@@ -20,10 +20,12 @@ import (
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
+	"goup/pkg/desktop"
 )
 
 //go:embed web/*
 var embeddedWebFiles embed.FS
+const appVersion = "dev"
 
 // App keeps only explicit dependencies to stay readable and easy to swap.
 type App struct {
@@ -48,15 +50,12 @@ func main() {
 	port := flag.Int("port", 8080, "HTTP listen port")
 	dbType := flag.String("db-type", "sqlite", "database driver (supported: sqlite)")
 	dbPath := flag.String("db-path", "sitebrush.db", "path to sqlite database file")
-	desktopMode := flag.Bool("desktop", false, "enable desktop mode when desktop build tags are used")
+	desktopMode := flag.Bool("desktop", desktop.DefaultEnabled(), "enable desktop mode when desktop build tags are used")
 	setupMode := flag.Bool("setup", false, "run interactive Linux setup wizard mode")
 	flag.Parse()
 
 	if *dbType != "sqlite" {
 		log.Fatalf("unsupported -db-type %q, supported: sqlite", *dbType)
-	}
-	if *desktopMode {
-		log.Printf("desktop mode requested; rebuild with desktop tags to enable native webview")
 	}
 	if *setupMode {
 		log.Printf("setup mode requested; run the setup wizard build flow for Linux deployment")
@@ -92,7 +91,22 @@ func main() {
 
 	address := "127.0.0.1:" + strconv.Itoa(*port)
 	log.Printf("Sitebrush started on http://%s", address)
-	log.Fatal(http.ListenAndServe(":"+strconv.Itoa(*port), router))
+
+	serverErrors := make(chan error, 1)
+	go func() {
+		serverErrors <- http.ListenAndServe(":"+strconv.Itoa(*port), router)
+	}()
+
+	if *desktopMode {
+		if err := desktop.RunWebviewWindow(address, appVersion); err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
+
+	if err := <-serverErrors; err != nil {
+		log.Fatal(err)
+	}
 }
 
 func (a *App) migrate(ctx context.Context) error {
