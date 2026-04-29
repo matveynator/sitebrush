@@ -1,7 +1,7 @@
-# Sidebrush wiki
+# Sitebrush wiki
 
 ## Overview
-Sidebrush is a single-binary Go web app prototype for local SiteBrush-style editing.
+Sitebrush is a single-binary Go web app prototype for local SiteBrush-style editing.
 
 ## Implemented now
 - bootstrap first administrator when none exists
@@ -15,5 +15,5 @@ Sidebrush is a single-binary Go web app prototype for local SiteBrush-style edit
 
 ## Run
 ```bash
-go run Sidebrush.go
+go run sitebrush.go
 ```
