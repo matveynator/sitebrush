@@ -7,6 +7,7 @@ import (
 	"embed"
 	"encoding/hex"
 	"errors"
+	"flag"
 	"fmt"
 	"html/template"
 	"io/fs"
@@ -44,7 +45,24 @@ type Revision struct {
 }
 
 func main() {
-	database, err := sql.Open("sqlite3", "file:sitebrush.db")
+	port := flag.Int("port", 8080, "HTTP listen port")
+	dbType := flag.String("db-type", "sqlite", "database driver (supported: sqlite)")
+	dbPath := flag.String("db-path", "sitebrush.db", "path to sqlite database file")
+	desktopMode := flag.Bool("desktop", false, "enable desktop mode when desktop build tags are used")
+	setupMode := flag.Bool("setup", false, "run interactive Linux setup wizard mode")
+	flag.Parse()
+
+	if *dbType != "sqlite" {
+		log.Fatalf("unsupported -db-type %q, supported: sqlite", *dbType)
+	}
+	if *desktopMode {
+		log.Printf("desktop mode requested; rebuild with desktop tags to enable native webview")
+	}
+	if *setupMode {
+		log.Printf("setup mode requested; run the setup wizard build flow for Linux deployment")
+	}
+
+	database, err := sql.Open("sqlite3", "file:"+*dbPath)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -72,8 +90,9 @@ func main() {
 	router.HandleFunc("/revision/delete", application.deleteRevision)
 	router.HandleFunc("/", application.route)
 
-	log.Println("Sidebrush started on http://127.0.0.1:8080")
-	log.Fatal(http.ListenAndServe(":8080", router))
+	address := "127.0.0.1:" + strconv.Itoa(*port)
+	log.Printf("Sitebrush started on http://%s", address)
+	log.Fatal(http.ListenAndServe(":"+strconv.Itoa(*port), router))
 }
 
 func (a *App) migrate(ctx context.Context) error {
@@ -171,7 +190,7 @@ func (a *App) login(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) logout(w http.ResponseWriter, r *http.Request) {
-	http.SetCookie(w, &http.Cookie{Name: "sidebrush_session", Value: "", Path: "/", Expires: time.Unix(0, 0)})
+	http.SetCookie(w, &http.Cookie{Name: "sitebrush_session", Value: "", Path: "/", Expires: time.Unix(0, 0)})
 	http.Redirect(w, r, "/", http.StatusFound)
 }
 
@@ -269,11 +288,11 @@ func (a *App) hasAdmin(ctx context.Context) bool {
 func (a *App) createSession(w http.ResponseWriter, r *http.Request, email string) {
 	token := fmt.Sprintf("%x", sha256.Sum256([]byte(email+time.Now().String())))
 	_, _ = a.db.ExecContext(r.Context(), `INSERT OR REPLACE INTO sessions(token,user_email,created_at) VALUES(?,?,?)`, token, email, time.Now().Format(time.RFC3339))
-	http.SetCookie(w, &http.Cookie{Name: "sidebrush_session", Value: token, Path: "/", HttpOnly: true})
+	http.SetCookie(w, &http.Cookie{Name: "sitebrush_session", Value: token, Path: "/", HttpOnly: true})
 }
 
 func (a *App) isAdminRequest(r *http.Request) bool {
-	cookie, err := r.Cookie("sidebrush_session")
+	cookie, err := r.Cookie("sitebrush_session")
 	if err != nil {
 		return false
 	}
