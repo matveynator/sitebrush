@@ -109,6 +109,9 @@ func Run(ctx context.Context, in io.Reader, out io.Writer, defaults Defaults) (R
 	fmt.Fprintf(out, "\n%s🛠  Quick setup (Linux)%s\n", theme.AccentIfEnabled(), theme.ResetIfEnabled())
 
 	answers := enrichDefaults(defaults)
+	if err := validateDefaultDBType(answers.DBType, availableDBTypes()); err != nil {
+		return Result{}, err
+	}
 outer:
 	for {
 		answers.NeedCert = promptYesNo(ctx, reader, out, theme, "Issue HTTPS certificate", answers.NeedCert)
@@ -381,6 +384,23 @@ func pickDefault(options []string, def string) string {
 		}
 	}
 	return options[0]
+}
+
+// validateDefaultDBType prevents silent fallback when an older deployment
+// passes an engine that this binary no longer supports (for example duckdb).
+// Failing fast keeps migrations explicit and avoids rewriting a working setup
+// into mismatched sqlite defaults.
+func validateDefaultDBType(defaultDBType string, options []string) error {
+	normalized := strings.ToLower(strings.TrimSpace(defaultDBType))
+	if normalized == "" {
+		return nil
+	}
+	for _, option := range options {
+		if strings.EqualFold(option, normalized) {
+			return nil
+		}
+	}
+	return fmt.Errorf("unsupported existing database type %q in setup defaults; choose one of %s and migrate data before applying", defaultDBType, strings.Join(options, ", "))
 }
 
 // choosePortLabel keeps the wording short while hinting at the best practice
