@@ -123,9 +123,6 @@ outer:
 
 		options := availableDBTypes()
 		fmt.Fprintf(out, "%sDatabase:%s sqlite/chai store files; pgx is PostgreSQL; clickhouse fits analytics.%s\n", theme.AccentIfEnabled(), theme.ResetIfEnabled(), theme.ResetIfEnabled())
-		if duckDBBuilt {
-			fmt.Fprintf(out, "%sDuckDB appears only when built with duckdb tag.%s\n", theme.AccentIfEnabled(), theme.ResetIfEnabled())
-		}
 		answers.DBType = promptChoice(ctx, reader, out, theme, "Database", options, pickDefault(options, answers.DBType))
 
 		dbPath, dbConn := promptDatabaseConfig(ctx, reader, out, theme, &answers)
@@ -309,24 +306,19 @@ outer:
 		printUsageHint(out, theme, answers.Domain, answers.Port)
 
 		if err := createUpdateScript(result); err != nil {
-			fmt.Fprintf(out, "\n%sUpdater:%s could not write /usr/local/bin/chicha-update (%v).\n", theme.PromptIfEnabled(), theme.ResetIfEnabled(), err)
+			fmt.Fprintf(out, "\n%sUpdater:%s could not write /usr/local/bin/sitebrush-update (%v).\n", theme.PromptIfEnabled(), theme.ResetIfEnabled(), err)
 		} else {
-			fmt.Fprintf(out, "\n%sUpdater:%s wrote /usr/local/bin/chicha-update for one-command upgrades.\n", theme.AccentIfEnabled(), theme.ResetIfEnabled())
+			fmt.Fprintf(out, "\n%sUpdater:%s wrote /usr/local/bin/sitebrush-update for one-command upgrades.\n", theme.AccentIfEnabled(), theme.ResetIfEnabled())
 		}
 
 		return result, nil
 	}
 }
 
-// availableDBTypes lists engines compiled into the binary. DuckDB is opt-in via
-// the duckdb build tag, so the wizard hides it when absent while keeping the
-// order predictable for muscle memory.
+// availableDBTypes lists engines supported by Sitebrush. SQLite is first so
+// the default installation path stays predictable for Linux servers.
 func availableDBTypes() []string {
-	types := []string{"sqlite", "chai", "pgx", "clickhouse"}
-	if duckDBBuilt {
-		types = append([]string{"duckdb"}, types...)
-	}
-	return types
+	return []string{"sqlite", "chai", "pgx", "clickhouse"}
 }
 
 // enrichDefaults derives per-field defaults so restarts can reuse the latest
@@ -456,7 +448,7 @@ func promptDatabaseConfig(ctx context.Context, reader *bufio.Reader, out io.Writ
 		port := promptDigits(ctx, reader, out, theme, "Port", defaultOr(answers.PGPort, "5432"))
 		user := promptWithDefault(ctx, reader, out, theme, "User", defaultOr(answers.PGUser, "postgres"))
 		password := promptWithDefault(ctx, reader, out, theme, "Password (leave empty for trust/local auth)", answers.PGPassword)
-		dbname := promptWithDefault(ctx, reader, out, theme, "Database name", defaultOr(answers.PGDatabase, "chicha"))
+		dbname := promptWithDefault(ctx, reader, out, theme, "Database name", defaultOr(answers.PGDatabase, "sitebrush"))
 		answers.PGHost, answers.PGPort, answers.PGUser, answers.PGPassword, answers.PGDatabase = host, port, user, password, dbname
 		return "", buildPostgresURI(host, port, user, password, dbname)
 	}
@@ -490,8 +482,7 @@ func suggestFileDBPath(dbType string, port int, existing string) string {
 	}
 	baseDir := fmt.Sprintf("/var/lib/%s-%d", dbType, port)
 	name := map[string]string{
-		"sqlite":     "database.sqlite",
-		"duckdb":     "database.duckdb",
+		"sqlite":     "database.db",
 		"chai":       "database.chai",
 		"clickhouse": "data.clickhouse",
 	}[dbType]
@@ -508,7 +499,7 @@ func suggestArchivePath(existing string, port int) string {
 	if strings.TrimSpace(existing) != "" {
 		return existing
 	}
-	return filepath.Join("/backup", fmt.Sprintf("chicha-json-%d", port))
+	return filepath.Join("/backup", fmt.Sprintf("sitebrush-json-%d", port))
 }
 
 // prepareDBPath creates the directory tree for file databases so systemd never
@@ -669,7 +660,7 @@ func resolveServiceDestination(port int) (string, bool, error) {
 	if runtime.GOOS != "linux" {
 		return "", false, errors.New("systemd services are only supported on Linux")
 	}
-	suffix := fmt.Sprintf("chicha-isotope-map-%d.service", port)
+	suffix := fmt.Sprintf("sitebrush-%d.service", port)
 	if os.Geteuid() == 0 {
 		return filepath.Join("/etc/systemd/system", suffix), false, nil
 	}
@@ -685,7 +676,7 @@ func resolveServiceDestination(port int) (string, bool, error) {
 // locations: /var/log for system units, XDG_STATE_HOME (or ~/.local/state) for
 // user sessions.
 func resolveLogPath(userUnit bool, port int) (string, error) {
-	fileName := fmt.Sprintf("chicha-isotope-map-%d.log", port)
+	fileName := fmt.Sprintf("sitebrush-%d.log", port)
 	if !userUnit {
 		return filepath.Join("/var/log", fileName), nil
 	}
@@ -879,10 +870,10 @@ func appendProfilePrimer(res Result) {
 		edit = fmt.Sprintf("sudo %s", edit)
 	}
 
-	block := fmt.Sprintf("\n# chicha-isotope-map service hint\nif [ -t 1 ]; then\n  echo \"Chicha service: %s\"\n  echo \"reload:  %s daemon-reload\"\n  echo \"restart: %s restart %s\"\n  echo \"stop:    %s stop %s\"\n  echo \"edit:    %s\"\n  echo \"logs:    %s %s -f (or tail -f %s)\"\nfi\n", res.ServiceName, prefix, prefix, res.ServiceName, prefix, res.ServiceName, edit, journal, res.ServiceName, res.LogPath)
+	block := fmt.Sprintf("\n# sitebrush service hint\nif [ -t 1 ]; then\n  echo \"Chicha service: %s\"\n  echo \"reload:  %s daemon-reload\"\n  echo \"restart: %s restart %s\"\n  echo \"stop:    %s stop %s\"\n  echo \"edit:    %s\"\n  echo \"logs:    %s %s -f (or tail -f %s)\"\nfi\n", res.ServiceName, prefix, prefix, res.ServiceName, prefix, res.ServiceName, edit, journal, res.ServiceName, res.LogPath)
 
 	existing, err := os.ReadFile(profilePath)
-	if err == nil && strings.Contains(string(existing), "# chicha-isotope-map service hint") {
+	if err == nil && strings.Contains(string(existing), "# sitebrush service hint") {
 		return
 	}
 
@@ -924,9 +915,9 @@ func createUpdateScript(res Result) error {
 		systemctl = "systemctl --user"
 	}
 
-	script := fmt.Sprintf("#!/bin/bash\nset -euo pipefail\nSVC=%q\nLOG=%q\nBIN=%q\nCTL=%q\n$CTL stop $SVC\ncurl -L https://github.com/matveynator/chicha-isotope-map/releases/download/latest/chicha-isotope-map_linux_amd64 > $BIN\nchmod +x $BIN\n$BIN --version\n$CTL start $SVC\ntail -f $LOG\n", res.ServiceName, res.LogPath, binaryPath, systemctl)
+	script := fmt.Sprintf("#!/bin/bash\nset -euo pipefail\nSVC=%q\nLOG=%q\nBIN=%q\nCTL=%q\n$CTL stop $SVC\ncurl -L https://github.com/matveynator/sitebrush/releases/download/latest/sitebrush_linux_amd64 > $BIN\nchmod +x $BIN\n$BIN --version\n$CTL start $SVC\ntail -f $LOG\n", res.ServiceName, res.LogPath, binaryPath, systemctl)
 
-	if err := os.WriteFile("/usr/local/bin/chicha-update", []byte(script), 0o755); err != nil {
+	if err := os.WriteFile("/usr/local/bin/sitebrush-update", []byte(script), 0o755); err != nil {
 		return fmt.Errorf("write updater: %w", err)
 	}
 	return nil

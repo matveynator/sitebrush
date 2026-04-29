@@ -18,7 +18,7 @@ func RunWebviewWindow(address, appVersion string) error {
 	}
 	defer window.Destroy()
 
-	windowTitle := fmt.Sprintf("chicha-isotope-map: world radiation map (%s)", appVersion)
+	windowTitle := fmt.Sprintf("sitebrush desktop (%s)", appVersion)
 	window.SetTitle(windowTitle)
 	window.SetSize(1120, 760, webview.HintNone)
 	window.Navigate("http://" + address)

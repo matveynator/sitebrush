@@ -74,7 +74,7 @@ jobs:
           export CGO_ENABLED=0
           VERSION=${{ github.run_number }}
           mkdir -p dist
-          BIN="chicha-isotope-map_${GOOS}_${GOARCH}"
+          BIN="sitebrush_${GOOS}_${GOARCH}"
           GOFLAGS="-trimpath -buildvcs=false" \
           go build -tags netgo,osusergo \
                    -ldflags "-s -w -X main.CompileVersion=$VERSION" \
@@ -90,7 +90,7 @@ jobs:
           $env:CGO_ENABLED = "0"
           $version = "${{ github.run_number }}"
           New-Item -Force -ItemType Directory dist | Out-Null
-          $bin = "chicha-isotope-map_${{ matrix.goos }}_${{ matrix.goarch }}.exe"
+          $bin = "sitebrush_${{ matrix.goos }}_${{ matrix.goarch }}.exe"
           go build -tags "netgo,osusergo" `
                    -ldflags "-s -w -X main.CompileVersion=$version" `
                    -o "dist/$bin"
@@ -102,58 +102,6 @@ jobs:
           path: dist/
 
 # ---------- DUCKDB: Linux/amd64 (glibc 2.28) в контейнере + macOS (amd64/arm64) ----------
-  build_duckdb:
-    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main' && (contains(join(github.event.commits.*.message, ' || '), 'stable release') || contains(join(github.event.commits.*.message, ' || '), 'Stable Release')))
-    runs-on: ${{ matrix.runner }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          # macOS amd64/arm64: нативно
-          - { target: darwin_amd64_duckdb, goos: darwin, goarch: amd64, goversion: "1.24", runner: "macos-14", in_container: false }
-          - { target: darwin_arm64_duckdb, goos: darwin, goarch: arm64, goversion: "1.24", runner: "macos-14", in_container: false }
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-
-      # --- macOS нативно ---
-      - name: Set up Go (macOS)
-        if: matrix.in_container == false
-        uses: actions/setup-go@v6
-        with:
-          go-version: "${{ matrix.goversion }}"
-          cache: false
-
-      - name: go mod tidy (macOS)
-        if: matrix.in_container == false
-        shell: bash
-        run: |
-          go get github.com/marcboeker/go-duckdb/v2@latest
-          go mod tidy
-
-      - name: Build (macOS duckdb)
-        if: matrix.in_container == false
-        shell: bash
-        env:
-          GOOS: ${{ matrix.goos }}
-          GOARCH: ${{ matrix.goarch }}
-        run: |
-          set -euo pipefail
-          export CGO_ENABLED=1
-          VERSION=${{ github.run_number }}
-          mkdir -p dist
-          BIN="chicha-isotope-map_${GOOS}_${GOARCH}_duckdb"
-          GOFLAGS="-trimpath -buildvcs=false" \
-          go build -tags "netgo,osusergo,duckdb" \
-                   -ldflags "-s -w -X main.CompileVersion=$VERSION" \
-                   -o "dist/${BIN}"
-
-      - name: Upload duckdb artifact
-        uses: actions/upload-artifact@v5
-        with:
-          name: bin-${{ matrix.target }}
-          path: dist/
 
 # ---------- DESKTOP WEBVIEW: macOS / Linux / Windows ----------
   build_desktop:
@@ -242,7 +190,7 @@ jobs:
           set -euo pipefail
           VERSION=${{ github.run_number }}
           mkdir -p dist
-          BIN="chicha-isotope-map_${GOOS}_${GOARCH}_desktop"
+          BIN="sitebrush_${GOOS}_${GOARCH}_desktop"
           if [ "${GOOS}" = "linux" ]; then
             BIN="${BIN}_${DESKTOP_VARIANT}"
           fi
@@ -277,7 +225,7 @@ jobs:
           DESKTOP_VARIANT: ${{ matrix.desktop_variant }}
         run: |
           set -euo pipefail
-          BIN="chicha-isotope-map_${GOOS}_${GOARCH}_desktop_${DESKTOP_VARIANT}"
+          BIN="sitebrush_${GOOS}_${GOARCH}_desktop_${DESKTOP_VARIANT}"
           chmod +x "dist/${BIN}"
 
           # Keep a direct binary and a download-friendly archive for Linux desktop releases.
@@ -354,7 +302,7 @@ jobs:
           $ErrorActionPreference = "Stop"
           $version = "${{ github.run_number }}"
           New-Item -Force -ItemType Directory dist | Out-Null
-          $bin = "chicha-isotope-map_${{ matrix.goos }}_${{ matrix.goarch }}_desktop.exe"
+          $bin = "sitebrush_${{ matrix.goos }}_${{ matrix.goarch }}_desktop.exe"
           go build -tags "desktop" `
                    -ldflags "-H windowsgui -s -w -X main.CompileVersion=$version" `
                    -o "dist/$bin"
@@ -364,15 +312,15 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          $bin = "chicha-isotope-map_${{ matrix.goos }}_${{ matrix.goarch }}_desktop.exe"
-          Compress-Archive -Path "dist/$bin" -DestinationPath "dist/chicha-isotope-map_${{ matrix.goos }}_${{ matrix.goarch }}_desktop.zip" -Force
+          $bin = "sitebrush_${{ matrix.goos }}_${{ matrix.goarch }}_desktop.exe"
+          Compress-Archive -Path "dist/$bin" -DestinationPath "dist/sitebrush_${{ matrix.goos }}_${{ matrix.goarch }}_desktop.zip" -Force
 
       - name: Upload desktop artifact
         uses: actions/upload-artifact@v5
         with:
           name: bin-desktop-${{ matrix.goos }}-${{ matrix.goarch }}-${{ matrix.desktop_variant }}
           path: |
-            dist/chicha-isotope-map_${{ matrix.goos }}_${{ matrix.goarch }}_desktop*
+            dist/sitebrush_${{ matrix.goos }}_${{ matrix.goarch }}_desktop*
 
       - name: Upload desktop icon artifact (single copy for release assets)
         if: runner.os == 'Windows' && matrix.goarch == 'amd64'
@@ -400,9 +348,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          AMD64_BIN="dist/chicha-isotope-map_darwin_amd64_desktop"
-          ARM64_BIN="dist/chicha-isotope-map_darwin_arm64_desktop"
-          UNIVERSAL_BIN="dist/chicha-isotope-map_darwin_universal_desktop"
+          AMD64_BIN="dist/sitebrush_darwin_amd64_desktop"
+          ARM64_BIN="dist/sitebrush_darwin_arm64_desktop"
+          UNIVERSAL_BIN="dist/sitebrush_darwin_universal_desktop"
           lipo -create "${AMD64_BIN}" "${ARM64_BIN}" -output "${UNIVERSAL_BIN}"
           lipo "${UNIVERSAL_BIN}" -verify_arch x86_64 arm64
           chmod +x "${UNIVERSAL_BIN}"
@@ -411,11 +359,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          BIN="chicha-isotope-map_darwin_universal_desktop"
+          BIN="sitebrush_darwin_universal_desktop"
           APP_NAME="Chicha Isotope Map"
           APP_DIR="dist/${APP_NAME}.app"
           DMG_STAGING_DIR="dist/dmg-staging"
-          DMG_PATH="dist/chicha-isotope-map_darwin_universal_desktop.dmg"
+          DMG_PATH="dist/sitebrush_darwin_universal_desktop.dmg"
           ICONSET_DIR="dist/AppIcon.iconset"
           ICON_SOURCE="public_html/images/apple-touch-icon.png"
 
@@ -431,8 +379,8 @@ jobs:
           cp "${ICONSET_DIR}/icon_512x512.png" "${ICONSET_DIR}/icon_512x512@2x.png"
           iconutil -c icns "${ICONSET_DIR}" -o "dist/AppIcon.icns"
 
-          cp "dist/${BIN}" "${APP_DIR}/Contents/MacOS/chicha-isotope-map"
-          chmod +x "${APP_DIR}/Contents/MacOS/chicha-isotope-map"
+          cp "dist/${BIN}" "${APP_DIR}/Contents/MacOS/sitebrush"
+          chmod +x "${APP_DIR}/Contents/MacOS/sitebrush"
           cp "dist/AppIcon.icns" "${APP_DIR}/Contents/Resources/AppIcon.icns"
 
           cat > "${APP_DIR}/Contents/Info.plist" <<'PLIST'
@@ -445,13 +393,13 @@ jobs:
             <key>CFBundleDisplayName</key>
             <string>Chicha Isotope Map</string>
             <key>CFBundleIdentifier</key>
-            <string>net.zabiyaka.chicha-isotope-map</string>
+            <string>net.zabiyaka.sitebrush</string>
             <key>CFBundleVersion</key>
             <string>${{ github.run_number }}</string>
             <key>CFBundleShortVersionString</key>
             <string>${{ github.run_number }}</string>
             <key>CFBundleExecutable</key>
-            <string>chicha-isotope-map</string>
+            <string>sitebrush</string>
             <key>CFBundlePackageType</key>
             <string>APPL</string>
             <key>CFBundleIconFile</key>
@@ -487,12 +435,12 @@ jobs:
         with:
           name: bin-desktop-darwin-universal
           path: |
-            dist/chicha-isotope-map_darwin_universal_desktop
-            dist/chicha-isotope-map_darwin_universal_desktop.dmg
+            dist/sitebrush_darwin_universal_desktop
+            dist/sitebrush_darwin_universal_desktop.dmg
 
   release:
     if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main' && (contains(join(github.event.commits.*.message, ' || '), 'stable release') || contains(join(github.event.commits.*.message, ' || '), 'Stable Release')))
-    needs: [build_portable, build_duckdb, build_desktop, build_desktop_macos_universal]
+    needs: [build_portable, build_desktop, build_desktop_macos_universal]
     runs-on: ubuntu-22.04
     steps:
       - name: Checkout
