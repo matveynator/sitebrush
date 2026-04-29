@@ -1,0 +1,517 @@
+name: Stable Release
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+# Run automatically only for pushes to main where at least one commit message
+# contains "stable release" (case variants below), or via manual dispatch.
+
+permissions:
+  contents: write
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
+
+# ---------- PORTABLE: всё без CGO и без DuckDB ----------
+jobs:
+  # GitHub-hosted Debian runners are unavailable, so Linux-hosted jobs use Ubuntu 22.04 LTS
+  # as the closest stable base with broad package compatibility.
+  build_portable:
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main' && (contains(join(github.event.commits.*.message, ' || '), 'stable release') || contains(join(github.event.commits.*.message, ' || '), 'Stable Release')))
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Linux
+          - { goos: linux,  goarch: amd64, goversion: "1.24", runner: "ubuntu-22.04" }
+          - { goos: linux,  goarch: arm64, goversion: "1.24", runner: "ubuntu-22.04" }
+          - { goos: linux,  goarch: 386,   goversion: "1.24", runner: "ubuntu-22.04" }
+          # macOS
+          - { goos: darwin, goarch: amd64, goversion: "1.24", runner: "macos-14" }
+          - { goos: darwin, goarch: arm64, goversion: "1.24", runner: "macos-14" }
+          # *BSD
+          - { goos: freebsd, goarch: amd64, goversion: "1.24", runner: "ubuntu-22.04" }
+          - { goos: freebsd, goarch: arm64, goversion: "1.24", runner: "ubuntu-22.04" }
+          - { goos: openbsd, goarch: amd64, goversion: "1.24", runner: "ubuntu-22.04" }
+          - { goos: openbsd, goarch: arm64, goversion: "1.24", runner: "ubuntu-22.04" }
+          - { goos: netbsd,  goarch: amd64, goversion: "1.24", runner: "ubuntu-22.04" }
+          # Windows
+          - { goos: windows, goarch: amd64, goversion: "1.24", runner: "windows-latest" }
+          - { goos: windows, goarch: arm64, goversion: "1.24", runner: "windows-latest" }
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: "${{ matrix.goversion }}"
+          cache: false
+
+      - name: go mod tidy (POSIX)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: go mod tidy
+
+      - name: go mod tidy (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: go mod tidy
+
+      - name: Build (POSIX)
+        if: runner.os != 'Windows'
+        shell: bash
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          set -euo pipefail
+          export CGO_ENABLED=0
+          VERSION=${{ github.run_number }}
+          mkdir -p dist
+          BIN="chicha-isotope-map_${GOOS}_${GOARCH}"
+          GOFLAGS="-trimpath -buildvcs=false" \
+          go build -tags netgo,osusergo \
+                   -ldflags "-s -w -X main.CompileVersion=$VERSION" \
+                   -o "dist/${BIN}"
+      - name: Build (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $env:CGO_ENABLED = "0"
+          $version = "${{ github.run_number }}"
+          New-Item -Force -ItemType Directory dist | Out-Null
+          $bin = "chicha-isotope-map_${{ matrix.goos }}_${{ matrix.goarch }}.exe"
+          go build -tags "netgo,osusergo" `
+                   -ldflags "-s -w -X main.CompileVersion=$version" `
+                   -o "dist/$bin"
+
+      - name: Upload portable artifact
+        uses: actions/upload-artifact@v5
+        with:
+          name: bin-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist/
+
+# ---------- DUCKDB: Linux/amd64 (glibc 2.28) в контейнере + macOS (amd64/arm64) ----------
+  build_duckdb:
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main' && (contains(join(github.event.commits.*.message, ' || '), 'stable release') || contains(join(github.event.commits.*.message, ' || '), 'Stable Release')))
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # macOS amd64/arm64: нативно
+          - { target: darwin_amd64_duckdb, goos: darwin, goarch: amd64, goversion: "1.24", runner: "macos-14", in_container: false }
+          - { target: darwin_arm64_duckdb, goos: darwin, goarch: arm64, goversion: "1.24", runner: "macos-14", in_container: false }
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      # --- macOS нативно ---
+      - name: Set up Go (macOS)
+        if: matrix.in_container == false
+        uses: actions/setup-go@v6
+        with:
+          go-version: "${{ matrix.goversion }}"
+          cache: false
+
+      - name: go mod tidy (macOS)
+        if: matrix.in_container == false
+        shell: bash
+        run: |
+          go get github.com/marcboeker/go-duckdb/v2@latest
+          go mod tidy
+
+      - name: Build (macOS duckdb)
+        if: matrix.in_container == false
+        shell: bash
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          set -euo pipefail
+          export CGO_ENABLED=1
+          VERSION=${{ github.run_number }}
+          mkdir -p dist
+          BIN="chicha-isotope-map_${GOOS}_${GOARCH}_duckdb"
+          GOFLAGS="-trimpath -buildvcs=false" \
+          go build -tags "netgo,osusergo,duckdb" \
+                   -ldflags "-s -w -X main.CompileVersion=$VERSION" \
+                   -o "dist/${BIN}"
+
+      - name: Upload duckdb artifact
+        uses: actions/upload-artifact@v5
+        with:
+          name: bin-${{ matrix.target }}
+          path: dist/
+
+# ---------- DESKTOP WEBVIEW: macOS / Linux / Windows ----------
+  build_desktop:
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main' && (contains(join(github.event.commits.*.message, ' || '), 'stable release') || contains(join(github.event.commits.*.message, ' || '), 'Stable Release')))
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # go-webview-selector resolves webkit2gtk via pkg-config name "webkit2gtk-4.0",
+          # so Linux desktop builds provide a webkit2gtk-4.0 pkg-config target.
+          - { goos: linux, goarch: amd64, goversion: "1.24", runner: "ubuntu-22.04", desktop_variant: "gtk40" }
+          - { goos: linux, goarch: amd64, goversion: "1.24", runner: "ubuntu-24.04", desktop_variant: "gtk41" }
+          - { goos: linux, goarch: arm64, goversion: "1.24", runner: "ubuntu-22.04-arm", desktop_variant: "gtk40" }
+          - { goos: linux, goarch: arm64, goversion: "1.24", runner: "ubuntu-24.04-arm", desktop_variant: "gtk41" }
+          # Build both macOS desktop targets on macos-14 to avoid queue stalls on scarce macos-13 runners.
+          # amd64 output is cross-compiled with explicit x86_64 toolchain flags and old deployment target.
+          - { goos: darwin, goarch: amd64, goversion: "1.24", runner: "macos-14", desktop_variant: "default" }
+          - { goos: darwin, goarch: arm64, goversion: "1.24", runner: "macos-14", desktop_variant: "default" }
+          - { goos: windows, goarch: amd64, goversion: "1.24", runner: "windows-latest", desktop_variant: "default" }
+          - { goos: windows, goarch: arm64, goversion: "1.24", runner: "windows-latest", desktop_variant: "default" }
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: "${{ matrix.goversion }}"
+          cache: false
+
+      - name: Install desktop libs (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          WEBKIT_DEV_PACKAGE="libwebkit2gtk-4.0-dev"
+          if ! apt-cache show "${WEBKIT_DEV_PACKAGE}" >/dev/null 2>&1; then
+            WEBKIT_DEV_PACKAGE="libwebkit2gtk-4.1-dev"
+          fi
+          sudo apt-get install -y build-essential pkg-config libgtk-3-dev "${WEBKIT_DEV_PACKAGE}"
+
+          if ! pkg-config --exists webkit2gtk-4.0 && pkg-config --exists webkit2gtk-4.1; then
+            # go-webview-selector currently asks pkg-config for webkit2gtk-4.0.
+            # This compatibility shim maps that lookup to webkit2gtk-4.1 on newer distros.
+            sudo install -d /usr/local/lib/pkgconfig
+            printf '%s\n' \
+              'prefix=/usr' \
+              'exec_prefix=${prefix}' \
+              'libdir=${exec_prefix}/lib' \
+              'includedir=${prefix}/include' \
+              '' \
+              'Name: webkit2gtk-4.0' \
+              'Description: Compatibility shim for webkit2gtk-4.1' \
+              'Version: 4.0' \
+              'Requires: webkit2gtk-4.1' \
+              'Libs:' \
+              'Cflags:' \
+              | sudo tee /usr/local/lib/pkgconfig/webkit2gtk-4.0.pc >/dev/null
+            echo "PKG_CONFIG_PATH=/usr/local/lib/pkgconfig:${PKG_CONFIG_PATH:-}" >> "$GITHUB_ENV"
+          fi
+
+          pkg-config --exists webkit2gtk-4.0
+
+      - name: go mod tidy (POSIX)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: go mod tidy
+
+      - name: go mod tidy (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: go mod tidy
+
+      - name: Build desktop (POSIX)
+        if: runner.os != 'Windows'
+        shell: bash
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          DESKTOP_VARIANT: ${{ matrix.desktop_variant }}
+          CGO_ENABLED: 1
+        run: |
+          set -euo pipefail
+          VERSION=${{ github.run_number }}
+          mkdir -p dist
+          BIN="chicha-isotope-map_${GOOS}_${GOARCH}_desktop"
+          if [ "${GOOS}" = "linux" ]; then
+            BIN="${BIN}_${DESKTOP_VARIANT}"
+          fi
+          if [ "${GOOS}" = "darwin" ] && [ "${GOARCH}" = "amd64" ]; then
+            # Keep Intel builds launchable on older macOS releases even when built on Apple Silicon runners.
+            export MACOSX_DEPLOYMENT_TARGET=10.13
+            export CC="clang -arch x86_64"
+            export CXX="clang++ -arch x86_64"
+            export CGO_CFLAGS="-arch x86_64 -mmacosx-version-min=10.13"
+            export CGO_CXXFLAGS="-arch x86_64 -mmacosx-version-min=10.13"
+            export CGO_LDFLAGS="-arch x86_64 -mmacosx-version-min=10.13"
+          elif [ "${GOOS}" = "darwin" ] && [ "${GOARCH}" = "arm64" ]; then
+            # Apple Silicon binaries require macOS 11+.
+            export MACOSX_DEPLOYMENT_TARGET=11.0
+            export CC="clang -arch arm64"
+            export CXX="clang++ -arch arm64"
+            export CGO_CFLAGS="-arch arm64 -mmacosx-version-min=11.0"
+            export CGO_CXXFLAGS="-arch arm64 -mmacosx-version-min=11.0"
+            export CGO_LDFLAGS="-arch arm64 -mmacosx-version-min=11.0"
+          fi
+          GOFLAGS="-trimpath -buildvcs=false" \
+          go build -tags "desktop" \
+                   -ldflags "-s -w -X main.CompileVersion=$VERSION" \
+                   -o "dist/${BIN}"
+
+      - name: Package Linux desktop artifact (zip with executable binary)
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          DESKTOP_VARIANT: ${{ matrix.desktop_variant }}
+        run: |
+          set -euo pipefail
+          BIN="chicha-isotope-map_${GOOS}_${GOARCH}_desktop_${DESKTOP_VARIANT}"
+          chmod +x "dist/${BIN}"
+
+          # Keep a direct binary and a download-friendly archive for Linux desktop releases.
+          # zip stores Unix mode bits, so extraction tools that honor them keep the executable bit.
+          (
+            cd dist
+            zip -q -X "${BIN}.zip" "${BIN}"
+          )
+
+      - name: Build Windows ICO from desktop app icon
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $pngPath = "public_html/images/apple-touch-icon.png"
+          $icoPath = "dist/windows-desktop-icon.ico"
+          New-Item -Force -ItemType Directory dist | Out-Null
+
+          [byte[]]$pngBytes = [System.IO.File]::ReadAllBytes($pngPath)
+          if ($pngBytes.Length -lt 8 -or $pngBytes[0] -ne 0x89 -or $pngBytes[1] -ne 0x50 -or $pngBytes[2] -ne 0x4E -or $pngBytes[3] -ne 0x47) {
+            throw "Icon source must be a PNG file: $pngPath"
+          }
+          if ($pngBytes.Length -lt 24) {
+            throw "Icon source PNG is too short to contain IHDR dimensions: $pngPath"
+          }
+
+          # Read dimensions from PNG IHDR to keep ICO directory metadata aligned with embedded payload.
+          $pngWidth = ([UInt32]$pngBytes[16] -shl 24) -bor ([UInt32]$pngBytes[17] -shl 16) -bor ([UInt32]$pngBytes[18] -shl 8) -bor [UInt32]$pngBytes[19]
+          $pngHeight = ([UInt32]$pngBytes[20] -shl 24) -bor ([UInt32]$pngBytes[21] -shl 16) -bor ([UInt32]$pngBytes[22] -shl 8) -bor [UInt32]$pngBytes[23]
+          if ($pngWidth -eq 0 -or $pngHeight -eq 0 -or $pngWidth -gt 256 -or $pngHeight -gt 256) {
+            throw "Icon dimensions must be in range 1..256, got ${pngWidth}x${pngHeight}"
+          }
+          $icoWidthByte = if ($pngWidth -eq 256) { [Byte]0 } else { [Byte]$pngWidth }
+          $icoHeightByte = if ($pngHeight -eq 256) { [Byte]0 } else { [Byte]$pngHeight }
+
+          # ICO can store PNG payloads directly; this keeps the Windows desktop icon pixel-identical to the macOS icon source.
+          $iconDataOffset = 6 + 16
+          $writer = New-Object System.IO.BinaryWriter([System.IO.File]::Open($icoPath, [System.IO.FileMode]::Create))
+          try {
+            $writer.Write([UInt16]0)                 # reserved
+            $writer.Write([UInt16]1)                 # type = icon
+            $writer.Write([UInt16]1)                 # one image
+            $writer.Write($icoWidthByte)             # width (0 means 256)
+            $writer.Write($icoHeightByte)            # height (0 means 256)
+            $writer.Write([Byte]0)                   # color count
+            $writer.Write([Byte]0)                   # reserved
+            $writer.Write([UInt16]1)                 # color planes
+            $writer.Write([UInt16]32)                # bits per pixel
+            $writer.Write([UInt32]$pngBytes.Length)  # image data size
+            $writer.Write([UInt32]$iconDataOffset)   # image data offset
+            $writer.Write($pngBytes)
+          } finally {
+            $writer.Dispose()
+          }
+
+      - name: Prepare Windows icon resource
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          go install github.com/akavel/rsrc@latest
+          $rsrcBin = Join-Path (go env GOPATH) "bin/rsrc.exe"
+          $resourceArch = if ("${{ matrix.goarch }}" -eq "arm64") { "arm64" } else { "amd64" }
+          & $rsrcBin -ico "dist/windows-desktop-icon.ico" -arch $resourceArch -o "zz_chicha_icon_windows_${{ matrix.goarch }}.syso"
+
+      - name: Build desktop (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: 1
+        run: |
+          $ErrorActionPreference = "Stop"
+          $version = "${{ github.run_number }}"
+          New-Item -Force -ItemType Directory dist | Out-Null
+          $bin = "chicha-isotope-map_${{ matrix.goos }}_${{ matrix.goarch }}_desktop.exe"
+          go build -tags "desktop" `
+                   -ldflags "-H windowsgui -s -w -X main.CompileVersion=$version" `
+                   -o "dist/$bin"
+
+      - name: Package desktop app (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $bin = "chicha-isotope-map_${{ matrix.goos }}_${{ matrix.goarch }}_desktop.exe"
+          Compress-Archive -Path "dist/$bin" -DestinationPath "dist/chicha-isotope-map_${{ matrix.goos }}_${{ matrix.goarch }}_desktop.zip" -Force
+
+      - name: Upload desktop artifact
+        uses: actions/upload-artifact@v5
+        with:
+          name: bin-desktop-${{ matrix.goos }}-${{ matrix.goarch }}-${{ matrix.desktop_variant }}
+          path: |
+            dist/chicha-isotope-map_${{ matrix.goos }}_${{ matrix.goarch }}_desktop*
+
+      - name: Upload desktop icon artifact (single copy for release assets)
+        if: runner.os == 'Windows' && matrix.goarch == 'amd64'
+        uses: actions/upload-artifact@v5
+        with:
+          name: bin-desktop-icon-windows
+          path: dist/windows-desktop-icon.ico
+
+  build_desktop_macos_universal:
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main' && (contains(join(github.event.commits.*.message, ' || '), 'stable release') || contains(join(github.event.commits.*.message, ' || '), 'Stable Release')))
+    needs: [build_desktop]
+    runs-on: macos-14
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Download macOS desktop artifacts
+        uses: actions/download-artifact@v5
+        with:
+          pattern: bin-desktop-darwin-*
+          merge-multiple: true
+          path: dist/
+
+      - name: Build universal desktop binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          AMD64_BIN="dist/chicha-isotope-map_darwin_amd64_desktop"
+          ARM64_BIN="dist/chicha-isotope-map_darwin_arm64_desktop"
+          UNIVERSAL_BIN="dist/chicha-isotope-map_darwin_universal_desktop"
+          lipo -create "${AMD64_BIN}" "${ARM64_BIN}" -output "${UNIVERSAL_BIN}"
+          lipo "${UNIVERSAL_BIN}" -verify_arch x86_64 arm64
+          chmod +x "${UNIVERSAL_BIN}"
+
+      - name: Package universal desktop app (macOS DMG)
+        shell: bash
+        run: |
+          set -euo pipefail
+          BIN="chicha-isotope-map_darwin_universal_desktop"
+          APP_NAME="Chicha Isotope Map"
+          APP_DIR="dist/${APP_NAME}.app"
+          DMG_STAGING_DIR="dist/dmg-staging"
+          DMG_PATH="dist/chicha-isotope-map_darwin_universal_desktop.dmg"
+          ICONSET_DIR="dist/AppIcon.iconset"
+          ICON_SOURCE="public_html/images/apple-touch-icon.png"
+
+          mkdir -p "${ICONSET_DIR}" "${APP_DIR}/Contents/MacOS" "${APP_DIR}/Contents/Resources"
+          for size in 16 32 128; do
+            sips -z "${size}" "${size}" "${ICON_SOURCE}" --out "${ICONSET_DIR}/icon_${size}x${size}.png" >/dev/null
+            double_size=$((size * 2))
+            sips -z "${double_size}" "${double_size}" "${ICON_SOURCE}" --out "${ICONSET_DIR}/icon_${size}x${size}@2x.png" >/dev/null
+          done
+          sips -z 256 256 "${ICON_SOURCE}" --out "${ICONSET_DIR}/icon_256x256.png" >/dev/null
+          sips -z 512 512 "${ICON_SOURCE}" --out "${ICONSET_DIR}/icon_256x256@2x.png" >/dev/null
+          sips -z 512 512 "${ICON_SOURCE}" --out "${ICONSET_DIR}/icon_512x512.png" >/dev/null
+          cp "${ICONSET_DIR}/icon_512x512.png" "${ICONSET_DIR}/icon_512x512@2x.png"
+          iconutil -c icns "${ICONSET_DIR}" -o "dist/AppIcon.icns"
+
+          cp "dist/${BIN}" "${APP_DIR}/Contents/MacOS/chicha-isotope-map"
+          chmod +x "${APP_DIR}/Contents/MacOS/chicha-isotope-map"
+          cp "dist/AppIcon.icns" "${APP_DIR}/Contents/Resources/AppIcon.icns"
+
+          cat > "${APP_DIR}/Contents/Info.plist" <<'PLIST'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>CFBundleName</key>
+            <string>Chicha Isotope Map</string>
+            <key>CFBundleDisplayName</key>
+            <string>Chicha Isotope Map</string>
+            <key>CFBundleIdentifier</key>
+            <string>net.zabiyaka.chicha-isotope-map</string>
+            <key>CFBundleVersion</key>
+            <string>${{ github.run_number }}</string>
+            <key>CFBundleShortVersionString</key>
+            <string>${{ github.run_number }}</string>
+            <key>CFBundleExecutable</key>
+            <string>chicha-isotope-map</string>
+            <key>CFBundlePackageType</key>
+            <string>APPL</string>
+            <key>CFBundleIconFile</key>
+            <string>AppIcon.icns</string>
+            <key>LSMinimumSystemVersion</key>
+            <string>10.13</string>
+          </dict>
+          </plist>
+          PLIST
+
+          # Ad-hoc sign keeps macOS launch services happy on fresh systems where
+          # unsigned bundles can bounce in Dock before the first trust override.
+          codesign --force --deep --sign - "${APP_DIR}"
+          codesign --verify --deep --strict "${APP_DIR}"
+
+          # Put the app and /Applications shortcut into DMG so installation is drag-and-drop.
+          rm -rf "${DMG_STAGING_DIR}"
+          mkdir -p "${DMG_STAGING_DIR}"
+          cp -R "${APP_DIR}" "${DMG_STAGING_DIR}/"
+          ln -s /Applications "${DMG_STAGING_DIR}/Applications"
+
+          rm -f "${DMG_PATH}"
+          # Use a unique temporary volume name per run to avoid collisions with previously mounted volumes on shared runners.
+          hdiutil create \
+            -volname "Chicha Isotope Map ${{ github.run_id }}-${{ github.run_attempt }}" \
+            -srcfolder "${DMG_STAGING_DIR}" \
+            -ov \
+            -format UDZO \
+            "${DMG_PATH}"
+
+      - name: Upload macOS universal desktop artifact
+        uses: actions/upload-artifact@v5
+        with:
+          name: bin-desktop-darwin-universal
+          path: |
+            dist/chicha-isotope-map_darwin_universal_desktop
+            dist/chicha-isotope-map_darwin_universal_desktop.dmg
+
+  release:
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main' && (contains(join(github.event.commits.*.message, ' || '), 'stable release') || contains(join(github.event.commits.*.message, ' || '), 'Stable Release')))
+    needs: [build_portable, build_duckdb, build_desktop, build_desktop_macos_universal]
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v5
+        with:
+          path: dist-raw/
+
+      - name: Publish GitHub Release (stable tag)
+        uses: softprops/action-gh-release@v3
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: stable-release
+          name: "Stable Release"
+          body_path: .github/release/stable-release.md
+          make_latest: true
+          prerelease: false
+          overwrite_files: true
+          files: dist-raw/**/*
