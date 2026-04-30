@@ -40,6 +40,7 @@ type App struct {
 }
 
 type Page struct {
+	Domain    string
 	Path      string
 	Title     string
 	HTML      string
@@ -119,6 +120,7 @@ func main() {
 	router.HandleFunc("/grab", application.grabPage)
 	router.HandleFunc("/files", application.filesPage)
 	router.HandleFunc("/save", application.savePage)
+	router.HandleFunc("/domain/settings", application.domainSettingsPage)
 	router.HandleFunc("/revisions", application.revisionsPage)
 	router.HandleFunc("/revision/restore", application.restoreRevision)
 	router.HandleFunc("/revision/delete", application.deleteRevision)
@@ -146,16 +148,20 @@ func main() {
 
 func (a *App) migrate(ctx context.Context) error {
 	queries := []string{
-		`CREATE TABLE IF NOT EXISTS users(id INTEGER PRIMARY KEY AUTOINCREMENT,email TEXT UNIQUE,password TEXT,is_admin INTEGER);`,
+		`CREATE TABLE IF NOT EXISTS users(id INTEGER PRIMARY KEY AUTOINCREMENT,domain TEXT,email TEXT,password TEXT,is_admin INTEGER,UNIQUE(domain,email));`,
 		`CREATE TABLE IF NOT EXISTS sessions(token TEXT PRIMARY KEY,user_email TEXT,created_at TEXT);`,
-		`CREATE TABLE IF NOT EXISTS pages(path TEXT PRIMARY KEY,title TEXT,html TEXT,published INTEGER);`,
-		`CREATE TABLE IF NOT EXISTS revisions(id INTEGER PRIMARY KEY AUTOINCREMENT,page_path TEXT,html TEXT,created_at TEXT);`,
+		`CREATE TABLE IF NOT EXISTS pages(domain TEXT,path TEXT,title TEXT,html TEXT,published INTEGER,PRIMARY KEY(domain,path));`,
+		`CREATE TABLE IF NOT EXISTS revisions(id INTEGER PRIMARY KEY AUTOINCREMENT,domain TEXT,page_path TEXT,html TEXT,created_at TEXT);`,
+		`CREATE TABLE IF NOT EXISTS domain_aliases(primary_domain TEXT,alias_domain TEXT UNIQUE);`,
 	}
 	for _, query := range queries {
 		if _, err := a.db.ExecContext(ctx, query); err != nil {
 			return err
 		}
 	}
+	_, _ = a.db.ExecContext(ctx, `ALTER TABLE users ADD COLUMN domain TEXT`)
+	_, _ = a.db.ExecContext(ctx, `ALTER TABLE pages ADD COLUMN domain TEXT`)
+	_, _ = a.db.ExecContext(ctx, `ALTER TABLE revisions ADD COLUMN domain TEXT`)
 	return nil
 }
 
@@ -170,7 +176,7 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.URL.RawQuery == "settings" || r.URL.RawQuery == "properties" || r.URL.RawQuery == "freeze" || r.URL.RawQuery == "unfreeze" {
-		a.editPage(w, r)
+		a.domainSettingsPage(w, r)
 		return
 	}
 	if r.URL.RawQuery == "files" {
@@ -201,12 +207,13 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 		a.captchaImage(w, r)
 		return
 	}
-	pageRecord, err := a.findPage(r.Context(), pagePath)
+	domain := a.siteDomain(r.Context(), r)
+	pageRecord, err := a.findPage(r.Context(), domain, pagePath)
 	if err == nil && pageRecord.Published == 1 {
 		_, _ = w.Write([]byte(a.wrapWithMenu(r, pageRecord.Path, pageRecord.HTML)))
 		return
 	}
-	if !a.hasAdmin(r.Context()) {
+	if !a.hasAdmin(r.Context(), domain) {
 		a.render(w, "setup.html", nil)
 		return
 	}
@@ -222,7 +229,8 @@ func (a *App) setupAdmin(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if a.hasAdmin(r.Context()) {
+	domain := a.siteDomain(r.Context(), r)
+	if a.hasAdmin(r.Context(), domain) {
 		http.Redirect(w, r, "/", http.StatusFound)
 		return
 	}
@@ -232,7 +240,7 @@ func (a *App) setupAdmin(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "email and password required", http.StatusBadRequest)
 		return
 	}
-	_, err := a.db.ExecContext(r.Context(), `INSERT INTO users(email,password,is_admin) VALUES(?,?,1)`, email, password)
+	_, err := a.db.ExecContext(r.Context(), `INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, domain, email, password)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -253,7 +261,8 @@ func (a *App) login(w http.ResponseWriter, r *http.Request) {
 	email := r.FormValue("email")
 	password := r.FormValue("password")
 	var matchedUsers int
-	_ = a.db.QueryRowContext(r.Context(), `SELECT COUNT(1) FROM users WHERE email=? AND password=?`, email, password).Scan(&matchedUsers)
+	domain := a.siteDomain(r.Context(), r)
+	_ = a.db.QueryRowContext(r.Context(), `SELECT COUNT(1) FROM users WHERE domain=? AND email=? AND password=?`, domain, email, password).Scan(&matchedUsers)
 	if matchedUsers == 0 {
 		http.Error(w, "invalid credentials", http.StatusUnauthorized)
 		return
@@ -283,7 +292,8 @@ func (a *App) editPage(w http.ResponseWriter, r *http.Request) {
 	if pagePath == "" {
 		pagePath = "/"
 	}
-	record, _ := a.findPage(r.Context(), pagePath)
+	domain := a.siteDomain(r.Context(), r)
+	record, _ := a.findPage(r.Context(), domain, pagePath)
 	if record.Path == "" {
 		record = Page{Path: pagePath, Title: pagePath, HTML: "<h1>New page</h1>"}
 	}
@@ -317,7 +327,8 @@ func (a *App) editRawPage(w http.ResponseWriter, r *http.Request) {
 	if pagePath == "" {
 		pagePath = "/"
 	}
-	record, _ := a.findPage(r.Context(), pagePath)
+	domain := a.siteDomain(r.Context(), r)
+	record, _ := a.findPage(r.Context(), domain, pagePath)
 	if record.Path == "" {
 		record = Page{Path: pagePath, Title: pagePath, HTML: ""}
 	}
@@ -330,11 +341,12 @@ func (a *App) savePage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	pagePath := r.FormValue("path")
+	domain := a.siteDomain(r.Context(), r)
 	title := r.FormValue("title")
 	html := r.FormValue("html")
-	_, _ = a.db.ExecContext(r.Context(), `INSERT OR REPLACE INTO pages(path,title,html,published) VALUES(?,?,?,1)`, pagePath, title, html)
-	_, _ = a.db.ExecContext(r.Context(), `INSERT INTO revisions(page_path,html,created_at) VALUES(?,?,?)`, pagePath, html, time.Now().Format(time.RFC3339))
-	a.applyTemplatePropagation(r.Context(), html)
+	_, _ = a.db.ExecContext(r.Context(), `INSERT OR REPLACE INTO pages(domain,path,title,html,published) VALUES(?,?,?,?,1)`, domain, pagePath, title, html)
+	_, _ = a.db.ExecContext(r.Context(), `INSERT INTO revisions(domain,page_path,html,created_at) VALUES(?,?,?,?)`, domain, pagePath, html, time.Now().Format(time.RFC3339))
+	a.applyTemplatePropagation(r.Context(), domain, html)
 	http.Redirect(w, r, pagePath, http.StatusFound)
 }
 
@@ -383,9 +395,10 @@ func (a *App) grabPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	html := a.mirrorRemotePage(sourceURL, remoteSourceURL, string(htmlBytes))
-	_, _ = a.db.ExecContext(r.Context(), `INSERT OR REPLACE INTO pages(path,title,html,published) VALUES(?,?,?,1)`, pagePath, pagePath, html)
-	_, _ = a.db.ExecContext(r.Context(), `INSERT INTO revisions(page_path,html,created_at) VALUES(?,?,?)`, pagePath, html, time.Now().Format(time.RFC3339))
+	domain := a.siteDomain(r.Context(), r)
+	html := a.mirrorRemotePage(domain, sourceURL, remoteSourceURL, string(htmlBytes))
+	_, _ = a.db.ExecContext(r.Context(), `INSERT OR REPLACE INTO pages(domain,path,title,html,published) VALUES(?,?,?,?,1)`, domain, pagePath, pagePath, html)
+	_, _ = a.db.ExecContext(r.Context(), `INSERT INTO revisions(domain,page_path,html,created_at) VALUES(?,?,?,?)`, domain, pagePath, html, time.Now().Format(time.RFC3339))
 	http.Redirect(w, r, pagePath+"?edit", http.StatusFound)
 }
 
@@ -395,7 +408,8 @@ func (a *App) revisionsPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	pagePath := r.URL.Query().Get("path")
-	revisionRows, err := a.db.QueryContext(r.Context(), `SELECT id,page_path,html,created_at FROM revisions WHERE page_path=? ORDER BY id DESC`, pagePath)
+	domain := a.siteDomain(r.Context(), r)
+	revisionRows, err := a.db.QueryContext(r.Context(), `SELECT id,page_path,html,created_at FROM revisions WHERE domain=? AND page_path=? ORDER BY id DESC`, domain, pagePath)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -417,13 +431,14 @@ func (a *App) restoreRevision(w http.ResponseWriter, r *http.Request) {
 	}
 	revisionID, _ := strconv.Atoi(r.FormValue("id"))
 	var pagePath, html string
-	err := a.db.QueryRowContext(r.Context(), `SELECT page_path,html FROM revisions WHERE id=?`, revisionID).Scan(&pagePath, &html)
+	domain := a.siteDomain(r.Context(), r)
+	err := a.db.QueryRowContext(r.Context(), `SELECT page_path,html FROM revisions WHERE id=? AND domain=?`, revisionID, domain).Scan(&pagePath, &html)
 	if err != nil {
 		http.Error(w, "revision not found", http.StatusNotFound)
 		return
 	}
-	_, _ = a.db.ExecContext(r.Context(), `UPDATE pages SET html=? WHERE path=?`, html, pagePath)
-	_, _ = a.db.ExecContext(r.Context(), `INSERT INTO revisions(page_path,html,created_at) VALUES(?,?,?)`, pagePath, html, time.Now().Format(time.RFC3339))
+	_, _ = a.db.ExecContext(r.Context(), `UPDATE pages SET html=? WHERE domain=? AND path=?`, html, domain, pagePath)
+	_, _ = a.db.ExecContext(r.Context(), `INSERT INTO revisions(domain,page_path,html,created_at) VALUES(?,?,?,?)`, domain, pagePath, html, time.Now().Format(time.RFC3339))
 	http.Redirect(w, r, pagePath, http.StatusFound)
 }
 
@@ -434,7 +449,8 @@ func (a *App) deleteRevision(w http.ResponseWriter, r *http.Request) {
 	}
 	revisionID, _ := strconv.Atoi(r.FormValue("id"))
 	pagePath := r.FormValue("path")
-	_, _ = a.db.ExecContext(r.Context(), `DELETE FROM revisions WHERE id=?`, revisionID)
+	domain := a.siteDomain(r.Context(), r)
+	_, _ = a.db.ExecContext(r.Context(), `DELETE FROM revisions WHERE id=? AND domain=?`, revisionID, domain)
 	http.Redirect(w, r, pagePath+"?revisions", http.StatusFound)
 }
 
@@ -451,7 +467,8 @@ func (a *App) recoverPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var userCount int
-	_ = a.db.QueryRowContext(r.Context(), `SELECT COUNT(1) FROM users WHERE email=? AND is_admin=1`, email).Scan(&userCount)
+	domain := a.siteDomain(r.Context(), r)
+	_ = a.db.QueryRowContext(r.Context(), `SELECT COUNT(1) FROM users WHERE domain=? AND email=? AND is_admin=1`, domain, email).Scan(&userCount)
 	if userCount == 0 {
 		http.Redirect(w, r, requestedReturnPath(r), http.StatusFound)
 		return
@@ -481,7 +498,7 @@ func (a *App) filesPage(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodPost {
 		fileName := safeFileName(r.FormValue("name"))
 		if fileName != "" {
-			_ = os.Remove(filepath.Join("storage/files", fileName))
+			_ = os.Remove(filepath.Join(a.domainFilesDir(r), fileName))
 		}
 		currentPath := r.URL.Query().Get("path")
 		if currentPath == "" {
@@ -490,7 +507,7 @@ func (a *App) filesPage(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, currentPath+"?files", http.StatusFound)
 		return
 	}
-	entries, err := os.ReadDir("storage/files")
+	entries, err := os.ReadDir(a.domainFilesDir(r))
 	if err != nil {
 		a.render(w, "files.html", map[string]any{"Path": r.URL.Query().Get("path"), "Files": []ManagedFile{}})
 		return
@@ -516,15 +533,15 @@ func (a *App) filesPage(w http.ResponseWriter, r *http.Request) {
 	a.render(w, "files.html", map[string]any{"Path": currentPath, "Files": fileList})
 }
 
-func (a *App) findPage(ctx context.Context, pagePath string) (Page, error) {
+func (a *App) findPage(ctx context.Context, domain, pagePath string) (Page, error) {
 	var current Page
-	err := a.db.QueryRowContext(ctx, `SELECT path,title,html,published FROM pages WHERE path=?`, pagePath).Scan(&current.Path, &current.Title, &current.HTML, &current.Published)
+	err := a.db.QueryRowContext(ctx, `SELECT domain,path,title,html,published FROM pages WHERE domain=? AND path=?`, domain, pagePath).Scan(&current.Domain, &current.Path, &current.Title, &current.HTML, &current.Published)
 	return current, err
 }
 
-func (a *App) hasAdmin(ctx context.Context) bool {
+func (a *App) hasAdmin(ctx context.Context, domain string) bool {
 	var adminCount int
-	_ = a.db.QueryRowContext(ctx, `SELECT COUNT(1) FROM users WHERE is_admin=1`).Scan(&adminCount)
+	_ = a.db.QueryRowContext(ctx, `SELECT COUNT(1) FROM users WHERE domain=? AND is_admin=1`, domain).Scan(&adminCount)
 	return adminCount > 0
 }
 
@@ -537,7 +554,7 @@ func requestedReturnPath(r *http.Request) string {
 
 func (a *App) createSession(w http.ResponseWriter, r *http.Request, email string) {
 	token := fmt.Sprintf("%x", sha256.Sum256([]byte(email+time.Now().String())))
-	_, _ = a.db.ExecContext(r.Context(), `INSERT OR REPLACE INTO sessions(token,user_email,created_at) VALUES(?,?,?)`, token, email, time.Now().Format(time.RFC3339))
+	_, _ = a.db.ExecContext(r.Context(), `INSERT OR REPLACE INTO sessions(token,user_email,created_at) VALUES(?,?,?)`, token, a.siteDomain(r.Context(), r)+"|"+email, time.Now().Format(time.RFC3339))
 	http.SetCookie(w, &http.Cookie{Name: "sitebrush_session", Value: token, Path: "/", HttpOnly: true})
 }
 
@@ -547,7 +564,7 @@ func (a *App) isAdminRequest(r *http.Request) bool {
 		return false
 	}
 	var sessionCount int
-	_ = a.db.QueryRowContext(r.Context(), `SELECT COUNT(1) FROM sessions s JOIN users u ON u.email=s.user_email WHERE s.token=? AND u.is_admin=1`, cookie.Value).Scan(&sessionCount)
+	_ = a.db.QueryRowContext(r.Context(), `SELECT COUNT(1) FROM sessions s JOIN users u ON (u.domain||'|'||u.email)=s.user_email WHERE s.token=? AND u.domain=? AND u.is_admin=1`, cookie.Value, a.siteDomain(r.Context(), r)).Scan(&sessionCount)
 	return sessionCount > 0
 }
 
@@ -584,6 +601,7 @@ func buildContextMenuScript(isAdmin bool, pagePath string) string {
       "<li class='SiteBrushContextMenu'><a href='?edit' class='SiteBrushContextMenuLink'><img src='/p/static/pencil.png' class='SiteBrushMenuIcon' alt=''>Редактировать</a></li>",
       "<li class='SiteBrushContextMenu'><a href='?revisions' class='SiteBrushContextMenuLink'><img src='/p/static/revisions.png' class='SiteBrushMenuIcon' alt=''>Ревизии</a></li>",
       "<li class='SiteBrushContextMenu'><a href='?files' class='SiteBrushContextMenuLink'><img src='/p/static/upload.png' class='SiteBrushMenuIcon' alt=''>Файлы</a></li>",
+      "<li class='SiteBrushContextMenu'><a href='/domain/settings' class='SiteBrushContextMenuLink'><img src='/p/static/revisions.png' class='SiteBrushMenuIcon' alt=''>Настройки домена</a></li>",
       "<li class='SiteBrushContextMenu'><a href='?logout' class='SiteBrushContextMenuLink'><img src='/p/static/sign-out.png' class='SiteBrushMenuIcon' alt=''>Выйти</a></li>",
       "<li class='SiteBrushContextMenu ContextMenuCopyright'><a href='http://sitebrush.com' class='SiteBrushContextMenuLink'>sitebrush</a></li>",
       "</ul>"
@@ -664,13 +682,13 @@ function showSitebrushMenu(browserEvent, menuHtmlEntries, currentPagePath) {
 </script>`
 }
 
-func (a *App) applyTemplatePropagation(ctx context.Context, sourceHTML string) {
+func (a *App) applyTemplatePropagation(ctx context.Context, domain, sourceHTML string) {
 	pattern := regexp.MustCompile(`(?s)<([a-zA-Z0-9]+)[^>]*class="[^"]*sitebrush-template-([a-zA-Z0-9_-]+)[^"]*"[^>]*>.*?</[a-zA-Z0-9]+>`)
 	matches := pattern.FindAllStringSubmatch(sourceHTML, -1)
 	for _, match := range matches {
 		templateBlock := match[0]
 		templateName := match[2]
-		rows, err := a.db.QueryContext(ctx, `SELECT path,html FROM pages WHERE html LIKE ?`, "%sitebrush-template-"+templateName+"%")
+		rows, err := a.db.QueryContext(ctx, `SELECT path,html FROM pages WHERE domain=? AND html LIKE ?`, domain, "%sitebrush-template-"+templateName+"%")
 		if err != nil {
 			continue
 		}
@@ -678,7 +696,7 @@ func (a *App) applyTemplatePropagation(ctx context.Context, sourceHTML string) {
 			var pagePath, pageHTML string
 			_ = rows.Scan(&pagePath, &pageHTML)
 			updatedHTML := replaceTemplateByClass(pageHTML, templateName, templateBlock)
-			_, _ = a.db.ExecContext(ctx, `UPDATE pages SET html=? WHERE path=?`, updatedHTML, pagePath)
+			_, _ = a.db.ExecContext(ctx, `UPDATE pages SET html=? WHERE domain=? AND path=?`, updatedHTML, domain, pagePath)
 		}
 		_ = rows.Close()
 	}
@@ -718,7 +736,7 @@ func contentHashName(fileBytes []byte, extension string) (string, error) {
 	return hex.EncodeToString(hashedBytes[:]) + extension, nil
 }
 
-func (a *App) mirrorRemotePage(sourceURL string, pageURL *url.URL, fallbackHTML string) string {
+func (a *App) mirrorRemotePage(domain, sourceURL string, pageURL *url.URL, fallbackHTML string) string {
 	tempDirPath, err := os.MkdirTemp("", "sitebrush-grab-*")
 	if err != nil {
 		return fallbackHTML
@@ -737,13 +755,14 @@ func (a *App) mirrorRemotePage(sourceURL string, pageURL *url.URL, fallbackHTML 
 	}
 	renderedHTML := string(renderedHTMLBytes)
 
-	localFileToAssetPath := a.importMirroredFiles(tempDirPath)
+	localFileToAssetPath := a.importMirroredFiles(domain, tempDirPath)
 	return rewriteMirroredLinks(renderedHTML, localFileToAssetPath)
 }
 
-func (a *App) importMirroredFiles(tempDirPath string) map[string]string {
+func (a *App) importMirroredFiles(domain, tempDirPath string) map[string]string {
 	localFileToAssetPath := make(map[string]string)
-	_ = os.MkdirAll("storage/files", 0o755)
+	baseDir := filepath.Join("storage/files", domainStorageName(domain))
+	_ = os.MkdirAll(baseDir, 0o755)
 	_ = filepath.Walk(tempDirPath, func(currentPath string, fileInfo os.FileInfo, walkErr error) error {
 		if walkErr != nil || fileInfo.IsDir() || strings.HasSuffix(currentPath, "page.html") {
 			return nil
@@ -760,15 +779,90 @@ func (a *App) importMirroredFiles(tempDirPath string) map[string]string {
 		if err != nil {
 			return nil
 		}
-		assetPath := filepath.Join("storage/files", hashedFileName)
+		assetPath := filepath.Join(baseDir, hashedFileName)
 		if err = os.WriteFile(assetPath, fileBytes, 0o644); err != nil {
 			return nil
 		}
 		relativePath, _ := filepath.Rel(tempDirPath, currentPath)
-		localFileToAssetPath[filepath.ToSlash(relativePath)] = "/assets/" + hashedFileName
+		localFileToAssetPath[filepath.ToSlash(relativePath)] = "/assets/" + domainStorageName(domain) + "/" + hashedFileName
 		return nil
 	})
 	return localFileToAssetPath
+}
+
+func domainFromRequest(r *http.Request) string {
+	host := strings.TrimSpace(r.Host)
+	if strings.Contains(host, ":") {
+		parts := strings.Split(host, ":")
+		host = parts[0]
+	}
+	if host == "" {
+		return "localhost"
+	}
+	return strings.ToLower(host)
+}
+
+func (a *App) siteDomain(ctx context.Context, r *http.Request) string {
+	requestDomain := domainFromRequest(r)
+	var primaryDomain string
+	err := a.db.QueryRowContext(ctx, `SELECT primary_domain FROM domain_aliases WHERE alias_domain=?`, requestDomain).Scan(&primaryDomain)
+	if err != nil || strings.TrimSpace(primaryDomain) == "" {
+		return requestDomain
+	}
+	return primaryDomain
+}
+
+func (a *App) domainSettingsPage(w http.ResponseWriter, r *http.Request) {
+	if !a.isAdminRequest(r) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	siteDomain := a.siteDomain(r.Context(), r)
+	if r.Method == http.MethodPost {
+		rawAliases := strings.Split(r.FormValue("aliases"), "\n")
+		cleanAliases := make([]string, 0, 3)
+		aliasSeen := make(map[string]struct{})
+		for _, rawAlias := range rawAliases {
+			normalizedAlias := strings.ToLower(strings.TrimSpace(rawAlias))
+			if normalizedAlias == "" || normalizedAlias == siteDomain {
+				continue
+			}
+			if _, exists := aliasSeen[normalizedAlias]; exists {
+				continue
+			}
+			aliasSeen[normalizedAlias] = struct{}{}
+			cleanAliases = append(cleanAliases, normalizedAlias)
+			if len(cleanAliases) == 3 {
+				break
+			}
+		}
+		_, _ = a.db.ExecContext(r.Context(), `DELETE FROM domain_aliases WHERE primary_domain=?`, siteDomain)
+		for _, aliasDomain := range cleanAliases {
+			_, _ = a.db.ExecContext(r.Context(), `INSERT INTO domain_aliases(primary_domain,alias_domain) VALUES(?,?)`, siteDomain, aliasDomain)
+		}
+		http.Redirect(w, r, "/domain/settings", http.StatusFound)
+		return
+	}
+	aliasRows, err := a.db.QueryContext(r.Context(), `SELECT alias_domain FROM domain_aliases WHERE primary_domain=? ORDER BY alias_domain`, siteDomain)
+	if err != nil {
+		http.Error(w, "failed to load domain aliases", http.StatusInternalServerError)
+		return
+	}
+	defer aliasRows.Close()
+	domainAliases := make([]string, 0, 3)
+	for aliasRows.Next() {
+		var aliasDomain string
+		_ = aliasRows.Scan(&aliasDomain)
+		domainAliases = append(domainAliases, aliasDomain)
+	}
+	a.render(w, "domain_settings.html", map[string]string{"Domain": siteDomain, "Aliases": strings.Join(domainAliases, "\n")})
+}
+func domainStorageName(domain string) string {
+	return strings.NewReplacer("/", "_", "\\", "_", ":", "_", "..", "_").Replace(domain)
+}
+
+func (a *App) domainFilesDir(r *http.Request) string {
+	return filepath.Join("storage/files", domainStorageName(domainFromRequest(r)))
 }
 
 func rewriteMirroredLinks(sourceHTML string, localFileToAssetPath map[string]string) string {

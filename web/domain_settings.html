@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Domain settings</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 24px; max-width: 720px; }
+    textarea { width: 100%; min-height: 140px; }
+    .hint { color: #555; }
+  </style>
+</head>
+<body>
+  <h1>Domain settings</h1>
+  <p><strong>Primary domain:</strong> {{.Domain}}</p>
+  <p class="hint">Add up to 3 aliases, one domain per line. Aliases serve the same site without redirect.</p>
+  <form method="post" action="/domain/settings">
+    <label for="aliases">Domain aliases</label><br>
+    <textarea id="aliases" name="aliases" placeholder="example.net&#10;www.example.net">{{.Aliases}}</textarea><br><br>
+    <button type="submit">Save aliases</button>
+  </form>
+</body>
+</html>
