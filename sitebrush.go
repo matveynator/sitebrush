@@ -429,7 +429,11 @@ func (a *App) revisionsPage(w http.ResponseWriter, r *http.Request) {
 		_ = revisionRows.Scan(&current.ID, &current.PagePath, &current.HTML, &current.CreatedAt)
 		revisionList = append(revisionList, current)
 	}
-	a.render(w, r, "revisions.html", map[string]any{"Path": pagePath, "Revisions": revisionList})
+	returnPath := r.URL.Query().Get("return")
+	if strings.TrimSpace(returnPath) == "" {
+		returnPath = pagePath
+	}
+	a.render(w, r, "revisions.html", map[string]any{"Path": pagePath, "ReturnPath": returnPath, "Revisions": revisionList})
 }
 
 func (a *App) restoreRevision(w http.ResponseWriter, r *http.Request) {
@@ -577,7 +581,7 @@ func (a *App) isAdminRequest(r *http.Request) bool {
 }
 
 func (a *App) wrapWithMenu(r *http.Request, pagePath, html string) string {
-	menuScript := buildContextMenuScript(a.isAdminRequest(r), pagePath)
+	menuScript := buildContextMenuScript(a.isAdminRequest(r), pagePath, a.siteDomain(r.Context(), r))
 	if strings.Contains(strings.ToLower(html), "</body>") {
 		bodyClosePattern := regexp.MustCompile(`(?i)</body>`)
 		return bodyClosePattern.ReplaceAllString(html, menuScript+"</body>")
@@ -585,8 +589,9 @@ func (a *App) wrapWithMenu(r *http.Request, pagePath, html string) string {
 	return html + menuScript
 }
 
-func buildContextMenuScript(isAdmin bool, pagePath string) string {
+func buildContextMenuScript(isAdmin bool, pagePath, domain string) string {
 	escapedPath := template.JSEscapeString(pagePath)
+	escapedDomain := template.JSEscapeString(domain)
 	if isAdmin {
 		return contextMenuStylesAndHelpers() + `<script>
 (function initializeSitebrushContextMenuForAdmin() {
@@ -595,6 +600,7 @@ func buildContextMenuScript(isAdmin bool, pagePath string) string {
   }
   window.__sitebrushContextMenuInitialized = true;
   const currentPagePath = "` + escapedPath + `";
+  const currentDomainName = "` + escapedDomain + `";
   document.addEventListener("contextmenu", function onContextMenuOpen(browserEvent) {
     if (browserEvent.ctrlKey || browserEvent.defaultPrevented) {
       return;
@@ -606,10 +612,11 @@ func buildContextMenuScript(isAdmin bool, pagePath string) string {
     browserEvent.preventDefault();
     const menuHtmlEntries = [
       "<ul class='SiteBrushMenuList'>",
+      "<li class='SiteBrushContextMenu SiteBrushDomainMenuItem'><a href='/' class='SiteBrushContextMenuLink'>" + currentDomainName + "</a></li>",
       "<li class='SiteBrushContextMenu'><a href='?edit' class='SiteBrushContextMenuLink'><img src='/p/static/pencil.png' class='SiteBrushMenuIcon' alt=''>Редактировать</a></li>",
       "<li class='SiteBrushContextMenu'><a href='?revisions' class='SiteBrushContextMenuLink'><img src='/p/static/revisions.png' class='SiteBrushMenuIcon' alt=''>Ревизии</a></li>",
       "<li class='SiteBrushContextMenu'><a href='?files' class='SiteBrushContextMenuLink'><img src='/p/static/upload.png' class='SiteBrushMenuIcon' alt=''>Файлы</a></li>",
-      "<li class='SiteBrushContextMenu'><a href='/domain/settings' class='SiteBrushContextMenuLink'><img src='/p/static/revisions.png' class='SiteBrushMenuIcon' alt=''>Настройки домена</a></li>",
+      "<li class='SiteBrushContextMenu'><a href='?settings' class='SiteBrushContextMenuLink'><img src='/p/static/revisions.png' class='SiteBrushMenuIcon' alt=''>Настройки домена</a></li>",
       "<li class='SiteBrushContextMenu'><a href='?logout' class='SiteBrushContextMenuLink'><img src='/p/static/sign-out.png' class='SiteBrushMenuIcon' alt=''>Выйти</a></li>",
       "<li class='SiteBrushContextMenu ContextMenuCopyright'><a href='http://sitebrush.com' class='SiteBrushContextMenuLink'>sitebrush</a></li>",
       "</ul>"
@@ -626,6 +633,7 @@ func buildContextMenuScript(isAdmin bool, pagePath string) string {
   }
   window.__sitebrushContextMenuInitialized = true;
   const currentPagePath = "` + escapedPath + `";
+  const currentDomainName = "` + escapedDomain + `";
   document.addEventListener("contextmenu", function onContextMenuOpen(browserEvent) {
     if (browserEvent.ctrlKey || browserEvent.defaultPrevented) {
       return;
@@ -637,6 +645,7 @@ func buildContextMenuScript(isAdmin bool, pagePath string) string {
     browserEvent.preventDefault();
     const menuHtmlEntries = [
       "<ul class='SiteBrushMenuList'>",
+      "<li class='SiteBrushContextMenu SiteBrushDomainMenuItem'><a href='/' class='SiteBrushContextMenuLink'>" + currentDomainName + "</a></li>",
       "<li class='SiteBrushContextMenu'><a href='?login' class='SiteBrushContextMenuLink'><img src='/p/static/lock.png' class='SiteBrushMenuIcon' alt=''>Войти</a></li>",
       "<li class='SiteBrushContextMenu ContextMenuCopyright'><a href='http://sitebrush.com' class='SiteBrushContextMenuLink'>sitebrush</a></li>",
       "</ul>"
@@ -649,11 +658,13 @@ func buildContextMenuScript(isAdmin bool, pagePath string) string {
 
 func contextMenuStylesAndHelpers() string {
 	return `<style>
-.SiteBrushMenuBox{position:fixed;background:#fff url(/p/static/bg.png) repeat-x top;border:1px solid #8ea4c1;z-index:99999;padding:2px;min-width:240px;box-shadow:0 2px 12px rgba(0,0,0,0.2)}
+.SiteBrushMenuBox,.SiteBrushMenuBox *{all:initial;box-sizing:border-box}
+.SiteBrushMenuBox{position:fixed;background:#fff url(/p/static/bg.png) repeat-x top;border:1px solid #8ea4c1;z-index:99999;padding:2px;min-width:240px;box-shadow:0 2px 12px rgba(0,0,0,0.2);font-family:Arial,Helvetica,sans-serif}
 .SiteBrushMenuList{list-style:none;margin:0;padding:0}
 .SiteBrushContextMenu{margin:0;padding:0}
-.SiteBrushContextMenuLink{display:flex;align-items:center;gap:8px;padding:8px 10px;color:#1f3f6f;text-decoration:none;font-family:Arial,Helvetica,sans-serif;font-size:14px}
+.SiteBrushContextMenuLink{display:flex;align-items:center;gap:8px;padding:8px 10px;color:#1f3f6f;text-decoration:none;font-family:Arial,Helvetica,sans-serif;font-size:14px;cursor:pointer}
 .SiteBrushContextMenuLink:hover{background:#eef5ff}
+.SiteBrushDomainMenuItem .SiteBrushContextMenuLink{font-weight:700;border-bottom:1px solid #c8d5e7}
 .ContextMenuCopyright .SiteBrushContextMenuLink{font-size:12px;color:#5b6f8b;border-top:1px solid #c8d5e7;margin-top:2px;padding-top:7px}.SiteBrushMenuIcon{width:16px;height:16px;flex:0 0 16px}
 </style>
 <script>
@@ -942,7 +953,11 @@ func (a *App) domainSettingsPage(w http.ResponseWriter, r *http.Request) {
 		for _, aliasDomain := range cleanAliases {
 			_, _ = a.db.ExecContext(r.Context(), `INSERT INTO domain_aliases(primary_domain,alias_domain) VALUES(?,?)`, siteDomain, aliasDomain)
 		}
-		http.Redirect(w, r, "/domain/settings", http.StatusFound)
+		returnPath := r.FormValue("return")
+		if strings.TrimSpace(returnPath) == "" {
+			returnPath = "/"
+		}
+		http.Redirect(w, r, returnPath+"?settings", http.StatusFound)
 		return
 	}
 	aliasRows, err := a.db.QueryContext(r.Context(), `SELECT alias_domain FROM domain_aliases WHERE primary_domain=? ORDER BY alias_domain`, siteDomain)
@@ -957,7 +972,11 @@ func (a *App) domainSettingsPage(w http.ResponseWriter, r *http.Request) {
 		_ = aliasRows.Scan(&aliasDomain)
 		domainAliases = append(domainAliases, aliasDomain)
 	}
-	a.render(w, r, "domain_settings.html", map[string]any{"Domain": siteDomain, "Aliases": strings.Join(domainAliases, "\n")})
+	returnPath := r.URL.Query().Get("return")
+	if strings.TrimSpace(returnPath) == "" {
+		returnPath = "/"
+	}
+	a.render(w, r, "domain_settings.html", map[string]any{"Domain": siteDomain, "Aliases": strings.Join(domainAliases, "\n"), "ReturnPath": returnPath})
 }
 func domainStorageName(domain string) string {
 	return strings.NewReplacer("/", "_", "\\", "_", ":", "_", "..", "_").Replace(domain)

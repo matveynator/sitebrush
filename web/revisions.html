@@ -10,8 +10,8 @@
 <body>
 <div class="container py-4">
   <div class="d-flex align-items-center justify-content-between mb-3">
-    <h1 class="h4 mb-0"><img src="/p/static/revisions.png" width="18" alt=""> Revisions for {{.Path}}</h1>
-    <a class="btn btn-outline-primary" href="/edit?path={{.Path}}"><img src="/p/static/arrow-left-up.png" width="16" alt=""> Back to edit</a>
+    <h1 class="h4 mb-0"><a href="/" class="text-decoration-none">{{.Domain}}</a> · <img src="/p/static/revisions.png" width="18" alt=""> {{index .T "revisions_for"}} {{.Path}}</h1>
+    <a class="btn btn-outline-primary" href="{{.ReturnPath}}"><img src="/p/static/arrow-left-up.png" width="16" alt=""> {{index .T "back_to_uri"}}</a>
   </div>
   {{range .Revisions}}
   <div class="card revision-card mb-3 shadow-sm border-0">
