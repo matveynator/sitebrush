@@ -10,6 +10,7 @@ import (
 	"flag"
 	"fmt"
 	"html/template"
+	"io"
 	"io/fs"
 	"log"
 	"net/http"
@@ -25,6 +26,7 @@ import (
 
 //go:embed web/*
 var embeddedWebFiles embed.FS
+
 const appVersion = "dev"
 
 // App keeps only explicit dependencies to stay readable and easy to swap.
@@ -83,6 +85,7 @@ func main() {
 	router.HandleFunc("/login", application.login)
 	router.HandleFunc("/logout", application.logout)
 	router.HandleFunc("/edit", application.editPage)
+	router.HandleFunc("/grab", application.grabPage)
 	router.HandleFunc("/save", application.savePage)
 	router.HandleFunc("/revisions", application.revisionsPage)
 	router.HandleFunc("/revision/restore", application.restoreRevision)
@@ -236,6 +239,51 @@ func (a *App) savePage(w http.ResponseWriter, r *http.Request) {
 	_, _ = a.db.ExecContext(r.Context(), `INSERT INTO revisions(page_path,html,created_at) VALUES(?,?,?)`, pagePath, html, time.Now().Format(time.RFC3339))
 	a.applyTemplatePropagation(r.Context(), html)
 	http.Redirect(w, r, pagePath, http.StatusFound)
+}
+
+func (a *App) grabPage(w http.ResponseWriter, r *http.Request) {
+	if !a.isAdminRequest(r) || r.Method != http.MethodPost {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+
+	pagePath := r.FormValue("path")
+	if pagePath == "" {
+		http.Error(w, "path is required", http.StatusBadRequest)
+		return
+	}
+
+	sourceURL := r.FormValue("source_url")
+	if sourceURL == "" {
+		http.Error(w, "source_url is required", http.StatusBadRequest)
+		return
+	}
+	if !strings.HasPrefix(sourceURL, "http://") && !strings.HasPrefix(sourceURL, "https://") {
+		http.Error(w, "source_url must start with http:// or https://", http.StatusBadRequest)
+		return
+	}
+
+	response, err := http.Get(sourceURL)
+	if err != nil {
+		http.Error(w, "failed to download source page", http.StatusBadGateway)
+		return
+	}
+	defer response.Body.Close()
+	if response.StatusCode < 200 || response.StatusCode > 299 {
+		http.Error(w, "source page returned non-success status", http.StatusBadGateway)
+		return
+	}
+
+	htmlBytes, err := io.ReadAll(response.Body)
+	if err != nil {
+		http.Error(w, "failed to read source page", http.StatusBadGateway)
+		return
+	}
+
+	html := string(htmlBytes)
+	_, _ = a.db.ExecContext(r.Context(), `INSERT OR REPLACE INTO pages(path,title,html,published) VALUES(?,?,?,1)`, pagePath, pagePath, html)
+	_, _ = a.db.ExecContext(r.Context(), `INSERT INTO revisions(page_path,html,created_at) VALUES(?,?,?)`, pagePath, html, time.Now().Format(time.RFC3339))
+	http.Redirect(w, r, "/edit?path="+pagePath, http.StatusFound)
 }
 
 func (a *App) revisionsPage(w http.ResponseWriter, r *http.Request) {
