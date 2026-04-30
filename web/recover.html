@@ -10,12 +10,14 @@
 <div class="container py-5">
   <div class='page-header mb-4'><h1><a href='/'>SiteBrush</a> <small class="text-muted">| Восстановление пароля.</small></h1></div>
   <form class="card card-body shadow-sm" method="post" action="?recover" style="max-width:560px;">
+    <input type="hidden" name="return_path" value="{{.ReturnPath}}">
     <p><input type='text' class="form-control" name='email' placeholder="введите email администратора..."></p>
     <p class="d-flex align-items-center gap-2"><input type="text" class="form-control" name="captcha" placeholder="введите цифры -->" style="max-width:220px;"/>
     <img src="?captcha" alt="Введите цифры с картинки." title="введите цифры -->"></p>
     <input type="submit" class="btn btn-primary" value="восстановить пароль"/>
   </form>
   {{if .Status}}<div class="alert alert-info mt-3" style="max-width:560px;">{{.Status}}</div>{{end}}
+  <p class="mt-3"><a href="{{.ReturnPath}}?login">Вернуться ко входу</a></p>
 </div>
 </body>
 </html>

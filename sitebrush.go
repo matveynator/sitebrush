@@ -238,12 +238,16 @@ func (a *App) setupAdmin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.createSession(w, r, email)
-	http.Redirect(w, r, "/", http.StatusFound)
+	returnPath := r.FormValue("return_path")
+	if returnPath == "" {
+		returnPath = requestedReturnPath(r)
+	}
+	http.Redirect(w, r, returnPath, http.StatusFound)
 }
 
 func (a *App) login(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet {
-		a.render(w, "login.html", nil)
+		a.render(w, "login.html", map[string]string{"ReturnPath": requestedReturnPath(r)})
 		return
 	}
 	email := r.FormValue("email")
@@ -255,7 +259,11 @@ func (a *App) login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.createSession(w, r, email)
-	http.Redirect(w, r, "/", http.StatusFound)
+	returnPath := r.FormValue("return_path")
+	if returnPath == "" {
+		returnPath = requestedReturnPath(r)
+	}
+	http.Redirect(w, r, returnPath, http.StatusFound)
 }
 
 func (a *App) logout(w http.ResponseWriter, r *http.Request) {
@@ -432,30 +440,30 @@ func (a *App) deleteRevision(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) recoverPage(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet {
-		a.render(w, "recover.html", map[string]string{"Status": ""})
+		a.render(w, "recover.html", map[string]string{"Status": "", "ReturnPath": requestedReturnPath(r)})
 		return
 	}
 	email := strings.TrimSpace(r.FormValue("email"))
 	captchaValue := strings.TrimSpace(r.FormValue("captcha"))
 	captchaCookie, err := r.Cookie("sitebrush_captcha")
 	if err != nil || captchaCookie.Value == "" || captchaCookie.Value != captchaValue {
-		a.render(w, "recover.html", map[string]string{"Status": "Captcha is invalid"})
+		a.render(w, "recover.html", map[string]string{"Status": "Captcha is invalid", "ReturnPath": requestedReturnPath(r)})
 		return
 	}
 	var userCount int
 	_ = a.db.QueryRowContext(r.Context(), `SELECT COUNT(1) FROM users WHERE email=? AND is_admin=1`, email).Scan(&userCount)
 	if userCount == 0 {
-		a.render(w, "recover.html", map[string]string{"Status": "Recovery request sent"})
+		http.Redirect(w, r, requestedReturnPath(r), http.StatusFound)
 		return
 	}
 	recoveryCode := fmt.Sprintf("%06d", time.Now().UnixNano()%1000000)
 	message := "Subject: SiteBrush recovery code\r\n\r\nRecovery code: " + recoveryCode + "\r\n"
 	mailError := smtp.SendMail("127.0.0.1:25", nil, "noreply@localhost", []string{email}, []byte(message))
 	if mailError != nil {
-		a.render(w, "recover.html", map[string]string{"Status": "SMTP send failed: " + mailError.Error()})
+		a.render(w, "recover.html", map[string]string{"Status": "SMTP send failed: " + mailError.Error(), "ReturnPath": requestedReturnPath(r)})
 		return
 	}
-	a.render(w, "recover.html", map[string]string{"Status": "Recovery code sent"})
+	http.Redirect(w, r, requestedReturnPath(r), http.StatusFound)
 }
 
 func (a *App) captchaImage(w http.ResponseWriter, r *http.Request) {
@@ -518,6 +526,13 @@ func (a *App) hasAdmin(ctx context.Context) bool {
 	var adminCount int
 	_ = a.db.QueryRowContext(ctx, `SELECT COUNT(1) FROM users WHERE is_admin=1`).Scan(&adminCount)
 	return adminCount > 0
+}
+
+func requestedReturnPath(r *http.Request) string {
+	if r.URL.Path == "" {
+		return "/"
+	}
+	return r.URL.Path
 }
 
 func (a *App) createSession(w http.ResponseWriter, r *http.Request, email string) {
