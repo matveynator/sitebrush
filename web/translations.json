@@ -24,7 +24,10 @@
     "edit_cancel": "Cancel",
     "edit_save": "Save",
     "edit_title_prefix": "Edit",
-    "edit_raw_title_prefix": "Raw edit"
+    "edit_raw_title_prefix": "Raw edit",
+    "back_to_uri": "Back to URI",
+    "revisions_for": "Revisions for",
+    "file_manager": "File manager"
   },
   "fr": {
     "setup_no_admin": "aucun administrateur pour l'instant",
@@ -51,7 +54,10 @@
     "edit_cancel": "Cancel",
     "edit_save": "Save",
     "edit_title_prefix": "Edit",
-    "edit_raw_title_prefix": "Raw edit"
+    "edit_raw_title_prefix": "Raw edit",
+    "back_to_uri": "Retour à l’URI",
+    "revisions_for": "Révisions pour",
+    "file_manager": "Gestionnaire de fichiers"
   },
   "ru": {
     "setup_no_admin": "пока нет администратора",
@@ -78,7 +84,10 @@
     "edit_cancel": "Отмена",
     "edit_save": "Сохранить",
     "edit_title_prefix": "Редактирование",
-    "edit_raw_title_prefix": "Редактирование HTML"
+    "edit_raw_title_prefix": "Редактирование HTML",
+    "back_to_uri": "Назад к URI",
+    "revisions_for": "Ревизии для",
+    "file_manager": "Файловый менеджер"
   },
   "ja": {
     "setup_no_admin": "まだ管理者がいません",
@@ -105,7 +114,10 @@
     "edit_cancel": "Cancel",
     "edit_save": "Save",
     "edit_title_prefix": "Edit",
-    "edit_raw_title_prefix": "Raw edit"
+    "edit_raw_title_prefix": "Raw edit",
+    "back_to_uri": "URI に戻る",
+    "revisions_for": "改訂履歴",
+    "file_manager": "ファイルマネージャー"
   },
   "it": {
     "setup_no_admin": "nessun amministratore ancora",
@@ -132,7 +144,10 @@
     "edit_cancel": "Cancel",
     "edit_save": "Save",
     "edit_title_prefix": "Edit",
-    "edit_raw_title_prefix": "Raw edit"
+    "edit_raw_title_prefix": "Raw edit",
+    "back_to_uri": "Torna all’URI",
+    "revisions_for": "Revisioni per",
+    "file_manager": "Gestore file"
   },
   "sv": {
     "setup_no_admin": "ingen administratör ännu",
@@ -159,7 +174,10 @@
     "edit_cancel": "Cancel",
     "edit_save": "Save",
     "edit_title_prefix": "Edit",
-    "edit_raw_title_prefix": "Raw edit"
+    "edit_raw_title_prefix": "Raw edit",
+    "back_to_uri": "Tillbaka till URI",
+    "revisions_for": "Revisioner för",
+    "file_manager": "Filhanterare"
   },
   "fi": {
     "setup_no_admin": "ei vielä järjestelmänvalvojaa",
@@ -186,7 +204,10 @@
     "edit_cancel": "Cancel",
     "edit_save": "Save",
     "edit_title_prefix": "Edit",
-    "edit_raw_title_prefix": "Raw edit"
+    "edit_raw_title_prefix": "Raw edit",
+    "back_to_uri": "Takaisin URI:in",
+    "revisions_for": "Versiot kohteelle",
+    "file_manager": "Tiedostonhallinta"
   },
   "mn": {
     "setup_no_admin": "админ хараахан алга",
@@ -213,7 +234,10 @@
     "edit_cancel": "Cancel",
     "edit_save": "Save",
     "edit_title_prefix": "Edit",
-    "edit_raw_title_prefix": "Raw edit"
+    "edit_raw_title_prefix": "Raw edit",
+    "back_to_uri": "URI рүү буцах",
+    "revisions_for": "URI-ийн хувилбарууд",
+    "file_manager": "Файл менежер"
   },
   "zh": {
     "setup_no_admin": "尚无管理员",
@@ -240,7 +264,10 @@
     "edit_cancel": "Cancel",
     "edit_save": "Save",
     "edit_title_prefix": "Edit",
-    "edit_raw_title_prefix": "Raw edit"
+    "edit_raw_title_prefix": "Raw edit",
+    "back_to_uri": "返回 URI",
+    "revisions_for": "URI 的修订",
+    "file_manager": "文件管理器"
   },
   "he": {
     "setup_no_admin": "עדיין אין מנהל",
@@ -267,7 +294,10 @@
     "edit_cancel": "Cancel",
     "edit_save": "Save",
     "edit_title_prefix": "Edit",
-    "edit_raw_title_prefix": "Raw edit"
+    "edit_raw_title_prefix": "Raw edit",
+    "back_to_uri": "חזרה ל-URI",
+    "revisions_for": "גרסאות עבור",
+    "file_manager": "מנהל קבצים"
   },
   "fa": {
     "setup_no_admin": "هنوز مدیر وجود ندارد",
@@ -294,7 +324,10 @@
     "edit_cancel": "Cancel",
     "edit_save": "Save",
     "edit_title_prefix": "Edit",
-    "edit_raw_title_prefix": "Raw edit"
+    "edit_raw_title_prefix": "Raw edit",
+    "back_to_uri": "بازگشت به URI",
+    "revisions_for": "بازبینی‌ها برای",
+    "file_manager": "مدیر فایل"
   },
   "de": {
     "setup_no_admin": "noch kein Administrator",
@@ -321,7 +354,10 @@
     "edit_cancel": "Cancel",
     "edit_save": "Save",
     "edit_title_prefix": "Edit",
-    "edit_raw_title_prefix": "Raw edit"
+    "edit_raw_title_prefix": "Raw edit",
+    "back_to_uri": "Zurück zur URI",
+    "revisions_for": "Revisionen für",
+    "file_manager": "Dateimanager"
   },
   "tr": {
     "setup_no_admin": "henüz yönetici yok",
@@ -348,7 +384,10 @@
     "edit_cancel": "Cancel",
     "edit_save": "Save",
     "edit_title_prefix": "Edit",
-    "edit_raw_title_prefix": "Raw edit"
+    "edit_raw_title_prefix": "Raw edit",
+    "back_to_uri": "URI’ye geri dön",
+    "revisions_for": "URI için revizyonlar",
+    "file_manager": "Dosya yöneticisi"
   },
   "kk": {
     "setup_no_admin": "әзірге әкімші жоқ",
@@ -375,7 +414,10 @@
     "edit_cancel": "Cancel",
     "edit_save": "Save",
     "edit_title_prefix": "Edit",
-    "edit_raw_title_prefix": "Raw edit"
+    "edit_raw_title_prefix": "Raw edit",
+    "back_to_uri": "URI-ге оралу",
+    "revisions_for": "URI үшін нұсқалар",
+    "file_manager": "Файл менеджері"
   },
   "es": {
     "setup_no_admin": "aún no hay administrador",
@@ -402,7 +444,10 @@
     "edit_cancel": "Cancel",
     "edit_save": "Save",
     "edit_title_prefix": "Edit",
-    "edit_raw_title_prefix": "Raw edit"
+    "edit_raw_title_prefix": "Raw edit",
+    "back_to_uri": "Volver al URI",
+    "revisions_for": "Revisiones para",
+    "file_manager": "Administrador de archivos"
   },
   "pt": {
     "setup_no_admin": "ainda não há administrador",
@@ -429,6 +474,9 @@
     "edit_cancel": "Cancel",
     "edit_save": "Save",
     "edit_title_prefix": "Edit",
-    "edit_raw_title_prefix": "Raw edit"
+    "edit_raw_title_prefix": "Raw edit",
+    "back_to_uri": "Voltar ao URI",
+    "revisions_for": "Revisões para",
+    "file_manager": "Gerenciador de arquivos"
   }
 }

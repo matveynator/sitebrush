@@ -10,10 +10,12 @@
   </style>
 </head>
 <body>
-  <h1>{{.Domain}} | {{index .T "domain_settings_title"}}</h1>
+  <h1><a href="/">{{.Domain}}</a> | {{index .T "domain_settings_title"}}</h1>
+  <p><a href="{{.ReturnPath}}">{{index .T "back_to_uri"}}</a></p>
   <p><strong>{{index .T "domain_settings_primary"}}</strong> {{.Domain}}</p>
   <p class="hint">{{index .T "domain_settings_hint"}}</p>
-  <form method="post" action="/domain/settings">
+  <form method="post" action="?settings">
+    <input type="hidden" name="return" value="{{.ReturnPath}}">
     <label for="aliases">{{index .T "domain_settings_aliases"}}</label><br>
     <textarea id="aliases" name="aliases" placeholder="example.net&#10;www.example.net">{{.Aliases}}</textarea><br><br>
     <button type="submit">{{index .T "domain_settings_save"}}</button>
