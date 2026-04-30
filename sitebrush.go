@@ -52,6 +52,11 @@ type Revision struct {
 	CreatedAt string
 }
 
+type ManagedFile struct {
+	Name string
+	Size int64
+}
+
 func main() {
 	port := flag.Int("port", 8080, "HTTP listen port")
 	dbType := flag.String("db-type", "sqlite", "database driver (supported: sqlite)")
@@ -92,6 +97,7 @@ func main() {
 	router.HandleFunc("/edit/raw", application.editRawPage)
 	router.HandleFunc("/edit/mode", application.editModePage)
 	router.HandleFunc("/grab", application.grabPage)
+	router.HandleFunc("/files", application.filesPage)
 	router.HandleFunc("/save", application.savePage)
 	router.HandleFunc("/revisions", application.revisionsPage)
 	router.HandleFunc("/revision/restore", application.restoreRevision)
@@ -375,6 +381,38 @@ func (a *App) deleteRevision(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/revisions?path="+pagePath, http.StatusFound)
 }
 
+func (a *App) filesPage(w http.ResponseWriter, r *http.Request) {
+	if !a.isAdminRequest(r) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	if r.Method == http.MethodPost {
+		fileName := safeFileName(r.FormValue("name"))
+		if fileName != "" {
+			_ = os.Remove(filepath.Join("storage/files", fileName))
+		}
+		http.Redirect(w, r, "/files", http.StatusFound)
+		return
+	}
+	entries, err := os.ReadDir("storage/files")
+	if err != nil {
+		a.render(w, "files.html", []ManagedFile{})
+		return
+	}
+	fileList := make([]ManagedFile, 0, len(entries))
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		fileInfo, statErr := entry.Info()
+		if statErr != nil {
+			continue
+		}
+		fileList = append(fileList, ManagedFile{Name: entry.Name(), Size: fileInfo.Size()})
+	}
+	a.render(w, "files.html", fileList)
+}
+
 func (a *App) findPage(ctx context.Context, pagePath string) (Page, error) {
 	var current Page
 	err := a.db.QueryRowContext(ctx, `SELECT path,title,html,published FROM pages WHERE path=?`, pagePath).Scan(&current.Path, &current.Title, &current.HTML, &current.Published)
@@ -414,13 +452,17 @@ func buildContextMenuScript(isAdmin bool, pagePath string) string {
 (function initializeSitebrushContextMenuForAdmin() {
   const currentPagePath = "` + escapedPath + `";
   document.addEventListener("contextmenu", function onContextMenuOpen(browserEvent) {
+    if (browserEvent.ctrlKey) {
+      return;
+    }
     browserEvent.preventDefault();
     const menuHtml = [
       "<ul class='SiteBrushMenuList'>",
       "<li class='SiteBrushContextMenu'><a href='?edit' class='SiteBrushContextMenuLink'><img src='/p/static/pencil.png' class='SiteBrushMenuIcon' alt=''>Редактировать</a></li>",
       "<li class='SiteBrushContextMenu'><a href='?revisions' class='SiteBrushContextMenuLink'><img src='/p/static/revisions.png' class='SiteBrushMenuIcon' alt=''>Ревизии</a></li>",
       "<li class='SiteBrushContextMenu'><a href='?properties' class='SiteBrushContextMenuLink'><img src='/p/static/properties.gif' class='SiteBrushMenuIcon' alt=''>Свойства</a></li>",
-      "<li class='SiteBrushContextMenu'><a href='?freeze' class='SiteBrushContextMenuLink'><img src='/p/static/freeze.png' class='SiteBrushMenuIcon' alt=''>Заморозить</a></li>",
+      "<li class='SiteBrushContextMenu'><a href='?freeze' class='SiteBrushContextMenuLink'><img src='/p/static/freeze.png' class='SiteBrushMenuIcon' alt=''>Заморозить</a></li>
+      <li class='SiteBrushContextMenu'><a href='/files' class='SiteBrushContextMenuLink'><img src='/p/static/upload.png' class='SiteBrushMenuIcon' alt=''>Файлы</a></li>",
       "<li class='SiteBrushContextMenu'><a href='?logout' class='SiteBrushContextMenuLink'><img src='/p/static/sign-out.png' class='SiteBrushMenuIcon' alt=''>Выйти</a></li>",
       "<li class='SiteBrushContextMenu ContextMenuCopyright'><a href='http://sitebrush.com' class='SiteBrushContextMenuLink'>sitebrush</a></li>",
       "</ul>"
@@ -434,6 +476,9 @@ func buildContextMenuScript(isAdmin bool, pagePath string) string {
 (function initializeSitebrushContextMenuForGuest() {
   const currentPagePath = "` + escapedPath + `";
   document.addEventListener("contextmenu", function onContextMenuOpen(browserEvent) {
+    if (browserEvent.ctrlKey) {
+      return;
+    }
     browserEvent.preventDefault();
     const menuHtml = [
       "<ul class='SiteBrushMenuList'>",
