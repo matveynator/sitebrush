@@ -4,54 +4,60 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Edit {{.Path}}</title>
+  <link rel="stylesheet" href="https://uicdn.toast.com/editor/latest/toastui-editor.min.css" />
   <style>
     html, body { height: 100%; margin: 0; }
     body { background: #f4f8fc; font-family: Arial, sans-serif; }
-    .editor-page { min-height: 100%; display: flex; flex-direction: column; padding: 10px; }
-    .editor-header { display:flex; justify-content:space-between; align-items:center; margin-bottom:10px; }
+    .editor-page { min-height: 100%; display: flex; flex-direction: column; padding: 10px; gap: 10px; }
+    .editor-topbar { display:flex; justify-content:space-between; align-items:center; }
+    .save-button { background:#1ea74f; color:#fff; border:0; padding:10px 16px; border-radius:6px; cursor:pointer; }
     .cancel-link { color:#1f3f6f; text-decoration:none; }
-    .editor-form { flex: 1; display: flex; flex-direction: column; }
-    #editor { flex: 1; min-height: 80vh; }
+    #visualEditorRoot { flex: 1; min-height: 75vh; }
   </style>
 </head>
 <body>
-<div class="editor-page">
-  <div class="editor-header">
-    <strong>Edit {{.Path}}</strong>
+<form id="visualEditorForm" method="post" action="/save" class="editor-page">
+  <input type="hidden" name="path" value="{{.Path}}" />
+  <input type="hidden" name="title" value="{{.Title}}" />
+  <input type="hidden" id="htmlContentField" name="html" />
+
+  <div class="editor-topbar">
+    <button class="save-button" type="submit">Save</button>
     <a class="cancel-link" href="{{.Path}}">Cancel</a>
   </div>
-  <form id="editorForm" method="post" action="/save" class="editor-form">
-    <input type="hidden" name="path" value="{{.Path}}" />
-    <input type="hidden" name="title" value="{{.Title}}" />
-    <textarea id="editor" name="html">{{.HTML}}</textarea>
-  </form>
-</div>
-<script src="https://cdn.ckeditor.com/4.25.1-lts/full-all/ckeditor.js"></script>
+
+  <div id="visualEditorRoot"></div>
+
+  <div class="editor-topbar">
+    <button class="save-button" type="submit">Save</button>
+    <a class="cancel-link" href="{{.Path}}">Cancel</a>
+  </div>
+</form>
+
+<script src="https://uicdn.toast.com/editor/latest/toastui-editor-all.min.js"></script>
 <script>
-function initializeEditor() {
-  CKEDITOR.replace('editor', {
-    height: '100%',
-    removePlugins: 'elementspath',
-    extraPlugins: 'save',
-    toolbar: [
-      { name: 'document', items: ['Save'] },
-      { name: 'clipboard', items: ['Undo', 'Redo'] },
-      { name: 'editing', items: ['Find', 'Replace'] },
-      { name: 'basicstyles', items: ['Bold', 'Italic', 'Underline'] },
-      { name: 'paragraph', items: ['NumberedList', 'BulletedList'] },
-      { name: 'links', items: ['Link', 'Unlink'] },
-      { name: 'insert', items: ['Image', 'Table'] },
-      { name: 'styles', items: ['Format'] }
-    ],
-    on: {
-      save: function(event) {
-        event.cancel();
-        document.getElementById('editorForm').submit();
-      }
-    }
+const initialHtmlContent = {{printf "%q" .HTML}};
+
+function createVisualHtmlEditor() {
+  return new toastui.Editor({
+    el: document.querySelector('#visualEditorRoot'),
+    initialValue: initialHtmlContent,
+    initialEditType: 'wysiwyg',
+    previewStyle: 'vertical',
+    height: '100%'
   });
 }
-initializeEditor();
+
+function connectSavePipeline(visualHtmlEditor) {
+  const visualEditorFormElement = document.getElementById('visualEditorForm');
+  const htmlContentFieldElement = document.getElementById('htmlContentField');
+  visualEditorFormElement.addEventListener('submit', function onSubmit() {
+    htmlContentFieldElement.value = visualHtmlEditor.getHTML();
+  });
+}
+
+const visualHtmlEditor = createVisualHtmlEditor();
+connectSavePipeline(visualHtmlEditor);
 </script>
 </body>
 </html>
