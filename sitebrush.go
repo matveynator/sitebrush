@@ -453,7 +453,7 @@ func (a *App) wrapWithMenu(r *http.Request, pagePath, html string) string {
 func buildContextMenuScript(isAdmin bool, pagePath string) string {
 	escapedPath := template.JSEscapeString(pagePath)
 	if isAdmin {
-		return `<script>
+		return contextMenuStylesAndHelpers() + `<script>
 (function initializeSitebrushContextMenuForAdmin() {
   if (window.__sitebrushContextMenuInitialized) {
     return;
@@ -479,11 +479,11 @@ func buildContextMenuScript(isAdmin bool, pagePath string) string {
       "</ul>"
     ];
     showSitebrushMenu(browserEvent, menuHtmlEntries, currentPagePath);
-  }, {capture: false, passive: false});
+	  }, {capture: false, passive: false});
 })();
-` + contextMenuStylesAndHelpers()
+	</script>`
 	}
-	return `<script>
+	return contextMenuStylesAndHelpers() + `<script>
 (function initializeSitebrushContextMenuForGuests() {
   if (window.__sitebrushContextMenuInitialized) {
     return;
@@ -506,9 +506,9 @@ func buildContextMenuScript(isAdmin bool, pagePath string) string {
       "</ul>"
     ];
     showSitebrushMenu(browserEvent, menuHtmlEntries, currentPagePath);
-  }, {capture: false, passive: false});
+	  }, {capture: false, passive: false});
 })();
-` + contextMenuStylesAndHelpers()
+	</script>`
 }
 
 func contextMenuStylesAndHelpers() string {
