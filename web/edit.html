@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Edit {{.Path}}</title>
+  <title>{{index .T "edit_title_prefix"}} {{.Path}}</title>
   <link rel="stylesheet" href="https://uicdn.toast.com/editor/latest/toastui-editor.min.css" />
   <style>
     html, body { height: 100%; margin: 0; }
@@ -22,8 +22,8 @@
   <input type="hidden" id="htmlContentField" name="html" />
   <div id="visualEditorRoot"></div>
   <div class="action-bar">
-    <a class="cancel-button" href="{{.Path}}">Cancel</a>
-    <button class="save-button" type="submit">Save</button>
+    <a class="cancel-button" href="{{.Path}}">{{index .T "edit_cancel"}}</a>
+    <button class="save-button" type="submit">{{index .T "edit_save"}}</button>
   </div>
 </form>
 <script src="https://uicdn.toast.com/editor/latest/toastui-editor-all.min.js"></script>

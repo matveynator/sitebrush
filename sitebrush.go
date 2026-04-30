@@ -21,6 +21,7 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"strconv"
 	"strings"
@@ -722,14 +723,41 @@ func (a *App) render(w http.ResponseWriter, r *http.Request, templateName string
 	}
 	parsedTemplate := template.Must(template.New(templateName).Parse(string(fileBytes)))
 	envelope := map[string]any{"Domain": a.siteDomain(r.Context(), r), "T": translationsForRequest(r)}
+	mergeTemplateData(envelope, templateData)
+	_ = parsedTemplate.Execute(w, envelope)
+}
+
+func mergeTemplateData(envelope map[string]any, templateData any) {
+	if templateData == nil {
+		return
+	}
 	if values, ok := templateData.(map[string]any); ok {
 		for key, value := range values {
 			envelope[key] = value
 		}
-	} else {
-		envelope["Data"] = templateData
+		return
 	}
-	_ = parsedTemplate.Execute(w, envelope)
+
+	reflectedValue := reflect.ValueOf(templateData)
+	if reflectedValue.Kind() == reflect.Pointer {
+		if reflectedValue.IsNil() {
+			return
+		}
+		reflectedValue = reflectedValue.Elem()
+	}
+	if reflectedValue.Kind() == reflect.Struct {
+		reflectedType := reflectedValue.Type()
+		for fieldIndex := 0; fieldIndex < reflectedValue.NumField(); fieldIndex++ {
+			structField := reflectedType.Field(fieldIndex)
+			if structField.PkgPath != "" {
+				continue
+			}
+			envelope[structField.Name] = reflectedValue.Field(fieldIndex).Interface()
+		}
+		return
+	}
+
+	envelope["Data"] = templateData
 }
 
 func loadTranslationCatalog() map[string]map[string]string {
@@ -758,13 +786,37 @@ func preferredLanguageCode(acceptLanguageHeader string) string {
 	if normalizedHeader == "" {
 		return "en"
 	}
+	bestLanguageCode := "en"
+	bestWeight := -1.0
+	supportedLanguageCodes := map[string]struct{}{
+		"en": {}, "fr": {}, "ru": {}, "ja": {}, "it": {}, "sv": {}, "fi": {}, "mn": {},
+		"zh": {}, "he": {}, "fa": {}, "de": {}, "tr": {}, "kk": {}, "es": {}, "pt": {},
+	}
 	for _, languageEntry := range strings.Split(normalizedHeader, ",") {
-		baseCode := strings.TrimSpace(strings.Split(strings.Split(languageEntry, ";")[0], "-")[0])
-		if baseCode == "en" || baseCode == "fr" || baseCode == "ru" || baseCode == "ja" || baseCode == "it" || baseCode == "sv" || baseCode == "fi" || baseCode == "mn" || baseCode == "zh" || baseCode == "he" || baseCode == "fa" || baseCode == "de" || baseCode == "tr" || baseCode == "kk" || baseCode == "es" || baseCode == "pt" {
-			return baseCode
+		parts := strings.Split(languageEntry, ";")
+		baseCode := strings.TrimSpace(strings.Split(strings.TrimSpace(parts[0]), "-")[0])
+		if _, supported := supportedLanguageCodes[baseCode]; !supported {
+			continue
+		}
+		weight := 1.0
+		for _, parameterEntry := range parts[1:] {
+			parameter := strings.TrimSpace(parameterEntry)
+			if !strings.HasPrefix(parameter, "q=") {
+				continue
+			}
+			parsedWeight, err := strconv.ParseFloat(strings.TrimSpace(strings.TrimPrefix(parameter, "q=")), 64)
+			if err != nil || parsedWeight < 0 || parsedWeight > 1 {
+				continue
+			}
+			weight = parsedWeight
+			break
+		}
+		if weight > bestWeight {
+			bestWeight = weight
+			bestLanguageCode = baseCode
 		}
 	}
-	return "en"
+	return bestLanguageCode
 }
 
 func safeFileName(rawName string) string {

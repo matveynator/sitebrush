@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Raw edit {{.Path}}</title>
+  <title>{{index .T "edit_raw_title_prefix"}} {{.Path}}</title>
   <style>
     html, body { height:100%; margin:0; }
     body { font-family: Arial, sans-serif; }
@@ -19,8 +19,8 @@
   <input type="hidden" name="title" value="{{.Title}}" />
   <textarea name="html">{{.HTML}}</textarea>
   <div class="action-bar">
-    <a class="cancel-button" href="{{.Path}}">Cancel</a>
-    <button type="submit" class="save-button">Save</button>
+    <a class="cancel-button" href="{{.Path}}">{{index .T "edit_cancel"}}</a>
+    <button type="submit" class="save-button">{{index .T "edit_save"}}</button>
   </div>
 </form>
 </body>
