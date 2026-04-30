@@ -17,7 +17,14 @@
     "domain_settings_primary": "Primary domain:",
     "domain_settings_hint": "Add up to 3 aliases, one domain per line. Aliases serve the same site without redirect.",
     "domain_settings_aliases": "Domain aliases",
-    "domain_settings_save": "Save aliases"
+    "domain_settings_save": "Save aliases",
+    "login_email_placeholder": "Email...",
+    "login_password_placeholder": "Password...",
+    "login_submit": "Sign in",
+    "edit_cancel": "Cancel",
+    "edit_save": "Save",
+    "edit_title_prefix": "Edit",
+    "edit_raw_title_prefix": "Raw edit"
   },
   "fr": {
     "setup_no_admin": "aucun administrateur pour l'instant",
@@ -37,7 +44,14 @@
     "domain_settings_primary": "Domaine principal :",
     "domain_settings_hint": "Ajoutez jusqu'à 3 alias, un domaine par ligne. Les alias servent le même site sans redirection.",
     "domain_settings_aliases": "Alias de domaine",
-    "domain_settings_save": "Enregistrer les alias"
+    "domain_settings_save": "Enregistrer les alias",
+    "login_email_placeholder": "Email...",
+    "login_password_placeholder": "Password...",
+    "login_submit": "Sign in",
+    "edit_cancel": "Cancel",
+    "edit_save": "Save",
+    "edit_title_prefix": "Edit",
+    "edit_raw_title_prefix": "Raw edit"
   },
   "ru": {
     "setup_no_admin": "пока нет администратора",
@@ -57,7 +71,14 @@
     "domain_settings_primary": "Основной домен:",
     "domain_settings_hint": "Добавьте до 3 алиасов, по одному домену в строке. Алиасы обслуживают тот же сайт без редиректа.",
     "domain_settings_aliases": "Алиасы домена",
-    "domain_settings_save": "Сохранить алиасы"
+    "domain_settings_save": "Сохранить алиасы",
+    "login_email_placeholder": "Email...",
+    "login_password_placeholder": "Пароль...",
+    "login_submit": "Войти",
+    "edit_cancel": "Отмена",
+    "edit_save": "Сохранить",
+    "edit_title_prefix": "Редактирование",
+    "edit_raw_title_prefix": "Редактирование HTML"
   },
   "ja": {
     "setup_no_admin": "まだ管理者がいません",
@@ -77,7 +98,14 @@
     "domain_settings_primary": "プライマリドメイン:",
     "domain_settings_hint": "最大3つのエイリアスを1行ずつ追加します。エイリアスはリダイレクトなしで同じサイトを提供します。",
     "domain_settings_aliases": "ドメインエイリアス",
-    "domain_settings_save": "エイリアスを保存"
+    "domain_settings_save": "エイリアスを保存",
+    "login_email_placeholder": "Email...",
+    "login_password_placeholder": "Password...",
+    "login_submit": "Sign in",
+    "edit_cancel": "Cancel",
+    "edit_save": "Save",
+    "edit_title_prefix": "Edit",
+    "edit_raw_title_prefix": "Raw edit"
   },
   "it": {
     "setup_no_admin": "nessun amministratore ancora",
@@ -97,7 +125,14 @@
     "domain_settings_primary": "Dominio principale:",
     "domain_settings_hint": "Aggiungi fino a 3 alias, un dominio per riga. Gli alias servono lo stesso sito senza reindirizzamento.",
     "domain_settings_aliases": "Alias dominio",
-    "domain_settings_save": "Salva alias"
+    "domain_settings_save": "Salva alias",
+    "login_email_placeholder": "Email...",
+    "login_password_placeholder": "Password...",
+    "login_submit": "Sign in",
+    "edit_cancel": "Cancel",
+    "edit_save": "Save",
+    "edit_title_prefix": "Edit",
+    "edit_raw_title_prefix": "Raw edit"
   },
   "sv": {
     "setup_no_admin": "ingen administratör ännu",
@@ -117,7 +152,14 @@
     "domain_settings_primary": "Primär domän:",
     "domain_settings_hint": "Lägg till upp till 3 alias, en domän per rad. Alias visar samma webbplats utan omdirigering.",
     "domain_settings_aliases": "Domänalias",
-    "domain_settings_save": "Spara alias"
+    "domain_settings_save": "Spara alias",
+    "login_email_placeholder": "Email...",
+    "login_password_placeholder": "Password...",
+    "login_submit": "Sign in",
+    "edit_cancel": "Cancel",
+    "edit_save": "Save",
+    "edit_title_prefix": "Edit",
+    "edit_raw_title_prefix": "Raw edit"
   },
   "fi": {
     "setup_no_admin": "ei vielä järjestelmänvalvojaa",
@@ -137,7 +179,14 @@
     "domain_settings_primary": "Pääverkkotunnus:",
     "domain_settings_hint": "Lisää enintään 3 aliasia, yksi verkkotunnus per rivi. Aliakset palvelevat samaa sivustoa ilman uudelleenohjausta.",
     "domain_settings_aliases": "Verkkotunnusaliakset",
-    "domain_settings_save": "Tallenna aliakset"
+    "domain_settings_save": "Tallenna aliakset",
+    "login_email_placeholder": "Email...",
+    "login_password_placeholder": "Password...",
+    "login_submit": "Sign in",
+    "edit_cancel": "Cancel",
+    "edit_save": "Save",
+    "edit_title_prefix": "Edit",
+    "edit_raw_title_prefix": "Raw edit"
   },
   "mn": {
     "setup_no_admin": "админ хараахан алга",
@@ -157,7 +206,14 @@
     "domain_settings_primary": "Үндсэн домэйн:",
     "domain_settings_hint": "3 хүртэл alias нэмнэ үү, нэг мөрөнд нэг домэйн. Alias-ууд ижил сайтыг redirectгүй үйлчилнэ.",
     "domain_settings_aliases": "Домэйны alias",
-    "domain_settings_save": "Alias хадгалах"
+    "domain_settings_save": "Alias хадгалах",
+    "login_email_placeholder": "Email...",
+    "login_password_placeholder": "Password...",
+    "login_submit": "Sign in",
+    "edit_cancel": "Cancel",
+    "edit_save": "Save",
+    "edit_title_prefix": "Edit",
+    "edit_raw_title_prefix": "Raw edit"
   },
   "zh": {
     "setup_no_admin": "尚无管理员",
@@ -177,7 +233,14 @@
     "domain_settings_primary": "主域名：",
     "domain_settings_hint": "最多添加 3 个别名，每行一个域名。别名在不重定向的情况下提供同一站点。",
     "domain_settings_aliases": "域名别名",
-    "domain_settings_save": "保存别名"
+    "domain_settings_save": "保存别名",
+    "login_email_placeholder": "Email...",
+    "login_password_placeholder": "Password...",
+    "login_submit": "Sign in",
+    "edit_cancel": "Cancel",
+    "edit_save": "Save",
+    "edit_title_prefix": "Edit",
+    "edit_raw_title_prefix": "Raw edit"
   },
   "he": {
     "setup_no_admin": "עדיין אין מנהל",
@@ -197,7 +260,14 @@
     "domain_settings_primary": "דומיין ראשי:",
     "domain_settings_hint": "הוסף עד 3 כינויים, דומיין אחד בכל שורה. הכינויים משרתים את אותו אתר ללא הפניה.",
     "domain_settings_aliases": "כינויי דומיין",
-    "domain_settings_save": "שמור כינויים"
+    "domain_settings_save": "שמור כינויים",
+    "login_email_placeholder": "Email...",
+    "login_password_placeholder": "Password...",
+    "login_submit": "Sign in",
+    "edit_cancel": "Cancel",
+    "edit_save": "Save",
+    "edit_title_prefix": "Edit",
+    "edit_raw_title_prefix": "Raw edit"
   },
   "fa": {
     "setup_no_admin": "هنوز مدیر وجود ندارد",
@@ -217,7 +287,14 @@
     "domain_settings_primary": "دامنه اصلی:",
     "domain_settings_hint": "تا ۳ نام مستعار اضافه کنید، هر دامنه در یک خط. نام‌های مستعار همان سایت را بدون تغییر مسیر ارائه می‌کنند.",
     "domain_settings_aliases": "نام‌های مستعار دامنه",
-    "domain_settings_save": "ذخیره نام‌های مستعار"
+    "domain_settings_save": "ذخیره نام‌های مستعار",
+    "login_email_placeholder": "Email...",
+    "login_password_placeholder": "Password...",
+    "login_submit": "Sign in",
+    "edit_cancel": "Cancel",
+    "edit_save": "Save",
+    "edit_title_prefix": "Edit",
+    "edit_raw_title_prefix": "Raw edit"
   },
   "de": {
     "setup_no_admin": "noch kein Administrator",
@@ -237,7 +314,14 @@
     "domain_settings_primary": "Primäre Domain:",
     "domain_settings_hint": "Bis zu 3 Aliasse hinzufügen, eine Domain pro Zeile. Aliasse bedienen dieselbe Website ohne Weiterleitung.",
     "domain_settings_aliases": "Domain-Aliasse",
-    "domain_settings_save": "Aliasse speichern"
+    "domain_settings_save": "Aliasse speichern",
+    "login_email_placeholder": "Email...",
+    "login_password_placeholder": "Password...",
+    "login_submit": "Sign in",
+    "edit_cancel": "Cancel",
+    "edit_save": "Save",
+    "edit_title_prefix": "Edit",
+    "edit_raw_title_prefix": "Raw edit"
   },
   "tr": {
     "setup_no_admin": "henüz yönetici yok",
@@ -257,7 +341,14 @@
     "domain_settings_primary": "Birincil alan adı:",
     "domain_settings_hint": "En fazla 3 takma ad ekleyin, satır başına bir alan adı. Takma adlar yönlendirme olmadan aynı siteyi sunar.",
     "domain_settings_aliases": "Alan adı takma adları",
-    "domain_settings_save": "Takma adları kaydet"
+    "domain_settings_save": "Takma adları kaydet",
+    "login_email_placeholder": "Email...",
+    "login_password_placeholder": "Password...",
+    "login_submit": "Sign in",
+    "edit_cancel": "Cancel",
+    "edit_save": "Save",
+    "edit_title_prefix": "Edit",
+    "edit_raw_title_prefix": "Raw edit"
   },
   "kk": {
     "setup_no_admin": "әзірге әкімші жоқ",
@@ -277,7 +368,14 @@
     "domain_settings_primary": "Негізгі домен:",
     "domain_settings_hint": "Ең көбі 3 алиас қосыңыз, әр жолға бір домен. Алиастар бір сайтты қайта бағыттаусыз қызмет етеді.",
     "domain_settings_aliases": "Домен алиастары",
-    "domain_settings_save": "Алиастарды сақтау"
+    "domain_settings_save": "Алиастарды сақтау",
+    "login_email_placeholder": "Email...",
+    "login_password_placeholder": "Password...",
+    "login_submit": "Sign in",
+    "edit_cancel": "Cancel",
+    "edit_save": "Save",
+    "edit_title_prefix": "Edit",
+    "edit_raw_title_prefix": "Raw edit"
   },
   "es": {
     "setup_no_admin": "aún no hay administrador",
@@ -297,7 +395,14 @@
     "domain_settings_primary": "Dominio principal:",
     "domain_settings_hint": "Añade hasta 3 alias, un dominio por línea. Los alias sirven el mismo sitio sin redirección.",
     "domain_settings_aliases": "Alias de dominio",
-    "domain_settings_save": "Guardar alias"
+    "domain_settings_save": "Guardar alias",
+    "login_email_placeholder": "Email...",
+    "login_password_placeholder": "Password...",
+    "login_submit": "Sign in",
+    "edit_cancel": "Cancel",
+    "edit_save": "Save",
+    "edit_title_prefix": "Edit",
+    "edit_raw_title_prefix": "Raw edit"
   },
   "pt": {
     "setup_no_admin": "ainda não há administrador",
@@ -317,6 +422,13 @@
     "domain_settings_primary": "Domínio principal:",
     "domain_settings_hint": "Adicione até 3 aliases, um domínio por linha. Os aliases servem o mesmo site sem redirecionamento.",
     "domain_settings_aliases": "Aliases de domínio",
-    "domain_settings_save": "Salvar aliases"
+    "domain_settings_save": "Salvar aliases",
+    "login_email_placeholder": "Email...",
+    "login_password_placeholder": "Password...",
+    "login_submit": "Sign in",
+    "edit_cancel": "Cancel",
+    "edit_save": "Save",
+    "edit_title_prefix": "Edit",
+    "edit_raw_title_prefix": "Raw edit"
   }
 }
