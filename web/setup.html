@@ -1,7 +1,7 @@
-<h1>Sitebrush: no administrator yet</h1>
-<p>First visitor becomes administrator for this domain.</p>
+<h1>{{.Domain}}: {{index .T "setup_no_admin"}}</h1>
+<p>{{index .T "setup_first_visitor"}}</p>
 <form method="post" action="/setup">
   <input name="email" placeholder="email"/>
   <input name="password" type="password" placeholder="password"/>
-  <button>Create administrator</button>
+  <button>{{index .T "setup_create_admin"}}</button>
 </form>

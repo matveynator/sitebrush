@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"embed"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -31,6 +32,7 @@ import (
 
 //go:embed web/*
 var embeddedWebFiles embed.FS
+var translationCatalog = loadTranslationCatalog()
 
 const appVersion = "dev"
 
@@ -200,7 +202,7 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.URL.RawQuery == "grab" {
-		a.render(w, "missing.html", map[string]string{"Path": pagePath})
+		a.render(w, r, "missing.html", map[string]any{"Path": pagePath})
 		return
 	}
 	if r.URL.RawQuery == "recover" {
@@ -218,11 +220,11 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !a.hasAdmin(r.Context(), domain) {
-		a.render(w, "setup.html", nil)
+		a.render(w, r, "setup.html", map[string]any{"Domain": domain})
 		return
 	}
 	if a.isAdminRequest(r) {
-		a.render(w, "missing.html", map[string]string{"Path": pagePath})
+		a.render(w, r, "missing.html", map[string]any{"Path": pagePath})
 		return
 	}
 	http.NotFound(w, r)
@@ -259,7 +261,8 @@ func (a *App) setupAdmin(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) login(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet {
-		a.render(w, "login.html", map[string]string{"ReturnPath": requestedReturnPath(r)})
+		domain := a.siteDomain(r.Context(), r)
+		a.render(w, r, "login.html", map[string]any{"ReturnPath": requestedReturnPath(r), "Domain": domain})
 		return
 	}
 	email := r.FormValue("email")
@@ -301,7 +304,7 @@ func (a *App) editPage(w http.ResponseWriter, r *http.Request) {
 	if record.Path == "" {
 		record = Page{Path: pagePath, Title: pagePath, HTML: "<h1>New page</h1>"}
 	}
-	a.render(w, "edit.html", record)
+	a.render(w, r, "edit.html", record)
 }
 
 func (a *App) editModePage(w http.ResponseWriter, r *http.Request) {
@@ -316,7 +319,7 @@ func (a *App) editModePage(w http.ResponseWriter, r *http.Request) {
 	if pagePath == "" {
 		pagePath = "/"
 	}
-	a.render(w, "edit_mode.html", map[string]string{"Path": pagePath})
+	a.render(w, r, "edit_mode.html", map[string]any{"Path": pagePath})
 }
 
 func (a *App) editRawPage(w http.ResponseWriter, r *http.Request) {
@@ -336,7 +339,7 @@ func (a *App) editRawPage(w http.ResponseWriter, r *http.Request) {
 	if record.Path == "" {
 		record = Page{Path: pagePath, Title: pagePath, HTML: ""}
 	}
-	a.render(w, "edit_raw.html", record)
+	a.render(w, r, "edit_raw.html", record)
 }
 
 func (a *App) savePage(w http.ResponseWriter, r *http.Request) {
@@ -425,7 +428,7 @@ func (a *App) revisionsPage(w http.ResponseWriter, r *http.Request) {
 		_ = revisionRows.Scan(&current.ID, &current.PagePath, &current.HTML, &current.CreatedAt)
 		revisionList = append(revisionList, current)
 	}
-	a.render(w, "revisions.html", map[string]any{"Path": pagePath, "Revisions": revisionList})
+	a.render(w, r, "revisions.html", map[string]any{"Path": pagePath, "Revisions": revisionList})
 }
 
 func (a *App) restoreRevision(w http.ResponseWriter, r *http.Request) {
@@ -460,14 +463,14 @@ func (a *App) deleteRevision(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) recoverPage(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet {
-		a.render(w, "recover.html", map[string]string{"Status": "", "ReturnPath": requestedReturnPath(r)})
+		a.render(w, r, "recover.html", map[string]any{"Status": "", "ReturnPath": requestedReturnPath(r)})
 		return
 	}
 	email := strings.TrimSpace(r.FormValue("email"))
 	captchaValue := strings.TrimSpace(r.FormValue("captcha"))
 	captchaCookie, err := r.Cookie("sitebrush_captcha")
 	if err != nil || captchaCookie.Value == "" || captchaCookie.Value != captchaValue {
-		a.render(w, "recover.html", map[string]string{"Status": "Captcha is invalid", "ReturnPath": requestedReturnPath(r)})
+		a.render(w, r, "recover.html", map[string]any{"Status": "Captcha is invalid", "ReturnPath": requestedReturnPath(r)})
 		return
 	}
 	var userCount int
@@ -481,7 +484,7 @@ func (a *App) recoverPage(w http.ResponseWriter, r *http.Request) {
 	message := "Subject: SiteBrush recovery code\r\n\r\nRecovery code: " + recoveryCode + "\r\n"
 	mailError := smtp.SendMail("127.0.0.1:25", nil, "noreply@localhost", []string{email}, []byte(message))
 	if mailError != nil {
-		a.render(w, "recover.html", map[string]string{"Status": "SMTP send failed: " + mailError.Error(), "ReturnPath": requestedReturnPath(r)})
+		a.render(w, r, "recover.html", map[string]any{"Status": "SMTP send failed: " + mailError.Error(), "ReturnPath": requestedReturnPath(r)})
 		return
 	}
 	http.Redirect(w, r, requestedReturnPath(r), http.StatusFound)
@@ -513,7 +516,7 @@ func (a *App) filesPage(w http.ResponseWriter, r *http.Request) {
 	}
 	entries, err := os.ReadDir(a.domainFilesDir(r))
 	if err != nil {
-		a.render(w, "files.html", map[string]any{"Path": r.URL.Query().Get("path"), "Files": []ManagedFile{}})
+		a.render(w, r, "files.html", map[string]any{"Path": r.URL.Query().Get("path"), "Files": []ManagedFile{}})
 		return
 	}
 	fileList := make([]ManagedFile, 0, len(entries))
@@ -534,7 +537,7 @@ func (a *App) filesPage(w http.ResponseWriter, r *http.Request) {
 	if currentPath == "" {
 		currentPath = "/"
 	}
-	a.render(w, "files.html", map[string]any{"Path": currentPath, "Files": fileList})
+	a.render(w, r, "files.html", map[string]any{"Path": currentPath, "Files": fileList})
 }
 
 func (a *App) findPage(ctx context.Context, domain, pagePath string) (Page, error) {
@@ -711,14 +714,57 @@ func replaceTemplateByClass(pageHTML, templateName, newBlock string) string {
 	return templatePattern.ReplaceAllString(pageHTML, newBlock)
 }
 
-func (a *App) render(w http.ResponseWriter, templateName string, templateData any) {
+func (a *App) render(w http.ResponseWriter, r *http.Request, templateName string, templateData any) {
 	fileBytes, err := fs.ReadFile(embeddedWebFiles, "web/"+templateName)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	parsedTemplate := template.Must(template.New(templateName).Parse(string(fileBytes)))
-	_ = parsedTemplate.Execute(w, templateData)
+	envelope := map[string]any{"Domain": a.siteDomain(r.Context(), r), "T": translationsForRequest(r)}
+	if values, ok := templateData.(map[string]any); ok {
+		for key, value := range values {
+			envelope[key] = value
+		}
+	} else {
+		envelope["Data"] = templateData
+	}
+	_ = parsedTemplate.Execute(w, envelope)
+}
+
+func loadTranslationCatalog() map[string]map[string]string {
+	translationBytes, err := fs.ReadFile(embeddedWebFiles, "web/translations.json")
+	if err != nil {
+		return map[string]map[string]string{}
+	}
+	var catalog map[string]map[string]string
+	if json.Unmarshal(translationBytes, &catalog) != nil {
+		return map[string]map[string]string{}
+	}
+	return catalog
+}
+
+func translationsForRequest(r *http.Request) map[string]string {
+	languageCode := preferredLanguageCode(r.Header.Get("Accept-Language"))
+	selectedTranslations, found := translationCatalog[languageCode]
+	if !found {
+		selectedTranslations = translationCatalog["en"]
+	}
+	return selectedTranslations
+}
+
+func preferredLanguageCode(acceptLanguageHeader string) string {
+	normalizedHeader := strings.ToLower(strings.TrimSpace(acceptLanguageHeader))
+	if normalizedHeader == "" {
+		return "en"
+	}
+	for _, languageEntry := range strings.Split(normalizedHeader, ",") {
+		baseCode := strings.TrimSpace(strings.Split(strings.Split(languageEntry, ";")[0], "-")[0])
+		if baseCode == "en" || baseCode == "fr" || baseCode == "ru" || baseCode == "ja" || baseCode == "it" || baseCode == "sv" || baseCode == "fi" || baseCode == "mn" || baseCode == "zh" || baseCode == "he" || baseCode == "fa" || baseCode == "de" || baseCode == "tr" || baseCode == "kk" || baseCode == "es" || baseCode == "pt" {
+			return baseCode
+		}
+	}
+	return "en"
 }
 
 func safeFileName(rawName string) string {
@@ -859,7 +905,7 @@ func (a *App) domainSettingsPage(w http.ResponseWriter, r *http.Request) {
 		_ = aliasRows.Scan(&aliasDomain)
 		domainAliases = append(domainAliases, aliasDomain)
 	}
-	a.render(w, "domain_settings.html", map[string]string{"Domain": siteDomain, "Aliases": strings.Join(domainAliases, "\n")})
+	a.render(w, r, "domain_settings.html", map[string]any{"Domain": siteDomain, "Aliases": strings.Join(domainAliases, "\n")})
 }
 func domainStorageName(domain string) string {
 	return strings.NewReplacer("/", "_", "\\", "_", ":", "_", "..", "_").Replace(domain)
