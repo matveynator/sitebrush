@@ -21,6 +21,7 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"strconv"
 	"strings"
@@ -722,14 +723,41 @@ func (a *App) render(w http.ResponseWriter, r *http.Request, templateName string
 	}
 	parsedTemplate := template.Must(template.New(templateName).Parse(string(fileBytes)))
 	envelope := map[string]any{"Domain": a.siteDomain(r.Context(), r), "T": translationsForRequest(r)}
+	mergeTemplateData(envelope, templateData)
+	_ = parsedTemplate.Execute(w, envelope)
+}
+
+func mergeTemplateData(envelope map[string]any, templateData any) {
+	if templateData == nil {
+		return
+	}
 	if values, ok := templateData.(map[string]any); ok {
 		for key, value := range values {
 			envelope[key] = value
 		}
-	} else {
-		envelope["Data"] = templateData
+		return
 	}
-	_ = parsedTemplate.Execute(w, envelope)
+
+	reflectedValue := reflect.ValueOf(templateData)
+	if reflectedValue.Kind() == reflect.Pointer {
+		if reflectedValue.IsNil() {
+			return
+		}
+		reflectedValue = reflectedValue.Elem()
+	}
+	if reflectedValue.Kind() == reflect.Struct {
+		reflectedType := reflectedValue.Type()
+		for fieldIndex := 0; fieldIndex < reflectedValue.NumField(); fieldIndex++ {
+			structField := reflectedType.Field(fieldIndex)
+			if structField.PkgPath != "" {
+				continue
+			}
+			envelope[structField.Name] = reflectedValue.Field(fieldIndex).Interface()
+		}
+		return
+	}
+
+	envelope["Data"] = templateData
 }
 
 func loadTranslationCatalog() map[string]map[string]string {
