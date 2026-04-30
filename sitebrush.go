@@ -147,6 +147,7 @@ func main() {
 }
 
 func (a *App) migrate(ctx context.Context) error {
+	const legacyDomain = "localhost"
 	queries := []string{
 		`CREATE TABLE IF NOT EXISTS users(id INTEGER PRIMARY KEY AUTOINCREMENT,domain TEXT,email TEXT,password TEXT,is_admin INTEGER,UNIQUE(domain,email));`,
 		`CREATE TABLE IF NOT EXISTS sessions(token TEXT PRIMARY KEY,user_email TEXT,created_at TEXT);`,
@@ -162,6 +163,9 @@ func (a *App) migrate(ctx context.Context) error {
 	_, _ = a.db.ExecContext(ctx, `ALTER TABLE users ADD COLUMN domain TEXT`)
 	_, _ = a.db.ExecContext(ctx, `ALTER TABLE pages ADD COLUMN domain TEXT`)
 	_, _ = a.db.ExecContext(ctx, `ALTER TABLE revisions ADD COLUMN domain TEXT`)
+	_, _ = a.db.ExecContext(ctx, `UPDATE users SET domain=? WHERE domain IS NULL OR TRIM(domain)=''`, legacyDomain)
+	_, _ = a.db.ExecContext(ctx, `UPDATE pages SET domain=? WHERE domain IS NULL OR TRIM(domain)=''`, legacyDomain)
+	_, _ = a.db.ExecContext(ctx, `UPDATE revisions SET domain=? WHERE domain IS NULL OR TRIM(domain)=''`, legacyDomain)
 	return nil
 }
 
@@ -862,7 +866,7 @@ func domainStorageName(domain string) string {
 }
 
 func (a *App) domainFilesDir(r *http.Request) string {
-	return filepath.Join("storage/files", domainStorageName(domainFromRequest(r)))
+	return filepath.Join("storage/files", domainStorageName(a.siteDomain(r.Context(), r)))
 }
 
 func rewriteMirroredLinks(sourceHTML string, localFileToAssetPath map[string]string) string {
