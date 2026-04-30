@@ -57,6 +57,25 @@ type ManagedFile struct {
 	Size int64
 }
 
+type statusCapturingResponseWriter struct {
+	http.ResponseWriter
+	statusCode int
+}
+
+func (writer *statusCapturingResponseWriter) WriteHeader(statusCode int) {
+	writer.statusCode = statusCode
+	writer.ResponseWriter.WriteHeader(statusCode)
+}
+
+func accessLogMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		startedAt := time.Now()
+		writer := &statusCapturingResponseWriter{ResponseWriter: w, statusCode: http.StatusOK}
+		next.ServeHTTP(writer, r)
+		log.Printf("access method=%s path=%s query=%s status=%d remote=%s duration=%s", r.Method, r.URL.Path, r.URL.RawQuery, writer.statusCode, r.RemoteAddr, time.Since(startedAt).String())
+	})
+}
+
 func main() {
 	port := flag.Int("port", 8080, "HTTP listen port")
 	dbType := flag.String("db-type", "sqlite", "database driver (supported: sqlite)")
@@ -109,7 +128,7 @@ func main() {
 
 	serverErrors := make(chan error, 1)
 	go func() {
-		serverErrors <- http.ListenAndServe(":"+strconv.Itoa(*port), router)
+		serverErrors <- http.ListenAndServe(":"+strconv.Itoa(*port), accessLogMiddleware(router))
 	}()
 
 	if *desktopMode {
@@ -143,6 +162,10 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 	pagePath := r.URL.Path
 	if r.URL.RawQuery == "edit" {
 		http.Redirect(w, r, "/edit/mode?path="+pagePath, http.StatusFound)
+		return
+	}
+	if r.URL.RawQuery == "files" {
+		http.Redirect(w, r, "/files?path="+pagePath, http.StatusFound)
 		return
 	}
 	if r.URL.RawQuery == "revisions" {
@@ -391,12 +414,16 @@ func (a *App) filesPage(w http.ResponseWriter, r *http.Request) {
 		if fileName != "" {
 			_ = os.Remove(filepath.Join("storage/files", fileName))
 		}
-		http.Redirect(w, r, "/files", http.StatusFound)
+		currentPath := r.URL.Query().Get("path")
+		if currentPath == "" {
+			currentPath = "/"
+		}
+		http.Redirect(w, r, "/files?path="+currentPath, http.StatusFound)
 		return
 	}
 	entries, err := os.ReadDir("storage/files")
 	if err != nil {
-		a.render(w, "files.html", []ManagedFile{})
+		a.render(w, "files.html", map[string]any{"Path": r.URL.Query().Get("path"), "Files": []ManagedFile{}})
 		return
 	}
 	fileList := make([]ManagedFile, 0, len(entries))
@@ -410,7 +437,11 @@ func (a *App) filesPage(w http.ResponseWriter, r *http.Request) {
 		}
 		fileList = append(fileList, ManagedFile{Name: entry.Name(), Size: fileInfo.Size()})
 	}
-	a.render(w, "files.html", fileList)
+	currentPath := r.URL.Query().Get("path")
+	if currentPath == "" {
+		currentPath = "/"
+	}
+	a.render(w, "files.html", map[string]any{"Path": currentPath, "Files": fileList})
 }
 
 func (a *App) findPage(ctx context.Context, pagePath string) (Page, error) {
@@ -473,7 +504,7 @@ func buildContextMenuScript(isAdmin bool, pagePath string) string {
       "<ul class='SiteBrushMenuList'>",
       "<li class='SiteBrushContextMenu'><a href='?edit' class='SiteBrushContextMenuLink'><img src='/p/static/pencil.png' class='SiteBrushMenuIcon' alt=''>Редактировать</a></li>",
       "<li class='SiteBrushContextMenu'><a href='?revisions' class='SiteBrushContextMenuLink'><img src='/p/static/revisions.png' class='SiteBrushMenuIcon' alt=''>Ревизии</a></li>",
-      "<li class='SiteBrushContextMenu'><a href='/files' class='SiteBrushContextMenuLink'><img src='/p/static/upload.png' class='SiteBrushMenuIcon' alt=''>Файлы</a></li>",
+      "<li class='SiteBrushContextMenu'><a href='?files' class='SiteBrushContextMenuLink'><img src='/p/static/upload.png' class='SiteBrushMenuIcon' alt=''>Файлы</a></li>",
       "<li class='SiteBrushContextMenu'><a href='?logout' class='SiteBrushContextMenuLink'><img src='/p/static/sign-out.png' class='SiteBrushMenuIcon' alt=''>Выйти</a></li>",
       "<li class='SiteBrushContextMenu ContextMenuCopyright'><a href='http://sitebrush.com' class='SiteBrushContextMenuLink'>sitebrush</a></li>",
       "</ul>"
