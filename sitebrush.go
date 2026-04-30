@@ -161,27 +161,35 @@ func (a *App) migrate(ctx context.Context) error {
 func (a *App) route(w http.ResponseWriter, r *http.Request) {
 	pagePath := r.URL.Path
 	if r.URL.RawQuery == "edit" {
-		http.Redirect(w, r, "/edit/mode?path="+pagePath, http.StatusFound)
+		a.editModePage(w, r)
+		return
+	}
+	if r.URL.RawQuery == "editraw" {
+		a.editRawPage(w, r)
+		return
+	}
+	if r.URL.RawQuery == "settings" || r.URL.RawQuery == "properties" || r.URL.RawQuery == "freeze" || r.URL.RawQuery == "unfreeze" {
+		a.editPage(w, r)
 		return
 	}
 	if r.URL.RawQuery == "files" {
-		http.Redirect(w, r, "/files?path="+pagePath, http.StatusFound)
+		a.filesPage(w, r)
 		return
 	}
 	if r.URL.RawQuery == "revisions" {
-		http.Redirect(w, r, "/revisions?path="+pagePath, http.StatusFound)
+		a.revisionsPage(w, r)
 		return
 	}
 	if r.URL.RawQuery == "login" {
-		http.Redirect(w, r, "/login", http.StatusFound)
+		a.login(w, r)
 		return
 	}
 	if r.URL.RawQuery == "logout" {
-		http.Redirect(w, r, "/logout", http.StatusFound)
+		a.logout(w, r)
 		return
 	}
-	if r.URL.RawQuery == "properties" || r.URL.RawQuery == "freeze" || r.URL.RawQuery == "unfreeze" {
-		http.Redirect(w, r, "/edit/mode?path="+pagePath, http.StatusFound)
+	if r.URL.RawQuery == "grab" {
+		a.render(w, "missing.html", map[string]string{"Path": pagePath})
 		return
 	}
 	pageRecord, err := a.findPage(r.Context(), pagePath)
@@ -253,6 +261,9 @@ func (a *App) editPage(w http.ResponseWriter, r *http.Request) {
 	}
 	pagePath := r.URL.Query().Get("path")
 	if pagePath == "" {
+		pagePath = r.URL.Path
+	}
+	if pagePath == "" {
 		pagePath = "/"
 	}
 	record, _ := a.findPage(r.Context(), pagePath)
@@ -269,6 +280,9 @@ func (a *App) editModePage(w http.ResponseWriter, r *http.Request) {
 	}
 	pagePath := r.URL.Query().Get("path")
 	if pagePath == "" {
+		pagePath = r.URL.Path
+	}
+	if pagePath == "" {
 		pagePath = "/"
 	}
 	a.render(w, "edit_mode.html", map[string]string{"Path": pagePath})
@@ -280,6 +294,9 @@ func (a *App) editRawPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	pagePath := r.URL.Query().Get("path")
+	if pagePath == "" {
+		pagePath = r.URL.Path
+	}
 	if pagePath == "" {
 		pagePath = "/"
 	}
@@ -352,7 +369,7 @@ func (a *App) grabPage(w http.ResponseWriter, r *http.Request) {
 	html := a.mirrorRemotePage(sourceURL, remoteSourceURL, string(htmlBytes))
 	_, _ = a.db.ExecContext(r.Context(), `INSERT OR REPLACE INTO pages(path,title,html,published) VALUES(?,?,?,1)`, pagePath, pagePath, html)
 	_, _ = a.db.ExecContext(r.Context(), `INSERT INTO revisions(page_path,html,created_at) VALUES(?,?,?)`, pagePath, html, time.Now().Format(time.RFC3339))
-	http.Redirect(w, r, "/edit/mode?path="+pagePath, http.StatusFound)
+	http.Redirect(w, r, pagePath+"?edit", http.StatusFound)
 }
 
 func (a *App) revisionsPage(w http.ResponseWriter, r *http.Request) {
@@ -401,7 +418,7 @@ func (a *App) deleteRevision(w http.ResponseWriter, r *http.Request) {
 	revisionID, _ := strconv.Atoi(r.FormValue("id"))
 	pagePath := r.FormValue("path")
 	_, _ = a.db.ExecContext(r.Context(), `DELETE FROM revisions WHERE id=?`, revisionID)
-	http.Redirect(w, r, "/revisions?path="+pagePath, http.StatusFound)
+	http.Redirect(w, r, pagePath+"?revisions", http.StatusFound)
 }
 
 func (a *App) filesPage(w http.ResponseWriter, r *http.Request) {
@@ -418,7 +435,7 @@ func (a *App) filesPage(w http.ResponseWriter, r *http.Request) {
 		if currentPath == "" {
 			currentPath = "/"
 		}
-		http.Redirect(w, r, "/files?path="+currentPath, http.StatusFound)
+		http.Redirect(w, r, currentPath+"?files", http.StatusFound)
 		return
 	}
 	entries, err := os.ReadDir("storage/files")
@@ -438,6 +455,9 @@ func (a *App) filesPage(w http.ResponseWriter, r *http.Request) {
 		fileList = append(fileList, ManagedFile{Name: entry.Name(), Size: fileInfo.Size()})
 	}
 	currentPath := r.URL.Query().Get("path")
+	if currentPath == "" {
+		currentPath = r.URL.Path
+	}
 	if currentPath == "" {
 		currentPath = "/"
 	}
