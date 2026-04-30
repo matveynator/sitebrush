@@ -13,10 +13,10 @@ import (
 	"io"
 	"io/fs"
 	"log"
-	"mime"
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path"
 	"path/filepath"
 	"regexp"
@@ -89,6 +89,8 @@ func main() {
 	router.HandleFunc("/login", application.login)
 	router.HandleFunc("/logout", application.logout)
 	router.HandleFunc("/edit", application.editPage)
+	router.HandleFunc("/edit/raw", application.editRawPage)
+	router.HandleFunc("/edit/mode", application.editModePage)
 	router.HandleFunc("/grab", application.grabPage)
 	router.HandleFunc("/save", application.savePage)
 	router.HandleFunc("/revisions", application.revisionsPage)
@@ -134,7 +136,7 @@ func (a *App) migrate(ctx context.Context) error {
 func (a *App) route(w http.ResponseWriter, r *http.Request) {
 	pagePath := r.URL.Path
 	if r.URL.RawQuery == "edit" {
-		http.Redirect(w, r, "/edit?path="+pagePath, http.StatusFound)
+		http.Redirect(w, r, "/edit/mode?path="+pagePath, http.StatusFound)
 		return
 	}
 	if r.URL.RawQuery == "revisions" {
@@ -150,7 +152,7 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.URL.RawQuery == "properties" || r.URL.RawQuery == "freeze" || r.URL.RawQuery == "unfreeze" {
-		http.Redirect(w, r, "/edit?path="+pagePath, http.StatusFound)
+		http.Redirect(w, r, "/edit/mode?path="+pagePath, http.StatusFound)
 		return
 	}
 	pageRecord, err := a.findPage(r.Context(), pagePath)
@@ -231,6 +233,34 @@ func (a *App) editPage(w http.ResponseWriter, r *http.Request) {
 	a.render(w, "edit.html", record)
 }
 
+func (a *App) editModePage(w http.ResponseWriter, r *http.Request) {
+	if !a.isAdminRequest(r) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	pagePath := r.URL.Query().Get("path")
+	if pagePath == "" {
+		pagePath = "/"
+	}
+	a.render(w, "edit_mode.html", map[string]string{"Path": pagePath})
+}
+
+func (a *App) editRawPage(w http.ResponseWriter, r *http.Request) {
+	if !a.isAdminRequest(r) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	pagePath := r.URL.Query().Get("path")
+	if pagePath == "" {
+		pagePath = "/"
+	}
+	record, _ := a.findPage(r.Context(), pagePath)
+	if record.Path == "" {
+		record = Page{Path: pagePath, Title: pagePath, HTML: ""}
+	}
+	a.render(w, "edit_raw.html", record)
+}
+
 func (a *App) savePage(w http.ResponseWriter, r *http.Request) {
 	if !a.isAdminRequest(r) || r.Method != http.MethodPost {
 		http.Error(w, "forbidden", http.StatusForbidden)
@@ -290,11 +320,10 @@ func (a *App) grabPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	assetMap := make(map[string]string)
-	html := a.localizeHTMLAssets(remoteSourceURL, string(htmlBytes), assetMap)
+	html := a.mirrorRemotePage(sourceURL, remoteSourceURL, string(htmlBytes))
 	_, _ = a.db.ExecContext(r.Context(), `INSERT OR REPLACE INTO pages(path,title,html,published) VALUES(?,?,?,1)`, pagePath, pagePath, html)
 	_, _ = a.db.ExecContext(r.Context(), `INSERT INTO revisions(page_path,html,created_at) VALUES(?,?,?)`, pagePath, html, time.Now().Format(time.RFC3339))
-	http.Redirect(w, r, "/edit?path="+pagePath, http.StatusFound)
+	http.Redirect(w, r, "/edit/mode?path="+pagePath, http.StatusFound)
 }
 
 func (a *App) revisionsPage(w http.ResponseWriter, r *http.Request) {
@@ -517,108 +546,74 @@ func contentHashName(fileBytes []byte, extension string) (string, error) {
 	return hex.EncodeToString(hashedBytes[:]) + extension, nil
 }
 
-func (a *App) localizeHTMLAssets(baseURL *url.URL, sourceHTML string, assetMap map[string]string) string {
-	attributePattern := regexp.MustCompile(`(?i)(<(?:img|script)[^>]*?\s(?:src)=|<link[^>]*?\s(?:href)=)(["'])([^"']+)(["'])`)
-	sourceHTML = attributePattern.ReplaceAllStringFunc(sourceHTML, func(match string) string {
-		parts := attributePattern.FindStringSubmatch(match)
-		if len(parts) != 5 {
-			return match
-		}
-		localPath := a.downloadAndStoreAsset(baseURL, parts[3], assetMap)
-		if localPath == "" {
-			return match
-		}
-		return parts[1] + parts[2] + localPath + parts[4]
-	})
-	return sourceHTML
+func (a *App) mirrorRemotePage(sourceURL string, pageURL *url.URL, fallbackHTML string) string {
+	tempDirPath, err := os.MkdirTemp("", "sitebrush-grab-*")
+	if err != nil {
+		return fallbackHTML
+	}
+	defer os.RemoveAll(tempDirPath)
+
+	htmlFilePath := filepath.Join(tempDirPath, "page.html")
+	command := exec.Command("wget", "--page-requisites", "--convert-links", "--adjust-extension", "--span-hosts", "--no-parent", "--execute", "robots=off", "-O", htmlFilePath, "-P", tempDirPath, sourceURL)
+	if command.Run() != nil {
+		return fallbackHTML
+	}
+
+	renderedHTMLBytes, err := os.ReadFile(htmlFilePath)
+	if err != nil {
+		return fallbackHTML
+	}
+	renderedHTML := string(renderedHTMLBytes)
+
+	localFileToAssetPath := a.importMirroredFiles(tempDirPath)
+	return rewriteMirroredLinks(renderedHTML, localFileToAssetPath)
 }
 
-func (a *App) downloadAndStoreAsset(baseURL *url.URL, rawAssetURL string, assetMap map[string]string) string {
-	if strings.HasPrefix(rawAssetURL, "data:") || strings.HasPrefix(rawAssetURL, "javascript:") || strings.HasPrefix(rawAssetURL, "#") {
-		return ""
-	}
-	if cachedLocalPath, exists := assetMap[rawAssetURL]; exists {
-		return cachedLocalPath
-	}
-	resolvedAssetURL, err := baseURL.Parse(rawAssetURL)
-	if err != nil || resolvedAssetURL.Scheme == "" || resolvedAssetURL.Host == "" {
-		return ""
-	}
-	assetResponse, err := http.Get(resolvedAssetURL.String())
-	if err != nil {
-		return ""
-	}
-	defer assetResponse.Body.Close()
-	if assetResponse.StatusCode < 200 || assetResponse.StatusCode > 299 {
-		return ""
-	}
-	assetBytes, err := io.ReadAll(assetResponse.Body)
-	if err != nil {
-		return ""
-	}
-	extension := detectAssetExtension(resolvedAssetURL.Path, assetResponse.Header.Get("Content-Type"))
-	hashedFileName, err := contentHashName(assetBytes, extension)
-	if err != nil {
-		return ""
-	}
-	if err := os.MkdirAll("storage/files", 0o755); err != nil {
-		return ""
-	}
-	localFilePath := filepath.Join("storage/files", hashedFileName)
-	if writeError := os.WriteFile(localFilePath, assetBytes, 0o644); writeError != nil {
-		return ""
-	}
-	localAssetURL := "/assets/" + hashedFileName
-	assetMap[rawAssetURL] = localAssetURL
-
-	if extension == ".css" {
-		cssText := string(assetBytes)
-		localizedCSS := a.localizeCSSAssets(resolvedAssetURL, cssText, assetMap)
-		_ = os.WriteFile(localFilePath, []byte(localizedCSS), 0o644)
-	}
-	return localAssetURL
+func (a *App) importMirroredFiles(tempDirPath string) map[string]string {
+	localFileToAssetPath := make(map[string]string)
+	_ = os.MkdirAll("storage/files", 0o755)
+	_ = filepath.Walk(tempDirPath, func(currentPath string, fileInfo os.FileInfo, walkErr error) error {
+		if walkErr != nil || fileInfo.IsDir() || strings.HasSuffix(currentPath, "page.html") {
+			return nil
+		}
+		fileBytes, err := os.ReadFile(currentPath)
+		if err != nil {
+			return nil
+		}
+		fileExtension := strings.ToLower(path.Ext(currentPath))
+		if fileExtension == "" {
+			fileExtension = ".bin"
+		}
+		hashedFileName, err := contentHashName(fileBytes, fileExtension)
+		if err != nil {
+			return nil
+		}
+		assetPath := filepath.Join("storage/files", hashedFileName)
+		if err = os.WriteFile(assetPath, fileBytes, 0o644); err != nil {
+			return nil
+		}
+		relativePath, _ := filepath.Rel(tempDirPath, currentPath)
+		localFileToAssetPath[filepath.ToSlash(relativePath)] = "/assets/" + hashedFileName
+		return nil
+	})
+	return localFileToAssetPath
 }
 
-func (a *App) localizeCSSAssets(baseURL *url.URL, cssSource string, assetMap map[string]string) string {
-	cssURLPattern := regexp.MustCompile(`url\(([^)]+)\)`)
-	cssSource = cssURLPattern.ReplaceAllStringFunc(cssSource, func(match string) string {
-		parts := cssURLPattern.FindStringSubmatch(match)
-		if len(parts) != 2 {
-			return match
+func rewriteMirroredLinks(sourceHTML string, localFileToAssetPath map[string]string) string {
+	referencePattern := regexp.MustCompile(`(["'\(])(?!https?:|data:|javascript:|#)([^"'\)]+)(["'\)])`)
+	return referencePattern.ReplaceAllStringFunc(sourceHTML, func(fragment string) string {
+		parts := referencePattern.FindStringSubmatch(fragment)
+		if len(parts) != 4 {
+			return fragment
 		}
-		trimmedReference := strings.TrimSpace(parts[1])
-		trimmedReference = strings.Trim(trimmedReference, `"'`)
-		localPath := a.downloadAndStoreAsset(baseURL, trimmedReference, assetMap)
-		if localPath == "" {
-			return match
+		relativeReference := strings.TrimPrefix(parts[2], "./")
+		if assetPath, exists := localFileToAssetPath[relativeReference]; exists {
+			return parts[1] + assetPath + parts[3]
 		}
-		return "url('" + localPath + "')"
+		fileNameReference := path.Base(relativeReference)
+		if assetPath, exists := localFileToAssetPath[fileNameReference]; exists {
+			return parts[1] + assetPath + parts[3]
+		}
+		return fragment
 	})
-	cssImportPattern := regexp.MustCompile(`@import\s+(?:url\()?['"]([^'"]+)['"]\)?`)
-	cssSource = cssImportPattern.ReplaceAllStringFunc(cssSource, func(match string) string {
-		parts := cssImportPattern.FindStringSubmatch(match)
-		if len(parts) != 2 {
-			return match
-		}
-		localPath := a.downloadAndStoreAsset(baseURL, strings.TrimSpace(parts[1]), assetMap)
-		if localPath == "" {
-			return match
-		}
-		return "@import url('" + localPath + "')"
-	})
-	return cssSource
-}
-
-func detectAssetExtension(requestPath, contentType string) string {
-	extension := strings.ToLower(path.Ext(requestPath))
-	if extension != "" {
-		return extension
-	}
-	mimeType := strings.TrimSpace(strings.Split(contentType, ";")[0])
-	if mimeType != "" {
-		if guessed, err := mime.ExtensionsByType(mimeType); err == nil && len(guessed) > 0 {
-			return guessed[0]
-		}
-	}
-	return ".bin"
 }

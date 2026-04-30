@@ -1,0 +1,11 @@
+<!doctype html>
+<html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Raw edit {{.Path}}</title></head>
+<body>
+<h1>Raw HTML editor {{.Path}}</h1>
+<form method="post" action="/save">
+<input type="hidden" name="path" value="{{.Path}}" />
+<input name="title" value="{{.Title}}" />
+<textarea name="html" style="width:100%;min-height:80vh;font-family:monospace;">{{.HTML}}</textarea>
+<button type="submit">Save page</button>
+</form>
+</body></html>
