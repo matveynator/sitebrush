@@ -14,6 +14,7 @@ import (
 	"io/fs"
 	"log"
 	"net/http"
+	"net/smtp"
 	"net/url"
 	"os"
 	"os/exec"
@@ -190,6 +191,14 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.URL.RawQuery == "grab" {
 		a.render(w, "missing.html", map[string]string{"Path": pagePath})
+		return
+	}
+	if r.URL.RawQuery == "recover" {
+		a.recoverPage(w, r)
+		return
+	}
+	if r.URL.RawQuery == "captcha" {
+		a.captchaImage(w, r)
 		return
 	}
 	pageRecord, err := a.findPage(r.Context(), pagePath)
@@ -419,6 +428,41 @@ func (a *App) deleteRevision(w http.ResponseWriter, r *http.Request) {
 	pagePath := r.FormValue("path")
 	_, _ = a.db.ExecContext(r.Context(), `DELETE FROM revisions WHERE id=?`, revisionID)
 	http.Redirect(w, r, pagePath+"?revisions", http.StatusFound)
+}
+
+func (a *App) recoverPage(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodGet {
+		a.render(w, "recover.html", map[string]string{"Status": ""})
+		return
+	}
+	email := strings.TrimSpace(r.FormValue("email"))
+	captchaValue := strings.TrimSpace(r.FormValue("captcha"))
+	captchaCookie, err := r.Cookie("sitebrush_captcha")
+	if err != nil || captchaCookie.Value == "" || captchaCookie.Value != captchaValue {
+		a.render(w, "recover.html", map[string]string{"Status": "Captcha is invalid"})
+		return
+	}
+	var userCount int
+	_ = a.db.QueryRowContext(r.Context(), `SELECT COUNT(1) FROM users WHERE email=? AND is_admin=1`, email).Scan(&userCount)
+	if userCount == 0 {
+		a.render(w, "recover.html", map[string]string{"Status": "Recovery request sent"})
+		return
+	}
+	recoveryCode := fmt.Sprintf("%06d", time.Now().UnixNano()%1000000)
+	message := "Subject: SiteBrush recovery code\r\n\r\nRecovery code: " + recoveryCode + "\r\n"
+	mailError := smtp.SendMail("127.0.0.1:25", nil, "noreply@localhost", []string{email}, []byte(message))
+	if mailError != nil {
+		a.render(w, "recover.html", map[string]string{"Status": "SMTP send failed: " + mailError.Error()})
+		return
+	}
+	a.render(w, "recover.html", map[string]string{"Status": "Recovery code sent"})
+}
+
+func (a *App) captchaImage(w http.ResponseWriter, r *http.Request) {
+	captchaCode := fmt.Sprintf("%04d", time.Now().UnixNano()%10000)
+	http.SetCookie(w, &http.Cookie{Name: "sitebrush_captcha", Value: captchaCode, Path: "/", HttpOnly: true, MaxAge: 300})
+	w.Header().Set("Content-Type", "image/svg+xml")
+	_, _ = w.Write([]byte("<svg xmlns='http://www.w3.org/2000/svg' width='140' height='40'><rect width='100%' height='100%' fill='#f4f4f4'/><text x='15' y='28' font-size='24' font-family='monospace' fill='#333'>" + captchaCode + "</text></svg>"))
 }
 
 func (a *App) filesPage(w http.ResponseWriter, r *http.Request) {
