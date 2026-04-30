@@ -4,45 +4,51 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Edit {{.Path}}</title>
-  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
   <style>
-    body { background: #f4f8fc url('/p/static/bg.png') repeat; }
-    .editor-layout { min-height: 100vh; display: flex; flex-direction: column; }
-    .editor-layout .card { flex: 1; }
-    .editor-layout .card-body { height: 100%; display: flex; flex-direction: column; }
-    #editor { min-height: 60vh; }
-    .top-menu { background: linear-gradient(90deg,#244f9c,#3f7fe0); border-radius: 12px; }
-    .top-menu a { color:#fff; text-decoration:none; padding:10px 14px; border-right:1px solid rgba(255,255,255,.2); display:flex; align-items:center; gap:8px; }
-    .top-menu a:last-child { border-right:0; }
-    .top-menu img { width:16px; }
+    html, body { height: 100%; margin: 0; }
+    body { background: #f4f8fc; font-family: Arial, sans-serif; }
+    .editor-page { min-height: 100%; display: flex; flex-direction: column; padding: 10px; }
+    .editor-header { display:flex; justify-content:space-between; align-items:center; margin-bottom:10px; }
+    .cancel-link { color:#1f3f6f; text-decoration:none; }
+    .editor-form { flex: 1; display: flex; flex-direction: column; }
+    #editor { flex: 1; min-height: 80vh; }
   </style>
 </head>
 <body>
-<div class="container-fluid py-4 editor-layout">
-  <nav class="top-menu d-flex flex-wrap mb-4 shadow-sm overflow-hidden">
-    <a href="/?edit"><img src="/p/static/pencil.png" alt="">Edit</a>
-    <a href="{{.Path}}?revisions"><img src="/p/static/revisions.png" alt="">Revisions</a>
-    <a href="{{.Path}}?files"><img src="/p/static/upload.png" alt="">Files</a>
-    <a href="/logout"><img src="/p/static/sign-out.png" alt="">Sign out</a>
-  </nav>
-  <div class="card border-0 shadow-sm">
-    <div class="card-body p-4">
-      <h1 class="h4">Edit {{.Path}}</h1>
-      <form method="post" action="/save" class="vstack gap-3">
-        <input type="hidden" name="path" value="{{.Path}}" />
-        <input class="form-control" name="title" value="{{.Title}}" placeholder="Page title" />
-        <textarea class="form-control" id="editor" name="html" rows="20">{{.HTML}}</textarea>
-        <button class="btn btn-success"><img src="/p/static/apply.png" width="16" alt=""> Save page</button>
-      </form>
-    </div>
+<div class="editor-page">
+  <div class="editor-header">
+    <strong>Edit {{.Path}}</strong>
+    <a class="cancel-link" href="{{.Path}}">Cancel</a>
   </div>
+  <form id="editorForm" method="post" action="/save" class="editor-form">
+    <input type="hidden" name="path" value="{{.Path}}" />
+    <input type="hidden" name="title" value="{{.Title}}" />
+    <textarea id="editor" name="html">{{.HTML}}</textarea>
+  </form>
 </div>
-<script src="https://cdn.ckeditor.com/4.25.1-lts/standard/ckeditor.js"></script>
+<script src="https://cdn.ckeditor.com/4.25.1-lts/full-all/ckeditor.js"></script>
 <script>
 function initializeEditor() {
   CKEDITOR.replace('editor', {
     height: '100%',
-    removePlugins: 'resize'
+    removePlugins: 'elementspath',
+    extraPlugins: 'save',
+    toolbar: [
+      { name: 'document', items: ['Save'] },
+      { name: 'clipboard', items: ['Undo', 'Redo'] },
+      { name: 'editing', items: ['Find', 'Replace'] },
+      { name: 'basicstyles', items: ['Bold', 'Italic', 'Underline'] },
+      { name: 'paragraph', items: ['NumberedList', 'BulletedList'] },
+      { name: 'links', items: ['Link', 'Unlink'] },
+      { name: 'insert', items: ['Image', 'Table'] },
+      { name: 'styles', items: ['Format'] }
+    ],
+    on: {
+      save: function(event) {
+        event.cancel();
+        document.getElementById('editorForm').submit();
+      }
+    }
   });
 }
 initializeEditor();
