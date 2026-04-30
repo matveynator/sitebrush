@@ -760,7 +760,7 @@ func preferredLanguageCode(acceptLanguageHeader string) string {
 	}
 	for _, languageEntry := range strings.Split(normalizedHeader, ",") {
 		baseCode := strings.TrimSpace(strings.Split(strings.Split(languageEntry, ";")[0], "-")[0])
-		if baseCode == "en" || baseCode == "fr" || baseCode == "ru" || baseCode == "ja" {
+		if baseCode == "en" || baseCode == "fr" || baseCode == "ru" || baseCode == "ja" || baseCode == "it" || baseCode == "sv" || baseCode == "fi" || baseCode == "mn" || baseCode == "zh" || baseCode == "he" || baseCode == "fa" || baseCode == "de" || baseCode == "tr" || baseCode == "kk" || baseCode == "es" || baseCode == "pt" {
 			return baseCode
 		}
 	}
