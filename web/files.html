@@ -4,9 +4,10 @@
 <body class="bg-light">
 <div class="container py-4">
 <h1 class="h4 mb-3"><img src="/p/static/upload.png" width="18" alt=""> File manager</h1>
-{{range .}}
-<div class="card mb-2"><div class="card-body d-flex justify-content-between align-items-center">{{.Name}}
-<form method="post" action="/files" style="display:inline"><input type="hidden" name="name" value="{{.Name}}"/><button class="btn btn-outline-danger btn-sm"><img src="/p/static/cross.png" width="14" alt="">Delete</button></form>
+<p><a href="{{.Path}}">Back to page</a></p>
+{{range .Files}}
+<div class="card mb-2"><div class="card-body d-flex justify-content-between align-items-center"><a href="/assets/{{.Name}}" target="_blank">{{.Name}}</a> <small class="text-muted">({{.Size}} bytes)</small>
+<form method="post" action="/files?path={{$.Path}}" style="display:inline"><input type="hidden" name="name" value="{{.Name}}"/><button class="btn btn-outline-danger btn-sm"><img src="/p/static/cross.png" width="14" alt="">Delete</button></form>
 </div></div>
 {{end}}
 </div>

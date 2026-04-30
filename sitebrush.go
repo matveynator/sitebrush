@@ -10,10 +10,16 @@ import (
 	"flag"
 	"fmt"
 	"html/template"
+	"io"
 	"io/fs"
 	"log"
 	"net/http"
+	"net/smtp"
+	"net/url"
+	"os"
+	"os/exec"
 	"path"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -25,6 +31,7 @@ import (
 
 //go:embed web/*
 var embeddedWebFiles embed.FS
+
 const appVersion = "dev"
 
 // App keeps only explicit dependencies to stay readable and easy to swap.
@@ -44,6 +51,30 @@ type Revision struct {
 	PagePath  string
 	HTML      string
 	CreatedAt string
+}
+
+type ManagedFile struct {
+	Name string
+	Size int64
+}
+
+type statusCapturingResponseWriter struct {
+	http.ResponseWriter
+	statusCode int
+}
+
+func (writer *statusCapturingResponseWriter) WriteHeader(statusCode int) {
+	writer.statusCode = statusCode
+	writer.ResponseWriter.WriteHeader(statusCode)
+}
+
+func accessLogMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		startedAt := time.Now()
+		writer := &statusCapturingResponseWriter{ResponseWriter: w, statusCode: http.StatusOK}
+		next.ServeHTTP(writer, r)
+		log.Printf("access method=%s path=%s query=%s status=%d remote=%s duration=%s", r.Method, r.URL.Path, r.URL.RawQuery, writer.statusCode, r.RemoteAddr, time.Since(startedAt).String())
+	})
 }
 
 func main() {
@@ -83,6 +114,10 @@ func main() {
 	router.HandleFunc("/login", application.login)
 	router.HandleFunc("/logout", application.logout)
 	router.HandleFunc("/edit", application.editPage)
+	router.HandleFunc("/edit/raw", application.editRawPage)
+	router.HandleFunc("/edit/mode", application.editModePage)
+	router.HandleFunc("/grab", application.grabPage)
+	router.HandleFunc("/files", application.filesPage)
 	router.HandleFunc("/save", application.savePage)
 	router.HandleFunc("/revisions", application.revisionsPage)
 	router.HandleFunc("/revision/restore", application.restoreRevision)
@@ -94,7 +129,7 @@ func main() {
 
 	serverErrors := make(chan error, 1)
 	go func() {
-		serverErrors <- http.ListenAndServe(":"+strconv.Itoa(*port), router)
+		serverErrors <- http.ListenAndServe(":"+strconv.Itoa(*port), accessLogMiddleware(router))
 	}()
 
 	if *desktopMode {
@@ -127,23 +162,43 @@ func (a *App) migrate(ctx context.Context) error {
 func (a *App) route(w http.ResponseWriter, r *http.Request) {
 	pagePath := r.URL.Path
 	if r.URL.RawQuery == "edit" {
-		http.Redirect(w, r, "/edit?path="+pagePath, http.StatusFound)
+		a.editModePage(w, r)
+		return
+	}
+	if r.URL.RawQuery == "editraw" {
+		a.editRawPage(w, r)
+		return
+	}
+	if r.URL.RawQuery == "settings" || r.URL.RawQuery == "properties" || r.URL.RawQuery == "freeze" || r.URL.RawQuery == "unfreeze" {
+		a.editPage(w, r)
+		return
+	}
+	if r.URL.RawQuery == "files" {
+		a.filesPage(w, r)
 		return
 	}
 	if r.URL.RawQuery == "revisions" {
-		http.Redirect(w, r, "/revisions?path="+pagePath, http.StatusFound)
+		a.revisionsPage(w, r)
 		return
 	}
 	if r.URL.RawQuery == "login" {
-		http.Redirect(w, r, "/login", http.StatusFound)
+		a.login(w, r)
 		return
 	}
 	if r.URL.RawQuery == "logout" {
-		http.Redirect(w, r, "/logout", http.StatusFound)
+		a.logout(w, r)
 		return
 	}
-	if r.URL.RawQuery == "properties" || r.URL.RawQuery == "freeze" || r.URL.RawQuery == "unfreeze" {
-		http.Redirect(w, r, "/edit?path="+pagePath, http.StatusFound)
+	if r.URL.RawQuery == "grab" {
+		a.render(w, "missing.html", map[string]string{"Path": pagePath})
+		return
+	}
+	if r.URL.RawQuery == "recover" {
+		a.recoverPage(w, r)
+		return
+	}
+	if r.URL.RawQuery == "captcha" {
+		a.captchaImage(w, r)
 		return
 	}
 	pageRecord, err := a.findPage(r.Context(), pagePath)
@@ -183,12 +238,16 @@ func (a *App) setupAdmin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.createSession(w, r, email)
-	http.Redirect(w, r, "/", http.StatusFound)
+	returnPath := r.FormValue("return_path")
+	if returnPath == "" {
+		returnPath = requestedReturnPath(r)
+	}
+	http.Redirect(w, r, returnPath, http.StatusFound)
 }
 
 func (a *App) login(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet {
-		a.render(w, "login.html", nil)
+		a.render(w, "login.html", map[string]string{"ReturnPath": requestedReturnPath(r)})
 		return
 	}
 	email := r.FormValue("email")
@@ -200,7 +259,11 @@ func (a *App) login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.createSession(w, r, email)
-	http.Redirect(w, r, "/", http.StatusFound)
+	returnPath := r.FormValue("return_path")
+	if returnPath == "" {
+		returnPath = requestedReturnPath(r)
+	}
+	http.Redirect(w, r, returnPath, http.StatusFound)
 }
 
 func (a *App) logout(w http.ResponseWriter, r *http.Request) {
@@ -215,6 +278,9 @@ func (a *App) editPage(w http.ResponseWriter, r *http.Request) {
 	}
 	pagePath := r.URL.Query().Get("path")
 	if pagePath == "" {
+		pagePath = r.URL.Path
+	}
+	if pagePath == "" {
 		pagePath = "/"
 	}
 	record, _ := a.findPage(r.Context(), pagePath)
@@ -222,6 +288,40 @@ func (a *App) editPage(w http.ResponseWriter, r *http.Request) {
 		record = Page{Path: pagePath, Title: pagePath, HTML: "<h1>New page</h1>"}
 	}
 	a.render(w, "edit.html", record)
+}
+
+func (a *App) editModePage(w http.ResponseWriter, r *http.Request) {
+	if !a.isAdminRequest(r) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	pagePath := r.URL.Query().Get("path")
+	if pagePath == "" {
+		pagePath = r.URL.Path
+	}
+	if pagePath == "" {
+		pagePath = "/"
+	}
+	a.render(w, "edit_mode.html", map[string]string{"Path": pagePath})
+}
+
+func (a *App) editRawPage(w http.ResponseWriter, r *http.Request) {
+	if !a.isAdminRequest(r) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	pagePath := r.URL.Query().Get("path")
+	if pagePath == "" {
+		pagePath = r.URL.Path
+	}
+	if pagePath == "" {
+		pagePath = "/"
+	}
+	record, _ := a.findPage(r.Context(), pagePath)
+	if record.Path == "" {
+		record = Page{Path: pagePath, Title: pagePath, HTML: ""}
+	}
+	a.render(w, "edit_raw.html", record)
 }
 
 func (a *App) savePage(w http.ResponseWriter, r *http.Request) {
@@ -236,6 +336,57 @@ func (a *App) savePage(w http.ResponseWriter, r *http.Request) {
 	_, _ = a.db.ExecContext(r.Context(), `INSERT INTO revisions(page_path,html,created_at) VALUES(?,?,?)`, pagePath, html, time.Now().Format(time.RFC3339))
 	a.applyTemplatePropagation(r.Context(), html)
 	http.Redirect(w, r, pagePath, http.StatusFound)
+}
+
+func (a *App) grabPage(w http.ResponseWriter, r *http.Request) {
+	if !a.isAdminRequest(r) || r.Method != http.MethodPost {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+
+	pagePath := r.FormValue("path")
+	if pagePath == "" {
+		http.Error(w, "path is required", http.StatusBadRequest)
+		return
+	}
+
+	sourceURL := r.FormValue("source_url")
+	if sourceURL == "" {
+		http.Error(w, "source_url is required", http.StatusBadRequest)
+		return
+	}
+	if !strings.HasPrefix(sourceURL, "http://") && !strings.HasPrefix(sourceURL, "https://") {
+		http.Error(w, "source_url must start with http:// or https://", http.StatusBadRequest)
+		return
+	}
+
+	remoteSourceURL, err := url.Parse(sourceURL)
+	if err != nil {
+		http.Error(w, "source_url is invalid", http.StatusBadRequest)
+		return
+	}
+
+	response, err := http.Get(sourceURL)
+	if err != nil {
+		http.Error(w, "failed to download source page", http.StatusBadGateway)
+		return
+	}
+	defer response.Body.Close()
+	if response.StatusCode < 200 || response.StatusCode > 299 {
+		http.Error(w, "source page returned non-success status", http.StatusBadGateway)
+		return
+	}
+
+	htmlBytes, err := io.ReadAll(response.Body)
+	if err != nil {
+		http.Error(w, "failed to read source page", http.StatusBadGateway)
+		return
+	}
+
+	html := a.mirrorRemotePage(sourceURL, remoteSourceURL, string(htmlBytes))
+	_, _ = a.db.ExecContext(r.Context(), `INSERT OR REPLACE INTO pages(path,title,html,published) VALUES(?,?,?,1)`, pagePath, pagePath, html)
+	_, _ = a.db.ExecContext(r.Context(), `INSERT INTO revisions(page_path,html,created_at) VALUES(?,?,?)`, pagePath, html, time.Now().Format(time.RFC3339))
+	http.Redirect(w, r, pagePath+"?edit", http.StatusFound)
 }
 
 func (a *App) revisionsPage(w http.ResponseWriter, r *http.Request) {
@@ -284,7 +435,85 @@ func (a *App) deleteRevision(w http.ResponseWriter, r *http.Request) {
 	revisionID, _ := strconv.Atoi(r.FormValue("id"))
 	pagePath := r.FormValue("path")
 	_, _ = a.db.ExecContext(r.Context(), `DELETE FROM revisions WHERE id=?`, revisionID)
-	http.Redirect(w, r, "/revisions?path="+pagePath, http.StatusFound)
+	http.Redirect(w, r, pagePath+"?revisions", http.StatusFound)
+}
+
+func (a *App) recoverPage(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodGet {
+		a.render(w, "recover.html", map[string]string{"Status": "", "ReturnPath": requestedReturnPath(r)})
+		return
+	}
+	email := strings.TrimSpace(r.FormValue("email"))
+	captchaValue := strings.TrimSpace(r.FormValue("captcha"))
+	captchaCookie, err := r.Cookie("sitebrush_captcha")
+	if err != nil || captchaCookie.Value == "" || captchaCookie.Value != captchaValue {
+		a.render(w, "recover.html", map[string]string{"Status": "Captcha is invalid", "ReturnPath": requestedReturnPath(r)})
+		return
+	}
+	var userCount int
+	_ = a.db.QueryRowContext(r.Context(), `SELECT COUNT(1) FROM users WHERE email=? AND is_admin=1`, email).Scan(&userCount)
+	if userCount == 0 {
+		http.Redirect(w, r, requestedReturnPath(r), http.StatusFound)
+		return
+	}
+	recoveryCode := fmt.Sprintf("%06d", time.Now().UnixNano()%1000000)
+	message := "Subject: SiteBrush recovery code\r\n\r\nRecovery code: " + recoveryCode + "\r\n"
+	mailError := smtp.SendMail("127.0.0.1:25", nil, "noreply@localhost", []string{email}, []byte(message))
+	if mailError != nil {
+		a.render(w, "recover.html", map[string]string{"Status": "SMTP send failed: " + mailError.Error(), "ReturnPath": requestedReturnPath(r)})
+		return
+	}
+	http.Redirect(w, r, requestedReturnPath(r), http.StatusFound)
+}
+
+func (a *App) captchaImage(w http.ResponseWriter, r *http.Request) {
+	captchaCode := fmt.Sprintf("%04d", time.Now().UnixNano()%10000)
+	http.SetCookie(w, &http.Cookie{Name: "sitebrush_captcha", Value: captchaCode, Path: "/", HttpOnly: true, MaxAge: 300})
+	w.Header().Set("Content-Type", "image/svg+xml")
+	_, _ = w.Write([]byte("<svg xmlns='http://www.w3.org/2000/svg' width='140' height='40'><rect width='100%' height='100%' fill='#f4f4f4'/><text x='15' y='28' font-size='24' font-family='monospace' fill='#333'>" + captchaCode + "</text></svg>"))
+}
+
+func (a *App) filesPage(w http.ResponseWriter, r *http.Request) {
+	if !a.isAdminRequest(r) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	if r.Method == http.MethodPost {
+		fileName := safeFileName(r.FormValue("name"))
+		if fileName != "" {
+			_ = os.Remove(filepath.Join("storage/files", fileName))
+		}
+		currentPath := r.URL.Query().Get("path")
+		if currentPath == "" {
+			currentPath = "/"
+		}
+		http.Redirect(w, r, currentPath+"?files", http.StatusFound)
+		return
+	}
+	entries, err := os.ReadDir("storage/files")
+	if err != nil {
+		a.render(w, "files.html", map[string]any{"Path": r.URL.Query().Get("path"), "Files": []ManagedFile{}})
+		return
+	}
+	fileList := make([]ManagedFile, 0, len(entries))
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		fileInfo, statErr := entry.Info()
+		if statErr != nil {
+			continue
+		}
+		fileList = append(fileList, ManagedFile{Name: entry.Name(), Size: fileInfo.Size()})
+	}
+	currentPath := r.URL.Query().Get("path")
+	if currentPath == "" {
+		currentPath = r.URL.Path
+	}
+	if currentPath == "" {
+		currentPath = "/"
+	}
+	a.render(w, "files.html", map[string]any{"Path": currentPath, "Files": fileList})
 }
 
 func (a *App) findPage(ctx context.Context, pagePath string) (Page, error) {
@@ -297,6 +526,13 @@ func (a *App) hasAdmin(ctx context.Context) bool {
 	var adminCount int
 	_ = a.db.QueryRowContext(ctx, `SELECT COUNT(1) FROM users WHERE is_admin=1`).Scan(&adminCount)
 	return adminCount > 0
+}
+
+func requestedReturnPath(r *http.Request) string {
+	if r.URL.Path == "" {
+		return "/"
+	}
+	return r.URL.Path
 }
 
 func (a *App) createSession(w http.ResponseWriter, r *http.Request, email string) {
@@ -316,60 +552,85 @@ func (a *App) isAdminRequest(r *http.Request) bool {
 }
 
 func (a *App) wrapWithMenu(r *http.Request, pagePath, html string) string {
-	return html + buildContextMenuScript(a.isAdminRequest(r), pagePath)
+	menuScript := buildContextMenuScript(a.isAdminRequest(r), pagePath)
+	if strings.Contains(strings.ToLower(html), "</body>") {
+		bodyClosePattern := regexp.MustCompile(`(?i)</body>`)
+		return bodyClosePattern.ReplaceAllString(html, menuScript+"</body>")
+	}
+	return html + menuScript
 }
 
 func buildContextMenuScript(isAdmin bool, pagePath string) string {
 	escapedPath := template.JSEscapeString(pagePath)
 	if isAdmin {
-		return `<script>
+		return contextMenuStylesAndHelpers() + `<script>
 (function initializeSitebrushContextMenuForAdmin() {
+  if (window.__sitebrushContextMenuInitialized) {
+    return;
+  }
+  window.__sitebrushContextMenuInitialized = true;
   const currentPagePath = "` + escapedPath + `";
   document.addEventListener("contextmenu", function onContextMenuOpen(browserEvent) {
+    if (browserEvent.ctrlKey || browserEvent.defaultPrevented) {
+      return;
+    }
+    const clickedInsideSitebrushMenu = browserEvent.target && browserEvent.target.closest && browserEvent.target.closest("#SiteBrushMenuBox");
+    if (clickedInsideSitebrushMenu) {
+      return;
+    }
     browserEvent.preventDefault();
-    const menuHtml = [
+    const menuHtmlEntries = [
       "<ul class='SiteBrushMenuList'>",
       "<li class='SiteBrushContextMenu'><a href='?edit' class='SiteBrushContextMenuLink'><img src='/p/static/pencil.png' class='SiteBrushMenuIcon' alt=''>Редактировать</a></li>",
       "<li class='SiteBrushContextMenu'><a href='?revisions' class='SiteBrushContextMenuLink'><img src='/p/static/revisions.png' class='SiteBrushMenuIcon' alt=''>Ревизии</a></li>",
-      "<li class='SiteBrushContextMenu'><a href='?properties' class='SiteBrushContextMenuLink'><img src='/p/static/properties.gif' class='SiteBrushMenuIcon' alt=''>Свойства</a></li>",
-      "<li class='SiteBrushContextMenu'><a href='?freeze' class='SiteBrushContextMenuLink'><img src='/p/static/freeze.png' class='SiteBrushMenuIcon' alt=''>Заморозить</a></li>",
+      "<li class='SiteBrushContextMenu'><a href='?files' class='SiteBrushContextMenuLink'><img src='/p/static/upload.png' class='SiteBrushMenuIcon' alt=''>Файлы</a></li>",
       "<li class='SiteBrushContextMenu'><a href='?logout' class='SiteBrushContextMenuLink'><img src='/p/static/sign-out.png' class='SiteBrushMenuIcon' alt=''>Выйти</a></li>",
       "<li class='SiteBrushContextMenu ContextMenuCopyright'><a href='http://sitebrush.com' class='SiteBrushContextMenuLink'>sitebrush</a></li>",
       "</ul>"
     ];
-    showSitebrushMenu(browserEvent, menuHtml, currentPagePath);
-  });
+    showSitebrushMenu(browserEvent, menuHtmlEntries, currentPagePath);
+	  }, {capture: false, passive: false});
 })();
-</script>` + contextMenuSharedScript()
+	</script>`
 	}
-	return `<script>
-(function initializeSitebrushContextMenuForGuest() {
+	return contextMenuStylesAndHelpers() + `<script>
+(function initializeSitebrushContextMenuForGuests() {
+  if (window.__sitebrushContextMenuInitialized) {
+    return;
+  }
+  window.__sitebrushContextMenuInitialized = true;
   const currentPagePath = "` + escapedPath + `";
   document.addEventListener("contextmenu", function onContextMenuOpen(browserEvent) {
+    if (browserEvent.ctrlKey || browserEvent.defaultPrevented) {
+      return;
+    }
+    const clickedInsideSitebrushMenu = browserEvent.target && browserEvent.target.closest && browserEvent.target.closest("#SiteBrushMenuBox");
+    if (clickedInsideSitebrushMenu) {
+      return;
+    }
     browserEvent.preventDefault();
-    const menuHtml = [
+    const menuHtmlEntries = [
       "<ul class='SiteBrushMenuList'>",
       "<li class='SiteBrushContextMenu'><a href='?login' class='SiteBrushContextMenuLink'><img src='/p/static/lock.png' class='SiteBrushMenuIcon' alt=''>Войти</a></li>",
       "<li class='SiteBrushContextMenu ContextMenuCopyright'><a href='http://sitebrush.com' class='SiteBrushContextMenuLink'>sitebrush</a></li>",
       "</ul>"
     ];
-    showSitebrushMenu(browserEvent, menuHtml, currentPagePath);
-  });
+    showSitebrushMenu(browserEvent, menuHtmlEntries, currentPagePath);
+	  }, {capture: false, passive: false});
 })();
-</script>` + contextMenuSharedScript()
+	</script>`
 }
 
-func contextMenuSharedScript() string {
+func contextMenuStylesAndHelpers() string {
 	return `<style>
 .SiteBrushMenuBox{position:fixed;background:#fff url(/p/static/bg.png) repeat-x top;border:1px solid #8ea4c1;z-index:99999;padding:2px;min-width:240px;box-shadow:0 2px 12px rgba(0,0,0,0.2)}
 .SiteBrushMenuList{list-style:none;margin:0;padding:0}
-.SiteBrushContextMenu{padding:0;margin:0}
-.SiteBrushContextMenuLink{display:flex;align-items:center;gap:8px;color:#1d3557;text-decoration:none;padding:6px 10px;font-family:Arial,sans-serif;font-size:13px;line-height:16px}
-.SiteBrushContextMenuLink:hover{background:#dfe8f6}
+.SiteBrushContextMenu{margin:0;padding:0}
+.SiteBrushContextMenuLink{display:flex;align-items:center;gap:8px;padding:8px 10px;color:#1f3f6f;text-decoration:none;font-family:Arial,Helvetica,sans-serif;font-size:14px}
+.SiteBrushContextMenuLink:hover{background:#eef5ff}
 .ContextMenuCopyright .SiteBrushContextMenuLink{font-size:12px;color:#5b6f8b;border-top:1px solid #c8d5e7;margin-top:2px;padding-top:7px}.SiteBrushMenuIcon{width:16px;height:16px;flex:0 0 16px}
 </style>
 <script>
-
 function normalizeSitebrushMenuLinks(menuBoxElement, currentPagePath) {
   const menuLinkElements = menuBoxElement.querySelectorAll("a[href]");
   for (const menuLinkElement of menuLinkElements) {
@@ -380,7 +641,6 @@ function normalizeSitebrushMenuLinks(menuBoxElement, currentPagePath) {
     menuLinkElement.setAttribute("href", currentPagePath + originalHref);
   }
 }
-
 function showSitebrushMenu(browserEvent, menuHtmlEntries, currentPagePath) {
   const existingMenuBox = document.getElementById("SiteBrushMenuBox");
   if (existingMenuBox) {
@@ -456,4 +716,76 @@ func contentHashName(fileBytes []byte, extension string) (string, error) {
 	}
 	hashedBytes := sha256.Sum256(fileBytes)
 	return hex.EncodeToString(hashedBytes[:]) + extension, nil
+}
+
+func (a *App) mirrorRemotePage(sourceURL string, pageURL *url.URL, fallbackHTML string) string {
+	tempDirPath, err := os.MkdirTemp("", "sitebrush-grab-*")
+	if err != nil {
+		return fallbackHTML
+	}
+	defer os.RemoveAll(tempDirPath)
+
+	htmlFilePath := filepath.Join(tempDirPath, "page.html")
+	command := exec.Command("wget", "--page-requisites", "--convert-links", "--adjust-extension", "--span-hosts", "--no-parent", "--execute", "robots=off", "-O", htmlFilePath, "-P", tempDirPath, sourceURL)
+	if command.Run() != nil {
+		return fallbackHTML
+	}
+
+	renderedHTMLBytes, err := os.ReadFile(htmlFilePath)
+	if err != nil {
+		return fallbackHTML
+	}
+	renderedHTML := string(renderedHTMLBytes)
+
+	localFileToAssetPath := a.importMirroredFiles(tempDirPath)
+	return rewriteMirroredLinks(renderedHTML, localFileToAssetPath)
+}
+
+func (a *App) importMirroredFiles(tempDirPath string) map[string]string {
+	localFileToAssetPath := make(map[string]string)
+	_ = os.MkdirAll("storage/files", 0o755)
+	_ = filepath.Walk(tempDirPath, func(currentPath string, fileInfo os.FileInfo, walkErr error) error {
+		if walkErr != nil || fileInfo.IsDir() || strings.HasSuffix(currentPath, "page.html") {
+			return nil
+		}
+		fileBytes, err := os.ReadFile(currentPath)
+		if err != nil {
+			return nil
+		}
+		fileExtension := strings.ToLower(path.Ext(currentPath))
+		if fileExtension == "" {
+			fileExtension = ".bin"
+		}
+		hashedFileName, err := contentHashName(fileBytes, fileExtension)
+		if err != nil {
+			return nil
+		}
+		assetPath := filepath.Join("storage/files", hashedFileName)
+		if err = os.WriteFile(assetPath, fileBytes, 0o644); err != nil {
+			return nil
+		}
+		relativePath, _ := filepath.Rel(tempDirPath, currentPath)
+		localFileToAssetPath[filepath.ToSlash(relativePath)] = "/assets/" + hashedFileName
+		return nil
+	})
+	return localFileToAssetPath
+}
+
+func rewriteMirroredLinks(sourceHTML string, localFileToAssetPath map[string]string) string {
+	referencePattern := regexp.MustCompile(`(["'\(])(?!https?:|data:|javascript:|#)([^"'\)]+)(["'\)])`)
+	return referencePattern.ReplaceAllStringFunc(sourceHTML, func(fragment string) string {
+		parts := referencePattern.FindStringSubmatch(fragment)
+		if len(parts) != 4 {
+			return fragment
+		}
+		relativeReference := strings.TrimPrefix(parts[2], "./")
+		if assetPath, exists := localFileToAssetPath[relativeReference]; exists {
+			return parts[1] + assetPath + parts[3]
+		}
+		fileNameReference := path.Base(relativeReference)
+		if assetPath, exists := localFileToAssetPath[fileNameReference]; exists {
+			return parts[1] + assetPath + parts[3]
+		}
+		return fragment
+	})
 }

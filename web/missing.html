@@ -1,2 +1,11 @@
 <h1>Page {{.Path}} does not exist</h1>
-<p><a href="/edit?path={{.Path}}">Create this page</a></p>
+<p><a href="{{.Path}}?settings">Create this page</a></p>
+
+<hr>
+<h2>Copy static HTML from another website</h2>
+<form method="post" action="/grab">
+  <input type="hidden" name="path" value="{{.Path}}">
+  <label for="source_url">Source URL</label>
+  <input id="source_url" name="source_url" type="url" placeholder="https://example.com/page" required>
+  <button type="submit">Grab page</button>
+</form>
