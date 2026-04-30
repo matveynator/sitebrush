@@ -442,7 +442,12 @@ func (a *App) isAdminRequest(r *http.Request) bool {
 }
 
 func (a *App) wrapWithMenu(r *http.Request, pagePath, html string) string {
-	return html + buildContextMenuScript(a.isAdminRequest(r), pagePath)
+	menuScript := buildContextMenuScript(a.isAdminRequest(r), pagePath)
+	if strings.Contains(strings.ToLower(html), "</body>") {
+		bodyClosePattern := regexp.MustCompile(`(?i)</body>`)
+		return bodyClosePattern.ReplaceAllString(html, menuScript+"</body>")
+	}
+	return html + menuScript
 }
 
 func buildContextMenuScript(isAdmin bool, pagePath string) string {
@@ -450,59 +455,72 @@ func buildContextMenuScript(isAdmin bool, pagePath string) string {
 	if isAdmin {
 		return `<script>
 (function initializeSitebrushContextMenuForAdmin() {
+  if (window.__sitebrushContextMenuInitialized) {
+    return;
+  }
+  window.__sitebrushContextMenuInitialized = true;
   const currentPagePath = "` + escapedPath + `";
   document.addEventListener("contextmenu", function onContextMenuOpen(browserEvent) {
-    if (browserEvent.ctrlKey) {
+    if (browserEvent.ctrlKey || browserEvent.defaultPrevented) {
+      return;
+    }
+    const clickedInsideSitebrushMenu = browserEvent.target && browserEvent.target.closest && browserEvent.target.closest("#SiteBrushMenuBox");
+    if (clickedInsideSitebrushMenu) {
       return;
     }
     browserEvent.preventDefault();
-    const menuHtml = [
+    const menuHtmlEntries = [
       "<ul class='SiteBrushMenuList'>",
       "<li class='SiteBrushContextMenu'><a href='?edit' class='SiteBrushContextMenuLink'><img src='/p/static/pencil.png' class='SiteBrushMenuIcon' alt=''>Редактировать</a></li>",
       "<li class='SiteBrushContextMenu'><a href='?revisions' class='SiteBrushContextMenuLink'><img src='/p/static/revisions.png' class='SiteBrushMenuIcon' alt=''>Ревизии</a></li>",
-      "<li class='SiteBrushContextMenu'><a href='?properties' class='SiteBrushContextMenuLink'><img src='/p/static/properties.gif' class='SiteBrushMenuIcon' alt=''>Свойства</a></li>",
-      "<li class='SiteBrushContextMenu'><a href='?freeze' class='SiteBrushContextMenuLink'><img src='/p/static/freeze.png' class='SiteBrushMenuIcon' alt=''>Заморозить</a></li>
-      <li class='SiteBrushContextMenu'><a href='/files' class='SiteBrushContextMenuLink'><img src='/p/static/upload.png' class='SiteBrushMenuIcon' alt=''>Файлы</a></li>",
+      "<li class='SiteBrushContextMenu'><a href='/files' class='SiteBrushContextMenuLink'><img src='/p/static/upload.png' class='SiteBrushMenuIcon' alt=''>Файлы</a></li>",
       "<li class='SiteBrushContextMenu'><a href='?logout' class='SiteBrushContextMenuLink'><img src='/p/static/sign-out.png' class='SiteBrushMenuIcon' alt=''>Выйти</a></li>",
       "<li class='SiteBrushContextMenu ContextMenuCopyright'><a href='http://sitebrush.com' class='SiteBrushContextMenuLink'>sitebrush</a></li>",
       "</ul>"
     ];
-    showSitebrushMenu(browserEvent, menuHtml, currentPagePath);
-  });
+    showSitebrushMenu(browserEvent, menuHtmlEntries, currentPagePath);
+  }, {capture: false, passive: false});
 })();
-</script>` + contextMenuSharedScript()
+` + contextMenuStylesAndHelpers()
 	}
 	return `<script>
-(function initializeSitebrushContextMenuForGuest() {
+(function initializeSitebrushContextMenuForGuests() {
+  if (window.__sitebrushContextMenuInitialized) {
+    return;
+  }
+  window.__sitebrushContextMenuInitialized = true;
   const currentPagePath = "` + escapedPath + `";
   document.addEventListener("contextmenu", function onContextMenuOpen(browserEvent) {
-    if (browserEvent.ctrlKey) {
+    if (browserEvent.ctrlKey || browserEvent.defaultPrevented) {
+      return;
+    }
+    const clickedInsideSitebrushMenu = browserEvent.target && browserEvent.target.closest && browserEvent.target.closest("#SiteBrushMenuBox");
+    if (clickedInsideSitebrushMenu) {
       return;
     }
     browserEvent.preventDefault();
-    const menuHtml = [
+    const menuHtmlEntries = [
       "<ul class='SiteBrushMenuList'>",
       "<li class='SiteBrushContextMenu'><a href='?login' class='SiteBrushContextMenuLink'><img src='/p/static/lock.png' class='SiteBrushMenuIcon' alt=''>Войти</a></li>",
       "<li class='SiteBrushContextMenu ContextMenuCopyright'><a href='http://sitebrush.com' class='SiteBrushContextMenuLink'>sitebrush</a></li>",
       "</ul>"
     ];
-    showSitebrushMenu(browserEvent, menuHtml, currentPagePath);
-  });
+    showSitebrushMenu(browserEvent, menuHtmlEntries, currentPagePath);
+  }, {capture: false, passive: false});
 })();
-</script>` + contextMenuSharedScript()
+` + contextMenuStylesAndHelpers()
 }
 
-func contextMenuSharedScript() string {
+func contextMenuStylesAndHelpers() string {
 	return `<style>
 .SiteBrushMenuBox{position:fixed;background:#fff url(/p/static/bg.png) repeat-x top;border:1px solid #8ea4c1;z-index:99999;padding:2px;min-width:240px;box-shadow:0 2px 12px rgba(0,0,0,0.2)}
 .SiteBrushMenuList{list-style:none;margin:0;padding:0}
-.SiteBrushContextMenu{padding:0;margin:0}
-.SiteBrushContextMenuLink{display:flex;align-items:center;gap:8px;color:#1d3557;text-decoration:none;padding:6px 10px;font-family:Arial,sans-serif;font-size:13px;line-height:16px}
-.SiteBrushContextMenuLink:hover{background:#dfe8f6}
+.SiteBrushContextMenu{margin:0;padding:0}
+.SiteBrushContextMenuLink{display:flex;align-items:center;gap:8px;padding:8px 10px;color:#1f3f6f;text-decoration:none;font-family:Arial,Helvetica,sans-serif;font-size:14px}
+.SiteBrushContextMenuLink:hover{background:#eef5ff}
 .ContextMenuCopyright .SiteBrushContextMenuLink{font-size:12px;color:#5b6f8b;border-top:1px solid #c8d5e7;margin-top:2px;padding-top:7px}.SiteBrushMenuIcon{width:16px;height:16px;flex:0 0 16px}
 </style>
 <script>
-
 function normalizeSitebrushMenuLinks(menuBoxElement, currentPagePath) {
   const menuLinkElements = menuBoxElement.querySelectorAll("a[href]");
   for (const menuLinkElement of menuLinkElements) {
@@ -513,7 +531,6 @@ function normalizeSitebrushMenuLinks(menuBoxElement, currentPagePath) {
     menuLinkElement.setAttribute("href", currentPagePath + originalHref);
   }
 }
-
 function showSitebrushMenu(browserEvent, menuHtmlEntries, currentPagePath) {
   const existingMenuBox = document.getElementById("SiteBrushMenuBox");
   if (existingMenuBox) {
