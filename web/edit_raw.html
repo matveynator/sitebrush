@@ -6,20 +6,22 @@
   <style>
     html, body { height:100%; margin:0; }
     body { font-family: Arial, sans-serif; }
-    .raw-page { min-height:100%; display:flex; flex-direction:column; padding:10px; }
-    .bar { display:flex; justify-content:space-between; margin-bottom:8px; }
-    .save-button { background:#1ea74f; color:#fff; border:0; padding:10px 16px; border-radius:6px; cursor:pointer; }
+    .raw-page { height:100%; display:flex; flex-direction:column; padding:12px; box-sizing:border-box; }
     textarea { width:100%; flex:1; min-height:75vh; font-family: monospace; }
-    .cancel-link { color:#1f3f6f; text-decoration:none; }
+    .action-bar { display:flex; justify-content:flex-end; gap:10px; padding-top:10px; }
+    .save-button { background:#1ea74f; color:#fff; border:0; padding:10px 18px; border-radius:6px; cursor:pointer; }
+    .cancel-button { background:#6c757d; color:#fff; text-decoration:none; padding:10px 18px; border-radius:6px; }
   </style>
 </head>
 <body>
 <form method="post" action="/save" class="raw-page">
   <input type="hidden" name="path" value="{{.Path}}" />
   <input type="hidden" name="title" value="{{.Title}}" />
-  <div class="bar"><button type="submit" class="save-button">Save</button><a class="cancel-link" href="{{.Path}}">Cancel</a></div>
   <textarea name="html">{{.HTML}}</textarea>
-  <div class="bar"><button type="submit" class="save-button">Save</button><a class="cancel-link" href="{{.Path}}">Cancel</a></div>
+  <div class="action-bar">
+    <a class="cancel-button" href="{{.Path}}">Cancel</a>
+    <button type="submit" class="save-button">Save</button>
+  </div>
 </form>
 </body>
 </html>

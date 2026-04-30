@@ -8,11 +8,11 @@
   <style>
     html, body { height: 100%; margin: 0; }
     body { background: #f4f8fc; font-family: Arial, sans-serif; }
-    .editor-page { min-height: 100%; display: flex; flex-direction: column; padding: 10px; gap: 10px; }
-    .editor-topbar { display:flex; justify-content:space-between; align-items:center; }
-    .save-button { background:#1ea74f; color:#fff; border:0; padding:10px 16px; border-radius:6px; cursor:pointer; }
-    .cancel-link { color:#1f3f6f; text-decoration:none; }
+    .editor-page { height: 100%; display: flex; flex-direction: column; padding: 12px; box-sizing: border-box; }
     #visualEditorRoot { flex: 1; min-height: 75vh; }
+    .action-bar { display:flex; justify-content:flex-end; gap:10px; padding-top:10px; }
+    .save-button { background:#1ea74f; color:#fff; border:0; padding:10px 18px; border-radius:6px; cursor:pointer; }
+    .cancel-button { background:#6c757d; color:#fff; text-decoration:none; padding:10px 18px; border-radius:6px; }
   </style>
 </head>
 <body>
@@ -20,20 +20,12 @@
   <input type="hidden" name="path" value="{{.Path}}" />
   <input type="hidden" name="title" value="{{.Title}}" />
   <input type="hidden" id="htmlContentField" name="html" />
-
-  <div class="editor-topbar">
-    <button class="save-button" type="submit">Save</button>
-    <a class="cancel-link" href="{{.Path}}">Cancel</a>
-  </div>
-
   <div id="visualEditorRoot"></div>
-
-  <div class="editor-topbar">
+  <div class="action-bar">
+    <a class="cancel-button" href="{{.Path}}">Cancel</a>
     <button class="save-button" type="submit">Save</button>
-    <a class="cancel-link" href="{{.Path}}">Cancel</a>
   </div>
 </form>
-
 <script src="https://uicdn.toast.com/editor/latest/toastui-editor-all.min.js"></script>
 <script>
 const initialHtmlContent = {{printf "%q" .HTML}};
