@@ -13,8 +13,12 @@ import (
 	"io"
 	"io/fs"
 	"log"
+	"mime"
 	"net/http"
+	"net/url"
+	"os"
 	"path"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -263,6 +267,12 @@ func (a *App) grabPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	remoteSourceURL, err := url.Parse(sourceURL)
+	if err != nil {
+		http.Error(w, "source_url is invalid", http.StatusBadRequest)
+		return
+	}
+
 	response, err := http.Get(sourceURL)
 	if err != nil {
 		http.Error(w, "failed to download source page", http.StatusBadGateway)
@@ -280,7 +290,8 @@ func (a *App) grabPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	html := string(htmlBytes)
+	assetMap := make(map[string]string)
+	html := a.localizeHTMLAssets(remoteSourceURL, string(htmlBytes), assetMap)
 	_, _ = a.db.ExecContext(r.Context(), `INSERT OR REPLACE INTO pages(path,title,html,published) VALUES(?,?,?,1)`, pagePath, pagePath, html)
 	_, _ = a.db.ExecContext(r.Context(), `INSERT INTO revisions(page_path,html,created_at) VALUES(?,?,?)`, pagePath, html, time.Now().Format(time.RFC3339))
 	http.Redirect(w, r, "/edit?path="+pagePath, http.StatusFound)
@@ -504,4 +515,110 @@ func contentHashName(fileBytes []byte, extension string) (string, error) {
 	}
 	hashedBytes := sha256.Sum256(fileBytes)
 	return hex.EncodeToString(hashedBytes[:]) + extension, nil
+}
+
+func (a *App) localizeHTMLAssets(baseURL *url.URL, sourceHTML string, assetMap map[string]string) string {
+	attributePattern := regexp.MustCompile(`(?i)(<(?:img|script)[^>]*?\s(?:src)=|<link[^>]*?\s(?:href)=)(["'])([^"']+)(["'])`)
+	sourceHTML = attributePattern.ReplaceAllStringFunc(sourceHTML, func(match string) string {
+		parts := attributePattern.FindStringSubmatch(match)
+		if len(parts) != 5 {
+			return match
+		}
+		localPath := a.downloadAndStoreAsset(baseURL, parts[3], assetMap)
+		if localPath == "" {
+			return match
+		}
+		return parts[1] + parts[2] + localPath + parts[4]
+	})
+	return sourceHTML
+}
+
+func (a *App) downloadAndStoreAsset(baseURL *url.URL, rawAssetURL string, assetMap map[string]string) string {
+	if strings.HasPrefix(rawAssetURL, "data:") || strings.HasPrefix(rawAssetURL, "javascript:") || strings.HasPrefix(rawAssetURL, "#") {
+		return ""
+	}
+	if cachedLocalPath, exists := assetMap[rawAssetURL]; exists {
+		return cachedLocalPath
+	}
+	resolvedAssetURL, err := baseURL.Parse(rawAssetURL)
+	if err != nil || resolvedAssetURL.Scheme == "" || resolvedAssetURL.Host == "" {
+		return ""
+	}
+	assetResponse, err := http.Get(resolvedAssetURL.String())
+	if err != nil {
+		return ""
+	}
+	defer assetResponse.Body.Close()
+	if assetResponse.StatusCode < 200 || assetResponse.StatusCode > 299 {
+		return ""
+	}
+	assetBytes, err := io.ReadAll(assetResponse.Body)
+	if err != nil {
+		return ""
+	}
+	extension := detectAssetExtension(resolvedAssetURL.Path, assetResponse.Header.Get("Content-Type"))
+	hashedFileName, err := contentHashName(assetBytes, extension)
+	if err != nil {
+		return ""
+	}
+	if err := os.MkdirAll("storage/files", 0o755); err != nil {
+		return ""
+	}
+	localFilePath := filepath.Join("storage/files", hashedFileName)
+	if writeError := os.WriteFile(localFilePath, assetBytes, 0o644); writeError != nil {
+		return ""
+	}
+	localAssetURL := "/assets/" + hashedFileName
+	assetMap[rawAssetURL] = localAssetURL
+
+	if extension == ".css" {
+		cssText := string(assetBytes)
+		localizedCSS := a.localizeCSSAssets(resolvedAssetURL, cssText, assetMap)
+		_ = os.WriteFile(localFilePath, []byte(localizedCSS), 0o644)
+	}
+	return localAssetURL
+}
+
+func (a *App) localizeCSSAssets(baseURL *url.URL, cssSource string, assetMap map[string]string) string {
+	cssURLPattern := regexp.MustCompile(`url\(([^)]+)\)`)
+	cssSource = cssURLPattern.ReplaceAllStringFunc(cssSource, func(match string) string {
+		parts := cssURLPattern.FindStringSubmatch(match)
+		if len(parts) != 2 {
+			return match
+		}
+		trimmedReference := strings.TrimSpace(parts[1])
+		trimmedReference = strings.Trim(trimmedReference, `"'`)
+		localPath := a.downloadAndStoreAsset(baseURL, trimmedReference, assetMap)
+		if localPath == "" {
+			return match
+		}
+		return "url('" + localPath + "')"
+	})
+	cssImportPattern := regexp.MustCompile(`@import\s+(?:url\()?['"]([^'"]+)['"]\)?`)
+	cssSource = cssImportPattern.ReplaceAllStringFunc(cssSource, func(match string) string {
+		parts := cssImportPattern.FindStringSubmatch(match)
+		if len(parts) != 2 {
+			return match
+		}
+		localPath := a.downloadAndStoreAsset(baseURL, strings.TrimSpace(parts[1]), assetMap)
+		if localPath == "" {
+			return match
+		}
+		return "@import url('" + localPath + "')"
+	})
+	return cssSource
+}
+
+func detectAssetExtension(requestPath, contentType string) string {
+	extension := strings.ToLower(path.Ext(requestPath))
+	if extension != "" {
+		return extension
+	}
+	mimeType := strings.TrimSpace(strings.Split(contentType, ";")[0])
+	if mimeType != "" {
+		if guessed, err := mime.ExtensionsByType(mimeType); err == nil && len(guessed) > 0 {
+			return guessed[0]
+		}
+	}
+	return ".bin"
 }
