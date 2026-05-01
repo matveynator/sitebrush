@@ -256,6 +256,10 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 		a.publishDomain(w, r)
 		return
 	}
+	if hasQueryFlag(r, "publish_preview") {
+		a.publishPreviewJSON(w, r)
+		return
+	}
 	if hasQueryFlag(r, "files") {
 		a.filesPage(w, r)
 		return
@@ -807,6 +811,8 @@ func buildContextMenuScript(isAdmin bool, isFrozen bool, pagePath, domain string
 	escapedDomain := template.JSEscapeString(domain)
 	confirmFreezePrompt := template.JSEscapeString(translationOrDefault(translations, "confirm_freeze_prompt", "Freeze domain now?"))
 	confirmPublishPrompt := template.JSEscapeString(translationOrDefault(translations, "confirm_publish_prompt", "Publish domain now?"))
+	publishPreviewLoadingLabel := template.JSEscapeString(translationOrDefault(translations, "publish_preview_loading", "Checking changes to publish..."))
+	publishPreviewSummaryLabel := template.JSEscapeString(translationOrDefault(translations, "publish_preview_summary", "Changes:"))
 	confirmYesLabel := template.JSEscapeString(translationOrDefault(translations, "confirm_yes", "Yes"))
 	confirmNoLabel := template.JSEscapeString(translationOrDefault(translations, "confirm_no", "No"))
 	editLabel := template.JSEscapeString(translationOrDefault(translations, "menu_edit", "Edit"))
@@ -884,13 +890,29 @@ func buildContextMenuScript(isAdmin bool, isFrozen bool, pagePath, domain string
     if (!selectedActionConfig) {
       return;
     }
-    openConfirmationDialog(selectedActionConfig.message, function submitConfirmedAction() {
+    if (actionName === "publish") {
+      fetch(currentPagePath + "?publish_preview", { headers: { "Accept": "application/json" } })
+        .then(function parsePublishPreview(previewResponse) {
+          if (!previewResponse.ok) { throw new Error("publish preview failed"); }
+          return previewResponse.json();
+        })
+        .then(function confirmPublishWithPreview(previewPayload) {
+          const summaryText = "` + publishPreviewSummaryLabel + `" + " " + previewPayload.changed + " / " + previewPayload.total;
+          openConfirmationDialog(selectedActionConfig.message + "\n\n" + summaryText, submitConfirmedAction);
+        })
+        .catch(function fallbackPublishConfirmation() {
+          openConfirmationDialog(selectedActionConfig.message + "\n\n" + "` + publishPreviewLoadingLabel + `", submitConfirmedAction);
+        });
+      return;
+    }
+    openConfirmationDialog(selectedActionConfig.message, submitConfirmedAction);
+    function submitConfirmedAction() {
       const actionFormElement = document.createElement("form");
       actionFormElement.method = "POST";
       actionFormElement.action = selectedActionConfig.path;
       document.body.appendChild(actionFormElement);
       actionFormElement.submit();
-    });
+    }
   }, {capture: true});
   document.addEventListener("contextmenu", function onContextMenuOpen(browserEvent) {
     if (browserEvent.ctrlKey || browserEvent.defaultPrevented) {
@@ -1487,6 +1509,60 @@ func (a *App) publishDomain(w http.ResponseWriter, r *http.Request) {
 	a.setDomainFrozenState(r.Context(), domain, 0)
 	log.Printf("publish completed domain=%s", domain)
 	http.Redirect(w, r, requestedReturnPath(r), http.StatusFound)
+}
+
+func (a *App) publishPreviewJSON(w http.ResponseWriter, r *http.Request) {
+	if !a.isAdminRequest(r) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	domain := a.siteDomain(r.Context(), r)
+	totalPagesCount, changedPagesCount := a.countPublishChanges(r.Context(), domain)
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{"total": totalPagesCount, "changed": changedPagesCount, "unchanged": totalPagesCount - changedPagesCount})
+}
+
+func (a *App) countPublishChanges(ctx context.Context, domain string) (int, int) {
+	totalPagesCount := 0
+	changedPagesCount := 0
+	revisionRows, err := a.db.QueryContext(ctx, `SELECT page_path,html FROM revisions WHERE domain=? AND is_active=1 ORDER BY page_path ASC, id DESC`, domain)
+	if err != nil {
+		return 0, 0
+	}
+	defer revisionRows.Close()
+	latestRevisionByPath := make(map[string]string)
+	for revisionRows.Next() {
+		var pagePath string
+		var pageHTML string
+		if scanErr := revisionRows.Scan(&pagePath, &pageHTML); scanErr != nil {
+			continue
+		}
+		if _, alreadyStored := latestRevisionByPath[pagePath]; !alreadyStored {
+			latestRevisionByPath[pagePath] = pageHTML
+		}
+	}
+	pageRows, pageQueryErr := a.db.QueryContext(ctx, `SELECT path,title,html FROM pages WHERE domain=? ORDER BY path ASC`, domain)
+	if pageQueryErr != nil {
+		return 0, 0
+	}
+	defer pageRows.Close()
+	for pageRows.Next() {
+		totalPagesCount++
+		var pagePath, pageTitle, draftHTML string
+		if scanErr := pageRows.Scan(&pagePath, &pageTitle, &draftHTML); scanErr != nil {
+			continue
+		}
+		pageHTMLToPublish := draftHTML
+		if latestActiveHTML, foundLatestActiveRevision := latestRevisionByPath[pagePath]; foundLatestActiveRevision {
+			pageHTMLToPublish = latestActiveHTML
+		}
+		var previousPublishedTitle, previousPublishedHTML string
+		readPublishedErr := a.db.QueryRowContext(ctx, `SELECT title,html FROM published_pages WHERE domain=? AND path=?`, domain, pagePath).Scan(&previousPublishedTitle, &previousPublishedHTML)
+		if readPublishedErr != nil || previousPublishedTitle != pageTitle || previousPublishedHTML != pageHTMLToPublish {
+			changedPagesCount++
+		}
+	}
+	return totalPagesCount, changedPagesCount
 }
 
 func (a *App) generateDomainPack(domain string) error {
