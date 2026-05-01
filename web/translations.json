@@ -29,7 +29,7 @@
     "revisions_for": "Revisions for",
     "file_manager": "File manager",
     "confirm_freeze_prompt": "Freeze site visibility for visitors so you can continue editing and publish changes later?",
-    "confirm_publish_prompt": "Publish website changes now?",
+    "confirm_publish_prompt": "Publish the changes made to the site?",
     "confirm_yes": "Yes",
     "confirm_no": "No",
     "menu_edit": "Edit",
@@ -42,7 +42,9 @@
     "menu_login": "Sign in",
     "publish_preview_loading": "Checking changes to publish...",
     "publish_preview_summary": "Changed pages to publish:",
-    "publish_preview_no_changes": "No changes to publish."
+    "publish_preview_no_changes": "No changes found — only unfreeze is needed.",
+    "publish_confirm_with_changes": "Publish the changes made to the site?",
+    "publish_confirm_without_changes": "No changes were made. Unfreeze the site?"
   },
   "fr": {
     "setup_no_admin": "aucun administrateur pour l'instant",
@@ -74,7 +76,7 @@
     "revisions_for": "Révisions pour",
     "file_manager": "Gestionnaire de fichiers",
     "confirm_freeze_prompt": "Geler l’affichage du site pour les visiteurs afin de continuer à modifier et publier les changements plus tard ?",
-    "confirm_publish_prompt": "Publish website changes now?",
+    "confirm_publish_prompt": "Publish the changes made to the site?",
     "confirm_yes": "Oui",
     "confirm_no": "Non",
     "menu_edit": "Modifier",
@@ -87,7 +89,9 @@
     "menu_login": "Se connecter",
     "publish_preview_loading": "Checking changes to publish...",
     "publish_preview_summary": "Changed pages to publish:",
-    "publish_preview_no_changes": "No changes to publish."
+    "publish_preview_no_changes": "No changes found — only unfreeze is needed.",
+    "publish_confirm_with_changes": "Publish the changes made to the site?",
+    "publish_confirm_without_changes": "No changes were made. Unfreeze the site?"
   },
   "ru": {
     "setup_no_admin": "пока нет администратора",
@@ -119,7 +123,7 @@
     "revisions_for": "Ревизии для",
     "file_manager": "Файловый менеджер",
     "confirm_freeze_prompt": "Заморозить отображение сайта для пользователей, чтобы продолжить редактирование и опубликовать изменения позже?",
-    "confirm_publish_prompt": "Опубликовать внесенные в сайт изменения?",
+    "confirm_publish_prompt": "Опубликовать внесённые в сайт изменения?",
     "confirm_yes": "Да",
     "confirm_no": "Нет",
     "menu_edit": "Редактировать",
@@ -132,7 +136,9 @@
     "menu_login": "Войти",
     "publish_preview_loading": "Проверяем изменения перед публикацией...",
     "publish_preview_summary": "Будет опубликовано измененных страниц:",
-    "publish_preview_no_changes": "Изменений нет — публиковать нечего."
+    "publish_preview_no_changes": "Изменений нет — можно только разморозить сайт.",
+    "publish_confirm_with_changes": "Опубликовать внесённые в сайт изменения?",
+    "publish_confirm_without_changes": "Никаких изменений не производилось, разморозить сайт?"
   },
   "ja": {
     "setup_no_admin": "まだ管理者がいません",
@@ -164,7 +170,7 @@
     "revisions_for": "改訂履歴",
     "file_manager": "ファイルマネージャー",
     "confirm_freeze_prompt": "訪問者へのサイト表示を凍結して、編集を続け、後で変更を公開しますか？",
-    "confirm_publish_prompt": "Publish website changes now?",
+    "confirm_publish_prompt": "Publish the changes made to the site?",
     "confirm_yes": "はい",
     "confirm_no": "いいえ",
     "menu_edit": "編集",
@@ -177,7 +183,9 @@
     "menu_login": "ログイン",
     "publish_preview_loading": "Checking changes to publish...",
     "publish_preview_summary": "Changed pages to publish:",
-    "publish_preview_no_changes": "No changes to publish."
+    "publish_preview_no_changes": "No changes found — only unfreeze is needed.",
+    "publish_confirm_with_changes": "Publish the changes made to the site?",
+    "publish_confirm_without_changes": "No changes were made. Unfreeze the site?"
   },
   "it": {
     "setup_no_admin": "nessun amministratore ancora",
@@ -209,7 +217,7 @@
     "revisions_for": "Revisioni per",
     "file_manager": "Gestore file",
     "confirm_freeze_prompt": "Bloccare la visualizzazione del sito per i visitatori, così puoi continuare a modificare e pubblicare le modifiche più tardi?",
-    "confirm_publish_prompt": "Publish website changes now?",
+    "confirm_publish_prompt": "Publish the changes made to the site?",
     "confirm_yes": "Sì",
     "confirm_no": "No",
     "menu_edit": "Modifica",
@@ -222,7 +230,9 @@
     "menu_login": "Accedi",
     "publish_preview_loading": "Checking changes to publish...",
     "publish_preview_summary": "Changed pages to publish:",
-    "publish_preview_no_changes": "No changes to publish."
+    "publish_preview_no_changes": "No changes found — only unfreeze is needed.",
+    "publish_confirm_with_changes": "Publish the changes made to the site?",
+    "publish_confirm_without_changes": "No changes were made. Unfreeze the site?"
   },
   "sv": {
     "setup_no_admin": "ingen administratör ännu",
@@ -254,7 +264,7 @@
     "revisions_for": "Revisioner för",
     "file_manager": "Filhanterare",
     "confirm_freeze_prompt": "Frysa visningen av webbplatsen för besökare så att du kan fortsätta redigera och publicera ändringar senare?",
-    "confirm_publish_prompt": "Publish website changes now?",
+    "confirm_publish_prompt": "Publish the changes made to the site?",
     "confirm_yes": "Ja",
     "confirm_no": "Nej",
     "menu_edit": "Redigera",
@@ -267,7 +277,9 @@
     "menu_login": "Logga in",
     "publish_preview_loading": "Checking changes to publish...",
     "publish_preview_summary": "Changed pages to publish:",
-    "publish_preview_no_changes": "No changes to publish."
+    "publish_preview_no_changes": "No changes found — only unfreeze is needed.",
+    "publish_confirm_with_changes": "Publish the changes made to the site?",
+    "publish_confirm_without_changes": "No changes were made. Unfreeze the site?"
   },
   "fi": {
     "setup_no_admin": "ei vielä järjestelmänvalvojaa",
@@ -299,7 +311,7 @@
     "revisions_for": "Versiot kohteelle",
     "file_manager": "Tiedostonhallinta",
     "confirm_freeze_prompt": "Jäädytetäänkö sivuston näkyminen kävijöille, jotta voit jatkaa muokkaamista ja julkaista muutokset myöhemmin?",
-    "confirm_publish_prompt": "Publish website changes now?",
+    "confirm_publish_prompt": "Publish the changes made to the site?",
     "confirm_yes": "Kyllä",
     "confirm_no": "Ei",
     "menu_edit": "Muokkaa",
@@ -312,7 +324,9 @@
     "menu_login": "Kirjaudu sisään",
     "publish_preview_loading": "Checking changes to publish...",
     "publish_preview_summary": "Changed pages to publish:",
-    "publish_preview_no_changes": "No changes to publish."
+    "publish_preview_no_changes": "No changes found — only unfreeze is needed.",
+    "publish_confirm_with_changes": "Publish the changes made to the site?",
+    "publish_confirm_without_changes": "No changes were made. Unfreeze the site?"
   },
   "mn": {
     "setup_no_admin": "админ хараахан алга",
@@ -344,7 +358,7 @@
     "revisions_for": "URI-ийн хувилбарууд",
     "file_manager": "Файл менежер",
     "confirm_freeze_prompt": "Хэрэглэгчдэд харагдах сайтыг царцааж, засвараа үргэлжлүүлээд өөрчлөлтөө дараа нь нийтлэх үү?",
-    "confirm_publish_prompt": "Publish website changes now?",
+    "confirm_publish_prompt": "Publish the changes made to the site?",
     "confirm_yes": "Тийм",
     "confirm_no": "Үгүй",
     "menu_edit": "Засах",
@@ -357,7 +371,9 @@
     "menu_login": "Нэвтрэх",
     "publish_preview_loading": "Checking changes to publish...",
     "publish_preview_summary": "Changed pages to publish:",
-    "publish_preview_no_changes": "No changes to publish."
+    "publish_preview_no_changes": "No changes found — only unfreeze is needed.",
+    "publish_confirm_with_changes": "Publish the changes made to the site?",
+    "publish_confirm_without_changes": "No changes were made. Unfreeze the site?"
   },
   "zh": {
     "setup_no_admin": "尚无管理员",
@@ -389,7 +405,7 @@
     "revisions_for": "URI 的修订",
     "file_manager": "文件管理器",
     "confirm_freeze_prompt": "是否冻结访客看到的网站显示，以便继续编辑并稍后发布更改？",
-    "confirm_publish_prompt": "Publish website changes now?",
+    "confirm_publish_prompt": "Publish the changes made to the site?",
     "confirm_yes": "是",
     "confirm_no": "否",
     "menu_edit": "编辑",
@@ -402,7 +418,9 @@
     "menu_login": "登录",
     "publish_preview_loading": "Checking changes to publish...",
     "publish_preview_summary": "Changed pages to publish:",
-    "publish_preview_no_changes": "No changes to publish."
+    "publish_preview_no_changes": "No changes found — only unfreeze is needed.",
+    "publish_confirm_with_changes": "Publish the changes made to the site?",
+    "publish_confirm_without_changes": "No changes were made. Unfreeze the site?"
   },
   "he": {
     "setup_no_admin": "עדיין אין מנהל",
@@ -434,7 +452,7 @@
     "revisions_for": "גרסאות עבור",
     "file_manager": "מנהל קבצים",
     "confirm_freeze_prompt": "להקפיא את תצוגת האתר למבקרים כדי להמשיך לערוך ולפרסם את השינויים מאוחר יותר?",
-    "confirm_publish_prompt": "Publish website changes now?",
+    "confirm_publish_prompt": "Publish the changes made to the site?",
     "confirm_yes": "כן",
     "confirm_no": "לא",
     "menu_edit": "עריכה",
@@ -447,7 +465,9 @@
     "menu_login": "כניסה",
     "publish_preview_loading": "Checking changes to publish...",
     "publish_preview_summary": "Changed pages to publish:",
-    "publish_preview_no_changes": "No changes to publish."
+    "publish_preview_no_changes": "No changes found — only unfreeze is needed.",
+    "publish_confirm_with_changes": "Publish the changes made to the site?",
+    "publish_confirm_without_changes": "No changes were made. Unfreeze the site?"
   },
   "fa": {
     "setup_no_admin": "هنوز مدیر وجود ندارد",
@@ -479,7 +499,7 @@
     "revisions_for": "بازبینی‌ها برای",
     "file_manager": "مدیر فایل",
     "confirm_freeze_prompt": "نمایش سایت برای کاربران منجمد شود تا بتوانید ویرایش را ادامه دهید و تغییرات را بعداً منتشر کنید؟",
-    "confirm_publish_prompt": "Publish website changes now?",
+    "confirm_publish_prompt": "Publish the changes made to the site?",
     "confirm_yes": "بله",
     "confirm_no": "خیر",
     "menu_edit": "ویرایش",
@@ -492,7 +512,9 @@
     "menu_login": "ورود",
     "publish_preview_loading": "Checking changes to publish...",
     "publish_preview_summary": "Changed pages to publish:",
-    "publish_preview_no_changes": "No changes to publish."
+    "publish_preview_no_changes": "No changes found — only unfreeze is needed.",
+    "publish_confirm_with_changes": "Publish the changes made to the site?",
+    "publish_confirm_without_changes": "No changes were made. Unfreeze the site?"
   },
   "de": {
     "setup_no_admin": "noch kein Administrator",
@@ -524,7 +546,7 @@
     "revisions_for": "Revisionen für",
     "file_manager": "Dateimanager",
     "confirm_freeze_prompt": "Sichtbarkeit der Website für Besucher einfrieren, damit Sie weiter bearbeiten und Änderungen später veröffentlichen können?",
-    "confirm_publish_prompt": "Publish website changes now?",
+    "confirm_publish_prompt": "Publish the changes made to the site?",
     "confirm_yes": "Ja",
     "confirm_no": "Nein",
     "menu_edit": "Bearbeiten",
@@ -537,7 +559,9 @@
     "menu_login": "Anmelden",
     "publish_preview_loading": "Checking changes to publish...",
     "publish_preview_summary": "Changed pages to publish:",
-    "publish_preview_no_changes": "No changes to publish."
+    "publish_preview_no_changes": "No changes found — only unfreeze is needed.",
+    "publish_confirm_with_changes": "Publish the changes made to the site?",
+    "publish_confirm_without_changes": "No changes were made. Unfreeze the site?"
   },
   "tr": {
     "setup_no_admin": "henüz yönetici yok",
@@ -569,7 +593,7 @@
     "revisions_for": "URI için revizyonlar",
     "file_manager": "Dosya yöneticisi",
     "confirm_freeze_prompt": "Düzenlemeye devam edip değişiklikleri daha sonra yayımlayabilmek için ziyaretçiler için site görünümünü dondurmak istiyor musunuz?",
-    "confirm_publish_prompt": "Publish website changes now?",
+    "confirm_publish_prompt": "Publish the changes made to the site?",
     "confirm_yes": "Evet",
     "confirm_no": "Hayır",
     "menu_edit": "Düzenle",
@@ -582,7 +606,9 @@
     "menu_login": "Giriş yap",
     "publish_preview_loading": "Checking changes to publish...",
     "publish_preview_summary": "Changed pages to publish:",
-    "publish_preview_no_changes": "No changes to publish."
+    "publish_preview_no_changes": "No changes found — only unfreeze is needed.",
+    "publish_confirm_with_changes": "Publish the changes made to the site?",
+    "publish_confirm_without_changes": "No changes were made. Unfreeze the site?"
   },
   "kk": {
     "setup_no_admin": "әзірге әкімші жоқ",
@@ -614,7 +640,7 @@
     "revisions_for": "URI үшін нұсқалар",
     "file_manager": "Файл менеджері",
     "confirm_freeze_prompt": "Өзгерістерді кейін жариялау үшін өңдеуді жалғастыра отырып, пайдаланушыларға сайт көрсетілімін уақытша тоқтату керек пе?",
-    "confirm_publish_prompt": "Publish website changes now?",
+    "confirm_publish_prompt": "Publish the changes made to the site?",
     "confirm_yes": "Иә",
     "confirm_no": "Жоқ",
     "menu_edit": "Өңдеу",
@@ -627,7 +653,9 @@
     "menu_login": "Кіру",
     "publish_preview_loading": "Checking changes to publish...",
     "publish_preview_summary": "Changed pages to publish:",
-    "publish_preview_no_changes": "No changes to publish."
+    "publish_preview_no_changes": "No changes found — only unfreeze is needed.",
+    "publish_confirm_with_changes": "Publish the changes made to the site?",
+    "publish_confirm_without_changes": "No changes were made. Unfreeze the site?"
   },
   "es": {
     "setup_no_admin": "aún no hay administrador",
@@ -659,7 +687,7 @@
     "revisions_for": "Revisiones para",
     "file_manager": "Administrador de archivos",
     "confirm_freeze_prompt": "¿Congelar la visualización del sitio para los visitantes para continuar editando y publicar los cambios más tarde?",
-    "confirm_publish_prompt": "Publish website changes now?",
+    "confirm_publish_prompt": "Publish the changes made to the site?",
     "confirm_yes": "Sí",
     "confirm_no": "No",
     "menu_edit": "Editar",
@@ -672,7 +700,9 @@
     "menu_login": "Iniciar sesión",
     "publish_preview_loading": "Checking changes to publish...",
     "publish_preview_summary": "Changed pages to publish:",
-    "publish_preview_no_changes": "No changes to publish."
+    "publish_preview_no_changes": "No changes found — only unfreeze is needed.",
+    "publish_confirm_with_changes": "Publish the changes made to the site?",
+    "publish_confirm_without_changes": "No changes were made. Unfreeze the site?"
   },
   "pt": {
     "setup_no_admin": "ainda não há administrador",
@@ -704,7 +734,7 @@
     "revisions_for": "Revisões para",
     "file_manager": "Gerenciador de arquivos",
     "confirm_freeze_prompt": "Congelar a exibição do site para os visitantes para continuar editando e publicar as alterações depois?",
-    "confirm_publish_prompt": "Publish website changes now?",
+    "confirm_publish_prompt": "Publish the changes made to the site?",
     "confirm_yes": "Sim",
     "confirm_no": "Não",
     "menu_edit": "Editar",
@@ -717,6 +747,8 @@
     "menu_login": "Entrar",
     "publish_preview_loading": "Checking changes to publish...",
     "publish_preview_summary": "Changed pages to publish:",
-    "publish_preview_no_changes": "No changes to publish."
+    "publish_preview_no_changes": "No changes found — only unfreeze is needed.",
+    "publish_confirm_with_changes": "Publish the changes made to the site?",
+    "publish_confirm_without_changes": "No changes were made. Unfreeze the site?"
   }
 }

@@ -810,7 +810,9 @@ func buildContextMenuScript(isAdmin bool, isFrozen bool, pagePath, domain string
 	escapedPath := template.JSEscapeString(pagePath)
 	escapedDomain := template.JSEscapeString(domain)
 	confirmFreezePrompt := template.JSEscapeString(translationOrDefault(translations, "confirm_freeze_prompt", "Freeze domain now?"))
-	confirmPublishPrompt := template.JSEscapeString(translationOrDefault(translations, "confirm_publish_prompt", "Publish domain now?"))
+	confirmPublishPrompt := template.JSEscapeString(translationOrDefault(translations, "confirm_publish_prompt", "Publish website changes now?"))
+	publishConfirmWithChangesLabel := template.JSEscapeString(translationOrDefault(translations, "publish_confirm_with_changes", "Publish the changes made to the site?"))
+	publishConfirmWithoutChangesLabel := template.JSEscapeString(translationOrDefault(translations, "publish_confirm_without_changes", "No changes were made. Unfreeze the site?"))
 	publishPreviewLoadingLabel := template.JSEscapeString(translationOrDefault(translations, "publish_preview_loading", "Checking changes to publish..."))
 	publishPreviewSummaryLabel := template.JSEscapeString(translationOrDefault(translations, "publish_preview_summary", "Changes:"))
 	publishPreviewNoChangesLabel := template.JSEscapeString(translationOrDefault(translations, "publish_preview_no_changes", "No changes to publish."))
@@ -941,12 +943,14 @@ func buildContextMenuScript(isAdmin bool, isFrozen bool, pagePath, domain string
           return previewResponse.json();
         })
 	        .then(function confirmPublishWithPreview(previewPayload) {
-	          let summaryText = "` + publishPreviewSummaryLabel + `" + " " + previewPayload.changed + " / " + previewPayload.total;
-	          if (previewPayload.changed === 0) {
-	            summaryText = "` + publishPreviewNoChangesLabel + `";
-	          }
-	          openPublishConfirmationDialog(selectedActionConfig.message + "\n\n" + summaryText, previewPayload.paths || [], submitConfirmedAction);
-	        })
+		          let summaryText = "` + publishPreviewSummaryLabel + `" + " " + previewPayload.changed + " / " + previewPayload.total;
+		          let confirmQuestionText = "` + publishConfirmWithChangesLabel + `";
+		          if (previewPayload.changed === 0) {
+		            summaryText = "` + publishPreviewNoChangesLabel + `";
+		            confirmQuestionText = "` + publishConfirmWithoutChangesLabel + `";
+		          }
+		          openPublishConfirmationDialog(confirmQuestionText + "\n\n" + summaryText, previewPayload.paths || [], submitConfirmedAction);
+		        })
         .catch(function fallbackPublishConfirmation() {
           openConfirmationDialog(selectedActionConfig.message + "\n\n" + "` + publishPreviewLoadingLabel + `", submitConfirmedAction);
         });
