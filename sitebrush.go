@@ -834,6 +834,7 @@ func buildContextMenuScript(isAdmin bool, isFrozen bool, pagePath, domain string
   window.__sitebrushContextMenuInitialized = true;
   const currentPagePath = "` + escapedPath + `";
   const currentDomainName = "` + escapedDomain + `";
+  const isDomainFrozen = ` + strconv.FormatBool(isFrozen) + `;
   const actionConfigByName = {
     freeze: { path: "?freeze", message: "` + confirmFreezePrompt + `" },
     publish: { path: "?publish", message: "` + confirmPublishPrompt + `" }
@@ -913,7 +914,7 @@ func buildContextMenuScript(isAdmin bool, isFrozen bool, pagePath, domain string
       "<li class='SiteBrushContextMenu ContextMenuCopyright'><a href='http://sitebrush.com' class='SiteBrushContextMenuLink'>sitebrush</a></li>",
       "</ul>"
     ];
-    showSitebrushMenu(browserEvent, menuHtmlEntries, currentPagePath);
+    showSitebrushMenu(browserEvent, menuHtmlEntries, currentPagePath, isDomainFrozen);
 	  }, {capture: false, passive: false});
   function openSiteTreeDialog() {
     const overlayElement = document.createElement("div");
@@ -971,7 +972,7 @@ func buildContextMenuScript(isAdmin bool, isFrozen bool, pagePath, domain string
       "<li class='SiteBrushContextMenu ContextMenuCopyright'><a href='http://sitebrush.com' class='SiteBrushContextMenuLink'>sitebrush</a></li>",
       "</ul>"
     ];
-    showSitebrushMenu(browserEvent, menuHtmlEntries, currentPagePath);
+    showSitebrushMenu(browserEvent, menuHtmlEntries, currentPagePath, false);
 	  }, {capture: false, passive: false});
 })();
 	</script>`
@@ -980,7 +981,8 @@ func buildContextMenuScript(isAdmin bool, isFrozen bool, pagePath, domain string
 func contextMenuStylesAndHelpers() string {
 	return `<style>
 .SiteBrushMenuBox,.SiteBrushMenuBox *{all:initial;box-sizing:border-box}
-.SiteBrushMenuBox{position:fixed;background:#fff url(/p/static/bg.png) repeat-x top;border:1px solid #8ea4c1;z-index:99999;padding:2px;min-width:240px;box-shadow:0 2px 12px rgba(0,0,0,0.2);font-family:Arial,Helvetica,sans-serif}
+.SiteBrushMenuBox{position:fixed;background:#fff url(/p/static/bg.png) repeat-x top;border:1px solid #8ea4c1;z-index:2147483647;padding:2px;min-width:240px;box-shadow:0 2px 12px rgba(0,0,0,0.2);font-family:Arial,Helvetica,sans-serif}
+.SiteBrushMenuBox.SiteBrushMenuBoxFrozen{background:#e9f5ff;border-color:#6da6d4}
 .SiteBrushMenuList{list-style:none;margin:0;padding:0}
 .SiteBrushContextMenu{margin:0;padding:0}
 .SiteBrushContextMenuLink{display:flex;align-items:center;gap:8px;padding:8px 10px;color:#1f3f6f;text-decoration:none;font-family:Arial,Helvetica,sans-serif;font-size:14px;cursor:pointer}
@@ -1021,7 +1023,7 @@ function normalizeSitebrushMenuLinks(menuBoxElement, currentPagePath) {
     menuLinkElement.setAttribute("href", currentPagePath + originalHref);
   }
 }
-function showSitebrushMenu(browserEvent, menuHtmlEntries, currentPagePath) {
+function showSitebrushMenu(browserEvent, menuHtmlEntries, currentPagePath, frozenMenuEnabled) {
   const existingMenuBox = document.getElementById("SiteBrushMenuBox");
   if (existingMenuBox) {
     existingMenuBox.remove();
@@ -1029,6 +1031,9 @@ function showSitebrushMenu(browserEvent, menuHtmlEntries, currentPagePath) {
   const menuBoxElement = document.createElement("div");
   menuBoxElement.id = "SiteBrushMenuBox";
   menuBoxElement.className = "SiteBrushMenuBox";
+  if (frozenMenuEnabled) {
+    menuBoxElement.classList.add("SiteBrushMenuBoxFrozen");
+  }
   menuBoxElement.innerHTML = menuHtmlEntries.join("");
   normalizeSitebrushMenuLinks(menuBoxElement, currentPagePath);
   menuBoxElement.style.left = browserEvent.clientX + "px";
