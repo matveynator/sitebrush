@@ -508,6 +508,21 @@ func parentPagePath(pagePath string) string {
 	return pagePath[:lastSlashIndex]
 }
 
+func cleanPath(rawPath string) string {
+	trimmedPath := strings.TrimSpace(rawPath)
+	if trimmedPath == "" {
+		return "/"
+	}
+	if !strings.HasPrefix(trimmedPath, "/") {
+		trimmedPath = "/" + trimmedPath
+	}
+	normalizedPath := path.Clean(trimmedPath)
+	if normalizedPath == "." || normalizedPath == "" {
+		return "/"
+	}
+	return normalizedPath
+}
+
 func loginReturnPathOrDefault(r *http.Request) string {
 	returnPath := strings.TrimSpace(r.URL.Query().Get("return_path"))
 	if returnPath != "" {
