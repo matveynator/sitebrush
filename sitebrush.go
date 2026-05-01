@@ -1377,7 +1377,7 @@ func (a *App) writePublishedStaticHTML(domain, pagePath, html string) {
 }
 
 func (a *App) wrapPublishedPageWithGuestMenu(domain, pagePath, html string) string {
-	script := buildContextMenuScript(false, false, pagePath, domain)
+	script := buildContextMenuScript(false, false, pagePath, domain, map[string]string{})
 	if strings.Contains(strings.ToLower(html), "</body>") {
 		bodyClosePattern := regexp.MustCompile(`(?i)</body>`)
 		return bodyClosePattern.ReplaceAllString(html, script+"</body>")
