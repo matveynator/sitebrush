@@ -1,13 +1,21 @@
 <!doctype html>
 <html lang="en">
 <head>
+  <script>
+  (function applySystemThemeMode() {
+    const prefersDarkMode = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+    document.documentElement.setAttribute('data-bs-theme', prefersDarkMode ? 'dark' : 'light');
+  })();
+  </script>
   <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{{index .T "edit_raw_title_prefix"}} {{.Path}}</title>
   <style>
+    :root { color-scheme: light dark; --page-bg:#f4f8fc; --text-main:#1b2a3d; --panel:#ffffff; --field:#ffffff; --field-text:#12253f; --field-border:#b9c7db; }
+    @media (prefers-color-scheme: dark) { :root { --page-bg:#0f1724; --text-main:#dbe8ff; --panel:#172235; --field:#0f1a2b; --field-text:#dbe8ff; --field-border:#334868; } }
     html, body { height:100%; margin:0; }
-    body { font-family: Arial, sans-serif; }
+    body { font-family: Arial, sans-serif; background: var(--page-bg); color: var(--text-main); }
     .raw-page { height:100%; display:flex; flex-direction:column; padding:12px; box-sizing:border-box; }
-    textarea { width:100%; flex:1; min-height:75vh; font-family: monospace; }
+    textarea { width:100%; flex:1; min-height:75vh; font-family: monospace; background: var(--field); color: var(--field-text); border: 1px solid var(--field-border); }
     .action-bar { display:flex; justify-content:flex-end; gap:10px; padding-top:10px; }
     .save-button { background:#1ea74f; color:#fff; border:0; padding:10px 18px; border-radius:6px; cursor:pointer; }
     .cancel-button { background:#6c757d; color:#fff; text-decoration:none; padding:10px 18px; border-radius:6px; }

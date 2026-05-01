@@ -1,12 +1,21 @@
 <!doctype html>
 <html lang="en">
 <head>
+  <script>
+  (function applySystemThemeMode() {
+    const prefersDarkMode = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+    document.documentElement.setAttribute('data-bs-theme', prefersDarkMode ? 'dark' : 'light');
+  })();
+  </script>
   <meta charset="utf-8" />
   <title>{{index .T "domain_settings_title"}}</title>
   <style>
-    body { font-family: Arial, sans-serif; margin: 24px; max-width: 720px; }
-    textarea { width: 100%; min-height: 140px; }
-    .hint { color: #555; }
+    :root { color-scheme: light dark; --page-bg:#f4f8fc; --text-main:#1b2a3d; --hint:#4f5f79; --field-bg:#ffffff; --field-text:#12253f; --field-border:#b9c7db; --link:#1a65d8; }
+    @media (prefers-color-scheme: dark) { :root { --page-bg:#0f1724; --text-main:#dbe8ff; --hint:#9fb3cf; --field-bg:#0f1a2b; --field-text:#dbe8ff; --field-border:#334868; --link:#9ec2ff; } }
+    body { font-family: Arial, sans-serif; margin: 24px; max-width: 720px; background: var(--page-bg); color: var(--text-main); }
+    textarea { width: 100%; min-height: 140px; background: var(--field-bg); color: var(--field-text); border: 1px solid var(--field-border); }
+    .hint { color: var(--hint); }
+    a { color: var(--link); }
   </style>
 </head>
 <body>
