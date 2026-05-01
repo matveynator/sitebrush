@@ -1583,19 +1583,17 @@ func (a *App) domainStaticDir(domain string) string {
 
 func (a *App) logContentDelivery(sourceType, domain, pagePath string) {
 	const (
-		colorGreen  = "\033[32m"
-		colorBlue   = "\033[34m"
-		colorYellow = "\033[33m"
-		colorReset  = "\033[0m"
+		colorGreen = "\033[32m"
+		colorBlue  = "\033[34m"
+		colorReset = "\033[0m"
 	)
-	sourceColor := colorYellow
+	logPrefix := "dynamic"
+	logColor := colorBlue
 	if sourceType == "static-file" {
-		sourceColor = colorGreen
+		logPrefix = "static"
+		logColor = colorGreen
 	}
-	if sourceType == "db-draft" {
-		sourceColor = colorBlue
-	}
-	log.Printf("%scontent-source=%s%s domain=%s path=%s", sourceColor, sourceType, colorReset, domain, pagePath)
+	log.Printf("%s%s:%s domain=%s path=%s", logColor, logPrefix, colorReset, domain, pagePath)
 }
 func domainStorageName(domain string) string {
 	return strings.NewReplacer("/", "_", "\\", "_", ":", "_", "..", "_").Replace(domain)
