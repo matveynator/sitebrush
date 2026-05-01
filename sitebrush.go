@@ -1648,9 +1648,17 @@ func (a *App) generateDomainPack(domain string) error {
 	}
 	defer packFile.Close()
 	zipWriter := zip.NewWriter(packFile)
-	defer zipWriter.Close()
-	_ = addDirectoryToZip(zipWriter, a.domainStaticDir(domain), filepath.Join("static", domainDirName))
-	_ = addDirectoryToZip(zipWriter, filepath.Join("storage", "files", domainDirName), filepath.Join("files", domainDirName))
+	if addStaticErr := addDirectoryToZip(zipWriter, a.domainStaticDir(domain), filepath.Join("static", domainDirName)); addStaticErr != nil {
+		_ = zipWriter.Close()
+		return addStaticErr
+	}
+	if addFilesErr := addDirectoryToZip(zipWriter, filepath.Join("storage", "files", domainDirName), filepath.Join("files", domainDirName)); addFilesErr != nil {
+		_ = zipWriter.Close()
+		return addFilesErr
+	}
+	if closeZipErr := zipWriter.Close(); closeZipErr != nil {
+		return closeZipErr
+	}
 	return nil
 }
 
