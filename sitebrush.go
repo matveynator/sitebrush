@@ -77,16 +77,17 @@ func (writer *statusCapturingResponseWriter) WriteHeader(statusCode int) {
 func accessLogMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		const (
-			colorGreen = "\033[32m"
-			colorBlue  = "\033[34m"
-			colorReset = "\033[0m"
+			colorGreen  = "\033[32m"
+			colorBlue   = "\033[34m"
+			colorYellow = "\033[33m"
+			colorReset  = "\033[0m"
 		)
 		startedAt := time.Now()
 		writer := &statusCapturingResponseWriter{ResponseWriter: w, statusCode: http.StatusOK}
 		next.ServeHTTP(writer, r)
 		contentSource := writer.Header().Get("X-Sitebrush-Source")
 		logType := "REQUEST"
-		logColor := colorBlue
+		logColor := colorYellow
 		if contentSource == "static" {
 			logType = "STATIC"
 			logColor = colorGreen
@@ -95,12 +96,25 @@ func accessLogMiddleware(next http.Handler) http.Handler {
 			logType = "DYNAMIC"
 			logColor = colorBlue
 		}
-		if contentSource == "" && (strings.HasPrefix(r.URL.Path, "/p/static/") || strings.HasPrefix(r.URL.Path, "/assets/")) {
+		if contentSource == "" && isLikelyStaticAssetPath(r.URL.Path) {
 			logType = "STATIC"
 			logColor = colorGreen
 		}
 		log.Printf("%s%s%s method=%s path=%s query=%s status=%d remote=%s duration=%s", logColor, logType, colorReset, r.Method, r.URL.Path, r.URL.RawQuery, writer.statusCode, r.RemoteAddr, time.Since(startedAt).String())
 	})
+}
+
+func isLikelyStaticAssetPath(requestPath string) bool {
+	if strings.HasPrefix(requestPath, "/p/static/") || strings.HasPrefix(requestPath, "/assets/") {
+		return true
+	}
+	fileExtension := strings.ToLower(path.Ext(requestPath))
+	switch fileExtension {
+	case ".css", ".js", ".mjs", ".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico", ".webp", ".woff", ".woff2", ".ttf", ".eot", ".map":
+		return true
+	default:
+		return false
+	}
 }
 
 func main() {
