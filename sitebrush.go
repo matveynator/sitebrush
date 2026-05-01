@@ -1914,6 +1914,12 @@ func (a *App) servePublishedStaticFile(w http.ResponseWriter, r *http.Request, d
 	if a.isAdminRequest(r) {
 		return false
 	}
+	// Serve static page only when there is an active revision for this path.
+	var activeRevisionCount int
+	countErr := a.db.QueryRowContext(r.Context(), `SELECT COUNT(1) FROM revisions WHERE domain=? AND page_path=? AND is_active=1`, domain, pagePath).Scan(&activeRevisionCount)
+	if countErr != nil || activeRevisionCount == 0 {
+		return false
+	}
 	staticFilePath := filepath.Join(a.domainStaticDir(domain), staticRelativePathForPage(pagePath))
 	if _, statErr := os.Stat(staticFilePath); statErr != nil {
 		return false
