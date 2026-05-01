@@ -843,7 +843,8 @@ func (a *App) saveFileAccessRule(ctx context.Context, r *http.Request, fileName 
 		accessMode = "public"
 	}
 	token := strings.TrimSpace(r.FormValue("access_token"))
-	days, _ := strconv.Atoi(strings.TrimSpace(r.FormValue("access_days")))
+	accessDaysValue := strings.TrimSpace(r.FormValue("access_days"))
+	days, _ := strconv.Atoi(accessDaysValue)
 	if days < 0 {
 		days = 0
 	}
@@ -851,8 +852,12 @@ func (a *App) saveFileAccessRule(ctx context.Context, r *http.Request, fileName 
 	if singleUseLeft < 0 {
 		singleUseLeft = 0
 	}
+
 	expiresAt := ""
-	if days > 0 {
+	// Keep the existing expiration when days input is omitted.
+	if accessDaysValue == "" {
+		_ = a.db.QueryRowContext(ctx, `SELECT expires_at FROM file_access_rules WHERE domain=? AND file_name=?`, domainStorageName(a.siteDomain(ctx, r)), fileName).Scan(&expiresAt)
+	} else if days > 0 {
 		expiresAt = time.Now().Add(time.Duration(days) * 24 * time.Hour).UTC().Format(time.RFC3339)
 	}
 	_, _ = a.db.ExecContext(ctx, `INSERT INTO file_access_rules(domain,file_name,access_mode,token,expires_at,single_use_left) VALUES(?,?,?,?,?,?) ON CONFLICT(domain,file_name) DO UPDATE SET access_mode=excluded.access_mode,token=excluded.token,expires_at=excluded.expires_at,single_use_left=excluded.single_use_left`, domainStorageName(a.siteDomain(ctx, r)), fileName, accessMode, token, expiresAt, singleUseLeft)
