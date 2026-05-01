@@ -10,17 +10,17 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>{{index .T "edit_title_prefix"}} {{.Path}}</title>
-  <link rel="stylesheet" href="https://uicdn.toast.com/editor/latest/toastui-editor.min.css" />
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/jodit@4.2.47/es2021/jodit.min.css" />
   <style>
     :root { color-scheme: light dark; --page-bg:#f4f8fc; --text-main:#1b2a3d; }
     @media (prefers-color-scheme: dark) { :root { --page-bg:#0f1724; --text-main:#dbe8ff; } }
     html, body { height: 100%; margin: 0; }
     body { background: var(--page-bg); color: var(--text-main); font-family: Arial, sans-serif; }
-    .editor-page { height: 100%; display: flex; flex-direction: column; padding: 12px; box-sizing: border-box; }
-    #visualEditorRoot { flex: 1; min-height: 75vh; }
-    .action-bar { display:flex; justify-content:flex-end; gap:10px; padding-top:10px; }
-    .save-button { background:#1ea74f; color:#fff; border:0; padding:10px 18px; border-radius:6px; cursor:pointer; }
-    .cancel-button { background:#6c757d; color:#fff; text-decoration:none; padding:10px 18px; border-radius:6px; }
+    .editor-page { height: 100%; display: flex; flex-direction: column; padding: 0; box-sizing: border-box; }
+    .editor-host { flex: 1; min-height: 100vh; }
+    .jodit-container:not(.jodit_inline) { height: 100% !important; border: 0 !important; border-radius: 0 !important; }
+    .jodit-workplace { min-height: calc(100vh - 56px) !important; }
+    .jodit-status-bar { display: none; }
   </style>
 </head>
 <body>
@@ -28,36 +28,63 @@
   <input type="hidden" name="path" value="{{.Path}}" />
   <input type="hidden" name="title" value="{{.Title}}" />
   <input type="hidden" id="htmlContentField" name="html" />
-  <div id="visualEditorRoot"></div>
-  <div class="action-bar">
-    <a class="cancel-button" href="{{.Path}}">{{index .T "edit_cancel"}}</a>
-    <button class="save-button" type="submit">{{index .T "edit_save"}}</button>
-  </div>
+  <textarea id="visualEditorRoot" class="editor-host">{{.HTML}}</textarea>
 </form>
-<script src="https://uicdn.toast.com/editor/latest/toastui-editor-all.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/jodit@4.2.47/es2021/jodit.min.js"></script>
 <script>
 const initialHtmlContent = {{printf "%q" .HTML}};
 
+function submitVisualEditorForm(visualHtmlEditor) {
+  const visualEditorFormElement = document.getElementById('visualEditorForm');
+  const htmlContentFieldElement = document.getElementById('htmlContentField');
+  htmlContentFieldElement.value = visualHtmlEditor.value;
+  visualEditorFormElement.submit();
+}
+
 function createVisualHtmlEditor() {
-  return new toastui.Editor({
-    el: document.querySelector('#visualEditorRoot'),
-    initialValue: initialHtmlContent,
-    initialEditType: 'wysiwyg',
-    previewStyle: 'vertical',
-    height: '100%'
+  return Jodit.make('#visualEditorRoot', {
+    value: initialHtmlContent,
+    height: '100%',
+    width: '100%',
+    toolbarAdaptive: false,
+    showCharsCounter: false,
+    showWordsCounter: false,
+    showXPathInStatusbar: false,
+    buttons: [
+      'source', '|', 'bold', 'italic', 'underline', 'strikethrough', '|',
+      'ul', 'ol', '|', 'outdent', 'indent', '|', 'left', 'center', 'right', '|',
+      'fontsize', 'brush', 'paragraph', '|', 'link', 'image', 'table', '|',
+      'undo', 'redo', '|', {
+        name: 'savePageHtml',
+        iconURL: '/p/static/accept.png',
+        tooltip: 'Save page',
+        exec: function executeSave(editorInstance) {
+          submitVisualEditorForm(editorInstance);
+        }
+      }, '|', {
+        name: 'cancelEdit',
+        iconURL: '/p/static/cancel.png',
+        tooltip: 'Cancel edit',
+        exec: function executeCancel() {
+          window.location.href = {{printf "%q" .Path}};
+        }
+      }
+    ]
   });
 }
 
-function connectSavePipeline(visualHtmlEditor) {
-  const visualEditorFormElement = document.getElementById('visualEditorForm');
-  const htmlContentFieldElement = document.getElementById('htmlContentField');
-  visualEditorFormElement.addEventListener('submit', function onSubmit() {
-    htmlContentFieldElement.value = visualHtmlEditor.getHTML();
+function connectSaveHotkey(visualHtmlEditor) {
+  visualHtmlEditor.events.on('keydown', function onEditorKeyDown(editorEvent) {
+    const pressedCtrlOrMeta = editorEvent.ctrlKey || editorEvent.metaKey;
+    if (pressedCtrlOrMeta && editorEvent.key.toLowerCase() === 's') {
+      editorEvent.preventDefault();
+      submitVisualEditorForm(visualHtmlEditor);
+    }
   });
 }
 
 const visualHtmlEditor = createVisualHtmlEditor();
-connectSavePipeline(visualHtmlEditor);
+connectSaveHotkey(visualHtmlEditor);
 </script>
 </body>
 </html>
