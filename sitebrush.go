@@ -175,6 +175,15 @@ func (a *App) migrate(ctx context.Context) error {
 	_, _ = a.db.ExecContext(ctx, `UPDATE pages SET domain=? WHERE domain IS NULL OR TRIM(domain)=''`, legacyDomain)
 	_, _ = a.db.ExecContext(ctx, `UPDATE revisions SET domain=? WHERE domain IS NULL OR TRIM(domain)=''`, legacyDomain)
 	_, _ = a.db.ExecContext(ctx, `UPDATE revisions SET is_active=1 WHERE is_active IS NULL`)
+	_, _ = a.db.ExecContext(ctx, `
+		INSERT INTO published_pages(domain,path,title,html)
+		SELECT p.domain,p.path,p.title,p.html
+		FROM pages AS p
+		WHERE p.published=1
+		AND NOT EXISTS (
+			SELECT 1 FROM published_pages AS pp WHERE pp.domain=p.domain AND pp.path=p.path
+		)
+	`)
 	return nil
 }
 
