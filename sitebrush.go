@@ -100,6 +100,10 @@ func accessLogMiddleware(next http.Handler) http.Handler {
 			logType = "STATIC"
 			logColor = colorGreen
 		}
+		if strings.TrimSpace(r.URL.RawQuery) == "" {
+			log.Printf("%s%s%s method=%s path=%s status=%d remote=%s duration=%s", logColor, logType, colorReset, r.Method, r.URL.Path, writer.statusCode, r.RemoteAddr, time.Since(startedAt).String())
+			return
+		}
 		log.Printf("%s%s%s method=%s path=%s query=%s status=%d remote=%s duration=%s", logColor, logType, colorReset, r.Method, r.URL.Path, r.URL.RawQuery, writer.statusCode, r.RemoteAddr, time.Since(startedAt).String())
 	})
 }
