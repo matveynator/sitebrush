@@ -1,53 +1,71 @@
 <!doctype html>
 <html lang="en">
 <head>
-  <script>
-  (function applySystemThemeMode() {
-    const prefersDarkMode = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
-    document.documentElement.setAttribute('data-bs-theme', prefersDarkMode ? 'dark' : 'light');
-  })();
-  </script>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Revisions {{.Path}}</title>
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
-  <style>body{background:#eef4fb url('/p/static/bg.png') repeat}.revision-card{border-left:5px solid #2d6cdf}</style>
+  <style>
+    body { background:#efefef; color:#333; font-family:Arial,Helvetica,sans-serif; }
+    .revisions-wrap { max-width: 1700px; margin: 40px auto; background: transparent; }
+    .revisions-header { border-bottom:1px solid #d5d5d5; padding-bottom:12px; margin-bottom:20px; }
+    .revisions-title-link { color:#1481c4; text-decoration:none; font-weight:700; }
+    .revisions-subtitle { color:#8a8a8a; font-size:42px; margin-right:8px; vertical-align:middle; }
+    .revisions-table thead th { border-bottom:1px solid #cfcfcf; color:#444; font-weight:700; }
+    .revisions-table tbody td { border-top:1px solid #d8d8d8; vertical-align:middle; }
+    .revision-disabled td { color:#8e8e8e; text-decoration:line-through; }
+    .btn-red { background:#ce3e3a; border-color:#b52b27; color:#fff; }
+    .btn-green { background:#5cae4e; border-color:#4f9643; color:#fff; }
+  </style>
 </head>
 <body>
-<div class="container py-4">
-  <div class="d-flex align-items-center justify-content-between mb-3">
-    <h1 class="h4 mb-0"><a href="/" class="text-decoration-none">{{.Domain}}</a> · <img src="/p/static/revisions.png" width="18" alt=""> {{index .T "revisions_for"}} {{.Path}}</h1>
-    <a class="btn btn-outline-primary" href="{{.ReturnPath}}"><img src="/p/static/arrow-left-up.png" width="16" alt=""> {{index .T "back_to_uri"}}</a>
+<div class="revisions-wrap px-3">
+  <div class="revisions-header d-flex justify-content-between align-items-center gap-3 flex-wrap">
+    <h1 class="h2 mb-0 d-flex align-items-center gap-2">
+      <a href="/" class="revisions-title-link">{{.Domain}}</a>
+      <span class="text-secondary fw-normal">| {{index .T "revisions_for"}} {{.Path}}</span>
+    </h1>
+    <a class="btn btn-outline-secondary" href="{{.ReturnPath}}">{{index .T "back_to_uri"}}</a>
   </div>
-  {{range .Revisions}}
-  <div class="card revision-card mb-3 shadow-sm border-0">
-    <div class="card-body">
-      <div class="d-flex justify-content-between align-items-center mb-2">
-        <strong>#{{.ID}}</strong><small class="text-secondary">{{.CreatedAt}} · {{if eq .IsActive 1}}Active{{else}}Disabled{{end}}</small>
-      </div>
-      <div class="d-flex gap-2 mb-3">
-        <form method="post" action="/revision/restore">
-          <input type="hidden" name="id" value="{{.ID}}"/>
-          <button class="btn btn-success btn-sm"><img src="/p/static/arrow_undo.png" width="14" alt=""> Restore</button>
-        </form>
-        <form method="post" action="/revision/delete">
+
+  <table class="table revisions-table">
+    <thead>
+    <tr>
+      <th>#</th>
+      <th>Date</th>
+      <th>Revision snippet</th>
+      <th>Action</th>
+      <th>Status</th>
+    </tr>
+    </thead>
+    <tbody>
+    {{range .Revisions}}
+    <tr class="{{if eq .IsActive 0}}revision-disabled{{end}}">
+      <td>{{.ID}}</td>
+      <td>{{.CreatedAt}}</td>
+      <td><code>{{printf "%.120s" .HTML}}</code></td>
+      <td>
+        {{if eq .IsActive 1}}
+        <form method="post" action="/revision/toggle" class="d-inline">
           <input type="hidden" name="id" value="{{.ID}}"/>
           <input type="hidden" name="path" value="{{.PagePath}}"/>
-          <button class="btn btn-danger btn-sm"><img src="/p/static/cross.png" width="14" alt=""> Disable</button>
+          <input type="hidden" name="enable" value="0"/>
+          <button class="btn btn-red btn-sm">disable</button>
         </form>
-        {{if eq .IsActive 0}}
-        <form method="post" action="/revision/toggle">
+        {{else}}
+        <form method="post" action="/revision/toggle" class="d-inline">
           <input type="hidden" name="id" value="{{.ID}}"/>
           <input type="hidden" name="path" value="{{.PagePath}}"/>
           <input type="hidden" name="enable" value="1"/>
-          <button class="btn btn-primary btn-sm"><img src="/p/static/accept.png" width="14" alt=""> Enable</button>
+          <button class="btn btn-green btn-sm">enable</button>
         </form>
         {{end}}
-      </div>
-      <pre class="bg-light p-3 rounded" style="white-space:pre-wrap">{{.HTML}}</pre>
-    </div>
-  </div>
-  {{end}}
+      </td>
+      <td>{{if eq .IsActive 1}}active{{else}}disabled{{end}}</td>
+    </tr>
+    {{end}}
+    </tbody>
+  </table>
 </div>
 </body>
 </html>

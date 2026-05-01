@@ -411,7 +411,10 @@ func (a *App) editPage(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, r.URL.Path+"?login", http.StatusFound)
 		return
 	}
-	pagePath := r.URL.Query().Get("path")
+	pagePath := cleanPath(r.URL.Query().Get("path"))
+	if pagePath == "/" && strings.TrimSpace(r.URL.Query().Get("path")) == "" {
+		pagePath = cleanPath(r.URL.Path)
+	}
 	if pagePath == "" {
 		pagePath = r.URL.Path
 	}
@@ -435,7 +438,10 @@ func (a *App) editModePage(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, r.URL.Path+"?login", http.StatusFound)
 		return
 	}
-	pagePath := r.URL.Query().Get("path")
+	pagePath := cleanPath(r.URL.Query().Get("path"))
+	if pagePath == "/" && strings.TrimSpace(r.URL.Query().Get("path")) == "" {
+		pagePath = cleanPath(r.URL.Path)
+	}
 	if pagePath == "" {
 		pagePath = r.URL.Path
 	}
@@ -454,7 +460,10 @@ func (a *App) editRawPage(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, r.URL.Path+"?login", http.StatusFound)
 		return
 	}
-	pagePath := r.URL.Query().Get("path")
+	pagePath := cleanPath(r.URL.Query().Get("path"))
+	if pagePath == "/" && strings.TrimSpace(r.URL.Query().Get("path")) == "" {
+		pagePath = cleanPath(r.URL.Path)
+	}
 	if pagePath == "" {
 		pagePath = r.URL.Path
 	}
@@ -600,7 +609,10 @@ func (a *App) revisionsPage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
-	pagePath := r.URL.Query().Get("path")
+	pagePath := cleanPath(r.URL.Query().Get("path"))
+	if pagePath == "/" && strings.TrimSpace(r.URL.Query().Get("path")) == "" {
+		pagePath = cleanPath(r.URL.Path)
+	}
 	domain := a.siteDomain(r.Context(), r)
 	revisionRows, err := a.db.QueryContext(r.Context(), `SELECT id,page_path,html,created_at,is_active FROM revisions WHERE domain=? AND page_path=? ORDER BY id DESC`, domain, pagePath)
 	if err != nil {
