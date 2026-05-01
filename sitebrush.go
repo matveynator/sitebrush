@@ -307,6 +307,10 @@ func (a *App) setupAdmin(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) registerPage(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodPost {
+		a.setupAdmin(w, r)
+		return
+	}
 	domain := a.siteDomain(r.Context(), r)
 	if a.hasAdmin(r.Context(), domain) {
 		http.Redirect(w, r, r.URL.Path+"?login", http.StatusFound)
