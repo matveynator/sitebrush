@@ -876,6 +876,49 @@ func buildContextMenuScript(isAdmin bool, isFrozen bool, pagePath, domain string
     cancelButtonElement.addEventListener("click", closeDialog);
     confirmButtonElement.addEventListener("click", function onConfirmClick() { closeDialog(); onConfirm(); });
   }
+  function openPublishConfirmationDialog(confirmMessageText, changedPagePaths, onConfirm) {
+    const overlayElement = document.createElement("div");
+    overlayElement.className = "SiteBrushConfirmOverlay";
+    const modalElement = document.createElement("div");
+    modalElement.className = "SiteBrushConfirmModal";
+    const textElement = document.createElement("p");
+    textElement.className = "SiteBrushConfirmText";
+    textElement.textContent = confirmMessageText;
+    modalElement.appendChild(textElement);
+    if (Array.isArray(changedPagePaths) && changedPagePaths.length > 0) {
+      const listElement = document.createElement("ul");
+      listElement.className = "SiteBrushPublishPreviewList";
+      for (const changedPagePath of changedPagePaths) {
+        const itemElement = document.createElement("li");
+        itemElement.className = "SiteBrushPublishPreviewListItem";
+        const linkElement = document.createElement("a");
+        linkElement.className = "SiteBrushPublishPreviewLink";
+        linkElement.href = changedPagePath;
+        linkElement.textContent = changedPagePath;
+        itemElement.appendChild(linkElement);
+        listElement.appendChild(itemElement);
+      }
+      modalElement.appendChild(listElement);
+    }
+    const actionRowElement = document.createElement("div");
+    actionRowElement.className = "SiteBrushConfirmActions";
+    const confirmButtonElement = document.createElement("button");
+    confirmButtonElement.type = "button";
+    confirmButtonElement.className = "SiteBrushConfirmButton";
+    confirmButtonElement.textContent = confirmYesLabel;
+    const cancelButtonElement = document.createElement("button");
+    cancelButtonElement.type = "button";
+    cancelButtonElement.className = "SiteBrushCancelButton";
+    cancelButtonElement.textContent = confirmNoLabel;
+    actionRowElement.appendChild(confirmButtonElement);
+    actionRowElement.appendChild(cancelButtonElement);
+    modalElement.appendChild(actionRowElement);
+    overlayElement.appendChild(modalElement);
+    document.body.appendChild(overlayElement);
+    function closeDialog() { overlayElement.remove(); }
+    cancelButtonElement.addEventListener("click", closeDialog);
+    confirmButtonElement.addEventListener("click", function onConfirmClick() { closeDialog(); onConfirm(); });
+  }
   document.addEventListener("click", function onActionClick(browserEvent) {
     const actionButtonElement = browserEvent.target && browserEvent.target.closest && browserEvent.target.closest("[data-sitebrush-action]");
     if (!actionButtonElement) {
@@ -902,7 +945,7 @@ func buildContextMenuScript(isAdmin bool, isFrozen bool, pagePath, domain string
 	          if (previewPayload.changed === 0) {
 	            summaryText = "` + publishPreviewNoChangesLabel + `";
 	          }
-	          openConfirmationDialog(selectedActionConfig.message + "\n\n" + summaryText, submitConfirmedAction);
+	          openPublishConfirmationDialog(selectedActionConfig.message + "\n\n" + summaryText, previewPayload.paths || [], submitConfirmedAction);
 	        })
         .catch(function fallbackPublishConfirmation() {
           openConfirmationDialog(selectedActionConfig.message + "\n\n" + "` + publishPreviewLoadingLabel + `", submitConfirmedAction);
@@ -1019,6 +1062,9 @@ func contextMenuStylesAndHelpers() string {
 .SiteBrushConfirmOverlay{position:fixed;inset:0;background:rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center;z-index:100000}
 .SiteBrushConfirmModal{background:#fff;border:1px solid #8ea4c1;min-width:260px;max-width:340px;padding:16px;font-family:Arial,Helvetica,sans-serif}
 .SiteBrushConfirmText{margin:0 0 14px 0;color:#1f3f6f;font-size:14px}
+.SiteBrushPublishPreviewList{list-style:none;margin:0 0 12px 0;padding:0;max-height:180px;overflow:auto}
+.SiteBrushPublishPreviewListItem{margin:0 0 4px 0}
+.SiteBrushPublishPreviewLink{color:#1f3f6f;text-decoration:underline;font-size:13px}
 .SiteBrushConfirmActions{display:flex;gap:8px;justify-content:flex-end}
 .SiteBrushConfirmButton,.SiteBrushCancelButton{border:1px solid #8ea4c1;background:#f2f7ff;padding:6px 12px;cursor:pointer;font-size:13px}
 .SiteBrushTreeOverlay{position:fixed;inset:0;background:rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center;z-index:100000}
@@ -1521,17 +1567,18 @@ func (a *App) publishPreviewJSON(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	domain := a.siteDomain(r.Context(), r)
-	totalPagesCount, changedPagesCount := a.countPublishChanges(r.Context(), domain)
+	totalPagesCount, changedPagesCount, changedPagePaths := a.countPublishChanges(r.Context(), domain)
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]any{"total": totalPagesCount, "changed": changedPagesCount, "unchanged": totalPagesCount - changedPagesCount})
+	_ = json.NewEncoder(w).Encode(map[string]any{"total": totalPagesCount, "changed": changedPagesCount, "unchanged": totalPagesCount - changedPagesCount, "paths": changedPagePaths})
 }
 
-func (a *App) countPublishChanges(ctx context.Context, domain string) (int, int) {
+func (a *App) countPublishChanges(ctx context.Context, domain string) (int, int, []string) {
 	totalPagesCount := 0
 	changedPagesCount := 0
+	changedPagePaths := make([]string, 0)
 	revisionRows, err := a.db.QueryContext(ctx, `SELECT page_path,html FROM revisions WHERE domain=? AND is_active=1 ORDER BY page_path ASC, id DESC`, domain)
 	if err != nil {
-		return 0, 0
+		return 0, 0, changedPagePaths
 	}
 	defer revisionRows.Close()
 	latestRevisionByPath := make(map[string]string)
@@ -1547,7 +1594,7 @@ func (a *App) countPublishChanges(ctx context.Context, domain string) (int, int)
 	}
 	pageRows, pageQueryErr := a.db.QueryContext(ctx, `SELECT path,title,html FROM pages WHERE domain=? ORDER BY path ASC`, domain)
 	if pageQueryErr != nil {
-		return 0, 0
+		return 0, 0, changedPagePaths
 	}
 	defer pageRows.Close()
 	for pageRows.Next() {
@@ -1564,18 +1611,18 @@ func (a *App) countPublishChanges(ctx context.Context, domain string) (int, int)
 		readPublishedErr := a.db.QueryRowContext(ctx, `SELECT title,html FROM published_pages WHERE domain=? AND path=?`, domain, pagePath).Scan(&previousPublishedTitle, &previousPublishedHTML)
 		if hasPublishedPageChanged(readPublishedErr, previousPublishedTitle, previousPublishedHTML, pageTitle, pageHTMLToPublish) {
 			changedPagesCount++
+			changedPagePaths = append(changedPagePaths, pagePath)
 		}
 	}
-	return totalPagesCount, changedPagesCount
+	return totalPagesCount, changedPagesCount, changedPagePaths
 }
 
 func hasPublishedPageChanged(readPublishedErr error, previousPublishedTitle, previousPublishedHTML, nextPublishedTitle, nextPublishedHTML string) bool {
 	if readPublishedErr != nil {
 		return true
 	}
-	if strings.TrimSpace(previousPublishedTitle) != strings.TrimSpace(nextPublishedTitle) {
-		return true
-	}
+	_ = previousPublishedTitle
+	_ = nextPublishedTitle
 	return normalizePublishedHTML(previousPublishedHTML) != normalizePublishedHTML(nextPublishedHTML)
 }
 
