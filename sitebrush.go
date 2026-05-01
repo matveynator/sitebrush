@@ -76,18 +76,30 @@ func (writer *statusCapturingResponseWriter) WriteHeader(statusCode int) {
 
 func accessLogMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		const (
+			colorGreen = "\033[32m"
+			colorBlue  = "\033[34m"
+			colorReset = "\033[0m"
+		)
 		startedAt := time.Now()
 		writer := &statusCapturingResponseWriter{ResponseWriter: w, statusCode: http.StatusOK}
 		next.ServeHTTP(writer, r)
 		contentSource := writer.Header().Get("X-Sitebrush-Source")
 		logType := "REQUEST"
+		logColor := colorBlue
 		if contentSource == "static" {
 			logType = "STATIC"
+			logColor = colorGreen
 		}
 		if contentSource == "dynamic" {
 			logType = "DYNAMIC"
+			logColor = colorBlue
 		}
-		log.Printf("%s method=%s path=%s query=%s status=%d remote=%s duration=%s", logType, r.Method, r.URL.Path, r.URL.RawQuery, writer.statusCode, r.RemoteAddr, time.Since(startedAt).String())
+		if contentSource == "" && (strings.HasPrefix(r.URL.Path, "/p/static/") || strings.HasPrefix(r.URL.Path, "/assets/")) {
+			logType = "STATIC"
+			logColor = colorGreen
+		}
+		log.Printf("%s%s%s method=%s path=%s query=%s status=%d remote=%s duration=%s", logColor, logType, colorReset, r.Method, r.URL.Path, r.URL.RawQuery, writer.statusCode, r.RemoteAddr, time.Since(startedAt).String())
 	})
 }
 
