@@ -231,11 +231,16 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 	domain := a.siteDomain(r.Context(), r)
 	pageRecord, err := a.findPage(r.Context(), domain, pagePath)
 	if err == nil && a.isAdminRequest(r) {
+		a.logContentDelivery("db-draft", domain, pagePath)
 		_, _ = w.Write([]byte(a.wrapWithMenu(r, pageRecord.Path, pageRecord.HTML)))
+		return
+	}
+	if a.servePublishedStaticFile(w, r, domain, pagePath) {
 		return
 	}
 	publishedPage, publishedErr := a.findPublishedPage(r.Context(), domain, pagePath)
 	if publishedErr == nil {
+		a.logContentDelivery("db-published-fallback", domain, pagePath)
 		_, _ = w.Write([]byte(a.wrapWithMenu(r, publishedPage.Path, publishedPage.HTML)))
 		return
 	}
@@ -1099,6 +1104,7 @@ func (a *App) publishDomain(w http.ResponseWriter, r *http.Request) {
 					pageHTMLToPublish = latestActiveHTML
 				}
 				_, _ = a.db.ExecContext(r.Context(), `INSERT INTO published_pages(domain,path,title,html) VALUES(?,?,?,?)`, domain, pagePath, pageTitle, pageHTMLToPublish)
+				a.writePublishedStaticHTML(domain, pagePath, a.wrapPublishedPageWithGuestMenu(domain, pagePath, pageHTMLToPublish))
 			}
 		}
 	}
@@ -1121,6 +1127,66 @@ func (a *App) setDomainFrozenState(ctx context.Context, domain string, frozenSta
 		}
 	}
 	_, _ = a.db.ExecContext(ctx, `INSERT INTO domain_states(domain,is_frozen) VALUES(?,?)`, domain, frozenState)
+}
+
+func (a *App) servePublishedStaticFile(w http.ResponseWriter, r *http.Request, domain, pagePath string) bool {
+	if a.isAdminRequest(r) {
+		return false
+	}
+	staticFilePath := filepath.Join(a.domainStaticDir(domain), staticRelativePathForPage(pagePath))
+	if _, statErr := os.Stat(staticFilePath); statErr != nil {
+		return false
+	}
+	a.logContentDelivery("static-file", domain, pagePath)
+	http.ServeFile(w, r, staticFilePath)
+	return true
+}
+
+func (a *App) writePublishedStaticHTML(domain, pagePath, html string) {
+	staticFilePath := filepath.Join(a.domainStaticDir(domain), staticRelativePathForPage(pagePath))
+	_ = os.MkdirAll(filepath.Dir(staticFilePath), 0755)
+	_ = os.WriteFile(staticFilePath, []byte(html), 0644)
+}
+
+func (a *App) wrapPublishedPageWithGuestMenu(domain, pagePath, html string) string {
+	script := buildContextMenuScript(false, false, pagePath, domain)
+	if strings.Contains(strings.ToLower(html), "</body>") {
+		bodyClosePattern := regexp.MustCompile(`(?i)</body>`)
+		return bodyClosePattern.ReplaceAllString(html, script+"</body>")
+	}
+	return html + script
+}
+
+func staticRelativePathForPage(pagePath string) string {
+	normalizedPath := strings.TrimPrefix(pagePath, "/")
+	if normalizedPath == "" {
+		return "index.html"
+	}
+	if strings.HasSuffix(normalizedPath, "/") {
+		return normalizedPath + "index.html"
+	}
+	return normalizedPath + ".html"
+}
+
+func (a *App) domainStaticDir(domain string) string {
+	return filepath.Join("storage/static", domainStorageName(domain))
+}
+
+func (a *App) logContentDelivery(sourceType, domain, pagePath string) {
+	const (
+		colorGreen  = "\033[32m"
+		colorBlue   = "\033[34m"
+		colorYellow = "\033[33m"
+		colorReset  = "\033[0m"
+	)
+	sourceColor := colorYellow
+	if sourceType == "static-file" {
+		sourceColor = colorGreen
+	}
+	if sourceType == "db-draft" {
+		sourceColor = colorBlue
+	}
+	log.Printf("%scontent-source=%s%s domain=%s path=%s", sourceColor, sourceType, colorReset, domain, pagePath)
 }
 func domainStorageName(domain string) string {
 	return strings.NewReplacer("/", "_", "\\", "_", ":", "_", "..", "_").Replace(domain)
