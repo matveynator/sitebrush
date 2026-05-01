@@ -895,9 +895,11 @@ func (a *App) serveAsset(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
-		if rule.SingleUseLeft > 0 {
-			_, _ = a.db.ExecContext(r.Context(), `UPDATE file_access_rules SET single_use_left=single_use_left-1 WHERE domain=? AND file_name=? AND single_use_left>0`, domain, fileName)
+		if rule.SingleUseLeft <= 0 {
+			http.Error(w, "token quota exhausted", http.StatusForbidden)
+			return
 		}
+		_, _ = a.db.ExecContext(r.Context(), `UPDATE file_access_rules SET single_use_left=single_use_left-1 WHERE domain=? AND file_name=? AND single_use_left>0`, domain, fileName)
 	}
 	http.StripPrefix("/assets/", http.FileServer(http.Dir("storage/files"))).ServeHTTP(w, r)
 }
