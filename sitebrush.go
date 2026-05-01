@@ -305,10 +305,7 @@ func (a *App) setupAdmin(w http.ResponseWriter, r *http.Request) {
 func (a *App) login(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet {
 		domain := a.siteDomain(r.Context(), r)
-		returnPath := strings.TrimSpace(r.URL.Query().Get("return_path"))
-		if returnPath == "" {
-			returnPath = requestedReturnPath(r)
-		}
+		returnPath := loginReturnPathOrDefault(r)
 		a.render(w, r, "login.html", map[string]any{"ReturnPath": returnPath, "Domain": domain})
 		return
 	}
@@ -322,9 +319,9 @@ func (a *App) login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.createSession(w, r, email)
-	returnPath := r.FormValue("return_path")
+	returnPath := strings.TrimSpace(r.FormValue("return_path"))
 	if returnPath == "" {
-		returnPath = requestedReturnPath(r)
+		returnPath = loginReturnPathOrDefault(r)
 	}
 	http.Redirect(w, r, returnPath, http.StatusFound)
 }
@@ -336,7 +333,7 @@ func (a *App) logout(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) editPage(w http.ResponseWriter, r *http.Request) {
 	if !a.isAdminRequest(r) {
-		http.Error(w, "forbidden", http.StatusForbidden)
+		http.Redirect(w, r, r.URL.Path+"?login", http.StatusFound)
 		return
 	}
 	pagePath := r.URL.Query().Get("path")
@@ -356,7 +353,7 @@ func (a *App) editPage(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) editModePage(w http.ResponseWriter, r *http.Request) {
 	if !a.isAdminRequest(r) {
-		http.Error(w, "forbidden", http.StatusForbidden)
+		http.Redirect(w, r, r.URL.Path+"?login", http.StatusFound)
 		return
 	}
 	pagePath := r.URL.Query().Get("path")
@@ -371,7 +368,7 @@ func (a *App) editModePage(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) editRawPage(w http.ResponseWriter, r *http.Request) {
 	if !a.isAdminRequest(r) {
-		http.Error(w, "forbidden", http.StatusForbidden)
+		http.Redirect(w, r, r.URL.Path+"?login", http.StatusFound)
 		return
 	}
 	pagePath := r.URL.Query().Get("path")
@@ -387,6 +384,21 @@ func (a *App) editRawPage(w http.ResponseWriter, r *http.Request) {
 		record = Page{Path: pagePath, Title: pagePath, HTML: ""}
 	}
 	a.render(w, r, "edit_raw.html", record)
+}
+
+func loginReturnPathOrDefault(r *http.Request) string {
+	returnPath := strings.TrimSpace(r.URL.Query().Get("return_path"))
+	if returnPath != "" {
+		return returnPath
+	}
+	if strings.TrimSpace(r.URL.RawQuery) == "login" {
+		return r.URL.Path + "?edit"
+	}
+	refererURL, parseErr := url.Parse(strings.TrimSpace(r.Referer()))
+	if parseErr == nil && refererURL.Path == r.URL.Path && strings.TrimSpace(refererURL.RawQuery) == "edit" {
+		return refererURL.Path + "?edit"
+	}
+	return requestedReturnPath(r)
 }
 
 func (a *App) savePage(w http.ResponseWriter, r *http.Request) {
