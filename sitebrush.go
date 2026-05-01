@@ -79,7 +79,15 @@ func accessLogMiddleware(next http.Handler) http.Handler {
 		startedAt := time.Now()
 		writer := &statusCapturingResponseWriter{ResponseWriter: w, statusCode: http.StatusOK}
 		next.ServeHTTP(writer, r)
-		log.Printf("access method=%s path=%s query=%s status=%d remote=%s duration=%s", r.Method, r.URL.Path, r.URL.RawQuery, writer.statusCode, r.RemoteAddr, time.Since(startedAt).String())
+		contentSource := writer.Header().Get("X-Sitebrush-Source")
+		logType := "REQUEST"
+		if contentSource == "static" {
+			logType = "STATIC"
+		}
+		if contentSource == "dynamic" {
+			logType = "DYNAMIC"
+		}
+		log.Printf("%s method=%s path=%s query=%s status=%d remote=%s duration=%s", logType, r.Method, r.URL.Path, r.URL.RawQuery, writer.statusCode, r.RemoteAddr, time.Since(startedAt).String())
 	})
 }
 
@@ -262,7 +270,7 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 	isAdmin := a.isAdminRequest(r)
 	pageRecord, err := a.findPage(r.Context(), domain, pagePath)
 	if err == nil && isAdmin {
-		a.logContentDelivery("db-draft", domain, pagePath)
+		a.logContentDelivery(w, "db-draft")
 		_, _ = w.Write([]byte(a.wrapWithMenu(r, pageRecord.Path, pageRecord.HTML)))
 		return
 	}
@@ -275,7 +283,7 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 	}
 	publishedPage, publishedErr := a.findPublishedPage(r.Context(), domain, pagePath)
 	if publishedErr == nil {
-		a.logContentDelivery("db-published-fallback", domain, pagePath)
+		a.logContentDelivery(w, "db-published-fallback")
 		_, _ = w.Write([]byte(a.wrapWithMenu(r, publishedPage.Path, publishedPage.HTML)))
 		return
 	}
@@ -1546,7 +1554,7 @@ func (a *App) servePublishedStaticFile(w http.ResponseWriter, r *http.Request, d
 	if _, statErr := os.Stat(staticFilePath); statErr != nil {
 		return false
 	}
-	a.logContentDelivery("static-file", domain, pagePath)
+	a.logContentDelivery(w, "static-file")
 	http.ServeFile(w, r, staticFilePath)
 	return true
 }
@@ -1581,19 +1589,12 @@ func (a *App) domainStaticDir(domain string) string {
 	return filepath.Join("storage/static", domainStorageName(domain))
 }
 
-func (a *App) logContentDelivery(sourceType, domain, pagePath string) {
-	const (
-		colorGreen = "\033[32m"
-		colorBlue  = "\033[34m"
-		colorReset = "\033[0m"
-	)
-	logPrefix := "dynamic"
-	logColor := colorBlue
+func (a *App) logContentDelivery(w http.ResponseWriter, sourceType string) {
+	contentSource := "dynamic"
 	if sourceType == "static-file" {
-		logPrefix = "static"
-		logColor = colorGreen
+		contentSource = "static"
 	}
-	log.Printf("%s%s:%s domain=%s path=%s", logColor, logPrefix, colorReset, domain, pagePath)
+	w.Header().Set("X-Sitebrush-Source", contentSource)
 }
 func domainStorageName(domain string) string {
 	return strings.NewReplacer("/", "_", "\\", "_", ":", "_", "..", "_").Replace(domain)
