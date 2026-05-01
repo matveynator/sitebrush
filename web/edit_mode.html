@@ -1,5 +1,20 @@
-<!doctype html><html><body>
+<!doctype html>
+<html lang="en">
+<head>
+  <script>(function applySystemThemeMode(){const prefersDarkMode=window.matchMedia&&window.matchMedia('(prefers-color-scheme: dark)').matches;document.documentElement.setAttribute('data-bs-theme',prefersDarkMode?'dark':'light');})();</script>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Choose editor</title>
+  <style>
+    :root { color-scheme: light dark; --page-bg:#f4f8fc; --text-main:#1b2a3d; --link:#1a65d8; }
+    @media (prefers-color-scheme: dark) { :root { --page-bg:#0f1724; --text-main:#dbe8ff; --link:#9ec2ff; } }
+    body { margin: 0; padding: 24px; font-family: Arial,sans-serif; background: var(--page-bg); color: var(--text-main); }
+    a { color: var(--link); }
+  </style>
+</head>
+<body>
 <h1>Choose editor for {{.Path}}</h1>
 <p><a href="{{.Path}}?settings">Open visual editor</a></p>
 <p><a href="{{.Path}}?editraw">Open plain text editor</a></p>
-</body></html>
+</body>
+</html>

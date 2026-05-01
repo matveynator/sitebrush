@@ -666,6 +666,13 @@ func contextMenuStylesAndHelpers() string {
 .SiteBrushContextMenuLink:hover{background:#eef5ff}
 .SiteBrushDomainMenuItem .SiteBrushContextMenuLink{font-weight:700;border-bottom:1px solid #c8d5e7}
 .ContextMenuCopyright .SiteBrushContextMenuLink{font-size:12px;color:#5b6f8b;border-top:1px solid #c8d5e7;margin-top:2px;padding-top:7px}.SiteBrushMenuIcon{width:16px;height:16px;flex:0 0 16px}
+@media (prefers-color-scheme: dark){
+  .SiteBrushMenuBox{background:#172235;border-color:#2f405d}
+  .SiteBrushContextMenuLink{color:#dbe8ff}
+  .SiteBrushContextMenuLink:hover{background:#24344d}
+  .SiteBrushDomainMenuItem .SiteBrushContextMenuLink{border-bottom-color:#2f405d}
+  .ContextMenuCopyright .SiteBrushContextMenuLink{color:#a7bbd8;border-top-color:#2f405d}
+}
 </style>
 <script>
 function normalizeSitebrushMenuLinks(menuBoxElement, currentPagePath) {
