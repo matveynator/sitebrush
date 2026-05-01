@@ -189,6 +189,10 @@ func (a *App) migrate(ctx context.Context) error {
 
 func (a *App) route(w http.ResponseWriter, r *http.Request) {
 	pagePath := r.URL.Path
+	if r.URL.RawQuery == "tree" {
+		a.siteTreeJSON(w, r)
+		return
+	}
 	if r.URL.RawQuery == "edit" {
 		a.editModePage(w, r)
 		return
@@ -683,11 +687,15 @@ func buildContextMenuScript(isAdmin bool, isFrozen bool, pagePath, domain string
 	editLabel := template.JSEscapeString(translationOrDefault(translations, "menu_edit", "Edit"))
 	revisionsLabel := template.JSEscapeString(translationOrDefault(translations, "menu_revisions", "Revisions"))
 	filesLabel := template.JSEscapeString(translationOrDefault(translations, "menu_files", "Files"))
+	treeLabel := template.JSEscapeString(translationOrDefault(translations, "menu_tree", "Site tree"))
 	freezeLabel := template.JSEscapeString(translationOrDefault(translations, "menu_freeze", "Freeze"))
 	publishLabel := template.JSEscapeString(translationOrDefault(translations, "menu_publish", "Publish"))
 	settingsLabel := template.JSEscapeString(translationOrDefault(translations, "menu_domain_settings", "Domain settings"))
 	logoutLabel := template.JSEscapeString(translationOrDefault(translations, "menu_logout", "Sign out"))
 	loginLabel := template.JSEscapeString(translationOrDefault(translations, "menu_login", "Sign in"))
+	treeModalTitle := template.JSEscapeString(translationOrDefault(translations, "tree_modal_title", "Site tree"))
+	treeLoadingLabel := template.JSEscapeString(translationOrDefault(translations, "tree_loading", "Loading site tree..."))
+	treeLoadErrorLabel := template.JSEscapeString(translationOrDefault(translations, "tree_load_error", "Failed to load site tree."))
 	if isAdmin {
 		freezeActionEntry := "<li class='SiteBrushContextMenu'><button type='button' data-sitebrush-action='freeze' class='SiteBrushContextMenuLink SiteBrushContextMenuButton'><img src='/p/static/freeze.png' class='SiteBrushMenuIcon' alt=''>" + freezeLabel + "</button></li>"
 		if isFrozen {
@@ -742,6 +750,10 @@ func buildContextMenuScript(isAdmin bool, isFrozen bool, pagePath, domain string
     }
     browserEvent.preventDefault();
     const actionName = actionButtonElement.getAttribute("data-sitebrush-action");
+    if (actionName === "tree") {
+      openSiteTreeDialog();
+      return;
+    }
     const selectedActionConfig = actionConfigByName[actionName];
     if (!selectedActionConfig) {
       return;
@@ -769,6 +781,7 @@ func buildContextMenuScript(isAdmin bool, isFrozen bool, pagePath, domain string
       "<li class='SiteBrushContextMenu'><a href='?edit' class='SiteBrushContextMenuLink'><img src='/p/static/pencil.png' class='SiteBrushMenuIcon' alt=''>" + "` + editLabel + `" + "</a></li>",
       "<li class='SiteBrushContextMenu'><a href='?revisions' class='SiteBrushContextMenuLink'><img src='/p/static/revisions.png' class='SiteBrushMenuIcon' alt=''>" + "` + revisionsLabel + `" + "</a></li>",
       "<li class='SiteBrushContextMenu'><a href='?files' class='SiteBrushContextMenuLink'><img src='/p/static/upload.png' class='SiteBrushMenuIcon' alt=''>" + "` + filesLabel + `" + "</a></li>",
+      "<li class='SiteBrushContextMenu'><button type='button' data-sitebrush-action='tree' class='SiteBrushContextMenuLink SiteBrushContextMenuButton'><img src='/p/static/tree.png' class='SiteBrushMenuIcon' alt=''>" + "` + treeLabel + `" + "</button></li>",
       "` + freezeActionEntry + `",
       "<li class='SiteBrushContextMenu'><a href='?settings' class='SiteBrushContextMenuLink'><img src='/p/static/revisions.png' class='SiteBrushMenuIcon' alt=''>" + "` + settingsLabel + `" + "</a></li>",
       "<li class='SiteBrushContextMenu'><a href='?logout' class='SiteBrushContextMenuLink'><img src='/p/static/sign-out.png' class='SiteBrushMenuIcon' alt=''>" + "` + logoutLabel + `" + "</a></li>",
@@ -777,6 +790,35 @@ func buildContextMenuScript(isAdmin bool, isFrozen bool, pagePath, domain string
     ];
     showSitebrushMenu(browserEvent, menuHtmlEntries, currentPagePath);
 	  }, {capture: false, passive: false});
+  function openSiteTreeDialog() {
+    const overlayElement = document.createElement("div");
+    overlayElement.className = "SiteBrushTreeOverlay";
+    const modalElement = document.createElement("div");
+    modalElement.className = "SiteBrushTreeModal";
+    const titleElement = document.createElement("h3");
+    titleElement.className = "SiteBrushTreeTitle";
+    titleElement.textContent = "` + treeModalTitle + `";
+    const contentElement = document.createElement("div");
+    contentElement.className = "SiteBrushTreeContent";
+    contentElement.textContent = "` + treeLoadingLabel + `";
+    const closeButtonElement = document.createElement("button");
+    closeButtonElement.type = "button";
+    closeButtonElement.className = "SiteBrushCancelButton";
+    closeButtonElement.textContent = "` + confirmNoLabel + `";
+    modalElement.appendChild(titleElement);
+    modalElement.appendChild(contentElement);
+    modalElement.appendChild(closeButtonElement);
+    overlayElement.appendChild(modalElement);
+    document.body.appendChild(overlayElement);
+    closeButtonElement.addEventListener("click", function closeTreeDialog() { overlayElement.remove(); });
+    fetch(currentPagePath + "?tree", { headers: { "Accept": "application/json" } })
+      .then(function parseTreeResponse(treeResponse) {
+        if (!treeResponse.ok) { throw new Error("tree request failed"); }
+        return treeResponse.json();
+      })
+      .then(function renderTree(treeData) { renderSiteTree(contentElement, treeData); })
+      .catch(function showTreeError() { contentElement.textContent = "` + treeLoadErrorLabel + `"; });
+  }
 })();
 	</script>`
 	}
@@ -826,12 +868,21 @@ func contextMenuStylesAndHelpers() string {
 .SiteBrushConfirmText{margin:0 0 14px 0;color:#1f3f6f;font-size:14px}
 .SiteBrushConfirmActions{display:flex;gap:8px;justify-content:flex-end}
 .SiteBrushConfirmButton,.SiteBrushCancelButton{border:1px solid #8ea4c1;background:#f2f7ff;padding:6px 12px;cursor:pointer;font-size:13px}
+.SiteBrushTreeOverlay{position:fixed;inset:0;background:rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center;z-index:100000}
+.SiteBrushTreeModal{background:#fff;border:1px solid #8ea4c1;min-width:320px;max-width:700px;max-height:80vh;overflow:auto;padding:16px;font-family:Arial,Helvetica,sans-serif}
+.SiteBrushTreeTitle{margin:0 0 12px 0;color:#1f3f6f;font-size:18px}
+.SiteBrushTreeContent{margin:0 0 12px 0;color:#1f3f6f;font-size:14px}
+.SiteBrushTreeList{list-style:none;margin:0;padding-left:16px}
+.SiteBrushTreeLink{color:#1f3f6f;text-decoration:none;font-size:14px;line-height:1.6}
+.SiteBrushTreeCurrent{font-weight:700;text-decoration:underline}
 @media (prefers-color-scheme: dark){
   .SiteBrushMenuBox{background:#172235;border-color:#2f405d}
   .SiteBrushContextMenuLink{color:#dbe8ff}
   .SiteBrushContextMenuLink:hover{background:#24344d}
   .SiteBrushDomainMenuItem .SiteBrushContextMenuLink{border-bottom-color:#2f405d}
   .ContextMenuCopyright .SiteBrushContextMenuLink{color:#a7bbd8;border-top-color:#2f405d}
+  .SiteBrushTreeModal{background:#172235;border-color:#2f405d}
+  .SiteBrushTreeTitle,.SiteBrushTreeContent,.SiteBrushTreeLink{color:#dbe8ff}
 }
 </style>
 <script>
@@ -864,6 +915,54 @@ function showSitebrushMenu(browserEvent, menuHtmlEntries, currentPagePath) {
       openMenu.remove();
     }
   }, { once: true });
+}
+function buildSiteTreeStateFromPaths(pagePathList, currentPagePath) {
+  const rootNode = { name: "/", fullPath: "/", childrenByName: {}, childList: [] };
+  for (const fullPathEntry of pagePathList) {
+    const normalizedPath = fullPathEntry === "/" ? "/" : fullPathEntry.replace(/\/+$/, "");
+    const pathPartList = normalizedPath === "/" ? [] : normalizedPath.split("/").filter(function isSegmentPresent(pathSegment) { return pathSegment !== ""; });
+    let currentNode = rootNode;
+    let builtPath = "";
+    for (const pathPart of pathPartList) {
+      builtPath += "/" + pathPart;
+      if (!currentNode.childrenByName[pathPart]) {
+        const nextNode = { name: pathPart, fullPath: builtPath, childrenByName: {}, childList: [] };
+        currentNode.childrenByName[pathPart] = nextNode;
+        currentNode.childList.push(nextNode);
+      }
+      currentNode = currentNode.childrenByName[pathPart];
+    }
+  }
+  const sortBranch = function sortBranchNodes(branchNode) {
+    branchNode.childList.sort(function compareBranchNames(leftBranch, rightBranch) { return leftBranch.name.localeCompare(rightBranch.name); });
+    for (const childBranch of branchNode.childList) { sortBranch(childBranch); }
+  };
+  sortBranch(rootNode);
+  rootNode.currentPath = currentPagePath;
+  return rootNode;
+}
+function renderSiteTree(hostElement, treeData) {
+  hostElement.textContent = "";
+  const treeState = buildSiteTreeStateFromPaths(treeData.paths || [], treeData.current_path || "/");
+  const branchRootList = document.createElement("ul");
+  branchRootList.className = "SiteBrushTreeList";
+  hostElement.appendChild(branchRootList);
+  const renderBranchNode = function renderBranchNodeRecursive(branchNode, parentListElement) {
+    const branchListItemElement = document.createElement("li");
+    const branchLinkElement = document.createElement("a");
+    branchLinkElement.className = "SiteBrushTreeLink";
+    branchLinkElement.href = branchNode.fullPath + "?edit";
+    branchLinkElement.textContent = branchNode.fullPath;
+    if (branchNode.fullPath === treeState.currentPath) { branchLinkElement.classList.add("SiteBrushTreeCurrent"); }
+    branchListItemElement.appendChild(branchLinkElement);
+    parentListElement.appendChild(branchListItemElement);
+    if (branchNode.childList.length === 0) { return; }
+    const childListElement = document.createElement("ul");
+    childListElement.className = "SiteBrushTreeList";
+    branchListItemElement.appendChild(childListElement);
+    for (const childNode of branchNode.childList) { renderBranchNodeRecursive(childNode, childListElement); }
+  };
+  renderBranchNode(treeState, branchRootList);
 }
 </script>`
 }
@@ -1221,6 +1320,30 @@ func (a *App) findPublishedPage(ctx context.Context, domain, pagePath string) (P
 	var current Page
 	err := a.db.QueryRowContext(ctx, `SELECT domain,path,title,html FROM published_pages WHERE domain=? AND path=?`, domain, pagePath).Scan(&current.Domain, &current.Path, &current.Title, &current.HTML)
 	return current, err
+}
+
+func (a *App) siteTreeJSON(w http.ResponseWriter, r *http.Request) {
+	if !a.isAdminRequest(r) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	domain := a.siteDomain(r.Context(), r)
+	pageRows, err := a.db.QueryContext(r.Context(), `SELECT path FROM pages WHERE domain=? ORDER BY path ASC`, domain)
+	if err != nil {
+		http.Error(w, "failed to read site tree", http.StatusInternalServerError)
+		return
+	}
+	defer pageRows.Close()
+	pathList := []string{"/"}
+	for pageRows.Next() {
+		var pagePath string
+		if scanErr := pageRows.Scan(&pagePath); scanErr != nil {
+			continue
+		}
+		pathList = append(pathList, pagePath)
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{"current_path": requestedReturnPath(r), "paths": pathList})
 }
 
 func (a *App) setDomainFrozenState(ctx context.Context, domain string, frozenState int) {
