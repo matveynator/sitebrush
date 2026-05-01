@@ -60,8 +60,20 @@ type Revision struct {
 }
 
 type ManagedFile struct {
-	Name string
-	Size int64
+	Name          string
+	Size          int64
+	AssetPath     string
+	AccessMode    string
+	Token         string
+	ExpiresAt     string
+	SingleUseLeft int
+}
+
+type ManagedFileAccess struct {
+	AccessMode    string
+	Token         string
+	ExpiresAt     string
+	SingleUseLeft int
 }
 
 type statusCapturingResponseWriter struct {
@@ -153,7 +165,7 @@ func main() {
 		log.Fatal(err)
 	}
 	router.Handle("/p/static/", http.StripPrefix("/p/static/", http.FileServer(http.FS(staticFiles))))
-	router.Handle("/assets/", http.StripPrefix("/assets/", http.FileServer(http.Dir("storage/files"))))
+	router.HandleFunc("/assets/", application.serveAsset)
 	router.HandleFunc("/setup", application.setupAdmin)
 	router.HandleFunc("/login", application.login)
 	router.HandleFunc("/logout", application.logout)
@@ -200,6 +212,7 @@ func (a *App) migrate(ctx context.Context) error {
 		`CREATE TABLE IF NOT EXISTS revisions(id INTEGER PRIMARY KEY AUTOINCREMENT,domain TEXT,page_path TEXT,html TEXT,created_at TEXT,is_active INTEGER DEFAULT 1);`,
 		`CREATE TABLE IF NOT EXISTS domain_aliases(primary_domain TEXT,alias_domain TEXT UNIQUE);`,
 		`CREATE TABLE IF NOT EXISTS domain_states(domain TEXT PRIMARY KEY,is_frozen INTEGER DEFAULT 0);`,
+		`CREATE TABLE IF NOT EXISTS file_access_rules(domain TEXT,file_name TEXT,access_mode TEXT,token TEXT,expires_at TEXT,single_use_left INTEGER DEFAULT 0,PRIMARY KEY(domain,file_name));`,
 	}
 	for _, query := range queries {
 		if _, err := a.db.ExecContext(ctx, query); err != nil {
@@ -750,8 +763,12 @@ func (a *App) filesPage(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.Method == http.MethodPost {
 		fileName := safeFileName(r.FormValue("name"))
-		if fileName != "" {
+		action := r.FormValue("action")
+		if action == "save_access" && fileName != "" {
+			a.saveFileAccessRule(r.Context(), r, fileName)
+		} else if fileName != "" {
 			_ = os.Remove(filepath.Join(a.domainFilesDir(r), fileName))
+			_, _ = a.db.ExecContext(r.Context(), `DELETE FROM file_access_rules WHERE domain=? AND file_name=?`, domainStorageName(a.siteDomain(r.Context(), r)), fileName)
 		}
 		currentPath := r.URL.Query().Get("path")
 		if currentPath == "" {
@@ -774,7 +791,16 @@ func (a *App) filesPage(w http.ResponseWriter, r *http.Request) {
 		if statErr != nil {
 			continue
 		}
-		fileList = append(fileList, ManagedFile{Name: entry.Name(), Size: fileInfo.Size()})
+		accessRule := a.fileAccessRule(r.Context(), r, entry.Name())
+		fileList = append(fileList, ManagedFile{
+			Name:          entry.Name(),
+			Size:          fileInfo.Size(),
+			AssetPath:     "/assets/" + domainStorageName(a.siteDomain(r.Context(), r)) + "/" + entry.Name(),
+			AccessMode:    accessRule.AccessMode,
+			Token:         accessRule.Token,
+			ExpiresAt:     accessRule.ExpiresAt,
+			SingleUseLeft: accessRule.SingleUseLeft,
+		})
 	}
 	currentPath := r.URL.Query().Get("path")
 	if currentPath == "" {
@@ -784,6 +810,75 @@ func (a *App) filesPage(w http.ResponseWriter, r *http.Request) {
 		currentPath = "/"
 	}
 	a.render(w, r, "files.html", map[string]any{"Path": currentPath, "Files": fileList})
+}
+
+func (a *App) fileAccessRule(ctx context.Context, r *http.Request, fileName string) ManagedFileAccess {
+	rule := ManagedFileAccess{AccessMode: "public"}
+	_ = a.db.QueryRowContext(ctx, `SELECT access_mode,token,expires_at,single_use_left FROM file_access_rules WHERE domain=? AND file_name=?`, domainStorageName(a.siteDomain(ctx, r)), fileName).Scan(&rule.AccessMode, &rule.Token, &rule.ExpiresAt, &rule.SingleUseLeft)
+	if strings.TrimSpace(rule.AccessMode) == "" {
+		rule.AccessMode = "public"
+	}
+	return rule
+}
+
+func (a *App) saveFileAccessRule(ctx context.Context, r *http.Request, fileName string) {
+	accessMode := r.FormValue("access_mode")
+	if accessMode != "token" {
+		accessMode = "public"
+	}
+	token := strings.TrimSpace(r.FormValue("access_token"))
+	days, _ := strconv.Atoi(strings.TrimSpace(r.FormValue("access_days")))
+	if days < 0 {
+		days = 0
+	}
+	singleUseLeft, _ := strconv.Atoi(strings.TrimSpace(r.FormValue("single_use_left")))
+	if singleUseLeft < 0 {
+		singleUseLeft = 0
+	}
+	expiresAt := ""
+	if days > 0 {
+		expiresAt = time.Now().Add(time.Duration(days) * 24 * time.Hour).UTC().Format(time.RFC3339)
+	}
+	_, _ = a.db.ExecContext(ctx, `INSERT INTO file_access_rules(domain,file_name,access_mode,token,expires_at,single_use_left) VALUES(?,?,?,?,?,?) ON CONFLICT(domain,file_name) DO UPDATE SET access_mode=excluded.access_mode,token=excluded.token,expires_at=excluded.expires_at,single_use_left=excluded.single_use_left`, domainStorageName(a.siteDomain(ctx, r)), fileName, accessMode, token, expiresAt, singleUseLeft)
+}
+
+func (a *App) serveAsset(w http.ResponseWriter, r *http.Request) {
+	assetReference := strings.TrimPrefix(path.Clean(r.URL.Path), "/assets/")
+	if assetReference == "." || assetReference == "" {
+		http.NotFound(w, r)
+		return
+	}
+	parts := strings.SplitN(assetReference, "/", 2)
+	if len(parts) != 2 {
+		http.NotFound(w, r)
+		return
+	}
+	domain := parts[0]
+	fileName := safeFileName(parts[1])
+	if fileName == "" {
+		http.NotFound(w, r)
+		return
+	}
+	rule := ManagedFileAccess{AccessMode: "public"}
+	_ = a.db.QueryRowContext(r.Context(), `SELECT access_mode,token,expires_at,single_use_left FROM file_access_rules WHERE domain=? AND file_name=?`, domain, fileName).Scan(&rule.AccessMode, &rule.Token, &rule.ExpiresAt, &rule.SingleUseLeft)
+	if strings.TrimSpace(rule.AccessMode) == "token" {
+		requestedToken := strings.TrimSpace(r.URL.Query().Get("token"))
+		if requestedToken == "" || requestedToken != rule.Token {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+		if strings.TrimSpace(rule.ExpiresAt) != "" {
+			expiresAt, parseErr := time.Parse(time.RFC3339, rule.ExpiresAt)
+			if parseErr == nil && time.Now().UTC().After(expiresAt) {
+				http.Error(w, "token expired", http.StatusForbidden)
+				return
+			}
+		}
+		if rule.SingleUseLeft > 0 {
+			_, _ = a.db.ExecContext(r.Context(), `UPDATE file_access_rules SET single_use_left=single_use_left-1 WHERE domain=? AND file_name=? AND single_use_left>0`, domain, fileName)
+		}
+	}
+	http.StripPrefix("/assets/", http.FileServer(http.Dir("storage/files"))).ServeHTTP(w, r)
 }
 
 func (a *App) findPage(ctx context.Context, domain, pagePath string) (Page, error) {
