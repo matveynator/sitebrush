@@ -229,13 +229,18 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	domain := a.siteDomain(r.Context(), r)
+	isAdmin := a.isAdminRequest(r)
 	pageRecord, err := a.findPage(r.Context(), domain, pagePath)
-	if err == nil && a.isAdminRequest(r) {
+	if err == nil && isAdmin {
 		a.logContentDelivery("db-draft", domain, pagePath)
 		_, _ = w.Write([]byte(a.wrapWithMenu(r, pageRecord.Path, pageRecord.HTML)))
 		return
 	}
-	if a.servePublishedStaticFile(w, r, domain, pagePath) {
+	if !isAdmin && a.servePublishedStaticFile(w, r, domain, pagePath) {
+		return
+	}
+	if !isAdmin {
+		a.render(w, r, "missing.html", map[string]any{"Path": pagePath, "EditLink": pagePath + "?login&return_path=" + url.QueryEscape(pagePath+"?edit")})
 		return
 	}
 	publishedPage, publishedErr := a.findPublishedPage(r.Context(), domain, pagePath)
@@ -248,7 +253,7 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 		a.render(w, r, "setup.html", map[string]any{"Domain": domain})
 		return
 	}
-	if a.isAdminRequest(r) {
+	if isAdmin {
 		a.render(w, r, "missing.html", map[string]any{"Path": pagePath})
 		return
 	}
@@ -287,7 +292,11 @@ func (a *App) setupAdmin(w http.ResponseWriter, r *http.Request) {
 func (a *App) login(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet {
 		domain := a.siteDomain(r.Context(), r)
-		a.render(w, r, "login.html", map[string]any{"ReturnPath": requestedReturnPath(r), "Domain": domain})
+		returnPath := strings.TrimSpace(r.URL.Query().Get("return_path"))
+		if returnPath == "" {
+			returnPath = requestedReturnPath(r)
+		}
+		a.render(w, r, "login.html", map[string]any{"ReturnPath": returnPath, "Domain": domain})
 		return
 	}
 	email := r.FormValue("email")

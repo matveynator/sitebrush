@@ -8,7 +8,7 @@
 </head>
 <body>
 <h1>Page {{.Path}} does not exist</h1>
-<p><a href="{{.Path}}?settings">Create this page</a></p>
+<p><a href="{{if .EditLink}}{{.EditLink}}{{else}}{{.Path}}?edit{{end}}">Edit this page</a></p>
 
 <hr>
 <h2>Copy static HTML from another website</h2>
