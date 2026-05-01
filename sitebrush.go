@@ -1393,8 +1393,7 @@ func (a *App) publishDomain(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	domain := a.siteDomain(r.Context(), r)
-	_ = os.RemoveAll(a.domainStaticDir(domain))
-	_, _ = a.db.ExecContext(r.Context(), `DELETE FROM published_pages WHERE domain=?`, domain)
+	log.Printf("publish started domain=%s", domain)
 	revisionRows, err := a.db.QueryContext(r.Context(), `SELECT page_path,html FROM revisions WHERE domain=? AND is_active=1 ORDER BY page_path ASC, id DESC`, domain)
 	if err == nil {
 		defer revisionRows.Close()
@@ -1413,6 +1412,8 @@ func (a *App) publishDomain(w http.ResponseWriter, r *http.Request) {
 		pageRows, pageQueryErr := a.db.QueryContext(r.Context(), `SELECT path,title,html FROM pages WHERE domain=? ORDER BY path ASC`, domain)
 		if pageQueryErr == nil {
 			defer pageRows.Close()
+			updatedPagesCount := 0
+			skippedPagesCount := 0
 			for pageRows.Next() {
 				var pagePath string
 				var pageTitle string
@@ -1424,13 +1425,28 @@ func (a *App) publishDomain(w http.ResponseWriter, r *http.Request) {
 				if latestActiveHTML, foundLatestActiveRevision := latestRevisionByPath[pagePath]; foundLatestActiveRevision {
 					pageHTMLToPublish = latestActiveHTML
 				}
-				_, _ = a.db.ExecContext(r.Context(), `INSERT INTO published_pages(domain,path,title,html) VALUES(?,?,?,?)`, domain, pagePath, pageTitle, pageHTMLToPublish)
+				var previousPublishedTitle string
+				var previousPublishedHTML string
+				readPublishedErr := a.db.QueryRowContext(r.Context(), `SELECT title,html FROM published_pages WHERE domain=? AND path=?`, domain, pagePath).Scan(&previousPublishedTitle, &previousPublishedHTML)
+				if readPublishedErr == nil && previousPublishedTitle == pageTitle && previousPublishedHTML == pageHTMLToPublish {
+					skippedPagesCount++
+					continue
+				}
+				_, _ = a.db.ExecContext(r.Context(), `INSERT OR REPLACE INTO published_pages(domain,path,title,html) VALUES(?,?,?,?)`, domain, pagePath, pageTitle, pageHTMLToPublish)
 				a.writePublishedStaticHTML(domain, pagePath, a.wrapPublishedPageWithGuestMenu(domain, pagePath, pageHTMLToPublish))
+				updatedPagesCount++
+				log.Printf("publish page updated domain=%s path=%s", domain, pagePath)
 			}
+			log.Printf("publish pages processed domain=%s updated=%d unchanged=%d", domain, updatedPagesCount, skippedPagesCount)
 		}
 	}
-	_ = a.generateDomainPack(domain)
+	if packErr := a.generateDomainPack(domain); packErr != nil {
+		log.Printf("publish pack failed domain=%s error=%v", domain, packErr)
+	} else {
+		log.Printf("publish pack updated domain=%s", domain)
+	}
 	a.setDomainFrozenState(r.Context(), domain, 0)
+	log.Printf("publish completed domain=%s", domain)
 	http.Redirect(w, r, requestedReturnPath(r), http.StatusFound)
 }
 
