@@ -1,6 +1,7 @@
 package main
 
 import (
+	"archive/zip"
 	"context"
 	"crypto/sha256"
 	"database/sql"
@@ -75,11 +76,49 @@ func (writer *statusCapturingResponseWriter) WriteHeader(statusCode int) {
 
 func accessLogMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		const (
+			colorGreen  = "\033[32m"
+			colorBlue   = "\033[34m"
+			colorYellow = "\033[33m"
+			colorReset  = "\033[0m"
+		)
 		startedAt := time.Now()
 		writer := &statusCapturingResponseWriter{ResponseWriter: w, statusCode: http.StatusOK}
 		next.ServeHTTP(writer, r)
-		log.Printf("access method=%s path=%s query=%s status=%d remote=%s duration=%s", r.Method, r.URL.Path, r.URL.RawQuery, writer.statusCode, r.RemoteAddr, time.Since(startedAt).String())
+		contentSource := writer.Header().Get("X-Sitebrush-Source")
+		logType := "REQUEST"
+		logColor := colorYellow
+		if contentSource == "static" {
+			logType = "STATIC"
+			logColor = colorGreen
+		}
+		if contentSource == "dynamic" {
+			logType = "DYNAMIC"
+			logColor = colorBlue
+		}
+		if contentSource == "" && isLikelyStaticAssetPath(r.URL.Path) {
+			logType = "STATIC"
+			logColor = colorGreen
+		}
+		if strings.TrimSpace(r.URL.RawQuery) == "" {
+			log.Printf("%s%s%s method=%s path=%s status=%d remote=%s duration=%s", logColor, logType, colorReset, r.Method, r.URL.Path, writer.statusCode, r.RemoteAddr, time.Since(startedAt).String())
+			return
+		}
+		log.Printf("%s%s%s method=%s path=%s query=%s status=%d remote=%s duration=%s", logColor, logType, colorReset, r.Method, r.URL.Path, r.URL.RawQuery, writer.statusCode, r.RemoteAddr, time.Since(startedAt).String())
 	})
+}
+
+func isLikelyStaticAssetPath(requestPath string) bool {
+	if strings.HasPrefix(requestPath, "/p/static/") || strings.HasPrefix(requestPath, "/assets/") {
+		return true
+	}
+	fileExtension := strings.ToLower(path.Ext(requestPath))
+	switch fileExtension {
+	case ".css", ".js", ".mjs", ".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico", ".webp", ".woff", ".woff2", ".ttf", ".eot", ".map":
+		return true
+	default:
+		return false
+	}
 }
 
 func main() {
@@ -221,6 +260,10 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 		a.publishDomain(w, r)
 		return
 	}
+	if hasQueryFlag(r, "publish_preview") {
+		a.publishPreviewJSON(w, r)
+		return
+	}
 	if hasQueryFlag(r, "files") {
 		a.filesPage(w, r)
 		return
@@ -261,7 +304,7 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 	isAdmin := a.isAdminRequest(r)
 	pageRecord, err := a.findPage(r.Context(), domain, pagePath)
 	if err == nil && isAdmin {
-		a.logContentDelivery("db-draft", domain, pagePath)
+		a.logContentDelivery(w, "db-draft")
 		_, _ = w.Write([]byte(a.wrapWithMenu(r, pageRecord.Path, pageRecord.HTML)))
 		return
 	}
@@ -274,7 +317,7 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 	}
 	publishedPage, publishedErr := a.findPublishedPage(r.Context(), domain, pagePath)
 	if publishedErr == nil {
-		a.logContentDelivery("db-published-fallback", domain, pagePath)
+		a.logContentDelivery(w, "db-published-fallback")
 		_, _ = w.Write([]byte(a.wrapWithMenu(r, publishedPage.Path, publishedPage.HTML)))
 		return
 	}
@@ -771,7 +814,11 @@ func buildContextMenuScript(isAdmin bool, isFrozen bool, pagePath, domain string
 	escapedPath := template.JSEscapeString(pagePath)
 	escapedDomain := template.JSEscapeString(domain)
 	confirmFreezePrompt := template.JSEscapeString(translationOrDefault(translations, "confirm_freeze_prompt", "Freeze domain now?"))
-	confirmPublishPrompt := template.JSEscapeString(translationOrDefault(translations, "confirm_publish_prompt", "Publish domain now?"))
+	confirmPublishPrompt := template.JSEscapeString(translationOrDefault(translations, "confirm_publish_prompt", "Publish website changes now?"))
+	publishConfirmWithChangesLabel := template.JSEscapeString(translationOrDefault(translations, "publish_confirm_with_changes", "Publish the changes made to the site?"))
+	publishConfirmWithoutChangesLabel := template.JSEscapeString(translationOrDefault(translations, "publish_confirm_without_changes", "No changes were made. Unfreeze the site?"))
+	publishPreviewLoadingLabel := template.JSEscapeString(translationOrDefault(translations, "publish_preview_loading", "Checking changes to publish..."))
+	publishPreviewSummaryLabel := template.JSEscapeString(translationOrDefault(translations, "publish_preview_summary", "Changes:"))
 	confirmYesLabel := template.JSEscapeString(translationOrDefault(translations, "confirm_yes", "Yes"))
 	confirmNoLabel := template.JSEscapeString(translationOrDefault(translations, "confirm_no", "No"))
 	editLabel := template.JSEscapeString(translationOrDefault(translations, "menu_edit", "Edit"))
@@ -799,6 +846,7 @@ func buildContextMenuScript(isAdmin bool, isFrozen bool, pagePath, domain string
   window.__sitebrushContextMenuInitialized = true;
   const currentPagePath = "` + escapedPath + `";
   const currentDomainName = "` + escapedDomain + `";
+  const isDomainFrozen = ` + strconv.FormatBool(isFrozen) + `;
   const actionConfigByName = {
     freeze: { path: "?freeze", message: "` + confirmFreezePrompt + `" },
     publish: { path: "?publish", message: "` + confirmPublishPrompt + `" }
@@ -833,6 +881,49 @@ func buildContextMenuScript(isAdmin bool, isFrozen bool, pagePath, domain string
     cancelButtonElement.addEventListener("click", closeDialog);
     confirmButtonElement.addEventListener("click", function onConfirmClick() { closeDialog(); onConfirm(); });
   }
+  function openPublishConfirmationDialog(confirmMessageText, changedPagePaths, onConfirm) {
+    const overlayElement = document.createElement("div");
+    overlayElement.className = "SiteBrushConfirmOverlay";
+    const modalElement = document.createElement("div");
+    modalElement.className = "SiteBrushConfirmModal";
+    const textElement = document.createElement("p");
+    textElement.className = "SiteBrushConfirmText";
+    textElement.textContent = confirmMessageText;
+    modalElement.appendChild(textElement);
+    if (Array.isArray(changedPagePaths) && changedPagePaths.length > 0) {
+      const listElement = document.createElement("ul");
+      listElement.className = "SiteBrushPublishPreviewList";
+      for (const changedPagePath of changedPagePaths) {
+        const itemElement = document.createElement("li");
+        itemElement.className = "SiteBrushPublishPreviewListItem";
+        const linkElement = document.createElement("a");
+        linkElement.className = "SiteBrushPublishPreviewLink";
+        linkElement.href = changedPagePath;
+        linkElement.textContent = changedPagePath;
+        itemElement.appendChild(linkElement);
+        listElement.appendChild(itemElement);
+      }
+      modalElement.appendChild(listElement);
+    }
+    const actionRowElement = document.createElement("div");
+    actionRowElement.className = "SiteBrushConfirmActions";
+    const confirmButtonElement = document.createElement("button");
+    confirmButtonElement.type = "button";
+    confirmButtonElement.className = "SiteBrushConfirmButton";
+    confirmButtonElement.textContent = confirmYesLabel;
+    const cancelButtonElement = document.createElement("button");
+    cancelButtonElement.type = "button";
+    cancelButtonElement.className = "SiteBrushCancelButton";
+    cancelButtonElement.textContent = confirmNoLabel;
+    actionRowElement.appendChild(confirmButtonElement);
+    actionRowElement.appendChild(cancelButtonElement);
+    modalElement.appendChild(actionRowElement);
+    overlayElement.appendChild(modalElement);
+    document.body.appendChild(overlayElement);
+    function closeDialog() { overlayElement.remove(); }
+    cancelButtonElement.addEventListener("click", closeDialog);
+    confirmButtonElement.addEventListener("click", function onConfirmClick() { closeDialog(); onConfirm(); });
+  }
   document.addEventListener("click", function onActionClick(browserEvent) {
     const actionButtonElement = browserEvent.target && browserEvent.target.closest && browserEvent.target.closest("[data-sitebrush-action]");
     if (!actionButtonElement) {
@@ -848,13 +939,35 @@ func buildContextMenuScript(isAdmin bool, isFrozen bool, pagePath, domain string
     if (!selectedActionConfig) {
       return;
     }
-    openConfirmationDialog(selectedActionConfig.message, function submitConfirmedAction() {
+    if (actionName === "publish") {
+      fetch(currentPagePath + "?publish_preview", { headers: { "Accept": "application/json" } })
+        .then(function parsePublishPreview(previewResponse) {
+          if (!previewResponse.ok) { throw new Error("publish preview failed"); }
+          return previewResponse.json();
+        })
+	        .then(function confirmPublishWithPreview(previewPayload) {
+		          let summaryText = "` + publishPreviewSummaryLabel + `" + " " + previewPayload.changed + " / " + previewPayload.total;
+		          let confirmQuestionText = "` + publishConfirmWithChangesLabel + `";
+		          if (previewPayload.changed === 0) {
+		            summaryText = "";
+		            confirmQuestionText = "` + publishConfirmWithoutChangesLabel + `";
+		          }
+		          const dialogMessage = summaryText === "" ? confirmQuestionText : confirmQuestionText + "\n\n" + summaryText;
+		          openPublishConfirmationDialog(dialogMessage, previewPayload.paths || [], submitConfirmedAction);
+		        })
+        .catch(function fallbackPublishConfirmation() {
+          openConfirmationDialog(selectedActionConfig.message + "\n\n" + "` + publishPreviewLoadingLabel + `", submitConfirmedAction);
+        });
+      return;
+    }
+    openConfirmationDialog(selectedActionConfig.message, submitConfirmedAction);
+    function submitConfirmedAction() {
       const actionFormElement = document.createElement("form");
       actionFormElement.method = "POST";
       actionFormElement.action = selectedActionConfig.path;
       document.body.appendChild(actionFormElement);
       actionFormElement.submit();
-    });
+    }
   }, {capture: true});
   document.addEventListener("contextmenu", function onContextMenuOpen(browserEvent) {
     if (browserEvent.ctrlKey || browserEvent.defaultPrevented) {
@@ -878,7 +991,7 @@ func buildContextMenuScript(isAdmin bool, isFrozen bool, pagePath, domain string
       "<li class='SiteBrushContextMenu ContextMenuCopyright'><a href='http://sitebrush.com' class='SiteBrushContextMenuLink'>sitebrush</a></li>",
       "</ul>"
     ];
-    showSitebrushMenu(browserEvent, menuHtmlEntries, currentPagePath);
+    showSitebrushMenu(browserEvent, menuHtmlEntries, currentPagePath, isDomainFrozen);
 	  }, {capture: false, passive: false});
   function openSiteTreeDialog() {
     const overlayElement = document.createElement("div");
@@ -936,7 +1049,7 @@ func buildContextMenuScript(isAdmin bool, isFrozen bool, pagePath, domain string
       "<li class='SiteBrushContextMenu ContextMenuCopyright'><a href='http://sitebrush.com' class='SiteBrushContextMenuLink'>sitebrush</a></li>",
       "</ul>"
     ];
-    showSitebrushMenu(browserEvent, menuHtmlEntries, currentPagePath);
+    showSitebrushMenu(browserEvent, menuHtmlEntries, currentPagePath, false);
 	  }, {capture: false, passive: false});
 })();
 	</script>`
@@ -945,7 +1058,8 @@ func buildContextMenuScript(isAdmin bool, isFrozen bool, pagePath, domain string
 func contextMenuStylesAndHelpers() string {
 	return `<style>
 .SiteBrushMenuBox,.SiteBrushMenuBox *{all:initial;box-sizing:border-box}
-.SiteBrushMenuBox{position:fixed;background:#fff url(/p/static/bg.png) repeat-x top;border:1px solid #8ea4c1;z-index:99999;padding:2px;min-width:240px;box-shadow:0 2px 12px rgba(0,0,0,0.2);font-family:Arial,Helvetica,sans-serif}
+.SiteBrushMenuBox{position:fixed;background:#fff url(/p/static/bg.png) repeat-x top;border:1px solid #8ea4c1;z-index:2147483647;padding:2px;min-width:240px;box-shadow:0 2px 12px rgba(0,0,0,0.2);font-family:Arial,Helvetica,sans-serif}
+.SiteBrushMenuBox.SiteBrushMenuBoxFrozen{background:#e9f5ff;border-color:#6da6d4}
 .SiteBrushMenuList{list-style:none;margin:0;padding:0}
 .SiteBrushContextMenu{margin:0;padding:0}
 .SiteBrushContextMenuLink{display:flex;align-items:center;gap:8px;padding:8px 10px;color:#1f3f6f;text-decoration:none;font-family:Arial,Helvetica,sans-serif;font-size:14px;cursor:pointer}
@@ -956,6 +1070,9 @@ func contextMenuStylesAndHelpers() string {
 .SiteBrushConfirmOverlay{position:fixed;inset:0;background:rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center;z-index:100000}
 .SiteBrushConfirmModal{background:#fff;border:1px solid #8ea4c1;min-width:260px;max-width:340px;padding:16px;font-family:Arial,Helvetica,sans-serif}
 .SiteBrushConfirmText{margin:0 0 14px 0;color:#1f3f6f;font-size:14px}
+.SiteBrushPublishPreviewList{list-style:none;margin:0 0 12px 0;padding:0;max-height:180px;overflow:auto}
+.SiteBrushPublishPreviewListItem{margin:0 0 4px 0}
+.SiteBrushPublishPreviewLink{color:#1f3f6f;text-decoration:underline;font-size:13px}
 .SiteBrushConfirmActions{display:flex;gap:8px;justify-content:flex-end}
 .SiteBrushConfirmButton,.SiteBrushCancelButton{border:1px solid #8ea4c1;background:#f2f7ff;padding:6px 12px;cursor:pointer;font-size:13px}
 .SiteBrushTreeOverlay{position:fixed;inset:0;background:rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center;z-index:100000}
@@ -986,7 +1103,7 @@ function normalizeSitebrushMenuLinks(menuBoxElement, currentPagePath) {
     menuLinkElement.setAttribute("href", currentPagePath + originalHref);
   }
 }
-function showSitebrushMenu(browserEvent, menuHtmlEntries, currentPagePath) {
+function showSitebrushMenu(browserEvent, menuHtmlEntries, currentPagePath, frozenMenuEnabled) {
   const existingMenuBox = document.getElementById("SiteBrushMenuBox");
   if (existingMenuBox) {
     existingMenuBox.remove();
@@ -994,6 +1111,9 @@ function showSitebrushMenu(browserEvent, menuHtmlEntries, currentPagePath) {
   const menuBoxElement = document.createElement("div");
   menuBoxElement.id = "SiteBrushMenuBox";
   menuBoxElement.className = "SiteBrushMenuBox";
+  if (frozenMenuEnabled) {
+    menuBoxElement.classList.add("SiteBrushMenuBoxFrozen");
+  }
   menuBoxElement.innerHTML = menuHtmlEntries.join("");
   normalizeSitebrushMenuLinks(menuBoxElement, currentPagePath);
   menuBoxElement.style.left = browserEvent.clientX + "px";
@@ -1392,7 +1512,7 @@ func (a *App) publishDomain(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	domain := a.siteDomain(r.Context(), r)
-	_, _ = a.db.ExecContext(r.Context(), `DELETE FROM published_pages WHERE domain=?`, domain)
+	log.Printf("publish started domain=%s", domain)
 	revisionRows, err := a.db.QueryContext(r.Context(), `SELECT page_path,html FROM revisions WHERE domain=? AND is_active=1 ORDER BY page_path ASC, id DESC`, domain)
 	if err == nil {
 		defer revisionRows.Close()
@@ -1411,6 +1531,8 @@ func (a *App) publishDomain(w http.ResponseWriter, r *http.Request) {
 		pageRows, pageQueryErr := a.db.QueryContext(r.Context(), `SELECT path,title,html FROM pages WHERE domain=? ORDER BY path ASC`, domain)
 		if pageQueryErr == nil {
 			defer pageRows.Close()
+			updatedPagesCount := 0
+			skippedPagesCount := 0
 			for pageRows.Next() {
 				var pagePath string
 				var pageTitle string
@@ -1422,13 +1544,150 @@ func (a *App) publishDomain(w http.ResponseWriter, r *http.Request) {
 				if latestActiveHTML, foundLatestActiveRevision := latestRevisionByPath[pagePath]; foundLatestActiveRevision {
 					pageHTMLToPublish = latestActiveHTML
 				}
-				_, _ = a.db.ExecContext(r.Context(), `INSERT INTO published_pages(domain,path,title,html) VALUES(?,?,?,?)`, domain, pagePath, pageTitle, pageHTMLToPublish)
-				a.writePublishedStaticHTML(domain, pagePath, a.wrapPublishedPageWithGuestMenu(domain, pagePath, pageHTMLToPublish))
+				renderedPublishedHTML := a.wrapPublishedPageWithGuestMenu(domain, pagePath, pageHTMLToPublish)
+				if !a.shouldUpdatePublishedPageFile(domain, pagePath, renderedPublishedHTML) {
+					skippedPagesCount++
+					continue
+				}
+				_, _ = a.db.ExecContext(r.Context(), `INSERT OR REPLACE INTO published_pages(domain,path,title,html) VALUES(?,?,?,?)`, domain, pagePath, pageTitle, pageHTMLToPublish)
+				a.writePublishedStaticHTML(domain, pagePath, renderedPublishedHTML)
+				updatedPagesCount++
+				log.Printf("publish page updated domain=%s path=%s", domain, pagePath)
 			}
+			log.Printf("publish pages processed domain=%s updated=%d unchanged=%d", domain, updatedPagesCount, skippedPagesCount)
 		}
 	}
+	if packErr := a.generateDomainPack(domain); packErr != nil {
+		log.Printf("publish pack failed domain=%s error=%v", domain, packErr)
+	} else {
+		log.Printf("publish pack updated domain=%s", domain)
+	}
 	a.setDomainFrozenState(r.Context(), domain, 0)
+	log.Printf("publish completed domain=%s", domain)
 	http.Redirect(w, r, requestedReturnPath(r), http.StatusFound)
+}
+
+func (a *App) publishPreviewJSON(w http.ResponseWriter, r *http.Request) {
+	if !a.isAdminRequest(r) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	domain := a.siteDomain(r.Context(), r)
+	totalPagesCount, changedPagesCount, changedPagePaths := a.countPublishChanges(r.Context(), domain)
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{"total": totalPagesCount, "changed": changedPagesCount, "unchanged": totalPagesCount - changedPagesCount, "paths": changedPagePaths})
+}
+
+func (a *App) countPublishChanges(ctx context.Context, domain string) (int, int, []string) {
+	totalPagesCount := 0
+	changedPagesCount := 0
+	changedPagePaths := make([]string, 0)
+	revisionRows, err := a.db.QueryContext(ctx, `SELECT page_path,html FROM revisions WHERE domain=? AND is_active=1 ORDER BY page_path ASC, id DESC`, domain)
+	if err != nil {
+		return 0, 0, changedPagePaths
+	}
+	defer revisionRows.Close()
+	latestRevisionByPath := make(map[string]string)
+	for revisionRows.Next() {
+		var pagePath string
+		var pageHTML string
+		if scanErr := revisionRows.Scan(&pagePath, &pageHTML); scanErr != nil {
+			continue
+		}
+		if _, alreadyStored := latestRevisionByPath[pagePath]; !alreadyStored {
+			latestRevisionByPath[pagePath] = pageHTML
+		}
+	}
+	pageRows, pageQueryErr := a.db.QueryContext(ctx, `SELECT path,title,html FROM pages WHERE domain=? ORDER BY path ASC`, domain)
+	if pageQueryErr != nil {
+		return 0, 0, changedPagePaths
+	}
+	defer pageRows.Close()
+	for pageRows.Next() {
+		totalPagesCount++
+		var pagePath, pageTitle, draftHTML string
+		if scanErr := pageRows.Scan(&pagePath, &pageTitle, &draftHTML); scanErr != nil {
+			continue
+		}
+		pageHTMLToPublish := draftHTML
+		if latestActiveHTML, foundLatestActiveRevision := latestRevisionByPath[pagePath]; foundLatestActiveRevision {
+			pageHTMLToPublish = latestActiveHTML
+		}
+		renderedPublishedHTML := a.wrapPublishedPageWithGuestMenu(domain, pagePath, pageHTMLToPublish)
+		if a.shouldUpdatePublishedPageFile(domain, pagePath, renderedPublishedHTML) {
+			changedPagesCount++
+			changedPagePaths = append(changedPagePaths, pagePath)
+		}
+	}
+	return totalPagesCount, changedPagesCount, changedPagePaths
+}
+
+func normalizePublishedHTML(html string) string {
+	return strings.TrimSpace(strings.ReplaceAll(html, "\r\n", "\n"))
+}
+
+func (a *App) shouldUpdatePublishedPageFile(domain, pagePath, nextRenderedHTML string) bool {
+	staticFilePath := filepath.Join(a.domainStaticDir(domain), staticRelativePathForPage(pagePath))
+	previousRenderedHTMLBytes, readErr := os.ReadFile(staticFilePath)
+	if readErr != nil {
+		return true
+	}
+	return normalizePublishedHTML(string(previousRenderedHTMLBytes)) != normalizePublishedHTML(nextRenderedHTML)
+}
+
+func (a *App) generateDomainPack(domain string) error {
+	domainDirName := domainStorageName(domain)
+	packsDirPath := filepath.Join("storage", "packs")
+	if makeErr := os.MkdirAll(packsDirPath, 0o755); makeErr != nil {
+		return makeErr
+	}
+	packFilePath := filepath.Join(packsDirPath, domainDirName+".zip")
+	packFile, createErr := os.Create(packFilePath)
+	if createErr != nil {
+		return createErr
+	}
+	defer packFile.Close()
+	zipWriter := zip.NewWriter(packFile)
+	if addStaticErr := addDirectoryToZip(zipWriter, a.domainStaticDir(domain), filepath.Join("static", domainDirName)); addStaticErr != nil {
+		_ = zipWriter.Close()
+		return addStaticErr
+	}
+	if addFilesErr := addDirectoryToZip(zipWriter, filepath.Join("storage", "files", domainDirName), filepath.Join("files", domainDirName)); addFilesErr != nil {
+		_ = zipWriter.Close()
+		return addFilesErr
+	}
+	if closeZipErr := zipWriter.Close(); closeZipErr != nil {
+		return closeZipErr
+	}
+	return nil
+}
+
+func addDirectoryToZip(zipWriter *zip.Writer, sourceDirPath, archiveDirPrefix string) error {
+	directoryInfo, statErr := os.Stat(sourceDirPath)
+	if statErr != nil || !directoryInfo.IsDir() {
+		return nil
+	}
+	return filepath.WalkDir(sourceDirPath, func(currentPath string, currentEntry fs.DirEntry, walkErr error) error {
+		if walkErr != nil || currentEntry.IsDir() {
+			return walkErr
+		}
+		relativePath, relErr := filepath.Rel(sourceDirPath, currentPath)
+		if relErr != nil {
+			return relErr
+		}
+		archivePath := filepath.ToSlash(filepath.Join(archiveDirPrefix, relativePath))
+		archiveFileWriter, createErr := zipWriter.Create(archivePath)
+		if createErr != nil {
+			return createErr
+		}
+		sourceFile, openErr := os.Open(currentPath)
+		if openErr != nil {
+			return openErr
+		}
+		defer sourceFile.Close()
+		_, copyErr := io.Copy(archiveFileWriter, sourceFile)
+		return copyErr
+	})
 }
 
 func (a *App) findPublishedPage(ctx context.Context, domain, pagePath string) (Page, error) {
@@ -1480,7 +1739,7 @@ func (a *App) servePublishedStaticFile(w http.ResponseWriter, r *http.Request, d
 	if _, statErr := os.Stat(staticFilePath); statErr != nil {
 		return false
 	}
-	a.logContentDelivery("static-file", domain, pagePath)
+	a.logContentDelivery(w, "static-file")
 	http.ServeFile(w, r, staticFilePath)
 	return true
 }
@@ -1515,21 +1774,12 @@ func (a *App) domainStaticDir(domain string) string {
 	return filepath.Join("storage/static", domainStorageName(domain))
 }
 
-func (a *App) logContentDelivery(sourceType, domain, pagePath string) {
-	const (
-		colorGreen  = "\033[32m"
-		colorBlue   = "\033[34m"
-		colorYellow = "\033[33m"
-		colorReset  = "\033[0m"
-	)
-	sourceColor := colorYellow
+func (a *App) logContentDelivery(w http.ResponseWriter, sourceType string) {
+	contentSource := "dynamic"
 	if sourceType == "static-file" {
-		sourceColor = colorGreen
+		contentSource = "static"
 	}
-	if sourceType == "db-draft" {
-		sourceColor = colorBlue
-	}
-	log.Printf("%scontent-source=%s%s domain=%s path=%s", sourceColor, sourceType, colorReset, domain, pagePath)
+	w.Header().Set("X-Sitebrush-Source", contentSource)
 }
 func domainStorageName(domain string) string {
 	return strings.NewReplacer("/", "_", "\\", "_", ":", "_", "..", "_").Replace(domain)
