@@ -55,6 +55,7 @@ type Revision struct {
 	PagePath  string
 	HTML      string
 	CreatedAt string
+	IsActive  int
 }
 
 type ManagedFile struct {
@@ -127,6 +128,7 @@ func main() {
 	router.HandleFunc("/revisions", application.revisionsPage)
 	router.HandleFunc("/revision/restore", application.restoreRevision)
 	router.HandleFunc("/revision/delete", application.deleteRevision)
+	router.HandleFunc("/revision/toggle", application.toggleRevision)
 	router.HandleFunc("/", application.route)
 
 	address := "127.0.0.1:" + strconv.Itoa(*port)
@@ -155,7 +157,7 @@ func (a *App) migrate(ctx context.Context) error {
 		`CREATE TABLE IF NOT EXISTS users(id INTEGER PRIMARY KEY AUTOINCREMENT,domain TEXT,email TEXT,password TEXT,is_admin INTEGER,UNIQUE(domain,email));`,
 		`CREATE TABLE IF NOT EXISTS sessions(token TEXT PRIMARY KEY,user_email TEXT,created_at TEXT);`,
 		`CREATE TABLE IF NOT EXISTS pages(domain TEXT,path TEXT,title TEXT,html TEXT,published INTEGER,PRIMARY KEY(domain,path));`,
-		`CREATE TABLE IF NOT EXISTS revisions(id INTEGER PRIMARY KEY AUTOINCREMENT,domain TEXT,page_path TEXT,html TEXT,created_at TEXT);`,
+		`CREATE TABLE IF NOT EXISTS revisions(id INTEGER PRIMARY KEY AUTOINCREMENT,domain TEXT,page_path TEXT,html TEXT,created_at TEXT,is_active INTEGER DEFAULT 1);`,
 		`CREATE TABLE IF NOT EXISTS domain_aliases(primary_domain TEXT,alias_domain TEXT UNIQUE);`,
 	}
 	for _, query := range queries {
@@ -166,9 +168,11 @@ func (a *App) migrate(ctx context.Context) error {
 	_, _ = a.db.ExecContext(ctx, `ALTER TABLE users ADD COLUMN domain TEXT`)
 	_, _ = a.db.ExecContext(ctx, `ALTER TABLE pages ADD COLUMN domain TEXT`)
 	_, _ = a.db.ExecContext(ctx, `ALTER TABLE revisions ADD COLUMN domain TEXT`)
+	_, _ = a.db.ExecContext(ctx, `ALTER TABLE revisions ADD COLUMN is_active INTEGER DEFAULT 1`)
 	_, _ = a.db.ExecContext(ctx, `UPDATE users SET domain=? WHERE domain IS NULL OR TRIM(domain)=''`, legacyDomain)
 	_, _ = a.db.ExecContext(ctx, `UPDATE pages SET domain=? WHERE domain IS NULL OR TRIM(domain)=''`, legacyDomain)
 	_, _ = a.db.ExecContext(ctx, `UPDATE revisions SET domain=? WHERE domain IS NULL OR TRIM(domain)=''`, legacyDomain)
+	_, _ = a.db.ExecContext(ctx, `UPDATE revisions SET is_active=1 WHERE is_active IS NULL`)
 	return nil
 }
 
@@ -417,7 +421,7 @@ func (a *App) revisionsPage(w http.ResponseWriter, r *http.Request) {
 	}
 	pagePath := r.URL.Query().Get("path")
 	domain := a.siteDomain(r.Context(), r)
-	revisionRows, err := a.db.QueryContext(r.Context(), `SELECT id,page_path,html,created_at FROM revisions WHERE domain=? AND page_path=? ORDER BY id DESC`, domain, pagePath)
+	revisionRows, err := a.db.QueryContext(r.Context(), `SELECT id,page_path,html,created_at,is_active FROM revisions WHERE domain=? AND page_path=? ORDER BY id DESC`, domain, pagePath)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -426,7 +430,7 @@ func (a *App) revisionsPage(w http.ResponseWriter, r *http.Request) {
 	var revisionList []Revision
 	for revisionRows.Next() {
 		var current Revision
-		_ = revisionRows.Scan(&current.ID, &current.PagePath, &current.HTML, &current.CreatedAt)
+		_ = revisionRows.Scan(&current.ID, &current.PagePath, &current.HTML, &current.CreatedAt, &current.IsActive)
 		revisionList = append(revisionList, current)
 	}
 	returnPath := r.URL.Query().Get("return")
@@ -434,6 +438,15 @@ func (a *App) revisionsPage(w http.ResponseWriter, r *http.Request) {
 		returnPath = pagePath
 	}
 	a.render(w, r, "revisions.html", map[string]any{"Path": pagePath, "ReturnPath": returnPath, "Revisions": revisionList})
+}
+
+func (a *App) applyLatestActiveRevision(ctx context.Context, domain string, pagePath string) {
+	var latestActiveHTML string
+	err := a.db.QueryRowContext(ctx, `SELECT html FROM revisions WHERE domain=? AND page_path=? AND is_active=1 ORDER BY id DESC LIMIT 1`, domain, pagePath).Scan(&latestActiveHTML)
+	if err != nil {
+		return
+	}
+	_, _ = a.db.ExecContext(ctx, `UPDATE pages SET html=? WHERE domain=? AND path=?`, latestActiveHTML, domain, pagePath)
 }
 
 func (a *App) restoreRevision(w http.ResponseWriter, r *http.Request) {
@@ -451,6 +464,7 @@ func (a *App) restoreRevision(w http.ResponseWriter, r *http.Request) {
 	}
 	_, _ = a.db.ExecContext(r.Context(), `UPDATE pages SET html=? WHERE domain=? AND path=?`, html, domain, pagePath)
 	_, _ = a.db.ExecContext(r.Context(), `INSERT INTO revisions(domain,page_path,html,created_at) VALUES(?,?,?,?)`, domain, pagePath, html, time.Now().Format(time.RFC3339))
+	a.applyLatestActiveRevision(r.Context(), domain, pagePath)
 	http.Redirect(w, r, pagePath, http.StatusFound)
 }
 
@@ -462,7 +476,26 @@ func (a *App) deleteRevision(w http.ResponseWriter, r *http.Request) {
 	revisionID, _ := strconv.Atoi(r.FormValue("id"))
 	pagePath := r.FormValue("path")
 	domain := a.siteDomain(r.Context(), r)
-	_, _ = a.db.ExecContext(r.Context(), `DELETE FROM revisions WHERE id=? AND domain=?`, revisionID, domain)
+	_, _ = a.db.ExecContext(r.Context(), `UPDATE revisions SET is_active=0 WHERE id=? AND domain=?`, revisionID, domain)
+	a.applyLatestActiveRevision(r.Context(), domain, pagePath)
+	http.Redirect(w, r, pagePath+"?revisions", http.StatusFound)
+}
+
+func (a *App) toggleRevision(w http.ResponseWriter, r *http.Request) {
+	if !a.isAdminRequest(r) || r.Method != http.MethodPost {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	revisionID, _ := strconv.Atoi(r.FormValue("id"))
+	pagePath := r.FormValue("path")
+	domain := a.siteDomain(r.Context(), r)
+	enableRevision := r.FormValue("enable") == "1"
+	nextActiveState := 0
+	if enableRevision {
+		nextActiveState = 1
+	}
+	_, _ = a.db.ExecContext(r.Context(), `UPDATE revisions SET is_active=? WHERE id=? AND domain=?`, nextActiveState, revisionID, domain)
+	a.applyLatestActiveRevision(r.Context(), domain, pagePath)
 	http.Redirect(w, r, pagePath+"?revisions", http.StatusFound)
 }
 
