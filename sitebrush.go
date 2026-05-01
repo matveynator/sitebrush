@@ -197,6 +197,14 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 		a.editModePage(w, r)
 		return
 	}
+	if hasQueryFlag(r, "visual") {
+		a.editPage(w, r)
+		return
+	}
+	if hasQueryFlag(r, "text") {
+		a.editRawPage(w, r)
+		return
+	}
 	if hasQueryFlag(r, "editraw") {
 		a.editRawPage(w, r)
 		return
