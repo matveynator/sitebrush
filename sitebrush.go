@@ -253,7 +253,7 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !isAdmin {
-		a.render(w, r, "missing.html", map[string]any{"Path": pagePath, "EditLink": pagePath + "?login&return_path=" + url.QueryEscape(pagePath+"?edit")})
+		a.render(w, r, "missing.html", map[string]any{"Path": pagePath, "EditLink": pagePath + "?edit", "IsAdmin": false})
 		return
 	}
 	publishedPage, publishedErr := a.findPublishedPage(r.Context(), domain, pagePath)
@@ -267,7 +267,7 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if isAdmin {
-		a.render(w, r, "missing.html", map[string]any{"Path": pagePath})
+		a.render(w, r, "missing.html", map[string]any{"Path": pagePath, "EditLink": pagePath + "?edit", "IsAdmin": true})
 		return
 	}
 	http.NotFound(w, r)
