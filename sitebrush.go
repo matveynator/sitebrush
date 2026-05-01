@@ -665,7 +665,7 @@ func (a *App) isAdminRequest(r *http.Request) bool {
 
 func (a *App) wrapWithMenu(r *http.Request, pagePath, html string) string {
 	domain := a.siteDomain(r.Context(), r)
-	menuScript := buildContextMenuScript(a.isAdminRequest(r), a.isDomainFrozen(r.Context(), domain), pagePath, domain)
+	menuScript := buildContextMenuScript(a.isAdminRequest(r), a.isDomainFrozen(r.Context(), domain), pagePath, domain, translationsForRequest(r))
 	if strings.Contains(strings.ToLower(html), "</body>") {
 		bodyClosePattern := regexp.MustCompile(`(?i)</body>`)
 		return bodyClosePattern.ReplaceAllString(html, menuScript+"</body>")
@@ -673,13 +673,25 @@ func (a *App) wrapWithMenu(r *http.Request, pagePath, html string) string {
 	return html + menuScript
 }
 
-func buildContextMenuScript(isAdmin bool, isFrozen bool, pagePath, domain string) string {
+func buildContextMenuScript(isAdmin bool, isFrozen bool, pagePath, domain string, translations map[string]string) string {
 	escapedPath := template.JSEscapeString(pagePath)
 	escapedDomain := template.JSEscapeString(domain)
+	confirmFreezePrompt := template.JSEscapeString(translationOrDefault(translations, "confirm_freeze_prompt", "Freeze domain now?"))
+	confirmPublishPrompt := template.JSEscapeString(translationOrDefault(translations, "confirm_publish_prompt", "Publish domain now?"))
+	confirmYesLabel := template.JSEscapeString(translationOrDefault(translations, "confirm_yes", "Yes"))
+	confirmNoLabel := template.JSEscapeString(translationOrDefault(translations, "confirm_no", "No"))
+	editLabel := template.JSEscapeString(translationOrDefault(translations, "menu_edit", "Edit"))
+	revisionsLabel := template.JSEscapeString(translationOrDefault(translations, "menu_revisions", "Revisions"))
+	filesLabel := template.JSEscapeString(translationOrDefault(translations, "menu_files", "Files"))
+	freezeLabel := template.JSEscapeString(translationOrDefault(translations, "menu_freeze", "Freeze"))
+	publishLabel := template.JSEscapeString(translationOrDefault(translations, "menu_publish", "Publish"))
+	settingsLabel := template.JSEscapeString(translationOrDefault(translations, "menu_domain_settings", "Domain settings"))
+	logoutLabel := template.JSEscapeString(translationOrDefault(translations, "menu_logout", "Sign out"))
+	loginLabel := template.JSEscapeString(translationOrDefault(translations, "menu_login", "Sign in"))
 	if isAdmin {
-		freezeActionEntry := "<li class='SiteBrushContextMenu'><a href='?freeze' class='SiteBrushContextMenuLink'><img src='/p/static/freeze.png' class='SiteBrushMenuIcon' alt=''>Заморозить</a></li>"
+		freezeActionEntry := "<li class='SiteBrushContextMenu'><button type='button' data-sitebrush-action='freeze' class='SiteBrushContextMenuLink SiteBrushContextMenuButton'><img src='/p/static/freeze.png' class='SiteBrushMenuIcon' alt=''>" + freezeLabel + "</button></li>"
 		if isFrozen {
-			freezeActionEntry = "<li class='SiteBrushContextMenu'><a href='?publish' class='SiteBrushContextMenuLink'><img src='/p/static/publish.png' class='SiteBrushMenuIcon' alt=''>Опубликовать</a></li>"
+			freezeActionEntry = "<li class='SiteBrushContextMenu'><button type='button' data-sitebrush-action='publish' class='SiteBrushContextMenuLink SiteBrushContextMenuButton'><img src='/p/static/publish.png' class='SiteBrushMenuIcon' alt=''>" + publishLabel + "</button></li>"
 		}
 		return contextMenuStylesAndHelpers() + `<script>
 (function initializeSitebrushContextMenuForAdmin() {
@@ -689,6 +701,59 @@ func buildContextMenuScript(isAdmin bool, isFrozen bool, pagePath, domain string
   window.__sitebrushContextMenuInitialized = true;
   const currentPagePath = "` + escapedPath + `";
   const currentDomainName = "` + escapedDomain + `";
+  const actionConfigByName = {
+    freeze: { path: "?freeze", message: "` + confirmFreezePrompt + `" },
+    publish: { path: "?publish", message: "` + confirmPublishPrompt + `" }
+  };
+  const confirmYesLabel = "` + confirmYesLabel + `";
+  const confirmNoLabel = "` + confirmNoLabel + `";
+  function openConfirmationDialog(confirmMessageText, onConfirm) {
+    const overlayElement = document.createElement("div");
+    overlayElement.className = "SiteBrushConfirmOverlay";
+    const modalElement = document.createElement("div");
+    modalElement.className = "SiteBrushConfirmModal";
+    const textElement = document.createElement("p");
+    textElement.className = "SiteBrushConfirmText";
+    textElement.textContent = confirmMessageText;
+    const actionRowElement = document.createElement("div");
+    actionRowElement.className = "SiteBrushConfirmActions";
+    const confirmButtonElement = document.createElement("button");
+    confirmButtonElement.type = "button";
+    confirmButtonElement.className = "SiteBrushConfirmButton";
+    confirmButtonElement.textContent = confirmYesLabel;
+    const cancelButtonElement = document.createElement("button");
+    cancelButtonElement.type = "button";
+    cancelButtonElement.className = "SiteBrushCancelButton";
+    cancelButtonElement.textContent = confirmNoLabel;
+    actionRowElement.appendChild(confirmButtonElement);
+    actionRowElement.appendChild(cancelButtonElement);
+    modalElement.appendChild(textElement);
+    modalElement.appendChild(actionRowElement);
+    overlayElement.appendChild(modalElement);
+    document.body.appendChild(overlayElement);
+    function closeDialog() { overlayElement.remove(); }
+    cancelButtonElement.addEventListener("click", closeDialog);
+    confirmButtonElement.addEventListener("click", function onConfirmClick() { closeDialog(); onConfirm(); });
+  }
+  document.addEventListener("click", function onActionClick(browserEvent) {
+    const actionButtonElement = browserEvent.target && browserEvent.target.closest && browserEvent.target.closest("[data-sitebrush-action]");
+    if (!actionButtonElement) {
+      return;
+    }
+    browserEvent.preventDefault();
+    const actionName = actionButtonElement.getAttribute("data-sitebrush-action");
+    const selectedActionConfig = actionConfigByName[actionName];
+    if (!selectedActionConfig) {
+      return;
+    }
+    openConfirmationDialog(selectedActionConfig.message, function submitConfirmedAction() {
+      const actionFormElement = document.createElement("form");
+      actionFormElement.method = "POST";
+      actionFormElement.action = selectedActionConfig.path;
+      document.body.appendChild(actionFormElement);
+      actionFormElement.submit();
+    });
+  }, {capture: true});
   document.addEventListener("contextmenu", function onContextMenuOpen(browserEvent) {
     if (browserEvent.ctrlKey || browserEvent.defaultPrevented) {
       return;
@@ -701,12 +766,12 @@ func buildContextMenuScript(isAdmin bool, isFrozen bool, pagePath, domain string
     const menuHtmlEntries = [
       "<ul class='SiteBrushMenuList'>",
       "<li class='SiteBrushContextMenu SiteBrushDomainMenuItem'><a href='/' class='SiteBrushContextMenuLink'>" + currentDomainName + "</a></li>",
-      "<li class='SiteBrushContextMenu'><a href='?edit' class='SiteBrushContextMenuLink'><img src='/p/static/pencil.png' class='SiteBrushMenuIcon' alt=''>Редактировать</a></li>",
-      "<li class='SiteBrushContextMenu'><a href='?revisions' class='SiteBrushContextMenuLink'><img src='/p/static/revisions.png' class='SiteBrushMenuIcon' alt=''>Ревизии</a></li>",
-      "<li class='SiteBrushContextMenu'><a href='?files' class='SiteBrushContextMenuLink'><img src='/p/static/upload.png' class='SiteBrushMenuIcon' alt=''>Файлы</a></li>",
+      "<li class='SiteBrushContextMenu'><a href='?edit' class='SiteBrushContextMenuLink'><img src='/p/static/pencil.png' class='SiteBrushMenuIcon' alt=''>" + "` + editLabel + `" + "</a></li>",
+      "<li class='SiteBrushContextMenu'><a href='?revisions' class='SiteBrushContextMenuLink'><img src='/p/static/revisions.png' class='SiteBrushMenuIcon' alt=''>" + "` + revisionsLabel + `" + "</a></li>",
+      "<li class='SiteBrushContextMenu'><a href='?files' class='SiteBrushContextMenuLink'><img src='/p/static/upload.png' class='SiteBrushMenuIcon' alt=''>" + "` + filesLabel + `" + "</a></li>",
       "` + freezeActionEntry + `",
-      "<li class='SiteBrushContextMenu'><a href='?settings' class='SiteBrushContextMenuLink'><img src='/p/static/revisions.png' class='SiteBrushMenuIcon' alt=''>Настройки домена</a></li>",
-      "<li class='SiteBrushContextMenu'><a href='?logout' class='SiteBrushContextMenuLink'><img src='/p/static/sign-out.png' class='SiteBrushMenuIcon' alt=''>Выйти</a></li>",
+      "<li class='SiteBrushContextMenu'><a href='?settings' class='SiteBrushContextMenuLink'><img src='/p/static/revisions.png' class='SiteBrushMenuIcon' alt=''>" + "` + settingsLabel + `" + "</a></li>",
+      "<li class='SiteBrushContextMenu'><a href='?logout' class='SiteBrushContextMenuLink'><img src='/p/static/sign-out.png' class='SiteBrushMenuIcon' alt=''>" + "` + logoutLabel + `" + "</a></li>",
       "<li class='SiteBrushContextMenu ContextMenuCopyright'><a href='http://sitebrush.com' class='SiteBrushContextMenuLink'>sitebrush</a></li>",
       "</ul>"
     ];
@@ -735,7 +800,7 @@ func buildContextMenuScript(isAdmin bool, isFrozen bool, pagePath, domain string
     const menuHtmlEntries = [
       "<ul class='SiteBrushMenuList'>",
       "<li class='SiteBrushContextMenu SiteBrushDomainMenuItem'><a href='/' class='SiteBrushContextMenuLink'>" + currentDomainName + "</a></li>",
-      "<li class='SiteBrushContextMenu'><a href='?login' class='SiteBrushContextMenuLink'><img src='/p/static/lock.png' class='SiteBrushMenuIcon' alt=''>Войти</a></li>",
+      "<li class='SiteBrushContextMenu'><a href='?login' class='SiteBrushContextMenuLink'><img src='/p/static/lock.png' class='SiteBrushMenuIcon' alt=''>" + "` + loginLabel + `" + "</a></li>",
       "<li class='SiteBrushContextMenu ContextMenuCopyright'><a href='http://sitebrush.com' class='SiteBrushContextMenuLink'>sitebrush</a></li>",
       "</ul>"
     ];
@@ -753,8 +818,14 @@ func contextMenuStylesAndHelpers() string {
 .SiteBrushContextMenu{margin:0;padding:0}
 .SiteBrushContextMenuLink{display:flex;align-items:center;gap:8px;padding:8px 10px;color:#1f3f6f;text-decoration:none;font-family:Arial,Helvetica,sans-serif;font-size:14px;cursor:pointer}
 .SiteBrushContextMenuLink:hover{background:#eef5ff}
+.SiteBrushContextMenuButton{width:100%;border:0;background:transparent;text-align:left}
 .SiteBrushDomainMenuItem .SiteBrushContextMenuLink{font-weight:700;border-bottom:1px solid #c8d5e7}
 .ContextMenuCopyright .SiteBrushContextMenuLink{font-size:12px;color:#5b6f8b;border-top:1px solid #c8d5e7;margin-top:2px;padding-top:7px}.SiteBrushMenuIcon{width:16px;height:16px;flex:0 0 16px}
+.SiteBrushConfirmOverlay{position:fixed;inset:0;background:rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center;z-index:100000}
+.SiteBrushConfirmModal{background:#fff;border:1px solid #8ea4c1;min-width:260px;max-width:340px;padding:16px;font-family:Arial,Helvetica,sans-serif}
+.SiteBrushConfirmText{margin:0 0 14px 0;color:#1f3f6f;font-size:14px}
+.SiteBrushConfirmActions{display:flex;gap:8px;justify-content:flex-end}
+.SiteBrushConfirmButton,.SiteBrushCancelButton{border:1px solid #8ea4c1;background:#f2f7ff;padding:6px 12px;cursor:pointer;font-size:13px}
 @media (prefers-color-scheme: dark){
   .SiteBrushMenuBox{background:#172235;border-color:#2f405d}
   .SiteBrushContextMenuLink{color:#dbe8ff}
@@ -795,6 +866,14 @@ function showSitebrushMenu(browserEvent, menuHtmlEntries, currentPagePath) {
   }, { once: true });
 }
 </script>`
+}
+
+func translationOrDefault(translations map[string]string, key, fallback string) string {
+	translatedValue := strings.TrimSpace(translations[key])
+	if translatedValue == "" {
+		return fallback
+	}
+	return translatedValue
 }
 
 func (a *App) applyTemplatePropagation(ctx context.Context, domain, sourceHTML string) {
@@ -1076,6 +1155,10 @@ func (a *App) domainSettingsPage(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) freezeDomain(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
 	if !a.isAdminRequest(r) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
@@ -1086,6 +1169,10 @@ func (a *App) freezeDomain(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) publishDomain(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
 	if !a.isAdminRequest(r) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
