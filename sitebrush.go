@@ -762,7 +762,7 @@ func (a *App) filesPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.Method == http.MethodPost {
-		fileName := safeFileName(r.FormValue("name"))
+		fileName := safeRelativeAssetPath(r.FormValue("name"))
 		action := r.FormValue("action")
 		if action == "save_access" && fileName != "" {
 			a.saveFileAccessRule(r.Context(), r, fileName)
@@ -777,30 +777,18 @@ func (a *App) filesPage(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, currentPath+"?files", http.StatusFound)
 		return
 	}
-	entries, err := os.ReadDir(a.domainFilesDir(r))
-	if err != nil {
+	fileList, listErr := a.listManagedFiles(r.Context(), r)
+	if listErr != nil {
 		a.render(w, r, "files.html", map[string]any{"Path": r.URL.Query().Get("path"), "Files": []ManagedFile{}})
 		return
 	}
-	fileList := make([]ManagedFile, 0, len(entries))
-	for _, entry := range entries {
-		if entry.IsDir() {
-			continue
-		}
-		fileInfo, statErr := entry.Info()
-		if statErr != nil {
-			continue
-		}
-		accessRule := a.fileAccessRule(r.Context(), r, entry.Name())
-		fileList = append(fileList, ManagedFile{
-			Name:          entry.Name(),
-			Size:          fileInfo.Size(),
-			AssetPath:     "/assets/" + domainStorageName(a.siteDomain(r.Context(), r)) + "/" + entry.Name(),
-			AccessMode:    accessRule.AccessMode,
-			Token:         accessRule.Token,
-			ExpiresAt:     accessRule.ExpiresAt,
-			SingleUseLeft: accessRule.SingleUseLeft,
-		})
+	for index := range fileList {
+		accessRule := a.fileAccessRule(r.Context(), r, fileList[index].Name)
+		fileList[index].AssetPath = "/assets/" + domainStorageName(a.siteDomain(r.Context(), r)) + "/" + fileList[index].Name
+		fileList[index].AccessMode = accessRule.AccessMode
+		fileList[index].Token = accessRule.Token
+		fileList[index].ExpiresAt = accessRule.ExpiresAt
+		fileList[index].SingleUseLeft = accessRule.SingleUseLeft
 	}
 	currentPath := r.URL.Query().Get("path")
 	if currentPath == "" {
@@ -810,6 +798,34 @@ func (a *App) filesPage(w http.ResponseWriter, r *http.Request) {
 		currentPath = "/"
 	}
 	a.render(w, r, "files.html", map[string]any{"Path": currentPath, "Files": fileList})
+}
+
+func (a *App) listManagedFiles(ctx context.Context, r *http.Request) ([]ManagedFile, error) {
+	fileList := make([]ManagedFile, 0, 32)
+	rootPath := a.domainFilesDir(r)
+	walkErr := filepath.WalkDir(rootPath, func(currentPath string, currentEntry fs.DirEntry, entryErr error) error {
+		if entryErr != nil || currentEntry.IsDir() {
+			return nil
+		}
+		relativePath, relErr := filepath.Rel(rootPath, currentPath)
+		if relErr != nil {
+			return nil
+		}
+		normalizedPath := filepath.ToSlash(relativePath)
+		if safeRelativeAssetPath(normalizedPath) == "" {
+			return nil
+		}
+		fileInfo, statErr := currentEntry.Info()
+		if statErr != nil {
+			return nil
+		}
+		fileList = append(fileList, ManagedFile{Name: normalizedPath, Size: fileInfo.Size()})
+		return nil
+	})
+	if walkErr != nil {
+		return nil, walkErr
+	}
+	return fileList, nil
 }
 
 func (a *App) fileAccessRule(ctx context.Context, r *http.Request, fileName string) ManagedFileAccess {
@@ -854,7 +870,7 @@ func (a *App) serveAsset(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	domain := parts[0]
-	fileName := safeFileName(parts[1])
+	fileName := safeRelativeAssetPath(parts[1])
 	if fileName == "" {
 		http.NotFound(w, r)
 		return
@@ -1472,6 +1488,15 @@ func safeFileName(rawName string) string {
 	return cleaned
 }
 
+func safeRelativeAssetPath(rawPath string) string {
+	cleanedPath := path.Clean("/" + strings.TrimSpace(rawPath))
+	cleanedPath = strings.TrimPrefix(cleanedPath, "/")
+	if cleanedPath == "" || cleanedPath == "." || strings.Contains(cleanedPath, "..") {
+		return ""
+	}
+	return cleanedPath
+}
+
 func contentHashName(fileBytes []byte, extension string) (string, error) {
 	if extension == "" {
 		return "", errors.New("missing extension")
@@ -1507,14 +1532,17 @@ func (a *App) importMirroredFiles(domain, tempDirPath string) map[string]string 
 	localFileToAssetPath := make(map[string]string)
 	baseDir := filepath.Join("storage/files", domainStorageName(domain))
 	_ = os.MkdirAll(baseDir, 0o755)
+	stagedFileByRelativePath := make(map[string][]byte)
 	_ = filepath.Walk(tempDirPath, func(currentPath string, fileInfo os.FileInfo, walkErr error) error {
 		if walkErr != nil || fileInfo.IsDir() || strings.HasSuffix(currentPath, "page.html") {
 			return nil
 		}
-		fileBytes, err := os.ReadFile(currentPath)
-		if err != nil {
+		fileBytes, readErr := os.ReadFile(currentPath)
+		if readErr != nil {
 			return nil
 		}
+		relativePath, _ := filepath.Rel(tempDirPath, currentPath)
+		normalizedRelativePath := filepath.ToSlash(relativePath)
 		fileExtension := strings.ToLower(path.Ext(currentPath))
 		if fileExtension == "" {
 			fileExtension = ".bin"
@@ -1523,15 +1551,33 @@ func (a *App) importMirroredFiles(domain, tempDirPath string) map[string]string 
 		if err != nil {
 			return nil
 		}
-		assetPath := filepath.Join(baseDir, hashedFileName)
-		if err = os.WriteFile(assetPath, fileBytes, 0o644); err != nil {
-			return nil
-		}
-		relativePath, _ := filepath.Rel(tempDirPath, currentPath)
-		localFileToAssetPath[filepath.ToSlash(relativePath)] = "/assets/" + domainStorageName(domain) + "/" + hashedFileName
+		localAssetRelativePath := "p/" + hashedFileName
+		localFileToAssetPath[normalizedRelativePath] = "/assets/" + domainStorageName(domain) + "/" + localAssetRelativePath
+		stagedFileByRelativePath[normalizedRelativePath] = fileBytes
 		return nil
 	})
+	for originalRelativePath, originalBytes := range stagedFileByRelativePath {
+		mirroredBytes := rewriteMirroredFileContent(originalRelativePath, originalBytes, localFileToAssetPath)
+		assetReference := strings.TrimPrefix(localFileToAssetPath[originalRelativePath], "/assets/"+domainStorageName(domain)+"/")
+		targetFilePath := filepath.Join(baseDir, filepath.FromSlash(assetReference))
+		_ = os.MkdirAll(filepath.Dir(targetFilePath), 0o755)
+		_ = os.WriteFile(targetFilePath, mirroredBytes, 0o644)
+	}
 	return localFileToAssetPath
+}
+
+func rewriteMirroredFileContent(relativePath string, sourceBytes []byte, localFileToAssetPath map[string]string) []byte {
+	extension := strings.ToLower(path.Ext(relativePath))
+	if extension != ".css" && extension != ".js" && extension != ".mjs" && extension != ".html" && extension != ".htm" {
+		return sourceBytes
+	}
+	rewrittenContent := string(sourceBytes)
+	for sourcePath, localAssetPath := range localFileToAssetPath {
+		rewrittenContent = strings.ReplaceAll(rewrittenContent, sourcePath, localAssetPath)
+		rewrittenContent = strings.ReplaceAll(rewrittenContent, "./"+sourcePath, localAssetPath)
+		rewrittenContent = strings.ReplaceAll(rewrittenContent, path.Base(sourcePath), localAssetPath)
+	}
+	return []byte(rewrittenContent)
 }
 
 func domainFromRequest(r *http.Request) string {
