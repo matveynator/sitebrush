@@ -813,6 +813,7 @@ func buildContextMenuScript(isAdmin bool, isFrozen bool, pagePath, domain string
 	confirmPublishPrompt := template.JSEscapeString(translationOrDefault(translations, "confirm_publish_prompt", "Publish domain now?"))
 	publishPreviewLoadingLabel := template.JSEscapeString(translationOrDefault(translations, "publish_preview_loading", "Checking changes to publish..."))
 	publishPreviewSummaryLabel := template.JSEscapeString(translationOrDefault(translations, "publish_preview_summary", "Changes:"))
+	publishPreviewNoChangesLabel := template.JSEscapeString(translationOrDefault(translations, "publish_preview_no_changes", "No changes to publish."))
 	confirmYesLabel := template.JSEscapeString(translationOrDefault(translations, "confirm_yes", "Yes"))
 	confirmNoLabel := template.JSEscapeString(translationOrDefault(translations, "confirm_no", "No"))
 	editLabel := template.JSEscapeString(translationOrDefault(translations, "menu_edit", "Edit"))
@@ -896,10 +897,13 @@ func buildContextMenuScript(isAdmin bool, isFrozen bool, pagePath, domain string
           if (!previewResponse.ok) { throw new Error("publish preview failed"); }
           return previewResponse.json();
         })
-        .then(function confirmPublishWithPreview(previewPayload) {
-          const summaryText = "` + publishPreviewSummaryLabel + `" + " " + previewPayload.changed + " / " + previewPayload.total;
-          openConfirmationDialog(selectedActionConfig.message + "\n\n" + summaryText, submitConfirmedAction);
-        })
+	        .then(function confirmPublishWithPreview(previewPayload) {
+	          let summaryText = "` + publishPreviewSummaryLabel + `" + " " + previewPayload.changed + " / " + previewPayload.total;
+	          if (previewPayload.changed === 0) {
+	            summaryText = "` + publishPreviewNoChangesLabel + `";
+	          }
+	          openConfirmationDialog(selectedActionConfig.message + "\n\n" + summaryText, submitConfirmedAction);
+	        })
         .catch(function fallbackPublishConfirmation() {
           openConfirmationDialog(selectedActionConfig.message + "\n\n" + "` + publishPreviewLoadingLabel + `", submitConfirmedAction);
         });
@@ -1489,7 +1493,7 @@ func (a *App) publishDomain(w http.ResponseWriter, r *http.Request) {
 				var previousPublishedTitle string
 				var previousPublishedHTML string
 				readPublishedErr := a.db.QueryRowContext(r.Context(), `SELECT title,html FROM published_pages WHERE domain=? AND path=?`, domain, pagePath).Scan(&previousPublishedTitle, &previousPublishedHTML)
-				if readPublishedErr == nil && previousPublishedTitle == pageTitle && previousPublishedHTML == pageHTMLToPublish {
+				if !hasPublishedPageChanged(readPublishedErr, previousPublishedTitle, previousPublishedHTML, pageTitle, pageHTMLToPublish) {
 					skippedPagesCount++
 					continue
 				}
@@ -1558,11 +1562,25 @@ func (a *App) countPublishChanges(ctx context.Context, domain string) (int, int)
 		}
 		var previousPublishedTitle, previousPublishedHTML string
 		readPublishedErr := a.db.QueryRowContext(ctx, `SELECT title,html FROM published_pages WHERE domain=? AND path=?`, domain, pagePath).Scan(&previousPublishedTitle, &previousPublishedHTML)
-		if readPublishedErr != nil || previousPublishedTitle != pageTitle || previousPublishedHTML != pageHTMLToPublish {
+		if hasPublishedPageChanged(readPublishedErr, previousPublishedTitle, previousPublishedHTML, pageTitle, pageHTMLToPublish) {
 			changedPagesCount++
 		}
 	}
 	return totalPagesCount, changedPagesCount
+}
+
+func hasPublishedPageChanged(readPublishedErr error, previousPublishedTitle, previousPublishedHTML, nextPublishedTitle, nextPublishedHTML string) bool {
+	if readPublishedErr != nil {
+		return true
+	}
+	if strings.TrimSpace(previousPublishedTitle) != strings.TrimSpace(nextPublishedTitle) {
+		return true
+	}
+	return normalizePublishedHTML(previousPublishedHTML) != normalizePublishedHTML(nextPublishedHTML)
+}
+
+func normalizePublishedHTML(html string) string {
+	return strings.TrimSpace(strings.ReplaceAll(html, "\r\n", "\n"))
 }
 
 func (a *App) generateDomainPack(domain string) error {

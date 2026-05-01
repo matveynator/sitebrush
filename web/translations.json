@@ -41,7 +41,8 @@
     "menu_logout": "Sign out",
     "menu_login": "Sign in",
     "publish_preview_loading": "Checking changes to publish...",
-    "publish_preview_summary": "Changed pages to publish:"
+    "publish_preview_summary": "Changed pages to publish:",
+    "publish_preview_no_changes": "No changes to publish."
   },
   "fr": {
     "setup_no_admin": "aucun administrateur pour l'instant",
@@ -85,7 +86,8 @@
     "menu_logout": "Se déconnecter",
     "menu_login": "Se connecter",
     "publish_preview_loading": "Checking changes to publish...",
-    "publish_preview_summary": "Changed pages to publish:"
+    "publish_preview_summary": "Changed pages to publish:",
+    "publish_preview_no_changes": "No changes to publish."
   },
   "ru": {
     "setup_no_admin": "пока нет администратора",
@@ -129,7 +131,8 @@
     "menu_logout": "Выйти",
     "menu_login": "Войти",
     "publish_preview_loading": "Проверяем изменения перед публикацией...",
-    "publish_preview_summary": "Будет опубликовано измененных страниц:"
+    "publish_preview_summary": "Будет опубликовано измененных страниц:",
+    "publish_preview_no_changes": "Изменений нет — публиковать нечего."
   },
   "ja": {
     "setup_no_admin": "まだ管理者がいません",
@@ -173,7 +176,8 @@
     "menu_logout": "ログアウト",
     "menu_login": "ログイン",
     "publish_preview_loading": "Checking changes to publish...",
-    "publish_preview_summary": "Changed pages to publish:"
+    "publish_preview_summary": "Changed pages to publish:",
+    "publish_preview_no_changes": "No changes to publish."
   },
   "it": {
     "setup_no_admin": "nessun amministratore ancora",
@@ -217,7 +221,8 @@
     "menu_logout": "Esci",
     "menu_login": "Accedi",
     "publish_preview_loading": "Checking changes to publish...",
-    "publish_preview_summary": "Changed pages to publish:"
+    "publish_preview_summary": "Changed pages to publish:",
+    "publish_preview_no_changes": "No changes to publish."
   },
   "sv": {
     "setup_no_admin": "ingen administratör ännu",
@@ -261,7 +266,8 @@
     "menu_logout": "Logga ut",
     "menu_login": "Logga in",
     "publish_preview_loading": "Checking changes to publish...",
-    "publish_preview_summary": "Changed pages to publish:"
+    "publish_preview_summary": "Changed pages to publish:",
+    "publish_preview_no_changes": "No changes to publish."
   },
   "fi": {
     "setup_no_admin": "ei vielä järjestelmänvalvojaa",
@@ -305,7 +311,8 @@
     "menu_logout": "Kirjaudu ulos",
     "menu_login": "Kirjaudu sisään",
     "publish_preview_loading": "Checking changes to publish...",
-    "publish_preview_summary": "Changed pages to publish:"
+    "publish_preview_summary": "Changed pages to publish:",
+    "publish_preview_no_changes": "No changes to publish."
   },
   "mn": {
     "setup_no_admin": "админ хараахан алга",
@@ -349,7 +356,8 @@
     "menu_logout": "Гарах",
     "menu_login": "Нэвтрэх",
     "publish_preview_loading": "Checking changes to publish...",
-    "publish_preview_summary": "Changed pages to publish:"
+    "publish_preview_summary": "Changed pages to publish:",
+    "publish_preview_no_changes": "No changes to publish."
   },
   "zh": {
     "setup_no_admin": "尚无管理员",
@@ -393,7 +401,8 @@
     "menu_logout": "退出",
     "menu_login": "登录",
     "publish_preview_loading": "Checking changes to publish...",
-    "publish_preview_summary": "Changed pages to publish:"
+    "publish_preview_summary": "Changed pages to publish:",
+    "publish_preview_no_changes": "No changes to publish."
   },
   "he": {
     "setup_no_admin": "עדיין אין מנהל",
@@ -437,7 +446,8 @@
     "menu_logout": "יציאה",
     "menu_login": "כניסה",
     "publish_preview_loading": "Checking changes to publish...",
-    "publish_preview_summary": "Changed pages to publish:"
+    "publish_preview_summary": "Changed pages to publish:",
+    "publish_preview_no_changes": "No changes to publish."
   },
   "fa": {
     "setup_no_admin": "هنوز مدیر وجود ندارد",
@@ -481,7 +491,8 @@
     "menu_logout": "خروج",
     "menu_login": "ورود",
     "publish_preview_loading": "Checking changes to publish...",
-    "publish_preview_summary": "Changed pages to publish:"
+    "publish_preview_summary": "Changed pages to publish:",
+    "publish_preview_no_changes": "No changes to publish."
   },
   "de": {
     "setup_no_admin": "noch kein Administrator",
@@ -525,7 +536,8 @@
     "menu_logout": "Abmelden",
     "menu_login": "Anmelden",
     "publish_preview_loading": "Checking changes to publish...",
-    "publish_preview_summary": "Changed pages to publish:"
+    "publish_preview_summary": "Changed pages to publish:",
+    "publish_preview_no_changes": "No changes to publish."
   },
   "tr": {
     "setup_no_admin": "henüz yönetici yok",
@@ -569,7 +581,8 @@
     "menu_logout": "Çıkış yap",
     "menu_login": "Giriş yap",
     "publish_preview_loading": "Checking changes to publish...",
-    "publish_preview_summary": "Changed pages to publish:"
+    "publish_preview_summary": "Changed pages to publish:",
+    "publish_preview_no_changes": "No changes to publish."
   },
   "kk": {
     "setup_no_admin": "әзірге әкімші жоқ",
@@ -613,7 +626,8 @@
     "menu_logout": "Шығу",
     "menu_login": "Кіру",
     "publish_preview_loading": "Checking changes to publish...",
-    "publish_preview_summary": "Changed pages to publish:"
+    "publish_preview_summary": "Changed pages to publish:",
+    "publish_preview_no_changes": "No changes to publish."
   },
   "es": {
     "setup_no_admin": "aún no hay administrador",
@@ -657,7 +671,8 @@
     "menu_logout": "Cerrar sesión",
     "menu_login": "Iniciar sesión",
     "publish_preview_loading": "Checking changes to publish...",
-    "publish_preview_summary": "Changed pages to publish:"
+    "publish_preview_summary": "Changed pages to publish:",
+    "publish_preview_no_changes": "No changes to publish."
   },
   "pt": {
     "setup_no_admin": "ainda não há administrador",
@@ -701,6 +716,7 @@
     "menu_logout": "Sair",
     "menu_login": "Entrar",
     "publish_preview_loading": "Checking changes to publish...",
-    "publish_preview_summary": "Changed pages to publish:"
+    "publish_preview_summary": "Changed pages to publish:",
+    "publish_preview_no_changes": "No changes to publish."
   }
 }
