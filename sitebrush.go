@@ -815,7 +815,6 @@ func buildContextMenuScript(isAdmin bool, isFrozen bool, pagePath, domain string
 	publishConfirmWithoutChangesLabel := template.JSEscapeString(translationOrDefault(translations, "publish_confirm_without_changes", "No changes were made. Unfreeze the site?"))
 	publishPreviewLoadingLabel := template.JSEscapeString(translationOrDefault(translations, "publish_preview_loading", "Checking changes to publish..."))
 	publishPreviewSummaryLabel := template.JSEscapeString(translationOrDefault(translations, "publish_preview_summary", "Changes:"))
-	publishPreviewNoChangesLabel := template.JSEscapeString(translationOrDefault(translations, "publish_preview_no_changes", "No changes to publish."))
 	confirmYesLabel := template.JSEscapeString(translationOrDefault(translations, "confirm_yes", "Yes"))
 	confirmNoLabel := template.JSEscapeString(translationOrDefault(translations, "confirm_no", "No"))
 	editLabel := template.JSEscapeString(translationOrDefault(translations, "menu_edit", "Edit"))
