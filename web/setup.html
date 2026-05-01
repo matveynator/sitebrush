@@ -21,10 +21,7 @@
   <form class="card card-body shadow-sm" method="post" action="?register" style="max-width:520px;">
     <p><input type="email" name="email" class="form-control" placeholder="{{index .T "login_email_placeholder"}}" required></p>
     <p><input type="password" name="password" class="form-control" placeholder="{{index .T "login_password_placeholder"}}" required></p>
-    <div class="d-flex gap-2">
-      <button type="submit" class="btn btn-primary">{{index .T "setup_create_admin"}}</button>
-      <a href="?login" class="btn btn-outline-secondary">{{index .T "menu_login"}}</a>
-    </div>
+    <div><button type="submit" class="btn btn-primary">{{index .T "setup_create_admin"}}</button></div>
   </form>
 </div>
 </body>

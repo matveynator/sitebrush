@@ -254,6 +254,10 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	domain := a.siteDomain(r.Context(), r)
+	if !a.hasAdmin(r.Context(), domain) && !hasQueryFlag(r, "register") {
+		http.Redirect(w, r, r.URL.Path+"?register", http.StatusFound)
+		return
+	}
 	isAdmin := a.isAdminRequest(r)
 	pageRecord, err := a.findPage(r.Context(), domain, pagePath)
 	if err == nil && isAdmin {
@@ -272,10 +276,6 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 	if publishedErr == nil {
 		a.logContentDelivery("db-published-fallback", domain, pagePath)
 		_, _ = w.Write([]byte(a.wrapWithMenu(r, publishedPage.Path, publishedPage.HTML)))
-		return
-	}
-	if !a.hasAdmin(r.Context(), domain) {
-		a.render(w, r, "setup.html", map[string]any{"Domain": domain})
 		return
 	}
 	if isAdmin {
@@ -328,8 +328,12 @@ func (a *App) registerPage(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) login(w http.ResponseWriter, r *http.Request) {
+	domain := a.siteDomain(r.Context(), r)
+	if !a.hasAdmin(r.Context(), domain) {
+		http.Redirect(w, r, r.URL.Path+"?register", http.StatusFound)
+		return
+	}
 	if r.Method == http.MethodGet {
-		domain := a.siteDomain(r.Context(), r)
 		returnPath := loginReturnPathOrDefault(r)
 		a.render(w, r, "login.html", map[string]any{"ReturnPath": returnPath, "Domain": domain})
 		return
@@ -337,7 +341,6 @@ func (a *App) login(w http.ResponseWriter, r *http.Request) {
 	email := r.FormValue("email")
 	password := r.FormValue("password")
 	var matchedUsers int
-	domain := a.siteDomain(r.Context(), r)
 	_ = a.db.QueryRowContext(r.Context(), `SELECT COUNT(1) FROM users WHERE domain=? AND email=? AND password=?`, domain, email, password).Scan(&matchedUsers)
 	if matchedUsers == 0 {
 		http.Error(w, "invalid credentials", http.StatusUnauthorized)
@@ -358,6 +361,10 @@ func (a *App) logout(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) editPage(w http.ResponseWriter, r *http.Request) {
 	if !a.isAdminRequest(r) {
+		if !a.hasAdmin(r.Context(), a.siteDomain(r.Context(), r)) {
+			http.Redirect(w, r, r.URL.Path+"?register", http.StatusFound)
+			return
+		}
 		http.Redirect(w, r, r.URL.Path+"?login", http.StatusFound)
 		return
 	}
@@ -378,6 +385,10 @@ func (a *App) editPage(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) editModePage(w http.ResponseWriter, r *http.Request) {
 	if !a.isAdminRequest(r) {
+		if !a.hasAdmin(r.Context(), a.siteDomain(r.Context(), r)) {
+			http.Redirect(w, r, r.URL.Path+"?register", http.StatusFound)
+			return
+		}
 		http.Redirect(w, r, r.URL.Path+"?login", http.StatusFound)
 		return
 	}
@@ -393,6 +404,10 @@ func (a *App) editModePage(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) editRawPage(w http.ResponseWriter, r *http.Request) {
 	if !a.isAdminRequest(r) {
+		if !a.hasAdmin(r.Context(), a.siteDomain(r.Context(), r)) {
+			http.Redirect(w, r, r.URL.Path+"?register", http.StatusFound)
+			return
+		}
 		http.Redirect(w, r, r.URL.Path+"?login", http.StatusFound)
 		return
 	}
