@@ -378,7 +378,7 @@ func (a *App) editPage(w http.ResponseWriter, r *http.Request) {
 	domain := a.siteDomain(r.Context(), r)
 	record, _ := a.findPage(r.Context(), domain, pagePath)
 	if record.Path == "" {
-		record = Page{Path: pagePath, Title: pagePath, HTML: "<h1>New page</h1>"}
+		record = Page{Path: pagePath, Title: pagePath, HTML: a.defaultHTMLForNewPage(r.Context(), domain, pagePath)}
 	}
 	a.render(w, r, "edit.html", record)
 }
@@ -424,6 +424,36 @@ func (a *App) editRawPage(w http.ResponseWriter, r *http.Request) {
 		record = Page{Path: pagePath, Title: pagePath, HTML: ""}
 	}
 	a.render(w, r, "edit_raw.html", record)
+}
+
+func (a *App) defaultHTMLForNewPage(ctx context.Context, domain, pagePath string) string {
+	ancestorPath := parentPagePath(pagePath)
+	for ancestorPath != "" {
+		ancestorPage, err := a.findPage(ctx, domain, ancestorPath)
+		if err == nil && ancestorPage.Path != "" && strings.TrimSpace(ancestorPage.HTML) != "" {
+			return ancestorPage.HTML
+		}
+		ancestorPath = parentPagePath(ancestorPath)
+	}
+	return "<h1>New page</h1>"
+}
+
+func parentPagePath(pagePath string) string {
+	if pagePath == "" || pagePath == "/" {
+		return ""
+	}
+	if strings.HasSuffix(pagePath, "/") {
+		trimmedPath := strings.TrimSuffix(pagePath, "/")
+		if trimmedPath == "" {
+			return "/"
+		}
+		return trimmedPath
+	}
+	lastSlashIndex := strings.LastIndex(pagePath, "/")
+	if lastSlashIndex <= 0 {
+		return "/"
+	}
+	return pagePath[:lastSlashIndex]
 }
 
 func loginReturnPathOrDefault(r *http.Request) string {
@@ -976,21 +1006,41 @@ function showSitebrushMenu(browserEvent, menuHtmlEntries, currentPagePath) {
     }
   }, { once: true });
 }
+function buildSiteTreeNodeName(fullPath) {
+  if (fullPath === "/") { return "/"; }
+  if (fullPath.endsWith("/")) {
+    const trimmedPath = fullPath.slice(0, -1);
+    const slashIndex = trimmedPath.lastIndexOf("/");
+    return trimmedPath.slice(slashIndex + 1) + "/";
+  }
+  const slashIndex = fullPath.lastIndexOf("/");
+  return fullPath.slice(slashIndex + 1);
+}
+function parentTreePath(fullPath) {
+  if (fullPath === "/") { return ""; }
+  if (fullPath.endsWith("/")) { return fullPath.slice(0, -1); }
+  const slashIndex = fullPath.lastIndexOf("/");
+  if (slashIndex <= 0) { return "/"; }
+  return fullPath.slice(0, slashIndex);
+}
 function buildSiteTreeStateFromPaths(pagePathList, currentPagePath) {
   const rootNode = { name: "/", fullPath: "/", childrenByName: {}, childList: [] };
+  const nodeByPath = { "/": rootNode };
+  const ensureNode = function ensureTreeNode(pathValue) {
+    if (nodeByPath[pathValue]) { return nodeByPath[pathValue]; }
+    const createdNode = { name: buildSiteTreeNodeName(pathValue), fullPath: pathValue, childrenByName: {}, childList: [] };
+    nodeByPath[pathValue] = createdNode;
+    return createdNode;
+  };
   for (const fullPathEntry of pagePathList) {
-    const normalizedPath = fullPathEntry === "/" ? "/" : fullPathEntry.replace(/\/+$/, "");
-    const pathPartList = normalizedPath === "/" ? [] : normalizedPath.split("/").filter(function isSegmentPresent(pathSegment) { return pathSegment !== ""; });
-    let currentNode = rootNode;
-    let builtPath = "";
-    for (const pathPart of pathPartList) {
-      builtPath += "/" + pathPart;
-      if (!currentNode.childrenByName[pathPart]) {
-        const nextNode = { name: pathPart, fullPath: builtPath, childrenByName: {}, childList: [] };
-        currentNode.childrenByName[pathPart] = nextNode;
-        currentNode.childList.push(nextNode);
-      }
-      currentNode = currentNode.childrenByName[pathPart];
+    const exactPath = fullPathEntry || "/";
+    const branchNode = ensureNode(exactPath);
+    const parentPath = parentTreePath(exactPath);
+    if (!parentPath) { continue; }
+    const parentNode = ensureNode(parentPath);
+    if (!parentNode.childrenByName[branchNode.fullPath]) {
+      parentNode.childrenByName[branchNode.fullPath] = branchNode;
+      parentNode.childList.push(branchNode);
     }
   }
   const sortBranch = function sortBranchNodes(branchNode) {
@@ -1011,7 +1061,7 @@ function renderSiteTree(hostElement, treeData) {
     const branchListItemElement = document.createElement("li");
     const branchLinkElement = document.createElement("a");
     branchLinkElement.className = "SiteBrushTreeLink";
-    branchLinkElement.href = branchNode.fullPath + "?edit";
+    branchLinkElement.href = branchNode.fullPath;
     branchLinkElement.textContent = branchNode.fullPath;
     if (branchNode.fullPath === treeState.currentPath) { branchLinkElement.classList.add("SiteBrushTreeCurrent"); }
     branchListItemElement.appendChild(branchLinkElement);
