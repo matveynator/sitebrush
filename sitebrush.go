@@ -1,6 +1,7 @@
 package main
 
 import (
+	"archive/zip"
 	"context"
 	"crypto/sha256"
 	"database/sql"
@@ -1392,6 +1393,7 @@ func (a *App) publishDomain(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	domain := a.siteDomain(r.Context(), r)
+	_ = os.RemoveAll(a.domainStaticDir(domain))
 	_, _ = a.db.ExecContext(r.Context(), `DELETE FROM published_pages WHERE domain=?`, domain)
 	revisionRows, err := a.db.QueryContext(r.Context(), `SELECT page_path,html FROM revisions WHERE domain=? AND is_active=1 ORDER BY page_path ASC, id DESC`, domain)
 	if err == nil {
@@ -1427,8 +1429,56 @@ func (a *App) publishDomain(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	_ = a.generateDomainPack(domain)
 	a.setDomainFrozenState(r.Context(), domain, 0)
 	http.Redirect(w, r, requestedReturnPath(r), http.StatusFound)
+}
+
+func (a *App) generateDomainPack(domain string) error {
+	domainDirName := domainStorageName(domain)
+	packsDirPath := filepath.Join("storage", "packs")
+	if makeErr := os.MkdirAll(packsDirPath, 0o755); makeErr != nil {
+		return makeErr
+	}
+	packFilePath := filepath.Join(packsDirPath, domainDirName+".zip")
+	packFile, createErr := os.Create(packFilePath)
+	if createErr != nil {
+		return createErr
+	}
+	defer packFile.Close()
+	zipWriter := zip.NewWriter(packFile)
+	defer zipWriter.Close()
+	_ = addDirectoryToZip(zipWriter, a.domainStaticDir(domain), filepath.Join("static", domainDirName))
+	_ = addDirectoryToZip(zipWriter, filepath.Join("storage", "files", domainDirName), filepath.Join("files", domainDirName))
+	return nil
+}
+
+func addDirectoryToZip(zipWriter *zip.Writer, sourceDirPath, archiveDirPrefix string) error {
+	directoryInfo, statErr := os.Stat(sourceDirPath)
+	if statErr != nil || !directoryInfo.IsDir() {
+		return nil
+	}
+	return filepath.WalkDir(sourceDirPath, func(currentPath string, currentEntry fs.DirEntry, walkErr error) error {
+		if walkErr != nil || currentEntry.IsDir() {
+			return walkErr
+		}
+		relativePath, relErr := filepath.Rel(sourceDirPath, currentPath)
+		if relErr != nil {
+			return relErr
+		}
+		archivePath := filepath.ToSlash(filepath.Join(archiveDirPrefix, relativePath))
+		archiveFileWriter, createErr := zipWriter.Create(archivePath)
+		if createErr != nil {
+			return createErr
+		}
+		sourceFile, openErr := os.Open(currentPath)
+		if openErr != nil {
+			return openErr
+		}
+		defer sourceFile.Close()
+		_, copyErr := io.Copy(archiveFileWriter, sourceFile)
+		return copyErr
+	})
 }
 
 func (a *App) findPublishedPage(ctx context.Context, domain, pagePath string) (Page, error) {
