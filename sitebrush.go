@@ -1032,15 +1032,20 @@ function buildSiteTreeStateFromPaths(pagePathList, currentPagePath) {
     nodeByPath[pathValue] = createdNode;
     return createdNode;
   };
+  const connectChildToParent = function connectTreeChild(parentNode, childNode) {
+    if (parentNode.childrenByName[childNode.fullPath]) { return; }
+    parentNode.childrenByName[childNode.fullPath] = childNode;
+    parentNode.childList.push(childNode);
+  };
   for (const fullPathEntry of pagePathList) {
     const exactPath = fullPathEntry || "/";
-    const branchNode = ensureNode(exactPath);
-    const parentPath = parentTreePath(exactPath);
-    if (!parentPath) { continue; }
-    const parentNode = ensureNode(parentPath);
-    if (!parentNode.childrenByName[branchNode.fullPath]) {
-      parentNode.childrenByName[branchNode.fullPath] = branchNode;
-      parentNode.childList.push(branchNode);
+    let childNode = ensureNode(exactPath);
+    let parentPath = parentTreePath(exactPath);
+    while (parentPath) {
+      const parentNode = ensureNode(parentPath);
+      connectChildToParent(parentNode, childNode);
+      childNode = parentNode;
+      parentPath = parentTreePath(parentNode.fullPath);
     }
   }
   const sortBranch = function sortBranchNodes(branchNode) {
