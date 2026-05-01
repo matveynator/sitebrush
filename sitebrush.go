@@ -854,8 +854,12 @@ func (a *App) saveFileAccessRule(ctx context.Context, r *http.Request, fileName 
 	}
 
 	expiresAt := ""
-	// Keep the existing expiration when days input is omitted.
-	if accessDaysValue == "" {
+	// Public mode must always clear token-specific state.
+	if accessMode == "public" {
+		token = ""
+		singleUseLeft = 0
+	} else if accessDaysValue == "" {
+		// Keep the existing expiration for token mode when days input is omitted.
 		_ = a.db.QueryRowContext(ctx, `SELECT expires_at FROM file_access_rules WHERE domain=? AND file_name=?`, domainStorageName(a.siteDomain(ctx, r)), fileName).Scan(&expiresAt)
 	} else if days > 0 {
 		expiresAt = time.Now().Add(time.Duration(days) * 24 * time.Hour).UTC().Format(time.RFC3339)
@@ -1908,6 +1912,12 @@ func (a *App) setDomainFrozenState(ctx context.Context, domain string, frozenSta
 
 func (a *App) servePublishedStaticFile(w http.ResponseWriter, r *http.Request, domain, pagePath string) bool {
 	if a.isAdminRequest(r) {
+		return false
+	}
+	// Serve static page only when there is an active revision for this path.
+	var activeRevisionCount int
+	countErr := a.db.QueryRowContext(r.Context(), `SELECT COUNT(1) FROM revisions WHERE domain=? AND page_path=? AND is_active=1`, domain, pagePath).Scan(&activeRevisionCount)
+	if countErr != nil || activeRevisionCount == 0 {
 		return false
 	}
 	staticFilePath := filepath.Join(a.domainStaticDir(domain), staticRelativePathForPage(pagePath))
