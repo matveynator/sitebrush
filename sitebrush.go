@@ -157,8 +157,10 @@ func (a *App) migrate(ctx context.Context) error {
 		`CREATE TABLE IF NOT EXISTS users(id INTEGER PRIMARY KEY AUTOINCREMENT,domain TEXT,email TEXT,password TEXT,is_admin INTEGER,UNIQUE(domain,email));`,
 		`CREATE TABLE IF NOT EXISTS sessions(token TEXT PRIMARY KEY,user_email TEXT,created_at TEXT);`,
 		`CREATE TABLE IF NOT EXISTS pages(domain TEXT,path TEXT,title TEXT,html TEXT,published INTEGER,PRIMARY KEY(domain,path));`,
+		`CREATE TABLE IF NOT EXISTS published_pages(domain TEXT,path TEXT,title TEXT,html TEXT,PRIMARY KEY(domain,path));`,
 		`CREATE TABLE IF NOT EXISTS revisions(id INTEGER PRIMARY KEY AUTOINCREMENT,domain TEXT,page_path TEXT,html TEXT,created_at TEXT,is_active INTEGER DEFAULT 1);`,
 		`CREATE TABLE IF NOT EXISTS domain_aliases(primary_domain TEXT,alias_domain TEXT UNIQUE);`,
+		`CREATE TABLE IF NOT EXISTS domain_states(domain TEXT PRIMARY KEY,is_frozen INTEGER DEFAULT 0);`,
 	}
 	for _, query := range queries {
 		if _, err := a.db.ExecContext(ctx, query); err != nil {
@@ -186,8 +188,16 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 		a.editRawPage(w, r)
 		return
 	}
-	if r.URL.RawQuery == "settings" || r.URL.RawQuery == "properties" || r.URL.RawQuery == "freeze" || r.URL.RawQuery == "unfreeze" {
+	if r.URL.RawQuery == "settings" || r.URL.RawQuery == "properties" {
 		a.domainSettingsPage(w, r)
+		return
+	}
+	if r.URL.RawQuery == "freeze" {
+		a.freezeDomain(w, r)
+		return
+	}
+	if r.URL.RawQuery == "publish" {
+		a.publishDomain(w, r)
 		return
 	}
 	if r.URL.RawQuery == "files" {
@@ -220,8 +230,13 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 	}
 	domain := a.siteDomain(r.Context(), r)
 	pageRecord, err := a.findPage(r.Context(), domain, pagePath)
-	if err == nil && pageRecord.Published == 1 {
+	if err == nil && a.isAdminRequest(r) {
 		_, _ = w.Write([]byte(a.wrapWithMenu(r, pageRecord.Path, pageRecord.HTML)))
+		return
+	}
+	publishedPage, publishedErr := a.findPublishedPage(r.Context(), domain, pagePath)
+	if publishedErr == nil {
+		_, _ = w.Write([]byte(a.wrapWithMenu(r, publishedPage.Path, publishedPage.HTML)))
 		return
 	}
 	if !a.hasAdmin(r.Context(), domain) {
@@ -357,6 +372,9 @@ func (a *App) savePage(w http.ResponseWriter, r *http.Request) {
 	title := r.FormValue("title")
 	html := r.FormValue("html")
 	_, _ = a.db.ExecContext(r.Context(), `INSERT OR REPLACE INTO pages(domain,path,title,html,published) VALUES(?,?,?,?,1)`, domain, pagePath, title, html)
+	if !a.isDomainFrozen(r.Context(), domain) {
+		_, _ = a.db.ExecContext(r.Context(), `INSERT OR REPLACE INTO published_pages(domain,path,title,html) VALUES(?,?,?,?)`, domain, pagePath, title, html)
+	}
 	_, _ = a.db.ExecContext(r.Context(), `INSERT INTO revisions(domain,page_path,html,created_at) VALUES(?,?,?,?)`, domain, pagePath, html, time.Now().Format(time.RFC3339))
 	a.applyTemplatePropagation(r.Context(), domain, html)
 	http.Redirect(w, r, pagePath, http.StatusFound)
@@ -410,6 +428,9 @@ func (a *App) grabPage(w http.ResponseWriter, r *http.Request) {
 	domain := a.siteDomain(r.Context(), r)
 	html := a.mirrorRemotePage(domain, sourceURL, remoteSourceURL, string(htmlBytes))
 	_, _ = a.db.ExecContext(r.Context(), `INSERT OR REPLACE INTO pages(domain,path,title,html,published) VALUES(?,?,?,?,1)`, domain, pagePath, pagePath, html)
+	if !a.isDomainFrozen(r.Context(), domain) {
+		_, _ = a.db.ExecContext(r.Context(), `INSERT OR REPLACE INTO published_pages(domain,path,title,html) VALUES(?,?,?,?)`, domain, pagePath, pagePath, html)
+	}
 	_, _ = a.db.ExecContext(r.Context(), `INSERT INTO revisions(domain,page_path,html,created_at) VALUES(?,?,?,?)`, domain, pagePath, html, time.Now().Format(time.RFC3339))
 	http.Redirect(w, r, pagePath+"?edit", http.StatusFound)
 }
@@ -590,6 +611,12 @@ func (a *App) hasAdmin(ctx context.Context, domain string) bool {
 	return adminCount > 0
 }
 
+func (a *App) isDomainFrozen(ctx context.Context, domain string) bool {
+	var isFrozen int
+	_ = a.db.QueryRowContext(ctx, `SELECT is_frozen FROM domain_states WHERE domain=?`, domain).Scan(&isFrozen)
+	return isFrozen == 1
+}
+
 func requestedReturnPath(r *http.Request) string {
 	if r.URL.Path == "" {
 		return "/"
@@ -614,7 +641,8 @@ func (a *App) isAdminRequest(r *http.Request) bool {
 }
 
 func (a *App) wrapWithMenu(r *http.Request, pagePath, html string) string {
-	menuScript := buildContextMenuScript(a.isAdminRequest(r), pagePath, a.siteDomain(r.Context(), r))
+	domain := a.siteDomain(r.Context(), r)
+	menuScript := buildContextMenuScript(a.isAdminRequest(r), a.isDomainFrozen(r.Context(), domain), pagePath, domain)
 	if strings.Contains(strings.ToLower(html), "</body>") {
 		bodyClosePattern := regexp.MustCompile(`(?i)</body>`)
 		return bodyClosePattern.ReplaceAllString(html, menuScript+"</body>")
@@ -622,10 +650,14 @@ func (a *App) wrapWithMenu(r *http.Request, pagePath, html string) string {
 	return html + menuScript
 }
 
-func buildContextMenuScript(isAdmin bool, pagePath, domain string) string {
+func buildContextMenuScript(isAdmin bool, isFrozen bool, pagePath, domain string) string {
 	escapedPath := template.JSEscapeString(pagePath)
 	escapedDomain := template.JSEscapeString(domain)
 	if isAdmin {
+		freezeActionEntry := "<li class='SiteBrushContextMenu'><a href='?freeze' class='SiteBrushContextMenuLink'><img src='/p/static/freeze.png' class='SiteBrushMenuIcon' alt=''>Заморозить</a></li>"
+		if isFrozen {
+			freezeActionEntry = "<li class='SiteBrushContextMenu'><a href='?publish' class='SiteBrushContextMenuLink'><img src='/p/static/publish.png' class='SiteBrushMenuIcon' alt=''>Опубликовать</a></li>"
+		}
 		return contextMenuStylesAndHelpers() + `<script>
 (function initializeSitebrushContextMenuForAdmin() {
   if (window.__sitebrushContextMenuInitialized) {
@@ -649,6 +681,7 @@ func buildContextMenuScript(isAdmin bool, pagePath, domain string) string {
       "<li class='SiteBrushContextMenu'><a href='?edit' class='SiteBrushContextMenuLink'><img src='/p/static/pencil.png' class='SiteBrushMenuIcon' alt=''>Редактировать</a></li>",
       "<li class='SiteBrushContextMenu'><a href='?revisions' class='SiteBrushContextMenuLink'><img src='/p/static/revisions.png' class='SiteBrushMenuIcon' alt=''>Ревизии</a></li>",
       "<li class='SiteBrushContextMenu'><a href='?files' class='SiteBrushContextMenuLink'><img src='/p/static/upload.png' class='SiteBrushMenuIcon' alt=''>Файлы</a></li>",
+      "` + freezeActionEntry + `",
       "<li class='SiteBrushContextMenu'><a href='?settings' class='SiteBrushContextMenuLink'><img src='/p/static/revisions.png' class='SiteBrushMenuIcon' alt=''>Настройки домена</a></li>",
       "<li class='SiteBrushContextMenu'><a href='?logout' class='SiteBrushContextMenuLink'><img src='/p/static/sign-out.png' class='SiteBrushMenuIcon' alt=''>Выйти</a></li>",
       "<li class='SiteBrushContextMenu ContextMenuCopyright'><a href='http://sitebrush.com' class='SiteBrushContextMenuLink'>sitebrush</a></li>",
@@ -1017,6 +1050,77 @@ func (a *App) domainSettingsPage(w http.ResponseWriter, r *http.Request) {
 		returnPath = "/"
 	}
 	a.render(w, r, "domain_settings.html", map[string]any{"Domain": siteDomain, "Aliases": strings.Join(domainAliases, "\n"), "ReturnPath": returnPath})
+}
+
+func (a *App) freezeDomain(w http.ResponseWriter, r *http.Request) {
+	if !a.isAdminRequest(r) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	domain := a.siteDomain(r.Context(), r)
+	a.setDomainFrozenState(r.Context(), domain, 1)
+	http.Redirect(w, r, requestedReturnPath(r), http.StatusFound)
+}
+
+func (a *App) publishDomain(w http.ResponseWriter, r *http.Request) {
+	if !a.isAdminRequest(r) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	domain := a.siteDomain(r.Context(), r)
+	_, _ = a.db.ExecContext(r.Context(), `DELETE FROM published_pages WHERE domain=?`, domain)
+	revisionRows, err := a.db.QueryContext(r.Context(), `SELECT page_path,html FROM revisions WHERE domain=? AND is_active=1 ORDER BY page_path ASC, id DESC`, domain)
+	if err == nil {
+		defer revisionRows.Close()
+		latestRevisionByPath := make(map[string]string)
+		for revisionRows.Next() {
+			var pagePath string
+			var pageHTML string
+			if scanErr := revisionRows.Scan(&pagePath, &pageHTML); scanErr != nil {
+				continue
+			}
+			if _, alreadyStored := latestRevisionByPath[pagePath]; alreadyStored {
+				continue
+			}
+			latestRevisionByPath[pagePath] = pageHTML
+		}
+		pageRows, pageQueryErr := a.db.QueryContext(r.Context(), `SELECT path,title,html FROM pages WHERE domain=? ORDER BY path ASC`, domain)
+		if pageQueryErr == nil {
+			defer pageRows.Close()
+			for pageRows.Next() {
+				var pagePath string
+				var pageTitle string
+				var draftHTML string
+				if scanErr := pageRows.Scan(&pagePath, &pageTitle, &draftHTML); scanErr != nil {
+					continue
+				}
+				pageHTMLToPublish := draftHTML
+				if latestActiveHTML, foundLatestActiveRevision := latestRevisionByPath[pagePath]; foundLatestActiveRevision {
+					pageHTMLToPublish = latestActiveHTML
+				}
+				_, _ = a.db.ExecContext(r.Context(), `INSERT INTO published_pages(domain,path,title,html) VALUES(?,?,?,?)`, domain, pagePath, pageTitle, pageHTMLToPublish)
+			}
+		}
+	}
+	a.setDomainFrozenState(r.Context(), domain, 0)
+	http.Redirect(w, r, requestedReturnPath(r), http.StatusFound)
+}
+
+func (a *App) findPublishedPage(ctx context.Context, domain, pagePath string) (Page, error) {
+	var current Page
+	err := a.db.QueryRowContext(ctx, `SELECT domain,path,title,html FROM published_pages WHERE domain=? AND path=?`, domain, pagePath).Scan(&current.Domain, &current.Path, &current.Title, &current.HTML)
+	return current, err
+}
+
+func (a *App) setDomainFrozenState(ctx context.Context, domain string, frozenState int) {
+	updateResult, updateErr := a.db.ExecContext(ctx, `UPDATE domain_states SET is_frozen=? WHERE domain=?`, frozenState, domain)
+	if updateErr == nil {
+		updatedRowsCount, rowsErr := updateResult.RowsAffected()
+		if rowsErr == nil && updatedRowsCount > 0 {
+			return
+		}
+	}
+	_, _ = a.db.ExecContext(ctx, `INSERT INTO domain_states(domain,is_frozen) VALUES(?,?)`, domain, frozenState)
 }
 func domainStorageName(domain string) string {
 	return strings.NewReplacer("/", "_", "\\", "_", ":", "_", "..", "_").Replace(domain)
