@@ -946,10 +946,11 @@ func buildContextMenuScript(isAdmin bool, isFrozen bool, pagePath, domain string
 		          let summaryText = "` + publishPreviewSummaryLabel + `" + " " + previewPayload.changed + " / " + previewPayload.total;
 		          let confirmQuestionText = "` + publishConfirmWithChangesLabel + `";
 		          if (previewPayload.changed === 0) {
-		            summaryText = "` + publishPreviewNoChangesLabel + `";
+		            summaryText = "";
 		            confirmQuestionText = "` + publishConfirmWithoutChangesLabel + `";
 		          }
-		          openPublishConfirmationDialog(confirmQuestionText + "\n\n" + summaryText, previewPayload.paths || [], submitConfirmedAction);
+		          const dialogMessage = summaryText === "" ? confirmQuestionText : confirmQuestionText + "\n\n" + summaryText;
+		          openPublishConfirmationDialog(dialogMessage, previewPayload.paths || [], submitConfirmedAction);
 		        })
         .catch(function fallbackPublishConfirmation() {
           openConfirmationDialog(selectedActionConfig.message + "\n\n" + "` + publishPreviewLoadingLabel + `", submitConfirmedAction);

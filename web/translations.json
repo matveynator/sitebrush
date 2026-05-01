@@ -42,7 +42,7 @@
     "menu_login": "Sign in",
     "publish_preview_loading": "Checking changes to publish...",
     "publish_preview_summary": "Changed pages to publish:",
-    "publish_preview_no_changes": "No changes found — only unfreeze is needed.",
+    "publish_preview_no_changes": "No changes were made. Unfreeze the site?",
     "publish_confirm_with_changes": "Publish the changes made to the site?",
     "publish_confirm_without_changes": "No changes were made. Unfreeze the site?"
   },
@@ -89,7 +89,7 @@
     "menu_login": "Se connecter",
     "publish_preview_loading": "Checking changes to publish...",
     "publish_preview_summary": "Changed pages to publish:",
-    "publish_preview_no_changes": "No changes found — only unfreeze is needed.",
+    "publish_preview_no_changes": "No changes were made. Unfreeze the site?",
     "publish_confirm_with_changes": "Publish the changes made to the site?",
     "publish_confirm_without_changes": "No changes were made. Unfreeze the site?"
   },
@@ -136,7 +136,7 @@
     "menu_login": "Войти",
     "publish_preview_loading": "Проверяем изменения перед публикацией...",
     "publish_preview_summary": "Будет опубликовано измененных страниц:",
-    "publish_preview_no_changes": "Изменений нет — можно только разморозить сайт.",
+    "publish_preview_no_changes": "Никаких изменений не производилось, разморозить сайт?",
     "publish_confirm_with_changes": "Опубликовать внесённые в сайт изменения?",
     "publish_confirm_without_changes": "Никаких изменений не производилось, разморозить сайт?"
   },
@@ -183,7 +183,7 @@
     "menu_login": "ログイン",
     "publish_preview_loading": "Checking changes to publish...",
     "publish_preview_summary": "Changed pages to publish:",
-    "publish_preview_no_changes": "No changes found — only unfreeze is needed.",
+    "publish_preview_no_changes": "No changes were made. Unfreeze the site?",
     "publish_confirm_with_changes": "Publish the changes made to the site?",
     "publish_confirm_without_changes": "No changes were made. Unfreeze the site?"
   },
@@ -230,7 +230,7 @@
     "menu_login": "Accedi",
     "publish_preview_loading": "Checking changes to publish...",
     "publish_preview_summary": "Changed pages to publish:",
-    "publish_preview_no_changes": "No changes found — only unfreeze is needed.",
+    "publish_preview_no_changes": "No changes were made. Unfreeze the site?",
     "publish_confirm_with_changes": "Publish the changes made to the site?",
     "publish_confirm_without_changes": "No changes were made. Unfreeze the site?"
   },
@@ -277,7 +277,7 @@
     "menu_login": "Logga in",
     "publish_preview_loading": "Checking changes to publish...",
     "publish_preview_summary": "Changed pages to publish:",
-    "publish_preview_no_changes": "No changes found — only unfreeze is needed.",
+    "publish_preview_no_changes": "No changes were made. Unfreeze the site?",
     "publish_confirm_with_changes": "Publish the changes made to the site?",
     "publish_confirm_without_changes": "No changes were made. Unfreeze the site?"
   },
@@ -324,7 +324,7 @@
     "menu_login": "Kirjaudu sisään",
     "publish_preview_loading": "Checking changes to publish...",
     "publish_preview_summary": "Changed pages to publish:",
-    "publish_preview_no_changes": "No changes found — only unfreeze is needed.",
+    "publish_preview_no_changes": "No changes were made. Unfreeze the site?",
     "publish_confirm_with_changes": "Publish the changes made to the site?",
     "publish_confirm_without_changes": "No changes were made. Unfreeze the site?"
   },
@@ -371,7 +371,7 @@
     "menu_login": "Нэвтрэх",
     "publish_preview_loading": "Checking changes to publish...",
     "publish_preview_summary": "Changed pages to publish:",
-    "publish_preview_no_changes": "No changes found — only unfreeze is needed.",
+    "publish_preview_no_changes": "No changes were made. Unfreeze the site?",
     "publish_confirm_with_changes": "Publish the changes made to the site?",
     "publish_confirm_without_changes": "No changes were made. Unfreeze the site?"
   },
@@ -418,7 +418,7 @@
     "menu_login": "登录",
     "publish_preview_loading": "Checking changes to publish...",
     "publish_preview_summary": "Changed pages to publish:",
-    "publish_preview_no_changes": "No changes found — only unfreeze is needed.",
+    "publish_preview_no_changes": "No changes were made. Unfreeze the site?",
     "publish_confirm_with_changes": "Publish the changes made to the site?",
     "publish_confirm_without_changes": "No changes were made. Unfreeze the site?"
   },
@@ -465,7 +465,7 @@
     "menu_login": "כניסה",
     "publish_preview_loading": "Checking changes to publish...",
     "publish_preview_summary": "Changed pages to publish:",
-    "publish_preview_no_changes": "No changes found — only unfreeze is needed.",
+    "publish_preview_no_changes": "No changes were made. Unfreeze the site?",
     "publish_confirm_with_changes": "Publish the changes made to the site?",
     "publish_confirm_without_changes": "No changes were made. Unfreeze the site?"
   },
@@ -512,7 +512,7 @@
     "menu_login": "ورود",
     "publish_preview_loading": "Checking changes to publish...",
     "publish_preview_summary": "Changed pages to publish:",
-    "publish_preview_no_changes": "No changes found — only unfreeze is needed.",
+    "publish_preview_no_changes": "No changes were made. Unfreeze the site?",
     "publish_confirm_with_changes": "Publish the changes made to the site?",
     "publish_confirm_without_changes": "No changes were made. Unfreeze the site?"
   },
@@ -559,7 +559,7 @@
     "menu_login": "Anmelden",
     "publish_preview_loading": "Checking changes to publish...",
     "publish_preview_summary": "Changed pages to publish:",
-    "publish_preview_no_changes": "No changes found — only unfreeze is needed.",
+    "publish_preview_no_changes": "No changes were made. Unfreeze the site?",
     "publish_confirm_with_changes": "Publish the changes made to the site?",
     "publish_confirm_without_changes": "No changes were made. Unfreeze the site?"
   },
@@ -606,7 +606,7 @@
     "menu_login": "Giriş yap",
     "publish_preview_loading": "Checking changes to publish...",
     "publish_preview_summary": "Changed pages to publish:",
-    "publish_preview_no_changes": "No changes found — only unfreeze is needed.",
+    "publish_preview_no_changes": "No changes were made. Unfreeze the site?",
     "publish_confirm_with_changes": "Publish the changes made to the site?",
     "publish_confirm_without_changes": "No changes were made. Unfreeze the site?"
   },
@@ -653,7 +653,7 @@
     "menu_login": "Кіру",
     "publish_preview_loading": "Checking changes to publish...",
     "publish_preview_summary": "Changed pages to publish:",
-    "publish_preview_no_changes": "No changes found — only unfreeze is needed.",
+    "publish_preview_no_changes": "No changes were made. Unfreeze the site?",
     "publish_confirm_with_changes": "Publish the changes made to the site?",
     "publish_confirm_without_changes": "No changes were made. Unfreeze the site?"
   },
@@ -700,7 +700,7 @@
     "menu_login": "Iniciar sesión",
     "publish_preview_loading": "Checking changes to publish...",
     "publish_preview_summary": "Changed pages to publish:",
-    "publish_preview_no_changes": "No changes found — only unfreeze is needed.",
+    "publish_preview_no_changes": "No changes were made. Unfreeze the site?",
     "publish_confirm_with_changes": "Publish the changes made to the site?",
     "publish_confirm_without_changes": "No changes were made. Unfreeze the site?"
   },
@@ -747,7 +747,7 @@
     "menu_login": "Entrar",
     "publish_preview_loading": "Checking changes to publish...",
     "publish_preview_summary": "Changed pages to publish:",
-    "publish_preview_no_changes": "No changes found — only unfreeze is needed.",
+    "publish_preview_no_changes": "No changes were made. Unfreeze the site?",
     "publish_confirm_with_changes": "Publish the changes made to the site?",
     "publish_confirm_without_changes": "No changes were made. Unfreeze the site?"
   }
