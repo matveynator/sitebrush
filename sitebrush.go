@@ -189,55 +189,59 @@ func (a *App) migrate(ctx context.Context) error {
 
 func (a *App) route(w http.ResponseWriter, r *http.Request) {
 	pagePath := r.URL.Path
-	if r.URL.RawQuery == "tree" {
+	if hasQueryFlag(r, "tree") {
 		a.siteTreeJSON(w, r)
 		return
 	}
-	if r.URL.RawQuery == "edit" {
+	if hasQueryFlag(r, "edit") {
 		a.editModePage(w, r)
 		return
 	}
-	if r.URL.RawQuery == "editraw" {
+	if hasQueryFlag(r, "editraw") {
 		a.editRawPage(w, r)
 		return
 	}
-	if r.URL.RawQuery == "settings" || r.URL.RawQuery == "properties" {
+	if hasQueryFlag(r, "settings") || hasQueryFlag(r, "properties") {
 		a.domainSettingsPage(w, r)
 		return
 	}
-	if r.URL.RawQuery == "freeze" {
+	if hasQueryFlag(r, "freeze") {
 		a.freezeDomain(w, r)
 		return
 	}
-	if r.URL.RawQuery == "publish" {
+	if hasQueryFlag(r, "publish") {
 		a.publishDomain(w, r)
 		return
 	}
-	if r.URL.RawQuery == "files" {
+	if hasQueryFlag(r, "files") {
 		a.filesPage(w, r)
 		return
 	}
-	if r.URL.RawQuery == "revisions" {
+	if hasQueryFlag(r, "revisions") {
 		a.revisionsPage(w, r)
 		return
 	}
-	if r.URL.RawQuery == "login" {
+	if hasQueryFlag(r, "login") {
 		a.login(w, r)
 		return
 	}
-	if r.URL.RawQuery == "logout" {
+	if hasQueryFlag(r, "logout") {
 		a.logout(w, r)
 		return
 	}
-	if r.URL.RawQuery == "grab" {
+	if hasQueryFlag(r, "register") {
+		a.registerPage(w, r)
+		return
+	}
+	if hasQueryFlag(r, "grab") {
 		a.render(w, r, "missing.html", map[string]any{"Path": pagePath})
 		return
 	}
-	if r.URL.RawQuery == "recover" {
+	if hasQueryFlag(r, "recover") {
 		a.recoverPage(w, r)
 		return
 	}
-	if r.URL.RawQuery == "captcha" {
+	if hasQueryFlag(r, "captcha") {
 		a.captchaImage(w, r)
 		return
 	}
@@ -300,6 +304,15 @@ func (a *App) setupAdmin(w http.ResponseWriter, r *http.Request) {
 		returnPath = requestedReturnPath(r)
 	}
 	http.Redirect(w, r, returnPath, http.StatusFound)
+}
+
+func (a *App) registerPage(w http.ResponseWriter, r *http.Request) {
+	domain := a.siteDomain(r.Context(), r)
+	if a.hasAdmin(r.Context(), domain) {
+		http.Redirect(w, r, r.URL.Path+"?login", http.StatusFound)
+		return
+	}
+	a.render(w, r, "setup.html", map[string]any{"Domain": domain})
 }
 
 func (a *App) login(w http.ResponseWriter, r *http.Request) {
@@ -399,6 +412,14 @@ func loginReturnPathOrDefault(r *http.Request) string {
 		return refererURL.Path + "?edit"
 	}
 	return requestedReturnPath(r)
+}
+
+func hasQueryFlag(r *http.Request, flagName string) bool {
+	if strings.TrimSpace(r.URL.RawQuery) == flagName {
+		return true
+	}
+	_, hasFlag := r.URL.Query()[flagName]
+	return hasFlag
 }
 
 func (a *App) savePage(w http.ResponseWriter, r *http.Request) {
