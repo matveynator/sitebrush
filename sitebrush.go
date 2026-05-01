@@ -1536,15 +1536,13 @@ func (a *App) publishDomain(w http.ResponseWriter, r *http.Request) {
 				if latestActiveHTML, foundLatestActiveRevision := latestRevisionByPath[pagePath]; foundLatestActiveRevision {
 					pageHTMLToPublish = latestActiveHTML
 				}
-				var previousPublishedTitle string
-				var previousPublishedHTML string
-				readPublishedErr := a.db.QueryRowContext(r.Context(), `SELECT title,html FROM published_pages WHERE domain=? AND path=?`, domain, pagePath).Scan(&previousPublishedTitle, &previousPublishedHTML)
-				if !hasPublishedPageChanged(readPublishedErr, previousPublishedTitle, previousPublishedHTML, pageTitle, pageHTMLToPublish) {
+				renderedPublishedHTML := a.wrapPublishedPageWithGuestMenu(domain, pagePath, pageHTMLToPublish)
+				if !a.shouldUpdatePublishedPageFile(domain, pagePath, renderedPublishedHTML) {
 					skippedPagesCount++
 					continue
 				}
 				_, _ = a.db.ExecContext(r.Context(), `INSERT OR REPLACE INTO published_pages(domain,path,title,html) VALUES(?,?,?,?)`, domain, pagePath, pageTitle, pageHTMLToPublish)
-				a.writePublishedStaticHTML(domain, pagePath, a.wrapPublishedPageWithGuestMenu(domain, pagePath, pageHTMLToPublish))
+				a.writePublishedStaticHTML(domain, pagePath, renderedPublishedHTML)
 				updatedPagesCount++
 				log.Printf("publish page updated domain=%s path=%s", domain, pagePath)
 			}
@@ -1607,9 +1605,8 @@ func (a *App) countPublishChanges(ctx context.Context, domain string) (int, int,
 		if latestActiveHTML, foundLatestActiveRevision := latestRevisionByPath[pagePath]; foundLatestActiveRevision {
 			pageHTMLToPublish = latestActiveHTML
 		}
-		var previousPublishedTitle, previousPublishedHTML string
-		readPublishedErr := a.db.QueryRowContext(ctx, `SELECT title,html FROM published_pages WHERE domain=? AND path=?`, domain, pagePath).Scan(&previousPublishedTitle, &previousPublishedHTML)
-		if hasPublishedPageChanged(readPublishedErr, previousPublishedTitle, previousPublishedHTML, pageTitle, pageHTMLToPublish) {
+		renderedPublishedHTML := a.wrapPublishedPageWithGuestMenu(domain, pagePath, pageHTMLToPublish)
+		if a.shouldUpdatePublishedPageFile(domain, pagePath, renderedPublishedHTML) {
 			changedPagesCount++
 			changedPagePaths = append(changedPagePaths, pagePath)
 		}
@@ -1617,17 +1614,17 @@ func (a *App) countPublishChanges(ctx context.Context, domain string) (int, int,
 	return totalPagesCount, changedPagesCount, changedPagePaths
 }
 
-func hasPublishedPageChanged(readPublishedErr error, previousPublishedTitle, previousPublishedHTML, nextPublishedTitle, nextPublishedHTML string) bool {
-	if readPublishedErr != nil {
-		return true
-	}
-	_ = previousPublishedTitle
-	_ = nextPublishedTitle
-	return normalizePublishedHTML(previousPublishedHTML) != normalizePublishedHTML(nextPublishedHTML)
-}
-
 func normalizePublishedHTML(html string) string {
 	return strings.TrimSpace(strings.ReplaceAll(html, "\r\n", "\n"))
+}
+
+func (a *App) shouldUpdatePublishedPageFile(domain, pagePath, nextRenderedHTML string) bool {
+	staticFilePath := filepath.Join(a.domainStaticDir(domain), staticRelativePathForPage(pagePath))
+	previousRenderedHTMLBytes, readErr := os.ReadFile(staticFilePath)
+	if readErr != nil {
+		return true
+	}
+	return normalizePublishedHTML(string(previousRenderedHTMLBytes)) != normalizePublishedHTML(nextRenderedHTML)
 }
 
 func (a *App) generateDomainPack(domain string) error {
