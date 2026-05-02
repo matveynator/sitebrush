@@ -2,6 +2,7 @@ package main
 
 import (
 	"archive/zip"
+	"bytes"
 	"context"
 	"crypto/sha1"
 	"crypto/sha256"
@@ -28,6 +29,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -41,26 +43,33 @@ var embeddedWebFiles embed.FS
 var translationCatalog = loadTranslationCatalog()
 
 const appVersion = "dev"
+const defaultStoragePath = "."
+const defaultDBPath = "storage/db/sitebrush.db"
+const grabResourceMaxDepth = 64
 
 // App keeps only explicit dependencies to stay readable and easy to swap.
 type App struct {
 	db          *sql.DB
+	storagePath string
 	grabTracker *grabProgressTracker
 }
 
 type grabProgressEvent struct {
-	Token            string `json:"token"`
-	Stage            string `json:"stage"`
-	FoundTotal       int    `json:"found_total"`
-	DownloadedTotal  int    `json:"downloaded_total"`
-	CurrentURL       string `json:"current_url"`
-	CurrentPercent   int    `json:"current_percent"`
-	CompletedPercent int    `json:"completed_percent"`
+	Token                  string `json:"token"`
+	Stage                  string `json:"stage"`
+	FoundTotal             int    `json:"found_total"`
+	DownloadedTotal        int    `json:"downloaded_total"`
+	CurrentURL             string `json:"current_url"`
+	CurrentPercent         int    `json:"current_percent"`
+	CurrentDownloadedBytes int64  `json:"current_downloaded_bytes"`
+	CurrentSizeBytes       int64  `json:"current_size_bytes"`
+	CompletedPercent       int    `json:"completed_percent"`
 }
 
 type grabResourcePreview struct {
-	URL  string `json:"url"`
-	Kind string `json:"kind"`
+	URL       string `json:"url"`
+	Kind      string `json:"kind"`
+	SizeBytes int64  `json:"size_bytes"`
 }
 
 type grabPreviewResponse struct {
@@ -160,10 +169,45 @@ func isLikelyStaticAssetPath(requestPath string) bool {
 	}
 }
 
+func flagWasProvided(flagName string) bool {
+	provided := false
+	flag.Visit(func(currentFlag *flag.Flag) {
+		if currentFlag.Name == flagName {
+			provided = true
+		}
+	})
+	return provided
+}
+
+func cleanStoragePath(storagePath string) string {
+	trimmedStoragePath := strings.TrimSpace(storagePath)
+	if trimmedStoragePath == "" {
+		return defaultStoragePath
+	}
+	return filepath.Clean(trimmedStoragePath)
+}
+
+func cleanDBPath(dbPath string) string {
+	trimmedDBPath := strings.TrimSpace(dbPath)
+	if trimmedDBPath == "" {
+		return defaultDBPath
+	}
+	return filepath.Clean(trimmedDBPath)
+}
+
+func ensureParentDir(filePath string) error {
+	parentDir := filepath.Dir(filePath)
+	if parentDir == "." || parentDir == "" {
+		return nil
+	}
+	return os.MkdirAll(parentDir, 0o755)
+}
+
 func main() {
 	port := flag.Int("port", 8080, "HTTP listen port")
 	dbType := flag.String("db-type", "sqlite", "database driver (supported: sqlite)")
-	dbPath := flag.String("db-path", "sitebrush.db", "path to sqlite database file")
+	storagePath := flag.String("storage-path", defaultStoragePath, "path to directory that contains Sitebrush storage")
+	dbPath := flag.String("db-path", defaultDBPath, "path to sqlite database file")
 	desktopMode := flag.Bool("desktop", desktop.DefaultEnabled(), "enable desktop mode when desktop build tags are used")
 	setupMode := flag.Bool("setup", false, "run interactive Linux setup wizard mode")
 	flag.Parse()
@@ -175,13 +219,22 @@ func main() {
 		log.Printf("setup mode requested; run the setup wizard build flow for Linux deployment")
 	}
 
-	database, err := sql.Open("sqlite3", "file:"+*dbPath)
+	effectiveStoragePath := cleanStoragePath(*storagePath)
+	effectiveDBPath := cleanDBPath(*dbPath)
+	if !flagWasProvided("db-path") {
+		effectiveDBPath = filepath.Join(effectiveStoragePath, defaultDBPath)
+	}
+	if err := ensureParentDir(effectiveDBPath); err != nil {
+		log.Fatal(err)
+	}
+
+	database, err := sql.Open("sqlite3", "file:"+effectiveDBPath)
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer database.Close()
 
-	application := &App{db: database, grabTracker: newGrabProgressTracker()}
+	application := &App{db: database, storagePath: effectiveStoragePath, grabTracker: newGrabProgressTracker()}
 	if err = application.migrate(context.Background()); err != nil {
 		log.Fatal(err)
 	}
@@ -664,12 +717,18 @@ func (a *App) grabPage(w http.ResponseWriter, r *http.Request) {
 
 	domain := a.siteDomain(r.Context(), r)
 	progressToken := strings.TrimSpace(r.FormValue("progress_token"))
-	html := a.mirrorRemotePage(domain, sourceURL, remoteSourceURL, string(htmlBytes), progressToken)
+	selectedResourceURLs := selectedGrabResourceURLs(r)
+	html := a.mirrorRemotePage(domain, sourceURL, remoteSourceURL, string(htmlBytes), progressToken, selectedResourceURLs)
 	_, _ = a.db.ExecContext(r.Context(), `INSERT OR REPLACE INTO pages(domain,path,title,html,published) VALUES(?,?,?,?,1)`, domain, pagePath, pagePath, html)
 	if !a.isDomainFrozen(r.Context(), domain) {
 		_, _ = a.db.ExecContext(r.Context(), `INSERT OR REPLACE INTO published_pages(domain,path,title,html) VALUES(?,?,?,?)`, domain, pagePath, pagePath, html)
 	}
 	_, _ = a.db.ExecContext(r.Context(), `INSERT INTO revisions(domain,page_path,html,created_at) VALUES(?,?,?,?)`, domain, pagePath, html, time.Now().Format(time.RFC3339))
+	if wantsJSONResponse(r) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]string{"redirect": pagePath + "?edit"})
+		return
+	}
 	http.Redirect(w, r, pagePath+"?edit", http.StatusFound)
 }
 
@@ -708,18 +767,39 @@ func parseGrabSourceURL(sourceURL string) (*url.URL, error) {
 	if trimmedSourceURL == "" {
 		return nil, errors.New("source_url is required")
 	}
-	if !strings.HasPrefix(trimmedSourceURL, "http://") && !strings.HasPrefix(trimmedSourceURL, "https://") {
-		return nil, errors.New("source_url must start with http:// or https://")
+	if strings.HasPrefix(trimmedSourceURL, "//") {
+		trimmedSourceURL = "https:" + trimmedSourceURL
+	}
+	if !strings.Contains(trimmedSourceURL, "://") {
+		trimmedSourceURL = defaultGrabScheme(trimmedSourceURL) + "://" + trimmedSourceURL
 	}
 	remoteSourceURL, err := url.Parse(trimmedSourceURL)
-	if err != nil || remoteSourceURL.Hostname() == "" {
+	if err != nil || remoteSourceURL.Hostname() == "" || (remoteSourceURL.Scheme != "http" && remoteSourceURL.Scheme != "https") {
 		return nil, errors.New("source_url is invalid")
 	}
 	return remoteSourceURL, nil
 }
 
+func defaultGrabScheme(sourceURL string) string {
+	hostCandidate := sourceURL
+	if slashIndex := strings.Index(hostCandidate, "/"); slashIndex >= 0 {
+		hostCandidate = hostCandidate[:slashIndex]
+	}
+	if colonIndex := strings.LastIndex(hostCandidate, ":"); colonIndex >= 0 {
+		hostCandidate = hostCandidate[:colonIndex]
+	}
+	if hostCandidate == "localhost" || net.ParseIP(hostCandidate) != nil {
+		return "http"
+	}
+	return "https"
+}
+
+func wantsJSONResponse(r *http.Request) bool {
+	return strings.Contains(strings.ToLower(r.Header.Get("Accept")), "application/json")
+}
+
 func downloadGrabSourceHTML(sourceURL string) ([]byte, error) {
-	response, err := http.Get(sourceURL)
+	response, err := newGrabHTTPClient().Get(sourceURL)
 	if err != nil {
 		return nil, errors.New("failed to download source page")
 	}
@@ -734,52 +814,43 @@ func downloadGrabSourceHTML(sourceURL string) ([]byte, error) {
 	return htmlBytes, nil
 }
 
+func selectedGrabResourceURLs(r *http.Request) map[string]struct{} {
+	if strings.TrimSpace(r.FormValue("import_selection_confirmed")) == "" {
+		return nil
+	}
+	selectedResourceURLs := make(map[string]struct{})
+	for _, resourceURL := range r.Form["import_resource_url"] {
+		trimmedResourceURL := strings.TrimSpace(resourceURL)
+		if trimmedResourceURL == "" {
+			continue
+		}
+		selectedResourceURLs[trimmedResourceURL] = struct{}{}
+	}
+	return selectedResourceURLs
+}
+
 func previewGrabResources(pageURL *url.URL, htmlSource string) []grabResourcePreview {
-	spider := newPageSpider("", pageURL, 0, nil, "")
-	seen := make(map[string]struct{})
+	spider := newPageSpider("", pageURL, grabResourceMaxDepth, nil, "")
+	rootResource := &mirroredResource{url: pageURL.String(), content: []byte(htmlSource)}
+	spider.resources[pageURL.String()] = rootResource
+	spider.rewriteNestedResources(rootResource, 0, "text/html")
 	resources := make([]grabResourcePreview, 0)
-	addResource := func(rawRef, kind string) {
-		normalizedURL, blocked := spider.normalizeURL(rawRef, pageURL)
-		if blocked || normalizedURL == "" {
-			return
-		}
-		if _, exists := seen[normalizedURL]; exists {
-			return
-		}
-		seen[normalizedURL] = struct{}{}
-		resources = append(resources, grabResourcePreview{URL: normalizedURL, Kind: kind})
-	}
-	for _, match := range htmlResourcePattern.FindAllStringSubmatch(htmlSource, -1) {
-		if len(match) != 4 {
+	for resourceURL, resource := range spider.resources {
+		if resourceURL == pageURL.String() {
 			continue
 		}
-		addResource(match[3], previewResourceKind(match[1], match[2], match[3]))
-	}
-	for _, match := range htmlSrcSetPattern.FindAllStringSubmatch(htmlSource, -1) {
-		if len(match) != 2 {
-			continue
+		sizeBytes := int64(-1)
+		if resource != nil && resource.content != nil {
+			sizeBytes = int64(len(resource.content))
 		}
-		candidates := strings.Split(match[1], ",")
-		for _, candidate := range candidates {
-			fields := strings.Fields(strings.TrimSpace(candidate))
-			if len(fields) == 0 {
-				continue
-			}
-			addResource(fields[0], "image")
-		}
+		resources = append(resources, grabResourcePreview{URL: resourceURL, Kind: previewResourceKind("", "", resourceURL), SizeBytes: sizeBytes})
 	}
-	for _, match := range cssURLPattern.FindAllStringSubmatch(htmlSource, -1) {
-		if len(match) != 2 {
-			continue
+	sort.Slice(resources, func(leftIndex, rightIndex int) bool {
+		if resources[leftIndex].Kind == resources[rightIndex].Kind {
+			return resources[leftIndex].URL < resources[rightIndex].URL
 		}
-		addResource(match[1], previewResourceKind("", "", match[1]))
-	}
-	for _, match := range cssImportPattern.FindAllStringSubmatch(htmlSource, -1) {
-		if len(match) != 2 {
-			continue
-		}
-		addResource(match[1], "style")
-	}
+		return resources[leftIndex].Kind < resources[rightIndex].Kind
+	})
 	return resources
 }
 
@@ -801,7 +872,7 @@ func previewResourceKind(tagName, attributeName, rawRef string) string {
 	if attribute == "poster" {
 		return "image"
 	}
-	extension := strings.ToLower(path.Ext(rawRef))
+	extension := resourceExtension(rawRef)
 	switch extension {
 	case ".css":
 		return "style"
@@ -837,6 +908,13 @@ func (a *App) grabProgressWS(w http.ResponseWriter, r *http.Request) {
 	defer connection.Close()
 	events := a.grabTracker.subscribe(progressToken)
 	defer a.grabTracker.unsubscribe(progressToken, events)
+	readyEventJSON, marshalReadyErr := json.Marshal(grabProgressEvent{Token: progressToken, Stage: "ready"})
+	if marshalReadyErr != nil {
+		return
+	}
+	if err := connection.WriteText(readyEventJSON); err != nil {
+		return
+	}
 	for {
 		event, isOpen := <-events
 		if !isOpen {
@@ -849,7 +927,7 @@ func (a *App) grabProgressWS(w http.ResponseWriter, r *http.Request) {
 		if err := connection.WriteText(eventJSON); err != nil {
 			return
 		}
-		if event.Stage == "done" || event.Stage == "error" {
+		if event.Stage == "done" || (event.Stage == "error" && strings.TrimSpace(event.CurrentURL) == "") {
 			return
 		}
 	}
@@ -1152,7 +1230,7 @@ func (a *App) serveAsset(w http.ResponseWriter, r *http.Request) {
 		}
 		_, _ = a.db.ExecContext(r.Context(), `UPDATE file_access_rules SET single_use_left=single_use_left-1 WHERE domain=? AND file_name=? AND single_use_left>0`, domain, fileName)
 	}
-	http.StripPrefix("/assets/", http.FileServer(http.Dir("storage/files"))).ServeHTTP(w, r)
+	http.StripPrefix("/assets/", http.FileServer(http.Dir(a.filesRootDir()))).ServeHTTP(w, r)
 }
 
 func (a *App) findPage(ctx context.Context, domain, pagePath string) (Page, error) {
@@ -1838,20 +1916,30 @@ func contentHashName(fileBytes []byte, extension string) (string, error) {
 	return hex.EncodeToString(hashedBytes[:]) + extension, nil
 }
 
-func (a *App) mirrorRemotePage(domain, sourceURL string, pageURL *url.URL, fallbackHTML, progressToken string) string {
-	spider := newPageSpider(domain, pageURL, 4, a.grabTracker, progressToken)
-	rootResource, err := spider.fetchHTML(sourceURL)
-	if err != nil || rootResource == nil {
-		a.grabTracker.publish(grabProgressEvent{Token: progressToken, Stage: "error"})
-		return fallbackHTML
+func resourceExtension(rawRef string) string {
+	parsedRef, err := url.Parse(strings.TrimSpace(rawRef))
+	if err == nil && parsedRef.Path != "" {
+		return strings.ToLower(path.Ext(parsedRef.Path))
 	}
+	withoutFragment := strings.SplitN(rawRef, "#", 2)[0]
+	withoutQuery := strings.SplitN(withoutFragment, "?", 2)[0]
+	return strings.ToLower(path.Ext(withoutQuery))
+}
+
+func (a *App) mirrorRemotePage(domain, sourceURL string, pageURL *url.URL, fallbackHTML, progressToken string, selectedResourceURLs map[string]struct{}) string {
+	spider := newPageSpider(domain, pageURL, grabResourceMaxDepth, a.grabTracker, progressToken)
+	spider.selectedResourceURLs = selectedResourceURLs
+	rootResource := &mirroredResource{url: sourceURL, content: []byte(fallbackHTML)}
+	spider.resources[sourceURL] = rootResource
+	spider.rewriteNestedResources(rootResource, 0, "text/html")
+	spider.fetchSelectedResources()
 	_ = a.persistSpiderAssets(spider)
 	a.grabTracker.publish(grabProgressEvent{Token: progressToken, Stage: "done", FoundTotal: spider.foundTotal, DownloadedTotal: spider.downloadedTotal, CompletedPercent: 100})
-	return spider.rewriteHTMLWithAssets(rootResource.content)
+	return string(rootResource.content)
 }
 
 func (a *App) persistSpiderAssets(spider *pageSpider) error {
-	baseDir := filepath.Join("storage/files", domainStorageName(spider.domain))
+	baseDir := a.domainFilesDirForDomain(spider.domain)
 	_ = os.MkdirAll(baseDir, 0o755)
 	for _, resource := range spider.resources {
 		if !resource.persist || strings.TrimSpace(resource.assetPath) == "" {
@@ -1873,43 +1961,41 @@ type mirroredResource struct {
 }
 
 type pageSpider struct {
-	domain          string
-	pageURL         *url.URL
-	maxDepth        int
-	client          *http.Client
-	resources       map[string]*mirroredResource
-	inFlight        map[string]bool
-	allowedHosts    map[string]struct{}
-	tracker         *grabProgressTracker
-	progressToken   string
-	foundTotal      int
-	downloadedTotal int
+	domain               string
+	pageURL              *url.URL
+	maxDepth             int
+	client               *http.Client
+	resources            map[string]*mirroredResource
+	inFlight             map[string]bool
+	selectedResourceURLs map[string]struct{}
+	tracker              *grabProgressTracker
+	progressToken        string
+	foundTotal           int
+	downloadedTotal      int
 }
 
 var (
 	htmlResourcePattern = regexp.MustCompile(`(?is)<(link|script|img|source|video|audio|iframe|embed|object)\b[^>]*(href|src|poster|data)\s*=\s*["']([^"']+)["']`)
 	htmlSrcSetPattern   = regexp.MustCompile(`(?is)\bsrcset\s*=\s*["']([^"']+)["']`)
 	cssURLPattern       = regexp.MustCompile(`(?is)url\(\s*['"]?([^'")]+)['"]?\s*\)`)
-	cssImportPattern    = regexp.MustCompile(`(?is)@import\s+(?:url\()?\s*['"]([^'"]+)['"]`)
+	cssImportPattern    = regexp.MustCompile(`(?is)@import\s+(?:url\(\s*)?['"]?([^'")\s;]+)['"]?`)
+	jsImportPattern     = regexp.MustCompile(`(?is)\bimport\s*(?:\(\s*)?(?:[^'"]*?\s+from\s*)?['"]([^'"]+)['"]`)
+	newGrabHTTPClient   = func() *http.Client {
+		return &http.Client{Timeout: 20 * time.Second}
+	}
 )
 
 func newPageSpider(domain string, pageURL *url.URL, maxDepth int, tracker *grabProgressTracker, progressToken string) *pageSpider {
-	allowedHosts := map[string]struct{}{strings.ToLower(pageURL.Hostname()): {}}
 	return &pageSpider{
 		domain:        domain,
 		pageURL:       pageURL,
 		maxDepth:      maxDepth,
-		client:        &http.Client{Timeout: 20 * time.Second},
+		client:        newGrabHTTPClient(),
 		resources:     make(map[string]*mirroredResource),
 		inFlight:      make(map[string]bool),
-		allowedHosts:  allowedHosts,
 		tracker:       tracker,
 		progressToken: progressToken,
 	}
-}
-
-func (spider *pageSpider) fetchHTML(rawURL string) (*mirroredResource, error) {
-	return spider.fetchResource(rawURL, spider.pageURL, 0, false)
 }
 
 func (spider *pageSpider) fetchResource(rawURL string, baseURL *url.URL, depth int, persist bool) (*mirroredResource, error) {
@@ -1920,6 +2006,7 @@ func (spider *pageSpider) fetchResource(rawURL string, baseURL *url.URL, depth i
 	if blocked || normalizedURL == "" {
 		return nil, errors.New("unsupported resource url")
 	}
+	persist = persist && spider.shouldPersistResource(normalizedURL)
 	if existing, found := spider.resources[normalizedURL]; found {
 		if persist {
 			existing.persist = true
@@ -1936,14 +2023,20 @@ func (spider *pageSpider) fetchResource(rawURL string, baseURL *url.URL, depth i
 	request, _ := http.NewRequest(http.MethodGet, normalizedURL, nil)
 	response, err := spider.client.Do(request)
 	if err != nil {
+		spider.resources[normalizedURL] = &mirroredResource{url: normalizedURL, persist: persist}
+		spider.publishResourceProgress("error", normalizedURL, 0, 0, -1)
 		return nil, err
 	}
 	defer response.Body.Close()
 	if response.StatusCode >= 400 {
+		spider.resources[normalizedURL] = &mirroredResource{url: normalizedURL, persist: persist}
+		spider.publishResourceProgress("error", normalizedURL, 0, 0, response.ContentLength)
 		return nil, fmt.Errorf("resource download failed: %s", response.Status)
 	}
-	body, err := io.ReadAll(response.Body)
+	body, err := spider.readResourceBody(response.Body, normalizedURL, response.ContentLength)
 	if err != nil {
+		spider.resources[normalizedURL] = &mirroredResource{url: normalizedURL, persist: persist}
+		spider.publishResourceProgress("error", normalizedURL, 0, 0, response.ContentLength)
 		return nil, err
 	}
 	resource := &mirroredResource{url: normalizedURL, content: body, persist: persist}
@@ -1955,12 +2048,16 @@ func (spider *pageSpider) fetchResource(rawURL string, baseURL *url.URL, depth i
 	}
 	spider.resources[normalizedURL] = resource
 	spider.downloadedTotal++
-	spider.publishProgress("downloaded", normalizedURL, 100)
+	spider.publishResourceProgress("downloaded", normalizedURL, 100, int64(len(body)), response.ContentLength)
 	spider.rewriteNestedResources(resource, depth+1, response.Header.Get("Content-Type"))
 	return resource, nil
 }
 
 func (spider *pageSpider) publishProgress(stage, currentURL string, currentPercent int) {
+	spider.publishResourceProgress(stage, currentURL, currentPercent, 0, -1)
+}
+
+func (spider *pageSpider) publishResourceProgress(stage, currentURL string, currentPercent int, downloadedBytes, sizeBytes int64) {
 	if spider.tracker == nil || strings.TrimSpace(spider.progressToken) == "" {
 		return
 	}
@@ -1970,8 +2067,68 @@ func (spider *pageSpider) publishProgress(stage, currentURL string, currentPerce
 	}
 	spider.tracker.publish(grabProgressEvent{
 		Token: spider.progressToken, Stage: stage, FoundTotal: spider.foundTotal, DownloadedTotal: spider.downloadedTotal,
-		CurrentURL: currentURL, CurrentPercent: currentPercent, CompletedPercent: completedPercent,
+		CurrentURL: currentURL, CurrentPercent: currentPercent, CurrentDownloadedBytes: downloadedBytes, CurrentSizeBytes: sizeBytes, CompletedPercent: completedPercent,
 	})
+}
+
+func (spider *pageSpider) readResourceBody(reader io.Reader, resourceURL string, sizeBytes int64) ([]byte, error) {
+	var bodyBuffer bytes.Buffer
+	buffer := make([]byte, 32*1024)
+	downloadedBytes := int64(0)
+	lastPercent := -1
+	spider.publishResourceProgress("downloading", resourceURL, 0, 0, sizeBytes)
+	for {
+		readCount, readErr := reader.Read(buffer)
+		if readCount > 0 {
+			downloadedBytes += int64(readCount)
+			if _, writeErr := bodyBuffer.Write(buffer[:readCount]); writeErr != nil {
+				return nil, writeErr
+			}
+			currentPercent := resourcePercent(downloadedBytes, sizeBytes)
+			if currentPercent != lastPercent {
+				spider.publishResourceProgress("downloading", resourceURL, currentPercent, downloadedBytes, sizeBytes)
+				lastPercent = currentPercent
+			}
+		}
+		if readErr == io.EOF {
+			break
+		}
+		if readErr != nil {
+			return nil, readErr
+		}
+	}
+	return bodyBuffer.Bytes(), nil
+}
+
+func resourcePercent(downloadedBytes, sizeBytes int64) int {
+	if sizeBytes <= 0 {
+		return 0
+	}
+	percent := int(downloadedBytes * 100 / sizeBytes)
+	if percent < 0 {
+		return 0
+	}
+	if percent > 100 {
+		return 100
+	}
+	return percent
+}
+
+func (spider *pageSpider) fetchSelectedResources() {
+	if spider.selectedResourceURLs == nil || len(spider.selectedResourceURLs) == 0 {
+		return
+	}
+	selectedURLs := make([]string, 0, len(spider.selectedResourceURLs))
+	for selectedURL := range spider.selectedResourceURLs {
+		selectedURLs = append(selectedURLs, selectedURL)
+	}
+	sort.Strings(selectedURLs)
+	for _, selectedURL := range selectedURLs {
+		if existing, found := spider.resources[selectedURL]; found && existing.persist {
+			continue
+		}
+		_, _ = spider.fetchResource(selectedURL, spider.pageURL, 0, true)
+	}
 }
 
 func (spider *pageSpider) rewriteNestedResources(resource *mirroredResource, depth int, contentType string) {
@@ -1986,16 +2143,19 @@ func (spider *pageSpider) rewriteNestedResources(resource *mirroredResource, dep
 	resource.content = []byte(rewritten)
 }
 
-func (spider *pageSpider) rewriteHTMLWithAssets(html []byte) string {
-	return spider.rewriteTextReferences(string(html), spider.pageURL.String(), 0)
-}
-
 func (spider *pageSpider) rewriteTextReferences(source, baseRawURL string, depth int) string {
 	baseURL, _ := url.Parse(baseRawURL)
 	rewriteSingle := func(rawRef string) string {
+		normalizedURL, blocked := spider.normalizeURL(rawRef, baseURL)
+		if blocked || normalizedURL == "" {
+			return rawRef
+		}
+		if !spider.shouldPersistResource(normalizedURL) {
+			return normalizedURL
+		}
 		dependency, err := spider.fetchResource(rawRef, baseURL, depth, true)
 		if err != nil || dependency == nil || dependency.assetPath == "" {
-			return rawRef
+			return normalizedURL
 		}
 		return dependency.assetPath
 	}
@@ -2022,13 +2182,6 @@ func (spider *pageSpider) rewriteTextReferences(source, baseRawURL string, depth
 		}
 		return strings.Replace(match, parts[1], strings.Join(candidates, ", "), 1)
 	})
-	rewritten = cssURLPattern.ReplaceAllStringFunc(rewritten, func(match string) string {
-		parts := cssURLPattern.FindStringSubmatch(match)
-		if len(parts) != 2 {
-			return match
-		}
-		return strings.Replace(match, parts[1], rewriteSingle(parts[1]), 1)
-	})
 	rewritten = cssImportPattern.ReplaceAllStringFunc(rewritten, func(match string) string {
 		parts := cssImportPattern.FindStringSubmatch(match)
 		if len(parts) != 2 {
@@ -2036,7 +2189,50 @@ func (spider *pageSpider) rewriteTextReferences(source, baseRawURL string, depth
 		}
 		return strings.Replace(match, parts[1], rewriteSingle(parts[1]), 1)
 	})
+	rewritten = rewriteCSSURLReferences(rewritten, rewriteSingle)
+	rewritten = jsImportPattern.ReplaceAllStringFunc(rewritten, func(match string) string {
+		parts := jsImportPattern.FindStringSubmatch(match)
+		if len(parts) != 2 {
+			return match
+		}
+		return strings.Replace(match, parts[1], rewriteSingle(parts[1]), 1)
+	})
 	return rewritten
+}
+
+func rewriteCSSURLReferences(source string, rewriteSingle func(string) string) string {
+	matches := cssURLPattern.FindAllStringSubmatchIndex(source, -1)
+	if len(matches) == 0 {
+		return source
+	}
+	var rewritten strings.Builder
+	lastEnd := 0
+	for _, match := range matches {
+		if len(match) != 4 {
+			continue
+		}
+		matchStart := match[0]
+		matchEnd := match[1]
+		referenceStart := match[2]
+		referenceEnd := match[3]
+		rewritten.WriteString(source[lastEnd:matchStart])
+		if isCSSImportURL(source, matchStart) {
+			rewritten.WriteString(source[matchStart:matchEnd])
+		} else {
+			rewritten.WriteString(source[matchStart:referenceStart])
+			rewritten.WriteString(rewriteSingle(source[referenceStart:referenceEnd]))
+			rewritten.WriteString(source[referenceEnd:matchEnd])
+		}
+		lastEnd = matchEnd
+	}
+	rewritten.WriteString(source[lastEnd:])
+	return rewritten.String()
+}
+
+func isCSSImportURL(source string, urlStart int) bool {
+	prefixStart := strings.LastIndexAny(source[:urlStart], ";{}")
+	statementPrefix := strings.ToLower(strings.TrimSpace(source[prefixStart+1 : urlStart]))
+	return strings.HasPrefix(statementPrefix, "@import")
 }
 
 func (spider *pageSpider) normalizeURL(rawRef string, baseURL *url.URL) (string, bool) {
@@ -2058,15 +2254,27 @@ func (spider *pageSpider) normalizeURL(rawRef string, baseURL *url.URL) (string,
 	if resolved == nil || resolved.Scheme == "" {
 		return "", true
 	}
-	host := strings.ToLower(resolved.Hostname())
-	if _, allowed := spider.allowedHosts[host]; !allowed {
+	if resolved.Scheme != "http" && resolved.Scheme != "https" {
 		return "", true
 	}
+	resolved.Fragment = ""
+	resolved.ForceQuery = false
 	return resolved.String(), false
 }
 
+func (spider *pageSpider) shouldPersistResource(normalizedURL string) bool {
+	if spider.selectedResourceURLs == nil {
+		return true
+	}
+	if len(spider.selectedResourceURLs) == 0 {
+		return false
+	}
+	_, selected := spider.selectedResourceURLs[normalizedURL]
+	return selected
+}
+
 func (spider *pageSpider) assetPathFor(fileBytes []byte, sourceURL string) string {
-	extension := strings.ToLower(path.Ext(sourceURL))
+	extension := resourceExtension(sourceURL)
 	if extension == "" {
 		extension = ".bin"
 	}
@@ -2404,7 +2612,7 @@ func (a *App) shouldUpdatePublishedPageFile(domain, pagePath, nextRenderedHTML s
 
 func (a *App) generateDomainPack(domain string) error {
 	domainDirName := domainStorageName(domain)
-	packsDirPath := filepath.Join("storage", "packs")
+	packsDirPath := a.packsDir()
 	if makeErr := os.MkdirAll(packsDirPath, 0o755); makeErr != nil {
 		return makeErr
 	}
@@ -2419,7 +2627,7 @@ func (a *App) generateDomainPack(domain string) error {
 		_ = zipWriter.Close()
 		return addStaticErr
 	}
-	if addFilesErr := addDirectoryToZip(zipWriter, filepath.Join("storage", "files", domainDirName), filepath.Join("files", domainDirName)); addFilesErr != nil {
+	if addFilesErr := addDirectoryToZip(zipWriter, a.domainFilesDirForDomain(domain), filepath.Join("files", domainDirName)); addFilesErr != nil {
 		_ = zipWriter.Close()
 		return addFilesErr
 	}
@@ -2551,7 +2759,7 @@ func staticRelativePathForPage(pagePath string) string {
 }
 
 func (a *App) domainStaticDir(domain string) string {
-	return filepath.Join("storage/static", domainStorageName(domain))
+	return filepath.Join(a.staticRootDir(), domainStorageName(domain))
 }
 
 func (a *App) logContentDelivery(w http.ResponseWriter, sourceType string) {
@@ -2566,5 +2774,29 @@ func domainStorageName(domain string) string {
 }
 
 func (a *App) domainFilesDir(r *http.Request) string {
-	return filepath.Join("storage/files", domainStorageName(a.siteDomain(r.Context(), r)))
+	return a.domainFilesDirForDomain(a.siteDomain(r.Context(), r))
+}
+
+func (a *App) domainFilesDirForDomain(domain string) string {
+	return filepath.Join(a.filesRootDir(), domainStorageName(domain))
+}
+
+func (a *App) staticRootDir() string {
+	return filepath.Join(a.storageRootDir(), "static")
+}
+
+func (a *App) filesRootDir() string {
+	return filepath.Join(a.storageRootDir(), "files")
+}
+
+func (a *App) packsDir() string {
+	return filepath.Join(a.storageRootDir(), "packs")
+}
+
+func (a *App) storageRootDir() string {
+	storagePath := a.storagePath
+	if strings.TrimSpace(storagePath) == "" {
+		storagePath = defaultStoragePath
+	}
+	return filepath.Join(storagePath, "storage")
 }

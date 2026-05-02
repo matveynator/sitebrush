@@ -72,6 +72,14 @@
 
   let progressSocket = null;
   let confirmedSubmitStarted = false;
+  let previewSelectAllElement = null;
+  let downloadFinished = false;
+  let downloadRedirectURL = '';
+
+  function finishDownloadIfReady() {
+    if (!downloadFinished || downloadRedirectURL === '') { return; }
+    window.location.href = downloadRedirectURL;
+  }
 
   function setModalClosable(closable) {
     headerCloseButtonElement.classList.toggle('d-none', !closable);
@@ -88,6 +96,128 @@
   function clearResourceList() {
     resourceListElement.replaceChildren();
     resourceListElement.classList.add('d-none');
+    previewSelectAllElement = null;
+  }
+
+  function formatResourceSize(sizeBytes) {
+    const normalizedSize = Number(sizeBytes);
+    if (!Number.isFinite(normalizedSize) || normalizedSize < 0) { return 'размер неизвестен'; }
+    if (normalizedSize < 1024) { return normalizedSize + ' B'; }
+    if (normalizedSize < 1024 * 1024) { return (normalizedSize / 1024).toFixed(1) + ' KB'; }
+    return (normalizedSize / 1024 / 1024).toFixed(1) + ' MB';
+  }
+
+  function syncSelectedResourceFields() {
+    for (const selectedResourceElement of grabFormElement.querySelectorAll('input[name="import_resource_url"], input[name="import_selection_confirmed"]')) {
+      selectedResourceElement.remove();
+    }
+    const confirmedSelectionElement = document.createElement('input');
+    confirmedSelectionElement.type = 'hidden';
+    confirmedSelectionElement.name = 'import_selection_confirmed';
+    confirmedSelectionElement.value = '1';
+    grabFormElement.appendChild(confirmedSelectionElement);
+    for (const checkboxElement of resourceListElement.querySelectorAll('input[data-grab-resource-url]')) {
+      if (!checkboxElement.checked) { continue; }
+      const selectedResourceElement = document.createElement('input');
+      selectedResourceElement.type = 'hidden';
+      selectedResourceElement.name = 'import_resource_url';
+      selectedResourceElement.value = checkboxElement.dataset.grabResourceUrl || '';
+      grabFormElement.appendChild(selectedResourceElement);
+    }
+  }
+
+  function updatePreviewSelectAllState() {
+    if (!previewSelectAllElement) { return; }
+    const checkboxElements = Array.from(resourceListElement.querySelectorAll('input[data-grab-resource-url]'));
+    const checkedCount = checkboxElements.filter(function countChecked(checkboxElement) { return checkboxElement.checked; }).length;
+    previewSelectAllElement.checked = checkboxElements.length > 0 && checkedCount === checkboxElements.length;
+    previewSelectAllElement.indeterminate = checkedCount > 0 && checkedCount < checkboxElements.length;
+  }
+
+  function findResourceRow(resourceURL) {
+    for (const resourceRowElement of resourceListElement.querySelectorAll('[data-grab-resource-row-url]')) {
+      if (resourceRowElement.dataset.grabResourceRowUrl === resourceURL) {
+        return resourceRowElement;
+      }
+    }
+    return null;
+  }
+
+  function setResourceRowProgress(resourceRowElement, percentNumber, statusText) {
+    const boundedPercent = Math.max(0, Math.min(100, Number(percentNumber) || 0));
+    const progressElement = resourceRowElement.querySelector('[data-grab-resource-progress]');
+    const progressBarElement = resourceRowElement.querySelector('[data-grab-resource-progress-bar]');
+    const statusElement = resourceRowElement.querySelector('[data-grab-resource-status]');
+    if (progressElement) { progressElement.classList.remove('d-none'); }
+    if (progressBarElement) {
+      progressBarElement.style.width = boundedPercent + '%';
+      progressBarElement.textContent = boundedPercent + '%';
+      progressBarElement.setAttribute('aria-valuenow', String(boundedPercent));
+    }
+    if (statusElement) { statusElement.textContent = statusText; }
+  }
+
+  function describeDownloadProgress(progressState) {
+    const currentPercent = Number(progressState.current_percent) || 0;
+    const downloadedBytes = Number(progressState.current_downloaded_bytes) || 0;
+    const sizeBytes = Number(progressState.current_size_bytes);
+    if (progressState.stage === 'found') { return 'Ожидает скачивания'; }
+    if (progressState.stage === 'downloaded') { return 'Скачано локально'; }
+    if (progressState.stage === 'error') { return 'Ошибка скачивания, оставлен внешний URL'; }
+    if (Number.isFinite(sizeBytes) && sizeBytes > 0) {
+      return 'Скачано ' + formatResourceSize(downloadedBytes) + ' из ' + formatResourceSize(sizeBytes) + ' (' + currentPercent + '%)';
+    }
+    if (downloadedBytes > 0) {
+      return 'Скачано ' + formatResourceSize(downloadedBytes);
+    }
+    return 'Скачивание...';
+  }
+
+  function appendProgressOnlyResource(resourceURL) {
+    appendPreviewResource({ url: resourceURL, kind: 'file', size_bytes: -1 });
+    const resourceRowElement = findResourceRow(resourceURL);
+    if (!resourceRowElement) { return null; }
+    const checkboxElement = resourceRowElement.querySelector('input[data-grab-resource-url]');
+    if (checkboxElement) {
+      checkboxElement.checked = true;
+      checkboxElement.disabled = true;
+    }
+    return resourceRowElement;
+  }
+
+  function updateResourceDownloadProgress(progressState) {
+    const resourceURL = progressState.current_url || '';
+    if (!resourceURL) { return; }
+    let resourceRowElement = findResourceRow(resourceURL);
+    if (!resourceRowElement) {
+      resourceRowElement = appendProgressOnlyResource(resourceURL);
+    }
+    if (!resourceRowElement) { return; }
+    const resourcePercent = progressState.stage === 'downloaded' ? 100 : Number(progressState.current_percent) || 0;
+    setResourceRowProgress(resourceRowElement, resourcePercent, describeDownloadProgress(progressState));
+  }
+
+  function prepareResourceRowsForDownload() {
+    if (previewSelectAllElement && previewSelectAllElement.parentElement) {
+      previewSelectAllElement.parentElement.remove();
+      previewSelectAllElement = null;
+    }
+    const resourceRowElements = resourceListElement.querySelectorAll('[data-grab-resource-row-url]');
+    if (resourceRowElements.length > 0) {
+      resourceListElement.classList.remove('d-none');
+    }
+    for (const resourceRowElement of resourceRowElements) {
+      const checkboxElement = resourceRowElement.querySelector('input[data-grab-resource-url]');
+      if (!checkboxElement) { continue; }
+      checkboxElement.disabled = true;
+      if (!checkboxElement.checked) {
+        resourceRowElement.classList.add('opacity-75');
+        const statusElement = resourceRowElement.querySelector('[data-grab-resource-status]');
+        if (statusElement) { statusElement.textContent = 'Оставлен внешний URL'; }
+        continue;
+      }
+      setResourceRowProgress(resourceRowElement, 0, 'Ожидает скачивания');
+    }
   }
 
   function showPreviewLoading() {
@@ -117,29 +247,82 @@
   function appendPreviewResource(previewResource) {
     const resourceRowElement = document.createElement('div');
     resourceRowElement.className = 'list-group-item d-flex gap-2 align-items-start';
+    resourceRowElement.dataset.grabResourceRowUrl = previewResource.url || '';
+    const checkboxElement = document.createElement('input');
+    checkboxElement.className = 'form-check-input flex-shrink-0 mt-1';
+    checkboxElement.type = 'checkbox';
+    checkboxElement.checked = true;
+    checkboxElement.dataset.grabResourceUrl = previewResource.url || '';
+    checkboxElement.addEventListener('change', updatePreviewSelectAllState);
     const kindElement = document.createElement('span');
     kindElement.className = 'badge text-bg-secondary flex-shrink-0';
     kindElement.textContent = previewResource.kind || 'file';
-    const urlElement = document.createElement('span');
+    const detailsElement = document.createElement('div');
+    detailsElement.className = 'flex-grow-1';
+    const urlElement = document.createElement('div');
     urlElement.className = 'text-break';
     urlElement.textContent = previewResource.url;
+    const sizeElement = document.createElement('div');
+    sizeElement.className = 'text-muted';
+    sizeElement.textContent = formatResourceSize(previewResource.size_bytes);
+    sizeElement.dataset.grabResourceStatus = '1';
+    const rowProgressElement = document.createElement('div');
+    rowProgressElement.className = 'progress mt-2 d-none';
+    rowProgressElement.style.height = '18px';
+    rowProgressElement.dataset.grabResourceProgress = '1';
+    const rowProgressBarElement = document.createElement('div');
+    rowProgressBarElement.className = 'progress-bar';
+    rowProgressBarElement.style.width = '0%';
+    rowProgressBarElement.textContent = '0%';
+    rowProgressBarElement.setAttribute('role', 'progressbar');
+    rowProgressBarElement.setAttribute('aria-valuemin', '0');
+    rowProgressBarElement.setAttribute('aria-valuemax', '100');
+    rowProgressBarElement.setAttribute('aria-valuenow', '0');
+    rowProgressBarElement.dataset.grabResourceProgressBar = '1';
+    rowProgressElement.appendChild(rowProgressBarElement);
+    detailsElement.appendChild(urlElement);
+    detailsElement.appendChild(sizeElement);
+    detailsElement.appendChild(rowProgressElement);
+    resourceRowElement.appendChild(checkboxElement);
     resourceRowElement.appendChild(kindElement);
-    resourceRowElement.appendChild(urlElement);
+    resourceRowElement.appendChild(detailsElement);
     resourceListElement.appendChild(resourceRowElement);
+  }
+
+  function appendPreviewSelectAll() {
+    const selectAllRowElement = document.createElement('label');
+    selectAllRowElement.className = 'list-group-item d-flex gap-2 align-items-center';
+    previewSelectAllElement = document.createElement('input');
+    previewSelectAllElement.className = 'form-check-input';
+    previewSelectAllElement.type = 'checkbox';
+    previewSelectAllElement.checked = true;
+    const labelElement = document.createElement('span');
+    labelElement.textContent = 'Импортировать все ресурсы локально';
+    previewSelectAllElement.addEventListener('change', function onSelectAllChange() {
+      for (const checkboxElement of resourceListElement.querySelectorAll('input[data-grab-resource-url]')) {
+        checkboxElement.checked = previewSelectAllElement.checked;
+      }
+      updatePreviewSelectAllState();
+    });
+    selectAllRowElement.appendChild(previewSelectAllElement);
+    selectAllRowElement.appendChild(labelElement);
+    resourceListElement.appendChild(selectAllRowElement);
   }
 
   function showResourcePreview(previewPayload) {
     modalTitleElement.textContent = 'Подтвердите загрузку';
     progressHolderElement.classList.add('d-none');
     const resourceCount = Number(previewPayload.resource_count) || 0;
-    progressTextElement.textContent = 'Будет скачан HTML страницы и ресурсов: ' + resourceCount + '. Продолжить?';
+    progressTextElement.textContent = 'HTML страницы будет импортирован. Отмеченные ресурсы будут скачаны локально, снятые останутся внешними ссылками: ' + resourceCount + '.';
     progressUrlElement.textContent = previewPayload.source_url || sourceUrlElement.value;
     clearResourceList();
     if (resourceCount > 0) {
       resourceListElement.classList.remove('d-none');
+      appendPreviewSelectAll();
       for (const previewResource of previewPayload.resources || []) {
         appendPreviewResource(previewResource);
       }
+      updatePreviewSelectAllState();
     }
     setModalClosable(true);
     cancelButtonElement.classList.remove('d-none');
@@ -152,11 +335,13 @@
     progressTextElement.textContent = 'Начинаем загрузку...';
     progressHolderElement.classList.remove('d-none');
     progressUrlElement.textContent = '';
-    clearResourceList();
+    prepareResourceRowsForDownload();
     setProgressPercent(0);
     setModalClosable(false);
     cancelButtonElement.classList.add('d-none');
     continueButtonElement.classList.add('d-none');
+    downloadFinished = false;
+    downloadRedirectURL = '';
   }
 
   function showDownloadError(errorText) {
@@ -168,7 +353,8 @@
     if (submitButtonElement) { submitButtonElement.disabled = false; }
   }
 
-  function connectProgressSocket(progressToken) {
+  function connectProgressSocket(progressToken, readyCallback) {
+    let readyCallbackWasCalled = false;
     const socketProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     progressSocket = new WebSocket(socketProtocol + '//' + window.location.host + '/grab/ws?token=' + encodeURIComponent(progressToken));
     progressSocket.onmessage = function onSocketMessage(messageEvent) {
@@ -180,36 +366,69 @@
         progressSocket.close();
         return;
       }
+      if (progressState.stage === 'ready') {
+        if (!readyCallbackWasCalled) {
+          readyCallbackWasCalled = true;
+          readyCallback();
+        }
+        return;
+      }
       const foundTotal = Number(progressState.found_total) || 0;
       const downloadedTotal = Number(progressState.downloaded_total) || 0;
       const remainingTotal = Math.max(foundTotal - downloadedTotal, 0);
       const completedPercent = Number(progressState.completed_percent) || 0;
       const remainingPercent = Math.max(100 - completedPercent, 0);
+      updateResourceDownloadProgress(progressState);
       setProgressPercent(completedPercent);
       progressTextElement.textContent = 'Скачано: ' + downloadedTotal + ' из ' + foundTotal + ' (' + completedPercent + '%). Осталось: ' + remainingTotal + ' (' + remainingPercent + '%).';
       progressUrlElement.textContent = progressState.current_url || '';
       if (progressState.stage === 'done') {
+        downloadFinished = true;
         setProgressPercent(100);
         progressTextElement.textContent = 'Готово. Открываем редактор...';
         progressSocket.close();
+        finishDownloadIfReady();
       }
-      if (progressState.stage === 'error') {
+      if (progressState.stage === 'error' && !progressState.current_url) {
         showDownloadError('Не удалось скачать страницу. Окно можно закрыть и попробовать другой адрес.');
         progressSocket.close();
       }
     };
     progressSocket.onerror = function onSocketError() {
+      if (downloadFinished) { return; }
       showDownloadError('Потеряно соединение со статусом загрузки. Окно можно закрыть.');
     };
+  }
+
+  function submitGrabRequest() {
+    fetch('/grab', { method: 'POST', body: new FormData(grabFormElement), headers: { 'Accept': 'application/json' } })
+      .then(function handleGrabHTTPResponse(grabHTTPResponse) {
+        if (!grabHTTPResponse.ok) {
+          return grabHTTPResponse.text().then(function throwGrabHTTPError(errorText) {
+            throw new Error(errorText || 'Не удалось загрузить страницу.');
+          });
+        }
+        return grabHTTPResponse.json();
+      })
+      .then(function handleGrabPayload(grabPayload) {
+        downloadRedirectURL = grabPayload.redirect || (grabFormElement.querySelector('input[name="path"]').value + '?edit');
+        finishDownloadIfReady();
+      })
+      .catch(function handleGrabFailure(grabError) {
+        showDownloadError(grabError.message || 'Не удалось загрузить страницу.');
+        if (progressSocket) { progressSocket.close(); }
+      });
   }
 
   function startConfirmedDownload() {
     const progressToken = Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 10);
     tokenFieldElement.value = progressToken;
+    syncSelectedResourceFields();
     showDownloadProgress();
-    connectProgressSocket(progressToken);
-    confirmedSubmitStarted = true;
-    grabFormElement.submit();
+    connectProgressSocket(progressToken, function submitGrabFormAfterProgressReady() {
+      confirmedSubmitStarted = true;
+      submitGrabRequest();
+    });
   }
 
   function requestGrabPreview() {
