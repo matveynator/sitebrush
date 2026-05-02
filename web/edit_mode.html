@@ -14,7 +14,8 @@
 </head>
 <body>
 <h1>Choose editor for {{.Path}}</h1>
-<p><a href="{{.Path}}?visual">Open visual editor</a></p>
+<p>Document type: {{.ContentKind}}</p>
+{{if .IsHTML}}<p><a href="{{.Path}}?visual">Open visual editor</a></p>{{end}}
 <p><a href="{{.Path}}?text">Open plain text editor</a></p>
 </body>
 </html>

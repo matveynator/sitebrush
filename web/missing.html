@@ -33,10 +33,18 @@
     </div>
   </form>
   <div class="modal fade" id="grabProgressModal" tabindex="-1" aria-hidden="true">
-    <div class="modal-dialog"><div class="modal-content"><div class="modal-header"><h5 class="modal-title">Загрузка страницы</h5></div><div class="modal-body">
+    <div class="modal-dialog modal-lg"><div class="modal-content"><div class="modal-header">
+      <h5 class="modal-title" id="grab_modal_title">Загрузка страницы</h5>
+      <button type="button" class="btn-close d-none" id="grab_modal_header_close" data-bs-dismiss="modal" aria-label="Закрыть"></button>
+    </div><div class="modal-body">
       <p id="grab_progress_text">Подготовка...</p>
-      <div class="progress"><div class="progress-bar" id="grab_progress_bar" role="progressbar" style="width:0%;">0%</div></div>
+      <div class="progress" id="grab_progress_holder"><div class="progress-bar" id="grab_progress_bar" role="progressbar" style="width:0%;">0%</div></div>
       <small id="grab_progress_url" class="text-muted d-block mt-2"></small>
+      <div id="grab_resource_list" class="list-group small mt-3 d-none" style="max-height:260px;overflow:auto;"></div>
+    </div><div class="modal-footer">
+      <button type="button" class="btn btn-outline-secondary" id="grab_cancel_button" data-bs-dismiss="modal">Отмена</button>
+      <button type="button" class="btn btn-success" id="grab_continue_button">Продолжить</button>
+      <button type="button" class="btn btn-primary d-none" id="grab_close_button" data-bs-dismiss="modal">Закрыть</button>
     </div></div></div>
   </div>
   {{end}}
@@ -47,27 +55,203 @@
   const grabFormElement = document.querySelector('form[action="/grab"]');
   if (!grabFormElement) { return; }
   const tokenFieldElement = document.getElementById('progress_token');
+  const sourceUrlElement = document.getElementById('source_url');
+  const submitButtonElement = grabFormElement.querySelector('button[type="submit"]');
+  const modalTitleElement = document.getElementById('grab_modal_title');
   const progressTextElement = document.getElementById('grab_progress_text');
+  const progressHolderElement = document.getElementById('grab_progress_holder');
   const progressBarElement = document.getElementById('grab_progress_bar');
   const progressUrlElement = document.getElementById('grab_progress_url');
+  const resourceListElement = document.getElementById('grab_resource_list');
   const progressModalElement = document.getElementById('grabProgressModal');
+  const headerCloseButtonElement = document.getElementById('grab_modal_header_close');
+  const cancelButtonElement = document.getElementById('grab_cancel_button');
+  const continueButtonElement = document.getElementById('grab_continue_button');
+  const closeButtonElement = document.getElementById('grab_close_button');
   const progressModalController = new bootstrap.Modal(progressModalElement, { backdrop: 'static', keyboard: false });
-  grabFormElement.addEventListener('submit', function onGrabSubmit() {
-    const progressToken = Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 10);
-    tokenFieldElement.value = progressToken;
+
+  let progressSocket = null;
+  let confirmedSubmitStarted = false;
+
+  function setModalClosable(closable) {
+    headerCloseButtonElement.classList.toggle('d-none', !closable);
+    closeButtonElement.classList.toggle('d-none', !closable);
+  }
+
+  function setProgressPercent(percentNumber) {
+    const boundedPercent = Math.max(0, Math.min(100, Number(percentNumber) || 0));
+    progressBarElement.style.width = boundedPercent + '%';
+    progressBarElement.textContent = boundedPercent + '%';
+    progressBarElement.setAttribute('aria-valuenow', String(boundedPercent));
+  }
+
+  function clearResourceList() {
+    resourceListElement.replaceChildren();
+    resourceListElement.classList.add('d-none');
+  }
+
+  function showPreviewLoading() {
+    modalTitleElement.textContent = 'Проверка ресурсов';
+    progressTextElement.textContent = 'Смотрим, какие ресурсы есть на странице...';
+    progressHolderElement.classList.add('d-none');
+    progressUrlElement.textContent = sourceUrlElement.value;
+    clearResourceList();
+    setModalClosable(false);
+    cancelButtonElement.classList.remove('d-none');
+    continueButtonElement.classList.add('d-none');
     progressModalController.show();
+  }
+
+  function showPreviewError(previewError) {
+    modalTitleElement.textContent = 'Ошибка проверки';
+    progressTextElement.textContent = previewError.message || 'Не удалось проверить ресурсы страницы.';
+    progressHolderElement.classList.add('d-none');
+    progressUrlElement.textContent = sourceUrlElement.value;
+    clearResourceList();
+    setModalClosable(true);
+    cancelButtonElement.classList.add('d-none');
+    continueButtonElement.classList.add('d-none');
+    if (submitButtonElement) { submitButtonElement.disabled = false; }
+  }
+
+  function appendPreviewResource(previewResource) {
+    const resourceRowElement = document.createElement('div');
+    resourceRowElement.className = 'list-group-item d-flex gap-2 align-items-start';
+    const kindElement = document.createElement('span');
+    kindElement.className = 'badge text-bg-secondary flex-shrink-0';
+    kindElement.textContent = previewResource.kind || 'file';
+    const urlElement = document.createElement('span');
+    urlElement.className = 'text-break';
+    urlElement.textContent = previewResource.url;
+    resourceRowElement.appendChild(kindElement);
+    resourceRowElement.appendChild(urlElement);
+    resourceListElement.appendChild(resourceRowElement);
+  }
+
+  function showResourcePreview(previewPayload) {
+    modalTitleElement.textContent = 'Подтвердите загрузку';
+    progressHolderElement.classList.add('d-none');
+    const resourceCount = Number(previewPayload.resource_count) || 0;
+    progressTextElement.textContent = 'Будет скачан HTML страницы и ресурсов: ' + resourceCount + '. Продолжить?';
+    progressUrlElement.textContent = previewPayload.source_url || sourceUrlElement.value;
+    clearResourceList();
+    if (resourceCount > 0) {
+      resourceListElement.classList.remove('d-none');
+      for (const previewResource of previewPayload.resources || []) {
+        appendPreviewResource(previewResource);
+      }
+    }
+    setModalClosable(true);
+    cancelButtonElement.classList.remove('d-none');
+    continueButtonElement.classList.remove('d-none');
+    if (submitButtonElement) { submitButtonElement.disabled = false; }
+  }
+
+  function showDownloadProgress() {
+    modalTitleElement.textContent = 'Загрузка страницы';
+    progressTextElement.textContent = 'Начинаем загрузку...';
+    progressHolderElement.classList.remove('d-none');
+    progressUrlElement.textContent = '';
+    clearResourceList();
+    setProgressPercent(0);
+    setModalClosable(false);
+    cancelButtonElement.classList.add('d-none');
+    continueButtonElement.classList.add('d-none');
+  }
+
+  function showDownloadError(errorText) {
+    modalTitleElement.textContent = 'Ошибка загрузки';
+    progressTextElement.textContent = errorText;
+    setModalClosable(true);
+    cancelButtonElement.classList.add('d-none');
+    continueButtonElement.classList.add('d-none');
+    if (submitButtonElement) { submitButtonElement.disabled = false; }
+  }
+
+  function connectProgressSocket(progressToken) {
     const socketProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const progressSocket = new WebSocket(socketProtocol + '//' + window.location.host + '/grab/ws?token=' + encodeURIComponent(progressToken));
+    progressSocket = new WebSocket(socketProtocol + '//' + window.location.host + '/grab/ws?token=' + encodeURIComponent(progressToken));
     progressSocket.onmessage = function onSocketMessage(messageEvent) {
-      const progressState = JSON.parse(messageEvent.data);
-      progressTextElement.textContent = 'Найдено: ' + progressState.found_total + ', скачано: ' + progressState.downloaded_total;
-      progressBarElement.style.width = progressState.completed_percent + '%';
-      progressBarElement.textContent = progressState.completed_percent + '%';
+      let progressState = null;
+      try {
+        progressState = JSON.parse(messageEvent.data);
+      } catch (parseError) {
+        showDownloadError('Сервер прислал некорректный статус загрузки.');
+        progressSocket.close();
+        return;
+      }
+      const foundTotal = Number(progressState.found_total) || 0;
+      const downloadedTotal = Number(progressState.downloaded_total) || 0;
+      const remainingTotal = Math.max(foundTotal - downloadedTotal, 0);
+      const completedPercent = Number(progressState.completed_percent) || 0;
+      const remainingPercent = Math.max(100 - completedPercent, 0);
+      setProgressPercent(completedPercent);
+      progressTextElement.textContent = 'Скачано: ' + downloadedTotal + ' из ' + foundTotal + ' (' + completedPercent + '%). Осталось: ' + remainingTotal + ' (' + remainingPercent + '%).';
       progressUrlElement.textContent = progressState.current_url || '';
-      if (progressState.stage === 'done' || progressState.stage === 'error') {
+      if (progressState.stage === 'done') {
+        setProgressPercent(100);
+        progressTextElement.textContent = 'Готово. Открываем редактор...';
+        progressSocket.close();
+      }
+      if (progressState.stage === 'error') {
+        showDownloadError('Не удалось скачать страницу. Окно можно закрыть и попробовать другой адрес.');
         progressSocket.close();
       }
     };
+    progressSocket.onerror = function onSocketError() {
+      showDownloadError('Потеряно соединение со статусом загрузки. Окно можно закрыть.');
+    };
+  }
+
+  function startConfirmedDownload() {
+    const progressToken = Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 10);
+    tokenFieldElement.value = progressToken;
+    showDownloadProgress();
+    connectProgressSocket(progressToken);
+    confirmedSubmitStarted = true;
+    grabFormElement.submit();
+  }
+
+  function requestGrabPreview() {
+    showPreviewLoading();
+    if (submitButtonElement) { submitButtonElement.disabled = true; }
+    const previewRequestBody = new FormData(grabFormElement);
+    fetch('/grab/preview', { method: 'POST', body: previewRequestBody, headers: { 'Accept': 'application/json' } })
+      .then(function handlePreviewHTTPResponse(previewHTTPResponse) {
+        if (!previewHTTPResponse.ok) {
+          return previewHTTPResponse.text().then(function throwPreviewHTTPError(errorText) {
+            throw new Error(errorText || 'Не удалось проверить ресурсы страницы.');
+          });
+        }
+        return previewHTTPResponse.json();
+      })
+      .then(function handlePreviewPayload(previewPayload) {
+        showResourcePreview(previewPayload);
+      })
+      .catch(function handlePreviewFailure(previewError) {
+        showPreviewError(previewError);
+      });
+  }
+
+  continueButtonElement.addEventListener('click', function onContinueClick() {
+    startConfirmedDownload();
+  });
+
+  progressModalElement.addEventListener('hidden.bs.modal', function onProgressModalHidden() {
+    if (progressSocket) {
+      progressSocket.close();
+      progressSocket = null;
+    }
+  });
+
+  grabFormElement.addEventListener('submit', function onGrabSubmit(submitEvent) {
+    if (confirmedSubmitStarted) { return; }
+    submitEvent.preventDefault();
+    if (!grabFormElement.checkValidity()) {
+      grabFormElement.reportValidity();
+      return;
+    }
+    requestGrabPreview();
   });
 })();
 </script>

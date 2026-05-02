@@ -18,6 +18,7 @@ import (
 	"io"
 	"io/fs"
 	"log"
+	"mime"
 	"net"
 	"net/http"
 	"net/smtp"
@@ -57,12 +58,24 @@ type grabProgressEvent struct {
 	CompletedPercent int    `json:"completed_percent"`
 }
 
+type grabResourcePreview struct {
+	URL  string `json:"url"`
+	Kind string `json:"kind"`
+}
+
+type grabPreviewResponse struct {
+	SourceURL     string                `json:"source_url"`
+	ResourceCount int                   `json:"resource_count"`
+	Resources     []grabResourcePreview `json:"resources"`
+}
+
 type Page struct {
-	Domain    string
-	Path      string
-	Title     string
-	HTML      string
-	Published int
+	Domain      string
+	Path        string
+	Title       string
+	HTML        string
+	ContentKind string
+	Published   int
 }
 
 type Revision struct {
@@ -187,10 +200,11 @@ func main() {
 	router.HandleFunc("/edit", application.editPage)
 	router.HandleFunc("/edit/raw", application.editRawPage)
 	router.HandleFunc("/edit/mode", application.editModePage)
+	router.HandleFunc("/grab/preview", application.grabPreview)
 	router.HandleFunc("/grab", application.grabPage)
 	router.HandleFunc("/grab/ws", application.grabProgressWS)
 	router.HandleFunc("/files", application.filesPage)
-	router.HandleFunc("/save", application.savePage)
+	router.HandleFunc("/save", application.saveEndpoint)
 	router.HandleFunc("/domain/settings", application.domainSettingsPage)
 	router.HandleFunc("/revisions", application.revisionsPage)
 	router.HandleFunc("/revision/restore", application.restoreRevision)
@@ -333,21 +347,19 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 	isAdmin := a.isAdminRequest(r)
 	pageRecord, err := a.findPage(r.Context(), domain, pagePath)
 	if err == nil && isAdmin {
-		a.logContentDelivery(w, "db-draft")
-		_, _ = w.Write([]byte(a.wrapWithMenu(r, pageRecord.Path, pageRecord.HTML)))
+		a.serveManagedPageContent(w, r, pageRecord.Path, pageRecord.HTML, "db-draft")
 		return
 	}
 	if !isAdmin && a.servePublishedStaticFile(w, r, domain, pagePath) {
 		return
 	}
-	if !isAdmin {
-		a.render(w, r, "missing.html", map[string]any{"Path": pagePath, "EditLink": pagePath + "?edit", "IsAdmin": false})
-		return
-	}
 	publishedPage, publishedErr := a.findPublishedPage(r.Context(), domain, pagePath)
 	if publishedErr == nil {
-		a.logContentDelivery(w, "db-published-fallback")
-		_, _ = w.Write([]byte(a.wrapWithMenu(r, publishedPage.Path, publishedPage.HTML)))
+		a.serveManagedPageContent(w, r, publishedPage.Path, publishedPage.HTML, "db-published-fallback")
+		return
+	}
+	if !isAdmin {
+		a.render(w, r, "missing.html", map[string]any{"Path": pagePath, "EditLink": pagePath + "?edit", "IsAdmin": false})
 		return
 	}
 	if isAdmin {
@@ -452,6 +464,14 @@ func (a *App) editPage(w http.ResponseWriter, r *http.Request) {
 	}
 	domain := a.siteDomain(r.Context(), r)
 	record, _ := a.findPage(r.Context(), domain, pagePath)
+	if record.Path != "" && pageContentKind(record.Path, record.HTML) != "html" {
+		http.Redirect(w, r, pagePath+"?text", http.StatusFound)
+		return
+	}
+	if record.Path == "" && pageContentKind(pagePath, "") != "html" {
+		http.Redirect(w, r, pagePath+"?text", http.StatusFound)
+		return
+	}
 	if record.Path == "" {
 		record = Page{Path: pagePath, Title: pagePath, HTML: a.defaultHTMLForNewPage(r.Context(), domain, pagePath)}
 	}
@@ -477,7 +497,13 @@ func (a *App) editModePage(w http.ResponseWriter, r *http.Request) {
 	if pagePath == "" {
 		pagePath = "/"
 	}
-	a.render(w, r, "edit_mode.html", map[string]any{"Path": pagePath})
+	domain := a.siteDomain(r.Context(), r)
+	record, _ := a.findPage(r.Context(), domain, pagePath)
+	contentKind := pageContentKind(pagePath, "")
+	if record.Path != "" {
+		contentKind = pageContentKind(record.Path, record.HTML)
+	}
+	a.render(w, r, "edit_mode.html", map[string]any{"Path": pagePath, "ContentKind": contentKindLabel(contentKind), "IsHTML": contentKind == "html"})
 }
 
 func (a *App) editRawPage(w http.ResponseWriter, r *http.Request) {
@@ -504,6 +530,7 @@ func (a *App) editRawPage(w http.ResponseWriter, r *http.Request) {
 	if record.Path == "" {
 		record = Page{Path: pagePath, Title: pagePath, HTML: ""}
 	}
+	record.ContentKind = contentKindLabel(pageContentKind(record.Path, record.HTML))
 	a.render(w, r, "edit_raw.html", record)
 }
 
@@ -575,6 +602,14 @@ func hasQueryFlag(r *http.Request, flagName string) bool {
 	return hasFlag
 }
 
+func (a *App) saveEndpoint(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodPost {
+		a.savePage(w, r)
+		return
+	}
+	a.route(w, r)
+}
+
 func (a *App) savePage(w http.ResponseWriter, r *http.Request) {
 	if !a.isAdminRequest(r) || r.Method != http.MethodPost {
 		http.Error(w, "forbidden", http.StatusForbidden)
@@ -587,9 +622,12 @@ func (a *App) savePage(w http.ResponseWriter, r *http.Request) {
 	_, _ = a.db.ExecContext(r.Context(), `INSERT OR REPLACE INTO pages(domain,path,title,html,published) VALUES(?,?,?,?,1)`, domain, pagePath, title, html)
 	if !a.isDomainFrozen(r.Context(), domain) {
 		_, _ = a.db.ExecContext(r.Context(), `INSERT OR REPLACE INTO published_pages(domain,path,title,html) VALUES(?,?,?,?)`, domain, pagePath, title, html)
+		a.writePublishedStaticHTML(domain, pagePath, html)
 	}
 	_, _ = a.db.ExecContext(r.Context(), `INSERT INTO revisions(domain,page_path,html,created_at) VALUES(?,?,?,?)`, domain, pagePath, html, time.Now().Format(time.RFC3339))
-	a.applyTemplatePropagation(r.Context(), domain, html)
+	if pageContentKind(pagePath, html) == "html" {
+		a.applyTemplatePropagation(r.Context(), domain, html)
+	}
 	http.Redirect(w, r, pagePath, http.StatusFound)
 }
 
@@ -610,31 +648,17 @@ func (a *App) grabPage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "source_url is required", http.StatusBadRequest)
 		return
 	}
-	if !strings.HasPrefix(sourceURL, "http://") && !strings.HasPrefix(sourceURL, "https://") {
-		http.Error(w, "source_url must start with http:// or https://", http.StatusBadRequest)
-		return
-	}
 
-	remoteSourceURL, err := url.Parse(sourceURL)
+	remoteSourceURL, err := parseGrabSourceURL(sourceURL)
 	if err != nil {
-		http.Error(w, "source_url is invalid", http.StatusBadRequest)
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	sourceURL = remoteSourceURL.String()
 
-	response, err := http.Get(sourceURL)
+	htmlBytes, err := downloadGrabSourceHTML(sourceURL)
 	if err != nil {
-		http.Error(w, "failed to download source page", http.StatusBadGateway)
-		return
-	}
-	defer response.Body.Close()
-	if response.StatusCode < 200 || response.StatusCode > 299 {
-		http.Error(w, "source page returned non-success status", http.StatusBadGateway)
-		return
-	}
-
-	htmlBytes, err := io.ReadAll(response.Body)
-	if err != nil {
-		http.Error(w, "failed to read source page", http.StatusBadGateway)
+		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
 
@@ -647,6 +671,153 @@ func (a *App) grabPage(w http.ResponseWriter, r *http.Request) {
 	}
 	_, _ = a.db.ExecContext(r.Context(), `INSERT INTO revisions(domain,page_path,html,created_at) VALUES(?,?,?,?)`, domain, pagePath, html, time.Now().Format(time.RFC3339))
 	http.Redirect(w, r, pagePath+"?edit", http.StatusFound)
+}
+
+func (a *App) grabPreview(w http.ResponseWriter, r *http.Request) {
+	if !a.isAdminRequest(r) || r.Method != http.MethodPost {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	sourceURL := r.FormValue("source_url")
+	if sourceURL == "" {
+		http.Error(w, "source_url is required", http.StatusBadRequest)
+		return
+	}
+	remoteSourceURL, err := parseGrabSourceURL(sourceURL)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	sourceURL = remoteSourceURL.String()
+	htmlBytes, err := downloadGrabSourceHTML(sourceURL)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+	resources := previewGrabResources(remoteSourceURL, string(htmlBytes))
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(grabPreviewResponse{
+		SourceURL:     remoteSourceURL.String(),
+		ResourceCount: len(resources),
+		Resources:     resources,
+	})
+}
+
+func parseGrabSourceURL(sourceURL string) (*url.URL, error) {
+	trimmedSourceURL := strings.TrimSpace(sourceURL)
+	if trimmedSourceURL == "" {
+		return nil, errors.New("source_url is required")
+	}
+	if !strings.HasPrefix(trimmedSourceURL, "http://") && !strings.HasPrefix(trimmedSourceURL, "https://") {
+		return nil, errors.New("source_url must start with http:// or https://")
+	}
+	remoteSourceURL, err := url.Parse(trimmedSourceURL)
+	if err != nil || remoteSourceURL.Hostname() == "" {
+		return nil, errors.New("source_url is invalid")
+	}
+	return remoteSourceURL, nil
+}
+
+func downloadGrabSourceHTML(sourceURL string) ([]byte, error) {
+	response, err := http.Get(sourceURL)
+	if err != nil {
+		return nil, errors.New("failed to download source page")
+	}
+	defer response.Body.Close()
+	if response.StatusCode < 200 || response.StatusCode > 299 {
+		return nil, errors.New("source page returned non-success status")
+	}
+	htmlBytes, err := io.ReadAll(response.Body)
+	if err != nil {
+		return nil, errors.New("failed to read source page")
+	}
+	return htmlBytes, nil
+}
+
+func previewGrabResources(pageURL *url.URL, htmlSource string) []grabResourcePreview {
+	spider := newPageSpider("", pageURL, 0, nil, "")
+	seen := make(map[string]struct{})
+	resources := make([]grabResourcePreview, 0)
+	addResource := func(rawRef, kind string) {
+		normalizedURL, blocked := spider.normalizeURL(rawRef, pageURL)
+		if blocked || normalizedURL == "" {
+			return
+		}
+		if _, exists := seen[normalizedURL]; exists {
+			return
+		}
+		seen[normalizedURL] = struct{}{}
+		resources = append(resources, grabResourcePreview{URL: normalizedURL, Kind: kind})
+	}
+	for _, match := range htmlResourcePattern.FindAllStringSubmatch(htmlSource, -1) {
+		if len(match) != 4 {
+			continue
+		}
+		addResource(match[3], previewResourceKind(match[1], match[2], match[3]))
+	}
+	for _, match := range htmlSrcSetPattern.FindAllStringSubmatch(htmlSource, -1) {
+		if len(match) != 2 {
+			continue
+		}
+		candidates := strings.Split(match[1], ",")
+		for _, candidate := range candidates {
+			fields := strings.Fields(strings.TrimSpace(candidate))
+			if len(fields) == 0 {
+				continue
+			}
+			addResource(fields[0], "image")
+		}
+	}
+	for _, match := range cssURLPattern.FindAllStringSubmatch(htmlSource, -1) {
+		if len(match) != 2 {
+			continue
+		}
+		addResource(match[1], previewResourceKind("", "", match[1]))
+	}
+	for _, match := range cssImportPattern.FindAllStringSubmatch(htmlSource, -1) {
+		if len(match) != 2 {
+			continue
+		}
+		addResource(match[1], "style")
+	}
+	return resources
+}
+
+func previewResourceKind(tagName, attributeName, rawRef string) string {
+	tag := strings.ToLower(strings.TrimSpace(tagName))
+	attribute := strings.ToLower(strings.TrimSpace(attributeName))
+	switch tag {
+	case "script":
+		return "script"
+	case "link":
+		return "style"
+	case "img", "source":
+		return "image"
+	case "video", "audio":
+		return tag
+	case "iframe", "embed", "object":
+		return "embedded"
+	}
+	if attribute == "poster" {
+		return "image"
+	}
+	extension := strings.ToLower(path.Ext(rawRef))
+	switch extension {
+	case ".css":
+		return "style"
+	case ".js", ".mjs":
+		return "script"
+	case ".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp", ".ico":
+		return "image"
+	case ".woff", ".woff2", ".ttf", ".eot", ".otf":
+		return "font"
+	case ".mp4", ".webm", ".mov":
+		return "video"
+	case ".mp3", ".ogg", ".wav":
+		return "audio"
+	default:
+		return "file"
+	}
 }
 
 func (a *App) grabProgressWS(w http.ResponseWriter, r *http.Request) {
@@ -717,9 +888,22 @@ func (a *App) applyLatestActiveRevision(ctx context.Context, domain string, page
 	var latestActiveHTML string
 	err := a.db.QueryRowContext(ctx, `SELECT html FROM revisions WHERE domain=? AND page_path=? AND is_active=1 ORDER BY id DESC LIMIT 1`, domain, pagePath).Scan(&latestActiveHTML)
 	if err != nil {
+		a.removeManagedPage(ctx, domain, pagePath)
 		return
 	}
-	_, _ = a.db.ExecContext(ctx, `UPDATE pages SET html=? WHERE domain=? AND path=?`, latestActiveHTML, domain, pagePath)
+	pageTitle := pagePath
+	_ = a.db.QueryRowContext(ctx, `SELECT title FROM pages WHERE domain=? AND path=?`, domain, pagePath).Scan(&pageTitle)
+	_, _ = a.db.ExecContext(ctx, `INSERT OR REPLACE INTO pages(domain,path,title,html,published) VALUES(?,?,?,?,1)`, domain, pagePath, pageTitle, latestActiveHTML)
+	if !a.isDomainFrozen(ctx, domain) {
+		_, _ = a.db.ExecContext(ctx, `INSERT OR REPLACE INTO published_pages(domain,path,title,html) VALUES(?,?,?,?)`, domain, pagePath, pageTitle, latestActiveHTML)
+		a.writePublishedStaticHTML(domain, pagePath, latestActiveHTML)
+	}
+}
+
+func (a *App) removeManagedPage(ctx context.Context, domain string, pagePath string) {
+	_, _ = a.db.ExecContext(ctx, `DELETE FROM pages WHERE domain=? AND path=?`, domain, pagePath)
+	_, _ = a.db.ExecContext(ctx, `DELETE FROM published_pages WHERE domain=? AND path=?`, domain, pagePath)
+	a.removePublishedStaticFile(domain, pagePath)
 }
 
 func (a *App) restoreRevision(w http.ResponseWriter, r *http.Request) {
@@ -1012,7 +1196,18 @@ func (a *App) isAdminRequest(r *http.Request) bool {
 	return sessionCount > 0
 }
 
-func (a *App) wrapWithMenu(r *http.Request, pagePath, html string) string {
+func (a *App) serveManagedPageContent(w http.ResponseWriter, r *http.Request, pagePath, content, sourceType string) {
+	a.logContentDelivery(w, sourceType)
+	if pageContentKind(pagePath, content) == "html" {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = w.Write([]byte(a.injectContextMenu(r, pagePath, content)))
+		return
+	}
+	w.Header().Set("Content-Type", contentTypeForManagedPage(pagePath, content))
+	_, _ = w.Write([]byte(content))
+}
+
+func (a *App) injectContextMenu(r *http.Request, pagePath, html string) string {
 	domain := a.siteDomain(r.Context(), r)
 	menuScript := buildContextMenuScript(a.isAdminRequest(r), a.isDomainFrozen(r.Context(), domain), pagePath, domain, translationsForRequest(r))
 	if strings.Contains(strings.ToLower(html), "</body>") {
@@ -1020,6 +1215,70 @@ func (a *App) wrapWithMenu(r *http.Request, pagePath, html string) string {
 		return bodyClosePattern.ReplaceAllString(html, menuScript+"</body>")
 	}
 	return html + menuScript
+}
+
+func pageContentKind(pagePath, content string) string {
+	extension := strings.ToLower(path.Ext(strings.TrimSpace(pagePath)))
+	switch extension {
+	case ".htm", ".html":
+		return "html"
+	case ".txt", ".text", ".md", ".markdown", ".css", ".js", ".mjs", ".json", ".xml", ".csv", ".tsv", ".yml", ".yaml", ".toml", ".ini", ".svg":
+		return "text"
+	}
+	if extension != "" {
+		return "file"
+	}
+	trimmedContent := strings.TrimSpace(strings.ToLower(content))
+	if trimmedContent == "" {
+		return "html"
+	}
+	if strings.HasPrefix(trimmedContent, "<!doctype html") || strings.HasPrefix(trimmedContent, "<html") || strings.Contains(trimmedContent, "</body>") {
+		return "html"
+	}
+	if strings.Contains(trimmedContent, "<script") || strings.Contains(trimmedContent, "<style") || looksLikeHTMLFragment(trimmedContent) {
+		return "html"
+	}
+	return "text"
+}
+
+func looksLikeHTMLFragment(trimmedContent string) bool {
+	for _, tagName := range []string{"<div", "<section", "<article", "<main", "<header", "<footer", "<nav", "<p", "<h1", "<h2", "<h3", "<ul", "<ol", "<table", "<form", "<img", "<a "} {
+		if strings.Contains(trimmedContent, tagName) {
+			return true
+		}
+	}
+	return false
+}
+
+func contentKindLabel(kind string) string {
+	switch kind {
+	case "html":
+		return "HTML page"
+	case "text":
+		return "Text document"
+	default:
+		return "File"
+	}
+}
+
+func contentTypeForManagedPage(pagePath, content string) string {
+	extension := strings.ToLower(path.Ext(strings.TrimSpace(pagePath)))
+	if extension != "" {
+		if contentType := mime.TypeByExtension(extension); contentType != "" {
+			if strings.HasPrefix(contentType, "text/") && !strings.Contains(strings.ToLower(contentType), "charset=") {
+				return contentType + "; charset=utf-8"
+			}
+			return contentType
+		}
+	}
+	if strings.TrimSpace(content) == "" {
+		return "text/plain; charset=utf-8"
+	}
+	detectedContentType := http.DetectContentType([]byte(content))
+	if strings.HasPrefix(detectedContentType, "text/") && !strings.Contains(strings.ToLower(detectedContentType), "charset=") {
+		return detectedContentType + "; charset=utf-8"
+	}
+	return detectedContentType
 }
 
 func buildContextMenuScript(isAdmin bool, isFrozen bool, pagePath, domain string, translations map[string]string) string {
@@ -2054,13 +2313,12 @@ func (a *App) publishDomain(w http.ResponseWriter, r *http.Request) {
 				if latestActiveHTML, foundLatestActiveRevision := latestRevisionByPath[pagePath]; foundLatestActiveRevision {
 					pageHTMLToPublish = latestActiveHTML
 				}
-				renderedPublishedHTML := a.wrapPublishedPageWithGuestMenu(domain, pagePath, pageHTMLToPublish)
-				if !a.shouldUpdatePublishedPageFile(domain, pagePath, renderedPublishedHTML) {
+				if !a.shouldUpdatePublishedPageFile(domain, pagePath, pageHTMLToPublish) {
 					skippedPagesCount++
 					continue
 				}
 				_, _ = a.db.ExecContext(r.Context(), `INSERT OR REPLACE INTO published_pages(domain,path,title,html) VALUES(?,?,?,?)`, domain, pagePath, pageTitle, pageHTMLToPublish)
-				a.writePublishedStaticHTML(domain, pagePath, renderedPublishedHTML)
+				a.writePublishedStaticHTML(domain, pagePath, pageHTMLToPublish)
 				updatedPagesCount++
 				log.Printf("publish page updated domain=%s path=%s", domain, pagePath)
 			}
@@ -2123,8 +2381,7 @@ func (a *App) countPublishChanges(ctx context.Context, domain string) (int, int,
 		if latestActiveHTML, foundLatestActiveRevision := latestRevisionByPath[pagePath]; foundLatestActiveRevision {
 			pageHTMLToPublish = latestActiveHTML
 		}
-		renderedPublishedHTML := a.wrapPublishedPageWithGuestMenu(domain, pagePath, pageHTMLToPublish)
-		if a.shouldUpdatePublishedPageFile(domain, pagePath, renderedPublishedHTML) {
+		if a.shouldUpdatePublishedPageFile(domain, pagePath, pageHTMLToPublish) {
 			changedPagesCount++
 			changedPagePaths = append(changedPagePaths, pagePath)
 		}
@@ -2255,8 +2512,16 @@ func (a *App) servePublishedStaticFile(w http.ResponseWriter, r *http.Request, d
 	if _, statErr := os.Stat(staticFilePath); statErr != nil {
 		return false
 	}
-	a.logContentDelivery(w, "static-file")
-	http.ServeFile(w, r, staticFilePath)
+	if pageContentKind(pagePath, "") != "html" {
+		a.logContentDelivery(w, "static-file")
+		http.ServeFile(w, r, staticFilePath)
+		return true
+	}
+	staticContent, readErr := os.ReadFile(staticFilePath)
+	if readErr != nil {
+		return false
+	}
+	a.serveManagedPageContent(w, r, pagePath, string(staticContent), "static-file")
 	return true
 }
 
@@ -2266,13 +2531,9 @@ func (a *App) writePublishedStaticHTML(domain, pagePath, html string) {
 	_ = os.WriteFile(staticFilePath, []byte(html), 0644)
 }
 
-func (a *App) wrapPublishedPageWithGuestMenu(domain, pagePath, html string) string {
-	script := buildContextMenuScript(false, false, pagePath, domain, map[string]string{})
-	if strings.Contains(strings.ToLower(html), "</body>") {
-		bodyClosePattern := regexp.MustCompile(`(?i)</body>`)
-		return bodyClosePattern.ReplaceAllString(html, script+"</body>")
-	}
-	return html + script
+func (a *App) removePublishedStaticFile(domain, pagePath string) {
+	staticFilePath := filepath.Join(a.domainStaticDir(domain), staticRelativePathForPage(pagePath))
+	_ = os.Remove(staticFilePath)
 }
 
 func staticRelativePathForPage(pagePath string) string {
@@ -2282,6 +2543,9 @@ func staticRelativePathForPage(pagePath string) string {
 	}
 	if strings.HasSuffix(normalizedPath, "/") {
 		return normalizedPath + "index.html"
+	}
+	if extension := strings.ToLower(path.Ext(normalizedPath)); extension != "" {
+		return normalizedPath
 	}
 	return normalizedPath + ".html"
 }
