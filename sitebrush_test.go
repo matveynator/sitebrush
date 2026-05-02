@@ -122,6 +122,7 @@ func TestParseGrabSourceURLAcceptsCommonURLForms(t *testing.T) {
 	testCases := map[string]string{
 		"https://example.com/path":   "https://example.com/path",
 		"http://example.com/path":    "http://example.com/path",
+		"sitebrush.com":              "https://sitebrush.com",
 		"example.com/path":           "https://example.com/path",
 		"127.0.0.1:8080/admin":       "http://127.0.0.1:8080/admin",
 		"localhost:18080/admin":      "http://localhost:18080/admin",
