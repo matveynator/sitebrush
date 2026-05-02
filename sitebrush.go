@@ -19,7 +19,6 @@ import (
 	"net/smtp"
 	"net/url"
 	"os"
-	"os/exec"
 	"path"
 	"path/filepath"
 	"reflect"
@@ -1517,78 +1516,216 @@ func contentHashName(fileBytes []byte, extension string) (string, error) {
 }
 
 func (a *App) mirrorRemotePage(domain, sourceURL string, pageURL *url.URL, fallbackHTML string) string {
-	tempDirPath, err := os.MkdirTemp("", "sitebrush-grab-*")
-	if err != nil {
+	spider := newPageSpider(domain, pageURL, 4)
+	rootResource, err := spider.fetchHTML(sourceURL)
+	if err != nil || rootResource == nil {
 		return fallbackHTML
 	}
-	defer os.RemoveAll(tempDirPath)
-
-	htmlFilePath := filepath.Join(tempDirPath, "page.html")
-	command := exec.Command("wget", "--page-requisites", "--convert-links", "--adjust-extension", "--span-hosts", "--no-parent", "--execute", "robots=off", "-O", htmlFilePath, "-P", tempDirPath, sourceURL)
-	if command.Run() != nil {
-		return fallbackHTML
-	}
-
-	renderedHTMLBytes, err := os.ReadFile(htmlFilePath)
-	if err != nil {
-		return fallbackHTML
-	}
-	renderedHTML := string(renderedHTMLBytes)
-
-	localFileToAssetPath := a.importMirroredFiles(domain, tempDirPath)
-	return rewriteMirroredLinks(renderedHTML, localFileToAssetPath)
+	_ = a.persistSpiderAssets(spider)
+	return spider.rewriteHTMLWithAssets(rootResource.content)
 }
 
-func (a *App) importMirroredFiles(domain, tempDirPath string) map[string]string {
-	localFileToAssetPath := make(map[string]string)
-	baseDir := filepath.Join("storage/files", domainStorageName(domain))
+func (a *App) persistSpiderAssets(spider *pageSpider) error {
+	baseDir := filepath.Join("storage/files", domainStorageName(spider.domain))
 	_ = os.MkdirAll(baseDir, 0o755)
-	stagedFileByRelativePath := make(map[string][]byte)
-	_ = filepath.Walk(tempDirPath, func(currentPath string, fileInfo os.FileInfo, walkErr error) error {
-		if walkErr != nil || fileInfo.IsDir() || strings.HasSuffix(currentPath, "page.html") {
-			return nil
+	for _, resource := range spider.resources {
+		if !resource.persist || strings.TrimSpace(resource.assetPath) == "" {
+			continue
 		}
-		fileBytes, readErr := os.ReadFile(currentPath)
-		if readErr != nil {
-			return nil
-		}
-		relativePath, _ := filepath.Rel(tempDirPath, currentPath)
-		normalizedRelativePath := filepath.ToSlash(relativePath)
-		fileExtension := strings.ToLower(path.Ext(currentPath))
-		if fileExtension == "" {
-			fileExtension = ".bin"
-		}
-		hashedFileName, err := contentHashName(fileBytes, fileExtension)
-		if err != nil {
-			return nil
-		}
-		localAssetRelativePath := "p/" + hashedFileName
-		localFileToAssetPath[normalizedRelativePath] = "/assets/" + domainStorageName(domain) + "/" + localAssetRelativePath
-		stagedFileByRelativePath[normalizedRelativePath] = fileBytes
-		return nil
-	})
-	for originalRelativePath, originalBytes := range stagedFileByRelativePath {
-		mirroredBytes := rewriteMirroredFileContent(originalRelativePath, originalBytes, localFileToAssetPath)
-		assetReference := strings.TrimPrefix(localFileToAssetPath[originalRelativePath], "/assets/"+domainStorageName(domain)+"/")
+		assetReference := strings.TrimPrefix(resource.assetPath, "/assets/"+domainStorageName(spider.domain)+"/")
 		targetFilePath := filepath.Join(baseDir, filepath.FromSlash(assetReference))
 		_ = os.MkdirAll(filepath.Dir(targetFilePath), 0o755)
-		_ = os.WriteFile(targetFilePath, mirroredBytes, 0o644)
+		_ = os.WriteFile(targetFilePath, resource.content, 0o644)
 	}
-	return localFileToAssetPath
+	return nil
 }
 
-func rewriteMirroredFileContent(relativePath string, sourceBytes []byte, localFileToAssetPath map[string]string) []byte {
-	extension := strings.ToLower(path.Ext(relativePath))
-	if extension != ".css" && extension != ".js" && extension != ".mjs" && extension != ".html" && extension != ".htm" {
-		return sourceBytes
+type mirroredResource struct {
+	url       string
+	content   []byte
+	assetPath string
+	persist   bool
+}
+
+type pageSpider struct {
+	domain       string
+	pageURL      *url.URL
+	maxDepth     int
+	client       *http.Client
+	resources    map[string]*mirroredResource
+	inFlight     map[string]bool
+	allowedHosts map[string]struct{}
+}
+
+var (
+	htmlResourcePattern = regexp.MustCompile(`(?is)<(link|script|img|source|video|audio|iframe|embed|object)\b[^>]*(href|src|poster|data)\s*=\s*["']([^"']+)["']`)
+	htmlSrcSetPattern   = regexp.MustCompile(`(?is)\bsrcset\s*=\s*["']([^"']+)["']`)
+	cssURLPattern       = regexp.MustCompile(`(?is)url\(\s*['"]?([^'")]+)['"]?\s*\)`)
+	cssImportPattern    = regexp.MustCompile(`(?is)@import\s+(?:url\()?\s*['"]([^'"]+)['"]`)
+)
+
+func newPageSpider(domain string, pageURL *url.URL, maxDepth int) *pageSpider {
+	allowedHosts := map[string]struct{}{strings.ToLower(pageURL.Hostname()): {}}
+	return &pageSpider{
+		domain:       domain,
+		pageURL:      pageURL,
+		maxDepth:     maxDepth,
+		client:       &http.Client{Timeout: 20 * time.Second},
+		resources:    make(map[string]*mirroredResource),
+		inFlight:     make(map[string]bool),
+		allowedHosts: allowedHosts,
 	}
-	rewrittenContent := string(sourceBytes)
-	for sourcePath, localAssetPath := range localFileToAssetPath {
-		rewrittenContent = strings.ReplaceAll(rewrittenContent, sourcePath, localAssetPath)
-		rewrittenContent = strings.ReplaceAll(rewrittenContent, "./"+sourcePath, localAssetPath)
-		rewrittenContent = strings.ReplaceAll(rewrittenContent, path.Base(sourcePath), localAssetPath)
+}
+
+func (spider *pageSpider) fetchHTML(rawURL string) (*mirroredResource, error) {
+	return spider.fetchResource(rawURL, spider.pageURL, 0, false)
+}
+
+func (spider *pageSpider) fetchResource(rawURL string, baseURL *url.URL, depth int, persist bool) (*mirroredResource, error) {
+	if depth > spider.maxDepth {
+		return nil, errors.New("max depth reached")
 	}
-	return []byte(rewrittenContent)
+	normalizedURL, blocked := spider.normalizeURL(rawURL, baseURL)
+	if blocked || normalizedURL == "" {
+		return nil, errors.New("unsupported resource url")
+	}
+	if existing, found := spider.resources[normalizedURL]; found {
+		if persist {
+			existing.persist = true
+		}
+		return existing, nil
+	}
+	if spider.inFlight[normalizedURL] {
+		return nil, errors.New("resource is already in flight")
+	}
+	spider.inFlight[normalizedURL] = true
+	defer delete(spider.inFlight, normalizedURL)
+	request, _ := http.NewRequest(http.MethodGet, normalizedURL, nil)
+	response, err := spider.client.Do(request)
+	if err != nil {
+		return nil, err
+	}
+	defer response.Body.Close()
+	if response.StatusCode >= 400 {
+		return nil, fmt.Errorf("resource download failed: %s", response.Status)
+	}
+	body, err := io.ReadAll(response.Body)
+	if err != nil {
+		return nil, err
+	}
+	resource := &mirroredResource{url: normalizedURL, content: body, persist: persist}
+	if persist {
+		assetPath := spider.assetPathFor(body, normalizedURL)
+		if assetPath != "" {
+			resource.assetPath = assetPath
+		}
+	}
+	spider.resources[normalizedURL] = resource
+	spider.rewriteNestedResources(resource, depth+1, response.Header.Get("Content-Type"))
+	return resource, nil
+}
+
+func (spider *pageSpider) rewriteNestedResources(resource *mirroredResource, depth int, contentType string) {
+	isHTML := strings.Contains(contentType, "text/html")
+	isCSS := strings.Contains(contentType, "text/css")
+	isJS := strings.Contains(contentType, "javascript") || strings.HasSuffix(strings.ToLower(resource.url), ".js") || strings.HasSuffix(strings.ToLower(resource.url), ".mjs")
+	if !(isHTML || isCSS || isJS) {
+		return
+	}
+	source := string(resource.content)
+	rewritten := spider.rewriteTextReferences(source, resource.url, depth)
+	resource.content = []byte(rewritten)
+}
+
+func (spider *pageSpider) rewriteHTMLWithAssets(html []byte) string {
+	return spider.rewriteTextReferences(string(html), spider.pageURL.String(), 0)
+}
+
+func (spider *pageSpider) rewriteTextReferences(source, baseRawURL string, depth int) string {
+	baseURL, _ := url.Parse(baseRawURL)
+	rewriteSingle := func(rawRef string) string {
+		dependency, err := spider.fetchResource(rawRef, baseURL, depth, true)
+		if err != nil || dependency == nil || dependency.assetPath == "" {
+			return rawRef
+		}
+		return dependency.assetPath
+	}
+	rewritten := htmlResourcePattern.ReplaceAllStringFunc(source, func(match string) string {
+		parts := htmlResourcePattern.FindStringSubmatch(match)
+		if len(parts) != 4 {
+			return match
+		}
+		return strings.Replace(match, parts[3], rewriteSingle(parts[3]), 1)
+	})
+	rewritten = htmlSrcSetPattern.ReplaceAllStringFunc(rewritten, func(match string) string {
+		parts := htmlSrcSetPattern.FindStringSubmatch(match)
+		if len(parts) != 2 {
+			return match
+		}
+		candidates := strings.Split(parts[1], ",")
+		for index, candidate := range candidates {
+			fields := strings.Fields(strings.TrimSpace(candidate))
+			if len(fields) == 0 {
+				continue
+			}
+			fields[0] = rewriteSingle(fields[0])
+			candidates[index] = strings.Join(fields, " ")
+		}
+		return strings.Replace(match, parts[1], strings.Join(candidates, ", "), 1)
+	})
+	rewritten = cssURLPattern.ReplaceAllStringFunc(rewritten, func(match string) string {
+		parts := cssURLPattern.FindStringSubmatch(match)
+		if len(parts) != 2 {
+			return match
+		}
+		return strings.Replace(match, parts[1], rewriteSingle(parts[1]), 1)
+	})
+	rewritten = cssImportPattern.ReplaceAllStringFunc(rewritten, func(match string) string {
+		parts := cssImportPattern.FindStringSubmatch(match)
+		if len(parts) != 2 {
+			return match
+		}
+		return strings.Replace(match, parts[1], rewriteSingle(parts[1]), 1)
+	})
+	return rewritten
+}
+
+func (spider *pageSpider) normalizeURL(rawRef string, baseURL *url.URL) (string, bool) {
+	trimmedRef := strings.TrimSpace(rawRef)
+	if trimmedRef == "" || strings.HasPrefix(trimmedRef, "#") {
+		return "", true
+	}
+	loweredRef := strings.ToLower(trimmedRef)
+	for _, blockedPrefix := range []string{"mailto:", "tel:", "javascript:", "data:", "blob:"} {
+		if strings.HasPrefix(loweredRef, blockedPrefix) {
+			return "", true
+		}
+	}
+	parsedRef, err := url.Parse(trimmedRef)
+	if err != nil {
+		return "", true
+	}
+	resolved := baseURL.ResolveReference(parsedRef)
+	if resolved == nil || resolved.Scheme == "" {
+		return "", true
+	}
+	host := strings.ToLower(resolved.Hostname())
+	if _, allowed := spider.allowedHosts[host]; !allowed {
+		return "", true
+	}
+	return resolved.String(), false
+}
+
+func (spider *pageSpider) assetPathFor(fileBytes []byte, sourceURL string) string {
+	extension := strings.ToLower(path.Ext(sourceURL))
+	if extension == "" {
+		extension = ".bin"
+	}
+	hashedFileName, err := contentHashName(fileBytes, extension)
+	if err != nil {
+		return ""
+	}
+	return "/assets/" + domainStorageName(spider.domain) + "/p/" + hashedFileName
 }
 
 func domainFromRequest(r *http.Request) string {
@@ -1972,23 +2109,4 @@ func domainStorageName(domain string) string {
 
 func (a *App) domainFilesDir(r *http.Request) string {
 	return filepath.Join("storage/files", domainStorageName(a.siteDomain(r.Context(), r)))
-}
-
-func rewriteMirroredLinks(sourceHTML string, localFileToAssetPath map[string]string) string {
-	referencePattern := regexp.MustCompile(`(["'\(])(?!https?:|data:|javascript:|#)([^"'\)]+)(["'\)])`)
-	return referencePattern.ReplaceAllStringFunc(sourceHTML, func(fragment string) string {
-		parts := referencePattern.FindStringSubmatch(fragment)
-		if len(parts) != 4 {
-			return fragment
-		}
-		relativeReference := strings.TrimPrefix(parts[2], "./")
-		if assetPath, exists := localFileToAssetPath[relativeReference]; exists {
-			return parts[1] + assetPath + parts[3]
-		}
-		fileNameReference := path.Base(relativeReference)
-		if assetPath, exists := localFileToAssetPath[fileNameReference]; exists {
-			return parts[1] + assetPath + parts[3]
-		}
-		return fragment
-	})
 }
