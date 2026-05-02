@@ -35,7 +35,7 @@ import (
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
-	"goup/pkg/desktop"
+	"sitebrush/pkg/desktop"
 )
 
 //go:embed web/*
