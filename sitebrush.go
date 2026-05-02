@@ -2,8 +2,10 @@ package main
 
 import (
 	"archive/zip"
+	"bufio"
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/sha1"
 	"crypto/sha256"
 	"database/sql"
@@ -98,7 +100,14 @@ type Revision struct {
 type ManagedFile struct {
 	Name          string
 	Size          int64
+	SizeLabel     string
 	AssetPath     string
+	PagePath      string
+	MimeType      string
+	Extension     string
+	CreatedAt     string
+	CreatedUnix   int64
+	IsImage       bool
 	AccessMode    string
 	Token         string
 	ExpiresAt     string
@@ -112,6 +121,13 @@ type ManagedFileAccess struct {
 	SingleUseLeft int
 }
 
+type fileMetadata struct {
+	PagePath  string
+	Size      int64
+	MimeType  string
+	CreatedAt string
+}
+
 type statusCapturingResponseWriter struct {
 	http.ResponseWriter
 	statusCode int
@@ -120,6 +136,14 @@ type statusCapturingResponseWriter struct {
 func (writer *statusCapturingResponseWriter) WriteHeader(statusCode int) {
 	writer.statusCode = statusCode
 	writer.ResponseWriter.WriteHeader(statusCode)
+}
+
+func (writer *statusCapturingResponseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	hijacker, ok := writer.ResponseWriter.(http.Hijacker)
+	if !ok {
+		return nil, nil, errors.New("hijack is not supported")
+	}
+	return hijacker.Hijack()
 }
 
 func accessLogMiddleware(next http.Handler) http.Handler {
@@ -296,6 +320,7 @@ func (a *App) migrate(ctx context.Context) error {
 		`CREATE TABLE IF NOT EXISTS domain_aliases(primary_domain TEXT,alias_domain TEXT UNIQUE);`,
 		`CREATE TABLE IF NOT EXISTS domain_states(domain TEXT PRIMARY KEY,is_frozen INTEGER DEFAULT 0);`,
 		`CREATE TABLE IF NOT EXISTS file_access_rules(domain TEXT,file_name TEXT,access_mode TEXT,token TEXT,expires_at TEXT,single_use_left INTEGER DEFAULT 0,PRIMARY KEY(domain,file_name));`,
+		`CREATE TABLE IF NOT EXISTS file_metadata(domain TEXT,file_name TEXT,page_path TEXT,size INTEGER,mime_type TEXT,created_at TEXT,updated_at TEXT,source TEXT,PRIMARY KEY(domain,file_name));`,
 	}
 	for _, query := range queries {
 		if _, err := a.db.ExecContext(ctx, query); err != nil {
@@ -324,6 +349,10 @@ func (a *App) migrate(ctx context.Context) error {
 
 func (a *App) route(w http.ResponseWriter, r *http.Request) {
 	pagePath := r.URL.Path
+	if a.isDomainPrefixedPublicAssetPath(r) {
+		a.servePublicAsset(w, r)
+		return
+	}
 	if hasQueryFlag(r, "tree") {
 		a.siteTreeJSON(w, r)
 		return
@@ -718,7 +747,7 @@ func (a *App) grabPage(w http.ResponseWriter, r *http.Request) {
 	domain := a.siteDomain(r.Context(), r)
 	progressToken := strings.TrimSpace(r.FormValue("progress_token"))
 	selectedResourceURLs := selectedGrabResourceURLs(r)
-	html := a.mirrorRemotePage(domain, sourceURL, remoteSourceURL, string(htmlBytes), progressToken, selectedResourceURLs)
+	html := a.mirrorRemotePage(domain, pagePath, sourceURL, remoteSourceURL, string(htmlBytes), progressToken, selectedResourceURLs)
 	_, _ = a.db.ExecContext(r.Context(), `INSERT OR REPLACE INTO pages(domain,path,title,html,published) VALUES(?,?,?,?,1)`, domain, pagePath, pagePath, html)
 	if !a.isDomainFrozen(r.Context(), domain) {
 		_, _ = a.db.ExecContext(r.Context(), `INSERT OR REPLACE INTO published_pages(domain,path,title,html) VALUES(?,?,?,?)`, domain, pagePath, pagePath, html)
@@ -1075,64 +1104,61 @@ func (a *App) filesPage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
+	currentPath := currentFilesPath(r)
 	if r.Method == http.MethodPost {
 		fileName := safeRelativeAssetPath(r.FormValue("name"))
 		action := r.FormValue("action")
+		if action == "upload" {
+			a.uploadFiles(w, r, currentPath)
+			return
+		}
 		if action == "save_access" && fileName != "" {
 			a.saveFileAccessRule(r.Context(), r, fileName)
 		} else if fileName != "" {
 			_ = os.Remove(filepath.Join(a.domainFilesDir(r), fileName))
 			_, _ = a.db.ExecContext(r.Context(), `DELETE FROM file_access_rules WHERE domain=? AND file_name=?`, domainStorageName(a.siteDomain(r.Context(), r)), fileName)
-		}
-		currentPath := r.URL.Query().Get("path")
-		if currentPath == "" {
-			currentPath = "/"
+			_, _ = a.db.ExecContext(r.Context(), `DELETE FROM file_metadata WHERE domain=? AND file_name=?`, domainStorageName(a.siteDomain(r.Context(), r)), fileName)
 		}
 		http.Redirect(w, r, currentPath+"?files", http.StatusFound)
 		return
 	}
-	fileList, listErr := a.listManagedFiles(r.Context(), r)
+	fileList, listErr := a.listManagedFiles(r.Context(), r, currentPath)
 	if listErr != nil {
-		a.render(w, r, "files.html", map[string]any{"Path": r.URL.Query().Get("path"), "Files": []ManagedFile{}})
+		a.render(w, r, "files.html", map[string]any{"Path": currentPath, "Files": []ManagedFile{}})
 		return
 	}
 	for index := range fileList {
 		accessRule := a.fileAccessRule(r.Context(), r, fileList[index].Name)
-		fileList[index].AssetPath = "/" + fileList[index].Name
+		fileList[index].AssetPath = "/p/" + fileList[index].Name
 		fileList[index].AccessMode = accessRule.AccessMode
 		fileList[index].Token = accessRule.Token
 		fileList[index].ExpiresAt = accessRule.ExpiresAt
 		fileList[index].SingleUseLeft = accessRule.SingleUseLeft
 	}
-	currentPath := r.URL.Query().Get("path")
-	if currentPath == "" {
-		currentPath = r.URL.Path
-	}
-	if currentPath == "" {
-		currentPath = "/"
-	}
 	a.render(w, r, "files.html", map[string]any{"Path": currentPath, "Files": fileList})
 }
 
 func (a *App) servePublicAsset(w http.ResponseWriter, r *http.Request) {
-	fileName := safeRelativeAssetPath(strings.TrimPrefix(path.Clean(r.URL.Path), "/"))
+	fileName := publicAssetFileNameFromPath(r.URL.Path, a.siteDomain(r.Context(), r))
 	if fileName == "" {
 		http.NotFound(w, r)
 		return
 	}
 	domain := domainStorageName(a.siteDomain(r.Context(), r))
-	r.URL.Path = "/" + domain + "/" + fileName
-	a.serveAsset(w, r)
+	a.serveAssetFile(w, r, domain, fileName)
 }
 
-func (a *App) listManagedFiles(ctx context.Context, r *http.Request) ([]ManagedFile, error) {
+func (a *App) listManagedFiles(ctx context.Context, r *http.Request, currentPath string) ([]ManagedFile, error) {
 	fileList := make([]ManagedFile, 0, 32)
 	rootPath := a.domainFilesDir(r)
-	walkErr := filepath.WalkDir(rootPath, func(currentPath string, currentEntry fs.DirEntry, entryErr error) error {
+	domain := domainStorageName(a.siteDomain(ctx, r))
+	metadata := a.fileMetadataByName(ctx, domain)
+	currentPath = cleanPath(currentPath)
+	walkErr := filepath.WalkDir(rootPath, func(filePath string, currentEntry fs.DirEntry, entryErr error) error {
 		if entryErr != nil || currentEntry.IsDir() {
 			return nil
 		}
-		relativePath, relErr := filepath.Rel(rootPath, currentPath)
+		relativePath, relErr := filepath.Rel(rootPath, filePath)
 		if relErr != nil {
 			return nil
 		}
@@ -1144,13 +1170,220 @@ func (a *App) listManagedFiles(ctx context.Context, r *http.Request) ([]ManagedF
 		if statErr != nil {
 			return nil
 		}
-		fileList = append(fileList, ManagedFile{Name: normalizedPath, Size: fileInfo.Size()})
+		meta := metadata[normalizedPath]
+		if meta.PagePath == "" && currentPath != "/" {
+			return nil
+		}
+		if meta.PagePath != "" && !filePathBelongsToBranch(meta.PagePath, currentPath) {
+			return nil
+		}
+		size := fileInfo.Size()
+		if meta.Size > 0 {
+			size = meta.Size
+		}
+		createdUnix := fileInfo.ModTime().Unix()
+		createdAt := fileInfo.ModTime().Format("2006-01-02 15:04")
+		if meta.CreatedAt != "" {
+			if parsedTime, parseErr := time.Parse(time.RFC3339, meta.CreatedAt); parseErr == nil {
+				createdUnix = parsedTime.Unix()
+				createdAt = parsedTime.Local().Format("2006-01-02 15:04")
+			}
+		}
+		mimeType := meta.MimeType
+		if mimeType == "" {
+			mimeType = mime.TypeByExtension(path.Ext(normalizedPath))
+		}
+		fileList = append(fileList, ManagedFile{
+			Name:        normalizedPath,
+			Size:        size,
+			SizeLabel:   formatFileSize(size),
+			PagePath:    meta.PagePath,
+			MimeType:    mimeType,
+			Extension:   fileExtensionLabel(normalizedPath),
+			CreatedAt:   createdAt,
+			CreatedUnix: createdUnix,
+			IsImage:     isImageFile(normalizedPath, mimeType),
+		})
 		return nil
 	})
 	if walkErr != nil {
 		return nil, walkErr
 	}
+	sort.Slice(fileList, func(leftIndex, rightIndex int) bool {
+		return fileList[leftIndex].CreatedUnix > fileList[rightIndex].CreatedUnix
+	})
 	return fileList, nil
+}
+
+func (a *App) uploadFiles(w http.ResponseWriter, r *http.Request, currentPath string) {
+	if err := r.ParseMultipartForm(128 << 20); err != nil {
+		http.Error(w, "failed to parse uploaded files", http.StatusBadRequest)
+		return
+	}
+	if r.MultipartForm == nil || len(r.MultipartForm.File["upload_files"]) == 0 {
+		http.Error(w, "no files selected", http.StatusBadRequest)
+		return
+	}
+
+	domain := domainStorageName(a.siteDomain(r.Context(), r))
+	baseDir := a.domainFilesDir(r)
+	if err := os.MkdirAll(baseDir, 0o755); err != nil {
+		http.Error(w, "failed to create files directory", http.StatusInternalServerError)
+		return
+	}
+
+	uploadedCount := 0
+	for _, fileHeader := range r.MultipartForm.File["upload_files"] {
+		fileName := safeFileName(fileHeader.Filename)
+		if fileName == "" {
+			continue
+		}
+		sourceFile, openErr := fileHeader.Open()
+		if openErr != nil {
+			continue
+		}
+
+		storedName := uniqueUploadedFileName(baseDir, fileName)
+		targetPath := filepath.Join(baseDir, storedName)
+		targetFile, createErr := os.Create(targetPath)
+		if createErr != nil {
+			_ = sourceFile.Close()
+			continue
+		}
+		writtenBytes, copyErr := io.Copy(targetFile, sourceFile)
+		closeErr := targetFile.Close()
+		_ = sourceFile.Close()
+		if copyErr != nil || closeErr != nil {
+			_ = os.Remove(targetPath)
+			continue
+		}
+
+		mimeType := strings.TrimSpace(fileHeader.Header.Get("Content-Type"))
+		if mimeType == "" {
+			mimeType = mime.TypeByExtension(path.Ext(storedName))
+		}
+		a.upsertFileMetadata(r.Context(), domain, storedName, currentPath, writtenBytes, mimeType, "upload")
+		uploadedCount++
+	}
+
+	if wantsJSONResponse(r) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"uploaded": uploadedCount, "redirect": currentPath + "?files"})
+		return
+	}
+	http.Redirect(w, r, currentPath+"?files", http.StatusFound)
+}
+
+func uniqueUploadedFileName(baseDir, requestedName string) string {
+	candidate := requestedName
+	extension := path.Ext(requestedName)
+	stem := strings.TrimSuffix(requestedName, extension)
+	for index := 1; ; index++ {
+		if _, err := os.Stat(filepath.Join(baseDir, candidate)); os.IsNotExist(err) {
+			return candidate
+		}
+		candidate = fmt.Sprintf("%s-%d%s", stem, index, extension)
+	}
+}
+
+func currentFilesPath(r *http.Request) string {
+	currentPath := strings.TrimSpace(r.URL.Query().Get("path"))
+	if currentPath == "" {
+		currentPath = r.URL.Path
+	}
+	return cleanPath(currentPath)
+}
+
+func (a *App) fileMetadataByName(ctx context.Context, domain string) map[string]fileMetadata {
+	metadataByName := make(map[string]fileMetadata)
+	if a == nil || a.db == nil {
+		return metadataByName
+	}
+	rows, err := a.db.QueryContext(ctx, `SELECT file_name,page_path,size,mime_type,created_at FROM file_metadata WHERE domain=?`, domain)
+	if err != nil {
+		return metadataByName
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var name string
+		var meta fileMetadata
+		if scanErr := rows.Scan(&name, &meta.PagePath, &meta.Size, &meta.MimeType, &meta.CreatedAt); scanErr != nil {
+			continue
+		}
+		if safeRelativeAssetPath(name) == "" {
+			continue
+		}
+		meta.PagePath = cleanPath(meta.PagePath)
+		metadataByName[name] = meta
+	}
+	return metadataByName
+}
+
+func (a *App) upsertFileMetadata(ctx context.Context, domain, fileName, pagePath string, size int64, mimeType, source string) {
+	if a == nil || a.db == nil {
+		return
+	}
+	if safeRelativeAssetPath(fileName) == "" {
+		return
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	_, _ = a.db.ExecContext(ctx, `INSERT INTO file_metadata(domain,file_name,page_path,size,mime_type,created_at,updated_at,source)
+VALUES(?,?,?,?,?,?,?,?)
+ON CONFLICT(domain,file_name) DO UPDATE SET page_path=excluded.page_path,size=excluded.size,mime_type=excluded.mime_type,updated_at=excluded.updated_at,source=excluded.source`,
+		domain, fileName, cleanPath(pagePath), size, mimeType, now, now, source)
+}
+
+func filePathBelongsToBranch(filePagePath, currentPath string) bool {
+	filePagePath = cleanPath(filePagePath)
+	currentPath = cleanPath(currentPath)
+	if currentPath == "/" {
+		return true
+	}
+	return filePagePath == currentPath || strings.HasPrefix(filePagePath, currentPath+"/")
+}
+
+func isImageFile(fileName, mimeType string) bool {
+	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(mimeType)), "image/") {
+		return true
+	}
+	switch strings.ToLower(path.Ext(fileName)) {
+	case ".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".ico", ".bmp":
+		return true
+	default:
+		return false
+	}
+}
+
+func formatFileSize(size int64) string {
+	if size < 1024 {
+		return fmt.Sprintf("%d B", size)
+	}
+	if size < 1024*1024 {
+		return fmt.Sprintf("%.1f KB", float64(size)/1024)
+	}
+	if size < 1024*1024*1024 {
+		return fmt.Sprintf("%.1f MB", float64(size)/(1024*1024))
+	}
+	return fmt.Sprintf("%.1f GB", float64(size)/(1024*1024*1024))
+}
+
+func fileExtensionLabel(fileName string) string {
+	extension := strings.TrimPrefix(strings.ToUpper(path.Ext(fileName)), ".")
+	if extension == "" {
+		return "FILE"
+	}
+	if len(extension) > 6 {
+		return extension[:6]
+	}
+	return extension
+}
+
+func randomAccessToken() string {
+	var tokenBytes [18]byte
+	if _, err := rand.Read(tokenBytes[:]); err != nil {
+		return fmt.Sprintf("%x", sha256.Sum256([]byte(time.Now().String())))[:24]
+	}
+	return base64.RawURLEncoding.EncodeToString(tokenBytes[:])
 }
 
 func (a *App) fileAccessRule(ctx context.Context, r *http.Request, fileName string) ManagedFileAccess {
@@ -1168,6 +1401,9 @@ func (a *App) saveFileAccessRule(ctx context.Context, r *http.Request, fileName 
 		accessMode = "public"
 	}
 	token := strings.TrimSpace(r.FormValue("access_token"))
+	if accessMode == "token" && token == "" {
+		token = randomAccessToken()
+	}
 	accessDaysValue := strings.TrimSpace(r.FormValue("access_days"))
 	days, _ := strconv.Atoi(accessDaysValue)
 	if days < 0 {
@@ -1209,6 +1445,10 @@ func (a *App) serveAsset(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
+	a.serveAssetFile(w, r, domain, fileName)
+}
+
+func (a *App) serveAssetFile(w http.ResponseWriter, r *http.Request, domain, fileName string) {
 	rule := ManagedFileAccess{AccessMode: "public"}
 	_ = a.db.QueryRowContext(r.Context(), `SELECT access_mode,token,expires_at,single_use_left FROM file_access_rules WHERE domain=? AND file_name=?`, domain, fileName).Scan(&rule.AccessMode, &rule.Token, &rule.ExpiresAt, &rule.SingleUseLeft)
 	if strings.TrimSpace(rule.AccessMode) == "token" {
@@ -1224,13 +1464,34 @@ func (a *App) serveAsset(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
-		if rule.SingleUseLeft <= 0 {
-			http.Error(w, "token quota exhausted", http.StatusForbidden)
-			return
+		if rule.SingleUseLeft > 0 {
+			_, _ = a.db.ExecContext(r.Context(), `UPDATE file_access_rules SET single_use_left=single_use_left-1 WHERE domain=? AND file_name=? AND single_use_left>0`, domain, fileName)
 		}
-		_, _ = a.db.ExecContext(r.Context(), `UPDATE file_access_rules SET single_use_left=single_use_left-1 WHERE domain=? AND file_name=? AND single_use_left>0`, domain, fileName)
 	}
-	http.StripPrefix("/assets/", http.FileServer(http.Dir(a.filesRootDir()))).ServeHTTP(w, r)
+	filePath := filepath.Join(a.filesRootDir(), domain, filepath.FromSlash(fileName))
+	if _, err := os.Stat(filePath); err != nil && !strings.HasPrefix(fileName, "p/") {
+		legacyPath := filepath.Join(a.filesRootDir(), domain, "p", filepath.FromSlash(fileName))
+		if _, legacyErr := os.Stat(legacyPath); legacyErr == nil {
+			filePath = legacyPath
+		}
+	}
+	http.ServeFile(w, r, filePath)
+}
+
+func publicAssetFileNameFromPath(requestPath, domain string) string {
+	cleanedPath := path.Clean("/" + strings.TrimSpace(requestPath))
+	if strings.HasPrefix(cleanedPath, "/p/") {
+		return safeRelativeAssetPath(strings.TrimPrefix(cleanedPath, "/p/"))
+	}
+	domainPrefix := "/" + domainStorageName(domain) + "/p/"
+	if strings.HasPrefix(cleanedPath, domainPrefix) {
+		return safeRelativeAssetPath(strings.TrimPrefix(cleanedPath, domainPrefix))
+	}
+	return ""
+}
+
+func (a *App) isDomainPrefixedPublicAssetPath(r *http.Request) bool {
+	return publicAssetFileNameFromPath(r.URL.Path, a.siteDomain(r.Context(), r)) != "" && !strings.HasPrefix(path.Clean(r.URL.Path), "/p/")
 }
 
 func (a *App) findPage(ctx context.Context, domain, pagePath string) (Page, error) {
@@ -1926,29 +2187,40 @@ func resourceExtension(rawRef string) string {
 	return strings.ToLower(path.Ext(withoutQuery))
 }
 
-func (a *App) mirrorRemotePage(domain, sourceURL string, pageURL *url.URL, fallbackHTML, progressToken string, selectedResourceURLs map[string]struct{}) string {
+func (a *App) mirrorRemotePage(domain, pagePath, sourceURL string, pageURL *url.URL, fallbackHTML, progressToken string, selectedResourceURLs map[string]struct{}) string {
 	spider := newPageSpider(domain, pageURL, grabResourceMaxDepth, a.grabTracker, progressToken)
 	spider.selectedResourceURLs = selectedResourceURLs
 	rootResource := &mirroredResource{url: sourceURL, content: []byte(fallbackHTML)}
 	spider.resources[sourceURL] = rootResource
 	spider.rewriteNestedResources(rootResource, 0, "text/html")
 	spider.fetchSelectedResources()
-	_ = a.persistSpiderAssets(spider)
+	_ = a.persistSpiderAssets(spider, pagePath)
 	a.grabTracker.publish(grabProgressEvent{Token: progressToken, Stage: "done", FoundTotal: spider.foundTotal, DownloadedTotal: spider.downloadedTotal, CompletedPercent: 100})
 	return string(rootResource.content)
 }
 
-func (a *App) persistSpiderAssets(spider *pageSpider) error {
+func (a *App) persistSpiderAssets(spider *pageSpider, pagePath string) error {
 	baseDir := a.domainFilesDirForDomain(spider.domain)
 	_ = os.MkdirAll(baseDir, 0o755)
+	ownerPath := cleanPath(pagePath)
 	for _, resource := range spider.resources {
 		if !resource.persist || strings.TrimSpace(resource.assetPath) == "" {
 			continue
 		}
-		assetReference := strings.TrimPrefix(resource.assetPath, "/assets/"+domainStorageName(spider.domain)+"/")
+		assetReference := resource.assetPath
+		if strings.HasPrefix(assetReference, "/p/") {
+			assetReference = strings.TrimPrefix(assetReference, "/p/")
+		} else {
+			assetReference = strings.TrimPrefix(assetReference, "/assets/"+domainStorageName(spider.domain)+"/")
+		}
+		assetReference = safeRelativeAssetPath(assetReference)
+		if assetReference == "" {
+			continue
+		}
 		targetFilePath := filepath.Join(baseDir, filepath.FromSlash(assetReference))
 		_ = os.MkdirAll(filepath.Dir(targetFilePath), 0o755)
 		_ = os.WriteFile(targetFilePath, resource.content, 0o644)
+		a.upsertFileMetadata(context.Background(), domainStorageName(spider.domain), assetReference, ownerPath, int64(len(resource.content)), mime.TypeByExtension(path.Ext(assetReference)), "import")
 	}
 	return nil
 }
