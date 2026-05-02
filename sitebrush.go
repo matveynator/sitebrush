@@ -3,9 +3,12 @@ package main
 import (
 	"archive/zip"
 	"context"
+	"crypto/sha1"
 	"crypto/sha256"
 	"database/sql"
 	"embed"
+	"encoding/base64"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -15,11 +18,11 @@ import (
 	"io"
 	"io/fs"
 	"log"
+	"net"
 	"net/http"
 	"net/smtp"
 	"net/url"
 	"os"
-	"os/exec"
 	"path"
 	"path/filepath"
 	"reflect"
@@ -40,7 +43,18 @@ const appVersion = "dev"
 
 // App keeps only explicit dependencies to stay readable and easy to swap.
 type App struct {
-	db *sql.DB
+	db          *sql.DB
+	grabTracker *grabProgressTracker
+}
+
+type grabProgressEvent struct {
+	Token            string `json:"token"`
+	Stage            string `json:"stage"`
+	FoundTotal       int    `json:"found_total"`
+	DownloadedTotal  int    `json:"downloaded_total"`
+	CurrentURL       string `json:"current_url"`
+	CurrentPercent   int    `json:"current_percent"`
+	CompletedPercent int    `json:"completed_percent"`
 }
 
 type Page struct {
@@ -121,7 +135,7 @@ func accessLogMiddleware(next http.Handler) http.Handler {
 }
 
 func isLikelyStaticAssetPath(requestPath string) bool {
-	if strings.HasPrefix(requestPath, "/p/static/") || strings.HasPrefix(requestPath, "/assets/") {
+	if strings.HasPrefix(requestPath, "/p/static/") || strings.HasPrefix(requestPath, "/p/") || strings.HasPrefix(requestPath, "/assets/") {
 		return true
 	}
 	fileExtension := strings.ToLower(path.Ext(requestPath))
@@ -154,7 +168,7 @@ func main() {
 	}
 	defer database.Close()
 
-	application := &App{db: database}
+	application := &App{db: database, grabTracker: newGrabProgressTracker()}
 	if err = application.migrate(context.Background()); err != nil {
 		log.Fatal(err)
 	}
@@ -165,6 +179,7 @@ func main() {
 		log.Fatal(err)
 	}
 	router.Handle("/p/static/", http.StripPrefix("/p/static/", http.FileServer(http.FS(staticFiles))))
+	router.HandleFunc("/p/", application.servePublicAsset)
 	router.HandleFunc("/assets/", application.serveAsset)
 	router.HandleFunc("/setup", application.setupAdmin)
 	router.HandleFunc("/login", application.login)
@@ -173,6 +188,7 @@ func main() {
 	router.HandleFunc("/edit/raw", application.editRawPage)
 	router.HandleFunc("/edit/mode", application.editModePage)
 	router.HandleFunc("/grab", application.grabPage)
+	router.HandleFunc("/grab/ws", application.grabProgressWS)
 	router.HandleFunc("/files", application.filesPage)
 	router.HandleFunc("/save", application.savePage)
 	router.HandleFunc("/domain/settings", application.domainSettingsPage)
@@ -623,13 +639,49 @@ func (a *App) grabPage(w http.ResponseWriter, r *http.Request) {
 	}
 
 	domain := a.siteDomain(r.Context(), r)
-	html := a.mirrorRemotePage(domain, sourceURL, remoteSourceURL, string(htmlBytes))
+	progressToken := strings.TrimSpace(r.FormValue("progress_token"))
+	html := a.mirrorRemotePage(domain, sourceURL, remoteSourceURL, string(htmlBytes), progressToken)
 	_, _ = a.db.ExecContext(r.Context(), `INSERT OR REPLACE INTO pages(domain,path,title,html,published) VALUES(?,?,?,?,1)`, domain, pagePath, pagePath, html)
 	if !a.isDomainFrozen(r.Context(), domain) {
 		_, _ = a.db.ExecContext(r.Context(), `INSERT OR REPLACE INTO published_pages(domain,path,title,html) VALUES(?,?,?,?)`, domain, pagePath, pagePath, html)
 	}
 	_, _ = a.db.ExecContext(r.Context(), `INSERT INTO revisions(domain,page_path,html,created_at) VALUES(?,?,?,?)`, domain, pagePath, html, time.Now().Format(time.RFC3339))
 	http.Redirect(w, r, pagePath+"?edit", http.StatusFound)
+}
+
+func (a *App) grabProgressWS(w http.ResponseWriter, r *http.Request) {
+	if !a.isAdminRequest(r) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	progressToken := strings.TrimSpace(r.URL.Query().Get("token"))
+	if progressToken == "" {
+		http.Error(w, "token is required", http.StatusBadRequest)
+		return
+	}
+	connection, err := upgradeToWebSocket(w, r)
+	if err != nil {
+		return
+	}
+	defer connection.Close()
+	events := a.grabTracker.subscribe(progressToken)
+	defer a.grabTracker.unsubscribe(progressToken, events)
+	for {
+		event, isOpen := <-events
+		if !isOpen {
+			return
+		}
+		eventJSON, marshalErr := json.Marshal(event)
+		if marshalErr != nil {
+			return
+		}
+		if err := connection.WriteText(eventJSON); err != nil {
+			return
+		}
+		if event.Stage == "done" || event.Stage == "error" {
+			return
+		}
+	}
 }
 
 func (a *App) revisionsPage(w http.ResponseWriter, r *http.Request) {
@@ -784,7 +836,7 @@ func (a *App) filesPage(w http.ResponseWriter, r *http.Request) {
 	}
 	for index := range fileList {
 		accessRule := a.fileAccessRule(r.Context(), r, fileList[index].Name)
-		fileList[index].AssetPath = "/assets/" + domainStorageName(a.siteDomain(r.Context(), r)) + "/" + fileList[index].Name
+		fileList[index].AssetPath = "/" + fileList[index].Name
 		fileList[index].AccessMode = accessRule.AccessMode
 		fileList[index].Token = accessRule.Token
 		fileList[index].ExpiresAt = accessRule.ExpiresAt
@@ -798,6 +850,17 @@ func (a *App) filesPage(w http.ResponseWriter, r *http.Request) {
 		currentPath = "/"
 	}
 	a.render(w, r, "files.html", map[string]any{"Path": currentPath, "Files": fileList})
+}
+
+func (a *App) servePublicAsset(w http.ResponseWriter, r *http.Request) {
+	fileName := safeRelativeAssetPath(strings.TrimPrefix(path.Clean(r.URL.Path), "/"))
+	if fileName == "" {
+		http.NotFound(w, r)
+		return
+	}
+	domain := domainStorageName(a.siteDomain(r.Context(), r))
+	r.URL.Path = "/" + domain + "/" + fileName
+	a.serveAsset(w, r)
 }
 
 func (a *App) listManagedFiles(ctx context.Context, r *http.Request) ([]ManagedFile, error) {
@@ -1516,79 +1579,347 @@ func contentHashName(fileBytes []byte, extension string) (string, error) {
 	return hex.EncodeToString(hashedBytes[:]) + extension, nil
 }
 
-func (a *App) mirrorRemotePage(domain, sourceURL string, pageURL *url.URL, fallbackHTML string) string {
-	tempDirPath, err := os.MkdirTemp("", "sitebrush-grab-*")
-	if err != nil {
+func (a *App) mirrorRemotePage(domain, sourceURL string, pageURL *url.URL, fallbackHTML, progressToken string) string {
+	spider := newPageSpider(domain, pageURL, 4, a.grabTracker, progressToken)
+	rootResource, err := spider.fetchHTML(sourceURL)
+	if err != nil || rootResource == nil {
+		a.grabTracker.publish(grabProgressEvent{Token: progressToken, Stage: "error"})
 		return fallbackHTML
 	}
-	defer os.RemoveAll(tempDirPath)
-
-	htmlFilePath := filepath.Join(tempDirPath, "page.html")
-	command := exec.Command("wget", "--page-requisites", "--convert-links", "--adjust-extension", "--span-hosts", "--no-parent", "--execute", "robots=off", "-O", htmlFilePath, "-P", tempDirPath, sourceURL)
-	if command.Run() != nil {
-		return fallbackHTML
-	}
-
-	renderedHTMLBytes, err := os.ReadFile(htmlFilePath)
-	if err != nil {
-		return fallbackHTML
-	}
-	renderedHTML := string(renderedHTMLBytes)
-
-	localFileToAssetPath := a.importMirroredFiles(domain, tempDirPath)
-	return rewriteMirroredLinks(renderedHTML, localFileToAssetPath)
+	_ = a.persistSpiderAssets(spider)
+	a.grabTracker.publish(grabProgressEvent{Token: progressToken, Stage: "done", FoundTotal: spider.foundTotal, DownloadedTotal: spider.downloadedTotal, CompletedPercent: 100})
+	return spider.rewriteHTMLWithAssets(rootResource.content)
 }
 
-func (a *App) importMirroredFiles(domain, tempDirPath string) map[string]string {
-	localFileToAssetPath := make(map[string]string)
-	baseDir := filepath.Join("storage/files", domainStorageName(domain))
+func (a *App) persistSpiderAssets(spider *pageSpider) error {
+	baseDir := filepath.Join("storage/files", domainStorageName(spider.domain))
 	_ = os.MkdirAll(baseDir, 0o755)
-	stagedFileByRelativePath := make(map[string][]byte)
-	_ = filepath.Walk(tempDirPath, func(currentPath string, fileInfo os.FileInfo, walkErr error) error {
-		if walkErr != nil || fileInfo.IsDir() || strings.HasSuffix(currentPath, "page.html") {
-			return nil
+	for _, resource := range spider.resources {
+		if !resource.persist || strings.TrimSpace(resource.assetPath) == "" {
+			continue
 		}
-		fileBytes, readErr := os.ReadFile(currentPath)
-		if readErr != nil {
-			return nil
-		}
-		relativePath, _ := filepath.Rel(tempDirPath, currentPath)
-		normalizedRelativePath := filepath.ToSlash(relativePath)
-		fileExtension := strings.ToLower(path.Ext(currentPath))
-		if fileExtension == "" {
-			fileExtension = ".bin"
-		}
-		hashedFileName, err := contentHashName(fileBytes, fileExtension)
-		if err != nil {
-			return nil
-		}
-		localAssetRelativePath := "p/" + hashedFileName
-		localFileToAssetPath[normalizedRelativePath] = "/assets/" + domainStorageName(domain) + "/" + localAssetRelativePath
-		stagedFileByRelativePath[normalizedRelativePath] = fileBytes
-		return nil
-	})
-	for originalRelativePath, originalBytes := range stagedFileByRelativePath {
-		mirroredBytes := rewriteMirroredFileContent(originalRelativePath, originalBytes, localFileToAssetPath)
-		assetReference := strings.TrimPrefix(localFileToAssetPath[originalRelativePath], "/assets/"+domainStorageName(domain)+"/")
+		assetReference := strings.TrimPrefix(resource.assetPath, "/assets/"+domainStorageName(spider.domain)+"/")
 		targetFilePath := filepath.Join(baseDir, filepath.FromSlash(assetReference))
 		_ = os.MkdirAll(filepath.Dir(targetFilePath), 0o755)
-		_ = os.WriteFile(targetFilePath, mirroredBytes, 0o644)
+		_ = os.WriteFile(targetFilePath, resource.content, 0o644)
 	}
-	return localFileToAssetPath
+	return nil
 }
 
-func rewriteMirroredFileContent(relativePath string, sourceBytes []byte, localFileToAssetPath map[string]string) []byte {
-	extension := strings.ToLower(path.Ext(relativePath))
-	if extension != ".css" && extension != ".js" && extension != ".mjs" && extension != ".html" && extension != ".htm" {
-		return sourceBytes
+type mirroredResource struct {
+	url       string
+	content   []byte
+	assetPath string
+	persist   bool
+}
+
+type pageSpider struct {
+	domain          string
+	pageURL         *url.URL
+	maxDepth        int
+	client          *http.Client
+	resources       map[string]*mirroredResource
+	inFlight        map[string]bool
+	allowedHosts    map[string]struct{}
+	tracker         *grabProgressTracker
+	progressToken   string
+	foundTotal      int
+	downloadedTotal int
+}
+
+var (
+	htmlResourcePattern = regexp.MustCompile(`(?is)<(link|script|img|source|video|audio|iframe|embed|object)\b[^>]*(href|src|poster|data)\s*=\s*["']([^"']+)["']`)
+	htmlSrcSetPattern   = regexp.MustCompile(`(?is)\bsrcset\s*=\s*["']([^"']+)["']`)
+	cssURLPattern       = regexp.MustCompile(`(?is)url\(\s*['"]?([^'")]+)['"]?\s*\)`)
+	cssImportPattern    = regexp.MustCompile(`(?is)@import\s+(?:url\()?\s*['"]([^'"]+)['"]`)
+)
+
+func newPageSpider(domain string, pageURL *url.URL, maxDepth int, tracker *grabProgressTracker, progressToken string) *pageSpider {
+	allowedHosts := map[string]struct{}{strings.ToLower(pageURL.Hostname()): {}}
+	return &pageSpider{
+		domain:        domain,
+		pageURL:       pageURL,
+		maxDepth:      maxDepth,
+		client:        &http.Client{Timeout: 20 * time.Second},
+		resources:     make(map[string]*mirroredResource),
+		inFlight:      make(map[string]bool),
+		allowedHosts:  allowedHosts,
+		tracker:       tracker,
+		progressToken: progressToken,
 	}
-	rewrittenContent := string(sourceBytes)
-	for sourcePath, localAssetPath := range localFileToAssetPath {
-		rewrittenContent = strings.ReplaceAll(rewrittenContent, sourcePath, localAssetPath)
-		rewrittenContent = strings.ReplaceAll(rewrittenContent, "./"+sourcePath, localAssetPath)
-		rewrittenContent = strings.ReplaceAll(rewrittenContent, path.Base(sourcePath), localAssetPath)
+}
+
+func (spider *pageSpider) fetchHTML(rawURL string) (*mirroredResource, error) {
+	return spider.fetchResource(rawURL, spider.pageURL, 0, false)
+}
+
+func (spider *pageSpider) fetchResource(rawURL string, baseURL *url.URL, depth int, persist bool) (*mirroredResource, error) {
+	if depth > spider.maxDepth {
+		return nil, errors.New("max depth reached")
 	}
-	return []byte(rewrittenContent)
+	normalizedURL, blocked := spider.normalizeURL(rawURL, baseURL)
+	if blocked || normalizedURL == "" {
+		return nil, errors.New("unsupported resource url")
+	}
+	if existing, found := spider.resources[normalizedURL]; found {
+		if persist {
+			existing.persist = true
+		}
+		return existing, nil
+	}
+	spider.foundTotal++
+	spider.publishProgress("found", normalizedURL, 0)
+	if spider.inFlight[normalizedURL] {
+		return nil, errors.New("resource is already in flight")
+	}
+	spider.inFlight[normalizedURL] = true
+	defer delete(spider.inFlight, normalizedURL)
+	request, _ := http.NewRequest(http.MethodGet, normalizedURL, nil)
+	response, err := spider.client.Do(request)
+	if err != nil {
+		return nil, err
+	}
+	defer response.Body.Close()
+	if response.StatusCode >= 400 {
+		return nil, fmt.Errorf("resource download failed: %s", response.Status)
+	}
+	body, err := io.ReadAll(response.Body)
+	if err != nil {
+		return nil, err
+	}
+	resource := &mirroredResource{url: normalizedURL, content: body, persist: persist}
+	if persist {
+		assetPath := spider.assetPathFor(body, normalizedURL)
+		if assetPath != "" {
+			resource.assetPath = assetPath
+		}
+	}
+	spider.resources[normalizedURL] = resource
+	spider.downloadedTotal++
+	spider.publishProgress("downloaded", normalizedURL, 100)
+	spider.rewriteNestedResources(resource, depth+1, response.Header.Get("Content-Type"))
+	return resource, nil
+}
+
+func (spider *pageSpider) publishProgress(stage, currentURL string, currentPercent int) {
+	if spider.tracker == nil || strings.TrimSpace(spider.progressToken) == "" {
+		return
+	}
+	completedPercent := 0
+	if spider.foundTotal > 0 {
+		completedPercent = spider.downloadedTotal * 100 / spider.foundTotal
+	}
+	spider.tracker.publish(grabProgressEvent{
+		Token: spider.progressToken, Stage: stage, FoundTotal: spider.foundTotal, DownloadedTotal: spider.downloadedTotal,
+		CurrentURL: currentURL, CurrentPercent: currentPercent, CompletedPercent: completedPercent,
+	})
+}
+
+func (spider *pageSpider) rewriteNestedResources(resource *mirroredResource, depth int, contentType string) {
+	isHTML := strings.Contains(contentType, "text/html")
+	isCSS := strings.Contains(contentType, "text/css")
+	isJS := strings.Contains(contentType, "javascript") || strings.HasSuffix(strings.ToLower(resource.url), ".js") || strings.HasSuffix(strings.ToLower(resource.url), ".mjs")
+	if !(isHTML || isCSS || isJS) {
+		return
+	}
+	source := string(resource.content)
+	rewritten := spider.rewriteTextReferences(source, resource.url, depth)
+	resource.content = []byte(rewritten)
+}
+
+func (spider *pageSpider) rewriteHTMLWithAssets(html []byte) string {
+	return spider.rewriteTextReferences(string(html), spider.pageURL.String(), 0)
+}
+
+func (spider *pageSpider) rewriteTextReferences(source, baseRawURL string, depth int) string {
+	baseURL, _ := url.Parse(baseRawURL)
+	rewriteSingle := func(rawRef string) string {
+		dependency, err := spider.fetchResource(rawRef, baseURL, depth, true)
+		if err != nil || dependency == nil || dependency.assetPath == "" {
+			return rawRef
+		}
+		return dependency.assetPath
+	}
+	rewritten := htmlResourcePattern.ReplaceAllStringFunc(source, func(match string) string {
+		parts := htmlResourcePattern.FindStringSubmatch(match)
+		if len(parts) != 4 {
+			return match
+		}
+		return strings.Replace(match, parts[3], rewriteSingle(parts[3]), 1)
+	})
+	rewritten = htmlSrcSetPattern.ReplaceAllStringFunc(rewritten, func(match string) string {
+		parts := htmlSrcSetPattern.FindStringSubmatch(match)
+		if len(parts) != 2 {
+			return match
+		}
+		candidates := strings.Split(parts[1], ",")
+		for index, candidate := range candidates {
+			fields := strings.Fields(strings.TrimSpace(candidate))
+			if len(fields) == 0 {
+				continue
+			}
+			fields[0] = rewriteSingle(fields[0])
+			candidates[index] = strings.Join(fields, " ")
+		}
+		return strings.Replace(match, parts[1], strings.Join(candidates, ", "), 1)
+	})
+	rewritten = cssURLPattern.ReplaceAllStringFunc(rewritten, func(match string) string {
+		parts := cssURLPattern.FindStringSubmatch(match)
+		if len(parts) != 2 {
+			return match
+		}
+		return strings.Replace(match, parts[1], rewriteSingle(parts[1]), 1)
+	})
+	rewritten = cssImportPattern.ReplaceAllStringFunc(rewritten, func(match string) string {
+		parts := cssImportPattern.FindStringSubmatch(match)
+		if len(parts) != 2 {
+			return match
+		}
+		return strings.Replace(match, parts[1], rewriteSingle(parts[1]), 1)
+	})
+	return rewritten
+}
+
+func (spider *pageSpider) normalizeURL(rawRef string, baseURL *url.URL) (string, bool) {
+	trimmedRef := strings.TrimSpace(rawRef)
+	if trimmedRef == "" || strings.HasPrefix(trimmedRef, "#") {
+		return "", true
+	}
+	loweredRef := strings.ToLower(trimmedRef)
+	for _, blockedPrefix := range []string{"mailto:", "tel:", "javascript:", "data:", "blob:"} {
+		if strings.HasPrefix(loweredRef, blockedPrefix) {
+			return "", true
+		}
+	}
+	parsedRef, err := url.Parse(trimmedRef)
+	if err != nil {
+		return "", true
+	}
+	resolved := baseURL.ResolveReference(parsedRef)
+	if resolved == nil || resolved.Scheme == "" {
+		return "", true
+	}
+	host := strings.ToLower(resolved.Hostname())
+	if _, allowed := spider.allowedHosts[host]; !allowed {
+		return "", true
+	}
+	return resolved.String(), false
+}
+
+func (spider *pageSpider) assetPathFor(fileBytes []byte, sourceURL string) string {
+	extension := strings.ToLower(path.Ext(sourceURL))
+	if extension == "" {
+		extension = ".bin"
+	}
+	hashedFileName, err := contentHashName(fileBytes, extension)
+	if err != nil {
+		return ""
+	}
+	return "/p/" + hashedFileName
+}
+
+type grabTrackerRequest struct {
+	action string
+	token  string
+	stream chan grabProgressEvent
+	event  grabProgressEvent
+}
+
+type grabProgressTracker struct {
+	requests chan grabTrackerRequest
+}
+
+type webSocketTextWriter struct {
+	connection net.Conn
+}
+
+func newGrabProgressTracker() *grabProgressTracker {
+	tracker := &grabProgressTracker{requests: make(chan grabTrackerRequest)}
+	go tracker.loop()
+	return tracker
+}
+
+func (tracker *grabProgressTracker) subscribe(token string) chan grabProgressEvent {
+	stream := make(chan grabProgressEvent, 32)
+	tracker.requests <- grabTrackerRequest{action: "subscribe", token: token, stream: stream}
+	return stream
+}
+func (tracker *grabProgressTracker) unsubscribe(token string, stream chan grabProgressEvent) {
+	tracker.requests <- grabTrackerRequest{action: "unsubscribe", token: token, stream: stream}
+}
+func (tracker *grabProgressTracker) publish(event grabProgressEvent) {
+	tracker.requests <- grabTrackerRequest{action: "publish", token: event.Token, event: event}
+}
+func (tracker *grabProgressTracker) loop() {
+	subscribersByToken := make(map[string]map[chan grabProgressEvent]struct{})
+	for request := range tracker.requests {
+		switch request.action {
+		case "subscribe":
+			if _, exists := subscribersByToken[request.token]; !exists {
+				subscribersByToken[request.token] = make(map[chan grabProgressEvent]struct{})
+			}
+			subscribersByToken[request.token][request.stream] = struct{}{}
+		case "unsubscribe":
+			group := subscribersByToken[request.token]
+			delete(group, request.stream)
+			close(request.stream)
+		case "publish":
+			for stream := range subscribersByToken[request.token] {
+				select {
+				case stream <- request.event:
+				default:
+				}
+			}
+		}
+	}
+}
+
+func upgradeToWebSocket(w http.ResponseWriter, r *http.Request) (*webSocketTextWriter, error) {
+	if !strings.EqualFold(r.Header.Get("Connection"), "Upgrade") && !strings.Contains(strings.ToLower(r.Header.Get("Connection")), "upgrade") {
+		return nil, errors.New("missing websocket upgrade")
+	}
+	webSocketKey := strings.TrimSpace(r.Header.Get("Sec-WebSocket-Key"))
+	if webSocketKey == "" {
+		return nil, errors.New("missing websocket key")
+	}
+	acceptSeed := webSocketKey + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+	acceptHash := sha1.Sum([]byte(acceptSeed))
+	acceptValue := base64.StdEncoding.EncodeToString(acceptHash[:])
+	hijacker, isHijacker := w.(http.Hijacker)
+	if !isHijacker {
+		return nil, errors.New("hijack is not supported")
+	}
+	connection, bufferedReadWriter, err := hijacker.Hijack()
+	if err != nil {
+		return nil, err
+	}
+	if _, err := bufferedReadWriter.WriteString("HTTP/1.1 101 Switching Protocols\r\n"); err != nil {
+		connection.Close()
+		return nil, err
+	}
+	_, _ = bufferedReadWriter.WriteString("Upgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: " + acceptValue + "\r\n\r\n")
+	_ = bufferedReadWriter.Flush()
+	return &webSocketTextWriter{connection: connection}, nil
+}
+
+func (writer *webSocketTextWriter) Close() error { return writer.connection.Close() }
+func (writer *webSocketTextWriter) WriteText(payload []byte) error {
+	header := []byte{0x81}
+	payloadLength := len(payload)
+	if payloadLength < 126 {
+		header = append(header, byte(payloadLength))
+	} else if payloadLength <= 65535 {
+		header = append(header, 126, 0, 0)
+		binary.BigEndian.PutUint16(header[len(header)-2:], uint16(payloadLength))
+	} else {
+		header = append(header, 127, 0, 0, 0, 0, 0, 0, 0, 0)
+		binary.BigEndian.PutUint64(header[len(header)-8:], uint64(payloadLength))
+	}
+	if _, err := writer.connection.Write(header); err != nil {
+		return err
+	}
+	_, err := writer.connection.Write(payload)
+	return err
 }
 
 func domainFromRequest(r *http.Request) string {
@@ -1972,23 +2303,4 @@ func domainStorageName(domain string) string {
 
 func (a *App) domainFilesDir(r *http.Request) string {
 	return filepath.Join("storage/files", domainStorageName(a.siteDomain(r.Context(), r)))
-}
-
-func rewriteMirroredLinks(sourceHTML string, localFileToAssetPath map[string]string) string {
-	referencePattern := regexp.MustCompile(`(["'\(])(?!https?:|data:|javascript:|#)([^"'\)]+)(["'\)])`)
-	return referencePattern.ReplaceAllStringFunc(sourceHTML, func(fragment string) string {
-		parts := referencePattern.FindStringSubmatch(fragment)
-		if len(parts) != 4 {
-			return fragment
-		}
-		relativeReference := strings.TrimPrefix(parts[2], "./")
-		if assetPath, exists := localFileToAssetPath[relativeReference]; exists {
-			return parts[1] + assetPath + parts[3]
-		}
-		fileNameReference := path.Base(relativeReference)
-		if assetPath, exists := localFileToAssetPath[fileNameReference]; exists {
-			return parts[1] + assetPath + parts[3]
-		}
-		return fragment
-	})
 }

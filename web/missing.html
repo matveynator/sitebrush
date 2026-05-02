@@ -25,13 +25,51 @@
   {{if .IsAdmin}}
   <form class="card card-body shadow-sm mt-3" method="post" action="/grab" style="max-width:680px;">
     <input type="hidden" name="path" value="{{.Path}}">
+    <input type="hidden" name="progress_token" id="progress_token" value="">
     <label class="form-label" for="source_url">Или скопируйте страницу с другого сайта:</label>
     <div class="input-group">
       <input id="source_url" name="source_url" type="url" class="form-control" placeholder="https://example.com/page" required>
       <button type="submit" class="btn btn-success">Скопировать</button>
     </div>
   </form>
+  <div class="modal fade" id="grabProgressModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog"><div class="modal-content"><div class="modal-header"><h5 class="modal-title">Загрузка страницы</h5></div><div class="modal-body">
+      <p id="grab_progress_text">Подготовка...</p>
+      <div class="progress"><div class="progress-bar" id="grab_progress_bar" role="progressbar" style="width:0%;">0%</div></div>
+      <small id="grab_progress_url" class="text-muted d-block mt-2"></small>
+    </div></div></div>
+  </div>
   {{end}}
 </div>
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+<script>
+(function setupGrabProgress() {
+  const grabFormElement = document.querySelector('form[action="/grab"]');
+  if (!grabFormElement) { return; }
+  const tokenFieldElement = document.getElementById('progress_token');
+  const progressTextElement = document.getElementById('grab_progress_text');
+  const progressBarElement = document.getElementById('grab_progress_bar');
+  const progressUrlElement = document.getElementById('grab_progress_url');
+  const progressModalElement = document.getElementById('grabProgressModal');
+  const progressModalController = new bootstrap.Modal(progressModalElement, { backdrop: 'static', keyboard: false });
+  grabFormElement.addEventListener('submit', function onGrabSubmit() {
+    const progressToken = Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 10);
+    tokenFieldElement.value = progressToken;
+    progressModalController.show();
+    const socketProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const progressSocket = new WebSocket(socketProtocol + '//' + window.location.host + '/grab/ws?token=' + encodeURIComponent(progressToken));
+    progressSocket.onmessage = function onSocketMessage(messageEvent) {
+      const progressState = JSON.parse(messageEvent.data);
+      progressTextElement.textContent = 'Найдено: ' + progressState.found_total + ', скачано: ' + progressState.downloaded_total;
+      progressBarElement.style.width = progressState.completed_percent + '%';
+      progressBarElement.textContent = progressState.completed_percent + '%';
+      progressUrlElement.textContent = progressState.current_url || '';
+      if (progressState.stage === 'done' || progressState.stage === 'error') {
+        progressSocket.close();
+      }
+    };
+  });
+})();
+</script>
 </body>
 </html>
