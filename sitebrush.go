@@ -37,6 +37,7 @@ import (
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
+	"golang.org/x/crypto/acme/autocert"
 	"sitebrush/pkg/desktop"
 )
 
@@ -112,6 +113,18 @@ type ManagedFile struct {
 	Token         string
 	ExpiresAt     string
 	SingleUseLeft int
+	DownloadCount int64
+	TokenUseCount int64
+}
+
+type DomainAlias struct {
+	Domain            string
+	VerificationToken string
+	TXTVerified       bool
+	ARecordVerified   bool
+	IsActive          bool
+	IsSelected        bool
+	LastCheckedAt     string
 }
 
 type ManagedFileAccess struct {
@@ -119,13 +132,15 @@ type ManagedFileAccess struct {
 	Token         string
 	ExpiresAt     string
 	SingleUseLeft int
+	TokenUseCount int64
 }
 
 type fileMetadata struct {
-	PagePath  string
-	Size      int64
-	MimeType  string
-	CreatedAt string
+	PagePath      string
+	Size          int64
+	MimeType      string
+	CreatedAt     string
+	DownloadCount int64
 }
 
 type statusCapturingResponseWriter struct {
@@ -181,7 +196,7 @@ func accessLogMiddleware(next http.Handler) http.Handler {
 }
 
 func isLikelyStaticAssetPath(requestPath string) bool {
-	if strings.HasPrefix(requestPath, "/p/static/") || strings.HasPrefix(requestPath, "/p/") || strings.HasPrefix(requestPath, "/assets/") {
+	if strings.HasPrefix(requestPath, "/p/static/") || strings.HasPrefix(requestPath, "/p/") {
 		return true
 	}
 	fileExtension := strings.ToLower(path.Ext(requestPath))
@@ -228,7 +243,7 @@ func ensureParentDir(filePath string) error {
 }
 
 func main() {
-	port := flag.Int("port", 8080, "HTTP listen port")
+	port := flag.Int("port", 80, "HTTP listen port")
 	dbType := flag.String("db-type", "sqlite", "database driver (supported: sqlite)")
 	storagePath := flag.String("storage-path", defaultStoragePath, "path to directory that contains Sitebrush storage")
 	dbPath := flag.String("db-path", defaultDBPath, "path to sqlite database file")
@@ -270,31 +285,37 @@ func main() {
 	}
 	router.Handle("/p/static/", http.StripPrefix("/p/static/", http.FileServer(http.FS(staticFiles))))
 	router.HandleFunc("/p/", application.servePublicAsset)
-	router.HandleFunc("/assets/", application.serveAsset)
-	router.HandleFunc("/setup", application.setupAdmin)
-	router.HandleFunc("/login", application.login)
-	router.HandleFunc("/logout", application.logout)
-	router.HandleFunc("/edit", application.editPage)
-	router.HandleFunc("/edit/raw", application.editRawPage)
-	router.HandleFunc("/edit/mode", application.editModePage)
-	router.HandleFunc("/grab/preview", application.grabPreview)
-	router.HandleFunc("/grab", application.grabPage)
-	router.HandleFunc("/grab/ws", application.grabProgressWS)
-	router.HandleFunc("/files", application.filesPage)
-	router.HandleFunc("/save", application.saveEndpoint)
-	router.HandleFunc("/domain/settings", application.domainSettingsPage)
-	router.HandleFunc("/revisions", application.revisionsPage)
-	router.HandleFunc("/revision/restore", application.restoreRevision)
-	router.HandleFunc("/revision/delete", application.deleteRevision)
-	router.HandleFunc("/revision/toggle", application.toggleRevision)
 	router.HandleFunc("/", application.route)
 
-	address := "127.0.0.1:" + strconv.Itoa(*port)
+	listener, listenPort, err := listenOnAvailablePort(*port)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer listener.Close()
+
+	address := "127.0.0.1:" + strconv.Itoa(listenPort)
 	log.Printf("Sitebrush started on http://%s", address)
+
+	httpHandler := accessLogMiddleware(router)
+	if listenPort != 80 {
+		log.Printf("Let’s Encrypt HTTP-01 checks need public port 80; current HTTP port is %d", listenPort)
+	}
+	certificateCacheDir := filepath.Join(application.storageRootDir(), "letsencrypt")
+	if mkdirErr := os.MkdirAll(certificateCacheDir, 0o755); mkdirErr != nil {
+		log.Printf("failed to create certificate cache: %v", mkdirErr)
+	} else {
+		certificateManager := &autocert.Manager{
+			Prompt:     autocert.AcceptTOS,
+			Cache:      autocert.DirCache(certificateCacheDir),
+			HostPolicy: application.autoCertHostPolicy,
+		}
+		httpHandler = certificateManager.HTTPHandler(httpHandler)
+		go serveTLSWithAutoCert(certificateManager, httpHandler)
+	}
 
 	serverErrors := make(chan error, 1)
 	go func() {
-		serverErrors <- http.ListenAndServe(":"+strconv.Itoa(*port), accessLogMiddleware(router))
+		serverErrors <- http.Serve(listener, httpHandler)
 	}()
 
 	if *desktopMode {
@@ -309,6 +330,37 @@ func main() {
 	}
 }
 
+func listenOnAvailablePort(requestedPort int) (net.Listener, int, error) {
+	listener, err := net.Listen("tcp", ":"+strconv.Itoa(requestedPort))
+	if err == nil {
+		return listener, requestedPort, nil
+	}
+	for fallbackPort := 9898; fallbackPort < 65536; fallbackPort++ {
+		listener, err = net.Listen("tcp", ":"+strconv.Itoa(fallbackPort))
+		if err == nil {
+			log.Printf("port %d is unavailable, using %d", requestedPort, fallbackPort)
+			return listener, fallbackPort, nil
+		}
+	}
+	return nil, 0, fmt.Errorf("no available HTTP port after %d: %w", requestedPort, err)
+}
+
+func serveTLSWithAutoCert(certificateManager *autocert.Manager, handler http.Handler) {
+	tlsListener, err := net.Listen("tcp", ":443")
+	if err != nil {
+		log.Printf("HTTPS disabled: cannot listen on port 443: %v", err)
+		return
+	}
+	tlsServer := &http.Server{
+		Handler:   handler,
+		TLSConfig: certificateManager.TLSConfig(),
+	}
+	log.Printf("Sitebrush HTTPS enabled on port 443 for selected active aliases")
+	if serveErr := tlsServer.Serve(tlsListener); serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
+		log.Printf("HTTPS server stopped: %v", serveErr)
+	}
+}
+
 func (a *App) migrate(ctx context.Context) error {
 	const legacyDomain = "localhost"
 	queries := []string{
@@ -317,10 +369,10 @@ func (a *App) migrate(ctx context.Context) error {
 		`CREATE TABLE IF NOT EXISTS pages(domain TEXT,path TEXT,title TEXT,html TEXT,published INTEGER,PRIMARY KEY(domain,path));`,
 		`CREATE TABLE IF NOT EXISTS published_pages(domain TEXT,path TEXT,title TEXT,html TEXT,PRIMARY KEY(domain,path));`,
 		`CREATE TABLE IF NOT EXISTS revisions(id INTEGER PRIMARY KEY AUTOINCREMENT,domain TEXT,page_path TEXT,html TEXT,created_at TEXT,is_active INTEGER DEFAULT 1);`,
-		`CREATE TABLE IF NOT EXISTS domain_aliases(primary_domain TEXT,alias_domain TEXT UNIQUE);`,
+		`CREATE TABLE IF NOT EXISTS domain_aliases(primary_domain TEXT,alias_domain TEXT UNIQUE,verification_token TEXT,is_verified INTEGER DEFAULT 0,dns_a_ok INTEGER DEFAULT 0,is_selected INTEGER DEFAULT 0,last_checked_at TEXT);`,
 		`CREATE TABLE IF NOT EXISTS domain_states(domain TEXT PRIMARY KEY,is_frozen INTEGER DEFAULT 0);`,
-		`CREATE TABLE IF NOT EXISTS file_access_rules(domain TEXT,file_name TEXT,access_mode TEXT,token TEXT,expires_at TEXT,single_use_left INTEGER DEFAULT 0,PRIMARY KEY(domain,file_name));`,
-		`CREATE TABLE IF NOT EXISTS file_metadata(domain TEXT,file_name TEXT,page_path TEXT,size INTEGER,mime_type TEXT,created_at TEXT,updated_at TEXT,source TEXT,PRIMARY KEY(domain,file_name));`,
+		`CREATE TABLE IF NOT EXISTS file_access_rules(domain TEXT,file_name TEXT,access_mode TEXT,token TEXT,expires_at TEXT,single_use_left INTEGER DEFAULT 0,token_use_count INTEGER DEFAULT 0,PRIMARY KEY(domain,file_name));`,
+		`CREATE TABLE IF NOT EXISTS file_metadata(domain TEXT,file_name TEXT,page_path TEXT,size INTEGER,mime_type TEXT,created_at TEXT,updated_at TEXT,source TEXT,download_count INTEGER DEFAULT 0,PRIMARY KEY(domain,file_name));`,
 	}
 	for _, query := range queries {
 		if _, err := a.db.ExecContext(ctx, query); err != nil {
@@ -331,10 +383,18 @@ func (a *App) migrate(ctx context.Context) error {
 	_, _ = a.db.ExecContext(ctx, `ALTER TABLE pages ADD COLUMN domain TEXT`)
 	_, _ = a.db.ExecContext(ctx, `ALTER TABLE revisions ADD COLUMN domain TEXT`)
 	_, _ = a.db.ExecContext(ctx, `ALTER TABLE revisions ADD COLUMN is_active INTEGER DEFAULT 1`)
+	_, _ = a.db.ExecContext(ctx, `ALTER TABLE domain_aliases ADD COLUMN verification_token TEXT`)
+	_, _ = a.db.ExecContext(ctx, `ALTER TABLE domain_aliases ADD COLUMN is_verified INTEGER DEFAULT 0`)
+	_, _ = a.db.ExecContext(ctx, `ALTER TABLE domain_aliases ADD COLUMN dns_a_ok INTEGER DEFAULT 0`)
+	_, _ = a.db.ExecContext(ctx, `ALTER TABLE domain_aliases ADD COLUMN is_selected INTEGER DEFAULT 0`)
+	_, _ = a.db.ExecContext(ctx, `ALTER TABLE domain_aliases ADD COLUMN last_checked_at TEXT`)
+	_, _ = a.db.ExecContext(ctx, `ALTER TABLE file_access_rules ADD COLUMN token_use_count INTEGER DEFAULT 0`)
+	_, _ = a.db.ExecContext(ctx, `ALTER TABLE file_metadata ADD COLUMN download_count INTEGER DEFAULT 0`)
 	_, _ = a.db.ExecContext(ctx, `UPDATE users SET domain=? WHERE domain IS NULL OR TRIM(domain)=''`, legacyDomain)
 	_, _ = a.db.ExecContext(ctx, `UPDATE pages SET domain=? WHERE domain IS NULL OR TRIM(domain)=''`, legacyDomain)
 	_, _ = a.db.ExecContext(ctx, `UPDATE revisions SET domain=? WHERE domain IS NULL OR TRIM(domain)=''`, legacyDomain)
 	_, _ = a.db.ExecContext(ctx, `UPDATE revisions SET is_active=1 WHERE is_active IS NULL`)
+	a.assignMissingDomainAliasTokens(ctx)
 	_, _ = a.db.ExecContext(ctx, `
 		INSERT INTO published_pages(domain,path,title,html)
 		SELECT p.domain,p.path,p.title,p.html
@@ -347,10 +407,69 @@ func (a *App) migrate(ctx context.Context) error {
 	return nil
 }
 
+func (a *App) autoCertHostPolicy(ctx context.Context, host string) error {
+	aliasDomain := normalizeDomainName(host)
+	if aliasDomain == "" {
+		return fmt.Errorf("invalid certificate host %q", host)
+	}
+	var activeSelectedCount int
+	err := a.db.QueryRowContext(ctx, `SELECT COUNT(1) FROM domain_aliases WHERE alias_domain=? AND is_selected=1 AND is_verified=1 AND dns_a_ok=1`, aliasDomain).Scan(&activeSelectedCount)
+	if err != nil {
+		return err
+	}
+	if activeSelectedCount == 0 {
+		return fmt.Errorf("certificate host %q is not a selected active alias", aliasDomain)
+	}
+	return nil
+}
+
+func (a *App) assignMissingDomainAliasTokens(ctx context.Context) {
+	aliasRows, err := a.db.QueryContext(ctx, `SELECT alias_domain FROM domain_aliases WHERE verification_token IS NULL OR TRIM(verification_token)=''`)
+	if err != nil {
+		return
+	}
+	defer aliasRows.Close()
+	for aliasRows.Next() {
+		var aliasDomain string
+		if scanErr := aliasRows.Scan(&aliasDomain); scanErr != nil {
+			continue
+		}
+		_, _ = a.db.ExecContext(ctx, `UPDATE domain_aliases SET verification_token=? WHERE alias_domain=?`, randomAccessToken(), aliasDomain)
+	}
+}
+
 func (a *App) route(w http.ResponseWriter, r *http.Request) {
 	pagePath := r.URL.Path
 	if a.isDomainPrefixedPublicAssetPath(r) {
 		a.servePublicAsset(w, r)
+		return
+	}
+	if hasQueryFlag(r, "save") {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		a.savePage(w, r)
+		return
+	}
+	if hasQueryFlag(r, "grab_preview") {
+		a.grabPreview(w, r)
+		return
+	}
+	if hasQueryFlag(r, "grab_ws") {
+		a.grabProgressWS(w, r)
+		return
+	}
+	if hasQueryFlag(r, "revision_restore") {
+		a.restoreRevision(w, r)
+		return
+	}
+	if hasQueryFlag(r, "revision_delete") {
+		a.deleteRevision(w, r)
+		return
+	}
+	if hasQueryFlag(r, "revision_toggle") {
+		a.toggleRevision(w, r)
 		return
 	}
 	if hasQueryFlag(r, "tree") {
@@ -410,6 +529,10 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if hasQueryFlag(r, "grab") {
+		if r.Method == http.MethodPost {
+			a.grabPage(w, r)
+			return
+		}
 		a.render(w, r, "missing.html", map[string]any{"Path": pagePath})
 		return
 	}
@@ -1134,6 +1257,7 @@ func (a *App) filesPage(w http.ResponseWriter, r *http.Request) {
 		fileList[index].Token = accessRule.Token
 		fileList[index].ExpiresAt = accessRule.ExpiresAt
 		fileList[index].SingleUseLeft = accessRule.SingleUseLeft
+		fileList[index].TokenUseCount = accessRule.TokenUseCount
 	}
 	a.render(w, r, "files.html", map[string]any{"Path": currentPath, "Files": fileList})
 }
@@ -1194,15 +1318,16 @@ func (a *App) listManagedFiles(ctx context.Context, r *http.Request, currentPath
 			mimeType = mime.TypeByExtension(path.Ext(normalizedPath))
 		}
 		fileList = append(fileList, ManagedFile{
-			Name:        normalizedPath,
-			Size:        size,
-			SizeLabel:   formatFileSize(size),
-			PagePath:    meta.PagePath,
-			MimeType:    mimeType,
-			Extension:   fileExtensionLabel(normalizedPath),
-			CreatedAt:   createdAt,
-			CreatedUnix: createdUnix,
-			IsImage:     isImageFile(normalizedPath, mimeType),
+			Name:          normalizedPath,
+			Size:          size,
+			SizeLabel:     formatFileSize(size),
+			PagePath:      meta.PagePath,
+			MimeType:      mimeType,
+			Extension:     fileExtensionLabel(normalizedPath),
+			CreatedAt:     createdAt,
+			CreatedUnix:   createdUnix,
+			IsImage:       isImageFile(normalizedPath, mimeType),
+			DownloadCount: meta.DownloadCount,
 		})
 		return nil
 	})
@@ -1232,7 +1357,7 @@ func (a *App) uploadFiles(w http.ResponseWriter, r *http.Request, currentPath st
 		return
 	}
 
-	uploadedCount := 0
+	uploadedNames := make([]string, 0, len(r.MultipartForm.File["upload_files"]))
 	for _, fileHeader := range r.MultipartForm.File["upload_files"] {
 		fileName := safeFileName(fileHeader.Filename)
 		if fileName == "" {
@@ -1263,12 +1388,12 @@ func (a *App) uploadFiles(w http.ResponseWriter, r *http.Request, currentPath st
 			mimeType = mime.TypeByExtension(path.Ext(storedName))
 		}
 		a.upsertFileMetadata(r.Context(), domain, storedName, currentPath, writtenBytes, mimeType, "upload")
-		uploadedCount++
+		uploadedNames = append(uploadedNames, storedName)
 	}
 
 	if wantsJSONResponse(r) {
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{"uploaded": uploadedCount, "redirect": currentPath + "?files"})
+		_ = json.NewEncoder(w).Encode(map[string]any{"uploaded": len(uploadedNames), "files": uploadedNames, "redirect": currentPath + "?files"})
 		return
 	}
 	http.Redirect(w, r, currentPath+"?files", http.StatusFound)
@@ -1299,7 +1424,7 @@ func (a *App) fileMetadataByName(ctx context.Context, domain string) map[string]
 	if a == nil || a.db == nil {
 		return metadataByName
 	}
-	rows, err := a.db.QueryContext(ctx, `SELECT file_name,page_path,size,mime_type,created_at FROM file_metadata WHERE domain=?`, domain)
+	rows, err := a.db.QueryContext(ctx, `SELECT file_name,page_path,size,mime_type,created_at,download_count FROM file_metadata WHERE domain=?`, domain)
 	if err != nil {
 		return metadataByName
 	}
@@ -1307,7 +1432,7 @@ func (a *App) fileMetadataByName(ctx context.Context, domain string) map[string]
 	for rows.Next() {
 		var name string
 		var meta fileMetadata
-		if scanErr := rows.Scan(&name, &meta.PagePath, &meta.Size, &meta.MimeType, &meta.CreatedAt); scanErr != nil {
+		if scanErr := rows.Scan(&name, &meta.PagePath, &meta.Size, &meta.MimeType, &meta.CreatedAt, &meta.DownloadCount); scanErr != nil {
 			continue
 		}
 		if safeRelativeAssetPath(name) == "" {
@@ -1327,8 +1452,8 @@ func (a *App) upsertFileMetadata(ctx context.Context, domain, fileName, pagePath
 		return
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
-	_, _ = a.db.ExecContext(ctx, `INSERT INTO file_metadata(domain,file_name,page_path,size,mime_type,created_at,updated_at,source)
-VALUES(?,?,?,?,?,?,?,?)
+	_, _ = a.db.ExecContext(ctx, `INSERT INTO file_metadata(domain,file_name,page_path,size,mime_type,created_at,updated_at,source,download_count)
+VALUES(?,?,?,?,?,?,?,?,0)
 ON CONFLICT(domain,file_name) DO UPDATE SET page_path=excluded.page_path,size=excluded.size,mime_type=excluded.mime_type,updated_at=excluded.updated_at,source=excluded.source`,
 		domain, fileName, cleanPath(pagePath), size, mimeType, now, now, source)
 }
@@ -1388,7 +1513,7 @@ func randomAccessToken() string {
 
 func (a *App) fileAccessRule(ctx context.Context, r *http.Request, fileName string) ManagedFileAccess {
 	rule := ManagedFileAccess{AccessMode: "public"}
-	_ = a.db.QueryRowContext(ctx, `SELECT access_mode,token,expires_at,single_use_left FROM file_access_rules WHERE domain=? AND file_name=?`, domainStorageName(a.siteDomain(ctx, r)), fileName).Scan(&rule.AccessMode, &rule.Token, &rule.ExpiresAt, &rule.SingleUseLeft)
+	_ = a.db.QueryRowContext(ctx, `SELECT access_mode,token,expires_at,single_use_left,token_use_count FROM file_access_rules WHERE domain=? AND file_name=?`, domainStorageName(a.siteDomain(ctx, r)), fileName).Scan(&rule.AccessMode, &rule.Token, &rule.ExpiresAt, &rule.SingleUseLeft, &rule.TokenUseCount)
 	if strings.TrimSpace(rule.AccessMode) == "" {
 		rule.AccessMode = "public"
 	}
@@ -1397,7 +1522,7 @@ func (a *App) fileAccessRule(ctx context.Context, r *http.Request, fileName stri
 
 func (a *App) saveFileAccessRule(ctx context.Context, r *http.Request, fileName string) {
 	accessMode := r.FormValue("access_mode")
-	if accessMode != "token" {
+	if accessMode != "token" && accessMode != "timer" {
 		accessMode = "public"
 	}
 	token := strings.TrimSpace(r.FormValue("access_token"))
@@ -1415,42 +1540,40 @@ func (a *App) saveFileAccessRule(ctx context.Context, r *http.Request, fileName 
 	}
 
 	expiresAt := ""
-	// Public mode must always clear token-specific state.
 	if accessMode == "public" {
 		token = ""
 		singleUseLeft = 0
-	} else if accessDaysValue == "" {
-		// Keep the existing expiration for token mode when days input is omitted.
+	} else if accessMode == "timer" {
+		token = ""
+		singleUseLeft = 0
+		if accessDaysValue == "" {
+			_ = a.db.QueryRowContext(ctx, `SELECT expires_at FROM file_access_rules WHERE domain=? AND file_name=?`, domainStorageName(a.siteDomain(ctx, r)), fileName).Scan(&expiresAt)
+		} else if days > 0 {
+			expiresAt = time.Now().Add(time.Duration(days) * 24 * time.Hour).UTC().Format(time.RFC3339)
+		}
+	} else if accessMode == "token" && accessDaysValue == "" {
 		_ = a.db.QueryRowContext(ctx, `SELECT expires_at FROM file_access_rules WHERE domain=? AND file_name=?`, domainStorageName(a.siteDomain(ctx, r)), fileName).Scan(&expiresAt)
-	} else if days > 0 {
+	} else if accessMode == "token" && days > 0 {
 		expiresAt = time.Now().Add(time.Duration(days) * 24 * time.Hour).UTC().Format(time.RFC3339)
 	}
-	_, _ = a.db.ExecContext(ctx, `INSERT INTO file_access_rules(domain,file_name,access_mode,token,expires_at,single_use_left) VALUES(?,?,?,?,?,?) ON CONFLICT(domain,file_name) DO UPDATE SET access_mode=excluded.access_mode,token=excluded.token,expires_at=excluded.expires_at,single_use_left=excluded.single_use_left`, domainStorageName(a.siteDomain(ctx, r)), fileName, accessMode, token, expiresAt, singleUseLeft)
-}
-
-func (a *App) serveAsset(w http.ResponseWriter, r *http.Request) {
-	assetReference := strings.TrimPrefix(path.Clean(r.URL.Path), "/assets/")
-	if assetReference == "." || assetReference == "" {
-		http.NotFound(w, r)
-		return
-	}
-	parts := strings.SplitN(assetReference, "/", 2)
-	if len(parts) != 2 {
-		http.NotFound(w, r)
-		return
-	}
-	domain := parts[0]
-	fileName := safeRelativeAssetPath(parts[1])
-	if fileName == "" {
-		http.NotFound(w, r)
-		return
-	}
-	a.serveAssetFile(w, r, domain, fileName)
+	_, _ = a.db.ExecContext(ctx, `INSERT INTO file_access_rules(domain,file_name,access_mode,token,expires_at,single_use_left,token_use_count)
+VALUES(?,?,?,?,?,?,0)
+ON CONFLICT(domain,file_name) DO UPDATE SET access_mode=excluded.access_mode,token=excluded.token,expires_at=excluded.expires_at,single_use_left=excluded.single_use_left,token_use_count=CASE WHEN file_access_rules.token=excluded.token THEN file_access_rules.token_use_count ELSE 0 END`,
+		domainStorageName(a.siteDomain(ctx, r)), fileName, accessMode, token, expiresAt, singleUseLeft)
 }
 
 func (a *App) serveAssetFile(w http.ResponseWriter, r *http.Request, domain, fileName string) {
 	rule := ManagedFileAccess{AccessMode: "public"}
-	_ = a.db.QueryRowContext(r.Context(), `SELECT access_mode,token,expires_at,single_use_left FROM file_access_rules WHERE domain=? AND file_name=?`, domain, fileName).Scan(&rule.AccessMode, &rule.Token, &rule.ExpiresAt, &rule.SingleUseLeft)
+	_ = a.db.QueryRowContext(r.Context(), `SELECT access_mode,token,expires_at,single_use_left,token_use_count FROM file_access_rules WHERE domain=? AND file_name=?`, domain, fileName).Scan(&rule.AccessMode, &rule.Token, &rule.ExpiresAt, &rule.SingleUseLeft, &rule.TokenUseCount)
+	if strings.TrimSpace(rule.AccessMode) == "timer" {
+		if strings.TrimSpace(rule.ExpiresAt) != "" {
+			expiresAt, parseErr := time.Parse(time.RFC3339, rule.ExpiresAt)
+			if parseErr == nil && time.Now().UTC().After(expiresAt) {
+				http.Error(w, "timer expired", http.StatusForbidden)
+				return
+			}
+		}
+	}
 	if strings.TrimSpace(rule.AccessMode) == "token" {
 		requestedToken := strings.TrimSpace(r.URL.Query().Get("token"))
 		if requestedToken == "" || requestedToken != rule.Token {
@@ -1467,6 +1590,7 @@ func (a *App) serveAssetFile(w http.ResponseWriter, r *http.Request, domain, fil
 		if rule.SingleUseLeft > 0 {
 			_, _ = a.db.ExecContext(r.Context(), `UPDATE file_access_rules SET single_use_left=single_use_left-1 WHERE domain=? AND file_name=? AND single_use_left>0`, domain, fileName)
 		}
+		_, _ = a.db.ExecContext(r.Context(), `UPDATE file_access_rules SET token_use_count=token_use_count+1 WHERE domain=? AND file_name=?`, domain, fileName)
 	}
 	filePath := filepath.Join(a.filesRootDir(), domain, filepath.FromSlash(fileName))
 	if _, err := os.Stat(filePath); err != nil && !strings.HasPrefix(fileName, "p/") {
@@ -1475,6 +1599,7 @@ func (a *App) serveAssetFile(w http.ResponseWriter, r *http.Request, domain, fil
 			filePath = legacyPath
 		}
 	}
+	_, _ = a.db.ExecContext(r.Context(), `UPDATE file_metadata SET download_count=download_count+1 WHERE domain=? AND file_name=?`, domain, fileName)
 	http.ServeFile(w, r, filePath)
 }
 
@@ -1898,6 +2023,9 @@ func contextMenuStylesAndHelpers() string {
   .SiteBrushContextMenuLink:hover{background:#24344d}
   .SiteBrushDomainMenuItem .SiteBrushContextMenuLink{border-bottom-color:#2f405d}
   .ContextMenuCopyright .SiteBrushContextMenuLink{color:#a7bbd8;border-top-color:#2f405d}
+  .SiteBrushConfirmModal{background:#172235;border-color:#2f405d}
+  .SiteBrushConfirmText,.SiteBrushPublishPreviewLink{color:#dbe8ff}
+  .SiteBrushConfirmButton,.SiteBrushCancelButton{background:#22324a;color:#dbe8ff;border-color:#405674}
   .SiteBrushTreeModal{background:#172235;border-color:#2f405d}
   .SiteBrushTreeTitle,.SiteBrushTreeContent,.SiteBrushTreeLink{color:#dbe8ff}
 }
@@ -2210,8 +2338,6 @@ func (a *App) persistSpiderAssets(spider *pageSpider, pagePath string) error {
 		assetReference := resource.assetPath
 		if strings.HasPrefix(assetReference, "/p/") {
 			assetReference = strings.TrimPrefix(assetReference, "/p/")
-		} else {
-			assetReference = strings.TrimPrefix(assetReference, "/assets/"+domainStorageName(spider.domain)+"/")
 		}
 		assetReference = safeRelativeAssetPath(assetReference)
 		if assetReference == "" {
@@ -2676,11 +2802,248 @@ func domainFromRequest(r *http.Request) string {
 func (a *App) siteDomain(ctx context.Context, r *http.Request) string {
 	requestDomain := domainFromRequest(r)
 	var primaryDomain string
-	err := a.db.QueryRowContext(ctx, `SELECT primary_domain FROM domain_aliases WHERE alias_domain=?`, requestDomain).Scan(&primaryDomain)
+	err := a.db.QueryRowContext(ctx, `SELECT primary_domain FROM domain_aliases WHERE alias_domain=? AND is_verified=1 AND dns_a_ok=1`, requestDomain).Scan(&primaryDomain)
 	if err != nil || strings.TrimSpace(primaryDomain) == "" {
 		return requestDomain
 	}
 	return primaryDomain
+}
+
+var lookupTXTRecords = net.LookupTXT
+var lookupIPRecords = net.LookupIP
+var lookupServerExternalIP = detectServerExternalIP
+
+func detectServerExternalIP(ctx context.Context) (string, error) {
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://api.ipify.org", nil)
+	if err != nil {
+		return "", err
+	}
+	client := &http.Client{Timeout: 3 * time.Second}
+	response, err := client.Do(request)
+	if err != nil {
+		return "", err
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("external IP service returned %s", response.Status)
+	}
+	bodyBytes, err := io.ReadAll(io.LimitReader(response.Body, 128))
+	if err != nil {
+		return "", err
+	}
+	externalIP := strings.TrimSpace(string(bodyBytes))
+	if net.ParseIP(externalIP) == nil {
+		return "", fmt.Errorf("external IP service returned invalid address %q", externalIP)
+	}
+	return externalIP, nil
+}
+
+func normalizeDomainName(rawDomain string) string {
+	cleanDomain := strings.ToLower(strings.TrimSpace(rawDomain))
+	if cleanDomain == "" {
+		return ""
+	}
+	if strings.Contains(cleanDomain, "://") {
+		parsedURL, err := url.Parse(cleanDomain)
+		if err == nil {
+			cleanDomain = parsedURL.Host
+		}
+	}
+	cleanDomain = strings.TrimPrefix(cleanDomain, "//")
+	if strings.Contains(cleanDomain, "/") {
+		cleanDomain = strings.Split(cleanDomain, "/")[0]
+	}
+	if strings.Contains(cleanDomain, "@") {
+		cleanDomain = cleanDomain[strings.LastIndex(cleanDomain, "@")+1:]
+	}
+	if host, _, splitErr := net.SplitHostPort(cleanDomain); splitErr == nil {
+		cleanDomain = host
+	}
+	cleanDomain = strings.Trim(cleanDomain, ". ")
+	if cleanDomain == "" || strings.ContainsAny(cleanDomain, " \t\r\n") {
+		return ""
+	}
+	if net.ParseIP(cleanDomain) != nil {
+		return ""
+	}
+	domainParts := strings.Split(cleanDomain, ".")
+	if len(domainParts) < 2 {
+		return ""
+	}
+	for _, domainPart := range domainParts {
+		if domainPart == "" || len(domainPart) > 63 {
+			return ""
+		}
+		for _, domainRune := range domainPart {
+			if (domainRune >= 'a' && domainRune <= 'z') || (domainRune >= '0' && domainRune <= '9') || domainRune == '-' {
+				continue
+			}
+			return ""
+		}
+		if strings.HasPrefix(domainPart, "-") || strings.HasSuffix(domainPart, "-") {
+			return ""
+		}
+	}
+	return cleanDomain
+}
+
+func (a *App) handleDomainSettingsPost(ctx context.Context, r *http.Request, siteDomain string, externalIP string) {
+	action := strings.TrimSpace(r.FormValue("action"))
+	switch action {
+	case "add_alias":
+		aliasDomain := normalizeDomainName(r.FormValue("alias_domain"))
+		if aliasDomain == "" || aliasDomain == siteDomain {
+			return
+		}
+		if a.domainAliasCount(ctx, siteDomain) >= 10 {
+			return
+		}
+		token := randomAccessToken()
+		_, _ = a.db.ExecContext(ctx, `INSERT INTO domain_aliases(primary_domain,alias_domain,verification_token,is_verified,dns_a_ok,is_selected,last_checked_at)
+VALUES(?,?,?,?,?,?,?)
+ON CONFLICT(alias_domain) DO UPDATE SET
+	primary_domain=excluded.primary_domain,
+	verification_token=CASE WHEN domain_aliases.primary_domain=excluded.primary_domain AND TRIM(COALESCE(domain_aliases.verification_token,''))<>'' THEN domain_aliases.verification_token ELSE excluded.verification_token END,
+	is_verified=0,
+	dns_a_ok=0,
+	is_selected=0,
+	last_checked_at=''`,
+			siteDomain, aliasDomain, token, 0, 0, 0, "")
+		a.refreshDomainAliasVerification(ctx, siteDomain, aliasDomain, externalIP)
+	case "delete_alias":
+		aliasDomain := normalizeDomainName(r.FormValue("alias_domain"))
+		_, _ = a.db.ExecContext(ctx, `DELETE FROM domain_aliases WHERE primary_domain=? AND alias_domain=?`, siteDomain, aliasDomain)
+	case "select_alias":
+		aliasDomain := normalizeDomainName(r.FormValue("alias_domain"))
+		a.refreshDomainAliasVerification(ctx, siteDomain, aliasDomain, externalIP)
+		if a.domainAliasIsActive(ctx, siteDomain, aliasDomain) {
+			_, _ = a.db.ExecContext(ctx, `UPDATE domain_aliases SET is_selected=0 WHERE primary_domain=?`, siteDomain)
+			_, _ = a.db.ExecContext(ctx, `UPDATE domain_aliases SET is_selected=1 WHERE primary_domain=? AND alias_domain=?`, siteDomain, aliasDomain)
+		}
+	case "select_primary":
+		_, _ = a.db.ExecContext(ctx, `UPDATE domain_aliases SET is_selected=0 WHERE primary_domain=?`, siteDomain)
+	case "check_alias":
+		aliasDomain := normalizeDomainName(r.FormValue("alias_domain"))
+		a.refreshDomainAliasVerification(ctx, siteDomain, aliasDomain, externalIP)
+	case "check_all":
+		a.refreshDomainAliases(ctx, siteDomain, externalIP)
+	}
+}
+
+func (a *App) domainAliasCount(ctx context.Context, siteDomain string) int {
+	var aliasCount int
+	_ = a.db.QueryRowContext(ctx, `SELECT COUNT(1) FROM domain_aliases WHERE primary_domain=?`, siteDomain).Scan(&aliasCount)
+	return aliasCount
+}
+
+func (a *App) domainAliasIsActive(ctx context.Context, siteDomain string, aliasDomain string) bool {
+	var activeCount int
+	_ = a.db.QueryRowContext(ctx, `SELECT COUNT(1) FROM domain_aliases WHERE primary_domain=? AND alias_domain=? AND is_verified=1 AND dns_a_ok=1`, siteDomain, aliasDomain).Scan(&activeCount)
+	return activeCount > 0
+}
+
+func (a *App) refreshDomainAliases(ctx context.Context, siteDomain string, externalIP string) {
+	aliasRows, err := a.db.QueryContext(ctx, `SELECT alias_domain FROM domain_aliases WHERE primary_domain=? ORDER BY alias_domain`, siteDomain)
+	if err != nil {
+		return
+	}
+	defer aliasRows.Close()
+	for aliasRows.Next() {
+		var aliasDomain string
+		if scanErr := aliasRows.Scan(&aliasDomain); scanErr == nil {
+			a.refreshDomainAliasVerification(ctx, siteDomain, aliasDomain, externalIP)
+		}
+	}
+}
+
+func (a *App) refreshDomainAliasVerification(ctx context.Context, siteDomain string, aliasDomain string, externalIP string) {
+	if aliasDomain == "" {
+		return
+	}
+	var verificationTokenValue sql.NullString
+	err := a.db.QueryRowContext(ctx, `SELECT verification_token FROM domain_aliases WHERE primary_domain=? AND alias_domain=?`, siteDomain, aliasDomain).Scan(&verificationTokenValue)
+	if err != nil {
+		return
+	}
+	verificationToken := verificationTokenValue.String
+	if strings.TrimSpace(verificationToken) == "" {
+		verificationToken = randomAccessToken()
+		_, _ = a.db.ExecContext(ctx, `UPDATE domain_aliases SET verification_token=? WHERE primary_domain=? AND alias_domain=?`, verificationToken, siteDomain, aliasDomain)
+	}
+	txtVerified := domainTXTRecordMatches(aliasDomain, verificationToken)
+	aRecordVerified := domainARecordMatches(aliasDomain, externalIP)
+	lastCheckedAt := time.Now().Format(time.RFC3339)
+	_, _ = a.db.ExecContext(ctx, `UPDATE domain_aliases SET is_verified=?, dns_a_ok=?, last_checked_at=? WHERE primary_domain=? AND alias_domain=?`,
+		boolToInt(txtVerified), boolToInt(aRecordVerified), lastCheckedAt, siteDomain, aliasDomain)
+	if !txtVerified || !aRecordVerified {
+		_, _ = a.db.ExecContext(ctx, `UPDATE domain_aliases SET is_selected=0 WHERE primary_domain=? AND alias_domain=?`, siteDomain, aliasDomain)
+	}
+}
+
+func domainTXTRecordMatches(aliasDomain string, verificationToken string) bool {
+	txtRecords, err := lookupTXTRecords(aliasDomain)
+	if err != nil {
+		return false
+	}
+	requiredRecord := "sitebrush=" + strings.TrimSpace(verificationToken)
+	for _, txtRecord := range txtRecords {
+		if strings.TrimSpace(txtRecord) == requiredRecord {
+			return true
+		}
+	}
+	return false
+}
+
+func domainARecordMatches(aliasDomain string, externalIP string) bool {
+	parsedExternalIP := net.ParseIP(strings.TrimSpace(externalIP))
+	if parsedExternalIP == nil {
+		return false
+	}
+	ipRecords, err := lookupIPRecords(aliasDomain)
+	if err != nil {
+		return false
+	}
+	for _, ipRecord := range ipRecords {
+		if ipRecord.Equal(parsedExternalIP) {
+			return true
+		}
+	}
+	return false
+}
+
+func (a *App) listDomainAliases(ctx context.Context, siteDomain string) ([]DomainAlias, error) {
+	aliasRows, err := a.db.QueryContext(ctx, `SELECT alias_domain,verification_token,is_verified,dns_a_ok,is_selected,last_checked_at FROM domain_aliases WHERE primary_domain=? ORDER BY alias_domain`, siteDomain)
+	if err != nil {
+		return nil, err
+	}
+	defer aliasRows.Close()
+	domainAliases := make([]DomainAlias, 0, 10)
+	for aliasRows.Next() {
+		var domainAlias DomainAlias
+		var verificationToken sql.NullString
+		var lastCheckedAt sql.NullString
+		var txtVerified int
+		var aRecordVerified int
+		var isSelected int
+		if scanErr := aliasRows.Scan(&domainAlias.Domain, &verificationToken, &txtVerified, &aRecordVerified, &isSelected, &lastCheckedAt); scanErr != nil {
+			return nil, scanErr
+		}
+		domainAlias.VerificationToken = verificationToken.String
+		domainAlias.LastCheckedAt = lastCheckedAt.String
+		domainAlias.TXTVerified = txtVerified == 1
+		domainAlias.ARecordVerified = aRecordVerified == 1
+		domainAlias.IsSelected = isSelected == 1
+		domainAlias.IsActive = domainAlias.TXTVerified && domainAlias.ARecordVerified
+		domainAliases = append(domainAliases, domainAlias)
+	}
+	return domainAliases, aliasRows.Err()
+}
+
+func boolToInt(state bool) int {
+	if state {
+		return 1
+	}
+	return 0
 }
 
 func (a *App) domainSettingsPage(w http.ResponseWriter, r *http.Request) {
@@ -2689,52 +3052,50 @@ func (a *App) domainSettingsPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	siteDomain := a.siteDomain(r.Context(), r)
+	returnPath := r.FormValue("return")
+	if strings.TrimSpace(returnPath) == "" {
+		returnPath = r.URL.Query().Get("return")
+	}
+	if strings.TrimSpace(returnPath) == "" {
+		returnPath = requestedReturnPath(r)
+	}
 	if r.Method == http.MethodPost {
-		rawAliases := strings.Split(r.FormValue("aliases"), "\n")
-		cleanAliases := make([]string, 0, 3)
-		aliasSeen := make(map[string]struct{})
-		for _, rawAlias := range rawAliases {
-			normalizedAlias := strings.ToLower(strings.TrimSpace(rawAlias))
-			if normalizedAlias == "" || normalizedAlias == siteDomain {
-				continue
-			}
-			if _, exists := aliasSeen[normalizedAlias]; exists {
-				continue
-			}
-			aliasSeen[normalizedAlias] = struct{}{}
-			cleanAliases = append(cleanAliases, normalizedAlias)
-			if len(cleanAliases) == 3 {
-				break
-			}
+		externalIP := ""
+		action := strings.TrimSpace(r.FormValue("action"))
+		if action == "add_alias" || action == "select_alias" || action == "check_alias" || action == "check_all" {
+			externalIP, _ = lookupServerExternalIP(r.Context())
 		}
-		_, _ = a.db.ExecContext(r.Context(), `DELETE FROM domain_aliases WHERE primary_domain=?`, siteDomain)
-		for _, aliasDomain := range cleanAliases {
-			_, _ = a.db.ExecContext(r.Context(), `INSERT INTO domain_aliases(primary_domain,alias_domain) VALUES(?,?)`, siteDomain, aliasDomain)
-		}
-		returnPath := r.FormValue("return")
-		if strings.TrimSpace(returnPath) == "" {
-			returnPath = "/"
-		}
+		a.handleDomainSettingsPost(r.Context(), r, siteDomain, externalIP)
 		http.Redirect(w, r, returnPath+"?settings", http.StatusFound)
 		return
 	}
-	aliasRows, err := a.db.QueryContext(r.Context(), `SELECT alias_domain FROM domain_aliases WHERE primary_domain=? ORDER BY alias_domain`, siteDomain)
+	externalIP, externalIPErr := lookupServerExternalIP(r.Context())
+	domainAliases, err := a.listDomainAliases(r.Context(), siteDomain)
 	if err != nil {
 		http.Error(w, "failed to load domain aliases", http.StatusInternalServerError)
 		return
 	}
-	defer aliasRows.Close()
-	domainAliases := make([]string, 0, 3)
-	for aliasRows.Next() {
-		var aliasDomain string
-		_ = aliasRows.Scan(&aliasDomain)
-		domainAliases = append(domainAliases, aliasDomain)
+	selectedDomain := siteDomain
+	for _, domainAlias := range domainAliases {
+		if domainAlias.IsSelected && domainAlias.IsActive {
+			selectedDomain = domainAlias.Domain
+			break
+		}
 	}
-	returnPath := r.URL.Query().Get("return")
-	if strings.TrimSpace(returnPath) == "" {
-		returnPath = "/"
+	externalIPError := ""
+	if externalIPErr != nil {
+		externalIPError = externalIPErr.Error()
 	}
-	a.render(w, r, "domain_settings.html", map[string]any{"Domain": siteDomain, "Aliases": strings.Join(domainAliases, "\n"), "ReturnPath": returnPath})
+	a.render(w, r, "domain_settings.html", map[string]any{
+		"Domain":          siteDomain,
+		"SelectedDomain":  selectedDomain,
+		"Aliases":         domainAliases,
+		"AliasCount":      len(domainAliases),
+		"CanAddAlias":     len(domainAliases) < 10,
+		"ReturnPath":      returnPath,
+		"ExternalIP":      externalIP,
+		"ExternalIPError": externalIPError,
+	})
 }
 
 func (a *App) freezeDomain(w http.ResponseWriter, r *http.Request) {

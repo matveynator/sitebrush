@@ -12,15 +12,17 @@
   <title>Files</title>
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
   <style>
-    body { background:#f4f7fb; }
+    body { background:var(--bs-body-bg); color:var(--bs-body-color); }
     .manager-shell { max-width:1180px; }
-    .file-thumb { width:64px; height:64px; object-fit:cover; border-radius:8px; border:1px solid rgba(0,0,0,.12); background:#fff; cursor:pointer; }
-    .file-icon { width:64px; height:64px; border-radius:8px; display:grid; place-items:center; border:1px solid rgba(0,0,0,.12); background:#eef3f8; color:#607087; font-weight:700; }
+    .file-thumb { width:64px; height:64px; object-fit:cover; border-radius:8px; border:1px solid var(--bs-border-color); background:var(--bs-tertiary-bg); cursor:pointer; }
+    .file-icon { width:64px; height:64px; border-radius:8px; display:grid; place-items:center; border:1px solid var(--bs-border-color); background:var(--bs-tertiary-bg); color:var(--bs-secondary-color); font-weight:700; }
     .copy-field { font-family:ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size:.82rem; }
     .table td { vertical-align:middle; }
     .access-grid { display:grid; grid-template-columns:minmax(120px,150px) minmax(160px,1fr) minmax(110px,140px) auto; gap:.5rem; align-items:center; }
     @media (max-width: 900px) { .access-grid { grid-template-columns:1fr; } }
     .preview-image { max-width:100%; max-height:72vh; object-fit:contain; }
+    .uploaded-focus { outline:3px solid var(--bs-primary); outline-offset:-3px; animation:uploadedPulse 1.8s ease-in-out 2; }
+    @keyframes uploadedPulse { 0%,100% { background:transparent; } 50% { background:rgba(var(--bs-primary-rgb), .14); } }
   </style>
 </head>
 <body>
@@ -33,7 +35,7 @@
     <a class="btn btn-outline-secondary" href="{{.Path}}">{{index .T "back_to_uri"}}</a>
   </div>
 
-  <form id="uploadForm" class="bg-white border rounded-3 p-3 mb-3" method="post" action="/files?path={{.Path}}" enctype="multipart/form-data">
+  <form id="uploadForm" class="bg-body-tertiary border rounded-3 p-3 mb-3" method="post" action="{{.Path}}?files" enctype="multipart/form-data">
     <input type="hidden" name="action" value="upload">
     <label class="form-label fw-semibold" for="upload_files">Загрузить файлы для этого URI</label>
     <div class="d-flex flex-wrap gap-2">
@@ -49,10 +51,10 @@
     <button class="btn btn-sm btn-outline-secondary" type="button" data-sort-files="name">по имени</button>
   </div>
 
-  <div class="bg-white border rounded-3 overflow-hidden">
+  <div class="bg-body-tertiary border rounded-3 overflow-hidden">
     <div class="table-responsive">
       <table class="table table-hover align-middle mb-0">
-        <thead class="table-light">
+        <thead>
           <tr>
             <th style="width:86px;">Превью</th>
             <th>Файл и ссылка</th>
@@ -64,7 +66,7 @@
         </thead>
         <tbody id="fileTableBody">
 {{range .Files}}
-          <tr data-file-row data-name="{{.Name}}" data-size="{{.Size}}" data-date="{{.CreatedUnix}}">
+          <tr data-file-row data-name="{{.Name}}" data-size="{{.Size}}" data-date="{{.CreatedUnix}}" id="file-{{printf "%x" .Name}}">
             <td>
               {{if .IsImage}}
               <img class="file-thumb" src="{{.AssetPath}}" alt="" data-preview-image data-preview-src="{{.AssetPath}}" data-preview-name="{{.Name}}">
@@ -75,6 +77,7 @@
             <td>
               <div class="fw-semibold text-break">{{.Name}}</div>
               {{if .PagePath}}<div class="small text-muted">URI: <code>{{.PagePath}}</code></div>{{end}}
+              <div class="small text-muted">Скачиваний: {{.DownloadCount}}</div>
               <div class="input-group input-group-sm mt-2">
                 <input class="form-control copy-field" readonly data-full-link data-asset-path="{{.AssetPath}}">
                 <button class="btn btn-outline-secondary" type="button" data-copy-target="full">Копировать</button>
@@ -83,25 +86,27 @@
             <td><span class="text-muted">{{.SizeLabel}}</span></td>
             <td><span class="text-muted">{{.CreatedAt}}</span></td>
             <td>
-              <form method="post" action="/files?path={{$.Path}}" class="access-grid" data-access-form>
+              <form method="post" action="{{$.Path}}?files" class="access-grid" data-access-form>
                 <input type="hidden" name="action" value="save_access">
                 <input type="hidden" name="name" value="{{.Name}}">
                 <select name="access_mode" class="form-select form-select-sm" data-access-mode>
-                  <option value="public" {{if ne .AccessMode "token"}}selected{{end}}>public</option>
+                  <option value="public" {{if eq .AccessMode "public"}}selected{{end}}>public</option>
+                  <option value="timer" {{if eq .AccessMode "timer"}}selected{{end}}>timer</option>
                   <option value="token" {{if eq .AccessMode "token"}}selected{{end}}>token</option>
                 </select>
-                <input name="access_token" class="form-control form-control-sm copy-field" placeholder="token" value="{{.Token}}" data-access-token>
-                <input name="access_days" class="form-control form-control-sm" type="number" min="0" placeholder="days">
-                <button class="btn btn-sm btn-outline-primary" type="submit">save</button>
-                <div class="input-group input-group-sm" style="grid-column:1 / -1;">
+                <input name="access_token" class="form-control form-control-sm copy-field" placeholder="token" value="{{.Token}}" data-access-token data-token-control>
+                <input name="access_days" class="form-control form-control-sm" type="number" min="0" placeholder="days" data-timer-control>
+                <button class="btn btn-sm btn-outline-primary d-none" type="submit" data-save-access>save</button>
+                <div class="input-group input-group-sm" data-token-link-row style="grid-column:1 / -1;">
                   <input class="form-control copy-field" readonly data-token-link data-asset-path="{{.AssetPath}}">
                   <button class="btn btn-outline-secondary" type="button" data-copy-target="token">Копировать ссылку с токеном</button>
                 </div>
               </form>
               {{if .ExpiresAt}}<small class="text-muted">expires: {{.ExpiresAt}}</small>{{end}}
+              {{if eq .AccessMode "token"}}<small class="text-muted d-block">token used: {{.TokenUseCount}}</small>{{end}}
             </td>
             <td>
-              <form method="post" action="/files?path={{$.Path}}">
+              <form method="post" action="{{$.Path}}?files">
                 <input type="hidden" name="name" value="{{.Name}}">
                 <button class="btn btn-outline-danger btn-sm" type="submit"><img src="/p/static/cross.png" width="14" alt=""> Delete</button>
               </form>
@@ -132,7 +137,7 @@
       <h5 class="modal-title" id="imagePreviewTitle">Preview</h5>
       <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Закрыть"></button>
     </div>
-    <div class="modal-body text-center bg-dark">
+    <div class="modal-body text-center bg-body-tertiary">
       <img id="imagePreviewFull" class="preview-image" alt="">
     </div>
     <div class="modal-footer justify-content-between">
@@ -152,12 +157,12 @@
   const uploadModalElement = document.getElementById('uploadProgressModal');
   const uploadProgressTextElement = document.getElementById('uploadProgressText');
   const uploadProgressBarElement = document.getElementById('uploadProgressBar');
-  const uploadModalController = uploadModalElement ? new bootstrap.Modal(uploadModalElement, { backdrop: 'static', keyboard: false }) : null;
+  const uploadModalController = uploadModalElement && window.bootstrap ? new bootstrap.Modal(uploadModalElement, { backdrop: 'static', keyboard: false }) : null;
   const previewImages = Array.from(document.querySelectorAll('[data-preview-image]'));
   const imagePreviewModalElement = document.getElementById('imagePreviewModal');
   const imagePreviewFullElement = document.getElementById('imagePreviewFull');
   const imagePreviewTitleElement = document.getElementById('imagePreviewTitle');
-  const imagePreviewModalController = imagePreviewModalElement ? new bootstrap.Modal(imagePreviewModalElement) : null;
+  const imagePreviewModalController = imagePreviewModalElement && window.bootstrap ? new bootstrap.Modal(imagePreviewModalElement) : null;
   let currentPreviewIndex = 0;
 
   function absoluteURL(assetPath) {
@@ -181,22 +186,94 @@
     return Date.now().toString(36) + Math.random().toString(36).slice(2, 14);
   }
 
+  function uploadedFileURL(uploadedFiles) {
+    const nextURL = new URL(window.location.href);
+    nextURL.searchParams.set('uploaded', uploadedFiles.join(','));
+    return nextURL.href;
+  }
+
+  function showUploadModal() {
+    if (uploadModalController) {
+      uploadModalController.show();
+      return;
+    }
+    if (uploadModalElement) {
+      uploadModalElement.classList.add('show');
+      uploadModalElement.style.display = 'block';
+      uploadModalElement.removeAttribute('aria-hidden');
+    }
+  }
+
+  function showImagePreviewModal() {
+    if (imagePreviewModalController) {
+      imagePreviewModalController.show();
+      return;
+    }
+    if (imagePreviewModalElement) {
+      imagePreviewModalElement.classList.add('show');
+      imagePreviewModalElement.style.display = 'block';
+      imagePreviewModalElement.removeAttribute('aria-hidden');
+    }
+  }
+
+  function focusUploadedFiles() {
+    const uploadedParam = new URLSearchParams(window.location.search).get('uploaded') || '';
+    const uploadedNames = uploadedParam.split(',').map(function cleanName(uploadedName) { return uploadedName.trim(); }).filter(Boolean);
+    if (uploadedNames.length === 0) { return; }
+    let firstUploadedRow = null;
+    for (const uploadedName of uploadedNames) {
+      for (const rowElement of document.querySelectorAll('[data-file-row]')) {
+        if (rowElement.dataset.name !== uploadedName) { continue; }
+        rowElement.classList.add('uploaded-focus');
+        if (!firstUploadedRow) { firstUploadedRow = rowElement; }
+      }
+    }
+    if (firstUploadedRow) {
+      firstUploadedRow.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }
+  }
+
   function writeCopyFields() {
     for (const inputElement of document.querySelectorAll('[data-full-link]')) {
       inputElement.value = absoluteURL(inputElement.dataset.assetPath || '/');
     }
     for (const formElement of document.querySelectorAll('[data-access-form]')) {
-      updateTokenLink(formElement);
+      updateAccessControls(formElement);
     }
   }
 
-  function updateTokenLink(formElement) {
+  function updateAccessControls(formElement) {
     const tokenInputElement = formElement.querySelector('[data-access-token]');
     const tokenLinkElement = formElement.querySelector('[data-token-link]');
+    const tokenLinkRowElement = formElement.querySelector('[data-token-link-row]');
+    const timerControlElement = formElement.querySelector('[data-timer-control]');
+    const tokenControlElement = formElement.querySelector('[data-token-control]');
     const modeElement = formElement.querySelector('[data-access-mode]');
     if (!tokenInputElement || !tokenLinkElement || !modeElement) { return; }
+    const isTokenMode = modeElement.value === 'token';
+    const isTimerMode = modeElement.value === 'timer';
+    if (tokenControlElement) { tokenControlElement.classList.toggle('d-none', !isTokenMode); }
+    if (tokenLinkRowElement) { tokenLinkRowElement.classList.toggle('d-none', !isTokenMode); }
+    if (timerControlElement) { timerControlElement.classList.toggle('d-none', !isTimerMode); }
     const token = tokenInputElement.value.trim();
-    tokenLinkElement.value = modeElement.value === 'token' ? tokenURL(tokenLinkElement.dataset.assetPath || '/', token) : absoluteURL(tokenLinkElement.dataset.assetPath || '/');
+    tokenLinkElement.value = isTokenMode ? tokenURL(tokenLinkElement.dataset.assetPath || '/', token) : '';
+  }
+
+  function accessFormSnapshot(formElement) {
+    const modeElement = formElement.querySelector('[data-access-mode]');
+    const tokenInputElement = formElement.querySelector('[data-access-token]');
+    const timerControlElement = formElement.querySelector('[data-timer-control]');
+    return [
+      modeElement ? modeElement.value : '',
+      tokenInputElement ? tokenInputElement.value.trim() : '',
+      timerControlElement ? timerControlElement.value.trim() : ''
+    ].join('\n');
+  }
+
+  function updateSaveVisibility(formElement) {
+    const saveButtonElement = formElement.querySelector('[data-save-access]');
+    if (!saveButtonElement) { return; }
+    saveButtonElement.classList.toggle('d-none', accessFormSnapshot(formElement) === formElement.dataset.initialAccessState);
   }
 
   function copyText(text) {
@@ -230,15 +307,29 @@
     const modeElement = formElement.querySelector('[data-access-mode]');
     const tokenInputElement = formElement.querySelector('[data-access-token]');
     if (!modeElement || !tokenInputElement) { continue; }
+    updateAccessControls(formElement);
+    formElement.dataset.initialAccessState = accessFormSnapshot(formElement);
     modeElement.addEventListener('change', function onModeChange() {
       if (modeElement.value === 'token' && tokenInputElement.value.trim() === '') {
         tokenInputElement.value = randomToken();
       }
-      updateTokenLink(formElement);
+      const timerControlElement = formElement.querySelector('[data-timer-control]');
+      if (modeElement.value === 'timer' && timerControlElement && timerControlElement.value.trim() === '') {
+        timerControlElement.value = '30';
+      }
+      updateAccessControls(formElement);
+      updateSaveVisibility(formElement);
     });
     tokenInputElement.addEventListener('input', function onTokenInput() {
-      updateTokenLink(formElement);
+      updateAccessControls(formElement);
+      updateSaveVisibility(formElement);
     });
+    const timerControlElement = formElement.querySelector('[data-timer-control]');
+    if (timerControlElement) {
+      timerControlElement.addEventListener('input', function onTimerInput() {
+        updateSaveVisibility(formElement);
+      });
+    }
   }
 
   function sortRows(sortKind) {
@@ -278,7 +369,7 @@
       const body = new FormData(uploadFormElement);
       uploadProgressTextElement.textContent = 'Загрузка: 0%';
       setUploadPercent(0);
-      uploadModalController.show();
+      showUploadModal();
       request.upload.onprogress = function onUploadProgress(progressEvent) {
         if (!progressEvent.lengthComputable) { return; }
         const percent = progressEvent.loaded * 100 / progressEvent.total;
@@ -289,7 +380,14 @@
         if (request.status >= 200 && request.status < 300) {
           setUploadPercent(100);
           uploadProgressTextElement.textContent = 'Готово. Обновляем список...';
-          window.location.reload();
+          let uploadedFiles = [];
+          try {
+            const uploadPayload = JSON.parse(request.responseText || '{}');
+            uploadedFiles = Array.isArray(uploadPayload.files) ? uploadPayload.files : [];
+          } catch (parseError) {
+            uploadedFiles = [];
+          }
+          window.location.href = uploadedFiles.length > 0 ? uploadedFileURL(uploadedFiles) : window.location.href;
           return;
         }
         uploadProgressTextElement.textContent = request.responseText || 'Не удалось загрузить файлы.';
@@ -309,7 +407,7 @@
     const imageElement = previewImages[currentPreviewIndex];
     imagePreviewFullElement.src = imageElement.dataset.previewSrc || imageElement.src;
     imagePreviewTitleElement.textContent = imageElement.dataset.previewName || 'Preview';
-    imagePreviewModalController.show();
+    showImagePreviewModal();
   }
 
   previewImages.forEach(function connectPreview(imageElement, index) {
@@ -321,6 +419,7 @@
   document.getElementById('imagePreviewNext').addEventListener('click', function onNextClick() { showPreview(currentPreviewIndex + 1); });
 
   writeCopyFields();
+  focusUploadedFiles();
 })();
 </script>
 </body>

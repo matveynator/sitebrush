@@ -23,7 +23,7 @@
   </style>
 </head>
 <body>
-<form method="post" action="/save" class="raw-page">
+<form method="post" action="{{.Path}}?save" class="raw-page">
   <input type="hidden" name="path" value="{{.Path}}" />
   <input type="hidden" name="title" value="{{.Title}}" />
   <p class="document-kind">Document type: {{.ContentKind}}</p>

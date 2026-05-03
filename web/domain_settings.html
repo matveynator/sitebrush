@@ -10,24 +10,166 @@
   <meta charset="utf-8" />
   <title>{{index .T "domain_settings_title"}}</title>
   <style>
-    :root { color-scheme: light dark; --page-bg:#f4f8fc; --text-main:#1b2a3d; --hint:#4f5f79; --field-bg:#ffffff; --field-text:#12253f; --field-border:#b9c7db; --link:#1a65d8; }
-    @media (prefers-color-scheme: dark) { :root { --page-bg:#0f1724; --text-main:#dbe8ff; --hint:#9fb3cf; --field-bg:#0f1a2b; --field-text:#dbe8ff; --field-border:#334868; --link:#9ec2ff; } }
-    body { font-family: Arial, sans-serif; margin: 24px; max-width: 720px; background: var(--page-bg); color: var(--text-main); }
-    textarea { width: 100%; min-height: 140px; background: var(--field-bg); color: var(--field-text); border: 1px solid var(--field-border); }
-    .hint { color: var(--hint); }
+    :root {
+      color-scheme: light dark;
+      --page-bg:#f4f8fc;
+      --surface:#ffffff;
+      --surface-soft:#edf4fb;
+      --text-main:#1b2a3d;
+      --hint:#4f5f79;
+      --field-bg:#ffffff;
+      --field-text:#12253f;
+      --field-border:#b9c7db;
+      --link:#1a65d8;
+      --ok:#0b7a3b;
+      --bad:#b3261e;
+      --line:#d7e1ef;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --page-bg:#0f1724;
+        --surface:#121f32;
+        --surface-soft:#0d1727;
+        --text-main:#dbe8ff;
+        --hint:#9fb3cf;
+        --field-bg:#0f1a2b;
+        --field-text:#dbe8ff;
+        --field-border:#334868;
+        --link:#9ec2ff;
+        --ok:#6ee7a7;
+        --bad:#ff9b93;
+        --line:#263a57;
+      }
+    }
+    * { box-sizing: border-box; }
+    body { font-family: Arial, sans-serif; margin: 24px; max-width: 960px; background: var(--page-bg); color: var(--text-main); }
     a { color: var(--link); }
+    input, button { font: inherit; }
+    input[type="text"] { width: 100%; background: var(--field-bg); color: var(--field-text); border: 1px solid var(--field-border); border-radius: 6px; padding: 10px 12px; }
+    button { border: 1px solid var(--field-border); border-radius: 6px; padding: 9px 12px; background: var(--surface); color: var(--text-main); cursor: pointer; }
+    button.primary { background: var(--link); border-color: var(--link); color: #fff; }
+    button.danger { color: var(--bad); }
+    code { background: var(--surface-soft); border: 1px solid var(--line); border-radius: 6px; padding: 2px 6px; }
+    .hint { color: var(--hint); }
+    .dns-box, .alias-row { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 16px; }
+    .dns-box { margin: 18px 0; }
+    .add-form { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; align-items: center; margin: 18px 0; }
+    .alias-list { display: grid; gap: 12px; margin-top: 16px; }
+    .alias-header { display: flex; justify-content: space-between; gap: 12px; align-items: center; }
+    .alias-domain { font-weight: 700; word-break: break-all; }
+    .alias-actions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+    .status-list { display: flex; gap: 10px; flex-wrap: wrap; margin: 10px 0; }
+    .status-ok { color: var(--ok); }
+    .status-bad { color: var(--bad); }
+    .record-grid { display: grid; grid-template-columns: 110px minmax(0, 1fr); gap: 8px 12px; margin-top: 10px; }
+    .record-grid code { display: inline-block; word-break: break-all; }
+    .selected { border-color: var(--ok); }
+    .empty { color: var(--hint); padding: 18px 0; }
+    @media (max-width: 700px) {
+      body { margin: 16px; }
+      .add-form { grid-template-columns: 1fr; }
+      .alias-header { align-items: flex-start; flex-direction: column; }
+      .alias-actions { justify-content: flex-start; }
+      .record-grid { grid-template-columns: 1fr; }
+    }
   </style>
 </head>
 <body>
   <h1><a href="/">{{.Domain}}</a> | {{index .T "domain_settings_title"}}</h1>
   <p><a href="{{.ReturnPath}}">{{index .T "back_to_uri"}}</a></p>
+
   <p><strong>{{index .T "domain_settings_primary"}}</strong> {{.Domain}}</p>
-  <p class="hint">{{index .T "domain_settings_hint"}}</p>
-  <form method="post" action="?settings">
+  <p><strong>Selected domain:</strong> {{.SelectedDomain}}</p>
+  <p class="hint">If the selected domain is active, Sitebrush will request and renew a Let’s Encrypt certificate automatically on ports 80 and 443.</p>
+
+  <section class="dns-box">
+    <p><strong>DNS A record for aliases</strong></p>
+    {{if .ExternalIP}}
+      <p>Add an A record for every alias domain pointing to this server IP:</p>
+      <p><code>A</code> <code>@</code> <code>{{.ExternalIP}}</code></p>
+      <p class="hint">For a subdomain like www.example.com, set the host/name field to <code>www</code>.</p>
+    {{else}}
+      <p class="status-bad">Could not determine the external IP automatically.</p>
+      {{if .ExternalIPError}}<p class="hint">{{.ExternalIPError}}</p>{{end}}
+    {{end}}
+  </section>
+
+  {{if .CanAddAlias}}
+  <form class="add-form" method="post" action="?settings">
     <input type="hidden" name="return" value="{{.ReturnPath}}">
-    <label for="aliases">{{index .T "domain_settings_aliases"}}</label><br>
-    <textarea id="aliases" name="aliases" placeholder="example.net&#10;www.example.net">{{.Aliases}}</textarea><br><br>
-    <button type="submit">{{index .T "domain_settings_save"}}</button>
+    <input type="hidden" name="action" value="add_alias">
+    <input type="text" name="alias_domain" placeholder="example.com" autocomplete="off">
+    <button class="primary" type="submit">Save</button>
   </form>
+  {{else}}
+  <p class="hint">Alias limit reached: 10 domains.</p>
+  {{end}}
+
+  <form method="post" action="?settings" style="margin: 0 0 12px;">
+    <input type="hidden" name="return" value="{{.ReturnPath}}">
+    <input type="hidden" name="action" value="check_all">
+    <button type="submit">Check DNS now</button>
+  </form>
+
+  <form method="post" action="?settings" style="margin: 0 0 12px;">
+    <input type="hidden" name="return" value="{{.ReturnPath}}">
+    <input type="hidden" name="action" value="select_primary">
+    <button type="submit">Use primary domain</button>
+  </form>
+
+  {{if .Aliases}}
+  <div class="alias-list">
+    {{range .Aliases}}
+    <section class="alias-row {{if .IsSelected}}selected{{end}}">
+      <div class="alias-header">
+        <div>
+          <div class="alias-domain">{{.Domain}}</div>
+          {{if .IsSelected}}<div class="status-ok">Selected</div>{{end}}
+        </div>
+        <div class="alias-actions">
+          <form method="post" action="?settings">
+            <input type="hidden" name="return" value="{{$.ReturnPath}}">
+            <input type="hidden" name="action" value="check_alias">
+            <input type="hidden" name="alias_domain" value="{{.Domain}}">
+            <button type="submit">Check</button>
+          </form>
+          {{if .IsActive}}
+          <form method="post" action="?settings">
+            <input type="hidden" name="return" value="{{$.ReturnPath}}">
+            <input type="hidden" name="action" value="select_alias">
+            <input type="hidden" name="alias_domain" value="{{.Domain}}">
+            <button type="submit">Use domain</button>
+          </form>
+          {{end}}
+          <form method="post" action="?settings">
+            <input type="hidden" name="return" value="{{$.ReturnPath}}">
+            <input type="hidden" name="action" value="delete_alias">
+            <input type="hidden" name="alias_domain" value="{{.Domain}}">
+            <button class="danger" type="submit" aria-label="Delete {{.Domain}}">×</button>
+          </form>
+        </div>
+      </div>
+
+      <div class="status-list">
+        {{if .TXTVerified}}<span class="status-ok">TXT ok</span>{{else}}<span class="status-bad">TXT missing</span>{{end}}
+        {{if .ARecordVerified}}<span class="status-ok">A ok</span>{{else}}<span class="status-bad">A missing</span>{{end}}
+        {{if .IsActive}}<span class="status-ok">Active</span>{{else}}<span class="status-bad">Inactive</span>{{end}}
+      </div>
+
+      <div class="record-grid">
+        <span>TXT name</span><code>{{.Domain}}</code>
+        <span>TXT value</span><code>sitebrush={{.VerificationToken}}</code>
+        {{if $.ExternalIP}}
+        <span>A name</span><code>{{.Domain}}</code>
+        <span>A value</span><code>{{$.ExternalIP}}</code>
+        {{end}}
+      </div>
+      {{if .LastCheckedAt}}<p class="hint">Last checked: {{.LastCheckedAt}}</p>{{end}}
+    </section>
+    {{end}}
+  </div>
+  {{else}}
+  <p class="empty">No aliases yet.</p>
+  {{end}}
 </body>
 </html>

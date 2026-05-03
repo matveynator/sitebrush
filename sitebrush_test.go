@@ -6,12 +6,14 @@ import (
 	"context"
 	"database/sql"
 	"io"
+	"mime/multipart"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -212,7 +214,7 @@ func TestParseGrabSourceURLAcceptsCommonURLForms(t *testing.T) {
 }
 
 func TestStatusCapturingResponseWriterSupportsWebSocketHijack(t *testing.T) {
-	request := httptest.NewRequest(http.MethodGet, "/grab/ws?token=test", nil)
+	request := httptest.NewRequest(http.MethodGet, "/?grab_ws&token=test", nil)
 	request.Header.Set("Connection", "Upgrade")
 	request.Header.Set("Upgrade", "websocket")
 	request.Header.Set("Sec-WebSocket-Version", "13")
@@ -362,6 +364,265 @@ func TestManagedFilesVisibleForCurrentURIAndDescendants(t *testing.T) {
 	}
 	if names["other.png"] || names["legacy.png"] {
 		t.Fatalf("unexpected out-of-scope files, got %#v", names)
+	}
+}
+
+func TestAssetServingCountsDownloadsAndTokenUse(t *testing.T) {
+	storagePath := t.TempDir()
+	rawDB, err := sql.Open("sqlite3", filepath.Join(storagePath, "sitebrush.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rawDB.Close()
+
+	application := &App{db: rawDB, storagePath: storagePath, grabTracker: newGrabProgressTracker()}
+	if err := application.migrate(context.Background()); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	domainDir := application.domainFilesDirForDomain("localhost")
+	if err := os.MkdirAll(domainDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(domainDir, "token.png"), []byte("token image"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	application.upsertFileMetadata(context.Background(), "localhost", "token.png", "/docs", 11, "image/png", "test")
+	_, err = rawDB.Exec(`INSERT INTO file_access_rules(domain,file_name,access_mode,token,expires_at,single_use_left,token_use_count) VALUES(?,?,?,?,?,?,?)`, "localhost", "token.png", "token", "abc", "", 0, 0)
+	if err != nil {
+		t.Fatalf("insert token rule: %v", err)
+	}
+
+	request := httptest.NewRequest(http.MethodGet, "http://localhost:8080/p/token.png?token=abc", nil)
+	response := httptest.NewRecorder()
+	application.servePublicAsset(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("token asset status = %d, want 200", response.Code)
+	}
+
+	var downloadCount int64
+	if err := rawDB.QueryRow(`SELECT download_count FROM file_metadata WHERE domain=? AND file_name=?`, "localhost", "token.png").Scan(&downloadCount); err != nil {
+		t.Fatalf("read download count: %v", err)
+	}
+	if downloadCount != 1 {
+		t.Fatalf("download count = %d, want 1", downloadCount)
+	}
+
+	var tokenUseCount int64
+	if err := rawDB.QueryRow(`SELECT token_use_count FROM file_access_rules WHERE domain=? AND file_name=?`, "localhost", "token.png").Scan(&tokenUseCount); err != nil {
+		t.Fatalf("read token count: %v", err)
+	}
+	if tokenUseCount != 1 {
+		t.Fatalf("token use count = %d, want 1", tokenUseCount)
+	}
+}
+
+func TestUploadFilesStoresFilesForCurrentURI(t *testing.T) {
+	storagePath := t.TempDir()
+	rawDB, err := sql.Open("sqlite3", filepath.Join(storagePath, "sitebrush.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rawDB.Close()
+
+	application := &App{db: rawDB, storagePath: storagePath, grabTracker: newGrabProgressTracker()}
+	if err := application.migrate(context.Background()); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	var body bytes.Buffer
+	multipartWriter := multipart.NewWriter(&body)
+	fileWriter, err := multipartWriter.CreateFormFile("upload_files", "manual.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fileWriter.Write([]byte("manual upload")); err != nil {
+		t.Fatal(err)
+	}
+	if err := multipartWriter.WriteField("action", "upload"); err != nil {
+		t.Fatal(err)
+	}
+	if err := multipartWriter.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	request := httptest.NewRequest(http.MethodPost, "http://localhost:8080/docs?files", &body)
+	request.Header.Set("Content-Type", multipartWriter.FormDataContentType())
+	request.Header.Set("Accept", "application/json")
+	response := httptest.NewRecorder()
+
+	application.uploadFiles(response, request, "/docs")
+	if response.Code != http.StatusOK {
+		t.Fatalf("upload status = %d, body=%q", response.Code, response.Body.String())
+	}
+
+	storedPath := filepath.Join(application.domainFilesDirForDomain("localhost"), "manual.txt")
+	storedBytes, err := os.ReadFile(storedPath)
+	if err != nil {
+		t.Fatalf("read stored file: %v", err)
+	}
+	if string(storedBytes) != "manual upload" {
+		t.Fatalf("stored file = %q", string(storedBytes))
+	}
+
+	var pagePath string
+	if err := rawDB.QueryRow(`SELECT page_path FROM file_metadata WHERE domain=? AND file_name=?`, "localhost", "manual.txt").Scan(&pagePath); err != nil {
+		t.Fatalf("read upload metadata: %v", err)
+	}
+	if pagePath != "/docs" {
+		t.Fatalf("uploaded page path = %q, want /docs", pagePath)
+	}
+	if !strings.Contains(response.Body.String(), "manual.txt") {
+		t.Fatalf("upload response does not include filename: %q", response.Body.String())
+	}
+}
+
+func TestNormalizeDomainNameAcceptsBareDomainsAndRejectsInvalidNames(t *testing.T) {
+	testCases := map[string]string{
+		"sitebrush.com":                  "sitebrush.com",
+		"https://www.sitebrush.com/path": "www.sitebrush.com",
+		"www.sitebrush.com:443":          "www.sitebrush.com",
+		" localhost ":                    "",
+		"127.0.0.1":                      "",
+		"bad domain.com":                 "",
+	}
+	for rawDomain, expectedDomain := range testCases {
+		actualDomain := normalizeDomainName(rawDomain)
+		if actualDomain != expectedDomain {
+			t.Fatalf("normalizeDomainName(%q) = %q, want %q", rawDomain, actualDomain, expectedDomain)
+		}
+	}
+}
+
+func TestDomainAliasesRequireDNSVerificationBeforeResolving(t *testing.T) {
+	storagePath := t.TempDir()
+	rawDB, err := sql.Open("sqlite3", filepath.Join(storagePath, "sitebrush.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rawDB.Close()
+
+	application := &App{db: rawDB, storagePath: storagePath, grabTracker: newGrabProgressTracker()}
+	if err := application.migrate(context.Background()); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	previousTXTLookup := lookupTXTRecords
+	previousIPLookup := lookupIPRecords
+	defer func() {
+		lookupTXTRecords = previousTXTLookup
+		lookupIPRecords = previousIPLookup
+	}()
+
+	lookupTXTRecords = func(string) ([]string, error) {
+		return nil, os.ErrNotExist
+	}
+	lookupIPRecords = func(string) ([]net.IP, error) {
+		return []net.IP{net.ParseIP("203.0.113.10")}, nil
+	}
+
+	addForm := url.Values{}
+	addForm.Set("action", "add_alias")
+	addForm.Set("alias_domain", "example.com")
+	addRequest := httptest.NewRequest(http.MethodPost, "http://localhost:8080/?settings", strings.NewReader(addForm.Encode()))
+	addRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	application.handleDomainSettingsPost(addRequest.Context(), addRequest, "localhost", "203.0.113.10")
+
+	inactiveRequest := httptest.NewRequest(http.MethodGet, "http://example.com/", nil)
+	if domain := application.siteDomain(inactiveRequest.Context(), inactiveRequest); domain != "example.com" {
+		t.Fatalf("inactive alias resolved to %q, want request domain", domain)
+	}
+
+	var verificationToken string
+	if err := rawDB.QueryRow(`SELECT verification_token FROM domain_aliases WHERE primary_domain=? AND alias_domain=?`, "localhost", "example.com").Scan(&verificationToken); err != nil {
+		t.Fatalf("read verification token: %v", err)
+	}
+	lookupTXTRecords = func(string) ([]string, error) {
+		return []string{"sitebrush=" + verificationToken}, nil
+	}
+
+	checkForm := url.Values{}
+	checkForm.Set("action", "check_alias")
+	checkForm.Set("alias_domain", "example.com")
+	checkRequest := httptest.NewRequest(http.MethodPost, "http://localhost:8080/?settings", strings.NewReader(checkForm.Encode()))
+	checkRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	application.handleDomainSettingsPost(checkRequest.Context(), checkRequest, "localhost", "203.0.113.10")
+
+	activeRequest := httptest.NewRequest(http.MethodGet, "http://example.com/", nil)
+	if domain := application.siteDomain(activeRequest.Context(), activeRequest); domain != "localhost" {
+		t.Fatalf("active alias resolved to %q, want primary domain", domain)
+	}
+
+	selectForm := url.Values{}
+	selectForm.Set("action", "select_alias")
+	selectForm.Set("alias_domain", "example.com")
+	selectRequest := httptest.NewRequest(http.MethodPost, "http://localhost:8080/?settings", strings.NewReader(selectForm.Encode()))
+	selectRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	application.handleDomainSettingsPost(selectRequest.Context(), selectRequest, "localhost", "203.0.113.10")
+
+	var selectedCount int
+	if err := rawDB.QueryRow(`SELECT COUNT(1) FROM domain_aliases WHERE primary_domain=? AND alias_domain=? AND is_selected=1`, "localhost", "example.com").Scan(&selectedCount); err != nil {
+		t.Fatalf("read selected alias: %v", err)
+	}
+	if selectedCount != 1 {
+		t.Fatalf("selected aliases = %d, want 1", selectedCount)
+	}
+}
+
+func TestDomainAliasLimitIsTenDomains(t *testing.T) {
+	storagePath := t.TempDir()
+	rawDB, err := sql.Open("sqlite3", filepath.Join(storagePath, "sitebrush.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rawDB.Close()
+
+	application := &App{db: rawDB, storagePath: storagePath, grabTracker: newGrabProgressTracker()}
+	if err := application.migrate(context.Background()); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	for aliasIndex := 0; aliasIndex < 11; aliasIndex++ {
+		addForm := url.Values{}
+		addForm.Set("action", "add_alias")
+		addForm.Set("alias_domain", "alias"+strconv.Itoa(aliasIndex)+".example.com")
+		addRequest := httptest.NewRequest(http.MethodPost, "http://localhost:8080/?settings", strings.NewReader(addForm.Encode()))
+		addRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		application.handleDomainSettingsPost(addRequest.Context(), addRequest, "localhost", "")
+	}
+
+	if aliasCount := application.domainAliasCount(context.Background(), "localhost"); aliasCount != 10 {
+		t.Fatalf("alias count = %d, want 10", aliasCount)
+	}
+}
+
+func TestListenOnAvailablePortFallsBackWhenRequestedPortIsBusy(t *testing.T) {
+	busyListener, err := net.Listen("tcp", ":0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer busyListener.Close()
+
+	_, portText, err := net.SplitHostPort(busyListener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	busyPort, err := strconv.Atoi(portText)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	fallbackListener, fallbackPort, err := listenOnAvailablePort(busyPort)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fallbackListener.Close()
+
+	if fallbackPort == busyPort {
+		t.Fatalf("fallback port = busy port %d", busyPort)
+	}
+	if fallbackPort < 9898 {
+		t.Fatalf("fallback port = %d, want 9898 or higher", fallbackPort)
 	}
 }
 
