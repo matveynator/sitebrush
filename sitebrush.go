@@ -52,9 +52,10 @@ const grabResourceMaxDepth = 64
 
 // App keeps only explicit dependencies to stay readable and easy to swap.
 type App struct {
-	db          *sql.DB
-	storagePath string
-	grabTracker *grabProgressTracker
+	db               *sql.DB
+	storagePath      string
+	nativeFileDialog bool
+	grabTracker      *grabProgressTracker
 }
 
 type grabProgressEvent struct {
@@ -81,13 +82,24 @@ type grabPreviewResponse struct {
 	Resources     []grabResourcePreview `json:"resources"`
 }
 
+type nativePickedFile struct {
+	Name    string `json:"name"`
+	Mime    string `json:"mime"`
+	Content string `json:"content"`
+}
+
+type nativePickedFilesResponse struct {
+	Files []nativePickedFile `json:"files"`
+}
+
 type Page struct {
-	Domain      string
-	Path        string
-	Title       string
-	HTML        string
-	ContentKind string
-	Published   int
+	Domain           string
+	Path             string
+	Title            string
+	HTML             string
+	ContentKind      string
+	Published        int
+	NativeFileDialog bool
 }
 
 type Revision struct {
@@ -273,7 +285,7 @@ func main() {
 	}
 	defer database.Close()
 
-	application := &App{db: database, storagePath: effectiveStoragePath, grabTracker: newGrabProgressTracker()}
+	application := &App{db: database, storagePath: effectiveStoragePath, nativeFileDialog: desktop.NativeFileDialogSupported(), grabTracker: newGrabProgressTracker()}
 	if err = application.migrate(context.Background()); err != nil {
 		log.Fatal(err)
 	}
@@ -478,6 +490,10 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 	}
 	if hasQueryFlag(r, "tree") {
 		a.siteTreeJSON(w, r)
+		return
+	}
+	if hasQueryFlag(r, "native_pick_files") {
+		a.nativePickedFilesJSON(w, r)
 		return
 	}
 	if hasQueryFlag(r, "edit") {
@@ -688,6 +704,7 @@ func (a *App) editPage(w http.ResponseWriter, r *http.Request) {
 	if record.Path == "" {
 		record = Page{Path: pagePath, Title: pagePath, HTML: a.defaultHTMLForNewPage(r.Context(), domain, pagePath)}
 	}
+	record.NativeFileDialog = a.nativeFileDialog
 	a.render(w, r, "edit.html", record)
 }
 
@@ -864,15 +881,20 @@ func (a *App) grabPage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "source_url is required", http.StatusBadRequest)
 		return
 	}
+	sourceIP, err := parseOptionalGrabSourceIP(r.FormValue("source_ip"))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 
-	remoteSourceURL, err := parseGrabSourceURL(sourceURL)
+	remoteSourceURL, err := parseGrabSourceURLForServerIP(sourceURL, sourceIP)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 	sourceURL = remoteSourceURL.String()
 
-	htmlBytes, err := downloadGrabSourceHTML(sourceURL)
+	htmlBytes, err := downloadGrabSourceHTML(sourceURL, sourceIP)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
@@ -881,7 +903,7 @@ func (a *App) grabPage(w http.ResponseWriter, r *http.Request) {
 	domain := a.siteDomain(r.Context(), r)
 	progressToken := strings.TrimSpace(r.FormValue("progress_token"))
 	selectedResourceURLs := selectedGrabResourceURLs(r)
-	html := a.mirrorRemotePage(domain, pagePath, sourceURL, remoteSourceURL, string(htmlBytes), progressToken, selectedResourceURLs)
+	html := a.mirrorRemotePage(domain, pagePath, sourceURL, remoteSourceURL, string(htmlBytes), progressToken, selectedResourceURLs, sourceIP)
 	_, _ = a.db.ExecContext(r.Context(), `INSERT OR REPLACE INTO pages(domain,path,title,html,published) VALUES(?,?,?,?,1)`, domain, pagePath, pagePath, html)
 	if !a.isDomainFrozen(r.Context(), domain) {
 		_, _ = a.db.ExecContext(r.Context(), `INSERT OR REPLACE INTO published_pages(domain,path,title,html) VALUES(?,?,?,?)`, domain, pagePath, pagePath, html)
@@ -905,18 +927,23 @@ func (a *App) grabPreview(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "source_url is required", http.StatusBadRequest)
 		return
 	}
-	remoteSourceURL, err := parseGrabSourceURL(sourceURL)
+	sourceIP, err := parseOptionalGrabSourceIP(r.FormValue("source_ip"))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	remoteSourceURL, err := parseGrabSourceURLForServerIP(sourceURL, sourceIP)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 	sourceURL = remoteSourceURL.String()
-	htmlBytes, err := downloadGrabSourceHTML(sourceURL)
+	htmlBytes, err := downloadGrabSourceHTML(sourceURL, sourceIP)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
-	resources := previewGrabResources(remoteSourceURL, string(htmlBytes))
+	resources := previewGrabResources(remoteSourceURL, string(htmlBytes), sourceIP)
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(grabPreviewResponse{
 		SourceURL:     remoteSourceURL.String(),
@@ -926,6 +953,10 @@ func (a *App) grabPreview(w http.ResponseWriter, r *http.Request) {
 }
 
 func parseGrabSourceURL(sourceURL string) (*url.URL, error) {
+	return parseGrabSourceURLForServerIP(sourceURL, "")
+}
+
+func parseGrabSourceURLForServerIP(sourceURL, sourceIP string) (*url.URL, error) {
 	trimmedSourceURL := strings.TrimSpace(sourceURL)
 	if trimmedSourceURL == "" {
 		return nil, errors.New("source_url is required")
@@ -934,7 +965,7 @@ func parseGrabSourceURL(sourceURL string) (*url.URL, error) {
 		trimmedSourceURL = "https:" + trimmedSourceURL
 	}
 	if !strings.Contains(trimmedSourceURL, "://") {
-		trimmedSourceURL = defaultGrabScheme(trimmedSourceURL) + "://" + trimmedSourceURL
+		trimmedSourceURL = defaultGrabSchemeForServerIP(trimmedSourceURL, sourceIP) + "://" + trimmedSourceURL
 	}
 	remoteSourceURL, err := url.Parse(trimmedSourceURL)
 	if err != nil || remoteSourceURL.Hostname() == "" || (remoteSourceURL.Scheme != "http" && remoteSourceURL.Scheme != "https") {
@@ -944,6 +975,13 @@ func parseGrabSourceURL(sourceURL string) (*url.URL, error) {
 }
 
 func defaultGrabScheme(sourceURL string) string {
+	return defaultGrabSchemeForServerIP(sourceURL, "")
+}
+
+func defaultGrabSchemeForServerIP(sourceURL, sourceIP string) string {
+	if strings.TrimSpace(sourceIP) != "" {
+		return "http"
+	}
 	hostCandidate := sourceURL
 	if slashIndex := strings.Index(hostCandidate, "/"); slashIndex >= 0 {
 		hostCandidate = hostCandidate[:slashIndex]
@@ -957,12 +995,28 @@ func defaultGrabScheme(sourceURL string) string {
 	return "https"
 }
 
+func parseOptionalGrabSourceIP(rawSourceIP string) (string, error) {
+	trimmedSourceIP := strings.TrimSpace(rawSourceIP)
+	if trimmedSourceIP == "" {
+		return "", nil
+	}
+	parsedIP := net.ParseIP(trimmedSourceIP)
+	if parsedIP == nil {
+		return "", errors.New("source_ip is invalid")
+	}
+	return parsedIP.String(), nil
+}
+
 func wantsJSONResponse(r *http.Request) bool {
 	return strings.Contains(strings.ToLower(r.Header.Get("Accept")), "application/json")
 }
 
-func downloadGrabSourceHTML(sourceURL string) ([]byte, error) {
-	response, err := newGrabHTTPClient().Get(sourceURL)
+func downloadGrabSourceHTML(sourceURL, sourceIP string) ([]byte, error) {
+	remoteSourceURL, err := url.Parse(sourceURL)
+	if err != nil {
+		return nil, errors.New("source_url is invalid")
+	}
+	response, err := newGrabHTTPClientForServerIP(remoteSourceURL.Hostname(), sourceIP).Get(sourceURL)
 	if err != nil {
 		return nil, errors.New("failed to download source page")
 	}
@@ -992,8 +1046,8 @@ func selectedGrabResourceURLs(r *http.Request) map[string]struct{} {
 	return selectedResourceURLs
 }
 
-func previewGrabResources(pageURL *url.URL, htmlSource string) []grabResourcePreview {
-	spider := newPageSpider("", pageURL, grabResourceMaxDepth, nil, "")
+func previewGrabResources(pageURL *url.URL, htmlSource, sourceIP string) []grabResourcePreview {
+	spider := newPageSpider("", pageURL, grabResourceMaxDepth, nil, "", sourceIP)
 	rootResource := &mirroredResource{url: pageURL.String(), content: []byte(htmlSource)}
 	spider.resources[pageURL.String()] = rootResource
 	spider.rewriteNestedResources(rootResource, 0, "text/html")
@@ -1346,6 +1400,45 @@ func (a *App) filesPage(w http.ResponseWriter, r *http.Request) {
 		fileList[index].TokenUseCount = accessRule.TokenUseCount
 	}
 	a.render(w, r, "files.html", map[string]any{"Path": currentPath, "Files": fileList})
+}
+
+func (a *App) nativePickedFilesJSON(w http.ResponseWriter, r *http.Request) {
+	if !a.isAdminRequest(r) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	selectedPaths, err := desktop.PickFiles()
+	if err != nil {
+		if errors.Is(err, desktop.ErrNativeDialogCanceled) {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(nativePickedFilesResponse{Files: []nativePickedFile{}})
+			return
+		}
+		http.Error(w, err.Error(), http.StatusNotImplemented)
+		return
+	}
+	pickedFiles := make([]nativePickedFile, 0, len(selectedPaths))
+	for _, selectedPath := range selectedPaths {
+		fileInfo, statErr := os.Stat(selectedPath)
+		if statErr != nil || fileInfo.IsDir() {
+			continue
+		}
+		fileBytes, readErr := os.ReadFile(selectedPath)
+		if readErr != nil {
+			continue
+		}
+		mimeType := mime.TypeByExtension(path.Ext(selectedPath))
+		if mimeType == "" {
+			mimeType = http.DetectContentType(fileBytes)
+		}
+		pickedFiles = append(pickedFiles, nativePickedFile{
+			Name:    filepath.Base(selectedPath),
+			Mime:    mimeType,
+			Content: base64.StdEncoding.EncodeToString(fileBytes),
+		})
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(nativePickedFilesResponse{Files: pickedFiles})
 }
 
 func (a *App) servePublicAsset(w http.ResponseWriter, r *http.Request) {
@@ -2440,8 +2533,8 @@ func resourceExtension(rawRef string) string {
 	return strings.ToLower(path.Ext(withoutQuery))
 }
 
-func (a *App) mirrorRemotePage(domain, pagePath, sourceURL string, pageURL *url.URL, fallbackHTML, progressToken string, selectedResourceURLs map[string]struct{}) string {
-	spider := newPageSpider(domain, pageURL, grabResourceMaxDepth, a.grabTracker, progressToken)
+func (a *App) mirrorRemotePage(domain, pagePath, sourceURL string, pageURL *url.URL, fallbackHTML, progressToken string, selectedResourceURLs map[string]struct{}, sourceIP string) string {
+	spider := newPageSpider(domain, pageURL, grabResourceMaxDepth, a.grabTracker, progressToken, sourceIP)
 	spider.selectedResourceURLs = selectedResourceURLs
 	rootResource := &mirroredResource{url: sourceURL, content: []byte(fallbackHTML)}
 	spider.resources[sourceURL] = rootResource
@@ -2488,6 +2581,7 @@ type pageSpider struct {
 	pageURL              *url.URL
 	maxDepth             int
 	client               *http.Client
+	sourceIP             string
 	resources            map[string]*mirroredResource
 	inFlight             map[string]bool
 	selectedResourceURLs map[string]struct{}
@@ -2508,12 +2602,36 @@ var (
 	}
 )
 
-func newPageSpider(domain string, pageURL *url.URL, maxDepth int, tracker *grabProgressTracker, progressToken string) *pageSpider {
+func newGrabHTTPClientForServerIP(sourceHost, sourceIP string) *http.Client {
+	trimmedSourceIP := strings.TrimSpace(sourceIP)
+	if trimmedSourceIP == "" {
+		return newGrabHTTPClient()
+	}
+	parsedIP := net.ParseIP(trimmedSourceIP)
+	if parsedIP == nil {
+		return newGrabHTTPClient()
+	}
+	sourceHost = strings.TrimSpace(strings.ToLower(sourceHost))
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.Proxy = nil
+	dialer := &net.Dialer{Timeout: 20 * time.Second}
+	transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+		host, port, splitErr := net.SplitHostPort(address)
+		if splitErr == nil && strings.EqualFold(host, sourceHost) {
+			address = net.JoinHostPort(parsedIP.String(), port)
+		}
+		return dialer.DialContext(ctx, network, address)
+	}
+	return &http.Client{Timeout: 20 * time.Second, Transport: transport}
+}
+
+func newPageSpider(domain string, pageURL *url.URL, maxDepth int, tracker *grabProgressTracker, progressToken, sourceIP string) *pageSpider {
 	return &pageSpider{
 		domain:        domain,
 		pageURL:       pageURL,
 		maxDepth:      maxDepth,
-		client:        newGrabHTTPClient(),
+		client:        newGrabHTTPClientForServerIP(pageURL.Hostname(), sourceIP),
+		sourceIP:      sourceIP,
 		resources:     make(map[string]*mirroredResource),
 		inFlight:      make(map[string]bool),
 		tracker:       tracker,

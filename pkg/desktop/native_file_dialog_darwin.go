@@ -41,3 +41,7 @@ func PickFiles() ([]string, error) {
 
 	return selectedPaths, nil
 }
+
+func NativeFileDialogSupported() bool {
+	return true
+}

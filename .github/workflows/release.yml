@@ -178,6 +178,16 @@ jobs:
         shell: pwsh
         run: go mod tidy
 
+      - name: Install Windows ARM64 CGO toolchain
+        if: runner.os == 'Windows' && matrix.goarch == 'arm64'
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: CLANGARM64
+          update: true
+          path-type: inherit
+          install: >-
+            mingw-w64-clang-aarch64-toolchain
+
       - name: Build desktop (POSIX)
         if: runner.os != 'Windows'
         shell: bash
@@ -264,6 +274,10 @@ jobs:
           CGO_ENABLED: 1
         run: |
           $ErrorActionPreference = "Stop"
+          if ("${{ matrix.goarch }}" -eq "arm64") {
+            $env:CC = "clang --target=aarch64-w64-windows-gnu"
+            $env:CXX = "clang++ --target=aarch64-w64-windows-gnu"
+          }
           $version = "${{ github.run_number }}"
           New-Item -Force -ItemType Directory dist | Out-Null
           $bin = "sitebrush_${{ matrix.goos }}_${{ matrix.goarch }}_desktop.exe"

@@ -12,15 +12,67 @@
   <title>{{index .T "edit_title_prefix"}} {{.Path}}</title>
   <link rel="stylesheet" href="/p/static/jodit.min.css" />
   <style>
-    :root { color-scheme: light dark; --page-bg:#f4f8fc; --text-main:#1b2a3d; }
-    @media (prefers-color-scheme: dark) { :root { --page-bg:#0f1724; --text-main:#dbe8ff; } }
+    :root {
+      color-scheme: light dark;
+      --page-bg:#f4f8fc;
+      --text-main:#1b2a3d;
+      --surface:#ffffff;
+      --surface-soft:#edf4fb;
+      --line:#d7e1ef;
+      --field-bg:#ffffff;
+      --field-text:#12253f;
+      --field-border:#b9c7db;
+      --link:#1a65d8;
+      --bad:#b3261e;
+      --hint:#4f5f79;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --page-bg:#0f1724;
+        --text-main:#dbe8ff;
+        --surface:#121f32;
+        --surface-soft:#0d1727;
+        --line:#263a57;
+        --field-bg:#0f1a2b;
+        --field-text:#dbe8ff;
+        --field-border:#334868;
+        --link:#9ec2ff;
+        --bad:#ff9b93;
+        --hint:#9fb3cf;
+      }
+    }
     html, body { height: 100%; margin: 0; }
     body { background: var(--page-bg); color: var(--text-main); font-family: Arial, sans-serif; }
+    input, select, button { font: inherit; }
     .editor-page { height: 100%; display: flex; flex-direction: column; padding: 0; box-sizing: border-box; }
     .editor-host { flex: 1; min-height: 100vh; }
     .jodit-container:not(.jodit_inline) { height: 100% !important; border: 0 !important; border-radius: 0 !important; }
     .jodit-workplace { min-height: calc(100vh - 56px) !important; }
     .jodit-status-bar { display: none; }
+    .SiteBrushUploadOverlay { position: fixed; inset: 0; z-index: 2147483647; display: none; align-items: center; justify-content: center; padding: 20px; background: rgba(7, 15, 28, .55); }
+    .SiteBrushUploadOverlay.is-open { display: flex; }
+    .SiteBrushUploadModal { width: min(620px, 100%); max-height: calc(100vh - 40px); overflow: auto; background: var(--surface); color: var(--text-main); border: 1px solid var(--line); border-radius: 8px; box-shadow: 0 20px 60px rgba(0,0,0,.35); }
+    .SiteBrushUploadHeader, .SiteBrushUploadFooter { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 14px 16px; border-bottom: 1px solid var(--line); }
+    .SiteBrushUploadFooter { border-top: 1px solid var(--line); border-bottom: 0; justify-content: flex-end; }
+    .SiteBrushUploadBody { display: grid; gap: 14px; padding: 16px; }
+    .SiteBrushUploadTitle { margin: 0; font-size: 18px; line-height: 1.25; }
+    .SiteBrushUploadField { display: grid; gap: 6px; font-weight: 700; }
+    .SiteBrushUploadField input, .SiteBrushUploadField select { width: 100%; box-sizing: border-box; border: 1px solid var(--field-border); border-radius: 6px; padding: 9px 10px; background: var(--field-bg); color: var(--field-text); }
+    .SiteBrushUploadHint { color: var(--hint); font-size: 13px; line-height: 1.4; }
+    .SiteBrushUploadError { color: var(--bad); font-size: 13px; min-height: 18px; }
+    .SiteBrushUploadPreview { max-width: 100%; max-height: 240px; object-fit: contain; background: var(--surface-soft); border: 1px solid var(--line); border-radius: 6px; justify-self: start; }
+    .SiteBrushUploadActions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+    .SiteBrushUploadButton { border: 1px solid var(--field-border); border-radius: 6px; padding: 9px 12px; background: var(--surface); color: var(--text-main); cursor: pointer; }
+    .SiteBrushUploadButton.primary { background: var(--link); border-color: var(--link); color: #fff; }
+    .SiteBrushUploadButton[disabled] { opacity: .6; cursor: default; }
+    .SiteBrushUploadClose { border: 0; background: transparent; color: var(--text-main); font-size: 24px; line-height: 1; cursor: pointer; }
+    .SiteBrushUploadResizeGrid { display: grid; grid-template-columns: minmax(0, 1fr) 120px; gap: 8px; align-items: end; }
+    .SiteBrushUploadHidden { display: none; }
+    @media (max-width: 620px) {
+      .SiteBrushUploadResizeGrid { grid-template-columns: 1fr; }
+      .SiteBrushUploadFooter { justify-content: stretch; }
+      .SiteBrushUploadActions, .SiteBrushUploadButton { width: 100%; }
+    }
   </style>
 </head>
 <body>
@@ -30,10 +82,88 @@
   <input type="hidden" id="htmlContentField" name="html" />
   <textarea id="visualEditorRoot" class="editor-host">{{.HTML}}</textarea>
 </form>
+
+<div id="uploadDialogOverlay" class="SiteBrushUploadOverlay" role="dialog" aria-modal="true" aria-labelledby="uploadDialogTitle">
+  <div class="SiteBrushUploadModal">
+    <div class="SiteBrushUploadHeader">
+      <h2 id="uploadDialogTitle" class="SiteBrushUploadTitle">Upload file</h2>
+      <button id="uploadDialogClose" class="SiteBrushUploadClose" type="button" aria-label="Close">&times;</button>
+    </div>
+    <div class="SiteBrushUploadBody">
+      <div id="uploadDialogQueue" class="SiteBrushUploadHint"></div>
+      <img id="uploadDialogPreview" class="SiteBrushUploadPreview SiteBrushUploadHidden" alt="">
+      <label class="SiteBrushUploadField">
+        File name
+        <input id="uploadDialogName" type="text" autocomplete="off">
+      </label>
+      <div id="uploadDialogImageControls" class="SiteBrushUploadResizeGrid SiteBrushUploadHidden">
+        <label class="SiteBrushUploadField">
+          Image size
+          <select id="uploadDialogResizeMode">
+            <option value="original">Upload as is</option>
+            <option value="600">Max side 600 px</option>
+            <option value="800">Max side 800 px</option>
+            <option value="1200">Max side 1200 px</option>
+            <option value="2000">Max side 2000 px</option>
+            <option value="custom">Custom</option>
+          </select>
+        </label>
+        <label id="uploadDialogCustomSizeField" class="SiteBrushUploadField SiteBrushUploadHidden">
+          Pixels
+          <input id="uploadDialogCustomSize" type="number" min="16" max="12000" step="1" value="1200">
+        </label>
+      </div>
+      <div id="uploadDialogMeta" class="SiteBrushUploadHint"></div>
+      <div id="uploadDialogError" class="SiteBrushUploadError"></div>
+    </div>
+    <div class="SiteBrushUploadFooter">
+      <div class="SiteBrushUploadActions">
+        <button id="uploadDialogSkip" class="SiteBrushUploadButton" type="button">Skip</button>
+        <button id="uploadDialogUpload" class="SiteBrushUploadButton primary" type="button">Upload</button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <script src="/p/static/jodit.min.js"></script>
 <script>
-const initialHtmlContent = {{printf "%q" .HTML}};
-const currentPagePath = {{printf "%q" .Path}};
+const initialHtmlContent = {{.HTML}};
+const currentPagePath = {{.Path}};
+const desktopNativeFilePickerEnabled = {{.NativeFileDialog}};
+const uploadResizeModeStorageKey = 'sitebrush.visualUploadResizeMode';
+const uploadCustomSizeStorageKey = 'sitebrush.visualUploadCustomSize';
+
+const uploadDialogState = {
+  editor: null,
+  files: [],
+  index: 0,
+  pickerInput: null,
+  resizeMode: normalizedResizeMode(storedUploadPreference(uploadResizeModeStorageKey, 'original')),
+  customSize: storedUploadPreference(uploadCustomSizeStorageKey, '1200'),
+  resolver: null
+};
+
+function storedUploadPreference(storageKey, fallbackValue) {
+  try {
+    return window.localStorage.getItem(storageKey) || fallbackValue;
+  } catch (storageError) {
+    return fallbackValue;
+  }
+}
+
+function storeUploadPreference(storageKey, storedValue) {
+  try {
+    window.localStorage.setItem(storageKey, storedValue);
+  } catch (storageError) {
+  }
+}
+
+function normalizedResizeMode(resizeMode) {
+  if (resizeMode === 'original' || resizeMode === '600' || resizeMode === '800' || resizeMode === '1200' || resizeMode === '2000' || resizeMode === 'custom') {
+    return resizeMode;
+  }
+  return 'original';
+}
 
 function submitVisualEditorForm(visualHtmlEditor) {
   const visualEditorFormElement = document.getElementById('visualEditorForm');
@@ -42,7 +172,7 @@ function submitVisualEditorForm(visualHtmlEditor) {
   visualEditorFormElement.submit();
 }
 
-function uploadedImageURL(uploadPayload) {
+function uploadedFileURL(uploadPayload) {
   if (Array.isArray(uploadPayload.paths) && uploadPayload.paths.length > 0) {
     return uploadPayload.paths[0];
   }
@@ -52,60 +182,404 @@ function uploadedImageURL(uploadPayload) {
   return '';
 }
 
-function insertImageIntoEditor(visualHtmlEditor, imageURL, imageAltText) {
-  if (!imageURL) {
-    return;
-  }
-  if (visualHtmlEditor.selection && typeof visualHtmlEditor.selection.insertImage === 'function') {
-    visualHtmlEditor.selection.insertImage(imageURL, null, 300);
-    return;
-  }
-  if (visualHtmlEditor.s && typeof visualHtmlEditor.s.insertImage === 'function') {
-    visualHtmlEditor.s.insertImage(imageURL, null, 300);
-    return;
-  }
-  const imageHtml = '<img src="' + imageURL.replace(/"/g, '&quot;') + '" alt="' + imageAltText.replace(/"/g, '&quot;') + '">';
+function escapeHTMLAttribute(attributeValue) {
+  return String(attributeValue || '').replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+function insertHTMLIntoEditor(visualHtmlEditor, htmlText) {
   if (visualHtmlEditor.selection && typeof visualHtmlEditor.selection.insertHTML === 'function') {
-    visualHtmlEditor.selection.insertHTML(imageHtml);
+    visualHtmlEditor.selection.insertHTML(htmlText);
     return;
   }
   if (typeof visualHtmlEditor.execCommand === 'function') {
-    visualHtmlEditor.execCommand('insertHTML', false, imageHtml);
+    visualHtmlEditor.execCommand('insertHTML', false, htmlText);
   }
 }
 
-function chooseAndUploadImage(visualHtmlEditor) {
-  const imageInputElement = document.createElement('input');
-  imageInputElement.type = 'file';
-  imageInputElement.accept = 'image/*';
-  imageInputElement.addEventListener('change', function onImageSelected() {
-    if (!imageInputElement.files || imageInputElement.files.length === 0) {
+function insertUploadedFileIntoEditor(visualHtmlEditor, fileURL, fileName, fileType, imageWidth, imageHeight) {
+  if (!fileURL) {
+    return;
+  }
+  if (String(fileType || '').toLowerCase().indexOf('image/') === 0) {
+    let sizeAttributes = '';
+    if (imageWidth > 0 && imageHeight > 0) {
+      sizeAttributes = ' width="' + String(Math.round(imageWidth)) + '" height="' + String(Math.round(imageHeight)) + '"';
+    }
+    insertHTMLIntoEditor(visualHtmlEditor, '<img src="' + escapeHTMLAttribute(fileURL) + '" alt="' + escapeHTMLAttribute(fileName) + '"' + sizeAttributes + '>');
+    return;
+  }
+  insertHTMLIntoEditor(visualHtmlEditor, '<a href="' + escapeHTMLAttribute(fileURL) + '">' + escapeHTMLAttribute(fileName) + '</a>');
+}
+
+function base64ToBlob(base64Content, mimeType) {
+  const binaryString = window.atob(base64Content);
+  const byteArrays = [];
+  for (let offset = 0; offset < binaryString.length; offset += 8192) {
+    const slice = binaryString.slice(offset, offset + 8192);
+    const byteNumbers = new Array(slice.length);
+    for (let index = 0; index < slice.length; index++) {
+      byteNumbers[index] = slice.charCodeAt(index);
+    }
+    byteArrays.push(new Uint8Array(byteNumbers));
+  }
+  return new Blob(byteArrays, { type: mimeType || 'application/octet-stream' });
+}
+
+function fileExtension(fileName, mimeType) {
+  const dotIndex = String(fileName || '').lastIndexOf('.');
+  if (dotIndex >= 0 && dotIndex < fileName.length - 1) {
+    return fileName.slice(dotIndex);
+  }
+  const normalizedType = String(mimeType || '').toLowerCase();
+  if (normalizedType === 'image/jpeg') { return '.jpg'; }
+  if (normalizedType === 'image/png') { return '.png'; }
+  if (normalizedType === 'image/webp') { return '.webp'; }
+  if (normalizedType === 'image/gif') { return '.gif'; }
+  if (normalizedType === 'image/svg+xml') { return '.svg'; }
+  return '';
+}
+
+function humanFileSize(fileSize) {
+  if (fileSize < 1024) { return fileSize + ' B'; }
+  if (fileSize < 1024 * 1024) { return (fileSize / 1024).toFixed(1) + ' KB'; }
+  return (fileSize / 1024 / 1024).toFixed(1) + ' MB';
+}
+
+function bytesToHex(byteBuffer) {
+  return Array.from(new Uint8Array(byteBuffer)).map(function byteToHex(byteValue) {
+    return byteValue.toString(16).padStart(2, '0');
+  }).join('');
+}
+
+function fallbackHashFileName(selectedFile) {
+  const safeFile = selectedFile || {};
+  const hashSource = String(safeFile.name || '') + ':' + String(safeFile.size || 0) + ':' + String(safeFile.lastModified || 0);
+  let hashValue = 2166136261;
+  for (let index = 0; index < hashSource.length; index++) {
+    hashValue ^= hashSource.charCodeAt(index);
+    hashValue = Math.imul(hashValue, 16777619);
+  }
+  return (hashValue >>> 0).toString(16).padStart(8, '0') + fileExtension(safeFile.name, safeFile.type);
+}
+
+function hashFileName(selectedFile) {
+  if (!selectedFile || typeof selectedFile.arrayBuffer !== 'function' || !window.crypto || !window.crypto.subtle) {
+    return Promise.resolve(fallbackHashFileName(selectedFile));
+  }
+  return selectedFile.arrayBuffer()
+    .then(function calculateDigest(fileBuffer) {
+      return window.crypto.subtle.digest('SHA-256', fileBuffer);
+    })
+    .then(function buildName(hashBuffer) {
+      return bytesToHex(hashBuffer).slice(0, 32) + fileExtension(selectedFile.name, selectedFile.type);
+    });
+}
+
+function isResizableImage(selectedFile) {
+  const fileType = String(selectedFile.type || '').toLowerCase();
+  return fileType.indexOf('image/') === 0 && fileType !== 'image/svg+xml' && fileType !== 'image/gif';
+}
+
+function openImagePreview(selectedFile, previewElement) {
+  if (!String(selectedFile.type || '').toLowerCase().startsWith('image/')) {
+    previewElement.classList.add('SiteBrushUploadHidden');
+    previewElement.removeAttribute('src');
+    return;
+  }
+  const previewURL = URL.createObjectURL(selectedFile);
+  previewElement.onload = function revokePreviewURL() {
+    URL.revokeObjectURL(previewURL);
+  };
+  previewElement.onerror = function hideBrokenPreview() {
+    URL.revokeObjectURL(previewURL);
+    previewElement.classList.add('SiteBrushUploadHidden');
+    previewElement.removeAttribute('src');
+  };
+  previewElement.src = previewURL;
+  previewElement.classList.remove('SiteBrushUploadHidden');
+}
+
+function namedUploadFile(fileContent, fileName, mimeType) {
+  const normalizedType = mimeType || 'application/octet-stream';
+  if (typeof File === 'function') {
+    return new File([fileContent], fileName, { type: normalizedType });
+  }
+  const uploadBlob = fileContent instanceof Blob ? fileContent : new Blob([fileContent], { type: normalizedType });
+  uploadBlob.name = fileName;
+  uploadBlob.lastModified = Date.now();
+  return uploadBlob;
+}
+
+function uploadFileResult(uploadFile, imageWidth, imageHeight) {
+  return {
+    file: uploadFile,
+    width: imageWidth || 0,
+    height: imageHeight || 0
+  };
+}
+
+function scaledImageSize(sourceWidth, sourceHeight, maxSide) {
+  if (!sourceWidth || !sourceHeight || !maxSide || maxSide <= 0) {
+    return { width: sourceWidth || 0, height: sourceHeight || 0 };
+  }
+  const scale = Math.min(1, maxSide / Math.max(sourceWidth, sourceHeight));
+  return {
+    width: Math.max(1, Math.round(sourceWidth * scale)),
+    height: Math.max(1, Math.round(sourceHeight * scale))
+  };
+}
+
+function resizeImageFile(selectedFile, outputName, maxSide) {
+  if (!isResizableImage(selectedFile)) {
+    return Promise.resolve(uploadFileResult(namedUploadFile(selectedFile, outputName, selectedFile.type), 0, 0));
+  }
+  return new Promise(function resizeImage(resolve, reject) {
+    const imageElement = new Image();
+    const imageURL = URL.createObjectURL(selectedFile);
+    imageElement.onload = function onImageLoaded() {
+      URL.revokeObjectURL(imageURL);
+      const outputSize = maxSide > 0
+        ? scaledImageSize(imageElement.naturalWidth, imageElement.naturalHeight, maxSide)
+        : { width: imageElement.naturalWidth, height: imageElement.naturalHeight };
+      if (outputSize.width === imageElement.naturalWidth && outputSize.height === imageElement.naturalHeight) {
+        resolve(uploadFileResult(namedUploadFile(selectedFile, outputName, selectedFile.type), outputSize.width, outputSize.height));
+        return;
+      }
+      const canvasElement = document.createElement('canvas');
+      canvasElement.width = outputSize.width;
+      canvasElement.height = outputSize.height;
+      const canvasContext = canvasElement.getContext('2d');
+      canvasContext.drawImage(imageElement, 0, 0, canvasElement.width, canvasElement.height);
+      const outputType = selectedFile.type === 'image/png' ? 'image/png' : 'image/jpeg';
+      canvasElement.toBlob(function onImageBlob(imageBlob) {
+        if (!imageBlob) {
+          reject(new Error('Image resize failed'));
+          return;
+        }
+        const normalizedName = outputType === 'image/jpeg' && !/\.(jpg|jpeg)$/i.test(outputName)
+          ? outputName.replace(/\.[^.]*$/, '') + '.jpg'
+          : outputName;
+        resolve(uploadFileResult(namedUploadFile(imageBlob, normalizedName, outputType), outputSize.width, outputSize.height));
+      }, outputType, .88);
+    };
+    imageElement.onerror = function onImageError() {
+      URL.revokeObjectURL(imageURL);
+      reject(new Error('Image preview failed'));
+    };
+    imageElement.src = imageURL;
+  });
+}
+
+function uploadPreparedFile(preparedFile) {
+  const uploadRequestBody = new FormData();
+  uploadRequestBody.append('action', 'upload');
+  uploadRequestBody.append('upload_files', preparedFile, preparedFile.name);
+  return fetch(currentPagePath + '?files', {
+    method: 'POST',
+    body: uploadRequestBody,
+    headers: { 'Accept': 'application/json' }
+  }).then(function parseUploadResponse(uploadResponse) {
+    if (!uploadResponse.ok) {
+      throw new Error('File upload failed');
+    }
+    return uploadResponse.json();
+  });
+}
+
+function closeUploadDialog() {
+  const overlayElement = document.getElementById('uploadDialogOverlay');
+  overlayElement.classList.remove('is-open');
+  if (uploadDialogState.resolver) {
+    uploadDialogState.resolver();
+    uploadDialogState.resolver = null;
+  }
+}
+
+function selectedResizeMaxSide() {
+  const resizeModeElement = document.getElementById('uploadDialogResizeMode');
+  const customSizeElement = document.getElementById('uploadDialogCustomSize');
+  if (!resizeModeElement || resizeModeElement.value === 'original') {
+    return 0;
+  }
+  if (resizeModeElement.value === 'custom') {
+    return Number(customSizeElement.value || 0);
+  }
+  return Number(resizeModeElement.value || 0);
+}
+
+function syncUploadResizeControls() {
+  const resizeModeElement = document.getElementById('uploadDialogResizeMode');
+  const customSizeElement = document.getElementById('uploadDialogCustomSize');
+  const customSizeFieldElement = document.getElementById('uploadDialogCustomSizeField');
+  if (!resizeModeElement || !customSizeElement || !customSizeFieldElement) {
+    return;
+  }
+  customSizeElement.disabled = resizeModeElement.value !== 'custom';
+  customSizeFieldElement.classList.toggle('SiteBrushUploadHidden', resizeModeElement.value !== 'custom');
+}
+
+function rememberUploadResizeControls() {
+  const resizeModeElement = document.getElementById('uploadDialogResizeMode');
+  const customSizeElement = document.getElementById('uploadDialogCustomSize');
+  uploadDialogState.resizeMode = normalizedResizeMode(resizeModeElement.value || 'original');
+  uploadDialogState.customSize = customSizeElement.value || '1200';
+  storeUploadPreference(uploadResizeModeStorageKey, uploadDialogState.resizeMode);
+  storeUploadPreference(uploadCustomSizeStorageKey, uploadDialogState.customSize);
+}
+
+function showUploadDialogForCurrentFile() {
+  const selectedFile = uploadDialogState.files[uploadDialogState.index];
+  if (!selectedFile) {
+    closeUploadDialog();
+    return;
+  }
+  const overlayElement = document.getElementById('uploadDialogOverlay');
+  const queueElement = document.getElementById('uploadDialogQueue');
+  const nameElement = document.getElementById('uploadDialogName');
+  const metaElement = document.getElementById('uploadDialogMeta');
+  const errorElement = document.getElementById('uploadDialogError');
+  const previewElement = document.getElementById('uploadDialogPreview');
+  const imageControlsElement = document.getElementById('uploadDialogImageControls');
+  const resizeModeElement = document.getElementById('uploadDialogResizeMode');
+  const uploadButtonElement = document.getElementById('uploadDialogUpload');
+  errorElement.textContent = '';
+  uploadButtonElement.disabled = true;
+  queueElement.textContent = 'File ' + (uploadDialogState.index + 1) + ' of ' + uploadDialogState.files.length + ': ' + selectedFile.name;
+  metaElement.textContent = humanFileSize(selectedFile.size) + (selectedFile.type ? ' - ' + selectedFile.type : '');
+  imageControlsElement.classList.toggle('SiteBrushUploadHidden', !isResizableImage(selectedFile));
+  resizeModeElement.value = uploadDialogState.resizeMode;
+  document.getElementById('uploadDialogCustomSize').value = uploadDialogState.customSize;
+  syncUploadResizeControls();
+  openImagePreview(selectedFile, previewElement);
+  overlayElement.classList.add('is-open');
+  hashFileName(selectedFile).then(function setDefaultName(defaultName) {
+    nameElement.value = defaultName;
+    uploadButtonElement.disabled = false;
+    nameElement.focus();
+    nameElement.select();
+  }).catch(function fallbackName() {
+    nameElement.value = selectedFile.name;
+    uploadButtonElement.disabled = false;
+  });
+}
+
+function advanceUploadDialog() {
+  uploadDialogState.index += 1;
+  showUploadDialogForCurrentFile();
+}
+
+function uploadCurrentDialogFile() {
+  const selectedFile = uploadDialogState.files[uploadDialogState.index];
+  const nameElement = document.getElementById('uploadDialogName');
+  const errorElement = document.getElementById('uploadDialogError');
+  const uploadButtonElement = document.getElementById('uploadDialogUpload');
+  if (!selectedFile) {
+    closeUploadDialog();
+    return;
+  }
+  const outputName = nameElement.value.trim();
+  if (outputName === '') {
+    errorElement.textContent = 'File name is required.';
+    return;
+  }
+  uploadButtonElement.disabled = true;
+  errorElement.textContent = 'Uploading...';
+  rememberUploadResizeControls();
+  resizeImageFile(selectedFile, outputName, selectedResizeMaxSide())
+    .then(function uploadAndInsertPreparedFile(preparedFileResult) {
+      return uploadPreparedFile(preparedFileResult.file).then(function insertUploadedFile(uploadPayload) {
+        insertUploadedFileIntoEditor(uploadDialogState.editor, uploadedFileURL(uploadPayload), preparedFileResult.file.name, preparedFileResult.file.type, preparedFileResult.width, preparedFileResult.height);
+      });
+    })
+    .then(function advanceAfterUpload() {
+      advanceUploadDialog();
+    })
+    .catch(function showUploadError(uploadError) {
+      errorElement.textContent = uploadError.message || 'File upload failed.';
+      uploadButtonElement.disabled = false;
+    });
+}
+
+function openUploadDialog(visualHtmlEditor, selectedFiles) {
+  uploadDialogState.editor = visualHtmlEditor;
+  uploadDialogState.files = Array.from(selectedFiles || []);
+  uploadDialogState.index = 0;
+  return new Promise(function waitForDialog(resolve) {
+    uploadDialogState.resolver = resolve;
+    showUploadDialogForCurrentFile();
+  });
+}
+
+function pickFilesWithBrowser(visualHtmlEditor) {
+  if (uploadDialogState.pickerInput) {
+    uploadDialogState.pickerInput.remove();
+    uploadDialogState.pickerInput = null;
+  }
+  const fileInputElement = document.createElement('input');
+  fileInputElement.type = 'file';
+  fileInputElement.multiple = true;
+  fileInputElement.style.position = 'fixed';
+  fileInputElement.style.left = '-10000px';
+  fileInputElement.style.top = '0';
+  fileInputElement.style.opacity = '0';
+  uploadDialogState.pickerInput = fileInputElement;
+  fileInputElement.addEventListener('change', function onFilesSelected() {
+    const selectedFiles = Array.from(fileInputElement.files || []);
+    fileInputElement.remove();
+    uploadDialogState.pickerInput = null;
+    if (selectedFiles.length === 0) {
       return;
     }
-    const selectedImageFile = imageInputElement.files[0];
-    const uploadRequestBody = new FormData();
-    uploadRequestBody.append('action', 'upload');
-    uploadRequestBody.append('upload_files', selectedImageFile);
-    fetch(currentPagePath + '?files', {
-      method: 'POST',
-      body: uploadRequestBody,
-      headers: { 'Accept': 'application/json' }
-    })
-      .then(function parseUploadResponse(uploadResponse) {
-        if (!uploadResponse.ok) {
-          throw new Error('image upload failed');
-        }
-        return uploadResponse.json();
-      })
-      .then(function insertUploadedImage(uploadPayload) {
-        insertImageIntoEditor(visualHtmlEditor, uploadedImageURL(uploadPayload), selectedImageFile.name);
-      })
-      .catch(function showUploadError(uploadError) {
-        window.alert(uploadError.message || 'Image upload failed');
-      });
+    openUploadDialog(visualHtmlEditor, selectedFiles);
   });
-  imageInputElement.click();
+  document.body.appendChild(fileInputElement);
+  fileInputElement.click();
 }
+
+function nativePickedFilesToFiles(nativePayload) {
+  if (!Array.isArray(nativePayload.files)) {
+    return [];
+  }
+  return nativePayload.files.map(function convertPickedFile(pickedFile) {
+    const fileBlob = base64ToBlob(pickedFile.content || '', pickedFile.mime || 'application/octet-stream');
+    return namedUploadFile(fileBlob, pickedFile.name || 'upload', pickedFile.mime || 'application/octet-stream');
+  });
+}
+
+function chooseAndUploadFiles(visualHtmlEditor) {
+  if (!desktopNativeFilePickerEnabled) {
+    pickFilesWithBrowser(visualHtmlEditor);
+    return;
+  }
+  fetch(currentPagePath + '?native_pick_files', { headers: { 'Accept': 'application/json' } })
+    .then(function parseNativePickerResponse(nativeResponse) {
+      if (!nativeResponse.ok) {
+        throw new Error('native picker unavailable');
+      }
+      return nativeResponse.json();
+    })
+    .then(function useNativePickedFiles(nativePayload) {
+      const selectedFiles = nativePickedFilesToFiles(nativePayload);
+      if (selectedFiles.length > 0) {
+        openUploadDialog(visualHtmlEditor, selectedFiles);
+      }
+    })
+    .catch(function fallbackToBrowserPicker() {
+      pickFilesWithBrowser(visualHtmlEditor);
+    });
+}
+
+document.getElementById('uploadDialogClose').addEventListener('click', closeUploadDialog);
+document.getElementById('uploadDialogSkip').addEventListener('click', advanceUploadDialog);
+document.getElementById('uploadDialogUpload').addEventListener('click', uploadCurrentDialogFile);
+document.getElementById('uploadDialogResizeMode').addEventListener('change', function onResizeModeChange() {
+  rememberUploadResizeControls();
+  syncUploadResizeControls();
+});
+document.getElementById('uploadDialogCustomSize').addEventListener('input', function onCustomSizeInput() {
+  rememberUploadResizeControls();
+});
+syncUploadResizeControls();
 
 function createVisualHtmlEditor() {
   return Jodit.make('#visualEditorRoot', {
@@ -120,11 +594,11 @@ function createVisualHtmlEditor() {
       'source', '|', 'bold', 'italic', 'underline', 'strikethrough', '|',
       'ul', 'ol', '|', 'outdent', 'indent', '|', 'left', 'center', 'right', '|',
       'fontsize', 'brush', 'paragraph', '|', 'link', {
-        name: 'insertServerImage',
-        iconURL: '/p/static/insert-image.png',
-        tooltip: 'Insert image',
-        exec: function executeImageUpload(editorInstance) {
-          chooseAndUploadImage(editorInstance);
+        name: 'insertServerFile',
+        iconURL: '/p/static/files.png',
+        tooltip: 'Upload file',
+        exec: function executeFileUpload(editorInstance) {
+          chooseAndUploadFiles(editorInstance);
         }
       }, 'table', '|',
       'undo', 'redo', '|', {
@@ -139,7 +613,7 @@ function createVisualHtmlEditor() {
         iconURL: '/p/static/exit-editor.png',
         tooltip: 'Cancel edit',
         exec: function executeCancel() {
-          window.location.href = {{printf "%q" .Path}};
+          window.location.href = currentPagePath;
         }
       }
     ]

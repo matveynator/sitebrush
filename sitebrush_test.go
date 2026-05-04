@@ -296,7 +296,7 @@ func TestMirrorRemotePageImportsNestedExternalResources(t *testing.T) {
 	if parseErr != nil {
 		t.Fatal(parseErr)
 	}
-	previewResources := previewGrabResources(pageURL, sourceHTML)
+	previewResources := previewGrabResources(pageURL, sourceHTML, "")
 	if len(previewResources) != 8 {
 		t.Fatalf("expected 8 preview resources, got %d: %#v", len(previewResources), previewResources)
 	}
@@ -306,7 +306,7 @@ func TestMirrorRemotePageImportsNestedExternalResources(t *testing.T) {
 		selectedResourceURLs[previewResource.URL] = struct{}{}
 	}
 	application := &App{storagePath: t.TempDir(), grabTracker: newGrabProgressTracker()}
-	importedHTML := application.mirrorRemotePage("example.test", "/imported", pageRawURL, pageURL, sourceHTML, "", selectedResourceURLs)
+	importedHTML := application.mirrorRemotePage("example.test", "/imported", pageRawURL, pageURL, sourceHTML, "", selectedResourceURLs, "")
 	if strings.Contains(importedHTML, assetBaseURL) {
 		t.Fatalf("imported HTML still references external asset host: %s", importedHTML)
 	}
@@ -360,6 +360,63 @@ func TestParseGrabSourceURLAcceptsCommonURLForms(t *testing.T) {
 		if parsedSourceURL.String() != expectedSourceURL {
 			t.Fatalf("parseGrabSourceURL(%q) = %q, want %q", rawSourceURL, parsedSourceURL.String(), expectedSourceURL)
 		}
+	}
+}
+
+func TestParseGrabSourceURLUsesHTTPDefaultWhenServerIPIsProvided(t *testing.T) {
+	parsedSourceURL, parseErr := parseGrabSourceURLForServerIP("expired.example/page", "127.0.0.1")
+	if parseErr != nil {
+		t.Fatalf("parseGrabSourceURLForServerIP failed: %v", parseErr)
+	}
+	if parsedSourceURL.String() != "http://expired.example/page" {
+		t.Fatalf("parsed URL = %q, want http://expired.example/page", parsedSourceURL.String())
+	}
+}
+
+func TestDownloadGrabSourceHTMLCanDialSourceIPWithDomainHost(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if !strings.HasPrefix(request.Host, "expired.example:") {
+			t.Fatalf("Host = %q, want expired.example with server port", request.Host)
+		}
+		_, _ = response.Write([]byte("<html>expired domain copy</html>"))
+	}))
+	defer server.Close()
+
+	serverURL, parseErr := url.Parse(server.URL)
+	if parseErr != nil {
+		t.Fatal(parseErr)
+	}
+	_, serverPort, splitErr := net.SplitHostPort(serverURL.Host)
+	if splitErr != nil {
+		t.Fatal(splitErr)
+	}
+	sourceURL := "http://expired.example:" + serverPort + "/page"
+	htmlBytes, downloadErr := downloadGrabSourceHTML(sourceURL, "127.0.0.1")
+	if downloadErr != nil {
+		t.Fatalf("download with source IP failed: %v", downloadErr)
+	}
+	if string(htmlBytes) != "<html>expired domain copy</html>" {
+		t.Fatalf("downloaded HTML = %q", string(htmlBytes))
+	}
+}
+
+func TestMissingPageGrabFormIncludesSourceIPOverride(t *testing.T) {
+	application, rawDB := newTestApplication(t)
+	_, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "admin@example.com", "old")
+	if err != nil {
+		t.Fatalf("insert user: %v", err)
+	}
+
+	request := httptest.NewRequest(http.MethodGet, "http://localhost:8080/missing", nil)
+	request.AddCookie(newAdminSessionCookie(t, application, "admin@example.com"))
+	response := httptest.NewRecorder()
+	application.route(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("missing page status = %d, body=%q", response.Code, response.Body.String())
+	}
+	body := response.Body.String()
+	if !strings.Contains(body, `name="source_ip"`) {
+		t.Fatalf("missing page import form does not include source_ip field: %s", body)
 	}
 }
 
@@ -649,7 +706,7 @@ func TestVisualEditorUsesLocalJoditAssetsAndServerImageUpload(t *testing.T) {
 		t.Fatalf("visual editor status = %d, body=%q", response.Code, response.Body.String())
 	}
 	body := response.Body.String()
-	for _, expectedFragment := range []string{`href="/p/static/jodit.min.css"`, `src="/p/static/jodit.min.js"`, "/p/static/insert-image.png", "/p/static/save-page.png", "/p/static/exit-editor.png", "chooseAndUploadImage", "currentPagePath + '?files'"} {
+	for _, expectedFragment := range []string{`href="/p/static/jodit.min.css"`, `src="/p/static/jodit.min.js"`, "/p/static/files.png", "/p/static/save-page.png", "/p/static/exit-editor.png", "chooseAndUploadFiles", "document.body.appendChild(fileInputElement)", "fallbackHashFileName", "sitebrush.visualUploadResizeMode", `value="600"`, `value="800"`, `value="1200"`, `value="2000"`, "width=", "height=", "currentPagePath + '?files'", "currentPagePath + '?native_pick_files'", "window.location.href = currentPagePath"} {
 		if !strings.Contains(body, expectedFragment) {
 			t.Fatalf("visual editor missing %q in %s", expectedFragment, body)
 		}
