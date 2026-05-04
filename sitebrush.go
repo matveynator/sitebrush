@@ -2149,6 +2149,7 @@ func buildContextMenuScript(isAdmin bool, isFrozen bool, pagePath, domain string
   const confirmYesLabel = "` + confirmYesLabel + `";
   const confirmNoLabel = "` + confirmNoLabel + `";
   function openConfirmationDialog(confirmMessageText, onConfirm) {
+    closeSitebrushMenu();
     const overlayElement = document.createElement("div");
     overlayElement.className = "SiteBrushConfirmOverlay";
     const modalElement = document.createElement("div");
@@ -2177,6 +2178,7 @@ func buildContextMenuScript(isAdmin bool, isFrozen bool, pagePath, domain string
     confirmButtonElement.addEventListener("click", function onConfirmClick() { closeDialog(); onConfirm(); });
   }
   function openPublishConfirmationDialog(confirmMessageText, changedPagePaths, onConfirm) {
+    closeSitebrushMenu();
     const overlayElement = document.createElement("div");
     overlayElement.className = "SiteBrushConfirmOverlay";
     const modalElement = document.createElement("div");
@@ -2292,6 +2294,7 @@ func buildContextMenuScript(isAdmin bool, isFrozen bool, pagePath, domain string
     showSitebrushMenu(browserEvent, menuHtmlEntries, currentPagePath, isDomainFrozen);
 	  }, {capture: false, passive: false});
   function openSiteTreeDialog() {
+    closeSitebrushMenu();
     const overlayElement = document.createElement("div");
     overlayElement.className = "SiteBrushTreeOverlay";
     const modalElement = document.createElement("div");
@@ -2356,7 +2359,7 @@ func buildContextMenuScript(isAdmin bool, isFrozen bool, pagePath, domain string
 func contextMenuStylesAndHelpers() string {
 	return `<style>
 .SiteBrushMenuBox,.SiteBrushMenuBox *{all:initial;box-sizing:border-box}
-.SiteBrushMenuBox{position:fixed;background:#fff url(/p/static/bg.png) repeat-x top;border:1px solid #8ea4c1;z-index:2147483647;padding:2px;min-width:240px;box-shadow:0 2px 12px rgba(0,0,0,0.2);font-family:Arial,Helvetica,sans-serif}
+.SiteBrushMenuBox{position:fixed;background:#fff url(/p/static/bg.png) repeat-x top;border:1px solid #8ea4c1;z-index:2147483646;padding:2px;min-width:240px;box-shadow:0 2px 12px rgba(0,0,0,0.2);font-family:Arial,Helvetica,sans-serif}
 .SiteBrushMenuBox.SiteBrushMenuBoxFrozen{background:#e9f5ff;border-color:#6da6d4}
 .SiteBrushMenuList{list-style:none;margin:0;padding:0}
 .SiteBrushContextMenu{margin:0;padding:0}
@@ -2364,9 +2367,9 @@ func contextMenuStylesAndHelpers() string {
 .SiteBrushContextMenuLink:hover{background:#eef5ff}
 .SiteBrushContextMenuButton{width:100%;border:0;background:transparent;text-align:left}
 .SiteBrushDomainMenuItem .SiteBrushContextMenuLink{font-weight:700;border-bottom:1px solid #c8d5e7}
-.ContextMenuCopyright .SiteBrushContextMenuLink{font-size:12px;color:#5b6f8b;border-top:1px solid #c8d5e7;margin-top:2px;padding-top:7px}.SiteBrushMenuIcon{width:20px;height:20px;flex:0 0 20px}
+.ContextMenuCopyright .SiteBrushContextMenuLink{font-size:12px;color:#5b6f8b;border-top:1px solid #c8d5e7;margin-top:2px;padding-top:7px}.SiteBrushMenuIcon{width:18px;height:18px;flex:0 0 18px}
 .SiteBrushContextMenuVersion{font-weight:700;margin-left:4px}
-.SiteBrushConfirmOverlay{position:fixed;inset:0;background:rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center;z-index:100000}
+.SiteBrushConfirmOverlay{position:fixed;inset:0;background:rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center;z-index:2147483647}
 .SiteBrushConfirmModal{background:#fff;border:1px solid #8ea4c1;min-width:260px;max-width:340px;padding:16px;font-family:Arial,Helvetica,sans-serif}
 .SiteBrushConfirmText{margin:0 0 14px 0;color:#1f3f6f;font-size:14px}
 .SiteBrushPublishPreviewList{list-style:none;margin:0 0 12px 0;padding:0;max-height:180px;overflow:auto}
@@ -2374,7 +2377,7 @@ func contextMenuStylesAndHelpers() string {
 .SiteBrushPublishPreviewLink{color:#1f3f6f;text-decoration:underline;font-size:13px}
 .SiteBrushConfirmActions{display:flex;gap:8px;justify-content:flex-end}
 .SiteBrushConfirmButton,.SiteBrushCancelButton{border:1px solid #8ea4c1;background:#f2f7ff;padding:6px 12px;cursor:pointer;font-size:13px}
-.SiteBrushTreeOverlay{position:fixed;inset:0;background:rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center;z-index:100000}
+.SiteBrushTreeOverlay{position:fixed;inset:0;background:rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center;z-index:2147483647}
 .SiteBrushTreeModal{background:#fff;border:1px solid #8ea4c1;min-width:320px;max-width:700px;max-height:80vh;overflow:auto;padding:16px;font-family:Arial,Helvetica,sans-serif}
 .SiteBrushTreeTitle{margin:0 0 12px 0;color:#1f3f6f;font-size:18px}
 .SiteBrushTreeContent{margin:0 0 12px 0;color:#1f3f6f;font-size:14px}
@@ -2383,6 +2386,7 @@ func contextMenuStylesAndHelpers() string {
 .SiteBrushTreeCurrent{font-weight:700;text-decoration:underline}
 @media (prefers-color-scheme: dark){
   .SiteBrushMenuBox{background:#172235;border-color:#2f405d}
+  .SiteBrushMenuBox.SiteBrushMenuBoxFrozen{background:#13263d;border-color:#4a6f99}
   .SiteBrushContextMenuLink{color:#dbe8ff}
   .SiteBrushContextMenuLink:hover{background:#24344d}
   .SiteBrushDomainMenuItem .SiteBrushContextMenuLink{border-bottom-color:#2f405d}
@@ -2395,6 +2399,12 @@ func contextMenuStylesAndHelpers() string {
 }
 </style>
 <script>
+function closeSitebrushMenu() {
+  const existingMenuBox = document.getElementById("SiteBrushMenuBox");
+  if (existingMenuBox) {
+    existingMenuBox.remove();
+  }
+}
 function normalizeSitebrushMenuLinks(menuBoxElement, currentPagePath) {
   const menuLinkElements = menuBoxElement.querySelectorAll("a[href]");
   for (const menuLinkElement of menuLinkElements) {
@@ -2406,10 +2416,7 @@ function normalizeSitebrushMenuLinks(menuBoxElement, currentPagePath) {
   }
 }
 function showSitebrushMenu(browserEvent, menuHtmlEntries, currentPagePath, frozenMenuEnabled) {
-  const existingMenuBox = document.getElementById("SiteBrushMenuBox");
-  if (existingMenuBox) {
-    existingMenuBox.remove();
-  }
+  closeSitebrushMenu();
   const menuBoxElement = document.createElement("div");
   menuBoxElement.id = "SiteBrushMenuBox";
   menuBoxElement.className = "SiteBrushMenuBox";

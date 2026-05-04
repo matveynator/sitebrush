@@ -181,7 +181,7 @@ func TestContextMenuUsesDirectEditorProfileAndDeleteActions(t *testing.T) {
 	if strings.Contains(body, "href='?edit'") {
 		t.Fatalf("context menu still contains intermediate edit link: %s", body)
 	}
-	for _, expectedFragment := range []string{`window.location.href = targetHref;`, `closest("#SiteBrushMenuBox")`} {
+	for _, expectedFragment := range []string{`window.location.href = targetHref;`, `closest("#SiteBrushMenuBox")`, `function closeSitebrushMenu()`, `z-index:2147483647`, `closeSitebrushMenu();`} {
 		if !strings.Contains(body, expectedFragment) {
 			t.Fatalf("context menu missing navigation guard %q in %s", expectedFragment, body)
 		}
