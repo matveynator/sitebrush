@@ -273,6 +273,8 @@ func TestMirrorRemotePageImportsNestedExternalResources(t *testing.T) {
 	sourceHTML := `<!doctype html><html><head>` +
 		`<link rel="stylesheet" href="` + assetBaseURL + `/style.css">` +
 		`<script type="module" src="` + assetBaseURL + `/app.js"></script>` +
+		`<script>const assetURL = "${l}"; const assetPath = "+e.url+"; const dynamicValue = this.videoId;</script>` +
+		`<iframe src="https://www.youtube.com/embed/demo"></iframe>` +
 		`</head><body>Imported</body></html>`
 
 	previousGrabHTTPClient := newGrabHTTPClient
@@ -281,8 +283,6 @@ func TestMirrorRemotePageImportsNestedExternalResources(t *testing.T) {
 			assetBaseURL + "/style.css":        {contentType: "text/css", body: `@import url("/nested.css"); body{background:url("/image.png")} @font-face{src:url("/font.eot?v=1#iefix")}`},
 			assetBaseURL + "/nested.css":       {contentType: "text/css", body: `.nested{background:url("/nested-image.png")}`},
 			assetBaseURL + "/app.js":           {contentType: "application/javascript", body: `import "/module.js"; console.log("app");`},
-			assetBaseURL + "/module.js":        {contentType: "application/javascript", body: `import "/deep.js"; export const moduleValue = 1;`},
-			assetBaseURL + "/deep.js":          {contentType: "application/javascript", body: `export const deepValue = 1;`},
 			assetBaseURL + "/font.eot?v=1":     {contentType: "application/vnd.ms-fontobject", body: "font"},
 			assetBaseURL + "/image.png":        {contentType: "image/png", body: "png"},
 			assetBaseURL + "/nested-image.png": {contentType: "image/png", body: "nested-png"},
@@ -297,8 +297,8 @@ func TestMirrorRemotePageImportsNestedExternalResources(t *testing.T) {
 		t.Fatal(parseErr)
 	}
 	previewResources := previewGrabResources(pageURL, sourceHTML, "")
-	if len(previewResources) != 8 {
-		t.Fatalf("expected 8 preview resources, got %d: %#v", len(previewResources), previewResources)
+	if len(previewResources) != 6 {
+		t.Fatalf("expected 6 preview resources, got %d: %#v", len(previewResources), previewResources)
 	}
 
 	selectedResourceURLs := make(map[string]struct{})
@@ -309,6 +309,9 @@ func TestMirrorRemotePageImportsNestedExternalResources(t *testing.T) {
 	importedHTML := application.mirrorRemotePage("example.test", "/imported", pageRawURL, pageURL, sourceHTML, "", selectedResourceURLs, "")
 	if strings.Contains(importedHTML, assetBaseURL) {
 		t.Fatalf("imported HTML still references external asset host: %s", importedHTML)
+	}
+	if !strings.Contains(importedHTML, "youtube.com/embed/demo") {
+		t.Fatalf("imported HTML lost external iframe reference: %s", importedHTML)
 	}
 	if !strings.Contains(importedHTML, "/p/") {
 		t.Fatalf("imported HTML does not reference local public assets: %s", importedHTML)
@@ -339,6 +342,31 @@ func TestMirrorRemotePageImportsNestedExternalResources(t *testing.T) {
 	}
 	if !storedFontWithCleanExtension {
 		t.Fatalf("expected font resource to be stored with clean .eot extension: %#v", storedFiles)
+	}
+	for _, forbiddenFragment := range []string{"/module.js", "/deep.js", "youtube.com/embed/demo"} {
+		if strings.Contains(importedHTML, forbiddenFragment) && forbiddenFragment != "youtube.com/embed/demo" {
+			t.Fatalf("imported HTML still contains forbidden fragment %q: %s", forbiddenFragment, importedHTML)
+		}
+	}
+}
+
+func TestNormalizeURLRejectsSuspiciousDynamicReferences(t *testing.T) {
+	pageURL, parseErr := url.Parse("https://example.com/page")
+	if parseErr != nil {
+		t.Fatal(parseErr)
+	}
+	spider := newPageSpider("", pageURL, grabResourceMaxDepth, nil, "", "")
+	testCases := []string{
+		"${l}",
+		"+e.url+",
+		"this.videoId",
+		"videoId",
+		"/assets/app.js?x=1+2",
+	}
+	for _, rawRef := range testCases {
+		if normalizedURL, blocked := spider.normalizeURL(rawRef, pageURL); !blocked || normalizedURL != "" {
+			t.Fatalf("normalizeURL(%q) = (%q, %v), want blocked", rawRef, normalizedURL, blocked)
+		}
 	}
 }
 

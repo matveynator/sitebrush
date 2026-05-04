@@ -2602,7 +2602,6 @@ var (
 	htmlSrcSetPattern   = regexp.MustCompile(`(?is)\bsrcset\s*=\s*["']([^"']+)["']`)
 	cssURLPattern       = regexp.MustCompile(`(?is)url\(\s*['"]?([^'")]+)['"]?\s*\)`)
 	cssImportPattern    = regexp.MustCompile(`(?is)@import\s+(?:url\(\s*)?['"]?([^'")\s;]+)['"]?`)
-	jsImportPattern     = regexp.MustCompile(`(?is)\bimport\s*(?:\(\s*)?(?:[^'"]*?\s+from\s*)?['"]([^'"]+)['"]`)
 	newGrabHTTPClient   = func() *http.Client {
 		return &http.Client{Timeout: 20 * time.Second}
 	}
@@ -2653,6 +2652,9 @@ func (spider *pageSpider) fetchResource(rawURL string, baseURL *url.URL, depth i
 	if blocked || normalizedURL == "" {
 		return nil, errors.New("unsupported resource url")
 	}
+	if spider.shouldSkipMirrorResource(normalizedURL) {
+		return nil, errors.New("unsupported resource url")
+	}
 	persist = persist && spider.shouldPersistResource(normalizedURL)
 	if existing, found := spider.resources[normalizedURL]; found {
 		if persist {
@@ -2679,6 +2681,11 @@ func (spider *pageSpider) fetchResource(rawURL string, baseURL *url.URL, depth i
 		spider.resources[normalizedURL] = &mirroredResource{url: normalizedURL, persist: persist}
 		spider.publishResourceProgress("error", normalizedURL, 0, 0, response.ContentLength)
 		return nil, fmt.Errorf("resource download failed: %s", response.Status)
+	}
+	if !spider.isAllowedResourceContentType(normalizedURL, response.Header.Get("Content-Type")) {
+		spider.resources[normalizedURL] = &mirroredResource{url: normalizedURL, persist: persist}
+		spider.publishResourceProgress("error", normalizedURL, 0, 0, response.ContentLength)
+		return nil, fmt.Errorf("resource content-type rejected: %s", response.Header.Get("Content-Type"))
 	}
 	body, err := spider.readResourceBody(response.Body, normalizedURL, response.ContentLength)
 	if err != nil {
@@ -2781,8 +2788,7 @@ func (spider *pageSpider) fetchSelectedResources() {
 func (spider *pageSpider) rewriteNestedResources(resource *mirroredResource, depth int, contentType string) {
 	isHTML := strings.Contains(contentType, "text/html")
 	isCSS := strings.Contains(contentType, "text/css")
-	isJS := strings.Contains(contentType, "javascript") || strings.HasSuffix(strings.ToLower(resource.url), ".js") || strings.HasSuffix(strings.ToLower(resource.url), ".mjs")
-	if !(isHTML || isCSS || isJS) {
+	if !(isHTML || isCSS) {
 		return
 	}
 	source := string(resource.content)
@@ -2837,13 +2843,6 @@ func (spider *pageSpider) rewriteTextReferences(source, baseRawURL string, depth
 		return strings.Replace(match, parts[1], rewriteSingle(parts[1]), 1)
 	})
 	rewritten = rewriteCSSURLReferences(rewritten, rewriteSingle)
-	rewritten = jsImportPattern.ReplaceAllStringFunc(rewritten, func(match string) string {
-		parts := jsImportPattern.FindStringSubmatch(match)
-		if len(parts) != 2 {
-			return match
-		}
-		return strings.Replace(match, parts[1], rewriteSingle(parts[1]), 1)
-	})
 	return rewritten
 }
 
@@ -2887,6 +2886,9 @@ func (spider *pageSpider) normalizeURL(rawRef string, baseURL *url.URL) (string,
 	if trimmedRef == "" || strings.HasPrefix(trimmedRef, "#") {
 		return "", true
 	}
+	if isSuspiciousGrabReference(trimmedRef) {
+		return "", true
+	}
 	loweredRef := strings.ToLower(trimmedRef)
 	for _, blockedPrefix := range []string{"mailto:", "tel:", "javascript:", "data:", "blob:"} {
 		if strings.HasPrefix(loweredRef, blockedPrefix) {
@@ -2907,6 +2909,92 @@ func (spider *pageSpider) normalizeURL(rawRef string, baseURL *url.URL) (string,
 	resolved.Fragment = ""
 	resolved.ForceQuery = false
 	return resolved.String(), false
+}
+
+func isSuspiciousGrabReference(rawRef string) bool {
+	loweredRef := strings.ToLower(strings.TrimSpace(rawRef))
+	if loweredRef == "" {
+		return true
+	}
+	if strings.Contains(loweredRef, "${") || strings.ContainsAny(loweredRef, "+()[],") {
+		return true
+	}
+	for _, blockedFragment := range []string{"this.", ".src", ".url", "params", "videoid", "void"} {
+		if strings.Contains(loweredRef, blockedFragment) {
+			return true
+		}
+	}
+	return false
+}
+
+func (spider *pageSpider) shouldSkipMirrorResource(resourceURL string) bool {
+	parsedURL, err := url.Parse(resourceURL)
+	if err != nil {
+		return true
+	}
+	hostName := strings.ToLower(strings.TrimSpace(parsedURL.Hostname()))
+	pathName := strings.ToLower(strings.TrimSpace(parsedURL.Path))
+	if hostName == "" {
+		return false
+	}
+	for _, blockedHostFragment := range []string{"youtube.com", "youtu.be", "youtube-nocookie.com", "googlevideo.com", "doubleclick.net", "googletagmanager.com", "google-analytics.com", "adservice.google.com", "connect.facebook.net", "facebook.com", "clarity.ms", "hotjar.com", "segment.com", "mixpanel.com", "matomo", "outbrain.com", "taboola.com"} {
+		if strings.Contains(hostName, blockedHostFragment) {
+			return true
+		}
+	}
+	for _, blockedPathFragment := range []string{"/analytics", "/gtag", "/gtm", "/ads", "/adservice", "/pixel", "/tracking"} {
+		if strings.Contains(pathName, blockedPathFragment) {
+			return true
+		}
+	}
+	return false
+}
+
+func (spider *pageSpider) isAllowedResourceContentType(resourceURL, contentTypeHeader string) bool {
+	contentType := strings.ToLower(strings.TrimSpace(strings.Split(contentTypeHeader, ";")[0]))
+	if contentType == "" {
+		return hasAllowedGrabResourceExtension(resourceURL)
+	}
+	switch resourceKindFromURL(resourceURL) {
+	case "style":
+		return contentType == "text/css"
+	case "script":
+		return strings.Contains(contentType, "javascript") || strings.Contains(contentType, "ecmascript")
+	case "font":
+		return strings.HasPrefix(contentType, "font/") || strings.Contains(contentType, "font") || strings.Contains(contentType, "octet-stream")
+	case "image":
+		return strings.HasPrefix(contentType, "image/")
+	case "video":
+		return strings.HasPrefix(contentType, "video/")
+	case "audio":
+		return strings.HasPrefix(contentType, "audio/")
+	default:
+		return false
+	}
+}
+
+func resourceKindFromURL(resourceURL string) string {
+	extension := resourceExtension(resourceURL)
+	switch extension {
+	case ".css":
+		return "style"
+	case ".js", ".mjs":
+		return "script"
+	case ".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp", ".ico":
+		return "image"
+	case ".woff", ".woff2", ".ttf", ".eot", ".otf":
+		return "font"
+	case ".mp4", ".webm", ".mov":
+		return "video"
+	case ".mp3", ".ogg", ".wav":
+		return "audio"
+	default:
+		return ""
+	}
+}
+
+func hasAllowedGrabResourceExtension(resourceURL string) bool {
+	return resourceKindFromURL(resourceURL) != ""
 }
 
 func (spider *pageSpider) shouldPersistResource(normalizedURL string) bool {
