@@ -329,17 +329,29 @@ jobs:
           DMG_STAGING_DIR="dist/dmg-staging"
           DMG_PATH="dist/sitebrush_darwin_universal_desktop.dmg"
           ICONSET_DIR="dist/AppIcon.iconset"
-          ICON_SOURCE="web/static/sitebrush-logo.png"
+          ICON_SOURCE_ICO="web/static/sitebrush-logo.ico"
+          ICON_SOURCE_PNG="dist/AppIcon-source.png"
+          ICON_SOURCE_SQUARE="dist/AppIcon-square.png"
 
           mkdir -p "${ICONSET_DIR}" "${APP_DIR}/Contents/MacOS" "${APP_DIR}/Contents/Resources"
+          if ! sips -s format png "${ICON_SOURCE_ICO}" --out "${ICON_SOURCE_PNG}" >/dev/null; then
+            cp "web/static/sitebrush-logo.png" "${ICON_SOURCE_PNG}"
+          fi
+          icon_width=$(sips -g pixelWidth "${ICON_SOURCE_PNG}" | awk '/pixelWidth/ {print $2}')
+          icon_height=$(sips -g pixelHeight "${ICON_SOURCE_PNG}" | awk '/pixelHeight/ {print $2}')
+          icon_side="${icon_width}"
+          if [ "${icon_height}" -lt "${icon_side}" ]; then
+            icon_side="${icon_height}"
+          fi
+          sips --cropToHeightWidth "${icon_side}" "${icon_side}" "${ICON_SOURCE_PNG}" --out "${ICON_SOURCE_SQUARE}" >/dev/null
           for size in 16 32 128; do
-            sips -z "${size}" "${size}" "${ICON_SOURCE}" --out "${ICONSET_DIR}/icon_${size}x${size}.png" >/dev/null
+            sips -z "${size}" "${size}" "${ICON_SOURCE_SQUARE}" --out "${ICONSET_DIR}/icon_${size}x${size}.png" >/dev/null
             double_size=$((size * 2))
-            sips -z "${double_size}" "${double_size}" "${ICON_SOURCE}" --out "${ICONSET_DIR}/icon_${size}x${size}@2x.png" >/dev/null
+            sips -z "${double_size}" "${double_size}" "${ICON_SOURCE_SQUARE}" --out "${ICONSET_DIR}/icon_${size}x${size}@2x.png" >/dev/null
           done
-          sips -z 256 256 "${ICON_SOURCE}" --out "${ICONSET_DIR}/icon_256x256.png" >/dev/null
-          sips -z 512 512 "${ICON_SOURCE}" --out "${ICONSET_DIR}/icon_256x256@2x.png" >/dev/null
-          sips -z 512 512 "${ICON_SOURCE}" --out "${ICONSET_DIR}/icon_512x512.png" >/dev/null
+          sips -z 256 256 "${ICON_SOURCE_SQUARE}" --out "${ICONSET_DIR}/icon_256x256.png" >/dev/null
+          sips -z 512 512 "${ICON_SOURCE_SQUARE}" --out "${ICONSET_DIR}/icon_256x256@2x.png" >/dev/null
+          sips -z 512 512 "${ICON_SOURCE_SQUARE}" --out "${ICONSET_DIR}/icon_512x512.png" >/dev/null
           cp "${ICONSET_DIR}/icon_512x512.png" "${ICONSET_DIR}/icon_512x512@2x.png"
           iconutil -c icns "${ICONSET_DIR}" -o "dist/AppIcon.icns"
 

@@ -72,11 +72,12 @@
   const closeButtonElement = document.getElementById('grab_close_button');
   const progressModalController = new bootstrap.Modal(progressModalElement, { backdrop: 'static', keyboard: false });
 
-  let progressSocket = null;
+  let progressStream = null;
   let confirmedSubmitStarted = false;
   let previewSelectAllElement = null;
   let downloadFinished = false;
   let downloadRedirectURL = '';
+  let grabRequestInFlight = false;
 
   function finishDownloadIfReady() {
     if (!downloadFinished || downloadRedirectURL === '') { return; }
@@ -355,17 +356,16 @@
     if (submitButtonElement) { submitButtonElement.disabled = false; }
   }
 
-  function connectProgressSocket(progressToken, readyCallback) {
+  function connectProgressStream(progressToken, readyCallback) {
     let readyCallbackWasCalled = false;
-    const socketProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    progressSocket = new WebSocket(socketProtocol + '//' + window.location.host + {{printf "%q" .Path}} + '?grab_ws&token=' + encodeURIComponent(progressToken));
-    progressSocket.onmessage = function onSocketMessage(messageEvent) {
+    progressStream = new EventSource({{printf "%q" .Path}} + '?grab_events&token=' + encodeURIComponent(progressToken));
+    progressStream.onmessage = function onProgressStreamMessage(messageEvent) {
       let progressState = null;
       try {
         progressState = JSON.parse(messageEvent.data);
       } catch (parseError) {
         showDownloadError('Сервер прислал некорректный статус загрузки.');
-        progressSocket.close();
+        progressStream.close();
         return;
       }
       if (progressState.stage === 'ready') {
@@ -388,21 +388,26 @@
         downloadFinished = true;
         setProgressPercent(100);
         progressTextElement.textContent = 'Готово. Открываем редактор...';
-        progressSocket.close();
+        progressStream.close();
         finishDownloadIfReady();
       }
       if (progressState.stage === 'error' && !progressState.current_url) {
         showDownloadError('Не удалось скачать страницу. Окно можно закрыть и попробовать другой адрес.');
-        progressSocket.close();
+        progressStream.close();
       }
     };
-    progressSocket.onerror = function onSocketError() {
+    progressStream.onerror = function onProgressStreamError() {
       if (downloadFinished) { return; }
-      showDownloadError('Потеряно соединение со статусом загрузки. Окно можно закрыть.');
+      if (grabRequestInFlight) {
+        progressTextElement.textContent = 'Загрузка продолжается. Канал статуса переподключается...';
+        return;
+      }
+      showDownloadError('Не удалось подключиться к статусу загрузки. Окно можно закрыть и попробовать ещё раз.');
     };
   }
 
   function submitGrabRequest() {
+    grabRequestInFlight = true;
     fetch({{printf "%q" .Path}} + '?grab', { method: 'POST', body: new FormData(grabFormElement), headers: { 'Accept': 'application/json' } })
       .then(function handleGrabHTTPResponse(grabHTTPResponse) {
         if (!grabHTTPResponse.ok) {
@@ -413,12 +418,18 @@
         return grabHTTPResponse.json();
       })
       .then(function handleGrabPayload(grabPayload) {
+        grabRequestInFlight = false;
         downloadRedirectURL = grabPayload.redirect || (grabFormElement.querySelector('input[name="path"]').value + '?visual');
+        downloadFinished = true;
+        setProgressPercent(100);
+        progressTextElement.textContent = 'Готово. Открываем редактор...';
+        if (progressStream) { progressStream.close(); }
         finishDownloadIfReady();
       })
       .catch(function handleGrabFailure(grabError) {
+        grabRequestInFlight = false;
         showDownloadError(grabError.message || 'Не удалось загрузить страницу.');
-        if (progressSocket) { progressSocket.close(); }
+        if (progressStream) { progressStream.close(); }
       });
   }
 
@@ -427,7 +438,7 @@
     tokenFieldElement.value = progressToken;
     syncSelectedResourceFields();
     showDownloadProgress();
-    connectProgressSocket(progressToken, function submitGrabFormAfterProgressReady() {
+    connectProgressStream(progressToken, function submitGrabFormAfterProgressReady() {
       confirmedSubmitStarted = true;
       submitGrabRequest();
     });
@@ -459,9 +470,9 @@
   });
 
   progressModalElement.addEventListener('hidden.bs.modal', function onProgressModalHidden() {
-    if (progressSocket) {
-      progressSocket.close();
-      progressSocket = null;
+    if (progressStream) {
+      progressStream.close();
+      progressStream = null;
     }
   });
 

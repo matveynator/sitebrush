@@ -175,6 +175,13 @@ func (writer *statusCapturingResponseWriter) Hijack() (net.Conn, *bufio.ReadWrit
 	return hijacker.Hijack()
 }
 
+func (writer *statusCapturingResponseWriter) Flush() {
+	flusher, ok := writer.ResponseWriter.(http.Flusher)
+	if ok {
+		flusher.Flush()
+	}
+}
+
 func accessLogMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		const (
@@ -307,7 +314,7 @@ func main() {
 	}
 	defer listener.Close()
 
-	address := "127.0.0.1:" + strconv.Itoa(listenPort)
+	address := "localhost:" + strconv.Itoa(listenPort)
 	log.Printf("Sitebrush started on http://%s", address)
 
 	httpHandler := accessLogMiddleware(router)
@@ -407,6 +414,7 @@ func (a *App) migrate(ctx context.Context) error {
 	_, _ = a.db.ExecContext(ctx, `UPDATE users SET domain=? WHERE domain IS NULL OR TRIM(domain)=''`, legacyDomain)
 	_, _ = a.db.ExecContext(ctx, `UPDATE pages SET domain=? WHERE domain IS NULL OR TRIM(domain)=''`, legacyDomain)
 	_, _ = a.db.ExecContext(ctx, `UPDATE revisions SET domain=? WHERE domain IS NULL OR TRIM(domain)=''`, legacyDomain)
+	a.migrateLoopbackDomainsToLocalhost(ctx)
 	_, _ = a.db.ExecContext(ctx, `UPDATE revisions SET is_active=1 WHERE is_active IS NULL`)
 	a.assignMissingDomainAliasTokens(ctx)
 	_, _ = a.db.ExecContext(ctx, `
@@ -419,6 +427,44 @@ func (a *App) migrate(ctx context.Context) error {
 		)
 	`)
 	return nil
+}
+
+func (a *App) migrateLoopbackDomainsToLocalhost(ctx context.Context) {
+	legacyLoopbackDomains := []string{"127.0.0.1", "::1", "[::1]"}
+	placeholders := "(" + strings.TrimSuffix(strings.Repeat("?,", len(legacyLoopbackDomains)), ",") + ")"
+	sqlArguments := make([]any, 0, len(legacyLoopbackDomains))
+	for _, legacyLoopbackDomain := range legacyLoopbackDomains {
+		sqlArguments = append(sqlArguments, legacyLoopbackDomain)
+	}
+	usersMergeQuery := `INSERT OR IGNORE INTO users(domain,email,password,is_admin)
+SELECT 'localhost',email,password,is_admin FROM users WHERE domain IN ` + placeholders
+	_, _ = a.db.ExecContext(ctx, usersMergeQuery, sqlArguments...)
+	pagesMergeQuery := `INSERT OR IGNORE INTO pages(domain,path,title,html,published)
+SELECT 'localhost',path,title,html,published FROM pages WHERE domain IN ` + placeholders
+	_, _ = a.db.ExecContext(ctx, pagesMergeQuery, sqlArguments...)
+	publishedPagesMergeQuery := `INSERT OR IGNORE INTO published_pages(domain,path,title,html)
+SELECT 'localhost',path,title,html FROM published_pages WHERE domain IN ` + placeholders
+	_, _ = a.db.ExecContext(ctx, publishedPagesMergeQuery, sqlArguments...)
+	fileAccessRulesMergeQuery := `INSERT OR IGNORE INTO file_access_rules(domain,file_name,access_mode,token,expires_at,single_use_left,token_use_count)
+SELECT 'localhost',file_name,access_mode,token,expires_at,single_use_left,token_use_count FROM file_access_rules WHERE domain IN ` + placeholders
+	_, _ = a.db.ExecContext(ctx, fileAccessRulesMergeQuery, sqlArguments...)
+	fileMetadataMergeQuery := `INSERT OR IGNORE INTO file_metadata(domain,file_name,page_path,size,mime_type,created_at,updated_at,source,download_count)
+SELECT 'localhost',file_name,page_path,size,mime_type,created_at,updated_at,source,download_count FROM file_metadata WHERE domain IN ` + placeholders
+	_, _ = a.db.ExecContext(ctx, fileMetadataMergeQuery, sqlArguments...)
+	domainStatesMergeQuery := `INSERT OR IGNORE INTO domain_states(domain,is_frozen)
+SELECT 'localhost',is_frozen FROM domain_states WHERE domain IN ` + placeholders
+	_, _ = a.db.ExecContext(ctx, domainStatesMergeQuery, sqlArguments...)
+
+	_, _ = a.db.ExecContext(ctx, `UPDATE revisions SET domain='localhost' WHERE domain IN `+placeholders, sqlArguments...)
+	_, _ = a.db.ExecContext(ctx, `UPDATE domain_aliases SET primary_domain='localhost' WHERE primary_domain IN `+placeholders, sqlArguments...)
+	_, _ = a.db.ExecContext(ctx, `DELETE FROM domain_aliases WHERE alias_domain IN `+placeholders, sqlArguments...)
+
+	_, _ = a.db.ExecContext(ctx, `DELETE FROM users WHERE domain IN `+placeholders, sqlArguments...)
+	_, _ = a.db.ExecContext(ctx, `DELETE FROM pages WHERE domain IN `+placeholders, sqlArguments...)
+	_, _ = a.db.ExecContext(ctx, `DELETE FROM published_pages WHERE domain IN `+placeholders, sqlArguments...)
+	_, _ = a.db.ExecContext(ctx, `DELETE FROM file_access_rules WHERE domain IN `+placeholders, sqlArguments...)
+	_, _ = a.db.ExecContext(ctx, `DELETE FROM file_metadata WHERE domain IN `+placeholders, sqlArguments...)
+	_, _ = a.db.ExecContext(ctx, `DELETE FROM domain_states WHERE domain IN `+placeholders, sqlArguments...)
 }
 
 func (a *App) autoCertHostPolicy(ctx context.Context, host string) error {
@@ -468,6 +514,10 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 	}
 	if hasQueryFlag(r, "grab_preview") {
 		a.grabPreview(w, r)
+		return
+	}
+	if hasQueryFlag(r, "grab_events") {
+		a.grabProgressEvents(w, r)
 		return
 	}
 	if hasQueryFlag(r, "grab_ws") {
@@ -1150,6 +1200,60 @@ func (a *App) grabProgressWS(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+}
+
+func (a *App) grabProgressEvents(w http.ResponseWriter, r *http.Request) {
+	if !a.isAdminRequest(r) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	progressToken := strings.TrimSpace(r.URL.Query().Get("token"))
+	if progressToken == "" {
+		http.Error(w, "token is required", http.StatusBadRequest)
+		return
+	}
+	flusher, canFlush := w.(http.Flusher)
+	if !canFlush {
+		http.Error(w, "streaming is not supported", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+
+	events := a.grabTracker.subscribe(progressToken)
+	defer a.grabTracker.unsubscribe(progressToken, events)
+	if !writeGrabProgressEvent(w, flusher, grabProgressEvent{Token: progressToken, Stage: "ready"}) {
+		return
+	}
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case event, isOpen := <-events:
+			if !isOpen {
+				return
+			}
+			if !writeGrabProgressEvent(w, flusher, event) {
+				return
+			}
+			if event.Stage == "done" || (event.Stage == "error" && strings.TrimSpace(event.CurrentURL) == "") {
+				return
+			}
+		}
+	}
+}
+
+func writeGrabProgressEvent(w io.Writer, flusher http.Flusher, event grabProgressEvent) bool {
+	eventJSON, marshalErr := json.Marshal(event)
+	if marshalErr != nil {
+		return false
+	}
+	if _, writeErr := fmt.Fprintf(w, "data: %s\n\n", eventJSON); writeErr != nil {
+		return false
+	}
+	flusher.Flush()
+	return true
 }
 
 func (a *App) revisionsPage(w http.ResponseWriter, r *http.Request) {
@@ -3126,14 +3230,32 @@ func (writer *webSocketTextWriter) WriteText(payload []byte) error {
 
 func domainFromRequest(r *http.Request) string {
 	host := strings.TrimSpace(r.Host)
-	if strings.Contains(host, ":") {
-		parts := strings.Split(host, ":")
-		host = parts[0]
+	if parsedHost, _, splitErr := net.SplitHostPort(host); splitErr == nil {
+		host = parsedHost
+	} else if strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]") {
+		host = strings.Trim(host, "[]")
 	}
+	host = canonicalLocalDomain(host)
 	if host == "" {
 		return "localhost"
 	}
-	return strings.ToLower(host)
+	return host
+}
+
+func canonicalLocalDomain(rawDomain string) string {
+	cleanDomain := strings.ToLower(strings.TrimSpace(rawDomain))
+	cleanDomain = strings.Trim(cleanDomain, "[]")
+	if cleanDomain == "" {
+		return ""
+	}
+	if cleanDomain == "localhost" {
+		return "localhost"
+	}
+	parsedIP := net.ParseIP(cleanDomain)
+	if parsedIP != nil && parsedIP.IsLoopback() {
+		return "localhost"
+	}
+	return cleanDomain
 }
 
 func (a *App) siteDomain(ctx context.Context, r *http.Request) string {

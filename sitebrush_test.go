@@ -473,6 +473,20 @@ func TestStatusCapturingResponseWriterSupportsWebSocketHijack(t *testing.T) {
 	}
 }
 
+func TestStatusCapturingResponseWriterSupportsFlush(t *testing.T) {
+	baseWriter := httptest.NewRecorder()
+	wrappedWriter := &statusCapturingResponseWriter{ResponseWriter: baseWriter, statusCode: http.StatusOK}
+	flusher, ok := any(wrappedWriter).(http.Flusher)
+	if !ok {
+		t.Fatal("logging response writer does not expose http.Flusher")
+	}
+
+	flusher.Flush()
+	if !baseWriter.Flushed {
+		t.Fatal("flush was not forwarded to the wrapped response writer")
+	}
+}
+
 func TestPublicImportedAssetsServeFromCanonicalAndDomainPrefixedPaths(t *testing.T) {
 	storagePath := t.TempDir()
 	rawDB, err := sql.Open("sqlite3", filepath.Join(storagePath, "sitebrush.db"))
@@ -758,6 +772,78 @@ func TestNormalizeDomainNameAcceptsBareDomainsAndRejectsInvalidNames(t *testing.
 		if actualDomain != expectedDomain {
 			t.Fatalf("normalizeDomainName(%q) = %q, want %q", rawDomain, actualDomain, expectedDomain)
 		}
+	}
+}
+
+func TestDomainFromRequestCanonicalizesLoopbackHosts(t *testing.T) {
+	testCases := map[string]string{
+		"localhost:8080": "localhost",
+		"127.0.0.1:8080": "localhost",
+		"[::1]:8080":     "localhost",
+		"EXAMPLE.com:80": "example.com",
+	}
+	for hostHeader, expectedDomain := range testCases {
+		request := httptest.NewRequest(http.MethodGet, "http://"+hostHeader+"/", nil)
+		actualDomain := domainFromRequest(request)
+		if actualDomain != expectedDomain {
+			t.Fatalf("domainFromRequest(%q) = %q, want %q", hostHeader, actualDomain, expectedDomain)
+		}
+	}
+}
+
+func TestMigrateMergesLegacyLoopbackDomainsIntoLocalhost(t *testing.T) {
+	application, rawDB := newTestApplication(t)
+	_, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "127.0.0.1", "admin@example.com", "old")
+	if err != nil {
+		t.Fatalf("insert loopback user: %v", err)
+	}
+	_, err = rawDB.Exec(`INSERT INTO pages(domain,path,title,html,published) VALUES(?,?,?,?,1)`, "127.0.0.1", "/docs", "/docs", "<p>docs</p>")
+	if err != nil {
+		t.Fatalf("insert loopback page: %v", err)
+	}
+	_, err = rawDB.Exec(`INSERT INTO domain_states(domain,is_frozen) VALUES(?,?)`, "127.0.0.1", 1)
+	if err != nil {
+		t.Fatalf("insert loopback domain state: %v", err)
+	}
+	_, err = rawDB.Exec(`INSERT INTO domain_aliases(primary_domain,alias_domain,verification_token,is_verified,dns_a_ok,is_selected,last_checked_at) VALUES(?,?,?,?,?,?,?)`,
+		"127.0.0.1", "example.com", "token", 1, 1, 0, "")
+	if err != nil {
+		t.Fatalf("insert loopback alias: %v", err)
+	}
+
+	if err := application.migrate(context.Background()); err != nil {
+		t.Fatalf("re-run migrate: %v", err)
+	}
+
+	var migratedUsers int
+	if err := rawDB.QueryRow(`SELECT COUNT(1) FROM users WHERE domain='localhost' AND email='admin@example.com'`).Scan(&migratedUsers); err != nil {
+		t.Fatalf("count migrated users: %v", err)
+	}
+	if migratedUsers != 1 {
+		t.Fatalf("migrated users = %d, want 1", migratedUsers)
+	}
+	var legacyUsers int
+	if err := rawDB.QueryRow(`SELECT COUNT(1) FROM users WHERE domain='127.0.0.1' AND email='admin@example.com'`).Scan(&legacyUsers); err != nil {
+		t.Fatalf("count legacy users: %v", err)
+	}
+	if legacyUsers != 0 {
+		t.Fatalf("legacy users = %d, want 0", legacyUsers)
+	}
+
+	var pageDomain string
+	if err := rawDB.QueryRow(`SELECT domain FROM pages WHERE path='/docs'`).Scan(&pageDomain); err != nil {
+		t.Fatalf("select migrated page: %v", err)
+	}
+	if pageDomain != "localhost" {
+		t.Fatalf("migrated page domain = %q, want localhost", pageDomain)
+	}
+
+	var aliasPrimaryDomain string
+	if err := rawDB.QueryRow(`SELECT primary_domain FROM domain_aliases WHERE alias_domain='example.com'`).Scan(&aliasPrimaryDomain); err != nil {
+		t.Fatalf("select migrated alias: %v", err)
+	}
+	if aliasPrimaryDomain != "localhost" {
+		t.Fatalf("migrated alias primary_domain = %q, want localhost", aliasPrimaryDomain)
 	}
 }
 
