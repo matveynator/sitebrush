@@ -45,7 +45,8 @@ import (
 var embeddedWebFiles embed.FS
 var translationCatalog = loadTranslationCatalog()
 
-const appVersion = "dev"
+var CompileVersion = "dev"
+
 const defaultStoragePath = "."
 const defaultDBPath = "storage/db/sitebrush.db"
 const grabResourceMaxDepth = 64
@@ -331,7 +332,7 @@ func main() {
 	}()
 
 	if *desktopMode {
-		if err := desktop.RunWebviewWindow(address, appVersion); err != nil {
+		if err := desktop.RunWebviewWindow(address, CompileVersion); err != nil {
 			log.Fatal(err)
 		}
 		return
@@ -1978,6 +1979,9 @@ func buildContextMenuScript(isAdmin bool, isFrozen bool, pagePath, domain string
 	treeModalTitle := template.JSEscapeString(translationOrDefault(translations, "tree_modal_title", "Site tree"))
 	treeLoadingLabel := template.JSEscapeString(translationOrDefault(translations, "tree_loading", "Loading site tree..."))
 	treeLoadErrorLabel := template.JSEscapeString(translationOrDefault(translations, "tree_load_error", "Failed to load site tree."))
+	stableReleaseURL := "https://github.com/matveynator/sitebrush/releases/tag/stable-release"
+	compiledVersionLabel := template.JSEscapeString(CompileVersion)
+	copyrightMenuEntry := fmt.Sprintf("<li class='SiteBrushContextMenu ContextMenuCopyright'><a href='%s' class='SiteBrushContextMenuLink' target='_blank' rel='noopener noreferrer'>sitebrush <span class='SiteBrushContextMenuVersion'>%s</span></a></li>", stableReleaseURL, compiledVersionLabel)
 	if isAdmin {
 		deleteActionEntry := ""
 		if revisionID > 0 {
@@ -2141,7 +2145,7 @@ func buildContextMenuScript(isAdmin bool, isFrozen bool, pagePath, domain string
       "<li class='SiteBrushContextMenu'><a href='?settings' class='SiteBrushContextMenuLink'><img src='/p/static/settings.png' class='SiteBrushMenuIcon' alt=''>" + "` + settingsLabel + `" + "</a></li>",
       "<li class='SiteBrushContextMenu'><a href='?profile' class='SiteBrushContextMenuLink'><img src='/p/static/profile.png' class='SiteBrushMenuIcon' alt=''>" + "` + profileLabel + `" + "</a></li>",
       "<li class='SiteBrushContextMenu'><a href='?logout' class='SiteBrushContextMenuLink'><img src='/p/static/sign-out.png' class='SiteBrushMenuIcon' alt=''>" + "` + logoutLabel + `" + "</a></li>",
-      "<li class='SiteBrushContextMenu ContextMenuCopyright'><a href='http://sitebrush.com' class='SiteBrushContextMenuLink'>sitebrush</a></li>",
+      "` + copyrightMenuEntry + `",
       "</ul>"
     ];
     showSitebrushMenu(browserEvent, menuHtmlEntries, currentPagePath, isDomainFrozen);
@@ -2199,7 +2203,7 @@ func buildContextMenuScript(isAdmin bool, isFrozen bool, pagePath, domain string
       "<ul class='SiteBrushMenuList'>",
       "<li class='SiteBrushContextMenu SiteBrushDomainMenuItem'><a href='/' class='SiteBrushContextMenuLink'>" + currentDomainName + "</a></li>",
       "<li class='SiteBrushContextMenu'><a href='?login' class='SiteBrushContextMenuLink'><img src='/p/static/login.png' class='SiteBrushMenuIcon' alt=''>" + "` + loginLabel + `" + "</a></li>",
-      "<li class='SiteBrushContextMenu ContextMenuCopyright'><a href='http://sitebrush.com' class='SiteBrushContextMenuLink'>sitebrush</a></li>",
+      "` + copyrightMenuEntry + `",
       "</ul>"
     ];
     showSitebrushMenu(browserEvent, menuHtmlEntries, currentPagePath, false);
@@ -2220,6 +2224,7 @@ func contextMenuStylesAndHelpers() string {
 .SiteBrushContextMenuButton{width:100%;border:0;background:transparent;text-align:left}
 .SiteBrushDomainMenuItem .SiteBrushContextMenuLink{font-weight:700;border-bottom:1px solid #c8d5e7}
 .ContextMenuCopyright .SiteBrushContextMenuLink{font-size:12px;color:#5b6f8b;border-top:1px solid #c8d5e7;margin-top:2px;padding-top:7px}.SiteBrushMenuIcon{width:20px;height:20px;flex:0 0 20px}
+.SiteBrushContextMenuVersion{font-weight:700;margin-left:4px}
 .SiteBrushConfirmOverlay{position:fixed;inset:0;background:rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center;z-index:100000}
 .SiteBrushConfirmModal{background:#fff;border:1px solid #8ea4c1;min-width:260px;max-width:340px;padding:16px;font-family:Arial,Helvetica,sans-serif}
 .SiteBrushConfirmText{margin:0 0 14px 0;color:#1f3f6f;font-size:14px}
@@ -2398,7 +2403,7 @@ func (a *App) render(w http.ResponseWriter, r *http.Request, templateName string
 		return
 	}
 	parsedTemplate := template.Must(template.New(templateName).Parse(string(fileBytes)))
-	envelope := map[string]any{"Domain": a.siteDomain(r.Context(), r), "T": translationsForRequest(r)}
+	envelope := map[string]any{"Domain": a.siteDomain(r.Context(), r), "T": translationsForRequest(r), "CompileVersion": CompileVersion}
 	mergeTemplateData(envelope, templateData)
 	_ = parsedTemplate.Execute(w, envelope)
 }

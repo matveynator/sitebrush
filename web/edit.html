@@ -68,6 +68,20 @@
     .SiteBrushUploadClose { border: 0; background: transparent; color: var(--text-main); font-size: 24px; line-height: 1; cursor: pointer; }
     .SiteBrushUploadResizeGrid { display: grid; grid-template-columns: minmax(0, 1fr) 120px; gap: 8px; align-items: end; }
     .SiteBrushUploadHidden { display: none; }
+    .SiteBrushBuildVersion {
+      position: fixed;
+      right: 12px;
+      bottom: 10px;
+      z-index: 12;
+      padding: 4px 8px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: color-mix(in srgb, var(--surface) 92%, transparent);
+      color: var(--hint);
+      font-size: 12px;
+      line-height: 1;
+      pointer-events: none;
+    }
     @media (max-width: 620px) {
       .SiteBrushUploadResizeGrid { grid-template-columns: 1fr; }
       .SiteBrushUploadFooter { justify-content: stretch; }
@@ -82,6 +96,7 @@
   <input type="hidden" id="htmlContentField" name="html" />
   <textarea id="visualEditorRoot" class="editor-host">{{.HTML}}</textarea>
 </form>
+<div class="SiteBrushBuildVersion">Build {{.CompileVersion}}</div>
 
 <div id="uploadDialogOverlay" class="SiteBrushUploadOverlay" role="dialog" aria-modal="true" aria-labelledby="uploadDialogTitle">
   <div class="SiteBrushUploadModal">
