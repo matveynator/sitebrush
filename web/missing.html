@@ -19,7 +19,7 @@
   </div>
 
   <div class="alert {{if .IsAdmin}}alert-success{{else}}alert-info{{end}}" role="alert">
-    Страница <strong>{{.Path}}</strong> не найдена. Пожалуйста <a class="alert-link" href="{{if .EditLink}}{{.EditLink}}{{else}}{{.Path}}?edit{{end}}">создайте эту страницу</a>.
+    Страница <strong>{{.Path}}</strong> не найдена. Пожалуйста <a class="alert-link" href="{{if .EditLink}}{{.EditLink}}{{else}}{{.Path}}?visual{{end}}">создайте эту страницу</a>.
   </div>
 
   {{if .IsAdmin}}
@@ -411,7 +411,7 @@
         return grabHTTPResponse.json();
       })
       .then(function handleGrabPayload(grabPayload) {
-        downloadRedirectURL = grabPayload.redirect || (grabFormElement.querySelector('input[name="path"]').value + '?edit');
+        downloadRedirectURL = grabPayload.redirect || (grabFormElement.querySelector('input[name="path"]').value + '?visual');
         finishDownloadIfReady();
       })
       .catch(function handleGrabFailure(grabError) {

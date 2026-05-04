@@ -30,6 +30,35 @@ type fakeGrabResponse struct {
 	body        string
 }
 
+func newTestApplication(t *testing.T) (*App, *sql.DB) {
+	t.Helper()
+	storagePath := t.TempDir()
+	rawDB, err := sql.Open("sqlite3", filepath.Join(storagePath, "sitebrush.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = rawDB.Close()
+	})
+	application := &App{db: rawDB, storagePath: storagePath, grabTracker: newGrabProgressTracker()}
+	if err := application.migrate(context.Background()); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	return application, rawDB
+}
+
+func newAdminSessionCookie(t *testing.T, application *App, email string) *http.Cookie {
+	t.Helper()
+	sessionRequest := httptest.NewRequest(http.MethodGet, "http://localhost:8080/", nil)
+	sessionResponse := httptest.NewRecorder()
+	application.createSession(sessionResponse, sessionRequest, email)
+	sessionCookies := sessionResponse.Result().Cookies()
+	if len(sessionCookies) == 0 {
+		t.Fatal("createSession did not set a cookie")
+	}
+	return sessionCookies[0]
+}
+
 type fakeHijackResponseWriter struct {
 	header http.Header
 	conn   *fakeHijackConn
@@ -115,6 +144,127 @@ func (transport fakeGrabTransport) RoundTrip(request *http.Request) (*http.Respo
 		Header:        header,
 		Request:       request,
 	}, nil
+}
+
+func TestContextMenuUsesDirectEditorProfileAndDeleteActions(t *testing.T) {
+	application, rawDB := newTestApplication(t)
+	_, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "admin@example.com", "old")
+	if err != nil {
+		t.Fatalf("insert user: %v", err)
+	}
+	_, err = rawDB.Exec(`INSERT INTO pages(domain,path,title,html,published) VALUES(?,?,?,?,1)`, "localhost", "/docs", "/docs", "<html><body>docs</body></html>")
+	if err != nil {
+		t.Fatalf("insert page: %v", err)
+	}
+	result, err := rawDB.Exec(`INSERT INTO revisions(domain,page_path,html,created_at,is_active) VALUES(?,?,?,?,1)`, "localhost", "/docs", "<html><body>docs</body></html>", time.Now().Format(time.RFC3339))
+	if err != nil {
+		t.Fatalf("insert revision: %v", err)
+	}
+	revisionID, err := result.LastInsertId()
+	if err != nil {
+		t.Fatalf("revision id: %v", err)
+	}
+
+	request := httptest.NewRequest(http.MethodGet, "http://localhost:8080/docs", nil)
+	request.AddCookie(newAdminSessionCookie(t, application, "admin@example.com"))
+	response := httptest.NewRecorder()
+	application.route(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%q", response.Code, response.Body.String())
+	}
+	body := response.Body.String()
+	for _, expectedFragment := range []string{"href='?visual'", "href='?text'", "data-sitebrush-action='delete'", "?delete=" + strconv.FormatInt(revisionID, 10), "href='?profile'"} {
+		if !strings.Contains(body, expectedFragment) {
+			t.Fatalf("context menu missing %q in %s", expectedFragment, body)
+		}
+	}
+	if strings.Contains(body, "href='?edit'") {
+		t.Fatalf("context menu still contains intermediate edit link: %s", body)
+	}
+}
+
+func TestDeleteRevisionByQueryDisablesRevisionAndAppliesPreviousActiveRevision(t *testing.T) {
+	application, rawDB := newTestApplication(t)
+	_, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "admin@example.com", "old")
+	if err != nil {
+		t.Fatalf("insert user: %v", err)
+	}
+	_, err = rawDB.Exec(`INSERT INTO pages(domain,path,title,html,published) VALUES(?,?,?,?,1)`, "localhost", "/docs", "/docs", "new")
+	if err != nil {
+		t.Fatalf("insert page: %v", err)
+	}
+	_, err = rawDB.Exec(`INSERT INTO revisions(domain,page_path,html,created_at,is_active) VALUES(?,?,?,?,1)`, "localhost", "/docs", "old", "2026-01-01T00:00:00Z")
+	if err != nil {
+		t.Fatalf("insert old revision: %v", err)
+	}
+	result, err := rawDB.Exec(`INSERT INTO revisions(domain,page_path,html,created_at,is_active) VALUES(?,?,?,?,1)`, "localhost", "/docs", "new", "2026-01-02T00:00:00Z")
+	if err != nil {
+		t.Fatalf("insert new revision: %v", err)
+	}
+	revisionID, err := result.LastInsertId()
+	if err != nil {
+		t.Fatalf("revision id: %v", err)
+	}
+
+	request := httptest.NewRequest(http.MethodPost, "http://localhost:8080/docs?delete="+strconv.FormatInt(revisionID, 10), nil)
+	request.AddCookie(newAdminSessionCookie(t, application, "admin@example.com"))
+	response := httptest.NewRecorder()
+	application.route(response, request)
+	if response.Code != http.StatusFound {
+		t.Fatalf("status = %d, body=%q", response.Code, response.Body.String())
+	}
+
+	var isActive int
+	if err := rawDB.QueryRow(`SELECT is_active FROM revisions WHERE id=?`, revisionID).Scan(&isActive); err != nil {
+		t.Fatalf("read revision: %v", err)
+	}
+	if isActive != 0 {
+		t.Fatalf("revision is_active = %d, want 0", isActive)
+	}
+	var pageHTML string
+	if err := rawDB.QueryRow(`SELECT html FROM pages WHERE domain=? AND path=?`, "localhost", "/docs").Scan(&pageHTML); err != nil {
+		t.Fatalf("read page: %v", err)
+	}
+	if pageHTML != "old" {
+		t.Fatalf("page html = %q, want old", pageHTML)
+	}
+}
+
+func TestProfilePageUpdatesAdminEmailAndPassword(t *testing.T) {
+	application, rawDB := newTestApplication(t)
+	_, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "admin@example.com", "old")
+	if err != nil {
+		t.Fatalf("insert user: %v", err)
+	}
+	form := url.Values{}
+	form.Set("email", "new@example.com")
+	form.Set("password", "new-secret")
+	form.Set("password_confirm", "new-secret")
+	request := httptest.NewRequest(http.MethodPost, "http://localhost:8080/?profile", strings.NewReader(form.Encode()))
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	request.AddCookie(newAdminSessionCookie(t, application, "admin@example.com"))
+	response := httptest.NewRecorder()
+	application.route(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%q", response.Code, response.Body.String())
+	}
+
+	var password string
+	if err := rawDB.QueryRow(`SELECT password FROM users WHERE domain=? AND email=?`, "localhost", "new@example.com").Scan(&password); err != nil {
+		t.Fatalf("read updated user: %v", err)
+	}
+	if password != "new-secret" {
+		t.Fatalf("password = %q, want new-secret", password)
+	}
+	profileCookies := response.Result().Cookies()
+	if len(profileCookies) == 0 {
+		t.Fatal("profile update did not refresh the session cookie")
+	}
+	authenticatedRequest := httptest.NewRequest(http.MethodGet, "http://localhost:8080/", nil)
+	authenticatedRequest.AddCookie(profileCookies[0])
+	if !application.isAdminRequest(authenticatedRequest) {
+		t.Fatal("refreshed profile session is not authenticated")
+	}
 }
 
 func TestMirrorRemotePageImportsNestedExternalResources(t *testing.T) {

@@ -468,6 +468,10 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 		a.deleteRevision(w, r)
 		return
 	}
+	if strings.TrimSpace(r.URL.Query().Get("delete")) != "" {
+		a.deleteRevisionByQuery(w, r)
+		return
+	}
 	if hasQueryFlag(r, "revision_toggle") {
 		a.toggleRevision(w, r)
 		return
@@ -494,6 +498,10 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 	}
 	if hasQueryFlag(r, "settings") || hasQueryFlag(r, "properties") {
 		a.domainSettingsPage(w, r)
+		return
+	}
+	if hasQueryFlag(r, "profile") {
+		a.profilePage(w, r)
 		return
 	}
 	if hasQueryFlag(r, "freeze") {
@@ -564,11 +572,11 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !isAdmin {
-		a.render(w, r, "missing.html", map[string]any{"Path": pagePath, "EditLink": pagePath + "?edit", "IsAdmin": false})
+		a.render(w, r, "missing.html", map[string]any{"Path": pagePath, "EditLink": pagePath + "?visual", "IsAdmin": false})
 		return
 	}
 	if isAdmin {
-		a.render(w, r, "missing.html", map[string]any{"Path": pagePath, "EditLink": pagePath + "?edit", "IsAdmin": true})
+		a.render(w, r, "missing.html", map[string]any{"Path": pagePath, "EditLink": pagePath + "?visual", "IsAdmin": true})
 		return
 	}
 	http.NotFound(w, r)
@@ -790,11 +798,14 @@ func loginReturnPathOrDefault(r *http.Request) string {
 		return returnPath
 	}
 	if strings.TrimSpace(r.URL.RawQuery) == "login" {
-		return r.URL.Path + "?edit"
+		return r.URL.Path + "?visual"
 	}
 	refererURL, parseErr := url.Parse(strings.TrimSpace(r.Referer()))
-	if parseErr == nil && refererURL.Path == r.URL.Path && strings.TrimSpace(refererURL.RawQuery) == "edit" {
-		return refererURL.Path + "?edit"
+	if parseErr == nil && refererURL.Path == r.URL.Path {
+		refererMode := strings.TrimSpace(refererURL.RawQuery)
+		if refererMode == "edit" || refererMode == "visual" || refererMode == "text" {
+			return refererURL.Path + "?" + refererMode
+		}
 	}
 	return requestedReturnPath(r)
 }
@@ -878,10 +889,10 @@ func (a *App) grabPage(w http.ResponseWriter, r *http.Request) {
 	_, _ = a.db.ExecContext(r.Context(), `INSERT INTO revisions(domain,page_path,html,created_at) VALUES(?,?,?,?)`, domain, pagePath, html, time.Now().Format(time.RFC3339))
 	if wantsJSONResponse(r) {
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]string{"redirect": pagePath + "?edit"})
+		_ = json.NewEncoder(w).Encode(map[string]string{"redirect": pagePath + "?visual"})
 		return
 	}
-	http.Redirect(w, r, pagePath+"?edit", http.StatusFound)
+	http.Redirect(w, r, pagePath+"?visual", http.StatusFound)
 }
 
 func (a *App) grabPreview(w http.ResponseWriter, r *http.Request) {
@@ -1168,6 +1179,28 @@ func (a *App) deleteRevision(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, pagePath+"?revisions", http.StatusFound)
 }
 
+func (a *App) deleteRevisionByQuery(w http.ResponseWriter, r *http.Request) {
+	if !a.isAdminRequest(r) || r.Method != http.MethodPost {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	revisionID, _ := strconv.Atoi(strings.TrimSpace(r.URL.Query().Get("delete")))
+	if revisionID <= 0 {
+		http.Error(w, "revision not found", http.StatusNotFound)
+		return
+	}
+	domain := a.siteDomain(r.Context(), r)
+	var pagePath string
+	err := a.db.QueryRowContext(r.Context(), `SELECT page_path FROM revisions WHERE id=? AND domain=?`, revisionID, domain).Scan(&pagePath)
+	if err != nil {
+		http.Error(w, "revision not found", http.StatusNotFound)
+		return
+	}
+	_, _ = a.db.ExecContext(r.Context(), `UPDATE revisions SET is_active=0 WHERE id=? AND domain=?`, revisionID, domain)
+	a.applyLatestActiveRevision(r.Context(), domain, pagePath)
+	http.Redirect(w, r, pagePath, http.StatusFound)
+}
+
 func (a *App) toggleRevision(w http.ResponseWriter, r *http.Request) {
 	if !a.isAdminRequest(r) || r.Method != http.MethodPost {
 		http.Error(w, "forbidden", http.StatusForbidden)
@@ -1184,6 +1217,59 @@ func (a *App) toggleRevision(w http.ResponseWriter, r *http.Request) {
 	_, _ = a.db.ExecContext(r.Context(), `UPDATE revisions SET is_active=? WHERE id=? AND domain=?`, nextActiveState, revisionID, domain)
 	a.applyLatestActiveRevision(r.Context(), domain, pagePath)
 	http.Redirect(w, r, pagePath+"?revisions", http.StatusFound)
+}
+
+func (a *App) profilePage(w http.ResponseWriter, r *http.Request) {
+	if !a.isAdminRequest(r) {
+		if !a.hasAdmin(r.Context(), a.siteDomain(r.Context(), r)) {
+			http.Redirect(w, r, r.URL.Path+"?register", http.StatusFound)
+			return
+		}
+		http.Redirect(w, r, r.URL.Path+"?login", http.StatusFound)
+		return
+	}
+	currentEmail, found := a.currentAdminEmail(r)
+	if !found {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	status := ""
+	if r.Method == http.MethodPost {
+		nextEmail := strings.TrimSpace(r.FormValue("email"))
+		nextPassword := strings.TrimSpace(r.FormValue("password"))
+		confirmPassword := strings.TrimSpace(r.FormValue("password_confirm"))
+		switch {
+		case nextEmail == "":
+			status = "Email is required."
+		case nextPassword != "" && nextPassword != confirmPassword:
+			status = "Password confirmation does not match."
+		default:
+			domain := a.siteDomain(r.Context(), r)
+			var updateErr error
+			if nextPassword == "" {
+				_, updateErr = a.db.ExecContext(r.Context(), `UPDATE users SET email=? WHERE domain=? AND email=?`, nextEmail, domain, currentEmail)
+			} else {
+				_, updateErr = a.db.ExecContext(r.Context(), `UPDATE users SET email=?,password=? WHERE domain=? AND email=?`, nextEmail, nextPassword, domain, currentEmail)
+			}
+			if updateErr != nil {
+				status = updateErr.Error()
+				break
+			}
+			a.createSession(w, r, nextEmail)
+			currentEmail = nextEmail
+			status = "Account updated."
+		}
+	}
+	translations := translationsForRequest(r)
+	a.render(w, r, "profile.html", map[string]any{
+		"Email":                currentEmail,
+		"Status":               status,
+		"Title":                translationOrDefault(translations, "profile_title", "Account"),
+		"EmailLabel":           translationOrDefault(translations, "profile_email", "Email"),
+		"PasswordLabel":        translationOrDefault(translations, "profile_new_password", "New password"),
+		"PasswordConfirmLabel": translationOrDefault(translations, "profile_confirm_password", "Confirm password"),
+		"SaveLabel":            translationOrDefault(translations, "profile_save", "Save"),
+	})
 }
 
 func (a *App) recoverPage(w http.ResponseWriter, r *http.Request) {
@@ -1660,6 +1746,25 @@ func (a *App) isAdminRequest(r *http.Request) bool {
 	return sessionCount > 0
 }
 
+func (a *App) currentAdminEmail(r *http.Request) (string, bool) {
+	cookie, err := r.Cookie("sitebrush_session")
+	if err != nil {
+		return "", false
+	}
+	var email string
+	err = a.db.QueryRowContext(r.Context(), `SELECT u.email FROM sessions s JOIN users u ON (u.domain||'|'||u.email)=s.user_email WHERE s.token=? AND u.domain=? AND u.is_admin=1 LIMIT 1`, cookie.Value, a.siteDomain(r.Context(), r)).Scan(&email)
+	if err != nil || strings.TrimSpace(email) == "" {
+		return "", false
+	}
+	return email, true
+}
+
+func (a *App) latestActiveRevisionID(ctx context.Context, domain string, pagePath string) int {
+	var revisionID int
+	_ = a.db.QueryRowContext(ctx, `SELECT id FROM revisions WHERE domain=? AND page_path=? AND is_active=1 ORDER BY id DESC LIMIT 1`, domain, pagePath).Scan(&revisionID)
+	return revisionID
+}
+
 func (a *App) serveManagedPageContent(w http.ResponseWriter, r *http.Request, pagePath, content, sourceType string) {
 	a.logContentDelivery(w, sourceType)
 	if pageContentKind(pagePath, content) == "html" {
@@ -1673,7 +1778,11 @@ func (a *App) serveManagedPageContent(w http.ResponseWriter, r *http.Request, pa
 
 func (a *App) injectContextMenu(r *http.Request, pagePath, html string) string {
 	domain := a.siteDomain(r.Context(), r)
-	menuScript := buildContextMenuScript(a.isAdminRequest(r), a.isDomainFrozen(r.Context(), domain), pagePath, domain, translationsForRequest(r))
+	revisionID := 0
+	if a.isAdminRequest(r) {
+		revisionID = a.latestActiveRevisionID(r.Context(), domain, pagePath)
+	}
+	menuScript := buildContextMenuScript(a.isAdminRequest(r), a.isDomainFrozen(r.Context(), domain), pagePath, domain, revisionID, translationsForRequest(r))
 	if strings.Contains(strings.ToLower(html), "</body>") {
 		bodyClosePattern := regexp.MustCompile(`(?i)</body>`)
 		return bodyClosePattern.ReplaceAllString(html, menuScript+"</body>")
@@ -1745,11 +1854,12 @@ func contentTypeForManagedPage(pagePath, content string) string {
 	return detectedContentType
 }
 
-func buildContextMenuScript(isAdmin bool, isFrozen bool, pagePath, domain string, translations map[string]string) string {
+func buildContextMenuScript(isAdmin bool, isFrozen bool, pagePath, domain string, revisionID int, translations map[string]string) string {
 	escapedPath := template.JSEscapeString(pagePath)
 	escapedDomain := template.JSEscapeString(domain)
 	confirmFreezePrompt := template.JSEscapeString(translationOrDefault(translations, "confirm_freeze_prompt", "Freeze domain now?"))
 	confirmPublishPrompt := template.JSEscapeString(translationOrDefault(translations, "confirm_publish_prompt", "Publish website changes now?"))
+	confirmDeletePrompt := template.JSEscapeString(translationOrDefault(translations, "confirm_delete_revision_prompt", "Delete this revision?"))
 	publishConfirmWithChangesLabel := template.JSEscapeString(translationOrDefault(translations, "publish_confirm_with_changes", "Publish the changes made to the site?"))
 	publishConfirmWithoutChangesLabel := template.JSEscapeString(translationOrDefault(translations, "publish_confirm_without_changes", "No changes were made. Unfreeze the site?"))
 	publishPreviewLoadingLabel := template.JSEscapeString(translationOrDefault(translations, "publish_preview_loading", "Checking changes to publish..."))
@@ -1757,18 +1867,25 @@ func buildContextMenuScript(isAdmin bool, isFrozen bool, pagePath, domain string
 	confirmYesLabel := template.JSEscapeString(translationOrDefault(translations, "confirm_yes", "Yes"))
 	confirmNoLabel := template.JSEscapeString(translationOrDefault(translations, "confirm_no", "No"))
 	editLabel := template.JSEscapeString(translationOrDefault(translations, "menu_edit", "Edit"))
+	textEditLabel := template.JSEscapeString(translationOrDefault(translations, "menu_text_edit", "Edit as text"))
+	deleteLabel := template.JSEscapeString(translationOrDefault(translations, "menu_delete", "Delete"))
 	revisionsLabel := template.JSEscapeString(translationOrDefault(translations, "menu_revisions", "Revisions"))
 	filesLabel := template.JSEscapeString(translationOrDefault(translations, "menu_files", "Files"))
 	treeLabel := template.JSEscapeString(translationOrDefault(translations, "menu_tree", "Site tree"))
 	freezeLabel := template.JSEscapeString(translationOrDefault(translations, "menu_freeze", "Freeze"))
 	publishLabel := template.JSEscapeString(translationOrDefault(translations, "menu_publish", "Publish"))
 	settingsLabel := template.JSEscapeString(translationOrDefault(translations, "menu_domain_settings", "Domain settings"))
+	profileLabel := template.JSEscapeString(translationOrDefault(translations, "menu_profile", "Account"))
 	logoutLabel := template.JSEscapeString(translationOrDefault(translations, "menu_logout", "Sign out"))
 	loginLabel := template.JSEscapeString(translationOrDefault(translations, "menu_login", "Sign in"))
 	treeModalTitle := template.JSEscapeString(translationOrDefault(translations, "tree_modal_title", "Site tree"))
 	treeLoadingLabel := template.JSEscapeString(translationOrDefault(translations, "tree_loading", "Loading site tree..."))
 	treeLoadErrorLabel := template.JSEscapeString(translationOrDefault(translations, "tree_load_error", "Failed to load site tree."))
 	if isAdmin {
+		deleteActionEntry := ""
+		if revisionID > 0 {
+			deleteActionEntry = "<li class='SiteBrushContextMenu'><button type='button' data-sitebrush-action='delete' class='SiteBrushContextMenuLink SiteBrushContextMenuButton'><img src='/p/static/cross.png' class='SiteBrushMenuIcon' alt=''>" + deleteLabel + "</button></li>"
+		}
 		freezeActionEntry := "<li class='SiteBrushContextMenu'><button type='button' data-sitebrush-action='freeze' class='SiteBrushContextMenuLink SiteBrushContextMenuButton'><img src='/p/static/freeze.png' class='SiteBrushMenuIcon' alt=''>" + freezeLabel + "</button></li>"
 		if isFrozen {
 			freezeActionEntry = "<li class='SiteBrushContextMenu'><button type='button' data-sitebrush-action='publish' class='SiteBrushContextMenuLink SiteBrushContextMenuButton'><img src='/p/static/publish.png' class='SiteBrushMenuIcon' alt=''>" + publishLabel + "</button></li>"
@@ -1783,6 +1900,7 @@ func buildContextMenuScript(isAdmin bool, isFrozen bool, pagePath, domain string
   const currentDomainName = "` + escapedDomain + `";
   const isDomainFrozen = ` + strconv.FormatBool(isFrozen) + `;
   const actionConfigByName = {
+    delete: { path: "?delete=` + strconv.Itoa(revisionID) + `", message: "` + confirmDeletePrompt + `" },
     freeze: { path: "?freeze", message: "` + confirmFreezePrompt + `" },
     publish: { path: "?publish", message: "` + confirmPublishPrompt + `" }
   };
@@ -1916,12 +2034,15 @@ func buildContextMenuScript(isAdmin bool, isFrozen bool, pagePath, domain string
     const menuHtmlEntries = [
       "<ul class='SiteBrushMenuList'>",
       "<li class='SiteBrushContextMenu SiteBrushDomainMenuItem'><a href='/' class='SiteBrushContextMenuLink'>" + currentDomainName + "</a></li>",
-      "<li class='SiteBrushContextMenu'><a href='?edit' class='SiteBrushContextMenuLink'><img src='/p/static/pencil.png' class='SiteBrushMenuIcon' alt=''>" + "` + editLabel + `" + "</a></li>",
+      "<li class='SiteBrushContextMenu'><a href='?visual' class='SiteBrushContextMenuLink'><img src='/p/static/pencil.png' class='SiteBrushMenuIcon' alt=''>" + "` + editLabel + `" + "</a></li>",
+      "<li class='SiteBrushContextMenu'><a href='?text' class='SiteBrushContextMenuLink'><img src='/p/static/pencil-big.png' class='SiteBrushMenuIcon' alt=''>" + "` + textEditLabel + `" + "</a></li>",
       "<li class='SiteBrushContextMenu'><a href='?revisions' class='SiteBrushContextMenuLink'><img src='/p/static/revisions.png' class='SiteBrushMenuIcon' alt=''>" + "` + revisionsLabel + `" + "</a></li>",
+      "` + deleteActionEntry + `",
       "<li class='SiteBrushContextMenu'><a href='?files' class='SiteBrushContextMenuLink'><img src='/p/static/upload.png' class='SiteBrushMenuIcon' alt=''>" + "` + filesLabel + `" + "</a></li>",
       "<li class='SiteBrushContextMenu'><button type='button' data-sitebrush-action='tree' class='SiteBrushContextMenuLink SiteBrushContextMenuButton'><img src='/p/static/tree.png' class='SiteBrushMenuIcon' alt=''>" + "` + treeLabel + `" + "</button></li>",
       "` + freezeActionEntry + `",
       "<li class='SiteBrushContextMenu'><a href='?settings' class='SiteBrushContextMenuLink'><img src='/p/static/revisions.png' class='SiteBrushMenuIcon' alt=''>" + "` + settingsLabel + `" + "</a></li>",
+      "<li class='SiteBrushContextMenu'><a href='?profile' class='SiteBrushContextMenuLink'><img src='/p/static/profile.png' class='SiteBrushMenuIcon' alt=''>" + "` + profileLabel + `" + "</a></li>",
       "<li class='SiteBrushContextMenu'><a href='?logout' class='SiteBrushContextMenuLink'><img src='/p/static/sign-out.png' class='SiteBrushMenuIcon' alt=''>" + "` + logoutLabel + `" + "</a></li>",
       "<li class='SiteBrushContextMenu ContextMenuCopyright'><a href='http://sitebrush.com' class='SiteBrushContextMenuLink'>sitebrush</a></li>",
       "</ul>"
