@@ -31,6 +31,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -47,7 +48,7 @@ var translationCatalog = loadTranslationCatalog()
 
 var CompileVersion = "dev"
 
-const defaultStoragePath = "."
+const storageAppName = "sitebrush"
 const defaultDBPath = "storage/db/sitebrush.db"
 const grabResourceMaxDepth = 64
 
@@ -234,7 +235,7 @@ func flagWasProvided(flagName string) bool {
 func cleanStoragePath(storagePath string) string {
 	trimmedStoragePath := strings.TrimSpace(storagePath)
 	if trimmedStoragePath == "" {
-		return defaultStoragePath
+		return defaultAppStoragePath()
 	}
 	return filepath.Clean(trimmedStoragePath)
 }
@@ -258,7 +259,7 @@ func ensureParentDir(filePath string) error {
 func main() {
 	port := flag.Int("port", 80, "HTTP listen port")
 	dbType := flag.String("db-type", "sqlite", "database driver (supported: sqlite)")
-	storagePath := flag.String("storage-path", defaultStoragePath, "path to directory that contains Sitebrush storage")
+	storagePath := flag.String("storage-path", defaultAppStoragePath(), "path to the Sitebrush app data directory (defaults to the OS user data folder)")
 	dbPath := flag.String("db-path", defaultDBPath, "path to sqlite database file")
 	desktopMode := flag.Bool("desktop", desktop.DefaultEnabled(), "enable desktop mode when desktop build tags are used")
 	setupMode := flag.Bool("setup", false, "run interactive Linux setup wizard mode")
@@ -3677,7 +3678,47 @@ func (a *App) packsDir() string {
 func (a *App) storageRootDir() string {
 	storagePath := a.storagePath
 	if strings.TrimSpace(storagePath) == "" {
-		storagePath = defaultStoragePath
+		storagePath = defaultAppStoragePath()
 	}
 	return filepath.Join(storagePath, "storage")
+}
+
+func defaultAppStoragePath() string {
+	basePath := defaultBaseAppDataPath()
+	return filepath.Join(basePath, storageAppName)
+}
+
+func defaultBaseAppDataPath() string {
+	switch runtime.GOOS {
+	case "darwin":
+		homeDir, err := os.UserHomeDir()
+		if err == nil && strings.TrimSpace(homeDir) != "" {
+			return filepath.Join(homeDir, "Library", "Application Support")
+		}
+	case "windows":
+		localAppDataDir := strings.TrimSpace(os.Getenv("LOCALAPPDATA"))
+		if localAppDataDir != "" {
+			return localAppDataDir
+		}
+		roamingAppDataDir := strings.TrimSpace(os.Getenv("APPDATA"))
+		if roamingAppDataDir != "" {
+			return roamingAppDataDir
+		}
+	default:
+		homeDir, err := os.UserHomeDir()
+		if err == nil && strings.TrimSpace(homeDir) != "" {
+			return filepath.Join(homeDir, ".sitebrush")
+		}
+		xdgDataHomeDir := strings.TrimSpace(os.Getenv("XDG_DATA_HOME"))
+		if xdgDataHomeDir != "" {
+			return filepath.Join(xdgDataHomeDir, storageAppName)
+		}
+	}
+	if configDir, err := os.UserConfigDir(); err == nil && strings.TrimSpace(configDir) != "" {
+		return configDir
+	}
+	if homeDir, err := os.UserHomeDir(); err == nil && strings.TrimSpace(homeDir) != "" {
+		return homeDir
+	}
+	return "."
 }
