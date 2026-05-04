@@ -625,6 +625,38 @@ func TestUploadFilesStoresFilesForCurrentURI(t *testing.T) {
 	if !strings.Contains(response.Body.String(), "manual.txt") {
 		t.Fatalf("upload response does not include filename: %q", response.Body.String())
 	}
+	if !strings.Contains(response.Body.String(), "/p/manual.txt") {
+		t.Fatalf("upload response does not include public path: %q", response.Body.String())
+	}
+}
+
+func TestVisualEditorUsesLocalJoditAssetsAndServerImageUpload(t *testing.T) {
+	application, rawDB := newTestApplication(t)
+	_, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "admin@example.com", "old")
+	if err != nil {
+		t.Fatalf("insert user: %v", err)
+	}
+	_, err = rawDB.Exec(`INSERT INTO pages(domain,path,title,html,published) VALUES(?,?,?,?,1)`, "localhost", "/docs", "/docs", "<p>docs</p>")
+	if err != nil {
+		t.Fatalf("insert page: %v", err)
+	}
+
+	request := httptest.NewRequest(http.MethodGet, "http://localhost:8080/docs?visual", nil)
+	request.AddCookie(newAdminSessionCookie(t, application, "admin@example.com"))
+	response := httptest.NewRecorder()
+	application.route(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("visual editor status = %d, body=%q", response.Code, response.Body.String())
+	}
+	body := response.Body.String()
+	for _, expectedFragment := range []string{`href="/p/static/jodit.min.css"`, `src="/p/static/jodit.min.js"`, "/p/static/insert-image.png", "/p/static/save-page.png", "/p/static/exit-editor.png", "chooseAndUploadImage", "currentPagePath + '?files'"} {
+		if !strings.Contains(body, expectedFragment) {
+			t.Fatalf("visual editor missing %q in %s", expectedFragment, body)
+		}
+	}
+	if strings.Contains(body, "cdn.jsdelivr.net") {
+		t.Fatalf("visual editor still references CDN: %s", body)
+	}
 }
 
 func TestNormalizeDomainNameAcceptsBareDomainsAndRejectsInvalidNames(t *testing.T) {

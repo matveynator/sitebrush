@@ -10,7 +10,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>{{index .T "edit_title_prefix"}} {{.Path}}</title>
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/jodit@4.2.47/es2021/jodit.min.css" />
+  <link rel="stylesheet" href="/p/static/jodit.min.css" />
   <style>
     :root { color-scheme: light dark; --page-bg:#f4f8fc; --text-main:#1b2a3d; }
     @media (prefers-color-scheme: dark) { :root { --page-bg:#0f1724; --text-main:#dbe8ff; } }
@@ -30,15 +30,81 @@
   <input type="hidden" id="htmlContentField" name="html" />
   <textarea id="visualEditorRoot" class="editor-host">{{.HTML}}</textarea>
 </form>
-<script src="https://cdn.jsdelivr.net/npm/jodit@4.2.47/es2021/jodit.min.js"></script>
+<script src="/p/static/jodit.min.js"></script>
 <script>
 const initialHtmlContent = {{printf "%q" .HTML}};
+const currentPagePath = {{printf "%q" .Path}};
 
 function submitVisualEditorForm(visualHtmlEditor) {
   const visualEditorFormElement = document.getElementById('visualEditorForm');
   const htmlContentFieldElement = document.getElementById('htmlContentField');
   htmlContentFieldElement.value = visualHtmlEditor.value;
   visualEditorFormElement.submit();
+}
+
+function uploadedImageURL(uploadPayload) {
+  if (Array.isArray(uploadPayload.paths) && uploadPayload.paths.length > 0) {
+    return uploadPayload.paths[0];
+  }
+  if (Array.isArray(uploadPayload.files) && uploadPayload.files.length > 0) {
+    return '/p/' + uploadPayload.files[0];
+  }
+  return '';
+}
+
+function insertImageIntoEditor(visualHtmlEditor, imageURL, imageAltText) {
+  if (!imageURL) {
+    return;
+  }
+  if (visualHtmlEditor.selection && typeof visualHtmlEditor.selection.insertImage === 'function') {
+    visualHtmlEditor.selection.insertImage(imageURL, null, 300);
+    return;
+  }
+  if (visualHtmlEditor.s && typeof visualHtmlEditor.s.insertImage === 'function') {
+    visualHtmlEditor.s.insertImage(imageURL, null, 300);
+    return;
+  }
+  const imageHtml = '<img src="' + imageURL.replace(/"/g, '&quot;') + '" alt="' + imageAltText.replace(/"/g, '&quot;') + '">';
+  if (visualHtmlEditor.selection && typeof visualHtmlEditor.selection.insertHTML === 'function') {
+    visualHtmlEditor.selection.insertHTML(imageHtml);
+    return;
+  }
+  if (typeof visualHtmlEditor.execCommand === 'function') {
+    visualHtmlEditor.execCommand('insertHTML', false, imageHtml);
+  }
+}
+
+function chooseAndUploadImage(visualHtmlEditor) {
+  const imageInputElement = document.createElement('input');
+  imageInputElement.type = 'file';
+  imageInputElement.accept = 'image/*';
+  imageInputElement.addEventListener('change', function onImageSelected() {
+    if (!imageInputElement.files || imageInputElement.files.length === 0) {
+      return;
+    }
+    const selectedImageFile = imageInputElement.files[0];
+    const uploadRequestBody = new FormData();
+    uploadRequestBody.append('action', 'upload');
+    uploadRequestBody.append('upload_files', selectedImageFile);
+    fetch(currentPagePath + '?files', {
+      method: 'POST',
+      body: uploadRequestBody,
+      headers: { 'Accept': 'application/json' }
+    })
+      .then(function parseUploadResponse(uploadResponse) {
+        if (!uploadResponse.ok) {
+          throw new Error('image upload failed');
+        }
+        return uploadResponse.json();
+      })
+      .then(function insertUploadedImage(uploadPayload) {
+        insertImageIntoEditor(visualHtmlEditor, uploadedImageURL(uploadPayload), selectedImageFile.name);
+      })
+      .catch(function showUploadError(uploadError) {
+        window.alert(uploadError.message || 'Image upload failed');
+      });
+  });
+  imageInputElement.click();
 }
 
 function createVisualHtmlEditor() {
@@ -53,17 +119,24 @@ function createVisualHtmlEditor() {
     buttons: [
       'source', '|', 'bold', 'italic', 'underline', 'strikethrough', '|',
       'ul', 'ol', '|', 'outdent', 'indent', '|', 'left', 'center', 'right', '|',
-      'fontsize', 'brush', 'paragraph', '|', 'link', 'image', 'table', '|',
+      'fontsize', 'brush', 'paragraph', '|', 'link', {
+        name: 'insertServerImage',
+        iconURL: '/p/static/insert-image.png',
+        tooltip: 'Insert image',
+        exec: function executeImageUpload(editorInstance) {
+          chooseAndUploadImage(editorInstance);
+        }
+      }, 'table', '|',
       'undo', 'redo', '|', {
         name: 'savePageHtml',
-        iconURL: '/p/static/accept.png',
+        iconURL: '/p/static/save-page.png',
         tooltip: 'Save page',
         exec: function executeSave(editorInstance) {
           submitVisualEditorForm(editorInstance);
         }
       }, '|', {
         name: 'cancelEdit',
-        iconURL: '/p/static/cancel.png',
+        iconURL: '/p/static/exit-editor.png',
         tooltip: 'Cancel edit',
         exec: function executeCancel() {
           window.location.href = {{printf "%q" .Path}};

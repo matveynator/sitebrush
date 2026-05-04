@@ -1478,8 +1478,12 @@ func (a *App) uploadFiles(w http.ResponseWriter, r *http.Request, currentPath st
 	}
 
 	if wantsJSONResponse(r) {
+		uploadedPaths := make([]string, 0, len(uploadedNames))
+		for _, uploadedName := range uploadedNames {
+			uploadedPaths = append(uploadedPaths, "/p/"+uploadedName)
+		}
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{"uploaded": len(uploadedNames), "files": uploadedNames, "redirect": currentPath + "?files"})
+		_ = json.NewEncoder(w).Encode(map[string]any{"uploaded": len(uploadedNames), "files": uploadedNames, "paths": uploadedPaths, "redirect": currentPath + "?files"})
 		return
 	}
 	http.Redirect(w, r, currentPath+"?files", http.StatusFound)
