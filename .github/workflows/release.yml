@@ -329,7 +329,7 @@ jobs:
           DMG_STAGING_DIR="dist/dmg-staging"
           DMG_PATH="dist/sitebrush_darwin_universal_desktop.dmg"
           ICONSET_DIR="dist/AppIcon.iconset"
-          ICON_SOURCE="web/static/sitebrush-app-icon.png"
+          ICON_SOURCE="web/static/sitebrush-small-logo.png"
 
           mkdir -p "${ICONSET_DIR}" "${APP_DIR}/Contents/MacOS" "${APP_DIR}/Contents/Resources"
           for size in 16 32 128; do
