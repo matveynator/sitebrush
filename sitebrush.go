@@ -1496,8 +1496,12 @@ func (a *App) filesPage(w http.ResponseWriter, r *http.Request) {
 		a.render(w, r, "files.html", map[string]any{"Path": currentPath, "Files": []ManagedFile{}})
 		return
 	}
+	accessRulesByName := a.fileAccessRulesByName(r.Context(), r)
 	for index := range fileList {
-		accessRule := a.fileAccessRule(r.Context(), r, fileList[index].Name)
+		accessRule := accessRulesByName[fileList[index].Name]
+		if strings.TrimSpace(accessRule.AccessMode) == "" {
+			accessRule.AccessMode = "public"
+		}
 		fileList[index].AssetPath = "/p/" + fileList[index].Name
 		fileList[index].AccessMode = accessRule.AccessMode
 		fileList[index].Token = accessRule.Token
@@ -1800,6 +1804,30 @@ func randomAccessToken() string {
 	return base64.RawURLEncoding.EncodeToString(tokenBytes[:])
 }
 
+func (a *App) fileAccessRulesByName(ctx context.Context, r *http.Request) map[string]ManagedFileAccess {
+	accessRulesByName := make(map[string]ManagedFileAccess)
+	rows, err := a.db.QueryContext(ctx, `SELECT file_name,access_mode,token,expires_at,single_use_left,token_use_count FROM file_access_rules WHERE domain=?`, domainStorageName(a.siteDomain(ctx, r)))
+	if err != nil {
+		return accessRulesByName
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var fileName string
+		var accessRule ManagedFileAccess
+		if scanErr := rows.Scan(&fileName, &accessRule.AccessMode, &accessRule.Token, &accessRule.ExpiresAt, &accessRule.SingleUseLeft, &accessRule.TokenUseCount); scanErr != nil {
+			continue
+		}
+		if safeRelativeAssetPath(fileName) == "" {
+			continue
+		}
+		if strings.TrimSpace(accessRule.AccessMode) == "" {
+			accessRule.AccessMode = "public"
+		}
+		accessRulesByName[fileName] = accessRule
+	}
+	return accessRulesByName
+}
+
 func (a *App) fileAccessRule(ctx context.Context, r *http.Request, fileName string) ManagedFileAccess {
 	rule := ManagedFileAccess{AccessMode: "public"}
 	_ = a.db.QueryRowContext(ctx, `SELECT access_mode,token,expires_at,single_use_left,token_use_count FROM file_access_rules WHERE domain=? AND file_name=?`, domainStorageName(a.siteDomain(ctx, r)), fileName).Scan(&rule.AccessMode, &rule.Token, &rule.ExpiresAt, &rule.SingleUseLeft, &rule.TokenUseCount)
@@ -1968,6 +1996,12 @@ func (a *App) latestActiveRevisionID(ctx context.Context, domain string, pagePat
 	return revisionID
 }
 
+func (a *App) revisionCount(ctx context.Context, domain string, pagePath string) int {
+	var revisionCount int
+	_ = a.db.QueryRowContext(ctx, `SELECT COUNT(1) FROM revisions WHERE domain=? AND page_path=?`, domain, pagePath).Scan(&revisionCount)
+	return revisionCount
+}
+
 func (a *App) serveManagedPageContent(w http.ResponseWriter, r *http.Request, pagePath, content, sourceType string) {
 	a.logContentDelivery(w, sourceType)
 	if pageContentKind(pagePath, content) == "html" {
@@ -1982,10 +2016,12 @@ func (a *App) serveManagedPageContent(w http.ResponseWriter, r *http.Request, pa
 func (a *App) injectContextMenu(r *http.Request, pagePath, html string) string {
 	domain := a.siteDomain(r.Context(), r)
 	revisionID := 0
+	revisionCount := 0
 	if a.isAdminRequest(r) {
 		revisionID = a.latestActiveRevisionID(r.Context(), domain, pagePath)
+		revisionCount = a.revisionCount(r.Context(), domain, pagePath)
 	}
-	menuScript := buildContextMenuScript(a.isAdminRequest(r), a.isDomainFrozen(r.Context(), domain), pagePath, domain, revisionID, translationsForRequest(r))
+	menuScript := buildContextMenuScript(a.isAdminRequest(r), a.isDomainFrozen(r.Context(), domain), pagePath, domain, revisionID, revisionCount, translationsForRequest(r))
 	if strings.Contains(strings.ToLower(html), "</body>") {
 		bodyClosePattern := regexp.MustCompile(`(?i)</body>`)
 		return bodyClosePattern.ReplaceAllString(html, menuScript+"</body>")
@@ -2057,7 +2093,7 @@ func contentTypeForManagedPage(pagePath, content string) string {
 	return detectedContentType
 }
 
-func buildContextMenuScript(isAdmin bool, isFrozen bool, pagePath, domain string, revisionID int, translations map[string]string) string {
+func buildContextMenuScript(isAdmin bool, isFrozen bool, pagePath, domain string, revisionID int, revisionCount int, translations map[string]string) string {
 	escapedPath := template.JSEscapeString(pagePath)
 	escapedDomain := template.JSEscapeString(domain)
 	confirmFreezePrompt := template.JSEscapeString(translationOrDefault(translations, "confirm_freeze_prompt", "Freeze domain now?"))
@@ -2072,7 +2108,7 @@ func buildContextMenuScript(isAdmin bool, isFrozen bool, pagePath, domain string
 	editLabel := template.JSEscapeString(translationOrDefault(translations, "menu_edit", "Edit"))
 	textEditLabel := template.JSEscapeString(translationOrDefault(translations, "menu_text_edit", "Edit as text"))
 	deleteLabel := template.JSEscapeString(translationOrDefault(translations, "menu_delete", "Delete"))
-	revisionsLabel := template.JSEscapeString(translationOrDefault(translations, "menu_revisions", "Revisions"))
+	revisionsLabel := template.JSEscapeString(fmt.Sprintf("%s: %d", translationOrDefault(translations, "menu_revisions", "Revisions"), revisionCount))
 	filesLabel := template.JSEscapeString(translationOrDefault(translations, "menu_files", "Files"))
 	treeLabel := template.JSEscapeString(translationOrDefault(translations, "menu_tree", "Site tree"))
 	freezeLabel := template.JSEscapeString(translationOrDefault(translations, "menu_freeze", "Freeze"))
@@ -2385,11 +2421,28 @@ function showSitebrushMenu(browserEvent, menuHtmlEntries, currentPagePath, froze
   menuBoxElement.style.left = browserEvent.clientX + "px";
   menuBoxElement.style.top = browserEvent.clientY + "px";
   document.body.appendChild(menuBoxElement);
-  document.addEventListener("click", function closeMenuOnClick() {
-    const openMenu = document.getElementById("SiteBrushMenuBox");
-    if (openMenu) {
-      openMenu.remove();
+  menuBoxElement.addEventListener("click", function onMenuClick(browserEvent) {
+    const menuLinkElement = browserEvent.target && browserEvent.target.closest && browserEvent.target.closest("a[href]");
+    if (!menuLinkElement) {
+      return;
     }
+    const targetHref = menuLinkElement.getAttribute("href");
+    if (!targetHref) {
+      return;
+    }
+    browserEvent.preventDefault();
+    browserEvent.stopPropagation();
+    window.location.href = targetHref;
+  });
+  document.addEventListener("click", function closeMenuOnClick(browserEvent) {
+    const openMenu = document.getElementById("SiteBrushMenuBox");
+    if (!openMenu) {
+      return;
+    }
+    if (browserEvent.target && browserEvent.target.closest && browserEvent.target.closest("#SiteBrushMenuBox")) {
+      return;
+    }
+    openMenu.remove();
   }, { once: true });
 }
 function buildSiteTreeNodeName(fullPath) {
@@ -2921,6 +2974,11 @@ func (spider *pageSpider) rewriteTextReferences(source, baseRawURL string, depth
 		if len(parts) != 4 {
 			return match
 		}
+		tagName := strings.ToLower(strings.TrimSpace(parts[1]))
+		normalizedURL, blocked := spider.normalizeURL(parts[3], baseURL)
+		if !blocked && spider.shouldBlankEmbeddedDocumentReference(tagName, normalizedURL) {
+			return strings.Replace(match, parts[3], "about:blank", 1)
+		}
 		return strings.Replace(match, parts[3], rewriteSingle(parts[3]), 1)
 	})
 	rewritten = htmlSrcSetPattern.ReplaceAllStringFunc(rewritten, func(match string) string {
@@ -2948,6 +3006,37 @@ func (spider *pageSpider) rewriteTextReferences(source, baseRawURL string, depth
 	})
 	rewritten = rewriteCSSURLReferences(rewritten, rewriteSingle)
 	return rewritten
+}
+
+func (spider *pageSpider) shouldBlankEmbeddedDocumentReference(tagName, normalizedURL string) bool {
+	switch tagName {
+	case "iframe", "embed", "object":
+	default:
+		return false
+	}
+	if normalizedURL == "" || spider.shouldSkipMirrorResource(normalizedURL) {
+		return false
+	}
+	parsedURL, err := url.Parse(normalizedURL)
+	if err != nil {
+		return false
+	}
+	if spider.pageURL == nil {
+		return false
+	}
+	if !strings.EqualFold(strings.TrimSpace(parsedURL.Hostname()), strings.TrimSpace(spider.pageURL.Hostname())) {
+		return false
+	}
+	extension := strings.ToLower(path.Ext(parsedURL.Path))
+	if extension == "" {
+		return true
+	}
+	switch extension {
+	case ".htm", ".html", ".xhtml", ".php", ".asp", ".aspx", ".jsp", ".cgi":
+		return true
+	default:
+		return false
+	}
 }
 
 func rewriteCSSURLReferences(source string, rewriteSingle func(string) string) string {

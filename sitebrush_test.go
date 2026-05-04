@@ -181,6 +181,11 @@ func TestContextMenuUsesDirectEditorProfileAndDeleteActions(t *testing.T) {
 	if strings.Contains(body, "href='?edit'") {
 		t.Fatalf("context menu still contains intermediate edit link: %s", body)
 	}
+	for _, expectedFragment := range []string{`window.location.href = targetHref;`, `closest("#SiteBrushMenuBox")`} {
+		if !strings.Contains(body, expectedFragment) {
+			t.Fatalf("context menu missing navigation guard %q in %s", expectedFragment, body)
+		}
+	}
 }
 
 func TestDeleteRevisionByQueryDisablesRevisionAndAppliesPreviousActiveRevision(t *testing.T) {
@@ -367,6 +372,29 @@ func TestNormalizeURLRejectsSuspiciousDynamicReferences(t *testing.T) {
 		if normalizedURL, blocked := spider.normalizeURL(rawRef, pageURL); !blocked || normalizedURL != "" {
 			t.Fatalf("normalizeURL(%q) = (%q, %v), want blocked", rawRef, normalizedURL, blocked)
 		}
+	}
+}
+
+func TestMirrorRemotePageBlanksSameOriginEmbeddedHTMLFrames(t *testing.T) {
+	pageRawURL := "https://example.test/imported"
+	sourceHTML := `<!doctype html><html><body><iframe src="/imported"></iframe><iframe src="https://www.youtube.com/embed/demo"></iframe></body></html>`
+
+	pageURL, parseErr := url.Parse(pageRawURL)
+	if parseErr != nil {
+		t.Fatal(parseErr)
+	}
+
+	application := &App{storagePath: t.TempDir(), grabTracker: newGrabProgressTracker()}
+	importedHTML := application.mirrorRemotePage("example.test", "/imported", pageRawURL, pageURL, sourceHTML, "", nil, "")
+
+	if strings.Contains(importedHTML, `src="https://example.test/imported"`) || strings.Contains(importedHTML, `src="/imported"`) {
+		t.Fatalf("imported HTML still contains recursive same-origin iframe: %s", importedHTML)
+	}
+	if !strings.Contains(importedHTML, `src="about:blank"`) {
+		t.Fatalf("imported HTML did not blank recursive iframe: %s", importedHTML)
+	}
+	if !strings.Contains(importedHTML, "youtube.com/embed/demo") {
+		t.Fatalf("imported HTML lost allowed external embed: %s", importedHTML)
 	}
 }
 
@@ -613,6 +641,41 @@ func TestManagedFilesVisibleForCurrentURIAndDescendants(t *testing.T) {
 	}
 	if names["other.png"] || names["legacy.png"] {
 		t.Fatalf("unexpected out-of-scope files, got %#v", names)
+	}
+}
+
+func TestFilesPageDoesNotAutoLoadImageAssets(t *testing.T) {
+	application, rawDB := newTestApplication(t)
+	_, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "admin@example.com", "old")
+	if err != nil {
+		t.Fatalf("insert user: %v", err)
+	}
+
+	domainDir := application.domainFilesDirForDomain("localhost")
+	if err := os.MkdirAll(domainDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(domainDir, "imported.png"), []byte("png"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	application.upsertFileMetadata(context.Background(), "localhost", "imported.png", "/docs", 3, "image/png", "import")
+
+	request := httptest.NewRequest(http.MethodGet, "http://localhost:8080/docs?files", nil)
+	request.AddCookie(newAdminSessionCookie(t, application, "admin@example.com"))
+	response := httptest.NewRecorder()
+	application.route(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("files page status = %d, body=%q", response.Code, response.Body.String())
+	}
+
+	body := response.Body.String()
+	if strings.Contains(body, `<img class="file-thumb" src="/p/imported.png"`) {
+		t.Fatalf("files page still auto-loads imported image asset: %s", body)
+	}
+	for _, expectedFragment := range []string{`class="file-preview-trigger"`, `data-preview-src="/p/imported.png"`} {
+		if !strings.Contains(body, expectedFragment) {
+			t.Fatalf("files page missing %q in %s", expectedFragment, body)
+		}
 	}
 }
 
