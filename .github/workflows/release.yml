@@ -240,7 +240,7 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          $pngPath = "public_html/images/apple-touch-icon.png"
+          $pngPath = "web/static/sitebrush-app-icon.png"
           $icoPath = "dist/windows-desktop-icon.ico"
           New-Item -Force -ItemType Directory dist | Out-Null
 
@@ -365,7 +365,7 @@ jobs:
           DMG_STAGING_DIR="dist/dmg-staging"
           DMG_PATH="dist/sitebrush_darwin_universal_desktop.dmg"
           ICONSET_DIR="dist/AppIcon.iconset"
-          ICON_SOURCE="public_html/images/apple-touch-icon.png"
+          ICON_SOURCE="web/static/sitebrush-app-icon.png"
 
           mkdir -p "${ICONSET_DIR}" "${APP_DIR}/Contents/MacOS" "${APP_DIR}/Contents/Resources"
           for size in 16 32 128; do
