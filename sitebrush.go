@@ -151,6 +151,46 @@ type ManagedFileAccess struct {
 	TokenUseCount int64
 }
 
+type backupPage struct {
+	Path      string `json:"path"`
+	Title     string `json:"title"`
+	HTML      string `json:"html"`
+	Published int    `json:"published"`
+}
+
+type backupFileMetadata struct {
+	FileName      string `json:"file_name"`
+	PagePath      string `json:"page_path"`
+	Size          int64  `json:"size"`
+	MimeType      string `json:"mime_type"`
+	CreatedAt     string `json:"created_at"`
+	DownloadCount int64  `json:"download_count"`
+}
+
+type backupFileAccessRule struct {
+	FileName      string `json:"file_name"`
+	AccessMode    string `json:"access_mode"`
+	Token         string `json:"token"`
+	ExpiresAt     string `json:"expires_at"`
+	SingleUseLeft int    `json:"single_use_left"`
+	TokenUseCount int64  `json:"token_use_count"`
+}
+
+type backupRedirect struct {
+	OldPath string `json:"old_path"`
+	NewPath string `json:"new_path"`
+}
+
+type domainBackup struct {
+	Version         int                    `json:"version"`
+	ExportedAt      string                 `json:"exported_at"`
+	Domain          string                 `json:"domain"`
+	Pages           []backupPage           `json:"pages"`
+	FileMetadata    []backupFileMetadata   `json:"file_metadata"`
+	FileAccessRules []backupFileAccessRule `json:"file_access_rules"`
+	Redirects       []backupRedirect       `json:"redirects"`
+}
+
 type fileMetadata struct {
 	PagePath      string
 	Size          int64
@@ -474,6 +514,7 @@ func (a *App) migrate(ctx context.Context) error {
 		`CREATE TABLE IF NOT EXISTS revisions(id INTEGER PRIMARY KEY AUTOINCREMENT,domain TEXT,page_path TEXT,html TEXT,created_at TEXT,is_active INTEGER DEFAULT 1);`,
 		`CREATE TABLE IF NOT EXISTS domain_aliases(primary_domain TEXT,alias_domain TEXT UNIQUE,verification_token TEXT,is_verified INTEGER DEFAULT 0,dns_a_ok INTEGER DEFAULT 0,is_selected INTEGER DEFAULT 0,last_checked_at TEXT);`,
 		`CREATE TABLE IF NOT EXISTS domain_states(domain TEXT PRIMARY KEY,is_frozen INTEGER DEFAULT 0);`,
+		`CREATE TABLE IF NOT EXISTS domain_backup_tokens(domain TEXT PRIMARY KEY,token TEXT,updated_at TEXT);`,
 		`CREATE TABLE IF NOT EXISTS file_access_rules(domain TEXT,file_name TEXT,access_mode TEXT,token TEXT,expires_at TEXT,single_use_left INTEGER DEFAULT 0,token_use_count INTEGER DEFAULT 0,PRIMARY KEY(domain,file_name));`,
 		`CREATE TABLE IF NOT EXISTS file_metadata(domain TEXT,file_name TEXT,page_path TEXT,size INTEGER,mime_type TEXT,created_at TEXT,updated_at TEXT,source TEXT,download_count INTEGER DEFAULT 0,PRIMARY KEY(domain,file_name));`,
 	}
@@ -665,6 +706,14 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 	}
 	if hasQueryFlag(r, "settings") || hasQueryFlag(r, "properties") {
 		a.domainSettingsPage(w, r)
+		return
+	}
+	if hasQueryFlag(r, "backup_download") {
+		a.downloadBackup(w, r)
+		return
+	}
+	if hasQueryFlag(r, "backup_import") {
+		a.importBackup(w, r)
 		return
 	}
 	if hasQueryFlag(r, "profile") {
@@ -2489,6 +2538,31 @@ func requestedReturnPath(r *http.Request) string {
 	return r.URL.Path
 }
 
+func requestScheme(r *http.Request) string {
+	forwardedProto := strings.TrimSpace(r.Header.Get("X-Forwarded-Proto"))
+	if forwardedProto != "" {
+		if commaIndex := strings.Index(forwardedProto, ","); commaIndex >= 0 {
+			forwardedProto = forwardedProto[:commaIndex]
+		}
+		forwardedProto = strings.ToLower(strings.TrimSpace(forwardedProto))
+		if forwardedProto == "http" || forwardedProto == "https" {
+			return forwardedProto
+		}
+	}
+	if r.TLS != nil {
+		return "https"
+	}
+	return "http"
+}
+
+func absoluteURLForPath(r *http.Request, relativePath string) string {
+	host := strings.TrimSpace(r.Host)
+	if host == "" {
+		host = "localhost"
+	}
+	return requestScheme(r) + "://" + host + relativePath
+}
+
 func (a *App) createSession(w http.ResponseWriter, r *http.Request, email string) {
 	token := fmt.Sprintf("%x", sha256.Sum256([]byte(email+time.Now().String())))
 	_, _ = a.db.ExecContext(r.Context(), `INSERT OR REPLACE INTO sessions(token,user_email,created_at) VALUES(?,?,?)`, token, a.siteDomain(r.Context(), r)+"|"+email, time.Now().Format(time.RFC3339))
@@ -2649,13 +2723,14 @@ func buildContextMenuScript(isAdmin bool, isFrozen bool, pagePath, domain string
 	treeLabel := template.JSEscapeString(translationOrDefault(translations, "menu_tree", "Site tree"))
 	freezeLabel := template.JSEscapeString(translationOrDefault(translations, "menu_freeze", "Freeze"))
 	publishLabel := template.JSEscapeString(translationOrDefault(translations, "menu_publish", "Publish"))
-	settingsLabel := template.JSEscapeString(translationOrDefault(translations, "menu_domain_settings", "Domain settings"))
+	settingsLabel := template.JSEscapeString(translationOrDefault(translations, "menu_domain_settings", "Settings"))
 	profileLabel := template.JSEscapeString(translationOrDefault(translations, "menu_profile", "Account"))
 	logoutLabel := template.JSEscapeString(translationOrDefault(translations, "menu_logout", "Sign out"))
 	loginLabel := template.JSEscapeString(translationOrDefault(translations, "menu_login", "Sign in"))
 	treeModalTitle := template.JSEscapeString(translationOrDefault(translations, "tree_modal_title", "Site tree"))
 	treeLoadingLabel := template.JSEscapeString(translationOrDefault(translations, "tree_loading", "Loading site tree..."))
 	treeLoadErrorLabel := template.JSEscapeString(translationOrDefault(translations, "tree_load_error", "Failed to load site tree."))
+	treeCloseLabel := template.JSEscapeString(translationOrDefault(translations, "tree_close", "Close"))
 	stableReleaseURL := "https://github.com/matveynator/sitebrush/releases/tag/stable-release"
 	compiledVersionLabel := template.JSEscapeString("v." + CompileVersion)
 	storageUsageHTML := ""
@@ -2839,6 +2914,10 @@ func buildContextMenuScript(isAdmin bool, isFrozen bool, pagePath, domain string
     overlayElement.className = "SiteBrushTreeOverlay";
     const modalElement = document.createElement("div");
     modalElement.className = "SiteBrushTreeModal";
+    const cornerIconElement = document.createElement("img");
+    cornerIconElement.className = "SiteBrushTreeCornerIcon";
+    cornerIconElement.src = "/p/static/tree.png";
+    cornerIconElement.alt = "";
     const titleElement = document.createElement("h3");
     titleElement.className = "SiteBrushTreeTitle";
     titleElement.textContent = "` + treeModalTitle + `";
@@ -2847,14 +2926,21 @@ func buildContextMenuScript(isAdmin bool, isFrozen bool, pagePath, domain string
     contentElement.textContent = "` + treeLoadingLabel + `";
     const closeButtonElement = document.createElement("button");
     closeButtonElement.type = "button";
-    closeButtonElement.className = "SiteBrushCancelButton";
-    closeButtonElement.textContent = "` + confirmNoLabel + `";
+    closeButtonElement.className = "SiteBrushTreeCloseButton";
+    closeButtonElement.textContent = "` + treeCloseLabel + `";
+    modalElement.appendChild(cornerIconElement);
     modalElement.appendChild(titleElement);
     modalElement.appendChild(contentElement);
     modalElement.appendChild(closeButtonElement);
     overlayElement.appendChild(modalElement);
     document.body.appendChild(overlayElement);
-    closeButtonElement.addEventListener("click", function closeTreeDialog() { overlayElement.remove(); });
+    function closeTreeDialog() { overlayElement.remove(); }
+    closeButtonElement.addEventListener("click", closeTreeDialog);
+    overlayElement.addEventListener("click", function closeTreeDialogOnOverlay(browserEvent) {
+      if (browserEvent.target === overlayElement) {
+        closeTreeDialog();
+      }
+    });
     fetch(currentPagePath + "?tree", { headers: { "Accept": "application/json" } })
       .then(function parseTreeResponse(treeResponse) {
         if (!treeResponse.ok) { throw new Error("tree request failed"); }
@@ -2919,9 +3005,11 @@ func contextMenuStylesAndHelpers() string {
 .SiteBrushConfirmActions{display:flex;gap:8px;justify-content:flex-end}
 .SiteBrushConfirmButton,.SiteBrushCancelButton{border:1px solid #8ea4c1;background:#f2f7ff;padding:6px 12px;cursor:pointer;font-size:13px}
 .SiteBrushTreeOverlay{position:fixed;inset:0;background:rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center;z-index:2147483647}
-.SiteBrushTreeModal{background:#fff;border:1px solid #8ea4c1;min-width:320px;max-width:700px;max-height:80vh;overflow:auto;padding:16px;font-family:Arial,Helvetica,sans-serif}
-.SiteBrushTreeTitle{margin:0 0 12px 0;color:#1f3f6f;font-size:18px}
-.SiteBrushTreeContent{margin:0 0 12px 0;color:#1f3f6f;font-size:14px}
+.SiteBrushTreeModal{position:relative;background:#fff;border:1px solid #8ea4c1;min-width:320px;max-width:700px;max-height:80vh;overflow:auto;padding:16px 16px 84px 16px;font-family:Arial,Helvetica,sans-serif}
+.SiteBrushTreeCloseButton{display:block;margin:12px 0 0 16px;border:1px solid #8ea4c1;background:#f2f7ff;color:#1f3f6f;padding:6px 14px;cursor:pointer;font-size:13px}
+.SiteBrushTreeCornerIcon{position:absolute;top:14px;right:14px;width:60px;height:60px;object-fit:contain;opacity:.95}
+.SiteBrushTreeTitle{margin:0 72px 12px 0;color:#1f3f6f;font-size:18px}
+.SiteBrushTreeContent{margin:0;color:#1f3f6f;font-size:14px}
 .SiteBrushTreeList{list-style:none;margin:0;padding-left:16px}
 .SiteBrushTreeLink{color:#1f3f6f;text-decoration:none;font-size:14px;line-height:1.6}
 .SiteBrushTreeCurrent{font-weight:700;text-decoration:underline}
@@ -2936,6 +3024,7 @@ func contextMenuStylesAndHelpers() string {
   .SiteBrushConfirmText,.SiteBrushPublishPreviewLink{color:#dbe8ff}
   .SiteBrushConfirmButton,.SiteBrushCancelButton{background:#22324a;color:#dbe8ff;border-color:#405674}
   .SiteBrushTreeModal{background:#172235;border-color:#2f405d}
+  .SiteBrushTreeCloseButton{background:#22324a;color:#dbe8ff;border-color:#405674}
   .SiteBrushTreeTitle,.SiteBrushTreeContent,.SiteBrushTreeLink{color:#dbe8ff}
 }
 </style>
@@ -3505,7 +3594,7 @@ type pageSpider struct {
 }
 
 var (
-	htmlResourcePattern = regexp.MustCompile(`(?is)<(link|script|img|source|video|audio|iframe|embed|object)\b[^>]*(href|src|poster|data)\s*=\s*["']([^"']+)["']`)
+	htmlResourcePattern = regexp.MustCompile(`(?is)<(a|area|link|script|img|source|video|audio|iframe|embed|object|form)\b[^>]*(href|xlink:href|src|poster|data|action)\s*=\s*["']([^"']+)["']`)
 	htmlSrcSetPattern   = regexp.MustCompile(`(?is)\bsrcset\s*=\s*["']([^"']+)["']`)
 	cssURLPattern       = regexp.MustCompile(`(?is)url\(\s*['"]?([^'")]+)['"]?\s*\)`)
 	cssImportPattern    = regexp.MustCompile(`(?is)@import\s+(?:url\(\s*)?['"]?([^'")\s;]+)['"]?`)
@@ -4225,6 +4314,8 @@ ON CONFLICT(alias_domain) DO UPDATE SET
 		a.refreshDomainAliasVerification(ctx, siteDomain, aliasDomain, externalIP)
 	case "check_all":
 		a.refreshDomainAliases(ctx, siteDomain, externalIP)
+	case "rotate_backup_token":
+		a.rotateBackupTokenForDomain(ctx, siteDomain)
 	}
 }
 
@@ -4344,6 +4435,29 @@ func boolToInt(state bool) int {
 	return 0
 }
 
+func (a *App) backupTokenForDomain(ctx context.Context, domain string) string {
+	var token string
+	err := a.db.QueryRowContext(ctx, `SELECT token FROM domain_backup_tokens WHERE domain=?`, domain).Scan(&token)
+	if err == nil && strings.TrimSpace(token) != "" {
+		return token
+	}
+	token = randomAccessToken()
+	_, _ = a.db.ExecContext(ctx, `INSERT INTO domain_backup_tokens(domain,token,updated_at)
+VALUES(?,?,?)
+ON CONFLICT(domain) DO UPDATE SET token=excluded.token,updated_at=excluded.updated_at`,
+		domain, token, time.Now().UTC().Format(time.RFC3339))
+	return token
+}
+
+func (a *App) rotateBackupTokenForDomain(ctx context.Context, domain string) string {
+	token := randomAccessToken()
+	_, _ = a.db.ExecContext(ctx, `INSERT INTO domain_backup_tokens(domain,token,updated_at)
+VALUES(?,?,?)
+ON CONFLICT(domain) DO UPDATE SET token=excluded.token,updated_at=excluded.updated_at`,
+		domain, token, time.Now().UTC().Format(time.RFC3339))
+	return token
+}
+
 func (a *App) domainSettingsPage(w http.ResponseWriter, r *http.Request) {
 	if !a.isAdminRequest(r) {
 		if !a.hasAdmin(r.Context(), a.siteDomain(r.Context(), r)) {
@@ -4384,19 +4498,24 @@ func (a *App) domainSettingsPage(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 	}
+	backupToken := a.backupTokenForDomain(r.Context(), siteDomain)
+	backupDownloadPath := "/?backup_download&token=" + url.QueryEscape(backupToken)
+	backupDownloadURL := absoluteURLForPath(r, backupDownloadPath)
 	externalIPError := ""
 	if externalIPErr != nil {
 		externalIPError = externalIPErr.Error()
 	}
 	a.render(w, r, "domain_settings.html", map[string]any{
-		"Domain":          siteDomain,
-		"SelectedDomain":  selectedDomain,
-		"Aliases":         domainAliases,
-		"AliasCount":      len(domainAliases),
-		"CanAddAlias":     len(domainAliases) < 10,
-		"ReturnPath":      returnPath,
-		"ExternalIP":      externalIP,
-		"ExternalIPError": externalIPError,
+		"Domain":             siteDomain,
+		"SelectedDomain":     selectedDomain,
+		"Aliases":            domainAliases,
+		"AliasCount":         len(domainAliases),
+		"CanAddAlias":        len(domainAliases) < 10,
+		"ReturnPath":         returnPath,
+		"ExternalIP":         externalIP,
+		"ExternalIPError":    externalIPError,
+		"BackupDownloadURL":  backupDownloadURL,
+		"BackupDownloadPath": backupDownloadPath,
 	})
 }
 
@@ -4555,6 +4674,93 @@ func (a *App) shouldUpdatePublishedPageFile(domain, pagePath, nextRenderedHTML s
 	return normalizePublishedHTML(string(previousRenderedHTMLBytes)) != normalizePublishedHTML(nextRenderedHTML)
 }
 
+func (a *App) downloadBackup(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	domain := a.siteDomain(r.Context(), r)
+	if !a.isAdminRequest(r) {
+		requestedToken := strings.TrimSpace(r.URL.Query().Get("token"))
+		backupToken := a.backupTokenForDomain(r.Context(), domain)
+		if requestedToken == "" || requestedToken != backupToken {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+	}
+	fileName := domainStorageName(domain) + "-backup-" + time.Now().UTC().Format("20060102-150405") + ".zip"
+	w.Header().Set("Content-Type", "application/zip")
+	w.Header().Set("Content-Disposition", "attachment; filename=\""+fileName+"\"")
+	if err := a.writeDomainBackupZIP(r.Context(), domain, w); err != nil {
+		log.Printf("backup download failed domain=%s error=%v", domain, err)
+		http.Error(w, "failed to create backup", http.StatusInternalServerError)
+		return
+	}
+}
+
+func (a *App) importBackup(w http.ResponseWriter, r *http.Request) {
+	if !a.isAdminRequest(r) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if err := r.ParseMultipartForm(512 << 20); err != nil {
+		http.Error(w, "failed to parse upload", http.StatusBadRequest)
+		return
+	}
+	backupFile, backupFileHeader, err := r.FormFile("backup_zip")
+	if err != nil {
+		http.Error(w, "backup zip is required", http.StatusBadRequest)
+		return
+	}
+	defer backupFile.Close()
+	if backupFileHeader == nil {
+		http.Error(w, "backup zip is empty", http.StatusBadRequest)
+		return
+	}
+	tempFile, err := os.CreateTemp("", "sitebrush-backup-*.zip")
+	if err != nil {
+		http.Error(w, "failed to stage backup zip", http.StatusInternalServerError)
+		return
+	}
+	tempFilePath := tempFile.Name()
+	defer os.Remove(tempFilePath)
+	writtenBytes, copyErr := io.Copy(tempFile, backupFile)
+	if closeErr := tempFile.Close(); closeErr != nil && copyErr == nil {
+		copyErr = closeErr
+	}
+	if copyErr != nil {
+		http.Error(w, "failed to stage backup zip", http.StatusInternalServerError)
+		return
+	}
+	if writtenBytes <= 0 {
+		http.Error(w, "backup zip is empty", http.StatusBadRequest)
+		return
+	}
+	readerAt, err := os.Open(tempFilePath)
+	if err != nil {
+		http.Error(w, "failed to open backup zip", http.StatusInternalServerError)
+		return
+	}
+	defer readerAt.Close()
+	backupZIP, err := zip.NewReader(readerAt, writtenBytes)
+	if err != nil {
+		http.Error(w, "invalid backup zip", http.StatusBadRequest)
+		return
+	}
+	domain := a.siteDomain(r.Context(), r)
+	importBasePath := normalizeImportBasePath(r.FormValue("base_path"))
+	redirectPath, err := a.importDomainBackupZIP(r.Context(), domain, importBasePath, backupZIP)
+	if err != nil {
+		http.Error(w, "failed to import backup: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	http.Redirect(w, r, redirectPath+"?visual", http.StatusFound)
+}
+
 func (a *App) generateDomainPack(domain string) error {
 	domainDirName := domainStorageName(domain)
 	packsDirPath := a.packsDir()
@@ -4567,12 +4773,56 @@ func (a *App) generateDomainPack(domain string) error {
 		return createErr
 	}
 	defer packFile.Close()
-	zipWriter := zip.NewWriter(packFile)
-	if addStaticErr := addDirectoryToZip(zipWriter, a.domainStaticDir(domain), filepath.Join("static", domainDirName)); addStaticErr != nil {
-		_ = zipWriter.Close()
-		return addStaticErr
+	return a.writeDomainBackupZIP(context.Background(), domain, packFile)
+}
+
+func (a *App) writeDomainBackupZIP(ctx context.Context, domain string, writer io.Writer) error {
+	backup, err := a.collectDomainBackup(ctx, domain)
+	if err != nil {
+		return err
 	}
-	if addFilesErr := addDirectoryToZip(zipWriter, a.domainFilesDirForDomain(domain), filepath.Join("files", domainDirName)); addFilesErr != nil {
+	backupJSON, err := json.MarshalIndent(backup, "", "  ")
+	if err != nil {
+		return err
+	}
+	zipWriter := zip.NewWriter(writer)
+	backupEntryWriter, err := zipWriter.Create("backup.json")
+	if err != nil {
+		_ = zipWriter.Close()
+		return err
+	}
+	if _, err := backupEntryWriter.Write(backupJSON); err != nil {
+		_ = zipWriter.Close()
+		return err
+	}
+	pageArchivePathBySitePath := staticExportPageArchivePaths(backup.Pages)
+	for _, backupPage := range backup.Pages {
+		archivePath := pageArchivePathBySitePath[cleanPath(backupPage.Path)]
+		if archivePath == "" {
+			continue
+		}
+		pageFileWriter, createErr := zipWriter.Create(archivePath)
+		if createErr != nil {
+			_ = zipWriter.Close()
+			return createErr
+		}
+		pageHTML := backupPage.HTML
+		if shouldRewriteStaticExportDocument(backupPage.Path, pageHTML) {
+			pageHTML = rewriteStaticExportText(pageHTML, domain, backupPage.Path, archivePath, pageArchivePathBySitePath)
+		}
+		if _, writeErr := io.WriteString(pageFileWriter, pageHTML); writeErr != nil {
+			_ = zipWriter.Close()
+			return writeErr
+		}
+	}
+	rewriteArchiveFile := func(archivePath string, fileBytes []byte) []byte {
+		if !shouldRewriteStaticExportAsset(archivePath) {
+			return fileBytes
+		}
+		sitePath := "/" + strings.TrimPrefix(filepath.ToSlash(archivePath), "/")
+		return []byte(rewriteStaticExportText(string(fileBytes), domain, sitePath, archivePath, pageArchivePathBySitePath))
+	}
+	if addFilesErr := addDirectoryToZip(zipWriter, a.domainFilesDirForDomain(domain), "p", rewriteArchiveFile); addFilesErr != nil {
 		_ = zipWriter.Close()
 		return addFilesErr
 	}
@@ -4582,7 +4832,100 @@ func (a *App) generateDomainPack(domain string) error {
 	return nil
 }
 
-func addDirectoryToZip(zipWriter *zip.Writer, sourceDirPath, archiveDirPrefix string) error {
+func (a *App) collectDomainBackup(ctx context.Context, domain string) (domainBackup, error) {
+	backup := domainBackup{
+		Version:         1,
+		ExportedAt:      time.Now().UTC().Format(time.RFC3339),
+		Domain:          domain,
+		Pages:           make([]backupPage, 0, 64),
+		FileMetadata:    make([]backupFileMetadata, 0, 128),
+		FileAccessRules: make([]backupFileAccessRule, 0, 128),
+		Redirects:       make([]backupRedirect, 0, 64),
+	}
+	latestRevisionHTMLByPath := make(map[string]string)
+	revisionRows, revisionErr := a.db.QueryContext(ctx, `SELECT page_path,html FROM revisions WHERE domain=? AND is_active=1 ORDER BY page_path ASC, id DESC`, domain)
+	if revisionErr == nil {
+		for revisionRows.Next() {
+			var pagePath string
+			var pageHTML string
+			if scanErr := revisionRows.Scan(&pagePath, &pageHTML); scanErr != nil {
+				continue
+			}
+			normalizedPath := cleanPath(pagePath)
+			if _, alreadyStored := latestRevisionHTMLByPath[normalizedPath]; alreadyStored {
+				continue
+			}
+			latestRevisionHTMLByPath[normalizedPath] = pageHTML
+		}
+		_ = revisionRows.Close()
+	}
+	pageRows, err := a.db.QueryContext(ctx, `SELECT path,title,html,published FROM pages WHERE domain=? ORDER BY path ASC`, domain)
+	if err != nil {
+		return backup, err
+	}
+	for pageRows.Next() {
+		var page backupPage
+		if scanErr := pageRows.Scan(&page.Path, &page.Title, &page.HTML, &page.Published); scanErr != nil {
+			continue
+		}
+		page.Path = cleanPath(page.Path)
+		if revisionHTML, foundRevision := latestRevisionHTMLByPath[page.Path]; foundRevision {
+			page.HTML = revisionHTML
+		}
+		backup.Pages = append(backup.Pages, page)
+	}
+	_ = pageRows.Close()
+
+	metadataRows, metadataErr := a.db.QueryContext(ctx, `SELECT file_name,page_path,size,mime_type,created_at,download_count FROM file_metadata WHERE domain=? ORDER BY file_name ASC`, domainStorageName(domain))
+	if metadataErr == nil {
+		for metadataRows.Next() {
+			var currentMetadata backupFileMetadata
+			if scanErr := metadataRows.Scan(&currentMetadata.FileName, &currentMetadata.PagePath, &currentMetadata.Size, &currentMetadata.MimeType, &currentMetadata.CreatedAt, &currentMetadata.DownloadCount); scanErr != nil {
+				continue
+			}
+			currentMetadata.FileName = safeRelativeAssetPath(currentMetadata.FileName)
+			if currentMetadata.FileName == "" {
+				continue
+			}
+			currentMetadata.PagePath = cleanPath(currentMetadata.PagePath)
+			backup.FileMetadata = append(backup.FileMetadata, currentMetadata)
+		}
+		_ = metadataRows.Close()
+	}
+
+	accessRows, accessErr := a.db.QueryContext(ctx, `SELECT file_name,access_mode,token,expires_at,single_use_left,token_use_count FROM file_access_rules WHERE domain=? ORDER BY file_name ASC`, domainStorageName(domain))
+	if accessErr == nil {
+		for accessRows.Next() {
+			var currentRule backupFileAccessRule
+			if scanErr := accessRows.Scan(&currentRule.FileName, &currentRule.AccessMode, &currentRule.Token, &currentRule.ExpiresAt, &currentRule.SingleUseLeft, &currentRule.TokenUseCount); scanErr != nil {
+				continue
+			}
+			currentRule.FileName = safeRelativeAssetPath(currentRule.FileName)
+			if currentRule.FileName == "" {
+				continue
+			}
+			backup.FileAccessRules = append(backup.FileAccessRules, currentRule)
+		}
+		_ = accessRows.Close()
+	}
+
+	redirectRows, redirectErr := a.db.QueryContext(ctx, `SELECT old_path,new_path FROM page_redirects WHERE domain=? ORDER BY old_path ASC`, domain)
+	if redirectErr == nil {
+		for redirectRows.Next() {
+			var currentRedirect backupRedirect
+			if scanErr := redirectRows.Scan(&currentRedirect.OldPath, &currentRedirect.NewPath); scanErr != nil {
+				continue
+			}
+			currentRedirect.OldPath = cleanPath(currentRedirect.OldPath)
+			currentRedirect.NewPath = cleanPath(currentRedirect.NewPath)
+			backup.Redirects = append(backup.Redirects, currentRedirect)
+		}
+		_ = redirectRows.Close()
+	}
+	return backup, nil
+}
+
+func addDirectoryToZip(zipWriter *zip.Writer, sourceDirPath, archiveDirPrefix string, rewriteFile func(string, []byte) []byte) error {
 	directoryInfo, statErr := os.Stat(sourceDirPath)
 	if statErr != nil || !directoryInfo.IsDir() {
 		return nil
@@ -4600,6 +4943,14 @@ func addDirectoryToZip(zipWriter *zip.Writer, sourceDirPath, archiveDirPrefix st
 		if createErr != nil {
 			return createErr
 		}
+		if rewriteFile != nil && shouldReadStaticExportArchiveFile(archivePath) {
+			sourceBytes, readErr := os.ReadFile(currentPath)
+			if readErr != nil {
+				return readErr
+			}
+			_, writeErr := archiveFileWriter.Write(rewriteFile(archivePath, sourceBytes))
+			return writeErr
+		}
 		sourceFile, openErr := os.Open(currentPath)
 		if openErr != nil {
 			return openErr
@@ -4608,6 +4959,561 @@ func addDirectoryToZip(zipWriter *zip.Writer, sourceDirPath, archiveDirPrefix st
 		_, copyErr := io.Copy(archiveFileWriter, sourceFile)
 		return copyErr
 	})
+}
+
+func staticExportPageArchivePaths(pages []backupPage) map[string]string {
+	pageArchivePathBySitePath := make(map[string]string, len(pages))
+	for _, page := range pages {
+		pagePath := cleanPath(page.Path)
+		archivePath := staticArchivePathForURI(pagePath)
+		if archivePath == "" {
+			continue
+		}
+		pageArchivePathBySitePath[pagePath] = archivePath
+	}
+	return pageArchivePathBySitePath
+}
+
+func shouldRewriteStaticExportDocument(pagePath, content string) bool {
+	switch strings.ToLower(path.Ext(strings.TrimSpace(pagePath))) {
+	case ".css", ".htm", ".html", ".js", ".mjs", ".svg":
+		return true
+	case "":
+		return pageContentKind(pagePath, content) == "html"
+	default:
+		return false
+	}
+}
+
+func shouldRewriteStaticExportAsset(archivePath string) bool {
+	switch strings.ToLower(path.Ext(strings.TrimSpace(archivePath))) {
+	case ".css", ".htm", ".html", ".js", ".mjs", ".svg":
+		return true
+	default:
+		return false
+	}
+}
+
+func shouldReadStaticExportArchiveFile(archivePath string) bool {
+	return shouldRewriteStaticExportAsset(archivePath)
+}
+
+func rewriteStaticExportText(source, domain, sourceSitePath, sourceArchivePath string, pageArchivePathBySitePath map[string]string) string {
+	switch strings.ToLower(path.Ext(strings.TrimSpace(sourceArchivePath))) {
+	case ".js", ".mjs":
+		return rewriteStaticExportJavaScriptReferences(source, domain, sourceSitePath, sourceArchivePath, pageArchivePathBySitePath)
+	default:
+		return rewriteStaticExportDocumentLinks(source, domain, sourceSitePath, sourceArchivePath, pageArchivePathBySitePath)
+	}
+}
+
+func rewriteStaticExportDocumentLinks(source, domain, sourceSitePath, sourceArchivePath string, pageArchivePathBySitePath map[string]string) string {
+	if strings.TrimSpace(source) == "" {
+		return source
+	}
+	rewriteSingle := func(rawReference string) string {
+		return rewriteStaticExportReference(rawReference, domain, sourceSitePath, sourceArchivePath, pageArchivePathBySitePath)
+	}
+	rewritten := htmlResourcePattern.ReplaceAllStringFunc(source, func(match string) string {
+		parts := htmlResourcePattern.FindStringSubmatch(match)
+		if len(parts) != 4 {
+			return match
+		}
+		return strings.Replace(match, parts[3], rewriteSingle(parts[3]), 1)
+	})
+	rewritten = htmlSrcSetPattern.ReplaceAllStringFunc(rewritten, func(match string) string {
+		parts := htmlSrcSetPattern.FindStringSubmatch(match)
+		if len(parts) != 2 {
+			return match
+		}
+		candidates := strings.Split(parts[1], ",")
+		for index, candidate := range candidates {
+			fields := strings.Fields(strings.TrimSpace(candidate))
+			if len(fields) == 0 {
+				continue
+			}
+			fields[0] = rewriteSingle(fields[0])
+			candidates[index] = strings.Join(fields, " ")
+		}
+		return strings.Replace(match, parts[1], strings.Join(candidates, ", "), 1)
+	})
+	rewritten = cssImportPattern.ReplaceAllStringFunc(rewritten, func(match string) string {
+		parts := cssImportPattern.FindStringSubmatch(match)
+		if len(parts) != 2 {
+			return match
+		}
+		return strings.Replace(match, parts[1], rewriteSingle(parts[1]), 1)
+	})
+	rewritten = rewriteCSSURLReferences(rewritten, rewriteSingle)
+	return rewritten
+}
+
+func rewriteStaticExportJavaScriptReferences(source, domain, sourceSitePath, sourceArchivePath string, pageArchivePathBySitePath map[string]string) string {
+	if strings.TrimSpace(source) == "" {
+		return source
+	}
+	var rewritten strings.Builder
+	for index := 0; index < len(source); {
+		quote := source[index]
+		if quote != '\'' && quote != '"' && quote != '`' {
+			rewritten.WriteByte(source[index])
+			index++
+			continue
+		}
+		stringEnd := index + 1
+		escaped := false
+		for stringEnd < len(source) {
+			currentByte := source[stringEnd]
+			if escaped {
+				escaped = false
+				stringEnd++
+				continue
+			}
+			if currentByte == '\\' {
+				escaped = true
+				stringEnd++
+				continue
+			}
+			if currentByte == quote {
+				break
+			}
+			stringEnd++
+		}
+		if stringEnd >= len(source) {
+			rewritten.WriteString(source[index:])
+			break
+		}
+		literalValue := source[index+1 : stringEnd]
+		nextLiteralValue := literalValue
+		if !strings.Contains(literalValue, `\`) && !(quote == '`' && strings.Contains(literalValue, "${")) {
+			nextLiteralValue = rewriteStaticExportReference(literalValue, domain, sourceSitePath, sourceArchivePath, pageArchivePathBySitePath)
+		}
+		rewritten.WriteByte(quote)
+		rewritten.WriteString(nextLiteralValue)
+		rewritten.WriteByte(quote)
+		index = stringEnd + 1
+	}
+	return rewritten.String()
+}
+
+func rewriteStaticExportReference(rawReference, domain, sourceSitePath, sourceArchivePath string, pageArchivePathBySitePath map[string]string) string {
+	trimmedReference := strings.TrimSpace(rawReference)
+	if trimmedReference == "" || strings.HasPrefix(trimmedReference, "#") {
+		return rawReference
+	}
+	loweredReference := strings.ToLower(trimmedReference)
+	for _, blockedPrefix := range []string{"mailto:", "tel:", "javascript:", "data:", "blob:", "about:"} {
+		if strings.HasPrefix(loweredReference, blockedPrefix) {
+			return rawReference
+		}
+	}
+	if parsedReference, parseErr := url.Parse(trimmedReference); parseErr == nil {
+		if parsedReference.IsAbs() || parsedReference.Host != "" {
+			if !sameStaticExportHost(parsedReference.Host, domain) {
+				return rawReference
+			}
+			if rewrittenReference, foundReference := staticExportReferenceForSitePath(parsedReference.Path, staticExportURLSuffix(parsedReference), sourceArchivePath, pageArchivePathBySitePath); foundReference {
+				return rewrittenReference
+			}
+			return rawReference
+		}
+	}
+	pathPart, suffixPart := splitReferencePathAndSuffix(trimmedReference)
+	if pathPart == "" {
+		return rawReference
+	}
+	if strings.HasPrefix(pathPart, "/") {
+		if rewrittenReference, foundReference := staticExportReferenceForSitePath(pathPart, suffixPart, sourceArchivePath, pageArchivePathBySitePath); foundReference {
+			return rewrittenReference
+		}
+		return rawReference
+	}
+	for _, resolvedSitePath := range resolveStaticExportRelativeSitePaths(pathPart, sourceSitePath) {
+		rewrittenReference, foundReference := staticExportReferenceForSitePath(resolvedSitePath, suffixPart, sourceArchivePath, pageArchivePathBySitePath)
+		if foundReference {
+			return rewrittenReference
+		}
+	}
+	return rawReference
+}
+
+func staticExportReferenceForSitePath(sitePath, suffixPart, sourceArchivePath string, pageArchivePathBySitePath map[string]string) (string, bool) {
+	targetArchivePath, foundTarget := staticExportTargetArchivePath(sitePath, pageArchivePathBySitePath)
+	if !foundTarget {
+		return "", false
+	}
+	return relativeArchiveReference(sourceArchivePath, targetArchivePath) + suffixPart, true
+}
+
+func staticExportTargetArchivePath(sitePath string, pageArchivePathBySitePath map[string]string) (string, bool) {
+	normalizedSitePath := cleanPath(sitePath)
+	if strings.HasPrefix(normalizedSitePath, "/p/") {
+		assetPath := safeRelativeAssetPath(strings.TrimPrefix(normalizedSitePath, "/p/"))
+		if assetPath == "" {
+			return "", false
+		}
+		return path.Join("p", assetPath), true
+	}
+	archivePath, found := pageArchivePathBySitePath[normalizedSitePath]
+	return archivePath, found
+}
+
+func relativeArchiveReference(sourceArchivePath, targetArchivePath string) string {
+	sourceDir := path.Dir(filepath.ToSlash(sourceArchivePath))
+	if sourceDir == "." {
+		sourceDir = ""
+	}
+	relativePath, err := filepath.Rel(filepath.FromSlash(sourceDir), filepath.FromSlash(targetArchivePath))
+	if err != nil {
+		return targetArchivePath
+	}
+	relativePath = filepath.ToSlash(relativePath)
+	if relativePath == "." || relativePath == "" {
+		return path.Base(targetArchivePath)
+	}
+	return relativePath
+}
+
+func sameStaticExportHost(referenceHost, domain string) bool {
+	referenceName := normalizedStaticExportHost(referenceHost)
+	domainName := normalizedStaticExportHost(domain)
+	return referenceName != "" && domainName != "" && referenceName == domainName
+}
+
+func normalizedStaticExportHost(rawHost string) string {
+	trimmedHost := strings.ToLower(strings.Trim(strings.TrimSpace(rawHost), "[]"))
+	if trimmedHost == "" {
+		return ""
+	}
+	hostURL := &url.URL{Scheme: "http", Host: trimmedHost}
+	if parsedHost := hostURL.Hostname(); parsedHost != "" {
+		return canonicalLocalDomain(parsedHost)
+	}
+	if parsedHost, _, splitErr := net.SplitHostPort(trimmedHost); splitErr == nil {
+		return canonicalLocalDomain(parsedHost)
+	}
+	return canonicalLocalDomain(trimmedHost)
+}
+
+func staticExportURLSuffix(parsedReference *url.URL) string {
+	var suffixBuilder strings.Builder
+	if parsedReference.ForceQuery || parsedReference.RawQuery != "" {
+		suffixBuilder.WriteString("?")
+		suffixBuilder.WriteString(parsedReference.RawQuery)
+	}
+	if parsedReference.Fragment != "" {
+		suffixBuilder.WriteString("#")
+		suffixBuilder.WriteString(parsedReference.EscapedFragment())
+	}
+	return suffixBuilder.String()
+}
+
+func splitReferencePathAndSuffix(rawReference string) (string, string) {
+	markerIndex := strings.IndexAny(rawReference, "?#")
+	if markerIndex < 0 {
+		return rawReference, ""
+	}
+	return rawReference[:markerIndex], rawReference[markerIndex:]
+}
+
+func resolveStaticExportRelativeSitePaths(rawPath, sourceSitePath string) []string {
+	normalizedSourcePath := cleanPath(sourceSitePath)
+	baseURL := &url.URL{Scheme: "http", Host: "sitebrush.local", Path: normalizedSourcePath}
+	referenceURL := &url.URL{Path: rawPath}
+	resolvedPaths := []string{cleanPath(baseURL.ResolveReference(referenceURL).Path)}
+	if path.Ext(normalizedSourcePath) == "" && !strings.HasSuffix(normalizedSourcePath, "/") {
+		directoryBaseURL := &url.URL{Scheme: "http", Host: "sitebrush.local", Path: normalizedSourcePath + "/"}
+		directoryResolvedPath := cleanPath(directoryBaseURL.ResolveReference(referenceURL).Path)
+		if directoryResolvedPath != resolvedPaths[0] {
+			resolvedPaths = append(resolvedPaths, directoryResolvedPath)
+		}
+	}
+	return resolvedPaths
+}
+
+func (a *App) importDomainBackupZIP(ctx context.Context, domain string, importBasePath string, backupZIP *zip.Reader) (string, error) {
+	var backupJSON []byte
+	filesByName := make(map[string]*zip.File)
+	for _, zipEntry := range backupZIP.File {
+		entryName := filepath.ToSlash(strings.TrimSpace(zipEntry.Name))
+		switch {
+		case entryName == "backup.json":
+			reader, openErr := zipEntry.Open()
+			if openErr != nil {
+				return "/", openErr
+			}
+			payload, readErr := io.ReadAll(reader)
+			_ = reader.Close()
+			if readErr != nil {
+				return "/", readErr
+			}
+			backupJSON = payload
+		case strings.HasPrefix(entryName, "files/"):
+			relativeName := safeRelativeAssetPath(strings.TrimPrefix(entryName, "files/"))
+			if relativeName == "" || strings.HasSuffix(entryName, "/") {
+				continue
+			}
+			filesByName[relativeName] = zipEntry
+		case strings.HasPrefix(entryName, "p/"):
+			relativeName := safeRelativeAssetPath(strings.TrimPrefix(entryName, "p/"))
+			if relativeName == "" || strings.HasSuffix(entryName, "/") {
+				continue
+			}
+			filesByName[relativeName] = zipEntry
+		}
+	}
+	if len(backupJSON) == 0 {
+		return "/", errors.New("backup.json is missing")
+	}
+	var backup domainBackup
+	if err := json.Unmarshal(backupJSON, &backup); err != nil {
+		return "/", err
+	}
+	if backup.Version <= 0 {
+		return "/", errors.New("unsupported backup format")
+	}
+
+	basePath := normalizeImportBasePath(importBasePath)
+	filePrefix := importFilePrefix(basePath)
+	rootRedirectPath := applyImportBasePath(basePath, "/")
+	domainDir := a.domainFilesDirForDomain(domain)
+	if err := os.MkdirAll(domainDir, 0o755); err != nil {
+		return rootRedirectPath, err
+	}
+
+	for _, currentPage := range backup.Pages {
+		nextPagePath := applyImportBasePath(basePath, currentPage.Path)
+		nextPageHTML := rewriteBackupInternalLinks(currentPage.HTML, basePath, filePrefix)
+		nextTitle := strings.TrimSpace(currentPage.Title)
+		if nextTitle == "" {
+			nextTitle = nextPagePath
+		}
+		a.clearPageRedirectSource(ctx, domain, nextPagePath)
+		_, _ = a.db.ExecContext(ctx, `INSERT OR REPLACE INTO pages(domain,path,title,html,published) VALUES(?,?,?,?,1)`, domain, nextPagePath, nextTitle, nextPageHTML)
+		_, _ = a.db.ExecContext(ctx, `INSERT OR REPLACE INTO published_pages(domain,path,title,html) VALUES(?,?,?,?)`, domain, nextPagePath, nextTitle, nextPageHTML)
+		_, _ = a.db.ExecContext(ctx, `INSERT INTO revisions(domain,page_path,html,created_at,is_active) VALUES(?,?,?,?,1)`, domain, nextPagePath, nextPageHTML, time.Now().UTC().Format(time.RFC3339))
+		a.writePublishedStaticHTML(domain, nextPagePath, nextPageHTML)
+	}
+
+	for _, currentRedirect := range backup.Redirects {
+		oldPath := applyImportBasePath(basePath, currentRedirect.OldPath)
+		newPath := applyImportBasePath(basePath, currentRedirect.NewPath)
+		if oldPath == newPath {
+			continue
+		}
+		redirectCreatedAt := time.Now().UTC().Format(time.RFC3339)
+		_, _ = a.db.ExecContext(ctx, `INSERT INTO page_redirects(domain,old_path,new_path,created_at) VALUES(?,?,?,?) ON CONFLICT(domain,old_path) DO UPDATE SET new_path=excluded.new_path, created_at=excluded.created_at`, domain, oldPath, newPath, redirectCreatedAt)
+	}
+
+	for sourceFileName, zipEntry := range filesByName {
+		nextFileName := applyImportFilePrefix(filePrefix, sourceFileName)
+		if nextFileName == "" {
+			continue
+		}
+		entryReader, openErr := zipEntry.Open()
+		if openErr != nil {
+			return rootRedirectPath, openErr
+		}
+		fileBytes, readErr := io.ReadAll(entryReader)
+		_ = entryReader.Close()
+		if readErr != nil {
+			return rootRedirectPath, readErr
+		}
+		if shouldRewriteImportedTextFile(nextFileName) {
+			fileBytes = []byte(rewriteBackupInternalLinks(string(fileBytes), basePath, filePrefix))
+		}
+		targetFilePath := filepath.Join(domainDir, filepath.FromSlash(nextFileName))
+		if err := os.MkdirAll(filepath.Dir(targetFilePath), 0o755); err != nil {
+			return rootRedirectPath, err
+		}
+		if err := os.WriteFile(targetFilePath, fileBytes, 0o644); err != nil {
+			return rootRedirectPath, err
+		}
+	}
+
+	for _, metadata := range backup.FileMetadata {
+		nextFileName := applyImportFilePrefix(filePrefix, metadata.FileName)
+		if nextFileName == "" {
+			continue
+		}
+		nextPagePath := applyImportBasePath(basePath, metadata.PagePath)
+		if nextPagePath == "/" && rootRedirectPath != "/" {
+			nextPagePath = rootRedirectPath
+		}
+		a.upsertFileMetadata(ctx, domainStorageName(domain), nextFileName, nextPagePath, metadata.Size, metadata.MimeType, "backup-import")
+		_, _ = a.db.ExecContext(ctx, `UPDATE file_metadata SET download_count=? WHERE domain=? AND file_name=?`, metadata.DownloadCount, domainStorageName(domain), nextFileName)
+	}
+
+	for _, accessRule := range backup.FileAccessRules {
+		nextFileName := applyImportFilePrefix(filePrefix, accessRule.FileName)
+		if nextFileName == "" {
+			continue
+		}
+		nextAccessMode := strings.TrimSpace(accessRule.AccessMode)
+		if nextAccessMode == "" {
+			nextAccessMode = "public"
+		}
+		_, _ = a.db.ExecContext(ctx, `INSERT INTO file_access_rules(domain,file_name,access_mode,token,expires_at,single_use_left,token_use_count)
+VALUES(?,?,?,?,?,?,?)
+ON CONFLICT(domain,file_name) DO UPDATE SET access_mode=excluded.access_mode,token=excluded.token,expires_at=excluded.expires_at,single_use_left=excluded.single_use_left,token_use_count=excluded.token_use_count`,
+			domainStorageName(domain), nextFileName, nextAccessMode, accessRule.Token, accessRule.ExpiresAt, accessRule.SingleUseLeft, accessRule.TokenUseCount)
+	}
+	a.rebuildDomainStorageUsage(ctx, domain)
+	return rootRedirectPath, nil
+}
+
+func staticArchivePathForURI(pageURI string) string {
+	normalizedPath := cleanPath(pageURI)
+	trimmedPath := strings.TrimPrefix(normalizedPath, "/")
+	if trimmedPath == "" {
+		return "index.html"
+	}
+	lastSlashIndex := strings.LastIndex(trimmedPath, "/")
+	lastSegment := trimmedPath
+	if lastSlashIndex >= 0 {
+		lastSegment = trimmedPath[lastSlashIndex+1:]
+	}
+	if strings.Contains(lastSegment, ".") {
+		return trimmedPath
+	}
+	return path.Join(trimmedPath, "index.html")
+}
+
+func normalizeImportBasePath(rawBasePath string) string {
+	if strings.TrimSpace(rawBasePath) == "" {
+		return "/"
+	}
+	return cleanPath(rawBasePath)
+}
+
+func applyImportBasePath(basePath, sourcePath string) string {
+	normalizedSourcePath := cleanPath(sourcePath)
+	if basePath == "/" {
+		return normalizedSourcePath
+	}
+	if normalizedSourcePath == "/" {
+		return basePath
+	}
+	return cleanPath(basePath + normalizedSourcePath)
+}
+
+func importFilePrefix(basePath string) string {
+	if basePath == "/" {
+		return ""
+	}
+	return strings.TrimPrefix(basePath, "/")
+}
+
+func applyImportFilePrefix(filePrefix, sourceFileName string) string {
+	normalizedFileName := safeRelativeAssetPath(sourceFileName)
+	if normalizedFileName == "" {
+		return ""
+	}
+	if filePrefix == "" {
+		return normalizedFileName
+	}
+	return safeRelativeAssetPath(strings.Trim(filePrefix, "/") + "/" + normalizedFileName)
+}
+
+func shouldRewriteImportedTextFile(fileName string) bool {
+	switch strings.ToLower(path.Ext(fileName)) {
+	case ".html", ".htm", ".css":
+		return true
+	default:
+		return false
+	}
+}
+
+func rewriteBackupInternalLinks(source, basePath, filePrefix string) string {
+	if strings.TrimSpace(source) == "" {
+		return source
+	}
+	if basePath == "/" && filePrefix == "" {
+		return source
+	}
+	rewriteSingle := func(rawReference string) string {
+		return rewriteBackupReference(rawReference, basePath, filePrefix)
+	}
+	rewritten := htmlResourcePattern.ReplaceAllStringFunc(source, func(match string) string {
+		parts := htmlResourcePattern.FindStringSubmatch(match)
+		if len(parts) != 4 {
+			return match
+		}
+		return strings.Replace(match, parts[3], rewriteSingle(parts[3]), 1)
+	})
+	rewritten = htmlSrcSetPattern.ReplaceAllStringFunc(rewritten, func(match string) string {
+		parts := htmlSrcSetPattern.FindStringSubmatch(match)
+		if len(parts) != 2 {
+			return match
+		}
+		candidates := strings.Split(parts[1], ",")
+		for index, candidate := range candidates {
+			fields := strings.Fields(strings.TrimSpace(candidate))
+			if len(fields) == 0 {
+				continue
+			}
+			fields[0] = rewriteSingle(fields[0])
+			candidates[index] = strings.Join(fields, " ")
+		}
+		return strings.Replace(match, parts[1], strings.Join(candidates, ", "), 1)
+	})
+	rewritten = cssImportPattern.ReplaceAllStringFunc(rewritten, func(match string) string {
+		parts := cssImportPattern.FindStringSubmatch(match)
+		if len(parts) != 2 {
+			return match
+		}
+		return strings.Replace(match, parts[1], rewriteSingle(parts[1]), 1)
+	})
+	rewritten = rewriteCSSURLReferences(rewritten, rewriteSingle)
+	return rewritten
+}
+
+func rewriteBackupReference(rawReference, basePath, filePrefix string) string {
+	trimmedReference := strings.TrimSpace(rawReference)
+	if trimmedReference == "" {
+		return rawReference
+	}
+	loweredReference := strings.ToLower(trimmedReference)
+	for _, blockedPrefix := range []string{"mailto:", "tel:", "javascript:", "data:", "blob:"} {
+		if strings.HasPrefix(loweredReference, blockedPrefix) {
+			return rawReference
+		}
+	}
+	if strings.HasPrefix(trimmedReference, "//") {
+		return rawReference
+	}
+	parsedReference, parseErr := url.Parse(trimmedReference)
+	if parseErr == nil && (parsedReference.IsAbs() || parsedReference.Host != "") {
+		return rawReference
+	}
+	pathPart := trimmedReference
+	suffixPart := ""
+	markerIndex := strings.IndexAny(pathPart, "?#")
+	if markerIndex >= 0 {
+		suffixPart = pathPart[markerIndex:]
+		pathPart = pathPart[:markerIndex]
+	}
+	if strings.HasPrefix(pathPart, "/p/") {
+		if filePrefix == "" {
+			return pathPart + suffixPart
+		}
+		trimmedAssetPath := strings.TrimPrefix(pathPart, "/p/")
+		nextFileName := applyImportFilePrefix(filePrefix, trimmedAssetPath)
+		if nextFileName == "" {
+			return pathPart + suffixPart
+		}
+		return "/p/" + nextFileName + suffixPart
+	}
+	if strings.HasPrefix(pathPart, "/") {
+		if basePath == "/" {
+			return pathPart + suffixPart
+		}
+		if pathPart == basePath || strings.HasPrefix(pathPart, basePath+"/") {
+			return pathPart + suffixPart
+		}
+		return cleanPath(basePath+pathPart) + suffixPart
+	}
+	return rawReference
 }
 
 func (a *App) findPublishedPage(ctx context.Context, domain, pagePath string) (Page, error) {

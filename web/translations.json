@@ -13,7 +13,7 @@
     "recover_captcha_alt": "Enter digits from image.",
     "recover_submit": "recover password",
     "recover_back": "Back to sign in",
-    "domain_settings_title": "Domain settings",
+    "domain_settings_title": "Settings",
     "domain_settings_primary": "Primary domain:",
     "domain_settings_hint": "Add up to 3 aliases, one domain per line. Aliases serve the same site without redirect.",
     "domain_settings_aliases": "Domain aliases",
@@ -49,7 +49,7 @@
     "menu_files": "Files",
     "menu_freeze": "Freeze",
     "menu_publish": "Publish",
-    "menu_domain_settings": "Domain settings",
+    "menu_domain_settings": "Settings",
     "menu_profile": "Account",
     "menu_logout": "Sign out",
     "menu_login": "Sign in",
@@ -66,7 +66,8 @@
     "menu_tree": "Site tree",
     "tree_modal_title": "Site tree",
     "tree_loading": "Loading site tree...",
-    "tree_load_error": "Failed to load site tree."
+    "tree_load_error": "Failed to load site tree.",
+    "tree_close": "Close"
   },
   "fr": {
     "setup_no_admin": "aucun administrateur pour l'instant",
@@ -126,7 +127,8 @@
     "menu_tree": "Arborescence du site",
     "tree_modal_title": "Arborescence du site",
     "tree_loading": "Chargement de l’arborescence du site...",
-    "tree_load_error": "Impossible de charger l’arborescence du site."
+    "tree_load_error": "Impossible de charger l’arborescence du site.",
+    "tree_close": "Fermer"
   },
   "ru": {
     "setup_no_admin": "пока нет администратора",
@@ -142,7 +144,7 @@
     "recover_captcha_alt": "Введите цифры с картинки.",
     "recover_submit": "восстановить пароль",
     "recover_back": "Вернуться ко входу",
-    "domain_settings_title": "Настройки домена",
+    "domain_settings_title": "Настройки",
     "domain_settings_primary": "Основной домен:",
     "domain_settings_hint": "Добавьте до 3 алиасов, по одному домену в строке. Алиасы обслуживают тот же сайт без редиректа.",
     "domain_settings_aliases": "Алиасы домена",
@@ -178,7 +180,7 @@
     "menu_files": "Файлы",
     "menu_freeze": "Заморозить",
     "menu_publish": "Опубликовать",
-    "menu_domain_settings": "Настройки домена",
+    "menu_domain_settings": "Настройки",
     "menu_profile": "Учетная запись",
     "menu_logout": "Выйти",
     "menu_login": "Войти",
@@ -195,7 +197,8 @@
     "menu_tree": "Дерево сайта",
     "tree_modal_title": "Дерево сайта",
     "tree_loading": "Загружаем дерево сайта...",
-    "tree_load_error": "Не удалось загрузить дерево сайта."
+    "tree_load_error": "Не удалось загрузить дерево сайта.",
+    "tree_close": "Закрыть"
   },
   "ja": {
     "setup_no_admin": "まだ管理者がいません",
@@ -255,7 +258,8 @@
     "menu_tree": "サイトツリー",
     "tree_modal_title": "サイトツリー",
     "tree_loading": "サイトツリーを読み込んでいます...",
-    "tree_load_error": "サイトツリーを読み込めませんでした。"
+    "tree_load_error": "サイトツリーを読み込めませんでした。",
+    "tree_close": "閉じる"
   },
   "it": {
     "setup_no_admin": "nessun amministratore ancora",
@@ -315,7 +319,8 @@
     "menu_tree": "Albero del sito",
     "tree_modal_title": "Albero del sito",
     "tree_loading": "Caricamento dell’albero del sito...",
-    "tree_load_error": "Impossibile caricare l’albero del sito."
+    "tree_load_error": "Impossibile caricare l’albero del sito.",
+    "tree_close": "Chiudi"
   },
   "sv": {
     "setup_no_admin": "ingen administratör ännu",
@@ -375,7 +380,8 @@
     "menu_tree": "Webbplatsträd",
     "tree_modal_title": "Webbplatsträd",
     "tree_loading": "Läser in webbplatsträd...",
-    "tree_load_error": "Det gick inte att läsa in webbplatsträdet."
+    "tree_load_error": "Det gick inte att läsa in webbplatsträdet.",
+    "tree_close": "Stäng"
   },
   "fi": {
     "setup_no_admin": "ei vielä järjestelmänvalvojaa",
@@ -435,7 +441,8 @@
     "menu_tree": "Sivustopuu",
     "tree_modal_title": "Sivustopuu",
     "tree_loading": "Ladataan sivustopuuta...",
-    "tree_load_error": "Sivustopuuta ei voitu ladata."
+    "tree_load_error": "Sivustopuuta ei voitu ladata.",
+    "tree_close": "Sulje"
   },
   "mn": {
     "setup_no_admin": "админ хараахан алга",
@@ -495,7 +502,8 @@
     "menu_tree": "Сайтын мод",
     "tree_modal_title": "Сайтын мод",
     "tree_loading": "Сайтын модыг ачаалж байна...",
-    "tree_load_error": "Сайтын модыг ачаалж чадсангүй."
+    "tree_load_error": "Сайтын модыг ачаалж чадсангүй.",
+    "tree_close": "Хаах"
   },
   "zh": {
     "setup_no_admin": "尚无管理员",
@@ -555,7 +563,8 @@
     "menu_tree": "站点树",
     "tree_modal_title": "站点树",
     "tree_loading": "正在加载站点树...",
-    "tree_load_error": "无法加载站点树。"
+    "tree_load_error": "无法加载站点树。",
+    "tree_close": "关闭"
   },
   "he": {
     "setup_no_admin": "עדיין אין מנהל",
@@ -615,7 +624,8 @@
     "menu_tree": "עץ האתר",
     "tree_modal_title": "עץ האתר",
     "tree_loading": "טוען את עץ האתר...",
-    "tree_load_error": "טעינת עץ האתר נכשלה."
+    "tree_load_error": "טעינת עץ האתר נכשלה.",
+    "tree_close": "סגור"
   },
   "fa": {
     "setup_no_admin": "هنوز مدیر وجود ندارد",
@@ -675,7 +685,8 @@
     "menu_tree": "درخت سایت",
     "tree_modal_title": "درخت سایت",
     "tree_loading": "در حال بارگیری درخت سایت...",
-    "tree_load_error": "بارگیری درخت سایت ناموفق بود."
+    "tree_load_error": "بارگیری درخت سایت ناموفق بود.",
+    "tree_close": "بستن"
   },
   "de": {
     "setup_no_admin": "noch kein Administrator",
@@ -735,7 +746,8 @@
     "menu_tree": "Website-Baum",
     "tree_modal_title": "Website-Baum",
     "tree_loading": "Website-Baum wird geladen...",
-    "tree_load_error": "Website-Baum konnte nicht geladen werden."
+    "tree_load_error": "Website-Baum konnte nicht geladen werden.",
+    "tree_close": "Schließen"
   },
   "tr": {
     "setup_no_admin": "henüz yönetici yok",
@@ -795,7 +807,8 @@
     "menu_tree": "Site ağacı",
     "tree_modal_title": "Site ağacı",
     "tree_loading": "Site ağacı yükleniyor...",
-    "tree_load_error": "Site ağacı yüklenemedi."
+    "tree_load_error": "Site ağacı yüklenemedi.",
+    "tree_close": "Kapat"
   },
   "kk": {
     "setup_no_admin": "әзірге әкімші жоқ",
@@ -855,7 +868,8 @@
     "menu_tree": "Сайт ағашы",
     "tree_modal_title": "Сайт ағашы",
     "tree_loading": "Сайт ағашы жүктелуде...",
-    "tree_load_error": "Сайт ағашын жүктеу мүмкін болмады."
+    "tree_load_error": "Сайт ағашын жүктеу мүмкін болмады.",
+    "tree_close": "Жабу"
   },
   "es": {
     "setup_no_admin": "aún no hay administrador",
@@ -915,7 +929,8 @@
     "menu_tree": "Árbol del sitio",
     "tree_modal_title": "Árbol del sitio",
     "tree_loading": "Cargando árbol del sitio...",
-    "tree_load_error": "No se pudo cargar el árbol del sitio."
+    "tree_load_error": "No se pudo cargar el árbol del sitio.",
+    "tree_close": "Cerrar"
   },
   "pt": {
     "setup_no_admin": "ainda não há administrador",
@@ -975,6 +990,7 @@
     "menu_tree": "Árvore do site",
     "tree_modal_title": "Árvore do site",
     "tree_loading": "Carregando árvore do site...",
-    "tree_load_error": "Não foi possível carregar a árvore do site."
+    "tree_load_error": "Não foi possível carregar a árvore do site.",
+    "tree_close": "Fechar"
   }
 }

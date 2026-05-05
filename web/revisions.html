@@ -11,11 +11,16 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>{{index .T "revisions_for"}} {{.Path}}</title>
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+  <style>
+    .section-icon { width:30px; height:30px; object-fit:contain; }
+    .section-heading { display:flex; align-items:center; gap:10px; }
+  </style>
 </head>
 <body class="bg-body">
 <div class="container py-5">
   <div class="page-header mb-4 d-flex flex-wrap align-items-center justify-content-between gap-2">
-    <h1 class="m-0">
+    <h1 class="m-0 section-heading">
+      <img src="/p/static/revisions.png" class="section-icon" alt="">
       <a href="/">{{.Domain}}</a>
       <small class="text-muted">| {{index .T "revisions_for"}} {{.Path}}</small>
     </h1>

@@ -14,6 +14,8 @@
   <style>
     body { background:var(--bs-body-bg); color:var(--bs-body-color); }
     .manager-shell { max-width:1180px; }
+    .section-icon { width:30px; height:30px; object-fit:contain; }
+    .section-heading { display:flex; align-items:center; gap:10px; }
     .file-thumb { width:64px; height:64px; object-fit:cover; border-radius:8px; border:1px solid var(--bs-border-color); background:var(--bs-tertiary-bg); cursor:pointer; }
     .file-icon { width:64px; height:64px; border-radius:8px; display:grid; place-items:center; border:1px solid var(--bs-border-color); background:var(--bs-tertiary-bg); color:var(--bs-secondary-color); font-weight:700; }
     .file-preview-trigger { width:64px; height:64px; border-radius:8px; display:grid; place-items:center; border:1px solid var(--bs-border-color); background:var(--bs-tertiary-bg); color:var(--bs-body-color); font-weight:700; cursor:pointer; padding:0; }
@@ -38,7 +40,7 @@
 
   <form id="uploadForm" class="bg-body-tertiary border rounded-3 p-3 mb-3" method="post" action="{{.Path}}?files" enctype="multipart/form-data">
     <input type="hidden" name="action" value="upload">
-    <label class="form-label fw-semibold" for="upload_files">Загрузить файлы для этого URI</label>
+    <label class="form-label fw-semibold section-heading" for="upload_files"><img src="/p/static/files.png" class="section-icon" alt="">Загрузить файлы для этого URI</label>
     <div class="d-flex flex-wrap gap-2">
       <input id="upload_files" class="form-control" type="file" name="upload_files" multiple>
       <button class="btn btn-primary" type="submit">Загрузить</button>

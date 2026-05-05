@@ -1,6 +1,7 @@
 package main
 
 import (
+	"archive/zip"
 	"bufio"
 	"bytes"
 	"context"
@@ -1602,4 +1603,166 @@ func listStoredFiles(rootPath string) ([]string, error) {
 		return nil
 	})
 	return storedFiles, walkErr
+}
+
+func TestStaticArchivePathForURI(t *testing.T) {
+	testCases := []struct {
+		pageURI          string
+		expectedFilePath string
+	}{
+		{pageURI: "/", expectedFilePath: "index.html"},
+		{pageURI: "/catalog/product", expectedFilePath: "catalog/product/index.html"},
+		{pageURI: "/blog/2024/post", expectedFilePath: "blog/2024/post/index.html"},
+		{pageURI: "/assets/style.css", expectedFilePath: "assets/style.css"},
+		{pageURI: "/page.html", expectedFilePath: "page.html"},
+	}
+	for _, testCase := range testCases {
+		actualFilePath := staticArchivePathForURI(testCase.pageURI)
+		if actualFilePath != testCase.expectedFilePath {
+			t.Fatalf("staticArchivePathForURI(%q) = %q, want %q", testCase.pageURI, actualFilePath, testCase.expectedFilePath)
+		}
+	}
+}
+
+func TestBackupExportWritesStaticStructureFromURI(t *testing.T) {
+	application, rawDB := newTestApplication(t)
+	homeHTML := `<h1>home</h1><a href="/catalog/product">Product</a><a href="/page.html?view=1#top">Page</a><a href="http://localhost/blog/2024/post">Same host</a><img src="/p/assets/logo.png"><img srcset="/p/assets/logo.png 1x, /p/assets/logo@2x.png 2x"><link rel="stylesheet" href="/p/assets/style.css"><script src="/p/assets/app.js"></script><a href="https://external.test/path">External</a>`
+	productRevisionHTML := `<h1>revision</h1><a href="/">Home</a><a href="/blog/2024/post#read">Post</a><img src="/p/assets/logo.png">`
+	_, err := rawDB.Exec(`INSERT INTO pages(domain,path,title,html,published) VALUES(?,?,?,?,1)`, "localhost", "/", "Home", homeHTML)
+	if err != nil {
+		t.Fatalf("insert /: %v", err)
+	}
+	_, err = rawDB.Exec(`INSERT INTO pages(domain,path,title,html,published) VALUES(?,?,?,?,1)`, "localhost", "/catalog/product", "Product", "<h1>draft</h1>")
+	if err != nil {
+		t.Fatalf("insert /catalog/product: %v", err)
+	}
+	_, err = rawDB.Exec(`INSERT INTO pages(domain,path,title,html,published) VALUES(?,?,?,?,1)`, "localhost", "/page.html", "Page", "<h1>page</h1>")
+	if err != nil {
+		t.Fatalf("insert /page.html: %v", err)
+	}
+	_, err = rawDB.Exec(`INSERT INTO pages(domain,path,title,html,published) VALUES(?,?,?,?,1)`, "localhost", "/blog/2024/post", "Post", "<h1>post</h1>")
+	if err != nil {
+		t.Fatalf("insert /blog/2024/post: %v", err)
+	}
+	_, err = rawDB.Exec(`INSERT INTO revisions(domain,page_path,html,created_at,is_active) VALUES(?,?,?,?,1)`, "localhost", "/catalog/product", productRevisionHTML, time.Now().UTC().Format(time.RFC3339))
+	if err != nil {
+		t.Fatalf("insert revision /catalog/product: %v", err)
+	}
+
+	domainFilesDir := application.domainFilesDirForDomain("localhost")
+	if err := os.MkdirAll(filepath.Join(domainFilesDir, "assets"), 0o755); err != nil {
+		t.Fatalf("mkdir assets: %v", err)
+	}
+	styleCSS := `@import url("/p/assets/fonts.css"); body{background:url("/p/assets/logo.png")} @font-face{src:url("/p/assets/font.woff2")}`
+	if err := os.WriteFile(filepath.Join(domainFilesDir, "assets", "style.css"), []byte(styleCSS), 0o644); err != nil {
+		t.Fatalf("write style.css: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(domainFilesDir, "assets", "fonts.css"), []byte(`@font-face{src:url("/p/assets/font.woff2")}`), 0o644); err != nil {
+		t.Fatalf("write fonts.css: %v", err)
+	}
+	appJS := `const logoPath = "/p/assets/logo.png"; const productPath = "/catalog/product"; const externalPath = "https://external.test/app.js";`
+	if err := os.WriteFile(filepath.Join(domainFilesDir, "assets", "app.js"), []byte(appJS), 0o644); err != nil {
+		t.Fatalf("write app.js: %v", err)
+	}
+	for _, assetName := range []string{"logo.png", "logo@2x.png", "font.woff2"} {
+		if err := os.WriteFile(filepath.Join(domainFilesDir, "assets", assetName), []byte(assetName), 0o644); err != nil {
+			t.Fatalf("write %s: %v", assetName, err)
+		}
+	}
+
+	var archiveBuffer bytes.Buffer
+	if err := application.writeDomainBackupZIP(context.Background(), "localhost", &archiveBuffer); err != nil {
+		t.Fatalf("writeDomainBackupZIP: %v", err)
+	}
+	archiveReader, err := zip.NewReader(bytes.NewReader(archiveBuffer.Bytes()), int64(archiveBuffer.Len()))
+	if err != nil {
+		t.Fatalf("zip.NewReader: %v", err)
+	}
+	archiveFileByName := make(map[string]*zip.File, len(archiveReader.File))
+	for _, archiveFile := range archiveReader.File {
+		archiveFileByName[archiveFile.Name] = archiveFile
+	}
+	for _, expectedFileName := range []string{
+		"backup.json",
+		"index.html",
+		"catalog/product/index.html",
+		"page.html",
+		"blog/2024/post/index.html",
+		"p/assets/style.css",
+		"p/assets/fonts.css",
+		"p/assets/app.js",
+		"p/assets/logo.png",
+	} {
+		if _, exists := archiveFileByName[expectedFileName]; !exists {
+			t.Fatalf("backup archive missing %q", expectedFileName)
+		}
+	}
+
+	rootPageBody := readZipTextFile(t, archiveFileByName, "index.html")
+	for _, expectedFragment := range []string{
+		`href="catalog/product/index.html"`,
+		`href="page.html?view=1#top"`,
+		`href="blog/2024/post/index.html"`,
+		`src="p/assets/logo.png"`,
+		`srcset="p/assets/logo.png 1x, p/assets/logo@2x.png 2x"`,
+		`href="p/assets/style.css"`,
+		`src="p/assets/app.js"`,
+		`href="https://external.test/path"`,
+	} {
+		if !strings.Contains(rootPageBody, expectedFragment) {
+			t.Fatalf("index.html missing rewritten fragment %q in %q", expectedFragment, rootPageBody)
+		}
+	}
+
+	productPageBody := readZipTextFile(t, archiveFileByName, "catalog/product/index.html")
+	for _, expectedFragment := range []string{
+		`<h1>revision</h1>`,
+		`href="../../index.html"`,
+		`href="../../blog/2024/post/index.html#read"`,
+		`src="../../p/assets/logo.png"`,
+	} {
+		if !strings.Contains(productPageBody, expectedFragment) {
+			t.Fatalf("catalog/product/index.html missing rewritten fragment %q in %q", expectedFragment, productPageBody)
+		}
+	}
+
+	styleBody := readZipTextFile(t, archiveFileByName, "p/assets/style.css")
+	for _, expectedFragment := range []string{
+		`@import url("fonts.css")`,
+		`url("logo.png")`,
+		`url("font.woff2")`,
+	} {
+		if !strings.Contains(styleBody, expectedFragment) {
+			t.Fatalf("p/assets/style.css missing rewritten fragment %q in %q", expectedFragment, styleBody)
+		}
+	}
+
+	scriptBody := readZipTextFile(t, archiveFileByName, "p/assets/app.js")
+	for _, expectedFragment := range []string{
+		`const logoPath = "logo.png"`,
+		`const productPath = "../../catalog/product/index.html"`,
+		`const externalPath = "https://external.test/app.js"`,
+	} {
+		if !strings.Contains(scriptBody, expectedFragment) {
+			t.Fatalf("p/assets/app.js missing rewritten fragment %q in %q", expectedFragment, scriptBody)
+		}
+	}
+}
+
+func readZipTextFile(t *testing.T, archiveFileByName map[string]*zip.File, fileName string) string {
+	t.Helper()
+	archiveFile, exists := archiveFileByName[fileName]
+	if !exists {
+		t.Fatalf("backup archive missing %s", fileName)
+	}
+	archiveFileReader, err := archiveFile.Open()
+	if err != nil {
+		t.Fatalf("open %s: %v", fileName, err)
+	}
+	fileBytes, readErr := io.ReadAll(archiveFileReader)
+	_ = archiveFileReader.Close()
+	if readErr != nil {
+		t.Fatalf("read %s: %v", fileName, readErr)
+	}
+	return string(fileBytes)
 }

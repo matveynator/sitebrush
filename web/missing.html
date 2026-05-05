@@ -34,6 +34,16 @@
     <label class="form-label mt-3" for="source_ip">IP сервера, если домен уже не резолвится:</label>
     <input id="source_ip" name="source_ip" type="text" inputmode="numeric" autocomplete="off" class="form-control" placeholder="Например 203.0.113.10">
   </form>
+
+  <form class="card card-body mt-3" method="post" enctype="multipart/form-data" action="{{.Path}}?backup_import" style="max-width:680px;">
+    <label class="form-label" for="backup_zip">Или восстановите сайт из ZIP-бэкапа:</label>
+    <input id="backup_zip" name="backup_zip" type="file" accept=".zip,application/zip" class="form-control" required>
+    <label class="form-label mt-3" for="base_path">Базовый путь для восстановления:</label>
+    <input id="base_path" name="base_path" type="text" class="form-control" placeholder="/uri" value="{{.Path}}">
+    <div class="form-text">Содержимое бэкапа будет развёрнуто как корень сайта внутри указанного пути.</div>
+    <button type="submit" class="btn btn-primary mt-3">Восстановить бэкап</button>
+  </form>
+
   <div class="modal fade" id="grabProgressModal" tabindex="-1" aria-hidden="true">
     <div class="modal-dialog modal-lg"><div class="modal-content"><div class="modal-header">
       <h5 class="modal-title" id="grab_modal_title">Загрузка страницы</h5>

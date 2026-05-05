@@ -65,6 +65,8 @@
     .record-grid code { display: inline-block; word-break: break-all; }
     .selected { border-color: var(--ok); }
     .empty { color: var(--hint); padding: 18px 0; }
+    .section-icon { width:30px; height:30px; object-fit:contain; }
+    .section-heading { display:flex; align-items:center; gap:10px; margin: 0; }
     @media (max-width: 700px) {
       body { margin: 16px; }
       .add-form { grid-template-columns: 1fr; }
@@ -75,12 +77,27 @@
   </style>
 </head>
 <body>
-  <h1><a href="/">{{.Domain}}</a> | {{index .T "domain_settings_title"}}</h1>
+  <h1 class="section-heading"><img src="/p/static/settings.png" class="section-icon" alt=""><a href="/">{{.Domain}}</a> | {{index .T "domain_settings_title"}}</h1>
   <p><a href="{{.ReturnPath}}">{{index .T "back_to_uri"}}</a></p>
 
   <p><strong>{{index .T "domain_settings_primary"}}</strong> {{.Domain}}</p>
   <p><strong>Selected domain:</strong> {{.SelectedDomain}}</p>
   <p class="hint">If the selected domain is active, Sitebrush will request and renew a Let’s Encrypt certificate automatically on ports 80 and 443.</p>
+
+  <section class="dns-box">
+    <p><strong>Site backup</strong></p>
+    <p class="hint">Use this link for automatic backups from external scripts. The link includes a secure token.</p>
+    <div class="add-form" style="margin-bottom: 12px;">
+      <input type="text" id="backup_download_url" readonly value="{{.BackupDownloadURL}}">
+      <button type="button" id="copy_backup_link_button">Copy link</button>
+    </div>
+    <p class="hint">Relative path: <code>{{.BackupDownloadPath}}</code></p>
+    <form method="post" action="?settings" style="margin: 0;">
+      <input type="hidden" name="return" value="{{.ReturnPath}}">
+      <input type="hidden" name="action" value="rotate_backup_token">
+      <button type="submit">Regenerate backup token</button>
+    </form>
+  </section>
 
   <section class="dns-box">
     <p><strong>DNS A record for aliases</strong></p>
@@ -171,5 +188,27 @@
   {{else}}
   <p class="empty">No aliases yet.</p>
   {{end}}
+
+  <script>
+  (function setupBackupLinkCopy() {
+    const copyButtonElement = document.getElementById('copy_backup_link_button');
+    const backupLinkElement = document.getElementById('backup_download_url');
+    if (!copyButtonElement || !backupLinkElement) { return; }
+    copyButtonElement.addEventListener('click', function copyBackupLink() {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(backupLinkElement.value).then(function onCopied() {
+          copyButtonElement.textContent = 'Copied';
+          setTimeout(function restoreCopyLabel() { copyButtonElement.textContent = 'Copy link'; }, 1500);
+        }).catch(function fallbackCopy() {
+          backupLinkElement.select();
+          document.execCommand('copy');
+        });
+        return;
+      }
+      backupLinkElement.select();
+      document.execCommand('copy');
+    });
+  })();
+  </script>
 </body>
 </html>
