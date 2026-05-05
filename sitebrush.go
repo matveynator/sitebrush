@@ -1695,6 +1695,7 @@ func (a *App) profilePage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
+	translations := translationsForRequest(r)
 	status := ""
 	if r.Method == http.MethodPost {
 		nextEmail := strings.TrimSpace(r.FormValue("email"))
@@ -1702,9 +1703,9 @@ func (a *App) profilePage(w http.ResponseWriter, r *http.Request) {
 		confirmPassword := strings.TrimSpace(r.FormValue("password_confirm"))
 		switch {
 		case nextEmail == "":
-			status = "Email is required."
+			status = translationOrDefault(translations, "profile_status_email_required", "Email is required.")
 		case nextPassword != "" && nextPassword != confirmPassword:
-			status = "Password confirmation does not match."
+			status = translationOrDefault(translations, "profile_status_password_mismatch", "Password confirmation does not match.")
 		default:
 			domain := a.siteDomain(r.Context(), r)
 			var updateErr error
@@ -1719,10 +1720,9 @@ func (a *App) profilePage(w http.ResponseWriter, r *http.Request) {
 			}
 			a.createSession(w, r, nextEmail)
 			currentEmail = nextEmail
-			status = "Account updated."
+			status = translationOrDefault(translations, "profile_status_updated", "Account updated.")
 		}
 	}
-	translations := translationsForRequest(r)
 	a.render(w, r, "profile.html", map[string]any{
 		"Email":                currentEmail,
 		"Status":               status,
@@ -1735,6 +1735,7 @@ func (a *App) profilePage(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) recoverPage(w http.ResponseWriter, r *http.Request) {
+	translations := translationsForRequest(r)
 	if r.Method == http.MethodGet {
 		a.render(w, r, "recover.html", map[string]any{"Status": "", "ReturnPath": requestedReturnPath(r)})
 		return
@@ -1743,7 +1744,7 @@ func (a *App) recoverPage(w http.ResponseWriter, r *http.Request) {
 	captchaValue := strings.TrimSpace(r.FormValue("captcha"))
 	captchaCookie, err := r.Cookie("sitebrush_captcha")
 	if err != nil || captchaCookie.Value == "" || captchaCookie.Value != captchaValue {
-		a.render(w, r, "recover.html", map[string]any{"Status": "Captcha is invalid", "ReturnPath": requestedReturnPath(r)})
+		a.render(w, r, "recover.html", map[string]any{"Status": translationOrDefault(translations, "recover_status_captcha_invalid", "Captcha is invalid"), "ReturnPath": requestedReturnPath(r)})
 		return
 	}
 	var userCount int
@@ -1757,7 +1758,7 @@ func (a *App) recoverPage(w http.ResponseWriter, r *http.Request) {
 	message := "Subject: SiteBrush recovery code\r\n\r\nRecovery code: " + recoveryCode + "\r\n"
 	mailError := smtp.SendMail("127.0.0.1:25", nil, "noreply@localhost", []string{email}, []byte(message))
 	if mailError != nil {
-		a.render(w, r, "recover.html", map[string]any{"Status": "SMTP send failed: " + mailError.Error(), "ReturnPath": requestedReturnPath(r)})
+		a.render(w, r, "recover.html", map[string]any{"Status": translationOrDefault(translations, "recover_status_smtp_failed_prefix", "SMTP send failed: ") + mailError.Error(), "ReturnPath": requestedReturnPath(r)})
 		return
 	}
 	a.clearFailedLoginAttempts(r.Context(), domain, clientIPAddress(r))
@@ -3453,18 +3454,26 @@ func loadTranslationCatalog() map[string]map[string]string {
 func translationsForRequest(r *http.Request) map[string]string {
 	languageCode := preferredLanguageCode(r.Header.Get("Accept-Language"))
 	selectedTranslations, found := translationCatalog[languageCode]
+	englishTranslations := translationCatalog["en"]
 	if !found {
-		selectedTranslations = translationCatalog["en"]
+		return englishTranslations
 	}
-	return selectedTranslations
+	mergedTranslations := make(map[string]string, len(englishTranslations)+len(selectedTranslations))
+	for translationKey, translationValue := range englishTranslations {
+		mergedTranslations[translationKey] = translationValue
+	}
+	for translationKey, translationValue := range selectedTranslations {
+		mergedTranslations[translationKey] = translationValue
+	}
+	return mergedTranslations
 }
 
 func preferredLanguageCode(acceptLanguageHeader string) string {
 	normalizedHeader := strings.ToLower(strings.TrimSpace(acceptLanguageHeader))
 	if normalizedHeader == "" {
-		return "en"
+		return "ru"
 	}
-	bestLanguageCode := "en"
+	bestLanguageCode := "ru"
 	bestWeight := -1.0
 	supportedLanguageCodes := map[string]struct{}{
 		"en": {}, "fr": {}, "ru": {}, "ja": {}, "it": {}, "sv": {}, "fi": {}, "mn": {},

@@ -97,35 +97,35 @@
   <input type="hidden" id="htmlContentField" name="html" />
   <textarea id="visualEditorRoot" class="editor-host">{{.HTML}}</textarea>
 </form>
-<div class="SiteBrushBuildVersion">Build {{.CompileVersion}}</div>
+<div class="SiteBrushBuildVersion">{{index .T "edit_build_label"}} {{.CompileVersion}}</div>
 
 <div id="uploadDialogOverlay" class="SiteBrushUploadOverlay" role="dialog" aria-modal="true" aria-labelledby="uploadDialogTitle">
   <div class="SiteBrushUploadModal">
     <div class="SiteBrushUploadHeader">
-      <h2 id="uploadDialogTitle" class="SiteBrushUploadTitle">Upload file</h2>
-      <button id="uploadDialogClose" class="SiteBrushUploadClose" type="button" aria-label="Close">&times;</button>
+      <h2 id="uploadDialogTitle" class="SiteBrushUploadTitle">{{index .T "edit_upload_file_title"}}</h2>
+      <button id="uploadDialogClose" class="SiteBrushUploadClose" type="button" aria-label="{{index .T "tree_close"}}">&times;</button>
     </div>
     <div class="SiteBrushUploadBody">
       <div id="uploadDialogQueue" class="SiteBrushUploadHint"></div>
       <img id="uploadDialogPreview" class="SiteBrushUploadPreview SiteBrushUploadHidden" alt="">
       <label class="SiteBrushUploadField">
-        File name
+        {{index .T "edit_file_name"}}
         <input id="uploadDialogName" type="text" autocomplete="off">
       </label>
       <div id="uploadDialogImageControls" class="SiteBrushUploadResizeGrid SiteBrushUploadHidden">
         <label class="SiteBrushUploadField">
-          Image size
+          {{index .T "edit_image_size"}}
           <select id="uploadDialogResizeMode">
-            <option value="original">Upload as is</option>
-            <option value="600">Max side 600 px</option>
-            <option value="800">Max side 800 px</option>
-            <option value="1200">Max side 1200 px</option>
-            <option value="2000">Max side 2000 px</option>
-            <option value="custom">Custom</option>
+            <option value="original">{{index .T "edit_resize_original"}}</option>
+            <option value="600">{{index .T "edit_resize_600"}}</option>
+            <option value="800">{{index .T "edit_resize_800"}}</option>
+            <option value="1200">{{index .T "edit_resize_1200"}}</option>
+            <option value="2000">{{index .T "edit_resize_2000"}}</option>
+            <option value="custom">{{index .T "edit_resize_custom"}}</option>
           </select>
         </label>
         <label id="uploadDialogCustomSizeField" class="SiteBrushUploadField SiteBrushUploadHidden">
-          Pixels
+          {{index .T "edit_pixels"}}
           <input id="uploadDialogCustomSize" type="number" min="16" max="12000" step="1" value="1200">
         </label>
       </div>
@@ -134,8 +134,8 @@
     </div>
     <div class="SiteBrushUploadFooter">
       <div class="SiteBrushUploadActions">
-        <button id="uploadDialogSkip" class="SiteBrushUploadButton" type="button">Skip</button>
-        <button id="uploadDialogUpload" class="SiteBrushUploadButton primary" type="button">Upload</button>
+        <button id="uploadDialogSkip" class="SiteBrushUploadButton" type="button">{{index .T "edit_skip"}}</button>
+        <button id="uploadDialogUpload" class="SiteBrushUploadButton primary" type="button">{{index .T "edit_upload"}}</button>
       </div>
     </div>
   </div>
@@ -143,6 +143,16 @@
 
 <script src="/p/static/jodit.min.js"></script>
 <script>
+const editUIText = {
+  imageResizeFailed: "{{index .T "edit_error_image_resize_failed"}}",
+  imagePreviewFailed: "{{index .T "edit_error_image_preview_failed"}}",
+  fileUploadFailed: "{{index .T "edit_error_file_upload_failed"}}",
+  nativePickerUnavailable: "{{index .T "edit_error_native_picker_unavailable"}}",
+  queuePrefix: "{{index .T "edit_queue_prefix"}}",
+  queueOf: "{{index .T "edit_queue_of"}}",
+  fileNameRequired: "{{index .T "edit_file_name_required"}}",
+  uploading: "{{index .T "edit_uploading"}}"
+};
 const initialHtmlContent = {{.HTML}};
 const currentPagePath = {{.Path}};
 const desktopNativeFilePickerEnabled = {{.NativeFileDialog}};
@@ -369,7 +379,7 @@ function resizeImageFile(selectedFile, outputName, maxSide) {
       const outputType = selectedFile.type === 'image/png' ? 'image/png' : 'image/jpeg';
       canvasElement.toBlob(function onImageBlob(imageBlob) {
         if (!imageBlob) {
-          reject(new Error('Image resize failed'));
+          reject(new Error(editUIText.imageResizeFailed));
           return;
         }
         const normalizedName = outputType === 'image/jpeg' && !/\.(jpg|jpeg)$/i.test(outputName)
@@ -380,7 +390,7 @@ function resizeImageFile(selectedFile, outputName, maxSide) {
     };
     imageElement.onerror = function onImageError() {
       URL.revokeObjectURL(imageURL);
-      reject(new Error('Image preview failed'));
+      reject(new Error(editUIText.imagePreviewFailed));
     };
     imageElement.src = imageURL;
   });
@@ -396,7 +406,7 @@ function uploadPreparedFile(preparedFile) {
     headers: { 'Accept': 'application/json' }
   }).then(function parseUploadResponse(uploadResponse) {
     if (!uploadResponse.ok) {
-      throw new Error('File upload failed');
+      throw new Error(editUIText.fileUploadFailed);
     }
     return uploadResponse.json();
   });
@@ -460,7 +470,7 @@ function showUploadDialogForCurrentFile() {
   const uploadButtonElement = document.getElementById('uploadDialogUpload');
   errorElement.textContent = '';
   uploadButtonElement.disabled = true;
-  queueElement.textContent = 'File ' + (uploadDialogState.index + 1) + ' of ' + uploadDialogState.files.length + ': ' + selectedFile.name;
+  queueElement.textContent = editUIText.queuePrefix + ' ' + (uploadDialogState.index + 1) + ' ' + editUIText.queueOf + ' ' + uploadDialogState.files.length + ': ' + selectedFile.name;
   metaElement.textContent = humanFileSize(selectedFile.size) + (selectedFile.type ? ' - ' + selectedFile.type : '');
   imageControlsElement.classList.toggle('SiteBrushUploadHidden', !isResizableImage(selectedFile));
   resizeModeElement.value = uploadDialogState.resizeMode;
@@ -495,11 +505,11 @@ function uploadCurrentDialogFile() {
   }
   const outputName = nameElement.value.trim();
   if (outputName === '') {
-    errorElement.textContent = 'File name is required.';
+    errorElement.textContent = editUIText.fileNameRequired;
     return;
   }
   uploadButtonElement.disabled = true;
-  errorElement.textContent = 'Uploading...';
+  errorElement.textContent = editUIText.uploading;
   rememberUploadResizeControls();
   resizeImageFile(selectedFile, outputName, selectedResizeMaxSide())
     .then(function uploadAndInsertPreparedFile(preparedFileResult) {
@@ -511,7 +521,7 @@ function uploadCurrentDialogFile() {
       advanceUploadDialog();
     })
     .catch(function showUploadError(uploadError) {
-      errorElement.textContent = uploadError.message || 'File upload failed.';
+      errorElement.textContent = uploadError.message || editUIText.fileUploadFailed;
       uploadButtonElement.disabled = false;
     });
 }
@@ -570,7 +580,7 @@ function chooseAndUploadFiles(visualHtmlEditor) {
   fetch(currentPagePath + '?native_pick_files', { headers: { 'Accept': 'application/json' } })
     .then(function parseNativePickerResponse(nativeResponse) {
       if (!nativeResponse.ok) {
-        throw new Error('native picker unavailable');
+        throw new Error(editUIText.nativePickerUnavailable);
       }
       return nativeResponse.json();
     })
@@ -612,7 +622,7 @@ function createVisualHtmlEditor() {
       'fontsize', 'brush', 'paragraph', '|', 'link', {
         name: 'insertServerFile',
         iconURL: '/p/static/files.png',
-        tooltip: 'Upload file',
+        tooltip: {{printf "%q" (index .T "edit_upload_file_title")}},
         exec: function executeFileUpload(editorInstance) {
           chooseAndUploadFiles(editorInstance);
         }

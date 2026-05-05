@@ -9,7 +9,7 @@
   </script>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Import website page</title>
+  <title>{{index .T "import_page_title"}}</title>
   <style>
     :root {
       color-scheme: light dark;
@@ -33,12 +33,12 @@
 </head>
 <body>
 <main class="page">
-  <h1>Import website page</h1>
+  <h1>{{index .T "import_page_title"}}</h1>
   <form method="post" action="?import">
     <input class="field" name="url" placeholder="https://example.com"/>
-    <input class="field" name="source_ip" placeholder="Server IP, optional"/>
+    <input class="field" name="source_ip" placeholder="{{index .T "import_source_ip_placeholder"}}"/>
     <input class="field" name="path" placeholder="/imported"/>
-    <button>Import</button>
+    <button>{{index .T "import_button"}}</button>
   </form>
 </main>
 </body>

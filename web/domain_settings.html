@@ -83,33 +83,33 @@
   <p><a href="{{.ReturnPath}}">{{index .T "back_to_uri"}}</a></p>
 
   <p><strong>{{index .T "domain_settings_primary"}}</strong> {{.Domain}}</p>
-  <p><strong>Selected domain:</strong> {{.SelectedDomain}}</p>
-  <p class="hint">If the selected domain is active, Sitebrush will request and renew a Let’s Encrypt certificate automatically on ports 80 and 443.</p>
+  <p><strong>{{index .T "domain_settings_selected_domain"}}</strong> {{.SelectedDomain}}</p>
+  <p class="hint">{{index .T "domain_settings_https_hint"}}</p>
 
   <section class="dns-box">
-    <p><strong>Site backup</strong></p>
-    <p class="hint">Use this link for automatic backups from external scripts. The link includes a secure token.</p>
-    <p><a class="backup-download-link" href="{{.BackupDownloadPath}}"><img src="/p/static/backup.png" alt="">Download backup archive</a></p>
+    <p><strong>{{index .T "domain_settings_backup_title"}}</strong></p>
+    <p class="hint">{{index .T "domain_settings_backup_hint"}}</p>
+    <p><a class="backup-download-link" href="{{.BackupDownloadPath}}"><img src="/p/static/backup.png" alt="">{{index .T "domain_settings_backup_download"}}</a></p>
     <div class="add-form" style="margin-bottom: 12px;">
       <input type="text" id="backup_download_url" readonly value="{{.BackupDownloadURL}}">
-      <button type="button" id="copy_backup_link_button">Copy link</button>
+      <button type="button" id="copy_backup_link_button">{{index .T "domain_settings_copy_link"}}</button>
     </div>
-    <p class="hint">Relative path: <code>{{.BackupDownloadPath}}</code></p>
+    <p class="hint">{{index .T "domain_settings_relative_path"}} <code>{{.BackupDownloadPath}}</code></p>
     <form method="post" action="?settings" style="margin: 0;">
       <input type="hidden" name="return" value="{{.ReturnPath}}">
       <input type="hidden" name="action" value="rotate_backup_token">
-      <button type="submit">Regenerate backup token</button>
+      <button type="submit">{{index .T "domain_settings_regen_backup_token"}}</button>
     </form>
   </section>
 
   <section class="dns-box">
-    <p><strong>DNS A record for aliases</strong></p>
+    <p><strong>{{index .T "domain_settings_dns_a_title"}}</strong></p>
     {{if .ExternalIP}}
-      <p>Add an A record for every alias domain pointing to this server IP:</p>
+      <p>{{index .T "domain_settings_dns_a_hint"}}</p>
       <p><code>A</code> <code>@</code> <code>{{.ExternalIP}}</code></p>
-      <p class="hint">For a subdomain like www.example.com, set the host/name field to <code>www</code>.</p>
+      <p class="hint">{{index .T "domain_settings_dns_subdomain_hint"}}</p>
     {{else}}
-      <p class="status-bad">Could not determine the external IP automatically.</p>
+      <p class="status-bad">{{index .T "domain_settings_external_ip_failed"}}</p>
       {{if .ExternalIPError}}<p class="hint">{{.ExternalIPError}}</p>{{end}}
     {{end}}
   </section>
@@ -118,23 +118,23 @@
   <form class="add-form" method="post" action="?settings">
     <input type="hidden" name="return" value="{{.ReturnPath}}">
     <input type="hidden" name="action" value="add_alias">
-    <input type="text" name="alias_domain" placeholder="example.com" autocomplete="off">
-    <button class="primary" type="submit">Save</button>
+    <input type="text" name="alias_domain" placeholder="{{index .T "domain_settings_alias_placeholder"}}" autocomplete="off">
+    <button class="primary" type="submit">{{index .T "domain_settings_save"}}</button>
   </form>
   {{else}}
-  <p class="hint">Alias limit reached: 10 domains.</p>
+  <p class="hint">{{index .T "domain_settings_alias_limit"}}</p>
   {{end}}
 
   <form method="post" action="?settings" style="margin: 0 0 12px;">
     <input type="hidden" name="return" value="{{.ReturnPath}}">
     <input type="hidden" name="action" value="check_all">
-    <button type="submit">Check DNS now</button>
+    <button type="submit">{{index .T "domain_settings_check_dns_now"}}</button>
   </form>
 
   <form method="post" action="?settings" style="margin: 0 0 12px;">
     <input type="hidden" name="return" value="{{.ReturnPath}}">
     <input type="hidden" name="action" value="select_primary">
-    <button type="submit">Use primary domain</button>
+    <button type="submit">{{index .T "domain_settings_use_primary"}}</button>
   </form>
 
   {{if .Aliases}}
@@ -144,52 +144,52 @@
       <div class="alias-header">
         <div>
           <div class="alias-domain">{{.Domain}}</div>
-          {{if .IsSelected}}<div class="status-ok">Selected</div>{{end}}
+          {{if .IsSelected}}<div class="status-ok">{{index $.T "domain_settings_selected"}}</div>{{end}}
         </div>
         <div class="alias-actions">
           <form method="post" action="?settings">
             <input type="hidden" name="return" value="{{$.ReturnPath}}">
             <input type="hidden" name="action" value="check_alias">
             <input type="hidden" name="alias_domain" value="{{.Domain}}">
-            <button type="submit">Check</button>
+            <button type="submit">{{index $.T "domain_settings_check"}}</button>
           </form>
           {{if .IsActive}}
           <form method="post" action="?settings">
             <input type="hidden" name="return" value="{{$.ReturnPath}}">
             <input type="hidden" name="action" value="select_alias">
             <input type="hidden" name="alias_domain" value="{{.Domain}}">
-            <button type="submit">Use domain</button>
+            <button type="submit">{{index $.T "domain_settings_use_domain"}}</button>
           </form>
           {{end}}
           <form method="post" action="?settings">
             <input type="hidden" name="return" value="{{$.ReturnPath}}">
             <input type="hidden" name="action" value="delete_alias">
             <input type="hidden" name="alias_domain" value="{{.Domain}}">
-            <button class="danger" type="submit" aria-label="Delete {{.Domain}}">×</button>
+            <button class="danger" type="submit" aria-label="{{index $.T "domain_settings_delete_alias_aria"}} {{.Domain}}">×</button>
           </form>
         </div>
       </div>
 
       <div class="status-list">
-        {{if .TXTVerified}}<span class="status-ok">TXT ok</span>{{else}}<span class="status-bad">TXT missing</span>{{end}}
-        {{if .ARecordVerified}}<span class="status-ok">A ok</span>{{else}}<span class="status-bad">A missing</span>{{end}}
-        {{if .IsActive}}<span class="status-ok">Active</span>{{else}}<span class="status-bad">Inactive</span>{{end}}
+        {{if .TXTVerified}}<span class="status-ok">{{index $.T "domain_settings_txt_ok"}}</span>{{else}}<span class="status-bad">{{index $.T "domain_settings_txt_missing"}}</span>{{end}}
+        {{if .ARecordVerified}}<span class="status-ok">{{index $.T "domain_settings_a_ok"}}</span>{{else}}<span class="status-bad">{{index $.T "domain_settings_a_missing"}}</span>{{end}}
+        {{if .IsActive}}<span class="status-ok">{{index $.T "domain_settings_active"}}</span>{{else}}<span class="status-bad">{{index $.T "domain_settings_inactive"}}</span>{{end}}
       </div>
 
       <div class="record-grid">
-        <span>TXT name</span><code>{{.Domain}}</code>
-        <span>TXT value</span><code>sitebrush={{.VerificationToken}}</code>
+        <span>{{index $.T "domain_settings_txt_name"}}</span><code>{{.Domain}}</code>
+        <span>{{index $.T "domain_settings_txt_value"}}</span><code>sitebrush={{.VerificationToken}}</code>
         {{if $.ExternalIP}}
-        <span>A name</span><code>{{.Domain}}</code>
-        <span>A value</span><code>{{$.ExternalIP}}</code>
+        <span>{{index $.T "domain_settings_a_name"}}</span><code>{{.Domain}}</code>
+        <span>{{index $.T "domain_settings_a_value"}}</span><code>{{$.ExternalIP}}</code>
         {{end}}
       </div>
-      {{if .LastCheckedAt}}<p class="hint">Last checked: {{.LastCheckedAt}}</p>{{end}}
+      {{if .LastCheckedAt}}<p class="hint">{{index $.T "domain_settings_last_checked"}} {{.LastCheckedAt}}</p>{{end}}
     </section>
     {{end}}
   </div>
   {{else}}
-  <p class="empty">No aliases yet.</p>
+  <p class="empty">{{index .T "domain_settings_no_aliases"}}</p>
   {{end}}
 
   <script>
@@ -200,8 +200,8 @@
     copyButtonElement.addEventListener('click', function copyBackupLink() {
       if (navigator.clipboard && navigator.clipboard.writeText) {
         navigator.clipboard.writeText(backupLinkElement.value).then(function onCopied() {
-          copyButtonElement.textContent = 'Copied';
-          setTimeout(function restoreCopyLabel() { copyButtonElement.textContent = 'Copy link'; }, 1500);
+          copyButtonElement.textContent = {{printf "%q" (index .T "domain_settings_copied")}};
+          setTimeout(function restoreCopyLabel() { copyButtonElement.textContent = {{printf "%q" (index .T "domain_settings_copy_link")}}; }, 1500);
         }).catch(function fallbackCopy() {
           backupLinkElement.select();
           document.execCommand('copy');

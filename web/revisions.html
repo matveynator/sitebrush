@@ -33,10 +33,10 @@
         <thead>
           <tr>
             <th>#</th>
-            <th>Date</th>
-            <th>Revision snippet</th>
-            <th>Status</th>
-            <th>Action</th>
+            <th>{{index .T "revisions_table_date"}}</th>
+            <th>{{index .T "revisions_table_snippet"}}</th>
+            <th>{{index .T "revisions_table_status"}}</th>
+            <th>{{index .T "revisions_table_action"}}</th>
           </tr>
         </thead>
         <tbody>
@@ -45,24 +45,24 @@
             <td>{{.ID}}</td>
             <td>{{.CreatedAt}}</td>
             <td><code>{{printf "%.120s" .HTML}}</code></td>
-            <td>{{if eq .IsActive 1}}active{{else}}disabled{{end}}</td>
+            <td>{{if eq .IsActive 1}}{{index $.T "revisions_status_active"}}{{else}}{{index $.T "revisions_status_disabled"}}{{end}}</td>
             <td>
               <form method="post" action="{{$.Path}}?revision_toggle" class="d-inline">
                 <input type="hidden" name="id" value="{{.ID}}"/>
                 <input type="hidden" name="path" value="{{.PagePath}}"/>
                 {{if eq .IsActive 1}}
                 <input type="hidden" name="enable" value="0"/>
-                <button class="btn btn-danger btn-sm">disable</button>
+                <button class="btn btn-danger btn-sm">{{index $.T "revisions_disable"}}</button>
                 {{else}}
                 <input type="hidden" name="enable" value="1"/>
-                <button class="btn btn-success btn-sm">enable</button>
+                <button class="btn btn-success btn-sm">{{index $.T "revisions_enable"}}</button>
                 {{end}}
               </form>
             </td>
           </tr>
         {{else}}
           <tr>
-            <td colspan="5" class="text-center text-muted py-4">No revisions yet.</td>
+            <td colspan="5" class="text-center text-muted py-4">{{index .T "revisions_empty"}}</td>
           </tr>
         {{end}}
         </tbody>

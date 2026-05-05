@@ -4,7 +4,7 @@
   <script>(function applySystemThemeMode(){const prefersDarkMode=window.matchMedia&&window.matchMedia('(prefers-color-scheme: dark)').matches;document.documentElement.setAttribute('data-bs-theme',prefersDarkMode?'dark':'light');})();</script>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Choose editor</title>
+  <title>{{index .T "edit_mode_title"}}</title>
   <style>
     :root { color-scheme: light dark; --page-bg:#f4f8fc; --text-main:#1b2a3d; --link:#1a65d8; }
     @media (prefers-color-scheme: dark) { :root { --page-bg:#0f1724; --text-main:#dbe8ff; --link:#9ec2ff; } }
@@ -13,9 +13,9 @@
   </style>
 </head>
 <body>
-<h1>Choose editor for {{.Path}}</h1>
-<p>Document type: {{.ContentKind}}</p>
-{{if .IsHTML}}<p><a href="{{.Path}}?visual">Open visual editor</a></p>{{end}}
-<p><a href="{{.Path}}?text">Open plain text editor</a></p>
+<h1>{{index .T "edit_mode_choose_for"}} {{.Path}}</h1>
+<p>{{index .T "edit_mode_document_type"}} {{.ContentKind}}</p>
+{{if .IsHTML}}<p><a href="{{.Path}}?visual">{{index .T "edit_mode_open_visual"}}</a></p>{{end}}
+<p><a href="{{.Path}}?text">{{index .T "edit_mode_open_text"}}</a></p>
 </body>
 </html>

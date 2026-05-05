@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="ru" id="SiteBrush">
+<html lang="en" id="SiteBrush">
 <head>
   <script>
   (function applySystemThemeMode() {
@@ -9,54 +9,54 @@
   </script>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Ошибка 404: страница не найдена.</title>
+  <title>{{index .T "missing_title"}}</title>
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
 </head>
 <body class="bg-body">
 <div class="container py-5">
   <div class="page-header mb-4">
-    <h1><a href="/">{{.Domain}}</a> <small class="text-muted">| Ошибка 404: страница не найдена.</small></h1>
+    <h1><a href="/">{{.Domain}}</a> <small class="text-muted">| {{index .T "missing_title"}}</small></h1>
   </div>
 
   <div class="alert {{if .IsAdmin}}alert-success{{else}}alert-info{{end}}" role="alert">
-    Страница <strong>{{.Path}}</strong> не найдена. Пожалуйста <a class="alert-link" href="{{if .EditLink}}{{.EditLink}}{{else}}{{.Path}}?visual{{end}}">создайте эту страницу</a>.
+    {{index .T "missing_page_not_found_prefix"}} <strong>{{.Path}}</strong> {{index .T "missing_page_not_found_suffix"}} <a class="alert-link" href="{{if .EditLink}}{{.EditLink}}{{else}}{{.Path}}?visual{{end}}">{{index .T "missing_create_page"}}</a>.
   </div>
 
   {{if .IsAdmin}}
   <form class="card card-body mt-3" method="post" action="{{.Path}}?grab" data-grab-form style="max-width:680px;">
     <input type="hidden" name="path" value="{{.Path}}">
     <input type="hidden" name="progress_token" id="progress_token" value="">
-    <label class="form-label" for="source_url">Или скопируйте страницу с другого сайта:</label>
+    <label class="form-label" for="source_url">{{index .T "missing_copy_from_site_label"}}</label>
     <div class="input-group">
-      <input id="source_url" name="source_url" type="text" inputmode="url" autocomplete="url" class="form-control" placeholder="sitebrush.com или https://example.com/page" required>
-      <button type="submit" class="btn btn-success">Скопировать</button>
+      <input id="source_url" name="source_url" type="text" inputmode="url" autocomplete="url" class="form-control" placeholder="{{index .T "missing_source_url_placeholder"}}" required>
+      <button type="submit" class="btn btn-success">{{index .T "missing_copy_button"}}</button>
     </div>
-    <label class="form-label mt-3" for="source_ip">IP сервера, если домен уже не резолвится:</label>
-    <input id="source_ip" name="source_ip" type="text" inputmode="numeric" autocomplete="off" class="form-control" placeholder="Например 203.0.113.10">
+    <label class="form-label mt-3" for="source_ip">{{index .T "missing_source_ip_label"}}</label>
+    <input id="source_ip" name="source_ip" type="text" inputmode="numeric" autocomplete="off" class="form-control" placeholder="{{index .T "missing_source_ip_placeholder"}}">
   </form>
 
   <form class="card card-body mt-3" method="post" enctype="multipart/form-data" action="{{.Path}}?backup_import" style="max-width:680px;">
-    <label class="form-label" for="backup_zip">Или восстановите сайт из ZIP-бэкапа:</label>
+    <label class="form-label" for="backup_zip">{{index .T "missing_restore_zip_label"}}</label>
     <input id="backup_zip" name="backup_zip" type="file" accept=".zip,application/zip" class="form-control" required>
-    <label class="form-label mt-3" for="base_path">Базовый путь для восстановления:</label>
+    <label class="form-label mt-3" for="base_path">{{index .T "missing_base_path_label"}}</label>
     <input id="base_path" name="base_path" type="text" class="form-control" placeholder="/uri" value="{{.Path}}">
-    <div class="form-text">Содержимое бэкапа будет развёрнуто как корень сайта внутри указанного пути.</div>
-    <button type="submit" class="btn btn-primary mt-3">Восстановить бэкап</button>
+    <div class="form-text">{{index .T "missing_base_path_hint"}}</div>
+    <button type="submit" class="btn btn-primary mt-3">{{index .T "missing_restore_backup_button"}}</button>
   </form>
 
   <div class="modal fade" id="grabProgressModal" tabindex="-1" aria-hidden="true">
     <div class="modal-dialog modal-lg"><div class="modal-content"><div class="modal-header">
-      <h5 class="modal-title" id="grab_modal_title">Загрузка страницы</h5>
-      <button type="button" class="btn-close d-none" id="grab_modal_header_close" data-bs-dismiss="modal" aria-label="Закрыть"></button>
+      <h5 class="modal-title" id="grab_modal_title">{{index .T "missing_modal_loading_title"}}</h5>
+      <button type="button" class="btn-close d-none" id="grab_modal_header_close" data-bs-dismiss="modal" aria-label="{{index .T "tree_close"}}"></button>
     </div><div class="modal-body">
-      <p id="grab_progress_text">Подготовка...</p>
+      <p id="grab_progress_text">{{index .T "files_preparing"}}</p>
       <div class="progress" id="grab_progress_holder"><div class="progress-bar" id="grab_progress_bar" role="progressbar" style="width:0%;">0%</div></div>
       <small id="grab_progress_url" class="text-muted d-block mt-2"></small>
       <div id="grab_resource_list" class="list-group small mt-3 d-none" style="max-height:260px;overflow:auto;"></div>
     </div><div class="modal-footer">
-      <button type="button" class="btn btn-outline-secondary" id="grab_cancel_button" data-bs-dismiss="modal">Отмена</button>
-      <button type="button" class="btn btn-success" id="grab_continue_button">Продолжить</button>
-      <button type="button" class="btn btn-primary d-none" id="grab_close_button" data-bs-dismiss="modal">Закрыть</button>
+      <button type="button" class="btn btn-outline-secondary" id="grab_cancel_button" data-bs-dismiss="modal">{{index .T "edit_cancel"}}</button>
+      <button type="button" class="btn btn-success" id="grab_continue_button">{{index .T "missing_continue"}}</button>
+      <button type="button" class="btn btn-primary d-none" id="grab_close_button" data-bs-dismiss="modal">{{index .T "tree_close"}}</button>
     </div></div></div>
   </div>
   {{end}}
@@ -64,6 +64,36 @@
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
 <script>
 (function setupGrabProgress() {
+  const uiText = {
+    sizeUnknown: "{{index .T "missing_size_unknown"}}",
+    waitingDownload: "{{index .T "missing_waiting_download"}}",
+    downloadedLocal: "{{index .T "missing_downloaded_local"}}",
+    downloadErrorExternal: "{{index .T "missing_download_error_external"}}",
+    downloadedPrefix: "{{index .T "missing_downloaded_prefix"}}",
+    ofWord: "{{index .T "missing_of_word"}}",
+    downloading: "{{index .T "missing_downloading"}}",
+    leftExternal: "{{index .T "missing_left_external"}}",
+    previewResourcesTitle: "{{index .T "missing_preview_resources_title"}}",
+    previewResourcesText: "{{index .T "missing_preview_resources_text"}}",
+    previewErrorTitle: "{{index .T "missing_preview_error_title"}}",
+    previewErrorDefault: "{{index .T "missing_preview_error_default"}}",
+    selectAllResources: "{{index .T "missing_select_all_resources"}}",
+    confirmDownloadTitle: "{{index .T "missing_confirm_download_title"}}",
+    confirmDownloadTextPrefix: "{{index .T "missing_confirm_download_text_prefix"}}",
+    loadingPageTitle: "{{index .T "missing_modal_loading_title"}}",
+    loadingStarted: "{{index .T "missing_loading_started"}}",
+    loadingErrorTitle: "{{index .T "missing_loading_error_title"}}",
+    invalidStatusError: "{{index .T "missing_invalid_status_error"}}",
+    progressDownloadedPrefix: "{{index .T "missing_progress_downloaded_prefix"}}",
+    fromWord: "{{index .T "missing_progress_from_word"}}",
+    leftWord: "{{index .T "missing_progress_left_word"}}",
+    doneOpenEditor: "{{index .T "missing_done_open_editor"}}",
+    downloadFailedRetry: "{{index .T "missing_download_failed_retry"}}",
+    reconnectingStatus: "{{index .T "missing_reconnecting_status"}}",
+    connectStatusFailed: "{{index .T "missing_connect_status_failed"}}",
+    loadPageFailed: "{{index .T "missing_load_page_failed"}}",
+    checkResourcesFailed: "{{index .T "missing_check_resources_failed"}}"
+  };
   const grabFormElement = document.querySelector('[data-grab-form]');
   if (!grabFormElement) { return; }
   const tokenFieldElement = document.getElementById('progress_token');
@@ -114,7 +144,7 @@
 
   function formatResourceSize(sizeBytes) {
     const normalizedSize = Number(sizeBytes);
-    if (!Number.isFinite(normalizedSize) || normalizedSize < 0) { return 'размер неизвестен'; }
+    if (!Number.isFinite(normalizedSize) || normalizedSize < 0) { return uiText.sizeUnknown; }
     if (normalizedSize < 1024) { return normalizedSize + ' B'; }
     if (normalizedSize < 1024 * 1024) { return (normalizedSize / 1024).toFixed(1) + ' KB'; }
     return (normalizedSize / 1024 / 1024).toFixed(1) + ' MB';
@@ -174,16 +204,16 @@
     const currentPercent = Number(progressState.current_percent) || 0;
     const downloadedBytes = Number(progressState.current_downloaded_bytes) || 0;
     const sizeBytes = Number(progressState.current_size_bytes);
-    if (progressState.stage === 'found') { return 'Ожидает скачивания'; }
-    if (progressState.stage === 'downloaded') { return 'Скачано локально'; }
-    if (progressState.stage === 'error') { return 'Ошибка скачивания, оставлен внешний URL'; }
+    if (progressState.stage === 'found') { return uiText.waitingDownload; }
+    if (progressState.stage === 'downloaded') { return uiText.downloadedLocal; }
+    if (progressState.stage === 'error') { return uiText.downloadErrorExternal; }
     if (Number.isFinite(sizeBytes) && sizeBytes > 0) {
-      return 'Скачано ' + formatResourceSize(downloadedBytes) + ' из ' + formatResourceSize(sizeBytes) + ' (' + currentPercent + '%)';
+      return uiText.downloadedPrefix + ' ' + formatResourceSize(downloadedBytes) + ' ' + uiText.ofWord + ' ' + formatResourceSize(sizeBytes) + ' (' + currentPercent + '%)';
     }
     if (downloadedBytes > 0) {
-      return 'Скачано ' + formatResourceSize(downloadedBytes);
+      return uiText.downloadedPrefix + ' ' + formatResourceSize(downloadedBytes);
     }
-    return 'Скачивание...';
+    return uiText.downloading;
   }
 
   function appendProgressOnlyResource(resourceURL) {
@@ -226,16 +256,16 @@
       if (!checkboxElement.checked) {
         resourceRowElement.classList.add('opacity-75');
         const statusElement = resourceRowElement.querySelector('[data-grab-resource-status]');
-        if (statusElement) { statusElement.textContent = 'Оставлен внешний URL'; }
+        if (statusElement) { statusElement.textContent = uiText.leftExternal; }
         continue;
       }
-      setResourceRowProgress(resourceRowElement, 0, 'Ожидает скачивания');
+      setResourceRowProgress(resourceRowElement, 0, uiText.waitingDownload);
     }
   }
 
   function showPreviewLoading() {
-    modalTitleElement.textContent = 'Проверка ресурсов';
-    progressTextElement.textContent = 'Смотрим, какие ресурсы есть на странице...';
+    modalTitleElement.textContent = uiText.previewResourcesTitle;
+    progressTextElement.textContent = uiText.previewResourcesText;
     progressHolderElement.classList.add('d-none');
     progressUrlElement.textContent = sourceUrlElement.value;
     clearResourceList();
@@ -246,8 +276,8 @@
   }
 
   function showPreviewError(previewError) {
-    modalTitleElement.textContent = 'Ошибка проверки';
-    progressTextElement.textContent = previewError.message || 'Не удалось проверить ресурсы страницы.';
+    modalTitleElement.textContent = uiText.previewErrorTitle;
+    progressTextElement.textContent = previewError.message || uiText.previewErrorDefault;
     progressHolderElement.classList.add('d-none');
     progressUrlElement.textContent = sourceUrlElement.value;
     clearResourceList();
@@ -310,7 +340,7 @@
     previewSelectAllElement.type = 'checkbox';
     previewSelectAllElement.checked = true;
     const labelElement = document.createElement('span');
-    labelElement.textContent = 'Импортировать все ресурсы локально';
+    labelElement.textContent = uiText.selectAllResources;
     previewSelectAllElement.addEventListener('change', function onSelectAllChange() {
       for (const checkboxElement of resourceListElement.querySelectorAll('input[data-grab-resource-url]')) {
         checkboxElement.checked = previewSelectAllElement.checked;
@@ -323,10 +353,10 @@
   }
 
   function showResourcePreview(previewPayload) {
-    modalTitleElement.textContent = 'Подтвердите загрузку';
+    modalTitleElement.textContent = uiText.confirmDownloadTitle;
     progressHolderElement.classList.add('d-none');
     const resourceCount = Number(previewPayload.resource_count) || 0;
-    progressTextElement.textContent = 'HTML страницы будет импортирован. Отмеченные ресурсы будут скачаны локально, снятые останутся внешними ссылками: ' + resourceCount + '.';
+    progressTextElement.textContent = uiText.confirmDownloadTextPrefix + ' ' + resourceCount + '.';
     progressUrlElement.textContent = previewPayload.source_url || sourceUrlElement.value;
     clearResourceList();
     if (resourceCount > 0) {
@@ -344,8 +374,8 @@
   }
 
   function showDownloadProgress() {
-    modalTitleElement.textContent = 'Загрузка страницы';
-    progressTextElement.textContent = 'Начинаем загрузку...';
+    modalTitleElement.textContent = uiText.loadingPageTitle;
+    progressTextElement.textContent = uiText.loadingStarted;
     progressHolderElement.classList.remove('d-none');
     progressUrlElement.textContent = '';
     prepareResourceRowsForDownload();
@@ -358,7 +388,7 @@
   }
 
   function showDownloadError(errorText) {
-    modalTitleElement.textContent = 'Ошибка загрузки';
+    modalTitleElement.textContent = uiText.loadingErrorTitle;
     progressTextElement.textContent = errorText;
     setModalClosable(true);
     cancelButtonElement.classList.add('d-none');
@@ -374,7 +404,7 @@
       try {
         progressState = JSON.parse(messageEvent.data);
       } catch (parseError) {
-        showDownloadError('Сервер прислал некорректный статус загрузки.');
+        showDownloadError(uiText.invalidStatusError);
         progressStream.close();
         return;
       }
@@ -392,27 +422,27 @@
       const remainingPercent = Math.max(100 - completedPercent, 0);
       updateResourceDownloadProgress(progressState);
       setProgressPercent(completedPercent);
-      progressTextElement.textContent = 'Скачано: ' + downloadedTotal + ' из ' + foundTotal + ' (' + completedPercent + '%). Осталось: ' + remainingTotal + ' (' + remainingPercent + '%).';
+      progressTextElement.textContent = uiText.progressDownloadedPrefix + ' ' + downloadedTotal + ' ' + uiText.fromWord + ' ' + foundTotal + ' (' + completedPercent + '%). ' + uiText.leftWord + ' ' + remainingTotal + ' (' + remainingPercent + '%).';
       progressUrlElement.textContent = progressState.current_url || '';
       if (progressState.stage === 'done') {
         downloadFinished = true;
         setProgressPercent(100);
-        progressTextElement.textContent = 'Готово. Открываем редактор...';
+        progressTextElement.textContent = uiText.doneOpenEditor;
         progressStream.close();
         finishDownloadIfReady();
       }
       if (progressState.stage === 'error' && !progressState.current_url) {
-        showDownloadError('Не удалось скачать страницу. Окно можно закрыть и попробовать другой адрес.');
+        showDownloadError(uiText.downloadFailedRetry);
         progressStream.close();
       }
     };
     progressStream.onerror = function onProgressStreamError() {
       if (downloadFinished) { return; }
       if (grabRequestInFlight) {
-        progressTextElement.textContent = 'Загрузка продолжается. Канал статуса переподключается...';
+        progressTextElement.textContent = uiText.reconnectingStatus;
         return;
       }
-      showDownloadError('Не удалось подключиться к статусу загрузки. Окно можно закрыть и попробовать ещё раз.');
+      showDownloadError(uiText.connectStatusFailed);
     };
   }
 
@@ -422,7 +452,7 @@
       .then(function handleGrabHTTPResponse(grabHTTPResponse) {
         if (!grabHTTPResponse.ok) {
           return grabHTTPResponse.text().then(function throwGrabHTTPError(errorText) {
-            throw new Error(errorText || 'Не удалось загрузить страницу.');
+            throw new Error(errorText || uiText.loadPageFailed);
           });
         }
         return grabHTTPResponse.json();
@@ -432,13 +462,13 @@
         downloadRedirectURL = grabPayload.redirect || (grabFormElement.querySelector('input[name="path"]').value + '?visual');
         downloadFinished = true;
         setProgressPercent(100);
-        progressTextElement.textContent = 'Готово. Открываем редактор...';
+        progressTextElement.textContent = uiText.doneOpenEditor;
         if (progressStream) { progressStream.close(); }
         finishDownloadIfReady();
       })
       .catch(function handleGrabFailure(grabError) {
         grabRequestInFlight = false;
-        showDownloadError(grabError.message || 'Не удалось загрузить страницу.');
+        showDownloadError(grabError.message || uiText.loadPageFailed);
         if (progressStream) { progressStream.close(); }
       });
   }
@@ -462,7 +492,7 @@
       .then(function handlePreviewHTTPResponse(previewHTTPResponse) {
         if (!previewHTTPResponse.ok) {
           return previewHTTPResponse.text().then(function throwPreviewHTTPError(errorText) {
-            throw new Error(errorText || 'Не удалось проверить ресурсы страницы.');
+            throw new Error(errorText || uiText.checkResourcesFailed);
           });
         }
         return previewHTTPResponse.json();
