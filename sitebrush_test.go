@@ -194,6 +194,66 @@ func TestContextMenuUsesDirectEditorProfileAndDeleteActions(t *testing.T) {
 	}
 }
 
+func TestLoginReturnPathDefaultsToCurrentPageWithoutAutoVisual(t *testing.T) {
+	request := httptest.NewRequest(http.MethodGet, "http://localhost:8080/docs?login", nil)
+	if returnPath := loginReturnPathOrDefault(request); returnPath != "/docs" {
+		t.Fatalf("return path = %q, want %q", returnPath, "/docs")
+	}
+}
+
+func TestProtectedControllerRedirectsToLoginAndPreservesController(t *testing.T) {
+	application, rawDB := newTestApplication(t)
+	_, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "admin@example.com", "old")
+	if err != nil {
+		t.Fatalf("insert user: %v", err)
+	}
+
+	request := httptest.NewRequest(http.MethodGet, "http://localhost:8080/docs?files", nil)
+	response := httptest.NewRecorder()
+	application.route(response, request)
+	if response.Code != http.StatusFound {
+		t.Fatalf("status = %d, body=%q", response.Code, response.Body.String())
+	}
+
+	redirectURL, err := url.Parse(response.Header().Get("Location"))
+	if err != nil {
+		t.Fatalf("parse redirect: %v", err)
+	}
+	if redirectURL.Path != "/docs" {
+		t.Fatalf("redirect path = %q, want %q", redirectURL.Path, "/docs")
+	}
+	if _, hasLogin := redirectURL.Query()["login"]; !hasLogin {
+		t.Fatalf("redirect query missing login flag: %q", redirectURL.RawQuery)
+	}
+	if returnPath := redirectURL.Query().Get("return_path"); returnPath != "/docs?files=" {
+		t.Fatalf("return_path = %q, want %q", returnPath, "/docs?files=")
+	}
+}
+
+func TestLoginPostRedirectsBackToRequestedController(t *testing.T) {
+	application, rawDB := newTestApplication(t)
+	_, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "admin@example.com", "old")
+	if err != nil {
+		t.Fatalf("insert user: %v", err)
+	}
+
+	form := url.Values{}
+	form.Set("email", "admin@example.com")
+	form.Set("password", "old")
+	form.Set("return_path", "/docs?settings=")
+	request := httptest.NewRequest(http.MethodPost, "http://localhost:8080/docs?login", strings.NewReader(form.Encode()))
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	response := httptest.NewRecorder()
+
+	application.login(response, request)
+	if response.Code != http.StatusFound {
+		t.Fatalf("status = %d, body=%q", response.Code, response.Body.String())
+	}
+	if location := response.Header().Get("Location"); location != "/docs?settings=" {
+		t.Fatalf("location = %q, want %q", location, "/docs?settings=")
+	}
+}
+
 func TestDeleteRevisionByQueryDisablesRevisionAndAppliesPreviousActiveRevision(t *testing.T) {
 	application, rawDB := newTestApplication(t)
 	_, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "admin@example.com", "old")

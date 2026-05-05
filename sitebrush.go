@@ -709,7 +709,7 @@ func (a *App) registerPage(w http.ResponseWriter, r *http.Request) {
 	}
 	domain := a.siteDomain(r.Context(), r)
 	if a.hasAdmin(r.Context(), domain) {
-		http.Redirect(w, r, r.URL.Path+"?login", http.StatusFound)
+		http.Redirect(w, r, loginURLForRequest(r), http.StatusFound)
 		return
 	}
 	a.render(w, r, "setup.html", map[string]any{"Domain": domain})
@@ -753,7 +753,7 @@ func (a *App) editPage(w http.ResponseWriter, r *http.Request) {
 			http.Redirect(w, r, r.URL.Path+"?register", http.StatusFound)
 			return
 		}
-		http.Redirect(w, r, r.URL.Path+"?login", http.StatusFound)
+		http.Redirect(w, r, loginURLForRequest(r), http.StatusFound)
 		return
 	}
 	pagePath := cleanPath(r.URL.Query().Get("path"))
@@ -789,7 +789,7 @@ func (a *App) editModePage(w http.ResponseWriter, r *http.Request) {
 			http.Redirect(w, r, r.URL.Path+"?register", http.StatusFound)
 			return
 		}
-		http.Redirect(w, r, r.URL.Path+"?login", http.StatusFound)
+		http.Redirect(w, r, loginURLForRequest(r), http.StatusFound)
 		return
 	}
 	pagePath := cleanPath(r.URL.Query().Get("path"))
@@ -817,7 +817,7 @@ func (a *App) editRawPage(w http.ResponseWriter, r *http.Request) {
 			http.Redirect(w, r, r.URL.Path+"?register", http.StatusFound)
 			return
 		}
-		http.Redirect(w, r, r.URL.Path+"?login", http.StatusFound)
+		http.Redirect(w, r, loginURLForRequest(r), http.StatusFound)
 		return
 	}
 	pagePath := cleanPath(r.URL.Query().Get("path"))
@@ -889,17 +889,7 @@ func loginReturnPathOrDefault(r *http.Request) string {
 	if returnPath != "" {
 		return returnPath
 	}
-	if strings.TrimSpace(r.URL.RawQuery) == "login" {
-		return r.URL.Path + "?visual"
-	}
-	refererURL, parseErr := url.Parse(strings.TrimSpace(r.Referer()))
-	if parseErr == nil && refererURL.Path == r.URL.Path {
-		refererMode := strings.TrimSpace(refererURL.RawQuery)
-		if refererMode == "edit" || refererMode == "visual" || refererMode == "text" {
-			return refererURL.Path + "?" + refererMode
-		}
-	}
-	return requestedReturnPath(r)
+	return requestedReturnTarget(r)
 }
 
 func hasQueryFlag(r *http.Request, flagName string) bool {
@@ -908,6 +898,30 @@ func hasQueryFlag(r *http.Request, flagName string) bool {
 	}
 	_, hasFlag := r.URL.Query()[flagName]
 	return hasFlag
+}
+
+func requestedReturnTarget(r *http.Request) string {
+	returnPath := r.URL.Path
+	if strings.TrimSpace(returnPath) == "" {
+		returnPath = "/"
+	}
+	queryValues := r.URL.Query()
+	queryValues.Del("login")
+	queryValues.Del("return_path")
+	encodedQuery := queryValues.Encode()
+	if encodedQuery == "" {
+		return returnPath
+	}
+	return returnPath + "?" + encodedQuery
+}
+
+func loginURLForRequest(r *http.Request) string {
+	loginURL := &url.URL{Path: r.URL.Path}
+	queryValues := url.Values{}
+	queryValues.Set("login", "")
+	queryValues.Set("return_path", requestedReturnTarget(r))
+	loginURL.RawQuery = queryValues.Encode()
+	return loginURL.String()
 }
 
 func (a *App) saveEndpoint(w http.ResponseWriter, r *http.Request) {
@@ -1326,7 +1340,11 @@ func writeGrabProgressEvent(w io.Writer, flusher http.Flusher, event grabProgres
 
 func (a *App) revisionsPage(w http.ResponseWriter, r *http.Request) {
 	if !a.isAdminRequest(r) {
-		http.Error(w, "forbidden", http.StatusForbidden)
+		if !a.hasAdmin(r.Context(), a.siteDomain(r.Context(), r)) {
+			http.Redirect(w, r, r.URL.Path+"?register", http.StatusFound)
+			return
+		}
+		http.Redirect(w, r, loginURLForRequest(r), http.StatusFound)
 		return
 	}
 	pagePath := cleanPath(r.URL.Query().Get("path"))
@@ -1480,7 +1498,7 @@ func (a *App) profilePage(w http.ResponseWriter, r *http.Request) {
 			http.Redirect(w, r, r.URL.Path+"?register", http.StatusFound)
 			return
 		}
-		http.Redirect(w, r, r.URL.Path+"?login", http.StatusFound)
+		http.Redirect(w, r, loginURLForRequest(r), http.StatusFound)
 		return
 	}
 	currentEmail, found := a.currentAdminEmail(r)
@@ -1565,7 +1583,11 @@ func (a *App) captchaImage(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) filesPage(w http.ResponseWriter, r *http.Request) {
 	if !a.isAdminRequest(r) {
-		http.Error(w, "forbidden", http.StatusForbidden)
+		if !a.hasAdmin(r.Context(), a.siteDomain(r.Context(), r)) {
+			http.Redirect(w, r, r.URL.Path+"?register", http.StatusFound)
+			return
+		}
+		http.Redirect(w, r, loginURLForRequest(r), http.StatusFound)
 		return
 	}
 	currentPath := currentFilesPath(r)
@@ -4126,7 +4148,11 @@ func boolToInt(state bool) int {
 
 func (a *App) domainSettingsPage(w http.ResponseWriter, r *http.Request) {
 	if !a.isAdminRequest(r) {
-		http.Error(w, "forbidden", http.StatusForbidden)
+		if !a.hasAdmin(r.Context(), a.siteDomain(r.Context(), r)) {
+			http.Redirect(w, r, r.URL.Path+"?register", http.StatusFound)
+			return
+		}
+		http.Redirect(w, r, loginURLForRequest(r), http.StatusFound)
 		return
 	}
 	siteDomain := a.siteDomain(r.Context(), r)
