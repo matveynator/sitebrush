@@ -6,6 +6,7 @@ import (
 	"context"
 	"database/sql"
 	"io"
+	"io/fs"
 	"mime/multipart"
 	"net"
 	"net/http"
@@ -251,6 +252,235 @@ func TestLoginPostRedirectsBackToRequestedController(t *testing.T) {
 	}
 	if location := response.Header().Get("Location"); location != "/docs?settings=" {
 		t.Fatalf("location = %q, want %q", location, "/docs?settings=")
+	}
+}
+
+func TestFailedLoginAttemptsEscalateToIPBlock(t *testing.T) {
+	application, rawDB := newTestApplication(t)
+	_, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "admin@example.com", "old")
+	if err != nil {
+		t.Fatalf("insert user: %v", err)
+	}
+
+	for attemptIndex := 1; attemptIndex <= 4; attemptIndex++ {
+		form := url.Values{}
+		form.Set("email", "admin@example.com")
+		form.Set("password", "wrong")
+		request := httptest.NewRequest(http.MethodPost, "http://localhost:8080/docs?login", strings.NewReader(form.Encode()))
+		request.RemoteAddr = "198.51.100.10:1234"
+		request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		response := httptest.NewRecorder()
+
+		application.login(response, request)
+		expectedStatus := http.StatusUnauthorized
+		if attemptIndex == 4 {
+			expectedStatus = http.StatusTooManyRequests
+		}
+		if response.Code != expectedStatus {
+			t.Fatalf("attempt %d status = %d, want %d, body=%q", attemptIndex, response.Code, expectedStatus, response.Body.String())
+		}
+	}
+}
+
+func TestFailedLoginRendersLoginFormWithLocalizedStatus(t *testing.T) {
+	application, rawDB := newTestApplication(t)
+	_, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "admin@example.com", "old")
+	if err != nil {
+		t.Fatalf("insert user: %v", err)
+	}
+
+	form := url.Values{}
+	form.Set("email", "admin@example.com")
+	form.Set("password", "wrong")
+	form.Set("return_path", "/docs")
+	request := httptest.NewRequest(http.MethodPost, "http://localhost:8080/docs?login", strings.NewReader(form.Encode()))
+	request.RemoteAddr = "198.51.100.11:1234"
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	request.Header.Set("Accept-Language", "ru")
+	response := httptest.NewRecorder()
+
+	application.login(response, request)
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want %d, body=%q", response.Code, http.StatusUnauthorized, response.Body.String())
+	}
+	body := response.Body.String()
+	for _, expectedFragment := range []string{`<form class="card card-body" method="post" action="?login"`, "Неверный email или пароль.", `value="admin@example.com"`} {
+		if !strings.Contains(body, expectedFragment) {
+			t.Fatalf("login failure page missing %q in %s", expectedFragment, body)
+		}
+	}
+}
+
+func TestTenthFailedLoginAttemptRequiresRecovery(t *testing.T) {
+	application, rawDB := newTestApplication(t)
+	_, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "admin@example.com", "old")
+	if err != nil {
+		t.Fatalf("insert user: %v", err)
+	}
+	_, err = rawDB.Exec(`INSERT INTO auth_ip_failures(domain,client_ip,failure_count,blocked_until,hard_locked,last_failed_at,last_attempt_at) VALUES(?,?,?,?,?,?,?)`,
+		"localhost", "198.51.100.20", 9, "", 0, time.Now().Format(time.RFC3339), time.Now().Format(time.RFC3339))
+	if err != nil {
+		t.Fatalf("seed auth failures: %v", err)
+	}
+
+	form := url.Values{}
+	form.Set("email", "admin@example.com")
+	form.Set("password", "wrong")
+	request := httptest.NewRequest(http.MethodPost, "http://localhost:8080/docs?login", strings.NewReader(form.Encode()))
+	request.RemoteAddr = "198.51.100.20:1234"
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	response := httptest.NewRecorder()
+
+	application.login(response, request)
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want %d, body=%q", response.Code, http.StatusForbidden, response.Body.String())
+	}
+}
+
+func TestBlockedLoginPageShowsCountdownInsteadOfForm(t *testing.T) {
+	application, rawDB := newTestApplication(t)
+	_, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "admin@example.com", "old")
+	if err != nil {
+		t.Fatalf("insert user: %v", err)
+	}
+	_, err = rawDB.Exec(`INSERT INTO auth_ip_failures(domain,client_ip,failure_count,blocked_until,hard_locked,last_failed_at,last_attempt_at) VALUES(?,?,?,?,?,?,?)`,
+		"localhost", "198.51.100.21", 4, time.Now().UTC().Add(time.Minute).Format(time.RFC3339), 0, time.Now().Format(time.RFC3339), time.Now().Format(time.RFC3339))
+	if err != nil {
+		t.Fatalf("seed auth failures: %v", err)
+	}
+
+	router := http.NewServeMux()
+	router.HandleFunc("/", application.route)
+	protectedHandler := application.authAbuseMiddleware(router)
+
+	request := httptest.NewRequest(http.MethodGet, "http://localhost:8080/docs?login", nil)
+	request.RemoteAddr = "198.51.100.21:1234"
+	request.Header.Set("Accept-Language", "ru")
+	response := httptest.NewRecorder()
+	protectedHandler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want %d, body=%q", response.Code, http.StatusTooManyRequests, response.Body.String())
+	}
+	body := response.Body.String()
+	for _, unexpectedFragment := range []string{`name="password"`, `name="email"`} {
+		if strings.Contains(body, unexpectedFragment) {
+			t.Fatalf("blocked login page should hide form field %q in %s", unexpectedFragment, body)
+		}
+	}
+	for _, expectedFragment := range []string{"Повторить попытку можно через:", `id="SiteBrushLoginCountdown"`} {
+		if !strings.Contains(body, expectedFragment) {
+			t.Fatalf("blocked login page missing %q in %s", expectedFragment, body)
+		}
+	}
+}
+
+func TestHardLockedLoginPageShowsRecoveryInsteadOfForm(t *testing.T) {
+	application, rawDB := newTestApplication(t)
+	_, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "admin@example.com", "old")
+	if err != nil {
+		t.Fatalf("insert user: %v", err)
+	}
+	_, err = rawDB.Exec(`INSERT INTO auth_ip_failures(domain,client_ip,failure_count,blocked_until,hard_locked,last_failed_at,last_attempt_at) VALUES(?,?,?,?,?,?,?)`,
+		"localhost", "198.51.100.22", 10, "", 1, time.Now().Format(time.RFC3339), time.Now().Format(time.RFC3339))
+	if err != nil {
+		t.Fatalf("seed auth failures: %v", err)
+	}
+
+	router := http.NewServeMux()
+	router.HandleFunc("/", application.route)
+	protectedHandler := application.authAbuseMiddleware(router)
+
+	request := httptest.NewRequest(http.MethodGet, "http://localhost:8080/docs?login", nil)
+	request.RemoteAddr = "198.51.100.22:1234"
+	request.Header.Set("Accept-Language", "ru")
+	response := httptest.NewRecorder()
+	protectedHandler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want %d, body=%q", response.Code, http.StatusForbidden, response.Body.String())
+	}
+	body := response.Body.String()
+	for _, unexpectedFragment := range []string{`name="password"`, `name="email"`} {
+		if strings.Contains(body, unexpectedFragment) {
+			t.Fatalf("hard-locked login page should hide form field %q in %s", unexpectedFragment, body)
+		}
+	}
+	for _, expectedFragment := range []string{"используйте восстановление доступа", `href="?recover"`} {
+		if !strings.Contains(body, expectedFragment) {
+			t.Fatalf("hard-locked login page missing %q in %s", expectedFragment, body)
+		}
+	}
+}
+
+func TestBlockedIPMiddlewareLeavesNonLoginRequestsAvailable(t *testing.T) {
+	application, rawDB := newTestApplication(t)
+	_, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "admin@example.com", "old")
+	if err != nil {
+		t.Fatalf("insert user: %v", err)
+	}
+	_, err = rawDB.Exec(`INSERT INTO auth_ip_failures(domain,client_ip,failure_count,blocked_until,hard_locked,last_failed_at,last_attempt_at) VALUES(?,?,?,?,?,?,?)`,
+		"localhost", "198.51.100.30", 4, time.Now().UTC().Add(time.Minute).Format(time.RFC3339), 0, time.Now().Format(time.RFC3339), time.Now().Format(time.RFC3339))
+	if err != nil {
+		t.Fatalf("seed auth failures: %v", err)
+	}
+
+	router := http.NewServeMux()
+	staticFiles, err := fs.Sub(embeddedWebFiles, "web/static")
+	if err != nil {
+		t.Fatalf("static subfs: %v", err)
+	}
+	router.Handle("/p/static/", http.StripPrefix("/p/static/", http.FileServer(http.FS(staticFiles))))
+	router.HandleFunc("/p/", application.servePublicAsset)
+	router.HandleFunc("/", application.route)
+	protectedHandler := application.authAbuseMiddleware(router)
+
+	dynamicRequest := httptest.NewRequest(http.MethodGet, "http://localhost:8080/", nil)
+	dynamicRequest.RemoteAddr = "198.51.100.30:1234"
+	dynamicResponse := httptest.NewRecorder()
+	protectedHandler.ServeHTTP(dynamicResponse, dynamicRequest)
+	if dynamicResponse.Code == http.StatusTooManyRequests || dynamicResponse.Code == http.StatusForbidden {
+		t.Fatalf("dynamic status = %d, want non-login request to remain available, body=%q", dynamicResponse.Code, dynamicResponse.Body.String())
+	}
+
+	staticRequest := httptest.NewRequest(http.MethodGet, "http://localhost:8080/p/static/jodit.min.js", nil)
+	staticRequest.RemoteAddr = "198.51.100.30:1234"
+	staticResponse := httptest.NewRecorder()
+	protectedHandler.ServeHTTP(staticResponse, staticRequest)
+	if staticResponse.Code != http.StatusOK {
+		t.Fatalf("static status = %d, want %d", staticResponse.Code, http.StatusOK)
+	}
+}
+
+func TestBlockedLoginPageUsesSameTimerFromAnyURI(t *testing.T) {
+	application, rawDB := newTestApplication(t)
+	_, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "admin@example.com", "old")
+	if err != nil {
+		t.Fatalf("insert user: %v", err)
+	}
+	_, err = rawDB.Exec(`INSERT INTO auth_ip_failures(domain,client_ip,failure_count,blocked_until,hard_locked,last_failed_at,last_attempt_at) VALUES(?,?,?,?,?,?,?)`,
+		"localhost", "198.51.100.31", 4, time.Now().UTC().Add(2*time.Minute).Format(time.RFC3339), 0, time.Now().Format(time.RFC3339), time.Now().Format(time.RFC3339))
+	if err != nil {
+		t.Fatalf("seed auth failures: %v", err)
+	}
+
+	request := httptest.NewRequest(http.MethodGet, "http://localhost:8080/address/book?login", nil)
+	request.RemoteAddr = "198.51.100.31:1234"
+	request.Header.Set("Accept-Language", "ru")
+	response := httptest.NewRecorder()
+
+	application.route(response, request)
+	if response.Code != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want %d, body=%q", response.Code, http.StatusTooManyRequests, response.Body.String())
+	}
+	body := response.Body.String()
+	for _, expectedFragment := range []string{
+		"Повторить попытку можно через:",
+		`id="SiteBrushLoginCountdown"`,
+	} {
+		if !strings.Contains(body, expectedFragment) {
+			t.Fatalf("blocked login page missing %q in %s", expectedFragment, body)
+		}
 	}
 }
 

@@ -168,6 +168,12 @@ type domainStorageUsage struct {
 	LimitBytes           int64
 }
 
+type authIPFailure struct {
+	FailureCount int
+	BlockedUntil string
+	HardLocked   int
+}
+
 type statusCapturingResponseWriter struct {
 	http.ResponseWriter
 	statusCode int
@@ -227,6 +233,12 @@ func accessLogMiddleware(next http.Handler) http.Handler {
 	})
 }
 
+func (a *App) authAbuseMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		next.ServeHTTP(w, r)
+	})
+}
+
 func isLikelyStaticAssetPath(requestPath string) bool {
 	if strings.HasPrefix(requestPath, "/p/static/") || strings.HasPrefix(requestPath, "/p/") {
 		return true
@@ -237,6 +249,62 @@ func isLikelyStaticAssetPath(requestPath string) bool {
 		return true
 	default:
 		return false
+	}
+}
+
+func clientIPAddress(r *http.Request) string {
+	forwardedHeader := strings.TrimSpace(r.Header.Get("Forwarded"))
+	if forwardedHeader != "" {
+		for _, forwardedPart := range strings.Split(forwardedHeader, ";") {
+			normalizedPart := strings.TrimSpace(forwardedPart)
+			if !strings.HasPrefix(strings.ToLower(normalizedPart), "for=") {
+				continue
+			}
+			forwardedValue := strings.Trim(strings.TrimSpace(strings.TrimPrefix(normalizedPart, "for=")), "\"")
+			if parsedIP := net.ParseIP(strings.Trim(strings.TrimSpace(forwardedValue), "[]")); parsedIP != nil {
+				return parsedIP.String()
+			}
+		}
+	}
+	xForwardedFor := strings.TrimSpace(r.Header.Get("X-Forwarded-For"))
+	if xForwardedFor != "" {
+		for _, ipCandidate := range strings.Split(xForwardedFor, ",") {
+			if parsedIP := net.ParseIP(strings.TrimSpace(ipCandidate)); parsedIP != nil {
+				return parsedIP.String()
+			}
+		}
+	}
+	hostPart, _, splitErr := net.SplitHostPort(strings.TrimSpace(r.RemoteAddr))
+	if splitErr == nil {
+		if parsedIP := net.ParseIP(strings.TrimSpace(hostPart)); parsedIP != nil {
+			return parsedIP.String()
+		}
+	}
+	if parsedIP := net.ParseIP(strings.TrimSpace(r.RemoteAddr)); parsedIP != nil {
+		return parsedIP.String()
+	}
+	return ""
+}
+
+func loginBlockDurationForFailureCount(failureCount int) (time.Duration, bool) {
+	switch failureCount {
+	case 4:
+		return time.Minute, false
+	case 5:
+		return 5 * time.Minute, false
+	case 6:
+		return 15 * time.Minute, false
+	case 7:
+		return 30 * time.Minute, false
+	case 8:
+		return time.Hour, false
+	case 9:
+		return 3 * time.Hour, false
+	default:
+		if failureCount >= 10 {
+			return 0, true
+		}
+		return 0, false
 	}
 }
 
@@ -328,7 +396,7 @@ func main() {
 	address := "localhost:" + strconv.Itoa(listenPort)
 	log.Printf("Sitebrush started on http://%s", address)
 
-	httpHandler := accessLogMiddleware(router)
+	httpHandler := accessLogMiddleware(application.authAbuseMiddleware(router))
 	if listenPort != 80 {
 		log.Printf("Let’s Encrypt HTTP-01 checks need public port 80; current HTTP port is %d", listenPort)
 	}
@@ -402,6 +470,7 @@ func (a *App) migrate(ctx context.Context) error {
 		`CREATE TABLE IF NOT EXISTS published_pages(domain TEXT,path TEXT,title TEXT,html TEXT,PRIMARY KEY(domain,path));`,
 		`CREATE TABLE IF NOT EXISTS page_redirects(domain TEXT,old_path TEXT,new_path TEXT,created_at TEXT,PRIMARY KEY(domain,old_path));`,
 		`CREATE TABLE IF NOT EXISTS domain_storage_usage(domain TEXT PRIMARY KEY,page_bytes INTEGER DEFAULT 0,published_page_bytes INTEGER DEFAULT 0,revision_bytes INTEGER DEFAULT 0,file_bytes INTEGER DEFAULT 0,published_static_bytes INTEGER DEFAULT 0,limit_bytes INTEGER DEFAULT 10737418240,updated_at TEXT);`,
+		`CREATE TABLE IF NOT EXISTS auth_ip_failures(domain TEXT,client_ip TEXT,failure_count INTEGER DEFAULT 0,blocked_until TEXT,hard_locked INTEGER DEFAULT 0,last_failed_at TEXT,last_attempt_at TEXT,PRIMARY KEY(domain,client_ip));`,
 		`CREATE TABLE IF NOT EXISTS revisions(id INTEGER PRIMARY KEY AUTOINCREMENT,domain TEXT,page_path TEXT,html TEXT,created_at TEXT,is_active INTEGER DEFAULT 1);`,
 		`CREATE TABLE IF NOT EXISTS domain_aliases(primary_domain TEXT,alias_domain TEXT UNIQUE,verification_token TEXT,is_verified INTEGER DEFAULT 0,dns_a_ok INTEGER DEFAULT 0,is_selected INTEGER DEFAULT 0,last_checked_at TEXT);`,
 		`CREATE TABLE IF NOT EXISTS domain_states(domain TEXT PRIMARY KEY,is_frozen INTEGER DEFAULT 0);`,
@@ -721,25 +790,96 @@ func (a *App) login(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, r.URL.Path+"?register", http.StatusFound)
 		return
 	}
+	clientIP := clientIPAddress(r)
+	blocked, hardLocked, blockedUntil := a.authIPIsBlocked(r.Context(), domain, clientIP)
 	if r.Method == http.MethodGet {
 		returnPath := loginReturnPathOrDefault(r)
-		a.render(w, r, "login.html", map[string]any{"ReturnPath": returnPath, "Domain": domain})
+		if hardLocked {
+			w.WriteHeader(http.StatusForbidden)
+			a.renderLoginPage(w, r, returnPath, "", translationOrDefault(translationsForRequest(r), "login_status_hard_locked", "Too many failed attempts from this IP. Account recovery is now required."), "danger", blockedUntil, true)
+			return
+		}
+		if blocked {
+			retryAfter := int(time.Until(blockedUntil).Seconds())
+			if retryAfter < 1 {
+				retryAfter = 1
+			}
+			w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
+			w.WriteHeader(http.StatusTooManyRequests)
+			a.renderLoginPage(w, r, returnPath, "", translationOrDefault(translationsForRequest(r), "login_status_rate_limited", "Too many failed attempts from this IP. Please try again later."), "warning", blockedUntil, false)
+			return
+		}
+		a.renderLoginPage(w, r, returnPath, "", "", "", time.Time{}, false)
 		return
 	}
 	email := r.FormValue("email")
 	password := r.FormValue("password")
-	var matchedUsers int
-	_ = a.db.QueryRowContext(r.Context(), `SELECT COUNT(1) FROM users WHERE domain=? AND email=? AND password=?`, domain, email, password).Scan(&matchedUsers)
-	if matchedUsers == 0 {
-		http.Error(w, "invalid credentials", http.StatusUnauthorized)
-		return
-	}
-	a.createSession(w, r, email)
 	returnPath := strings.TrimSpace(r.FormValue("return_path"))
 	if returnPath == "" {
 		returnPath = loginReturnPathOrDefault(r)
 	}
+	if hardLocked {
+		w.WriteHeader(http.StatusForbidden)
+		a.renderLoginPage(w, r, returnPath, email, translationOrDefault(translationsForRequest(r), "login_status_hard_locked", "Too many failed attempts from this IP. Account recovery is now required."), "danger", blockedUntil, true)
+		return
+	}
+	if blocked {
+		retryAfter := int(time.Until(blockedUntil).Seconds())
+		if retryAfter < 1 {
+			retryAfter = 1
+		}
+		w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
+		w.WriteHeader(http.StatusTooManyRequests)
+		a.renderLoginPage(w, r, returnPath, email, translationOrDefault(translationsForRequest(r), "login_status_rate_limited", "Too many failed attempts from this IP. Please try again later."), "warning", blockedUntil, false)
+		return
+	}
+	var matchedUsers int
+	_ = a.db.QueryRowContext(r.Context(), `SELECT COUNT(1) FROM users WHERE domain=? AND email=? AND password=?`, domain, email, password).Scan(&matchedUsers)
+	if matchedUsers == 0 {
+		failureCount, blockedUntil, hardLocked := a.registerFailedLoginAttempt(r.Context(), domain, clientIP)
+		translations := translationsForRequest(r)
+		if hardLocked {
+			w.WriteHeader(http.StatusForbidden)
+			a.renderLoginPage(w, r, returnPath, email, translationOrDefault(translations, "login_status_hard_locked", "Too many failed attempts from this IP. Account recovery is now required."), "danger", blockedUntil, true)
+			return
+		}
+		if !blockedUntil.IsZero() {
+			retryAfter := int(time.Until(blockedUntil).Seconds())
+			if retryAfter < 1 {
+				retryAfter = 1
+			}
+			w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
+			w.WriteHeader(http.StatusTooManyRequests)
+			a.renderLoginPage(w, r, returnPath, email, translationOrDefault(translations, "login_status_rate_limited", "Too many failed attempts from this IP. Please try again later."), "warning", blockedUntil, false)
+			return
+		}
+		_ = failureCount
+		w.WriteHeader(http.StatusUnauthorized)
+		a.renderLoginPage(w, r, returnPath, email, translationOrDefault(translations, "login_status_invalid_credentials", "Incorrect email or password."), "danger", time.Time{}, false)
+		return
+	}
+	a.clearFailedLoginAttempts(r.Context(), domain, clientIP)
+	a.createSession(w, r, email)
 	http.Redirect(w, r, returnPath, http.StatusFound)
+}
+
+func (a *App) renderLoginPage(w http.ResponseWriter, r *http.Request, returnPath, email, status, statusClass string, blockedUntil time.Time, hardLocked bool) {
+	translations := translationsForRequest(r)
+	a.render(w, r, "login.html", map[string]any{
+		"ReturnPath":           returnPath,
+		"Domain":               a.siteDomain(r.Context(), r),
+		"Email":                strings.TrimSpace(email),
+		"Status":               strings.TrimSpace(status),
+		"StatusClass":          strings.TrimSpace(statusClass),
+		"ShowForm":             strings.TrimSpace(status) == "" || (!hardLocked && blockedUntil.IsZero()),
+		"BlockedUntilUnix":     blockedUntil.Unix(),
+		"BlockedUntilISO":      blockedUntil.UTC().Format(time.RFC3339),
+		"IsHardLocked":         hardLocked,
+		"CountdownLabel":       translationOrDefault(translations, "login_retry_in", "You can try again in:"),
+		"RetryAtLabel":         translationOrDefault(translations, "login_retry_at", "You can try again at:"),
+		"TryAgainNowText":      translationOrDefault(translations, "login_try_again_now", "You can try again now."),
+		"RecoveryRequiredText": translationOrDefault(translations, "login_recovery_required", "Use account recovery to continue."),
+	})
 }
 
 func (a *App) logout(w http.ResponseWriter, r *http.Request) {
@@ -1571,6 +1711,7 @@ func (a *App) recoverPage(w http.ResponseWriter, r *http.Request) {
 		a.render(w, r, "recover.html", map[string]any{"Status": "SMTP send failed: " + mailError.Error(), "ReturnPath": requestedReturnPath(r)})
 		return
 	}
+	a.clearFailedLoginAttempts(r.Context(), domain, clientIPAddress(r))
 	http.Redirect(w, r, requestedReturnPath(r), http.StatusFound)
 }
 
@@ -2254,6 +2395,63 @@ func (a *App) resolvedPageRedirectPath(ctx context.Context, domain, pagePath str
 		currentPath = nextPath
 	}
 	return currentPath
+}
+
+func (a *App) authIPFailureState(ctx context.Context, domain, clientIP string) authIPFailure {
+	state := authIPFailure{}
+	if strings.TrimSpace(domain) == "" || strings.TrimSpace(clientIP) == "" {
+		return state
+	}
+	_ = a.db.QueryRowContext(ctx, `SELECT failure_count,blocked_until,hard_locked FROM auth_ip_failures WHERE domain=? AND client_ip=?`, domain, clientIP).Scan(&state.FailureCount, &state.BlockedUntil, &state.HardLocked)
+	return state
+}
+
+func (a *App) authIPIsBlocked(ctx context.Context, domain, clientIP string) (bool, bool, time.Time) {
+	state := a.authIPFailureState(ctx, domain, clientIP)
+	if state.HardLocked == 1 {
+		return true, true, time.Time{}
+	}
+	if strings.TrimSpace(state.BlockedUntil) == "" {
+		return false, false, time.Time{}
+	}
+	blockedUntil, parseErr := time.Parse(time.RFC3339, state.BlockedUntil)
+	if parseErr != nil || !time.Now().UTC().Before(blockedUntil) {
+		return false, false, time.Time{}
+	}
+	return true, false, blockedUntil
+}
+
+func (a *App) registerFailedLoginAttempt(ctx context.Context, domain, clientIP string) (int, time.Time, bool) {
+	if strings.TrimSpace(domain) == "" || strings.TrimSpace(clientIP) == "" {
+		return 0, time.Time{}, false
+	}
+	state := a.authIPFailureState(ctx, domain, clientIP)
+	nextFailureCount := state.FailureCount + 1
+	now := time.Now().UTC()
+	blockDuration, hardLocked := loginBlockDurationForFailureCount(nextFailureCount)
+	blockedUntilText := ""
+	blockedUntil := time.Time{}
+	if blockDuration > 0 {
+		blockedUntil = now.Add(blockDuration)
+		blockedUntilText = blockedUntil.Format(time.RFC3339)
+	}
+	_, _ = a.db.ExecContext(ctx, `INSERT INTO auth_ip_failures(domain,client_ip,failure_count,blocked_until,hard_locked,last_failed_at,last_attempt_at)
+VALUES(?,?,?,?,?,?,?)
+ON CONFLICT(domain,client_ip) DO UPDATE SET
+	failure_count=excluded.failure_count,
+	blocked_until=excluded.blocked_until,
+	hard_locked=excluded.hard_locked,
+	last_failed_at=excluded.last_failed_at,
+	last_attempt_at=excluded.last_attempt_at`,
+		domain, clientIP, nextFailureCount, blockedUntilText, boolToInt(hardLocked), now.Format(time.RFC3339), now.Format(time.RFC3339))
+	return nextFailureCount, blockedUntil, hardLocked
+}
+
+func (a *App) clearFailedLoginAttempts(ctx context.Context, domain, clientIP string) {
+	if strings.TrimSpace(domain) == "" || strings.TrimSpace(clientIP) == "" {
+		return
+	}
+	_, _ = a.db.ExecContext(ctx, `DELETE FROM auth_ip_failures WHERE domain=? AND client_ip=?`, domain, clientIP)
 }
 
 func (a *App) clearPageRedirectSource(ctx context.Context, domain, pagePath string) {
