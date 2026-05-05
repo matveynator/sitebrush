@@ -39,6 +39,7 @@ import (
 
 	_ "github.com/mattn/go-sqlite3"
 	"golang.org/x/crypto/acme/autocert"
+	"golang.org/x/net/html"
 	"sitebrush/pkg/desktop"
 )
 
@@ -2537,28 +2538,185 @@ func translationOrDefault(translations map[string]string, key, fallback string) 
 }
 
 func (a *App) applyTemplatePropagation(ctx context.Context, domain, sourceHTML string) {
-	pattern := regexp.MustCompile(`(?s)<([a-zA-Z0-9]+)[^>]*class="[^"]*sitebrush-template-([a-zA-Z0-9_-]+)[^"]*"[^>]*>.*?</[a-zA-Z0-9]+>`)
-	matches := pattern.FindAllStringSubmatch(sourceHTML, -1)
-	for _, match := range matches {
-		templateBlock := match[0]
-		templateName := match[2]
-		rows, err := a.db.QueryContext(ctx, `SELECT path,html FROM pages WHERE domain=? AND html LIKE ?`, domain, "%sitebrush-template-"+templateName+"%")
-		if err != nil {
+	templateBlockByID := extractTemplateBlocks(sourceHTML)
+	if len(templateBlockByID) == 0 {
+		return
+	}
+
+	pageRows, err := a.db.QueryContext(ctx, `SELECT path,title,html FROM pages WHERE domain=?`, domain)
+	if err != nil {
+		return
+	}
+	type storedPage struct {
+		path  string
+		title string
+		html  string
+	}
+	pageList := make([]storedPage, 0)
+	for pageRows.Next() {
+		var currentPage storedPage
+		if scanErr := pageRows.Scan(&currentPage.path, &currentPage.title, &currentPage.html); scanErr != nil {
 			continue
 		}
-		for rows.Next() {
-			var pagePath, pageHTML string
-			_ = rows.Scan(&pagePath, &pageHTML)
-			updatedHTML := replaceTemplateByClass(pageHTML, templateName, templateBlock)
-			_, _ = a.db.ExecContext(ctx, `UPDATE pages SET html=? WHERE domain=? AND path=?`, updatedHTML, domain, pagePath)
+		pageList = append(pageList, currentPage)
+	}
+	_ = pageRows.Close()
+
+	frozenDomain := a.isDomainFrozen(ctx, domain)
+	for _, currentPage := range pageList {
+		updatedHTML, changed := replaceTemplateBlocks(currentPage.html, templateBlockByID)
+		if !changed || updatedHTML == currentPage.html {
+			continue
 		}
-		_ = rows.Close()
+
+		_, _ = a.db.ExecContext(ctx, `UPDATE pages SET html=? WHERE domain=? AND path=?`, updatedHTML, domain, currentPage.path)
+		if !frozenDomain {
+			_, _ = a.db.ExecContext(ctx, `INSERT OR REPLACE INTO published_pages(domain,path,title,html) VALUES(?,?,?,?)`, domain, currentPage.path, currentPage.title, updatedHTML)
+			a.writePublishedStaticHTML(domain, currentPage.path, updatedHTML)
+		}
+		_, _ = a.db.ExecContext(ctx, `INSERT INTO revisions(domain,page_path,html,created_at) VALUES(?,?,?,?)`, domain, currentPage.path, updatedHTML, time.Now().Format(time.RFC3339))
 	}
 }
 
-func replaceTemplateByClass(pageHTML, templateName, newBlock string) string {
-	templatePattern := regexp.MustCompile(`(?s)<([a-zA-Z0-9]+)[^>]*class="[^"]*sitebrush-template-` + regexp.QuoteMeta(templateName) + `[^"]*"[^>]*>.*?</[a-zA-Z0-9]+>`)
-	return templatePattern.ReplaceAllString(pageHTML, newBlock)
+type templateMatch struct {
+	start int
+	end   int
+	id    string
+	block string
+}
+
+type templateOpenElement struct {
+	tagName    string
+	start      int
+	templateID string
+}
+
+func extractTemplateBlocks(sourceHTML string) map[string]string {
+	matchList := scanTemplateMatches(sourceHTML)
+	if len(matchList) == 0 {
+		return nil
+	}
+
+	templateBlockByID := make(map[string]string, len(matchList))
+	for _, currentMatch := range matchList {
+		templateBlockByID[currentMatch.id] = currentMatch.block
+	}
+	return templateBlockByID
+}
+
+func replaceTemplateBlocks(pageHTML string, templateBlockByID map[string]string) (string, bool) {
+	matchList := scanTemplateMatches(pageHTML)
+	if len(matchList) == 0 {
+		return pageHTML, false
+	}
+
+	var updatedHTML strings.Builder
+	updatedHTML.Grow(len(pageHTML))
+	changed := false
+	previousEnd := 0
+
+	for _, currentMatch := range matchList {
+		replacementBlock, found := templateBlockByID[currentMatch.id]
+		if !found {
+			continue
+		}
+		updatedHTML.WriteString(pageHTML[previousEnd:currentMatch.start])
+		updatedHTML.WriteString(replacementBlock)
+		previousEnd = currentMatch.end
+		changed = true
+	}
+
+	if !changed {
+		return pageHTML, false
+	}
+	updatedHTML.WriteString(pageHTML[previousEnd:])
+	return updatedHTML.String(), true
+}
+
+func scanTemplateMatches(pageHTML string) []templateMatch {
+	tokenizer := html.NewTokenizer(strings.NewReader(pageHTML))
+	openElementStack := make([]templateOpenElement, 0)
+	matchList := make([]templateMatch, 0)
+	offset := 0
+
+	for {
+		tokenType := tokenizer.Next()
+		rawToken := tokenizer.Raw()
+		tokenStart := offset
+		tokenEnd := tokenStart + len(rawToken)
+		offset = tokenEnd
+
+		switch tokenType {
+		case html.ErrorToken:
+			return matchList
+		case html.StartTagToken:
+			token := tokenizer.Token()
+			openElementStack = append(openElementStack, templateOpenElement{
+				tagName:    token.Data,
+				start:      tokenStart,
+				templateID: templateIdentifierFromAttributes(token.Attr),
+			})
+		case html.SelfClosingTagToken:
+			token := tokenizer.Token()
+			templateID := templateIdentifierFromAttributes(token.Attr)
+			if templateID == "" {
+				continue
+			}
+			matchList = append(matchList, templateMatch{
+				start: tokenStart,
+				end:   tokenEnd,
+				id:    templateID,
+				block: pageHTML[tokenStart:tokenEnd],
+			})
+		case html.EndTagToken:
+			token := tokenizer.Token()
+			for len(openElementStack) > 0 {
+				lastIndex := len(openElementStack) - 1
+				openElement := openElementStack[lastIndex]
+				openElementStack = openElementStack[:lastIndex]
+				if !strings.EqualFold(openElement.tagName, token.Data) {
+					continue
+				}
+				if openElement.templateID == "" {
+					break
+				}
+				matchList = append(matchList, templateMatch{
+					start: openElement.start,
+					end:   tokenEnd,
+					id:    openElement.templateID,
+					block: pageHTML[openElement.start:tokenEnd],
+				})
+				break
+			}
+		}
+	}
+}
+
+func templateIdentifierFromAttributes(attributeList []html.Attribute) string {
+	for _, attribute := range attributeList {
+		if !strings.EqualFold(attribute.Key, "class") {
+			continue
+		}
+		return templateIdentifierFromClassList(attribute.Val)
+	}
+	return ""
+}
+
+func templateIdentifierFromClassList(classValue string) string {
+	classNameList := strings.Fields(classValue)
+	for classIndex, className := range classNameList {
+		if strings.EqualFold(className, "SiteBrush-Template") {
+			if classIndex+1 < len(classNameList) {
+				return classNameList[classIndex+1]
+			}
+			return ""
+		}
+		lowerClassName := strings.ToLower(className)
+		if strings.HasPrefix(lowerClassName, "sitebrush-template-") {
+			return className[len("sitebrush-template-"):]
+		}
+	}
+	return ""
 }
 
 func (a *App) render(w http.ResponseWriter, r *http.Request, templateName string, templateData any) {
