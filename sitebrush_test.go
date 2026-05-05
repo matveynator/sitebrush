@@ -582,7 +582,7 @@ func TestMissingPageGrabFormIncludesSourceIPOverride(t *testing.T) {
 	request.AddCookie(newAdminSessionCookie(t, application, "admin@example.com"))
 	response := httptest.NewRecorder()
 	application.route(response, request)
-	if response.Code != http.StatusOK {
+	if response.Code != http.StatusNotFound {
 		t.Fatalf("missing page status = %d, body=%q", response.Code, response.Body.String())
 	}
 	body := response.Body.String()
@@ -1154,6 +1154,107 @@ func TestListenOnAvailablePortFallsBackWhenRequestedPortIsBusy(t *testing.T) {
 	}
 	if fallbackPort < 9898 {
 		t.Fatalf("fallback port = %d, want 9898 or higher", fallbackPort)
+	}
+}
+
+func TestReplaceTemplateBlocksHandlesNestedTemplateMatches(t *testing.T) {
+	sourceHTML := `<html><body><div class="SiteBrush-Template outer"><section>before<div class="SiteBrush-Template inner">new inner</div>after</section></div></body></html>`
+	targetHTML := `<html><body><div class="SiteBrush-Template outer"><section>before<div class="SiteBrush-Template inner">old inner</div>after</section></div><p>tail</p></body></html>`
+
+	updatedHTML, changed := replaceTemplateBlocks(targetHTML, extractTemplateBlocks(sourceHTML))
+	if !changed {
+		t.Fatal("changed = false, want true")
+	}
+
+	expectedHTML := `<html><body><div class="SiteBrush-Template outer"><section>before<div class="SiteBrush-Template inner">new inner</div>after</section></div><p>tail</p></body></html>`
+	if updatedHTML != expectedHTML {
+		t.Fatalf("updated html = %q, want %q", updatedHTML, expectedHTML)
+	}
+}
+
+func TestMovedPageRedirectsFromOldPathToNewPath(t *testing.T) {
+	application, rawDB := newTestApplication(t)
+	_, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "admin@example.com", "old")
+	if err != nil {
+		t.Fatalf("insert user: %v", err)
+	}
+	_, err = rawDB.Exec(`INSERT INTO pages(domain,path,title,html,published) VALUES(?,?,?,?,1)`, "localhost", "/contacts", "Contacts", "<h1>Contacts</h1>")
+	if err != nil {
+		t.Fatalf("insert page: %v", err)
+	}
+	_, err = rawDB.Exec(`INSERT INTO published_pages(domain,path,title,html) VALUES(?,?,?,?)`, "localhost", "/contacts", "Contacts", "<h1>Contacts</h1>")
+	if err != nil {
+		t.Fatalf("insert published page: %v", err)
+	}
+	_, err = rawDB.Exec(`INSERT INTO revisions(domain,page_path,html,created_at,is_active) VALUES(?,?,?,?,1)`, "localhost", "/contacts", "<h1>Contacts</h1>", time.Now().Format(time.RFC3339))
+	if err != nil {
+		t.Fatalf("insert revision: %v", err)
+	}
+
+	saveForm := url.Values{}
+	saveForm.Set("path", "/address")
+	saveForm.Set("previous_path", "/contacts")
+	saveForm.Set("title", "Address")
+	saveForm.Set("html", "<h1>Address</h1>")
+	saveRequest := httptest.NewRequest(http.MethodPost, "http://localhost:8080/address?save", strings.NewReader(saveForm.Encode()))
+	saveRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	saveRequest.AddCookie(newAdminSessionCookie(t, application, "admin@example.com"))
+	saveResponse := httptest.NewRecorder()
+	application.route(saveResponse, saveRequest)
+	if saveResponse.Code != http.StatusFound {
+		t.Fatalf("save status = %d, body=%q", saveResponse.Code, saveResponse.Body.String())
+	}
+
+	oldPathRequest := httptest.NewRequest(http.MethodGet, "http://localhost:8080/contacts", nil)
+	oldPathResponse := httptest.NewRecorder()
+	application.route(oldPathResponse, oldPathRequest)
+	if oldPathResponse.Code != http.StatusMovedPermanently {
+		t.Fatalf("old path status = %d, body=%q", oldPathResponse.Code, oldPathResponse.Body.String())
+	}
+	if location := oldPathResponse.Header().Get("Location"); location != "/address" {
+		t.Fatalf("old path location = %q, want %q", location, "/address")
+	}
+}
+
+func TestMissingPageReturns404ForGuest(t *testing.T) {
+	application, rawDB := newTestApplication(t)
+	_, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "admin@example.com", "old")
+	if err != nil {
+		t.Fatalf("insert user: %v", err)
+	}
+
+	request := httptest.NewRequest(http.MethodGet, "http://localhost:8080/missing", nil)
+	response := httptest.NewRecorder()
+	application.route(response, request)
+	if response.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, body=%q", response.Code, response.Body.String())
+	}
+	body := response.Body.String()
+	if !strings.Contains(body, "создайте эту страницу") {
+		t.Fatalf("missing page did not offer create action: %s", body)
+	}
+	if strings.Contains(body, `method="post" action="/missing?grab" data-grab-form`) {
+		t.Fatalf("guest missing page unexpectedly offers copy form: %s", body)
+	}
+}
+
+func TestMissingPageReturns404ForAdminWithCopyOption(t *testing.T) {
+	application, rawDB := newTestApplication(t)
+	_, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "admin@example.com", "old")
+	if err != nil {
+		t.Fatalf("insert user: %v", err)
+	}
+
+	request := httptest.NewRequest(http.MethodGet, "http://localhost:8080/missing", nil)
+	request.AddCookie(newAdminSessionCookie(t, application, "admin@example.com"))
+	response := httptest.NewRecorder()
+	application.route(response, request)
+	if response.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, body=%q", response.Code, response.Body.String())
+	}
+	body := response.Body.String()
+	if !strings.Contains(body, `method="post" action="/missing?grab" data-grab-form`) {
+		t.Fatalf("admin missing page does not offer copy form: %s", body)
 	}
 }
 

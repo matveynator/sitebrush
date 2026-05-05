@@ -25,6 +25,7 @@
 <body>
 <form method="post" action="{{.Path}}?save" class="raw-page">
   <input type="hidden" name="path" value="{{.Path}}" />
+  <input type="hidden" name="previous_path" value="{{.Path}}" />
   <input type="hidden" name="title" value="{{.Title}}" />
   <p class="document-kind">Document type: {{.ContentKind}}</p>
   <textarea name="html">{{.HTML}}</textarea>

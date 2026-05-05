@@ -390,6 +390,7 @@ func (a *App) migrate(ctx context.Context) error {
 		`CREATE TABLE IF NOT EXISTS sessions(token TEXT PRIMARY KEY,user_email TEXT,created_at TEXT);`,
 		`CREATE TABLE IF NOT EXISTS pages(domain TEXT,path TEXT,title TEXT,html TEXT,published INTEGER,PRIMARY KEY(domain,path));`,
 		`CREATE TABLE IF NOT EXISTS published_pages(domain TEXT,path TEXT,title TEXT,html TEXT,PRIMARY KEY(domain,path));`,
+		`CREATE TABLE IF NOT EXISTS page_redirects(domain TEXT,old_path TEXT,new_path TEXT,created_at TEXT,PRIMARY KEY(domain,old_path));`,
 		`CREATE TABLE IF NOT EXISTS revisions(id INTEGER PRIMARY KEY AUTOINCREMENT,domain TEXT,page_path TEXT,html TEXT,created_at TEXT,is_active INTEGER DEFAULT 1);`,
 		`CREATE TABLE IF NOT EXISTS domain_aliases(primary_domain TEXT,alias_domain TEXT UNIQUE,verification_token TEXT,is_verified INTEGER DEFAULT 0,dns_a_ok INTEGER DEFAULT 0,is_selected INTEGER DEFAULT 0,last_checked_at TEXT);`,
 		`CREATE TABLE IF NOT EXISTS domain_states(domain TEXT PRIMARY KEY,is_frozen INTEGER DEFAULT 0);`,
@@ -452,6 +453,9 @@ SELECT 'localhost',file_name,access_mode,token,expires_at,single_use_left,token_
 	fileMetadataMergeQuery := `INSERT OR IGNORE INTO file_metadata(domain,file_name,page_path,size,mime_type,created_at,updated_at,source,download_count)
 SELECT 'localhost',file_name,page_path,size,mime_type,created_at,updated_at,source,download_count FROM file_metadata WHERE domain IN ` + placeholders
 	_, _ = a.db.ExecContext(ctx, fileMetadataMergeQuery, sqlArguments...)
+	pageRedirectsMergeQuery := `INSERT OR IGNORE INTO page_redirects(domain,old_path,new_path,created_at)
+SELECT 'localhost',old_path,new_path,created_at FROM page_redirects WHERE domain IN ` + placeholders
+	_, _ = a.db.ExecContext(ctx, pageRedirectsMergeQuery, sqlArguments...)
 	domainStatesMergeQuery := `INSERT OR IGNORE INTO domain_states(domain,is_frozen)
 SELECT 'localhost',is_frozen FROM domain_states WHERE domain IN ` + placeholders
 	_, _ = a.db.ExecContext(ctx, domainStatesMergeQuery, sqlArguments...)
@@ -463,6 +467,7 @@ SELECT 'localhost',is_frozen FROM domain_states WHERE domain IN ` + placeholders
 	_, _ = a.db.ExecContext(ctx, `DELETE FROM users WHERE domain IN `+placeholders, sqlArguments...)
 	_, _ = a.db.ExecContext(ctx, `DELETE FROM pages WHERE domain IN `+placeholders, sqlArguments...)
 	_, _ = a.db.ExecContext(ctx, `DELETE FROM published_pages WHERE domain IN `+placeholders, sqlArguments...)
+	_, _ = a.db.ExecContext(ctx, `DELETE FROM page_redirects WHERE domain IN `+placeholders, sqlArguments...)
 	_, _ = a.db.ExecContext(ctx, `DELETE FROM file_access_rules WHERE domain IN `+placeholders, sqlArguments...)
 	_, _ = a.db.ExecContext(ctx, `DELETE FROM file_metadata WHERE domain IN `+placeholders, sqlArguments...)
 	_, _ = a.db.ExecContext(ctx, `DELETE FROM domain_states WHERE domain IN `+placeholders, sqlArguments...)
@@ -622,8 +627,9 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	domain := a.siteDomain(r.Context(), r)
-	if !a.hasAdmin(r.Context(), domain) && !hasQueryFlag(r, "register") {
-		http.Redirect(w, r, r.URL.Path+"?register", http.StatusFound)
+	redirectTargetPath := a.resolvedPageRedirectPath(r.Context(), domain, pagePath)
+	if redirectTargetPath != "" && redirectTargetPath != pagePath {
+		http.Redirect(w, r, redirectTargetPath, http.StatusMovedPermanently)
 		return
 	}
 	isAdmin := a.isAdminRequest(r)
@@ -640,15 +646,7 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 		a.serveManagedPageContent(w, r, publishedPage.Path, publishedPage.HTML, "db-published-fallback")
 		return
 	}
-	if !isAdmin {
-		a.render(w, r, "missing.html", map[string]any{"Path": pagePath, "EditLink": pagePath + "?visual", "IsAdmin": false})
-		return
-	}
-	if isAdmin {
-		a.render(w, r, "missing.html", map[string]any{"Path": pagePath, "EditLink": pagePath + "?visual", "IsAdmin": true})
-		return
-	}
-	http.NotFound(w, r)
+	a.renderMissingPage(w, r, pagePath, isAdmin)
 }
 
 func (a *App) setupAdmin(w http.ResponseWriter, r *http.Request) {
@@ -901,16 +899,27 @@ func (a *App) savePage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
-	pagePath := r.FormValue("path")
+	pagePath := cleanPath(r.FormValue("path"))
+	previousPath := pagePath
+	if strings.TrimSpace(r.FormValue("previous_path")) != "" {
+		previousPath = cleanPath(r.FormValue("previous_path"))
+	}
 	domain := a.siteDomain(r.Context(), r)
-	title := r.FormValue("title")
+	title := strings.TrimSpace(r.FormValue("title"))
+	if title == "" {
+		title = pagePath
+	}
 	html := r.FormValue("html")
+	a.clearPageRedirectSource(r.Context(), domain, pagePath)
 	_, _ = a.db.ExecContext(r.Context(), `INSERT OR REPLACE INTO pages(domain,path,title,html,published) VALUES(?,?,?,?,1)`, domain, pagePath, title, html)
 	if !a.isDomainFrozen(r.Context(), domain) {
 		_, _ = a.db.ExecContext(r.Context(), `INSERT OR REPLACE INTO published_pages(domain,path,title,html) VALUES(?,?,?,?)`, domain, pagePath, title, html)
 		a.writePublishedStaticHTML(domain, pagePath, html)
 	}
 	_, _ = a.db.ExecContext(r.Context(), `INSERT INTO revisions(domain,page_path,html,created_at) VALUES(?,?,?,?)`, domain, pagePath, html, time.Now().Format(time.RFC3339))
+	if previousPath != pagePath {
+		a.registerPageRedirect(r.Context(), domain, previousPath, pagePath)
+	}
 	if pageContentKind(pagePath, html) == "html" {
 		a.applyTemplatePropagation(r.Context(), domain, html)
 	}
@@ -957,6 +966,7 @@ func (a *App) grabPage(w http.ResponseWriter, r *http.Request) {
 	progressToken := strings.TrimSpace(r.FormValue("progress_token"))
 	selectedResourceURLs := selectedGrabResourceURLs(r)
 	html := a.mirrorRemotePage(domain, pagePath, sourceURL, remoteSourceURL, string(htmlBytes), progressToken, selectedResourceURLs, sourceIP)
+	a.clearPageRedirectSource(r.Context(), domain, pagePath)
 	_, _ = a.db.ExecContext(r.Context(), `INSERT OR REPLACE INTO pages(domain,path,title,html,published) VALUES(?,?,?,?,1)`, domain, pagePath, pagePath, html)
 	if !a.isDomainFrozen(r.Context(), domain) {
 		_, _ = a.db.ExecContext(r.Context(), `INSERT OR REPLACE INTO published_pages(domain,path,title,html) VALUES(?,?,?,?)`, domain, pagePath, pagePath, html)
@@ -1295,6 +1305,7 @@ func (a *App) applyLatestActiveRevision(ctx context.Context, domain string, page
 	}
 	pageTitle := pagePath
 	_ = a.db.QueryRowContext(ctx, `SELECT title FROM pages WHERE domain=? AND path=?`, domain, pagePath).Scan(&pageTitle)
+	a.clearPageRedirectSource(ctx, domain, pagePath)
 	_, _ = a.db.ExecContext(ctx, `INSERT OR REPLACE INTO pages(domain,path,title,html,published) VALUES(?,?,?,?,1)`, domain, pagePath, pageTitle, latestActiveHTML)
 	if !a.isDomainFrozen(ctx, domain) {
 		_, _ = a.db.ExecContext(ctx, `INSERT OR REPLACE INTO published_pages(domain,path,title,html) VALUES(?,?,?,?)`, domain, pagePath, pageTitle, latestActiveHTML)
@@ -1943,6 +1954,47 @@ func (a *App) findPage(ctx context.Context, domain, pagePath string) (Page, erro
 	return current, err
 }
 
+func (a *App) resolvedPageRedirectPath(ctx context.Context, domain, pagePath string) string {
+	currentPath := cleanPath(pagePath)
+	visitedPathSet := map[string]struct{}{currentPath: {}}
+	for redirectStep := 0; redirectStep < 16; redirectStep++ {
+		var nextPath string
+		err := a.db.QueryRowContext(ctx, `SELECT new_path FROM page_redirects WHERE domain=? AND old_path=?`, domain, currentPath).Scan(&nextPath)
+		if err != nil {
+			if len(visitedPathSet) == 1 {
+				return ""
+			}
+			return currentPath
+		}
+		nextPath = cleanPath(nextPath)
+		if nextPath == currentPath {
+			return ""
+		}
+		if _, alreadyVisited := visitedPathSet[nextPath]; alreadyVisited {
+			return ""
+		}
+		visitedPathSet[nextPath] = struct{}{}
+		currentPath = nextPath
+	}
+	return currentPath
+}
+
+func (a *App) clearPageRedirectSource(ctx context.Context, domain, pagePath string) {
+	_, _ = a.db.ExecContext(ctx, `DELETE FROM page_redirects WHERE domain=? AND old_path=?`, domain, cleanPath(pagePath))
+}
+
+func (a *App) registerPageRedirect(ctx context.Context, domain, oldPath, newPath string) {
+	oldPath = cleanPath(oldPath)
+	newPath = cleanPath(newPath)
+	if oldPath == newPath {
+		return
+	}
+	redirectCreatedAt := time.Now().Format(time.RFC3339)
+	_, _ = a.db.ExecContext(ctx, `UPDATE page_redirects SET new_path=?, created_at=? WHERE domain=? AND new_path=?`, newPath, redirectCreatedAt, domain, oldPath)
+	_, _ = a.db.ExecContext(ctx, `INSERT INTO page_redirects(domain,old_path,new_path,created_at) VALUES(?,?,?,?) ON CONFLICT(domain,old_path) DO UPDATE SET new_path=excluded.new_path, created_at=excluded.created_at`, domain, oldPath, newPath, redirectCreatedAt)
+	_, _ = a.db.ExecContext(ctx, `DELETE FROM page_redirects WHERE domain=? AND old_path=new_path`, domain)
+}
+
 func (a *App) hasAdmin(ctx context.Context, domain string) bool {
 	var adminCount int
 	_ = a.db.QueryRowContext(ctx, `SELECT COUNT(1) FROM users WHERE domain=? AND is_admin=1`, domain).Scan(&adminCount)
@@ -2012,6 +2064,11 @@ func (a *App) serveManagedPageContent(w http.ResponseWriter, r *http.Request, pa
 	}
 	w.Header().Set("Content-Type", contentTypeForManagedPage(pagePath, content))
 	_, _ = w.Write([]byte(content))
+}
+
+func (a *App) renderMissingPage(w http.ResponseWriter, r *http.Request, pagePath string, isAdmin bool) {
+	w.WriteHeader(http.StatusNotFound)
+	a.render(w, r, "missing.html", map[string]any{"Path": pagePath, "EditLink": pagePath + "?visual", "IsAdmin": isAdmin})
 }
 
 func (a *App) injectContextMenu(r *http.Request, pagePath, html string) string {
@@ -2609,6 +2666,10 @@ func replaceTemplateBlocks(pageHTML string, templateBlockByID map[string]string)
 	if len(matchList) == 0 {
 		return pageHTML, false
 	}
+	matchList = sortedNonOverlappingTemplateMatches(matchList)
+	if len(matchList) == 0 {
+		return pageHTML, false
+	}
 
 	var updatedHTML strings.Builder
 	updatedHTML.Grow(len(pageHTML))
@@ -2631,6 +2692,33 @@ func replaceTemplateBlocks(pageHTML string, templateBlockByID map[string]string)
 	}
 	updatedHTML.WriteString(pageHTML[previousEnd:])
 	return updatedHTML.String(), true
+}
+
+func sortedNonOverlappingTemplateMatches(matchList []templateMatch) []templateMatch {
+	if len(matchList) < 2 {
+		return matchList
+	}
+
+	sortedMatchList := append([]templateMatch(nil), matchList...)
+	sort.Slice(sortedMatchList, func(leftIndex, rightIndex int) bool {
+		leftMatch := sortedMatchList[leftIndex]
+		rightMatch := sortedMatchList[rightIndex]
+		if leftMatch.start != rightMatch.start {
+			return leftMatch.start < rightMatch.start
+		}
+		return leftMatch.end > rightMatch.end
+	})
+
+	filteredMatchList := sortedMatchList[:0]
+	previousEnd := -1
+	for _, currentMatch := range sortedMatchList {
+		if currentMatch.start < previousEnd {
+			continue
+		}
+		filteredMatchList = append(filteredMatchList, currentMatch)
+		previousEnd = currentMatch.end
+	}
+	return filteredMatchList
 }
 
 func scanTemplateMatches(pageHTML string) []templateMatch {
