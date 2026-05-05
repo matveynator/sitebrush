@@ -160,6 +160,7 @@ func TestContextMenuUsesDirectEditorProfileAndDeleteActions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("insert revision: %v", err)
 	}
+	application.rebuildDomainStorageUsage(context.Background(), "localhost")
 	revisionID, err := result.LastInsertId()
 	if err != nil {
 		t.Fatalf("revision id: %v", err)
@@ -176,6 +177,11 @@ func TestContextMenuUsesDirectEditorProfileAndDeleteActions(t *testing.T) {
 	for _, expectedFragment := range []string{"href='?visual'", "href='?text'", "data-sitebrush-action='delete'", "?delete=" + strconv.FormatInt(revisionID, 10), "href='?profile'"} {
 		if !strings.Contains(body, expectedFragment) {
 			t.Fatalf("context menu missing %q in %s", expectedFragment, body)
+		}
+	}
+	for _, expectedFragment := range []string{"SiteBrushContextMenuVersion'>v.", "SiteBrushMenuStorageUsage", "10.0 GB"} {
+		if !strings.Contains(body, expectedFragment) {
+			t.Fatalf("context menu missing storage/version fragment %q in %s", expectedFragment, body)
 		}
 	}
 	if strings.Contains(body, "href='?edit'") {
@@ -904,6 +910,44 @@ func TestUploadFilesStoresFilesForCurrentURI(t *testing.T) {
 	}
 	if !strings.Contains(response.Body.String(), "/p/manual.txt") {
 		t.Fatalf("upload response does not include public path: %q", response.Body.String())
+	}
+}
+
+func TestUploadFilesRejectsWhenDomainStorageLimitIsExceeded(t *testing.T) {
+	application, rawDB := newTestApplication(t)
+	_, err := rawDB.Exec(`INSERT OR REPLACE INTO domain_storage_usage(domain,page_bytes,published_page_bytes,revision_bytes,file_bytes,published_static_bytes,limit_bytes,updated_at) VALUES(?,?,?,?,?,?,?,?)`,
+		"localhost", 0, 0, 0, 0, 0, 5, time.Now().Format(time.RFC3339))
+	if err != nil {
+		t.Fatalf("seed storage usage: %v", err)
+	}
+
+	var body bytes.Buffer
+	multipartWriter := multipart.NewWriter(&body)
+	fileWriter, err := multipartWriter.CreateFormFile("upload_files", "manual.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fileWriter.Write([]byte("manual upload")); err != nil {
+		t.Fatal(err)
+	}
+	if err := multipartWriter.WriteField("action", "upload"); err != nil {
+		t.Fatal(err)
+	}
+	if err := multipartWriter.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	request := httptest.NewRequest(http.MethodPost, "http://localhost:8080/docs?files", &body)
+	request.Header.Set("Content-Type", multipartWriter.FormDataContentType())
+	request.Header.Set("Accept", "application/json")
+	response := httptest.NewRecorder()
+
+	application.uploadFiles(response, request, "/docs")
+	if response.Code != http.StatusInsufficientStorage {
+		t.Fatalf("upload status = %d, body=%q", response.Code, response.Body.String())
+	}
+	if _, statErr := os.Stat(filepath.Join(application.domainFilesDirForDomain("localhost"), "manual.txt")); !os.IsNotExist(statErr) {
+		t.Fatalf("file was stored despite storage limit: %v", statErr)
 	}
 }
 
