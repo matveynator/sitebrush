@@ -101,10 +101,19 @@ type grabResourcePreview struct {
 }
 
 type grabPreviewResponse struct {
-	SourceURL     string                `json:"source_url"`
-	PageCount     int                   `json:"page_count"`
-	ResourceCount int                   `json:"resource_count"`
-	Resources     []grabResourcePreview `json:"resources"`
+	SourceURL             string                `json:"source_url"`
+	PageCount             int                   `json:"page_count"`
+	ResourceCount         int                   `json:"resource_count"`
+	Resources             []grabResourcePreview `json:"resources"`
+	PageDownloadBytes     int64                 `json:"page_download_bytes"`
+	PageStorageBytes      int64                 `json:"page_storage_bytes"`
+	CurrentUsedBytes      int64                 `json:"current_used_bytes"`
+	LimitBytes            int64                 `json:"limit_bytes"`
+	FreeBytes             int64                 `json:"free_bytes"`
+	SelectedResourceBytes int64                 `json:"selected_resource_bytes"`
+	EstimatedImportBytes  int64                 `json:"estimated_import_bytes"`
+	ProjectedUsedBytes    int64                 `json:"projected_used_bytes"`
+	FitsQuota             bool                  `json:"fits_quota"`
 }
 
 type wholeSiteImportedPage struct {
@@ -119,8 +128,10 @@ type wholeSitePageJob struct {
 }
 
 type wholeSitePreviewResult struct {
-	PageCount int
-	Resources []grabResourcePreview
+	PageCount     int
+	Resources     []grabResourcePreview
+	ImportedPages []wholeSiteImportedPage
+	Spider        *pageSpider
 }
 
 type nativePickedFile struct {
@@ -1253,7 +1264,11 @@ func (a *App) grabPage(w http.ResponseWriter, r *http.Request) {
 		selectedResourceURLs := selectedGrabResourceURLs(r)
 		redirectPath, importErr := a.importWholeRemoteSite(r.Context(), domain, pagePath, remoteSourceURL, string(htmlBytes), progressToken, selectedResourceURLs, sourceIP)
 		if importErr != nil {
-			http.Error(w, importErr.Error(), http.StatusBadGateway)
+			statusCode := http.StatusBadGateway
+			if strings.Contains(importErr.Error(), "storage limit reached:") {
+				statusCode = http.StatusInsufficientStorage
+			}
+			http.Error(w, importErr.Error(), statusCode)
 			return
 		}
 		if wantsJSONResponse(r) {
@@ -1265,21 +1280,17 @@ func (a *App) grabPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	selectedResourceURLs := selectedGrabResourceURLs(r)
-	html := a.mirrorRemotePage(domain, pagePath, sourceURL, remoteSourceURL, string(htmlBytes), progressToken, selectedResourceURLs, sourceIP)
-	newHTMLBytes := int64(len([]byte(html)))
-	var previousStoredHTML string
-	_ = a.db.QueryRowContext(r.Context(), `SELECT html FROM pages WHERE domain=? AND path=?`, domain, pagePath).Scan(&previousStoredHTML)
-	pageDelta := newHTMLBytes - int64(len([]byte(previousStoredHTML)))
-	publishedPageDelta := int64(0)
-	publishedStaticDelta := int64(0)
-	if !a.isDomainFrozen(r.Context(), domain) {
-		var previousPublishedHTML string
-		_ = a.db.QueryRowContext(r.Context(), `SELECT html FROM published_pages WHERE domain=? AND path=?`, domain, pagePath).Scan(&previousPublishedHTML)
-		publishedPageDelta = newHTMLBytes - int64(len([]byte(previousPublishedHTML)))
-		publishedStaticDelta = newHTMLBytes - fileSizeBytes(filepath.Join(a.domainStaticDir(domain), staticRelativePathForPage(pagePath)))
-	}
-	if storageErr := a.applyDomainStorageDelta(r.Context(), domain, pageDelta, publishedPageDelta, newHTMLBytes, 0, publishedStaticDelta); storageErr != nil {
+	spider, html := prepareSinglePageImport(domain, pagePath, sourceURL, remoteSourceURL, string(htmlBytes), a.grabTracker, progressToken, selectedResourceURLs, sourceIP)
+	importedPages := []wholeSiteImportedPage{{SourceURL: sourceURL, LocalPath: pagePath, HTML: html}}
+	pageDelta, publishedPageDelta, revisionDelta, publishedStaticDelta := a.estimateImportedPagesStorageDelta(r.Context(), domain, importedPages)
+	fileDelta := a.estimateImportedFileDelta(domain, spider)
+	if storageErr := a.applyDomainStorageDelta(r.Context(), domain, pageDelta, publishedPageDelta, revisionDelta, fileDelta, publishedStaticDelta); storageErr != nil {
 		http.Error(w, storageErr.Error(), http.StatusInsufficientStorage)
+		return
+	}
+	if persistErr := a.persistSpiderAssets(spider, pagePath); persistErr != nil {
+		_ = a.applyDomainStorageDelta(r.Context(), domain, -pageDelta, -publishedPageDelta, -revisionDelta, -fileDelta, -publishedStaticDelta)
+		http.Error(w, persistErr.Error(), http.StatusBadGateway)
 		return
 	}
 	a.clearPageRedirectSource(r.Context(), domain, pagePath)
@@ -1323,21 +1334,47 @@ func (a *App) grabPreview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	progressToken := strings.TrimSpace(r.FormValue("progress_token"))
+	domain := a.siteDomain(r.Context(), r)
+	pagePath := cleanPath(r.FormValue("path"))
 	var resources []grabResourcePreview
 	pageCount := 1
+	var importedPages []wholeSiteImportedPage
+	var pageDownloadBytes int64
+	var previewSpider *pageSpider
 	if grabCopyWholeSite(r) {
-		wholeSitePreview := previewWholeRemoteSiteResources(remoteSourceURL, string(htmlBytes), a.grabTracker, progressToken, sourceIP)
+		wholeSitePreview := previewWholeRemoteSiteResources(remoteSourceURL, string(htmlBytes), pagePath, a.grabTracker, progressToken, sourceIP)
 		resources = wholeSitePreview.Resources
 		pageCount = wholeSitePreview.PageCount
+		importedPages = wholeSitePreview.ImportedPages
+		previewSpider = wholeSitePreview.Spider
 	} else {
-		resources = previewGrabResources(remoteSourceURL, string(htmlBytes), a.grabTracker, progressToken, sourceIP)
+		previewSpider, importedHTML := prepareSinglePageImport(domain, pagePath, sourceURL, remoteSourceURL, string(htmlBytes), a.grabTracker, progressToken, nil, sourceIP)
+		resources = previewResourcesFromSpider(previewSpider, map[string]struct{}{sourceURL: {}})
+		importedPages = []wholeSiteImportedPage{{SourceURL: sourceURL, LocalPath: pagePath, HTML: importedHTML}}
+		if a.grabTracker != nil && progressToken != "" {
+			a.grabTracker.publish(grabProgressEvent{Token: progressToken, Stage: "done", FoundTotal: previewSpider.foundTotal, DownloadedTotal: previewSpider.downloadedTotal, CompletedPercent: 100})
+		}
 	}
+	for _, importedPage := range importedPages {
+		pageDownloadBytes += int64(len([]byte(importedPage.HTML)))
+	}
+	selectedResourceBytes := sumGrabPreviewResourceBytes(resources)
+	quotaEstimate := a.estimateImportQuota(r.Context(), domain, importedPages, previewSpider)
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(grabPreviewResponse{
-		SourceURL:     remoteSourceURL.String(),
-		PageCount:     pageCount,
-		ResourceCount: len(resources),
-		Resources:     resources,
+		SourceURL:             remoteSourceURL.String(),
+		PageCount:             pageCount,
+		ResourceCount:         len(resources),
+		Resources:             resources,
+		PageDownloadBytes:     pageDownloadBytes,
+		PageStorageBytes:      quotaEstimate.PageStorageBytes,
+		CurrentUsedBytes:      quotaEstimate.CurrentUsedBytes,
+		LimitBytes:            quotaEstimate.LimitBytes,
+		FreeBytes:             quotaEstimate.FreeBytes,
+		SelectedResourceBytes: selectedResourceBytes,
+		EstimatedImportBytes:  quotaEstimate.EstimatedImportBytes,
+		ProjectedUsedBytes:    quotaEstimate.ProjectedUsedBytes,
+		FitsQuota:             quotaEstimate.FitsQuota,
 	})
 }
 
@@ -1440,6 +1477,48 @@ func grabCopyWholeSite(r *http.Request) bool {
 	return rawValue == "1" || rawValue == "on" || rawValue == "true" || rawValue == "yes"
 }
 
+func sumGrabPreviewResourceBytes(resources []grabResourcePreview) int64 {
+	var totalBytes int64
+	for _, resource := range resources {
+		if resource.SizeBytes <= 0 {
+			continue
+		}
+		totalBytes += resource.SizeBytes
+	}
+	return totalBytes
+}
+
+type importQuotaEstimate struct {
+	PageStorageBytes     int64
+	ResourceBytes        int64
+	EstimatedImportBytes int64
+	CurrentUsedBytes     int64
+	LimitBytes           int64
+	FreeBytes            int64
+	ProjectedUsedBytes   int64
+	FitsQuota            bool
+}
+
+func (a *App) estimateImportQuota(ctx context.Context, domain string, importedPages []wholeSiteImportedPage, spider *pageSpider) importQuotaEstimate {
+	pageDelta, publishedPageDelta, revisionDelta, publishedStaticDelta := a.estimateImportedPagesStorageDelta(ctx, domain, importedPages)
+	resourceBytes := a.estimateImportedFileDelta(domain, spider)
+	usage := a.domainStorageUsage(ctx, domain)
+	currentUsedBytes := usage.totalBytes()
+	estimatedImportBytes := pageDelta + publishedPageDelta + revisionDelta + publishedStaticDelta + resourceBytes
+	projectedUsedBytes := currentUsedBytes + estimatedImportBytes
+	freeBytes := usage.LimitBytes - currentUsedBytes
+	return importQuotaEstimate{
+		PageStorageBytes:     pageDelta + publishedPageDelta + revisionDelta + publishedStaticDelta,
+		ResourceBytes:        resourceBytes,
+		EstimatedImportBytes: estimatedImportBytes,
+		CurrentUsedBytes:     currentUsedBytes,
+		LimitBytes:           usage.LimitBytes,
+		FreeBytes:            freeBytes,
+		ProjectedUsedBytes:   projectedUsedBytes,
+		FitsQuota:            projectedUsedBytes <= usage.LimitBytes,
+	}
+}
+
 func previewGrabResources(pageURL *url.URL, htmlSource string, tracker *grabProgressTracker, progressToken, sourceIP string) []grabResourcePreview {
 	spider := newPageSpider("", pageURL, grabResourceMaxDepth, tracker, progressToken, sourceIP)
 	rootResource := &mirroredResource{url: pageURL.String(), content: []byte(htmlSource)}
@@ -1450,6 +1529,16 @@ func previewGrabResources(pageURL *url.URL, htmlSource string, tracker *grabProg
 		tracker.publish(grabProgressEvent{Token: progressToken, Stage: "done", FoundTotal: spider.foundTotal, DownloadedTotal: spider.downloadedTotal, CompletedPercent: 100})
 	}
 	return resources
+}
+
+func prepareSinglePageImport(domain, pagePath, sourceURL string, pageURL *url.URL, fallbackHTML string, tracker *grabProgressTracker, progressToken string, selectedResourceURLs map[string]struct{}, sourceIP string) (*pageSpider, string) {
+	spider := newPageSpider(domain, pageURL, grabResourceMaxDepth, tracker, progressToken, sourceIP)
+	spider.selectedResourceURLs = selectedResourceURLs
+	rootResource := &mirroredResource{url: sourceURL, content: []byte(fallbackHTML)}
+	spider.resources[sourceURL] = rootResource
+	spider.rewriteNestedResources(rootResource, 0, "text/html")
+	spider.fetchSelectedResources()
+	return spider, string(rootResource.content)
 }
 
 func previewResourcesFromSpider(spider *pageSpider, excludedURLs map[string]struct{}) []grabResourcePreview {
@@ -1482,19 +1571,19 @@ func previewResourcesFromSpider(spider *pageSpider, excludedURLs map[string]stru
 	return resources
 }
 
-func previewWholeRemoteSiteResources(startURL *url.URL, startHTML string, tracker *grabProgressTracker, progressToken, sourceIP string) wholeSitePreviewResult {
-	spider, pageURLs := crawlWholeRemoteSite(startURL, startHTML, "", tracker, progressToken, sourceIP)
+func previewWholeRemoteSiteResources(startURL *url.URL, startHTML, publicAssetBasePath string, tracker *grabProgressTracker, progressToken, sourceIP string) wholeSitePreviewResult {
+	spider, pageURLs, importedPages := crawlWholeRemoteSite(startURL, startHTML, publicAssetBasePath, tracker, progressToken, sourceIP)
 	resources := previewResourcesFromSpider(spider, pageURLs)
 	if tracker != nil && strings.TrimSpace(progressToken) != "" {
 		tracker.publish(grabProgressEvent{Token: progressToken, Stage: "done", FoundTotal: spider.foundTotal, DownloadedTotal: spider.downloadedTotal, CompletedPercent: 100})
 	}
-	return wholeSitePreviewResult{PageCount: len(pageURLs), Resources: resources}
+	return wholeSitePreviewResult{PageCount: len(pageURLs), Resources: resources, ImportedPages: importedPages, Spider: spider}
 }
 
-func (a *App) importWholeRemoteSite(ctx context.Context, domain, basePath string, startURL *url.URL, startHTML, progressToken string, selectedResourceURLs map[string]struct{}, sourceIP string) (string, error) {
+func (a *App) prepareWholeRemoteSiteImport(domain, basePath string, startURL *url.URL, startHTML, progressToken string, selectedResourceURLs map[string]struct{}, sourceIP string) (*pageSpider, []wholeSiteImportedPage, error) {
 	basePath = cleanPath(basePath)
 	if startURL == nil || startURL.Hostname() == "" {
-		return "", errors.New("source_url is invalid")
+		return nil, nil, errors.New("source_url is invalid")
 	}
 	spider := newPageSpider(domain, startURL, grabResourceMaxDepth, a.grabTracker, progressToken, sourceIP)
 	spider.selectedResourceURLs = selectedResourceURLs
@@ -1565,12 +1654,27 @@ func (a *App) importWholeRemoteSite(ctx context.Context, domain, basePath string
 		spider.publishResourceProgress("downloaded", currentJob.URL.String(), 100, int64(len(pageHTML)), int64(len(pageHTML)))
 	}
 	if len(importedPages) == 0 {
-		return "", errors.New("no pages were imported")
+		return nil, nil, errors.New("no pages were imported")
+	}
+	return spider, importedPages, nil
+}
+
+func (a *App) importWholeRemoteSite(ctx context.Context, domain, basePath string, startURL *url.URL, startHTML, progressToken string, selectedResourceURLs map[string]struct{}, sourceIP string) (string, error) {
+	spider, importedPages, prepareErr := a.prepareWholeRemoteSiteImport(domain, basePath, startURL, startHTML, progressToken, selectedResourceURLs, sourceIP)
+	if prepareErr != nil {
+		return "", prepareErr
+	}
+	pageDelta, publishedPageDelta, revisionDelta, publishedStaticDelta := a.estimateImportedPagesStorageDelta(ctx, domain, importedPages)
+	fileDelta := a.estimateImportedFileDelta(domain, spider)
+	if storageErr := a.applyDomainStorageDelta(ctx, domain, pageDelta, publishedPageDelta, revisionDelta, fileDelta, publishedStaticDelta); storageErr != nil {
+		return "", storageErr
 	}
 	if persistErr := a.persistSpiderAssets(spider, basePath); persistErr != nil {
+		_ = a.applyDomainStorageDelta(ctx, domain, -pageDelta, -publishedPageDelta, -revisionDelta, -fileDelta, -publishedStaticDelta)
 		return "", persistErr
 	}
 	if storeErr := a.storeWholeSiteImportedPages(ctx, domain, importedPages); storeErr != nil {
+		_ = a.applyDomainStorageDelta(ctx, domain, -pageDelta, -publishedPageDelta, -revisionDelta, -fileDelta, -publishedStaticDelta)
 		return "", storeErr
 	}
 	a.rebuildDomainStorageUsage(ctx, domain)
@@ -1580,13 +1684,14 @@ func (a *App) importWholeRemoteSite(ctx context.Context, domain, basePath string
 	return basePath, nil
 }
 
-func crawlWholeRemoteSite(startURL *url.URL, startHTML, publicAssetBasePath string, tracker *grabProgressTracker, progressToken, sourceIP string) (*pageSpider, map[string]struct{}) {
+func crawlWholeRemoteSite(startURL *url.URL, startHTML, publicAssetBasePath string, tracker *grabProgressTracker, progressToken, sourceIP string) (*pageSpider, map[string]struct{}, []wholeSiteImportedPage) {
 	spider := newPageSpider("", startURL, grabResourceMaxDepth, tracker, progressToken, sourceIP)
 	spider.publicAssetBasePath = publicAssetBasePath
 	pageClient := newGrabHTTPClientForServerIP(startURL.Hostname(), sourceIP)
 	knownPagePathsByKey := map[string]string{wholeSitePageKey(startURL): cleanPath(publicAssetBasePath)}
 	pageURLs := map[string]struct{}{startURL.String(): {}}
 	pageQueue := []wholeSitePageJob{{URL: cloneURL(startURL), HTML: startHTML}}
+	importedPages := make([]wholeSiteImportedPage, 0, 32)
 	spider.foundTotal++
 	spider.publishProgress("found", startURL.String(), 0)
 	for len(pageQueue) > 0 && len(pageURLs) < wholeSiteImportMaxPages {
@@ -1628,10 +1733,11 @@ func crawlWholeRemoteSite(startURL *url.URL, startHTML, publicAssetBasePath stri
 		rootResource := &mirroredResource{url: currentJob.URL.String(), content: []byte(pageHTML)}
 		spider.resources[currentJob.URL.String()] = rootResource
 		spider.rewriteNestedResources(rootResource, 0, "text/html")
+		importedPages = append(importedPages, wholeSiteImportedPage{SourceURL: currentJob.URL.String(), LocalPath: knownPagePathsByKey[pageKey], HTML: string(rootResource.content)})
 		spider.downloadedTotal++
 		spider.publishResourceProgress("downloaded", currentJob.URL.String(), 100, int64(len(pageHTML)), int64(len(pageHTML)))
 	}
-	return spider, pageURLs
+	return spider, pageURLs, importedPages
 }
 
 func (a *App) storeWholeSiteImportedPages(ctx context.Context, domain string, importedPages []wholeSiteImportedPage) error {
@@ -1639,21 +1745,6 @@ func (a *App) storeWholeSiteImportedPages(ctx context.Context, domain string, im
 	for _, importedPage := range importedPages {
 		pagePath := cleanPath(importedPage.LocalPath)
 		pageHTML := importedPage.HTML
-		newHTMLBytes := int64(len([]byte(pageHTML)))
-		var previousStoredHTML string
-		_ = a.db.QueryRowContext(ctx, `SELECT html FROM pages WHERE domain=? AND path=?`, domain, pagePath).Scan(&previousStoredHTML)
-		pageDelta := newHTMLBytes - int64(len([]byte(previousStoredHTML)))
-		publishedPageDelta := int64(0)
-		publishedStaticDelta := int64(0)
-		if !frozenDomain {
-			var previousPublishedHTML string
-			_ = a.db.QueryRowContext(ctx, `SELECT html FROM published_pages WHERE domain=? AND path=?`, domain, pagePath).Scan(&previousPublishedHTML)
-			publishedPageDelta = newHTMLBytes - int64(len([]byte(previousPublishedHTML)))
-			publishedStaticDelta = newHTMLBytes - fileSizeBytes(filepath.Join(a.domainStaticDir(domain), staticRelativePathForPage(pagePath)))
-		}
-		if storageErr := a.applyDomainStorageDelta(ctx, domain, pageDelta, publishedPageDelta, newHTMLBytes, 0, publishedStaticDelta); storageErr != nil {
-			return storageErr
-		}
 		a.clearPageRedirectSource(ctx, domain, pagePath)
 		_, _ = a.db.ExecContext(ctx, `INSERT OR REPLACE INTO pages(domain,path,title,html,published) VALUES(?,?,?,?,1)`, domain, pagePath, pagePath, pageHTML)
 		if !frozenDomain {
@@ -1663,6 +1754,57 @@ func (a *App) storeWholeSiteImportedPages(ctx context.Context, domain string, im
 		_, _ = a.db.ExecContext(ctx, `INSERT INTO revisions(domain,page_path,html,created_at) VALUES(?,?,?,?)`, domain, pagePath, pageHTML, time.Now().Format(time.RFC3339))
 	}
 	return nil
+}
+
+func (a *App) estimateImportedPagesStorageDelta(ctx context.Context, domain string, importedPages []wholeSiteImportedPage) (int64, int64, int64, int64) {
+	frozenDomain := a.isDomainFrozen(ctx, domain)
+	var pageDelta int64
+	var publishedPageDelta int64
+	var revisionDelta int64
+	var publishedStaticDelta int64
+	for _, importedPage := range importedPages {
+		pagePath := cleanPath(importedPage.LocalPath)
+		pageHTML := importedPage.HTML
+		newHTMLBytes := int64(len([]byte(pageHTML)))
+		var previousStoredHTML string
+		_ = a.db.QueryRowContext(ctx, `SELECT html FROM pages WHERE domain=? AND path=?`, domain, pagePath).Scan(&previousStoredHTML)
+		pageDelta += newHTMLBytes - int64(len([]byte(previousStoredHTML)))
+		revisionDelta += newHTMLBytes
+		if frozenDomain {
+			continue
+		}
+		var previousPublishedHTML string
+		_ = a.db.QueryRowContext(ctx, `SELECT html FROM published_pages WHERE domain=? AND path=?`, domain, pagePath).Scan(&previousPublishedHTML)
+		publishedPageDelta += newHTMLBytes - int64(len([]byte(previousPublishedHTML)))
+		publishedStaticDelta += newHTMLBytes - fileSizeBytes(filepath.Join(a.domainStaticDir(domain), staticRelativePathForPage(pagePath)))
+	}
+	return pageDelta, publishedPageDelta, revisionDelta, publishedStaticDelta
+}
+
+func (a *App) estimateImportedFileDelta(domain string, spider *pageSpider) int64 {
+	if a == nil || spider == nil {
+		return 0
+	}
+	baseDir := a.domainFilesDirForDomain(domain)
+	var fileDelta int64
+	for _, resource := range spider.resources {
+		if resource == nil || !resource.persist || strings.TrimSpace(resource.assetPath) == "" || resource.content == nil {
+			continue
+		}
+		assetReference := publicAssetReferenceFromPath(resource.assetPath)
+		if assetReference == "" {
+			continue
+		}
+		targetFilePath := filepath.Join(baseDir, filepath.FromSlash(assetReference))
+		existingSize := fileSizeBytes(targetFilePath)
+		newSize := int64(len(resource.content))
+		if existingSize <= 0 {
+			fileDelta += newSize
+			continue
+		}
+		fileDelta += newSize - existingSize
+	}
+	return fileDelta
 }
 
 func downloadWholeSitePageHTML(client *http.Client, pageURL *url.URL) (string, bool, error) {
@@ -4332,15 +4474,10 @@ func resourceExtensionFromContentType(contentType string) string {
 }
 
 func (a *App) mirrorRemotePage(domain, pagePath, sourceURL string, pageURL *url.URL, fallbackHTML, progressToken string, selectedResourceURLs map[string]struct{}, sourceIP string) string {
-	spider := newPageSpider(domain, pageURL, grabResourceMaxDepth, a.grabTracker, progressToken, sourceIP)
-	spider.selectedResourceURLs = selectedResourceURLs
-	rootResource := &mirroredResource{url: sourceURL, content: []byte(fallbackHTML)}
-	spider.resources[sourceURL] = rootResource
-	spider.rewriteNestedResources(rootResource, 0, "text/html")
-	spider.fetchSelectedResources()
+	spider, html := prepareSinglePageImport(domain, pagePath, sourceURL, pageURL, fallbackHTML, a.grabTracker, progressToken, selectedResourceURLs, sourceIP)
 	_ = a.persistSpiderAssets(spider, pagePath)
 	a.grabTracker.publish(grabProgressEvent{Token: progressToken, Stage: "done", FoundTotal: spider.foundTotal, DownloadedTotal: spider.downloadedTotal, CompletedPercent: 100})
-	return string(rootResource.content)
+	return html
 }
 
 func (a *App) persistSpiderAssets(spider *pageSpider, pagePath string) error {

@@ -56,6 +56,8 @@
       <p id="grab_progress_text">{{index .T "files_preparing"}}</p>
       <div class="progress" id="grab_progress_holder"><div class="progress-bar" id="grab_progress_bar" role="progressbar" style="width:0%;">0%</div></div>
       <small id="grab_progress_url" class="text-muted d-block mt-2"></small>
+      <div id="grab_quota_summary" class="small mt-3 d-none"></div>
+      <div id="grab_quota_warning" class="alert alert-danger mt-3 mb-0 d-none"></div>
       <div id="grab_resource_list" class="list-group small mt-3 d-none" style="max-height:260px;overflow:auto;"></div>
     </div><div class="modal-footer">
       <button type="button" class="btn btn-outline-secondary" id="grab_cancel_button" data-bs-dismiss="modal">{{index .T "edit_cancel"}}</button>
@@ -96,7 +98,16 @@
     reconnectingStatus: "{{index .T "missing_reconnecting_status"}}",
     connectStatusFailed: "{{index .T "missing_connect_status_failed"}}",
     loadPageFailed: "{{index .T "missing_load_page_failed"}}",
-    checkResourcesFailed: "{{index .T "missing_check_resources_failed"}}"
+    checkResourcesFailed: "{{index .T "missing_check_resources_failed"}}",
+    quotaSummaryTitle: "{{index .T "missing_quota_summary_title"}}",
+    quotaCurrentUsed: "{{index .T "missing_quota_current_used"}}",
+    quotaWillAdd: "{{index .T "missing_quota_will_add"}}",
+    quotaFreeSpace: "{{index .T "missing_quota_free_space"}}",
+    quotaAfterImport: "{{index .T "missing_quota_after_import"}}",
+    quotaAfterImportOf: "{{index .T "missing_quota_after_import_of"}}",
+    quotaWillRemain: "{{index .T "missing_quota_will_remain"}}",
+    quotaFits: "{{index .T "missing_quota_fits"}}",
+    quotaExceeded: "{{index .T "missing_quota_exceeded"}}"
   };
   const grabFormElement = document.querySelector('[data-grab-form]');
   if (!grabFormElement) { return; }
@@ -109,6 +120,8 @@
   const progressHolderElement = document.getElementById('grab_progress_holder');
   const progressBarElement = document.getElementById('grab_progress_bar');
   const progressUrlElement = document.getElementById('grab_progress_url');
+  const quotaSummaryElement = document.getElementById('grab_quota_summary');
+  const quotaWarningElement = document.getElementById('grab_quota_warning');
   const resourceListElement = document.getElementById('grab_resource_list');
   const progressModalElement = document.getElementById('grabProgressModal');
   const headerCloseButtonElement = document.getElementById('grab_modal_header_close');
@@ -123,6 +136,7 @@
   let downloadFinished = false;
   let downloadRedirectURL = '';
   let grabRequestInFlight = false;
+  let currentPreviewPayload = null;
 
   function finishDownloadIfReady() {
     if (!downloadFinished || downloadRedirectURL === '') { return; }
@@ -155,6 +169,89 @@
     return (normalizedSize / 1024 / 1024).toFixed(1) + ' MB';
   }
 
+  function formatSignedResourceSize(sizeBytes) {
+    const normalizedSize = Number(sizeBytes) || 0;
+    if (normalizedSize < 0) {
+      return '-' + formatResourceSize(Math.abs(normalizedSize));
+    }
+    return formatResourceSize(normalizedSize);
+  }
+
+  function setQuotaSummaryVisible(visible) {
+    quotaSummaryElement.classList.toggle('d-none', !visible);
+  }
+
+  function setQuotaWarning(messageText) {
+    if (!messageText) {
+      quotaWarningElement.classList.add('d-none');
+      quotaWarningElement.textContent = '';
+      return;
+    }
+    quotaWarningElement.textContent = messageText;
+    quotaWarningElement.classList.remove('d-none');
+  }
+
+  function appendQuotaSummaryLine(labelText, valueText, isEmphasis) {
+    const lineElement = document.createElement('div');
+    lineElement.className = 'd-flex justify-content-between gap-3' + (isEmphasis ? ' fw-semibold' : '');
+    const labelElement = document.createElement('span');
+    labelElement.textContent = labelText;
+    const valueElement = document.createElement('span');
+    valueElement.textContent = valueText;
+    lineElement.appendChild(labelElement);
+    lineElement.appendChild(valueElement);
+    quotaSummaryElement.appendChild(lineElement);
+  }
+
+  function appendQuotaSummaryTitle(titleText) {
+    const titleElement = document.createElement('div');
+    titleElement.className = 'fw-semibold mb-2';
+    titleElement.textContent = titleText;
+    quotaSummaryElement.appendChild(titleElement);
+  }
+
+  function appendQuotaSummaryStatus(messageText, success) {
+    const statusElement = document.createElement('div');
+    statusElement.className = 'mt-2 fw-semibold ' + (success ? 'text-success' : 'text-danger');
+    statusElement.textContent = messageText;
+    quotaSummaryElement.appendChild(statusElement);
+  }
+
+  function updateQuotaSummary() {
+    if (!currentPreviewPayload) {
+      quotaSummaryElement.replaceChildren();
+      setQuotaSummaryVisible(false);
+      setQuotaWarning('');
+      continueButtonElement.disabled = false;
+      return;
+    }
+    let selectedResourceBytes = 0;
+    for (const checkboxElement of resourceListElement.querySelectorAll('input[data-grab-resource-url]')) {
+      if (!checkboxElement.checked) { continue; }
+      selectedResourceBytes += Number(checkboxElement.dataset.grabResourceSizeBytes) || 0;
+    }
+    const pageDownloadBytes = Number(currentPreviewPayload.page_download_bytes) || 0;
+    const pageStorageBytes = Number(currentPreviewPayload.page_storage_bytes) || 0;
+    const currentUsedBytes = Number(currentPreviewPayload.current_used_bytes) || 0;
+    const freeBytes = Number(currentPreviewPayload.free_bytes) || 0;
+    const limitBytes = Number(currentPreviewPayload.limit_bytes) || 0;
+    const totalDownloadBytes = pageDownloadBytes + selectedResourceBytes;
+    const totalStorageBytes = pageStorageBytes + selectedResourceBytes;
+    const projectedUsedBytes = currentUsedBytes + totalStorageBytes;
+    const remainingBytes = limitBytes - projectedUsedBytes;
+    const fitsQuota = projectedUsedBytes <= limitBytes;
+    quotaSummaryElement.replaceChildren();
+    appendQuotaSummaryTitle(uiText.quotaSummaryTitle);
+    appendQuotaSummaryLine(uiText.quotaCurrentUsed, formatSignedResourceSize(currentUsedBytes), false);
+    appendQuotaSummaryLine(uiText.quotaWillAdd, formatSignedResourceSize(totalStorageBytes), false);
+    appendQuotaSummaryLine(uiText.quotaAfterImport, formatSignedResourceSize(projectedUsedBytes) + ' ' + uiText.quotaAfterImportOf + ' ' + formatSignedResourceSize(limitBytes), true);
+    appendQuotaSummaryLine(uiText.quotaWillRemain, formatSignedResourceSize(Math.max(remainingBytes, 0)), false);
+    appendQuotaSummaryStatus(fitsQuota ? uiText.quotaFits : uiText.quotaExceeded, fitsQuota);
+    setQuotaSummaryVisible(true);
+    setQuotaWarning(fitsQuota ? '' : uiText.quotaExceeded);
+    continueButtonElement.disabled = !fitsQuota;
+  }
+
   function syncSelectedResourceFields() {
     for (const selectedResourceElement of grabFormElement.querySelectorAll('input[name="import_resource_url"], input[name="import_selection_confirmed"]')) {
       selectedResourceElement.remove();
@@ -180,6 +277,7 @@
     const checkedCount = checkboxElements.filter(function countChecked(checkboxElement) { return checkboxElement.checked; }).length;
     previewSelectAllElement.checked = checkboxElements.length > 0 && checkedCount === checkboxElements.length;
     previewSelectAllElement.indeterminate = checkedCount > 0 && checkedCount < checkboxElements.length;
+    updateQuotaSummary();
   }
 
   function findResourceRow(resourceURL) {
@@ -274,6 +372,8 @@
     progressHolderElement.classList.remove('d-none');
     progressUrlElement.textContent = sourceUrlElement.value;
     clearResourceList();
+    currentPreviewPayload = null;
+    updateQuotaSummary();
     setProgressPercent(0);
     downloadFinished = false;
     setModalClosable(false);
@@ -288,6 +388,8 @@
     progressHolderElement.classList.add('d-none');
     progressUrlElement.textContent = sourceUrlElement.value;
     clearResourceList();
+    currentPreviewPayload = null;
+    updateQuotaSummary();
     setModalClosable(true);
     cancelButtonElement.classList.add('d-none');
     continueButtonElement.classList.add('d-none');
@@ -303,6 +405,7 @@
     checkboxElement.type = 'checkbox';
     checkboxElement.checked = true;
     checkboxElement.dataset.grabResourceUrl = previewResource.url || '';
+    checkboxElement.dataset.grabResourceSizeBytes = String(Number(previewResource.size_bytes) || 0);
     checkboxElement.addEventListener('change', updatePreviewSelectAllState);
     const kindElement = document.createElement('span');
     kindElement.className = 'badge text-bg-secondary flex-shrink-0';
@@ -366,6 +469,7 @@
     progressTextElement.textContent = uiText.confirmDownloadTextPrefix + ' ' + resourceCount + '.';
     progressUrlElement.textContent = previewPayload.source_url || sourceUrlElement.value;
     clearResourceList();
+    currentPreviewPayload = previewPayload;
     if (resourceCount > 0) {
       resourceListElement.classList.remove('d-none');
       appendPreviewSelectAll();
@@ -374,6 +478,7 @@
       }
       updatePreviewSelectAllState();
     }
+    updateQuotaSummary();
     setModalClosable(true);
     cancelButtonElement.classList.remove('d-none');
     continueButtonElement.classList.remove('d-none');
@@ -385,6 +490,8 @@
     progressTextElement.textContent = uiText.loadingStarted;
     progressHolderElement.classList.remove('d-none');
     progressUrlElement.textContent = '';
+    currentPreviewPayload = null;
+    updateQuotaSummary();
     prepareResourceRowsForDownload();
     setProgressPercent(0);
     setModalClosable(false);

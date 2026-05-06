@@ -1007,6 +1007,76 @@ func TestMirrorRemotePageImportsDocumentMediaAndArchiveLinks(t *testing.T) {
 	}
 }
 
+func TestGrabPreviewReportsQuotaAndGrabRejectsOversizedImport(t *testing.T) {
+	application, rawDB := newTestApplication(t)
+	_, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "admin@example.com", "old")
+	if err != nil {
+		t.Fatalf("insert user: %v", err)
+	}
+	application.ensureDomainStorageUsageRow(context.Background(), "localhost")
+	_, err = rawDB.Exec(`UPDATE domain_storage_usage SET limit_bytes=? WHERE domain=?`, 120, "localhost")
+	if err != nil {
+		t.Fatalf("update storage limit: %v", err)
+	}
+
+	sourceURL := "https://quota.example/page"
+	sourceHTML := `<!doctype html><html><body><a href="https://quota.example/manual.pdf">Manual</a></body></html>`
+
+	previousGrabHTTPClient := newGrabHTTPClient
+	newGrabHTTPClient = func() *http.Client {
+		return &http.Client{Transport: fakeGrabTransport{responses: map[string]fakeGrabResponse{
+			sourceURL:                          {contentType: "text/html", body: sourceHTML},
+			"https://quota.example/manual.pdf": {contentType: "application/pdf", body: strings.Repeat("P", 80)},
+		}}}
+	}
+	defer func() {
+		newGrabHTTPClient = previousGrabHTTPClient
+	}()
+
+	previewForm := url.Values{}
+	previewForm.Set("path", "/quota")
+	previewForm.Set("source_url", sourceURL)
+	previewRequest := httptest.NewRequest(http.MethodPost, "http://localhost:8080/quota?grab_preview", strings.NewReader(previewForm.Encode()))
+	previewRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	previewRequest.Header.Set("Accept", "application/json")
+	previewRequest.AddCookie(newAdminSessionCookie(t, application, "admin@example.com"))
+	previewResponse := httptest.NewRecorder()
+	application.route(previewResponse, previewRequest)
+	if previewResponse.Code != http.StatusOK {
+		t.Fatalf("preview status = %d, body=%q", previewResponse.Code, previewResponse.Body.String())
+	}
+
+	var previewPayload grabPreviewResponse
+	if err := json.Unmarshal(previewResponse.Body.Bytes(), &previewPayload); err != nil {
+		t.Fatalf("decode preview payload: %v", err)
+	}
+	if previewPayload.FitsQuota {
+		t.Fatalf("expected preview to exceed quota, payload=%+v", previewPayload)
+	}
+	if previewPayload.ProjectedUsedBytes <= previewPayload.LimitBytes {
+		t.Fatalf("expected projected usage %d to exceed limit %d", previewPayload.ProjectedUsedBytes, previewPayload.LimitBytes)
+	}
+	if previewPayload.SelectedResourceBytes < 80 {
+		t.Fatalf("expected selected resource bytes to include pdf, payload=%+v", previewPayload)
+	}
+
+	grabForm := url.Values{}
+	grabForm.Set("path", "/quota")
+	grabForm.Set("source_url", sourceURL)
+	grabRequest := httptest.NewRequest(http.MethodPost, "http://localhost:8080/quota?grab", strings.NewReader(grabForm.Encode()))
+	grabRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	grabRequest.Header.Set("Accept", "application/json")
+	grabRequest.AddCookie(newAdminSessionCookie(t, application, "admin@example.com"))
+	grabResponse := httptest.NewRecorder()
+	application.route(grabResponse, grabRequest)
+	if grabResponse.Code != http.StatusInsufficientStorage {
+		t.Fatalf("grab status = %d, body=%q", grabResponse.Code, grabResponse.Body.String())
+	}
+	if !strings.Contains(grabResponse.Body.String(), "storage limit reached:") {
+		t.Fatalf("grab body does not mention storage limit: %q", grabResponse.Body.String())
+	}
+}
+
 func TestRewriteJSResourceReferencesLeavesLibraryCodeIntact(t *testing.T) {
 	pageRawURL := "https://page.example/page"
 	sourceHTML := `<!doctype html><html><body><script src="/js/app.js"></script></body></html>`
