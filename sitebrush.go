@@ -1462,7 +1462,13 @@ func previewResourcesFromSpider(spider *pageSpider, excludedURLs map[string]stru
 		if resource != nil && resource.content != nil {
 			sizeBytes = int64(len(resource.content))
 		}
-		resources = append(resources, grabResourcePreview{URL: resourceURL, Kind: previewResourceKind("", "", resourceURL), SizeBytes: sizeBytes})
+		resourceKind := previewResourceKind("", "", resourceURL)
+		if resource != nil && resourceKind == "file" {
+			if contentTypeKind := resourceKindFromContentType(resource.contentType); contentTypeKind != "" {
+				resourceKind = contentTypeKind
+			}
+		}
+		resources = append(resources, grabResourcePreview{URL: resourceURL, Kind: resourceKind, SizeBytes: sizeBytes})
 	}
 	sort.Slice(resources, func(leftIndex, rightIndex int) bool {
 		if resources[leftIndex].Kind == resources[rightIndex].Kind {
@@ -4114,6 +4120,80 @@ func resourceExtension(rawRef string) string {
 	return strings.ToLower(path.Ext(withoutQuery))
 }
 
+func normalizedResourceContentType(contentTypeHeader string) string {
+	return strings.ToLower(strings.TrimSpace(strings.Split(contentTypeHeader, ";")[0]))
+}
+
+func resourceKindFromContentType(contentType string) string {
+	switch {
+	case contentType == "text/css":
+		return "style"
+	case strings.Contains(contentType, "javascript"), strings.Contains(contentType, "ecmascript"):
+		return "script"
+	case strings.HasPrefix(contentType, "image/"):
+		return "image"
+	case strings.HasPrefix(contentType, "font/"), strings.Contains(contentType, "font"):
+		return "font"
+	case strings.HasPrefix(contentType, "video/"):
+		return "video"
+	case strings.HasPrefix(contentType, "audio/"):
+		return "audio"
+	default:
+		return ""
+	}
+}
+
+func resourceExtensionFromContentType(contentType string) string {
+	switch contentType {
+	case "text/css":
+		return ".css"
+	case "application/javascript", "text/javascript", "application/x-javascript":
+		return ".js"
+	case "application/ecmascript", "text/ecmascript":
+		return ".mjs"
+	case "image/png":
+		return ".png"
+	case "image/jpeg":
+		return ".jpg"
+	case "image/gif":
+		return ".gif"
+	case "image/svg+xml":
+		return ".svg"
+	case "image/webp":
+		return ".webp"
+	case "image/x-icon", "image/vnd.microsoft.icon":
+		return ".ico"
+	case "font/woff":
+		return ".woff"
+	case "font/woff2":
+		return ".woff2"
+	case "font/ttf", "application/x-font-ttf":
+		return ".ttf"
+	case "font/otf", "application/x-font-opentype":
+		return ".otf"
+	case "application/vnd.ms-fontobject":
+		return ".eot"
+	case "video/mp4":
+		return ".mp4"
+	case "video/webm":
+		return ".webm"
+	case "video/quicktime":
+		return ".mov"
+	case "audio/mpeg":
+		return ".mp3"
+	case "audio/ogg":
+		return ".ogg"
+	case "audio/wav", "audio/wave", "audio/x-wav":
+		return ".wav"
+	}
+	extensions, err := mime.ExtensionsByType(contentType)
+	if err != nil || len(extensions) == 0 {
+		return ""
+	}
+	sort.Strings(extensions)
+	return strings.ToLower(strings.TrimSpace(extensions[0]))
+}
+
 func (a *App) mirrorRemotePage(domain, pagePath, sourceURL string, pageURL *url.URL, fallbackHTML, progressToken string, selectedResourceURLs map[string]struct{}, sourceIP string) string {
 	spider := newPageSpider(domain, pageURL, grabResourceMaxDepth, a.grabTracker, progressToken, sourceIP)
 	spider.selectedResourceURLs = selectedResourceURLs
@@ -4143,7 +4223,11 @@ func (a *App) persistSpiderAssets(spider *pageSpider, pagePath string) error {
 		_ = os.MkdirAll(filepath.Dir(targetFilePath), 0o755)
 		_ = os.WriteFile(targetFilePath, resource.content, 0o644)
 		wroteFile = true
-		a.upsertFileMetadata(context.Background(), domainStorageName(spider.domain), assetReference, ownerPath, int64(len(resource.content)), mime.TypeByExtension(path.Ext(assetReference)), "import")
+		resourceContentType := resource.contentType
+		if strings.TrimSpace(resourceContentType) == "" {
+			resourceContentType = mime.TypeByExtension(path.Ext(assetReference))
+		}
+		a.upsertFileMetadata(context.Background(), domainStorageName(spider.domain), assetReference, ownerPath, int64(len(resource.content)), resourceContentType, "import")
 	}
 	if wroteFile && a != nil && a.db != nil {
 		a.rebuildDomainStorageUsage(context.Background(), spider.domain)
@@ -4163,10 +4247,11 @@ func publicAssetReferenceFromPath(assetPath string) string {
 }
 
 type mirroredResource struct {
-	url       string
-	content   []byte
-	assetPath string
-	persist   bool
+	url         string
+	content     []byte
+	assetPath   string
+	contentType string
+	persist     bool
 }
 
 type pageSpider struct {
@@ -4271,7 +4356,8 @@ func (spider *pageSpider) fetchResource(rawURL string, baseURL *url.URL, depth i
 		spider.publishResourceProgress("error", normalizedURL, 0, 0, response.ContentLength)
 		return nil, fmt.Errorf("resource download failed: %s", response.Status)
 	}
-	if !spider.isAllowedResourceContentType(normalizedURL, response.Header.Get("Content-Type")) {
+	resourceContentType := normalizedResourceContentType(response.Header.Get("Content-Type"))
+	if !spider.isAllowedResourceContentType(normalizedURL, resourceContentType) {
 		spider.resources[normalizedURL] = &mirroredResource{url: normalizedURL, persist: persist}
 		spider.publishResourceProgress("error", normalizedURL, 0, 0, response.ContentLength)
 		return nil, fmt.Errorf("resource content-type rejected: %s", response.Header.Get("Content-Type"))
@@ -4282,9 +4368,9 @@ func (spider *pageSpider) fetchResource(rawURL string, baseURL *url.URL, depth i
 		spider.publishResourceProgress("error", normalizedURL, 0, 0, response.ContentLength)
 		return nil, err
 	}
-	resource := &mirroredResource{url: normalizedURL, content: body, persist: persist}
+	resource := &mirroredResource{url: normalizedURL, content: body, contentType: resourceContentType, persist: persist}
 	if persist {
-		assetPath := spider.assetPathFor(body, normalizedURL)
+		assetPath := spider.assetPathFor(body, normalizedURL, resourceContentType)
 		if assetPath != "" {
 			resource.assetPath = assetPath
 		}
@@ -4292,7 +4378,7 @@ func (spider *pageSpider) fetchResource(rawURL string, baseURL *url.URL, depth i
 	spider.resources[normalizedURL] = resource
 	spider.downloadedTotal++
 	spider.publishResourceProgress("downloaded", normalizedURL, 100, int64(len(body)), response.ContentLength)
-	spider.rewriteNestedResources(resource, depth+1, response.Header.Get("Content-Type"))
+	spider.rewriteNestedResources(resource, depth+1, resourceContentType)
 	return resource, nil
 }
 
@@ -4648,12 +4734,15 @@ func (spider *pageSpider) shouldSkipMirrorResource(resourceURL string) bool {
 	return false
 }
 
-func (spider *pageSpider) isAllowedResourceContentType(resourceURL, contentTypeHeader string) bool {
-	contentType := strings.ToLower(strings.TrimSpace(strings.Split(contentTypeHeader, ";")[0]))
+func (spider *pageSpider) isAllowedResourceContentType(resourceURL, contentType string) bool {
 	if contentType == "" {
 		return hasAllowedGrabResourceExtension(resourceURL)
 	}
-	switch resourceKindFromURL(resourceURL) {
+	resourceKind := resourceKindFromURL(resourceURL)
+	if resourceKind == "" {
+		resourceKind = resourceKindFromContentType(contentType)
+	}
+	switch resourceKind {
 	case "style":
 		return contentType == "text/css"
 	case "script":
@@ -4706,8 +4795,11 @@ func (spider *pageSpider) shouldPersistResource(normalizedURL string) bool {
 	return selected
 }
 
-func (spider *pageSpider) assetPathFor(fileBytes []byte, sourceURL string) string {
+func (spider *pageSpider) assetPathFor(fileBytes []byte, sourceURL, contentType string) string {
 	extension := resourceExtension(sourceURL)
+	if extension == "" {
+		extension = resourceExtensionFromContentType(contentType)
+	}
 	if extension == "" {
 		extension = ".bin"
 	}

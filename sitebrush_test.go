@@ -877,6 +877,64 @@ func TestMirrorRemotePageImportsNestedExternalResources(t *testing.T) {
 	}
 }
 
+func TestMirrorRemotePageImportsCrossDomainAssetsWithoutURLExtensions(t *testing.T) {
+	pageRawURL := "https://page.example/page"
+	sourceHTML := `<!doctype html><html><head>` +
+		`<link rel="stylesheet" href="https://cdn.example/styles?id=42">` +
+		`</head><body><img src="https://img.example/render?asset=hero"></body></html>`
+
+	previousGrabHTTPClient := newGrabHTTPClient
+	newGrabHTTPClient = func() *http.Client {
+		return &http.Client{Transport: fakeGrabTransport{responses: map[string]fakeGrabResponse{
+			"https://cdn.example/styles?id=42":      {contentType: "text/css; charset=utf-8", body: `@font-face{src:url("https://fonts.example/open?id=7")} body{background:url("https://img.example/bg?asset=1")}`},
+			"https://fonts.example/open?id=7":       {contentType: "font/woff2", body: "font"},
+			"https://img.example/bg?asset=1":        {contentType: "image/png", body: "bg"},
+			"https://img.example/render?asset=hero": {contentType: "image/png", body: "hero"},
+		}}}
+	}
+	defer func() {
+		newGrabHTTPClient = previousGrabHTTPClient
+	}()
+
+	pageURL, parseErr := url.Parse(pageRawURL)
+	if parseErr != nil {
+		t.Fatal(parseErr)
+	}
+	previewResources := previewGrabResources(pageURL, sourceHTML, nil, "", "")
+	if len(previewResources) != 4 {
+		t.Fatalf("expected 4 preview resources, got %d: %#v", len(previewResources), previewResources)
+	}
+
+	selectedResourceURLs := make(map[string]struct{}, len(previewResources))
+	for _, previewResource := range previewResources {
+		selectedResourceURLs[previewResource.URL] = struct{}{}
+	}
+	application, _ := newTestApplication(t)
+	importedHTML := application.mirrorRemotePage("example.test", "/imported", pageRawURL, pageURL, sourceHTML, "", selectedResourceURLs, "")
+	if strings.Contains(importedHTML, "cdn.example") || strings.Contains(importedHTML, "img.example") || strings.Contains(importedHTML, "fonts.example") {
+		t.Fatalf("imported HTML still references external extensionless assets: %s", importedHTML)
+	}
+	if !strings.Contains(importedHTML, "/p/") {
+		t.Fatalf("imported HTML does not reference local assets: %s", importedHTML)
+	}
+
+	storedFiles, listErr := listStoredFiles(application.domainFilesDirForDomain("example.test"))
+	if listErr != nil {
+		t.Fatal(listErr)
+	}
+	expectedExtensions := map[string]bool{".css": false, ".woff2": false, ".png": false}
+	for _, storedFilePath := range storedFiles {
+		if _, tracked := expectedExtensions[filepath.Ext(storedFilePath)]; tracked {
+			expectedExtensions[filepath.Ext(storedFilePath)] = true
+		}
+	}
+	for expectedExtension, found := range expectedExtensions {
+		if !found {
+			t.Fatalf("expected imported extensionless asset with extension %s, stored files: %#v", expectedExtension, storedFiles)
+		}
+	}
+}
+
 func TestGrabPageCanCopyWholeExternalSiteUnderLocalPath(t *testing.T) {
 	application, rawDB := newTestApplication(t)
 	_, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "admin@example.com", "old")
@@ -1024,6 +1082,73 @@ func TestGrabPageCanCopyWholeExternalSiteUnderLocalPath(t *testing.T) {
 	application.route(assetResponse, assetRequest)
 	if assetResponse.Code != http.StatusOK {
 		t.Fatalf("base-prefixed asset status = %d, path=%q", assetResponse.Code, rootHTML[assetPrefixIndex:assetPathEnd])
+	}
+}
+
+func TestGrabPageCanCopyWholeExternalSiteWithCrossDomainAssetsWithoutURLExtensions(t *testing.T) {
+	application, rawDB := newTestApplication(t)
+	_, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "admin@example.com", "old")
+	if err != nil {
+		t.Fatalf("insert user: %v", err)
+	}
+
+	sourceBaseURL := "https://source.example"
+	previousGrabHTTPClient := newGrabHTTPClient
+	newGrabHTTPClient = func() *http.Client {
+		return &http.Client{Transport: fakeGrabTransport{responses: map[string]fakeGrabResponse{
+			sourceBaseURL + "/":                     {contentType: "text/html", body: `<!doctype html><html><head><link rel="stylesheet" href="https://cdn.example/theme?id=5"></head><body><img src="https://img.example/render?asset=hero"><a href="/about">About</a></body></html>`},
+			sourceBaseURL + "/about":                {contentType: "text/html", body: `<!doctype html><html><body><a href="/">Home</a></body></html>`},
+			"https://cdn.example/theme?id=5":        {contentType: "text/css; charset=utf-8", body: `@font-face{src:url("https://fonts.example/family?id=7")} body{background:url("https://img.example/bg?asset=1")}`},
+			"https://fonts.example/family?id=7":     {contentType: "font/woff2", body: "font"},
+			"https://img.example/bg?asset=1":        {contentType: "image/png", body: "bg"},
+			"https://img.example/render?asset=hero": {contentType: "image/png", body: "hero"},
+		}}}
+	}
+	defer func() {
+		newGrabHTTPClient = previousGrabHTTPClient
+	}()
+
+	form := url.Values{}
+	form.Set("path", "/URI")
+	form.Set("source_url", sourceBaseURL+"/")
+	form.Set("copy_whole_site", "1")
+	request := httptest.NewRequest(http.MethodPost, "http://localhost:8080/URI?grab", strings.NewReader(form.Encode()))
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	request.Header.Set("Accept", "application/json")
+	request.AddCookie(newAdminSessionCookie(t, application, "admin@example.com"))
+	response := httptest.NewRecorder()
+	application.route(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("whole-site import status = %d, body=%q", response.Code, response.Body.String())
+	}
+
+	var rootHTML string
+	if err := rawDB.QueryRow(`SELECT html FROM pages WHERE domain=? AND path=?`, "localhost", "/URI").Scan(&rootHTML); err != nil {
+		t.Fatalf("read root imported page: %v", err)
+	}
+	if strings.Contains(rootHTML, "cdn.example") || strings.Contains(rootHTML, "img.example") || strings.Contains(rootHTML, "fonts.example") {
+		t.Fatalf("whole-site import still references external extensionless assets: %s", rootHTML)
+	}
+	for _, expectedFragment := range []string{`href="/URI/p/`, `src="/URI/p/`} {
+		if !strings.Contains(rootHTML, expectedFragment) {
+			t.Fatalf("whole-site import missing local asset fragment %q in %s", expectedFragment, rootHTML)
+		}
+	}
+
+	storedFiles, listErr := listStoredFiles(application.domainFilesDirForDomain("localhost"))
+	if listErr != nil {
+		t.Fatal(listErr)
+	}
+	expectedExtensions := map[string]bool{".css": false, ".woff2": false, ".png": false}
+	for _, storedFilePath := range storedFiles {
+		if _, tracked := expectedExtensions[filepath.Ext(storedFilePath)]; tracked {
+			expectedExtensions[filepath.Ext(storedFilePath)] = true
+		}
+	}
+	for expectedExtension, found := range expectedExtensions {
+		if !found {
+			t.Fatalf("expected whole-site imported extensionless asset with extension %s, stored files: %#v", expectedExtension, storedFiles)
+		}
 	}
 }
 
