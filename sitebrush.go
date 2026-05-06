@@ -41,6 +41,7 @@ import (
 	"golang.org/x/crypto/acme/autocert"
 	"golang.org/x/net/html"
 	"sitebrush/pkg/desktop"
+	"sitebrush/pkg/diskusage"
 )
 
 //go:embed web/*
@@ -2022,6 +2023,9 @@ func (a *App) uploadFiles(w http.ResponseWriter, r *http.Request, currentPath st
 		uploadedNames = append(uploadedNames, storedName)
 	}
 
+	if len(uploadedNames) > 0 {
+		a.rebuildDomainStorageUsage(r.Context(), siteDomain)
+	}
 	if wantsJSONResponse(r) {
 		uploadedPaths := make([]string, 0, len(uploadedNames))
 		for _, uploadedName := range uploadedNames {
@@ -2132,6 +2136,7 @@ func (usage domainStorageUsage) totalBytes() int64 {
 }
 
 func (a *App) domainStorageUsage(ctx context.Context, domain string) domainStorageUsage {
+	a.rebuildDomainStorageUsage(ctx, domain)
 	a.ensureDomainStorageUsageRow(ctx, domain)
 	usage := domainStorageUsage{LimitBytes: defaultDomainStorageLimitBytes}
 	_ = a.db.QueryRowContext(ctx, `SELECT page_bytes,published_page_bytes,revision_bytes,file_bytes,published_static_bytes,limit_bytes FROM domain_storage_usage WHERE domain=?`, domain).Scan(&usage.PageBytes, &usage.PublishedPageBytes, &usage.RevisionBytes, &usage.FileBytes, &usage.PublishedStaticBytes, &usage.LimitBytes)
@@ -2152,7 +2157,8 @@ func (a *App) applyDomainStorageDelta(ctx context.Context, domain string, pageDe
 	a.ensureDomainStorageUsageRow(ctx, domain)
 	totalDelta := pageDelta + publishedPageDelta + revisionDelta + fileDelta + publishedStaticDelta
 	now := time.Now().UTC().Format(time.RFC3339)
-	result, err := a.db.ExecContext(ctx, `UPDATE domain_storage_usage
+	updateUsage := func() (int64, error) {
+		result, err := a.db.ExecContext(ctx, `UPDATE domain_storage_usage
 SET page_bytes=page_bytes+?,
     published_page_bytes=published_page_bytes+?,
     revision_bytes=revision_bytes+?,
@@ -2166,14 +2172,23 @@ WHERE domain=?
   AND file_bytes+?>=0
   AND published_static_bytes+?>=0
   AND page_bytes+published_page_bytes+revision_bytes+file_bytes+published_static_bytes+?<=limit_bytes`,
-		pageDelta, publishedPageDelta, revisionDelta, fileDelta, publishedStaticDelta, now, domain,
-		pageDelta, publishedPageDelta, revisionDelta, fileDelta, publishedStaticDelta, totalDelta)
+			pageDelta, publishedPageDelta, revisionDelta, fileDelta, publishedStaticDelta, now, domain,
+			pageDelta, publishedPageDelta, revisionDelta, fileDelta, publishedStaticDelta, totalDelta)
+		if err != nil {
+			return 0, err
+		}
+		return result.RowsAffected()
+	}
+	updatedRowsCount, err := updateUsage()
 	if err != nil {
 		return err
 	}
-	updatedRowsCount, rowsErr := result.RowsAffected()
-	if rowsErr != nil {
-		return rowsErr
+	if updatedRowsCount == 0 {
+		a.rebuildDomainStorageUsage(ctx, domain)
+		updatedRowsCount, err = updateUsage()
+		if err != nil {
+			return err
+		}
 	}
 	if updatedRowsCount == 0 {
 		usage := a.domainStorageUsage(ctx, domain)
@@ -2217,8 +2232,8 @@ func (a *App) rebuildDomainStorageUsage(ctx context.Context, domain string) {
 	pageBytes := a.sumHTMLColumnBytes(ctx, `SELECT html FROM pages WHERE domain=?`, domain)
 	publishedPageBytes := a.sumHTMLColumnBytes(ctx, `SELECT html FROM published_pages WHERE domain=?`, domain)
 	revisionBytes := a.sumHTMLColumnBytes(ctx, `SELECT html FROM revisions WHERE domain=?`, domain)
-	fileBytes := directorySizeBytes(a.domainFilesDirForDomain(domain))
-	publishedStaticBytes := directorySizeBytes(a.domainStaticDir(domain))
+	fileBytes := diskusage.DirectorySize(a.domainFilesDirForDomain(domain))
+	publishedStaticBytes := diskusage.DirectorySize(a.domainStaticDir(domain))
 	a.ensureDomainStorageUsageRow(ctx, domain)
 	_, _ = a.db.ExecContext(ctx, `UPDATE domain_storage_usage SET page_bytes=?, published_page_bytes=?, revision_bytes=?, file_bytes=?, published_static_bytes=?, updated_at=?, limit_bytes=COALESCE(NULLIF(limit_bytes,0),?) WHERE domain=?`,
 		pageBytes, publishedPageBytes, revisionBytes, fileBytes, publishedStaticBytes, time.Now().UTC().Format(time.RFC3339), defaultDomainStorageLimitBytes, domain)
@@ -2241,28 +2256,8 @@ func (a *App) sumHTMLColumnBytes(ctx context.Context, query string, domain strin
 	return totalBytes
 }
 
-func directorySizeBytes(rootPath string) int64 {
-	var totalBytes int64
-	_ = filepath.WalkDir(rootPath, func(currentPath string, currentEntry fs.DirEntry, walkErr error) error {
-		if walkErr != nil || currentEntry.IsDir() {
-			return nil
-		}
-		fileInfo, statErr := currentEntry.Info()
-		if statErr != nil {
-			return nil
-		}
-		totalBytes += fileInfo.Size()
-		return nil
-	})
-	return totalBytes
-}
-
 func fileSizeBytes(filePath string) int64 {
-	fileInfo, err := os.Stat(filePath)
-	if err != nil || fileInfo.IsDir() {
-		return 0
-	}
-	return fileInfo.Size()
+	return diskusage.FileSize(filePath)
 }
 
 func fileExtensionLabel(fileName string) string {
@@ -3560,6 +3555,7 @@ func (a *App) persistSpiderAssets(spider *pageSpider, pagePath string) error {
 	baseDir := a.domainFilesDirForDomain(spider.domain)
 	_ = os.MkdirAll(baseDir, 0o755)
 	ownerPath := cleanPath(pagePath)
+	wroteFile := false
 	for _, resource := range spider.resources {
 		if !resource.persist || strings.TrimSpace(resource.assetPath) == "" {
 			continue
@@ -3575,7 +3571,11 @@ func (a *App) persistSpiderAssets(spider *pageSpider, pagePath string) error {
 		targetFilePath := filepath.Join(baseDir, filepath.FromSlash(assetReference))
 		_ = os.MkdirAll(filepath.Dir(targetFilePath), 0o755)
 		_ = os.WriteFile(targetFilePath, resource.content, 0o644)
+		wroteFile = true
 		a.upsertFileMetadata(context.Background(), domainStorageName(spider.domain), assetReference, ownerPath, int64(len(resource.content)), mime.TypeByExtension(path.Ext(assetReference)), "import")
+	}
+	if wroteFile && a != nil && a.db != nil {
+		a.rebuildDomainStorageUsage(context.Background(), spider.domain)
 	}
 	return nil
 }

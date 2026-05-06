@@ -21,6 +21,7 @@ import (
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
+	"sitebrush/pkg/diskusage"
 )
 
 type fakeGrabTransport struct {
@@ -193,6 +194,28 @@ func TestContextMenuUsesDirectEditorProfileAndDeleteActions(t *testing.T) {
 		if !strings.Contains(body, expectedFragment) {
 			t.Fatalf("context menu missing navigation guard %q in %s", expectedFragment, body)
 		}
+	}
+}
+
+func TestDomainStorageUsageRebuildsFromActualDiskUsage(t *testing.T) {
+	application, rawDB := newTestApplication(t)
+	domainFilesDir := application.domainFilesDirForDomain("localhost")
+	if err := os.MkdirAll(filepath.Join(domainFilesDir, "assets"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(domainFilesDir, "assets", "imported.png"), []byte("imported image"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := rawDB.Exec(`INSERT OR REPLACE INTO domain_storage_usage(domain,page_bytes,published_page_bytes,revision_bytes,file_bytes,published_static_bytes,limit_bytes,updated_at) VALUES(?,?,?,?,?,?,?,?)`,
+		"localhost", 0, 0, 0, 0, 0, defaultDomainStorageLimitBytes, time.Now().Format(time.RFC3339))
+	if err != nil {
+		t.Fatalf("seed stale storage usage: %v", err)
+	}
+
+	usage := application.domainStorageUsage(context.Background(), "localhost")
+	expectedFileBytes := diskusage.DirectorySize(domainFilesDir)
+	if usage.FileBytes != expectedFileBytes {
+		t.Fatalf("file bytes = %d, want actual disk usage %d", usage.FileBytes, expectedFileBytes)
 	}
 }
 
@@ -722,7 +745,7 @@ func TestMirrorRemotePageImportsNestedExternalResources(t *testing.T) {
 	for _, previewResource := range previewResources {
 		selectedResourceURLs[previewResource.URL] = struct{}{}
 	}
-	application := &App{storagePath: t.TempDir(), grabTracker: newGrabProgressTracker()}
+	application, _ := newTestApplication(t)
 	importedHTML := application.mirrorRemotePage("example.test", "/imported", pageRawURL, pageURL, sourceHTML, "", selectedResourceURLs, "")
 	if strings.Contains(importedHTML, assetBaseURL) {
 		t.Fatalf("imported HTML still references external asset host: %s", importedHTML)
@@ -740,6 +763,11 @@ func TestMirrorRemotePageImportsNestedExternalResources(t *testing.T) {
 	}
 	if len(storedFiles) != len(previewResources) {
 		t.Fatalf("expected %d stored files, got %d: %#v", len(previewResources), len(storedFiles), storedFiles)
+	}
+	usage := application.domainStorageUsage(context.Background(), "example.test")
+	expectedFileBytes := diskusage.DirectorySize(application.domainFilesDirForDomain("example.test"))
+	if usage.FileBytes != expectedFileBytes {
+		t.Fatalf("imported asset bytes = %d, want actual disk usage %d", usage.FileBytes, expectedFileBytes)
 	}
 	storedFontWithCleanExtension := false
 	for _, storedFilePath := range storedFiles {
