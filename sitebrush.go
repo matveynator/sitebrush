@@ -692,6 +692,10 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 		a.servePublicAsset(w, r)
 		return
 	}
+	if hasQueryFlag(r, "logout") {
+		a.logout(w, r)
+		return
+	}
 	if hasQueryFlag(r, "save") {
 		if r.Method != http.MethodPost {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -794,10 +798,6 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 	}
 	if hasQueryFlag(r, "login") {
 		a.login(w, r)
-		return
-	}
-	if hasQueryFlag(r, "logout") {
-		a.logout(w, r)
 		return
 	}
 	if hasQueryFlag(r, "register") {
@@ -985,7 +985,7 @@ func (a *App) renderLoginPage(w http.ResponseWriter, r *http.Request, returnPath
 
 func (a *App) logout(w http.ResponseWriter, r *http.Request) {
 	http.SetCookie(w, &http.Cookie{Name: "sitebrush_session", Value: "", Path: "/", Expires: time.Unix(0, 0)})
-	http.Redirect(w, r, "/", http.StatusFound)
+	http.Redirect(w, r, requestedReturnTarget(r), http.StatusFound)
 }
 
 func (a *App) editPage(w http.ResponseWriter, r *http.Request) {
@@ -1148,6 +1148,7 @@ func requestedReturnTarget(r *http.Request) string {
 	}
 	queryValues := r.URL.Query()
 	queryValues.Del("login")
+	queryValues.Del("logout")
 	queryValues.Del("return_path")
 	encodedQuery := queryValues.Encode()
 	if encodedQuery == "" {
@@ -1972,6 +1973,140 @@ func previewResourceKind(tagName, attributeName, rawRef string) string {
 		return resourceKind
 	}
 	return "file"
+}
+
+type importedHTMLCleanupRule struct {
+	name    string
+	matches func(*html.Node) bool
+}
+
+var legacyImportedSiteBrushCleanupRules = []importedHTMLCleanupRule{
+	{name: "sitebrush-comment", matches: isLegacySiteBrushCommentNode},
+	{name: "sitebrush-menu-container", matches: isLegacySiteBrushMenuContainerNode},
+	{name: "sitebrush-context-script", matches: isLegacySiteBrushContextScriptNode},
+	{name: "sitebrush-context-style", matches: isLegacySiteBrushContextStyleNode},
+}
+
+func cleanupLegacyImportedSiteBrushHTML(source string) string {
+	loweredSource := strings.ToLower(source)
+	if !strings.Contains(loweredSource, "sitebrush") && !strings.Contains(loweredSource, "jqcontextmenu") && !strings.Contains(loweredSource, "contextmenu") {
+		return source
+	}
+	documentNode, parseErr := html.Parse(strings.NewReader(source))
+	if parseErr != nil {
+		return source
+	}
+	removeImportedHTMLNodes(documentNode)
+	var rendered bytes.Buffer
+	if renderErr := html.Render(&rendered, documentNode); renderErr != nil {
+		return source
+	}
+	return rendered.String()
+}
+
+func removeImportedHTMLNodes(parentNode *html.Node) {
+	if parentNode == nil {
+		return
+	}
+	for childNode := parentNode.FirstChild; childNode != nil; {
+		nextNode := childNode.NextSibling
+		if shouldRemoveImportedHTMLNode(childNode) {
+			parentNode.RemoveChild(childNode)
+		} else {
+			removeImportedHTMLNodes(childNode)
+		}
+		childNode = nextNode
+	}
+}
+
+func shouldRemoveImportedHTMLNode(node *html.Node) bool {
+	for _, cleanupRule := range legacyImportedSiteBrushCleanupRules {
+		if cleanupRule.matches(node) {
+			return true
+		}
+	}
+	return false
+}
+
+func isLegacySiteBrushCommentNode(node *html.Node) bool {
+	return node != nil && node.Type == html.CommentNode && strings.Contains(strings.ToLower(node.Data), "powered by sitebrush")
+}
+
+func isLegacySiteBrushMenuContainerNode(node *html.Node) bool {
+	if node == nil || node.Type != html.ElementNode {
+		return false
+	}
+	nodeID := strings.ToLower(strings.TrimSpace(htmlAttribute(node, "id")))
+	if nodeID == "sitebrushmenu" || nodeID == "jqcontextmenu" {
+		return true
+	}
+	nodeClass := htmlClassSet(node)
+	return nodeClass["sitebrushcontextmenu"] || nodeClass["contextmenucopyright"] || (nodeClass["contextmenu"] && nodeClass["sitebrushmenu"])
+}
+
+func isLegacySiteBrushContextScriptNode(node *html.Node) bool {
+	if node == nil || node.Type != html.ElementNode || node.Data != "script" {
+		return false
+	}
+	scriptSource := strings.ToLower(htmlNodeText(node))
+	if scriptSource == "" {
+		return false
+	}
+	for _, marker := range []string{"$.fn.contextmenu", "jqcontextmenu", "$('#sitebrush').contextmenu(", `$("#sitebrush").contextmenu(`, "div.contextmenu", "sitebrushmenu"} {
+		if strings.Contains(scriptSource, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func isLegacySiteBrushContextStyleNode(node *html.Node) bool {
+	if node == nil || node.Type != html.ElementNode || node.Data != "style" {
+		return false
+	}
+	styleSource := strings.ToLower(htmlNodeText(node))
+	if styleSource == "" {
+		return false
+	}
+	for _, marker := range []string{".sitebrushcontextmenu", ".contextmenucopyright", ".sitebrushmenu", "div.contextmenu"} {
+		if strings.Contains(styleSource, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func htmlAttribute(node *html.Node, attributeKey string) string {
+	if node == nil {
+		return ""
+	}
+	for _, attribute := range node.Attr {
+		if strings.EqualFold(strings.TrimSpace(attribute.Key), attributeKey) {
+			return attribute.Val
+		}
+	}
+	return ""
+}
+
+func htmlClassSet(node *html.Node) map[string]bool {
+	classSet := make(map[string]bool)
+	for _, className := range strings.Fields(strings.ToLower(htmlAttribute(node, "class"))) {
+		classSet[className] = true
+	}
+	return classSet
+}
+
+func htmlNodeText(node *html.Node) string {
+	if node == nil {
+		return ""
+	}
+	var textBuilder strings.Builder
+	for childNode := node.FirstChild; childNode != nil; childNode = childNode.NextSibling {
+		if childNode.Type == html.TextNode || childNode.Type == html.CommentNode {
+			textBuilder.WriteString(childNode.Data)
+		}
+	}
+	return textBuilder.String()
 }
 
 func (a *App) grabProgressWS(w http.ResponseWriter, r *http.Request) {
@@ -4742,6 +4877,9 @@ func (spider *pageSpider) rewriteNestedResources(resource *mirroredResource, dep
 		return
 	}
 	source := string(resource.content)
+	if isHTML {
+		source = cleanupLegacyImportedSiteBrushHTML(source)
+	}
 	rewritten := source
 	if isHTML || isCSS {
 		rewritten = spider.rewriteTextReferences(source, resource.url, depth)

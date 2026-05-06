@@ -1436,6 +1436,102 @@ func TestMirrorRemotePageBlanksSameOriginEmbeddedHTMLFrames(t *testing.T) {
 	}
 }
 
+func TestMirrorRemotePageRemovesLegacySiteBrushMenuChrome(t *testing.T) {
+	pageRawURL := "https://legacy.example/rotorway4"
+	sourceHTML := `<!DOCTYPE html>
+<!-- Powered by SiteBrush | http://sitebrush.com/ -->
+<html lang="en" id="SiteBrush">
+<head>
+<script src="https://legacy.example/p/js/jquery/jquery.js" type="text/javascript"></script>
+<script type="text/javascript">
+$.fn.contextMenu = function(id, options) { return this; };
+jQuery(function($) { $('div.contextMenu').hide(); });
+</script>
+<style type="text/css">
+.SiteBrushContextMenu { font-size:14px; }
+.ContextMenuCopyright { font-size:10px; }
+.SiteBrushMenu { visibility:hidden; }
+</style>
+<script type="text/javascript">
+jQuery(document).ready(function($) { $('#SiteBrush').contextMenu('SiteBrushMenu', {}); });
+</script>
+</head>
+<body>
+<div style="visibility:hidden" class="contextMenu SiteBrushMenu" id="SiteBrushMenu">
+<ul>
+<li id="close" class="SiteBrushContextMenu">&nbsp;<img src="https://legacy.example/p/static/lock.png" /> <a href="https://legacy.example/rotorway4?login" class="SiteBrushContextMenu">Войти</a></li>
+<li class="SiteBrushContextMenu ContextMenuCopyright"><a href="http://sitebrush.com" class="SiteBrushContextMenu ContextMenuCopyright">sitebrush</a></li>
+</ul>
+</div>
+<main><img src="https://legacy.example/content.jpg"><script>$(function(){ window.pageReady = true; });</script></main>
+</body></html>`
+
+	previousGrabHTTPClient := newGrabHTTPClient
+	newGrabHTTPClient = func() *http.Client {
+		return &http.Client{Transport: fakeGrabTransport{responses: map[string]fakeGrabResponse{
+			"https://legacy.example/p/js/jquery/jquery.js": {contentType: "application/javascript", body: `window.jQuery = function(){}; window.$ = window.jQuery;`},
+			"https://legacy.example/content.jpg":           {contentType: "image/jpeg", body: "image"},
+		}}}
+	}
+	defer func() {
+		newGrabHTTPClient = previousGrabHTTPClient
+	}()
+
+	pageURL, parseErr := url.Parse(pageRawURL)
+	if parseErr != nil {
+		t.Fatal(parseErr)
+	}
+	previewResources := previewGrabResources(pageURL, sourceHTML, nil, "", "")
+	if len(previewResources) != 2 {
+		t.Fatalf("expected only content resources after legacy menu cleanup, got %d: %#v", len(previewResources), previewResources)
+	}
+	for _, previewResource := range previewResources {
+		if strings.Contains(previewResource.URL, "lock.png") || strings.Contains(previewResource.URL, "?login") {
+			t.Fatalf("legacy sitebrush menu resource leaked into preview: %#v", previewResources)
+		}
+	}
+
+	selectedResourceURLs := make(map[string]struct{}, len(previewResources))
+	for _, previewResource := range previewResources {
+		selectedResourceURLs[previewResource.URL] = struct{}{}
+	}
+	application, rawDB := newTestApplication(t)
+	importedHTML := application.mirrorRemotePage("localhost", "/rotorway4", pageRawURL, pageURL, sourceHTML, "", selectedResourceURLs, "")
+	for _, forbiddenFragment := range []string{"Powered by SiteBrush", `id="SiteBrushMenu"`, "SiteBrushContextMenu", "ContextMenuCopyright", "rotorway4?login", "jqContextMenu", "$.fn.contextMenu"} {
+		if strings.Contains(importedHTML, forbiddenFragment) {
+			t.Fatalf("legacy sitebrush chrome fragment %q remained in imported HTML: %s", forbiddenFragment, importedHTML)
+		}
+	}
+	for _, expectedFragment := range []string{"/p/", "window.pageReady = true"} {
+		if !strings.Contains(importedHTML, expectedFragment) {
+			t.Fatalf("imported HTML missing expected fragment %q: %s", expectedFragment, importedHTML)
+		}
+	}
+
+	_, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "admin@example.com", "old")
+	if err != nil {
+		t.Fatalf("insert user: %v", err)
+	}
+	_, err = rawDB.Exec(`INSERT INTO pages(domain,path,title,html,published) VALUES(?,?,?,?,1)`, "localhost", "/rotorway4", "/rotorway4", importedHTML)
+	if err != nil {
+		t.Fatalf("insert imported page: %v", err)
+	}
+	request := httptest.NewRequest(http.MethodGet, "http://localhost:8080/rotorway4", nil)
+	request.AddCookie(newAdminSessionCookie(t, application, "admin@example.com"))
+	response := httptest.NewRecorder()
+	application.route(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("serve imported page status = %d, body=%q", response.Code, response.Body.String())
+	}
+	body := response.Body.String()
+	if !strings.Contains(body, "SiteBrushMenuBox") {
+		t.Fatalf("served imported page does not contain current sitebrush menu: %s", body)
+	}
+	if strings.Contains(body, `id="SiteBrushMenu"`) || strings.Contains(body, "rotorway4?login") {
+		t.Fatalf("served imported page still exposes legacy sitebrush menu: %s", body)
+	}
+}
+
 func TestParseGrabSourceURLAcceptsCommonURLForms(t *testing.T) {
 	testCases := map[string]string{
 		"https://example.com/path":   "https://example.com/path",
@@ -1464,6 +1560,33 @@ func TestParseGrabSourceURLUsesHTTPDefaultWhenServerIPIsProvided(t *testing.T) {
 	}
 	if parsedSourceURL.String() != "http://expired.example/page" {
 		t.Fatalf("parsed URL = %q, want http://expired.example/page", parsedSourceURL.String())
+	}
+}
+
+func TestLogoutRedirectsToSameURIWithoutLogoutFlag(t *testing.T) {
+	application, rawDB := newTestApplication(t)
+	_, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "admin@example.com", "old")
+	if err != nil {
+		t.Fatalf("insert user: %v", err)
+	}
+
+	testCases := map[string]string{
+		"http://localhost:8080/docs?logout":                "/docs",
+		"http://localhost:8080/docs?logout=&files=":        "/docs?files=",
+		"http://localhost:8080/overmobile/doc?a=1&logout=": "/overmobile/doc?a=1",
+		"http://localhost:8080/?logout=&settings=&x=1":     "/?settings=&x=1",
+	}
+	for requestURL, expectedLocation := range testCases {
+		request := httptest.NewRequest(http.MethodGet, requestURL, nil)
+		request.AddCookie(newAdminSessionCookie(t, application, "admin@example.com"))
+		response := httptest.NewRecorder()
+		application.route(response, request)
+		if response.Code != http.StatusFound {
+			t.Fatalf("logout status for %s = %d, body=%q", requestURL, response.Code, response.Body.String())
+		}
+		if location := response.Header().Get("Location"); location != expectedLocation {
+			t.Fatalf("logout location for %s = %q, want %q", requestURL, location, expectedLocation)
+		}
 	}
 }
 
