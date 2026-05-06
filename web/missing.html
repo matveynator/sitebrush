@@ -33,6 +33,10 @@
     </div>
     <label class="form-label mt-3" for="source_ip">{{index .T "missing_source_ip_label"}}</label>
     <input id="source_ip" name="source_ip" type="text" inputmode="numeric" autocomplete="off" class="form-control" placeholder="{{index .T "missing_source_ip_placeholder"}}">
+    <label class="form-check mt-3" for="copy_whole_site">
+      <input id="copy_whole_site" name="copy_whole_site" type="checkbox" value="1" class="form-check-input">
+      <span class="form-check-label">{{index .T "missing_copy_whole_site"}}</span>
+    </label>
   </form>
 
   <form class="card card-body mt-3" method="post" enctype="multipart/form-data" action="{{.Path}}?backup_import" style="max-width:680px;">
@@ -98,6 +102,7 @@
   if (!grabFormElement) { return; }
   const tokenFieldElement = document.getElementById('progress_token');
   const sourceUrlElement = document.getElementById('source_url');
+  const copyWholeSiteElement = document.getElementById('copy_whole_site');
   const submitButtonElement = grabFormElement.querySelector('button[type="submit"]');
   const modalTitleElement = document.getElementById('grab_modal_title');
   const progressTextElement = document.getElementById('grab_progress_text');
@@ -266,9 +271,11 @@
   function showPreviewLoading() {
     modalTitleElement.textContent = uiText.previewResourcesTitle;
     progressTextElement.textContent = uiText.previewResourcesText;
-    progressHolderElement.classList.add('d-none');
+    progressHolderElement.classList.remove('d-none');
     progressUrlElement.textContent = sourceUrlElement.value;
     clearResourceList();
+    setProgressPercent(0);
+    downloadFinished = false;
     setModalClosable(false);
     cancelButtonElement.classList.remove('d-none');
     continueButtonElement.classList.add('d-none');
@@ -396,7 +403,7 @@
     if (submitButtonElement) { submitButtonElement.disabled = false; }
   }
 
-  function connectProgressStream(progressToken, readyCallback) {
+  function connectProgressStream(progressToken, readyCallback, streamMode) {
     let readyCallbackWasCalled = false;
     progressStream = new EventSource({{printf "%q" .Path}} + '?grab_events&token=' + encodeURIComponent(progressToken));
     progressStream.onmessage = function onProgressStreamMessage(messageEvent) {
@@ -427,9 +434,15 @@
       if (progressState.stage === 'done') {
         downloadFinished = true;
         setProgressPercent(100);
-        progressTextElement.textContent = uiText.doneOpenEditor;
+        if (streamMode === 'preview') {
+          progressTextElement.textContent = uiText.previewResourcesText;
+        } else {
+          progressTextElement.textContent = uiText.doneOpenEditor;
+        }
         progressStream.close();
-        finishDownloadIfReady();
+        if (streamMode !== 'preview') {
+          finishDownloadIfReady();
+        }
       }
       if (progressState.stage === 'error' && !progressState.current_url) {
         showDownloadError(uiText.downloadFailedRetry);
@@ -481,28 +494,40 @@
     connectProgressStream(progressToken, function submitGrabFormAfterProgressReady() {
       confirmedSubmitStarted = true;
       submitGrabRequest();
-    });
+    }, 'download');
   }
 
   function requestGrabPreview() {
+    const progressToken = Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 10);
+    tokenFieldElement.value = progressToken;
     showPreviewLoading();
     if (submitButtonElement) { submitButtonElement.disabled = true; }
-    const previewRequestBody = new FormData(grabFormElement);
-    fetch({{printf "%q" .Path}} + '?grab_preview', { method: 'POST', body: previewRequestBody, headers: { 'Accept': 'application/json' } })
-      .then(function handlePreviewHTTPResponse(previewHTTPResponse) {
-        if (!previewHTTPResponse.ok) {
-          return previewHTTPResponse.text().then(function throwPreviewHTTPError(errorText) {
-            throw new Error(errorText || uiText.checkResourcesFailed);
-          });
-        }
-        return previewHTTPResponse.json();
-      })
-      .then(function handlePreviewPayload(previewPayload) {
-        showResourcePreview(previewPayload);
-      })
-      .catch(function handlePreviewFailure(previewError) {
-        showPreviewError(previewError);
-      });
+    connectProgressStream(progressToken, function submitPreviewAfterProgressReady() {
+      const previewRequestBody = new FormData(grabFormElement);
+      fetch({{printf "%q" .Path}} + '?grab_preview', { method: 'POST', body: previewRequestBody, headers: { 'Accept': 'application/json' } })
+        .then(function handlePreviewHTTPResponse(previewHTTPResponse) {
+          if (!previewHTTPResponse.ok) {
+            return previewHTTPResponse.text().then(function throwPreviewHTTPError(errorText) {
+              throw new Error(errorText || uiText.checkResourcesFailed);
+            });
+          }
+          return previewHTTPResponse.json();
+        })
+        .then(function handlePreviewPayload(previewPayload) {
+          if (progressStream) {
+            progressStream.close();
+            progressStream = null;
+          }
+          showResourcePreview(previewPayload);
+        })
+        .catch(function handlePreviewFailure(previewError) {
+          if (progressStream) {
+            progressStream.close();
+            progressStream = null;
+          }
+          showPreviewError(previewError);
+        });
+    }, 'preview');
   }
 
   continueButtonElement.addEventListener('click', function onContinueClick() {

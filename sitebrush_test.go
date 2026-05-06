@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"io"
 	"io/fs"
 	"mime/multipart"
@@ -723,6 +724,7 @@ func TestMirrorRemotePageImportsNestedExternalResources(t *testing.T) {
 			assetBaseURL + "/style.css":        {contentType: "text/css", body: `@import url("/nested.css"); body{background:url("/image.png")} @font-face{src:url("/font.eot?v=1#iefix")}`},
 			assetBaseURL + "/nested.css":       {contentType: "text/css", body: `.nested{background:url("/nested-image.png")}`},
 			assetBaseURL + "/app.js":           {contentType: "application/javascript", body: `import "/module.js"; console.log("app");`},
+			assetBaseURL + "/module.js":        {contentType: "application/javascript", body: `console.log("module");`},
 			assetBaseURL + "/font.eot?v=1":     {contentType: "application/vnd.ms-fontobject", body: "font"},
 			assetBaseURL + "/image.png":        {contentType: "image/png", body: "png"},
 			assetBaseURL + "/nested-image.png": {contentType: "image/png", body: "nested-png"},
@@ -736,9 +738,9 @@ func TestMirrorRemotePageImportsNestedExternalResources(t *testing.T) {
 	if parseErr != nil {
 		t.Fatal(parseErr)
 	}
-	previewResources := previewGrabResources(pageURL, sourceHTML, "")
-	if len(previewResources) != 6 {
-		t.Fatalf("expected 6 preview resources, got %d: %#v", len(previewResources), previewResources)
+	previewResources := previewGrabResources(pageURL, sourceHTML, nil, "", "")
+	if len(previewResources) != 7 {
+		t.Fatalf("expected 7 preview resources, got %d: %#v", len(previewResources), previewResources)
 	}
 
 	selectedResourceURLs := make(map[string]struct{})
@@ -792,6 +794,156 @@ func TestMirrorRemotePageImportsNestedExternalResources(t *testing.T) {
 		if strings.Contains(importedHTML, forbiddenFragment) && forbiddenFragment != "youtube.com/embed/demo" {
 			t.Fatalf("imported HTML still contains forbidden fragment %q: %s", forbiddenFragment, importedHTML)
 		}
+	}
+}
+
+func TestGrabPageCanCopyWholeExternalSiteUnderLocalPath(t *testing.T) {
+	application, rawDB := newTestApplication(t)
+	_, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "admin@example.com", "old")
+	if err != nil {
+		t.Fatalf("insert user: %v", err)
+	}
+
+	sourceBaseURL := "https://source.example"
+	previousGrabHTTPClient := newGrabHTTPClient
+	newGrabHTTPClient = func() *http.Client {
+		return &http.Client{Transport: fakeGrabTransport{responses: map[string]fakeGrabResponse{
+			sourceBaseURL + "/":                 {contentType: "text/html", body: `<!doctype html><html><head><link rel="stylesheet" href="/style.css"><script src="/app.js"></script></head><body><a href="/about">About</a><a href="https://outside.example/x">Outside</a><img src="/images/logo.png"></body></html>`},
+			sourceBaseURL + "/about":            {contentType: "text/html", body: `<!doctype html><html><body><a href="/">Home</a><a href="contact.html">Contact</a><img src="about.png"><iframe src="/contact.html"></iframe></body></html>`},
+			sourceBaseURL + "/contact.html":     {contentType: "text/html", body: `<!doctype html><html><body><a href="/about">About</a></body></html>`},
+			sourceBaseURL + "/style.css":        {contentType: "text/css", body: `@import url("/nested.css"); body{background:url("/images/bg.png")}`},
+			sourceBaseURL + "/nested.css":       {contentType: "text/css", body: `.nested{background:url("/fonts/font.woff2")}`},
+			sourceBaseURL + "/app.js":           {contentType: "application/javascript", body: `import "/chunk.js"; const icon = "/icons/icon.svg";`},
+			sourceBaseURL + "/chunk.js":         {contentType: "application/javascript", body: `console.log("chunk");`},
+			sourceBaseURL + "/images/logo.png":  {contentType: "image/png", body: "logo"},
+			sourceBaseURL + "/images/bg.png":    {contentType: "image/png", body: "bg"},
+			sourceBaseURL + "/about.png":        {contentType: "image/png", body: "about"},
+			sourceBaseURL + "/fonts/font.woff2": {contentType: "font/woff2", body: "font"},
+			sourceBaseURL + "/icons/icon.svg":   {contentType: "image/svg+xml", body: "<svg/>"},
+		}}}
+	}
+	defer func() {
+		newGrabHTTPClient = previousGrabHTTPClient
+	}()
+
+	previewForm := url.Values{}
+	previewForm.Set("source_url", sourceBaseURL+"/")
+	previewForm.Set("copy_whole_site", "1")
+	previewForm.Set("progress_token", "preview-token")
+	previewRequest := httptest.NewRequest(http.MethodPost, "http://localhost:8080/URI?grab_preview", strings.NewReader(previewForm.Encode()))
+	previewRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	previewRequest.Header.Set("Accept", "application/json")
+	previewRequest.AddCookie(newAdminSessionCookie(t, application, "admin@example.com"))
+	previewResponse := httptest.NewRecorder()
+	application.route(previewResponse, previewRequest)
+	if previewResponse.Code != http.StatusOK {
+		t.Fatalf("whole-site preview status = %d, body=%q", previewResponse.Code, previewResponse.Body.String())
+	}
+	var previewPayload grabPreviewResponse
+	if err := json.Unmarshal(previewResponse.Body.Bytes(), &previewPayload); err != nil {
+		t.Fatalf("decode whole-site preview: %v", err)
+	}
+	if previewPayload.PageCount != 3 {
+		t.Fatalf("whole-site preview page count = %d, want 3", previewPayload.PageCount)
+	}
+	if previewPayload.ResourceCount < 8 {
+		t.Fatalf("whole-site preview resource count = %d, want at least 8: %#v", previewPayload.ResourceCount, previewPayload.Resources)
+	}
+	for _, previewResource := range previewPayload.Resources {
+		if strings.Contains(previewResource.URL, "outside.example") {
+			t.Fatalf("whole-site preview included external document link as resource: %#v", previewPayload.Resources)
+		}
+	}
+
+	form := url.Values{}
+	form.Set("path", "/URI")
+	form.Set("source_url", sourceBaseURL+"/")
+	form.Set("copy_whole_site", "1")
+	request := httptest.NewRequest(http.MethodPost, "http://localhost:8080/URI?grab", strings.NewReader(form.Encode()))
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	request.Header.Set("Accept", "application/json")
+	request.AddCookie(newAdminSessionCookie(t, application, "admin@example.com"))
+	response := httptest.NewRecorder()
+	application.route(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("whole-site import status = %d, body=%q", response.Code, response.Body.String())
+	}
+	if !strings.Contains(response.Body.String(), `"/URI?visual"`) {
+		t.Fatalf("whole-site import redirect does not point to local base path: %s", response.Body.String())
+	}
+
+	expectedPages := []string{"/URI", "/URI/about", "/URI/contact.html"}
+	for _, expectedPagePath := range expectedPages {
+		var pageHTML string
+		if err := rawDB.QueryRow(`SELECT html FROM pages WHERE domain=? AND path=?`, "localhost", expectedPagePath).Scan(&pageHTML); err != nil {
+			t.Fatalf("missing imported page %s: %v", expectedPagePath, err)
+		}
+		if strings.Contains(pageHTML, sourceBaseURL) {
+			t.Fatalf("imported page %s still references source host: %s", expectedPagePath, pageHTML)
+		}
+	}
+
+	var rootHTML string
+	if err := rawDB.QueryRow(`SELECT html FROM pages WHERE domain=? AND path=?`, "localhost", "/URI").Scan(&rootHTML); err != nil {
+		t.Fatalf("read root imported page: %v", err)
+	}
+	for _, expectedFragment := range []string{`href="/URI/about"`, `href="https://outside.example/x"`, `href="/URI/p/`, `src="/URI/p/`} {
+		if !strings.Contains(rootHTML, expectedFragment) {
+			t.Fatalf("root imported page missing %q in %s", expectedFragment, rootHTML)
+		}
+	}
+	var aboutHTML string
+	if err := rawDB.QueryRow(`SELECT html FROM pages WHERE domain=? AND path=?`, "localhost", "/URI/about").Scan(&aboutHTML); err != nil {
+		t.Fatalf("read about imported page: %v", err)
+	}
+	for _, expectedFragment := range []string{`href="/URI"`, `href="/URI/contact.html"`, `src="/URI/contact.html"`} {
+		if !strings.Contains(aboutHTML, expectedFragment) {
+			t.Fatalf("about imported page missing %q in %s", expectedFragment, aboutHTML)
+		}
+	}
+
+	storedFiles, listErr := listStoredFiles(application.domainFilesDirForDomain("localhost"))
+	if listErr != nil {
+		t.Fatal(listErr)
+	}
+	if len(storedFiles) < 8 {
+		t.Fatalf("expected imported resources to be stored locally, got %d: %#v", len(storedFiles), storedFiles)
+	}
+	foundRewrittenJS := false
+	foundRewrittenCSS := false
+	for _, storedFilePath := range storedFiles {
+		storedBytes, readErr := os.ReadFile(storedFilePath)
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		storedText := string(storedBytes)
+		if filepath.Ext(storedFilePath) == ".js" && strings.Contains(storedText, "/URI/p/") {
+			foundRewrittenJS = true
+		}
+		if filepath.Ext(storedFilePath) == ".css" && strings.Contains(storedText, "/URI/p/") {
+			foundRewrittenCSS = true
+		}
+	}
+	if !foundRewrittenJS {
+		t.Fatalf("imported JS did not rewrite nested local resources: %#v", storedFiles)
+	}
+	if !foundRewrittenCSS {
+		t.Fatalf("imported CSS did not rewrite nested local resources: %#v", storedFiles)
+	}
+
+	assetPrefixIndex := strings.Index(rootHTML, "/URI/p/")
+	if assetPrefixIndex < 0 {
+		t.Fatalf("root imported page does not contain base-prefixed asset path: %s", rootHTML)
+	}
+	assetPathEnd := assetPrefixIndex
+	for assetPathEnd < len(rootHTML) && rootHTML[assetPathEnd] != '"' && rootHTML[assetPathEnd] != '\'' && rootHTML[assetPathEnd] != ' ' {
+		assetPathEnd++
+	}
+	assetRequest := httptest.NewRequest(http.MethodGet, "http://localhost:8080"+rootHTML[assetPrefixIndex:assetPathEnd], nil)
+	assetResponse := httptest.NewRecorder()
+	application.route(assetResponse, assetRequest)
+	if assetResponse.Code != http.StatusOK {
+		t.Fatalf("base-prefixed asset status = %d, path=%q", assetResponse.Code, rootHTML[assetPrefixIndex:assetPathEnd])
 	}
 }
 
@@ -913,6 +1065,9 @@ func TestMissingPageGrabFormIncludesSourceIPOverride(t *testing.T) {
 	body := response.Body.String()
 	if !strings.Contains(body, `name="source_ip"`) {
 		t.Fatalf("missing page import form does not include source_ip field: %s", body)
+	}
+	if !strings.Contains(body, `name="copy_whole_site"`) {
+		t.Fatalf("missing page import form does not include whole-site checkbox: %s", body)
 	}
 }
 
@@ -1618,6 +1773,9 @@ func TestMissingPageReturns404ForAdminWithCopyOption(t *testing.T) {
 	body := response.Body.String()
 	if !strings.Contains(body, `method="post" action="/missing?grab" data-grab-form`) {
 		t.Fatalf("admin missing page does not offer copy form: %s", body)
+	}
+	if !strings.Contains(body, `name="copy_whole_site"`) {
+		t.Fatalf("admin missing page does not offer whole-site copy option: %s", body)
 	}
 }
 

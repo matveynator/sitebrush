@@ -53,6 +53,7 @@ var CompileVersion = "dev"
 const storageAppName = "sitebrush"
 const defaultDBPath = "storage/db/sitebrush.db"
 const grabResourceMaxDepth = 64
+const wholeSiteImportMaxPages = 2048
 const defaultDomainStorageLimitBytes int64 = 10 * 1024 * 1024 * 1024
 
 // App keeps only explicit dependencies to stay readable and easy to swap.
@@ -83,8 +84,25 @@ type grabResourcePreview struct {
 
 type grabPreviewResponse struct {
 	SourceURL     string                `json:"source_url"`
+	PageCount     int                   `json:"page_count"`
 	ResourceCount int                   `json:"resource_count"`
 	Resources     []grabResourcePreview `json:"resources"`
+}
+
+type wholeSiteImportedPage struct {
+	SourceURL string
+	LocalPath string
+	HTML      string
+}
+
+type wholeSitePageJob struct {
+	URL  *url.URL
+	HTML string
+}
+
+type wholeSitePreviewResult struct {
+	PageCount int
+	Resources []grabResourcePreview
 }
 
 type nativePickedFile struct {
@@ -1209,6 +1227,21 @@ func (a *App) grabPage(w http.ResponseWriter, r *http.Request) {
 
 	domain := a.siteDomain(r.Context(), r)
 	progressToken := strings.TrimSpace(r.FormValue("progress_token"))
+	if grabCopyWholeSite(r) {
+		selectedResourceURLs := selectedGrabResourceURLs(r)
+		redirectPath, importErr := a.importWholeRemoteSite(r.Context(), domain, pagePath, remoteSourceURL, string(htmlBytes), progressToken, selectedResourceURLs, sourceIP)
+		if importErr != nil {
+			http.Error(w, importErr.Error(), http.StatusBadGateway)
+			return
+		}
+		if wantsJSONResponse(r) {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]string{"redirect": redirectPath + "?visual"})
+			return
+		}
+		http.Redirect(w, r, redirectPath+"?visual", http.StatusFound)
+		return
+	}
 	selectedResourceURLs := selectedGrabResourceURLs(r)
 	html := a.mirrorRemotePage(domain, pagePath, sourceURL, remoteSourceURL, string(htmlBytes), progressToken, selectedResourceURLs, sourceIP)
 	newHTMLBytes := int64(len([]byte(html)))
@@ -1267,10 +1300,20 @@ func (a *App) grabPreview(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
-	resources := previewGrabResources(remoteSourceURL, string(htmlBytes), sourceIP)
+	progressToken := strings.TrimSpace(r.FormValue("progress_token"))
+	var resources []grabResourcePreview
+	pageCount := 1
+	if grabCopyWholeSite(r) {
+		wholeSitePreview := previewWholeRemoteSiteResources(remoteSourceURL, string(htmlBytes), a.grabTracker, progressToken, sourceIP)
+		resources = wholeSitePreview.Resources
+		pageCount = wholeSitePreview.PageCount
+	} else {
+		resources = previewGrabResources(remoteSourceURL, string(htmlBytes), a.grabTracker, progressToken, sourceIP)
+	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(grabPreviewResponse{
 		SourceURL:     remoteSourceURL.String(),
+		PageCount:     pageCount,
 		ResourceCount: len(resources),
 		Resources:     resources,
 	})
@@ -1370,14 +1413,27 @@ func selectedGrabResourceURLs(r *http.Request) map[string]struct{} {
 	return selectedResourceURLs
 }
 
-func previewGrabResources(pageURL *url.URL, htmlSource, sourceIP string) []grabResourcePreview {
-	spider := newPageSpider("", pageURL, grabResourceMaxDepth, nil, "", sourceIP)
+func grabCopyWholeSite(r *http.Request) bool {
+	rawValue := strings.ToLower(strings.TrimSpace(r.FormValue("copy_whole_site")))
+	return rawValue == "1" || rawValue == "on" || rawValue == "true" || rawValue == "yes"
+}
+
+func previewGrabResources(pageURL *url.URL, htmlSource string, tracker *grabProgressTracker, progressToken, sourceIP string) []grabResourcePreview {
+	spider := newPageSpider("", pageURL, grabResourceMaxDepth, tracker, progressToken, sourceIP)
 	rootResource := &mirroredResource{url: pageURL.String(), content: []byte(htmlSource)}
 	spider.resources[pageURL.String()] = rootResource
 	spider.rewriteNestedResources(rootResource, 0, "text/html")
-	resources := make([]grabResourcePreview, 0)
+	resources := previewResourcesFromSpider(spider, map[string]struct{}{pageURL.String(): {}})
+	if tracker != nil && strings.TrimSpace(progressToken) != "" {
+		tracker.publish(grabProgressEvent{Token: progressToken, Stage: "done", FoundTotal: spider.foundTotal, DownloadedTotal: spider.downloadedTotal, CompletedPercent: 100})
+	}
+	return resources
+}
+
+func previewResourcesFromSpider(spider *pageSpider, excludedURLs map[string]struct{}) []grabResourcePreview {
+	resources := make([]grabResourcePreview, 0, len(spider.resources))
 	for resourceURL, resource := range spider.resources {
-		if resourceURL == pageURL.String() {
+		if _, excluded := excludedURLs[resourceURL]; excluded {
 			continue
 		}
 		sizeBytes := int64(-1)
@@ -1393,6 +1449,331 @@ func previewGrabResources(pageURL *url.URL, htmlSource, sourceIP string) []grabR
 		return resources[leftIndex].Kind < resources[rightIndex].Kind
 	})
 	return resources
+}
+
+func previewWholeRemoteSiteResources(startURL *url.URL, startHTML string, tracker *grabProgressTracker, progressToken, sourceIP string) wholeSitePreviewResult {
+	spider, pageURLs := crawlWholeRemoteSite(startURL, startHTML, "", tracker, progressToken, sourceIP)
+	resources := previewResourcesFromSpider(spider, pageURLs)
+	if tracker != nil && strings.TrimSpace(progressToken) != "" {
+		tracker.publish(grabProgressEvent{Token: progressToken, Stage: "done", FoundTotal: spider.foundTotal, DownloadedTotal: spider.downloadedTotal, CompletedPercent: 100})
+	}
+	return wholeSitePreviewResult{PageCount: len(pageURLs), Resources: resources}
+}
+
+func (a *App) importWholeRemoteSite(ctx context.Context, domain, basePath string, startURL *url.URL, startHTML, progressToken string, selectedResourceURLs map[string]struct{}, sourceIP string) (string, error) {
+	basePath = cleanPath(basePath)
+	if startURL == nil || startURL.Hostname() == "" {
+		return "", errors.New("source_url is invalid")
+	}
+	spider := newPageSpider(domain, startURL, grabResourceMaxDepth, a.grabTracker, progressToken, sourceIP)
+	spider.selectedResourceURLs = selectedResourceURLs
+	spider.publicAssetBasePath = basePath
+	spider.documentURLRewriter = func(normalizedURL string) (string, bool) {
+		parsedURL, parseErr := url.Parse(normalizedURL)
+		if parseErr != nil || !sameWholeSiteHost(startURL, parsedURL) || !isWholeSitePageURL(parsedURL) {
+			return "", false
+		}
+		return wholeSiteLocalLink(basePath, startURL, parsedURL), true
+	}
+
+	pageClient := newGrabHTTPClientForServerIP(startURL.Hostname(), sourceIP)
+	knownPagePathsByKey := map[string]string{wholeSitePageKey(startURL): basePath}
+	pageQueue := []wholeSitePageJob{{URL: cloneURL(startURL), HTML: startHTML}}
+	importedPages := make([]wholeSiteImportedPage, 0, 32)
+	importedLocalPaths := make(map[string]struct{})
+	spider.foundTotal++
+	spider.publishProgress("found", startURL.String(), 0)
+
+	for len(pageQueue) > 0 && len(importedPages) < wholeSiteImportMaxPages {
+		currentJob := pageQueue[0]
+		pageQueue = pageQueue[1:]
+		if currentJob.URL == nil {
+			continue
+		}
+		pageKey := wholeSitePageKey(currentJob.URL)
+		if pageKey == "" {
+			continue
+		}
+		pageHTML := currentJob.HTML
+		if strings.TrimSpace(pageHTML) == "" {
+			downloadedHTML, downloaded, downloadErr := downloadWholeSitePageHTML(pageClient, currentJob.URL)
+			if downloadErr != nil || !downloaded {
+				spider.publishResourceProgress("error", currentJob.URL.String(), 0, 0, -1)
+				continue
+			}
+			pageHTML = downloadedHTML
+		}
+
+		for _, linkedPageURL := range extractWholeSitePageLinks(pageHTML, currentJob.URL, startURL) {
+			linkedPageKey := wholeSitePageKey(linkedPageURL)
+			if linkedPageKey == "" {
+				continue
+			}
+			if _, alreadyKnown := knownPagePathsByKey[linkedPageKey]; alreadyKnown {
+				continue
+			}
+			if len(knownPagePathsByKey) >= wholeSiteImportMaxPages {
+				break
+			}
+			knownPagePathsByKey[linkedPageKey] = wholeSiteLocalPath(basePath, startURL, linkedPageURL)
+			pageQueue = append(pageQueue, wholeSitePageJob{URL: cloneURL(linkedPageURL)})
+			spider.foundTotal++
+			spider.publishProgress("found", linkedPageURL.String(), 0)
+		}
+
+		rootResource := &mirroredResource{url: currentJob.URL.String(), content: []byte(pageHTML)}
+		spider.resources[currentJob.URL.String()] = rootResource
+		spider.rewriteNestedResources(rootResource, 0, "text/html")
+		localPath := knownPagePathsByKey[pageKey]
+		if _, alreadyImported := importedLocalPaths[localPath]; alreadyImported {
+			continue
+		}
+		importedLocalPaths[localPath] = struct{}{}
+		importedPages = append(importedPages, wholeSiteImportedPage{SourceURL: currentJob.URL.String(), LocalPath: localPath, HTML: string(rootResource.content)})
+		spider.downloadedTotal++
+		spider.publishResourceProgress("downloaded", currentJob.URL.String(), 100, int64(len(pageHTML)), int64(len(pageHTML)))
+	}
+	if len(importedPages) == 0 {
+		return "", errors.New("no pages were imported")
+	}
+	if persistErr := a.persistSpiderAssets(spider, basePath); persistErr != nil {
+		return "", persistErr
+	}
+	if storeErr := a.storeWholeSiteImportedPages(ctx, domain, importedPages); storeErr != nil {
+		return "", storeErr
+	}
+	a.rebuildDomainStorageUsage(ctx, domain)
+	if a.grabTracker != nil {
+		a.grabTracker.publish(grabProgressEvent{Token: progressToken, Stage: "done", FoundTotal: spider.foundTotal, DownloadedTotal: spider.downloadedTotal, CompletedPercent: 100})
+	}
+	return basePath, nil
+}
+
+func crawlWholeRemoteSite(startURL *url.URL, startHTML, publicAssetBasePath string, tracker *grabProgressTracker, progressToken, sourceIP string) (*pageSpider, map[string]struct{}) {
+	spider := newPageSpider("", startURL, grabResourceMaxDepth, tracker, progressToken, sourceIP)
+	spider.publicAssetBasePath = publicAssetBasePath
+	pageClient := newGrabHTTPClientForServerIP(startURL.Hostname(), sourceIP)
+	knownPagePathsByKey := map[string]string{wholeSitePageKey(startURL): cleanPath(publicAssetBasePath)}
+	pageURLs := map[string]struct{}{startURL.String(): {}}
+	pageQueue := []wholeSitePageJob{{URL: cloneURL(startURL), HTML: startHTML}}
+	spider.foundTotal++
+	spider.publishProgress("found", startURL.String(), 0)
+	for len(pageQueue) > 0 && len(pageURLs) < wholeSiteImportMaxPages {
+		currentJob := pageQueue[0]
+		pageQueue = pageQueue[1:]
+		if currentJob.URL == nil {
+			continue
+		}
+		pageKey := wholeSitePageKey(currentJob.URL)
+		if pageKey == "" {
+			continue
+		}
+		pageHTML := currentJob.HTML
+		if strings.TrimSpace(pageHTML) == "" {
+			downloadedHTML, downloaded, downloadErr := downloadWholeSitePageHTML(pageClient, currentJob.URL)
+			if downloadErr != nil || !downloaded {
+				spider.publishResourceProgress("error", currentJob.URL.String(), 0, 0, -1)
+				continue
+			}
+			pageHTML = downloadedHTML
+		}
+		for _, linkedPageURL := range extractWholeSitePageLinks(pageHTML, currentJob.URL, startURL) {
+			linkedPageKey := wholeSitePageKey(linkedPageURL)
+			if linkedPageKey == "" {
+				continue
+			}
+			if _, alreadyKnown := knownPagePathsByKey[linkedPageKey]; alreadyKnown {
+				continue
+			}
+			if len(knownPagePathsByKey) >= wholeSiteImportMaxPages {
+				break
+			}
+			knownPagePathsByKey[linkedPageKey] = wholeSiteLocalPath(cleanPath(publicAssetBasePath), startURL, linkedPageURL)
+			pageQueue = append(pageQueue, wholeSitePageJob{URL: cloneURL(linkedPageURL)})
+			pageURLs[linkedPageURL.String()] = struct{}{}
+			spider.foundTotal++
+			spider.publishProgress("found", linkedPageURL.String(), 0)
+		}
+		rootResource := &mirroredResource{url: currentJob.URL.String(), content: []byte(pageHTML)}
+		spider.resources[currentJob.URL.String()] = rootResource
+		spider.rewriteNestedResources(rootResource, 0, "text/html")
+		spider.downloadedTotal++
+		spider.publishResourceProgress("downloaded", currentJob.URL.String(), 100, int64(len(pageHTML)), int64(len(pageHTML)))
+	}
+	return spider, pageURLs
+}
+
+func (a *App) storeWholeSiteImportedPages(ctx context.Context, domain string, importedPages []wholeSiteImportedPage) error {
+	frozenDomain := a.isDomainFrozen(ctx, domain)
+	for _, importedPage := range importedPages {
+		pagePath := cleanPath(importedPage.LocalPath)
+		pageHTML := importedPage.HTML
+		newHTMLBytes := int64(len([]byte(pageHTML)))
+		var previousStoredHTML string
+		_ = a.db.QueryRowContext(ctx, `SELECT html FROM pages WHERE domain=? AND path=?`, domain, pagePath).Scan(&previousStoredHTML)
+		pageDelta := newHTMLBytes - int64(len([]byte(previousStoredHTML)))
+		publishedPageDelta := int64(0)
+		publishedStaticDelta := int64(0)
+		if !frozenDomain {
+			var previousPublishedHTML string
+			_ = a.db.QueryRowContext(ctx, `SELECT html FROM published_pages WHERE domain=? AND path=?`, domain, pagePath).Scan(&previousPublishedHTML)
+			publishedPageDelta = newHTMLBytes - int64(len([]byte(previousPublishedHTML)))
+			publishedStaticDelta = newHTMLBytes - fileSizeBytes(filepath.Join(a.domainStaticDir(domain), staticRelativePathForPage(pagePath)))
+		}
+		if storageErr := a.applyDomainStorageDelta(ctx, domain, pageDelta, publishedPageDelta, newHTMLBytes, 0, publishedStaticDelta); storageErr != nil {
+			return storageErr
+		}
+		a.clearPageRedirectSource(ctx, domain, pagePath)
+		_, _ = a.db.ExecContext(ctx, `INSERT OR REPLACE INTO pages(domain,path,title,html,published) VALUES(?,?,?,?,1)`, domain, pagePath, pagePath, pageHTML)
+		if !frozenDomain {
+			_, _ = a.db.ExecContext(ctx, `INSERT OR REPLACE INTO published_pages(domain,path,title,html) VALUES(?,?,?,?)`, domain, pagePath, pagePath, pageHTML)
+			a.writePublishedStaticHTML(domain, pagePath, pageHTML)
+		}
+		_, _ = a.db.ExecContext(ctx, `INSERT INTO revisions(domain,page_path,html,created_at) VALUES(?,?,?,?)`, domain, pagePath, pageHTML, time.Now().Format(time.RFC3339))
+	}
+	return nil
+}
+
+func downloadWholeSitePageHTML(client *http.Client, pageURL *url.URL) (string, bool, error) {
+	response, err := client.Get(pageURL.String())
+	if err != nil {
+		return "", false, err
+	}
+	defer response.Body.Close()
+	if response.StatusCode < 200 || response.StatusCode > 299 {
+		return "", false, fmt.Errorf("page download failed: %s", response.Status)
+	}
+	contentType := strings.ToLower(strings.TrimSpace(strings.Split(response.Header.Get("Content-Type"), ";")[0]))
+	if contentType != "" && contentType != "text/html" && contentType != "application/xhtml+xml" {
+		return "", false, nil
+	}
+	pageBytes, readErr := io.ReadAll(response.Body)
+	if readErr != nil {
+		return "", false, readErr
+	}
+	return string(pageBytes), true, nil
+}
+
+func extractWholeSitePageLinks(htmlSource string, baseURL, siteURL *url.URL) []*url.URL {
+	pageURLs := make([]*url.URL, 0, 16)
+	tokenizer := html.NewTokenizer(strings.NewReader(htmlSource))
+	for {
+		tokenType := tokenizer.Next()
+		if tokenType == html.ErrorToken {
+			break
+		}
+		if tokenType != html.StartTagToken && tokenType != html.SelfClosingTagToken {
+			continue
+		}
+		token := tokenizer.Token()
+		tagName := strings.ToLower(strings.TrimSpace(token.Data))
+		for _, attribute := range token.Attr {
+			attributeName := strings.ToLower(strings.TrimSpace(attribute.Key))
+			if !isWholeSiteDocumentAttribute(tagName, attributeName) {
+				continue
+			}
+			normalizedURL, blocked := (&pageSpider{}).normalizeURL(attribute.Val, baseURL)
+			if blocked || normalizedURL == "" {
+				continue
+			}
+			linkedPageURL, parseErr := url.Parse(normalizedURL)
+			if parseErr != nil || !sameWholeSiteHost(siteURL, linkedPageURL) || !isWholeSitePageURL(linkedPageURL) {
+				continue
+			}
+			pageURLs = append(pageURLs, linkedPageURL)
+		}
+	}
+	return pageURLs
+}
+
+func isWholeSiteDocumentAttribute(tagName, attributeName string) bool {
+	switch strings.ToLower(strings.TrimSpace(tagName)) {
+	case "a", "area":
+		return attributeName == "href" || attributeName == "xlink:href"
+	case "form":
+		return attributeName == "action"
+	case "iframe", "embed":
+		return attributeName == "src"
+	case "object":
+		return attributeName == "data"
+	default:
+		return false
+	}
+}
+
+func sameWholeSiteHost(leftURL, rightURL *url.URL) bool {
+	if leftURL == nil || rightURL == nil {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(leftURL.Host), strings.TrimSpace(rightURL.Host))
+}
+
+func isWholeSitePageURL(pageURL *url.URL) bool {
+	if pageURL == nil {
+		return false
+	}
+	extension := strings.ToLower(path.Ext(pageURL.Path))
+	if extension == "" {
+		return true
+	}
+	switch extension {
+	case ".htm", ".html", ".xhtml", ".php", ".asp", ".aspx", ".jsp", ".cgi":
+		return true
+	default:
+		return false
+	}
+}
+
+func wholeSitePageKey(pageURL *url.URL) string {
+	if pageURL == nil || pageURL.Host == "" {
+		return ""
+	}
+	return strings.ToLower(pageURL.Scheme) + "://" + strings.ToLower(pageURL.Host) + canonicalWholeSitePagePath(pageURL.Path)
+}
+
+func canonicalWholeSitePagePath(rawPath string) string {
+	cleanedPath := cleanPath(rawPath)
+	for _, indexName := range []string{"/index.html", "/index.htm", "/index.xhtml"} {
+		if strings.HasSuffix(strings.ToLower(cleanedPath), indexName) {
+			cleanedPath = cleanedPath[:len(cleanedPath)-len(indexName)]
+			if cleanedPath == "" {
+				return "/"
+			}
+			return cleanPath(cleanedPath)
+		}
+	}
+	return cleanedPath
+}
+
+func wholeSiteLocalPath(basePath string, startURL, pageURL *url.URL) string {
+	basePath = cleanPath(basePath)
+	if wholeSitePageKey(startURL) == wholeSitePageKey(pageURL) {
+		return basePath
+	}
+	sourcePath := canonicalWholeSitePagePath(pageURL.Path)
+	if sourcePath == "/" {
+		return basePath
+	}
+	if basePath == "/" {
+		return sourcePath
+	}
+	return cleanPath(strings.TrimRight(basePath, "/") + sourcePath)
+}
+
+func wholeSiteLocalLink(basePath string, startURL, pageURL *url.URL) string {
+	localPath := wholeSiteLocalPath(basePath, startURL, pageURL)
+	if pageURL != nil && strings.TrimSpace(pageURL.RawQuery) != "" {
+		return localPath + "?" + pageURL.RawQuery
+	}
+	return localPath
+}
+
+func cloneURL(sourceURL *url.URL) *url.URL {
+	if sourceURL == nil {
+		return nil
+	}
+	clonedURL := *sourceURL
+	return &clonedURL
 }
 
 func previewResourceKind(tagName, attributeName, rawRef string) string {
@@ -2403,6 +2784,9 @@ func publicAssetFileNameFromPath(requestPath, domain string) string {
 	domainPrefix := "/" + domainStorageName(domain) + "/p/"
 	if strings.HasPrefix(cleanedPath, domainPrefix) {
 		return safeRelativeAssetPath(strings.TrimPrefix(cleanedPath, domainPrefix))
+	}
+	if prefixIndex := strings.Index(cleanedPath, "/p/"); prefixIndex > 0 {
+		return safeRelativeAssetPath(cleanedPath[prefixIndex+len("/p/"):])
 	}
 	return ""
 }
@@ -3560,11 +3944,7 @@ func (a *App) persistSpiderAssets(spider *pageSpider, pagePath string) error {
 		if !resource.persist || strings.TrimSpace(resource.assetPath) == "" {
 			continue
 		}
-		assetReference := resource.assetPath
-		if strings.HasPrefix(assetReference, "/p/") {
-			assetReference = strings.TrimPrefix(assetReference, "/p/")
-		}
-		assetReference = safeRelativeAssetPath(assetReference)
+		assetReference := publicAssetReferenceFromPath(resource.assetPath)
 		if assetReference == "" {
 			continue
 		}
@@ -3578,6 +3958,17 @@ func (a *App) persistSpiderAssets(spider *pageSpider, pagePath string) error {
 		a.rebuildDomainStorageUsage(context.Background(), spider.domain)
 	}
 	return nil
+}
+
+func publicAssetReferenceFromPath(assetPath string) string {
+	cleanedPath := path.Clean("/" + strings.TrimSpace(assetPath))
+	if strings.HasPrefix(cleanedPath, "/p/") {
+		return safeRelativeAssetPath(strings.TrimPrefix(cleanedPath, "/p/"))
+	}
+	if prefixIndex := strings.Index(cleanedPath, "/p/"); prefixIndex > 0 {
+		return safeRelativeAssetPath(cleanedPath[prefixIndex+len("/p/"):])
+	}
+	return safeRelativeAssetPath(strings.TrimPrefix(cleanedPath, "/"))
 }
 
 type mirroredResource struct {
@@ -3596,6 +3987,8 @@ type pageSpider struct {
 	resources            map[string]*mirroredResource
 	inFlight             map[string]bool
 	selectedResourceURLs map[string]struct{}
+	publicAssetBasePath  string
+	documentURLRewriter  func(string) (string, bool)
 	tracker              *grabProgressTracker
 	progressToken        string
 	foundTotal           int
@@ -3793,29 +4186,24 @@ func (spider *pageSpider) fetchSelectedResources() {
 func (spider *pageSpider) rewriteNestedResources(resource *mirroredResource, depth int, contentType string) {
 	isHTML := strings.Contains(contentType, "text/html")
 	isCSS := strings.Contains(contentType, "text/css")
-	if !(isHTML || isCSS) {
+	isJS := strings.Contains(contentType, "javascript") || strings.Contains(contentType, "ecmascript") || strings.HasSuffix(resourceExtension(resource.url), ".js") || strings.HasSuffix(resourceExtension(resource.url), ".mjs")
+	if !(isHTML || isCSS || isJS) {
 		return
 	}
 	source := string(resource.content)
-	rewritten := spider.rewriteTextReferences(source, resource.url, depth)
+	rewritten := source
+	if isHTML || isCSS {
+		rewritten = spider.rewriteTextReferences(source, resource.url, depth)
+	} else if isJS {
+		rewritten = spider.rewriteJSResourceReferences(source, resource.url, depth)
+	}
 	resource.content = []byte(rewritten)
 }
 
 func (spider *pageSpider) rewriteTextReferences(source, baseRawURL string, depth int) string {
 	baseURL, _ := url.Parse(baseRawURL)
 	rewriteSingle := func(rawRef string) string {
-		normalizedURL, blocked := spider.normalizeURL(rawRef, baseURL)
-		if blocked || normalizedURL == "" {
-			return rawRef
-		}
-		if !spider.shouldPersistResource(normalizedURL) {
-			return normalizedURL
-		}
-		dependency, err := spider.fetchResource(rawRef, baseURL, depth, true)
-		if err != nil || dependency == nil || dependency.assetPath == "" {
-			return normalizedURL
-		}
-		return dependency.assetPath
+		return spider.rewriteResourceReference(rawRef, baseURL, depth)
 	}
 	rewritten := htmlResourcePattern.ReplaceAllStringFunc(source, func(match string) string {
 		parts := htmlResourcePattern.FindStringSubmatch(match)
@@ -3823,9 +4211,19 @@ func (spider *pageSpider) rewriteTextReferences(source, baseRawURL string, depth
 			return match
 		}
 		tagName := strings.ToLower(strings.TrimSpace(parts[1]))
+		attributeName := strings.ToLower(strings.TrimSpace(parts[2]))
 		normalizedURL, blocked := spider.normalizeURL(parts[3], baseURL)
+		if !blocked && spider.documentURLRewriter != nil && isWholeSiteDocumentAttribute(tagName, attributeName) && isWholeSitePageURLString(normalizedURL) {
+			if rewrittenURL, ok := spider.documentURLRewriter(normalizedURL); ok {
+				return strings.Replace(match, parts[3], rewrittenURL, 1)
+			}
+			return match
+		}
 		if !blocked && spider.shouldBlankEmbeddedDocumentReference(tagName, normalizedURL) {
 			return strings.Replace(match, parts[3], "about:blank", 1)
+		}
+		if isWholeSiteDocumentAttribute(tagName, attributeName) {
+			return match
 		}
 		return strings.Replace(match, parts[3], rewriteSingle(parts[3]), 1)
 	})
@@ -3854,6 +4252,74 @@ func (spider *pageSpider) rewriteTextReferences(source, baseRawURL string, depth
 	})
 	rewritten = rewriteCSSURLReferences(rewritten, rewriteSingle)
 	return rewritten
+}
+
+func (spider *pageSpider) rewriteResourceReference(rawRef string, baseURL *url.URL, depth int) string {
+	normalizedURL, blocked := spider.normalizeURL(rawRef, baseURL)
+	if blocked || normalizedURL == "" {
+		return rawRef
+	}
+	if !spider.shouldPersistResource(normalizedURL) {
+		return normalizedURL
+	}
+	dependency, err := spider.fetchResource(rawRef, baseURL, depth, true)
+	if err != nil || dependency == nil || dependency.assetPath == "" {
+		return normalizedURL
+	}
+	return dependency.assetPath
+}
+
+func (spider *pageSpider) rewriteJSResourceReferences(source, baseRawURL string, depth int) string {
+	baseURL, _ := url.Parse(baseRawURL)
+	var rewritten strings.Builder
+	lastWrittenIndex := 0
+	for currentIndex := 0; currentIndex < len(source); currentIndex++ {
+		quote := source[currentIndex]
+		if quote != '\'' && quote != '"' {
+			continue
+		}
+		referenceStart := currentIndex + 1
+		referenceEnd := referenceStart
+		escaped := false
+		for referenceEnd < len(source) {
+			currentByte := source[referenceEnd]
+			if escaped {
+				escaped = false
+				referenceEnd++
+				continue
+			}
+			if currentByte == '\\' {
+				escaped = true
+				referenceEnd++
+				continue
+			}
+			if currentByte == quote {
+				break
+			}
+			referenceEnd++
+		}
+		if referenceEnd >= len(source) || source[referenceEnd] != quote {
+			break
+		}
+		rawReference := source[referenceStart:referenceEnd]
+		normalizedURL, blocked := spider.normalizeURL(rawReference, baseURL)
+		if !blocked && hasAllowedGrabResourceExtension(normalizedURL) {
+			rewritten.WriteString(source[lastWrittenIndex:referenceStart])
+			rewritten.WriteString(spider.rewriteResourceReference(rawReference, baseURL, depth))
+			lastWrittenIndex = referenceEnd
+		}
+		currentIndex = referenceEnd
+	}
+	if lastWrittenIndex == 0 {
+		return source
+	}
+	rewritten.WriteString(source[lastWrittenIndex:])
+	return rewritten.String()
+}
+
+func isWholeSitePageURLString(rawURL string) bool {
+	parsedURL, err := url.Parse(rawURL)
+	return err == nil && isWholeSitePageURL(parsedURL)
 }
 
 func (spider *pageSpider) shouldBlankEmbeddedDocumentReference(tagName, normalizedURL string) bool {
@@ -4058,7 +4524,11 @@ func (spider *pageSpider) assetPathFor(fileBytes []byte, sourceURL string) strin
 	if err != nil {
 		return ""
 	}
-	return "/p/" + hashedFileName
+	basePath := cleanPath(spider.publicAssetBasePath)
+	if basePath == "/" {
+		return "/p/" + hashedFileName
+	}
+	return strings.TrimRight(basePath, "/") + "/p/" + hashedFileName
 }
 
 type grabTrackerRequest struct {
