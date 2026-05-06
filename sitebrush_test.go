@@ -935,6 +935,140 @@ func TestMirrorRemotePageImportsCrossDomainAssetsWithoutURLExtensions(t *testing
 	}
 }
 
+func TestMirrorRemotePageImportsDocumentMediaAndArchiveLinks(t *testing.T) {
+	pageRawURL := "https://page.example/page"
+	sourceHTML := `<!doctype html><html><body>` +
+		`<a href="https://cdn.example/download?id=manual">Manual</a>` +
+		`<a href="https://cdn.example/archive.zip">Archive</a>` +
+		`<a href="https://cdn.example/feed.json">Feed</a>` +
+		`<video controls src="https://cdn.example/media/intro.mp4"></video>` +
+		`<audio controls src="https://cdn.example/audio/theme.mp3"></audio>` +
+		`</body></html>`
+
+	previousGrabHTTPClient := newGrabHTTPClient
+	newGrabHTTPClient = func() *http.Client {
+		return &http.Client{Transport: fakeGrabTransport{responses: map[string]fakeGrabResponse{
+			"https://cdn.example/download?id=manual": {contentType: "application/pdf", body: "%PDF-1.7"},
+			"https://cdn.example/archive.zip":        {contentType: "application/zip", body: "zip"},
+			"https://cdn.example/feed.json":          {contentType: "application/json", body: `{"ok":true}`},
+			"https://cdn.example/media/intro.mp4":    {contentType: "video/mp4", body: "mp4"},
+			"https://cdn.example/audio/theme.mp3":    {contentType: "audio/mpeg", body: "mp3"},
+		}}}
+	}
+	defer func() {
+		newGrabHTTPClient = previousGrabHTTPClient
+	}()
+
+	pageURL, parseErr := url.Parse(pageRawURL)
+	if parseErr != nil {
+		t.Fatal(parseErr)
+	}
+	previewResources := previewGrabResources(pageURL, sourceHTML, nil, "", "")
+	if len(previewResources) != 5 {
+		t.Fatalf("expected 5 preview resources, got %d: %#v", len(previewResources), previewResources)
+	}
+
+	selectedResourceURLs := make(map[string]struct{}, len(previewResources))
+	for _, previewResource := range previewResources {
+		selectedResourceURLs[previewResource.URL] = struct{}{}
+	}
+
+	application, _ := newTestApplication(t)
+	importedHTML := application.mirrorRemotePage("example.test", "/imported", pageRawURL, pageURL, sourceHTML, "", selectedResourceURLs, "")
+	for _, forbiddenFragment := range []string{"cdn.example/download?id=manual", "cdn.example/archive.zip", "cdn.example/feed.json", "cdn.example/media/intro.mp4", "cdn.example/audio/theme.mp3"} {
+		if strings.Contains(importedHTML, forbiddenFragment) {
+			t.Fatalf("imported HTML still references external resource %q: %s", forbiddenFragment, importedHTML)
+		}
+	}
+	if strings.Count(importedHTML, `/p/`) < 5 {
+		t.Fatalf("imported HTML does not contain local references for all resources: %s", importedHTML)
+	}
+
+	storedFiles, listErr := listStoredFiles(application.domainFilesDirForDomain("example.test"))
+	if listErr != nil {
+		t.Fatal(listErr)
+	}
+	expectedExtensions := map[string]bool{
+		".pdf":  false,
+		".zip":  false,
+		".json": false,
+		".mp4":  false,
+		".mp3":  false,
+	}
+	for _, storedFilePath := range storedFiles {
+		if _, tracked := expectedExtensions[filepath.Ext(storedFilePath)]; tracked {
+			expectedExtensions[filepath.Ext(storedFilePath)] = true
+		}
+	}
+	for expectedExtension, found := range expectedExtensions {
+		if !found {
+			t.Fatalf("expected imported resource with extension %s, stored files: %#v", expectedExtension, storedFiles)
+		}
+	}
+}
+
+func TestRewriteJSResourceReferencesLeavesLibraryCodeIntact(t *testing.T) {
+	pageRawURL := "https://page.example/page"
+	sourceHTML := `<!doctype html><html><body><script src="/js/app.js"></script></body></html>`
+
+	previousGrabHTTPClient := newGrabHTTPClient
+	newGrabHTTPClient = func() *http.Client {
+		return &http.Client{Transport: fakeGrabTransport{responses: map[string]fakeGrabResponse{
+			"https://page.example/js/app.js": {contentType: "application/javascript", body: `
+				var analyticsURL = ('https:' == document.location.protocol ? 'https://ssl' : 'http://www') + '.google-analytics.com/ga.js';
+				var selectorOperator = "*=";
+				var imagePath = "/images/logo.png";
+			`},
+			"https://page.example/images/logo.png": {contentType: "image/png", body: "logo"},
+		}}}
+	}
+	defer func() {
+		newGrabHTTPClient = previousGrabHTTPClient
+	}()
+
+	pageURL, parseErr := url.Parse(pageRawURL)
+	if parseErr != nil {
+		t.Fatal(parseErr)
+	}
+	previewResources := previewGrabResources(pageURL, sourceHTML, nil, "", "")
+	selectedResourceURLs := make(map[string]struct{}, len(previewResources))
+	for _, previewResource := range previewResources {
+		selectedResourceURLs[previewResource.URL] = struct{}{}
+	}
+
+	application, _ := newTestApplication(t)
+	application.mirrorRemotePage("example.test", "/imported", pageRawURL, pageURL, sourceHTML, "", selectedResourceURLs, "")
+
+	storedFiles, listErr := listStoredFiles(application.domainFilesDirForDomain("example.test"))
+	if listErr != nil {
+		t.Fatal(listErr)
+	}
+	var storedScript string
+	for _, storedFilePath := range storedFiles {
+		if filepath.Ext(storedFilePath) != ".js" {
+			continue
+		}
+		storedBytes, readErr := os.ReadFile(storedFilePath)
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		storedScript = string(storedBytes)
+		break
+	}
+	if storedScript == "" {
+		t.Fatalf("expected rewritten JS file, stored files: %#v", storedFiles)
+	}
+	if !strings.Contains(storedScript, `'.google-analytics.com/ga.js'`) {
+		t.Fatalf("analytics suffix string was unexpectedly rewritten: %s", storedScript)
+	}
+	if !strings.Contains(storedScript, `"*="`) {
+		t.Fatalf("selector operator string was unexpectedly rewritten: %s", storedScript)
+	}
+	if !strings.Contains(storedScript, `/p/`) {
+		t.Fatalf("real JS asset path was not rewritten to local resource: %s", storedScript)
+	}
+}
+
 func TestGrabPageCanCopyWholeExternalSiteUnderLocalPath(t *testing.T) {
 	application, rawDB := newTestApplication(t)
 	_, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "admin@example.com", "old")
@@ -946,18 +1080,22 @@ func TestGrabPageCanCopyWholeExternalSiteUnderLocalPath(t *testing.T) {
 	previousGrabHTTPClient := newGrabHTTPClient
 	newGrabHTTPClient = func() *http.Client {
 		return &http.Client{Transport: fakeGrabTransport{responses: map[string]fakeGrabResponse{
-			sourceBaseURL + "/":                 {contentType: "text/html", body: `<!doctype html><html><head><link rel="stylesheet" href="/style.css"><script src="/app.js"></script></head><body><a href="/about">About</a><a href="https://outside.example/x">Outside</a><img src="/images/logo.png"></body></html>`},
-			sourceBaseURL + "/about":            {contentType: "text/html", body: `<!doctype html><html><body><a href="/">Home</a><a href="contact.html">Contact</a><img src="about.png"><iframe src="/contact.html"></iframe></body></html>`},
-			sourceBaseURL + "/contact.html":     {contentType: "text/html", body: `<!doctype html><html><body><a href="/about">About</a></body></html>`},
-			sourceBaseURL + "/style.css":        {contentType: "text/css", body: `@import url("/nested.css"); body{background:url("/images/bg.png")}`},
-			sourceBaseURL + "/nested.css":       {contentType: "text/css", body: `.nested{background:url("/fonts/font.woff2")}`},
-			sourceBaseURL + "/app.js":           {contentType: "application/javascript", body: `import "/chunk.js"; const icon = "/icons/icon.svg";`},
-			sourceBaseURL + "/chunk.js":         {contentType: "application/javascript", body: `console.log("chunk");`},
-			sourceBaseURL + "/images/logo.png":  {contentType: "image/png", body: "logo"},
-			sourceBaseURL + "/images/bg.png":    {contentType: "image/png", body: "bg"},
-			sourceBaseURL + "/about.png":        {contentType: "image/png", body: "about"},
-			sourceBaseURL + "/fonts/font.woff2": {contentType: "font/woff2", body: "font"},
-			sourceBaseURL + "/icons/icon.svg":   {contentType: "image/svg+xml", body: "<svg/>"},
+			sourceBaseURL + "/":                                         {contentType: "text/html", body: `<!doctype html><html><head><link rel="stylesheet" href="/style.css"><link rel="stylesheet" href="https://fonts.googleapis.com/css?family=PT+Sans+Narrow&v1"><link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Monoton"><script src="/app.js"></script></head><body><a href="/about">About</a><a href="https://outside.example/x">Outside</a><img src="/images/logo.png"></body></html>`},
+			sourceBaseURL + "/about":                                    {contentType: "text/html", body: `<!doctype html><html><body><a href="/">Home</a><a href="contact.html">Contact</a><img src="about.png"><iframe src="/contact.html"></iframe></body></html>`},
+			sourceBaseURL + "/contact.html":                             {contentType: "text/html", body: `<!doctype html><html><body><a href="/about">About</a></body></html>`},
+			sourceBaseURL + "/style.css":                                {contentType: "text/css", body: `@import url("/nested.css"); body{background:url("/images/bg.png")}`},
+			sourceBaseURL + "/nested.css":                               {contentType: "text/css", body: `.nested{background:url("/fonts/font.woff2")}`},
+			sourceBaseURL + "/app.js":                                   {contentType: "application/javascript", body: `import "/chunk.js"; const icon = "/icons/icon.svg";`},
+			sourceBaseURL + "/chunk.js":                                 {contentType: "application/javascript", body: `console.log("chunk");`},
+			sourceBaseURL + "/images/logo.png":                          {contentType: "image/png", body: "logo"},
+			sourceBaseURL + "/images/bg.png":                            {contentType: "image/png", body: "bg"},
+			sourceBaseURL + "/about.png":                                {contentType: "image/png", body: "about"},
+			sourceBaseURL + "/fonts/font.woff2":                         {contentType: "font/woff2", body: "font"},
+			sourceBaseURL + "/icons/icon.svg":                           {contentType: "image/svg+xml", body: "<svg/>"},
+			"https://fonts.googleapis.com/css?family=PT+Sans+Narrow&v1": {contentType: "text/css; charset=utf-8", body: `@font-face{src:url("https://fonts.gstatic.com/s/ptsansnarrow.woff2")}`},
+			"https://fonts.googleapis.com/css?family=Monoton":           {contentType: "text/css; charset=utf-8", body: `@font-face{src:url("https://fonts.gstatic.com/s/monoton.woff2")}`},
+			"https://fonts.gstatic.com/s/ptsansnarrow.woff2":            {contentType: "font/woff2", body: "ptsans"},
+			"https://fonts.gstatic.com/s/monoton.woff2":                 {contentType: "font/woff2", body: "monoton"},
 		}}}
 	}
 	defer func() {

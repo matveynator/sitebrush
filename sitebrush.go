@@ -1458,8 +1458,11 @@ func previewResourcesFromSpider(spider *pageSpider, excludedURLs map[string]stru
 		if _, excluded := excludedURLs[resourceURL]; excluded {
 			continue
 		}
+		if resource == nil || resource.content == nil {
+			continue
+		}
 		sizeBytes := int64(-1)
-		if resource != nil && resource.content != nil {
+		if resource.content != nil {
 			sizeBytes = int64(len(resource.content))
 		}
 		resourceKind := previewResourceKind("", "", resourceURL)
@@ -1823,22 +1826,10 @@ func previewResourceKind(tagName, attributeName, rawRef string) string {
 		return "image"
 	}
 	extension := resourceExtension(rawRef)
-	switch extension {
-	case ".css":
-		return "style"
-	case ".js", ".mjs":
-		return "script"
-	case ".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp", ".ico":
-		return "image"
-	case ".woff", ".woff2", ".ttf", ".eot", ".otf":
-		return "font"
-	case ".mp4", ".webm", ".mov":
-		return "video"
-	case ".mp3", ".ogg", ".wav":
-		return "audio"
-	default:
-		return "file"
+	if resourceKind, found := knownGrabResourceKindsByExtension[extension]; found {
+		return resourceKind
 	}
+	return "file"
 }
 
 func (a *App) grabProgressWS(w http.ResponseWriter, r *http.Request) {
@@ -4138,9 +4129,155 @@ func resourceKindFromContentType(contentType string) string {
 		return "video"
 	case strings.HasPrefix(contentType, "audio/"):
 		return "audio"
+	case strings.HasPrefix(contentType, "text/"), strings.HasPrefix(contentType, "application/"):
+		return "file"
 	default:
 		return ""
 	}
+}
+
+var knownGrabResourceKindsByExtension = map[string]string{
+	".css":      "style",
+	".js":       "script",
+	".mjs":      "script",
+	".cjs":      "script",
+	".png":      "image",
+	".jpg":      "image",
+	".jpeg":     "image",
+	".gif":      "image",
+	".svg":      "image",
+	".webp":     "image",
+	".ico":      "image",
+	".bmp":      "image",
+	".tif":      "image",
+	".tiff":     "image",
+	".avif":     "image",
+	".apng":     "image",
+	".heic":     "image",
+	".heif":     "image",
+	".jfif":     "image",
+	".pjpeg":    "image",
+	".pjp":      "image",
+	".woff":     "font",
+	".woff2":    "font",
+	".ttf":      "font",
+	".eot":      "font",
+	".otf":      "font",
+	".mp4":      "video",
+	".webm":     "video",
+	".mov":      "video",
+	".avi":      "video",
+	".mkv":      "video",
+	".m4v":      "video",
+	".flv":      "video",
+	".wmv":      "video",
+	".mpg":      "video",
+	".mpeg":     "video",
+	".3gp":      "video",
+	".3g2":      "video",
+	".ts":       "video",
+	".m2ts":     "video",
+	".mts":      "video",
+	".ogv":      "video",
+	".m3u8":     "video",
+	".mp3":      "audio",
+	".ogg":      "audio",
+	".oga":      "audio",
+	".opus":     "audio",
+	".wav":      "audio",
+	".flac":     "audio",
+	".aac":      "audio",
+	".m4a":      "audio",
+	".wma":      "audio",
+	".aiff":     "audio",
+	".mid":      "audio",
+	".midi":     "audio",
+	".amr":      "audio",
+	".weba":     "audio",
+	".pdf":      "file",
+	".doc":      "file",
+	".docx":     "file",
+	".dot":      "file",
+	".dotx":     "file",
+	".xls":      "file",
+	".xlsx":     "file",
+	".xlsm":     "file",
+	".csv":      "file",
+	".tsv":      "file",
+	".ods":      "file",
+	".odt":      "file",
+	".odp":      "file",
+	".odg":      "file",
+	".odf":      "file",
+	".ppt":      "file",
+	".pptx":     "file",
+	".pps":      "file",
+	".ppsx":     "file",
+	".pot":      "file",
+	".potx":     "file",
+	".rtf":      "file",
+	".txt":      "file",
+	".text":     "file",
+	".md":       "file",
+	".markdown": "file",
+	".epub":     "file",
+	".mobi":     "file",
+	".azw":      "file",
+	".azw3":     "file",
+	".fb2":      "file",
+	".djvu":     "file",
+	".djv":      "file",
+	".cbz":      "file",
+	".cbr":      "file",
+	".xml":      "file",
+	".json":     "file",
+	".map":      "file",
+	".geojson":  "file",
+	".yaml":     "file",
+	".yml":      "file",
+	".toml":     "file",
+	".ini":      "file",
+	".cfg":      "file",
+	".conf":     "file",
+	".log":      "file",
+	".sql":      "file",
+	".db":       "file",
+	".sqlite":   "file",
+	".sqlite3":  "file",
+	".zip":      "file",
+	".rar":      "file",
+	".7z":       "file",
+	".tar":      "file",
+	".gz":       "file",
+	".tgz":      "file",
+	".bz2":      "file",
+	".xz":       "file",
+	".lz":       "file",
+	".lzma":     "file",
+	".zst":      "file",
+	".cab":      "file",
+	".jar":      "file",
+	".war":      "file",
+	".ear":      "file",
+	".apk":      "file",
+	".ipa":      "file",
+	".exe":      "file",
+	".msi":      "file",
+	".msix":     "file",
+	".dmg":      "file",
+	".pkg":      "file",
+	".deb":      "file",
+	".rpm":      "file",
+	".appimage": "file",
+	".bin":      "file",
+	".iso":      "file",
+	".img":      "file",
+	".toast":    "file",
+	".kmz":      "file",
+	".kml":      "file",
+	".gpx":      "file",
+	".rctrk":    "file",
+	".torrent":  "file",
 }
 
 func resourceExtensionFromContentType(contentType string) string {
@@ -4482,6 +4619,9 @@ func (spider *pageSpider) rewriteTextReferences(source, baseRawURL string, depth
 	rewriteSingle := func(rawRef string) string {
 		return spider.rewriteResourceReference(rawRef, baseURL, depth)
 	}
+	rewriteDocumentReference := func(rawRef string) string {
+		return spider.rewriteDocumentResourceReference(rawRef, baseURL, depth)
+	}
 	rewritten := htmlResourcePattern.ReplaceAllStringFunc(source, func(match string) string {
 		parts := htmlResourcePattern.FindStringSubmatch(match)
 		if len(parts) != 4 {
@@ -4500,7 +4640,7 @@ func (spider *pageSpider) rewriteTextReferences(source, baseRawURL string, depth
 			return strings.Replace(match, parts[3], "about:blank", 1)
 		}
 		if isWholeSiteDocumentAttribute(tagName, attributeName) {
-			return match
+			return strings.Replace(match, parts[3], rewriteDocumentReference(parts[3]), 1)
 		}
 		return strings.Replace(match, parts[3], rewriteSingle(parts[3]), 1)
 	})
@@ -4546,6 +4686,21 @@ func (spider *pageSpider) rewriteResourceReference(rawRef string, baseURL *url.U
 	return dependency.assetPath
 }
 
+func (spider *pageSpider) rewriteDocumentResourceReference(rawRef string, baseURL *url.URL, depth int) string {
+	normalizedURL, blocked := spider.normalizeURL(rawRef, baseURL)
+	if blocked || normalizedURL == "" {
+		return rawRef
+	}
+	if !spider.shouldPersistResource(normalizedURL) {
+		return rawRef
+	}
+	dependency, err := spider.fetchResource(rawRef, baseURL, depth, true)
+	if err != nil || dependency == nil || dependency.assetPath == "" {
+		return rawRef
+	}
+	return dependency.assetPath
+}
+
 func (spider *pageSpider) rewriteJSResourceReferences(source, baseRawURL string, depth int) string {
 	baseURL, _ := url.Parse(baseRawURL)
 	var rewritten strings.Builder
@@ -4579,6 +4734,10 @@ func (spider *pageSpider) rewriteJSResourceReferences(source, baseRawURL string,
 			break
 		}
 		rawReference := source[referenceStart:referenceEnd]
+		if !shouldRewriteJSResourceReference(rawReference) {
+			currentIndex = referenceEnd
+			continue
+		}
 		normalizedURL, blocked := spider.normalizeURL(rawReference, baseURL)
 		if !blocked && hasAllowedGrabResourceExtension(normalizedURL) {
 			rewritten.WriteString(source[lastWrittenIndex:referenceStart])
@@ -4592,6 +4751,70 @@ func (spider *pageSpider) rewriteJSResourceReferences(source, baseRawURL string,
 	}
 	rewritten.WriteString(source[lastWrittenIndex:])
 	return rewritten.String()
+}
+
+// JS resource rewriting stays intentionally conservative: only obvious path-like
+// literals are touched so library code and selector/operator strings stay intact.
+type jsResourceReferenceRule func(string) bool
+
+var jsResourceReferenceRules = []jsResourceReferenceRule{
+	isExplicitJSResourceReference,
+	isRootRelativeJSResourceReference,
+	isDotRelativeJSResourceReference,
+	isBareStaticFileJSResourceReference,
+}
+
+func shouldRewriteJSResourceReference(rawReference string) bool {
+	trimmedReference := strings.TrimSpace(rawReference)
+	if trimmedReference == "" {
+		return false
+	}
+	for _, rule := range jsResourceReferenceRules {
+		if rule(trimmedReference) {
+			return true
+		}
+	}
+	return false
+}
+
+func isExplicitJSResourceReference(rawReference string) bool {
+	loweredReference := strings.ToLower(strings.TrimSpace(rawReference))
+	return strings.HasPrefix(loweredReference, "http://") || strings.HasPrefix(loweredReference, "https://") || strings.HasPrefix(loweredReference, "//")
+}
+
+func isRootRelativeJSResourceReference(rawReference string) bool {
+	trimmedReference := strings.TrimSpace(rawReference)
+	return strings.HasPrefix(trimmedReference, "/") && isStaticLikeJSReference(trimmedReference)
+}
+
+func isDotRelativeJSResourceReference(rawReference string) bool {
+	trimmedReference := strings.TrimSpace(rawReference)
+	if strings.HasPrefix(trimmedReference, "./") || strings.HasPrefix(trimmedReference, "../") {
+		return isStaticLikeJSReference(trimmedReference)
+	}
+	return false
+}
+
+func isBareStaticFileJSResourceReference(rawReference string) bool {
+	trimmedReference := strings.TrimSpace(rawReference)
+	if strings.Contains(trimmedReference, "://") || strings.HasPrefix(trimmedReference, "//") || strings.HasPrefix(trimmedReference, "/") || strings.HasPrefix(trimmedReference, "./") || strings.HasPrefix(trimmedReference, "../") {
+		return false
+	}
+	return isStaticLikeJSReference(trimmedReference)
+}
+
+func isStaticLikeJSReference(rawReference string) bool {
+	trimmedReference := strings.TrimSpace(rawReference)
+	if trimmedReference == "" {
+		return false
+	}
+	if strings.ContainsAny(trimmedReference, ` "'\`+"*<>{}()[]|^$") {
+		return false
+	}
+	if strings.HasPrefix(trimmedReference, ".") && !strings.HasPrefix(trimmedReference, "./") && !strings.HasPrefix(trimmedReference, "../") {
+		return false
+	}
+	return hasAllowedGrabResourceExtension(trimmedReference)
 }
 
 func isWholeSitePageURLString(rawURL string) bool {
@@ -4738,6 +4961,10 @@ func (spider *pageSpider) isAllowedResourceContentType(resourceURL, contentType 
 	if contentType == "" {
 		return hasAllowedGrabResourceExtension(resourceURL)
 	}
+	switch contentType {
+	case "text/html", "application/xhtml+xml":
+		return false
+	}
 	resourceKind := resourceKindFromURL(resourceURL)
 	if resourceKind == "" {
 		resourceKind = resourceKindFromContentType(contentType)
@@ -4755,6 +4982,8 @@ func (spider *pageSpider) isAllowedResourceContentType(resourceURL, contentType 
 		return strings.HasPrefix(contentType, "video/")
 	case "audio":
 		return strings.HasPrefix(contentType, "audio/")
+	case "file":
+		return true
 	default:
 		return false
 	}
@@ -4762,26 +4991,15 @@ func (spider *pageSpider) isAllowedResourceContentType(resourceURL, contentType 
 
 func resourceKindFromURL(resourceURL string) string {
 	extension := resourceExtension(resourceURL)
-	switch extension {
-	case ".css":
-		return "style"
-	case ".js", ".mjs":
-		return "script"
-	case ".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp", ".ico":
-		return "image"
-	case ".woff", ".woff2", ".ttf", ".eot", ".otf":
-		return "font"
-	case ".mp4", ".webm", ".mov":
-		return "video"
-	case ".mp3", ".ogg", ".wav":
-		return "audio"
-	default:
-		return ""
+	if resourceKind, found := knownGrabResourceKindsByExtension[extension]; found {
+		return resourceKind
 	}
+	return ""
 }
 
 func hasAllowedGrabResourceExtension(resourceURL string) bool {
-	return resourceKindFromURL(resourceURL) != ""
+	_, found := knownGrabResourceKindsByExtension[resourceExtension(resourceURL)]
+	return found
 }
 
 func (spider *pageSpider) shouldPersistResource(normalizedURL string) bool {
