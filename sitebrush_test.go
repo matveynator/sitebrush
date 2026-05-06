@@ -667,6 +667,86 @@ func TestSavePagePropagatesSiteBrushTemplateToOtherPagesAndPublishedOutputs(t *t
 	}
 }
 
+func TestFrozenSavePublishUpdatesPublishedStaticForGuests(t *testing.T) {
+	application, rawDB := newTestApplication(t)
+	_, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "admin@example.com", "old")
+	if err != nil {
+		t.Fatalf("insert user: %v", err)
+	}
+	oldHTML := "<html><body><h1>Old public page</h1></body></html>"
+	newHTML := "<html><body><h1>New frozen edit</h1></body></html>"
+	_, err = rawDB.Exec(`INSERT INTO pages(domain,path,title,html,published) VALUES(?,?,?,?,1)`, "localhost", "/docs", "Docs", oldHTML)
+	if err != nil {
+		t.Fatalf("insert page: %v", err)
+	}
+	_, err = rawDB.Exec(`INSERT INTO published_pages(domain,path,title,html) VALUES(?,?,?,?)`, "localhost", "/docs", "Docs", oldHTML)
+	if err != nil {
+		t.Fatalf("insert published page: %v", err)
+	}
+	_, err = rawDB.Exec(`INSERT INTO revisions(domain,page_path,html,created_at,is_active) VALUES(?,?,?,?,1)`, "localhost", "/docs", oldHTML, time.Now().Format(time.RFC3339))
+	if err != nil {
+		t.Fatalf("insert revision: %v", err)
+	}
+	application.writePublishedStaticHTML("localhost", "/docs", oldHTML)
+	application.setDomainFrozenState(context.Background(), "localhost", 1)
+
+	saveForm := url.Values{}
+	saveForm.Set("path", "/docs")
+	saveForm.Set("title", "Docs")
+	saveForm.Set("html", newHTML)
+	saveRequest := httptest.NewRequest(http.MethodPost, "http://localhost:8080/docs?save", strings.NewReader(saveForm.Encode()))
+	saveRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	saveRequest.AddCookie(newAdminSessionCookie(t, application, "admin@example.com"))
+	saveResponse := httptest.NewRecorder()
+	application.route(saveResponse, saveRequest)
+	if saveResponse.Code != http.StatusFound {
+		t.Fatalf("save status = %d, body=%q", saveResponse.Code, saveResponse.Body.String())
+	}
+
+	frozenGuestRequest := httptest.NewRequest(http.MethodGet, "http://localhost:8080/docs", nil)
+	frozenGuestResponse := httptest.NewRecorder()
+	application.route(frozenGuestResponse, frozenGuestRequest)
+	if !strings.Contains(frozenGuestResponse.Body.String(), "Old public page") {
+		t.Fatalf("frozen guest did not keep old static page: %s", frozenGuestResponse.Body.String())
+	}
+	if strings.Contains(frozenGuestResponse.Body.String(), "New frozen edit") {
+		t.Fatalf("frozen guest saw draft edit before publish: %s", frozenGuestResponse.Body.String())
+	}
+
+	publishRequest := httptest.NewRequest(http.MethodPost, "http://localhost:8080/docs?publish", nil)
+	publishRequest.AddCookie(newAdminSessionCookie(t, application, "admin@example.com"))
+	publishResponse := httptest.NewRecorder()
+	application.route(publishResponse, publishRequest)
+	if publishResponse.Code != http.StatusFound {
+		t.Fatalf("publish status = %d, body=%q", publishResponse.Code, publishResponse.Body.String())
+	}
+
+	var publishedHTML string
+	if err := rawDB.QueryRow(`SELECT html FROM published_pages WHERE domain=? AND path=?`, "localhost", "/docs").Scan(&publishedHTML); err != nil {
+		t.Fatalf("read published page: %v", err)
+	}
+	if publishedHTML != newHTML {
+		t.Fatalf("published html = %q, want %q", publishedHTML, newHTML)
+	}
+	staticHTML, readErr := os.ReadFile(filepath.Join(application.domainStaticDir("localhost"), staticRelativePathForPage("/docs")))
+	if readErr != nil {
+		t.Fatalf("read static page: %v", readErr)
+	}
+	if string(staticHTML) != newHTML {
+		t.Fatalf("static html = %q, want %q", string(staticHTML), newHTML)
+	}
+	if application.isDomainFrozen(context.Background(), "localhost") {
+		t.Fatal("domain remained frozen after publish")
+	}
+
+	publishedGuestRequest := httptest.NewRequest(http.MethodGet, "http://localhost:8080/docs", nil)
+	publishedGuestResponse := httptest.NewRecorder()
+	application.route(publishedGuestResponse, publishedGuestRequest)
+	if !strings.Contains(publishedGuestResponse.Body.String(), "New frozen edit") {
+		t.Fatalf("published guest did not see new static page: %s", publishedGuestResponse.Body.String())
+	}
+}
+
 func TestSavePagePropagatesLegacySitebrushTemplateClass(t *testing.T) {
 	application, rawDB := newTestApplication(t)
 	_, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "admin@example.com", "old")
@@ -868,7 +948,7 @@ func TestGrabPageCanCopyWholeExternalSiteUnderLocalPath(t *testing.T) {
 	if response.Code != http.StatusOK {
 		t.Fatalf("whole-site import status = %d, body=%q", response.Code, response.Body.String())
 	}
-	if !strings.Contains(response.Body.String(), `"/URI?visual"`) {
+	if !strings.Contains(response.Body.String(), `"/URI"`) || strings.Contains(response.Body.String(), `?visual`) {
 		t.Fatalf("whole-site import redirect does not point to local base path: %s", response.Body.String())
 	}
 
@@ -944,6 +1024,39 @@ func TestGrabPageCanCopyWholeExternalSiteUnderLocalPath(t *testing.T) {
 	application.route(assetResponse, assetRequest)
 	if assetResponse.Code != http.StatusOK {
 		t.Fatalf("base-prefixed asset status = %d, path=%q", assetResponse.Code, rootHTML[assetPrefixIndex:assetPathEnd])
+	}
+}
+
+func TestGrabPageRedirectsToImportedPageView(t *testing.T) {
+	application, rawDB := newTestApplication(t)
+	_, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "admin@example.com", "old")
+	if err != nil {
+		t.Fatalf("insert user: %v", err)
+	}
+	previousGrabHTTPClient := newGrabHTTPClient
+	newGrabHTTPClient = func() *http.Client {
+		return &http.Client{Transport: fakeGrabTransport{responses: map[string]fakeGrabResponse{
+			"https://source.example/page": {contentType: "text/html", body: "<!doctype html><html><body>Imported page</body></html>"},
+		}}}
+	}
+	defer func() {
+		newGrabHTTPClient = previousGrabHTTPClient
+	}()
+
+	form := url.Values{}
+	form.Set("path", "/docs")
+	form.Set("source_url", "https://source.example/page")
+	request := httptest.NewRequest(http.MethodPost, "http://localhost:8080/docs?grab", strings.NewReader(form.Encode()))
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	request.Header.Set("Accept", "application/json")
+	request.AddCookie(newAdminSessionCookie(t, application, "admin@example.com"))
+	response := httptest.NewRecorder()
+	application.route(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("grab status = %d, body=%q", response.Code, response.Body.String())
+	}
+	if !strings.Contains(response.Body.String(), `"/docs"`) || strings.Contains(response.Body.String(), `?visual`) {
+		t.Fatalf("grab redirect should open imported page view, got %s", response.Body.String())
 	}
 }
 
@@ -1384,6 +1497,39 @@ func TestUploadFilesStoresFilesForCurrentURI(t *testing.T) {
 	}
 	if !strings.Contains(response.Body.String(), "/p/manual.txt") {
 		t.Fatalf("upload response does not include public path: %q", response.Body.String())
+	}
+}
+
+func TestFilesPageUploadButtonOpensPickerAndSelectedFilesUploadImmediately(t *testing.T) {
+	application, rawDB := newTestApplication(t)
+	_, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "admin@example.com", "old")
+	if err != nil {
+		t.Fatalf("insert user: %v", err)
+	}
+
+	request := httptest.NewRequest(http.MethodGet, "http://localhost:8080/docs?files", nil)
+	request.AddCookie(newAdminSessionCookie(t, application, "admin@example.com"))
+	response := httptest.NewRecorder()
+	application.route(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("files status = %d, body=%q", response.Code, response.Body.String())
+	}
+	body := response.Body.String()
+	expectedSnippets := []string{
+		`const currentFilesPath = "/docs";`,
+		"requestFileSelection();",
+		"uploadInputElement.addEventListener('change'",
+		"uploadSelectedFiles(Array.from(uploadInputElement.files));",
+		"request.open('POST', currentFilesPath + '?files');",
+		"currentFilesPath + '?native_pick_files'",
+	}
+	for _, expectedSnippet := range expectedSnippets {
+		if !strings.Contains(body, expectedSnippet) {
+			t.Fatalf("files page does not contain %q", expectedSnippet)
+		}
+	}
+	if strings.Contains(body, "new FormData(uploadFormElement)") {
+		t.Fatalf("files page still posts the whole form instead of selected file list")
 	}
 }
 

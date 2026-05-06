@@ -161,12 +161,15 @@
   const uploadProgressTextElement = document.getElementById('uploadProgressText');
   const uploadProgressBarElement = document.getElementById('uploadProgressBar');
   const uploadModalController = uploadModalElement && window.bootstrap ? new bootstrap.Modal(uploadModalElement, { backdrop: 'static', keyboard: false }) : null;
+  const currentFilesPath = {{.Path}};
+  const desktopNativeFilePickerEnabled = {{.NativeFileDialog}};
   const previewImages = Array.from(document.querySelectorAll('[data-preview-image]'));
   const imagePreviewModalElement = document.getElementById('imagePreviewModal');
   const imagePreviewFullElement = document.getElementById('imagePreviewFull');
   const imagePreviewTitleElement = document.getElementById('imagePreviewTitle');
   const imagePreviewModalController = imagePreviewModalElement && window.bootstrap ? new bootstrap.Modal(imagePreviewModalElement) : null;
   let currentPreviewIndex = 0;
+  let uploadInFlight = false;
 
   function absoluteURL(assetPath) {
     return new URL(assetPath, window.location.origin).href;
@@ -364,12 +367,63 @@
     uploadProgressBarElement.setAttribute('aria-valuenow', String(boundedPercent));
   }
 
-  if (uploadFormElement) {
-    uploadFormElement.addEventListener('submit', function onUploadSubmit(event) {
-      event.preventDefault();
-      if (!uploadInputElement || uploadInputElement.files.length === 0) { return; }
+  function base64ToBlob(base64Content, mimeType) {
+    const binaryString = atob(base64Content);
+    const byteNumbers = new Uint8Array(binaryString.length);
+    for (let byteIndex = 0; byteIndex < binaryString.length; byteIndex += 1) {
+      byteNumbers[byteIndex] = binaryString.charCodeAt(byteIndex);
+    }
+    return new Blob([byteNumbers], { type: mimeType || 'application/octet-stream' });
+  }
+
+  function nativePickedFilesToUploadFiles(nativePayload) {
+    if (!nativePayload || !Array.isArray(nativePayload.files)) {
+      return [];
+    }
+    return nativePayload.files.map(function convertPickedFile(pickedFile) {
+      const mimeType = pickedFile.mime || 'application/octet-stream';
+      const fileBlob = base64ToBlob(pickedFile.content || '', mimeType);
+      fileBlob.uploadName = pickedFile.name || 'upload';
+      return fileBlob;
+    });
+  }
+
+  function appendUploadFile(formData, selectedFile) {
+    const uploadName = selectedFile.name || selectedFile.uploadName || 'upload';
+    formData.append('upload_files', selectedFile, uploadName);
+  }
+
+  function uploadErrorText(request) {
+    const contentType = request.getResponseHeader('Content-Type') || '';
+    if (contentType.indexOf('application/json') >= 0) {
+      try {
+        const errorPayload = JSON.parse(request.responseText || '{}');
+        if (typeof errorPayload.error === 'string' && errorPayload.error.trim() !== '') {
+          return errorPayload.error;
+        }
+      } catch (parseError) {
+        return {{printf "%q" (index .T "files_upload_failed")}};
+      }
+    }
+    if (contentType.indexOf('text/html') >= 0) {
+      return {{printf "%q" (index .T "files_upload_failed")}};
+    }
+    const responseText = (request.responseText || '').trim();
+    if (responseText !== '' && responseText.length < 240) {
+      return responseText;
+    }
+    return {{printf "%q" (index .T "files_upload_failed")}};
+  }
+
+  function uploadSelectedFiles(selectedFiles) {
+    if (!uploadFormElement || uploadInFlight || selectedFiles.length === 0) { return; }
       const request = new XMLHttpRequest();
-      const body = new FormData(uploadFormElement);
+      const body = new FormData();
+      body.append('action', 'upload');
+      for (const selectedFile of selectedFiles) {
+        appendUploadFile(body, selectedFile);
+      }
+      uploadInFlight = true;
       uploadProgressTextElement.textContent = {{printf "%q" (index .T "files_upload_progress")}} + ' 0%';
       setUploadPercent(0);
       showUploadModal();
@@ -393,14 +447,58 @@
           window.location.href = uploadedFiles.length > 0 ? uploadedFileURL(uploadedFiles) : window.location.href;
           return;
         }
-        uploadProgressTextElement.textContent = request.responseText || {{printf "%q" (index .T "files_upload_failed")}};
+        uploadInFlight = false;
+        uploadProgressTextElement.textContent = uploadErrorText(request);
       };
       request.onerror = function onUploadError() {
+        uploadInFlight = false;
         uploadProgressTextElement.textContent = {{printf "%q" (index .T "files_upload_connection_lost")}};
       };
-      request.open('POST', uploadFormElement.action);
+      request.open('POST', currentFilesPath + '?files');
       request.setRequestHeader('Accept', 'application/json');
       request.send(body);
+  }
+
+  function pickFilesWithBrowser() {
+    if (!uploadInputElement) { return; }
+    uploadInputElement.click();
+  }
+
+  function requestFileSelection() {
+    if (!desktopNativeFilePickerEnabled) {
+      pickFilesWithBrowser();
+      return;
+    }
+    fetch(currentFilesPath + '?native_pick_files', { headers: { 'Accept': 'application/json' } })
+      .then(function parseNativePickerResponse(nativeResponse) {
+        if (!nativeResponse.ok) { throw new Error('native picker unavailable'); }
+        return nativeResponse.json();
+      })
+      .then(function uploadNativePickedFiles(nativePayload) {
+        const selectedFiles = nativePickedFilesToUploadFiles(nativePayload);
+        if (selectedFiles.length > 0) {
+          uploadSelectedFiles(selectedFiles);
+        }
+      })
+      .catch(function fallbackToBrowserPicker() {
+        pickFilesWithBrowser();
+      });
+  }
+
+  if (uploadFormElement) {
+    uploadFormElement.addEventListener('submit', function onUploadSubmit(event) {
+      event.preventDefault();
+      if (!uploadInputElement || uploadInputElement.files.length === 0) {
+        requestFileSelection();
+        return;
+      }
+      uploadSelectedFiles(Array.from(uploadInputElement.files));
+    });
+  }
+  if (uploadInputElement) {
+    uploadInputElement.addEventListener('change', function onUploadInputChange() {
+      if (uploadInputElement.files.length === 0) { return; }
+      uploadSelectedFiles(Array.from(uploadInputElement.files));
     });
   }
 

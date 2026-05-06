@@ -197,7 +197,7 @@
     "missing_progress_downloaded_prefix": "Downloaded:",
     "missing_progress_from_word": "of",
     "missing_progress_left_word": "Remaining:",
-    "missing_done_open_editor": "Done. Opening editor...",
+    "missing_done_open_editor": "Done. Opening page...",
     "missing_download_failed_retry": "Failed to download the page. You can close the window and try another URL.",
     "missing_reconnecting_status": "Download continues. Reconnecting status channel...",
     "missing_connect_status_failed": "Failed to connect to download status. You can close the window and try again.",
@@ -223,7 +223,14 @@
     "edit_queue_prefix": "File",
     "edit_queue_of": "of",
     "edit_file_name_required": "File name is required.",
-    "edit_uploading": "Uploading..."
+    "edit_uploading": "Uploading...",
+    "publish_progress_preparing": "Preparing publication...",
+    "publish_progress_pages": "Publishing pages...",
+    "publish_progress_pack": "Rebuilding backup package...",
+    "publish_progress_unfreeze": "Opening the site to visitors...",
+    "publish_progress_done": "Done. Refreshing page...",
+    "publish_progress_failed": "Publication failed.",
+    "publish_progress_remaining": "Remaining:"
   },
   "fr": {
     "setup_no_admin": "aucun administrateur pour l'instant",
@@ -423,7 +430,7 @@
     "missing_progress_downloaded_prefix": "Téléchargé :",
     "missing_progress_from_word": "de",
     "missing_progress_left_word": "Restant:",
-    "missing_done_open_editor": "Fait. Ouverture de l'éditeur...",
+    "missing_done_open_editor": "Fait. Ouverture de la page...",
     "missing_download_failed_retry": "Échec du téléchargement de la page. Vous pouvez fermer la fenêtre et essayer une autre URL.",
     "missing_reconnecting_status": "Le téléchargement continue. Reconnexion du canal d'état...",
     "missing_connect_status_failed": "Échec de la connexion à l'état de téléchargement. Vous pouvez fermer la fenêtre et réessayer.",
@@ -449,7 +456,14 @@
     "edit_queue_prefix": "Fichier",
     "edit_queue_of": "de",
     "edit_file_name_required": "Le nom du fichier est requis.",
-    "edit_uploading": "Téléchargement..."
+    "edit_uploading": "Téléchargement...",
+    "publish_progress_preparing": "Préparation de la publication...",
+    "publish_progress_pages": "Publication des pages...",
+    "publish_progress_pack": "Reconstruction du paquet de sauvegarde...",
+    "publish_progress_unfreeze": "Ouverture du site aux visiteurs...",
+    "publish_progress_done": "Terminé. Actualisation de la page...",
+    "publish_progress_failed": "La publication a échoué.",
+    "publish_progress_remaining": "Restant :"
   },
   "ru": {
     "setup_no_admin": "пока нет администратора",
@@ -649,7 +663,7 @@
     "missing_progress_downloaded_prefix": "Скачано:",
     "missing_progress_from_word": "из",
     "missing_progress_left_word": "Осталось:",
-    "missing_done_open_editor": "Готово. Открываем редактор...",
+    "missing_done_open_editor": "Готово. Открываем страницу...",
     "missing_download_failed_retry": "Не удалось скачать страницу. Окно можно закрыть и попробовать другой адрес.",
     "missing_reconnecting_status": "Загрузка продолжается. Канал статуса переподключается...",
     "missing_connect_status_failed": "Не удалось подключиться к статусу загрузки. Окно можно закрыть и попробовать ещё раз.",
@@ -675,7 +689,14 @@
     "edit_queue_prefix": "Файл",
     "edit_queue_of": "из",
     "edit_file_name_required": "Имя файла обязательно.",
-    "edit_uploading": "Загрузка..."
+    "edit_uploading": "Загрузка...",
+    "publish_progress_preparing": "Подготовка публикации...",
+    "publish_progress_pages": "Публикуем страницы...",
+    "publish_progress_pack": "Пересобираем пакет бэкапа...",
+    "publish_progress_unfreeze": "Открываем сайт посетителям...",
+    "publish_progress_done": "Готово. Обновляем страницу...",
+    "publish_progress_failed": "Публикация не удалась.",
+    "publish_progress_remaining": "Осталось:"
   },
   "ja": {
     "setup_no_admin": "まだ管理者がいません",
@@ -875,7 +896,7 @@
     "missing_progress_downloaded_prefix": "ダウンロード済み:",
     "missing_progress_from_word": "の",
     "missing_progress_left_word": "残り：",
-    "missing_done_open_editor": "終わり。エディターを開いています...",
+    "missing_done_open_editor": "完了しました。ページを開いています...",
     "missing_download_failed_retry": "ページのダウンロードに失敗しました。ウィンドウを閉じて、別の URL を試してください。",
     "missing_reconnecting_status": "ダウンロードは続行されます。ステータス チャネルを再接続しています...",
     "missing_connect_status_failed": "ダウンロードステータスへの接続に失敗しました。ウィンドウを閉じて、もう一度試してください。",
@@ -901,7 +922,14 @@
     "edit_queue_prefix": "ファイル",
     "edit_queue_of": "の",
     "edit_file_name_required": "ファイル名は必須です。",
-    "edit_uploading": "アップロード中..."
+    "edit_uploading": "アップロード中...",
+    "publish_progress_preparing": "公開を準備しています...",
+    "publish_progress_pages": "ページを公開しています...",
+    "publish_progress_pack": "バックアップパッケージを再構築しています...",
+    "publish_progress_unfreeze": "訪問者にサイトを公開しています...",
+    "publish_progress_done": "完了しました。ページを更新しています...",
+    "publish_progress_failed": "公開に失敗しました。",
+    "publish_progress_remaining": "残り:"
   },
   "it": {
     "setup_no_admin": "nessun amministratore ancora",
@@ -1101,7 +1129,7 @@
     "missing_progress_downloaded_prefix": "Scaricato:",
     "missing_progress_from_word": "di",
     "missing_progress_left_word": "Rimanente:",
-    "missing_done_open_editor": "Fatto. Apertura dell'editor...",
+    "missing_done_open_editor": "Fatto. Apertura della pagina...",
     "missing_download_failed_retry": "Impossibile scaricare la pagina. Puoi chiudere la finestra e provare un altro URL.",
     "missing_reconnecting_status": "Il download continua. Riconnessione del canale di stato...",
     "missing_connect_status_failed": "Impossibile connettersi allo stato del download. Puoi chiudere la finestra e riprovare.",
@@ -1127,7 +1155,14 @@
     "edit_queue_prefix": "Elemento",
     "edit_queue_of": "Di",
     "edit_file_name_required": "Il nome del file è obbligatorio.",
-    "edit_uploading": "Caricamento..."
+    "edit_uploading": "Caricamento...",
+    "publish_progress_preparing": "Preparazione della pubblicazione...",
+    "publish_progress_pages": "Pubblicazione delle pagine...",
+    "publish_progress_pack": "Ricostruzione del pacchetto di backup...",
+    "publish_progress_unfreeze": "Apertura del sito ai visitatori...",
+    "publish_progress_done": "Fatto. Aggiornamento pagina...",
+    "publish_progress_failed": "Pubblicazione non riuscita.",
+    "publish_progress_remaining": "Rimanenti:"
   },
   "sv": {
     "setup_no_admin": "ingen administratör ännu",
@@ -1327,7 +1362,7 @@
     "missing_progress_downloaded_prefix": "Nedladdat:",
     "missing_progress_from_word": "av",
     "missing_progress_left_word": "Återstående:",
-    "missing_done_open_editor": "Gjort. Öppnar redigeraren...",
+    "missing_done_open_editor": "Klart. Öppnar sidan...",
     "missing_download_failed_retry": "Det gick inte att ladda ner sidan. Du kan stänga fönstret och prova en annan URL.",
     "missing_reconnecting_status": "Nedladdningen fortsätter. Återansluter statuskanal...",
     "missing_connect_status_failed": "Det gick inte att ansluta till nedladdningsstatus. Du kan stänga fönstret och försöka igen.",
@@ -1353,7 +1388,14 @@
     "edit_queue_prefix": "Fil",
     "edit_queue_of": "av",
     "edit_file_name_required": "Filnamn krävs.",
-    "edit_uploading": "Laddar upp..."
+    "edit_uploading": "Laddar upp...",
+    "publish_progress_preparing": "Förbereder publicering...",
+    "publish_progress_pages": "Publicerar sidor...",
+    "publish_progress_pack": "Bygger om säkerhetskopieringspaketet...",
+    "publish_progress_unfreeze": "Öppnar webbplatsen för besökare...",
+    "publish_progress_done": "Klart. Uppdaterar sidan...",
+    "publish_progress_failed": "Publiceringen misslyckades.",
+    "publish_progress_remaining": "Återstår:"
   },
   "fi": {
     "setup_no_admin": "ei vielä järjestelmänvalvojaa",
@@ -1553,7 +1595,7 @@
     "missing_progress_downloaded_prefix": "Ladattu:",
     "missing_progress_from_word": "/",
     "missing_progress_left_word": "Jäljellä:",
-    "missing_done_open_editor": "Tehty. Avataan editori...",
+    "missing_done_open_editor": "Valmis. Avataan sivu...",
     "missing_download_failed_retry": "Sivun lataaminen epäonnistui. Voit sulkea ikkunan ja kokeilla toista URL-osoitetta.",
     "missing_reconnecting_status": "Lataus jatkuu. Yhdistetään uudelleen tilakanavaa...",
     "missing_connect_status_failed": "Yhteyden muodostaminen lataustilaan epäonnistui. Voit sulkea ikkunan ja yrittää uudelleen.",
@@ -1579,7 +1621,14 @@
     "edit_queue_prefix": "Tiedosto",
     "edit_queue_of": "/",
     "edit_file_name_required": "Tiedostonimi vaaditaan.",
-    "edit_uploading": "Ladataan..."
+    "edit_uploading": "Ladataan...",
+    "publish_progress_preparing": "Valmistellaan julkaisua...",
+    "publish_progress_pages": "Julkaistaan sivuja...",
+    "publish_progress_pack": "Rakennetaan varmuuskopiopakettia uudelleen...",
+    "publish_progress_unfreeze": "Avataan sivusto kävijöille...",
+    "publish_progress_done": "Valmis. Päivitetään sivu...",
+    "publish_progress_failed": "Julkaisu epäonnistui.",
+    "publish_progress_remaining": "Jäljellä:"
   },
   "mn": {
     "setup_no_admin": "админ хараахан алга",
@@ -1779,7 +1828,7 @@
     "missing_progress_downloaded_prefix": "Татаж авсан:",
     "missing_progress_from_word": "-аас",
     "missing_progress_left_word": "Үлдсэн:",
-    "missing_done_open_editor": "Дууслаа. Засварлагчийг нээж байна...",
+    "missing_done_open_editor": "Дууслаа. Хуудсыг нээж байна...",
     "missing_download_failed_retry": "Хуудсыг татаж авч чадсангүй. Та цонхыг хааж, өөр URL-г оролдож болно.",
     "missing_reconnecting_status": "Татаж авч байна. Статусын сувгийг дахин холбож байна...",
     "missing_connect_status_failed": "Татаж авах төлөвтэй холбогдож чадсангүй. Та цонхоо хаагаад дахин оролдоно уу.",
@@ -1805,7 +1854,14 @@
     "edit_queue_prefix": "Файл",
     "edit_queue_of": "-ийн",
     "edit_file_name_required": "Файлын нэр шаардлагатай.",
-    "edit_uploading": "Байршуулж байна..."
+    "edit_uploading": "Байршуулж байна...",
+    "publish_progress_preparing": "Нийтлэлд бэлтгэж байна...",
+    "publish_progress_pages": "Хуудсуудыг нийтэлж байна...",
+    "publish_progress_pack": "Нөөц багцыг дахин үүсгэж байна...",
+    "publish_progress_unfreeze": "Сайтыг зочдод нээж байна...",
+    "publish_progress_done": "Дууслаа. Хуудсыг шинэчилж байна...",
+    "publish_progress_failed": "Нийтэлж чадсангүй.",
+    "publish_progress_remaining": "Үлдсэн:"
   },
   "zh": {
     "setup_no_admin": "尚无管理员",
@@ -2005,7 +2061,7 @@
     "missing_progress_downloaded_prefix": "下载：",
     "missing_progress_from_word": "的",
     "missing_progress_left_word": "其余的：",
-    "missing_done_open_editor": "完毕。打开编辑器...",
+    "missing_done_open_editor": "完成。正在打开页面...",
     "missing_download_failed_retry": "下载页面失败。您可以关闭窗口并尝试另一个 URL。",
     "missing_reconnecting_status": "下载继续。正在重新连接状态通道...",
     "missing_connect_status_failed": "无法连接到下载状态。您可以关闭窗口并重试。",
@@ -2031,7 +2087,14 @@
     "edit_queue_prefix": "文件",
     "edit_queue_of": "的",
     "edit_file_name_required": "文件名是必需的。",
-    "edit_uploading": "正在上传..."
+    "edit_uploading": "正在上传...",
+    "publish_progress_preparing": "正在准备发布...",
+    "publish_progress_pages": "正在发布页面...",
+    "publish_progress_pack": "正在重建备份包...",
+    "publish_progress_unfreeze": "正在向访客开放站点...",
+    "publish_progress_done": "完成。正在刷新页面...",
+    "publish_progress_failed": "发布失败。",
+    "publish_progress_remaining": "剩余："
   },
   "he": {
     "setup_no_admin": "עדיין אין מנהל",
@@ -2231,7 +2294,7 @@
     "missing_progress_downloaded_prefix": "הורדת:",
     "missing_progress_from_word": "מתוך",
     "missing_progress_left_word": "נוֹתָר:",
-    "missing_done_open_editor": "נַעֲשָׂה. פותח את העורך...",
+    "missing_done_open_editor": "הסתיים. פותח את הדף...",
     "missing_download_failed_retry": "הורדת העמוד נכשלה. אתה יכול לסגור את החלון ולנסות כתובת URL אחרת.",
     "missing_reconnecting_status": "ההורדה נמשכת. מחבר מחדש את ערוץ הסטטוס...",
     "missing_connect_status_failed": "נכשל החיבור לסטטוס ההורדה. אתה יכול לסגור את החלון ולנסות שוב.",
@@ -2257,7 +2320,14 @@
     "edit_queue_prefix": "קוֹבֶץ",
     "edit_queue_of": "שֶׁל",
     "edit_file_name_required": "נדרש שם קובץ.",
-    "edit_uploading": "מעלה..."
+    "edit_uploading": "מעלה...",
+    "publish_progress_preparing": "מכין פרסום...",
+    "publish_progress_pages": "מפרסם דפים...",
+    "publish_progress_pack": "בונה מחדש את חבילת הגיבוי...",
+    "publish_progress_unfreeze": "פותח את האתר למבקרים...",
+    "publish_progress_done": "הסתיים. מרענן את הדף...",
+    "publish_progress_failed": "הפרסום נכשל.",
+    "publish_progress_remaining": "נותר:"
   },
   "fa": {
     "setup_no_admin": "هنوز مدیر وجود ندارد",
@@ -2457,7 +2527,7 @@
     "missing_progress_downloaded_prefix": "دانلود شده:",
     "missing_progress_from_word": "از",
     "missing_progress_left_word": "باقی مانده:",
-    "missing_done_open_editor": "انجام شد. باز کردن ویرایشگر...",
+    "missing_done_open_editor": "انجام شد. صفحه باز می‌شود...",
     "missing_download_failed_retry": "صفحه دانلود نشد. می توانید پنجره را ببندید و URL دیگری را امتحان کنید.",
     "missing_reconnecting_status": "دانلود ادامه دارد. در حال اتصال مجدد کانال وضعیت...",
     "missing_connect_status_failed": "اتصال به وضعیت بارگیری انجام نشد. می توانید پنجره را ببندید و دوباره امتحان کنید.",
@@ -2483,7 +2553,14 @@
     "edit_queue_prefix": "فایل",
     "edit_queue_of": "از",
     "edit_file_name_required": "نام فایل مورد نیاز است.",
-    "edit_uploading": "در حال آپلود..."
+    "edit_uploading": "در حال آپلود...",
+    "publish_progress_preparing": "در حال آماده‌سازی انتشار...",
+    "publish_progress_pages": "در حال انتشار صفحه‌ها...",
+    "publish_progress_pack": "در حال بازسازی بسته پشتیبان...",
+    "publish_progress_unfreeze": "در حال باز کردن سایت برای بازدیدکنندگان...",
+    "publish_progress_done": "انجام شد. صفحه تازه‌سازی می‌شود...",
+    "publish_progress_failed": "انتشار ناموفق بود.",
+    "publish_progress_remaining": "باقی‌مانده:"
   },
   "de": {
     "setup_no_admin": "noch kein Administrator",
@@ -2683,7 +2760,7 @@
     "missing_progress_downloaded_prefix": "Heruntergeladen:",
     "missing_progress_from_word": "von",
     "missing_progress_left_word": "Übrig:",
-    "missing_done_open_editor": "Erledigt. Editor wird geöffnet...",
+    "missing_done_open_editor": "Fertig. Seite wird geöffnet...",
     "missing_download_failed_retry": "Die Seite konnte nicht heruntergeladen werden. Sie können das Fenster schließen und eine andere URL ausprobieren.",
     "missing_reconnecting_status": "Der Download wird fortgesetzt. Statuskanal wird erneut verbunden...",
     "missing_connect_status_failed": "Verbindung zum Download-Status fehlgeschlagen. Sie können das Fenster schließen und es erneut versuchen.",
@@ -2709,7 +2786,14 @@
     "edit_queue_prefix": "Datei",
     "edit_queue_of": "von",
     "edit_file_name_required": "Dateiname ist erforderlich.",
-    "edit_uploading": "Hochladen..."
+    "edit_uploading": "Hochladen...",
+    "publish_progress_preparing": "Veröffentlichung wird vorbereitet...",
+    "publish_progress_pages": "Seiten werden veröffentlicht...",
+    "publish_progress_pack": "Backup-Paket wird neu erstellt...",
+    "publish_progress_unfreeze": "Website wird für Besucher geöffnet...",
+    "publish_progress_done": "Fertig. Seite wird aktualisiert...",
+    "publish_progress_failed": "Veröffentlichung fehlgeschlagen.",
+    "publish_progress_remaining": "Verbleibend:"
   },
   "tr": {
     "setup_no_admin": "henüz yönetici yok",
@@ -2909,7 +2993,7 @@
     "missing_progress_downloaded_prefix": "İndirildi:",
     "missing_progress_from_word": "içinden",
     "missing_progress_left_word": "Geriye kalan:",
-    "missing_done_open_editor": "Tamamlamak. Editör açılıyor...",
+    "missing_done_open_editor": "Tamam. Sayfa açılıyor...",
     "missing_download_failed_retry": "Sayfa indirilemedi. Pencereyi kapatabilir ve başka bir URL deneyebilirsiniz.",
     "missing_reconnecting_status": "İndirme devam ediyor. Durum kanalı yeniden bağlanıyor...",
     "missing_connect_status_failed": "İndirme durumuna bağlanılamadı. Pencereyi kapatıp tekrar deneyebilirsiniz.",
@@ -2935,7 +3019,14 @@
     "edit_queue_prefix": "Dosya",
     "edit_queue_of": "ile ilgili",
     "edit_file_name_required": "Dosya adı gerekli.",
-    "edit_uploading": "Yükleniyor..."
+    "edit_uploading": "Yükleniyor...",
+    "publish_progress_preparing": "Yayın hazırlığı yapılıyor...",
+    "publish_progress_pages": "Sayfalar yayımlanıyor...",
+    "publish_progress_pack": "Yedek paketi yeniden oluşturuluyor...",
+    "publish_progress_unfreeze": "Site ziyaretçilere açılıyor...",
+    "publish_progress_done": "Tamam. Sayfa yenileniyor...",
+    "publish_progress_failed": "Yayınlama başarısız oldu.",
+    "publish_progress_remaining": "Kalan:"
   },
   "kk": {
     "setup_no_admin": "әзірге әкімші жоқ",
@@ -3135,7 +3226,7 @@
     "missing_progress_downloaded_prefix": "Жүктеп алынған:",
     "missing_progress_from_word": "ішінен",
     "missing_progress_left_word": "Қалғандары:",
-    "missing_done_open_editor": "Дайын. Редактор ашылуда...",
+    "missing_done_open_editor": "Дайын. Бет ашылуда...",
     "missing_download_failed_retry": "Бетті жүктеп алу мүмкін болмады. Терезені жауып, басқа URL мекенжайын қолдануға болады.",
     "missing_reconnecting_status": "Жүктеп алу жалғасуда. Күй арнасы қайта қосылуда...",
     "missing_connect_status_failed": "Жүктеп алу күйіне қосылу мүмкін болмады. Терезені жауып, әрекетті қайталауға болады.",
@@ -3161,7 +3252,14 @@
     "edit_queue_prefix": "Файл",
     "edit_queue_of": "бойынша",
     "edit_file_name_required": "Файл атауы қажет.",
-    "edit_uploading": "Жүктеп салынуда..."
+    "edit_uploading": "Жүктеп салынуда...",
+    "publish_progress_preparing": "Жариялауға дайындалуда...",
+    "publish_progress_pages": "Беттер жариялануда...",
+    "publish_progress_pack": "Бэкап пакеті қайта құрылуда...",
+    "publish_progress_unfreeze": "Сайт келушілерге ашылуда...",
+    "publish_progress_done": "Дайын. Бет жаңартылуда...",
+    "publish_progress_failed": "Жариялау сәтсіз аяқталды.",
+    "publish_progress_remaining": "Қалды:"
   },
   "es": {
     "setup_no_admin": "aún no hay administrador",
@@ -3361,7 +3459,7 @@
     "missing_progress_downloaded_prefix": "Descargado:",
     "missing_progress_from_word": "de",
     "missing_progress_left_word": "Restante:",
-    "missing_done_open_editor": "Hecho. Editor de apertura...",
+    "missing_done_open_editor": "Hecho. Abriendo página...",
     "missing_download_failed_retry": "No se pudo descargar la página. Puede cerrar la ventana e intentar con otra URL.",
     "missing_reconnecting_status": "La descarga continúa. Reconectando el canal de estado...",
     "missing_connect_status_failed": "No se pudo conectar al estado de descarga. Puedes cerrar la ventana y volver a intentarlo.",
@@ -3387,7 +3485,14 @@
     "edit_queue_prefix": "Archivo",
     "edit_queue_of": "de",
     "edit_file_name_required": "El nombre del archivo es obligatorio.",
-    "edit_uploading": "Subiendo..."
+    "edit_uploading": "Subiendo...",
+    "publish_progress_preparing": "Preparando publicación...",
+    "publish_progress_pages": "Publicando páginas...",
+    "publish_progress_pack": "Reconstruyendo paquete de copia de seguridad...",
+    "publish_progress_unfreeze": "Abriendo el sitio a los visitantes...",
+    "publish_progress_done": "Listo. Actualizando página...",
+    "publish_progress_failed": "La publicación falló.",
+    "publish_progress_remaining": "Restante:"
   },
   "pt": {
     "setup_no_admin": "ainda não há administrador",
@@ -3587,7 +3692,7 @@
     "missing_progress_downloaded_prefix": "Baixado:",
     "missing_progress_from_word": "de",
     "missing_progress_left_word": "Restante:",
-    "missing_done_open_editor": "Feito. Abrindo editora...",
+    "missing_done_open_editor": "Feito. Abrindo página...",
     "missing_download_failed_retry": "Falha ao baixar a página. Você pode fechar a janela e tentar outro URL.",
     "missing_reconnecting_status": "O download continua. Reconectando canal de status...",
     "missing_connect_status_failed": "Falha ao conectar ao status do download. Você pode fechar a janela e tentar novamente.",
@@ -3613,6 +3718,13 @@
     "edit_queue_prefix": "Arquivo",
     "edit_queue_of": "de",
     "edit_file_name_required": "O nome do arquivo é obrigatório.",
-    "edit_uploading": "Fazendo upload..."
+    "edit_uploading": "Fazendo upload...",
+    "publish_progress_preparing": "Preparando publicação...",
+    "publish_progress_pages": "Publicando páginas...",
+    "publish_progress_pack": "Reconstruindo pacote de backup...",
+    "publish_progress_unfreeze": "Abrindo o site para visitantes...",
+    "publish_progress_done": "Concluído. Atualizando página...",
+    "publish_progress_failed": "Falha na publicação.",
+    "publish_progress_remaining": "Restante:"
   }
 }

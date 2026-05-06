@@ -91,7 +91,7 @@
     progressDownloadedPrefix: "{{index .T "missing_progress_downloaded_prefix"}}",
     fromWord: "{{index .T "missing_progress_from_word"}}",
     leftWord: "{{index .T "missing_progress_left_word"}}",
-    doneOpenEditor: "{{index .T "missing_done_open_editor"}}",
+    doneOpenPage: "{{index .T "missing_done_open_editor"}}",
     downloadFailedRetry: "{{index .T "missing_download_failed_retry"}}",
     reconnectingStatus: "{{index .T "missing_reconnecting_status"}}",
     connectStatusFailed: "{{index .T "missing_connect_status_failed"}}",
@@ -437,7 +437,7 @@
         if (streamMode === 'preview') {
           progressTextElement.textContent = uiText.previewResourcesText;
         } else {
-          progressTextElement.textContent = uiText.doneOpenEditor;
+          progressTextElement.textContent = uiText.doneOpenPage;
         }
         progressStream.close();
         if (streamMode !== 'preview') {
@@ -472,10 +472,10 @@
       })
       .then(function handleGrabPayload(grabPayload) {
         grabRequestInFlight = false;
-        downloadRedirectURL = grabPayload.redirect || (grabFormElement.querySelector('input[name="path"]').value + '?visual');
+        downloadRedirectURL = grabPayload.redirect || grabFormElement.querySelector('input[name="path"]').value;
         downloadFinished = true;
         setProgressPercent(100);
-        progressTextElement.textContent = uiText.doneOpenEditor;
+        progressTextElement.textContent = uiText.doneOpenPage;
         if (progressStream) { progressStream.close(); }
         finishDownloadIfReady();
       })

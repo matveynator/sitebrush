@@ -21,6 +21,7 @@ import (
 	"io"
 	"io/fs"
 	"log"
+	"math"
 	"mime"
 	"net"
 	"net/http"
@@ -62,6 +63,7 @@ type App struct {
 	storagePath      string
 	nativeFileDialog bool
 	grabTracker      *grabProgressTracker
+	publishTracker   *publishProgressTracker
 }
 
 type grabProgressEvent struct {
@@ -74,6 +76,22 @@ type grabProgressEvent struct {
 	CurrentDownloadedBytes int64  `json:"current_downloaded_bytes"`
 	CurrentSizeBytes       int64  `json:"current_size_bytes"`
 	CompletedPercent       int    `json:"completed_percent"`
+}
+
+type publishProgressEvent struct {
+	Token            string `json:"token"`
+	Stage            string `json:"stage"`
+	CurrentPath      string `json:"current_path"`
+	Completed        int    `json:"completed"`
+	Total            int    `json:"total"`
+	CompletedPercent int    `json:"completed_percent"`
+	Message          string `json:"message"`
+}
+
+type publishPageCandidate struct {
+	Path  string
+	Title string
+	HTML  string
 }
 
 type grabResourcePreview struct {
@@ -432,7 +450,7 @@ func main() {
 	}
 	defer database.Close()
 
-	application := &App{db: database, storagePath: effectiveStoragePath, nativeFileDialog: desktop.NativeFileDialogSupported(), grabTracker: newGrabProgressTracker()}
+	application := &App{db: database, storagePath: effectiveStoragePath, nativeFileDialog: desktop.NativeFileDialogSupported(), grabTracker: newGrabProgressTracker(), publishTracker: newPublishProgressTracker()}
 	if err = application.migrate(context.Background()); err != nil {
 		log.Fatal(err)
 	}
@@ -745,6 +763,10 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 	}
 	if hasQueryFlag(r, "publish") {
 		a.publishDomain(w, r)
+		return
+	}
+	if hasQueryFlag(r, "publish_events") {
+		a.publishProgressEvents(w, r)
 		return
 	}
 	if hasQueryFlag(r, "publish_preview") {
@@ -1236,10 +1258,10 @@ func (a *App) grabPage(w http.ResponseWriter, r *http.Request) {
 		}
 		if wantsJSONResponse(r) {
 			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(map[string]string{"redirect": redirectPath + "?visual"})
+			_ = json.NewEncoder(w).Encode(map[string]string{"redirect": redirectPath})
 			return
 		}
-		http.Redirect(w, r, redirectPath+"?visual", http.StatusFound)
+		http.Redirect(w, r, redirectPath, http.StatusFound)
 		return
 	}
 	selectedResourceURLs := selectedGrabResourceURLs(r)
@@ -1268,10 +1290,10 @@ func (a *App) grabPage(w http.ResponseWriter, r *http.Request) {
 	_, _ = a.db.ExecContext(r.Context(), `INSERT INTO revisions(domain,page_path,html,created_at) VALUES(?,?,?,?)`, domain, pagePath, html, time.Now().Format(time.RFC3339))
 	if wantsJSONResponse(r) {
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]string{"redirect": pagePath + "?visual"})
+		_ = json.NewEncoder(w).Encode(map[string]string{"redirect": pagePath})
 		return
 	}
-	http.Redirect(w, r, pagePath+"?visual", http.StatusFound)
+	http.Redirect(w, r, pagePath, http.StatusFound)
 }
 
 func (a *App) grabPreview(w http.ResponseWriter, r *http.Request) {
@@ -1909,6 +1931,61 @@ func writeGrabProgressEvent(w io.Writer, flusher http.Flusher, event grabProgres
 	return true
 }
 
+func (a *App) publishProgressEvents(w http.ResponseWriter, r *http.Request) {
+	if !a.isAdminRequest(r) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	progressToken := strings.TrimSpace(r.URL.Query().Get("token"))
+	if progressToken == "" {
+		http.Error(w, "token is required", http.StatusBadRequest)
+		return
+	}
+	flusher, canFlush := w.(http.Flusher)
+	if !canFlush {
+		http.Error(w, "streaming is not supported", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+
+	tracker := a.activePublishTracker()
+	events := tracker.subscribe(progressToken)
+	defer tracker.unsubscribe(progressToken, events)
+	if !writePublishProgressEvent(w, flusher, publishProgressEvent{Token: progressToken, Stage: "ready"}) {
+		return
+	}
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case event, isOpen := <-events:
+			if !isOpen {
+				return
+			}
+			if !writePublishProgressEvent(w, flusher, event) {
+				return
+			}
+			if event.Stage == "done" || event.Stage == "error" {
+				return
+			}
+		}
+	}
+}
+
+func writePublishProgressEvent(w io.Writer, flusher http.Flusher, event publishProgressEvent) bool {
+	eventJSON, marshalErr := json.Marshal(event)
+	if marshalErr != nil {
+		return false
+	}
+	if _, writeErr := fmt.Fprintf(w, "data: %s\n\n", eventJSON); writeErr != nil {
+		return false
+	}
+	flusher.Flush()
+	return true
+}
+
 func (a *App) revisionsPage(w http.ResponseWriter, r *http.Request) {
 	if !a.isAdminRequest(r) {
 		if !a.hasAdmin(r.Context(), a.siteDomain(r.Context(), r)) {
@@ -2185,7 +2262,7 @@ func (a *App) filesPage(w http.ResponseWriter, r *http.Request) {
 	}
 	fileList, listErr := a.listManagedFiles(r.Context(), r, currentPath)
 	if listErr != nil {
-		a.render(w, r, "files.html", map[string]any{"Path": currentPath, "Files": []ManagedFile{}})
+		a.render(w, r, "files.html", map[string]any{"Path": currentPath, "Files": []ManagedFile{}, "NativeFileDialog": a.nativeFileDialog})
 		return
 	}
 	accessRulesByName := a.fileAccessRulesByName(r.Context(), r)
@@ -2201,7 +2278,7 @@ func (a *App) filesPage(w http.ResponseWriter, r *http.Request) {
 		fileList[index].SingleUseLeft = accessRule.SingleUseLeft
 		fileList[index].TokenUseCount = accessRule.TokenUseCount
 	}
-	a.render(w, r, "files.html", map[string]any{"Path": currentPath, "Files": fileList})
+	a.render(w, r, "files.html", map[string]any{"Path": currentPath, "Files": fileList, "NativeFileDialog": a.nativeFileDialog})
 }
 
 func (a *App) nativePickedFilesJSON(w http.ResponseWriter, r *http.Request) {
@@ -3093,6 +3170,13 @@ func buildContextMenuScript(isAdmin bool, isFrozen bool, pagePath, domain string
 	publishConfirmWithoutChangesLabel := template.JSEscapeString(translationOrDefault(translations, "publish_confirm_without_changes", "No changes were made. Unfreeze the site?"))
 	publishPreviewLoadingLabel := template.JSEscapeString(translationOrDefault(translations, "publish_preview_loading", "Checking changes to publish..."))
 	publishPreviewSummaryLabel := template.JSEscapeString(translationOrDefault(translations, "publish_preview_summary", "Changes:"))
+	publishProgressPreparingLabel := template.JSEscapeString(translationOrDefault(translations, "publish_progress_preparing", "Preparing publication..."))
+	publishProgressPagesLabel := template.JSEscapeString(translationOrDefault(translations, "publish_progress_pages", "Publishing pages..."))
+	publishProgressPackLabel := template.JSEscapeString(translationOrDefault(translations, "publish_progress_pack", "Rebuilding backup package..."))
+	publishProgressUnfreezeLabel := template.JSEscapeString(translationOrDefault(translations, "publish_progress_unfreeze", "Opening the site to visitors..."))
+	publishProgressDoneLabel := template.JSEscapeString(translationOrDefault(translations, "publish_progress_done", "Done. Refreshing page..."))
+	publishProgressFailedLabel := template.JSEscapeString(translationOrDefault(translations, "publish_progress_failed", "Publication failed."))
+	publishProgressRemainingLabel := template.JSEscapeString(translationOrDefault(translations, "publish_progress_remaining", "Remaining:"))
 	confirmYesLabel := template.JSEscapeString(translationOrDefault(translations, "confirm_yes", "Yes"))
 	confirmNoLabel := template.JSEscapeString(translationOrDefault(translations, "confirm_no", "No"))
 	editLabel := template.JSEscapeString(translationOrDefault(translations, "menu_edit", "Edit"))
@@ -3216,6 +3300,89 @@ func buildContextMenuScript(isAdmin bool, isFrozen bool, pagePath, domain string
     cancelButtonElement.addEventListener("click", closeDialog);
     confirmButtonElement.addEventListener("click", function onConfirmClick() { closeDialog(); onConfirm(); });
   }
+  function randomSitebrushToken() {
+    return Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 12);
+  }
+  function labelForPublishStage(stageName) {
+    if (stageName === "preparing") { return "` + publishProgressPreparingLabel + `"; }
+    if (stageName === "pages") { return "` + publishProgressPagesLabel + `"; }
+    if (stageName === "pack") { return "` + publishProgressPackLabel + `"; }
+    if (stageName === "unfreeze") { return "` + publishProgressUnfreezeLabel + `"; }
+    if (stageName === "done") { return "` + publishProgressDoneLabel + `"; }
+    if (stageName === "error") { return "` + publishProgressFailedLabel + `"; }
+    return "` + publishProgressPreparingLabel + `";
+  }
+  function openPublishProgressDialog(progressToken, readyCallback) {
+    closeSitebrushMenu();
+    const overlayElement = document.createElement("div");
+    overlayElement.className = "SiteBrushConfirmOverlay";
+    const modalElement = document.createElement("div");
+    modalElement.className = "SiteBrushConfirmModal SiteBrushPublishProgressModal";
+    const textElement = document.createElement("p");
+    textElement.className = "SiteBrushConfirmText";
+    textElement.textContent = "` + publishProgressPreparingLabel + `";
+    const pathElement = document.createElement("div");
+    pathElement.className = "SiteBrushPublishProgressPath";
+    const progressElement = document.createElement("div");
+    progressElement.className = "SiteBrushPublishProgress";
+    const progressBarElement = document.createElement("div");
+    progressBarElement.className = "SiteBrushPublishProgressBar";
+    progressBarElement.textContent = "0%";
+    progressElement.appendChild(progressBarElement);
+    modalElement.appendChild(textElement);
+    modalElement.appendChild(pathElement);
+    modalElement.appendChild(progressElement);
+    overlayElement.appendChild(modalElement);
+    document.body.appendChild(overlayElement);
+    let readyCallbackWasCalled = false;
+    function setProgressPercent(percentNumber) {
+      const boundedPercent = Math.max(0, Math.min(100, Math.round(Number(percentNumber) || 0)));
+      progressBarElement.style.width = boundedPercent + "%";
+      progressBarElement.textContent = boundedPercent + "%";
+    }
+    const progressStream = new EventSource(currentPagePath + "?publish_events&token=" + encodeURIComponent(progressToken));
+    progressStream.onmessage = function onPublishProgressMessage(messageEvent) {
+      let progressState = null;
+      try {
+        progressState = JSON.parse(messageEvent.data);
+      } catch (parseError) {
+        return;
+      }
+      if (progressState.stage === "ready") {
+        if (!readyCallbackWasCalled) {
+          readyCallbackWasCalled = true;
+          readyCallback();
+        }
+        return;
+      }
+      setProgressPercent(progressState.completed_percent);
+      const totalCount = Number(progressState.total) || 0;
+      const completedCount = Number(progressState.completed) || 0;
+      const remainingCount = Math.max(totalCount - completedCount, 0);
+      const remainingPercent = Math.max(0, 100 - (Number(progressState.completed_percent) || 0));
+      textElement.textContent = labelForPublishStage(progressState.stage) + " " + completedCount + " / " + totalCount + ". " + "` + publishProgressRemainingLabel + `" + " " + remainingCount + " (" + remainingPercent + "%).";
+      pathElement.textContent = progressState.current_path || "";
+      if (progressState.stage === "done") {
+        textElement.textContent = "` + publishProgressDoneLabel + `";
+        setProgressPercent(100);
+        progressStream.close();
+      }
+      if (progressState.stage === "error") {
+        textElement.textContent = "` + publishProgressFailedLabel + `";
+        progressStream.close();
+      }
+    };
+    progressStream.onerror = function onPublishProgressError() {
+      textElement.textContent = "` + publishProgressPreparingLabel + `";
+    };
+    window.setTimeout(function submitPublishIfStreamReadyWasMissed() {
+      if (readyCallbackWasCalled) {
+        return;
+      }
+      readyCallbackWasCalled = true;
+      readyCallback();
+    }, 750);
+  }
   document.addEventListener("click", function onActionClick(browserEvent) {
     const actionButtonElement = browserEvent.target && browserEvent.target.closest && browserEvent.target.closest("[data-sitebrush-action]");
     if (!actionButtonElement) {
@@ -3254,9 +3421,26 @@ func buildContextMenuScript(isAdmin bool, isFrozen bool, pagePath, domain string
     }
     openConfirmationDialog(selectedActionConfig.message, submitConfirmedAction);
     function submitConfirmedAction() {
+      if (actionName === "publish") {
+        const publishToken = randomSitebrushToken();
+        openPublishProgressDialog(publishToken, function submitPublishAfterProgressReady() {
+          submitActionForm(publishToken);
+        });
+        return;
+      }
+      submitActionForm("");
+    }
+    function submitActionForm(publishToken) {
       const actionFormElement = document.createElement("form");
       actionFormElement.method = "POST";
       actionFormElement.action = selectedActionConfig.path;
+      if (publishToken !== "") {
+        const tokenInputElement = document.createElement("input");
+        tokenInputElement.type = "hidden";
+        tokenInputElement.name = "publish_token";
+        tokenInputElement.value = publishToken;
+        actionFormElement.appendChild(tokenInputElement);
+      }
       document.body.appendChild(actionFormElement);
       actionFormElement.submit();
     }
@@ -3382,6 +3566,10 @@ func contextMenuStylesAndHelpers() string {
 .SiteBrushPublishPreviewList{list-style:none;margin:0 0 12px 0;padding:0;max-height:180px;overflow:auto}
 .SiteBrushPublishPreviewListItem{margin:0 0 4px 0}
 .SiteBrushPublishPreviewLink{color:#1f3f6f;text-decoration:underline;font-size:13px}
+.SiteBrushPublishProgressModal{min-width:320px;max-width:460px}
+.SiteBrushPublishProgressPath{min-height:18px;margin:0 0 8px 0;color:#5b6f8b;font-size:12px;word-break:break-word}
+.SiteBrushPublishProgress{height:20px;background:#e8f0fb;border:1px solid #8ea4c1;overflow:hidden}
+.SiteBrushPublishProgressBar{height:100%;width:0%;background:#3f7ecb;color:#fff;text-align:center;font-size:12px;line-height:20px;font-family:Arial,Helvetica,sans-serif;transition:width .18s ease}
 .SiteBrushConfirmActions{display:flex;gap:8px;justify-content:flex-end}
 .SiteBrushConfirmButton,.SiteBrushCancelButton{border:1px solid #8ea4c1;background:#f2f7ff;padding:6px 12px;cursor:pointer;font-size:13px}
 .SiteBrushTreeOverlay{position:fixed;inset:0;background:rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center;z-index:2147483647}
@@ -3402,6 +3590,9 @@ func contextMenuStylesAndHelpers() string {
   .ContextMenuCopyright .SiteBrushContextMenuLink{color:#a7bbd8;border-top-color:#2f405d}
   .SiteBrushConfirmModal{background:#172235;border-color:#2f405d}
   .SiteBrushConfirmText,.SiteBrushPublishPreviewLink{color:#dbe8ff}
+  .SiteBrushPublishProgressPath{color:#a7bbd8}
+  .SiteBrushPublishProgress{background:#22324a;border-color:#405674}
+  .SiteBrushPublishProgressBar{background:#4f8bd8;color:#fff}
   .SiteBrushConfirmButton,.SiteBrushCancelButton{background:#22324a;color:#dbe8ff;border-color:#405674}
   .SiteBrushTreeModal{background:#172235;border-color:#2f405d}
   .SiteBrushTreeCloseButton{background:#22324a;color:#dbe8ff;border-color:#405674}
@@ -4542,6 +4733,17 @@ type grabProgressTracker struct {
 	requests chan grabTrackerRequest
 }
 
+type publishTrackerRequest struct {
+	action string
+	token  string
+	stream chan publishProgressEvent
+	event  publishProgressEvent
+}
+
+type publishProgressTracker struct {
+	requests chan publishTrackerRequest
+}
+
 type webSocketTextWriter struct {
 	connection net.Conn
 }
@@ -4570,6 +4772,59 @@ func (tracker *grabProgressTracker) loop() {
 		case "subscribe":
 			if _, exists := subscribersByToken[request.token]; !exists {
 				subscribersByToken[request.token] = make(map[chan grabProgressEvent]struct{})
+			}
+			subscribersByToken[request.token][request.stream] = struct{}{}
+		case "unsubscribe":
+			group := subscribersByToken[request.token]
+			delete(group, request.stream)
+			close(request.stream)
+		case "publish":
+			for stream := range subscribersByToken[request.token] {
+				select {
+				case stream <- request.event:
+				default:
+				}
+			}
+		}
+	}
+}
+
+func newPublishProgressTracker() *publishProgressTracker {
+	tracker := &publishProgressTracker{requests: make(chan publishTrackerRequest)}
+	go tracker.loop()
+	return tracker
+}
+
+var fallbackPublishProgressTracker = newPublishProgressTracker()
+
+func (a *App) activePublishTracker() *publishProgressTracker {
+	if a != nil && a.publishTracker != nil {
+		return a.publishTracker
+	}
+	return fallbackPublishProgressTracker
+}
+
+func (tracker *publishProgressTracker) subscribe(token string) chan publishProgressEvent {
+	stream := make(chan publishProgressEvent, 32)
+	tracker.requests <- publishTrackerRequest{action: "subscribe", token: token, stream: stream}
+	return stream
+}
+func (tracker *publishProgressTracker) unsubscribe(token string, stream chan publishProgressEvent) {
+	tracker.requests <- publishTrackerRequest{action: "unsubscribe", token: token, stream: stream}
+}
+func (tracker *publishProgressTracker) publish(event publishProgressEvent) {
+	if strings.TrimSpace(event.Token) == "" {
+		return
+	}
+	tracker.requests <- publishTrackerRequest{action: "publish", token: event.Token, event: event}
+}
+func (tracker *publishProgressTracker) loop() {
+	subscribersByToken := make(map[string]map[chan publishProgressEvent]struct{})
+	for request := range tracker.requests {
+		switch request.action {
+		case "subscribe":
+			if _, exists := subscribersByToken[request.token]; !exists {
+				subscribersByToken[request.token] = make(map[chan publishProgressEvent]struct{})
 			}
 			subscribersByToken[request.token][request.stream] = struct{}{}
 		case "unsubscribe":
@@ -5022,66 +5277,77 @@ func (a *App) publishDomain(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	domain := a.siteDomain(r.Context(), r)
-	log.Printf("publish started domain=%s", domain)
-	revisionRows, err := a.db.QueryContext(r.Context(), `SELECT page_path,html FROM revisions WHERE domain=? AND is_active=1 ORDER BY page_path ASC, id DESC`, domain)
-	if err == nil {
-		defer revisionRows.Close()
-		latestRevisionByPath := make(map[string]string)
-		for revisionRows.Next() {
-			var pagePath string
-			var pageHTML string
-			if scanErr := revisionRows.Scan(&pagePath, &pageHTML); scanErr != nil {
-				continue
-			}
-			if _, alreadyStored := latestRevisionByPath[pagePath]; alreadyStored {
-				continue
-			}
-			latestRevisionByPath[pagePath] = pageHTML
+	progressToken := strings.TrimSpace(r.FormValue("publish_token"))
+	progressTracker := a.activePublishTracker()
+	publishProgress := func(stage, currentPath string, completed, total int, message string) {
+		if progressToken == "" {
+			return
 		}
-		pageRows, pageQueryErr := a.db.QueryContext(r.Context(), `SELECT path,title,html FROM pages WHERE domain=? ORDER BY path ASC`, domain)
-		if pageQueryErr == nil {
-			defer pageRows.Close()
-			updatedPagesCount := 0
-			skippedPagesCount := 0
-			for pageRows.Next() {
-				var pagePath string
-				var pageTitle string
-				var draftHTML string
-				if scanErr := pageRows.Scan(&pagePath, &pageTitle, &draftHTML); scanErr != nil {
-					continue
-				}
-				pageHTMLToPublish := draftHTML
-				if latestActiveHTML, foundLatestActiveRevision := latestRevisionByPath[pagePath]; foundLatestActiveRevision {
-					pageHTMLToPublish = latestActiveHTML
-				}
-				if !a.shouldUpdatePublishedPageFile(domain, pagePath, pageHTMLToPublish) {
-					skippedPagesCount++
-					continue
-				}
-				publishedHTMLBytes := int64(len([]byte(pageHTMLToPublish)))
-				var previousPublishedHTML string
-				_ = a.db.QueryRowContext(r.Context(), `SELECT html FROM published_pages WHERE domain=? AND path=?`, domain, pagePath).Scan(&previousPublishedHTML)
-				publishedPageDelta := publishedHTMLBytes - int64(len([]byte(previousPublishedHTML)))
-				publishedStaticDelta := publishedHTMLBytes - fileSizeBytes(filepath.Join(a.domainStaticDir(domain), staticRelativePathForPage(pagePath)))
-				if storageErr := a.applyDomainStorageDelta(r.Context(), domain, 0, publishedPageDelta, 0, 0, publishedStaticDelta); storageErr != nil {
-					log.Printf("publish skipped by storage limit domain=%s path=%s error=%v", domain, pagePath, storageErr)
-					skippedPagesCount++
-					continue
-				}
-				_, _ = a.db.ExecContext(r.Context(), `INSERT OR REPLACE INTO published_pages(domain,path,title,html) VALUES(?,?,?,?)`, domain, pagePath, pageTitle, pageHTMLToPublish)
-				a.writePublishedStaticHTML(domain, pagePath, pageHTMLToPublish)
-				updatedPagesCount++
-				log.Printf("publish page updated domain=%s path=%s", domain, pagePath)
-			}
-			log.Printf("publish pages processed domain=%s updated=%d unchanged=%d", domain, updatedPagesCount, skippedPagesCount)
+		completedPercent := 0
+		if total > 0 {
+			completedPercent = int(math.Round(float64(completed) * 100 / float64(total)))
 		}
+		if completedPercent < 0 {
+			completedPercent = 0
+		}
+		if completedPercent > 100 {
+			completedPercent = 100
+		}
+		progressTracker.publish(publishProgressEvent{
+			Token:            progressToken,
+			Stage:            stage,
+			CurrentPath:      currentPath,
+			Completed:        completed,
+			Total:            total,
+			CompletedPercent: completedPercent,
+			Message:          message,
+		})
 	}
+	log.Printf("publish started domain=%s", domain)
+	publishProgress("preparing", "", 0, 1, "preparing")
+	pageList, err := a.collectPublishPageCandidates(r.Context(), domain)
+	if err != nil {
+		publishProgress("error", "", 0, 1, err.Error())
+		http.Error(w, "failed to read pages for publishing", http.StatusInternalServerError)
+		return
+	}
+	updatedPagesCount := 0
+	skippedPagesCount := 0
+	totalSteps := len(pageList) + 2
+	if totalSteps < 2 {
+		totalSteps = 2
+	}
+	for pageIndex, pageCandidate := range pageList {
+		publishProgress("pages", pageCandidate.Path, pageIndex, totalSteps, pageCandidate.Path)
+		if !a.shouldUpdatePublishedPage(r.Context(), domain, pageCandidate.Path, pageCandidate.HTML) {
+			skippedPagesCount++
+			continue
+		}
+		publishedHTMLBytes := int64(len([]byte(pageCandidate.HTML)))
+		var previousPublishedHTML string
+		_ = a.db.QueryRowContext(r.Context(), `SELECT html FROM published_pages WHERE domain=? AND path=?`, domain, pageCandidate.Path).Scan(&previousPublishedHTML)
+		publishedPageDelta := publishedHTMLBytes - int64(len([]byte(previousPublishedHTML)))
+		publishedStaticDelta := publishedHTMLBytes - fileSizeBytes(filepath.Join(a.domainStaticDir(domain), staticRelativePathForPage(pageCandidate.Path)))
+		if storageErr := a.applyDomainStorageDelta(r.Context(), domain, 0, publishedPageDelta, 0, 0, publishedStaticDelta); storageErr != nil {
+			log.Printf("publish skipped by storage limit domain=%s path=%s error=%v", domain, pageCandidate.Path, storageErr)
+			skippedPagesCount++
+			continue
+		}
+		_, _ = a.db.ExecContext(r.Context(), `INSERT OR REPLACE INTO published_pages(domain,path,title,html) VALUES(?,?,?,?)`, domain, pageCandidate.Path, pageCandidate.Title, pageCandidate.HTML)
+		a.writePublishedStaticHTML(domain, pageCandidate.Path, pageCandidate.HTML)
+		updatedPagesCount++
+		log.Printf("publish page updated domain=%s path=%s", domain, pageCandidate.Path)
+	}
+	log.Printf("publish pages processed domain=%s updated=%d unchanged=%d", domain, updatedPagesCount, skippedPagesCount)
+	publishProgress("pack", "", len(pageList)+1, totalSteps, "pack")
 	if packErr := a.generateDomainPack(domain); packErr != nil {
 		log.Printf("publish pack failed domain=%s error=%v", domain, packErr)
 	} else {
 		log.Printf("publish pack updated domain=%s", domain)
 	}
+	publishProgress("unfreeze", "", totalSteps-1, totalSteps, "unfreeze")
 	a.setDomainFrozenState(r.Context(), domain, 0)
+	publishProgress("done", "", totalSteps, totalSteps, "done")
 	log.Printf("publish completed domain=%s", domain)
 	http.Redirect(w, r, requestedReturnPath(r), http.StatusFound)
 }
@@ -5098,12 +5364,25 @@ func (a *App) publishPreviewJSON(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) countPublishChanges(ctx context.Context, domain string) (int, int, []string) {
-	totalPagesCount := 0
 	changedPagesCount := 0
 	changedPagePaths := make([]string, 0)
-	revisionRows, err := a.db.QueryContext(ctx, `SELECT page_path,html FROM revisions WHERE domain=? AND is_active=1 ORDER BY page_path ASC, id DESC`, domain)
+	pageList, err := a.collectPublishPageCandidates(ctx, domain)
 	if err != nil {
 		return 0, 0, changedPagePaths
+	}
+	for _, pageCandidate := range pageList {
+		if a.shouldUpdatePublishedPage(ctx, domain, pageCandidate.Path, pageCandidate.HTML) {
+			changedPagesCount++
+			changedPagePaths = append(changedPagePaths, pageCandidate.Path)
+		}
+	}
+	return len(pageList), changedPagesCount, changedPagePaths
+}
+
+func (a *App) collectPublishPageCandidates(ctx context.Context, domain string) ([]publishPageCandidate, error) {
+	revisionRows, err := a.db.QueryContext(ctx, `SELECT page_path,html FROM revisions WHERE domain=? AND is_active=1 ORDER BY page_path ASC, id DESC`, domain)
+	if err != nil {
+		return nil, err
 	}
 	defer revisionRows.Close()
 	latestRevisionByPath := make(map[string]string)
@@ -5119,11 +5398,11 @@ func (a *App) countPublishChanges(ctx context.Context, domain string) (int, int,
 	}
 	pageRows, pageQueryErr := a.db.QueryContext(ctx, `SELECT path,title,html FROM pages WHERE domain=? ORDER BY path ASC`, domain)
 	if pageQueryErr != nil {
-		return 0, 0, changedPagePaths
+		return nil, pageQueryErr
 	}
 	defer pageRows.Close()
+	pageList := make([]publishPageCandidate, 0)
 	for pageRows.Next() {
-		totalPagesCount++
 		var pagePath, pageTitle, draftHTML string
 		if scanErr := pageRows.Scan(&pagePath, &pageTitle, &draftHTML); scanErr != nil {
 			continue
@@ -5132,19 +5411,21 @@ func (a *App) countPublishChanges(ctx context.Context, domain string) (int, int,
 		if latestActiveHTML, foundLatestActiveRevision := latestRevisionByPath[pagePath]; foundLatestActiveRevision {
 			pageHTMLToPublish = latestActiveHTML
 		}
-		if a.shouldUpdatePublishedPageFile(domain, pagePath, pageHTMLToPublish) {
-			changedPagesCount++
-			changedPagePaths = append(changedPagePaths, pagePath)
-		}
+		pageList = append(pageList, publishPageCandidate{Path: pagePath, Title: pageTitle, HTML: pageHTMLToPublish})
 	}
-	return totalPagesCount, changedPagesCount, changedPagePaths
+	return pageList, nil
 }
 
 func normalizePublishedHTML(html string) string {
 	return strings.TrimSpace(strings.ReplaceAll(html, "\r\n", "\n"))
 }
 
-func (a *App) shouldUpdatePublishedPageFile(domain, pagePath, nextRenderedHTML string) bool {
+func (a *App) shouldUpdatePublishedPage(ctx context.Context, domain, pagePath, nextRenderedHTML string) bool {
+	var previousPublishedHTML string
+	publishedErr := a.db.QueryRowContext(ctx, `SELECT html FROM published_pages WHERE domain=? AND path=?`, domain, pagePath).Scan(&previousPublishedHTML)
+	if publishedErr != nil || normalizePublishedHTML(previousPublishedHTML) != normalizePublishedHTML(nextRenderedHTML) {
+		return true
+	}
 	staticFilePath := filepath.Join(a.domainStaticDir(domain), staticRelativePathForPage(pagePath))
 	previousRenderedHTMLBytes, readErr := os.ReadFile(staticFilePath)
 	if readErr != nil {
