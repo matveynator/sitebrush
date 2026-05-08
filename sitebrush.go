@@ -144,6 +144,12 @@ type nativePickedFilesResponse struct {
 	Files []nativePickedFile `json:"files"`
 }
 
+type nativeSavedBackupResponse struct {
+	Saved    bool   `json:"saved"`
+	Canceled bool   `json:"canceled,omitempty"`
+	Path     string `json:"path,omitempty"`
+}
+
 type Page struct {
 	Domain           string
 	Path             string
@@ -738,6 +744,10 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 	}
 	if hasQueryFlag(r, "native_pick_files") {
 		a.nativePickedFilesJSON(w, r)
+		return
+	}
+	if hasQueryFlag(r, "native_save_backup") {
+		a.nativeSaveBackupJSON(w, r)
 		return
 	}
 	if hasQueryFlag(r, "edit") {
@@ -5835,6 +5845,7 @@ func (a *App) domainSettingsPage(w http.ResponseWriter, r *http.Request) {
 		"ExternalIPError":    externalIPError,
 		"BackupDownloadURL":  backupDownloadURL,
 		"BackupDownloadPath": backupDownloadPath,
+		"NativeFileDialog":   a.nativeFileDialog,
 	})
 }
 
@@ -6033,7 +6044,7 @@ func (a *App) downloadBackup(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	fileName := domainStorageName(domain) + "-backup-" + time.Now().UTC().Format("20060102-150405") + ".zip"
+	fileName := backupFileName(domain)
 	w.Header().Set("Content-Type", "application/zip")
 	w.Header().Set("Content-Disposition", "attachment; filename=\""+fileName+"\"")
 	if err := a.writeDomainBackupZIP(r.Context(), domain, w); err != nil {
@@ -6041,6 +6052,60 @@ func (a *App) downloadBackup(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "failed to create backup", http.StatusInternalServerError)
 		return
 	}
+}
+
+func (a *App) nativeSaveBackupJSON(w http.ResponseWriter, r *http.Request) {
+	if !a.isAdminRequest(r) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !a.nativeFileDialog {
+		http.Error(w, "native save dialog is unavailable", http.StatusNotImplemented)
+		return
+	}
+
+	domain := a.siteDomain(r.Context(), r)
+	fileName := backupFileName(domain)
+	destinationPath, chooseErr := desktop.ChooseSaveFilePath(fileName)
+	if chooseErr != nil {
+		if errors.Is(chooseErr, desktop.ErrNativeDialogCanceled) {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(nativeSavedBackupResponse{Saved: false, Canceled: true})
+			return
+		}
+		http.Error(w, chooseErr.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	destinationFile, err := os.Create(destinationPath)
+	if err != nil {
+		http.Error(w, "failed to open backup destination", http.StatusInternalServerError)
+		return
+	}
+	writeErr := a.writeDomainBackupZIP(r.Context(), domain, destinationFile)
+	closeErr := destinationFile.Close()
+	if writeErr != nil {
+		_ = os.Remove(destinationPath)
+		log.Printf("native backup save failed domain=%s error=%v", domain, writeErr)
+		http.Error(w, "failed to create backup", http.StatusInternalServerError)
+		return
+	}
+	if closeErr != nil {
+		_ = os.Remove(destinationPath)
+		http.Error(w, "failed to finish backup file", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(nativeSavedBackupResponse{Saved: true, Path: destinationPath})
+}
+
+func backupFileName(domain string) string {
+	return domainStorageName(domain) + "-backup-" + time.Now().UTC().Format("20060102-150405") + ".zip"
 }
 
 func (a *App) importBackup(w http.ResponseWriter, r *http.Request) {

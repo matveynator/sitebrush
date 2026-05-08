@@ -89,7 +89,7 @@
   <section class="dns-box">
     <p><strong>{{index .T "domain_settings_backup_title"}}</strong></p>
     <p class="hint">{{index .T "domain_settings_backup_hint"}}</p>
-    <p><a class="backup-download-link" href="{{.BackupDownloadPath}}"><img src="/p/static/backup.png" alt="">{{index .T "domain_settings_backup_download"}}</a></p>
+    <p><a class="backup-download-link" href="{{.BackupDownloadPath}}" data-native-backup-download><img src="/p/static/backup.png" alt="">{{index .T "domain_settings_backup_download"}}</a></p>
     <div class="add-form" style="margin-bottom: 12px;">
       <input type="text" id="backup_download_url" readonly value="{{.BackupDownloadURL}}">
       <button type="button" id="copy_backup_link_button">{{index .T "domain_settings_copy_link"}}</button>
@@ -193,6 +193,51 @@
   {{end}}
 
   <script>
+  (function setupNativeBackupDownload() {
+    const nativeFileDialogEnabled = {{.NativeFileDialog}};
+    const backupDownloadElement = document.querySelector('[data-native-backup-download]');
+    if (!nativeFileDialogEnabled || !backupDownloadElement || !window.fetch) { return; }
+    const defaultLabel = backupDownloadElement.textContent;
+    let backupSaveInFlight = false;
+
+    function setBackupDownloadLabel(nextLabel) {
+      const iconElement = backupDownloadElement.querySelector('img');
+      backupDownloadElement.textContent = nextLabel;
+      if (iconElement) {
+        backupDownloadElement.prepend(iconElement);
+      }
+    }
+
+    backupDownloadElement.addEventListener('click', function saveBackupWithNativeDialog(event) {
+      event.preventDefault();
+      if (backupSaveInFlight) { return; }
+      backupSaveInFlight = true;
+      setBackupDownloadLabel(defaultLabel + '...');
+      fetch('/?native_save_backup', {
+        method: 'POST',
+        headers: { 'Accept': 'application/json' }
+      }).then(function handleNativeBackupResponse(response) {
+        if (!response.ok) { throw new Error('native backup save failed'); }
+        return response.json();
+      }).then(function handleNativeBackupPayload(payload) {
+        if (payload && payload.canceled) {
+          setBackupDownloadLabel(defaultLabel);
+          return;
+        }
+        if (payload && payload.saved) {
+          setBackupDownloadLabel({{printf "%q" (index .T "domain_settings_copied")}});
+          setTimeout(function restoreBackupLabel() { setBackupDownloadLabel(defaultLabel); }, 1500);
+          return;
+        }
+        throw new Error('native backup save failed');
+      }).catch(function fallbackToBrowserDownload() {
+        window.location.href = backupDownloadElement.href;
+      }).finally(function unlockNativeBackupSave() {
+        backupSaveInFlight = false;
+      });
+    });
+  })();
+
   (function setupBackupLinkCopy() {
     const copyButtonElement = document.getElementById('copy_backup_link_button');
     const backupLinkElement = document.getElementById('backup_download_url');
