@@ -368,24 +368,21 @@ chmod +x %s
 }
 
 func windowsDesktopDockerfile(goarch string) string {
-	installToolchain := `
-apt-get install -y ca-certificates curl build-essential mingw-w64 zip tar
-`
+	installPackages := "apt-get install -y ca-certificates curl build-essential mingw-w64 zip tar"
+	installCrossCompiler := ""
 
 	if goarch == "arm64" {
-		installToolchain = fmt.Sprintf(`
-apt-get install -y ca-certificates curl build-essential zip tar xz-utils
-LLVM_MINGW_VERSION="%s"
-LLVM_MINGW_ARCHIVE="llvm-mingw-${LLVM_MINGW_VERSION}-ucrt-ubuntu-22.04-x86_64.tar.xz"
-LLVM_MINGW_URL="https://github.com/mstorsjo/llvm-mingw/releases/download/${LLVM_MINGW_VERSION}/${LLVM_MINGW_ARCHIVE}"
-
-curl -fsSL "$LLVM_MINGW_URL" -o "/tmp/$LLVM_MINGW_ARCHIVE"
-mkdir -p /opt/llvm-mingw
-tar -xf "/tmp/$LLVM_MINGW_ARCHIVE" -C /opt/llvm-mingw --strip-components=1
-export PATH="/opt/llvm-mingw/bin:$PATH"
-
-command -v aarch64-w64-mingw32-gcc
-command -v aarch64-w64-mingw32-g++
+		installPackages = "apt-get install -y ca-certificates curl build-essential zip tar xz-utils"
+		installCrossCompiler = fmt.Sprintf(`RUN set -e; \
+  LLVM_MINGW_VERSION="%s"; \
+  LLVM_MINGW_ARCHIVE="llvm-mingw-${LLVM_MINGW_VERSION}-ucrt-ubuntu-22.04-x86_64.tar.xz"; \
+  LLVM_MINGW_URL="https://github.com/mstorsjo/llvm-mingw/releases/download/${LLVM_MINGW_VERSION}/${LLVM_MINGW_ARCHIVE}"; \
+  curl -fsSL "$LLVM_MINGW_URL" -o "/tmp/$LLVM_MINGW_ARCHIVE"; \
+  mkdir -p /opt/llvm-mingw; \
+  tar -xf "/tmp/$LLVM_MINGW_ARCHIVE" -C /opt/llvm-mingw --strip-components=1; \
+  export PATH="/opt/llvm-mingw/bin:$PATH"; \
+  command -v aarch64-w64-mingw32-gcc; \
+  command -v aarch64-w64-mingw32-g++
 `, llvmMingwVersion)
 	}
 
@@ -394,10 +391,11 @@ FROM --platform=linux/amd64 ubuntu:22.04
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 ENV DEBIAN_FRONTEND=noninteractive
 RUN set -e; apt-get update; %s; rm -rf /var/lib/apt/lists/*
+%s
 RUN curl -fsSL "https://go.dev/dl/go%s.linux-amd64.tar.gz" | tar -C /usr/local -xz
 ENV PATH="/usr/local/go/bin:/root/go/bin:/opt/llvm-mingw/bin:${PATH}"
 RUN go install github.com/akavel/rsrc@latest
-`, strings.TrimSpace(installToolchain), dockerGoVersion)
+`, installPackages, installCrossCompiler, dockerGoVersion)
 }
 
 func windowsDesktopDockerScript(artifactPath, artifactName, goarch, version string) string {

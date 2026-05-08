@@ -160,6 +160,9 @@ func TestWindowsArm64DesktopDockerfile(t *testing.T) {
 	if !strings.Contains(dockerfile, `LLVM_MINGW_VERSION="20260505"`) {
 		t.Fatalf("windowsDesktopDockerfile() missing llvm-mingw archive")
 	}
+	if strings.Contains(dockerfile, "\nLLVM_MINGW_VERSION=") {
+		t.Fatalf("windowsDesktopDockerfile() emits shell assignment as Dockerfile instruction")
+	}
 	if !strings.Contains(dockerfile, "aarch64-w64-mingw32-gcc") {
 		t.Fatalf("windowsDesktopDockerfile() missing arm64 cross compiler")
 	}
