@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -19,9 +20,20 @@ const (
 	modeDesktopApp buildMode = "desktop-app"
 )
 
+const (
+	dockerBuilderImageVersion = "v1"
+	dockerGoVersion           = "1.25.0"
+	dockerWorkspaceRoot       = "/workspace"
+	llvmMingwVersion          = "20260505"
+)
+
 type serverAppTarget struct {
 	goos   string
 	goarch string
+}
+
+type desktopBuildOptions struct {
+	rebuildDockerImages bool
 }
 
 type buildRequest struct {
@@ -35,12 +47,13 @@ type buildRequest struct {
 
 func main() {
 	var (
-		programName = flag.String("program", "sitebrush", "program name used in binary names and rsync publish paths")
-		versionFlag = flag.String("version", "", "version folder under binaries/; defaults to GITHUB_RUN_NUMBER, then git rev-list count, then git describe")
-		outputRoot  = flag.String("output-dir", "binaries", "root output directory for generated artifacts")
-		syncHost    = flag.String("sync-host", "", "optional ssh host for rsync publication, for example deploy@example.com")
-		syncBase    = flag.String("sync-base", "", "optional remote base path used together with -sync-host, for example /srv/releases")
-		modeFlag    = flag.String("mode", string(modeAll), "build scope: all, server-app, or desktop-app")
+		programName         = flag.String("program", "sitebrush", "program name used in binary names and rsync publish paths")
+		versionFlag         = flag.String("version", "", "version folder under binaries/; defaults to GITHUB_RUN_NUMBER, then git rev-list count, then git describe")
+		outputRoot          = flag.String("output-dir", "binaries", "root output directory for generated artifacts")
+		syncHost            = flag.String("sync-host", "", "optional ssh host for rsync publication, for example deploy@example.com")
+		syncBase            = flag.String("sync-base", "", "optional remote base path used together with -sync-host, for example /srv/releases")
+		modeFlag            = flag.String("mode", string(modeAll), "build scope: all, server-app, or desktop-app")
+		rebuildDockerImages = flag.Bool("rebuild-docker-images", false, "rebuild cached Docker builder images before Docker-based desktop builds")
 	)
 	flag.Parse()
 
@@ -89,7 +102,9 @@ func main() {
 	}
 
 	if mode == modeAll || mode == modeDesktopApp {
-		if err := buildDesktopAppArtifacts(repoRoot, outputDir, *programName, version); err != nil {
+		if err := buildDesktopAppArtifacts(repoRoot, outputDir, *programName, version, desktopBuildOptions{
+			rebuildDockerImages: *rebuildDockerImages,
+		}); err != nil {
 			fatalf("desktop-app build: %v", err)
 		}
 	}
@@ -135,7 +150,7 @@ func buildServerAppArtifacts(repoRoot, outputDir, programName, version string) e
 	return nil
 }
 
-func buildDesktopAppArtifacts(repoRoot, outputDir, programName, version string) error {
+func buildDesktopAppArtifacts(repoRoot, outputDir, programName, version string, options desktopBuildOptions) error {
 	desktopDir := filepath.Join(outputDir, "desktop-app")
 	if err := os.MkdirAll(desktopDir, 0o755); err != nil {
 		return err
@@ -149,10 +164,10 @@ func buildDesktopAppArtifacts(repoRoot, outputDir, programName, version string) 
 		fmt.Printf("skip macOS desktop build on host %s\n", runtime.GOOS)
 	}
 
-	if err := buildLinuxDesktopArtifacts(repoRoot, desktopDir, programName, version); err != nil {
+	if err := buildLinuxDesktopArtifacts(repoRoot, desktopDir, programName, version, options); err != nil {
 		return err
 	}
-	if err := buildWindowsDesktopArtifacts(repoRoot, desktopDir, programName, version); err != nil {
+	if err := buildWindowsDesktopArtifacts(repoRoot, desktopDir, programName, version, options); err != nil {
 		return err
 	}
 
@@ -221,7 +236,7 @@ func buildMacOSDesktopArtifacts(repoRoot, desktopDir, programName, version strin
 	return nil
 }
 
-func buildLinuxDesktopArtifacts(repoRoot, desktopDir, programName, version string) error {
+func buildLinuxDesktopArtifacts(repoRoot, desktopDir, programName, version string, options desktopBuildOptions) error {
 	fmt.Println("== Linux desktop builds via docker ==")
 	if !commandExists("docker") {
 		return fmt.Errorf("docker is required to build Linux desktop variants")
@@ -236,7 +251,7 @@ func buildLinuxDesktopArtifacts(repoRoot, desktopDir, programName, version strin
 		{goarch: "arm64", variant: "gtk40"},
 		{goarch: "arm64", variant: "gtk41"},
 	} {
-		if err := buildLinuxDesktopArtifactInDocker(repoRoot, desktopDir, programName, version, target.goarch, target.variant); err != nil {
+		if err := buildLinuxDesktopArtifactInDocker(repoRoot, desktopDir, programName, version, target.goarch, target.variant, options); err != nil {
 			return err
 		}
 	}
@@ -244,76 +259,98 @@ func buildLinuxDesktopArtifacts(repoRoot, desktopDir, programName, version strin
 	return nil
 }
 
-func buildWindowsDesktopArtifacts(repoRoot, desktopDir, programName, version string) error {
+func buildWindowsDesktopArtifacts(repoRoot, desktopDir, programName, version string, options desktopBuildOptions) error {
 	fmt.Println("== Windows desktop builds via docker ==")
 	if !commandExists("docker") {
 		return fmt.Errorf("docker is required to build Windows desktop variants")
 	}
 
 	for _, goarch := range []string{"amd64", "arm64"} {
-		if err := buildWindowsDesktopArtifactInDocker(repoRoot, desktopDir, programName, version, goarch); err != nil {
+		if err := buildWindowsDesktopArtifactInDocker(repoRoot, desktopDir, programName, version, goarch, options); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func buildLinuxDesktopArtifactInDocker(repoRoot, desktopDir, programName, version, goarch, variant string) error {
+func buildLinuxDesktopArtifactInDocker(repoRoot, desktopDir, programName, version, goarch, variant string, options desktopBuildOptions) error {
 	artifactName := desktopArtifactName(programName, "linux", goarch, variant)
 	artifactPath := filepath.Join(desktopDir, artifactName)
+	containerArtifactPath, err := dockerWorkspacePath(repoRoot, artifactPath)
+	if err != nil {
+		return err
+	}
 	dockerPlatform := "linux/" + goarch
-	dockerImage := linuxDesktopDockerImage(variant)
-	dockerScript := linuxDesktopDockerScript(artifactPath, artifactName, goarch, variant, version)
+	dockerImage := linuxDesktopDockerImage(goarch, variant)
+	if err := ensureDockerBuilderImage(repoRoot, dockerPlatform, dockerImage, linuxDesktopDockerfile(goarch, variant), options.rebuildDockerImages); err != nil {
+		return err
+	}
+	dockerScript := linuxDesktopDockerScript(containerArtifactPath, artifactName, goarch, variant, version)
 	fmt.Printf("build linux/%s %s -> %s\n", goarch, variant, artifactPath)
-	return runDockerShellScript(repoRoot, dockerPlatform, dockerImage, dockerScript, nil)
+	if err := runDockerShellScript(repoRoot, dockerPlatform, dockerImage, dockerScript, nil); err != nil {
+		return err
+	}
+	return verifyBuiltDesktopArtifact(artifactPath)
 }
 
-func buildWindowsDesktopArtifactInDocker(repoRoot, desktopDir, programName, version, goarch string) error {
+func buildWindowsDesktopArtifactInDocker(repoRoot, desktopDir, programName, version, goarch string, options desktopBuildOptions) error {
 	artifactName := desktopArtifactName(programName, "windows", goarch, "")
 	artifactPath := filepath.Join(desktopDir, artifactName)
-	dockerScript := windowsDesktopDockerScript(artifactPath, artifactName, goarch, version)
+	containerArtifactPath, err := dockerWorkspacePath(repoRoot, artifactPath)
+	if err != nil {
+		return err
+	}
+	dockerImage := windowsDesktopDockerImage(goarch)
+	if err := ensureDockerBuilderImage(repoRoot, "linux/amd64", dockerImage, windowsDesktopDockerfile(goarch), options.rebuildDockerImages); err != nil {
+		return err
+	}
+	dockerScript := windowsDesktopDockerScript(containerArtifactPath, artifactName, goarch, version)
 	fmt.Printf("build windows/%s -> %s\n", goarch, artifactPath)
-	return runDockerShellScript(repoRoot, "linux/amd64", "ubuntu:22.04", dockerScript, nil)
+	if err := runDockerShellScript(repoRoot, "linux/amd64", dockerImage, dockerScript, nil); err != nil {
+		return err
+	}
+	return verifyBuiltDesktopArtifact(artifactPath)
 }
 
-func linuxDesktopDockerImage(variant string) string {
+func linuxDesktopBaseImage(variant string) string {
 	if variant == "gtk41" {
 		return "ubuntu:24.04"
 	}
 	return "ubuntu:22.04"
 }
 
-func linuxDesktopDockerScript(artifactPath, artifactName, goarch, variant, version string) string {
+func linuxDesktopDockerImage(goarch, variant string) string {
+	return fmt.Sprintf("sitebrush-crosscompile:linux-%s-%s-go%s-%s", goarch, variant, dockerGoVersion, dockerBuilderImageVersion)
+}
+
+func windowsDesktopDockerImage(goarch string) string {
+	return fmt.Sprintf("sitebrush-crosscompile:windows-%s-go%s-%s", goarch, dockerGoVersion, dockerBuilderImageVersion)
+}
+
+func linuxDesktopDockerfile(goarch, variant string) string {
 	webkitPackage := "libwebkit2gtk-4.0-dev"
 	if variant == "gtk41" {
 		webkitPackage = "libwebkit2gtk-4.1-dev"
 	}
 
+	return fmt.Sprintf(`FROM --platform=linux/%s %s
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+ENV DEBIAN_FRONTEND=noninteractive
+RUN set -e; apt-get update; apt-get install -y ca-certificates curl build-essential pkg-config libgtk-3-dev %s zip tar; rm -rf /var/lib/apt/lists/*
+RUN curl -fsSL "https://go.dev/dl/go%s.linux-%s.tar.gz" | tar -C /usr/local -xz
+ENV PATH="/usr/local/go/bin:${PATH}"
+RUN if ! pkg-config --exists webkit2gtk-4.0 && pkg-config --exists webkit2gtk-4.1; then \
+  install -d /usr/local/lib/pkgconfig; \
+  printf 'prefix=/usr\nexec_prefix=${prefix}\nlibdir=${exec_prefix}/lib\nincludedir=${prefix}/include\n\nName: webkit2gtk-4.0\nDescription: Compatibility shim for webkit2gtk-4.1\nVersion: 4.0\nRequires: webkit2gtk-4.1\nLibs:\nCflags:\n' > /usr/local/lib/pkgconfig/webkit2gtk-4.0.pc; \
+fi
+`, goarch, linuxDesktopBaseImage(variant), webkitPackage, dockerGoVersion, goarch)
+}
+
+func linuxDesktopDockerScript(artifactPath, artifactName, goarch, variant, version string) string {
+	artifactDir := path.Dir(artifactPath)
+
 	return fmt.Sprintf(`
 set -euo pipefail
-export DEBIAN_FRONTEND=noninteractive
-apt-get update
-apt-get install -y ca-certificates curl build-essential pkg-config libgtk-3-dev %s zip tar
-if [ ! -x /usr/local/go/bin/go ]; then
-  curl -fsSL "https://go.dev/dl/go1.25.0.linux-%s.tar.gz" | tar -C /usr/local -xz
-fi
-export PATH=/usr/local/go/bin:$PATH
-if ! pkg-config --exists webkit2gtk-4.0 && pkg-config --exists webkit2gtk-4.1; then
-  install -d /usr/local/lib/pkgconfig
-  cat > /usr/local/lib/pkgconfig/webkit2gtk-4.0.pc <<'PC'
-prefix=/usr
-exec_prefix=${prefix}
-libdir=${exec_prefix}/lib
-includedir=${prefix}/include
-
-Name: webkit2gtk-4.0
-Description: Compatibility shim for webkit2gtk-4.1
-Version: 4.0
-Requires: webkit2gtk-4.1
-Libs:
-Cflags:
-PC
-fi
 mkdir -p %s
 GOFLAGS="-trimpath -buildvcs=false" \
 CGO_ENABLED=1 \
@@ -327,13 +364,48 @@ chmod +x %s
   cd %s
   zip -q -X %s %s
 )
-`, webkitPackage, goarch, shellQuote(filepath.Dir(artifactPath)), goarch, shellQuote(version), shellQuote(artifactPath), shellQuote(artifactPath), shellQuote(filepath.Dir(artifactPath)), shellQuote(artifactName+".zip"), shellQuote(artifactName))
+`, shellQuote(artifactDir), goarch, shellQuote(version), shellQuote(artifactPath), shellQuote(artifactPath), shellQuote(artifactDir), shellQuote(artifactName+".zip"), shellQuote(artifactName))
+}
+
+func windowsDesktopDockerfile(goarch string) string {
+	installToolchain := `
+apt-get install -y ca-certificates curl build-essential mingw-w64 zip tar
+`
+
+	if goarch == "arm64" {
+		installToolchain = fmt.Sprintf(`
+apt-get install -y ca-certificates curl build-essential zip tar xz-utils
+LLVM_MINGW_VERSION="%s"
+LLVM_MINGW_ARCHIVE="llvm-mingw-${LLVM_MINGW_VERSION}-ucrt-ubuntu-22.04-x86_64.tar.xz"
+LLVM_MINGW_URL="https://github.com/mstorsjo/llvm-mingw/releases/download/${LLVM_MINGW_VERSION}/${LLVM_MINGW_ARCHIVE}"
+
+curl -fsSL "$LLVM_MINGW_URL" -o "/tmp/$LLVM_MINGW_ARCHIVE"
+mkdir -p /opt/llvm-mingw
+tar -xf "/tmp/$LLVM_MINGW_ARCHIVE" -C /opt/llvm-mingw --strip-components=1
+export PATH="/opt/llvm-mingw/bin:$PATH"
+
+command -v aarch64-w64-mingw32-gcc
+command -v aarch64-w64-mingw32-g++
+`, llvmMingwVersion)
+	}
+
+	return fmt.Sprintf(`
+FROM --platform=linux/amd64 ubuntu:22.04
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+ENV DEBIAN_FRONTEND=noninteractive
+RUN set -e; apt-get update; %s; rm -rf /var/lib/apt/lists/*
+RUN curl -fsSL "https://go.dev/dl/go%s.linux-amd64.tar.gz" | tar -C /usr/local -xz
+ENV PATH="/usr/local/go/bin:/root/go/bin:/opt/llvm-mingw/bin:${PATH}"
+RUN go install github.com/akavel/rsrc@latest
+`, strings.TrimSpace(installToolchain), dockerGoVersion)
 }
 
 func windowsDesktopDockerScript(artifactPath, artifactName, goarch, version string) string {
 	resourceArch := "amd64"
 	cc := "x86_64-w64-mingw32-gcc"
 	cxx := "x86_64-w64-mingw32-g++"
+	artifactDir := path.Dir(artifactPath)
+
 	if goarch == "arm64" {
 		resourceArch = "arm64"
 		cc = "aarch64-w64-mingw32-gcc"
@@ -342,17 +414,12 @@ func windowsDesktopDockerScript(artifactPath, artifactName, goarch, version stri
 
 	return fmt.Sprintf(`
 set -euo pipefail
-export DEBIAN_FRONTEND=noninteractive
-apt-get update
-apt-get install -y ca-certificates curl build-essential mingw-w64 zip tar
-if [ ! -x /usr/local/go/bin/go ]; then
-  curl -fsSL "https://go.dev/dl/go1.25.0.linux-amd64.tar.gz" | tar -C /usr/local -xz
-fi
-export PATH=/usr/local/go/bin:$PATH
-go install github.com/akavel/rsrc@latest
 rsrcBin="$(go env GOPATH)/bin/rsrc"
 "$rsrcBin" -ico "web/static/sitebrush-logo.ico" -arch %s -o "zz_sitebrush_icon_windows_%s.syso"
+trap 'rm -f "zz_sitebrush_icon_windows_%s.syso"' EXIT
+
 mkdir -p %s
+
 GOFLAGS="-trimpath -buildvcs=false" \
 CGO_ENABLED=1 \
 GOOS=windows \
@@ -362,11 +429,12 @@ CXX=%s \
 go build -tags "desktop" \
   -ldflags "-H windowsgui -s -w -X main.CompileVersion=%s" \
   -o %s
+
 (
   cd %s
   zip -q -X %s %s
 )
-`, resourceArch, goarch, shellQuote(filepath.Dir(artifactPath)), goarch, cc, cxx, shellQuote(version), shellQuote(artifactPath), shellQuote(filepath.Dir(artifactPath)), shellQuote(artifactName+".zip"), shellQuote(artifactName))
+`, resourceArch, goarch, goarch, shellQuote(artifactDir), goarch, cc, cxx, shellQuote(version), shellQuote(artifactPath), shellQuote(artifactDir), shellQuote(artifactName+".zip"), shellQuote(artifactName))
 }
 
 func buildGoBinary(repoRoot, outputPath string, request buildRequest) error {
@@ -666,12 +734,102 @@ func runCommand(dir, name string, args ...string) error {
 }
 
 func runDockerShellScript(repoRoot, platform, image, shellScript string, extraEnv map[string]string) error {
-	args := []string{"run", "--rm", "--platform", platform, "-v", repoRoot + ":/workspace", "-w", "/workspace"}
+	args := []string{
+		"run",
+		"--rm",
+		"--platform", platform,
+		"-v", repoRoot + ":" + dockerWorkspaceRoot,
+		"-v", dockerVolumeName(image, "gocache") + ":/root/.cache/go-build",
+		"-v", dockerVolumeName(image, "gomod") + ":/root/go/pkg/mod",
+		"-w", dockerWorkspaceRoot,
+	}
 	for key, value := range extraEnv {
 		args = append(args, "-e", key+"="+value)
 	}
 	args = append(args, image, "bash", "-lc", shellScript)
 	return runCommand(repoRoot, "docker", args...)
+}
+
+func ensureDockerBuilderImage(repoRoot, platform, image, dockerfile string, rebuild bool) error {
+	if !rebuild && dockerImageExists(repoRoot, image) {
+		fmt.Printf("reuse docker builder image %s\n", image)
+		return nil
+	}
+
+	fmt.Printf("build docker builder image %s\n", image)
+	return runDockerBuild(repoRoot, platform, image, dockerfile)
+}
+
+func dockerImageExists(repoRoot, image string) bool {
+	cmd := exec.Command("docker", "image", "inspect", image)
+	cmd.Dir = repoRoot
+	return cmd.Run() == nil
+}
+
+func runDockerBuild(repoRoot, platform, image, dockerfile string) error {
+	cmd := exec.Command("docker", "build", "--platform", platform, "-t", image, "-")
+	cmd.Dir = repoRoot
+	cmd.Stdin = strings.NewReader(dockerfile)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	cmd.Env = os.Environ()
+	return cmd.Run()
+}
+
+func dockerVolumeName(image, suffix string) string {
+	var builder strings.Builder
+	for _, r := range image {
+		switch {
+		case r >= 'a' && r <= 'z':
+			builder.WriteRune(r)
+		case r >= 'A' && r <= 'Z':
+			builder.WriteRune(r)
+		case r >= '0' && r <= '9':
+			builder.WriteRune(r)
+		case r == '.', r == '_', r == '-':
+			builder.WriteRune(r)
+		default:
+			builder.WriteRune('-')
+		}
+	}
+	builder.WriteRune('-')
+	builder.WriteString(suffix)
+	return builder.String()
+}
+
+func dockerWorkspacePath(repoRoot, hostPath string) (string, error) {
+	relativePath, err := filepath.Rel(repoRoot, hostPath)
+	if err != nil {
+		return "", err
+	}
+	if relativePath == "." {
+		return dockerWorkspaceRoot, nil
+	}
+	if strings.HasPrefix(relativePath, ".."+string(filepath.Separator)) || relativePath == ".." || filepath.IsAbs(relativePath) {
+		return "", fmt.Errorf("path %s is outside docker workspace %s", hostPath, repoRoot)
+	}
+	return path.Join(dockerWorkspaceRoot, filepath.ToSlash(relativePath)), nil
+}
+
+func verifyBuiltDesktopArtifact(artifactPath string) error {
+	if err := verifyNonEmptyFile(artifactPath); err != nil {
+		return err
+	}
+	return verifyNonEmptyFile(artifactPath + ".zip")
+}
+
+func verifyNonEmptyFile(filePath string) error {
+	info, err := os.Stat(filePath)
+	if err != nil {
+		return fmt.Errorf("expected build artifact %s: %w", filePath, err)
+	}
+	if info.IsDir() {
+		return fmt.Errorf("expected build artifact %s, got directory", filePath)
+	}
+	if info.Size() == 0 {
+		return fmt.Errorf("expected build artifact %s to be non-empty", filePath)
+	}
+	return nil
 }
 
 func runOutput(dir, name string, args ...string) (string, error) {

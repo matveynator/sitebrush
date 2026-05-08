@@ -76,14 +76,41 @@ func TestDesktopArtifactName(t *testing.T) {
 	}
 }
 
+func TestLinuxDesktopBaseImage(t *testing.T) {
+	t.Parallel()
+
+	if got, want := linuxDesktopBaseImage("gtk40"), "ubuntu:22.04"; got != want {
+		t.Fatalf("linuxDesktopBaseImage(gtk40) = %q, want %q", got, want)
+	}
+	if got, want := linuxDesktopBaseImage("gtk41"), "ubuntu:24.04"; got != want {
+		t.Fatalf("linuxDesktopBaseImage(gtk41) = %q, want %q", got, want)
+	}
+}
+
 func TestLinuxDesktopDockerImage(t *testing.T) {
 	t.Parallel()
 
-	if got, want := linuxDesktopDockerImage("gtk40"), "ubuntu:22.04"; got != want {
-		t.Fatalf("linuxDesktopDockerImage(gtk40) = %q, want %q", got, want)
+	got := linuxDesktopDockerImage("amd64", "gtk40")
+	if want := "sitebrush-crosscompile:linux-amd64-gtk40-go1.25.0-v1"; got != want {
+		t.Fatalf("linuxDesktopDockerImage() = %q, want %q", got, want)
 	}
-	if got, want := linuxDesktopDockerImage("gtk41"), "ubuntu:24.04"; got != want {
-		t.Fatalf("linuxDesktopDockerImage(gtk41) = %q, want %q", got, want)
+}
+
+func TestLinuxDesktopDockerfile(t *testing.T) {
+	t.Parallel()
+
+	dockerfile := linuxDesktopDockerfile("amd64", "gtk40")
+	if !strings.Contains(dockerfile, "FROM --platform=linux/amd64 ubuntu:22.04") {
+		t.Fatalf("linuxDesktopDockerfile() missing base image")
+	}
+	if !strings.Contains(dockerfile, `SHELL ["/bin/bash", "-o", "pipefail", "-c"]`) {
+		t.Fatalf("linuxDesktopDockerfile() missing pipefail shell")
+	}
+	if !strings.Contains(dockerfile, "libwebkit2gtk-4.0-dev") {
+		t.Fatalf("linuxDesktopDockerfile() missing gtk40 webkit package")
+	}
+	if !strings.Contains(dockerfile, "go1.25.0.linux-amd64.tar.gz") {
+		t.Fatalf("linuxDesktopDockerfile() missing Go tarball URL")
 	}
 }
 
@@ -91,14 +118,50 @@ func TestLinuxDesktopDockerScript(t *testing.T) {
 	t.Parallel()
 
 	script := linuxDesktopDockerScript("/work/dist/sitebrush_linux_amd64_desktop_gtk40", "sitebrush_linux_amd64_desktop_gtk40", "amd64", "gtk40", "151")
-	if !strings.Contains(script, "libwebkit2gtk-4.0-dev") {
-		t.Fatalf("linuxDesktopDockerScript() missing gtk40 webkit package")
-	}
-	if !strings.Contains(script, "go1.25.0.linux-amd64.tar.gz") {
-		t.Fatalf("linuxDesktopDockerScript() missing Go tarball URL")
-	}
 	if !strings.Contains(script, "sitebrush_linux_amd64_desktop_gtk40.zip") {
 		t.Fatalf("linuxDesktopDockerScript() missing zip target")
+	}
+	if strings.Contains(script, "apt-get") || strings.Contains(script, "go.dev/dl") {
+		t.Fatalf("linuxDesktopDockerScript() should use cached builder image dependencies")
+	}
+}
+
+func TestWindowsDesktopDockerImage(t *testing.T) {
+	t.Parallel()
+
+	got := windowsDesktopDockerImage("arm64")
+	if want := "sitebrush-crosscompile:windows-arm64-go1.25.0-v1"; got != want {
+		t.Fatalf("windowsDesktopDockerImage() = %q, want %q", got, want)
+	}
+}
+
+func TestWindowsDesktopDockerfile(t *testing.T) {
+	t.Parallel()
+
+	dockerfile := windowsDesktopDockerfile("amd64")
+	if !strings.Contains(dockerfile, "mingw-w64") {
+		t.Fatalf("windowsDesktopDockerfile() missing mingw package")
+	}
+	if !strings.Contains(dockerfile, `SHELL ["/bin/bash", "-o", "pipefail", "-c"]`) {
+		t.Fatalf("windowsDesktopDockerfile() missing pipefail shell")
+	}
+	if !strings.Contains(dockerfile, "go1.25.0.linux-amd64.tar.gz") {
+		t.Fatalf("windowsDesktopDockerfile() missing Go tarball URL")
+	}
+	if !strings.Contains(dockerfile, "go install github.com/akavel/rsrc@latest") {
+		t.Fatalf("windowsDesktopDockerfile() missing rsrc install")
+	}
+}
+
+func TestWindowsArm64DesktopDockerfile(t *testing.T) {
+	t.Parallel()
+
+	dockerfile := windowsDesktopDockerfile("arm64")
+	if !strings.Contains(dockerfile, `LLVM_MINGW_VERSION="20260505"`) {
+		t.Fatalf("windowsDesktopDockerfile() missing llvm-mingw archive")
+	}
+	if !strings.Contains(dockerfile, "aarch64-w64-mingw32-gcc") {
+		t.Fatalf("windowsDesktopDockerfile() missing arm64 cross compiler")
 	}
 }
 
@@ -106,14 +169,77 @@ func TestWindowsDesktopDockerScript(t *testing.T) {
 	t.Parallel()
 
 	script := windowsDesktopDockerScript("/work/dist/sitebrush_windows_amd64_desktop.exe", "sitebrush_windows_amd64_desktop.exe", "amd64", "151")
-	if !strings.Contains(script, "mingw-w64") {
-		t.Fatalf("windowsDesktopDockerScript() missing mingw package")
-	}
-	if !strings.Contains(script, "go1.25.0.linux-amd64.tar.gz") {
-		t.Fatalf("windowsDesktopDockerScript() missing Go tarball URL")
-	}
 	if !strings.Contains(script, "x86_64-w64-mingw32-gcc") {
 		t.Fatalf("windowsDesktopDockerScript() missing amd64 cross compiler")
+	}
+	if !strings.Contains(script, `trap 'rm -f "zz_sitebrush_icon_windows_amd64.syso"' EXIT`) {
+		t.Fatalf("windowsDesktopDockerScript() does not clean generated syso")
+	}
+	if strings.Contains(script, "apt-get") || strings.Contains(script, "go.dev/dl") || strings.Contains(script, "go install") {
+		t.Fatalf("windowsDesktopDockerScript() should use cached builder image dependencies")
+	}
+}
+
+func TestDockerVolumeName(t *testing.T) {
+	t.Parallel()
+
+	got := dockerVolumeName("sitebrush-crosscompile:linux-amd64-gtk40-go1.25.0-v1", "gomod")
+	want := "sitebrush-crosscompile-linux-amd64-gtk40-go1.25.0-v1-gomod"
+	if got != want {
+		t.Fatalf("dockerVolumeName() = %q, want %q", got, want)
+	}
+}
+
+func TestDockerWorkspacePath(t *testing.T) {
+	t.Parallel()
+
+	repoRoot := filepath.Join(string(filepath.Separator), "Users", "matvey", "codex", "sitebrush")
+	hostPath := filepath.Join(repoRoot, "binaries", "152", "desktop-app", "sitebrush_linux_amd64_desktop_gtk40")
+	got, err := dockerWorkspacePath(repoRoot, hostPath)
+	if err != nil {
+		t.Fatalf("dockerWorkspacePath() error = %v", err)
+	}
+	if want := "/workspace/binaries/152/desktop-app/sitebrush_linux_amd64_desktop_gtk40"; got != want {
+		t.Fatalf("dockerWorkspacePath() = %q, want %q", got, want)
+	}
+}
+
+func TestDockerWorkspacePathRejectsOutsidePath(t *testing.T) {
+	t.Parallel()
+
+	repoRoot := filepath.Join(string(filepath.Separator), "Users", "matvey", "codex", "sitebrush")
+	hostPath := filepath.Join(string(filepath.Separator), "Users", "matvey", "codex", "other", "binary")
+	if _, err := dockerWorkspacePath(repoRoot, hostPath); err == nil {
+		t.Fatalf("dockerWorkspacePath() accepted path outside repo")
+	}
+}
+
+func TestVerifyBuiltDesktopArtifact(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	artifactPath := filepath.Join(dir, "sitebrush_linux_amd64_desktop_gtk40")
+	if err := os.WriteFile(artifactPath, []byte("binary"), 0o644); err != nil {
+		t.Fatalf("write artifact: %v", err)
+	}
+	if err := os.WriteFile(artifactPath+".zip", []byte("zip"), 0o644); err != nil {
+		t.Fatalf("write zip: %v", err)
+	}
+	if err := verifyBuiltDesktopArtifact(artifactPath); err != nil {
+		t.Fatalf("verifyBuiltDesktopArtifact() error = %v", err)
+	}
+}
+
+func TestVerifyBuiltDesktopArtifactRejectsMissingZip(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	artifactPath := filepath.Join(dir, "sitebrush_linux_amd64_desktop_gtk40")
+	if err := os.WriteFile(artifactPath, []byte("binary"), 0o644); err != nil {
+		t.Fatalf("write artifact: %v", err)
+	}
+	if err := verifyBuiltDesktopArtifact(artifactPath); err == nil {
+		t.Fatalf("verifyBuiltDesktopArtifact() accepted missing zip")
 	}
 }
 
