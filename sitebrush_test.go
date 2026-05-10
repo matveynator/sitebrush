@@ -191,7 +191,7 @@ func TestContextMenuUsesDirectEditorProfileAndDeleteActions(t *testing.T) {
 	if strings.Contains(body, "href='?edit'") {
 		t.Fatalf("context menu still contains intermediate edit link: %s", body)
 	}
-	for _, expectedFragment := range []string{`window.location.href = targetHref;`, `closest("#SiteBrushMenuBox")`, `function closeSitebrushMenu()`, `z-index:2147483647`, `closeSitebrushMenu();`} {
+	for _, expectedFragment := range []string{`window.location.href = targetHref;`, `closest("#SiteBrushMenuBox")`, `function closeSitebrushMenu()`, `z-index:2147483647`, `closeSitebrushMenu();`, `data-sitebrush-owned`, `window.addEventListener("contextmenu", onContextMenuOpen, {capture: true, passive: false})`} {
 		if !strings.Contains(body, expectedFragment) {
 			t.Fatalf("context menu missing navigation guard %q in %s", expectedFragment, body)
 		}
@@ -1436,10 +1436,67 @@ func TestMirrorRemotePageBlanksSameOriginEmbeddedHTMLFrames(t *testing.T) {
 	}
 }
 
+func TestMirrorRemotePageInjectsRuntimeGuardBeforeImportedScripts(t *testing.T) {
+	pageRawURL := "https://sitebrush.com/"
+	sourceHTML := `<!doctype html><html><head><script>window.loopStarted = true;</script></head><body>` +
+		`<script>document.body.insertAdjacentHTML("beforeend", "<iframe src='/'>" + document.documentElement.outerHTML + "</iframe>");</script>` +
+		`</body></html>`
+
+	pageURL, parseErr := url.Parse(pageRawURL)
+	if parseErr != nil {
+		t.Fatal(parseErr)
+	}
+
+	application := &App{storagePath: t.TempDir(), grabTracker: newGrabProgressTracker()}
+	importedHTML := application.mirrorRemotePage("localhost", "/", pageRawURL, pageURL, sourceHTML, "", nil, "")
+
+	guardIndex := strings.Index(importedHTML, "data-sitebrush-import-runtime-guard")
+	importedScriptIndex := strings.Index(importedHTML, "window.loopStarted = true")
+	if guardIndex < 0 {
+		t.Fatalf("imported HTML does not include runtime guard: %s", importedHTML)
+	}
+	if importedScriptIndex < 0 {
+		t.Fatalf("imported HTML lost imported script: %s", importedHTML)
+	}
+	if guardIndex > importedScriptIndex {
+		t.Fatalf("runtime guard was inserted after imported script: %s", importedHTML)
+	}
+	for _, expectedFragment := range []string{
+		"processedElements = new WeakSet",
+		"seenSourceKeys = new Set",
+		"maximumElementDepth",
+		"maximumInsertedNodeCount",
+		"maximumMutationRecordCount",
+		"maximumGuardRunMilliseconds",
+		"Node.prototype.appendChild",
+		"Element.prototype.insertAdjacentHTML",
+		"isSitebrushOwnedNode",
+		"sitebrushOwnedAttributeName",
+		"data-sitebrush-blank-embedded-document",
+		"element.style.pointerEvents = \"none\"",
+		"innerHTML",
+		"MutationObserver",
+		"about:blank",
+	} {
+		if !strings.Contains(importedHTML, expectedFragment) {
+			t.Fatalf("runtime guard missing expected fragment %q: %s", expectedFragment, importedHTML)
+		}
+	}
+}
+
+func TestImportedPageRuntimeGuardIsNotInjectedTwice(t *testing.T) {
+	sourceHTML := `<html><head>` + importedPageRuntimeGuardScript + `</head><body>Imported</body></html>`
+	importedHTML := injectImportedPageRuntimeGuard(sourceHTML)
+
+	if guardCount := strings.Count(importedHTML, "<script data-sitebrush-import-runtime-guard>"); guardCount != 1 {
+		t.Fatalf("runtime guard count = %d, want 1: %s", guardCount, importedHTML)
+	}
+}
+
 func TestMirrorRemotePageRemovesLegacySiteBrushMenuChrome(t *testing.T) {
 	pageRawURL := "https://legacy.example/rotorway4"
 	sourceHTML := `<!DOCTYPE html>
-<!-- Powered by SiteBrush | http://sitebrush.com/ -->
+	<!-- Powered by SiteBrush | http://sitebrush.com/ -->
 <html lang="en" id="SiteBrush">
 <head>
 <script src="https://legacy.example/p/js/jquery/jquery.js" type="text/javascript"></script>
