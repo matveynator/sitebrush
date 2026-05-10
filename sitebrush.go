@@ -4167,7 +4167,7 @@ func buildContextMenuScript(isAdmin bool, isFrozen bool, pagePath, domain string
     }, 750);
   }
   document.addEventListener("click", function onActionClick(browserEvent) {
-    const actionButtonElement = browserEvent.target && browserEvent.target.closest && browserEvent.target.closest("[data-sitebrush-action]");
+    const actionButtonElement = closestSitebrushEventElement(browserEvent, "[data-sitebrush-action]");
     if (!actionButtonElement) {
       return;
     }
@@ -4233,7 +4233,7 @@ func buildContextMenuScript(isAdmin bool, isFrozen bool, pagePath, domain string
     if (browserEvent.__sitebrushContextMenuHandled || browserEvent.ctrlKey) {
       return;
     }
-    const clickedInsideSitebrushMenu = browserEvent.target && browserEvent.target.closest && browserEvent.target.closest("#SiteBrushMenuBox");
+    const clickedInsideSitebrushMenu = closestSitebrushEventElement(browserEvent, "#SiteBrushMenuBox");
     if (clickedInsideSitebrushMenu) {
       return;
     }
@@ -4316,7 +4316,7 @@ func buildContextMenuScript(isAdmin bool, isFrozen bool, pagePath, domain string
     if (browserEvent.__sitebrushContextMenuHandled || browserEvent.ctrlKey) {
       return;
     }
-    const clickedInsideSitebrushMenu = browserEvent.target && browserEvent.target.closest && browserEvent.target.closest("#SiteBrushMenuBox");
+    const clickedInsideSitebrushMenu = closestSitebrushEventElement(browserEvent, "#SiteBrushMenuBox");
     if (clickedInsideSitebrushMenu) {
       return;
     }
@@ -4346,10 +4346,12 @@ func contextMenuStylesAndHelpers() string {
 .SiteBrushMenuList{list-style:none;margin:0;padding:0}
 .SiteBrushContextMenu{margin:0;padding:0}
 .SiteBrushContextMenuLink{display:flex;align-items:center;gap:8px;padding:8px 10px;color:#1f3f6f;text-decoration:none;font-family:Arial,Helvetica,sans-serif;font-size:14px;cursor:pointer}
-.SiteBrushContextMenuLink:hover{background:#eef5ff}
+.SiteBrushContextMenuLink:link,.SiteBrushContextMenuLink:visited,.SiteBrushContextMenuLink:active{color:#1f3f6f;text-decoration:none}
+.SiteBrushContextMenuLink:hover{color:#1f3f6f;background:#eef5ff;text-decoration:none}
 .SiteBrushContextMenuButton{width:100%;border:0;background:transparent;text-align:left}
 .SiteBrushDomainMenuItem .SiteBrushContextMenuLink{font-weight:700;border-bottom:1px solid #c8d5e7}
 .ContextMenuCopyright .SiteBrushContextMenuLink{font-size:12px;color:#5b6f8b;border-top:1px solid #c8d5e7;margin-top:2px;padding-top:7px;justify-content:space-between;gap:12px}.SiteBrushMenuIcon{width:18px;height:18px;flex:0 0 18px}
+.ContextMenuCopyright .SiteBrushContextMenuLink:link,.ContextMenuCopyright .SiteBrushContextMenuLink:visited,.ContextMenuCopyright .SiteBrushContextMenuLink:active,.ContextMenuCopyright .SiteBrushContextMenuLink:hover{color:#5b6f8b}
 .SiteBrushContextMenuVersion{font-weight:700;margin-left:4px}
 .SiteBrushMenuStorageUsage{margin-left:auto;font-variant-numeric:tabular-nums;white-space:nowrap}
 .SiteBrushConfirmOverlay{position:fixed;inset:0;background:rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center;z-index:2147483647}
@@ -4358,6 +4360,7 @@ func contextMenuStylesAndHelpers() string {
 .SiteBrushPublishPreviewList{list-style:none;margin:0 0 12px 0;padding:0;max-height:180px;overflow:auto}
 .SiteBrushPublishPreviewListItem{margin:0 0 4px 0}
 .SiteBrushPublishPreviewLink{color:#1f3f6f;text-decoration:underline;font-size:13px}
+.SiteBrushPublishPreviewLink:link,.SiteBrushPublishPreviewLink:visited,.SiteBrushPublishPreviewLink:active,.SiteBrushPublishPreviewLink:hover{color:#1f3f6f;text-decoration:underline}
 .SiteBrushPublishProgressModal{min-width:320px;max-width:460px}
 .SiteBrushPublishProgressPath{min-height:18px;margin:0 0 8px 0;color:#5b6f8b;font-size:12px;word-break:break-word}
 .SiteBrushPublishProgress{height:20px;background:#e8f0fb;border:1px solid #8ea4c1;overflow:hidden}
@@ -4372,16 +4375,20 @@ func contextMenuStylesAndHelpers() string {
 .SiteBrushTreeContent{margin:0;color:#1f3f6f;font-size:14px}
 .SiteBrushTreeList{list-style:none;margin:0;padding-left:16px}
 .SiteBrushTreeLink{color:#1f3f6f;text-decoration:none;font-size:14px;line-height:1.6}
+.SiteBrushTreeLink:link,.SiteBrushTreeLink:visited,.SiteBrushTreeLink:active,.SiteBrushTreeLink:hover{color:#1f3f6f;text-decoration:none}
 .SiteBrushTreeCurrent{font-weight:700;text-decoration:underline}
 @media (prefers-color-scheme: dark){
   .SiteBrushMenuBox{background:#172235;border-color:#2f405d}
   .SiteBrushMenuBox.SiteBrushMenuBoxFrozen{background:#13263d;border-color:#4a6f99}
   .SiteBrushContextMenuLink{color:#dbe8ff}
-  .SiteBrushContextMenuLink:hover{background:#24344d}
+  .SiteBrushContextMenuLink:link,.SiteBrushContextMenuLink:visited,.SiteBrushContextMenuLink:active{color:#dbe8ff}
+  .SiteBrushContextMenuLink:hover{color:#dbe8ff;background:#24344d}
   .SiteBrushDomainMenuItem .SiteBrushContextMenuLink{border-bottom-color:#2f405d}
   .ContextMenuCopyright .SiteBrushContextMenuLink{color:#a7bbd8;border-top-color:#2f405d}
+  .ContextMenuCopyright .SiteBrushContextMenuLink:link,.ContextMenuCopyright .SiteBrushContextMenuLink:visited,.ContextMenuCopyright .SiteBrushContextMenuLink:active,.ContextMenuCopyright .SiteBrushContextMenuLink:hover{color:#a7bbd8}
   .SiteBrushConfirmModal{background:#172235;border-color:#2f405d}
   .SiteBrushConfirmText,.SiteBrushPublishPreviewLink{color:#dbe8ff}
+  .SiteBrushPublishPreviewLink:link,.SiteBrushPublishPreviewLink:visited,.SiteBrushPublishPreviewLink:active,.SiteBrushPublishPreviewLink:hover{color:#dbe8ff}
   .SiteBrushPublishProgressPath{color:#a7bbd8}
   .SiteBrushPublishProgress{background:#22324a;border-color:#405674}
   .SiteBrushPublishProgressBar{background:#4f8bd8;color:#fff}
@@ -4389,9 +4396,38 @@ func contextMenuStylesAndHelpers() string {
   .SiteBrushTreeModal{background:#172235;border-color:#2f405d}
   .SiteBrushTreeCloseButton{background:#22324a;color:#dbe8ff;border-color:#405674}
   .SiteBrushTreeTitle,.SiteBrushTreeContent,.SiteBrushTreeLink{color:#dbe8ff}
+  .SiteBrushTreeLink:link,.SiteBrushTreeLink:visited,.SiteBrushTreeLink:active,.SiteBrushTreeLink:hover{color:#dbe8ff}
 }
 </style>
 <script>
+const sitebrushContextMenuShadowCSS = document.currentScript && document.currentScript.previousElementSibling ? document.currentScript.previousElementSibling.textContent : "";
+function closestSitebrushEventElement(browserEvent, selector) {
+  const directTarget = browserEvent.target;
+  if (directTarget && directTarget.closest) {
+    const directMatch = directTarget.closest(selector);
+    if (directMatch) {
+      return directMatch;
+    }
+  }
+  if (!browserEvent.composedPath) {
+    return null;
+  }
+  for (const pathNode of browserEvent.composedPath()) {
+    if (!pathNode || pathNode.nodeType !== Node.ELEMENT_NODE) {
+      continue;
+    }
+    if (pathNode.matches && pathNode.matches(selector)) {
+      return pathNode;
+    }
+    if (pathNode.closest) {
+      const pathMatch = pathNode.closest(selector);
+      if (pathMatch) {
+        return pathMatch;
+      }
+    }
+  }
+  return null;
+}
 function closeSitebrushMenu() {
   const existingMenuBox = document.getElementById("SiteBrushMenuBox");
   if (existingMenuBox) {
@@ -4410,8 +4446,19 @@ function normalizeSitebrushMenuLinks(menuBoxElement, currentPagePath) {
 }
 function showSitebrushMenu(browserEvent, menuHtmlEntries, currentPagePath, frozenMenuEnabled) {
   closeSitebrushMenu();
+  const menuHostElement = document.createElement("div");
+  menuHostElement.id = "SiteBrushMenuBox";
+  menuHostElement.setAttribute("data-sitebrush-owned", "true");
+  menuHostElement.style.setProperty("all", "initial", "important");
+  menuHostElement.style.setProperty("position", "fixed", "important");
+  menuHostElement.style.setProperty("left", "0", "important");
+  menuHostElement.style.setProperty("top", "0", "important");
+  menuHostElement.style.setProperty("z-index", "2147483646", "important");
+  const menuRoot = menuHostElement.attachShadow ? menuHostElement.attachShadow({mode: "open"}) : menuHostElement;
+  const menuStyleElement = document.createElement("style");
+  menuStyleElement.setAttribute("data-sitebrush-owned", "true");
+  menuStyleElement.textContent = sitebrushContextMenuShadowCSS;
   const menuBoxElement = document.createElement("div");
-  menuBoxElement.id = "SiteBrushMenuBox";
   menuBoxElement.className = "SiteBrushMenuBox";
   menuBoxElement.setAttribute("data-sitebrush-owned", "true");
   if (frozenMenuEnabled) {
@@ -4421,7 +4468,9 @@ function showSitebrushMenu(browserEvent, menuHtmlEntries, currentPagePath, froze
   normalizeSitebrushMenuLinks(menuBoxElement, currentPagePath);
   menuBoxElement.style.left = browserEvent.clientX + "px";
   menuBoxElement.style.top = browserEvent.clientY + "px";
-  document.body.appendChild(menuBoxElement);
+  menuRoot.appendChild(menuStyleElement);
+  menuRoot.appendChild(menuBoxElement);
+  document.body.appendChild(menuHostElement);
   menuBoxElement.addEventListener("click", function onMenuClick(browserEvent) {
     const menuLinkElement = browserEvent.target && browserEvent.target.closest && browserEvent.target.closest("a[href]");
     if (!menuLinkElement) {
@@ -4440,7 +4489,7 @@ function showSitebrushMenu(browserEvent, menuHtmlEntries, currentPagePath, froze
     if (!openMenu) {
       return;
     }
-    if (browserEvent.target && browserEvent.target.closest && browserEvent.target.closest("#SiteBrushMenuBox")) {
+    if (closestSitebrushEventElement(browserEvent, "#SiteBrushMenuBox")) {
       return;
     }
     openMenu.remove();
