@@ -44,7 +44,7 @@ func newTestApplication(t *testing.T) (*App, *sql.DB) {
 	t.Cleanup(func() {
 		_ = rawDB.Close()
 	})
-	application := &App{db: rawDB, storagePath: storagePath, grabTracker: newGrabProgressTracker()}
+	application := &App{db: rawDB, storagePath: storagePath, grabTracker: newGrabProgressTracker(), publishTracker: newPublishProgressTracker(), analyticsEvents: make(chan siteAnalyticsEvent, 1024)}
 	if err := application.migrate(context.Background()); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
@@ -178,7 +178,7 @@ func TestContextMenuUsesDirectEditorProfileAndDeleteActions(t *testing.T) {
 		t.Fatalf("status = %d, body=%q", response.Code, response.Body.String())
 	}
 	body := response.Body.String()
-	for _, expectedFragment := range []string{"href='?visual'", "href='?text'", "data-sitebrush-action='delete'", "?delete=" + strconv.FormatInt(revisionID, 10), "href='?profile'"} {
+	for _, expectedFragment := range []string{"href='?visual'", "href='?text'", "data-sitebrush-action='delete'", "?delete=" + strconv.FormatInt(revisionID, 10), "href='?profile'", "href='?analytics'", "/p/static/analytics.svg"} {
 		if !strings.Contains(body, expectedFragment) {
 			t.Fatalf("context menu missing %q in %s", expectedFragment, body)
 		}
@@ -196,6 +196,186 @@ func TestContextMenuUsesDirectEditorProfileAndDeleteActions(t *testing.T) {
 			t.Fatalf("context menu missing navigation guard %q in %s", expectedFragment, body)
 		}
 	}
+}
+
+func TestAnalyticsReportBuildsGoogleAnalyticsStyleMetrics(t *testing.T) {
+	now := time.Date(2026, 5, 10, 12, 0, 0, 0, time.UTC)
+	events := []siteAnalyticsEvent{
+		{
+			Domain:         "localhost",
+			Path:           "/",
+			Method:         http.MethodGet,
+			StatusCode:     http.StatusOK,
+			ContentSource:  "dynamic",
+			OccurredAt:     now.Add(-40 * time.Minute),
+			Duration:       120 * time.Millisecond,
+			UserAgent:      "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 Version/17.0 Safari/605.1.15",
+			Referer:        "https://www.google.com/search?q=sitebrush",
+			AcceptLanguage: "en-US,en;q=0.9",
+			VisitorID:      "visitor-a",
+		},
+		{
+			Domain:         "localhost",
+			Path:           "/pricing",
+			Method:         http.MethodGet,
+			StatusCode:     http.StatusOK,
+			ContentSource:  "dynamic",
+			OccurredAt:     now.Add(-35 * time.Minute),
+			Duration:       450 * time.Millisecond,
+			UserAgent:      "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 Version/17.0 Mobile/15E148 Safari/604.1",
+			Referer:        "https://t.co/example",
+			AcceptLanguage: "ru-RU,ru;q=0.9",
+			VisitorID:      "visitor-a",
+		},
+		{
+			Domain:         "localhost",
+			Path:           "/docs",
+			Method:         http.MethodGet,
+			StatusCode:     http.StatusOK,
+			ContentSource:  "dynamic",
+			OccurredAt:     now.Add(-5 * time.Minute),
+			Duration:       210 * time.Millisecond,
+			UserAgent:      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36",
+			Referer:        "",
+			AcceptLanguage: "de-DE,de;q=0.9",
+			VisitorID:      "visitor-b",
+		},
+		{
+			Domain:        "localhost",
+			Path:          "/p/logo.png",
+			Method:        http.MethodGet,
+			StatusCode:    http.StatusOK,
+			ContentSource: "static",
+			OccurredAt:    now.Add(-4 * time.Minute),
+			Duration:      30 * time.Millisecond,
+			UserAgent:     "Mozilla/5.0 Chrome/124.0.0.0 Safari/537.36",
+			VisitorID:     "visitor-b",
+			IsAsset:       true,
+		},
+		{
+			Domain:        "localhost",
+			Path:          "/missing",
+			Method:        http.MethodGet,
+			StatusCode:    http.StatusNotFound,
+			ContentSource: "dynamic",
+			OccurredAt:    now.Add(-3 * time.Minute),
+			Duration:      80 * time.Millisecond,
+			UserAgent:     "Mozilla/5.0 Chrome/124.0.0.0 Safari/537.36",
+			VisitorID:     "visitor-c",
+		},
+		{
+			Domain:        "localhost",
+			Path:          "/docs",
+			Query:         "settings=",
+			Method:        http.MethodGet,
+			StatusCode:    http.StatusOK,
+			ContentSource: "request",
+			OccurredAt:    now.Add(-2 * time.Minute),
+			Duration:      95 * time.Millisecond,
+			UserAgent:     "Mozilla/5.0 Chrome/124.0.0.0 Safari/537.36",
+			VisitorID:     "visitor-admin",
+			IsAdmin:       true,
+			IsController:  true,
+		},
+	}
+
+	report := buildAnalyticsReportFromEvents(events, now)
+	if report.TotalRequests != 6 {
+		t.Fatalf("total requests = %d, want 6", report.TotalRequests)
+	}
+	if report.PageViews != 4 {
+		t.Fatalf("page views = %d, want 4", report.PageViews)
+	}
+	if report.UniqueVisitors != 4 {
+		t.Fatalf("unique visitors = %d, want 4", report.UniqueVisitors)
+	}
+	if report.Sessions != 3 {
+		t.Fatalf("sessions = %d, want 3", report.Sessions)
+	}
+	if report.BounceRate < 66.6 || report.BounceRate > 66.7 {
+		t.Fatalf("bounce rate = %.1f, want about 66.7", report.BounceRate)
+	}
+	if report.ErrorCount != 1 {
+		t.Fatalf("errors = %d, want 1", report.ErrorCount)
+	}
+	if report.AdminRequests != 1 {
+		t.Fatalf("admin requests = %d, want 1", report.AdminRequests)
+	}
+	if report.StaticRequests != 1 {
+		t.Fatalf("static requests = %d, want 1", report.StaticRequests)
+	}
+	assertAnalyticsRow(t, report.TopPages, "/", 1)
+	assertAnalyticsRow(t, report.TopPages, "/pricing", 1)
+	assertAnalyticsRow(t, report.TopPages, "/docs", 1)
+	assertAnalyticsRow(t, report.TopPages, "/missing", 1)
+	assertAnalyticsRow(t, report.TrafficSources, "organic search", 1)
+	assertAnalyticsRow(t, report.TrafficSources, "social", 1)
+	assertAnalyticsRow(t, report.TrafficSources, "direct", 2)
+	assertAnalyticsRow(t, report.Devices, "desktop", 3)
+	assertAnalyticsRow(t, report.Devices, "mobile", 1)
+	assertAnalyticsRow(t, report.StatusCodes, "404", 1)
+	assertAnalyticsRow(t, report.TopAssets, "/p/logo.png", 1)
+	assertAnalyticsRow(t, report.ErrorPaths, "/missing 404", 1)
+}
+
+func TestAnalyticsPageRequiresAdminAndRendersPreparedReport(t *testing.T) {
+	application, rawDB := newTestApplication(t)
+	_, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "admin@example.com", "old")
+	if err != nil {
+		t.Fatalf("insert user: %v", err)
+	}
+	report := analyticsPreparedReport{
+		GeneratedAt:    time.Date(2026, 5, 10, 12, 0, 0, 0, time.UTC).Format(time.RFC3339),
+		PeriodStart:    time.Date(2026, 5, 10, 11, 0, 0, 0, time.UTC).Format(time.RFC3339),
+		PeriodEnd:      time.Date(2026, 5, 10, 12, 0, 0, 0, time.UTC).Format(time.RFC3339),
+		TotalRequests:  3,
+		PageViews:      2,
+		UniqueVisitors: 1,
+		Sessions:       1,
+		TopPages:       []analyticsCountRow{{Label: "/docs", Count: 2}},
+		TrafficSources: []analyticsCountRow{{Label: "direct", Count: 2}},
+	}
+	if err := application.saveAnalyticsReport(context.Background(), "localhost", report); err != nil {
+		t.Fatalf("save analytics report: %v", err)
+	}
+
+	guestRequest := httptest.NewRequest(http.MethodGet, "http://localhost:8080/docs?analytics", nil)
+	guestResponse := httptest.NewRecorder()
+	application.route(guestResponse, guestRequest)
+	if guestResponse.Code != http.StatusFound {
+		t.Fatalf("guest status = %d, want %d", guestResponse.Code, http.StatusFound)
+	}
+	if !strings.Contains(guestResponse.Header().Get("Location"), "login") {
+		t.Fatalf("guest redirect missing login: %q", guestResponse.Header().Get("Location"))
+	}
+
+	adminRequest := httptest.NewRequest(http.MethodGet, "http://localhost:8080/docs?analytics", nil)
+	adminRequest.Header.Set("Accept-Language", "en")
+	adminRequest.AddCookie(newAdminSessionCookie(t, application, "admin@example.com"))
+	adminResponse := httptest.NewRecorder()
+	application.route(adminResponse, adminRequest)
+	if adminResponse.Code != http.StatusOK {
+		t.Fatalf("admin status = %d, body=%q", adminResponse.Code, adminResponse.Body.String())
+	}
+	body := adminResponse.Body.String()
+	for _, expectedFragment := range []string{"Analytics", "Total requests", "/docs", "Direct", `href="/docs"`} {
+		if !strings.Contains(body, expectedFragment) {
+			t.Fatalf("analytics page missing %q in %s", expectedFragment, body)
+		}
+	}
+}
+
+func assertAnalyticsRow(t *testing.T, rows []analyticsCountRow, label string, count int) {
+	t.Helper()
+	for _, row := range rows {
+		if row.Label == label {
+			if row.Count != count {
+				t.Fatalf("row %q count = %d, want %d", label, row.Count, count)
+			}
+			return
+		}
+	}
+	t.Fatalf("missing analytics row %q in %#v", label, rows)
 }
 
 func TestDomainStorageUsageRebuildsFromActualDiskUsage(t *testing.T) {

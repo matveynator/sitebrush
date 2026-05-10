@@ -64,6 +64,91 @@ type App struct {
 	nativeFileDialog bool
 	grabTracker      *grabProgressTracker
 	publishTracker   *publishProgressTracker
+	analyticsEvents  chan siteAnalyticsEvent
+}
+
+type siteAnalyticsEvent struct {
+	Domain         string
+	Path           string
+	Query          string
+	Method         string
+	StatusCode     int
+	ContentSource  string
+	OccurredAt     time.Time
+	Duration       time.Duration
+	ClientIP       string
+	RemoteAddress  string
+	UserAgent      string
+	Referer        string
+	AcceptLanguage string
+	VisitorID      string
+	IsAdmin        bool
+	IsAsset        bool
+	IsController   bool
+}
+
+type analyticsPreparedReport struct {
+	GeneratedAt       string              `json:"generated_at"`
+	PeriodStart       string              `json:"period_start"`
+	PeriodEnd         string              `json:"period_end"`
+	TotalRequests     int                 `json:"total_requests"`
+	PageViews         int                 `json:"page_views"`
+	UniqueVisitors    int                 `json:"unique_visitors"`
+	Sessions          int                 `json:"sessions"`
+	BounceRate        float64             `json:"bounce_rate"`
+	AverageDurationMS int64               `json:"average_duration_ms"`
+	ErrorCount        int                 `json:"error_count"`
+	AdminRequests     int                 `json:"admin_requests"`
+	StaticRequests    int                 `json:"static_requests"`
+	TopPages          []analyticsCountRow `json:"top_pages"`
+	EntryPages        []analyticsCountRow `json:"entry_pages"`
+	ExitPages         []analyticsCountRow `json:"exit_pages"`
+	TrafficSources    []analyticsCountRow `json:"traffic_sources"`
+	Referrers         []analyticsCountRow `json:"referrers"`
+	Devices           []analyticsCountRow `json:"devices"`
+	Browsers          []analyticsCountRow `json:"browsers"`
+	OperatingSystems  []analyticsCountRow `json:"operating_systems"`
+	Languages         []analyticsCountRow `json:"languages"`
+	StatusCodes       []analyticsCountRow `json:"status_codes"`
+	HourlyActivity    []analyticsCountRow `json:"hourly_activity"`
+	DailyActivity     []analyticsCountRow `json:"daily_activity"`
+	SlowPages         []analyticsCountRow `json:"slow_pages"`
+	TopAssets         []analyticsCountRow `json:"top_assets"`
+	ErrorPaths        []analyticsCountRow `json:"error_paths"`
+	ContentSources    []analyticsCountRow `json:"content_sources"`
+}
+
+type analyticsCountRow struct {
+	Label  string `json:"label"`
+	Count  int    `json:"count"`
+	Value  string `json:"value,omitempty"`
+	Detail string `json:"detail,omitempty"`
+}
+
+type analyticsPageData struct {
+	GeneratedAt string
+	Period      string
+	Cards       []analyticsMetricCard
+	Sections    []analyticsReportSection
+}
+
+type analyticsMetricCard struct {
+	Label string
+	Value string
+	Hint  string
+}
+
+type analyticsReportSection struct {
+	Title       string
+	Description string
+	Rows        []analyticsReportRow
+}
+
+type analyticsReportRow struct {
+	Label   string
+	Value   string
+	Percent string
+	Detail  string
 }
 
 type grabProgressEvent struct {
@@ -327,6 +412,641 @@ func accessLogMiddleware(next http.Handler) http.Handler {
 	})
 }
 
+func (a *App) analyticsMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		startedAt := time.Now()
+		writer := &statusCapturingResponseWriter{ResponseWriter: w, statusCode: http.StatusOK}
+		next.ServeHTTP(writer, r)
+		if !shouldRecordAnalyticsRequest(r) {
+			return
+		}
+		contentSource := writer.Header().Get("X-Sitebrush-Source")
+		if contentSource == "" && isLikelyStaticAssetPath(r.URL.Path) {
+			contentSource = "static"
+		}
+		if contentSource == "" {
+			contentSource = "request"
+		}
+		event := siteAnalyticsEvent{
+			Domain:         a.siteDomain(r.Context(), r),
+			Path:           cleanPath(r.URL.Path),
+			Query:          r.URL.RawQuery,
+			Method:         r.Method,
+			StatusCode:     writer.statusCode,
+			ContentSource:  contentSource,
+			OccurredAt:     startedAt.UTC(),
+			Duration:       time.Since(startedAt),
+			ClientIP:       clientIPAddress(r),
+			RemoteAddress:  r.RemoteAddr,
+			UserAgent:      r.UserAgent(),
+			Referer:        r.Referer(),
+			AcceptLanguage: r.Header.Get("Accept-Language"),
+			IsAdmin:        a.isAdminRequest(r),
+			IsAsset:        isLikelyStaticAssetPath(r.URL.Path),
+			IsController:   isSitebrushControllerQuery(r.URL.Query()),
+		}
+		event.VisitorID = analyticsVisitorID(event.ClientIP, event.UserAgent)
+		a.enqueueAnalyticsEvent(event)
+	})
+}
+
+func shouldRecordAnalyticsRequest(r *http.Request) bool {
+	if r == nil || r.URL == nil {
+		return false
+	}
+	query := r.URL.Query()
+	for _, skippedFlag := range []string{"analytics", "grab_events", "grab_ws", "publish_events", "captcha"} {
+		if _, found := query[skippedFlag]; found {
+			return false
+		}
+	}
+	return true
+}
+
+func isSitebrushControllerQuery(query url.Values) bool {
+	for _, controllerFlag := range []string{
+		"save", "grab_preview", "grab_events", "grab_ws", "revision_restore", "revision_delete", "revision_toggle",
+		"tree", "native_pick_files", "native_save_backup", "edit", "visual", "text", "editraw", "settings", "properties",
+		"backup_download", "backup_import", "profile", "freeze", "publish", "publish_events", "publish_preview", "files",
+		"revisions", "login", "register", "grab", "recover", "captcha", "analytics",
+	} {
+		if _, found := query[controllerFlag]; found {
+			return true
+		}
+	}
+	if strings.TrimSpace(query.Get("delete")) != "" {
+		return true
+	}
+	return false
+}
+
+func analyticsVisitorID(clientIP, userAgent string) string {
+	sum := sha256.Sum256([]byte(strings.TrimSpace(clientIP) + "\n" + strings.TrimSpace(userAgent)))
+	return hex.EncodeToString(sum[:12])
+}
+
+func (a *App) enqueueAnalyticsEvent(event siteAnalyticsEvent) {
+	if a.analyticsEvents == nil {
+		return
+	}
+	select {
+	case a.analyticsEvents <- event:
+	default:
+		log.Printf("analytics event buffer is full; dropping event path=%s", event.Path)
+	}
+}
+
+func (a *App) startAnalyticsWorkers(ctx context.Context) {
+	if a.analyticsEvents == nil {
+		return
+	}
+	go a.runAnalyticsEventWriter(ctx)
+	go a.runAnalyticsReportBuilder(ctx)
+}
+
+func (a *App) runAnalyticsEventWriter(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case event := <-a.analyticsEvents:
+			if err := a.insertAnalyticsEvent(ctx, event); err != nil {
+				log.Printf("analytics event insert failed: %v", err)
+			}
+		}
+	}
+}
+
+func (a *App) runAnalyticsReportBuilder(ctx context.Context) {
+	a.rebuildAnalyticsReports(ctx)
+	ticker := time.NewTicker(5 * time.Minute)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			a.rebuildAnalyticsReports(ctx)
+		}
+	}
+}
+
+func (a *App) insertAnalyticsEvent(ctx context.Context, event siteAnalyticsEvent) error {
+	if strings.TrimSpace(event.Domain) == "" {
+		event.Domain = "localhost"
+	}
+	if strings.TrimSpace(event.Path) == "" {
+		event.Path = "/"
+	}
+	_, err := a.db.ExecContext(ctx, `INSERT INTO analytics_events(domain,path,query,method,status_code,content_source,occurred_at,duration_ms,client_ip,remote_addr,user_agent,referer,accept_language,visitor_id,is_admin,is_asset,is_controller) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		event.Domain,
+		event.Path,
+		event.Query,
+		event.Method,
+		event.StatusCode,
+		event.ContentSource,
+		event.OccurredAt.Format(time.RFC3339Nano),
+		event.Duration.Milliseconds(),
+		event.ClientIP,
+		event.RemoteAddress,
+		event.UserAgent,
+		event.Referer,
+		event.AcceptLanguage,
+		event.VisitorID,
+		boolToInt(event.IsAdmin),
+		boolToInt(event.IsAsset),
+		boolToInt(event.IsController),
+	)
+	return err
+}
+
+func (a *App) rebuildAnalyticsReports(ctx context.Context) {
+	for _, domain := range a.analyticsDomains(ctx) {
+		report, err := a.buildAnalyticsReport(ctx, domain)
+		if err != nil {
+			log.Printf("analytics report build failed domain=%s: %v", domain, err)
+			continue
+		}
+		if err := a.saveAnalyticsReport(ctx, domain, report); err != nil {
+			log.Printf("analytics report save failed domain=%s: %v", domain, err)
+		}
+	}
+}
+
+func (a *App) analyticsDomains(ctx context.Context) []string {
+	rows, err := a.db.QueryContext(ctx, `SELECT domain FROM analytics_events GROUP BY domain UNION SELECT domain FROM users GROUP BY domain UNION SELECT domain FROM pages GROUP BY domain UNION SELECT domain FROM published_pages GROUP BY domain ORDER BY domain`)
+	if err != nil {
+		return []string{}
+	}
+	defer rows.Close()
+	domains := make([]string, 0, 8)
+	for rows.Next() {
+		var domain string
+		if scanErr := rows.Scan(&domain); scanErr != nil {
+			continue
+		}
+		domain = strings.TrimSpace(domain)
+		if domain != "" {
+			domains = append(domains, domain)
+		}
+	}
+	return domains
+}
+
+func (a *App) buildAnalyticsReport(ctx context.Context, domain string) (analyticsPreparedReport, error) {
+	rows, err := a.db.QueryContext(ctx, `SELECT path,query,method,status_code,content_source,occurred_at,duration_ms,client_ip,user_agent,referer,accept_language,visitor_id,is_admin,is_asset,is_controller FROM analytics_events WHERE domain=? ORDER BY occurred_at ASC`, domain)
+	if err != nil {
+		return analyticsPreparedReport{}, err
+	}
+	defer rows.Close()
+	events := make([]siteAnalyticsEvent, 0, 512)
+	for rows.Next() {
+		var event siteAnalyticsEvent
+		var occurredAt string
+		var durationMS int64
+		var isAdmin, isAsset, isController int
+		if scanErr := rows.Scan(&event.Path, &event.Query, &event.Method, &event.StatusCode, &event.ContentSource, &occurredAt, &durationMS, &event.ClientIP, &event.UserAgent, &event.Referer, &event.AcceptLanguage, &event.VisitorID, &isAdmin, &isAsset, &isController); scanErr != nil {
+			continue
+		}
+		event.Domain = domain
+		event.OccurredAt = parseAnalyticsTime(occurredAt)
+		event.Duration = time.Duration(durationMS) * time.Millisecond
+		event.IsAdmin = isAdmin == 1
+		event.IsAsset = isAsset == 1
+		event.IsController = isController == 1
+		events = append(events, event)
+	}
+	if err := rows.Err(); err != nil {
+		return analyticsPreparedReport{}, err
+	}
+	return buildAnalyticsReportFromEvents(events, time.Now().UTC()), nil
+}
+
+func buildAnalyticsReportFromEvents(events []siteAnalyticsEvent, generatedAt time.Time) analyticsPreparedReport {
+	report := analyticsPreparedReport{GeneratedAt: generatedAt.Format(time.RFC3339), PeriodStart: generatedAt.Format(time.RFC3339), PeriodEnd: generatedAt.Format(time.RFC3339)}
+	if len(events) == 0 {
+		return report
+	}
+	report.PeriodStart = events[0].OccurredAt.Format(time.RFC3339)
+	report.PeriodEnd = events[len(events)-1].OccurredAt.Format(time.RFC3339)
+	report.TotalRequests = len(events)
+	visitorSet := make(map[string]struct{})
+	topPages := make(map[string]int)
+	trafficSources := make(map[string]int)
+	referrers := make(map[string]int)
+	devices := make(map[string]int)
+	browsers := make(map[string]int)
+	operatingSystems := make(map[string]int)
+	languages := make(map[string]int)
+	statusCodes := make(map[string]int)
+	hourlyActivity := make(map[string]int)
+	dailyActivity := make(map[string]int)
+	assets := make(map[string]int)
+	errorPaths := make(map[string]int)
+	contentSources := make(map[string]int)
+	slowPageTotalDuration := make(map[string]int64)
+	slowPageCounts := make(map[string]int)
+	sessionEvents := make(map[string][]siteAnalyticsEvent)
+	var totalDuration int64
+	for _, event := range events {
+		visitorSet[event.VisitorID] = struct{}{}
+		totalDuration += event.Duration.Milliseconds()
+		contentSources[analyticsContentSourceLabel(event.ContentSource)]++
+		statusCodes[strconv.Itoa(event.StatusCode)]++
+		hourlyActivity[event.OccurredAt.Format("15:00")]++
+		dailyActivity[event.OccurredAt.Format("2006-01-02")]++
+		if event.IsAdmin {
+			report.AdminRequests++
+		}
+		if event.ContentSource == "static" || event.IsAsset {
+			report.StaticRequests++
+			assets[event.Path]++
+		}
+		if event.StatusCode >= 400 {
+			report.ErrorCount++
+			errorPaths[event.Path+" "+strconv.Itoa(event.StatusCode)]++
+		}
+		if event.IsController || event.IsAsset || event.Method != http.MethodGet {
+			continue
+		}
+		report.PageViews++
+		topPages[event.Path]++
+		trafficSources[classifyAnalyticsTrafficSource(event.Referer)]++
+		if host := analyticsRefererHost(event.Referer); host != "" {
+			referrers[host]++
+		}
+		devices[analyticsDeviceClass(event.UserAgent)]++
+		browsers[analyticsBrowserName(event.UserAgent)]++
+		operatingSystems[analyticsOSName(event.UserAgent)]++
+		languages[analyticsLanguageLabel(event.AcceptLanguage)]++
+		slowPageTotalDuration[event.Path] += event.Duration.Milliseconds()
+		slowPageCounts[event.Path]++
+		sessionEvents[event.VisitorID] = append(sessionEvents[event.VisitorID], event)
+	}
+	report.UniqueVisitors = len(visitorSet)
+	if len(events) > 0 {
+		report.AverageDurationMS = totalDuration / int64(len(events))
+	}
+	entryPages, exitPages, sessionCount, bouncedSessions := analyticsSessionPageStats(sessionEvents)
+	report.Sessions = sessionCount
+	if sessionCount > 0 {
+		report.BounceRate = float64(bouncedSessions) / float64(sessionCount) * 100
+	}
+	report.TopPages = sortedAnalyticsRows(topPages, 12, report.PageViews)
+	report.EntryPages = sortedAnalyticsRows(entryPages, 10, sessionCount)
+	report.ExitPages = sortedAnalyticsRows(exitPages, 10, sessionCount)
+	report.TrafficSources = sortedAnalyticsRows(trafficSources, 10, report.PageViews)
+	report.Referrers = sortedAnalyticsRows(referrers, 10, report.PageViews)
+	report.Devices = sortedAnalyticsRows(devices, 10, report.PageViews)
+	report.Browsers = sortedAnalyticsRows(browsers, 10, report.PageViews)
+	report.OperatingSystems = sortedAnalyticsRows(operatingSystems, 10, report.PageViews)
+	report.Languages = sortedAnalyticsRows(languages, 10, report.PageViews)
+	report.StatusCodes = sortedAnalyticsRows(statusCodes, 10, report.TotalRequests)
+	report.HourlyActivity = sortedAnalyticsRows(hourlyActivity, 24, report.TotalRequests)
+	report.DailyActivity = sortedAnalyticsRows(dailyActivity, 14, report.TotalRequests)
+	report.TopAssets = sortedAnalyticsRows(assets, 10, report.StaticRequests)
+	report.ErrorPaths = sortedAnalyticsRows(errorPaths, 10, report.ErrorCount)
+	report.ContentSources = sortedAnalyticsRows(contentSources, 10, report.TotalRequests)
+	report.SlowPages = analyticsSlowPageRows(slowPageTotalDuration, slowPageCounts, 10)
+	return report
+}
+
+func analyticsSessionPageStats(eventsByVisitor map[string][]siteAnalyticsEvent) (map[string]int, map[string]int, int, int) {
+	entryPages := make(map[string]int)
+	exitPages := make(map[string]int)
+	sessionCount := 0
+	bouncedSessions := 0
+	for _, visitorEvents := range eventsByVisitor {
+		sort.Slice(visitorEvents, func(i, j int) bool { return visitorEvents[i].OccurredAt.Before(visitorEvents[j].OccurredAt) })
+		sessionPages := make([]string, 0, 8)
+		var previousEvent time.Time
+		flushSession := func() {
+			if len(sessionPages) == 0 {
+				return
+			}
+			sessionCount++
+			entryPages[sessionPages[0]]++
+			exitPages[sessionPages[len(sessionPages)-1]]++
+			if len(sessionPages) == 1 {
+				bouncedSessions++
+			}
+			sessionPages = sessionPages[:0]
+		}
+		for _, event := range visitorEvents {
+			if !previousEvent.IsZero() && event.OccurredAt.Sub(previousEvent) > 30*time.Minute {
+				flushSession()
+			}
+			sessionPages = append(sessionPages, event.Path)
+			previousEvent = event.OccurredAt
+		}
+		flushSession()
+	}
+	return entryPages, exitPages, sessionCount, bouncedSessions
+}
+
+func sortedAnalyticsRows(values map[string]int, limit int, total int) []analyticsCountRow {
+	rows := make([]analyticsCountRow, 0, len(values))
+	for label, count := range values {
+		if strings.TrimSpace(label) == "" || count == 0 {
+			continue
+		}
+		rows = append(rows, analyticsCountRow{Label: label, Count: count, Value: analyticsPercent(count, total)})
+	}
+	sort.Slice(rows, func(i, j int) bool {
+		if rows[i].Count == rows[j].Count {
+			return rows[i].Label < rows[j].Label
+		}
+		return rows[i].Count > rows[j].Count
+	})
+	if limit > 0 && len(rows) > limit {
+		return rows[:limit]
+	}
+	return rows
+}
+
+func analyticsSlowPageRows(totalDuration map[string]int64, counts map[string]int, limit int) []analyticsCountRow {
+	rows := make([]analyticsCountRow, 0, len(totalDuration))
+	for pagePath, duration := range totalDuration {
+		count := counts[pagePath]
+		if count == 0 {
+			continue
+		}
+		rows = append(rows, analyticsCountRow{Label: pagePath, Count: int(duration / int64(count)), Value: formatDurationMS(duration / int64(count)), Detail: strconv.Itoa(count)})
+	}
+	sort.Slice(rows, func(i, j int) bool { return rows[i].Count > rows[j].Count })
+	if limit > 0 && len(rows) > limit {
+		return rows[:limit]
+	}
+	return rows
+}
+
+func (a *App) saveAnalyticsReport(ctx context.Context, domain string, report analyticsPreparedReport) error {
+	reportBytes, err := json.Marshal(report)
+	if err != nil {
+		return err
+	}
+	_, err = a.db.ExecContext(ctx, `INSERT INTO analytics_reports(domain,generated_at,period_start,period_end,event_count,report_json) VALUES(?,?,?,?,?,?) ON CONFLICT(domain) DO UPDATE SET generated_at=excluded.generated_at,period_start=excluded.period_start,period_end=excluded.period_end,event_count=excluded.event_count,report_json=excluded.report_json`,
+		domain, report.GeneratedAt, report.PeriodStart, report.PeriodEnd, report.TotalRequests, string(reportBytes))
+	return err
+}
+
+func (a *App) loadAnalyticsReport(ctx context.Context, domain string) (analyticsPreparedReport, bool) {
+	var reportJSON string
+	err := a.db.QueryRowContext(ctx, `SELECT report_json FROM analytics_reports WHERE domain=?`, domain).Scan(&reportJSON)
+	if err != nil || strings.TrimSpace(reportJSON) == "" {
+		return analyticsPreparedReport{}, false
+	}
+	var report analyticsPreparedReport
+	if json.Unmarshal([]byte(reportJSON), &report) != nil {
+		return analyticsPreparedReport{}, false
+	}
+	return report, true
+}
+
+func parseAnalyticsTime(rawTime string) time.Time {
+	parsedTime, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(rawTime))
+	if err == nil {
+		return parsedTime
+	}
+	parsedTime, err = time.Parse(time.RFC3339, strings.TrimSpace(rawTime))
+	if err == nil {
+		return parsedTime
+	}
+	return time.Time{}
+}
+
+func analyticsContentSourceLabel(contentSource string) string {
+	switch strings.TrimSpace(contentSource) {
+	case "dynamic":
+		return "dynamic"
+	case "static":
+		return "static"
+	default:
+		return "other"
+	}
+}
+
+func classifyAnalyticsTrafficSource(rawReferer string) string {
+	host := analyticsRefererHost(rawReferer)
+	if host == "" {
+		return "direct"
+	}
+	searchHosts := []string{"google.", "bing.", "yahoo.", "duckduckgo.", "yandex.", "baidu."}
+	for _, searchHost := range searchHosts {
+		if strings.Contains(host, searchHost) {
+			return "organic search"
+		}
+	}
+	socialHosts := []string{"facebook.", "instagram.", "t.co", "twitter.", "x.com", "linkedin.", "vk.", "tiktok.", "reddit."}
+	for _, socialHost := range socialHosts {
+		if strings.Contains(host, socialHost) {
+			return "social"
+		}
+	}
+	return "referral"
+}
+
+func analyticsRefererHost(rawReferer string) string {
+	parsedURL, err := url.Parse(strings.TrimSpace(rawReferer))
+	if err != nil {
+		return ""
+	}
+	return strings.ToLower(strings.TrimPrefix(parsedURL.Hostname(), "www."))
+}
+
+func analyticsDeviceClass(userAgent string) string {
+	loweredAgent := strings.ToLower(userAgent)
+	switch {
+	case strings.Contains(loweredAgent, "bot") || strings.Contains(loweredAgent, "spider") || strings.Contains(loweredAgent, "crawler"):
+		return "bot"
+	case strings.Contains(loweredAgent, "ipad") || strings.Contains(loweredAgent, "tablet"):
+		return "tablet"
+	case strings.Contains(loweredAgent, "mobile") || strings.Contains(loweredAgent, "android") || strings.Contains(loweredAgent, "iphone"):
+		return "mobile"
+	default:
+		return "desktop"
+	}
+}
+
+func analyticsBrowserName(userAgent string) string {
+	loweredAgent := strings.ToLower(userAgent)
+	switch {
+	case strings.Contains(loweredAgent, "edg/"):
+		return "Edge"
+	case strings.Contains(loweredAgent, "opr/") || strings.Contains(loweredAgent, "opera"):
+		return "Opera"
+	case strings.Contains(loweredAgent, "firefox/"):
+		return "Firefox"
+	case strings.Contains(loweredAgent, "chrome/") || strings.Contains(loweredAgent, "crios/"):
+		return "Chrome"
+	case strings.Contains(loweredAgent, "safari/"):
+		return "Safari"
+	case strings.Contains(loweredAgent, "bot") || strings.Contains(loweredAgent, "spider") || strings.Contains(loweredAgent, "crawler"):
+		return "Bot"
+	default:
+		return "Other"
+	}
+}
+
+func analyticsOSName(userAgent string) string {
+	loweredAgent := strings.ToLower(userAgent)
+	switch {
+	case strings.Contains(loweredAgent, "windows"):
+		return "Windows"
+	case strings.Contains(loweredAgent, "mac os") || strings.Contains(loweredAgent, "macintosh"):
+		return "macOS"
+	case strings.Contains(loweredAgent, "iphone") || strings.Contains(loweredAgent, "ipad") || strings.Contains(loweredAgent, "ios"):
+		return "iOS"
+	case strings.Contains(loweredAgent, "android"):
+		return "Android"
+	case strings.Contains(loweredAgent, "linux"):
+		return "Linux"
+	default:
+		return "Other"
+	}
+}
+
+func analyticsLanguageLabel(acceptLanguageHeader string) string {
+	languageCode := preferredLanguageCode(acceptLanguageHeader)
+	if languageCode == "" {
+		return "unknown"
+	}
+	return languageCode
+}
+
+func analyticsPercent(count, total int) string {
+	if total <= 0 {
+		return "0%"
+	}
+	return fmt.Sprintf("%.1f%%", float64(count)/float64(total)*100)
+}
+
+func formatDurationMS(milliseconds int64) string {
+	if milliseconds < 1000 {
+		return fmt.Sprintf("%d ms", milliseconds)
+	}
+	return fmt.Sprintf("%.2f s", float64(milliseconds)/1000)
+}
+
+func (a *App) analyticsPage(w http.ResponseWriter, r *http.Request) {
+	if !a.isAdminRequest(r) {
+		if !a.hasAdmin(r.Context(), a.siteDomain(r.Context(), r)) {
+			http.Redirect(w, r, r.URL.Path+"?register", http.StatusFound)
+			return
+		}
+		http.Redirect(w, r, loginURLForRequest(r), http.StatusFound)
+		return
+	}
+	domain := a.siteDomain(r.Context(), r)
+	report, found := a.loadAnalyticsReport(r.Context(), domain)
+	if !found {
+		var err error
+		report, err = a.buildAnalyticsReport(r.Context(), domain)
+		if err == nil {
+			_ = a.saveAnalyticsReport(r.Context(), domain, report)
+			found = true
+		}
+	}
+	if !found {
+		report = analyticsPreparedReport{GeneratedAt: time.Now().UTC().Format(time.RFC3339)}
+	}
+	a.render(w, r, "analytics.html", map[string]any{
+		"ReturnPath": requestedReturnPath(r),
+		"Report":     analyticsReportView(report, translationsForRequest(r)),
+	})
+}
+
+func analyticsReportView(report analyticsPreparedReport, translations map[string]string) analyticsPageData {
+	view := analyticsPageData{
+		GeneratedAt: formatAnalyticsTime(report.GeneratedAt),
+		Period:      formatAnalyticsTime(report.PeriodStart) + " - " + formatAnalyticsTime(report.PeriodEnd),
+	}
+	if strings.TrimSpace(report.PeriodStart) == "" || report.TotalRequests == 0 {
+		view.Period = translationOrDefault(translations, "analytics_no_data", "No analytics data yet.")
+	}
+	view.Cards = []analyticsMetricCard{
+		{Label: translationOrDefault(translations, "analytics_total_requests", "Total requests"), Value: strconv.Itoa(report.TotalRequests), Hint: translationOrDefault(translations, "analytics_total_requests_hint", "All logged dynamic, static, and controller requests.")},
+		{Label: translationOrDefault(translations, "analytics_page_views", "Page views"), Value: strconv.Itoa(report.PageViews), Hint: translationOrDefault(translations, "analytics_page_views_hint", "GET page requests excluding assets and Sitebrush controllers.")},
+		{Label: translationOrDefault(translations, "analytics_unique_visitors", "Unique visitors"), Value: strconv.Itoa(report.UniqueVisitors), Hint: translationOrDefault(translations, "analytics_unique_visitors_hint", "Estimated from IP and browser signature.")},
+		{Label: translationOrDefault(translations, "analytics_sessions", "Sessions"), Value: strconv.Itoa(report.Sessions), Hint: translationOrDefault(translations, "analytics_sessions_hint", "Visits split after 30 minutes of inactivity.")},
+		{Label: translationOrDefault(translations, "analytics_bounce_rate", "Bounce rate"), Value: fmt.Sprintf("%.1f%%", report.BounceRate), Hint: translationOrDefault(translations, "analytics_bounce_rate_hint", "Sessions with one page view.")},
+		{Label: translationOrDefault(translations, "analytics_avg_duration", "Average response time"), Value: formatDurationMS(report.AverageDurationMS), Hint: translationOrDefault(translations, "analytics_avg_duration_hint", "Average server response time across logged requests.")},
+		{Label: translationOrDefault(translations, "analytics_errors", "Errors"), Value: strconv.Itoa(report.ErrorCount), Hint: translationOrDefault(translations, "analytics_errors_hint", "Requests with HTTP status 400 or higher.")},
+		{Label: translationOrDefault(translations, "analytics_admin_traffic", "Admin traffic"), Value: strconv.Itoa(report.AdminRequests), Hint: translationOrDefault(translations, "analytics_admin_traffic_hint", "Requests made while logged in as an administrator.")},
+	}
+	view.Sections = []analyticsReportSection{
+		analyticsSectionView("analytics_section_top_pages", "analytics_section_top_pages_hint", report.TopPages, report.PageViews, "path", translations),
+		analyticsSectionView("analytics_section_entry_pages", "analytics_section_entry_pages_hint", report.EntryPages, report.Sessions, "path", translations),
+		analyticsSectionView("analytics_section_exit_pages", "analytics_section_exit_pages_hint", report.ExitPages, report.Sessions, "path", translations),
+		analyticsSectionView("analytics_section_traffic_sources", "analytics_section_traffic_sources_hint", report.TrafficSources, report.PageViews, "traffic", translations),
+		analyticsSectionView("analytics_section_referrers", "analytics_section_referrers_hint", report.Referrers, report.PageViews, "plain", translations),
+		analyticsSectionView("analytics_section_devices", "analytics_section_devices_hint", report.Devices, report.PageViews, "device", translations),
+		analyticsSectionView("analytics_section_browsers", "analytics_section_browsers_hint", report.Browsers, report.PageViews, "plain", translations),
+		analyticsSectionView("analytics_section_os", "analytics_section_os_hint", report.OperatingSystems, report.PageViews, "plain", translations),
+		analyticsSectionView("analytics_section_languages", "analytics_section_languages_hint", report.Languages, report.PageViews, "language", translations),
+		analyticsSectionView("analytics_section_status_codes", "analytics_section_status_codes_hint", report.StatusCodes, report.TotalRequests, "plain", translations),
+		analyticsSectionView("analytics_section_hourly", "analytics_section_hourly_hint", report.HourlyActivity, report.TotalRequests, "plain", translations),
+		analyticsSectionView("analytics_section_daily", "analytics_section_daily_hint", report.DailyActivity, report.TotalRequests, "plain", translations),
+		analyticsSectionView("analytics_section_slow_pages", "analytics_section_slow_pages_hint", report.SlowPages, 0, "duration", translations),
+		analyticsSectionView("analytics_section_assets", "analytics_section_assets_hint", report.TopAssets, report.StaticRequests, "path", translations),
+		analyticsSectionView("analytics_section_errors", "analytics_section_errors_hint", report.ErrorPaths, report.ErrorCount, "path", translations),
+		analyticsSectionView("analytics_section_content_sources", "analytics_section_content_sources_hint", report.ContentSources, report.TotalRequests, "content", translations),
+	}
+	return view
+}
+
+func analyticsSectionView(titleKey, descriptionKey string, sourceRows []analyticsCountRow, total int, labelKind string, translations map[string]string) analyticsReportSection {
+	section := analyticsReportSection{
+		Title:       translationOrDefault(translations, titleKey, titleKey),
+		Description: translationOrDefault(translations, descriptionKey, ""),
+		Rows:        make([]analyticsReportRow, 0, len(sourceRows)),
+	}
+	for _, sourceRow := range sourceRows {
+		value := strconv.Itoa(sourceRow.Count)
+		detail := sourceRow.Detail
+		if labelKind == "duration" {
+			value = sourceRow.Value
+			if detail != "" {
+				detail = detail + " " + translationOrDefault(translations, "analytics_views_suffix", "views")
+			}
+		}
+		section.Rows = append(section.Rows, analyticsReportRow{
+			Label:   localizeAnalyticsReportLabel(labelKind, sourceRow.Label, translations),
+			Value:   value,
+			Percent: analyticsPercent(sourceRow.Count, total),
+			Detail:  detail,
+		})
+	}
+	return section
+}
+
+func localizeAnalyticsReportLabel(labelKind, label string, translations map[string]string) string {
+	keyPrefix := ""
+	switch labelKind {
+	case "traffic":
+		keyPrefix = "analytics_source_"
+	case "device":
+		keyPrefix = "analytics_device_"
+	case "content":
+		keyPrefix = "analytics_content_"
+	case "language":
+		keyPrefix = "analytics_language_"
+	}
+	if keyPrefix == "" {
+		return label
+	}
+	key := keyPrefix + strings.NewReplacer(" ", "_", "-", "_").Replace(strings.ToLower(label))
+	return translationOrDefault(translations, key, label)
+}
+
+func formatAnalyticsTime(rawTime string) string {
+	parsedTime := parseAnalyticsTime(rawTime)
+	if parsedTime.IsZero() {
+		return ""
+	}
+	return parsedTime.Local().Format("2006-01-02 15:04:05")
+}
+
 func (a *App) authAbuseMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		next.ServeHTTP(w, r)
@@ -467,10 +1187,11 @@ func main() {
 	}
 	defer database.Close()
 
-	application := &App{db: database, storagePath: effectiveStoragePath, nativeFileDialog: desktop.NativeFileDialogSupported(), grabTracker: newGrabProgressTracker(), publishTracker: newPublishProgressTracker()}
+	application := &App{db: database, storagePath: effectiveStoragePath, nativeFileDialog: desktop.NativeFileDialogSupported(), grabTracker: newGrabProgressTracker(), publishTracker: newPublishProgressTracker(), analyticsEvents: make(chan siteAnalyticsEvent, 1024)}
 	if err = application.migrate(context.Background()); err != nil {
 		log.Fatal(err)
 	}
+	application.startAnalyticsWorkers(context.Background())
 
 	router := http.NewServeMux()
 	staticFiles, err := fs.Sub(embeddedWebFiles, "web/static")
@@ -490,7 +1211,7 @@ func main() {
 	address := "localhost:" + strconv.Itoa(listenPort)
 	log.Printf("Sitebrush started on http://%s", address)
 
-	httpHandler := accessLogMiddleware(application.authAbuseMiddleware(router))
+	httpHandler := application.analyticsMiddleware(accessLogMiddleware(application.authAbuseMiddleware(router)))
 	if listenPort != 80 {
 		log.Printf("Let’s Encrypt HTTP-01 checks need public port 80; current HTTP port is %d", listenPort)
 	}
@@ -571,6 +1292,10 @@ func (a *App) migrate(ctx context.Context) error {
 		`CREATE TABLE IF NOT EXISTS domain_backup_tokens(domain TEXT PRIMARY KEY,token TEXT,updated_at TEXT);`,
 		`CREATE TABLE IF NOT EXISTS file_access_rules(domain TEXT,file_name TEXT,access_mode TEXT,token TEXT,expires_at TEXT,single_use_left INTEGER DEFAULT 0,token_use_count INTEGER DEFAULT 0,PRIMARY KEY(domain,file_name));`,
 		`CREATE TABLE IF NOT EXISTS file_metadata(domain TEXT,file_name TEXT,page_path TEXT,size INTEGER,mime_type TEXT,created_at TEXT,updated_at TEXT,source TEXT,download_count INTEGER DEFAULT 0,PRIMARY KEY(domain,file_name));`,
+		`CREATE TABLE IF NOT EXISTS analytics_events(id INTEGER PRIMARY KEY AUTOINCREMENT,domain TEXT,path TEXT,query TEXT,method TEXT,status_code INTEGER,content_source TEXT,occurred_at TEXT,duration_ms INTEGER,client_ip TEXT,remote_addr TEXT,user_agent TEXT,referer TEXT,accept_language TEXT,visitor_id TEXT,is_admin INTEGER DEFAULT 0,is_asset INTEGER DEFAULT 0,is_controller INTEGER DEFAULT 0);`,
+		`CREATE INDEX IF NOT EXISTS idx_analytics_events_domain_time ON analytics_events(domain,occurred_at);`,
+		`CREATE INDEX IF NOT EXISTS idx_analytics_events_visitor ON analytics_events(domain,visitor_id,occurred_at);`,
+		`CREATE TABLE IF NOT EXISTS analytics_reports(domain TEXT PRIMARY KEY,generated_at TEXT,period_start TEXT,period_end TEXT,event_count INTEGER,report_json TEXT);`,
 	}
 	for _, query := range queries {
 		if _, err := a.db.ExecContext(ctx, query); err != nil {
@@ -768,6 +1493,10 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 	}
 	if hasQueryFlag(r, "settings") || hasQueryFlag(r, "properties") {
 		a.domainSettingsPage(w, r)
+		return
+	}
+	if hasQueryFlag(r, "analytics") {
+		a.analyticsPage(w, r)
 		return
 	}
 	if hasQueryFlag(r, "backup_download") {
@@ -3971,6 +4700,7 @@ func buildContextMenuScript(isAdmin bool, isFrozen bool, pagePath, domain string
 	freezeLabel := template.JSEscapeString(translationOrDefault(translations, "menu_freeze", "Freeze"))
 	publishLabel := template.JSEscapeString(translationOrDefault(translations, "menu_publish", "Publish"))
 	settingsLabel := template.JSEscapeString(translationOrDefault(translations, "menu_domain_settings", "Settings"))
+	analyticsLabel := template.JSEscapeString(translationOrDefault(translations, "menu_analytics", "Analytics"))
 	profileLabel := template.JSEscapeString(translationOrDefault(translations, "menu_profile", "Account"))
 	logoutLabel := template.JSEscapeString(translationOrDefault(translations, "menu_logout", "Sign out"))
 	loginLabel := template.JSEscapeString(translationOrDefault(translations, "menu_login", "Sign in"))
@@ -4250,6 +4980,7 @@ func buildContextMenuScript(isAdmin bool, isFrozen bool, pagePath, domain string
       "<li class='SiteBrushContextMenu'><a href='?files' class='SiteBrushContextMenuLink'><img src='/p/static/upload.png' class='SiteBrushMenuIcon' alt=''>" + "` + filesLabel + `" + "</a></li>",
       "<li class='SiteBrushContextMenu'><button type='button' data-sitebrush-action='tree' class='SiteBrushContextMenuLink SiteBrushContextMenuButton'><img src='/p/static/tree.png' class='SiteBrushMenuIcon' alt=''>" + "` + treeLabel + `" + "</button></li>",
       "` + freezeActionEntry + `",
+      "<li class='SiteBrushContextMenu'><a href='?analytics' class='SiteBrushContextMenuLink'><img src='/p/static/analytics.svg' class='SiteBrushMenuIcon' alt=''>" + "` + analyticsLabel + `" + "</a></li>",
       "<li class='SiteBrushContextMenu'><a href='?settings' class='SiteBrushContextMenuLink'><img src='/p/static/settings.png' class='SiteBrushMenuIcon' alt=''>" + "` + settingsLabel + `" + "</a></li>",
       "<li class='SiteBrushContextMenu'><a href='?profile' class='SiteBrushContextMenuLink'><img src='/p/static/profile.png' class='SiteBrushMenuIcon' alt=''>" + "` + profileLabel + `" + "</a></li>",
       "<li class='SiteBrushContextMenu'><a href='?logout' class='SiteBrushContextMenuLink'><img src='/p/static/sign-out.png' class='SiteBrushMenuIcon' alt=''>" + "` + logoutLabel + `" + "</a></li>",
