@@ -59,12 +59,185 @@ const defaultDomainStorageLimitBytes int64 = 10 * 1024 * 1024 * 1024
 
 // App keeps only explicit dependencies to stay readable and easy to swap.
 type App struct {
-	db               *sql.DB
+	db               sqlExecutor
 	storagePath      string
 	nativeFileDialog bool
 	grabTracker      *grabProgressTracker
 	publishTracker   *publishProgressTracker
 	analyticsEvents  chan siteAnalyticsEvent
+}
+
+type sqlExecutor interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
+type siteDBMigrator func(*sql.DB) error
+
+type siteDBRequest struct {
+	domain   string
+	response chan siteDBResponse
+}
+
+type siteDBResponse struct {
+	db  *sql.DB
+	err error
+}
+
+type siteDomainContextKey struct{}
+
+func contextWithDomain(ctx context.Context, domain string) context.Context {
+	normalizedDomain := normalizeDomainName(domain)
+	if normalizedDomain == "" {
+		normalizedDomain = "localhost"
+	}
+	return context.WithValue(ctx, siteDomainContextKey{}, normalizedDomain)
+}
+
+func domainFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return "localhost"
+	}
+	domain, ok := ctx.Value(siteDomainContextKey{}).(string)
+	if !ok {
+		return "localhost"
+	}
+	normalizedDomain := normalizeDomainName(domain)
+	if normalizedDomain == "" {
+		return "localhost"
+	}
+	return normalizedDomain
+}
+
+// perSiteDBRouter resolves a separate sqlite file per domain and keeps the map
+// ownership in a single goroutine so we do not coordinate it with mutexes.
+type perSiteDBRouter struct {
+	fallbackDomain string
+	requests       chan siteDBRequest
+	closeRequests  chan chan error
+	noopDatabase   *sql.DB
+}
+
+func newPerSiteDBRouter(siteDatabaseRootDir string, fallbackDomain string, migrate siteDBMigrator) *perSiteDBRouter {
+	router := &perSiteDBRouter{
+		fallbackDomain: fallbackDomain,
+		requests:       make(chan siteDBRequest),
+		closeRequests:  make(chan chan error),
+		noopDatabase:   mustOpenNoopSQLite(),
+	}
+	go router.run(siteDatabaseRootDir, migrate)
+	return router
+}
+
+func (r *perSiteDBRouter) run(siteDatabaseRootDir string, migrate siteDBMigrator) {
+	databasesByDomain := make(map[string]*sql.DB)
+	for {
+		select {
+		case request := <-r.requests:
+			domain := normalizeDomainName(request.domain)
+			if domain == "" {
+				domain = r.fallbackDomain
+			}
+			database := databasesByDomain[domain]
+			if database == nil {
+				databasePath := filepath.Join(siteDatabaseRootDir, domainStorageName(domain)+".db")
+				if err := ensureParentDir(databasePath); err != nil {
+					request.response <- siteDBResponse{err: err}
+					continue
+				}
+				nextDatabase, err := sql.Open("sqlite3", "file:"+databasePath)
+				if err != nil {
+					request.response <- siteDBResponse{err: err}
+					continue
+				}
+				if migrateErr := migrate(nextDatabase); migrateErr != nil {
+					_ = nextDatabase.Close()
+					request.response <- siteDBResponse{err: migrateErr}
+					continue
+				}
+				databasesByDomain[domain] = nextDatabase
+				database = nextDatabase
+			}
+			request.response <- siteDBResponse{db: database}
+		case closeResponse := <-r.closeRequests:
+			var closeErr error
+			for _, database := range databasesByDomain {
+				if err := database.Close(); err != nil && closeErr == nil {
+					closeErr = err
+				}
+			}
+			_ = routerCloseNoop(r.noopDatabase)
+			closeResponse <- closeErr
+			return
+		}
+	}
+}
+
+func (r *perSiteDBRouter) Close() error {
+	closeResponse := make(chan error, 1)
+	r.closeRequests <- closeResponse
+	return <-closeResponse
+}
+
+func (r *perSiteDBRouter) ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error) {
+	database, err := r.databaseForContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return database.ExecContext(ctx, query, args...)
+}
+
+func (r *perSiteDBRouter) QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error) {
+	database, err := r.databaseForContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return database.QueryContext(ctx, query, args...)
+}
+
+func (r *perSiteDBRouter) QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row {
+	database, err := r.databaseForContext(ctx)
+	if err != nil {
+		log.Printf("site db router query-row fallback: %v", err)
+		return r.noopDatabase.QueryRowContext(ctx, `SELECT 1 WHERE 0`)
+	}
+	return database.QueryRowContext(ctx, query, args...)
+}
+
+func (r *perSiteDBRouter) databaseForContext(ctx context.Context) (*sql.DB, error) {
+	domain := domainFromContext(ctx)
+	if domain == "" {
+		domain = r.fallbackDomain
+	}
+	response := make(chan siteDBResponse, 1)
+	r.requests <- siteDBRequest{domain: domain, response: response}
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case next := <-response:
+		return next.db, next.err
+	}
+}
+
+func mustOpenNoopSQLite() *sql.DB {
+	noopDatabase, err := sql.Open("sqlite3", "file::memory:?cache=shared")
+	if err == nil {
+		return noopDatabase
+	}
+	noopDatabase, err = sql.Open("sqlite3", ":memory:")
+	if err == nil {
+		return noopDatabase
+	}
+	log.Fatalf("failed to open noop sqlite database: %v", err)
+	return nil
+}
+
+func routerCloseNoop(noopDatabase *sql.DB) error {
+	if noopDatabase == nil {
+		return nil
+	}
+	return noopDatabase.Close()
 }
 
 type siteAnalyticsEvent struct {
@@ -510,7 +683,8 @@ func (a *App) runAnalyticsEventWriter(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case event := <-a.analyticsEvents:
-			if err := a.insertAnalyticsEvent(ctx, event); err != nil {
+			eventContext := contextWithDomain(ctx, event.Domain)
+			if err := a.insertAnalyticsEvent(eventContext, event); err != nil {
 				log.Printf("analytics event insert failed: %v", err)
 			}
 		}
@@ -1181,16 +1355,19 @@ func main() {
 		log.Fatal(err)
 	}
 
-	database, err := sql.Open("sqlite3", "file:"+effectiveDBPath)
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer database.Close()
-
-	application := &App{db: database, storagePath: effectiveStoragePath, nativeFileDialog: desktop.NativeFileDialogSupported(), grabTracker: newGrabProgressTracker(), publishTracker: newPublishProgressTracker(), analyticsEvents: make(chan siteAnalyticsEvent, 1024)}
-	if err = application.migrate(context.Background()); err != nil {
-		log.Fatal(err)
-	}
+	var siteDatabaseRouter *perSiteDBRouter
+	application := &App{storagePath: effectiveStoragePath, nativeFileDialog: desktop.NativeFileDialogSupported(), grabTracker: newGrabProgressTracker(), publishTracker: newPublishProgressTracker(), analyticsEvents: make(chan siteAnalyticsEvent, 1024)}
+	siteDatabaseRootDir := filepath.Join(filepath.Dir(effectiveDBPath), "sites")
+	siteDatabaseRouter = newPerSiteDBRouter(siteDatabaseRootDir, "localhost", func(rawDatabase *sql.DB) error {
+		bootstrapApplication := &App{db: rawDatabase, storagePath: effectiveStoragePath}
+		return bootstrapApplication.migrate(contextWithDomain(context.Background(), "localhost"))
+	})
+	defer func() {
+		if closeErr := siteDatabaseRouter.Close(); closeErr != nil {
+			log.Printf("site database router close failed: %v", closeErr)
+		}
+	}()
+	application.db = siteDatabaseRouter
 	application.startAnalyticsWorkers(context.Background())
 
 	router := http.NewServeMux()
@@ -1211,7 +1388,12 @@ func main() {
 	address := "localhost:" + strconv.Itoa(listenPort)
 	log.Printf("Sitebrush started on http://%s", address)
 
-	httpHandler := application.analyticsMiddleware(accessLogMiddleware(application.authAbuseMiddleware(router)))
+	domainContextMiddleware := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestDomain := domainFromRequest(r)
+		nextRequest := r.WithContext(contextWithDomain(r.Context(), requestDomain))
+		router.ServeHTTP(w, nextRequest)
+	})
+	httpHandler := application.analyticsMiddleware(accessLogMiddleware(application.authAbuseMiddleware(domainContextMiddleware)))
 	if listenPort != 80 {
 		log.Printf("Let’s Encrypt HTTP-01 checks need public port 80; current HTTP port is %d", listenPort)
 	}
