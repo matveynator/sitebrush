@@ -3203,6 +3203,33 @@ func TestAutoCertHostPolicyRequiresAutomaticSSLSettingAndPorts(t *testing.T) {
 	}
 }
 
+func TestAutomaticSSLStatusViewExplainsReadyWaitingAndErrors(t *testing.T) {
+	readyStatus := automaticSSLStatusView(DomainAutomaticSSLSetting{Domain: "example.com", Available: true, Enabled: true}, nil)
+	if readyStatus.OverallClass != "status-ok" || readyStatus.DomainCheckClass != "status-ok" || readyStatus.CertificateClass != "status-ok" {
+		t.Fatalf("ready status = %+v, want all ok", readyStatus)
+	}
+
+	waitingStatus := automaticSSLStatusView(DomainAutomaticSSLSetting{Domain: "example.com", Available: true}, nil)
+	if waitingStatus.OverallClass != "status-warn" || waitingStatus.DomainCheckClass != "status-warn" || waitingStatus.CertificateClass != "status-warn" {
+		t.Fatalf("waiting status = %+v, want all warn", waitingStatus)
+	}
+
+	manualOffStatus := automaticSSLStatusView(DomainAutomaticSSLSetting{Domain: "example.com", Available: true, ManuallyDisabled: true}, nil)
+	if manualOffStatus.OverallTextKey != "domain_settings_ssl_status_disabled" || manualOffStatus.CertificateTextKey != "domain_settings_ssl_certificate_disabled" {
+		t.Fatalf("manual off status = %+v, want disabled copy", manualOffStatus)
+	}
+
+	portErrorStatus := automaticSSLStatusView(DomainAutomaticSSLSetting{Domain: "example.com", Available: false}, nil)
+	if portErrorStatus.OverallClass != "status-bad" || portErrorStatus.CertificateTextKey != "domain_settings_ssl_certificate_ports_error" {
+		t.Fatalf("port error status = %+v, want red port error", portErrorStatus)
+	}
+
+	ipErrorStatus := automaticSSLStatusView(DomainAutomaticSSLSetting{Domain: "example.com", Available: true}, os.ErrNotExist)
+	if ipErrorStatus.DomainCheckClass != "status-bad" || ipErrorStatus.DomainCheckTextKey != "domain_settings_ssl_domain_check_error" {
+		t.Fatalf("ip error status = %+v, want red domain check error", ipErrorStatus)
+	}
+}
+
 func TestListenOnAvailablePortFallsBackWhenRequestedPortIsBusy(t *testing.T) {
 	busyListener, err := net.Listen("tcp", ":0")
 	if err != nil {

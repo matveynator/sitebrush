@@ -22,6 +22,7 @@
       --field-border:#b9c7db;
       --link:#1a65d8;
       --ok:#0b7a3b;
+      --warn:#9a6700;
       --bad:#b3261e;
       --line:#d7e1ef;
     }
@@ -37,6 +38,7 @@
         --field-border:#334868;
         --link:#9ec2ff;
         --ok:#6ee7a7;
+        --warn:#f6c65b;
         --bad:#ff9b93;
         --line:#263a57;
       }
@@ -64,7 +66,12 @@
     .alias-actions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
     .status-list { display: flex; gap: 10px; flex-wrap: wrap; margin: 10px 0; }
     .status-ok { color: var(--ok); }
+    .status-warn { color: var(--warn); }
     .status-bad { color: var(--bad); }
+    .ssl-status-list { display: grid; gap: 8px; margin: 12px 0; }
+    .ssl-status-row { display: grid; grid-template-columns: 170px minmax(0, 1fr); gap: 8px 12px; align-items: start; }
+    .ssl-status-label { color: var(--hint); }
+    .ssl-status-summary { font-weight: 700; margin: 10px 0; }
     .record-grid { display: grid; grid-template-columns: 110px minmax(0, 1fr); gap: 8px 12px; margin-top: 10px; }
     .record-grid code { display: inline-block; word-break: break-all; }
     .selected { border-color: var(--ok); }
@@ -76,6 +83,7 @@
       .add-form { grid-template-columns: 1fr; }
       .alias-header { align-items: flex-start; flex-direction: column; }
       .alias-actions { justify-content: flex-start; }
+      .ssl-status-row { grid-template-columns: 1fr; }
       .record-grid { grid-template-columns: 1fr; }
     }
   </style>
@@ -90,6 +98,17 @@
 
   <section class="dns-box">
     <p><strong>{{index .T "domain_settings_ssl_title"}}</strong></p>
+    <p class="ssl-status-summary {{.AutomaticSSLStatus.OverallClass}}">{{index .T .AutomaticSSLStatus.OverallTextKey}}</p>
+    <div class="ssl-status-list">
+      <div class="ssl-status-row">
+        <span class="ssl-status-label">{{index .T "domain_settings_ssl_domain_check_label"}}</span>
+        <span class="{{.AutomaticSSLStatus.DomainCheckClass}}">{{index .T .AutomaticSSLStatus.DomainCheckTextKey}}</span>
+      </div>
+      <div class="ssl-status-row">
+        <span class="ssl-status-label">{{index .T "domain_settings_ssl_certificate_label"}}</span>
+        <span class="{{.AutomaticSSLStatus.CertificateClass}}">{{index .T .AutomaticSSLStatus.CertificateTextKey}}</span>
+      </div>
+    </div>
     <form method="post" action="?settings" style="margin: 0;">
       <input type="hidden" name="return" value="{{.ReturnPath}}">
       <input type="hidden" name="action" value="update_auto_ssl">

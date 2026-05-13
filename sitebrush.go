@@ -468,6 +468,15 @@ type DomainAutomaticSSLSetting struct {
 	LastCheckedAt    string
 }
 
+type DomainAutomaticSSLStatus struct {
+	OverallClass       string
+	OverallTextKey     string
+	DomainCheckClass   string
+	DomainCheckTextKey string
+	CertificateClass   string
+	CertificateTextKey string
+}
+
 type ManagedFileAccess struct {
 	AccessMode    string
 	Token         string
@@ -8311,6 +8320,57 @@ func (a *App) domainAutomaticSSLEnabled(ctx context.Context, domain string) bool
 	return setting.Enabled && !setting.ManuallyDisabled
 }
 
+func automaticSSLStatusView(setting DomainAutomaticSSLSetting, externalIPErr error) DomainAutomaticSSLStatus {
+	if !setting.Available {
+		return DomainAutomaticSSLStatus{
+			OverallClass:       "status-bad",
+			OverallTextKey:     "domain_settings_ssl_status_error",
+			DomainCheckClass:   "status-warn",
+			DomainCheckTextKey: "domain_settings_ssl_domain_check_not_checked",
+			CertificateClass:   "status-bad",
+			CertificateTextKey: "domain_settings_ssl_certificate_ports_error",
+		}
+	}
+	if externalIPErr != nil {
+		return DomainAutomaticSSLStatus{
+			OverallClass:       "status-bad",
+			OverallTextKey:     "domain_settings_ssl_status_error",
+			DomainCheckClass:   "status-bad",
+			DomainCheckTextKey: "domain_settings_ssl_domain_check_error",
+			CertificateClass:   "status-warn",
+			CertificateTextKey: "domain_settings_ssl_certificate_waiting",
+		}
+	}
+	if setting.ManuallyDisabled {
+		return DomainAutomaticSSLStatus{
+			OverallClass:       "status-warn",
+			OverallTextKey:     "domain_settings_ssl_status_disabled",
+			DomainCheckClass:   "status-warn",
+			DomainCheckTextKey: "domain_settings_ssl_domain_check_manual_off",
+			CertificateClass:   "status-warn",
+			CertificateTextKey: "domain_settings_ssl_certificate_disabled",
+		}
+	}
+	if setting.Enabled {
+		return DomainAutomaticSSLStatus{
+			OverallClass:       "status-ok",
+			OverallTextKey:     "domain_settings_ssl_status_ok",
+			DomainCheckClass:   "status-ok",
+			DomainCheckTextKey: "domain_settings_ssl_domain_check_ok",
+			CertificateClass:   "status-ok",
+			CertificateTextKey: "domain_settings_ssl_certificate_active",
+		}
+	}
+	return DomainAutomaticSSLStatus{
+		OverallClass:       "status-warn",
+		OverallTextKey:     "domain_settings_ssl_status_waiting",
+		DomainCheckClass:   "status-warn",
+		DomainCheckTextKey: "domain_settings_ssl_domain_check_waiting",
+		CertificateClass:   "status-warn",
+		CertificateTextKey: "domain_settings_ssl_certificate_waiting",
+	}
+}
+
 func (a *App) setDomainAutomaticSSLManual(ctx context.Context, domain string, enabled bool) {
 	setting := a.domainAutomaticSSLSetting(ctx, domain)
 	if setting.Domain == "" {
@@ -8436,6 +8496,7 @@ func (a *App) domainSettingsPage(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	automaticSSLSetting := a.refreshDomainAutomaticSSLIfStale(r.Context(), selectedDomain, externalIP)
+	automaticSSLStatus := automaticSSLStatusView(automaticSSLSetting, externalIPErr)
 	backupToken := a.backupTokenForDomain(r.Context(), siteDomain)
 	backupDownloadPath := "/?backup_download&token=" + url.QueryEscape(backupToken)
 	backupDownloadURL := absoluteURLForPath(r, backupDownloadPath)
@@ -8453,6 +8514,7 @@ func (a *App) domainSettingsPage(w http.ResponseWriter, r *http.Request) {
 		"ExternalIP":         externalIP,
 		"ExternalIPError":    externalIPError,
 		"AutomaticSSL":       automaticSSLSetting,
+		"AutomaticSSLStatus": automaticSSLStatus,
 		"AutomaticSSLDomain": automaticSSLSetting.Domain,
 		"AutomaticSSLReady":  automaticSSLSetting.Available && automaticSSLSetting.Domain != "",
 		"BackupDownloadURL":  backupDownloadURL,
