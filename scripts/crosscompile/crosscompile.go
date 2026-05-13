@@ -702,7 +702,7 @@ func remoteLatestSymlinkCommand(remoteProgramBase, version string) string {
 	remoteLatest := remoteProgramBase + "/latest"
 	remoteLatestTemp := remoteProgramBase + "/.latest.tmp-" + sanitizePathSegment(version)
 	return fmt.Sprintf(
-		"set -e; mkdir -p %s; rm -rf %s; ln -s %s %s; rm -rf %s; mv -Tf %s %s; actual=$(readlink %s); test \"$actual\" = %s; printf 'latest -> %%s\\n' \"$actual\"",
+		"set -e; mkdir -p %s; rm -rf %s; ln -s %s %s; rm -rf %s; mv -Tf %s %s; test -L %s; actual=$(readlink %s); test \"$actual\" = %s; printf 'latest -> %%s\\n' \"$actual\"; ls -la %s",
 		shellQuote(remoteProgramBase),
 		shellQuote(remoteLatestTemp),
 		shellQuote(version),
@@ -711,7 +711,9 @@ func remoteLatestSymlinkCommand(remoteProgramBase, version string) string {
 		shellQuote(remoteLatestTemp),
 		shellQuote(remoteLatest),
 		shellQuote(remoteLatest),
+		shellQuote(remoteLatest),
 		shellQuote(version),
+		shellQuote(remoteProgramBase),
 	)
 }
 

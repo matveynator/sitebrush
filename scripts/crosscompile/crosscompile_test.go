@@ -322,9 +322,11 @@ func TestRemoteLatestSymlinkCommandReplacesAndVerifiesLink(t *testing.T) {
 	for _, want := range []string{
 		"rm -rf '/srv/releases/sitebrush/latest'",
 		"mv -Tf '/srv/releases/sitebrush/.latest.tmp-162' '/srv/releases/sitebrush/latest'",
+		"test -L '/srv/releases/sitebrush/latest'",
 		"actual=$(readlink '/srv/releases/sitebrush/latest')",
 		"test \"$actual\" = '162'",
 		"printf 'latest -> %s\\n' \"$actual\"",
+		"ls -la '/srv/releases/sitebrush'",
 	} {
 		if !strings.Contains(command, want) {
 			t.Fatalf("remoteLatestSymlinkCommand() missing %q in %q", want, command)
