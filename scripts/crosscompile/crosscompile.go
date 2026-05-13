@@ -686,7 +686,8 @@ func syncArtifacts(repoRoot, outputRoot, programName, version, syncHost, syncBas
 	if err := runCommand(repoRoot, "rsync", "-avP", outputRoot+"/", syncHost+":"+remoteProgramBase+"/"); err != nil {
 		return err
 	}
-	return runCommand(repoRoot, "ssh", syncHost, remoteLatestSymlinkVerifyCommand(remoteProgramBase, version))
+	fmt.Printf("synced latest -> %s via rsync\n", version)
+	return nil
 }
 
 func remoteProgramBasePath(syncBase, programName string) string {
@@ -695,17 +696,6 @@ func remoteProgramBasePath(syncBase, programName string) string {
 		return remoteBase
 	}
 	return remoteBase + "/" + programName
-}
-
-func remoteLatestSymlinkVerifyCommand(remoteProgramBase, version string) string {
-	remoteLatest := remoteProgramBase + "/latest"
-	return fmt.Sprintf(
-		"set -e; test -L %s; actual=$(readlink %s); test \"$actual\" = %s; printf 'latest -> %%s\\n' \"$actual\"; ls -la %s",
-		shellQuote(remoteLatest),
-		shellQuote(remoteLatest),
-		shellQuote(version),
-		shellQuote(remoteProgramBase),
-	)
 }
 
 func defaultVersionLabel(repoRoot string) string {

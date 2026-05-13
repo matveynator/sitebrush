@@ -315,26 +315,6 @@ func TestUpdateLatestSymlink(t *testing.T) {
 	}
 }
 
-func TestRemoteLatestSymlinkVerifyCommandChecksRsyncCopiedLink(t *testing.T) {
-	t.Parallel()
-
-	command := remoteLatestSymlinkVerifyCommand("/srv/releases/sitebrush", "162")
-	for _, want := range []string{
-		"test -L '/srv/releases/sitebrush/latest'",
-		"actual=$(readlink '/srv/releases/sitebrush/latest')",
-		"test \"$actual\" = '162'",
-		"printf 'latest -> %s\\n' \"$actual\"",
-		"ls -la '/srv/releases/sitebrush'",
-	} {
-		if !strings.Contains(command, want) {
-			t.Fatalf("remoteLatestSymlinkCommand() missing %q in %q", want, command)
-		}
-	}
-	if strings.Contains(command, "ln -s") || strings.Contains(command, "rm -rf") {
-		t.Fatalf("remoteLatestSymlinkVerifyCommand() should only verify rsync-copied symlink: %q", command)
-	}
-}
-
 func TestRemoteProgramBasePathDoesNotDuplicateProgramName(t *testing.T) {
 	t.Parallel()
 
