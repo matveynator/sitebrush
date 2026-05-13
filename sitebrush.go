@@ -2254,11 +2254,13 @@ func (a *App) grabPage(w http.ResponseWriter, r *http.Request) {
 	}
 	sourceURL = remoteSourceURL.String()
 
-	htmlBytes, err := downloadGrabSourceHTML(sourceURL, sourceIP)
+	htmlBytes, resolvedSourceURL, err := downloadGrabSourceHTMLWithResolvedURL(sourceURL, sourceIP)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
+	remoteSourceURL = resolvedSourceURL
+	sourceURL = remoteSourceURL.String()
 
 	domain := a.siteDomain(r.Context(), r)
 	progressToken := strings.TrimSpace(r.FormValue("progress_token"))
@@ -2330,11 +2332,13 @@ func (a *App) grabPreview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sourceURL = remoteSourceURL.String()
-	htmlBytes, err := downloadGrabSourceHTML(sourceURL, sourceIP)
+	htmlBytes, resolvedSourceURL, err := downloadGrabSourceHTMLWithResolvedURL(sourceURL, sourceIP)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
+	remoteSourceURL = resolvedSourceURL
+	sourceURL = remoteSourceURL.String()
 	progressToken := strings.TrimSpace(r.FormValue("progress_token"))
 	domain := a.siteDomain(r.Context(), r)
 	pagePath := cleanPath(r.FormValue("path"))
@@ -2389,6 +2393,7 @@ func parseGrabSourceURLForServerIP(sourceURL, sourceIP string) (*url.URL, error)
 	if trimmedSourceURL == "" {
 		return nil, errors.New("source_url is required")
 	}
+	sourceIPPort := grabSourceIPPort(sourceIP)
 	if strings.HasPrefix(trimmedSourceURL, "//") {
 		trimmedSourceURL = "https:" + trimmedSourceURL
 	}
@@ -2399,6 +2404,9 @@ func parseGrabSourceURLForServerIP(sourceURL, sourceIP string) (*url.URL, error)
 	if err != nil || remoteSourceURL.Hostname() == "" || (remoteSourceURL.Scheme != "http" && remoteSourceURL.Scheme != "https") {
 		return nil, errors.New("source_url is invalid")
 	}
+	if sourceIPPort != "" {
+		remoteSourceURL.Host = net.JoinHostPort(remoteSourceURL.Hostname(), sourceIPPort)
+	}
 	return remoteSourceURL, nil
 }
 
@@ -2407,8 +2415,15 @@ func defaultGrabScheme(sourceURL string) string {
 }
 
 func defaultGrabSchemeForServerIP(sourceURL, sourceIP string) string {
-	if strings.TrimSpace(sourceIP) != "" {
+	sourceIPPort := grabSourceIPPort(sourceIP)
+	if sourceIPPort == "443" {
+		return "https"
+	}
+	if sourceIPPort != "" {
 		return "http"
+	}
+	if strings.TrimSpace(sourceIP) != "" {
+		return "https"
 	}
 	hostCandidate := sourceURL
 	if slashIndex := strings.Index(hostCandidate, "/"); slashIndex >= 0 {
@@ -2428,11 +2443,18 @@ func parseOptionalGrabSourceIP(rawSourceIP string) (string, error) {
 	if trimmedSourceIP == "" {
 		return "", nil
 	}
-	parsedIP := net.ParseIP(trimmedSourceIP)
+	parsedIP, portPart := splitGrabSourceIP(trimmedSourceIP)
 	if parsedIP == nil {
 		return "", errors.New("source_ip is invalid")
 	}
-	return parsedIP.String(), nil
+	if portPart == "" {
+		return parsedIP.String(), nil
+	}
+	parsedPort, err := strconv.Atoi(strings.TrimSpace(portPart))
+	if err != nil || parsedPort <= 0 || parsedPort > 65535 {
+		return "", errors.New("source_ip port is invalid")
+	}
+	return net.JoinHostPort(parsedIP.String(), strconv.Itoa(parsedPort)), nil
 }
 
 func wantsJSONResponse(r *http.Request) bool {
@@ -2440,23 +2462,70 @@ func wantsJSONResponse(r *http.Request) bool {
 }
 
 func downloadGrabSourceHTML(sourceURL, sourceIP string) ([]byte, error) {
+	htmlBytes, _, err := downloadGrabSourceHTMLWithResolvedURL(sourceURL, sourceIP)
+	return htmlBytes, err
+}
+
+func downloadGrabSourceHTMLWithResolvedURL(sourceURL, sourceIP string) ([]byte, *url.URL, error) {
 	remoteSourceURL, err := url.Parse(sourceURL)
 	if err != nil {
-		return nil, errors.New("source_url is invalid")
+		return nil, nil, errors.New("source_url is invalid")
 	}
-	response, err := newGrabHTTPClientForServerIP(remoteSourceURL.Hostname(), sourceIP).Get(sourceURL)
+	client := newGrabHTTPClientForServerIP(remoteSourceURL.Hostname(), sourceIP)
+	response, err := client.Get(sourceURL)
+	if err != nil && shouldFallbackGrabSourceToHTTP(remoteSourceURL, sourceIP) {
+		fallbackURL := cloneURL(remoteSourceURL)
+		fallbackURL.Scheme = "http"
+		fallbackURL.Host = fallbackURL.Hostname()
+		response, err = client.Get(fallbackURL.String())
+		if err == nil {
+			remoteSourceURL = fallbackURL
+		}
+	}
 	if err != nil {
-		return nil, errors.New("failed to download source page")
+		return nil, nil, errors.New("failed to download source page")
 	}
 	defer response.Body.Close()
 	if response.StatusCode < 200 || response.StatusCode > 299 {
-		return nil, errors.New("source page returned non-success status")
+		return nil, nil, errors.New("source page returned non-success status")
 	}
 	htmlBytes, err := io.ReadAll(response.Body)
 	if err != nil {
-		return nil, errors.New("failed to read source page")
+		return nil, nil, errors.New("failed to read source page")
 	}
-	return htmlBytes, nil
+	return htmlBytes, remoteSourceURL, nil
+}
+
+func shouldFallbackGrabSourceToHTTP(sourceURL *url.URL, sourceIP string) bool {
+	return sourceURL != nil && sourceURL.Scheme == "https" && grabSourceIPPort(sourceIP) == "" && strings.TrimSpace(sourceIP) != ""
+}
+
+func grabSourceIPPort(sourceIP string) string {
+	trimmedSourceIP := strings.TrimSpace(sourceIP)
+	if trimmedSourceIP == "" {
+		return ""
+	}
+	if _, port, splitErr := net.SplitHostPort(trimmedSourceIP); splitErr == nil {
+		return port
+	}
+	return ""
+}
+
+func splitGrabSourceIP(sourceIP string) (net.IP, string) {
+	trimmedSourceIP := strings.TrimSpace(sourceIP)
+	ipPart := trimmedSourceIP
+	portPart := ""
+	if host, port, splitErr := net.SplitHostPort(trimmedSourceIP); splitErr == nil {
+		ipPart = host
+		portPart = port
+	} else if strings.Count(trimmedSourceIP, ":") == 1 {
+		host, port, foundPort := strings.Cut(trimmedSourceIP, ":")
+		if foundPort {
+			ipPart = host
+			portPart = port
+		}
+	}
+	return net.ParseIP(strings.Trim(ipPart, "[]")), strings.TrimSpace(portPart)
 }
 
 func selectedGrabResourceURLs(r *http.Request) map[string]struct{} {
@@ -6256,7 +6325,7 @@ func newGrabHTTPClientForServerIP(sourceHost, sourceIP string) *http.Client {
 	if trimmedSourceIP == "" {
 		return newGrabHTTPClient()
 	}
-	parsedIP := net.ParseIP(trimmedSourceIP)
+	parsedIP, sourcePort := splitGrabSourceIP(trimmedSourceIP)
 	if parsedIP == nil {
 		return newGrabHTTPClient()
 	}
@@ -6267,6 +6336,9 @@ func newGrabHTTPClientForServerIP(sourceHost, sourceIP string) *http.Client {
 	transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
 		host, port, splitErr := net.SplitHostPort(address)
 		if splitErr == nil && strings.EqualFold(host, sourceHost) {
+			if sourcePort != "" {
+				port = sourcePort
+			}
 			address = net.JoinHostPort(parsedIP.String(), port)
 		}
 		return dialer.DialContext(ctx, network, address)

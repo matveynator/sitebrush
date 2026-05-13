@@ -1790,13 +1790,33 @@ func TestParseGrabSourceURLAcceptsCommonURLForms(t *testing.T) {
 	}
 }
 
-func TestParseGrabSourceURLUsesHTTPDefaultWhenServerIPIsProvided(t *testing.T) {
+func TestParseGrabSourceURLUsesHTTPSDefaultWhenServerIPIsProvided(t *testing.T) {
 	parsedSourceURL, parseErr := parseGrabSourceURLForServerIP("expired.example/page", "127.0.0.1")
 	if parseErr != nil {
 		t.Fatalf("parseGrabSourceURLForServerIP failed: %v", parseErr)
 	}
-	if parsedSourceURL.String() != "http://expired.example/page" {
-		t.Fatalf("parsed URL = %q, want http://expired.example/page", parsedSourceURL.String())
+	if parsedSourceURL.String() != "https://expired.example/page" {
+		t.Fatalf("parsed URL = %q, want https://expired.example/page", parsedSourceURL.String())
+	}
+}
+
+func TestParseGrabSourceURLUsesSourceIPPortWhenProvided(t *testing.T) {
+	parsedSourceURL, parseErr := parseGrabSourceURLForServerIP("expired.example/page", "127.0.0.1:8080")
+	if parseErr != nil {
+		t.Fatalf("parseGrabSourceURLForServerIP failed: %v", parseErr)
+	}
+	if parsedSourceURL.String() != "http://expired.example:8080/page" {
+		t.Fatalf("parsed URL = %q, want http://expired.example:8080/page", parsedSourceURL.String())
+	}
+}
+
+func TestParseOptionalGrabSourceIPAcceptsPort(t *testing.T) {
+	sourceIP, parseErr := parseOptionalGrabSourceIP("127.0.0.1:8080")
+	if parseErr != nil {
+		t.Fatalf("parseOptionalGrabSourceIP failed: %v", parseErr)
+	}
+	if sourceIP != "127.0.0.1:8080" {
+		t.Fatalf("sourceIP = %q, want 127.0.0.1:8080", sourceIP)
 	}
 }
 
@@ -1850,6 +1870,33 @@ func TestDownloadGrabSourceHTMLCanDialSourceIPWithDomainHost(t *testing.T) {
 		t.Fatalf("download with source IP failed: %v", downloadErr)
 	}
 	if string(htmlBytes) != "<html>expired domain copy</html>" {
+		t.Fatalf("downloaded HTML = %q", string(htmlBytes))
+	}
+}
+
+func TestDownloadGrabSourceHTMLUsesSourceIPPort(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if request.Host != "expired.example:8080" {
+			t.Fatalf("Host = %q, want expired.example:8080", request.Host)
+		}
+		_, _ = response.Write([]byte("<html>custom port copy</html>"))
+	}))
+	defer server.Close()
+
+	serverURL, parseErr := url.Parse(server.URL)
+	if parseErr != nil {
+		t.Fatal(parseErr)
+	}
+	serverHost, serverPort, splitErr := net.SplitHostPort(serverURL.Host)
+	if splitErr != nil {
+		t.Fatal(splitErr)
+	}
+	sourceURL := "http://expired.example:8080/page"
+	htmlBytes, downloadErr := downloadGrabSourceHTML(sourceURL, net.JoinHostPort(serverHost, serverPort))
+	if downloadErr != nil {
+		t.Fatalf("download with source IP port failed: %v", downloadErr)
+	}
+	if string(htmlBytes) != "<html>custom port copy</html>" {
 		t.Fatalf("downloaded HTML = %q", string(htmlBytes))
 	}
 }
