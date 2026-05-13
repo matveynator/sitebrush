@@ -40,6 +40,7 @@ import (
 
 	"golang.org/x/crypto/acme/autocert"
 	"golang.org/x/net/html"
+	"golang.org/x/term"
 	appcli "sitebrush/pkg/cli"
 	_ "sitebrush/pkg/database/drivers"
 	"sitebrush/pkg/desktop"
@@ -1343,6 +1344,9 @@ func main() {
 	dbType := flag.String("db-type", "sqlite", "database driver (supported: sqlite)")
 	storagePath := flag.String("storage-path", defaultAppStoragePath(), "path to the Sitebrush app data directory")
 	dbPath := flag.String("db-path", defaultDBPath, "path to sqlite database file")
+	listSitesMode := flag.Bool("list-sites", false, "open interactive server site quota console")
+	quotaSite := flag.String("quota-site", "", "site domain to update storage quota for")
+	quotaValue := flag.String("quota", "", "set -quota-site storage quota, for example 50mb or 20gb")
 	var desktopModeFlag *bool
 	if appcli.DesktopModeFlagSupported() {
 		desktopModeFlag = flag.Bool("desktop", desktop.DefaultEnabled(), "enable desktop mode when desktop build tags are used")
@@ -1370,6 +1374,13 @@ func main() {
 	if !flagWasProvided("db-path") {
 		effectiveDBPath = filepath.Join(effectiveStoragePath, defaultDBPath)
 	}
+	quotaCommandMode := *listSitesMode || strings.TrimSpace(*quotaSite) != "" || flagWasProvided("quota")
+	if quotaCommandMode {
+		if err := runSiteQuotaCommand(context.Background(), os.Stdout, os.Stdin, effectiveStoragePath, effectiveDBPath, *listSitesMode, *quotaSite, *quotaValue); err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
 	parsedPorts, err := parseListenPorts(*port)
 	if err != nil {
 		log.Fatal(err)
@@ -1386,7 +1397,7 @@ func main() {
 
 	var siteDatabaseRouter *perSiteDBRouter
 	application := &App{storagePath: effectiveStoragePath, nativeFileDialog: desktop.NativeFileDialogSupported(), grabTracker: newGrabProgressTracker(), publishTracker: newPublishProgressTracker(), analyticsEvents: make(chan siteAnalyticsEvent, 1024)}
-	siteDatabaseRootDir := filepath.Join(filepath.Dir(effectiveDBPath), "sites")
+	siteDatabaseRootDir := siteDatabaseRootPath(effectiveDBPath)
 	siteDatabaseRouter = newPerSiteDBRouter(siteDatabaseRootDir, "localhost", func(rawDatabase *sql.DB) error {
 		bootstrapApplication := &App{db: rawDatabase, storagePath: effectiveStoragePath}
 		return bootstrapApplication.migrate(contextWithDomain(context.Background(), "localhost"))
@@ -4430,6 +4441,812 @@ func formatFileSize(size int64) string {
 		return fmt.Sprintf("%.1f MB", float64(size)/(1024*1024))
 	}
 	return fmt.Sprintf("%.1f GB", float64(size)/(1024*1024*1024))
+}
+
+type siteQuotaDatabaseCandidate struct {
+	path           string
+	fallbackDomain string
+}
+
+type siteQuotaRow struct {
+	Domain       string
+	Aliases      []string
+	UsedBytes    int64
+	LimitBytes   int64
+	FilesPath    string
+	DatabasePath string
+}
+
+func siteDatabaseRootPath(dbPath string) string {
+	return filepath.Join(filepath.Dir(dbPath), "sites")
+}
+
+func parseSiteQuotaLimitBytes(rawQuota string) (int64, bool, error) {
+	quotaText := strings.ToLower(strings.TrimSpace(rawQuota))
+	if quotaText == "" {
+		return 0, false, nil
+	}
+	quotaText = strings.ReplaceAll(quotaText, " ", "")
+	unitMultiplier := int64(0)
+	numberText := ""
+	switch {
+	case strings.HasSuffix(quotaText, "mb"):
+		unitMultiplier = 1024 * 1024
+		numberText = strings.TrimSuffix(quotaText, "mb")
+	case strings.HasSuffix(quotaText, "m"):
+		unitMultiplier = 1024 * 1024
+		numberText = strings.TrimSuffix(quotaText, "m")
+	case strings.HasSuffix(quotaText, "gb"):
+		unitMultiplier = 1024 * 1024 * 1024
+		numberText = strings.TrimSuffix(quotaText, "gb")
+	case strings.HasSuffix(quotaText, "g"):
+		unitMultiplier = 1024 * 1024 * 1024
+		numberText = strings.TrimSuffix(quotaText, "g")
+	default:
+		return 0, false, fmt.Errorf("quota must use mb or gb suffix, for example -quota 50mb or -quota 20gb")
+	}
+	numberText = strings.TrimSpace(numberText)
+	if numberText == "" {
+		return 0, false, fmt.Errorf("quota value is missing")
+	}
+	quotaNumber, err := strconv.ParseInt(numberText, 10, 64)
+	if err != nil || quotaNumber <= 0 {
+		return 0, false, fmt.Errorf("quota must be a positive integer with mb or gb suffix")
+	}
+	if quotaNumber > math.MaxInt64/unitMultiplier {
+		return 0, false, fmt.Errorf("quota is too large")
+	}
+	return quotaNumber * unitMultiplier, true, nil
+}
+
+func runSiteQuotaCommand(ctx context.Context, output io.Writer, input io.Reader, storagePath, dbPath string, listSites bool, quotaSite string, quota string) error {
+	limitBytes, quotaRequested, err := parseSiteQuotaLimitBytes(quota)
+	if err != nil {
+		return err
+	}
+	if quotaRequested && strings.TrimSpace(quotaSite) == "" {
+		return fmt.Errorf("-quota-site is required when changing quota")
+	}
+	if strings.TrimSpace(quotaSite) != "" && !quotaRequested {
+		return fmt.Errorf("quota value is required: use -quota 50mb or -quota 20gb")
+	}
+
+	if quotaRequested {
+		updatedRow, err := updateSiteQuotaLimit(ctx, storagePath, dbPath, quotaSite, limitBytes)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(output, "Updated quota for %s: %s used / %s limit\n", updatedRow.Domain, formatFileSize(updatedRow.UsedBytes), formatFileSize(updatedRow.LimitBytes))
+	}
+	if listSites {
+		rows, err := listSiteQuotaRows(ctx, storagePath, dbPath)
+		if err != nil {
+			return err
+		}
+		if err := runSiteQuotaInteractiveConsole(ctx, output, input, storagePath, dbPath, rows); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func listSiteQuotaRows(ctx context.Context, storagePath, dbPath string) ([]siteQuotaRow, error) {
+	candidates, err := siteQuotaDatabaseCandidates(dbPath)
+	if err != nil {
+		return nil, err
+	}
+	rows := make([]siteQuotaRow, 0, len(candidates))
+	for _, candidate := range candidates {
+		candidateRows, err := siteQuotaRowsFromDatabase(ctx, storagePath, candidate)
+		if err != nil {
+			return nil, err
+		}
+		rows = append(rows, candidateRows...)
+	}
+	sort.Slice(rows, func(left, right int) bool {
+		if rows[left].Domain == rows[right].Domain {
+			return rows[left].DatabasePath < rows[right].DatabasePath
+		}
+		return rows[left].Domain < rows[right].Domain
+	})
+	return rows, nil
+}
+
+func siteQuotaDatabaseCandidates(dbPath string) ([]siteQuotaDatabaseCandidate, error) {
+	candidates := make([]siteQuotaDatabaseCandidate, 0, 8)
+	seenPaths := make(map[string]struct{})
+	addCandidate := func(candidatePath string, fallbackDomain string) {
+		cleanPath := filepath.Clean(candidatePath)
+		if _, err := os.Stat(cleanPath); err != nil {
+			return
+		}
+		absolutePath, err := filepath.Abs(cleanPath)
+		if err != nil {
+			absolutePath = cleanPath
+		}
+		if _, seen := seenPaths[absolutePath]; seen {
+			return
+		}
+		seenPaths[absolutePath] = struct{}{}
+		candidates = append(candidates, siteQuotaDatabaseCandidate{path: cleanPath, fallbackDomain: fallbackDomain})
+	}
+
+	addCandidate(dbPath, "")
+	siteDatabaseDir := siteDatabaseRootPath(dbPath)
+	databaseFiles, err := os.ReadDir(siteDatabaseDir)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return candidates, nil
+		}
+		return nil, err
+	}
+	for _, databaseFile := range databaseFiles {
+		if databaseFile.IsDir() || strings.ToLower(filepath.Ext(databaseFile.Name())) != ".db" {
+			continue
+		}
+		fallbackDomain := strings.TrimSuffix(databaseFile.Name(), filepath.Ext(databaseFile.Name()))
+		addCandidate(filepath.Join(siteDatabaseDir, databaseFile.Name()), fallbackDomain)
+	}
+	return candidates, nil
+}
+
+func siteQuotaRowsFromDatabase(ctx context.Context, storagePath string, candidate siteQuotaDatabaseCandidate) ([]siteQuotaRow, error) {
+	rawDatabase, err := sql.Open("sqlite", "file:"+candidate.path)
+	if err != nil {
+		return nil, err
+	}
+	defer rawDatabase.Close()
+
+	application := &App{db: rawDatabase, storagePath: storagePath}
+	migrateDomain := candidate.fallbackDomain
+	if strings.TrimSpace(migrateDomain) == "" {
+		migrateDomain = "localhost"
+	}
+	if err := application.migrate(contextWithDomain(ctx, migrateDomain)); err != nil {
+		return nil, err
+	}
+	domains := siteDomainsInDatabase(ctx, rawDatabase)
+	if len(domains) == 0 && strings.TrimSpace(candidate.fallbackDomain) != "" {
+		domains = append(domains, candidate.fallbackDomain)
+	}
+
+	rows := make([]siteQuotaRow, 0, len(domains))
+	for _, domain := range domains {
+		usage := application.domainStorageUsage(contextWithDomain(ctx, domain), domain)
+		rows = append(rows, siteQuotaRow{
+			Domain:       domain,
+			Aliases:      siteAliasesInDatabase(ctx, rawDatabase, domain),
+			UsedBytes:    usage.totalBytes(),
+			LimitBytes:   usage.LimitBytes,
+			FilesPath:    application.domainFilesDirForDomain(domain),
+			DatabasePath: candidate.path,
+		})
+	}
+	return rows, nil
+}
+
+func siteDomainsInDatabase(ctx context.Context, database *sql.DB) []string {
+	domainSet := make(map[string]struct{})
+	queries := []string{
+		`SELECT DISTINCT domain FROM domain_storage_usage`,
+		`SELECT DISTINCT domain FROM users`,
+		`SELECT DISTINCT domain FROM pages`,
+		`SELECT DISTINCT domain FROM published_pages`,
+		`SELECT DISTINCT domain FROM revisions`,
+		`SELECT DISTINCT domain FROM domain_states`,
+		`SELECT DISTINCT primary_domain FROM domain_aliases`,
+	}
+	for _, query := range queries {
+		rows, err := database.QueryContext(ctx, query)
+		if err != nil {
+			continue
+		}
+		for rows.Next() {
+			var domain string
+			if scanErr := rows.Scan(&domain); scanErr != nil {
+				continue
+			}
+			domain = strings.TrimSpace(domain)
+			if domain != "" {
+				domainSet[domain] = struct{}{}
+			}
+		}
+		_ = rows.Close()
+	}
+	domains := make([]string, 0, len(domainSet))
+	for domain := range domainSet {
+		domains = append(domains, domain)
+	}
+	sort.Strings(domains)
+	return domains
+}
+
+func siteAliasesInDatabase(ctx context.Context, database *sql.DB, domain string) []string {
+	rows, err := database.QueryContext(ctx, `SELECT alias_domain FROM domain_aliases WHERE primary_domain=? ORDER BY alias_domain`, domain)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	aliases := make([]string, 0, 4)
+	for rows.Next() {
+		var aliasDomain string
+		if scanErr := rows.Scan(&aliasDomain); scanErr == nil && strings.TrimSpace(aliasDomain) != "" {
+			aliases = append(aliases, aliasDomain)
+		}
+	}
+	return aliases
+}
+
+func updateSiteQuotaLimit(ctx context.Context, storagePath, dbPath, rawDomain string, limitBytes int64) (siteQuotaRow, error) {
+	domain := normalizeQuotaDomainName(rawDomain)
+	if domain == "" {
+		return siteQuotaRow{}, fmt.Errorf("invalid site domain %q", rawDomain)
+	}
+	candidate, err := siteQuotaDatabaseCandidateForDomain(ctx, storagePath, dbPath, domain)
+	if err != nil {
+		return siteQuotaRow{}, err
+	}
+
+	rawDatabase, err := sql.Open("sqlite", "file:"+candidate.path)
+	if err != nil {
+		return siteQuotaRow{}, err
+	}
+	defer rawDatabase.Close()
+
+	application := &App{db: rawDatabase, storagePath: storagePath}
+	commandContext := contextWithDomain(ctx, domain)
+	if err := application.migrate(commandContext); err != nil {
+		return siteQuotaRow{}, err
+	}
+	application.ensureDomainStorageUsageRow(commandContext, domain)
+	_, err = rawDatabase.ExecContext(commandContext, `UPDATE domain_storage_usage SET limit_bytes=?, updated_at=? WHERE domain=?`, limitBytes, time.Now().UTC().Format(time.RFC3339), domain)
+	if err != nil {
+		return siteQuotaRow{}, err
+	}
+	usage := application.domainStorageUsage(commandContext, domain)
+	return siteQuotaRow{
+		Domain:       domain,
+		Aliases:      siteAliasesInDatabase(commandContext, rawDatabase, domain),
+		UsedBytes:    usage.totalBytes(),
+		LimitBytes:   usage.LimitBytes,
+		FilesPath:    application.domainFilesDirForDomain(domain),
+		DatabasePath: candidate.path,
+	}, nil
+}
+
+func siteQuotaDatabaseCandidateForDomain(ctx context.Context, storagePath, dbPath, domain string) (siteQuotaDatabaseCandidate, error) {
+	siteDatabasePath := filepath.Join(siteDatabaseRootPath(dbPath), domainStorageName(domain)+".db")
+	if _, err := os.Stat(siteDatabasePath); err == nil {
+		return siteQuotaDatabaseCandidate{path: siteDatabasePath, fallbackDomain: domain}, nil
+	}
+	candidates, err := siteQuotaDatabaseCandidates(dbPath)
+	if err != nil {
+		return siteQuotaDatabaseCandidate{}, err
+	}
+	for _, candidate := range candidates {
+		rows, err := siteQuotaRowsFromDatabase(ctx, storagePath, candidate)
+		if err != nil {
+			return siteQuotaDatabaseCandidate{}, err
+		}
+		for _, row := range rows {
+			if row.Domain == domain {
+				return candidate, nil
+			}
+		}
+	}
+	return siteQuotaDatabaseCandidate{}, fmt.Errorf("site %q was not found under %s", domain, siteDatabaseRootPath(dbPath))
+}
+
+func normalizeQuotaDomainName(rawDomain string) string {
+	cleanDomain := strings.ToLower(strings.TrimSpace(rawDomain))
+	if cleanDomain == "localhost" {
+		return cleanDomain
+	}
+	return normalizeDomainName(cleanDomain)
+}
+
+func runSiteQuotaInteractiveConsole(ctx context.Context, output io.Writer, input io.Reader, storagePath, dbPath string, rows []siteQuotaRow) error {
+	reader := bufio.NewReader(input)
+	selectedIndex := 0
+	inputFile, inputIsFile := input.(*os.File)
+	rawTerminal := inputIsFile && term.IsTerminal(int(inputFile.Fd()))
+	layout := siteQuotaTerminalLayoutForWriter(output)
+	var rawTerminalState *term.State
+	if rawTerminal {
+		terminalState, err := term.MakeRaw(int(inputFile.Fd()))
+		if err != nil {
+			return err
+		}
+		layout.newline = "\r\n"
+		rawTerminalState = terminalState
+		defer func() {
+			_ = term.Restore(int(inputFile.Fd()), rawTerminalState)
+		}()
+	}
+	for {
+		printSiteQuotaRows(output, storagePath, dbPath, rows, selectedIndex, layout)
+		if len(rows) == 0 {
+			return nil
+		}
+		command, err := readSiteQuotaMenuCommand(reader)
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				return nil
+			}
+			return err
+		}
+		switch command.Action {
+		case "quit":
+			return nil
+		case "up":
+			if selectedIndex > 0 {
+				selectedIndex--
+			}
+			continue
+		case "down":
+			if selectedIndex < len(rows)-1 {
+				selectedIndex++
+			}
+			continue
+		case "number":
+			if command.Index < 1 || command.Index > len(rows) {
+				fmt.Fprintf(output, "%sInvalid selection.%s%s", terminalRed(), terminalReset(), layout.newline)
+				continue
+			}
+			selectedIndex = command.Index - 1
+		case "enter":
+		default:
+			fmt.Fprintf(output, "%sInvalid selection.%s%s", terminalRed(), terminalReset(), layout.newline)
+			continue
+		}
+		selectedRow := rows[selectedIndex]
+		if rawTerminal {
+			_ = term.Restore(int(inputFile.Fd()), rawTerminalState)
+		}
+		fmt.Fprintf(output, "%s%s", layout.newline, siteQuotaQuotaPromptLine(layout, selectedRow))
+		quotaAnswer, quitQuotaPrompt, err := readSiteQuotaQuotaAnswer(reader)
+		if rawTerminal {
+			terminalState, rawErr := term.MakeRaw(int(inputFile.Fd()))
+			if rawErr != nil {
+				return rawErr
+			}
+			rawTerminalState = terminalState
+		}
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				return nil
+			}
+			return err
+		}
+		if quitQuotaPrompt {
+			return nil
+		}
+		limitBytes, quotaRequested, err := parseSiteQuotaLimitBytes(quotaAnswer)
+		if err != nil || !quotaRequested {
+			if err == nil {
+				err = fmt.Errorf("quota value is required")
+			}
+			fmt.Fprintf(output, "%s%v%s%s", terminalRed(), err, terminalReset(), layout.newline)
+			continue
+		}
+		updatedRow, err := updateSiteQuotaLimit(ctx, storagePath, dbPath, selectedRow.Domain, limitBytes)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(output, "%sUpdated %s: %s used / %s limit%s%s", terminalGreen(), updatedRow.Domain, formatFileSize(updatedRow.UsedBytes), formatFileSize(updatedRow.LimitBytes), terminalReset(), layout.newline)
+		rows, err = listSiteQuotaRows(ctx, storagePath, dbPath)
+		if err != nil {
+			return err
+		}
+		if selectedIndex >= len(rows) {
+			selectedIndex = len(rows) - 1
+		}
+	}
+}
+
+type siteQuotaMenuCommand struct {
+	Action string
+	Index  int
+}
+
+func readSiteQuotaMenuCommand(reader *bufio.Reader) (siteQuotaMenuCommand, error) {
+	for {
+		nextByte, err := reader.ReadByte()
+		if err != nil {
+			return siteQuotaMenuCommand{}, err
+		}
+		switch {
+		case nextByte == '\r' || nextByte == '\n':
+			return siteQuotaMenuCommand{Action: "enter"}, nil
+		case nextByte == 'q' || nextByte == 'Q':
+			drainSiteQuotaInputLine(reader)
+			return siteQuotaMenuCommand{Action: "quit"}, nil
+		case nextByte >= '0' && nextByte <= '9':
+			digitBytes := []byte{nextByte}
+			for {
+				peekBytes, err := reader.Peek(1)
+				if err != nil || len(peekBytes) == 0 || peekBytes[0] < '0' || peekBytes[0] > '9' {
+					break
+				}
+				nextDigit, _ := reader.ReadByte()
+				digitBytes = append(digitBytes, nextDigit)
+			}
+			drainSiteQuotaInputLine(reader)
+			selectedNumber, err := strconv.Atoi(string(digitBytes))
+			if err != nil {
+				return siteQuotaMenuCommand{Action: "invalid"}, nil
+			}
+			return siteQuotaMenuCommand{Action: "number", Index: selectedNumber}, nil
+		case nextByte == 0x1b:
+			secondByte, err := reader.ReadByte()
+			if err != nil {
+				return siteQuotaMenuCommand{}, err
+			}
+			thirdByte, err := reader.ReadByte()
+			if err != nil {
+				return siteQuotaMenuCommand{}, err
+			}
+			drainSiteQuotaInputLine(reader)
+			if secondByte == '[' && thirdByte == 'A' {
+				return siteQuotaMenuCommand{Action: "up"}, nil
+			}
+			if secondByte == '[' && thirdByte == 'B' {
+				return siteQuotaMenuCommand{Action: "down"}, nil
+			}
+			return siteQuotaMenuCommand{Action: "invalid"}, nil
+		}
+	}
+}
+
+func readSiteQuotaQuotaAnswer(reader *bufio.Reader) (string, bool, error) {
+	var quotaText strings.Builder
+	for {
+		nextByte, err := reader.ReadByte()
+		if err != nil {
+			return "", false, err
+		}
+		switch nextByte {
+		case '\r', '\n':
+			return strings.TrimSpace(quotaText.String()), false, nil
+		case 'q', 'Q':
+			if quotaText.Len() == 0 {
+				drainSiteQuotaInputLine(reader)
+				return "", true, nil
+			}
+			quotaText.WriteByte(nextByte)
+		default:
+			quotaText.WriteByte(nextByte)
+		}
+	}
+}
+
+func drainSiteQuotaInputLine(reader *bufio.Reader) {
+	if reader.Buffered() == 0 {
+		return
+	}
+	peekBytes, err := reader.Peek(1)
+	if err != nil || len(peekBytes) == 0 {
+		return
+	}
+	if peekBytes[0] != '\n' && peekBytes[0] != '\r' {
+		return
+	}
+	firstLineByte, _ := reader.ReadByte()
+	if firstLineByte != '\r' || reader.Buffered() == 0 {
+		return
+	}
+	peekBytes, err = reader.Peek(1)
+	if err == nil && len(peekBytes) > 0 && peekBytes[0] == '\n' {
+		_, _ = reader.ReadByte()
+	}
+}
+
+type siteQuotaTerminalLayout struct {
+	width       int
+	height      int
+	colors      bool
+	clearScreen bool
+	newline     string
+}
+
+func siteQuotaTerminalLayoutForWriter(output io.Writer) siteQuotaTerminalLayout {
+	layout := siteQuotaTerminalLayout{width: 120, height: 24, newline: "\n"}
+	outputFile, ok := output.(*os.File)
+	if !ok || !term.IsTerminal(int(outputFile.Fd())) {
+		return layout
+	}
+	layout.colors = true
+	layout.clearScreen = true
+	width, height, err := term.GetSize(int(outputFile.Fd()))
+	if err == nil && width > 0 {
+		layout.width = width
+	}
+	if err == nil && height > 0 {
+		layout.height = height
+	}
+	return layout
+}
+
+func printSiteQuotaRows(output io.Writer, storagePath, dbPath string, rows []siteQuotaRow, selectedIndex int, layout siteQuotaTerminalLayout) {
+	if layout.newline == "" {
+		layout.newline = "\n"
+	}
+	if len(rows) == 0 {
+		fmt.Fprintf(output, "No sites found in %s (database root: %s)\n", storagePath, siteDatabaseRootPath(dbPath))
+		return
+	}
+	if layout.clearScreen {
+		fmt.Fprint(output, "\033[2J\033[H")
+	}
+	innerWidth := siteQuotaInnerWidth(layout.width)
+	visibleRows := layout.height - 4
+	if visibleRows < 0 {
+		visibleRows = 0
+	}
+	if visibleRows > len(rows) {
+		visibleRows = len(rows)
+	}
+	if visibleRows == 0 {
+		siteQuotaPrintLine(output, layout, siteQuotaBoxBorderLine(innerWidth))
+		siteQuotaPrintLine(output, layout, siteQuotaBoxContentLineColored(layout, innerWidth, terminalBold(), siteQuotaHeaderLine(len(rows), selectedIndex, innerWidth)))
+		siteQuotaPrintLine(output, layout, siteQuotaBoxContentLine(innerWidth, ""))
+		siteQuotaPrintLine(output, layout, siteQuotaBoxContentLineColored(layout, innerWidth, terminalCyan(), truncateDisplayText("window too small", innerWidth)))
+		siteQuotaPrintLine(output, layout, siteQuotaBoxBorderLine(innerWidth))
+		return
+	}
+	startIndex := 0
+	if len(rows) > visibleRows {
+		startIndex = selectedIndex - visibleRows/2
+		if startIndex < 0 {
+			startIndex = 0
+		}
+		if startIndex+visibleRows > len(rows) {
+			startIndex = len(rows) - visibleRows
+		}
+	}
+	endIndex := startIndex + visibleRows
+	siteQuotaPrintLine(output, layout, siteQuotaBoxBorderLine(innerWidth))
+	siteQuotaPrintLine(output, layout, siteQuotaBoxContentLineColored(layout, innerWidth, terminalBold(), siteQuotaHeaderLine(len(rows), selectedIndex, innerWidth)))
+	for rowIndex := startIndex; rowIndex < endIndex; rowIndex++ {
+		rowLine, rowColor := siteQuotaRowLine(rows[rowIndex], rowIndex+1, rowIndex == selectedIndex, innerWidth)
+		siteQuotaPrintLine(output, layout, siteQuotaBoxContentLineColored(layout, innerWidth, rowColor, rowLine))
+	}
+	if endIndex < len(rows) {
+		hiddenRowsText := fmt.Sprintf("... %d more", len(rows)-endIndex)
+		siteQuotaPrintLine(output, layout, siteQuotaBoxContentLineColored(layout, innerWidth, terminalCyan(), truncateDisplayText(hiddenRowsText, innerWidth)))
+	}
+	siteQuotaPrintLine(output, layout, siteQuotaBoxContentLineColored(layout, innerWidth, terminalCyan(), siteQuotaMenuHelpLine(innerWidth)))
+	siteQuotaPrintLine(output, layout, siteQuotaBoxBorderLine(innerWidth))
+}
+
+func siteQuotaHeaderLine(totalRows, selectedIndex, width int) string {
+	headerText := fmt.Sprintf("sites %d/%d  q quit  up/down move  enter edit", selectedIndex+1, totalRows)
+	if width < 48 {
+		headerText = fmt.Sprintf("%d/%d q quit up/down enter", selectedIndex+1, totalRows)
+	}
+	return truncateDisplayText(headerText, width)
+}
+
+func siteQuotaMenuHelpLine(width int) string {
+	return truncateDisplayText("q quit  up/down move  enter edit", width)
+}
+
+func siteQuotaQuotaPromptLine(layout siteQuotaTerminalLayout, row siteQuotaRow) string {
+	prompt := fmt.Sprintf("quota for %s [%s]: ", row.Domain, quotaRecommendation(row))
+	return siteQuotaApplyColor(layout, terminalCyan(), truncateDisplayText(prompt, layout.width))
+}
+
+func siteQuotaRowLine(row siteQuotaRow, index int, selected bool, width int) (string, string) {
+	usageText := compactQuotaUsageText(row)
+	stateText, stateColor := siteQuotaQuotaState(row)
+	lineText := fmt.Sprintf("[%d] %s | %s | %s | aliases:%d", index, row.Domain, usageText, stateText, len(row.Aliases))
+	lineText = truncateDisplayText(lineText, width)
+	if selected {
+		return lineText, terminalCyan() + terminalBold()
+	}
+	return lineText, stateColor
+}
+
+func compactQuotaUsageText(row siteQuotaRow) string {
+	usedText := formatCompactFileSize(row.UsedBytes)
+	limitText := formatCompactFileSize(row.LimitBytes)
+	if row.LimitBytes <= 0 {
+		return fmt.Sprintf("used %s  quota:none", usedText)
+	}
+	freeBytes := row.LimitBytes - row.UsedBytes
+	if freeBytes <= 0 {
+		return fmt.Sprintf("used %s/%s  quota:full", usedText, limitText)
+	}
+	return fmt.Sprintf("used %s/%s  free:%s", usedText, limitText, compactPercentText(freeBytes, row.LimitBytes))
+}
+
+func siteQuotaQuotaState(row siteQuotaRow) (string, string) {
+	if row.LimitBytes <= 0 {
+		return "quota:none", terminalYellow()
+	}
+	freeBytes := row.LimitBytes - row.UsedBytes
+	if freeBytes <= 0 {
+		return "quota:full", terminalRed()
+	}
+	freePercent := float64(freeBytes) * 100 / float64(row.LimitBytes)
+	if freePercent < 25 {
+		return "quota:low", terminalYellow()
+	}
+	return "quota:ok", terminalGreen()
+}
+
+func siteQuotaApplyColor(layout siteQuotaTerminalLayout, color string, text string) string {
+	if !layout.colors || color == "" {
+		return text
+	}
+	return color + text + terminalReset()
+}
+
+func siteQuotaInnerWidth(width int) int {
+	if width <= 4 {
+		return 1
+	}
+	return width - 4
+}
+
+func siteQuotaBoxBorderLine(innerWidth int) string {
+	return "+" + strings.Repeat("-", innerWidth) + "+"
+}
+
+func siteQuotaBoxContentLine(innerWidth int, text string) string {
+	return "|" + padAndTruncateDisplayText(text, innerWidth) + "|"
+}
+
+func siteQuotaBoxContentLineColored(layout siteQuotaTerminalLayout, innerWidth int, color string, text string) string {
+	paddedText := padAndTruncateDisplayText(text, innerWidth)
+	if layout.colors && color != "" {
+		paddedText = color + paddedText + terminalReset()
+	}
+	return "|" + paddedText + "|"
+}
+
+func siteQuotaPrintLine(output io.Writer, layout siteQuotaTerminalLayout, text string) {
+	fmt.Fprint(output, text, layout.newline)
+}
+
+func padAndTruncateDisplayText(text string, width int) string {
+	trimmedText := truncateDisplayText(text, width)
+	if width <= 0 {
+		return ""
+	}
+	if len(trimmedText) >= width {
+		return trimmedText
+	}
+	return trimmedText + strings.Repeat(" ", width-len(trimmedText))
+}
+
+func compactPercentText(freeBytes, limitBytes int64) string {
+	if limitBytes <= 0 {
+		return "0%"
+	}
+	percent := int((float64(freeBytes) * 100) / float64(limitBytes))
+	if percent < 0 {
+		percent = 0
+	}
+	if percent > 100 {
+		percent = 100
+	}
+	return fmt.Sprintf("%d%%", percent)
+}
+
+func compactDisplayText(text string, width int) string {
+	trimmedText := strings.TrimSpace(text)
+	if width <= 0 || len(trimmedText) <= width {
+		return trimmedText
+	}
+	if width <= 3 {
+		return trimmedText[:width]
+	}
+	return trimmedText[:width-3] + "..."
+}
+
+func compactPathText(text string, width int) string {
+	trimmedText := strings.TrimSpace(text)
+	if width <= 0 || len(trimmedText) <= width {
+		return trimmedText
+	}
+	if width <= 3 {
+		return trimmedText[len(trimmedText)-width:]
+	}
+	return "..." + trimmedText[len(trimmedText)-(width-3):]
+}
+
+func truncateDisplayText(text string, width int) string {
+	trimmedText := strings.TrimSpace(text)
+	if width <= 0 || len(trimmedText) <= width {
+		return trimmedText
+	}
+	if width <= 3 {
+		return trimmedText[:width]
+	}
+	return trimmedText[:width-3] + "..."
+}
+
+func formatCompactFileSize(size int64) string {
+	const kilobyte = int64(1024)
+	const megabyte = int64(1024 * kilobyte)
+	const gigabyte = int64(1024 * megabyte)
+	switch {
+	case size >= gigabyte:
+		if size%gigabyte == 0 {
+			return fmt.Sprintf("%dG", size/gigabyte)
+		}
+		return fmt.Sprintf("%.1fG", float64(size)/float64(gigabyte))
+	case size >= megabyte:
+		if size%megabyte == 0 {
+			return fmt.Sprintf("%dM", size/megabyte)
+		}
+		return fmt.Sprintf("%.1fM", float64(size)/float64(megabyte))
+	case size >= kilobyte:
+		if size%kilobyte == 0 {
+			return fmt.Sprintf("%dK", size/kilobyte)
+		}
+		return fmt.Sprintf("%.1fK", float64(size)/float64(kilobyte))
+	default:
+		return fmt.Sprintf("%dB", size)
+	}
+}
+
+func quotaRecommendation(row siteQuotaRow) string {
+	recommendedBytes := recommendedQuotaBytes(row.UsedBytes)
+	if row.UsedBytes >= row.LimitBytes {
+		return fmt.Sprintf("quota is exhausted; set at least %s", formatQuotaForInput(recommendedBytes))
+	}
+	return fmt.Sprintf("suggested %s", formatQuotaForInput(recommendedBytes))
+}
+
+func recommendedQuotaBytes(usedBytes int64) int64 {
+	const gigabyte = int64(1024 * 1024 * 1024)
+	const megabyte = int64(1024 * 1024)
+	minimumBytes := usedBytes + usedBytes/5
+	if minimumBytes < 512*megabyte {
+		minimumBytes = 512 * megabyte
+	}
+	if minimumBytes%gigabyte == 0 {
+		return minimumBytes
+	}
+	if minimumBytes >= gigabyte {
+		return ((minimumBytes / gigabyte) + 1) * gigabyte
+	}
+	return ((minimumBytes / megabyte) + 1) * megabyte
+}
+
+func formatQuotaForInput(sizeBytes int64) string {
+	const gigabyte = int64(1024 * 1024 * 1024)
+	const megabyte = int64(1024 * 1024)
+	if sizeBytes >= gigabyte && sizeBytes%gigabyte == 0 {
+		return fmt.Sprintf("%dgb", sizeBytes/gigabyte)
+	}
+	return fmt.Sprintf("%dmb", sizeBytes/megabyte)
+}
+
+func terminalBold() string {
+	return "\033[1m"
+}
+
+func terminalGreen() string {
+	return "\033[32m"
+}
+
+func terminalCyan() string {
+	return "\033[36m"
+}
+
+func terminalRed() string {
+	return "\033[31m"
+}
+
+func terminalYellow() string {
+	return "\033[33m"
+}
+
+func terminalReset() string {
+	return "\033[0m"
 }
 
 func (usage domainStorageUsage) totalBytes() int64 {

@@ -400,6 +400,268 @@ func TestDomainStorageUsageRebuildsFromActualDiskUsage(t *testing.T) {
 	}
 }
 
+func TestParseSiteQuotaLimitBytesAcceptsMegabytesOrGigabytes(t *testing.T) {
+	megabyteLimit, megabyteRequested, megabyteErr := parseSiteQuotaLimitBytes("512mb")
+	if megabyteErr != nil {
+		t.Fatalf("megabyte quota: %v", megabyteErr)
+	}
+	if !megabyteRequested || megabyteLimit != 512*1024*1024 {
+		t.Fatalf("megabyte quota = %d requested=%v", megabyteLimit, megabyteRequested)
+	}
+
+	gigabyteLimit, gigabyteRequested, gigabyteErr := parseSiteQuotaLimitBytes("3gb")
+	if gigabyteErr != nil {
+		t.Fatalf("gigabyte quota: %v", gigabyteErr)
+	}
+	if !gigabyteRequested || gigabyteLimit != 3*1024*1024*1024 {
+		t.Fatalf("gigabyte quota = %d requested=%v", gigabyteLimit, gigabyteRequested)
+	}
+
+	if _, _, err := parseSiteQuotaLimitBytes("256"); err == nil {
+		t.Fatal("expected quota without unit to be rejected")
+	}
+}
+
+func TestSiteQuotaCommandListsAndUpdatesPerSiteDatabase(t *testing.T) {
+	storagePath := t.TempDir()
+	dbPath := filepath.Join(storagePath, defaultDBPath)
+	siteDatabasePath := filepath.Join(siteDatabaseRootPath(dbPath), domainStorageName("example.com")+".db")
+	if err := ensureParentDir(siteDatabasePath); err != nil {
+		t.Fatal(err)
+	}
+	rawDB, err := sql.Open("sqlite", "file:"+siteDatabasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = rawDB.Close()
+	})
+	application := &App{db: rawDB, storagePath: storagePath}
+	if err := application.migrate(contextWithDomain(context.Background(), "example.com")); err != nil {
+		t.Fatalf("migrate site db: %v", err)
+	}
+	if _, err := rawDB.Exec(`INSERT OR REPLACE INTO pages(domain,path,title,html,published) VALUES(?,?,?,?,?)`, "example.com", "/", "Home", strings.Repeat("A", 64), 0); err != nil {
+		t.Fatalf("insert page: %v", err)
+	}
+	if _, err := rawDB.Exec(`INSERT INTO domain_aliases(primary_domain,alias_domain,verification_token,is_verified,dns_a_ok,is_selected,last_checked_at) VALUES(?,?,?,?,?,?,?)`,
+		"example.com", "www.example.com", "token", 1, 1, 1, time.Now().Format(time.RFC3339)); err != nil {
+		t.Fatalf("insert alias: %v", err)
+	}
+
+	var listOutput bytes.Buffer
+	if err := runSiteQuotaCommand(context.Background(), &listOutput, strings.NewReader("q\n"), storagePath, dbPath, true, "", ""); err != nil {
+		t.Fatalf("list sites: %v", err)
+	}
+	if !strings.Contains(listOutput.String(), "example.com") {
+		t.Fatalf("list output missing site: %s", listOutput.String())
+	}
+	if !strings.Contains(listOutput.String(), "www.example.com") {
+		t.Fatalf("list output missing alias: %s", listOutput.String())
+	}
+	if !strings.Contains(listOutput.String(), "dir:") {
+		t.Fatalf("list output missing compact directory path: %s", listOutput.String())
+	}
+
+	var updateOutput bytes.Buffer
+	if err := runSiteQuotaCommand(context.Background(), &updateOutput, strings.NewReader(""), storagePath, dbPath, false, "example.com", "2gb"); err != nil {
+		t.Fatalf("update quota: %v", err)
+	}
+	if !strings.Contains(updateOutput.String(), "2.0 GB limit") {
+		t.Fatalf("update output missing limit: %s", updateOutput.String())
+	}
+	var limitBytes int64
+	if err := rawDB.QueryRow(`SELECT limit_bytes FROM domain_storage_usage WHERE domain=?`, "example.com").Scan(&limitBytes); err != nil {
+		t.Fatalf("read updated quota: %v", err)
+	}
+	if limitBytes != 2*1024*1024*1024 {
+		t.Fatalf("limit bytes = %d, want 2 GiB", limitBytes)
+	}
+}
+
+func TestSiteQuotaInteractiveConsoleUpdatesQuota(t *testing.T) {
+	storagePath := t.TempDir()
+	dbPath := filepath.Join(storagePath, defaultDBPath)
+	siteDatabasePath := filepath.Join(siteDatabaseRootPath(dbPath), domainStorageName("example.com")+".db")
+	if err := ensureParentDir(siteDatabasePath); err != nil {
+		t.Fatal(err)
+	}
+	rawDB, err := sql.Open("sqlite", "file:"+siteDatabasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = rawDB.Close()
+	})
+	application := &App{db: rawDB, storagePath: storagePath}
+	if err := application.migrate(contextWithDomain(context.Background(), "example.com")); err != nil {
+		t.Fatalf("migrate site db: %v", err)
+	}
+
+	var output bytes.Buffer
+	input := strings.NewReader("1\n64mb\nq\n")
+	if err := runSiteQuotaCommand(context.Background(), &output, input, storagePath, dbPath, true, "", ""); err != nil {
+		t.Fatalf("interactive quota: %v", err)
+	}
+	var limitBytes int64
+	if err := rawDB.QueryRow(`SELECT limit_bytes FROM domain_storage_usage WHERE domain=?`, "example.com").Scan(&limitBytes); err != nil {
+		t.Fatalf("read interactive quota: %v", err)
+	}
+	if limitBytes != 64*1024*1024 {
+		t.Fatalf("limit bytes = %d, want 64 MiB", limitBytes)
+	}
+	if !strings.Contains(output.String(), "Updated example.com") {
+		t.Fatalf("interactive output missing update confirmation: %s", output.String())
+	}
+}
+
+func TestSiteQuotaInteractiveConsoleQuitsFromQuotaPrompt(t *testing.T) {
+	storagePath := t.TempDir()
+	dbPath := filepath.Join(storagePath, defaultDBPath)
+	siteDatabasePath := filepath.Join(siteDatabaseRootPath(dbPath), domainStorageName("example.com")+".db")
+	if err := ensureParentDir(siteDatabasePath); err != nil {
+		t.Fatal(err)
+	}
+	rawDB, err := sql.Open("sqlite", "file:"+siteDatabasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = rawDB.Close()
+	})
+	application := &App{db: rawDB, storagePath: storagePath}
+	if err := application.migrate(contextWithDomain(context.Background(), "example.com")); err != nil {
+		t.Fatalf("migrate site db: %v", err)
+	}
+
+	var output bytes.Buffer
+	input := strings.NewReader("1\nq\n")
+	if err := runSiteQuotaCommand(context.Background(), &output, input, storagePath, dbPath, true, "", ""); err != nil {
+		t.Fatalf("quota prompt quit: %v", err)
+	}
+	var limitBytes int64
+	if err := rawDB.QueryRow(`SELECT limit_bytes FROM domain_storage_usage WHERE domain=?`, "example.com").Scan(&limitBytes); err != nil {
+		t.Fatalf("read quota after quit: %v", err)
+	}
+	if limitBytes != defaultDomainStorageLimitBytes {
+		t.Fatalf("limit bytes = %d, want unchanged default", limitBytes)
+	}
+}
+
+func TestSiteQuotaInteractiveConsoleSupportsArrowSelection(t *testing.T) {
+	storagePath := t.TempDir()
+	dbPath := filepath.Join(storagePath, defaultDBPath)
+	firstDatabasePath := filepath.Join(siteDatabaseRootPath(dbPath), domainStorageName("alpha.com")+".db")
+	secondDatabasePath := filepath.Join(siteDatabaseRootPath(dbPath), domainStorageName("beta.com")+".db")
+	for _, databasePath := range []string{firstDatabasePath, secondDatabasePath} {
+		if err := ensureParentDir(databasePath); err != nil {
+			t.Fatal(err)
+		}
+	}
+	firstDB, err := sql.Open("sqlite", "file:"+firstDatabasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer firstDB.Close()
+	secondDB, err := sql.Open("sqlite", "file:"+secondDatabasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer secondDB.Close()
+	if err := (&App{db: firstDB, storagePath: storagePath}).migrate(contextWithDomain(context.Background(), "alpha.com")); err != nil {
+		t.Fatalf("migrate first db: %v", err)
+	}
+	if err := (&App{db: secondDB, storagePath: storagePath}).migrate(contextWithDomain(context.Background(), "beta.com")); err != nil {
+		t.Fatalf("migrate second db: %v", err)
+	}
+
+	var output bytes.Buffer
+	input := strings.NewReader("\x1b[B\n\n128mb\nq\n")
+	if err := runSiteQuotaCommand(context.Background(), &output, input, storagePath, dbPath, true, "", ""); err != nil {
+		t.Fatalf("interactive arrow quota: %v", err)
+	}
+	var firstLimitBytes int64
+	if err := firstDB.QueryRow(`SELECT limit_bytes FROM domain_storage_usage WHERE domain=?`, "alpha.com").Scan(&firstLimitBytes); err != nil {
+		t.Fatalf("read first quota: %v", err)
+	}
+	if firstLimitBytes != defaultDomainStorageLimitBytes {
+		t.Fatalf("first limit bytes = %d, want unchanged default", firstLimitBytes)
+	}
+	var secondLimitBytes int64
+	if err := secondDB.QueryRow(`SELECT limit_bytes FROM domain_storage_usage WHERE domain=?`, "beta.com").Scan(&secondLimitBytes); err != nil {
+		t.Fatalf("read second quota: %v", err)
+	}
+	if secondLimitBytes != 128*1024*1024 {
+		t.Fatalf("second limit bytes = %d, want 128 MiB", secondLimitBytes)
+	}
+	if !strings.Contains(output.String(), "free") {
+		t.Fatalf("interactive output missing free space label: %s", output.String())
+	}
+}
+
+func TestSiteQuotaMenuRenderingIsCompact(t *testing.T) {
+	rows := []siteQuotaRow{
+		{
+			Domain:       "example.com",
+			Aliases:      []string{"www.example.com", "shop.example.com"},
+			UsedBytes:    2 * 1024 * 1024 * 1024,
+			LimitBytes:   3 * 1024 * 1024 * 1024,
+			FilesPath:    "/private/tmp/sitebrush/storage/sites/example.com",
+			DatabasePath: "/private/tmp/sitebrush/storage/sites/example.com.db",
+		},
+	}
+
+	var output bytes.Buffer
+	printSiteQuotaRows(&output, "/private/tmp/sitebrush", "/private/tmp/sitebrush/storage/db/sitebrush.db", rows, 0, siteQuotaTerminalLayout{width: 72, height: 4})
+
+	rendered := output.String()
+	if !strings.Contains(rendered, "+") || !strings.Contains(rendered, "|") {
+		t.Fatalf("compact menu missing frame: %s", rendered)
+	}
+	for _, line := range strings.Split(strings.TrimSpace(rendered), "\n") {
+		if len(line) > 72 {
+			t.Fatalf("compact menu line exceeds width: %d > 72 in %q", len(line), line)
+		}
+	}
+	if strings.Contains(rendered, "quota:   ") {
+		t.Fatalf("compact menu should not use legacy detail layout: %s", rendered)
+	}
+	if strings.Contains(rendered, "dir:") {
+		t.Fatalf("compact menu should not render long paths: %s", rendered)
+	}
+}
+
+func TestSiteQuotaMenuRenderingUsesRawTerminalNewlines(t *testing.T) {
+	rows := []siteQuotaRow{
+		{
+			Domain:     "localhost",
+			UsedBytes:  1024 * 1024,
+			LimitBytes: 1024 * 1024 * 1024,
+			FilesPath:  "/private/tmp/sitebrush/storage/files/localhost",
+		},
+	}
+
+	var output bytes.Buffer
+	printSiteQuotaRows(&output, "/private/tmp/sitebrush", "/private/tmp/sitebrush/storage/db/sitebrush.db", rows, 0, siteQuotaTerminalLayout{width: 60, height: 5, newline: "\r\n"})
+
+	rendered := output.String()
+	if !strings.Contains(rendered, "\r\n") {
+		t.Fatalf("raw terminal menu should use CRLF line endings: %q", rendered)
+	}
+	if strings.Contains(rendered, "\n|") && !strings.Contains(rendered, "\r\n|") {
+		t.Fatalf("raw terminal menu emitted LF-only content lines: %q", rendered)
+	}
+}
+
+func TestQuotaRecommendationShowsExhaustedLimit(t *testing.T) {
+	row := siteQuotaRow{UsedBytes: 2 * 1024 * 1024 * 1024, LimitBytes: 1024 * 1024 * 1024}
+	if label, _ := siteQuotaQuotaState(row); label != "quota:full" {
+		t.Fatalf("quota state = %q, want quota:full", label)
+	}
+	if recommendation := quotaRecommendation(row); !strings.Contains(recommendation, "3gb") {
+		t.Fatalf("recommendation = %q, want rounded quota hint", recommendation)
+	}
+}
+
 func TestLoginReturnPathDefaultsToCurrentPageWithoutAutoVisual(t *testing.T) {
 	request := httptest.NewRequest(http.MethodGet, "http://localhost:8080/docs?login", nil)
 	if returnPath := loginReturnPathOrDefault(request); returnPath != "/docs" {
