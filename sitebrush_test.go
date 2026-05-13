@@ -1233,6 +1233,181 @@ func TestSavePagePropagatesSiteBrushTemplateToOtherPagesAndPublishedOutputs(t *t
 	}
 }
 
+func TestSavePageSynchronizesAddedSiteBrushTemplateClassByNormalizedInnerHTML(t *testing.T) {
+	application, rawDB := newTestApplication(t)
+	_, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "admin@example.com", "old")
+	if err != nil {
+		t.Fatalf("insert user: %v", err)
+	}
+
+	homeBefore := `<html><body><section class="hero lead"><h1>Shared</h1><p>Copy</p></section><section class="secondary"><h1>Unique</h1></section></body></html>`
+	aboutBefore := "<html><body><main><section class=\"lead hero\"><h1>\nShared\n</h1>\n<p>Copy</p></section></main></body></html>"
+	contactBefore := `<html><body><section class="target"><h1>Shared</h1><p>Copy</p></section><div class="lead hero"><h1>Shared</h1><p>Copy</p></div></body></html>`
+	_, err = rawDB.Exec(`INSERT INTO pages(domain,path,title,html,published) VALUES(?,?,?,?,1),(?,?,?,?,1),(?,?,?,?,1)`,
+		"localhost", "/", "Home", homeBefore,
+		"localhost", "/about", "About", aboutBefore,
+		"localhost", "/contact", "Contact", contactBefore,
+	)
+	if err != nil {
+		t.Fatalf("insert pages: %v", err)
+	}
+	_, err = rawDB.Exec(`INSERT INTO published_pages(domain,path,title,html) VALUES(?,?,?,?),(?,?,?,?),(?,?,?,?)`,
+		"localhost", "/", "Home", homeBefore,
+		"localhost", "/about", "About", aboutBefore,
+		"localhost", "/contact", "Contact", contactBefore,
+	)
+	if err != nil {
+		t.Fatalf("insert published pages: %v", err)
+	}
+	application.writePublishedStaticHTML("localhost", "/", homeBefore)
+	application.writePublishedStaticHTML("localhost", "/about", aboutBefore)
+	application.writePublishedStaticHTML("localhost", "/contact", contactBefore)
+
+	homeAfter := `<html><body><section class="hero SiteBrush-Template SiteBrush-Template lead"><h1>Shared</h1><p>Copy</p></section><section class="secondary"><h1>Unique</h1></section></body></html>`
+	form := url.Values{}
+	form.Set("path", "/")
+	form.Set("title", "Home")
+	form.Set("html", homeAfter)
+	request := httptest.NewRequest(http.MethodPost, "http://localhost:8080/?save", strings.NewReader(form.Encode()))
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	request.AddCookie(newAdminSessionCookie(t, application, "admin@example.com"))
+	response := httptest.NewRecorder()
+	application.route(response, request)
+	if response.Code != http.StatusFound {
+		t.Fatalf("status = %d, body=%q", response.Code, response.Body.String())
+	}
+
+	var updatedHomeHTML string
+	if err := rawDB.QueryRow(`SELECT html FROM pages WHERE domain=? AND path=?`, "localhost", "/").Scan(&updatedHomeHTML); err != nil {
+		t.Fatalf("read home page: %v", err)
+	}
+	if !strings.Contains(updatedHomeHTML, `<section class="SiteBrush-Template hero lead"><h1>Shared</h1><p>Copy</p></section>`) {
+		t.Fatalf("home page did not canonicalize added class first: %s", updatedHomeHTML)
+	}
+
+	var updatedAboutHTML string
+	if err := rawDB.QueryRow(`SELECT html FROM pages WHERE domain=? AND path=?`, "localhost", "/about").Scan(&updatedAboutHTML); err != nil {
+		t.Fatalf("read about page: %v", err)
+	}
+	if !strings.Contains(updatedAboutHTML, `<section class="SiteBrush-Template lead hero"><h1>
+Shared
+</h1>
+<p>Copy</p></section>`) {
+		t.Fatalf("about page did not receive synchronized class first: %s", updatedAboutHTML)
+	}
+
+	var updatedContactHTML string
+	if err := rawDB.QueryRow(`SELECT html FROM pages WHERE domain=? AND path=?`, "localhost", "/contact").Scan(&updatedContactHTML); err != nil {
+		t.Fatalf("read contact page: %v", err)
+	}
+	if updatedContactHTML != contactBefore {
+		t.Fatalf("contact page with different tag or class set changed unexpectedly: %s", updatedContactHTML)
+	}
+
+	var updatedPublishedAboutHTML string
+	if err := rawDB.QueryRow(`SELECT html FROM published_pages WHERE domain=? AND path=?`, "localhost", "/about").Scan(&updatedPublishedAboutHTML); err != nil {
+		t.Fatalf("read published about page: %v", err)
+	}
+	if updatedPublishedAboutHTML != updatedAboutHTML {
+		t.Fatalf("published about html = %q, want %q", updatedPublishedAboutHTML, updatedAboutHTML)
+	}
+
+	aboutStaticHTML, readErr := os.ReadFile(filepath.Join(application.domainStaticDir("localhost"), staticRelativePathForPage("/about")))
+	if readErr != nil {
+		t.Fatalf("read static about page: %v", readErr)
+	}
+	if string(aboutStaticHTML) != updatedAboutHTML {
+		t.Fatalf("static about html = %q, want %q", string(aboutStaticHTML), updatedAboutHTML)
+	}
+
+	var aboutRevisionCount int
+	if err := rawDB.QueryRow(`SELECT COUNT(*) FROM revisions WHERE domain=? AND page_path=?`, "localhost", "/about").Scan(&aboutRevisionCount); err != nil {
+		t.Fatalf("count about revisions: %v", err)
+	}
+	if aboutRevisionCount != 1 {
+		t.Fatalf("about revision count = %d, want 1", aboutRevisionCount)
+	}
+}
+
+func TestSavePageSynchronizesRemovedSiteBrushTemplateClassByNormalizedInnerHTML(t *testing.T) {
+	application, rawDB := newTestApplication(t)
+	_, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "admin@example.com", "old")
+	if err != nil {
+		t.Fatalf("insert user: %v", err)
+	}
+
+	homeBefore := `<html><body><footer class="SiteBrush-Template footer shared"><span>Phone</span></footer></body></html>`
+	aboutBefore := "<html><body><footer class=\"SiteBrush-Template shared footer\"><span>\nPhone\n</span></footer></body></html>"
+	contactBefore := `<html><body><footer class="SiteBrush-Template contact"><span>Phone</span></footer><div class="SiteBrush-Template footer shared"><span>Phone</span></div></body></html>`
+	_, err = rawDB.Exec(`INSERT INTO pages(domain,path,title,html,published) VALUES(?,?,?,?,1),(?,?,?,?,1),(?,?,?,?,1)`,
+		"localhost", "/", "Home", homeBefore,
+		"localhost", "/about", "About", aboutBefore,
+		"localhost", "/contact", "Contact", contactBefore,
+	)
+	if err != nil {
+		t.Fatalf("insert pages: %v", err)
+	}
+	_, err = rawDB.Exec(`INSERT INTO published_pages(domain,path,title,html) VALUES(?,?,?,?),(?,?,?,?),(?,?,?,?)`,
+		"localhost", "/", "Home", homeBefore,
+		"localhost", "/about", "About", aboutBefore,
+		"localhost", "/contact", "Contact", contactBefore,
+	)
+	if err != nil {
+		t.Fatalf("insert published pages: %v", err)
+	}
+	application.writePublishedStaticHTML("localhost", "/", homeBefore)
+	application.writePublishedStaticHTML("localhost", "/about", aboutBefore)
+	application.writePublishedStaticHTML("localhost", "/contact", contactBefore)
+
+	homeAfter := `<html><body><footer class="footer shared"><span>Phone</span></footer></body></html>`
+	form := url.Values{}
+	form.Set("path", "/")
+	form.Set("title", "Home")
+	form.Set("html", homeAfter)
+	request := httptest.NewRequest(http.MethodPost, "http://localhost:8080/?save", strings.NewReader(form.Encode()))
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	request.AddCookie(newAdminSessionCookie(t, application, "admin@example.com"))
+	response := httptest.NewRecorder()
+	application.route(response, request)
+	if response.Code != http.StatusFound {
+		t.Fatalf("status = %d, body=%q", response.Code, response.Body.String())
+	}
+
+	var updatedAboutHTML string
+	if err := rawDB.QueryRow(`SELECT html FROM pages WHERE domain=? AND path=?`, "localhost", "/about").Scan(&updatedAboutHTML); err != nil {
+		t.Fatalf("read about page: %v", err)
+	}
+	if !strings.Contains(updatedAboutHTML, `<footer class="shared footer"><span>
+Phone
+</span></footer>`) {
+		t.Fatalf("about page did not remove synchronized class: %s", updatedAboutHTML)
+	}
+
+	var updatedContactHTML string
+	if err := rawDB.QueryRow(`SELECT html FROM pages WHERE domain=? AND path=?`, "localhost", "/contact").Scan(&updatedContactHTML); err != nil {
+		t.Fatalf("read contact page: %v", err)
+	}
+	if updatedContactHTML != contactBefore {
+		t.Fatalf("contact page with different tag or class set changed unexpectedly: %s", updatedContactHTML)
+	}
+
+	var updatedPublishedAboutHTML string
+	if err := rawDB.QueryRow(`SELECT html FROM published_pages WHERE domain=? AND path=?`, "localhost", "/about").Scan(&updatedPublishedAboutHTML); err != nil {
+		t.Fatalf("read published about page: %v", err)
+	}
+	if updatedPublishedAboutHTML != updatedAboutHTML {
+		t.Fatalf("published about html = %q, want %q", updatedPublishedAboutHTML, updatedAboutHTML)
+	}
+
+	aboutStaticHTML, readErr := os.ReadFile(filepath.Join(application.domainStaticDir("localhost"), staticRelativePathForPage("/about")))
+	if readErr != nil {
+		t.Fatalf("read static about page: %v", readErr)
+	}
+	if string(aboutStaticHTML) != updatedAboutHTML {
+		t.Fatalf("static about html = %q, want %q", string(aboutStaticHTML), updatedAboutHTML)
+	}
+}
+
 func TestFrozenSavePublishUpdatesPublishedStaticForGuests(t *testing.T) {
 	application, rawDB := newTestApplication(t)
 	_, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "admin@example.com", "old")

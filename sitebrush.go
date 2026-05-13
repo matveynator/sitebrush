@@ -37,6 +37,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"golang.org/x/crypto/acme/autocert"
 	"golang.org/x/net/html"
@@ -2230,6 +2231,7 @@ func (a *App) savePage(w http.ResponseWriter, r *http.Request) {
 		a.registerPageRedirect(r.Context(), domain, previousPath, pagePath)
 	}
 	if pageContentKind(pagePath, html) == "html" {
+		a.applyTemplateClassSynchronization(r.Context(), domain, previousStoredHTML, html)
 		a.applyTemplatePropagation(r.Context(), domain, html)
 	}
 	http.Redirect(w, r, pagePath, http.StatusFound)
@@ -6112,10 +6114,376 @@ type templateMatch struct {
 	block string
 }
 
+type templateClassActionSet struct {
+	addKeys    map[string]struct{}
+	removeKeys map[string]struct{}
+}
+
+type templateClassElement struct {
+	startTagStart int
+	startTagEnd   int
+	matchKey      string
+	hasTemplate   bool
+}
+
+type templateClassOpenElement struct {
+	tagName       string
+	startTagStart int
+	startTagEnd   int
+	classKey      string
+	hasTemplate   bool
+}
+
+type templateClassEdit struct {
+	startTagStart int
+	startTagEnd   int
+	addTemplate   bool
+}
+
 type templateOpenElement struct {
 	tagName    string
 	start      int
 	templateID string
+}
+
+var htmlClassAttributePattern = regexp.MustCompile(`(?is)\sclass\s*=\s*("([^"]*)"|'([^']*)'|([^\s"'=<>]+))`)
+
+func (a *App) applyTemplateClassSynchronization(ctx context.Context, domain, previousHTML, savedHTML string) {
+	actionSet := templateClassActionSetFromHTML(previousHTML, savedHTML)
+	if len(actionSet.addKeys) == 0 && len(actionSet.removeKeys) == 0 {
+		return
+	}
+
+	pageRows, err := a.db.QueryContext(ctx, `SELECT path,title,html FROM pages WHERE domain=?`, domain)
+	if err != nil {
+		return
+	}
+	type storedPage struct {
+		path  string
+		title string
+		html  string
+	}
+	pageList := make([]storedPage, 0)
+	for pageRows.Next() {
+		var currentPage storedPage
+		if scanErr := pageRows.Scan(&currentPage.path, &currentPage.title, &currentPage.html); scanErr != nil {
+			continue
+		}
+		pageList = append(pageList, currentPage)
+	}
+	_ = pageRows.Close()
+
+	frozenDomain := a.isDomainFrozen(ctx, domain)
+	for _, currentPage := range pageList {
+		if pageContentKind(currentPage.path, currentPage.html) != "html" {
+			continue
+		}
+		updatedHTML, changed := synchronizeTemplateClassesInHTML(currentPage.html, actionSet)
+		if !changed || updatedHTML == currentPage.html {
+			continue
+		}
+
+		updatedHTMLBytes := int64(len([]byte(updatedHTML)))
+		pageDelta := updatedHTMLBytes - int64(len([]byte(currentPage.html)))
+		publishedPageDelta := int64(0)
+		publishedStaticDelta := int64(0)
+		if !frozenDomain {
+			var previousPublishedHTML string
+			_ = a.db.QueryRowContext(ctx, `SELECT html FROM published_pages WHERE domain=? AND path=?`, domain, currentPage.path).Scan(&previousPublishedHTML)
+			publishedPageDelta = updatedHTMLBytes - int64(len([]byte(previousPublishedHTML)))
+			publishedStaticDelta = updatedHTMLBytes - fileSizeBytes(filepath.Join(a.domainStaticDir(domain), staticRelativePathForPage(currentPage.path)))
+		}
+		if storageErr := a.applyDomainStorageDelta(ctx, domain, pageDelta, publishedPageDelta, updatedHTMLBytes, 0, publishedStaticDelta); storageErr != nil {
+			log.Printf("template class synchronization blocked by storage limit domain=%s path=%s error=%v", domain, currentPage.path, storageErr)
+			continue
+		}
+
+		_, _ = a.db.ExecContext(ctx, `UPDATE pages SET html=? WHERE domain=? AND path=?`, updatedHTML, domain, currentPage.path)
+		if !frozenDomain {
+			_, _ = a.db.ExecContext(ctx, `INSERT OR REPLACE INTO published_pages(domain,path,title,html) VALUES(?,?,?,?)`, domain, currentPage.path, currentPage.title, updatedHTML)
+			a.writePublishedStaticHTML(domain, currentPage.path, updatedHTML)
+		}
+		_, _ = a.db.ExecContext(ctx, `INSERT INTO revisions(domain,page_path,html,created_at) VALUES(?,?,?,?)`, domain, currentPage.path, updatedHTML, time.Now().Format(time.RFC3339))
+	}
+}
+
+func templateClassActionSetFromHTML(previousHTML, savedHTML string) templateClassActionSet {
+	previousTemplateKeys, previousPlainKeys := templateClassKeySets(previousHTML)
+	savedTemplateKeys, savedPlainKeys := templateClassKeySets(savedHTML)
+
+	actionSet := templateClassActionSet{
+		addKeys:    make(map[string]struct{}),
+		removeKeys: make(map[string]struct{}),
+	}
+	for innerKey := range savedTemplateKeys {
+		_, wasPlain := previousPlainKeys[innerKey]
+		_, wasTemplate := previousTemplateKeys[innerKey]
+		if wasPlain || !wasTemplate {
+			actionSet.addKeys[innerKey] = struct{}{}
+		}
+	}
+	for innerKey := range previousTemplateKeys {
+		if _, isPlain := savedPlainKeys[innerKey]; isPlain {
+			actionSet.removeKeys[innerKey] = struct{}{}
+			delete(actionSet.addKeys, innerKey)
+		}
+	}
+	return actionSet
+}
+
+func templateClassKeySets(sourceHTML string) (map[string]struct{}, map[string]struct{}) {
+	templateKeys := make(map[string]struct{})
+	plainKeys := make(map[string]struct{})
+	for _, element := range scanTemplateClassElements(sourceHTML) {
+		if element.hasTemplate {
+			templateKeys[element.matchKey] = struct{}{}
+			continue
+		}
+		plainKeys[element.matchKey] = struct{}{}
+	}
+	return templateKeys, plainKeys
+}
+
+func synchronizeTemplateClassesInHTML(sourceHTML string, actionSet templateClassActionSet) (string, bool) {
+	if len(actionSet.addKeys) == 0 && len(actionSet.removeKeys) == 0 {
+		return sourceHTML, false
+	}
+	editList := make([]templateClassEdit, 0)
+	for _, element := range scanTemplateClassElements(sourceHTML) {
+		if _, removeTemplate := actionSet.removeKeys[element.matchKey]; removeTemplate && element.hasTemplate {
+			editList = append(editList, templateClassEdit{startTagStart: element.startTagStart, startTagEnd: element.startTagEnd, addTemplate: false})
+			continue
+		}
+		if _, addTemplate := actionSet.addKeys[element.matchKey]; addTemplate {
+			editList = append(editList, templateClassEdit{startTagStart: element.startTagStart, startTagEnd: element.startTagEnd, addTemplate: true})
+		}
+	}
+	if len(editList) == 0 {
+		return sourceHTML, false
+	}
+	sort.Slice(editList, func(leftIndex, rightIndex int) bool {
+		return editList[leftIndex].startTagStart < editList[rightIndex].startTagStart
+	})
+
+	var updatedHTML strings.Builder
+	updatedHTML.Grow(len(sourceHTML) + len(editList)*len("SiteBrush-Template "))
+	previousEnd := 0
+	changed := false
+	for _, edit := range editList {
+		if edit.startTagStart < previousEnd || edit.startTagEnd > len(sourceHTML) {
+			continue
+		}
+		startTag := sourceHTML[edit.startTagStart:edit.startTagEnd]
+		updatedStartTag := rewriteTemplateClassStartTag(startTag, edit.addTemplate)
+		updatedHTML.WriteString(sourceHTML[previousEnd:edit.startTagStart])
+		updatedHTML.WriteString(updatedStartTag)
+		previousEnd = edit.startTagEnd
+		if updatedStartTag != startTag {
+			changed = true
+		}
+	}
+	if !changed {
+		return sourceHTML, false
+	}
+	updatedHTML.WriteString(sourceHTML[previousEnd:])
+	return updatedHTML.String(), true
+}
+
+func scanTemplateClassElements(sourceHTML string) []templateClassElement {
+	tokenizer := html.NewTokenizer(strings.NewReader(sourceHTML))
+	openElementStack := make([]templateClassOpenElement, 0)
+	elementList := make([]templateClassElement, 0)
+	offset := 0
+
+	for {
+		tokenType := tokenizer.Next()
+		rawToken := tokenizer.Raw()
+		tokenStart := offset
+		tokenEnd := tokenStart + len(rawToken)
+		offset = tokenEnd
+
+		switch tokenType {
+		case html.ErrorToken:
+			return elementList
+		case html.StartTagToken:
+			token := tokenizer.Token()
+			tagName := strings.ToLower(token.Data)
+			classKey := normalizedTemplateClassKey(token)
+			if isHTMLVoidElement(tagName) {
+				elementList = append(elementList, templateClassElement{
+					startTagStart: tokenStart,
+					startTagEnd:   tokenEnd,
+					matchKey:      templateClassElementKey(tagName, classKey, ""),
+					hasTemplate:   tokenHasSiteBrushTemplateClass(token),
+				})
+				continue
+			}
+			openElementStack = append(openElementStack, templateClassOpenElement{
+				tagName:       tagName,
+				startTagStart: tokenStart,
+				startTagEnd:   tokenEnd,
+				classKey:      classKey,
+				hasTemplate:   tokenHasSiteBrushTemplateClass(token),
+			})
+		case html.SelfClosingTagToken:
+			token := tokenizer.Token()
+			tagName := strings.ToLower(token.Data)
+			elementList = append(elementList, templateClassElement{
+				startTagStart: tokenStart,
+				startTagEnd:   tokenEnd,
+				matchKey:      templateClassElementKey(tagName, normalizedTemplateClassKey(token), ""),
+				hasTemplate:   tokenHasSiteBrushTemplateClass(token),
+			})
+		case html.EndTagToken:
+			token := tokenizer.Token()
+			for len(openElementStack) > 0 {
+				lastIndex := len(openElementStack) - 1
+				openElement := openElementStack[lastIndex]
+				openElementStack = openElementStack[:lastIndex]
+				if !strings.EqualFold(openElement.tagName, token.Data) {
+					continue
+				}
+				elementList = append(elementList, templateClassElement{
+					startTagStart: openElement.startTagStart,
+					startTagEnd:   openElement.startTagEnd,
+					matchKey:      templateClassElementKey(openElement.tagName, openElement.classKey, normalizedTemplateInnerHTML(sourceHTML[openElement.startTagEnd:tokenStart])),
+					hasTemplate:   openElement.hasTemplate,
+				})
+				break
+			}
+		}
+	}
+}
+
+func templateClassElementKey(tagName, classKey, innerKey string) string {
+	return strings.ToLower(tagName) + "\x00" + classKey + "\x00" + innerKey
+}
+
+func tokenHasSiteBrushTemplateClass(token html.Token) bool {
+	for _, attribute := range token.Attr {
+		if strings.EqualFold(attribute.Key, "class") && classListHasSiteBrushTemplate(attribute.Val) {
+			return true
+		}
+	}
+	return false
+}
+
+func normalizedTemplateClassKey(token html.Token) string {
+	classNameSet := make(map[string]struct{})
+	for _, attribute := range token.Attr {
+		if !strings.EqualFold(attribute.Key, "class") {
+			continue
+		}
+		for _, className := range strings.Fields(attribute.Val) {
+			if strings.EqualFold(className, "SiteBrush-Template") {
+				continue
+			}
+			classNameSet[className] = struct{}{}
+		}
+	}
+	classNameList := make([]string, 0, len(classNameSet))
+	for className := range classNameSet {
+		classNameList = append(classNameList, className)
+	}
+	sort.Strings(classNameList)
+	return strings.Join(classNameList, " ")
+}
+
+func normalizedTemplateInnerHTML(innerHTML string) string {
+	return strings.Map(func(innerRune rune) rune {
+		if unicode.IsSpace(innerRune) {
+			return -1
+		}
+		return innerRune
+	}, innerHTML)
+}
+
+func isHTMLVoidElement(tagName string) bool {
+	switch strings.ToLower(tagName) {
+	case "area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source", "track", "wbr":
+		return true
+	default:
+		return false
+	}
+}
+
+func rewriteTemplateClassStartTag(startTag string, addTemplate bool) string {
+	classMatch := htmlClassAttributePattern.FindStringSubmatchIndex(startTag)
+	if classMatch == nil {
+		if !addTemplate {
+			return startTag
+		}
+		return insertTemplateClassAttribute(startTag)
+	}
+
+	classValueStart := -1
+	classValueEnd := -1
+	for _, pair := range [][2]int{{4, 5}, {6, 7}, {8, 9}} {
+		if classMatch[pair[0]] >= 0 && classMatch[pair[1]] >= 0 {
+			classValueStart = classMatch[pair[0]]
+			classValueEnd = classMatch[pair[1]]
+			break
+		}
+	}
+	if classValueStart < 0 || classValueEnd < 0 {
+		return startTag
+	}
+
+	classValue := startTag[classValueStart:classValueEnd]
+	updatedClassValue := removeSiteBrushTemplateClass(classValue)
+	if addTemplate {
+		updatedClassValue = prependSiteBrushTemplateClass(updatedClassValue)
+	}
+	if strings.TrimSpace(updatedClassValue) == "" {
+		return startTag[:classMatch[0]] + startTag[classMatch[1]:]
+	}
+	return startTag[:classMatch[0]] + ` class="` + updatedClassValue + `"` + startTag[classMatch[1]:]
+}
+
+func insertTemplateClassAttribute(startTag string) string {
+	insertIndex := strings.LastIndex(startTag, ">")
+	if insertIndex < 0 {
+		return startTag
+	}
+	for insertIndex > 0 && unicode.IsSpace(rune(startTag[insertIndex-1])) {
+		insertIndex--
+	}
+	if insertIndex > 0 && startTag[insertIndex-1] == '/' {
+		insertIndex--
+	}
+	return startTag[:insertIndex] + ` class="SiteBrush-Template"` + startTag[insertIndex:]
+}
+
+func prependSiteBrushTemplateClass(classValue string) string {
+	classNameList := make([]string, 0, len(strings.Fields(classValue))+1)
+	classNameList = append(classNameList, "SiteBrush-Template")
+	for _, className := range strings.Fields(classValue) {
+		if strings.EqualFold(className, "SiteBrush-Template") {
+			continue
+		}
+		classNameList = append(classNameList, className)
+	}
+	return strings.Join(classNameList, " ")
+}
+
+func removeSiteBrushTemplateClass(classValue string) string {
+	classNameList := make([]string, 0, len(strings.Fields(classValue)))
+	for _, className := range strings.Fields(classValue) {
+		if strings.EqualFold(className, "SiteBrush-Template") {
+			continue
+		}
+		classNameList = append(classNameList, className)
+	}
+	return strings.Join(classNameList, " ")
+}
+
+func classListHasSiteBrushTemplate(classValue string) bool {
+	for _, className := range strings.Fields(classValue) {
+		if strings.EqualFold(className, "SiteBrush-Template") {
+			return true
+		}
+	}
+	return false
 }
 
 func extractTemplateBlocks(sourceHTML string) map[string]string {
