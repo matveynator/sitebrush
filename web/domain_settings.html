@@ -56,6 +56,8 @@
     .add-form { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; align-items: center; margin: 18px 0; }
     .backup-download-link { display: inline-flex; align-items: center; gap: 8px; border: 1px solid var(--field-border); border-radius: 6px; padding: 8px 12px; background: var(--surface-soft); color: var(--text-main); text-decoration: none; }
     .backup-download-link img { width: 22px; height: 22px; object-fit: contain; }
+    .checkbox-row { display: flex; align-items: flex-start; gap: 10px; margin: 12px 0; }
+    .checkbox-row input { margin-top: 3px; }
     .alias-list { display: grid; gap: 12px; margin-top: 16px; }
     .alias-header { display: flex; justify-content: space-between; gap: 12px; align-items: center; }
     .alias-domain { font-weight: 700; word-break: break-all; }
@@ -85,6 +87,30 @@
   <p><strong>{{index .T "domain_settings_primary"}}</strong> {{.Domain}}</p>
   <p><strong>{{index .T "domain_settings_selected_domain"}}</strong> {{.SelectedDomain}}</p>
   <p class="hint">{{index .T "domain_settings_https_hint"}}</p>
+
+  <section class="dns-box">
+    <p><strong>{{index .T "domain_settings_ssl_title"}}</strong></p>
+    <form method="post" action="?settings" style="margin: 0;">
+      <input type="hidden" name="return" value="{{.ReturnPath}}">
+      <input type="hidden" name="action" value="update_auto_ssl">
+      <input type="hidden" name="ssl_domain" value="{{.AutomaticSSLDomain}}">
+      <label class="checkbox-row">
+        <input type="checkbox" name="auto_ssl_enabled" value="1" {{if .AutomaticSSL.Enabled}}checked{{end}} {{if not .AutomaticSSLReady}}disabled{{end}}>
+        <span>{{index .T "domain_settings_ssl_auto_label"}}</span>
+      </label>
+      {{if .AutomaticSSLReady}}
+        {{if .AutomaticSSL.ManuallyDisabled}}
+          <p class="hint">{{index .T "domain_settings_ssl_manual_off_hint"}}</p>
+        {{else}}
+          <p class="hint">{{index .T "domain_settings_ssl_available_hint"}}</p>
+        {{end}}
+        {{if .AutomaticSSL.LastCheckedAt}}<p class="hint">{{index .T "domain_settings_ssl_last_checked"}} {{.AutomaticSSL.LastCheckedAt}}</p>{{end}}
+        <button type="submit">{{index .T "domain_settings_ssl_save"}}</button>
+      {{else}}
+        <p class="status-bad">{{index .T "domain_settings_ssl_unavailable_hint"}}</p>
+      {{end}}
+    </form>
+  </section>
 
   <section class="dns-box">
     <p><strong>{{index .T "domain_settings_backup_title"}}</strong></p>

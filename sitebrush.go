@@ -63,12 +63,13 @@ const defaultDomainStorageLimitBytes int64 = 10 * 1024 * 1024 * 1024
 
 // App keeps only explicit dependencies to stay readable and easy to swap.
 type App struct {
-	db               sqlExecutor
-	storagePath      string
-	nativeFileDialog bool
-	grabTracker      *grabProgressTracker
-	publishTracker   *publishProgressTracker
-	analyticsEvents  chan siteAnalyticsEvent
+	db                    sqlExecutor
+	storagePath           string
+	nativeFileDialog      bool
+	automaticSSLAvailable bool
+	grabTracker           *grabProgressTracker
+	publishTracker        *publishProgressTracker
+	analyticsEvents       chan siteAnalyticsEvent
 }
 
 type sqlExecutor interface {
@@ -457,6 +458,14 @@ type DomainAlias struct {
 	IsActive          bool
 	IsSelected        bool
 	LastCheckedAt     string
+}
+
+type DomainAutomaticSSLSetting struct {
+	Domain           string
+	Enabled          bool
+	ManuallyDisabled bool
+	Available        bool
+	LastCheckedAt    string
 }
 
 type ManagedFileAccess struct {
@@ -1441,14 +1450,21 @@ func main() {
 	certificateCacheDir := filepath.Join(application.storageRootDir(), "letsencrypt")
 	if mkdirErr := os.MkdirAll(certificateCacheDir, 0o755); mkdirErr != nil {
 		log.Printf("failed to create certificate cache: %v", mkdirErr)
-	} else if parsedPorts.TLSEnabled {
+	} else if parsedPorts.TLSEnabled && listenPort == 80 {
 		certificateManager := &autocert.Manager{
 			Prompt:     autocert.AcceptTOS,
 			Cache:      autocert.DirCache(certificateCacheDir),
 			HostPolicy: application.autoCertHostPolicy,
 		}
-		httpHandler = certificateManager.HTTPHandler(httpHandler)
-		go serveTLSWithAutoCert(certificateManager, httpHandler)
+		tlsListener, tlsListenErr := listenTLSForAutoCert()
+		if tlsListenErr != nil {
+			log.Printf("HTTPS disabled: cannot listen on port 443: %v", tlsListenErr)
+		} else {
+			application.automaticSSLAvailable = true
+			httpHandler = certificateManager.HTTPHandler(httpHandler)
+			go serveTLSWithAutoCert(tlsListener, certificateManager, httpHandler)
+			application.startAutomaticSSLRefreshWorker(context.Background())
+		}
 	}
 
 	serverErrors := make(chan error, 1)
@@ -1534,17 +1550,16 @@ func listenOnAvailablePort(requestedPort int) (net.Listener, int, error) {
 	return nil, 0, fmt.Errorf("no available HTTP port after %d: %w", requestedPort, err)
 }
 
-func serveTLSWithAutoCert(certificateManager *autocert.Manager, handler http.Handler) {
-	tlsListener, err := net.Listen("tcp", ":443")
-	if err != nil {
-		log.Printf("HTTPS disabled: cannot listen on port 443: %v", err)
-		return
-	}
+func listenTLSForAutoCert() (net.Listener, error) {
+	return net.Listen("tcp", ":443")
+}
+
+func serveTLSWithAutoCert(tlsListener net.Listener, certificateManager *autocert.Manager, handler http.Handler) {
 	tlsServer := &http.Server{
 		Handler:   handler,
 		TLSConfig: certificateManager.TLSConfig(),
 	}
-	log.Printf("Sitebrush HTTPS enabled on port 443 for selected active aliases")
+	log.Printf("Sitebrush HTTPS enabled on port 443 for automatic SSL domains")
 	if serveErr := tlsServer.Serve(tlsListener); serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
 		log.Printf("HTTPS server stopped: %v", serveErr)
 	}
@@ -1563,6 +1578,7 @@ func (a *App) migrate(ctx context.Context) error {
 		`CREATE TABLE IF NOT EXISTS revisions(id INTEGER PRIMARY KEY AUTOINCREMENT,domain TEXT,page_path TEXT,html TEXT,created_at TEXT,is_active INTEGER DEFAULT 1);`,
 		`CREATE TABLE IF NOT EXISTS domain_aliases(primary_domain TEXT,alias_domain TEXT UNIQUE,verification_token TEXT,is_verified INTEGER DEFAULT 0,dns_a_ok INTEGER DEFAULT 0,is_selected INTEGER DEFAULT 0,last_checked_at TEXT);`,
 		`CREATE TABLE IF NOT EXISTS domain_states(domain TEXT PRIMARY KEY,is_frozen INTEGER DEFAULT 0);`,
+		`CREATE TABLE IF NOT EXISTS domain_ssl_settings(domain TEXT PRIMARY KEY,auto_ssl_enabled INTEGER DEFAULT 0,manually_disabled INTEGER DEFAULT 0,last_checked_at TEXT);`,
 		`CREATE TABLE IF NOT EXISTS domain_backup_tokens(domain TEXT PRIMARY KEY,token TEXT,updated_at TEXT);`,
 		`CREATE TABLE IF NOT EXISTS file_access_rules(domain TEXT,file_name TEXT,access_mode TEXT,token TEXT,expires_at TEXT,single_use_left INTEGER DEFAULT 0,token_use_count INTEGER DEFAULT 0,PRIMARY KEY(domain,file_name));`,
 		`CREATE TABLE IF NOT EXISTS file_metadata(domain TEXT,file_name TEXT,page_path TEXT,size INTEGER,mime_type TEXT,created_at TEXT,updated_at TEXT,source TEXT,download_count INTEGER DEFAULT 0,PRIMARY KEY(domain,file_name));`,
@@ -1585,6 +1601,9 @@ func (a *App) migrate(ctx context.Context) error {
 	_, _ = a.db.ExecContext(ctx, `ALTER TABLE domain_aliases ADD COLUMN dns_a_ok INTEGER DEFAULT 0`)
 	_, _ = a.db.ExecContext(ctx, `ALTER TABLE domain_aliases ADD COLUMN is_selected INTEGER DEFAULT 0`)
 	_, _ = a.db.ExecContext(ctx, `ALTER TABLE domain_aliases ADD COLUMN last_checked_at TEXT`)
+	_, _ = a.db.ExecContext(ctx, `ALTER TABLE domain_ssl_settings ADD COLUMN auto_ssl_enabled INTEGER DEFAULT 0`)
+	_, _ = a.db.ExecContext(ctx, `ALTER TABLE domain_ssl_settings ADD COLUMN manually_disabled INTEGER DEFAULT 0`)
+	_, _ = a.db.ExecContext(ctx, `ALTER TABLE domain_ssl_settings ADD COLUMN last_checked_at TEXT`)
 	_, _ = a.db.ExecContext(ctx, `ALTER TABLE file_access_rules ADD COLUMN token_use_count INTEGER DEFAULT 0`)
 	_, _ = a.db.ExecContext(ctx, `ALTER TABLE file_metadata ADD COLUMN download_count INTEGER DEFAULT 0`)
 	_, _ = a.db.ExecContext(ctx, `ALTER TABLE domain_storage_usage ADD COLUMN page_bytes INTEGER DEFAULT 0`)
@@ -1645,6 +1664,9 @@ SELECT 'localhost',page_bytes,published_page_bytes,revision_bytes,file_bytes,pub
 	domainStatesMergeQuery := `INSERT OR IGNORE INTO domain_states(domain,is_frozen)
 SELECT 'localhost',is_frozen FROM domain_states WHERE domain IN ` + placeholders
 	_, _ = a.db.ExecContext(ctx, domainStatesMergeQuery, sqlArguments...)
+	domainSSLSettingsMergeQuery := `INSERT OR IGNORE INTO domain_ssl_settings(domain,auto_ssl_enabled,manually_disabled,last_checked_at)
+SELECT 'localhost',auto_ssl_enabled,manually_disabled,last_checked_at FROM domain_ssl_settings WHERE domain IN ` + placeholders
+	_, _ = a.db.ExecContext(ctx, domainSSLSettingsMergeQuery, sqlArguments...)
 
 	_, _ = a.db.ExecContext(ctx, `UPDATE revisions SET domain='localhost' WHERE domain IN `+placeholders, sqlArguments...)
 	_, _ = a.db.ExecContext(ctx, `UPDATE domain_aliases SET primary_domain='localhost' WHERE primary_domain IN `+placeholders, sqlArguments...)
@@ -1658,20 +1680,19 @@ SELECT 'localhost',is_frozen FROM domain_states WHERE domain IN ` + placeholders
 	_, _ = a.db.ExecContext(ctx, `DELETE FROM file_metadata WHERE domain IN `+placeholders, sqlArguments...)
 	_, _ = a.db.ExecContext(ctx, `DELETE FROM domain_storage_usage WHERE domain IN `+placeholders, sqlArguments...)
 	_, _ = a.db.ExecContext(ctx, `DELETE FROM domain_states WHERE domain IN `+placeholders, sqlArguments...)
+	_, _ = a.db.ExecContext(ctx, `DELETE FROM domain_ssl_settings WHERE domain IN `+placeholders, sqlArguments...)
 }
 
 func (a *App) autoCertHostPolicy(ctx context.Context, host string) error {
-	aliasDomain := normalizeDomainName(host)
-	if aliasDomain == "" {
+	certificateDomain := normalizeDomainName(host)
+	if certificateDomain == "" {
 		return fmt.Errorf("invalid certificate host %q", host)
 	}
-	var activeSelectedCount int
-	err := a.db.QueryRowContext(ctx, `SELECT COUNT(1) FROM domain_aliases WHERE alias_domain=? AND is_selected=1 AND is_verified=1 AND dns_a_ok=1`, aliasDomain).Scan(&activeSelectedCount)
-	if err != nil {
-		return err
+	if !a.automaticSSLAvailable {
+		return fmt.Errorf("automatic SSL is unavailable because Sitebrush is not listening on ports 80 and 443")
 	}
-	if activeSelectedCount == 0 {
-		return fmt.Errorf("certificate host %q is not a selected active alias", aliasDomain)
+	if !a.domainAutomaticSSLEnabled(ctx, certificateDomain) && !a.domainAutomaticSSLEnabled(contextWithDomain(ctx, certificateDomain), certificateDomain) {
+		return fmt.Errorf("automatic SSL is disabled for %q", certificateDomain)
 	}
 	return nil
 }
@@ -7945,6 +7966,8 @@ var lookupTXTRecords = net.LookupTXT
 var lookupIPRecords = net.LookupIP
 var lookupServerExternalIP = detectServerExternalIP
 
+const automaticSSLRefreshInterval = time.Hour
+
 func detectServerExternalIP(ctx context.Context) (string, error) {
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://api.ipify.org", nil)
 	if err != nil {
@@ -8022,6 +8045,16 @@ func normalizeDomainName(rawDomain string) string {
 func (a *App) handleDomainSettingsPost(ctx context.Context, r *http.Request, siteDomain string, externalIP string) {
 	action := strings.TrimSpace(r.FormValue("action"))
 	switch action {
+	case "update_auto_ssl":
+		certificateDomain := normalizeDomainName(r.FormValue("ssl_domain"))
+		if certificateDomain == "" || !a.domainBelongsToSite(ctx, siteDomain, certificateDomain) {
+			return
+		}
+		enabled := r.FormValue("auto_ssl_enabled") == "1"
+		a.setDomainAutomaticSSLManual(ctx, certificateDomain, enabled)
+		if enabled && a.automaticSSLAvailable && strings.TrimSpace(externalIP) != "" {
+			a.refreshDomainAutomaticSSL(ctx, certificateDomain, externalIP)
+		}
 	case "add_alias":
 		aliasDomain := normalizeDomainName(r.FormValue("alias_domain"))
 		if aliasDomain == "" || aliasDomain == siteDomain {
@@ -8062,6 +8095,15 @@ ON CONFLICT(alias_domain) DO UPDATE SET
 	case "rotate_backup_token":
 		a.rotateBackupTokenForDomain(ctx, siteDomain)
 	}
+}
+
+func (a *App) domainBelongsToSite(ctx context.Context, siteDomain string, candidateDomain string) bool {
+	if candidateDomain == siteDomain {
+		return true
+	}
+	var aliasCount int
+	_ = a.db.QueryRowContext(ctx, `SELECT COUNT(1) FROM domain_aliases WHERE primary_domain=? AND alias_domain=?`, siteDomain, candidateDomain).Scan(&aliasCount)
+	return aliasCount > 0
 }
 
 func (a *App) domainAliasCount(ctx context.Context, siteDomain string) int {
@@ -8145,6 +8187,156 @@ func domainARecordMatches(aliasDomain string, externalIP string) bool {
 	return false
 }
 
+func (a *App) startAutomaticSSLRefreshWorker(ctx context.Context) {
+	go func() {
+		a.refreshAutomaticSSLDomains(ctx)
+		ticker := time.NewTicker(automaticSSLRefreshInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				a.refreshAutomaticSSLDomains(ctx)
+			}
+		}
+	}()
+}
+
+func (a *App) refreshAutomaticSSLDomains(ctx context.Context) {
+	if !a.automaticSSLAvailable {
+		return
+	}
+	externalIP, err := lookupServerExternalIP(ctx)
+	if err != nil || strings.TrimSpace(externalIP) == "" {
+		return
+	}
+	domainList := a.listAutomaticSSLDomainCandidates(ctx)
+	for _, domain := range domainList {
+		a.refreshDomainAutomaticSSL(ctx, domain, externalIP)
+	}
+}
+
+func (a *App) listAutomaticSSLDomainCandidates(ctx context.Context) []string {
+	query := `
+SELECT domain FROM pages
+UNION SELECT domain FROM users
+UNION SELECT domain FROM domain_states
+UNION SELECT primary_domain FROM domain_aliases
+UNION SELECT alias_domain FROM domain_aliases
+UNION SELECT domain FROM domain_ssl_settings`
+	rows, err := a.db.QueryContext(ctx, query)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	seenDomains := make(map[string]struct{})
+	domainList := make([]string, 0)
+	for rows.Next() {
+		var rawDomain sql.NullString
+		if scanErr := rows.Scan(&rawDomain); scanErr != nil {
+			continue
+		}
+		domain := normalizeDomainName(rawDomain.String)
+		if domain == "" {
+			continue
+		}
+		if _, seen := seenDomains[domain]; seen {
+			continue
+		}
+		seenDomains[domain] = struct{}{}
+		domainList = append(domainList, domain)
+	}
+	sort.Strings(domainList)
+	return domainList
+}
+
+func (a *App) refreshDomainAutomaticSSL(ctx context.Context, domain string, externalIP string) DomainAutomaticSSLSetting {
+	setting := a.domainAutomaticSSLSetting(ctx, domain)
+	if setting.Domain == "" {
+		return setting
+	}
+	setting.Available = a.automaticSSLAvailable
+	if !setting.Available || setting.ManuallyDisabled {
+		return setting
+	}
+	setting.Enabled = domainARecordMatches(setting.Domain, externalIP)
+	setting.LastCheckedAt = time.Now().UTC().Format(time.RFC3339)
+	a.upsertDomainAutomaticSSLSetting(ctx, setting)
+	if domainFromContext(ctx) != setting.Domain {
+		a.upsertDomainAutomaticSSLSetting(contextWithDomain(ctx, setting.Domain), setting)
+	}
+	return setting
+}
+
+func (a *App) refreshDomainAutomaticSSLIfStale(ctx context.Context, domain string, externalIP string) DomainAutomaticSSLSetting {
+	setting := a.domainAutomaticSSLSetting(ctx, domain)
+	if setting.Domain == "" {
+		return setting
+	}
+	setting.Available = a.automaticSSLAvailable
+	if !setting.Available || setting.ManuallyDisabled {
+		return setting
+	}
+	lastCheckedAt, err := time.Parse(time.RFC3339, setting.LastCheckedAt)
+	if err == nil && time.Since(lastCheckedAt) < automaticSSLRefreshInterval {
+		return setting
+	}
+	if strings.TrimSpace(externalIP) == "" {
+		return setting
+	}
+	return a.refreshDomainAutomaticSSL(ctx, domain, externalIP)
+}
+
+func (a *App) domainAutomaticSSLSetting(ctx context.Context, domain string) DomainAutomaticSSLSetting {
+	certificateDomain := normalizeDomainName(domain)
+	if certificateDomain == "" {
+		return DomainAutomaticSSLSetting{Available: a.automaticSSLAvailable}
+	}
+	setting := DomainAutomaticSSLSetting{Domain: certificateDomain, Available: a.automaticSSLAvailable}
+	var enabled int
+	var manuallyDisabled int
+	var lastCheckedAt sql.NullString
+	err := a.db.QueryRowContext(ctx, `SELECT auto_ssl_enabled,manually_disabled,last_checked_at FROM domain_ssl_settings WHERE domain=?`, certificateDomain).Scan(&enabled, &manuallyDisabled, &lastCheckedAt)
+	if err == nil {
+		setting.Enabled = enabled == 1
+		setting.ManuallyDisabled = manuallyDisabled == 1
+		setting.LastCheckedAt = lastCheckedAt.String
+	}
+	return setting
+}
+
+func (a *App) domainAutomaticSSLEnabled(ctx context.Context, domain string) bool {
+	setting := a.domainAutomaticSSLSetting(ctx, domain)
+	return setting.Enabled && !setting.ManuallyDisabled
+}
+
+func (a *App) setDomainAutomaticSSLManual(ctx context.Context, domain string, enabled bool) {
+	setting := a.domainAutomaticSSLSetting(ctx, domain)
+	if setting.Domain == "" {
+		return
+	}
+	setting.Enabled = enabled
+	setting.ManuallyDisabled = !enabled
+	if strings.TrimSpace(setting.LastCheckedAt) == "" {
+		setting.LastCheckedAt = time.Now().UTC().Format(time.RFC3339)
+	}
+	a.upsertDomainAutomaticSSLSetting(ctx, setting)
+	if domainFromContext(ctx) != setting.Domain {
+		a.upsertDomainAutomaticSSLSetting(contextWithDomain(ctx, setting.Domain), setting)
+	}
+}
+
+func (a *App) upsertDomainAutomaticSSLSetting(ctx context.Context, setting DomainAutomaticSSLSetting) {
+	if setting.Domain == "" {
+		return
+	}
+	_, _ = a.db.ExecContext(ctx, `INSERT INTO domain_ssl_settings(domain,auto_ssl_enabled,manually_disabled,last_checked_at)
+VALUES(?,?,?,?)
+ON CONFLICT(domain) DO UPDATE SET auto_ssl_enabled=excluded.auto_ssl_enabled,manually_disabled=excluded.manually_disabled,last_checked_at=excluded.last_checked_at`,
+		setting.Domain, boolToInt(setting.Enabled), boolToInt(setting.ManuallyDisabled), setting.LastCheckedAt)
+}
+
 func (a *App) listDomainAliases(ctx context.Context, siteDomain string) ([]DomainAlias, error) {
 	aliasRows, err := a.db.QueryContext(ctx, `SELECT alias_domain,verification_token,is_verified,dns_a_ok,is_selected,last_checked_at FROM domain_aliases WHERE primary_domain=? ORDER BY alias_domain`, siteDomain)
 	if err != nil {
@@ -8223,7 +8415,7 @@ func (a *App) domainSettingsPage(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodPost {
 		externalIP := ""
 		action := strings.TrimSpace(r.FormValue("action"))
-		if action == "add_alias" || action == "select_alias" || action == "check_alias" || action == "check_all" {
+		if action == "add_alias" || action == "select_alias" || action == "check_alias" || action == "check_all" || action == "update_auto_ssl" {
 			externalIP, _ = lookupServerExternalIP(r.Context())
 		}
 		a.handleDomainSettingsPost(r.Context(), r, siteDomain, externalIP)
@@ -8243,6 +8435,7 @@ func (a *App) domainSettingsPage(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 	}
+	automaticSSLSetting := a.refreshDomainAutomaticSSLIfStale(r.Context(), selectedDomain, externalIP)
 	backupToken := a.backupTokenForDomain(r.Context(), siteDomain)
 	backupDownloadPath := "/?backup_download&token=" + url.QueryEscape(backupToken)
 	backupDownloadURL := absoluteURLForPath(r, backupDownloadPath)
@@ -8259,6 +8452,9 @@ func (a *App) domainSettingsPage(w http.ResponseWriter, r *http.Request) {
 		"ReturnPath":         returnPath,
 		"ExternalIP":         externalIP,
 		"ExternalIPError":    externalIPError,
+		"AutomaticSSL":       automaticSSLSetting,
+		"AutomaticSSLDomain": automaticSSLSetting.Domain,
+		"AutomaticSSLReady":  automaticSSLSetting.Available && automaticSSLSetting.Domain != "",
 		"BackupDownloadURL":  backupDownloadURL,
 		"BackupDownloadPath": backupDownloadPath,
 		"NativeFileDialog":   a.nativeFileDialog,

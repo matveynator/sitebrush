@@ -3145,6 +3145,64 @@ func TestDomainAliasLimitIsTenDomains(t *testing.T) {
 	}
 }
 
+func TestAutomaticSSLDefaultsOnForResolvingDomainAndHonorsManualOff(t *testing.T) {
+	application, rawDB := newTestApplication(t)
+	application.automaticSSLAvailable = true
+	previousIPLookup := lookupIPRecords
+	defer func() { lookupIPRecords = previousIPLookup }()
+	lookupIPRecords = func(domain string) ([]net.IP, error) {
+		if domain == "example.com" {
+			return []net.IP{net.ParseIP("203.0.113.10")}, nil
+		}
+		return nil, os.ErrNotExist
+	}
+
+	_, err := rawDB.Exec(`INSERT INTO pages(domain,path,title,html,published) VALUES(?,?,?,?,1)`, "example.com", "/", "Home", "<h1>Home</h1>")
+	if err != nil {
+		t.Fatalf("insert page: %v", err)
+	}
+
+	setting := application.refreshDomainAutomaticSSL(context.Background(), "example.com", "203.0.113.10")
+	if !setting.Enabled {
+		t.Fatalf("auto ssl enabled = false, want true")
+	}
+	if !application.domainAutomaticSSLEnabled(context.Background(), "example.com") {
+		t.Fatal("domainAutomaticSSLEnabled = false, want true")
+	}
+
+	application.setDomainAutomaticSSLManual(context.Background(), "example.com", false)
+	setting = application.refreshDomainAutomaticSSL(context.Background(), "example.com", "203.0.113.10")
+	if setting.Enabled || !setting.ManuallyDisabled {
+		t.Fatalf("manual off setting = %+v, want disabled and manually disabled", setting)
+	}
+
+	application.setDomainAutomaticSSLManual(context.Background(), "example.com", true)
+	setting = application.refreshDomainAutomaticSSL(context.Background(), "example.com", "198.51.100.25")
+	if setting.Enabled {
+		t.Fatalf("auto ssl remained enabled for non-resolving domain: %+v", setting)
+	}
+}
+
+func TestAutoCertHostPolicyRequiresAutomaticSSLSettingAndPorts(t *testing.T) {
+	application, _ := newTestApplication(t)
+
+	application.automaticSSLAvailable = false
+	application.setDomainAutomaticSSLManual(context.Background(), "example.com", true)
+	if err := application.autoCertHostPolicy(context.Background(), "example.com"); err == nil {
+		t.Fatal("autoCertHostPolicy succeeded without 80/443 availability")
+	}
+
+	application.automaticSSLAvailable = true
+	if err := application.autoCertHostPolicy(context.Background(), "example.com"); err != nil {
+		t.Fatalf("autoCertHostPolicy with enabled domain: %v", err)
+	}
+
+	application.setDomainAutomaticSSLManual(context.Background(), "example.com", false)
+	if err := application.autoCertHostPolicy(context.Background(), "example.com"); err == nil {
+		t.Fatal("autoCertHostPolicy succeeded after manual SSL disable")
+	}
+}
+
 func TestListenOnAvailablePortFallsBackWhenRequestedPortIsBusy(t *testing.T) {
 	busyListener, err := net.Listen("tcp", ":0")
 	if err != nil {
