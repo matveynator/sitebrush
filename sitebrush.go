@@ -1447,16 +1447,19 @@ func main() {
 }
 
 func runLinuxSetupWizard(port int, dbType, storagePath, dbPath string) error {
-	log.Printf("setup mode requested; starting interactive Linux setup wizard")
+	binaryPath, err := os.Executable()
+	if err != nil || strings.TrimSpace(binaryPath) == "" {
+		binaryPath = os.Args[0]
+	}
 	defaults := setupwizard.Defaults{
 		Port:        port,
+		StoragePath: storagePath,
 		DBType:      dbType,
 		DBPath:      dbPath,
-		BinaryPath:  os.Args[0],
+		BinaryPath:  binaryPath,
 		WorkingDir:  storagePath,
-		ArchivePath: filepath.Join(storagePath, "backup"),
 	}
-	_, err := setupwizard.Run(context.Background(), os.Stdin, os.Stdout, defaults)
+	_, err = setupwizard.Run(context.Background(), os.Stdin, os.Stdout, defaults)
 	return err
 }
 

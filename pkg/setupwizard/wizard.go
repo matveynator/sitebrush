@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -22,24 +21,12 @@ import (
 // cleverness: we only hold what the service file needs instead of mirroring
 // every CLI flag.
 type Defaults struct {
-	Port         int
-	Domain       string
-	NeedCert     bool
-	DBType       string
-	DBPath       string
-	DBConn       string
-	PGHost       string
-	PGPort       string
-	PGUser       string
-	PGPassword   string
-	PGDatabase   string
-	SafecastLive bool
-	ArchivePath  string
-	ImportEnable bool
-	ImportTGZURL string
-	SupportEmail string
-	BinaryPath   string
-	WorkingDir   string
+	Port        int
+	StoragePath string
+	DBType      string
+	DBPath      string
+	BinaryPath  string
+	WorkingDir  string
 }
 
 // Result summarises what the wizard wrote to disk so the caller can show
@@ -106,7 +93,7 @@ func Run(ctx context.Context, in io.Reader, out io.Writer, defaults Defaults) (R
 	theme := resolveTheme(out)
 	reader := bufio.NewReader(in)
 
-	fmt.Fprintf(out, "\n%s🛠  Quick setup (Linux)%s\n", theme.AccentIfEnabled(), theme.ResetIfEnabled())
+	fmt.Fprintf(out, "\n%sSitebrush setup (Linux)%s\n", theme.AccentIfEnabled(), theme.ResetIfEnabled())
 
 	answers := enrichDefaults(defaults)
 	if err := validateDefaultDBType(answers.DBType, availableDBTypes()); err != nil {
@@ -114,41 +101,16 @@ func Run(ctx context.Context, in io.Reader, out io.Writer, defaults Defaults) (R
 	}
 outer:
 	for {
-		answers.NeedCert = promptYesNo(ctx, reader, out, theme, "Issue HTTPS certificate", answers.NeedCert)
-		if answers.NeedCert {
-			fmt.Fprintf(out, "%sKeeps 80 and 443 reserved for TLS challenges and traffic.%s\n", theme.AccentIfEnabled(), theme.ResetIfEnabled())
-			answers.Domain = promptWithDefault(ctx, reader, out, theme, "Domain", defaultOr(answers.Domain, "maps.example.org"))
-			answers.Port = 443
-		} else {
-			answers.Domain = ""
-			answers.Port = promptPort(ctx, reader, out, theme, "HTTP port", suggestPort(false, answers.Port))
-		}
+		fmt.Fprintf(out, "%sNetwork:%s choose the HTTP port Sitebrush will bind.%s\n", theme.AccentIfEnabled(), theme.ResetIfEnabled(), theme.ResetIfEnabled())
+		answers.Port = promptPort(ctx, reader, out, theme, "HTTP port", suggestPort(false, answers.Port))
+
+		fmt.Fprintf(out, "%sStorage:%s Sitebrush keeps databases, files, static output and certificates here.%s\n", theme.AccentIfEnabled(), theme.ResetIfEnabled(), theme.ResetIfEnabled())
+		answers.StoragePath = promptWithDefault(ctx, reader, out, theme, "Storage path", defaultOr(answers.StoragePath, "/var/lib/sitebrush"))
 
 		options := availableDBTypes()
-		fmt.Fprintf(out, "%sDatabase:%s sqlite/chai store files; pgx is PostgreSQL; clickhouse fits analytics.%s\n", theme.AccentIfEnabled(), theme.ResetIfEnabled(), theme.ResetIfEnabled())
+		fmt.Fprintf(out, "%sDatabase:%s choose the database engine used by this binary.%s\n", theme.AccentIfEnabled(), theme.ResetIfEnabled(), theme.ResetIfEnabled())
 		answers.DBType = promptChoice(ctx, reader, out, theme, "Database", options, pickDefault(options, answers.DBType))
-
-		dbPath, dbConn := promptDatabaseConfig(ctx, reader, out, theme, &answers)
-		answers.DBPath = dbPath
-		answers.DBConn = dbConn
-
-		fmt.Fprintf(out, "%sSupport contact:%s short note for users who need help.%s\n", theme.AccentIfEnabled(), theme.ResetIfEnabled(), theme.ResetIfEnabled())
-		answers.SupportEmail = promptWithDefault(ctx, reader, out, theme, "Support e-mail", answers.SupportEmail)
-
-		fmt.Fprintf(out, "%sRealtime:%s toggle Safecast live devices.%s\n", theme.AccentIfEnabled(), theme.ResetIfEnabled(), theme.ResetIfEnabled())
-		answers.SafecastLive = promptYesNo(ctx, reader, out, theme, "Enable Safecast realtime", answers.SafecastLive)
-
-		suggestedArchive := suggestArchivePath(answers.ArchivePath, answers.Port)
-		fmt.Fprintf(out, "%sArchives:%s JSON dumps live under a port-specific folder.%s\n", theme.AccentIfEnabled(), theme.ResetIfEnabled(), theme.ResetIfEnabled())
-		answers.ArchivePath = promptWithDefault(ctx, reader, out, theme, "Archive dir", suggestedArchive)
-
-		fmt.Fprintf(out, "%sImport data:%s optional first sync before the service starts.%s\n", theme.AccentIfEnabled(), theme.ResetIfEnabled(), theme.ResetIfEnabled())
-		answers.ImportEnable = promptYesNo(ctx, reader, out, theme, "Fetch initial .tgz", answers.ImportEnable)
-		if answers.ImportEnable {
-			answers.ImportTGZURL = promptWithDefault(ctx, reader, out, theme, "Import .tgz URL", defaultOr(answers.ImportTGZURL, "https://pelora.org/api/json/weekly.tgz"))
-		} else {
-			answers.ImportTGZURL = ""
-		}
+		answers.DBPath = promptDatabasePath(ctx, reader, out, theme, answers)
 
 		port := answers.Port
 		unitPath, userUnit, err := resolveServiceDestination(port)
@@ -169,7 +131,7 @@ outer:
 			answers.WorkingDir, _ = filepath.Abs(filepath.Dir(execPath))
 		}
 
-		args := buildExecArgs(execPath, port, answers.Domain, answers.DBType, answers.DBPath, answers.DBConn, answers.SupportEmail, answers.SafecastLive, answers.ArchivePath, answers.ImportEnable, answers.ImportTGZURL)
+		args := buildExecArgs(execPath, answers.Port, answers.StoragePath, answers.DBType, answers.DBPath)
 
 		logPath, err := resolveLogPath(userUnit, port)
 		if err != nil {
@@ -178,14 +140,11 @@ outer:
 
 		for {
 			fmt.Fprintf(out, "\n%sReview:%s\n", theme.AccentIfEnabled(), theme.ResetIfEnabled())
-			fmt.Fprintf(out, "  [1] HTTPS:   %s\n", formatHTTPSChoice(answers.NeedCert, answers.Domain))
-			fmt.Fprintf(out, "  [2] Port:    %d\n", port)
+			fmt.Fprintf(out, "  [1] Port:    %d\n", answers.Port)
+			fmt.Fprintf(out, "  [2] Storage: %s\n", displayValue(answers.StoragePath))
 			fmt.Fprintf(out, "  [3] DB:      %s\n", answers.DBType)
-			fmt.Fprintf(out, "  [4] Support: %s\n", displayValue(answers.SupportEmail))
-			fmt.Fprintf(out, "  [5] Live:    %t\n", answers.SafecastLive)
-			fmt.Fprintf(out, "  [6] Archive: %s\n", displayValue(answers.ArchivePath))
-			fmt.Fprintf(out, "  [7] Import:  %s\n", formatImportChoice(answers.ImportEnable, answers.ImportTGZURL))
-			fmt.Fprintf(out, "      Service: %s\n      Logs:    %s\n", unitPath, logPath)
+			fmt.Fprintf(out, "  [4] DB path: %s\n", displayValue(answers.DBPath))
+			fmt.Fprintf(out, "      Service: %s\n      Logs:    %s\n      Start:   %s\n", unitPath, logPath, strings.Join(args, " "))
 
 			action := promptWithDefault(ctx, reader, out, theme, "apply / edit number / restart / quit", "apply")
 			action = strings.ToLower(strings.TrimSpace(action))
@@ -204,48 +163,20 @@ outer:
 			changed := false
 			switch action {
 			case "1":
-				answers.NeedCert = promptYesNo(ctx, reader, out, theme, "Issue HTTPS certificate", answers.NeedCert)
-				if answers.NeedCert {
-					fmt.Fprintf(out, "%s80 and 443 stay reserved for HTTPS.%s\n", theme.AccentIfEnabled(), theme.ResetIfEnabled())
-					answers.Domain = promptWithDefault(ctx, reader, out, theme, "Domain", defaultOr(answers.Domain, "maps.example.org"))
-					answers.Port = 443
-				} else {
-					answers.Domain = ""
-					answers.Port = promptPort(ctx, reader, out, theme, choosePortLabel(false), suggestPort(false, answers.Port))
-				}
+				answers.Port = promptPort(ctx, reader, out, theme, choosePortLabel(false), answers.Port)
 				port = answers.Port
 				changed = true
 			case "2":
-				if answers.NeedCert {
-					fmt.Fprintf(out, "%sHTTPS keeps port at 443 for clarity.%s\n", theme.PromptIfEnabled(), theme.ResetIfEnabled())
-					answers.Port = 443
-				} else {
-					answers.Port = promptPort(ctx, reader, out, theme, choosePortLabel(false), answers.Port)
-				}
-				port = answers.Port
+				answers.StoragePath = promptWithDefault(ctx, reader, out, theme, "Storage path", answers.StoragePath)
+				answers.DBPath = suggestFileDBPath(answers.DBType, answers.StoragePath, answers.DBPath)
 				changed = true
 			case "3":
 				options = availableDBTypes()
 				answers.DBType = promptChoice(ctx, reader, out, theme, "Database engine", options, pickDefault(options, answers.DBType))
-				answers.DBPath, answers.DBConn = promptDatabaseConfig(ctx, reader, out, theme, &answers)
+				answers.DBPath = promptDatabasePath(ctx, reader, out, theme, answers)
 				changed = true
 			case "4":
-				answers.SupportEmail = promptWithDefault(ctx, reader, out, theme, "Support e-mail", answers.SupportEmail)
-				changed = true
-			case "5":
-				answers.SafecastLive = promptYesNo(ctx, reader, out, theme, "Enable Safecast realtime", answers.SafecastLive)
-				changed = true
-			case "6":
-				suggestedArchive = suggestArchivePath(answers.ArchivePath, answers.Port)
-				answers.ArchivePath = promptWithDefault(ctx, reader, out, theme, "JSON archive directory", suggestedArchive)
-				changed = true
-			case "7":
-				answers.ImportEnable = promptYesNo(ctx, reader, out, theme, "Fetch initial import .tgz", answers.ImportEnable)
-				if answers.ImportEnable {
-					answers.ImportTGZURL = promptWithDefault(ctx, reader, out, theme, "Import .tgz URL", defaultOr(answers.ImportTGZURL, "https://pelora.org/api/json/weekly.tgz"))
-				} else {
-					answers.ImportTGZURL = ""
-				}
+				answers.DBPath = promptDatabasePath(ctx, reader, out, theme, answers)
 				changed = true
 			}
 			if changed {
@@ -263,15 +194,15 @@ outer:
 		}
 
 		port = answers.Port
-		args = buildExecArgs(execPath, port, answers.Domain, answers.DBType, answers.DBPath, answers.DBConn, answers.SupportEmail, answers.SafecastLive, answers.ArchivePath, answers.ImportEnable, answers.ImportTGZURL)
+		args = buildExecArgs(execPath, port, answers.StoragePath, answers.DBType, answers.DBPath)
 		logPath, err = resolveLogPath(userUnit, port)
 		if err != nil {
 			return Result{}, err
 		}
-		if err := prepareDBPath(answers.DBType, answers.DBPath); err != nil {
+		if err := prepareStoragePath(answers.StoragePath); err != nil {
 			return Result{}, err
 		}
-		if err := prepareArchivePath(answers.ArchivePath); err != nil {
+		if err := prepareDBPath(answers.DBType, answers.DBPath); err != nil {
 			return Result{}, err
 		}
 
@@ -304,15 +235,10 @@ outer:
 
 		fmt.Fprintf(out, "\n%s✔ Service written to %s%s\n", theme.SuccessIfEnabled(), unitPath, theme.ResetIfEnabled())
 		fmt.Fprintf(out, "%sExecStart:%s %s\n", theme.AccentIfEnabled(), theme.ResetIfEnabled(), strings.Join(args, " "))
+		printEnableNotes(out, theme, result.EnableNotes)
 		printNextSteps(out, theme, result)
 		appendProfilePrimer(result)
-		printUsageHint(out, theme, answers.Domain, answers.Port)
-
-		if err := createUpdateScript(result); err != nil {
-			fmt.Fprintf(out, "\n%sUpdater:%s could not write /usr/local/bin/sitebrush-update (%v).\n", theme.PromptIfEnabled(), theme.ResetIfEnabled(), err)
-		} else {
-			fmt.Fprintf(out, "\n%sUpdater:%s wrote /usr/local/bin/sitebrush-update for one-command upgrades.\n", theme.AccentIfEnabled(), theme.ResetIfEnabled())
-		}
+		printUsageHint(out, theme, answers.Port)
 
 		return result, nil
 	}
@@ -321,7 +247,7 @@ outer:
 // availableDBTypes lists engines supported by Sitebrush. SQLite is first so
 // the default installation path stays predictable for Linux servers.
 func availableDBTypes() []string {
-	return []string{"sqlite", "chai", "pgx", "clickhouse"}
+	return []string{"sqlite"}
 }
 
 // enrichDefaults derives per-field defaults so restarts can reuse the latest
@@ -329,9 +255,6 @@ func availableDBTypes() []string {
 // individual prompts to keep the experience consistent with Go's preference for
 // explicit state.
 func enrichDefaults(defaults Defaults) Defaults {
-	if strings.TrimSpace(defaults.Domain) != "" {
-		defaults.NeedCert = true
-	}
 	if defaults.BinaryPath == "" {
 		if exe, err := os.Executable(); err == nil {
 			defaults.BinaryPath = exe
@@ -342,34 +265,17 @@ func enrichDefaults(defaults Defaults) Defaults {
 			defaults.WorkingDir = wd
 		}
 	}
-	if strings.TrimSpace(defaults.ImportTGZURL) != "" {
-		defaults.ImportEnable = true
+	if defaults.Port <= 0 {
+		defaults.Port = 80
 	}
-	if defaults.DBType != "pgx" || strings.TrimSpace(defaults.DBConn) == "" {
-		return defaults
+	if strings.TrimSpace(defaults.StoragePath) == "" {
+		defaults.StoragePath = "/var/lib/sitebrush"
 	}
-	parsed, err := url.Parse(defaults.DBConn)
-	if err != nil {
-		return defaults
+	if strings.TrimSpace(defaults.DBType) == "" {
+		defaults.DBType = "sqlite"
 	}
-	if defaults.PGHost == "" {
-		defaults.PGHost = parsed.Hostname()
-	}
-	if defaults.PGPort == "" {
-		defaults.PGPort = parsed.Port()
-	}
-	if parsed.User != nil {
-		if defaults.PGUser == "" {
-			defaults.PGUser = parsed.User.Username()
-		}
-		if defaults.PGPassword == "" {
-			if pw, ok := parsed.User.Password(); ok {
-				defaults.PGPassword = pw
-			}
-		}
-	}
-	if defaults.PGDatabase == "" {
-		defaults.PGDatabase = strings.TrimPrefix(parsed.Path, "/")
+	if strings.TrimSpace(defaults.DBPath) == "" {
+		defaults.DBPath = filepath.Join(defaults.StoragePath, "storage", "db", "sitebrush.db")
 	}
 	return defaults
 }
@@ -440,109 +346,50 @@ func promptPort(ctx context.Context, reader *bufio.Reader, out io.Writer, theme 
 	}
 }
 
-// promptDigits keeps numeric string fields (like PostgreSQL port) constrained to digits only.
-// Using a loop instead of panicking mirrors the Go proverb about solid, direct code.
-func promptDigits(ctx context.Context, reader *bufio.Reader, out io.Writer, theme colorTheme, label, current string) string {
-	cleaned := strings.TrimSpace(current)
-	if cleaned == "" {
-		cleaned = "0"
-	}
-	for {
-		answer := promptWithDefault(ctx, reader, out, theme, label, cleaned)
-		if _, err := strconv.Atoi(answer); err == nil {
-			return answer
-		}
-		fmt.Fprintf(out, "%sDigits only, please.%s\n", theme.PromptIfEnabled(), theme.ResetIfEnabled())
-	}
-}
-
-// promptDatabaseConfig prints detailed hints for the selected database and
-// returns the appropriate path or connection string. File databases get a
-// suggested /var/lib directory that includes the port for clarity, while
-// network databases receive structured prompts. Channel-based prompts keep the
-// flow cancellable.
-func promptDatabaseConfig(ctx context.Context, reader *bufio.Reader, out io.Writer, theme colorTheme, answers *Defaults) (string, string) {
-	if answers.DBType == "pgx" {
-		fmt.Fprintf(out, "%sPostgreSQL (pgx driver):%s defaults assume a local server with an empty password. Adjust to match your cluster.%s\n", theme.AccentIfEnabled(), theme.ResetIfEnabled(), theme.ResetIfEnabled())
-		host := promptWithDefault(ctx, reader, out, theme, "Host", defaultOr(answers.PGHost, "localhost"))
-		port := promptDigits(ctx, reader, out, theme, "Port", defaultOr(answers.PGPort, "5432"))
-		user := promptWithDefault(ctx, reader, out, theme, "User", defaultOr(answers.PGUser, "postgres"))
-		password := promptWithDefault(ctx, reader, out, theme, "Password (leave empty for trust/local auth)", answers.PGPassword)
-		dbname := promptWithDefault(ctx, reader, out, theme, "Database name", defaultOr(answers.PGDatabase, "sitebrush"))
-		answers.PGHost, answers.PGPort, answers.PGUser, answers.PGPassword, answers.PGDatabase = host, port, user, password, dbname
-		return "", buildPostgresURI(host, port, user, password, dbname)
-	}
-
-	if answers.DBType == "clickhouse" {
-		fmt.Fprintf(out, "%sClickHouse:%s provide a native or HTTP URI; defaults stay empty so your existing config remains untouched.%s\n", theme.AccentIfEnabled(), theme.ResetIfEnabled(), theme.ResetIfEnabled())
-		return "", promptWithDefault(ctx, reader, out, theme, "Connection URI", answers.DBConn)
-	}
-
-	defaultPath := suggestFileDBPath(answers.DBType, answers.Port, answers.DBPath)
-	fmt.Fprintf(out, "%sFile database:%s the wizard will create directories if missing. Suggested path keeps port in the folder for clarity.%s\n", theme.AccentIfEnabled(), theme.ResetIfEnabled(), theme.ResetIfEnabled())
-	return promptWithDefault(ctx, reader, out, theme, "Database file path", defaultPath), ""
-}
-
-// buildPostgresURI assembles a connection string while omitting the colon when
-// the password is empty. Keeping the string builder here avoids surprises in
-// the calling flow.
-func buildPostgresURI(host, port, user, password, dbname string) string {
-	cred := user
-	if password != "" {
-		cred = fmt.Sprintf("%s:%s", user, password)
-	}
-	return fmt.Sprintf("postgres://%s@%s:%s/%s", cred, host, port, dbname)
+// promptDatabasePath asks for the sqlite root database. Per-site database files
+// are created next to it by the application at runtime.
+func promptDatabasePath(ctx context.Context, reader *bufio.Reader, out io.Writer, theme colorTheme, answers Defaults) string {
+	defaultPath := suggestFileDBPath(answers.DBType, answers.StoragePath, answers.DBPath)
+	fmt.Fprintf(out, "%sDatabase file:%s Sitebrush creates per-site sqlite files next to this root path.%s\n", theme.AccentIfEnabled(), theme.ResetIfEnabled(), theme.ResetIfEnabled())
+	return promptWithDefault(ctx, reader, out, theme, "Database file path", defaultPath)
 }
 
 // suggestFileDBPath proposes a stable location under /var/lib that carries the
 // driver name and port number. Extensions are kept simple to match each engine.
-func suggestFileDBPath(dbType string, port int, existing string) string {
+func suggestFileDBPath(dbType, storagePath, existing string) string {
 	if strings.TrimSpace(existing) != "" {
 		return existing
 	}
-	baseDir := fmt.Sprintf("/var/lib/%s-%d", dbType, port)
+	baseDir := filepath.Join(defaultOr(storagePath, "/var/lib/sitebrush"), "storage", "db")
 	name := map[string]string{
-		"sqlite":     "database.db",
-		"chai":       "database.chai",
-		"clickhouse": "data.clickhouse",
+		"sqlite": "sitebrush.db",
 	}[dbType]
 	if name == "" {
-		name = "database.db"
+		name = "sitebrush.db"
 	}
 	return filepath.Join(baseDir, name)
 }
 
-// suggestArchivePath proposes a stable archive directory that mirrors the
-// port-based service naming. Using /backup keeps exports separate from the data
-// directory while staying predictable when multiple services run side by side.
-func suggestArchivePath(existing string, port int) string {
-	if strings.TrimSpace(existing) != "" {
-		return existing
+func prepareStoragePath(path string) error {
+	cleaned := strings.TrimSpace(path)
+	if cleaned == "" {
+		return errors.New("storage path is empty")
 	}
-	return filepath.Join("/backup", fmt.Sprintf("sitebrush-json-%d", port))
+	if err := os.MkdirAll(cleaned, 0o755); err != nil {
+		return fmt.Errorf("create storage directory: %w", err)
+	}
+	return nil
 }
 
 // prepareDBPath creates the directory tree for file databases so systemd never
 // fails on startup due to missing folders. Network databases skip this step.
 func prepareDBPath(dbType, dbPath string) error {
-	if dbType == "pgx" || dbType == "clickhouse" || strings.TrimSpace(dbPath) == "" {
+	_ = dbType
+	if strings.TrimSpace(dbPath) == "" {
 		return nil
 	}
 	if err := os.MkdirAll(filepath.Dir(dbPath), 0o755); err != nil {
 		return fmt.Errorf("create db directory: %w", err)
-	}
-	return nil
-}
-
-// prepareArchivePath ensures the archive destination exists before the service
-// starts so scheduled exports never fail on missing directories.
-func prepareArchivePath(path string) error {
-	cleaned := strings.TrimSpace(path)
-	if cleaned == "" {
-		return nil
-	}
-	if err := os.MkdirAll(cleaned, 0o755); err != nil {
-		return fmt.Errorf("create archive directory: %w", err)
 	}
 	return nil
 }
@@ -554,24 +401,6 @@ func displayValue(v string) string {
 		return "(empty)"
 	}
 	return v
-}
-
-// formatHTTPSChoice keeps the review summary compact while showing whether a
-// certificate will be requested and which domain will be used.
-func formatHTTPSChoice(needCert bool, domain string) string {
-	if !needCert {
-		return "no (HTTP only)"
-	}
-	return fmt.Sprintf("yes (%s, ports 80+443)", displayValue(domain))
-}
-
-// formatImportChoice keeps the review summary compact and explicit about
-// whether the operator asked for an initial import and from where.
-func formatImportChoice(enabled bool, url string) string {
-	if !enabled {
-		return "skip"
-	}
-	return displayValue(url)
 }
 
 // defaultOr falls back when the candidate string is empty. This keeps prompt
@@ -712,35 +541,11 @@ func resolveLogPath(userUnit bool, port int) (string, error) {
 	return filepath.Join(stateHome, fileName), nil
 }
 
-// buildExecArgs assembles the final ExecStart line. Returning a slice keeps the
-// order predictable and avoids clever string concatenation. When a domain is
-// present we skip an explicit port because HTTPS mode already binds 80/443 via
-// the autocert server, keeping the unit file truthful to the CLI.
-func buildExecArgs(binary string, port int, domain, dbType, dbPath, dbConn, support string, safecast bool, archiveDir string, importEnabled bool, importURL string) []string {
-	args := []string{binary, "-db-type", dbType}
-	if strings.TrimSpace(domain) != "" {
-		args = append(args, "-domain", domain)
-	} else {
-		args = append(args, "-port", strconv.Itoa(port))
-	}
-	if dbType == "pgx" || dbType == "clickhouse" {
-		if strings.TrimSpace(dbConn) != "" {
-			args = append(args, "-db-conn", dbConn)
-		}
-	} else if strings.TrimSpace(dbPath) != "" {
+// buildExecArgs assembles only flags supported by the Sitebrush server binary.
+func buildExecArgs(binary string, port int, storagePath, dbType, dbPath string) []string {
+	args := []string{binary, "-port", strconv.Itoa(port), "-storage-path", storagePath, "-db-type", dbType}
+	if strings.TrimSpace(dbPath) != "" {
 		args = append(args, "-db-path", dbPath)
-	}
-	if strings.TrimSpace(support) != "" {
-		args = append(args, "-support-email", support)
-	}
-	if safecast {
-		args = append(args, "-safecast-realtime")
-	}
-	if strings.TrimSpace(archiveDir) != "" {
-		args = append(args, "-json-archive-path", archiveDir)
-	}
-	if importEnabled && strings.TrimSpace(importURL) != "" {
-		args = append(args, "-import-tgz-url", importURL)
 	}
 	return args
 }
@@ -768,7 +573,7 @@ func writeServiceFile(path, workdir, logPath string, args []string, userUnit boo
 	}
 
 	content := fmt.Sprintf(`[Unit]
-Description=Chicha Isotope Map (port %d)
+Description=Sitebrush server (port %d)
 After=network-online.target
 Wants=network-online.target
 
@@ -814,7 +619,16 @@ func systemctlCommands(userUnit bool, unitName string) []string {
 	return []string{
 		fmt.Sprintf("%s daemon-reload", prefix),
 		fmt.Sprintf("%s enable --now %s", prefix, unitName),
+		fmt.Sprintf("%s status --no-pager --full %s", prefix, unitName),
+		fmt.Sprintf("journalctl%s -u %s -n 40 --no-pager", userJournalFlag(userUnit), unitName),
 	}
+}
+
+func userJournalFlag(userUnit bool) string {
+	if userUnit {
+		return " --user"
+	}
+	return ""
 }
 
 // commandResult streams the outcome of each systemctl call without blocking the
@@ -870,6 +684,20 @@ func printNextSteps(out io.Writer, theme colorTheme, res Result) {
 	fmt.Fprintf(out, "  file:    %s\n", res.ServicePath)
 }
 
+func printEnableNotes(out io.Writer, theme colorTheme, notes []string) {
+	if len(notes) == 0 {
+		return
+	}
+	fmt.Fprintf(out, "\n%sSystemd:%s\n", theme.AccentIfEnabled(), theme.ResetIfEnabled())
+	for _, note := range notes {
+		note = strings.TrimSpace(note)
+		if note == "" {
+			continue
+		}
+		fmt.Fprintf(out, "%s\n", note)
+	}
+}
+
 // appendProfilePrimer appends a short service cheat sheet to ~/.profile so SSH sessions
 // remind operators how to manage the unit. Keeping it terse ensures the login remains
 // readable while still surfacing start/stop/log hints without extra commands.
@@ -890,7 +718,7 @@ func appendProfilePrimer(res Result) {
 		edit = fmt.Sprintf("sudo %s", edit)
 	}
 
-	block := fmt.Sprintf("\n# sitebrush service hint\nif [ -t 1 ]; then\n  echo \"Chicha service: %s\"\n  echo \"reload:  %s daemon-reload\"\n  echo \"restart: %s restart %s\"\n  echo \"stop:    %s stop %s\"\n  echo \"edit:    %s\"\n  echo \"logs:    %s %s -f (or tail -f %s)\"\nfi\n", res.ServiceName, prefix, prefix, res.ServiceName, prefix, res.ServiceName, edit, journal, res.ServiceName, res.LogPath)
+	block := fmt.Sprintf("\n# sitebrush service hint\nif [ -t 1 ]; then\n  echo \"Sitebrush service: %s\"\n  echo \"reload:  %s daemon-reload\"\n  echo \"restart: %s restart %s\"\n  echo \"stop:    %s stop %s\"\n  echo \"edit:    %s\"\n  echo \"logs:    %s %s -f (or tail -f %s)\"\nfi\n", res.ServiceName, prefix, prefix, res.ServiceName, prefix, res.ServiceName, edit, journal, res.ServiceName, res.LogPath)
 
 	existing, err := os.ReadFile(profilePath)
 	if err == nil && strings.Contains(string(existing), "# sitebrush service hint") {
@@ -905,52 +733,10 @@ func appendProfilePrimer(res Result) {
 	_, _ = f.WriteString(block)
 }
 
-// printUsageHint keeps the end-of-setup message short while still telling the
-// operator how to reach the service. Mentioning autocert ports when a domain is
-// present avoids confusion about why 80/443 must stay open even though we no
-// longer ask for an explicit port flag.
-func printUsageHint(out io.Writer, theme colorTheme, domain string, port int) {
+func printUsageHint(out io.Writer, theme colorTheme, port int) {
 	target := fmt.Sprintf("http://localhost:%d", port)
-	note := "Keep the service running under systemd and reload+restart after edits."
-	if trimmed := strings.TrimSpace(domain); trimmed != "" {
-		target = fmt.Sprintf("https://%s", trimmed)
-		note = "TLS uses ports 80/443 automatically; leave them open for Let's Encrypt."
-	}
+	note := "Open the web UI to finish domain, HTTPS and site settings."
 	fmt.Fprintf(out, "\n%sUse:%s open %s in your browser. %s\n", theme.AccentIfEnabled(), theme.ResetIfEnabled(), target, note)
-}
-
-// createUpdateScript writes a tiny helper under /usr/local/bin so operators can stop,
-// refresh, and restart the service in one go. Keeping the logic here guarantees the
-// script matches the freshly written unit, which avoids mistakes when juggling
-// multiple ports. The function intentionally skips mutexes and relies on simple file
-// writes to stay in line with Go's preference for straightforward code.
-func createUpdateScript(res Result) error {
-	if len(res.ExecStart) == 0 {
-		return errors.New("missing ExecStart for update script")
-	}
-
-	binaryPath := res.ExecStart[0]
-	systemctl := "systemctl"
-	if res.UserUnit {
-		systemctl = "systemctl --user"
-	}
-
-	script := fmt.Sprintf("#!/bin/bash\nset -euo pipefail\nSVC=%q\nLOG=%q\nBIN=%q\nCTL=%q\n$CTL stop $SVC\ncurl -L https://github.com/matveynator/sitebrush/releases/download/latest/sitebrush_linux_amd64 > $BIN\nchmod +x $BIN\n$BIN --version\n$CTL start $SVC\ntail -f $LOG\n", res.ServiceName, res.LogPath, binaryPath, systemctl)
-
-	if err := os.WriteFile("/usr/local/bin/sitebrush-update", []byte(script), 0o755); err != nil {
-		return fmt.Errorf("write updater: %w", err)
-	}
-	return nil
-}
-
-// tailLogs follows the application log right after startup so operators can see the first lines without another command.
-// Using tail keeps the terminal familiar while ctx lets the caller interrupt cleanly.
-func tailLogs(ctx context.Context, out io.Writer, theme colorTheme, logPath string) {
-	fmt.Fprintf(out, "\n%sLive log (Ctrl+C to exit)%s\n", theme.PromptIfEnabled(), theme.ResetIfEnabled())
-	cmd := exec.CommandContext(ctx, "tail", "-n", "40", "-F", logPath)
-	cmd.Stdout = out
-	cmd.Stderr = out
-	_ = cmd.Run()
 }
 
 // AccentIfEnabled wraps the text in the accent colour when ANSI is available.
