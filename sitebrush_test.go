@@ -1443,6 +1443,72 @@ func TestMirrorRemotePageImportsNestedExternalResources(t *testing.T) {
 	}
 }
 
+func TestMirrorRemotePageImportsImageAltResourceURLs(t *testing.T) {
+	pageRawURL := "https://elburus.example/gallery"
+	sourceHTML := `<!doctype html><html><body>` +
+		`<img alt="/f/d79e6970493ed0c96a836dc2c35a0ae9.jpeg" src="/f/19fc3fc8d6ff9413f475b5b208e6cc37.jpeg">` +
+		`<img alt="Станция Мир: 3500м Ледник" src="/f/thumb.jpeg">` +
+		`<script>var imgL_source = $thumb.attr('alt');</script>` +
+		`</body></html>`
+
+	previousGrabHTTPClient := newGrabHTTPClient
+	newGrabHTTPClient = func() *http.Client {
+		return &http.Client{Transport: fakeGrabTransport{responses: map[string]fakeGrabResponse{
+			"https://elburus.example/f/d79e6970493ed0c96a836dc2c35a0ae9.jpeg": {contentType: "image/jpeg", body: "large"},
+			"https://elburus.example/f/19fc3fc8d6ff9413f475b5b208e6cc37.jpeg": {contentType: "image/jpeg", body: "thumb"},
+			"https://elburus.example/f/thumb.jpeg":                            {contentType: "image/jpeg", body: "plain-alt-thumb"},
+		}}}
+	}
+	defer func() {
+		newGrabHTTPClient = previousGrabHTTPClient
+	}()
+
+	pageURL, parseErr := url.Parse(pageRawURL)
+	if parseErr != nil {
+		t.Fatal(parseErr)
+	}
+	previewResources := previewGrabResources(pageURL, sourceHTML, nil, "", "")
+	if len(previewResources) != 3 {
+		t.Fatalf("expected 3 preview resources, got %d: %#v", len(previewResources), previewResources)
+	}
+	largeImageFound := false
+	for _, previewResource := range previewResources {
+		if previewResource.URL == "https://elburus.example/f/d79e6970493ed0c96a836dc2c35a0ae9.jpeg" {
+			largeImageFound = true
+		}
+		if strings.Contains(previewResource.URL, "%D0%A1%D1%82%D0%B0%D0%BD%D1%86%D0%B8%D1%8F") {
+			t.Fatalf("plain alt text was treated as a resource: %#v", previewResources)
+		}
+	}
+	if !largeImageFound {
+		t.Fatalf("preview resources missed image URL from alt: %#v", previewResources)
+	}
+
+	selectedResourceURLs := make(map[string]struct{}, len(previewResources))
+	for _, previewResource := range previewResources {
+		selectedResourceURLs[previewResource.URL] = struct{}{}
+	}
+	application, _ := newTestApplication(t)
+	importedHTML := application.mirrorRemotePage("example.test", "/imported", pageRawURL, pageURL, sourceHTML, "", selectedResourceURLs, "")
+	if strings.Contains(importedHTML, "/f/d79e6970493ed0c96a836dc2c35a0ae9.jpeg") {
+		t.Fatalf("imported HTML still references source image alt URL: %s", importedHTML)
+	}
+	if !strings.Contains(importedHTML, `alt="/p/`) {
+		t.Fatalf("imported HTML did not rewrite image alt URL to a local asset: %s", importedHTML)
+	}
+	if !strings.Contains(importedHTML, `alt="Станция Мир: 3500м Ледник"`) {
+		t.Fatalf("imported HTML rewrote plain alt text: %s", importedHTML)
+	}
+
+	storedFiles, listErr := listStoredFiles(application.domainFilesDirForDomain("example.test"))
+	if listErr != nil {
+		t.Fatal(listErr)
+	}
+	if len(storedFiles) != 3 {
+		t.Fatalf("expected 3 stored images, got %d: %#v", len(storedFiles), storedFiles)
+	}
+}
+
 func TestMirrorRemotePageImportsCrossDomainAssetsWithoutURLExtensions(t *testing.T) {
 	pageRawURL := "https://page.example/page"
 	sourceHTML := `<!doctype html><html><head>` +

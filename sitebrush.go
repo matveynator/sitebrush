@@ -7220,6 +7220,7 @@ type pageSpider struct {
 
 var (
 	htmlResourcePattern = regexp.MustCompile(`(?is)<(a|area|link|script|img|source|video|audio|iframe|embed|object|form)\b[^>]*(href|xlink:href|src|poster|data|action)\s*=\s*["']([^"']+)["']`)
+	htmlImageAltPattern = regexp.MustCompile(`(?is)<img\b[^>]*\balt\s*=\s*["']([^"']+)["'][^>]*>`)
 	htmlSrcSetPattern   = regexp.MustCompile(`(?is)\bsrcset\s*=\s*["']([^"']+)["']`)
 	cssURLPattern       = regexp.MustCompile(`(?is)url\(\s*['"]?([^'")]+)['"]?\s*\)`)
 	cssImportPattern    = regexp.MustCompile(`(?is)@import\s+(?:url\(\s*)?['"]?([^'")\s;]+)['"]?`)
@@ -7463,6 +7464,13 @@ func (spider *pageSpider) rewriteTextReferences(source, baseRawURL string, depth
 		}
 		return strings.Replace(match, parts[3], rewriteSingle(parts[3]), 1)
 	})
+	rewritten = htmlImageAltPattern.ReplaceAllStringFunc(rewritten, func(match string) string {
+		parts := htmlImageAltPattern.FindStringSubmatch(match)
+		if len(parts) != 2 || !spider.shouldRewriteImageAltResourceReference(parts[1], baseURL) {
+			return match
+		}
+		return strings.Replace(match, parts[1], rewriteSingle(parts[1]), 1)
+	})
 	rewritten = htmlSrcSetPattern.ReplaceAllStringFunc(rewritten, func(match string) string {
 		parts := htmlSrcSetPattern.FindStringSubmatch(match)
 		if len(parts) != 2 {
@@ -7488,6 +7496,14 @@ func (spider *pageSpider) rewriteTextReferences(source, baseRawURL string, depth
 	})
 	rewritten = rewriteCSSURLReferences(rewritten, rewriteSingle)
 	return rewritten
+}
+
+func (spider *pageSpider) shouldRewriteImageAltResourceReference(rawRef string, baseURL *url.URL) bool {
+	normalizedURL, blocked := spider.normalizeURL(rawRef, baseURL)
+	if blocked || normalizedURL == "" {
+		return false
+	}
+	return hasAllowedGrabResourceExtension(normalizedURL)
 }
 
 func (spider *pageSpider) rewriteResourceReference(rawRef string, baseURL *url.URL, depth int) string {
