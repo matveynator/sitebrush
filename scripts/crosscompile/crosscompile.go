@@ -678,21 +678,31 @@ func updateLatestSymlink(binaryRoot, version string) error {
 }
 
 func syncArtifacts(repoRoot, outputDir, programName, version, syncHost, syncBase string) error {
-	remoteBase := strings.TrimRight(syncBase, "/")
-	remoteProgramBase := remoteBase + "/" + programName
+	remoteProgramBase := remoteProgramBasePath(syncBase, programName)
 	remoteVersionPath := remoteProgramBase + "/" + version
 	fmt.Printf("sync %s to %s:%s\n", outputDir, syncHost, remoteVersionPath)
+	if err := runCommand(repoRoot, "ssh", syncHost, fmt.Sprintf("mkdir -p %s", shellQuote(remoteVersionPath))); err != nil {
+		return err
+	}
 	if err := runCommand(repoRoot, "rsync", "-a", "--delete", outputDir+"/", syncHost+":"+remoteVersionPath+"/"); err != nil {
 		return err
 	}
 	return runCommand(repoRoot, "ssh", syncHost, remoteLatestSymlinkCommand(remoteProgramBase, version))
 }
 
+func remoteProgramBasePath(syncBase, programName string) string {
+	remoteBase := strings.TrimRight(strings.TrimSpace(syncBase), "/")
+	if path.Base(remoteBase) == programName {
+		return remoteBase
+	}
+	return remoteBase + "/" + programName
+}
+
 func remoteLatestSymlinkCommand(remoteProgramBase, version string) string {
 	remoteLatest := remoteProgramBase + "/latest"
 	remoteLatestTemp := remoteProgramBase + "/.latest.tmp-" + sanitizePathSegment(version)
 	return fmt.Sprintf(
-		"mkdir -p %s && rm -rf %s && ln -s %s %s && rm -rf %s && mv -Tf %s %s && test \"$(readlink %s)\" = %s",
+		"set -e; mkdir -p %s; rm -rf %s; ln -s %s %s; rm -rf %s; mv -Tf %s %s; actual=$(readlink %s); test \"$actual\" = %s; printf 'latest -> %%s\\n' \"$actual\"",
 		shellQuote(remoteProgramBase),
 		shellQuote(remoteLatestTemp),
 		shellQuote(version),

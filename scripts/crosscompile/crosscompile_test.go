@@ -322,7 +322,9 @@ func TestRemoteLatestSymlinkCommandReplacesAndVerifiesLink(t *testing.T) {
 	for _, want := range []string{
 		"rm -rf '/srv/releases/sitebrush/latest'",
 		"mv -Tf '/srv/releases/sitebrush/.latest.tmp-162' '/srv/releases/sitebrush/latest'",
-		"test \"$(readlink '/srv/releases/sitebrush/latest')\" = '162'",
+		"actual=$(readlink '/srv/releases/sitebrush/latest')",
+		"test \"$actual\" = '162'",
+		"printf 'latest -> %s\\n' \"$actual\"",
 	} {
 		if !strings.Contains(command, want) {
 			t.Fatalf("remoteLatestSymlinkCommand() missing %q in %q", want, command)
@@ -330,6 +332,17 @@ func TestRemoteLatestSymlinkCommandReplacesAndVerifiesLink(t *testing.T) {
 	}
 	if strings.Contains(command, "ln -sfn") {
 		t.Fatalf("remoteLatestSymlinkCommand() should not use ln -sfn: %q", command)
+	}
+}
+
+func TestRemoteProgramBasePathDoesNotDuplicateProgramName(t *testing.T) {
+	t.Parallel()
+
+	if got, want := remoteProgramBasePath("/srv/releases", "sitebrush"), "/srv/releases/sitebrush"; got != want {
+		t.Fatalf("remoteProgramBasePath() = %q, want %q", got, want)
+	}
+	if got, want := remoteProgramBasePath("/srv/releases/sitebrush", "sitebrush"), "/srv/releases/sitebrush"; got != want {
+		t.Fatalf("remoteProgramBasePath() duplicated program name: got %q, want %q", got, want)
 	}
 }
 
