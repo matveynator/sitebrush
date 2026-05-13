@@ -38,9 +38,9 @@ import (
 	"strings"
 	"time"
 
-	_ "github.com/mattn/go-sqlite3"
 	"golang.org/x/crypto/acme/autocert"
 	"golang.org/x/net/html"
+	_ "sitebrush/pkg/database/drivers"
 	"sitebrush/pkg/desktop"
 	"sitebrush/pkg/diskusage"
 )
@@ -146,7 +146,7 @@ func (r *perSiteDBRouter) run(siteDatabaseRootDir string, migrate siteDBMigrator
 					request.response <- siteDBResponse{err: err}
 					continue
 				}
-				nextDatabase, err := sql.Open("sqlite3", "file:"+databasePath)
+				nextDatabase, err := sql.Open("sqlite", "file:"+databasePath)
 				if err != nil {
 					request.response <- siteDBResponse{err: err}
 					continue
@@ -221,11 +221,11 @@ func (r *perSiteDBRouter) databaseForContext(ctx context.Context) (*sql.DB, erro
 }
 
 func mustOpenNoopSQLite() *sql.DB {
-	noopDatabase, err := sql.Open("sqlite3", "file::memory:?cache=shared")
+	noopDatabase, err := sql.Open("sqlite", "file::memory:?cache=shared")
 	if err == nil {
 		return noopDatabase
 	}
-	noopDatabase, err = sql.Open("sqlite3", ":memory:")
+	noopDatabase, err = sql.Open("sqlite", ":memory:")
 	if err == nil {
 		return noopDatabase
 	}
