@@ -117,7 +117,7 @@ func main() {
 		if *syncBase == "" {
 			fatalf("-sync-base is required when -sync-host is set")
 		}
-		if err := syncArtifacts(repoRoot, outputDir, *programName, version, *syncHost, *syncBase); err != nil {
+		if err := syncArtifacts(repoRoot, filepath.Join(repoRoot, *outputRoot), *programName, version, *syncHost, *syncBase); err != nil {
 			fatalf("sync artifacts: %v", err)
 		}
 	}
@@ -677,17 +677,16 @@ func updateLatestSymlink(binaryRoot, version string) error {
 	return nil
 }
 
-func syncArtifacts(repoRoot, outputDir, programName, version, syncHost, syncBase string) error {
+func syncArtifacts(repoRoot, outputRoot, programName, version, syncHost, syncBase string) error {
 	remoteProgramBase := remoteProgramBasePath(syncBase, programName)
-	remoteVersionPath := remoteProgramBase + "/" + version
-	fmt.Printf("sync %s to %s:%s\n", outputDir, syncHost, remoteVersionPath)
-	if err := runCommand(repoRoot, "ssh", syncHost, fmt.Sprintf("mkdir -p %s", shellQuote(remoteVersionPath))); err != nil {
+	fmt.Printf("sync %s to %s:%s\n", outputRoot, syncHost, remoteProgramBase)
+	if err := runCommand(repoRoot, "ssh", syncHost, fmt.Sprintf("mkdir -p %s", shellQuote(remoteProgramBase))); err != nil {
 		return err
 	}
-	if err := runCommand(repoRoot, "rsync", "-a", "--delete", outputDir+"/", syncHost+":"+remoteVersionPath+"/"); err != nil {
+	if err := runCommand(repoRoot, "rsync", "-avP", outputRoot+"/", syncHost+":"+remoteProgramBase+"/"); err != nil {
 		return err
 	}
-	return runCommand(repoRoot, "ssh", syncHost, remoteLatestSymlinkCommand(remoteProgramBase, version))
+	return runCommand(repoRoot, "ssh", syncHost, remoteLatestSymlinkVerifyCommand(remoteProgramBase, version))
 }
 
 func remoteProgramBasePath(syncBase, programName string) string {
@@ -698,18 +697,10 @@ func remoteProgramBasePath(syncBase, programName string) string {
 	return remoteBase + "/" + programName
 }
 
-func remoteLatestSymlinkCommand(remoteProgramBase, version string) string {
+func remoteLatestSymlinkVerifyCommand(remoteProgramBase, version string) string {
 	remoteLatest := remoteProgramBase + "/latest"
-	remoteLatestTemp := remoteProgramBase + "/.latest.tmp-" + sanitizePathSegment(version)
 	return fmt.Sprintf(
-		"set -e; mkdir -p %s; rm -rf %s; ln -s %s %s; rm -rf %s; mv -Tf %s %s; test -L %s; actual=$(readlink %s); test \"$actual\" = %s; printf 'latest -> %%s\\n' \"$actual\"; ls -la %s",
-		shellQuote(remoteProgramBase),
-		shellQuote(remoteLatestTemp),
-		shellQuote(version),
-		shellQuote(remoteLatestTemp),
-		shellQuote(remoteLatest),
-		shellQuote(remoteLatestTemp),
-		shellQuote(remoteLatest),
+		"set -e; test -L %s; actual=$(readlink %s); test \"$actual\" = %s; printf 'latest -> %%s\\n' \"$actual\"; ls -la %s",
 		shellQuote(remoteLatest),
 		shellQuote(remoteLatest),
 		shellQuote(version),

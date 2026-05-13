@@ -315,13 +315,11 @@ func TestUpdateLatestSymlink(t *testing.T) {
 	}
 }
 
-func TestRemoteLatestSymlinkCommandReplacesAndVerifiesLink(t *testing.T) {
+func TestRemoteLatestSymlinkVerifyCommandChecksRsyncCopiedLink(t *testing.T) {
 	t.Parallel()
 
-	command := remoteLatestSymlinkCommand("/srv/releases/sitebrush", "162")
+	command := remoteLatestSymlinkVerifyCommand("/srv/releases/sitebrush", "162")
 	for _, want := range []string{
-		"rm -rf '/srv/releases/sitebrush/latest'",
-		"mv -Tf '/srv/releases/sitebrush/.latest.tmp-162' '/srv/releases/sitebrush/latest'",
 		"test -L '/srv/releases/sitebrush/latest'",
 		"actual=$(readlink '/srv/releases/sitebrush/latest')",
 		"test \"$actual\" = '162'",
@@ -332,8 +330,8 @@ func TestRemoteLatestSymlinkCommandReplacesAndVerifiesLink(t *testing.T) {
 			t.Fatalf("remoteLatestSymlinkCommand() missing %q in %q", want, command)
 		}
 	}
-	if strings.Contains(command, "ln -sfn") {
-		t.Fatalf("remoteLatestSymlinkCommand() should not use ln -sfn: %q", command)
+	if strings.Contains(command, "ln -s") || strings.Contains(command, "rm -rf") {
+		t.Fatalf("remoteLatestSymlinkVerifyCommand() should only verify rsync-copied symlink: %q", command)
 	}
 }
 
