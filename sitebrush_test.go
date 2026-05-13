@@ -5,6 +5,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/tls"
 	"database/sql"
 	"encoding/json"
 	"io"
@@ -3285,6 +3286,73 @@ func TestDomainLogsRotateDailyAndKeepAnalyticsData(t *testing.T) {
 	}
 	if reportCount != 1 {
 		t.Fatalf("analytics report count = %d, want 1", reportCount)
+	}
+
+	problemLogDir := application.problemLogDir()
+	if err := os.MkdirAll(problemLogDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	oldProblemLogPath := filepath.Join(problemLogDir, "2026-05-07.log")
+	if err := os.WriteFile(oldProblemLogPath, []byte("old problem\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	application.appendProblemLogEvent(now, "AUTOCERT DNS refresh started")
+	if _, err := os.Stat(oldProblemLogPath); !os.IsNotExist(err) {
+		t.Fatalf("old problem log still exists, stat error = %v", err)
+	}
+	problemLogPath := filepath.Join(problemLogDir, "2026-05-13.log")
+	problemLog, err := os.ReadFile(problemLogPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(problemLog), "AUTOCERT DNS refresh started") {
+		t.Fatalf("problem log does not contain diagnostic message: %q", string(problemLog))
+	}
+}
+
+func TestServeTLSWithAutoCertUsesTLSOnListener(t *testing.T) {
+	application, _ := newTestApplication(t)
+	certificateSource := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	t.Cleanup(certificateSource.Close)
+	tlsConfig := certificateSource.TLS.Clone()
+	if tlsConfig == nil {
+		t.Fatal("test TLS config is nil")
+	}
+	tlsConfig.MinVersion = tls.VersionTLS12
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	serverDone := make(chan struct{})
+	go func() {
+		application.serveTLSWithAutoCert(listener, tlsConfig, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_, _ = w.Write([]byte("secure"))
+		}))
+		close(serverDone)
+	}()
+
+	client := certificateSource.Client()
+	response, err := client.Get("https://" + listener.Addr().String() + "/")
+	if err != nil {
+		_ = listener.Close()
+		t.Fatalf("HTTPS request failed: %v", err)
+	}
+	defer response.Body.Close()
+	bodyBytes, err := io.ReadAll(response.Body)
+	if err != nil {
+		_ = listener.Close()
+		t.Fatal(err)
+	}
+	if string(bodyBytes) != "secure" {
+		_ = listener.Close()
+		t.Fatalf("HTTPS body = %q, want secure", string(bodyBytes))
+	}
+
+	_ = listener.Close()
+	select {
+	case <-serverDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("TLS server did not stop after listener close")
 	}
 }
 

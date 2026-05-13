@@ -715,6 +715,67 @@ func (a *App) cleanupOldDomainLogs(domain string, now time.Time) {
 	}
 }
 
+func (a *App) logProblemEvent(format string, args ...any) {
+	message := fmt.Sprintf(format, args...)
+	log.Printf("PROBLEM %s", message)
+	a.appendProblemLogEvent(time.Now().UTC(), message)
+}
+
+func (a *App) appendProblemLogEvent(occurredAt time.Time, message string) {
+	if occurredAt.IsZero() {
+		occurredAt = time.Now().UTC()
+	}
+	logDir := a.problemLogDir()
+	if err := os.MkdirAll(logDir, 0o755); err != nil {
+		log.Printf("failed to create problem log dir: %v", err)
+		return
+	}
+	logPath := filepath.Join(logDir, occurredAt.Format("2006-01-02")+".log")
+	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		log.Printf("failed to open problem log: %v", err)
+		return
+	}
+	defer logFile.Close()
+	if _, err := fmt.Fprintf(logFile, "%s %s\n", occurredAt.Format(time.RFC3339), message); err != nil {
+		log.Printf("failed to write problem log: %v", err)
+	}
+	a.cleanupOldProblemLogs(occurredAt)
+}
+
+func (a *App) cleanupOldProblemLogs(now time.Time) {
+	logDir := a.problemLogDir()
+	entries, err := os.ReadDir(logDir)
+	if err != nil {
+		return
+	}
+	cutoffDate := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC).AddDate(0, 0, -domainLogRetentionDays)
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".log") {
+			continue
+		}
+		logDate, parseErr := time.Parse("2006-01-02", strings.TrimSuffix(entry.Name(), ".log"))
+		if parseErr != nil || !logDate.Before(cutoffDate) {
+			continue
+		}
+		if removeErr := os.Remove(filepath.Join(logDir, entry.Name())); removeErr != nil {
+			log.Printf("failed to remove old problem log %s: %v", entry.Name(), removeErr)
+		}
+	}
+}
+
+type problemLogWriter struct {
+	application *App
+}
+
+func (writer problemLogWriter) Write(payload []byte) (int, error) {
+	message := strings.TrimSpace(string(payload))
+	if writer.application != nil && message != "" {
+		writer.application.logProblemEvent("%s", message)
+	}
+	return len(payload), nil
+}
+
 func (a *App) analyticsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		startedAt := time.Now()
@@ -1570,11 +1631,11 @@ func main() {
 	appHandler := application.analyticsMiddleware(application.accessLogMiddleware(application.authAbuseMiddleware(domainContextMiddleware)))
 	httpHandler := appHandler
 	if parsedPorts.TLSEnabled && listenPort != 80 {
-		log.Printf("Let’s Encrypt HTTP-01 checks need public port 80; current HTTP port is %d", listenPort)
+		application.logProblemEvent("AUTOCERT disabled: Let’s Encrypt HTTP-01 checks need public port 80; current HTTP port is %d", listenPort)
 	}
 	certificateCacheDir := filepath.Join(application.storageRootDir(), "letsencrypt")
 	if mkdirErr := os.MkdirAll(certificateCacheDir, 0o755); mkdirErr != nil {
-		log.Printf("failed to create certificate cache: %v", mkdirErr)
+		application.logProblemEvent("AUTOCERT disabled: failed to create certificate cache %s: %v", certificateCacheDir, mkdirErr)
 	} else if parsedPorts.TLSEnabled && listenPort == 80 {
 		certificateManager := &autocert.Manager{
 			Prompt:     autocert.AcceptTOS,
@@ -1583,11 +1644,12 @@ func main() {
 		}
 		tlsListener, tlsListenErr := listenTLSForAutoCert()
 		if tlsListenErr != nil {
-			log.Printf("HTTPS disabled: cannot listen on port 443: %v", tlsListenErr)
+			application.logProblemEvent("AUTOCERT disabled: cannot listen on port 443: %v", tlsListenErr)
 		} else {
 			application.automaticSSLAvailable = true
 			httpHandler = certificateManager.HTTPHandler(appHandler)
-			go serveTLSWithAutoCert(tlsListener, application.autoCertTLSConfig(certificateManager), appHandler)
+			application.logProblemEvent("AUTOCERT enabled: HTTP challenge on port 80, HTTPS TLS listener on port 443, certificate cache=%s", certificateCacheDir)
+			go application.serveTLSWithAutoCert(tlsListener, application.autoCertTLSConfig(certificateManager), appHandler)
 			application.startAutomaticSSLRefreshWorker(context.Background())
 		}
 	}
@@ -1679,14 +1741,16 @@ func listenTLSForAutoCert() (net.Listener, error) {
 	return net.Listen("tcp", ":443")
 }
 
-func serveTLSWithAutoCert(tlsListener net.Listener, tlsConfig *tls.Config, handler http.Handler) {
+func (a *App) serveTLSWithAutoCert(tlsListener net.Listener, tlsConfig *tls.Config, handler http.Handler) {
 	tlsServer := &http.Server{
 		Handler:   handler,
 		TLSConfig: tlsConfig,
+		ErrorLog:  log.New(problemLogWriter{application: a}, "", 0),
 	}
-	log.Printf("Sitebrush HTTPS enabled on port 443 for automatic SSL domains")
-	if serveErr := tlsServer.Serve(tlsListener); serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
-		log.Printf("HTTPS server stopped: %v", serveErr)
+	tlsAddress := tlsListener.Addr().String()
+	a.logProblemEvent("HTTPS server enabled on %s with TLS", tlsAddress)
+	if serveErr := tlsServer.ServeTLS(tlsListener, "", ""); serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
+		a.logProblemEvent("HTTPS server stopped: %v", serveErr)
 	}
 }
 
@@ -8475,10 +8539,11 @@ func (a *App) refreshAutomaticSSLDomains(ctx context.Context) {
 	}
 	serverIPs, _, err := detectServerIPCandidates(ctx)
 	if err != nil || len(serverIPs) == 0 {
-		log.Printf("automatic SSL DNS refresh skipped: server IP detection failed: %v", err)
+		a.logProblemEvent("AUTOCERT DNS refresh skipped: server IP detection failed: %v", err)
 		return
 	}
 	domainList := a.listAutomaticSSLDomainCandidates(ctx)
+	a.logProblemEvent("AUTOCERT DNS refresh started: domains=%d server_ips=%s", len(domainList), ipListForLog(serverIPs))
 	for _, domain := range domainList {
 		a.refreshDomainAutomaticSSL(ctx, domain, serverIPs)
 	}
@@ -9958,6 +10023,10 @@ func (a *App) domainStaticDir(domain string) string {
 
 func (a *App) domainLogDir(domain string) string {
 	return filepath.Join(a.storageRootDir(), "logs", domainStorageName(domain))
+}
+
+func (a *App) problemLogDir() string {
+	return filepath.Join(a.storageRootDir(), "logs", "problems")
 }
 
 func (a *App) logContentDelivery(w http.ResponseWriter, sourceType string) {
