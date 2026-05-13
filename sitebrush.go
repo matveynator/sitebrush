@@ -7974,6 +7974,7 @@ func (a *App) siteDomain(ctx context.Context, r *http.Request) string {
 var lookupTXTRecords = net.LookupTXT
 var lookupIPRecords = net.LookupIP
 var lookupServerExternalIP = detectServerExternalIP
+var lookupServerInterfaceIPs = detectServerInterfaceIPs
 
 const automaticSSLRefreshInterval = time.Hour
 
@@ -8000,6 +8001,91 @@ func detectServerExternalIP(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("external IP service returned invalid address %q", externalIP)
 	}
 	return externalIP, nil
+}
+
+func detectServerInterfaceIPs() ([]net.IP, error) {
+	addressList, err := net.InterfaceAddrs()
+	if err != nil {
+		return nil, err
+	}
+	ipList := make([]net.IP, 0, len(addressList))
+	for _, address := range addressList {
+		var candidateIP net.IP
+		switch typedAddress := address.(type) {
+		case *net.IPNet:
+			candidateIP = typedAddress.IP
+		case *net.IPAddr:
+			candidateIP = typedAddress.IP
+		}
+		if candidateIP == nil || candidateIP.IsLoopback() || !candidateIP.IsGlobalUnicast() {
+			continue
+		}
+		ipList = append(ipList, candidateIP)
+	}
+	return ipList, nil
+}
+
+func detectServerIPCandidates(ctx context.Context) ([]net.IP, string, error) {
+	externalIP, externalErr := lookupServerExternalIP(ctx)
+	ipList := serverIPCandidatesWithExternalIP(externalIP)
+	if len(ipList) > 0 {
+		return ipList, ipList[0].String(), nil
+	}
+	if externalErr != nil {
+		return nil, "", externalErr
+	}
+	return nil, "", errors.New("no public server IP addresses detected")
+}
+
+func serverIPCandidatesWithExternalIP(externalIP string) []net.IP {
+	seenIPs := make(map[string]struct{})
+	publicInterfaceIPs := make([]net.IP, 0)
+	privateInterfaceIPs := make([]net.IP, 0)
+	if interfaceIPs, err := lookupServerInterfaceIPs(); err == nil {
+		for _, interfaceIP := range interfaceIPs {
+			if interfaceIP == nil {
+				continue
+			}
+			if interfaceIP.IsPrivate() {
+				privateInterfaceIPs = append(privateInterfaceIPs, interfaceIP)
+				continue
+			}
+			publicInterfaceIPs = append(publicInterfaceIPs, interfaceIP)
+		}
+	}
+	sortIPListForDisplay(publicInterfaceIPs)
+	sortIPListForDisplay(privateInterfaceIPs)
+	ipList := make([]net.IP, 0, len(publicInterfaceIPs)+len(privateInterfaceIPs)+1)
+	addIP := func(candidateIP net.IP) {
+		if candidateIP == nil {
+			return
+		}
+		ipKey := candidateIP.String()
+		if _, seen := seenIPs[ipKey]; seen {
+			return
+		}
+		seenIPs[ipKey] = struct{}{}
+		ipList = append(ipList, candidateIP)
+	}
+	for _, interfaceIP := range publicInterfaceIPs {
+		addIP(interfaceIP)
+	}
+	addIP(net.ParseIP(strings.TrimSpace(externalIP)))
+	for _, interfaceIP := range privateInterfaceIPs {
+		addIP(interfaceIP)
+	}
+	return ipList
+}
+
+func sortIPListForDisplay(ipList []net.IP) {
+	sort.SliceStable(ipList, func(leftIndex, rightIndex int) bool {
+		leftIsIPv4 := ipList[leftIndex].To4() != nil
+		rightIsIPv4 := ipList[rightIndex].To4() != nil
+		if leftIsIPv4 != rightIsIPv4 {
+			return leftIsIPv4
+		}
+		return ipList[leftIndex].String() < ipList[rightIndex].String()
+	})
 }
 
 func normalizeDomainName(rawDomain string) string {
@@ -8062,7 +8148,7 @@ func (a *App) handleDomainSettingsPost(ctx context.Context, r *http.Request, sit
 		enabled := r.FormValue("auto_ssl_enabled") == "1"
 		a.setDomainAutomaticSSLManual(ctx, certificateDomain, enabled)
 		if enabled && a.automaticSSLAvailable && strings.TrimSpace(externalIP) != "" {
-			a.refreshDomainAutomaticSSL(ctx, certificateDomain, externalIP)
+			a.refreshDomainAutomaticSSL(ctx, certificateDomain, serverIPCandidatesWithExternalIP(externalIP))
 		}
 	case "add_alias":
 		aliasDomain := normalizeDomainName(r.FormValue("alias_domain"))
@@ -8184,13 +8270,22 @@ func domainARecordMatches(aliasDomain string, externalIP string) bool {
 	if parsedExternalIP == nil {
 		return false
 	}
+	return domainARecordMatchesAny(aliasDomain, []net.IP{parsedExternalIP})
+}
+
+func domainARecordMatchesAny(aliasDomain string, serverIPs []net.IP) bool {
+	if len(serverIPs) == 0 {
+		return false
+	}
 	ipRecords, err := lookupIPRecords(aliasDomain)
 	if err != nil {
 		return false
 	}
 	for _, ipRecord := range ipRecords {
-		if ipRecord.Equal(parsedExternalIP) {
-			return true
+		for _, serverIP := range serverIPs {
+			if serverIP != nil && ipRecord.Equal(serverIP) {
+				return true
+			}
 		}
 	}
 	return false
@@ -8216,13 +8311,13 @@ func (a *App) refreshAutomaticSSLDomains(ctx context.Context) {
 	if !a.automaticSSLAvailable {
 		return
 	}
-	externalIP, err := lookupServerExternalIP(ctx)
-	if err != nil || strings.TrimSpace(externalIP) == "" {
+	serverIPs, _, err := detectServerIPCandidates(ctx)
+	if err != nil || len(serverIPs) == 0 {
 		return
 	}
 	domainList := a.listAutomaticSSLDomainCandidates(ctx)
 	for _, domain := range domainList {
-		a.refreshDomainAutomaticSSL(ctx, domain, externalIP)
+		a.refreshDomainAutomaticSSL(ctx, domain, serverIPs)
 	}
 }
 
@@ -8260,7 +8355,7 @@ UNION SELECT domain FROM domain_ssl_settings`
 	return domainList
 }
 
-func (a *App) refreshDomainAutomaticSSL(ctx context.Context, domain string, externalIP string) DomainAutomaticSSLSetting {
+func (a *App) refreshDomainAutomaticSSL(ctx context.Context, domain string, serverIPs []net.IP) DomainAutomaticSSLSetting {
 	setting := a.domainAutomaticSSLSetting(ctx, domain)
 	if setting.Domain == "" {
 		return setting
@@ -8269,7 +8364,7 @@ func (a *App) refreshDomainAutomaticSSL(ctx context.Context, domain string, exte
 	if !setting.Available || setting.ManuallyDisabled {
 		return setting
 	}
-	setting.Enabled = domainARecordMatches(setting.Domain, externalIP)
+	setting.Enabled = domainARecordMatchesAny(setting.Domain, serverIPs)
 	setting.LastCheckedAt = time.Now().UTC().Format(time.RFC3339)
 	a.upsertDomainAutomaticSSLSetting(ctx, setting)
 	if domainFromContext(ctx) != setting.Domain {
@@ -8278,7 +8373,7 @@ func (a *App) refreshDomainAutomaticSSL(ctx context.Context, domain string, exte
 	return setting
 }
 
-func (a *App) refreshDomainAutomaticSSLIfStale(ctx context.Context, domain string, externalIP string) DomainAutomaticSSLSetting {
+func (a *App) refreshDomainAutomaticSSLIfStale(ctx context.Context, domain string, serverIPs []net.IP) DomainAutomaticSSLSetting {
 	setting := a.domainAutomaticSSLSetting(ctx, domain)
 	if setting.Domain == "" {
 		return setting
@@ -8291,10 +8386,10 @@ func (a *App) refreshDomainAutomaticSSLIfStale(ctx context.Context, domain strin
 	if err == nil && time.Since(lastCheckedAt) < automaticSSLRefreshInterval {
 		return setting
 	}
-	if strings.TrimSpace(externalIP) == "" {
+	if len(serverIPs) == 0 {
 		return setting
 	}
-	return a.refreshDomainAutomaticSSL(ctx, domain, externalIP)
+	return a.refreshDomainAutomaticSSL(ctx, domain, serverIPs)
 }
 
 func (a *App) domainAutomaticSSLSetting(ctx context.Context, domain string) DomainAutomaticSSLSetting {
@@ -8476,13 +8571,13 @@ func (a *App) domainSettingsPage(w http.ResponseWriter, r *http.Request) {
 		externalIP := ""
 		action := strings.TrimSpace(r.FormValue("action"))
 		if action == "add_alias" || action == "select_alias" || action == "check_alias" || action == "check_all" || action == "update_auto_ssl" {
-			externalIP, _ = lookupServerExternalIP(r.Context())
+			_, externalIP, _ = detectServerIPCandidates(r.Context())
 		}
 		a.handleDomainSettingsPost(r.Context(), r, siteDomain, externalIP)
 		http.Redirect(w, r, returnPath+"?settings", http.StatusFound)
 		return
 	}
-	externalIP, externalIPErr := lookupServerExternalIP(r.Context())
+	serverIPs, externalIP, externalIPErr := detectServerIPCandidates(r.Context())
 	domainAliases, err := a.listDomainAliases(r.Context(), siteDomain)
 	if err != nil {
 		http.Error(w, "failed to load domain aliases", http.StatusInternalServerError)
@@ -8495,7 +8590,7 @@ func (a *App) domainSettingsPage(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 	}
-	automaticSSLSetting := a.refreshDomainAutomaticSSLIfStale(r.Context(), selectedDomain, externalIP)
+	automaticSSLSetting := a.refreshDomainAutomaticSSLIfStale(r.Context(), selectedDomain, serverIPs)
 	automaticSSLStatus := automaticSSLStatusView(automaticSSLSetting, externalIPErr)
 	backupToken := a.backupTokenForDomain(r.Context(), siteDomain)
 	backupDownloadPath := "/?backup_download&token=" + url.QueryEscape(backupToken)

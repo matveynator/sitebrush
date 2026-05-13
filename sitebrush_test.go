@@ -3149,7 +3149,11 @@ func TestAutomaticSSLDefaultsOnForResolvingDomainAndHonorsManualOff(t *testing.T
 	application, rawDB := newTestApplication(t)
 	application.automaticSSLAvailable = true
 	previousIPLookup := lookupIPRecords
-	defer func() { lookupIPRecords = previousIPLookup }()
+	previousInterfaceLookup := lookupServerInterfaceIPs
+	defer func() {
+		lookupIPRecords = previousIPLookup
+		lookupServerInterfaceIPs = previousInterfaceLookup
+	}()
 	lookupIPRecords = func(domain string) ([]net.IP, error) {
 		if domain == "example.com" {
 			return []net.IP{net.ParseIP("203.0.113.10")}, nil
@@ -3162,7 +3166,7 @@ func TestAutomaticSSLDefaultsOnForResolvingDomainAndHonorsManualOff(t *testing.T
 		t.Fatalf("insert page: %v", err)
 	}
 
-	setting := application.refreshDomainAutomaticSSL(context.Background(), "example.com", "203.0.113.10")
+	setting := application.refreshDomainAutomaticSSL(context.Background(), "example.com", []net.IP{net.ParseIP("203.0.113.10")})
 	if !setting.Enabled {
 		t.Fatalf("auto ssl enabled = false, want true")
 	}
@@ -3171,15 +3175,23 @@ func TestAutomaticSSLDefaultsOnForResolvingDomainAndHonorsManualOff(t *testing.T
 	}
 
 	application.setDomainAutomaticSSLManual(context.Background(), "example.com", false)
-	setting = application.refreshDomainAutomaticSSL(context.Background(), "example.com", "203.0.113.10")
+	setting = application.refreshDomainAutomaticSSL(context.Background(), "example.com", []net.IP{net.ParseIP("203.0.113.10")})
 	if setting.Enabled || !setting.ManuallyDisabled {
 		t.Fatalf("manual off setting = %+v, want disabled and manually disabled", setting)
 	}
 
 	application.setDomainAutomaticSSLManual(context.Background(), "example.com", true)
-	setting = application.refreshDomainAutomaticSSL(context.Background(), "example.com", "198.51.100.25")
+	setting = application.refreshDomainAutomaticSSL(context.Background(), "example.com", []net.IP{net.ParseIP("198.51.100.25")})
 	if setting.Enabled {
 		t.Fatalf("auto ssl remained enabled for non-resolving domain: %+v", setting)
+	}
+
+	lookupServerInterfaceIPs = func() ([]net.IP, error) {
+		return []net.IP{net.ParseIP("203.0.113.10")}, nil
+	}
+	setting = application.refreshDomainAutomaticSSL(context.Background(), "example.com", serverIPCandidatesWithExternalIP("198.51.100.25"))
+	if !setting.Enabled {
+		t.Fatalf("auto ssl did not use matching interface IP when external service returned another IP: %+v", setting)
 	}
 }
 
