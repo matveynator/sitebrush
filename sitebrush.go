@@ -8,6 +8,7 @@ import (
 	"crypto/rand"
 	"crypto/sha1"
 	"crypto/sha256"
+	"crypto/tls"
 	"database/sql"
 	"embed"
 	"encoding/base64"
@@ -70,6 +71,7 @@ type App struct {
 	grabTracker           *grabProgressTracker
 	publishTracker        *publishProgressTracker
 	analyticsEvents       chan siteAnalyticsEvent
+	domainLogEvents       chan domainLogEvent
 }
 
 type sqlExecutor interface {
@@ -573,7 +575,15 @@ func (writer *statusCapturingResponseWriter) Flush() {
 	}
 }
 
-func accessLogMiddleware(next http.Handler) http.Handler {
+type domainLogEvent struct {
+	Domain     string
+	OccurredAt time.Time
+	Message    string
+}
+
+const domainLogRetentionDays = 5
+
+func (a *App) accessLogMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		const (
 			colorGreen  = "\033[32m"
@@ -599,12 +609,110 @@ func accessLogMiddleware(next http.Handler) http.Handler {
 			logType = "STATIC"
 			logColor = colorGreen
 		}
+		duration := time.Since(startedAt)
+		requestDomain := domainFromRequest(r)
 		if strings.TrimSpace(r.URL.RawQuery) == "" {
-			log.Printf("%s%s%s method=%s path=%s status=%d remote=%s duration=%s", logColor, logType, colorReset, r.Method, r.URL.Path, writer.statusCode, r.RemoteAddr, time.Since(startedAt).String())
+			log.Printf("%s%s%s method=%s path=%s status=%d remote=%s duration=%s", logColor, logType, colorReset, r.Method, r.URL.Path, writer.statusCode, r.RemoteAddr, duration.String())
+			a.writeDomainLog(requestDomain, "%s method=%s path=%s status=%d remote=%s duration=%s", logType, r.Method, r.URL.Path, writer.statusCode, r.RemoteAddr, duration.String())
 			return
 		}
-		log.Printf("%s%s%s method=%s path=%s query=%s status=%d remote=%s duration=%s", logColor, logType, colorReset, r.Method, r.URL.Path, r.URL.RawQuery, writer.statusCode, r.RemoteAddr, time.Since(startedAt).String())
+		log.Printf("%s%s%s method=%s path=%s query=%s status=%d remote=%s duration=%s", logColor, logType, colorReset, r.Method, r.URL.Path, r.URL.RawQuery, writer.statusCode, r.RemoteAddr, duration.String())
+		a.writeDomainLog(requestDomain, "%s method=%s path=%s query=%s status=%d remote=%s duration=%s", logType, r.Method, r.URL.Path, r.URL.RawQuery, writer.statusCode, r.RemoteAddr, duration.String())
 	})
+}
+
+func (a *App) startDomainLogWorker(ctx context.Context) {
+	if a.domainLogEvents == nil {
+		a.domainLogEvents = make(chan domainLogEvent, 1024)
+	}
+	go a.runDomainLogWorker(ctx, a.domainLogEvents)
+}
+
+func (a *App) writeDomainLog(domain string, format string, args ...any) {
+	cleanDomain := normalizeDomainName(domain)
+	if cleanDomain == "" {
+		cleanDomain = "localhost"
+	}
+	message := fmt.Sprintf(format, args...)
+	if a.domainLogEvents == nil {
+		return
+	}
+	event := domainLogEvent{Domain: cleanDomain, OccurredAt: time.Now().UTC(), Message: message}
+	select {
+	case a.domainLogEvents <- event:
+	default:
+		log.Printf("domain log queue is full, skipped log for %s: %s", cleanDomain, message)
+	}
+}
+
+func (a *App) logDomainEvent(domain string, format string, args ...any) {
+	cleanDomain := normalizeDomainName(domain)
+	if cleanDomain == "" {
+		cleanDomain = "localhost"
+	}
+	message := fmt.Sprintf(format, args...)
+	log.Printf("domain=%s %s", cleanDomain, message)
+	a.writeDomainLog(cleanDomain, "%s", message)
+}
+
+func (a *App) runDomainLogWorker(ctx context.Context, events <-chan domainLogEvent) {
+	lastCleanupByDomain := make(map[string]string)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case event := <-events:
+			if event.OccurredAt.IsZero() {
+				event.OccurredAt = time.Now().UTC()
+			}
+			a.appendDomainLogEvent(event)
+			cleanupDate := event.OccurredAt.Format("2006-01-02")
+			if lastCleanupByDomain[event.Domain] == cleanupDate {
+				continue
+			}
+			lastCleanupByDomain[event.Domain] = cleanupDate
+			a.cleanupOldDomainLogs(event.Domain, event.OccurredAt)
+		}
+	}
+}
+
+func (a *App) appendDomainLogEvent(event domainLogEvent) {
+	logDir := a.domainLogDir(event.Domain)
+	if err := os.MkdirAll(logDir, 0o755); err != nil {
+		log.Printf("failed to create domain log dir for %s: %v", event.Domain, err)
+		return
+	}
+	logPath := filepath.Join(logDir, event.OccurredAt.Format("2006-01-02")+".log")
+	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		log.Printf("failed to open domain log for %s: %v", event.Domain, err)
+		return
+	}
+	defer logFile.Close()
+	if _, err := fmt.Fprintf(logFile, "%s %s\n", event.OccurredAt.Format(time.RFC3339), event.Message); err != nil {
+		log.Printf("failed to write domain log for %s: %v", event.Domain, err)
+	}
+}
+
+func (a *App) cleanupOldDomainLogs(domain string, now time.Time) {
+	logDir := a.domainLogDir(domain)
+	entries, err := os.ReadDir(logDir)
+	if err != nil {
+		return
+	}
+	cutoffDate := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC).AddDate(0, 0, -domainLogRetentionDays)
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".log") {
+			continue
+		}
+		logDate, parseErr := time.Parse("2006-01-02", strings.TrimSuffix(entry.Name(), ".log"))
+		if parseErr != nil || !logDate.Before(cutoffDate) {
+			continue
+		}
+		if removeErr := os.Remove(filepath.Join(logDir, entry.Name())); removeErr != nil {
+			log.Printf("failed to remove old domain log %s/%s: %v", domain, entry.Name(), removeErr)
+		}
+	}
 }
 
 func (a *App) analyticsMiddleware(next http.Handler) http.Handler {
@@ -1366,6 +1474,8 @@ func main() {
 	listSitesMode := flag.Bool("list-sites", false, "open interactive server site quota console")
 	quotaSite := flag.String("quota-site", "", "site domain to update storage quota for")
 	quotaValue := flag.String("quota", "", "set -quota-site storage quota, for example 50mb or 20gb")
+	versionShort := flag.Bool("v", false, "print version and exit")
+	versionLong := flag.Bool("version", false, "print version and exit")
 	var desktopModeFlag *bool
 	if appcli.DesktopModeFlagSupported() {
 		desktopModeFlag = flag.Bool("desktop", desktop.DefaultEnabled(), "enable desktop mode when desktop build tags are used")
@@ -1375,6 +1485,10 @@ func main() {
 		setupModeFlag = flag.Bool("setup", false, "run interactive Linux setup wizard mode")
 	}
 	flag.Parse()
+	if *versionShort || *versionLong {
+		fmt.Println(CompileVersion)
+		return
+	}
 	desktopMode := false
 	if desktopModeFlag != nil {
 		desktopMode = *desktopModeFlag
@@ -1415,7 +1529,7 @@ func main() {
 	}
 
 	var siteDatabaseRouter *perSiteDBRouter
-	application := &App{storagePath: effectiveStoragePath, nativeFileDialog: desktop.NativeFileDialogSupported(), grabTracker: newGrabProgressTracker(), publishTracker: newPublishProgressTracker(), analyticsEvents: make(chan siteAnalyticsEvent, 1024)}
+	application := &App{storagePath: effectiveStoragePath, nativeFileDialog: desktop.NativeFileDialogSupported(), grabTracker: newGrabProgressTracker(), publishTracker: newPublishProgressTracker(), analyticsEvents: make(chan siteAnalyticsEvent, 1024), domainLogEvents: make(chan domainLogEvent, 1024)}
 	siteDatabaseRootDir := siteDatabaseRootPath(effectiveDBPath)
 	siteDatabaseRouter = newPerSiteDBRouter(siteDatabaseRootDir, "localhost", func(rawDatabase *sql.DB) error {
 		bootstrapApplication := &App{db: rawDatabase, storagePath: effectiveStoragePath}
@@ -1427,6 +1541,7 @@ func main() {
 		}
 	}()
 	application.db = siteDatabaseRouter
+	application.startDomainLogWorker(context.Background())
 	application.startAnalyticsWorkers(context.Background())
 
 	router := http.NewServeMux()
@@ -1452,7 +1567,8 @@ func main() {
 		nextRequest := r.WithContext(contextWithDomain(r.Context(), requestDomain))
 		router.ServeHTTP(w, nextRequest)
 	})
-	httpHandler := application.analyticsMiddleware(accessLogMiddleware(application.authAbuseMiddleware(domainContextMiddleware)))
+	appHandler := application.analyticsMiddleware(application.accessLogMiddleware(application.authAbuseMiddleware(domainContextMiddleware)))
+	httpHandler := appHandler
 	if parsedPorts.TLSEnabled && listenPort != 80 {
 		log.Printf("Let’s Encrypt HTTP-01 checks need public port 80; current HTTP port is %d", listenPort)
 	}
@@ -1470,8 +1586,8 @@ func main() {
 			log.Printf("HTTPS disabled: cannot listen on port 443: %v", tlsListenErr)
 		} else {
 			application.automaticSSLAvailable = true
-			httpHandler = certificateManager.HTTPHandler(httpHandler)
-			go serveTLSWithAutoCert(tlsListener, certificateManager, httpHandler)
+			httpHandler = certificateManager.HTTPHandler(appHandler)
+			go serveTLSWithAutoCert(tlsListener, application.autoCertTLSConfig(certificateManager), appHandler)
 			application.startAutomaticSSLRefreshWorker(context.Background())
 		}
 	}
@@ -1563,15 +1679,43 @@ func listenTLSForAutoCert() (net.Listener, error) {
 	return net.Listen("tcp", ":443")
 }
 
-func serveTLSWithAutoCert(tlsListener net.Listener, certificateManager *autocert.Manager, handler http.Handler) {
+func serveTLSWithAutoCert(tlsListener net.Listener, tlsConfig *tls.Config, handler http.Handler) {
 	tlsServer := &http.Server{
 		Handler:   handler,
-		TLSConfig: certificateManager.TLSConfig(),
+		TLSConfig: tlsConfig,
 	}
 	log.Printf("Sitebrush HTTPS enabled on port 443 for automatic SSL domains")
 	if serveErr := tlsServer.Serve(tlsListener); serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
 		log.Printf("HTTPS server stopped: %v", serveErr)
 	}
+}
+
+func (a *App) autoCertTLSConfig(certificateManager *autocert.Manager) *tls.Config {
+	tlsConfig := certificateManager.TLSConfig()
+	originalGetCertificate := tlsConfig.GetCertificate
+	tlsConfig.GetCertificate = func(clientHello *tls.ClientHelloInfo) (*tls.Certificate, error) {
+		certificateDomain := normalizeDomainName(clientHello.ServerName)
+		if certificateDomain == "" {
+			certificateDomain = "localhost"
+		}
+		remoteAddress := tlsClientRemoteAddress(clientHello)
+		a.logDomainEvent(certificateDomain, "AUTOCERT certificate requested server_name=%s remote=%s", clientHello.ServerName, remoteAddress)
+		certificate, err := originalGetCertificate(clientHello)
+		if err != nil {
+			a.logDomainEvent(certificateDomain, "AUTOCERT certificate request failed server_name=%s remote=%s error=%v", clientHello.ServerName, remoteAddress, err)
+			return nil, err
+		}
+		a.logDomainEvent(certificateDomain, "AUTOCERT certificate ready server_name=%s remote=%s", clientHello.ServerName, remoteAddress)
+		return certificate, nil
+	}
+	return tlsConfig
+}
+
+func tlsClientRemoteAddress(clientHello *tls.ClientHelloInfo) string {
+	if clientHello == nil || clientHello.Conn == nil || clientHello.Conn.RemoteAddr() == nil {
+		return ""
+	}
+	return clientHello.Conn.RemoteAddr().String()
 }
 
 func (a *App) migrate(ctx context.Context) error {
@@ -1695,14 +1839,21 @@ SELECT 'localhost',auto_ssl_enabled,manually_disabled,last_checked_at FROM domai
 func (a *App) autoCertHostPolicy(ctx context.Context, host string) error {
 	certificateDomain := normalizeDomainName(host)
 	if certificateDomain == "" {
-		return fmt.Errorf("invalid certificate host %q", host)
+		err := fmt.Errorf("invalid certificate host %q", host)
+		a.logDomainEvent("localhost", "AUTOCERT host policy rejected host=%s error=%v", host, err)
+		return err
 	}
 	if !a.automaticSSLAvailable {
-		return fmt.Errorf("automatic SSL is unavailable because Sitebrush is not listening on ports 80 and 443")
+		err := fmt.Errorf("automatic SSL is unavailable because Sitebrush is not listening on ports 80 and 443")
+		a.logDomainEvent(certificateDomain, "AUTOCERT host policy rejected host=%s error=%v", host, err)
+		return err
 	}
 	if !a.domainAutomaticSSLEnabled(ctx, certificateDomain) && !a.domainAutomaticSSLEnabled(contextWithDomain(ctx, certificateDomain), certificateDomain) {
-		return fmt.Errorf("automatic SSL is disabled for %q", certificateDomain)
+		err := fmt.Errorf("automatic SSL is disabled for %q", certificateDomain)
+		a.logDomainEvent(certificateDomain, "AUTOCERT host policy rejected host=%s error=%v", host, err)
+		return err
 	}
+	a.logDomainEvent(certificateDomain, "AUTOCERT host policy accepted host=%s", host)
 	return nil
 }
 
@@ -8088,6 +8239,17 @@ func sortIPListForDisplay(ipList []net.IP) {
 	})
 }
 
+func ipListForLog(ipList []net.IP) string {
+	ipStrings := make([]string, 0, len(ipList))
+	for _, currentIP := range ipList {
+		if currentIP != nil {
+			ipStrings = append(ipStrings, currentIP.String())
+		}
+	}
+	sort.Strings(ipStrings)
+	return strings.Join(ipStrings, ",")
+}
+
 func normalizeDomainName(rawDomain string) string {
 	cleanDomain := strings.ToLower(strings.TrimSpace(rawDomain))
 	if cleanDomain == "" {
@@ -8313,6 +8475,7 @@ func (a *App) refreshAutomaticSSLDomains(ctx context.Context) {
 	}
 	serverIPs, _, err := detectServerIPCandidates(ctx)
 	if err != nil || len(serverIPs) == 0 {
+		log.Printf("automatic SSL DNS refresh skipped: server IP detection failed: %v", err)
 		return
 	}
 	domainList := a.listAutomaticSSLDomainCandidates(ctx)
@@ -8370,6 +8533,7 @@ func (a *App) refreshDomainAutomaticSSL(ctx context.Context, domain string, serv
 	if domainFromContext(ctx) != setting.Domain {
 		a.upsertDomainAutomaticSSLSetting(contextWithDomain(ctx, setting.Domain), setting)
 	}
+	a.logDomainEvent(setting.Domain, "AUTOCERT DNS check domain=%s matched=%t server_ips=%s", setting.Domain, setting.Enabled, ipListForLog(serverIPs))
 	return setting
 }
 
@@ -9790,6 +9954,10 @@ func staticRelativePathForPage(pagePath string) string {
 
 func (a *App) domainStaticDir(domain string) string {
 	return filepath.Join(a.staticRootDir(), domainStorageName(domain))
+}
+
+func (a *App) domainLogDir(domain string) string {
+	return filepath.Join(a.storageRootDir(), "logs", domainStorageName(domain))
 }
 
 func (a *App) logContentDelivery(w http.ResponseWriter, sourceType string) {

@@ -3242,6 +3242,52 @@ func TestAutomaticSSLStatusViewExplainsReadyWaitingAndErrors(t *testing.T) {
 	}
 }
 
+func TestDomainLogsRotateDailyAndKeepAnalyticsData(t *testing.T) {
+	application, rawDB := newTestApplication(t)
+	now := time.Date(2026, 5, 13, 12, 0, 0, 0, time.UTC)
+	logDir := application.domainLogDir("example.com")
+	if err := os.MkdirAll(logDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	oldLogPath := filepath.Join(logDir, "2026-05-07.log")
+	recentLogPath := filepath.Join(logDir, "2026-05-08.log")
+	if err := os.WriteFile(oldLogPath, []byte("old\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(recentLogPath, []byte("recent\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := rawDB.Exec(`INSERT INTO analytics_reports(domain,generated_at,period_start,period_end,event_count,report_json) VALUES(?,?,?,?,?,?)`, "example.com", now.Format(time.RFC3339), "", "", 1, "{}")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	application.cleanupOldDomainLogs("example.com", now)
+	if _, err := os.Stat(oldLogPath); !os.IsNotExist(err) {
+		t.Fatalf("old log still exists, stat error = %v", err)
+	}
+	if _, err := os.Stat(recentLogPath); err != nil {
+		t.Fatalf("recent log was removed: %v", err)
+	}
+
+	application.appendDomainLogEvent(domainLogEvent{Domain: "example.com", OccurredAt: now, Message: "AUTOCERT certificate requested"})
+	todayLogPath := filepath.Join(logDir, "2026-05-13.log")
+	todayLog, err := os.ReadFile(todayLogPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(todayLog), "AUTOCERT certificate requested") {
+		t.Fatalf("today log does not contain certificate message: %q", string(todayLog))
+	}
+	var reportCount int
+	if err := rawDB.QueryRow(`SELECT COUNT(1) FROM analytics_reports WHERE domain=?`, "example.com").Scan(&reportCount); err != nil {
+		t.Fatal(err)
+	}
+	if reportCount != 1 {
+		t.Fatalf("analytics report count = %d, want 1", reportCount)
+	}
+}
+
 func TestListenOnAvailablePortFallsBackWhenRequestedPortIsBusy(t *testing.T) {
 	busyListener, err := net.Listen("tcp", ":0")
 	if err != nil {
