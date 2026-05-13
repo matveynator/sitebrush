@@ -204,6 +204,32 @@ func TestAnalyticsReportBuildsGoogleAnalyticsStyleMetrics(t *testing.T) {
 	events := []siteAnalyticsEvent{
 		{
 			Domain:         "localhost",
+			Path:           "/robots",
+			Method:         http.MethodGet,
+			StatusCode:     http.StatusOK,
+			ContentSource:  "dynamic",
+			OccurredAt:     now.Add(-90 * time.Minute),
+			Duration:       60 * time.Millisecond,
+			UserAgent:      "Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko); compatible; GPTBot/1.2; +https://openai.com/gptbot",
+			Referer:        "https://example.org/index",
+			AcceptLanguage: "en-GB,en;q=0.9",
+			VisitorID:      "visitor-bot",
+		},
+		{
+			Domain:         "localhost",
+			Path:           "/docs",
+			Method:         http.MethodGet,
+			StatusCode:     http.StatusOK,
+			ContentSource:  "dynamic",
+			OccurredAt:     now.Add(-50 * time.Minute),
+			Duration:       70 * time.Millisecond,
+			UserAgent:      "Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko); compatible; GPTBot/1.2; +https://openai.com/gptbot",
+			Referer:        "https://example.org/again",
+			AcceptLanguage: "en-GB,en;q=0.9",
+			VisitorID:      "visitor-bot",
+		},
+		{
+			Domain:         "localhost",
 			Path:           "/",
 			Method:         http.MethodGet,
 			StatusCode:     http.StatusOK,
@@ -281,20 +307,26 @@ func TestAnalyticsReportBuildsGoogleAnalyticsStyleMetrics(t *testing.T) {
 	}
 
 	report := buildAnalyticsReportFromEvents(events, now)
-	if report.TotalRequests != 6 {
-		t.Fatalf("total requests = %d, want 6", report.TotalRequests)
+	if report.TotalRequests != 8 {
+		t.Fatalf("total requests = %d, want 8", report.TotalRequests)
 	}
-	if report.PageViews != 4 {
-		t.Fatalf("page views = %d, want 4", report.PageViews)
+	if report.PageViews != 6 {
+		t.Fatalf("page views = %d, want 6", report.PageViews)
 	}
-	if report.UniqueVisitors != 4 {
-		t.Fatalf("unique visitors = %d, want 4", report.UniqueVisitors)
+	if report.UniqueVisitors != 5 {
+		t.Fatalf("unique visitors = %d, want 5", report.UniqueVisitors)
 	}
-	if report.Sessions != 3 {
-		t.Fatalf("sessions = %d, want 3", report.Sessions)
+	if report.HumanRequests != 6 || report.BotRequests != 2 {
+		t.Fatalf("human/bot requests = %d/%d, want 6/2", report.HumanRequests, report.BotRequests)
 	}
-	if report.BounceRate < 66.6 || report.BounceRate > 66.7 {
-		t.Fatalf("bounce rate = %.1f, want about 66.7", report.BounceRate)
+	if report.ReturningVisitors != 1 || report.ReturnVisits != 1 {
+		t.Fatalf("returning visitors/visits = %d/%d, want 1/1", report.ReturningVisitors, report.ReturnVisits)
+	}
+	if report.Sessions != 5 {
+		t.Fatalf("sessions = %d, want 5", report.Sessions)
+	}
+	if report.BounceRate < 79.9 || report.BounceRate > 80.1 {
+		t.Fatalf("bounce rate = %.1f, want about 80.0", report.BounceRate)
 	}
 	if report.ErrorCount != 1 {
 		t.Fatalf("errors = %d, want 1", report.ErrorCount)
@@ -307,13 +339,24 @@ func TestAnalyticsReportBuildsGoogleAnalyticsStyleMetrics(t *testing.T) {
 	}
 	assertAnalyticsRow(t, report.TopPages, "/", 1)
 	assertAnalyticsRow(t, report.TopPages, "/pricing", 1)
-	assertAnalyticsRow(t, report.TopPages, "/docs", 1)
+	assertAnalyticsRow(t, report.TopPages, "/docs", 2)
 	assertAnalyticsRow(t, report.TopPages, "/missing", 1)
+	assertAnalyticsRow(t, report.TopPages, "/robots", 1)
 	assertAnalyticsRow(t, report.TrafficSources, "organic search", 1)
 	assertAnalyticsRow(t, report.TrafficSources, "social", 1)
 	assertAnalyticsRow(t, report.TrafficSources, "direct", 2)
+	assertAnalyticsRow(t, report.TrafficSources, "referral", 2)
 	assertAnalyticsRow(t, report.Devices, "desktop", 3)
 	assertAnalyticsRow(t, report.Devices, "mobile", 1)
+	assertAnalyticsRow(t, report.Devices, "bot", 2)
+	assertAnalyticsRow(t, report.VisitorTypes, "human", 4)
+	assertAnalyticsRow(t, report.VisitorTypes, "bot", 2)
+	assertAnalyticsRow(t, report.BotCrawlers, "GPTBot", 2)
+	assertAnalyticsRow(t, report.BotReturnSources, "referral", 1)
+	assertAnalyticsRow(t, report.BotReferrers, "example.org", 2)
+	assertAnalyticsRow(t, report.Countries, "United Kingdom", 2)
+	assertAnalyticsRow(t, report.Countries, "Russia", 1)
+	assertAnalyticsRow(t, report.EntryHours, "11:00", 4)
 	assertAnalyticsRow(t, report.StatusCodes, "404", 1)
 	assertAnalyticsRow(t, report.TopAssets, "/p/logo.png", 1)
 	assertAnalyticsRow(t, report.ErrorPaths, "/missing 404", 1)

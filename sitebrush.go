@@ -47,6 +47,7 @@ import (
 	_ "sitebrush/pkg/database/drivers"
 	"sitebrush/pkg/desktop"
 	"sitebrush/pkg/diskusage"
+	"sitebrush/pkg/geoip"
 	"sitebrush/pkg/setupwizard"
 )
 
@@ -71,6 +72,7 @@ type App struct {
 	grabTracker           *grabProgressTracker
 	publishTracker        *publishProgressTracker
 	analyticsEvents       chan siteAnalyticsEvent
+	geoIP                 *geoip.Resolver
 	domainLogEvents       chan domainLogEvent
 }
 
@@ -261,6 +263,11 @@ type siteAnalyticsEvent struct {
 	UserAgent      string
 	Referer        string
 	AcceptLanguage string
+	GeoCountryCode string
+	GeoCity        string
+	GeoLatitude    float64
+	GeoLongitude   float64
+	GeoSource      string
 	VisitorID      string
 	IsAdmin        bool
 	IsAsset        bool
@@ -268,34 +275,48 @@ type siteAnalyticsEvent struct {
 }
 
 type analyticsPreparedReport struct {
-	GeneratedAt       string              `json:"generated_at"`
-	PeriodStart       string              `json:"period_start"`
-	PeriodEnd         string              `json:"period_end"`
-	TotalRequests     int                 `json:"total_requests"`
-	PageViews         int                 `json:"page_views"`
-	UniqueVisitors    int                 `json:"unique_visitors"`
-	Sessions          int                 `json:"sessions"`
-	BounceRate        float64             `json:"bounce_rate"`
-	AverageDurationMS int64               `json:"average_duration_ms"`
-	ErrorCount        int                 `json:"error_count"`
-	AdminRequests     int                 `json:"admin_requests"`
-	StaticRequests    int                 `json:"static_requests"`
-	TopPages          []analyticsCountRow `json:"top_pages"`
-	EntryPages        []analyticsCountRow `json:"entry_pages"`
-	ExitPages         []analyticsCountRow `json:"exit_pages"`
-	TrafficSources    []analyticsCountRow `json:"traffic_sources"`
-	Referrers         []analyticsCountRow `json:"referrers"`
-	Devices           []analyticsCountRow `json:"devices"`
-	Browsers          []analyticsCountRow `json:"browsers"`
-	OperatingSystems  []analyticsCountRow `json:"operating_systems"`
-	Languages         []analyticsCountRow `json:"languages"`
-	StatusCodes       []analyticsCountRow `json:"status_codes"`
-	HourlyActivity    []analyticsCountRow `json:"hourly_activity"`
-	DailyActivity     []analyticsCountRow `json:"daily_activity"`
-	SlowPages         []analyticsCountRow `json:"slow_pages"`
-	TopAssets         []analyticsCountRow `json:"top_assets"`
-	ErrorPaths        []analyticsCountRow `json:"error_paths"`
-	ContentSources    []analyticsCountRow `json:"content_sources"`
+	GeneratedAt        string              `json:"generated_at"`
+	PeriodStart        string              `json:"period_start"`
+	PeriodEnd          string              `json:"period_end"`
+	TotalRequests      int                 `json:"total_requests"`
+	PageViews          int                 `json:"page_views"`
+	UniqueVisitors     int                 `json:"unique_visitors"`
+	HumanRequests      int                 `json:"human_requests"`
+	BotRequests        int                 `json:"bot_requests"`
+	ReturningVisitors  int                 `json:"returning_visitors"`
+	ReturnVisits       int                 `json:"return_visits"`
+	Sessions           int                 `json:"sessions"`
+	BounceRate         float64             `json:"bounce_rate"`
+	AverageDurationMS  int64               `json:"average_duration_ms"`
+	ErrorCount         int                 `json:"error_count"`
+	AdminRequests      int                 `json:"admin_requests"`
+	StaticRequests     int                 `json:"static_requests"`
+	TopPages           []analyticsCountRow `json:"top_pages"`
+	EntryPages         []analyticsCountRow `json:"entry_pages"`
+	ExitPages          []analyticsCountRow `json:"exit_pages"`
+	TrafficSources     []analyticsCountRow `json:"traffic_sources"`
+	Referrers          []analyticsCountRow `json:"referrers"`
+	ReturningSources   []analyticsCountRow `json:"returning_sources"`
+	ReturningReferrers []analyticsCountRow `json:"returning_referrers"`
+	Countries          []analyticsCountRow `json:"countries"`
+	Cities             []analyticsCountRow `json:"cities"`
+	EntryHours         []analyticsCountRow `json:"entry_hours"`
+	MapPoints          []analyticsMapPoint `json:"map_points"`
+	Devices            []analyticsCountRow `json:"devices"`
+	VisitorTypes       []analyticsCountRow `json:"visitor_types"`
+	BotCrawlers        []analyticsCountRow `json:"bot_crawlers"`
+	BotReturnSources   []analyticsCountRow `json:"bot_return_sources"`
+	BotReferrers       []analyticsCountRow `json:"bot_referrers"`
+	Browsers           []analyticsCountRow `json:"browsers"`
+	OperatingSystems   []analyticsCountRow `json:"operating_systems"`
+	Languages          []analyticsCountRow `json:"languages"`
+	StatusCodes        []analyticsCountRow `json:"status_codes"`
+	HourlyActivity     []analyticsCountRow `json:"hourly_activity"`
+	DailyActivity      []analyticsCountRow `json:"daily_activity"`
+	SlowPages          []analyticsCountRow `json:"slow_pages"`
+	TopAssets          []analyticsCountRow `json:"top_assets"`
+	ErrorPaths         []analyticsCountRow `json:"error_paths"`
+	ContentSources     []analyticsCountRow `json:"content_sources"`
 }
 
 type analyticsCountRow struct {
@@ -305,11 +326,32 @@ type analyticsCountRow struct {
 	Detail string `json:"detail,omitempty"`
 }
 
+type analyticsMapPoint struct {
+	Label     string  `json:"label"`
+	Country   string  `json:"country"`
+	City      string  `json:"city,omitempty"`
+	Latitude  float64 `json:"latitude"`
+	Longitude float64 `json:"longitude"`
+	Count     int     `json:"count"`
+	Percent   string  `json:"percent"`
+	Left      string  `json:"left"`
+	Top       string  `json:"top"`
+	Detail    string  `json:"detail,omitempty"`
+	Color     string  `json:"color"`
+	Heat      float64 `json:"heat"`
+	Radius    float64 `json:"radius"`
+}
+
 type analyticsPageData struct {
-	GeneratedAt string
-	Period      string
-	Cards       []analyticsMetricCard
-	Sections    []analyticsReportSection
+	GeneratedAt    string
+	Period         string
+	Cards          []analyticsMetricCard
+	MapTitle       string
+	MapHint        string
+	MapPoints      []analyticsMapPoint
+	MapJSON        template.JS
+	MapAttribution template.HTML
+	Sections       []analyticsReportSection
 }
 
 type analyticsMetricCard struct {
@@ -805,6 +847,9 @@ func (a *App) analyticsMiddleware(next http.Handler) http.Handler {
 			UserAgent:      r.UserAgent(),
 			Referer:        r.Referer(),
 			AcceptLanguage: r.Header.Get("Accept-Language"),
+			GeoCountryCode: analyticsGeoCountryCodeFromRequest(r),
+			GeoCity:        analyticsGeoCityFromRequest(r),
+			GeoSource:      analyticsGeoSourceFromRequest(r),
 			IsAdmin:        a.isAdminRequest(r),
 			IsAsset:        isLikelyStaticAssetPath(r.URL.Path),
 			IsController:   isSitebrushControllerQuery(r.URL.Query()),
@@ -875,6 +920,7 @@ func (a *App) runAnalyticsEventWriter(ctx context.Context) {
 			return
 		case event := <-a.analyticsEvents:
 			eventContext := contextWithDomain(ctx, event.Domain)
+			event = a.enrichAnalyticsEventGeo(eventContext, event)
 			if err := a.insertAnalyticsEvent(eventContext, event); err != nil {
 				log.Printf("analytics event insert failed: %v", err)
 			}
@@ -903,7 +949,7 @@ func (a *App) insertAnalyticsEvent(ctx context.Context, event siteAnalyticsEvent
 	if strings.TrimSpace(event.Path) == "" {
 		event.Path = "/"
 	}
-	_, err := a.db.ExecContext(ctx, `INSERT INTO analytics_events(domain,path,query,method,status_code,content_source,occurred_at,duration_ms,client_ip,remote_addr,user_agent,referer,accept_language,visitor_id,is_admin,is_asset,is_controller) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+	_, err := a.db.ExecContext(ctx, `INSERT INTO analytics_events(domain,path,query,method,status_code,content_source,occurred_at,duration_ms,client_ip,remote_addr,user_agent,referer,accept_language,geo_country_code,geo_city,geo_latitude,geo_longitude,geo_source,visitor_id,is_admin,is_asset,is_controller) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		event.Domain,
 		event.Path,
 		event.Query,
@@ -917,12 +963,33 @@ func (a *App) insertAnalyticsEvent(ctx context.Context, event siteAnalyticsEvent
 		event.UserAgent,
 		event.Referer,
 		event.AcceptLanguage,
+		event.GeoCountryCode,
+		event.GeoCity,
+		event.GeoLatitude,
+		event.GeoLongitude,
+		event.GeoSource,
 		event.VisitorID,
 		boolToInt(event.IsAdmin),
 		boolToInt(event.IsAsset),
 		boolToInt(event.IsController),
 	)
 	return err
+}
+
+func (a *App) enrichAnalyticsEventGeo(ctx context.Context, event siteAnalyticsEvent) siteAnalyticsEvent {
+	if a.geoIP == nil || strings.TrimSpace(event.ClientIP) == "" {
+		return event
+	}
+	location, found := a.geoIP.Lookup(ctx, event.ClientIP)
+	if !found {
+		return event
+	}
+	event.GeoCountryCode = location.CountryCode
+	event.GeoCity = location.City
+	event.GeoLatitude = location.Latitude
+	event.GeoLongitude = location.Longitude
+	event.GeoSource = location.Source
+	return event
 }
 
 func (a *App) rebuildAnalyticsReports(ctx context.Context) {
@@ -959,7 +1026,7 @@ func (a *App) analyticsDomains(ctx context.Context) []string {
 }
 
 func (a *App) buildAnalyticsReport(ctx context.Context, domain string) (analyticsPreparedReport, error) {
-	rows, err := a.db.QueryContext(ctx, `SELECT path,query,method,status_code,content_source,occurred_at,duration_ms,client_ip,user_agent,referer,accept_language,visitor_id,is_admin,is_asset,is_controller FROM analytics_events WHERE domain=? ORDER BY occurred_at ASC`, domain)
+	rows, err := a.db.QueryContext(ctx, `SELECT path,query,method,status_code,content_source,occurred_at,duration_ms,client_ip,user_agent,referer,accept_language,geo_country_code,geo_city,geo_latitude,geo_longitude,geo_source,visitor_id,is_admin,is_asset,is_controller FROM analytics_events WHERE domain=? ORDER BY occurred_at ASC`, domain)
 	if err != nil {
 		return analyticsPreparedReport{}, err
 	}
@@ -970,7 +1037,7 @@ func (a *App) buildAnalyticsReport(ctx context.Context, domain string) (analytic
 		var occurredAt string
 		var durationMS int64
 		var isAdmin, isAsset, isController int
-		if scanErr := rows.Scan(&event.Path, &event.Query, &event.Method, &event.StatusCode, &event.ContentSource, &occurredAt, &durationMS, &event.ClientIP, &event.UserAgent, &event.Referer, &event.AcceptLanguage, &event.VisitorID, &isAdmin, &isAsset, &isController); scanErr != nil {
+		if scanErr := rows.Scan(&event.Path, &event.Query, &event.Method, &event.StatusCode, &event.ContentSource, &occurredAt, &durationMS, &event.ClientIP, &event.UserAgent, &event.Referer, &event.AcceptLanguage, &event.GeoCountryCode, &event.GeoCity, &event.GeoLatitude, &event.GeoLongitude, &event.GeoSource, &event.VisitorID, &isAdmin, &isAsset, &isController); scanErr != nil {
 			continue
 		}
 		event.Domain = domain
@@ -999,7 +1066,13 @@ func buildAnalyticsReportFromEvents(events []siteAnalyticsEvent, generatedAt tim
 	topPages := make(map[string]int)
 	trafficSources := make(map[string]int)
 	referrers := make(map[string]int)
+	countries := make(map[string]int)
+	cities := make(map[string]int)
+	mapBuckets := make(map[string]analyticsMapBucket)
 	devices := make(map[string]int)
+	visitorTypes := make(map[string]int)
+	botCrawlers := make(map[string]int)
+	botReferrers := make(map[string]int)
 	browsers := make(map[string]int)
 	operatingSystems := make(map[string]int)
 	languages := make(map[string]int)
@@ -1016,6 +1089,11 @@ func buildAnalyticsReportFromEvents(events []siteAnalyticsEvent, generatedAt tim
 	for _, event := range events {
 		visitorSet[event.VisitorID] = struct{}{}
 		totalDuration += event.Duration.Milliseconds()
+		if analyticsIsBot(event.UserAgent) {
+			report.BotRequests++
+		} else {
+			report.HumanRequests++
+		}
 		contentSources[analyticsContentSourceLabel(event.ContentSource)]++
 		statusCodes[strconv.Itoa(event.StatusCode)]++
 		hourlyActivity[event.OccurredAt.Format("15:00")]++
@@ -1040,7 +1118,22 @@ func buildAnalyticsReportFromEvents(events []siteAnalyticsEvent, generatedAt tim
 		if host := analyticsRefererHost(event.Referer); host != "" {
 			referrers[host]++
 		}
+		location := analyticsLocationForEvent(event)
+		countries[location.Country]++
+		cities[location.CityLabel]++
+		if location.hasCoordinates() {
+			addAnalyticsMapBucket(mapBuckets, location)
+		}
 		devices[analyticsDeviceClass(event.UserAgent)]++
+		if analyticsIsBot(event.UserAgent) {
+			visitorTypes["bot"]++
+			botCrawlers[analyticsBotCrawlerName(event.UserAgent)]++
+			if host := analyticsRefererHost(event.Referer); host != "" {
+				botReferrers[host]++
+			}
+		} else {
+			visitorTypes["human"]++
+		}
 		browsers[analyticsBrowserName(event.UserAgent)]++
 		operatingSystems[analyticsOSName(event.UserAgent)]++
 		languages[analyticsLanguageLabel(event.AcceptLanguage)]++
@@ -1052,17 +1145,29 @@ func buildAnalyticsReportFromEvents(events []siteAnalyticsEvent, generatedAt tim
 	if len(events) > 0 {
 		report.AverageDurationMS = totalDuration / int64(len(events))
 	}
-	entryPages, exitPages, sessionCount, bouncedSessions := analyticsSessionPageStats(sessionEvents)
-	report.Sessions = sessionCount
-	if sessionCount > 0 {
-		report.BounceRate = float64(bouncedSessions) / float64(sessionCount) * 100
+	sessionSummary := analyticsSessionPageStats(sessionEvents)
+	report.Sessions = sessionSummary.SessionCount
+	report.ReturningVisitors = sessionSummary.ReturningVisitors
+	report.ReturnVisits = sessionSummary.ReturnVisits
+	if sessionSummary.SessionCount > 0 {
+		report.BounceRate = float64(sessionSummary.BouncedSessions) / float64(sessionSummary.SessionCount) * 100
 	}
 	report.TopPages = sortedAnalyticsRows(topPages, 12, report.PageViews)
-	report.EntryPages = sortedAnalyticsRows(entryPages, 10, sessionCount)
-	report.ExitPages = sortedAnalyticsRows(exitPages, 10, sessionCount)
+	report.EntryPages = sortedAnalyticsRows(sessionSummary.EntryPages, 10, sessionSummary.SessionCount)
+	report.ExitPages = sortedAnalyticsRows(sessionSummary.ExitPages, 10, sessionSummary.SessionCount)
 	report.TrafficSources = sortedAnalyticsRows(trafficSources, 10, report.PageViews)
 	report.Referrers = sortedAnalyticsRows(referrers, 10, report.PageViews)
+	report.ReturningSources = sortedAnalyticsRows(sessionSummary.ReturningSources, 10, report.ReturnVisits)
+	report.ReturningReferrers = sortedAnalyticsRows(sessionSummary.ReturningReferrers, 10, report.ReturnVisits)
+	report.Countries = sortedAnalyticsRows(countries, 10, report.PageViews)
+	report.Cities = sortedAnalyticsRows(cities, 10, report.PageViews)
+	report.EntryHours = sortedAnalyticsRows(sessionSummary.EntryHours, 24, sessionSummary.SessionCount)
+	report.MapPoints = analyticsMapPoints(mapBuckets, report.PageViews)
 	report.Devices = sortedAnalyticsRows(devices, 10, report.PageViews)
+	report.VisitorTypes = sortedAnalyticsRows(visitorTypes, 10, report.PageViews)
+	report.BotCrawlers = sortedAnalyticsRows(botCrawlers, 10, report.PageViews)
+	report.BotReturnSources = sortedAnalyticsRows(sessionSummary.BotReturnSources, 10, report.ReturnVisits)
+	report.BotReferrers = sortedAnalyticsRows(botReferrers, 10, report.PageViews)
 	report.Browsers = sortedAnalyticsRows(browsers, 10, report.PageViews)
 	report.OperatingSystems = sortedAnalyticsRows(operatingSystems, 10, report.PageViews)
 	report.Languages = sortedAnalyticsRows(languages, 10, report.PageViews)
@@ -1076,37 +1181,76 @@ func buildAnalyticsReportFromEvents(events []siteAnalyticsEvent, generatedAt tim
 	return report
 }
 
-func analyticsSessionPageStats(eventsByVisitor map[string][]siteAnalyticsEvent) (map[string]int, map[string]int, int, int) {
-	entryPages := make(map[string]int)
-	exitPages := make(map[string]int)
-	sessionCount := 0
-	bouncedSessions := 0
+type analyticsSessionSummary struct {
+	EntryPages         map[string]int
+	ExitPages          map[string]int
+	EntryHours         map[string]int
+	ReturningSources   map[string]int
+	ReturningReferrers map[string]int
+	BotReturnSources   map[string]int
+	SessionCount       int
+	BouncedSessions    int
+	ReturningVisitors  int
+	ReturnVisits       int
+}
+
+func analyticsSessionPageStats(eventsByVisitor map[string][]siteAnalyticsEvent) analyticsSessionSummary {
+	summary := analyticsSessionSummary{
+		EntryPages:         make(map[string]int),
+		ExitPages:          make(map[string]int),
+		EntryHours:         make(map[string]int),
+		ReturningSources:   make(map[string]int),
+		ReturningReferrers: make(map[string]int),
+		BotReturnSources:   make(map[string]int),
+	}
 	for _, visitorEvents := range eventsByVisitor {
 		sort.Slice(visitorEvents, func(i, j int) bool { return visitorEvents[i].OccurredAt.Before(visitorEvents[j].OccurredAt) })
-		sessionPages := make([]string, 0, 8)
+		sessionEvents := make([]siteAnalyticsEvent, 0, 8)
 		var previousEvent time.Time
+		sessionIndex := 0
+		visitorReturned := false
 		flushSession := func() {
-			if len(sessionPages) == 0 {
+			if len(sessionEvents) == 0 {
 				return
 			}
-			sessionCount++
-			entryPages[sessionPages[0]]++
-			exitPages[sessionPages[len(sessionPages)-1]]++
-			if len(sessionPages) == 1 {
-				bouncedSessions++
+			summary.SessionCount++
+			firstEvent := sessionEvents[0]
+			lastEvent := sessionEvents[len(sessionEvents)-1]
+			summary.EntryPages[firstEvent.Path]++
+			summary.ExitPages[lastEvent.Path]++
+			summary.EntryHours[firstEvent.OccurredAt.Format("15:00")]++
+			if len(sessionEvents) == 1 {
+				summary.BouncedSessions++
 			}
-			sessionPages = sessionPages[:0]
+			if sessionIndex > 0 {
+				summary.ReturnVisits++
+				visitorReturned = true
+				source := classifyAnalyticsTrafficSource(firstEvent.Referer)
+				if analyticsIsBot(firstEvent.UserAgent) {
+					summary.BotReturnSources[source]++
+				} else {
+					summary.ReturningSources[source]++
+					if host := analyticsRefererHost(firstEvent.Referer); host != "" {
+						summary.ReturningReferrers[host]++
+					}
+				}
+			}
+			sessionIndex++
+			sessionEvents = sessionEvents[:0]
 		}
 		for _, event := range visitorEvents {
 			if !previousEvent.IsZero() && event.OccurredAt.Sub(previousEvent) > 30*time.Minute {
 				flushSession()
 			}
-			sessionPages = append(sessionPages, event.Path)
+			sessionEvents = append(sessionEvents, event)
 			previousEvent = event.OccurredAt
 		}
 		flushSession()
+		if visitorReturned {
+			summary.ReturningVisitors++
+		}
 	}
-	return entryPages, exitPages, sessionCount, bouncedSessions
+	return summary
 }
 
 func sortedAnalyticsRows(values map[string]int, limit int, total int) []analyticsCountRow {
@@ -1222,7 +1366,7 @@ func analyticsRefererHost(rawReferer string) string {
 func analyticsDeviceClass(userAgent string) string {
 	loweredAgent := strings.ToLower(userAgent)
 	switch {
-	case strings.Contains(loweredAgent, "bot") || strings.Contains(loweredAgent, "spider") || strings.Contains(loweredAgent, "crawler"):
+	case analyticsIsBot(userAgent):
 		return "bot"
 	case strings.Contains(loweredAgent, "ipad") || strings.Contains(loweredAgent, "tablet"):
 		return "tablet"
@@ -1230,6 +1374,58 @@ func analyticsDeviceClass(userAgent string) string {
 		return "mobile"
 	default:
 		return "desktop"
+	}
+}
+
+func analyticsIsBot(userAgent string) bool {
+	loweredAgent := strings.ToLower(userAgent)
+	botMarkers := []string{
+		"bot", "spider", "crawler", "crawl", "slurp", "bingpreview", "facebookexternalhit",
+		"headless", "python-requests", "curl/", "wget/", "httpclient", "monitoring",
+	}
+	for _, marker := range botMarkers {
+		if strings.Contains(loweredAgent, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func analyticsBotCrawlerName(userAgent string) string {
+	loweredAgent := strings.ToLower(userAgent)
+	switch {
+	case strings.Contains(loweredAgent, "gptbot"):
+		return "GPTBot"
+	case strings.Contains(loweredAgent, "chatgpt-user"):
+		return "ChatGPT"
+	case strings.Contains(loweredAgent, "openai"):
+		return "OpenAI"
+	case strings.Contains(loweredAgent, "googlebot"):
+		return "Googlebot"
+	case strings.Contains(loweredAgent, "bingbot") || strings.Contains(loweredAgent, "bingpreview"):
+		return "Bingbot"
+	case strings.Contains(loweredAgent, "yandex"):
+		return "YandexBot"
+	case strings.Contains(loweredAgent, "baiduspider"):
+		return "Baiduspider"
+	case strings.Contains(loweredAgent, "duckduckbot"):
+		return "DuckDuckBot"
+	case strings.Contains(loweredAgent, "ahrefsbot"):
+		return "AhrefsBot"
+	case strings.Contains(loweredAgent, "semrushbot"):
+		return "SemrushBot"
+	case strings.Contains(loweredAgent, "facebookexternalhit"):
+		return "Facebook crawler"
+	case strings.Contains(loweredAgent, "twitterbot"):
+		return "Twitterbot"
+	case strings.Contains(loweredAgent, "telegrambot"):
+		return "TelegramBot"
+	case strings.Contains(loweredAgent, "slackbot"):
+		return "Slackbot"
+	case analyticsIsBot(userAgent):
+		return "Other crawler"
+	default:
+		return "Human"
 	}
 }
 
@@ -1246,8 +1442,8 @@ func analyticsBrowserName(userAgent string) string {
 		return "Chrome"
 	case strings.Contains(loweredAgent, "safari/"):
 		return "Safari"
-	case strings.Contains(loweredAgent, "bot") || strings.Contains(loweredAgent, "spider") || strings.Contains(loweredAgent, "crawler"):
-		return "Bot"
+	case analyticsIsBot(userAgent):
+		return analyticsBotCrawlerName(userAgent)
 	default:
 		return "Other"
 	}
@@ -1277,6 +1473,254 @@ func analyticsLanguageLabel(acceptLanguageHeader string) string {
 		return "unknown"
 	}
 	return languageCode
+}
+
+type analyticsLocation struct {
+	Country   string
+	CityLabel string
+	City      string
+	Latitude  float64
+	Longitude float64
+	Detail    string
+}
+
+func (location analyticsLocation) hasCoordinates() bool {
+	return location.Latitude >= -90 && location.Latitude <= 90 && location.Longitude >= -180 && location.Longitude <= 180 && (location.Latitude != 0 || location.Longitude != 0)
+}
+
+type analyticsMapBucket struct {
+	Label     string
+	Country   string
+	City      string
+	Latitude  float64
+	Longitude float64
+	Detail    string
+	Count     int
+}
+
+type analyticsCountryLocation struct {
+	Name      string
+	Latitude  float64
+	Longitude float64
+}
+
+var analyticsCountryLocations = map[string]analyticsCountryLocation{
+	"AR": {Name: "Argentina", Latitude: -34.60, Longitude: -58.38},
+	"AU": {Name: "Australia", Latitude: -35.28, Longitude: 149.13},
+	"BR": {Name: "Brazil", Latitude: -15.78, Longitude: -47.93},
+	"CA": {Name: "Canada", Latitude: 45.42, Longitude: -75.69},
+	"CN": {Name: "China", Latitude: 39.90, Longitude: 116.40},
+	"DE": {Name: "Germany", Latitude: 52.52, Longitude: 13.41},
+	"ES": {Name: "Spain", Latitude: 40.42, Longitude: -3.70},
+	"FI": {Name: "Finland", Latitude: 60.17, Longitude: 24.94},
+	"FR": {Name: "France", Latitude: 48.86, Longitude: 2.35},
+	"GB": {Name: "United Kingdom", Latitude: 51.51, Longitude: -0.13},
+	"IL": {Name: "Israel", Latitude: 31.78, Longitude: 35.22},
+	"IN": {Name: "India", Latitude: 28.61, Longitude: 77.21},
+	"IR": {Name: "Iran", Latitude: 35.69, Longitude: 51.39},
+	"IT": {Name: "Italy", Latitude: 41.90, Longitude: 12.50},
+	"JP": {Name: "Japan", Latitude: 35.68, Longitude: 139.76},
+	"KZ": {Name: "Kazakhstan", Latitude: 51.16, Longitude: 71.43},
+	"MN": {Name: "Mongolia", Latitude: 47.92, Longitude: 106.92},
+	"MX": {Name: "Mexico", Latitude: 19.43, Longitude: -99.13},
+	"NL": {Name: "Netherlands", Latitude: 52.37, Longitude: 4.90},
+	"PT": {Name: "Portugal", Latitude: 38.72, Longitude: -9.14},
+	"RU": {Name: "Russia", Latitude: 55.75, Longitude: 37.62},
+	"SE": {Name: "Sweden", Latitude: 59.33, Longitude: 18.07},
+	"TR": {Name: "Turkey", Latitude: 39.93, Longitude: 32.86},
+	"UA": {Name: "Ukraine", Latitude: 50.45, Longitude: 30.52},
+	"US": {Name: "United States", Latitude: 38.90, Longitude: -77.04},
+}
+
+var analyticsLanguageDefaultCountries = map[string]string{
+	"de": "DE", "en": "US", "es": "ES", "fa": "IR", "fi": "FI", "fr": "FR", "he": "IL",
+	"it": "IT", "ja": "JP", "kk": "KZ", "mn": "MN", "pt": "PT", "ru": "RU", "sv": "SE",
+	"tr": "TR", "zh": "CN",
+}
+
+func analyticsLocationForEvent(event siteAnalyticsEvent) analyticsLocation {
+	countryCode := strings.ToUpper(strings.TrimSpace(event.GeoCountryCode))
+	sourceDetail := strings.TrimSpace(event.GeoSource)
+	if sourceDetail == "" && countryCode != "" {
+		sourceDetail = "from proxy geo header"
+	}
+	if countryCode == "" {
+		countryCode = analyticsCountryCodeFromAcceptLanguage(event.AcceptLanguage)
+		sourceDetail = "estimated from language"
+	}
+	country, found := analyticsCountryLocations[countryCode]
+	if !found {
+		if countryCode != "" {
+			country = analyticsCountryLocation{Name: countryCode}
+			found = true
+		}
+	}
+	if !found {
+		return analyticsLocation{Country: "Unknown", CityLabel: "Unknown city", Detail: "unknown"}
+	}
+	cityLabel := "Unknown city, " + country.Name
+	cityName := strings.TrimSpace(event.GeoCity)
+	if cityName != "" {
+		cityLabel = cityName + ", " + country.Name
+	}
+	latitude := country.Latitude
+	longitude := country.Longitude
+	if event.GeoLatitude >= -90 && event.GeoLatitude <= 90 && event.GeoLongitude >= -180 && event.GeoLongitude <= 180 && (event.GeoLatitude != 0 || event.GeoLongitude != 0) {
+		latitude = event.GeoLatitude
+		longitude = event.GeoLongitude
+	}
+	return analyticsLocation{
+		Country:   country.Name,
+		CityLabel: cityLabel,
+		City:      cityName,
+		Latitude:  latitude,
+		Longitude: longitude,
+		Detail:    sourceDetail,
+	}
+}
+
+func analyticsCountryCodeFromAcceptLanguage(acceptLanguageHeader string) string {
+	bestLanguage := ""
+	bestCountry := ""
+	bestWeight := -1.0
+	for _, languageEntry := range strings.Split(strings.ToLower(strings.TrimSpace(acceptLanguageHeader)), ",") {
+		parts := strings.Split(languageEntry, ";")
+		languageTag := strings.TrimSpace(parts[0])
+		if languageTag == "" {
+			continue
+		}
+		weight := 1.0
+		for _, parameterEntry := range parts[1:] {
+			parameter := strings.TrimSpace(parameterEntry)
+			if !strings.HasPrefix(parameter, "q=") {
+				continue
+			}
+			parsedWeight, err := strconv.ParseFloat(strings.TrimSpace(strings.TrimPrefix(parameter, "q=")), 64)
+			if err == nil && parsedWeight >= 0 && parsedWeight <= 1 {
+				weight = parsedWeight
+			}
+			break
+		}
+		tagParts := strings.FieldsFunc(languageTag, func(currentRune rune) bool {
+			return currentRune == '-' || currentRune == '_'
+		})
+		if len(tagParts) == 0 || weight <= bestWeight {
+			continue
+		}
+		bestLanguage = strings.TrimSpace(tagParts[0])
+		bestCountry = ""
+		for _, tagPart := range tagParts[1:] {
+			if len(tagPart) == 2 {
+				bestCountry = strings.ToUpper(tagPart)
+				break
+			}
+		}
+		bestWeight = weight
+	}
+	if bestCountry != "" {
+		return bestCountry
+	}
+	if defaultCountry := analyticsLanguageDefaultCountries[bestLanguage]; defaultCountry != "" {
+		return defaultCountry
+	}
+	return ""
+}
+
+func addAnalyticsMapBucket(buckets map[string]analyticsMapBucket, location analyticsLocation) {
+	label := location.Country
+	if location.City != "" {
+		label = location.City + ", " + location.Country
+	}
+	key := fmt.Sprintf("%.4f:%.4f:%s", location.Latitude, location.Longitude, label)
+	bucket := buckets[key]
+	if bucket.Count == 0 {
+		bucket = analyticsMapBucket{
+			Label:     label,
+			Country:   location.Country,
+			City:      location.City,
+			Latitude:  location.Latitude,
+			Longitude: location.Longitude,
+			Detail:    location.Detail,
+		}
+	}
+	bucket.Count++
+	buckets[key] = bucket
+}
+
+func analyticsMapPoints(buckets map[string]analyticsMapBucket, total int) []analyticsMapPoint {
+	rows := make([]analyticsMapBucket, 0, len(buckets))
+	for _, bucket := range buckets {
+		rows = append(rows, bucket)
+	}
+	sort.Slice(rows, func(i, j int) bool {
+		if rows[i].Count == rows[j].Count {
+			return rows[i].Label < rows[j].Label
+		}
+		return rows[i].Count > rows[j].Count
+	})
+	if len(rows) > 120 {
+		rows = rows[:120]
+	}
+	minCount := 0
+	maxCount := 0
+	for _, row := range rows {
+		if minCount == 0 || row.Count < minCount {
+			minCount = row.Count
+		}
+		if row.Count > maxCount {
+			maxCount = row.Count
+		}
+	}
+	points := make([]analyticsMapPoint, 0, len(rows))
+	for _, row := range rows {
+		heat := analyticsHeatValue(row.Count, minCount, maxCount)
+		left := (row.Longitude + 180) / 360 * 100
+		top := (90 - row.Latitude) / 180 * 100
+		points = append(points, analyticsMapPoint{
+			Label:     row.Label,
+			Country:   row.Country,
+			City:      row.City,
+			Latitude:  row.Latitude,
+			Longitude: row.Longitude,
+			Count:     row.Count,
+			Percent:   analyticsPercent(row.Count, total),
+			Left:      fmt.Sprintf("%.2f%%", left),
+			Top:       fmt.Sprintf("%.2f%%", top),
+			Detail:    row.Detail,
+			Color:     analyticsHeatColor(heat),
+			Heat:      heat,
+			Radius:    5 + heat*7,
+		})
+	}
+	return points
+}
+
+func analyticsHeatValue(count, minCount, maxCount int) float64 {
+	if maxCount <= minCount {
+		return 0
+	}
+	return float64(count-minCount) / float64(maxCount-minCount)
+}
+
+func analyticsHeatColor(heat float64) string {
+	normalizedHeat := math.Max(0, math.Min(1, heat))
+	if normalizedHeat <= 0.5 {
+		return interpolateHexColor(0x2ecc71, 0xf1c40f, normalizedHeat*2)
+	}
+	return interpolateHexColor(0xf1c40f, 0xe74c3c, (normalizedHeat-0.5)*2)
+}
+
+func interpolateHexColor(startColor, endColor int, ratio float64) string {
+	startRed := (startColor >> 16) & 0xff
+	startGreen := (startColor >> 8) & 0xff
+	startBlue := startColor & 0xff
+	endRed := (endColor >> 16) & 0xff
+	endGreen := (endColor >> 8) & 0xff
+	endBlue := endColor & 0xff
+	red := startRed + int(math.Round(float64(endRed-startRed)*ratio))
+	green := startGreen + int(math.Round(float64(endGreen-startGreen)*ratio))
+	blue := startBlue + int(math.Round(float64(endBlue-startBlue)*ratio))
+	return fmt.Sprintf("#%02x%02x%02x", red, green, blue)
 }
 
 func analyticsPercent(count, total int) string {
@@ -1323,8 +1767,13 @@ func (a *App) analyticsPage(w http.ResponseWriter, r *http.Request) {
 
 func analyticsReportView(report analyticsPreparedReport, translations map[string]string) analyticsPageData {
 	view := analyticsPageData{
-		GeneratedAt: formatAnalyticsTime(report.GeneratedAt),
-		Period:      formatAnalyticsTime(report.PeriodStart) + " - " + formatAnalyticsTime(report.PeriodEnd),
+		GeneratedAt:    formatAnalyticsTime(report.GeneratedAt),
+		Period:         formatAnalyticsTime(report.PeriodStart) + " - " + formatAnalyticsTime(report.PeriodEnd),
+		MapTitle:       translationOrDefault(translations, "analytics_section_world_map", "World map"),
+		MapHint:        translationOrDefault(translations, "analytics_section_world_map_hint", "Visitor geography from the local GeoIP database cache, with request metadata fallback while the database downloads."),
+		MapPoints:      report.MapPoints,
+		MapJSON:        analyticsMapPointsJSON(report.MapPoints),
+		MapAttribution: template.HTML(geoip.AttributionHTML),
 	}
 	if strings.TrimSpace(report.PeriodStart) == "" || report.TotalRequests == 0 {
 		view.Period = translationOrDefault(translations, "analytics_no_data", "No analytics data yet.")
@@ -1333,6 +1782,10 @@ func analyticsReportView(report analyticsPreparedReport, translations map[string
 		{Label: translationOrDefault(translations, "analytics_total_requests", "Total requests"), Value: strconv.Itoa(report.TotalRequests), Hint: translationOrDefault(translations, "analytics_total_requests_hint", "All logged dynamic, static, and controller requests.")},
 		{Label: translationOrDefault(translations, "analytics_page_views", "Page views"), Value: strconv.Itoa(report.PageViews), Hint: translationOrDefault(translations, "analytics_page_views_hint", "GET page requests excluding assets and Sitebrush controllers.")},
 		{Label: translationOrDefault(translations, "analytics_unique_visitors", "Unique visitors"), Value: strconv.Itoa(report.UniqueVisitors), Hint: translationOrDefault(translations, "analytics_unique_visitors_hint", "Estimated from IP and browser signature.")},
+		{Label: translationOrDefault(translations, "analytics_human_requests", "People"), Value: strconv.Itoa(report.HumanRequests), Hint: translationOrDefault(translations, "analytics_human_requests_hint", "Requests that do not look like known bots or crawlers.")},
+		{Label: translationOrDefault(translations, "analytics_bot_requests", "Bots"), Value: strconv.Itoa(report.BotRequests), Hint: translationOrDefault(translations, "analytics_bot_requests_hint", "Requests from crawlers, bots, monitors, and automated clients.")},
+		{Label: translationOrDefault(translations, "analytics_returning_visitors", "Returning visitors"), Value: strconv.Itoa(report.ReturningVisitors), Hint: translationOrDefault(translations, "analytics_returning_visitors_hint", "Visitors with more than one visit in the report period.")},
+		{Label: translationOrDefault(translations, "analytics_return_visits", "Repeat visits"), Value: strconv.Itoa(report.ReturnVisits), Hint: translationOrDefault(translations, "analytics_return_visits_hint", "Visits after the first visit from the same visitor signature.")},
 		{Label: translationOrDefault(translations, "analytics_sessions", "Sessions"), Value: strconv.Itoa(report.Sessions), Hint: translationOrDefault(translations, "analytics_sessions_hint", "Visits split after 30 minutes of inactivity.")},
 		{Label: translationOrDefault(translations, "analytics_bounce_rate", "Bounce rate"), Value: fmt.Sprintf("%.1f%%", report.BounceRate), Hint: translationOrDefault(translations, "analytics_bounce_rate_hint", "Sessions with one page view.")},
 		{Label: translationOrDefault(translations, "analytics_avg_duration", "Average response time"), Value: formatDurationMS(report.AverageDurationMS), Hint: translationOrDefault(translations, "analytics_avg_duration_hint", "Average server response time across logged requests.")},
@@ -1345,6 +1798,15 @@ func analyticsReportView(report analyticsPreparedReport, translations map[string
 		analyticsSectionView("analytics_section_exit_pages", "analytics_section_exit_pages_hint", report.ExitPages, report.Sessions, "path", translations),
 		analyticsSectionView("analytics_section_traffic_sources", "analytics_section_traffic_sources_hint", report.TrafficSources, report.PageViews, "traffic", translations),
 		analyticsSectionView("analytics_section_referrers", "analytics_section_referrers_hint", report.Referrers, report.PageViews, "plain", translations),
+		analyticsSectionView("analytics_section_returning_sources", "analytics_section_returning_sources_hint", report.ReturningSources, report.ReturnVisits, "traffic", translations),
+		analyticsSectionView("analytics_section_returning_referrers", "analytics_section_returning_referrers_hint", report.ReturningReferrers, report.ReturnVisits, "plain", translations),
+		analyticsSectionView("analytics_section_countries", "analytics_section_countries_hint", report.Countries, report.PageViews, "plain", translations),
+		analyticsSectionView("analytics_section_cities", "analytics_section_cities_hint", report.Cities, report.PageViews, "plain", translations),
+		analyticsSectionView("analytics_section_entry_hours", "analytics_section_entry_hours_hint", report.EntryHours, report.Sessions, "plain", translations),
+		analyticsSectionView("analytics_section_visitor_types", "analytics_section_visitor_types_hint", report.VisitorTypes, report.PageViews, "visitor", translations),
+		analyticsSectionView("analytics_section_bot_crawlers", "analytics_section_bot_crawlers_hint", report.BotCrawlers, report.PageViews, "plain", translations),
+		analyticsSectionView("analytics_section_bot_return_sources", "analytics_section_bot_return_sources_hint", report.BotReturnSources, report.ReturnVisits, "traffic", translations),
+		analyticsSectionView("analytics_section_bot_referrers", "analytics_section_bot_referrers_hint", report.BotReferrers, report.PageViews, "plain", translations),
 		analyticsSectionView("analytics_section_devices", "analytics_section_devices_hint", report.Devices, report.PageViews, "device", translations),
 		analyticsSectionView("analytics_section_browsers", "analytics_section_browsers_hint", report.Browsers, report.PageViews, "plain", translations),
 		analyticsSectionView("analytics_section_os", "analytics_section_os_hint", report.OperatingSystems, report.PageViews, "plain", translations),
@@ -1385,6 +1847,14 @@ func analyticsSectionView(titleKey, descriptionKey string, sourceRows []analytic
 	return section
 }
 
+func analyticsMapPointsJSON(points []analyticsMapPoint) template.JS {
+	payload, err := json.Marshal(points)
+	if err != nil {
+		return template.JS("[]")
+	}
+	return template.JS(payload)
+}
+
 func localizeAnalyticsReportLabel(labelKind, label string, translations map[string]string) string {
 	keyPrefix := ""
 	switch labelKind {
@@ -1396,6 +1866,8 @@ func localizeAnalyticsReportLabel(labelKind, label string, translations map[stri
 		keyPrefix = "analytics_content_"
 	case "language":
 		keyPrefix = "analytics_language_"
+	case "visitor":
+		keyPrefix = "analytics_visitor_"
 	}
 	if keyPrefix == "" {
 		return label
@@ -1461,6 +1933,38 @@ func clientIPAddress(r *http.Request) string {
 	}
 	if parsedIP := net.ParseIP(strings.TrimSpace(r.RemoteAddr)); parsedIP != nil {
 		return parsedIP.String()
+	}
+	return ""
+}
+
+func analyticsGeoCountryCodeFromRequest(r *http.Request) string {
+	headerNames := []string{"CF-IPCountry", "CloudFront-Viewer-Country", "X-Vercel-IP-Country", "X-Appengine-Country", "X-Geo-Country"}
+	for _, headerName := range headerNames {
+		countryCode := strings.ToUpper(strings.TrimSpace(r.Header.Get(headerName)))
+		if len(countryCode) == 2 && countryCode != "XX" {
+			return countryCode
+		}
+	}
+	return ""
+}
+
+func analyticsGeoCityFromRequest(r *http.Request) string {
+	headerNames := []string{"CF-IPCity", "X-Vercel-IP-City", "X-Appengine-City", "X-Geo-City"}
+	for _, headerName := range headerNames {
+		city := strings.TrimSpace(r.Header.Get(headerName))
+		if city != "" {
+			if decodedCity, err := url.QueryUnescape(city); err == nil && strings.TrimSpace(decodedCity) != "" {
+				city = decodedCity
+			}
+			return city
+		}
+	}
+	return ""
+}
+
+func analyticsGeoSourceFromRequest(r *http.Request) string {
+	if analyticsGeoCountryCodeFromRequest(r) != "" || analyticsGeoCityFromRequest(r) != "" {
+		return "proxy geo header"
 	}
 	return ""
 }
@@ -1591,6 +2095,7 @@ func main() {
 
 	var siteDatabaseRouter *perSiteDBRouter
 	application := &App{storagePath: effectiveStoragePath, nativeFileDialog: desktop.NativeFileDialogSupported(), grabTracker: newGrabProgressTracker(), publishTracker: newPublishProgressTracker(), analyticsEvents: make(chan siteAnalyticsEvent, 1024), domainLogEvents: make(chan domainLogEvent, 1024)}
+	application.geoIP = geoip.NewResolver(filepath.Join(application.storageRootDir(), "geoip"))
 	siteDatabaseRootDir := siteDatabaseRootPath(effectiveDBPath)
 	siteDatabaseRouter = newPerSiteDBRouter(siteDatabaseRootDir, "localhost", func(rawDatabase *sql.DB) error {
 		bootstrapApplication := &App{db: rawDatabase, storagePath: effectiveStoragePath}
@@ -1799,7 +2304,7 @@ func (a *App) migrate(ctx context.Context) error {
 		`CREATE TABLE IF NOT EXISTS domain_backup_tokens(domain TEXT PRIMARY KEY,token TEXT,updated_at TEXT);`,
 		`CREATE TABLE IF NOT EXISTS file_access_rules(domain TEXT,file_name TEXT,access_mode TEXT,token TEXT,expires_at TEXT,single_use_left INTEGER DEFAULT 0,token_use_count INTEGER DEFAULT 0,PRIMARY KEY(domain,file_name));`,
 		`CREATE TABLE IF NOT EXISTS file_metadata(domain TEXT,file_name TEXT,page_path TEXT,size INTEGER,mime_type TEXT,created_at TEXT,updated_at TEXT,source TEXT,download_count INTEGER DEFAULT 0,PRIMARY KEY(domain,file_name));`,
-		`CREATE TABLE IF NOT EXISTS analytics_events(id INTEGER PRIMARY KEY AUTOINCREMENT,domain TEXT,path TEXT,query TEXT,method TEXT,status_code INTEGER,content_source TEXT,occurred_at TEXT,duration_ms INTEGER,client_ip TEXT,remote_addr TEXT,user_agent TEXT,referer TEXT,accept_language TEXT,visitor_id TEXT,is_admin INTEGER DEFAULT 0,is_asset INTEGER DEFAULT 0,is_controller INTEGER DEFAULT 0);`,
+		`CREATE TABLE IF NOT EXISTS analytics_events(id INTEGER PRIMARY KEY AUTOINCREMENT,domain TEXT,path TEXT,query TEXT,method TEXT,status_code INTEGER,content_source TEXT,occurred_at TEXT,duration_ms INTEGER,client_ip TEXT,remote_addr TEXT,user_agent TEXT,referer TEXT,accept_language TEXT,geo_country_code TEXT,geo_city TEXT,geo_latitude REAL DEFAULT 0,geo_longitude REAL DEFAULT 0,geo_source TEXT,visitor_id TEXT,is_admin INTEGER DEFAULT 0,is_asset INTEGER DEFAULT 0,is_controller INTEGER DEFAULT 0);`,
 		`CREATE INDEX IF NOT EXISTS idx_analytics_events_domain_time ON analytics_events(domain,occurred_at);`,
 		`CREATE INDEX IF NOT EXISTS idx_analytics_events_visitor ON analytics_events(domain,visitor_id,occurred_at);`,
 		`CREATE TABLE IF NOT EXISTS analytics_reports(domain TEXT PRIMARY KEY,generated_at TEXT,period_start TEXT,period_end TEXT,event_count INTEGER,report_json TEXT);`,
@@ -1823,6 +2328,11 @@ func (a *App) migrate(ctx context.Context) error {
 	_, _ = a.db.ExecContext(ctx, `ALTER TABLE domain_ssl_settings ADD COLUMN last_checked_at TEXT`)
 	_, _ = a.db.ExecContext(ctx, `ALTER TABLE file_access_rules ADD COLUMN token_use_count INTEGER DEFAULT 0`)
 	_, _ = a.db.ExecContext(ctx, `ALTER TABLE file_metadata ADD COLUMN download_count INTEGER DEFAULT 0`)
+	_, _ = a.db.ExecContext(ctx, `ALTER TABLE analytics_events ADD COLUMN geo_country_code TEXT`)
+	_, _ = a.db.ExecContext(ctx, `ALTER TABLE analytics_events ADD COLUMN geo_city TEXT`)
+	_, _ = a.db.ExecContext(ctx, `ALTER TABLE analytics_events ADD COLUMN geo_latitude REAL DEFAULT 0`)
+	_, _ = a.db.ExecContext(ctx, `ALTER TABLE analytics_events ADD COLUMN geo_longitude REAL DEFAULT 0`)
+	_, _ = a.db.ExecContext(ctx, `ALTER TABLE analytics_events ADD COLUMN geo_source TEXT`)
 	_, _ = a.db.ExecContext(ctx, `ALTER TABLE domain_storage_usage ADD COLUMN page_bytes INTEGER DEFAULT 0`)
 	_, _ = a.db.ExecContext(ctx, `ALTER TABLE domain_storage_usage ADD COLUMN published_page_bytes INTEGER DEFAULT 0`)
 	_, _ = a.db.ExecContext(ctx, `ALTER TABLE domain_storage_usage ADD COLUMN revision_bytes INTEGER DEFAULT 0`)
