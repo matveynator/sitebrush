@@ -7216,7 +7216,7 @@ func rewriteCSSURLReferences(source string, rewriteSingle func(string) string) s
 }
 
 func isCSSImportURL(source string, urlStart int) bool {
-	prefixStart := strings.LastIndexAny(source[:urlStart], ";{}")
+	prefixStart := strings.LastIndexAny(source[:urlStart], ";{}>")
 	statementPrefix := strings.ToLower(strings.TrimSpace(source[prefixStart+1 : urlStart]))
 	return strings.HasPrefix(statementPrefix, "@import")
 }

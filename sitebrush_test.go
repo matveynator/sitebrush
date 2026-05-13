@@ -1443,6 +1443,50 @@ func TestMirrorRemotePageImportsNestedExternalResources(t *testing.T) {
 	}
 }
 
+func TestMirrorRemotePageDoesNotDoubleRewriteFirstInlineCSSImport(t *testing.T) {
+	pageRawURL := "http://perftoran-archive.ru/"
+	sourceHTML := `<!doctype html><html><head>` +
+		`<style class="SiteBrush-Template perftoran-css-main-style" type="text/css">` +
+		`@import url("/f/fb6473a435b5347875cbe04e61f91d17.css");  ` +
+		`@import url("/f/166fbb8fd4a3f5207a500bdf6c2d9186.css");  ` +
+		`@import url("/f/db93670dc2c4f8f877dbaabcf30b91d4.css");` +
+		`</style></head><body>Imported</body></html>`
+
+	previousGrabHTTPClient := newGrabHTTPClient
+	newGrabHTTPClient = func() *http.Client {
+		return &http.Client{Transport: fakeGrabTransport{responses: map[string]fakeGrabResponse{
+			"http://perftoran-archive.ru/f/fb6473a435b5347875cbe04e61f91d17.css": {contentType: "text/css", body: ".first{color:red}"},
+			"http://perftoran-archive.ru/f/166fbb8fd4a3f5207a500bdf6c2d9186.css": {contentType: "text/css", body: ".second{color:green}"},
+			"http://perftoran-archive.ru/f/db93670dc2c4f8f877dbaabcf30b91d4.css": {contentType: "text/css", body: ".third{color:blue}"},
+		}}}
+	}
+	defer func() {
+		newGrabHTTPClient = previousGrabHTTPClient
+	}()
+
+	pageURL, parseErr := url.Parse(pageRawURL)
+	if parseErr != nil {
+		t.Fatal(parseErr)
+	}
+	previewResources := previewGrabResources(pageURL, sourceHTML, nil, "", "")
+	if len(previewResources) != 3 {
+		t.Fatalf("expected 3 preview resources, got %d: %#v", len(previewResources), previewResources)
+	}
+
+	selectedResourceURLs := make(map[string]struct{}, len(previewResources))
+	for _, previewResource := range previewResources {
+		selectedResourceURLs[previewResource.URL] = struct{}{}
+	}
+	application, _ := newTestApplication(t)
+	importedHTML := application.mirrorRemotePage("example.test", "/imported", pageRawURL, pageURL, sourceHTML, "", selectedResourceURLs, "")
+	if strings.Contains(importedHTML, "http://perftoran-archive.ru/p/") {
+		t.Fatalf("first inline CSS import was double rewritten through source host: %s", importedHTML)
+	}
+	if strings.Count(importedHTML, `@import url("/p/`) != 3 {
+		t.Fatalf("inline CSS imports were not all rewritten to local assets: %s", importedHTML)
+	}
+}
+
 func TestMirrorRemotePageImportsImageAltResourceURLs(t *testing.T) {
 	pageRawURL := "https://elburus.example/gallery"
 	sourceHTML := `<!doctype html><html><body>` +
