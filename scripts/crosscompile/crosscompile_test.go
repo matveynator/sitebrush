@@ -12,8 +12,8 @@ func TestServerAppTargets(t *testing.T) {
 	t.Parallel()
 
 	targets := serverAppTargets()
-	if len(targets) != 12 {
-		t.Fatalf("expected 12 server-app targets, got %d", len(targets))
+	if len(targets) != 11 {
+		t.Fatalf("expected 11 server-app targets, got %d", len(targets))
 	}
 
 	if targets[0].goos != "linux" || targets[0].goarch != "amd64" {

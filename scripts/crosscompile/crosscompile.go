@@ -476,7 +476,6 @@ func serverAppTargets() []serverAppTarget {
 		{goos: "freebsd", goarch: "arm64"},
 		{goos: "openbsd", goarch: "amd64"},
 		{goos: "openbsd", goarch: "arm64"},
-		{goos: "netbsd", goarch: "amd64"},
 		{goos: "windows", goarch: "amd64"},
 		{goos: "windows", goarch: "arm64"},
 	}

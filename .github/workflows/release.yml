@@ -38,7 +38,6 @@ jobs:
           - { goos: freebsd, goarch: arm64, goversion: "1.25", runner: "ubuntu-22.04" }
           - { goos: openbsd, goarch: amd64, goversion: "1.25", runner: "ubuntu-22.04" }
           - { goos: openbsd, goarch: arm64, goversion: "1.25", runner: "ubuntu-22.04" }
-          - { goos: netbsd,  goarch: amd64, goversion: "1.25", runner: "ubuntu-22.04" }
           # Windows
           - { goos: windows, goarch: amd64, goversion: "1.25", runner: "windows-latest" }
           - { goos: windows, goarch: arm64, goversion: "1.25", runner: "windows-latest" }
