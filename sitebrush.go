@@ -4543,6 +4543,7 @@ func listSiteQuotaRows(ctx context.Context, storagePath, dbPath string) ([]siteQ
 		}
 		rows = append(rows, candidateRows...)
 	}
+	rows = mergeSiteQuotaRows(rows, dbPath)
 	sort.Slice(rows, func(left, right int) bool {
 		if rows[left].Domain == rows[right].Domain {
 			return rows[left].DatabasePath < rows[right].DatabasePath
@@ -4606,9 +4607,6 @@ func siteQuotaRowsFromDatabase(ctx context.Context, storagePath string, candidat
 		return nil, err
 	}
 	domains := siteDomainsInDatabase(ctx, rawDatabase)
-	if len(domains) == 0 && strings.TrimSpace(candidate.fallbackDomain) != "" {
-		domains = append(domains, candidate.fallbackDomain)
-	}
 
 	rows := make([]siteQuotaRow, 0, len(domains))
 	for _, domain := range domains {
@@ -4625,28 +4623,121 @@ func siteQuotaRowsFromDatabase(ctx context.Context, storagePath string, candidat
 	return rows, nil
 }
 
-func siteDomainsInDatabase(ctx context.Context, database *sql.DB) []string {
-	domainSet := make(map[string]struct{})
-	queries := []string{
-		`SELECT DISTINCT domain FROM domain_storage_usage`,
-		`SELECT DISTINCT domain FROM users`,
-		`SELECT DISTINCT domain FROM pages`,
-		`SELECT DISTINCT domain FROM published_pages`,
-		`SELECT DISTINCT domain FROM revisions`,
-		`SELECT DISTINCT domain FROM domain_states`,
-		`SELECT DISTINCT primary_domain FROM domain_aliases`,
+func mergeSiteQuotaRows(rows []siteQuotaRow, dbPath string) []siteQuotaRow {
+	primaryDomainByAlias := make(map[string]string)
+	for _, row := range rows {
+		for _, aliasDomain := range row.Aliases {
+			aliasDomain = normalizeQuotaDomainName(aliasDomain)
+			if aliasDomain != "" && aliasDomain != row.Domain {
+				primaryDomainByAlias[aliasDomain] = row.Domain
+			}
+		}
 	}
-	for _, query := range queries {
-		rows, err := database.QueryContext(ctx, query)
-		if err != nil {
+
+	rowsByDomain := make(map[string]siteQuotaRow)
+	for _, row := range rows {
+		domain := normalizeQuotaDomainName(row.Domain)
+		if domain == "" {
 			continue
 		}
+		primaryDomain := domain
+		if aliasPrimaryDomain := primaryDomainByAlias[domain]; aliasPrimaryDomain != "" {
+			primaryDomain = aliasPrimaryDomain
+		}
+
+		currentRow, rowExists := rowsByDomain[primaryDomain]
+		nextAliases := mergeSiteQuotaAliases(primaryDomain, currentRow.Aliases, row.Aliases)
+		if domain != primaryDomain {
+			nextAliases = mergeSiteQuotaAliases(primaryDomain, nextAliases, []string{domain})
+		}
+		if !rowExists || siteQuotaRowPreferred(row, currentRow, primaryDomain, dbPath) {
+			row.Domain = primaryDomain
+			row.Aliases = nextAliases
+			rowsByDomain[primaryDomain] = row
+			continue
+		}
+		currentRow.Aliases = nextAliases
+		rowsByDomain[primaryDomain] = currentRow
+	}
+
+	mergedRows := make([]siteQuotaRow, 0, len(rowsByDomain))
+	for _, row := range rowsByDomain {
+		sort.Strings(row.Aliases)
+		mergedRows = append(mergedRows, row)
+	}
+	return mergedRows
+}
+
+func mergeSiteQuotaAliases(primaryDomain string, aliasGroups ...[]string) []string {
+	aliasSet := make(map[string]struct{})
+	for _, aliasGroup := range aliasGroups {
+		for _, aliasDomain := range aliasGroup {
+			aliasDomain = normalizeQuotaDomainName(aliasDomain)
+			if aliasDomain == "" || aliasDomain == primaryDomain {
+				continue
+			}
+			aliasSet[aliasDomain] = struct{}{}
+		}
+	}
+	aliases := make([]string, 0, len(aliasSet))
+	for aliasDomain := range aliasSet {
+		aliases = append(aliases, aliasDomain)
+	}
+	sort.Strings(aliases)
+	return aliases
+}
+
+func siteQuotaRowPreferred(nextRow, currentRow siteQuotaRow, primaryDomain, dbPath string) bool {
+	nextPriority := siteQuotaRowPriority(nextRow, primaryDomain, dbPath)
+	currentPriority := siteQuotaRowPriority(currentRow, primaryDomain, dbPath)
+	if nextPriority != currentPriority {
+		return nextPriority > currentPriority
+	}
+	if nextRow.UsedBytes != currentRow.UsedBytes {
+		return nextRow.UsedBytes > currentRow.UsedBytes
+	}
+	if nextRow.DatabasePath != currentRow.DatabasePath {
+		return nextRow.DatabasePath < currentRow.DatabasePath
+	}
+	return false
+}
+
+func siteQuotaRowPriority(row siteQuotaRow, primaryDomain, dbPath string) int {
+	priority := 0
+	if row.Domain == primaryDomain {
+		priority += 4
+	}
+	expectedSiteDatabasePath := filepath.Join(siteDatabaseRootPath(dbPath), domainStorageName(primaryDomain)+".db")
+	if sameSiteQuotaPath(row.DatabasePath, expectedSiteDatabasePath) {
+		priority += 8
+	}
+	if sameSiteQuotaPath(row.DatabasePath, dbPath) {
+		priority--
+	}
+	return priority
+}
+
+func sameSiteQuotaPath(leftPath, rightPath string) bool {
+	leftCleanPath := filepath.Clean(leftPath)
+	rightCleanPath := filepath.Clean(rightPath)
+	leftAbsolutePath, leftErr := filepath.Abs(leftCleanPath)
+	rightAbsolutePath, rightErr := filepath.Abs(rightCleanPath)
+	if leftErr == nil && rightErr == nil {
+		return leftAbsolutePath == rightAbsolutePath
+	}
+	return leftCleanPath == rightCleanPath
+}
+
+func siteDomainsInDatabase(ctx context.Context, database *sql.DB) []string {
+	domainSet := make(map[string]struct{})
+	rows, err := database.QueryContext(ctx, `SELECT DISTINCT domain FROM users WHERE is_admin=1 AND TRIM(COALESCE(email,''))<>'' AND TRIM(COALESCE(password,''))<>''`)
+	if err == nil {
 		for rows.Next() {
 			var domain string
 			if scanErr := rows.Scan(&domain); scanErr != nil {
 				continue
 			}
-			domain = strings.TrimSpace(domain)
+			domain = normalizeQuotaDomainName(domain)
 			if domain != "" {
 				domainSet[domain] = struct{}{}
 			}

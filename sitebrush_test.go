@@ -422,6 +422,14 @@ func TestParseSiteQuotaLimitBytesAcceptsMegabytesOrGigabytes(t *testing.T) {
 	}
 }
 
+func insertSiteQuotaAdmin(t *testing.T, rawDB *sql.DB, domain string) {
+	t.Helper()
+	_, err := rawDB.Exec(`INSERT OR REPLACE INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, domain, "admin@"+domain, "hashed-password")
+	if err != nil {
+		t.Fatalf("insert site quota admin for %s: %v", domain, err)
+	}
+}
+
 func TestSiteQuotaCommandListsAndUpdatesPerSiteDatabase(t *testing.T) {
 	storagePath := t.TempDir()
 	dbPath := filepath.Join(storagePath, defaultDBPath)
@@ -440,6 +448,7 @@ func TestSiteQuotaCommandListsAndUpdatesPerSiteDatabase(t *testing.T) {
 	if err := application.migrate(contextWithDomain(context.Background(), "example.com")); err != nil {
 		t.Fatalf("migrate site db: %v", err)
 	}
+	insertSiteQuotaAdmin(t, rawDB, "example.com")
 	if _, err := rawDB.Exec(`INSERT OR REPLACE INTO pages(domain,path,title,html,published) VALUES(?,?,?,?,?)`, "example.com", "/", "Home", strings.Repeat("A", 64), 0); err != nil {
 		t.Fatalf("insert page: %v", err)
 	}
@@ -455,11 +464,11 @@ func TestSiteQuotaCommandListsAndUpdatesPerSiteDatabase(t *testing.T) {
 	if !strings.Contains(listOutput.String(), "example.com") {
 		t.Fatalf("list output missing site: %s", listOutput.String())
 	}
-	if !strings.Contains(listOutput.String(), "www.example.com") {
+	if !strings.Contains(listOutput.String(), "aliases:1") {
 		t.Fatalf("list output missing alias: %s", listOutput.String())
 	}
-	if !strings.Contains(listOutput.String(), "dir:") {
-		t.Fatalf("list output missing compact directory path: %s", listOutput.String())
+	if strings.Contains(listOutput.String(), "dir:") {
+		t.Fatalf("list output should stay compact without directory path: %s", listOutput.String())
 	}
 
 	var updateOutput bytes.Buffer
@@ -475,6 +484,117 @@ func TestSiteQuotaCommandListsAndUpdatesPerSiteDatabase(t *testing.T) {
 	}
 	if limitBytes != 2*1024*1024*1024 {
 		t.Fatalf("limit bytes = %d, want 2 GiB", limitBytes)
+	}
+}
+
+func TestListSiteQuotaRowsRequiresRegisteredAdmin(t *testing.T) {
+	storagePath := t.TempDir()
+	dbPath := filepath.Join(storagePath, defaultDBPath)
+	siteDatabaseDir := siteDatabaseRootPath(dbPath)
+	workingDatabasePath := filepath.Join(siteDatabaseDir, domainStorageName("working.example")+".db")
+	junkDatabasePath := filepath.Join(siteDatabaseDir, domainStorageName("junk.example")+".db")
+	for _, databasePath := range []string{workingDatabasePath, junkDatabasePath} {
+		if err := ensureParentDir(databasePath); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	workingDB, err := sql.Open("sqlite", "file:"+workingDatabasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer workingDB.Close()
+	junkDB, err := sql.Open("sqlite", "file:"+junkDatabasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer junkDB.Close()
+	if err := (&App{db: workingDB, storagePath: storagePath}).migrate(contextWithDomain(context.Background(), "working.example")); err != nil {
+		t.Fatalf("migrate working db: %v", err)
+	}
+	if err := (&App{db: junkDB, storagePath: storagePath}).migrate(contextWithDomain(context.Background(), "junk.example")); err != nil {
+		t.Fatalf("migrate junk db: %v", err)
+	}
+	insertSiteQuotaAdmin(t, workingDB, "working.example")
+	if _, err := junkDB.Exec(`INSERT OR REPLACE INTO pages(domain,path,title,html,published) VALUES(?,?,?,?,?)`, "junk.example", "/", "Junk", "leftover", 0); err != nil {
+		t.Fatalf("insert junk page: %v", err)
+	}
+	if _, err := junkDB.Exec(`INSERT OR REPLACE INTO domain_storage_usage(domain,page_bytes,limit_bytes) VALUES(?,?,?)`, "junk.example", 128, defaultDomainStorageLimitBytes); err != nil {
+		t.Fatalf("insert junk usage: %v", err)
+	}
+	if _, err := junkDB.Exec(`INSERT INTO domain_aliases(primary_domain,alias_domain,verification_token,is_verified,dns_a_ok,is_selected,last_checked_at) VALUES(?,?,?,?,?,?,?)`,
+		"junk.example", "www.junk.example", "token", 1, 1, 1, time.Now().Format(time.RFC3339)); err != nil {
+		t.Fatalf("insert junk alias: %v", err)
+	}
+
+	rows, err := listSiteQuotaRows(context.Background(), storagePath, dbPath)
+	if err != nil {
+		t.Fatalf("list quota rows: %v", err)
+	}
+	if len(rows) != 1 || rows[0].Domain != "working.example" {
+		t.Fatalf("rows = %#v, want only working.example", rows)
+	}
+}
+
+func TestListSiteQuotaRowsMergesDuplicateDomainsAndAliasSites(t *testing.T) {
+	storagePath := t.TempDir()
+	dbPath := filepath.Join(storagePath, defaultDBPath)
+	primaryDatabasePath := filepath.Join(siteDatabaseRootPath(dbPath), domainStorageName("example.com")+".db")
+	aliasDatabasePath := filepath.Join(siteDatabaseRootPath(dbPath), domainStorageName("www.example.com")+".db")
+	for _, databasePath := range []string{dbPath, primaryDatabasePath, aliasDatabasePath} {
+		if err := ensureParentDir(databasePath); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	legacyDB, err := sql.Open("sqlite", "file:"+dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer legacyDB.Close()
+	primaryDB, err := sql.Open("sqlite", "file:"+primaryDatabasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer primaryDB.Close()
+	aliasDB, err := sql.Open("sqlite", "file:"+aliasDatabasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer aliasDB.Close()
+	if err := (&App{db: legacyDB, storagePath: storagePath}).migrate(contextWithDomain(context.Background(), "example.com")); err != nil {
+		t.Fatalf("migrate legacy db: %v", err)
+	}
+	if err := (&App{db: primaryDB, storagePath: storagePath}).migrate(contextWithDomain(context.Background(), "example.com")); err != nil {
+		t.Fatalf("migrate primary db: %v", err)
+	}
+	if err := (&App{db: aliasDB, storagePath: storagePath}).migrate(contextWithDomain(context.Background(), "www.example.com")); err != nil {
+		t.Fatalf("migrate alias db: %v", err)
+	}
+	insertSiteQuotaAdmin(t, legacyDB, "example.com")
+	insertSiteQuotaAdmin(t, primaryDB, "example.com")
+	insertSiteQuotaAdmin(t, aliasDB, "www.example.com")
+	if _, err := primaryDB.Exec(`INSERT INTO domain_aliases(primary_domain,alias_domain,verification_token,is_verified,dns_a_ok,is_selected,last_checked_at) VALUES(?,?,?,?,?,?,?)`,
+		"example.com", "www.example.com", "token", 1, 1, 1, time.Now().Format(time.RFC3339)); err != nil {
+		t.Fatalf("insert primary alias: %v", err)
+	}
+
+	rows, err := listSiteQuotaRows(context.Background(), storagePath, dbPath)
+	if err != nil {
+		t.Fatalf("list quota rows: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("row count = %d, want 1: %#v", len(rows), rows)
+	}
+	row := rows[0]
+	if row.Domain != "example.com" {
+		t.Fatalf("domain = %q, want example.com", row.Domain)
+	}
+	if !sameSiteQuotaPath(row.DatabasePath, primaryDatabasePath) {
+		t.Fatalf("database path = %q, want primary per-site db %q", row.DatabasePath, primaryDatabasePath)
+	}
+	if len(row.Aliases) != 1 || row.Aliases[0] != "www.example.com" {
+		t.Fatalf("aliases = %#v, want www.example.com", row.Aliases)
 	}
 }
 
@@ -496,6 +616,7 @@ func TestSiteQuotaInteractiveConsoleUpdatesQuota(t *testing.T) {
 	if err := application.migrate(contextWithDomain(context.Background(), "example.com")); err != nil {
 		t.Fatalf("migrate site db: %v", err)
 	}
+	insertSiteQuotaAdmin(t, rawDB, "example.com")
 
 	var output bytes.Buffer
 	input := strings.NewReader("1\n64mb\nq\n")
@@ -532,6 +653,7 @@ func TestSiteQuotaInteractiveConsoleQuitsFromQuotaPrompt(t *testing.T) {
 	if err := application.migrate(contextWithDomain(context.Background(), "example.com")); err != nil {
 		t.Fatalf("migrate site db: %v", err)
 	}
+	insertSiteQuotaAdmin(t, rawDB, "example.com")
 
 	var output bytes.Buffer
 	input := strings.NewReader("1\nq\n")
@@ -573,6 +695,8 @@ func TestSiteQuotaInteractiveConsoleSupportsArrowSelection(t *testing.T) {
 	if err := (&App{db: secondDB, storagePath: storagePath}).migrate(contextWithDomain(context.Background(), "beta.com")); err != nil {
 		t.Fatalf("migrate second db: %v", err)
 	}
+	insertSiteQuotaAdmin(t, firstDB, "alpha.com")
+	insertSiteQuotaAdmin(t, secondDB, "beta.com")
 
 	var output bytes.Buffer
 	input := strings.NewReader("\x1b[B\n\n128mb\nq\n")
