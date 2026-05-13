@@ -685,15 +685,24 @@ func syncArtifacts(repoRoot, outputDir, programName, version, syncHost, syncBase
 	if err := runCommand(repoRoot, "rsync", "-a", "--delete", outputDir+"/", syncHost+":"+remoteVersionPath+"/"); err != nil {
 		return err
 	}
+	return runCommand(repoRoot, "ssh", syncHost, remoteLatestSymlinkCommand(remoteProgramBase, version))
+}
+
+func remoteLatestSymlinkCommand(remoteProgramBase, version string) string {
 	remoteLatest := remoteProgramBase + "/latest"
-	remoteCommand := fmt.Sprintf(
-		"mkdir -p %s && rm -rf %s && ln -s %s %s",
+	remoteLatestTemp := remoteProgramBase + "/.latest.tmp-" + sanitizePathSegment(version)
+	return fmt.Sprintf(
+		"mkdir -p %s && rm -rf %s && ln -s %s %s && rm -rf %s && mv -Tf %s %s && test \"$(readlink %s)\" = %s",
 		shellQuote(remoteProgramBase),
+		shellQuote(remoteLatestTemp),
+		shellQuote(version),
+		shellQuote(remoteLatestTemp),
+		shellQuote(remoteLatest),
+		shellQuote(remoteLatestTemp),
+		shellQuote(remoteLatest),
 		shellQuote(remoteLatest),
 		shellQuote(version),
-		shellQuote(remoteLatest),
 	)
-	return runCommand(repoRoot, "ssh", syncHost, remoteCommand)
 }
 
 func defaultVersionLabel(repoRoot string) string {

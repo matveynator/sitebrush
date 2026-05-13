@@ -315,6 +315,24 @@ func TestUpdateLatestSymlink(t *testing.T) {
 	}
 }
 
+func TestRemoteLatestSymlinkCommandReplacesAndVerifiesLink(t *testing.T) {
+	t.Parallel()
+
+	command := remoteLatestSymlinkCommand("/srv/releases/sitebrush", "162")
+	for _, want := range []string{
+		"rm -rf '/srv/releases/sitebrush/latest'",
+		"mv -Tf '/srv/releases/sitebrush/.latest.tmp-162' '/srv/releases/sitebrush/latest'",
+		"test \"$(readlink '/srv/releases/sitebrush/latest')\" = '162'",
+	} {
+		if !strings.Contains(command, want) {
+			t.Fatalf("remoteLatestSymlinkCommand() missing %q in %q", want, command)
+		}
+	}
+	if strings.Contains(command, "ln -sfn") {
+		t.Fatalf("remoteLatestSymlinkCommand() should not use ln -sfn: %q", command)
+	}
+}
+
 func TestDefaultVersionLabelUsesEnvironment(t *testing.T) {
 	t.Setenv("GITHUB_RUN_NUMBER", "987")
 	got := defaultVersionLabel(t.TempDir())

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -101,8 +102,7 @@ func Run(ctx context.Context, in io.Reader, out io.Writer, defaults Defaults) (R
 	}
 outer:
 	for {
-		fmt.Fprintf(out, "%sNetwork:%s choose the HTTP port Sitebrush will bind.%s\n", theme.AccentIfEnabled(), theme.ResetIfEnabled(), theme.ResetIfEnabled())
-		answers.Port = promptPort(ctx, reader, out, theme, "HTTP port", suggestPort(false, answers.Port))
+		answers.Port = promptSetupPort(ctx, reader, out, theme, answers.Port)
 
 		fmt.Fprintf(out, "%sStorage:%s Sitebrush keeps databases, files, static output and certificates here.%s\n", theme.AccentIfEnabled(), theme.ResetIfEnabled(), theme.ResetIfEnabled())
 		answers.StoragePath = promptWithDefault(ctx, reader, out, theme, "Storage path", defaultOr(answers.StoragePath, "/var/lib/sitebrush"))
@@ -140,7 +140,7 @@ outer:
 
 		for {
 			fmt.Fprintf(out, "\n%sReview:%s\n", theme.AccentIfEnabled(), theme.ResetIfEnabled())
-			fmt.Fprintf(out, "  [1] Port:    %d\n", answers.Port)
+			fmt.Fprintf(out, "  [1] Ports:   %s\n", formatPortChoice(answers.Port))
 			fmt.Fprintf(out, "  [2] Storage: %s\n", displayValue(answers.StoragePath))
 			fmt.Fprintf(out, "  [3] DB:      %s\n", answers.DBType)
 			fmt.Fprintf(out, "  [4] DB path: %s\n", displayValue(answers.DBPath))
@@ -163,7 +163,7 @@ outer:
 			changed := false
 			switch action {
 			case "1":
-				answers.Port = promptPort(ctx, reader, out, theme, choosePortLabel(false), answers.Port)
+				answers.Port = promptSetupPort(ctx, reader, out, theme, answers.Port)
 				port = answers.Port
 				changed = true
 			case "2":
@@ -332,6 +332,44 @@ func suggestPort(needCert bool, current int) int {
 	return 8765
 }
 
+func promptSetupPort(ctx context.Context, reader *bufio.Reader, out io.Writer, theme colorTheme, current int) int {
+	standardPortsAvailable := portsAvailable(80, 443)
+	fmt.Fprintf(out, "%sNetwork:%s Sitebrush can use public ports 80,443 together, or one custom HTTP port.%s\n", theme.AccentIfEnabled(), theme.ResetIfEnabled(), theme.ResetIfEnabled())
+	if standardPortsAvailable {
+		useStandardPorts := current == 80 || current <= 0
+		if promptYesNo(ctx, reader, out, theme, "Use standard ports 80,443", useStandardPorts) {
+			return 80
+		}
+		return promptPort(ctx, reader, out, theme, choosePortLabel(false), suggestCustomPort(current))
+	}
+	fmt.Fprintf(out, "%sPorts 80,443 are not both available. Stop the process that uses them, then rerun setup, or choose another HTTP port.%s\n", theme.PromptIfEnabled(), theme.ResetIfEnabled())
+	return promptPort(ctx, reader, out, theme, choosePortLabel(false), suggestCustomPort(current))
+}
+
+func suggestCustomPort(current int) int {
+	if current > 0 && current != 80 && current != 443 {
+		return current
+	}
+	return 8080
+}
+
+func portsAvailable(ports ...int) bool {
+	listeners := make([]net.Listener, 0, len(ports))
+	defer func() {
+		for _, listener := range listeners {
+			_ = listener.Close()
+		}
+	}()
+	for _, port := range ports {
+		listener, err := net.Listen("tcp", ":"+strconv.Itoa(port))
+		if err != nil {
+			return false
+		}
+		listeners = append(listeners, listener)
+	}
+	return true
+}
+
 // promptPort asks for the listening port and retries on invalid input so the
 // wizard never aborts due to a typo. The select-based reader keeps the flow
 // cancellable without locks.
@@ -401,6 +439,13 @@ func displayValue(v string) string {
 		return "(empty)"
 	}
 	return v
+}
+
+func formatPortChoice(port int) string {
+	if port == 80 {
+		return "80,443"
+	}
+	return strconv.Itoa(port)
 }
 
 // defaultOr falls back when the candidate string is empty. This keeps prompt
@@ -543,7 +588,7 @@ func resolveLogPath(userUnit bool, port int) (string, error) {
 
 // buildExecArgs assembles only flags supported by the Sitebrush server binary.
 func buildExecArgs(binary string, port int, storagePath, dbType, dbPath string) []string {
-	args := []string{binary, "-port", strconv.Itoa(port), "-storage-path", storagePath, "-db-type", dbType}
+	args := []string{binary, "-port", formatPortChoice(port), "-storage-path", storagePath, "-db-type", dbType}
 	if strings.TrimSpace(dbPath) != "" {
 		args = append(args, "-db-path", dbPath)
 	}
@@ -573,7 +618,7 @@ func writeServiceFile(path, workdir, logPath string, args []string, userUnit boo
 	}
 
 	content := fmt.Sprintf(`[Unit]
-Description=Sitebrush server (port %d)
+Description=Sitebrush server (ports %s)
 After=network-online.target
 Wants=network-online.target
 
@@ -588,7 +633,7 @@ StandardError=append:%s
 
 [Install]
 WantedBy=%s
-`, extractPort(args), workdir, strings.Join(args, " "), logPath, logPath, wantedBy)
+`, formatPortChoice(extractPort(args)), workdir, strings.Join(args, " "), logPath, logPath, wantedBy)
 
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		return fmt.Errorf("write service file: %w", err)
@@ -601,7 +646,8 @@ WantedBy=%s
 func extractPort(args []string) int {
 	for i := 0; i < len(args)-1; i++ {
 		if args[i] == "-port" {
-			if p, err := strconv.Atoi(args[i+1]); err == nil {
+			portValue := strings.Split(args[i+1], ",")[0]
+			if p, err := strconv.Atoi(strings.TrimSpace(portValue)); err == nil {
 				return p
 			}
 		}
@@ -736,6 +782,10 @@ func appendProfilePrimer(res Result) {
 func printUsageHint(out io.Writer, theme colorTheme, port int) {
 	target := fmt.Sprintf("http://localhost:%d", port)
 	note := "Open the web UI to finish domain, HTTPS and site settings."
+	if port == 80 {
+		target = "http://localhost"
+		note = "Open the web UI to finish domain and HTTPS settings; keep ports 80,443 free for Sitebrush."
+	}
 	fmt.Fprintf(out, "\n%sUse:%s open %s in your browser. %s\n", theme.AccentIfEnabled(), theme.ResetIfEnabled(), target, note)
 }
 

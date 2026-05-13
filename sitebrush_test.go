@@ -2514,6 +2514,40 @@ func TestListenOnAvailablePortFallsBackWhenRequestedPortIsBusy(t *testing.T) {
 	}
 }
 
+func TestParseListenPortsAcceptsStandardPairAndCustomPort(t *testing.T) {
+	standardPorts, err := parseListenPorts("80,443")
+	if err != nil {
+		t.Fatalf("parse standard pair: %v", err)
+	}
+	if standardPorts.HTTPPort != 80 || !standardPorts.TLSEnabled || standardPorts.Raw != "80,443" {
+		t.Fatalf("standard ports = %+v", standardPorts)
+	}
+
+	legacyStandardPorts, err := parseListenPorts("80")
+	if err != nil {
+		t.Fatalf("parse legacy standard port: %v", err)
+	}
+	if legacyStandardPorts.HTTPPort != 80 || !legacyStandardPorts.TLSEnabled || legacyStandardPorts.Raw != "80,443" {
+		t.Fatalf("legacy standard ports = %+v", legacyStandardPorts)
+	}
+
+	customPorts, err := parseListenPorts("8080")
+	if err != nil {
+		t.Fatalf("parse custom port: %v", err)
+	}
+	if customPorts.HTTPPort != 8080 || customPorts.TLSEnabled {
+		t.Fatalf("custom ports = %+v", customPorts)
+	}
+}
+
+func TestParseListenPortsRejectsPartialTLSAndMultipleCustomPorts(t *testing.T) {
+	for _, rawPorts := range []string{"443", "80,444", "8080,9090", "abc"} {
+		if _, err := parseListenPorts(rawPorts); err == nil {
+			t.Fatalf("parseListenPorts(%q) succeeded, want error", rawPorts)
+		}
+	}
+}
+
 func TestReplaceTemplateBlocksHandlesNestedTemplateMatches(t *testing.T) {
 	sourceHTML := `<html><body><div class="SiteBrush-Template outer"><section>before<div class="SiteBrush-Template inner">new inner</div>after</section></div></body></html>`
 	targetHTML := `<html><body><div class="SiteBrush-Template outer"><section>before<div class="SiteBrush-Template inner">old inner</div>after</section></div><p>tail</p></body></html>`

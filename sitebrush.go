@@ -1332,8 +1332,14 @@ func ensureParentDir(filePath string) error {
 	return os.MkdirAll(parentDir, 0o755)
 }
 
+type listenPorts struct {
+	Raw        string
+	HTTPPort   int
+	TLSEnabled bool
+}
+
 func main() {
-	port := flag.Int("port", 80, "HTTP listen port")
+	port := flag.String("port", "80,443", "listen port or standard pair 80,443")
 	dbType := flag.String("db-type", "sqlite", "database driver (supported: sqlite)")
 	storagePath := flag.String("storage-path", defaultAppStoragePath(), "path to the Sitebrush app data directory")
 	dbPath := flag.String("db-path", defaultDBPath, "path to sqlite database file")
@@ -1364,8 +1370,12 @@ func main() {
 	if !flagWasProvided("db-path") {
 		effectiveDBPath = filepath.Join(effectiveStoragePath, defaultDBPath)
 	}
+	parsedPorts, err := parseListenPorts(*port)
+	if err != nil {
+		log.Fatal(err)
+	}
 	if setupMode {
-		if err := runLinuxSetupWizard(*port, *dbType, effectiveStoragePath, effectiveDBPath); err != nil {
+		if err := runLinuxSetupWizard(parsedPorts.HTTPPort, *dbType, effectiveStoragePath, effectiveDBPath); err != nil {
 			log.Fatal(err)
 		}
 		return
@@ -1398,7 +1408,7 @@ func main() {
 	router.HandleFunc("/p/", application.servePublicAsset)
 	router.HandleFunc("/", application.route)
 
-	listener, listenPort, err := listenOnAvailablePort(*port)
+	listener, listenPort, err := listenOnAvailablePort(parsedPorts.HTTPPort)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -1413,13 +1423,13 @@ func main() {
 		router.ServeHTTP(w, nextRequest)
 	})
 	httpHandler := application.analyticsMiddleware(accessLogMiddleware(application.authAbuseMiddleware(domainContextMiddleware)))
-	if listenPort != 80 {
+	if parsedPorts.TLSEnabled && listenPort != 80 {
 		log.Printf("Let’s Encrypt HTTP-01 checks need public port 80; current HTTP port is %d", listenPort)
 	}
 	certificateCacheDir := filepath.Join(application.storageRootDir(), "letsencrypt")
 	if mkdirErr := os.MkdirAll(certificateCacheDir, 0o755); mkdirErr != nil {
 		log.Printf("failed to create certificate cache: %v", mkdirErr)
-	} else {
+	} else if parsedPorts.TLSEnabled {
 		certificateManager := &autocert.Manager{
 			Prompt:     autocert.AcceptTOS,
 			Cache:      autocert.DirCache(certificateCacheDir),
@@ -1461,6 +1471,40 @@ func runLinuxSetupWizard(port int, dbType, storagePath, dbPath string) error {
 	}
 	_, err = setupwizard.Run(context.Background(), os.Stdin, os.Stdout, defaults)
 	return err
+}
+
+func parseListenPorts(rawPorts string) (listenPorts, error) {
+	cleaned := strings.TrimSpace(rawPorts)
+	if cleaned == "" {
+		cleaned = "80,443"
+	}
+	parts := strings.Split(cleaned, ",")
+	seenPorts := make(map[int]bool, len(parts))
+	parsed := make([]int, 0, len(parts))
+	for _, part := range parts {
+		nextPort, err := strconv.Atoi(strings.TrimSpace(part))
+		if err != nil || nextPort <= 0 || nextPort > 65535 {
+			return listenPorts{}, fmt.Errorf("invalid -port value %q", rawPorts)
+		}
+		if seenPorts[nextPort] {
+			continue
+		}
+		seenPorts[nextPort] = true
+		parsed = append(parsed, nextPort)
+	}
+	if len(parsed) == 1 {
+		if parsed[0] == 80 {
+			return listenPorts{Raw: "80,443", HTTPPort: 80, TLSEnabled: true}, nil
+		}
+		if parsed[0] == 443 {
+			return listenPorts{}, fmt.Errorf("-port 443 is incomplete; use -port 80,443 or choose another HTTP port")
+		}
+		return listenPorts{Raw: strconv.Itoa(parsed[0]), HTTPPort: parsed[0]}, nil
+	}
+	if len(parsed) == 2 && seenPorts[80] && seenPorts[443] {
+		return listenPorts{Raw: "80,443", HTTPPort: 80, TLSEnabled: true}, nil
+	}
+	return listenPorts{}, fmt.Errorf("-port must be 80,443 or one custom HTTP port")
 }
 
 func listenOnAvailablePort(requestedPort int) (net.Listener, int, error) {

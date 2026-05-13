@@ -34,6 +34,14 @@ func TestBuildExecArgsUsesOnlySitebrushFlags(t *testing.T) {
 	}
 }
 
+func TestBuildExecArgsUsesStandardPortPair(t *testing.T) {
+	args := buildExecArgs("/usr/local/bin/sitebrush", 80, "/var/lib/sitebrush", "sqlite", "/var/lib/sitebrush/storage/db/sitebrush.db")
+	got := strings.Join(args, " ")
+	if !strings.Contains(got, "-port 80,443") {
+		t.Fatalf("buildExecArgs() should use comma port pair, got %q", got)
+	}
+}
+
 func TestSystemctlCommandsStartAndCheckLogs(t *testing.T) {
 	commands := systemctlCommands(false, "sitebrush-80.service")
 	got := strings.Join(commands, "\n")
@@ -46,5 +54,20 @@ func TestSystemctlCommandsStartAndCheckLogs(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Fatalf("systemctlCommands() missing %q in:\n%s", want, got)
 		}
+	}
+}
+
+func TestPortFormattingAndCustomFallback(t *testing.T) {
+	if got := formatPortChoice(80); got != "80,443" {
+		t.Fatalf("formatPortChoice(80) = %q", got)
+	}
+	if got := formatPortChoice(8080); got != "8080" {
+		t.Fatalf("formatPortChoice(8080) = %q", got)
+	}
+	if got := suggestCustomPort(80); got != 8080 {
+		t.Fatalf("suggestCustomPort(80) = %d, want 8080", got)
+	}
+	if got := suggestCustomPort(9090); got != 9090 {
+		t.Fatalf("suggestCustomPort(9090) = %d, want 9090", got)
 	}
 }
