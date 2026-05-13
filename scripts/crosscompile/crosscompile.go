@@ -686,7 +686,13 @@ func syncArtifacts(repoRoot, outputDir, programName, version, syncHost, syncBase
 		return err
 	}
 	remoteLatest := remoteProgramBase + "/latest"
-	remoteCommand := fmt.Sprintf("mkdir -p %s && ln -sfn %s %s", shellQuote(remoteProgramBase), shellQuote(version), shellQuote(remoteLatest))
+	remoteCommand := fmt.Sprintf(
+		"mkdir -p %s && rm -rf %s && ln -s %s %s",
+		shellQuote(remoteProgramBase),
+		shellQuote(remoteLatest),
+		shellQuote(version),
+		shellQuote(remoteLatest),
+	)
 	return runCommand(repoRoot, "ssh", syncHost, remoteCommand)
 }
 

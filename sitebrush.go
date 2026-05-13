@@ -40,9 +40,11 @@ import (
 
 	"golang.org/x/crypto/acme/autocert"
 	"golang.org/x/net/html"
+	appcli "sitebrush/pkg/cli"
 	_ "sitebrush/pkg/database/drivers"
 	"sitebrush/pkg/desktop"
 	"sitebrush/pkg/diskusage"
+	"sitebrush/pkg/setupwizard"
 )
 
 //go:embed web/*
@@ -1333,23 +1335,40 @@ func ensureParentDir(filePath string) error {
 func main() {
 	port := flag.Int("port", 80, "HTTP listen port")
 	dbType := flag.String("db-type", "sqlite", "database driver (supported: sqlite)")
-	storagePath := flag.String("storage-path", defaultAppStoragePath(), "path to the Sitebrush app data directory (defaults to the OS user data folder)")
+	storagePath := flag.String("storage-path", defaultAppStoragePath(), "path to the Sitebrush app data directory")
 	dbPath := flag.String("db-path", defaultDBPath, "path to sqlite database file")
-	desktopMode := flag.Bool("desktop", desktop.DefaultEnabled(), "enable desktop mode when desktop build tags are used")
-	setupMode := flag.Bool("setup", false, "run interactive Linux setup wizard mode")
+	var desktopModeFlag *bool
+	if appcli.DesktopModeFlagSupported() {
+		desktopModeFlag = flag.Bool("desktop", desktop.DefaultEnabled(), "enable desktop mode when desktop build tags are used")
+	}
+	var setupModeFlag *bool
+	if appcli.SetupWizardFlagSupported() {
+		setupModeFlag = flag.Bool("setup", false, "run interactive Linux setup wizard mode")
+	}
 	flag.Parse()
+	desktopMode := false
+	if desktopModeFlag != nil {
+		desktopMode = *desktopModeFlag
+	}
+	setupMode := false
+	if setupModeFlag != nil {
+		setupMode = *setupModeFlag
+	}
 
 	if *dbType != "sqlite" {
 		log.Fatalf("unsupported -db-type %q, supported: sqlite", *dbType)
-	}
-	if *setupMode {
-		log.Printf("setup mode requested; run the setup wizard build flow for Linux deployment")
 	}
 
 	effectiveStoragePath := cleanStoragePath(*storagePath)
 	effectiveDBPath := cleanDBPath(*dbPath)
 	if !flagWasProvided("db-path") {
 		effectiveDBPath = filepath.Join(effectiveStoragePath, defaultDBPath)
+	}
+	if setupMode {
+		if err := runLinuxSetupWizard(*port, *dbType, effectiveStoragePath, effectiveDBPath); err != nil {
+			log.Fatal(err)
+		}
+		return
 	}
 	if err := ensureParentDir(effectiveDBPath); err != nil {
 		log.Fatal(err)
@@ -1415,7 +1434,7 @@ func main() {
 		serverErrors <- http.Serve(listener, httpHandler)
 	}()
 
-	if *desktopMode {
+	if desktopMode {
 		if err := desktop.RunWebviewWindow(address, CompileVersion); err != nil {
 			log.Fatal(err)
 		}
@@ -1425,6 +1444,20 @@ func main() {
 	if err := <-serverErrors; err != nil {
 		log.Fatal(err)
 	}
+}
+
+func runLinuxSetupWizard(port int, dbType, storagePath, dbPath string) error {
+	log.Printf("setup mode requested; starting interactive Linux setup wizard")
+	defaults := setupwizard.Defaults{
+		Port:        port,
+		DBType:      dbType,
+		DBPath:      dbPath,
+		BinaryPath:  os.Args[0],
+		WorkingDir:  storagePath,
+		ArchivePath: filepath.Join(storagePath, "backup"),
+	}
+	_, err := setupwizard.Run(context.Background(), os.Stdin, os.Stdout, defaults)
+	return err
 }
 
 func listenOnAvailablePort(requestedPort int) (net.Listener, int, error) {
@@ -8537,6 +8570,9 @@ func (a *App) storageRootDir() string {
 }
 
 func defaultAppStoragePath() string {
+	if appcli.LinuxServerStorageDefaultEnabled() {
+		return "/var/lib/sitebrush"
+	}
 	basePath := defaultBaseAppDataPath()
 	return filepath.Join(basePath, storageAppName)
 }
