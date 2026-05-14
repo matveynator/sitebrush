@@ -41,13 +41,15 @@
         --hint:#9fb3cf;
       }
     }
-    html, body { height: 100%; margin: 0; }
+    html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; }
     body { background: var(--page-bg); color: var(--text-main); font-family: Arial, sans-serif; }
     input, select, button { font: inherit; }
-    .editor-page { height: 100%; display: flex; flex-direction: column; padding: 0; box-sizing: border-box; }
-    .editor-host { flex: 1; min-height: 100vh; }
-    .jodit-container:not(.jodit_inline) { height: 100% !important; border: 0 !important; border-radius: 0 !important; }
-    .jodit-workplace { min-height: calc(100vh - 56px) !important; }
+    .editor-page { width: 100vw; height: 100vh; min-height: 0; display: flex; flex-direction: column; padding: 0; box-sizing: border-box; overflow: hidden; }
+    .editor-host { flex: 1 1 auto; width: 100%; min-width: 0; min-height: 0; }
+    .jodit-container:not(.jodit_inline) { flex: 1 1 auto; width: 100vw !important; height: 100vh !important; min-width: 0 !important; min-height: 0 !important; max-width: none !important; max-height: none !important; display: flex !important; flex-direction: column !important; border: 0 !important; border-radius: 0 !important; overflow: hidden !important; }
+    .jodit-container:not(.jodit_inline) .jodit-toolbar__box { flex: 0 0 auto; width: 100% !important; max-width: none !important; }
+    .jodit-container:not(.jodit_inline) .jodit-workplace { flex: 1 1 auto !important; width: 100% !important; max-width: none !important; min-width: 0 !important; min-height: 0 !important; max-height: none !important; overflow: hidden !important; }
+    .jodit-container:not(.jodit_inline) .jodit-wysiwyg_iframe { width: 100% !important; height: 100% !important; display: block !important; border: 0 !important; background: var(--page-bg); }
     .jodit-status-bar { display: none; }
     .SiteBrushUploadOverlay { position: fixed; inset: 0; z-index: 2147483647; display: none; align-items: center; justify-content: center; padding: 20px; background: rgba(7, 15, 28, .55); }
     .SiteBrushUploadOverlay.is-open { display: flex; }
@@ -68,20 +70,6 @@
     .SiteBrushUploadClose { border: 0; background: transparent; color: var(--text-main); font-size: 24px; line-height: 1; cursor: pointer; }
     .SiteBrushUploadResizeGrid { display: grid; grid-template-columns: minmax(0, 1fr) 120px; gap: 8px; align-items: end; }
     .SiteBrushUploadHidden { display: none; }
-    .SiteBrushBuildVersion {
-      position: fixed;
-      right: 12px;
-      bottom: 10px;
-      z-index: 12;
-      padding: 4px 8px;
-      border: 1px solid var(--line);
-      border-radius: 999px;
-      background: color-mix(in srgb, var(--surface) 92%, transparent);
-      color: var(--hint);
-      font-size: 12px;
-      line-height: 1;
-      pointer-events: none;
-    }
     @media (max-width: 620px) {
       .SiteBrushUploadResizeGrid { grid-template-columns: 1fr; }
       .SiteBrushUploadFooter { justify-content: stretch; }
@@ -97,7 +85,6 @@
   <input type="hidden" id="htmlContentField" name="html" />
   <textarea id="visualEditorRoot" class="editor-host">{{.HTML}}</textarea>
 </form>
-<div class="SiteBrushBuildVersion">{{index .T "edit_build_label"}} {{.CompileVersion}}</div>
 
 <div id="uploadDialogOverlay" class="SiteBrushUploadOverlay" role="dialog" aria-modal="true" aria-labelledby="uploadDialogTitle">
   <div class="SiteBrushUploadModal">
@@ -158,6 +145,8 @@ const currentPagePath = {{.Path}};
 const desktopNativeFilePickerEnabled = {{.NativeFileDialog}};
 const uploadResizeModeStorageKey = 'sitebrush.visualUploadResizeMode';
 const uploadCustomSizeStorageKey = 'sitebrush.visualUploadCustomSize';
+const visualEditorDocumentModel = parseVisualEditorDocument(initialHtmlContent);
+const visualEditorThemeMediaQuery = window.matchMedia ? window.matchMedia('(prefers-color-scheme: dark)') : null;
 
 const uploadDialogState = {
   editor: null,
@@ -191,10 +180,315 @@ function normalizedResizeMode(resizeMode) {
   return 'original';
 }
 
+function currentVisualEditorThemeName() {
+  if (visualEditorThemeMediaQuery && visualEditorThemeMediaQuery.matches) {
+    return 'dark';
+  }
+  return 'default';
+}
+
+function currentVisualEditorColorScheme() {
+  return currentVisualEditorThemeName() === 'dark' ? 'dark' : 'light';
+}
+
+function parseVisualEditorDocument(htmlContent) {
+  const parsedDocument = new DOMParser().parseFromString(htmlContent || '', 'text/html');
+  const hasDocumentShell = /<(html|head|body)(\s|>)/i.test(htmlContent || '');
+  const bodyElement = parsedDocument.body;
+  const headElement = parsedDocument.head;
+  return {
+    hasDocumentShell: hasDocumentShell,
+    doctype: visualEditorDoctype(parsedDocument),
+    hasStoredThemeMarker: visualEditorHasStoredThemeMarker(parsedDocument.documentElement, bodyElement),
+    htmlAttributeList: hasDocumentShell ? visualEditorElementAttributeList(parsedDocument.documentElement) : [],
+    bodyAttributeList: hasDocumentShell ? visualEditorElementAttributeList(bodyElement) : [],
+    htmlAttributes: hasDocumentShell ? visualEditorElementAttributes(parsedDocument.documentElement) : '',
+    bodyAttributes: hasDocumentShell ? visualEditorElementAttributes(bodyElement) : '',
+    headHTML: hasDocumentShell && headElement ? headElement.innerHTML : '',
+    bodyHTML: hasDocumentShell && bodyElement ? bodyElement.innerHTML : htmlContent || ''
+  };
+}
+
+function visualEditorHasStoredThemeMarker(htmlElement, bodyElement) {
+  return visualEditorElementHasThemeMarker(htmlElement) || visualEditorElementHasThemeMarker(bodyElement);
+}
+
+function visualEditorElementHasThemeMarker(element) {
+  if (!element) {
+    return false;
+  }
+  if (element.hasAttribute('data-bs-theme') || element.hasAttribute('data-theme') || element.hasAttribute('color-scheme')) {
+    return true;
+  }
+  return element.classList.contains('dark') || element.classList.contains('light');
+}
+
+function visualEditorDoctype(parsedDocument) {
+  if (!parsedDocument || !parsedDocument.doctype) {
+    return '<!doctype html>';
+  }
+  const doctypeNode = parsedDocument.doctype;
+  let doctypeText = '<!DOCTYPE ' + doctypeNode.name;
+  if (doctypeNode.publicId) {
+    doctypeText += ' PUBLIC "' + doctypeNode.publicId + '"';
+  }
+  if (doctypeNode.systemId) {
+    if (!doctypeNode.publicId) {
+      doctypeText += ' SYSTEM';
+    }
+    doctypeText += ' "' + doctypeNode.systemId + '"';
+  }
+  return doctypeText + '>';
+}
+
+function visualEditorElementAttributeList(element) {
+  if (!element || !element.attributes) {
+    return [];
+  }
+  const attributeList = [];
+  for (let attributeIndex = 0; attributeIndex < element.attributes.length; attributeIndex++) {
+    const currentAttribute = element.attributes[attributeIndex];
+    attributeList.push({
+      name: currentAttribute.name,
+      text: String(currentAttribute.value || '')
+    });
+  }
+  return attributeList;
+}
+
+function visualEditorElementAttributes(element) {
+  if (!element || !element.attributes) {
+    return '';
+  }
+  const attributeTexts = [];
+  for (let attributeIndex = 0; attributeIndex < element.attributes.length; attributeIndex++) {
+    const currentAttribute = element.attributes[attributeIndex];
+    attributeTexts.push(currentAttribute.name + '="' + escapeHTMLAttribute(currentAttribute.value) + '"');
+  }
+  return attributeTexts.join(' ');
+}
+
+function visualEditorOpeningTag(tagName, attributeText) {
+  if (!attributeText) {
+    return '<' + tagName + '>';
+  }
+  return '<' + tagName + ' ' + attributeText + '>';
+}
+
+function visualEditorFrameBaseURL() {
+  return new URL(currentPagePath || '/', window.location.href).href;
+}
+
+function visualEditorStylesheetLinks(htmlContent) {
+  const parsedDocument = new DOMParser().parseFromString(htmlContent || '', 'text/html');
+  const linkElements = parsedDocument.querySelectorAll('link[href]');
+  const stylesheetLinks = [];
+  const seenLinks = Object.create(null);
+  for (let linkIndex = 0; linkIndex < linkElements.length; linkIndex++) {
+    const linkElement = linkElements[linkIndex];
+    const relationship = String(linkElement.getAttribute('rel') || '').toLowerCase().split(/\s+/);
+    if (relationship.indexOf('stylesheet') === -1) {
+      continue;
+    }
+    const stylesheetHref = linkElement.getAttribute('href');
+    if (!stylesheetHref || seenLinks[stylesheetHref]) {
+      continue;
+    }
+    seenLinks[stylesheetHref] = true;
+    stylesheetLinks.push(stylesheetHref);
+  }
+  return stylesheetLinks;
+}
+
+function visualEditorInlineStyleText(htmlContent) {
+  const parsedDocument = new DOMParser().parseFromString(htmlContent || '', 'text/html');
+  const styleElements = parsedDocument.querySelectorAll('style');
+  const inlineStyleTexts = [];
+  for (let styleIndex = 0; styleIndex < styleElements.length; styleIndex++) {
+    const styleText = String(styleElements[styleIndex].textContent || '').trim();
+    if (styleText) {
+      inlineStyleTexts.push(styleText);
+    }
+  }
+  return inlineStyleTexts.join('\n\n');
+}
+
+function visualEditorFrameStyle() {
+  const inlineSiteStyle = visualEditorInlineStyleText(initialHtmlContent);
+  const fallbackStyle = [
+    'html{min-height:100%;color-scheme:light dark;}',
+    ':where(body){min-height:100%;margin:0;box-sizing:border-box;background:Canvas;color:CanvasText;}',
+    'img,video,svg,canvas,iframe{max-width:100%;}',
+    '@media (prefers-color-scheme: dark){:where(html:not([data-bs-theme]):not([data-theme]):not(.light)){background:#0f1724;color:#dbe8ff;}:where(body:not([style*="background"])){background:#0f1724;color:#dbe8ff;}}'
+  ].join('\n');
+  if (!inlineSiteStyle) {
+    return fallbackStyle;
+  }
+  return fallbackStyle + '\n\n' + inlineSiteStyle;
+}
+
+function syncVisualEditorTheme(visualHtmlEditor) {
+  const themeName = currentVisualEditorThemeName();
+  const colorScheme = currentVisualEditorColorScheme();
+  document.documentElement.setAttribute('data-bs-theme', colorScheme);
+  document.body.style.colorScheme = colorScheme;
+  if (visualHtmlEditor && visualHtmlEditor.container) {
+    if (visualHtmlEditor.sitebrushThemeName !== themeName && typeof visualHtmlEditor.setOptions === 'function') {
+      visualHtmlEditor.setOptions({ theme: themeName });
+      visualHtmlEditor.sitebrushThemeName = themeName;
+    }
+    visualHtmlEditor.container.classList.toggle('jodit_theme_dark', themeName === 'dark');
+    visualHtmlEditor.container.classList.toggle('jodit_theme_default', themeName !== 'dark');
+  }
+  syncVisualEditorFrameTheme(visualHtmlEditor, colorScheme);
+}
+
+function resizeVisualEditorWorkspace(visualHtmlEditor) {
+  if (!visualHtmlEditor || !visualHtmlEditor.container) {
+    return;
+  }
+  const viewportWidth = Math.max(1, Math.round(window.innerWidth || document.documentElement.clientWidth || 0));
+  const viewportHeight = Math.max(1, Math.round(window.innerHeight || document.documentElement.clientHeight || 0));
+  const editorContainer = visualHtmlEditor.container;
+  const editorToolbar = editorContainer.querySelector('.jodit-toolbar__box');
+  const editorStatusbar = editorContainer.querySelector('.jodit-status-bar');
+  const toolbarHeight = editorToolbar ? editorToolbar.getBoundingClientRect().height : 0;
+  const statusbarHeight = editorStatusbar && editorStatusbar.offsetParent !== null ? editorStatusbar.getBoundingClientRect().height : 0;
+  const workplaceHeight = Math.max(1, viewportHeight - toolbarHeight - statusbarHeight);
+  setVisualEditorStyle(editorContainer, 'width', viewportWidth + 'px');
+  setVisualEditorStyle(editorContainer, 'height', viewportHeight + 'px');
+  setVisualEditorStyle(editorContainer, 'maxWidth', 'none');
+  setVisualEditorStyle(editorContainer, 'maxHeight', 'none');
+  setVisualEditorStyle(editorContainer, 'minWidth', '0px');
+  setVisualEditorStyle(editorContainer, 'minHeight', viewportHeight + 'px');
+  setVisualEditorStyle(editorContainer, 'display', 'flex');
+  setVisualEditorStyle(editorContainer, 'flexDirection', 'column');
+  setVisualEditorStyle(editorContainer, 'overflow', 'hidden');
+  if (editorToolbar) {
+    setVisualEditorStyle(editorToolbar, 'width', viewportWidth + 'px');
+    setVisualEditorStyle(editorToolbar, 'maxWidth', 'none');
+    setVisualEditorStyle(editorToolbar, 'flex', '0 0 auto');
+  }
+  if (visualHtmlEditor.workplace) {
+    setVisualEditorStyle(visualHtmlEditor.workplace, 'width', viewportWidth + 'px');
+    setVisualEditorStyle(visualHtmlEditor.workplace, 'height', workplaceHeight + 'px');
+    setVisualEditorStyle(visualHtmlEditor.workplace, 'minHeight', workplaceHeight + 'px');
+    setVisualEditorStyle(visualHtmlEditor.workplace, 'maxHeight', workplaceHeight + 'px');
+    setVisualEditorStyle(visualHtmlEditor.workplace, 'maxWidth', 'none');
+    setVisualEditorStyle(visualHtmlEditor.workplace, 'flex', '1 1 auto');
+    setVisualEditorStyle(visualHtmlEditor.workplace, 'overflow', 'hidden');
+  }
+  if (visualHtmlEditor.iframe) {
+    setVisualEditorStyle(visualHtmlEditor.iframe, 'width', viewportWidth + 'px');
+    setVisualEditorStyle(visualHtmlEditor.iframe, 'height', workplaceHeight + 'px');
+    setVisualEditorStyle(visualHtmlEditor.iframe, 'minHeight', workplaceHeight + 'px');
+    setVisualEditorStyle(visualHtmlEditor.iframe, 'maxHeight', workplaceHeight + 'px');
+    setVisualEditorStyle(visualHtmlEditor.iframe, 'maxWidth', 'none');
+    setVisualEditorStyle(visualHtmlEditor.iframe, 'display', 'block');
+    setVisualEditorStyle(visualHtmlEditor.iframe, 'border', '0px');
+  }
+  if (visualHtmlEditor.editor) {
+    setVisualEditorStyle(visualHtmlEditor.editor, 'minHeight', workplaceHeight + 'px');
+  }
+}
+
+function setVisualEditorStyle(element, propertyName, propertyValue) {
+  if (!element || element.style[propertyName] === propertyValue) {
+    return;
+  }
+  element.style[propertyName] = propertyValue;
+}
+
+function syncVisualEditorLayout(visualHtmlEditor) {
+  resizeVisualEditorWorkspace(visualHtmlEditor);
+  syncVisualEditorTheme(visualHtmlEditor);
+}
+
+function scheduleVisualEditorLayout(visualHtmlEditor) {
+  syncVisualEditorLayout(visualHtmlEditor);
+  window.requestAnimationFrame(function onNextVisualEditorFrame() {
+    syncVisualEditorLayout(visualHtmlEditor);
+  });
+}
+
+function syncVisualEditorFrameTheme(visualHtmlEditor, colorScheme) {
+  if (!visualHtmlEditor || !visualHtmlEditor.iframe || !visualHtmlEditor.iframe.contentDocument) {
+    return;
+  }
+  const frameDocument = visualHtmlEditor.iframe.contentDocument;
+  const frameRootElement = frameDocument.documentElement;
+  if (!frameRootElement) {
+    return;
+  }
+  applyVisualEditorFrameAttributes(frameRootElement, visualEditorDocumentModel.htmlAttributeList, ['jodit']);
+  frameRootElement.style.colorScheme = colorScheme;
+  if (!visualEditorDocumentModel.hasStoredThemeMarker) {
+    frameRootElement.classList.toggle('dark', colorScheme === 'dark');
+    frameRootElement.classList.toggle('light', colorScheme !== 'dark');
+    frameRootElement.setAttribute('data-bs-theme', colorScheme);
+    frameRootElement.setAttribute('data-theme', colorScheme);
+  }
+  if (frameDocument.body) {
+    applyVisualEditorFrameAttributes(frameDocument.body, visualEditorDocumentModel.bodyAttributeList, ['jodit-wysiwyg']);
+    frameDocument.body.style.colorScheme = colorScheme;
+    if (!visualEditorDocumentModel.hasStoredThemeMarker) {
+      frameDocument.body.classList.toggle('dark', colorScheme === 'dark');
+      frameDocument.body.classList.toggle('light', colorScheme !== 'dark');
+    }
+  }
+}
+
+function applyVisualEditorFrameAttributes(targetElement, attributeList, requiredClasses) {
+  for (let attributeIndex = 0; attributeIndex < attributeList.length; attributeIndex++) {
+    const currentAttribute = attributeList[attributeIndex];
+    if (currentAttribute.name === 'contenteditable') {
+      continue;
+    }
+    if (currentAttribute.name === 'class') {
+      continue;
+    }
+    targetElement.setAttribute(currentAttribute.name, currentAttribute.text);
+  }
+  const classNames = [];
+  for (let requiredIndex = 0; requiredIndex < requiredClasses.length; requiredIndex++) {
+    classNames.push(requiredClasses[requiredIndex]);
+  }
+  for (let attributeIndex = 0; attributeIndex < attributeList.length; attributeIndex++) {
+    const currentAttribute = attributeList[attributeIndex];
+    if (currentAttribute.name !== 'class') {
+      continue;
+    }
+    const storedClasses = currentAttribute.text.split(/\s+/);
+    for (let classIndex = 0; classIndex < storedClasses.length; classIndex++) {
+      const className = storedClasses[classIndex];
+      if (className && classNames.indexOf(className) === -1) {
+        classNames.push(className);
+      }
+    }
+  }
+  targetElement.className = classNames.join(' ');
+}
+
+function storedVisualEditorHTML(editorBodyHTML) {
+  if (!visualEditorDocumentModel.hasDocumentShell) {
+    return editorBodyHTML;
+  }
+  return [
+    visualEditorDocumentModel.doctype,
+    visualEditorOpeningTag('html', visualEditorDocumentModel.htmlAttributes),
+    '<head>',
+    visualEditorDocumentModel.headHTML,
+    '</head>',
+    visualEditorOpeningTag('body', visualEditorDocumentModel.bodyAttributes),
+    editorBodyHTML,
+    '</body></html>'
+  ].join('');
+}
+
 function submitVisualEditorForm(visualHtmlEditor) {
   const visualEditorFormElement = document.getElementById('visualEditorForm');
   const htmlContentFieldElement = document.getElementById('htmlContentField');
-  htmlContentFieldElement.value = visualHtmlEditor.value;
+  htmlContentFieldElement.value = storedVisualEditorHTML(visualHtmlEditor.value);
   visualEditorFormElement.submit();
 }
 
@@ -609,9 +903,18 @@ syncUploadResizeControls();
 
 function createVisualHtmlEditor() {
   return Jodit.make('#visualEditorRoot', {
-    value: initialHtmlContent,
+    value: visualEditorDocumentModel.bodyHTML,
     height: '100%',
     width: '100%',
+    minWidth: 0,
+    maxWidth: 'none',
+    minHeight: 0,
+    maxHeight: 'none',
+    theme: currentVisualEditorThemeName(),
+    iframe: true,
+    iframeBaseUrl: visualEditorFrameBaseURL(),
+    iframeCSSLinks: visualEditorStylesheetLinks(initialHtmlContent),
+    iframeStyle: visualEditorFrameStyle(),
     toolbarAdaptive: false,
     showCharsCounter: false,
     showWordsCounter: false,
@@ -657,6 +960,31 @@ function connectSaveHotkey(visualHtmlEditor) {
 }
 
 const visualHtmlEditor = createVisualHtmlEditor();
+visualHtmlEditor.sitebrushThemeName = currentVisualEditorThemeName();
+syncVisualEditorLayout(visualHtmlEditor);
+visualHtmlEditor.events.on('afterInit afterSetMode change resize', function onVisualEditorFrameRefresh() {
+  scheduleVisualEditorLayout(visualHtmlEditor);
+});
+window.addEventListener('resize', function onVisualEditorWindowResize() {
+  scheduleVisualEditorLayout(visualHtmlEditor);
+});
+window.addEventListener('orientationchange', function onVisualEditorOrientationChange() {
+  scheduleVisualEditorLayout(visualHtmlEditor);
+});
+window.requestAnimationFrame(function afterVisualEditorPaint() {
+  scheduleVisualEditorLayout(visualHtmlEditor);
+});
+if (visualEditorThemeMediaQuery) {
+  if (typeof visualEditorThemeMediaQuery.addEventListener === 'function') {
+    visualEditorThemeMediaQuery.addEventListener('change', function onVisualEditorThemeChange() {
+      scheduleVisualEditorLayout(visualHtmlEditor);
+    });
+  } else if (typeof visualEditorThemeMediaQuery.addListener === 'function') {
+    visualEditorThemeMediaQuery.addListener(function onLegacyVisualEditorThemeChange() {
+      scheduleVisualEditorLayout(visualHtmlEditor);
+    });
+  }
+}
 connectSaveHotkey(visualHtmlEditor);
 </script>
 </body>

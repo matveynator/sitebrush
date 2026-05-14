@@ -2988,7 +2988,7 @@ func TestVisualEditorUsesLocalJoditAssetsAndServerImageUpload(t *testing.T) {
 		t.Fatalf("visual editor status = %d, body=%q", response.Code, response.Body.String())
 	}
 	body := response.Body.String()
-	for _, expectedFragment := range []string{`href="/p/static/jodit.min.css"`, `src="/p/static/jodit.min.js"`, "/p/static/files.png", "/p/static/save-page.png", "/p/static/exit-editor.png", "chooseAndUploadFiles", "document.body.appendChild(fileInputElement)", "fallbackHashFileName", "sitebrush.visualUploadResizeMode", `value="600"`, `value="800"`, `value="1200"`, `value="2000"`, "width=", "height=", "currentPagePath + '?files'", "currentPagePath + '?native_pick_files'", "window.location.href = currentPagePath"} {
+	for _, expectedFragment := range []string{`href="/p/static/jodit.min.css"`, `src="/p/static/jodit.min.js"`, "/p/static/files.png", "/p/static/save-page.png", "/p/static/exit-editor.png", "chooseAndUploadFiles", "document.body.appendChild(fileInputElement)", "fallbackHashFileName", "sitebrush.visualUploadResizeMode", `value="600"`, `value="800"`, `value="1200"`, `value="2000"`, "width=", "height=", "currentPagePath + '?files'", "currentPagePath + '?native_pick_files'", "window.location.href = currentPagePath", "parseVisualEditorDocument", "visualEditorStylesheetLinks", "syncVisualEditorTheme", "resizeVisualEditorWorkspace", "storedVisualEditorHTML", "iframe: true", "iframeCSSLinks: visualEditorStylesheetLinks(initialHtmlContent)"} {
 		if !strings.Contains(body, expectedFragment) {
 			t.Fatalf("visual editor missing %q in %s", expectedFragment, body)
 		}
