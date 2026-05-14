@@ -6169,13 +6169,6 @@ func contentTypeForManagedPage(pagePath, content string) string {
 	return detectedContentType
 }
 
-func latestServerBinaryDownloadURL(goos, goarch string) string {
-	artifactName := "sitebrush_" + goos + "_" + goarch
-	if goos == "windows" {
-		artifactName += ".exe"
-	}
-	return "https://files.zabiyaka.net/sitebrush/latest/server-app/" + artifactName
-}
 
 func buildContextMenuScript(isAdmin bool, isFrozen bool, pagePath, domain string, revisionID int, revisionCount int, storageUsageLabel string, translations map[string]string) string {
 	escapedPath := template.JSEscapeString(pagePath)
@@ -6215,7 +6208,7 @@ func buildContextMenuScript(isAdmin bool, isFrozen bool, pagePath, domain string
 	treeCloseLabel := template.JSEscapeString(translationOrDefault(translations, "tree_close", "Close"))
 	compiledVersionLabel := template.JSEscapeString("v." + CompileVersion)
 	sitebrushHomeURL := "https://sitebrush.com"
-	serverBinaryDownloadURL := latestServerBinaryDownloadURL(runtime.GOOS, runtime.GOARCH)
+	serverBinaryDownloadURL := "https://files.zabiyaka.net/sitebrush/latest"
 	storageUsageHTML := ""
 	if strings.TrimSpace(storageUsageLabel) != "" {
 		storageUsageHTML = "<span class='SiteBrushMenuStorageUsage'>" + template.HTMLEscapeString(storageUsageLabel) + "</span>"
