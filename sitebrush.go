@@ -6456,18 +6456,8 @@ func buildContextMenuScript(isAdmin bool, isFrozen bool, pagePath, domain string
       actionFormElement.submit();
     }
   }, {capture: true});
-  function onContextMenuOpen(browserEvent) {
-    if (browserEvent.__sitebrushContextMenuHandled || browserEvent.ctrlKey) {
-      return;
-    }
-    const clickedInsideSitebrushMenu = closestSitebrushEventElement(browserEvent, "#SiteBrushMenuBox");
-    if (clickedInsideSitebrushMenu) {
-      return;
-    }
-    browserEvent.__sitebrushContextMenuHandled = true;
-    browserEvent.preventDefault();
-    browserEvent.stopPropagation();
-    const menuHtmlEntries = [
+  function buildSitebrushAdminMenuEntries() {
+    return [
       "<ul class='SiteBrushMenuList'>",
       "<li class='SiteBrushContextMenu SiteBrushDomainMenuItem'><a href='/' class='SiteBrushContextMenuLink'>" + currentDomainName + "</a></li>",
       "<li class='SiteBrushContextMenu'><a href='?visual' class='SiteBrushContextMenuLink'><img src='/p/static/pencil.png' class='SiteBrushMenuIcon' alt=''>" + "` + editLabel + `" + "</a></li>",
@@ -6484,10 +6474,28 @@ func buildContextMenuScript(isAdmin bool, isFrozen bool, pagePath, domain string
       "` + copyrightMenuEntry + `",
       "</ul>"
     ];
-    showSitebrushMenu(browserEvent, menuHtmlEntries, currentPagePath, isDomainFrozen);
+  }
+  function onContextMenuOpen(browserEvent) {
+    if (browserEvent.__sitebrushContextMenuHandled || browserEvent.ctrlKey) {
+      return;
+    }
+    if (sitebrushShouldIgnoreContextMenuEvent(browserEvent)) {
+      return;
+    }
+    const clickedInsideSitebrushMenu = closestSitebrushEventElement(browserEvent, "#SiteBrushMenuBox");
+    if (clickedInsideSitebrushMenu) {
+      return;
+    }
+    browserEvent.__sitebrushContextMenuHandled = true;
+    browserEvent.preventDefault();
+    browserEvent.stopPropagation();
+    showSitebrushMenu(browserEvent, buildSitebrushAdminMenuEntries(), currentPagePath, isDomainFrozen);
   }
   window.addEventListener("contextmenu", onContextMenuOpen, {capture: true, passive: false});
   document.addEventListener("contextmenu", onContextMenuOpen, {capture: true, passive: false});
+  installSitebrushLongPressMenu(function openAdminMenuFromLongPress(menuPoint) {
+    showSitebrushMenu(menuPoint, buildSitebrushAdminMenuEntries(), currentPagePath, isDomainFrozen);
+  });
   function openSiteTreeDialog() {
     closeSitebrushMenu();
     const overlayElement = document.createElement("div");
@@ -6540,8 +6548,20 @@ func buildContextMenuScript(isAdmin bool, isFrozen bool, pagePath, domain string
   window.__sitebrushContextMenuInitialized = true;
   const currentPagePath = "` + escapedPath + `";
   const currentDomainName = "` + escapedDomain + `";
+  function buildSitebrushGuestMenuEntries() {
+    return [
+      "<ul class='SiteBrushMenuList'>",
+      "<li class='SiteBrushContextMenu SiteBrushDomainMenuItem'><a href='/' class='SiteBrushContextMenuLink'>" + currentDomainName + "</a></li>",
+      "<li class='SiteBrushContextMenu'><a href='?login' class='SiteBrushContextMenuLink'><img src='/p/static/login.png' class='SiteBrushMenuIcon' alt=''>" + "` + loginLabel + `" + "</a></li>",
+      "` + copyrightMenuEntry + `",
+      "</ul>"
+    ];
+  }
   function onContextMenuOpen(browserEvent) {
     if (browserEvent.__sitebrushContextMenuHandled || browserEvent.ctrlKey) {
+      return;
+    }
+    if (sitebrushShouldIgnoreContextMenuEvent(browserEvent)) {
       return;
     }
     const clickedInsideSitebrushMenu = closestSitebrushEventElement(browserEvent, "#SiteBrushMenuBox");
@@ -6551,29 +6571,25 @@ func buildContextMenuScript(isAdmin bool, isFrozen bool, pagePath, domain string
     browserEvent.__sitebrushContextMenuHandled = true;
     browserEvent.preventDefault();
     browserEvent.stopPropagation();
-    const menuHtmlEntries = [
-      "<ul class='SiteBrushMenuList'>",
-      "<li class='SiteBrushContextMenu SiteBrushDomainMenuItem'><a href='/' class='SiteBrushContextMenuLink'>" + currentDomainName + "</a></li>",
-      "<li class='SiteBrushContextMenu'><a href='?login' class='SiteBrushContextMenuLink'><img src='/p/static/login.png' class='SiteBrushMenuIcon' alt=''>" + "` + loginLabel + `" + "</a></li>",
-      "` + copyrightMenuEntry + `",
-      "</ul>"
-    ];
-    showSitebrushMenu(browserEvent, menuHtmlEntries, currentPagePath, false);
+    showSitebrushMenu(browserEvent, buildSitebrushGuestMenuEntries(), currentPagePath, false);
   }
   window.addEventListener("contextmenu", onContextMenuOpen, {capture: true, passive: false});
   document.addEventListener("contextmenu", onContextMenuOpen, {capture: true, passive: false});
-})();
-	</script>`
+  installSitebrushLongPressMenu(function openGuestMenuFromLongPress(menuPoint) {
+    showSitebrushMenu(menuPoint, buildSitebrushGuestMenuEntries(), currentPagePath, false);
+  });
+	})();
+		</script>`
 }
 
 func contextMenuStylesAndHelpers() string {
 	return `<style>
 .SiteBrushMenuBox,.SiteBrushMenuBox *{all:initial;box-sizing:border-box}
-.SiteBrushMenuBox{position:fixed;background:#fff url(/p/static/bg.png) repeat-x top;border:1px solid #8ea4c1;z-index:2147483646;padding:2px;min-width:240px;box-shadow:0 2px 12px rgba(0,0,0,0.2);font-family:Arial,Helvetica,sans-serif}
+.SiteBrushMenuBox{position:fixed;background:#fff url(/p/static/bg.png) repeat-x top;border:1px solid #8ea4c1;z-index:2147483646;padding:2px;min-width:min(240px,calc(100vw - 16px));max-width:calc(100vw - 16px);max-height:calc(100vh - 16px);overflow:auto;box-shadow:0 2px 12px rgba(0,0,0,0.2);font-family:Arial,Helvetica,sans-serif;touch-action:manipulation}
 .SiteBrushMenuBox.SiteBrushMenuBoxFrozen{background:#e9f5ff;border-color:#6da6d4}
 .SiteBrushMenuList{list-style:none;margin:0;padding:0}
 .SiteBrushContextMenu{margin:0;padding:0}
-.SiteBrushContextMenuLink{display:flex;align-items:center;gap:8px;padding:8px 10px;color:#1f3f6f;text-decoration:none;font-family:Arial,Helvetica,sans-serif;font-size:14px;cursor:pointer}
+.SiteBrushContextMenuLink{display:flex;align-items:center;gap:8px;padding:8px 10px;color:#1f3f6f;text-decoration:none;font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:1.25;cursor:pointer;min-width:0;white-space:normal;word-break:break-word}
 .SiteBrushContextMenuLink:link,.SiteBrushContextMenuLink:visited,.SiteBrushContextMenuLink:active{color:#1f3f6f;text-decoration:none}
 .SiteBrushContextMenuLink:hover{color:#1f3f6f;background:#eef5ff;text-decoration:none}
 .SiteBrushContextMenuButton{width:100%;border:0;background:transparent;text-align:left}
@@ -6605,6 +6621,13 @@ func contextMenuStylesAndHelpers() string {
 .SiteBrushTreeLink{color:#1f3f6f;text-decoration:none;font-size:14px;line-height:1.6}
 .SiteBrushTreeLink:link,.SiteBrushTreeLink:visited,.SiteBrushTreeLink:active,.SiteBrushTreeLink:hover{color:#1f3f6f;text-decoration:none}
 .SiteBrushTreeCurrent{font-weight:700;text-decoration:underline}
+@media (pointer: coarse), (max-width: 820px){
+  .SiteBrushMenuBox{right:auto;min-width:min(280px,calc(100vw - 16px));max-width:calc(100vw - 16px);max-height:calc(100vh - 16px);border-radius:8px;-webkit-overflow-scrolling:touch}
+  .SiteBrushContextMenuLink{min-height:44px;padding:11px 12px;font-size:16px;gap:10px}
+  .SiteBrushMenuIcon{width:20px;height:20px;flex-basis:20px}
+  .ContextMenuCopyright .SiteBrushContextMenuLink{font-size:13px;flex-wrap:wrap}
+  .SiteBrushMenuStorageUsage{margin-left:0}
+}
 @media (prefers-color-scheme: dark){
   .SiteBrushMenuBox{background:#172235;border-color:#2f405d}
   .SiteBrushMenuBox.SiteBrushMenuBoxFrozen{background:#13263d;border-color:#4a6f99}
@@ -6672,8 +6695,143 @@ function normalizeSitebrushMenuLinks(menuBoxElement, currentPagePath) {
     menuLinkElement.setAttribute("href", currentPagePath + originalHref);
   }
 }
+function sitebrushMenuViewportNumber(candidateNumber, fallbackNumber) {
+  const parsedNumber = Number(candidateNumber);
+  if (Number.isFinite(parsedNumber) && parsedNumber > 0) {
+    return parsedNumber;
+  }
+  return fallbackNumber;
+}
+function sitebrushMenuPointFromEvent(browserEvent) {
+  const viewportWidth = sitebrushMenuViewportNumber(window.innerWidth, document.documentElement.clientWidth || 320);
+  const viewportHeight = sitebrushMenuViewportNumber(window.innerHeight, document.documentElement.clientHeight || 480);
+  return {
+    clientX: Math.max(0, Math.min(Number(browserEvent.clientX) || 0, viewportWidth)),
+    clientY: Math.max(0, Math.min(Number(browserEvent.clientY) || 0, viewportHeight))
+  };
+}
+function positionSitebrushMenuBox(menuBoxElement, menuPoint) {
+  const viewportWidth = sitebrushMenuViewportNumber(window.innerWidth, document.documentElement.clientWidth || 320);
+  const viewportHeight = sitebrushMenuViewportNumber(window.innerHeight, document.documentElement.clientHeight || 480);
+  const viewportGap = 8;
+  const menuRect = menuBoxElement.getBoundingClientRect();
+  const menuWidth = Math.min(menuRect.width || 0, viewportWidth - viewportGap * 2);
+  const menuHeight = Math.min(menuRect.height || 0, viewportHeight - viewportGap * 2);
+  const boundedLeft = Math.max(viewportGap, Math.min(menuPoint.clientX, viewportWidth - menuWidth - viewportGap));
+  const boundedTop = Math.max(viewportGap, Math.min(menuPoint.clientY, viewportHeight - menuHeight - viewportGap));
+  menuBoxElement.style.left = boundedLeft + "px";
+  menuBoxElement.style.top = boundedTop + "px";
+}
+function sitebrushShouldIgnoreContextMenuEvent(browserEvent) {
+  if (!window.__sitebrushLongPressMenuUntil) {
+    return false;
+  }
+  if (Date.now() > window.__sitebrushLongPressMenuUntil) {
+    window.__sitebrushLongPressMenuUntil = 0;
+    return false;
+  }
+  if (document.getElementById("SiteBrushMenuBox")) {
+    browserEvent.preventDefault();
+    browserEvent.stopPropagation();
+    return true;
+  }
+  return false;
+}
+function installSitebrushLongPressMenu(openMenuAtPoint) {
+  const longPressDelayMilliseconds = 650;
+  const moveTolerancePixels = 12;
+  let longPressTimer = 0;
+  let longPressStartPoint = null;
+  let longPressPointerID = null;
+  function clearLongPressTimer() {
+    if (longPressTimer) {
+      window.clearTimeout(longPressTimer);
+      longPressTimer = 0;
+    }
+  }
+  function cancelLongPress() {
+    clearLongPressTimer();
+    longPressStartPoint = null;
+    longPressPointerID = null;
+  }
+  function isTouchLikePointerEvent(browserEvent) {
+    return browserEvent.pointerType === "touch" || browserEvent.pointerType === "pen";
+  }
+  function startLongPress(browserEvent) {
+    if (closestSitebrushEventElement(browserEvent, "#SiteBrushMenuBox")) {
+      return;
+    }
+    if (browserEvent.pointerType && !isTouchLikePointerEvent(browserEvent)) {
+      return;
+    }
+    if (browserEvent.button && browserEvent.button !== 0) {
+      return;
+    }
+    cancelLongPress();
+    longPressStartPoint = sitebrushMenuPointFromEvent(browserEvent);
+    longPressPointerID = browserEvent.pointerId || null;
+    longPressTimer = window.setTimeout(function openMenuFromLongPress() {
+      const menuPoint = longPressStartPoint;
+      cancelLongPress();
+      if (!menuPoint) {
+        return;
+      }
+      window.__sitebrushLongPressMenuUntil = Date.now() + 1000;
+      openMenuAtPoint(menuPoint);
+    }, longPressDelayMilliseconds);
+  }
+  function moveLongPress(browserEvent) {
+    if (!longPressStartPoint) {
+      return;
+    }
+    if (longPressPointerID !== null && browserEvent.pointerId && browserEvent.pointerId !== longPressPointerID) {
+      return;
+    }
+    const currentPoint = sitebrushMenuPointFromEvent(browserEvent);
+    const movedX = Math.abs(currentPoint.clientX - longPressStartPoint.clientX);
+    const movedY = Math.abs(currentPoint.clientY - longPressStartPoint.clientY);
+    if (movedX > moveTolerancePixels || movedY > moveTolerancePixels) {
+      cancelLongPress();
+    }
+  }
+  function blockSyntheticClickAfterLongPress(browserEvent) {
+    if (!window.__sitebrushLongPressMenuUntil || Date.now() > window.__sitebrushLongPressMenuUntil) {
+      return;
+    }
+    if (closestSitebrushEventElement(browserEvent, "#SiteBrushMenuBox")) {
+      return;
+    }
+    browserEvent.preventDefault();
+    browserEvent.stopPropagation();
+  }
+  if (window.PointerEvent) {
+    document.addEventListener("pointerdown", startLongPress, {capture: true, passive: true});
+    document.addEventListener("pointermove", moveLongPress, {capture: true, passive: true});
+    document.addEventListener("pointerup", cancelLongPress, {capture: true, passive: true});
+    document.addEventListener("pointercancel", cancelLongPress, {capture: true, passive: true});
+  } else {
+    document.addEventListener("touchstart", function onTouchStart(browserEvent) {
+      if (browserEvent.touches.length !== 1) {
+        cancelLongPress();
+        return;
+      }
+      startLongPress(browserEvent.touches[0]);
+    }, {capture: true, passive: true});
+    document.addEventListener("touchmove", function onTouchMove(browserEvent) {
+      if (browserEvent.touches.length !== 1) {
+        cancelLongPress();
+        return;
+      }
+      moveLongPress(browserEvent.touches[0]);
+    }, {capture: true, passive: true});
+    document.addEventListener("touchend", cancelLongPress, {capture: true, passive: true});
+    document.addEventListener("touchcancel", cancelLongPress, {capture: true, passive: true});
+  }
+  document.addEventListener("click", blockSyntheticClickAfterLongPress, {capture: true, passive: false});
+}
 function showSitebrushMenu(browserEvent, menuHtmlEntries, currentPagePath, frozenMenuEnabled) {
   closeSitebrushMenu();
+  const menuPoint = sitebrushMenuPointFromEvent(browserEvent);
   const menuHostElement = document.createElement("div");
   menuHostElement.id = "SiteBrushMenuBox";
   menuHostElement.setAttribute("data-sitebrush-owned", "true");
@@ -6694,11 +6852,12 @@ function showSitebrushMenu(browserEvent, menuHtmlEntries, currentPagePath, froze
   }
   menuBoxElement.innerHTML = menuHtmlEntries.join("");
   normalizeSitebrushMenuLinks(menuBoxElement, currentPagePath);
-  menuBoxElement.style.left = browserEvent.clientX + "px";
-  menuBoxElement.style.top = browserEvent.clientY + "px";
+  menuBoxElement.style.left = menuPoint.clientX + "px";
+  menuBoxElement.style.top = menuPoint.clientY + "px";
   menuRoot.appendChild(menuStyleElement);
   menuRoot.appendChild(menuBoxElement);
   document.body.appendChild(menuHostElement);
+  positionSitebrushMenuBox(menuBoxElement, menuPoint);
   menuBoxElement.addEventListener("click", function onMenuClick(browserEvent) {
     const menuLinkElement = browserEvent.target && browserEvent.target.closest && browserEvent.target.closest("a[href]");
     if (!menuLinkElement) {

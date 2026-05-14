@@ -192,7 +192,7 @@ func TestContextMenuUsesDirectEditorProfileAndDeleteActions(t *testing.T) {
 	if strings.Contains(body, "href='?edit'") {
 		t.Fatalf("context menu still contains intermediate edit link: %s", body)
 	}
-	for _, expectedFragment := range []string{`window.location.href = targetHref;`, `closestSitebrushEventElement(browserEvent, "#SiteBrushMenuBox")`, `function closeSitebrushMenu()`, `z-index:2147483647`, `closeSitebrushMenu();`, `data-sitebrush-owned`, `sitebrushContextMenuShadowCSS`, `attachShadow({mode: "open"})`, `menuRoot.appendChild(menuStyleElement)`, `.SiteBrushContextMenuLink:link`, `.SiteBrushContextMenuLink:visited`, `window.addEventListener("contextmenu", onContextMenuOpen, {capture: true, passive: false})`} {
+	for _, expectedFragment := range []string{`window.location.href = targetHref;`, `closestSitebrushEventElement(browserEvent, "#SiteBrushMenuBox")`, `function closeSitebrushMenu()`, `z-index:2147483647`, `closeSitebrushMenu();`, `data-sitebrush-owned`, `sitebrushContextMenuShadowCSS`, `attachShadow({mode: "open"})`, `menuRoot.appendChild(menuStyleElement)`, `.SiteBrushContextMenuLink:link`, `.SiteBrushContextMenuLink:visited`, `window.addEventListener("contextmenu", onContextMenuOpen, {capture: true, passive: false})`, `installSitebrushLongPressMenu`, `document.addEventListener("pointerdown", startLongPress`, `document.addEventListener("touchstart"`, `positionSitebrushMenuBox(menuBoxElement, menuPoint)`, `max-height:calc(100vh - 16px)`, `@media (pointer: coarse), (max-width: 820px)`} {
 		if !strings.Contains(body, expectedFragment) {
 			t.Fatalf("context menu missing navigation guard %q in %s", expectedFragment, body)
 		}
