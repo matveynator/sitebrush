@@ -17,6 +17,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -184,7 +185,7 @@ func TestContextMenuUsesDirectEditorProfileAndDeleteActions(t *testing.T) {
 			t.Fatalf("context menu missing %q in %s", expectedFragment, body)
 		}
 	}
-	for _, expectedFragment := range []string{"SiteBrushContextMenuVersion'>v.", "SiteBrushMenuStorageUsage", "10.0 GB"} {
+	for _, expectedFragment := range []string{"href='https://sitebrush.com'", "class='SiteBrushContextMenuVersion' download>v.", "href='" + latestServerBinaryDownloadURL(runtime.GOOS, runtime.GOARCH) + "'", "SiteBrushMenuStorageUsage", "10.0 GB"} {
 		if !strings.Contains(body, expectedFragment) {
 			t.Fatalf("context menu missing storage/version fragment %q in %s", expectedFragment, body)
 		}
@@ -196,6 +197,27 @@ func TestContextMenuUsesDirectEditorProfileAndDeleteActions(t *testing.T) {
 		if !strings.Contains(body, expectedFragment) {
 			t.Fatalf("context menu missing navigation guard %q in %s", expectedFragment, body)
 		}
+	}
+}
+
+func TestLatestServerBinaryDownloadURL(t *testing.T) {
+	tests := []struct {
+		name   string
+		goos   string
+		goarch string
+		want   string
+	}{
+		{name: "linux amd64", goos: "linux", goarch: "amd64", want: "https://files.zabiyaka.net/sitebrush/latest/server-app/sitebrush_linux_amd64"},
+		{name: "darwin arm64", goos: "darwin", goarch: "arm64", want: "https://files.zabiyaka.net/sitebrush/latest/server-app/sitebrush_darwin_arm64"},
+		{name: "windows amd64", goos: "windows", goarch: "amd64", want: "https://files.zabiyaka.net/sitebrush/latest/server-app/sitebrush_windows_amd64.exe"},
+	}
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			got := latestServerBinaryDownloadURL(testCase.goos, testCase.goarch)
+			if got != testCase.want {
+				t.Fatalf("latestServerBinaryDownloadURL() = %q, want %q", got, testCase.want)
+			}
+		})
 	}
 }
 

@@ -6169,6 +6169,14 @@ func contentTypeForManagedPage(pagePath, content string) string {
 	return detectedContentType
 }
 
+func latestServerBinaryDownloadURL(goos, goarch string) string {
+	artifactName := "sitebrush_" + goos + "_" + goarch
+	if goos == "windows" {
+		artifactName += ".exe"
+	}
+	return "https://files.zabiyaka.net/sitebrush/latest/server-app/" + artifactName
+}
+
 func buildContextMenuScript(isAdmin bool, isFrozen bool, pagePath, domain string, revisionID int, revisionCount int, storageUsageLabel string, translations map[string]string) string {
 	escapedPath := template.JSEscapeString(pagePath)
 	escapedDomain := template.JSEscapeString(domain)
@@ -6205,13 +6213,14 @@ func buildContextMenuScript(isAdmin bool, isFrozen bool, pagePath, domain string
 	treeLoadingLabel := template.JSEscapeString(translationOrDefault(translations, "tree_loading", "Loading site tree..."))
 	treeLoadErrorLabel := template.JSEscapeString(translationOrDefault(translations, "tree_load_error", "Failed to load site tree."))
 	treeCloseLabel := template.JSEscapeString(translationOrDefault(translations, "tree_close", "Close"))
-	stableReleaseURL := "https://github.com/matveynator/sitebrush/releases/tag/stable-release"
 	compiledVersionLabel := template.JSEscapeString("v." + CompileVersion)
+	sitebrushHomeURL := "https://sitebrush.com"
+	serverBinaryDownloadURL := latestServerBinaryDownloadURL(runtime.GOOS, runtime.GOARCH)
 	storageUsageHTML := ""
 	if strings.TrimSpace(storageUsageLabel) != "" {
 		storageUsageHTML = "<span class='SiteBrushMenuStorageUsage'>" + template.HTMLEscapeString(storageUsageLabel) + "</span>"
 	}
-	copyrightMenuEntry := fmt.Sprintf("<li class='SiteBrushContextMenu ContextMenuCopyright'><a href='%s' class='SiteBrushContextMenuLink' target='_blank' rel='noopener noreferrer'>sitebrush <span class='SiteBrushContextMenuVersion'>%s</span>%s</a></li>", stableReleaseURL, compiledVersionLabel, storageUsageHTML)
+	copyrightMenuEntry := fmt.Sprintf("<li class='SiteBrushContextMenu ContextMenuCopyright'><div class='SiteBrushContextMenuFooter'><a href='%s' class='SiteBrushContextMenuFooterLink' target='_blank' rel='noopener noreferrer'>sitebrush</a><a href='%s' class='SiteBrushContextMenuVersion' download>%s</a>%s</div></li>", sitebrushHomeURL, serverBinaryDownloadURL, compiledVersionLabel, storageUsageHTML)
 	if isAdmin {
 		deleteActionEntry := ""
 		if revisionID > 0 {
@@ -6594,9 +6603,10 @@ func contextMenuStylesAndHelpers() string {
 .SiteBrushContextMenuLink:hover{color:#1f3f6f;background:#eef5ff;text-decoration:none}
 .SiteBrushContextMenuButton{width:100%;border:0;background:transparent;text-align:left}
 .SiteBrushDomainMenuItem .SiteBrushContextMenuLink{font-weight:700;border-bottom:1px solid #c8d5e7}
-.ContextMenuCopyright .SiteBrushContextMenuLink{font-size:12px;color:#5b6f8b;border-top:1px solid #c8d5e7;margin-top:2px;padding-top:7px;justify-content:space-between;gap:12px}.SiteBrushMenuIcon{width:18px;height:18px;flex:0 0 18px}
-.ContextMenuCopyright .SiteBrushContextMenuLink:link,.ContextMenuCopyright .SiteBrushContextMenuLink:visited,.ContextMenuCopyright .SiteBrushContextMenuLink:active,.ContextMenuCopyright .SiteBrushContextMenuLink:hover{color:#5b6f8b}
-.SiteBrushContextMenuVersion{font-weight:700;margin-left:4px}
+.SiteBrushContextMenuFooter{display:flex;align-items:center;justify-content:space-between;gap:12px;border-top:1px solid #c8d5e7;margin-top:2px;padding:7px 10px 8px 10px;font-family:Arial,Helvetica,sans-serif;font-size:12px;color:#5b6f8b}.SiteBrushMenuIcon{width:18px;height:18px;flex:0 0 18px}
+.SiteBrushContextMenuFooterLink,.SiteBrushContextMenuVersion{color:#5b6f8b;text-decoration:none;font-family:Arial,Helvetica,sans-serif;font-size:12px;cursor:pointer}
+.SiteBrushContextMenuFooterLink:link,.SiteBrushContextMenuFooterLink:visited,.SiteBrushContextMenuFooterLink:active,.SiteBrushContextMenuFooterLink:hover,.SiteBrushContextMenuVersion:link,.SiteBrushContextMenuVersion:visited,.SiteBrushContextMenuVersion:active,.SiteBrushContextMenuVersion:hover{color:#5b6f8b;text-decoration:none}
+.SiteBrushContextMenuVersion{font-weight:700}
 .SiteBrushMenuStorageUsage{margin-left:auto;font-variant-numeric:tabular-nums;white-space:nowrap}
 .SiteBrushConfirmOverlay{position:fixed;inset:0;background:rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center;z-index:2147483647}
 .SiteBrushConfirmModal{background:#fff;border:1px solid #8ea4c1;min-width:260px;max-width:340px;padding:16px;font-family:Arial,Helvetica,sans-serif}
@@ -6625,7 +6635,8 @@ func contextMenuStylesAndHelpers() string {
   .SiteBrushMenuBox{right:auto;min-width:min(280px,calc(100vw - 16px));max-width:calc(100vw - 16px);max-height:calc(100vh - 16px);border-radius:8px;-webkit-overflow-scrolling:touch}
   .SiteBrushContextMenuLink{min-height:44px;padding:11px 12px;font-size:16px;gap:10px}
   .SiteBrushMenuIcon{width:20px;height:20px;flex-basis:20px}
-  .ContextMenuCopyright .SiteBrushContextMenuLink{font-size:13px;flex-wrap:wrap}
+  .SiteBrushContextMenuFooter{font-size:13px;flex-wrap:wrap;padding:9px 12px 10px 12px}
+  .SiteBrushContextMenuFooterLink,.SiteBrushContextMenuVersion{font-size:13px}
   .SiteBrushMenuStorageUsage{margin-left:0}
 }
 @media (prefers-color-scheme: dark){
@@ -6635,8 +6646,9 @@ func contextMenuStylesAndHelpers() string {
   .SiteBrushContextMenuLink:link,.SiteBrushContextMenuLink:visited,.SiteBrushContextMenuLink:active{color:#dbe8ff}
   .SiteBrushContextMenuLink:hover{color:#dbe8ff;background:#24344d}
   .SiteBrushDomainMenuItem .SiteBrushContextMenuLink{border-bottom-color:#2f405d}
-  .ContextMenuCopyright .SiteBrushContextMenuLink{color:#a7bbd8;border-top-color:#2f405d}
-  .ContextMenuCopyright .SiteBrushContextMenuLink:link,.ContextMenuCopyright .SiteBrushContextMenuLink:visited,.ContextMenuCopyright .SiteBrushContextMenuLink:active,.ContextMenuCopyright .SiteBrushContextMenuLink:hover{color:#a7bbd8}
+  .SiteBrushContextMenuFooter{color:#a7bbd8;border-top-color:#2f405d}
+  .SiteBrushContextMenuFooterLink,.SiteBrushContextMenuVersion{color:#a7bbd8}
+  .SiteBrushContextMenuFooterLink:link,.SiteBrushContextMenuFooterLink:visited,.SiteBrushContextMenuFooterLink:active,.SiteBrushContextMenuFooterLink:hover,.SiteBrushContextMenuVersion:link,.SiteBrushContextMenuVersion:visited,.SiteBrushContextMenuVersion:active,.SiteBrushContextMenuVersion:hover{color:#a7bbd8}
   .SiteBrushConfirmModal{background:#172235;border-color:#2f405d}
   .SiteBrushConfirmText,.SiteBrushPublishPreviewLink{color:#dbe8ff}
   .SiteBrushPublishPreviewLink:link,.SiteBrushPublishPreviewLink:visited,.SiteBrushPublishPreviewLink:active,.SiteBrushPublishPreviewLink:hover{color:#dbe8ff}
