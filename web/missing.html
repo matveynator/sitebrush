@@ -297,6 +297,14 @@
     }
   }
 
+  function buildGrabRequestBody() {
+    const grabRequestBody = new URLSearchParams();
+    for (const [fieldName, fieldValue] of new FormData(grabFormElement).entries()) {
+      grabRequestBody.append(fieldName, fieldValue);
+    }
+    return grabRequestBody;
+  }
+
   function updatePreviewSelectAllState() {
     if (!previewSelectAllElement) { return; }
     const checkboxElements = Array.from(resourceListElement.querySelectorAll('input[data-grab-resource-url]'));
@@ -594,7 +602,7 @@
 
   function submitGrabRequest() {
     grabRequestInFlight = true;
-    fetch({{printf "%q" .Path}} + '?grab', { method: 'POST', body: new FormData(grabFormElement), headers: { 'Accept': 'application/json' } })
+    fetch({{printf "%q" .Path}} + '?grab', { method: 'POST', body: buildGrabRequestBody(), headers: { 'Accept': 'application/json' } })
       .then(function handleGrabHTTPResponse(grabHTTPResponse) {
         if (!grabHTTPResponse.ok) {
           return grabHTTPResponse.text().then(function throwGrabHTTPError(errorText) {
@@ -636,7 +644,7 @@
     showPreviewLoading();
     if (submitButtonElement) { submitButtonElement.disabled = true; }
     connectProgressStream(progressToken, function submitPreviewAfterProgressReady() {
-      const previewRequestBody = new FormData(grabFormElement);
+      const previewRequestBody = buildGrabRequestBody();
       fetch({{printf "%q" .Path}} + '?grab_preview', { method: 'POST', body: previewRequestBody, headers: { 'Accept': 'application/json' } })
         .then(function handlePreviewHTTPResponse(previewHTTPResponse) {
           if (!previewHTTPResponse.ok) {

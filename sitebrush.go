@@ -3003,11 +3003,7 @@ func (a *App) grabPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	pagePath := r.FormValue("path")
-	if pagePath == "" {
-		http.Error(w, "path is required", http.StatusBadRequest)
-		return
-	}
+	pagePath := grabRequestTargetPath(r)
 
 	sourceURL := r.FormValue("source_url")
 	if sourceURL == "" {
@@ -3114,7 +3110,7 @@ func (a *App) grabPreview(w http.ResponseWriter, r *http.Request) {
 	sourceURL = remoteSourceURL.String()
 	progressToken := strings.TrimSpace(r.FormValue("progress_token"))
 	domain := a.siteDomain(r.Context(), r)
-	pagePath := cleanPath(r.FormValue("path"))
+	pagePath := grabRequestTargetPath(r)
 	var resources []grabResourcePreview
 	pageCount := 1
 	var importedPages []wholeSiteImportedPage
@@ -3159,6 +3155,14 @@ func (a *App) grabPreview(w http.ResponseWriter, r *http.Request) {
 
 func parseGrabSourceURL(sourceURL string) (*url.URL, error) {
 	return parseGrabSourceURLForServerIP(sourceURL, "")
+}
+
+func grabRequestTargetPath(r *http.Request) string {
+	rawPath := strings.TrimSpace(r.FormValue("path"))
+	if rawPath == "" {
+		rawPath = r.URL.Path
+	}
+	return cleanPath(rawPath)
 }
 
 func parseGrabSourceURLForServerIP(sourceURL, sourceIP string) (*url.URL, error) {

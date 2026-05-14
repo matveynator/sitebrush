@@ -2089,6 +2089,45 @@ func TestGrabPreviewReportsQuotaAndGrabRejectsOversizedImport(t *testing.T) {
 	}
 }
 
+func TestGrabUsesRequestPathWhenPostedPathIsMissing(t *testing.T) {
+	application, rawDB := newTestApplication(t)
+	_, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "admin@example.com", "old")
+	if err != nil {
+		t.Fatalf("insert user: %v", err)
+	}
+
+	sourceURL := "https://fallback.example/page"
+	previousGrabHTTPClient := newGrabHTTPClient
+	newGrabHTTPClient = func() *http.Client {
+		return &http.Client{Transport: fakeGrabTransport{responses: map[string]fakeGrabResponse{
+			sourceURL: {contentType: "text/html", body: `<!doctype html><html><body>fallback path</body></html>`},
+		}}}
+	}
+	defer func() {
+		newGrabHTTPClient = previousGrabHTTPClient
+	}()
+
+	grabForm := url.Values{}
+	grabForm.Set("source_url", sourceURL)
+	grabRequest := httptest.NewRequest(http.MethodPost, "http://localhost:8080/fallback?grab", strings.NewReader(grabForm.Encode()))
+	grabRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	grabRequest.Header.Set("Accept", "application/json")
+	grabRequest.AddCookie(newAdminSessionCookie(t, application, "admin@example.com"))
+	grabResponse := httptest.NewRecorder()
+	application.route(grabResponse, grabRequest)
+	if grabResponse.Code != http.StatusOK {
+		t.Fatalf("grab status = %d, body=%q", grabResponse.Code, grabResponse.Body.String())
+	}
+
+	var grabPayload map[string]string
+	if err := json.Unmarshal(grabResponse.Body.Bytes(), &grabPayload); err != nil {
+		t.Fatalf("decode grab payload: %v", err)
+	}
+	if grabPayload["redirect"] != "/fallback" {
+		t.Fatalf("redirect = %q, want /fallback", grabPayload["redirect"])
+	}
+}
+
 func TestRewriteJSResourceReferencesLeavesLibraryCodeIntact(t *testing.T) {
 	pageRawURL := "https://page.example/page"
 	sourceHTML := `<!doctype html><html><body><script src="/js/app.js"></script></body></html>`
@@ -2696,6 +2735,9 @@ func TestMissingPageGrabFormIncludesSourceIPOverride(t *testing.T) {
 	}
 	if !strings.Contains(body, `name="copy_whole_site"`) {
 		t.Fatalf("missing page import form does not include whole-site checkbox: %s", body)
+	}
+	if !strings.Contains(body, `body: buildGrabRequestBody()`) {
+		t.Fatalf("missing page import script does not send urlencoded grab body: %s", body)
 	}
 }
 
