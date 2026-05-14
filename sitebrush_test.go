@@ -32,9 +32,13 @@ type fakeGrabTransport struct {
 }
 
 type fakeGrabResponse struct {
+	statusCode  int
+	location    string
 	contentType string
 	body        string
 }
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func newTestApplication(t *testing.T) (*App, *sql.DB) {
 	t.Helper()
@@ -141,15 +145,32 @@ func (transport fakeGrabTransport) RoundTrip(request *http.Request) (*http.Respo
 		}, nil
 	}
 	header := make(http.Header)
-	header.Set("Content-Type", response.contentType)
+	if response.contentType != "" {
+		header.Set("Content-Type", response.contentType)
+	}
+	if response.location != "" {
+		header.Set("Location", response.location)
+	}
+	statusCode := response.statusCode
+	if statusCode == 0 {
+		statusCode = http.StatusOK
+	}
+	statusText := http.StatusText(statusCode)
+	if statusText == "" {
+		statusText = "status"
+	}
 	return &http.Response{
-		StatusCode:    http.StatusOK,
-		Status:        "200 OK",
+		StatusCode:    statusCode,
+		Status:        strconv.Itoa(statusCode) + " " + statusText,
 		Body:          io.NopCloser(strings.NewReader(response.body)),
 		ContentLength: int64(len(response.body)),
 		Header:        header,
 		Request:       request,
 	}, nil
+}
+
+func (roundTripper roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
+	return roundTripper(request)
 }
 
 func TestContextMenuUsesDirectEditorProfileAndDeleteActions(t *testing.T) {
@@ -1625,7 +1646,7 @@ func TestMirrorRemotePageImportsNestedExternalResources(t *testing.T) {
 	if parseErr != nil {
 		t.Fatal(parseErr)
 	}
-	previewResources := previewGrabResources(pageURL, sourceHTML, nil, "", "")
+	previewResources := previewGrabResources(pageURL, sourceHTML, nil, "", grabSourceOptions{})
 	if len(previewResources) != 7 {
 		t.Fatalf("expected 7 preview resources, got %d: %#v", len(previewResources), previewResources)
 	}
@@ -1684,6 +1705,80 @@ func TestMirrorRemotePageImportsNestedExternalResources(t *testing.T) {
 	}
 }
 
+func TestDownloadGrabSourceHTMLUsesSelectedLanguageAndResolvedURL(t *testing.T) {
+	requestedLanguageHeaders := make([]string, 0, 2)
+	previousGrabHTTPClient := newGrabHTTPClient
+	newGrabHTTPClient = func() *http.Client {
+		return &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+			requestedLanguageHeaders = append(requestedLanguageHeaders, request.Header.Get("Accept-Language"))
+			switch request.URL.String() {
+			case "https://lang.example/":
+				return &http.Response{
+					StatusCode: http.StatusFound,
+					Status:     "302 Found",
+					Header:     http.Header{"Location": []string{"/ru/index.html"}},
+					Body:       io.NopCloser(strings.NewReader("")),
+					Request:    request,
+				}, nil
+			case "https://lang.example/ru/index.html":
+				return &http.Response{
+					StatusCode:    http.StatusOK,
+					Status:        "200 OK",
+					Header:        http.Header{"Content-Type": []string{"text/html"}},
+					Body:          io.NopCloser(strings.NewReader("<html>ru</html>")),
+					ContentLength: int64(len("<html>ru</html>")),
+					Request:       request,
+				}, nil
+			default:
+				t.Fatalf("unexpected URL requested: %s", request.URL.String())
+				return nil, nil
+			}
+		})}
+	}
+	defer func() {
+		newGrabHTTPClient = previousGrabHTTPClient
+	}()
+
+	htmlBytes, resolvedURL, err := downloadGrabSourceHTMLWithResolvedURL("https://lang.example/", grabSourceOptions{LanguageCode: "ru"})
+	if err != nil {
+		t.Fatalf("download source HTML: %v", err)
+	}
+	if string(htmlBytes) != "<html>ru</html>" {
+		t.Fatalf("html = %q", string(htmlBytes))
+	}
+	if resolvedURL.String() != "https://lang.example/ru/index.html" {
+		t.Fatalf("resolved URL = %s", resolvedURL.String())
+	}
+	if len(requestedLanguageHeaders) < 2 {
+		t.Fatalf("expected redirect request headers, got %#v", requestedLanguageHeaders)
+	}
+	for _, acceptLanguageHeader := range requestedLanguageHeaders {
+		if !strings.HasPrefix(acceptLanguageHeader, "ru,ru-RU") {
+			t.Fatalf("Accept-Language = %q", acceptLanguageHeader)
+		}
+	}
+}
+
+func TestMirrorRemotePageRemovesImportedHostLanguageRedirect(t *testing.T) {
+	pageRawURL := "https://overmobile.example/"
+	sourceHTML := `<!doctype html><html lang="ru"><head>` +
+		`<script>if (window.location.hostname.includes('.com') && window.location.pathname === '/') { window.location.href = '/en/index.html'; }</script>` +
+		`</head><body><main>Русская версия</main></body></html>`
+	pageURL, parseErr := url.Parse(pageRawURL)
+	if parseErr != nil {
+		t.Fatal(parseErr)
+	}
+
+	application, _ := newTestApplication(t)
+	importedHTML := application.mirrorRemotePage("example.test", "/", pageRawURL, pageURL, sourceHTML, "", nil, "")
+	if strings.Contains(importedHTML, "/en/index.html") || strings.Contains(strings.ToLower(importedHTML), "location.href") {
+		t.Fatalf("host language redirect survived import: %s", importedHTML)
+	}
+	if !strings.Contains(importedHTML, "Русская версия") {
+		t.Fatalf("imported content was lost: %s", importedHTML)
+	}
+}
+
 func TestMirrorRemotePageDoesNotDoubleRewriteFirstInlineCSSImport(t *testing.T) {
 	pageRawURL := "http://perftoran-archive.ru/"
 	sourceHTML := `<!doctype html><html><head>` +
@@ -1709,7 +1804,7 @@ func TestMirrorRemotePageDoesNotDoubleRewriteFirstInlineCSSImport(t *testing.T) 
 	if parseErr != nil {
 		t.Fatal(parseErr)
 	}
-	previewResources := previewGrabResources(pageURL, sourceHTML, nil, "", "")
+	previewResources := previewGrabResources(pageURL, sourceHTML, nil, "", grabSourceOptions{})
 	if len(previewResources) != 3 {
 		t.Fatalf("expected 3 preview resources, got %d: %#v", len(previewResources), previewResources)
 	}
@@ -1752,7 +1847,7 @@ func TestMirrorRemotePageImportsImageAltResourceURLs(t *testing.T) {
 	if parseErr != nil {
 		t.Fatal(parseErr)
 	}
-	previewResources := previewGrabResources(pageURL, sourceHTML, nil, "", "")
+	previewResources := previewGrabResources(pageURL, sourceHTML, nil, "", grabSourceOptions{})
 	if len(previewResources) != 3 {
 		t.Fatalf("expected 3 preview resources, got %d: %#v", len(previewResources), previewResources)
 	}
@@ -1817,7 +1912,7 @@ func TestMirrorRemotePageImportsCrossDomainAssetsWithoutURLExtensions(t *testing
 	if parseErr != nil {
 		t.Fatal(parseErr)
 	}
-	previewResources := previewGrabResources(pageURL, sourceHTML, nil, "", "")
+	previewResources := previewGrabResources(pageURL, sourceHTML, nil, "", grabSourceOptions{})
 	if len(previewResources) != 4 {
 		t.Fatalf("expected 4 preview resources, got %d: %#v", len(previewResources), previewResources)
 	}
@@ -1880,7 +1975,7 @@ func TestMirrorRemotePageImportsDocumentMediaAndArchiveLinks(t *testing.T) {
 	if parseErr != nil {
 		t.Fatal(parseErr)
 	}
-	previewResources := previewGrabResources(pageURL, sourceHTML, nil, "", "")
+	previewResources := previewGrabResources(pageURL, sourceHTML, nil, "", grabSourceOptions{})
 	if len(previewResources) != 5 {
 		t.Fatalf("expected 5 preview resources, got %d: %#v", len(previewResources), previewResources)
 	}
@@ -2017,7 +2112,7 @@ func TestRewriteJSResourceReferencesLeavesLibraryCodeIntact(t *testing.T) {
 	if parseErr != nil {
 		t.Fatal(parseErr)
 	}
-	previewResources := previewGrabResources(pageURL, sourceHTML, nil, "", "")
+	previewResources := previewGrabResources(pageURL, sourceHTML, nil, "", grabSourceOptions{})
 	selectedResourceURLs := make(map[string]struct{}, len(previewResources))
 	for _, previewResource := range previewResources {
 		selectedResourceURLs[previewResource.URL] = struct{}{}
@@ -2315,7 +2410,7 @@ func TestNormalizeURLRejectsSuspiciousDynamicReferences(t *testing.T) {
 	if parseErr != nil {
 		t.Fatal(parseErr)
 	}
-	spider := newPageSpider("", pageURL, grabResourceMaxDepth, nil, "", "")
+	spider := newPageSpider("", pageURL, grabResourceMaxDepth, nil, "", grabSourceOptions{})
 	testCases := []string{
 		"${l}",
 		"+e.url+",
@@ -2398,7 +2493,7 @@ jQuery(document).ready(function($) { $('#SiteBrush').contextMenu('SiteBrushMenu'
 	if parseErr != nil {
 		t.Fatal(parseErr)
 	}
-	previewResources := previewGrabResources(pageURL, sourceHTML, nil, "", "")
+	previewResources := previewGrabResources(pageURL, sourceHTML, nil, "", grabSourceOptions{})
 	if len(previewResources) != 2 {
 		t.Fatalf("expected only content resources after legacy menu cleanup, got %d: %#v", len(previewResources), previewResources)
 	}

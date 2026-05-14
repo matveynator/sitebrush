@@ -423,6 +423,11 @@ type grabPreviewResponse struct {
 	FitsQuota             bool                  `json:"fits_quota"`
 }
 
+type grabSourceOptions struct {
+	IP           string
+	LanguageCode string
+}
+
 type wholeSiteImportedPage struct {
 	SourceURL string
 	LocalPath string
@@ -3009,20 +3014,20 @@ func (a *App) grabPage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "source_url is required", http.StatusBadRequest)
 		return
 	}
-	sourceIP, err := parseOptionalGrabSourceIP(r.FormValue("source_ip"))
+	sourceOptions, err := parseGrabSourceOptions(r)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
-	remoteSourceURL, err := parseGrabSourceURLForServerIP(sourceURL, sourceIP)
+	remoteSourceURL, err := parseGrabSourceURLForServerIP(sourceURL, sourceOptions.IP)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 	sourceURL = remoteSourceURL.String()
 
-	htmlBytes, resolvedSourceURL, err := downloadGrabSourceHTMLWithResolvedURL(sourceURL, sourceIP)
+	htmlBytes, resolvedSourceURL, err := downloadGrabSourceHTMLWithResolvedURL(sourceURL, sourceOptions)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
@@ -3034,7 +3039,7 @@ func (a *App) grabPage(w http.ResponseWriter, r *http.Request) {
 	progressToken := strings.TrimSpace(r.FormValue("progress_token"))
 	if grabCopyWholeSite(r) {
 		selectedResourceURLs := selectedGrabResourceURLs(r)
-		redirectPath, importErr := a.importWholeRemoteSite(r.Context(), domain, pagePath, remoteSourceURL, string(htmlBytes), progressToken, selectedResourceURLs, sourceIP)
+		redirectPath, importErr := a.importWholeRemoteSite(r.Context(), domain, pagePath, remoteSourceURL, string(htmlBytes), progressToken, selectedResourceURLs, sourceOptions)
 		if importErr != nil {
 			statusCode := http.StatusBadGateway
 			if strings.Contains(importErr.Error(), "storage limit reached:") {
@@ -3052,7 +3057,7 @@ func (a *App) grabPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	selectedResourceURLs := selectedGrabResourceURLs(r)
-	spider, html := prepareSinglePageImport(domain, pagePath, sourceURL, remoteSourceURL, string(htmlBytes), a.grabTracker, progressToken, selectedResourceURLs, sourceIP)
+	spider, html := prepareSinglePageImport(domain, pagePath, sourceURL, remoteSourceURL, string(htmlBytes), a.grabTracker, progressToken, selectedResourceURLs, sourceOptions)
 	importedPages := []wholeSiteImportedPage{{SourceURL: sourceURL, LocalPath: pagePath, HTML: html}}
 	pageDelta, publishedPageDelta, revisionDelta, publishedStaticDelta := a.estimateImportedPagesStorageDelta(r.Context(), domain, importedPages)
 	fileDelta := a.estimateImportedFileDelta(domain, spider)
@@ -3089,18 +3094,18 @@ func (a *App) grabPreview(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "source_url is required", http.StatusBadRequest)
 		return
 	}
-	sourceIP, err := parseOptionalGrabSourceIP(r.FormValue("source_ip"))
+	sourceOptions, err := parseGrabSourceOptions(r)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	remoteSourceURL, err := parseGrabSourceURLForServerIP(sourceURL, sourceIP)
+	remoteSourceURL, err := parseGrabSourceURLForServerIP(sourceURL, sourceOptions.IP)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 	sourceURL = remoteSourceURL.String()
-	htmlBytes, resolvedSourceURL, err := downloadGrabSourceHTMLWithResolvedURL(sourceURL, sourceIP)
+	htmlBytes, resolvedSourceURL, err := downloadGrabSourceHTMLWithResolvedURL(sourceURL, sourceOptions)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
@@ -3116,13 +3121,13 @@ func (a *App) grabPreview(w http.ResponseWriter, r *http.Request) {
 	var pageDownloadBytes int64
 	var previewSpider *pageSpider
 	if grabCopyWholeSite(r) {
-		wholeSitePreview := previewWholeRemoteSiteResources(remoteSourceURL, string(htmlBytes), pagePath, a.grabTracker, progressToken, sourceIP)
+		wholeSitePreview := previewWholeRemoteSiteResources(remoteSourceURL, string(htmlBytes), pagePath, a.grabTracker, progressToken, sourceOptions)
 		resources = wholeSitePreview.Resources
 		pageCount = wholeSitePreview.PageCount
 		importedPages = wholeSitePreview.ImportedPages
 		previewSpider = wholeSitePreview.Spider
 	} else {
-		previewSpider, importedHTML := prepareSinglePageImport(domain, pagePath, sourceURL, remoteSourceURL, string(htmlBytes), a.grabTracker, progressToken, nil, sourceIP)
+		previewSpider, importedHTML := prepareSinglePageImport(domain, pagePath, sourceURL, remoteSourceURL, string(htmlBytes), a.grabTracker, progressToken, nil, sourceOptions)
 		resources = previewResourcesFromSpider(previewSpider, map[string]struct{}{sourceURL: {}})
 		importedPages = []wholeSiteImportedPage{{SourceURL: sourceURL, LocalPath: pagePath, HTML: importedHTML}}
 		if a.grabTracker != nil && progressToken != "" {
@@ -3225,27 +3230,78 @@ func parseOptionalGrabSourceIP(rawSourceIP string) (string, error) {
 	return net.JoinHostPort(parsedIP.String(), strconv.Itoa(parsedPort)), nil
 }
 
+func parseGrabSourceOptions(r *http.Request) (grabSourceOptions, error) {
+	sourceIP, err := parseOptionalGrabSourceIP(r.FormValue("source_ip"))
+	if err != nil {
+		return grabSourceOptions{}, err
+	}
+	languageCode, err := parseOptionalGrabSourceLanguage(r.FormValue("source_language"))
+	if err != nil {
+		return grabSourceOptions{}, err
+	}
+	return grabSourceOptions{IP: sourceIP, LanguageCode: languageCode}, nil
+}
+
+func parseOptionalGrabSourceLanguage(rawLanguage string) (string, error) {
+	languageCode := strings.ToLower(strings.TrimSpace(rawLanguage))
+	if languageCode == "" || languageCode == "auto" {
+		return "", nil
+	}
+	for _, supportedLanguageCode := range supportedGrabSourceLanguageCodes() {
+		if languageCode == supportedLanguageCode {
+			return languageCode, nil
+		}
+	}
+	return "", errors.New("source_language is invalid")
+}
+
+func supportedGrabSourceLanguageCodes() []string {
+	return []string{"en", "fr", "ru", "ja", "it", "sv", "fi", "mn", "zh", "he", "fa", "de", "tr", "kk", "es", "pt"}
+}
+
+func grabSourceAcceptLanguage(languageCode string) string {
+	languageCode = strings.ToLower(strings.TrimSpace(languageCode))
+	if languageCode == "" {
+		return ""
+	}
+	regionTags := map[string]string{
+		"en": "en-US", "fr": "fr-FR", "ru": "ru-RU", "ja": "ja-JP",
+		"it": "it-IT", "sv": "sv-SE", "fi": "fi-FI", "mn": "mn-MN",
+		"zh": "zh-CN", "he": "he-IL", "fa": "fa-IR", "de": "de-DE",
+		"tr": "tr-TR", "kk": "kk-KZ", "es": "es-ES", "pt": "pt-PT",
+	}
+	regionTag, found := regionTags[languageCode]
+	if !found {
+		return languageCode
+	}
+	fallbackCode := "en"
+	if languageCode == "en" {
+		fallbackCode = "ru"
+	}
+	return languageCode + "," + regionTag + ";q=0.9," + fallbackCode + ";q=0.5,*;q=0.1"
+}
+
 func wantsJSONResponse(r *http.Request) bool {
 	return strings.Contains(strings.ToLower(r.Header.Get("Accept")), "application/json")
 }
 
 func downloadGrabSourceHTML(sourceURL, sourceIP string) ([]byte, error) {
-	htmlBytes, _, err := downloadGrabSourceHTMLWithResolvedURL(sourceURL, sourceIP)
+	htmlBytes, _, err := downloadGrabSourceHTMLWithResolvedURL(sourceURL, grabSourceOptions{IP: sourceIP})
 	return htmlBytes, err
 }
 
-func downloadGrabSourceHTMLWithResolvedURL(sourceURL, sourceIP string) ([]byte, *url.URL, error) {
+func downloadGrabSourceHTMLWithResolvedURL(sourceURL string, sourceOptions grabSourceOptions) ([]byte, *url.URL, error) {
 	remoteSourceURL, err := url.Parse(sourceURL)
 	if err != nil {
 		return nil, nil, errors.New("source_url is invalid")
 	}
-	client := newGrabHTTPClientForServerIP(remoteSourceURL.Hostname(), sourceIP)
-	response, err := client.Get(sourceURL)
-	if err != nil && shouldFallbackGrabSourceToHTTP(remoteSourceURL, sourceIP) {
+	client := newGrabHTTPClientForServerIP(remoteSourceURL.Hostname(), sourceOptions.IP)
+	response, err := doGrabGET(client, sourceURL, sourceOptions)
+	if err != nil && shouldFallbackGrabSourceToHTTP(remoteSourceURL, sourceOptions.IP) {
 		fallbackURL := cloneURL(remoteSourceURL)
 		fallbackURL.Scheme = "http"
 		fallbackURL.Host = fallbackURL.Hostname()
-		response, err = client.Get(fallbackURL.String())
+		response, err = doGrabGET(client, fallbackURL.String(), sourceOptions)
 		if err == nil {
 			remoteSourceURL = fallbackURL
 		}
@@ -3257,11 +3313,31 @@ func downloadGrabSourceHTMLWithResolvedURL(sourceURL, sourceIP string) ([]byte, 
 	if response.StatusCode < 200 || response.StatusCode > 299 {
 		return nil, nil, errors.New("source page returned non-success status")
 	}
+	if response.Request != nil && response.Request.URL != nil {
+		remoteSourceURL = response.Request.URL
+	}
 	htmlBytes, err := io.ReadAll(response.Body)
 	if err != nil {
 		return nil, nil, errors.New("failed to read source page")
 	}
 	return htmlBytes, remoteSourceURL, nil
+}
+
+func doGrabGET(client *http.Client, rawURL string, sourceOptions grabSourceOptions) (*http.Response, error) {
+	request, err := http.NewRequest(http.MethodGet, rawURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	applyGrabRequestHeaders(request, sourceOptions)
+	request.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+	return client.Do(request)
+}
+
+func applyGrabRequestHeaders(request *http.Request, sourceOptions grabSourceOptions) {
+	acceptLanguage := grabSourceAcceptLanguage(sourceOptions.LanguageCode)
+	if acceptLanguage != "" {
+		request.Header.Set("Accept-Language", acceptLanguage)
+	}
 }
 
 func shouldFallbackGrabSourceToHTTP(sourceURL *url.URL, sourceIP string) bool {
@@ -3358,8 +3434,8 @@ func (a *App) estimateImportQuota(ctx context.Context, domain string, importedPa
 	}
 }
 
-func previewGrabResources(pageURL *url.URL, htmlSource string, tracker *grabProgressTracker, progressToken, sourceIP string) []grabResourcePreview {
-	spider := newPageSpider("", pageURL, grabResourceMaxDepth, tracker, progressToken, sourceIP)
+func previewGrabResources(pageURL *url.URL, htmlSource string, tracker *grabProgressTracker, progressToken string, sourceOptions grabSourceOptions) []grabResourcePreview {
+	spider := newPageSpider("", pageURL, grabResourceMaxDepth, tracker, progressToken, sourceOptions)
 	rootResource := &mirroredResource{url: pageURL.String(), content: []byte(htmlSource)}
 	spider.resources[pageURL.String()] = rootResource
 	spider.rewriteNestedResources(rootResource, 0, "text/html")
@@ -3370,8 +3446,8 @@ func previewGrabResources(pageURL *url.URL, htmlSource string, tracker *grabProg
 	return resources
 }
 
-func prepareSinglePageImport(domain, pagePath, sourceURL string, pageURL *url.URL, fallbackHTML string, tracker *grabProgressTracker, progressToken string, selectedResourceURLs map[string]struct{}, sourceIP string) (*pageSpider, string) {
-	spider := newPageSpider(domain, pageURL, grabResourceMaxDepth, tracker, progressToken, sourceIP)
+func prepareSinglePageImport(domain, pagePath, sourceURL string, pageURL *url.URL, fallbackHTML string, tracker *grabProgressTracker, progressToken string, selectedResourceURLs map[string]struct{}, sourceOptions grabSourceOptions) (*pageSpider, string) {
+	spider := newPageSpider(domain, pageURL, grabResourceMaxDepth, tracker, progressToken, sourceOptions)
 	spider.selectedResourceURLs = selectedResourceURLs
 	rootResource := &mirroredResource{url: sourceURL, content: []byte(fallbackHTML)}
 	spider.resources[sourceURL] = rootResource
@@ -3410,8 +3486,8 @@ func previewResourcesFromSpider(spider *pageSpider, excludedURLs map[string]stru
 	return resources
 }
 
-func previewWholeRemoteSiteResources(startURL *url.URL, startHTML, publicAssetBasePath string, tracker *grabProgressTracker, progressToken, sourceIP string) wholeSitePreviewResult {
-	spider, pageURLs, importedPages := crawlWholeRemoteSite(startURL, startHTML, publicAssetBasePath, tracker, progressToken, sourceIP)
+func previewWholeRemoteSiteResources(startURL *url.URL, startHTML, publicAssetBasePath string, tracker *grabProgressTracker, progressToken string, sourceOptions grabSourceOptions) wholeSitePreviewResult {
+	spider, pageURLs, importedPages := crawlWholeRemoteSite(startURL, startHTML, publicAssetBasePath, tracker, progressToken, sourceOptions)
 	resources := previewResourcesFromSpider(spider, pageURLs)
 	if tracker != nil && strings.TrimSpace(progressToken) != "" {
 		tracker.publish(grabProgressEvent{Token: progressToken, Stage: "done", FoundTotal: spider.foundTotal, DownloadedTotal: spider.downloadedTotal, CompletedPercent: 100})
@@ -3419,12 +3495,12 @@ func previewWholeRemoteSiteResources(startURL *url.URL, startHTML, publicAssetBa
 	return wholeSitePreviewResult{PageCount: len(pageURLs), Resources: resources, ImportedPages: importedPages, Spider: spider}
 }
 
-func (a *App) prepareWholeRemoteSiteImport(domain, basePath string, startURL *url.URL, startHTML, progressToken string, selectedResourceURLs map[string]struct{}, sourceIP string) (*pageSpider, []wholeSiteImportedPage, error) {
+func (a *App) prepareWholeRemoteSiteImport(domain, basePath string, startURL *url.URL, startHTML, progressToken string, selectedResourceURLs map[string]struct{}, sourceOptions grabSourceOptions) (*pageSpider, []wholeSiteImportedPage, error) {
 	basePath = cleanPath(basePath)
 	if startURL == nil || startURL.Hostname() == "" {
 		return nil, nil, errors.New("source_url is invalid")
 	}
-	spider := newPageSpider(domain, startURL, grabResourceMaxDepth, a.grabTracker, progressToken, sourceIP)
+	spider := newPageSpider(domain, startURL, grabResourceMaxDepth, a.grabTracker, progressToken, sourceOptions)
 	spider.selectedResourceURLs = selectedResourceURLs
 	spider.publicAssetBasePath = basePath
 	spider.documentURLRewriter = func(normalizedURL string) (string, bool) {
@@ -3435,7 +3511,7 @@ func (a *App) prepareWholeRemoteSiteImport(domain, basePath string, startURL *ur
 		return wholeSiteLocalLink(basePath, startURL, parsedURL), true
 	}
 
-	pageClient := newGrabHTTPClientForServerIP(startURL.Hostname(), sourceIP)
+	pageClient := newGrabHTTPClientForServerIP(startURL.Hostname(), sourceOptions.IP)
 	knownPagePathsByKey := map[string]string{wholeSitePageKey(startURL): basePath}
 	pageQueue := []wholeSitePageJob{{URL: cloneURL(startURL), HTML: startHTML}}
 	importedPages := make([]wholeSiteImportedPage, 0, 32)
@@ -3455,7 +3531,7 @@ func (a *App) prepareWholeRemoteSiteImport(domain, basePath string, startURL *ur
 		}
 		pageHTML := currentJob.HTML
 		if strings.TrimSpace(pageHTML) == "" {
-			downloadedHTML, downloaded, downloadErr := downloadWholeSitePageHTML(pageClient, currentJob.URL)
+			downloadedHTML, downloaded, downloadErr := downloadWholeSitePageHTML(pageClient, currentJob.URL, sourceOptions)
 			if downloadErr != nil || !downloaded {
 				spider.publishResourceProgress("error", currentJob.URL.String(), 0, 0, -1)
 				continue
@@ -3498,8 +3574,8 @@ func (a *App) prepareWholeRemoteSiteImport(domain, basePath string, startURL *ur
 	return spider, importedPages, nil
 }
 
-func (a *App) importWholeRemoteSite(ctx context.Context, domain, basePath string, startURL *url.URL, startHTML, progressToken string, selectedResourceURLs map[string]struct{}, sourceIP string) (string, error) {
-	spider, importedPages, prepareErr := a.prepareWholeRemoteSiteImport(domain, basePath, startURL, startHTML, progressToken, selectedResourceURLs, sourceIP)
+func (a *App) importWholeRemoteSite(ctx context.Context, domain, basePath string, startURL *url.URL, startHTML, progressToken string, selectedResourceURLs map[string]struct{}, sourceOptions grabSourceOptions) (string, error) {
+	spider, importedPages, prepareErr := a.prepareWholeRemoteSiteImport(domain, basePath, startURL, startHTML, progressToken, selectedResourceURLs, sourceOptions)
 	if prepareErr != nil {
 		return "", prepareErr
 	}
@@ -3523,10 +3599,10 @@ func (a *App) importWholeRemoteSite(ctx context.Context, domain, basePath string
 	return basePath, nil
 }
 
-func crawlWholeRemoteSite(startURL *url.URL, startHTML, publicAssetBasePath string, tracker *grabProgressTracker, progressToken, sourceIP string) (*pageSpider, map[string]struct{}, []wholeSiteImportedPage) {
-	spider := newPageSpider("", startURL, grabResourceMaxDepth, tracker, progressToken, sourceIP)
+func crawlWholeRemoteSite(startURL *url.URL, startHTML, publicAssetBasePath string, tracker *grabProgressTracker, progressToken string, sourceOptions grabSourceOptions) (*pageSpider, map[string]struct{}, []wholeSiteImportedPage) {
+	spider := newPageSpider("", startURL, grabResourceMaxDepth, tracker, progressToken, sourceOptions)
 	spider.publicAssetBasePath = publicAssetBasePath
-	pageClient := newGrabHTTPClientForServerIP(startURL.Hostname(), sourceIP)
+	pageClient := newGrabHTTPClientForServerIP(startURL.Hostname(), sourceOptions.IP)
 	knownPagePathsByKey := map[string]string{wholeSitePageKey(startURL): cleanPath(publicAssetBasePath)}
 	pageURLs := map[string]struct{}{startURL.String(): {}}
 	pageQueue := []wholeSitePageJob{{URL: cloneURL(startURL), HTML: startHTML}}
@@ -3545,7 +3621,7 @@ func crawlWholeRemoteSite(startURL *url.URL, startHTML, publicAssetBasePath stri
 		}
 		pageHTML := currentJob.HTML
 		if strings.TrimSpace(pageHTML) == "" {
-			downloadedHTML, downloaded, downloadErr := downloadWholeSitePageHTML(pageClient, currentJob.URL)
+			downloadedHTML, downloaded, downloadErr := downloadWholeSitePageHTML(pageClient, currentJob.URL, sourceOptions)
 			if downloadErr != nil || !downloaded {
 				spider.publishResourceProgress("error", currentJob.URL.String(), 0, 0, -1)
 				continue
@@ -3646,8 +3722,8 @@ func (a *App) estimateImportedFileDelta(domain string, spider *pageSpider) int64
 	return fileDelta
 }
 
-func downloadWholeSitePageHTML(client *http.Client, pageURL *url.URL) (string, bool, error) {
-	response, err := client.Get(pageURL.String())
+func downloadWholeSitePageHTML(client *http.Client, pageURL *url.URL, sourceOptions grabSourceOptions) (string, bool, error) {
+	response, err := doGrabGET(client, pageURL.String(), sourceOptions)
 	if err != nil {
 		return "", false, err
 	}
@@ -3825,6 +3901,8 @@ var legacyImportedSiteBrushCleanupRules = []importedHTMLCleanupRule{
 	{name: "sitebrush-context-style", matches: isLegacySiteBrushContextStyleNode},
 }
 
+var importedLanguageRedirectPathPattern = regexp.MustCompile(`(?i)['"]/?(en|fr|ru|ja|it|sv|fi|mn|zh|he|fa|de|tr|kk|es|pt)/(index\.(html?|xhtml|php|asp|aspx|jsp|cgi))?['"]`)
+
 func cleanupLegacyImportedSiteBrushHTML(source string) string {
 	loweredSource := strings.ToLower(source)
 	if !strings.Contains(loweredSource, "sitebrush") && !strings.Contains(loweredSource, "jqcontextmenu") && !strings.Contains(loweredSource, "contextmenu") {
@@ -3840,6 +3918,59 @@ func cleanupLegacyImportedSiteBrushHTML(source string) string {
 		return source
 	}
 	return rendered.String()
+}
+
+func neutralizeImportedHostLanguageRedirects(source string) string {
+	loweredSource := strings.ToLower(source)
+	if !strings.Contains(loweredSource, "location") || (!strings.Contains(loweredSource, "hostname") && !strings.Contains(loweredSource, "host")) {
+		return source
+	}
+	documentNode, parseErr := html.Parse(strings.NewReader(source))
+	if parseErr != nil {
+		return source
+	}
+	removeImportedHostLanguageRedirectScripts(documentNode)
+	var rendered bytes.Buffer
+	if renderErr := html.Render(&rendered, documentNode); renderErr != nil {
+		return source
+	}
+	return rendered.String()
+}
+
+func removeImportedHostLanguageRedirectScripts(parentNode *html.Node) {
+	if parentNode == nil {
+		return
+	}
+	for childNode := parentNode.FirstChild; childNode != nil; {
+		nextNode := childNode.NextSibling
+		if isImportedHostLanguageRedirectScriptNode(childNode) {
+			parentNode.RemoveChild(childNode)
+		} else {
+			removeImportedHostLanguageRedirectScripts(childNode)
+		}
+		childNode = nextNode
+	}
+}
+
+func isImportedHostLanguageRedirectScriptNode(node *html.Node) bool {
+	if node == nil || node.Type != html.ElementNode || node.Data != "script" || strings.TrimSpace(htmlAttribute(node, "src")) != "" {
+		return false
+	}
+	scriptSource := strings.ToLower(htmlNodeText(node))
+	if scriptSource == "" {
+		return false
+	}
+	hasNavigationSink := strings.Contains(scriptSource, "location.href") || strings.Contains(scriptSource, "location.replace") || strings.Contains(scriptSource, "location.assign")
+	if !hasNavigationSink {
+		return false
+	}
+	if !strings.Contains(scriptSource, "hostname") && !strings.Contains(scriptSource, "host") {
+		return false
+	}
+	if !strings.Contains(scriptSource, "pathname") && !strings.Contains(scriptSource, "path") {
+		return false
+	}
+	return importedLanguageRedirectPathPattern.MatchString(scriptSource)
 }
 
 func removeImportedHTMLNodes(parentNode *html.Node) {
@@ -6169,7 +6300,6 @@ func contentTypeForManagedPage(pagePath, content string) string {
 	return detectedContentType
 }
 
-
 func buildContextMenuScript(isAdmin bool, isFrozen bool, pagePath, domain string, revisionID int, revisionCount int, storageUsageLabel string, translations map[string]string) string {
 	escapedPath := template.JSEscapeString(pagePath)
 	escapedDomain := template.JSEscapeString(domain)
@@ -6208,7 +6338,7 @@ func buildContextMenuScript(isAdmin bool, isFrozen bool, pagePath, domain string
 	treeCloseLabel := template.JSEscapeString(translationOrDefault(translations, "tree_close", "Close"))
 	compiledVersionLabel := template.JSEscapeString("v." + CompileVersion)
 	sitebrushHomeURL := "https://sitebrush.com"
-	serverBinaryDownloadURL := "https://files.zabiyaka.net/sitebrush/latest"
+	serverBinaryDownloadURL := latestServerBinaryDownloadURL(runtime.GOOS, runtime.GOARCH)
 	storageUsageHTML := ""
 	if strings.TrimSpace(storageUsageLabel) != "" {
 		storageUsageHTML = "<span class='SiteBrushMenuStorageUsage'>" + template.HTMLEscapeString(storageUsageLabel) + "</span>"
@@ -6582,6 +6712,14 @@ func buildContextMenuScript(isAdmin bool, isFrozen bool, pagePath, domain string
   });
 	})();
 		</script>`
+}
+
+func latestServerBinaryDownloadURL(goos, goarch string) string {
+	fileName := "sitebrush_" + strings.TrimSpace(goos) + "_" + strings.TrimSpace(goarch)
+	if goos == "windows" {
+		fileName += ".exe"
+	}
+	return "https://files.zabiyaka.net/sitebrush/latest/server-app/" + fileName
 }
 
 func contextMenuStylesAndHelpers() string {
@@ -7935,7 +8073,7 @@ func resourceExtensionFromContentType(contentType string) string {
 }
 
 func (a *App) mirrorRemotePage(domain, pagePath, sourceURL string, pageURL *url.URL, fallbackHTML, progressToken string, selectedResourceURLs map[string]struct{}, sourceIP string) string {
-	spider, html := prepareSinglePageImport(domain, pagePath, sourceURL, pageURL, fallbackHTML, a.grabTracker, progressToken, selectedResourceURLs, sourceIP)
+	spider, html := prepareSinglePageImport(domain, pagePath, sourceURL, pageURL, fallbackHTML, a.grabTracker, progressToken, selectedResourceURLs, grabSourceOptions{IP: sourceIP})
 	_ = a.persistSpiderAssets(spider, pagePath)
 	a.grabTracker.publish(grabProgressEvent{Token: progressToken, Stage: "done", FoundTotal: spider.foundTotal, DownloadedTotal: spider.downloadedTotal, CompletedPercent: 100})
 	return html
@@ -7994,7 +8132,7 @@ type pageSpider struct {
 	pageURL              *url.URL
 	maxDepth             int
 	client               *http.Client
-	sourceIP             string
+	sourceOptions        grabSourceOptions
 	resources            map[string]*mirroredResource
 	inFlight             map[string]bool
 	selectedResourceURLs map[string]struct{}
@@ -8043,13 +8181,13 @@ func newGrabHTTPClientForServerIP(sourceHost, sourceIP string) *http.Client {
 	return &http.Client{Timeout: 20 * time.Second, Transport: transport}
 }
 
-func newPageSpider(domain string, pageURL *url.URL, maxDepth int, tracker *grabProgressTracker, progressToken, sourceIP string) *pageSpider {
+func newPageSpider(domain string, pageURL *url.URL, maxDepth int, tracker *grabProgressTracker, progressToken string, sourceOptions grabSourceOptions) *pageSpider {
 	return &pageSpider{
 		domain:        domain,
 		pageURL:       pageURL,
 		maxDepth:      maxDepth,
-		client:        newGrabHTTPClientForServerIP(pageURL.Hostname(), sourceIP),
-		sourceIP:      sourceIP,
+		client:        newGrabHTTPClientForServerIP(pageURL.Hostname(), sourceOptions.IP),
+		sourceOptions: sourceOptions,
 		resources:     make(map[string]*mirroredResource),
 		inFlight:      make(map[string]bool),
 		tracker:       tracker,
@@ -8083,6 +8221,7 @@ func (spider *pageSpider) fetchResource(rawURL string, baseURL *url.URL, depth i
 	spider.inFlight[normalizedURL] = true
 	defer delete(spider.inFlight, normalizedURL)
 	request, _ := http.NewRequest(http.MethodGet, normalizedURL, nil)
+	applyGrabRequestHeaders(request, spider.sourceOptions)
 	response, err := spider.client.Do(request)
 	if err != nil {
 		spider.resources[normalizedURL] = &mirroredResource{url: normalizedURL, persist: persist}
@@ -8209,6 +8348,7 @@ func (spider *pageSpider) rewriteNestedResources(resource *mirroredResource, dep
 	source := string(resource.content)
 	if isHTML {
 		source = cleanupLegacyImportedSiteBrushHTML(source)
+		source = neutralizeImportedHostLanguageRedirects(source)
 	}
 	rewritten := source
 	if isHTML || isCSS {

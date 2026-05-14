@@ -31,8 +31,34 @@
       <input id="source_url" name="source_url" type="text" inputmode="url" autocomplete="url" class="form-control" placeholder="{{index .T "missing_source_url_placeholder"}}" required>
       <button type="submit" class="btn btn-success">{{index .T "missing_copy_button"}}</button>
     </div>
-    <label class="form-label mt-3" for="source_ip">{{index .T "missing_source_ip_label"}}</label>
-    <input id="source_ip" name="source_ip" type="text" inputmode="numeric" autocomplete="off" class="form-control" placeholder="{{index .T "missing_source_ip_placeholder"}}">
+    <div class="row g-3 mt-1">
+      <div class="col-md-6">
+        <label class="form-label" for="source_ip">{{index .T "missing_source_ip_label"}}</label>
+        <input id="source_ip" name="source_ip" type="text" inputmode="numeric" autocomplete="off" class="form-control" placeholder="{{index .T "missing_source_ip_placeholder"}}">
+      </div>
+      <div class="col-md-6">
+        <label class="form-label" for="source_language">{{index .T "missing_source_language_label"}}</label>
+        <select id="source_language" name="source_language" class="form-select">
+          <option value="auto">{{index .T "missing_source_language_auto"}}</option>
+          <option value="ru">Русский</option>
+          <option value="en">English</option>
+          <option value="fr">Français</option>
+          <option value="de">Deutsch</option>
+          <option value="es">Español</option>
+          <option value="pt">Português</option>
+          <option value="it">Italiano</option>
+          <option value="sv">Svenska</option>
+          <option value="fi">Suomi</option>
+          <option value="tr">Türkçe</option>
+          <option value="zh">中文</option>
+          <option value="ja">日本語</option>
+          <option value="he">עברית</option>
+          <option value="fa">فارسی</option>
+          <option value="kk">Қазақша</option>
+          <option value="mn">Монгол</option>
+        </select>
+      </div>
+    </div>
     <label class="form-check mt-3" for="copy_whole_site">
       <input id="copy_whole_site" name="copy_whole_site" type="checkbox" value="1" class="form-check-input">
       <span class="form-check-label">{{index .T "missing_copy_whole_site"}}</span>
