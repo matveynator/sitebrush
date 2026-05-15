@@ -9,12 +9,14 @@ import (
 	"crypto/sha1"
 	"crypto/sha256"
 	"crypto/tls"
+	"crypto/x509"
 	"database/sql"
 	"embed"
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"flag"
 	"fmt"
@@ -2428,14 +2430,18 @@ func (a *App) autoCertHostPolicy(ctx context.Context, host string) error {
 		a.logDomainEvent(certificateDomain, "AUTOCERT host policy rejected host=%s error=%v", host, err)
 		return err
 	}
-	if !a.domainIsAutomaticSSLCandidate(ctx, certificateDomain) {
-		err := fmt.Errorf("automatic SSL domain %q is not managed by Sitebrush", certificateDomain)
-		a.logDomainEvent(certificateDomain, "AUTOCERT host policy rejected host=%s error=%v", host, err)
-		return err
-	}
 	setting := a.domainAutomaticSSLSetting(ctx, certificateDomain)
 	if setting.ManuallyDisabled {
 		err := fmt.Errorf("automatic SSL is manually disabled for %q", certificateDomain)
+		a.logDomainEvent(certificateDomain, "AUTOCERT host policy rejected host=%s error=%v", host, err)
+		return err
+	}
+	if a.autoCertCachedCertificateValid(certificateDomain, time.Now()) {
+		a.logDomainEvent(certificateDomain, "AUTOCERT host policy accepted host=%s from existing certificate cache", host)
+		return nil
+	}
+	if !a.domainIsAutomaticSSLCandidate(ctx, certificateDomain) {
+		err := fmt.Errorf("automatic SSL domain %q is not managed by Sitebrush", certificateDomain)
 		a.logDomainEvent(certificateDomain, "AUTOCERT host policy rejected host=%s error=%v", host, err)
 		return err
 	}
@@ -2455,6 +2461,53 @@ func (a *App) autoCertHostPolicy(ctx context.Context, host string) error {
 	}
 	a.logDomainEvent(certificateDomain, "AUTOCERT host policy accepted host=%s", host)
 	return nil
+}
+
+func (a *App) autoCertCachedCertificateValid(domain string, now time.Time) bool {
+	certificateDomain := normalizeDomainName(domain)
+	if certificateDomain == "" {
+		return false
+	}
+	certificateCacheDir := filepath.Join(a.storageRootDir(), "letsencrypt")
+	cacheNames := []string{certificateDomain, certificateDomain + "+rsa"}
+	for _, cacheName := range cacheNames {
+		cacheBytes, err := os.ReadFile(filepath.Join(certificateCacheDir, cacheName))
+		if err != nil {
+			continue
+		}
+		if cachedCertificatePEMValidForDomain(cacheBytes, certificateDomain, now) {
+			return true
+		}
+	}
+	return false
+}
+
+func cachedCertificatePEMValidForDomain(certificateBytes []byte, domain string, now time.Time) bool {
+	certificateDomain := normalizeDomainName(domain)
+	if certificateDomain == "" {
+		return false
+	}
+	remainingBytes := certificateBytes
+	for {
+		var pemBlock *pem.Block
+		pemBlock, remainingBytes = pem.Decode(remainingBytes)
+		if pemBlock == nil {
+			return false
+		}
+		if pemBlock.Type != "CERTIFICATE" {
+			continue
+		}
+		certificate, err := x509.ParseCertificate(pemBlock.Bytes)
+		if err != nil {
+			continue
+		}
+		if now.Before(certificate.NotBefore) || !now.Before(certificate.NotAfter) {
+			continue
+		}
+		if certificate.VerifyHostname(certificateDomain) == nil {
+			return true
+		}
+	}
 }
 
 func (a *App) assignMissingDomainAliasTokens(ctx context.Context) {

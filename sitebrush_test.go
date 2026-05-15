@@ -5,11 +5,17 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/tls"
+	"crypto/x509"
 	"database/sql"
 	"encoding/json"
+	"encoding/pem"
 	"io"
 	"io/fs"
+	"math/big"
 	"mime/multipart"
 	"net"
 	"net/http"
@@ -47,6 +53,45 @@ func mustDNSNameForTest(name string) dnsmessage.Name {
 		panic(err)
 	}
 	return dnsName
+}
+
+func writeCachedAutoCertForTest(t *testing.T, application *App, domain string, notBefore time.Time, notAfter time.Time) {
+	t.Helper()
+	privateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generate certificate key: %v", err)
+	}
+	template := x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		DNSNames:              []string{domain},
+		NotBefore:             notBefore,
+		NotAfter:              notAfter,
+		KeyUsage:              x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		BasicConstraintsValid: true,
+	}
+	certificateDER, err := x509.CreateCertificate(rand.Reader, &template, &template, &privateKey.PublicKey, privateKey)
+	if err != nil {
+		t.Fatalf("create certificate: %v", err)
+	}
+	privateKeyDER, err := x509.MarshalECPrivateKey(privateKey)
+	if err != nil {
+		t.Fatalf("marshal certificate key: %v", err)
+	}
+	var certificatePEM bytes.Buffer
+	if err := pem.Encode(&certificatePEM, &pem.Block{Type: "EC PRIVATE KEY", Bytes: privateKeyDER}); err != nil {
+		t.Fatalf("encode private key: %v", err)
+	}
+	if err := pem.Encode(&certificatePEM, &pem.Block{Type: "CERTIFICATE", Bytes: certificateDER}); err != nil {
+		t.Fatalf("encode certificate: %v", err)
+	}
+	certificateCacheDir := filepath.Join(application.storageRootDir(), "letsencrypt")
+	if err := os.MkdirAll(certificateCacheDir, 0o700); err != nil {
+		t.Fatalf("create certificate cache: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(certificateCacheDir, domain), certificatePEM.Bytes(), 0o600); err != nil {
+		t.Fatalf("write cached certificate: %v", err)
+	}
 }
 
 func newTestApplication(t *testing.T) (*App, *sql.DB) {
@@ -3521,6 +3566,42 @@ func TestAutoCertHostPolicyRequiresAutomaticSSLSettingAndPorts(t *testing.T) {
 	application.setDomainAutomaticSSLManual(context.Background(), "example.com", false)
 	if err := application.autoCertHostPolicy(context.Background(), "example.com"); err == nil {
 		t.Fatal("autoCertHostPolicy succeeded after manual SSL disable")
+	}
+}
+
+func TestAutoCertHostPolicyAllowsExistingCachedCertificateForUnlistedDomain(t *testing.T) {
+	application, _ := newTestApplication(t)
+	application.automaticSSLAvailable = true
+	writeCachedAutoCertForTest(t, application, "cached.example.com", time.Now().Add(-time.Hour), time.Now().Add(time.Hour))
+
+	previousIPLookup := lookupIPRecords
+	previousExternalIPLookup := lookupServerExternalIP
+	previousInterfaceLookup := lookupServerInterfaceIPs
+	defer func() {
+		lookupIPRecords = previousIPLookup
+		lookupServerExternalIP = previousExternalIPLookup
+		lookupServerInterfaceIPs = previousInterfaceLookup
+	}()
+	lookupIPRecords = func(string) ([]net.IP, error) {
+		t.Fatal("cached certificate host policy should not query DNS")
+		return nil, os.ErrInvalid
+	}
+	lookupServerExternalIP = func(context.Context) (string, error) {
+		t.Fatal("cached certificate host policy should not detect external IP")
+		return "", os.ErrInvalid
+	}
+	lookupServerInterfaceIPs = func() ([]net.IP, error) {
+		t.Fatal("cached certificate host policy should not inspect interface IPs")
+		return nil, os.ErrInvalid
+	}
+
+	if err := application.autoCertHostPolicy(context.Background(), "cached.example.com"); err != nil {
+		t.Fatalf("autoCertHostPolicy rejected cached certificate domain: %v", err)
+	}
+
+	application.setDomainAutomaticSSLManual(context.Background(), "cached.example.com", false)
+	if err := application.autoCertHostPolicy(context.Background(), "cached.example.com"); err == nil {
+		t.Fatal("autoCertHostPolicy accepted manually disabled cached certificate domain")
 	}
 }
 
