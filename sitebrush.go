@@ -41,6 +41,7 @@ import (
 	"unicode"
 
 	"golang.org/x/crypto/acme/autocert"
+	"golang.org/x/net/dns/dnsmessage"
 	"golang.org/x/net/html"
 	"golang.org/x/term"
 	appcli "sitebrush/pkg/cli"
@@ -2427,8 +2428,28 @@ func (a *App) autoCertHostPolicy(ctx context.Context, host string) error {
 		a.logDomainEvent(certificateDomain, "AUTOCERT host policy rejected host=%s error=%v", host, err)
 		return err
 	}
-	if !a.domainAutomaticSSLEnabled(ctx, certificateDomain) && !a.domainAutomaticSSLEnabled(contextWithDomain(ctx, certificateDomain), certificateDomain) {
-		err := fmt.Errorf("automatic SSL is disabled for %q", certificateDomain)
+	if !a.domainIsAutomaticSSLCandidate(ctx, certificateDomain) {
+		err := fmt.Errorf("automatic SSL domain %q is not managed by Sitebrush", certificateDomain)
+		a.logDomainEvent(certificateDomain, "AUTOCERT host policy rejected host=%s error=%v", host, err)
+		return err
+	}
+	setting := a.domainAutomaticSSLSetting(ctx, certificateDomain)
+	if setting.ManuallyDisabled {
+		err := fmt.Errorf("automatic SSL is manually disabled for %q", certificateDomain)
+		a.logDomainEvent(certificateDomain, "AUTOCERT host policy rejected host=%s error=%v", host, err)
+		return err
+	}
+	serverIPs, _, err := detectServerIPCandidates(ctx)
+	if err != nil || len(serverIPs) == 0 {
+		if err == nil {
+			err = errors.New("no public server IP addresses detected")
+		}
+		a.logDomainEvent(certificateDomain, "AUTOCERT host policy rejected host=%s error=%v", host, err)
+		return err
+	}
+	setting = a.refreshDomainAutomaticSSL(ctx, certificateDomain, serverIPs)
+	if !setting.Enabled || setting.ManuallyDisabled {
+		err := fmt.Errorf("automatic SSL DNS check failed for %q", certificateDomain)
 		a.logDomainEvent(certificateDomain, "AUTOCERT host policy rejected host=%s error=%v", host, err)
 		return err
 	}
@@ -9004,12 +9025,455 @@ func (a *App) siteDomain(ctx context.Context, r *http.Request) string {
 	return primaryDomain
 }
 
-var lookupTXTRecords = net.LookupTXT
-var lookupIPRecords = net.LookupIP
+var lookupTXTRecords = lookupAuthoritativeTXTRecords
+var lookupIPRecords = lookupAuthoritativeIPRecords
 var lookupServerExternalIP = detectServerExternalIP
 var lookupServerInterfaceIPs = detectServerInterfaceIPs
+var exchangeDNSMessage = exchangeDNSMessageWithServer
 
 const automaticSSLRefreshInterval = time.Hour
+
+const authoritativeDNSMaxDepth = 16
+const authoritativeDNSTimeout = 3 * time.Second
+
+var authoritativeDNSRootServers = []string{
+	"198.41.0.4",
+	"199.9.14.201",
+	"192.33.4.12",
+	"199.7.91.13",
+	"192.203.230.10",
+	"192.5.5.241",
+	"192.112.36.4",
+	"198.97.190.53",
+	"192.36.148.17",
+	"192.58.128.30",
+	"193.0.14.129",
+	"199.7.83.42",
+	"202.12.27.33",
+}
+
+type authoritativeDNSResponse struct {
+	nameServerIP string
+	message      dnsmessage.Message
+	err          error
+}
+
+// Authoritative DNS checks bypass recursive resolvers so domain settings and
+// ACME admission see fresh records directly from the delegated name servers.
+func lookupAuthoritativeTXTRecords(domain string) ([]string, error) {
+	message, err := lookupAuthoritativeDNSMessage(context.Background(), domain, dnsmessage.TypeTXT, 0)
+	if err != nil {
+		return nil, err
+	}
+	txtRecords := make([]string, 0, len(message.Answers))
+	for _, answer := range message.Answers {
+		txtResource, ok := answer.Body.(*dnsmessage.TXTResource)
+		if !ok {
+			continue
+		}
+		txtRecords = append(txtRecords, strings.Join(txtResource.TXT, ""))
+	}
+	if len(txtRecords) == 0 {
+		return nil, fmt.Errorf("authoritative TXT record for %s not found", domain)
+	}
+	return txtRecords, nil
+}
+
+func lookupAuthoritativeIPRecords(domain string) ([]net.IP, error) {
+	ipRecords := make([]net.IP, 0, 4)
+	lookupErrs := make([]error, 0, 2)
+	aMessage, aErr := lookupAuthoritativeDNSMessage(context.Background(), domain, dnsmessage.TypeA, 0)
+	if aErr != nil {
+		lookupErrs = append(lookupErrs, aErr)
+	} else {
+		ipRecords = append(ipRecords, ipRecordsFromDNSMessage(aMessage)...)
+	}
+	aaaaMessage, aaaaErr := lookupAuthoritativeDNSMessage(context.Background(), domain, dnsmessage.TypeAAAA, 0)
+	if aaaaErr != nil {
+		lookupErrs = append(lookupErrs, aaaaErr)
+	} else {
+		ipRecords = append(ipRecords, ipRecordsFromDNSMessage(aaaaMessage)...)
+	}
+	if len(ipRecords) == 0 {
+		return nil, errors.Join(lookupErrs...)
+	}
+	return dedupeIPRecords(ipRecords), nil
+}
+
+func lookupAuthoritativeDNSMessage(ctx context.Context, domain string, recordType dnsmessage.Type, depth int) (dnsmessage.Message, error) {
+	domainName, err := dnsMessageName(domain)
+	if err != nil {
+		return dnsmessage.Message{}, err
+	}
+	return lookupAuthoritativeDNSMessageForName(ctx, domainName, recordType, authoritativeDNSRootServers, depth)
+}
+
+func lookupAuthoritativeDNSMessageForName(ctx context.Context, domainName dnsmessage.Name, recordType dnsmessage.Type, nameServerIPs []string, depth int) (dnsmessage.Message, error) {
+	if depth > authoritativeDNSMaxDepth {
+		return dnsmessage.Message{}, fmt.Errorf("authoritative DNS lookup exceeded recursion depth for %s", domainName.String())
+	}
+	currentNameServerIPs := append([]string(nil), nameServerIPs...)
+	for referralDepth := 0; referralDepth < authoritativeDNSMaxDepth; referralDepth++ {
+		nameServerIP, message, err := queryAuthoritativeNameServers(ctx, currentNameServerIPs, domainName, recordType)
+		if err != nil {
+			return dnsmessage.Message{}, err
+		}
+		if message.Header.RCode == dnsmessage.RCodeNameError {
+			return dnsmessage.Message{}, fmt.Errorf("authoritative DNS name %s does not exist", domainName.String())
+		}
+		if messageHasAnswer(message, domainName, recordType) {
+			return message, nil
+		}
+		if cnameName, ok := cnameAnswerTarget(message, domainName); ok {
+			return lookupAuthoritativeDNSMessageForName(ctx, cnameName, recordType, authoritativeDNSRootServers, depth+1)
+		}
+		nextNameServerIPs, err := referralNameServerIPs(ctx, message, depth+1)
+		if err != nil {
+			return dnsmessage.Message{}, err
+		}
+		if len(nextNameServerIPs) == 0 {
+			if messageHasSOA(message) {
+				return dnsmessage.Message{}, fmt.Errorf("authoritative DNS record %s %s not found", domainName.String(), recordType.String())
+			}
+			return dnsmessage.Message{}, fmt.Errorf("authoritative DNS server %s returned no usable referral for %s", nameServerIP, domainName.String())
+		}
+		currentNameServerIPs = nextNameServerIPs
+	}
+	return dnsmessage.Message{}, fmt.Errorf("authoritative DNS lookup exceeded referral depth for %s", domainName.String())
+}
+
+func queryAuthoritativeNameServers(ctx context.Context, nameServerIPs []string, domainName dnsmessage.Name, recordType dnsmessage.Type) (string, dnsmessage.Message, error) {
+	if len(nameServerIPs) == 0 {
+		return "", dnsmessage.Message{}, fmt.Errorf("authoritative DNS has no name servers for %s", domainName.String())
+	}
+	queryContext, cancel := context.WithCancel(ctx)
+	defer cancel()
+	responses := make(chan authoritativeDNSResponse, len(nameServerIPs))
+	for _, nameServerIP := range nameServerIPs {
+		go func(currentNameServerIP string) {
+			message, err := exchangeDNSMessage(queryContext, currentNameServerIP, domainName, recordType)
+			select {
+			case responses <- authoritativeDNSResponse{nameServerIP: currentNameServerIP, message: message, err: err}:
+			case <-queryContext.Done():
+			}
+		}(nameServerIP)
+	}
+	var lastErr error
+	var fallbackResponse authoritativeDNSResponse
+	fallbackAvailable := false
+	for responseIndex := 0; responseIndex < len(nameServerIPs); responseIndex++ {
+		response := <-responses
+		if response.err != nil {
+			lastErr = response.err
+			continue
+		}
+		if response.message.Header.RCode == dnsmessage.RCodeNameError {
+			cancel()
+			return response.nameServerIP, response.message, nil
+		}
+		if response.message.Header.RCode == dnsmessage.RCodeSuccess {
+			if messageHasAnswer(response.message, domainName, recordType) {
+				cancel()
+				return response.nameServerIP, response.message, nil
+			}
+			if _, ok := cnameAnswerTarget(response.message, domainName); ok {
+				cancel()
+				return response.nameServerIP, response.message, nil
+			}
+			if len(nameServerNamesFromAuthorities(response.message)) > 0 {
+				cancel()
+				return response.nameServerIP, response.message, nil
+			}
+			if !fallbackAvailable {
+				fallbackResponse = response
+				fallbackAvailable = true
+			}
+			continue
+		}
+		lastErr = fmt.Errorf("authoritative DNS server %s returned rcode %v for %s", response.nameServerIP, response.message.Header.RCode, domainName.String())
+	}
+	if fallbackAvailable {
+		return fallbackResponse.nameServerIP, fallbackResponse.message, nil
+	}
+	if lastErr != nil {
+		return "", dnsmessage.Message{}, lastErr
+	}
+	return "", dnsmessage.Message{}, fmt.Errorf("authoritative DNS lookup failed for %s", domainName.String())
+}
+
+func exchangeDNSMessageWithServer(ctx context.Context, nameServerIP string, domainName dnsmessage.Name, recordType dnsmessage.Type) (dnsmessage.Message, error) {
+	queryID, err := randomDNSQueryID()
+	if err != nil {
+		return dnsmessage.Message{}, err
+	}
+	queryMessage := dnsmessage.Message{
+		Header: dnsmessage.Header{
+			ID:               queryID,
+			RecursionDesired: false,
+		},
+		Questions: []dnsmessage.Question{{
+			Name:  domainName,
+			Type:  recordType,
+			Class: dnsmessage.ClassINET,
+		}},
+	}
+	queryBytes, err := queryMessage.Pack()
+	if err != nil {
+		return dnsmessage.Message{}, err
+	}
+	message, err := exchangeDNSPacket(ctx, "udp", nameServerIP, queryBytes, queryID)
+	if err == nil && !message.Header.Truncated {
+		return message, nil
+	}
+	return exchangeDNSPacket(ctx, "tcp", nameServerIP, queryBytes, queryID)
+}
+
+func exchangeDNSPacket(ctx context.Context, network string, nameServerIP string, queryBytes []byte, queryID uint16) (dnsmessage.Message, error) {
+	queryContext, cancel := context.WithTimeout(ctx, authoritativeDNSTimeout)
+	defer cancel()
+	connection, err := (&net.Dialer{}).DialContext(queryContext, network, net.JoinHostPort(nameServerIP, "53"))
+	if err != nil {
+		return dnsmessage.Message{}, err
+	}
+	defer connection.Close()
+	_ = connection.SetDeadline(time.Now().Add(authoritativeDNSTimeout))
+	if network == "tcp" {
+		lengthPrefix := []byte{byte(len(queryBytes) >> 8), byte(len(queryBytes))}
+		if _, err := connection.Write(append(lengthPrefix, queryBytes...)); err != nil {
+			return dnsmessage.Message{}, err
+		}
+		responseLengthPrefix := make([]byte, 2)
+		if _, err := io.ReadFull(connection, responseLengthPrefix); err != nil {
+			return dnsmessage.Message{}, err
+		}
+		responseLength := int(responseLengthPrefix[0])<<8 | int(responseLengthPrefix[1])
+		responseBytes := make([]byte, responseLength)
+		if _, err := io.ReadFull(connection, responseBytes); err != nil {
+			return dnsmessage.Message{}, err
+		}
+		return unpackDNSResponse(responseBytes, queryID)
+	}
+	if _, err := connection.Write(queryBytes); err != nil {
+		return dnsmessage.Message{}, err
+	}
+	responseBytes := make([]byte, 4096)
+	responseLength, err := connection.Read(responseBytes)
+	if err != nil {
+		return dnsmessage.Message{}, err
+	}
+	return unpackDNSResponse(responseBytes[:responseLength], queryID)
+}
+
+func unpackDNSResponse(responseBytes []byte, queryID uint16) (dnsmessage.Message, error) {
+	var message dnsmessage.Message
+	if err := message.Unpack(responseBytes); err != nil {
+		return dnsmessage.Message{}, err
+	}
+	if message.Header.ID != queryID {
+		return dnsmessage.Message{}, fmt.Errorf("authoritative DNS response id mismatch")
+	}
+	return message, nil
+}
+
+func randomDNSQueryID() (uint16, error) {
+	var queryIDBytes [2]byte
+	if _, err := rand.Read(queryIDBytes[:]); err != nil {
+		return 0, err
+	}
+	return binary.BigEndian.Uint16(queryIDBytes[:]), nil
+}
+
+func dnsMessageName(domain string) (dnsmessage.Name, error) {
+	cleanDomain := normalizeDomainName(domain)
+	if cleanDomain == "" {
+		return dnsmessage.Name{}, fmt.Errorf("invalid domain %q", domain)
+	}
+	return dnsmessage.NewName(cleanDomain + ".")
+}
+
+func messageHasAnswer(message dnsmessage.Message, domainName dnsmessage.Name, recordType dnsmessage.Type) bool {
+	domainNameString := domainName.String()
+	for _, answer := range message.Answers {
+		if answer.Header.Type != recordType || !strings.EqualFold(answer.Header.Name.String(), domainNameString) {
+			continue
+		}
+		switch recordType {
+		case dnsmessage.TypeA:
+			_, ok := answer.Body.(*dnsmessage.AResource)
+			return ok
+		case dnsmessage.TypeAAAA:
+			_, ok := answer.Body.(*dnsmessage.AAAAResource)
+			return ok
+		case dnsmessage.TypeTXT:
+			_, ok := answer.Body.(*dnsmessage.TXTResource)
+			return ok
+		default:
+			return true
+		}
+	}
+	return false
+}
+
+func cnameAnswerTarget(message dnsmessage.Message, domainName dnsmessage.Name) (dnsmessage.Name, bool) {
+	domainNameString := domainName.String()
+	for _, answer := range message.Answers {
+		if answer.Header.Type != dnsmessage.TypeCNAME || !strings.EqualFold(answer.Header.Name.String(), domainNameString) {
+			continue
+		}
+		cnameResource, ok := answer.Body.(*dnsmessage.CNAMEResource)
+		if ok {
+			return cnameResource.CNAME, true
+		}
+	}
+	return dnsmessage.Name{}, false
+}
+
+func messageHasSOA(message dnsmessage.Message) bool {
+	for _, authority := range message.Authorities {
+		if authority.Header.Type == dnsmessage.TypeSOA {
+			return true
+		}
+	}
+	return false
+}
+
+func referralNameServerIPs(ctx context.Context, message dnsmessage.Message, depth int) ([]string, error) {
+	nameServerNames := nameServerNamesFromAuthorities(message)
+	if len(nameServerNames) == 0 {
+		return nil, nil
+	}
+	nameServerIPs := nameServerIPsFromAdditionals(message, nameServerNames)
+	if len(nameServerIPs) > 0 {
+		return nameServerIPs, nil
+	}
+	for _, nameServerName := range nameServerNames {
+		ipRecords, err := lookupAuthoritativeIPRecordsForName(ctx, nameServerName, depth)
+		if err == nil && len(ipRecords) > 0 {
+			nameServerIPs = append(nameServerIPs, ipStringsFromRecords(ipRecords)...)
+		}
+	}
+	return dedupeIPStrings(nameServerIPs), nil
+}
+
+func nameServerNamesFromAuthorities(message dnsmessage.Message) []dnsmessage.Name {
+	nameServerNames := make([]dnsmessage.Name, 0, len(message.Authorities))
+	seenNames := make(map[string]struct{})
+	for _, authority := range message.Authorities {
+		if authority.Header.Type != dnsmessage.TypeNS {
+			continue
+		}
+		nsResource, ok := authority.Body.(*dnsmessage.NSResource)
+		if !ok {
+			continue
+		}
+		nameKey := strings.ToLower(nsResource.NS.String())
+		if _, seen := seenNames[nameKey]; seen {
+			continue
+		}
+		seenNames[nameKey] = struct{}{}
+		nameServerNames = append(nameServerNames, nsResource.NS)
+	}
+	return nameServerNames
+}
+
+func nameServerIPsFromAdditionals(message dnsmessage.Message, nameServerNames []dnsmessage.Name) []string {
+	nameServerNameSet := make(map[string]struct{}, len(nameServerNames))
+	for _, nameServerName := range nameServerNames {
+		nameServerNameSet[strings.ToLower(nameServerName.String())] = struct{}{}
+	}
+	nameServerIPs := make([]string, 0)
+	for _, additional := range message.Additionals {
+		if _, wanted := nameServerNameSet[strings.ToLower(additional.Header.Name.String())]; !wanted {
+			continue
+		}
+		switch body := additional.Body.(type) {
+		case *dnsmessage.AResource:
+			nameServerIPs = append(nameServerIPs, net.IP(body.A[:]).String())
+		case *dnsmessage.AAAAResource:
+			nameServerIPs = append(nameServerIPs, net.IP(body.AAAA[:]).String())
+		}
+	}
+	return dedupeIPStrings(nameServerIPs)
+}
+
+func lookupAuthoritativeIPRecordsForName(ctx context.Context, domainName dnsmessage.Name, depth int) ([]net.IP, error) {
+	ipRecords := make([]net.IP, 0, 4)
+	lookupErrs := make([]error, 0, 2)
+	aMessage, aErr := lookupAuthoritativeDNSMessageForName(ctx, domainName, dnsmessage.TypeA, authoritativeDNSRootServers, depth)
+	if aErr != nil {
+		lookupErrs = append(lookupErrs, aErr)
+	} else {
+		ipRecords = append(ipRecords, ipRecordsFromDNSMessage(aMessage)...)
+	}
+	aaaaMessage, aaaaErr := lookupAuthoritativeDNSMessageForName(ctx, domainName, dnsmessage.TypeAAAA, authoritativeDNSRootServers, depth)
+	if aaaaErr != nil {
+		lookupErrs = append(lookupErrs, aaaaErr)
+	} else {
+		ipRecords = append(ipRecords, ipRecordsFromDNSMessage(aaaaMessage)...)
+	}
+	if len(ipRecords) == 0 {
+		return nil, errors.Join(lookupErrs...)
+	}
+	return dedupeIPRecords(ipRecords), nil
+}
+
+func ipRecordsFromDNSMessage(message dnsmessage.Message) []net.IP {
+	ipRecords := make([]net.IP, 0, len(message.Answers))
+	for _, answer := range message.Answers {
+		switch body := answer.Body.(type) {
+		case *dnsmessage.AResource:
+			ipRecords = append(ipRecords, net.IP(body.A[:]))
+		case *dnsmessage.AAAAResource:
+			ipRecords = append(ipRecords, net.IP(body.AAAA[:]))
+		}
+	}
+	return ipRecords
+}
+
+func ipStringsFromRecords(ipRecords []net.IP) []string {
+	ipStrings := make([]string, 0, len(ipRecords))
+	for _, ipRecord := range ipRecords {
+		if ipRecord != nil {
+			ipStrings = append(ipStrings, ipRecord.String())
+		}
+	}
+	return ipStrings
+}
+
+func dedupeIPRecords(ipRecords []net.IP) []net.IP {
+	seenIPs := make(map[string]struct{}, len(ipRecords))
+	dedupedIPRecords := make([]net.IP, 0, len(ipRecords))
+	for _, ipRecord := range ipRecords {
+		if ipRecord == nil {
+			continue
+		}
+		ipKey := ipRecord.String()
+		if _, seen := seenIPs[ipKey]; seen {
+			continue
+		}
+		seenIPs[ipKey] = struct{}{}
+		dedupedIPRecords = append(dedupedIPRecords, ipRecord)
+	}
+	return dedupedIPRecords
+}
+
+func dedupeIPStrings(ipStrings []string) []string {
+	seenIPs := make(map[string]struct{}, len(ipStrings))
+	dedupedIPStrings := make([]string, 0, len(ipStrings))
+	for _, ipString := range ipStrings {
+		parsedIP := net.ParseIP(strings.TrimSpace(ipString))
+		if parsedIP == nil {
+			continue
+		}
+		ipKey := parsedIP.String()
+		if _, seen := seenIPs[ipKey]; seen {
+			continue
+		}
+		seenIPs[ipKey] = struct{}{}
+		dedupedIPStrings = append(dedupedIPStrings, ipKey)
+	}
+	return dedupedIPStrings
+}
 
 func detectServerExternalIP(ctx context.Context) (string, error) {
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://api.ipify.org", nil)
@@ -9399,6 +9863,25 @@ UNION SELECT domain FROM domain_ssl_settings`
 	}
 	sort.Strings(domainList)
 	return domainList
+}
+
+func (a *App) domainIsAutomaticSSLCandidate(ctx context.Context, domain string) bool {
+	certificateDomain := normalizeDomainName(domain)
+	if certificateDomain == "" {
+		return false
+	}
+	query := `
+SELECT COUNT(1) FROM (
+SELECT domain FROM pages WHERE domain=?
+UNION SELECT domain FROM users WHERE domain=?
+UNION SELECT domain FROM domain_states WHERE domain=?
+UNION SELECT primary_domain FROM domain_aliases WHERE primary_domain=?
+UNION SELECT alias_domain FROM domain_aliases WHERE alias_domain=?
+UNION SELECT domain FROM domain_ssl_settings WHERE domain=?
+)`
+	var domainCount int
+	err := a.db.QueryRowContext(ctx, query, certificateDomain, certificateDomain, certificateDomain, certificateDomain, certificateDomain, certificateDomain).Scan(&domainCount)
+	return err == nil && domainCount > 0
 }
 
 func (a *App) refreshDomainAutomaticSSL(ctx context.Context, domain string, serverIPs []net.IP) DomainAutomaticSSLSetting {

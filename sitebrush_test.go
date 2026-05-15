@@ -24,6 +24,7 @@ import (
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
+	"golang.org/x/net/dns/dnsmessage"
 	"sitebrush/pkg/diskusage"
 )
 
@@ -39,6 +40,14 @@ type fakeGrabResponse struct {
 }
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func mustDNSNameForTest(name string) dnsmessage.Name {
+	dnsName, err := dnsmessage.NewName(name)
+	if err != nil {
+		panic(err)
+	}
+	return dnsName
+}
 
 func newTestApplication(t *testing.T) (*App, *sql.DB) {
 	t.Helper()
@@ -3321,6 +3330,67 @@ func TestDomainAliasesRequireDNSVerificationBeforeResolving(t *testing.T) {
 	}
 }
 
+func TestAuthoritativeDNSLookupFollowsDelegationWithoutRecursiveResolver(t *testing.T) {
+	previousExchangeDNSMessage := exchangeDNSMessage
+	defer func() {
+		exchangeDNSMessage = previousExchangeDNSMessage
+	}()
+
+	queriedNameServers := make(chan string, 32)
+	exchangeDNSMessage = func(_ context.Context, nameServerIP string, domainName dnsmessage.Name, recordType dnsmessage.Type) (dnsmessage.Message, error) {
+		queriedNameServers <- nameServerIP
+		switch nameServerIP {
+		case authoritativeDNSRootServers[0]:
+			return dnsmessage.Message{
+				Header: dnsmessage.Header{RCode: dnsmessage.RCodeSuccess},
+				Authorities: []dnsmessage.Resource{{
+					Header: dnsmessage.ResourceHeader{Name: mustDNSNameForTest("example.com."), Type: dnsmessage.TypeNS, Class: dnsmessage.ClassINET},
+					Body:   &dnsmessage.NSResource{NS: mustDNSNameForTest("ns1.example.net.")},
+				}},
+				Additionals: []dnsmessage.Resource{{
+					Header: dnsmessage.ResourceHeader{Name: mustDNSNameForTest("ns1.example.net."), Type: dnsmessage.TypeA, Class: dnsmessage.ClassINET},
+					Body:   &dnsmessage.AResource{A: [4]byte{192, 0, 2, 53}},
+				}},
+			}, nil
+		case "192.0.2.53":
+			if domainName.String() != "alias.example.com." || recordType != dnsmessage.TypeTXT {
+				return dnsmessage.Message{}, os.ErrInvalid
+			}
+			return dnsmessage.Message{
+				Header: dnsmessage.Header{RCode: dnsmessage.RCodeSuccess},
+				Answers: []dnsmessage.Resource{{
+					Header: dnsmessage.ResourceHeader{Name: mustDNSNameForTest("alias.example.com."), Type: dnsmessage.TypeTXT, Class: dnsmessage.ClassINET},
+					Body:   &dnsmessage.TXTResource{TXT: []string{"sitebrush=token"}},
+				}},
+			}, nil
+		default:
+			return dnsmessage.Message{}, os.ErrNotExist
+		}
+	}
+
+	txtRecords, err := lookupAuthoritativeTXTRecords("alias.example.com")
+	if err != nil {
+		t.Fatalf("lookupAuthoritativeTXTRecords: %v", err)
+	}
+	if len(txtRecords) != 1 || txtRecords[0] != "sitebrush=token" {
+		t.Fatalf("TXT records = %#v, want sitebrush token", txtRecords)
+	}
+	sawRootServer := false
+	sawAuthoritativeServer := false
+	for len(queriedNameServers) > 0 {
+		queriedNameServer := <-queriedNameServers
+		if queriedNameServer == authoritativeDNSRootServers[0] {
+			sawRootServer = true
+		}
+		if queriedNameServer == "192.0.2.53" {
+			sawAuthoritativeServer = true
+		}
+	}
+	if !sawRootServer || !sawAuthoritativeServer {
+		t.Fatalf("authoritative lookup did not query root and delegated server")
+	}
+}
+
 func TestDomainAliasLimitIsTenDomains(t *testing.T) {
 	storagePath := t.TempDir()
 	rawDB, err := sql.Open("sqlite3", filepath.Join(storagePath, "sitebrush.db"))
@@ -3400,6 +3470,26 @@ func TestAutomaticSSLDefaultsOnForResolvingDomainAndHonorsManualOff(t *testing.T
 
 func TestAutoCertHostPolicyRequiresAutomaticSSLSettingAndPorts(t *testing.T) {
 	application, _ := newTestApplication(t)
+	previousIPLookup := lookupIPRecords
+	previousExternalIPLookup := lookupServerExternalIP
+	previousInterfaceLookup := lookupServerInterfaceIPs
+	defer func() {
+		lookupIPRecords = previousIPLookup
+		lookupServerExternalIP = previousExternalIPLookup
+		lookupServerInterfaceIPs = previousInterfaceLookup
+	}()
+	lookupIPRecords = func(domain string) ([]net.IP, error) {
+		if domain == "example.com" {
+			return []net.IP{net.ParseIP("203.0.113.10")}, nil
+		}
+		return nil, os.ErrNotExist
+	}
+	lookupServerExternalIP = func(context.Context) (string, error) {
+		return "203.0.113.10", nil
+	}
+	lookupServerInterfaceIPs = func() ([]net.IP, error) {
+		return nil, nil
+	}
 
 	application.automaticSSLAvailable = false
 	application.setDomainAutomaticSSLManual(context.Background(), "example.com", true)
@@ -3412,6 +3502,22 @@ func TestAutoCertHostPolicyRequiresAutomaticSSLSettingAndPorts(t *testing.T) {
 		t.Fatalf("autoCertHostPolicy with enabled domain: %v", err)
 	}
 
+	lookupIPRecords = func(domain string) ([]net.IP, error) {
+		if domain == "example.com" {
+			return []net.IP{net.ParseIP("198.51.100.25")}, nil
+		}
+		return nil, os.ErrNotExist
+	}
+	if err := application.autoCertHostPolicy(context.Background(), "example.com"); err == nil {
+		t.Fatal("autoCertHostPolicy accepted stale SSL setting after live DNS mismatch")
+	}
+
+	lookupIPRecords = func(domain string) ([]net.IP, error) {
+		if domain == "example.com" {
+			return []net.IP{net.ParseIP("203.0.113.10")}, nil
+		}
+		return nil, os.ErrNotExist
+	}
 	application.setDomainAutomaticSSLManual(context.Background(), "example.com", false)
 	if err := application.autoCertHostPolicy(context.Background(), "example.com"); err == nil {
 		t.Fatal("autoCertHostPolicy succeeded after manual SSL disable")
