@@ -144,6 +144,7 @@ func newPerSiteDBRouter(siteDatabaseRootDir string, fallbackDomain string, migra
 
 func (r *perSiteDBRouter) run(siteDatabaseRootDir string, migrate siteDBMigrator) {
 	databasesByDomain := make(map[string]*sql.DB)
+	primaryDomainsByAlias := make(map[string]string)
 	for {
 		select {
 		case request := <-r.requests:
@@ -151,25 +152,27 @@ func (r *perSiteDBRouter) run(siteDatabaseRootDir string, migrate siteDBMigrator
 			if domain == "" {
 				domain = r.fallbackDomain
 			}
-			database := databasesByDomain[domain]
-			if database == nil {
-				databasePath := filepath.Join(siteDatabaseRootDir, domainStorageName(domain)+".db")
-				if err := ensureParentDir(databasePath); err != nil {
-					request.response <- siteDBResponse{err: err}
-					continue
-				}
-				nextDatabase, err := sql.Open("sqlite", "file:"+databasePath)
+			databaseDomain := domain
+			if primaryDomain := primaryDomainsByAlias[domain]; primaryDomain != "" {
+				database, err := r.databaseForDomain(siteDatabaseRootDir, databasesByDomain, primaryDomain, migrate)
 				if err != nil {
 					request.response <- siteDBResponse{err: err}
 					continue
 				}
-				if migrateErr := migrate(nextDatabase); migrateErr != nil {
-					_ = nextDatabase.Close()
-					request.response <- siteDBResponse{err: migrateErr}
+				if activePrimaryDomainForAlias(database, domain) == primaryDomain {
+					request.response <- siteDBResponse{db: database}
 					continue
 				}
-				databasesByDomain[domain] = nextDatabase
-				database = nextDatabase
+				delete(primaryDomainsByAlias, domain)
+			}
+			if primaryDomain := findActivePrimaryDomainForAlias(siteDatabaseRootDir, databasesByDomain, domain); primaryDomain != "" {
+				primaryDomainsByAlias[domain] = primaryDomain
+				databaseDomain = primaryDomain
+			}
+			database, err := r.databaseForDomain(siteDatabaseRootDir, databasesByDomain, databaseDomain, migrate)
+			if err != nil {
+				request.response <- siteDBResponse{err: err}
+				continue
 			}
 			request.response <- siteDBResponse{db: database}
 		case closeResponse := <-r.closeRequests:
@@ -184,6 +187,79 @@ func (r *perSiteDBRouter) run(siteDatabaseRootDir string, migrate siteDBMigrator
 			return
 		}
 	}
+}
+
+func (r *perSiteDBRouter) databaseForDomain(siteDatabaseRootDir string, databasesByDomain map[string]*sql.DB, domain string, migrate siteDBMigrator) (*sql.DB, error) {
+	databaseDomain := normalizeDomainName(domain)
+	if databaseDomain == "" {
+		databaseDomain = r.fallbackDomain
+	}
+	database := databasesByDomain[databaseDomain]
+	if database != nil {
+		return database, nil
+	}
+	databasePath := filepath.Join(siteDatabaseRootDir, domainStorageName(databaseDomain)+".db")
+	if err := ensureParentDir(databasePath); err != nil {
+		return nil, err
+	}
+	nextDatabase, err := sql.Open("sqlite", "file:"+databasePath)
+	if err != nil {
+		return nil, err
+	}
+	if migrateErr := migrate(nextDatabase); migrateErr != nil {
+		_ = nextDatabase.Close()
+		return nil, migrateErr
+	}
+	databasesByDomain[databaseDomain] = nextDatabase
+	return nextDatabase, nil
+}
+
+func findActivePrimaryDomainForAlias(siteDatabaseRootDir string, databasesByDomain map[string]*sql.DB, aliasDomain string) string {
+	aliasDomain = normalizeDomainName(aliasDomain)
+	if aliasDomain == "" {
+		return ""
+	}
+	for _, database := range databasesByDomain {
+		if primaryDomain := activePrimaryDomainForAlias(database, aliasDomain); primaryDomain != "" {
+			return primaryDomain
+		}
+	}
+	databaseEntries, err := os.ReadDir(siteDatabaseRootDir)
+	if err != nil {
+		return ""
+	}
+	for _, databaseEntry := range databaseEntries {
+		if databaseEntry.IsDir() || !strings.HasSuffix(databaseEntry.Name(), ".db") {
+			continue
+		}
+		databasePath := filepath.Join(siteDatabaseRootDir, databaseEntry.Name())
+		database, err := sql.Open("sqlite", "file:"+databasePath)
+		if err != nil {
+			continue
+		}
+		primaryDomain := activePrimaryDomainForAlias(database, aliasDomain)
+		_ = database.Close()
+		if primaryDomain != "" {
+			return primaryDomain
+		}
+	}
+	return ""
+}
+
+func activePrimaryDomainForAlias(database *sql.DB, aliasDomain string) string {
+	if database == nil {
+		return ""
+	}
+	var rawPrimaryDomain string
+	err := database.QueryRowContext(context.Background(), `SELECT primary_domain FROM domain_aliases WHERE alias_domain=? AND is_verified=1 AND dns_a_ok=1 LIMIT 1`, aliasDomain).Scan(&rawPrimaryDomain)
+	if err != nil {
+		return ""
+	}
+	primaryDomain := normalizeDomainName(rawPrimaryDomain)
+	if primaryDomain == "" || primaryDomain == aliasDomain {
+		return ""
+	}
+	return primaryDomain
 }
 
 func (r *perSiteDBRouter) Close() error {

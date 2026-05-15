@@ -3375,6 +3375,54 @@ func TestDomainAliasesRequireDNSVerificationBeforeResolving(t *testing.T) {
 	}
 }
 
+func TestPerSiteDBRouterRoutesActiveAliasRequestsToPrimarySiteDatabase(t *testing.T) {
+	storagePath := t.TempDir()
+	dbPath := filepath.Join(storagePath, defaultDBPath)
+	siteDatabaseDir := siteDatabaseRootPath(dbPath)
+	router := newPerSiteDBRouter(siteDatabaseDir, "localhost", func(rawDB *sql.DB) error {
+		application := &App{db: rawDB, storagePath: storagePath, grabTracker: newGrabProgressTracker()}
+		return application.migrate(context.Background())
+	})
+	t.Cleanup(func() {
+		if err := router.Close(); err != nil {
+			t.Fatalf("close site database router: %v", err)
+		}
+	})
+
+	aliasContext := contextWithDomain(context.Background(), "twochicks.ru")
+	var staleAliasUserCount int
+	if err := router.QueryRowContext(aliasContext, `SELECT COUNT(1) FROM users`).Scan(&staleAliasUserCount); err != nil {
+		t.Fatalf("open stale alias database: %v", err)
+	}
+
+	primaryDomain := "twochicks.sitebrush.com"
+	primaryContext := contextWithDomain(context.Background(), primaryDomain)
+	if _, err := router.ExecContext(primaryContext, `INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, primaryDomain, "admin@twochicks.test", "hash"); err != nil {
+		t.Fatalf("insert primary admin: %v", err)
+	}
+	if _, err := router.ExecContext(primaryContext, `INSERT INTO pages(domain,path,title,html,published) VALUES(?,?,?,?,1)`, primaryDomain, "/", "Home", "<h1>Home</h1>"); err != nil {
+		t.Fatalf("insert primary page: %v", err)
+	}
+	if _, err := router.ExecContext(primaryContext, `INSERT INTO domain_aliases(primary_domain,alias_domain,verification_token,is_verified,dns_a_ok,is_selected,last_checked_at) VALUES(?,?,?,?,?,?,?)`,
+		primaryDomain, "twochicks.ru", "token", 1, 1, 1, time.Now().Format(time.RFC3339)); err != nil {
+		t.Fatalf("insert active alias: %v", err)
+	}
+
+	application := &App{db: router, storagePath: storagePath, grabTracker: newGrabProgressTracker()}
+	request := httptest.NewRequest(http.MethodGet, "http://twochicks.ru/", nil)
+	request = request.WithContext(contextWithDomain(request.Context(), "twochicks.ru"))
+	if domain := application.siteDomain(request.Context(), request); domain != primaryDomain {
+		t.Fatalf("siteDomain for active alias = %q, want %q", domain, primaryDomain)
+	}
+	page, err := application.findPage(request.Context(), primaryDomain, "/")
+	if err != nil {
+		t.Fatalf("find primary page through alias context: %v", err)
+	}
+	if page.HTML != "<h1>Home</h1>" {
+		t.Fatalf("alias page HTML = %q, want primary content", page.HTML)
+	}
+}
+
 func TestAuthoritativeDNSLookupFollowsDelegationWithoutRecursiveResolver(t *testing.T) {
 	previousExchangeDNSMessage := exchangeDNSMessage
 	defer func() {
