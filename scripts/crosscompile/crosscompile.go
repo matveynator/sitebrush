@@ -50,11 +50,11 @@ type buildRequest struct {
 
 func main() {
 	var (
-		programName         = flag.String("program", "sitebrush", "program name used in binary names and rsync publish paths")
+		programName         = flag.String("program", "sitebrush", "program name used in binary names")
 		versionFlag         = flag.String("version", "", "version folder under binaries/; defaults to GITHUB_RUN_NUMBER, then git rev-list count, then git describe")
 		outputRoot          = flag.String("output-dir", "binaries", "root output directory for generated artifacts")
 		syncHost            = flag.String("sync-host", "", "optional ssh host for rsync publication, for example deploy@example.com")
-		syncBase            = flag.String("sync-base", "", "optional remote base path used together with -sync-host, for example /srv/releases")
+		syncBase            = flag.String("sync-base", "", "exact remote directory used together with -sync-host, for example /var/lib/sitebrush/storage/chroot/sitebrush.com/download")
 		modeFlag            = flag.String("mode", string(modeAll), "build scope: all, server-app, or desktop-app")
 		rebuildDockerImages = flag.Bool("rebuild-docker-images", false, "rebuild cached Docker builder images before Docker-based desktop builds")
 	)
@@ -120,7 +120,7 @@ func main() {
 		if *syncBase == "" {
 			fatalf("-sync-base is required when -sync-host is set")
 		}
-		if err := syncArtifacts(repoRoot, filepath.Join(repoRoot, *outputRoot), *programName, version, *syncHost, *syncBase); err != nil {
+		if err := syncArtifacts(repoRoot, filepath.Join(repoRoot, *outputRoot), version, *syncHost, *syncBase); err != nil {
 			fatalf("sync artifacts: %v", err)
 		}
 	}
@@ -683,25 +683,36 @@ func updateLatestSymlink(binaryRoot, version string) error {
 	return nil
 }
 
-func syncArtifacts(repoRoot, outputRoot, programName, version, syncHost, syncBase string) error {
-	remoteProgramBase := remoteProgramBasePath(syncBase, programName)
-	fmt.Printf("sync %s to %s:%s\n", outputRoot, syncHost, remoteProgramBase)
-	if err := runCommand(repoRoot, "ssh", syncHost, fmt.Sprintf("mkdir -p %s", shellQuote(remoteProgramBase))); err != nil {
+func syncArtifacts(repoRoot, outputRoot, version, syncHost, syncBase string) error {
+	remoteDirectory := remoteSyncDirectory(syncBase)
+	if remoteDirectory == "" {
+		return errors.New("remote sync directory is empty")
+	}
+	fmt.Printf("sync %s to %s:%s\n", outputRoot, syncHost, remoteDirectory)
+	if err := runCommand(repoRoot, "ssh", syncHost, fmt.Sprintf("mkdir -p %s", shellQuote(remoteDirectory))); err != nil {
 		return err
 	}
-	if err := runCommand(repoRoot, "rsync", "-avP", outputRoot+"/", syncHost+":"+remoteProgramBase+"/"); err != nil {
+	if err := runCommand(repoRoot, "rsync", "-avP", rsyncSourceDirectory(outputRoot), rsyncRemoteDirectory(syncHost, remoteDirectory)); err != nil {
 		return err
 	}
 	fmt.Printf("synced latest -> %s via rsync\n", version)
 	return nil
 }
 
-func remoteProgramBasePath(syncBase, programName string) string {
-	remoteBase := strings.TrimRight(strings.TrimSpace(syncBase), "/")
-	if path.Base(remoteBase) == programName {
-		return remoteBase
+func remoteSyncDirectory(syncBase string) string {
+	remoteDirectory := strings.TrimSpace(syncBase)
+	for len(remoteDirectory) > 1 && strings.HasSuffix(remoteDirectory, "/") {
+		remoteDirectory = strings.TrimSuffix(remoteDirectory, "/")
 	}
-	return remoteBase + "/" + programName
+	return remoteDirectory
+}
+
+func rsyncSourceDirectory(outputRoot string) string {
+	return filepath.Clean(outputRoot) + string(filepath.Separator)
+}
+
+func rsyncRemoteDirectory(syncHost, remoteDirectory string) string {
+	return syncHost + ":" + strings.TrimRight(remoteDirectory, "/") + "/"
 }
 
 func defaultVersionLabel(repoRoot string) string {

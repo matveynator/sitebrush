@@ -368,14 +368,28 @@ func TestUpdateLatestSymlink(t *testing.T) {
 	}
 }
 
-func TestRemoteProgramBasePathDoesNotDuplicateProgramName(t *testing.T) {
+func TestRemoteSyncDirectoryIsExactDestination(t *testing.T) {
 	t.Parallel()
 
-	if got, want := remoteProgramBasePath("/srv/releases", "sitebrush"), "/srv/releases/sitebrush"; got != want {
-		t.Fatalf("remoteProgramBasePath() = %q, want %q", got, want)
+	if got, want := remoteSyncDirectory("/var/lib/sitebrush/storage/chroot/sitebrush.com/download/"), "/var/lib/sitebrush/storage/chroot/sitebrush.com/download"; got != want {
+		t.Fatalf("remoteSyncDirectory() = %q, want %q", got, want)
 	}
-	if got, want := remoteProgramBasePath("/srv/releases/sitebrush", "sitebrush"), "/srv/releases/sitebrush"; got != want {
-		t.Fatalf("remoteProgramBasePath() duplicated program name: got %q, want %q", got, want)
+	if got, want := remoteSyncDirectory("  /srv/releases/sitebrush  "), "/srv/releases/sitebrush"; got != want {
+		t.Fatalf("remoteSyncDirectory() changed exact destination: got %q, want %q", got, want)
+	}
+	if got, want := remoteSyncDirectory("/"), "/"; got != want {
+		t.Fatalf("remoteSyncDirectory() root path = %q, want %q", got, want)
+	}
+}
+
+func TestRsyncDirectoriesCopyContentsIntoExactDestination(t *testing.T) {
+	t.Parallel()
+
+	if got, want := rsyncSourceDirectory(filepath.Join("repo", "binaries")), filepath.Join("repo", "binaries")+string(filepath.Separator); got != want {
+		t.Fatalf("rsyncSourceDirectory() = %q, want %q", got, want)
+	}
+	if got, want := rsyncRemoteDirectory("root@sitebrush.com", "/var/lib/sitebrush/storage/chroot/sitebrush.com/download"), "root@sitebrush.com:/var/lib/sitebrush/storage/chroot/sitebrush.com/download/"; got != want {
+		t.Fatalf("rsyncRemoteDirectory() = %q, want %q", got, want)
 	}
 }
 
