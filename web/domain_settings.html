@@ -8,89 +8,16 @@
   })();
   </script>
   <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>{{index .T "domain_settings_title"}}</title>
-  <style>
-    :root {
-      color-scheme: light dark;
-      --page-bg:#f4f8fc;
-      --surface:#ffffff;
-      --surface-soft:#edf4fb;
-      --text-main:#1b2a3d;
-      --hint:#4f5f79;
-      --field-bg:#ffffff;
-      --field-text:#12253f;
-      --field-border:#b9c7db;
-      --link:#1a65d8;
-      --ok:#0b7a3b;
-      --warn:#9a6700;
-      --bad:#b3261e;
-      --line:#d7e1ef;
-    }
-    @media (prefers-color-scheme: dark) {
-      :root {
-        --page-bg:#0f1724;
-        --surface:#121f32;
-        --surface-soft:#0d1727;
-        --text-main:#dbe8ff;
-        --hint:#9fb3cf;
-        --field-bg:#0f1a2b;
-        --field-text:#dbe8ff;
-        --field-border:#334868;
-        --link:#9ec2ff;
-        --ok:#6ee7a7;
-        --warn:#f6c65b;
-        --bad:#ff9b93;
-        --line:#263a57;
-      }
-    }
-    * { box-sizing: border-box; }
-    body { font-family: Arial, sans-serif; margin: 24px; max-width: 960px; background: var(--page-bg); color: var(--text-main); }
-    a { color: var(--link); }
-    input, button { font: inherit; }
-    input[type="text"] { width: 100%; background: var(--field-bg); color: var(--field-text); border: 1px solid var(--field-border); border-radius: 6px; padding: 10px 12px; }
-    button { border: 1px solid var(--field-border); border-radius: 6px; padding: 9px 12px; background: var(--surface); color: var(--text-main); cursor: pointer; }
-    button.primary { background: var(--link); border-color: var(--link); color: #fff; }
-    button.danger { color: var(--bad); }
-    code { background: var(--surface-soft); border: 1px solid var(--line); border-radius: 6px; padding: 2px 6px; }
-    .hint { color: var(--hint); }
-    .dns-box, .alias-row { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 16px; }
-    .dns-box { margin: 18px 0; }
-    .add-form { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; align-items: center; margin: 18px 0; }
-    .backup-download-link { display: inline-flex; align-items: center; gap: 8px; border: 1px solid var(--field-border); border-radius: 6px; padding: 8px 12px; background: var(--surface-soft); color: var(--text-main); text-decoration: none; }
-    .backup-download-link img { width: 22px; height: 22px; object-fit: contain; }
-    .checkbox-row { display: flex; align-items: flex-start; gap: 10px; margin: 12px 0; }
-    .checkbox-row input { margin-top: 3px; }
-    .alias-list { display: grid; gap: 12px; margin-top: 16px; }
-    .alias-header { display: flex; justify-content: space-between; gap: 12px; align-items: center; }
-    .alias-domain { font-weight: 700; word-break: break-all; }
-    .alias-actions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
-    .status-list { display: flex; gap: 10px; flex-wrap: wrap; margin: 10px 0; }
-    .status-ok { color: var(--ok); }
-    .status-warn { color: var(--warn); }
-    .status-bad { color: var(--bad); }
-    .ssl-status-list { display: grid; gap: 8px; margin: 12px 0; }
-    .ssl-status-row { display: grid; grid-template-columns: 170px minmax(0, 1fr); gap: 8px 12px; align-items: start; }
-    .ssl-status-label { color: var(--hint); }
-    .ssl-status-summary { font-weight: 700; margin: 10px 0; }
-    .record-grid { display: grid; grid-template-columns: 110px minmax(0, 1fr); gap: 8px 12px; margin-top: 10px; }
-    .record-grid code { display: inline-block; word-break: break-all; }
-    .selected { border-color: var(--ok); }
-    .empty { color: var(--hint); padding: 18px 0; }
-    .section-icon { width:30px; height:30px; object-fit:contain; }
-    .section-heading { display:flex; align-items:center; gap:10px; margin: 0; }
-    @media (max-width: 700px) {
-      body { margin: 16px; }
-      .add-form { grid-template-columns: 1fr; }
-      .alias-header { align-items: flex-start; flex-direction: column; }
-      .alias-actions { justify-content: flex-start; }
-      .ssl-status-row { grid-template-columns: 1fr; }
-      .record-grid { grid-template-columns: 1fr; }
-    }
-  </style>
+  <link href="/p/static/technical_pages.css" rel="stylesheet">
 </head>
-<body>
-  <h1 class="section-heading"><img src="/p/static/settings.png" class="section-icon" alt=""><a href="/">{{.Domain}}</a> | {{index .T "domain_settings_title"}}</h1>
-  <p><a href="{{.ReturnPath}}">{{index .T "back_to_uri"}}</a></p>
+<body class="technical-page">
+<main class="container">
+  <div class="page-header">
+    <h1 class="section-heading"><img src="/p/static/settings.png" class="section-icon" alt=""><a href="/">{{.Domain}}</a> <small class="text-muted">| {{index .T "domain_settings_title"}}</small></h1>
+    <a class="btn btn-outline-secondary" href="{{.ReturnPath}}">{{index .T "back_to_uri"}}</a>
+  </div>
 
   <p><strong>{{index .T "domain_settings_primary"}}</strong> {{.Domain}}</p>
   <p><strong>{{index .T "domain_settings_selected_domain"}}</strong> {{.SelectedDomain}}</p>
@@ -161,10 +88,12 @@
 
   <section class="dns-box">
     <p><strong>{{index .T "domain_settings_chroot_title"}}</strong></p>
-    <form class="add-form" method="post" action="?settings">
+    <form class="add-form static-folder-form" method="post" action="?settings">
       <input type="hidden" name="return" value="{{.ReturnPath}}">
       <input type="hidden" name="action" value="save_chroot_location">
-      <input type="text" name="location_url_path" placeholder="{{index .T "domain_settings_chroot_placeholder"}}" autocomplete="off">
+      <label class="static-folder-field">
+        <input type="text" name="location_url_path" placeholder="{{index .T "domain_settings_chroot_placeholder"}}" autocomplete="off">
+      </label>
       <button class="primary" type="submit">{{index .T "domain_settings_chroot_save"}}</button>
     </form>
     {{if .ChrootLocations}}
@@ -204,6 +133,7 @@
   <p class="hint">{{index .T "domain_settings_alias_limit"}}</p>
   {{end}}
 
+  {{if .Aliases}}
   <form method="post" action="?settings" style="margin: 0 0 12px;">
     <input type="hidden" name="return" value="{{.ReturnPath}}">
     <input type="hidden" name="action" value="check_all">
@@ -216,7 +146,6 @@
     <button type="submit">{{index .T "domain_settings_use_primary"}}</button>
   </form>
 
-  {{if .Aliases}}
   <div class="alias-list">
     {{range .Aliases}}
     <section class="alias-row {{if .IsSelected}}selected{{end}}">
@@ -232,7 +161,7 @@
             <input type="hidden" name="alias_domain" value="{{.Domain}}">
             <button type="submit">{{index $.T "domain_settings_check"}}</button>
           </form>
-          {{if .IsActive}}
+          {{if and .IsActive (not .IsSelected)}}
           <form method="post" action="?settings">
             <input type="hidden" name="return" value="{{$.ReturnPath}}">
             <input type="hidden" name="action" value="select_alias">
@@ -337,5 +266,6 @@
     });
   })();
   </script>
+</main>
 </body>
 </html>

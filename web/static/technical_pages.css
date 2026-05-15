@@ -1,0 +1,507 @@
+@import url("/p/static/directory_listing.css");
+
+.technical-page .container,
+.technical-page .manager-shell,
+.technical-page .analytics-page-shell {
+    width: min(1180px, calc(100% - 32px));
+    max-width: none;
+    margin: 0 auto;
+    padding: 32px 0 56px;
+}
+
+.technical-page .analytics-page-shell {
+    width: min(1320px, calc(100% - 32px));
+}
+
+.technical-page .page-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 24px;
+    margin-bottom: 28px;
+    padding: 14px 18px;
+    border: 1px solid var(--border-cyan);
+    border-radius: 18px;
+    background: rgba(0, 0, 0, 0.18);
+    backdrop-filter: blur(8px);
+}
+
+.technical-page .page-header h1,
+.technical-page h1.section-heading {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    min-width: 0;
+    margin: 0;
+    color: var(--text);
+    font-family: "DefaultNormal", Arial, Helvetica, sans-serif;
+    font-size: clamp(28px, 4vw, 46px);
+    line-height: 1.08;
+}
+
+.technical-page .page-header a,
+.technical-page h1.section-heading a {
+    color: var(--text);
+    text-decoration: none;
+}
+
+.technical-page .page-header a:hover,
+.technical-page h1.section-heading a:hover {
+    color: var(--cyan);
+}
+
+.technical-page .page-header small,
+.technical-page .page-header .text-muted,
+.technical-page h1.section-heading .text-muted {
+    min-width: 0;
+    color: var(--muted) !important;
+    font-family: "DefaultLight", Arial, Helvetica, sans-serif;
+    font-size: 15px;
+    font-weight: 400;
+    overflow-wrap: anywhere;
+}
+
+.technical-page .section-icon {
+    width: 42px;
+    height: 42px;
+    padding: 7px;
+    border: 1px solid rgba(149, 229, 239, 0.24);
+    border-radius: 14px;
+    background: rgba(0, 0, 0, 0.24);
+    object-fit: contain;
+}
+
+.technical-page .text-muted,
+.technical-page .form-text,
+.technical-page .hint,
+.technical-page .small {
+    color: var(--muted) !important;
+}
+
+.technical-page code,
+.technical-page .copy-field {
+    border: 1px solid rgba(149, 229, 239, 0.18);
+    border-radius: 8px;
+    background: rgba(0, 0, 0, 0.22);
+    color: var(--green);
+}
+
+.technical-page .btn,
+.technical-page button,
+.technical-page input[type="submit"],
+.technical-page .backup-download-link {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    min-height: 38px;
+    padding: 8px 12px;
+    border: 1px solid transparent;
+    border-radius: 10px;
+    font: inherit;
+    cursor: pointer;
+    text-decoration: none;
+}
+
+.technical-page .btn-primary,
+.technical-page button.primary,
+.technical-page input[type="submit"].btn-primary {
+    border-color: rgba(149, 229, 239, 0.62);
+    background: rgba(149, 229, 239, 0.18);
+    color: var(--text);
+}
+
+.technical-page .btn-primary:hover,
+.technical-page button.primary:hover,
+.technical-page input[type="submit"].btn-primary:hover {
+    border-color: var(--cyan);
+    background: rgba(149, 229, 239, 0.28);
+    color: var(--text);
+}
+
+.technical-page .btn-outline-secondary,
+.technical-page button:not(.primary):not(.danger),
+.technical-page .backup-download-link {
+    border-color: rgba(149, 229, 239, 0.28);
+    background: rgba(0, 0, 0, 0.16);
+    color: var(--cream);
+}
+
+.technical-page .btn-outline-secondary:hover,
+.technical-page button:not(.primary):not(.danger):hover,
+.technical-page .backup-download-link:hover {
+    border-color: rgba(149, 229, 239, 0.56);
+    background: rgba(0, 0, 0, 0.30);
+    color: var(--cyan);
+}
+
+.technical-page .btn-outline-danger,
+.technical-page .btn-danger,
+.technical-page button.danger {
+    border-color: rgba(255, 133, 133, 0.42);
+    background: rgba(117, 27, 27, 0.22);
+    color: #ffb5b5;
+}
+
+.technical-page .btn-success {
+    border-color: rgba(142, 233, 155, 0.42);
+    background: rgba(28, 94, 45, 0.28);
+    color: var(--green);
+}
+
+.technical-page .card,
+.technical-page .bg-body-tertiary.border,
+.technical-page .dns-box,
+.technical-page .alias-row,
+.technical-page .profile-form {
+    border: 1px solid var(--border-cyan) !important;
+    border-radius: 24px !important;
+    background:
+        radial-gradient(circle at top right, rgba(149, 229, 239, 0.10), transparent 34%),
+        radial-gradient(circle at bottom left, rgba(255, 165, 0, 0.08), transparent 30%),
+        rgba(0, 0, 0, 0.24) !important;
+    color: var(--text);
+    box-shadow: var(--shadow);
+}
+
+.technical-page .card-body,
+.technical-page .dns-box,
+.technical-page .profile-form {
+    padding: 22px;
+}
+
+.technical-page .table {
+    --bs-table-bg: transparent;
+    --bs-table-color: var(--text);
+    --bs-table-hover-bg: rgba(149, 229, 239, 0.07);
+    --bs-table-hover-color: var(--text);
+    color: var(--text);
+}
+
+.technical-page .table thead th {
+    border-bottom-color: rgba(149, 229, 239, 0.28);
+    color: var(--cyan);
+    font-size: 13px;
+    text-transform: uppercase;
+}
+
+.technical-page .table tbody td {
+    border-color: rgba(149, 229, 239, 0.14);
+}
+
+.technical-page .form-control,
+.technical-page .form-select,
+.technical-page input[type="text"],
+.technical-page input[type="email"],
+.technical-page input[type="password"],
+.technical-page input[type="number"] {
+    min-height: 48px;
+    padding: 12px 14px;
+    border: 1px solid rgba(149, 229, 239, 0.28);
+    border-radius: 10px;
+    background: rgba(0, 0, 0, 0.20);
+    color: var(--text);
+}
+
+.technical-page .form-control:focus,
+.technical-page .form-select:focus,
+.technical-page input:focus {
+    border-color: var(--cyan);
+    box-shadow: 0 0 0 0.2rem rgba(149, 229, 239, 0.16);
+}
+
+.technical-page .form-control::placeholder,
+.technical-page input::placeholder {
+    color: rgba(255, 255, 255, 0.48);
+}
+
+.technical-page .form-select option {
+    background: #252525;
+    color: var(--text);
+}
+
+.technical-page .form-control-sm,
+.technical-page .form-select-sm {
+    min-height: 42px;
+    padding: 9px 12px;
+}
+
+.technical-page label {
+    color: var(--text);
+}
+
+.technical-page .profile-form {
+    display: grid;
+    gap: 14px;
+    max-width: 560px;
+}
+
+.technical-page .profile-form label {
+    display: grid;
+    gap: 6px;
+    font-weight: 700;
+}
+
+.technical-page .profile-form button[type="submit"] {
+    border-color: rgba(149, 229, 239, 0.62);
+    background: rgba(149, 229, 239, 0.18);
+    color: var(--text);
+}
+
+.technical-page .backup-download-link {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    text-decoration: none;
+}
+
+.technical-page .backup-download-link img {
+    width: 22px;
+    height: 22px;
+    object-fit: contain;
+}
+
+.technical-page .static-folder-form {
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+    margin-top: 14px;
+    margin-bottom: 20px;
+    padding: 16px;
+    border: 1px solid rgba(149, 229, 239, 0.18);
+    border-radius: 18px;
+    background: rgba(0, 0, 0, 0.16);
+}
+
+.technical-page .static-folder-field {
+    display: grid;
+    gap: 6px;
+}
+
+.technical-page .static-folder-field .hint {
+    font-size: 13px;
+}
+
+.technical-page .revision-enable-button,
+.technical-page .btn-success.revision-enable-button {
+    border-color: rgba(78, 255, 125, 0.72);
+    background: rgba(34, 177, 76, 0.28);
+    color: #8eff9f;
+    box-shadow: inset 0 0 0 1px rgba(142, 233, 155, 0.18);
+}
+
+.technical-page .revision-enable-button:hover,
+.technical-page .btn-success.revision-enable-button:hover {
+    border-color: #8eff9f;
+    background: rgba(34, 177, 76, 0.42);
+    color: #eaffee;
+}
+
+.technical-page .revision-disable-button,
+.technical-page .btn-danger.revision-disable-button {
+    border-color: rgba(255, 92, 92, 0.72);
+    background: rgba(181, 42, 42, 0.30);
+    color: #ffb5b5;
+    box-shadow: inset 0 0 0 1px rgba(255, 133, 133, 0.16);
+}
+
+.technical-page .revision-disable-button:hover,
+.technical-page .btn-danger.revision-disable-button:hover {
+    border-color: #ff8f8f;
+    background: rgba(181, 42, 42, 0.46);
+    color: #fff1f1;
+}
+
+.technical-page .access-grid,
+.technical-page .add-form {
+    display: grid;
+    grid-template-columns: minmax(120px, 150px) minmax(160px, 1fr) minmax(110px, 140px) auto;
+    gap: 8px;
+    align-items: center;
+}
+
+.technical-page .add-form {
+    grid-template-columns: minmax(0, 1fr) auto;
+    margin: 18px 0;
+}
+
+.technical-page .alias-list {
+    display: grid;
+    gap: 12px;
+    margin-top: 16px;
+}
+
+.technical-page .alias-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 14px;
+}
+
+.technical-page .alias-domain {
+    color: var(--text);
+    font-family: "DefaultNormal", Arial, Helvetica, sans-serif;
+    font-weight: 700;
+    word-break: break-all;
+}
+
+.technical-page .alias-actions,
+.technical-page .status-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+.technical-page .status-list {
+    margin: 10px 0;
+}
+
+.technical-page .record-grid,
+.technical-page .ssl-status-list {
+    display: grid;
+    gap: 8px 12px;
+    margin-top: 10px;
+}
+
+.technical-page .record-grid,
+.technical-page .ssl-status-row {
+    grid-template-columns: 120px minmax(0, 1fr);
+}
+
+.technical-page .record-grid code {
+    display: inline-block;
+    word-break: break-all;
+}
+
+.technical-page .checkbox-row {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    margin: 12px 0;
+}
+
+.technical-page .checkbox-row input {
+    margin-top: 4px;
+}
+
+.technical-page .selected {
+    border-color: rgba(142, 233, 155, 0.56) !important;
+}
+
+.technical-page .status-ok {
+    color: var(--green);
+}
+
+.technical-page .status-warn {
+    color: var(--orange);
+}
+
+.technical-page .status-bad {
+    color: #ffb5b5;
+}
+
+.technical-page .empty {
+    padding: 22px;
+    color: var(--muted);
+}
+
+.technical-page .file-thumb,
+.technical-page .file-icon,
+.technical-page .file-preview-trigger {
+    width: 64px;
+    height: 64px;
+    border: 1px solid rgba(149, 229, 239, 0.24);
+    border-radius: 16px;
+    background: rgba(0, 0, 0, 0.24);
+    color: var(--orange);
+}
+
+.technical-page .modal-content {
+    border: 1px solid var(--border-cyan);
+    border-radius: 22px;
+    background: #252525;
+    color: var(--text);
+}
+
+.technical-page .modal-header,
+.technical-page .modal-footer {
+    border-color: rgba(149, 229, 239, 0.18);
+}
+
+.technical-page .progress {
+    background: rgba(0, 0, 0, 0.28);
+}
+
+.technical-page .progress-bar {
+    background: var(--cyan);
+    color: #1e2729;
+}
+
+.technical-page .alert,
+.technical-page .alert-secondary,
+.technical-page .alert-info,
+.technical-page .alert-warning,
+.technical-page .alert-danger {
+    border: 1px solid rgba(149, 229, 239, 0.24);
+    border-radius: 16px;
+    background: rgba(0, 0, 0, 0.22);
+    color: var(--text);
+}
+
+.technical-page .alert-danger {
+    border-color: rgba(255, 133, 133, 0.42);
+    color: #ffb5b5;
+}
+
+.technical-page.analytics-page {
+    background:
+        radial-gradient(circle at top right, rgba(149, 229, 239, 0.10), transparent 32%),
+        radial-gradient(circle at bottom left, rgba(255, 165, 0, 0.10), transparent 30%),
+        #333 url("/p/bb83e4fb3c837848f1fb56fa4d2194349b14f30096ff5a4b94976589042aae75.png");
+}
+
+.technical-page.analytics-page .metric-card,
+.technical-page.analytics-page .world-map-card,
+.technical-page.analytics-page .report-grid > section.card {
+    border-color: var(--border-cyan);
+    background: rgba(0, 0, 0, 0.24);
+}
+
+@media (max-width: 900px) {
+    .technical-page .access-grid,
+    .technical-page .add-form,
+    .technical-page .record-grid,
+    .technical-page .ssl-status-row {
+        grid-template-columns: 1fr;
+    }
+}
+
+@media (max-width: 760px) {
+    .technical-page .container,
+    .technical-page .manager-shell,
+    .technical-page .analytics-page-shell {
+        width: min(100% - 20px, 1180px);
+        padding-top: 14px;
+    }
+
+    .technical-page .page-header,
+    .technical-page .alias-header {
+        align-items: flex-start;
+        flex-direction: column;
+    }
+
+    .technical-page .page-header h1,
+    .technical-page h1.section-heading {
+        font-size: 30px;
+    }
+
+    .technical-page .section-icon {
+        width: 38px;
+        height: 38px;
+    }
+
+    .technical-page .card-body,
+    .technical-page .dns-box,
+    .technical-page .profile-form {
+        padding: 18px;
+    }
+}

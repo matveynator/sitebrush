@@ -10133,10 +10133,16 @@ func (a *App) renderDirectoryListing(w http.ResponseWriter, r *http.Request, dom
 		http.NotFound(w, r)
 		return
 	}
+	translations := translationsForRequest(r)
+	directoryListingTitle := translationOrDefault(translations, "directory_listing_title", "Directory listing")
+	directoryFolderLabel := translationOrDefault(translations, "directory_folder", "Folder")
+	directoryEntriesLabel := translationOrDefault(translations, "directory_entries_label", "entries")
+	directoryParentFolderLabel := translationOrDefault(translations, "directory_parent_folder", "Parent folder")
+	directoryEmptyLabel := translationOrDefault(translations, "directory_empty", "This folder is empty.")
 	cleanRequestPath := cleanPath(requestPath)
 	listingEntries := make([]directoryListingEntry, 0, len(entries))
 	for _, entry := range entries {
-		entryView, ok := a.directoryListingEntryView(domain, cleanRequestPath, absoluteDirectoryPath, entry)
+		entryView, ok := a.directoryListingEntryView(domain, cleanRequestPath, absoluteDirectoryPath, entry, translations)
 		if ok {
 			listingEntries = append(listingEntries, entryView)
 		}
@@ -10150,15 +10156,23 @@ func (a *App) renderDirectoryListing(w http.ResponseWriter, r *http.Request, dom
 		return strings.ToLower(listingEntries[i].Name) < strings.ToLower(listingEntries[j].Name)
 	})
 	var listing strings.Builder
-	listing.WriteString("<!doctype html><html><head><meta charset=\"utf-8\"><title>Index of ")
+	listing.WriteString("<!doctype html><html><head><meta charset=\"utf-8\"><title>")
+	listing.WriteString(template.HTMLEscapeString(directoryListingTitle))
+	listing.WriteString(": ")
 	listing.WriteString(template.HTMLEscapeString(cleanRequestPath))
-	listing.WriteString("</title><meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\"><link rel=\"icon\" href=\"/p/static/sitebrush-logo.ico\" type=\"image/x-icon\"><link rel=\"stylesheet\" href=\"/p/static/directory_listing.css\"></head><body><main class=\"page\"><header class=\"topbar\"><a class=\"brand\" href=\"/\"><img class=\"brand-logo\" src=\"/p/static/sitebrush-logo.png\" alt=\"Sitebrush\"><span><span class=\"brand-name\">sitebrush</span><span class=\"brand-line\">Directory listing</span></span></a><div class=\"path-pill\">")
+	listing.WriteString("</title><meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\"><link rel=\"icon\" href=\"/p/static/sitebrush-logo.ico\" type=\"image/x-icon\"><link rel=\"stylesheet\" href=\"/p/static/directory_listing.css\"></head><body><main class=\"page\"><header class=\"topbar\"><a class=\"brand\" href=\"/\"><img class=\"brand-logo\" src=\"/p/static/sitebrush-logo.png\" alt=\"Sitebrush\"><span><span class=\"brand-name\">sitebrush</span><span class=\"brand-line\">")
+	listing.WriteString(template.HTMLEscapeString(directoryListingTitle))
+	listing.WriteString("</span></span></a><div class=\"path-pill\">")
 	listing.WriteString(template.HTMLEscapeString(cleanRequestPath))
-	listing.WriteString("</div></header><section class=\"directory-panel\"><div class=\"directory-header\"><p class=\"eyebrow\">Folder</p><h1>")
+	listing.WriteString("</div></header><section class=\"directory-panel\"><div class=\"directory-header\"><p class=\"eyebrow\">")
+	listing.WriteString(template.HTMLEscapeString(directoryFolderLabel))
+	listing.WriteString("</p><h1>")
 	listing.WriteString(template.HTMLEscapeString(cleanRequestPath))
 	listing.WriteString("</h1><p class=\"directory-meta\">")
 	listing.WriteString(strconv.Itoa(len(listingEntries)))
-	listing.WriteString(" entries</p></div><div class=\"entry-list\">")
+	listing.WriteString(" ")
+	listing.WriteString(template.HTMLEscapeString(directoryEntriesLabel))
+	listing.WriteString("</p></div><div class=\"entry-list\">")
 	if cleanRequestPath != locationURLPath {
 		parentPath := parentPagePath(cleanRequestPath)
 		if parentPath == "" {
@@ -10166,7 +10180,11 @@ func (a *App) renderDirectoryListing(w http.ResponseWriter, r *http.Request, dom
 		}
 		listing.WriteString("<a class=\"entry entry-folder\" href=\"")
 		listing.WriteString(template.HTMLEscapeString(parentPath))
-		listing.WriteString("\"><span class=\"entry-icon\">..</span><span class=\"entry-name\">Parent folder</span><span class=\"entry-kind\">Folder</span><span class=\"entry-size\">-</span><span class=\"entry-time\"></span></a>")
+		listing.WriteString("\"><span class=\"entry-icon\">..</span><span class=\"entry-name\">")
+		listing.WriteString(template.HTMLEscapeString(directoryParentFolderLabel))
+		listing.WriteString("</span><span class=\"entry-kind\">")
+		listing.WriteString(template.HTMLEscapeString(directoryFolderLabel))
+		listing.WriteString("</span><span class=\"entry-size\">-</span><span class=\"entry-time\"></span></a>")
 	}
 	for _, entry := range listingEntries {
 		listing.WriteString("<a class=\"")
@@ -10189,14 +10207,16 @@ func (a *App) renderDirectoryListing(w http.ResponseWriter, r *http.Request, dom
 		listing.WriteString("</span></a>")
 	}
 	if len(listingEntries) == 0 && cleanRequestPath == locationURLPath {
-		listing.WriteString("<div class=\"empty\">This folder is empty.</div>")
+		listing.WriteString("<div class=\"empty\">")
+		listing.WriteString(template.HTMLEscapeString(directoryEmptyLabel))
+		listing.WriteString("</div>")
 	}
 	listing.WriteString("</div></section></main></body></html>")
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_, _ = io.WriteString(w, listing.String())
 }
 
-func (a *App) directoryListingEntryView(domain, cleanRequestPath, absoluteDirectoryPath string, entry os.DirEntry) (directoryListingEntry, bool) {
+func (a *App) directoryListingEntryView(domain, cleanRequestPath, absoluteDirectoryPath string, entry os.DirEntry, translations map[string]string) (directoryListingEntry, bool) {
 	entryName := entry.Name()
 	entryPath := filepath.Join(absoluteDirectoryPath, entryName)
 	_, entryInfo, err := a.resolveExistingChrootPath(domain, entryPath)
@@ -10206,21 +10226,21 @@ func (a *App) directoryListingEntryView(domain, cleanRequestPath, absoluteDirect
 	isDir := entryInfo.IsDir()
 	href := strings.TrimSuffix(cleanRequestPath, "/") + "/" + url.PathEscape(entryName)
 	label := entryName
-	entryKind := "File"
+	entryKind := translationOrDefault(translations, "directory_file", "File")
 	entryIcon := "•"
 	entrySize := formatFileSize(entryInfo.Size())
 	if isDir {
 		href += "/"
 		label += "/"
-		entryKind = "Folder"
+		entryKind = translationOrDefault(translations, "directory_folder", "Folder")
 		entryIcon = "⌂"
 		entrySize = "-"
 	}
 	if entry.Type()&os.ModeSymlink != 0 {
 		if isDir {
-			entryKind = "Folder link"
+			entryKind = translationOrDefault(translations, "directory_folder_link", "Folder link")
 		} else {
-			entryKind = "File link"
+			entryKind = translationOrDefault(translations, "directory_file_link", "File link")
 		}
 		entryIcon = "↗"
 	}

@@ -617,6 +617,7 @@ func TestChrootDirectoryListingUsesEmbeddedSitebrushStyle(t *testing.T) {
 	for _, expected := range []string{
 		`/p/static/directory_listing.css`,
 		`class="directory-panel"`,
+		`Содержимое папки`,
 		`manuals/`,
 		`release notes.txt`,
 		`release%20notes.txt`,
@@ -649,8 +650,10 @@ func TestChrootLocationAllowsSymlinksInsideDomainChroot(t *testing.T) {
 		t.Fatalf("body does not include symlinked index: %q", response.Body.String())
 	}
 
+	listingRequest := httptest.NewRequest(http.MethodGet, "http://localhost:8080/downloads", nil)
+	listingRequest.Header.Set("Accept-Language", "en")
 	listingResponse := httptest.NewRecorder()
-	application.route(listingResponse, httptest.NewRequest(http.MethodGet, "http://localhost:8080/downloads", nil))
+	application.route(listingResponse, listingRequest)
 	if listingResponse.Code != http.StatusOK {
 		t.Fatalf("listing status = %d, want %d", listingResponse.Code, http.StatusOK)
 	}

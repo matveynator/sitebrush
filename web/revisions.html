@@ -15,8 +15,9 @@
     .section-icon { width:30px; height:30px; object-fit:contain; }
     .section-heading { display:flex; align-items:center; gap:10px; }
   </style>
+  <link href="/p/static/technical_pages.css" rel="stylesheet">
 </head>
-<body class="bg-body">
+<body class="technical-page bg-body">
 <div class="container py-5">
   <div class="page-header mb-4 d-flex flex-wrap align-items-center justify-content-between gap-2">
     <h1 class="m-0 section-heading">
@@ -52,10 +53,10 @@
                 <input type="hidden" name="path" value="{{.PagePath}}"/>
                 {{if eq .IsActive 1}}
                 <input type="hidden" name="enable" value="0"/>
-                <button class="btn btn-danger btn-sm">{{index $.T "revisions_disable"}}</button>
+                <button class="btn btn-danger btn-sm revision-disable-button">{{index $.T "revisions_disable"}}</button>
                 {{else}}
                 <input type="hidden" name="enable" value="1"/>
-                <button class="btn btn-success btn-sm">{{index $.T "revisions_enable"}}</button>
+                <button class="btn btn-success btn-sm revision-enable-button">{{index $.T "revisions_enable"}}</button>
                 {{end}}
               </form>
             </td>
