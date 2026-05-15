@@ -111,6 +111,25 @@ func newTestApplication(t *testing.T) (*App, *sql.DB) {
 	return application, rawDB
 }
 
+type panicSQLExecutor struct {
+	t *testing.T
+}
+
+func (executor panicSQLExecutor) ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error) {
+	executor.t.Fatalf("unexpected database exec on static fast path: %s", query)
+	return nil, nil
+}
+
+func (executor panicSQLExecutor) QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error) {
+	executor.t.Fatalf("unexpected database query on static fast path: %s", query)
+	return nil, nil
+}
+
+func (executor panicSQLExecutor) QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row {
+	executor.t.Fatalf("unexpected database query-row on static fast path: %s", query)
+	return nil
+}
+
 func newAdminSessionCookie(t *testing.T, application *App, email string) *http.Cookie {
 	t.Helper()
 	sessionRequest := httptest.NewRequest(http.MethodGet, "http://localhost:8080/", nil)
@@ -3117,6 +3136,63 @@ func TestPublicImportedAssetsServeFromCanonicalAndDomainPrefixedPaths(t *testing
 	}
 }
 
+func TestGuestStaticRouteServesPublishedFileWithoutDatabase(t *testing.T) {
+	storagePath := t.TempDir()
+	application := &App{db: panicSQLExecutor{t: t}, storagePath: storagePath}
+	staticFilePath := filepath.Join(application.domainStaticDir("localhost"), "en.html")
+	if err := os.MkdirAll(filepath.Dir(staticFilePath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(staticFilePath, []byte("<html><body>fast</body></html>"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	request := httptest.NewRequest(http.MethodGet, "http://localhost:8080/en", nil)
+	response := httptest.NewRecorder()
+	application.route(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%q", response.Code, response.Body.String())
+	}
+	body := response.Body.String()
+	for _, expectedFragment := range []string{"<html><body>fast", "initializeSitebrushContextMenuForGuests", "href='?login'", "/p/static/login.png"} {
+		if !strings.Contains(body, expectedFragment) {
+			t.Fatalf("guest static body missing %q in %s", expectedFragment, body)
+		}
+	}
+	for _, unexpectedFragment := range []string{"href='?visual'", "href='?analytics'", "SiteBrushMenuStorageUsage"} {
+		if strings.Contains(body, unexpectedFragment) {
+			t.Fatalf("guest static body contains admin fragment %q in %s", unexpectedFragment, body)
+		}
+	}
+	if response.Header().Get("X-Sitebrush-Source") != "static" {
+		t.Fatalf("source header = %q, want static", response.Header().Get("X-Sitebrush-Source"))
+	}
+}
+
+func TestGuestStaticAnalyticsSkipsDatabase(t *testing.T) {
+	storagePath := t.TempDir()
+	application := &App{db: panicSQLExecutor{t: t}, storagePath: storagePath, analyticsEvents: make(chan siteAnalyticsEvent, 1)}
+	staticFilePath := filepath.Join(application.domainStaticDir("localhost"), "index.html")
+	if err := os.MkdirAll(filepath.Dir(staticFilePath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(staticFilePath, []byte("<html><body>cached</body></html>"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	request := httptest.NewRequest(http.MethodGet, "http://localhost:8080/", nil)
+	response := httptest.NewRecorder()
+	application.analyticsMiddleware(http.HandlerFunc(application.route)).ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%q", response.Code, response.Body.String())
+	}
+	select {
+	case event := <-application.analyticsEvents:
+		t.Fatalf("guest static request should not enqueue analytics event: %#v", event)
+	default:
+	}
+}
+
 func TestFilesPageUsesPublicAssetPrefix(t *testing.T) {
 	storagePath := t.TempDir()
 	rawDB, err := sql.Open("sqlite3", filepath.Join(storagePath, "sitebrush.db"))
@@ -3278,6 +3354,44 @@ func TestAssetServingCountsDownloadsAndTokenUse(t *testing.T) {
 	}
 	if tokenUseCount != 1 {
 		t.Fatalf("token use count = %d, want 1", tokenUseCount)
+	}
+}
+
+func TestPublicAssetServingDoesNotWriteDownloadCountOnHotPath(t *testing.T) {
+	storagePath := t.TempDir()
+	rawDB, err := sql.Open("sqlite3", filepath.Join(storagePath, "sitebrush.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rawDB.Close()
+
+	application := &App{db: rawDB, storagePath: storagePath, grabTracker: newGrabProgressTracker()}
+	if err := application.migrate(context.Background()); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	domainDir := application.domainFilesDirForDomain("localhost")
+	if err := os.MkdirAll(domainDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(domainDir, "public.svg"), []byte("<svg></svg>"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	application.upsertFileMetadata(context.Background(), "localhost", "public.svg", "/docs", 11, "image/svg+xml", "test")
+
+	request := httptest.NewRequest(http.MethodGet, "http://localhost:8080/p/public.svg", nil)
+	response := httptest.NewRecorder()
+	application.servePublicAsset(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("public asset status = %d, want 200", response.Code)
+	}
+
+	var downloadCount int64
+	if err := rawDB.QueryRow(`SELECT download_count FROM file_metadata WHERE domain=? AND file_name=?`, "localhost", "public.svg").Scan(&downloadCount); err != nil {
+		t.Fatalf("read download count: %v", err)
+	}
+	if downloadCount != 0 {
+		t.Fatalf("download count = %d, want public hot path to avoid database writes", downloadCount)
 	}
 }
 

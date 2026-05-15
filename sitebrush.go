@@ -929,6 +929,9 @@ func (a *App) analyticsMiddleware(next http.Handler) http.Handler {
 		if contentSource == "" && isLikelyStaticAssetPath(r.URL.Path) {
 			contentSource = "static"
 		}
+		if !hasSitebrushSessionCookie(r) && contentSource == "static" {
+			return
+		}
 		if contentSource == "" {
 			contentSource = "request"
 		}
@@ -2757,6 +2760,9 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 	}
 	if hasQueryFlag(r, "captcha") {
 		a.captchaImage(w, r)
+		return
+	}
+	if isGuestStaticRequest(r) && a.servePublishedStaticFileFromDisk(w, r, domainFromContext(r.Context()), pagePath, true) {
 		return
 	}
 	domain := a.siteDomain(r.Context(), r)
@@ -4740,12 +4746,19 @@ func (a *App) nativePickedFilesJSON(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) servePublicAsset(w http.ResponseWriter, r *http.Request) {
-	fileName := publicAssetFileNameFromPath(r.URL.Path, a.siteDomain(r.Context(), r))
+	requestDomain := domainFromContext(r.Context())
+	fileName := publicAssetFileNameFromPath(r.URL.Path, requestDomain)
 	if fileName == "" {
 		http.NotFound(w, r)
 		return
 	}
-	domain := domainStorageName(a.siteDomain(r.Context(), r))
+	domain := domainStorageName(requestDomain)
+	if !a.publicAssetExists(domain, fileName) {
+		primaryDomain := a.siteDomain(r.Context(), r)
+		if primaryDomain != requestDomain {
+			domain = domainStorageName(primaryDomain)
+		}
+	}
 	a.serveAssetFile(w, r, domain, fileName)
 }
 
@@ -6161,6 +6174,7 @@ func (a *App) serveAssetFile(w http.ResponseWriter, r *http.Request, domain, fil
 			_, _ = a.db.ExecContext(r.Context(), `UPDATE file_access_rules SET single_use_left=single_use_left-1 WHERE domain=? AND file_name=? AND single_use_left>0`, domain, fileName)
 		}
 		_, _ = a.db.ExecContext(r.Context(), `UPDATE file_access_rules SET token_use_count=token_use_count+1 WHERE domain=? AND file_name=?`, domain, fileName)
+		_, _ = a.db.ExecContext(r.Context(), `UPDATE file_metadata SET download_count=download_count+1 WHERE domain=? AND file_name=?`, domain, fileName)
 	}
 	filePath := filepath.Join(a.filesRootDir(), domain, filepath.FromSlash(fileName))
 	if _, err := os.Stat(filePath); err != nil && !strings.HasPrefix(fileName, "p/") {
@@ -6169,8 +6183,20 @@ func (a *App) serveAssetFile(w http.ResponseWriter, r *http.Request, domain, fil
 			filePath = legacyPath
 		}
 	}
-	_, _ = a.db.ExecContext(r.Context(), `UPDATE file_metadata SET download_count=download_count+1 WHERE domain=? AND file_name=?`, domain, fileName)
 	http.ServeFile(w, r, filePath)
+}
+
+func (a *App) publicAssetExists(domain, fileName string) bool {
+	filePath := filepath.Join(a.filesRootDir(), domain, filepath.FromSlash(fileName))
+	if fileInfo, err := os.Stat(filePath); err == nil && !fileInfo.IsDir() {
+		return true
+	}
+	if strings.HasPrefix(fileName, "p/") {
+		return false
+	}
+	legacyPath := filepath.Join(a.filesRootDir(), domain, "p", filepath.FromSlash(fileName))
+	fileInfo, err := os.Stat(legacyPath)
+	return err == nil && !fileInfo.IsDir()
 }
 
 func publicAssetFileNameFromPath(requestPath, domain string) string {
@@ -6189,7 +6215,7 @@ func publicAssetFileNameFromPath(requestPath, domain string) string {
 }
 
 func (a *App) isDomainPrefixedPublicAssetPath(r *http.Request) bool {
-	return publicAssetFileNameFromPath(r.URL.Path, a.siteDomain(r.Context(), r)) != "" && !strings.HasPrefix(path.Clean(r.URL.Path), "/p/")
+	return publicAssetFileNameFromPath(r.URL.Path, domainFromContext(r.Context())) != "" && !strings.HasPrefix(path.Clean(r.URL.Path), "/p/")
 }
 
 func (a *App) findPage(ctx context.Context, domain, pagePath string) (Page, error) {
@@ -6481,6 +6507,9 @@ func contentTypeForManagedPage(pagePath, content string) string {
 }
 
 func buildContextMenuScript(isAdmin bool, isFrozen bool, pagePath, domain string, revisionID int, revisionCount int, storageUsageLabel string, translations map[string]string) string {
+	if !isAdmin {
+		return buildGuestContextMenuScript(pagePath, domain, translations)
+	}
 	escapedPath := template.JSEscapeString(pagePath)
 	escapedDomain := template.JSEscapeString(domain)
 	confirmFreezePrompt := template.JSEscapeString(translationOrDefault(translations, "confirm_freeze_prompt", "Freeze domain now?"))
@@ -6852,7 +6881,7 @@ func buildContextMenuScript(isAdmin bool, isFrozen bool, pagePath, domain string
 })();
 	</script>`
 	}
-	return contextMenuStylesAndHelpers() + `<script>
+	return guestContextMenuStylesAndHelpers() + `<script>
 (function initializeSitebrushContextMenuForGuests() {
   if (window.__sitebrushContextMenuInitialized) {
     return;
@@ -6894,12 +6923,329 @@ func buildContextMenuScript(isAdmin bool, isFrozen bool, pagePath, domain string
 		</script>`
 }
 
+func buildGuestContextMenuScript(pagePath, domain string, translations map[string]string) string {
+	escapedPath := template.JSEscapeString(pagePath)
+	escapedDomain := template.JSEscapeString(domain)
+	loginLabel := template.JSEscapeString(translationOrDefault(translations, "menu_login", "Sign in"))
+	compiledVersionLabel := template.JSEscapeString("v." + CompileVersion)
+	sitebrushHomeURL := "https://sitebrush.com"
+	serverBinaryDownloadURL := latestServerBinaryDownloadURL(runtime.GOOS, runtime.GOARCH)
+	copyrightMenuEntry := fmt.Sprintf("<li class='SiteBrushContextMenu ContextMenuCopyright'><div class='SiteBrushContextMenuFooter'><a href='%s' class='SiteBrushContextMenuFooterLink' target='_blank' rel='noopener noreferrer'>sitebrush</a><a href='%s' class='SiteBrushContextMenuVersion' download>%s</a></div></li>", sitebrushHomeURL, serverBinaryDownloadURL, compiledVersionLabel)
+	return guestContextMenuStylesAndHelpers() + `<script>
+(function initializeSitebrushContextMenuForGuests() {
+  if (window.__sitebrushContextMenuInitialized) {
+    return;
+  }
+  window.__sitebrushContextMenuInitialized = true;
+  const currentPagePath = "` + escapedPath + `";
+  const currentDomainName = "` + escapedDomain + `";
+  function buildSitebrushGuestMenuEntries() {
+    return [
+      "<ul class='SiteBrushMenuList'>",
+      "<li class='SiteBrushContextMenu SiteBrushDomainMenuItem'><a href='/' class='SiteBrushContextMenuLink'>" + currentDomainName + "</a></li>",
+      "<li class='SiteBrushContextMenu'><a href='?login' class='SiteBrushContextMenuLink'><img src='/p/static/login.png' class='SiteBrushMenuIcon' alt=''>" + "` + loginLabel + `" + "</a></li>",
+      "` + copyrightMenuEntry + `",
+      "</ul>"
+    ];
+  }
+  function onContextMenuOpen(browserEvent) {
+    if (browserEvent.__sitebrushContextMenuHandled || browserEvent.ctrlKey) {
+      return;
+    }
+    if (sitebrushShouldIgnoreContextMenuEvent(browserEvent)) {
+      return;
+    }
+    const clickedInsideSitebrushMenu = closestSitebrushEventElement(browserEvent, "#SiteBrushMenuBox");
+    if (clickedInsideSitebrushMenu) {
+      return;
+    }
+    browserEvent.__sitebrushContextMenuHandled = true;
+    browserEvent.preventDefault();
+    browserEvent.stopPropagation();
+    showSitebrushMenu(browserEvent, buildSitebrushGuestMenuEntries(), currentPagePath, false);
+  }
+  window.addEventListener("contextmenu", onContextMenuOpen, {capture: true, passive: false});
+  document.addEventListener("contextmenu", onContextMenuOpen, {capture: true, passive: false});
+  installSitebrushLongPressMenu(function openGuestMenuFromLongPress(menuPoint) {
+    showSitebrushMenu(menuPoint, buildSitebrushGuestMenuEntries(), currentPagePath, false);
+  });
+})();
+	</script>`
+}
+
 func latestServerBinaryDownloadURL(goos, goarch string) string {
 	fileName := "sitebrush_" + strings.TrimSpace(goos) + "_" + strings.TrimSpace(goarch)
 	if goos == "windows" {
 		fileName += ".exe"
 	}
 	return "https://files.zabiyaka.net/sitebrush/latest/server-app/" + fileName
+}
+
+func guestContextMenuStylesAndHelpers() string {
+	return `<style>
+.SiteBrushMenuBox,.SiteBrushMenuBox *{all:initial;box-sizing:border-box}
+.SiteBrushMenuBox{position:fixed;background:#fff url(/p/static/bg.png) repeat-x top;border:1px solid #8ea4c1;z-index:2147483646;padding:2px;min-width:min(240px,calc(100vw - 16px));max-width:calc(100vw - 16px);max-height:calc(100vh - 16px);overflow:auto;box-shadow:0 2px 12px rgba(0,0,0,0.2);font-family:Arial,Helvetica,sans-serif;touch-action:manipulation}
+.SiteBrushMenuList{list-style:none;margin:0;padding:0}
+.SiteBrushContextMenu{margin:0;padding:0}
+.SiteBrushContextMenuLink{display:flex;align-items:center;gap:8px;padding:8px 10px;color:#1f3f6f;text-decoration:none;font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:1.25;cursor:pointer;min-width:0;white-space:normal;word-break:break-word}
+.SiteBrushContextMenuLink:link,.SiteBrushContextMenuLink:visited,.SiteBrushContextMenuLink:active{color:#1f3f6f;text-decoration:none}
+.SiteBrushContextMenuLink:hover{color:#1f3f6f;background:#eef5ff;text-decoration:none}
+.SiteBrushDomainMenuItem .SiteBrushContextMenuLink{font-weight:700;border-bottom:1px solid #c8d5e7}
+.SiteBrushContextMenuFooter{display:flex;align-items:center;justify-content:space-between;gap:12px;border-top:1px solid #c8d5e7;margin-top:2px;padding:7px 10px 8px 10px;font-family:Arial,Helvetica,sans-serif;font-size:12px;color:#5b6f8b}.SiteBrushMenuIcon{width:18px;height:18px;flex:0 0 18px}
+.SiteBrushContextMenuFooterLink,.SiteBrushContextMenuVersion{color:#5b6f8b;text-decoration:none;font-family:Arial,Helvetica,sans-serif;font-size:12px;cursor:pointer}
+.SiteBrushContextMenuFooterLink:link,.SiteBrushContextMenuFooterLink:visited,.SiteBrushContextMenuFooterLink:active,.SiteBrushContextMenuFooterLink:hover,.SiteBrushContextMenuVersion:link,.SiteBrushContextMenuVersion:visited,.SiteBrushContextMenuVersion:active,.SiteBrushContextMenuVersion:hover{color:#5b6f8b;text-decoration:none}
+.SiteBrushContextMenuVersion{font-weight:700}
+@media (pointer: coarse), (max-width: 820px){
+  .SiteBrushMenuBox{right:auto;min-width:min(280px,calc(100vw - 16px));max-width:calc(100vw - 16px);max-height:calc(100vh - 16px);border-radius:8px;-webkit-overflow-scrolling:touch}
+  .SiteBrushContextMenuLink{min-height:44px;padding:11px 12px;font-size:16px;gap:10px}
+  .SiteBrushMenuIcon{width:20px;height:20px;flex-basis:20px}
+  .SiteBrushContextMenuFooter{font-size:13px;flex-wrap:wrap;padding:9px 12px 10px 12px}
+  .SiteBrushContextMenuFooterLink,.SiteBrushContextMenuVersion{font-size:13px}
+}
+@media (prefers-color-scheme: dark){
+  .SiteBrushMenuBox{background:#172235;border-color:#2f405d}
+  .SiteBrushContextMenuLink{color:#dbe8ff}
+  .SiteBrushContextMenuLink:link,.SiteBrushContextMenuLink:visited,.SiteBrushContextMenuLink:active{color:#dbe8ff}
+  .SiteBrushContextMenuLink:hover{color:#dbe8ff;background:#24344d}
+  .SiteBrushDomainMenuItem .SiteBrushContextMenuLink{border-bottom-color:#2f405d}
+  .SiteBrushContextMenuFooter{color:#a7bbd8;border-top-color:#2f405d}
+  .SiteBrushContextMenuFooterLink,.SiteBrushContextMenuVersion{color:#a7bbd8}
+  .SiteBrushContextMenuFooterLink:link,.SiteBrushContextMenuFooterLink:visited,.SiteBrushContextMenuFooterLink:active,.SiteBrushContextMenuFooterLink:hover,.SiteBrushContextMenuVersion:link,.SiteBrushContextMenuVersion:visited,.SiteBrushContextMenuVersion:active,.SiteBrushContextMenuVersion:hover{color:#a7bbd8}
+}
+</style>
+<script>
+const sitebrushContextMenuShadowCSS = document.currentScript && document.currentScript.previousElementSibling ? document.currentScript.previousElementSibling.textContent : "";
+function closestSitebrushEventElement(browserEvent, selector) {
+  const directTarget = browserEvent.target;
+  if (directTarget && directTarget.closest) {
+    const directMatch = directTarget.closest(selector);
+    if (directMatch) {
+      return directMatch;
+    }
+  }
+  if (!browserEvent.composedPath) {
+    return null;
+  }
+  for (const pathNode of browserEvent.composedPath()) {
+    if (!pathNode || pathNode.nodeType !== Node.ELEMENT_NODE) {
+      continue;
+    }
+    if (pathNode.matches && pathNode.matches(selector)) {
+      return pathNode;
+    }
+    if (pathNode.closest) {
+      const pathMatch = pathNode.closest(selector);
+      if (pathMatch) {
+        return pathMatch;
+      }
+    }
+  }
+  return null;
+}
+function closeSitebrushMenu() {
+  const existingMenuBox = document.getElementById("SiteBrushMenuBox");
+  if (existingMenuBox) {
+    existingMenuBox.remove();
+  }
+}
+function normalizeSitebrushMenuLinks(menuBoxElement, currentPagePath) {
+  const menuLinkElements = menuBoxElement.querySelectorAll("a[href]");
+  for (const menuLinkElement of menuLinkElements) {
+    const originalHref = menuLinkElement.getAttribute("href");
+    if (!originalHref || !originalHref.startsWith("?")) {
+      continue;
+    }
+    menuLinkElement.setAttribute("href", currentPagePath + originalHref);
+  }
+}
+function sitebrushMenuViewportNumber(candidateNumber, fallbackNumber) {
+  const parsedNumber = Number(candidateNumber);
+  if (Number.isFinite(parsedNumber) && parsedNumber > 0) {
+    return parsedNumber;
+  }
+  return fallbackNumber;
+}
+function sitebrushMenuPointFromEvent(browserEvent) {
+  const viewportWidth = sitebrushMenuViewportNumber(window.innerWidth, document.documentElement.clientWidth || 320);
+  const viewportHeight = sitebrushMenuViewportNumber(window.innerHeight, document.documentElement.clientHeight || 480);
+  return {
+    clientX: Math.max(0, Math.min(Number(browserEvent.clientX) || 0, viewportWidth)),
+    clientY: Math.max(0, Math.min(Number(browserEvent.clientY) || 0, viewportHeight))
+  };
+}
+function positionSitebrushMenuBox(menuBoxElement, menuPoint) {
+  const viewportWidth = sitebrushMenuViewportNumber(window.innerWidth, document.documentElement.clientWidth || 320);
+  const viewportHeight = sitebrushMenuViewportNumber(window.innerHeight, document.documentElement.clientHeight || 480);
+  const viewportGap = 8;
+  const menuRect = menuBoxElement.getBoundingClientRect();
+  const menuWidth = Math.min(menuRect.width || 0, viewportWidth - viewportGap * 2);
+  const menuHeight = Math.min(menuRect.height || 0, viewportHeight - viewportGap * 2);
+  const boundedLeft = Math.max(viewportGap, Math.min(menuPoint.clientX, viewportWidth - menuWidth - viewportGap));
+  const boundedTop = Math.max(viewportGap, Math.min(menuPoint.clientY, viewportHeight - menuHeight - viewportGap));
+  menuBoxElement.style.left = boundedLeft + "px";
+  menuBoxElement.style.top = boundedTop + "px";
+}
+function sitebrushShouldIgnoreContextMenuEvent(browserEvent) {
+  if (!window.__sitebrushLongPressMenuUntil) {
+    return false;
+  }
+  if (Date.now() > window.__sitebrushLongPressMenuUntil) {
+    window.__sitebrushLongPressMenuUntil = 0;
+    return false;
+  }
+  if (document.getElementById("SiteBrushMenuBox")) {
+    browserEvent.preventDefault();
+    browserEvent.stopPropagation();
+    return true;
+  }
+  return false;
+}
+function installSitebrushLongPressMenu(openMenuAtPoint) {
+  const longPressDelayMilliseconds = 650;
+  const moveTolerancePixels = 12;
+  let longPressTimer = 0;
+  let longPressStartPoint = null;
+  let longPressPointerID = null;
+  function clearLongPressTimer() {
+    if (longPressTimer) {
+      window.clearTimeout(longPressTimer);
+      longPressTimer = 0;
+    }
+  }
+  function cancelLongPress() {
+    clearLongPressTimer();
+    longPressStartPoint = null;
+    longPressPointerID = null;
+  }
+  function isTouchLikePointerEvent(browserEvent) {
+    return browserEvent.pointerType === "touch" || browserEvent.pointerType === "pen";
+  }
+  function startLongPress(browserEvent) {
+    if (closestSitebrushEventElement(browserEvent, "#SiteBrushMenuBox")) {
+      return;
+    }
+    if (browserEvent.pointerType && !isTouchLikePointerEvent(browserEvent)) {
+      return;
+    }
+    if (browserEvent.button && browserEvent.button !== 0) {
+      return;
+    }
+    cancelLongPress();
+    longPressStartPoint = sitebrushMenuPointFromEvent(browserEvent);
+    longPressPointerID = browserEvent.pointerId || null;
+    longPressTimer = window.setTimeout(function openMenuFromLongPress() {
+      const menuPoint = longPressStartPoint;
+      cancelLongPress();
+      if (!menuPoint) {
+        return;
+      }
+      window.__sitebrushLongPressMenuUntil = Date.now() + 1000;
+      openMenuAtPoint(menuPoint);
+    }, longPressDelayMilliseconds);
+  }
+  function moveLongPress(browserEvent) {
+    if (!longPressStartPoint) {
+      return;
+    }
+    if (longPressPointerID !== null && browserEvent.pointerId && browserEvent.pointerId !== longPressPointerID) {
+      return;
+    }
+    const currentPoint = sitebrushMenuPointFromEvent(browserEvent);
+    const movedX = Math.abs(currentPoint.clientX - longPressStartPoint.clientX);
+    const movedY = Math.abs(currentPoint.clientY - longPressStartPoint.clientY);
+    if (movedX > moveTolerancePixels || movedY > moveTolerancePixels) {
+      cancelLongPress();
+    }
+  }
+  function blockSyntheticClickAfterLongPress(browserEvent) {
+    if (!window.__sitebrushLongPressMenuUntil || Date.now() > window.__sitebrushLongPressMenuUntil) {
+      return;
+    }
+    if (closestSitebrushEventElement(browserEvent, "#SiteBrushMenuBox")) {
+      return;
+    }
+    browserEvent.preventDefault();
+    browserEvent.stopPropagation();
+  }
+  if (window.PointerEvent) {
+    document.addEventListener("pointerdown", startLongPress, {capture: true, passive: true});
+    document.addEventListener("pointermove", moveLongPress, {capture: true, passive: true});
+    document.addEventListener("pointerup", cancelLongPress, {capture: true, passive: true});
+    document.addEventListener("pointercancel", cancelLongPress, {capture: true, passive: true});
+  } else {
+    document.addEventListener("touchstart", function onTouchStart(browserEvent) {
+      if (browserEvent.touches.length !== 1) {
+        cancelLongPress();
+        return;
+      }
+      startLongPress(browserEvent.touches[0]);
+    }, {capture: true, passive: true});
+    document.addEventListener("touchmove", function onTouchMove(browserEvent) {
+      if (browserEvent.touches.length !== 1) {
+        cancelLongPress();
+        return;
+      }
+      moveLongPress(browserEvent.touches[0]);
+    }, {capture: true, passive: true});
+    document.addEventListener("touchend", cancelLongPress, {capture: true, passive: true});
+    document.addEventListener("touchcancel", cancelLongPress, {capture: true, passive: true});
+  }
+  document.addEventListener("click", blockSyntheticClickAfterLongPress, {capture: true, passive: false});
+}
+function showSitebrushMenu(browserEvent, menuHtmlEntries, currentPagePath, frozenMenuEnabled) {
+  closeSitebrushMenu();
+  const menuPoint = sitebrushMenuPointFromEvent(browserEvent);
+  const menuHostElement = document.createElement("div");
+  menuHostElement.id = "SiteBrushMenuBox";
+  menuHostElement.setAttribute("data-sitebrush-owned", "true");
+  menuHostElement.style.setProperty("all", "initial", "important");
+  menuHostElement.style.setProperty("position", "fixed", "important");
+  menuHostElement.style.setProperty("left", "0", "important");
+  menuHostElement.style.setProperty("top", "0", "important");
+  menuHostElement.style.setProperty("z-index", "2147483646", "important");
+  const menuRoot = menuHostElement.attachShadow ? menuHostElement.attachShadow({mode: "open"}) : menuHostElement;
+  const menuStyleElement = document.createElement("style");
+  menuStyleElement.setAttribute("data-sitebrush-owned", "true");
+  menuStyleElement.textContent = sitebrushContextMenuShadowCSS;
+  const menuBoxElement = document.createElement("div");
+  menuBoxElement.className = "SiteBrushMenuBox";
+  menuBoxElement.setAttribute("data-sitebrush-owned", "true");
+  if (frozenMenuEnabled) {
+    menuBoxElement.classList.add("SiteBrushMenuBoxFrozen");
+  }
+  menuBoxElement.innerHTML = menuHtmlEntries.join("");
+  normalizeSitebrushMenuLinks(menuBoxElement, currentPagePath);
+  menuBoxElement.style.left = menuPoint.clientX + "px";
+  menuBoxElement.style.top = menuPoint.clientY + "px";
+  menuRoot.appendChild(menuStyleElement);
+  menuRoot.appendChild(menuBoxElement);
+  document.body.appendChild(menuHostElement);
+  positionSitebrushMenuBox(menuBoxElement, menuPoint);
+  menuBoxElement.addEventListener("click", function onMenuClick(browserEvent) {
+    const menuLinkElement = browserEvent.target && browserEvent.target.closest && browserEvent.target.closest("a[href]");
+    if (!menuLinkElement) {
+      return;
+    }
+    const targetHref = menuLinkElement.getAttribute("href");
+    if (!targetHref) {
+      return;
+    }
+    browserEvent.preventDefault();
+    browserEvent.stopPropagation();
+    window.location.href = targetHref;
+  });
+  document.addEventListener("click", function closeMenuOnClick(browserEvent) {
+    const openMenu = document.getElementById("SiteBrushMenuBox");
+    if (!openMenu) {
+      return;
+    }
+    if (closestSitebrushEventElement(browserEvent, "#SiteBrushMenuBox")) {
+      return;
+    }
+    openMenu.remove();
+  }, { once: true });
+}
+</script>`
 }
 
 func contextMenuStylesAndHelpers() string {
@@ -11831,14 +12177,34 @@ func (a *App) servePublishedStaticFile(w http.ResponseWriter, r *http.Request, d
 	if a.isAdminRequest(r) {
 		return false
 	}
-	// Serve static page only when there is an active revision for this path.
-	var activeRevisionCount int
-	countErr := a.db.QueryRowContext(r.Context(), `SELECT COUNT(1) FROM revisions WHERE domain=? AND page_path=? AND is_active=1`, domain, pagePath).Scan(&activeRevisionCount)
-	if countErr != nil || activeRevisionCount == 0 {
+	return a.servePublishedStaticFileFromDisk(w, r, domain, pagePath, true)
+}
+
+func isGuestStaticRequest(r *http.Request) bool {
+	if r == nil {
 		return false
 	}
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		return false
+	}
+	if strings.TrimSpace(r.URL.RawQuery) != "" {
+		return false
+	}
+	return !hasSitebrushSessionCookie(r)
+}
+
+func hasSitebrushSessionCookie(r *http.Request) bool {
+	if r == nil {
+		return false
+	}
+	_, err := r.Cookie("sitebrush_session")
+	return err == nil
+}
+
+func (a *App) servePublishedStaticFileFromDisk(w http.ResponseWriter, r *http.Request, domain, pagePath string, injectPublicMenu bool) bool {
 	staticFilePath := filepath.Join(a.domainStaticDir(domain), staticRelativePathForPage(pagePath))
-	if _, statErr := os.Stat(staticFilePath); statErr != nil {
+	fileInfo, statErr := os.Stat(staticFilePath)
+	if statErr != nil || fileInfo.IsDir() {
 		return false
 	}
 	if pageContentKind(pagePath, "") != "html" {
@@ -11850,8 +12216,24 @@ func (a *App) servePublishedStaticFile(w http.ResponseWriter, r *http.Request, d
 	if readErr != nil {
 		return false
 	}
-	a.serveManagedPageContent(w, r, pagePath, string(staticContent), "static-file")
+	a.logContentDelivery(w, "static-file")
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if injectPublicMenu {
+		_, _ = w.Write([]byte(a.injectPublicContextMenu(r, pagePath, string(staticContent))))
+		return true
+	}
+	_, _ = w.Write(staticContent)
 	return true
+}
+
+func (a *App) injectPublicContextMenu(r *http.Request, pagePath, html string) string {
+	menuScript := buildGuestContextMenuScript(pagePath, domainFromContext(r.Context()), translationsForRequest(r))
+	lowerHTML := strings.ToLower(html)
+	bodyCloseIndex := strings.LastIndex(lowerHTML, "</body>")
+	if bodyCloseIndex < 0 {
+		return html + menuScript
+	}
+	return html[:bodyCloseIndex] + menuScript + html[bodyCloseIndex:]
 }
 
 func (a *App) writePublishedStaticHTML(domain, pagePath, html string) {
