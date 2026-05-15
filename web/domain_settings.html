@@ -159,6 +159,40 @@
     {{end}}
   </section>
 
+  <section class="dns-box">
+    <p><strong>{{index .T "domain_settings_chroot_title"}}</strong></p>
+    <form class="add-form" method="post" action="?settings">
+      <input type="hidden" name="return" value="{{.ReturnPath}}">
+      <input type="hidden" name="action" value="save_chroot_location">
+      <input type="text" name="location_url_path" placeholder="{{index .T "domain_settings_chroot_placeholder"}}" autocomplete="off">
+      <button class="primary" type="submit">{{index .T "domain_settings_chroot_save"}}</button>
+    </form>
+    {{if .ChrootLocations}}
+    <div class="alias-list">
+      {{range .ChrootLocations}}
+      <section class="alias-row">
+        <div class="alias-header">
+          <div>
+            <div class="alias-domain"><a href="{{.URLPath}}">{{.URLPath}}</a></div>
+            <div class="hint">{{index $.T "domain_settings_chroot_copy_hint"}} <code>{{.DirectoryPath}}</code></div>
+          </div>
+          <div class="alias-actions">
+            <form method="post" action="?settings">
+              <input type="hidden" name="return" value="{{$.ReturnPath}}">
+              <input type="hidden" name="action" value="delete_chroot_location">
+              <input type="hidden" name="location_url_path" value="{{.URLPath}}">
+              <button class="danger" type="submit" aria-label="{{index $.T "domain_settings_chroot_delete_aria"}} {{.URLPath}}">×</button>
+            </form>
+          </div>
+        </div>
+      </section>
+      {{end}}
+    </div>
+    {{else}}
+    <p class="empty">{{index .T "domain_settings_chroot_empty"}}</p>
+    {{end}}
+  </section>
+
   {{if .CanAddAlias}}
   <form class="add-form" method="post" action="?settings">
     <input type="hidden" name="return" value="{{.ReturnPath}}">

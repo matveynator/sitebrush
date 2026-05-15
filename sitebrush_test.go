@@ -528,6 +528,13 @@ func TestDomainStorageUsageRebuildsFromActualDiskUsage(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(domainFilesDir, "assets", "imported.png"), []byte("imported image"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	chrootDownloadsDir := filepath.Join(application.domainChrootRootDir("localhost"), "downloads")
+	if err := os.MkdirAll(chrootDownloadsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(chrootDownloadsDir, "manual.zip"), []byte("manual download"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	_, err := rawDB.Exec(`INSERT OR REPLACE INTO domain_storage_usage(domain,page_bytes,published_page_bytes,revision_bytes,file_bytes,published_static_bytes,limit_bytes,updated_at) VALUES(?,?,?,?,?,?,?,?)`,
 		"localhost", 0, 0, 0, 0, 0, defaultDomainStorageLimitBytes, time.Now().Format(time.RFC3339))
 	if err != nil {
@@ -535,9 +542,168 @@ func TestDomainStorageUsageRebuildsFromActualDiskUsage(t *testing.T) {
 	}
 
 	usage := application.domainStorageUsage(context.Background(), "localhost")
-	expectedFileBytes := diskusage.DirectorySize(domainFilesDir)
+	expectedFileBytes := diskusage.DirectorySize(domainFilesDir) + diskusage.DirectorySize(application.domainChrootRootDir("localhost"))
 	if usage.FileBytes != expectedFileBytes {
 		t.Fatalf("file bytes = %d, want actual disk usage %d", usage.FileBytes, expectedFileBytes)
+	}
+}
+
+func TestChrootLocationSettingsCreatesDirectoryAndServesIndex(t *testing.T) {
+	application, rawDB := newTestApplication(t)
+	form := url.Values{}
+	form.Set("action", "save_chroot_location")
+	form.Set("location_url_path", "/downloads")
+	request := httptest.NewRequest(http.MethodPost, "http://localhost:8080/?settings", strings.NewReader(form.Encode()))
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	application.handleDomainSettingsPost(request.Context(), request, "localhost", "")
+
+	expectedDirectoryPath := filepath.Join(application.domainChrootRootDir("localhost"), "downloads")
+	directoryInfo, err := os.Stat(expectedDirectoryPath)
+	if err != nil {
+		t.Fatalf("location directory was not created: %v", err)
+	}
+	if !directoryInfo.IsDir() {
+		t.Fatalf("location path is not a directory: %s", expectedDirectoryPath)
+	}
+	var storedDirectoryPath string
+	if err := rawDB.QueryRow(`SELECT directory_path FROM domain_chroot_locations WHERE domain=? AND url_path=?`, "localhost", "/downloads").Scan(&storedDirectoryPath); err != nil {
+		t.Fatalf("read stored chroot location: %v", err)
+	}
+	expectedRealDirectoryPath, err := filepath.EvalSymlinks(expectedDirectoryPath)
+	if err != nil {
+		t.Fatalf("resolve expected directory: %v", err)
+	}
+	if storedDirectoryPath != expectedRealDirectoryPath {
+		t.Fatalf("stored directory = %q, want %q", storedDirectoryPath, expectedRealDirectoryPath)
+	}
+	if err := os.WriteFile(filepath.Join(expectedDirectoryPath, "index.html"), []byte("<h1>Downloads</h1>"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	response := httptest.NewRecorder()
+	application.route(response, httptest.NewRequest(http.MethodGet, "http://localhost:8080/downloads", nil))
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", response.Code, http.StatusOK)
+	}
+	if !strings.Contains(response.Body.String(), "<h1>Downloads</h1>") {
+		t.Fatalf("body does not include index.html: %q", response.Body.String())
+	}
+}
+
+func TestChrootDirectoryListingUsesEmbeddedSitebrushStyle(t *testing.T) {
+	application, _ := newTestApplication(t)
+	form := url.Values{}
+	form.Set("action", "save_chroot_location")
+	form.Set("location_url_path", "/downloads")
+	request := httptest.NewRequest(http.MethodPost, "http://localhost:8080/?settings", strings.NewReader(form.Encode()))
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	application.handleDomainSettingsPost(request.Context(), request, "localhost", "")
+
+	downloadsDir := filepath.Join(application.domainChrootRootDir("localhost"), "downloads")
+	if err := os.MkdirAll(filepath.Join(downloadsDir, "manuals"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(downloadsDir, "release notes.txt"), []byte("hello"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	response := httptest.NewRecorder()
+	application.route(response, httptest.NewRequest(http.MethodGet, "http://localhost:8080/downloads", nil))
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", response.Code, http.StatusOK)
+	}
+	body := response.Body.String()
+	for _, expected := range []string{
+		`/p/static/directory_listing.css`,
+		`class="directory-panel"`,
+		`manuals/`,
+		`release notes.txt`,
+		`release%20notes.txt`,
+	} {
+		if !strings.Contains(body, expected) {
+			t.Fatalf("listing body missing %q: %q", expected, body)
+		}
+	}
+}
+
+func TestChrootLocationAllowsSymlinksInsideDomainChroot(t *testing.T) {
+	application, _ := newTestApplication(t)
+	createChrootLocationForTest(t, application, "/downloads")
+	chrootRoot := application.domainChrootRootDir("localhost")
+	releaseDir := filepath.Join(chrootRoot, "releases", "v1")
+	if err := os.MkdirAll(releaseDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(releaseDir, "index.html"), []byte("<h1>Latest release</h1>"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	createTestSymlink(t, filepath.Join("..", "releases", "v1"), filepath.Join(chrootRoot, "downloads", "latest"))
+
+	response := httptest.NewRecorder()
+	application.route(response, httptest.NewRequest(http.MethodGet, "http://localhost:8080/downloads/latest", nil))
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", response.Code, http.StatusOK)
+	}
+	if !strings.Contains(response.Body.String(), "<h1>Latest release</h1>") {
+		t.Fatalf("body does not include symlinked index: %q", response.Body.String())
+	}
+
+	listingResponse := httptest.NewRecorder()
+	application.route(listingResponse, httptest.NewRequest(http.MethodGet, "http://localhost:8080/downloads", nil))
+	if listingResponse.Code != http.StatusOK {
+		t.Fatalf("listing status = %d, want %d", listingResponse.Code, http.StatusOK)
+	}
+	if !strings.Contains(listingResponse.Body.String(), "latest/") || !strings.Contains(listingResponse.Body.String(), "Folder link") {
+		t.Fatalf("listing does not show internal symlink: %q", listingResponse.Body.String())
+	}
+}
+
+func TestChrootLocationBlocksSymlinksOutsideDomainChroot(t *testing.T) {
+	application, _ := newTestApplication(t)
+	createChrootLocationForTest(t, application, "/downloads")
+	outsideDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(outsideDir, "passwd"), []byte("root:x:0:0"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	createTestSymlink(t, outsideDir, filepath.Join(application.domainChrootRootDir("localhost"), "downloads", "escape"))
+
+	response := httptest.NewRecorder()
+	application.route(response, httptest.NewRequest(http.MethodGet, "http://localhost:8080/downloads/escape/passwd", nil))
+	if response.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want %d", response.Code, http.StatusNotFound)
+	}
+	if strings.Contains(response.Body.String(), "root:x:0:0") {
+		t.Fatalf("blocked external symlink leaked file body: %q", response.Body.String())
+	}
+
+	listingResponse := httptest.NewRecorder()
+	application.route(listingResponse, httptest.NewRequest(http.MethodGet, "http://localhost:8080/downloads", nil))
+	if listingResponse.Code != http.StatusOK {
+		t.Fatalf("listing status = %d, want %d", listingResponse.Code, http.StatusOK)
+	}
+	if strings.Contains(listingResponse.Body.String(), "escape") {
+		t.Fatalf("listing exposes blocked external symlink: %q", listingResponse.Body.String())
+	}
+}
+
+func createChrootLocationForTest(t *testing.T, application *App, locationPath string) {
+	t.Helper()
+	form := url.Values{}
+	form.Set("action", "save_chroot_location")
+	form.Set("location_url_path", locationPath)
+	request := httptest.NewRequest(http.MethodPost, "http://localhost:8080/?settings", strings.NewReader(form.Encode()))
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	application.handleDomainSettingsPost(request.Context(), request, "localhost", "")
+}
+
+func createTestSymlink(t *testing.T, oldName, newName string) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink tests require privileges on Windows")
+	}
+	if err := os.Symlink(oldName, newName); err != nil {
+		t.Fatalf("create symlink %s -> %s: %v", newName, oldName, err)
 	}
 }
 

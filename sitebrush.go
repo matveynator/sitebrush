@@ -588,6 +588,21 @@ type DomainAlias struct {
 	LastCheckedAt     string
 }
 
+type DomainChrootLocation struct {
+	URLPath       string
+	DirectoryPath string
+}
+
+type directoryListingEntry struct {
+	Name      string
+	Href      string
+	Kind      string
+	Icon      string
+	SizeLabel string
+	TimeLabel string
+	IsDir     bool
+}
+
 type DomainAutomaticSSLSetting struct {
 	Domain           string
 	Enabled          bool
@@ -2385,6 +2400,7 @@ func (a *App) migrate(ctx context.Context) error {
 		`CREATE TABLE IF NOT EXISTS domain_aliases(primary_domain TEXT,alias_domain TEXT UNIQUE,verification_token TEXT,is_verified INTEGER DEFAULT 0,dns_a_ok INTEGER DEFAULT 0,is_selected INTEGER DEFAULT 0,last_checked_at TEXT);`,
 		`CREATE TABLE IF NOT EXISTS domain_states(domain TEXT PRIMARY KEY,is_frozen INTEGER DEFAULT 0);`,
 		`CREATE TABLE IF NOT EXISTS domain_ssl_settings(domain TEXT PRIMARY KEY,auto_ssl_enabled INTEGER DEFAULT 0,manually_disabled INTEGER DEFAULT 0,last_checked_at TEXT);`,
+		`CREATE TABLE IF NOT EXISTS domain_chroot_locations(domain TEXT,url_path TEXT,directory_path TEXT,updated_at TEXT,PRIMARY KEY(domain,url_path));`,
 		`CREATE TABLE IF NOT EXISTS domain_backup_tokens(domain TEXT PRIMARY KEY,token TEXT,updated_at TEXT);`,
 		`CREATE TABLE IF NOT EXISTS file_access_rules(domain TEXT,file_name TEXT,access_mode TEXT,token TEXT,expires_at TEXT,single_use_left INTEGER DEFAULT 0,token_use_count INTEGER DEFAULT 0,PRIMARY KEY(domain,file_name));`,
 		`CREATE TABLE IF NOT EXISTS file_metadata(domain TEXT,file_name TEXT,page_path TEXT,size INTEGER,mime_type TEXT,created_at TEXT,updated_at TEXT,source TEXT,download_count INTEGER DEFAULT 0,PRIMARY KEY(domain,file_name));`,
@@ -2744,6 +2760,9 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	domain := a.siteDomain(r.Context(), r)
+	if a.serveDomainChrootLocation(w, r, domain, pagePath) {
+		return
+	}
 	redirectTargetPath := a.resolvedPageRedirectPath(r.Context(), domain, pagePath)
 	if redirectTargetPath != "" && redirectTargetPath != pagePath {
 		http.Redirect(w, r, redirectTargetPath, http.StatusMovedPermanently)
@@ -5911,6 +5930,9 @@ func (a *App) ensureDomainStorageUsageRow(ctx context.Context, domain string) {
 func (a *App) applyDomainStorageDelta(ctx context.Context, domain string, pageDelta, publishedPageDelta, revisionDelta, fileDelta, publishedStaticDelta int64) error {
 	a.ensureDomainStorageUsageRow(ctx, domain)
 	totalDelta := pageDelta + publishedPageDelta + revisionDelta + fileDelta + publishedStaticDelta
+	if totalDelta > 0 {
+		a.rebuildDomainStorageUsage(ctx, domain)
+	}
 	now := time.Now().UTC().Format(time.RFC3339)
 	updateUsage := func() (int64, error) {
 		result, err := a.db.ExecContext(ctx, `UPDATE domain_storage_usage
@@ -5961,6 +5983,7 @@ func (a *App) rebuildAllDomainStorageUsage(ctx context.Context) {
 		`SELECT DISTINCT domain FROM revisions`,
 		`SELECT DISTINCT domain FROM domain_states`,
 		`SELECT DISTINCT primary_domain FROM domain_aliases`,
+		`SELECT DISTINCT domain FROM domain_chroot_locations`,
 		`SELECT DISTINCT domain FROM domain_storage_usage`,
 	} {
 		rows, err := a.db.QueryContext(ctx, query)
@@ -5987,7 +6010,7 @@ func (a *App) rebuildDomainStorageUsage(ctx context.Context, domain string) {
 	pageBytes := a.sumHTMLColumnBytes(ctx, `SELECT html FROM pages WHERE domain=?`, domain)
 	publishedPageBytes := a.sumHTMLColumnBytes(ctx, `SELECT html FROM published_pages WHERE domain=?`, domain)
 	revisionBytes := a.sumHTMLColumnBytes(ctx, `SELECT html FROM revisions WHERE domain=?`, domain)
-	fileBytes := diskusage.DirectorySize(a.domainFilesDirForDomain(domain))
+	fileBytes := diskusage.DirectorySize(a.domainFilesDirForDomain(domain)) + diskusage.DirectorySize(a.domainChrootRootDir(domain))
 	publishedStaticBytes := diskusage.DirectorySize(a.domainStaticDir(domain))
 	a.ensureDomainStorageUsageRow(ctx, domain)
 	_, _ = a.db.ExecContext(ctx, `UPDATE domain_storage_usage SET page_bytes=?, published_page_bytes=?, revision_bytes=?, file_bytes=?, published_static_bytes=?, updated_at=?, limit_bytes=COALESCE(NULLIF(limit_bytes,0),?) WHERE domain=?`,
@@ -9873,7 +9896,343 @@ ON CONFLICT(alias_domain) DO UPDATE SET
 		a.refreshDomainAliases(ctx, siteDomain, externalIP)
 	case "rotate_backup_token":
 		a.rotateBackupTokenForDomain(ctx, siteDomain)
+	case "save_chroot_location":
+		urlPath := normalizeChrootLocationURLPath(r.FormValue("location_url_path"))
+		if urlPath == "" {
+			return
+		}
+		directoryPath, err := a.ensureChrootLocationDirectory(siteDomain, urlPath)
+		if err != nil {
+			return
+		}
+		_, _ = a.db.ExecContext(ctx, `INSERT INTO domain_chroot_locations(domain,url_path,directory_path,updated_at)
+VALUES(?,?,?,?)
+ON CONFLICT(domain,url_path) DO UPDATE SET directory_path=excluded.directory_path,updated_at=excluded.updated_at`,
+			siteDomain, urlPath, directoryPath, time.Now().UTC().Format(time.RFC3339))
+	case "delete_chroot_location":
+		urlPath := normalizeChrootLocationURLPath(r.FormValue("location_url_path"))
+		if urlPath == "" {
+			return
+		}
+		_, _ = a.db.ExecContext(ctx, `DELETE FROM domain_chroot_locations WHERE domain=? AND url_path=?`, siteDomain, urlPath)
 	}
+}
+
+func normalizeChrootLocationURLPath(rawPath string) string {
+	cleanedPath := cleanPath(rawPath)
+	if cleanedPath == "/" {
+		return ""
+	}
+	return strings.TrimRight(cleanedPath, "/")
+}
+
+func isPathWithinRoot(rootPath string, candidatePath string) bool {
+	cleanRoot := filepath.Clean(rootPath)
+	cleanCandidate := filepath.Clean(candidatePath)
+	if cleanRoot == cleanCandidate {
+		return true
+	}
+	return strings.HasPrefix(cleanCandidate, cleanRoot+string(os.PathSeparator))
+}
+
+func (a *App) domainChrootRootDir(domain string) string {
+	return filepath.Join(a.storageRootDir(), "chroot", domainStorageName(domain))
+}
+
+func (a *App) domainChrootRealRootDir(domain string) (string, error) {
+	rootPath := a.domainChrootRootDir(domain)
+	if err := os.MkdirAll(rootPath, 0o755); err != nil {
+		return "", err
+	}
+	rootAbsPath, err := filepath.Abs(rootPath)
+	if err != nil {
+		return "", err
+	}
+	rootRealPath, err := filepath.EvalSymlinks(rootAbsPath)
+	if err != nil {
+		return rootAbsPath, nil
+	}
+	return rootRealPath, nil
+}
+
+func (a *App) chrootLocationDirectoryPath(domain, urlPath string) string {
+	normalizedURLPath := normalizeChrootLocationURLPath(urlPath)
+	relativePath := strings.TrimPrefix(normalizedURLPath, "/")
+	return filepath.Join(a.domainChrootRootDir(domain), filepath.FromSlash(relativePath))
+}
+
+func (a *App) ensureChrootLocationDirectory(domain, urlPath string) (string, error) {
+	directoryPath := a.chrootLocationDirectoryPath(domain, urlPath)
+	if err := os.MkdirAll(directoryPath, 0o755); err != nil {
+		return "", err
+	}
+	return a.normalizeAndValidateChrootLocationPath(domain, directoryPath)
+}
+
+func (a *App) normalizeAndValidateChrootLocationPath(domain, rawDirectoryPath string) (string, error) {
+	rootRealPath, err := a.domainChrootRealRootDir(domain)
+	if err != nil {
+		return "", err
+	}
+	cleanInputPath := strings.TrimSpace(rawDirectoryPath)
+	if cleanInputPath == "" {
+		return "", errors.New("directory path is required")
+	}
+	candidatePath := cleanInputPath
+	if !filepath.IsAbs(candidatePath) {
+		candidatePath = filepath.Join(rootRealPath, candidatePath)
+	}
+	candidateAbsPath, err := filepath.Abs(candidatePath)
+	if err != nil {
+		return "", err
+	}
+	candidateRealPath, err := filepath.EvalSymlinks(candidateAbsPath)
+	if err != nil {
+		return "", err
+	}
+	info, err := os.Stat(candidateRealPath)
+	if err != nil {
+		return "", err
+	}
+	if !info.IsDir() {
+		return "", errors.New("directory path must point to a folder")
+	}
+	if !isPathWithinRoot(rootRealPath, candidateRealPath) {
+		return "", errors.New("directory path is outside allowed chroot")
+	}
+	return candidateRealPath, nil
+}
+
+func (a *App) listDomainChrootLocations(ctx context.Context, domain string) ([]DomainChrootLocation, error) {
+	rows, err := a.db.QueryContext(ctx, `SELECT url_path,directory_path FROM domain_chroot_locations WHERE domain=? ORDER BY url_path`, domain)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	locationList := make([]DomainChrootLocation, 0)
+	for rows.Next() {
+		var currentLocation DomainChrootLocation
+		if scanErr := rows.Scan(&currentLocation.URLPath, &currentLocation.DirectoryPath); scanErr != nil {
+			return nil, scanErr
+		}
+		currentLocation.URLPath = normalizeChrootLocationURLPath(currentLocation.URLPath)
+		if currentLocation.URLPath == "" {
+			continue
+		}
+		expectedDirectoryPath, err := a.ensureChrootLocationDirectory(domain, currentLocation.URLPath)
+		if err == nil {
+			currentLocation.DirectoryPath = expectedDirectoryPath
+		}
+		locationList = append(locationList, currentLocation)
+	}
+	return locationList, rows.Err()
+}
+
+func (a *App) matchDomainChrootLocation(ctx context.Context, domain, requestPath string) (DomainChrootLocation, string, bool) {
+	rows, err := a.db.QueryContext(ctx, `SELECT url_path,directory_path FROM domain_chroot_locations WHERE domain=?`, domain)
+	if err != nil {
+		return DomainChrootLocation{}, "", false
+	}
+	defer rows.Close()
+	locationList := make([]DomainChrootLocation, 0)
+	for rows.Next() {
+		var location DomainChrootLocation
+		if scanErr := rows.Scan(&location.URLPath, &location.DirectoryPath); scanErr != nil {
+			continue
+		}
+		location.URLPath = normalizeChrootLocationURLPath(location.URLPath)
+		if location.URLPath == "" {
+			continue
+		}
+		locationList = append(locationList, location)
+	}
+	sort.SliceStable(locationList, func(leftIndex, rightIndex int) bool {
+		return len(locationList[leftIndex].URLPath) > len(locationList[rightIndex].URLPath)
+	})
+	cleanRequestPath := cleanPath(requestPath)
+	for _, location := range locationList {
+		if cleanRequestPath != location.URLPath && !strings.HasPrefix(cleanRequestPath, location.URLPath+"/") {
+			continue
+		}
+		expectedDirectoryPath, err := a.ensureChrootLocationDirectory(domain, location.URLPath)
+		if err != nil {
+			continue
+		}
+		location.DirectoryPath = expectedDirectoryPath
+		relativeRequestPath := strings.TrimPrefix(cleanRequestPath, location.URLPath)
+		if relativeRequestPath == "" {
+			relativeRequestPath = "/"
+		}
+		return location, relativeRequestPath, true
+	}
+	return DomainChrootLocation{}, "", false
+}
+
+func (a *App) resolveExistingChrootPath(domain string, candidatePath string) (string, os.FileInfo, error) {
+	candidateAbsPath, err := filepath.Abs(candidatePath)
+	if err != nil {
+		return "", nil, err
+	}
+	candidateRealPath, err := filepath.EvalSymlinks(candidateAbsPath)
+	if err != nil {
+		return "", nil, err
+	}
+	rootRealPath, err := a.domainChrootRealRootDir(domain)
+	if err != nil {
+		return "", nil, err
+	}
+	if !isPathWithinRoot(rootRealPath, candidateRealPath) {
+		return "", nil, errors.New("path escapes allowed domain chroot")
+	}
+	info, err := os.Stat(candidateRealPath)
+	if err != nil {
+		return "", nil, err
+	}
+	return candidateRealPath, info, nil
+}
+
+func (a *App) resolveChrootLocationTargetPath(domain string, location DomainChrootLocation, relativeRequestPath string) (string, os.FileInfo, error) {
+	cleanRelativePath := cleanPath(relativeRequestPath)
+	relativePathValue := strings.TrimPrefix(cleanRelativePath, "/")
+	candidatePath := filepath.Join(location.DirectoryPath, filepath.FromSlash(relativePathValue))
+	return a.resolveExistingChrootPath(domain, candidatePath)
+}
+
+func (a *App) serveDomainChrootLocation(w http.ResponseWriter, r *http.Request, domain, requestPath string) bool {
+	location, relativeRequestPath, found := a.matchDomainChrootLocation(r.Context(), domain, requestPath)
+	if !found {
+		return false
+	}
+	validatedDirectoryPath, err := a.normalizeAndValidateChrootLocationPath(domain, location.DirectoryPath)
+	if err != nil {
+		http.NotFound(w, r)
+		return true
+	}
+	location.DirectoryPath = validatedDirectoryPath
+	targetPath, info, err := a.resolveChrootLocationTargetPath(domain, location, relativeRequestPath)
+	if err != nil {
+		http.NotFound(w, r)
+		return true
+	}
+	if info.IsDir() {
+		indexPath := filepath.Join(targetPath, "index.html")
+		if indexRealPath, indexInfo, indexErr := a.resolveExistingChrootPath(domain, indexPath); indexErr == nil && !indexInfo.IsDir() {
+			http.ServeFile(w, r, indexRealPath)
+			return true
+		}
+		a.renderDirectoryListing(w, r, domain, requestPath, targetPath, location.URLPath)
+		return true
+	}
+	http.ServeFile(w, r, targetPath)
+	return true
+}
+
+func (a *App) renderDirectoryListing(w http.ResponseWriter, r *http.Request, domain, requestPath, absoluteDirectoryPath, locationURLPath string) {
+	entries, err := os.ReadDir(absoluteDirectoryPath)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	cleanRequestPath := cleanPath(requestPath)
+	listingEntries := make([]directoryListingEntry, 0, len(entries))
+	for _, entry := range entries {
+		entryView, ok := a.directoryListingEntryView(domain, cleanRequestPath, absoluteDirectoryPath, entry)
+		if ok {
+			listingEntries = append(listingEntries, entryView)
+		}
+	}
+	sort.SliceStable(listingEntries, func(i, j int) bool {
+		leftIsDir := listingEntries[i].IsDir
+		rightIsDir := listingEntries[j].IsDir
+		if leftIsDir != rightIsDir {
+			return leftIsDir
+		}
+		return strings.ToLower(listingEntries[i].Name) < strings.ToLower(listingEntries[j].Name)
+	})
+	var listing strings.Builder
+	listing.WriteString("<!doctype html><html><head><meta charset=\"utf-8\"><title>Index of ")
+	listing.WriteString(template.HTMLEscapeString(cleanRequestPath))
+	listing.WriteString("</title><meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\"><link rel=\"icon\" href=\"/p/static/sitebrush-logo.ico\" type=\"image/x-icon\"><link rel=\"stylesheet\" href=\"/p/static/directory_listing.css\"></head><body><main class=\"page\"><header class=\"topbar\"><a class=\"brand\" href=\"/\"><img class=\"brand-logo\" src=\"/p/static/sitebrush-logo.png\" alt=\"Sitebrush\"><span><span class=\"brand-name\">sitebrush</span><span class=\"brand-line\">Directory listing</span></span></a><div class=\"path-pill\">")
+	listing.WriteString(template.HTMLEscapeString(cleanRequestPath))
+	listing.WriteString("</div></header><section class=\"directory-panel\"><div class=\"directory-header\"><p class=\"eyebrow\">Folder</p><h1>")
+	listing.WriteString(template.HTMLEscapeString(cleanRequestPath))
+	listing.WriteString("</h1><p class=\"directory-meta\">")
+	listing.WriteString(strconv.Itoa(len(listingEntries)))
+	listing.WriteString(" entries</p></div><div class=\"entry-list\">")
+	if cleanRequestPath != locationURLPath {
+		parentPath := parentPagePath(cleanRequestPath)
+		if parentPath == "" {
+			parentPath = locationURLPath
+		}
+		listing.WriteString("<a class=\"entry entry-folder\" href=\"")
+		listing.WriteString(template.HTMLEscapeString(parentPath))
+		listing.WriteString("\"><span class=\"entry-icon\">..</span><span class=\"entry-name\">Parent folder</span><span class=\"entry-kind\">Folder</span><span class=\"entry-size\">-</span><span class=\"entry-time\"></span></a>")
+	}
+	for _, entry := range listingEntries {
+		listing.WriteString("<a class=\"")
+		listing.WriteString("entry")
+		if entry.IsDir {
+			listing.WriteString(" entry-folder")
+		}
+		listing.WriteString("\" href=\"")
+		listing.WriteString(template.HTMLEscapeString(entry.Href))
+		listing.WriteString("\"><span class=\"entry-icon\">")
+		listing.WriteString(template.HTMLEscapeString(entry.Icon))
+		listing.WriteString("</span><span class=\"entry-name\">")
+		listing.WriteString(template.HTMLEscapeString(entry.Name))
+		listing.WriteString("</span><span class=\"entry-kind\">")
+		listing.WriteString(template.HTMLEscapeString(entry.Kind))
+		listing.WriteString("</span><span class=\"entry-size\">")
+		listing.WriteString(template.HTMLEscapeString(entry.SizeLabel))
+		listing.WriteString("</span><span class=\"entry-time\">")
+		listing.WriteString(template.HTMLEscapeString(entry.TimeLabel))
+		listing.WriteString("</span></a>")
+	}
+	if len(listingEntries) == 0 && cleanRequestPath == locationURLPath {
+		listing.WriteString("<div class=\"empty\">This folder is empty.</div>")
+	}
+	listing.WriteString("</div></section></main></body></html>")
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	_, _ = io.WriteString(w, listing.String())
+}
+
+func (a *App) directoryListingEntryView(domain, cleanRequestPath, absoluteDirectoryPath string, entry os.DirEntry) (directoryListingEntry, bool) {
+	entryName := entry.Name()
+	entryPath := filepath.Join(absoluteDirectoryPath, entryName)
+	_, entryInfo, err := a.resolveExistingChrootPath(domain, entryPath)
+	if err != nil {
+		return directoryListingEntry{}, false
+	}
+	isDir := entryInfo.IsDir()
+	href := strings.TrimSuffix(cleanRequestPath, "/") + "/" + url.PathEscape(entryName)
+	label := entryName
+	entryKind := "File"
+	entryIcon := "•"
+	entrySize := formatFileSize(entryInfo.Size())
+	if isDir {
+		href += "/"
+		label += "/"
+		entryKind = "Folder"
+		entryIcon = "⌂"
+		entrySize = "-"
+	}
+	if entry.Type()&os.ModeSymlink != 0 {
+		if isDir {
+			entryKind = "Folder link"
+		} else {
+			entryKind = "File link"
+		}
+		entryIcon = "↗"
+	}
+	return directoryListingEntry{
+		Name:      label,
+		Href:      href,
+		Kind:      entryKind,
+		Icon:      entryIcon,
+		SizeLabel: entrySize,
+		TimeLabel: entryInfo.ModTime().Format("2006-01-02 15:04"),
+		IsDir:     isDir,
+	}, true
 }
 
 func (a *App) domainBelongsToSite(ctx context.Context, siteDomain string, candidateDomain string) bool {
@@ -10289,6 +10648,11 @@ func (a *App) domainSettingsPage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "failed to load domain aliases", http.StatusInternalServerError)
 		return
 	}
+	chrootLocations, err := a.listDomainChrootLocations(r.Context(), siteDomain)
+	if err != nil {
+		http.Error(w, "failed to load chroot locations", http.StatusInternalServerError)
+		return
+	}
 	selectedDomain := siteDomain
 	for _, domainAlias := range domainAliases {
 		if domainAlias.IsSelected && domainAlias.IsActive {
@@ -10309,6 +10673,7 @@ func (a *App) domainSettingsPage(w http.ResponseWriter, r *http.Request) {
 		"Domain":             siteDomain,
 		"SelectedDomain":     selectedDomain,
 		"Aliases":            domainAliases,
+		"ChrootLocations":    chrootLocations,
 		"AliasCount":         len(domainAliases),
 		"CanAddAlias":        len(domainAliases) < 10,
 		"ReturnPath":         returnPath,
