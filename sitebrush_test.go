@@ -2465,6 +2465,70 @@ func TestGrabPageCanCopyWholeExternalSiteWithCrossDomainAssetsWithoutURLExtensio
 	}
 }
 
+func TestGrabPageRewritesDynamicImageURLWithQueryAcrossWholeSiteImport(t *testing.T) {
+	application, rawDB := newTestApplication(t)
+	_, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "admin@example.com", "old")
+	if err != nil {
+		t.Fatalf("insert user: %v", err)
+	}
+
+	imageURL := "http://twochicks.ru/files/products/9ailniwq8ji.1000x.jpg?b1edcdeeffb231b04e127712bd1a9deb"
+	previousGrabHTTPClient := newGrabHTTPClient
+	newGrabHTTPClient = func() *http.Client {
+		return &http.Client{Transport: fakeGrabTransport{responses: map[string]fakeGrabResponse{
+			"http://twochicks.ru/":      {contentType: "text/html", body: `<!doctype html><html><body><a href="/about">About</a><img src="` + imageURL + `"></body></html>`},
+			"http://twochicks.ru/about": {contentType: "text/html", body: `<!doctype html><html><body><script>window.productImage="` + imageURL + `";</script></body></html>`},
+			imageURL:                    {contentType: "image/jpeg", body: "image-bytes"},
+		}}}
+	}
+	defer func() {
+		newGrabHTTPClient = previousGrabHTTPClient
+	}()
+
+	form := url.Values{}
+	form.Set("path", "/URI")
+	form.Set("source_url", "http://twochicks.ru/")
+	form.Set("copy_whole_site", "1")
+	form.Set("import_selection_confirmed", "1")
+	form.Set("import_resource_url", imageURL)
+	request := httptest.NewRequest(http.MethodPost, "http://localhost:8080/URI?grab", strings.NewReader(form.Encode()))
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	request.Header.Set("Accept", "application/json")
+	request.AddCookie(newAdminSessionCookie(t, application, "admin@example.com"))
+	response := httptest.NewRecorder()
+	application.route(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("whole-site import status = %d, body=%q", response.Code, response.Body.String())
+	}
+
+	for _, pagePath := range []string{"/URI", "/URI/about"} {
+		var pageHTML string
+		if err := rawDB.QueryRow(`SELECT html FROM pages WHERE domain=? AND path=?`, "localhost", pagePath).Scan(&pageHTML); err != nil {
+			t.Fatalf("read imported page %s: %v", pagePath, err)
+		}
+		if strings.Contains(pageHTML, imageURL) || strings.Contains(pageHTML, "?b1edcdeeffb231b04e127712bd1a9deb") {
+			t.Fatalf("imported page %s still contains dynamic image URL: %s", pagePath, pageHTML)
+		}
+		if !strings.Contains(pageHTML, "/URI/p/") || !strings.Contains(pageHTML, ".jpg") {
+			t.Fatalf("imported page %s did not use local hashed jpg asset: %s", pagePath, pageHTML)
+		}
+	}
+
+	storedFiles, listErr := listStoredFiles(application.domainFilesDirForDomain("localhost"))
+	if listErr != nil {
+		t.Fatal(listErr)
+	}
+	jpgCount := 0
+	for _, storedFilePath := range storedFiles {
+		if filepath.Ext(storedFilePath) == ".jpg" {
+			jpgCount++
+		}
+	}
+	if jpgCount != 1 {
+		t.Fatalf("stored jpg count = %d, want 1: %#v", jpgCount, storedFiles)
+	}
+}
+
 func TestGrabPageRedirectsToImportedPageView(t *testing.T) {
 	application, rawDB := newTestApplication(t)
 	_, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "admin@example.com", "old")

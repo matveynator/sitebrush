@@ -1,14 +1,17 @@
 package main
 
 import (
+	"crypto/md5"
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 )
 
@@ -147,7 +150,7 @@ func buildServerAppArtifacts(repoRoot, outputDir, programName, version string) e
 		}
 	}
 
-	return nil
+	return writeMD5SumsFile(serverAppDir)
 }
 
 func buildDesktopAppArtifacts(repoRoot, outputDir, programName, version string, options desktopBuildOptions) error {
@@ -171,7 +174,10 @@ func buildDesktopAppArtifacts(repoRoot, outputDir, programName, version string, 
 		return err
 	}
 
-	return nil
+	if err := cleanupDesktopBuildIntermediates(desktopDir); err != nil {
+		return err
+	}
+	return writeMD5SumsFile(desktopDir)
 }
 
 func buildMacOSDesktopArtifacts(repoRoot, desktopDir, programName, version string) error {
@@ -817,10 +823,85 @@ func dockerWorkspacePath(repoRoot, hostPath string) (string, error) {
 }
 
 func verifyBuiltDesktopArtifact(artifactPath string) error {
-	if err := verifyNonEmptyFile(artifactPath); err != nil {
+	return verifyNonEmptyFile(artifactPath + ".zip")
+}
+
+func cleanupDesktopBuildIntermediates(desktopDir string) error {
+	entries, err := os.ReadDir(desktopDir)
+	if err != nil {
 		return err
 	}
-	return verifyNonEmptyFile(artifactPath + ".zip")
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if name == "MD5SUMS" {
+			continue
+		}
+		if strings.HasSuffix(name, ".zip") || strings.HasSuffix(name, ".dmg") {
+			continue
+		}
+		if err := os.Remove(filepath.Join(desktopDir, name)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func writeMD5SumsFile(dir string) error {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return err
+	}
+
+	type checksumEntry struct {
+		name string
+		sum  string
+	}
+	checksums := make([]checksumEntry, 0, len(entries))
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if name == "MD5SUMS" {
+			continue
+		}
+		sum, sumErr := fileMD5(filepath.Join(dir, name))
+		if sumErr != nil {
+			return sumErr
+		}
+		checksums = append(checksums, checksumEntry{name: name, sum: sum})
+	}
+
+	sort.Slice(checksums, func(left, right int) bool {
+		return checksums[left].name < checksums[right].name
+	})
+
+	var builder strings.Builder
+	for _, checksum := range checksums {
+		builder.WriteString(checksum.sum)
+		builder.WriteString("  ")
+		builder.WriteString(checksum.name)
+		builder.WriteString("\n")
+	}
+
+	return os.WriteFile(filepath.Join(dir, "MD5SUMS"), []byte(builder.String()), 0o644)
+}
+
+func fileMD5(filePath string) (string, error) {
+	file, err := os.Open(filePath)
+	if err != nil {
+		return "", err
+	}
+	defer file.Close()
+
+	hash := md5.New()
+	if _, err := io.Copy(hash, file); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%x", hash.Sum(nil)), nil
 }
 
 func verifyNonEmptyFile(filePath string) error {

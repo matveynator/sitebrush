@@ -94,6 +94,24 @@ jobs:
                    -ldflags "-s -w -X main.CompileVersion=$version" `
                    -o "dist/$bin"
 
+      - name: Write portable md5
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          (
+            cd dist
+            md5sum * > MD5SUMS
+          )
+      - name: Write portable md5 (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          Get-ChildItem dist -File | ForEach-Object {
+            $hash = (Get-FileHash -Algorithm MD5 $_.FullName).Hash.ToLowerInvariant()
+            "$hash  $($_.Name)"
+          } | Set-Content -NoNewline:$false "dist/MD5SUMS"
       - name: Upload portable artifact
         uses: actions/upload-artifact@v5
         with:
@@ -232,6 +250,8 @@ jobs:
           (
             cd dist
             zip -q -X "${BIN}.zip" "${BIN}"
+            rm -f "${BIN}"
+            md5sum "${BIN}.zip" > "MD5SUMS-${BIN}.txt"
           )
 
       - name: Copy Windows desktop icon
@@ -277,13 +297,26 @@ jobs:
           $ErrorActionPreference = "Stop"
           $bin = "sitebrush_${{ matrix.goos }}_${{ matrix.goarch }}_desktop.exe"
           Compress-Archive -Path "dist/$bin" -DestinationPath "dist/sitebrush_${{ matrix.goos }}_${{ matrix.goarch }}_desktop.zip" -Force
+          Remove-Item -Force "dist/$bin"
+          $zip = "sitebrush_${{ matrix.goos }}_${{ matrix.goarch }}_desktop.zip"
+          $hash = (Get-FileHash -Algorithm MD5 "dist/$zip").Hash.ToLowerInvariant()
+          Set-Content -Path "dist/MD5SUMS-$zip.txt" -Value "$hash  $zip"
 
       - name: Upload desktop artifact
+        if: runner.os != 'macOS'
         uses: actions/upload-artifact@v5
         with:
           name: bin-desktop-${{ matrix.goos }}-${{ matrix.goarch }}-${{ matrix.desktop_variant }}
           path: |
-            dist/sitebrush_${{ matrix.goos }}_${{ matrix.goarch }}_desktop*
+            dist/*.zip
+            dist/MD5SUMS-*.txt
+      - name: Upload desktop artifact (macOS intermediate binaries)
+        if: runner.os == 'macOS'
+        uses: actions/upload-artifact@v5
+        with:
+          name: bin-desktop-${{ matrix.goos }}-${{ matrix.goarch }}-${{ matrix.desktop_variant }}
+          path: |
+            dist/sitebrush_${{ matrix.goos }}_${{ matrix.goarch }}_desktop
 
       - name: Upload desktop icon artifact (single copy for release assets)
         if: runner.os == 'Windows' && matrix.goarch == 'amd64'
@@ -410,8 +443,20 @@ jobs:
         with:
           name: bin-desktop-darwin-universal
           path: |
-            dist/sitebrush_darwin_universal_desktop
             dist/sitebrush_darwin_universal_desktop.dmg
+      - name: Write macOS universal desktop md5
+        shell: bash
+        run: |
+          set -euo pipefail
+          (
+            cd dist
+            md5sum sitebrush_darwin_universal_desktop.dmg > MD5SUMS-sitebrush_darwin_universal_desktop.dmg.txt
+          )
+      - name: Upload macOS universal desktop md5
+        uses: actions/upload-artifact@v5
+        with:
+          name: bin-desktop-darwin-universal-md5
+          path: dist/MD5SUMS-sitebrush_darwin_universal_desktop.dmg.txt
 
   release:
     if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main' && (contains(join(github.event.commits.*.message, ' || '), 'stable release') || contains(join(github.event.commits.*.message, ' || '), 'Stable Release')))
@@ -426,6 +471,24 @@ jobs:
         with:
           path: dist-raw/
 
+      - name: Assemble release files
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist-release
+
+          # Server binaries stay uncompressed; keep them with their folder MD5SUMS files.
+          for artifact_dir in dist-raw/bin-*; do
+            artifact_name="$(basename "${artifact_dir}")"
+            if [[ "${artifact_name}" == bin-desktop-* ]]; then
+              continue
+            fi
+            find "${artifact_dir}" -maxdepth 1 -type f -exec cp {} dist-release/ \;
+          done
+
+          # Desktop release accepts only zip/dmg plus md5 checksum files.
+          find dist-raw -type f \( -name '*.zip' -o -name '*.dmg' -o -name 'MD5SUMS-*.txt' \) -exec cp {} dist-release/ \;
+
       - name: Publish GitHub Release (stable tag)
         uses: softprops/action-gh-release@v3
         env:
@@ -436,4 +499,4 @@ jobs:
           make_latest: true
           prerelease: false
           overwrite_files: true
-          files: dist-raw/**/*
+          files: dist-release/*

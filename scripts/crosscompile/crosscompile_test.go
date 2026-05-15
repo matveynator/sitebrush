@@ -222,9 +222,6 @@ func TestVerifyBuiltDesktopArtifact(t *testing.T) {
 
 	dir := t.TempDir()
 	artifactPath := filepath.Join(dir, "sitebrush_linux_amd64_desktop_gtk40")
-	if err := os.WriteFile(artifactPath, []byte("binary"), 0o644); err != nil {
-		t.Fatalf("write artifact: %v", err)
-	}
 	if err := os.WriteFile(artifactPath+".zip", []byte("zip"), 0o644); err != nil {
 		t.Fatalf("write zip: %v", err)
 	}
@@ -238,11 +235,67 @@ func TestVerifyBuiltDesktopArtifactRejectsMissingZip(t *testing.T) {
 
 	dir := t.TempDir()
 	artifactPath := filepath.Join(dir, "sitebrush_linux_amd64_desktop_gtk40")
-	if err := os.WriteFile(artifactPath, []byte("binary"), 0o644); err != nil {
-		t.Fatalf("write artifact: %v", err)
-	}
 	if err := verifyBuiltDesktopArtifact(artifactPath); err == nil {
 		t.Fatalf("verifyBuiltDesktopArtifact() accepted missing zip")
+	}
+}
+
+func TestCleanupDesktopBuildIntermediates(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "sitebrush_linux_amd64_desktop_gtk40"), []byte("binary"), 0o644); err != nil {
+		t.Fatalf("write raw binary: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "sitebrush_linux_amd64_desktop_gtk40.zip"), []byte("zip"), 0o644); err != nil {
+		t.Fatalf("write zip: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "sitebrush_darwin_universal_desktop.dmg"), []byte("dmg"), 0o644); err != nil {
+		t.Fatalf("write dmg: %v", err)
+	}
+
+	if err := cleanupDesktopBuildIntermediates(dir); err != nil {
+		t.Fatalf("cleanupDesktopBuildIntermediates() error = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "sitebrush_linux_amd64_desktop_gtk40")); !os.IsNotExist(err) {
+		t.Fatalf("expected raw desktop artifact to be removed, err=%v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "sitebrush_linux_amd64_desktop_gtk40.zip")); err != nil {
+		t.Fatalf("expected desktop zip to stay, err=%v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "sitebrush_darwin_universal_desktop.dmg")); err != nil {
+		t.Fatalf("expected desktop dmg to stay, err=%v", err)
+	}
+}
+
+func TestWriteMD5SumsFile(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "sitebrush_linux_amd64"), []byte("server"), 0o644); err != nil {
+		t.Fatalf("write server artifact: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "sitebrush_linux_amd64.zip"), []byte("desktop"), 0o644); err != nil {
+		t.Fatalf("write desktop artifact: %v", err)
+	}
+
+	if err := writeMD5SumsFile(dir); err != nil {
+		t.Fatalf("writeMD5SumsFile() error = %v", err)
+	}
+
+	content, err := os.ReadFile(filepath.Join(dir, "MD5SUMS"))
+	if err != nil {
+		t.Fatalf("read MD5SUMS: %v", err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(content)), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("expected 2 checksum lines, got %d: %q", len(lines), string(content))
+	}
+	if !strings.Contains(lines[0], "sitebrush_linux_amd64") {
+		t.Fatalf("missing checksum line for server artifact: %q", lines[0])
+	}
+	if !strings.Contains(lines[1], "sitebrush_linux_amd64.zip") {
+		t.Fatalf("missing checksum line for desktop artifact: %q", lines[1])
 	}
 }
 

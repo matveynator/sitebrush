@@ -3607,6 +3607,7 @@ func prepareSinglePageImport(domain, pagePath, sourceURL string, pageURL *url.UR
 	spider.resources[sourceURL] = rootResource
 	spider.rewriteNestedResources(rootResource, 0, "text/html")
 	spider.fetchSelectedResources()
+	rootResource.content = []byte(spider.rewriteStaticURLTextReferences(string(rootResource.content), pageURL, 0))
 	return spider, string(rootResource.content)
 }
 
@@ -3725,6 +3726,7 @@ func (a *App) prepareWholeRemoteSiteImport(domain, basePath string, startURL *ur
 	if len(importedPages) == 0 {
 		return nil, nil, errors.New("no pages were imported")
 	}
+	spider.rewriteImportedPagesStaticURLTextReferences(importedPages)
 	return spider, importedPages, nil
 }
 
@@ -3806,6 +3808,7 @@ func crawlWholeRemoteSite(startURL *url.URL, startHTML, publicAssetBasePath stri
 		spider.downloadedTotal++
 		spider.publishResourceProgress("downloaded", currentJob.URL.String(), 100, int64(len(pageHTML)), int64(len(pageHTML)))
 	}
+	spider.rewriteImportedPagesStaticURLTextReferences(importedPages)
 	return spider, pageURLs, importedPages
 }
 
@@ -8304,6 +8307,7 @@ var (
 	htmlSrcSetPattern   = regexp.MustCompile(`(?is)\bsrcset\s*=\s*["']([^"']+)["']`)
 	cssURLPattern       = regexp.MustCompile(`(?is)url\(\s*['"]?([^'")]+)['"]?\s*\)`)
 	cssImportPattern    = regexp.MustCompile(`(?is)@import\s+(?:url\(\s*)?['"]?([^'")\s;]+)['"]?`)
+	staticURLPattern    = regexp.MustCompile(`(?is)https?://[^\s"'<>\\)]+`)
 	newGrabHTTPClient   = func() *http.Client {
 		return &http.Client{Timeout: 20 * time.Second}
 	}
@@ -8574,7 +8578,50 @@ func (spider *pageSpider) rewriteTextReferences(source, baseRawURL string, depth
 		return strings.Replace(match, parts[1], rewriteSingle(parts[1]), 1)
 	})
 	rewritten = rewriteCSSURLReferences(rewritten, rewriteSingle)
+	rewritten = spider.rewriteStaticURLTextReferences(rewritten, baseURL, depth)
 	return rewritten
+}
+
+func (spider *pageSpider) rewriteImportedPagesStaticURLTextReferences(importedPages []wholeSiteImportedPage) {
+	for pageIndex := range importedPages {
+		baseURL, _ := url.Parse(importedPages[pageIndex].SourceURL)
+		importedPages[pageIndex].HTML = spider.rewriteStaticURLTextReferences(importedPages[pageIndex].HTML, baseURL, 0)
+	}
+}
+
+func (spider *pageSpider) rewriteStaticURLTextReferences(source string, baseURL *url.URL, depth int) string {
+	return staticURLPattern.ReplaceAllStringFunc(source, func(rawURL string) string {
+		resourceURL, trailingText := splitStaticResourceURLTrailingText(rawURL)
+		if !hasAllowedGrabResourceExtension(resourceURL) {
+			return rawURL
+		}
+		normalizedURL, blocked := spider.normalizeURL(resourceURL, baseURL)
+		if blocked || normalizedURL == "" || !hasAllowedGrabResourceExtension(normalizedURL) {
+			return rawURL
+		}
+		rewrittenURL := spider.rewriteResourceReference(resourceURL, baseURL, depth)
+		if rewrittenURL == "" || strings.HasPrefix(rewrittenURL, "http://") || strings.HasPrefix(rewrittenURL, "https://") {
+			return rawURL
+		}
+		return rewrittenURL + trailingText
+	})
+}
+
+func splitStaticResourceURLTrailingText(rawURL string) (string, string) {
+	resourceURL := strings.TrimSpace(rawURL)
+	trailingLength := 0
+	for len(resourceURL) > 0 {
+		lastByte := resourceURL[len(resourceURL)-1]
+		if !strings.ContainsRune(".,;:", rune(lastByte)) {
+			break
+		}
+		resourceURL = resourceURL[:len(resourceURL)-1]
+		trailingLength++
+	}
+	if trailingLength == 0 {
+		return resourceURL, ""
+	}
+	return resourceURL, rawURL[len(rawURL)-trailingLength:]
 }
 
 func (spider *pageSpider) shouldRewriteImageAltResourceReference(rawRef string, baseURL *url.URL) bool {
