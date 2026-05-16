@@ -56,15 +56,18 @@ import (
 
 //go:embed web/*
 var embeddedWebFiles embed.FS
-var translationCatalog = loadTranslationCatalog()
-
 var CompileVersion = "dev"
+var translationCatalog = loadTranslationCatalog()
+var guestContextMenuTemplates = buildGuestContextMenuTemplates()
 
 const storageAppName = "sitebrush"
 const defaultDBPath = "storage/db/sitebrush.db"
 const grabResourceMaxDepth = 64
 const wholeSiteImportMaxPages = 2048
 const defaultDomainStorageLimitBytes int64 = 10 * 1024 * 1024 * 1024
+const defaultAnalyticsMemoryLimitBytes int64 = 500 * 1024 * 1024
+const defaultGuestStaticHTMLCacheLimitBytes int64 = 128 * 1024 * 1024
+const guestStaticHTMLCacheQueueSize = 4096
 
 // App keeps only explicit dependencies to stay readable and easy to swap.
 type App struct {
@@ -75,8 +78,31 @@ type App struct {
 	grabTracker           *grabProgressTracker
 	publishTracker        *publishProgressTracker
 	analyticsEvents       chan siteAnalyticsEvent
+	analyticsMemoryLimit  int64
+	guestStaticHTMLCache  chan guestStaticHTMLCacheRequest
 	geoIP                 *geoip.Resolver
 	domainLogEvents       chan domainLogEvent
+}
+
+type guestStaticHTMLCacheRequest struct {
+	filePath     string
+	pagePath     string
+	domain       string
+	languageCode string
+	modTime      time.Time
+	size         int64
+	response     chan guestStaticHTMLCacheResponse
+}
+
+type guestStaticHTMLCacheResponse struct {
+	body []byte
+	err  error
+}
+
+type guestStaticHTMLCacheEntry struct {
+	modTime time.Time
+	size    int64
+	body    []byte
 }
 
 type sqlExecutor interface {
@@ -396,6 +422,7 @@ type analyticsPreparedReport struct {
 	TopAssets          []analyticsCountRow `json:"top_assets"`
 	ErrorPaths         []analyticsCountRow `json:"error_paths"`
 	ContentSources     []analyticsCountRow `json:"content_sources"`
+	SystemEvents       []analyticsCountRow `json:"system_events,omitempty"`
 }
 
 type analyticsCountRow struct {
@@ -750,6 +777,9 @@ func (a *App) accessLogMiddleware(next http.Handler) http.Handler {
 			logType = "STATIC"
 			logColor = colorGreen
 		}
+		if logType == "STATIC" && !hasSitebrushSessionCookie(r) {
+			return
+		}
 		duration := time.Since(startedAt)
 		requestDomain := domainFromRequest(r)
 		if strings.TrimSpace(r.URL.RawQuery) == "" {
@@ -929,14 +959,11 @@ func (a *App) analyticsMiddleware(next http.Handler) http.Handler {
 		if contentSource == "" && isLikelyStaticAssetPath(r.URL.Path) {
 			contentSource = "static"
 		}
-		if !hasSitebrushSessionCookie(r) && contentSource == "static" {
-			return
-		}
 		if contentSource == "" {
 			contentSource = "request"
 		}
 		event := siteAnalyticsEvent{
-			Domain:         a.siteDomain(r.Context(), r),
+			Domain:         a.analyticsEventDomain(r, contentSource),
 			Path:           cleanPath(r.URL.Path),
 			Query:          r.URL.RawQuery,
 			Method:         r.Method,
@@ -952,7 +979,7 @@ func (a *App) analyticsMiddleware(next http.Handler) http.Handler {
 			GeoCountryCode: analyticsGeoCountryCodeFromRequest(r),
 			GeoCity:        analyticsGeoCityFromRequest(r),
 			GeoSource:      analyticsGeoSourceFromRequest(r),
-			IsAdmin:        a.isAdminRequest(r),
+			IsAdmin:        a.analyticsEventIsAdmin(r, contentSource),
 			IsAsset:        isLikelyStaticAssetPath(r.URL.Path),
 			IsController:   isSitebrushControllerQuery(r.URL.Query()),
 		}
@@ -1003,8 +1030,24 @@ func (a *App) enqueueAnalyticsEvent(event siteAnalyticsEvent) {
 	select {
 	case a.analyticsEvents <- event:
 	default:
-		log.Printf("analytics event buffer is full; dropping event path=%s", event.Path)
 	}
+}
+
+func (a *App) analyticsEventDomain(r *http.Request, contentSource string) string {
+	if r == nil {
+		return "localhost"
+	}
+	if contentSource == "static" && !hasSitebrushSessionCookie(r) {
+		return domainFromContext(r.Context())
+	}
+	return a.siteDomain(r.Context(), r)
+}
+
+func (a *App) analyticsEventIsAdmin(r *http.Request, contentSource string) bool {
+	if contentSource == "static" && !hasSitebrushSessionCookie(r) {
+		return false
+	}
+	return a.isAdminRequest(r)
 }
 
 func (a *App) startAnalyticsWorkers(ctx context.Context) {
@@ -1012,22 +1055,529 @@ func (a *App) startAnalyticsWorkers(ctx context.Context) {
 		return
 	}
 	go a.runAnalyticsEventWriter(ctx)
-	go a.runAnalyticsReportBuilder(ctx)
 }
 
 func (a *App) runAnalyticsEventWriter(ctx context.Context) {
+	memoryLimit := a.analyticsMemoryLimit
+	if memoryLimit <= 0 {
+		memoryLimit = defaultAnalyticsMemoryLimitBytes
+	}
+	state := newAnalyticsAggregateState(memoryLimit)
+	flushInterval := time.Minute
+	ticker := time.NewTicker(flushInterval)
+	defer ticker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
+			a.flushAnalyticsAggregateState(ctx, state)
 			return
 		case event := <-a.analyticsEvents:
 			eventContext := contextWithDomain(ctx, event.Domain)
 			event = a.enrichAnalyticsEventGeo(eventContext, event)
-			if err := a.insertAnalyticsEvent(eventContext, event); err != nil {
-				log.Printf("analytics event insert failed: %v", err)
+			state.record(event)
+		case <-ticker.C:
+			startedAt := time.Now()
+			a.flushAnalyticsAggregateState(ctx, state)
+			if time.Since(startedAt) > flushInterval && flushInterval < 30*time.Minute {
+				flushInterval *= 2
+				if flushInterval > 30*time.Minute {
+					flushInterval = 30 * time.Minute
+				}
+				ticker.Reset(flushInterval)
 			}
 		}
 	}
+}
+
+func (a *App) flushAnalyticsAggregateState(ctx context.Context, state *analyticsAggregateState) {
+	if state == nil {
+		return
+	}
+	reports := state.reports(time.Now().UTC())
+	state.resetAfterFlush()
+	for domain, report := range reports {
+		if strings.TrimSpace(domain) == "" {
+			continue
+		}
+		reportContext := contextWithDomain(ctx, domain)
+		if saveErr := a.saveAnalyticsReport(reportContext, domain, report); saveErr != nil {
+			continue
+		}
+	}
+}
+
+type analyticsAggregateState struct {
+	memoryLimitBytes int64
+	usedBytes        int64
+	domains          map[string]*siteAnalyticsAggregate
+	systemEvents     map[string][]analyticsCountRow
+	disabled         bool
+	overloadDomain   string
+}
+
+type siteAnalyticsAggregate struct {
+	periodStart           time.Time
+	periodEnd             time.Time
+	totalRequests         int
+	pageViews             int
+	humanRequests         int
+	botRequests           int
+	adminRequests         int
+	staticRequests        int
+	errorCount            int
+	totalDurationMS       int64
+	visitorSet            map[string]struct{}
+	topPages              map[string]int
+	trafficSources        map[string]int
+	referrers             map[string]int
+	countries             map[string]int
+	cities                map[string]int
+	mapBuckets            map[string]analyticsMapBucket
+	devices               map[string]int
+	visitorTypes          map[string]int
+	botCrawlers           map[string]int
+	botReferrers          map[string]int
+	browsers              map[string]int
+	operatingSystems      map[string]int
+	languages             map[string]int
+	statusCodes           map[string]int
+	hourlyActivity        map[string]int
+	dailyActivity         map[string]int
+	assets                map[string]int
+	errorPaths            map[string]int
+	contentSources        map[string]int
+	slowPageTotalDuration map[string]int64
+	slowPageCounts        map[string]int
+	sessionSummary        analyticsSessionSummary
+	visitorSessions       map[string]*analyticsVisitorSessionState
+}
+
+type analyticsVisitorSessionState struct {
+	firstEvent              siteAnalyticsEvent
+	lastEvent               siteAnalyticsEvent
+	pageCount               int
+	sessionIndex            int
+	returningVisitorCounted bool
+}
+
+func newAnalyticsAggregateState(memoryLimitBytes int64) *analyticsAggregateState {
+	return &analyticsAggregateState{
+		memoryLimitBytes: memoryLimitBytes,
+		domains:          make(map[string]*siteAnalyticsAggregate),
+		systemEvents:     make(map[string][]analyticsCountRow),
+	}
+}
+
+func (state *analyticsAggregateState) record(event siteAnalyticsEvent) {
+	if state == nil {
+		return
+	}
+	domain := strings.TrimSpace(event.Domain)
+	if domain == "" {
+		domain = "localhost"
+	}
+	if state.disabled {
+		return
+	}
+	aggregate := state.aggregateForDomain(domain)
+	aggregate.record(event)
+	state.usedBytes += estimateAnalyticsEventAggregateBytes(event)
+	if state.memoryLimitBytes > 0 && state.usedBytes > state.memoryLimitBytes {
+		state.recordSystemEvent(domain, "analytics overload started", time.Now().UTC())
+		state.domains = make(map[string]*siteAnalyticsAggregate)
+		state.usedBytes = 0
+		state.disabled = true
+		state.overloadDomain = domain
+	}
+}
+
+func estimateAnalyticsEventAggregateBytes(event siteAnalyticsEvent) int64 {
+	estimatedBytes := 512
+	estimatedBytes += len(event.Path)
+	estimatedBytes += len(event.Query)
+	estimatedBytes += len(event.UserAgent)
+	estimatedBytes += len(event.Referer)
+	estimatedBytes += len(event.AcceptLanguage)
+	estimatedBytes += len(event.VisitorID)
+	estimatedBytes += len(event.GeoCountryCode)
+	estimatedBytes += len(event.GeoCity)
+	return int64(estimatedBytes)
+}
+
+func (state *analyticsAggregateState) reports(generatedAt time.Time) map[string]analyticsPreparedReport {
+	if state.disabled {
+		domain := state.overloadDomain
+		if domain == "" {
+			domain = "localhost"
+		}
+		state.recordSystemEvent(domain, "analytics overload ended", generatedAt)
+	}
+	reports := make(map[string]analyticsPreparedReport, len(state.domains)+len(state.systemEvents))
+	for domain, aggregate := range state.domains {
+		report := aggregate.report(generatedAt)
+		if systemEvents := state.systemEvents[domain]; len(systemEvents) > 0 {
+			report.SystemEvents = append(report.SystemEvents, systemEvents...)
+		}
+		reports[domain] = report
+	}
+	for domain, systemEvents := range state.systemEvents {
+		if _, found := reports[domain]; found {
+			continue
+		}
+		reports[domain] = analyticsPreparedReport{
+			GeneratedAt:  generatedAt.Format(time.RFC3339),
+			PeriodStart:  generatedAt.Format(time.RFC3339),
+			PeriodEnd:    generatedAt.Format(time.RFC3339),
+			SystemEvents: append([]analyticsCountRow(nil), systemEvents...),
+		}
+	}
+	return reports
+}
+
+func (state *analyticsAggregateState) resetAfterFlush() {
+	if state == nil {
+		return
+	}
+	state.domains = make(map[string]*siteAnalyticsAggregate)
+	state.systemEvents = make(map[string][]analyticsCountRow)
+	state.usedBytes = 0
+	state.disabled = false
+	state.overloadDomain = ""
+}
+
+func (state *analyticsAggregateState) aggregateForDomain(domain string) *siteAnalyticsAggregate {
+	aggregate := state.domains[domain]
+	if aggregate == nil {
+		aggregate = newSiteAnalyticsAggregate()
+		state.domains[domain] = aggregate
+		state.usedBytes += int64(len(domain) + 256)
+	}
+	return aggregate
+}
+
+func (state *analyticsAggregateState) recordSystemEvent(domain, label string, occurredAt time.Time) {
+	if domain == "" {
+		domain = "localhost"
+	}
+	state.systemEvents[domain] = append(state.systemEvents[domain], analyticsCountRow{
+		Label:  label,
+		Count:  1,
+		Value:  occurredAt.Format(time.RFC3339),
+		Detail: "analytics",
+	})
+}
+
+func newSiteAnalyticsAggregate() *siteAnalyticsAggregate {
+	return &siteAnalyticsAggregate{
+		visitorSet:            make(map[string]struct{}),
+		topPages:              make(map[string]int),
+		trafficSources:        make(map[string]int),
+		referrers:             make(map[string]int),
+		countries:             make(map[string]int),
+		cities:                make(map[string]int),
+		mapBuckets:            make(map[string]analyticsMapBucket),
+		devices:               make(map[string]int),
+		visitorTypes:          make(map[string]int),
+		botCrawlers:           make(map[string]int),
+		botReferrers:          make(map[string]int),
+		browsers:              make(map[string]int),
+		operatingSystems:      make(map[string]int),
+		languages:             make(map[string]int),
+		statusCodes:           make(map[string]int),
+		hourlyActivity:        make(map[string]int),
+		dailyActivity:         make(map[string]int),
+		assets:                make(map[string]int),
+		errorPaths:            make(map[string]int),
+		contentSources:        make(map[string]int),
+		slowPageTotalDuration: make(map[string]int64),
+		slowPageCounts:        make(map[string]int),
+		sessionSummary: analyticsSessionSummary{
+			EntryPages:         make(map[string]int),
+			ExitPages:          make(map[string]int),
+			EntryHours:         make(map[string]int),
+			ReturningSources:   make(map[string]int),
+			ReturningReferrers: make(map[string]int),
+			BotReturnSources:   make(map[string]int),
+		},
+		visitorSessions: make(map[string]*analyticsVisitorSessionState),
+	}
+}
+
+func (aggregate *siteAnalyticsAggregate) record(event siteAnalyticsEvent) {
+	if aggregate.periodStart.IsZero() || event.OccurredAt.Before(aggregate.periodStart) {
+		aggregate.periodStart = event.OccurredAt
+	}
+	if event.OccurredAt.After(aggregate.periodEnd) {
+		aggregate.periodEnd = event.OccurredAt
+	}
+	aggregate.totalRequests++
+	aggregate.totalDurationMS += event.Duration.Milliseconds()
+	if _, found := aggregate.visitorSet[event.VisitorID]; !found && strings.TrimSpace(event.VisitorID) != "" {
+		aggregate.visitorSet[event.VisitorID] = struct{}{}
+	}
+	if analyticsIsBot(event.UserAgent) {
+		aggregate.botRequests++
+	} else {
+		aggregate.humanRequests++
+	}
+	incrementAnalyticsCounter(aggregate.contentSources, analyticsContentSourceLabel(event.ContentSource))
+	incrementAnalyticsCounter(aggregate.statusCodes, strconv.Itoa(event.StatusCode))
+	incrementAnalyticsCounter(aggregate.hourlyActivity, event.OccurredAt.Format("15:00"))
+	incrementAnalyticsCounter(aggregate.dailyActivity, event.OccurredAt.Format("2006-01-02"))
+	if event.IsAdmin {
+		aggregate.adminRequests++
+	}
+	if event.ContentSource == "static" || event.IsAsset {
+		aggregate.staticRequests++
+		incrementAnalyticsCounter(aggregate.assets, event.Path)
+	}
+	if event.StatusCode >= 400 {
+		aggregate.errorCount++
+		incrementAnalyticsCounter(aggregate.errorPaths, event.Path+" "+strconv.Itoa(event.StatusCode))
+	}
+	if event.IsController || event.IsAsset || event.Method != http.MethodGet {
+		return
+	}
+	aggregate.pageViews++
+	incrementAnalyticsCounter(aggregate.topPages, event.Path)
+	incrementAnalyticsCounter(aggregate.trafficSources, classifyAnalyticsTrafficSource(event.Referer))
+	if host := analyticsRefererHost(event.Referer); host != "" {
+		incrementAnalyticsCounter(aggregate.referrers, host)
+	}
+	location := analyticsLocationForEvent(event)
+	incrementAnalyticsCounter(aggregate.countries, location.Country)
+	incrementAnalyticsCounter(aggregate.cities, location.CityLabel)
+	if location.hasCoordinates() {
+		addAnalyticsMapBucket(aggregate.mapBuckets, location)
+	}
+	incrementAnalyticsCounter(aggregate.devices, analyticsDeviceClass(event.UserAgent))
+	if analyticsIsBot(event.UserAgent) {
+		incrementAnalyticsCounter(aggregate.visitorTypes, "bot")
+		incrementAnalyticsCounter(aggregate.botCrawlers, analyticsBotCrawlerName(event.UserAgent))
+		if host := analyticsRefererHost(event.Referer); host != "" {
+			incrementAnalyticsCounter(aggregate.botReferrers, host)
+		}
+	} else {
+		incrementAnalyticsCounter(aggregate.visitorTypes, "human")
+	}
+	incrementAnalyticsCounter(aggregate.browsers, analyticsBrowserName(event.UserAgent))
+	incrementAnalyticsCounter(aggregate.operatingSystems, analyticsOSName(event.UserAgent))
+	incrementAnalyticsCounter(aggregate.languages, analyticsLanguageLabel(event.AcceptLanguage))
+	aggregate.slowPageTotalDuration[event.Path] += event.Duration.Milliseconds()
+	aggregate.slowPageCounts[event.Path]++
+	aggregate.recordSessionEvent(event)
+}
+
+func (aggregate *siteAnalyticsAggregate) recordSessionEvent(event siteAnalyticsEvent) {
+	visitorID := event.VisitorID
+	if strings.TrimSpace(visitorID) == "" {
+		visitorID = analyticsVisitorID(event.ClientIP, event.UserAgent)
+	}
+	state := aggregate.visitorSessions[visitorID]
+	if state == nil {
+		state = &analyticsVisitorSessionState{firstEvent: event, lastEvent: event, pageCount: 1}
+		aggregate.visitorSessions[visitorID] = state
+		return
+	}
+	if event.OccurredAt.Sub(state.lastEvent.OccurredAt) > 30*time.Minute {
+		aggregate.flushVisitorSession(state)
+		state.firstEvent = event
+		state.lastEvent = event
+		state.pageCount = 1
+		return
+	}
+	state.lastEvent = event
+	state.pageCount++
+}
+
+func (aggregate *siteAnalyticsAggregate) report(generatedAt time.Time) analyticsPreparedReport {
+	sessionSummary := cloneAnalyticsSessionSummary(aggregate.sessionSummary)
+	for _, visitorSession := range aggregate.visitorSessions {
+		aggregate.addVisitorSessionToSummary(&sessionSummary, visitorSession)
+		if visitorSession.sessionIndex > 0 && !visitorSession.returningVisitorCounted {
+			sessionSummary.ReturningVisitors++
+		}
+	}
+	report := analyticsPreparedReport{
+		GeneratedAt:       generatedAt.Format(time.RFC3339),
+		PeriodStart:       generatedAt.Format(time.RFC3339),
+		PeriodEnd:         generatedAt.Format(time.RFC3339),
+		TotalRequests:     aggregate.totalRequests,
+		PageViews:         aggregate.pageViews,
+		UniqueVisitors:    len(aggregate.visitorSet),
+		HumanRequests:     aggregate.humanRequests,
+		BotRequests:       aggregate.botRequests,
+		Sessions:          sessionSummary.SessionCount,
+		ReturningVisitors: sessionSummary.ReturningVisitors,
+		ReturnVisits:      sessionSummary.ReturnVisits,
+		ErrorCount:        aggregate.errorCount,
+		AdminRequests:     aggregate.adminRequests,
+		StaticRequests:    aggregate.staticRequests,
+	}
+	if !aggregate.periodStart.IsZero() {
+		report.PeriodStart = aggregate.periodStart.Format(time.RFC3339)
+	}
+	if !aggregate.periodEnd.IsZero() {
+		report.PeriodEnd = aggregate.periodEnd.Format(time.RFC3339)
+	}
+	if aggregate.totalRequests > 0 {
+		report.AverageDurationMS = aggregate.totalDurationMS / int64(aggregate.totalRequests)
+	}
+	if sessionSummary.SessionCount > 0 {
+		report.BounceRate = float64(sessionSummary.BouncedSessions) / float64(sessionSummary.SessionCount) * 100
+	}
+	report.TopPages = sortedAnalyticsRows(aggregate.topPages, 12, report.PageViews)
+	report.EntryPages = sortedAnalyticsRows(sessionSummary.EntryPages, 10, sessionSummary.SessionCount)
+	report.ExitPages = sortedAnalyticsRows(sessionSummary.ExitPages, 10, sessionSummary.SessionCount)
+	report.TrafficSources = sortedAnalyticsRows(aggregate.trafficSources, 10, report.PageViews)
+	report.Referrers = sortedAnalyticsRows(aggregate.referrers, 10, report.PageViews)
+	report.ReturningSources = sortedAnalyticsRows(sessionSummary.ReturningSources, 10, report.ReturnVisits)
+	report.ReturningReferrers = sortedAnalyticsRows(sessionSummary.ReturningReferrers, 10, report.ReturnVisits)
+	report.Countries = sortedAnalyticsRows(aggregate.countries, 10, report.PageViews)
+	report.Cities = sortedAnalyticsRows(aggregate.cities, 10, report.PageViews)
+	report.EntryHours = sortedAnalyticsRows(sessionSummary.EntryHours, 24, sessionSummary.SessionCount)
+	report.MapPoints = analyticsMapPoints(aggregate.mapBuckets, report.PageViews)
+	report.Devices = sortedAnalyticsRows(aggregate.devices, 10, report.PageViews)
+	report.VisitorTypes = sortedAnalyticsRows(aggregate.visitorTypes, 10, report.PageViews)
+	report.BotCrawlers = sortedAnalyticsRows(aggregate.botCrawlers, 10, report.PageViews)
+	report.BotReturnSources = sortedAnalyticsRows(sessionSummary.BotReturnSources, 10, report.ReturnVisits)
+	report.BotReferrers = sortedAnalyticsRows(aggregate.botReferrers, 10, report.PageViews)
+	report.Browsers = sortedAnalyticsRows(aggregate.browsers, 10, report.PageViews)
+	report.OperatingSystems = sortedAnalyticsRows(aggregate.operatingSystems, 10, report.PageViews)
+	report.Languages = sortedAnalyticsRows(aggregate.languages, 10, report.PageViews)
+	report.StatusCodes = sortedAnalyticsRows(aggregate.statusCodes, 10, report.TotalRequests)
+	report.HourlyActivity = sortedAnalyticsRows(aggregate.hourlyActivity, 24, report.TotalRequests)
+	report.DailyActivity = sortedAnalyticsRows(aggregate.dailyActivity, 14, report.TotalRequests)
+	report.TopAssets = sortedAnalyticsRows(aggregate.assets, 10, report.StaticRequests)
+	report.ErrorPaths = sortedAnalyticsRows(aggregate.errorPaths, 10, report.ErrorCount)
+	report.ContentSources = sortedAnalyticsRows(aggregate.contentSources, 10, report.TotalRequests)
+	report.SlowPages = analyticsSlowPageRows(aggregate.slowPageTotalDuration, aggregate.slowPageCounts, 10)
+	return report
+}
+
+func cloneAnalyticsSessionSummary(source analyticsSessionSummary) analyticsSessionSummary {
+	return analyticsSessionSummary{
+		EntryPages:         cloneAnalyticsCounter(source.EntryPages),
+		ExitPages:          cloneAnalyticsCounter(source.ExitPages),
+		EntryHours:         cloneAnalyticsCounter(source.EntryHours),
+		ReturningSources:   cloneAnalyticsCounter(source.ReturningSources),
+		ReturningReferrers: cloneAnalyticsCounter(source.ReturningReferrers),
+		BotReturnSources:   cloneAnalyticsCounter(source.BotReturnSources),
+		SessionCount:       source.SessionCount,
+		BouncedSessions:    source.BouncedSessions,
+		ReturningVisitors:  source.ReturningVisitors,
+		ReturnVisits:       source.ReturnVisits,
+	}
+}
+
+func cloneAnalyticsCounter(source map[string]int) map[string]int {
+	cloned := make(map[string]int, len(source))
+	for key, count := range source {
+		cloned[key] = count
+	}
+	return cloned
+}
+
+func (aggregate *siteAnalyticsAggregate) flushVisitorSession(visitorSession *analyticsVisitorSessionState) {
+	aggregate.addVisitorSessionToSummary(&aggregate.sessionSummary, visitorSession)
+	if visitorSession.sessionIndex > 0 && !visitorSession.returningVisitorCounted {
+		aggregate.sessionSummary.ReturningVisitors++
+		visitorSession.returningVisitorCounted = true
+	}
+	visitorSession.sessionIndex++
+}
+
+func (aggregate *siteAnalyticsAggregate) addVisitorSessionToSummary(summary *analyticsSessionSummary, visitorSession *analyticsVisitorSessionState) {
+	if visitorSession == nil || visitorSession.pageCount == 0 {
+		return
+	}
+	summary.SessionCount++
+	firstEvent := visitorSession.firstEvent
+	lastEvent := visitorSession.lastEvent
+	summary.EntryPages[firstEvent.Path]++
+	summary.ExitPages[lastEvent.Path]++
+	summary.EntryHours[firstEvent.OccurredAt.Format("15:00")]++
+	if visitorSession.pageCount == 1 {
+		summary.BouncedSessions++
+	}
+	if visitorSession.sessionIndex > 0 {
+		summary.ReturnVisits++
+		source := classifyAnalyticsTrafficSource(firstEvent.Referer)
+		if analyticsIsBot(firstEvent.UserAgent) {
+			summary.BotReturnSources[source]++
+		} else {
+			summary.ReturningSources[source]++
+			if host := analyticsRefererHost(firstEvent.Referer); host != "" {
+				summary.ReturningReferrers[host]++
+			}
+		}
+	}
+}
+
+func (aggregate *siteAnalyticsAggregate) estimatedBytes() int64 {
+	total := int64(1024)
+	total += estimateAnalyticsStringSetBytes(aggregate.visitorSet)
+	total += estimateAnalyticsCounterBytes(aggregate.topPages)
+	total += estimateAnalyticsCounterBytes(aggregate.trafficSources)
+	total += estimateAnalyticsCounterBytes(aggregate.referrers)
+	total += estimateAnalyticsCounterBytes(aggregate.countries)
+	total += estimateAnalyticsCounterBytes(aggregate.cities)
+	total += int64(len(aggregate.mapBuckets) * 192)
+	total += estimateAnalyticsCounterBytes(aggregate.devices)
+	total += estimateAnalyticsCounterBytes(aggregate.visitorTypes)
+	total += estimateAnalyticsCounterBytes(aggregate.botCrawlers)
+	total += estimateAnalyticsCounterBytes(aggregate.botReferrers)
+	total += estimateAnalyticsCounterBytes(aggregate.browsers)
+	total += estimateAnalyticsCounterBytes(aggregate.operatingSystems)
+	total += estimateAnalyticsCounterBytes(aggregate.languages)
+	total += estimateAnalyticsCounterBytes(aggregate.statusCodes)
+	total += estimateAnalyticsCounterBytes(aggregate.hourlyActivity)
+	total += estimateAnalyticsCounterBytes(aggregate.dailyActivity)
+	total += estimateAnalyticsCounterBytes(aggregate.assets)
+	total += estimateAnalyticsCounterBytes(aggregate.errorPaths)
+	total += estimateAnalyticsCounterBytes(aggregate.contentSources)
+	total += estimateAnalyticsDurationCounterBytes(aggregate.slowPageTotalDuration)
+	total += estimateAnalyticsCounterBytes(aggregate.slowPageCounts)
+	total += int64(len(aggregate.visitorSessions) * 512)
+	total += estimateAnalyticsCounterBytes(aggregate.sessionSummary.EntryPages)
+	total += estimateAnalyticsCounterBytes(aggregate.sessionSummary.ExitPages)
+	total += estimateAnalyticsCounterBytes(aggregate.sessionSummary.EntryHours)
+	total += estimateAnalyticsCounterBytes(aggregate.sessionSummary.ReturningSources)
+	total += estimateAnalyticsCounterBytes(aggregate.sessionSummary.ReturningReferrers)
+	total += estimateAnalyticsCounterBytes(aggregate.sessionSummary.BotReturnSources)
+	return total
+}
+
+func incrementAnalyticsCounter(values map[string]int, key string) {
+	cleanKey := strings.TrimSpace(key)
+	if cleanKey == "" {
+		return
+	}
+	values[cleanKey]++
+}
+
+func estimateAnalyticsCounterBytes(values map[string]int) int64 {
+	var total int64
+	for key := range values {
+		total += int64(len(key) + 96)
+	}
+	return total
+}
+
+func estimateAnalyticsDurationCounterBytes(values map[string]int64) int64 {
+	var total int64
+	for key := range values {
+		total += int64(len(key) + 96)
+	}
+	return total
+}
+
+func estimateAnalyticsStringSetBytes(values map[string]struct{}) int64 {
+	var total int64
+	for key := range values {
+		total += int64(len(key) + 96)
+	}
+	return total
 }
 
 func (a *App) runAnalyticsReportBuilder(ctx context.Context) {
@@ -1920,14 +2470,23 @@ func analyticsReportView(report analyticsPreparedReport, translations map[string
 		analyticsSectionView("analytics_section_assets", "analytics_section_assets_hint", report.TopAssets, report.StaticRequests, "path", translations),
 		analyticsSectionView("analytics_section_errors", "analytics_section_errors_hint", report.ErrorPaths, report.ErrorCount, "path", translations),
 		analyticsSectionView("analytics_section_content_sources", "analytics_section_content_sources_hint", report.ContentSources, report.TotalRequests, "content", translations),
+		analyticsSectionView("analytics_section_system_events", "analytics_section_system_events_hint", report.SystemEvents, 0, "plain", translations),
 	}
 	return view
 }
 
 func analyticsSectionView(titleKey, descriptionKey string, sourceRows []analyticsCountRow, total int, labelKind string, translations map[string]string) analyticsReportSection {
+	titleFallback := titleKey
+	descriptionFallback := ""
+	if titleKey == "analytics_section_system_events" {
+		titleFallback = "Analytics system events"
+	}
+	if descriptionKey == "analytics_section_system_events_hint" {
+		descriptionFallback = "Overload and recovery markers from the bounded in-memory analytics worker."
+	}
 	section := analyticsReportSection{
-		Title:       translationOrDefault(translations, titleKey, titleKey),
-		Description: translationOrDefault(translations, descriptionKey, ""),
+		Title:       translationOrDefault(translations, titleKey, titleFallback),
+		Description: translationOrDefault(translations, descriptionKey, descriptionFallback),
 		Rows:        make([]analyticsReportRow, 0, len(sourceRows)),
 	}
 	for _, sourceRow := range sourceRows {
@@ -2196,7 +2755,8 @@ func main() {
 	}
 
 	var siteDatabaseRouter *perSiteDBRouter
-	application := &App{storagePath: effectiveStoragePath, nativeFileDialog: desktop.NativeFileDialogSupported(), grabTracker: newGrabProgressTracker(), publishTracker: newPublishProgressTracker(), analyticsEvents: make(chan siteAnalyticsEvent, 1024), domainLogEvents: make(chan domainLogEvent, 1024)}
+	application := &App{storagePath: effectiveStoragePath, nativeFileDialog: desktop.NativeFileDialogSupported(), grabTracker: newGrabProgressTracker(), publishTracker: newPublishProgressTracker(), analyticsEvents: make(chan siteAnalyticsEvent, 65536), domainLogEvents: make(chan domainLogEvent, 1024)}
+	application.guestStaticHTMLCache = startGuestStaticHTMLCacheWorker(context.Background(), defaultGuestStaticHTMLCacheLimitBytes)
 	application.geoIP = geoip.NewResolver(filepath.Join(application.storageRootDir(), "geoip"))
 	siteDatabaseRootDir := siteDatabaseRootPath(effectiveDBPath)
 	siteDatabaseRouter = newPerSiteDBRouter(siteDatabaseRootDir, "localhost", func(rawDatabase *sql.DB) error {
@@ -6924,8 +7484,28 @@ func buildContextMenuScript(isAdmin bool, isFrozen bool, pagePath, domain string
 }
 
 func buildGuestContextMenuScript(pagePath, domain string, translations map[string]string) string {
-	escapedPath := template.JSEscapeString(pagePath)
-	escapedDomain := template.JSEscapeString(domain)
+	menuTemplate := buildGuestContextMenuScriptTemplate(translations)
+	return strings.NewReplacer(
+		guestContextMenuPagePathPlaceholder, template.JSEscapeString(pagePath),
+		guestContextMenuDomainPlaceholder, template.JSEscapeString(domain),
+	).Replace(menuTemplate)
+}
+
+func buildGuestContextMenuScriptForLanguage(pagePath, domain, languageCode string) string {
+	menuTemplate := guestContextMenuTemplates[languageCode]
+	if strings.TrimSpace(menuTemplate) == "" {
+		menuTemplate = guestContextMenuTemplates["ru"]
+	}
+	if strings.TrimSpace(menuTemplate) == "" {
+		menuTemplate = buildGuestContextMenuScriptTemplate(translationsForLanguageCode("ru"))
+	}
+	return strings.NewReplacer(
+		guestContextMenuPagePathPlaceholder, template.JSEscapeString(pagePath),
+		guestContextMenuDomainPlaceholder, template.JSEscapeString(domain),
+	).Replace(menuTemplate)
+}
+
+func buildGuestContextMenuScriptTemplate(translations map[string]string) string {
 	loginLabel := template.JSEscapeString(translationOrDefault(translations, "menu_login", "Sign in"))
 	compiledVersionLabel := template.JSEscapeString("v." + CompileVersion)
 	sitebrushHomeURL := "https://sitebrush.com"
@@ -6937,8 +7517,8 @@ func buildGuestContextMenuScript(pagePath, domain string, translations map[strin
     return;
   }
   window.__sitebrushContextMenuInitialized = true;
-  const currentPagePath = "` + escapedPath + `";
-  const currentDomainName = "` + escapedDomain + `";
+  const currentPagePath = "` + guestContextMenuPagePathPlaceholder + `";
+  const currentDomainName = "` + guestContextMenuDomainPlaceholder + `";
   function buildSitebrushGuestMenuEntries() {
     return [
       "<ul class='SiteBrushMenuList'>",
@@ -7635,6 +8215,9 @@ func translationOrDefault(translations map[string]string, key, fallback string) 
 	return translatedValue
 }
 
+const guestContextMenuPagePathPlaceholder = "__SITEBRUSH_PAGE_PATH__"
+const guestContextMenuDomainPlaceholder = "__SITEBRUSH_DOMAIN__"
+
 func (a *App) applyTemplatePropagation(ctx context.Context, domain, sourceHTML string) {
 	templateBlockByID := extractTemplateBlocks(sourceHTML)
 	if len(templateBlockByID) == 0 {
@@ -8285,8 +8868,23 @@ func loadTranslationCatalog() map[string]map[string]string {
 	return catalog
 }
 
+func buildGuestContextMenuTemplates() map[string]string {
+	templates := make(map[string]string, len(translationCatalog))
+	for languageCode := range translationCatalog {
+		templates[languageCode] = buildGuestContextMenuScriptTemplate(translationsForLanguageCode(languageCode))
+	}
+	if strings.TrimSpace(templates["ru"]) == "" {
+		templates["ru"] = buildGuestContextMenuScriptTemplate(map[string]string{"menu_login": "Sign in"})
+	}
+	return templates
+}
+
 func translationsForRequest(r *http.Request) map[string]string {
 	languageCode := preferredLanguageCode(r.Header.Get("Accept-Language"))
+	return translationsForLanguageCode(languageCode)
+}
+
+func translationsForLanguageCode(languageCode string) map[string]string {
 	selectedTranslations, found := translationCatalog[languageCode]
 	englishTranslations := translationCatalog["en"]
 	if !found {
@@ -12212,22 +12810,126 @@ func (a *App) servePublishedStaticFileFromDisk(w http.ResponseWriter, r *http.Re
 		http.ServeFile(w, r, staticFilePath)
 		return true
 	}
-	staticContent, readErr := os.ReadFile(staticFilePath)
-	if readErr != nil {
-		return false
-	}
 	a.logContentDelivery(w, "static-file")
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if injectPublicMenu {
-		_, _ = w.Write([]byte(a.injectPublicContextMenu(r, pagePath, string(staticContent))))
+		staticContent, readErr := a.guestStaticHTML(staticFilePath, pagePath, domain, preferredLanguageCode(r.Header.Get("Accept-Language")), fileInfo)
+		if readErr != nil {
+			return false
+		}
+		_, _ = w.Write(staticContent)
 		return true
+	}
+	staticContent, readErr := os.ReadFile(staticFilePath)
+	if readErr != nil {
+		return false
 	}
 	_, _ = w.Write(staticContent)
 	return true
 }
 
+func (a *App) guestStaticHTML(staticFilePath, pagePath, domain, languageCode string, fileInfo os.FileInfo) ([]byte, error) {
+	if a.guestStaticHTMLCache == nil {
+		staticContent, readErr := os.ReadFile(staticFilePath)
+		if readErr != nil {
+			return nil, readErr
+		}
+		html := string(staticContent)
+		menuScript := buildGuestContextMenuScriptForLanguage(pagePath, domain, languageCode)
+		lowerHTML := strings.ToLower(html)
+		bodyCloseIndex := strings.LastIndex(lowerHTML, "</body>")
+		if bodyCloseIndex < 0 {
+			return []byte(html + menuScript), nil
+		}
+		return []byte(html[:bodyCloseIndex] + menuScript + html[bodyCloseIndex:]), nil
+	}
+	response := make(chan guestStaticHTMLCacheResponse, 1)
+	request := guestStaticHTMLCacheRequest{
+		filePath:     staticFilePath,
+		pagePath:     pagePath,
+		domain:       domain,
+		languageCode: languageCode,
+		modTime:      fileInfo.ModTime(),
+		size:         fileInfo.Size(),
+		response:     response,
+	}
+	select {
+	case a.guestStaticHTMLCache <- request:
+	default:
+		return buildGuestStaticHTMLBody(staticFilePath, pagePath, domain, languageCode)
+	}
+	select {
+	case result := <-response:
+		return result.body, result.err
+	case <-time.After(2 * time.Second):
+		return buildGuestStaticHTMLBody(staticFilePath, pagePath, domain, languageCode)
+	}
+}
+
+func startGuestStaticHTMLCacheWorker(ctx context.Context, limitBytes int64) chan guestStaticHTMLCacheRequest {
+	requests := make(chan guestStaticHTMLCacheRequest, guestStaticHTMLCacheQueueSize)
+	go runGuestStaticHTMLCache(ctx, requests, limitBytes)
+	return requests
+}
+
+func runGuestStaticHTMLCache(ctx context.Context, requests <-chan guestStaticHTMLCacheRequest, limitBytes int64) {
+	if limitBytes <= 0 {
+		limitBytes = defaultGuestStaticHTMLCacheLimitBytes
+	}
+	cacheEntries := make(map[string]guestStaticHTMLCacheEntry)
+	var usedBytes int64
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case request := <-requests:
+			cacheKey := strings.Join([]string{request.filePath, request.pagePath, request.domain, request.languageCode}, "\x00")
+			if cachedEntry, found := cacheEntries[cacheKey]; found {
+				if cachedEntry.modTime.Equal(request.modTime) && cachedEntry.size == request.size {
+					request.response <- guestStaticHTMLCacheResponse{body: cachedEntry.body}
+					continue
+				}
+				usedBytes -= int64(len(cachedEntry.body))
+				delete(cacheEntries, cacheKey)
+			}
+			body, readErr := buildGuestStaticHTMLBody(request.filePath, request.pagePath, request.domain, request.languageCode)
+			if readErr != nil {
+				request.response <- guestStaticHTMLCacheResponse{err: readErr}
+				continue
+			}
+			bodySize := int64(len(body))
+			if bodySize > limitBytes {
+				request.response <- guestStaticHTMLCacheResponse{body: body}
+				continue
+			}
+			if usedBytes+bodySize > limitBytes {
+				cacheEntries = make(map[string]guestStaticHTMLCacheEntry)
+				usedBytes = 0
+			}
+			cacheEntries[cacheKey] = guestStaticHTMLCacheEntry{modTime: request.modTime, size: request.size, body: body}
+			usedBytes += bodySize
+			request.response <- guestStaticHTMLCacheResponse{body: body}
+		}
+	}
+}
+
+func buildGuestStaticHTMLBody(staticFilePath, pagePath, domain, languageCode string) ([]byte, error) {
+	staticContent, readErr := os.ReadFile(staticFilePath)
+	if readErr != nil {
+		return nil, readErr
+	}
+	html := string(staticContent)
+	menuScript := buildGuestContextMenuScriptForLanguage(pagePath, domain, languageCode)
+	lowerHTML := strings.ToLower(html)
+	bodyCloseIndex := strings.LastIndex(lowerHTML, "</body>")
+	if bodyCloseIndex < 0 {
+		return []byte(html + menuScript), nil
+	}
+	return []byte(html[:bodyCloseIndex] + menuScript + html[bodyCloseIndex:]), nil
+}
+
 func (a *App) injectPublicContextMenu(r *http.Request, pagePath, html string) string {
-	menuScript := buildGuestContextMenuScript(pagePath, domainFromContext(r.Context()), translationsForRequest(r))
+	menuScript := buildGuestContextMenuScriptForLanguage(pagePath, domainFromContext(r.Context()), preferredLanguageCode(r.Header.Get("Accept-Language")))
 	lowerHTML := strings.ToLower(html)
 	bodyCloseIndex := strings.LastIndex(lowerHTML, "</body>")
 	if bodyCloseIndex < 0 {

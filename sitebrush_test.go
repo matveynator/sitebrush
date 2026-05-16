@@ -478,6 +478,48 @@ func TestAnalyticsReportBuildsGoogleAnalyticsStyleMetrics(t *testing.T) {
 	assertAnalyticsRow(t, report.ErrorPaths, "/missing 404", 1)
 }
 
+func TestAnalyticsAggregateStoresProcessedReportAndOverloadMarkers(t *testing.T) {
+	now := time.Date(2026, 5, 16, 10, 0, 0, 0, time.UTC)
+	state := newAnalyticsAggregateState(4096)
+	state.record(siteAnalyticsEvent{
+		Domain:         "localhost",
+		Path:           "/",
+		Method:         http.MethodGet,
+		StatusCode:     http.StatusOK,
+		ContentSource:  "static",
+		OccurredAt:     now,
+		Duration:       25 * time.Millisecond,
+		ClientIP:       "127.0.0.1",
+		UserAgent:      "Mozilla/5.0 Chrome/124.0.0.0 Safari/537.36",
+		AcceptLanguage: "en-US,en;q=0.9",
+		VisitorID:      "visitor-a",
+	})
+	report := state.reports(now)["localhost"]
+	if report.TotalRequests != 1 || report.PageViews != 1 || report.StaticRequests != 1 {
+		t.Fatalf("report counts = total:%d views:%d static:%d, want 1/1/1", report.TotalRequests, report.PageViews, report.StaticRequests)
+	}
+	assertAnalyticsRow(t, report.TopPages, "/", 1)
+
+	overloadedState := newAnalyticsAggregateState(1)
+	overloadedState.record(siteAnalyticsEvent{
+		Domain:        "localhost",
+		Path:          "/heavy",
+		Method:        http.MethodGet,
+		StatusCode:    http.StatusOK,
+		ContentSource: "static",
+		OccurredAt:    now,
+		Duration:      10 * time.Millisecond,
+		UserAgent:     "Mozilla/5.0",
+		VisitorID:     "visitor-b",
+	})
+	overloadReport := overloadedState.reports(now.Add(time.Minute))["localhost"]
+	assertAnalyticsRow(t, overloadReport.SystemEvents, "analytics overload started", 1)
+	assertAnalyticsRow(t, overloadReport.SystemEvents, "analytics overload ended", 1)
+	if overloadReport.TotalRequests != 0 {
+		t.Fatalf("overloaded report total requests = %d, want cleared data", overloadReport.TotalRequests)
+	}
+}
+
 func TestAnalyticsPageRequiresAdminAndRendersPreparedReport(t *testing.T) {
 	application, rawDB := newTestApplication(t)
 	_, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "admin@example.com", "old")
@@ -3169,7 +3211,7 @@ func TestGuestStaticRouteServesPublishedFileWithoutDatabase(t *testing.T) {
 	}
 }
 
-func TestGuestStaticAnalyticsSkipsDatabase(t *testing.T) {
+func TestGuestStaticAnalyticsAvoidsDatabaseAndEnqueuesEvent(t *testing.T) {
 	storagePath := t.TempDir()
 	application := &App{db: panicSQLExecutor{t: t}, storagePath: storagePath, analyticsEvents: make(chan siteAnalyticsEvent, 1)}
 	staticFilePath := filepath.Join(application.domainStaticDir("localhost"), "index.html")
@@ -3188,8 +3230,14 @@ func TestGuestStaticAnalyticsSkipsDatabase(t *testing.T) {
 	}
 	select {
 	case event := <-application.analyticsEvents:
-		t.Fatalf("guest static request should not enqueue analytics event: %#v", event)
+		if event.ContentSource != "static" {
+			t.Fatalf("content source = %q, want static", event.ContentSource)
+		}
+		if event.Domain != "localhost" {
+			t.Fatalf("domain = %q, want localhost", event.Domain)
+		}
 	default:
+		t.Fatal("guest static request did not enqueue analytics event")
 	}
 }
 
