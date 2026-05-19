@@ -32,6 +32,7 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 	"golang.org/x/net/dns/dnsmessage"
 	"sitebrush/pkg/diskusage"
+	"sitebrush/pkg/grabber"
 )
 
 type fakeGrabTransport struct {
@@ -1986,6 +1987,139 @@ func TestMirrorRemotePageImportsNestedExternalResources(t *testing.T) {
 		if strings.Contains(importedHTML, forbiddenFragment) && forbiddenFragment != "youtube.com/embed/demo" {
 			t.Fatalf("imported HTML still contains forbidden fragment %q: %s", forbiddenFragment, importedHTML)
 		}
+	}
+}
+
+func TestMirrorRemotePageResolvesRootAssetJSReferencesWithoutDuplicatingDirectory(t *testing.T) {
+	pageRawURL := "https://karman.cafe/"
+	sourceHTML := `<!doctype html><html><head>` +
+		`<script src="/assets/entries/entry-server-routing.js" type="module"></script>` +
+		`<link rel="modulepreload" href="/assets/entries/renderer_default.page.client.js" as="script" type="text/javascript">` +
+		`<link rel="modulepreload" href="/assets/chunks/chunk-BXl3LOEh.js" as="script" type="text/javascript">` +
+		`</head><body>Imported</body></html>`
+
+	previousGrabHTTPClient := newGrabHTTPClient
+	newGrabHTTPClient = func() *http.Client {
+		return &http.Client{Transport: fakeGrabTransport{responses: map[string]fakeGrabResponse{
+			"https://karman.cafe/assets/entries/entry-server-routing.js":         {contentType: "application/javascript", body: "const renderer = \"assets/entries/renderer_default.page.client.js\"; const chunk = \"assets/chunks/chunk-BXl3LOEh.js\"; const templateChunk = `assets/chunks/chunk-Cpu9IR5w.js`; const sibling = \"./entry-helper.js\";"},
+			"https://karman.cafe/assets/entries/renderer_default.page.client.js": {contentType: "application/javascript", body: `const dependencies = ["assets/chunks/chunk-CZSVq2mV.js"]; import "../chunks/chunk-4KdN5x27.js";`},
+			"https://karman.cafe/assets/chunks/chunk-BXl3LOEh.js":                {contentType: "application/javascript", body: `console.log("chunk");`},
+			"https://karman.cafe/assets/chunks/chunk-CZSVq2mV.js":                {contentType: "application/javascript", body: `console.log("nested map chunk");`},
+			"https://karman.cafe/assets/chunks/chunk-4KdN5x27.js":                {contentType: "application/javascript", body: `console.log("nested import chunk");`},
+			"https://karman.cafe/assets/chunks/chunk-Cpu9IR5w.js":                {contentType: "application/javascript", body: `console.log("template chunk");`},
+			"https://karman.cafe/assets/entries/entry-helper.js":                 {contentType: "application/javascript", body: `console.log("helper");`},
+		}}}
+	}
+	defer func() {
+		newGrabHTTPClient = previousGrabHTTPClient
+	}()
+
+	pageURL, parseErr := url.Parse(pageRawURL)
+	if parseErr != nil {
+		t.Fatal(parseErr)
+	}
+	previewResources := previewGrabResources(pageURL, sourceHTML, nil, "", grabSourceOptions{})
+	for _, previewResource := range previewResources {
+		if strings.Contains(previewResource.URL, "/assets/entries/assets/") {
+			t.Fatalf("preview resource duplicated asset directory: %#v", previewResources)
+		}
+	}
+	selectedResourceURLs := make(map[string]struct{}, len(previewResources))
+	for _, previewResource := range previewResources {
+		selectedResourceURLs[previewResource.URL] = struct{}{}
+	}
+
+	application, _ := newTestApplication(t)
+	importedHTML := application.mirrorRemotePage("example.test", "/imported", pageRawURL, pageURL, sourceHTML, "", selectedResourceURLs, "")
+	if strings.Contains(importedHTML, "karman.cafe/assets") {
+		t.Fatalf("imported HTML still references source assets: %s", importedHTML)
+	}
+	if strings.Contains(importedHTML, `"//p/`) || strings.Contains(importedHTML, `'//p/`) {
+		t.Fatalf("imported HTML contains protocol-relative local asset reference: %s", importedHTML)
+	}
+
+	storedFiles, listErr := listStoredFiles(application.domainFilesDirForDomain("example.test"))
+	if listErr != nil {
+		t.Fatal(listErr)
+	}
+	if len(storedFiles) != 7 {
+		t.Fatalf("stored files = %d, want 7: %#v", len(storedFiles), storedFiles)
+	}
+	for _, storedFilePath := range storedFiles {
+		if filepath.Ext(storedFilePath) != ".js" {
+			continue
+		}
+		storedBytes, readErr := os.ReadFile(storedFilePath)
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		storedScript := string(storedBytes)
+		if strings.Contains(storedScript, "assets/entries/assets") || strings.Contains(storedScript, "karman.cafe/assets") {
+			t.Fatalf("stored script keeps broken source reference in %s: %s", storedFilePath, storedScript)
+		}
+		for _, forbiddenFragment := range []string{"assets/chunks/chunk-CZSVq2mV.js", "../chunks/chunk-4KdN5x27.js", `"//p/`, `'//p/`} {
+			if strings.Contains(storedScript, forbiddenFragment) {
+				t.Fatalf("stored script keeps broken reference %q in %s: %s", forbiddenFragment, storedFilePath, storedScript)
+			}
+		}
+	}
+}
+
+func TestMirrorRemotePageRewritesDataManifestRelativeURLs(t *testing.T) {
+	pageRawURL := "https://karman.cafe/"
+	manifest := `{"name":"Karman","start_url":"/","icons":[{"src":"./assets/apple-touch-icon.png","sizes":"180x180","type":"image/png"}]}`
+	sourceHTML := `<!doctype html><html><head><link rel="manifest" href="data:application/manifest+json,` + url.PathEscape(manifest) + `"></head><body>Imported</body></html>`
+	pageURL, parseErr := url.Parse(pageRawURL)
+	if parseErr != nil {
+		t.Fatal(parseErr)
+	}
+
+	application, _ := newTestApplication(t)
+	importedHTML := application.mirrorRemotePage("example.test", "/imported", pageRawURL, pageURL, sourceHTML, "", nil, "")
+	manifestHrefStart := strings.Index(importedHTML, `href="`)
+	if manifestHrefStart < 0 {
+		t.Fatalf("manifest href not found in imported HTML: %s", importedHTML)
+	}
+	manifestHrefStart += len(`href="`)
+	manifestHrefEnd := strings.Index(importedHTML[manifestHrefStart:], `"`)
+	if manifestHrefEnd < 0 {
+		t.Fatalf("manifest href is not closed in imported HTML: %s", importedHTML)
+	}
+	manifestHref := importedHTML[manifestHrefStart : manifestHrefStart+manifestHrefEnd]
+	_, manifestPayload, ok := grabber.SplitDataURL(manifestHref)
+	if !ok {
+		t.Fatalf("manifest href is not a data URL: %s", manifestHref)
+	}
+	decodedManifest, decodeErr := url.PathUnescape(manifestPayload)
+	if decodeErr != nil {
+		t.Fatal(decodeErr)
+	}
+	var manifestPayloadObject map[string]any
+	if err := json.Unmarshal([]byte(decodedManifest), &manifestPayloadObject); err != nil {
+		t.Fatalf("decode rewritten manifest: %v, payload=%s", err, decodedManifest)
+	}
+	if _, found := manifestPayloadObject["start_url"]; found {
+		t.Fatalf("manifest keeps source-origin start_url: %#v", manifestPayloadObject["start_url"])
+	}
+	icons, ok := manifestPayloadObject["icons"].([]any)
+	if !ok || len(icons) != 1 {
+		t.Fatalf("manifest icons = %#v", manifestPayloadObject["icons"])
+	}
+	icon, ok := icons[0].(map[string]any)
+	if !ok || icon["src"] != "https://karman.cafe/assets/apple-touch-icon.png" {
+		t.Fatalf("manifest icon src = %#v", manifestPayloadObject["icons"])
+	}
+}
+
+func TestNormalizeMirroredAssetReferenceCollapsesProtocolRelativeLocalPath(t *testing.T) {
+	if normalizedReference := normalizeMirroredAssetReference("//p/app.js"); normalizedReference != "/p/app.js" {
+		t.Fatalf("normalized reference = %q", normalizedReference)
+	}
+	if normalizedReference := normalizeMirroredAssetReference("/p/app.js"); normalizedReference != "/p/app.js" {
+		t.Fatalf("stable reference = %q", normalizedReference)
+	}
+	if normalizedReference := normalizeMirroredAssetReference("https://cdn.example/app.js"); normalizedReference != "https://cdn.example/app.js" {
+		t.Fatalf("external reference = %q", normalizedReference)
 	}
 }
 
@@ -4325,11 +4459,36 @@ func TestMissingPageReturns404ForGuest(t *testing.T) {
 		t.Fatalf("status = %d, body=%q", response.Code, response.Body.String())
 	}
 	body := response.Body.String()
-	if !strings.Contains(body, "создайте эту страницу") {
-		t.Fatalf("missing page did not offer create action: %s", body)
+	for _, expectedFragment := range []string{
+		`Страница <strong>/missing</strong> не найдена. Пожалуйста <a href="/missing?edit">создайте эту страницу</a>.`,
+		`initializeSitebrushContextMenuForGuests`,
+	} {
+		if !strings.Contains(body, expectedFragment) {
+			t.Fatalf("missing page did not include %q in %s", expectedFragment, body)
+		}
 	}
 	if strings.Contains(body, `method="post" action="/missing?grab" data-grab-form`) {
 		t.Fatalf("guest missing page unexpectedly offers copy form: %s", body)
+	}
+	if strings.Contains(body, "sitebrush / /missing") {
+		t.Fatalf("guest missing page still includes the old footer label: %s", body)
+	}
+	if response.Header().Get("X-Sitebrush-Source") != "static" {
+		t.Fatalf("guest missing page source = %q, want static", response.Header().Get("X-Sitebrush-Source"))
+	}
+}
+
+func TestGuestMissingPageTemplatesAreAvailableForEveryLanguage(t *testing.T) {
+	for languageCode := range translationCatalog {
+		body := buildGuestNotFoundPageForLanguage("/missing", "localhost", languageCode)
+		if !strings.Contains(body, `/missing?edit`) {
+			t.Fatalf("%s missing edit link in %s", languageCode, body)
+		}
+		for _, placeholder := range []string{`__SITEBRUSH_NOT_FOUND_PATH__`, `__SITEBRUSH_NOT_FOUND_EDIT_LINK__`, `__SITEBRUSH_NOT_FOUND_MENU__`} {
+			if strings.Contains(body, placeholder) {
+				t.Fatalf("%s still contains placeholder %q in %s", languageCode, placeholder, body)
+			}
+		}
 	}
 }
 

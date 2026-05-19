@@ -5,17 +5,43 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{{index .T "edit_mode_title"}}</title>
-  <style>
-    :root { color-scheme: light dark; --page-bg:#f4f8fc; --text-main:#1b2a3d; --link:#1a65d8; }
-    @media (prefers-color-scheme: dark) { :root { --page-bg:#0f1724; --text-main:#dbe8ff; --link:#9ec2ff; } }
-    body { margin: 0; padding: 24px; font-family: Arial,sans-serif; background: var(--page-bg); color: var(--text-main); }
-    a { color: var(--link); }
-  </style>
+  <link rel="stylesheet" href="/p/static/bootstrap.min.css">
+  <link rel="stylesheet" href="/p/static/technical_pages.css">
 </head>
-<body>
-<h1>{{index .T "edit_mode_choose_for"}} {{.Path}}</h1>
-<p>{{index .T "edit_mode_document_type"}} {{.ContentKind}}</p>
-{{if .IsHTML}}<p><a href="{{.Path}}?visual">{{index .T "edit_mode_open_visual"}}</a></p>{{end}}
-<p><a href="{{.Path}}?text">{{index .T "edit_mode_open_text"}}</a></p>
+<body class="technical-page bg-body">
+<main class="container edit-mode-page">
+  <header class="page-header">
+    <h1>{{index .T "edit_mode_choose_for"}} {{.Path}}</h1>
+    <small>{{index .T "edit_mode_document_type"}} {{.ContentKind}}</small>
+  </header>
+
+  <div class="edit-mode-grid">
+    <section class="card">
+      <div class="card-body">
+        <h2 class="h5">{{index .T "missing_copy_from_site_label"}}</h2>
+        <form method="post" action="{{.Path}}?grab" class="edit-mode-copy-form">
+          <input type="hidden" name="path" value="{{.Path}}">
+          <label for="source_url">{{index .T "missing_source_url_placeholder"}}</label>
+          <input id="source_url" name="source_url" type="text" inputmode="url" placeholder="sitebrush.com or https://example.com/page" required>
+          <label class="checkbox-row">
+            <input type="checkbox" name="copy_whole_site" value="1">
+            <span>{{index .T "missing_copy_whole_site"}}</span>
+          </label>
+          <button type="submit" class="primary">{{index .T "missing_copy_button"}}</button>
+        </form>
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="card-body">
+        <h2 class="h5">{{index .T "edit_mode_title"}}</h2>
+        <div class="edit-mode-actions">
+          {{if .IsHTML}}<a class="btn btn-primary" href="{{.Path}}?visual">{{index .T "edit_mode_open_visual"}}</a>{{end}}
+          <a class="btn btn-outline-secondary" href="{{.Path}}?text">{{index .T "edit_mode_open_text"}}</a>
+        </div>
+      </div>
+    </section>
+  </div>
+</main>
 </body>
 </html>

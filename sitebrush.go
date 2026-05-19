@@ -51,6 +51,7 @@ import (
 	"sitebrush/pkg/desktop"
 	"sitebrush/pkg/diskusage"
 	"sitebrush/pkg/geoip"
+	"sitebrush/pkg/grabber"
 	"sitebrush/pkg/setupwizard"
 )
 
@@ -59,6 +60,7 @@ var embeddedWebFiles embed.FS
 var CompileVersion = "dev"
 var translationCatalog = loadTranslationCatalog()
 var guestContextMenuTemplates = buildGuestContextMenuTemplates()
+var guestNotFoundPageTemplates = buildGuestNotFoundPageTemplates()
 
 const storageAppName = "sitebrush"
 const defaultDBPath = "storage/db/sitebrush.db"
@@ -3334,6 +3336,10 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, redirectTargetPath, http.StatusMovedPermanently)
 		return
 	}
+	if isGuestStaticRequest(r) {
+		a.serveGuestNotFoundPage(w, r, domain, pagePath)
+		return
+	}
 	isAdmin := a.isAdminRequest(r)
 	pageRecord, err := a.findPage(r.Context(), domain, pagePath)
 	if err == nil && isAdmin {
@@ -4624,8 +4630,7 @@ func previewResourceKind(tagName, attributeName, rawRef string) string {
 	if attribute == "poster" {
 		return "image"
 	}
-	extension := resourceExtension(rawRef)
-	if resourceKind, found := knownGrabResourceKindsByExtension[extension]; found {
+	if resourceKind := grabber.ResourceKindFromURL(rawRef); resourceKind != "" {
 		return resourceKind
 	}
 	return "file"
@@ -6983,6 +6988,18 @@ func (a *App) renderMissingPage(w http.ResponseWriter, r *http.Request, pagePath
 	a.render(w, r, "missing.html", map[string]any{"Path": pagePath, "EditLink": pagePath + "?visual", "IsAdmin": isAdmin})
 }
 
+func (a *App) serveGuestNotFoundPage(w http.ResponseWriter, r *http.Request, domain, pagePath string) {
+	languageCode := preferredLanguageCode(r.Header.Get("Accept-Language"))
+	body := buildGuestNotFoundPageForLanguage(pagePath, domain, languageCode)
+	a.logContentDelivery(w, "static-file")
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(http.StatusNotFound)
+	if r.Method == http.MethodHead {
+		return
+	}
+	_, _ = w.Write([]byte(body))
+}
+
 func (a *App) injectContextMenu(r *http.Request, pagePath, html string) string {
 	domain := a.siteDomain(r.Context(), r)
 	revisionID := 0
@@ -7505,6 +7522,76 @@ func buildGuestContextMenuScriptForLanguage(pagePath, domain, languageCode strin
 	).Replace(menuTemplate)
 }
 
+func buildGuestNotFoundPageTemplates() map[string]string {
+	templates := make(map[string]string, len(translationCatalog))
+	for languageCode := range translationCatalog {
+		templates[languageCode] = buildGuestNotFoundPageTemplate(languageCode, translationsForLanguageCode(languageCode))
+	}
+	if strings.TrimSpace(templates["ru"]) == "" {
+		templates["ru"] = buildGuestNotFoundPageTemplate("ru", translationsForLanguageCode("ru"))
+	}
+	return templates
+}
+
+func buildGuestNotFoundPageForLanguage(pagePath, domain, languageCode string) string {
+	pageTemplate := guestNotFoundPageTemplates[languageCode]
+	if strings.TrimSpace(pageTemplate) == "" {
+		pageTemplate = guestNotFoundPageTemplates["ru"]
+	}
+	if strings.TrimSpace(pageTemplate) == "" {
+		pageTemplate = buildGuestNotFoundPageTemplate("ru", translationsForLanguageCode("ru"))
+	}
+	normalizedPath := cleanPath(pagePath)
+	if strings.TrimSpace(normalizedPath) == "" {
+		normalizedPath = "/"
+	}
+	return strings.NewReplacer(
+		guestNotFoundPagePathPlaceholder, template.HTMLEscapeString(normalizedPath),
+		guestNotFoundEditLinkPlaceholder, template.HTMLEscapeString(normalizedPath+"?edit"),
+		guestNotFoundMenuPlaceholder, buildGuestContextMenuScriptForLanguage(normalizedPath, domain, languageCode),
+	).Replace(pageTemplate)
+}
+
+func buildGuestNotFoundPageTemplate(languageCode string, translations map[string]string) string {
+	pageTitle := template.HTMLEscapeString(translationOrDefault(translations, "missing_title", "Page not found"))
+	notFoundPrefix := template.HTMLEscapeString(translationOrDefault(translations, "missing_page_not_found_prefix", "Page"))
+	notFoundSuffix := template.HTMLEscapeString(translationOrDefault(translations, "missing_page_not_found_suffix", "not found. Please"))
+	createPageLabel := template.HTMLEscapeString(translationOrDefault(translations, "missing_create_page", "create this page"))
+	escapedLanguageCode := template.HTMLEscapeString(languageCode)
+
+return `<!doctype html>
+<html lang="` + escapedLanguageCode + `">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>` + pageTitle + `</title>
+  <style>
+    :root{color-scheme:light dark;--guest-bg:#f4f8fc;--guest-text:#1f3f6f;--guest-link:#1a65d8}
+    @media (prefers-color-scheme:dark){:root{--guest-bg:#0f1724;--guest-text:#dbe8ff;--guest-link:#9ec2ff}}
+    html,body{min-height:100%}
+    body{margin:0;background:var(--guest-bg);color:var(--guest-text);font-family:Arial,Helvetica,sans-serif}
+    .SiteBrushGuestNotFoundShell{min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px 16px;box-sizing:border-box}
+    .SiteBrushGuestNotFoundContent{width:min(720px,100%);text-align:left}
+    h1{margin:0 0 12px 0;font-size:clamp(28px,6vw,52px);line-height:1.05;overflow-wrap:anywhere}
+    .SiteBrushGuestNotFoundText{margin:0;font-size:15px;line-height:1.45;overflow-wrap:anywhere}
+    .SiteBrushGuestNotFoundText strong{font-weight:700}
+    .SiteBrushGuestNotFoundText a{color:var(--guest-link);font-weight:700;text-decoration:none}
+    .SiteBrushGuestNotFoundText a:hover{text-decoration:underline}
+    @media (max-width:640px){.SiteBrushGuestNotFoundShell{padding:18px 12px}.SiteBrushGuestNotFoundText{font-size:13px;line-height:1.36}}
+  </style>
+</head>
+<body>
+  <main class="SiteBrushGuestNotFoundShell">
+    <section class="SiteBrushGuestNotFoundContent">
+      <h1>404: ` + guestNotFoundPagePathPlaceholder + `</h1>
+      <p class="SiteBrushGuestNotFoundText">` + notFoundPrefix + ` ` + notFoundSuffix + ` <a href="` + guestNotFoundEditLinkPlaceholder + `">` + createPageLabel + `</a>.</p>
+    </section>
+  </main>
+  ` + guestNotFoundMenuPlaceholder + `
+</body>
+</html>`
+}
+
 func buildGuestContextMenuScriptTemplate(translations map[string]string) string {
 	loginLabel := template.JSEscapeString(translationOrDefault(translations, "menu_login", "Sign in"))
 	compiledVersionLabel := template.JSEscapeString("v." + CompileVersion)
@@ -7576,11 +7663,11 @@ func guestContextMenuStylesAndHelpers() string {
 .SiteBrushContextMenuFooterLink:link,.SiteBrushContextMenuFooterLink:visited,.SiteBrushContextMenuFooterLink:active,.SiteBrushContextMenuFooterLink:hover,.SiteBrushContextMenuVersion:link,.SiteBrushContextMenuVersion:visited,.SiteBrushContextMenuVersion:active,.SiteBrushContextMenuVersion:hover{color:#5b6f8b;text-decoration:none}
 .SiteBrushContextMenuVersion{font-weight:700}
 @media (pointer: coarse), (max-width: 820px){
-  .SiteBrushMenuBox{right:auto;min-width:min(280px,calc(100vw - 16px));max-width:calc(100vw - 16px);max-height:calc(100vh - 16px);border-radius:8px;-webkit-overflow-scrolling:touch}
-  .SiteBrushContextMenuLink{min-height:44px;padding:11px 12px;font-size:16px;gap:10px}
-  .SiteBrushMenuIcon{width:20px;height:20px;flex-basis:20px}
-  .SiteBrushContextMenuFooter{font-size:13px;flex-wrap:wrap;padding:9px 12px 10px 12px}
-  .SiteBrushContextMenuFooterLink,.SiteBrushContextMenuVersion{font-size:13px}
+  .SiteBrushMenuBox{right:auto;min-width:min(220px,calc(100vw - 12px));max-width:calc(100vw - 12px);max-height:calc(100vh - 12px);border-radius:7px;padding:1px;-webkit-overflow-scrolling:touch}
+  .SiteBrushContextMenuLink{min-height:34px;padding:7px 9px;font-size:13px;gap:7px}
+  .SiteBrushMenuIcon{width:16px;height:16px;flex-basis:16px}
+  .SiteBrushContextMenuFooter{font-size:11px;flex-wrap:wrap;padding:6px 8px 7px 8px;gap:8px}
+  .SiteBrushContextMenuFooterLink,.SiteBrushContextMenuVersion{font-size:11px}
 }
 @media (prefers-color-scheme: dark){
   .SiteBrushMenuBox{background:#172235;border-color:#2f405d}
@@ -7869,11 +7956,11 @@ func contextMenuStylesAndHelpers() string {
 .SiteBrushTreeLink:link,.SiteBrushTreeLink:visited,.SiteBrushTreeLink:active,.SiteBrushTreeLink:hover{color:#1f3f6f;text-decoration:none}
 .SiteBrushTreeCurrent{font-weight:700;text-decoration:underline}
 @media (pointer: coarse), (max-width: 820px){
-  .SiteBrushMenuBox{right:auto;min-width:min(280px,calc(100vw - 16px));max-width:calc(100vw - 16px);max-height:calc(100vh - 16px);border-radius:8px;-webkit-overflow-scrolling:touch}
-  .SiteBrushContextMenuLink{min-height:44px;padding:11px 12px;font-size:16px;gap:10px}
-  .SiteBrushMenuIcon{width:20px;height:20px;flex-basis:20px}
-  .SiteBrushContextMenuFooter{font-size:13px;flex-wrap:wrap;padding:9px 12px 10px 12px}
-  .SiteBrushContextMenuFooterLink,.SiteBrushContextMenuVersion{font-size:13px}
+  .SiteBrushMenuBox{right:auto;min-width:min(220px,calc(100vw - 12px));max-width:calc(100vw - 12px);max-height:calc(100vh - 12px);border-radius:7px;padding:1px;-webkit-overflow-scrolling:touch}
+  .SiteBrushContextMenuLink{min-height:34px;padding:7px 9px;font-size:13px;gap:7px}
+  .SiteBrushMenuIcon{width:16px;height:16px;flex-basis:16px}
+  .SiteBrushContextMenuFooter{font-size:11px;flex-wrap:wrap;padding:6px 8px 7px 8px;gap:8px}
+  .SiteBrushContextMenuFooterLink,.SiteBrushContextMenuVersion{font-size:11px}
   .SiteBrushMenuStorageUsage{margin-left:0}
 }
 @media (prefers-color-scheme: dark){
@@ -8217,6 +8304,9 @@ func translationOrDefault(translations map[string]string, key, fallback string) 
 
 const guestContextMenuPagePathPlaceholder = "__SITEBRUSH_PAGE_PATH__"
 const guestContextMenuDomainPlaceholder = "__SITEBRUSH_DOMAIN__"
+const guestNotFoundPagePathPlaceholder = "__SITEBRUSH_NOT_FOUND_PATH__"
+const guestNotFoundEditLinkPlaceholder = "__SITEBRUSH_NOT_FOUND_EDIT_LINK__"
+const guestNotFoundMenuPlaceholder = "__SITEBRUSH_NOT_FOUND_MENU__"
 
 func (a *App) applyTemplatePropagation(ctx context.Context, domain, sourceHTML string) {
 	templateBlockByID := extractTemplateBlocks(sourceHTML)
@@ -8967,13 +9057,7 @@ func contentHashName(fileBytes []byte, extension string) (string, error) {
 }
 
 func resourceExtension(rawRef string) string {
-	parsedRef, err := url.Parse(strings.TrimSpace(rawRef))
-	if err == nil && parsedRef.Path != "" {
-		return strings.ToLower(path.Ext(parsedRef.Path))
-	}
-	withoutFragment := strings.SplitN(rawRef, "#", 2)[0]
-	withoutQuery := strings.SplitN(withoutFragment, "?", 2)[0]
-	return strings.ToLower(path.Ext(withoutQuery))
+	return grabber.ResourceExtension(rawRef)
 }
 
 func normalizedResourceContentType(contentTypeHeader string) string {
@@ -8999,150 +9083,6 @@ func resourceKindFromContentType(contentType string) string {
 	default:
 		return ""
 	}
-}
-
-var knownGrabResourceKindsByExtension = map[string]string{
-	".css":      "style",
-	".js":       "script",
-	".mjs":      "script",
-	".cjs":      "script",
-	".png":      "image",
-	".jpg":      "image",
-	".jpeg":     "image",
-	".gif":      "image",
-	".svg":      "image",
-	".webp":     "image",
-	".ico":      "image",
-	".bmp":      "image",
-	".tif":      "image",
-	".tiff":     "image",
-	".avif":     "image",
-	".apng":     "image",
-	".heic":     "image",
-	".heif":     "image",
-	".jfif":     "image",
-	".pjpeg":    "image",
-	".pjp":      "image",
-	".woff":     "font",
-	".woff2":    "font",
-	".ttf":      "font",
-	".eot":      "font",
-	".otf":      "font",
-	".mp4":      "video",
-	".webm":     "video",
-	".mov":      "video",
-	".avi":      "video",
-	".mkv":      "video",
-	".m4v":      "video",
-	".flv":      "video",
-	".wmv":      "video",
-	".mpg":      "video",
-	".mpeg":     "video",
-	".3gp":      "video",
-	".3g2":      "video",
-	".ts":       "video",
-	".m2ts":     "video",
-	".mts":      "video",
-	".ogv":      "video",
-	".m3u8":     "video",
-	".mp3":      "audio",
-	".ogg":      "audio",
-	".oga":      "audio",
-	".opus":     "audio",
-	".wav":      "audio",
-	".flac":     "audio",
-	".aac":      "audio",
-	".m4a":      "audio",
-	".wma":      "audio",
-	".aiff":     "audio",
-	".mid":      "audio",
-	".midi":     "audio",
-	".amr":      "audio",
-	".weba":     "audio",
-	".pdf":      "file",
-	".doc":      "file",
-	".docx":     "file",
-	".dot":      "file",
-	".dotx":     "file",
-	".xls":      "file",
-	".xlsx":     "file",
-	".xlsm":     "file",
-	".csv":      "file",
-	".tsv":      "file",
-	".ods":      "file",
-	".odt":      "file",
-	".odp":      "file",
-	".odg":      "file",
-	".odf":      "file",
-	".ppt":      "file",
-	".pptx":     "file",
-	".pps":      "file",
-	".ppsx":     "file",
-	".pot":      "file",
-	".potx":     "file",
-	".rtf":      "file",
-	".txt":      "file",
-	".text":     "file",
-	".md":       "file",
-	".markdown": "file",
-	".epub":     "file",
-	".mobi":     "file",
-	".azw":      "file",
-	".azw3":     "file",
-	".fb2":      "file",
-	".djvu":     "file",
-	".djv":      "file",
-	".cbz":      "file",
-	".cbr":      "file",
-	".xml":      "file",
-	".json":     "file",
-	".map":      "file",
-	".geojson":  "file",
-	".yaml":     "file",
-	".yml":      "file",
-	".toml":     "file",
-	".ini":      "file",
-	".cfg":      "file",
-	".conf":     "file",
-	".log":      "file",
-	".sql":      "file",
-	".db":       "file",
-	".sqlite":   "file",
-	".sqlite3":  "file",
-	".zip":      "file",
-	".rar":      "file",
-	".7z":       "file",
-	".tar":      "file",
-	".gz":       "file",
-	".tgz":      "file",
-	".bz2":      "file",
-	".xz":       "file",
-	".lz":       "file",
-	".lzma":     "file",
-	".zst":      "file",
-	".cab":      "file",
-	".jar":      "file",
-	".war":      "file",
-	".ear":      "file",
-	".apk":      "file",
-	".ipa":      "file",
-	".exe":      "file",
-	".msi":      "file",
-	".msix":     "file",
-	".dmg":      "file",
-	".pkg":      "file",
-	".deb":      "file",
-	".rpm":      "file",
-	".appimage": "file",
-	".bin":      "file",
-	".iso":      "file",
-	".img":      "file",
-	".toast":    "file",
-	".kmz":      "file",
-	".kml":      "file",
-	".gpx":      "file",
-	".rctrk":    "file",
-	".torrent":  "file",
 }
 
 func resourceExtensionFromContentType(contentType string) string {
@@ -9268,14 +9208,15 @@ type pageSpider struct {
 	downloadedTotal      int
 }
 
+type grabReferenceContext = grabber.ReferenceContext
+
+const (
+	grabReferenceDocument   = grabber.ReferenceDocument
+	grabReferenceJavaScript = grabber.ReferenceJavaScript
+)
+
 var (
-	htmlResourcePattern = regexp.MustCompile(`(?is)<(a|area|link|script|img|source|video|audio|iframe|embed|object|form)\b[^>]*(href|xlink:href|src|poster|data|action)\s*=\s*["']([^"']+)["']`)
-	htmlImageAltPattern = regexp.MustCompile(`(?is)<img\b[^>]*\balt\s*=\s*["']([^"']+)["'][^>]*>`)
-	htmlSrcSetPattern   = regexp.MustCompile(`(?is)\bsrcset\s*=\s*["']([^"']+)["']`)
-	cssURLPattern       = regexp.MustCompile(`(?is)url\(\s*['"]?([^'")]+)['"]?\s*\)`)
-	cssImportPattern    = regexp.MustCompile(`(?is)@import\s+(?:url\(\s*)?['"]?([^'")\s;]+)['"]?`)
-	staticURLPattern    = regexp.MustCompile(`(?is)https?://[^\s"'<>\\)]+`)
-	newGrabHTTPClient   = func() *http.Client {
+	newGrabHTTPClient = func() *http.Client {
 		return &http.Client{Timeout: 20 * time.Second}
 	}
 )
@@ -9476,77 +9417,24 @@ func (spider *pageSpider) rewriteNestedResources(resource *mirroredResource, dep
 		source = neutralizeImportedHostLanguageRedirects(source)
 	}
 	rewritten := source
+	parser := spider.grabberParser()
 	if isHTML || isCSS {
-		rewritten = spider.rewriteTextReferences(source, resource.url, depth)
+		rewritten = parser.RewriteTextReferences(source, resource.url, depth)
 	} else if isJS {
-		rewritten = spider.rewriteJSResourceReferences(source, resource.url, depth)
+		rewritten = parser.RewriteJavaScriptReferences(source, resource.url, depth)
 	}
 	resource.content = []byte(rewritten)
 }
 
-func (spider *pageSpider) rewriteTextReferences(source, baseRawURL string, depth int) string {
-	baseURL, _ := url.Parse(baseRawURL)
-	rewriteSingle := func(rawRef string) string {
-		return spider.rewriteResourceReference(rawRef, baseURL, depth)
+func (spider *pageSpider) grabberParser() grabber.Parser {
+	return grabber.Parser{
+		NormalizeURL:                         spider.normalizeURLForContext,
+		RewriteResourceReference:             spider.rewriteResourceReferenceForContext,
+		RewriteDocumentResourceReference:     spider.rewriteDocumentResourceReference,
+		DocumentURLRewriter:                  spider.documentURLRewriter,
+		ShouldBlankEmbeddedDocumentReference: spider.shouldBlankEmbeddedDocumentReference,
+		ShouldRewriteImageAltResource:        spider.shouldRewriteImageAltResourceReference,
 	}
-	rewriteDocumentReference := func(rawRef string) string {
-		return spider.rewriteDocumentResourceReference(rawRef, baseURL, depth)
-	}
-	rewritten := htmlResourcePattern.ReplaceAllStringFunc(source, func(match string) string {
-		parts := htmlResourcePattern.FindStringSubmatch(match)
-		if len(parts) != 4 {
-			return match
-		}
-		tagName := strings.ToLower(strings.TrimSpace(parts[1]))
-		attributeName := strings.ToLower(strings.TrimSpace(parts[2]))
-		normalizedURL, blocked := spider.normalizeURL(parts[3], baseURL)
-		if !blocked && spider.documentURLRewriter != nil && isWholeSiteDocumentAttribute(tagName, attributeName) && isWholeSitePageURLString(normalizedURL) {
-			if rewrittenURL, ok := spider.documentURLRewriter(normalizedURL); ok {
-				return strings.Replace(match, parts[3], rewrittenURL, 1)
-			}
-			return match
-		}
-		if !blocked && spider.shouldBlankEmbeddedDocumentReference(tagName, normalizedURL) {
-			return strings.Replace(match, parts[3], "about:blank", 1)
-		}
-		if isWholeSiteDocumentAttribute(tagName, attributeName) {
-			return strings.Replace(match, parts[3], rewriteDocumentReference(parts[3]), 1)
-		}
-		return strings.Replace(match, parts[3], rewriteSingle(parts[3]), 1)
-	})
-	rewritten = htmlImageAltPattern.ReplaceAllStringFunc(rewritten, func(match string) string {
-		parts := htmlImageAltPattern.FindStringSubmatch(match)
-		if len(parts) != 2 || !spider.shouldRewriteImageAltResourceReference(parts[1], baseURL) {
-			return match
-		}
-		return strings.Replace(match, parts[1], rewriteSingle(parts[1]), 1)
-	})
-	rewritten = htmlSrcSetPattern.ReplaceAllStringFunc(rewritten, func(match string) string {
-		parts := htmlSrcSetPattern.FindStringSubmatch(match)
-		if len(parts) != 2 {
-			return match
-		}
-		candidates := strings.Split(parts[1], ",")
-		for index, candidate := range candidates {
-			fields := strings.Fields(strings.TrimSpace(candidate))
-			if len(fields) == 0 {
-				continue
-			}
-			fields[0] = rewriteSingle(fields[0])
-			candidates[index] = strings.Join(fields, " ")
-		}
-		return strings.Replace(match, parts[1], strings.Join(candidates, ", "), 1)
-	})
-	rewritten = cssImportPattern.ReplaceAllStringFunc(rewritten, func(match string) string {
-		parts := cssImportPattern.FindStringSubmatch(match)
-		if len(parts) != 2 {
-			return match
-		}
-		return strings.Replace(match, parts[1], rewriteSingle(parts[1]), 1)
-	})
-	rewritten = rewriteCSSURLReferences(rewritten, rewriteSingle)
-	rewritten = spider.rewriteStaticURLTextReferences(rewritten, baseURL, depth)
-	return rewritten
 }
 
 func (spider *pageSpider) rewriteImportedPagesStaticURLTextReferences(importedPages []wholeSiteImportedPage) {
@@ -9557,38 +9445,7 @@ func (spider *pageSpider) rewriteImportedPagesStaticURLTextReferences(importedPa
 }
 
 func (spider *pageSpider) rewriteStaticURLTextReferences(source string, baseURL *url.URL, depth int) string {
-	return staticURLPattern.ReplaceAllStringFunc(source, func(rawURL string) string {
-		resourceURL, trailingText := splitStaticResourceURLTrailingText(rawURL)
-		if !hasAllowedGrabResourceExtension(resourceURL) {
-			return rawURL
-		}
-		normalizedURL, blocked := spider.normalizeURL(resourceURL, baseURL)
-		if blocked || normalizedURL == "" || !hasAllowedGrabResourceExtension(normalizedURL) {
-			return rawURL
-		}
-		rewrittenURL := spider.rewriteResourceReference(resourceURL, baseURL, depth)
-		if rewrittenURL == "" || strings.HasPrefix(rewrittenURL, "http://") || strings.HasPrefix(rewrittenURL, "https://") {
-			return rawURL
-		}
-		return rewrittenURL + trailingText
-	})
-}
-
-func splitStaticResourceURLTrailingText(rawURL string) (string, string) {
-	resourceURL := strings.TrimSpace(rawURL)
-	trailingLength := 0
-	for len(resourceURL) > 0 {
-		lastByte := resourceURL[len(resourceURL)-1]
-		if !strings.ContainsRune(".,;:", rune(lastByte)) {
-			break
-		}
-		resourceURL = resourceURL[:len(resourceURL)-1]
-		trailingLength++
-	}
-	if trailingLength == 0 {
-		return resourceURL, ""
-	}
-	return resourceURL, rawURL[len(rawURL)-trailingLength:]
+	return spider.grabberParser().RewriteStaticURLTextReferences(source, baseURL, depth)
 }
 
 func (spider *pageSpider) shouldRewriteImageAltResourceReference(rawRef string, baseURL *url.URL) bool {
@@ -9611,7 +9468,7 @@ func (spider *pageSpider) rewriteResourceReference(rawRef string, baseURL *url.U
 	if err != nil || dependency == nil || dependency.assetPath == "" {
 		return normalizedURL
 	}
-	return dependency.assetPath
+	return normalizeMirroredAssetReference(dependency.assetPath)
 }
 
 func (spider *pageSpider) rewriteDocumentResourceReference(rawRef string, baseURL *url.URL, depth int) string {
@@ -9626,128 +9483,7 @@ func (spider *pageSpider) rewriteDocumentResourceReference(rawRef string, baseUR
 	if err != nil || dependency == nil || dependency.assetPath == "" {
 		return rawRef
 	}
-	return dependency.assetPath
-}
-
-func (spider *pageSpider) rewriteJSResourceReferences(source, baseRawURL string, depth int) string {
-	baseURL, _ := url.Parse(baseRawURL)
-	var rewritten strings.Builder
-	lastWrittenIndex := 0
-	for currentIndex := 0; currentIndex < len(source); currentIndex++ {
-		quote := source[currentIndex]
-		if quote != '\'' && quote != '"' {
-			continue
-		}
-		referenceStart := currentIndex + 1
-		referenceEnd := referenceStart
-		escaped := false
-		for referenceEnd < len(source) {
-			currentByte := source[referenceEnd]
-			if escaped {
-				escaped = false
-				referenceEnd++
-				continue
-			}
-			if currentByte == '\\' {
-				escaped = true
-				referenceEnd++
-				continue
-			}
-			if currentByte == quote {
-				break
-			}
-			referenceEnd++
-		}
-		if referenceEnd >= len(source) || source[referenceEnd] != quote {
-			break
-		}
-		rawReference := source[referenceStart:referenceEnd]
-		if !shouldRewriteJSResourceReference(rawReference) {
-			currentIndex = referenceEnd
-			continue
-		}
-		normalizedURL, blocked := spider.normalizeURL(rawReference, baseURL)
-		if !blocked && hasAllowedGrabResourceExtension(normalizedURL) {
-			rewritten.WriteString(source[lastWrittenIndex:referenceStart])
-			rewritten.WriteString(spider.rewriteResourceReference(rawReference, baseURL, depth))
-			lastWrittenIndex = referenceEnd
-		}
-		currentIndex = referenceEnd
-	}
-	if lastWrittenIndex == 0 {
-		return source
-	}
-	rewritten.WriteString(source[lastWrittenIndex:])
-	return rewritten.String()
-}
-
-// JS resource rewriting stays intentionally conservative: only obvious path-like
-// literals are touched so library code and selector/operator strings stay intact.
-type jsResourceReferenceRule func(string) bool
-
-var jsResourceReferenceRules = []jsResourceReferenceRule{
-	isExplicitJSResourceReference,
-	isRootRelativeJSResourceReference,
-	isDotRelativeJSResourceReference,
-	isBareStaticFileJSResourceReference,
-}
-
-func shouldRewriteJSResourceReference(rawReference string) bool {
-	trimmedReference := strings.TrimSpace(rawReference)
-	if trimmedReference == "" {
-		return false
-	}
-	for _, rule := range jsResourceReferenceRules {
-		if rule(trimmedReference) {
-			return true
-		}
-	}
-	return false
-}
-
-func isExplicitJSResourceReference(rawReference string) bool {
-	loweredReference := strings.ToLower(strings.TrimSpace(rawReference))
-	return strings.HasPrefix(loweredReference, "http://") || strings.HasPrefix(loweredReference, "https://") || strings.HasPrefix(loweredReference, "//")
-}
-
-func isRootRelativeJSResourceReference(rawReference string) bool {
-	trimmedReference := strings.TrimSpace(rawReference)
-	return strings.HasPrefix(trimmedReference, "/") && isStaticLikeJSReference(trimmedReference)
-}
-
-func isDotRelativeJSResourceReference(rawReference string) bool {
-	trimmedReference := strings.TrimSpace(rawReference)
-	if strings.HasPrefix(trimmedReference, "./") || strings.HasPrefix(trimmedReference, "../") {
-		return isStaticLikeJSReference(trimmedReference)
-	}
-	return false
-}
-
-func isBareStaticFileJSResourceReference(rawReference string) bool {
-	trimmedReference := strings.TrimSpace(rawReference)
-	if strings.Contains(trimmedReference, "://") || strings.HasPrefix(trimmedReference, "//") || strings.HasPrefix(trimmedReference, "/") || strings.HasPrefix(trimmedReference, "./") || strings.HasPrefix(trimmedReference, "../") {
-		return false
-	}
-	return isStaticLikeJSReference(trimmedReference)
-}
-
-func isStaticLikeJSReference(rawReference string) bool {
-	trimmedReference := strings.TrimSpace(rawReference)
-	if trimmedReference == "" {
-		return false
-	}
-	if strings.ContainsAny(trimmedReference, ` "'\`+"*<>{}()[]|^$") {
-		return false
-	}
-	if strings.HasPrefix(trimmedReference, ".") && !strings.HasPrefix(trimmedReference, "./") && !strings.HasPrefix(trimmedReference, "../") {
-		return false
-	}
-	return hasAllowedGrabResourceExtension(trimmedReference)
-}
-
-func isWholeSitePageURLString(rawURL string) bool {
-	parsedURL, err := url.Parse(rawURL)
-	return err == nil && isWholeSitePageURL(parsedURL)
+	return normalizeMirroredAssetReference(dependency.assetPath)
 }
 
 func (spider *pageSpider) shouldBlankEmbeddedDocumentReference(tagName, normalizedURL string) bool {
@@ -9781,85 +9517,59 @@ func (spider *pageSpider) shouldBlankEmbeddedDocumentReference(tagName, normaliz
 	}
 }
 
-func rewriteCSSURLReferences(source string, rewriteSingle func(string) string) string {
-	matches := cssURLPattern.FindAllStringSubmatchIndex(source, -1)
-	if len(matches) == 0 {
-		return source
-	}
-	var rewritten strings.Builder
-	lastEnd := 0
-	for _, match := range matches {
-		if len(match) != 4 {
-			continue
-		}
-		matchStart := match[0]
-		matchEnd := match[1]
-		referenceStart := match[2]
-		referenceEnd := match[3]
-		rewritten.WriteString(source[lastEnd:matchStart])
-		if isCSSImportURL(source, matchStart) {
-			rewritten.WriteString(source[matchStart:matchEnd])
-		} else {
-			rewritten.WriteString(source[matchStart:referenceStart])
-			rewritten.WriteString(rewriteSingle(source[referenceStart:referenceEnd]))
-			rewritten.WriteString(source[referenceEnd:matchEnd])
-		}
-		lastEnd = matchEnd
-	}
-	rewritten.WriteString(source[lastEnd:])
-	return rewritten.String()
-}
-
-func isCSSImportURL(source string, urlStart int) bool {
-	prefixStart := strings.LastIndexAny(source[:urlStart], ";{}>")
-	statementPrefix := strings.ToLower(strings.TrimSpace(source[prefixStart+1 : urlStart]))
-	return strings.HasPrefix(statementPrefix, "@import")
-}
-
 func (spider *pageSpider) normalizeURL(rawRef string, baseURL *url.URL) (string, bool) {
-	trimmedRef := strings.TrimSpace(rawRef)
-	if trimmedRef == "" || strings.HasPrefix(trimmedRef, "#") {
-		return "", true
+	return spider.normalizeURLForContext(rawRef, baseURL, grabReferenceDocument)
+}
+
+func (spider *pageSpider) normalizeURLForContext(rawRef string, baseURL *url.URL, referenceContext grabReferenceContext) (string, bool) {
+	return grabber.NormalizeURL(rawRef, baseURL, referenceContext)
+}
+
+func (spider *pageSpider) rewriteResourceReferenceForContext(rawRef string, baseURL *url.URL, depth int, referenceContext grabReferenceContext) string {
+	normalizedURL, blocked := spider.normalizeURLForContext(rawRef, baseURL, referenceContext)
+	if blocked || normalizedURL == "" {
+		return rawRef
 	}
-	if isSuspiciousGrabReference(trimmedRef) {
-		return "", true
+	if !spider.shouldPersistResource(normalizedURL) {
+		return normalizedURL
 	}
-	loweredRef := strings.ToLower(trimmedRef)
-	for _, blockedPrefix := range []string{"mailto:", "tel:", "javascript:", "data:", "blob:"} {
-		if strings.HasPrefix(loweredRef, blockedPrefix) {
-			return "", true
-		}
+	dependency, err := spider.fetchResource(normalizedURL, baseURL, depth, true)
+	if err != nil || dependency == nil || dependency.assetPath == "" {
+		return normalizedURL
 	}
-	parsedRef, err := url.Parse(trimmedRef)
-	if err != nil {
-		return "", true
+	return normalizeMirroredAssetReference(dependency.assetPath)
+}
+
+func normalizeMirroredAssetReference(assetPath string) string {
+	trimmedPath := strings.TrimSpace(assetPath)
+	if trimmedPath == "" {
+		return ""
 	}
-	resolved := baseURL.ResolveReference(parsedRef)
-	if resolved == nil || resolved.Scheme == "" {
-		return "", true
+	if strings.HasPrefix(trimmedPath, "http://") || strings.HasPrefix(trimmedPath, "https://") || strings.HasPrefix(trimmedPath, "data:") || strings.HasPrefix(trimmedPath, "blob:") {
+		return trimmedPath
 	}
-	if resolved.Scheme != "http" && resolved.Scheme != "https" {
-		return "", true
+	if strings.HasPrefix(trimmedPath, "//") {
+		return "/" + strings.TrimLeft(trimmedPath, "/")
 	}
-	resolved.Fragment = ""
-	resolved.ForceQuery = false
-	return resolved.String(), false
+	return trimmedPath
+}
+
+func shouldResolveJavaScriptReferenceAgainstOriginRoot(rawRef string, baseURL *url.URL) bool {
+	normalizedURL, blocked := grabber.NormalizeURL(rawRef, baseURL, grabber.ReferenceJavaScript)
+	documentURL, documentBlocked := grabber.NormalizeURL(rawRef, baseURL, grabber.ReferenceDocument)
+	return !blocked && !documentBlocked && normalizedURL != documentURL
+}
+
+func originRootURL(baseURL *url.URL) *url.URL {
+	return grabber.OriginRootURL(baseURL)
+}
+
+func firstPathSegment(rawPath string) string {
+	return grabber.FirstPathSegment(rawPath)
 }
 
 func isSuspiciousGrabReference(rawRef string) bool {
-	loweredRef := strings.ToLower(strings.TrimSpace(rawRef))
-	if loweredRef == "" {
-		return true
-	}
-	if strings.Contains(loweredRef, "${") || strings.ContainsAny(loweredRef, "+()[],") {
-		return true
-	}
-	for _, blockedFragment := range []string{"this.", ".src", ".url", "params", "videoid", "void"} {
-		if strings.Contains(loweredRef, blockedFragment) {
-			return true
-		}
-	}
-	return false
+	return grabber.IsSuspiciousReference(rawRef)
 }
 
 func (spider *pageSpider) shouldSkipMirrorResource(resourceURL string) bool {
@@ -9918,16 +9628,11 @@ func (spider *pageSpider) isAllowedResourceContentType(resourceURL, contentType 
 }
 
 func resourceKindFromURL(resourceURL string) string {
-	extension := resourceExtension(resourceURL)
-	if resourceKind, found := knownGrabResourceKindsByExtension[extension]; found {
-		return resourceKind
-	}
-	return ""
+	return grabber.ResourceKindFromURL(resourceURL)
 }
 
 func hasAllowedGrabResourceExtension(resourceURL string) bool {
-	_, found := knownGrabResourceKindsByExtension[resourceExtension(resourceURL)]
-	return found
+	return grabber.HasAllowedResourceExtension(resourceURL)
 }
 
 func (spider *pageSpider) shouldPersistResource(normalizedURL string) bool {
@@ -12228,38 +11933,7 @@ func rewriteStaticExportDocumentLinks(source, domain, sourceSitePath, sourceArch
 	rewriteSingle := func(rawReference string) string {
 		return rewriteStaticExportReference(rawReference, domain, sourceSitePath, sourceArchivePath, pageArchivePathBySitePath)
 	}
-	rewritten := htmlResourcePattern.ReplaceAllStringFunc(source, func(match string) string {
-		parts := htmlResourcePattern.FindStringSubmatch(match)
-		if len(parts) != 4 {
-			return match
-		}
-		return strings.Replace(match, parts[3], rewriteSingle(parts[3]), 1)
-	})
-	rewritten = htmlSrcSetPattern.ReplaceAllStringFunc(rewritten, func(match string) string {
-		parts := htmlSrcSetPattern.FindStringSubmatch(match)
-		if len(parts) != 2 {
-			return match
-		}
-		candidates := strings.Split(parts[1], ",")
-		for index, candidate := range candidates {
-			fields := strings.Fields(strings.TrimSpace(candidate))
-			if len(fields) == 0 {
-				continue
-			}
-			fields[0] = rewriteSingle(fields[0])
-			candidates[index] = strings.Join(fields, " ")
-		}
-		return strings.Replace(match, parts[1], strings.Join(candidates, ", "), 1)
-	})
-	rewritten = cssImportPattern.ReplaceAllStringFunc(rewritten, func(match string) string {
-		parts := cssImportPattern.FindStringSubmatch(match)
-		if len(parts) != 2 {
-			return match
-		}
-		return strings.Replace(match, parts[1], rewriteSingle(parts[1]), 1)
-	})
-	rewritten = rewriteCSSURLReferences(rewritten, rewriteSingle)
-	return rewritten
+	return grabber.RewriteDocumentResourceReferences(source, rewriteSingle)
 }
 
 func rewriteStaticExportJavaScriptReferences(source, domain, sourceSitePath, sourceArchivePath string, pageArchivePathBySitePath map[string]string) string {
@@ -12648,38 +12322,7 @@ func rewriteBackupInternalLinks(source, basePath, filePrefix string) string {
 	rewriteSingle := func(rawReference string) string {
 		return rewriteBackupReference(rawReference, basePath, filePrefix)
 	}
-	rewritten := htmlResourcePattern.ReplaceAllStringFunc(source, func(match string) string {
-		parts := htmlResourcePattern.FindStringSubmatch(match)
-		if len(parts) != 4 {
-			return match
-		}
-		return strings.Replace(match, parts[3], rewriteSingle(parts[3]), 1)
-	})
-	rewritten = htmlSrcSetPattern.ReplaceAllStringFunc(rewritten, func(match string) string {
-		parts := htmlSrcSetPattern.FindStringSubmatch(match)
-		if len(parts) != 2 {
-			return match
-		}
-		candidates := strings.Split(parts[1], ",")
-		for index, candidate := range candidates {
-			fields := strings.Fields(strings.TrimSpace(candidate))
-			if len(fields) == 0 {
-				continue
-			}
-			fields[0] = rewriteSingle(fields[0])
-			candidates[index] = strings.Join(fields, " ")
-		}
-		return strings.Replace(match, parts[1], strings.Join(candidates, ", "), 1)
-	})
-	rewritten = cssImportPattern.ReplaceAllStringFunc(rewritten, func(match string) string {
-		parts := cssImportPattern.FindStringSubmatch(match)
-		if len(parts) != 2 {
-			return match
-		}
-		return strings.Replace(match, parts[1], rewriteSingle(parts[1]), 1)
-	})
-	rewritten = rewriteCSSURLReferences(rewritten, rewriteSingle)
-	return rewritten
+	return grabber.RewriteDocumentResourceReferences(source, rewriteSingle)
 }
 
 func rewriteBackupReference(rawReference, basePath, filePrefix string) string {
