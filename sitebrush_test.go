@@ -3792,8 +3792,37 @@ func TestVisualEditorUsesLocalJoditAssetsAndServerImageUpload(t *testing.T) {
 			t.Fatalf("visual editor missing %q in %s", expectedFragment, body)
 		}
 	}
+	if strings.Contains(body, "visualEditorPreviewPane") || strings.Contains(body, "editor-preview-pane") {
+		t.Fatalf("visual editor should not contain text-editor preview tabs: %s", body)
+	}
 	if strings.Contains(body, "cdn.jsdelivr.net") {
 		t.Fatalf("visual editor still references CDN: %s", body)
+	}
+}
+
+func TestRawTextEditorHasDraftPreviewAndHistory(t *testing.T) {
+	application, rawDB := newTestApplication(t)
+	_, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "admin@example.com", "old")
+	if err != nil {
+		t.Fatalf("insert user: %v", err)
+	}
+	_, err = rawDB.Exec(`INSERT INTO pages(domain,path,title,html,published) VALUES(?,?,?,?,1)`, "localhost", "/docs", "/docs", "<h1>docs</h1>")
+	if err != nil {
+		t.Fatalf("insert page: %v", err)
+	}
+
+	request := httptest.NewRequest(http.MethodGet, "http://localhost:8080/docs?text", nil)
+	request.AddCookie(newAdminSessionCookie(t, application, "admin@example.com"))
+	response := httptest.NewRecorder()
+	application.route(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("raw editor status = %d, body=%q", response.Code, response.Body.String())
+	}
+	body := response.Body.String()
+	for _, expectedFragment := range []string{"rawEditorEditTab", "rawEditorPreviewTab", "rawPreviewFrame", "rawEditorPreviewHTML", "setRawEditorView", "undoRawEditorDraft", "redoRawEditorDraft", "pushRawEditorHistory", "rawEditorTextArea", ">Редактор<", ">Предпросмотр<", "История черновика"} {
+		if !strings.Contains(body, expectedFragment) {
+			t.Fatalf("raw editor missing %q in %s", expectedFragment, body)
+		}
 	}
 }
 

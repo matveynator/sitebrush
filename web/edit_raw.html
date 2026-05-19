@@ -10,29 +10,223 @@
   <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{{index .T "edit_raw_title_prefix"}} {{.Path}}</title>
   <style>
-    :root { color-scheme: light dark; --page-bg:#f4f8fc; --text-main:#1b2a3d; --panel:#ffffff; --field:#ffffff; --field-text:#12253f; --field-border:#b9c7db; }
-    @media (prefers-color-scheme: dark) { :root { --page-bg:#0f1724; --text-main:#dbe8ff; --panel:#172235; --field:#0f1a2b; --field-text:#dbe8ff; --field-border:#334868; } }
-    html, body { height:100%; margin:0; }
+    :root { color-scheme: light dark; --page-bg:#f4f8fc; --text-main:#1b2a3d; --panel:#ffffff; --panel-soft:#edf4fb; --field:#ffffff; --field-text:#12253f; --field-border:#b9c7db; --line:#d7e1ef; --link:#1a65d8; --disabled:#8b98aa; }
+    @media (prefers-color-scheme: dark) { :root { --page-bg:#0f1724; --text-main:#dbe8ff; --panel:#172235; --panel-soft:#0f1a2b; --field:#0f1a2b; --field-text:#dbe8ff; --field-border:#334868; --line:#263a57; --link:#9ec2ff; --disabled:#71819b; } }
+    html, body { height:100%; margin:0; overflow:hidden; }
     body { font-family: Arial, sans-serif; background: var(--page-bg); color: var(--text-main); }
-    .raw-page { height:100%; display:flex; flex-direction:column; padding:12px; box-sizing:border-box; }
-    .document-kind { margin:0 0 8px 0; font-size:13px; color: var(--text-main); opacity:.75; }
-    textarea { width:100%; flex:1; min-height:75vh; font-family: monospace; background: var(--field); color: var(--field-text); border: 1px solid var(--field-border); }
-    .action-bar { display:flex; justify-content:flex-end; gap:10px; padding-top:10px; }
+    button, textarea { font:inherit; }
+    .raw-page { height:100%; min-height:0; display:flex; flex-direction:column; box-sizing:border-box; }
+    .raw-topbar { flex:0 0 auto; display:flex; align-items:center; justify-content:space-between; gap:12px; padding:10px 12px; background:var(--panel); border-bottom:1px solid var(--line); }
+    .raw-tabs, .raw-actions, .raw-history { display:flex; align-items:center; gap:8px; }
+    .raw-tab, .raw-history-button { border:1px solid var(--field-border); border-radius:6px; min-height:36px; padding:7px 11px; background:var(--panel-soft); color:var(--text-main); cursor:pointer; }
+    .raw-tab.is-active { background:var(--link); border-color:var(--link); color:#fff; }
+    .raw-history-button { min-width:38px; padding:7px 10px; font-size:18px; line-height:1; }
+    .raw-history-button[disabled] { color:var(--disabled); cursor:default; opacity:.65; }
+    .raw-body { flex:1 1 auto; min-height:0; display:flex; flex-direction:column; padding:12px; box-sizing:border-box; overflow:hidden; }
+    .document-kind { flex:0 0 auto; margin:0 0 8px 0; font-size:13px; color: var(--text-main); opacity:.75; }
+    .raw-editor-pane, .raw-preview-pane { flex:1 1 auto; min-height:0; display:flex; }
+    .raw-editor-pane[hidden], .raw-preview-pane[hidden] { display:none; }
+    textarea { width:100%; flex:1 1 auto; min-height:0; resize:none; box-sizing:border-box; padding:10px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; background: var(--field); color: var(--field-text); border: 1px solid var(--field-border); border-radius:6px; line-height:1.45; }
+    .raw-preview-frame { width:100%; height:100%; border:1px solid var(--field-border); border-radius:6px; background:var(--field); box-sizing:border-box; }
+    .action-bar { flex:0 0 auto; display:flex; justify-content:flex-end; gap:10px; padding:10px 12px; border-top:1px solid var(--line); background:var(--panel); }
     .save-button { background:#1ea74f; color:#fff; border:0; padding:10px 18px; border-radius:6px; cursor:pointer; }
     .cancel-button { background:#6c757d; color:#fff; text-decoration:none; padding:10px 18px; border-radius:6px; }
+    @media (max-width: 700px) {
+      .raw-topbar { align-items:stretch; flex-direction:column; }
+      .raw-tabs, .raw-actions { width:100%; }
+      .raw-tab { flex:1 1 0; }
+      .raw-history { margin-left:auto; }
+    }
   </style>
 </head>
 <body>
-<form method="post" action="{{.Path}}?save" class="raw-page">
+<form id="rawEditorForm" method="post" action="{{.Path}}?save" class="raw-page">
   <input type="hidden" name="path" value="{{.Path}}" />
   <input type="hidden" name="previous_path" value="{{.Path}}" />
   <input type="hidden" name="title" value="{{.Title}}" />
-  <p class="document-kind">Document type: {{.ContentKind}}</p>
-  <textarea name="html">{{.HTML}}</textarea>
+  <div class="raw-topbar">
+    <div class="raw-tabs" role="tablist" aria-label="{{index .T "edit_view_tabs_label"}}">
+      <button id="rawEditorEditTab" class="raw-tab is-active" type="button" role="tab" aria-selected="true" aria-controls="rawEditorPane">{{index .T "edit_view_editor"}}</button>
+      <button id="rawEditorPreviewTab" class="raw-tab" type="button" role="tab" aria-selected="false" aria-controls="rawPreviewPane">{{index .T "edit_view_preview"}}</button>
+    </div>
+    <div class="raw-actions">
+      <div class="raw-history" aria-label="{{index .T "edit_history_controls_label"}}">
+        <button id="rawUndoButton" class="raw-history-button" type="button" title="{{index .T "edit_undo"}}" aria-label="{{index .T "edit_undo"}}">&larr;</button>
+        <button id="rawRedoButton" class="raw-history-button" type="button" title="{{index .T "edit_redo"}}" aria-label="{{index .T "edit_redo"}}">&rarr;</button>
+      </div>
+    </div>
+  </div>
+  <div class="raw-body">
+    <p class="document-kind">Document type: {{.ContentKind}}</p>
+    <div id="rawEditorPane" class="raw-editor-pane">
+      <textarea id="rawEditorTextArea" name="html" spellcheck="false">{{.HTML}}</textarea>
+    </div>
+    <div id="rawPreviewPane" class="raw-preview-pane" hidden>
+      <iframe id="rawPreviewFrame" class="raw-preview-frame" title="{{index .T "edit_view_preview"}}"></iframe>
+    </div>
+  </div>
   <div class="action-bar">
     <a class="cancel-button" href="{{.Path}}">{{index .T "edit_cancel"}}</a>
     <button type="submit" class="save-button">{{index .T "edit_save"}}</button>
   </div>
 </form>
+<script>
+const rawEditorState = {
+  view: 'edit',
+  history: [],
+  historyIndex: -1,
+  applyingHistory: false,
+  historyTimer: 0,
+  previewTimer: 0
+};
+const rawEditorFormElement = document.getElementById('rawEditorForm');
+const rawEditorTextAreaElement = document.getElementById('rawEditorTextArea');
+const rawEditorEditTabElement = document.getElementById('rawEditorEditTab');
+const rawEditorPreviewTabElement = document.getElementById('rawEditorPreviewTab');
+const rawEditorPaneElement = document.getElementById('rawEditorPane');
+const rawPreviewPaneElement = document.getElementById('rawPreviewPane');
+const rawPreviewFrameElement = document.getElementById('rawPreviewFrame');
+const rawUndoButtonElement = document.getElementById('rawUndoButton');
+const rawRedoButtonElement = document.getElementById('rawRedoButton');
+const rawEditorPagePath = {{.Path}};
+const rawEditorContentKind = {{.ContentKind}};
+
+function rawEditorBaseURL() {
+  return new URL(rawEditorPagePath || '/', window.location.href).href;
+}
+
+function escapeRawEditorHTML(textValue) {
+  return String(textValue || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+function rawEditorPreviewHTML(sourceText) {
+  const baseElement = '<base href="' + rawEditorBaseURL().replace(/&/g, '&amp;').replace(/"/g, '&quot;') + '">';
+  if (rawEditorContentKind === 'HTML page') {
+    if (/<(html|head|body)(\s|>)/i.test(sourceText || '')) {
+      return String(sourceText || '').replace(/<head(\s[^>]*)?>/i, function addBaseToHead(headOpenTag) {
+        return headOpenTag + baseElement;
+      });
+    }
+    return '<!doctype html><html><head>' + baseElement + '</head><body>' + String(sourceText || '') + '</body></html>';
+  }
+  return '<!doctype html><html><head>' + baseElement + '<style>html,body{margin:0;min-height:100%;box-sizing:border-box;background:Canvas;color:CanvasText;}body{padding:12px;font:14px/1.45 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;white-space:pre-wrap;overflow-wrap:anywhere;}</style></head><body>' + escapeRawEditorHTML(sourceText) + '</body></html>';
+}
+
+function refreshRawEditorPreview() {
+  rawPreviewFrameElement.srcdoc = rawEditorPreviewHTML(rawEditorTextAreaElement.value);
+}
+
+function scheduleRawEditorPreviewRefresh() {
+  if (rawEditorState.view !== 'preview') {
+    return;
+  }
+  window.clearTimeout(rawEditorState.previewTimer);
+  rawEditorState.previewTimer = window.setTimeout(refreshRawEditorPreview, 120);
+}
+
+function setRawEditorView(nextViewName) {
+  const normalizedViewName = nextViewName === 'preview' ? 'preview' : 'edit';
+  rawEditorState.view = normalizedViewName;
+  rawEditorEditTabElement.classList.toggle('is-active', normalizedViewName === 'edit');
+  rawEditorPreviewTabElement.classList.toggle('is-active', normalizedViewName === 'preview');
+  rawEditorEditTabElement.setAttribute('aria-selected', normalizedViewName === 'edit' ? 'true' : 'false');
+  rawEditorPreviewTabElement.setAttribute('aria-selected', normalizedViewName === 'preview' ? 'true' : 'false');
+  rawEditorPaneElement.hidden = normalizedViewName !== 'edit';
+  rawPreviewPaneElement.hidden = normalizedViewName !== 'preview';
+  if (normalizedViewName === 'preview') {
+    pushRawEditorHistory(rawEditorTextAreaElement.value);
+    refreshRawEditorPreview();
+    return;
+  }
+  rawEditorTextAreaElement.focus();
+}
+
+function updateRawHistoryButtons() {
+  rawUndoButtonElement.disabled = rawEditorState.historyIndex <= 0;
+  rawRedoButtonElement.disabled = rawEditorState.historyIndex >= rawEditorState.history.length - 1;
+}
+
+function pushRawEditorHistory(nextValue) {
+  const currentValue = String(nextValue || '');
+  if (rawEditorState.history[rawEditorState.historyIndex] === currentValue) {
+    updateRawHistoryButtons();
+    return;
+  }
+  rawEditorState.history = rawEditorState.history.slice(0, rawEditorState.historyIndex + 1);
+  rawEditorState.history.push(currentValue);
+  if (rawEditorState.history.length > 200) {
+    rawEditorState.history.shift();
+  }
+  rawEditorState.historyIndex = rawEditorState.history.length - 1;
+  updateRawHistoryButtons();
+}
+
+function scheduleRawEditorHistoryPush() {
+  if (rawEditorState.applyingHistory) {
+    return;
+  }
+  window.clearTimeout(rawEditorState.historyTimer);
+  rawEditorState.historyTimer = window.setTimeout(function pushCurrentDraft() {
+    pushRawEditorHistory(rawEditorTextAreaElement.value);
+  }, 350);
+}
+
+function applyRawEditorHistoryValue(historyValue) {
+  rawEditorState.applyingHistory = true;
+  rawEditorTextAreaElement.value = historyValue;
+  rawEditorState.applyingHistory = false;
+  updateRawHistoryButtons();
+  scheduleRawEditorPreviewRefresh();
+}
+
+function undoRawEditorDraft() {
+  pushRawEditorHistory(rawEditorTextAreaElement.value);
+  if (rawEditorState.historyIndex <= 0) {
+    return;
+  }
+  rawEditorState.historyIndex -= 1;
+  applyRawEditorHistoryValue(rawEditorState.history[rawEditorState.historyIndex]);
+}
+
+function redoRawEditorDraft() {
+  if (rawEditorState.historyIndex >= rawEditorState.history.length - 1) {
+    return;
+  }
+  rawEditorState.historyIndex += 1;
+  applyRawEditorHistoryValue(rawEditorState.history[rawEditorState.historyIndex]);
+}
+
+rawEditorEditTabElement.addEventListener('click', function onRawEditTabClick() {
+  setRawEditorView('edit');
+});
+rawEditorPreviewTabElement.addEventListener('click', function onRawPreviewTabClick() {
+  setRawEditorView('preview');
+});
+rawUndoButtonElement.addEventListener('click', undoRawEditorDraft);
+rawRedoButtonElement.addEventListener('click', redoRawEditorDraft);
+rawEditorTextAreaElement.addEventListener('input', function onRawEditorInput() {
+  scheduleRawEditorHistoryPush();
+  scheduleRawEditorPreviewRefresh();
+});
+rawEditorTextAreaElement.addEventListener('keydown', function onRawEditorKeyDown(keyboardEvent) {
+  const pressedCtrlOrMeta = keyboardEvent.ctrlKey || keyboardEvent.metaKey;
+  if (!pressedCtrlOrMeta) {
+    return;
+  }
+  const keyName = String(keyboardEvent.key || '').toLowerCase();
+  if (keyName === 'z' && !keyboardEvent.shiftKey) {
+    keyboardEvent.preventDefault();
+    undoRawEditorDraft();
+  } else if (keyName === 'y' || (keyName === 'z' && keyboardEvent.shiftKey)) {
+    keyboardEvent.preventDefault();
+    redoRawEditorDraft();
+  }
+});
+rawEditorFormElement.addEventListener('submit', function onRawEditorSubmit() {
+  pushRawEditorHistory(rawEditorTextAreaElement.value);
+});
+pushRawEditorHistory(rawEditorTextAreaElement.value);
+setRawEditorView('edit');
+</script>
 </body>
 </html>
