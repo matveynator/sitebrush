@@ -13,6 +13,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"io"
 	"io/fs"
 	"math/big"
@@ -2923,6 +2924,62 @@ func TestGrabPageRedirectsToImportedPageView(t *testing.T) {
 	}
 	if !strings.Contains(response.Body.String(), `"/docs"`) || strings.Contains(response.Body.String(), `?visual`) {
 		t.Fatalf("grab redirect should open imported page view, got %s", response.Body.String())
+	}
+}
+
+func TestGrabHTTPClientSkipsTLSVerification(t *testing.T) {
+	transport := newGrabHTTPTransport()
+	if transport.TLSClientConfig == nil {
+		t.Fatal("grab transport is missing TLS config")
+	}
+	if !transport.TLSClientConfig.InsecureSkipVerify {
+		t.Fatal("grab transport does not skip TLS verification")
+	}
+	client := newGrabHTTPClient()
+	clientTransport, ok := client.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("grab client transport type = %T, want *http.Transport", client.Transport)
+	}
+	if clientTransport.TLSClientConfig == nil || !clientTransport.TLSClientConfig.InsecureSkipVerify {
+		t.Fatal("grab client transport does not skip TLS verification")
+	}
+}
+
+func TestDownloadGrabSourceHTMLWithResolvedURLFallsBackToHTTP(t *testing.T) {
+	previousGrabHTTPClient := newGrabHTTPClient
+	newGrabHTTPClient = func() *http.Client {
+		return &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+			switch request.URL.Scheme {
+			case "https":
+				return nil, errors.New("tls: certificate verification failed")
+			case "http":
+				return &http.Response{
+					StatusCode:    http.StatusOK,
+					Status:        "200 OK",
+					Body:          io.NopCloser(strings.NewReader("<!doctype html><html><body>fallback</body></html>")),
+					ContentLength: int64(len("<!doctype html><html><body>fallback</body></html>")),
+					Header:        make(http.Header),
+					Request:       request,
+				}, nil
+			default:
+				t.Fatalf("unexpected request scheme %q", request.URL.Scheme)
+			}
+			return nil, nil
+		})}
+	}
+	defer func() {
+		newGrabHTTPClient = previousGrabHTTPClient
+	}()
+
+	htmlBytes, resolvedURL, err := downloadGrabSourceHTMLWithResolvedURL("https://source.example/page", grabSourceOptions{})
+	if err != nil {
+		t.Fatalf("downloadGrabSourceHTMLWithResolvedURL failed: %v", err)
+	}
+	if string(htmlBytes) != "<!doctype html><html><body>fallback</body></html>" {
+		t.Fatalf("downloaded HTML = %q", string(htmlBytes))
+	}
+	if resolvedURL.String() != "http://source.example/page" {
+		t.Fatalf("resolved URL = %q, want http://source.example/page", resolvedURL.String())
 	}
 }
 

@@ -4042,30 +4042,50 @@ func downloadGrabSourceHTMLWithResolvedURL(sourceURL string, sourceOptions grabS
 	}
 	client := newGrabHTTPClientForServerIP(remoteSourceURL.Hostname(), sourceOptions.IP)
 	response, err := doGrabGET(client, sourceURL, sourceOptions)
-	if err != nil && shouldFallbackGrabSourceToHTTP(remoteSourceURL, sourceOptions.IP) {
+	if err == nil && isSuccessfulGrabResponse(response) {
+		defer response.Body.Close()
+		if response.Request != nil && response.Request.URL != nil {
+			remoteSourceURL = response.Request.URL
+		}
+		htmlBytes, readErr := io.ReadAll(response.Body)
+		if readErr != nil {
+			return nil, nil, errors.New("failed to read source page")
+		}
+		return htmlBytes, remoteSourceURL, nil
+	}
+	if response != nil {
+		response.Body.Close()
+	}
+	if shouldFallbackGrabSourceToHTTP(remoteSourceURL) {
 		fallbackURL := cloneURL(remoteSourceURL)
 		fallbackURL.Scheme = "http"
 		fallbackURL.Host = fallbackURL.Hostname()
 		response, err = doGrabGET(client, fallbackURL.String(), sourceOptions)
-		if err == nil {
-			remoteSourceURL = fallbackURL
+		if err == nil && isSuccessfulGrabResponse(response) {
+			defer response.Body.Close()
+			if response.Request != nil && response.Request.URL != nil {
+				remoteSourceURL = response.Request.URL
+			} else {
+				remoteSourceURL = fallbackURL
+			}
+			htmlBytes, readErr := io.ReadAll(response.Body)
+			if readErr != nil {
+				return nil, nil, errors.New("failed to read source page")
+			}
+			return htmlBytes, remoteSourceURL, nil
+		}
+		if response != nil {
+			response.Body.Close()
 		}
 	}
 	if err != nil {
 		return nil, nil, errors.New("failed to download source page")
 	}
-	defer response.Body.Close()
-	if response.StatusCode < 200 || response.StatusCode > 299 {
-		return nil, nil, errors.New("source page returned non-success status")
-	}
-	if response.Request != nil && response.Request.URL != nil {
-		remoteSourceURL = response.Request.URL
-	}
-	htmlBytes, err := io.ReadAll(response.Body)
-	if err != nil {
-		return nil, nil, errors.New("failed to read source page")
-	}
-	return htmlBytes, remoteSourceURL, nil
+	return nil, nil, errors.New("source page returned non-success status")
+}
+
+func isSuccessfulGrabResponse(response *http.Response) bool {
+	return response != nil && response.StatusCode >= 200 && response.StatusCode <= 299
 }
 
 func doGrabGET(client *http.Client, rawURL string, sourceOptions grabSourceOptions) (*http.Response, error) {
@@ -4085,8 +4105,8 @@ func applyGrabRequestHeaders(request *http.Request, sourceOptions grabSourceOpti
 	}
 }
 
-func shouldFallbackGrabSourceToHTTP(sourceURL *url.URL, sourceIP string) bool {
-	return sourceURL != nil && sourceURL.Scheme == "https" && grabSourceIPPort(sourceIP) == "" && strings.TrimSpace(sourceIP) != ""
+func shouldFallbackGrabSourceToHTTP(sourceURL *url.URL) bool {
+	return sourceURL != nil && sourceURL.Scheme == "https"
 }
 
 func grabSourceIPPort(sourceIP string) string {
@@ -7559,7 +7579,7 @@ func buildGuestNotFoundPageTemplate(languageCode string, translations map[string
 	createPageLabel := template.HTMLEscapeString(translationOrDefault(translations, "missing_create_page", "create this page"))
 	escapedLanguageCode := template.HTMLEscapeString(languageCode)
 
-return `<!doctype html>
+	return `<!doctype html>
 <html lang="` + escapedLanguageCode + `">
 <head>
   <meta charset="UTF-8">
@@ -9217,9 +9237,20 @@ const (
 
 var (
 	newGrabHTTPClient = func() *http.Client {
-		return &http.Client{Timeout: 20 * time.Second}
+		return &http.Client{Timeout: 20 * time.Second, Transport: newGrabHTTPTransport()}
 	}
 )
+
+func newGrabHTTPTransport() *http.Transport {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	if transport.TLSClientConfig == nil {
+		transport.TLSClientConfig = &tls.Config{}
+	} else {
+		transport.TLSClientConfig = transport.TLSClientConfig.Clone()
+	}
+	transport.TLSClientConfig.InsecureSkipVerify = true
+	return transport
+}
 
 func newGrabHTTPClientForServerIP(sourceHost, sourceIP string) *http.Client {
 	trimmedSourceIP := strings.TrimSpace(sourceIP)
@@ -9231,7 +9262,7 @@ func newGrabHTTPClientForServerIP(sourceHost, sourceIP string) *http.Client {
 		return newGrabHTTPClient()
 	}
 	sourceHost = strings.TrimSpace(strings.ToLower(sourceHost))
-	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport := newGrabHTTPTransport()
 	transport.Proxy = nil
 	dialer := &net.Dialer{Timeout: 20 * time.Second}
 	transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
