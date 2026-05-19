@@ -672,6 +672,12 @@ type ManagedFileAccess struct {
 	TokenUseCount int64
 }
 
+type PagePasswordRule struct {
+	Domain       string
+	Path         string
+	PasswordHash string
+}
+
 type backupPage struct {
 	Path      string `json:"path"`
 	Title     string `json:"title"`
@@ -3069,6 +3075,8 @@ func (a *App) migrate(ctx context.Context) error {
 		`CREATE TABLE IF NOT EXISTS domain_aliases(primary_domain TEXT,alias_domain TEXT UNIQUE,verification_token TEXT,is_verified INTEGER DEFAULT 0,dns_a_ok INTEGER DEFAULT 0,is_selected INTEGER DEFAULT 0,last_checked_at TEXT);`,
 		`CREATE TABLE IF NOT EXISTS domain_states(domain TEXT PRIMARY KEY,is_frozen INTEGER DEFAULT 0);`,
 		`CREATE TABLE IF NOT EXISTS domain_ssl_settings(domain TEXT PRIMARY KEY,auto_ssl_enabled INTEGER DEFAULT 0,manually_disabled INTEGER DEFAULT 0,last_checked_at TEXT,last_failed_at TEXT,last_failure_reason TEXT,retry_after TEXT);`,
+		`CREATE TABLE IF NOT EXISTS page_password_rules(domain TEXT,path TEXT,password_hash TEXT,created_at TEXT,updated_at TEXT,PRIMARY KEY(domain,path));`,
+		`CREATE TABLE IF NOT EXISTS page_password_sessions(token TEXT PRIMARY KEY,domain TEXT,path TEXT,created_at TEXT);`,
 		`CREATE TABLE IF NOT EXISTS domain_chroot_locations(domain TEXT,url_path TEXT,directory_path TEXT,updated_at TEXT,PRIMARY KEY(domain,url_path));`,
 		`CREATE TABLE IF NOT EXISTS domain_backup_tokens(domain TEXT PRIMARY KEY,token TEXT,updated_at TEXT);`,
 		`CREATE TABLE IF NOT EXISTS file_access_rules(domain TEXT,file_name TEXT,access_mode TEXT,token TEXT,expires_at TEXT,single_use_left INTEGER DEFAULT 0,token_use_count INTEGER DEFAULT 0,PRIMARY KEY(domain,file_name));`,
@@ -3098,6 +3106,8 @@ func (a *App) migrate(ctx context.Context) error {
 	_, _ = a.db.ExecContext(ctx, `ALTER TABLE domain_ssl_settings ADD COLUMN last_failed_at TEXT`)
 	_, _ = a.db.ExecContext(ctx, `ALTER TABLE domain_ssl_settings ADD COLUMN last_failure_reason TEXT`)
 	_, _ = a.db.ExecContext(ctx, `ALTER TABLE domain_ssl_settings ADD COLUMN retry_after TEXT`)
+	_, _ = a.db.ExecContext(ctx, `ALTER TABLE page_password_rules ADD COLUMN created_at TEXT`)
+	_, _ = a.db.ExecContext(ctx, `ALTER TABLE page_password_rules ADD COLUMN updated_at TEXT`)
 	_, _ = a.db.ExecContext(ctx, `ALTER TABLE file_access_rules ADD COLUMN token_use_count INTEGER DEFAULT 0`)
 	_, _ = a.db.ExecContext(ctx, `ALTER TABLE file_metadata ADD COLUMN download_count INTEGER DEFAULT 0`)
 	_, _ = a.db.ExecContext(ctx, `ALTER TABLE analytics_events ADD COLUMN geo_country_code TEXT`)
@@ -3129,6 +3139,7 @@ func (a *App) migrate(ctx context.Context) error {
 		)
 	`)
 	a.rebuildAllDomainStorageUsage(ctx)
+	a.rebuildPagePasswordPrefixFiles(ctx)
 	return nil
 }
 
@@ -3166,6 +3177,12 @@ SELECT 'localhost',is_frozen FROM domain_states WHERE domain IN ` + placeholders
 	domainSSLSettingsMergeQuery := `INSERT OR IGNORE INTO domain_ssl_settings(domain,auto_ssl_enabled,manually_disabled,last_checked_at,last_failed_at,last_failure_reason,retry_after)
 SELECT 'localhost',auto_ssl_enabled,manually_disabled,last_checked_at,last_failed_at,last_failure_reason,retry_after FROM domain_ssl_settings WHERE domain IN ` + placeholders
 	_, _ = a.db.ExecContext(ctx, domainSSLSettingsMergeQuery, sqlArguments...)
+	pagePasswordRulesMergeQuery := `INSERT OR IGNORE INTO page_password_rules(domain,path,password_hash,created_at,updated_at)
+SELECT 'localhost',path,password_hash,created_at,updated_at FROM page_password_rules WHERE domain IN ` + placeholders
+	_, _ = a.db.ExecContext(ctx, pagePasswordRulesMergeQuery, sqlArguments...)
+	pagePasswordSessionsMergeQuery := `INSERT OR IGNORE INTO page_password_sessions(token,domain,path,created_at)
+SELECT token,'localhost',path,created_at FROM page_password_sessions WHERE domain IN ` + placeholders
+	_, _ = a.db.ExecContext(ctx, pagePasswordSessionsMergeQuery, sqlArguments...)
 
 	_, _ = a.db.ExecContext(ctx, `UPDATE revisions SET domain='localhost' WHERE domain IN `+placeholders, sqlArguments...)
 	_, _ = a.db.ExecContext(ctx, `UPDATE domain_aliases SET primary_domain='localhost' WHERE primary_domain IN `+placeholders, sqlArguments...)
@@ -3180,6 +3197,8 @@ SELECT 'localhost',auto_ssl_enabled,manually_disabled,last_checked_at,last_faile
 	_, _ = a.db.ExecContext(ctx, `DELETE FROM domain_storage_usage WHERE domain IN `+placeholders, sqlArguments...)
 	_, _ = a.db.ExecContext(ctx, `DELETE FROM domain_states WHERE domain IN `+placeholders, sqlArguments...)
 	_, _ = a.db.ExecContext(ctx, `DELETE FROM domain_ssl_settings WHERE domain IN `+placeholders, sqlArguments...)
+	_, _ = a.db.ExecContext(ctx, `DELETE FROM page_password_rules WHERE domain IN `+placeholders, sqlArguments...)
+	_, _ = a.db.ExecContext(ctx, `DELETE FROM page_password_sessions WHERE domain IN `+placeholders, sqlArguments...)
 }
 
 func (a *App) autoCertHostPolicy(ctx context.Context, host string) error {
@@ -3467,6 +3486,10 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 		a.revisionsPage(w, r)
 		return
 	}
+	if hasQueryFlag(r, "page_password") {
+		a.pagePasswordAction(w, r)
+		return
+	}
 	if hasQueryFlag(r, "login") {
 		a.login(w, r)
 		return
@@ -3491,10 +3514,36 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 		a.captchaImage(w, r)
 		return
 	}
-	if isGuestStaticRequest(r) && a.servePublishedStaticFileFromDisk(w, r, domainFromContext(r.Context()), pagePath, true) {
-		return
+	requestDomain := domainFromContext(r.Context())
+	if strings.TrimSpace(requestDomain) == "" {
+		requestDomain = domainFromRequest(r)
+	}
+	if isGuestStaticRequest(r) {
+		if rule, found := a.pagePasswordRuleFromPrefixFile(requestDomain, pagePath); found {
+			if a.pagePasswordSessionValid(r, rule) {
+				if a.servePublishedStaticFileFromDisk(w, r, requestDomain, pagePath, true) {
+					return
+				}
+			} else {
+				a.renderPagePasswordPrompt(w, r, requestDomain, pagePath, "", http.StatusUnauthorized)
+				return
+			}
+		}
+		if a.servePublishedStaticFileFromDisk(w, r, requestDomain, pagePath, true) {
+			return
+		}
 	}
 	domain := a.siteDomain(r.Context(), r)
+	if hasQueryFlag(r, "page_password_unlock") {
+		a.pagePasswordUnlock(w, r, domain, pagePath)
+		return
+	}
+	if a.requirePagePassword(w, r, domain, pagePath) {
+		return
+	}
+	if isGuestStaticRequest(r) && a.servePublishedStaticFileFromDisk(w, r, domain, pagePath, true) {
+		return
+	}
 	if a.serveDomainChrootLocation(w, r, domain, pagePath) {
 		return
 	}
@@ -7147,6 +7196,348 @@ func (a *App) currentAdminEmail(r *http.Request) (string, bool) {
 	return email, true
 }
 
+func (a *App) pagePasswordAction(w http.ResponseWriter, r *http.Request) {
+	if !a.isAdminRequest(r) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	domain := a.siteDomain(r.Context(), r)
+	pagePath := cleanPath(r.URL.Path)
+	action := strings.TrimSpace(r.URL.Query().Get("page_password"))
+	switch action {
+	case "protect":
+		password := strings.TrimSpace(r.FormValue("password"))
+		if password == "" {
+			http.Error(w, "password is required", http.StatusBadRequest)
+			return
+		}
+		a.setPagePasswordRule(r.Context(), domain, pagePath, password)
+	case "remove":
+		a.removePagePasswordRule(r.Context(), domain, pagePath)
+	default:
+		http.Error(w, "unknown password action", http.StatusBadRequest)
+		return
+	}
+	http.Redirect(w, r, pagePath, http.StatusFound)
+}
+
+func (a *App) pagePasswordUnlock(w http.ResponseWriter, r *http.Request, domain, pagePath string) {
+	rule, found := a.pagePasswordRuleFromPrefixFile(domain, pagePath)
+	if !found {
+		rule, found = a.pagePasswordRuleForPath(r.Context(), domain, pagePath)
+	}
+	if !found {
+		http.Redirect(w, r, pagePath, http.StatusFound)
+		return
+	}
+	if r.Method != http.MethodPost {
+		a.renderPagePasswordPrompt(w, r, domain, pagePath, "", http.StatusUnauthorized)
+		return
+	}
+	clientIP := clientIPAddress(r)
+	failureDomain := pagePasswordFailureDomain(rule.Domain, rule.Path)
+	if blocked, hardLocked, blockedUntil := a.authIPIsBlocked(r.Context(), failureDomain, clientIP); blocked {
+		translations := translationsForRequest(r)
+		if hardLocked {
+			status := translationOrDefault(translations, "login_status_hard_locked", "Too many failed attempts. Use password recovery to unlock access.")
+			a.renderPagePasswordPrompt(w, r, domain, pagePath, status, http.StatusForbidden)
+			return
+		}
+		retryAfterSeconds := int(time.Until(blockedUntil).Seconds())
+		if retryAfterSeconds < 1 {
+			retryAfterSeconds = 1
+		}
+		w.Header().Set("Retry-After", strconv.Itoa(retryAfterSeconds))
+		status := translationOrDefault(translations, "login_status_rate_limited", "Too many failed attempts. Try again later.")
+		a.renderPagePasswordPrompt(w, r, domain, pagePath, status, http.StatusTooManyRequests)
+		return
+	}
+	if !pagePasswordMatches(rule.PasswordHash, r.FormValue("password")) {
+		translations := translationsForRequest(r)
+		failureCount, blockedUntil, hardLocked := a.registerFailedLoginAttempt(r.Context(), failureDomain, clientIP)
+		if hardLocked {
+			status := translationOrDefault(translations, "login_status_hard_locked", "Too many failed attempts. Use password recovery to unlock access.")
+			a.renderPagePasswordPrompt(w, r, domain, pagePath, status, http.StatusForbidden)
+			return
+		}
+		if failureCount >= 4 {
+			retryAfterSeconds := int(time.Until(blockedUntil).Seconds())
+			if retryAfterSeconds < 1 {
+				retryAfterSeconds = 1
+			}
+			w.Header().Set("Retry-After", strconv.Itoa(retryAfterSeconds))
+			status := translationOrDefault(translations, "login_status_rate_limited", "Too many failed attempts. Try again later.")
+			a.renderPagePasswordPrompt(w, r, domain, pagePath, status, http.StatusTooManyRequests)
+			return
+		}
+		status := translationOrDefault(translations, "protected_page_invalid", "Incorrect password.")
+		a.renderPagePasswordPrompt(w, r, domain, pagePath, status, http.StatusUnauthorized)
+		return
+	}
+	a.clearFailedLoginAttempts(r.Context(), failureDomain, clientIP)
+	http.SetCookie(w, &http.Cookie{Name: pagePasswordCookieName(rule.Domain, rule.Path), Value: pagePasswordSessionToken(rule), Path: "/", HttpOnly: true, SameSite: http.SameSiteLaxMode})
+	http.Redirect(w, r, pagePath, http.StatusFound)
+}
+
+func (a *App) requirePagePassword(w http.ResponseWriter, r *http.Request, domain, pagePath string) bool {
+	if a.isAdminRequest(r) {
+		return false
+	}
+	rule, found := a.pagePasswordRuleForPath(r.Context(), domain, pagePath)
+	if !found {
+		return false
+	}
+	if a.pagePasswordSessionValid(r, rule) {
+		return false
+	}
+	a.renderPagePasswordPrompt(w, r, domain, pagePath, "", http.StatusUnauthorized)
+	return true
+}
+
+func (a *App) pagePasswordSessionValid(r *http.Request, rule PagePasswordRule) bool {
+	cookie, err := r.Cookie(pagePasswordCookieName(rule.Domain, rule.Path))
+	if err != nil || strings.TrimSpace(cookie.Value) == "" {
+		return false
+	}
+	return cookie.Value == pagePasswordSessionToken(rule)
+}
+
+func (a *App) setPagePasswordRule(ctx context.Context, domain, pagePath, password string) {
+	normalizedPath := cleanPath(pagePath)
+	now := time.Now().UTC().Format(time.RFC3339)
+	_, _ = a.db.ExecContext(ctx, `INSERT INTO page_password_rules(domain,path,password_hash,created_at,updated_at)
+VALUES(?,?,?,?,?)
+ON CONFLICT(domain,path) DO UPDATE SET password_hash=excluded.password_hash,updated_at=excluded.updated_at`,
+		domain, normalizedPath, pagePasswordHash(password), now, now)
+	_, _ = a.db.ExecContext(ctx, `DELETE FROM page_password_sessions WHERE domain=? AND path=?`, domain, normalizedPath)
+	a.writePagePasswordPrefixFile(ctx, domain)
+}
+
+func (a *App) removePagePasswordRule(ctx context.Context, domain, pagePath string) {
+	normalizedPath := cleanPath(pagePath)
+	_, _ = a.db.ExecContext(ctx, `DELETE FROM page_password_rules WHERE domain=? AND path=?`, domain, normalizedPath)
+	_, _ = a.db.ExecContext(ctx, `DELETE FROM page_password_sessions WHERE domain=? AND path=?`, domain, normalizedPath)
+	a.writePagePasswordPrefixFile(ctx, domain)
+}
+
+func (a *App) pagePasswordRuleExists(ctx context.Context, domain, pagePath string) bool {
+	var ruleCount int
+	_ = a.db.QueryRowContext(ctx, `SELECT COUNT(1) FROM page_password_rules WHERE domain=? AND path=?`, domain, cleanPath(pagePath)).Scan(&ruleCount)
+	return ruleCount > 0
+}
+
+func (a *App) pagePasswordRuleForPath(ctx context.Context, domain, pagePath string) (PagePasswordRule, bool) {
+	requestPath := cleanPath(pagePath)
+	rows, err := a.db.QueryContext(ctx, `SELECT path,password_hash FROM page_password_rules WHERE domain=? ORDER BY path DESC`, domain)
+	if err != nil {
+		return PagePasswordRule{}, false
+	}
+	defer rows.Close()
+	var bestRule PagePasswordRule
+	for rows.Next() {
+		var candidateRule PagePasswordRule
+		candidateRule.Domain = domain
+		if scanErr := rows.Scan(&candidateRule.Path, &candidateRule.PasswordHash); scanErr != nil {
+			continue
+		}
+		candidateRule.Path = cleanPath(candidateRule.Path)
+		if !pagePathHasProtectedPrefix(requestPath, candidateRule.Path) {
+			continue
+		}
+		if len(candidateRule.Path) > len(bestRule.Path) {
+			bestRule = candidateRule
+		}
+	}
+	return bestRule, bestRule.Path != ""
+}
+
+func pagePathHasProtectedPrefix(pagePath, protectedPrefix string) bool {
+	pagePath = cleanPath(pagePath)
+	protectedPrefix = cleanPath(protectedPrefix)
+	if protectedPrefix == "/" {
+		return true
+	}
+	return pagePath == protectedPrefix || strings.HasPrefix(pagePath, protectedPrefix+"/")
+}
+
+func pagePasswordHash(password string) string {
+	hashedBytes := sha256.Sum256([]byte("sitebrush page password\n" + password))
+	return fmt.Sprintf("sha256:%x", hashedBytes)
+}
+
+func pagePasswordMatches(storedHash, password string) bool {
+	return strings.TrimSpace(storedHash) == pagePasswordHash(password)
+}
+
+func pagePasswordCookieName(domain, pagePath string) string {
+	hashedBytes := sha256.Sum256([]byte(normalizeDomainName(domain) + "\n" + cleanPath(pagePath)))
+	return "sitebrush_page_password_" + fmt.Sprintf("%x", hashedBytes)[:16]
+}
+
+func pagePasswordSessionToken(rule PagePasswordRule) string {
+	hashedBytes := sha256.Sum256([]byte("sitebrush page password session\n" + normalizeDomainName(rule.Domain) + "\n" + cleanPath(rule.Path) + "\n" + rule.PasswordHash))
+	return "v1:" + fmt.Sprintf("%x", hashedBytes)
+}
+
+func pagePasswordFailureDomain(domain, pagePath string) string {
+	return normalizeDomainName(domain) + "|page-password|" + cleanPath(pagePath)
+}
+
+func (a *App) pagePasswordRuleFromPrefixFile(domain, pagePath string) (PagePasswordRule, bool) {
+	prefixBytes, err := os.ReadFile(a.pagePasswordPrefixFilePath(domain))
+	if err != nil {
+		return PagePasswordRule{}, false
+	}
+	normalizedDomain := canonicalLocalDomain(domain)
+	if normalizedDomain == "" {
+		normalizedDomain = "localhost"
+	}
+	requestPath := cleanPath(pagePath)
+	var bestRule PagePasswordRule
+	for _, rawPrefix := range strings.Split(string(prefixBytes), "\n") {
+		candidateRule, ok := parsePagePasswordPrefixLine(normalizedDomain, rawPrefix)
+		if !ok {
+			continue
+		}
+		if !pagePathHasProtectedPrefix(requestPath, candidateRule.Path) {
+			continue
+		}
+		if len(candidateRule.Path) > len(bestRule.Path) {
+			bestRule = candidateRule
+		}
+	}
+	return bestRule, bestRule.Path != "" && bestRule.PasswordHash != ""
+}
+
+func parsePagePasswordPrefixLine(domain, rawLine string) (PagePasswordRule, bool) {
+	trimmedLine := strings.TrimSpace(rawLine)
+	if trimmedLine == "" {
+		return PagePasswordRule{}, false
+	}
+	parts := strings.SplitN(trimmedLine, "\t", 2)
+	normalizedDomain := canonicalLocalDomain(domain)
+	if normalizedDomain == "" {
+		normalizedDomain = "localhost"
+	}
+	rule := PagePasswordRule{Domain: normalizedDomain, Path: cleanPath(parts[0])}
+	if len(parts) == 2 {
+		rule.PasswordHash = strings.TrimSpace(parts[1])
+	}
+	return rule, rule.Path != ""
+}
+
+func (a *App) rebuildPagePasswordPrefixFiles(ctx context.Context) {
+	rows, err := a.db.QueryContext(ctx, `SELECT DISTINCT domain FROM page_password_rules`)
+	if err != nil {
+		return
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var domain string
+		if scanErr := rows.Scan(&domain); scanErr != nil {
+			continue
+		}
+		a.writePagePasswordPrefixFile(ctx, domain)
+	}
+}
+
+func (a *App) writePagePasswordPrefixFile(ctx context.Context, domain string) {
+	normalizedDomain := canonicalLocalDomain(domain)
+	if normalizedDomain == "" {
+		return
+	}
+	rows, err := a.db.QueryContext(ctx, `SELECT path,password_hash FROM page_password_rules WHERE domain=? ORDER BY path ASC`, normalizedDomain)
+	if err != nil {
+		return
+	}
+	defer rows.Close()
+	protectedRules := make([]string, 0)
+	for rows.Next() {
+		var rule PagePasswordRule
+		if scanErr := rows.Scan(&rule.Path, &rule.PasswordHash); scanErr != nil {
+			continue
+		}
+		rule.Path = cleanPath(rule.Path)
+		rule.PasswordHash = strings.TrimSpace(rule.PasswordHash)
+		if rule.Path != "" && rule.PasswordHash != "" {
+			protectedRules = append(protectedRules, rule.Path+"\t"+rule.PasswordHash)
+		}
+	}
+	prefixFilePath := a.pagePasswordPrefixFilePath(normalizedDomain)
+	if len(protectedRules) == 0 {
+		_ = os.Remove(prefixFilePath)
+		return
+	}
+	if mkdirErr := os.MkdirAll(filepath.Dir(prefixFilePath), 0o700); mkdirErr != nil {
+		return
+	}
+	_ = os.WriteFile(prefixFilePath, []byte(strings.Join(protectedRules, "\n")+"\n"), 0o600)
+}
+
+func (a *App) pagePasswordPrefixFilePath(domain string) string {
+	normalizedDomain := canonicalLocalDomain(domain)
+	if normalizedDomain == "" {
+		normalizedDomain = "localhost"
+	}
+	return filepath.Join(a.storageRootDir(), "page-password-prefixes", domainStorageName(normalizedDomain)+".txt")
+}
+
+func (a *App) renderPagePasswordPrompt(w http.ResponseWriter, r *http.Request, domain, pagePath, status string, statusCode int) {
+	translations := translationsForRequest(r)
+	title := template.HTMLEscapeString(translationOrDefault(translations, "protected_page_title", "Password required"))
+	header := template.HTMLEscapeString(translationOrDefault(translations, "protected_page_header", "This page is password protected."))
+	placeholder := template.HTMLEscapeString(translationOrDefault(translations, "protected_page_password_placeholder", "Password..."))
+	submitLabel := template.HTMLEscapeString(translationOrDefault(translations, "protected_page_submit", "Open"))
+	statusHTML := ""
+	if strings.TrimSpace(status) != "" {
+		statusHTML = "<p class=\"SiteBrushProtectedStatus\">" + template.HTMLEscapeString(status) + "</p>"
+	}
+	actionURL := template.HTMLEscapeString(cleanPath(pagePath) + "?page_password_unlock")
+	menuScript := buildGuestContextMenuScriptForLanguage(pagePath, domain, preferredLanguageCode(r.Header.Get("Accept-Language")))
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(statusCode)
+	_, _ = w.Write([]byte(`<!doctype html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>` + title + `</title>
+  <style>
+    :root{color-scheme:light dark;--protected-bg:#f4f8fc;--protected-text:#1f3f6f;--protected-border:#c8d5e7;--protected-accent:#1a65d8;--protected-danger:#b42318}
+    @media (prefers-color-scheme:dark){:root{--protected-bg:#0f1724;--protected-text:#dbe8ff;--protected-border:#2f405d;--protected-accent:#9ec2ff;--protected-danger:#ffb4a8}}
+    html,body{min-height:100%}
+    body{margin:0;background:var(--protected-bg);color:var(--protected-text);font-family:Arial,Helvetica,sans-serif}
+    .SiteBrushProtectedShell{min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px 16px;box-sizing:border-box}
+    .SiteBrushProtectedPanel{width:min(420px,100%);border:1px solid var(--protected-border);padding:20px;background:rgba(255,255,255,.55)}
+    @media (prefers-color-scheme:dark){.SiteBrushProtectedPanel{background:rgba(23,34,53,.6)}}
+    .SiteBrushProtectedIcon{width:32px;height:32px;margin-bottom:12px}
+    h1{margin:0 0 10px 0;font-size:24px;line-height:1.2}
+    p{margin:0 0 14px 0;font-size:14px;line-height:1.4}
+    .SiteBrushProtectedStatus{color:var(--protected-danger);font-weight:700}
+    .SiteBrushProtectedInput{width:100%;box-sizing:border-box;border:1px solid var(--protected-border);padding:11px 12px;font:inherit;margin-bottom:12px;background:transparent;color:var(--protected-text)}
+    .SiteBrushProtectedButton{width:100%;border:0;background:var(--protected-accent);color:#fff;padding:11px 12px;font:inherit;font-weight:700;cursor:pointer}
+  </style>
+</head>
+<body>
+  <main class="SiteBrushProtectedShell">
+    <form class="SiteBrushProtectedPanel" method="post" action="` + actionURL + `">
+      <img class="SiteBrushProtectedIcon" src="/p/static/lock.png" alt="">
+      <h1>` + title + `</h1>
+      <p>` + header + `</p>
+      ` + statusHTML + `
+      <input class="SiteBrushProtectedInput" type="password" name="password" placeholder="` + placeholder + `" autocomplete="current-password" required autofocus>
+      <button class="SiteBrushProtectedButton" type="submit">` + submitLabel + `</button>
+    </form>
+  </main>
+  ` + menuScript + `
+</body>
+</html>`))
+}
+
 func (a *App) latestActiveRevisionID(ctx context.Context, domain string, pagePath string) int {
 	var revisionID int
 	_ = a.db.QueryRowContext(ctx, `SELECT id FROM revisions WHERE domain=? AND page_path=? AND is_active=1 ORDER BY id DESC LIMIT 1`, domain, pagePath).Scan(&revisionID)
@@ -7198,7 +7589,8 @@ func (a *App) injectContextMenu(r *http.Request, pagePath, html string) string {
 		storageUsage := a.domainStorageUsage(r.Context(), domain)
 		storageUsageLabel = formatFileSize(storageUsage.totalBytes()) + " / " + formatFileSize(storageUsage.LimitBytes)
 	}
-	menuScript := buildContextMenuScript(a.isAdminRequest(r), a.isDomainFrozen(r.Context(), domain), pagePath, domain, revisionID, revisionCount, storageUsageLabel, translationsForRequest(r))
+	pagePasswordProtected := a.isAdminRequest(r) && a.pagePasswordRuleExists(r.Context(), domain, pagePath)
+	menuScript := buildContextMenuScript(a.isAdminRequest(r), a.isDomainFrozen(r.Context(), domain), pagePasswordProtected, pagePath, domain, revisionID, revisionCount, storageUsageLabel, translationsForRequest(r))
 	if strings.Contains(strings.ToLower(html), "</body>") {
 		bodyClosePattern := regexp.MustCompile(`(?i)</body>`)
 		return bodyClosePattern.ReplaceAllString(html, menuScript+"</body>")
@@ -7270,7 +7662,7 @@ func contentTypeForManagedPage(pagePath, content string) string {
 	return detectedContentType
 }
 
-func buildContextMenuScript(isAdmin bool, isFrozen bool, pagePath, domain string, revisionID int, revisionCount int, storageUsageLabel string, translations map[string]string) string {
+func buildContextMenuScript(isAdmin bool, isFrozen bool, pagePasswordProtected bool, pagePath, domain string, revisionID int, revisionCount int, storageUsageLabel string, translations map[string]string) string {
 	if !isAdmin {
 		return buildGuestContextMenuScript(pagePath, domain, translations)
 	}
@@ -7295,6 +7687,8 @@ func buildContextMenuScript(isAdmin bool, isFrozen bool, pagePath, domain string
 	editLabel := template.JSEscapeString(translationOrDefault(translations, "menu_edit", "Edit"))
 	textEditLabel := template.JSEscapeString(translationOrDefault(translations, "menu_text_edit", "Edit as text"))
 	deleteLabel := template.JSEscapeString(translationOrDefault(translations, "menu_delete", "Delete"))
+	protectPasswordLabel := template.JSEscapeString(translationOrDefault(translations, "menu_protect_password", "Protect with password"))
+	removePasswordProtectionLabel := template.JSEscapeString(translationOrDefault(translations, "menu_remove_password_protection", "Remove password protection"))
 	revisionsLabel := template.JSEscapeString(fmt.Sprintf("%s: %d", translationOrDefault(translations, "menu_revisions", "Revisions"), revisionCount))
 	filesLabel := template.JSEscapeString(translationOrDefault(translations, "menu_files", "Files"))
 	treeLabel := template.JSEscapeString(translationOrDefault(translations, "menu_tree", "Site tree"))
@@ -7309,6 +7703,9 @@ func buildContextMenuScript(isAdmin bool, isFrozen bool, pagePath, domain string
 	treeLoadingLabel := template.JSEscapeString(translationOrDefault(translations, "tree_loading", "Loading site tree..."))
 	treeLoadErrorLabel := template.JSEscapeString(translationOrDefault(translations, "tree_load_error", "Failed to load site tree."))
 	treeCloseLabel := template.JSEscapeString(translationOrDefault(translations, "tree_close", "Close"))
+	protectPasswordPrompt := template.JSEscapeString(translationOrDefault(translations, "protect_password_prompt", "Password for this page and nested pages:"))
+	protectPasswordEmptyLabel := template.JSEscapeString(translationOrDefault(translations, "protect_password_empty", "Password is required."))
+	removePasswordProtectionPrompt := template.JSEscapeString(translationOrDefault(translations, "confirm_remove_password_protection", "Remove password protection for this page and nested pages?"))
 	compiledVersionLabel := template.JSEscapeString("v." + CompileVersion)
 	sitebrushHomeURL := "https://sitebrush.com"
 	serverBinaryDownloadURL := latestServerBinaryDownloadURL(runtime.GOOS, runtime.GOARCH)
@@ -7326,6 +7723,10 @@ func buildContextMenuScript(isAdmin bool, isFrozen bool, pagePath, domain string
 		if isFrozen {
 			freezeActionEntry = "<li class='SiteBrushContextMenu'><button type='button' data-sitebrush-action='publish' class='SiteBrushContextMenuLink SiteBrushContextMenuButton'><img src='/p/static/publish.png' class='SiteBrushMenuIcon' alt=''>" + publishLabel + "</button></li>"
 		}
+		passwordActionEntry := "<li class='SiteBrushContextMenu'><button type='button' data-sitebrush-action='protect_password' class='SiteBrushContextMenuLink SiteBrushContextMenuButton'><img src='/p/static/lock.png' class='SiteBrushMenuIcon' alt=''>" + protectPasswordLabel + "</button></li>"
+		if pagePasswordProtected {
+			passwordActionEntry = "<li class='SiteBrushContextMenu'><button type='button' data-sitebrush-action='remove_password_protection' class='SiteBrushContextMenuLink SiteBrushContextMenuButton'><img src='/p/static/unlock.png' class='SiteBrushMenuIcon' alt=''>" + removePasswordProtectionLabel + "</button></li>"
+		}
 		return contextMenuStylesAndHelpers() + `<script>
 (function initializeSitebrushContextMenuForAdmin() {
   if (window.__sitebrushContextMenuInitialized) {
@@ -7338,7 +7739,8 @@ func buildContextMenuScript(isAdmin bool, isFrozen bool, pagePath, domain string
   const actionConfigByName = {
     delete: { path: "?delete=` + strconv.Itoa(revisionID) + `", message: "` + confirmDeletePrompt + `" },
     freeze: { path: "?freeze", message: "` + confirmFreezePrompt + `" },
-    publish: { path: "?publish", message: "` + confirmPublishPrompt + `" }
+    publish: { path: "?publish", message: "` + confirmPublishPrompt + `" },
+    remove_password_protection: { path: "?page_password=remove", message: "` + removePasswordProtectionPrompt + `" }
   };
   const confirmYesLabel = "` + confirmYesLabel + `";
   const confirmNoLabel = "` + confirmNoLabel + `";
@@ -7509,6 +7911,18 @@ func buildContextMenuScript(isAdmin bool, isFrozen bool, pagePath, domain string
       openSiteTreeDialog();
       return;
     }
+    if (actionName === "protect_password") {
+      const passwordText = window.prompt("` + protectPasswordPrompt + `");
+      if (passwordText === null) {
+        return;
+      }
+      if (passwordText.trim() === "") {
+        window.alert("` + protectPasswordEmptyLabel + `");
+        return;
+      }
+      submitPasswordActionForm("?page_password=protect", passwordText);
+      return;
+    }
     const selectedActionConfig = actionConfigByName[actionName];
     if (!selectedActionConfig) {
       return;
@@ -7560,6 +7974,19 @@ func buildContextMenuScript(isAdmin bool, isFrozen bool, pagePath, domain string
       document.body.appendChild(actionFormElement);
       actionFormElement.submit();
     }
+    function submitPasswordActionForm(actionPath, passwordText) {
+      const actionFormElement = document.createElement("form");
+      actionFormElement.setAttribute("data-sitebrush-owned", "true");
+      actionFormElement.method = "POST";
+      actionFormElement.action = actionPath;
+      const passwordInputElement = document.createElement("input");
+      passwordInputElement.type = "hidden";
+      passwordInputElement.name = "password";
+      passwordInputElement.value = passwordText;
+      actionFormElement.appendChild(passwordInputElement);
+      document.body.appendChild(actionFormElement);
+      actionFormElement.submit();
+    }
   }, {capture: true});
   function buildSitebrushAdminMenuEntries() {
     return [
@@ -7569,6 +7996,7 @@ func buildContextMenuScript(isAdmin bool, isFrozen bool, pagePath, domain string
       "<li class='SiteBrushContextMenu'><a href='?text' class='SiteBrushContextMenuLink'><img src='/p/static/pencil-text.png' class='SiteBrushMenuIcon' alt=''>" + "` + textEditLabel + `" + "</a></li>",
       "<li class='SiteBrushContextMenu'><a href='?revisions' class='SiteBrushContextMenuLink'><img src='/p/static/revisions.png' class='SiteBrushMenuIcon' alt=''>" + "` + revisionsLabel + `" + "</a></li>",
       "` + deleteActionEntry + `",
+      "` + passwordActionEntry + `",
       "<li class='SiteBrushContextMenu'><a href='?files' class='SiteBrushContextMenuLink'><img src='/p/static/upload.png' class='SiteBrushMenuIcon' alt=''>" + "` + filesLabel + `" + "</a></li>",
       "<li class='SiteBrushContextMenu'><button type='button' data-sitebrush-action='tree' class='SiteBrushContextMenuLink SiteBrushContextMenuButton'><img src='/p/static/tree.png' class='SiteBrushMenuIcon' alt=''>" + "` + treeLabel + `" + "</button></li>",
       "` + freezeActionEntry + `",

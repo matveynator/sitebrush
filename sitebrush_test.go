@@ -269,6 +269,7 @@ func TestContextMenuUsesDirectEditorProfileAndDeleteActions(t *testing.T) {
 	}
 
 	request := httptest.NewRequest(http.MethodGet, "http://localhost:8080/docs", nil)
+	request.Header.Set("Accept-Language", "en")
 	request.AddCookie(newAdminSessionCookie(t, application, "admin@example.com"))
 	response := httptest.NewRecorder()
 	application.route(response, request)
@@ -276,7 +277,7 @@ func TestContextMenuUsesDirectEditorProfileAndDeleteActions(t *testing.T) {
 		t.Fatalf("status = %d, body=%q", response.Code, response.Body.String())
 	}
 	body := response.Body.String()
-	for _, expectedFragment := range []string{"href='?visual'", "href='?text'", "data-sitebrush-action='delete'", "?delete=" + strconv.FormatInt(revisionID, 10), "href='?profile'", "href='?analytics'", "/p/static/analytics.svg"} {
+	for _, expectedFragment := range []string{"href='?visual'", "href='?text'", "data-sitebrush-action='delete'", "?delete=" + strconv.FormatInt(revisionID, 10), "data-sitebrush-action='protect_password'", "/p/static/lock.png", "Protect with password", "href='?profile'", "href='?analytics'", "/p/static/analytics.svg"} {
 		if !strings.Contains(body, expectedFragment) {
 			t.Fatalf("context menu missing %q in %s", expectedFragment, body)
 		}
@@ -292,6 +293,32 @@ func TestContextMenuUsesDirectEditorProfileAndDeleteActions(t *testing.T) {
 	for _, expectedFragment := range []string{`window.location.href = targetHref;`, `closestSitebrushEventElement(browserEvent, "#SiteBrushMenuBox")`, `function closeSitebrushMenu()`, `z-index:2147483647`, `closeSitebrushMenu();`, `data-sitebrush-owned`, `sitebrushContextMenuShadowCSS`, `attachShadow({mode: "open"})`, `menuRoot.appendChild(menuStyleElement)`, `.SiteBrushContextMenuLink:link`, `.SiteBrushContextMenuLink:visited`, `window.addEventListener("contextmenu", onContextMenuOpen, {capture: true, passive: false})`, `installSitebrushLongPressMenu`, `document.addEventListener("pointerdown", startLongPress`, `document.addEventListener("touchstart"`, `positionSitebrushMenuBox(menuBoxElement, menuPoint)`, `max-height:calc(100vh - 16px)`, `@media (pointer: coarse), (max-width: 820px)`} {
 		if !strings.Contains(body, expectedFragment) {
 			t.Fatalf("context menu missing navigation guard %q in %s", expectedFragment, body)
+		}
+	}
+}
+
+func TestContextMenuShowsRemovePasswordProtectionForProtectedPage(t *testing.T) {
+	application, rawDB := newTestApplication(t)
+	if _, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "admin@example.com", "old"); err != nil {
+		t.Fatalf("insert user: %v", err)
+	}
+	if _, err := rawDB.Exec(`INSERT INTO pages(domain,path,title,html,published) VALUES(?,?,?,?,1)`, "localhost", "/docs", "/docs", "<html><body>docs</body></html>"); err != nil {
+		t.Fatalf("insert page: %v", err)
+	}
+	application.setPagePasswordRule(context.Background(), "localhost", "/docs", "secret")
+
+	request := httptest.NewRequest(http.MethodGet, "http://localhost:8080/docs", nil)
+	request.Header.Set("Accept-Language", "en")
+	request.AddCookie(newAdminSessionCookie(t, application, "admin@example.com"))
+	response := httptest.NewRecorder()
+	application.route(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%q", response.Code, response.Body.String())
+	}
+	body := response.Body.String()
+	for _, expectedFragment := range []string{"data-sitebrush-action='remove_password_protection'", "/p/static/unlock.png", "Remove password protection"} {
+		if !strings.Contains(body, expectedFragment) {
+			t.Fatalf("protected context menu missing %q in %s", expectedFragment, body)
 		}
 	}
 }
@@ -1216,6 +1243,183 @@ func TestLoginPostRedirectsBackToRequestedController(t *testing.T) {
 	}
 	if location := response.Header().Get("Location"); location != "/docs?settings=" {
 		t.Fatalf("location = %q, want %q", location, "/docs?settings=")
+	}
+}
+
+func TestPagePasswordProtectionAppliesToNestedPaths(t *testing.T) {
+	application, rawDB := newTestApplication(t)
+	if _, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "admin@example.com", "old"); err != nil {
+		t.Fatalf("insert user: %v", err)
+	}
+	if _, err := rawDB.Exec(`INSERT INTO published_pages(domain,path,title,html) VALUES(?,?,?,?)`, "localhost", "/passport/one", "Nested", "<html><body>nested secret</body></html>"); err != nil {
+		t.Fatalf("insert nested page: %v", err)
+	}
+	if _, err := rawDB.Exec(`INSERT INTO published_pages(domain,path,title,html) VALUES(?,?,?,?)`, "localhost", "/passports", "Sibling", "<html><body>sibling public</body></html>"); err != nil {
+		t.Fatalf("insert sibling page: %v", err)
+	}
+	application.writePublishedStaticHTML("localhost", "/passport/one", "<html><body>nested static secret</body></html>")
+	application.writePublishedStaticHTML("localhost", "/passports", "<html><body>sibling static public</body></html>")
+	application.setPagePasswordRule(context.Background(), "localhost", "/passport", "secret")
+
+	protectedRequest := httptest.NewRequest(http.MethodGet, "http://localhost:8080/passport/one", nil)
+	protectedResponse := httptest.NewRecorder()
+	application.route(protectedResponse, protectedRequest)
+	if protectedResponse.Code != http.StatusUnauthorized {
+		t.Fatalf("protected status = %d, want %d, body=%q", protectedResponse.Code, http.StatusUnauthorized, protectedResponse.Body.String())
+	}
+	if strings.Contains(protectedResponse.Body.String(), "nested static secret") {
+		t.Fatalf("protected page leaked nested content: %s", protectedResponse.Body.String())
+	}
+
+	form := url.Values{}
+	form.Set("password", "secret")
+	unlockRequest := httptest.NewRequest(http.MethodPost, "http://localhost:8080/passport/one?page_password_unlock", strings.NewReader(form.Encode()))
+	unlockRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	unlockResponse := httptest.NewRecorder()
+	application.route(unlockResponse, unlockRequest)
+	if unlockResponse.Code != http.StatusFound {
+		t.Fatalf("unlock status = %d, want %d, body=%q", unlockResponse.Code, http.StatusFound, unlockResponse.Body.String())
+	}
+	unlockCookies := unlockResponse.Result().Cookies()
+	if len(unlockCookies) == 0 {
+		t.Fatal("unlock did not set a page password cookie")
+	}
+
+	openedRequest := httptest.NewRequest(http.MethodGet, "http://localhost:8080/passport/one", nil)
+	openedRequest.AddCookie(unlockCookies[0])
+	openedResponse := httptest.NewRecorder()
+	application.route(openedResponse, openedRequest)
+	if openedResponse.Code != http.StatusOK {
+		t.Fatalf("opened status = %d, want %d, body=%q", openedResponse.Code, http.StatusOK, openedResponse.Body.String())
+	}
+	if !strings.Contains(openedResponse.Body.String(), "nested static secret") {
+		t.Fatalf("opened protected page missing content: %s", openedResponse.Body.String())
+	}
+
+	siblingRequest := httptest.NewRequest(http.MethodGet, "http://localhost:8080/passports", nil)
+	siblingResponse := httptest.NewRecorder()
+	application.route(siblingResponse, siblingRequest)
+	if siblingResponse.Code != http.StatusOK || !strings.Contains(siblingResponse.Body.String(), "sibling static public") {
+		t.Fatalf("sibling response = %d %q, want public sibling content", siblingResponse.Code, siblingResponse.Body.String())
+	}
+}
+
+func TestGuestProtectedStaticRouteUsesPrefixFileWithoutDatabase(t *testing.T) {
+	storagePath := t.TempDir()
+	application := &App{db: panicSQLExecutor{t: t}, storagePath: storagePath}
+	application.writePublishedStaticHTML("localhost", "/passport/one", "<html><body>nested static secret</body></html>")
+	application.writePublishedStaticHTML("localhost", "/public", "<html><body>public static page</body></html>")
+
+	prefixFilePath := application.pagePasswordPrefixFilePath("localhost")
+	if err := os.MkdirAll(filepath.Dir(prefixFilePath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	rule := PagePasswordRule{Domain: "localhost", Path: "/passport", PasswordHash: pagePasswordHash("secret")}
+	if err := os.WriteFile(prefixFilePath, []byte(rule.Path+"\t"+rule.PasswordHash+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	protectedRequest := httptest.NewRequest(http.MethodGet, "http://localhost:8080/passport/one", nil)
+	protectedResponse := httptest.NewRecorder()
+	application.route(protectedResponse, protectedRequest)
+	if protectedResponse.Code != http.StatusUnauthorized {
+		t.Fatalf("protected status = %d, want %d, body=%q", protectedResponse.Code, http.StatusUnauthorized, protectedResponse.Body.String())
+	}
+	if strings.Contains(protectedResponse.Body.String(), "nested static secret") {
+		t.Fatalf("protected page leaked static content: %s", protectedResponse.Body.String())
+	}
+
+	openedRequest := httptest.NewRequest(http.MethodGet, "http://localhost:8080/passport/one", nil)
+	openedRequest.AddCookie(&http.Cookie{Name: pagePasswordCookieName(rule.Domain, rule.Path), Value: pagePasswordSessionToken(rule)})
+	openedResponse := httptest.NewRecorder()
+	application.route(openedResponse, openedRequest)
+	if openedResponse.Code != http.StatusOK {
+		t.Fatalf("opened status = %d, want %d, body=%q", openedResponse.Code, http.StatusOK, openedResponse.Body.String())
+	}
+	if !strings.Contains(openedResponse.Body.String(), "nested static secret") {
+		t.Fatalf("opened protected page missing content: %s", openedResponse.Body.String())
+	}
+
+	publicRequest := httptest.NewRequest(http.MethodGet, "http://localhost:8080/public", nil)
+	publicResponse := httptest.NewRecorder()
+	application.route(publicResponse, publicRequest)
+	if publicResponse.Code != http.StatusOK || !strings.Contains(publicResponse.Body.String(), "public static page") {
+		t.Fatalf("public response = %d %q, want public static content", publicResponse.Code, publicResponse.Body.String())
+	}
+}
+
+func TestPagePasswordProtectionCanBeAddedAndRemovedFromMenuAction(t *testing.T) {
+	application, rawDB := newTestApplication(t)
+	if _, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "admin@example.com", "old"); err != nil {
+		t.Fatalf("insert user: %v", err)
+	}
+	if _, err := rawDB.Exec(`INSERT INTO published_pages(domain,path,title,html) VALUES(?,?,?,?)`, "localhost", "/docs", "Docs", "<html><body>docs secret</body></html>"); err != nil {
+		t.Fatalf("insert page: %v", err)
+	}
+
+	form := url.Values{}
+	form.Set("password", "secret")
+	protectRequest := httptest.NewRequest(http.MethodPost, "http://localhost:8080/docs?page_password=protect", strings.NewReader(form.Encode()))
+	protectRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	protectRequest.AddCookie(newAdminSessionCookie(t, application, "admin@example.com"))
+	protectResponse := httptest.NewRecorder()
+	application.route(protectResponse, protectRequest)
+	if protectResponse.Code != http.StatusFound {
+		t.Fatalf("protect status = %d, want %d", protectResponse.Code, http.StatusFound)
+	}
+	if !application.pagePasswordRuleExists(context.Background(), "localhost", "/docs") {
+		t.Fatal("protect action did not create page password rule")
+	}
+
+	removeRequest := httptest.NewRequest(http.MethodPost, "http://localhost:8080/docs?page_password=remove", nil)
+	removeRequest.AddCookie(newAdminSessionCookie(t, application, "admin@example.com"))
+	removeResponse := httptest.NewRecorder()
+	application.route(removeResponse, removeRequest)
+	if removeResponse.Code != http.StatusFound {
+		t.Fatalf("remove status = %d, want %d", removeResponse.Code, http.StatusFound)
+	}
+	if application.pagePasswordRuleExists(context.Background(), "localhost", "/docs") {
+		t.Fatal("remove action left page password rule in place")
+	}
+}
+
+func TestPagePasswordFailedAttemptsEscalateToIPBlock(t *testing.T) {
+	application, _ := newTestApplication(t)
+	application.setPagePasswordRule(context.Background(), "localhost", "/secret", "secret")
+
+	for attemptIndex := 1; attemptIndex <= 4; attemptIndex++ {
+		form := url.Values{}
+		form.Set("password", "wrong")
+		request := httptest.NewRequest(http.MethodPost, "http://localhost:8080/secret?page_password_unlock", strings.NewReader(form.Encode()))
+		request.RemoteAddr = "198.51.100.30:1234"
+		request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		response := httptest.NewRecorder()
+
+		application.route(response, request)
+		expectedStatus := http.StatusUnauthorized
+		if attemptIndex == 4 {
+			expectedStatus = http.StatusTooManyRequests
+		}
+		if response.Code != expectedStatus {
+			t.Fatalf("attempt %d status = %d, want %d, body=%q", attemptIndex, response.Code, expectedStatus, response.Body.String())
+		}
+	}
+
+	form := url.Values{}
+	form.Set("password", "secret")
+	blockedRequest := httptest.NewRequest(http.MethodPost, "http://localhost:8080/secret?page_password_unlock", strings.NewReader(form.Encode()))
+	blockedRequest.RemoteAddr = "198.51.100.30:1234"
+	blockedRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	blockedResponse := httptest.NewRecorder()
+	application.route(blockedResponse, blockedRequest)
+	if blockedResponse.Code != http.StatusTooManyRequests {
+		t.Fatalf("blocked status = %d, want %d, body=%q", blockedResponse.Code, http.StatusTooManyRequests, blockedResponse.Body.String())
+	}
+	if blockedResponse.Header().Get("Retry-After") == "" {
+		t.Fatal("blocked password response did not set Retry-After")
+	}
+	if len(blockedResponse.Result().Cookies()) != 0 {
+		t.Fatalf("blocked password response set cookies: %#v", blockedResponse.Result().Cookies())
 	}
 }
 
