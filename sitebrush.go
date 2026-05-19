@@ -84,6 +84,18 @@ type App struct {
 	guestStaticHTMLCache  chan guestStaticHTMLCacheRequest
 	geoIP                 *geoip.Resolver
 	domainLogEvents       chan domainLogEvent
+	autoCertGuard         chan autoCertGuardRequest
+}
+
+type autoCertGuardRequest struct {
+	action   string
+	domain   string
+	response chan autoCertGuardResponse
+}
+
+type autoCertGuardResponse struct {
+	allowed bool
+	reason  string
 }
 
 type guestStaticHTMLCacheRequest struct {
@@ -633,11 +645,14 @@ type directoryListingEntry struct {
 }
 
 type DomainAutomaticSSLSetting struct {
-	Domain           string
-	Enabled          bool
-	ManuallyDisabled bool
-	Available        bool
-	LastCheckedAt    string
+	Domain            string
+	Enabled           bool
+	ManuallyDisabled  bool
+	Available         bool
+	LastCheckedAt     string
+	LastFailedAt      string
+	LastFailureReason string
+	RetryAfter        string
 }
 
 type DomainAutomaticSSLStatus struct {
@@ -2771,6 +2786,7 @@ func main() {
 		}
 	}()
 	application.db = siteDatabaseRouter
+	application.ensureAutoCertGuard()
 	application.startDomainLogWorker(context.Background())
 	application.startAnalyticsWorkers(context.Background())
 
@@ -2932,12 +2948,42 @@ func (a *App) autoCertTLSConfig(certificateManager *autocert.Manager) *tls.Confi
 			certificateDomain = "localhost"
 		}
 		remoteAddress := tlsClientRemoteAddress(clientHello)
-		a.logDomainEvent(certificateDomain, "AUTOCERT certificate requested server_name=%s remote=%s", clientHello.ServerName, remoteAddress)
+		now := time.Now()
+		cachedCertificate, cachedExpiresAt, cachedCertificateOK := a.autoCertCachedCertificate(certificateDomain, now, 0)
+		if cachedCertificateOK && !cachedExpiresAt.Before(now.Add(automaticSSLCertificateRenewBefore)) {
+			a.logDomainEvent(certificateDomain, "AUTOCERT certificate loaded from cache server_name=%s remote=%s expires_at=%s", clientHello.ServerName, remoteAddress, cachedExpiresAt.Format(time.RFC3339))
+			return cachedCertificate, nil
+		}
+		if err := a.autoCertRetryDelayError(contextWithDomain(context.Background(), certificateDomain), certificateDomain, now); err != nil {
+			if cachedCertificateOK {
+				a.logDomainEvent(certificateDomain, "AUTOCERT renewal delayed; serving cached certificate server_name=%s remote=%s expires_at=%s error=%v", clientHello.ServerName, remoteAddress, cachedExpiresAt.Format(time.RFC3339), err)
+				return cachedCertificate, nil
+			}
+			a.logDomainEvent(certificateDomain, "AUTOCERT certificate request delayed server_name=%s remote=%s error=%v", clientHello.ServerName, remoteAddress, err)
+			return nil, err
+		}
+		if err := a.beginAutoCertIssuance(context.Background(), certificateDomain); err != nil {
+			if cachedCertificateOK {
+				a.logDomainEvent(certificateDomain, "AUTOCERT renewal skipped; serving cached certificate server_name=%s remote=%s expires_at=%s error=%v", clientHello.ServerName, remoteAddress, cachedExpiresAt.Format(time.RFC3339), err)
+				return cachedCertificate, nil
+			}
+			a.logDomainEvent(certificateDomain, "AUTOCERT certificate request skipped server_name=%s remote=%s error=%v", clientHello.ServerName, remoteAddress, err)
+			return nil, err
+		}
+		defer a.finishAutoCertIssuance(certificateDomain)
+		a.logDomainEvent(certificateDomain, "AUTOCERT certificate request started server_name=%s remote=%s", clientHello.ServerName, remoteAddress)
 		certificate, err := originalGetCertificate(clientHello)
 		if err != nil {
+			retryDelay := automaticSSLRetryDelayForCertificateError(err)
+			a.recordDomainAutomaticSSLFailure(contextWithDomain(context.Background(), certificateDomain), certificateDomain, fmt.Sprintf("certificate request failed: %v", err), retryDelay)
+			if cachedCertificateOK {
+				a.logDomainEvent(certificateDomain, "AUTOCERT certificate request failed; serving cached certificate server_name=%s remote=%s expires_at=%s error=%v", clientHello.ServerName, remoteAddress, cachedExpiresAt.Format(time.RFC3339), err)
+				return cachedCertificate, nil
+			}
 			a.logDomainEvent(certificateDomain, "AUTOCERT certificate request failed server_name=%s remote=%s error=%v", clientHello.ServerName, remoteAddress, err)
 			return nil, err
 		}
+		a.clearDomainAutomaticSSLFailure(contextWithDomain(context.Background(), certificateDomain), certificateDomain)
 		a.logDomainEvent(certificateDomain, "AUTOCERT certificate ready server_name=%s remote=%s", clientHello.ServerName, remoteAddress)
 		return certificate, nil
 	}
@@ -2949,6 +2995,64 @@ func tlsClientRemoteAddress(clientHello *tls.ClientHelloInfo) string {
 		return ""
 	}
 	return clientHello.Conn.RemoteAddr().String()
+}
+
+func (a *App) ensureAutoCertGuard() {
+	if a.autoCertGuard != nil {
+		return
+	}
+	autoCertGuard := make(chan autoCertGuardRequest, 128)
+	a.autoCertGuard = autoCertGuard
+	go runAutoCertGuard(autoCertGuard)
+}
+
+func runAutoCertGuard(requests <-chan autoCertGuardRequest) {
+	inFlightDomains := make(map[string]bool)
+	for request := range requests {
+		switch request.action {
+		case "begin":
+			if inFlightDomains[request.domain] {
+				request.response <- autoCertGuardResponse{allowed: false, reason: "automatic SSL request already in progress for this domain"}
+				continue
+			}
+			inFlightDomains[request.domain] = true
+			request.response <- autoCertGuardResponse{allowed: true}
+		case "finish":
+			delete(inFlightDomains, request.domain)
+		}
+	}
+}
+
+func (a *App) beginAutoCertIssuance(ctx context.Context, domain string) error {
+	certificateDomain := normalizeDomainName(domain)
+	if certificateDomain == "" {
+		return fmt.Errorf("invalid certificate domain %q", domain)
+	}
+	a.ensureAutoCertGuard()
+	response := make(chan autoCertGuardResponse, 1)
+	request := autoCertGuardRequest{action: "begin", domain: certificateDomain, response: response}
+	select {
+	case a.autoCertGuard <- request:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	select {
+	case guardResponse := <-response:
+		if guardResponse.allowed {
+			return nil
+		}
+		return fmt.Errorf("%s", guardResponse.reason)
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (a *App) finishAutoCertIssuance(domain string) {
+	certificateDomain := normalizeDomainName(domain)
+	if certificateDomain == "" || a.autoCertGuard == nil {
+		return
+	}
+	a.autoCertGuard <- autoCertGuardRequest{action: "finish", domain: certificateDomain}
 }
 
 func (a *App) migrate(ctx context.Context) error {
@@ -2964,7 +3068,7 @@ func (a *App) migrate(ctx context.Context) error {
 		`CREATE TABLE IF NOT EXISTS revisions(id INTEGER PRIMARY KEY AUTOINCREMENT,domain TEXT,page_path TEXT,html TEXT,created_at TEXT,is_active INTEGER DEFAULT 1);`,
 		`CREATE TABLE IF NOT EXISTS domain_aliases(primary_domain TEXT,alias_domain TEXT UNIQUE,verification_token TEXT,is_verified INTEGER DEFAULT 0,dns_a_ok INTEGER DEFAULT 0,is_selected INTEGER DEFAULT 0,last_checked_at TEXT);`,
 		`CREATE TABLE IF NOT EXISTS domain_states(domain TEXT PRIMARY KEY,is_frozen INTEGER DEFAULT 0);`,
-		`CREATE TABLE IF NOT EXISTS domain_ssl_settings(domain TEXT PRIMARY KEY,auto_ssl_enabled INTEGER DEFAULT 0,manually_disabled INTEGER DEFAULT 0,last_checked_at TEXT);`,
+		`CREATE TABLE IF NOT EXISTS domain_ssl_settings(domain TEXT PRIMARY KEY,auto_ssl_enabled INTEGER DEFAULT 0,manually_disabled INTEGER DEFAULT 0,last_checked_at TEXT,last_failed_at TEXT,last_failure_reason TEXT,retry_after TEXT);`,
 		`CREATE TABLE IF NOT EXISTS domain_chroot_locations(domain TEXT,url_path TEXT,directory_path TEXT,updated_at TEXT,PRIMARY KEY(domain,url_path));`,
 		`CREATE TABLE IF NOT EXISTS domain_backup_tokens(domain TEXT PRIMARY KEY,token TEXT,updated_at TEXT);`,
 		`CREATE TABLE IF NOT EXISTS file_access_rules(domain TEXT,file_name TEXT,access_mode TEXT,token TEXT,expires_at TEXT,single_use_left INTEGER DEFAULT 0,token_use_count INTEGER DEFAULT 0,PRIMARY KEY(domain,file_name));`,
@@ -2991,6 +3095,9 @@ func (a *App) migrate(ctx context.Context) error {
 	_, _ = a.db.ExecContext(ctx, `ALTER TABLE domain_ssl_settings ADD COLUMN auto_ssl_enabled INTEGER DEFAULT 0`)
 	_, _ = a.db.ExecContext(ctx, `ALTER TABLE domain_ssl_settings ADD COLUMN manually_disabled INTEGER DEFAULT 0`)
 	_, _ = a.db.ExecContext(ctx, `ALTER TABLE domain_ssl_settings ADD COLUMN last_checked_at TEXT`)
+	_, _ = a.db.ExecContext(ctx, `ALTER TABLE domain_ssl_settings ADD COLUMN last_failed_at TEXT`)
+	_, _ = a.db.ExecContext(ctx, `ALTER TABLE domain_ssl_settings ADD COLUMN last_failure_reason TEXT`)
+	_, _ = a.db.ExecContext(ctx, `ALTER TABLE domain_ssl_settings ADD COLUMN retry_after TEXT`)
 	_, _ = a.db.ExecContext(ctx, `ALTER TABLE file_access_rules ADD COLUMN token_use_count INTEGER DEFAULT 0`)
 	_, _ = a.db.ExecContext(ctx, `ALTER TABLE file_metadata ADD COLUMN download_count INTEGER DEFAULT 0`)
 	_, _ = a.db.ExecContext(ctx, `ALTER TABLE analytics_events ADD COLUMN geo_country_code TEXT`)
@@ -3056,8 +3163,8 @@ SELECT 'localhost',page_bytes,published_page_bytes,revision_bytes,file_bytes,pub
 	domainStatesMergeQuery := `INSERT OR IGNORE INTO domain_states(domain,is_frozen)
 SELECT 'localhost',is_frozen FROM domain_states WHERE domain IN ` + placeholders
 	_, _ = a.db.ExecContext(ctx, domainStatesMergeQuery, sqlArguments...)
-	domainSSLSettingsMergeQuery := `INSERT OR IGNORE INTO domain_ssl_settings(domain,auto_ssl_enabled,manually_disabled,last_checked_at)
-SELECT 'localhost',auto_ssl_enabled,manually_disabled,last_checked_at FROM domain_ssl_settings WHERE domain IN ` + placeholders
+	domainSSLSettingsMergeQuery := `INSERT OR IGNORE INTO domain_ssl_settings(domain,auto_ssl_enabled,manually_disabled,last_checked_at,last_failed_at,last_failure_reason,retry_after)
+SELECT 'localhost',auto_ssl_enabled,manually_disabled,last_checked_at,last_failed_at,last_failure_reason,retry_after FROM domain_ssl_settings WHERE domain IN ` + placeholders
 	_, _ = a.db.ExecContext(ctx, domainSSLSettingsMergeQuery, sqlArguments...)
 
 	_, _ = a.db.ExecContext(ctx, `UPDATE revisions SET domain='localhost' WHERE domain IN `+placeholders, sqlArguments...)
@@ -3082,23 +3189,35 @@ func (a *App) autoCertHostPolicy(ctx context.Context, host string) error {
 		a.logDomainEvent("localhost", "AUTOCERT host policy rejected host=%s error=%v", host, err)
 		return err
 	}
+	domainContext := contextWithDomain(ctx, certificateDomain)
 	if !a.automaticSSLAvailable {
 		err := fmt.Errorf("automatic SSL is unavailable because Sitebrush is not listening on ports 80 and 443")
 		a.logDomainEvent(certificateDomain, "AUTOCERT host policy rejected host=%s error=%v", host, err)
 		return err
 	}
-	setting := a.domainAutomaticSSLSetting(ctx, certificateDomain)
+	setting := a.domainAutomaticSSLSetting(domainContext, certificateDomain)
 	if setting.ManuallyDisabled {
 		err := fmt.Errorf("automatic SSL is manually disabled for %q", certificateDomain)
 		a.logDomainEvent(certificateDomain, "AUTOCERT host policy rejected host=%s error=%v", host, err)
 		return err
 	}
-	if a.autoCertCachedCertificateValid(certificateDomain, time.Now()) {
-		a.logDomainEvent(certificateDomain, "AUTOCERT host policy accepted host=%s from existing certificate cache", host)
+	now := time.Now()
+	if a.autoCertCachedCertificateReusable(certificateDomain, now) {
+		a.logDomainEvent(certificateDomain, "AUTOCERT host policy accepted host=%s from existing certificate cache with more than %s remaining", host, automaticSSLCertificateRenewBefore)
 		return nil
 	}
-	if !a.domainIsAutomaticSSLCandidate(ctx, certificateDomain) {
+	if err := autoCertDomainEligibilityError(certificateDomain); err != nil {
+		a.recordDomainAutomaticSSLFailure(domainContext, certificateDomain, err.Error(), automaticSSLRetryDelayEligibility)
+		a.logDomainEvent(certificateDomain, "AUTOCERT host policy rejected host=%s error=%v", host, err)
+		return err
+	}
+	if err := a.autoCertRetryDelayError(domainContext, certificateDomain, now); err != nil {
+		a.logDomainEvent(certificateDomain, "AUTOCERT host policy rejected host=%s error=%v", host, err)
+		return err
+	}
+	if !a.domainIsAutomaticSSLCandidate(domainContext, certificateDomain) {
 		err := fmt.Errorf("automatic SSL domain %q is not managed by Sitebrush", certificateDomain)
+		a.recordDomainAutomaticSSLFailure(domainContext, certificateDomain, err.Error(), automaticSSLRetryDelayEligibility)
 		a.logDomainEvent(certificateDomain, "AUTOCERT host policy rejected host=%s error=%v", host, err)
 		return err
 	}
@@ -3107,20 +3226,35 @@ func (a *App) autoCertHostPolicy(ctx context.Context, host string) error {
 		if err == nil {
 			err = errors.New("no public server IP addresses detected")
 		}
+		a.recordDomainAutomaticSSLFailure(domainContext, certificateDomain, err.Error(), automaticSSLRetryDelayDNS)
 		a.logDomainEvent(certificateDomain, "AUTOCERT host policy rejected host=%s error=%v", host, err)
 		return err
 	}
-	setting = a.refreshDomainAutomaticSSL(ctx, certificateDomain, serverIPs)
+	setting, err = a.precheckDomainAutomaticSSL(domainContext, certificateDomain, serverIPs)
+	if err != nil {
+		a.logDomainEvent(certificateDomain, "AUTOCERT host policy rejected host=%s error=%v", host, err)
+		return err
+	}
 	if !setting.Enabled || setting.ManuallyDisabled {
 		err := fmt.Errorf("automatic SSL DNS check failed for %q", certificateDomain)
+		a.recordDomainAutomaticSSLFailure(domainContext, certificateDomain, err.Error(), automaticSSLRetryDelayDNS)
 		a.logDomainEvent(certificateDomain, "AUTOCERT host policy rejected host=%s error=%v", host, err)
 		return err
 	}
+	a.clearDomainAutomaticSSLFailure(domainContext, certificateDomain)
 	a.logDomainEvent(certificateDomain, "AUTOCERT host policy accepted host=%s", host)
 	return nil
 }
 
 func (a *App) autoCertCachedCertificateValid(domain string, now time.Time) bool {
+	return a.autoCertCachedCertificateValidForDuration(domain, now, 0)
+}
+
+func (a *App) autoCertCachedCertificateReusable(domain string, now time.Time) bool {
+	return a.autoCertCachedCertificateValidForDuration(domain, now, automaticSSLCertificateRenewBefore)
+}
+
+func (a *App) autoCertCachedCertificateValidForDuration(domain string, now time.Time, minimumRemaining time.Duration) bool {
 	certificateDomain := normalizeDomainName(domain)
 	if certificateDomain == "" {
 		return false
@@ -3132,24 +3266,54 @@ func (a *App) autoCertCachedCertificateValid(domain string, now time.Time) bool 
 		if err != nil {
 			continue
 		}
-		if cachedCertificatePEMValidForDomain(cacheBytes, certificateDomain, now) {
+		if _, ok := cachedCertificatePEMExpiresForDomain(cacheBytes, certificateDomain, now, minimumRemaining); ok {
 			return true
 		}
 	}
 	return false
 }
 
-func cachedCertificatePEMValidForDomain(certificateBytes []byte, domain string, now time.Time) bool {
+func (a *App) autoCertCachedCertificate(domain string, now time.Time, minimumRemaining time.Duration) (*tls.Certificate, time.Time, bool) {
 	certificateDomain := normalizeDomainName(domain)
 	if certificateDomain == "" {
-		return false
+		return nil, time.Time{}, false
+	}
+	certificateCacheDir := filepath.Join(a.storageRootDir(), "letsencrypt")
+	cacheNames := []string{certificateDomain, certificateDomain + "+rsa"}
+	for _, cacheName := range cacheNames {
+		cacheBytes, err := os.ReadFile(filepath.Join(certificateCacheDir, cacheName))
+		if err != nil {
+			continue
+		}
+		expiresAt, ok := cachedCertificatePEMExpiresForDomain(cacheBytes, certificateDomain, now, minimumRemaining)
+		if !ok {
+			continue
+		}
+		certificate, err := tls.X509KeyPair(cacheBytes, cacheBytes)
+		if err != nil {
+			continue
+		}
+		return &certificate, expiresAt, true
+	}
+	return nil, time.Time{}, false
+}
+
+func cachedCertificatePEMValidForDomain(certificateBytes []byte, domain string, now time.Time) bool {
+	_, ok := cachedCertificatePEMExpiresForDomain(certificateBytes, domain, now, 0)
+	return ok
+}
+
+func cachedCertificatePEMExpiresForDomain(certificateBytes []byte, domain string, now time.Time, minimumRemaining time.Duration) (time.Time, bool) {
+	certificateDomain := normalizeDomainName(domain)
+	if certificateDomain == "" {
+		return time.Time{}, false
 	}
 	remainingBytes := certificateBytes
 	for {
 		var pemBlock *pem.Block
 		pemBlock, remainingBytes = pem.Decode(remainingBytes)
 		if pemBlock == nil {
-			return false
+			return time.Time{}, false
 		}
 		if pemBlock.Type != "CERTIFICATE" {
 			continue
@@ -3161,8 +3325,11 @@ func cachedCertificatePEMValidForDomain(certificateBytes []byte, domain string, 
 		if now.Before(certificate.NotBefore) || !now.Before(certificate.NotAfter) {
 			continue
 		}
+		if minimumRemaining > 0 && certificate.NotAfter.Before(now.Add(minimumRemaining)) {
+			continue
+		}
 		if certificate.VerifyHostname(certificateDomain) == nil {
-			return true
+			return certificate.NotAfter, true
 		}
 	}
 }
@@ -9911,6 +10078,11 @@ var lookupServerInterfaceIPs = detectServerInterfaceIPs
 var exchangeDNSMessage = exchangeDNSMessageWithServer
 
 const automaticSSLRefreshInterval = time.Hour
+const automaticSSLCertificateRenewBefore = 10 * 24 * time.Hour
+const automaticSSLRetryDelayEligibility = 24 * time.Hour
+const automaticSSLRetryDelayDNS = 6 * time.Hour
+const automaticSSLRetryDelayChallenge = time.Hour
+const automaticSSLRetryDelayACME = 12 * time.Hour
 
 const authoritativeDNSMaxDepth = 16
 const authoritativeDNSTimeout = 3 * time.Second
@@ -11034,6 +11206,51 @@ func domainARecordMatchesAny(aliasDomain string, serverIPs []net.IP) bool {
 	return false
 }
 
+func domainIPRecordsMatchAny(ipRecords []net.IP, serverIPs []net.IP) bool {
+	if len(ipRecords) == 0 || len(serverIPs) == 0 {
+		return false
+	}
+	for _, ipRecord := range ipRecords {
+		for _, serverIP := range serverIPs {
+			if serverIP != nil && ipRecord != nil && ipRecord.Equal(serverIP) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func publicAutoCertIPRecords(ipRecords []net.IP) []net.IP {
+	publicRecords := make([]net.IP, 0, len(ipRecords))
+	for _, ipRecord := range ipRecords {
+		if ipRecord == nil {
+			continue
+		}
+		if !ipRecord.IsGlobalUnicast() || ipRecord.IsPrivate() || ipRecord.IsLoopback() || ipRecord.IsLinkLocalUnicast() || ipRecord.IsLinkLocalMulticast() || ipRecord.IsUnspecified() {
+			continue
+		}
+		publicRecords = append(publicRecords, ipRecord)
+	}
+	return publicRecords
+}
+
+func autoCertDomainEligibilityError(domain string) error {
+	certificateDomain := normalizeDomainName(domain)
+	if certificateDomain == "" {
+		return fmt.Errorf("automatic SSL domain %q is not a valid public hostname", domain)
+	}
+	domainParts := strings.Split(certificateDomain, ".")
+	if len(domainParts) < 2 {
+		return fmt.Errorf("automatic SSL domain %q is not a public hostname", certificateDomain)
+	}
+	lastDomainPart := domainParts[len(domainParts)-1]
+	switch lastDomainPart {
+	case "local", "localhost", "internal", "lan", "home", "corp", "private", "test", "invalid", "example":
+		return fmt.Errorf("automatic SSL domain %q uses a private or reserved suffix", certificateDomain)
+	}
+	return nil
+}
+
 func (a *App) startAutomaticSSLRefreshWorker(ctx context.Context) {
 	go func() {
 		a.refreshAutomaticSSLDomains(ctx)
@@ -11119,6 +11336,55 @@ UNION SELECT domain FROM domain_ssl_settings WHERE domain=?
 	return err == nil && domainCount > 0
 }
 
+func (a *App) precheckDomainAutomaticSSL(ctx context.Context, domain string, serverIPs []net.IP) (DomainAutomaticSSLSetting, error) {
+	setting := a.domainAutomaticSSLSetting(ctx, domain)
+	if setting.Domain == "" {
+		return setting, fmt.Errorf("automatic SSL domain %q is invalid", domain)
+	}
+	setting.Available = a.automaticSSLAvailable
+	if !setting.Available {
+		return setting, fmt.Errorf("automatic SSL is unavailable because Sitebrush is not listening on ports 80 and 443")
+	}
+	if setting.ManuallyDisabled {
+		return setting, fmt.Errorf("automatic SSL is manually disabled for %q", setting.Domain)
+	}
+	ipRecords, err := lookupIPRecords(setting.Domain)
+	if err != nil {
+		setting.Enabled = false
+		setting.LastCheckedAt = time.Now().UTC().Format(time.RFC3339)
+		a.upsertDomainAutomaticSSLSetting(ctx, setting)
+		a.recordDomainAutomaticSSLFailure(ctx, setting.Domain, fmt.Sprintf("DNS lookup failed: %v", err), automaticSSLRetryDelayDNS)
+		return setting, fmt.Errorf("automatic SSL DNS lookup failed for %q: %w", setting.Domain, err)
+	}
+	publicRecords := publicAutoCertIPRecords(ipRecords)
+	if len(publicRecords) == 0 {
+		setting.Enabled = false
+		setting.LastCheckedAt = time.Now().UTC().Format(time.RFC3339)
+		a.upsertDomainAutomaticSSLSetting(ctx, setting)
+		err := fmt.Errorf("automatic SSL domain %q resolves only to private or non-public addresses", setting.Domain)
+		a.recordDomainAutomaticSSLFailure(ctx, setting.Domain, err.Error(), automaticSSLRetryDelayEligibility)
+		return setting, err
+	}
+	setting.Enabled = domainIPRecordsMatchAny(publicRecords, serverIPs)
+	setting.LastCheckedAt = time.Now().UTC().Format(time.RFC3339)
+	a.upsertDomainAutomaticSSLSetting(ctx, setting)
+	if domainFromContext(ctx) != setting.Domain {
+		a.upsertDomainAutomaticSSLSetting(contextWithDomain(ctx, setting.Domain), setting)
+	}
+	a.logDomainEvent(setting.Domain, "AUTOCERT DNS precheck domain=%s matched=%t dns_ips=%s server_ips=%s", setting.Domain, setting.Enabled, ipListForLog(publicRecords), ipListForLog(serverIPs))
+	if !setting.Enabled {
+		err := fmt.Errorf("automatic SSL domain %q does not point to this server", setting.Domain)
+		a.recordDomainAutomaticSSLFailure(ctx, setting.Domain, err.Error(), automaticSSLRetryDelayDNS)
+		return setting, err
+	}
+	if !a.automaticSSLAvailable {
+		err := fmt.Errorf("automatic SSL challenge endpoint is unavailable for %q", setting.Domain)
+		a.recordDomainAutomaticSSLFailure(ctx, setting.Domain, err.Error(), automaticSSLRetryDelayChallenge)
+		return setting, err
+	}
+	return setting, nil
+}
+
 func (a *App) refreshDomainAutomaticSSL(ctx context.Context, domain string, serverIPs []net.IP) DomainAutomaticSSLSetting {
 	setting := a.domainAutomaticSSLSetting(ctx, domain)
 	if setting.Domain == "" {
@@ -11166,11 +11432,17 @@ func (a *App) domainAutomaticSSLSetting(ctx context.Context, domain string) Doma
 	var enabled int
 	var manuallyDisabled int
 	var lastCheckedAt sql.NullString
-	err := a.db.QueryRowContext(ctx, `SELECT auto_ssl_enabled,manually_disabled,last_checked_at FROM domain_ssl_settings WHERE domain=?`, certificateDomain).Scan(&enabled, &manuallyDisabled, &lastCheckedAt)
+	var lastFailedAt sql.NullString
+	var lastFailureReason sql.NullString
+	var retryAfter sql.NullString
+	err := a.db.QueryRowContext(ctx, `SELECT auto_ssl_enabled,manually_disabled,last_checked_at,last_failed_at,last_failure_reason,retry_after FROM domain_ssl_settings WHERE domain=?`, certificateDomain).Scan(&enabled, &manuallyDisabled, &lastCheckedAt, &lastFailedAt, &lastFailureReason, &retryAfter)
 	if err == nil {
 		setting.Enabled = enabled == 1
 		setting.ManuallyDisabled = manuallyDisabled == 1
 		setting.LastCheckedAt = lastCheckedAt.String
+		setting.LastFailedAt = lastFailedAt.String
+		setting.LastFailureReason = lastFailureReason.String
+		setting.RetryAfter = retryAfter.String
 	}
 	return setting
 }
@@ -11255,6 +11527,69 @@ func (a *App) upsertDomainAutomaticSSLSetting(ctx context.Context, setting Domai
 VALUES(?,?,?,?)
 ON CONFLICT(domain) DO UPDATE SET auto_ssl_enabled=excluded.auto_ssl_enabled,manually_disabled=excluded.manually_disabled,last_checked_at=excluded.last_checked_at`,
 		setting.Domain, boolToInt(setting.Enabled), boolToInt(setting.ManuallyDisabled), setting.LastCheckedAt)
+}
+
+func (a *App) recordDomainAutomaticSSLFailure(ctx context.Context, domain string, reason string, retryDelay time.Duration) {
+	certificateDomain := normalizeDomainName(domain)
+	if certificateDomain == "" {
+		return
+	}
+	now := time.Now().UTC()
+	retryAfter := now.Add(retryDelay)
+	_, _ = a.db.ExecContext(ctx, `INSERT INTO domain_ssl_settings(domain,auto_ssl_enabled,manually_disabled,last_checked_at,last_failed_at,last_failure_reason,retry_after)
+VALUES(?,?,?,?,?,?,?)
+ON CONFLICT(domain) DO UPDATE SET last_checked_at=excluded.last_checked_at,last_failed_at=excluded.last_failed_at,last_failure_reason=excluded.last_failure_reason,retry_after=excluded.retry_after`,
+		certificateDomain, 0, 0, now.Format(time.RFC3339), now.Format(time.RFC3339), strings.TrimSpace(reason), retryAfter.Format(time.RFC3339))
+	if domainFromContext(ctx) != certificateDomain {
+		_, _ = a.db.ExecContext(contextWithDomain(ctx, certificateDomain), `INSERT INTO domain_ssl_settings(domain,auto_ssl_enabled,manually_disabled,last_checked_at,last_failed_at,last_failure_reason,retry_after)
+VALUES(?,?,?,?,?,?,?)
+ON CONFLICT(domain) DO UPDATE SET last_checked_at=excluded.last_checked_at,last_failed_at=excluded.last_failed_at,last_failure_reason=excluded.last_failure_reason,retry_after=excluded.retry_after`,
+			certificateDomain, 0, 0, now.Format(time.RFC3339), now.Format(time.RFC3339), strings.TrimSpace(reason), retryAfter.Format(time.RFC3339))
+	}
+}
+
+func (a *App) clearDomainAutomaticSSLFailure(ctx context.Context, domain string) {
+	certificateDomain := normalizeDomainName(domain)
+	if certificateDomain == "" {
+		return
+	}
+	_, _ = a.db.ExecContext(ctx, `UPDATE domain_ssl_settings SET last_failed_at=NULL,last_failure_reason=NULL,retry_after=NULL WHERE domain=?`, certificateDomain)
+	if domainFromContext(ctx) != certificateDomain {
+		_, _ = a.db.ExecContext(contextWithDomain(ctx, certificateDomain), `UPDATE domain_ssl_settings SET last_failed_at=NULL,last_failure_reason=NULL,retry_after=NULL WHERE domain=?`, certificateDomain)
+	}
+}
+
+func (a *App) autoCertRetryDelayError(ctx context.Context, domain string, now time.Time) error {
+	setting := a.domainAutomaticSSLSetting(ctx, domain)
+	if strings.TrimSpace(setting.RetryAfter) == "" {
+		return nil
+	}
+	retryAfter, err := time.Parse(time.RFC3339, setting.RetryAfter)
+	if err != nil || !retryAfter.After(now) {
+		return nil
+	}
+	reason := strings.TrimSpace(setting.LastFailureReason)
+	if reason == "" {
+		reason = "previous automatic SSL attempt failed"
+	}
+	return fmt.Errorf("automatic SSL retry for %q delayed until %s: %s", setting.Domain, retryAfter.Format(time.RFC3339), reason)
+}
+
+func automaticSSLRetryDelayForCertificateError(err error) time.Duration {
+	if err == nil {
+		return automaticSSLRetryDelayACME
+	}
+	errorText := strings.ToLower(err.Error())
+	if strings.Contains(errorText, "dns") || strings.Contains(errorText, "does not point") || strings.Contains(errorText, "server ip") {
+		return automaticSSLRetryDelayDNS
+	}
+	if strings.Contains(errorText, "challenge") || strings.Contains(errorText, "ports 80 and 443") || strings.Contains(errorText, "not listening") {
+		return automaticSSLRetryDelayChallenge
+	}
+	if strings.Contains(errorText, "not managed") || strings.Contains(errorText, "invalid") || strings.Contains(errorText, "private") || strings.Contains(errorText, "reserved") || strings.Contains(errorText, "manually disabled") {
+		return automaticSSLRetryDelayEligibility
+	}
+	return automaticSSLRetryDelayACME
 }
 
 func (a *App) listDomainAliases(ctx context.Context, siteDomain string) ([]DomainAlias, error) {

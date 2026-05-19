@@ -4235,7 +4235,7 @@ func TestAutoCertHostPolicyRequiresAutomaticSSLSettingAndPorts(t *testing.T) {
 func TestAutoCertHostPolicyAllowsExistingCachedCertificateForUnlistedDomain(t *testing.T) {
 	application, _ := newTestApplication(t)
 	application.automaticSSLAvailable = true
-	writeCachedAutoCertForTest(t, application, "cached.example.com", time.Now().Add(-time.Hour), time.Now().Add(time.Hour))
+	writeCachedAutoCertForTest(t, application, "cached.example.com", time.Now().Add(-time.Hour), time.Now().Add(automaticSSLCertificateRenewBefore+time.Hour))
 
 	previousIPLookup := lookupIPRecords
 	previousExternalIPLookup := lookupServerExternalIP
@@ -4266,6 +4266,112 @@ func TestAutoCertHostPolicyAllowsExistingCachedCertificateForUnlistedDomain(t *t
 	if err := application.autoCertHostPolicy(context.Background(), "cached.example.com"); err == nil {
 		t.Fatal("autoCertHostPolicy accepted manually disabled cached certificate domain")
 	}
+}
+
+func TestAutoCertHostPolicyRechecksExpiringCachedCertificate(t *testing.T) {
+	application, rawDB := newTestApplication(t)
+	application.automaticSSLAvailable = true
+	writeCachedAutoCertForTest(t, application, "expiring.example.com", time.Now().Add(-time.Hour), time.Now().Add(time.Hour))
+	if _, err := rawDB.Exec(`INSERT INTO pages(domain,path,title,html,published) VALUES(?,?,?,?,1)`, "expiring.example.com", "/", "Home", "<h1>Home</h1>"); err != nil {
+		t.Fatalf("insert page: %v", err)
+	}
+
+	previousIPLookup := lookupIPRecords
+	previousExternalIPLookup := lookupServerExternalIP
+	previousInterfaceLookup := lookupServerInterfaceIPs
+	defer func() {
+		lookupIPRecords = previousIPLookup
+		lookupServerExternalIP = previousExternalIPLookup
+		lookupServerInterfaceIPs = previousInterfaceLookup
+	}()
+	lookupIPRecords = func(domain string) ([]net.IP, error) {
+		if domain == "expiring.example.com" {
+			return []net.IP{net.ParseIP("198.51.100.25")}, nil
+		}
+		return nil, os.ErrNotExist
+	}
+	lookupServerExternalIP = func(context.Context) (string, error) {
+		return "203.0.113.10", nil
+	}
+	lookupServerInterfaceIPs = func() ([]net.IP, error) {
+		return nil, nil
+	}
+
+	if err := application.autoCertHostPolicy(context.Background(), "expiring.example.com"); err == nil {
+		t.Fatal("autoCertHostPolicy accepted expiring cached certificate without fresh DNS match")
+	}
+	setting := application.domainAutomaticSSLSetting(context.Background(), "expiring.example.com")
+	if strings.TrimSpace(setting.LastFailureReason) == "" || strings.TrimSpace(setting.RetryAfter) == "" {
+		t.Fatalf("SSL failure state was not stored: %+v", setting)
+	}
+}
+
+func TestAutoCertHostPolicyRejectsPrivateDomainsBeforeDNS(t *testing.T) {
+	application, _ := newTestApplication(t)
+	application.automaticSSLAvailable = true
+	application.setDomainAutomaticSSLManual(context.Background(), "printer.local", true)
+
+	previousIPLookup := lookupIPRecords
+	previousExternalIPLookup := lookupServerExternalIP
+	defer func() {
+		lookupIPRecords = previousIPLookup
+		lookupServerExternalIP = previousExternalIPLookup
+	}()
+	lookupIPRecords = func(string) ([]net.IP, error) {
+		t.Fatal("private automatic SSL domain should not query DNS")
+		return nil, os.ErrInvalid
+	}
+	lookupServerExternalIP = func(context.Context) (string, error) {
+		t.Fatal("private automatic SSL domain should not detect external IP")
+		return "", os.ErrInvalid
+	}
+
+	if err := application.autoCertHostPolicy(context.Background(), "printer.local"); err == nil {
+		t.Fatal("autoCertHostPolicy accepted .local domain")
+	}
+}
+
+func TestAutoCertHostPolicyBackoffSkipsPrechecks(t *testing.T) {
+	application, rawDB := newTestApplication(t)
+	application.automaticSSLAvailable = true
+	if _, err := rawDB.Exec(`INSERT INTO pages(domain,path,title,html,published) VALUES(?,?,?,?,1)`, "backoff.example.com", "/", "Home", "<h1>Home</h1>"); err != nil {
+		t.Fatalf("insert page: %v", err)
+	}
+	application.recordDomainAutomaticSSLFailure(context.Background(), "backoff.example.com", "previous DNS failure", time.Hour)
+
+	previousIPLookup := lookupIPRecords
+	previousExternalIPLookup := lookupServerExternalIP
+	defer func() {
+		lookupIPRecords = previousIPLookup
+		lookupServerExternalIP = previousExternalIPLookup
+	}()
+	lookupIPRecords = func(string) ([]net.IP, error) {
+		t.Fatal("automatic SSL retry backoff should skip DNS")
+		return nil, os.ErrInvalid
+	}
+	lookupServerExternalIP = func(context.Context) (string, error) {
+		t.Fatal("automatic SSL retry backoff should skip external IP detection")
+		return "", os.ErrInvalid
+	}
+
+	if err := application.autoCertHostPolicy(context.Background(), "backoff.example.com"); err == nil {
+		t.Fatal("autoCertHostPolicy accepted domain during retry backoff")
+	}
+}
+
+func TestAutoCertIssuanceGuardRejectsDuplicateDomain(t *testing.T) {
+	application, _ := newTestApplication(t)
+	if err := application.beginAutoCertIssuance(context.Background(), "duplicate.example.com"); err != nil {
+		t.Fatalf("begin first issuance: %v", err)
+	}
+	if err := application.beginAutoCertIssuance(context.Background(), "duplicate.example.com"); err == nil {
+		t.Fatal("duplicate issuance was accepted while first request is in progress")
+	}
+	application.finishAutoCertIssuance("duplicate.example.com")
+	if err := application.beginAutoCertIssuance(context.Background(), "duplicate.example.com"); err != nil {
+		t.Fatalf("begin issuance after finish: %v", err)
+	}
+	application.finishAutoCertIssuance("duplicate.example.com")
 }
 
 func TestAutomaticSSLStatusViewExplainsReadyWaitingAndErrors(t *testing.T) {
