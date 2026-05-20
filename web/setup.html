@@ -19,8 +19,10 @@
     <h1 class="section-heading"><img src="/p/static/profile.png" class="section-icon" alt=""><a href="/">{{.Domain}}</a> <small class="text-muted">| {{index .T "setup_no_admin"}}</small></h1>
   </div>
   <p class="text-muted">{{index .T "setup_first_visitor"}}</p>
+  {{if .Status}}<div class="alert alert-info" style="max-width:520px;">{{.Status}}</div>{{end}}
   <form class="card card-body" method="post" action="?register" style="max-width:520px;">
-    <p><input type="email" name="email" class="form-control" placeholder="{{index .T "login_email_placeholder"}}" required></p>
+    <input type="hidden" name="return_path" value="{{.ReturnPath}}">
+    <p><input type="email" name="email" class="form-control" placeholder="{{index .T "login_email_placeholder"}}" value="{{.Email}}" required></p>
     <p><input type="password" name="password" class="form-control" placeholder="{{index .T "login_password_placeholder"}}" required></p>
     <div><button type="submit" class="btn btn-primary">{{index .T "setup_create_admin"}}</button></div>
   </form>

@@ -106,11 +106,44 @@ func newTestApplication(t *testing.T) (*App, *sql.DB) {
 	t.Cleanup(func() {
 		_ = rawDB.Close()
 	})
-	application := &App{db: rawDB, storagePath: storagePath, grabTracker: newGrabProgressTracker(), publishTracker: newPublishProgressTracker(), analyticsEvents: make(chan siteAnalyticsEvent, 1024)}
+	application := &App{db: rawDB, storagePath: storagePath, grabTracker: newGrabProgressTracker(), publishTracker: newPublishProgressTracker(), analyticsEvents: make(chan siteAnalyticsEvent, 1024), emailDelivery: make(chan emailDeliveryJob, emailDeliveryQueueSize)}
 	if err := application.migrate(context.Background()); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
 	return application, rawDB
+}
+
+func withEmailSPFAllowed(t *testing.T) {
+	t.Helper()
+	t.Setenv("SITEBRUSH_SMTP_FROM", "SiteBrush <sitebrush@example.com>")
+	previousTXTLookup := lookupTXTRecords
+	previousIPLookup := lookupIPRecords
+	previousExternalIPLookup := lookupServerExternalIP
+	previousInterfaceLookup := lookupServerInterfaceIPs
+	lookupTXTRecords = func(domain string) ([]string, error) {
+		if domain != "example.com" {
+			t.Fatalf("unexpected SPF lookup domain %q", domain)
+		}
+		return []string{"v=spf1 a mx ip4:203.0.113.10 ~all"}, nil
+	}
+	lookupIPRecords = func(domain string) ([]net.IP, error) {
+		if domain != "example.com" {
+			t.Fatalf("unexpected IP lookup domain %q", domain)
+		}
+		return []net.IP{net.ParseIP("203.0.113.10")}, nil
+	}
+	lookupServerExternalIP = func(context.Context) (string, error) {
+		return "203.0.113.10", nil
+	}
+	lookupServerInterfaceIPs = func() ([]net.IP, error) {
+		return nil, nil
+	}
+	t.Cleanup(func() {
+		lookupTXTRecords = previousTXTLookup
+		lookupIPRecords = previousIPLookup
+		lookupServerExternalIP = previousExternalIPLookup
+		lookupServerInterfaceIPs = previousInterfaceLookup
+	})
 }
 
 type panicSQLExecutor struct {
@@ -1246,6 +1279,174 @@ func TestLoginPostRedirectsBackToRequestedController(t *testing.T) {
 	}
 }
 
+func TestRegisterRequiresEmailConfirmationBeforeCreatingAdmin(t *testing.T) {
+	withEmailSPFAllowed(t)
+	application, rawDB := newTestApplication(t)
+	form := url.Values{}
+	form.Set("email", "admin@example.com")
+	form.Set("password", "secret")
+	request := httptest.NewRequest(http.MethodPost, "http://localhost:8080/?register", strings.NewReader(form.Encode()))
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	request.Header.Set("Accept-Language", "ru")
+	response := httptest.NewRecorder()
+
+	application.route(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%q", response.Code, response.Body.String())
+	}
+	select {
+	case mailJob := <-application.emailDelivery:
+		if mailJob.message.To != "admin@example.com" {
+			t.Fatalf("confirmation recipient = %q", mailJob.message.To)
+		}
+		if !strings.Contains(mailJob.message.Subject, "Подтвердите email") || !strings.Contains(mailJob.message.Body, "Для подтверждения email") {
+			t.Fatalf("confirmation email is not Russian: %#v", mailJob.message)
+		}
+	default:
+		t.Fatal("registration did not enqueue confirmation email")
+	}
+	var userCount int
+	_ = rawDB.QueryRow(`SELECT COUNT(1) FROM users WHERE domain=?`, "localhost").Scan(&userCount)
+	if userCount != 0 {
+		t.Fatalf("user count before confirmation = %d, want 0", userCount)
+	}
+	var pendingToken string
+	if err := rawDB.QueryRow(`SELECT token FROM email_confirmations WHERE domain=? AND action=? AND email=?`, "localhost", "register", "admin@example.com").Scan(&pendingToken); err != nil {
+		t.Fatalf("read confirmation token: %v", err)
+	}
+
+	confirmRequest := httptest.NewRequest(http.MethodGet, "http://localhost:8080/?email_confirm="+url.QueryEscape(pendingToken), nil)
+	confirmResponse := httptest.NewRecorder()
+	application.route(confirmResponse, confirmRequest)
+	if confirmResponse.Code != http.StatusFound {
+		t.Fatalf("confirm status = %d, body=%q", confirmResponse.Code, confirmResponse.Body.String())
+	}
+	_ = rawDB.QueryRow(`SELECT COUNT(1) FROM users WHERE domain=? AND email=? AND password=? AND is_admin=1`, "localhost", "admin@example.com", "secret").Scan(&userCount)
+	if userCount != 1 {
+		t.Fatalf("confirmed admin count = %d, want 1", userCount)
+	}
+	if len(confirmResponse.Result().Cookies()) == 0 {
+		t.Fatal("confirmation did not create session")
+	}
+}
+
+func TestRecoverPageShowsSPFSetupBeforeEmailForm(t *testing.T) {
+	t.Setenv("SITEBRUSH_SMTP_FROM", "SiteBrush <sitebrush@example.com>")
+	previousTXTLookup := lookupTXTRecords
+	previousIPLookup := lookupIPRecords
+	previousExternalIPLookup := lookupServerExternalIP
+	previousInterfaceLookup := lookupServerInterfaceIPs
+	lookupTXTRecords = func(domain string) ([]string, error) {
+		if domain != "example.com" {
+			t.Fatalf("unexpected SPF lookup domain %q", domain)
+		}
+		return []string{"v=spf1 ip4:198.51.100.20 ~all"}, nil
+	}
+	lookupIPRecords = func(domain string) ([]net.IP, error) {
+		if domain != "example.com" {
+			t.Fatalf("unexpected IP lookup domain %q", domain)
+		}
+		return []net.IP{net.ParseIP("198.51.100.20")}, nil
+	}
+	lookupServerExternalIP = func(context.Context) (string, error) {
+		return "203.0.113.10", nil
+	}
+	lookupServerInterfaceIPs = func() ([]net.IP, error) {
+		return nil, nil
+	}
+	t.Cleanup(func() {
+		lookupTXTRecords = previousTXTLookup
+		lookupIPRecords = previousIPLookup
+		lookupServerExternalIP = previousExternalIPLookup
+		lookupServerInterfaceIPs = previousInterfaceLookup
+	})
+
+	application, rawDB := newTestApplication(t)
+	if _, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "admin@example.com", "old"); err != nil {
+		t.Fatalf("insert user: %v", err)
+	}
+	getRequest := httptest.NewRequest(http.MethodGet, "http://localhost:8080/?recover", nil)
+	getRequest.Header.Set("Accept-Language", "ru")
+	getResponse := httptest.NewRecorder()
+	application.route(getResponse, getRequest)
+	if getResponse.Code != http.StatusOK {
+		t.Fatalf("get status = %d, body=%q", getResponse.Code, getResponse.Body.String())
+	}
+	getBody := getResponse.Body.String()
+	for _, expectedFragment := range []string{"Сначала настройте DNS", "Восстановление пароля через email", "SiteBrush будет отправлять письма с адреса sitebrush@example.com", "example.com. IN A 203.0.113.10", `example.com. IN TXT &#34;v=spf1 a mx ip4:203.0.113.10 ~all&#34;`, "Копировать"} {
+		if !strings.Contains(getBody, expectedFragment) {
+			t.Fatalf("recover page missing %q in %s", expectedFragment, getBody)
+		}
+	}
+	for _, hiddenFragment := range []string{`name='email'`, `name="captcha"`, `?captcha`} {
+		if strings.Contains(getBody, hiddenFragment) {
+			t.Fatalf("recover page showed form fragment %q before SPF setup: %s", hiddenFragment, getBody)
+		}
+	}
+
+	form := url.Values{}
+	form.Set("email", "admin@example.com")
+	form.Set("captcha", "1234")
+	request := httptest.NewRequest(http.MethodPost, "http://localhost:8080/?recover", strings.NewReader(form.Encode()))
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	request.Header.Set("Accept-Language", "ru")
+	request.AddCookie(&http.Cookie{Name: "sitebrush_captcha", Value: "1234"})
+	response := httptest.NewRecorder()
+
+	application.route(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%q", response.Code, response.Body.String())
+	}
+	body := response.Body.String()
+	for _, expectedFragment := range []string{"Сначала настройте DNS", "example.com. IN A 203.0.113.10", `example.com. IN TXT &#34;v=spf1 a mx ip4:203.0.113.10 ~all&#34;`} {
+		if !strings.Contains(body, expectedFragment) {
+			t.Fatalf("recover page missing %q in %s", expectedFragment, body)
+		}
+	}
+	select {
+	case mailJob := <-application.emailDelivery:
+		t.Fatalf("recovery enqueued email despite invalid SPF: %#v", mailJob.message)
+	default:
+	}
+}
+
+func TestRecoverPageShowsEmailFormAfterSPFSetup(t *testing.T) {
+	withEmailSPFAllowed(t)
+	application, _ := newTestApplication(t)
+	request := httptest.NewRequest(http.MethodGet, "http://localhost:8080/?recover", nil)
+	request.Header.Set("Accept-Language", "ru")
+	response := httptest.NewRecorder()
+
+	application.route(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%q", response.Code, response.Body.String())
+	}
+	body := response.Body.String()
+	for _, expectedFragment := range []string{`name='email'`, `name="captcha"`, `?captcha`} {
+		if !strings.Contains(body, expectedFragment) {
+			t.Fatalf("recover page missing form fragment %q in %s", expectedFragment, body)
+		}
+	}
+	if strings.Contains(body, "Сначала настройте DNS") {
+		t.Fatalf("recover page showed SPF warning after valid SPF setup: %s", body)
+	}
+}
+
+func TestSPFRecordAllowsExactAndCIDRServerIPs(t *testing.T) {
+	if !spfRecordAllowsIP("v=spf1 ip4:203.0.113.10 ~all", net.ParseIP("203.0.113.10")) {
+		t.Fatal("exact IPv4 SPF mechanism did not match")
+	}
+	if !spfRecordAllowsIP("v=spf1 ip4:203.0.113.0/24 ~all", net.ParseIP("203.0.113.10")) {
+		t.Fatal("CIDR IPv4 SPF mechanism did not match")
+	}
+	if spfRecordAllowsIP("v=spf1 ip4:198.51.100.0/24 ~all", net.ParseIP("203.0.113.10")) {
+		t.Fatal("unrelated IPv4 SPF mechanism matched")
+	}
+	if spfRecordsAllowAnyServerIP([]string{"v=spf1 ip4:203.0.113.10 ~all", "v=spf1 ip4:203.0.113.10 ~all"}, []net.IP{net.ParseIP("203.0.113.10")}) {
+		t.Fatal("multiple SPF TXT records must not be accepted")
+	}
+}
+
 func TestPagePasswordProtectionAppliesToNestedPaths(t *testing.T) {
 	application, rawDB := newTestApplication(t)
 	if _, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "admin@example.com", "old"); err != nil {
@@ -1734,6 +1935,7 @@ func TestDeleteRevisionByQueryDisablesRevisionAndAppliesPreviousActiveRevision(t
 }
 
 func TestProfilePageUpdatesAdminEmailAndPassword(t *testing.T) {
+	withEmailSPFAllowed(t)
 	application, rawDB := newTestApplication(t)
 	_, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "admin@example.com", "old")
 	if err != nil {
@@ -1751,6 +1953,25 @@ func TestProfilePageUpdatesAdminEmailAndPassword(t *testing.T) {
 	if response.Code != http.StatusOK {
 		t.Fatalf("status = %d, body=%q", response.Code, response.Body.String())
 	}
+	select {
+	case mailJob := <-application.emailDelivery:
+		if mailJob.message.To != "new@example.com" || !strings.Contains(mailJob.message.Body, "email_confirm=") {
+			t.Fatalf("unexpected confirmation email: %#v", mailJob.message)
+		}
+	default:
+		t.Fatal("profile update did not enqueue confirmation email")
+	}
+
+	var pendingToken string
+	if err := rawDB.QueryRow(`SELECT token FROM email_confirmations WHERE domain=? AND action=? AND email=?`, "localhost", "profile", "new@example.com").Scan(&pendingToken); err != nil {
+		t.Fatalf("read confirmation token: %v", err)
+	}
+	confirmRequest := httptest.NewRequest(http.MethodGet, "http://localhost:8080/?email_confirm="+url.QueryEscape(pendingToken), nil)
+	confirmResponse := httptest.NewRecorder()
+	application.route(confirmResponse, confirmRequest)
+	if confirmResponse.Code != http.StatusFound {
+		t.Fatalf("confirm status = %d, body=%q", confirmResponse.Code, confirmResponse.Body.String())
+	}
 
 	var password string
 	if err := rawDB.QueryRow(`SELECT password FROM users WHERE domain=? AND email=?`, "localhost", "new@example.com").Scan(&password); err != nil {
@@ -1759,7 +1980,7 @@ func TestProfilePageUpdatesAdminEmailAndPassword(t *testing.T) {
 	if password != "new-secret" {
 		t.Fatalf("password = %q, want new-secret", password)
 	}
-	profileCookies := response.Result().Cookies()
+	profileCookies := confirmResponse.Result().Cookies()
 	if len(profileCookies) == 0 {
 		t.Fatal("profile update did not refresh the session cookie")
 	}

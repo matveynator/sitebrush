@@ -16,15 +16,52 @@
 <body class="technical-page bg-body">
 <div class="container py-5">
   <div class="page-header mb-4"><h1 class="section-heading"><img src="/p/static/login.png" class="section-icon" alt=""><a href="/">{{.Domain}}</a> <small class="text-muted">| {{index .T "recover_header"}}</small></h1></div>
-  <form class="card card-body" method="post" action="?recover" style="max-width:560px;">
+  {{with .DNSSetup}}<section class="card card-body mb-3" style="max-width:760px;">
+    <h2 class="h4 mb-3">{{.Title}}</h2>
+    <p>{{.Intro}}</p>
+    <p>{{.Explanation}}</p>
+    <p>{{.DNSIntro}}</p>
+    {{range $recordIndex, $record := .Records}}
+    <div class="mb-3">
+      <label class="form-label" for="SiteBrushDNSRecord{{$recordIndex}}">{{$record.Label}}</label>
+      <div class="input-group">
+        <input id="SiteBrushDNSRecord{{$recordIndex}}" class="form-control font-monospace" type="text" readonly value="{{$record.Value}}">
+        <button class="btn btn-outline-secondary" type="button" data-copy-target="SiteBrushDNSRecord{{$recordIndex}}">{{$.DNSSetup.CopyLabel}}</button>
+      </div>
+    </div>
+    {{end}}
+    <p class="mb-0">{{.AfterText}}</p>
+  </section>{{end}}
+  {{if .ShowForm}}<form class="card card-body" method="post" action="?recover" style="max-width:560px;">
     <input type="hidden" name="return_path" value="{{.ReturnPath}}">
     <p><input type='text' class="form-control" name='email' placeholder="{{index .T "recover_email_placeholder"}}"></p>
     <p class="d-flex align-items-center gap-2"><input type="text" class="form-control" name="captcha" placeholder="{{index .T "recover_captcha_placeholder"}}" style="max-width:220px;"/>
     <img src="?captcha" alt="{{index .T "recover_captcha_alt"}}" title="{{index .T "recover_captcha_placeholder"}}"></p>
     <input type="submit" class="btn btn-primary" value="{{index .T "recover_submit"}}"/>
-  </form>
+  </form>{{end}}
   {{if .Status}}<div class="alert alert-info mt-3" style="max-width:560px;">{{.Status}}</div>{{end}}
   <p class="mt-3"><a href="{{.ReturnPath}}?login">{{index .T "recover_back"}}</a></p>
 </div>
+<script>
+(function setupDNSCopyButtons() {
+  document.querySelectorAll('[data-copy-target]').forEach(function(copyButton) {
+    copyButton.addEventListener('click', function() {
+      var targetInput = document.getElementById(copyButton.getAttribute('data-copy-target'));
+      if (!targetInput) {
+        return;
+      }
+      targetInput.select();
+      targetInput.setSelectionRange(0, targetInput.value.length);
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(targetInput.value).catch(function() {
+          document.execCommand('copy');
+        });
+        return;
+      }
+      document.execCommand('copy');
+    });
+  });
+})();
+</script>
 </body>
 </html>
