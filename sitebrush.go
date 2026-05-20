@@ -49,6 +49,7 @@ import (
 	appcli "sitebrush/pkg/cli"
 	_ "sitebrush/pkg/database/drivers"
 	"sitebrush/pkg/desktop"
+	"sitebrush/pkg/dirprotect"
 	"sitebrush/pkg/diskusage"
 	"sitebrush/pkg/geoip"
 	"sitebrush/pkg/grabber"
@@ -672,11 +673,7 @@ type ManagedFileAccess struct {
 	TokenUseCount int64
 }
 
-type PagePasswordRule struct {
-	Domain       string
-	Path         string
-	PasswordHash string
-}
+type PagePasswordRule = dirprotect.Rule
 
 type backupPage struct {
 	Path      string `json:"path"`
@@ -3518,12 +3515,14 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 	if strings.TrimSpace(requestDomain) == "" {
 		requestDomain = domainFromRequest(r)
 	}
+	pagePasswordUnlockedForGuest := false
 	if isGuestStaticRequest(r) {
 		if rule, found := a.pagePasswordRuleFromPrefixFile(requestDomain, pagePath); found {
 			if a.pagePasswordSessionValid(r, rule) {
 				if a.servePublishedStaticFileFromDisk(w, r, requestDomain, pagePath, true) {
 					return
 				}
+				pagePasswordUnlockedForGuest = true
 			} else {
 				a.renderPagePasswordPrompt(w, r, requestDomain, pagePath, "", http.StatusUnauthorized)
 				return
@@ -3538,9 +3537,11 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 		a.pagePasswordUnlock(w, r, domain, pagePath)
 		return
 	}
-	if a.requirePagePassword(w, r, domain, pagePath) {
+	pagePasswordHandled, pagePasswordUnlocked := a.requirePagePassword(w, r, domain, pagePath)
+	if pagePasswordHandled {
 		return
 	}
+	pagePasswordUnlockedForGuest = pagePasswordUnlockedForGuest || pagePasswordUnlocked
 	if isGuestStaticRequest(r) && a.servePublishedStaticFileFromDisk(w, r, domain, pagePath, true) {
 		return
 	}
@@ -3552,7 +3553,7 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, redirectTargetPath, http.StatusMovedPermanently)
 		return
 	}
-	if isGuestStaticRequest(r) {
+	if isGuestStaticRequest(r) && !pagePasswordUnlockedForGuest {
 		a.serveGuestNotFoundPage(w, r, domain, pagePath)
 		return
 	}
@@ -7283,19 +7284,19 @@ func (a *App) pagePasswordUnlock(w http.ResponseWriter, r *http.Request, domain,
 	http.Redirect(w, r, pagePath, http.StatusFound)
 }
 
-func (a *App) requirePagePassword(w http.ResponseWriter, r *http.Request, domain, pagePath string) bool {
+func (a *App) requirePagePassword(w http.ResponseWriter, r *http.Request, domain, pagePath string) (bool, bool) {
 	if a.isAdminRequest(r) {
-		return false
+		return false, false
 	}
 	rule, found := a.pagePasswordRuleForPath(r.Context(), domain, pagePath)
 	if !found {
-		return false
+		return false, false
 	}
 	if a.pagePasswordSessionValid(r, rule) {
-		return false
+		return false, true
 	}
 	a.renderPagePasswordPrompt(w, r, domain, pagePath, "", http.StatusUnauthorized)
-	return true
+	return true, false
 }
 
 func (a *App) pagePasswordSessionValid(r *http.Request, rule PagePasswordRule) bool {
@@ -7356,35 +7357,28 @@ func (a *App) pagePasswordRuleForPath(ctx context.Context, domain, pagePath stri
 }
 
 func pagePathHasProtectedPrefix(pagePath, protectedPrefix string) bool {
-	pagePath = cleanPath(pagePath)
-	protectedPrefix = cleanPath(protectedPrefix)
-	if protectedPrefix == "/" {
-		return true
-	}
-	return pagePath == protectedPrefix || strings.HasPrefix(pagePath, protectedPrefix+"/")
+	return dirprotect.HasProtectedPrefix(pagePath, protectedPrefix)
 }
 
 func pagePasswordHash(password string) string {
-	hashedBytes := sha256.Sum256([]byte("sitebrush page password\n" + password))
-	return fmt.Sprintf("sha256:%x", hashedBytes)
+	return dirprotect.Hash(password)
 }
 
 func pagePasswordMatches(storedHash, password string) bool {
-	return strings.TrimSpace(storedHash) == pagePasswordHash(password)
+	return dirprotect.Matches(storedHash, password)
 }
 
 func pagePasswordCookieName(domain, pagePath string) string {
-	hashedBytes := sha256.Sum256([]byte(normalizeDomainName(domain) + "\n" + cleanPath(pagePath)))
-	return "sitebrush_page_password_" + fmt.Sprintf("%x", hashedBytes)[:16]
+	return dirprotect.CookieName(normalizeDomainName(domain), pagePath)
 }
 
 func pagePasswordSessionToken(rule PagePasswordRule) string {
-	hashedBytes := sha256.Sum256([]byte("sitebrush page password session\n" + normalizeDomainName(rule.Domain) + "\n" + cleanPath(rule.Path) + "\n" + rule.PasswordHash))
-	return "v1:" + fmt.Sprintf("%x", hashedBytes)
+	rule.Domain = normalizeDomainName(rule.Domain)
+	return dirprotect.SessionToken(rule)
 }
 
 func pagePasswordFailureDomain(domain, pagePath string) string {
-	return normalizeDomainName(domain) + "|page-password|" + cleanPath(pagePath)
+	return dirprotect.FailureDomain(normalizeDomainName(domain), pagePath)
 }
 
 func (a *App) pagePasswordRuleFromPrefixFile(domain, pagePath string) (PagePasswordRule, bool) {
@@ -7396,38 +7390,15 @@ func (a *App) pagePasswordRuleFromPrefixFile(domain, pagePath string) (PagePassw
 	if normalizedDomain == "" {
 		normalizedDomain = "localhost"
 	}
-	requestPath := cleanPath(pagePath)
-	var bestRule PagePasswordRule
-	for _, rawPrefix := range strings.Split(string(prefixBytes), "\n") {
-		candidateRule, ok := parsePagePasswordPrefixLine(normalizedDomain, rawPrefix)
-		if !ok {
-			continue
-		}
-		if !pagePathHasProtectedPrefix(requestPath, candidateRule.Path) {
-			continue
-		}
-		if len(candidateRule.Path) > len(bestRule.Path) {
-			bestRule = candidateRule
-		}
-	}
-	return bestRule, bestRule.Path != "" && bestRule.PasswordHash != ""
+	return dirprotect.FindBestRuleInPrefixData(normalizedDomain, pagePath, prefixBytes)
 }
 
 func parsePagePasswordPrefixLine(domain, rawLine string) (PagePasswordRule, bool) {
-	trimmedLine := strings.TrimSpace(rawLine)
-	if trimmedLine == "" {
-		return PagePasswordRule{}, false
-	}
-	parts := strings.SplitN(trimmedLine, "\t", 2)
 	normalizedDomain := canonicalLocalDomain(domain)
 	if normalizedDomain == "" {
 		normalizedDomain = "localhost"
 	}
-	rule := PagePasswordRule{Domain: normalizedDomain, Path: cleanPath(parts[0])}
-	if len(parts) == 2 {
-		rule.PasswordHash = strings.TrimSpace(parts[1])
-	}
-	return rule, rule.Path != ""
+	return dirprotect.ParsePrefixLine(normalizedDomain, rawLine)
 }
 
 func (a *App) rebuildPagePasswordPrefixFiles(ctx context.Context) {
@@ -7455,7 +7426,7 @@ func (a *App) writePagePasswordPrefixFile(ctx context.Context, domain string) {
 		return
 	}
 	defer rows.Close()
-	protectedRules := make([]string, 0)
+	rules := make([]PagePasswordRule, 0)
 	for rows.Next() {
 		var rule PagePasswordRule
 		if scanErr := rows.Scan(&rule.Path, &rule.PasswordHash); scanErr != nil {
@@ -7464,18 +7435,18 @@ func (a *App) writePagePasswordPrefixFile(ctx context.Context, domain string) {
 		rule.Path = cleanPath(rule.Path)
 		rule.PasswordHash = strings.TrimSpace(rule.PasswordHash)
 		if rule.Path != "" && rule.PasswordHash != "" {
-			protectedRules = append(protectedRules, rule.Path+"\t"+rule.PasswordHash)
+			rules = append(rules, rule)
 		}
 	}
 	prefixFilePath := a.pagePasswordPrefixFilePath(normalizedDomain)
-	if len(protectedRules) == 0 {
+	if len(rules) == 0 {
 		_ = os.Remove(prefixFilePath)
 		return
 	}
 	if mkdirErr := os.MkdirAll(filepath.Dir(prefixFilePath), 0o700); mkdirErr != nil {
 		return
 	}
-	_ = os.WriteFile(prefixFilePath, []byte(strings.Join(protectedRules, "\n")+"\n"), 0o600)
+	_ = os.WriteFile(prefixFilePath, dirprotect.PrefixFileBody(rules), 0o600)
 }
 
 func (a *App) pagePasswordPrefixFilePath(domain string) string {
@@ -8199,7 +8170,7 @@ func buildGuestNotFoundPageTemplate(languageCode string, translations map[string
   <main class="SiteBrushGuestNotFoundShell">
     <section class="SiteBrushGuestNotFoundContent">
       <h1>404: ` + guestNotFoundPagePathPlaceholder + `</h1>
-      <p class="SiteBrushGuestNotFoundText">` + notFoundPrefix + ` ` + notFoundSuffix + ` <a href="` + guestNotFoundEditLinkPlaceholder + `">` + createPageLabel + `</a>.</p>
+      <p class="SiteBrushGuestNotFoundText">` + notFoundPrefix + ` <strong>` + guestNotFoundPagePathPlaceholder + `</strong> ` + notFoundSuffix + ` <a href="` + guestNotFoundEditLinkPlaceholder + `">` + createPageLabel + `</a>.</p>
     </section>
   </main>
   ` + guestNotFoundMenuPlaceholder + `

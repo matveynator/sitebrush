@@ -1348,6 +1348,40 @@ func TestGuestProtectedStaticRouteUsesPrefixFileWithoutDatabase(t *testing.T) {
 	}
 }
 
+func TestUnlockedProtectedGuestCanUsePublishedPageFallback(t *testing.T) {
+	application, rawDB := newTestApplication(t)
+	if _, err := rawDB.Exec(`INSERT INTO published_pages(domain,path,title,html) VALUES(?,?,?,?)`, "localhost", "/passport", "Passport", "<html><body>published passport fallback</body></html>"); err != nil {
+		t.Fatalf("insert published page: %v", err)
+	}
+	application.setPagePasswordRule(context.Background(), "localhost", "/passport", "secret")
+
+	form := url.Values{}
+	form.Set("password", "secret")
+	unlockRequest := httptest.NewRequest(http.MethodPost, "http://localhost:8080/passport?page_password_unlock", strings.NewReader(form.Encode()))
+	unlockRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	unlockResponse := httptest.NewRecorder()
+	application.route(unlockResponse, unlockRequest)
+	if unlockResponse.Code != http.StatusFound {
+		t.Fatalf("unlock status = %d, want %d, body=%q", unlockResponse.Code, http.StatusFound, unlockResponse.Body.String())
+	}
+
+	openedRequest := httptest.NewRequest(http.MethodGet, "http://localhost:8080/passport", nil)
+	for _, cookie := range unlockResponse.Result().Cookies() {
+		openedRequest.AddCookie(cookie)
+	}
+	openedResponse := httptest.NewRecorder()
+	application.route(openedResponse, openedRequest)
+	if openedResponse.Code != http.StatusOK {
+		t.Fatalf("opened status = %d, want %d, body=%q", openedResponse.Code, http.StatusOK, openedResponse.Body.String())
+	}
+	if !strings.Contains(openedResponse.Body.String(), "published passport fallback") {
+		t.Fatalf("opened protected page missing fallback content: %s", openedResponse.Body.String())
+	}
+	if strings.Contains(openedResponse.Body.String(), "404:") {
+		t.Fatalf("opened protected page used guest 404: %s", openedResponse.Body.String())
+	}
+}
+
 func TestPagePasswordProtectionCanBeAddedAndRemovedFromMenuAction(t *testing.T) {
 	application, rawDB := newTestApplication(t)
 	if _, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "admin@example.com", "old"); err != nil {
