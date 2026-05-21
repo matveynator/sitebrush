@@ -73,6 +73,7 @@ const defaultDomainStorageLimitBytes int64 = 10 * 1024 * 1024 * 1024
 const defaultAnalyticsMemoryLimitBytes int64 = 500 * 1024 * 1024
 const defaultGuestStaticHTMLCacheLimitBytes int64 = 128 * 1024 * 1024
 const guestStaticHTMLCacheQueueSize = 4096
+const authIPFailureCacheQueueSize = 4096
 const emailDeliveryQueueSize = 256
 const emailConfirmationTTL = 24 * time.Hour
 const pagePasswordSessionTTL = time.Hour
@@ -91,6 +92,7 @@ type App struct {
 	geoIP                 *geoip.Resolver
 	domainLogEvents       chan domainLogEvent
 	autoCertGuard         chan autoCertGuardRequest
+	authIPFailureCache    chan authIPFailureCacheRequest
 	emailDelivery         chan emailDeliveryJob
 	sendEmail             emailSender
 }
@@ -131,6 +133,19 @@ type guestStaticHTMLCacheEntry struct {
 	modTime time.Time
 	size    int64
 	body    []byte
+}
+
+type authIPFailureCacheRequest struct {
+	action   string
+	domain   string
+	clientIP string
+	state    authIPFailure
+	response chan authIPFailureCacheResponse
+}
+
+type authIPFailureCacheResponse struct {
+	state authIPFailure
+	found bool
 }
 
 type sqlExecutor interface {
@@ -2626,37 +2641,72 @@ func isLikelyStaticAssetPath(requestPath string) bool {
 }
 
 func clientIPAddress(r *http.Request) string {
-	forwardedHeader := strings.TrimSpace(r.Header.Get("Forwarded"))
-	if forwardedHeader != "" {
-		for _, forwardedPart := range strings.Split(forwardedHeader, ";") {
-			normalizedPart := strings.TrimSpace(forwardedPart)
-			if !strings.HasPrefix(strings.ToLower(normalizedPart), "for=") {
-				continue
+	remoteIP := remoteIPAddress(r)
+	if trustedForwardingProxyIP(remoteIP) {
+		forwardedHeader := strings.TrimSpace(r.Header.Get("Forwarded"))
+		if forwardedHeader != "" {
+			for _, forwardedPart := range strings.Split(forwardedHeader, ";") {
+				normalizedPart := strings.TrimSpace(forwardedPart)
+				if !strings.HasPrefix(strings.ToLower(normalizedPart), "for=") {
+					continue
+				}
+				forwardedValue := strings.Trim(strings.TrimSpace(strings.TrimPrefix(normalizedPart, "for=")), "\"")
+				if parsedIP := net.ParseIP(strings.Trim(strings.TrimSpace(forwardedValue), "[]")); parsedIP != nil {
+					return normalizedClientIPAddress(parsedIP)
+				}
 			}
-			forwardedValue := strings.Trim(strings.TrimSpace(strings.TrimPrefix(normalizedPart, "for=")), "\"")
-			if parsedIP := net.ParseIP(strings.Trim(strings.TrimSpace(forwardedValue), "[]")); parsedIP != nil {
-				return parsedIP.String()
+		}
+		xForwardedFor := strings.TrimSpace(r.Header.Get("X-Forwarded-For"))
+		if xForwardedFor != "" {
+			for _, ipCandidate := range strings.Split(xForwardedFor, ",") {
+				if parsedIP := net.ParseIP(strings.TrimSpace(ipCandidate)); parsedIP != nil {
+					return normalizedClientIPAddress(parsedIP)
+				}
 			}
 		}
 	}
-	xForwardedFor := strings.TrimSpace(r.Header.Get("X-Forwarded-For"))
-	if xForwardedFor != "" {
-		for _, ipCandidate := range strings.Split(xForwardedFor, ",") {
-			if parsedIP := net.ParseIP(strings.TrimSpace(ipCandidate)); parsedIP != nil {
-				return parsedIP.String()
-			}
-		}
+	if remoteIP != nil {
+		return normalizedClientIPAddress(remoteIP)
 	}
+	return ""
+}
+
+func remoteIPAddress(r *http.Request) net.IP {
 	hostPart, _, splitErr := net.SplitHostPort(strings.TrimSpace(r.RemoteAddr))
 	if splitErr == nil {
 		if parsedIP := net.ParseIP(strings.TrimSpace(hostPart)); parsedIP != nil {
-			return parsedIP.String()
+			return parsedIP
 		}
 	}
 	if parsedIP := net.ParseIP(strings.TrimSpace(r.RemoteAddr)); parsedIP != nil {
-		return parsedIP.String()
+		return parsedIP
 	}
-	return ""
+	return nil
+}
+
+func trustedForwardingProxyIP(ip net.IP) bool {
+	if ip == nil {
+		return false
+	}
+	return ip.IsLoopback() || ip.IsPrivate()
+}
+
+func normalizedClientIPAddress(ip net.IP) string {
+	if ip == nil {
+		return ""
+	}
+	if ip.IsLoopback() {
+		return "localhost"
+	}
+	return ip.String()
+}
+
+func clientIPStorageAliases(clientIP string) []string {
+	normalizedClientIP := strings.TrimSpace(clientIP)
+	if normalizedClientIP == "localhost" || normalizedClientIP == "127.0.0.1" || normalizedClientIP == "::1" {
+		return []string{"localhost", "127.0.0.1", "::1"}
+	}
+	return []string{normalizedClientIP}
 }
 
 func analyticsGeoCountryCodeFromRequest(r *http.Request) string {
@@ -2858,6 +2908,7 @@ func runSitebrushServer(ctx context.Context, config serverRunConfig) error {
 	var siteDatabaseRouter *perSiteDBRouter
 	application := &App{storagePath: effectiveStoragePath, nativeFileDialog: desktop.NativeFileDialogSupported(), grabTracker: newGrabProgressTracker(), publishTracker: newPublishProgressTracker(), analyticsEvents: make(chan siteAnalyticsEvent, 65536), domainLogEvents: make(chan domainLogEvent, 1024)}
 	application.guestStaticHTMLCache = startGuestStaticHTMLCacheWorker(ctx, defaultGuestStaticHTMLCacheLimitBytes)
+	application.authIPFailureCache = startAuthIPFailureCacheWorker(ctx)
 	application.emailDelivery = startEmailDeliveryWorker(ctx, application.defaultEmailSender())
 	application.geoIP = geoip.NewResolver(filepath.Join(application.storageRootDir(), "geoip"))
 	siteDatabaseRootDir := siteDatabaseRootPath(effectiveDBPath)
@@ -3652,6 +3703,12 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 	pagePasswordUnlockedForGuest := false
 	if isGuestStaticRequest(r) {
 		if rule, found := a.pagePasswordRuleFromPrefixFile(requestDomain, pagePath); found {
+			failureDomainPrefix := pagePasswordFailureDomainPrefix(rule.Domain)
+			clientIP := clientIPAddress(r)
+			if blocked, hardLocked, blockedUntil := a.cachedAuthIPIsBlockedForDomainPrefix(failureDomainPrefix, clientIP); blocked {
+				a.renderBlockedPagePasswordPrompt(w, r, requestDomain, pagePath, hardLocked, blockedUntil)
+				return
+			}
 			if a.pagePasswordSessionValid(r, rule) {
 				if a.servePublishedStaticFileFromDisk(w, r, requestDomain, pagePath, true) {
 					return
@@ -7895,12 +7952,53 @@ func (a *App) authIPFailureState(ctx context.Context, domain, clientIP string) a
 	if strings.TrimSpace(domain) == "" || strings.TrimSpace(clientIP) == "" {
 		return state
 	}
-	_ = a.db.QueryRowContext(ctx, `SELECT failure_count,blocked_until,hard_locked FROM auth_ip_failures WHERE domain=? AND client_ip=?`, domain, clientIP).Scan(&state.FailureCount, &state.BlockedUntil, &state.HardLocked)
+	now := time.Now().UTC()
+	for _, clientIPAlias := range clientIPStorageAliases(clientIP) {
+		if cachedState, found := a.cachedAuthIPFailureState(domain, clientIPAlias); found {
+			state = strongerAuthIPFailureState(state, cachedState, now)
+		}
+	}
+	if state.FailureCount > 0 || strings.TrimSpace(state.BlockedUntil) != "" || state.HardLocked == 1 {
+		return state
+	}
+	for _, clientIPAlias := range clientIPStorageAliases(clientIP) {
+		var candidate authIPFailure
+		_ = a.db.QueryRowContext(ctx, `SELECT failure_count,blocked_until,hard_locked FROM auth_ip_failures WHERE domain=? AND client_ip=?`, domain, clientIPAlias).Scan(&candidate.FailureCount, &candidate.BlockedUntil, &candidate.HardLocked)
+		if candidate.FailureCount > 0 || strings.TrimSpace(candidate.BlockedUntil) != "" || candidate.HardLocked == 1 {
+			a.storeAuthIPFailureState(domain, clientIPAlias, candidate)
+			state = strongerAuthIPFailureState(state, candidate, now)
+		}
+	}
 	return state
 }
 
 func (a *App) authIPIsBlocked(ctx context.Context, domain, clientIP string) (bool, bool, time.Time) {
 	state := a.authIPFailureState(ctx, domain, clientIP)
+	return authIPBlockFromFailureState(state, time.Now().UTC())
+}
+
+func (a *App) authIPIsBlockedForDomainPrefix(ctx context.Context, domainPrefix, clientIP string) (bool, bool, time.Time) {
+	state := a.authIPFailureStateForDomainPrefix(ctx, domainPrefix, clientIP)
+	return authIPBlockFromFailureState(state, time.Now().UTC())
+}
+
+func (a *App) cachedAuthIPIsBlocked(domain, clientIP string) (bool, bool, time.Time) {
+	state, found := a.cachedAuthIPFailureState(domain, clientIP)
+	if !found {
+		return false, false, time.Time{}
+	}
+	return authIPBlockFromFailureState(state, time.Now().UTC())
+}
+
+func (a *App) cachedAuthIPIsBlockedForDomainPrefix(domainPrefix, clientIP string) (bool, bool, time.Time) {
+	state, found := a.cachedAuthIPFailureStateForDomainPrefix(domainPrefix, clientIP)
+	if !found {
+		return false, false, time.Time{}
+	}
+	return authIPBlockFromFailureState(state, time.Now().UTC())
+}
+
+func authIPBlockFromFailureState(state authIPFailure, now time.Time) (bool, bool, time.Time) {
 	if state.HardLocked == 1 {
 		return true, true, time.Time{}
 	}
@@ -7908,10 +8006,140 @@ func (a *App) authIPIsBlocked(ctx context.Context, domain, clientIP string) (boo
 		return false, false, time.Time{}
 	}
 	blockedUntil, parseErr := time.Parse(time.RFC3339, state.BlockedUntil)
-	if parseErr != nil || !time.Now().UTC().Before(blockedUntil) {
+	if parseErr != nil || !now.UTC().Before(blockedUntil) {
 		return false, false, time.Time{}
 	}
 	return true, false, blockedUntil
+}
+
+func strongerAuthIPFailureState(current authIPFailure, candidate authIPFailure, now time.Time) authIPFailure {
+	if candidate.HardLocked == 1 {
+		return candidate
+	}
+	if current.HardLocked == 1 {
+		return current
+	}
+	currentBlocked, _, currentBlockedUntil := authIPBlockFromFailureState(current, now)
+	candidateBlocked, _, candidateBlockedUntil := authIPBlockFromFailureState(candidate, now)
+	if candidateBlocked && (!currentBlocked || candidateBlockedUntil.After(currentBlockedUntil)) {
+		return candidate
+	}
+	if currentBlocked {
+		return current
+	}
+	if candidate.FailureCount > current.FailureCount {
+		return candidate
+	}
+	return current
+}
+
+func (a *App) authIPFailureStateForDomainPrefix(ctx context.Context, domainPrefix, clientIP string) authIPFailure {
+	state := authIPFailure{}
+	if strings.TrimSpace(domainPrefix) == "" || strings.TrimSpace(clientIP) == "" {
+		return state
+	}
+	if cachedState, found := a.cachedAuthIPFailureStateForDomainPrefix(domainPrefix, clientIP); found {
+		return cachedState
+	}
+	now := time.Now().UTC()
+	for _, clientIPAlias := range clientIPStorageAliases(clientIP) {
+		rows, err := a.db.QueryContext(ctx, `SELECT domain,failure_count,blocked_until,hard_locked FROM auth_ip_failures WHERE client_ip=?`, clientIPAlias)
+		if err != nil {
+			continue
+		}
+		for rows.Next() {
+			var failureDomain string
+			var candidate authIPFailure
+			if scanErr := rows.Scan(&failureDomain, &candidate.FailureCount, &candidate.BlockedUntil, &candidate.HardLocked); scanErr != nil {
+				continue
+			}
+			if failureDomain != strings.TrimSuffix(domainPrefix, "|") && !strings.HasPrefix(failureDomain, domainPrefix) {
+				continue
+			}
+			state = strongerAuthIPFailureState(state, candidate, now)
+			a.storeAuthIPFailureState(failureDomain, clientIPAlias, candidate)
+		}
+		_ = rows.Close()
+	}
+	return state
+}
+
+func (a *App) cachedAuthIPFailureState(domain, clientIP string) (authIPFailure, bool) {
+	cache := a.authIPFailureCache
+	if cache == nil || strings.TrimSpace(domain) == "" || strings.TrimSpace(clientIP) == "" {
+		return authIPFailure{}, false
+	}
+	response := make(chan authIPFailureCacheResponse, 1)
+	request := authIPFailureCacheRequest{action: "get", domain: domain, clientIP: clientIP, response: response}
+	select {
+	case cache <- request:
+	default:
+		return authIPFailure{}, false
+	}
+	select {
+	case result := <-response:
+		return result.state, result.found
+	case <-time.After(50 * time.Millisecond):
+		return authIPFailure{}, false
+	}
+}
+
+func (a *App) cachedAuthIPFailureStateForDomainPrefix(domainPrefix, clientIP string) (authIPFailure, bool) {
+	cache := a.authIPFailureCache
+	if cache == nil || strings.TrimSpace(domainPrefix) == "" || strings.TrimSpace(clientIP) == "" {
+		return authIPFailure{}, false
+	}
+	response := make(chan authIPFailureCacheResponse, 1)
+	request := authIPFailureCacheRequest{action: "max-prefix", domain: domainPrefix, clientIP: clientIP, response: response}
+	select {
+	case cache <- request:
+	default:
+		return authIPFailure{}, false
+	}
+	select {
+	case result := <-response:
+		return result.state, result.found
+	case <-time.After(50 * time.Millisecond):
+		return authIPFailure{}, false
+	}
+}
+
+func (a *App) storeAuthIPFailureState(domain, clientIP string, state authIPFailure) {
+	cache := a.authIPFailureCache
+	if cache == nil || strings.TrimSpace(domain) == "" || strings.TrimSpace(clientIP) == "" {
+		return
+	}
+	response := make(chan authIPFailureCacheResponse, 1)
+	request := authIPFailureCacheRequest{action: "set", domain: domain, clientIP: clientIP, state: state, response: response}
+	select {
+	case cache <- request:
+	default:
+		return
+	}
+	select {
+	case <-response:
+	case <-time.After(50 * time.Millisecond):
+	}
+}
+
+func (a *App) deleteAuthIPFailureState(domain, clientIP string) {
+	cache := a.authIPFailureCache
+	if cache == nil || strings.TrimSpace(domain) == "" || strings.TrimSpace(clientIP) == "" {
+		return
+	}
+	for _, clientIPAlias := range clientIPStorageAliases(clientIP) {
+		response := make(chan authIPFailureCacheResponse, 1)
+		request := authIPFailureCacheRequest{action: "delete", domain: domain, clientIP: clientIPAlias, response: response}
+		select {
+		case cache <- request:
+		default:
+			return
+		}
+		select {
+		case <-response:
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
 }
 
 func (a *App) registerFailedLoginAttempt(ctx context.Context, domain, clientIP string) (int, time.Time, bool) {
@@ -7937,6 +8165,7 @@ ON CONFLICT(domain,client_ip) DO UPDATE SET
 	last_failed_at=excluded.last_failed_at,
 	last_attempt_at=excluded.last_attempt_at`,
 		domain, clientIP, nextFailureCount, blockedUntilText, boolToInt(hardLocked), now.Format(time.RFC3339), now.Format(time.RFC3339))
+	a.storeAuthIPFailureState(domain, clientIP, authIPFailure{FailureCount: nextFailureCount, BlockedUntil: blockedUntilText, HardLocked: boolToInt(hardLocked)})
 	return nextFailureCount, blockedUntil, hardLocked
 }
 
@@ -7944,7 +8173,10 @@ func (a *App) clearFailedLoginAttempts(ctx context.Context, domain, clientIP str
 	if strings.TrimSpace(domain) == "" || strings.TrimSpace(clientIP) == "" {
 		return
 	}
-	_, _ = a.db.ExecContext(ctx, `DELETE FROM auth_ip_failures WHERE domain=? AND client_ip=?`, domain, clientIP)
+	a.deleteAuthIPFailureState(domain, clientIP)
+	for _, clientIPAlias := range clientIPStorageAliases(clientIP) {
+		_, _ = a.db.ExecContext(ctx, `DELETE FROM auth_ip_failures WHERE domain=? AND client_ip=?`, domain, clientIPAlias)
+	}
 }
 
 func (a *App) clearPageRedirectSource(ctx context.Context, domain, pagePath string) {
@@ -8080,27 +8312,15 @@ func (a *App) pagePasswordUnlock(w http.ResponseWriter, r *http.Request, domain,
 	}
 	clientIP := clientIPAddress(r)
 	failureDomain := pagePasswordFailureDomain(rule.Domain, rule.Path)
-	if blocked, hardLocked, blockedUntil := a.authIPIsBlocked(r.Context(), failureDomain, clientIP); blocked {
-		translations := translationsForRequest(r)
-		if hardLocked {
-			status := translationOrDefault(translations, "login_status_hard_locked", "Too many failed attempts. Use password recovery to unlock access.")
-			a.renderPagePasswordPrompt(w, r, domain, pagePath, status, http.StatusForbidden, time.Time{})
-			return
-		}
-		retryAfterSeconds := int(time.Until(blockedUntil).Seconds())
-		if retryAfterSeconds < 1 {
-			retryAfterSeconds = 1
-		}
-		w.Header().Set("Retry-After", strconv.Itoa(retryAfterSeconds))
-		status := translationOrDefault(translations, "login_status_rate_limited", "Too many failed attempts. Try again later.")
-		a.renderPagePasswordPrompt(w, r, domain, pagePath, status, http.StatusTooManyRequests, blockedUntil)
+	if blocked, hardLocked, blockedUntil := a.authIPIsBlockedForDomainPrefix(r.Context(), pagePasswordFailureDomainPrefix(rule.Domain), clientIP); blocked {
+		a.renderBlockedPagePasswordPrompt(w, r, domain, pagePath, hardLocked, blockedUntil)
 		return
 	}
 	if !pagePasswordMatches(rule.PasswordHash, r.FormValue("password")) {
 		translations := translationsForRequest(r)
 		failureCount, blockedUntil, hardLocked := a.registerFailedLoginAttempt(r.Context(), failureDomain, clientIP)
 		if hardLocked {
-			status := translationOrDefault(translations, "login_status_hard_locked", "Too many failed attempts. Use password recovery to unlock access.")
+			status := translationOrDefault(translations, "protected_page_status_hard_locked", "Too many incorrect password entries from this IP. Access is blocked.")
 			a.renderPagePasswordPrompt(w, r, domain, pagePath, status, http.StatusForbidden, time.Time{})
 			return
 		}
@@ -8110,7 +8330,7 @@ func (a *App) pagePasswordUnlock(w http.ResponseWriter, r *http.Request, domain,
 				retryAfterSeconds = 1
 			}
 			w.Header().Set("Retry-After", strconv.Itoa(retryAfterSeconds))
-			status := translationOrDefault(translations, "login_status_rate_limited", "Too many failed attempts. Try again later.")
+			status := translationOrDefault(translations, "protected_page_status_rate_limited", "Too many incorrect password entries from this IP. The next password entry is available after the delay below.")
 			a.renderPagePasswordPrompt(w, r, domain, pagePath, status, http.StatusTooManyRequests, blockedUntil)
 			return
 		}
@@ -8135,6 +8355,10 @@ func (a *App) requirePagePassword(w http.ResponseWriter, r *http.Request, domain
 	rule, found := a.pagePasswordRuleForPath(r.Context(), domain, pagePath)
 	if !found {
 		return false, false
+	}
+	if blocked, hardLocked, blockedUntil := a.authIPIsBlockedForDomainPrefix(r.Context(), pagePasswordFailureDomainPrefix(rule.Domain), clientIPAddress(r)); blocked {
+		a.renderBlockedPagePasswordPrompt(w, r, domain, pagePath, hardLocked, blockedUntil)
+		return true, false
 	}
 	if a.pagePasswordSessionValid(r, rule) {
 		return false, true
@@ -8227,7 +8451,15 @@ func pagePasswordSessionTokenValid(rule PagePasswordRule, token string, r *http.
 }
 
 func pagePasswordFailureDomain(domain, pagePath string) string {
-	return dirprotect.FailureDomain(normalizeDomainName(domain), pagePath)
+	return strings.TrimSuffix(pagePasswordFailureDomainPrefix(domain), "|")
+}
+
+func pagePasswordFailureDomainPrefix(domain string) string {
+	normalizedDomain := normalizeDomainName(domain)
+	if normalizedDomain == "" {
+		normalizedDomain = "localhost"
+	}
+	return normalizedDomain + "|page-password|"
 }
 
 func (a *App) pagePasswordRuleFromPrefixFile(domain, pagePath string) (PagePasswordRule, bool) {
@@ -8306,6 +8538,22 @@ func (a *App) pagePasswordPrefixFilePath(domain string) string {
 	return filepath.Join(a.storageRootDir(), "page-password-prefixes", domainStorageName(normalizedDomain)+".txt")
 }
 
+func (a *App) renderBlockedPagePasswordPrompt(w http.ResponseWriter, r *http.Request, domain, pagePath string, hardLocked bool, blockedUntil time.Time) {
+	translations := translationsForRequest(r)
+	if hardLocked {
+		status := translationOrDefault(translations, "protected_page_status_hard_locked", "Too many incorrect password entries from this IP. Access is blocked.")
+		a.renderPagePasswordPrompt(w, r, domain, pagePath, status, http.StatusForbidden, time.Time{})
+		return
+	}
+	retryAfterSeconds := int(time.Until(blockedUntil).Seconds())
+	if retryAfterSeconds < 1 {
+		retryAfterSeconds = 1
+	}
+	w.Header().Set("Retry-After", strconv.Itoa(retryAfterSeconds))
+	status := translationOrDefault(translations, "protected_page_status_rate_limited", "Too many incorrect password entries from this IP. The next password entry is available after the delay below.")
+	a.renderPagePasswordPrompt(w, r, domain, pagePath, status, http.StatusTooManyRequests, blockedUntil)
+}
+
 func (a *App) renderPagePasswordPrompt(w http.ResponseWriter, r *http.Request, domain, pagePath, status string, statusCode int, blockedUntil time.Time) {
 	translations := translationsForRequest(r)
 	languageCode := preferredLanguageCode(r.Header.Get("Accept-Language"))
@@ -8323,6 +8571,9 @@ func (a *App) renderPagePasswordPrompt(w http.ResponseWriter, r *http.Request, d
 	formControlsHTML := `<input class="SiteBrushProtectedInput" type="password" name="password" placeholder="` + placeholder + `" autocomplete="current-password" required autofocus>
       <button class="SiteBrushProtectedButton" type="submit">` + submitLabel + `</button>`
 	countdownHTML := ""
+	if statusCode == http.StatusForbidden {
+		formControlsHTML = ""
+	}
 	if !blockedUntil.IsZero() && blockedUntil.After(time.Now()) {
 		secondsLeft := int(time.Until(blockedUntil).Seconds())
 		if secondsLeft < 1 {
@@ -14209,6 +14460,70 @@ func startGuestStaticHTMLCacheWorker(ctx context.Context, limitBytes int64) chan
 	requests := make(chan guestStaticHTMLCacheRequest, guestStaticHTMLCacheQueueSize)
 	go runGuestStaticHTMLCache(ctx, requests, limitBytes)
 	return requests
+}
+
+func startAuthIPFailureCacheWorker(ctx context.Context) chan authIPFailureCacheRequest {
+	requests := make(chan authIPFailureCacheRequest, authIPFailureCacheQueueSize)
+	go runAuthIPFailureCache(ctx, requests)
+	return requests
+}
+
+func runAuthIPFailureCache(ctx context.Context, requests <-chan authIPFailureCacheRequest) {
+	statesByAddress := make(map[string]authIPFailure)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case request := <-requests:
+			cacheKey := strings.Join([]string{strings.TrimSpace(request.domain), strings.TrimSpace(request.clientIP)}, "\x00")
+			if cacheKey == "\x00" {
+				if request.response != nil {
+					request.response <- authIPFailureCacheResponse{}
+				}
+				continue
+			}
+			switch request.action {
+			case "get":
+				state, found := statesByAddress[cacheKey]
+				request.response <- authIPFailureCacheResponse{state: state, found: found}
+			case "max-prefix":
+				var state authIPFailure
+				found := false
+				now := time.Now().UTC()
+				domainPrefix := strings.TrimSpace(request.domain)
+				globalDomain := strings.TrimSuffix(domainPrefix, "|")
+				clientIPAliases := make(map[string]struct{})
+				for _, clientIPAlias := range clientIPStorageAliases(request.clientIP) {
+					clientIPAliases[clientIPAlias] = struct{}{}
+				}
+				for storedKey, candidate := range statesByAddress {
+					storedDomain, storedClientIP, splitOK := strings.Cut(storedKey, "\x00")
+					if !splitOK {
+						continue
+					}
+					if _, ok := clientIPAliases[storedClientIP]; !ok {
+						continue
+					}
+					if storedDomain != globalDomain && !strings.HasPrefix(storedDomain, domainPrefix) {
+						continue
+					}
+					state = strongerAuthIPFailureState(state, candidate, now)
+					found = true
+				}
+				request.response <- authIPFailureCacheResponse{state: state, found: found}
+			case "set":
+				statesByAddress[cacheKey] = request.state
+				if request.response != nil {
+					request.response <- authIPFailureCacheResponse{state: request.state, found: true}
+				}
+			case "delete":
+				delete(statesByAddress, cacheKey)
+				if request.response != nil {
+					request.response <- authIPFailureCacheResponse{}
+				}
+			}
+		}
+	}
 }
 
 func runGuestStaticHTMLCache(ctx context.Context, requests <-chan guestStaticHTMLCacheRequest, limitBytes int64) {

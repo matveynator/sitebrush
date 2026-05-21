@@ -56,7 +56,7 @@ func CookieName(domain, pagePath string) string {
 
 func BoundSessionToken(rule Rule, clientIP, userAgent string, issuedAt time.Time) string {
 	issuedUnix := issuedAt.UTC().Unix()
-	return "v2:" + strconv.FormatInt(issuedUnix, 10) + ":" + boundSessionSignature(rule, clientIP, userAgent, issuedUnix)
+	return "v2:" + strconv.FormatInt(issuedUnix, 10) + ":" + boundSessionSignature(rule, clientIP, issuedUnix)
 }
 
 func BoundSessionTokenValid(rule Rule, token, clientIP, userAgent string, now time.Time, ttl time.Duration) bool {
@@ -162,14 +162,13 @@ func NormalizeDomain(domain string) string {
 	return strings.ToLower(strings.Trim(strings.TrimSpace(domain), "."))
 }
 
-func boundSessionSignature(rule Rule, clientIP, userAgent string, issuedUnix int64) string {
+func boundSessionSignature(rule Rule, clientIP string, issuedUnix int64) string {
 	hashedBytes := sha256.Sum256([]byte(strings.Join([]string{
 		"sitebrush page password session v2",
 		NormalizeDomain(rule.Domain),
 		CleanPath(rule.Path),
 		strings.TrimSpace(rule.PasswordHash),
 		strings.TrimSpace(clientIP),
-		strings.TrimSpace(userAgent),
 		strconv.FormatInt(issuedUnix, 10),
 	}, "\n")))
 	return fmt.Sprintf("%x", hashedBytes)

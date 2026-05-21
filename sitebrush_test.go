@@ -106,7 +106,7 @@ func newTestApplication(t *testing.T) (*App, *sql.DB) {
 	t.Cleanup(func() {
 		_ = rawDB.Close()
 	})
-	application := &App{db: rawDB, storagePath: storagePath, grabTracker: newGrabProgressTracker(), publishTracker: newPublishProgressTracker(), analyticsEvents: make(chan siteAnalyticsEvent, 1024), emailDelivery: make(chan emailDeliveryJob, emailDeliveryQueueSize)}
+	application := &App{db: rawDB, storagePath: storagePath, grabTracker: newGrabProgressTracker(), publishTracker: newPublishProgressTracker(), analyticsEvents: make(chan siteAnalyticsEvent, 1024), authIPFailureCache: startAuthIPFailureCacheWorker(context.Background()), emailDelivery: make(chan emailDeliveryJob, emailDeliveryQueueSize)}
 	if err := application.migrate(context.Background()); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
@@ -1561,7 +1561,7 @@ func TestGuestProtectedStaticRouteUsesPrefixFileWithoutDatabase(t *testing.T) {
 	}
 }
 
-func TestPagePasswordSessionExpiresWhenClientConditionsChange(t *testing.T) {
+func TestPagePasswordSessionFollowsClientIPAddress(t *testing.T) {
 	rule := PagePasswordRule{Domain: "localhost", Path: "/passport", PasswordHash: pagePasswordHash("secret")}
 	issuedAt := time.Now().UTC().Add(-time.Minute)
 	originalRequest := httptest.NewRequest(http.MethodGet, "http://localhost:8080/passport", nil)
@@ -1583,8 +1583,8 @@ func TestPagePasswordSessionExpiresWhenClientConditionsChange(t *testing.T) {
 	changedBrowserRequest := httptest.NewRequest(http.MethodGet, "http://localhost:8080/passport", nil)
 	changedBrowserRequest.RemoteAddr = "198.51.100.42:1234"
 	changedBrowserRequest.Header.Set("User-Agent", "Other Browser")
-	if pagePasswordSessionTokenValid(rule, token, changedBrowserRequest, issuedAt.Add(time.Minute)) {
-		t.Fatal("page password token should expire when the browser changes")
+	if !pagePasswordSessionTokenValid(rule, token, changedBrowserRequest, issuedAt.Add(time.Minute)) {
+		t.Fatal("page password token should stay valid when only the browser changes")
 	}
 
 	if pagePasswordSessionTokenValid(rule, token, originalRequest, issuedAt.Add(pagePasswordSessionTTL+time.Second)) {
@@ -1663,6 +1663,7 @@ func TestPagePasswordProtectionCanBeAddedAndRemovedFromMenuAction(t *testing.T) 
 
 func TestPagePasswordFailedAttemptsEscalateToIPBlock(t *testing.T) {
 	application, _ := newTestApplication(t)
+	application.writePublishedStaticHTML("localhost", "/secret", "<html><body>protected static content</body></html>")
 	application.setPagePasswordRule(context.Background(), "localhost", "/secret", "secret")
 
 	for attemptIndex := 1; attemptIndex <= 4; attemptIndex++ {
@@ -1670,6 +1671,7 @@ func TestPagePasswordFailedAttemptsEscalateToIPBlock(t *testing.T) {
 		form.Set("password", "wrong")
 		request := httptest.NewRequest(http.MethodPost, "http://localhost:8080/secret?page_password_unlock", strings.NewReader(form.Encode()))
 		request.RemoteAddr = "198.51.100.30:1234"
+		request.Header.Set("User-Agent", "First Test Browser")
 		request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 		response := httptest.NewRecorder()
 
@@ -1687,6 +1689,7 @@ func TestPagePasswordFailedAttemptsEscalateToIPBlock(t *testing.T) {
 	form.Set("password", "secret")
 	blockedRequest := httptest.NewRequest(http.MethodPost, "http://localhost:8080/secret?page_password_unlock", strings.NewReader(form.Encode()))
 	blockedRequest.RemoteAddr = "198.51.100.30:1234"
+	blockedRequest.Header.Set("User-Agent", "Second Test Browser")
 	blockedRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	blockedRequest.Header.Set("Accept-Language", "ru")
 	blockedResponse := httptest.NewRecorder()
@@ -1702,6 +1705,7 @@ func TestPagePasswordFailedAttemptsEscalateToIPBlock(t *testing.T) {
 		`id="SiteBrushProtectedCountdown"`,
 		`data-countdown-text`,
 		"Повторить попытку можно через:",
+		"С этого IP введено слишком много неправильных паролей",
 	} {
 		if !strings.Contains(blockedBody, expectedFragment) {
 			t.Fatalf("blocked password page missing %q in %s", expectedFragment, blockedBody)
@@ -1712,6 +1716,186 @@ func TestPagePasswordFailedAttemptsEscalateToIPBlock(t *testing.T) {
 	}
 	if len(blockedResponse.Result().Cookies()) != 0 {
 		t.Fatalf("blocked password response set cookies: %#v", blockedResponse.Result().Cookies())
+	}
+
+	blockedGetRequest := httptest.NewRequest(http.MethodGet, "http://localhost:8080/secret", nil)
+	blockedGetRequest.RemoteAddr = "198.51.100.30:1234"
+	blockedGetRequest.Header.Set("User-Agent", "Second Test Browser")
+	blockedGetRequest.Header.Set("Accept-Language", "ru")
+	blockedGetResponse := httptest.NewRecorder()
+	application.route(blockedGetResponse, blockedGetRequest)
+	if blockedGetResponse.Code != http.StatusTooManyRequests {
+		t.Fatalf("blocked GET status = %d, want %d, body=%q", blockedGetResponse.Code, http.StatusTooManyRequests, blockedGetResponse.Body.String())
+	}
+	if strings.Contains(blockedGetResponse.Body.String(), `name="password"`) {
+		t.Fatalf("blocked GET should hide password input: %s", blockedGetResponse.Body.String())
+	}
+
+	rule, found := application.pagePasswordRuleFromPrefixFile("localhost", "/secret")
+	if !found {
+		t.Fatal("page password rule missing from prefix file")
+	}
+	cookieBypassRequest := httptest.NewRequest(http.MethodGet, "http://localhost:8080/secret", nil)
+	cookieBypassRequest.RemoteAddr = "198.51.100.30:1234"
+	cookieBypassRequest.Header.Set("User-Agent", "First Test Browser")
+	cookieBypassRequest.Header.Set("Accept-Language", "ru")
+	cookieBypassRequest.AddCookie(&http.Cookie{Name: pagePasswordCookieName(rule.Domain, rule.Path), Value: pagePasswordSessionTokenForRequest(rule, cookieBypassRequest, time.Now().UTC())})
+	cookieBypassResponse := httptest.NewRecorder()
+	application.route(cookieBypassResponse, cookieBypassRequest)
+	if cookieBypassResponse.Code != http.StatusTooManyRequests {
+		t.Fatalf("cookie bypass status = %d, want %d, body=%q", cookieBypassResponse.Code, http.StatusTooManyRequests, cookieBypassResponse.Body.String())
+	}
+	if strings.Contains(cookieBypassResponse.Body.String(), "protected static content") {
+		t.Fatalf("blocked IP with page password cookie leaked protected content: %s", cookieBypassResponse.Body.String())
+	}
+}
+
+func TestPagePasswordBlockUsesMaximumTimeoutForIPAddress(t *testing.T) {
+	application, rawDB := newTestApplication(t)
+	application.writePublishedStaticHTML("localhost", "/secret", "<html><body>protected static content</body></html>")
+	application.setPagePasswordRule(context.Background(), "localhost", "/secret", "secret")
+
+	now := time.Now().UTC()
+	clientIP := "198.51.100.81"
+	globalFailureDomain := pagePasswordFailureDomain("localhost", "/secret")
+	legacyPathFailureDomain := "localhost|page-password|/secret"
+	shortBlockUntil := now.Add(5 * time.Minute).Format(time.RFC3339)
+	longBlockUntil := now.Add(15 * time.Minute).Format(time.RFC3339)
+	for _, seededState := range []struct {
+		domain       string
+		failureCount int
+		blockedUntil string
+	}{
+		{domain: globalFailureDomain, failureCount: 5, blockedUntil: shortBlockUntil},
+		{domain: legacyPathFailureDomain, failureCount: 6, blockedUntil: longBlockUntil},
+	} {
+		_, err := rawDB.Exec(`INSERT INTO auth_ip_failures(domain,client_ip,failure_count,blocked_until,hard_locked,last_failed_at,last_attempt_at) VALUES(?,?,?,?,?,?,?)`,
+			seededState.domain, clientIP, seededState.failureCount, seededState.blockedUntil, 0, now.Format(time.RFC3339), now.Format(time.RFC3339))
+		if err != nil {
+			t.Fatalf("seed auth failure %s: %v", seededState.domain, err)
+		}
+		application.storeAuthIPFailureState(seededState.domain, clientIP, authIPFailure{FailureCount: seededState.failureCount, BlockedUntil: seededState.blockedUntil})
+	}
+
+	blockedGetRequest := httptest.NewRequest(http.MethodGet, "http://localhost:8080/secret", nil)
+	blockedGetRequest.RemoteAddr = clientIP + ":1234"
+	blockedGetRequest.Header.Set("User-Agent", "First Browser")
+	blockedGetResponse := httptest.NewRecorder()
+	application.route(blockedGetResponse, blockedGetRequest)
+	if blockedGetResponse.Code != http.StatusTooManyRequests {
+		t.Fatalf("blocked GET status = %d, want %d, body=%q", blockedGetResponse.Code, http.StatusTooManyRequests, blockedGetResponse.Body.String())
+	}
+	if strings.Contains(blockedGetResponse.Body.String(), `name="password"`) {
+		t.Fatalf("blocked GET should not show password input: %s", blockedGetResponse.Body.String())
+	}
+	retryAfter, err := strconv.Atoi(blockedGetResponse.Header().Get("Retry-After"))
+	if err != nil || retryAfter < int((10*time.Minute).Seconds()) {
+		t.Fatalf("blocked GET Retry-After = %q, want maximum timeout near 15 minutes", blockedGetResponse.Header().Get("Retry-After"))
+	}
+
+	form := url.Values{}
+	form.Set("password", "secret")
+	blockedPostRequest := httptest.NewRequest(http.MethodPost, "http://localhost:8080/secret?page_password_unlock", strings.NewReader(form.Encode()))
+	blockedPostRequest.RemoteAddr = clientIP + ":5678"
+	blockedPostRequest.Header.Set("User-Agent", "Second Browser")
+	blockedPostRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	blockedPostResponse := httptest.NewRecorder()
+	application.route(blockedPostResponse, blockedPostRequest)
+	if blockedPostResponse.Code != http.StatusTooManyRequests {
+		t.Fatalf("blocked POST status = %d, want %d, body=%q", blockedPostResponse.Code, http.StatusTooManyRequests, blockedPostResponse.Body.String())
+	}
+	if strings.Contains(blockedPostResponse.Body.String(), `name="password"`) {
+		t.Fatalf("blocked POST should not show password input: %s", blockedPostResponse.Body.String())
+	}
+	retryAfter, err = strconv.Atoi(blockedPostResponse.Header().Get("Retry-After"))
+	if err != nil || retryAfter < int((10*time.Minute).Seconds()) {
+		t.Fatalf("blocked POST Retry-After = %q, want maximum timeout near 15 minutes", blockedPostResponse.Header().Get("Retry-After"))
+	}
+}
+
+func TestPagePasswordBlockTreatsLocalhostIPv4AndIPv6AsSameClient(t *testing.T) {
+	application, rawDB := newTestApplication(t)
+	application.writePublishedStaticHTML("localhost", "/secret", "<html><body>protected static content</body></html>")
+	application.setPagePasswordRule(context.Background(), "localhost", "/secret", "secret")
+
+	blockedUntil := time.Now().UTC().Add(15 * time.Minute).Format(time.RFC3339)
+	_, err := rawDB.Exec(`INSERT INTO auth_ip_failures(domain,client_ip,failure_count,blocked_until,hard_locked,last_failed_at,last_attempt_at) VALUES(?,?,?,?,?,?,?)`,
+		pagePasswordFailureDomain("localhost", "/secret"), "127.0.0.1", 6, blockedUntil, 0, time.Now().UTC().Format(time.RFC3339), time.Now().UTC().Format(time.RFC3339))
+	if err != nil {
+		t.Fatalf("seed auth failure: %v", err)
+	}
+	application.storeAuthIPFailureState(pagePasswordFailureDomain("localhost", "/secret"), "127.0.0.1", authIPFailure{FailureCount: 6, BlockedUntil: blockedUntil})
+
+	request := httptest.NewRequest(http.MethodGet, "http://localhost:8080/secret", nil)
+	request.RemoteAddr = "[::1]:1234"
+	response := httptest.NewRecorder()
+	application.route(response, request)
+	if response.Code != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want %d, body=%q", response.Code, http.StatusTooManyRequests, response.Body.String())
+	}
+	if strings.Contains(response.Body.String(), `name="password"`) {
+		t.Fatalf("blocked localhost alias should not show password input: %s", response.Body.String())
+	}
+	retryAfter, err := strconv.Atoi(response.Header().Get("Retry-After"))
+	if err != nil || retryAfter < int((10*time.Minute).Seconds()) {
+		t.Fatalf("Retry-After = %q, want timeout from IPv4 localhost record", response.Header().Get("Retry-After"))
+	}
+}
+
+func TestBlockedLoginPageTreatsLocalhostIPv4AndIPv6AsSameClient(t *testing.T) {
+	application, rawDB := newTestApplication(t)
+	_, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "admin@example.com", "old")
+	if err != nil {
+		t.Fatalf("insert user: %v", err)
+	}
+	_, err = rawDB.Exec(`INSERT INTO auth_ip_failures(domain,client_ip,failure_count,blocked_until,hard_locked,last_failed_at,last_attempt_at) VALUES(?,?,?,?,?,?,?)`,
+		"localhost", "127.0.0.1", 6, time.Now().UTC().Add(15*time.Minute).Format(time.RFC3339), 0, time.Now().UTC().Format(time.RFC3339), time.Now().UTC().Format(time.RFC3339))
+	if err != nil {
+		t.Fatalf("seed auth failure: %v", err)
+	}
+
+	request := httptest.NewRequest(http.MethodGet, "http://localhost:8080/docs?login", nil)
+	request.RemoteAddr = "[::1]:1234"
+	response := httptest.NewRecorder()
+	application.login(response, request)
+	if response.Code != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want %d, body=%q", response.Code, http.StatusTooManyRequests, response.Body.String())
+	}
+	for _, unexpectedFragment := range []string{`name="password"`, `name="email"`} {
+		if strings.Contains(response.Body.String(), unexpectedFragment) {
+			t.Fatalf("blocked localhost alias should hide login field %q in %s", unexpectedFragment, response.Body.String())
+		}
+	}
+}
+
+func TestClientIPAddressIgnoresSpoofedForwardedHeadersFromPublicRemote(t *testing.T) {
+	request := httptest.NewRequest(http.MethodGet, "http://localhost:8080/secret", nil)
+	request.RemoteAddr = "198.51.100.80:1234"
+	request.Header.Set("Forwarded", `for=203.0.113.10`)
+	request.Header.Set("X-Forwarded-For", "203.0.113.11")
+
+	if clientIP := clientIPAddress(request); clientIP != "198.51.100.80" {
+		t.Fatalf("client IP = %q, want public remote address", clientIP)
+	}
+}
+
+func TestClientIPAddressNormalizesLocalhostAliases(t *testing.T) {
+	for _, remoteAddress := range []string{"127.0.0.1:1234", "[::1]:1234"} {
+		request := httptest.NewRequest(http.MethodGet, "http://localhost:8080/secret", nil)
+		request.RemoteAddr = remoteAddress
+		if clientIP := clientIPAddress(request); clientIP != "localhost" {
+			t.Fatalf("client IP for %s = %q, want localhost", remoteAddress, clientIP)
+		}
+	}
+}
+
+func TestClientIPAddressAcceptsForwardedHeadersFromTrustedProxy(t *testing.T) {
+	request := httptest.NewRequest(http.MethodGet, "http://localhost:8080/secret", nil)
+	request.RemoteAddr = "127.0.0.1:1234"
+	request.Header.Set("X-Forwarded-For", "203.0.113.11")
+
+	if clientIP := clientIPAddress(request); clientIP != "203.0.113.11" {
+		t.Fatalf("client IP = %q, want forwarded address from trusted proxy", clientIP)
 	}
 }
 

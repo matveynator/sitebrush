@@ -53,8 +53,8 @@ func TestBoundSessionTokenRequiresSameClientConditions(t *testing.T) {
 	if BoundSessionTokenValid(rule, token, "198.51.100.11", "Test Browser", issuedAt.Add(time.Minute), time.Hour) {
 		t.Fatal("token should not survive an IP address change")
 	}
-	if BoundSessionTokenValid(rule, token, "198.51.100.10", "Other Browser", issuedAt.Add(time.Minute), time.Hour) {
-		t.Fatal("token should not survive a browser change")
+	if !BoundSessionTokenValid(rule, token, "198.51.100.10", "Other Browser", issuedAt.Add(time.Minute), time.Hour) {
+		t.Fatal("token should stay valid for another browser on the same IP")
 	}
 }
 
