@@ -2,9 +2,12 @@ package dirprotect
 
 import (
 	"crypto/sha256"
+	"crypto/subtle"
 	"fmt"
 	"path"
+	"strconv"
 	"strings"
+	"time"
 )
 
 type Rule struct {
@@ -51,9 +54,33 @@ func CookieName(domain, pagePath string) string {
 	return "sitebrush_page_password_" + fmt.Sprintf("%x", hashedBytes)[:16]
 }
 
-func SessionToken(rule Rule) string {
-	hashedBytes := sha256.Sum256([]byte("sitebrush page password session\n" + NormalizeDomain(rule.Domain) + "\n" + CleanPath(rule.Path) + "\n" + rule.PasswordHash))
-	return "v1:" + fmt.Sprintf("%x", hashedBytes)
+func BoundSessionToken(rule Rule, clientIP, userAgent string, issuedAt time.Time) string {
+	issuedUnix := issuedAt.UTC().Unix()
+	return "v2:" + strconv.FormatInt(issuedUnix, 10) + ":" + boundSessionSignature(rule, clientIP, userAgent, issuedUnix)
+}
+
+func BoundSessionTokenValid(rule Rule, token, clientIP, userAgent string, now time.Time, ttl time.Duration) bool {
+	if ttl <= 0 {
+		return false
+	}
+	tokenParts := strings.Split(strings.TrimSpace(token), ":")
+	if len(tokenParts) != 3 || tokenParts[0] != "v2" {
+		return false
+	}
+	issuedUnix, err := strconv.ParseInt(tokenParts[1], 10, 64)
+	if err != nil {
+		return false
+	}
+	issuedAt := time.Unix(issuedUnix, 0).UTC()
+	now = now.UTC()
+	if issuedAt.After(now.Add(5 * time.Minute)) {
+		return false
+	}
+	if now.Sub(issuedAt) > ttl {
+		return false
+	}
+	expectedToken := BoundSessionToken(rule, clientIP, userAgent, issuedAt)
+	return subtle.ConstantTimeCompare([]byte(expectedToken), []byte(strings.TrimSpace(token))) == 1
 }
 
 func FailureDomain(domain, pagePath string) string {
@@ -133,4 +160,17 @@ func PrefixFileBody(rules []Rule) []byte {
 
 func NormalizeDomain(domain string) string {
 	return strings.ToLower(strings.Trim(strings.TrimSpace(domain), "."))
+}
+
+func boundSessionSignature(rule Rule, clientIP, userAgent string, issuedUnix int64) string {
+	hashedBytes := sha256.Sum256([]byte(strings.Join([]string{
+		"sitebrush page password session v2",
+		NormalizeDomain(rule.Domain),
+		CleanPath(rule.Path),
+		strings.TrimSpace(rule.PasswordHash),
+		strings.TrimSpace(clientIP),
+		strings.TrimSpace(userAgent),
+		strconv.FormatInt(issuedUnix, 10),
+	}, "\n")))
+	return fmt.Sprintf("%x", hashedBytes)
 }

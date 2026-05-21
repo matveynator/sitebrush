@@ -1475,6 +1475,8 @@ func TestPagePasswordProtectionAppliesToNestedPaths(t *testing.T) {
 	form := url.Values{}
 	form.Set("password", "secret")
 	unlockRequest := httptest.NewRequest(http.MethodPost, "http://localhost:8080/passport/one?page_password_unlock", strings.NewReader(form.Encode()))
+	unlockRequest.RemoteAddr = "198.51.100.40:1234"
+	unlockRequest.Header.Set("User-Agent", "Sitebrush Test Browser")
 	unlockRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	unlockResponse := httptest.NewRecorder()
 	application.route(unlockResponse, unlockRequest)
@@ -1485,8 +1487,16 @@ func TestPagePasswordProtectionAppliesToNestedPaths(t *testing.T) {
 	if len(unlockCookies) == 0 {
 		t.Fatal("unlock did not set a page password cookie")
 	}
+	if unlockCookies[0].MaxAge > int(pagePasswordSessionTTL.Seconds()) {
+		t.Fatalf("page password cookie MaxAge = %d, want at most %d", unlockCookies[0].MaxAge, int(pagePasswordSessionTTL.Seconds()))
+	}
+	if unlockCookies[0].Expires.IsZero() || unlockCookies[0].Expires.After(time.Now().Add(pagePasswordSessionTTL+time.Minute)) {
+		t.Fatalf("page password cookie Expires = %s, want about one hour", unlockCookies[0].Expires.Format(time.RFC3339))
+	}
 
 	openedRequest := httptest.NewRequest(http.MethodGet, "http://localhost:8080/passport/one", nil)
+	openedRequest.RemoteAddr = "198.51.100.40:1234"
+	openedRequest.Header.Set("User-Agent", "Sitebrush Test Browser")
 	openedRequest.AddCookie(unlockCookies[0])
 	openedResponse := httptest.NewRecorder()
 	application.route(openedResponse, openedRequest)
@@ -1531,7 +1541,9 @@ func TestGuestProtectedStaticRouteUsesPrefixFileWithoutDatabase(t *testing.T) {
 	}
 
 	openedRequest := httptest.NewRequest(http.MethodGet, "http://localhost:8080/passport/one", nil)
-	openedRequest.AddCookie(&http.Cookie{Name: pagePasswordCookieName(rule.Domain, rule.Path), Value: pagePasswordSessionToken(rule)})
+	openedRequest.RemoteAddr = "198.51.100.41:1234"
+	openedRequest.Header.Set("User-Agent", "Sitebrush Test Browser")
+	openedRequest.AddCookie(&http.Cookie{Name: pagePasswordCookieName(rule.Domain, rule.Path), Value: pagePasswordSessionTokenForRequest(rule, openedRequest, time.Now().UTC())})
 	openedResponse := httptest.NewRecorder()
 	application.route(openedResponse, openedRequest)
 	if openedResponse.Code != http.StatusOK {
@@ -1546,6 +1558,37 @@ func TestGuestProtectedStaticRouteUsesPrefixFileWithoutDatabase(t *testing.T) {
 	application.route(publicResponse, publicRequest)
 	if publicResponse.Code != http.StatusOK || !strings.Contains(publicResponse.Body.String(), "public static page") {
 		t.Fatalf("public response = %d %q, want public static content", publicResponse.Code, publicResponse.Body.String())
+	}
+}
+
+func TestPagePasswordSessionExpiresWhenClientConditionsChange(t *testing.T) {
+	rule := PagePasswordRule{Domain: "localhost", Path: "/passport", PasswordHash: pagePasswordHash("secret")}
+	issuedAt := time.Now().UTC().Add(-time.Minute)
+	originalRequest := httptest.NewRequest(http.MethodGet, "http://localhost:8080/passport", nil)
+	originalRequest.RemoteAddr = "198.51.100.42:1234"
+	originalRequest.Header.Set("User-Agent", "Sitebrush Test Browser")
+	token := pagePasswordSessionTokenForRequest(rule, originalRequest, issuedAt)
+
+	if !pagePasswordSessionTokenValid(rule, token, originalRequest, issuedAt.Add(time.Minute)) {
+		t.Fatal("page password token should be valid for the original IP and browser")
+	}
+
+	changedIPRequest := httptest.NewRequest(http.MethodGet, "http://localhost:8080/passport", nil)
+	changedIPRequest.RemoteAddr = "198.51.100.43:1234"
+	changedIPRequest.Header.Set("User-Agent", "Sitebrush Test Browser")
+	if pagePasswordSessionTokenValid(rule, token, changedIPRequest, issuedAt.Add(time.Minute)) {
+		t.Fatal("page password token should expire when the IP address changes")
+	}
+
+	changedBrowserRequest := httptest.NewRequest(http.MethodGet, "http://localhost:8080/passport", nil)
+	changedBrowserRequest.RemoteAddr = "198.51.100.42:1234"
+	changedBrowserRequest.Header.Set("User-Agent", "Other Browser")
+	if pagePasswordSessionTokenValid(rule, token, changedBrowserRequest, issuedAt.Add(time.Minute)) {
+		t.Fatal("page password token should expire when the browser changes")
+	}
+
+	if pagePasswordSessionTokenValid(rule, token, originalRequest, issuedAt.Add(pagePasswordSessionTTL+time.Second)) {
+		t.Fatal("page password token should expire after one hour")
 	}
 }
 
@@ -1645,6 +1688,7 @@ func TestPagePasswordFailedAttemptsEscalateToIPBlock(t *testing.T) {
 	blockedRequest := httptest.NewRequest(http.MethodPost, "http://localhost:8080/secret?page_password_unlock", strings.NewReader(form.Encode()))
 	blockedRequest.RemoteAddr = "198.51.100.30:1234"
 	blockedRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	blockedRequest.Header.Set("Accept-Language", "ru")
 	blockedResponse := httptest.NewRecorder()
 	application.route(blockedResponse, blockedRequest)
 	if blockedResponse.Code != http.StatusTooManyRequests {
@@ -1652,6 +1696,19 @@ func TestPagePasswordFailedAttemptsEscalateToIPBlock(t *testing.T) {
 	}
 	if blockedResponse.Header().Get("Retry-After") == "" {
 		t.Fatal("blocked password response did not set Retry-After")
+	}
+	blockedBody := blockedResponse.Body.String()
+	for _, expectedFragment := range []string{
+		`id="SiteBrushProtectedCountdown"`,
+		`data-countdown-text`,
+		"Повторить попытку можно через:",
+	} {
+		if !strings.Contains(blockedBody, expectedFragment) {
+			t.Fatalf("blocked password page missing %q in %s", expectedFragment, blockedBody)
+		}
+	}
+	if strings.Contains(blockedBody, `name="password"`) {
+		t.Fatalf("blocked password page should hide password input: %s", blockedBody)
 	}
 	if len(blockedResponse.Result().Cookies()) != 0 {
 		t.Fatalf("blocked password response set cookies: %#v", blockedResponse.Result().Cookies())

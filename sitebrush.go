@@ -75,6 +75,7 @@ const defaultGuestStaticHTMLCacheLimitBytes int64 = 128 * 1024 * 1024
 const guestStaticHTMLCacheQueueSize = 4096
 const emailDeliveryQueueSize = 256
 const emailConfirmationTTL = 24 * time.Hour
+const pagePasswordSessionTTL = time.Hour
 
 // App keeps only explicit dependencies to stay readable and easy to swap.
 type App struct {
@@ -3657,7 +3658,7 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 				}
 				pagePasswordUnlockedForGuest = true
 			} else {
-				a.renderPagePasswordPrompt(w, r, requestDomain, pagePath, "", http.StatusUnauthorized)
+				a.renderPagePasswordPrompt(w, r, requestDomain, pagePath, "", http.StatusUnauthorized, time.Time{})
 				return
 			}
 		}
@@ -8074,7 +8075,7 @@ func (a *App) pagePasswordUnlock(w http.ResponseWriter, r *http.Request, domain,
 		return
 	}
 	if r.Method != http.MethodPost {
-		a.renderPagePasswordPrompt(w, r, domain, pagePath, "", http.StatusUnauthorized)
+		a.renderPagePasswordPrompt(w, r, domain, pagePath, "", http.StatusUnauthorized, time.Time{})
 		return
 	}
 	clientIP := clientIPAddress(r)
@@ -8083,7 +8084,7 @@ func (a *App) pagePasswordUnlock(w http.ResponseWriter, r *http.Request, domain,
 		translations := translationsForRequest(r)
 		if hardLocked {
 			status := translationOrDefault(translations, "login_status_hard_locked", "Too many failed attempts. Use password recovery to unlock access.")
-			a.renderPagePasswordPrompt(w, r, domain, pagePath, status, http.StatusForbidden)
+			a.renderPagePasswordPrompt(w, r, domain, pagePath, status, http.StatusForbidden, time.Time{})
 			return
 		}
 		retryAfterSeconds := int(time.Until(blockedUntil).Seconds())
@@ -8092,7 +8093,7 @@ func (a *App) pagePasswordUnlock(w http.ResponseWriter, r *http.Request, domain,
 		}
 		w.Header().Set("Retry-After", strconv.Itoa(retryAfterSeconds))
 		status := translationOrDefault(translations, "login_status_rate_limited", "Too many failed attempts. Try again later.")
-		a.renderPagePasswordPrompt(w, r, domain, pagePath, status, http.StatusTooManyRequests)
+		a.renderPagePasswordPrompt(w, r, domain, pagePath, status, http.StatusTooManyRequests, blockedUntil)
 		return
 	}
 	if !pagePasswordMatches(rule.PasswordHash, r.FormValue("password")) {
@@ -8100,7 +8101,7 @@ func (a *App) pagePasswordUnlock(w http.ResponseWriter, r *http.Request, domain,
 		failureCount, blockedUntil, hardLocked := a.registerFailedLoginAttempt(r.Context(), failureDomain, clientIP)
 		if hardLocked {
 			status := translationOrDefault(translations, "login_status_hard_locked", "Too many failed attempts. Use password recovery to unlock access.")
-			a.renderPagePasswordPrompt(w, r, domain, pagePath, status, http.StatusForbidden)
+			a.renderPagePasswordPrompt(w, r, domain, pagePath, status, http.StatusForbidden, time.Time{})
 			return
 		}
 		if failureCount >= 4 {
@@ -8110,15 +8111,20 @@ func (a *App) pagePasswordUnlock(w http.ResponseWriter, r *http.Request, domain,
 			}
 			w.Header().Set("Retry-After", strconv.Itoa(retryAfterSeconds))
 			status := translationOrDefault(translations, "login_status_rate_limited", "Too many failed attempts. Try again later.")
-			a.renderPagePasswordPrompt(w, r, domain, pagePath, status, http.StatusTooManyRequests)
+			a.renderPagePasswordPrompt(w, r, domain, pagePath, status, http.StatusTooManyRequests, blockedUntil)
 			return
 		}
 		status := translationOrDefault(translations, "protected_page_invalid", "Incorrect password.")
-		a.renderPagePasswordPrompt(w, r, domain, pagePath, status, http.StatusUnauthorized)
+		a.renderPagePasswordPrompt(w, r, domain, pagePath, status, http.StatusUnauthorized, time.Time{})
 		return
 	}
 	a.clearFailedLoginAttempts(r.Context(), failureDomain, clientIP)
-	http.SetCookie(w, &http.Cookie{Name: pagePasswordCookieName(rule.Domain, rule.Path), Value: pagePasswordSessionToken(rule), Path: "/", HttpOnly: true, SameSite: http.SameSiteLaxMode})
+	issuedAt := time.Now().UTC()
+	cookie := &http.Cookie{Name: pagePasswordCookieName(rule.Domain, rule.Path), Value: pagePasswordSessionTokenForRequest(rule, r, issuedAt), Path: "/", Expires: issuedAt.Add(pagePasswordSessionTTL), MaxAge: int(pagePasswordSessionTTL.Seconds()), HttpOnly: true, SameSite: http.SameSiteLaxMode}
+	if requestScheme(r) == "https" {
+		cookie.Secure = true
+	}
+	http.SetCookie(w, cookie)
 	http.Redirect(w, r, pagePath, http.StatusFound)
 }
 
@@ -8133,7 +8139,7 @@ func (a *App) requirePagePassword(w http.ResponseWriter, r *http.Request, domain
 	if a.pagePasswordSessionValid(r, rule) {
 		return false, true
 	}
-	a.renderPagePasswordPrompt(w, r, domain, pagePath, "", http.StatusUnauthorized)
+	a.renderPagePasswordPrompt(w, r, domain, pagePath, "", http.StatusUnauthorized, time.Time{})
 	return true, false
 }
 
@@ -8142,7 +8148,7 @@ func (a *App) pagePasswordSessionValid(r *http.Request, rule PagePasswordRule) b
 	if err != nil || strings.TrimSpace(cookie.Value) == "" {
 		return false
 	}
-	return cookie.Value == pagePasswordSessionToken(rule)
+	return pagePasswordSessionTokenValid(rule, cookie.Value, r, time.Now().UTC())
 }
 
 func (a *App) setPagePasswordRule(ctx context.Context, domain, pagePath, password string) {
@@ -8210,9 +8216,14 @@ func pagePasswordCookieName(domain, pagePath string) string {
 	return dirprotect.CookieName(normalizeDomainName(domain), pagePath)
 }
 
-func pagePasswordSessionToken(rule PagePasswordRule) string {
+func pagePasswordSessionTokenForRequest(rule PagePasswordRule, r *http.Request, issuedAt time.Time) string {
 	rule.Domain = normalizeDomainName(rule.Domain)
-	return dirprotect.SessionToken(rule)
+	return dirprotect.BoundSessionToken(rule, clientIPAddress(r), r.UserAgent(), issuedAt)
+}
+
+func pagePasswordSessionTokenValid(rule PagePasswordRule, token string, r *http.Request, now time.Time) bool {
+	rule.Domain = normalizeDomainName(rule.Domain)
+	return dirprotect.BoundSessionTokenValid(rule, token, clientIPAddress(r), r.UserAgent(), now, pagePasswordSessionTTL)
 }
 
 func pagePasswordFailureDomain(domain, pagePath string) string {
@@ -8295,22 +8306,43 @@ func (a *App) pagePasswordPrefixFilePath(domain string) string {
 	return filepath.Join(a.storageRootDir(), "page-password-prefixes", domainStorageName(normalizedDomain)+".txt")
 }
 
-func (a *App) renderPagePasswordPrompt(w http.ResponseWriter, r *http.Request, domain, pagePath, status string, statusCode int) {
+func (a *App) renderPagePasswordPrompt(w http.ResponseWriter, r *http.Request, domain, pagePath, status string, statusCode int, blockedUntil time.Time) {
 	translations := translationsForRequest(r)
+	languageCode := preferredLanguageCode(r.Header.Get("Accept-Language"))
 	title := template.HTMLEscapeString(translationOrDefault(translations, "protected_page_title", "Password required"))
 	header := template.HTMLEscapeString(translationOrDefault(translations, "protected_page_header", "This page is password protected."))
 	placeholder := template.HTMLEscapeString(translationOrDefault(translations, "protected_page_password_placeholder", "Password..."))
 	submitLabel := template.HTMLEscapeString(translationOrDefault(translations, "protected_page_submit", "Open"))
+	countdownLabel := template.HTMLEscapeString(translationOrDefault(translations, "login_retry_in", "You can try again in:"))
+	retryAtLabel := template.HTMLEscapeString(translationOrDefault(translations, "login_retry_at", "You can try again at:"))
+	tryAgainNowText := template.HTMLEscapeString(translationOrDefault(translations, "login_try_again_now", "You can try again now."))
 	statusHTML := ""
 	if strings.TrimSpace(status) != "" {
 		statusHTML = "<p class=\"SiteBrushProtectedStatus\">" + template.HTMLEscapeString(status) + "</p>"
 	}
+	formControlsHTML := `<input class="SiteBrushProtectedInput" type="password" name="password" placeholder="` + placeholder + `" autocomplete="current-password" required autofocus>
+      <button class="SiteBrushProtectedButton" type="submit">` + submitLabel + `</button>`
+	countdownHTML := ""
+	if !blockedUntil.IsZero() && blockedUntil.After(time.Now()) {
+		secondsLeft := int(time.Until(blockedUntil).Seconds())
+		if secondsLeft < 1 {
+			secondsLeft = 1
+		}
+		blockedUntilUnix := strconv.FormatInt(blockedUntil.Unix(), 10)
+		blockedUntilISO := template.HTMLEscapeString(blockedUntil.UTC().Format(time.RFC3339))
+		countdownHTML = `<div id="SiteBrushProtectedCountdown" class="SiteBrushProtectedCountdown" data-blocked-until-unix="` + blockedUntilUnix + `" data-blocked-until-iso="` + blockedUntilISO + `" data-ready-text="` + tryAgainNowText + `">
+        <div class="SiteBrushProtectedCountdownLabel">` + countdownLabel + `</div>
+        <div class="SiteBrushProtectedCountdownClock" data-countdown-text>` + formatRetryCountdownSeconds(secondsLeft) + `</div>
+        <div class="SiteBrushProtectedCountdownAt">` + retryAtLabel + ` <span data-countdown-at>` + blockedUntilISO + `</span></div>
+      </div>`
+		formControlsHTML = ""
+	}
 	actionURL := template.HTMLEscapeString(cleanPath(pagePath) + "?page_password_unlock")
-	menuScript := buildGuestContextMenuScriptForLanguage(pagePath, domain, preferredLanguageCode(r.Header.Get("Accept-Language")))
+	menuScript := buildGuestContextMenuScriptForLanguage(pagePath, domain, languageCode)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(statusCode)
 	_, _ = w.Write([]byte(`<!doctype html>
-<html>
+<html lang="` + template.HTMLEscapeString(languageCode) + `">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -8327,6 +8359,9 @@ func (a *App) renderPagePasswordPrompt(w http.ResponseWriter, r *http.Request, d
     h1{margin:0 0 10px 0;font-size:24px;line-height:1.2}
     p{margin:0 0 14px 0;font-size:14px;line-height:1.4}
     .SiteBrushProtectedStatus{color:var(--protected-danger);font-weight:700}
+    .SiteBrushProtectedCountdown{border:1px solid var(--protected-border);padding:12px;margin-top:12px}
+    .SiteBrushProtectedCountdownLabel,.SiteBrushProtectedCountdownAt{font-size:13px;line-height:1.35;opacity:.78}
+    .SiteBrushProtectedCountdownClock{font-size:32px;line-height:1.1;font-weight:700;margin:8px 0}
     .SiteBrushProtectedInput{width:100%;box-sizing:border-box;border:1px solid var(--protected-border);padding:11px 12px;font:inherit;margin-bottom:12px;background:transparent;color:var(--protected-text)}
     .SiteBrushProtectedButton{width:100%;border:0;background:var(--protected-accent);color:#fff;padding:11px 12px;font:inherit;font-weight:700;cursor:pointer}
   </style>
@@ -8338,13 +8373,71 @@ func (a *App) renderPagePasswordPrompt(w http.ResponseWriter, r *http.Request, d
       <h1>` + title + `</h1>
       <p>` + header + `</p>
       ` + statusHTML + `
-      <input class="SiteBrushProtectedInput" type="password" name="password" placeholder="` + placeholder + `" autocomplete="current-password" required autofocus>
-      <button class="SiteBrushProtectedButton" type="submit">` + submitLabel + `</button>
+      ` + countdownHTML + `
+      ` + formControlsHTML + `
     </form>
   </main>
   ` + menuScript + `
+  <script>
+(function startProtectedPageBlockCountdown() {
+  var countdownRoot = document.getElementById('SiteBrushProtectedCountdown');
+  if (!countdownRoot) {
+    return;
+  }
+
+  var blockedUntilUnix = Number(countdownRoot.getAttribute('data-blocked-until-unix'));
+  if (!Number.isFinite(blockedUntilUnix) || blockedUntilUnix <= 0) {
+    return;
+  }
+
+  var countdownTextElement = countdownRoot.querySelector('[data-countdown-text]');
+  var countdownAtElement = countdownRoot.querySelector('[data-countdown-at]');
+  var readyText = countdownRoot.getAttribute('data-ready-text') || '';
+  var blockedUntilDate = new Date(blockedUntilUnix * 1000);
+
+  if (countdownAtElement) {
+    countdownAtElement.textContent = blockedUntilDate.toLocaleString(document.documentElement.lang || undefined);
+  }
+
+  function formatCountdown(totalSeconds) {
+    var hours = Math.floor(totalSeconds / 3600);
+    var minutes = Math.floor((totalSeconds % 3600) / 60);
+    var seconds = totalSeconds % 60;
+    return String(hours).padStart(2, '0') + ':' + String(minutes).padStart(2, '0') + ':' + String(seconds).padStart(2, '0');
+  }
+
+  function renderCountdown() {
+    var secondsLeft = Math.ceil((blockedUntilDate.getTime() - Date.now()) / 1000);
+    if (secondsLeft <= 0) {
+      if (countdownTextElement) {
+        countdownTextElement.textContent = readyText;
+      }
+      window.setTimeout(function reloadProtectedPage() {
+        window.location.reload();
+      }, 1000);
+      return;
+    }
+    if (countdownTextElement) {
+      countdownTextElement.textContent = formatCountdown(secondsLeft);
+    }
+    window.setTimeout(renderCountdown, 1000);
+  }
+
+  renderCountdown();
+})();
+</script>
 </body>
 </html>`))
+}
+
+func formatRetryCountdownSeconds(totalSeconds int) string {
+	if totalSeconds < 0 {
+		totalSeconds = 0
+	}
+	hours := totalSeconds / 3600
+	minutes := (totalSeconds % 3600) / 60
+	seconds := totalSeconds % 60
+	return fmt.Sprintf("%02d:%02d:%02d", hours, minutes, seconds)
 }
 
 func (a *App) latestActiveRevisionID(ctx context.Context, domain string, pagePath string) int {
