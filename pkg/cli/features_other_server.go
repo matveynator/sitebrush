@@ -2,8 +2,8 @@
 
 package cli
 
-func SetupWizardFlagSupported() bool {
-	return false
+func InstallFlagSupported() bool {
+	return true
 }
 
 func DesktopModeFlagSupported() bool {

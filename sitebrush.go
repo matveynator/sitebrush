@@ -54,7 +54,8 @@ import (
 	"sitebrush/pkg/geoip"
 	"sitebrush/pkg/grabber"
 	"sitebrush/pkg/mailout"
-	"sitebrush/pkg/setupwizard"
+	"sitebrush/pkg/serviceinstall"
+	"sitebrush/pkg/winservice"
 )
 
 //go:embed web/*
@@ -2751,6 +2752,13 @@ type listenPorts struct {
 	TLSEnabled bool
 }
 
+type serverRunConfig struct {
+	ParsedPorts listenPorts
+	StoragePath string
+	DBPath      string
+	DesktopMode bool
+}
+
 func main() {
 	port := flag.String("port", "80,443", "listen port or standard pair 80,443")
 	dbType := flag.String("db-type", "sqlite", "database driver (supported: sqlite)")
@@ -2765,9 +2773,11 @@ func main() {
 	if appcli.DesktopModeFlagSupported() {
 		desktopModeFlag = flag.Bool("desktop", desktop.DefaultEnabled(), "enable desktop mode when desktop build tags are used")
 	}
-	var setupModeFlag *bool
-	if appcli.SetupWizardFlagSupported() {
-		setupModeFlag = flag.Bool("setup", false, "run interactive Linux setup wizard mode")
+	var installModeFlag *bool
+	var uninstallModeFlag *bool
+	if appcli.InstallFlagSupported() {
+		installModeFlag = flag.Bool("install", false, "install Sitebrush as a system service")
+		uninstallModeFlag = flag.Bool("uninstall", false, "uninstall Sitebrush system service and remove startup registration")
 	}
 	flag.Parse()
 	if *versionShort || *versionLong {
@@ -2778,9 +2788,16 @@ func main() {
 	if desktopModeFlag != nil {
 		desktopMode = *desktopModeFlag
 	}
-	setupMode := false
-	if setupModeFlag != nil {
-		setupMode = *setupModeFlag
+	installMode := false
+	if installModeFlag != nil {
+		installMode = *installModeFlag
+	}
+	uninstallMode := false
+	if uninstallModeFlag != nil {
+		uninstallMode = *uninstallModeFlag
+	}
+	if installMode && uninstallMode {
+		log.Fatal("choose only one service action: -install or -uninstall")
 	}
 
 	if *dbType != "sqlite" {
@@ -2803,25 +2820,49 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	if setupMode {
-		if err := runLinuxSetupWizard(parsedPorts.HTTPPort, *dbType, effectiveStoragePath, effectiveDBPath); err != nil {
+	if installMode {
+		if err := runServiceInstaller(parsedPorts.Raw, *dbType, effectiveStoragePath, effectiveDBPath); err != nil {
+			handleServiceControlError(err)
+		}
+		return
+	}
+	if uninstallMode {
+		if err := runServiceUninstaller(parsedPorts.Raw, *dbType, effectiveStoragePath, effectiveDBPath); err != nil {
+			handleServiceControlError(err)
+		}
+		return
+	}
+	serverConfig := serverRunConfig{ParsedPorts: parsedPorts, StoragePath: effectiveStoragePath, DBPath: effectiveDBPath, DesktopMode: desktopMode}
+	if handled, err := winservice.RunIfNeeded("sitebrush", func(ctx context.Context) error {
+		return runSitebrushServer(ctx, serverConfig)
+	}); handled {
+		if err != nil {
 			log.Fatal(err)
 		}
 		return
 	}
-	if err := ensureParentDir(effectiveDBPath); err != nil {
+	if err := runSitebrushServer(context.Background(), serverConfig); err != nil {
 		log.Fatal(err)
+	}
+}
+
+func runSitebrushServer(ctx context.Context, config serverRunConfig) error {
+	parsedPorts := config.ParsedPorts
+	effectiveDBPath := config.DBPath
+	effectiveStoragePath := config.StoragePath
+	if err := ensureParentDir(effectiveDBPath); err != nil {
+		return err
 	}
 
 	var siteDatabaseRouter *perSiteDBRouter
 	application := &App{storagePath: effectiveStoragePath, nativeFileDialog: desktop.NativeFileDialogSupported(), grabTracker: newGrabProgressTracker(), publishTracker: newPublishProgressTracker(), analyticsEvents: make(chan siteAnalyticsEvent, 65536), domainLogEvents: make(chan domainLogEvent, 1024)}
-	application.guestStaticHTMLCache = startGuestStaticHTMLCacheWorker(context.Background(), defaultGuestStaticHTMLCacheLimitBytes)
-	application.emailDelivery = startEmailDeliveryWorker(context.Background(), application.defaultEmailSender())
+	application.guestStaticHTMLCache = startGuestStaticHTMLCacheWorker(ctx, defaultGuestStaticHTMLCacheLimitBytes)
+	application.emailDelivery = startEmailDeliveryWorker(ctx, application.defaultEmailSender())
 	application.geoIP = geoip.NewResolver(filepath.Join(application.storageRootDir(), "geoip"))
 	siteDatabaseRootDir := siteDatabaseRootPath(effectiveDBPath)
 	siteDatabaseRouter = newPerSiteDBRouter(siteDatabaseRootDir, "localhost", func(rawDatabase *sql.DB) error {
 		bootstrapApplication := &App{db: rawDatabase, storagePath: effectiveStoragePath}
-		return bootstrapApplication.migrate(contextWithDomain(context.Background(), "localhost"))
+		return bootstrapApplication.migrate(contextWithDomain(ctx, "localhost"))
 	})
 	defer func() {
 		if closeErr := siteDatabaseRouter.Close(); closeErr != nil {
@@ -2836,7 +2877,7 @@ func main() {
 	router := http.NewServeMux()
 	staticFiles, err := fs.Sub(embeddedWebFiles, "web/static")
 	if err != nil {
-		log.Fatal(err)
+		return err
 	}
 	router.Handle("/p/static/", http.StripPrefix("/p/static/", http.FileServer(http.FS(staticFiles))))
 	router.HandleFunc("/p/", application.servePublicAsset)
@@ -2844,7 +2885,7 @@ func main() {
 
 	listener, listenPort, err := listenOnAvailablePort(parsedPorts.HTTPPort)
 	if err != nil {
-		log.Fatal(err)
+		return err
 	}
 	defer listener.Close()
 
@@ -2878,42 +2919,89 @@ func main() {
 			httpHandler = certificateManager.HTTPHandler(appHandler)
 			application.logProblemEvent("AUTOCERT enabled: HTTP challenge on port 80, HTTPS TLS listener on port 443, certificate cache=%s", certificateCacheDir)
 			go application.serveTLSWithAutoCert(tlsListener, application.autoCertTLSConfig(certificateManager), appHandler)
-			application.startAutomaticSSLRefreshWorker(context.Background())
+			application.startAutomaticSSLRefreshWorker(ctx)
 		}
 	}
 
+	server := &http.Server{Handler: httpHandler}
 	serverErrors := make(chan error, 1)
 	go func() {
-		serverErrors <- http.Serve(listener, httpHandler)
+		serverErrors <- server.Serve(listener)
 	}()
 
-	if desktopMode {
+	if config.DesktopMode {
 		if err := desktop.RunWebviewWindow(address, CompileVersion); err != nil {
-			log.Fatal(err)
+			return err
 		}
-		return
+		return nil
 	}
 
-	if err := <-serverErrors; err != nil {
-		log.Fatal(err)
+	select {
+	case err := <-serverErrors:
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			return err
+		}
+		return nil
+	case <-ctx.Done():
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := server.Shutdown(shutdownCtx); err != nil {
+			return err
+		}
+		if err := <-serverErrors; err != nil && !errors.Is(err, http.ErrServerClosed) {
+			return err
+		}
+		return nil
 	}
 }
 
-func runLinuxSetupWizard(port int, dbType, storagePath, dbPath string) error {
+func runServiceInstaller(port, dbType, storagePath, dbPath string) error {
 	binaryPath, err := os.Executable()
 	if err != nil || strings.TrimSpace(binaryPath) == "" {
 		binaryPath = os.Args[0]
 	}
-	defaults := setupwizard.Defaults{
+	_, err = serviceinstall.Install(context.Background(), serviceinstall.Options{
 		Port:        port,
 		StoragePath: storagePath,
 		DBType:      dbType,
 		DBPath:      dbPath,
 		BinaryPath:  binaryPath,
 		WorkingDir:  storagePath,
-	}
-	_, err = setupwizard.Run(context.Background(), os.Stdin, os.Stdout, defaults)
+		Input:       os.Stdin,
+		Output:      os.Stdout,
+	})
 	return err
+}
+
+func runServiceUninstaller(port, dbType, storagePath, dbPath string) error {
+	binaryPath, err := os.Executable()
+	if err != nil || strings.TrimSpace(binaryPath) == "" {
+		binaryPath = os.Args[0]
+	}
+	_, err = serviceinstall.Uninstall(context.Background(), serviceinstall.Options{
+		Port:        port,
+		StoragePath: storagePath,
+		DBType:      dbType,
+		DBPath:      dbPath,
+		BinaryPath:  binaryPath,
+		WorkingDir:  storagePath,
+		Input:       os.Stdin,
+		Output:      os.Stdout,
+	})
+	return err
+}
+
+func handleServiceControlError(err error) {
+	if errors.Is(err, serviceinstall.ErrCancelled) {
+		message := strings.TrimSpace(strings.TrimSuffix(err.Error(), ": "+serviceinstall.ErrCancelled.Error()))
+		if message == "" {
+			message = err.Error()
+		}
+		fmt.Fprintln(os.Stdout, message)
+		return
+	}
+	fmt.Fprintf(os.Stderr, "Sitebrush service action failed: %v\n", err)
+	os.Exit(1)
 }
 
 func parseListenPorts(rawPorts string) (listenPorts, error) {

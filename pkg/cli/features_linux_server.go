@@ -2,7 +2,7 @@
 
 package cli
 
-func SetupWizardFlagSupported() bool {
+func InstallFlagSupported() bool {
 	return true
 }
 
