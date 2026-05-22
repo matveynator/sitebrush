@@ -301,7 +301,7 @@ func TestContextMenuUsesDirectEditorProfileAndDeleteActions(t *testing.T) {
 		t.Fatalf("revision id: %v", err)
 	}
 
-	request := httptest.NewRequest(http.MethodGet, "http://localhost:8080/docs", nil)
+	request := httptest.NewRequest(http.MethodGet, "http://localhost:8080/docs/", nil)
 	request.Header.Set("Accept-Language", "en")
 	request.AddCookie(newAdminSessionCookie(t, application, "admin@example.com"))
 	response := httptest.NewRecorder()
@@ -704,8 +704,17 @@ func TestChrootLocationSettingsCreatesDirectoryAndServesIndex(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	redirectResponse := httptest.NewRecorder()
+	application.route(redirectResponse, httptest.NewRequest(http.MethodGet, "http://localhost:8080/downloads", nil))
+	if redirectResponse.Code != http.StatusMovedPermanently {
+		t.Fatalf("redirect status = %d, want %d", redirectResponse.Code, http.StatusMovedPermanently)
+	}
+	if location := redirectResponse.Header().Get("Location"); location != "/downloads/" {
+		t.Fatalf("redirect location = %q, want %q", location, "/downloads/")
+	}
+
 	response := httptest.NewRecorder()
-	application.route(response, httptest.NewRequest(http.MethodGet, "http://localhost:8080/downloads", nil))
+	application.route(response, httptest.NewRequest(http.MethodGet, "http://localhost:8080/downloads/", nil))
 	if response.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d", response.Code, http.StatusOK)
 	}
@@ -732,7 +741,7 @@ func TestChrootDirectoryListingUsesEmbeddedSitebrushStyle(t *testing.T) {
 	}
 
 	response := httptest.NewRecorder()
-	application.route(response, httptest.NewRequest(http.MethodGet, "http://localhost:8080/downloads", nil))
+	application.route(response, httptest.NewRequest(http.MethodGet, "http://localhost:8080/downloads/", nil))
 	if response.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d", response.Code, http.StatusOK)
 	}
@@ -765,7 +774,7 @@ func TestChrootLocationAllowsSymlinksInsideDomainChroot(t *testing.T) {
 	createTestSymlink(t, filepath.Join("..", "releases", "v1"), filepath.Join(chrootRoot, "downloads", "latest"))
 
 	response := httptest.NewRecorder()
-	application.route(response, httptest.NewRequest(http.MethodGet, "http://localhost:8080/downloads/latest", nil))
+	application.route(response, httptest.NewRequest(http.MethodGet, "http://localhost:8080/downloads/latest/", nil))
 	if response.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d", response.Code, http.StatusOK)
 	}
@@ -773,7 +782,7 @@ func TestChrootLocationAllowsSymlinksInsideDomainChroot(t *testing.T) {
 		t.Fatalf("body does not include symlinked index: %q", response.Body.String())
 	}
 
-	listingRequest := httptest.NewRequest(http.MethodGet, "http://localhost:8080/downloads", nil)
+	listingRequest := httptest.NewRequest(http.MethodGet, "http://localhost:8080/downloads/", nil)
 	listingRequest.Header.Set("Accept-Language", "en")
 	listingResponse := httptest.NewRecorder()
 	application.route(listingResponse, listingRequest)
@@ -804,7 +813,7 @@ func TestChrootLocationBlocksSymlinksOutsideDomainChroot(t *testing.T) {
 	}
 
 	listingResponse := httptest.NewRecorder()
-	application.route(listingResponse, httptest.NewRequest(http.MethodGet, "http://localhost:8080/downloads", nil))
+	application.route(listingResponse, httptest.NewRequest(http.MethodGet, "http://localhost:8080/downloads/", nil))
 	if listingResponse.Code != http.StatusOK {
 		t.Fatalf("listing status = %d, want %d", listingResponse.Code, http.StatusOK)
 	}
@@ -1507,7 +1516,7 @@ func TestPagePasswordProtectionAppliesToNestedPaths(t *testing.T) {
 		t.Fatalf("opened protected page missing content: %s", openedResponse.Body.String())
 	}
 
-	siblingRequest := httptest.NewRequest(http.MethodGet, "http://localhost:8080/passports", nil)
+	siblingRequest := httptest.NewRequest(http.MethodGet, "http://localhost:8080/passports/", nil)
 	siblingResponse := httptest.NewRecorder()
 	application.route(siblingResponse, siblingRequest)
 	if siblingResponse.Code != http.StatusOK || !strings.Contains(siblingResponse.Body.String(), "sibling static public") {
@@ -1553,7 +1562,17 @@ func TestGuestProtectedStaticRouteUsesPrefixFileWithoutDatabase(t *testing.T) {
 		t.Fatalf("opened protected page missing content: %s", openedResponse.Body.String())
 	}
 
-	publicRequest := httptest.NewRequest(http.MethodGet, "http://localhost:8080/public", nil)
+	publicRedirectRequest := httptest.NewRequest(http.MethodGet, "http://localhost:8080/public", nil)
+	publicRedirectResponse := httptest.NewRecorder()
+	application.route(publicRedirectResponse, publicRedirectRequest)
+	if publicRedirectResponse.Code != http.StatusMovedPermanently {
+		t.Fatalf("public redirect status = %d, want %d, body=%q", publicRedirectResponse.Code, http.StatusMovedPermanently, publicRedirectResponse.Body.String())
+	}
+	if location := publicRedirectResponse.Header().Get("Location"); location != "/public/" {
+		t.Fatalf("public redirect location = %q, want %q", location, "/public/")
+	}
+
+	publicRequest := httptest.NewRequest(http.MethodGet, "http://localhost:8080/public/", nil)
 	publicResponse := httptest.NewRecorder()
 	application.route(publicResponse, publicRequest)
 	if publicResponse.Code != http.StatusOK || !strings.Contains(publicResponse.Body.String(), "public static page") {
@@ -2517,7 +2536,7 @@ func TestFrozenSavePublishUpdatesPublishedStaticForGuests(t *testing.T) {
 		t.Fatalf("save status = %d, body=%q", saveResponse.Code, saveResponse.Body.String())
 	}
 
-	frozenGuestRequest := httptest.NewRequest(http.MethodGet, "http://localhost:8080/docs", nil)
+	frozenGuestRequest := httptest.NewRequest(http.MethodGet, "http://localhost:8080/docs/", nil)
 	frozenGuestResponse := httptest.NewRecorder()
 	application.route(frozenGuestResponse, frozenGuestRequest)
 	if !strings.Contains(frozenGuestResponse.Body.String(), "Old public page") {
@@ -2553,7 +2572,7 @@ func TestFrozenSavePublishUpdatesPublishedStaticForGuests(t *testing.T) {
 		t.Fatal("domain remained frozen after publish")
 	}
 
-	publishedGuestRequest := httptest.NewRequest(http.MethodGet, "http://localhost:8080/docs", nil)
+	publishedGuestRequest := httptest.NewRequest(http.MethodGet, "http://localhost:8080/docs/", nil)
 	publishedGuestResponse := httptest.NewRecorder()
 	application.route(publishedGuestResponse, publishedGuestRequest)
 	if !strings.Contains(publishedGuestResponse.Body.String(), "New frozen edit") {
@@ -3806,7 +3825,7 @@ jQuery(document).ready(function($) { $('#SiteBrush').contextMenu('SiteBrushMenu'
 	if err != nil {
 		t.Fatalf("insert imported page: %v", err)
 	}
-	request := httptest.NewRequest(http.MethodGet, "http://localhost:8080/rotorway4", nil)
+	request := httptest.NewRequest(http.MethodGet, "http://localhost:8080/rotorway4/", nil)
 	request.AddCookie(newAdminSessionCookie(t, application, "admin@example.com"))
 	response := httptest.NewRecorder()
 	application.route(response, request)
@@ -4080,7 +4099,7 @@ func TestGuestStaticRouteServesPublishedFileWithoutDatabase(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	request := httptest.NewRequest(http.MethodGet, "http://localhost:8080/en", nil)
+	request := httptest.NewRequest(http.MethodGet, "http://localhost:8080/en/", nil)
 	response := httptest.NewRecorder()
 	application.route(response, request)
 	if response.Code != http.StatusOK {
@@ -5334,6 +5353,37 @@ func TestMovedPageRedirectsFromOldPathToNewPath(t *testing.T) {
 	}
 	if location := oldPathResponse.Header().Get("Location"); location != "/address" {
 		t.Fatalf("old path location = %q, want %q", location, "/address")
+	}
+}
+
+func TestCanonicalTrailingSlashRedirectsExistingPage(t *testing.T) {
+	application, rawDB := newTestApplication(t)
+	_, err := rawDB.Exec(`INSERT INTO pages(domain,path,title,html,published) VALUES(?,?,?,?,1)`, "localhost", "/service", "Service", "<html><body>Service page</body></html>")
+	if err != nil {
+		t.Fatalf("insert page: %v", err)
+	}
+	_, err = rawDB.Exec(`INSERT INTO published_pages(domain,path,title,html) VALUES(?,?,?,?)`, "localhost", "/service", "Service", "<html><body>Service page</body></html>")
+	if err != nil {
+		t.Fatalf("insert published page: %v", err)
+	}
+	application.writePublishedStaticHTML("localhost", "/service", "<html><body>Service page</body></html>")
+
+	redirectResponse := httptest.NewRecorder()
+	application.route(redirectResponse, httptest.NewRequest(http.MethodGet, "http://localhost:8080/service", nil))
+	if redirectResponse.Code != http.StatusMovedPermanently {
+		t.Fatalf("redirect status = %d, body=%q", redirectResponse.Code, redirectResponse.Body.String())
+	}
+	if location := redirectResponse.Header().Get("Location"); location != "/service/" {
+		t.Fatalf("redirect location = %q, want %q", location, "/service/")
+	}
+
+	pageResponse := httptest.NewRecorder()
+	application.route(pageResponse, httptest.NewRequest(http.MethodGet, "http://localhost:8080/service/", nil))
+	if pageResponse.Code != http.StatusOK {
+		t.Fatalf("page status = %d, body=%q", pageResponse.Code, pageResponse.Body.String())
+	}
+	if !strings.Contains(pageResponse.Body.String(), "Service page") {
+		t.Fatalf("page body does not include service content: %q", pageResponse.Body.String())
 	}
 }
 

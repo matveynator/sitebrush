@@ -3547,9 +3547,17 @@ func (a *App) assignMissingDomainAliasTokens(ctx context.Context) {
 }
 
 func (a *App) route(w http.ResponseWriter, r *http.Request) {
-	pagePath := r.URL.Path
+	pagePath := cleanPath(r.URL.Path)
 	if a.isDomainPrefixedPublicAssetPath(r) {
 		a.servePublicAsset(w, r)
+		return
+	}
+	requestDomain := domainFromContext(r.Context())
+	if strings.TrimSpace(requestDomain) == "" {
+		requestDomain = domainFromRequest(r)
+	}
+	if redirectTarget := a.canonicalTrailingSlashStaticRedirectTarget(r, requestDomain, pagePath); redirectTarget != "" {
+		http.Redirect(w, r, redirectTarget, http.StatusMovedPermanently)
 		return
 	}
 	if hasQueryFlag(r, "logout") {
@@ -3696,10 +3704,6 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 		a.captchaImage(w, r)
 		return
 	}
-	requestDomain := domainFromContext(r.Context())
-	if strings.TrimSpace(requestDomain) == "" {
-		requestDomain = domainFromRequest(r)
-	}
 	pagePasswordUnlockedForGuest := false
 	if isGuestStaticRequest(r) {
 		if rule, found := a.pagePasswordRuleFromPrefixFile(requestDomain, pagePath); found {
@@ -3724,6 +3728,10 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	domain := a.siteDomain(r.Context(), r)
+	if redirectTarget := a.canonicalTrailingSlashRedirectTarget(r, domain, pagePath); redirectTarget != "" {
+		http.Redirect(w, r, redirectTarget, http.StatusMovedPermanently)
+		return
+	}
 	if hasQueryFlag(r, "page_password_unlock") {
 		a.pagePasswordUnlock(w, r, domain, pagePath)
 		return
@@ -4050,6 +4058,81 @@ func cleanPath(rawPath string) string {
 		return "/"
 	}
 	return normalizedPath
+}
+
+func requestCanUseCanonicalTrailingSlash(r *http.Request, pagePath string) bool {
+	if r == nil || r.URL == nil {
+		return false
+	}
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		return false
+	}
+	if strings.TrimSpace(r.URL.RawQuery) != "" {
+		return false
+	}
+	rawPath := strings.TrimSpace(r.URL.Path)
+	if rawPath == "" || rawPath == "/" || strings.HasSuffix(rawPath, "/") {
+		return false
+	}
+	if pagePath == "/" || strings.HasPrefix(pagePath, "/p/") {
+		return false
+	}
+	if path.Ext(path.Base(pagePath)) != "" {
+		return false
+	}
+	return true
+}
+
+func canonicalTrailingSlashURL(r *http.Request, pagePath string) string {
+	redirectURL := url.URL{}
+	redirectURL.Path = pagePath + "/"
+	redirectURL.RawQuery = r.URL.RawQuery
+	return redirectURL.String()
+}
+
+func (a *App) canonicalTrailingSlashStaticRedirectTarget(r *http.Request, domain, pagePath string) string {
+	if !requestCanUseCanonicalTrailingSlash(r, pagePath) {
+		return ""
+	}
+	if _, found := a.pagePasswordRuleFromPrefixFile(domain, pagePath); found {
+		return ""
+	}
+	if !a.publishedStaticPageExists(domain, pagePath) {
+		return ""
+	}
+	return canonicalTrailingSlashURL(r, pagePath)
+}
+
+func (a *App) canonicalTrailingSlashRedirectTarget(r *http.Request, domain, pagePath string) string {
+	if !requestCanUseCanonicalTrailingSlash(r, pagePath) {
+		return ""
+	}
+	if redirectTargetPath := a.resolvedPageRedirectPath(r.Context(), domain, pagePath); redirectTargetPath != "" && redirectTargetPath != pagePath {
+		return ""
+	}
+	if _, found := a.pagePasswordRuleFromPrefixFile(domain, pagePath); found {
+		return ""
+	}
+	if !a.canonicalTrailingSlashResourceExists(r.Context(), domain, pagePath) {
+		return ""
+	}
+	return canonicalTrailingSlashURL(r, pagePath)
+}
+
+func (a *App) canonicalTrailingSlashResourceExists(ctx context.Context, domain, pagePath string) bool {
+	if a.publishedStaticPageExists(domain, pagePath) {
+		return true
+	}
+	var storedPageCount int
+	_ = a.db.QueryRowContext(ctx, `SELECT COUNT(1) FROM pages WHERE domain=? AND path=?`, domain, pagePath).Scan(&storedPageCount)
+	if storedPageCount > 0 {
+		return true
+	}
+	_ = a.db.QueryRowContext(ctx, `SELECT COUNT(1) FROM published_pages WHERE domain=? AND path=?`, domain, pagePath).Scan(&storedPageCount)
+	if storedPageCount > 0 {
+		return true
+	}
+	return a.chrootResourceExists(ctx, domain, pagePath)
 }
 
 func loginReturnPathOrDefault(r *http.Request) string {
@@ -12560,6 +12643,20 @@ func (a *App) serveDomainChrootLocation(w http.ResponseWriter, r *http.Request, 
 	return true
 }
 
+func (a *App) chrootResourceExists(ctx context.Context, domain, requestPath string) bool {
+	location, relativeRequestPath, found := a.matchDomainChrootLocation(ctx, domain, requestPath)
+	if !found {
+		return false
+	}
+	validatedDirectoryPath, err := a.normalizeAndValidateChrootLocationPath(domain, location.DirectoryPath)
+	if err != nil {
+		return false
+	}
+	location.DirectoryPath = validatedDirectoryPath
+	_, _, err = a.resolveChrootLocationTargetPath(domain, location, relativeRequestPath)
+	return err == nil
+}
+
 func (a *App) renderDirectoryListing(w http.ResponseWriter, r *http.Request, domain, requestPath, absoluteDirectoryPath, locationURLPath string) {
 	entries, err := os.ReadDir(absoluteDirectoryPath)
 	if err != nil {
@@ -14390,6 +14487,7 @@ func hasSitebrushSessionCookie(r *http.Request) bool {
 }
 
 func (a *App) servePublishedStaticFileFromDisk(w http.ResponseWriter, r *http.Request, domain, pagePath string, injectPublicMenu bool) bool {
+	pagePath = cleanPath(pagePath)
 	staticFilePath := filepath.Join(a.domainStaticDir(domain), staticRelativePathForPage(pagePath))
 	fileInfo, statErr := os.Stat(staticFilePath)
 	if statErr != nil || fileInfo.IsDir() {
@@ -14416,6 +14514,12 @@ func (a *App) servePublishedStaticFileFromDisk(w http.ResponseWriter, r *http.Re
 	}
 	_, _ = w.Write(staticContent)
 	return true
+}
+
+func (a *App) publishedStaticPageExists(domain, pagePath string) bool {
+	staticFilePath := filepath.Join(a.domainStaticDir(domain), staticRelativePathForPage(cleanPath(pagePath)))
+	fileInfo, statErr := os.Stat(staticFilePath)
+	return statErr == nil && !fileInfo.IsDir()
 }
 
 func (a *App) guestStaticHTML(staticFilePath, pagePath, domain, languageCode string, fileInfo os.FileInfo) ([]byte, error) {
