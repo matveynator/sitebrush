@@ -20,9 +20,19 @@
     .file-icon { width:64px; height:64px; border-radius:8px; display:grid; place-items:center; border:1px solid var(--bs-border-color); background:var(--bs-tertiary-bg); color:var(--bs-secondary-color); font-weight:700; }
     .file-preview-trigger { width:64px; height:64px; border-radius:8px; display:grid; place-items:center; border:1px solid var(--bs-border-color); background:var(--bs-tertiary-bg); color:var(--bs-body-color); font-weight:700; cursor:pointer; padding:0; }
     .copy-field { font-family:ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size:.82rem; }
+    .copy-link-group { width:clamp(280px, 42vw, 680px); max-width:calc(100vw - 48px); }
+    .copy-link-group .copy-field { min-width:0; height:24px; padding:.125rem .4rem; font-size:.72rem; line-height:1.15; }
+    .copy-link-group .btn { --bs-btn-padding-y:.125rem; --bs-btn-padding-x:.45rem; --bs-btn-font-size:.72rem; line-height:1.15; }
     .table td { vertical-align:middle; }
-    .access-grid { display:grid; grid-template-columns:minmax(120px,150px) minmax(160px,1fr) minmax(110px,140px) auto; gap:.5rem; align-items:center; }
-    @media (max-width: 900px) { .access-grid { grid-template-columns:1fr; } }
+    .file-link-cell { min-width:clamp(360px, 46vw, 720px); }
+    .access-cell { min-width:340px; }
+    .access-grid { display:grid; grid-template-columns:minmax(105px,130px) minmax(140px,1fr) minmax(86px,110px) auto; gap:.5rem; align-items:center; }
+    @media (max-width: 900px) {
+      .access-grid { grid-template-columns:1fr; }
+      .file-link-cell { min-width:calc(100vw - 56px); }
+      .access-cell { min-width:calc(100vw - 56px); }
+      .copy-link-group { width:calc(100vw - 72px); }
+    }
     .preview-image { max-width:100%; max-height:72vh; object-fit:contain; }
     .uploaded-focus { outline:3px solid var(--bs-primary); outline-offset:-3px; animation:uploadedPulse 1.8s ease-in-out 2; }
     @keyframes uploadedPulse { 0%,100% { background:transparent; } 50% { background:rgba(var(--bs-primary-rgb), .14); } }
@@ -61,10 +71,10 @@
         <thead>
           <tr>
             <th style="width:86px;">{{index .T "files_col_preview"}}</th>
-            <th>{{index .T "files_col_file_link"}}</th>
+            <th class="file-link-cell">{{index .T "files_col_file_link"}}</th>
             <th style="width:140px;">{{index .T "files_col_size"}}</th>
             <th style="width:170px;">{{index .T "files_col_date"}}</th>
-            <th style="min-width:420px;">{{index .T "files_col_access"}}</th>
+            <th class="access-cell">{{index .T "files_col_access"}}</th>
             <th style="width:110px;">{{index .T "files_col_actions"}}</th>
           </tr>
         </thead>
@@ -78,18 +88,17 @@
               <div class="file-icon">{{.Extension}}</div>
               {{end}}
             </td>
-            <td>
+            <td class="file-link-cell">
               <div class="fw-semibold text-break">{{.Name}}</div>
               {{if .PagePath}}<div class="small text-muted">{{index $.T "files_uri_label"}} <code>{{.PagePath}}</code></div>{{end}}
-              <div class="small text-muted">{{index $.T "files_download_count"}} {{.DownloadCount}}</div>
-              <div class="input-group input-group-sm mt-2">
+              <div class="input-group input-group-sm copy-link-group mt-2">
                 <input class="form-control copy-field" readonly data-full-link data-asset-path="{{.AssetPath}}">
                 <button class="btn btn-outline-secondary" type="button" data-copy-target="full">{{index $.T "files_copy"}}</button>
               </div>
             </td>
             <td><span class="text-muted">{{.SizeLabel}}</span></td>
             <td><span class="text-muted">{{.CreatedAt}}</span></td>
-            <td>
+            <td class="access-cell">
               <form method="post" action="{{$.Path}}?files" class="access-grid" data-access-form>
                 <input type="hidden" name="action" value="save_access">
                 <input type="hidden" name="name" value="{{.Name}}">
@@ -101,13 +110,12 @@
                 <input name="access_token" class="form-control form-control-sm copy-field" placeholder="{{index $.T "files_access_token_placeholder"}}" value="{{.Token}}" data-access-token data-token-control>
                 <input name="access_days" class="form-control form-control-sm" type="number" min="0" placeholder="{{index $.T "files_access_days_placeholder"}}" data-timer-control>
                 <button class="btn btn-sm btn-outline-primary d-none" type="submit" data-save-access>{{index $.T "files_access_save"}}</button>
-                <div class="input-group input-group-sm" data-token-link-row style="grid-column:1 / -1;">
+                <div class="input-group input-group-sm copy-link-group" data-token-link-row style="grid-column:1 / -1;">
                   <input class="form-control copy-field" readonly data-token-link data-asset-path="{{.AssetPath}}">
                   <button class="btn btn-outline-secondary" type="button" data-copy-target="token">{{index $.T "files_copy_token_link"}}</button>
                 </div>
               </form>
               {{if .ExpiresAt}}<small class="text-muted">{{index $.T "files_expires"}} {{.ExpiresAt}}</small>{{end}}
-              {{if eq .AccessMode "token"}}<small class="text-muted d-block">{{index $.T "files_token_used"}} {{.TokenUseCount}}</small>{{end}}
             </td>
             <td>
               <form method="post" action="{{$.Path}}?files">

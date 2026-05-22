@@ -4263,6 +4263,14 @@ func TestFilesPageDoesNotAutoLoadImageAssets(t *testing.T) {
 			t.Fatalf("files page missing %q in %s", expectedFragment, body)
 		}
 	}
+	for _, expectedFragment := range []string{`copy-link-group`, `width:clamp(280px, 42vw, 680px)`, `height:24px`} {
+		if !strings.Contains(body, expectedFragment) {
+			t.Fatalf("files page missing compact adaptive link UI %q in %s", expectedFragment, body)
+		}
+	}
+	if strings.Contains(body, `files_download_count`) || strings.Contains(body, `Скачиваний:`) || strings.Contains(body, `Downloads:`) {
+		t.Fatalf("files page still renders download counters: %s", body)
+	}
 }
 
 func TestAssetServingCountsDownloadsAndTokenUse(t *testing.T) {
