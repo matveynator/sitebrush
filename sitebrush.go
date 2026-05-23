@@ -8372,6 +8372,10 @@ func (a *App) pagePasswordAction(w http.ResponseWriter, r *http.Request) {
 		}
 		a.setPagePasswordRule(r.Context(), domain, pagePath, password)
 	case "remove":
+		if rule, found := a.pagePasswordRuleForPath(r.Context(), domain, pagePath); found {
+			a.removePagePasswordRule(r.Context(), domain, rule.Path)
+			break
+		}
 		a.removePagePasswordRule(r.Context(), domain, pagePath)
 	default:
 		http.Error(w, "unknown password action", http.StatusBadRequest)
@@ -8825,7 +8829,10 @@ func (a *App) injectContextMenu(r *http.Request, pagePath, html string) string {
 		storageUsage := a.domainStorageUsage(r.Context(), domain)
 		storageUsageLabel = formatFileSize(storageUsage.totalBytes()) + " / " + formatFileSize(storageUsage.LimitBytes)
 	}
-	pagePasswordProtected := a.isAdminRequest(r) && a.pagePasswordRuleExists(r.Context(), domain, pagePath)
+	pagePasswordProtected := false
+	if a.isAdminRequest(r) {
+		_, pagePasswordProtected = a.pagePasswordRuleForPath(r.Context(), domain, pagePath)
+	}
 	menuScript := buildContextMenuScript(a.isAdminRequest(r), a.isDomainFrozen(r.Context(), domain), pagePasswordProtected, pagePath, domain, revisionID, revisionCount, storageUsageLabel, translationsForRequest(r))
 	if strings.Contains(strings.ToLower(html), "</body>") {
 		bodyClosePattern := regexp.MustCompile(`(?i)</body>`)
@@ -9053,6 +9060,68 @@ func buildContextMenuScript(isAdmin bool, isFrozen bool, pagePasswordProtected b
     cancelButtonElement.addEventListener("click", closeDialog);
     confirmButtonElement.addEventListener("click", function onConfirmClick() { closeDialog(); onConfirm(); });
   }
+  function openPasswordProtectionDialog(onConfirm) {
+    closeSitebrushMenu();
+    const overlayElement = document.createElement("div");
+    overlayElement.className = "SiteBrushConfirmOverlay";
+    const modalElement = document.createElement("div");
+    modalElement.className = "SiteBrushConfirmModal SiteBrushPasswordModal";
+    const textElement = document.createElement("p");
+    textElement.className = "SiteBrushConfirmText";
+    textElement.textContent = "` + protectPasswordPrompt + `";
+    const passwordInputElement = document.createElement("input");
+    passwordInputElement.type = "password";
+    passwordInputElement.className = "SiteBrushPasswordInput";
+    passwordInputElement.autocomplete = "new-password";
+    const errorElement = document.createElement("div");
+    errorElement.className = "SiteBrushPasswordError";
+    errorElement.hidden = true;
+    errorElement.textContent = "` + protectPasswordEmptyLabel + `";
+    const actionRowElement = document.createElement("div");
+    actionRowElement.className = "SiteBrushConfirmActions";
+    const confirmButtonElement = document.createElement("button");
+    confirmButtonElement.type = "button";
+    confirmButtonElement.className = "SiteBrushConfirmButton";
+    confirmButtonElement.textContent = "` + protectPasswordLabel + `";
+    const cancelButtonElement = document.createElement("button");
+    cancelButtonElement.type = "button";
+    cancelButtonElement.className = "SiteBrushCancelButton";
+    cancelButtonElement.textContent = confirmNoLabel;
+    actionRowElement.appendChild(confirmButtonElement);
+    actionRowElement.appendChild(cancelButtonElement);
+    modalElement.appendChild(textElement);
+    modalElement.appendChild(passwordInputElement);
+    modalElement.appendChild(errorElement);
+    modalElement.appendChild(actionRowElement);
+    overlayElement.appendChild(modalElement);
+    document.body.appendChild(overlayElement);
+    function closeDialog() { overlayElement.remove(); }
+    function submitPasswordDialog() {
+      const passwordText = passwordInputElement.value || "";
+      if (passwordText.trim() === "") {
+        errorElement.hidden = false;
+        passwordInputElement.focus();
+        return;
+      }
+      closeDialog();
+      onConfirm(passwordText);
+    }
+    cancelButtonElement.addEventListener("click", closeDialog);
+    confirmButtonElement.addEventListener("click", submitPasswordDialog);
+    passwordInputElement.addEventListener("keydown", function onPasswordKeyDown(keyboardEvent) {
+      if (keyboardEvent.key === "Enter") {
+        keyboardEvent.preventDefault();
+        submitPasswordDialog();
+      }
+      if (keyboardEvent.key === "Escape") {
+        keyboardEvent.preventDefault();
+        closeDialog();
+      }
+    });
+    window.setTimeout(function focusPasswordInput() {
+      passwordInputElement.focus();
+    }, 0);
+  }
   function randomSitebrushToken() {
     return Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 12);
   }
@@ -9148,15 +9217,9 @@ func buildContextMenuScript(isAdmin bool, isFrozen bool, pagePasswordProtected b
       return;
     }
     if (actionName === "protect_password") {
-      const passwordText = window.prompt("` + protectPasswordPrompt + `");
-      if (passwordText === null) {
-        return;
-      }
-      if (passwordText.trim() === "") {
-        window.alert("` + protectPasswordEmptyLabel + `");
-        return;
-      }
-      submitPasswordActionForm("?page_password=protect", passwordText);
+      openPasswordProtectionDialog(function submitProtectedPagePassword(passwordText) {
+        submitPasswordActionForm("?page_password=protect", passwordText);
+      });
       return;
     }
     const selectedActionConfig = actionConfigByName[actionName];
@@ -9786,6 +9849,9 @@ func contextMenuStylesAndHelpers() string {
 .SiteBrushConfirmOverlay{position:fixed;inset:0;background:rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center;z-index:2147483647}
 .SiteBrushConfirmModal{background:#fff;border:1px solid #8ea4c1;min-width:260px;max-width:340px;padding:16px;font-family:Arial,Helvetica,sans-serif}
 .SiteBrushConfirmText{margin:0 0 14px 0;color:#1f3f6f;font-size:14px}
+.SiteBrushPasswordModal{min-width:300px}
+.SiteBrushPasswordInput{display:block;width:100%;box-sizing:border-box;border:1px solid #8ea4c1;background:#fff;color:#1f3f6f;padding:8px 10px;margin:0 0 10px 0;font-family:Arial,Helvetica,sans-serif;font-size:14px}
+.SiteBrushPasswordError{margin:0 0 10px 0;color:#b42318;font-family:Arial,Helvetica,sans-serif;font-size:13px;font-weight:700}
 .SiteBrushPublishPreviewList{list-style:none;margin:0 0 12px 0;padding:0;max-height:180px;overflow:auto}
 .SiteBrushPublishPreviewListItem{margin:0 0 4px 0}
 .SiteBrushPublishPreviewLink{color:#1f3f6f;text-decoration:underline;font-size:13px}
@@ -9826,6 +9892,8 @@ func contextMenuStylesAndHelpers() string {
   .SiteBrushContextMenuFooterLink:link,.SiteBrushContextMenuFooterLink:visited,.SiteBrushContextMenuFooterLink:active,.SiteBrushContextMenuFooterLink:hover,.SiteBrushContextMenuVersion:link,.SiteBrushContextMenuVersion:visited,.SiteBrushContextMenuVersion:active,.SiteBrushContextMenuVersion:hover{color:#a7bbd8}
   .SiteBrushConfirmModal{background:#172235;border-color:#2f405d}
   .SiteBrushConfirmText,.SiteBrushPublishPreviewLink{color:#dbe8ff}
+  .SiteBrushPasswordInput{background:#0f1724;color:#dbe8ff;border-color:#405674}
+  .SiteBrushPasswordError{color:#ffb4a8}
   .SiteBrushPublishPreviewLink:link,.SiteBrushPublishPreviewLink:visited,.SiteBrushPublishPreviewLink:active,.SiteBrushPublishPreviewLink:hover{color:#dbe8ff}
   .SiteBrushPublishProgressPath{color:#a7bbd8}
   .SiteBrushPublishProgress{background:#22324a;border-color:#405674}

@@ -323,24 +323,29 @@ func TestContextMenuUsesDirectEditorProfileAndDeleteActions(t *testing.T) {
 	if strings.Contains(body, "href='?edit'") {
 		t.Fatalf("context menu still contains intermediate edit link: %s", body)
 	}
-	for _, expectedFragment := range []string{`window.location.href = targetHref;`, `closestSitebrushEventElement(browserEvent, "#SiteBrushMenuBox")`, `function closeSitebrushMenu()`, `z-index:2147483647`, `closeSitebrushMenu();`, `data-sitebrush-owned`, `sitebrushContextMenuShadowCSS`, `attachShadow({mode: "open"})`, `menuRoot.appendChild(menuStyleElement)`, `.SiteBrushContextMenuLink:link`, `.SiteBrushContextMenuLink:visited`, `window.addEventListener("contextmenu", onContextMenuOpen, {capture: true, passive: false})`, `installSitebrushLongPressMenu`, `document.addEventListener("pointerdown", startLongPress`, `document.addEventListener("touchstart"`, `positionSitebrushMenuBox(menuBoxElement, menuPoint)`, `max-height:calc(100vh - 16px)`, `@media (pointer: coarse), (max-width: 820px)`} {
+	for _, expectedFragment := range []string{`window.location.href = targetHref;`, `closestSitebrushEventElement(browserEvent, "#SiteBrushMenuBox")`, `function closeSitebrushMenu()`, `z-index:2147483647`, `closeSitebrushMenu();`, `data-sitebrush-owned`, `sitebrushContextMenuShadowCSS`, `attachShadow({mode: "open"})`, `menuRoot.appendChild(menuStyleElement)`, `.SiteBrushContextMenuLink:link`, `.SiteBrushContextMenuLink:visited`, `window.addEventListener("contextmenu", onContextMenuOpen, {capture: true, passive: false})`, `installSitebrushLongPressMenu`, `document.addEventListener("pointerdown", startLongPress`, `document.addEventListener("touchstart"`, `positionSitebrushMenuBox(menuBoxElement, menuPoint)`, `max-height:calc(100vh - 16px)`, `@media (pointer: coarse), (max-width: 820px)`, `function openPasswordProtectionDialog`, `SiteBrushPasswordInput`} {
 		if !strings.Contains(body, expectedFragment) {
 			t.Fatalf("context menu missing navigation guard %q in %s", expectedFragment, body)
 		}
 	}
+	for _, forbiddenFragment := range []string{`window.prompt`, `window.alert`} {
+		if strings.Contains(body, forbiddenFragment) {
+			t.Fatalf("desktop-safe context menu still contains %q in %s", forbiddenFragment, body)
+		}
+	}
 }
 
-func TestContextMenuShowsRemovePasswordProtectionForProtectedPage(t *testing.T) {
+func TestContextMenuShowsRemovePasswordProtectionForProtectedPrefix(t *testing.T) {
 	application, rawDB := newTestApplication(t)
 	if _, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "admin@example.com", "old"); err != nil {
 		t.Fatalf("insert user: %v", err)
 	}
-	if _, err := rawDB.Exec(`INSERT INTO pages(domain,path,title,html,published) VALUES(?,?,?,?,1)`, "localhost", "/docs", "/docs", "<html><body>docs</body></html>"); err != nil {
+	if _, err := rawDB.Exec(`INSERT INTO pages(domain,path,title,html,published) VALUES(?,?,?,?,1)`, "localhost", "/docs/child", "/docs/child", "<html><body>docs child</body></html>"); err != nil {
 		t.Fatalf("insert page: %v", err)
 	}
 	application.setPagePasswordRule(context.Background(), "localhost", "/docs", "secret")
 
-	request := httptest.NewRequest(http.MethodGet, "http://localhost:8080/docs", nil)
+	request := httptest.NewRequest(http.MethodGet, "http://localhost:8080/docs/child", nil)
 	request.Header.Set("Accept-Language", "en")
 	request.AddCookie(newAdminSessionCookie(t, application, "admin@example.com"))
 	response := httptest.NewRecorder()
@@ -1677,6 +1682,26 @@ func TestPagePasswordProtectionCanBeAddedAndRemovedFromMenuAction(t *testing.T) 
 	}
 	if application.pagePasswordRuleExists(context.Background(), "localhost", "/docs") {
 		t.Fatal("remove action left page password rule in place")
+	}
+
+	protectAgainRequest := httptest.NewRequest(http.MethodPost, "http://localhost:8080/docs?page_password=protect", strings.NewReader(form.Encode()))
+	protectAgainRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	protectAgainRequest.AddCookie(newAdminSessionCookie(t, application, "admin@example.com"))
+	protectAgainResponse := httptest.NewRecorder()
+	application.route(protectAgainResponse, protectAgainRequest)
+	if protectAgainResponse.Code != http.StatusFound {
+		t.Fatalf("protect-again status = %d, want %d", protectAgainResponse.Code, http.StatusFound)
+	}
+
+	nestedRemoveRequest := httptest.NewRequest(http.MethodPost, "http://localhost:8080/docs/child?page_password=remove", nil)
+	nestedRemoveRequest.AddCookie(newAdminSessionCookie(t, application, "admin@example.com"))
+	nestedRemoveResponse := httptest.NewRecorder()
+	application.route(nestedRemoveResponse, nestedRemoveRequest)
+	if nestedRemoveResponse.Code != http.StatusFound {
+		t.Fatalf("nested remove status = %d, want %d", nestedRemoveResponse.Code, http.StatusFound)
+	}
+	if application.pagePasswordRuleExists(context.Background(), "localhost", "/docs") {
+		t.Fatal("nested remove action did not remove parent protected prefix rule")
 	}
 }
 
