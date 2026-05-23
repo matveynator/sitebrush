@@ -279,6 +279,109 @@
     object-fit: contain;
 }
 
+.technical-page .btn img,
+.technical-page button img {
+    width: 18px;
+    height: 18px;
+    object-fit: contain;
+}
+
+.technical-page .missing-page {
+    width: min(980px, calc(100% - 32px));
+}
+
+.technical-page .missing-page-alert {
+    max-width: 760px;
+}
+
+.technical-page .missing-page-actions {
+    display: grid;
+    gap: 16px;
+    max-width: 760px;
+}
+
+.technical-page .missing-page-form {
+    display: grid;
+    gap: 16px;
+}
+
+.technical-page .missing-page-form-title {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+.technical-page .missing-page-form-title .section-icon {
+    width: 34px;
+    height: 34px;
+    border-radius: 12px;
+}
+
+.technical-page .missing-page-form-title .form-label {
+    margin: 0;
+    font-weight: 700;
+}
+
+.technical-page .missing-page-primary-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 10px;
+    align-items: stretch;
+}
+
+.technical-page .missing-page-secondary-grid {
+    display: grid;
+    grid-template-columns: minmax(160px, 240px) minmax(160px, 220px);
+    gap: 12px;
+    align-items: end;
+}
+
+.technical-page .missing-page-secondary-field {
+    display: grid;
+    gap: 6px;
+    max-width: 260px;
+}
+
+.technical-page .missing-page-secondary-field .form-label {
+    margin: 0;
+    color: var(--muted);
+    font-size: 13px;
+    line-height: 1.25;
+}
+
+.technical-page .missing-page-source-ip-field {
+    max-width: 240px;
+}
+
+.technical-page .missing-page-language-field {
+    max-width: 220px;
+}
+
+.technical-page .missing-page-file-field {
+    max-width: 440px;
+}
+
+.technical-page .missing-page-base-path-field {
+    max-width: 280px;
+}
+
+.technical-page .missing-page-checkbox {
+    display: inline-flex;
+    align-items: flex-start;
+    gap: 10px;
+    width: fit-content;
+    margin: 0;
+    color: var(--text);
+}
+
+.technical-page .missing-page-checkbox .form-check-input {
+    margin: 3px 0 0;
+}
+
+.technical-page .missing-page-submit {
+    justify-self: start;
+}
+
 .technical-page .static-folder-form {
     grid-template-columns: minmax(0, 1fr) auto;
     align-items: center;
@@ -454,6 +557,12 @@
     color: #1e2729;
 }
 
+.technical-page .list-group-item {
+    border-color: rgba(149, 229, 239, 0.18);
+    background: rgba(0, 0, 0, 0.18);
+    color: var(--text);
+}
+
 .technical-page .alert,
 .technical-page .alert-secondary,
 .technical-page .alert-info,
@@ -488,9 +597,19 @@
     .technical-page .access-grid,
     .technical-page .add-form,
     .technical-page .edit-mode-grid,
+    .technical-page .missing-page-primary-row,
+    .technical-page .missing-page-secondary-grid,
     .technical-page .record-grid,
     .technical-page .ssl-status-row {
         grid-template-columns: 1fr;
+    }
+
+    .technical-page .missing-page-secondary-field,
+    .technical-page .missing-page-source-ip-field,
+    .technical-page .missing-page-language-field,
+    .technical-page .missing-page-file-field,
+    .technical-page .missing-page-base-path-field {
+        max-width: none;
     }
 }
 
@@ -545,5 +664,9 @@
         min-height: 40px;
         padding: 9px 11px;
         border-radius: 8px;
+    }
+
+    .technical-page .missing-page {
+        width: min(100% - 20px, 980px);
     }
 }

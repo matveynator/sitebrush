@@ -4013,6 +4013,16 @@ func TestMissingPageGrabFormIncludesSourceIPOverride(t *testing.T) {
 		t.Fatalf("missing page status = %d, body=%q", response.Code, response.Body.String())
 	}
 	body := response.Body.String()
+	for _, expectedFragment := range []string{
+		`<link href="/p/static/technical_pages.css" rel="stylesheet">`,
+		`<body class="technical-page bg-body">`,
+		`<img src="/p/static/sitebrush-app-icon.png" class="section-icon" alt="">`,
+		`class="missing-page-secondary-field missing-page-source-ip-field"`,
+	} {
+		if !strings.Contains(body, expectedFragment) {
+			t.Fatalf("missing page does not include admin technical-page fragment %q in %s", expectedFragment, body)
+		}
+	}
 	if !strings.Contains(body, `name="source_ip"`) {
 		t.Fatalf("missing page import form does not include source_ip field: %s", body)
 	}
@@ -5484,6 +5494,12 @@ func TestMissingPageReturns404ForAdminWithCopyOption(t *testing.T) {
 	body := response.Body.String()
 	if !strings.Contains(body, `method="post" action="/missing?grab" data-grab-form`) {
 		t.Fatalf("admin missing page does not offer copy form: %s", body)
+	}
+	if !strings.Contains(body, `class="card card-body missing-page-form missing-page-copy-form"`) {
+		t.Fatalf("admin missing page does not use styled copy form: %s", body)
+	}
+	if !strings.Contains(body, `/p/static/copy.png`) || !strings.Contains(body, `/p/static/backup.png`) {
+		t.Fatalf("admin missing page does not use Sitebrush form icons: %s", body)
 	}
 	if !strings.Contains(body, `name="copy_whole_site"`) {
 		t.Fatalf("admin missing page does not offer whole-site copy option: %s", body)
