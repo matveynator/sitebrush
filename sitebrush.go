@@ -1622,6 +1622,23 @@ type requestDiagnosticFields struct {
 	Remote string
 }
 
+func requestLogDomain(r *http.Request) string {
+	if r == nil {
+		return "localhost"
+	}
+	if contextDomain, ok := r.Context().Value(siteDomainContextKey{}).(string); ok {
+		normalizedContextDomain := normalizeDomainName(contextDomain)
+		if normalizedContextDomain != "" {
+			return normalizedContextDomain
+		}
+	}
+	requestDomain := normalizeDomainName(domainFromRequest(r))
+	if requestDomain == "" {
+		return "localhost"
+	}
+	return requestDomain
+}
+
 func (a *App) accessLogMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		const (
@@ -1631,7 +1648,7 @@ func (a *App) accessLogMiddleware(next http.Handler) http.Handler {
 			colorReset  = "\033[0m"
 		)
 		startedAt := time.Now()
-		requestDomain := domainFromRequest(r)
+		requestDomain := requestLogDomain(r)
 		if a.debug {
 			requestFields := requestDiagnosticFields{
 				Scheme: requestScheme(r),
@@ -1643,8 +1660,8 @@ func (a *App) accessLogMiddleware(next http.Handler) http.Handler {
 				Remote: r.RemoteAddr,
 			}
 			done := make(chan struct{})
-			log.Printf("%sREQUEST%s started scheme=%s host=%s domain=%s method=%s path=%s query=%s remote=%s",
-				terminalCyan(), terminalReset(), requestFields.Scheme, requestFields.Host, requestFields.Domain, requestFields.Method, requestFields.Path, requestFields.Query, requestFields.Remote)
+			log.Printf("%sREQUEST [%s]%s started scheme=%s host=%s method=%s path=%s query=%s remote=%s",
+				terminalCyan(), requestFields.Domain, terminalReset(), requestFields.Scheme, requestFields.Host, requestFields.Method, requestFields.Path, requestFields.Query, requestFields.Remote)
 			go logSlowHTTPRequest(done, startedAt, requestFields)
 			defer close(done)
 		}
@@ -1671,12 +1688,12 @@ func (a *App) accessLogMiddleware(next http.Handler) http.Handler {
 		}
 		duration := time.Since(startedAt)
 		if strings.TrimSpace(r.URL.RawQuery) == "" {
-			log.Printf("%s%s%s method=%s path=%s status=%d remote=%s duration=%s", logColor, logType, colorReset, r.Method, r.URL.Path, writer.statusCode, r.RemoteAddr, duration.String())
-			a.writeDomainLog(requestDomain, "%s method=%s path=%s status=%d remote=%s duration=%s", logType, r.Method, r.URL.Path, writer.statusCode, r.RemoteAddr, duration.String())
+			log.Printf("%s%s [%s]%s method=%s path=%s status=%d remote=%s duration=%s", logColor, logType, requestDomain, colorReset, r.Method, r.URL.Path, writer.statusCode, r.RemoteAddr, duration.String())
+			a.writeDomainLog(requestDomain, "%s [%s] method=%s path=%s status=%d remote=%s duration=%s", logType, requestDomain, r.Method, r.URL.Path, writer.statusCode, r.RemoteAddr, duration.String())
 			return
 		}
-		log.Printf("%s%s%s method=%s path=%s query=%s status=%d remote=%s duration=%s", logColor, logType, colorReset, r.Method, r.URL.Path, r.URL.RawQuery, writer.statusCode, r.RemoteAddr, duration.String())
-		a.writeDomainLog(requestDomain, "%s method=%s path=%s query=%s status=%d remote=%s duration=%s", logType, r.Method, r.URL.Path, r.URL.RawQuery, writer.statusCode, r.RemoteAddr, duration.String())
+		log.Printf("%s%s [%s]%s method=%s path=%s query=%s status=%d remote=%s duration=%s", logColor, logType, requestDomain, colorReset, r.Method, r.URL.Path, r.URL.RawQuery, writer.statusCode, r.RemoteAddr, duration.String())
+		a.writeDomainLog(requestDomain, "%s [%s] method=%s path=%s query=%s status=%d remote=%s duration=%s", logType, requestDomain, r.Method, r.URL.Path, r.URL.RawQuery, writer.statusCode, r.RemoteAddr, duration.String())
 	})
 }
 
@@ -1688,8 +1705,8 @@ func logSlowHTTPRequest(done <-chan struct{}, startedAt time.Time, requestFields
 		case <-done:
 			return
 		case <-timer.C:
-			log.Printf("%sREQUEST%s still-running scheme=%s host=%s domain=%s method=%s path=%s query=%s remote=%s duration=%s",
-				terminalYellow(), terminalReset(), requestFields.Scheme, requestFields.Host, requestFields.Domain, requestFields.Method, requestFields.Path, requestFields.Query, requestFields.Remote, time.Since(startedAt).String())
+			log.Printf("%sREQUEST [%s]%s still-running scheme=%s host=%s method=%s path=%s query=%s remote=%s duration=%s",
+				terminalYellow(), requestFields.Domain, terminalReset(), requestFields.Scheme, requestFields.Host, requestFields.Method, requestFields.Path, requestFields.Query, requestFields.Remote, time.Since(startedAt).String())
 			timer.Reset(slowHTTPRequestRepeatAfter)
 		}
 	}

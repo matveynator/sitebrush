@@ -1,23 +1,3 @@
-@font-face {
-    font-family: "DefaultLight";
-    src: url("/p/5b3f93d5d35a8922441380d68fece169067686df6018135193a97c996f040890.eot");
-    src: url("/p/5b3f93d5d35a8922441380d68fece169067686df6018135193a97c996f040890.eot") format("embedded-opentype"),
-         url("/p/b8fb1115e96d8c3edae62952e0f616c1e5a05466032252a5d3798d244d3e21f8.woff") format("woff"),
-         url("/p/861c8255f0c61699feca94d70481c56f34081026ba171d14a0987f6701436b4e.ttf") format("truetype"),
-         url("/p/a25fe2bb82fcea44c0f93ddcf56995428d15b763d7ed8539903521099d5f199c.svg") format("svg");
-    font-style: normal;
-}
-
-@font-face {
-    font-family: "DefaultNormal";
-    src: url("/p/1cab1dd77e1a267b99909818d0e47773102c4d6b289be53c84283bcf204150ca.eot");
-    src: url("/p/1cab1dd77e1a267b99909818d0e47773102c4d6b289be53c84283bcf204150ca.eot") format("embedded-opentype"),
-         url("/p/97cd452b090ea0c9c62132f3efc2448aa62302f82f20a6f91c6cf34f90e460a3.woff") format("woff"),
-         url("/p/05a82c831c7aac3e6ea4eb4ba250c9afc2ae76ff48a34c95b39ecf6c74ce4355.ttf") format("truetype"),
-         url("/p/7bb15a79376384a41b0f349d31c59476548b47b1c5d06403c6f99b025808435b.svg") format("svg");
-    font-weight: normal;
-}
-
 :root {
     --bg: #252525;
     --panel: #333333;
@@ -44,9 +24,9 @@ body {
     background:
         radial-gradient(circle at top right, rgba(149, 229, 239, 0.10), transparent 32%),
         radial-gradient(circle at bottom left, rgba(255, 165, 0, 0.10), transparent 30%),
-        #333 url("/p/bb83e4fb3c837848f1fb56fa4d2194349b14f30096ff5a4b94976589042aae75.png");
+        #333;
     color: var(--text);
-    font-family: "DefaultLight", Arial, Helvetica, sans-serif;
+    font-family: Arial, Helvetica, sans-serif;
     font-size: 16px;
     line-height: 1.55;
     text-rendering: optimizeLegibility;
@@ -108,7 +88,7 @@ a:hover {
 .brand-name {
     display: block;
     color: var(--text);
-    font-family: "DefaultNormal", Arial, Helvetica, sans-serif;
+    font-family: Arial, Helvetica, sans-serif;
     font-size: 22px;
 }
 
@@ -157,7 +137,7 @@ a:hover {
 h1 {
     margin: 0;
     color: var(--text);
-    font-family: "DefaultNormal", Arial, Helvetica, sans-serif;
+    font-family: Arial, Helvetica, sans-serif;
     font-size: clamp(34px, 5vw, 58px);
     line-height: 1.05;
 }
@@ -201,7 +181,7 @@ h1 {
     border-radius: 16px;
     background: rgba(0, 0, 0, 0.24);
     color: var(--orange);
-    font-family: "DefaultNormal", Arial, Helvetica, sans-serif;
+    font-family: Arial, Helvetica, sans-serif;
     font-size: 24px;
 }
 
@@ -212,7 +192,7 @@ h1 {
 .entry-name {
     overflow-wrap: anywhere;
     color: var(--text);
-    font-family: "DefaultNormal", Arial, Helvetica, sans-serif;
+    font-family: Arial, Helvetica, sans-serif;
     font-size: 18px;
 }
 

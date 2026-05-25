@@ -34,7 +34,7 @@
     min-width: 0;
     margin: 0;
     color: var(--text);
-    font-family: "DefaultNormal", Arial, Helvetica, sans-serif;
+    font-family: Arial, Helvetica, sans-serif;
     font-size: clamp(28px, 4vw, 46px);
     line-height: 1.08;
 }
@@ -55,7 +55,7 @@
 .technical-page h1.section-heading .text-muted {
     min-width: 0;
     color: var(--muted) !important;
-    font-family: "DefaultLight", Arial, Helvetica, sans-serif;
+    font-family: Arial, Helvetica, sans-serif;
     font-size: 15px;
     font-weight: 400;
     overflow-wrap: anywhere;
@@ -460,7 +460,7 @@
 
 .technical-page .alias-domain {
     color: var(--text);
-    font-family: "DefaultNormal", Arial, Helvetica, sans-serif;
+    font-family: Arial, Helvetica, sans-serif;
     font-weight: 700;
     word-break: break-all;
 }
@@ -583,7 +583,7 @@
     background:
         radial-gradient(circle at top right, rgba(149, 229, 239, 0.10), transparent 32%),
         radial-gradient(circle at bottom left, rgba(255, 165, 0, 0.10), transparent 30%),
-        #333 url("/p/bb83e4fb3c837848f1fb56fa4d2194349b14f30096ff5a4b94976589042aae75.png");
+        #333;
 }
 
 .technical-page.analytics-page .metric-card,
