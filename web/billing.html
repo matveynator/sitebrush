@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="ru" id="SiteBrush">
+<head>
+  <script>
+  (function applySystemThemeMode() {
+    const prefersDarkMode = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+    document.documentElement.setAttribute('data-bs-theme', prefersDarkMode ? 'dark' : 'light');
+  })();
+  </script>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{.Title}}</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+  <link href="/p/static/technical_pages.css" rel="stylesheet">
+</head>
+<body class="technical-page bg-body">
+<main class="container billing-page py-5">
+  <header class="page-header mb-4">
+    <h1 class="section-heading"><img src="/p/static/sitebrush-app-icon.png" class="section-icon" alt=""><a href="/">{{.Domain}}</a> <small class="text-muted">| {{.Title}}</small></h1>
+  </header>
+
+  {{if .Status}}<div class="alert alert-info billing-status" role="alert">{{.Status}}</div>{{end}}
+
+  <section class="card billing-card">
+    <div class="card-body billing-card-body">
+      <div>
+        <h2>Регистрация сайтов</h2>
+        <p class="text-muted">Первый администратор первого сайта становится владельцем сервера. Новые базы сайтов создаются только вместе с первым администратором.</p>
+      </div>
+      <form method="post" action="?billing" class="billing-settings-form">
+        <input type="hidden" name="billing_action" value="settings">
+        <label class="checkbox-row">
+          <input type="checkbox" name="auto_registration_enabled" value="1" {{if .AutoRegistrationEnabled}}checked{{end}}>
+          <span>Разрешить самостоятельную регистрацию новых сайтов</span>
+        </label>
+        <button type="submit" class="btn btn-primary"><img src="/p/static/save-page.png" alt="">Сохранить</button>
+      </form>
+    </div>
+  </section>
+
+  <section class="card billing-card">
+    <div class="card-body billing-card-body">
+      <div>
+        <h2>Добавить сайт</h2>
+        <p class="text-muted">База сайта будет создана только после проверки домена, email и пароля администратора.</p>
+      </div>
+      <form method="post" action="?billing" class="billing-create-form">
+        <input type="hidden" name="billing_action" value="create_site">
+        <label>Домен <input name="domain" type="text" class="form-control" placeholder="example.com" required></label>
+        <label>Email администратора <input name="email" type="email" class="form-control" placeholder="admin@example.com" required></label>
+        <label>Пароль <input name="password" type="text" class="form-control" autocomplete="off" required></label>
+        <label>Квота <input name="quota" type="text" class="form-control" placeholder="10gb"></label>
+        <button type="submit" class="btn btn-success"><img src="/p/static/profile.png" alt="">Создать</button>
+      </form>
+    </div>
+  </section>
+
+  <section class="card billing-card">
+    <div class="card-body">
+      <div class="billing-section-header">
+        <div>
+          <h2>Действующие сайты</h2>
+          <p class="text-muted">Показываются только базы, где уже есть администратор сайта.</p>
+        </div>
+      </div>
+      <div class="billing-site-list">
+        {{range .Sites}}
+        <article class="billing-site-row">
+          <div class="billing-site-main">
+            <div class="billing-domain">{{.Domain}}</div>
+            {{if .Aliases}}<div class="text-muted small">Алиасы: {{.Aliases}}</div>{{end}}
+            {{if .AdminEmails}}<div class="text-muted small">Администраторы: {{.AdminEmails}}</div>{{end}}
+            <div class="billing-quota-bar" aria-label="Использовано {{.UsedPercent}}%">
+              <div style="width:{{.UsedPercent}}%"></div>
+            </div>
+            <div class="text-muted small">Использовано {{.UsedLabel}} / {{.LimitLabel}}, свободно {{.FreeLabel}}</div>
+          </div>
+          <form method="post" action="?billing" class="billing-site-form">
+            <input type="hidden" name="billing_action" value="update_site">
+            <input type="hidden" name="domain" value="{{.Domain}}">
+            <label>Квота <input name="quota" type="text" class="form-control form-control-sm" value="{{.QuotaInput}}"></label>
+            <label>Тариф
+              <select name="plan_id" class="form-select form-select-sm">
+                <option value="0">Без тарифа</option>
+                {{$selectedPlanID := .PlanID}}{{range $.Plans}}<option value="{{.ID}}" {{if eq .ID $selectedPlanID}}selected{{end}}>{{.Name}} · {{.QuotaLabel}} · {{.Price}} {{.Currency}}/{{.BillingPeriod}}</option>{{end}}
+              </select>
+            </label>
+            <label>Статус
+              <select name="service_status" class="form-select form-select-sm">
+                <option value="free" {{if eq .ServiceStatus "free"}}selected{{end}}>Бесплатный</option>
+                <option value="paid" {{if eq .ServiceStatus "paid"}}selected{{end}}>Платный</option>
+                <option value="paused" {{if eq .ServiceStatus "paused"}}selected{{end}}>Приостановлен</option>
+              </select>
+            </label>
+            <button type="submit" class="btn btn-primary btn-sm"><img src="/p/static/save-page.png" alt="">Сохранить</button>
+          </form>
+          {{if .CanDelete}}<form method="post" action="?billing" class="billing-delete-form">
+            <input type="hidden" name="billing_action" value="delete_site">
+            <input type="hidden" name="domain" value="{{.Domain}}">
+            <label>Удаление <input name="confirm_domain" type="text" class="form-control form-control-sm" placeholder="{{.Domain}}"></label>
+            <button type="submit" class="btn btn-outline-danger btn-sm"><img src="/p/static/delete.png" alt="">Удалить</button>
+          </form>{{end}}
+        </article>
+        {{else}}
+        <div class="empty">Сайты пока не найдены.</div>
+        {{end}}
+      </div>
+    </div>
+  </section>
+
+  <section class="card billing-card">
+    <div class="card-body">
+      <h2>Тарифы</h2>
+      <form method="post" action="?billing" class="billing-plan-form">
+        <input type="hidden" name="billing_action" value="save_plan">
+        <label>Название <input name="name" type="text" class="form-control" placeholder="Free / Pro / Business" required></label>
+        <label>Квота <input name="quota" type="text" class="form-control" placeholder="10gb" required></label>
+        <label>Цена <input name="price" type="text" class="form-control" placeholder="0"></label>
+        <label>Валюта <input name="currency" type="text" class="form-control" value="USD"></label>
+        <label>Период <input name="billing_period" type="text" class="form-control" value="monthly"></label>
+        <label class="checkbox-row"><input type="checkbox" name="is_default" value="1"><span>Тариф по умолчанию</span></label>
+        <button type="submit" class="btn btn-primary"><img src="/p/static/save-page.png" alt="">Сохранить тариф</button>
+      </form>
+      <div class="billing-plan-list">
+        {{range .Plans}}
+        <form method="post" action="?billing" class="billing-plan-row">
+          <input type="hidden" name="billing_action" value="delete_plan">
+          <input type="hidden" name="plan_id" value="{{.ID}}">
+          <span>{{.Name}} · {{.QuotaLabel}} · {{.Price}} {{.Currency}}/{{.BillingPeriod}}{{if .IsDefault}} · по умолчанию{{end}}</span>
+          <button type="submit" class="btn btn-outline-danger btn-sm"><img src="/p/static/cross.png" alt="">Удалить</button>
+        </form>
+        {{end}}
+      </div>
+    </div>
+  </section>
+</main>
+</body>
+</html>

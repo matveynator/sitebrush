@@ -47,6 +47,7 @@ import (
 	"golang.org/x/net/dns/dnsmessage"
 	"golang.org/x/net/html"
 	"golang.org/x/term"
+	"sitebrush/pkg/billing"
 	appcli "sitebrush/pkg/cli"
 	_ "sitebrush/pkg/database/drivers"
 	"sitebrush/pkg/desktop"
@@ -94,6 +95,7 @@ type App struct {
 	db                    sqlExecutor
 	siteDatabaseRouter    *perSiteDBRouter
 	storagePath           string
+	dbPath                string
 	debug                 bool
 	nativeFileDialog      bool
 	automaticSSLAvailable bool
@@ -1941,7 +1943,7 @@ func shouldRecordAnalyticsRequest(r *http.Request) bool {
 		return false
 	}
 	query := r.URL.Query()
-	for _, skippedFlag := range []string{"analytics", "grab_events", "grab_ws", "publish_events", "captcha"} {
+	for _, skippedFlag := range []string{"analytics", "billing", "grab_events", "grab_ws", "publish_events", "captcha"} {
 		if _, found := query[skippedFlag]; found {
 			return false
 		}
@@ -1954,7 +1956,7 @@ func isSitebrushControllerQuery(query url.Values) bool {
 		"save", "grab_preview", "grab_events", "grab_ws", "revision_restore", "revision_delete", "revision_toggle",
 		"tree", "native_pick_files", "native_save_backup", "edit", "visual", "text", "editraw", "settings", "properties",
 		"backup_download", "backup_import", "profile", "freeze", "publish", "publish_events", "publish_preview", "files",
-		"revisions", "login", "register", "email_confirm", "grab", "recover", "captcha", "analytics",
+		"revisions", "login", "register", "email_confirm", "grab", "recover", "captcha", "analytics", "billing",
 	} {
 		if _, found := query[controllerFlag]; found {
 			return true
@@ -3831,14 +3833,14 @@ func runSitebrushServer(ctx context.Context, config serverRunConfig) error {
 	}
 
 	var siteDatabaseRouter *perSiteDBRouter
-	application := &App{storagePath: effectiveStoragePath, debug: config.Debug, nativeFileDialog: desktop.NativeFileDialogSupported(), grabTracker: newGrabProgressTracker(), publishTracker: newPublishProgressTracker(), analyticsEvents: make(chan siteAnalyticsEvent, 65536), domainLogEvents: make(chan domainLogEvent, 1024)}
+	application := &App{storagePath: effectiveStoragePath, dbPath: effectiveDBPath, debug: config.Debug, nativeFileDialog: desktop.NativeFileDialogSupported(), grabTracker: newGrabProgressTracker(), publishTracker: newPublishProgressTracker(), analyticsEvents: make(chan siteAnalyticsEvent, 65536), domainLogEvents: make(chan domainLogEvent, 1024)}
 	application.guestStaticHTMLCache = startGuestStaticHTMLCacheWorker(ctx, defaultGuestStaticHTMLCacheLimitBytes)
 	application.authIPFailureCache = startAuthIPFailureCacheWorker(ctx)
 	application.emailDelivery = startEmailDeliveryWorker(ctx, application.defaultEmailSender())
 	application.geoIP = geoip.NewResolver(filepath.Join(application.storageRootDir(), "geoip"))
 	siteDatabaseRootDir := siteDatabaseRootPath(effectiveDBPath)
 	siteDatabaseRouter = newPerSiteDBRouter(siteDatabaseRootDir, "localhost", func(migrationCtx context.Context, rawDatabase *sql.DB, domain string) error {
-		bootstrapApplication := &App{db: rawDatabase, storagePath: effectiveStoragePath, debug: config.Debug}
+		bootstrapApplication := &App{db: rawDatabase, storagePath: effectiveStoragePath, dbPath: effectiveDBPath, debug: config.Debug}
 		return bootstrapApplication.migrate(contextWithDomain(migrationCtx, domain))
 	}, config.Debug)
 	defer func() {
@@ -3854,6 +3856,7 @@ func runSitebrushServer(ctx context.Context, config serverRunConfig) error {
 	application.ensureAutoCertGuard()
 	application.startDomainLogWorker(ctx)
 	application.startAnalyticsWorkers(ctx)
+	application.startServerOwnerRecoveryWorker(ctx)
 
 	router := http.NewServeMux()
 	staticFiles, err := fs.Sub(embeddedWebFiles, "web/static")
@@ -4912,6 +4915,10 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 		a.analyticsPage(w, r)
 		return
 	}
+	if hasQueryFlag(r, "billing") {
+		a.billingPage(w, r)
+		return
+	}
 	if hasQueryFlag(r, "backup_download") {
 		a.downloadBackup(w, r)
 		return
@@ -5093,12 +5100,18 @@ func (a *App) setupAdmin(w http.ResponseWriter, r *http.Request) {
 		a.renderSetupPage(w, r, domain, email, err.Error())
 		return
 	}
+	a.promoteFirstServerOwner(registerContext, domain, email)
 	a.createSessionForDomain(w, registerContext, domain, email)
 	http.Redirect(w, r, requestedReturnTarget(r), http.StatusFound)
 }
 
 func (a *App) registerPage(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodPost {
+		if a.serverOwnerExists(r.Context()) && !a.serverAutomaticRegistrationAllowed(r.Context()) && !a.hasAdmin(r.Context(), a.siteDomain(r.Context(), r)) {
+			w.WriteHeader(http.StatusForbidden)
+			a.renderSetupPage(w, r, a.siteDomain(r.Context(), r), strings.TrimSpace(r.FormValue("email")), "Регистрация новых сайтов отключена владельцем сервера.")
+			return
+		}
 		a.setupAdmin(w, r)
 		return
 	}
@@ -5109,6 +5122,11 @@ func (a *App) registerPage(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		http.Redirect(w, r, loginURLForRequest(r), http.StatusFound)
+		return
+	}
+	if a.serverOwnerExists(r.Context()) && !a.serverAutomaticRegistrationAllowed(r.Context()) {
+		w.WriteHeader(http.StatusForbidden)
+		a.renderSetupPage(w, r, domain, "", "Регистрация новых сайтов отключена владельцем сервера.")
 		return
 	}
 	a.renderSetupPage(w, r, domain, "", "")
@@ -6830,6 +6848,314 @@ func (a *App) revisionsPage(w http.ResponseWriter, r *http.Request) {
 	a.render(w, r, "revisions.html", map[string]any{"Path": pagePath, "ReturnPath": returnPath, "Revisions": revisionList})
 }
 
+func (a *App) billingPage(w http.ResponseWriter, r *http.Request) {
+	if !a.isAdminRequest(r) {
+		if !a.hasAdmin(r.Context(), a.siteDomain(r.Context(), r)) {
+			http.Redirect(w, r, r.URL.Path+"?register", http.StatusFound)
+			return
+		}
+		http.Redirect(w, r, loginURLForRequest(r), http.StatusFound)
+		return
+	}
+	if !a.isServerManagerRequest(r) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	status := ""
+	if r.Method == http.MethodPost {
+		status = a.handleBillingAction(r)
+	}
+	view, err := a.billingView(r.Context(), r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	view["Status"] = status
+	a.render(w, r, "billing.html", view)
+}
+
+func (a *App) handleBillingAction(r *http.Request) string {
+	_ = r.ParseMultipartForm(8 << 20)
+	switch strings.TrimSpace(r.FormValue("billing_action")) {
+	case "settings":
+		return a.saveBillingSettingsFromForm(r)
+	case "create_site":
+		return a.createManagedSiteFromForm(r)
+	case "update_site":
+		return a.updateManagedSiteFromForm(r)
+	case "delete_site":
+		return a.deleteManagedSiteFromForm(r)
+	case "save_plan":
+		return a.saveServicePlanFromForm(r)
+	case "delete_plan":
+		return a.deleteServicePlanFromForm(r)
+	default:
+		return "Неизвестное действие биллинга."
+	}
+}
+
+func (a *App) billingView(ctx context.Context, r *http.Request) (map[string]any, error) {
+	controlDatabase, err := a.openServerControlDatabase(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer controlDatabase.Close()
+	store := billing.Store{DB: controlDatabase}
+	plans := store.Plans(ctx)
+	assignments := store.ServiceAssignments(ctx)
+	siteRows, err := a.billingSiteRows(ctx, plans, assignments, a.siteDomain(ctx, r))
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{
+		"Title":                   "Биллинг",
+		"Sites":                   siteRows,
+		"Plans":                   plans,
+		"AutoRegistrationEnabled": store.AutomaticRegistrationAllowed(ctx),
+		"CurrentDomain":           a.siteDomain(ctx, r),
+	}, nil
+}
+
+func (a *App) billingSiteRows(ctx context.Context, plans []billing.Plan, assignments map[string]billing.ServiceAssignment, currentDomain string) ([]billing.Site, error) {
+	rows, err := listSiteQuotaRows(ctx, a.storagePath, a.serverControlDBPath())
+	if err != nil {
+		return nil, err
+	}
+	usages := make([]billing.SiteUsage, 0, len(rows))
+	for _, row := range rows {
+		usages = append(usages, billing.SiteUsage{
+			Domain:       row.Domain,
+			Aliases:      row.Aliases,
+			UsedBytes:    row.UsedBytes,
+			LimitBytes:   row.LimitBytes,
+			AdminEmails:  siteAdminEmails(ctx, row.DatabasePath, row.Domain),
+			DatabasePath: row.DatabasePath,
+		})
+	}
+	return billing.BuildSites(usages, plans, assignments, currentDomain), nil
+}
+
+func siteAdminEmails(ctx context.Context, databasePath, domain string) []string {
+	rawDatabase, err := sql.Open("sqlite", "file:"+databasePath)
+	if err != nil {
+		return nil
+	}
+	defer rawDatabase.Close()
+	rows, err := rawDatabase.QueryContext(ctx, `SELECT email FROM users WHERE domain=? AND is_admin=1 ORDER BY email`, domain)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	emails := make([]string, 0, 2)
+	for rows.Next() {
+		var email string
+		if scanErr := rows.Scan(&email); scanErr == nil && strings.TrimSpace(email) != "" {
+			emails = append(emails, strings.TrimSpace(email))
+		}
+	}
+	return emails
+}
+
+func (a *App) saveBillingSettingsFromForm(r *http.Request) string {
+	controlDatabase, err := a.openServerControlDatabase(r.Context())
+	if err != nil {
+		return err.Error()
+	}
+	defer controlDatabase.Close()
+	if err := (billing.Store{DB: controlDatabase}).SaveSettings(r.Context(), r.FormValue("auto_registration_enabled") == "1"); err != nil {
+		return err.Error()
+	}
+	return "Настройки регистрации сохранены."
+}
+
+func (a *App) createManagedSiteFromForm(r *http.Request) string {
+	domain := normalizeQuotaDomainName(r.FormValue("domain"))
+	email := strings.TrimSpace(r.FormValue("email"))
+	password := strings.TrimSpace(r.FormValue("password"))
+	quotaBytes, quotaRequested, err := parseSiteQuotaLimitBytes(r.FormValue("quota"))
+	if err != nil {
+		return err.Error()
+	}
+	if !quotaRequested {
+		quotaBytes = defaultDomainStorageLimitBytes
+	}
+	if domain == "" {
+		return "Домен сайта обязателен."
+	}
+	if email == "" || password == "" {
+		return "Email и пароль первого администратора обязательны."
+	}
+	if _, err := stdmail.ParseAddress(email); err != nil {
+		return "Email администратора некорректен."
+	}
+	if err := a.createManagedSite(r.Context(), domain, email, password, quotaBytes); err != nil {
+		return err.Error()
+	}
+	return "Сайт " + domain + " создан."
+}
+
+func (a *App) createManagedSite(ctx context.Context, domain, email, password string, quotaBytes int64) error {
+	siteDatabasePath := filepath.Join(siteDatabaseRootPath(a.serverControlDBPath()), domainStorageName(domain)+".db")
+	if _, statErr := os.Stat(siteDatabasePath); statErr == nil {
+		return fmt.Errorf("site database for %s already exists", domain)
+	} else if !errors.Is(statErr, os.ErrNotExist) {
+		return statErr
+	}
+	if err := ensureParentDir(siteDatabasePath); err != nil {
+		return err
+	}
+	rawDatabase, err := sql.Open("sqlite", "file:"+siteDatabasePath)
+	if err != nil {
+		return err
+	}
+	adminInserted := false
+	defer func() {
+		_ = rawDatabase.Close()
+		if !adminInserted {
+			_ = os.Remove(siteDatabasePath)
+		}
+	}()
+	siteApplication := &App{db: rawDatabase, storagePath: a.storagePath, dbPath: a.serverControlDBPath(), debug: a.debug}
+	siteContext := contextWithDomain(ctx, domain)
+	if err := siteApplication.migrate(siteContext); err != nil {
+		return err
+	}
+	if siteApplication.hasAdmin(siteContext, domain) {
+		return fmt.Errorf("site %s already has an administrator", domain)
+	}
+	if _, err := rawDatabase.ExecContext(siteContext, `INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, domain, email, password); err != nil {
+		return err
+	}
+	adminInserted = true
+	siteApplication.ensureDomainStorageUsageRow(siteContext, domain)
+	_, err = rawDatabase.ExecContext(siteContext, `UPDATE domain_storage_usage SET limit_bytes=?, updated_at=? WHERE domain=?`, quotaBytes, time.Now().UTC().Format(time.RFC3339), domain)
+	return err
+}
+
+func (a *App) updateManagedSiteFromForm(r *http.Request) string {
+	domain := normalizeQuotaDomainName(r.FormValue("domain"))
+	if domain == "" {
+		return "Домен сайта обязателен."
+	}
+	controlDatabase, err := a.openServerControlDatabase(r.Context())
+	if err != nil {
+		return err.Error()
+	}
+	defer controlDatabase.Close()
+	planID, _ := strconv.Atoi(strings.TrimSpace(r.FormValue("plan_id")))
+	serviceStatus := strings.TrimSpace(r.FormValue("service_status"))
+	quotaBytes, quotaRequested, err := parseSiteQuotaLimitBytes(r.FormValue("quota"))
+	if err != nil {
+		return err.Error()
+	}
+	if !quotaRequested && planID > 0 {
+		plan, found := (billing.Store{DB: controlDatabase}).PlanByID(r.Context(), planID)
+		if found {
+			quotaBytes = plan.QuotaBytes
+			quotaRequested = true
+		}
+	}
+	if quotaRequested {
+		if _, err := updateSiteQuotaLimit(r.Context(), a.storagePath, a.serverControlDBPath(), domain, quotaBytes); err != nil {
+			return err.Error()
+		}
+	}
+	if err := (billing.Store{DB: controlDatabase}).AssignSite(r.Context(), domain, planID, serviceStatus); err != nil {
+		return err.Error()
+	}
+	return "Параметры сайта " + domain + " сохранены."
+}
+
+func (a *App) deleteManagedSiteFromForm(r *http.Request) string {
+	domain := normalizeQuotaDomainName(r.FormValue("domain"))
+	confirmDomain := normalizeQuotaDomainName(r.FormValue("confirm_domain"))
+	if domain == "" || confirmDomain != domain {
+		return "Для удаления нужно повторить домен сайта."
+	}
+	if domain == a.siteDomain(r.Context(), r) {
+		return "Текущий сайт владельца сервера нельзя удалить из биллинга."
+	}
+	if err := a.deleteManagedSite(r.Context(), domain); err != nil {
+		return err.Error()
+	}
+	return "Сайт " + domain + " удален."
+}
+
+func (a *App) deleteManagedSite(ctx context.Context, domain string) error {
+	controlDatabase, err := a.openServerControlDatabase(ctx)
+	if err != nil {
+		return err
+	}
+	defer controlDatabase.Close()
+	var ownerCount int
+	_ = controlDatabase.QueryRowContext(ctx, `SELECT COUNT(1) FROM server_managers WHERE domain=? AND role='owner'`, domain).Scan(&ownerCount)
+	if ownerCount > 0 {
+		return fmt.Errorf("server owner site %s cannot be deleted", domain)
+	}
+	(billing.Store{DB: controlDatabase}).RemoveSiteAssignment(ctx, domain)
+	siteDatabasePath := filepath.Join(siteDatabaseRootPath(a.serverControlDBPath()), domainStorageName(domain)+".db")
+	_ = os.Remove(siteDatabasePath)
+	for _, directoryPath := range []string{
+		a.domainFilesDirForDomain(domain),
+		a.domainStaticDir(domain),
+		a.domainChrootRootDir(domain),
+		a.domainLogDir(domain),
+	} {
+		_ = os.RemoveAll(directoryPath)
+	}
+	return nil
+}
+
+func (a *App) saveServicePlanFromForm(r *http.Request) string {
+	name := strings.TrimSpace(r.FormValue("name"))
+	if name == "" {
+		return "Название тарифа обязательно."
+	}
+	quotaBytes, quotaRequested, err := parseSiteQuotaLimitBytes(r.FormValue("quota"))
+	if err != nil {
+		return err.Error()
+	}
+	if !quotaRequested {
+		return "Квота тарифа обязательна."
+	}
+	controlDatabase, err := a.openServerControlDatabase(r.Context())
+	if err != nil {
+		return err.Error()
+	}
+	defer controlDatabase.Close()
+	planID, _ := strconv.Atoi(strings.TrimSpace(r.FormValue("plan_id")))
+	price := strings.TrimSpace(r.FormValue("price"))
+	currency := strings.TrimSpace(r.FormValue("currency"))
+	if currency == "" {
+		currency = "USD"
+	}
+	billingPeriod := strings.TrimSpace(r.FormValue("billing_period"))
+	if billingPeriod == "" {
+		billingPeriod = "monthly"
+	}
+	isDefault := r.FormValue("is_default") == "1"
+	if err := (billing.Store{DB: controlDatabase}).SavePlan(r.Context(), planID, name, quotaBytes, price, currency, billingPeriod, isDefault); err != nil {
+		return err.Error()
+	}
+	return "Тариф сохранен."
+}
+
+func (a *App) deleteServicePlanFromForm(r *http.Request) string {
+	planID, _ := strconv.Atoi(strings.TrimSpace(r.FormValue("plan_id")))
+	if planID <= 0 {
+		return "Тариф не выбран."
+	}
+	controlDatabase, err := a.openServerControlDatabase(r.Context())
+	if err != nil {
+		return err.Error()
+	}
+	defer controlDatabase.Close()
+	if err := (billing.Store{DB: controlDatabase}).DeletePlan(r.Context(), planID); err != nil {
+		return err.Error()
+	}
+	return "Тариф удален."
+}
+
 func (a *App) applyLatestActiveRevision(ctx context.Context, domain string, pagePath string) {
 	var latestActiveHTML string
 	err := a.db.QueryRowContext(ctx, `SELECT html FROM revisions WHERE domain=? AND page_path=? AND is_active=1 ORDER BY id DESC LIMIT 1`, domain, pagePath).Scan(&latestActiveHTML)
@@ -8276,7 +8602,10 @@ func siteQuotaRowsFromDatabase(ctx context.Context, storagePath string, candidat
 	}
 	defer rawDatabase.Close()
 
-	application := &App{db: rawDatabase, storagePath: storagePath}
+	if !siteDatabaseHasRegisteredAdmin(ctx, rawDatabase) {
+		return nil, nil
+	}
+	application := &App{db: rawDatabase, storagePath: storagePath, dbPath: candidate.path}
 	migrateDomain := candidate.fallbackDomain
 	if strings.TrimSpace(migrateDomain) == "" {
 		migrateDomain = "localhost"
@@ -8462,7 +8791,7 @@ func updateSiteQuotaLimit(ctx context.Context, storagePath, dbPath, rawDomain st
 	}
 	defer rawDatabase.Close()
 
-	application := &App{db: rawDatabase, storagePath: storagePath}
+	application := &App{db: rawDatabase, storagePath: storagePath, dbPath: dbPath}
 	commandContext := contextWithDomain(ctx, domain)
 	if err := application.migrate(commandContext); err != nil {
 		return siteQuotaRow{}, err
@@ -9020,6 +9349,156 @@ func terminalReset() string {
 
 func (usage domainStorageUsage) totalBytes() int64 {
 	return usage.PageBytes + usage.PublishedPageBytes + usage.RevisionBytes + usage.FileBytes + usage.PublishedStaticBytes
+}
+
+func (a *App) serverControlDBPath() string {
+	if strings.TrimSpace(a.dbPath) != "" {
+		return cleanDBPath(a.dbPath)
+	}
+	if strings.TrimSpace(a.storagePath) != "" {
+		return filepath.Join(a.storagePath, "storage", "db", "sitebrush.db")
+	}
+	return cleanDBPath(defaultDBPath)
+}
+
+func (a *App) openServerControlDatabase(ctx context.Context) (*sql.DB, error) {
+	databasePath := a.serverControlDBPath()
+	if err := ensureParentDir(databasePath); err != nil {
+		return nil, err
+	}
+	database, err := sql.Open("sqlite", "file:"+databasePath)
+	if err != nil {
+		return nil, err
+	}
+	database.SetMaxOpenConns(1)
+	database.SetMaxIdleConns(1)
+	if err := billing.Migrate(ctx, database); err != nil {
+		_ = database.Close()
+		return nil, err
+	}
+	return database, nil
+}
+
+func (a *App) startServerOwnerRecoveryWorker(ctx context.Context) {
+	go func() {
+		if a.siteDatabaseRouter != nil {
+			ticker := time.NewTicker(200 * time.Millisecond)
+			defer ticker.Stop()
+			for {
+				status := a.siteDatabaseRouter.MigrationStatus(ctx, "localhost")
+				if status.startupFinished {
+					break
+				}
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+				}
+			}
+		}
+		a.ensureServerOwnerExists(ctx)
+	}()
+}
+
+func (a *App) serverOwnerExists(ctx context.Context) bool {
+	controlDatabase, err := a.openServerControlDatabase(ctx)
+	if err != nil {
+		return false
+	}
+	defer controlDatabase.Close()
+	return (billing.Store{DB: controlDatabase}).OwnerExists(ctx)
+}
+
+func (a *App) ensureServerOwnerExists(ctx context.Context) {
+	controlDatabase, err := a.openServerControlDatabase(ctx)
+	if err != nil {
+		return
+	}
+	defer controlDatabase.Close()
+	store := billing.Store{DB: controlDatabase}
+	if store.OwnerExists(ctx) {
+		return
+	}
+	domain, email, found := a.firstExistingSiteAdmin(ctx)
+	if !found {
+		return
+	}
+	store.PromoteOwnerIfMissing(ctx, domain, email)
+}
+
+func (a *App) firstExistingSiteAdmin(ctx context.Context) (string, string, bool) {
+	rows, err := listSiteQuotaRows(ctx, a.storagePath, a.serverControlDBPath())
+	if err != nil {
+		return "", "", false
+	}
+	for _, row := range rows {
+		domain, email, found := firstAdminInDatabase(ctx, row.DatabasePath, row.Domain)
+		if found {
+			return domain, email, true
+		}
+	}
+	return "", "", false
+}
+
+func firstAdminInDatabase(ctx context.Context, databasePath, fallbackDomain string) (string, string, bool) {
+	rawDatabase, err := sql.Open("sqlite", "file:"+databasePath)
+	if err != nil {
+		return "", "", false
+	}
+	defer rawDatabase.Close()
+	var domain string
+	var email string
+	err = rawDatabase.QueryRowContext(ctx, `SELECT domain,email FROM users WHERE is_admin=1 ORDER BY id ASC LIMIT 1`).Scan(&domain, &email)
+	domain = normalizeQuotaDomainName(domain)
+	if domain == "" {
+		domain = normalizeQuotaDomainName(fallbackDomain)
+	}
+	email = strings.TrimSpace(email)
+	return domain, email, err == nil && domain != "" && email != ""
+}
+
+func (a *App) promoteFirstServerOwner(ctx context.Context, domain, email string) {
+	domain = normalizeQuotaDomainName(domain)
+	email = strings.TrimSpace(email)
+	if domain == "" || email == "" {
+		return
+	}
+	controlDatabase, err := a.openServerControlDatabase(ctx)
+	if err != nil {
+		return
+	}
+	defer controlDatabase.Close()
+	(billing.Store{DB: controlDatabase}).PromoteOwnerIfMissing(ctx, domain, email)
+}
+
+func (a *App) isServerManagerRequest(r *http.Request) bool {
+	email, found := a.currentAdminEmail(r)
+	if !found {
+		return false
+	}
+	controlDatabase, err := a.openServerControlDatabase(r.Context())
+	if err != nil {
+		return false
+	}
+	defer controlDatabase.Close()
+	store := billing.Store{DB: controlDatabase}
+	ownerDomain, ownerFound := store.OwnerDomain(r.Context())
+	if !ownerFound || normalizeQuotaDomainName(ownerDomain) != a.siteDomain(r.Context(), r) {
+		return false
+	}
+	return store.IsOwner(r.Context(), email)
+}
+
+func (a *App) serverAutomaticRegistrationAllowed(ctx context.Context) bool {
+	if !a.serverOwnerExists(ctx) {
+		return true
+	}
+	controlDatabase, err := a.openServerControlDatabase(ctx)
+	if err != nil {
+		return true
+	}
+	defer controlDatabase.Close()
+	return (billing.Store{DB: controlDatabase}).AutomaticRegistrationAllowed(ctx)
 }
 
 func (a *App) domainStorageUsage(ctx context.Context, domain string) domainStorageUsage {
@@ -10166,7 +10645,8 @@ func (a *App) injectContextMenu(r *http.Request, pagePath, html string) string {
 	if a.isAdminRequest(r) {
 		_, pagePasswordProtected = a.pagePasswordRuleForPath(r.Context(), domain, pagePath)
 	}
-	menuScript := buildContextMenuScript(a.isAdminRequest(r), a.isDomainFrozen(r.Context(), domain), pagePasswordProtected, pagePath, domain, revisionID, revisionCount, storageUsageLabel, translationsForRequest(r))
+	isServerManager := a.isAdminRequest(r) && a.isServerManagerRequest(r)
+	menuScript := buildContextMenuScript(a.isAdminRequest(r), isServerManager, a.isDomainFrozen(r.Context(), domain), pagePasswordProtected, pagePath, domain, revisionID, revisionCount, storageUsageLabel, translationsForRequest(r))
 	if strings.Contains(strings.ToLower(html), "</body>") {
 		bodyClosePattern := regexp.MustCompile(`(?i)</body>`)
 		return bodyClosePattern.ReplaceAllString(html, menuScript+"</body>")
@@ -10238,7 +10718,7 @@ func contentTypeForManagedPage(pagePath, content string) string {
 	return detectedContentType
 }
 
-func buildContextMenuScript(isAdmin bool, isFrozen bool, pagePasswordProtected bool, pagePath, domain string, revisionID int, revisionCount int, storageUsageLabel string, translations map[string]string) string {
+func buildContextMenuScript(isAdmin bool, isServerManager bool, isFrozen bool, pagePasswordProtected bool, pagePath, domain string, revisionID int, revisionCount int, storageUsageLabel string, translations map[string]string) string {
 	if !isAdmin {
 		return buildGuestContextMenuScript(pagePath, domain, translations)
 	}
@@ -10272,6 +10752,7 @@ func buildContextMenuScript(isAdmin bool, isFrozen bool, pagePasswordProtected b
 	publishLabel := template.JSEscapeString(translationOrDefault(translations, "menu_publish", "Publish"))
 	settingsLabel := template.JSEscapeString(translationOrDefault(translations, "menu_domain_settings", "Settings"))
 	analyticsLabel := template.JSEscapeString(translationOrDefault(translations, "menu_analytics", "Analytics"))
+	billingLabel := template.JSEscapeString(translationOrDefault(translations, "menu_billing", "Биллинг"))
 	profileLabel := template.JSEscapeString(translationOrDefault(translations, "menu_profile", "Account"))
 	logoutLabel := template.JSEscapeString(translationOrDefault(translations, "menu_logout", "Sign out"))
 	loginLabel := template.JSEscapeString(translationOrDefault(translations, "menu_login", "Sign in"))
@@ -10302,6 +10783,10 @@ func buildContextMenuScript(isAdmin bool, isFrozen bool, pagePasswordProtected b
 		passwordActionEntry := "<li class='SiteBrushContextMenu'><button type='button' data-sitebrush-action='protect_password' class='SiteBrushContextMenuLink SiteBrushContextMenuButton'><img src='/p/static/lock.png' class='SiteBrushMenuIcon' alt=''>" + protectPasswordLabel + "</button></li>"
 		if pagePasswordProtected {
 			passwordActionEntry = "<li class='SiteBrushContextMenu'><button type='button' data-sitebrush-action='remove_password_protection' class='SiteBrushContextMenuLink SiteBrushContextMenuButton'><img src='/p/static/unlock.png' class='SiteBrushMenuIcon' alt=''>" + removePasswordProtectionLabel + "</button></li>"
+		}
+		billingEntry := ""
+		if isServerManager {
+			billingEntry = "<li class='SiteBrushContextMenu SiteBrushPrivilegedMenuItem'><a href='?billing' class='SiteBrushContextMenuLink'><img src='/p/static/sitebrush-app-icon.png' class='SiteBrushMenuIcon' alt=''>" + billingLabel + "</a></li>"
 		}
 		return contextMenuStylesAndHelpers() + `<script>
 (function initializeSitebrushContextMenuForAdmin() {
@@ -10636,6 +11121,7 @@ func buildContextMenuScript(isAdmin bool, isFrozen bool, pagePasswordProtected b
       "<li class='SiteBrushContextMenu'><a href='?settings' class='SiteBrushContextMenuLink'><img src='/p/static/settings.png' class='SiteBrushMenuIcon' alt=''>" + "` + settingsLabel + `" + "</a></li>",
       "<li class='SiteBrushContextMenu'><a href='?profile' class='SiteBrushContextMenuLink'><img src='/p/static/profile.png' class='SiteBrushMenuIcon' alt=''>" + "` + profileLabel + `" + "</a></li>",
       "<li class='SiteBrushContextMenu'><a href='?logout' class='SiteBrushContextMenuLink'><img src='/p/static/sign-out.png' class='SiteBrushMenuIcon' alt=''>" + "` + logoutLabel + `" + "</a></li>",
+      "` + billingEntry + `",
       "` + copyrightMenuEntry + `",
       "</ul>"
     ];
@@ -11174,6 +11660,7 @@ func contextMenuStylesAndHelpers() string {
 .SiteBrushContextMenuLink:hover{color:#1f3f6f;background:#eef5ff;text-decoration:none}
 .SiteBrushContextMenuButton{width:100%;border:0;background:transparent;text-align:left}
 .SiteBrushDomainMenuItem .SiteBrushContextMenuLink{font-weight:700;border-bottom:1px solid #c8d5e7}
+.SiteBrushPrivilegedMenuItem{margin-top:4px;border-top:1px solid #c8d5e7;padding-top:4px}
 .SiteBrushContextMenuFooter{display:flex;align-items:center;justify-content:space-between;gap:12px;border-top:1px solid #c8d5e7;margin-top:2px;padding:7px 10px 8px 10px;font-family:Arial,Helvetica,sans-serif;font-size:12px;color:#5b6f8b}.SiteBrushMenuIcon{width:18px;height:18px;flex:0 0 18px}
 .SiteBrushContextMenuFooterLink,.SiteBrushContextMenuVersion{color:#5b6f8b;text-decoration:none;font-family:Arial,Helvetica,sans-serif;font-size:12px;cursor:pointer}
 .SiteBrushContextMenuFooterLink:link,.SiteBrushContextMenuFooterLink:visited,.SiteBrushContextMenuFooterLink:active,.SiteBrushContextMenuFooterLink:hover,.SiteBrushContextMenuVersion:link,.SiteBrushContextMenuVersion:visited,.SiteBrushContextMenuVersion:active,.SiteBrushContextMenuVersion:hover{color:#5b6f8b;text-decoration:none}
@@ -11220,6 +11707,7 @@ func contextMenuStylesAndHelpers() string {
   .SiteBrushContextMenuLink:link,.SiteBrushContextMenuLink:visited,.SiteBrushContextMenuLink:active{color:#dbe8ff}
   .SiteBrushContextMenuLink:hover{color:#dbe8ff;background:#24344d}
   .SiteBrushDomainMenuItem .SiteBrushContextMenuLink{border-bottom-color:#2f405d}
+  .SiteBrushPrivilegedMenuItem{border-top-color:#2f405d}
   .SiteBrushContextMenuFooter{color:#a7bbd8;border-top-color:#2f405d}
   .SiteBrushContextMenuFooterLink,.SiteBrushContextMenuVersion{color:#a7bbd8}
   .SiteBrushContextMenuFooterLink:link,.SiteBrushContextMenuFooterLink:visited,.SiteBrushContextMenuFooterLink:active,.SiteBrushContextMenuFooterLink:hover,.SiteBrushContextMenuVersion:link,.SiteBrushContextMenuVersion:visited,.SiteBrushContextMenuVersion:active,.SiteBrushContextMenuVersion:hover{color:#a7bbd8}
