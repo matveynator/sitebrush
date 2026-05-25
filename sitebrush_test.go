@@ -2892,6 +2892,79 @@ func TestFrozenSavePublishUpdatesPublishedStaticForGuests(t *testing.T) {
 	}
 }
 
+func TestAdminRequestUsesStaticPageWhenDomainIsNotFrozen(t *testing.T) {
+	application, rawDB := newTestApplication(t)
+	_, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "admin@example.com", "old")
+	if err != nil {
+		t.Fatalf("insert user: %v", err)
+	}
+	draftHTML := "<html><body><h1>Draft database page</h1></body></html>"
+	staticHTML := "<html><body><h1>Published static page</h1></body></html>"
+	_, err = rawDB.Exec(`INSERT INTO pages(domain,path,title,html,published) VALUES(?,?,?,?,1)`, "localhost", "/docs", "Docs", draftHTML)
+	if err != nil {
+		t.Fatalf("insert page: %v", err)
+	}
+	application.writePublishedStaticHTML("localhost", "/docs", staticHTML)
+
+	request := httptest.NewRequest(http.MethodGet, "http://localhost:8080/docs/", nil)
+	request.AddCookie(newAdminSessionCookie(t, application, "admin@example.com"))
+	response := httptest.NewRecorder()
+	application.route(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%q", response.Code, response.Body.String())
+	}
+	body := response.Body.String()
+	if !strings.Contains(body, "Published static page") {
+		t.Fatalf("admin did not receive static page: %s", body)
+	}
+	if strings.Contains(body, "Draft database page") {
+		t.Fatalf("admin received database draft while domain is not frozen: %s", body)
+	}
+	if !strings.Contains(body, "initializeSitebrushContextMenuForAdmin") {
+		t.Fatalf("admin static page did not include admin menu: %s", body)
+	}
+	if response.Header().Get("X-Sitebrush-Source") != "static" {
+		t.Fatalf("source header = %q, want static", response.Header().Get("X-Sitebrush-Source"))
+	}
+}
+
+func TestAdminRequestUsesDraftDatabaseWhenDomainIsFrozen(t *testing.T) {
+	application, rawDB := newTestApplication(t)
+	_, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "admin@example.com", "old")
+	if err != nil {
+		t.Fatalf("insert user: %v", err)
+	}
+	draftHTML := "<html><body><h1>Draft frozen page</h1></body></html>"
+	staticHTML := "<html><body><h1>Published static page</h1></body></html>"
+	_, err = rawDB.Exec(`INSERT INTO pages(domain,path,title,html,published) VALUES(?,?,?,?,1)`, "localhost", "/docs", "Docs", draftHTML)
+	if err != nil {
+		t.Fatalf("insert page: %v", err)
+	}
+	application.writePublishedStaticHTML("localhost", "/docs", staticHTML)
+	application.setDomainFrozenState(context.Background(), "localhost", 1)
+
+	request := httptest.NewRequest(http.MethodGet, "http://localhost:8080/docs/", nil)
+	request.AddCookie(newAdminSessionCookie(t, application, "admin@example.com"))
+	response := httptest.NewRecorder()
+	application.route(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%q", response.Code, response.Body.String())
+	}
+	body := response.Body.String()
+	if !strings.Contains(body, "Draft frozen page") {
+		t.Fatalf("frozen admin did not receive database draft: %s", body)
+	}
+	if strings.Contains(body, "Published static page") {
+		t.Fatalf("frozen admin received static page instead of draft: %s", body)
+	}
+	if !strings.Contains(body, "initializeSitebrushContextMenuForAdmin") {
+		t.Fatalf("frozen admin page did not include admin menu: %s", body)
+	}
+	if response.Header().Get("X-Sitebrush-Source") != "dynamic" {
+		t.Fatalf("source header = %q, want dynamic", response.Header().Get("X-Sitebrush-Source"))
+	}
+}
+
 func TestSavePagePropagatesLegacySitebrushTemplateClass(t *testing.T) {
 	application, rawDB := newTestApplication(t)
 	_, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "admin@example.com", "old")

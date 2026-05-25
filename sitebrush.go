@@ -5090,7 +5090,14 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 		a.serveGuestNotFoundPage(w, r, domain, pagePath)
 		return
 	}
-	isAdmin := a.isAdminRequest(r)
+	adminEmail, isAdmin := a.currentAdminEmailForDomain(r, domain)
+	domainFrozen := false
+	if isAdmin {
+		domainFrozen = a.isDomainFrozen(r.Context(), domain)
+		if !domainFrozen && isStaticPageRequest(r) && a.servePublishedStaticFileForAdmin(w, r, domain, pagePath, adminEmail) {
+			return
+		}
+	}
 	pageRecord, err := a.findPage(r.Context(), domain, pagePath)
 	if err == nil && isAdmin {
 		a.serveManagedPageContent(w, r, pageRecord.Path, pageRecord.HTML, "db-draft")
@@ -10310,17 +10317,25 @@ func (a *App) isServerManagerRequest(r *http.Request) bool {
 	if !found {
 		return false
 	}
-	controlDatabase, err := a.openServerControlDatabase(r.Context())
+	return a.isServerManagerEmail(r.Context(), a.siteDomain(r.Context(), r), email)
+}
+
+func (a *App) isServerManagerEmail(ctx context.Context, domain, email string) bool {
+	email = strings.TrimSpace(email)
+	if email == "" {
+		return false
+	}
+	controlDatabase, err := a.openServerControlDatabase(ctx)
 	if err != nil {
 		return false
 	}
 	defer controlDatabase.Close()
 	store := billing.Store{DB: controlDatabase}
-	ownerDomain, ownerFound := store.OwnerDomain(r.Context())
-	if !ownerFound || normalizeQuotaDomainName(ownerDomain) != a.siteDomain(r.Context(), r) {
+	ownerDomain, ownerFound := store.OwnerDomain(ctx)
+	if !ownerFound || normalizeQuotaDomainName(ownerDomain) != normalizeQuotaDomainName(domain) {
 		return false
 	}
-	return store.IsOwner(r.Context(), email)
+	return store.IsOwner(ctx, email)
 }
 
 func (a *App) serverAutomaticRegistrationAllowed(ctx context.Context) bool {
@@ -10338,6 +10353,15 @@ func (a *App) serverAutomaticRegistrationAllowed(ctx context.Context) bool {
 func (a *App) domainStorageUsage(ctx context.Context, domain string) domainStorageUsage {
 	a.rebuildDomainStorageUsage(ctx, domain)
 	a.ensureDomainStorageUsageRow(ctx, domain)
+	usage := domainStorageUsage{LimitBytes: defaultDomainStorageLimitBytes}
+	_ = a.db.QueryRowContext(ctx, `SELECT page_bytes,published_page_bytes,revision_bytes,file_bytes,published_static_bytes,limit_bytes FROM domain_storage_usage WHERE domain=?`, domain).Scan(&usage.PageBytes, &usage.PublishedPageBytes, &usage.RevisionBytes, &usage.FileBytes, &usage.PublishedStaticBytes, &usage.LimitBytes)
+	if usage.LimitBytes <= 0 {
+		usage.LimitBytes = defaultDomainStorageLimitBytes
+	}
+	return usage
+}
+
+func (a *App) storedDomainStorageUsage(ctx context.Context, domain string) domainStorageUsage {
 	usage := domainStorageUsage{LimitBytes: defaultDomainStorageLimitBytes}
 	_ = a.db.QueryRowContext(ctx, `SELECT page_bytes,published_page_bytes,revision_bytes,file_bytes,published_static_bytes,limit_bytes FROM domain_storage_usage WHERE domain=?`, domain).Scan(&usage.PageBytes, &usage.PublishedPageBytes, &usage.RevisionBytes, &usage.FileBytes, &usage.PublishedStaticBytes, &usage.LimitBytes)
 	if usage.LimitBytes <= 0 {
@@ -10969,22 +10993,21 @@ func (a *App) createSessionForDomain(w http.ResponseWriter, ctx context.Context,
 }
 
 func (a *App) isAdminRequest(r *http.Request) bool {
-	cookie, err := r.Cookie("sitebrush_session")
-	if err != nil {
-		return false
-	}
-	var sessionCount int
-	_ = a.db.QueryRowContext(r.Context(), `SELECT COUNT(1) FROM sessions s JOIN users u ON (u.domain||'|'||u.email)=s.user_email WHERE s.token=? AND u.domain=? AND u.is_admin=1`, cookie.Value, a.siteDomain(r.Context(), r)).Scan(&sessionCount)
-	return sessionCount > 0
+	_, found := a.currentAdminEmail(r)
+	return found
 }
 
 func (a *App) currentAdminEmail(r *http.Request) (string, bool) {
+	return a.currentAdminEmailForDomain(r, a.siteDomain(r.Context(), r))
+}
+
+func (a *App) currentAdminEmailForDomain(r *http.Request, domain string) (string, bool) {
 	cookie, err := r.Cookie("sitebrush_session")
 	if err != nil {
 		return "", false
 	}
 	var email string
-	err = a.db.QueryRowContext(r.Context(), `SELECT u.email FROM sessions s JOIN users u ON (u.domain||'|'||u.email)=s.user_email WHERE s.token=? AND u.domain=? AND u.is_admin=1 LIMIT 1`, cookie.Value, a.siteDomain(r.Context(), r)).Scan(&email)
+	err = a.db.QueryRowContext(r.Context(), `SELECT u.email FROM sessions s JOIN users u ON (u.domain||'|'||u.email)=s.user_email WHERE s.token=? AND u.domain=? AND u.is_admin=1 LIMIT 1`, cookie.Value, strings.TrimSpace(domain)).Scan(&email)
 	if err != nil || strings.TrimSpace(email) == "" {
 		return "", false
 	}
@@ -11466,21 +11489,29 @@ func (a *App) serveGuestNotFoundPage(w http.ResponseWriter, r *http.Request, dom
 
 func (a *App) injectContextMenu(r *http.Request, pagePath, html string) string {
 	domain := a.siteDomain(r.Context(), r)
+	isAdmin := a.isAdminRequest(r)
 	revisionID := 0
 	revisionCount := 0
 	storageUsageLabel := ""
-	if a.isAdminRequest(r) {
+	if isAdmin {
 		revisionID = a.latestActiveRevisionID(r.Context(), domain, pagePath)
 		revisionCount = a.revisionCount(r.Context(), domain, pagePath)
-		storageUsage := a.domainStorageUsage(r.Context(), domain)
+		storageUsage := a.storedDomainStorageUsage(r.Context(), domain)
 		storageUsageLabel = formatFileSize(storageUsage.totalBytes()) + " / " + formatFileSize(storageUsage.LimitBytes)
 	}
 	pagePasswordProtected := false
-	if a.isAdminRequest(r) {
+	if isAdmin {
 		_, pagePasswordProtected = a.pagePasswordRuleForPath(r.Context(), domain, pagePath)
 	}
-	isServerManager := a.isAdminRequest(r) && a.isServerManagerRequest(r)
-	menuScript := buildContextMenuScript(a.isAdminRequest(r), isServerManager, a.isDomainFrozen(r.Context(), domain), pagePasswordProtected, pagePath, domain, revisionID, revisionCount, storageUsageLabel, translationsForRequest(r))
+	isServerManager := false
+	if isAdmin {
+		isServerManager = a.isServerManagerRequest(r)
+	}
+	menuScript := buildContextMenuScript(isAdmin, isServerManager, a.isDomainFrozen(r.Context(), domain), pagePasswordProtected, pagePath, domain, revisionID, revisionCount, storageUsageLabel, translationsForRequest(r))
+	return injectMenuScriptIntoHTML(html, menuScript)
+}
+
+func injectMenuScriptIntoHTML(html string, menuScript string) string {
 	if strings.Contains(strings.ToLower(html), "</body>") {
 		bodyClosePattern := regexp.MustCompile(`(?i)</body>`)
 		return bodyClosePattern.ReplaceAllString(html, menuScript+"</body>")
@@ -17191,17 +17222,18 @@ func (a *App) servePublishedStaticFile(w http.ResponseWriter, r *http.Request, d
 	return a.servePublishedStaticFileFromDisk(w, r, domain, pagePath, true)
 }
 
-func isGuestStaticRequest(r *http.Request) bool {
+func isStaticPageRequest(r *http.Request) bool {
 	if r == nil {
 		return false
 	}
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		return false
 	}
-	if strings.TrimSpace(r.URL.RawQuery) != "" {
-		return false
-	}
-	return !hasSitebrushSessionCookie(r)
+	return strings.TrimSpace(r.URL.RawQuery) == ""
+}
+
+func isGuestStaticRequest(r *http.Request) bool {
+	return isStaticPageRequest(r) && !hasSitebrushSessionCookie(r)
 }
 
 func hasSitebrushSessionCookie(r *http.Request) bool {
@@ -17239,6 +17271,31 @@ func (a *App) servePublishedStaticFileFromDisk(w http.ResponseWriter, r *http.Re
 		return false
 	}
 	_, _ = w.Write(staticContent)
+	return true
+}
+
+func (a *App) servePublishedStaticFileForAdmin(w http.ResponseWriter, r *http.Request, domain, pagePath string, adminEmail string) bool {
+	pagePath = cleanPath(pagePath)
+	staticFilePath := filepath.Join(a.domainStaticDir(domain), staticRelativePathForPage(pagePath))
+	fileInfo, statErr := os.Stat(staticFilePath)
+	if statErr != nil || fileInfo.IsDir() {
+		return false
+	}
+	if pageContentKind(pagePath, "") != "html" {
+		a.logContentDelivery(w, "static-file")
+		http.ServeFile(w, r, staticFilePath)
+		return true
+	}
+	staticContent, readErr := os.ReadFile(staticFilePath)
+	if readErr != nil {
+		return false
+	}
+	_, pagePasswordProtected := a.pagePasswordRuleFromPrefixFile(domain, pagePath)
+	isServerManager := a.isServerManagerEmail(r.Context(), domain, adminEmail)
+	menuScript := buildContextMenuScript(true, isServerManager, false, pagePasswordProtected, pagePath, domain, 0, 0, "", translationsForRequest(r))
+	a.logContentDelivery(w, "static-file")
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	_, _ = w.Write([]byte(injectMenuScriptIntoHTML(string(staticContent), menuScript)))
 	return true
 }
 
