@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"math/big"
@@ -111,6 +112,36 @@ func newTestApplication(t *testing.T) (*App, *sql.DB) {
 		t.Fatalf("migrate: %v", err)
 	}
 	return application, rawDB
+}
+
+func TestMigrateWithSingleSQLiteConnectionRebuildsPagePasswordPrefixFiles(t *testing.T) {
+	storagePath := t.TempDir()
+	rawDB, err := sql.Open("sqlite3", filepath.Join(storagePath, "sitebrush.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rawDB.SetMaxOpenConns(1)
+	rawDB.SetMaxIdleConns(1)
+	t.Cleanup(func() {
+		_ = rawDB.Close()
+	})
+	application := &App{db: rawDB, storagePath: storagePath}
+	if err := application.migrate(context.Background()); err != nil {
+		t.Fatalf("initial migrate: %v", err)
+	}
+	if _, err := rawDB.Exec(`INSERT INTO page_password_rules(domain,path,password_hash,created_at,updated_at) VALUES(?,?,?,?,?)`, "localhost", "/", "hash", time.Now().UTC().Format(time.RFC3339), time.Now().UTC().Format(time.RFC3339)); err != nil {
+		t.Fatalf("insert page password rule: %v", err)
+	}
+
+	startedAt := time.Now()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := application.migrate(ctx); err != nil {
+		t.Fatalf("second migrate: %v", err)
+	}
+	if duration := time.Since(startedAt); duration > time.Second {
+		t.Fatalf("second migrate took %s, want under 1s", duration)
+	}
 }
 
 func withEmailSPFAllowed(t *testing.T) {
@@ -4759,7 +4790,7 @@ func TestPerSiteDBRouterRoutesActiveAliasRequestsToPrimarySiteDatabase(t *testin
 	router := newPerSiteDBRouter(siteDatabaseDir, "localhost", func(rawDB *sql.DB) error {
 		application := &App{db: rawDB, storagePath: storagePath, grabTracker: newGrabProgressTracker()}
 		return application.migrate(context.Background())
-	})
+	}, false)
 	t.Cleanup(func() {
 		if err := router.Close(); err != nil {
 			t.Fatalf("close site database router: %v", err)
@@ -4797,6 +4828,99 @@ func TestPerSiteDBRouterRoutesActiveAliasRequestsToPrimarySiteDatabase(t *testin
 	}
 	if page.HTML != "<h1>Home</h1>" {
 		t.Fatalf("alias page HTML = %q, want primary content", page.HTML)
+	}
+}
+
+func TestPerSiteDBRouterSerializesConcurrentWritesToOneSiteDatabase(t *testing.T) {
+	storagePath := t.TempDir()
+	dbPath := filepath.Join(storagePath, defaultDBPath)
+	siteDatabaseDir := siteDatabaseRootPath(dbPath)
+	router := newPerSiteDBRouter(siteDatabaseDir, "localhost", func(rawDB *sql.DB) error {
+		application := &App{db: rawDB, storagePath: storagePath, grabTracker: newGrabProgressTracker()}
+		return application.migrate(context.Background())
+	}, false)
+	t.Cleanup(func() {
+		if err := router.Close(); err != nil {
+			t.Fatalf("close site database router: %v", err)
+		}
+	})
+
+	domain := "serial.example"
+	domainContext := contextWithDomain(context.Background(), domain)
+	siteDatabase, err := router.databaseForContext(domainContext)
+	if err != nil {
+		t.Fatalf("open site database: %v", err)
+	}
+	if got := siteDatabase.rawDatabase.Stats().MaxOpenConnections; got != 1 {
+		t.Fatalf("site database max open connections = %d, want 1", got)
+	}
+
+	writeCount := 96
+	writeResults := make(chan error, writeCount)
+	for writeIndex := 0; writeIndex < writeCount; writeIndex++ {
+		go func(index int) {
+			pagePath := fmt.Sprintf("/page-%03d", index)
+			_, execErr := router.ExecContext(domainContext, `INSERT INTO pages(domain,path,title,html,published) VALUES(?,?,?,?,1)`, domain, pagePath, pagePath, "<p>ok</p>")
+			writeResults <- execErr
+		}(writeIndex)
+	}
+	for writeIndex := 0; writeIndex < writeCount; writeIndex++ {
+		if execErr := <-writeResults; execErr != nil {
+			t.Fatalf("concurrent write %d failed: %v", writeIndex, execErr)
+		}
+	}
+
+	var storedPages int
+	if err := router.QueryRowContext(domainContext, `SELECT COUNT(1) FROM pages WHERE domain=?`, domain).Scan(&storedPages); err != nil {
+		t.Fatalf("count stored pages: %v", err)
+	}
+	if storedPages != writeCount {
+		t.Fatalf("stored pages = %d, want %d", storedPages, writeCount)
+	}
+}
+
+func TestPerSiteDBRouterMigratesUnopenedDatabaseDuringAliasScan(t *testing.T) {
+	storagePath := t.TempDir()
+	dbPath := filepath.Join(storagePath, defaultDBPath)
+	siteDatabaseDir := siteDatabaseRootPath(dbPath)
+	primaryDomain := "primary.example"
+	aliasDomain := "www.primary.example"
+	primaryDatabasePath := filepath.Join(siteDatabaseDir, domainStorageName(primaryDomain)+".db")
+	if err := ensureParentDir(primaryDatabasePath); err != nil {
+		t.Fatal(err)
+	}
+	rawPrimaryDB, err := sql.Open("sqlite", "file:"+primaryDatabasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := rawPrimaryDB.Exec(`CREATE TABLE domain_aliases(primary_domain TEXT,alias_domain TEXT UNIQUE,is_verified INTEGER,dns_a_ok INTEGER)`); err != nil {
+		t.Fatalf("create old alias table: %v", err)
+	}
+	if _, err := rawPrimaryDB.Exec(`INSERT INTO domain_aliases(primary_domain,alias_domain,is_verified,dns_a_ok) VALUES(?,?,1,1)`, primaryDomain, aliasDomain); err != nil {
+		t.Fatalf("insert old alias: %v", err)
+	}
+	_ = rawPrimaryDB.Close()
+
+	router := newPerSiteDBRouter(siteDatabaseDir, "localhost", func(rawDB *sql.DB) error {
+		application := &App{db: rawDB, storagePath: storagePath, grabTracker: newGrabProgressTracker()}
+		return application.migrate(context.Background())
+	}, false)
+	t.Cleanup(func() {
+		if err := router.Close(); err != nil {
+			t.Fatalf("close site database router: %v", err)
+		}
+	})
+
+	siteDatabase, err := router.databaseForContext(contextWithDomain(context.Background(), aliasDomain))
+	if err != nil {
+		t.Fatalf("route alias database: %v", err)
+	}
+	if siteDatabase.path != primaryDatabasePath {
+		t.Fatalf("alias routed to %q, want primary database %q", siteDatabase.path, primaryDatabasePath)
+	}
+	var verificationToken string
+	if err := router.QueryRowContext(contextWithDomain(context.Background(), aliasDomain), `SELECT COALESCE(verification_token,'') FROM domain_aliases WHERE alias_domain=?`, aliasDomain).Scan(&verificationToken); err != nil {
+		t.Fatalf("read migrated alias column: %v", err)
 	}
 }
 
@@ -5245,7 +5369,7 @@ func TestServeTLSWithAutoCertUsesTLSOnListener(t *testing.T) {
 	}
 	serverDone := make(chan struct{})
 	go func() {
-		application.serveTLSWithAutoCert(listener, tlsConfig, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		application.serveTLSWithAutoCert(context.Background(), listener, tlsConfig, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			_, _ = w.Write([]byte("secure"))
 		}))
 		close(serverDone)

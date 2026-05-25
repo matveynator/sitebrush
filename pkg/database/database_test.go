@@ -8,6 +8,7 @@ import (
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
+	_ "sitebrush/pkg/database/drivers"
 )
 
 func newTestDatabase(t *testing.T) *Database {
@@ -33,6 +34,25 @@ func newTestDatabase(t *testing.T) *Database {
 		t.Fatalf("init schema: %v", err)
 	}
 	return db
+}
+
+func TestNewDatabaseUsesSingleConnectionForSQLiteFiles(t *testing.T) {
+	db, err := NewDatabase(Config{DBType: "sqlite", DBPath: filepath.Join(t.TempDir(), "sitebrush.db")})
+	if err != nil {
+		t.Fatalf("new sqlite database: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := db.DB.Close(); err != nil {
+			t.Fatalf("close sqlite database: %v", err)
+		}
+	})
+
+	if got := db.DB.Stats().MaxOpenConnections; got != 1 {
+		t.Fatalf("sqlite max open connections = %d, want 1", got)
+	}
+	if db.pipeline == nil {
+		t.Fatalf("sqlite database should use serialized pipeline")
+	}
 }
 
 func TestShortLinksPreviewPersistAndResolve(t *testing.T) {

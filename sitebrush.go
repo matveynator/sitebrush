@@ -31,6 +31,7 @@ import (
 	stdmail "net/mail"
 	"net/url"
 	"os"
+	"os/signal"
 	"path"
 	"path/filepath"
 	"reflect"
@@ -49,14 +50,16 @@ import (
 	appcli "sitebrush/pkg/cli"
 	_ "sitebrush/pkg/database/drivers"
 	"sitebrush/pkg/desktop"
+	"sitebrush/pkg/diagnosticlog"
 	"sitebrush/pkg/dirprotect"
 	"sitebrush/pkg/diskusage"
 	"sitebrush/pkg/geoip"
 	"sitebrush/pkg/grabber"
 	"sitebrush/pkg/mailout"
 	"sitebrush/pkg/serviceinstall"
+	"sitebrush/pkg/shutdownsignals"
+	"sitebrush/pkg/systeminit"
 	"sitebrush/pkg/winservice"
-        "sitebrush/pkg/systeminit"
 )
 
 //go:embed web/*
@@ -83,6 +86,7 @@ const pagePasswordSessionTTL = time.Hour
 type App struct {
 	db                    sqlExecutor
 	storagePath           string
+	debug                 bool
 	nativeFileDialog      bool
 	automaticSSLAvailable bool
 	grabTracker           *grabProgressTracker
@@ -163,11 +167,53 @@ type siteDBRequest struct {
 }
 
 type siteDBResponse struct {
-	db  *sql.DB
+	db  *siteFileDatabase
 	err error
 }
 
 type siteDomainContextKey struct{}
+
+type siteDBWorkloadKind int
+
+const (
+	siteDBWorkloadGeneral siteDBWorkloadKind = iota
+	siteDBWorkloadRead
+	siteDBWorkloadWrite
+)
+
+type siteDBOperation struct {
+	ctx      context.Context
+	query    string
+	args     []any
+	response chan siteDBOperationResponse
+	run      func(context.Context, *sql.DB) siteDBOperationResponse
+	kind     siteDBWorkloadKind
+}
+
+type siteDBOperationResponse struct {
+	result sql.Result
+	rows   *sql.Rows
+	row    *sql.Row
+	err    error
+}
+
+// siteFileDatabase owns one file-backed database handle from one goroutine.
+// database/sql is still the portable execution layer, but all callers enter
+// through channel queues so SQLite-style files do not receive parallel writes.
+type siteFileDatabase struct {
+	path          string
+	rawDatabase   *sql.DB
+	debug         bool
+	generalQueue  chan siteDBOperation
+	readQueue     chan siteDBOperation
+	writeQueue    chan siteDBOperation
+	closeRequests chan chan error
+}
+
+const slowHTTPRequestLogAfter = 2 * time.Second
+const slowHTTPRequestRepeatAfter = 10 * time.Second
+const slowDatabaseOperationLogAfter = time.Second
+const slowDatabaseOperationRepeatAfter = 5 * time.Second
 
 func contextWithDomain(ctx context.Context, domain string) context.Context {
 	normalizedDomain := normalizeDomainName(domain)
@@ -192,18 +238,326 @@ func domainFromContext(ctx context.Context) string {
 	return normalizedDomain
 }
 
+func newSiteFileDatabase(databasePath string, rawDatabase *sql.DB, debug bool) *siteFileDatabase {
+	rawDatabase.SetMaxOpenConns(1)
+	rawDatabase.SetMaxIdleConns(1)
+	rawDatabase.SetConnMaxLifetime(0)
+
+	database := &siteFileDatabase{
+		path:          databasePath,
+		rawDatabase:   rawDatabase,
+		debug:         debug,
+		generalQueue:  make(chan siteDBOperation, 64),
+		readQueue:     make(chan siteDBOperation, 256),
+		writeQueue:    make(chan siteDBOperation, 128),
+		closeRequests: make(chan chan error),
+	}
+	go database.run()
+	log.Printf("%sDB WORKER%s connected path=%s", terminalGreen(), terminalReset(), databasePath)
+	return database
+}
+
+func (db *siteFileDatabase) run() {
+	queues := []chan siteDBOperation{db.writeQueue, db.readQueue, db.generalQueue}
+	turn := 0
+
+	for {
+		select {
+		case response := <-db.closeRequests:
+			finishedOperations := db.finishQueuedOperations()
+			response <- db.close(finishedOperations)
+			return
+		default:
+		}
+
+		operation, closeResponse, closing := db.nextOperation(queues, &turn)
+		if closing {
+			finishedOperations := db.finishQueuedOperations()
+			closeResponse <- db.close(finishedOperations)
+			return
+		}
+
+		db.completeOperation(operation)
+	}
+}
+
+func (db *siteFileDatabase) completeOperation(operation siteDBOperation) {
+	select {
+	case <-operation.ctx.Done():
+		if db.debug {
+			db.logDatabaseOperationCanceled(operation)
+		}
+		operation.response <- siteDBOperationResponse{err: operation.ctx.Err()}
+		return
+	default:
+	}
+
+	startedAt := time.Now()
+	response := operation.run(operation.ctx, db.rawDatabase)
+	duration := time.Since(startedAt)
+	if db.debug && (duration >= slowDatabaseOperationLogAfter || response.err != nil) {
+		db.logDatabaseOperationFinished(operation, duration, response.err)
+	}
+	operation.response <- response
+}
+
+func (db *siteFileDatabase) finishQueuedOperations() int {
+	finishedOperations := 0
+	for {
+		select {
+		case operation := <-db.writeQueue:
+			db.completeOperation(operation)
+		case operation := <-db.readQueue:
+			db.completeOperation(operation)
+		case operation := <-db.generalQueue:
+			db.completeOperation(operation)
+		default:
+			return finishedOperations
+		}
+		finishedOperations++
+	}
+}
+
+func (db *siteFileDatabase) close(finishedOperations int) error {
+	log.Printf("%sDB WORKER%s closing path=%s queued_operations_finished=%d", terminalYellow(), terminalReset(), db.path, finishedOperations)
+	err := db.rawDatabase.Close()
+	if err != nil {
+		log.Printf("%sDB WORKER%s close failed path=%s err=%v", terminalRed(), terminalReset(), db.path, err)
+		return err
+	}
+	log.Printf("%sDB WORKER%s disconnected path=%s", terminalGreen(), terminalReset(), db.path)
+	return nil
+}
+
+func (db *siteFileDatabase) nextOperation(queues []chan siteDBOperation, turn *int) (siteDBOperation, chan error, bool) {
+	for range queues {
+		queue := queues[*turn%len(queues)]
+		*turn = *turn + 1
+		select {
+		case operation := <-queue:
+			return operation, nil, false
+		default:
+		}
+	}
+
+	select {
+	case response := <-db.closeRequests:
+		return siteDBOperation{}, response, true
+	case operation := <-db.writeQueue:
+		return operation, nil, false
+	case operation := <-db.readQueue:
+		return operation, nil, false
+	case operation := <-db.generalQueue:
+		return operation, nil, false
+	}
+}
+
+func (db *siteFileDatabase) ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error) {
+	arguments := append([]any(nil), args...)
+	operation := siteDBOperation{
+		query: query,
+		args:  arguments,
+		kind:  siteDBWorkloadForQuery(query),
+		run: func(runCtx context.Context, rawDatabase *sql.DB) siteDBOperationResponse {
+			result, err := rawDatabase.ExecContext(runCtx, query, arguments...)
+			return siteDBOperationResponse{result: result, err: err}
+		},
+	}
+	response := db.runOperation(ctx, operation)
+	return response.result, response.err
+}
+
+func (db *siteFileDatabase) QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error) {
+	arguments := append([]any(nil), args...)
+	operation := siteDBOperation{
+		query: query,
+		args:  arguments,
+		kind:  siteDBWorkloadForQuery(query),
+		run: func(runCtx context.Context, rawDatabase *sql.DB) siteDBOperationResponse {
+			rows, err := rawDatabase.QueryContext(runCtx, query, arguments...)
+			return siteDBOperationResponse{rows: rows, err: err}
+		},
+	}
+	response := db.runOperation(ctx, operation)
+	return response.rows, response.err
+}
+
+func (db *siteFileDatabase) QueryRowContext(ctx context.Context, query string, args ...any) (*sql.Row, error) {
+	arguments := append([]any(nil), args...)
+	operation := siteDBOperation{
+		query: query,
+		args:  arguments,
+		kind:  siteDBWorkloadForQuery(query),
+		run: func(runCtx context.Context, rawDatabase *sql.DB) siteDBOperationResponse {
+			row := rawDatabase.QueryRowContext(runCtx, query, arguments...)
+			return siteDBOperationResponse{row: row}
+		},
+	}
+	response := db.runOperation(ctx, operation)
+	return response.row, response.err
+}
+
+func (db *siteFileDatabase) Migrate(ctx context.Context, migrate siteDBMigrator) error {
+	if migrate == nil {
+		return nil
+	}
+	operation := siteDBOperation{
+		kind: siteDBWorkloadGeneral,
+		run: func(runCtx context.Context, rawDatabase *sql.DB) siteDBOperationResponse {
+			return siteDBOperationResponse{err: migrate(rawDatabase)}
+		},
+	}
+	return db.runOperation(ctx, operation).err
+}
+
+func (db *siteFileDatabase) Close() error {
+	response := make(chan error, 1)
+	db.closeRequests <- response
+	return <-response
+}
+
+func (db *siteFileDatabase) runOperation(ctx context.Context, operation siteDBOperation) siteDBOperationResponse {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	operation.ctx = ctx
+	operation.response = make(chan siteDBOperationResponse, 1)
+
+	queue := db.queueFor(operation.kind)
+	if !db.debug {
+		select {
+		case <-ctx.Done():
+			return siteDBOperationResponse{err: ctx.Err()}
+		case queue <- operation:
+		}
+		select {
+		case response := <-operation.response:
+			return response
+		case <-ctx.Done():
+			return siteDBOperationResponse{err: ctx.Err()}
+		}
+	}
+
+	queueStartedAt := time.Now()
+	queueTimer := time.NewTimer(slowDatabaseOperationLogAfter)
+	defer queueTimer.Stop()
+	for queued := false; !queued; {
+		select {
+		case <-ctx.Done():
+			return siteDBOperationResponse{err: ctx.Err()}
+		case queue <- operation:
+			queued = true
+		case <-queueTimer.C:
+			db.logDatabaseOperationWaiting("queue", operation, time.Since(queueStartedAt))
+			queueTimer.Reset(slowDatabaseOperationRepeatAfter)
+		}
+	}
+
+	runStartedAt := time.Now()
+	waitTimer := time.NewTimer(slowDatabaseOperationLogAfter)
+	defer waitTimer.Stop()
+	for {
+		select {
+		case response := <-operation.response:
+			waitDuration := time.Since(runStartedAt)
+			if waitDuration >= slowDatabaseOperationLogAfter || response.err != nil {
+				db.logDatabaseOperationResponse(operation, time.Since(queueStartedAt), response.err)
+			}
+			return response
+		case <-ctx.Done():
+			db.logDatabaseOperationWaiting("context-canceled", operation, time.Since(queueStartedAt))
+			return siteDBOperationResponse{err: ctx.Err()}
+		case <-waitTimer.C:
+			db.logDatabaseOperationWaiting("response", operation, time.Since(runStartedAt))
+			waitTimer.Reset(slowDatabaseOperationRepeatAfter)
+		}
+	}
+}
+
+func (db *siteFileDatabase) queueFor(kind siteDBWorkloadKind) chan siteDBOperation {
+	switch kind {
+	case siteDBWorkloadRead:
+		return db.readQueue
+	case siteDBWorkloadWrite:
+		return db.writeQueue
+	default:
+		return db.generalQueue
+	}
+}
+
+func siteDBWorkloadForQuery(query string) siteDBWorkloadKind {
+	statement := strings.ToUpper(strings.TrimSpace(query))
+	if statement == "" {
+		return siteDBWorkloadGeneral
+	}
+	switch {
+	case strings.HasPrefix(statement, "SELECT"), strings.HasPrefix(statement, "WITH"):
+		return siteDBWorkloadRead
+	case strings.HasPrefix(statement, "INSERT"), strings.HasPrefix(statement, "UPDATE"), strings.HasPrefix(statement, "DELETE"), strings.HasPrefix(statement, "CREATE"), strings.HasPrefix(statement, "ALTER"), strings.HasPrefix(statement, "DROP"), strings.HasPrefix(statement, "REPLACE"):
+		return siteDBWorkloadWrite
+	default:
+		return siteDBWorkloadGeneral
+	}
+}
+
+func siteDBWorkloadName(kind siteDBWorkloadKind) string {
+	switch kind {
+	case siteDBWorkloadRead:
+		return "read"
+	case siteDBWorkloadWrite:
+		return "write"
+	default:
+		return "general"
+	}
+}
+
+func (db *siteFileDatabase) logDatabaseOperationWaiting(stage string, operation siteDBOperation, duration time.Duration) {
+	log.Printf("%sDB WORKER%s waiting stage=%s path=%s domain=%s kind=%s duration=%s queues=write:%d,read:%d,general:%d sql=%q",
+		terminalYellow(), terminalReset(), stage, db.path, domainFromContext(operation.ctx), siteDBWorkloadName(operation.kind), duration.String(),
+		len(db.writeQueue), len(db.readQueue), len(db.generalQueue), diagnosticlog.SQLSummary(operation.query))
+}
+
+func (db *siteFileDatabase) logDatabaseOperationFinished(operation siteDBOperation, duration time.Duration, err error) {
+	status := "ok"
+	logColor := terminalCyan()
+	if err != nil {
+		status = err.Error()
+		logColor = terminalRed()
+	}
+	log.Printf("%sDB WORKER%s operation finished path=%s domain=%s kind=%s duration=%s status=%q sql=%q",
+		logColor, terminalReset(), db.path, domainFromContext(operation.ctx), siteDBWorkloadName(operation.kind), duration.String(), status, diagnosticlog.SQLSummary(operation.query))
+}
+
+func (db *siteFileDatabase) logDatabaseOperationResponse(operation siteDBOperation, duration time.Duration, err error) {
+	status := "ok"
+	logColor := terminalCyan()
+	if err != nil {
+		status = err.Error()
+		logColor = terminalRed()
+	}
+	log.Printf("%sDB WORKER%s response delivered path=%s domain=%s kind=%s duration=%s status=%q sql=%q",
+		logColor, terminalReset(), db.path, domainFromContext(operation.ctx), siteDBWorkloadName(operation.kind), duration.String(), status, diagnosticlog.SQLSummary(operation.query))
+}
+
+func (db *siteFileDatabase) logDatabaseOperationCanceled(operation siteDBOperation) {
+	log.Printf("%sDB WORKER%s operation skipped path=%s domain=%s kind=%s status=%q sql=%q",
+		terminalYellow(), terminalReset(), db.path, domainFromContext(operation.ctx), siteDBWorkloadName(operation.kind), operation.ctx.Err(), diagnosticlog.SQLSummary(operation.query))
+}
+
 // perSiteDBRouter resolves a separate sqlite file per domain and keeps the map
 // ownership in a single goroutine so we do not coordinate it with mutexes.
 type perSiteDBRouter struct {
 	fallbackDomain string
+	debug          bool
 	requests       chan siteDBRequest
 	closeRequests  chan chan error
 	noopDatabase   *sql.DB
 }
 
-func newPerSiteDBRouter(siteDatabaseRootDir string, fallbackDomain string, migrate siteDBMigrator) *perSiteDBRouter {
+func newPerSiteDBRouter(siteDatabaseRootDir string, fallbackDomain string, migrate siteDBMigrator, debug bool) *perSiteDBRouter {
 	router := &perSiteDBRouter{
 		fallbackDomain: fallbackDomain,
+		debug:          debug,
 		requests:       make(chan siteDBRequest),
 		closeRequests:  make(chan chan error),
 		noopDatabase:   mustOpenNoopSQLite(),
@@ -213,16 +567,18 @@ func newPerSiteDBRouter(siteDatabaseRootDir string, fallbackDomain string, migra
 }
 
 func (r *perSiteDBRouter) run(siteDatabaseRootDir string, migrate siteDBMigrator) {
-	databasesByDomain := make(map[string]*sql.DB)
+	databasesByDomain := make(map[string]*siteFileDatabase)
 	primaryDomainsByAlias := make(map[string]string)
 	for {
 		select {
 		case request := <-r.requests:
+			startedAt := time.Now()
 			domain := normalizeDomainName(request.domain)
 			if domain == "" {
 				domain = r.fallbackDomain
 			}
 			databaseDomain := domain
+			aliasDomain := ""
 			if primaryDomain := primaryDomainsByAlias[domain]; primaryDomain != "" {
 				database, err := r.databaseForDomain(siteDatabaseRootDir, databasesByDomain, primaryDomain, migrate)
 				if err != nil {
@@ -230,20 +586,24 @@ func (r *perSiteDBRouter) run(siteDatabaseRootDir string, migrate siteDBMigrator
 					continue
 				}
 				if activePrimaryDomainForAlias(database, domain) == primaryDomain {
+					r.logRouterResolved(domain, primaryDomain, domain, time.Since(startedAt), nil)
 					request.response <- siteDBResponse{db: database}
 					continue
 				}
 				delete(primaryDomainsByAlias, domain)
 			}
-			if primaryDomain := findActivePrimaryDomainForAlias(siteDatabaseRootDir, databasesByDomain, domain); primaryDomain != "" {
+			if primaryDomain := findActivePrimaryDomainForAlias(siteDatabaseRootDir, databasesByDomain, domain, migrate); primaryDomain != "" {
 				primaryDomainsByAlias[domain] = primaryDomain
 				databaseDomain = primaryDomain
+				aliasDomain = domain
 			}
 			database, err := r.databaseForDomain(siteDatabaseRootDir, databasesByDomain, databaseDomain, migrate)
 			if err != nil {
+				r.logRouterResolved(domain, databaseDomain, aliasDomain, time.Since(startedAt), err)
 				request.response <- siteDBResponse{err: err}
 				continue
 			}
+			r.logRouterResolved(domain, databaseDomain, aliasDomain, time.Since(startedAt), nil)
 			request.response <- siteDBResponse{db: database}
 		case closeResponse := <-r.closeRequests:
 			var closeErr error
@@ -259,7 +619,7 @@ func (r *perSiteDBRouter) run(siteDatabaseRootDir string, migrate siteDBMigrator
 	}
 }
 
-func (r *perSiteDBRouter) databaseForDomain(siteDatabaseRootDir string, databasesByDomain map[string]*sql.DB, domain string, migrate siteDBMigrator) (*sql.DB, error) {
+func (r *perSiteDBRouter) databaseForDomain(siteDatabaseRootDir string, databasesByDomain map[string]*siteFileDatabase, domain string, migrate siteDBMigrator) (*siteFileDatabase, error) {
 	databaseDomain := normalizeDomainName(domain)
 	if databaseDomain == "" {
 		databaseDomain = r.fallbackDomain
@@ -276,15 +636,17 @@ func (r *perSiteDBRouter) databaseForDomain(siteDatabaseRootDir string, database
 	if err != nil {
 		return nil, err
 	}
-	if migrateErr := migrate(nextDatabase); migrateErr != nil {
-		_ = nextDatabase.Close()
+	siteDatabase := newSiteFileDatabase(databasePath, nextDatabase, r.debug)
+	if migrateErr := siteDatabase.Migrate(context.Background(), migrate); migrateErr != nil {
+		_ = siteDatabase.Close()
 		return nil, migrateErr
 	}
-	databasesByDomain[databaseDomain] = nextDatabase
-	return nextDatabase, nil
+	log.Printf("%sDB MIGRATION%s checked path=%s domain=%s", terminalCyan(), terminalReset(), databasePath, databaseDomain)
+	databasesByDomain[databaseDomain] = siteDatabase
+	return siteDatabase, nil
 }
 
-func findActivePrimaryDomainForAlias(siteDatabaseRootDir string, databasesByDomain map[string]*sql.DB, aliasDomain string) string {
+func findActivePrimaryDomainForAlias(siteDatabaseRootDir string, databasesByDomain map[string]*siteFileDatabase, aliasDomain string, migrate siteDBMigrator) string {
 	aliasDomain = normalizeDomainName(aliasDomain)
 	if aliasDomain == "" {
 		return ""
@@ -303,11 +665,24 @@ func findActivePrimaryDomainForAlias(siteDatabaseRootDir string, databasesByDoma
 			continue
 		}
 		databasePath := filepath.Join(siteDatabaseRootDir, databaseEntry.Name())
+		if siteDatabasePathAlreadyOpen(databasesByDomain, databasePath) {
+			continue
+		}
 		database, err := sql.Open("sqlite", "file:"+databasePath)
 		if err != nil {
 			continue
 		}
-		primaryDomain := activePrimaryDomainForAlias(database, aliasDomain)
+		database.SetMaxOpenConns(1)
+		database.SetMaxIdleConns(1)
+		if migrate != nil {
+			if migrateErr := migrate(database); migrateErr != nil {
+				log.Printf("%sDB MIGRATION%s skipped alias scan path=%s err=%v", terminalRed(), terminalReset(), databasePath, migrateErr)
+				_ = database.Close()
+				continue
+			}
+			log.Printf("%sDB MIGRATION%s checked path=%s reason=alias-scan", terminalCyan(), terminalReset(), databasePath)
+		}
+		primaryDomain := activePrimaryDomainForAliasRaw(database, aliasDomain)
 		_ = database.Close()
 		if primaryDomain != "" {
 			return primaryDomain
@@ -316,12 +691,37 @@ func findActivePrimaryDomainForAlias(siteDatabaseRootDir string, databasesByDoma
 	return ""
 }
 
-func activePrimaryDomainForAlias(database *sql.DB, aliasDomain string) string {
+func siteDatabasePathAlreadyOpen(databasesByDomain map[string]*siteFileDatabase, databasePath string) bool {
+	for _, database := range databasesByDomain {
+		if database != nil && database.path == databasePath {
+			return true
+		}
+	}
+	return false
+}
+
+func activePrimaryDomainForAlias(database *siteFileDatabase, aliasDomain string) string {
 	if database == nil {
 		return ""
 	}
+	row, err := database.QueryRowContext(context.Background(), `SELECT primary_domain FROM domain_aliases WHERE alias_domain=? AND is_verified=1 AND dns_a_ok=1 LIMIT 1`, aliasDomain)
+	if err != nil {
+		return ""
+	}
+	return scanActivePrimaryDomainForAlias(row, aliasDomain)
+}
+
+func activePrimaryDomainForAliasRaw(database *sql.DB, aliasDomain string) string {
+	if database == nil {
+		return ""
+	}
+	row := database.QueryRowContext(context.Background(), `SELECT primary_domain FROM domain_aliases WHERE alias_domain=? AND is_verified=1 AND dns_a_ok=1 LIMIT 1`, aliasDomain)
+	return scanActivePrimaryDomainForAlias(row, aliasDomain)
+}
+
+func scanActivePrimaryDomainForAlias(row *sql.Row, aliasDomain string) string {
 	var rawPrimaryDomain string
-	err := database.QueryRowContext(context.Background(), `SELECT primary_domain FROM domain_aliases WHERE alias_domain=? AND is_verified=1 AND dns_a_ok=1 LIMIT 1`, aliasDomain).Scan(&rawPrimaryDomain)
+	err := row.Scan(&rawPrimaryDomain)
 	if err != nil {
 		return ""
 	}
@@ -357,25 +757,93 @@ func (r *perSiteDBRouter) QueryContext(ctx context.Context, query string, args .
 func (r *perSiteDBRouter) QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row {
 	database, err := r.databaseForContext(ctx)
 	if err != nil {
-		log.Printf("site db router query-row fallback: %v", err)
+		if r.debug {
+			log.Printf("%sDB ROUTER%s query-row fallback domain=%s err=%v sql=%q", terminalYellow(), terminalReset(), domainFromContext(ctx), err, diagnosticlog.SQLSummary(query))
+		}
 		return r.noopDatabase.QueryRowContext(ctx, `SELECT 1 WHERE 0`)
 	}
-	return database.QueryRowContext(ctx, query, args...)
+	row, err := database.QueryRowContext(ctx, query, args...)
+	if err != nil {
+		if r.debug {
+			log.Printf("%sDB ROUTER%s query-row fallback domain=%s path=%s err=%v sql=%q", terminalYellow(), terminalReset(), domainFromContext(ctx), database.path, err, diagnosticlog.SQLSummary(query))
+		}
+		return r.noopDatabase.QueryRowContext(ctx, `SELECT 1 WHERE 0`)
+	}
+	return row
 }
 
-func (r *perSiteDBRouter) databaseForContext(ctx context.Context) (*sql.DB, error) {
+func (r *perSiteDBRouter) databaseForContext(ctx context.Context) (*siteFileDatabase, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	domain := domainFromContext(ctx)
 	if domain == "" {
 		domain = r.fallbackDomain
 	}
 	response := make(chan siteDBResponse, 1)
-	r.requests <- siteDBRequest{domain: domain, response: response}
-	select {
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	case next := <-response:
-		return next.db, next.err
+	request := siteDBRequest{domain: domain, response: response}
+	if !r.debug {
+		select {
+		case r.requests <- request:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case next := <-response:
+			return next.db, next.err
+		}
 	}
+
+	sendStartedAt := time.Now()
+	sendTimer := time.NewTimer(slowDatabaseOperationLogAfter)
+	defer sendTimer.Stop()
+	for sent := false; !sent; {
+		select {
+		case r.requests <- request:
+			sent = true
+		case <-ctx.Done():
+			log.Printf("%sDB ROUTER%s request canceled before send domain=%s duration=%s err=%v", terminalYellow(), terminalReset(), domain, time.Since(sendStartedAt).String(), ctx.Err())
+			return nil, ctx.Err()
+		case <-sendTimer.C:
+			log.Printf("%sDB ROUTER%s waiting stage=send domain=%s duration=%s", terminalYellow(), terminalReset(), domain, time.Since(sendStartedAt).String())
+			sendTimer.Reset(slowDatabaseOperationRepeatAfter)
+		}
+	}
+
+	waitStartedAt := time.Now()
+	waitTimer := time.NewTimer(slowDatabaseOperationLogAfter)
+	defer waitTimer.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			log.Printf("%sDB ROUTER%s request canceled while waiting domain=%s duration=%s err=%v", terminalYellow(), terminalReset(), domain, time.Since(waitStartedAt).String(), ctx.Err())
+			return nil, ctx.Err()
+		case next := <-response:
+			return next.db, next.err
+		case <-waitTimer.C:
+			log.Printf("%sDB ROUTER%s waiting stage=response domain=%s duration=%s", terminalYellow(), terminalReset(), domain, time.Since(waitStartedAt).String())
+			waitTimer.Reset(slowDatabaseOperationRepeatAfter)
+		}
+	}
+}
+
+func (r *perSiteDBRouter) logRouterResolved(requestDomain, databaseDomain, aliasDomain string, duration time.Duration, err error) {
+	if !r.debug {
+		return
+	}
+	if duration < 200*time.Millisecond && err == nil {
+		return
+	}
+	status := "ok"
+	logColor := terminalCyan()
+	if err != nil {
+		status = err.Error()
+		logColor = terminalRed()
+	}
+	log.Printf("%sDB ROUTER%s resolved request_domain=%s database_domain=%s alias_domain=%s duration=%s status=%q",
+		logColor, terminalReset(), requestDomain, databaseDomain, diagnosticlog.SafeLogValue(aliasDomain), duration.String(), status)
 }
 
 func mustOpenNoopSQLite() *sql.DB {
@@ -828,6 +1296,16 @@ type domainLogEvent struct {
 
 const domainLogRetentionDays = 5
 
+type requestDiagnosticFields struct {
+	Scheme string
+	Host   string
+	Domain string
+	Method string
+	Path   string
+	Query  string
+	Remote string
+}
+
 func (a *App) accessLogMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		const (
@@ -837,6 +1315,24 @@ func (a *App) accessLogMiddleware(next http.Handler) http.Handler {
 			colorReset  = "\033[0m"
 		)
 		startedAt := time.Now()
+		requestDomain := domainFromRequest(r)
+		if a.debug {
+			requestFields := requestDiagnosticFields{
+				Scheme: requestScheme(r),
+				Host:   diagnosticlog.SafeLogValue(r.Host),
+				Domain: requestDomain,
+				Method: r.Method,
+				Path:   r.URL.Path,
+				Query:  diagnosticlog.SafeLogValue(r.URL.RawQuery),
+				Remote: r.RemoteAddr,
+			}
+			done := make(chan struct{})
+			log.Printf("%sREQUEST%s started scheme=%s host=%s domain=%s method=%s path=%s query=%s remote=%s",
+				terminalCyan(), terminalReset(), requestFields.Scheme, requestFields.Host, requestFields.Domain, requestFields.Method, requestFields.Path, requestFields.Query, requestFields.Remote)
+			go logSlowHTTPRequest(done, startedAt, requestFields)
+			defer close(done)
+		}
+
 		writer := &statusCapturingResponseWriter{ResponseWriter: w, statusCode: http.StatusOK}
 		next.ServeHTTP(writer, r)
 		contentSource := writer.Header().Get("X-Sitebrush-Source")
@@ -858,7 +1354,6 @@ func (a *App) accessLogMiddleware(next http.Handler) http.Handler {
 			return
 		}
 		duration := time.Since(startedAt)
-		requestDomain := domainFromRequest(r)
 		if strings.TrimSpace(r.URL.RawQuery) == "" {
 			log.Printf("%s%s%s method=%s path=%s status=%d remote=%s duration=%s", logColor, logType, colorReset, r.Method, r.URL.Path, writer.statusCode, r.RemoteAddr, duration.String())
 			a.writeDomainLog(requestDomain, "%s method=%s path=%s status=%d remote=%s duration=%s", logType, r.Method, r.URL.Path, writer.statusCode, r.RemoteAddr, duration.String())
@@ -867,6 +1362,34 @@ func (a *App) accessLogMiddleware(next http.Handler) http.Handler {
 		log.Printf("%s%s%s method=%s path=%s query=%s status=%d remote=%s duration=%s", logColor, logType, colorReset, r.Method, r.URL.Path, r.URL.RawQuery, writer.statusCode, r.RemoteAddr, duration.String())
 		a.writeDomainLog(requestDomain, "%s method=%s path=%s query=%s status=%d remote=%s duration=%s", logType, r.Method, r.URL.Path, r.URL.RawQuery, writer.statusCode, r.RemoteAddr, duration.String())
 	})
+}
+
+func logSlowHTTPRequest(done <-chan struct{}, startedAt time.Time, requestFields requestDiagnosticFields) {
+	timer := time.NewTimer(slowHTTPRequestLogAfter)
+	defer timer.Stop()
+	for {
+		select {
+		case <-done:
+			return
+		case <-timer.C:
+			log.Printf("%sREQUEST%s still-running scheme=%s host=%s domain=%s method=%s path=%s query=%s remote=%s duration=%s",
+				terminalYellow(), terminalReset(), requestFields.Scheme, requestFields.Host, requestFields.Domain, requestFields.Method, requestFields.Path, requestFields.Query, requestFields.Remote, time.Since(startedAt).String())
+			timer.Reset(slowHTTPRequestRepeatAfter)
+		}
+	}
+}
+
+func sitebrushConnStateLogger(protocol string, debug bool) func(net.Conn, http.ConnState) {
+	if !debug {
+		return nil
+	}
+	return func(connection net.Conn, state http.ConnState) {
+		if state == http.StateIdle {
+			return
+		}
+		log.Printf("%sCONNECTION%s protocol=%s state=%s local=%s remote=%s",
+			terminalCyan(), terminalReset(), protocol, state.String(), connection.LocalAddr().String(), connection.RemoteAddr().String())
+	}
 }
 
 func (a *App) startDomainLogWorker(ctx context.Context) {
@@ -908,6 +1431,7 @@ func (a *App) runDomainLogWorker(ctx context.Context, events <-chan domainLogEve
 	for {
 		select {
 		case <-ctx.Done():
+			a.drainDomainLogEvents(events)
 			return
 		case event := <-events:
 			if event.OccurredAt.IsZero() {
@@ -920,6 +1444,20 @@ func (a *App) runDomainLogWorker(ctx context.Context, events <-chan domainLogEve
 			}
 			lastCleanupByDomain[event.Domain] = cleanupDate
 			a.cleanupOldDomainLogs(event.Domain, event.OccurredAt)
+		}
+	}
+}
+
+func (a *App) drainDomainLogEvents(events <-chan domainLogEvent) {
+	for {
+		select {
+		case event := <-events:
+			if event.OccurredAt.IsZero() {
+				event.OccurredAt = time.Now().UTC()
+			}
+			a.appendDomainLogEvent(event)
+		default:
+			return
 		}
 	}
 }
@@ -1146,7 +1684,10 @@ func (a *App) runAnalyticsEventWriter(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
-			a.flushAnalyticsAggregateState(ctx, state)
+			a.drainAnalyticsEvents(ctx, state)
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			a.flushAnalyticsAggregateState(shutdownCtx, state)
+			cancel()
 			return
 		case event := <-a.analyticsEvents:
 			eventContext := contextWithDomain(ctx, event.Domain)
@@ -1162,6 +1703,19 @@ func (a *App) runAnalyticsEventWriter(ctx context.Context) {
 				}
 				ticker.Reset(flushInterval)
 			}
+		}
+	}
+}
+
+func (a *App) drainAnalyticsEvents(ctx context.Context, state *analyticsAggregateState) {
+	for {
+		select {
+		case event := <-a.analyticsEvents:
+			eventContext := contextWithDomain(ctx, event.Domain)
+			event = a.enrichAnalyticsEventGeo(eventContext, event)
+			state.record(event)
+		default:
+			return
 		}
 	}
 }
@@ -2809,6 +3363,7 @@ type serverRunConfig struct {
 	StoragePath string
 	DBPath      string
 	DesktopMode bool
+	Debug       bool
 }
 
 func main() {
@@ -2821,6 +3376,7 @@ func main() {
 	quotaValue := flag.String("quota", "", "set -quota-site storage quota, for example 50mb or 20gb")
 	versionShort := flag.Bool("v", false, "print version and exit")
 	versionLong := flag.Bool("version", false, "print version and exit")
+	debugMode := flag.Bool("debug", false, "enable verbose HTTP and database diagnostic logs")
 	var desktopModeFlag *bool
 	if appcli.DesktopModeFlagSupported() {
 		desktopModeFlag = flag.Bool("desktop", desktop.DefaultEnabled(), "enable desktop mode when desktop build tags are used")
@@ -2884,18 +3440,48 @@ func main() {
 		}
 		return
 	}
-	serverConfig := serverRunConfig{ParsedPorts: parsedPorts, StoragePath: effectiveStoragePath, DBPath: effectiveDBPath, DesktopMode: desktopMode}
+	serverConfig := serverRunConfig{ParsedPorts: parsedPorts, StoragePath: effectiveStoragePath, DBPath: effectiveDBPath, DesktopMode: desktopMode, Debug: *debugMode}
 	if handled, err := winservice.RunIfNeeded("sitebrush", func(ctx context.Context) error {
 		return runSitebrushServer(ctx, serverConfig)
 	}); handled {
 		if err != nil {
 			log.Fatal(err)
 		}
+		logShutdownDone("program stopped")
 		return
 	}
-	if err := runSitebrushServer(context.Background(), serverConfig); err != nil {
+	serverContext, stopSignals := signalAwareContext(context.Background())
+	defer stopSignals()
+	if err := runSitebrushServer(serverContext, serverConfig); err != nil {
 		log.Fatal(err)
 	}
+	logShutdownDone("program stopped")
+}
+
+func signalAwareContext(parent context.Context) (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithCancel(parent)
+	signals := make(chan os.Signal, 2)
+	signal.Notify(signals, shutdownsignals.ServerShutdownSignals()...)
+	go func() {
+		select {
+		case receivedSignal := <-signals:
+			log.Printf("%sSHUTDOWN%s signal=%s received", terminalYellow(), terminalReset(), receivedSignal)
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+	return ctx, func() {
+		signal.Stop(signals)
+		cancel()
+	}
+}
+
+func logShutdownStep(format string, args ...any) {
+	log.Printf("%sSHUTDOWN%s %s", terminalCyan(), terminalReset(), fmt.Sprintf(format, args...))
+}
+
+func logShutdownDone(format string, args ...any) {
+	log.Printf("%sSHUTDOWN%s %s", terminalGreen(), terminalReset(), fmt.Sprintf(format, args...))
 }
 
 func runSitebrushServer(ctx context.Context, config serverRunConfig) error {
@@ -2912,7 +3498,7 @@ func runSitebrushServer(ctx context.Context, config serverRunConfig) error {
 	}
 
 	var siteDatabaseRouter *perSiteDBRouter
-	application := &App{storagePath: effectiveStoragePath, nativeFileDialog: desktop.NativeFileDialogSupported(), grabTracker: newGrabProgressTracker(), publishTracker: newPublishProgressTracker(), analyticsEvents: make(chan siteAnalyticsEvent, 65536), domainLogEvents: make(chan domainLogEvent, 1024)}
+	application := &App{storagePath: effectiveStoragePath, debug: config.Debug, nativeFileDialog: desktop.NativeFileDialogSupported(), grabTracker: newGrabProgressTracker(), publishTracker: newPublishProgressTracker(), analyticsEvents: make(chan siteAnalyticsEvent, 65536), domainLogEvents: make(chan domainLogEvent, 1024)}
 	application.guestStaticHTMLCache = startGuestStaticHTMLCacheWorker(ctx, defaultGuestStaticHTMLCacheLimitBytes)
 	application.authIPFailureCache = startAuthIPFailureCacheWorker(ctx)
 	application.emailDelivery = startEmailDeliveryWorker(ctx, application.defaultEmailSender())
@@ -2921,16 +3507,19 @@ func runSitebrushServer(ctx context.Context, config serverRunConfig) error {
 	siteDatabaseRouter = newPerSiteDBRouter(siteDatabaseRootDir, "localhost", func(rawDatabase *sql.DB) error {
 		bootstrapApplication := &App{db: rawDatabase, storagePath: effectiveStoragePath}
 		return bootstrapApplication.migrate(contextWithDomain(ctx, "localhost"))
-	})
+	}, config.Debug)
 	defer func() {
+		logShutdownStep("closing site database workers")
 		if closeErr := siteDatabaseRouter.Close(); closeErr != nil {
-			log.Printf("site database router close failed: %v", closeErr)
+			log.Printf("%sSHUTDOWN%s site database router close failed: %v", terminalRed(), terminalReset(), closeErr)
+			return
 		}
+		logShutdownDone("site database workers closed")
 	}()
 	application.db = siteDatabaseRouter
 	application.ensureAutoCertGuard()
-	application.startDomainLogWorker(context.Background())
-	application.startAnalyticsWorkers(context.Background())
+	application.startDomainLogWorker(ctx)
+	application.startAnalyticsWorkers(ctx)
 
 	router := http.NewServeMux()
 	staticFiles, err := fs.Sub(embeddedWebFiles, "web/static")
@@ -2973,15 +3562,19 @@ func runSitebrushServer(ctx context.Context, config serverRunConfig) error {
 		if tlsListenErr != nil {
 			application.logProblemEvent("AUTOCERT disabled: cannot listen on port 443: %v", tlsListenErr)
 		} else {
+			defer tlsListener.Close()
 			application.automaticSSLAvailable = true
 			httpHandler = certificateManager.HTTPHandler(appHandler)
 			application.logProblemEvent("AUTOCERT enabled: HTTP challenge on port 80, HTTPS TLS listener on port 443, certificate cache=%s", certificateCacheDir)
-			go application.serveTLSWithAutoCert(tlsListener, application.autoCertTLSConfig(certificateManager), appHandler)
+			go application.serveTLSWithAutoCert(ctx, tlsListener, application.autoCertTLSConfig(certificateManager), appHandler)
 			application.startAutomaticSSLRefreshWorker(ctx)
 		}
 	}
 
-	server := &http.Server{Handler: httpHandler}
+	server := &http.Server{
+		Handler:   httpHandler,
+		ConnState: sitebrushConnStateLogger("HTTP", config.Debug),
+	}
 	serverErrors := make(chan error, 1)
 	go func() {
 		serverErrors <- server.Serve(listener)
@@ -2999,8 +3592,10 @@ func runSitebrushServer(ctx context.Context, config serverRunConfig) error {
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
 			return err
 		}
+		logShutdownDone("HTTP server stopped")
 		return nil
 	case <-ctx.Done():
+		logShutdownStep("HTTP server shutdown started")
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		if err := server.Shutdown(shutdownCtx); err != nil {
@@ -3009,6 +3604,7 @@ func runSitebrushServer(ctx context.Context, config serverRunConfig) error {
 		if err := <-serverErrors; err != nil && !errors.Is(err, http.ErrServerClosed) {
 			return err
 		}
+		logShutdownDone("HTTP server shutdown complete")
 		return nil
 	}
 }
@@ -3097,12 +3693,12 @@ func parseListenPorts(rawPorts string) (listenPorts, error) {
 }
 
 func listenOnAvailablePort(requestedPort int) (net.Listener, int, error) {
-        listener, err := systeminit.Listen(context.Background(), "tcp", ":"+strconv.Itoa(requestedPort))
+	listener, err := systeminit.Listen(context.Background(), "tcp", ":"+strconv.Itoa(requestedPort))
 	if err == nil {
 		return listener, requestedPort, nil
 	}
 	for fallbackPort := 9898; fallbackPort < 65536; fallbackPort++ {
-                listener, err = systeminit.Listen(context.Background(), "tcp", ":"+strconv.Itoa(fallbackPort))
+		listener, err = systeminit.Listen(context.Background(), "tcp", ":"+strconv.Itoa(fallbackPort))
 		if err == nil {
 			log.Printf("port %d is unavailable, using %d", requestedPort, fallbackPort)
 			return listener, fallbackPort, nil
@@ -3112,20 +3708,41 @@ func listenOnAvailablePort(requestedPort int) (net.Listener, int, error) {
 }
 
 func listenTLSForAutoCert() (net.Listener, error) {
-        return systeminit.Listen(context.Background(), "tcp", ":443")
+	return systeminit.Listen(context.Background(), "tcp", ":443")
 }
 
-func (a *App) serveTLSWithAutoCert(tlsListener net.Listener, tlsConfig *tls.Config, handler http.Handler) {
+func (a *App) serveTLSWithAutoCert(ctx context.Context, tlsListener net.Listener, tlsConfig *tls.Config, handler http.Handler) {
 	tlsServer := &http.Server{
 		Handler:   handler,
 		TLSConfig: tlsConfig,
 		ErrorLog:  log.New(problemLogWriter{application: a}, "", 0),
+		ConnState: sitebrushConnStateLogger("HTTPS", a.debug),
 	}
 	tlsAddress := tlsListener.Addr().String()
 	a.logProblemEvent("HTTPS server enabled on %s with TLS", tlsAddress)
+	serverStopped := make(chan struct{})
+	go func() {
+		if ctx == nil {
+			return
+		}
+		select {
+		case <-ctx.Done():
+		case <-serverStopped:
+			return
+		}
+		logShutdownStep("HTTPS server shutdown started")
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := tlsServer.Shutdown(shutdownCtx); err != nil {
+			log.Printf("%sSHUTDOWN%s HTTPS server shutdown failed: %v", terminalRed(), terminalReset(), err)
+			return
+		}
+		logShutdownDone("HTTPS server shutdown complete")
+	}()
 	if serveErr := tlsServer.ServeTLS(tlsListener, "", ""); serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
 		a.logProblemEvent("HTTPS server stopped: %v", serveErr)
 	}
+	close(serverStopped)
 }
 
 func (a *App) autoCertTLSConfig(certificateManager *autocert.Manager) *tls.Config {
@@ -3161,7 +3778,16 @@ func (a *App) autoCertTLSConfig(certificateManager *autocert.Manager) *tls.Confi
 		}
 		defer a.finishAutoCertIssuance(certificateDomain)
 		a.logDomainEvent(certificateDomain, "AUTOCERT certificate request started server_name=%s remote=%s", clientHello.ServerName, remoteAddress)
+		var certificateRequestDone chan struct{}
+		if a.debug {
+			certificateRequestDone = make(chan struct{})
+			certificateRequestStartedAt := time.Now()
+			go a.logSlowAutoCertCertificateRequest(certificateRequestDone, certificateDomain, clientHello.ServerName, remoteAddress, certificateRequestStartedAt)
+		}
 		certificate, err := originalGetCertificate(clientHello)
+		if certificateRequestDone != nil {
+			close(certificateRequestDone)
+		}
 		if err != nil {
 			retryDelay := automaticSSLRetryDelayForCertificateError(err)
 			a.recordDomainAutomaticSSLFailure(contextWithDomain(context.Background(), certificateDomain), certificateDomain, fmt.Sprintf("certificate request failed: %v", err), retryDelay)
@@ -3177,6 +3803,20 @@ func (a *App) autoCertTLSConfig(certificateManager *autocert.Manager) *tls.Confi
 		return certificate, nil
 	}
 	return tlsConfig
+}
+
+func (a *App) logSlowAutoCertCertificateRequest(done <-chan struct{}, certificateDomain, serverName, remoteAddress string, startedAt time.Time) {
+	timer := time.NewTimer(slowHTTPRequestLogAfter)
+	defer timer.Stop()
+	for {
+		select {
+		case <-done:
+			return
+		case <-timer.C:
+			a.logDomainEvent(certificateDomain, "AUTOCERT certificate request still running server_name=%s remote=%s duration=%s", serverName, remoteAddress, time.Since(startedAt).String())
+			timer.Reset(slowHTTPRequestRepeatAfter)
+		}
+	}
 }
 
 func tlsClientRemoteAddress(clientHello *tls.ClientHelloInfo) string {
@@ -3542,12 +4182,16 @@ func (a *App) assignMissingDomainAliasTokens(ctx context.Context) {
 	if err != nil {
 		return
 	}
-	defer aliasRows.Close()
+	aliasDomains := []string{}
 	for aliasRows.Next() {
 		var aliasDomain string
 		if scanErr := aliasRows.Scan(&aliasDomain); scanErr != nil {
 			continue
 		}
+		aliasDomains = append(aliasDomains, aliasDomain)
+	}
+	_ = aliasRows.Close()
+	for _, aliasDomain := range aliasDomains {
 		_, _ = a.db.ExecContext(ctx, `UPDATE domain_aliases SET verification_token=? WHERE alias_domain=?`, randomAccessToken(), aliasDomain)
 	}
 }
@@ -8580,12 +9224,18 @@ func (a *App) rebuildPagePasswordPrefixFiles(ctx context.Context) {
 	if err != nil {
 		return
 	}
-	defer rows.Close()
+	domainList := []string{}
 	for rows.Next() {
 		var domain string
 		if scanErr := rows.Scan(&domain); scanErr != nil {
 			continue
 		}
+		if strings.TrimSpace(domain) != "" {
+			domainList = append(domainList, domain)
+		}
+	}
+	_ = rows.Close()
+	for _, domain := range domainList {
 		a.writePagePasswordPrefixFile(ctx, domain)
 	}
 }

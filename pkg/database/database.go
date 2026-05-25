@@ -567,13 +567,11 @@ func NewDatabase(config Config) (*Database, error) {
 	// === CRITICAL: tune single-user engines so imports and UI reads can coexist ===
 	switch driverName {
 	case "sqlite", "chai":
-		// Allow a handful of concurrent readers while keeping writes funnelled through
-		// WAL so imports stay ahead of UI polls. Multiple connections avoid a single
-		// blocked query from stalling the importer, following "A little copying is"
-		// "better than a little dependency" by leaning on SQLite's own lock manager
-		// instead of layering mutexes in Go.
-		db.SetMaxOpenConns(4)
-		db.SetMaxIdleConns(4)
+		// File-backed engines must have one database/sql connection behind the
+		// channel pipeline. Query rows can outlive the worker call, so additional
+		// pooled connections would reintroduce parallel file access.
+		db.SetMaxOpenConns(1)
+		db.SetMaxIdleConns(1)
 		// Never recycle the pooled connections (keeps them stable for the whole process).
 		db.SetConnMaxLifetime(0)
 		// Tuning WAL/synchronous/busy_timeout keeps inserts fast enough for realtime uploads.
