@@ -33,6 +33,9 @@
           <input type="checkbox" name="auto_registration_enabled" value="1" {{if .AutoRegistrationEnabled}}checked{{end}}>
           <span>Разрешить самостоятельную регистрацию новых сайтов</span>
         </label>
+        <label>{{index .T "billing_backup_retention_days"}}
+          <input name="backup_retention_days" type="number" min="1" max="3650" class="form-control form-control-sm" value="{{.BackupRetentionDays}}">
+        </label>
         <button type="submit" class="btn btn-primary"><img src="/p/static/save-page.png" alt="">Сохранить</button>
       </form>
     </div>
@@ -64,45 +67,99 @@
         </div>
       </div>
       <div class="billing-site-list">
-        {{range .Sites}}
+        {{range $siteIndex, $site := .Sites}}
         <article class="billing-site-row">
           <div class="billing-site-main">
-            <div class="billing-domain">{{.Domain}}</div>
-            {{if .Aliases}}<div class="text-muted small">Алиасы: {{.Aliases}}</div>{{end}}
-            {{if .AdminEmails}}<div class="text-muted small">Администраторы: {{.AdminEmails}}</div>{{end}}
-            <div class="billing-quota-bar" aria-label="Использовано {{.UsedPercent}}%">
-              <div style="width:{{.UsedPercent}}%"></div>
+            <div class="billing-domain">{{$site.Domain}}</div>
+            {{if $site.Aliases}}<div class="text-muted small">Алиасы: {{$site.Aliases}}</div>{{end}}
+            {{if $site.AdminEmails}}<div class="text-muted small">Администраторы: {{$site.AdminEmails}}</div>{{end}}
+            <div class="text-muted small">{{index $.T "billing_delete_will_remove"}} {{$site.DeletionSizeLabel}}</div>
+            <div class="billing-quota-bar" aria-label="Использовано {{$site.UsedPercent}}%">
+              <div style="width:{{$site.UsedPercent}}%"></div>
             </div>
-            <div class="text-muted small">Использовано {{.UsedLabel}} / {{.LimitLabel}}, свободно {{.FreeLabel}}</div>
+            <div class="text-muted small">Использовано {{$site.UsedLabel}} / {{$site.LimitLabel}}, свободно {{$site.FreeLabel}}</div>
           </div>
           <form method="post" action="?billing" class="billing-site-form">
             <input type="hidden" name="billing_action" value="update_site">
-            <input type="hidden" name="domain" value="{{.Domain}}">
-            <label>Квота <input name="quota" type="text" class="form-control form-control-sm" value="{{.QuotaInput}}"></label>
+            <input type="hidden" name="domain" value="{{$site.Domain}}">
+            <label>Квота <input name="quota" type="text" class="form-control form-control-sm" value="{{$site.QuotaInput}}"></label>
             <label>Тариф
               <select name="plan_id" class="form-select form-select-sm">
                 <option value="0">Без тарифа</option>
-                {{$selectedPlanID := .PlanID}}{{range $.Plans}}<option value="{{.ID}}" {{if eq .ID $selectedPlanID}}selected{{end}}>{{.Name}} · {{.QuotaLabel}} · {{.Price}} {{.Currency}}/{{.BillingPeriod}}</option>{{end}}
+                {{$selectedPlanID := $site.PlanID}}{{range $.Plans}}<option value="{{.ID}}" {{if eq .ID $selectedPlanID}}selected{{end}}>{{.Name}} · {{.QuotaLabel}} · {{.Price}} {{.Currency}}/{{.BillingPeriod}}</option>{{end}}
               </select>
             </label>
             <label>Статус
               <select name="service_status" class="form-select form-select-sm">
-                <option value="free" {{if eq .ServiceStatus "free"}}selected{{end}}>Бесплатный</option>
-                <option value="paid" {{if eq .ServiceStatus "paid"}}selected{{end}}>Платный</option>
-                <option value="paused" {{if eq .ServiceStatus "paused"}}selected{{end}}>Приостановлен</option>
+                <option value="free" {{if eq $site.ServiceStatus "free"}}selected{{end}}>Бесплатный</option>
+                <option value="paid" {{if eq $site.ServiceStatus "paid"}}selected{{end}}>Платный</option>
+                <option value="paused" {{if eq $site.ServiceStatus "paused"}}selected{{end}}>Приостановлен</option>
               </select>
             </label>
             <button type="submit" class="btn btn-primary btn-sm"><img src="/p/static/save-page.png" alt="">Сохранить</button>
           </form>
-          {{if .CanDelete}}<form method="post" action="?billing" class="billing-delete-form">
-            <input type="hidden" name="billing_action" value="delete_site">
-            <input type="hidden" name="domain" value="{{.Domain}}">
-            <label>Удаление <input name="confirm_domain" type="text" class="form-control form-control-sm" placeholder="{{.Domain}}"></label>
-            <button type="submit" class="btn btn-outline-danger btn-sm"><img src="/p/static/delete.png" alt="">Удалить</button>
-          </form>{{end}}
+          {{if $site.CanDelete}}<div class="billing-delete-form">
+            <button type="button" class="btn btn-outline-danger btn-sm" data-bs-toggle="modal" data-bs-target="#deleteSiteModal{{$siteIndex}}"><img src="/p/static/delete.png" alt="">{{index $.T "billing_delete_button"}}</button>
+          </div>
+          <div class="modal fade" id="deleteSiteModal{{$siteIndex}}" tabindex="-1" aria-hidden="true">
+            <div class="modal-dialog modal-dialog-centered"><div class="modal-content">
+              <form method="post" action="?billing">
+                <div class="modal-header">
+                  <h5 class="modal-title">{{index $.T "billing_delete_modal_title"}} {{$site.Domain}}</h5>
+                  <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="{{index $.T "tree_close"}}"></button>
+                </div>
+                <div class="modal-body">
+                  <p>{{index $.T "billing_delete_modal_backup_notice"}}</p>
+                  <p><strong>{{index $.T "billing_delete_will_remove"}}</strong> {{$site.DeletionSizeLabel}}</p>
+                  <p class="text-muted">{{index $.T "billing_delete_modal_type_site"}}</p>
+                  <input type="hidden" name="billing_action" value="delete_site">
+                  <input type="hidden" name="domain" value="{{$site.Domain}}">
+                  <input name="confirm_domain" type="text" class="form-control" placeholder="{{$site.Domain}}" autocomplete="off" required>
+                </div>
+                <div class="modal-footer">
+                  <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">{{index $.T "edit_cancel"}}</button>
+                  <button type="submit" class="btn btn-outline-danger"><img src="/p/static/delete.png" alt="">{{index $.T "billing_delete_confirm_button"}}</button>
+                </div>
+              </form>
+            </div></div>
+          </div>{{end}}
         </article>
         {{else}}
         <div class="empty">Сайты пока не найдены.</div>
+        {{end}}
+      </div>
+    </div>
+  </section>
+
+  <section class="card billing-card">
+    <div class="card-body">
+      <div class="billing-section-header">
+        <div>
+          <h2>{{index .T "billing_backups_title"}}</h2>
+          <p class="text-muted">{{index .T "billing_backups_hint"}}</p>
+        </div>
+      </div>
+      <div class="billing-backup-list">
+        {{range .Backups}}
+        <article class="billing-backup-row">
+          <div>
+            <div class="billing-domain">{{.Domain}}</div>
+            <div class="text-muted small">{{.FileName}}</div>
+            {{if .OwnerContacts}}<div class="text-muted small">{{index $.T "billing_backup_owner_contacts"}} {{.OwnerContacts}}</div>{{end}}
+          </div>
+          <div class="billing-backup-meta">
+            <span>{{index $.T "billing_backup_size"}} {{.SizeLabel}}</span>
+            <span>{{index $.T "billing_backup_created_at"}} {{.CreatedAt}}</span>
+            <span>{{index $.T "billing_backup_expires_at"}} {{.ExpiresAt}}</span>
+            <span>{{index $.T "billing_backup_token_status"}} {{.TokenStatus}}</span>
+            {{if .DownloadedAt}}<span>{{index $.T "billing_backup_downloaded_at"}} {{.DownloadedAt}}</span>{{end}}
+          </div>
+          <div class="billing-backup-actions">
+            {{if .DownloadURL}}<a class="btn btn-primary btn-sm" href="{{.DownloadURL}}"><img src="/p/static/backup.png" alt="">{{index $.T "billing_backup_download"}}</a>{{end}}
+          </div>
+        </article>
+        {{else}}
+        <div class="empty">{{index .T "billing_backups_empty"}}</div>
         {{end}}
       </div>
     </div>
@@ -134,5 +191,6 @@
     </div>
   </section>
 </main>
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
 </body>
 </html>

@@ -1573,6 +1573,36 @@ type domainBackup struct {
 	Redirects       []backupRedirect       `json:"redirects"`
 }
 
+type managedSiteDeletionBackupMetadata struct {
+	Version           int      `json:"version"`
+	Domain            string   `json:"domain"`
+	CreatedAt         string   `json:"created_at"`
+	ExpiresAt         string   `json:"expires_at"`
+	RetentionDays     int      `json:"retention_days"`
+	OwnerContacts     []string `json:"owner_contacts"`
+	DeletedBytes      int64    `json:"deleted_bytes"`
+	DatabaseFile      string   `json:"database_file"`
+	StaticDirectory   string   `json:"static_directory"`
+	OriginalDatabase  string   `json:"original_database"`
+	OriginalStaticDir string   `json:"original_static_dir"`
+}
+
+type managedSiteDeletionBackupView struct {
+	ID             int
+	Domain         string
+	FileName       string
+	SizeLabel      string
+	CreatedAt      string
+	ExpiresAt      string
+	OwnerContacts  string
+	TokenStatus    string
+	DownloadURL    string
+	DownloadCount  int
+	DownloadedAt   string
+	Expired        bool
+	ArchiveMissing bool
+}
+
 type fileMetadata struct {
 	PagePath      string
 	Size          int64
@@ -1970,7 +2000,7 @@ func isSitebrushControllerQuery(query url.Values) bool {
 	for _, controllerFlag := range []string{
 		"save", "grab_preview", "grab_events", "grab_ws", "revision_restore", "revision_delete", "revision_toggle",
 		"tree", "native_pick_files", "native_save_backup", "edit", "visual", "text", "editraw", "settings", "properties",
-		"backup_download", "backup_import", "profile", "freeze", "publish", "publish_events", "publish_preview", "files",
+		"backup_download", "billing_backup_download", "backup_import", "profile", "freeze", "publish", "publish_events", "publish_preview", "files",
 		"revisions", "login", "register", "email_confirm", "grab", "recover", "captcha", "analytics", "billing",
 	} {
 		if _, found := query[controllerFlag]; found {
@@ -4936,6 +4966,10 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 		a.billingPage(w, r)
 		return
 	}
+	if hasQueryFlag(r, "billing_backup_download") {
+		a.downloadManagedSiteDeletionBackup(w, r)
+		return
+	}
 	if hasQueryFlag(r, "backup_download") {
 		a.downloadBackup(w, r)
 		return
@@ -6915,16 +6949,21 @@ func (a *App) billingView(ctx context.Context, r *http.Request) (map[string]any,
 	}
 	defer controlDatabase.Close()
 	store := billing.Store{DB: controlDatabase}
+	a.cleanupExpiredManagedSiteDeletionBackups(ctx, controlDatabase)
 	plans := store.Plans(ctx)
 	assignments := store.ServiceAssignments(ctx)
 	siteRows, err := a.billingSiteRows(ctx, plans, assignments, a.siteDomain(ctx, r))
 	if err != nil {
 		return nil, err
 	}
+	retentionDays := billingDeletionBackupRetentionDays(ctx, controlDatabase)
+	backups := a.managedSiteDeletionBackupViews(ctx, r, controlDatabase)
 	return map[string]any{
 		"Title":                   "Биллинг",
 		"Sites":                   siteRows,
 		"Plans":                   plans,
+		"Backups":                 backups,
+		"BackupRetentionDays":     retentionDays,
 		"AutoRegistrationEnabled": store.AutomaticRegistrationAllowed(ctx),
 		"CurrentDomain":           a.siteDomain(ctx, r),
 	}, nil
@@ -6946,7 +6985,19 @@ func (a *App) billingSiteRows(ctx context.Context, plans []billing.Plan, assignm
 			DatabasePath: row.DatabasePath,
 		})
 	}
-	return billing.BuildSites(usages, plans, assignments, currentDomain), nil
+	siteRows := billing.BuildSites(usages, plans, assignments, currentDomain)
+	rowByDomain := make(map[string]siteQuotaRow, len(rows))
+	for _, row := range rows {
+		rowByDomain[row.Domain] = row
+	}
+	for siteIndex := range siteRows {
+		if row, found := rowByDomain[siteRows[siteIndex].Domain]; found {
+			deletionSizeBytes := a.managedSiteDeletionSizeBytes(row)
+			siteRows[siteIndex].DeletionSizeBytes = deletionSizeBytes
+			siteRows[siteIndex].DeletionSizeLabel = formatFileSize(deletionSizeBytes)
+		}
+	}
+	return siteRows, nil
 }
 
 func siteAdminEmails(ctx context.Context, databasePath, domain string) []string {
@@ -6979,7 +7030,14 @@ func (a *App) saveBillingSettingsFromForm(r *http.Request) string {
 	if err := (billing.Store{DB: controlDatabase}).SaveSettings(r.Context(), r.FormValue("auto_registration_enabled") == "1"); err != nil {
 		return err.Error()
 	}
-	return "Настройки регистрации сохранены."
+	retentionDays, retentionErr := parseBillingDeletionBackupRetentionDays(r.FormValue("backup_retention_days"))
+	if retentionErr != nil {
+		return retentionErr.Error()
+	}
+	if err := saveBillingDeletionBackupRetentionDays(r.Context(), controlDatabase, retentionDays); err != nil {
+		return err.Error()
+	}
+	return translationOrDefault(translationsForRequest(r), "billing_status_settings_saved", "Billing settings saved.")
 }
 
 func (a *App) createManagedSiteFromForm(r *http.Request) string {
@@ -7081,43 +7139,563 @@ func (a *App) updateManagedSiteFromForm(r *http.Request) string {
 }
 
 func (a *App) deleteManagedSiteFromForm(r *http.Request) string {
+	translations := translationsForRequest(r)
 	domain := normalizeQuotaDomainName(r.FormValue("domain"))
 	confirmDomain := normalizeQuotaDomainName(r.FormValue("confirm_domain"))
 	if domain == "" || confirmDomain != domain {
-		return "Для удаления нужно повторить домен сайта."
+		return translationOrDefault(translations, "billing_delete_confirm_mismatch", "Type the site domain to confirm deletion.")
 	}
 	if domain == a.siteDomain(r.Context(), r) {
-		return "Текущий сайт владельца сервера нельзя удалить из биллинга."
+		return translationOrDefault(translations, "billing_delete_current_site_blocked", "The current billing owner site cannot be deleted from Billing.")
 	}
-	if err := a.deleteManagedSite(r.Context(), domain); err != nil {
+	backup, err := a.deleteManagedSiteWithBackup(r.Context(), r, domain)
+	if err != nil {
 		return err.Error()
 	}
-	return "Сайт " + domain + " удален."
+	return fmt.Sprintf(translationOrDefault(translations, "billing_status_site_deleted_with_backup", "Site %s was deleted. Backup %s was created and kept until %s."), domain, backup.FileName, backup.ExpiresAt)
 }
 
 func (a *App) deleteManagedSite(ctx context.Context, domain string) error {
+	_, err := a.deleteManagedSiteWithBackup(ctx, nil, domain)
+	return err
+}
+
+func (a *App) deleteManagedSiteWithBackup(ctx context.Context, r *http.Request, domain string) (managedSiteDeletionBackupView, error) {
 	controlDatabase, err := a.openServerControlDatabase(ctx)
 	if err != nil {
-		return err
+		return managedSiteDeletionBackupView{}, err
 	}
 	defer controlDatabase.Close()
 	var ownerCount int
 	_ = controlDatabase.QueryRowContext(ctx, `SELECT COUNT(1) FROM server_managers WHERE domain=? AND role='owner'`, domain).Scan(&ownerCount)
 	if ownerCount > 0 {
-		return fmt.Errorf("server owner site %s cannot be deleted", domain)
+		return managedSiteDeletionBackupView{}, fmt.Errorf("server owner site %s cannot be deleted", domain)
+	}
+	row, found, err := a.managedSiteQuotaRow(ctx, domain)
+	if err != nil {
+		return managedSiteDeletionBackupView{}, err
+	}
+	if !found {
+		return managedSiteDeletionBackupView{}, fmt.Errorf("site %s was not found", domain)
+	}
+	if sameSiteQuotaPath(row.DatabasePath, a.serverControlDBPath()) {
+		return managedSiteDeletionBackupView{}, fmt.Errorf("site %s is stored in the server control database and cannot be safely deleted as a separate site", domain)
+	}
+	ownerContacts := managedSiteOwnerContacts(ctx, controlDatabase, row.DatabasePath, domain)
+	retentionDays := billingDeletionBackupRetentionDays(ctx, controlDatabase)
+	languageCode := "ru"
+	if r != nil {
+		languageCode = preferredLanguageCode(r.Header.Get("Accept-Language"))
+	}
+	backup, err := a.createManagedSiteDeletionBackup(ctx, r, controlDatabase, row, ownerContacts, retentionDays, languageCode)
+	if err != nil {
+		return managedSiteDeletionBackupView{}, err
+	}
+	if err := a.deleteManagedSiteDataAfterBackup(ctx, controlDatabase, row); err != nil {
+		return managedSiteDeletionBackupView{}, err
+	}
+	a.notifyManagedSiteDeletionBackupCreated(ctx, r, backup, ownerContacts, languageCode)
+	return backup, nil
+}
+
+func (a *App) deleteManagedSiteDataAfterBackup(ctx context.Context, controlDatabase *sql.DB, row siteQuotaRow) error {
+	domain := normalizeQuotaDomainName(row.Domain)
+	if domain == "" {
+		return fmt.Errorf("site domain is required")
 	}
 	(billing.Store{DB: controlDatabase}).RemoveSiteAssignment(ctx, domain)
-	siteDatabasePath := filepath.Join(siteDatabaseRootPath(a.serverControlDBPath()), domainStorageName(domain)+".db")
-	_ = os.Remove(siteDatabasePath)
+	_, _ = controlDatabase.ExecContext(ctx, `DELETE FROM server_managers WHERE domain=? AND role<>'owner'`, domain)
+	if strings.TrimSpace(row.DatabasePath) != "" && !sameSiteQuotaPath(row.DatabasePath, a.serverControlDBPath()) {
+		if err := os.Remove(row.DatabasePath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	}
 	for _, directoryPath := range []string{
 		a.domainFilesDirForDomain(domain),
 		a.domainStaticDir(domain),
 		a.domainChrootRootDir(domain),
 		a.domainLogDir(domain),
 	} {
-		_ = os.RemoveAll(directoryPath)
+		if err := os.RemoveAll(directoryPath); err != nil {
+			return err
+		}
+	}
+	packPath := filepath.Join(a.packsDir(), domainStorageName(domain)+".zip")
+	if err := os.Remove(packPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
 	}
 	return nil
+}
+
+func parseBillingDeletionBackupRetentionDays(rawDays string) (int, error) {
+	if strings.TrimSpace(rawDays) == "" {
+		return billing.DefaultDeletionBackupRetentionDays, nil
+	}
+	retentionDays, err := strconv.Atoi(strings.TrimSpace(rawDays))
+	if err != nil || retentionDays < 1 || retentionDays > 3650 {
+		return 0, fmt.Errorf("backup retention must be between 1 and 3650 days")
+	}
+	return retentionDays, nil
+}
+
+func billingDeletionBackupRetentionDays(ctx context.Context, controlDatabase *sql.DB) int {
+	var rawValue string
+	err := controlDatabase.QueryRowContext(ctx, `SELECT value FROM server_settings WHERE name='deletion_backup_retention_days'`).Scan(&rawValue)
+	if err != nil {
+		return billing.DefaultDeletionBackupRetentionDays
+	}
+	retentionDays, parseErr := parseBillingDeletionBackupRetentionDays(rawValue)
+	if parseErr != nil {
+		return billing.DefaultDeletionBackupRetentionDays
+	}
+	return retentionDays
+}
+
+func saveBillingDeletionBackupRetentionDays(ctx context.Context, controlDatabase *sql.DB, retentionDays int) error {
+	if retentionDays < 1 || retentionDays > 3650 {
+		return fmt.Errorf("backup retention must be between 1 and 3650 days")
+	}
+	_, err := controlDatabase.ExecContext(ctx, `INSERT INTO server_settings(name,value,updated_at) VALUES('deletion_backup_retention_days',?,?) ON CONFLICT(name) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at`,
+		strconv.Itoa(retentionDays), time.Now().UTC().Format(time.RFC3339))
+	return err
+}
+
+func (a *App) managedSiteQuotaRow(ctx context.Context, domain string) (siteQuotaRow, bool, error) {
+	rows, err := listSiteQuotaRows(ctx, a.storagePath, a.serverControlDBPath())
+	if err != nil {
+		return siteQuotaRow{}, false, err
+	}
+	for _, row := range rows {
+		if normalizeQuotaDomainName(row.Domain) == domain {
+			return row, true, nil
+		}
+	}
+	return siteQuotaRow{}, false, nil
+}
+
+func (a *App) managedSiteDeletionSizeBytes(row siteQuotaRow) int64 {
+	totalBytes := fileSizeBytes(row.DatabasePath)
+	for _, directoryPath := range []string{
+		a.domainFilesDirForDomain(row.Domain),
+		a.domainStaticDir(row.Domain),
+		a.domainChrootRootDir(row.Domain),
+		a.domainLogDir(row.Domain),
+	} {
+		totalBytes += diskusage.DirectorySize(directoryPath)
+	}
+	totalBytes += fileSizeBytes(filepath.Join(a.packsDir(), domainStorageName(row.Domain)+".zip"))
+	return totalBytes
+}
+
+func managedSiteOwnerContacts(ctx context.Context, controlDatabase *sql.DB, databasePath, domain string) []string {
+	contactSet := make(map[string]struct{})
+	for _, email := range siteAdminEmails(ctx, databasePath, domain) {
+		if _, err := stdmail.ParseAddress(email); err == nil {
+			contactSet[strings.TrimSpace(email)] = struct{}{}
+		}
+	}
+	if controlDatabase != nil {
+		rows, err := controlDatabase.QueryContext(ctx, `SELECT email FROM server_managers WHERE TRIM(COALESCE(email,''))<>'' ORDER BY email`)
+		if err == nil {
+			for rows.Next() {
+				var email string
+				if scanErr := rows.Scan(&email); scanErr == nil {
+					if _, parseErr := stdmail.ParseAddress(email); parseErr == nil {
+						contactSet[strings.TrimSpace(email)] = struct{}{}
+					}
+				}
+			}
+			_ = rows.Close()
+		}
+	}
+	contacts := make([]string, 0, len(contactSet))
+	for email := range contactSet {
+		contacts = append(contacts, email)
+	}
+	sort.Strings(contacts)
+	return contacts
+}
+
+func (a *App) backupRootDir() string {
+	storagePath := a.storagePath
+	if strings.TrimSpace(storagePath) == "" {
+		storagePath = defaultAppStoragePath()
+	}
+	return filepath.Join(storagePath, "backup")
+}
+
+func (a *App) createManagedSiteDeletionBackup(ctx context.Context, r *http.Request, controlDatabase *sql.DB, row siteQuotaRow, ownerContacts []string, retentionDays int, languageCode string) (managedSiteDeletionBackupView, error) {
+	domain := normalizeQuotaDomainName(row.Domain)
+	if domain == "" {
+		return managedSiteDeletionBackupView{}, fmt.Errorf("site domain is required")
+	}
+	if strings.TrimSpace(row.DatabasePath) == "" {
+		return managedSiteDeletionBackupView{}, fmt.Errorf("site database path is required")
+	}
+	createdAt := time.Now().UTC()
+	expiresAt := createdAt.AddDate(0, 0, retentionDays)
+	token := randomAccessToken()
+	if strings.TrimSpace(token) == "" {
+		return managedSiteDeletionBackupView{}, fmt.Errorf("backup download token was not created")
+	}
+	backupDirectory := a.backupRootDir()
+	if err := os.MkdirAll(backupDirectory, 0o755); err != nil {
+		return managedSiteDeletionBackupView{}, err
+	}
+	fileName := domainStorageName(domain) + "-deleted-" + createdAt.Format("20060102-150405") + ".zip"
+	archivePath := filepath.Join(backupDirectory, fileName)
+	tempArchivePath := archivePath + ".tmp"
+	_ = os.Remove(tempArchivePath)
+	metadata := managedSiteDeletionBackupMetadata{
+		Version:           1,
+		Domain:            domain,
+		CreatedAt:         createdAt.Format(time.RFC3339),
+		ExpiresAt:         expiresAt.Format(time.RFC3339),
+		RetentionDays:     retentionDays,
+		OwnerContacts:     ownerContacts,
+		DeletedBytes:      a.managedSiteDeletionSizeBytes(row),
+		DatabaseFile:      "database/" + filepath.Base(row.DatabasePath),
+		StaticDirectory:   "static/" + domainStorageName(domain),
+		OriginalDatabase:  row.DatabasePath,
+		OriginalStaticDir: a.domainStaticDir(domain),
+	}
+	if err := a.writeManagedSiteDeletionBackupArchive(ctx, domain, row.DatabasePath, tempArchivePath, metadata); err != nil {
+		_ = os.Remove(tempArchivePath)
+		return managedSiteDeletionBackupView{}, err
+	}
+	if err := verifyManagedSiteDeletionBackupArchive(tempArchivePath, metadata); err != nil {
+		_ = os.Remove(tempArchivePath)
+		return managedSiteDeletionBackupView{}, err
+	}
+	if err := os.Rename(tempArchivePath, archivePath); err != nil {
+		_ = os.Remove(tempArchivePath)
+		return managedSiteDeletionBackupView{}, err
+	}
+	archiveInfo, err := os.Stat(archivePath)
+	if err != nil || archiveInfo.Size() <= 0 {
+		_ = os.Remove(archivePath)
+		if err != nil {
+			return managedSiteDeletionBackupView{}, err
+		}
+		return managedSiteDeletionBackupView{}, fmt.Errorf("backup archive is empty")
+	}
+	metadataJSON, err := json.Marshal(metadata)
+	if err != nil {
+		_ = os.Remove(archivePath)
+		return managedSiteDeletionBackupView{}, err
+	}
+	_, err = controlDatabase.ExecContext(ctx, `INSERT INTO site_deletion_backups(domain,archive_path,file_name,size_bytes,token,token_created_at,created_at,expires_at,retention_days,owner_contacts,metadata_json,language_code,download_count) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,0)`,
+		domain, archivePath, fileName, archiveInfo.Size(), token, createdAt.Format(time.RFC3339), createdAt.Format(time.RFC3339), expiresAt.Format(time.RFC3339), retentionDays, strings.Join(ownerContacts, ", "), string(metadataJSON), languageCode)
+	if err != nil {
+		_ = os.Remove(archivePath)
+		return managedSiteDeletionBackupView{}, err
+	}
+	downloadURL := ""
+	if r != nil {
+		downloadURL = absoluteURLForPath(r, "/?billing_backup_download&token="+url.QueryEscape(token))
+	}
+	return managedSiteDeletionBackupView{
+		Domain:        domain,
+		FileName:      fileName,
+		SizeLabel:     formatFileSize(archiveInfo.Size()),
+		CreatedAt:     createdAt.Format(time.RFC3339),
+		ExpiresAt:     expiresAt.Format(time.RFC3339),
+		OwnerContacts: strings.Join(ownerContacts, ", "),
+		TokenStatus:   localizedBackupTokenStatus(translationsForLanguageCode(languageCode), false, 0),
+		DownloadURL:   downloadURL,
+	}, nil
+}
+
+func (a *App) writeManagedSiteDeletionBackupArchive(ctx context.Context, domain, databasePath, archivePath string, metadata managedSiteDeletionBackupMetadata) error {
+	siteDatabase, err := sql.Open("sqlite", "file:"+databasePath)
+	if err != nil {
+		return err
+	}
+	defer siteDatabase.Close()
+	siteApplication := &App{db: siteDatabase, storagePath: a.storagePath, dbPath: a.serverControlDBPath(), debug: a.debug}
+	archiveFile, err := os.Create(archivePath)
+	if err != nil {
+		return err
+	}
+	closeArchive := true
+	defer func() {
+		if closeArchive {
+			_ = archiveFile.Close()
+		}
+	}()
+	zipWriter := zip.NewWriter(archiveFile)
+	if err := siteApplication.writeDomainBackupEntriesToZip(ctx, domain, zipWriter); err != nil {
+		_ = zipWriter.Close()
+		return err
+	}
+	if _, err := zipWriter.Create(metadata.StaticDirectory + "/"); err != nil {
+		_ = zipWriter.Close()
+		return err
+	}
+	if err := addDirectoryToZip(zipWriter, a.domainStaticDir(domain), metadata.StaticDirectory, nil); err != nil {
+		_ = zipWriter.Close()
+		return err
+	}
+	if err := addFileToZip(zipWriter, databasePath, metadata.DatabaseFile); err != nil {
+		_ = zipWriter.Close()
+		return err
+	}
+	metadataJSON, err := json.MarshalIndent(metadata, "", "  ")
+	if err != nil {
+		_ = zipWriter.Close()
+		return err
+	}
+	metadataWriter, err := zipWriter.Create("metadata.json")
+	if err != nil {
+		_ = zipWriter.Close()
+		return err
+	}
+	if _, err := metadataWriter.Write(metadataJSON); err != nil {
+		_ = zipWriter.Close()
+		return err
+	}
+	if err := zipWriter.Close(); err != nil {
+		return err
+	}
+	if err := archiveFile.Close(); err != nil {
+		return err
+	}
+	closeArchive = false
+	return nil
+}
+
+func addFileToZip(zipWriter *zip.Writer, sourcePath, archivePath string) error {
+	sourceFile, err := os.Open(sourcePath)
+	if err != nil {
+		return err
+	}
+	defer sourceFile.Close()
+	sourceInfo, err := sourceFile.Stat()
+	if err != nil {
+		return err
+	}
+	header, err := zip.FileInfoHeader(sourceInfo)
+	if err != nil {
+		return err
+	}
+	header.Name = filepath.ToSlash(archivePath)
+	header.Method = zip.Deflate
+	archiveWriter, err := zipWriter.CreateHeader(header)
+	if err != nil {
+		return err
+	}
+	_, err = io.Copy(archiveWriter, sourceFile)
+	return err
+}
+
+func verifyManagedSiteDeletionBackupArchive(archivePath string, metadata managedSiteDeletionBackupMetadata) error {
+	archiveReader, err := zip.OpenReader(archivePath)
+	if err != nil {
+		return err
+	}
+	defer archiveReader.Close()
+	requiredEntries := map[string]bool{
+		"backup.json":            false,
+		"metadata.json":          false,
+		metadata.DatabaseFile:    false,
+		metadata.StaticDirectory: false,
+	}
+	for _, archiveFile := range archiveReader.File {
+		entryName := strings.TrimSuffix(archiveFile.Name, "/")
+		if _, required := requiredEntries[entryName]; required {
+			requiredEntries[entryName] = true
+		}
+		if strings.HasPrefix(entryName, metadata.StaticDirectory+"/") {
+			requiredEntries[metadata.StaticDirectory] = true
+		}
+	}
+	for entryName, found := range requiredEntries {
+		if !found {
+			return fmt.Errorf("backup archive missing %s", entryName)
+		}
+	}
+	return nil
+}
+
+func (a *App) managedSiteDeletionBackupViews(ctx context.Context, r *http.Request, controlDatabase *sql.DB) []managedSiteDeletionBackupView {
+	rows, err := controlDatabase.QueryContext(ctx, `SELECT id,domain,archive_path,file_name,size_bytes,token,created_at,expires_at,owner_contacts,downloaded_at,download_count FROM site_deletion_backups ORDER BY created_at DESC, id DESC`)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	translations := translationsForRequest(r)
+	now := time.Now().UTC()
+	views := make([]managedSiteDeletionBackupView, 0, 8)
+	for rows.Next() {
+		var view managedSiteDeletionBackupView
+		var archivePath string
+		var token string
+		var sizeBytes int64
+		var downloadedAt sql.NullString
+		if scanErr := rows.Scan(&view.ID, &view.Domain, &archivePath, &view.FileName, &sizeBytes, &token, &view.CreatedAt, &view.ExpiresAt, &view.OwnerContacts, &downloadedAt, &view.DownloadCount); scanErr != nil {
+			continue
+		}
+		view.DownloadedAt = downloadedAt.String
+		expiresAt, _ := time.Parse(time.RFC3339, view.ExpiresAt)
+		view.Expired = !expiresAt.IsZero() && !expiresAt.After(now)
+		if _, statErr := os.Stat(archivePath); statErr != nil {
+			view.ArchiveMissing = true
+		}
+		view.SizeLabel = formatFileSize(sizeBytes)
+		view.TokenStatus = localizedBackupTokenStatus(translations, view.Expired || view.ArchiveMissing, view.DownloadCount)
+		if !view.Expired && !view.ArchiveMissing && strings.TrimSpace(token) != "" {
+			view.DownloadURL = "/?billing_backup_download&token=" + url.QueryEscape(token)
+		}
+		views = append(views, view)
+	}
+	return views
+}
+
+func localizedBackupTokenStatus(translations map[string]string, unavailable bool, downloadCount int) string {
+	if unavailable {
+		return translationOrDefault(translations, "billing_backup_token_expired", "expired")
+	}
+	if downloadCount > 0 {
+		return translationOrDefault(translations, "billing_backup_token_downloaded", "downloaded")
+	}
+	return translationOrDefault(translations, "billing_backup_token_active", "active")
+}
+
+func (a *App) cleanupExpiredManagedSiteDeletionBackups(ctx context.Context, controlDatabase *sql.DB) {
+	now := time.Now().UTC()
+	rows, err := controlDatabase.QueryContext(ctx, `SELECT id,archive_path,expires_at FROM site_deletion_backups`)
+	if err != nil {
+		return
+	}
+	type expiredBackup struct {
+		id          int
+		archivePath string
+	}
+	expiredBackups := make([]expiredBackup, 0)
+	for rows.Next() {
+		var backup expiredBackup
+		var expiresAtText string
+		if scanErr := rows.Scan(&backup.id, &backup.archivePath, &expiresAtText); scanErr != nil {
+			continue
+		}
+		expiresAt, parseErr := time.Parse(time.RFC3339, expiresAtText)
+		if parseErr == nil && !expiresAt.After(now) {
+			expiredBackups = append(expiredBackups, backup)
+		}
+	}
+	_ = rows.Close()
+	for _, backup := range expiredBackups {
+		_ = os.Remove(backup.archivePath)
+		_, _ = controlDatabase.ExecContext(ctx, `UPDATE site_deletion_backups SET token='' WHERE id=?`, backup.id)
+	}
+}
+
+func (a *App) notifyManagedSiteDeletionBackupCreated(ctx context.Context, r *http.Request, backup managedSiteDeletionBackupView, ownerContacts []string, languageCode string) {
+	if len(ownerContacts) == 0 {
+		return
+	}
+	translations := translationsForLanguageCode(languageCode)
+	downloadURL := backup.DownloadURL
+	if downloadURL == "" && r != nil {
+		downloadURL = absoluteURLForPath(r, backup.DownloadURL)
+	}
+	subject := fmt.Sprintf(translationOrDefault(translations, "billing_backup_created_email_subject", "Site backup created for %s"), backup.Domain)
+	body := fmt.Sprintf(translationOrDefault(translations, "billing_backup_created_email_body", "A deletion backup for %s was created.\nArchive: %s\nSize: %s\nExpires: %s\nDownload: %s"), backup.Domain, backup.FileName, backup.SizeLabel, backup.ExpiresAt, downloadURL)
+	a.enqueueManagedSiteDeletionBackupEmails(ctx, backup.Domain, ownerContacts, subject, body)
+}
+
+func (a *App) notifyManagedSiteDeletionBackupDownloaded(ctx context.Context, backup managedSiteDeletionBackupView, ownerContacts []string, languageCode string, remoteAddress string) {
+	if len(ownerContacts) == 0 {
+		return
+	}
+	translations := translationsForLanguageCode(languageCode)
+	subject := fmt.Sprintf(translationOrDefault(translations, "billing_backup_downloaded_email_subject", "Site backup downloaded for %s"), backup.Domain)
+	body := fmt.Sprintf(translationOrDefault(translations, "billing_backup_downloaded_email_body", "The deletion backup for %s was downloaded.\nArchive: %s\nTime: %s\nRemote: %s"), backup.Domain, backup.FileName, time.Now().UTC().Format(time.RFC3339), remoteAddress)
+	a.enqueueManagedSiteDeletionBackupEmails(ctx, backup.Domain, ownerContacts, subject, body)
+}
+
+func (a *App) enqueueManagedSiteDeletionBackupEmails(ctx context.Context, domain string, ownerContacts []string, subject, body string) {
+	for _, email := range ownerContacts {
+		if _, err := stdmail.ParseAddress(email); err != nil {
+			continue
+		}
+		err := a.enqueueEmail(ctx, mailout.Message{
+			From:    a.emailFromAddress(domain),
+			To:      strings.TrimSpace(email),
+			Subject: subject,
+			Body:    body,
+		})
+		if err != nil {
+			log.Printf("deletion backup email enqueue failed domain=%s to=%s error=%v", domain, email, err)
+		}
+	}
+}
+
+func (a *App) downloadManagedSiteDeletionBackup(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	token := strings.TrimSpace(r.URL.Query().Get("token"))
+	if token == "" {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	controlDatabase, err := a.openServerControlDatabase(r.Context())
+	if err != nil {
+		http.Error(w, "backup store unavailable", http.StatusInternalServerError)
+		return
+	}
+	defer controlDatabase.Close()
+	var backup managedSiteDeletionBackupView
+	var archivePath string
+	var ownerContactsText string
+	var languageCodeValue sql.NullString
+	var downloadedAt sql.NullString
+	var sizeBytes int64
+	err = controlDatabase.QueryRowContext(r.Context(), `SELECT id,domain,archive_path,file_name,size_bytes,created_at,expires_at,owner_contacts,downloaded_at,download_count,language_code FROM site_deletion_backups WHERE token=?`, token).Scan(
+		&backup.ID, &backup.Domain, &archivePath, &backup.FileName, &sizeBytes, &backup.CreatedAt, &backup.ExpiresAt, &ownerContactsText, &downloadedAt, &backup.DownloadCount, &languageCodeValue)
+	if err != nil {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	expiresAt, _ := time.Parse(time.RFC3339, backup.ExpiresAt)
+	if !expiresAt.IsZero() && !expiresAt.After(time.Now().UTC()) {
+		http.Error(w, "backup expired", http.StatusGone)
+		return
+	}
+	archiveFile, err := os.Open(archivePath)
+	if err != nil {
+		http.Error(w, "backup archive missing", http.StatusNotFound)
+		return
+	}
+	defer archiveFile.Close()
+	archiveInfo, err := archiveFile.Stat()
+	if err != nil || archiveInfo.Size() <= 0 {
+		http.Error(w, "backup archive unavailable", http.StatusInternalServerError)
+		return
+	}
+	backup.SizeLabel = formatFileSize(archiveInfo.Size())
+	w.Header().Set("Content-Type", "application/zip")
+	w.Header().Set("Content-Disposition", "attachment; filename=\""+backup.FileName+"\"")
+	if _, err := io.Copy(w, archiveFile); err != nil {
+		return
+	}
+	nowText := time.Now().UTC().Format(time.RFC3339)
+	_, _ = controlDatabase.ExecContext(context.Background(), `UPDATE site_deletion_backups SET downloaded_at=?,download_count=COALESCE(download_count,0)+1 WHERE id=?`, nowText, backup.ID)
+	ownerContacts := splitOwnerContacts(ownerContactsText)
+	a.notifyManagedSiteDeletionBackupDownloaded(context.Background(), backup, ownerContacts, languageCodeValue.String, r.RemoteAddr)
+}
+
+func splitOwnerContacts(ownerContactsText string) []string {
+	contacts := make([]string, 0, 4)
+	for _, rawContact := range strings.Split(ownerContactsText, ",") {
+		contact := strings.TrimSpace(rawContact)
+		if contact != "" {
+			contacts = append(contacts, contact)
+		}
+	}
+	return contacts
 }
 
 func (a *App) saveServicePlanFromForm(r *http.Request) string {
@@ -15885,6 +16463,18 @@ func (a *App) generateDomainPack(domain string) error {
 }
 
 func (a *App) writeDomainBackupZIP(ctx context.Context, domain string, writer io.Writer) error {
+	zipWriter := zip.NewWriter(writer)
+	if err := a.writeDomainBackupEntriesToZip(ctx, domain, zipWriter); err != nil {
+		_ = zipWriter.Close()
+		return err
+	}
+	if closeZipErr := zipWriter.Close(); closeZipErr != nil {
+		return closeZipErr
+	}
+	return nil
+}
+
+func (a *App) writeDomainBackupEntriesToZip(ctx context.Context, domain string, zipWriter *zip.Writer) error {
 	backup, err := a.collectDomainBackup(ctx, domain)
 	if err != nil {
 		return err
@@ -15893,14 +16483,11 @@ func (a *App) writeDomainBackupZIP(ctx context.Context, domain string, writer io
 	if err != nil {
 		return err
 	}
-	zipWriter := zip.NewWriter(writer)
 	backupEntryWriter, err := zipWriter.Create("backup.json")
 	if err != nil {
-		_ = zipWriter.Close()
 		return err
 	}
 	if _, err := backupEntryWriter.Write(backupJSON); err != nil {
-		_ = zipWriter.Close()
 		return err
 	}
 	pageArchivePathBySitePath := staticExportPageArchivePaths(backup.Pages)
@@ -15911,7 +16498,6 @@ func (a *App) writeDomainBackupZIP(ctx context.Context, domain string, writer io
 		}
 		pageFileWriter, createErr := zipWriter.Create(archivePath)
 		if createErr != nil {
-			_ = zipWriter.Close()
 			return createErr
 		}
 		pageHTML := backupPage.HTML
@@ -15919,7 +16505,6 @@ func (a *App) writeDomainBackupZIP(ctx context.Context, domain string, writer io
 			pageHTML = rewriteStaticExportText(pageHTML, domain, backupPage.Path, archivePath, pageArchivePathBySitePath)
 		}
 		if _, writeErr := io.WriteString(pageFileWriter, pageHTML); writeErr != nil {
-			_ = zipWriter.Close()
 			return writeErr
 		}
 	}
@@ -15931,11 +16516,7 @@ func (a *App) writeDomainBackupZIP(ctx context.Context, domain string, writer io
 		return []byte(rewriteStaticExportText(string(fileBytes), domain, sitePath, archivePath, pageArchivePathBySitePath))
 	}
 	if addFilesErr := addDirectoryToZip(zipWriter, a.domainFilesDirForDomain(domain), "p", rewriteArchiveFile); addFilesErr != nil {
-		_ = zipWriter.Close()
 		return addFilesErr
-	}
-	if closeZipErr := zipWriter.Close(); closeZipErr != nil {
-		return closeZipErr
 	}
 	return nil
 }

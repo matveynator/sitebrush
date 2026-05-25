@@ -6039,6 +6039,160 @@ func TestBackupExportWritesStaticStructureFromURI(t *testing.T) {
 	}
 }
 
+func TestBillingDeleteSiteCreatesVerifiedBackupBeforeRemovingData(t *testing.T) {
+	application, _ := newTestApplication(t)
+	domain := "customer.example"
+	siteDatabasePath := filepath.Join(siteDatabaseRootPath(application.serverControlDBPath()), domainStorageName(domain)+".db")
+	if err := ensureParentDir(siteDatabasePath); err != nil {
+		t.Fatal(err)
+	}
+	siteDB, err := sql.Open("sqlite", "file:"+siteDatabasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer siteDB.Close()
+	siteApplication := &App{db: siteDB, storagePath: application.storagePath, dbPath: application.serverControlDBPath()}
+	if err := siteApplication.migrate(contextWithDomain(context.Background(), domain)); err != nil {
+		t.Fatalf("migrate site db: %v", err)
+	}
+	insertSiteQuotaAdmin(t, siteDB, domain)
+	if _, err := siteDB.Exec(`INSERT INTO pages(domain,path,title,html,published) VALUES(?,?,?,?,1)`, domain, "/", "Home", "<h1>customer</h1>"); err != nil {
+		t.Fatalf("insert page: %v", err)
+	}
+	if err := os.MkdirAll(application.domainStaticDir(domain), 0o755); err != nil {
+		t.Fatalf("create static dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(application.domainStaticDir(domain), "index.html"), []byte("<h1>static</h1>"), 0o644); err != nil {
+		t.Fatalf("write static file: %v", err)
+	}
+	if err := os.MkdirAll(application.domainFilesDirForDomain(domain), 0o755); err != nil {
+		t.Fatalf("create files dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(application.domainFilesDirForDomain(domain), "logo.png"), []byte("png"), 0o644); err != nil {
+		t.Fatalf("write file asset: %v", err)
+	}
+	controlDB, err := application.openServerControlDatabase(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := controlDB.Exec(`INSERT INTO server_managers(domain,email,role,scope_domain,created_at) VALUES(?,?,?,?,?)`, "owner.example", "owner@example.com", "owner", "*", time.Now().UTC().Format(time.RFC3339)); err != nil {
+		t.Fatalf("insert owner: %v", err)
+	}
+	if _, err := controlDB.Exec(`INSERT INTO site_service_assignments(domain,plan_id,service_status,updated_at) VALUES(?,?,?,?)`, domain, 0, "paid", time.Now().UTC().Format(time.RFC3339)); err != nil {
+		t.Fatalf("insert assignment: %v", err)
+	}
+	_ = controlDB.Close()
+
+	request := httptest.NewRequest(http.MethodPost, "http://owner.example/?billing", nil)
+	backup, err := application.deleteManagedSiteWithBackup(context.Background(), request, domain)
+	if err != nil {
+		t.Fatalf("delete with backup: %v", err)
+	}
+	if backup.FileName == "" || backup.DownloadURL == "" {
+		t.Fatalf("backup view missing file or URL: %+v", backup)
+	}
+	if _, err := os.Stat(siteDatabasePath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("site database still exists or stat failed differently: %v", err)
+	}
+	if _, err := os.Stat(application.domainStaticDir(domain)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("site static dir still exists or stat failed differently: %v", err)
+	}
+	backupPath := filepath.Join(application.backupRootDir(), backup.FileName)
+	archiveReader, err := zip.OpenReader(backupPath)
+	if err != nil {
+		t.Fatalf("open deletion backup: %v", err)
+	}
+	defer archiveReader.Close()
+	archiveFileByName := make(map[string]*zip.File, len(archiveReader.File))
+	for _, archiveFile := range archiveReader.File {
+		archiveFileByName[archiveFile.Name] = archiveFile
+	}
+	for _, expectedName := range []string{
+		"backup.json",
+		"metadata.json",
+		"database/" + filepath.Base(siteDatabasePath),
+		"static/" + domainStorageName(domain) + "/index.html",
+		"p/logo.png",
+	} {
+		if _, found := archiveFileByName[expectedName]; !found {
+			t.Fatalf("deletion backup missing %q", expectedName)
+		}
+	}
+	metadataBody := readZipTextFile(t, archiveFileByName, "metadata.json")
+	if !strings.Contains(metadataBody, "admin@customer.example") || !strings.Contains(metadataBody, "owner@example.com") {
+		t.Fatalf("metadata missing owner contacts: %s", metadataBody)
+	}
+	controlDB, err = application.openServerControlDatabase(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer controlDB.Close()
+	var assignmentCount int
+	if err := controlDB.QueryRow(`SELECT COUNT(1) FROM site_service_assignments WHERE domain=?`, domain).Scan(&assignmentCount); err != nil {
+		t.Fatalf("read assignment count: %v", err)
+	}
+	if assignmentCount != 0 {
+		t.Fatalf("assignment count = %d, want 0", assignmentCount)
+	}
+	var token string
+	if err := controlDB.QueryRow(`SELECT token FROM site_deletion_backups WHERE domain=?`, domain).Scan(&token); err != nil {
+		t.Fatalf("read deletion backup token: %v", err)
+	}
+	if token == "" {
+		t.Fatal("backup token is empty")
+	}
+	select {
+	case mailJob := <-application.emailDelivery:
+		if mailJob.message.To != "admin@customer.example" && mailJob.message.To != "owner@example.com" {
+			t.Fatalf("unexpected backup email recipient: %+v", mailJob.message)
+		}
+	default:
+		t.Fatal("backup creation email was not queued")
+	}
+
+	response := httptest.NewRecorder()
+	application.downloadManagedSiteDeletionBackup(response, httptest.NewRequest(http.MethodGet, "http://owner.example/?billing_backup_download&token="+url.QueryEscape(token), nil))
+	if response.Code != http.StatusOK {
+		t.Fatalf("download status = %d, body=%q", response.Code, response.Body.String())
+	}
+	var downloadCount int
+	if err := controlDB.QueryRow(`SELECT download_count FROM site_deletion_backups WHERE domain=?`, domain).Scan(&downloadCount); err != nil {
+		t.Fatalf("read download count: %v", err)
+	}
+	if downloadCount != 1 {
+		t.Fatalf("download count = %d, want 1", downloadCount)
+	}
+}
+
+func TestBillingDeleteSiteKeepsDataWhenBackupCreationFails(t *testing.T) {
+	application, _ := newTestApplication(t)
+	domain := "blocked-backup.example"
+	siteDatabasePath := filepath.Join(siteDatabaseRootPath(application.serverControlDBPath()), domainStorageName(domain)+".db")
+	if err := ensureParentDir(siteDatabasePath); err != nil {
+		t.Fatal(err)
+	}
+	siteDB, err := sql.Open("sqlite", "file:"+siteDatabasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer siteDB.Close()
+	if err := (&App{db: siteDB, storagePath: application.storagePath, dbPath: application.serverControlDBPath()}).migrate(contextWithDomain(context.Background(), domain)); err != nil {
+		t.Fatalf("migrate site db: %v", err)
+	}
+	insertSiteQuotaAdmin(t, siteDB, domain)
+	if err := os.WriteFile(application.backupRootDir(), []byte("not a directory"), 0o644); err != nil {
+		t.Fatalf("block backup dir: %v", err)
+	}
+
+	_, err = application.deleteManagedSiteWithBackup(context.Background(), httptest.NewRequest(http.MethodPost, "http://owner.example/?billing", nil), domain)
+	if err == nil {
+		t.Fatal("delete succeeded despite backup directory failure")
+	}
+	if _, statErr := os.Stat(siteDatabasePath); statErr != nil {
+		t.Fatalf("site database was removed after backup failure: %v", statErr)
+	}
+}
+
 func readZipTextFile(t *testing.T, archiveFileByName map[string]*zip.File, fileName string) string {
 	t.Helper()
 	archiveFile, exists := archiveFileByName[fileName]

@@ -457,9 +457,9 @@
 }
 
 .technical-page .billing-settings-form {
-    grid-template-columns: minmax(230px, 1fr) auto;
+    grid-template-columns: minmax(230px, 1fr) minmax(130px, 170px) auto;
     align-items: center;
-    max-width: 720px;
+    max-width: 900px;
 }
 
 .technical-page .billing-create-form {
@@ -473,7 +473,8 @@
 .technical-page .billing-create-form label,
 .technical-page .billing-plan-form label,
 .technical-page .billing-site-form label,
-.technical-page .billing-delete-form label {
+.technical-page .billing-delete-form label,
+.technical-page .billing-settings-form label:not(.checkbox-row) {
     display: grid;
     gap: 4px;
     color: var(--muted);
@@ -481,7 +482,8 @@
 }
 
 .technical-page .billing-site-list,
-.technical-page .billing-plan-list {
+.technical-page .billing-plan-list,
+.technical-page .billing-backup-list {
     display: grid;
     gap: 8px;
 }
@@ -545,6 +547,29 @@
     border: 1px solid rgba(149, 229, 239, 0.16);
     border-radius: 8px;
     background: rgba(0, 0, 0, 0.14);
+}
+
+.technical-page .billing-backup-row {
+    display: grid;
+    grid-template-columns: minmax(180px, 0.9fr) minmax(220px, 1.2fr) auto;
+    gap: 10px;
+    align-items: center;
+    padding: 10px;
+    border: 1px solid rgba(149, 229, 239, 0.16);
+    border-radius: 8px;
+    background: rgba(0, 0, 0, 0.14);
+}
+
+.technical-page .billing-backup-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px 12px;
+    color: var(--muted);
+    font-size: 12px;
+}
+
+.technical-page .billing-backup-actions {
+    justify-self: end;
 }
 
 .technical-page .revision-enable-button,
@@ -749,6 +774,7 @@
     .technical-page .billing-site-row,
     .technical-page .billing-site-form,
     .technical-page .billing-delete-form,
+    .technical-page .billing-backup-row,
     .technical-page .record-grid,
     .technical-page .ssl-status-row {
         grid-template-columns: 1fr;
@@ -764,6 +790,10 @@
 
     .technical-page .billing-delete-form {
         grid-column: auto;
+        justify-self: stretch;
+    }
+
+    .technical-page .billing-backup-actions {
         justify-self: stretch;
     }
 }

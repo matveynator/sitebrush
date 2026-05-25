@@ -11,7 +11,8 @@ import (
 )
 
 const DefaultStorageLimitBytes int64 = 10 * 1024 * 1024 * 1024
-const currentBillingSchemaVersion = 1
+const DefaultDeletionBackupRetentionDays = 365
+const currentBillingSchemaVersion = 2
 
 type Store struct {
 	DB *sql.DB
@@ -29,18 +30,20 @@ type Plan struct {
 }
 
 type Site struct {
-	Domain        string
-	Aliases       string
-	UsedLabel     string
-	LimitLabel    string
-	FreeLabel     string
-	UsedPercent   int
-	QuotaInput    string
-	PlanID        int
-	ServiceStatus string
-	AdminEmails   string
-	CanDelete     bool
-	DatabasePath  string
+	Domain            string
+	Aliases           string
+	UsedLabel         string
+	LimitLabel        string
+	FreeLabel         string
+	UsedPercent       int
+	QuotaInput        string
+	PlanID            int
+	ServiceStatus     string
+	AdminEmails       string
+	CanDelete         bool
+	DatabasePath      string
+	DeletionSizeBytes int64
+	DeletionSizeLabel string
 }
 
 type SiteUsage struct {
@@ -77,6 +80,7 @@ func Migrate(ctx context.Context, database *sql.DB) error {
 		`CREATE TABLE IF NOT EXISTS server_settings(name TEXT PRIMARY KEY,value TEXT,updated_at TEXT);`,
 		`CREATE TABLE IF NOT EXISTS site_service_plans(id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT UNIQUE,quota_bytes INTEGER,price TEXT,currency TEXT,billing_period TEXT,is_default INTEGER DEFAULT 0,created_at TEXT,updated_at TEXT);`,
 		`CREATE TABLE IF NOT EXISTS site_service_assignments(domain TEXT PRIMARY KEY,plan_id INTEGER DEFAULT 0,service_status TEXT,notes TEXT,updated_at TEXT);`,
+		`CREATE TABLE IF NOT EXISTS site_deletion_backups(id INTEGER PRIMARY KEY AUTOINCREMENT,domain TEXT,archive_path TEXT,file_name TEXT,size_bytes INTEGER,token TEXT,token_created_at TEXT,created_at TEXT,expires_at TEXT,retention_days INTEGER,owner_contacts TEXT,metadata_json TEXT,language_code TEXT,downloaded_at TEXT,download_count INTEGER DEFAULT 0);`,
 	}
 	for queryIndex, query := range queries {
 		if _, err := database.ExecContext(ctx, query); err != nil {
@@ -85,6 +89,7 @@ func Migrate(ctx context.Context, database *sql.DB) error {
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
 	_, _ = database.ExecContext(ctx, `INSERT OR IGNORE INTO server_settings(name,value,updated_at) VALUES('auto_registration_enabled','1',?)`, now)
+	_, _ = database.ExecContext(ctx, `INSERT OR IGNORE INTO server_settings(name,value,updated_at) VALUES('deletion_backup_retention_days',?,?)`, strconv.Itoa(DefaultDeletionBackupRetentionDays), now)
 	_, _ = database.ExecContext(ctx, `INSERT OR IGNORE INTO site_service_plans(name,quota_bytes,price,currency,billing_period,is_default,created_at,updated_at) VALUES('Free',?,'0','USD','monthly',1,?,?)`,
 		DefaultStorageLimitBytes, now, now)
 	if err := setSchemaMigrationVersion(ctx, database, "billing", currentBillingSchemaVersion); err != nil {
@@ -109,7 +114,7 @@ func setSchemaMigrationVersion(ctx context.Context, database *sql.DB, component 
 }
 
 func billingSchemaComplete(ctx context.Context, database *sql.DB) (bool, error) {
-	for _, tableName := range []string{"server_managers", "server_settings", "site_service_plans", "site_service_assignments"} {
+	for _, tableName := range []string{"server_managers", "server_settings", "site_service_plans", "site_service_assignments", "site_deletion_backups"} {
 		found, err := tableExists(ctx, database, tableName)
 		if err != nil || !found {
 			return found, err
