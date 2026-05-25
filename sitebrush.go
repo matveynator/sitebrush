@@ -80,6 +80,11 @@ const guestStaticHTMLCacheQueueSize = 4096
 const authIPFailureCacheQueueSize = 4096
 const emailDeliveryQueueSize = 256
 const emailConfirmationTTL = 24 * time.Hour
+const sitebrushHTTPReadTimeout = 10 * time.Second
+const sitebrushHTTPWriteTimeout = 30 * time.Second
+const sitebrushHTTPIdleTimeout = 65 * time.Second
+const sitebrushHTTPReadHeaderTimeout = 5 * time.Second
+const sitebrushHTTP10KeepAliveBufferLimit = 1024 * 1024
 const pagePasswordSessionTTL = time.Hour
 
 // App keeps only explicit dependencies to stay readable and easy to swap.
@@ -3571,10 +3576,8 @@ func runSitebrushServer(ctx context.Context, config serverRunConfig) error {
 		}
 	}
 
-	server := &http.Server{
-		Handler:   httpHandler,
-		ConnState: sitebrushConnStateLogger("HTTP", config.Debug),
-	}
+	server := newSitebrushHTTPServer(httpHandler)
+	server.ConnState = sitebrushConnStateLogger("HTTP", config.Debug)
 	serverErrors := make(chan error, 1)
 	go func() {
 		serverErrors <- server.Serve(listener)
@@ -3607,6 +3610,155 @@ func runSitebrushServer(ctx context.Context, config serverRunConfig) error {
 		logShutdownDone("HTTP server shutdown complete")
 		return nil
 	}
+}
+
+func newSitebrushHTTPServer(handler http.Handler) *http.Server {
+	server := &http.Server{
+		Handler:           keepAliveHandler(handler),
+		ReadTimeout:       sitebrushHTTPReadTimeout,
+		WriteTimeout:      sitebrushHTTPWriteTimeout,
+		IdleTimeout:       sitebrushHTTPIdleTimeout,
+		ReadHeaderTimeout: sitebrushHTTPReadHeaderTimeout,
+	}
+	server.SetKeepAlivesEnabled(true)
+	return server
+}
+
+func keepAliveHandler(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if shouldSendExplicitHTTP11KeepAlive(r) {
+			r.Close = false
+			w.Header().Set("Connection", "keep-alive")
+			w.Header().Set("Keep-Alive", "timeout=65")
+			next.ServeHTTP(w, r)
+			return
+		}
+		if shouldBufferHTTP10KeepAlive(r) {
+			r.Close = false
+			writer := newHTTP10KeepAliveResponseWriter(w, r.Method)
+			next.ServeHTTP(writer, r)
+			writer.finish()
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func shouldSendExplicitHTTP11KeepAlive(r *http.Request) bool {
+	if r.ProtoMajor != 1 || r.ProtoMinor != 1 {
+		return false
+	}
+	connectionHeader := strings.ToLower(r.Header.Get("Connection"))
+	if strings.Contains(connectionHeader, "upgrade") {
+		return false
+	}
+	if strings.EqualFold(r.Header.Get("Upgrade"), "websocket") {
+		return false
+	}
+	return true
+}
+
+func shouldBufferHTTP10KeepAlive(r *http.Request) bool {
+	if r.ProtoMajor != 1 || r.ProtoMinor != 0 {
+		return false
+	}
+	connectionHeader := strings.ToLower(r.Header.Get("Connection"))
+	if strings.Contains(connectionHeader, "upgrade") {
+		return false
+	}
+	if strings.EqualFold(r.Header.Get("Upgrade"), "websocket") {
+		return false
+	}
+	return strings.Contains(connectionHeader, "keep-alive")
+}
+
+type http10KeepAliveResponseWriter struct {
+	http.ResponseWriter
+	method      string
+	body        bytes.Buffer
+	statusCode  int
+	wroteHeader bool
+	overflowed  bool
+}
+
+func newHTTP10KeepAliveResponseWriter(w http.ResponseWriter, method string) *http10KeepAliveResponseWriter {
+	return &http10KeepAliveResponseWriter{ResponseWriter: w, method: method, statusCode: http.StatusOK}
+}
+
+func (writer *http10KeepAliveResponseWriter) Unwrap() http.ResponseWriter {
+	return writer.ResponseWriter
+}
+
+func (writer *http10KeepAliveResponseWriter) WriteHeader(statusCode int) {
+	if writer.wroteHeader {
+		return
+	}
+	writer.statusCode = statusCode
+	writer.wroteHeader = true
+}
+
+func (writer *http10KeepAliveResponseWriter) Write(payload []byte) (int, error) {
+	if !writer.wroteHeader {
+		writer.WriteHeader(http.StatusOK)
+	}
+	if writer.overflowed {
+		return writer.ResponseWriter.Write(payload)
+	}
+	if writer.body.Len()+len(payload) > sitebrushHTTP10KeepAliveBufferLimit {
+		writer.commitWithoutKeepAlive()
+		return writer.ResponseWriter.Write(payload)
+	}
+	return writer.body.Write(payload)
+}
+
+func (writer *http10KeepAliveResponseWriter) Flush() {
+	if !writer.overflowed {
+		writer.commitWithoutKeepAlive()
+	}
+	if flusher, ok := writer.ResponseWriter.(http.Flusher); ok {
+		flusher.Flush()
+	}
+}
+
+func (writer *http10KeepAliveResponseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	hijacker, ok := writer.ResponseWriter.(http.Hijacker)
+	if !ok {
+		return nil, nil, errors.New("hijack is not supported")
+	}
+	return hijacker.Hijack()
+}
+
+func (writer *http10KeepAliveResponseWriter) finish() {
+	if writer.overflowed {
+		return
+	}
+	if httpStatusAllowsBody(writer.statusCode) && writer.Header().Get("Content-Length") == "" {
+		writer.Header().Set("Content-Length", strconv.Itoa(writer.body.Len()))
+	}
+	writer.Header().Set("Connection", "keep-alive")
+	writer.Header().Set("Keep-Alive", "timeout=65")
+	writer.ResponseWriter.WriteHeader(writer.statusCode)
+	if writer.method != http.MethodHead && writer.body.Len() > 0 {
+		_, _ = writer.ResponseWriter.Write(writer.body.Bytes())
+	}
+}
+
+func (writer *http10KeepAliveResponseWriter) commitWithoutKeepAlive() {
+	writer.overflowed = true
+	writer.Header().Del("Connection")
+	writer.Header().Del("Keep-Alive")
+	writer.ResponseWriter.WriteHeader(writer.statusCode)
+	if writer.method != http.MethodHead && writer.body.Len() > 0 {
+		_, _ = writer.ResponseWriter.Write(writer.body.Bytes())
+	}
+	writer.body.Reset()
+}
+
+func httpStatusAllowsBody(statusCode int) bool {
+	if statusCode >= 100 && statusCode < 200 {
+		return false
+	}
+	return statusCode != http.StatusNoContent && statusCode != http.StatusNotModified
 }
 
 func runServiceInstaller(port, dbType, storagePath, dbPath string) error {
@@ -3712,12 +3864,10 @@ func listenTLSForAutoCert() (net.Listener, error) {
 }
 
 func (a *App) serveTLSWithAutoCert(ctx context.Context, tlsListener net.Listener, tlsConfig *tls.Config, handler http.Handler) {
-	tlsServer := &http.Server{
-		Handler:   handler,
-		TLSConfig: tlsConfig,
-		ErrorLog:  log.New(problemLogWriter{application: a}, "", 0),
-		ConnState: sitebrushConnStateLogger("HTTPS", a.debug),
-	}
+	tlsServer := newSitebrushHTTPServer(handler)
+	tlsServer.TLSConfig = tlsConfig
+	tlsServer.ErrorLog = log.New(problemLogWriter{application: a}, "", 0)
+	tlsServer.ConnState = sitebrushConnStateLogger("HTTPS", a.debug)
 	tlsAddress := tlsListener.Addr().String()
 	a.logProblemEvent("HTTPS server enabled on %s with TLS", tlsAddress)
 	serverStopped := make(chan struct{})
@@ -6048,9 +6198,9 @@ func (a *App) grabProgressEvents(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "streaming is not supported", http.StatusInternalServerError)
 		return
 	}
+	allowLongStreamingResponse(w)
 	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
 
 	events := a.grabTracker.subscribe(progressToken)
 	defer a.grabTracker.unsubscribe(progressToken, events)
@@ -6087,6 +6237,12 @@ func writeGrabProgressEvent(w io.Writer, flusher http.Flusher, event grabProgres
 	return true
 }
 
+func allowLongStreamingResponse(w http.ResponseWriter) {
+	// Streaming progress endpoints can outlive the global WriteTimeout, while
+	// ordinary page and static responses still keep the server-wide deadline.
+	_ = http.NewResponseController(w).SetWriteDeadline(time.Time{})
+}
+
 func (a *App) publishProgressEvents(w http.ResponseWriter, r *http.Request) {
 	if !a.isAdminRequest(r) {
 		http.Error(w, "forbidden", http.StatusForbidden)
@@ -6102,9 +6258,9 @@ func (a *App) publishProgressEvents(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "streaming is not supported", http.StatusInternalServerError)
 		return
 	}
+	allowLongStreamingResponse(w)
 	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
 
 	tracker := a.activePublishTracker()
 	events := tracker.subscribe(progressToken)
