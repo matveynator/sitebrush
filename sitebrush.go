@@ -1504,6 +1504,7 @@ type EmailDNSSetupView struct {
 	DNSIntro    string
 	Records     []EmailDNSRecordView
 	CopyLabel   string
+	CheckLabel  string
 	AfterText   string
 	PlainText   string
 }
@@ -5069,16 +5070,14 @@ func (a *App) setupAdmin(w http.ResponseWriter, r *http.Request) {
 		a.renderSetupPage(w, r, domain, email, translationOrDefault(translations, "email_confirmation_status_required", "Email and password are required."))
 		return
 	}
-	returnPath := r.FormValue("return_path")
-	if returnPath == "" {
-		returnPath = requestedReturnPath(r)
-	}
-	if err := a.createAndSendEmailConfirmation(r, "register", domain, "", email, password, returnPath); err != nil {
+	registerContext := contextWithSiteDatabaseCreation(contextWithDomain(r.Context(), domain))
+	if _, err := a.db.ExecContext(registerContext, `INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, domain, email, password); err != nil {
 		w.WriteHeader(http.StatusBadRequest)
 		a.renderSetupPage(w, r, domain, email, err.Error())
 		return
 	}
-	a.renderSetupPage(w, r, domain, email, translationOrDefault(translations, "email_confirmation_status_sent", "A confirmation link has been sent to the email address."))
+	a.createSessionForDomain(w, registerContext, domain, email)
+	http.Redirect(w, r, requestedReturnTarget(r), http.StatusFound)
 }
 
 func (a *App) registerPage(w http.ResponseWriter, r *http.Request) {
@@ -5088,6 +5087,10 @@ func (a *App) registerPage(w http.ResponseWriter, r *http.Request) {
 	}
 	domain := a.siteDomain(r.Context(), r)
 	if a.hasAdmin(r.Context(), domain) {
+		if a.isAdminRequest(r) {
+			http.Redirect(w, r, requestedReturnTarget(r), http.StatusFound)
+			return
+		}
 		http.Redirect(w, r, loginURLForRequest(r), http.StatusFound)
 		return
 	}
@@ -5173,7 +5176,7 @@ func (a *App) login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.clearFailedLoginAttempts(r.Context(), domain, clientIP)
-	a.createSession(w, r, email)
+	a.createSessionForDomain(w, r.Context(), domain, email)
 	http.Redirect(w, r, returnPath, http.StatusFound)
 }
 
@@ -5437,6 +5440,7 @@ func requestedReturnTarget(r *http.Request) string {
 	queryValues := r.URL.Query()
 	queryValues.Del("login")
 	queryValues.Del("logout")
+	queryValues.Del("register")
 	queryValues.Del("return_path")
 	encodedQuery := queryValues.Encode()
 	if encodedQuery == "" {
@@ -7102,7 +7106,7 @@ func (a *App) confirmEmailToken(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		_, _ = a.db.ExecContext(r.Context(), `DELETE FROM email_confirmations WHERE token=?`, token)
-		a.createSession(w, r, confirmation.Email)
+		a.createSessionForDomain(w, r.Context(), confirmation.Domain, confirmation.Email)
 		http.Redirect(w, r, safeConfirmationReturnPath(confirmation.ReturnPath), http.StatusFound)
 	case "profile":
 		if err := a.applyProfileEmailConfirmation(r.Context(), confirmation); err != nil {
@@ -7110,7 +7114,7 @@ func (a *App) confirmEmailToken(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		_, _ = a.db.ExecContext(r.Context(), `DELETE FROM email_confirmations WHERE token=?`, token)
-		a.createSession(w, r, confirmation.Email)
+		a.createSessionForDomain(w, r.Context(), confirmation.Domain, confirmation.Email)
 		http.Redirect(w, r, safeConfirmationReturnPath(confirmation.ReturnPath), http.StatusFound)
 	default:
 		a.renderEmailConfirmationStatus(w, r, http.StatusBadRequest, translationOrDefault(confirmationTranslations, "email_confirmation_status_invalid", "Confirmation link is invalid."))
@@ -7255,6 +7259,9 @@ func (a *App) emailFromAddress(domain string) string {
 
 func (a *App) emailDNSSetupView(ctx context.Context, siteDomain, fromAddress, languageCode string) (EmailDNSSetupView, bool) {
 	fromDomain := emailAddressDomain(fromAddress)
+	if emailDomainCannotUseDNS(fromDomain) {
+		return EmailDNSSetupView{}, false
+	}
 	setupDomain := emailSetupDomain(siteDomain, fromDomain)
 	setupFromAddress := "sitebrush@" + setupDomain
 	if fromDomain != "" && fromDomain != "localhost" && net.ParseIP(fromDomain) == nil {
@@ -7272,9 +7279,6 @@ func (a *App) emailDNSSetupView(ctx context.Context, siteDomain, fromAddress, la
 		return emailDNSSetupViewForLanguage(languageCode, setupDomain, setupFromAddress, "SERVER_IP"), true
 	}
 	selectedIPText := selectedIP.String()
-	if fromDomain == "" || fromDomain == "localhost" || net.ParseIP(fromDomain) != nil {
-		return emailDNSSetupViewForLanguage(languageCode, setupDomain, setupFromAddress, selectedIPText), true
-	}
 	ipRecords, ipErr := lookupIPRecords(fromDomain)
 	domainPointsToServer := ipErr == nil && ipRecordsAllowAnyServerIP(ipRecords, serverIPs)
 	txtRecords, txtErr := lookupTXTRecords(fromDomain)
@@ -7283,6 +7287,14 @@ func (a *App) emailDNSSetupView(ctx context.Context, siteDomain, fromAddress, la
 		return EmailDNSSetupView{}, false
 	}
 	return emailDNSSetupViewForLanguage(languageCode, setupDomain, setupFromAddress, selectedIPText), true
+}
+
+func emailDomainCannotUseDNS(domain string) bool {
+	cleanDomain := strings.ToLower(strings.Trim(strings.TrimSpace(domain), "."))
+	if cleanDomain == "" || cleanDomain == "localhost" {
+		return true
+	}
+	return net.ParseIP(cleanDomain) != nil
 }
 
 func emailAddressDomain(rawAddress string) string {
@@ -7518,16 +7530,18 @@ func emailDNSSetupViewForLanguage(languageCode, domain, fromAddress, serverIP st
 			{Label: "A/AAAA", Value: addressRecord},
 			{Label: "SPF TXT", Value: spfRecord},
 		},
-		CopyLabel: "Copy",
+		CopyLabel:  "Copy",
+		CheckLabel: "Check DNS",
 	}
 	switch strings.ToLower(strings.TrimSpace(languageCode)) {
 	case "ru":
-		view.Title = "Сначала настройте DNS для отправки писем"
-		view.Intro = fmt.Sprintf("Восстановление пароля через email будет работать только после того, как домен %s будет настроен для этого сайта.", domain)
-		view.Explanation = fmt.Sprintf("SiteBrush будет отправлять письма с адреса %s. Почтовые серверы принимают такие письма только когда DNS домена подтверждает, что этот сервер имеет право отправлять почту от имени домена. Поэтому нужны A/AAAA запись для домена и SPF TXT запись.", fromAddress)
-		view.DNSIntro = "Откройте DNS-настройки домена у регистратора или хостинг-провайдера и добавьте или обновите эти записи:"
+		view.Title = "Почта восстановления пока не готова"
+		view.Intro = fmt.Sprintf("Проблема: DNS домена %s еще не разрешает SiteBrush отправлять письма с адреса %s.", domain, fromAddress)
+		view.Explanation = "Добавьте записи ниже у регистратора домена."
+		view.DNSIntro = "Скопируйте записи в DNS:"
 		view.CopyLabel = "Копировать"
-		view.AfterText = "После обновления DNS вернитесь на эту страницу. Когда записи начнут проверяться, появится форма ввода email для восстановления пароля."
+		view.CheckLabel = "Проверить"
+		view.AfterText = "После обновления DNS нажмите «Проверить»."
 	case "fr":
 		view.Title = "Configurez d'abord le DNS pour envoyer les e-mails"
 		view.Intro = fmt.Sprintf("La récupération du mot de passe par e-mail fonctionnera seulement après la configuration du domaine %s pour ce site.", domain)
@@ -7627,11 +7641,11 @@ func emailDNSSetupViewForLanguage(languageCode, domain, fromAddress, serverIP st
 		view.CopyLabel = "Copiar"
 		view.AfterText = "Depois que o DNS atualizar, volte a esta página. Quando os registros forem válidos, o formulário para inserir o e-mail de recuperação aparecerá."
 	default:
-		view.Title = "Configure DNS before sending email"
-		view.Intro = fmt.Sprintf("Password recovery by email will work only after the domain %s is configured for this site.", domain)
-		view.Explanation = fmt.Sprintf("SiteBrush will send email from %s. Receiving mail servers accept those messages only when the domain DNS confirms that this server may send mail for the domain. That is why the domain needs an A/AAAA record and an SPF TXT record.", fromAddress)
-		view.DNSIntro = "Open DNS settings at your domain registrar or hosting provider and add or update these records:"
-		view.AfterText = "After DNS updates, return to this page. When the records validate, the recovery email form will appear."
+		view.Title = "Recovery email is not ready"
+		view.Intro = fmt.Sprintf("Problem: DNS for %s does not allow SiteBrush to send mail from %s yet.", domain, fromAddress)
+		view.Explanation = "Add these records at your domain registrar."
+		view.DNSIntro = "Copy these records into DNS:"
+		view.AfterText = "After DNS updates, click Check DNS."
 	}
 	view.PlainText = strings.Join([]string{view.Title, view.Intro, view.Explanation, view.DNSIntro, addressRecord, spfRecord, view.AfterText}, " ")
 	return view
@@ -9611,8 +9625,16 @@ func absoluteURLForPath(r *http.Request, relativePath string) string {
 }
 
 func (a *App) createSession(w http.ResponseWriter, r *http.Request, email string) {
+	a.createSessionForDomain(w, r.Context(), a.siteDomain(r.Context(), r), email)
+}
+
+func (a *App) createSessionForDomain(w http.ResponseWriter, ctx context.Context, domain string, email string) {
+	sessionDomain := normalizeDomainName(domain)
+	if sessionDomain == "" {
+		sessionDomain = "localhost"
+	}
 	token := fmt.Sprintf("%x", sha256.Sum256([]byte(email+time.Now().String())))
-	_, _ = a.db.ExecContext(r.Context(), `INSERT OR REPLACE INTO sessions(token,user_email,created_at) VALUES(?,?,?)`, token, a.siteDomain(r.Context(), r)+"|"+email, time.Now().Format(time.RFC3339))
+	_, _ = a.db.ExecContext(ctx, `INSERT OR REPLACE INTO sessions(token,user_email,created_at) VALUES(?,?,?)`, token, sessionDomain+"|"+email, time.Now().Format(time.RFC3339))
 	http.SetCookie(w, &http.Cookie{Name: "sitebrush_session", Value: token, Path: "/", HttpOnly: true})
 }
 

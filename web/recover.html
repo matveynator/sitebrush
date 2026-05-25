@@ -19,8 +19,8 @@
   {{with .DNSSetup}}<section class="card card-body mb-3" style="max-width:760px;">
     <h2 class="h4 mb-3">{{.Title}}</h2>
     <p>{{.Intro}}</p>
-    <p>{{.Explanation}}</p>
-    <p>{{.DNSIntro}}</p>
+    <p class="text-muted">{{.Explanation}}</p>
+    <p><strong>{{.DNSIntro}}</strong></p>
     {{range $recordIndex, $record := .Records}}
     <div class="mb-3">
       <label class="form-label" for="SiteBrushDNSRecord{{$recordIndex}}">{{$record.Label}}</label>
@@ -30,7 +30,14 @@
       </div>
     </div>
     {{end}}
-    <p class="mb-0">{{.AfterText}}</p>
+    <div class="d-flex align-items-center gap-2">
+      <form method="get" action="?recover" style="margin:0;">
+        <input type="hidden" name="recover" value="">
+        <input type="hidden" name="return_path" value="{{$.ReturnPath}}">
+        <button class="btn btn-primary" type="submit">{{.CheckLabel}}</button>
+      </form>
+      <p class="mb-0 text-muted">{{.AfterText}}</p>
+    </div>
   </section>{{end}}
   {{if .ShowForm}}<form class="card card-body" method="post" action="?recover" style="max-width:560px;">
     <input type="hidden" name="return_path" value="{{.ReturnPath}}">
