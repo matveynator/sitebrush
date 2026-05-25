@@ -4787,9 +4787,9 @@ func TestPerSiteDBRouterRoutesActiveAliasRequestsToPrimarySiteDatabase(t *testin
 	storagePath := t.TempDir()
 	dbPath := filepath.Join(storagePath, defaultDBPath)
 	siteDatabaseDir := siteDatabaseRootPath(dbPath)
-	router := newPerSiteDBRouter(siteDatabaseDir, "localhost", func(rawDB *sql.DB) error {
+	router := newPerSiteDBRouter(siteDatabaseDir, "localhost", func(migrationCtx context.Context, rawDB *sql.DB, domain string) error {
 		application := &App{db: rawDB, storagePath: storagePath, grabTracker: newGrabProgressTracker()}
-		return application.migrate(context.Background())
+		return application.migrate(contextWithDomain(migrationCtx, domain))
 	}, false)
 	t.Cleanup(func() {
 		if err := router.Close(); err != nil {
@@ -4835,9 +4835,9 @@ func TestPerSiteDBRouterSerializesConcurrentWritesToOneSiteDatabase(t *testing.T
 	storagePath := t.TempDir()
 	dbPath := filepath.Join(storagePath, defaultDBPath)
 	siteDatabaseDir := siteDatabaseRootPath(dbPath)
-	router := newPerSiteDBRouter(siteDatabaseDir, "localhost", func(rawDB *sql.DB) error {
+	router := newPerSiteDBRouter(siteDatabaseDir, "localhost", func(migrationCtx context.Context, rawDB *sql.DB, domain string) error {
 		application := &App{db: rawDB, storagePath: storagePath, grabTracker: newGrabProgressTracker()}
-		return application.migrate(context.Background())
+		return application.migrate(contextWithDomain(migrationCtx, domain))
 	}, false)
 	t.Cleanup(func() {
 		if err := router.Close(); err != nil {
@@ -4901,9 +4901,9 @@ func TestPerSiteDBRouterMigratesUnopenedDatabaseDuringAliasScan(t *testing.T) {
 	}
 	_ = rawPrimaryDB.Close()
 
-	router := newPerSiteDBRouter(siteDatabaseDir, "localhost", func(rawDB *sql.DB) error {
+	router := newPerSiteDBRouter(siteDatabaseDir, "localhost", func(migrationCtx context.Context, rawDB *sql.DB, domain string) error {
 		application := &App{db: rawDB, storagePath: storagePath, grabTracker: newGrabProgressTracker()}
-		return application.migrate(context.Background())
+		return application.migrate(contextWithDomain(migrationCtx, domain))
 	}, false)
 	t.Cleanup(func() {
 		if err := router.Close(); err != nil {

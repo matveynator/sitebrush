@@ -85,11 +85,14 @@ const sitebrushHTTPWriteTimeout = 30 * time.Second
 const sitebrushHTTPIdleTimeout = 65 * time.Second
 const sitebrushHTTPReadHeaderTimeout = 5 * time.Second
 const sitebrushHTTP10KeepAliveBufferLimit = 1024 * 1024
+const currentSiteDatabaseSchemaVersion = 1
+const siteDatabaseStartupMigrationTimeout = 30 * time.Second
 const pagePasswordSessionTTL = time.Hour
 
 // App keeps only explicit dependencies to stay readable and easy to swap.
 type App struct {
 	db                    sqlExecutor
+	siteDatabaseRouter    *perSiteDBRouter
 	storagePath           string
 	debug                 bool
 	nativeFileDialog      bool
@@ -164,7 +167,7 @@ type sqlExecutor interface {
 	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
 }
 
-type siteDBMigrator func(*sql.DB) error
+type siteDBMigrator func(context.Context, *sql.DB, string) error
 
 type siteDBRequest struct {
 	domain   string
@@ -174,6 +177,86 @@ type siteDBRequest struct {
 type siteDBResponse struct {
 	db  *siteFileDatabase
 	err error
+}
+
+type siteDBMigrationStatusRequest struct {
+	domain   string
+	response chan siteDBMigrationStatus
+}
+
+type siteDBMigrationStatus struct {
+	startupFinished bool
+	degraded        bool
+	err             error
+}
+
+type siteDBMigrationEvent struct {
+	kind            string
+	domain          string
+	path            string
+	step            string
+	err             error
+	total           int
+	applied         int
+	skipped         int
+	failed          int
+	previousVersion int
+	currentVersion  int
+}
+
+var errSiteMigrationsStarting = errors.New("startup database migrations are still running")
+
+type siteDatabaseDegradedError struct {
+	domain string
+	err    error
+}
+
+func (err siteDatabaseDegradedError) Error() string {
+	return "site database is degraded for " + err.domain + ": " + err.err.Error()
+}
+
+func (err siteDatabaseDegradedError) Unwrap() error {
+	return err.err
+}
+
+type siteMigrationStepError struct {
+	step string
+	err  error
+}
+
+func (err siteMigrationStepError) Error() string {
+	return err.step + ": " + err.err.Error()
+}
+
+func (err siteMigrationStepError) Unwrap() error {
+	return err.err
+}
+
+func siteMigrationFailureStep(err error) string {
+	var stepErr siteMigrationStepError
+	if errors.As(err, &stepErr) {
+		return stepErr.step
+	}
+	return "migration"
+}
+
+func sqliteUserVersion(ctx context.Context, database sqlExecutor) (int, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	var version int
+	if err := database.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&version); err != nil {
+		return 0, err
+	}
+	return version, nil
+}
+
+func setSQLiteUserVersion(ctx context.Context, database sqlExecutor, version int) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	_, err := database.ExecContext(ctx, `PRAGMA user_version = `+strconv.Itoa(version))
+	return err
 }
 
 type siteDomainContextKey struct{}
@@ -402,14 +485,14 @@ func (db *siteFileDatabase) QueryRowContext(ctx context.Context, query string, a
 	return response.row, response.err
 }
 
-func (db *siteFileDatabase) Migrate(ctx context.Context, migrate siteDBMigrator) error {
+func (db *siteFileDatabase) Migrate(ctx context.Context, domain string, migrate siteDBMigrator) error {
 	if migrate == nil {
 		return nil
 	}
 	operation := siteDBOperation{
 		kind: siteDBWorkloadGeneral,
 		run: func(runCtx context.Context, rawDatabase *sql.DB) siteDBOperationResponse {
-			return siteDBOperationResponse{err: migrate(rawDatabase)}
+			return siteDBOperationResponse{err: migrate(runCtx, rawDatabase, domain)}
 		},
 	}
 	return db.runOperation(ctx, operation).err
@@ -552,20 +635,24 @@ func (db *siteFileDatabase) logDatabaseOperationCanceled(operation siteDBOperati
 // perSiteDBRouter resolves a separate sqlite file per domain and keeps the map
 // ownership in a single goroutine so we do not coordinate it with mutexes.
 type perSiteDBRouter struct {
-	fallbackDomain string
-	debug          bool
-	requests       chan siteDBRequest
-	closeRequests  chan chan error
-	noopDatabase   *sql.DB
+	fallbackDomain          string
+	debug                   bool
+	requests                chan siteDBRequest
+	migrationStatusRequests chan siteDBMigrationStatusRequest
+	migrationEvents         chan siteDBMigrationEvent
+	closeRequests           chan chan error
+	noopDatabase            *sql.DB
 }
 
 func newPerSiteDBRouter(siteDatabaseRootDir string, fallbackDomain string, migrate siteDBMigrator, debug bool) *perSiteDBRouter {
 	router := &perSiteDBRouter{
-		fallbackDomain: fallbackDomain,
-		debug:          debug,
-		requests:       make(chan siteDBRequest),
-		closeRequests:  make(chan chan error),
-		noopDatabase:   mustOpenNoopSQLite(),
+		fallbackDomain:          fallbackDomain,
+		debug:                   debug,
+		requests:                make(chan siteDBRequest),
+		migrationStatusRequests: make(chan siteDBMigrationStatusRequest),
+		migrationEvents:         make(chan siteDBMigrationEvent, 256),
+		closeRequests:           make(chan chan error),
+		noopDatabase:            mustOpenNoopSQLite(),
 	}
 	go router.run(siteDatabaseRootDir, migrate)
 	return router
@@ -574,18 +661,59 @@ func newPerSiteDBRouter(siteDatabaseRootDir string, fallbackDomain string, migra
 func (r *perSiteDBRouter) run(siteDatabaseRootDir string, migrate siteDBMigrator) {
 	databasesByDomain := make(map[string]*siteFileDatabase)
 	primaryDomainsByAlias := make(map[string]string)
+	startupMigrationFinished := false
+	migratedDomains := make(map[string]bool)
+	degradedDomains := make(map[string]error)
+	go r.scanStartupMigrations(context.Background(), siteDatabaseRootDir, migrate)
 	for {
 		select {
+		case event := <-r.migrationEvents:
+			switch event.kind {
+			case "applied":
+				migratedDomains[event.domain] = true
+				delete(degradedDomains, event.domain)
+				log.Printf("%sDB MIGRATION%s applied path=%s domain=%s from=%d to=%d", terminalGreen(), terminalReset(), event.path, event.domain, event.previousVersion, event.currentVersion)
+			case "skipped":
+				migratedDomains[event.domain] = true
+				if r.debug {
+					log.Printf("%sDB MIGRATION%s skipped path=%s domain=%s version=%d", terminalCyan(), terminalReset(), event.path, event.domain, event.currentVersion)
+				}
+			case "failed":
+				degradedDomains[event.domain] = event.err
+				log.Printf("%sDB MIGRATION%s failed path=%s domain=%s step=%s err=%v", terminalRed(), terminalReset(), event.path, event.domain, diagnosticlog.SafeLogValue(event.step), event.err)
+			case "summary":
+				startupMigrationFinished = true
+				log.Printf("%sDB MIGRATION%s startup summary total=%d applied=%d skipped=%d failed=%d", terminalCyan(), terminalReset(), event.total, event.applied, event.skipped, event.failed)
+			}
+		case statusRequest := <-r.migrationStatusRequests:
+			domain := normalizeDomainName(statusRequest.domain)
+			if domain == "" {
+				domain = r.fallbackDomain
+			}
+			status := siteDBMigrationStatus{startupFinished: startupMigrationFinished}
+			if err := degradedDomains[domain]; err != nil {
+				status.degraded = true
+				status.err = err
+			}
+			statusRequest.response <- status
 		case request := <-r.requests:
 			startedAt := time.Now()
 			domain := normalizeDomainName(request.domain)
 			if domain == "" {
 				domain = r.fallbackDomain
 			}
+			if !startupMigrationFinished {
+				request.response <- siteDBResponse{err: errSiteMigrationsStarting}
+				continue
+			}
+			if err := degradedDomains[domain]; err != nil {
+				request.response <- siteDBResponse{err: siteDatabaseDegradedError{domain: domain, err: err}}
+				continue
+			}
 			databaseDomain := domain
 			aliasDomain := ""
 			if primaryDomain := primaryDomainsByAlias[domain]; primaryDomain != "" {
-				database, err := r.databaseForDomain(siteDatabaseRootDir, databasesByDomain, primaryDomain, migrate)
+				database, err := r.databaseForDomain(siteDatabaseRootDir, databasesByDomain, migratedDomains, degradedDomains, primaryDomain, migrate)
 				if err != nil {
 					request.response <- siteDBResponse{err: err}
 					continue
@@ -597,12 +725,16 @@ func (r *perSiteDBRouter) run(siteDatabaseRootDir string, migrate siteDBMigrator
 				}
 				delete(primaryDomainsByAlias, domain)
 			}
-			if primaryDomain := findActivePrimaryDomainForAlias(siteDatabaseRootDir, databasesByDomain, domain, migrate); primaryDomain != "" {
+			if primaryDomain := findActivePrimaryDomainForAlias(siteDatabaseRootDir, databasesByDomain, domain); primaryDomain != "" {
 				primaryDomainsByAlias[domain] = primaryDomain
 				databaseDomain = primaryDomain
 				aliasDomain = domain
 			}
-			database, err := r.databaseForDomain(siteDatabaseRootDir, databasesByDomain, databaseDomain, migrate)
+			if err := degradedDomains[databaseDomain]; err != nil {
+				request.response <- siteDBResponse{err: siteDatabaseDegradedError{domain: databaseDomain, err: err}}
+				continue
+			}
+			database, err := r.databaseForDomain(siteDatabaseRootDir, databasesByDomain, migratedDomains, degradedDomains, databaseDomain, migrate)
 			if err != nil {
 				r.logRouterResolved(domain, databaseDomain, aliasDomain, time.Since(startedAt), err)
 				request.response <- siteDBResponse{err: err}
@@ -624,10 +756,100 @@ func (r *perSiteDBRouter) run(siteDatabaseRootDir string, migrate siteDBMigrator
 	}
 }
 
-func (r *perSiteDBRouter) databaseForDomain(siteDatabaseRootDir string, databasesByDomain map[string]*siteFileDatabase, domain string, migrate siteDBMigrator) (*siteFileDatabase, error) {
+func (r *perSiteDBRouter) scanStartupMigrations(ctx context.Context, siteDatabaseRootDir string, migrate siteDBMigrator) {
+	databaseEntries, readErr := os.ReadDir(siteDatabaseRootDir)
+	if readErr != nil {
+		if !errors.Is(readErr, os.ErrNotExist) {
+			r.migrationEvents <- siteDBMigrationEvent{kind: "failed", domain: r.fallbackDomain, path: siteDatabaseRootDir, step: "read database directory", err: readErr}
+			r.migrationEvents <- siteDBMigrationEvent{kind: "summary", total: 0, failed: 1}
+			return
+		}
+		r.migrationEvents <- siteDBMigrationEvent{kind: "summary"}
+		return
+	}
+
+	databaseFiles := []string{}
+	for _, databaseEntry := range databaseEntries {
+		if databaseEntry.IsDir() || !strings.HasSuffix(strings.ToLower(databaseEntry.Name()), ".db") {
+			continue
+		}
+		databaseFiles = append(databaseFiles, databaseEntry.Name())
+	}
+	if len(databaseFiles) == 0 {
+		r.migrationEvents <- siteDBMigrationEvent{kind: "summary"}
+		return
+	}
+
+	results := make(chan siteDBMigrationEvent, len(databaseFiles))
+	for _, databaseFile := range databaseFiles {
+		databasePath := filepath.Join(siteDatabaseRootDir, databaseFile)
+		databaseDomain := normalizeDomainName(strings.TrimSuffix(databaseFile, filepath.Ext(databaseFile)))
+		if databaseDomain == "" {
+			databaseDomain = r.fallbackDomain
+		}
+		go r.migrateStartupDatabase(ctx, databasePath, databaseDomain, migrate, results)
+	}
+
+	summary := siteDBMigrationEvent{kind: "summary", total: len(databaseFiles)}
+	for range databaseFiles {
+		result := <-results
+		switch result.kind {
+		case "applied":
+			summary.applied++
+		case "skipped":
+			summary.skipped++
+		case "failed":
+			summary.failed++
+		}
+		r.migrationEvents <- result
+	}
+	r.migrationEvents <- summary
+}
+
+func (r *perSiteDBRouter) migrateStartupDatabase(ctx context.Context, databasePath, databaseDomain string, migrate siteDBMigrator, results chan siteDBMigrationEvent) {
+	migrationCtx, cancel := context.WithTimeout(ctx, siteDatabaseStartupMigrationTimeout)
+	defer cancel()
+	database, err := sql.Open("sqlite", "file:"+databasePath)
+	if err != nil {
+		results <- siteDBMigrationEvent{kind: "failed", domain: databaseDomain, path: databasePath, step: "open database", err: err}
+		return
+	}
+	defer database.Close()
+	database.SetMaxOpenConns(1)
+	database.SetMaxIdleConns(1)
+
+	version, versionErr := sqliteUserVersion(migrationCtx, database)
+	if versionErr != nil {
+		results <- siteDBMigrationEvent{kind: "failed", domain: databaseDomain, path: databasePath, step: "read schema version", err: versionErr}
+		return
+	}
+	if version >= currentSiteDatabaseSchemaVersion {
+		results <- siteDBMigrationEvent{kind: "skipped", domain: databaseDomain, path: databasePath, previousVersion: version, currentVersion: version}
+		return
+	}
+	if migrate == nil {
+		results <- siteDBMigrationEvent{kind: "failed", domain: databaseDomain, path: databasePath, step: "migration handler", err: errors.New("migration handler is not configured")}
+		return
+	}
+	if migrateErr := migrate(migrationCtx, database, databaseDomain); migrateErr != nil {
+		results <- siteDBMigrationEvent{kind: "failed", domain: databaseDomain, path: databasePath, step: siteMigrationFailureStep(migrateErr), err: migrateErr}
+		return
+	}
+	nextVersion, nextVersionErr := sqliteUserVersion(migrationCtx, database)
+	if nextVersionErr != nil {
+		results <- siteDBMigrationEvent{kind: "failed", domain: databaseDomain, path: databasePath, step: "read schema version after migration", err: nextVersionErr}
+		return
+	}
+	results <- siteDBMigrationEvent{kind: "applied", domain: databaseDomain, path: databasePath, previousVersion: version, currentVersion: nextVersion}
+}
+
+func (r *perSiteDBRouter) databaseForDomain(siteDatabaseRootDir string, databasesByDomain map[string]*siteFileDatabase, migratedDomains map[string]bool, degradedDomains map[string]error, domain string, migrate siteDBMigrator) (*siteFileDatabase, error) {
 	databaseDomain := normalizeDomainName(domain)
 	if databaseDomain == "" {
 		databaseDomain = r.fallbackDomain
+	}
+	if err := degradedDomains[databaseDomain]; err != nil {
+		return nil, siteDatabaseDegradedError{domain: databaseDomain, err: err}
 	}
 	database := databasesByDomain[databaseDomain]
 	if database != nil {
@@ -641,17 +863,35 @@ func (r *perSiteDBRouter) databaseForDomain(siteDatabaseRootDir string, database
 	if err != nil {
 		return nil, err
 	}
-	siteDatabase := newSiteFileDatabase(databasePath, nextDatabase, r.debug)
-	if migrateErr := siteDatabase.Migrate(context.Background(), migrate); migrateErr != nil {
-		_ = siteDatabase.Close()
-		return nil, migrateErr
+	currentVersion, versionErr := sqliteUserVersion(context.Background(), nextDatabase)
+	if versionErr != nil {
+		_ = nextDatabase.Close()
+		degradedDomains[databaseDomain] = versionErr
+		log.Printf("%sDB MIGRATION%s failed path=%s domain=%s step=%s err=%v", terminalRed(), terminalReset(), databasePath, databaseDomain, "read schema version", versionErr)
+		return nil, siteDatabaseDegradedError{domain: databaseDomain, err: versionErr}
 	}
-	log.Printf("%sDB MIGRATION%s checked path=%s domain=%s", terminalCyan(), terminalReset(), databasePath, databaseDomain)
+	siteDatabase := newSiteFileDatabase(databasePath, nextDatabase, r.debug)
+	if !migratedDomains[databaseDomain] {
+		if currentVersion < currentSiteDatabaseSchemaVersion {
+			if migrateErr := siteDatabase.Migrate(context.Background(), databaseDomain, migrate); migrateErr != nil {
+				degradedDomains[databaseDomain] = migrateErr
+				log.Printf("%sDB MIGRATION%s failed path=%s domain=%s step=%s err=%v", terminalRed(), terminalReset(), databasePath, databaseDomain, siteMigrationFailureStep(migrateErr), migrateErr)
+				_ = siteDatabase.Close()
+				return nil, siteDatabaseDegradedError{domain: databaseDomain, err: migrateErr}
+			}
+			log.Printf("%sDB MIGRATION%s applied path=%s domain=%s reason=runtime from=%d to=%d", terminalGreen(), terminalReset(), databasePath, databaseDomain, currentVersion, currentSiteDatabaseSchemaVersion)
+		} else if r.debug {
+			log.Printf("%sDB MIGRATION%s skipped path=%s domain=%s reason=runtime version=%d", terminalCyan(), terminalReset(), databasePath, databaseDomain, currentVersion)
+		}
+		migratedDomains[databaseDomain] = true
+	} else if r.debug {
+		log.Printf("%sDB MIGRATION%s skipped path=%s domain=%s reason=startup-ready", terminalCyan(), terminalReset(), databasePath, databaseDomain)
+	}
 	databasesByDomain[databaseDomain] = siteDatabase
 	return siteDatabase, nil
 }
 
-func findActivePrimaryDomainForAlias(siteDatabaseRootDir string, databasesByDomain map[string]*siteFileDatabase, aliasDomain string, migrate siteDBMigrator) string {
+func findActivePrimaryDomainForAlias(siteDatabaseRootDir string, databasesByDomain map[string]*siteFileDatabase, aliasDomain string) string {
 	aliasDomain = normalizeDomainName(aliasDomain)
 	if aliasDomain == "" {
 		return ""
@@ -679,14 +919,6 @@ func findActivePrimaryDomainForAlias(siteDatabaseRootDir string, databasesByDoma
 		}
 		database.SetMaxOpenConns(1)
 		database.SetMaxIdleConns(1)
-		if migrate != nil {
-			if migrateErr := migrate(database); migrateErr != nil {
-				log.Printf("%sDB MIGRATION%s skipped alias scan path=%s err=%v", terminalRed(), terminalReset(), databasePath, migrateErr)
-				_ = database.Close()
-				continue
-			}
-			log.Printf("%sDB MIGRATION%s checked path=%s reason=alias-scan", terminalCyan(), terminalReset(), databasePath)
-		}
 		primaryDomain := activePrimaryDomainForAliasRaw(database, aliasDomain)
 		_ = database.Close()
 		if primaryDomain != "" {
@@ -741,6 +973,25 @@ func (r *perSiteDBRouter) Close() error {
 	closeResponse := make(chan error, 1)
 	r.closeRequests <- closeResponse
 	return <-closeResponse
+}
+
+func (r *perSiteDBRouter) MigrationStatus(ctx context.Context, domain string) siteDBMigrationStatus {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	response := make(chan siteDBMigrationStatus, 1)
+	request := siteDBMigrationStatusRequest{domain: domain, response: response}
+	select {
+	case r.migrationStatusRequests <- request:
+	case <-ctx.Done():
+		return siteDBMigrationStatus{err: ctx.Err()}
+	}
+	select {
+	case status := <-response:
+		return status
+	case <-ctx.Done():
+		return siteDBMigrationStatus{err: ctx.Err()}
+	}
 }
 
 func (r *perSiteDBRouter) ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error) {
@@ -3509,9 +3760,9 @@ func runSitebrushServer(ctx context.Context, config serverRunConfig) error {
 	application.emailDelivery = startEmailDeliveryWorker(ctx, application.defaultEmailSender())
 	application.geoIP = geoip.NewResolver(filepath.Join(application.storageRootDir(), "geoip"))
 	siteDatabaseRootDir := siteDatabaseRootPath(effectiveDBPath)
-	siteDatabaseRouter = newPerSiteDBRouter(siteDatabaseRootDir, "localhost", func(rawDatabase *sql.DB) error {
-		bootstrapApplication := &App{db: rawDatabase, storagePath: effectiveStoragePath}
-		return bootstrapApplication.migrate(contextWithDomain(ctx, "localhost"))
+	siteDatabaseRouter = newPerSiteDBRouter(siteDatabaseRootDir, "localhost", func(migrationCtx context.Context, rawDatabase *sql.DB, domain string) error {
+		bootstrapApplication := &App{db: rawDatabase, storagePath: effectiveStoragePath, debug: config.Debug}
+		return bootstrapApplication.migrate(contextWithDomain(migrationCtx, domain))
 	}, config.Debug)
 	defer func() {
 		logShutdownStep("closing site database workers")
@@ -3522,6 +3773,7 @@ func runSitebrushServer(ctx context.Context, config serverRunConfig) error {
 		logShutdownDone("site database workers closed")
 	}()
 	application.db = siteDatabaseRouter
+	application.siteDatabaseRouter = siteDatabaseRouter
 	application.ensureAutoCertGuard()
 	application.startDomainLogWorker(ctx)
 	application.startAnalyticsWorkers(ctx)
@@ -4036,6 +4288,16 @@ func (a *App) finishAutoCertIssuance(domain string) {
 
 func (a *App) migrate(ctx context.Context) error {
 	const legacyDomain = "localhost"
+	schemaVersion, versionErr := sqliteUserVersion(ctx, a.db)
+	if versionErr != nil {
+		return siteMigrationStepError{step: "read schema version", err: versionErr}
+	}
+	if schemaVersion >= currentSiteDatabaseSchemaVersion {
+		if a.debug {
+			log.Printf("%sDB MIGRATION%s skipped domain=%s version=%d", terminalCyan(), terminalReset(), domainFromContext(ctx), schemaVersion)
+		}
+		return nil
+	}
 	queries := []string{
 		`CREATE TABLE IF NOT EXISTS users(id INTEGER PRIMARY KEY AUTOINCREMENT,domain TEXT,email TEXT,password TEXT,is_admin INTEGER,UNIQUE(domain,email));`,
 		`CREATE TABLE IF NOT EXISTS sessions(token TEXT PRIMARY KEY,user_email TEXT,created_at TEXT);`,
@@ -4060,9 +4322,9 @@ func (a *App) migrate(ctx context.Context) error {
 		`CREATE INDEX IF NOT EXISTS idx_analytics_events_visitor ON analytics_events(domain,visitor_id,occurred_at);`,
 		`CREATE TABLE IF NOT EXISTS analytics_reports(domain TEXT PRIMARY KEY,generated_at TEXT,period_start TEXT,period_end TEXT,event_count INTEGER,report_json TEXT);`,
 	}
-	for _, query := range queries {
+	for queryIndex, query := range queries {
 		if _, err := a.db.ExecContext(ctx, query); err != nil {
-			return err
+			return siteMigrationStepError{step: "base schema statement " + strconv.Itoa(queryIndex+1), err: err}
 		}
 	}
 	_, _ = a.db.ExecContext(ctx, `ALTER TABLE users ADD COLUMN domain TEXT`)
@@ -4114,6 +4376,9 @@ func (a *App) migrate(ctx context.Context) error {
 	`)
 	a.rebuildAllDomainStorageUsage(ctx)
 	a.rebuildPagePasswordPrefixFiles(ctx)
+	if err := setSQLiteUserVersion(ctx, a.db, currentSiteDatabaseSchemaVersion); err != nil {
+		return siteMigrationStepError{step: "write schema version", err: err}
+	}
 	return nil
 }
 
@@ -4360,6 +4625,30 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, redirectTarget, http.StatusMovedPermanently)
 		return
 	}
+	if isGuestStaticRequest(r) {
+		if rule, found := a.pagePasswordRuleFromPrefixFile(requestDomain, pagePath); found {
+			failureDomainPrefix := pagePasswordFailureDomainPrefix(rule.Domain)
+			clientIP := clientIPAddress(r)
+			if blocked, hardLocked, blockedUntil := a.cachedAuthIPIsBlockedForDomainPrefix(failureDomainPrefix, clientIP); blocked {
+				a.renderBlockedPagePasswordPrompt(w, r, requestDomain, pagePath, hardLocked, blockedUntil)
+				return
+			}
+			if a.pagePasswordSessionValid(r, rule) {
+				if a.servePublishedStaticFileFromDisk(w, r, requestDomain, pagePath, true) {
+					return
+				}
+			} else {
+				a.renderPagePasswordPrompt(w, r, requestDomain, pagePath, "", http.StatusUnauthorized, time.Time{})
+				return
+			}
+		}
+		if a.servePublishedStaticFileFromDisk(w, r, requestDomain, pagePath, true) {
+			return
+		}
+	}
+	if !a.dynamicDatabaseReady(w, r, requestDomain) {
+		return
+	}
 	if hasQueryFlag(r, "logout") {
 		a.logout(w, r)
 		return
@@ -4571,6 +4860,26 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.renderMissingPage(w, r, pagePath, isAdmin)
+}
+
+func (a *App) dynamicDatabaseReady(w http.ResponseWriter, r *http.Request, domain string) bool {
+	if a.siteDatabaseRouter == nil {
+		return true
+	}
+	status := a.siteDatabaseRouter.MigrationStatus(r.Context(), domain)
+	if status.err != nil && !status.degraded {
+		http.Error(w, "database status unavailable", http.StatusServiceUnavailable)
+		return false
+	}
+	if !status.startupFinished {
+		http.Error(w, "database migrations are still running; static files are available", http.StatusServiceUnavailable)
+		return false
+	}
+	if status.degraded {
+		http.Error(w, "site database is temporarily degraded; static files are available", http.StatusServiceUnavailable)
+		return false
+	}
+	return true
 }
 
 func (a *App) setupAdmin(w http.ResponseWriter, r *http.Request) {
