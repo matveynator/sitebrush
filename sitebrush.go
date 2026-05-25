@@ -170,8 +170,9 @@ type sqlExecutor interface {
 type siteDBMigrator func(context.Context, *sql.DB, string) error
 
 type siteDBRequest struct {
-	domain   string
-	response chan siteDBResponse
+	domain          string
+	createIfMissing bool
+	response        chan siteDBResponse
 }
 
 type siteDBResponse struct {
@@ -205,6 +206,7 @@ type siteDBMigrationEvent struct {
 }
 
 var errSiteMigrationsStarting = errors.New("startup database migrations are still running")
+var errSiteDatabaseMissing = errors.New("site database does not exist")
 
 type siteDatabaseDegradedError struct {
 	domain string
@@ -260,6 +262,7 @@ func setSQLiteUserVersion(ctx context.Context, database sqlExecutor, version int
 }
 
 type siteDomainContextKey struct{}
+type siteDatabaseCreateContextKey struct{}
 
 type siteDBWorkloadKind int
 
@@ -324,6 +327,21 @@ func domainFromContext(ctx context.Context) string {
 		return "localhost"
 	}
 	return normalizedDomain
+}
+
+func contextWithSiteDatabaseCreation(ctx context.Context) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, siteDatabaseCreateContextKey{}, true)
+}
+
+func siteDatabaseCreationAllowed(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
+	allowed, ok := ctx.Value(siteDatabaseCreateContextKey{}).(bool)
+	return ok && allowed
 }
 
 func newSiteFileDatabase(databasePath string, rawDatabase *sql.DB, debug bool) *siteFileDatabase {
@@ -681,6 +699,10 @@ func (r *perSiteDBRouter) run(siteDatabaseRootDir string, migrate siteDBMigrator
 			case "failed":
 				degradedDomains[event.domain] = event.err
 				log.Printf("%sDB MIGRATION%s failed path=%s domain=%s step=%s err=%v", terminalRed(), terminalReset(), event.path, event.domain, diagnosticlog.SafeLogValue(event.step), event.err)
+			case "ignored":
+				if r.debug {
+					log.Printf("%sDB MIGRATION%s ignored unregistered path=%s domain=%s", terminalCyan(), terminalReset(), event.path, event.domain)
+				}
 			case "summary":
 				startupMigrationFinished = true
 				log.Printf("%sDB MIGRATION%s startup summary total=%d applied=%d skipped=%d failed=%d", terminalCyan(), terminalReset(), event.total, event.applied, event.skipped, event.failed)
@@ -713,7 +735,7 @@ func (r *perSiteDBRouter) run(siteDatabaseRootDir string, migrate siteDBMigrator
 			databaseDomain := domain
 			aliasDomain := ""
 			if primaryDomain := primaryDomainsByAlias[domain]; primaryDomain != "" {
-				database, err := r.databaseForDomain(siteDatabaseRootDir, databasesByDomain, migratedDomains, degradedDomains, primaryDomain, migrate)
+				database, err := r.databaseForDomain(siteDatabaseRootDir, databasesByDomain, migratedDomains, degradedDomains, primaryDomain, request.createIfMissing, migrate)
 				if err != nil {
 					request.response <- siteDBResponse{err: err}
 					continue
@@ -734,7 +756,7 @@ func (r *perSiteDBRouter) run(siteDatabaseRootDir string, migrate siteDBMigrator
 				request.response <- siteDBResponse{err: siteDatabaseDegradedError{domain: databaseDomain, err: err}}
 				continue
 			}
-			database, err := r.databaseForDomain(siteDatabaseRootDir, databasesByDomain, migratedDomains, degradedDomains, databaseDomain, migrate)
+			database, err := r.databaseForDomain(siteDatabaseRootDir, databasesByDomain, migratedDomains, degradedDomains, databaseDomain, request.createIfMissing, migrate)
 			if err != nil {
 				r.logRouterResolved(domain, databaseDomain, aliasDomain, time.Since(startedAt), err)
 				request.response <- siteDBResponse{err: err}
@@ -790,15 +812,18 @@ func (r *perSiteDBRouter) scanStartupMigrations(ctx context.Context, siteDatabas
 		go r.migrateStartupDatabase(ctx, databasePath, databaseDomain, migrate, results)
 	}
 
-	summary := siteDBMigrationEvent{kind: "summary", total: len(databaseFiles)}
+	summary := siteDBMigrationEvent{kind: "summary"}
 	for range databaseFiles {
 		result := <-results
 		switch result.kind {
 		case "applied":
+			summary.total++
 			summary.applied++
 		case "skipped":
+			summary.total++
 			summary.skipped++
 		case "failed":
+			summary.total++
 			summary.failed++
 		}
 		r.migrationEvents <- result
@@ -817,6 +842,11 @@ func (r *perSiteDBRouter) migrateStartupDatabase(ctx context.Context, databasePa
 	defer database.Close()
 	database.SetMaxOpenConns(1)
 	database.SetMaxIdleConns(1)
+
+	if !siteDatabaseHasRegisteredAdmin(migrationCtx, database) {
+		results <- siteDBMigrationEvent{kind: "ignored", domain: databaseDomain, path: databasePath}
+		return
+	}
 
 	version, versionErr := sqliteUserVersion(migrationCtx, database)
 	if versionErr != nil {
@@ -843,7 +873,7 @@ func (r *perSiteDBRouter) migrateStartupDatabase(ctx context.Context, databasePa
 	results <- siteDBMigrationEvent{kind: "applied", domain: databaseDomain, path: databasePath, previousVersion: version, currentVersion: nextVersion}
 }
 
-func (r *perSiteDBRouter) databaseForDomain(siteDatabaseRootDir string, databasesByDomain map[string]*siteFileDatabase, migratedDomains map[string]bool, degradedDomains map[string]error, domain string, migrate siteDBMigrator) (*siteFileDatabase, error) {
+func (r *perSiteDBRouter) databaseForDomain(siteDatabaseRootDir string, databasesByDomain map[string]*siteFileDatabase, migratedDomains map[string]bool, degradedDomains map[string]error, domain string, createIfMissing bool, migrate siteDBMigrator) (*siteFileDatabase, error) {
 	databaseDomain := normalizeDomainName(domain)
 	if databaseDomain == "" {
 		databaseDomain = r.fallbackDomain
@@ -858,6 +888,14 @@ func (r *perSiteDBRouter) databaseForDomain(siteDatabaseRootDir string, database
 	databasePath := filepath.Join(siteDatabaseRootDir, domainStorageName(databaseDomain)+".db")
 	if err := ensureParentDir(databasePath); err != nil {
 		return nil, err
+	}
+	if !createIfMissing {
+		if _, statErr := os.Stat(databasePath); statErr != nil {
+			if errors.Is(statErr, os.ErrNotExist) {
+				return nil, errSiteDatabaseMissing
+			}
+			return nil, statErr
+		}
 	}
 	nextDatabase, err := sql.Open("sqlite", "file:"+databasePath)
 	if err != nil {
@@ -969,6 +1007,15 @@ func scanActivePrimaryDomainForAlias(row *sql.Row, aliasDomain string) string {
 	return primaryDomain
 }
 
+func siteDatabaseHasRegisteredAdmin(ctx context.Context, database *sql.DB) bool {
+	if database == nil {
+		return false
+	}
+	var adminCount int
+	err := database.QueryRowContext(ctx, `SELECT COUNT(1) FROM users WHERE is_admin=1`).Scan(&adminCount)
+	return err == nil && adminCount > 0
+}
+
 func (r *perSiteDBRouter) Close() error {
 	closeResponse := make(chan error, 1)
 	r.closeRequests <- closeResponse
@@ -1037,7 +1084,7 @@ func (r *perSiteDBRouter) databaseForContext(ctx context.Context) (*siteFileData
 		domain = r.fallbackDomain
 	}
 	response := make(chan siteDBResponse, 1)
-	request := siteDBRequest{domain: domain, response: response}
+	request := siteDBRequest{domain: domain, createIfMissing: siteDatabaseCreationAllowed(ctx), response: response}
 	if !r.debug {
 		select {
 		case r.requests <- request:
@@ -6867,6 +6914,10 @@ func (a *App) createAndSendEmailConfirmation(r *http.Request, action, domain, cu
 	if _, err := stdmail.ParseAddress(email); err != nil {
 		return fmt.Errorf("%s", translationOrDefault(translations, "email_confirmation_status_invalid_email", "Email address is invalid."))
 	}
+	databaseContext := r.Context()
+	if action == "register" {
+		databaseContext = contextWithSiteDatabaseCreation(databaseContext)
+	}
 	if strings.TrimSpace(returnPath) == "" {
 		returnPath = requestedReturnPath(r)
 	}
@@ -6874,16 +6925,16 @@ func (a *App) createAndSendEmailConfirmation(r *http.Request, action, domain, cu
 	token := randomAccessToken()
 	now := time.Now().UTC()
 	expiresAt := now.Add(emailConfirmationTTL)
-	_, _ = a.db.ExecContext(r.Context(), `DELETE FROM email_confirmations WHERE expires_at<>'' AND expires_at<?`, now.Format(time.RFC3339))
-	_, err := a.db.ExecContext(r.Context(), `INSERT INTO email_confirmations(token,domain,action,email,password,current_email,return_path,language_code,created_at,expires_at) VALUES(?,?,?,?,?,?,?,?,?,?)`,
+	_, _ = a.db.ExecContext(databaseContext, `DELETE FROM email_confirmations WHERE expires_at<>'' AND expires_at<?`, now.Format(time.RFC3339))
+	_, err := a.db.ExecContext(databaseContext, `INSERT INTO email_confirmations(token,domain,action,email,password,current_email,return_path,language_code,created_at,expires_at) VALUES(?,?,?,?,?,?,?,?,?,?)`,
 		token, domain, action, email, password, strings.TrimSpace(currentEmail), returnPath, languageCode, now.Format(time.RFC3339), expiresAt.Format(time.RFC3339))
 	if err != nil {
 		return err
 	}
 	confirmationURL := emailConfirmationURL(r, token)
 	fromAddress := a.emailFromAddress(domain)
-	if dnsSetup, dnsSetupRequired := a.emailDNSSetupView(r.Context(), domain, fromAddress, languageCode); dnsSetupRequired {
-		_, _ = a.db.ExecContext(r.Context(), `DELETE FROM email_confirmations WHERE token=?`, token)
+	if dnsSetup, dnsSetupRequired := a.emailDNSSetupView(databaseContext, domain, fromAddress, languageCode); dnsSetupRequired {
+		_, _ = a.db.ExecContext(databaseContext, `DELETE FROM email_confirmations WHERE token=?`, token)
 		return errors.New(dnsSetup.PlainText)
 	}
 	message := mailout.Message{
@@ -6892,8 +6943,8 @@ func (a *App) createAndSendEmailConfirmation(r *http.Request, action, domain, cu
 		Subject: emailSubjectForLanguage(languageCode, action, domain),
 		Body:    emailBodyForLanguage(languageCode, action, domain, confirmationURL),
 	}
-	if err := a.enqueueEmail(r.Context(), message); err != nil {
-		_, _ = a.db.ExecContext(r.Context(), `DELETE FROM email_confirmations WHERE token=?`, token)
+	if err := a.enqueueEmail(databaseContext, message); err != nil {
+		_, _ = a.db.ExecContext(databaseContext, `DELETE FROM email_confirmations WHERE token=?`, token)
 		return err
 	}
 	return nil
