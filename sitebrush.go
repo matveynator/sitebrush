@@ -4504,7 +4504,7 @@ func (a *App) migrate(ctx context.Context) error {
 			SELECT 1 FROM published_pages AS pp WHERE pp.domain=p.domain AND pp.path=p.path
 		)
 	`)
-	a.rebuildAllDomainStorageUsage(ctx)
+	a.ensureAllDomainStorageUsageRows(ctx)
 	a.rebuildPagePasswordPrefixFiles(ctx)
 	if err := setSQLiteUserVersion(ctx, a.db, currentSiteDatabaseSchemaVersion); err != nil {
 		return siteMigrationStepError{step: "write schema version", err: err}
@@ -5062,7 +5062,8 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	domain := a.siteDomain(r.Context(), r)
-	if redirectTarget := a.canonicalTrailingSlashRedirectTarget(r, domain, pagePath); redirectTarget != "" {
+	redirectTargetPath := a.resolvedPageRedirectPath(r.Context(), domain, pagePath)
+	if redirectTarget := a.canonicalTrailingSlashRedirectTargetForResolvedPath(r, domain, pagePath, redirectTargetPath); redirectTarget != "" {
 		http.Redirect(w, r, redirectTarget, http.StatusMovedPermanently)
 		return
 	}
@@ -5070,7 +5071,12 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 		a.pagePasswordUnlock(w, r, domain, pagePath)
 		return
 	}
-	pagePasswordHandled, pagePasswordUnlocked := a.requirePagePassword(w, r, domain, pagePath)
+	adminEmail := ""
+	isAdmin := false
+	if hasSitebrushSessionCookie(r) {
+		adminEmail, isAdmin = a.currentAdminEmailForDomain(r, domain)
+	}
+	pagePasswordHandled, pagePasswordUnlocked := a.requirePagePassword(w, r, domain, pagePath, isAdmin)
 	if pagePasswordHandled {
 		return
 	}
@@ -5081,7 +5087,6 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 	if a.serveDomainChrootLocation(w, r, domain, pagePath) {
 		return
 	}
-	redirectTargetPath := a.resolvedPageRedirectPath(r.Context(), domain, pagePath)
 	if redirectTargetPath != "" && redirectTargetPath != pagePath {
 		http.Redirect(w, r, redirectTargetPath, http.StatusMovedPermanently)
 		return
@@ -5090,7 +5095,6 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 		a.serveGuestNotFoundPage(w, r, domain, pagePath)
 		return
 	}
-	adminEmail, isAdmin := a.currentAdminEmailForDomain(r, domain)
 	domainFrozen := false
 	if isAdmin {
 		domainFrozen = a.isDomainFrozen(r.Context(), domain)
@@ -5100,7 +5104,7 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 	}
 	pageRecord, err := a.findPage(r.Context(), domain, pagePath)
 	if err == nil && isAdmin {
-		a.serveManagedPageContent(w, r, pageRecord.Path, pageRecord.HTML, "db-draft")
+		a.serveManagedPageContent(w, r, domain, pageRecord.Path, pageRecord.HTML, "db-draft", isAdmin, adminEmail, domainFrozen)
 		return
 	}
 	if !isAdmin && a.servePublishedStaticFile(w, r, domain, pagePath) {
@@ -5108,7 +5112,7 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 	}
 	publishedPage, publishedErr := a.findPublishedPage(r.Context(), domain, pagePath)
 	if publishedErr == nil {
-		a.serveManagedPageContent(w, r, publishedPage.Path, publishedPage.HTML, "db-published-fallback")
+		a.serveManagedPageContent(w, r, domain, publishedPage.Path, publishedPage.HTML, "db-published-fallback", isAdmin, adminEmail, domainFrozen)
 		return
 	}
 	a.renderMissingPage(w, r, pagePath, isAdmin)
@@ -5475,10 +5479,14 @@ func (a *App) canonicalTrailingSlashStaticRedirectTarget(r *http.Request, domain
 }
 
 func (a *App) canonicalTrailingSlashRedirectTarget(r *http.Request, domain, pagePath string) string {
+	return a.canonicalTrailingSlashRedirectTargetForResolvedPath(r, domain, pagePath, a.resolvedPageRedirectPath(r.Context(), domain, pagePath))
+}
+
+func (a *App) canonicalTrailingSlashRedirectTargetForResolvedPath(r *http.Request, domain, pagePath string, redirectTargetPath string) string {
 	if !requestCanUseCanonicalTrailingSlash(r, pagePath) {
 		return ""
 	}
-	if redirectTargetPath := a.resolvedPageRedirectPath(r.Context(), domain, pagePath); redirectTargetPath != "" && redirectTargetPath != pagePath {
+	if redirectTargetPath != "" && redirectTargetPath != pagePath {
 		return ""
 	}
 	if _, found := a.pagePasswordRuleFromPrefixFile(domain, pagePath); found {
@@ -10425,6 +10433,18 @@ WHERE domain=?
 }
 
 func (a *App) rebuildAllDomainStorageUsage(ctx context.Context) {
+	for _, domain := range a.domainStorageUsageDomains(ctx) {
+		a.rebuildDomainStorageUsage(ctx, domain)
+	}
+}
+
+func (a *App) ensureAllDomainStorageUsageRows(ctx context.Context) {
+	for _, domain := range a.domainStorageUsageDomains(ctx) {
+		a.ensureDomainStorageUsageRow(ctx, domain)
+	}
+}
+
+func (a *App) domainStorageUsageDomains(ctx context.Context) []string {
 	domainSet := make(map[string]struct{})
 	for _, query := range []string{
 		`SELECT DISTINCT domain FROM users`,
@@ -10448,9 +10468,12 @@ func (a *App) rebuildAllDomainStorageUsage(ctx context.Context) {
 		}
 		_ = rows.Close()
 	}
+	domains := make([]string, 0, len(domainSet))
 	for domain := range domainSet {
-		a.rebuildDomainStorageUsage(ctx, domain)
+		domains = append(domains, domain)
 	}
+	sort.Strings(domains)
+	return domains
 }
 
 func (a *App) rebuildDomainStorageUsage(ctx context.Context, domain string) {
@@ -11098,8 +11121,8 @@ func (a *App) pagePasswordUnlock(w http.ResponseWriter, r *http.Request, domain,
 	http.Redirect(w, r, pagePath, http.StatusFound)
 }
 
-func (a *App) requirePagePassword(w http.ResponseWriter, r *http.Request, domain, pagePath string) (bool, bool) {
-	if a.isAdminRequest(r) {
+func (a *App) requirePagePassword(w http.ResponseWriter, r *http.Request, domain, pagePath string, isAdmin bool) (bool, bool) {
+	if isAdmin {
 		return false, false
 	}
 	rule, found := a.pagePasswordRuleForPath(r.Context(), domain, pagePath)
@@ -11459,11 +11482,11 @@ func (a *App) revisionCount(ctx context.Context, domain string, pagePath string)
 	return revisionCount
 }
 
-func (a *App) serveManagedPageContent(w http.ResponseWriter, r *http.Request, pagePath, content, sourceType string) {
+func (a *App) serveManagedPageContent(w http.ResponseWriter, r *http.Request, domain, pagePath, content, sourceType string, isAdmin bool, adminEmail string, domainFrozen bool) {
 	a.logContentDelivery(w, sourceType)
 	if pageContentKind(pagePath, content) == "html" {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		_, _ = w.Write([]byte(a.injectContextMenu(r, pagePath, content)))
+		_, _ = w.Write([]byte(a.injectContextMenuForRequest(r, domain, pagePath, content, isAdmin, adminEmail, domainFrozen)))
 		return
 	}
 	w.Header().Set("Content-Type", contentTypeForManagedPage(pagePath, content))
@@ -11489,7 +11512,15 @@ func (a *App) serveGuestNotFoundPage(w http.ResponseWriter, r *http.Request, dom
 
 func (a *App) injectContextMenu(r *http.Request, pagePath, html string) string {
 	domain := a.siteDomain(r.Context(), r)
-	isAdmin := a.isAdminRequest(r)
+	adminEmail, isAdmin := a.currentAdminEmailForDomain(r, domain)
+	domainFrozen := false
+	if isAdmin {
+		domainFrozen = a.isDomainFrozen(r.Context(), domain)
+	}
+	return a.injectContextMenuForRequest(r, domain, pagePath, html, isAdmin, adminEmail, domainFrozen)
+}
+
+func (a *App) injectContextMenuForRequest(r *http.Request, domain, pagePath, html string, isAdmin bool, adminEmail string, domainFrozen bool) string {
 	revisionID := 0
 	revisionCount := 0
 	storageUsageLabel := ""
@@ -11504,10 +11535,10 @@ func (a *App) injectContextMenu(r *http.Request, pagePath, html string) string {
 		_, pagePasswordProtected = a.pagePasswordRuleForPath(r.Context(), domain, pagePath)
 	}
 	isServerManager := false
-	if isAdmin {
-		isServerManager = a.isServerManagerRequest(r)
+	if isAdmin && strings.TrimSpace(adminEmail) != "" {
+		isServerManager = a.isServerManagerEmail(r.Context(), domain, adminEmail)
 	}
-	menuScript := buildContextMenuScript(isAdmin, isServerManager, a.isDomainFrozen(r.Context(), domain), pagePasswordProtected, pagePath, domain, revisionID, revisionCount, storageUsageLabel, translationsForRequest(r))
+	menuScript := buildContextMenuScript(isAdmin, isServerManager, domainFrozen, pagePasswordProtected, pagePath, domain, revisionID, revisionCount, storageUsageLabel, translationsForRequest(r))
 	return injectMenuScriptIntoHTML(html, menuScript)
 }
 
@@ -17216,9 +17247,6 @@ func (a *App) setDomainFrozenState(ctx context.Context, domain string, frozenSta
 }
 
 func (a *App) servePublishedStaticFile(w http.ResponseWriter, r *http.Request, domain, pagePath string) bool {
-	if a.isAdminRequest(r) {
-		return false
-	}
 	return a.servePublishedStaticFileFromDisk(w, r, domain, pagePath, true)
 }
 
