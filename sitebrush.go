@@ -56,6 +56,7 @@ import (
 	"sitebrush/pkg/mailout"
 	"sitebrush/pkg/serviceinstall"
 	"sitebrush/pkg/winservice"
+        "sitebrush/pkg/systeminit"
 )
 
 //go:embed web/*
@@ -2898,6 +2899,11 @@ func main() {
 }
 
 func runSitebrushServer(ctx context.Context, config serverRunConfig) error {
+
+	if err := systeminit.Init(); err != nil {
+		log.Printf("system initialization failed: %v", err)
+	}
+
 	parsedPorts := config.ParsedPorts
 	effectiveDBPath := config.DBPath
 	effectiveStoragePath := config.StoragePath
@@ -3091,12 +3097,12 @@ func parseListenPorts(rawPorts string) (listenPorts, error) {
 }
 
 func listenOnAvailablePort(requestedPort int) (net.Listener, int, error) {
-	listener, err := net.Listen("tcp", ":"+strconv.Itoa(requestedPort))
+        listener, err := systeminit.Listen(context.Background(), "tcp", ":"+strconv.Itoa(requestedPort))
 	if err == nil {
 		return listener, requestedPort, nil
 	}
 	for fallbackPort := 9898; fallbackPort < 65536; fallbackPort++ {
-		listener, err = net.Listen("tcp", ":"+strconv.Itoa(fallbackPort))
+                listener, err = systeminit.Listen(context.Background(), "tcp", ":"+strconv.Itoa(fallbackPort))
 		if err == nil {
 			log.Printf("port %d is unavailable, using %d", requestedPort, fallbackPort)
 			return listener, fallbackPort, nil
@@ -3106,7 +3112,7 @@ func listenOnAvailablePort(requestedPort int) (net.Listener, int, error) {
 }
 
 func listenTLSForAutoCert() (net.Listener, error) {
-	return net.Listen("tcp", ":443")
+        return systeminit.Listen(context.Background(), "tcp", ":443")
 }
 
 func (a *App) serveTLSWithAutoCert(tlsListener net.Listener, tlsConfig *tls.Config, handler http.Handler) {
