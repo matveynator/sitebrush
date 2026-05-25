@@ -177,6 +177,31 @@ func (store Store) OwnerDomain(ctx context.Context) (string, bool) {
 	return domain, err == nil && domain != ""
 }
 
+func (store Store) SetOwner(ctx context.Context, domain, email string) error {
+	domain = strings.TrimSpace(domain)
+	email = strings.TrimSpace(email)
+	if domain == "" {
+		return fmt.Errorf("owner domain is required")
+	}
+	if email == "" {
+		return fmt.Errorf("owner email is required")
+	}
+	transaction, err := store.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	_, err = transaction.ExecContext(ctx, `DELETE FROM server_managers WHERE role='owner'`)
+	if err == nil {
+		_, err = transaction.ExecContext(ctx, `INSERT INTO server_managers(domain,email,role,scope_domain,created_at) VALUES(?,?,?,?,?)`,
+			domain, email, "owner", "*", time.Now().UTC().Format(time.RFC3339))
+	}
+	if err != nil {
+		_ = transaction.Rollback()
+		return err
+	}
+	return transaction.Commit()
+}
+
 func (store Store) AutomaticRegistrationAllowed(ctx context.Context) bool {
 	if !store.OwnerExists(ctx) {
 		return true

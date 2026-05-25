@@ -8629,12 +8629,13 @@ type siteQuotaDatabaseCandidate struct {
 }
 
 type siteQuotaRow struct {
-	Domain       string
-	Aliases      []string
-	UsedBytes    int64
-	LimitBytes   int64
-	FilesPath    string
-	DatabasePath string
+	Domain          string
+	Aliases         []string
+	UsedBytes       int64
+	LimitBytes      int64
+	FilesPath       string
+	DatabasePath    string
+	BillingMainSite bool
 }
 
 func siteDatabaseRootPath(dbPath string) string {
@@ -8703,6 +8704,7 @@ func runSiteQuotaCommand(ctx context.Context, output io.Writer, input io.Reader,
 		if err != nil {
 			return err
 		}
+		rows = markSiteQuotaBillingMainSite(ctx, dbPath, rows)
 		if err := runSiteQuotaInteractiveConsole(ctx, output, input, storagePath, dbPath, rows); err != nil {
 			return err
 		}
@@ -8988,6 +8990,61 @@ func updateSiteQuotaLimit(ctx context.Context, storagePath, dbPath, rawDomain st
 	}, nil
 }
 
+func openSiteQuotaControlDatabase(ctx context.Context, dbPath string) (*sql.DB, error) {
+	controlDatabasePath := cleanDBPath(dbPath)
+	if err := ensureParentDir(controlDatabasePath); err != nil {
+		return nil, err
+	}
+	controlDatabase, err := sql.Open("sqlite", "file:"+controlDatabasePath)
+	if err != nil {
+		return nil, err
+	}
+	controlDatabase.SetMaxOpenConns(1)
+	controlDatabase.SetMaxIdleConns(1)
+	if err := billing.Migrate(ctx, controlDatabase); err != nil {
+		_ = controlDatabase.Close()
+		return nil, err
+	}
+	return controlDatabase, nil
+}
+
+func markSiteQuotaBillingMainSite(ctx context.Context, dbPath string, rows []siteQuotaRow) []siteQuotaRow {
+	controlDatabase, err := openSiteQuotaControlDatabase(ctx, dbPath)
+	if err != nil {
+		return rows
+	}
+	defer controlDatabase.Close()
+	billingDomain, found := (billing.Store{DB: controlDatabase}).OwnerDomain(ctx)
+	billingDomain = normalizeQuotaDomainName(billingDomain)
+	if !found || billingDomain == "" {
+		return rows
+	}
+	for rowIndex := range rows {
+		rows[rowIndex].BillingMainSite = normalizeQuotaDomainName(rows[rowIndex].Domain) == billingDomain
+	}
+	return rows
+}
+
+func setSiteQuotaBillingMainSite(ctx context.Context, dbPath string, row siteQuotaRow) (string, error) {
+	domain := normalizeQuotaDomainName(row.Domain)
+	if domain == "" {
+		return "", fmt.Errorf("invalid site domain %q", row.Domain)
+	}
+	_, ownerEmail, found := firstAdminInDatabase(ctx, row.DatabasePath, domain)
+	if !found {
+		return "", fmt.Errorf("site %s has no administrator", domain)
+	}
+	controlDatabase, err := openSiteQuotaControlDatabase(ctx, dbPath)
+	if err != nil {
+		return "", err
+	}
+	defer controlDatabase.Close()
+	if err := (billing.Store{DB: controlDatabase}).SetOwner(ctx, domain, ownerEmail); err != nil {
+		return "", err
+	}
+	return ownerEmail, nil
+}
+
 func siteQuotaDatabaseCandidateForDomain(ctx context.Context, storagePath, dbPath, domain string) (siteQuotaDatabaseCandidate, error) {
 	siteDatabasePath := filepath.Join(siteDatabaseRootPath(dbPath), domainStorageName(domain)+".db")
 	if _, err := os.Stat(siteDatabasePath); err == nil {
@@ -9069,6 +9126,22 @@ func runSiteQuotaInteractiveConsole(ctx context.Context, output io.Writer, input
 			}
 			selectedIndex = command.Index - 1
 		case "enter":
+		case "billing":
+			selectedRow := rows[selectedIndex]
+			ownerEmail, err := setSiteQuotaBillingMainSite(ctx, dbPath, selectedRow)
+			if err != nil {
+				return err
+			}
+			fmt.Fprintf(output, "%sBilling main domain set to %s (%s)%s%s", terminalGreen(), selectedRow.Domain, ownerEmail, terminalReset(), layout.newline)
+			rows, err = listSiteQuotaRows(ctx, storagePath, dbPath)
+			if err != nil {
+				return err
+			}
+			rows = markSiteQuotaBillingMainSite(ctx, dbPath, rows)
+			if selectedIndex >= len(rows) {
+				selectedIndex = len(rows) - 1
+			}
+			continue
 		default:
 			fmt.Fprintf(output, "%sInvalid selection.%s%s", terminalRed(), terminalReset(), layout.newline)
 			continue
@@ -9135,6 +9208,9 @@ func readSiteQuotaMenuCommand(reader *bufio.Reader) (siteQuotaMenuCommand, error
 		case nextByte == 'q' || nextByte == 'Q':
 			drainSiteQuotaInputLine(reader)
 			return siteQuotaMenuCommand{Action: "quit"}, nil
+		case nextByte == 'b' || nextByte == 'B':
+			drainSiteQuotaInputLine(reader)
+			return siteQuotaMenuCommand{Action: "billing"}, nil
 		case nextByte >= '0' && nextByte <= '9':
 			digitBytes := []byte{nextByte}
 			for {
@@ -9294,15 +9370,15 @@ func printSiteQuotaRows(output io.Writer, storagePath, dbPath string, rows []sit
 }
 
 func siteQuotaHeaderLine(totalRows, selectedIndex, width int) string {
-	headerText := fmt.Sprintf("sites %d/%d  q quit  up/down move  enter edit", selectedIndex+1, totalRows)
+	headerText := fmt.Sprintf("sites %d/%d  q quit  up/down move  enter edit quota  b billing", selectedIndex+1, totalRows)
 	if width < 48 {
-		headerText = fmt.Sprintf("%d/%d q quit up/down enter", selectedIndex+1, totalRows)
+		headerText = fmt.Sprintf("%d/%d q quit up/down enter b", selectedIndex+1, totalRows)
 	}
 	return truncateDisplayText(headerText, width)
 }
 
 func siteQuotaMenuHelpLine(width int) string {
-	return truncateDisplayText("q quit  up/down move  enter edit", width)
+	return truncateDisplayText("q quit  up/down move  enter edit quota  b billing", width)
 }
 
 func siteQuotaQuotaPromptLine(layout siteQuotaTerminalLayout, row siteQuotaRow) string {
@@ -9313,7 +9389,11 @@ func siteQuotaQuotaPromptLine(layout siteQuotaTerminalLayout, row siteQuotaRow) 
 func siteQuotaRowLine(row siteQuotaRow, index int, selected bool, width int) (string, string) {
 	usageText := compactQuotaUsageText(row)
 	stateText, stateColor := siteQuotaQuotaState(row)
-	lineText := fmt.Sprintf("[%d] %s | %s | %s | aliases:%d", index, row.Domain, usageText, stateText, len(row.Aliases))
+	billingText := ""
+	if row.BillingMainSite {
+		billingText = " | billing:main"
+	}
+	lineText := fmt.Sprintf("[%d] %s | %s | %s | aliases:%d%s", index, row.Domain, usageText, stateText, len(row.Aliases), billingText)
 	lineText = truncateDisplayText(lineText, width)
 	if selected {
 		return lineText, terminalCyan() + terminalBold()

@@ -1288,6 +1288,62 @@ func TestSiteQuotaInteractiveConsoleSupportsArrowSelection(t *testing.T) {
 	}
 }
 
+func TestSiteQuotaInteractiveConsoleSetsBillingMainDomain(t *testing.T) {
+	storagePath := t.TempDir()
+	dbPath := filepath.Join(storagePath, defaultDBPath)
+	firstDatabasePath := filepath.Join(siteDatabaseRootPath(dbPath), domainStorageName("alpha.com")+".db")
+	secondDatabasePath := filepath.Join(siteDatabaseRootPath(dbPath), domainStorageName("beta.com")+".db")
+	for _, databasePath := range []string{firstDatabasePath, secondDatabasePath} {
+		if err := ensureParentDir(databasePath); err != nil {
+			t.Fatal(err)
+		}
+	}
+	firstDB, err := sql.Open("sqlite", "file:"+firstDatabasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer firstDB.Close()
+	secondDB, err := sql.Open("sqlite", "file:"+secondDatabasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer secondDB.Close()
+	if err := (&App{db: firstDB, storagePath: storagePath}).migrate(contextWithDomain(context.Background(), "alpha.com")); err != nil {
+		t.Fatalf("migrate first db: %v", err)
+	}
+	if err := (&App{db: secondDB, storagePath: storagePath}).migrate(contextWithDomain(context.Background(), "beta.com")); err != nil {
+		t.Fatalf("migrate second db: %v", err)
+	}
+	insertSiteQuotaAdmin(t, firstDB, "alpha.com")
+	insertSiteQuotaAdmin(t, secondDB, "beta.com")
+
+	var output bytes.Buffer
+	input := strings.NewReader("\x1b[Bb\nq\n")
+	if err := runSiteQuotaCommand(context.Background(), &output, input, storagePath, dbPath, true, "", ""); err != nil {
+		t.Fatalf("set billing main domain: %v", err)
+	}
+
+	controlDB, err := sql.Open("sqlite", "file:"+dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer controlDB.Close()
+	var ownerDomain string
+	var ownerEmail string
+	if err := controlDB.QueryRow(`SELECT domain,email FROM server_managers WHERE role='owner'`).Scan(&ownerDomain, &ownerEmail); err != nil {
+		t.Fatalf("read billing owner: %v", err)
+	}
+	if ownerDomain != "beta.com" || ownerEmail != "admin@beta.com" {
+		t.Fatalf("owner = %s %s, want beta.com admin@beta.com", ownerDomain, ownerEmail)
+	}
+	if !strings.Contains(output.String(), "Billing main domain set to beta.com") {
+		t.Fatalf("interactive output missing billing confirmation: %s", output.String())
+	}
+	if !strings.Contains(output.String(), "billing:main") {
+		t.Fatalf("interactive output missing billing marker: %s", output.String())
+	}
+}
+
 func TestSiteQuotaMenuRenderingIsCompact(t *testing.T) {
 	rows := []siteQuotaRow{
 		{
