@@ -853,7 +853,12 @@ func (r *perSiteDBRouter) migrateStartupDatabase(ctx context.Context, databasePa
 		results <- siteDBMigrationEvent{kind: "failed", domain: databaseDomain, path: databasePath, step: "read schema version", err: versionErr}
 		return
 	}
-	if version >= currentSiteDatabaseSchemaVersion {
+	schemaComplete, schemaErr := siteDatabaseSchemaComplete(migrationCtx, database)
+	if schemaErr != nil {
+		results <- siteDBMigrationEvent{kind: "failed", domain: databaseDomain, path: databasePath, step: "verify schema", err: schemaErr}
+		return
+	}
+	if version >= currentSiteDatabaseSchemaVersion && schemaComplete {
 		results <- siteDBMigrationEvent{kind: "skipped", domain: databaseDomain, path: databasePath, previousVersion: version, currentVersion: version}
 		return
 	}
@@ -908,9 +913,16 @@ func (r *perSiteDBRouter) databaseForDomain(siteDatabaseRootDir string, database
 		log.Printf("%sDB MIGRATION%s failed path=%s domain=%s step=%s err=%v", terminalRed(), terminalReset(), databasePath, databaseDomain, "read schema version", versionErr)
 		return nil, siteDatabaseDegradedError{domain: databaseDomain, err: versionErr}
 	}
+	schemaComplete, schemaErr := siteDatabaseSchemaComplete(context.Background(), nextDatabase)
+	if schemaErr != nil {
+		_ = nextDatabase.Close()
+		degradedDomains[databaseDomain] = schemaErr
+		log.Printf("%sDB MIGRATION%s failed path=%s domain=%s step=%s err=%v", terminalRed(), terminalReset(), databasePath, databaseDomain, "verify schema", schemaErr)
+		return nil, siteDatabaseDegradedError{domain: databaseDomain, err: schemaErr}
+	}
 	siteDatabase := newSiteFileDatabase(databasePath, nextDatabase, r.debug)
 	if !migratedDomains[databaseDomain] {
-		if currentVersion < currentSiteDatabaseSchemaVersion {
+		if currentVersion < currentSiteDatabaseSchemaVersion || !schemaComplete {
 			if migrateErr := siteDatabase.Migrate(context.Background(), databaseDomain, migrate); migrateErr != nil {
 				degradedDomains[databaseDomain] = migrateErr
 				log.Printf("%sDB MIGRATION%s failed path=%s domain=%s step=%s err=%v", terminalRed(), terminalReset(), databasePath, databaseDomain, siteMigrationFailureStep(migrateErr), migrateErr)
@@ -4209,7 +4221,16 @@ func (a *App) autoCertTLSConfig(certificateManager *autocert.Manager) *tls.Confi
 			a.logDomainEvent(certificateDomain, "AUTOCERT certificate loaded from cache server_name=%s remote=%s expires_at=%s", clientHello.ServerName, remoteAddress, cachedExpiresAt.Format(time.RFC3339))
 			return cachedCertificate, nil
 		}
-		if err := a.autoCertRetryDelayError(contextWithDomain(context.Background(), certificateDomain), certificateDomain, now); err != nil {
+		certificateContext := contextWithDomain(context.Background(), certificateDomain)
+		if err := a.autoCertHandshakePrecheck(certificateContext, certificateDomain); err != nil {
+			if cachedCertificateOK {
+				a.logDomainEvent(certificateDomain, "AUTOCERT renewal rejected; serving cached certificate server_name=%s remote=%s expires_at=%s error=%v", clientHello.ServerName, remoteAddress, cachedExpiresAt.Format(time.RFC3339), err)
+				return cachedCertificate, nil
+			}
+			a.logDomainEvent(certificateDomain, "AUTOCERT certificate request rejected server_name=%s remote=%s error=%v", clientHello.ServerName, remoteAddress, err)
+			return nil, err
+		}
+		if err := a.autoCertRetryDelayError(certificateContext, certificateDomain, now); err != nil {
 			if cachedCertificateOK {
 				a.logDomainEvent(certificateDomain, "AUTOCERT renewal delayed; serving cached certificate server_name=%s remote=%s expires_at=%s error=%v", clientHello.ServerName, remoteAddress, cachedExpiresAt.Format(time.RFC3339), err)
 				return cachedCertificate, nil
@@ -4239,7 +4260,7 @@ func (a *App) autoCertTLSConfig(certificateManager *autocert.Manager) *tls.Confi
 		}
 		if err != nil {
 			retryDelay := automaticSSLRetryDelayForCertificateError(err)
-			a.recordDomainAutomaticSSLFailure(contextWithDomain(context.Background(), certificateDomain), certificateDomain, fmt.Sprintf("certificate request failed: %v", err), retryDelay)
+			a.recordDomainAutomaticSSLFailure(certificateContext, certificateDomain, fmt.Sprintf("certificate request failed: %v", err), retryDelay)
 			if cachedCertificateOK {
 				a.logDomainEvent(certificateDomain, "AUTOCERT certificate request failed; serving cached certificate server_name=%s remote=%s expires_at=%s error=%v", clientHello.ServerName, remoteAddress, cachedExpiresAt.Format(time.RFC3339), err)
 				return cachedCertificate, nil
@@ -4247,11 +4268,29 @@ func (a *App) autoCertTLSConfig(certificateManager *autocert.Manager) *tls.Confi
 			a.logDomainEvent(certificateDomain, "AUTOCERT certificate request failed server_name=%s remote=%s error=%v", clientHello.ServerName, remoteAddress, err)
 			return nil, err
 		}
-		a.clearDomainAutomaticSSLFailure(contextWithDomain(context.Background(), certificateDomain), certificateDomain)
+		a.clearDomainAutomaticSSLFailure(certificateContext, certificateDomain)
 		a.logDomainEvent(certificateDomain, "AUTOCERT certificate ready server_name=%s remote=%s", clientHello.ServerName, remoteAddress)
 		return certificate, nil
 	}
 	return tlsConfig
+}
+
+func (a *App) autoCertHandshakePrecheck(ctx context.Context, domain string) error {
+	certificateDomain := normalizeDomainName(domain)
+	if certificateDomain == "" {
+		return fmt.Errorf("invalid certificate domain %q", domain)
+	}
+	if !a.domainIsAutomaticSSLCandidate(ctx, certificateDomain) {
+		return fmt.Errorf("automatic SSL domain %q is not managed by Sitebrush", certificateDomain)
+	}
+	setting := a.domainAutomaticSSLSetting(ctx, certificateDomain)
+	if setting.ManuallyDisabled {
+		return fmt.Errorf("automatic SSL is manually disabled for %q", certificateDomain)
+	}
+	if strings.TrimSpace(setting.LastCheckedAt) != "" && !setting.Enabled {
+		return fmt.Errorf("automatic SSL DNS check failed for %q", certificateDomain)
+	}
+	return nil
 }
 
 func (a *App) logSlowAutoCertCertificateRequest(done <-chan struct{}, certificateDomain, serverName, remoteAddress string, startedAt time.Time) {
@@ -4339,7 +4378,11 @@ func (a *App) migrate(ctx context.Context) error {
 	if versionErr != nil {
 		return siteMigrationStepError{step: "read schema version", err: versionErr}
 	}
-	if schemaVersion >= currentSiteDatabaseSchemaVersion {
+	schemaComplete, schemaErr := siteDatabaseSchemaComplete(ctx, a.db)
+	if schemaErr != nil {
+		return siteMigrationStepError{step: "verify schema", err: schemaErr}
+	}
+	if schemaVersion >= currentSiteDatabaseSchemaVersion && schemaComplete {
 		if a.debug {
 			log.Printf("%sDB MIGRATION%s skipped domain=%s version=%d", terminalCyan(), terminalReset(), domainFromContext(ctx), schemaVersion)
 		}
@@ -4374,37 +4417,9 @@ func (a *App) migrate(ctx context.Context) error {
 			return siteMigrationStepError{step: "base schema statement " + strconv.Itoa(queryIndex+1), err: err}
 		}
 	}
-	_, _ = a.db.ExecContext(ctx, `ALTER TABLE users ADD COLUMN domain TEXT`)
-	_, _ = a.db.ExecContext(ctx, `ALTER TABLE pages ADD COLUMN domain TEXT`)
-	_, _ = a.db.ExecContext(ctx, `ALTER TABLE revisions ADD COLUMN domain TEXT`)
-	_, _ = a.db.ExecContext(ctx, `ALTER TABLE revisions ADD COLUMN is_active INTEGER DEFAULT 1`)
-	_, _ = a.db.ExecContext(ctx, `ALTER TABLE domain_aliases ADD COLUMN verification_token TEXT`)
-	_, _ = a.db.ExecContext(ctx, `ALTER TABLE domain_aliases ADD COLUMN is_verified INTEGER DEFAULT 0`)
-	_, _ = a.db.ExecContext(ctx, `ALTER TABLE domain_aliases ADD COLUMN dns_a_ok INTEGER DEFAULT 0`)
-	_, _ = a.db.ExecContext(ctx, `ALTER TABLE domain_aliases ADD COLUMN is_selected INTEGER DEFAULT 0`)
-	_, _ = a.db.ExecContext(ctx, `ALTER TABLE domain_aliases ADD COLUMN last_checked_at TEXT`)
-	_, _ = a.db.ExecContext(ctx, `ALTER TABLE domain_ssl_settings ADD COLUMN auto_ssl_enabled INTEGER DEFAULT 0`)
-	_, _ = a.db.ExecContext(ctx, `ALTER TABLE domain_ssl_settings ADD COLUMN manually_disabled INTEGER DEFAULT 0`)
-	_, _ = a.db.ExecContext(ctx, `ALTER TABLE domain_ssl_settings ADD COLUMN last_checked_at TEXT`)
-	_, _ = a.db.ExecContext(ctx, `ALTER TABLE domain_ssl_settings ADD COLUMN last_failed_at TEXT`)
-	_, _ = a.db.ExecContext(ctx, `ALTER TABLE domain_ssl_settings ADD COLUMN last_failure_reason TEXT`)
-	_, _ = a.db.ExecContext(ctx, `ALTER TABLE domain_ssl_settings ADD COLUMN retry_after TEXT`)
-	_, _ = a.db.ExecContext(ctx, `ALTER TABLE page_password_rules ADD COLUMN created_at TEXT`)
-	_, _ = a.db.ExecContext(ctx, `ALTER TABLE page_password_rules ADD COLUMN updated_at TEXT`)
-	_, _ = a.db.ExecContext(ctx, `ALTER TABLE file_access_rules ADD COLUMN token_use_count INTEGER DEFAULT 0`)
-	_, _ = a.db.ExecContext(ctx, `ALTER TABLE file_metadata ADD COLUMN download_count INTEGER DEFAULT 0`)
-	_, _ = a.db.ExecContext(ctx, `ALTER TABLE analytics_events ADD COLUMN geo_country_code TEXT`)
-	_, _ = a.db.ExecContext(ctx, `ALTER TABLE analytics_events ADD COLUMN geo_city TEXT`)
-	_, _ = a.db.ExecContext(ctx, `ALTER TABLE analytics_events ADD COLUMN geo_latitude REAL DEFAULT 0`)
-	_, _ = a.db.ExecContext(ctx, `ALTER TABLE analytics_events ADD COLUMN geo_longitude REAL DEFAULT 0`)
-	_, _ = a.db.ExecContext(ctx, `ALTER TABLE analytics_events ADD COLUMN geo_source TEXT`)
-	_, _ = a.db.ExecContext(ctx, `ALTER TABLE domain_storage_usage ADD COLUMN page_bytes INTEGER DEFAULT 0`)
-	_, _ = a.db.ExecContext(ctx, `ALTER TABLE domain_storage_usage ADD COLUMN published_page_bytes INTEGER DEFAULT 0`)
-	_, _ = a.db.ExecContext(ctx, `ALTER TABLE domain_storage_usage ADD COLUMN revision_bytes INTEGER DEFAULT 0`)
-	_, _ = a.db.ExecContext(ctx, `ALTER TABLE domain_storage_usage ADD COLUMN file_bytes INTEGER DEFAULT 0`)
-	_, _ = a.db.ExecContext(ctx, `ALTER TABLE domain_storage_usage ADD COLUMN published_static_bytes INTEGER DEFAULT 0`)
-	_, _ = a.db.ExecContext(ctx, `ALTER TABLE domain_storage_usage ADD COLUMN limit_bytes INTEGER DEFAULT 10737418240`)
-	_, _ = a.db.ExecContext(ctx, `ALTER TABLE domain_storage_usage ADD COLUMN updated_at TEXT`)
+	if err := a.ensureSiteDatabaseSchemaColumns(ctx); err != nil {
+		return err
+	}
 	_, _ = a.db.ExecContext(ctx, `UPDATE users SET domain=? WHERE domain IS NULL OR TRIM(domain)=''`, legacyDomain)
 	_, _ = a.db.ExecContext(ctx, `UPDATE pages SET domain=? WHERE domain IS NULL OR TRIM(domain)=''`, legacyDomain)
 	_, _ = a.db.ExecContext(ctx, `UPDATE revisions SET domain=? WHERE domain IS NULL OR TRIM(domain)=''`, legacyDomain)
@@ -4427,6 +4442,113 @@ func (a *App) migrate(ctx context.Context) error {
 		return siteMigrationStepError{step: "write schema version", err: err}
 	}
 	return nil
+}
+
+func (a *App) ensureSiteDatabaseSchemaColumns(ctx context.Context) error {
+	for _, column := range requiredSiteDatabaseColumns() {
+		found, err := siteDatabaseColumnExists(ctx, a.db, column.tableName, column.columnName)
+		if err != nil {
+			return siteMigrationStepError{step: "check column " + column.tableName + "." + column.columnName, err: err}
+		}
+		if found {
+			continue
+		}
+		if _, err := a.db.ExecContext(ctx, `ALTER TABLE `+column.tableName+` ADD COLUMN `+column.columnName+` `+column.definition); err != nil {
+			return siteMigrationStepError{step: "add column " + column.tableName + "." + column.columnName, err: err}
+		}
+	}
+	_, _ = a.db.ExecContext(ctx, `CREATE UNIQUE INDEX IF NOT EXISTS idx_email_confirmations_token ON email_confirmations(token)`)
+	return nil
+}
+
+type siteDatabaseColumnRequirement struct {
+	tableName  string
+	columnName string
+	definition string
+}
+
+func requiredSiteDatabaseColumns() []siteDatabaseColumnRequirement {
+	return []siteDatabaseColumnRequirement{
+		{tableName: "users", columnName: "domain", definition: "TEXT"},
+		{tableName: "pages", columnName: "domain", definition: "TEXT"},
+		{tableName: "revisions", columnName: "domain", definition: "TEXT"},
+		{tableName: "revisions", columnName: "is_active", definition: "INTEGER DEFAULT 1"},
+		{tableName: "domain_aliases", columnName: "verification_token", definition: "TEXT"},
+		{tableName: "domain_aliases", columnName: "is_verified", definition: "INTEGER DEFAULT 0"},
+		{tableName: "domain_aliases", columnName: "dns_a_ok", definition: "INTEGER DEFAULT 0"},
+		{tableName: "domain_aliases", columnName: "is_selected", definition: "INTEGER DEFAULT 0"},
+		{tableName: "domain_aliases", columnName: "last_checked_at", definition: "TEXT"},
+		{tableName: "domain_ssl_settings", columnName: "auto_ssl_enabled", definition: "INTEGER DEFAULT 0"},
+		{tableName: "domain_ssl_settings", columnName: "manually_disabled", definition: "INTEGER DEFAULT 0"},
+		{tableName: "domain_ssl_settings", columnName: "last_checked_at", definition: "TEXT"},
+		{tableName: "domain_ssl_settings", columnName: "last_failed_at", definition: "TEXT"},
+		{tableName: "domain_ssl_settings", columnName: "last_failure_reason", definition: "TEXT"},
+		{tableName: "domain_ssl_settings", columnName: "retry_after", definition: "TEXT"},
+		{tableName: "page_password_rules", columnName: "created_at", definition: "TEXT"},
+		{tableName: "page_password_rules", columnName: "updated_at", definition: "TEXT"},
+		{tableName: "file_access_rules", columnName: "token", definition: "TEXT"},
+		{tableName: "file_access_rules", columnName: "expires_at", definition: "TEXT"},
+		{tableName: "file_access_rules", columnName: "single_use_left", definition: "INTEGER DEFAULT 0"},
+		{tableName: "file_access_rules", columnName: "token_use_count", definition: "INTEGER DEFAULT 0"},
+		{tableName: "file_metadata", columnName: "download_count", definition: "INTEGER DEFAULT 0"},
+		{tableName: "analytics_events", columnName: "geo_country_code", definition: "TEXT"},
+		{tableName: "analytics_events", columnName: "geo_city", definition: "TEXT"},
+		{tableName: "analytics_events", columnName: "geo_latitude", definition: "REAL DEFAULT 0"},
+		{tableName: "analytics_events", columnName: "geo_longitude", definition: "REAL DEFAULT 0"},
+		{tableName: "analytics_events", columnName: "geo_source", definition: "TEXT"},
+		{tableName: "domain_storage_usage", columnName: "page_bytes", definition: "INTEGER DEFAULT 0"},
+		{tableName: "domain_storage_usage", columnName: "published_page_bytes", definition: "INTEGER DEFAULT 0"},
+		{tableName: "domain_storage_usage", columnName: "revision_bytes", definition: "INTEGER DEFAULT 0"},
+		{tableName: "domain_storage_usage", columnName: "file_bytes", definition: "INTEGER DEFAULT 0"},
+		{tableName: "domain_storage_usage", columnName: "published_static_bytes", definition: "INTEGER DEFAULT 0"},
+		{tableName: "domain_storage_usage", columnName: "limit_bytes", definition: "INTEGER DEFAULT 10737418240"},
+		{tableName: "domain_storage_usage", columnName: "updated_at", definition: "TEXT"},
+		{tableName: "domain_backup_tokens", columnName: "token", definition: "TEXT"},
+		{tableName: "domain_backup_tokens", columnName: "updated_at", definition: "TEXT"},
+		{tableName: "email_confirmations", columnName: "token", definition: "TEXT"},
+		{tableName: "email_confirmations", columnName: "domain", definition: "TEXT"},
+		{tableName: "email_confirmations", columnName: "action", definition: "TEXT"},
+		{tableName: "email_confirmations", columnName: "email", definition: "TEXT"},
+		{tableName: "email_confirmations", columnName: "password", definition: "TEXT"},
+		{tableName: "email_confirmations", columnName: "current_email", definition: "TEXT"},
+		{tableName: "email_confirmations", columnName: "return_path", definition: "TEXT"},
+		{tableName: "email_confirmations", columnName: "language_code", definition: "TEXT"},
+		{tableName: "email_confirmations", columnName: "created_at", definition: "TEXT"},
+		{tableName: "email_confirmations", columnName: "expires_at", definition: "TEXT"},
+	}
+}
+
+func siteDatabaseSchemaComplete(ctx context.Context, database sqlExecutor) (bool, error) {
+	for _, column := range requiredSiteDatabaseColumns() {
+		found, err := siteDatabaseColumnExists(ctx, database, column.tableName, column.columnName)
+		if err != nil || !found {
+			return false, err
+		}
+	}
+	return true, nil
+}
+
+func siteDatabaseColumnExists(ctx context.Context, database sqlExecutor, tableName, columnName string) (bool, error) {
+	rows, err := database.QueryContext(ctx, `PRAGMA table_info(`+tableName+`)`)
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var columnID int
+		var name string
+		var columnType string
+		var notNull int
+		var defaultValue any
+		var primaryKey int
+		if scanErr := rows.Scan(&columnID, &name, &columnType, &notNull, &defaultValue, &primaryKey); scanErr != nil {
+			return false, scanErr
+		}
+		if strings.EqualFold(name, columnName) {
+			return true, nil
+		}
+	}
+	return false, rows.Err()
 }
 
 func (a *App) migrateLoopbackDomainsToLocalhost(ctx context.Context) {
