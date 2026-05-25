@@ -177,6 +177,94 @@ func withEmailSPFAllowed(t *testing.T) {
 	})
 }
 
+func withRegistrationDNS(t *testing.T, domain string, pointsToServer bool) {
+	t.Helper()
+	previousTXTLookup := lookupTXTRecords
+	previousIPLookup := lookupIPRecords
+	previousExternalIPLookup := lookupServerExternalIP
+	previousInterfaceLookup := lookupServerInterfaceIPs
+	lookupTXTRecords = func(lookupDomain string) ([]string, error) {
+		if lookupDomain == "sender.example" {
+			return []string{"v=spf1 a mx ip4:203.0.113.10 ~all"}, nil
+		}
+		if lookupDomain != domain {
+			t.Fatalf("unexpected SPF lookup domain %q", lookupDomain)
+		}
+		if pointsToServer {
+			return []string{"v=spf1 a mx ip4:203.0.113.10 ~all"}, nil
+		}
+		return []string{"v=spf1 a mx ip4:198.51.100.20 ~all"}, nil
+	}
+	lookupIPRecords = func(lookupDomain string) ([]net.IP, error) {
+		if lookupDomain == "sender.example" {
+			return []net.IP{net.ParseIP("203.0.113.10")}, nil
+		}
+		if lookupDomain != domain {
+			t.Fatalf("unexpected IP lookup domain %q", lookupDomain)
+		}
+		if pointsToServer {
+			return []net.IP{net.ParseIP("203.0.113.10")}, nil
+		}
+		return []net.IP{net.ParseIP("198.51.100.20")}, nil
+	}
+	lookupServerExternalIP = func(context.Context) (string, error) {
+		return "203.0.113.10", nil
+	}
+	lookupServerInterfaceIPs = func() ([]net.IP, error) {
+		return nil, nil
+	}
+	t.Cleanup(func() {
+		lookupTXTRecords = previousTXTLookup
+		lookupIPRecords = previousIPLookup
+		lookupServerExternalIP = previousExternalIPLookup
+		lookupServerInterfaceIPs = previousInterfaceLookup
+	})
+}
+
+func confirmationTokenFromBody(t *testing.T, body string) string {
+	t.Helper()
+	marker := "email_confirm="
+	startIndex := strings.Index(body, marker)
+	if startIndex < 0 {
+		t.Fatalf("confirmation body has no token: %q", body)
+	}
+	tokenStart := startIndex + len(marker)
+	tokenEnd := tokenStart
+	for tokenEnd < len(body) {
+		switch body[tokenEnd] {
+		case ' ', '\n', '\r', '\t', '&', '<', '"', '\'':
+			rawToken := body[tokenStart:tokenEnd]
+			token, err := url.QueryUnescape(rawToken)
+			if err != nil {
+				t.Fatalf("decode confirmation token %q: %v", rawToken, err)
+			}
+			return token
+		}
+		tokenEnd++
+	}
+	rawToken := body[tokenStart:tokenEnd]
+	token, err := url.QueryUnescape(rawToken)
+	if err != nil {
+		t.Fatalf("decode confirmation token %q: %v", rawToken, err)
+	}
+	return token
+}
+
+func waitSiteDBRouterStartup(t *testing.T, router *perSiteDBRouter) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		status := router.MigrationStatus(context.Background(), "localhost")
+		if status.startupFinished {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("site database router startup did not finish")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 type panicSQLExecutor struct {
 	t *testing.T
 }
@@ -1339,6 +1427,7 @@ func TestRegisterRequiresEmailConfirmationBeforeCreatingAdmin(t *testing.T) {
 	if response.Code != http.StatusOK {
 		t.Fatalf("status = %d, body=%q", response.Code, response.Body.String())
 	}
+	var pendingToken string
 	select {
 	case mailJob := <-application.emailDelivery:
 		if mailJob.message.To != "admin@example.com" {
@@ -1347,6 +1436,7 @@ func TestRegisterRequiresEmailConfirmationBeforeCreatingAdmin(t *testing.T) {
 		if !strings.Contains(mailJob.message.Subject, "Подтвердите email") || !strings.Contains(mailJob.message.Body, "Для подтверждения email") {
 			t.Fatalf("confirmation email is not Russian: %#v", mailJob.message)
 		}
+		pendingToken = confirmationTokenFromBody(t, mailJob.message.Body)
 	default:
 		t.Fatal("registration did not enqueue confirmation email")
 	}
@@ -1354,10 +1444,6 @@ func TestRegisterRequiresEmailConfirmationBeforeCreatingAdmin(t *testing.T) {
 	_ = rawDB.QueryRow(`SELECT COUNT(1) FROM users WHERE domain=?`, "localhost").Scan(&userCount)
 	if userCount != 0 {
 		t.Fatalf("user count before confirmation = %d, want 0", userCount)
-	}
-	var pendingToken string
-	if err := rawDB.QueryRow(`SELECT token FROM email_confirmations WHERE domain=? AND action=? AND email=?`, "localhost", "register", "admin@example.com").Scan(&pendingToken); err != nil {
-		t.Fatalf("read confirmation token: %v", err)
 	}
 
 	confirmRequest := httptest.NewRequest(http.MethodGet, "http://localhost:8080/?email_confirm="+url.QueryEscape(pendingToken), nil)
@@ -1372,6 +1458,120 @@ func TestRegisterRequiresEmailConfirmationBeforeCreatingAdmin(t *testing.T) {
 	}
 	if len(confirmResponse.Result().Cookies()) == 0 {
 		t.Fatal("confirmation did not create session")
+	}
+}
+
+func TestRegisterRejectsUnverifiedDomainBeforeCreatingSiteDatabase(t *testing.T) {
+	const domain = "fake.example"
+	t.Setenv("SITEBRUSH_SMTP_FROM", "SiteBrush <sitebrush@sender.example>")
+	withRegistrationDNS(t, domain, false)
+	storagePath := t.TempDir()
+	dbPath := filepath.Join(storagePath, defaultDBPath)
+	siteDatabaseDir := siteDatabaseRootPath(dbPath)
+	router := newPerSiteDBRouter(siteDatabaseDir, "localhost", func(migrationCtx context.Context, rawDB *sql.DB, migrateDomain string) error {
+		application := &App{db: rawDB, storagePath: storagePath, dbPath: dbPath, grabTracker: newGrabProgressTracker()}
+		return application.migrate(contextWithDomain(migrationCtx, migrateDomain))
+	}, false)
+	t.Cleanup(func() {
+		if err := router.Close(); err != nil {
+			t.Fatalf("close site database router: %v", err)
+		}
+	})
+	waitSiteDBRouterStartup(t, router)
+	application := &App{
+		db:                        router,
+		siteDatabaseRouter:        router,
+		storagePath:               storagePath,
+		dbPath:                    dbPath,
+		grabTracker:               newGrabProgressTracker(),
+		registrationConfirmations: startEmailConfirmationMemoryWorker(context.Background()),
+		emailDelivery:             make(chan emailDeliveryJob, 1),
+	}
+	form := url.Values{}
+	form.Set("email", "admin@fake.example")
+	form.Set("password", "secret")
+	request := httptest.NewRequest(http.MethodPost, "http://"+domain+"/?register", strings.NewReader(form.Encode()))
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	response := httptest.NewRecorder()
+
+	application.route(response, request)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, body=%q", response.Code, response.Body.String())
+	}
+	siteDatabasePath := filepath.Join(siteDatabaseDir, domainStorageName(domain)+".db")
+	if _, err := os.Stat(siteDatabasePath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("site database stat err = %v, want not exist", err)
+	}
+	select {
+	case mailJob := <-application.emailDelivery:
+		t.Fatalf("registration email was sent before DNS verification: %#v", mailJob.message)
+	default:
+	}
+}
+
+func TestRegisterCreatesSiteDatabaseOnlyAfterConfirmedVerifiedDomain(t *testing.T) {
+	const domain = "verified.example"
+	withRegistrationDNS(t, domain, true)
+	storagePath := t.TempDir()
+	dbPath := filepath.Join(storagePath, defaultDBPath)
+	siteDatabaseDir := siteDatabaseRootPath(dbPath)
+	router := newPerSiteDBRouter(siteDatabaseDir, "localhost", func(migrationCtx context.Context, rawDB *sql.DB, migrateDomain string) error {
+		application := &App{db: rawDB, storagePath: storagePath, dbPath: dbPath, grabTracker: newGrabProgressTracker()}
+		return application.migrate(contextWithDomain(migrationCtx, migrateDomain))
+	}, false)
+	t.Cleanup(func() {
+		if err := router.Close(); err != nil {
+			t.Fatalf("close site database router: %v", err)
+		}
+	})
+	waitSiteDBRouterStartup(t, router)
+	application := &App{
+		db:                        router,
+		siteDatabaseRouter:        router,
+		storagePath:               storagePath,
+		dbPath:                    dbPath,
+		grabTracker:               newGrabProgressTracker(),
+		registrationConfirmations: startEmailConfirmationMemoryWorker(context.Background()),
+		emailDelivery:             make(chan emailDeliveryJob, 1),
+	}
+	form := url.Values{}
+	form.Set("email", "admin@verified.example")
+	form.Set("password", "secret")
+	request := httptest.NewRequest(http.MethodPost, "http://"+domain+"/?register", strings.NewReader(form.Encode()))
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	response := httptest.NewRecorder()
+
+	application.route(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%q", response.Code, response.Body.String())
+	}
+	var pendingToken string
+	select {
+	case mailJob := <-application.emailDelivery:
+		pendingToken = confirmationTokenFromBody(t, mailJob.message.Body)
+	default:
+		t.Fatal("registration did not enqueue confirmation email")
+	}
+	siteDatabasePath := filepath.Join(siteDatabaseDir, domainStorageName(domain)+".db")
+	if _, err := os.Stat(siteDatabasePath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("site database before confirmation stat err = %v, want not exist", err)
+	}
+
+	confirmRequest := httptest.NewRequest(http.MethodGet, "http://"+domain+"/?email_confirm="+url.QueryEscape(pendingToken), nil)
+	confirmResponse := httptest.NewRecorder()
+	application.route(confirmResponse, confirmRequest)
+	if confirmResponse.Code != http.StatusFound {
+		t.Fatalf("confirm status = %d, body=%q", confirmResponse.Code, confirmResponse.Body.String())
+	}
+	if _, err := os.Stat(siteDatabasePath); err != nil {
+		t.Fatalf("site database after confirmation stat err = %v", err)
+	}
+	var userCount int
+	if err := router.QueryRowContext(contextWithDomain(context.Background(), domain), `SELECT COUNT(1) FROM users WHERE domain=? AND email=? AND is_admin=1`, domain, "admin@verified.example").Scan(&userCount); err != nil {
+		t.Fatalf("read confirmed admin: %v", err)
+	}
+	if userCount != 1 {
+		t.Fatalf("confirmed admin count = %d, want 1", userCount)
 	}
 }
 
@@ -4796,15 +4996,10 @@ func TestPerSiteDBRouterRoutesActiveAliasRequestsToPrimarySiteDatabase(t *testin
 			t.Fatalf("close site database router: %v", err)
 		}
 	})
-
-	aliasContext := contextWithDomain(context.Background(), "twochicks.ru")
-	var staleAliasUserCount int
-	if err := router.QueryRowContext(aliasContext, `SELECT COUNT(1) FROM users`).Scan(&staleAliasUserCount); err != nil {
-		t.Fatalf("open stale alias database: %v", err)
-	}
+	waitSiteDBRouterStartup(t, router)
 
 	primaryDomain := "twochicks.sitebrush.com"
-	primaryContext := contextWithDomain(context.Background(), primaryDomain)
+	primaryContext := contextWithSiteDatabaseCreation(contextWithDomain(context.Background(), primaryDomain))
 	if _, err := router.ExecContext(primaryContext, `INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, primaryDomain, "admin@twochicks.test", "hash"); err != nil {
 		t.Fatalf("insert primary admin: %v", err)
 	}
@@ -4844,9 +5039,10 @@ func TestPerSiteDBRouterSerializesConcurrentWritesToOneSiteDatabase(t *testing.T
 			t.Fatalf("close site database router: %v", err)
 		}
 	})
+	waitSiteDBRouterStartup(t, router)
 
 	domain := "serial.example"
-	domainContext := contextWithDomain(context.Background(), domain)
+	domainContext := contextWithSiteDatabaseCreation(contextWithDomain(context.Background(), domain))
 	siteDatabase, err := router.databaseForContext(domainContext)
 	if err != nil {
 		t.Fatalf("open site database: %v", err)
@@ -4910,6 +5106,7 @@ func TestPerSiteDBRouterMigratesUnopenedDatabaseDuringAliasScan(t *testing.T) {
 			t.Fatalf("close site database router: %v", err)
 		}
 	})
+	waitSiteDBRouterStartup(t, router)
 
 	siteDatabase, err := router.databaseForContext(contextWithDomain(context.Background(), aliasDomain))
 	if err != nil {

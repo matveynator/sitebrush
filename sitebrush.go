@@ -92,30 +92,45 @@ const pagePasswordSessionTTL = time.Hour
 
 // App keeps only explicit dependencies to stay readable and easy to swap.
 type App struct {
-	db                    sqlExecutor
-	siteDatabaseRouter    *perSiteDBRouter
-	storagePath           string
-	dbPath                string
-	debug                 bool
-	nativeFileDialog      bool
-	automaticSSLAvailable bool
-	grabTracker           *grabProgressTracker
-	publishTracker        *publishProgressTracker
-	analyticsEvents       chan siteAnalyticsEvent
-	analyticsMemoryLimit  int64
-	guestStaticHTMLCache  chan guestStaticHTMLCacheRequest
-	geoIP                 *geoip.Resolver
-	domainLogEvents       chan domainLogEvent
-	autoCertGuard         chan autoCertGuardRequest
-	authIPFailureCache    chan authIPFailureCacheRequest
-	emailDelivery         chan emailDeliveryJob
-	sendEmail             emailSender
+	db                        sqlExecutor
+	siteDatabaseRouter        *perSiteDBRouter
+	storagePath               string
+	dbPath                    string
+	debug                     bool
+	nativeFileDialog          bool
+	automaticSSLAvailable     bool
+	grabTracker               *grabProgressTracker
+	publishTracker            *publishProgressTracker
+	analyticsEvents           chan siteAnalyticsEvent
+	analyticsMemoryLimit      int64
+	guestStaticHTMLCache      chan guestStaticHTMLCacheRequest
+	geoIP                     *geoip.Resolver
+	domainLogEvents           chan domainLogEvent
+	autoCertGuard             chan autoCertGuardRequest
+	authIPFailureCache        chan authIPFailureCacheRequest
+	registrationConfirmations chan emailConfirmationMemoryRequest
+	emailDelivery             chan emailDeliveryJob
+	sendEmail                 emailSender
 }
 
 type emailSender func(context.Context, mailout.Message) error
 
 type emailDeliveryJob struct {
 	message mailout.Message
+}
+
+type emailConfirmationMemoryRequest struct {
+	action       string
+	token        string
+	confirmation EmailConfirmation
+	now          time.Time
+	response     chan emailConfirmationMemoryResponse
+}
+
+type emailConfirmationMemoryResponse struct {
+	confirmation EmailConfirmation
+	found        bool
+	err          error
 }
 
 type autoCertGuardRequest struct {
@@ -3836,6 +3851,7 @@ func runSitebrushServer(ctx context.Context, config serverRunConfig) error {
 	application := &App{storagePath: effectiveStoragePath, dbPath: effectiveDBPath, debug: config.Debug, nativeFileDialog: desktop.NativeFileDialogSupported(), grabTracker: newGrabProgressTracker(), publishTracker: newPublishProgressTracker(), analyticsEvents: make(chan siteAnalyticsEvent, 65536), domainLogEvents: make(chan domainLogEvent, 1024)}
 	application.guestStaticHTMLCache = startGuestStaticHTMLCacheWorker(ctx, defaultGuestStaticHTMLCacheLimitBytes)
 	application.authIPFailureCache = startAuthIPFailureCacheWorker(ctx)
+	application.registrationConfirmations = startEmailConfirmationMemoryWorker(ctx)
 	application.emailDelivery = startEmailDeliveryWorker(ctx, application.defaultEmailSender())
 	application.geoIP = geoip.NewResolver(filepath.Join(application.storageRootDir(), "geoip"))
 	siteDatabaseRootDir := siteDatabaseRootPath(effectiveDBPath)
@@ -4404,6 +4420,7 @@ func (a *App) migrate(ctx context.Context) error {
 		return siteMigrationStepError{step: "verify schema", err: schemaErr}
 	}
 	if schemaVersion >= currentSiteDatabaseSchemaVersion && schemaComplete {
+		a.migrateLoopbackDomainsToLocalhost(ctx)
 		if a.debug {
 			log.Printf("%sDB MIGRATION%s skipped domain=%s version=%d", terminalCyan(), terminalReset(), domainFromContext(ctx), schemaVersion)
 		}
@@ -5094,15 +5111,12 @@ func (a *App) setupAdmin(w http.ResponseWriter, r *http.Request) {
 		a.renderSetupPage(w, r, domain, email, translationOrDefault(translations, "email_confirmation_status_required", "Email and password are required."))
 		return
 	}
-	registerContext := contextWithSiteDatabaseCreation(contextWithDomain(r.Context(), domain))
-	if _, err := a.db.ExecContext(registerContext, `INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, domain, email, password); err != nil {
+	if err := a.createAndSendEmailConfirmation(r, "register", domain, "", email, password, requestedReturnPath(r)); err != nil {
 		w.WriteHeader(http.StatusBadRequest)
 		a.renderSetupPage(w, r, domain, email, err.Error())
 		return
 	}
-	a.promoteFirstServerOwner(registerContext, domain, email)
-	a.createSessionForDomain(w, registerContext, domain, email)
-	http.Redirect(w, r, requestedReturnTarget(r), http.StatusFound)
+	a.renderSetupPage(w, r, domain, email, translationOrDefault(translations, "email_confirmation_status_sent", "A confirmation link has been sent to the email address."))
 }
 
 func (a *App) registerPage(w http.ResponseWriter, r *http.Request) {
@@ -7384,9 +7398,6 @@ func (a *App) createAndSendEmailConfirmation(r *http.Request, action, domain, cu
 		return fmt.Errorf("%s", translationOrDefault(translations, "email_confirmation_status_invalid_email", "Email address is invalid."))
 	}
 	databaseContext := r.Context()
-	if action == "register" {
-		databaseContext = contextWithSiteDatabaseCreation(databaseContext)
-	}
 	if strings.TrimSpace(returnPath) == "" {
 		returnPath = requestedReturnPath(r)
 	}
@@ -7394,16 +7405,25 @@ func (a *App) createAndSendEmailConfirmation(r *http.Request, action, domain, cu
 	token := randomAccessToken()
 	now := time.Now().UTC()
 	expiresAt := now.Add(emailConfirmationTTL)
-	_, _ = a.db.ExecContext(databaseContext, `DELETE FROM email_confirmations WHERE expires_at<>'' AND expires_at<?`, now.Format(time.RFC3339))
-	_, err := a.db.ExecContext(databaseContext, `INSERT INTO email_confirmations(token,domain,action,email,password,current_email,return_path,language_code,created_at,expires_at) VALUES(?,?,?,?,?,?,?,?,?,?)`,
-		token, domain, action, email, password, strings.TrimSpace(currentEmail), returnPath, languageCode, now.Format(time.RFC3339), expiresAt.Format(time.RFC3339))
-	if err != nil {
-		return err
+	confirmation := EmailConfirmation{
+		Token:        token,
+		Domain:       domain,
+		Action:       action,
+		Email:        email,
+		Password:     password,
+		CurrentEmail: strings.TrimSpace(currentEmail),
+		ReturnPath:   returnPath,
+		LanguageCode: languageCode,
+		ExpiresAt:    expiresAt.Format(time.RFC3339),
 	}
 	confirmationURL := emailConfirmationURL(r, token)
 	fromAddress := a.emailFromAddress(domain)
+	if action == "register" {
+		if dnsSetup, dnsSetupRequired := a.registrationDNSSetupView(databaseContext, domain, languageCode); dnsSetupRequired {
+			return errors.New(dnsSetup.PlainText)
+		}
+	}
 	if dnsSetup, dnsSetupRequired := a.emailDNSSetupView(databaseContext, domain, fromAddress, languageCode); dnsSetupRequired {
-		_, _ = a.db.ExecContext(databaseContext, `DELETE FROM email_confirmations WHERE token=?`, token)
 		return errors.New(dnsSetup.PlainText)
 	}
 	message := mailout.Message{
@@ -7411,6 +7431,22 @@ func (a *App) createAndSendEmailConfirmation(r *http.Request, action, domain, cu
 		To:      email,
 		Subject: emailSubjectForLanguage(languageCode, action, domain),
 		Body:    emailBodyForLanguage(languageCode, action, domain, confirmationURL),
+	}
+	if action == "register" {
+		if err := a.saveRegistrationConfirmation(databaseContext, confirmation); err != nil {
+			return err
+		}
+		if err := a.enqueueEmail(databaseContext, message); err != nil {
+			a.deleteRegistrationConfirmation(databaseContext, token)
+			return err
+		}
+		return nil
+	}
+	_, _ = a.db.ExecContext(databaseContext, `DELETE FROM email_confirmations WHERE expires_at<>'' AND expires_at<?`, now.Format(time.RFC3339))
+	_, err := a.db.ExecContext(databaseContext, `INSERT INTO email_confirmations(token,domain,action,email,password,current_email,return_path,language_code,created_at,expires_at) VALUES(?,?,?,?,?,?,?,?,?,?)`,
+		token, domain, action, email, password, strings.TrimSpace(currentEmail), returnPath, languageCode, now.Format(time.RFC3339), expiresAt.Format(time.RFC3339))
+	if err != nil {
+		return err
 	}
 	if err := a.enqueueEmail(databaseContext, message); err != nil {
 		_, _ = a.db.ExecContext(databaseContext, `DELETE FROM email_confirmations WHERE token=?`, token)
@@ -7439,17 +7475,28 @@ func (a *App) confirmEmailToken(w http.ResponseWriter, r *http.Request) {
 	}
 	switch strings.TrimSpace(confirmation.Action) {
 	case "register":
-		if a.hasAdmin(r.Context(), confirmation.Domain) {
-			_, _ = a.db.ExecContext(r.Context(), `DELETE FROM email_confirmations WHERE token=?`, token)
+		confirmationContext := contextWithDomain(r.Context(), confirmation.Domain)
+		if a.hasAdmin(confirmationContext, confirmation.Domain) {
+			a.deleteRegistrationConfirmation(r.Context(), token)
 			a.renderEmailConfirmationStatus(w, r, http.StatusConflict, translationOrDefault(confirmationTranslations, "email_confirmation_status_admin_exists", "Administrator already exists."))
 			return
 		}
-		if _, err := a.db.ExecContext(r.Context(), `INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, confirmation.Domain, confirmation.Email, confirmation.Password); err != nil {
+		if dnsSetup, dnsSetupRequired := a.registrationDNSSetupView(confirmationContext, confirmation.Domain, confirmation.LanguageCode); dnsSetupRequired {
+			a.renderEmailConfirmationStatus(w, r, http.StatusBadRequest, dnsSetup.PlainText)
+			return
+		}
+		if dnsSetup, dnsSetupRequired := a.emailDNSSetupView(confirmationContext, confirmation.Domain, a.emailFromAddress(confirmation.Domain), confirmation.LanguageCode); dnsSetupRequired {
+			a.renderEmailConfirmationStatus(w, r, http.StatusBadRequest, dnsSetup.PlainText)
+			return
+		}
+		registerContext := contextWithSiteDatabaseCreation(confirmationContext)
+		if _, err := a.db.ExecContext(registerContext, `INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, confirmation.Domain, confirmation.Email, confirmation.Password); err != nil {
 			a.renderEmailConfirmationStatus(w, r, http.StatusBadRequest, err.Error())
 			return
 		}
-		_, _ = a.db.ExecContext(r.Context(), `DELETE FROM email_confirmations WHERE token=?`, token)
-		a.createSessionForDomain(w, r.Context(), confirmation.Domain, confirmation.Email)
+		a.deleteRegistrationConfirmation(registerContext, token)
+		a.promoteFirstServerOwner(registerContext, confirmation.Domain, confirmation.Email)
+		a.createSessionForDomain(w, registerContext, confirmation.Domain, confirmation.Email)
 		http.Redirect(w, r, safeConfirmationReturnPath(confirmation.ReturnPath), http.StatusFound)
 	case "profile":
 		if err := a.applyProfileEmailConfirmation(r.Context(), confirmation); err != nil {
@@ -7465,6 +7512,9 @@ func (a *App) confirmEmailToken(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) emailConfirmationByToken(ctx context.Context, token string) (EmailConfirmation, bool) {
+	if confirmation, found := a.registrationConfirmationByToken(ctx, token); found {
+		return confirmation, true
+	}
 	var confirmation EmailConfirmation
 	err := a.db.QueryRowContext(ctx, `SELECT token,domain,action,email,password,current_email,return_path,language_code,expires_at FROM email_confirmations WHERE token=?`, token).Scan(
 		&confirmation.Token, &confirmation.Domain, &confirmation.Action, &confirmation.Email, &confirmation.Password, &confirmation.CurrentEmail, &confirmation.ReturnPath, &confirmation.LanguageCode, &confirmation.ExpiresAt)
@@ -7545,6 +7595,109 @@ func (a *App) enqueueEmail(ctx context.Context, message mailout.Message) error {
 		return ctx.Err()
 	default:
 		return errors.New("email delivery queue is full")
+	}
+}
+
+var fallbackRegistrationConfirmations = startEmailConfirmationMemoryWorker(context.Background())
+
+func (a *App) activeRegistrationConfirmations() chan emailConfirmationMemoryRequest {
+	if a != nil && a.registrationConfirmations != nil {
+		return a.registrationConfirmations
+	}
+	return fallbackRegistrationConfirmations
+}
+
+func startEmailConfirmationMemoryWorker(ctx context.Context) chan emailConfirmationMemoryRequest {
+	requests := make(chan emailConfirmationMemoryRequest)
+	go runEmailConfirmationMemoryWorker(ctx, requests)
+	return requests
+}
+
+func runEmailConfirmationMemoryWorker(ctx context.Context, requests <-chan emailConfirmationMemoryRequest) {
+	confirmationsByToken := make(map[string]EmailConfirmation)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case request := <-requests:
+			now := request.now
+			if now.IsZero() {
+				now = time.Now().UTC()
+			}
+			purgeExpiredEmailConfirmations(confirmationsByToken, now)
+			switch request.action {
+			case "save":
+				token := strings.TrimSpace(request.confirmation.Token)
+				if token == "" {
+					request.response <- emailConfirmationMemoryResponse{err: errors.New("confirmation token is required")}
+					continue
+				}
+				confirmationsByToken[token] = request.confirmation
+				request.response <- emailConfirmationMemoryResponse{}
+			case "get":
+				confirmation, found := confirmationsByToken[strings.TrimSpace(request.token)]
+				request.response <- emailConfirmationMemoryResponse{confirmation: confirmation, found: found}
+			case "delete":
+				delete(confirmationsByToken, strings.TrimSpace(request.token))
+				request.response <- emailConfirmationMemoryResponse{}
+			default:
+				request.response <- emailConfirmationMemoryResponse{err: errors.New("unknown confirmation memory action")}
+			}
+		}
+	}
+}
+
+func purgeExpiredEmailConfirmations(confirmationsByToken map[string]EmailConfirmation, now time.Time) {
+	for token, confirmation := range confirmationsByToken {
+		if confirmationExpired(confirmation.ExpiresAt, now) {
+			delete(confirmationsByToken, token)
+		}
+	}
+}
+
+func (a *App) saveRegistrationConfirmation(ctx context.Context, confirmation EmailConfirmation) error {
+	response := make(chan emailConfirmationMemoryResponse, 1)
+	request := emailConfirmationMemoryRequest{action: "save", confirmation: confirmation, response: response}
+	select {
+	case a.activeRegistrationConfirmations() <- request:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	select {
+	case result := <-response:
+		return result.err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (a *App) registrationConfirmationByToken(ctx context.Context, token string) (EmailConfirmation, bool) {
+	response := make(chan emailConfirmationMemoryResponse, 1)
+	request := emailConfirmationMemoryRequest{action: "get", token: token, response: response}
+	select {
+	case a.activeRegistrationConfirmations() <- request:
+	case <-ctx.Done():
+		return EmailConfirmation{}, false
+	}
+	select {
+	case result := <-response:
+		return result.confirmation, result.found
+	case <-ctx.Done():
+		return EmailConfirmation{}, false
+	}
+}
+
+func (a *App) deleteRegistrationConfirmation(ctx context.Context, token string) {
+	response := make(chan emailConfirmationMemoryResponse, 1)
+	request := emailConfirmationMemoryRequest{action: "delete", token: token, response: response}
+	select {
+	case a.activeRegistrationConfirmations() <- request:
+	case <-ctx.Done():
+		return
+	}
+	select {
+	case <-response:
+	case <-ctx.Done():
 	}
 }
 
@@ -7630,6 +7783,29 @@ func (a *App) emailDNSSetupView(ctx context.Context, siteDomain, fromAddress, la
 		return EmailDNSSetupView{}, false
 	}
 	return emailDNSSetupViewForLanguage(languageCode, setupDomain, setupFromAddress, selectedIPText), true
+}
+
+func (a *App) registrationDNSSetupView(ctx context.Context, siteDomain, languageCode string) (EmailDNSSetupView, bool) {
+	registrationDomain := normalizeDomainName(siteDomain)
+	if emailDomainCannotUseDNS(registrationDomain) {
+		return EmailDNSSetupView{}, false
+	}
+	serverIPs, externalIP, err := detectServerIPCandidates(ctx)
+	if err != nil {
+		return emailDNSSetupViewForLanguage(languageCode, registrationDomain, "sitebrush@"+registrationDomain, "SERVER_IP"), true
+	}
+	selectedIP := selectedEmailDNSIP(externalIP, serverIPs)
+	if selectedIP == nil {
+		return emailDNSSetupViewForLanguage(languageCode, registrationDomain, "sitebrush@"+registrationDomain, "SERVER_IP"), true
+	}
+	ipRecords, ipErr := lookupIPRecords(registrationDomain)
+	domainPointsToServer := ipErr == nil && ipRecordsAllowAnyServerIP(ipRecords, serverIPs)
+	txtRecords, txtErr := lookupTXTRecords(registrationDomain)
+	spfAllowsServer := txtErr == nil && spfRecordsAllowAnyServerIP(txtRecords, serverIPs)
+	if domainPointsToServer && spfAllowsServer {
+		return EmailDNSSetupView{}, false
+	}
+	return emailDNSSetupViewForLanguage(languageCode, registrationDomain, "sitebrush@"+registrationDomain, selectedIP.String()), true
 }
 
 func emailDomainCannotUseDNS(domain string) bool {
@@ -7878,9 +8054,9 @@ func emailDNSSetupViewForLanguage(languageCode, domain, fromAddress, serverIP st
 	}
 	switch strings.ToLower(strings.TrimSpace(languageCode)) {
 	case "ru":
-		view.Title = "Почта восстановления пока не готова"
-		view.Intro = fmt.Sprintf("Проблема: DNS домена %s еще не разрешает SiteBrush отправлять письма с адреса %s.", domain, fromAddress)
-		view.Explanation = "Добавьте записи ниже у регистратора домена."
+		view.Title = "Сначала настройте DNS"
+		view.Intro = "Восстановление пароля через email"
+		view.Explanation = fmt.Sprintf("SiteBrush будет отправлять письма с адреса %s. Добавьте записи ниже у регистратора домена.", fromAddress)
 		view.DNSIntro = "Скопируйте записи в DNS:"
 		view.CopyLabel = "Копировать"
 		view.CheckLabel = "Проверить"
