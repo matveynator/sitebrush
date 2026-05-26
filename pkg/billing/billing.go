@@ -328,7 +328,7 @@ func (store Store) SaveDemoSettings(ctx context.Context, domain, sourceURL strin
 	return transaction.Commit()
 }
 
-func (store Store) CreateDemoSession(ctx context.Context, domain, sessionToken, userEmail string) error {
+func (store Store) CreateDemoSession(ctx context.Context, domain, sessionToken, userEmail string, deleteAfter time.Time) error {
 	domain = strings.TrimSpace(domain)
 	sessionToken = strings.TrimSpace(sessionToken)
 	userEmail = strings.TrimSpace(userEmail)
@@ -338,9 +338,13 @@ func (store Store) CreateDemoSession(ctx context.Context, domain, sessionToken, 
 	if sessionToken == "" {
 		return fmt.Errorf("demo session token is required")
 	}
-	now := time.Now().UTC().Format(time.RFC3339)
+	nowTime := time.Now().UTC()
+	if deleteAfter.IsZero() {
+		deleteAfter = nowTime
+	}
+	now := nowTime.Format(time.RFC3339)
 	_, err := store.DB.ExecContext(ctx, `INSERT INTO demo_site_sessions(domain,session_token,user_email,status,created_at,delete_after) VALUES(?,?,?,?,?,?)`,
-		domain, sessionToken, userEmail, "active", now, "")
+		domain, sessionToken, userEmail, "active", now, deleteAfter.UTC().Format(time.RFC3339))
 	return err
 }
 

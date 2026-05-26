@@ -5924,10 +5924,10 @@ func (a *App) startDemoSiteSession(w http.ResponseWriter, r *http.Request, setti
 		return "", err
 	}
 	sessionToken := a.createSessionForDomain(w, r.Context(), domain, adminEmail)
-	if err := store.CreateDemoSession(r.Context(), domain, sessionToken, adminEmail); err != nil {
+	if err := store.CreateDemoSession(r.Context(), domain, sessionToken, adminEmail, time.Now().Add(demoSiteDeletionDelay)); err != nil {
 		return "", err
 	}
-	return "/", nil
+	return "/?visual", nil
 }
 
 func (a *App) ensureDemoSiteReady(ctx context.Context, controlDatabase *sql.DB, settings billing.DemoSettings) (string, error) {
@@ -8146,20 +8146,24 @@ func (a *App) cleanupExpiredDemoSites(ctx context.Context, now time.Time) {
 }
 
 func demoSessionsReadyForDeletion(sessions []billing.DemoSession, now time.Time) bool {
-	hasDeletingSession := false
 	for _, session := range sessions {
-		switch strings.TrimSpace(session.Status) {
-		case "active":
-			return false
-		case "deleting":
-			hasDeletingSession = true
-			deleteAfter, err := time.Parse(time.RFC3339, strings.TrimSpace(session.DeleteAfter))
-			if err != nil || now.Before(deleteAfter) {
-				return false
-			}
+		deleteAfter, ok := demoSessionDeleteAfter(session)
+		if ok && !now.Before(deleteAfter) {
+			return true
 		}
 	}
-	return hasDeletingSession
+	return false
+}
+
+func demoSessionDeleteAfter(session billing.DemoSession) (time.Time, bool) {
+	if deleteAfter, err := time.Parse(time.RFC3339, strings.TrimSpace(session.DeleteAfter)); err == nil {
+		return deleteAfter, true
+	}
+	createdAt, err := time.Parse(time.RFC3339, strings.TrimSpace(session.CreatedAt))
+	if err != nil {
+		return time.Time{}, false
+	}
+	return createdAt.Add(demoSiteDeletionDelay), true
 }
 
 func (a *App) deleteDemoManagedSiteWithoutBackup(ctx context.Context, controlDatabase *sql.DB, domain string) error {

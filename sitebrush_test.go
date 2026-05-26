@@ -1922,6 +1922,52 @@ func TestDemoSiteVisitorGetsEditorSessionAndCleanupDeletesSite(t *testing.T) {
 	}
 }
 
+func TestActiveDemoSessionDoesNotBlockScheduledSiteRecreation(t *testing.T) {
+	application := newRouterTestApplication(t)
+	controlDB := setupBillingOwnerForTest(t, application, "owner.example", "owner@example.com", true)
+	defer controlDB.Close()
+	store := billing.Store{DB: controlDB}
+	if err := store.SaveDemoSettings(context.Background(), "demo-active.example", "", false); err != nil {
+		t.Fatalf("save demo settings: %v", err)
+	}
+
+	request := httptest.NewRequest(http.MethodGet, "http://demo-active.example/", nil)
+	request = request.WithContext(contextWithDomain(request.Context(), "demo-active.example"))
+	response := httptest.NewRecorder()
+	application.route(response, request)
+	if response.Code != http.StatusFound {
+		t.Fatalf("demo start status = %d, body=%q", response.Code, response.Body.String())
+	}
+
+	siteDatabasePath := filepath.Join(siteDatabaseRootPath(application.serverControlDBPath()), domainStorageName("demo-active.example")+".db")
+	if _, err := os.Stat(siteDatabasePath); err != nil {
+		t.Fatalf("demo site database stat err = %v, want exists", err)
+	}
+
+	application.cleanupExpiredDemoSites(context.Background(), time.Now().Add(11*time.Minute))
+	if _, err := os.Stat(siteDatabasePath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("demo site database stat err = %v, want not exist", err)
+	}
+	var remainingDemoSessions int
+	if err := controlDB.QueryRow(`SELECT COUNT(1) FROM demo_site_sessions WHERE domain='demo-active.example'`).Scan(&remainingDemoSessions); err != nil {
+		t.Fatalf("read remaining demo sessions: %v", err)
+	}
+	if remainingDemoSessions != 0 {
+		t.Fatalf("remaining demo sessions = %d, want 0", remainingDemoSessions)
+	}
+
+	recreateRequest := httptest.NewRequest(http.MethodGet, "http://demo-active.example/", nil)
+	recreateRequest = recreateRequest.WithContext(contextWithDomain(recreateRequest.Context(), "demo-active.example"))
+	recreateResponse := httptest.NewRecorder()
+	application.route(recreateResponse, recreateRequest)
+	if recreateResponse.Code != http.StatusFound {
+		t.Fatalf("demo recreate status = %d, body=%q", recreateResponse.Code, recreateResponse.Body.String())
+	}
+	if _, err := os.Stat(siteDatabasePath); err != nil {
+		t.Fatalf("recreated demo site database stat err = %v, want exists", err)
+	}
+}
+
 func newRouterTestApplication(t *testing.T) *App {
 	t.Helper()
 	storagePath := t.TempDir()
