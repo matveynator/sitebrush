@@ -81,6 +81,7 @@ const guestStaticHTMLCacheQueueSize = 4096
 const authIPFailureCacheQueueSize = 4096
 const emailDeliveryQueueSize = 256
 const emailConfirmationTTL = 24 * time.Hour
+const demoSiteDeletionDelay = 10 * time.Minute
 const sitebrushHTTPReadTimeout = 10 * time.Second
 const sitebrushHTTPWriteTimeout = 30 * time.Second
 const sitebrushHTTPIdleTimeout = 65 * time.Second
@@ -222,6 +223,11 @@ type siteDBResponse struct {
 
 type siteDBPreloadRequest struct {
 	response chan siteDBPreloadResponse
+}
+
+type siteDBForgetDomainRequest struct {
+	domain   string
+	response chan error
 }
 
 type siteDBPreloadResponse struct {
@@ -708,6 +714,7 @@ type perSiteDBRouter struct {
 	debug                   bool
 	requests                chan siteDBRequest
 	preloadRequests         chan siteDBPreloadRequest
+	forgetDomainRequests    chan siteDBForgetDomainRequest
 	migrationStatusRequests chan siteDBMigrationStatusRequest
 	migrationEvents         chan siteDBMigrationEvent
 	closeRequests           chan chan error
@@ -720,6 +727,7 @@ func newPerSiteDBRouter(siteDatabaseRootDir string, fallbackDomain string, migra
 		debug:                   debug,
 		requests:                make(chan siteDBRequest),
 		preloadRequests:         make(chan siteDBPreloadRequest),
+		forgetDomainRequests:    make(chan siteDBForgetDomainRequest),
 		migrationStatusRequests: make(chan siteDBMigrationStatusRequest),
 		migrationEvents:         make(chan siteDBMigrationEvent, 256),
 		closeRequests:           make(chan chan error),
@@ -778,6 +786,24 @@ func (r *perSiteDBRouter) run(siteDatabaseRootDir string, migrate siteDBMigrator
 			}
 			response := r.preloadMigratedDatabases(siteDatabaseRootDir, databasesByDomain, migratedDomains, degradedDomains, migrate)
 			preloadRequest.response <- response
+		case forgetRequest := <-r.forgetDomainRequests:
+			domain := normalizeDomainName(forgetRequest.domain)
+			if domain == "" {
+				domain = r.fallbackDomain
+			}
+			var closeErr error
+			if database := databasesByDomain[domain]; database != nil {
+				closeErr = database.Close()
+			}
+			delete(databasesByDomain, domain)
+			delete(migratedDomains, domain)
+			delete(degradedDomains, domain)
+			for aliasDomain, primaryDomain := range primaryDomainsByAlias {
+				if aliasDomain == domain || primaryDomain == domain {
+					delete(primaryDomainsByAlias, aliasDomain)
+				}
+			}
+			forgetRequest.response <- closeErr
 		case request := <-r.requests:
 			startedAt := time.Now()
 			domain := normalizeDomainName(request.domain)
@@ -1155,6 +1181,25 @@ func (r *perSiteDBRouter) Preload(ctx context.Context) siteDBPreloadResponse {
 		return preloadResponse
 	case <-ctx.Done():
 		return siteDBPreloadResponse{err: ctx.Err()}
+	}
+}
+
+func (r *perSiteDBRouter) ForgetDomain(ctx context.Context, domain string) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	response := make(chan error, 1)
+	request := siteDBForgetDomainRequest{domain: domain, response: response}
+	select {
+	case r.forgetDomainRequests <- request:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	select {
+	case err := <-response:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 }
 
@@ -3997,6 +4042,7 @@ func runSitebrushServer(ctx context.Context, config serverRunConfig) error {
 	application.startDomainLogWorker(ctx)
 	application.startAnalyticsWorkers(ctx)
 	application.startServerOwnerRecoveryWorker(ctx)
+	application.startDemoSiteCleanupWorker(ctx)
 
 	router := http.NewServeMux()
 	staticFiles, err := fs.Sub(embeddedWebFiles, "web/static")
@@ -5282,6 +5328,9 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, redirectTarget, http.StatusMovedPermanently)
 		return
 	}
+	if a.maybeStartDemoSite(w, r, requestDomain) {
+		return
+	}
 	if isGuestStaticRequest(r) {
 		if rule, found := a.pagePasswordRuleFromPrefixFile(requestDomain, pagePath); found {
 			failureDomainPrefix := pagePasswordFailureDomainPrefix(rule.Domain)
@@ -5806,9 +5855,203 @@ func (a *App) renderLoginPage(w http.ResponseWriter, r *http.Request, returnPath
 	})
 }
 
+// === Demo site sessions ===
+
+func (a *App) maybeStartDemoSite(w http.ResponseWriter, r *http.Request, requestDomain string) bool {
+	if !demoSiteCanStartFromRequest(r) {
+		return false
+	}
+	settings, found := a.demoSiteSettings(r.Context())
+	if !found || normalizeDomainName(settings.Domain) != normalizeDomainName(requestDomain) {
+		return false
+	}
+	if hasSitebrushSessionCookie(r) {
+		if _, isAdmin := a.currentAdminEmailForDomain(r, requestDomain); isAdmin {
+			return false
+		}
+	}
+	redirectPath, err := a.startDemoSiteSession(w, r, settings)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return true
+	}
+	http.Redirect(w, r, redirectPath, http.StatusFound)
+	return true
+}
+
+func demoSiteCanStartFromRequest(r *http.Request) bool {
+	if r == nil || (r.Method != http.MethodGet && r.Method != http.MethodHead) {
+		return false
+	}
+	if path.Ext(cleanPath(r.URL.Path)) != "" {
+		return false
+	}
+	for _, queryFlag := range []string{"logout", "billing", "billing_backup_download", "backup_download", "captcha", "email_confirm", "grab_events", "grab_ws", "publish_events"} {
+		if hasQueryFlag(r, queryFlag) {
+			return false
+		}
+	}
+	return true
+}
+
+func (a *App) demoSiteSettings(ctx context.Context) (billing.DemoSettings, bool) {
+	controlDatabase, err := a.openServerControlDatabase(ctx)
+	if err != nil {
+		return billing.DemoSettings{}, false
+	}
+	defer controlDatabase.Close()
+	settings := (billing.Store{DB: controlDatabase}).DemoSettings(ctx)
+	settings.Domain = normalizeDomainName(settings.Domain)
+	return settings, settings.Enabled && settings.Domain != ""
+}
+
+func (a *App) startDemoSiteSession(w http.ResponseWriter, r *http.Request, settings billing.DemoSettings) (string, error) {
+	domain := normalizeDomainName(settings.Domain)
+	if domain == "" {
+		return "", fmt.Errorf("demo domain is not configured")
+	}
+	controlDatabase, err := a.openServerControlDatabase(r.Context())
+	if err != nil {
+		return "", err
+	}
+	defer controlDatabase.Close()
+	store := billing.Store{DB: controlDatabase}
+	if ownerDomain, found := store.OwnerDomain(r.Context()); found && normalizeDomainName(ownerDomain) == domain {
+		return "", fmt.Errorf("server owner site cannot be used as the public demo site")
+	}
+	adminEmail, err := a.ensureDemoSiteReady(r.Context(), controlDatabase, settings)
+	if err != nil {
+		return "", err
+	}
+	sessionToken := a.createSessionForDomain(w, r.Context(), domain, adminEmail)
+	if err := store.CreateDemoSession(r.Context(), domain, sessionToken, adminEmail); err != nil {
+		return "", err
+	}
+	return "/?visual", nil
+}
+
+func (a *App) ensureDemoSiteReady(ctx context.Context, controlDatabase *sql.DB, settings billing.DemoSettings) (string, error) {
+	domain := normalizeDomainName(settings.Domain)
+	if domain == "" {
+		return "", fmt.Errorf("demo domain is required")
+	}
+	adminEmail, hasAdmin := a.firstAdminEmailForDomain(ctx, domain)
+	if !hasAdmin {
+		databasePath := filepath.Join(siteDatabaseRootPath(a.serverControlDBPath()), domainStorageName(domain)+".db")
+		if _, statErr := os.Stat(databasePath); statErr == nil {
+			if err := a.deleteDemoManagedSiteWithoutBackup(ctx, controlDatabase, domain); err != nil {
+				return "", err
+			}
+		} else if !errors.Is(statErr, os.ErrNotExist) {
+			return "", statErr
+		}
+		adminEmail = demoSiteAdminEmail(domain)
+		if err := a.createManagedSite(ctx, domain, adminEmail, randomAccessToken(), defaultDomainStorageLimitBytes); err != nil {
+			return "", err
+		}
+	}
+	if settings.SourceURL != "" && !a.demoSiteHasPages(ctx, domain) {
+		if err := a.seedDemoSiteContent(ctx, domain, settings); err != nil {
+			log.Printf("demo site source import failed domain=%s source=%s error=%v", domain, settings.SourceURL, err)
+			a.createDemoWelcomePage(ctx, domain)
+		}
+	} else if !a.demoSiteHasPages(ctx, domain) {
+		a.createDemoWelcomePage(ctx, domain)
+	}
+	return adminEmail, nil
+}
+
+func demoSiteAdminEmail(domain string) string {
+	domain = normalizeDomainName(domain)
+	if domain == "" {
+		domain = "localhost"
+	}
+	return "demo@" + domain
+}
+
+func (a *App) firstAdminEmailForDomain(ctx context.Context, domain string) (string, bool) {
+	var email string
+	err := a.db.QueryRowContext(contextWithDomain(ctx, domain), `SELECT email FROM users WHERE domain=? AND is_admin=1 ORDER BY email LIMIT 1`, domain).Scan(&email)
+	email = strings.TrimSpace(email)
+	return email, err == nil && email != ""
+}
+
+func (a *App) demoSiteHasPages(ctx context.Context, domain string) bool {
+	var pageCount int
+	_ = a.db.QueryRowContext(contextWithDomain(ctx, domain), `SELECT COUNT(1) FROM pages WHERE domain=?`, domain).Scan(&pageCount)
+	return pageCount > 0
+}
+
+func (a *App) seedDemoSiteContent(ctx context.Context, domain string, settings billing.DemoSettings) error {
+	sourceURL := strings.TrimSpace(settings.SourceURL)
+	if sourceURL == "" {
+		a.createDemoWelcomePage(ctx, domain)
+		return nil
+	}
+	remoteSourceURL, err := parseGrabSourceURL(sourceURL)
+	if err != nil {
+		return err
+	}
+	htmlBytes, resolvedSourceURL, err := downloadGrabSourceHTMLWithResolvedURL(remoteSourceURL.String(), grabSourceOptions{})
+	if err != nil {
+		return err
+	}
+	domainContext := contextWithDomain(ctx, domain)
+	if settings.CopyWholeSite {
+		_, err = a.importWholeRemoteSite(domainContext, domain, "/", resolvedSourceURL, string(htmlBytes), "", nil, grabSourceOptions{})
+		return err
+	}
+	spider, importedHTML := prepareSinglePageImport(domain, "/", resolvedSourceURL.String(), resolvedSourceURL, string(htmlBytes), a.grabTracker, "", nil, grabSourceOptions{})
+	importedPages := []wholeSiteImportedPage{{SourceURL: resolvedSourceURL.String(), LocalPath: "/", HTML: importedHTML}}
+	pageDelta, publishedPageDelta, revisionDelta, publishedStaticDelta := a.estimateImportedPagesStorageDelta(domainContext, domain, importedPages)
+	fileDelta := a.estimateImportedFileDelta(domain, spider)
+	if storageErr := a.applyDomainStorageDelta(domainContext, domain, pageDelta, publishedPageDelta, revisionDelta, fileDelta, publishedStaticDelta); storageErr != nil {
+		return storageErr
+	}
+	if persistErr := a.persistSpiderAssets(spider, "/"); persistErr != nil {
+		_ = a.applyDomainStorageDelta(domainContext, domain, -pageDelta, -publishedPageDelta, -revisionDelta, -fileDelta, -publishedStaticDelta)
+		return persistErr
+	}
+	if storeErr := a.storeWholeSiteImportedPages(domainContext, domain, importedPages); storeErr != nil {
+		_ = a.applyDomainStorageDelta(domainContext, domain, -pageDelta, -publishedPageDelta, -revisionDelta, -fileDelta, -publishedStaticDelta)
+		return storeErr
+	}
+	a.rebuildDomainStorageUsage(domainContext, domain)
+	return nil
+}
+
+func (a *App) createDemoWelcomePage(ctx context.Context, domain string) {
+	domainContext := contextWithDomain(ctx, domain)
+	html := `<!doctype html><html><head><meta charset="utf-8"><title>Sitebrush Demo</title></head><body><main style="font-family:system-ui,sans-serif;max-width:760px;margin:8vh auto;padding:24px"><h1>Sitebrush Demo</h1><p>Этот временный демо-сайт можно редактировать сразу после входа.</p><p>Измените этот текст, добавьте блоки, загрузите файлы и проверьте публикацию.</p></main></body></html>`
+	importedPages := []wholeSiteImportedPage{{SourceURL: "sitebrush-demo", LocalPath: "/", HTML: html}}
+	pageDelta, publishedPageDelta, revisionDelta, publishedStaticDelta := a.estimateImportedPagesStorageDelta(domainContext, domain, importedPages)
+	_ = a.applyDomainStorageDelta(domainContext, domain, pageDelta, publishedPageDelta, revisionDelta, 0, publishedStaticDelta)
+	_ = a.storeWholeSiteImportedPages(domainContext, domain, importedPages)
+	a.rebuildDomainStorageUsage(domainContext, domain)
+}
+
 func (a *App) logout(w http.ResponseWriter, r *http.Request) {
+	a.scheduleDemoSiteDeletionForLogout(r)
+	if cookie, err := r.Cookie("sitebrush_session"); err == nil {
+		_, _ = a.db.ExecContext(r.Context(), `DELETE FROM sessions WHERE token=?`, cookie.Value)
+	}
 	http.SetCookie(w, &http.Cookie{Name: "sitebrush_session", Value: "", Path: "/", Expires: time.Unix(0, 0)})
 	http.Redirect(w, r, requestedReturnTarget(r), http.StatusFound)
+}
+
+func (a *App) scheduleDemoSiteDeletionForLogout(r *http.Request) {
+	cookie, err := r.Cookie("sitebrush_session")
+	if err != nil || strings.TrimSpace(cookie.Value) == "" {
+		return
+	}
+	controlDatabase, err := a.openServerControlDatabase(r.Context())
+	if err != nil {
+		return
+	}
+	defer controlDatabase.Close()
+	if err := (billing.Store{DB: controlDatabase}).ScheduleDemoSessionDeletion(r.Context(), cookie.Value, time.Now().Add(demoSiteDeletionDelay)); err != nil {
+		log.Printf("demo site deletion schedule failed token=%s error=%v", diagnosticlog.SafeLogValue(cookie.Value), err)
+	}
 }
 
 func (a *App) editPage(w http.ResponseWriter, r *http.Request) {
@@ -7482,6 +7725,7 @@ func (a *App) billingView(ctx context.Context, r *http.Request) (map[string]any,
 	plans := store.Plans(ctx)
 	assignments := store.ServiceAssignments(ctx)
 	siteRequests := store.SiteRequests(ctx)
+	demoSettings := store.DemoSettings(ctx)
 	siteRows, err := a.billingSiteRows(ctx, plans, assignments, a.siteDomain(ctx, r))
 	if err != nil {
 		return nil, err
@@ -7495,6 +7739,7 @@ func (a *App) billingView(ctx context.Context, r *http.Request) (map[string]any,
 		"SiteRequests":            siteRequests,
 		"Backups":                 backups,
 		"BackupRetentionDays":     retentionDays,
+		"DemoSettings":            demoSettings,
 		"AutoRegistrationEnabled": store.AutomaticRegistrationAllowed(ctx),
 		"CurrentDomain":           a.siteDomain(ctx, r),
 	}, nil
@@ -7559,6 +7804,22 @@ func (a *App) saveBillingSettingsFromForm(r *http.Request) string {
 	}
 	defer controlDatabase.Close()
 	if err := (billing.Store{DB: controlDatabase}).SaveSettings(r.Context(), r.FormValue("auto_registration_enabled") == "1"); err != nil {
+		return err.Error()
+	}
+	store := billing.Store{DB: controlDatabase}
+	demoDomain := normalizeQuotaDomainName(r.FormValue("demo_site_domain"))
+	demoSourceURL := strings.TrimSpace(r.FormValue("demo_site_source_url"))
+	if demoDomain != "" {
+		if ownerDomain, found := store.OwnerDomain(r.Context()); found && normalizeDomainName(ownerDomain) == demoDomain {
+			return "Сайт владельца сервера нельзя использовать как публичный демо-сайт."
+		}
+	}
+	if demoSourceURL != "" {
+		if _, parseErr := parseGrabSourceURL(demoSourceURL); parseErr != nil {
+			return parseErr.Error()
+		}
+	}
+	if err := store.SaveDemoSettings(r.Context(), demoDomain, demoSourceURL, r.FormValue("demo_site_copy_whole_site") == "1"); err != nil {
 		return err.Error()
 	}
 	retentionDays, retentionErr := parseBillingDeletionBackupRetentionDays(r.FormValue("backup_retention_days"))
@@ -7831,6 +8092,91 @@ func (a *App) deleteManagedSite(ctx context.Context, domain string) error {
 	return err
 }
 
+func (a *App) startDemoSiteCleanupWorker(ctx context.Context) {
+	go func() {
+		a.cleanupExpiredDemoSites(ctx, time.Now())
+		ticker := time.NewTicker(time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case now := <-ticker.C:
+				a.cleanupExpiredDemoSites(ctx, now)
+			}
+		}
+	}()
+}
+
+func (a *App) cleanupExpiredDemoSites(ctx context.Context, now time.Time) {
+	controlDatabase, err := a.openServerControlDatabase(ctx)
+	if err != nil {
+		return
+	}
+	defer controlDatabase.Close()
+	store := billing.Store{DB: controlDatabase}
+	sessionsByDomain := make(map[string][]billing.DemoSession)
+	for _, session := range store.DemoSessions(ctx) {
+		domain := normalizeDomainName(session.Domain)
+		if domain == "" {
+			continue
+		}
+		sessionsByDomain[domain] = append(sessionsByDomain[domain], session)
+	}
+	for domain, sessions := range sessionsByDomain {
+		if !demoSessionsReadyForDeletion(sessions, now) {
+			continue
+		}
+		if err := a.deleteDemoManagedSiteWithoutBackup(ctx, controlDatabase, domain); err != nil {
+			log.Printf("demo site deletion failed domain=%s error=%v", domain, err)
+			continue
+		}
+		if err := store.RemoveDemoSessionsForDomain(ctx, domain); err != nil {
+			log.Printf("demo session cleanup failed domain=%s error=%v", domain, err)
+		}
+	}
+}
+
+func demoSessionsReadyForDeletion(sessions []billing.DemoSession, now time.Time) bool {
+	hasDeletingSession := false
+	for _, session := range sessions {
+		switch strings.TrimSpace(session.Status) {
+		case "active":
+			return false
+		case "deleting":
+			hasDeletingSession = true
+			deleteAfter, err := time.Parse(time.RFC3339, strings.TrimSpace(session.DeleteAfter))
+			if err != nil || now.Before(deleteAfter) {
+				return false
+			}
+		}
+	}
+	return hasDeletingSession
+}
+
+func (a *App) deleteDemoManagedSiteWithoutBackup(ctx context.Context, controlDatabase *sql.DB, domain string) error {
+	domain = normalizeQuotaDomainName(domain)
+	if domain == "" {
+		return fmt.Errorf("demo domain is required")
+	}
+	var ownerCount int
+	_ = controlDatabase.QueryRowContext(ctx, `SELECT COUNT(1) FROM server_managers WHERE domain=? AND role='owner'`, domain).Scan(&ownerCount)
+	if ownerCount > 0 {
+		return fmt.Errorf("server owner site %s cannot be deleted as a demo site", domain)
+	}
+	row, found, err := a.managedSiteQuotaRow(ctx, domain)
+	if err != nil {
+		return err
+	}
+	if !found {
+		return nil
+	}
+	if sameSiteQuotaPath(row.DatabasePath, a.serverControlDBPath()) {
+		return fmt.Errorf("demo site %s is stored in the server control database and cannot be deleted as a separate site", domain)
+	}
+	return a.deleteManagedSiteDataAfterBackup(ctx, controlDatabase, row)
+}
+
 func (a *App) deleteManagedSiteWithBackup(ctx context.Context, r *http.Request, domain string) (managedSiteDeletionBackupView, error) {
 	controlDatabase, err := a.openServerControlDatabase(ctx)
 	if err != nil {
@@ -7876,6 +8222,7 @@ func (a *App) deleteManagedSiteDataAfterBackup(ctx context.Context, controlDatab
 	}
 	(billing.Store{DB: controlDatabase}).RemoveSiteAssignment(ctx, domain)
 	_, _ = controlDatabase.ExecContext(ctx, `DELETE FROM server_managers WHERE domain=? AND role<>'owner'`, domain)
+	a.closeManagedSiteDatabase(ctx, domain)
 	if strings.TrimSpace(row.DatabasePath) != "" && !sameSiteQuotaPath(row.DatabasePath, a.serverControlDBPath()) {
 		if err := os.Remove(row.DatabasePath); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err
@@ -7896,6 +8243,15 @@ func (a *App) deleteManagedSiteDataAfterBackup(ctx context.Context, controlDatab
 		return err
 	}
 	return nil
+}
+
+func (a *App) closeManagedSiteDatabase(ctx context.Context, domain string) {
+	if a.siteDatabaseRouter == nil {
+		return
+	}
+	if err := a.siteDatabaseRouter.ForgetDomain(ctx, domain); err != nil {
+		log.Printf("managed site database close failed domain=%s error=%v", domain, err)
+	}
 }
 
 func parseBillingDeletionBackupRetentionDays(rawDays string) (int, error) {
@@ -11661,7 +12017,7 @@ func (a *App) createSession(w http.ResponseWriter, r *http.Request, email string
 	a.createSessionForDomain(w, r.Context(), a.siteDomain(r.Context(), r), email)
 }
 
-func (a *App) createSessionForDomain(w http.ResponseWriter, ctx context.Context, domain string, email string) {
+func (a *App) createSessionForDomain(w http.ResponseWriter, ctx context.Context, domain string, email string) string {
 	sessionDomain := normalizeDomainName(domain)
 	if sessionDomain == "" {
 		sessionDomain = "localhost"
@@ -11669,6 +12025,7 @@ func (a *App) createSessionForDomain(w http.ResponseWriter, ctx context.Context,
 	token := fmt.Sprintf("%x", sha256.Sum256([]byte(email+time.Now().String())))
 	_, _ = a.db.ExecContext(ctx, `INSERT OR REPLACE INTO sessions(token,user_email,created_at) VALUES(?,?,?)`, token, sessionDomain+"|"+email, time.Now().Format(time.RFC3339))
 	http.SetCookie(w, &http.Cookie{Name: "sitebrush_session", Value: token, Path: "/", HttpOnly: true})
+	return token
 }
 
 func (a *App) isAdminRequest(r *http.Request) bool {

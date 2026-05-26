@@ -1825,6 +1825,128 @@ func TestApproveSiteRequestCreatesSiteAndEmailsApplicant(t *testing.T) {
 	}
 }
 
+func TestDemoSiteVisitorGetsEditorSessionAndCleanupDeletesSite(t *testing.T) {
+	sourceURL := "https://source.example/"
+	previousGrabHTTPClient := newGrabHTTPClient
+	newGrabHTTPClient = func() *http.Client {
+		return &http.Client{Transport: fakeGrabTransport{responses: map[string]fakeGrabResponse{
+			sourceURL: {contentType: "text/html; charset=utf-8", body: `<!doctype html><html><head><title>External Demo</title></head><body><h1>External Demo</h1></body></html>`},
+		}}}
+	}
+	defer func() {
+		newGrabHTTPClient = previousGrabHTTPClient
+	}()
+
+	application := newRouterTestApplication(t)
+	controlDB := setupBillingOwnerForTest(t, application, "owner.example", "owner@example.com", true)
+	defer controlDB.Close()
+	store := billing.Store{DB: controlDB}
+	if err := store.SaveDemoSettings(context.Background(), "demo.example", sourceURL, false); err != nil {
+		t.Fatalf("save demo settings: %v", err)
+	}
+
+	request := httptest.NewRequest(http.MethodGet, "http://demo.example/", nil)
+	request = request.WithContext(contextWithDomain(request.Context(), "demo.example"))
+	response := httptest.NewRecorder()
+	application.route(response, request)
+	if response.Code != http.StatusFound {
+		t.Fatalf("demo start status = %d, body=%q", response.Code, response.Body.String())
+	}
+	if location := response.Header().Get("Location"); location != "/?visual" {
+		t.Fatalf("demo redirect = %q, want /?visual", location)
+	}
+	cookies := response.Result().Cookies()
+	if len(cookies) == 0 {
+		t.Fatal("demo start did not set a session cookie")
+	}
+	var sessionCookie *http.Cookie
+	for _, cookie := range cookies {
+		if cookie.Name == "sitebrush_session" {
+			sessionCookie = cookie
+			break
+		}
+	}
+	if sessionCookie == nil || strings.TrimSpace(sessionCookie.Value) == "" {
+		t.Fatalf("demo session cookie missing in %#v", cookies)
+	}
+
+	siteDatabasePath := filepath.Join(siteDatabaseRootPath(application.serverControlDBPath()), domainStorageName("demo.example")+".db")
+	siteDB, err := sql.Open("sqlite", "file:"+siteDatabasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var adminCount int
+	if err := siteDB.QueryRow(`SELECT COUNT(1) FROM users WHERE domain=? AND email=? AND is_admin=1`, "demo.example", "demo@demo.example").Scan(&adminCount); err != nil {
+		t.Fatalf("read demo admin count: %v", err)
+	}
+	if adminCount != 1 {
+		t.Fatalf("demo admin count = %d, want 1", adminCount)
+	}
+	var pageHTML string
+	if err := siteDB.QueryRow(`SELECT html FROM pages WHERE domain=? AND path='/'`, "demo.example").Scan(&pageHTML); err != nil {
+		t.Fatalf("read demo page: %v", err)
+	}
+	if !strings.Contains(pageHTML, "External Demo") {
+		t.Fatalf("demo source content was not imported: %s", pageHTML)
+	}
+	if err := siteDB.Close(); err != nil {
+		t.Fatalf("close demo db: %v", err)
+	}
+
+	logoutRequest := httptest.NewRequest(http.MethodGet, "http://demo.example/?logout", nil)
+	logoutRequest = logoutRequest.WithContext(contextWithDomain(logoutRequest.Context(), "demo.example"))
+	logoutRequest.AddCookie(sessionCookie)
+	logoutResponse := httptest.NewRecorder()
+	application.route(logoutResponse, logoutRequest)
+	if logoutResponse.Code != http.StatusFound {
+		t.Fatalf("demo logout status = %d, body=%q", logoutResponse.Code, logoutResponse.Body.String())
+	}
+	var deletingSessions int
+	if err := controlDB.QueryRow(`SELECT COUNT(1) FROM demo_site_sessions WHERE domain='demo.example' AND status='deleting' AND delete_after<>''`).Scan(&deletingSessions); err != nil {
+		t.Fatalf("read deleting demo sessions: %v", err)
+	}
+	if deletingSessions != 1 {
+		t.Fatalf("deleting demo sessions = %d, want 1", deletingSessions)
+	}
+
+	application.cleanupExpiredDemoSites(context.Background(), time.Now().Add(11*time.Minute))
+	if _, err := os.Stat(siteDatabasePath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("demo site database stat err = %v, want not exist", err)
+	}
+	var remainingDemoSessions int
+	if err := controlDB.QueryRow(`SELECT COUNT(1) FROM demo_site_sessions WHERE domain='demo.example'`).Scan(&remainingDemoSessions); err != nil {
+		t.Fatalf("read remaining demo sessions: %v", err)
+	}
+	if remainingDemoSessions != 0 {
+		t.Fatalf("remaining demo sessions = %d, want 0", remainingDemoSessions)
+	}
+}
+
+func newRouterTestApplication(t *testing.T) *App {
+	t.Helper()
+	storagePath := t.TempDir()
+	dbPath := filepath.Join(storagePath, defaultDBPath)
+	siteDatabaseDir := siteDatabaseRootPath(dbPath)
+	router := newPerSiteDBRouter(siteDatabaseDir, "localhost", func(migrationCtx context.Context, rawDB *sql.DB, migrateDomain string) error {
+		application := &App{db: rawDB, storagePath: storagePath, dbPath: dbPath, grabTracker: newGrabProgressTracker()}
+		return application.migrate(contextWithDomain(migrationCtx, migrateDomain))
+	}, false)
+	t.Cleanup(func() {
+		if err := router.Close(); err != nil {
+			t.Fatalf("close site database router: %v", err)
+		}
+	})
+	waitSiteDBRouterStartup(t, router)
+	return &App{
+		db:                 router,
+		siteDatabaseRouter: router,
+		storagePath:        storagePath,
+		dbPath:             dbPath,
+		grabTracker:        newGrabProgressTracker(),
+		emailDelivery:      make(chan emailDeliveryJob, 4),
+	}
+}
+
 func setupBillingOwnerForTest(t *testing.T, application *App, domain, email string, autoRegistrationEnabled bool) *sql.DB {
 	t.Helper()
 	controlDB, err := application.openServerControlDatabase(context.Background())

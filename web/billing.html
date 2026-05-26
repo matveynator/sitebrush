@@ -36,6 +36,23 @@
         <label>{{index .T "billing_backup_retention_days"}}
           <input name="backup_retention_days" type="number" min="1" max="3650" class="form-control form-control-sm" value="{{.BackupRetentionDays}}">
         </label>
+        <div class="billing-demo-settings">
+          <h3>Демо-сайт</h3>
+          <p class="text-muted">Один домен можно сделать публичным тестовым сайтом. Посетитель сразу попадет в редактор, а после выхода сайт будет удален через 10 минут.</p>
+          <label>Домен демо-сайта
+            <input name="demo_site_domain" type="text" class="form-control" list="billing-demo-domains" value="{{.DemoSettings.Domain}}" placeholder="demo.example.com">
+          </label>
+          <datalist id="billing-demo-domains">
+            {{range .Sites}}<option value="{{.Domain}}">{{.Domain}}</option>{{end}}
+          </datalist>
+          <label>Скопировать контент с внешнего сайта
+            <input name="demo_site_source_url" type="url" class="form-control" value="{{.DemoSettings.SourceURL}}" placeholder="https://example.com/">
+          </label>
+          <label class="checkbox-row">
+            <input type="checkbox" name="demo_site_copy_whole_site" value="1" {{if .DemoSettings.CopyWholeSite}}checked{{end}}>
+            <span>Копировать весь найденный сайт, а не только главную страницу</span>
+          </label>
+        </div>
         <button type="submit" class="btn btn-primary"><img src="/p/static/save-page.png" alt="">Сохранить</button>
       </form>
     </div>
