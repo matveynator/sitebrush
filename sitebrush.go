@@ -5927,7 +5927,7 @@ func (a *App) startDemoSiteSession(w http.ResponseWriter, r *http.Request, setti
 	if err := store.CreateDemoSession(r.Context(), domain, sessionToken, adminEmail); err != nil {
 		return "", err
 	}
-	return "/?visual", nil
+	return "/", nil
 }
 
 func (a *App) ensureDemoSiteReady(ctx context.Context, controlDatabase *sql.DB, settings billing.DemoSettings) (string, error) {
@@ -5980,6 +5980,14 @@ func (a *App) demoSiteHasPages(ctx context.Context, domain string) bool {
 	var pageCount int
 	_ = a.db.QueryRowContext(contextWithDomain(ctx, domain), `SELECT COUNT(1) FROM pages WHERE domain=?`, domain).Scan(&pageCount)
 	return pageCount > 0
+}
+
+func (a *App) isDemoSiteDomain(ctx context.Context, domain string) bool {
+	settings, found := a.demoSiteSettings(ctx)
+	if !found {
+		return false
+	}
+	return normalizeDomainName(settings.Domain) == normalizeDomainName(domain)
 }
 
 func (a *App) seedDemoSiteContent(ctx context.Context, domain string, settings billing.DemoSettings) error {
@@ -12537,11 +12545,13 @@ func (a *App) injectContextMenuForRequest(r *http.Request, domain, pagePath, htm
 	revisionID := 0
 	revisionCount := 0
 	storageUsageLabel := ""
+	showLogout := true
 	if isAdmin {
 		revisionID = a.latestActiveRevisionID(r.Context(), domain, pagePath)
 		revisionCount = a.revisionCount(r.Context(), domain, pagePath)
 		storageUsage := a.storedDomainStorageUsage(r.Context(), domain)
 		storageUsageLabel = formatFileSize(storageUsage.totalBytes()) + " / " + formatFileSize(storageUsage.LimitBytes)
+		showLogout = !a.isDemoSiteDomain(r.Context(), domain)
 	}
 	pagePasswordProtected := false
 	if isAdmin {
@@ -12551,7 +12561,7 @@ func (a *App) injectContextMenuForRequest(r *http.Request, domain, pagePath, htm
 	if isAdmin && strings.TrimSpace(adminEmail) != "" {
 		isServerManager = a.isServerManagerEmail(r.Context(), domain, adminEmail)
 	}
-	menuScript := buildContextMenuScript(isAdmin, isServerManager, domainFrozen, pagePasswordProtected, pagePath, domain, revisionID, revisionCount, storageUsageLabel, translationsForRequest(r))
+	menuScript := buildContextMenuScript(isAdmin, isServerManager, domainFrozen, pagePasswordProtected, showLogout, pagePath, domain, revisionID, revisionCount, storageUsageLabel, translationsForRequest(r))
 	return injectMenuScriptIntoHTML(html, menuScript)
 }
 
@@ -12627,7 +12637,7 @@ func contentTypeForManagedPage(pagePath, content string) string {
 	return detectedContentType
 }
 
-func buildContextMenuScript(isAdmin bool, isServerManager bool, isFrozen bool, pagePasswordProtected bool, pagePath, domain string, revisionID int, revisionCount int, storageUsageLabel string, translations map[string]string) string {
+func buildContextMenuScript(isAdmin bool, isServerManager bool, isFrozen bool, pagePasswordProtected bool, showLogout bool, pagePath, domain string, revisionID int, revisionCount int, storageUsageLabel string, translations map[string]string) string {
 	if !isAdmin {
 		return buildGuestContextMenuScript(pagePath, domain, translations)
 	}
@@ -12696,6 +12706,10 @@ func buildContextMenuScript(isAdmin bool, isServerManager bool, isFrozen bool, p
 		billingEntry := ""
 		if isServerManager {
 			billingEntry = "<li class='SiteBrushContextMenu SiteBrushPrivilegedMenuItem'><a href='?billing' class='SiteBrushContextMenuLink'><img src='/p/static/sitebrush-app-icon.png' class='SiteBrushMenuIcon' alt=''>" + billingLabel + "</a></li>"
+		}
+		logoutEntry := ""
+		if showLogout {
+			logoutEntry = "<li class='SiteBrushContextMenu'><a href='?logout' class='SiteBrushContextMenuLink'><img src='/p/static/sign-out.png' class='SiteBrushMenuIcon' alt=''>" + logoutLabel + "</a></li>"
 		}
 		return contextMenuStylesAndHelpers() + `<script>
 (function initializeSitebrushContextMenuForAdmin() {
@@ -13029,7 +13043,7 @@ func buildContextMenuScript(isAdmin bool, isServerManager bool, isFrozen bool, p
       "<li class='SiteBrushContextMenu'><a href='?analytics' class='SiteBrushContextMenuLink'><img src='/p/static/analytics.svg' class='SiteBrushMenuIcon' alt=''>" + "` + analyticsLabel + `" + "</a></li>",
       "<li class='SiteBrushContextMenu'><a href='?settings' class='SiteBrushContextMenuLink'><img src='/p/static/settings.png' class='SiteBrushMenuIcon' alt=''>" + "` + settingsLabel + `" + "</a></li>",
       "<li class='SiteBrushContextMenu'><a href='?profile' class='SiteBrushContextMenuLink'><img src='/p/static/profile.png' class='SiteBrushMenuIcon' alt=''>" + "` + profileLabel + `" + "</a></li>",
-      "<li class='SiteBrushContextMenu'><a href='?logout' class='SiteBrushContextMenuLink'><img src='/p/static/sign-out.png' class='SiteBrushMenuIcon' alt=''>" + "` + logoutLabel + `" + "</a></li>",
+      "` + logoutEntry + `",
       "` + billingEntry + `",
       "` + copyrightMenuEntry + `",
       "</ul>"
@@ -18331,9 +18345,11 @@ func (a *App) servePublishedStaticFileForAdmin(w http.ResponseWriter, r *http.Re
 	if readErr != nil {
 		return false
 	}
+	revisionID := a.latestActiveRevisionID(r.Context(), domain, pagePath)
+	revisionCount := a.revisionCount(r.Context(), domain, pagePath)
 	_, pagePasswordProtected := a.pagePasswordRuleFromPrefixFile(domain, pagePath)
 	isServerManager := a.isServerManagerEmail(r.Context(), domain, adminEmail)
-	menuScript := buildContextMenuScript(true, isServerManager, false, pagePasswordProtected, pagePath, domain, 0, 0, "", translationsForRequest(r))
+	menuScript := buildContextMenuScript(true, isServerManager, false, pagePasswordProtected, !a.isDemoSiteDomain(r.Context(), domain), pagePath, domain, revisionID, revisionCount, "", translationsForRequest(r))
 	a.logContentDelivery(w, "static-file")
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_, _ = w.Write([]byte(injectMenuScriptIntoHTML(string(staticContent), menuScript)))
