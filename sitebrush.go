@@ -6163,9 +6163,6 @@ func (a *App) grabPreview(w http.ResponseWriter, r *http.Request) {
 		previewSpider, importedHTML := prepareSinglePageImport(domain, pagePath, sourceURL, remoteSourceURL, string(htmlBytes), a.grabTracker, progressToken, nil, sourceOptions)
 		resources = previewResourcesFromSpider(previewSpider, map[string]struct{}{sourceURL: {}})
 		importedPages = []wholeSiteImportedPage{{SourceURL: sourceURL, LocalPath: pagePath, HTML: importedHTML}}
-		if a.grabTracker != nil && progressToken != "" {
-			a.grabTracker.publish(grabProgressEvent{Token: progressToken, Stage: "done", FoundTotal: previewSpider.foundTotal, DownloadedTotal: previewSpider.downloadedTotal, CompletedPercent: 100})
-		}
 	}
 	for _, importedPage := range importedPages {
 		pageDownloadBytes += int64(len([]byte(importedPage.HTML)))
@@ -6173,7 +6170,7 @@ func (a *App) grabPreview(w http.ResponseWriter, r *http.Request) {
 	selectedResourceBytes := sumGrabPreviewResourceBytes(resources)
 	quotaEstimate := a.estimateImportQuota(r.Context(), domain, importedPages, previewSpider)
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(grabPreviewResponse{
+	encodeErr := json.NewEncoder(w).Encode(grabPreviewResponse{
 		SourceURL:             remoteSourceURL.String(),
 		PageCount:             pageCount,
 		ResourceCount:         len(resources),
@@ -6188,6 +6185,9 @@ func (a *App) grabPreview(w http.ResponseWriter, r *http.Request) {
 		ProjectedUsedBytes:    quotaEstimate.ProjectedUsedBytes,
 		FitsQuota:             quotaEstimate.FitsQuota,
 	})
+	if encodeErr == nil && a.grabTracker != nil && progressToken != "" && previewSpider != nil {
+		a.grabTracker.publish(grabProgressEvent{Token: progressToken, Stage: "done", FoundTotal: previewSpider.foundTotal, DownloadedTotal: previewSpider.downloadedTotal, CompletedPercent: 100})
+	}
 }
 
 func parseGrabSourceURL(sourceURL string) (*url.URL, error) {
@@ -6551,9 +6551,6 @@ func previewResourcesFromSpider(spider *pageSpider, excludedURLs map[string]stru
 func previewWholeRemoteSiteResources(startURL *url.URL, startHTML, publicAssetBasePath string, tracker *grabProgressTracker, progressToken string, sourceOptions grabSourceOptions) wholeSitePreviewResult {
 	spider, pageURLs, importedPages := crawlWholeRemoteSite(startURL, startHTML, publicAssetBasePath, tracker, progressToken, sourceOptions)
 	resources := previewResourcesFromSpider(spider, pageURLs)
-	if tracker != nil && strings.TrimSpace(progressToken) != "" {
-		tracker.publish(grabProgressEvent{Token: progressToken, Stage: "done", FoundTotal: spider.foundTotal, DownloadedTotal: spider.downloadedTotal, CompletedPercent: 100})
-	}
 	return wholeSitePreviewResult{PageCount: len(pageURLs), Resources: resources, ImportedPages: importedPages, Spider: spider}
 }
 

@@ -175,7 +175,10 @@
   let downloadFinished = false;
   let downloadRedirectURL = '';
   let grabRequestInFlight = false;
+  let previewRequestInFlight = false;
+  let progressStreamClosedIntentionally = false;
   let currentPreviewPayload = null;
+  let downloadProgressModel = null;
 
   function finishDownloadIfReady() {
     if (!downloadFinished || downloadRedirectURL === '') { return; }
@@ -192,6 +195,13 @@
     progressBarElement.style.width = boundedPercent + '%';
     progressBarElement.textContent = boundedPercent + '%';
     progressBarElement.setAttribute('aria-valuenow', String(boundedPercent));
+  }
+
+  function closeProgressStream() {
+    if (!progressStream) { return; }
+    progressStreamClosedIntentionally = true;
+    progressStream.close();
+    progressStream = null;
   }
 
   function clearResourceList() {
@@ -390,6 +400,79 @@
     setResourceRowProgress(resourceRowElement, resourcePercent, describeDownloadProgress(progressState));
   }
 
+  function buildDownloadProgressModel(previewPayload) {
+    const selectedResourceURLs = new Set();
+    let selectedResourceBytes = 0;
+    for (const checkboxElement of resourceListElement.querySelectorAll('input[data-grab-resource-url]')) {
+      if (!checkboxElement.checked) { continue; }
+      const resourceURL = checkboxElement.dataset.grabResourceUrl || '';
+      if (resourceURL === '') { continue; }
+      const resourceSizeBytes = Number(checkboxElement.dataset.grabResourceSizeBytes) || 0;
+      selectedResourceURLs.add(resourceURL);
+      if (resourceSizeBytes > 0) {
+        selectedResourceBytes += resourceSizeBytes;
+      }
+    }
+    const wholeSiteImportSelected = copyWholeSiteElement && copyWholeSiteElement.checked;
+    const pageTargetCount = wholeSiteImportSelected ? Math.max(1, Number(previewPayload && previewPayload.page_count) || 1) : 0;
+    const pageDownloadBytes = wholeSiteImportSelected ? Math.max(0, Number(previewPayload && previewPayload.page_download_bytes) || 0) : 0;
+    return {
+      selectedResourceURLs: selectedResourceURLs,
+      completedURLs: new Set(),
+      downloadedBytesByURL: new Map(),
+      totalTargets: pageTargetCount + selectedResourceURLs.size,
+      totalBytes: pageDownloadBytes + selectedResourceBytes
+    };
+  }
+
+  function summarizeDownloadProgress(progressState) {
+    if (!downloadProgressModel || downloadProgressModel.totalTargets <= 0) {
+      return {
+        completedTotal: Number(progressState.downloaded_total) || 0,
+        foundTotal: Number(progressState.found_total) || 0,
+        completedPercent: Number(progressState.completed_percent) || 0
+      };
+    }
+    const currentURL = progressState.current_url || '';
+    if (currentURL !== '') {
+      const currentDownloadedBytes = Number(progressState.current_downloaded_bytes) || 0;
+      const currentSizeBytes = Number(progressState.current_size_bytes) || 0;
+      let recordedDownloadedBytes = currentDownloadedBytes;
+      if (progressState.stage === 'downloaded' && currentSizeBytes > 0) {
+        recordedDownloadedBytes = currentSizeBytes;
+      }
+      if (recordedDownloadedBytes > 0) {
+        downloadProgressModel.downloadedBytesByURL.set(currentURL, recordedDownloadedBytes);
+      }
+      if (progressState.stage === 'downloaded' || progressState.stage === 'error') {
+        downloadProgressModel.completedURLs.add(currentURL);
+      }
+    }
+    let completedTotal = Math.min(downloadProgressModel.completedURLs.size, downloadProgressModel.totalTargets);
+    let downloadedBytes = 0;
+    for (const downloadedByteCount of downloadProgressModel.downloadedBytesByURL.values()) {
+      downloadedBytes += Number(downloadedByteCount) || 0;
+    }
+    if (downloadProgressModel.totalBytes > 0) {
+      downloadedBytes = Math.min(downloadedBytes, downloadProgressModel.totalBytes);
+    }
+    let completedPercent = 0;
+    if (downloadProgressModel.totalBytes > 0) {
+      completedPercent = Math.round(downloadedBytes * 100 / downloadProgressModel.totalBytes);
+    } else {
+      completedPercent = Math.round(completedTotal * 100 / downloadProgressModel.totalTargets);
+    }
+    if (progressState.stage === 'done') {
+      completedTotal = downloadProgressModel.totalTargets;
+      completedPercent = 100;
+    }
+    return {
+      completedTotal: completedTotal,
+      foundTotal: downloadProgressModel.totalTargets,
+      completedPercent: Math.max(0, Math.min(100, completedPercent))
+    };
+  }
+
   function prepareResourceRowsForDownload() {
     if (previewSelectAllElement && previewSelectAllElement.parentElement) {
       previewSelectAllElement.parentElement.remove();
@@ -420,6 +503,7 @@
     progressUrlElement.textContent = sourceUrlElement.value;
     clearResourceList();
     currentPreviewPayload = null;
+    downloadProgressModel = null;
     updateQuotaSummary();
     setProgressPercent(0);
     downloadFinished = false;
@@ -436,6 +520,7 @@
     progressUrlElement.textContent = sourceUrlElement.value;
     clearResourceList();
     currentPreviewPayload = null;
+    downloadProgressModel = null;
     updateQuotaSummary();
     setModalClosable(true);
     cancelButtonElement.classList.add('d-none');
@@ -513,7 +598,9 @@
     modalTitleElement.textContent = uiText.confirmDownloadTitle;
     progressHolderElement.classList.add('d-none');
     const resourceCount = Number(previewPayload.resource_count) || 0;
-    progressTextElement.textContent = uiText.confirmDownloadTextPrefix + ' ' + resourceCount + '.';
+    const pageCount = copyWholeSiteElement && copyWholeSiteElement.checked ? Math.max(1, Number(previewPayload.page_count) || 1) : 0;
+    const targetCount = pageCount + resourceCount;
+    progressTextElement.textContent = uiText.confirmDownloadTextPrefix + ' ' + targetCount + '.';
     progressUrlElement.textContent = previewPayload.source_url || sourceUrlElement.value;
     clearResourceList();
     currentPreviewPayload = previewPayload;
@@ -533,13 +620,15 @@
   }
 
   function showDownloadProgress() {
+    const previewPayloadForDownload = currentPreviewPayload;
     modalTitleElement.textContent = uiText.loadingPageTitle;
     progressTextElement.textContent = uiText.loadingStarted;
     progressHolderElement.classList.remove('d-none');
     progressUrlElement.textContent = '';
+    prepareResourceRowsForDownload();
+    downloadProgressModel = buildDownloadProgressModel(previewPayloadForDownload);
     currentPreviewPayload = null;
     updateQuotaSummary();
-    prepareResourceRowsForDownload();
     setProgressPercent(0);
     setModalClosable(false);
     cancelButtonElement.classList.add('d-none');
@@ -551,6 +640,7 @@
   function showDownloadError(errorText) {
     modalTitleElement.textContent = uiText.loadingErrorTitle;
     progressTextElement.textContent = errorText;
+    downloadProgressModel = null;
     setModalClosable(true);
     cancelButtonElement.classList.add('d-none');
     continueButtonElement.classList.add('d-none');
@@ -559,6 +649,7 @@
 
   function connectProgressStream(progressToken, readyCallback, streamMode) {
     let readyCallbackWasCalled = false;
+    progressStreamClosedIntentionally = false;
     progressStream = new EventSource({{printf "%q" .Path}} + '?grab_events&token=' + encodeURIComponent(progressToken));
     progressStream.onmessage = function onProgressStreamMessage(messageEvent) {
       let progressState = null;
@@ -566,7 +657,7 @@
         progressState = JSON.parse(messageEvent.data);
       } catch (parseError) {
         showDownloadError(uiText.invalidStatusError);
-        progressStream.close();
+        closeProgressStream();
         return;
       }
       if (progressState.stage === 'ready') {
@@ -576,10 +667,11 @@
         }
         return;
       }
-      const foundTotal = Number(progressState.found_total) || 0;
-      const downloadedTotal = Number(progressState.downloaded_total) || 0;
+      const progressSummary = summarizeDownloadProgress(progressState);
+      const foundTotal = progressSummary.foundTotal;
+      const downloadedTotal = progressSummary.completedTotal;
       const remainingTotal = Math.max(foundTotal - downloadedTotal, 0);
-      const completedPercent = Number(progressState.completed_percent) || 0;
+      const completedPercent = progressSummary.completedPercent;
       const remainingPercent = Math.max(100 - completedPercent, 0);
       updateResourceDownloadProgress(progressState);
       setProgressPercent(completedPercent);
@@ -593,19 +685,19 @@
         } else {
           progressTextElement.textContent = uiText.doneOpenPage;
         }
-        progressStream.close();
+        closeProgressStream();
         if (streamMode !== 'preview') {
           finishDownloadIfReady();
         }
       }
       if (progressState.stage === 'error' && !progressState.current_url) {
         showDownloadError(uiText.downloadFailedRetry);
-        progressStream.close();
+        closeProgressStream();
       }
     };
     progressStream.onerror = function onProgressStreamError() {
-      if (downloadFinished) { return; }
-      if (grabRequestInFlight) {
+      if (downloadFinished || progressStreamClosedIntentionally) { return; }
+      if (grabRequestInFlight || previewRequestInFlight) {
         progressTextElement.textContent = uiText.reconnectingStatus;
         return;
       }
@@ -630,13 +722,13 @@
         downloadFinished = true;
         setProgressPercent(100);
         progressTextElement.textContent = uiText.doneOpenPage;
-        if (progressStream) { progressStream.close(); }
+        closeProgressStream();
         finishDownloadIfReady();
       })
       .catch(function handleGrabFailure(grabError) {
         grabRequestInFlight = false;
         showDownloadError(grabError.message || uiText.loadPageFailed);
-        if (progressStream) { progressStream.close(); }
+        closeProgressStream();
       });
   }
 
@@ -658,6 +750,7 @@
     if (submitButtonElement) { submitButtonElement.disabled = true; }
     connectProgressStream(progressToken, function submitPreviewAfterProgressReady() {
       const previewRequestBody = buildGrabRequestBody();
+      previewRequestInFlight = true;
       fetch({{printf "%q" .Path}} + '?grab_preview', { method: 'POST', body: previewRequestBody, headers: { 'Accept': 'application/json' } })
         .then(function handlePreviewHTTPResponse(previewHTTPResponse) {
           if (!previewHTTPResponse.ok) {
@@ -668,17 +761,13 @@
           return previewHTTPResponse.json();
         })
         .then(function handlePreviewPayload(previewPayload) {
-          if (progressStream) {
-            progressStream.close();
-            progressStream = null;
-          }
+          previewRequestInFlight = false;
+          closeProgressStream();
           showResourcePreview(previewPayload);
         })
         .catch(function handlePreviewFailure(previewError) {
-          if (progressStream) {
-            progressStream.close();
-            progressStream = null;
-          }
+          previewRequestInFlight = false;
+          closeProgressStream();
           showPreviewError(previewError);
         });
     }, 'preview');
@@ -689,10 +778,7 @@
   });
 
   progressModalElement.addEventListener('hidden.bs.modal', function onProgressModalHidden() {
-    if (progressStream) {
-      progressStream.close();
-      progressStream = null;
-    }
+    closeProgressStream();
   });
 
   grabFormElement.addEventListener('submit', function onGrabSubmit(submitEvent) {

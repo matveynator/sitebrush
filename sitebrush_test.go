@@ -4467,6 +4467,18 @@ func TestMissingPageGrabFormIncludesSourceIPOverride(t *testing.T) {
 	if !strings.Contains(body, `body: buildGrabRequestBody()`) {
 		t.Fatalf("missing page import script does not send urlencoded grab body: %s", body)
 	}
+	for _, expectedFragment := range []string{
+		`let previewRequestInFlight = false;`,
+		`function closeProgressStream()`,
+		`function buildDownloadProgressModel(previewPayload)`,
+		`function summarizeDownloadProgress(progressState)`,
+		`downloadProgressModel = buildDownloadProgressModel(previewPayloadForDownload);`,
+		`if (grabRequestInFlight || previewRequestInFlight)`,
+	} {
+		if !strings.Contains(body, expectedFragment) {
+			t.Fatalf("missing page import script does not include progress fix fragment %q in %s", expectedFragment, body)
+		}
+	}
 }
 
 func TestStatusCapturingResponseWriterSupportsWebSocketHijack(t *testing.T) {
