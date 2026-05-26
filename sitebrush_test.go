@@ -265,6 +265,15 @@ func waitSiteDBRouterStartup(t *testing.T, router *perSiteDBRouter) {
 	}
 }
 
+func testStaticFiles(t *testing.T) fs.FS {
+	t.Helper()
+	staticFiles, err := fs.Sub(embeddedWebFiles, "web/static")
+	if err != nil {
+		t.Fatalf("static subfs: %v", err)
+	}
+	return staticFiles
+}
+
 type panicSQLExecutor struct {
 	t *testing.T
 }
@@ -1099,6 +1108,49 @@ func TestListSiteQuotaRowsRequiresRegisteredAdmin(t *testing.T) {
 	}
 	if len(rows) != 1 || rows[0].Domain != "working.example" {
 		t.Fatalf("rows = %#v, want only working.example", rows)
+	}
+}
+
+func TestPerSiteDBRouterPreloadOpensRegisteredSiteDatabases(t *testing.T) {
+	storagePath := t.TempDir()
+	dbPath := filepath.Join(storagePath, defaultDBPath)
+	siteDatabaseDir := siteDatabaseRootPath(dbPath)
+	domains := []string{"alpha.example", "beta.example"}
+	for _, domain := range domains {
+		databasePath := filepath.Join(siteDatabaseDir, domainStorageName(domain)+".db")
+		if err := ensureParentDir(databasePath); err != nil {
+			t.Fatal(err)
+		}
+		rawDB, err := sql.Open("sqlite", "file:"+databasePath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := (&App{db: rawDB, storagePath: storagePath}).migrate(contextWithDomain(context.Background(), domain)); err != nil {
+			_ = rawDB.Close()
+			t.Fatalf("migrate %s: %v", domain, err)
+		}
+		insertSiteQuotaAdmin(t, rawDB, domain)
+		if closeErr := rawDB.Close(); closeErr != nil {
+			t.Fatalf("close seed db %s: %v", domain, closeErr)
+		}
+	}
+
+	router := newPerSiteDBRouter(siteDatabaseDir, "localhost", func(migrationCtx context.Context, rawDB *sql.DB, migrateDomain string) error {
+		return (&App{db: rawDB, storagePath: storagePath}).migrate(contextWithDomain(migrationCtx, migrateDomain))
+	}, false)
+	t.Cleanup(func() {
+		if err := router.Close(); err != nil {
+			t.Fatalf("close site database router: %v", err)
+		}
+	})
+	waitSiteDBRouterStartup(t, router)
+
+	preloadResponse := router.Preload(context.Background())
+	if preloadResponse.err != nil {
+		t.Fatalf("preload err: %v", preloadResponse.err)
+	}
+	if preloadResponse.total != len(domains) || preloadResponse.opened != len(domains) || preloadResponse.failed != 0 {
+		t.Fatalf("preload response = %#v, want all registered site dbs opened", preloadResponse)
 	}
 }
 
@@ -2400,12 +2452,13 @@ func TestBlockedIPMiddlewareLeavesNonLoginRequestsAvailable(t *testing.T) {
 		t.Fatalf("seed auth failures: %v", err)
 	}
 
-	router := http.NewServeMux()
-	staticFiles, err := fs.Sub(embeddedWebFiles, "web/static")
+	embeddedStaticAssets, err := buildEmbeddedStaticAssetCache(testStaticFiles(t))
 	if err != nil {
-		t.Fatalf("static subfs: %v", err)
+		t.Fatalf("build static cache: %v", err)
 	}
-	router.Handle("/p/static/", http.StripPrefix("/p/static/", http.FileServer(http.FS(staticFiles))))
+	application.embeddedStaticAssets = embeddedStaticAssets
+	router := http.NewServeMux()
+	router.HandleFunc("/p/static/", application.serveEmbeddedStaticAsset)
 	router.HandleFunc("/p/", application.servePublicAsset)
 	router.HandleFunc("/", application.route)
 	protectedHandler := application.authAbuseMiddleware(router)
@@ -2424,6 +2477,28 @@ func TestBlockedIPMiddlewareLeavesNonLoginRequestsAvailable(t *testing.T) {
 	protectedHandler.ServeHTTP(staticResponse, staticRequest)
 	if staticResponse.Code != http.StatusOK {
 		t.Fatalf("static status = %d, want %d", staticResponse.Code, http.StatusOK)
+	}
+}
+
+func TestEmbeddedStaticAssetsServedFromMemory(t *testing.T) {
+	application, _ := newTestApplication(t)
+	embeddedStaticAssets, err := buildEmbeddedStaticAssetCache(testStaticFiles(t))
+	if err != nil {
+		t.Fatalf("build static cache: %v", err)
+	}
+	application.embeddedStaticAssets = embeddedStaticAssets
+
+	request := httptest.NewRequest(http.MethodGet, "http://localhost:8080/p/static/login.png", nil)
+	response := httptest.NewRecorder()
+	application.serveEmbeddedStaticAsset(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%q", response.Code, response.Body.String())
+	}
+	if contentType := response.Header().Get("Content-Type"); !strings.HasPrefix(contentType, "image/png") {
+		t.Fatalf("content type = %q, want image/png", contentType)
+	}
+	if response.Body.Len() == 0 {
+		t.Fatal("static asset body is empty")
 	}
 }
 
@@ -5477,6 +5552,29 @@ func TestAutoCertHostPolicyAllowsExistingCachedCertificateForUnlistedDomain(t *t
 	application.setDomainAutomaticSSLManual(context.Background(), "cached.example.com", false)
 	if err := application.autoCertHostPolicy(context.Background(), "cached.example.com"); err == nil {
 		t.Fatal("autoCertHostPolicy accepted manually disabled cached certificate domain")
+	}
+}
+
+func TestAutoCertCertificateMemoryCachePreloadsDiskCertificate(t *testing.T) {
+	application, _ := newTestApplication(t)
+	certificateDomain := "memory-cache.example.com"
+	writeCachedAutoCertForTest(t, application, certificateDomain, time.Now().Add(-time.Hour), time.Now().Add(automaticSSLCertificateRenewBefore+time.Hour))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	application.autoCertCertificateCache = startAutoCertCertificateMemoryCache(ctx, filepath.Join(application.storageRootDir(), "letsencrypt"))
+	if _, _, ok := application.autoCertCachedCertificate(certificateDomain, time.Now(), automaticSSLCertificateRenewBefore); !ok {
+		t.Fatal("memory certificate cache did not load disk certificate")
+	}
+	if removeErr := os.Remove(filepath.Join(application.storageRootDir(), "letsencrypt", certificateDomain)); removeErr != nil {
+		t.Fatalf("remove disk certificate after preload: %v", removeErr)
+	}
+
+	certificate, expiresAt, ok := application.autoCertCachedCertificate(certificateDomain, time.Now(), automaticSSLCertificateRenewBefore)
+	if !ok {
+		t.Fatal("memory certificate cache did not serve preloaded certificate after disk removal")
+	}
+	if certificate == nil || expiresAt.IsZero() {
+		t.Fatalf("certificate=%#v expiresAt=%s", certificate, expiresAt)
 	}
 }
 

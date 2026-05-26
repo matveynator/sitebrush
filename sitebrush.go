@@ -99,6 +99,8 @@ type App struct {
 	debug                     bool
 	nativeFileDialog          bool
 	automaticSSLAvailable     bool
+	embeddedStaticAssets      map[string]embeddedStaticAsset
+	autoCertCertificateCache  chan autoCertCertificateCacheRequest
 	grabTracker               *grabProgressTracker
 	publishTracker            *publishProgressTracker
 	analyticsEvents           chan siteAnalyticsEvent
@@ -142,6 +144,27 @@ type autoCertGuardRequest struct {
 type autoCertGuardResponse struct {
 	allowed bool
 	reason  string
+}
+
+type autoCertCertificateCacheRequest struct {
+	action           string
+	domain           string
+	certificate      *tls.Certificate
+	expiresAt        time.Time
+	minimumRemaining time.Duration
+	response         chan autoCertCertificateCacheResponse
+}
+
+type autoCertCertificateCacheResponse struct {
+	certificate *tls.Certificate
+	expiresAt   time.Time
+	found       bool
+}
+
+type embeddedStaticAsset struct {
+	body        []byte
+	contentType string
+	modTime     time.Time
 }
 
 type guestStaticHTMLCacheRequest struct {
@@ -195,6 +218,17 @@ type siteDBRequest struct {
 type siteDBResponse struct {
 	db  *siteFileDatabase
 	err error
+}
+
+type siteDBPreloadRequest struct {
+	response chan siteDBPreloadResponse
+}
+
+type siteDBPreloadResponse struct {
+	total  int
+	opened int
+	failed int
+	err    error
 }
 
 type siteDBMigrationStatusRequest struct {
@@ -673,6 +707,7 @@ type perSiteDBRouter struct {
 	fallbackDomain          string
 	debug                   bool
 	requests                chan siteDBRequest
+	preloadRequests         chan siteDBPreloadRequest
 	migrationStatusRequests chan siteDBMigrationStatusRequest
 	migrationEvents         chan siteDBMigrationEvent
 	closeRequests           chan chan error
@@ -684,6 +719,7 @@ func newPerSiteDBRouter(siteDatabaseRootDir string, fallbackDomain string, migra
 		fallbackDomain:          fallbackDomain,
 		debug:                   debug,
 		requests:                make(chan siteDBRequest),
+		preloadRequests:         make(chan siteDBPreloadRequest),
 		migrationStatusRequests: make(chan siteDBMigrationStatusRequest),
 		migrationEvents:         make(chan siteDBMigrationEvent, 256),
 		closeRequests:           make(chan chan error),
@@ -735,6 +771,13 @@ func (r *perSiteDBRouter) run(siteDatabaseRootDir string, migrate siteDBMigrator
 				status.err = err
 			}
 			statusRequest.response <- status
+		case preloadRequest := <-r.preloadRequests:
+			if !startupMigrationFinished {
+				preloadRequest.response <- siteDBPreloadResponse{err: errSiteMigrationsStarting}
+				continue
+			}
+			response := r.preloadMigratedDatabases(siteDatabaseRootDir, databasesByDomain, migratedDomains, degradedDomains, migrate)
+			preloadRequest.response <- response
 		case request := <-r.requests:
 			startedAt := time.Now()
 			domain := normalizeDomainName(request.domain)
@@ -793,6 +836,32 @@ func (r *perSiteDBRouter) run(siteDatabaseRootDir string, migrate siteDBMigrator
 			return
 		}
 	}
+}
+
+func (r *perSiteDBRouter) preloadMigratedDatabases(siteDatabaseRootDir string, databasesByDomain map[string]*siteFileDatabase, migratedDomains map[string]bool, degradedDomains map[string]error, migrate siteDBMigrator) siteDBPreloadResponse {
+	domainList := make([]string, 0, len(migratedDomains))
+	for domain := range migratedDomains {
+		if _, degraded := degradedDomains[domain]; degraded {
+			continue
+		}
+		domainList = append(domainList, domain)
+	}
+	sort.Strings(domainList)
+	response := siteDBPreloadResponse{total: len(domainList)}
+	for _, domain := range domainList {
+		_, err := r.databaseForDomain(siteDatabaseRootDir, databasesByDomain, migratedDomains, degradedDomains, domain, false, migrate)
+		if err != nil {
+			response.failed++
+			if response.err == nil {
+				response.err = err
+			}
+			log.Printf("%sPRELOAD%s site database failed domain=%s err=%v", terminalRed(), terminalReset(), domain, err)
+			continue
+		}
+		response.opened++
+	}
+	log.Printf("%sPRELOAD%s site databases total=%d opened=%d failed=%d", terminalGreen(), terminalReset(), response.total, response.opened, response.failed)
+	return response
 }
 
 func (r *perSiteDBRouter) scanStartupMigrations(ctx context.Context, siteDatabaseRootDir string, migrate siteDBMigrator) {
@@ -1067,6 +1136,25 @@ func (r *perSiteDBRouter) MigrationStatus(ctx context.Context, domain string) si
 		return status
 	case <-ctx.Done():
 		return siteDBMigrationStatus{err: ctx.Err()}
+	}
+}
+
+func (r *perSiteDBRouter) Preload(ctx context.Context) siteDBPreloadResponse {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	response := make(chan siteDBPreloadResponse, 1)
+	request := siteDBPreloadRequest{response: response}
+	select {
+	case r.preloadRequests <- request:
+	case <-ctx.Done():
+		return siteDBPreloadResponse{err: ctx.Err()}
+	}
+	select {
+	case preloadResponse := <-response:
+		return preloadResponse
+	case <-ctx.Done():
+		return siteDBPreloadResponse{err: ctx.Err()}
 	}
 }
 
@@ -3884,6 +3972,12 @@ func runSitebrushServer(ctx context.Context, config serverRunConfig) error {
 	application.registrationConfirmations = startEmailConfirmationMemoryWorker(ctx)
 	application.emailDelivery = startEmailDeliveryWorker(ctx, application.defaultEmailSender())
 	application.geoIP = geoip.NewResolver(filepath.Join(application.storageRootDir(), "geoip"))
+	certificateCacheDir := filepath.Join(application.storageRootDir(), "letsencrypt")
+	if mkdirErr := os.MkdirAll(certificateCacheDir, 0o755); mkdirErr != nil {
+		application.logProblemEvent("AUTOCERT disabled: failed to create certificate cache %s: %v", certificateCacheDir, mkdirErr)
+	} else {
+		application.autoCertCertificateCache = startAutoCertCertificateMemoryCache(ctx, certificateCacheDir)
+	}
 	siteDatabaseRootDir := siteDatabaseRootPath(effectiveDBPath)
 	siteDatabaseRouter = newPerSiteDBRouter(siteDatabaseRootDir, "localhost", func(migrationCtx context.Context, rawDatabase *sql.DB, domain string) error {
 		bootstrapApplication := &App{db: rawDatabase, storagePath: effectiveStoragePath, dbPath: effectiveDBPath, debug: config.Debug}
@@ -3909,7 +4003,13 @@ func runSitebrushServer(ctx context.Context, config serverRunConfig) error {
 	if err != nil {
 		return err
 	}
-	router.Handle("/p/static/", http.StripPrefix("/p/static/", http.FileServer(http.FS(staticFiles))))
+	embeddedStaticAssets, err := buildEmbeddedStaticAssetCache(staticFiles)
+	if err != nil {
+		return err
+	}
+	application.embeddedStaticAssets = embeddedStaticAssets
+	application.startStartupPreloadWorker(ctx, siteDatabaseRootDir)
+	router.HandleFunc("/p/static/", application.serveEmbeddedStaticAsset)
 	router.HandleFunc("/p/", application.servePublicAsset)
 	router.HandleFunc("/", application.route)
 
@@ -3932,9 +4032,8 @@ func runSitebrushServer(ctx context.Context, config serverRunConfig) error {
 	if parsedPorts.TLSEnabled && listenPort != 80 {
 		application.logProblemEvent("AUTOCERT disabled: Let’s Encrypt HTTP-01 checks need public port 80; current HTTP port is %d", listenPort)
 	}
-	certificateCacheDir := filepath.Join(application.storageRootDir(), "letsencrypt")
-	if mkdirErr := os.MkdirAll(certificateCacheDir, 0o755); mkdirErr != nil {
-		application.logProblemEvent("AUTOCERT disabled: failed to create certificate cache %s: %v", certificateCacheDir, mkdirErr)
+	if application.autoCertCertificateCache == nil {
+		// The startup path already logged the filesystem problem. Leave HTTP available.
 	} else if parsedPorts.TLSEnabled && listenPort == 80 {
 		certificateManager := &autocert.Manager{
 			Prompt:     autocert.AcceptTOS,
@@ -4000,6 +4099,225 @@ func newSitebrushHTTPServer(handler http.Handler) *http.Server {
 	}
 	server.SetKeepAlivesEnabled(true)
 	return server
+}
+
+func buildEmbeddedStaticAssetCache(staticFiles fs.FS) (map[string]embeddedStaticAsset, error) {
+	assets := make(map[string]embeddedStaticAsset)
+	err := fs.WalkDir(staticFiles, ".", func(assetPath string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() {
+			return nil
+		}
+		relativePath := safeRelativeAssetPath(assetPath)
+		if relativePath == "" {
+			return nil
+		}
+		body, readErr := fs.ReadFile(staticFiles, assetPath)
+		if readErr != nil {
+			return readErr
+		}
+		info, infoErr := entry.Info()
+		modTime := time.Time{}
+		if infoErr == nil {
+			modTime = info.ModTime()
+		}
+		assets[relativePath] = embeddedStaticAsset{
+			body:        body,
+			contentType: staticAssetContentType(relativePath, body),
+			modTime:     modTime,
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	log.Printf("%sPRELOAD%s embedded static assets=%d", terminalGreen(), terminalReset(), len(assets))
+	return assets, nil
+}
+
+func staticAssetContentType(assetPath string, body []byte) string {
+	if contentType := mime.TypeByExtension(strings.ToLower(path.Ext(assetPath))); contentType != "" {
+		return contentType
+	}
+	if len(body) == 0 {
+		return "application/octet-stream"
+	}
+	return http.DetectContentType(body)
+}
+
+func (a *App) serveEmbeddedStaticAsset(w http.ResponseWriter, r *http.Request) {
+	relativePath := safeRelativeAssetPath(strings.TrimPrefix(r.URL.Path, "/p/static/"))
+	if relativePath == "" {
+		http.NotFound(w, r)
+		return
+	}
+	asset, found := a.embeddedStaticAssets[relativePath]
+	if !found {
+		http.NotFound(w, r)
+		return
+	}
+	w.Header().Set("Content-Type", asset.contentType)
+	http.ServeContent(w, r, relativePath, asset.modTime, bytes.NewReader(asset.body))
+}
+
+func (a *App) startStartupPreloadWorker(ctx context.Context, siteDatabaseRootDir string) {
+	go a.runStartupPreload(ctx, siteDatabaseRootDir)
+}
+
+func (a *App) runStartupPreload(ctx context.Context, siteDatabaseRootDir string) {
+	startedAt := time.Now()
+	a.waitForSiteDatabaseStartupMigrations(ctx)
+	if ctx.Err() != nil {
+		return
+	}
+	if a.siteDatabaseRouter != nil {
+		a.siteDatabaseRouter.Preload(ctx)
+	}
+	staticStats := a.preloadPublishedStaticFiles(ctx)
+	chrootStats := a.preloadChrootStorage(ctx)
+	log.Printf("%sPRELOAD%s startup complete duration=%s site_db_root=%s static_files=%d static_html=%d chroot_entries=%d",
+		terminalGreen(), terminalReset(), time.Since(startedAt).String(), siteDatabaseRootDir, staticStats.files, staticStats.htmlFiles, chrootStats.entries)
+}
+
+func (a *App) waitForSiteDatabaseStartupMigrations(ctx context.Context) {
+	if a.siteDatabaseRouter == nil {
+		return
+	}
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		status := a.siteDatabaseRouter.MigrationStatus(ctx, "localhost")
+		if status.startupFinished || status.err != nil {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+type startupStaticPreloadStats struct {
+	files     int
+	htmlFiles int
+}
+
+type startupChrootPreloadStats struct {
+	entries int
+}
+
+func (a *App) preloadPublishedStaticFiles(ctx context.Context) startupStaticPreloadStats {
+	rootPath := a.staticRootDir()
+	stats := startupStaticPreloadStats{}
+	err := filepath.WalkDir(rootPath, func(filePath string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return nil
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if entry.IsDir() {
+			return nil
+		}
+		stats.files++
+		_, _ = os.ReadFile(filePath)
+		if pageContentKind(filePath, "") != "html" {
+			return nil
+		}
+		stats.htmlFiles++
+		a.preloadGuestStaticHTMLFile(filePath, rootPath)
+		return nil
+	})
+	if err != nil && !errors.Is(err, os.ErrNotExist) && !errors.Is(err, context.Canceled) {
+		log.Printf("%sPRELOAD%s static files failed root=%s err=%v", terminalRed(), terminalReset(), rootPath, err)
+	}
+	log.Printf("%sPRELOAD%s static files root=%s files=%d html=%d", terminalGreen(), terminalReset(), rootPath, stats.files, stats.htmlFiles)
+	return stats
+}
+
+func (a *App) preloadGuestStaticHTMLFile(filePath, staticRootPath string) {
+	relativePath, err := filepath.Rel(staticRootPath, filePath)
+	if err != nil {
+		return
+	}
+	pathParts := strings.Split(filepath.ToSlash(relativePath), "/")
+	if len(pathParts) < 2 {
+		return
+	}
+	domain := normalizeDomainName(pathParts[0])
+	if domain == "" {
+		return
+	}
+	pagePath := pagePathFromStaticRelativePath(strings.Join(pathParts[1:], "/"))
+	fileInfo, statErr := os.Stat(filePath)
+	if statErr != nil || fileInfo.IsDir() {
+		return
+	}
+	for _, languageCode := range startupPreloadLanguageCodes() {
+		_, _ = a.guestStaticHTML(filePath, pagePath, domain, languageCode, fileInfo)
+	}
+}
+
+func pagePathFromStaticRelativePath(relativePath string) string {
+	relativePath = path.Clean("/" + strings.TrimSpace(filepath.ToSlash(relativePath)))
+	relativePath = strings.TrimPrefix(relativePath, "/")
+	if relativePath == "" || relativePath == "." {
+		return "/"
+	}
+	if relativePath == "index.html" {
+		return "/"
+	}
+	if strings.HasSuffix(relativePath, "/index.html") {
+		return "/" + strings.TrimSuffix(relativePath, "/index.html") + "/"
+	}
+	extension := path.Ext(relativePath)
+	if extension == "" {
+		return cleanPath(relativePath)
+	}
+	return cleanPath(strings.TrimSuffix(relativePath, extension))
+}
+
+func startupPreloadLanguageCodes() []string {
+	languageCodes := make([]string, 0, 2)
+	for _, languageCode := range []string{"ru", "en"} {
+		if _, found := translationCatalog[languageCode]; found {
+			languageCodes = append(languageCodes, languageCode)
+		}
+	}
+	if len(languageCodes) == 0 {
+		for languageCode := range translationCatalog {
+			return []string{languageCode}
+		}
+		return []string{"ru"}
+	}
+	return languageCodes
+}
+
+func (a *App) preloadChrootStorage(ctx context.Context) startupChrootPreloadStats {
+	rootPath := filepath.Join(a.storageRootDir(), "chroot")
+	stats := startupChrootPreloadStats{}
+	err := filepath.WalkDir(rootPath, func(filePath string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return nil
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		stats.entries++
+		if entry.IsDir() {
+			_, _ = os.ReadDir(filePath)
+			return nil
+		}
+		_, _ = entry.Info()
+		return nil
+	})
+	if err != nil && !errors.Is(err, os.ErrNotExist) && !errors.Is(err, context.Canceled) {
+		log.Printf("%sPRELOAD%s chroot storage failed root=%s err=%v", terminalRed(), terminalReset(), rootPath, err)
+	}
+	return stats
 }
 
 func keepAliveHandler(next http.Handler) http.Handler {
@@ -4750,28 +5068,17 @@ func (a *App) autoCertCachedCertificateReusable(domain string, now time.Time) bo
 }
 
 func (a *App) autoCertCachedCertificateValidForDuration(domain string, now time.Time, minimumRemaining time.Duration) bool {
-	certificateDomain := normalizeDomainName(domain)
-	if certificateDomain == "" {
-		return false
-	}
-	certificateCacheDir := filepath.Join(a.storageRootDir(), "letsencrypt")
-	cacheNames := []string{certificateDomain, certificateDomain + "+rsa"}
-	for _, cacheName := range cacheNames {
-		cacheBytes, err := os.ReadFile(filepath.Join(certificateCacheDir, cacheName))
-		if err != nil {
-			continue
-		}
-		if _, ok := cachedCertificatePEMExpiresForDomain(cacheBytes, certificateDomain, now, minimumRemaining); ok {
-			return true
-		}
-	}
-	return false
+	_, _, ok := a.autoCertCachedCertificate(domain, now, minimumRemaining)
+	return ok
 }
 
 func (a *App) autoCertCachedCertificate(domain string, now time.Time, minimumRemaining time.Duration) (*tls.Certificate, time.Time, bool) {
 	certificateDomain := normalizeDomainName(domain)
 	if certificateDomain == "" {
 		return nil, time.Time{}, false
+	}
+	if certificate, expiresAt, ok := a.autoCertCachedCertificateFromMemory(certificateDomain, now, minimumRemaining); ok {
+		return certificate, expiresAt, true
 	}
 	certificateCacheDir := filepath.Join(a.storageRootDir(), "letsencrypt")
 	cacheNames := []string{certificateDomain, certificateDomain + "+rsa"}
@@ -4788,9 +5095,122 @@ func (a *App) autoCertCachedCertificate(domain string, now time.Time, minimumRem
 		if err != nil {
 			continue
 		}
+		a.rememberAutoCertCachedCertificate(certificateDomain, &certificate, expiresAt)
 		return &certificate, expiresAt, true
 	}
 	return nil, time.Time{}, false
+}
+
+func (a *App) autoCertCachedCertificateFromMemory(domain string, now time.Time, minimumRemaining time.Duration) (*tls.Certificate, time.Time, bool) {
+	if a.autoCertCertificateCache == nil {
+		return nil, time.Time{}, false
+	}
+	response := make(chan autoCertCertificateCacheResponse, 1)
+	request := autoCertCertificateCacheRequest{
+		action:           "get",
+		domain:           domain,
+		minimumRemaining: minimumRemaining,
+		response:         response,
+	}
+	select {
+	case a.autoCertCertificateCache <- request:
+	default:
+		return nil, time.Time{}, false
+	}
+	select {
+	case cacheResponse := <-response:
+		if !cacheResponse.found || cacheResponse.certificate == nil {
+			return nil, time.Time{}, false
+		}
+		if cacheResponse.expiresAt.Before(now.Add(minimumRemaining)) {
+			return nil, time.Time{}, false
+		}
+		return cacheResponse.certificate, cacheResponse.expiresAt, true
+	case <-time.After(5 * time.Millisecond):
+		return nil, time.Time{}, false
+	}
+}
+
+func (a *App) rememberAutoCertCachedCertificate(domain string, certificate *tls.Certificate, expiresAt time.Time) {
+	if a.autoCertCertificateCache == nil || certificate == nil || expiresAt.IsZero() {
+		return
+	}
+	request := autoCertCertificateCacheRequest{action: "put", domain: domain, certificate: certificate, expiresAt: expiresAt}
+	select {
+	case a.autoCertCertificateCache <- request:
+	default:
+	}
+}
+
+func startAutoCertCertificateMemoryCache(ctx context.Context, certificateCacheDir string) chan autoCertCertificateCacheRequest {
+	requests := make(chan autoCertCertificateCacheRequest, 256)
+	go runAutoCertCertificateMemoryCache(ctx, certificateCacheDir, requests)
+	return requests
+}
+
+func runAutoCertCertificateMemoryCache(ctx context.Context, certificateCacheDir string, requests <-chan autoCertCertificateCacheRequest) {
+	certificatesByDomain := preloadAutoCertCertificatesFromDisk(certificateCacheDir)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case request := <-requests:
+			domain := normalizeDomainName(request.domain)
+			if domain == "" {
+				if request.response != nil {
+					request.response <- autoCertCertificateCacheResponse{}
+				}
+				continue
+			}
+			switch request.action {
+			case "get":
+				cacheResponse := certificatesByDomain[domain]
+				if cacheResponse.found && cacheResponse.expiresAt.Before(time.Now().Add(request.minimumRemaining)) {
+					delete(certificatesByDomain, domain)
+					cacheResponse = autoCertCertificateCacheResponse{}
+				}
+				request.response <- cacheResponse
+			case "put":
+				if request.certificate != nil && !request.expiresAt.IsZero() {
+					certificatesByDomain[domain] = autoCertCertificateCacheResponse{certificate: request.certificate, expiresAt: request.expiresAt, found: true}
+				}
+			}
+		}
+	}
+}
+
+func preloadAutoCertCertificatesFromDisk(certificateCacheDir string) map[string]autoCertCertificateCacheResponse {
+	certificatesByDomain := make(map[string]autoCertCertificateCacheResponse)
+	entries, err := os.ReadDir(certificateCacheDir)
+	if err != nil {
+		return certificatesByDomain
+	}
+	now := time.Now()
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		cacheName := entry.Name()
+		certificateDomain := normalizeDomainName(strings.TrimSuffix(cacheName, "+rsa"))
+		if certificateDomain == "" {
+			continue
+		}
+		cacheBytes, readErr := os.ReadFile(filepath.Join(certificateCacheDir, cacheName))
+		if readErr != nil {
+			continue
+		}
+		expiresAt, ok := cachedCertificatePEMExpiresForDomain(cacheBytes, certificateDomain, now, 0)
+		if !ok {
+			continue
+		}
+		certificate, keyPairErr := tls.X509KeyPair(cacheBytes, cacheBytes)
+		if keyPairErr != nil {
+			continue
+		}
+		certificatesByDomain[certificateDomain] = autoCertCertificateCacheResponse{certificate: &certificate, expiresAt: expiresAt, found: true}
+	}
+	log.Printf("%sPRELOAD%s autocert certificates=%d cache=%s", terminalGreen(), terminalReset(), len(certificatesByDomain), certificateCacheDir)
+	return certificatesByDomain
 }
 
 func cachedCertificatePEMValidForDomain(certificateBytes []byte, domain string, now time.Time) bool {
