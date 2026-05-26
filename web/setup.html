@@ -12,12 +12,88 @@
   <title>{{index .T "setup_create_admin"}}</title>
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
   <link href="/p/static/technical_pages.css" rel="stylesheet">
+  <style>
+    .site-request-shell { max-width: 920px; }
+    .site-request-form { max-width: 920px; border-radius: 8px; }
+    .site-request-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+    .site-request-plan-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; }
+    .site-request-plan { border: 1px solid var(--bs-border-color); border-radius: 8px; padding: 14px; display: grid; gap: 10px; min-height: 100%; cursor: pointer; }
+    .site-request-plan input { margin-top: 3px; }
+    .site-request-plan-main { display: flex; gap: 10px; align-items: flex-start; }
+    .site-request-plan-title { font-weight: 700; }
+    .site-request-plan-meta { color: var(--bs-secondary-color); font-size: .92rem; }
+    .site-request-plan-actions { display: flex; justify-content: flex-end; }
+    .site-request-modal-list { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; }
+    .site-request-modal-list li { border: 1px solid var(--bs-border-color); border-radius: 8px; padding: 10px 12px; background: var(--bs-tertiary-bg); }
+    @media (max-width: 760px) { .site-request-grid { grid-template-columns: 1fr; } }
+  </style>
 </head>
 <body class="technical-page bg-body">
 <div class="container py-5">
   <div class="page-header mb-4">
     <h1 class="section-heading"><img src="/p/static/profile.png" class="section-icon" alt=""><a href="/">{{.Domain}}</a> <small class="text-muted">| {{index .T "setup_no_admin"}}</small></h1>
   </div>
+  {{if .RegistrationDisabled}}
+  <div class="site-request-shell">
+    <p class="text-muted">Самостоятельная регистрация новых сайтов отключена владельцем сервера. Отправьте заявку на подключение этого домена.</p>
+    {{if .Status}}<div class="alert alert-info" style="max-width:920px;">{{.Status}}</div>{{end}}
+    <form class="card card-body site-request-form" method="post" action="?site_request">
+      <input type="hidden" name="return_path" value="{{.ReturnPath}}">
+      <div class="site-request-grid mb-3">
+        <label>Имя
+          <input type="text" name="name" class="form-control" value="{{.RequestName}}" autocomplete="name" required>
+        </label>
+        <label>Email
+          <input type="email" name="email" class="form-control" value="{{.RequestEmail}}" autocomplete="email" required>
+        </label>
+        <label>Телефон
+          <input type="tel" name="phone" class="form-control" value="{{.RequestPhone}}" autocomplete="tel" required>
+        </label>
+      </div>
+      <div class="mb-2 fw-semibold">Тарифный план</div>
+      <div class="site-request-plan-list mb-3">
+        {{range .Plans}}
+        <label class="site-request-plan">
+          <span class="site-request-plan-main">
+            <input type="radio" name="plan_id" value="{{.ID}}" {{if eq .ID $.SelectedPlanID}}checked{{end}} required>
+            <span>
+              <span class="site-request-plan-title">{{.Name}}</span>
+              <span class="site-request-plan-meta d-block">{{.QuotaLabel}} · {{.Price}} {{.Currency}}/{{.BillingPeriod}}</span>
+              {{if .IsDefault}}<span class="badge text-bg-primary mt-2">По умолчанию</span>{{end}}
+            </span>
+          </span>
+          <span class="site-request-plan-actions">
+            <button type="button" class="btn btn-outline-primary btn-sm" data-bs-toggle="modal" data-bs-target="#siteRequestPlanModal{{.ID}}">Подробнее</button>
+          </span>
+        </label>
+        <div class="modal fade" id="siteRequestPlanModal{{.ID}}" tabindex="-1" aria-hidden="true">
+          <div class="modal-dialog modal-dialog-centered"><div class="modal-content">
+            <div class="modal-header">
+              <h5 class="modal-title">{{.Name}}</h5>
+              <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="{{index $.T "tree_close"}}"></button>
+            </div>
+            <div class="modal-body">
+              <p class="text-muted mb-3">{{.QuotaLabel}} · {{.Price}} {{.Currency}}/{{.BillingPeriod}}</p>
+              <ul class="site-request-modal-list">
+                <li>Редактор страниц Sitebrush и публикация сайта.</li>
+                <li>Файлы, изображения и статические ресурсы в пределах квоты {{.QuotaLabel}}.</li>
+                <li>Резервные копии, настройки домена и управление HTTPS после активации.</li>
+                <li>Автоматический SSL будет доступен после корректной настройки DNS.</li>
+              </ul>
+            </div>
+            <div class="modal-footer">
+              <button type="button" class="btn btn-primary" data-bs-dismiss="modal">Понятно</button>
+            </div>
+          </div></div>
+        </div>
+        {{else}}
+        <div class="alert alert-warning">Тарифные планы пока не настроены владельцем сервера.</div>
+        {{end}}
+      </div>
+      <div><button type="submit" class="btn btn-primary"><img src="/p/static/profile.png" alt="">Отправить заявку</button></div>
+    </form>
+  </div>
+  {{else}}
   <p class="text-muted">{{index .T "setup_first_visitor"}}</p>
   {{if .Status}}<div class="alert alert-info" style="max-width:520px;">{{.Status}}</div>{{end}}
   <form class="card card-body" method="post" action="?register" style="max-width:520px;">
@@ -26,6 +102,8 @@
     <p><input type="password" name="password" class="form-control" placeholder="{{index .T "login_password_placeholder"}}" required></p>
     <div><button type="submit" class="btn btn-primary">{{index .T "setup_create_admin"}}</button></div>
   </form>
+  {{end}}
 </div>
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
 </body>
 </html>

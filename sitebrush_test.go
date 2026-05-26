@@ -33,6 +33,7 @@ import (
 
 	_ "github.com/mattn/go-sqlite3"
 	"golang.org/x/net/dns/dnsmessage"
+	"sitebrush/pkg/billing"
 	"sitebrush/pkg/diskusage"
 	"sitebrush/pkg/grabber"
 )
@@ -1681,6 +1682,165 @@ func TestRegisterCreatesSiteDatabaseOnlyAfterConfirmedVerifiedDomain(t *testing.
 	if userCount != 1 {
 		t.Fatalf("confirmed admin count = %d, want 1", userCount)
 	}
+}
+
+func TestDisabledAutoRegistrationShowsOnlySiteRequestForm(t *testing.T) {
+	application, _ := newTestApplication(t)
+	controlDB := setupBillingOwnerForTest(t, application, "localhost", "owner@example.com", false)
+	defer controlDB.Close()
+
+	request := httptest.NewRequest(http.MethodGet, "http://newsite.example/?register", nil)
+	response := httptest.NewRecorder()
+	application.route(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%q", response.Code, response.Body.String())
+	}
+	body := response.Body.String()
+	for _, expectedFragment := range []string{
+		`action="?site_request"`,
+		`name="name"`,
+		`name="phone"`,
+		`name="plan_id"`,
+		`siteRequestPlanModal`,
+		`Отправить заявку`,
+	} {
+		if !strings.Contains(body, expectedFragment) {
+			t.Fatalf("disabled registration page missing %q in %s", expectedFragment, body)
+		}
+	}
+	for _, forbiddenFragment := range []string{
+		`name="password"`,
+		`Первый посетитель становится администратором`,
+		`setup_first_visitor`,
+	} {
+		if strings.Contains(body, forbiddenFragment) {
+			t.Fatalf("disabled registration page still exposes bootstrap registration fragment %q in %s", forbiddenFragment, body)
+		}
+	}
+}
+
+func TestSiteRequestStoresApplicantWithoutCreatingAdmin(t *testing.T) {
+	application, rawDB := newTestApplication(t)
+	controlDB := setupBillingOwnerForTest(t, application, "localhost", "owner@example.com", false)
+	defer controlDB.Close()
+	store := billing.Store{DB: controlDB}
+	plan, found := store.DefaultPlan(context.Background())
+	if !found {
+		t.Fatal("default plan missing")
+	}
+
+	form := url.Values{}
+	form.Set("name", "Customer Name")
+	form.Set("email", "customer@example.com")
+	form.Set("phone", "+1 555 0100")
+	form.Set("plan_id", strconv.Itoa(plan.ID))
+	request := httptest.NewRequest(http.MethodPost, "http://customer.example/?site_request", strings.NewReader(form.Encode()))
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	response := httptest.NewRecorder()
+	application.route(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%q", response.Code, response.Body.String())
+	}
+	if !strings.Contains(response.Body.String(), "Заявка отправлена владельцу сервера") {
+		t.Fatalf("request page did not confirm submission: %s", response.Body.String())
+	}
+	var userCount int
+	if err := rawDB.QueryRow(`SELECT COUNT(1) FROM users WHERE domain=?`, "customer.example").Scan(&userCount); err != nil {
+		t.Fatalf("read user count: %v", err)
+	}
+	if userCount != 0 {
+		t.Fatalf("disabled registration created %d admins", userCount)
+	}
+	var requestCount int
+	if err := controlDB.QueryRow(`SELECT COUNT(1) FROM site_registration_requests WHERE domain=? AND name=? AND email=? AND phone=? AND plan_id=? AND status='pending'`,
+		"customer.example", "Customer Name", "customer@example.com", "+1 555 0100", plan.ID).Scan(&requestCount); err != nil {
+		t.Fatalf("read request count: %v", err)
+	}
+	if requestCount != 1 {
+		t.Fatalf("stored request count = %d, want 1", requestCount)
+	}
+	select {
+	case mailJob := <-application.emailDelivery:
+		if mailJob.message.To != "owner@example.com" || !strings.Contains(mailJob.message.Body, "customer.example") {
+			t.Fatalf("owner notification = %#v", mailJob.message)
+		}
+	default:
+		t.Fatal("site request did not enqueue owner notification")
+	}
+}
+
+func TestApproveSiteRequestCreatesSiteAndEmailsApplicant(t *testing.T) {
+	application, _ := newTestApplication(t)
+	controlDB := setupBillingOwnerForTest(t, application, "localhost", "owner@example.com", false)
+	defer controlDB.Close()
+	store := billing.Store{DB: controlDB}
+	plan, found := store.DefaultPlan(context.Background())
+	if !found {
+		t.Fatal("default plan missing")
+	}
+	if err := store.CreateSiteRequest(context.Background(), "approved.example", "Applicant", "applicant@example.com", "+1 555 0101", plan.ID); err != nil {
+		t.Fatalf("create site request: %v", err)
+	}
+	siteRequests := store.SiteRequests(context.Background())
+	if len(siteRequests) != 1 {
+		t.Fatalf("site requests = %#v", siteRequests)
+	}
+
+	form := url.Values{}
+	form.Set("request_id", strconv.Itoa(siteRequests[0].ID))
+	form.Set("owner_message", "Welcome")
+	request := httptest.NewRequest(http.MethodPost, "http://localhost/?billing", strings.NewReader(form.Encode()))
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	status := application.approveSiteRegistrationRequestFromForm(request)
+	if !strings.Contains(status, "активирован") {
+		t.Fatalf("approve status = %q", status)
+	}
+	siteDatabasePath := filepath.Join(siteDatabaseRootPath(application.serverControlDBPath()), domainStorageName("approved.example")+".db")
+	siteDB, err := sql.Open("sqlite", "file:"+siteDatabasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer siteDB.Close()
+	var adminCount int
+	if err := siteDB.QueryRow(`SELECT COUNT(1) FROM users WHERE domain=? AND email=? AND is_admin=1`, "approved.example", "applicant@example.com").Scan(&adminCount); err != nil {
+		t.Fatalf("read approved admin count: %v", err)
+	}
+	if adminCount != 1 {
+		t.Fatalf("approved admin count = %d, want 1", adminCount)
+	}
+	var assignmentCount int
+	if err := controlDB.QueryRow(`SELECT COUNT(1) FROM site_service_assignments WHERE domain=? AND plan_id=?`, "approved.example", plan.ID).Scan(&assignmentCount); err != nil {
+		t.Fatalf("read assignment count: %v", err)
+	}
+	if assignmentCount != 1 {
+		t.Fatalf("assignment count = %d, want 1", assignmentCount)
+	}
+	select {
+	case mailJob := <-application.emailDelivery:
+		if mailJob.message.To != "applicant@example.com" || !strings.Contains(mailJob.message.Body, "Временный пароль") {
+			t.Fatalf("applicant notification = %#v", mailJob.message)
+		}
+	default:
+		t.Fatal("approval did not enqueue applicant notification")
+	}
+}
+
+func setupBillingOwnerForTest(t *testing.T, application *App, domain, email string, autoRegistrationEnabled bool) *sql.DB {
+	t.Helper()
+	controlDB, err := application.openServerControlDatabase(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := billing.Store{DB: controlDB}
+	if err := store.SetOwner(context.Background(), domain, email); err != nil {
+		_ = controlDB.Close()
+		t.Fatalf("set owner: %v", err)
+	}
+	if err := store.SaveSettings(context.Background(), autoRegistrationEnabled); err != nil {
+		_ = controlDB.Close()
+		t.Fatalf("save billing settings: %v", err)
+	}
+	return controlDB
 }
 
 func TestRecoverPageShowsSPFSetupBeforeEmailForm(t *testing.T) {

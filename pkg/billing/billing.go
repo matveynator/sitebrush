@@ -12,7 +12,7 @@ import (
 
 const DefaultStorageLimitBytes int64 = 10 * 1024 * 1024 * 1024
 const DefaultDeletionBackupRetentionDays = 365
-const currentBillingSchemaVersion = 2
+const currentBillingSchemaVersion = 3
 
 type Store struct {
 	DB *sql.DB
@@ -44,6 +44,26 @@ type Site struct {
 	DatabasePath      string
 	DeletionSizeBytes int64
 	DeletionSizeLabel string
+}
+
+type SiteRequest struct {
+	ID                  int
+	Domain              string
+	Name                string
+	Email               string
+	Phone               string
+	PlanID              int
+	PlanName            string
+	PlanQuotaLabel      string
+	PlanPrice           string
+	PlanCurrency        string
+	PlanBillingPeriod   string
+	Status              string
+	OwnerMessage        string
+	CreatedAt           string
+	UpdatedAt           string
+	CanApproveOrReject  bool
+	PlanDescriptionText string
 }
 
 type SiteUsage struct {
@@ -80,6 +100,7 @@ func Migrate(ctx context.Context, database *sql.DB) error {
 		`CREATE TABLE IF NOT EXISTS server_settings(name TEXT PRIMARY KEY,value TEXT,updated_at TEXT);`,
 		`CREATE TABLE IF NOT EXISTS site_service_plans(id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT UNIQUE,quota_bytes INTEGER,price TEXT,currency TEXT,billing_period TEXT,is_default INTEGER DEFAULT 0,created_at TEXT,updated_at TEXT);`,
 		`CREATE TABLE IF NOT EXISTS site_service_assignments(domain TEXT PRIMARY KEY,plan_id INTEGER DEFAULT 0,service_status TEXT,notes TEXT,updated_at TEXT);`,
+		`CREATE TABLE IF NOT EXISTS site_registration_requests(id INTEGER PRIMARY KEY AUTOINCREMENT,domain TEXT,name TEXT,email TEXT,phone TEXT,plan_id INTEGER DEFAULT 0,status TEXT,owner_message TEXT,created_at TEXT,updated_at TEXT);`,
 		`CREATE TABLE IF NOT EXISTS site_deletion_backups(id INTEGER PRIMARY KEY AUTOINCREMENT,domain TEXT,archive_path TEXT,file_name TEXT,size_bytes INTEGER,token TEXT,token_created_at TEXT,created_at TEXT,expires_at TEXT,retention_days INTEGER,owner_contacts TEXT,metadata_json TEXT,language_code TEXT,downloaded_at TEXT,download_count INTEGER DEFAULT 0);`,
 	}
 	for queryIndex, query := range queries {
@@ -114,7 +135,7 @@ func setSchemaMigrationVersion(ctx context.Context, database *sql.DB, component 
 }
 
 func billingSchemaComplete(ctx context.Context, database *sql.DB) (bool, error) {
-	for _, tableName := range []string{"server_managers", "server_settings", "site_service_plans", "site_service_assignments", "site_deletion_backups"} {
+	for _, tableName := range []string{"server_managers", "server_settings", "site_service_plans", "site_service_assignments", "site_registration_requests", "site_deletion_backups"} {
 		found, err := tableExists(ctx, database, tableName)
 		if err != nil || !found {
 			return found, err
@@ -173,6 +194,32 @@ func (store Store) IsOwner(ctx context.Context, email string) bool {
 	var managerCount int
 	_ = store.DB.QueryRowContext(ctx, `SELECT COUNT(1) FROM server_managers WHERE email=? AND role='owner'`, strings.TrimSpace(email)).Scan(&managerCount)
 	return managerCount > 0
+}
+
+func (store Store) OwnerEmails(ctx context.Context) []string {
+	rows, err := store.DB.QueryContext(ctx, `SELECT email FROM server_managers WHERE role='owner' ORDER BY created_at ASC,email ASC`)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	emails := make([]string, 0, 2)
+	seen := make(map[string]struct{})
+	for rows.Next() {
+		var email string
+		if scanErr := rows.Scan(&email); scanErr != nil {
+			continue
+		}
+		email = strings.TrimSpace(email)
+		if email == "" {
+			continue
+		}
+		if _, found := seen[email]; found {
+			continue
+		}
+		seen[email] = struct{}{}
+		emails = append(emails, email)
+	}
+	return emails
 }
 
 func (store Store) OwnerDomain(ctx context.Context) (string, bool) {
@@ -309,6 +356,19 @@ func (store Store) PlanByID(ctx context.Context, planID int) (Plan, bool) {
 	return plan, true
 }
 
+func (store Store) DefaultPlan(ctx context.Context) (Plan, bool) {
+	var plan Plan
+	var isDefault int
+	err := store.DB.QueryRowContext(ctx, `SELECT id,name,quota_bytes,price,currency,billing_period,is_default FROM site_service_plans ORDER BY is_default DESC, quota_bytes ASC, name ASC LIMIT 1`).Scan(
+		&plan.ID, &plan.Name, &plan.QuotaBytes, &plan.Price, &plan.Currency, &plan.BillingPeriod, &isDefault)
+	if err != nil {
+		return Plan{}, false
+	}
+	plan.QuotaLabel = FormatFileSize(plan.QuotaBytes)
+	plan.IsDefault = isDefault == 1
+	return plan, true
+}
+
 func (store Store) ServiceAssignments(ctx context.Context) map[string]ServiceAssignment {
 	rows, err := store.DB.QueryContext(ctx, `SELECT domain,plan_id,service_status FROM site_service_assignments`)
 	if err != nil {
@@ -328,6 +388,89 @@ func (store Store) ServiceAssignments(ctx context.Context) map[string]ServiceAss
 		}
 	}
 	return assignments
+}
+
+func (store Store) CreateSiteRequest(ctx context.Context, domain, name, email, phone string, planID int) error {
+	domain = strings.TrimSpace(domain)
+	name = strings.TrimSpace(name)
+	email = strings.TrimSpace(email)
+	phone = strings.TrimSpace(phone)
+	if domain == "" {
+		return fmt.Errorf("site domain is required")
+	}
+	if name == "" {
+		return fmt.Errorf("name is required")
+	}
+	if email == "" {
+		return fmt.Errorf("email is required")
+	}
+	if phone == "" {
+		return fmt.Errorf("phone is required")
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	_, err := store.DB.ExecContext(ctx, `INSERT INTO site_registration_requests(domain,name,email,phone,plan_id,status,owner_message,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)`,
+		domain, name, email, phone, planID, "pending", "", now, now)
+	return err
+}
+
+func (store Store) SiteRequests(ctx context.Context) []SiteRequest {
+	plans := store.Plans(ctx)
+	planByID := make(map[int]Plan, len(plans))
+	for _, plan := range plans {
+		planByID[plan.ID] = plan
+	}
+	rows, err := store.DB.QueryContext(ctx, `SELECT id,domain,name,email,phone,plan_id,status,owner_message,created_at,updated_at FROM site_registration_requests ORDER BY CASE status WHEN 'pending' THEN 0 WHEN 'approved' THEN 1 ELSE 2 END, created_at DESC, id DESC`)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	requests := make([]SiteRequest, 0, 8)
+	for rows.Next() {
+		var request SiteRequest
+		if scanErr := rows.Scan(&request.ID, &request.Domain, &request.Name, &request.Email, &request.Phone, &request.PlanID, &request.Status, &request.OwnerMessage, &request.CreatedAt, &request.UpdatedAt); scanErr != nil {
+			continue
+		}
+		applyPlanToSiteRequest(&request, planByID[request.PlanID])
+		request.CanApproveOrReject = strings.TrimSpace(request.Status) == "pending"
+		requests = append(requests, request)
+	}
+	return requests
+}
+
+func (store Store) SiteRequestByID(ctx context.Context, requestID int) (SiteRequest, bool) {
+	var request SiteRequest
+	err := store.DB.QueryRowContext(ctx, `SELECT id,domain,name,email,phone,plan_id,status,owner_message,created_at,updated_at FROM site_registration_requests WHERE id=?`, requestID).Scan(
+		&request.ID, &request.Domain, &request.Name, &request.Email, &request.Phone, &request.PlanID, &request.Status, &request.OwnerMessage, &request.CreatedAt, &request.UpdatedAt)
+	if err != nil {
+		return SiteRequest{}, false
+	}
+	if plan, found := store.PlanByID(ctx, request.PlanID); found {
+		applyPlanToSiteRequest(&request, plan)
+	}
+	request.CanApproveOrReject = strings.TrimSpace(request.Status) == "pending"
+	return request, true
+}
+
+func (store Store) UpdateSiteRequestStatus(ctx context.Context, requestID int, status, ownerMessage string) error {
+	status = strings.TrimSpace(status)
+	if status == "" {
+		return fmt.Errorf("request status is required")
+	}
+	_, err := store.DB.ExecContext(ctx, `UPDATE site_registration_requests SET status=?,owner_message=?,updated_at=? WHERE id=?`,
+		status, strings.TrimSpace(ownerMessage), time.Now().UTC().Format(time.RFC3339), requestID)
+	return err
+}
+
+func applyPlanToSiteRequest(request *SiteRequest, plan Plan) {
+	if request == nil || plan.ID == 0 {
+		return
+	}
+	request.PlanName = plan.Name
+	request.PlanQuotaLabel = plan.QuotaLabel
+	request.PlanPrice = plan.Price
+	request.PlanCurrency = plan.Currency
+	request.PlanBillingPeriod = plan.BillingPeriod
+	request.PlanDescriptionText = fmt.Sprintf("Storage: %s. Price: %s %s/%s. Includes Sitebrush editor, file storage, publishing, backups, domain settings, and automatic SSL when DNS is configured.", plan.QuotaLabel, plan.Price, plan.Currency, plan.BillingPeriod)
 }
 
 func BuildSites(usages []SiteUsage, plans []Plan, assignments map[string]ServiceAssignment, currentDomain string) []Site {

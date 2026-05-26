@@ -5438,6 +5438,10 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 		a.login(w, r)
 		return
 	}
+	if hasQueryFlag(r, "site_request") {
+		a.siteRequestPage(w, r)
+		return
+	}
 	if hasQueryFlag(r, "register") {
 		a.registerPage(w, r)
 		return
@@ -5587,8 +5591,7 @@ func (a *App) setupAdmin(w http.ResponseWriter, r *http.Request) {
 func (a *App) registerPage(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodPost {
 		if a.serverOwnerExists(r.Context()) && !a.serverAutomaticRegistrationAllowed(r.Context()) && !a.hasAdmin(r.Context(), a.siteDomain(r.Context(), r)) {
-			w.WriteHeader(http.StatusForbidden)
-			a.renderSetupPage(w, r, a.siteDomain(r.Context(), r), strings.TrimSpace(r.FormValue("email")), "Регистрация новых сайтов отключена владельцем сервера.")
+			a.siteRequestPage(w, r)
 			return
 		}
 		a.setupAdmin(w, r)
@@ -5604,8 +5607,7 @@ func (a *App) registerPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if a.serverOwnerExists(r.Context()) && !a.serverAutomaticRegistrationAllowed(r.Context()) {
-		w.WriteHeader(http.StatusForbidden)
-		a.renderSetupPage(w, r, domain, "", "Регистрация новых сайтов отключена владельцем сервера.")
+		a.renderSiteRequestPage(w, r, domain, "", "", "", "", 0)
 		return
 	}
 	a.renderSetupPage(w, r, domain, "", "")
@@ -5613,6 +5615,97 @@ func (a *App) registerPage(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) renderSetupPage(w http.ResponseWriter, r *http.Request, domain, email, status string) {
 	a.render(w, r, "setup.html", map[string]any{"Domain": domain, "Email": strings.TrimSpace(email), "Status": strings.TrimSpace(status), "ReturnPath": requestedReturnPath(r)})
+}
+
+func (a *App) siteRequestPage(w http.ResponseWriter, r *http.Request) {
+	domain := a.siteDomain(r.Context(), r)
+	if a.hasAdmin(r.Context(), domain) {
+		http.Redirect(w, r, loginURLForRequest(r), http.StatusFound)
+		return
+	}
+	if !a.serverOwnerExists(r.Context()) || a.serverAutomaticRegistrationAllowed(r.Context()) {
+		if r.Method == http.MethodPost {
+			a.setupAdmin(w, r)
+			return
+		}
+		a.renderSetupPage(w, r, domain, "", "")
+		return
+	}
+	if r.Method != http.MethodPost {
+		a.renderSiteRequestPage(w, r, domain, "", "", "", "", 0)
+		return
+	}
+	name := strings.TrimSpace(r.FormValue("name"))
+	email := strings.TrimSpace(r.FormValue("email"))
+	phone := strings.TrimSpace(r.FormValue("phone"))
+	planID, _ := strconv.Atoi(strings.TrimSpace(r.FormValue("plan_id")))
+	status := a.createSiteRegistrationRequestFromForm(r, domain, name, email, phone, planID)
+	a.renderSiteRequestPage(w, r, domain, status, name, email, phone, planID)
+}
+
+func (a *App) renderSiteRequestPage(w http.ResponseWriter, r *http.Request, domain, status, name, email, phone string, selectedPlanID int) {
+	plans := a.publicBillingPlans(r.Context())
+	if selectedPlanID == 0 && len(plans) > 0 {
+		selectedPlanID = plans[0].ID
+	}
+	a.render(w, r, "setup.html", map[string]any{
+		"Domain":               domain,
+		"Status":               strings.TrimSpace(status),
+		"RegistrationDisabled": true,
+		"RequestName":          strings.TrimSpace(name),
+		"RequestEmail":         strings.TrimSpace(email),
+		"RequestPhone":         strings.TrimSpace(phone),
+		"Plans":                plans,
+		"SelectedPlanID":       selectedPlanID,
+		"ReturnPath":           requestedReturnPath(r),
+	})
+}
+
+func (a *App) publicBillingPlans(ctx context.Context) []billing.Plan {
+	controlDatabase, err := a.openServerControlDatabase(ctx)
+	if err != nil {
+		return nil
+	}
+	defer controlDatabase.Close()
+	return (billing.Store{DB: controlDatabase}).Plans(ctx)
+}
+
+func (a *App) createSiteRegistrationRequestFromForm(r *http.Request, domain, name, email, phone string, planID int) string {
+	translations := translationsForRequest(r)
+	if name == "" {
+		return "Укажите имя."
+	}
+	if email == "" {
+		return "Укажите email."
+	}
+	if _, err := stdmail.ParseAddress(email); err != nil {
+		return translationOrDefault(translations, "email_confirmation_status_invalid_email", "Email address is invalid.")
+	}
+	if phone == "" {
+		return "Укажите телефон."
+	}
+	controlDatabase, err := a.openServerControlDatabase(r.Context())
+	if err != nil {
+		return err.Error()
+	}
+	defer controlDatabase.Close()
+	store := billing.Store{DB: controlDatabase}
+	if planID <= 0 {
+		if defaultPlan, found := store.DefaultPlan(r.Context()); found {
+			planID = defaultPlan.ID
+		}
+	}
+	if planID <= 0 {
+		return "Выберите тарифный план."
+	}
+	if _, found := store.PlanByID(r.Context(), planID); !found {
+		return "Выбранный тариф не найден."
+	}
+	if err := store.CreateSiteRequest(r.Context(), domain, name, email, phone, planID); err != nil {
+		return err.Error()
+	}
+	a.enqueueSiteRegistrationRequestOwnerEmails(r.Context(), r, store, domain, name, email, phone, planID)
+	return "Заявка отправлена владельцу сервера. После проверки вы получите ответ на email."
 }
 
 func (a *App) login(w http.ResponseWriter, r *http.Request) {
@@ -7369,6 +7462,10 @@ func (a *App) handleBillingAction(r *http.Request) string {
 		return a.saveServicePlanFromForm(r)
 	case "delete_plan":
 		return a.deleteServicePlanFromForm(r)
+	case "approve_site_request":
+		return a.approveSiteRegistrationRequestFromForm(r)
+	case "reject_site_request":
+		return a.rejectSiteRegistrationRequestFromForm(r)
 	default:
 		return "Неизвестное действие биллинга."
 	}
@@ -7384,6 +7481,7 @@ func (a *App) billingView(ctx context.Context, r *http.Request) (map[string]any,
 	a.cleanupExpiredManagedSiteDeletionBackups(ctx, controlDatabase)
 	plans := store.Plans(ctx)
 	assignments := store.ServiceAssignments(ctx)
+	siteRequests := store.SiteRequests(ctx)
 	siteRows, err := a.billingSiteRows(ctx, plans, assignments, a.siteDomain(ctx, r))
 	if err != nil {
 		return nil, err
@@ -7394,6 +7492,7 @@ func (a *App) billingView(ctx context.Context, r *http.Request) (map[string]any,
 		"Title":                   "Биллинг",
 		"Sites":                   siteRows,
 		"Plans":                   plans,
+		"SiteRequests":            siteRequests,
 		"Backups":                 backups,
 		"BackupRetentionDays":     retentionDays,
 		"AutoRegistrationEnabled": store.AutomaticRegistrationAllowed(ctx),
@@ -7534,6 +7633,146 @@ func (a *App) createManagedSite(ctx context.Context, domain, email, password str
 	siteApplication.ensureDomainStorageUsageRow(siteContext, domain)
 	_, err = rawDatabase.ExecContext(siteContext, `UPDATE domain_storage_usage SET limit_bytes=?, updated_at=? WHERE domain=?`, quotaBytes, time.Now().UTC().Format(time.RFC3339), domain)
 	return err
+}
+
+func (a *App) approveSiteRegistrationRequestFromForm(r *http.Request) string {
+	requestID, _ := strconv.Atoi(strings.TrimSpace(r.FormValue("request_id")))
+	ownerMessage := strings.TrimSpace(r.FormValue("owner_message"))
+	if requestID <= 0 {
+		return "Заявка не выбрана."
+	}
+	controlDatabase, err := a.openServerControlDatabase(r.Context())
+	if err != nil {
+		return err.Error()
+	}
+	defer controlDatabase.Close()
+	store := billing.Store{DB: controlDatabase}
+	siteRequest, found := store.SiteRequestByID(r.Context(), requestID)
+	if !found {
+		return "Заявка не найдена."
+	}
+	if siteRequest.Status != "pending" {
+		return "Эта заявка уже обработана."
+	}
+	plan, planFound := store.PlanByID(r.Context(), siteRequest.PlanID)
+	if !planFound {
+		return "Тариф заявки не найден."
+	}
+	temporaryPassword := randomAccessToken()
+	if err := a.createManagedSite(r.Context(), siteRequest.Domain, siteRequest.Email, temporaryPassword, plan.QuotaBytes); err != nil {
+		return err.Error()
+	}
+	serviceStatus := "paid"
+	if planIsFree(plan) {
+		serviceStatus = "free"
+	}
+	if err := store.AssignSite(r.Context(), siteRequest.Domain, plan.ID, serviceStatus); err != nil {
+		return err.Error()
+	}
+	if err := store.UpdateSiteRequestStatus(r.Context(), requestID, "approved", ownerMessage); err != nil {
+		return err.Error()
+	}
+	if err := a.enqueueSiteRegistrationDecisionEmail(r.Context(), r, siteRequest, plan, "approved", ownerMessage, temporaryPassword); err != nil {
+		return "Сайт " + siteRequest.Domain + " активирован, но email клиенту не поставлен в очередь: " + err.Error()
+	}
+	return "Сайт " + siteRequest.Domain + " активирован, клиенту отправлено письмо."
+}
+
+func (a *App) rejectSiteRegistrationRequestFromForm(r *http.Request) string {
+	requestID, _ := strconv.Atoi(strings.TrimSpace(r.FormValue("request_id")))
+	ownerMessage := strings.TrimSpace(r.FormValue("owner_message"))
+	if requestID <= 0 {
+		return "Заявка не выбрана."
+	}
+	controlDatabase, err := a.openServerControlDatabase(r.Context())
+	if err != nil {
+		return err.Error()
+	}
+	defer controlDatabase.Close()
+	store := billing.Store{DB: controlDatabase}
+	siteRequest, found := store.SiteRequestByID(r.Context(), requestID)
+	if !found {
+		return "Заявка не найдена."
+	}
+	if siteRequest.Status != "pending" {
+		return "Эта заявка уже обработана."
+	}
+	plan, _ := store.PlanByID(r.Context(), siteRequest.PlanID)
+	if err := store.UpdateSiteRequestStatus(r.Context(), requestID, "rejected", ownerMessage); err != nil {
+		return err.Error()
+	}
+	if err := a.enqueueSiteRegistrationDecisionEmail(r.Context(), r, siteRequest, plan, "rejected", ownerMessage, ""); err != nil {
+		return "Заявка отклонена, но email клиенту не поставлен в очередь: " + err.Error()
+	}
+	return "Заявка " + siteRequest.Domain + " отклонена, клиенту отправлено письмо."
+}
+
+func planIsFree(plan billing.Plan) bool {
+	price := strings.TrimSpace(plan.Price)
+	return price == "" || price == "0" || price == "0.00"
+}
+
+func (a *App) enqueueSiteRegistrationRequestOwnerEmails(ctx context.Context, r *http.Request, store billing.Store, domain, name, email, phone string, planID int) {
+	ownerEmails := store.OwnerEmails(ctx)
+	if len(ownerEmails) == 0 {
+		return
+	}
+	plan, _ := store.PlanByID(ctx, planID)
+	subject := "Новая заявка на сайт " + domain
+	body := strings.Join([]string{
+		"Поступила новая заявка на подключение сайта.",
+		"",
+		"Домен: " + domain,
+		"Имя: " + name,
+		"Email: " + email,
+		"Телефон: " + phone,
+		"Тариф: " + billingPlanEmailLabel(plan),
+		"",
+		"Откройте биллинг, чтобы активировать или отклонить заявку:",
+		absoluteURLForPath(r, "/?billing"),
+	}, "\n")
+	fromAddress := a.emailFromAddress(a.siteDomain(r.Context(), r))
+	for _, ownerEmail := range ownerEmails {
+		if err := a.enqueueEmail(ctx, mailout.Message{From: fromAddress, To: ownerEmail, Subject: subject, Body: body}); err != nil {
+			log.Printf("site request owner email enqueue failed domain=%s to=%s error=%v", domain, ownerEmail, err)
+		}
+	}
+}
+
+func (a *App) enqueueSiteRegistrationDecisionEmail(ctx context.Context, r *http.Request, siteRequest billing.SiteRequest, plan billing.Plan, decision, ownerMessage, temporaryPassword string) error {
+	subject := "Заявка на сайт " + siteRequest.Domain
+	lines := []string{}
+	if decision == "approved" {
+		subject = "Сайт " + siteRequest.Domain + " активирован"
+		lines = append(lines,
+			"Ваша заявка на сайт "+siteRequest.Domain+" одобрена.",
+			"",
+			"Тариф: "+billingPlanEmailLabel(plan),
+			"Адрес сайта: "+requestScheme(r)+"://"+siteRequest.Domain+"/",
+			"Вход: "+requestScheme(r)+"://"+siteRequest.Domain+"/?login",
+			"Email администратора: "+siteRequest.Email,
+			"Временный пароль: "+temporaryPassword,
+		)
+	} else {
+		subject = "Заявка на сайт " + siteRequest.Domain + " отклонена"
+		lines = append(lines, "Ваша заявка на сайт "+siteRequest.Domain+" отклонена.")
+	}
+	if strings.TrimSpace(ownerMessage) != "" {
+		lines = append(lines, "", "Сообщение владельца сервера:", ownerMessage)
+	}
+	return a.enqueueEmail(ctx, mailout.Message{
+		From:    a.emailFromAddress(siteRequest.Domain),
+		To:      siteRequest.Email,
+		Subject: subject,
+		Body:    strings.Join(lines, "\n"),
+	})
+}
+
+func billingPlanEmailLabel(plan billing.Plan) string {
+	if plan.ID == 0 {
+		return "не выбран"
+	}
+	return strings.TrimSpace(plan.Name + " · " + plan.QuotaLabel + " · " + plan.Price + " " + plan.Currency + "/" + plan.BillingPeriod)
 }
 
 func (a *App) updateManagedSiteFromForm(r *http.Request) string {

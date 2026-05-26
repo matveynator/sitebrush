@@ -62,6 +62,81 @@
     <div class="card-body">
       <div class="billing-section-header">
         <div>
+          <h2>Заявки на подключение</h2>
+          <p class="text-muted">Новые домены попадают сюда, когда самостоятельная регистрация отключена.</p>
+        </div>
+      </div>
+      <div class="billing-site-list">
+        {{range $requestIndex, $request := .SiteRequests}}
+        <article class="billing-site-row">
+          <div class="billing-site-main">
+            <div class="billing-domain">{{$request.Domain}}</div>
+            <div class="text-muted small">{{$request.Name}} · {{$request.Email}} · {{$request.Phone}}</div>
+            <div class="text-muted small">Тариф: {{$request.PlanName}} · {{$request.PlanQuotaLabel}} · {{$request.PlanPrice}} {{$request.PlanCurrency}}/{{$request.PlanBillingPeriod}}</div>
+            <div class="text-muted small">Статус: {{$request.Status}} · {{$request.CreatedAt}}</div>
+            {{if $request.OwnerMessage}}<div class="text-muted small">Сообщение: {{$request.OwnerMessage}}</div>{{end}}
+          </div>
+          {{if $request.CanApproveOrReject}}
+          <div class="billing-site-form">
+            <button type="button" class="btn btn-success btn-sm" data-bs-toggle="modal" data-bs-target="#approveSiteRequestModal{{$requestIndex}}"><img src="/p/static/profile.png" alt="">Активировать</button>
+            <button type="button" class="btn btn-outline-danger btn-sm" data-bs-toggle="modal" data-bs-target="#rejectSiteRequestModal{{$requestIndex}}"><img src="/p/static/cross.png" alt="">Отказать</button>
+          </div>
+          <div class="modal fade" id="approveSiteRequestModal{{$requestIndex}}" tabindex="-1" aria-hidden="true">
+            <div class="modal-dialog modal-dialog-centered"><div class="modal-content">
+              <form method="post" action="?billing">
+                <div class="modal-header">
+                  <h5 class="modal-title">Активировать {{$request.Domain}}</h5>
+                  <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="{{index $.T "tree_close"}}"></button>
+                </div>
+                <div class="modal-body">
+                  <p class="text-muted">Будет создан сайт с администратором {{$request.Email}} и тарифом {{$request.PlanName}}. Клиент получит email с временным паролем.</p>
+                  <input type="hidden" name="billing_action" value="approve_site_request">
+                  <input type="hidden" name="request_id" value="{{$request.ID}}">
+                  <label>Сообщение клиенту
+                    <textarea name="owner_message" class="form-control" rows="4" placeholder="Например: сайт активирован, DNS можно настроить в панели Sitebrush."></textarea>
+                  </label>
+                </div>
+                <div class="modal-footer">
+                  <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">{{index $.T "edit_cancel"}}</button>
+                  <button type="submit" class="btn btn-success"><img src="/p/static/profile.png" alt="">Активировать</button>
+                </div>
+              </form>
+            </div></div>
+          </div>
+          <div class="modal fade" id="rejectSiteRequestModal{{$requestIndex}}" tabindex="-1" aria-hidden="true">
+            <div class="modal-dialog modal-dialog-centered"><div class="modal-content">
+              <form method="post" action="?billing">
+                <div class="modal-header">
+                  <h5 class="modal-title">Отказать {{$request.Domain}}</h5>
+                  <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="{{index $.T "tree_close"}}"></button>
+                </div>
+                <div class="modal-body">
+                  <input type="hidden" name="billing_action" value="reject_site_request">
+                  <input type="hidden" name="request_id" value="{{$request.ID}}">
+                  <label>Сообщение клиенту
+                    <textarea name="owner_message" class="form-control" rows="4" placeholder="Укажите причину отказа или следующие шаги."></textarea>
+                  </label>
+                </div>
+                <div class="modal-footer">
+                  <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">{{index $.T "edit_cancel"}}</button>
+                  <button type="submit" class="btn btn-outline-danger"><img src="/p/static/cross.png" alt="">Отказать</button>
+                </div>
+              </form>
+            </div></div>
+          </div>
+          {{end}}
+        </article>
+        {{else}}
+        <div class="empty">Заявок пока нет.</div>
+        {{end}}
+      </div>
+    </div>
+  </section>
+
+  <section class="card billing-card">
+    <div class="card-body">
+      <div class="billing-section-header">
+        <div>
           <h2>Действующие сайты</h2>
           <p class="text-muted">Показываются только базы, где уже есть администратор сайта.</p>
         </div>
@@ -183,9 +258,29 @@
         <form method="post" action="?billing" class="billing-plan-row">
           <input type="hidden" name="billing_action" value="delete_plan">
           <input type="hidden" name="plan_id" value="{{.ID}}">
-          <span>{{.Name}} · {{.QuotaLabel}} · {{.Price}} {{.Currency}}/{{.BillingPeriod}}{{if .IsDefault}} · по умолчанию{{end}}</span>
+          <span><button type="button" class="btn btn-link btn-sm p-0 align-baseline" data-bs-toggle="modal" data-bs-target="#billingPlanModal{{.ID}}">{{.Name}}</button> · {{.QuotaLabel}} · {{.Price}} {{.Currency}}/{{.BillingPeriod}}{{if .IsDefault}} · по умолчанию{{end}}</span>
           <button type="submit" class="btn btn-outline-danger btn-sm"><img src="/p/static/cross.png" alt="">Удалить</button>
         </form>
+        <div class="modal fade" id="billingPlanModal{{.ID}}" tabindex="-1" aria-hidden="true">
+          <div class="modal-dialog modal-dialog-centered"><div class="modal-content">
+            <div class="modal-header">
+              <h5 class="modal-title">{{.Name}}</h5>
+              <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="{{index $.T "tree_close"}}"></button>
+            </div>
+            <div class="modal-body">
+              <p class="text-muted">{{.QuotaLabel}} · {{.Price}} {{.Currency}}/{{.BillingPeriod}}</p>
+              <ul>
+                <li>Редактор страниц Sitebrush и публикация сайта.</li>
+                <li>Файлы и статические ресурсы в пределах квоты {{.QuotaLabel}}.</li>
+                <li>Резервные копии, настройки домена и управление HTTPS.</li>
+                <li>Автоматический SSL после корректной настройки DNS.</li>
+              </ul>
+            </div>
+            <div class="modal-footer">
+              <button type="button" class="btn btn-primary" data-bs-dismiss="modal">Понятно</button>
+            </div>
+          </div></div>
+        </div>
         {{end}}
       </div>
     </div>
