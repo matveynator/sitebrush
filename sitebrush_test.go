@@ -1852,8 +1852,8 @@ func TestDemoSiteVisitorGetsEditorSessionAndCleanupDeletesSite(t *testing.T) {
 	if response.Code != http.StatusFound {
 		t.Fatalf("demo start status = %d, body=%q", response.Code, response.Body.String())
 	}
-	if location := response.Header().Get("Location"); location != "/?visual" {
-		t.Fatalf("demo redirect = %q, want /?visual", location)
+	if location := response.Header().Get("Location"); location != "/" {
+		t.Fatalf("demo redirect = %q, want /", location)
 	}
 	cookies := response.Result().Cookies()
 	if len(cookies) == 0 {
@@ -1962,6 +1962,9 @@ func TestActiveDemoSessionDoesNotBlockScheduledSiteRecreation(t *testing.T) {
 	application.route(recreateResponse, recreateRequest)
 	if recreateResponse.Code != http.StatusFound {
 		t.Fatalf("demo recreate status = %d, body=%q", recreateResponse.Code, recreateResponse.Body.String())
+	}
+	if location := recreateResponse.Header().Get("Location"); location != "/" {
+		t.Fatalf("demo recreate redirect = %q, want /", location)
 	}
 	if _, err := os.Stat(siteDatabasePath); err != nil {
 		t.Fatalf("recreated demo site database stat err = %v, want exists", err)

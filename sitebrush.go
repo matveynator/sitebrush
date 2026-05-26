@@ -5927,7 +5927,7 @@ func (a *App) startDemoSiteSession(w http.ResponseWriter, r *http.Request, setti
 	if err := store.CreateDemoSession(r.Context(), domain, sessionToken, adminEmail, time.Now().Add(demoSiteDeletionDelay)); err != nil {
 		return "", err
 	}
-	return "/?visual", nil
+	return "/", nil
 }
 
 func (a *App) ensureDemoSiteReady(ctx context.Context, controlDatabase *sql.DB, settings billing.DemoSettings) (string, error) {
