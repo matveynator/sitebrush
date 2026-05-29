@@ -5631,6 +5631,23 @@ func (a *App) setupAdmin(w http.ResponseWriter, r *http.Request) {
 		a.renderSetupPage(w, r, domain, email, translationOrDefault(translations, "email_confirmation_status_required", "Email and password are required."))
 		return
 	}
+	if canonicalLocalDomain(domain) == "localhost" && !a.hasAnyAdmin(r.Context()) {
+		if _, err := stdmail.ParseAddress(email); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			a.renderSetupPage(w, r, domain, email, translationOrDefault(translations, "email_confirmation_status_invalid_email", "Email address is invalid."))
+			return
+		}
+		registerContext := contextWithSiteDatabaseCreation(contextWithDomain(r.Context(), domain))
+		if _, err := a.db.ExecContext(registerContext, `INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, domain, email, password); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			a.renderSetupPage(w, r, domain, email, err.Error())
+			return
+		}
+		a.promoteFirstServerOwner(registerContext, domain, email)
+		a.createSessionForDomain(w, registerContext, domain, email)
+		http.Redirect(w, r, safeConfirmationReturnPath(requestedReturnPath(r)), http.StatusFound)
+		return
+	}
 	if err := a.createAndSendEmailConfirmation(r, "register", domain, "", email, password, requestedReturnPath(r)); err != nil {
 		w.WriteHeader(http.StatusBadRequest)
 		a.renderSetupPage(w, r, domain, email, err.Error())
@@ -12011,6 +12028,12 @@ func (a *App) hasAdmin(ctx context.Context, domain string) bool {
 	return adminCount > 0
 }
 
+func (a *App) hasAnyAdmin(ctx context.Context) bool {
+	var adminCount int
+	_ = a.db.QueryRowContext(ctx, `SELECT COUNT(1) FROM users WHERE is_admin=1`).Scan(&adminCount)
+	return adminCount > 0
+}
+
 func (a *App) isDomainFrozen(ctx context.Context, domain string) bool {
 	var isFrozen int
 	_ = a.db.QueryRowContext(ctx, `SELECT is_frozen FROM domain_states WHERE domain=?`, domain).Scan(&isFrozen)
@@ -14337,12 +14360,94 @@ func normalizedTemplateClassKey(token html.Token) string {
 }
 
 func normalizedTemplateInnerHTML(innerHTML string) string {
-	return strings.Map(func(innerRune rune) rune {
-		if unicode.IsSpace(innerRune) {
+	tokenizer := html.NewTokenizer(strings.NewReader(innerHTML))
+	var normalizedHTML strings.Builder
+	for {
+		tokenType := tokenizer.Next()
+		if tokenType == html.ErrorToken {
+			break
+		}
+		token := tokenizer.Token()
+		switch tokenType {
+		case html.TextToken:
+			normalizedHTML.WriteString(normalizedTemplateText(token.Data))
+		case html.StartTagToken:
+			normalizedHTML.WriteString(normalizedTemplateTokenStart(token, false))
+		case html.SelfClosingTagToken:
+			normalizedHTML.WriteString(normalizedTemplateTokenStart(token, true))
+		case html.EndTagToken:
+			normalizedHTML.WriteString("</")
+			normalizedHTML.WriteString(strings.ToLower(strings.TrimSpace(token.Data)))
+			normalizedHTML.WriteByte('>')
+		}
+	}
+	return normalizedHTML.String()
+}
+
+func normalizedTemplateText(text string) string {
+	return strings.Map(func(textRune rune) rune {
+		if unicode.IsSpace(textRune) {
 			return -1
 		}
-		return innerRune
-	}, innerHTML)
+		return textRune
+	}, text)
+}
+
+func normalizedTemplateTokenStart(token html.Token, selfClosing bool) string {
+	tagName := strings.ToLower(strings.TrimSpace(token.Data))
+	attributeList := normalizedTemplateAttributes(token.Attr)
+	var normalizedStart strings.Builder
+	normalizedStart.WriteByte('<')
+	normalizedStart.WriteString(tagName)
+	for _, attribute := range attributeList {
+		normalizedStart.WriteByte(' ')
+		normalizedStart.WriteString(attribute)
+	}
+	if selfClosing {
+		normalizedStart.WriteByte('/')
+	}
+	normalizedStart.WriteByte('>')
+	return normalizedStart.String()
+}
+
+func normalizedTemplateAttributes(attributes []html.Attribute) []string {
+	attributeList := make([]string, 0, len(attributes))
+	for _, attribute := range attributes {
+		attributeName := strings.ToLower(strings.TrimSpace(attribute.Key))
+		if attributeName == "" {
+			continue
+		}
+		attributeValue := strings.TrimSpace(attribute.Val)
+		if attributeName == "class" {
+			attributeValue = normalizedTemplateInnerClassValue(attributeValue)
+			if attributeValue == "" {
+				continue
+			}
+		}
+		attributeList = append(attributeList, attributeName+"="+attributeValue)
+	}
+	sort.Strings(attributeList)
+	return attributeList
+}
+
+func normalizedTemplateInnerClassValue(classValue string) string {
+	classNameSet := make(map[string]struct{})
+	for _, className := range strings.Fields(classValue) {
+		if shouldIgnoreTemplateInnerClass(className) {
+			continue
+		}
+		classNameSet[className] = struct{}{}
+	}
+	classNameList := make([]string, 0, len(classNameSet))
+	for className := range classNameSet {
+		classNameList = append(classNameList, className)
+	}
+	sort.Strings(classNameList)
+	return strings.Join(classNameList, " ")
+}
+
+func shouldIgnoreTemplateInnerClass(className string) bool {
+	return strings.EqualFold(className, "SiteBrush-Template") || strings.EqualFold(className, "selected")
 }
 
 func isHTMLVoidElement(tagName string) bool {
