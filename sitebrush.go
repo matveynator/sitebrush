@@ -46,6 +46,7 @@ import (
 	"golang.org/x/crypto/acme/autocert"
 	"golang.org/x/net/dns/dnsmessage"
 	"golang.org/x/net/html"
+	"golang.org/x/net/html/charset"
 	"golang.org/x/term"
 	"sitebrush/pkg/billing"
 	appcli "sitebrush/pkg/cli"
@@ -69,6 +70,7 @@ var CompileVersion = "dev"
 var translationCatalog = loadTranslationCatalog()
 var guestContextMenuTemplates = buildGuestContextMenuTemplates()
 var guestNotFoundPageTemplates = buildGuestNotFoundPageTemplates()
+var importedHTMLCharsetAssignmentPattern = regexp.MustCompile(`(?i)(charset\s*=\s*)(["']?)[a-z0-9._:-]+`)
 
 const storageAppName = "sitebrush"
 const defaultDBPath = "storage/db/sitebrush.db"
@@ -6691,7 +6693,8 @@ func downloadGrabSourceHTMLWithResolvedURL(sourceURL string, sourceOptions grabS
 		if readErr != nil {
 			return nil, nil, errors.New("failed to read source page")
 		}
-		return htmlBytes, remoteSourceURL, nil
+		htmlSource := decodeImportedHTMLBytes(htmlBytes, response.Header.Get("Content-Type"))
+		return []byte(htmlSource), remoteSourceURL, nil
 	}
 	if response != nil {
 		response.Body.Close()
@@ -6712,7 +6715,8 @@ func downloadGrabSourceHTMLWithResolvedURL(sourceURL string, sourceOptions grabS
 			if readErr != nil {
 				return nil, nil, errors.New("failed to read source page")
 			}
-			return htmlBytes, remoteSourceURL, nil
+			htmlSource := decodeImportedHTMLBytes(htmlBytes, response.Header.Get("Content-Type"))
+			return []byte(htmlSource), remoteSourceURL, nil
 		}
 		if response != nil {
 			response.Body.Close()
@@ -6722,6 +6726,26 @@ func downloadGrabSourceHTMLWithResolvedURL(sourceURL string, sourceOptions grabS
 		return nil, nil, errors.New("failed to download source page")
 	}
 	return nil, nil, errors.New("source page returned non-success status")
+}
+
+func decodeImportedHTMLBytes(htmlBytes []byte, contentType string) string {
+	reader, err := charset.NewReader(bytes.NewReader(htmlBytes), contentType)
+	if err != nil {
+		return rewriteImportedHTMLCharsetDeclaration(string(htmlBytes))
+	}
+	decodedBytes, err := io.ReadAll(reader)
+	if err != nil {
+		return rewriteImportedHTMLCharsetDeclaration(string(htmlBytes))
+	}
+	return rewriteImportedHTMLCharsetDeclaration(string(decodedBytes))
+}
+
+func rewriteImportedHTMLCharsetDeclaration(htmlSource string) string {
+	return importedHTMLCharsetAssignmentPattern.ReplaceAllString(htmlSource, "${1}${2}utf-8")
+}
+
+func isImportedHTMLContentType(contentType string) bool {
+	return contentType == "text/html" || contentType == "application/xhtml+xml"
 }
 
 func isSuccessfulGrabResponse(response *http.Response) bool {
@@ -7144,7 +7168,7 @@ func downloadWholeSitePageHTML(client *http.Client, pageURL *url.URL, sourceOpti
 	if readErr != nil {
 		return "", false, readErr
 	}
-	return string(pageBytes), true, nil
+	return decodeImportedHTMLBytes(pageBytes, response.Header.Get("Content-Type")), true, nil
 }
 
 func extractWholeSitePageLinks(htmlSource string, baseURL, siteURL *url.URL) []*url.URL {
@@ -14990,6 +15014,9 @@ func (spider *pageSpider) fetchResource(rawURL string, baseURL *url.URL, depth i
 		spider.publishResourceProgress("error", normalizedURL, 0, 0, response.ContentLength)
 		return nil, err
 	}
+	if isImportedHTMLContentType(resourceContentType) {
+		body = []byte(decodeImportedHTMLBytes(body, response.Header.Get("Content-Type")))
+	}
 	resource := &mirroredResource{url: normalizedURL, content: body, contentType: resourceContentType, persist: persist}
 	if persist {
 		assetPath := spider.assetPathFor(body, normalizedURL, resourceContentType)
@@ -15083,7 +15110,7 @@ func (spider *pageSpider) fetchSelectedResources() {
 }
 
 func (spider *pageSpider) rewriteNestedResources(resource *mirroredResource, depth int, contentType string) {
-	isHTML := strings.Contains(contentType, "text/html")
+	isHTML := isImportedHTMLContentType(contentType)
 	isCSS := strings.Contains(contentType, "text/css")
 	isJS := strings.Contains(contentType, "javascript") || strings.Contains(contentType, "ecmascript") || strings.HasSuffix(resourceExtension(resource.url), ".js") || strings.HasSuffix(resourceExtension(resource.url), ".mjs")
 	if !(isHTML || isCSS || isJS) {
