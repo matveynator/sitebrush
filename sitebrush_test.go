@@ -3717,6 +3717,58 @@ func TestMirrorRemotePageResolvesRootAssetJSReferencesWithoutDuplicatingDirector
 	}
 }
 
+func TestPreviewGrabResourcesDoesNotDownloadBinaryBodies(t *testing.T) {
+	pageRawURL := "https://preview.example/"
+	sourceHTML := `<!doctype html><html><head><link rel="stylesheet" href="/app.css"></head><body><img src="/hero.png"></body></html>`
+	stylesheetBody := `body{background:url("/hero.png")}`
+	imageSize := int64(12345)
+	imageGETCount := 0
+
+	previousGrabHTTPClient := newGrabHTTPClient
+	newGrabHTTPClient = func() *http.Client {
+		return &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+			header := make(http.Header)
+			switch request.URL.String() {
+			case "https://preview.example/app.css":
+				header.Set("Content-Type", "text/css")
+				return &http.Response{StatusCode: http.StatusOK, Status: "200 OK", Header: header, Body: io.NopCloser(strings.NewReader(stylesheetBody)), ContentLength: int64(len(stylesheetBody)), Request: request}, nil
+			case "https://preview.example/hero.png":
+				header.Set("Content-Type", "image/png")
+				if request.Method == http.MethodGet {
+					imageGETCount++
+				}
+				return &http.Response{StatusCode: http.StatusOK, Status: "200 OK", Header: header, Body: io.NopCloser(strings.NewReader("")), ContentLength: imageSize, Request: request}, nil
+			default:
+				return &http.Response{StatusCode: http.StatusNotFound, Status: "404 Not Found", Header: header, Body: io.NopCloser(strings.NewReader("")), ContentLength: 0, Request: request}, nil
+			}
+		})}
+	}
+	defer func() {
+		newGrabHTTPClient = previousGrabHTTPClient
+	}()
+
+	pageURL, parseErr := url.Parse(pageRawURL)
+	if parseErr != nil {
+		t.Fatal(parseErr)
+	}
+	previewResources := previewGrabResources(pageURL, sourceHTML, nil, "", grabSourceOptions{})
+	if imageGETCount != 0 {
+		t.Fatalf("preview downloaded binary image body %d times", imageGETCount)
+	}
+	foundImage := false
+	for _, previewResource := range previewResources {
+		if previewResource.URL == "https://preview.example/hero.png" {
+			foundImage = true
+			if previewResource.SizeBytes != imageSize {
+				t.Fatalf("image size = %d, want %d", previewResource.SizeBytes, imageSize)
+			}
+		}
+	}
+	if !foundImage {
+		t.Fatalf("preview resources missed image: %#v", previewResources)
+	}
+}
+
 func TestMirrorRemotePageRewritesDataManifestRelativeURLs(t *testing.T) {
 	pageRawURL := "https://karman.cafe/"
 	manifest := `{"name":"Karman","start_url":"/","icons":[{"src":"./assets/apple-touch-icon.png","sizes":"180x180","type":"image/png"}]}`

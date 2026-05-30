@@ -76,6 +76,7 @@ var importedHTMLCharsetAssignmentPattern = regexp.MustCompile(`(?i)(charset\s*=\
 const storageAppName = "sitebrush"
 const defaultDBPath = "storage/db/sitebrush.db"
 const grabResourceMaxDepth = 64
+const grabPreviewResourceTimeout = 6 * time.Second
 const wholeSiteImportMaxPages = 2048
 const defaultDomainStorageLimitBytes int64 = 10 * 1024 * 1024 * 1024
 const defaultAnalyticsMemoryLimitBytes int64 = 500 * 1024 * 1024
@@ -6616,6 +6617,7 @@ func (a *App) grabPage(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) grabPreview(w http.ResponseWriter, r *http.Request) {
+	startedAt := time.Now()
 	if !a.isAdminRequest(r) || r.Method != http.MethodPost {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
@@ -6638,6 +6640,7 @@ func (a *App) grabPreview(w http.ResponseWriter, r *http.Request) {
 	sourceURL = remoteSourceURL.String()
 	htmlBytes, resolvedSourceURL, err := downloadGrabSourceHTMLWithResolvedURL(sourceURL, sourceOptions)
 	if err != nil {
+		a.logProblemEvent("grab preview failed source=%s error=%v duration=%s", sourceURL, err, time.Since(startedAt).String())
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
@@ -6683,6 +6686,9 @@ func (a *App) grabPreview(w http.ResponseWriter, r *http.Request) {
 		ProjectedUsedBytes:    quotaEstimate.ProjectedUsedBytes,
 		FitsQuota:             quotaEstimate.FitsQuota,
 	})
+	if encodeErr != nil {
+		a.logProblemEvent("grab preview response failed source=%s error=%v duration=%s", sourceURL, encodeErr, time.Since(startedAt).String())
+	}
 	if encodeErr == nil && a.grabTracker != nil && progressToken != "" && previewSpider != nil {
 		a.grabTracker.publish(grabProgressEvent{Token: progressToken, Stage: "done", FoundTotal: previewSpider.foundTotal, DownloadedTotal: previewSpider.downloadedTotal, CompletedPercent: 100})
 	}
@@ -7016,10 +7022,10 @@ func (a *App) estimateImportQuota(ctx context.Context, domain string, importedPa
 }
 
 func previewGrabResources(pageURL *url.URL, htmlSource string, tracker *grabProgressTracker, progressToken string, sourceOptions grabSourceOptions) []grabResourcePreview {
-	spider := newPageSpider("", pageURL, grabResourceMaxDepth, tracker, progressToken, sourceOptions)
+	spider := newPreviewPageSpider("", pageURL, grabResourceMaxDepth, tracker, progressToken, sourceOptions)
 	rootResource := &mirroredResource{url: pageURL.String(), content: []byte(htmlSource)}
 	spider.resources[pageURL.String()] = rootResource
-	spider.rewriteNestedResources(rootResource, 0, "text/html")
+	spider.collectPreviewNestedResources(rootResource, 0, "text/html")
 	resources := previewResourcesFromSpider(spider, map[string]struct{}{pageURL.String(): {}})
 	if tracker != nil && strings.TrimSpace(progressToken) != "" {
 		tracker.publish(grabProgressEvent{Token: progressToken, Stage: "done", FoundTotal: spider.foundTotal, DownloadedTotal: spider.downloadedTotal, CompletedPercent: 100})
@@ -7044,12 +7050,14 @@ func previewResourcesFromSpider(spider *pageSpider, excludedURLs map[string]stru
 		if _, excluded := excludedURLs[resourceURL]; excluded {
 			continue
 		}
-		if resource == nil || resource.content == nil {
+		if resource == nil {
 			continue
 		}
 		sizeBytes := int64(-1)
 		if resource.content != nil {
 			sizeBytes = int64(len(resource.content))
+		} else if resource.sizeBytes >= 0 {
+			sizeBytes = resource.sizeBytes
 		}
 		resourceKind := previewResourceKind("", "", resourceURL)
 		if resource != nil && resourceKind == "file" {
@@ -7180,9 +7188,16 @@ func (a *App) importWholeRemoteSite(ctx context.Context, domain, basePath string
 }
 
 func crawlWholeRemoteSite(startURL *url.URL, startHTML, publicAssetBasePath string, tracker *grabProgressTracker, progressToken string, sourceOptions grabSourceOptions) (*pageSpider, map[string]struct{}, []wholeSiteImportedPage) {
-	spider := newPageSpider("", startURL, grabResourceMaxDepth, tracker, progressToken, sourceOptions)
+	spider := newPreviewPageSpider("", startURL, grabResourceMaxDepth, tracker, progressToken, sourceOptions)
 	spider.publicAssetBasePath = publicAssetBasePath
-	pageClient := newGrabHTTPClientForServerIP(startURL.Hostname(), sourceOptions.IP)
+	spider.documentURLRewriter = func(normalizedURL string) (string, bool) {
+		parsedURL, parseErr := url.Parse(normalizedURL)
+		if parseErr != nil || !sameWholeSiteHost(startURL, parsedURL) || !isWholeSitePageURL(parsedURL) {
+			return "", false
+		}
+		return wholeSiteLocalLink(cleanPath(publicAssetBasePath), startURL, parsedURL), true
+	}
+	pageClient := grabPreviewHTTPClient(newGrabHTTPClientForServerIP(startURL.Hostname(), sourceOptions.IP))
 	knownPagePathsByKey := map[string]string{wholeSitePageKey(startURL): cleanPath(publicAssetBasePath)}
 	pageURLs := map[string]struct{}{startURL.String(): {}}
 	pageQueue := []wholeSitePageJob{{URL: cloneURL(startURL), HTML: startHTML}}
@@ -7227,12 +7242,12 @@ func crawlWholeRemoteSite(startURL *url.URL, startHTML, publicAssetBasePath stri
 		}
 		rootResource := &mirroredResource{url: currentJob.URL.String(), content: []byte(pageHTML)}
 		spider.resources[currentJob.URL.String()] = rootResource
-		spider.rewriteNestedResources(rootResource, 0, "text/html")
+		spider.collectPreviewNestedResources(rootResource, 0, "text/html")
 		importedPages = append(importedPages, wholeSiteImportedPage{SourceURL: currentJob.URL.String(), LocalPath: knownPagePathsByKey[pageKey], HTML: string(rootResource.content)})
 		spider.downloadedTotal++
 		spider.publishResourceProgress("downloaded", currentJob.URL.String(), 100, int64(len(pageHTML)), int64(len(pageHTML)))
 	}
-	spider.rewriteImportedPagesStaticURLTextReferences(importedPages)
+	spider.collectPreviewImportedPagesStaticURLTextReferences(importedPages)
 	return spider, pageURLs, importedPages
 }
 
@@ -15326,6 +15341,7 @@ type mirroredResource struct {
 	content     []byte
 	assetPath   string
 	contentType string
+	sizeBytes   int64
 	persist     bool
 }
 
@@ -15408,6 +15424,21 @@ func newPageSpider(domain string, pageURL *url.URL, maxDepth int, tracker *grabP
 		tracker:       tracker,
 		progressToken: progressToken,
 	}
+}
+
+func newPreviewPageSpider(domain string, pageURL *url.URL, maxDepth int, tracker *grabProgressTracker, progressToken string, sourceOptions grabSourceOptions) *pageSpider {
+	spider := newPageSpider(domain, pageURL, maxDepth, tracker, progressToken, sourceOptions)
+	spider.client = grabPreviewHTTPClient(spider.client)
+	return spider
+}
+
+func grabPreviewHTTPClient(client *http.Client) *http.Client {
+	if client == nil || (client.Timeout > 0 && client.Timeout <= grabPreviewResourceTimeout) {
+		return client
+	}
+	previewClient := *client
+	previewClient.Timeout = grabPreviewResourceTimeout
+	return &previewClient
 }
 
 func (spider *pageSpider) fetchResource(rawURL string, baseURL *url.URL, depth int, persist bool) (*mirroredResource, error) {
@@ -15578,6 +15609,28 @@ func (spider *pageSpider) rewriteNestedResources(resource *mirroredResource, dep
 	resource.content = []byte(rewritten)
 }
 
+func (spider *pageSpider) collectPreviewNestedResources(resource *mirroredResource, depth int, contentType string) {
+	isHTML := isImportedHTMLContentType(contentType)
+	isCSS := strings.Contains(contentType, "text/css")
+	isJS := strings.Contains(contentType, "javascript") || strings.Contains(contentType, "ecmascript") || strings.HasSuffix(resourceExtension(resource.url), ".js") || strings.HasSuffix(resourceExtension(resource.url), ".mjs")
+	if !(isHTML || isCSS || isJS) {
+		return
+	}
+	source := string(resource.content)
+	if isHTML {
+		source = cleanupLegacyImportedSiteBrushHTML(source)
+		source = neutralizeImportedHostLanguageRedirects(source)
+	}
+	rewritten := source
+	parser := spider.previewGrabberParser()
+	if isHTML || isCSS {
+		rewritten = parser.RewriteTextReferences(source, resource.url, depth)
+	} else if isJS {
+		rewritten = parser.RewriteJavaScriptReferences(source, resource.url, depth)
+	}
+	resource.content = []byte(rewritten)
+}
+
 func (spider *pageSpider) grabberParser() grabber.Parser {
 	return grabber.Parser{
 		NormalizeURL:                         spider.normalizeURLForContext,
@@ -15589,10 +15642,29 @@ func (spider *pageSpider) grabberParser() grabber.Parser {
 	}
 }
 
+func (spider *pageSpider) previewGrabberParser() grabber.Parser {
+	return grabber.Parser{
+		NormalizeURL:                         spider.normalizeURLForContext,
+		RewriteResourceReference:             spider.collectPreviewResourceReferenceForContext,
+		RewriteDocumentResourceReference:     spider.collectPreviewDocumentResourceReference,
+		DocumentURLRewriter:                  spider.documentURLRewriter,
+		ShouldBlankEmbeddedDocumentReference: spider.shouldBlankEmbeddedDocumentReference,
+		ShouldRewriteImageAltResource:        spider.shouldRewriteImageAltResourceReference,
+	}
+}
+
 func (spider *pageSpider) rewriteImportedPagesStaticURLTextReferences(importedPages []wholeSiteImportedPage) {
 	for pageIndex := range importedPages {
 		baseURL, _ := url.Parse(importedPages[pageIndex].SourceURL)
 		importedPages[pageIndex].HTML = spider.rewriteStaticURLTextReferences(importedPages[pageIndex].HTML, baseURL, 0)
+	}
+}
+
+func (spider *pageSpider) collectPreviewImportedPagesStaticURLTextReferences(importedPages []wholeSiteImportedPage) {
+	parser := spider.previewGrabberParser()
+	for pageIndex := range importedPages {
+		baseURL, _ := url.Parse(importedPages[pageIndex].SourceURL)
+		importedPages[pageIndex].HTML = parser.RewriteStaticURLTextReferences(importedPages[pageIndex].HTML, baseURL, 0)
 	}
 }
 
@@ -15690,6 +15762,136 @@ func (spider *pageSpider) rewriteResourceReferenceForContext(rawRef string, base
 		return normalizedURL
 	}
 	return normalizeMirroredAssetReference(dependency.assetPath)
+}
+
+func (spider *pageSpider) collectPreviewDocumentResourceReference(rawRef string, baseURL *url.URL, depth int) string {
+	normalizedURL, blocked := spider.normalizeURLForContext(rawRef, baseURL, grabReferenceDocument)
+	if blocked || normalizedURL == "" {
+		return rawRef
+	}
+	if spider.documentURLRewriter != nil && grabber.IsWholeSitePageURLString(normalizedURL) {
+		return rawRef
+	}
+	return spider.collectPreviewResourceReferenceForContext(rawRef, baseURL, depth, grabReferenceDocument)
+}
+
+func (spider *pageSpider) collectPreviewResourceReferenceForContext(rawRef string, baseURL *url.URL, depth int, referenceContext grabReferenceContext) string {
+	normalizedURL, blocked := spider.normalizeURLForContext(rawRef, baseURL, referenceContext)
+	if blocked || normalizedURL == "" {
+		return rawRef
+	}
+	if !spider.shouldPersistResource(normalizedURL) || spider.shouldSkipMirrorResource(normalizedURL) {
+		return normalizedURL
+	}
+	spider.collectPreviewResource(normalizedURL, depth)
+	return normalizedURL
+}
+
+func (spider *pageSpider) collectPreviewResource(normalizedURL string, depth int) {
+	if depth > spider.maxDepth {
+		return
+	}
+	if _, found := spider.resources[normalizedURL]; found {
+		return
+	}
+	resource := &mirroredResource{url: normalizedURL, persist: true, sizeBytes: -1}
+	spider.resources[normalizedURL] = resource
+	spider.foundTotal++
+	spider.publishProgress("found", normalizedURL, 0)
+	if spider.inFlight[normalizedURL] {
+		return
+	}
+	spider.inFlight[normalizedURL] = true
+	defer delete(spider.inFlight, normalizedURL)
+
+	contentType, contentLength := spider.previewResourceMetadata(normalizedURL)
+	resource.contentType = contentType
+	if contentLength >= 0 {
+		resource.sizeBytes = contentLength
+	}
+	if isImportedHTMLContentType(contentType) {
+		delete(spider.resources, normalizedURL)
+		spider.publishResourceProgress("error", normalizedURL, 0, 0, contentLength)
+		return
+	}
+	if !spider.shouldFetchPreviewResourceBody(normalizedURL, contentType) {
+		spider.downloadedTotal++
+		downloadedBytes := int64(0)
+		if resource.sizeBytes > 0 {
+			downloadedBytes = resource.sizeBytes
+		}
+		spider.publishResourceProgress("downloaded", normalizedURL, 100, downloadedBytes, resource.sizeBytes)
+		return
+	}
+	body, bodyContentType, bodySizeBytes, fetchErr := spider.fetchPreviewResourceBody(normalizedURL)
+	if fetchErr != nil {
+		spider.publishResourceProgress("error", normalizedURL, 0, 0, resource.sizeBytes)
+		return
+	}
+	if bodyContentType != "" {
+		resource.contentType = bodyContentType
+	}
+	if bodySizeBytes >= 0 {
+		resource.sizeBytes = bodySizeBytes
+	}
+	resource.content = body
+	spider.downloadedTotal++
+	spider.publishResourceProgress("downloaded", normalizedURL, 100, int64(len(body)), resource.sizeBytes)
+	spider.collectPreviewNestedResources(resource, depth+1, resource.contentType)
+}
+
+func (spider *pageSpider) previewResourceMetadata(normalizedURL string) (string, int64) {
+	request, err := http.NewRequest(http.MethodHead, normalizedURL, nil)
+	if err != nil {
+		return "", -1
+	}
+	applyGrabRequestHeaders(request, spider.sourceOptions)
+	response, err := spider.client.Do(request)
+	if err != nil {
+		return "", -1
+	}
+	defer response.Body.Close()
+	if response.StatusCode >= 400 {
+		return "", -1
+	}
+	contentType := normalizedResourceContentType(response.Header.Get("Content-Type"))
+	return contentType, response.ContentLength
+}
+
+func (spider *pageSpider) shouldFetchPreviewResourceBody(normalizedURL, contentType string) bool {
+	resourceKind := resourceKindFromURL(normalizedURL)
+	if resourceKind == "" && contentType != "" {
+		resourceKind = resourceKindFromContentType(contentType)
+	}
+	return resourceKind == "style" || resourceKind == "script"
+}
+
+func (spider *pageSpider) fetchPreviewResourceBody(normalizedURL string) ([]byte, string, int64, error) {
+	request, err := http.NewRequest(http.MethodGet, normalizedURL, nil)
+	if err != nil {
+		return nil, "", -1, err
+	}
+	applyGrabRequestHeaders(request, spider.sourceOptions)
+	response, err := spider.client.Do(request)
+	if err != nil {
+		return nil, "", -1, err
+	}
+	defer response.Body.Close()
+	if response.StatusCode >= 400 {
+		return nil, "", response.ContentLength, fmt.Errorf("resource download failed: %s", response.Status)
+	}
+	contentType := normalizedResourceContentType(response.Header.Get("Content-Type"))
+	if !spider.isAllowedResourceContentType(normalizedURL, contentType) {
+		return nil, contentType, response.ContentLength, fmt.Errorf("resource content-type rejected: %s", response.Header.Get("Content-Type"))
+	}
+	body, err := spider.readResourceBody(response.Body, normalizedURL, response.ContentLength)
+	if err != nil {
+		return nil, contentType, response.ContentLength, err
+	}
+	if isImportedHTMLContentType(contentType) {
+		body = []byte(decodeImportedHTMLBytes(body, response.Header.Get("Content-Type")))
+	}
+	return body, contentType, response.ContentLength, nil
 }
 
 func normalizeMirroredAssetReference(assetPath string) string {
