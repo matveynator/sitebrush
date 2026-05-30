@@ -14096,6 +14096,8 @@ type templateClassActionSet struct {
 type templateClassElement struct {
 	startTagStart int
 	startTagEnd   int
+	tagName       string
+	classKey      string
 	matchKey      string
 	hasTemplate   bool
 }
@@ -14184,6 +14186,8 @@ func (a *App) applyTemplateClassSynchronization(ctx context.Context, domain, pre
 func templateClassActionSetFromHTML(previousHTML, savedHTML string) templateClassActionSet {
 	previousTemplateKeys, previousPlainKeys := templateClassKeySets(previousHTML)
 	savedTemplateKeys, savedPlainKeys := templateClassKeySets(savedHTML)
+	previousElements := scanTemplateClassElements(previousHTML)
+	savedElements := scanTemplateClassElements(savedHTML)
 
 	actionSet := templateClassActionSet{
 		addKeys:    make(map[string]struct{}),
@@ -14196,6 +14200,14 @@ func templateClassActionSetFromHTML(previousHTML, savedHTML string) templateClas
 			actionSet.addKeys[innerKey] = struct{}{}
 		}
 	}
+	for _, previousElement := range previousElements {
+		if previousElement.hasTemplate {
+			continue
+		}
+		if matchingSavedTemplateElement(previousElement, savedElements) {
+			actionSet.addKeys[previousElement.matchKey] = struct{}{}
+		}
+	}
 	for innerKey := range previousTemplateKeys {
 		if _, isPlain := savedPlainKeys[innerKey]; isPlain {
 			actionSet.removeKeys[innerKey] = struct{}{}
@@ -14203,6 +14215,21 @@ func templateClassActionSetFromHTML(previousHTML, savedHTML string) templateClas
 		}
 	}
 	return actionSet
+}
+
+func matchingSavedTemplateElement(previousElement templateClassElement, savedElements []templateClassElement) bool {
+	for _, savedElement := range savedElements {
+		if !savedElement.hasTemplate {
+			continue
+		}
+		if previousElement.matchKey == savedElement.matchKey {
+			return true
+		}
+		if previousElement.tagName == savedElement.tagName && previousElement.classKey == savedElement.classKey {
+			return true
+		}
+	}
+	return false
 }
 
 func templateClassKeySets(sourceHTML string) (map[string]struct{}, map[string]struct{}) {
@@ -14287,6 +14314,8 @@ func scanTemplateClassElements(sourceHTML string) []templateClassElement {
 				elementList = append(elementList, templateClassElement{
 					startTagStart: tokenStart,
 					startTagEnd:   tokenEnd,
+					tagName:       tagName,
+					classKey:      classKey,
 					matchKey:      templateClassElementKey(tagName, classKey, ""),
 					hasTemplate:   tokenHasSiteBrushTemplateClass(token),
 				})
@@ -14302,10 +14331,13 @@ func scanTemplateClassElements(sourceHTML string) []templateClassElement {
 		case html.SelfClosingTagToken:
 			token := tokenizer.Token()
 			tagName := strings.ToLower(token.Data)
+			classKey := normalizedTemplateClassKey(token)
 			elementList = append(elementList, templateClassElement{
 				startTagStart: tokenStart,
 				startTagEnd:   tokenEnd,
-				matchKey:      templateClassElementKey(tagName, normalizedTemplateClassKey(token), ""),
+				tagName:       tagName,
+				classKey:      classKey,
+				matchKey:      templateClassElementKey(tagName, classKey, ""),
 				hasTemplate:   tokenHasSiteBrushTemplateClass(token),
 			})
 		case html.EndTagToken:
@@ -14320,6 +14352,8 @@ func scanTemplateClassElements(sourceHTML string) []templateClassElement {
 				elementList = append(elementList, templateClassElement{
 					startTagStart: openElement.startTagStart,
 					startTagEnd:   openElement.startTagEnd,
+					tagName:       openElement.tagName,
+					classKey:      openElement.classKey,
 					matchKey:      templateClassElementKey(openElement.tagName, openElement.classKey, normalizedTemplateInnerHTML(sourceHTML[openElement.startTagEnd:tokenStart])),
 					hasTemplate:   openElement.hasTemplate,
 				})
@@ -14349,7 +14383,7 @@ func normalizedTemplateClassKey(token html.Token) string {
 			continue
 		}
 		for _, className := range strings.Fields(attribute.Val) {
-			if strings.EqualFold(className, "SiteBrush-Template") {
+			if shouldIgnoreTemplateIdentityClass(className) {
 				continue
 			}
 			classNameSet[className] = struct{}{}
@@ -14451,6 +14485,10 @@ func normalizedTemplateInnerClassValue(classValue string) string {
 }
 
 func shouldIgnoreTemplateInnerClass(className string) bool {
+	return shouldIgnoreTemplateIdentityClass(className)
+}
+
+func shouldIgnoreTemplateIdentityClass(className string) bool {
 	return strings.EqualFold(className, "SiteBrush-Template") || strings.EqualFold(className, "selected")
 }
 
