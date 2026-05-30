@@ -72,6 +72,23 @@
       white-space: pre-wrap;
       overflow-wrap: anywhere;
     }
+
+    #SiteBrush .technical-page .revision-created-at {
+      display: inline-flex;
+      flex-direction: column;
+      gap: .15rem;
+      line-height: 1.25;
+      white-space: nowrap;
+    }
+
+    #SiteBrush .technical-page .revision-created-at-main {
+      font-weight: 600;
+    }
+
+    #SiteBrush .technical-page .revision-created-at-original {
+      font-size: .78rem;
+      opacity: .72;
+    }
   </style>
 </head>
 <body class="technical-page bg-body">
@@ -101,7 +118,12 @@
         {{range .Revisions}}
           <tr class="{{if eq .IsActive 0}}text-decoration-line-through text-secondary{{end}}">
             <td>{{.ID}}</td>
-            <td>{{.CreatedAt}}</td>
+            <td>
+              <time class="revision-created-at" datetime="{{.CreatedAt}}" data-created-at="{{.CreatedAt}}" title="{{.CreatedAt}}">
+                <span class="revision-created-at-main">{{.CreatedAt}}</span>
+                <span class="revision-created-at-original">{{.CreatedAt}}</span>
+              </time>
+            </td>
             <td><code class="{{if eq .IsActive 1}}revision-snippet-active{{else}}revision-snippet-disabled{{end}}">{{printf "%.120s" .HTML}}</code></td>
             <td>{{if eq .IsActive 1}}{{index $.T "revisions_status_active"}}{{else}}{{index $.T "revisions_status_disabled"}}{{end}}</td>
             <td>
@@ -128,6 +150,56 @@
     </div>
   </div>
 </div>
+
+<script>
+(function formatRevisionCreatedAt() {
+  const dateFormatter = new Intl.DateTimeFormat(navigator.language || undefined, {
+    year: 'numeric',
+    month: 'long',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit'
+  });
+
+  function parseRevisionDate(rawValue) {
+    if (!rawValue) return null;
+
+    const trimmedValue = String(rawValue).trim();
+    const normalizedValue = trimmedValue
+      .replace(' ', 'T')
+      .replace(/\.(\d{3})\d+/, '.$1');
+
+    const directDate = new Date(trimmedValue);
+    if (!Number.isNaN(directDate.getTime())) return directDate;
+
+    const normalizedDate = new Date(normalizedValue);
+    if (!Number.isNaN(normalizedDate.getTime())) return normalizedDate;
+
+    return null;
+  }
+
+  document.querySelectorAll('[data-created-at]').forEach(function (timeElement) {
+    const rawValue = timeElement.getAttribute('data-created-at');
+    const parsedDate = parseRevisionDate(rawValue);
+    if (!parsedDate) return;
+
+    const mainElement = timeElement.querySelector('.revision-created-at-main');
+    const originalElement = timeElement.querySelector('.revision-created-at-original');
+
+    if (mainElement) {
+      mainElement.textContent = dateFormatter.format(parsedDate);
+    }
+
+    if (originalElement) {
+      originalElement.textContent = 'original: ' + rawValue;
+    }
+
+    timeElement.setAttribute('datetime', parsedDate.toISOString());
+    timeElement.setAttribute('title', rawValue);
+  });
+})();
+</script>
+
 </body>
 </html>
-
