@@ -3043,6 +3043,137 @@ func TestSavePagePropagatesSiteBrushTemplateToOtherPagesAndPublishedOutputs(t *t
 	}
 }
 
+func TestSavePagePropagatesSiteBrushTemplateFromChildPageToRoot(t *testing.T) {
+	application, rawDB := newTestApplication(t)
+	_, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "admin@example.com", "old")
+	if err != nil {
+		t.Fatalf("insert user: %v", err)
+	}
+
+	navigationBefore := `<nav class="SiteBrush-Template shared-nav"><a href="/">Home</a></nav>`
+	navigationAfter := `<nav class="SiteBrush-Template shared-nav"><a href="/">Updated</a></nav>`
+	homeHTML := "<html><body>" + navigationBefore + `<main>Home</main></body></html>`
+	aboutHTML := "<html><body><header>About</header>" + navigationBefore + `<main>About</main></body></html>`
+	_, err = rawDB.Exec(`INSERT INTO pages(domain,path,title,html,published) VALUES(?,?,?,?,1),(?,?,?,?,1)`,
+		"localhost", "/", "Home", homeHTML,
+		"localhost", "/about", "About", aboutHTML,
+	)
+	if err != nil {
+		t.Fatalf("insert pages: %v", err)
+	}
+	_, err = rawDB.Exec(`INSERT INTO published_pages(domain,path,title,html) VALUES(?,?,?,?),(?,?,?,?)`,
+		"localhost", "/", "Home", homeHTML,
+		"localhost", "/about", "About", aboutHTML,
+	)
+	if err != nil {
+		t.Fatalf("insert published pages: %v", err)
+	}
+	application.writePublishedStaticHTML("localhost", "/", homeHTML)
+	application.writePublishedStaticHTML("localhost", "/about", aboutHTML)
+
+	form := url.Values{}
+	form.Set("path", "/about")
+	form.Set("title", "About")
+	form.Set("html", "<html><body><header>About</header>"+navigationAfter+`<main>About</main></body></html>`)
+	request := httptest.NewRequest(http.MethodPost, "http://localhost:8080/about?save", strings.NewReader(form.Encode()))
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	request.AddCookie(newAdminSessionCookie(t, application, "admin@example.com"))
+	response := httptest.NewRecorder()
+	application.route(response, request)
+	if response.Code != http.StatusFound {
+		t.Fatalf("status = %d, body=%q", response.Code, response.Body.String())
+	}
+
+	var updatedHomeHTML string
+	if err := rawDB.QueryRow(`SELECT html FROM pages WHERE domain=? AND path=?`, "localhost", "/").Scan(&updatedHomeHTML); err != nil {
+		t.Fatalf("read home page: %v", err)
+	}
+	if !strings.Contains(updatedHomeHTML, navigationAfter) {
+		t.Fatalf("root page did not receive propagated template: %s", updatedHomeHTML)
+	}
+
+	var updatedPublishedHomeHTML string
+	if err := rawDB.QueryRow(`SELECT html FROM published_pages WHERE domain=? AND path=?`, "localhost", "/").Scan(&updatedPublishedHomeHTML); err != nil {
+		t.Fatalf("read published home page: %v", err)
+	}
+	if !strings.Contains(updatedPublishedHomeHTML, navigationAfter) {
+		t.Fatalf("published root page did not receive propagated template: %s", updatedPublishedHomeHTML)
+	}
+
+	homeStaticHTML, readErr := os.ReadFile(filepath.Join(application.domainStaticDir("localhost"), staticRelativePathForPage("/")))
+	if readErr != nil {
+		t.Fatalf("read static root page: %v", readErr)
+	}
+	if !strings.Contains(string(homeStaticHTML), navigationAfter) {
+		t.Fatalf("static root page did not receive propagated template: %s", string(homeStaticHTML))
+	}
+}
+
+func TestSavePagePropagatesAddedSiteBrushTemplateWithDifferentClassOrderToRoot(t *testing.T) {
+	application, rawDB := newTestApplication(t)
+	_, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "admin@example.com", "old")
+	if err != nil {
+		t.Fatalf("insert user: %v", err)
+	}
+
+	homeBefore := `<html><body><section class="SiteBrush-Template lead hero"><h1>Shared</h1><p>Old</p></section></body></html>`
+	aboutBefore := `<html><body><section class="SiteBrush-Template hero lead"><h1>Shared</h1><p>Old</p></section></body></html>`
+	_, err = rawDB.Exec(`INSERT INTO pages(domain,path,title,html,published) VALUES(?,?,?,?,1),(?,?,?,?,1)`,
+		"localhost", "/", "Home", homeBefore,
+		"localhost", "/about", "About", aboutBefore,
+	)
+	if err != nil {
+		t.Fatalf("insert pages: %v", err)
+	}
+	_, err = rawDB.Exec(`INSERT INTO published_pages(domain,path,title,html) VALUES(?,?,?,?),(?,?,?,?)`,
+		"localhost", "/", "Home", homeBefore,
+		"localhost", "/about", "About", aboutBefore,
+	)
+	if err != nil {
+		t.Fatalf("insert published pages: %v", err)
+	}
+	application.writePublishedStaticHTML("localhost", "/", homeBefore)
+	application.writePublishedStaticHTML("localhost", "/about", aboutBefore)
+
+	aboutAfter := `<html><body><section class="SiteBrush-Template hero lead"><h1>Shared</h1><p>New</p></section></body></html>`
+	form := url.Values{}
+	form.Set("path", "/about")
+	form.Set("title", "About")
+	form.Set("html", aboutAfter)
+	request := httptest.NewRequest(http.MethodPost, "http://localhost:8080/about?save", strings.NewReader(form.Encode()))
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	request.AddCookie(newAdminSessionCookie(t, application, "admin@example.com"))
+	response := httptest.NewRecorder()
+	application.route(response, request)
+	if response.Code != http.StatusFound {
+		t.Fatalf("status = %d, body=%q", response.Code, response.Body.String())
+	}
+
+	var updatedHomeHTML string
+	if err := rawDB.QueryRow(`SELECT html FROM pages WHERE domain=? AND path=?`, "localhost", "/").Scan(&updatedHomeHTML); err != nil {
+		t.Fatalf("read home page: %v", err)
+	}
+	if !strings.Contains(updatedHomeHTML, `<section class="SiteBrush-Template hero lead"><h1>Shared</h1><p>New</p></section>`) {
+		t.Fatalf("root page did not receive class-order-independent template update: %s", updatedHomeHTML)
+	}
+
+	var updatedPublishedHomeHTML string
+	if err := rawDB.QueryRow(`SELECT html FROM published_pages WHERE domain=? AND path=?`, "localhost", "/").Scan(&updatedPublishedHomeHTML); err != nil {
+		t.Fatalf("read published home page: %v", err)
+	}
+	if updatedPublishedHomeHTML != updatedHomeHTML {
+		t.Fatalf("published root html = %q, want %q", updatedPublishedHomeHTML, updatedHomeHTML)
+	}
+
+	homeStaticHTML, readErr := os.ReadFile(filepath.Join(application.domainStaticDir("localhost"), staticRelativePathForPage("/")))
+	if readErr != nil {
+		t.Fatalf("read static root page: %v", readErr)
+	}
+	if string(homeStaticHTML) != updatedHomeHTML {
+		t.Fatalf("static root html = %q, want %q", string(homeStaticHTML), updatedHomeHTML)
+	}
+}
+
 func TestSavePageSynchronizesAddedSiteBrushTemplateClassByNormalizedInnerHTML(t *testing.T) {
 	application, rawDB := newTestApplication(t)
 	_, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "admin@example.com", "old")
@@ -3099,10 +3230,7 @@ func TestSavePageSynchronizesAddedSiteBrushTemplateClassByNormalizedInnerHTML(t 
 	if err := rawDB.QueryRow(`SELECT html FROM pages WHERE domain=? AND path=?`, "localhost", "/about").Scan(&updatedAboutHTML); err != nil {
 		t.Fatalf("read about page: %v", err)
 	}
-	if !strings.Contains(updatedAboutHTML, `<section class="SiteBrush-Template lead hero"><h1>
-Shared
-</h1>
-<p>Copy</p></section>`) {
+	if !strings.Contains(updatedAboutHTML, `<section class="SiteBrush-Template hero lead"><h1>Shared</h1><p>Copy</p></section>`) {
 		t.Fatalf("about page did not receive synchronized class first: %s", updatedAboutHTML)
 	}
 
@@ -3134,8 +3262,8 @@ Shared
 	if err := rawDB.QueryRow(`SELECT COUNT(*) FROM revisions WHERE domain=? AND page_path=?`, "localhost", "/about").Scan(&aboutRevisionCount); err != nil {
 		t.Fatalf("count about revisions: %v", err)
 	}
-	if aboutRevisionCount != 1 {
-		t.Fatalf("about revision count = %d, want 1", aboutRevisionCount)
+	if aboutRevisionCount != 2 {
+		t.Fatalf("about revision count = %d, want 2", aboutRevisionCount)
 	}
 }
 

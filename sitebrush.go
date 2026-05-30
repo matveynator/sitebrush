@@ -6392,6 +6392,10 @@ func (a *App) savePage(w http.ResponseWriter, r *http.Request) {
 	}
 	if pageContentKind(pagePath, html) == "html" {
 		a.applyTemplateClassSynchronization(r.Context(), domain, previousStoredHTML, html)
+		var synchronizedHTML string
+		if scanErr := a.db.QueryRowContext(r.Context(), `SELECT html FROM pages WHERE domain=? AND path=?`, domain, pagePath).Scan(&synchronizedHTML); scanErr == nil {
+			html = synchronizedHTML
+		}
 		a.applyTemplatePropagation(r.Context(), domain, html)
 	}
 	http.Redirect(w, r, pagePath, http.StatusFound)
@@ -14682,19 +14686,37 @@ func templateIdentifierFromAttributes(attributeList []html.Attribute) string {
 
 func templateIdentifierFromClassList(classValue string) string {
 	classNameList := strings.Fields(classValue)
-	for classIndex, className := range classNameList {
+	hasTemplateClass := false
+	for _, className := range classNameList {
 		if strings.EqualFold(className, "SiteBrush-Template") {
-			if classIndex+1 < len(classNameList) {
-				return classNameList[classIndex+1]
-			}
-			return ""
+			hasTemplateClass = true
+			continue
 		}
 		lowerClassName := strings.ToLower(className)
 		if strings.HasPrefix(lowerClassName, "sitebrush-template-") {
 			return className[len("sitebrush-template-"):]
 		}
 	}
+	if hasTemplateClass {
+		return normalizedTemplateIdentifierClassList(classNameList)
+	}
 	return ""
+}
+
+func normalizedTemplateIdentifierClassList(classNameList []string) string {
+	identifierClassSet := make(map[string]struct{})
+	for _, className := range classNameList {
+		if strings.EqualFold(className, "SiteBrush-Template") {
+			continue
+		}
+		identifierClassSet[className] = struct{}{}
+	}
+	identifierClassList := make([]string, 0, len(identifierClassSet))
+	for className := range identifierClassSet {
+		identifierClassList = append(identifierClassList, className)
+	}
+	sort.Strings(identifierClassList)
+	return strings.Join(identifierClassList, " ")
 }
 
 func (a *App) render(w http.ResponseWriter, r *http.Request, templateName string, templateData any) {
