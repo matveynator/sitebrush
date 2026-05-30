@@ -86,13 +86,13 @@ const emailConfirmationTTL = 24 * time.Hour
 const demoSiteDeletionDelay = 10 * time.Minute
 const sitebrushHTTPReadTimeout = 10 * time.Second
 const sitebrushHTTPWriteTimeout = 30 * time.Second
-const templatePropagationTimeout = 30 * time.Minute
 const sitebrushHTTPIdleTimeout = 65 * time.Second
 const sitebrushHTTPReadHeaderTimeout = 5 * time.Second
 const sitebrushHTTP10KeepAliveBufferLimit = 1024 * 1024
 const currentSiteDatabaseSchemaVersion = 1
 const siteDatabaseStartupMigrationTimeout = 30 * time.Second
 const pagePasswordSessionTTL = time.Hour
+const templatePropagationTimeout = 30 * time.Minute
 
 // App keeps only explicit dependencies to stay readable and easy to swap.
 type App struct {
@@ -6392,34 +6392,18 @@ func (a *App) savePage(w http.ResponseWriter, r *http.Request) {
 		a.registerPageRedirect(r.Context(), domain, previousPath, pagePath)
 	}
 	if pageContentKind(pagePath, html) == "html" {
-		a.startTemplatePropagation(domain, pagePath, previousStoredHTML, html)
+		templateBaseCtx := contextWithDomain(context.Background(), domain)
+		templateCtx, cancelTemplatePropagation := context.WithTimeout(templateBaseCtx, templatePropagationTimeout)
+		defer cancelTemplatePropagation()
+
+		a.applyTemplateClassSynchronization(templateCtx, domain, previousStoredHTML, html)
+		var synchronizedHTML string
+		if scanErr := a.db.QueryRowContext(templateCtx, `SELECT html FROM pages WHERE domain=? AND path=?`, domain, pagePath).Scan(&synchronizedHTML); scanErr == nil {
+			html = synchronizedHTML
+		}
+		a.applyTemplatePropagation(templateCtx, domain, html)
 	}
 	http.Redirect(w, r, pagePath, http.StatusFound)
-}
-
-func (a *App) startTemplatePropagation(domain, pagePath, previousStoredHTML, savedHTML string) {
-	if a == nil {
-		return
-	}
-	domain = normalizeDomainName(domain)
-	if domain == "" {
-		domain = "localhost"
-	}
-	savedPagePath := cleanPath(pagePath)
-	savedPreviousHTML := previousStoredHTML
-	savedHTMLCopy := savedHTML
-	go func() {
-		baseCtx := contextWithDomain(context.Background(), domain)
-		ctx, cancel := context.WithTimeout(baseCtx, templatePropagationTimeout)
-		defer cancel()
-
-		a.applyTemplateClassSynchronization(ctx, domain, savedPreviousHTML, savedHTMLCopy)
-		var synchronizedHTML string
-		if scanErr := a.db.QueryRowContext(ctx, `SELECT html FROM pages WHERE domain=? AND path=?`, domain, savedPagePath).Scan(&synchronizedHTML); scanErr == nil {
-			savedHTMLCopy = synchronizedHTML
-		}
-		a.applyTemplatePropagation(ctx, domain, savedHTMLCopy)
-	}()
 }
 
 func (a *App) grabPage(w http.ResponseWriter, r *http.Request) {
@@ -14047,15 +14031,8 @@ const guestNotFoundPagePathPlaceholder = "__SITEBRUSH_NOT_FOUND_PATH__"
 const guestNotFoundEditLinkPlaceholder = "__SITEBRUSH_NOT_FOUND_EDIT_LINK__"
 const guestNotFoundMenuPlaceholder = "__SITEBRUSH_NOT_FOUND_MENU__"
 
-func logTemplateStorageDeltaError(operation, domain, pagePath string, err error) {
-	if err == nil {
-		return
-	}
-	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-		log.Printf("%s canceled domain=%s path=%s error=%v", operation, domain, pagePath, err)
-		return
-	}
-	log.Printf("%s blocked by storage limit domain=%s path=%s error=%v", operation, domain, pagePath, err)
+func isContextCancellationError(err error) bool {
+	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
 }
 
 func (a *App) applyTemplatePropagation(ctx context.Context, domain, sourceHTML string) {
@@ -14100,7 +14077,11 @@ func (a *App) applyTemplatePropagation(ctx context.Context, domain, sourceHTML s
 			publishedStaticDelta = updatedHTMLBytes - fileSizeBytes(filepath.Join(a.domainStaticDir(domain), staticRelativePathForPage(currentPage.path)))
 		}
 		if storageErr := a.applyDomainStorageDelta(ctx, domain, pageDelta, publishedPageDelta, updatedHTMLBytes, 0, publishedStaticDelta); storageErr != nil {
-			logTemplateStorageDeltaError("template propagation", domain, currentPage.path, storageErr)
+			if isContextCancellationError(storageErr) {
+				log.Printf("template propagation stopped domain=%s path=%s error=%v", domain, currentPage.path, storageErr)
+				return
+			}
+			log.Printf("template propagation blocked by storage limit domain=%s path=%s error=%v", domain, currentPage.path, storageErr)
 			continue
 		}
 
@@ -14202,7 +14183,11 @@ func (a *App) applyTemplateClassSynchronization(ctx context.Context, domain, pre
 			publishedStaticDelta = updatedHTMLBytes - fileSizeBytes(filepath.Join(a.domainStaticDir(domain), staticRelativePathForPage(currentPage.path)))
 		}
 		if storageErr := a.applyDomainStorageDelta(ctx, domain, pageDelta, publishedPageDelta, updatedHTMLBytes, 0, publishedStaticDelta); storageErr != nil {
-			logTemplateStorageDeltaError("template class synchronization", domain, currentPage.path, storageErr)
+			if isContextCancellationError(storageErr) {
+				log.Printf("template class synchronization stopped domain=%s path=%s error=%v", domain, currentPage.path, storageErr)
+				return
+			}
+			log.Printf("template class synchronization blocked by storage limit domain=%s path=%s error=%v", domain, currentPage.path, storageErr)
 			continue
 		}
 
