@@ -6392,18 +6392,39 @@ func (a *App) savePage(w http.ResponseWriter, r *http.Request) {
 		a.registerPageRedirect(r.Context(), domain, previousPath, pagePath)
 	}
 	if pageContentKind(pagePath, html) == "html" {
-		templateBaseCtx := contextWithDomain(context.Background(), domain)
-		templateCtx, cancelTemplatePropagation := context.WithTimeout(templateBaseCtx, templatePropagationTimeout)
+		a.redirectAndFlush(w, pagePath, http.StatusFound)
+
+		templateCtx, cancelTemplatePropagation := context.WithTimeout(contextWithDomain(context.Background(), domain), templatePropagationTimeout)
 		defer cancelTemplatePropagation()
 
+		startedAt := time.Now()
+		log.Printf("template update started domain=%s source_path=%s", domain, pagePath)
 		a.applyTemplateClassSynchronization(templateCtx, domain, previousStoredHTML, html)
 		var synchronizedHTML string
 		if scanErr := a.db.QueryRowContext(templateCtx, `SELECT html FROM pages WHERE domain=? AND path=?`, domain, pagePath).Scan(&synchronizedHTML); scanErr == nil {
 			html = synchronizedHTML
 		}
 		a.applyTemplatePropagation(templateCtx, domain, html)
+		if templateCtx.Err() != nil {
+			log.Printf("template update stopped domain=%s source_path=%s duration=%s error=%v", domain, pagePath, time.Since(startedAt).String(), templateCtx.Err())
+		} else {
+			log.Printf("template update finished domain=%s source_path=%s duration=%s", domain, pagePath, time.Since(startedAt).String())
+		}
+		return
 	}
 	http.Redirect(w, r, pagePath, http.StatusFound)
+}
+
+func (a *App) redirectAndFlush(w http.ResponseWriter, target string, statusCode int) {
+	if statusCode < 300 || statusCode > 399 {
+		statusCode = http.StatusFound
+	}
+	w.Header().Set("Location", target)
+	w.Header().Set("Content-Length", "0")
+	w.WriteHeader(statusCode)
+	if flusher, ok := w.(http.Flusher); ok {
+		flusher.Flush()
+	}
 }
 
 func (a *App) grabPage(w http.ResponseWriter, r *http.Request) {
@@ -14031,8 +14052,15 @@ const guestNotFoundPagePathPlaceholder = "__SITEBRUSH_NOT_FOUND_PATH__"
 const guestNotFoundEditLinkPlaceholder = "__SITEBRUSH_NOT_FOUND_EDIT_LINK__"
 const guestNotFoundMenuPlaceholder = "__SITEBRUSH_NOT_FOUND_MENU__"
 
-func isContextCancellationError(err error) bool {
-	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
+func logTemplateUpdateStorageError(operation, domain, pagePath string, err error) {
+	if err == nil {
+		return
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		log.Printf("%s stopped domain=%s path=%s error=%v", operation, domain, pagePath, err)
+		return
+	}
+	log.Printf("%s blocked by storage limit domain=%s path=%s error=%v", operation, domain, pagePath, err)
 }
 
 func (a *App) applyTemplatePropagation(ctx context.Context, domain, sourceHTML string) {
@@ -14077,11 +14105,7 @@ func (a *App) applyTemplatePropagation(ctx context.Context, domain, sourceHTML s
 			publishedStaticDelta = updatedHTMLBytes - fileSizeBytes(filepath.Join(a.domainStaticDir(domain), staticRelativePathForPage(currentPage.path)))
 		}
 		if storageErr := a.applyDomainStorageDelta(ctx, domain, pageDelta, publishedPageDelta, updatedHTMLBytes, 0, publishedStaticDelta); storageErr != nil {
-			if isContextCancellationError(storageErr) {
-				log.Printf("template propagation stopped domain=%s path=%s error=%v", domain, currentPage.path, storageErr)
-				return
-			}
-			log.Printf("template propagation blocked by storage limit domain=%s path=%s error=%v", domain, currentPage.path, storageErr)
+			logTemplateUpdateStorageError("template propagation", domain, currentPage.path, storageErr)
 			continue
 		}
 
@@ -14183,11 +14207,7 @@ func (a *App) applyTemplateClassSynchronization(ctx context.Context, domain, pre
 			publishedStaticDelta = updatedHTMLBytes - fileSizeBytes(filepath.Join(a.domainStaticDir(domain), staticRelativePathForPage(currentPage.path)))
 		}
 		if storageErr := a.applyDomainStorageDelta(ctx, domain, pageDelta, publishedPageDelta, updatedHTMLBytes, 0, publishedStaticDelta); storageErr != nil {
-			if isContextCancellationError(storageErr) {
-				log.Printf("template class synchronization stopped domain=%s path=%s error=%v", domain, currentPage.path, storageErr)
-				return
-			}
-			log.Printf("template class synchronization blocked by storage limit domain=%s path=%s error=%v", domain, currentPage.path, storageErr)
+			logTemplateUpdateStorageError("template class synchronization", domain, currentPage.path, storageErr)
 			continue
 		}
 
