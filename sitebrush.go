@@ -40,6 +40,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 
@@ -85,14 +86,13 @@ const emailDeliveryQueueSize = 256
 const emailConfirmationTTL = 24 * time.Hour
 const demoSiteDeletionDelay = 10 * time.Minute
 const sitebrushHTTPReadTimeout = 10 * time.Second
-const sitebrushHTTPWriteTimeout = 30 * time.Second
+const sitebrushHTTPWriteTimeout = 0
 const sitebrushHTTPIdleTimeout = 65 * time.Second
 const sitebrushHTTPReadHeaderTimeout = 5 * time.Second
 const sitebrushHTTP10KeepAliveBufferLimit = 1024 * 1024
 const currentSiteDatabaseSchemaVersion = 1
 const siteDatabaseStartupMigrationTimeout = 30 * time.Second
 const pagePasswordSessionTTL = time.Hour
-const templatePropagationTimeout = 30 * time.Minute
 
 // App keeps only explicit dependencies to stay readable and easy to swap.
 type App struct {
@@ -2134,7 +2134,7 @@ func shouldRecordAnalyticsRequest(r *http.Request) bool {
 
 func isSitebrushControllerQuery(query url.Values) bool {
 	for _, controllerFlag := range []string{
-		"save", "grab_preview", "grab_events", "grab_ws", "revision_restore", "revision_delete", "revision_toggle",
+		"save", "template_events", "grab_preview", "grab_events", "grab_ws", "revision_restore", "revision_delete", "revision_toggle",
 		"tree", "native_pick_files", "native_save_backup", "edit", "visual", "text", "editraw", "settings", "properties",
 		"backup_download", "billing_backup_download", "backup_import", "profile", "freeze", "publish", "publish_events", "publish_preview", "files",
 		"revisions", "login", "register", "email_confirm", "grab", "recover", "captcha", "analytics", "billing",
@@ -5378,6 +5378,10 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 		a.grabProgressEvents(w, r)
 		return
 	}
+	if hasQueryFlag(r, "template_events") {
+		a.templatePropagationProgressEvents(w, r)
+		return
+	}
 	if hasQueryFlag(r, "grab_ws") {
 		a.grabProgressWS(w, r)
 		return
@@ -6340,6 +6344,125 @@ func loginURLForRequest(r *http.Request) string {
 	return loginURL.String()
 }
 
+type templatePropagationProgressEvent struct {
+	Stage   string `json:"stage"`
+	Domain  string `json:"domain"`
+	Path    string `json:"path"`
+	Current int    `json:"current"`
+	Total   int    `json:"total"`
+	Changed int    `json:"changed"`
+	Skipped int    `json:"skipped"`
+	Message string `json:"message"`
+	Error   string `json:"error,omitempty"`
+	Done    bool   `json:"done"`
+}
+
+type templatePropagationProgressTracker struct {
+	mu          sync.Mutex
+	subscribers map[string]chan templatePropagationProgressEvent
+}
+
+func newTemplatePropagationProgressTracker() *templatePropagationProgressTracker {
+	return &templatePropagationProgressTracker{subscribers: make(map[string]chan templatePropagationProgressEvent)}
+}
+
+var sitebrushTemplateProgress = newTemplatePropagationProgressTracker()
+
+func (tracker *templatePropagationProgressTracker) Subscribe(token string) (<-chan templatePropagationProgressEvent, func(), bool) {
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return nil, func() {}, false
+	}
+	tracker.mu.Lock()
+	channel := tracker.subscribers[token]
+	if channel == nil {
+		channel = make(chan templatePropagationProgressEvent, 256)
+		tracker.subscribers[token] = channel
+	}
+	tracker.mu.Unlock()
+	cancel := func() {
+		tracker.mu.Lock()
+		if tracker.subscribers[token] == channel {
+			delete(tracker.subscribers, token)
+			close(channel)
+		}
+		tracker.mu.Unlock()
+	}
+	return channel, cancel, true
+}
+
+func (tracker *templatePropagationProgressTracker) Publish(token string, event templatePropagationProgressEvent) {
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return
+	}
+	tracker.mu.Lock()
+	channel := tracker.subscribers[token]
+	tracker.mu.Unlock()
+	if channel == nil {
+		return
+	}
+	select {
+	case channel <- event:
+	default:
+	}
+}
+
+func (tracker *templatePropagationProgressTracker) Finish(token string) {
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return
+	}
+	tracker.mu.Lock()
+	channel := tracker.subscribers[token]
+	if channel != nil {
+		delete(tracker.subscribers, token)
+		close(channel)
+	}
+	tracker.mu.Unlock()
+}
+
+func (a *App) templatePropagationProgressEvents(w http.ResponseWriter, r *http.Request) {
+	allowLongStreamingResponse(w)
+	if !a.isAdminRequest(r) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	token := strings.TrimSpace(r.URL.Query().Get("template_events"))
+	events, cancel, ok := sitebrushTemplateProgress.Subscribe(token)
+	if !ok {
+		http.Error(w, "missing template progress token", http.StatusBadRequest)
+		return
+	}
+	defer cancel()
+
+	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	flusher, _ := w.(http.Flusher)
+	if flusher != nil {
+		flusher.Flush()
+	}
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case event, open := <-events:
+			if !open {
+				return
+			}
+			payload, _ := json.Marshal(event)
+			_, _ = fmt.Fprintf(w, "data: %s\n\n", payload)
+			if flusher != nil {
+				flusher.Flush()
+			}
+			if event.Done {
+				return
+			}
+		}
+	}
+}
+
 func (a *App) saveEndpoint(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodPost {
 		a.savePage(w, r)
@@ -6349,6 +6472,7 @@ func (a *App) saveEndpoint(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) savePage(w http.ResponseWriter, r *http.Request) {
+	allowLongStreamingResponse(w)
 	if !a.isAdminRequest(r) || r.Method != http.MethodPost {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
@@ -6359,6 +6483,8 @@ func (a *App) savePage(w http.ResponseWriter, r *http.Request) {
 		previousPath = cleanPath(r.FormValue("previous_path"))
 	}
 	domain := a.siteDomain(r.Context(), r)
+	saveCtx := contextWithDomain(context.Background(), domain)
+	progressToken := strings.TrimSpace(r.FormValue("template_progress_token"))
 	title := strings.TrimSpace(r.FormValue("title"))
 	if title == "" {
 		title = pagePath
@@ -6366,65 +6492,44 @@ func (a *App) savePage(w http.ResponseWriter, r *http.Request) {
 	html := r.FormValue("html")
 	newHTMLBytes := int64(len([]byte(html)))
 	var previousStoredHTML string
-	_ = a.db.QueryRowContext(r.Context(), `SELECT html FROM pages WHERE domain=? AND path=?`, domain, pagePath).Scan(&previousStoredHTML)
+	_ = a.db.QueryRowContext(saveCtx, `SELECT html FROM pages WHERE domain=? AND path=?`, domain, pagePath).Scan(&previousStoredHTML)
 	pageDelta := newHTMLBytes - int64(len([]byte(previousStoredHTML)))
 	publishedPageDelta := int64(0)
 	publishedStaticDelta := int64(0)
-	if !a.isDomainFrozen(r.Context(), domain) {
+	if !a.isDomainFrozen(saveCtx, domain) {
 		var previousPublishedHTML string
-		_ = a.db.QueryRowContext(r.Context(), `SELECT html FROM published_pages WHERE domain=? AND path=?`, domain, pagePath).Scan(&previousPublishedHTML)
+		_ = a.db.QueryRowContext(saveCtx, `SELECT html FROM published_pages WHERE domain=? AND path=?`, domain, pagePath).Scan(&previousPublishedHTML)
 		publishedPageDelta = newHTMLBytes - int64(len([]byte(previousPublishedHTML)))
 		publishedStaticPath := filepath.Join(a.domainStaticDir(domain), staticRelativePathForPage(pagePath))
 		publishedStaticDelta = newHTMLBytes - fileSizeBytes(publishedStaticPath)
 	}
-	if storageErr := a.applyDomainStorageDelta(r.Context(), domain, pageDelta, publishedPageDelta, newHTMLBytes, 0, publishedStaticDelta); storageErr != nil {
+	if storageErr := a.applyDomainStorageDelta(saveCtx, domain, pageDelta, publishedPageDelta, newHTMLBytes, 0, publishedStaticDelta); storageErr != nil {
+		sitebrushTemplateProgress.Publish(progressToken, templatePropagationProgressEvent{Stage: "error", Domain: domain, Path: pagePath, Error: storageErr.Error(), Done: true})
 		http.Error(w, storageErr.Error(), http.StatusInsufficientStorage)
 		return
 	}
-	a.clearPageRedirectSource(r.Context(), domain, pagePath)
-	_, _ = a.db.ExecContext(r.Context(), `INSERT OR REPLACE INTO pages(domain,path,title,html,published) VALUES(?,?,?,?,1)`, domain, pagePath, title, html)
-	if !a.isDomainFrozen(r.Context(), domain) {
-		_, _ = a.db.ExecContext(r.Context(), `INSERT OR REPLACE INTO published_pages(domain,path,title,html) VALUES(?,?,?,?)`, domain, pagePath, title, html)
+	a.clearPageRedirectSource(saveCtx, domain, pagePath)
+	_, _ = a.db.ExecContext(saveCtx, `INSERT OR REPLACE INTO pages(domain,path,title,html,published) VALUES(?,?,?,?,1)`, domain, pagePath, title, html)
+	if !a.isDomainFrozen(saveCtx, domain) {
+		_, _ = a.db.ExecContext(saveCtx, `INSERT OR REPLACE INTO published_pages(domain,path,title,html) VALUES(?,?,?,?)`, domain, pagePath, title, html)
 		a.writePublishedStaticHTML(domain, pagePath, html)
 	}
-	_, _ = a.db.ExecContext(r.Context(), `INSERT INTO revisions(domain,page_path,html,created_at) VALUES(?,?,?,?)`, domain, pagePath, html, time.Now().Format(time.RFC3339))
+	_, _ = a.db.ExecContext(saveCtx, `INSERT INTO revisions(domain,page_path,html,created_at) VALUES(?,?,?,?)`, domain, pagePath, html, time.Now().Format(time.RFC3339))
 	if previousPath != pagePath {
-		a.registerPageRedirect(r.Context(), domain, previousPath, pagePath)
+		a.registerPageRedirect(saveCtx, domain, previousPath, pagePath)
 	}
 	if pageContentKind(pagePath, html) == "html" {
-		a.redirectAndFlush(w, pagePath, http.StatusFound)
-
-		templateCtx, cancelTemplatePropagation := context.WithTimeout(contextWithDomain(context.Background(), domain), templatePropagationTimeout)
-		defer cancelTemplatePropagation()
-
-		startedAt := time.Now()
-		log.Printf("template update started domain=%s source_path=%s", domain, pagePath)
-		a.applyTemplateClassSynchronization(templateCtx, domain, previousStoredHTML, html)
+		sitebrushTemplateProgress.Publish(progressToken, templatePropagationProgressEvent{Stage: "start", Domain: domain, Path: pagePath, Message: "Saving page and scanning SiteBrush-Template pages"})
+		a.applyTemplateClassSynchronization(saveCtx, domain, previousStoredHTML, html, progressToken)
 		var synchronizedHTML string
-		if scanErr := a.db.QueryRowContext(templateCtx, `SELECT html FROM pages WHERE domain=? AND path=?`, domain, pagePath).Scan(&synchronizedHTML); scanErr == nil {
+		if scanErr := a.db.QueryRowContext(saveCtx, `SELECT html FROM pages WHERE domain=? AND path=?`, domain, pagePath).Scan(&synchronizedHTML); scanErr == nil {
 			html = synchronizedHTML
 		}
-		a.applyTemplatePropagation(templateCtx, domain, html)
-		if templateCtx.Err() != nil {
-			log.Printf("template update stopped domain=%s source_path=%s duration=%s error=%v", domain, pagePath, time.Since(startedAt).String(), templateCtx.Err())
-		} else {
-			log.Printf("template update finished domain=%s source_path=%s duration=%s", domain, pagePath, time.Since(startedAt).String())
-		}
-		return
+		a.applyTemplatePropagation(saveCtx, domain, html, progressToken)
+		sitebrushTemplateProgress.Publish(progressToken, templatePropagationProgressEvent{Stage: "done", Domain: domain, Path: pagePath, Done: true, Message: "Template update completed"})
+		sitebrushTemplateProgress.Finish(progressToken)
 	}
 	http.Redirect(w, r, pagePath, http.StatusFound)
-}
-
-func (a *App) redirectAndFlush(w http.ResponseWriter, target string, statusCode int) {
-	if statusCode < 300 || statusCode > 399 {
-		statusCode = http.StatusFound
-	}
-	w.Header().Set("Location", target)
-	w.Header().Set("Content-Length", "0")
-	w.WriteHeader(statusCode)
-	if flusher, ok := w.(http.Flusher); ok {
-		flusher.Flush()
-	}
 }
 
 func (a *App) grabPage(w http.ResponseWriter, r *http.Request) {
@@ -14052,18 +14157,7 @@ const guestNotFoundPagePathPlaceholder = "__SITEBRUSH_NOT_FOUND_PATH__"
 const guestNotFoundEditLinkPlaceholder = "__SITEBRUSH_NOT_FOUND_EDIT_LINK__"
 const guestNotFoundMenuPlaceholder = "__SITEBRUSH_NOT_FOUND_MENU__"
 
-func logTemplateUpdateStorageError(operation, domain, pagePath string, err error) {
-	if err == nil {
-		return
-	}
-	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-		log.Printf("%s stopped domain=%s path=%s error=%v", operation, domain, pagePath, err)
-		return
-	}
-	log.Printf("%s blocked by storage limit domain=%s path=%s error=%v", operation, domain, pagePath, err)
-}
-
-func (a *App) applyTemplatePropagation(ctx context.Context, domain, sourceHTML string) {
+func (a *App) applyTemplatePropagation(ctx context.Context, domain, sourceHTML, progressToken string) {
 	templateBlockByID := extractTemplateBlocks(sourceHTML)
 	if len(templateBlockByID) == 0 {
 		return
@@ -14089,9 +14183,13 @@ func (a *App) applyTemplatePropagation(ctx context.Context, domain, sourceHTML s
 	_ = pageRows.Close()
 
 	frozenDomain := a.isDomainFrozen(ctx, domain)
-	for _, currentPage := range pageList {
+	changedCount := 0
+	skippedCount := 0
+	for pageIndex, currentPage := range pageList {
+		sitebrushTemplateProgress.Publish(progressToken, templatePropagationProgressEvent{Stage: "scan", Domain: domain, Path: currentPage.path, Current: pageIndex + 1, Total: len(pageList), Changed: changedCount, Skipped: skippedCount, Message: "Checking template blocks"})
 		updatedHTML, changed := replaceTemplateBlocks(currentPage.html, templateBlockByID)
 		if !changed || updatedHTML == currentPage.html {
+			skippedCount++
 			continue
 		}
 		updatedHTMLBytes := int64(len([]byte(updatedHTML)))
@@ -14105,16 +14203,24 @@ func (a *App) applyTemplatePropagation(ctx context.Context, domain, sourceHTML s
 			publishedStaticDelta = updatedHTMLBytes - fileSizeBytes(filepath.Join(a.domainStaticDir(domain), staticRelativePathForPage(currentPage.path)))
 		}
 		if storageErr := a.applyDomainStorageDelta(ctx, domain, pageDelta, publishedPageDelta, updatedHTMLBytes, 0, publishedStaticDelta); storageErr != nil {
-			logTemplateUpdateStorageError("template propagation", domain, currentPage.path, storageErr)
+			message := "Template propagation skipped page because of storage limit"
+			if errors.Is(storageErr, context.Canceled) || errors.Is(storageErr, context.DeadlineExceeded) {
+				message = "Template propagation skipped page because context was canceled"
+			}
+			log.Printf("%s domain=%s path=%s error=%v", message, domain, currentPage.path, storageErr)
+			sitebrushTemplateProgress.Publish(progressToken, templatePropagationProgressEvent{Stage: "error", Domain: domain, Path: currentPage.path, Current: pageIndex + 1, Total: len(pageList), Changed: changedCount, Skipped: skippedCount, Error: storageErr.Error(), Message: message})
 			continue
 		}
 
+		sitebrushTemplateProgress.Publish(progressToken, templatePropagationProgressEvent{Stage: "update", Domain: domain, Path: currentPage.path, Current: pageIndex + 1, Total: len(pageList), Changed: changedCount, Skipped: skippedCount, Message: "Updating template blocks"})
 		_, _ = a.db.ExecContext(ctx, `UPDATE pages SET html=? WHERE domain=? AND path=?`, updatedHTML, domain, currentPage.path)
 		if !frozenDomain {
 			_, _ = a.db.ExecContext(ctx, `INSERT OR REPLACE INTO published_pages(domain,path,title,html) VALUES(?,?,?,?)`, domain, currentPage.path, currentPage.title, updatedHTML)
 			a.writePublishedStaticHTML(domain, currentPage.path, updatedHTML)
 		}
 		_, _ = a.db.ExecContext(ctx, `INSERT INTO revisions(domain,page_path,html,created_at) VALUES(?,?,?,?)`, domain, currentPage.path, updatedHTML, time.Now().Format(time.RFC3339))
+		changedCount++
+		sitebrushTemplateProgress.Publish(progressToken, templatePropagationProgressEvent{Stage: "updated", Domain: domain, Path: currentPage.path, Current: pageIndex + 1, Total: len(pageList), Changed: changedCount, Skipped: skippedCount, Message: "Updated template blocks"})
 	}
 }
 
@@ -14161,7 +14267,7 @@ type templateOpenElement struct {
 
 var htmlClassAttributePattern = regexp.MustCompile(`(?is)\sclass\s*=\s*("([^"]*)"|'([^']*)'|([^\s"'=<>]+))`)
 
-func (a *App) applyTemplateClassSynchronization(ctx context.Context, domain, previousHTML, savedHTML string) {
+func (a *App) applyTemplateClassSynchronization(ctx context.Context, domain, previousHTML, savedHTML, progressToken string) {
 	actionSet := templateClassActionSetFromHTML(previousHTML, savedHTML)
 	if len(actionSet.addKeys) == 0 && len(actionSet.removeKeys) == 0 {
 		return
@@ -14187,12 +14293,16 @@ func (a *App) applyTemplateClassSynchronization(ctx context.Context, domain, pre
 	_ = pageRows.Close()
 
 	frozenDomain := a.isDomainFrozen(ctx, domain)
-	for _, currentPage := range pageList {
+	changedCount := 0
+	skippedCount := 0
+	for pageIndex, currentPage := range pageList {
+		sitebrushTemplateProgress.Publish(progressToken, templatePropagationProgressEvent{Stage: "class-scan", Domain: domain, Path: currentPage.path, Current: pageIndex + 1, Total: len(pageList), Changed: changedCount, Skipped: skippedCount, Message: "Checking SiteBrush-Template class markers"})
 		if pageContentKind(currentPage.path, currentPage.html) != "html" {
 			continue
 		}
 		updatedHTML, changed := synchronizeTemplateClassesInHTML(currentPage.html, actionSet)
 		if !changed || updatedHTML == currentPage.html {
+			skippedCount++
 			continue
 		}
 
@@ -14207,16 +14317,24 @@ func (a *App) applyTemplateClassSynchronization(ctx context.Context, domain, pre
 			publishedStaticDelta = updatedHTMLBytes - fileSizeBytes(filepath.Join(a.domainStaticDir(domain), staticRelativePathForPage(currentPage.path)))
 		}
 		if storageErr := a.applyDomainStorageDelta(ctx, domain, pageDelta, publishedPageDelta, updatedHTMLBytes, 0, publishedStaticDelta); storageErr != nil {
-			logTemplateUpdateStorageError("template class synchronization", domain, currentPage.path, storageErr)
+			message := "Template class synchronization skipped page because of storage limit"
+			if errors.Is(storageErr, context.Canceled) || errors.Is(storageErr, context.DeadlineExceeded) {
+				message = "Template class synchronization skipped page because context was canceled"
+			}
+			log.Printf("%s domain=%s path=%s error=%v", message, domain, currentPage.path, storageErr)
+			sitebrushTemplateProgress.Publish(progressToken, templatePropagationProgressEvent{Stage: "class-error", Domain: domain, Path: currentPage.path, Current: pageIndex + 1, Total: len(pageList), Changed: changedCount, Skipped: skippedCount, Error: storageErr.Error(), Message: message})
 			continue
 		}
 
+		sitebrushTemplateProgress.Publish(progressToken, templatePropagationProgressEvent{Stage: "class-update", Domain: domain, Path: currentPage.path, Current: pageIndex + 1, Total: len(pageList), Changed: changedCount, Skipped: skippedCount, Message: "Updating SiteBrush-Template class markers"})
 		_, _ = a.db.ExecContext(ctx, `UPDATE pages SET html=? WHERE domain=? AND path=?`, updatedHTML, domain, currentPage.path)
 		if !frozenDomain {
 			_, _ = a.db.ExecContext(ctx, `INSERT OR REPLACE INTO published_pages(domain,path,title,html) VALUES(?,?,?,?)`, domain, currentPage.path, currentPage.title, updatedHTML)
 			a.writePublishedStaticHTML(domain, currentPage.path, updatedHTML)
 		}
 		_, _ = a.db.ExecContext(ctx, `INSERT INTO revisions(domain,page_path,html,created_at) VALUES(?,?,?,?)`, domain, currentPage.path, updatedHTML, time.Now().Format(time.RFC3339))
+		changedCount++
+		sitebrushTemplateProgress.Publish(progressToken, templatePropagationProgressEvent{Stage: "class-updated", Domain: domain, Path: currentPage.path, Current: pageIndex + 1, Total: len(pageList), Changed: changedCount, Skipped: skippedCount, Message: "Updated SiteBrush-Template class markers"})
 	}
 }
 
@@ -14803,7 +14921,134 @@ func (a *App) render(w http.ResponseWriter, r *http.Request, templateName string
 	parsedTemplate := template.Must(template.New(templateName).Parse(string(fileBytes)))
 	envelope := map[string]any{"Domain": a.siteDomain(r.Context(), r), "T": translationsForRequest(r), "CompileVersion": CompileVersion}
 	mergeTemplateData(envelope, templateData)
+	if templateName == "edit.html" {
+		var rendered bytes.Buffer
+		_ = parsedTemplate.Execute(&rendered, envelope)
+		_, _ = w.Write(injectTemplatePropagationProgressModal(rendered.Bytes()))
+		return
+	}
 	_ = parsedTemplate.Execute(w, envelope)
+}
+
+func injectTemplatePropagationProgressModal(pageHTML []byte) []byte {
+	injection := []byte(templatePropagationProgressModalHTML())
+	lowerPageHTML := bytes.ToLower(pageHTML)
+	bodyCloseIndex := bytes.LastIndex(lowerPageHTML, []byte("</body>"))
+	if bodyCloseIndex < 0 {
+		return append(pageHTML, injection...)
+	}
+	updatedHTML := make([]byte, 0, len(pageHTML)+len(injection))
+	updatedHTML = append(updatedHTML, pageHTML[:bodyCloseIndex]...)
+	updatedHTML = append(updatedHTML, injection...)
+	updatedHTML = append(updatedHTML, pageHTML[bodyCloseIndex:]...)
+	return updatedHTML
+}
+
+func templatePropagationProgressModalHTML() string {
+	return `<style>
+.SiteBrushTemplateProgressOverlay{position:fixed;inset:0;z-index:2147483647;display:none;align-items:center;justify-content:center;background:rgba(15,23,42,.48);font-family:Arial,Helvetica,sans-serif}
+.SiteBrushTemplateProgressOverlay.is-visible{display:flex}
+.SiteBrushTemplateProgressDialog{width:min(680px,calc(100vw - 32px));max-height:min(640px,calc(100vh - 32px));overflow:hidden;background:#fff;color:#1f2937;border-radius:18px;box-shadow:0 24px 80px rgba(15,23,42,.28);padding:22px}
+.SiteBrushTemplateProgressTitle{font-size:20px;font-weight:700;margin:0 0 6px}
+.SiteBrushTemplateProgressText{font-size:14px;line-height:1.4;margin:0 0 14px;color:#4b5563}
+.SiteBrushTemplateProgressBarShell{height:10px;border-radius:999px;background:#e5e7eb;overflow:hidden;margin:0 0 12px}
+.SiteBrushTemplateProgressBar{height:100%;width:0%;background:#2563eb;transition:width .18s ease}
+.SiteBrushTemplateProgressMeta{display:flex;gap:10px;flex-wrap:wrap;font-size:13px;color:#374151;margin-bottom:12px}
+.SiteBrushTemplateProgressCurrent{font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;font-size:13px;background:#f3f4f6;border-radius:10px;padding:10px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-bottom:12px}
+.SiteBrushTemplateProgressLog{height:220px;overflow:auto;border:1px solid #e5e7eb;border-radius:12px;background:#fafafa;padding:8px;font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;font-size:12px;line-height:1.35}
+.SiteBrushTemplateProgressLogLine{padding:3px 0;border-bottom:1px solid rgba(229,231,235,.65)}
+.SiteBrushTemplateProgressLogLine:last-child{border-bottom:0}
+@media (prefers-color-scheme:dark){.SiteBrushTemplateProgressDialog{background:#111827;color:#e5e7eb}.SiteBrushTemplateProgressText{color:#cbd5e1}.SiteBrushTemplateProgressBarShell{background:#374151}.SiteBrushTemplateProgressCurrent{background:#1f2937}.SiteBrushTemplateProgressLog{background:#0f172a;border-color:#374151}.SiteBrushTemplateProgressLogLine{border-bottom-color:rgba(55,65,81,.65)}}
+</style>
+<div class="SiteBrushTemplateProgressOverlay" id="SiteBrushTemplateProgressOverlay" role="dialog" aria-modal="true" aria-live="polite">
+  <div class="SiteBrushTemplateProgressDialog">
+    <h2 class="SiteBrushTemplateProgressTitle">Updating SiteBrush-Template</h2>
+    <p class="SiteBrushTemplateProgressText">Please keep this tab open. SiteBrush is saving the page and updating matching template blocks in other pages.</p>
+    <div class="SiteBrushTemplateProgressBarShell"><div class="SiteBrushTemplateProgressBar" id="SiteBrushTemplateProgressBar"></div></div>
+    <div class="SiteBrushTemplateProgressMeta">
+      <span id="SiteBrushTemplateProgressCount">Preparing…</span>
+      <span id="SiteBrushTemplateProgressChanged">Changed: 0</span>
+      <span id="SiteBrushTemplateProgressSkipped">Skipped: 0</span>
+    </div>
+    <div class="SiteBrushTemplateProgressCurrent" id="SiteBrushTemplateProgressCurrent">Waiting for server…</div>
+    <div class="SiteBrushTemplateProgressLog" id="SiteBrushTemplateProgressLog"></div>
+  </div>
+</div>
+<script>
+(function(){
+  function randomToken(){
+    if (window.crypto && crypto.getRandomValues) {
+      var bytes = new Uint8Array(16); crypto.getRandomValues(bytes);
+      return Array.prototype.map.call(bytes, function(b){ return b.toString(16).padStart(2,"0"); }).join("");
+    }
+    return String(Date.now()) + String(Math.random()).slice(2);
+  }
+  function isSaveForm(form){
+    if (!form || String(form.method || "get").toLowerCase() !== "post") { return false; }
+    var action = form.getAttribute("action") || window.location.href;
+    try {
+      var url = new URL(action, window.location.href);
+      return url.searchParams.has("save") || url.href.indexOf("?save") !== -1 || url.href.indexOf("&save") !== -1;
+    } catch (e) { return action.indexOf("save") !== -1; }
+  }
+  function appendLog(text){
+    var log = document.getElementById("SiteBrushTemplateProgressLog");
+    if (!log) { return; }
+    var line = document.createElement("div");
+    line.className = "SiteBrushTemplateProgressLogLine";
+    line.textContent = text;
+    log.appendChild(line);
+    while (log.children.length > 150) { log.removeChild(log.firstChild); }
+    log.scrollTop = log.scrollHeight;
+  }
+  function updateProgress(event){
+    var current = document.getElementById("SiteBrushTemplateProgressCurrent");
+    var count = document.getElementById("SiteBrushTemplateProgressCount");
+    var changed = document.getElementById("SiteBrushTemplateProgressChanged");
+    var skipped = document.getElementById("SiteBrushTemplateProgressSkipped");
+    var bar = document.getElementById("SiteBrushTemplateProgressBar");
+    var total = Number(event.total || 0), index = Number(event.current || 0);
+    if (count) { count.textContent = total > 0 ? (index + " / " + total) : (event.message || "Working…"); }
+    if (changed) { changed.textContent = "Changed: " + Number(event.changed || 0); }
+    if (skipped) { skipped.textContent = "Skipped: " + Number(event.skipped || 0); }
+    if (bar && total > 0) { bar.style.width = Math.max(0, Math.min(100, Math.round(index * 100 / total))) + "%"; }
+    if (current) { current.textContent = (event.path || "") + (event.message ? " — " + event.message : ""); }
+    if (event.path || event.message || event.error) { appendLog((event.path || "") + " " + (event.error || event.message || event.stage || "")); }
+  }
+  document.addEventListener("submit", function(e){
+    var form = e.target;
+    if (!isSaveForm(form) || form.dataset.sitebrushTemplateProgressStarted === "1") { return; }
+    form.dataset.sitebrushTemplateProgressStarted = "1";
+    var overlay = document.getElementById("SiteBrushTemplateProgressOverlay");
+    if (overlay) { overlay.classList.add("is-visible"); }
+    var token = randomToken();
+    var input = form.querySelector('input[name="template_progress_token"]');
+    if (!input) {
+      input = document.createElement("input");
+      input.type = "hidden";
+      input.name = "template_progress_token";
+      form.appendChild(input);
+    }
+    input.value = token;
+    var eventsURL = new URL(window.location.href);
+    eventsURL.search = "";
+    eventsURL.searchParams.set("template_events", token);
+    try {
+      var source = new EventSource(eventsURL.toString());
+      source.onmessage = function(message){
+        try {
+          var event = JSON.parse(message.data);
+          updateProgress(event);
+          if (event.done) { source.close(); }
+        } catch (err) {}
+      };
+      source.onerror = function(){ appendLog("Progress connection is waiting for server updates…"); };
+    } catch (err) {
+      appendLog("Progress stream is not available in this browser.");
+    }
+  }, true);
+})();
+</script>`
 }
 
 func mergeTemplateData(envelope map[string]any, templateData any) {
