@@ -9,6 +9,7 @@
   </script>
   <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{{index .T "edit_raw_title_prefix"}} {{.Path}}</title>
+  <link rel="stylesheet" href="/p/static/codemirror/codemirror.min.css" />
   <style>
     :root { color-scheme: light dark; --page-bg:#f4f8fc; --text-main:#1b2a3d; --panel:#ffffff; --panel-soft:#edf4fb; --field:#ffffff; --field-text:#12253f; --field-border:#b9c7db; --line:#d7e1ef; --link:#1a65d8; --disabled:#8b98aa; }
     @media (prefers-color-scheme: dark) { :root { --page-bg:#0f1724; --text-main:#dbe8ff; --panel:#172235; --panel-soft:#0f1a2b; --field:#0f1a2b; --field-text:#dbe8ff; --field-border:#334868; --line:#263a57; --link:#9ec2ff; --disabled:#71819b; } }
@@ -27,6 +28,24 @@
     .raw-editor-pane, .raw-preview-pane { flex:1 1 auto; min-height:0; display:flex; }
     .raw-editor-pane[hidden], .raw-preview-pane[hidden] { display:none; }
     textarea { width:100%; flex:1 1 auto; min-height:0; resize:none; box-sizing:border-box; padding:10px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; background: var(--field); color: var(--field-text); border: 1px solid var(--field-border); border-radius:6px; line-height:1.45; }
+    .CodeMirror { flex:1 1 auto; width:100%; height:auto; min-height:0; box-sizing:border-box; border:1px solid var(--field-border); border-radius:6px; background:var(--field); color:var(--field-text); font-family:ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size:14px; line-height:1.45; }
+    .CodeMirror-scroll { min-height:100%; }
+    .CodeMirror-gutters { background:var(--panel-soft); border-color:var(--field-border); }
+    .CodeMirror-linenumber { color:var(--disabled); }
+    .CodeMirror-cursor { border-left-color:var(--field-text); }
+    .CodeMirror-selected { background:rgba(26,101,216,.22); }
+    .cm-s-default .cm-tag { color:#12702a; }
+    .cm-s-default .cm-attribute { color:#1a65d8; }
+    .cm-s-default .cm-string { color:#a33b00; }
+    .cm-s-default .cm-keyword { color:#7c3aed; }
+    .cm-s-default .cm-comment { color:#777; }
+    @media (prefers-color-scheme: dark) {
+      .cm-s-default .cm-tag { color:#7ee787; }
+      .cm-s-default .cm-attribute { color:#9ec2ff; }
+      .cm-s-default .cm-string { color:#ffa657; }
+      .cm-s-default .cm-keyword { color:#d2a8ff; }
+      .cm-s-default .cm-comment { color:#8b949e; }
+    }
     .raw-preview-frame { width:100%; height:100%; border:1px solid var(--field-border); border-radius:6px; background:var(--field); box-sizing:border-box; }
     .action-bar { flex:0 0 auto; display:flex; justify-content:flex-end; gap:10px; padding:10px 12px; border-top:1px solid var(--line); background:var(--panel); }
     .save-button { background:#1ea74f; color:#fff; border:0; padding:10px 18px; border-radius:6px; cursor:pointer; }
@@ -70,6 +89,11 @@
     <button type="submit" class="save-button">{{index .T "edit_save"}}</button>
   </div>
 </form>
+<script src="/p/static/codemirror/codemirror.min.js"></script>
+<script src="/p/static/codemirror/xml.min.js"></script>
+<script src="/p/static/codemirror/css.min.js"></script>
+<script src="/p/static/codemirror/javascript.min.js"></script>
+<script src="/p/static/codemirror/htmlmixed.min.js"></script>
 <script>
 const rawEditorState = {
   view: 'edit',
@@ -77,7 +101,8 @@ const rawEditorState = {
   historyIndex: -1,
   applyingHistory: false,
   historyTimer: 0,
-  previewTimer: 0
+  previewTimer: 0,
+  codeMirror: null
 };
 const rawEditorFormElement = document.getElementById('rawEditorForm');
 const rawEditorTextAreaElement = document.getElementById('rawEditorTextArea');
@@ -90,6 +115,91 @@ const rawUndoButtonElement = document.getElementById('rawUndoButton');
 const rawRedoButtonElement = document.getElementById('rawRedoButton');
 const rawEditorPagePath = {{.Path}};
 const rawEditorContentKind = {{.ContentKind}};
+
+function rawEditorModeName() {
+  const normalizedPagePath = String(rawEditorPagePath || '').toLowerCase();
+  if (rawEditorContentKind === 'HTML page') {
+    return 'htmlmixed';
+  }
+  if (normalizedPagePath.endsWith('.css')) {
+    return 'css';
+  }
+  if (normalizedPagePath.endsWith('.js') || normalizedPagePath.endsWith('.mjs')) {
+    return 'javascript';
+  }
+  if (normalizedPagePath.endsWith('.xml') || normalizedPagePath.endsWith('.svg')) {
+    return 'xml';
+  }
+  if (normalizedPagePath.endsWith('.json')) {
+    return {name: 'javascript', json: true};
+  }
+  return 'htmlmixed';
+}
+
+function rawEditorCurrentText() {
+  if (rawEditorState.codeMirror) {
+    return rawEditorState.codeMirror.getValue();
+  }
+  return rawEditorTextAreaElement.value;
+}
+
+function saveRawEditorTextAreaValue() {
+  if (rawEditorState.codeMirror) {
+    rawEditorState.codeMirror.save();
+  }
+}
+
+function setRawEditorText(nextText) {
+  if (rawEditorState.codeMirror) {
+    rawEditorState.codeMirror.setValue(nextText);
+    saveRawEditorTextAreaValue();
+    return;
+  }
+  rawEditorTextAreaElement.value = nextText;
+}
+
+function refreshRawEditorCodeMirror() {
+  if (!rawEditorState.codeMirror) {
+    return;
+  }
+  rawEditorState.codeMirror.refresh();
+  rawEditorState.codeMirror.focus();
+}
+
+function initializeRawEditorCodeMirror() {
+  if (!window.CodeMirror) {
+    return;
+  }
+  rawEditorState.codeMirror = window.CodeMirror.fromTextArea(rawEditorTextAreaElement, {
+    mode: rawEditorModeName(),
+    lineNumbers: true,
+    lineWrapping: true,
+    smartIndent: true,
+    electricChars: true,
+    indentUnit: 2,
+    tabSize: 2,
+    indentWithTabs: false,
+    viewportMargin: 100,
+    extraKeys: {
+      Tab: function indentRawEditorSelection(codeMirrorEditor) {
+        if (codeMirrorEditor.somethingSelected()) {
+          codeMirrorEditor.indentSelection('add');
+          return;
+        }
+        codeMirrorEditor.replaceSelection(codeMirrorEditor.getOption('indentWithTabs') ? '\t' : Array(codeMirrorEditor.getOption('indentUnit') + 1).join(' '), 'end', '+input');
+      },
+      'Shift-Tab': function unindentRawEditorSelection(codeMirrorEditor) {
+        codeMirrorEditor.indentSelection('subtract');
+      },
+      Enter: 'newlineAndIndent'
+    }
+  });
+  rawEditorState.codeMirror.on('change', function onRawEditorCodeMirrorChange() {
+    saveRawEditorTextAreaValue();
+    scheduleRawEditorHistoryPush();
+    scheduleRawEditorPreviewRefresh();
+  });
+}
 
 function rawEditorBaseURL() {
   return new URL(rawEditorPagePath || '/', window.location.href).href;
@@ -113,7 +223,8 @@ function rawEditorPreviewHTML(sourceText) {
 }
 
 function refreshRawEditorPreview() {
-  rawPreviewFrameElement.srcdoc = rawEditorPreviewHTML(rawEditorTextAreaElement.value);
+  saveRawEditorTextAreaValue();
+  rawPreviewFrameElement.srcdoc = rawEditorPreviewHTML(rawEditorCurrentText());
 }
 
 function scheduleRawEditorPreviewRefresh() {
@@ -134,11 +245,11 @@ function setRawEditorView(nextViewName) {
   rawEditorPaneElement.hidden = normalizedViewName !== 'edit';
   rawPreviewPaneElement.hidden = normalizedViewName !== 'preview';
   if (normalizedViewName === 'preview') {
-    pushRawEditorHistory(rawEditorTextAreaElement.value);
+    pushRawEditorHistory(rawEditorCurrentText());
     refreshRawEditorPreview();
     return;
   }
-  rawEditorTextAreaElement.focus();
+  window.setTimeout(refreshRawEditorCodeMirror, 0);
 }
 
 function updateRawHistoryButtons() {
@@ -167,20 +278,20 @@ function scheduleRawEditorHistoryPush() {
   }
   window.clearTimeout(rawEditorState.historyTimer);
   rawEditorState.historyTimer = window.setTimeout(function pushCurrentDraft() {
-    pushRawEditorHistory(rawEditorTextAreaElement.value);
+    pushRawEditorHistory(rawEditorCurrentText());
   }, 350);
 }
 
 function applyRawEditorHistoryValue(historyValue) {
   rawEditorState.applyingHistory = true;
-  rawEditorTextAreaElement.value = historyValue;
+  setRawEditorText(historyValue);
   rawEditorState.applyingHistory = false;
   updateRawHistoryButtons();
   scheduleRawEditorPreviewRefresh();
 }
 
 function undoRawEditorDraft() {
-  pushRawEditorHistory(rawEditorTextAreaElement.value);
+  pushRawEditorHistory(rawEditorCurrentText());
   if (rawEditorState.historyIndex <= 0) {
     return;
   }
@@ -223,9 +334,11 @@ rawEditorTextAreaElement.addEventListener('keydown', function onRawEditorKeyDown
   }
 });
 rawEditorFormElement.addEventListener('submit', function onRawEditorSubmit() {
-  pushRawEditorHistory(rawEditorTextAreaElement.value);
+  saveRawEditorTextAreaValue();
+  pushRawEditorHistory(rawEditorCurrentText());
 });
-pushRawEditorHistory(rawEditorTextAreaElement.value);
+initializeRawEditorCodeMirror();
+pushRawEditorHistory(rawEditorCurrentText());
 setRawEditorView('edit');
 </script>
 </body>

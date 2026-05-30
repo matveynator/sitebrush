@@ -2831,6 +2831,19 @@ func TestEmbeddedStaticAssetsServedFromMemory(t *testing.T) {
 	if response.Body.Len() == 0 {
 		t.Fatal("static asset body is empty")
 	}
+
+	codeMirrorRequest := httptest.NewRequest(http.MethodGet, "http://localhost:8080/p/static/codemirror/htmlmixed.min.js", nil)
+	codeMirrorResponse := httptest.NewRecorder()
+	application.serveEmbeddedStaticAsset(codeMirrorResponse, codeMirrorRequest)
+	if codeMirrorResponse.Code != http.StatusOK {
+		t.Fatalf("codemirror status = %d, body=%q", codeMirrorResponse.Code, codeMirrorResponse.Body.String())
+	}
+	if contentType := codeMirrorResponse.Header().Get("Content-Type"); !strings.Contains(contentType, "javascript") {
+		t.Fatalf("codemirror content type = %q, want javascript", contentType)
+	}
+	if !strings.Contains(codeMirrorResponse.Body.String(), "htmlmixed") {
+		t.Fatalf("codemirror asset body did not look like htmlmixed mode")
+	}
 }
 
 func TestBlockedLoginPageUsesSameTimerFromAnyURI(t *testing.T) {
@@ -5487,10 +5500,13 @@ func TestRawTextEditorHasDraftPreviewAndHistory(t *testing.T) {
 		t.Fatalf("raw editor status = %d, body=%q", response.Code, response.Body.String())
 	}
 	body := response.Body.String()
-	for _, expectedFragment := range []string{"rawEditorEditTab", "rawEditorPreviewTab", "rawPreviewFrame", "rawEditorPreviewHTML", "setRawEditorView", "undoRawEditorDraft", "redoRawEditorDraft", "pushRawEditorHistory", "rawEditorTextArea", ">Редактор<", ">Предпросмотр<", "История черновика"} {
+	for _, expectedFragment := range []string{`href="/p/static/codemirror/codemirror.min.css"`, `src="/p/static/codemirror/codemirror.min.js"`, `src="/p/static/codemirror/htmlmixed.min.js"`, `src="/p/static/codemirror/css.min.js"`, `src="/p/static/codemirror/javascript.min.js"`, `src="/p/static/codemirror/xml.min.js"`, "rawEditorEditTab", "rawEditorPreviewTab", "rawPreviewFrame", "rawEditorPreviewHTML", "setRawEditorView", "initializeRawEditorCodeMirror", "rawEditorModeName", "newlineAndIndent", "indentSelection('add')", "undoRawEditorDraft", "redoRawEditorDraft", "pushRawEditorHistory", "rawEditorTextArea", ">Редактор<", ">Предпросмотр<", "История черновика"} {
 		if !strings.Contains(body, expectedFragment) {
 			t.Fatalf("raw editor missing %q in %s", expectedFragment, body)
 		}
+	}
+	if strings.Contains(body, "cdn.jsdelivr.net") || strings.Contains(body, "cdnjs.cloudflare.com") {
+		t.Fatalf("raw editor still references CDN: %s", body)
 	}
 }
 
