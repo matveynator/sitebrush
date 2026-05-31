@@ -1,19 +1,21 @@
-package textencoding
+package crawler
 
 import (
 	"bytes"
 	"io"
 	"mime"
+	"net/url"
 	"sort"
 	"strings"
 	"unicode"
 	"unicode/utf8"
 
+	"golang.org/x/net/html"
 	"golang.org/x/net/html/charset"
 	"golang.org/x/text/encoding"
+	"sitebrush/pkg/grabber"
 )
 
-// DecodeResult describes the Unicode text selected from competing source encodings.
 type DecodeResult struct {
 	Text     string
 	Encoding string
@@ -41,9 +43,6 @@ var htmlFallbackEncodingLabels = []string{
 	"gb18030", "big5", "shift_jis", "euc-jp", "iso-2022-jp", "euc-kr",
 }
 
-// DecodeHTML converts imported HTML bytes to UTF-8 text. Explicit HTTP/meta hints are
-// considered first, but the final choice is scored so broken or missing declarations
-// can recover pages in legacy encodings such as Windows-1251.
 func DecodeHTML(htmlBytes []byte, contentType string) DecodeResult {
 	candidates := htmlEncodingCandidates(htmlBytes, contentType)
 	scoredCandidates := make([]scoredTextEncoding, 0, len(candidates))
@@ -59,12 +58,7 @@ func DecodeHTML(htmlBytes []byte, contentType string) DecodeResult {
 		if candidate.label == "utf-8" {
 			score += 600
 		}
-		scoredCandidates = append(scoredCandidates, scoredTextEncoding{
-			label: candidate.label,
-			text:  decodedText,
-			score: score,
-			order: candidateIndex,
-		})
+		scoredCandidates = append(scoredCandidates, scoredTextEncoding{label: candidate.label, text: decodedText, score: score, order: candidateIndex})
 	}
 	if len(scoredCandidates) == 0 {
 		return DecodeResult{Text: string(htmlBytes), Encoding: "unknown"}
@@ -79,6 +73,61 @@ func DecodeHTML(htmlBytes []byte, contentType string) DecodeResult {
 	})
 	bestCandidate := scoredCandidates[0]
 	return DecodeResult{Text: bestCandidate.text, Encoding: bestCandidate.label}
+}
+
+func ExtractPageLinks(htmlSource string, baseURL, siteURL *url.URL) []*url.URL {
+	pageURLs := make([]*url.URL, 0, 16)
+	tokenizer := html.NewTokenizer(strings.NewReader(htmlSource))
+	for {
+		tokenType := tokenizer.Next()
+		if tokenType == html.ErrorToken {
+			break
+		}
+		if tokenType != html.StartTagToken && tokenType != html.SelfClosingTagToken {
+			continue
+		}
+		token := tokenizer.Token()
+		tagName := strings.ToLower(strings.TrimSpace(token.Data))
+		for _, attribute := range token.Attr {
+			attributeName := strings.ToLower(strings.TrimSpace(attribute.Key))
+			if !isDocumentAttribute(tagName, attributeName) {
+				continue
+			}
+			normalizedURL, blocked := grabber.NormalizeURL(attribute.Val, baseURL, grabber.ReferenceDocument)
+			if blocked || normalizedURL == "" {
+				continue
+			}
+			linkedPageURL, parseErr := url.Parse(normalizedURL)
+			if parseErr != nil || !SameHost(siteURL, linkedPageURL) || !IsPageURL(linkedPageURL) {
+				continue
+			}
+			pageURLs = append(pageURLs, linkedPageURL)
+		}
+	}
+	return pageURLs
+}
+
+func SameHost(leftURL, rightURL *url.URL) bool {
+	if leftURL == nil || rightURL == nil {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(leftURL.Host), strings.TrimSpace(rightURL.Host))
+}
+
+func IsPageURL(pageURL *url.URL) bool {
+	if pageURL == nil {
+		return false
+	}
+	extension := strings.ToLower(pathExt(pageURL.Path))
+	if extension == "" {
+		return true
+	}
+	switch extension {
+	case ".htm", ".html", ".xhtml", ".php", ".asp", ".aspx", ".jsp", ".cgi":
+		return true
+	default:
+		return false
+	}
 }
 
 func htmlEncodingCandidates(htmlBytes []byte, contentType string) []htmlEncodingCandidate {
@@ -101,13 +150,8 @@ func htmlEncodingCandidates(htmlBytes []byte, contentType string) []htmlEncoding
 			return
 		}
 		addedLabels[canonicalName] = struct{}{}
-		candidates = append(candidates, htmlEncodingCandidate{
-			label:     canonicalName,
-			encoding:  candidateEncoding,
-			preferred: preferred,
-		})
+		candidates = append(candidates, htmlEncodingCandidate{label: canonicalName, encoding: candidateEncoding, preferred: preferred})
 	}
-
 	_, charsetLabel, certain := charset.DetermineEncoding(htmlBytes, contentType)
 	addCandidate(charsetLabel, certain)
 	addCandidate(charsetFromContentType(contentType), true)
@@ -151,7 +195,6 @@ func scoreDecodedHTMLText(decodedText string) int {
 	replacementCharacters := 0
 	controlCharacters := 0
 	zeroRunes := 0
-
 	for _, decodedRune := range decodedText {
 		switch {
 		case decodedRune == utf8.RuneError:
@@ -193,7 +236,6 @@ func scoreDecodedHTMLText(decodedText string) int {
 			score += 1
 		}
 	}
-
 	if letters > 0 && nonLatinLetters > letters/3 {
 		score += nonLatinLetters * 3
 	}
@@ -213,21 +255,12 @@ func scoreDecodedHTMLText(decodedText string) int {
 }
 
 func scoreRussianTextShape(decodedText string) int {
-	mojibakeFragments := []string{
-		"Р°", "Р±", "РІ", "Рі", "Рґ", "Рµ", "Р¶", "Р·", "Рё", "Р¹", "Рє", "Р»", "Рј", "РЅ", "Рѕ", "Рї",
-		"СЂ", "СЃ", "С‚", "Сѓ", "С„", "С…", "С†", "С‡", "С€", "С‰", "С‹", "СЊ", "СЌ", "СЋ", "СЏ",
-	}
 	score := 0
-	for _, fragment := range mojibakeFragments {
+	for _, fragment := range []string{"Р°", "Р±", "РІ", "Рі", "Рґ", "Рµ", "Р¶", "Р·", "Рё", "Р¹", "Рє", "Р»", "Рј", "РЅ", "Рѕ", "Рї", "СЂ", "СЃ", "С‚", "Сѓ", "С„", "С…", "С†", "С‡", "С€", "С‰", "С‹", "СЊ", "СЌ", "СЋ", "СЏ"} {
 		score -= strings.Count(decodedText, fragment) * 120
 	}
-
 	lowerText := strings.ToLower(decodedText)
-	commonFragments := []string{
-		" и ", " в ", " на", " по", "ст", "ен", "то", "ов", "ни", "ра", "ко", "но",
-		"ре", "ос", "ли", "пр", "для", "что", "это", "как", "или", "его",
-	}
-	for _, fragment := range commonFragments {
+	for _, fragment := range []string{" и ", " в ", " на", " по", "ст", "ен", "то", "ов", "ни", "ра", "ко", "но", "ре", "ос", "ли", "пр", "для", "что", "это", "как", "или", "его"} {
 		score += strings.Count(lowerText, fragment) * 35
 	}
 	for _, decodedRune := range lowerText {
@@ -236,4 +269,28 @@ func scoreRussianTextShape(decodedText string) int {
 		}
 	}
 	return score
+}
+
+func isDocumentAttribute(tagName, attributeName string) bool {
+	switch strings.ToLower(strings.TrimSpace(tagName)) {
+	case "a", "area":
+		return attributeName == "href" || attributeName == "xlink:href"
+	case "form":
+		return attributeName == "action"
+	case "iframe", "embed":
+		return attributeName == "src"
+	case "object":
+		return attributeName == "data"
+	default:
+		return false
+	}
+}
+
+func pathExt(rawPath string) string {
+	lastSlashIndex := strings.LastIndex(rawPath, "/")
+	lastDotIndex := strings.LastIndex(rawPath, ".")
+	if lastDotIndex <= lastSlashIndex {
+		return ""
+	}
+	return rawPath[lastDotIndex:]
 }

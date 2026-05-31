@@ -50,6 +50,7 @@ import (
 	"golang.org/x/term"
 	"sitebrush/pkg/billing"
 	appcli "sitebrush/pkg/cli"
+	"sitebrush/pkg/crawler"
 	_ "sitebrush/pkg/database/drivers"
 	"sitebrush/pkg/desktop"
 	"sitebrush/pkg/diagnosticlog"
@@ -61,7 +62,6 @@ import (
 	"sitebrush/pkg/serviceinstall"
 	"sitebrush/pkg/shutdownsignals"
 	"sitebrush/pkg/systeminit"
-	"sitebrush/pkg/textencoding"
 	"sitebrush/pkg/winservice"
 )
 
@@ -80,6 +80,8 @@ const storageAppName = "sitebrush"
 const defaultDBPath = "storage/db/sitebrush.db"
 const grabResourceMaxDepth = 64
 const grabPreviewResourceTimeout = 6 * time.Second
+const grabImportResourceTimeout = 10 * time.Second
+const wholeSiteImportConsecutiveFailureLimit = 25
 const wholeSiteImportMaxPages = 2048
 const defaultDomainStorageLimitBytes int64 = 10 * 1024 * 1024 * 1024
 const defaultAnalyticsMemoryLimitBytes int64 = 500 * 1024 * 1024
@@ -1468,11 +1470,13 @@ type grabProgressEvent struct {
 	Stage                  string `json:"stage"`
 	FoundTotal             int    `json:"found_total"`
 	DownloadedTotal        int    `json:"downloaded_total"`
+	FailedTotal            int    `json:"failed_total"`
 	CurrentURL             string `json:"current_url"`
 	CurrentPercent         int    `json:"current_percent"`
 	CurrentDownloadedBytes int64  `json:"current_downloaded_bytes"`
 	CurrentSizeBytes       int64  `json:"current_size_bytes"`
 	CompletedPercent       int    `json:"completed_percent"`
+	Message                string `json:"message"`
 }
 
 type publishProgressEvent struct {
@@ -6611,6 +6615,13 @@ func (a *App) grabPage(w http.ResponseWriter, r *http.Request) {
 		_, _ = a.db.ExecContext(r.Context(), `INSERT OR REPLACE INTO published_pages(domain,path,title,html) VALUES(?,?,?,?)`, domain, pagePath, pagePath, html)
 	}
 	_, _ = a.db.ExecContext(r.Context(), `INSERT INTO revisions(domain,page_path,html,created_at) VALUES(?,?,?,?)`, domain, pagePath, html, time.Now().Format(time.RFC3339))
+	if a.grabTracker != nil && progressToken != "" {
+		stage := "done"
+		if spider.failedTotal > 0 {
+			stage = "partial"
+		}
+		a.grabTracker.publish(grabProgressEvent{Token: progressToken, Stage: stage, FoundTotal: spider.foundTotal, DownloadedTotal: spider.downloadedTotal, FailedTotal: spider.failedTotal, CompletedPercent: 100})
+	}
 	if wantsJSONResponse(r) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]string{"redirect": pagePath})
@@ -6890,7 +6901,7 @@ func downloadGrabSourceHTMLWithResolvedURL(sourceURL string, sourceOptions grabS
 }
 
 func decodeImportedHTMLBytes(htmlBytes []byte, contentType string) string {
-	decodedHTML := textencoding.DecodeHTML(htmlBytes, contentType)
+	decodedHTML := crawler.DecodeHTML(htmlBytes, contentType)
 	return rewriteImportedHTMLCharsetDeclaration(decodedHTML.Text)
 }
 
@@ -7099,21 +7110,26 @@ func (a *App) prepareWholeRemoteSiteImport(domain, basePath string, startURL *ur
 	spider.publicAssetBasePath = basePath
 	spider.documentURLRewriter = func(normalizedURL string) (string, bool) {
 		parsedURL, parseErr := url.Parse(normalizedURL)
-		if parseErr != nil || !sameWholeSiteHost(startURL, parsedURL) || !isWholeSitePageURL(parsedURL) {
+		if parseErr != nil || !crawler.SameHost(startURL, parsedURL) || !crawler.IsPageURL(parsedURL) {
 			return "", false
 		}
 		return wholeSiteLocalLink(basePath, startURL, parsedURL), true
 	}
 
-	pageClient := newGrabHTTPClientForServerIP(startURL.Hostname(), sourceOptions.IP)
+	pageClient := grabImportHTTPClient(newGrabHTTPClientForServerIP(startURL.Hostname(), sourceOptions.IP))
 	knownPagePathsByKey := map[string]string{wholeSitePageKey(startURL): basePath}
 	pageQueue := []wholeSitePageJob{{URL: cloneURL(startURL), HTML: startHTML}}
 	importedPages := make([]wholeSiteImportedPage, 0, 32)
 	importedLocalPaths := make(map[string]struct{})
+	consecutiveFailures := 0
 	spider.foundTotal++
 	spider.publishProgress("found", startURL.String(), 0)
 
 	for len(pageQueue) > 0 && len(importedPages) < wholeSiteImportMaxPages {
+		if consecutiveFailures >= wholeSiteImportConsecutiveFailureLimit {
+			spider.publishResourceProgress("partial", currentWholeSiteImportURL(pageQueue), 0, 0, -1)
+			break
+		}
 		currentJob := pageQueue[0]
 		pageQueue = pageQueue[1:]
 		if currentJob.URL == nil {
@@ -7127,13 +7143,15 @@ func (a *App) prepareWholeRemoteSiteImport(domain, basePath string, startURL *ur
 		if strings.TrimSpace(pageHTML) == "" {
 			downloadedHTML, downloaded, downloadErr := downloadWholeSitePageHTML(pageClient, currentJob.URL, sourceOptions)
 			if downloadErr != nil || !downloaded {
+				spider.failedTotal++
+				consecutiveFailures++
 				spider.publishResourceProgress("error", currentJob.URL.String(), 0, 0, -1)
 				continue
 			}
 			pageHTML = downloadedHTML
 		}
 
-		for _, linkedPageURL := range extractWholeSitePageLinks(pageHTML, currentJob.URL, startURL) {
+		for _, linkedPageURL := range crawler.ExtractPageLinks(pageHTML, currentJob.URL, startURL) {
 			linkedPageKey := wholeSitePageKey(linkedPageURL)
 			if linkedPageKey == "" {
 				continue
@@ -7160,6 +7178,7 @@ func (a *App) prepareWholeRemoteSiteImport(domain, basePath string, startURL *ur
 		importedLocalPaths[localPath] = struct{}{}
 		importedPages = append(importedPages, wholeSiteImportedPage{SourceURL: currentJob.URL.String(), LocalPath: localPath, HTML: string(rootResource.content)})
 		spider.downloadedTotal++
+		consecutiveFailures = 0
 		spider.publishResourceProgress("downloaded", currentJob.URL.String(), 100, int64(len(pageHTML)), int64(len(pageHTML)))
 	}
 	if len(importedPages) == 0 {
@@ -7189,7 +7208,11 @@ func (a *App) importWholeRemoteSite(ctx context.Context, domain, basePath string
 	}
 	a.rebuildDomainStorageUsage(ctx, domain)
 	if a.grabTracker != nil {
-		a.grabTracker.publish(grabProgressEvent{Token: progressToken, Stage: "done", FoundTotal: spider.foundTotal, DownloadedTotal: spider.downloadedTotal, CompletedPercent: 100})
+		stage := "done"
+		if spider.failedTotal > 0 {
+			stage = "partial"
+		}
+		a.grabTracker.publish(grabProgressEvent{Token: progressToken, Stage: stage, FoundTotal: spider.foundTotal, DownloadedTotal: spider.downloadedTotal, FailedTotal: spider.failedTotal, CompletedPercent: 100})
 	}
 	return basePath, nil
 }
@@ -7199,7 +7222,7 @@ func crawlWholeRemoteSite(startURL *url.URL, startHTML, publicAssetBasePath stri
 	spider.publicAssetBasePath = publicAssetBasePath
 	spider.documentURLRewriter = func(normalizedURL string) (string, bool) {
 		parsedURL, parseErr := url.Parse(normalizedURL)
-		if parseErr != nil || !sameWholeSiteHost(startURL, parsedURL) || !isWholeSitePageURL(parsedURL) {
+		if parseErr != nil || !crawler.SameHost(startURL, parsedURL) || !crawler.IsPageURL(parsedURL) {
 			return "", false
 		}
 		return wholeSiteLocalLink(cleanPath(publicAssetBasePath), startURL, parsedURL), true
@@ -7209,9 +7232,14 @@ func crawlWholeRemoteSite(startURL *url.URL, startHTML, publicAssetBasePath stri
 	pageURLs := map[string]struct{}{startURL.String(): {}}
 	pageQueue := []wholeSitePageJob{{URL: cloneURL(startURL), HTML: startHTML}}
 	importedPages := make([]wholeSiteImportedPage, 0, 32)
+	consecutiveFailures := 0
 	spider.foundTotal++
 	spider.publishProgress("found", startURL.String(), 0)
 	for len(pageQueue) > 0 && len(pageURLs) < wholeSiteImportMaxPages {
+		if consecutiveFailures >= wholeSiteImportConsecutiveFailureLimit {
+			spider.publishResourceProgress("partial", currentWholeSiteImportURL(pageQueue), 0, 0, -1)
+			break
+		}
 		currentJob := pageQueue[0]
 		pageQueue = pageQueue[1:]
 		if currentJob.URL == nil {
@@ -7225,12 +7253,14 @@ func crawlWholeRemoteSite(startURL *url.URL, startHTML, publicAssetBasePath stri
 		if strings.TrimSpace(pageHTML) == "" {
 			downloadedHTML, downloaded, downloadErr := downloadWholeSitePageHTML(pageClient, currentJob.URL, sourceOptions)
 			if downloadErr != nil || !downloaded {
+				spider.failedTotal++
+				consecutiveFailures++
 				spider.publishResourceProgress("error", currentJob.URL.String(), 0, 0, -1)
 				continue
 			}
 			pageHTML = downloadedHTML
 		}
-		for _, linkedPageURL := range extractWholeSitePageLinks(pageHTML, currentJob.URL, startURL) {
+		for _, linkedPageURL := range crawler.ExtractPageLinks(pageHTML, currentJob.URL, startURL) {
 			linkedPageKey := wholeSitePageKey(linkedPageURL)
 			if linkedPageKey == "" {
 				continue
@@ -7252,10 +7282,18 @@ func crawlWholeRemoteSite(startURL *url.URL, startHTML, publicAssetBasePath stri
 		spider.collectPreviewNestedResources(rootResource, 0, "text/html")
 		importedPages = append(importedPages, wholeSiteImportedPage{SourceURL: currentJob.URL.String(), LocalPath: knownPagePathsByKey[pageKey], HTML: string(rootResource.content)})
 		spider.downloadedTotal++
+		consecutiveFailures = 0
 		spider.publishResourceProgress("downloaded", currentJob.URL.String(), 100, int64(len(pageHTML)), int64(len(pageHTML)))
 	}
 	spider.collectPreviewImportedPagesStaticURLTextReferences(importedPages)
 	return spider, pageURLs, importedPages
+}
+
+func currentWholeSiteImportURL(pageQueue []wholeSitePageJob) string {
+	if len(pageQueue) == 0 || pageQueue[0].URL == nil {
+		return ""
+	}
+	return pageQueue[0].URL.String()
 }
 
 func (a *App) storeWholeSiteImportedPages(ctx context.Context, domain string, importedPages []wholeSiteImportedPage) error {
@@ -7326,93 +7364,10 @@ func (a *App) estimateImportedFileDelta(domain string, spider *pageSpider) int64
 }
 
 func downloadWholeSitePageHTML(client *http.Client, pageURL *url.URL, sourceOptions grabSourceOptions) (string, bool, error) {
-	response, err := doGrabGET(client, pageURL.String(), sourceOptions)
-	if err != nil {
-		return "", false, err
-	}
-	defer response.Body.Close()
-	if response.StatusCode < 200 || response.StatusCode > 299 {
-		return "", false, fmt.Errorf("page download failed: %s", response.Status)
-	}
-	contentType := strings.ToLower(strings.TrimSpace(strings.Split(response.Header.Get("Content-Type"), ";")[0]))
-	if contentType != "" && contentType != "text/html" && contentType != "application/xhtml+xml" {
-		return "", false, nil
-	}
-	pageBytes, readErr := io.ReadAll(response.Body)
-	if readErr != nil {
-		return "", false, readErr
-	}
-	return decodeImportedHTMLBytes(pageBytes, response.Header.Get("Content-Type")), true, nil
-}
-
-func extractWholeSitePageLinks(htmlSource string, baseURL, siteURL *url.URL) []*url.URL {
-	pageURLs := make([]*url.URL, 0, 16)
-	tokenizer := html.NewTokenizer(strings.NewReader(htmlSource))
-	for {
-		tokenType := tokenizer.Next()
-		if tokenType == html.ErrorToken {
-			break
-		}
-		if tokenType != html.StartTagToken && tokenType != html.SelfClosingTagToken {
-			continue
-		}
-		token := tokenizer.Token()
-		tagName := strings.ToLower(strings.TrimSpace(token.Data))
-		for _, attribute := range token.Attr {
-			attributeName := strings.ToLower(strings.TrimSpace(attribute.Key))
-			if !isWholeSiteDocumentAttribute(tagName, attributeName) {
-				continue
-			}
-			normalizedURL, blocked := (&pageSpider{}).normalizeURL(attribute.Val, baseURL)
-			if blocked || normalizedURL == "" {
-				continue
-			}
-			linkedPageURL, parseErr := url.Parse(normalizedURL)
-			if parseErr != nil || !sameWholeSiteHost(siteURL, linkedPageURL) || !isWholeSitePageURL(linkedPageURL) {
-				continue
-			}
-			pageURLs = append(pageURLs, linkedPageURL)
-		}
-	}
-	return pageURLs
-}
-
-func isWholeSiteDocumentAttribute(tagName, attributeName string) bool {
-	switch strings.ToLower(strings.TrimSpace(tagName)) {
-	case "a", "area":
-		return attributeName == "href" || attributeName == "xlink:href"
-	case "form":
-		return attributeName == "action"
-	case "iframe", "embed":
-		return attributeName == "src"
-	case "object":
-		return attributeName == "data"
-	default:
-		return false
-	}
-}
-
-func sameWholeSiteHost(leftURL, rightURL *url.URL) bool {
-	if leftURL == nil || rightURL == nil {
-		return false
-	}
-	return strings.EqualFold(strings.TrimSpace(leftURL.Host), strings.TrimSpace(rightURL.Host))
-}
-
-func isWholeSitePageURL(pageURL *url.URL) bool {
-	if pageURL == nil {
-		return false
-	}
-	extension := strings.ToLower(path.Ext(pageURL.Path))
-	if extension == "" {
-		return true
-	}
-	switch extension {
-	case ".htm", ".html", ".xhtml", ".php", ".asp", ".aspx", ".jsp", ".cgi":
-		return true
-	default:
-		return false
-	}
+	return crawler.DownloadHTML(client, pageURL, func(request *http.Request) {
+		applyGrabRequestHeaders(request, sourceOptions)
+		request.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+	})
 }
 
 func wholeSitePageKey(pageURL *url.URL) string {
@@ -15367,6 +15322,7 @@ type pageSpider struct {
 	progressToken        string
 	foundTotal           int
 	downloadedTotal      int
+	failedTotal          int
 }
 
 type grabReferenceContext = grabber.ReferenceContext
@@ -15424,13 +15380,22 @@ func newPageSpider(domain string, pageURL *url.URL, maxDepth int, tracker *grabP
 		domain:        domain,
 		pageURL:       pageURL,
 		maxDepth:      maxDepth,
-		client:        newGrabHTTPClientForServerIP(pageURL.Hostname(), sourceOptions.IP),
+		client:        grabImportHTTPClient(newGrabHTTPClientForServerIP(pageURL.Hostname(), sourceOptions.IP)),
 		sourceOptions: sourceOptions,
 		resources:     make(map[string]*mirroredResource),
 		inFlight:      make(map[string]bool),
 		tracker:       tracker,
 		progressToken: progressToken,
 	}
+}
+
+func grabImportHTTPClient(client *http.Client) *http.Client {
+	if client == nil || (client.Timeout > 0 && client.Timeout <= grabImportResourceTimeout) {
+		return client
+	}
+	importClient := *client
+	importClient.Timeout = grabImportResourceTimeout
+	return &importClient
 }
 
 func newPreviewPageSpider(domain string, pageURL *url.URL, maxDepth int, tracker *grabProgressTracker, progressToken string, sourceOptions grabSourceOptions) *pageSpider {
@@ -15478,24 +15443,28 @@ func (spider *pageSpider) fetchResource(rawURL string, baseURL *url.URL, depth i
 	response, err := spider.client.Do(request)
 	if err != nil {
 		spider.resources[normalizedURL] = &mirroredResource{url: normalizedURL, persist: persist}
+		spider.failedTotal++
 		spider.publishResourceProgress("error", normalizedURL, 0, 0, -1)
 		return nil, err
 	}
 	defer response.Body.Close()
 	if response.StatusCode >= 400 {
 		spider.resources[normalizedURL] = &mirroredResource{url: normalizedURL, persist: persist}
+		spider.failedTotal++
 		spider.publishResourceProgress("error", normalizedURL, 0, 0, response.ContentLength)
 		return nil, fmt.Errorf("resource download failed: %s", response.Status)
 	}
 	resourceContentType := normalizedResourceContentType(response.Header.Get("Content-Type"))
 	if !spider.isAllowedResourceContentType(normalizedURL, resourceContentType) {
 		spider.resources[normalizedURL] = &mirroredResource{url: normalizedURL, persist: persist}
+		spider.failedTotal++
 		spider.publishResourceProgress("error", normalizedURL, 0, 0, response.ContentLength)
 		return nil, fmt.Errorf("resource content-type rejected: %s", response.Header.Get("Content-Type"))
 	}
 	body, err := spider.readResourceBody(response.Body, normalizedURL, response.ContentLength)
 	if err != nil {
 		spider.resources[normalizedURL] = &mirroredResource{url: normalizedURL, persist: persist}
+		spider.failedTotal++
 		spider.publishResourceProgress("error", normalizedURL, 0, 0, response.ContentLength)
 		return nil, err
 	}
@@ -15526,10 +15495,10 @@ func (spider *pageSpider) publishResourceProgress(stage, currentURL string, curr
 	}
 	completedPercent := 0
 	if spider.foundTotal > 0 {
-		completedPercent = spider.downloadedTotal * 100 / spider.foundTotal
+		completedPercent = (spider.downloadedTotal + spider.failedTotal) * 100 / spider.foundTotal
 	}
 	spider.tracker.publish(grabProgressEvent{
-		Token: spider.progressToken, Stage: stage, FoundTotal: spider.foundTotal, DownloadedTotal: spider.downloadedTotal,
+		Token: spider.progressToken, Stage: stage, FoundTotal: spider.foundTotal, DownloadedTotal: spider.downloadedTotal, FailedTotal: spider.failedTotal,
 		CurrentURL: currentURL, CurrentPercent: currentPercent, CurrentDownloadedBytes: downloadedBytes, CurrentSizeBytes: sizeBytes, CompletedPercent: completedPercent,
 	})
 }
@@ -15818,6 +15787,7 @@ func (spider *pageSpider) collectPreviewResource(normalizedURL string, depth int
 	}
 	if isImportedHTMLContentType(contentType) {
 		delete(spider.resources, normalizedURL)
+		spider.failedTotal++
 		spider.publishResourceProgress("error", normalizedURL, 0, 0, contentLength)
 		return
 	}
@@ -15832,6 +15802,7 @@ func (spider *pageSpider) collectPreviewResource(normalizedURL string, depth int
 	}
 	body, bodyContentType, bodySizeBytes, fetchErr := spider.fetchPreviewResourceBody(normalizedURL)
 	if fetchErr != nil {
+		spider.failedTotal++
 		spider.publishResourceProgress("error", normalizedURL, 0, 0, resource.sizeBytes)
 		return
 	}

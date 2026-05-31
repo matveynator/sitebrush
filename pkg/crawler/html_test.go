@@ -1,6 +1,7 @@
-package textencoding
+package crawler
 
 import (
+	"net/url"
 	"strings"
 	"testing"
 
@@ -45,5 +46,16 @@ func TestDecodeHTMLKeepsValidUTF8(t *testing.T) {
 	}
 	if decodedHTML.Encoding != "utf-8" {
 		t.Fatalf("encoding = %s", decodedHTML.Encoding)
+	}
+}
+
+func TestExtractPageLinksKeepsSameSitePages(t *testing.T) {
+	siteURL, _ := url.Parse("https://example.test/root/")
+	baseURL, _ := url.Parse("https://example.test/root/index.html")
+	sourceHTML := `<a href="/about">About</a><a href="https://other.test/page.html">Other</a><img src="/image.png">`
+
+	pageLinks := ExtractPageLinks(sourceHTML, baseURL, siteURL)
+	if len(pageLinks) != 1 || pageLinks[0].String() != "https://example.test/about" {
+		t.Fatalf("page links = %#v", pageLinks)
 	}
 }
