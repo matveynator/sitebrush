@@ -38,7 +38,11 @@
         </label>
         <div class="billing-demo-settings">
           <h3>Демо-сайт</h3>
-          <p class="text-muted">Один домен можно сделать публичным тестовым сайтом. Посетитель сразу попадет в редактор, а после выхода сайт будет удален через 10 минут.</p>
+          <p class="text-muted">Один домен можно сделать публичным тестовым сайтом. При включении Sitebrush скачает исходный сайт один раз, сохранит резервную копию и будет восстанавливать демо из неё каждые 30 минут после работы пользователя.</p>
+          <label class="checkbox-row">
+            <input type="checkbox" name="demo_site_enabled" value="1" {{if .DemoSettings.Enabled}}checked{{end}}>
+            <span>Включить публичный демо-сайт</span>
+          </label>
           <label>Домен демо-сайта
             <input name="demo_site_domain" type="text" class="form-control" list="billing-demo-domains" value="{{.DemoSettings.Domain}}" placeholder="demo.example.com">
           </label>

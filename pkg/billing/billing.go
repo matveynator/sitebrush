@@ -8,6 +8,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"sitebrush/pkg/demo"
 )
 
 const DefaultStorageLimitBytes int64 = 10 * 1024 * 1024 * 1024
@@ -66,23 +68,6 @@ type SiteRequest struct {
 	PlanDescriptionText string
 }
 
-type DemoSettings struct {
-	Domain        string
-	SourceURL     string
-	CopyWholeSite bool
-	Enabled       bool
-}
-
-type DemoSession struct {
-	ID           int
-	Domain       string
-	SessionToken string
-	UserEmail    string
-	Status       string
-	CreatedAt    string
-	DeleteAfter  string
-}
-
 type SiteUsage struct {
 	Domain       string
 	Aliases      []string
@@ -118,9 +103,9 @@ func Migrate(ctx context.Context, database *sql.DB) error {
 		`CREATE TABLE IF NOT EXISTS site_service_plans(id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT UNIQUE,quota_bytes INTEGER,price TEXT,currency TEXT,billing_period TEXT,is_default INTEGER DEFAULT 0,created_at TEXT,updated_at TEXT);`,
 		`CREATE TABLE IF NOT EXISTS site_service_assignments(domain TEXT PRIMARY KEY,plan_id INTEGER DEFAULT 0,service_status TEXT,notes TEXT,updated_at TEXT);`,
 		`CREATE TABLE IF NOT EXISTS site_registration_requests(id INTEGER PRIMARY KEY AUTOINCREMENT,domain TEXT,name TEXT,email TEXT,phone TEXT,plan_id INTEGER DEFAULT 0,status TEXT,owner_message TEXT,created_at TEXT,updated_at TEXT);`,
-		`CREATE TABLE IF NOT EXISTS demo_site_sessions(id INTEGER PRIMARY KEY AUTOINCREMENT,domain TEXT,session_token TEXT,user_email TEXT,status TEXT,created_at TEXT,delete_after TEXT);`,
 		`CREATE TABLE IF NOT EXISTS site_deletion_backups(id INTEGER PRIMARY KEY AUTOINCREMENT,domain TEXT,archive_path TEXT,file_name TEXT,size_bytes INTEGER,token TEXT,token_created_at TEXT,created_at TEXT,expires_at TEXT,retention_days INTEGER,owner_contacts TEXT,metadata_json TEXT,language_code TEXT,downloaded_at TEXT,download_count INTEGER DEFAULT 0);`,
 	}
+	queries = append(queries, demo.SchemaQueries()...)
 	for queryIndex, query := range queries {
 		if _, err := database.ExecContext(ctx, query); err != nil {
 			return fmt.Errorf("billing schema statement %d: %w", queryIndex+1, err)
@@ -153,7 +138,9 @@ func setSchemaMigrationVersion(ctx context.Context, database *sql.DB, component 
 }
 
 func billingSchemaComplete(ctx context.Context, database *sql.DB) (bool, error) {
-	for _, tableName := range []string{"server_managers", "server_settings", "site_service_plans", "site_service_assignments", "site_registration_requests", "demo_site_sessions", "site_deletion_backups"} {
+	tableNames := []string{"server_managers", "server_settings", "site_service_plans", "site_service_assignments", "site_registration_requests", "site_deletion_backups"}
+	tableNames = append(tableNames, demo.TableNames()...)
+	for _, tableName := range tableNames {
 		found, err := tableExists(ctx, database, tableName)
 		if err != nil || !found {
 			return found, err
@@ -286,97 +273,6 @@ func (store Store) SaveSettings(ctx context.Context, autoRegistrationEnabled boo
 	}
 	_, err := store.DB.ExecContext(ctx, `INSERT INTO server_settings(name,value,updated_at) VALUES(?,?,?) ON CONFLICT(name) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at`,
 		"auto_registration_enabled", settingValue, time.Now().UTC().Format(time.RFC3339))
-	return err
-}
-
-func (store Store) DemoSettings(ctx context.Context) DemoSettings {
-	settings := DemoSettings{
-		Domain:    settingText(ctx, store.DB, "demo_site_domain"),
-		SourceURL: settingText(ctx, store.DB, "demo_site_source_url"),
-	}
-	settings.CopyWholeSite = SettingBool(ctx, store.DB, "demo_site_copy_whole_site", false)
-	settings.Enabled = strings.TrimSpace(settings.Domain) != ""
-	return settings
-}
-
-func (store Store) SaveDemoSettings(ctx context.Context, domain, sourceURL string, copyWholeSite bool) error {
-	domain = strings.TrimSpace(domain)
-	sourceURL = strings.TrimSpace(sourceURL)
-	copyWholeSiteValue := "0"
-	if copyWholeSite {
-		copyWholeSiteValue = "1"
-	}
-	now := time.Now().UTC().Format(time.RFC3339)
-	transaction, err := store.DB.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	for _, setting := range []struct {
-		name  string
-		value string
-	}{
-		{name: "demo_site_domain", value: domain},
-		{name: "demo_site_source_url", value: sourceURL},
-		{name: "demo_site_copy_whole_site", value: copyWholeSiteValue},
-	} {
-		if _, err = transaction.ExecContext(ctx, `INSERT INTO server_settings(name,value,updated_at) VALUES(?,?,?) ON CONFLICT(name) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at`,
-			setting.name, setting.value, now); err != nil {
-			_ = transaction.Rollback()
-			return err
-		}
-	}
-	return transaction.Commit()
-}
-
-func (store Store) CreateDemoSession(ctx context.Context, domain, sessionToken, userEmail string, deleteAfter time.Time) error {
-	domain = strings.TrimSpace(domain)
-	sessionToken = strings.TrimSpace(sessionToken)
-	userEmail = strings.TrimSpace(userEmail)
-	if domain == "" {
-		return fmt.Errorf("demo domain is required")
-	}
-	if sessionToken == "" {
-		return fmt.Errorf("demo session token is required")
-	}
-	nowTime := time.Now().UTC()
-	if deleteAfter.IsZero() {
-		deleteAfter = nowTime
-	}
-	now := nowTime.Format(time.RFC3339)
-	_, err := store.DB.ExecContext(ctx, `INSERT INTO demo_site_sessions(domain,session_token,user_email,status,created_at,delete_after) VALUES(?,?,?,?,?,?)`,
-		domain, sessionToken, userEmail, "active", now, deleteAfter.UTC().Format(time.RFC3339))
-	return err
-}
-
-func (store Store) ScheduleDemoSessionDeletion(ctx context.Context, sessionToken string, deleteAfter time.Time) error {
-	sessionToken = strings.TrimSpace(sessionToken)
-	if sessionToken == "" {
-		return nil
-	}
-	_, err := store.DB.ExecContext(ctx, `UPDATE demo_site_sessions SET status='deleting',delete_after=? WHERE session_token=? AND status='active'`,
-		deleteAfter.UTC().Format(time.RFC3339), sessionToken)
-	return err
-}
-
-func (store Store) DemoSessions(ctx context.Context) []DemoSession {
-	rows, err := store.DB.QueryContext(ctx, `SELECT id,domain,session_token,user_email,status,created_at,delete_after FROM demo_site_sessions ORDER BY id ASC`)
-	if err != nil {
-		return nil
-	}
-	defer rows.Close()
-	sessions := make([]DemoSession, 0, 8)
-	for rows.Next() {
-		var session DemoSession
-		if scanErr := rows.Scan(&session.ID, &session.Domain, &session.SessionToken, &session.UserEmail, &session.Status, &session.CreatedAt, &session.DeleteAfter); scanErr != nil {
-			continue
-		}
-		sessions = append(sessions, session)
-	}
-	return sessions
-}
-
-func (store Store) RemoveDemoSessionsForDomain(ctx context.Context, domain string) error {
-	_, err := store.DB.ExecContext(ctx, `DELETE FROM demo_site_sessions WHERE domain=?`, strings.TrimSpace(domain))
 	return err
 }
 

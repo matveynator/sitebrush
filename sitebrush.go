@@ -52,6 +52,7 @@ import (
 	appcli "sitebrush/pkg/cli"
 	"sitebrush/pkg/crawler"
 	_ "sitebrush/pkg/database/drivers"
+	"sitebrush/pkg/demo"
 	"sitebrush/pkg/desktop"
 	"sitebrush/pkg/diagnosticlog"
 	"sitebrush/pkg/dirprotect"
@@ -90,7 +91,6 @@ const guestStaticHTMLCacheQueueSize = 4096
 const authIPFailureCacheQueueSize = 4096
 const emailDeliveryQueueSize = 256
 const emailConfirmationTTL = 24 * time.Hour
-const demoSiteDeletionDelay = 10 * time.Minute
 const sitebrushHTTPReadTimeout = 10 * time.Second
 const sitebrushHTTPWriteTimeout = 0
 const sitebrushHTTPIdleTimeout = 65 * time.Second
@@ -5890,7 +5890,7 @@ func (a *App) renderLoginPage(w http.ResponseWriter, r *http.Request, returnPath
 // === Demo site sessions ===
 
 func (a *App) maybeStartDemoSite(w http.ResponseWriter, r *http.Request, requestDomain string) bool {
-	if !demoSiteCanStartFromRequest(r) {
+	if !demo.CanStartFromRequest(r) {
 		return false
 	}
 	settings, found := a.demoSiteSettings(r.Context())
@@ -5911,33 +5911,18 @@ func (a *App) maybeStartDemoSite(w http.ResponseWriter, r *http.Request, request
 	return true
 }
 
-func demoSiteCanStartFromRequest(r *http.Request) bool {
-	if r == nil || (r.Method != http.MethodGet && r.Method != http.MethodHead) {
-		return false
-	}
-	if path.Ext(cleanPath(r.URL.Path)) != "" {
-		return false
-	}
-	for _, queryFlag := range []string{"logout", "billing", "billing_backup_download", "backup_download", "captcha", "email_confirm", "grab_events", "grab_ws", "publish_events"} {
-		if hasQueryFlag(r, queryFlag) {
-			return false
-		}
-	}
-	return true
-}
-
-func (a *App) demoSiteSettings(ctx context.Context) (billing.DemoSettings, bool) {
+func (a *App) demoSiteSettings(ctx context.Context) (demo.Settings, bool) {
 	controlDatabase, err := a.openServerControlDatabase(ctx)
 	if err != nil {
-		return billing.DemoSettings{}, false
+		return demo.Settings{}, false
 	}
 	defer controlDatabase.Close()
-	settings := (billing.Store{DB: controlDatabase}).DemoSettings(ctx)
+	settings := (demo.Store{DB: controlDatabase}).Settings(ctx)
 	settings.Domain = normalizeDomainName(settings.Domain)
 	return settings, settings.Enabled && settings.Domain != ""
 }
 
-func (a *App) startDemoSiteSession(w http.ResponseWriter, r *http.Request, settings billing.DemoSettings) (string, error) {
+func (a *App) startDemoSiteSession(w http.ResponseWriter, r *http.Request, settings demo.Settings) (string, error) {
 	domain := normalizeDomainName(settings.Domain)
 	if domain == "" {
 		return "", fmt.Errorf("demo domain is not configured")
@@ -5951,18 +5936,18 @@ func (a *App) startDemoSiteSession(w http.ResponseWriter, r *http.Request, setti
 	if ownerDomain, found := store.OwnerDomain(r.Context()); found && normalizeDomainName(ownerDomain) == domain {
 		return "", fmt.Errorf("server owner site cannot be used as the public demo site")
 	}
-	adminEmail, err := a.ensureDemoSiteReady(r.Context(), controlDatabase, settings)
+	adminEmail, err := a.ensureDemoSiteReady(r.Context(), controlDatabase, settings, false)
 	if err != nil {
 		return "", err
 	}
 	sessionToken := a.createSessionForDomain(w, r.Context(), domain, adminEmail)
-	if err := store.CreateDemoSession(r.Context(), domain, sessionToken, adminEmail, time.Now().Add(demoSiteDeletionDelay)); err != nil {
+	if err := (demo.Store{DB: controlDatabase}).CreateSession(r.Context(), domain, sessionToken, adminEmail, time.Now().Add(demo.ResetDelay)); err != nil {
 		return "", err
 	}
 	return "/", nil
 }
 
-func (a *App) ensureDemoSiteReady(ctx context.Context, controlDatabase *sql.DB, settings billing.DemoSettings) (string, error) {
+func (a *App) ensureDemoSiteReady(ctx context.Context, controlDatabase *sql.DB, settings demo.Settings, refreshSnapshot bool) (string, error) {
 	domain := normalizeDomainName(settings.Domain)
 	if domain == "" {
 		return "", fmt.Errorf("demo domain is required")
@@ -5977,28 +5962,38 @@ func (a *App) ensureDemoSiteReady(ctx context.Context, controlDatabase *sql.DB, 
 		} else if !errors.Is(statErr, os.ErrNotExist) {
 			return "", statErr
 		}
-		adminEmail = demoSiteAdminEmail(domain)
+		adminEmail = demo.AdminEmail(domain)
 		if err := a.createManagedSite(ctx, domain, adminEmail, randomAccessToken(), defaultDomainStorageLimitBytes); err != nil {
 			return "", err
 		}
 	}
-	if settings.SourceURL != "" && !a.demoSiteHasPages(ctx, domain) {
-		if err := a.seedDemoSiteContent(ctx, domain, settings); err != nil {
-			log.Printf("demo site source import failed domain=%s source=%s error=%v", domain, settings.SourceURL, err)
+	if refreshSnapshot || !a.demoSiteHasPages(ctx, domain) {
+		if !refreshSnapshot {
+			if err := a.restoreDemoSiteFromSnapshot(ctx, controlDatabase, domain); err == nil {
+				return adminEmail, nil
+			}
+		}
+		if refreshSnapshot {
+			if err := a.clearDemoSiteContent(ctx, domain); err != nil {
+				return "", err
+			}
+		}
+		if !refreshSnapshot && a.demoSiteHasPages(ctx, domain) {
+			return adminEmail, nil
+		}
+		if settings.SourceURL != "" {
+			if err := a.seedDemoSiteContent(ctx, domain, settings); err != nil {
+				log.Printf("demo site source import failed domain=%s source=%s error=%v", domain, settings.SourceURL, err)
+				a.createDemoWelcomePage(ctx, domain)
+			}
+		} else {
 			a.createDemoWelcomePage(ctx, domain)
 		}
-	} else if !a.demoSiteHasPages(ctx, domain) {
-		a.createDemoWelcomePage(ctx, domain)
+		if err := a.createDemoSiteSnapshot(ctx, domain); err != nil {
+			log.Printf("demo site snapshot failed domain=%s error=%v", domain, err)
+		}
 	}
 	return adminEmail, nil
-}
-
-func demoSiteAdminEmail(domain string) string {
-	domain = normalizeDomainName(domain)
-	if domain == "" {
-		domain = "localhost"
-	}
-	return "demo@" + domain
 }
 
 func (a *App) firstAdminEmailForDomain(ctx context.Context, domain string) (string, bool) {
@@ -6022,7 +6017,7 @@ func (a *App) isDemoSiteDomain(ctx context.Context, domain string) bool {
 	return normalizeDomainName(settings.Domain) == normalizeDomainName(domain)
 }
 
-func (a *App) seedDemoSiteContent(ctx context.Context, domain string, settings billing.DemoSettings) error {
+func (a *App) seedDemoSiteContent(ctx context.Context, domain string, settings demo.Settings) error {
 	sourceURL := strings.TrimSpace(settings.SourceURL)
 	if sourceURL == "" {
 		a.createDemoWelcomePage(ctx, domain)
@@ -6070,6 +6065,102 @@ func (a *App) createDemoWelcomePage(ctx context.Context, domain string) {
 	a.rebuildDomainStorageUsage(domainContext, domain)
 }
 
+func (a *App) demoSiteSnapshotPath(domain string) string {
+	return filepath.FromSlash(demo.SnapshotPath(filepath.ToSlash(a.backupRootDir()), domainStorageName(domain)))
+}
+
+func (a *App) createDemoSiteSnapshot(ctx context.Context, domain string) error {
+	domain = normalizeDomainName(domain)
+	if domain == "" {
+		return fmt.Errorf("demo domain is required")
+	}
+	if err := os.MkdirAll(a.backupRootDir(), 0o755); err != nil {
+		return err
+	}
+	tempPath := a.demoSiteSnapshotPath(domain) + ".tmp"
+	snapshotFile, err := os.Create(tempPath)
+	if err != nil {
+		return err
+	}
+	zipWriter := zip.NewWriter(snapshotFile)
+	writeErr := a.writeDomainBackupEntriesToZip(contextWithDomain(ctx, domain), domain, zipWriter)
+	closeZipErr := zipWriter.Close()
+	closeFileErr := snapshotFile.Close()
+	if writeErr != nil {
+		_ = os.Remove(tempPath)
+		return writeErr
+	}
+	if closeZipErr != nil {
+		_ = os.Remove(tempPath)
+		return closeZipErr
+	}
+	if closeFileErr != nil {
+		_ = os.Remove(tempPath)
+		return closeFileErr
+	}
+	return os.Rename(tempPath, a.demoSiteSnapshotPath(domain))
+}
+
+func (a *App) restoreDemoSiteFromSnapshot(ctx context.Context, controlDatabase *sql.DB, domain string) error {
+	domain = normalizeDomainName(domain)
+	snapshotPath := a.demoSiteSnapshotPath(domain)
+	snapshotFile, err := os.Open(snapshotPath)
+	if err != nil {
+		return err
+	}
+	defer snapshotFile.Close()
+	snapshotInfo, err := snapshotFile.Stat()
+	if err != nil {
+		return err
+	}
+	zipReader, err := zip.NewReader(snapshotFile, snapshotInfo.Size())
+	if err != nil {
+		return err
+	}
+	if err := a.clearDemoSiteContent(ctx, domain); err != nil {
+		return err
+	}
+	_, err = a.importDomainBackupZIP(contextWithDomain(ctx, domain), domain, "/", zipReader)
+	if err != nil {
+		return err
+	}
+	if controlDatabase != nil {
+		_ = (demo.Store{DB: controlDatabase}).RemoveSessionsForDomain(ctx, domain)
+	}
+	return nil
+}
+
+func (a *App) clearDemoSiteContent(ctx context.Context, domain string) error {
+	domain = normalizeDomainName(domain)
+	if domain == "" {
+		return fmt.Errorf("demo domain is required")
+	}
+	domainContext := contextWithDomain(ctx, domain)
+	for _, statement := range []string{
+		`DELETE FROM pages WHERE domain=?`,
+		`DELETE FROM published_pages WHERE domain=?`,
+		`DELETE FROM revisions WHERE domain=?`,
+		`DELETE FROM page_redirects WHERE domain=?`,
+		`DELETE FROM file_metadata WHERE domain=?`,
+		`DELETE FROM file_access_rules WHERE domain=?`,
+	} {
+		statementDomain := domain
+		if strings.Contains(statement, "file_") {
+			statementDomain = domainStorageName(domain)
+		}
+		if _, err := a.db.ExecContext(domainContext, statement, statementDomain); err != nil {
+			return err
+		}
+	}
+	for _, directoryPath := range []string{a.domainFilesDirForDomain(domain), a.domainStaticDir(domain)} {
+		if err := os.RemoveAll(directoryPath); err != nil {
+			return err
+		}
+	}
+	a.rebuildDomainStorageUsage(domainContext, domain)
+	return nil
+}
+
 func (a *App) logout(w http.ResponseWriter, r *http.Request) {
 	a.scheduleDemoSiteDeletionForLogout(r)
 	if cookie, err := r.Cookie("sitebrush_session"); err == nil {
@@ -6089,7 +6180,7 @@ func (a *App) scheduleDemoSiteDeletionForLogout(r *http.Request) {
 		return
 	}
 	defer controlDatabase.Close()
-	if err := (billing.Store{DB: controlDatabase}).ScheduleDemoSessionDeletion(r.Context(), cookie.Value, time.Now().Add(demoSiteDeletionDelay)); err != nil {
+	if err := (demo.Store{DB: controlDatabase}).ScheduleSessionReset(r.Context(), cookie.Value, time.Now().Add(demo.ResetDelay)); err != nil {
 		log.Printf("demo site deletion schedule failed token=%s error=%v", diagnosticlog.SafeLogValue(cookie.Value), err)
 	}
 }
@@ -7886,7 +7977,7 @@ func (a *App) billingView(ctx context.Context, r *http.Request) (map[string]any,
 	plans := store.Plans(ctx)
 	assignments := store.ServiceAssignments(ctx)
 	siteRequests := store.SiteRequests(ctx)
-	demoSettings := store.DemoSettings(ctx)
+	demoSettings := (demo.Store{DB: controlDatabase}).Settings(ctx)
 	siteRows, err := a.billingSiteRows(ctx, plans, assignments, a.siteDomain(ctx, r))
 	if err != nil {
 		return nil, err
@@ -7970,6 +8061,10 @@ func (a *App) saveBillingSettingsFromForm(r *http.Request) string {
 	store := billing.Store{DB: controlDatabase}
 	demoDomain := normalizeQuotaDomainName(r.FormValue("demo_site_domain"))
 	demoSourceURL := strings.TrimSpace(r.FormValue("demo_site_source_url"))
+	demoEnabled := r.FormValue("demo_site_enabled") == "1"
+	if demoEnabled && demoDomain == "" {
+		return "Домен демо-сайта обязателен."
+	}
 	if demoDomain != "" {
 		if ownerDomain, found := store.OwnerDomain(r.Context()); found && normalizeDomainName(ownerDomain) == demoDomain {
 			return "Сайт владельца сервера нельзя использовать как публичный демо-сайт."
@@ -7980,8 +8075,15 @@ func (a *App) saveBillingSettingsFromForm(r *http.Request) string {
 			return parseErr.Error()
 		}
 	}
-	if err := store.SaveDemoSettings(r.Context(), demoDomain, demoSourceURL, r.FormValue("demo_site_copy_whole_site") == "1"); err != nil {
+	demoCopyWholeSite := r.FormValue("demo_site_copy_whole_site") == "1"
+	if err := (demo.Store{DB: controlDatabase}).SaveSettings(r.Context(), demoDomain, demoSourceURL, demoCopyWholeSite, demoEnabled); err != nil {
 		return err.Error()
+	}
+	if demoEnabled {
+		settings := demo.Settings{Domain: demoDomain, SourceURL: demoSourceURL, CopyWholeSite: demoCopyWholeSite, Enabled: true}
+		if _, err := a.ensureDemoSiteReady(r.Context(), controlDatabase, settings, true); err != nil {
+			return err.Error()
+		}
 	}
 	retentionDays, retentionErr := parseBillingDeletionBackupRetentionDays(r.FormValue("backup_retention_days"))
 	if retentionErr != nil {
@@ -8275,9 +8377,9 @@ func (a *App) cleanupExpiredDemoSites(ctx context.Context, now time.Time) {
 		return
 	}
 	defer controlDatabase.Close()
-	store := billing.Store{DB: controlDatabase}
-	sessionsByDomain := make(map[string][]billing.DemoSession)
-	for _, session := range store.DemoSessions(ctx) {
+	store := demo.Store{DB: controlDatabase}
+	sessionsByDomain := make(map[string][]demo.Session)
+	for _, session := range store.Sessions(ctx) {
 		domain := normalizeDomainName(session.Domain)
 		if domain == "" {
 			continue
@@ -8285,38 +8387,17 @@ func (a *App) cleanupExpiredDemoSites(ctx context.Context, now time.Time) {
 		sessionsByDomain[domain] = append(sessionsByDomain[domain], session)
 	}
 	for domain, sessions := range sessionsByDomain {
-		if !demoSessionsReadyForDeletion(sessions, now) {
+		if !demo.SessionsReadyForReset(sessions, now) {
 			continue
 		}
-		if err := a.deleteDemoManagedSiteWithoutBackup(ctx, controlDatabase, domain); err != nil {
-			log.Printf("demo site deletion failed domain=%s error=%v", domain, err)
+		if err := a.restoreDemoSiteFromSnapshot(ctx, controlDatabase, domain); err != nil {
+			log.Printf("demo site restore failed domain=%s error=%v", domain, err)
 			continue
 		}
-		if err := store.RemoveDemoSessionsForDomain(ctx, domain); err != nil {
+		if err := store.RemoveSessionsForDomain(ctx, domain); err != nil {
 			log.Printf("demo session cleanup failed domain=%s error=%v", domain, err)
 		}
 	}
-}
-
-func demoSessionsReadyForDeletion(sessions []billing.DemoSession, now time.Time) bool {
-	for _, session := range sessions {
-		deleteAfter, ok := demoSessionDeleteAfter(session)
-		if ok && !now.Before(deleteAfter) {
-			return true
-		}
-	}
-	return false
-}
-
-func demoSessionDeleteAfter(session billing.DemoSession) (time.Time, bool) {
-	if deleteAfter, err := time.Parse(time.RFC3339, strings.TrimSpace(session.DeleteAfter)); err == nil {
-		return deleteAfter, true
-	}
-	createdAt, err := time.Parse(time.RFC3339, strings.TrimSpace(session.CreatedAt))
-	if err != nil {
-		return time.Time{}, false
-	}
-	return createdAt.Add(demoSiteDeletionDelay), true
 }
 
 func (a *App) deleteDemoManagedSiteWithoutBackup(ctx context.Context, controlDatabase *sql.DB, domain string) error {

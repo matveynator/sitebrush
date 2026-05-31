@@ -35,6 +35,7 @@ import (
 	"golang.org/x/net/dns/dnsmessage"
 	"golang.org/x/text/encoding/charmap"
 	"sitebrush/pkg/billing"
+	"sitebrush/pkg/demo"
 	"sitebrush/pkg/diskusage"
 	"sitebrush/pkg/grabber"
 )
@@ -1841,8 +1842,8 @@ func TestDemoSiteVisitorGetsEditorSessionAndCleanupDeletesSite(t *testing.T) {
 	application := newRouterTestApplication(t)
 	controlDB := setupBillingOwnerForTest(t, application, "owner.example", "owner@example.com", true)
 	defer controlDB.Close()
-	store := billing.Store{DB: controlDB}
-	if err := store.SaveDemoSettings(context.Background(), "demo.example", sourceURL, false); err != nil {
+	store := demo.Store{DB: controlDB}
+	if err := store.SaveSettings(context.Background(), "demo.example", sourceURL, false, true); err != nil {
 		t.Fatalf("save demo settings: %v", err)
 	}
 
@@ -1910,9 +1911,9 @@ func TestDemoSiteVisitorGetsEditorSessionAndCleanupDeletesSite(t *testing.T) {
 		t.Fatalf("deleting demo sessions = %d, want 1", deletingSessions)
 	}
 
-	application.cleanupExpiredDemoSites(context.Background(), time.Now().Add(11*time.Minute))
-	if _, err := os.Stat(siteDatabasePath); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("demo site database stat err = %v, want not exist", err)
+	application.cleanupExpiredDemoSites(context.Background(), time.Now().Add(31*time.Minute))
+	if _, err := os.Stat(siteDatabasePath); err != nil {
+		t.Fatalf("demo site database stat err = %v, want restored site", err)
 	}
 	var remainingDemoSessions int
 	if err := controlDB.QueryRow(`SELECT COUNT(1) FROM demo_site_sessions WHERE domain='demo.example'`).Scan(&remainingDemoSessions); err != nil {
@@ -1927,8 +1928,8 @@ func TestActiveDemoSessionDoesNotBlockScheduledSiteRecreation(t *testing.T) {
 	application := newRouterTestApplication(t)
 	controlDB := setupBillingOwnerForTest(t, application, "owner.example", "owner@example.com", true)
 	defer controlDB.Close()
-	store := billing.Store{DB: controlDB}
-	if err := store.SaveDemoSettings(context.Background(), "demo-active.example", "", false); err != nil {
+	store := demo.Store{DB: controlDB}
+	if err := store.SaveSettings(context.Background(), "demo-active.example", "", false, true); err != nil {
 		t.Fatalf("save demo settings: %v", err)
 	}
 
@@ -1945,9 +1946,9 @@ func TestActiveDemoSessionDoesNotBlockScheduledSiteRecreation(t *testing.T) {
 		t.Fatalf("demo site database stat err = %v, want exists", err)
 	}
 
-	application.cleanupExpiredDemoSites(context.Background(), time.Now().Add(11*time.Minute))
-	if _, err := os.Stat(siteDatabasePath); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("demo site database stat err = %v, want not exist", err)
+	application.cleanupExpiredDemoSites(context.Background(), time.Now().Add(31*time.Minute))
+	if _, err := os.Stat(siteDatabasePath); err != nil {
+		t.Fatalf("demo site database stat err = %v, want restored site", err)
 	}
 	var remainingDemoSessions int
 	if err := controlDB.QueryRow(`SELECT COUNT(1) FROM demo_site_sessions WHERE domain='demo-active.example'`).Scan(&remainingDemoSessions); err != nil {
