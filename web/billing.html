@@ -29,6 +29,7 @@
       </div>
       <form method="post" action="?billing" class="billing-settings-form">
         <input type="hidden" name="billing_action" value="settings">
+        <input type="hidden" name="refresh_demo_site" value="0" data-refresh-demo-site-input>
         <label class="checkbox-row">
           <input type="checkbox" name="auto_registration_enabled" value="1" {{if .AutoRegistrationEnabled}}checked{{end}}>
           <span>Разрешить самостоятельную регистрацию новых сайтов</span>
@@ -56,6 +57,7 @@
             <input type="checkbox" name="demo_site_copy_whole_site" value="1" {{if .DemoSettings.CopyWholeSite}}checked{{end}}>
             <span>Копировать весь найденный сайт, а не только главную страницу</span>
           </label>
+          <button type="button" class="btn btn-outline-primary btn-sm" data-demo-refresh-preview-button><img src="/p/static/backup.png" alt="">Обновить скачанную копию</button>
         </div>
         <button type="submit" class="btn btn-primary"><img src="/p/static/save-page.png" alt="">Сохранить</button>
       </form>
@@ -307,6 +309,110 @@
     </div>
   </section>
 </main>
+<div class="modal fade" id="demoRefreshModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-dialog-centered"><div class="modal-content">
+    <div class="modal-header">
+      <h5 class="modal-title">Обновить скачанную копию</h5>
+      <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="{{index .T "tree_close"}}"></button>
+    </div>
+    <div class="modal-body" data-demo-refresh-modal-body>
+      <p class="text-muted">Проверка источника...</p>
+    </div>
+    <div class="modal-footer">
+      <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">{{index .T "edit_cancel"}}</button>
+      <button type="button" class="btn btn-primary" data-demo-refresh-confirm-button disabled><img src="/p/static/backup.png" alt="">Продолжить</button>
+    </div>
+  </div></div>
+</div>
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+<script>
+(function setupDemoRefreshPreview() {
+  const settingsFormElement = document.querySelector('.billing-settings-form');
+  const previewButtonElement = document.querySelector('[data-demo-refresh-preview-button]');
+  const refreshDemoSiteInputElement = document.querySelector('[data-refresh-demo-site-input]');
+  const modalElement = document.getElementById('demoRefreshModal');
+  const modalBodyElement = document.querySelector('[data-demo-refresh-modal-body]');
+  const confirmButtonElement = document.querySelector('[data-demo-refresh-confirm-button]');
+  if (!settingsFormElement || !previewButtonElement || !refreshDemoSiteInputElement || !modalElement || !modalBodyElement || !confirmButtonElement || !window.bootstrap) {
+    return;
+  }
+  const modalController = new bootstrap.Modal(modalElement, { backdrop: 'static', keyboard: false });
+  let refreshWasConfirmed = false;
+
+  function formatByteCount(byteCount) {
+    if (!Number.isFinite(byteCount) || byteCount < 0) {
+      return '0 B';
+    }
+    if (byteCount < 1024) {
+      return String(byteCount) + ' B';
+    }
+    if (byteCount < 1024 * 1024) {
+      return (byteCount / 1024).toFixed(1) + ' KB';
+    }
+    if (byteCount < 1024 * 1024 * 1024) {
+      return (byteCount / (1024 * 1024)).toFixed(1) + ' MB';
+    }
+    return (byteCount / (1024 * 1024 * 1024)).toFixed(1) + ' GB';
+  }
+
+  function renderPreviewResult(previewPayload) {
+    const totalDownloadBytes = Number(previewPayload.page_download_bytes || 0) + Number(previewPayload.selected_resource_bytes || 0);
+    const quotaText = previewPayload.fits_quota ? 'Квоты достаточно.' : 'После обновления квота будет превышена.';
+    modalBodyElement.innerHTML = [
+      '<p><strong>Источник:</strong> ' + escapeHTML(previewPayload.source_url || '') + '</p>',
+      '<ul>',
+      '<li>Страниц: ' + Number(previewPayload.page_count || 0) + '</li>',
+      '<li>Файлов: ' + Number(previewPayload.resource_count || 0) + '</li>',
+      '<li>Будет скачано: ' + formatByteCount(totalDownloadBytes) + '</li>',
+      '<li>Будет занято в хранилище: ' + formatByteCount(Number(previewPayload.estimated_import_bytes || 0)) + '</li>',
+      '</ul>',
+      '<p class="text-muted">' + quotaText + '</p>'
+    ].join('');
+    confirmButtonElement.disabled = !previewPayload.fits_quota;
+  }
+
+  function escapeHTML(rawText) {
+    const temporaryElement = document.createElement('div');
+    temporaryElement.textContent = rawText;
+    return temporaryElement.innerHTML;
+  }
+
+  previewButtonElement.addEventListener('click', function handlePreviewButtonClick() {
+    if (!settingsFormElement.reportValidity()) {
+      return;
+    }
+    confirmButtonElement.disabled = true;
+    modalBodyElement.innerHTML = '<p class="text-muted">Проверка источника...</p>';
+    modalController.show();
+    const previewRequestBody = new FormData(settingsFormElement);
+    fetch('?demo_grab_preview', { method: 'POST', body: previewRequestBody, headers: { 'Accept': 'application/json' } })
+      .then(function handlePreviewResponse(previewResponse) {
+        if (!previewResponse.ok) {
+          return previewResponse.text().then(function throwPreviewError(errorText) {
+            throw new Error(errorText || previewResponse.statusText);
+          });
+        }
+        return previewResponse.json();
+      })
+      .then(renderPreviewResult)
+      .catch(function renderPreviewError(previewError) {
+        confirmButtonElement.disabled = true;
+        modalBodyElement.innerHTML = '<div class="alert alert-danger" role="alert">' + escapeHTML(previewError.message || String(previewError)) + '</div>';
+      });
+  });
+
+  confirmButtonElement.addEventListener('click', function handleConfirmButtonClick() {
+    refreshWasConfirmed = true;
+    refreshDemoSiteInputElement.value = '1';
+    settingsFormElement.requestSubmit();
+  });
+
+  settingsFormElement.addEventListener('submit', function handleSettingsSubmit() {
+    if (!refreshWasConfirmed) {
+      refreshDemoSiteInputElement.value = '0';
+    }
+  });
+})();
+</script>
 </body>
 </html>

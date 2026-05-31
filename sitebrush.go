@@ -5450,6 +5450,10 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 		a.billingPage(w, r)
 		return
 	}
+	if hasQueryFlag(r, "demo_grab_preview") {
+		a.demoGrabPreview(w, r)
+		return
+	}
 	if hasQueryFlag(r, "billing_backup_download") {
 		a.downloadManagedSiteDeletionBackup(w, r)
 		return
@@ -5984,7 +5988,7 @@ func (a *App) ensureDemoSiteReady(ctx context.Context, controlDatabase *sql.DB, 
 		if settings.SourceURL != "" {
 			if err := a.seedDemoSiteContent(ctx, domain, settings); err != nil {
 				log.Printf("demo site source import failed domain=%s source=%s error=%v", domain, settings.SourceURL, err)
-				a.createDemoWelcomePage(ctx, domain)
+				return "", err
 			}
 		} else {
 			a.createDemoWelcomePage(ctx, domain)
@@ -6053,6 +6057,88 @@ func (a *App) seedDemoSiteContent(ctx context.Context, domain string, settings d
 	}
 	a.rebuildDomainStorageUsage(domainContext, domain)
 	return nil
+}
+
+func (a *App) demoGrabPreview(w http.ResponseWriter, r *http.Request) {
+	startedAt := time.Now()
+	if !a.isAdminRequest(r) || !a.isServerManagerRequest(r) || r.Method != http.MethodPost {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	domain := normalizeQuotaDomainName(r.FormValue("demo_site_domain"))
+	sourceURL := strings.TrimSpace(r.FormValue("demo_site_source_url"))
+	if domain == "" {
+		http.Error(w, "demo_site_domain is required", http.StatusBadRequest)
+		return
+	}
+	if sourceURL == "" {
+		http.Error(w, "demo_site_source_url is required", http.StatusBadRequest)
+		return
+	}
+	controlDatabase, err := a.openServerControlDatabase(r.Context())
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	defer controlDatabase.Close()
+	if ownerDomain, found := (billing.Store{DB: controlDatabase}).OwnerDomain(r.Context()); found && normalizeDomainName(ownerDomain) == domain {
+		http.Error(w, "server owner site cannot be used as the public demo site", http.StatusBadRequest)
+		return
+	}
+	remoteSourceURL, err := parseGrabSourceURL(sourceURL)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	htmlBytes, resolvedSourceURL, err := downloadGrabSourceHTMLWithResolvedURL(remoteSourceURL.String(), grabSourceOptions{})
+	if err != nil {
+		a.logProblemEvent("demo grab preview failed domain=%s source=%s error=%v duration=%s", domain, sourceURL, err, time.Since(startedAt).String())
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+	remoteSourceURL = resolvedSourceURL
+	pagePath := "/"
+	pageCount := 1
+	var resources []grabResourcePreview
+	var importedPages []wholeSiteImportedPage
+	var previewSpider *pageSpider
+	if r.FormValue("demo_site_copy_whole_site") == "1" {
+		wholeSitePreview := previewWholeRemoteSiteResources(remoteSourceURL, string(htmlBytes), pagePath, a.grabTracker, "", grabSourceOptions{})
+		resources = wholeSitePreview.Resources
+		pageCount = wholeSitePreview.PageCount
+		importedPages = wholeSitePreview.ImportedPages
+		previewSpider = wholeSitePreview.Spider
+	} else {
+		previewSpider, importedHTML := prepareSinglePageImport(domain, pagePath, remoteSourceURL.String(), remoteSourceURL, string(htmlBytes), a.grabTracker, "", nil, grabSourceOptions{})
+		resources = previewResourcesFromSpider(previewSpider, map[string]struct{}{remoteSourceURL.String(): {}})
+		importedPages = []wholeSiteImportedPage{{SourceURL: remoteSourceURL.String(), LocalPath: pagePath, HTML: importedHTML}}
+	}
+	var pageDownloadBytes int64
+	for _, importedPage := range importedPages {
+		pageDownloadBytes += int64(len([]byte(importedPage.HTML)))
+	}
+	selectedResourceBytes := sumGrabPreviewResourceBytes(resources)
+	domainContext := contextWithDomain(r.Context(), domain)
+	quotaEstimate := a.estimateImportQuota(domainContext, domain, importedPages, previewSpider)
+	w.Header().Set("Content-Type", "application/json")
+	encodeErr := json.NewEncoder(w).Encode(grabPreviewResponse{
+		SourceURL:             remoteSourceURL.String(),
+		PageCount:             pageCount,
+		ResourceCount:         len(resources),
+		Resources:             resources,
+		PageDownloadBytes:     pageDownloadBytes,
+		PageStorageBytes:      quotaEstimate.PageStorageBytes,
+		CurrentUsedBytes:      quotaEstimate.CurrentUsedBytes,
+		LimitBytes:            quotaEstimate.LimitBytes,
+		FreeBytes:             quotaEstimate.FreeBytes,
+		SelectedResourceBytes: selectedResourceBytes,
+		EstimatedImportBytes:  quotaEstimate.EstimatedImportBytes,
+		ProjectedUsedBytes:    quotaEstimate.ProjectedUsedBytes,
+		FitsQuota:             quotaEstimate.FitsQuota,
+	})
+	if encodeErr != nil {
+		a.logProblemEvent("demo grab preview response failed domain=%s source=%s error=%v duration=%s", domain, sourceURL, encodeErr, time.Since(startedAt).String())
+	}
 }
 
 func (a *App) createDemoWelcomePage(ctx context.Context, domain string) {
@@ -8081,7 +8167,8 @@ func (a *App) saveBillingSettingsFromForm(r *http.Request) string {
 	}
 	if demoEnabled {
 		settings := demo.Settings{Domain: demoDomain, SourceURL: demoSourceURL, CopyWholeSite: demoCopyWholeSite, Enabled: true}
-		if _, err := a.ensureDemoSiteReady(r.Context(), controlDatabase, settings, true); err != nil {
+		refreshDemoSite := r.FormValue("refresh_demo_site") == "1"
+		if _, err := a.ensureDemoSiteReady(r.Context(), controlDatabase, settings, refreshDemoSite); err != nil {
 			return err.Error()
 		}
 	}

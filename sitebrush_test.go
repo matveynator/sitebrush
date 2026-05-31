@@ -1924,6 +1924,95 @@ func TestDemoSiteVisitorGetsEditorSessionAndCleanupDeletesSite(t *testing.T) {
 	}
 }
 
+func TestDemoSiteSourceImportFailureDoesNotCreateWelcomePage(t *testing.T) {
+	sourceURL := "https://source.example/"
+	previousGrabHTTPClient := newGrabHTTPClient
+	newGrabHTTPClient = func() *http.Client {
+		return &http.Client{Transport: fakeGrabTransport{responses: map[string]fakeGrabResponse{
+			sourceURL: {statusCode: http.StatusBadGateway, contentType: "text/plain", body: "upstream failed"},
+		}}}
+	}
+	defer func() {
+		newGrabHTTPClient = previousGrabHTTPClient
+	}()
+
+	application := newRouterTestApplication(t)
+	controlDB := setupBillingOwnerForTest(t, application, "owner.example", "owner@example.com", true)
+	defer controlDB.Close()
+	store := demo.Store{DB: controlDB}
+	if err := store.SaveSettings(context.Background(), "demo-fail.example", sourceURL, false, true); err != nil {
+		t.Fatalf("save demo settings: %v", err)
+	}
+
+	request := httptest.NewRequest(http.MethodGet, "http://demo-fail.example/", nil)
+	request = request.WithContext(contextWithDomain(request.Context(), "demo-fail.example"))
+	response := httptest.NewRecorder()
+	application.route(response, request)
+	if response.Code != http.StatusInternalServerError {
+		t.Fatalf("demo start status = %d, body=%q", response.Code, response.Body.String())
+	}
+
+	siteDatabasePath := filepath.Join(siteDatabaseRootPath(application.serverControlDBPath()), domainStorageName("demo-fail.example")+".db")
+	siteDB, err := sql.Open("sqlite", "file:"+siteDatabasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer siteDB.Close()
+	var pageCount int
+	if err := siteDB.QueryRow(`SELECT COUNT(1) FROM pages WHERE domain=?`, "demo-fail.example").Scan(&pageCount); err != nil {
+		t.Fatalf("read demo page count: %v", err)
+	}
+	if pageCount != 0 {
+		t.Fatalf("demo page count = %d, want 0", pageCount)
+	}
+}
+
+func TestBillingDemoGrabPreviewReportsDownloadSize(t *testing.T) {
+	sourceURL := "https://source.example/"
+	previousGrabHTTPClient := newGrabHTTPClient
+	newGrabHTTPClient = func() *http.Client {
+		return &http.Client{Transport: fakeGrabTransport{responses: map[string]fakeGrabResponse{
+			sourceURL:                         {contentType: "text/html; charset=utf-8", body: `<!doctype html><html><body><img src="/logo.png"><h1>Preview Demo</h1></body></html>`},
+			"https://source.example/logo.png": {contentType: "image/png", body: strings.Repeat("P", 90)},
+		}}}
+	}
+	defer func() {
+		newGrabHTTPClient = previousGrabHTTPClient
+	}()
+
+	application, rawDB := newTestApplication(t)
+	if _, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "owner@example.com", "old"); err != nil {
+		t.Fatalf("insert owner user: %v", err)
+	}
+	controlDB := setupBillingOwnerForTest(t, application, "localhost", "owner@example.com", true)
+	defer controlDB.Close()
+	form := url.Values{}
+	form.Set("demo_site_domain", "demo-preview.example")
+	form.Set("demo_site_source_url", sourceURL)
+	previewRequest := httptest.NewRequest(http.MethodPost, "http://localhost:8080/?demo_grab_preview", strings.NewReader(form.Encode()))
+	previewRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	previewRequest.Header.Set("Accept", "application/json")
+	previewRequest.AddCookie(newAdminSessionCookie(t, application, "owner@example.com"))
+	previewResponse := httptest.NewRecorder()
+	application.route(previewResponse, previewRequest)
+	if previewResponse.Code != http.StatusOK {
+		t.Fatalf("preview status = %d, body=%q", previewResponse.Code, previewResponse.Body.String())
+	}
+	var previewPayload grabPreviewResponse
+	if err := json.Unmarshal(previewResponse.Body.Bytes(), &previewPayload); err != nil {
+		t.Fatalf("decode preview payload: %v", err)
+	}
+	if previewPayload.PageCount != 1 {
+		t.Fatalf("page count = %d, want 1", previewPayload.PageCount)
+	}
+	if previewPayload.SelectedResourceBytes < 90 {
+		t.Fatalf("selected resource bytes = %d, want at least 90", previewPayload.SelectedResourceBytes)
+	}
+	if previewPayload.SourceURL != sourceURL {
+		t.Fatalf("source url = %q, want %q", previewPayload.SourceURL, sourceURL)
+	}
+}
+
 func TestActiveDemoSessionDoesNotBlockScheduledSiteRecreation(t *testing.T) {
 	application := newRouterTestApplication(t)
 	controlDB := setupBillingOwnerForTest(t, application, "owner.example", "owner@example.com", true)
