@@ -47,7 +47,6 @@ import (
 	"golang.org/x/crypto/acme/autocert"
 	"golang.org/x/net/dns/dnsmessage"
 	"golang.org/x/net/html"
-	"golang.org/x/net/html/charset"
 	"golang.org/x/term"
 	"sitebrush/pkg/billing"
 	appcli "sitebrush/pkg/cli"
@@ -62,6 +61,7 @@ import (
 	"sitebrush/pkg/serviceinstall"
 	"sitebrush/pkg/shutdownsignals"
 	"sitebrush/pkg/systeminit"
+	"sitebrush/pkg/textencoding"
 	"sitebrush/pkg/winservice"
 )
 
@@ -72,6 +72,9 @@ var translationCatalog = loadTranslationCatalog()
 var guestContextMenuTemplates = buildGuestContextMenuTemplates()
 var guestNotFoundPageTemplates = buildGuestNotFoundPageTemplates()
 var importedHTMLCharsetAssignmentPattern = regexp.MustCompile(`(?i)(charset\s*=\s*)(["']?)[a-z0-9._:-]+`)
+var importedHTMLCharsetMetaPattern = regexp.MustCompile(`(?i)<meta\b[^>]*charset\s*=`)
+var importedHTMLHeadOpenPattern = regexp.MustCompile(`(?i)<head\b[^>]*>`)
+var importedHTMLHTMLOpenPattern = regexp.MustCompile(`(?i)<html\b[^>]*>`)
 
 const storageAppName = "sitebrush"
 const defaultDBPath = "storage/db/sitebrush.db"
@@ -6887,19 +6890,23 @@ func downloadGrabSourceHTMLWithResolvedURL(sourceURL string, sourceOptions grabS
 }
 
 func decodeImportedHTMLBytes(htmlBytes []byte, contentType string) string {
-	reader, err := charset.NewReader(bytes.NewReader(htmlBytes), contentType)
-	if err != nil {
-		return rewriteImportedHTMLCharsetDeclaration(string(htmlBytes))
-	}
-	decodedBytes, err := io.ReadAll(reader)
-	if err != nil {
-		return rewriteImportedHTMLCharsetDeclaration(string(htmlBytes))
-	}
-	return rewriteImportedHTMLCharsetDeclaration(string(decodedBytes))
+	decodedHTML := textencoding.DecodeHTML(htmlBytes, contentType)
+	return rewriteImportedHTMLCharsetDeclaration(decodedHTML.Text)
 }
 
 func rewriteImportedHTMLCharsetDeclaration(htmlSource string) string {
-	return importedHTMLCharsetAssignmentPattern.ReplaceAllString(htmlSource, "${1}${2}utf-8")
+	rewrittenHTML := importedHTMLCharsetAssignmentPattern.ReplaceAllString(htmlSource, "${1}${2}utf-8")
+	if importedHTMLCharsetMetaPattern.MatchString(rewrittenHTML) {
+		return rewrittenHTML
+	}
+	metaCharsetTag := `<meta charset="utf-8">`
+	if headOpenMatch := importedHTMLHeadOpenPattern.FindStringIndex(rewrittenHTML); headOpenMatch != nil {
+		return rewrittenHTML[:headOpenMatch[1]] + metaCharsetTag + rewrittenHTML[headOpenMatch[1]:]
+	}
+	if htmlOpenMatch := importedHTMLHTMLOpenPattern.FindStringIndex(rewrittenHTML); htmlOpenMatch != nil {
+		return rewrittenHTML[:htmlOpenMatch[1]] + `<head>` + metaCharsetTag + `</head>` + rewrittenHTML[htmlOpenMatch[1]:]
+	}
+	return metaCharsetTag + rewrittenHTML
 }
 
 func isImportedHTMLContentType(contentType string) bool {

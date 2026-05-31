@@ -33,6 +33,7 @@ import (
 
 	_ "github.com/mattn/go-sqlite3"
 	"golang.org/x/net/dns/dnsmessage"
+	"golang.org/x/text/encoding/charmap"
 	"sitebrush/pkg/billing"
 	"sitebrush/pkg/diskusage"
 	"sitebrush/pkg/grabber"
@@ -3878,6 +3879,29 @@ func TestDownloadGrabSourceHTMLUsesSelectedLanguageAndResolvedURL(t *testing.T) 
 		if !strings.HasPrefix(acceptLanguageHeader, "ru,ru-RU") {
 			t.Fatalf("Accept-Language = %q", acceptLanguageHeader)
 		}
+	}
+}
+
+func TestDecodeImportedHTMLBytesDetectsWindows1251AndAddsUTF8Meta(t *testing.T) {
+	sourceHTML := `<!doctype html><html><head><title>Искусство</title></head><body>Русский текст страницы</body></html>`
+	sourceBytes, encodeErr := charmap.Windows1251.NewEncoder().Bytes([]byte(sourceHTML))
+	if encodeErr != nil {
+		t.Fatal(encodeErr)
+	}
+
+	importedHTML := decodeImportedHTMLBytes(sourceBytes, "text/html")
+	if !strings.Contains(importedHTML, "Русский текст страницы") {
+		t.Fatalf("imported HTML was not decoded as readable text: %s", importedHTML)
+	}
+	if !strings.Contains(importedHTML, `<meta charset="utf-8">`) {
+		t.Fatalf("imported HTML is missing UTF-8 meta tag: %s", importedHTML)
+	}
+}
+
+func TestRewriteImportedHTMLCharsetDeclarationAddsHeadWhenMissing(t *testing.T) {
+	importedHTML := rewriteImportedHTMLCharsetDeclaration(`<html><body>Imported</body></html>`)
+	if !strings.Contains(importedHTML, `<head><meta charset="utf-8"></head>`) {
+		t.Fatalf("imported HTML is missing generated UTF-8 head: %s", importedHTML)
 	}
 }
 
