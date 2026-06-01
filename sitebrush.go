@@ -6184,7 +6184,13 @@ func (a *App) demoGrabRefresh(w http.ResponseWriter, r *http.Request) {
 	}
 	settings := demo.Settings{Domain: demoDomain, SourceURL: demoSourceURL, CopyWholeSite: demoCopyWholeSite, Enabled: true}
 	progressToken := strings.TrimSpace(r.FormValue("progress_token"))
-	_, failedTotal, err := a.ensureDemoSiteReady(r.Context(), controlDatabase, settings, true, progressToken)
+	failedResourceURLs := demoFailedResourceURLs(r)
+	var failedTotal int
+	if len(failedResourceURLs) > 0 {
+		failedTotal, err = a.retryDemoFailedResources(r.Context(), settings, progressToken, failedResourceURLs)
+	} else {
+		_, failedTotal, err = a.ensureDemoSiteReady(r.Context(), controlDatabase, settings, true, progressToken)
+	}
 	if err != nil {
 		statusCode := http.StatusBadGateway
 		if strings.Contains(err.Error(), "storage limit reached:") {
@@ -6195,6 +6201,167 @@ func (a *App) demoGrabRefresh(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{"status": "ok", "failed_total": failedTotal})
+}
+
+func demoFailedResourceURLs(r *http.Request) map[string]struct{} {
+	failedResourceURLs := make(map[string]struct{})
+	for _, rawResourceURL := range r.Form["demo_failed_resource_url"] {
+		resourceURL := strings.TrimSpace(rawResourceURL)
+		if resourceURL == "" {
+			continue
+		}
+		failedResourceURLs[resourceURL] = struct{}{}
+	}
+	return failedResourceURLs
+}
+
+func (a *App) retryDemoFailedResources(ctx context.Context, settings demo.Settings, progressToken string, failedResourceURLs map[string]struct{}) (int, error) {
+	sourceURL := strings.TrimSpace(settings.SourceURL)
+	if sourceURL == "" || len(failedResourceURLs) == 0 {
+		return 0, nil
+	}
+	remoteSourceURL, err := parseGrabSourceURL(sourceURL)
+	if err != nil {
+		return 0, err
+	}
+	spider := newPageSpider(settings.Domain, remoteSourceURL, grabResourceMaxDepth, a.grabTracker, progressToken, grabSourceOptions{})
+	spider.selectedResourceURLs = failedResourceURLs
+	spider.publicAssetBasePath = "/"
+	resourceURLs := make([]string, 0, len(failedResourceURLs))
+	for resourceURL := range failedResourceURLs {
+		resourceURLs = append(resourceURLs, resourceURL)
+	}
+	sort.Strings(resourceURLs)
+	for _, resourceURL := range resourceURLs {
+		_, _ = spider.fetchResource(resourceURL, remoteSourceURL, 0, true)
+	}
+	replacements := demoRetriedResourceReplacements(spider)
+	fileDelta := a.estimateImportedFileDelta(settings.Domain, spider)
+	domainContext := contextWithDomain(ctx, settings.Domain)
+	pageDelta, publishedPageDelta, publishedStaticDelta := a.estimateDemoRetriedResourcePageDelta(domainContext, settings.Domain, replacements)
+	if storageErr := a.applyDomainStorageDelta(domainContext, settings.Domain, pageDelta, publishedPageDelta, 0, fileDelta, publishedStaticDelta); storageErr != nil {
+		return spider.failedTotal, storageErr
+	}
+	if persistErr := a.persistSpiderAssets(spider, "/"); persistErr != nil {
+		_ = a.applyDomainStorageDelta(domainContext, settings.Domain, -pageDelta, -publishedPageDelta, 0, -fileDelta, -publishedStaticDelta)
+		return spider.failedTotal, persistErr
+	}
+	a.applyDemoRetriedResourcePageReplacements(domainContext, settings.Domain, replacements)
+	a.rebuildDomainStorageUsage(domainContext, settings.Domain)
+	if snapshotErr := a.createDemoSiteSnapshot(ctx, settings.Domain); snapshotErr != nil {
+		log.Printf("demo site retry snapshot failed domain=%s error=%v", settings.Domain, snapshotErr)
+	}
+	if a.grabTracker != nil && progressToken != "" {
+		stage := "done"
+		if spider.failedTotal > 0 {
+			stage = "partial"
+		}
+		a.grabTracker.publish(grabProgressEvent{Token: progressToken, Stage: stage, FoundTotal: spider.foundTotal, DownloadedTotal: spider.downloadedTotal, FailedTotal: spider.failedTotal, CompletedPercent: 100})
+	}
+	return spider.failedTotal, nil
+}
+
+func demoRetriedResourceReplacements(spider *pageSpider) map[string]string {
+	replacements := make(map[string]string)
+	if spider == nil {
+		return replacements
+	}
+	for resourceURL, resource := range spider.resources {
+		if resource == nil || !resource.persist || strings.TrimSpace(resource.assetPath) == "" || resource.content == nil {
+			continue
+		}
+		replacements[resourceURL] = normalizeMirroredAssetReference(resource.assetPath)
+	}
+	return replacements
+}
+
+func (a *App) estimateDemoRetriedResourcePageDelta(ctx context.Context, domain string, replacements map[string]string) (int64, int64, int64) {
+	if len(replacements) == 0 {
+		return 0, 0, 0
+	}
+	frozenDomain := a.isDomainFrozen(ctx, domain)
+	var pageDelta int64
+	var publishedPageDelta int64
+	var publishedStaticDelta int64
+	rows, err := a.db.QueryContext(ctx, `SELECT path,html FROM pages WHERE domain=?`, domain)
+	if err != nil {
+		return 0, 0, 0
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var pagePath string
+		var pageHTML string
+		if scanErr := rows.Scan(&pagePath, &pageHTML); scanErr != nil {
+			continue
+		}
+		updatedHTML := replaceDemoRetriedResourceReferences(pageHTML, replacements)
+		if updatedHTML == pageHTML {
+			continue
+		}
+		updatedHTMLBytes := int64(len([]byte(updatedHTML)))
+		pageDelta += updatedHTMLBytes - int64(len([]byte(pageHTML)))
+		if frozenDomain {
+			continue
+		}
+		var previousPublishedHTML string
+		_ = a.db.QueryRowContext(ctx, `SELECT html FROM published_pages WHERE domain=? AND path=?`, domain, pagePath).Scan(&previousPublishedHTML)
+		publishedPageDelta += updatedHTMLBytes - int64(len([]byte(previousPublishedHTML)))
+		publishedStaticDelta += updatedHTMLBytes - fileSizeBytes(filepath.Join(a.domainStaticDir(domain), staticRelativePathForPage(pagePath)))
+	}
+	return pageDelta, publishedPageDelta, publishedStaticDelta
+}
+
+func (a *App) applyDemoRetriedResourcePageReplacements(ctx context.Context, domain string, replacements map[string]string) {
+	if len(replacements) == 0 {
+		return
+	}
+	type demoPage struct {
+		path  string
+		title string
+		html  string
+	}
+	pages := make([]demoPage, 0, 16)
+	rows, err := a.db.QueryContext(ctx, `SELECT path,title,html FROM pages WHERE domain=?`, domain)
+	if err != nil {
+		return
+	}
+	for rows.Next() {
+		var page demoPage
+		if scanErr := rows.Scan(&page.path, &page.title, &page.html); scanErr == nil {
+			pages = append(pages, page)
+		}
+	}
+	_ = rows.Close()
+	frozenDomain := a.isDomainFrozen(ctx, domain)
+	for _, page := range pages {
+		updatedHTML := replaceDemoRetriedResourceReferences(page.html, replacements)
+		if updatedHTML == page.html {
+			continue
+		}
+		_, _ = a.db.ExecContext(ctx, `UPDATE pages SET html=? WHERE domain=? AND path=?`, updatedHTML, domain, page.path)
+		if !frozenDomain {
+			_, _ = a.db.ExecContext(ctx, `INSERT OR REPLACE INTO published_pages(domain,path,title,html) VALUES(?,?,?,?)`, domain, page.path, page.title, updatedHTML)
+			a.writePublishedStaticHTML(domain, page.path, updatedHTML)
+		}
+	}
+}
+
+func replaceDemoRetriedResourceReferences(sourceHTML string, replacements map[string]string) string {
+	updatedHTML := sourceHTML
+	resourceURLs := make([]string, 0, len(replacements))
+	for resourceURL := range replacements {
+		resourceURLs = append(resourceURLs, resourceURL)
+	}
+	sort.Strings(resourceURLs)
+	for _, resourceURL := range resourceURLs {
+		localReference := replacements[resourceURL]
+		if strings.TrimSpace(localReference) == "" {
+			continue
+		}
+		updatedHTML = strings.ReplaceAll(updatedHTML, resourceURL, localReference)
+		updatedHTML = strings.ReplaceAll(updatedHTML, template.HTMLEscapeString(resourceURL), localReference)
+	}
+	return updatedHTML
 }
 
 func (a *App) createDemoWelcomePage(ctx context.Context, domain string) {

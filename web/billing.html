@@ -316,11 +316,11 @@
 <div class="modal fade" id="demoRefreshModal" tabindex="-1" aria-hidden="true">
   <div class="modal-dialog modal-dialog-centered modal-dialog-scrollable modal-lg demo-refresh-modal-dialog"><div class="modal-content">
     <div class="modal-header">
-      <h5 class="modal-title">Обновить скачанную копию</h5>
+      <h5 class="modal-title">{{index .T "billing_demo_refresh_modal_title"}}</h5>
       <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="{{index .T "tree_close"}}"></button>
     </div>
     <div class="modal-body" data-demo-refresh-modal-body>
-      <p class="text-muted mb-2" data-demo-refresh-status>Проверка источника...</p>
+      <p class="text-muted mb-2" data-demo-refresh-status>{{index .T "billing_demo_refresh_checking"}}</p>
       <div class="text-break small text-muted mb-2" data-demo-refresh-url></div>
       <div class="progress mb-3" data-demo-refresh-progress-holder>
         <div class="progress-bar" data-demo-refresh-progress-bar role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" style="width:0%">0%</div>
@@ -330,7 +330,7 @@
     </div>
     <div class="modal-footer">
       <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal" data-demo-refresh-cancel-button>{{index .T "edit_cancel"}}</button>
-      <button type="button" class="btn btn-primary" data-demo-refresh-confirm-button disabled><img src="/p/static/backup.png" alt="">Продолжить</button>
+      <button type="button" class="btn btn-primary" data-demo-refresh-confirm-button disabled><img src="/p/static/backup.png" alt="">{{index .T "billing_demo_refresh_continue"}}</button>
       <button type="button" class="btn btn-primary d-none" data-bs-dismiss="modal" data-demo-refresh-close-button>{{index .T "tree_close"}}</button>
     </div>
   </div></div>
@@ -360,8 +360,39 @@
   let previewRequestInFlight = false;
   let refreshRequestInFlight = false;
   let refreshHadPartialFailure = false;
+  let currentRefreshIsRetry = false;
   let currentPreviewPayload = null;
   let failedResourceURLs = new Set();
+  const demoRefreshText = {
+    continueButton: {{printf "%q" (index .T "billing_demo_refresh_continue")}},
+    retryButton: {{printf "%q" (index .T "billing_demo_refresh_retry")}},
+    finishButton: {{printf "%q" (index .T "billing_demo_refresh_finish")}},
+    closeButton: {{printf "%q" (index .T "tree_close")}},
+    quotaOk: {{printf "%q" (index .T "billing_demo_refresh_quota_ok")}},
+    quotaExceeded: {{printf "%q" (index .T "billing_demo_refresh_quota_exceeded")}},
+    checkDownload: {{printf "%q" (index .T "billing_demo_refresh_check_download")}},
+    sourceLabel: {{printf "%q" (index .T "billing_demo_refresh_source")}},
+    pagesLabel: {{printf "%q" (index .T "billing_demo_refresh_pages")}},
+    filesLabel: {{printf "%q" (index .T "billing_demo_refresh_files")}},
+    willDownloadLabel: {{printf "%q" (index .T "billing_demo_refresh_will_download")}},
+    willUseStorageLabel: {{printf "%q" (index .T "billing_demo_refresh_will_use_storage")}},
+    checkingSource: {{printf "%q" (index .T "billing_demo_refresh_checking")}},
+    updatingCopy: {{printf "%q" (index .T "billing_demo_refresh_updating")}},
+    fileFailed: {{printf "%q" (index .T "billing_demo_refresh_file_failed")}},
+    downloaded: {{printf "%q" (index .T "billing_demo_refresh_downloaded")}},
+    downloadingPrefix: {{printf "%q" (index .T "billing_demo_refresh_downloading_prefix")}},
+    failedListMissing: {{printf "%q" (index .T "billing_demo_refresh_failed_list_missing")}},
+    progressReadError: {{printf "%q" (index .T "billing_demo_refresh_progress_read_error")}},
+    partialFailed: {{printf "%q" (index .T "billing_demo_refresh_partial_failed")}},
+    downloadFailed: {{printf "%q" (index .T "billing_demo_refresh_download_failed")}},
+    progressLost: {{printf "%q" (index .T "billing_demo_refresh_progress_lost")}},
+    downloadedCountPrefix: {{printf "%q" (index .T "billing_demo_refresh_downloaded_count_prefix")}},
+    ofWord: {{printf "%q" (index .T "missing_of_word")}},
+    updated: {{printf "%q" (index .T "billing_demo_refresh_updated")}},
+    snapshotReady: {{printf "%q" (index .T "billing_demo_refresh_snapshot_ready")}},
+    updatingProgress: {{printf "%q" (index .T "billing_demo_refresh_updating_progress")}},
+    finishHint: {{printf "%q" (index .T "billing_demo_refresh_finish_hint")}}
+  };
 
   function formatByteCount(byteCount) {
     if (!Number.isFinite(byteCount) || byteCount < 0) {
@@ -381,18 +412,20 @@
 
   function renderPreviewResult(previewPayload) {
     const totalDownloadBytes = Number(previewPayload.page_download_bytes || 0) + Number(previewPayload.selected_resource_bytes || 0);
-    const quotaText = previewPayload.fits_quota ? 'Квоты достаточно.' : 'После обновления квота будет превышена.';
+    const quotaText = previewPayload.fits_quota ? demoRefreshText.quotaOk : demoRefreshText.quotaExceeded;
     currentPreviewPayload = previewPayload;
+    failedResourceURLs = new Set();
+    currentRefreshIsRetry = false;
     setProgressPercent(100);
-    statusElement.textContent = 'Проверьте объём скачивания и обновите локальную копию.';
+    statusElement.textContent = demoRefreshText.checkDownload;
     urlElement.textContent = previewPayload.source_url || '';
     summaryElement.innerHTML = [
-      '<p><strong>Источник:</strong> ' + escapeHTML(previewPayload.source_url || '') + '</p>',
+      '<p><strong>' + escapeHTML(demoRefreshText.sourceLabel) + '</strong> ' + escapeHTML(previewPayload.source_url || '') + '</p>',
       '<ul>',
-      '<li>Страниц: ' + Number(previewPayload.page_count || 0) + '</li>',
-      '<li>Файлов: ' + Number(previewPayload.resource_count || 0) + '</li>',
-      '<li>Будет скачано: ' + formatByteCount(totalDownloadBytes) + '</li>',
-      '<li>Будет занято в хранилище: ' + formatByteCount(Number(previewPayload.estimated_import_bytes || 0)) + '</li>',
+      '<li>' + escapeHTML(demoRefreshText.pagesLabel) + ' ' + Number(previewPayload.page_count || 0) + '</li>',
+      '<li>' + escapeHTML(demoRefreshText.filesLabel) + ' ' + Number(previewPayload.resource_count || 0) + '</li>',
+      '<li>' + escapeHTML(demoRefreshText.willDownloadLabel) + ' ' + formatByteCount(totalDownloadBytes) + '</li>',
+      '<li>' + escapeHTML(demoRefreshText.willUseStorageLabel) + ' ' + formatByteCount(Number(previewPayload.estimated_import_bytes || 0)) + '</li>',
       '</ul>',
       '<p class="text-muted">' + quotaText + '</p>'
     ].join('');
@@ -417,12 +450,14 @@
     closeProgressStream();
     currentPreviewPayload = null;
     refreshHadPartialFailure = false;
+    currentRefreshIsRetry = false;
     failedResourceURLs = new Set();
     confirmButtonElement.disabled = true;
     confirmButtonElement.classList.remove('d-none');
-    confirmButtonElement.innerHTML = '<img src="/p/static/backup.png" alt="">Продолжить';
+    confirmButtonElement.innerHTML = '<img src="/p/static/backup.png" alt="">' + escapeHTML(demoRefreshText.continueButton);
     cancelButtonElement.classList.remove('d-none');
     closeButtonElement.classList.add('d-none');
+    closeButtonElement.textContent = demoRefreshText.closeButton;
     statusElement.textContent = statusText;
     urlElement.textContent = '';
     summaryElement.textContent = '';
@@ -498,12 +533,13 @@
       if (progressState.stage === 'error') {
         failedResourceURLs.add(resourceURL);
         resourceRowElement.classList.add('list-group-item-danger');
-        statusTextElement.textContent = 'Не удалось скачать. Можно повторить обновление.';
+        statusTextElement.textContent = demoRefreshText.fileFailed;
       } else if (progressState.stage === 'downloaded') {
+        failedResourceURLs.delete(resourceURL);
         resourceRowElement.classList.remove('list-group-item-danger');
-        statusTextElement.textContent = 'Скачано.';
+        statusTextElement.textContent = demoRefreshText.downloaded;
       } else {
-        statusTextElement.textContent = 'Скачивание: ' + currentPercent + '%';
+        statusTextElement.textContent = demoRefreshText.downloadingPrefix + ' ' + currentPercent + '%';
       }
     }
   }
@@ -513,11 +549,19 @@
     const failedItems = Array.from(failedResourceURLs).map(function buildFailedItem(resourceURL) {
       return '<li class="text-break">' + escapeHTML(resourceURL) + '</li>';
     }).join('');
-    const failedList = failedItems ? '<ul class="mb-0">' + failedItems + '</ul>' : '<p class="mb-0">Список файлов не получен.</p>';
+    const failedList = failedItems ? '<ul class="mb-0">' + failedItems + '</ul>' : '<p class="mb-0">' + escapeHTML(demoRefreshText.failedListMissing) + '</p>';
     statusElement.textContent = errorText;
-    summaryElement.innerHTML = '<div class="alert alert-warning" role="alert"><p class="mb-2">' + escapeHTML(errorText) + '</p>' + failedList + '</div>';
-    confirmButtonElement.disabled = !currentPreviewPayload;
-    confirmButtonElement.innerHTML = '<img src="/p/static/backup.png" alt="">Повторить';
+    const retryHint = currentRefreshIsRetry ? '<p class="mb-2">' + escapeHTML(demoRefreshText.finishHint) + '</p>' : '';
+    summaryElement.innerHTML = '<div class="alert alert-warning" role="alert"><p class="mb-2">' + escapeHTML(errorText) + '</p>' + retryHint + failedList + '</div>';
+    if (currentRefreshIsRetry) {
+      confirmButtonElement.classList.add('d-none');
+      cancelButtonElement.classList.add('d-none');
+      closeButtonElement.classList.remove('d-none');
+      closeButtonElement.textContent = demoRefreshText.finishButton;
+      return;
+    }
+    confirmButtonElement.disabled = !currentPreviewPayload || failedResourceURLs.size === 0;
+    confirmButtonElement.innerHTML = '<img src="/p/static/backup.png" alt="">' + escapeHTML(demoRefreshText.retryButton);
   }
 
   function closeProgressStream() {
@@ -538,7 +582,7 @@
       try {
         progressState = JSON.parse(messageEvent.data);
       } catch (parseError) {
-        showError('Ошибка чтения прогресса.');
+        showError(demoRefreshText.progressReadError);
         closeProgressStream();
         return;
       }
@@ -554,10 +598,10 @@
       const downloadedTotal = Number(progressState.downloaded_total || 0);
       updateResourceProgress(progressState);
       setProgressPercent(completedPercent);
-      statusElement.textContent = 'Скачано ' + downloadedTotal + ' из ' + foundTotal + ' (' + completedPercent + '%).';
+      statusElement.textContent = demoRefreshText.downloadedCountPrefix + ' ' + downloadedTotal + ' ' + demoRefreshText.ofWord + ' ' + foundTotal + ' (' + completedPercent + '%).';
       urlElement.textContent = progressState.current_url || '';
       if (progressState.stage === 'partial') {
-        showPartialFailure(progressState.message || 'Часть файлов не удалось скачать.');
+        showPartialFailure(progressState.message || demoRefreshText.partialFailed);
         closeProgressStream();
         return;
       }
@@ -567,7 +611,7 @@
         doneCallback();
       }
       if (progressState.stage === 'error' && !progressState.current_url) {
-        showError(progressState.message || 'Скачивание не удалось.');
+        showError(progressState.message || demoRefreshText.downloadFailed);
         closeProgressStream();
       }
     };
@@ -575,13 +619,16 @@
       if (progressStreamClosedIntentionally || previewRequestInFlight || refreshRequestInFlight) {
         return;
       }
-      showError('Соединение с прогрессом потеряно.');
+      showError(demoRefreshText.progressLost);
     };
   }
 
-  function buildDemoRefreshRequestBody(progressToken) {
+  function buildDemoRefreshRequestBody(progressToken, retryResourceURLs) {
     const requestBody = new FormData(settingsFormElement);
     requestBody.set('progress_token', progressToken);
+    for (const retryResourceURL of retryResourceURLs || []) {
+      requestBody.append('demo_failed_resource_url', retryResourceURL);
+    }
     return requestBody;
   }
 
@@ -595,12 +642,12 @@
     if (!settingsFormElement.reportValidity()) {
       return;
     }
-    resetProgressWindow('Проверка источника...');
+    resetProgressWindow(demoRefreshText.checkingSource);
     modalController.show();
     const progressToken = Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 10);
     connectProgressStream(progressToken, function requestPreviewAfterStreamReady() {
       previewRequestInFlight = true;
-      fetch('?demo_grab_preview', { method: 'POST', body: buildDemoRefreshRequestBody(progressToken), headers: { 'Accept': 'application/json' } })
+      fetch('?demo_grab_preview', { method: 'POST', body: buildDemoRefreshRequestBody(progressToken, []), headers: { 'Accept': 'application/json' } })
         .then(function handlePreviewResponse(previewResponse) {
           if (!previewResponse.ok) {
             return previewResponse.text().then(function throwPreviewError(errorText) {
@@ -626,13 +673,21 @@
     if (!currentPreviewPayload) {
       return;
     }
+    const retryResourceURLs = Array.from(failedResourceURLs);
+    const retryingFailedResources = retryResourceURLs.length > 0;
     const previewPayloadForRetry = currentPreviewPayload;
-    resetProgressWindow('Обновление локальной копии...');
+    resetProgressWindow(demoRefreshText.updatingCopy);
     currentPreviewPayload = previewPayloadForRetry;
+    currentRefreshIsRetry = retryingFailedResources;
+    if (retryingFailedResources) {
+      for (const retryResourceURL of retryResourceURLs) {
+        appendResourceRow({ url: retryResourceURL, kind: 'file', size_bytes: -1 });
+      }
+    }
     const progressToken = Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 10);
     connectProgressStream(progressToken, function requestRefreshAfterStreamReady() {
       refreshRequestInFlight = true;
-      fetch('?demo_grab_refresh', { method: 'POST', body: buildDemoRefreshRequestBody(progressToken), headers: { 'Accept': 'application/json' } })
+      fetch('?demo_grab_refresh', { method: 'POST', body: buildDemoRefreshRequestBody(progressToken, retryResourceURLs), headers: { 'Accept': 'application/json' } })
         .then(function handleRefreshResponse(refreshResponse) {
           if (!refreshResponse.ok) {
             return refreshResponse.text().then(function throwRefreshError(errorText) {
@@ -644,7 +699,7 @@
         .then(function handleRefreshPayload(refreshPayload) {
           refreshRequestInFlight = false;
           if (Number(refreshPayload.failed_total || 0) > 0) {
-            showPartialFailure('Часть файлов не удалось скачать.');
+            showPartialFailure(demoRefreshText.partialFailed);
             closeProgressStream();
             return;
           }
@@ -653,8 +708,8 @@
           }
           closeProgressStream();
           setProgressPercent(100);
-          statusElement.textContent = 'Локальная копия обновлена.';
-          summaryElement.innerHTML = '<div class="alert alert-success" role="alert">Демо-сайт будет пересоздаваться из новой локальной копии.</div>';
+          statusElement.textContent = demoRefreshText.updated;
+          summaryElement.innerHTML = '<div class="alert alert-success" role="alert">' + escapeHTML(demoRefreshText.snapshotReady) + '</div>';
           confirmButtonElement.classList.add('d-none');
           cancelButtonElement.classList.add('d-none');
           closeButtonElement.classList.remove('d-none');
@@ -665,7 +720,7 @@
           showError(refreshError.message || String(refreshError));
         });
     }, function handleRefreshDone() {
-      statusElement.textContent = 'Локальная копия обновляется...';
+      statusElement.textContent = demoRefreshText.updatingProgress;
     });
   });
 

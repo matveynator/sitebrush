@@ -375,15 +375,12 @@ func (addr fakeAddr) String() string {
 func (transport fakeGrabTransport) RoundTrip(request *http.Request) (*http.Response, error) {
 	response, found := transport.responses[request.URL.String()]
 	if !found {
-		return &http.Response{
-			StatusCode:    http.StatusNotFound,
-			Status:        "404 Not Found",
-			Body:          io.NopCloser(strings.NewReader("not found")),
-			ContentLength: int64(len("not found")),
-			Header:        make(http.Header),
-			Request:       request,
-		}, nil
+		return fakeGrabResponse{statusCode: http.StatusNotFound, body: "not found"}.httpResponse(request), nil
 	}
+	return response.httpResponse(request), nil
+}
+
+func (response fakeGrabResponse) httpResponse(request *http.Request) *http.Response {
 	header := make(http.Header)
 	if response.contentType != "" {
 		header.Set("Content-Type", response.contentType)
@@ -406,7 +403,7 @@ func (transport fakeGrabTransport) RoundTrip(request *http.Request) (*http.Respo
 		ContentLength: int64(len(response.body)),
 		Header:        header,
 		Request:       request,
-	}, nil
+	}
 }
 
 func (roundTripper roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
@@ -2055,6 +2052,89 @@ func TestBillingDemoGrabRefreshUpdatesLocalSnapshot(t *testing.T) {
 	}
 	if _, err := os.Stat(application.demoSiteSnapshotPath("demo-refresh.example")); err != nil {
 		t.Fatalf("demo snapshot stat err = %v", err)
+	}
+}
+
+func TestBillingDemoGrabRefreshRetryDownloadsOnlyFailedResources(t *testing.T) {
+	sourceURL := "https://source.example/"
+	resourceURL := "https://source.example/logo.png"
+	sourceRequestCount := 0
+	resourceShouldFail := true
+	previousGrabHTTPClient := newGrabHTTPClient
+	newGrabHTTPClient = func() *http.Client {
+		return &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+			switch request.URL.String() {
+			case sourceURL:
+				sourceRequestCount++
+				return fakeGrabResponse{contentType: "text/html; charset=utf-8", body: `<!doctype html><html><body><img src="/logo.png"><h1>Retry Demo</h1></body></html>`}.httpResponse(request), nil
+			case resourceURL:
+				if resourceShouldFail {
+					return fakeGrabResponse{statusCode: http.StatusNotFound, body: "not found"}.httpResponse(request), nil
+				}
+				return fakeGrabResponse{contentType: "image/png", body: strings.Repeat("P", 90)}.httpResponse(request), nil
+			default:
+				return fakeGrabResponse{statusCode: http.StatusNotFound, body: "not found"}.httpResponse(request), nil
+			}
+		})}
+	}
+	defer func() {
+		newGrabHTTPClient = previousGrabHTTPClient
+	}()
+
+	application, rawDB := newTestApplication(t)
+	if _, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "owner@example.com", "old"); err != nil {
+		t.Fatalf("insert owner user: %v", err)
+	}
+	controlDB := setupBillingOwnerForTest(t, application, "localhost", "owner@example.com", true)
+	defer controlDB.Close()
+	form := url.Values{}
+	form.Set("demo_site_domain", "demo-retry.example")
+	form.Set("demo_site_source_url", sourceURL)
+	form.Set("progress_token", "refresh-retry-test-token")
+	refreshRequest := httptest.NewRequest(http.MethodPost, "http://localhost:8080/?demo_grab_refresh", strings.NewReader(form.Encode()))
+	refreshRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	refreshRequest.Header.Set("Accept", "application/json")
+	refreshRequest.AddCookie(newAdminSessionCookie(t, application, "owner@example.com"))
+	refreshResponse := httptest.NewRecorder()
+	application.route(refreshResponse, refreshRequest)
+	if refreshResponse.Code != http.StatusOK {
+		t.Fatalf("refresh status = %d, body=%q", refreshResponse.Code, refreshResponse.Body.String())
+	}
+	var refreshPayload map[string]any
+	if err := json.Unmarshal(refreshResponse.Body.Bytes(), &refreshPayload); err != nil {
+		t.Fatalf("decode refresh payload: %v", err)
+	}
+	if failedTotal := int(refreshPayload["failed_total"].(float64)); failedTotal != 1 {
+		t.Fatalf("failed_total = %d, want 1", failedTotal)
+	}
+
+	resourceShouldFail = false
+	retryForm := url.Values{}
+	retryForm.Set("demo_site_domain", "demo-retry.example")
+	retryForm.Set("demo_site_source_url", sourceURL)
+	retryForm.Set("progress_token", "refresh-retry-test-token-2")
+	retryForm.Add("demo_failed_resource_url", resourceURL)
+	retryRequest := httptest.NewRequest(http.MethodPost, "http://localhost:8080/?demo_grab_refresh", strings.NewReader(retryForm.Encode()))
+	retryRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	retryRequest.Header.Set("Accept", "application/json")
+	retryRequest.AddCookie(newAdminSessionCookie(t, application, "owner@example.com"))
+	retryResponse := httptest.NewRecorder()
+	application.route(retryResponse, retryRequest)
+	if retryResponse.Code != http.StatusOK {
+		t.Fatalf("retry status = %d, body=%q", retryResponse.Code, retryResponse.Body.String())
+	}
+	if sourceRequestCount != 1 {
+		t.Fatalf("source request count = %d, want 1", sourceRequestCount)
+	}
+	var pageHTML string
+	if err := application.db.QueryRowContext(contextWithDomain(context.Background(), "demo-retry.example"), `SELECT html FROM pages WHERE domain=? AND path='/'`, "demo-retry.example").Scan(&pageHTML); err != nil {
+		t.Fatalf("read demo page: %v", err)
+	}
+	if strings.Contains(pageHTML, resourceURL) {
+		t.Fatalf("retried resource stayed external: %s", pageHTML)
+	}
+	if !strings.Contains(pageHTML, "/p/") {
+		t.Fatalf("retried resource was not rewritten locally: %s", pageHTML)
 	}
 }
 
