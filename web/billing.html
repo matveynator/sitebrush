@@ -22,43 +22,63 @@
   {{if .Status}}<div class="alert alert-info billing-status" role="alert">{{.Status}}</div>{{end}}
 
   <section class="card billing-card">
+    <div class="card-body">
+      <h2>Тарифы</h2>
+      <form method="post" action="?billing" class="billing-plan-form">
+        <input type="hidden" name="billing_action" value="save_plan">
+        <label>Название <input name="name" type="text" class="form-control" placeholder="Free / Pro / Business" required></label>
+        <label>Квота <input name="quota" type="text" class="form-control" placeholder="10gb" required></label>
+        <label>Цена <input name="price" type="text" class="form-control" placeholder="0"></label>
+        <label>Валюта <input name="currency" type="text" class="form-control" value="USD"></label>
+        <label>Период <input name="billing_period" type="text" class="form-control" value="monthly"></label>
+        <label class="checkbox-row"><input type="checkbox" name="is_default" value="1"><span>Тариф по умолчанию</span></label>
+        <button type="submit" class="btn btn-primary"><img src="/p/static/save-page.png" alt="">Сохранить тариф</button>
+      </form>
+      <div class="billing-plan-list">
+        {{range .Plans}}
+        <form method="post" action="?billing" class="billing-plan-row">
+          <input type="hidden" name="billing_action" value="delete_plan">
+          <input type="hidden" name="plan_id" value="{{.ID}}">
+          <span><button type="button" class="btn btn-link btn-sm p-0 align-baseline" data-bs-toggle="modal" data-bs-target="#billingPlanModal{{.ID}}">{{.Name}}</button> · {{.QuotaLabel}} · {{.Price}} {{.Currency}}/{{.BillingPeriod}}{{if .IsDefault}} · по умолчанию{{end}}</span>
+          <button type="submit" class="btn btn-outline-danger btn-sm"><img src="/p/static/cross.png" alt="">Удалить</button>
+        </form>
+        <div class="modal fade" id="billingPlanModal{{.ID}}" tabindex="-1" aria-hidden="true">
+          <div class="modal-dialog modal-dialog-centered"><div class="modal-content">
+            <div class="modal-header">
+              <h5 class="modal-title">{{.Name}}</h5>
+              <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="{{index $.T "tree_close"}}"></button>
+            </div>
+            <div class="modal-body">
+              <p class="text-muted">{{.QuotaLabel}} · {{.Price}} {{.Currency}}/{{.BillingPeriod}}</p>
+              <ul>
+                <li>Редактор страниц Sitebrush и публикация сайта.</li>
+                <li>Файлы и статические ресурсы в пределах квоты {{.QuotaLabel}}.</li>
+                <li>Резервные копии, настройки домена и управление HTTPS.</li>
+                <li>Автоматический SSL после корректной настройки DNS.</li>
+              </ul>
+            </div>
+            <div class="modal-footer">
+              <button type="button" class="btn btn-primary" data-bs-dismiss="modal">{{index $.T "tree_close"}}</button>
+            </div>
+          </div></div>
+        </div>
+        {{end}}
+      </div>
+    </div>
+  </section>
+
+  <section class="card billing-card">
     <div class="card-body billing-card-body">
       <div>
         <h2>Регистрация сайтов</h2>
         <p class="text-muted">Первый администратор первого сайта становится владельцем сервера. Новые базы сайтов создаются только вместе с первым администратором.</p>
       </div>
-      <form method="post" action="?billing" class="billing-settings-form">
-        <input type="hidden" name="billing_action" value="settings">
-        <input type="hidden" name="refresh_demo_site" value="0" data-refresh-demo-site-input>
+      <form method="post" action="?billing" class="billing-registration-settings-form">
+        <input type="hidden" name="billing_action" value="registration_settings">
         <label class="checkbox-row">
           <input type="checkbox" name="auto_registration_enabled" value="1" {{if .AutoRegistrationEnabled}}checked{{end}}>
           <span>Разрешить самостоятельную регистрацию новых сайтов</span>
         </label>
-        <label>{{index .T "billing_backup_retention_days"}}
-          <input name="backup_retention_days" type="number" min="1" max="3650" class="form-control form-control-sm" value="{{.BackupRetentionDays}}">
-        </label>
-        <div class="billing-demo-settings">
-          <h3>Демо-сайт</h3>
-          <p class="text-muted">Один домен можно сделать публичным тестовым сайтом. При включении Sitebrush скачает исходный сайт один раз, сохранит резервную копию и будет восстанавливать демо из неё каждые 30 минут после работы пользователя.</p>
-          <label class="checkbox-row">
-            <input type="checkbox" name="demo_site_enabled" value="1" {{if .DemoSettings.Enabled}}checked{{end}}>
-            <span>Включить публичный демо-сайт</span>
-          </label>
-          <label>Домен демо-сайта
-            <input name="demo_site_domain" type="text" class="form-control" list="billing-demo-domains" value="{{.DemoSettings.Domain}}" placeholder="demo.example.com">
-          </label>
-          <datalist id="billing-demo-domains">
-            {{range .Sites}}<option value="{{.Domain}}">{{.Domain}}</option>{{end}}
-          </datalist>
-          <label>Скопировать контент с внешнего сайта
-            <input name="demo_site_source_url" type="url" class="form-control" value="{{.DemoSettings.SourceURL}}" placeholder="https://example.com/">
-          </label>
-          <label class="checkbox-row">
-            <input type="checkbox" name="demo_site_copy_whole_site" value="1" {{if .DemoSettings.CopyWholeSite}}checked{{end}}>
-            <span>Копировать весь найденный сайт, а не только главную страницу</span>
-          </label>
-          <button type="button" class="btn btn-outline-primary btn-sm" data-demo-refresh-preview-button><img src="/p/static/backup.png" alt="">Обновить скачанную копию</button>
-        </div>
         <button type="submit" class="btn btn-primary"><img src="/p/static/save-page.png" alt="">Сохранить</button>
       </form>
     </div>
@@ -93,7 +113,7 @@
         {{range $requestIndex, $request := .SiteRequests}}
         <article class="billing-site-row">
           <div class="billing-site-main">
-            <div class="billing-domain">{{$request.Domain}}</div>
+            <div class="billing-domain"><a href="//{{$request.Domain}}/" target="_blank" rel="noopener noreferrer">{{$request.Domain}}</a></div>
             <div class="text-muted small">{{$request.Name}} · {{$request.Email}} · {{$request.Phone}}</div>
             <div class="text-muted small">Тариф: {{$request.PlanName}} · {{$request.PlanQuotaLabel}} · {{$request.PlanPrice}} {{$request.PlanCurrency}}/{{$request.PlanBillingPeriod}}</div>
             <div class="text-muted small">Статус: {{$request.Status}} · {{$request.CreatedAt}}</div>
@@ -168,16 +188,17 @@
         {{range $siteIndex, $site := .Sites}}
         <article class="billing-site-row">
           <div class="billing-site-main">
-            <div class="billing-domain">{{$site.Domain}}</div>
+            <div class="billing-domain"><a href="//{{$site.Domain}}/" target="_blank" rel="noopener noreferrer">{{$site.Domain}}</a>{{if $site.IsDemo}} <span class="badge text-bg-info">Демо-сайт</span>{{end}}</div>
             {{if $site.Aliases}}<div class="text-muted small">Алиасы: {{$site.Aliases}}</div>{{end}}
             {{if $site.AdminEmails}}<div class="text-muted small">Администраторы: {{$site.AdminEmails}}</div>{{end}}
-            <div class="text-muted small">{{index $.T "billing_delete_will_remove"}} {{$site.DeletionSizeLabel}}</div>
+            {{if $site.IsDemo}}<div class="text-muted small">Тарифы и удаление не применяются. Сайт удаляется при выключении демо.</div>{{end}}
+            {{if not $site.IsDemo}}<div class="text-muted small">{{index $.T "billing_delete_will_remove"}} {{$site.DeletionSizeLabel}}</div>{{end}}
             <div class="billing-quota-bar" aria-label="Использовано {{$site.UsedPercent}}%">
               <div style="width:{{$site.UsedPercent}}%"></div>
             </div>
             <div class="text-muted small">Использовано {{$site.UsedLabel}} / {{$site.LimitLabel}}, свободно {{$site.FreeLabel}}</div>
           </div>
-          <form method="post" action="?billing" class="billing-site-form">
+          {{if not $site.IsDemo}}<form method="post" action="?billing" class="billing-site-form">
             <input type="hidden" name="billing_action" value="update_site">
             <input type="hidden" name="domain" value="{{$site.Domain}}">
             <label>Квота <input name="quota" type="text" class="form-control form-control-sm" value="{{$site.QuotaInput}}"></label>
@@ -195,7 +216,7 @@
               </select>
             </label>
             <button type="submit" class="btn btn-primary btn-sm"><img src="/p/static/save-page.png" alt="">Сохранить</button>
-          </form>
+          </form>{{end}}
           {{if $site.CanDelete}}<div class="billing-delete-form">
             <button type="button" class="btn btn-outline-danger btn-sm" data-bs-toggle="modal" data-bs-target="#deleteSiteModal{{$siteIndex}}"><img src="/p/static/delete.png" alt="">{{index $.T "billing_delete_button"}}</button>
           </div>
@@ -212,6 +233,10 @@
                   <p class="text-muted">{{index $.T "billing_delete_modal_type_site"}}</p>
                   <input type="hidden" name="billing_action" value="delete_site">
                   <input type="hidden" name="domain" value="{{$site.Domain}}">
+                  <label>{{index $.T "billing_backup_retention_days"}}
+                    <input name="backup_retention_days" type="number" min="1" max="3650" class="form-control" value="365" required>
+                  </label>
+                  <div class="form-text mb-3">Бэкап удаляемого сайта будет храниться этот срок.</div>
                   <input name="confirm_domain" type="text" class="form-control" placeholder="{{$site.Domain}}" autocomplete="off" required>
                 </div>
                 <div class="modal-footer">
@@ -229,6 +254,7 @@
     </div>
   </section>
 
+  {{if .Backups}}
   <section class="card billing-card">
     <div class="card-body">
       <div class="billing-section-header">
@@ -241,7 +267,7 @@
         {{range .Backups}}
         <article class="billing-backup-row">
           <div>
-            <div class="billing-domain">{{.Domain}}</div>
+            <div class="billing-domain"><a href="//{{.Domain}}/" target="_blank" rel="noopener noreferrer">{{.Domain}}</a></div>
             <div class="text-muted small">{{.FileName}}</div>
             {{if .OwnerContacts}}<div class="text-muted small">{{index $.T "billing_backup_owner_contacts"}} {{.OwnerContacts}}</div>{{end}}
           </div>
@@ -252,60 +278,38 @@
             <span>{{index $.T "billing_backup_token_status"}} {{.TokenStatus}}</span>
             {{if .DownloadedAt}}<span>{{index $.T "billing_backup_downloaded_at"}} {{.DownloadedAt}}</span>{{end}}
           </div>
-          <div class="billing-backup-actions">
+          <form method="post" action="?billing" class="billing-backup-actions">
+            <input type="hidden" name="billing_action" value="update_backup_retention">
+            <input type="hidden" name="backup_id" value="{{.ID}}">
+            <label>{{index $.T "billing_backup_retention_days"}}
+              <input name="backup_retention_days" type="number" min="1" max="3650" class="form-control form-control-sm" value="{{.RetentionDays}}" required>
+            </label>
+            <button type="submit" class="btn btn-outline-primary btn-sm"><img src="/p/static/save-page.png" alt="">Сохранить</button>
             {{if .DownloadURL}}<a class="btn btn-primary btn-sm" href="{{.DownloadURL}}"><img src="/p/static/backup.png" alt="">{{index $.T "billing_backup_download"}}</a>{{end}}
-          </div>
+          </form>
         </article>
-        {{else}}
-        <div class="empty">{{index .T "billing_backups_empty"}}</div>
         {{end}}
       </div>
     </div>
   </section>
+  {{end}}
 
   <section class="card billing-card">
-    <div class="card-body">
-      <h2>Тарифы</h2>
-      <form method="post" action="?billing" class="billing-plan-form">
-        <input type="hidden" name="billing_action" value="save_plan">
-        <label>Название <input name="name" type="text" class="form-control" placeholder="Free / Pro / Business" required></label>
-        <label>Квота <input name="quota" type="text" class="form-control" placeholder="10gb" required></label>
-        <label>Цена <input name="price" type="text" class="form-control" placeholder="0"></label>
-        <label>Валюта <input name="currency" type="text" class="form-control" value="USD"></label>
-        <label>Период <input name="billing_period" type="text" class="form-control" value="monthly"></label>
-        <label class="checkbox-row"><input type="checkbox" name="is_default" value="1"><span>Тариф по умолчанию</span></label>
-        <button type="submit" class="btn btn-primary"><img src="/p/static/save-page.png" alt="">Сохранить тариф</button>
-      </form>
-      <div class="billing-plan-list">
-        {{range .Plans}}
-        <form method="post" action="?billing" class="billing-plan-row">
-          <input type="hidden" name="billing_action" value="delete_plan">
-          <input type="hidden" name="plan_id" value="{{.ID}}">
-          <span><button type="button" class="btn btn-link btn-sm p-0 align-baseline" data-bs-toggle="modal" data-bs-target="#billingPlanModal{{.ID}}">{{.Name}}</button> · {{.QuotaLabel}} · {{.Price}} {{.Currency}}/{{.BillingPeriod}}{{if .IsDefault}} · по умолчанию{{end}}</span>
-          <button type="submit" class="btn btn-outline-danger btn-sm"><img src="/p/static/cross.png" alt="">Удалить</button>
-        </form>
-        <div class="modal fade" id="billingPlanModal{{.ID}}" tabindex="-1" aria-hidden="true">
-          <div class="modal-dialog modal-dialog-centered"><div class="modal-content">
-            <div class="modal-header">
-              <h5 class="modal-title">{{.Name}}</h5>
-              <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="{{index $.T "tree_close"}}"></button>
-            </div>
-            <div class="modal-body">
-              <p class="text-muted">{{.QuotaLabel}} · {{.Price}} {{.Currency}}/{{.BillingPeriod}}</p>
-              <ul>
-                <li>Редактор страниц Sitebrush и публикация сайта.</li>
-                <li>Файлы и статические ресурсы в пределах квоты {{.QuotaLabel}}.</li>
-                <li>Резервные копии, настройки домена и управление HTTPS.</li>
-                <li>Автоматический SSL после корректной настройки DNS.</li>
-              </ul>
-            </div>
-            <div class="modal-footer">
-              <button type="button" class="btn btn-primary" data-bs-dismiss="modal">Понятно</button>
-            </div>
-          </div></div>
-        </div>
-        {{end}}
+    <div class="card-body billing-card-body">
+      <div>
+        <h2>Демо-сайт</h2>
+        <p class="text-muted">Локальная копия используется как шаблон для пересоздания демо-сайта после неактивной сессии.</p>
       </div>
+      <form method="post" action="?billing" class="billing-demo-settings-form">
+        <input type="hidden" name="billing_action" value="demo_settings">
+        <input type="hidden" name="refresh_demo_site" value="0" data-refresh-demo-site-input>
+        <label>Домен демо-сайта <input name="demo_site_domain" type="text" class="form-control" value="{{.DemoSettings.Domain}}" placeholder="demo.example.com"></label>
+        <label>Источник для скачивания <input name="demo_site_source_url" type="text" class="form-control" value="{{.DemoSettings.SourceURL}}" placeholder="example.com или https://example.com/"></label>
+        <label class="checkbox-row"><input type="checkbox" name="demo_site_copy_whole_site" value="1" {{if .DemoSettings.CopyWholeSite}}checked{{end}}><span>Скачивать весь сайт по ссылкам</span></label>
+        <label class="checkbox-row"><input type="checkbox" name="demo_site_enabled" value="1" {{if .DemoSettings.Enabled}}checked{{end}}><span>Включить публичный демо-сайт</span></label>
+        <button type="submit" class="btn btn-primary"><img src="/p/static/save-page.png" alt="">Сохранить</button>
+        <button type="button" class="btn btn-outline-primary" data-demo-refresh-preview-button><img src="/p/static/backup.png" alt="">Обновить скачанную копию</button>
+      </form>
     </div>
   </section>
 </main>
@@ -325,15 +329,16 @@
       <div class="list-group mt-3 d-none" data-demo-refresh-resource-list></div>
     </div>
     <div class="modal-footer">
-      <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">{{index .T "edit_cancel"}}</button>
+      <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal" data-demo-refresh-cancel-button>{{index .T "edit_cancel"}}</button>
       <button type="button" class="btn btn-primary" data-demo-refresh-confirm-button disabled><img src="/p/static/backup.png" alt="">Продолжить</button>
+      <button type="button" class="btn btn-primary d-none" data-bs-dismiss="modal" data-demo-refresh-close-button>{{index .T "tree_close"}}</button>
     </div>
   </div></div>
 </div>
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
 <script>
 (function setupDemoRefreshPreview() {
-  const settingsFormElement = document.querySelector('.billing-settings-form');
+  const settingsFormElement = document.querySelector('.billing-demo-settings-form');
   const previewButtonElement = document.querySelector('[data-demo-refresh-preview-button]');
   const refreshDemoSiteInputElement = document.querySelector('[data-refresh-demo-site-input]');
   const modalElement = document.getElementById('demoRefreshModal');
@@ -344,7 +349,9 @@
   const summaryElement = document.querySelector('[data-demo-refresh-summary]');
   const resourceListElement = document.querySelector('[data-demo-refresh-resource-list]');
   const confirmButtonElement = document.querySelector('[data-demo-refresh-confirm-button]');
-  if (!settingsFormElement || !previewButtonElement || !refreshDemoSiteInputElement || !modalElement || !statusElement || !urlElement || !progressHolderElement || !progressBarElement || !summaryElement || !resourceListElement || !confirmButtonElement || !window.bootstrap) {
+  const cancelButtonElement = document.querySelector('[data-demo-refresh-cancel-button]');
+  const closeButtonElement = document.querySelector('[data-demo-refresh-close-button]');
+  if (!settingsFormElement || !previewButtonElement || !refreshDemoSiteInputElement || !modalElement || !statusElement || !urlElement || !progressHolderElement || !progressBarElement || !summaryElement || !resourceListElement || !confirmButtonElement || !cancelButtonElement || !closeButtonElement || !window.bootstrap) {
     return;
   }
   const modalController = new bootstrap.Modal(modalElement, { backdrop: 'static', keyboard: false });
@@ -352,7 +359,9 @@
   let progressStreamClosedIntentionally = false;
   let previewRequestInFlight = false;
   let refreshRequestInFlight = false;
+  let refreshHadPartialFailure = false;
   let currentPreviewPayload = null;
+  let failedResourceURLs = new Set();
 
   function formatByteCount(byteCount) {
     if (!Number.isFinite(byteCount) || byteCount < 0) {
@@ -407,7 +416,13 @@
   function resetProgressWindow(statusText) {
     closeProgressStream();
     currentPreviewPayload = null;
+    refreshHadPartialFailure = false;
+    failedResourceURLs = new Set();
     confirmButtonElement.disabled = true;
+    confirmButtonElement.classList.remove('d-none');
+    confirmButtonElement.innerHTML = '<img src="/p/static/backup.png" alt="">Продолжить';
+    cancelButtonElement.classList.remove('d-none');
+    closeButtonElement.classList.add('d-none');
     statusElement.textContent = statusText;
     urlElement.textContent = '';
     summaryElement.textContent = '';
@@ -480,8 +495,29 @@
     const statusTextElement = resourceRowElement.querySelector('[data-demo-refresh-resource-status]');
     const currentPercent = progressState.stage === 'downloaded' ? 100 : Number(progressState.current_percent || 0);
     if (statusTextElement) {
-      statusTextElement.textContent = 'Скачивание: ' + currentPercent + '%';
+      if (progressState.stage === 'error') {
+        failedResourceURLs.add(resourceURL);
+        resourceRowElement.classList.add('list-group-item-danger');
+        statusTextElement.textContent = 'Не удалось скачать. Можно повторить обновление.';
+      } else if (progressState.stage === 'downloaded') {
+        resourceRowElement.classList.remove('list-group-item-danger');
+        statusTextElement.textContent = 'Скачано.';
+      } else {
+        statusTextElement.textContent = 'Скачивание: ' + currentPercent + '%';
+      }
     }
+  }
+
+  function showPartialFailure(errorText) {
+    refreshHadPartialFailure = true;
+    const failedItems = Array.from(failedResourceURLs).map(function buildFailedItem(resourceURL) {
+      return '<li class="text-break">' + escapeHTML(resourceURL) + '</li>';
+    }).join('');
+    const failedList = failedItems ? '<ul class="mb-0">' + failedItems + '</ul>' : '<p class="mb-0">Список файлов не получен.</p>';
+    statusElement.textContent = errorText;
+    summaryElement.innerHTML = '<div class="alert alert-warning" role="alert"><p class="mb-2">' + escapeHTML(errorText) + '</p>' + failedList + '</div>';
+    confirmButtonElement.disabled = !currentPreviewPayload;
+    confirmButtonElement.innerHTML = '<img src="/p/static/backup.png" alt="">Повторить';
   }
 
   function closeProgressStream() {
@@ -521,7 +557,7 @@
       statusElement.textContent = 'Скачано ' + downloadedTotal + ' из ' + foundTotal + ' (' + completedPercent + '%).';
       urlElement.textContent = progressState.current_url || '';
       if (progressState.stage === 'partial') {
-        showError(progressState.message || 'Часть файлов не удалось скачать.');
+        showPartialFailure(progressState.message || 'Часть файлов не удалось скачать.');
         closeProgressStream();
         return;
       }
@@ -590,7 +626,9 @@
     if (!currentPreviewPayload) {
       return;
     }
+    const previewPayloadForRetry = currentPreviewPayload;
     resetProgressWindow('Обновление локальной копии...');
+    currentPreviewPayload = previewPayloadForRetry;
     const progressToken = Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 10);
     connectProgressStream(progressToken, function requestRefreshAfterStreamReady() {
       refreshRequestInFlight = true;
@@ -603,12 +641,23 @@
           }
           return refreshResponse.json();
         })
-        .then(function handleRefreshPayload() {
+        .then(function handleRefreshPayload(refreshPayload) {
           refreshRequestInFlight = false;
+          if (Number(refreshPayload.failed_total || 0) > 0) {
+            showPartialFailure('Часть файлов не удалось скачать.');
+            closeProgressStream();
+            return;
+          }
+          if (refreshHadPartialFailure) {
+            return;
+          }
           closeProgressStream();
           setProgressPercent(100);
           statusElement.textContent = 'Локальная копия обновлена.';
           summaryElement.innerHTML = '<div class="alert alert-success" role="alert">Демо-сайт будет пересоздаваться из новой локальной копии.</div>';
+          confirmButtonElement.classList.add('d-none');
+          cancelButtonElement.classList.add('d-none');
+          closeButtonElement.classList.remove('d-none');
         })
         .catch(function renderRefreshError(refreshError) {
           refreshRequestInFlight = false;

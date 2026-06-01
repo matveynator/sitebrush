@@ -7103,7 +7103,7 @@ func TestBillingDeleteSiteCreatesVerifiedBackupBeforeRemovingData(t *testing.T) 
 	_ = controlDB.Close()
 
 	request := httptest.NewRequest(http.MethodPost, "http://owner.example/?billing", nil)
-	backup, err := application.deleteManagedSiteWithBackup(context.Background(), request, domain)
+	backup, err := application.deleteManagedSiteWithBackup(context.Background(), request, domain, billing.DefaultDeletionBackupRetentionDays)
 	if err != nil {
 		t.Fatalf("delete with backup: %v", err)
 	}
@@ -7203,7 +7203,7 @@ func TestBillingDeleteSiteKeepsDataWhenBackupCreationFails(t *testing.T) {
 		t.Fatalf("block backup dir: %v", err)
 	}
 
-	_, err = application.deleteManagedSiteWithBackup(context.Background(), httptest.NewRequest(http.MethodPost, "http://owner.example/?billing", nil), domain)
+	_, err = application.deleteManagedSiteWithBackup(context.Background(), httptest.NewRequest(http.MethodPost, "http://owner.example/?billing", nil), domain, billing.DefaultDeletionBackupRetentionDays)
 	if err == nil {
 		t.Fatal("delete succeeded despite backup directory failure")
 	}

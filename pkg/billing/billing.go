@@ -3,6 +3,7 @@ package billing
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"math"
 	"strconv"
@@ -33,6 +34,7 @@ type Plan struct {
 
 type Site struct {
 	Domain            string
+	IsDemo            bool
 	Aliases           string
 	UsedLabel         string
 	LimitLabel        string
@@ -80,6 +82,20 @@ type SiteUsage struct {
 type ServiceAssignment struct {
 	PlanID        int
 	ServiceStatus string
+}
+
+type DeletionBackupMetadata struct {
+	Version           int      `json:"version"`
+	Domain            string   `json:"domain"`
+	CreatedAt         string   `json:"created_at"`
+	ExpiresAt         string   `json:"expires_at"`
+	RetentionDays     int      `json:"retention_days"`
+	OwnerContacts     []string `json:"owner_contacts"`
+	DeletedBytes      int64    `json:"deleted_bytes"`
+	DatabaseFile      string   `json:"database_file"`
+	StaticDirectory   string   `json:"static_directory"`
+	OriginalDatabase  string   `json:"original_database"`
+	OriginalStaticDir string   `json:"original_static_dir"`
 }
 
 func Migrate(ctx context.Context, database *sql.DB) error {
@@ -488,6 +504,10 @@ func applyPlanToSiteRequest(request *SiteRequest, plan Plan) {
 }
 
 func BuildSites(usages []SiteUsage, plans []Plan, assignments map[string]ServiceAssignment, currentDomain string) []Site {
+	return BuildSitesWithDemoDomain(usages, plans, assignments, currentDomain, "")
+}
+
+func BuildSitesWithDemoDomain(usages []SiteUsage, plans []Plan, assignments map[string]ServiceAssignment, currentDomain string, demoDomain string) []Site {
 	planByID := make(map[int]Plan)
 	for _, plan := range plans {
 		planByID[plan.ID] = plan
@@ -515,8 +535,10 @@ func BuildSites(usages []SiteUsage, plans []Plan, assignments map[string]Service
 				quotaInput = FormatQuotaInput(plan.QuotaBytes)
 			}
 		}
+		isDemo := strings.TrimSpace(usage.Domain) != "" && strings.EqualFold(strings.TrimSpace(usage.Domain), strings.TrimSpace(demoDomain))
 		sites = append(sites, Site{
 			Domain:        usage.Domain,
+			IsDemo:        isDemo,
 			Aliases:       strings.Join(usage.Aliases, ", "),
 			UsedLabel:     FormatFileSize(usage.UsedBytes),
 			LimitLabel:    FormatFileSize(usage.LimitBytes),
@@ -526,7 +548,7 @@ func BuildSites(usages []SiteUsage, plans []Plan, assignments map[string]Service
 			PlanID:        assignment.PlanID,
 			ServiceStatus: assignment.ServiceStatus,
 			AdminEmails:   strings.Join(usage.AdminEmails, ", "),
-			CanDelete:     strings.TrimSpace(usage.Domain) != strings.TrimSpace(currentDomain),
+			CanDelete:     !isDemo && strings.TrimSpace(usage.Domain) != strings.TrimSpace(currentDomain),
 			DatabasePath:  usage.DatabasePath,
 		})
 	}
@@ -569,6 +591,31 @@ func ParseQuotaLimitBytes(rawQuota string) (int64, bool, error) {
 		return 0, false, fmt.Errorf("quota is too large")
 	}
 	return quotaNumber * unitMultiplier, true, nil
+}
+
+func ParseDeletionBackupRetentionDays(rawDays string) (int, error) {
+	if strings.TrimSpace(rawDays) == "" {
+		return DefaultDeletionBackupRetentionDays, nil
+	}
+	retentionDays, err := strconv.Atoi(strings.TrimSpace(rawDays))
+	if err != nil || retentionDays < 1 || retentionDays > 3650 {
+		return 0, fmt.Errorf("backup retention must be between 1 and 3650 days")
+	}
+	return retentionDays, nil
+}
+
+func RewriteDeletionBackupMetadataRetention(metadataText string, retentionDays int, expiresAt time.Time) string {
+	var metadata DeletionBackupMetadata
+	if json.Unmarshal([]byte(metadataText), &metadata) != nil {
+		return metadataText
+	}
+	metadata.RetentionDays = retentionDays
+	metadata.ExpiresAt = expiresAt.Format(time.RFC3339)
+	metadataJSON, err := json.Marshal(metadata)
+	if err != nil {
+		return metadataText
+	}
+	return string(metadataJSON)
 }
 
 func FormatQuotaInput(sizeBytes int64) string {

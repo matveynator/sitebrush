@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"net/http"
+	"net/url"
 	"path"
 	"strings"
 	"time"
@@ -53,6 +54,25 @@ func AdminEmail(domain string) string {
 
 func SnapshotPath(backupRootDir, domainStorageName string) string {
 	return path.Join(backupRootDir, "demo-"+strings.TrimSpace(domainStorageName)+"-snapshot.zip")
+}
+
+func NormalizeSourceURL(rawSourceURL string) (string, error) {
+	trimmedSourceURL := strings.TrimSpace(rawSourceURL)
+	if trimmedSourceURL == "" {
+		return "", nil
+	}
+	if strings.HasPrefix(trimmedSourceURL, "//") {
+		trimmedSourceURL = "https:" + trimmedSourceURL
+	}
+	if !strings.Contains(trimmedSourceURL, "://") {
+		trimmedSourceURL = "https://" + trimmedSourceURL
+	}
+	sourceURL, err := url.Parse(trimmedSourceURL)
+	if err != nil || sourceURL.Hostname() == "" || (sourceURL.Scheme != "http" && sourceURL.Scheme != "https") {
+		return "", fmt.Errorf("source_url must be an http or https URL")
+	}
+	sourceURL.Fragment = ""
+	return sourceURL.String(), nil
 }
 
 func CanStartFromRequest(r *http.Request) bool {
