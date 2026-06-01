@@ -2013,6 +2013,50 @@ func TestBillingDemoGrabPreviewReportsDownloadSize(t *testing.T) {
 	}
 }
 
+func TestBillingDemoGrabRefreshUpdatesLocalSnapshot(t *testing.T) {
+	sourceURL := "https://source.example/"
+	previousGrabHTTPClient := newGrabHTTPClient
+	newGrabHTTPClient = func() *http.Client {
+		return &http.Client{Transport: fakeGrabTransport{responses: map[string]fakeGrabResponse{
+			sourceURL: {contentType: "text/html; charset=utf-8", body: `<!doctype html><html><body><h1>Refresh Demo</h1></body></html>`},
+		}}}
+	}
+	defer func() {
+		newGrabHTTPClient = previousGrabHTTPClient
+	}()
+
+	application, rawDB := newTestApplication(t)
+	if _, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "owner@example.com", "old"); err != nil {
+		t.Fatalf("insert owner user: %v", err)
+	}
+	controlDB := setupBillingOwnerForTest(t, application, "localhost", "owner@example.com", true)
+	defer controlDB.Close()
+	form := url.Values{}
+	form.Set("demo_site_domain", "demo-refresh.example")
+	form.Set("demo_site_source_url", sourceURL)
+	form.Set("progress_token", "refresh-test-token")
+	refreshRequest := httptest.NewRequest(http.MethodPost, "http://localhost:8080/?demo_grab_refresh", strings.NewReader(form.Encode()))
+	refreshRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	refreshRequest.Header.Set("Accept", "application/json")
+	refreshRequest.AddCookie(newAdminSessionCookie(t, application, "owner@example.com"))
+	refreshResponse := httptest.NewRecorder()
+	application.route(refreshResponse, refreshRequest)
+	if refreshResponse.Code != http.StatusOK {
+		t.Fatalf("refresh status = %d, body=%q", refreshResponse.Code, refreshResponse.Body.String())
+	}
+
+	var pageHTML string
+	if err := application.db.QueryRowContext(contextWithDomain(context.Background(), "demo-refresh.example"), `SELECT html FROM pages WHERE domain=? AND path='/'`, "demo-refresh.example").Scan(&pageHTML); err != nil {
+		t.Fatalf("read demo page: %v", err)
+	}
+	if !strings.Contains(pageHTML, "Refresh Demo") {
+		t.Fatalf("demo refresh content was not imported: %s", pageHTML)
+	}
+	if _, err := os.Stat(application.demoSiteSnapshotPath("demo-refresh.example")); err != nil {
+		t.Fatalf("demo snapshot stat err = %v", err)
+	}
+}
+
 func TestActiveDemoSessionDoesNotBlockScheduledSiteRecreation(t *testing.T) {
 	application := newRouterTestApplication(t)
 	controlDB := setupBillingOwnerForTest(t, application, "owner.example", "owner@example.com", true)

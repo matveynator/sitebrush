@@ -763,6 +763,29 @@
     background: rgba(0, 0, 0, 0.24);
 }
 
+.technical-page .demo-refresh-modal-dialog {
+    max-width: min(920px, calc(100vw - 24px));
+    margin-right: auto;
+    margin-left: auto;
+}
+
+.technical-page .demo-refresh-modal-dialog .modal-content {
+    max-height: calc(100vh - 24px);
+}
+
+.technical-page .demo-refresh-modal-dialog .modal-body {
+    overflow: auto;
+}
+
+.technical-page [data-demo-refresh-resource-list] {
+    max-height: min(42vh, 420px);
+    overflow: auto;
+}
+
+.technical-page [data-demo-refresh-resource-list] .list-group-item {
+    overflow-wrap: anywhere;
+}
+
 @media (max-width: 900px) {
     .technical-page .access-grid,
     .technical-page .add-form,
@@ -867,5 +890,18 @@
     .technical-page .billing-card button {
         max-width: 100%;
         white-space: normal;
+    }
+
+    .technical-page .demo-refresh-modal-dialog {
+        max-width: calc(100vw - 16px);
+        margin: 8px auto;
+    }
+
+    .technical-page .demo-refresh-modal-dialog .modal-content {
+        max-height: calc(100vh - 16px);
+    }
+
+    .technical-page [data-demo-refresh-resource-list] {
+        max-height: 34vh;
     }
 }

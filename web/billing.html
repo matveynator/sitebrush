@@ -310,13 +310,19 @@
   </section>
 </main>
 <div class="modal fade" id="demoRefreshModal" tabindex="-1" aria-hidden="true">
-  <div class="modal-dialog modal-dialog-centered"><div class="modal-content">
+  <div class="modal-dialog modal-dialog-centered modal-dialog-scrollable modal-lg demo-refresh-modal-dialog"><div class="modal-content">
     <div class="modal-header">
       <h5 class="modal-title">Обновить скачанную копию</h5>
       <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="{{index .T "tree_close"}}"></button>
     </div>
     <div class="modal-body" data-demo-refresh-modal-body>
-      <p class="text-muted">Проверка источника...</p>
+      <p class="text-muted mb-2" data-demo-refresh-status>Проверка источника...</p>
+      <div class="text-break small text-muted mb-2" data-demo-refresh-url></div>
+      <div class="progress mb-3" data-demo-refresh-progress-holder>
+        <div class="progress-bar" data-demo-refresh-progress-bar role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" style="width:0%">0%</div>
+      </div>
+      <div class="small" data-demo-refresh-summary></div>
+      <div class="list-group mt-3 d-none" data-demo-refresh-resource-list></div>
     </div>
     <div class="modal-footer">
       <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">{{index .T "edit_cancel"}}</button>
@@ -331,13 +337,22 @@
   const previewButtonElement = document.querySelector('[data-demo-refresh-preview-button]');
   const refreshDemoSiteInputElement = document.querySelector('[data-refresh-demo-site-input]');
   const modalElement = document.getElementById('demoRefreshModal');
-  const modalBodyElement = document.querySelector('[data-demo-refresh-modal-body]');
+  const statusElement = document.querySelector('[data-demo-refresh-status]');
+  const urlElement = document.querySelector('[data-demo-refresh-url]');
+  const progressHolderElement = document.querySelector('[data-demo-refresh-progress-holder]');
+  const progressBarElement = document.querySelector('[data-demo-refresh-progress-bar]');
+  const summaryElement = document.querySelector('[data-demo-refresh-summary]');
+  const resourceListElement = document.querySelector('[data-demo-refresh-resource-list]');
   const confirmButtonElement = document.querySelector('[data-demo-refresh-confirm-button]');
-  if (!settingsFormElement || !previewButtonElement || !refreshDemoSiteInputElement || !modalElement || !modalBodyElement || !confirmButtonElement || !window.bootstrap) {
+  if (!settingsFormElement || !previewButtonElement || !refreshDemoSiteInputElement || !modalElement || !statusElement || !urlElement || !progressHolderElement || !progressBarElement || !summaryElement || !resourceListElement || !confirmButtonElement || !window.bootstrap) {
     return;
   }
   const modalController = new bootstrap.Modal(modalElement, { backdrop: 'static', keyboard: false });
-  let refreshWasConfirmed = false;
+  let progressStream = null;
+  let progressStreamClosedIntentionally = false;
+  let previewRequestInFlight = false;
+  let refreshRequestInFlight = false;
+  let currentPreviewPayload = null;
 
   function formatByteCount(byteCount) {
     if (!Number.isFinite(byteCount) || byteCount < 0) {
@@ -358,7 +373,11 @@
   function renderPreviewResult(previewPayload) {
     const totalDownloadBytes = Number(previewPayload.page_download_bytes || 0) + Number(previewPayload.selected_resource_bytes || 0);
     const quotaText = previewPayload.fits_quota ? 'Квоты достаточно.' : 'После обновления квота будет превышена.';
-    modalBodyElement.innerHTML = [
+    currentPreviewPayload = previewPayload;
+    setProgressPercent(100);
+    statusElement.textContent = 'Проверьте объём скачивания и обновите локальную копию.';
+    urlElement.textContent = previewPayload.source_url || '';
+    summaryElement.innerHTML = [
       '<p><strong>Источник:</strong> ' + escapeHTML(previewPayload.source_url || '') + '</p>',
       '<ul>',
       '<li>Страниц: ' + Number(previewPayload.page_count || 0) + '</li>',
@@ -368,6 +387,7 @@
       '</ul>',
       '<p class="text-muted">' + quotaText + '</p>'
     ].join('');
+    renderResourceRows(previewPayload.resources || []);
     confirmButtonElement.disabled = !previewPayload.fits_quota;
   }
 
@@ -377,40 +397,235 @@
     return temporaryElement.innerHTML;
   }
 
+  function setProgressPercent(percentNumber) {
+    const boundedPercent = Math.max(0, Math.min(100, Number(percentNumber) || 0));
+    progressBarElement.style.width = boundedPercent + '%';
+    progressBarElement.textContent = boundedPercent + '%';
+    progressBarElement.setAttribute('aria-valuenow', String(boundedPercent));
+  }
+
+  function resetProgressWindow(statusText) {
+    closeProgressStream();
+    currentPreviewPayload = null;
+    confirmButtonElement.disabled = true;
+    statusElement.textContent = statusText;
+    urlElement.textContent = '';
+    summaryElement.textContent = '';
+    resourceListElement.replaceChildren();
+    resourceListElement.classList.add('d-none');
+    progressHolderElement.classList.remove('d-none');
+    setProgressPercent(0);
+  }
+
+  function renderResourceRows(previewResources) {
+    resourceListElement.replaceChildren();
+    if (previewResources.length === 0) {
+      resourceListElement.classList.add('d-none');
+      return;
+    }
+    resourceListElement.classList.remove('d-none');
+    for (const previewResource of previewResources) {
+      appendResourceRow(previewResource);
+    }
+  }
+
+  function appendResourceRow(previewResource) {
+    resourceListElement.classList.remove('d-none');
+    const resourceRowElement = document.createElement('div');
+    resourceRowElement.className = 'list-group-item';
+    resourceRowElement.dataset.demoRefreshResourceUrl = previewResource.url || '';
+    const resourceHeaderElement = document.createElement('div');
+    resourceHeaderElement.className = 'd-flex gap-2 align-items-start';
+    const kindElement = document.createElement('span');
+    kindElement.className = 'badge text-bg-secondary flex-shrink-0';
+    kindElement.textContent = previewResource.kind || 'file';
+    const textElement = document.createElement('div');
+    textElement.className = 'flex-grow-1 text-break';
+    const urlTextElement = document.createElement('div');
+    urlTextElement.textContent = previewResource.url || '';
+    const sizeElement = document.createElement('div');
+    sizeElement.className = 'text-muted small';
+    sizeElement.dataset.demoRefreshResourceStatus = '1';
+    sizeElement.textContent = formatByteCount(Number(previewResource.size_bytes || 0));
+    textElement.appendChild(urlTextElement);
+    textElement.appendChild(sizeElement);
+    resourceHeaderElement.appendChild(kindElement);
+    resourceHeaderElement.appendChild(textElement);
+    resourceRowElement.appendChild(resourceHeaderElement);
+    resourceListElement.appendChild(resourceRowElement);
+  }
+
+  function findResourceRow(resourceURL) {
+    for (const resourceRowElement of resourceListElement.querySelectorAll('[data-demo-refresh-resource-url]')) {
+      if (resourceRowElement.dataset.demoRefreshResourceUrl === resourceURL) {
+        return resourceRowElement;
+      }
+    }
+    return null;
+  }
+
+  function updateResourceProgress(progressState) {
+    const resourceURL = progressState.current_url || '';
+    if (resourceURL === '') {
+      return;
+    }
+    let resourceRowElement = findResourceRow(resourceURL);
+    if (!resourceRowElement) {
+      appendResourceRow({ url: resourceURL, kind: 'file', size_bytes: progressState.current_size_bytes || -1 });
+      resourceRowElement = findResourceRow(resourceURL);
+    }
+    if (!resourceRowElement) {
+      return;
+    }
+    const statusTextElement = resourceRowElement.querySelector('[data-demo-refresh-resource-status]');
+    const currentPercent = progressState.stage === 'downloaded' ? 100 : Number(progressState.current_percent || 0);
+    if (statusTextElement) {
+      statusTextElement.textContent = 'Скачивание: ' + currentPercent + '%';
+    }
+  }
+
+  function closeProgressStream() {
+    if (!progressStream) {
+      return;
+    }
+    progressStreamClosedIntentionally = true;
+    progressStream.close();
+    progressStream = null;
+  }
+
+  function connectProgressStream(progressToken, readyCallback, doneCallback) {
+    let readyCallbackWasCalled = false;
+    progressStreamClosedIntentionally = false;
+    progressStream = new EventSource('?grab_events&token=' + encodeURIComponent(progressToken));
+    progressStream.onmessage = function handleProgressMessage(messageEvent) {
+      let progressState = null;
+      try {
+        progressState = JSON.parse(messageEvent.data);
+      } catch (parseError) {
+        showError('Ошибка чтения прогресса.');
+        closeProgressStream();
+        return;
+      }
+      if (progressState.stage === 'ready') {
+        if (!readyCallbackWasCalled) {
+          readyCallbackWasCalled = true;
+          readyCallback();
+        }
+        return;
+      }
+      const completedPercent = Number(progressState.completed_percent || 0);
+      const foundTotal = Number(progressState.found_total || 0);
+      const downloadedTotal = Number(progressState.downloaded_total || 0);
+      updateResourceProgress(progressState);
+      setProgressPercent(completedPercent);
+      statusElement.textContent = 'Скачано ' + downloadedTotal + ' из ' + foundTotal + ' (' + completedPercent + '%).';
+      urlElement.textContent = progressState.current_url || '';
+      if (progressState.stage === 'partial') {
+        showError(progressState.message || 'Часть файлов не удалось скачать.');
+        closeProgressStream();
+        return;
+      }
+      if (progressState.stage === 'done') {
+        setProgressPercent(100);
+        closeProgressStream();
+        doneCallback();
+      }
+      if (progressState.stage === 'error' && !progressState.current_url) {
+        showError(progressState.message || 'Скачивание не удалось.');
+        closeProgressStream();
+      }
+    };
+    progressStream.onerror = function handleProgressError() {
+      if (progressStreamClosedIntentionally || previewRequestInFlight || refreshRequestInFlight) {
+        return;
+      }
+      showError('Соединение с прогрессом потеряно.');
+    };
+  }
+
+  function buildDemoRefreshRequestBody(progressToken) {
+    const requestBody = new FormData(settingsFormElement);
+    requestBody.set('progress_token', progressToken);
+    return requestBody;
+  }
+
+  function showError(errorText) {
+    statusElement.textContent = errorText;
+    summaryElement.innerHTML = '<div class="alert alert-danger" role="alert">' + escapeHTML(errorText) + '</div>';
+    confirmButtonElement.disabled = true;
+  }
+
   previewButtonElement.addEventListener('click', function handlePreviewButtonClick() {
     if (!settingsFormElement.reportValidity()) {
       return;
     }
-    confirmButtonElement.disabled = true;
-    modalBodyElement.innerHTML = '<p class="text-muted">Проверка источника...</p>';
+    resetProgressWindow('Проверка источника...');
     modalController.show();
-    const previewRequestBody = new FormData(settingsFormElement);
-    fetch('?demo_grab_preview', { method: 'POST', body: previewRequestBody, headers: { 'Accept': 'application/json' } })
-      .then(function handlePreviewResponse(previewResponse) {
-        if (!previewResponse.ok) {
-          return previewResponse.text().then(function throwPreviewError(errorText) {
-            throw new Error(errorText || previewResponse.statusText);
-          });
-        }
-        return previewResponse.json();
-      })
-      .then(renderPreviewResult)
-      .catch(function renderPreviewError(previewError) {
-        confirmButtonElement.disabled = true;
-        modalBodyElement.innerHTML = '<div class="alert alert-danger" role="alert">' + escapeHTML(previewError.message || String(previewError)) + '</div>';
-      });
+    const progressToken = Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 10);
+    connectProgressStream(progressToken, function requestPreviewAfterStreamReady() {
+      previewRequestInFlight = true;
+      fetch('?demo_grab_preview', { method: 'POST', body: buildDemoRefreshRequestBody(progressToken), headers: { 'Accept': 'application/json' } })
+        .then(function handlePreviewResponse(previewResponse) {
+          if (!previewResponse.ok) {
+            return previewResponse.text().then(function throwPreviewError(errorText) {
+              throw new Error(errorText || previewResponse.statusText);
+            });
+          }
+          return previewResponse.json();
+        })
+        .then(function handlePreviewPayload(previewPayload) {
+          previewRequestInFlight = false;
+          closeProgressStream();
+          renderPreviewResult(previewPayload);
+        })
+        .catch(function renderPreviewError(previewError) {
+          previewRequestInFlight = false;
+          closeProgressStream();
+          showError(previewError.message || String(previewError));
+        });
+    }, function handlePreviewDone() {});
   });
 
   confirmButtonElement.addEventListener('click', function handleConfirmButtonClick() {
-    refreshWasConfirmed = true;
-    refreshDemoSiteInputElement.value = '1';
-    settingsFormElement.requestSubmit();
+    if (!currentPreviewPayload) {
+      return;
+    }
+    resetProgressWindow('Обновление локальной копии...');
+    const progressToken = Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 10);
+    connectProgressStream(progressToken, function requestRefreshAfterStreamReady() {
+      refreshRequestInFlight = true;
+      fetch('?demo_grab_refresh', { method: 'POST', body: buildDemoRefreshRequestBody(progressToken), headers: { 'Accept': 'application/json' } })
+        .then(function handleRefreshResponse(refreshResponse) {
+          if (!refreshResponse.ok) {
+            return refreshResponse.text().then(function throwRefreshError(errorText) {
+              throw new Error(errorText || refreshResponse.statusText);
+            });
+          }
+          return refreshResponse.json();
+        })
+        .then(function handleRefreshPayload() {
+          refreshRequestInFlight = false;
+          closeProgressStream();
+          setProgressPercent(100);
+          statusElement.textContent = 'Локальная копия обновлена.';
+          summaryElement.innerHTML = '<div class="alert alert-success" role="alert">Демо-сайт будет пересоздаваться из новой локальной копии.</div>';
+        })
+        .catch(function renderRefreshError(refreshError) {
+          refreshRequestInFlight = false;
+          closeProgressStream();
+          showError(refreshError.message || String(refreshError));
+        });
+    }, function handleRefreshDone() {
+      statusElement.textContent = 'Локальная копия обновляется...';
+    });
   });
 
   settingsFormElement.addEventListener('submit', function handleSettingsSubmit() {
-    if (!refreshWasConfirmed) {
-      refreshDemoSiteInputElement.value = '0';
-    }
+    refreshDemoSiteInputElement.value = '0';
+  });
+
+  modalElement.addEventListener('hidden.bs.modal', function handleDemoRefreshModalHidden() {
+    closeProgressStream();
   });
 })();
 </script>

@@ -5454,6 +5454,10 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 		a.demoGrabPreview(w, r)
 		return
 	}
+	if hasQueryFlag(r, "demo_grab_refresh") {
+		a.demoGrabRefresh(w, r)
+		return
+	}
 	if hasQueryFlag(r, "billing_backup_download") {
 		a.downloadManagedSiteDeletionBackup(w, r)
 		return
@@ -5940,7 +5944,7 @@ func (a *App) startDemoSiteSession(w http.ResponseWriter, r *http.Request, setti
 	if ownerDomain, found := store.OwnerDomain(r.Context()); found && normalizeDomainName(ownerDomain) == domain {
 		return "", fmt.Errorf("server owner site cannot be used as the public demo site")
 	}
-	adminEmail, err := a.ensureDemoSiteReady(r.Context(), controlDatabase, settings, false)
+	adminEmail, err := a.ensureDemoSiteReady(r.Context(), controlDatabase, settings, false, "")
 	if err != nil {
 		return "", err
 	}
@@ -5951,7 +5955,7 @@ func (a *App) startDemoSiteSession(w http.ResponseWriter, r *http.Request, setti
 	return "/", nil
 }
 
-func (a *App) ensureDemoSiteReady(ctx context.Context, controlDatabase *sql.DB, settings demo.Settings, refreshSnapshot bool) (string, error) {
+func (a *App) ensureDemoSiteReady(ctx context.Context, controlDatabase *sql.DB, settings demo.Settings, refreshSnapshot bool, progressToken string) (string, error) {
 	domain := normalizeDomainName(settings.Domain)
 	if domain == "" {
 		return "", fmt.Errorf("demo domain is required")
@@ -5986,7 +5990,7 @@ func (a *App) ensureDemoSiteReady(ctx context.Context, controlDatabase *sql.DB, 
 			return adminEmail, nil
 		}
 		if settings.SourceURL != "" {
-			if err := a.seedDemoSiteContent(ctx, domain, settings); err != nil {
+			if err := a.seedDemoSiteContent(ctx, domain, settings, progressToken); err != nil {
 				log.Printf("demo site source import failed domain=%s source=%s error=%v", domain, settings.SourceURL, err)
 				return "", err
 			}
@@ -6021,7 +6025,7 @@ func (a *App) isDemoSiteDomain(ctx context.Context, domain string) bool {
 	return normalizeDomainName(settings.Domain) == normalizeDomainName(domain)
 }
 
-func (a *App) seedDemoSiteContent(ctx context.Context, domain string, settings demo.Settings) error {
+func (a *App) seedDemoSiteContent(ctx context.Context, domain string, settings demo.Settings, progressToken string) error {
 	sourceURL := strings.TrimSpace(settings.SourceURL)
 	if sourceURL == "" {
 		a.createDemoWelcomePage(ctx, domain)
@@ -6037,10 +6041,10 @@ func (a *App) seedDemoSiteContent(ctx context.Context, domain string, settings d
 	}
 	domainContext := contextWithDomain(ctx, domain)
 	if settings.CopyWholeSite {
-		_, err = a.importWholeRemoteSite(domainContext, domain, "/", resolvedSourceURL, string(htmlBytes), "", nil, grabSourceOptions{})
+		_, err = a.importWholeRemoteSite(domainContext, domain, "/", resolvedSourceURL, string(htmlBytes), progressToken, nil, grabSourceOptions{})
 		return err
 	}
-	spider, importedHTML := prepareSinglePageImport(domain, "/", resolvedSourceURL.String(), resolvedSourceURL, string(htmlBytes), a.grabTracker, "", nil, grabSourceOptions{})
+	spider, importedHTML := prepareSinglePageImport(domain, "/", resolvedSourceURL.String(), resolvedSourceURL, string(htmlBytes), a.grabTracker, progressToken, nil, grabSourceOptions{})
 	importedPages := []wholeSiteImportedPage{{SourceURL: resolvedSourceURL.String(), LocalPath: "/", HTML: importedHTML}}
 	pageDelta, publishedPageDelta, revisionDelta, publishedStaticDelta := a.estimateImportedPagesStorageDelta(domainContext, domain, importedPages)
 	fileDelta := a.estimateImportedFileDelta(domain, spider)
@@ -6056,6 +6060,13 @@ func (a *App) seedDemoSiteContent(ctx context.Context, domain string, settings d
 		return storeErr
 	}
 	a.rebuildDomainStorageUsage(domainContext, domain)
+	if a.grabTracker != nil && progressToken != "" {
+		stage := "done"
+		if spider.failedTotal > 0 {
+			stage = "partial"
+		}
+		a.grabTracker.publish(grabProgressEvent{Token: progressToken, Stage: stage, FoundTotal: spider.foundTotal, DownloadedTotal: spider.downloadedTotal, FailedTotal: spider.failedTotal, CompletedPercent: 100})
+	}
 	return nil
 }
 
@@ -6097,19 +6108,20 @@ func (a *App) demoGrabPreview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	remoteSourceURL = resolvedSourceURL
+	progressToken := strings.TrimSpace(r.FormValue("progress_token"))
 	pagePath := "/"
 	pageCount := 1
 	var resources []grabResourcePreview
 	var importedPages []wholeSiteImportedPage
 	var previewSpider *pageSpider
 	if r.FormValue("demo_site_copy_whole_site") == "1" {
-		wholeSitePreview := previewWholeRemoteSiteResources(remoteSourceURL, string(htmlBytes), pagePath, a.grabTracker, "", grabSourceOptions{})
+		wholeSitePreview := previewWholeRemoteSiteResources(remoteSourceURL, string(htmlBytes), pagePath, a.grabTracker, progressToken, grabSourceOptions{})
 		resources = wholeSitePreview.Resources
 		pageCount = wholeSitePreview.PageCount
 		importedPages = wholeSitePreview.ImportedPages
 		previewSpider = wholeSitePreview.Spider
 	} else {
-		previewSpider, importedHTML := prepareSinglePageImport(domain, pagePath, remoteSourceURL.String(), remoteSourceURL, string(htmlBytes), a.grabTracker, "", nil, grabSourceOptions{})
+		previewSpider, importedHTML := prepareSinglePageImport(domain, pagePath, remoteSourceURL.String(), remoteSourceURL, string(htmlBytes), a.grabTracker, progressToken, nil, grabSourceOptions{})
 		resources = previewResourcesFromSpider(previewSpider, map[string]struct{}{remoteSourceURL.String(): {}})
 		importedPages = []wholeSiteImportedPage{{SourceURL: remoteSourceURL.String(), LocalPath: pagePath, HTML: importedHTML}}
 	}
@@ -6139,6 +6151,56 @@ func (a *App) demoGrabPreview(w http.ResponseWriter, r *http.Request) {
 	if encodeErr != nil {
 		a.logProblemEvent("demo grab preview response failed domain=%s source=%s error=%v duration=%s", domain, sourceURL, encodeErr, time.Since(startedAt).String())
 	}
+	if encodeErr == nil && a.grabTracker != nil && progressToken != "" && previewSpider != nil {
+		a.grabTracker.publish(grabProgressEvent{Token: progressToken, Stage: "done", FoundTotal: previewSpider.foundTotal, DownloadedTotal: previewSpider.downloadedTotal, CompletedPercent: 100})
+	}
+}
+
+func (a *App) demoGrabRefresh(w http.ResponseWriter, r *http.Request) {
+	if !a.isAdminRequest(r) || !a.isServerManagerRequest(r) || r.Method != http.MethodPost {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	controlDatabase, err := a.openServerControlDatabase(r.Context())
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	defer controlDatabase.Close()
+	store := billing.Store{DB: controlDatabase}
+	demoDomain := normalizeQuotaDomainName(r.FormValue("demo_site_domain"))
+	demoSourceURL := strings.TrimSpace(r.FormValue("demo_site_source_url"))
+	if demoDomain == "" {
+		http.Error(w, "Домен демо-сайта обязателен.", http.StatusBadRequest)
+		return
+	}
+	if ownerDomain, found := store.OwnerDomain(r.Context()); found && normalizeDomainName(ownerDomain) == demoDomain {
+		http.Error(w, "Сайт владельца сервера нельзя использовать как публичный демо-сайт.", http.StatusBadRequest)
+		return
+	}
+	if demoSourceURL != "" {
+		if _, parseErr := parseGrabSourceURL(demoSourceURL); parseErr != nil {
+			http.Error(w, parseErr.Error(), http.StatusBadRequest)
+			return
+		}
+	}
+	demoCopyWholeSite := r.FormValue("demo_site_copy_whole_site") == "1"
+	if err := (demo.Store{DB: controlDatabase}).SaveSettings(r.Context(), demoDomain, demoSourceURL, demoCopyWholeSite, true); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	settings := demo.Settings{Domain: demoDomain, SourceURL: demoSourceURL, CopyWholeSite: demoCopyWholeSite, Enabled: true}
+	progressToken := strings.TrimSpace(r.FormValue("progress_token"))
+	if _, err := a.ensureDemoSiteReady(r.Context(), controlDatabase, settings, true, progressToken); err != nil {
+		statusCode := http.StatusBadGateway
+		if strings.Contains(err.Error(), "storage limit reached:") {
+			statusCode = http.StatusInsufficientStorage
+		}
+		http.Error(w, err.Error(), statusCode)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 }
 
 func (a *App) createDemoWelcomePage(ctx context.Context, domain string) {
@@ -8168,7 +8230,7 @@ func (a *App) saveBillingSettingsFromForm(r *http.Request) string {
 	if demoEnabled {
 		settings := demo.Settings{Domain: demoDomain, SourceURL: demoSourceURL, CopyWholeSite: demoCopyWholeSite, Enabled: true}
 		refreshDemoSite := r.FormValue("refresh_demo_site") == "1"
-		if _, err := a.ensureDemoSiteReady(r.Context(), controlDatabase, settings, refreshDemoSite); err != nil {
+		if _, err := a.ensureDemoSiteReady(r.Context(), controlDatabase, settings, refreshDemoSite, ""); err != nil {
 			return err.Error()
 		}
 	}
