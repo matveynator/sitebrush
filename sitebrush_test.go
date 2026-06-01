@@ -5416,6 +5416,26 @@ func TestGuestStaticRouteServesPublishedFileWithoutDatabase(t *testing.T) {
 	}
 }
 
+func TestGuestContextMenuStandardMenuHintIsMouseOnlyAndTranslated(t *testing.T) {
+	for languageCode, translations := range translationCatalog {
+		if strings.TrimSpace(translations["menu_standard_context_hint"]) == "" {
+			t.Fatalf("missing standard context-menu hint translation for %s", languageCode)
+		}
+	}
+
+	body := buildGuestContextMenuScriptForLanguage("/", "localhost", "en")
+	for _, expectedFragment := range []string{
+		"Browser standard menu: Ctrl + right mouse click.",
+		"buildSitebrushGuestMenuEntries(sitebrushContextMenuWasOpenedByMouse(browserEvent))",
+		"buildSitebrushGuestMenuEntries(false)",
+		"function sitebrushContextMenuWasOpenedByMouse(browserEvent)",
+	} {
+		if !strings.Contains(body, expectedFragment) {
+			t.Fatalf("guest context menu missing %q in %s", expectedFragment, body)
+		}
+	}
+}
+
 func TestGuestStaticAnalyticsAvoidsDatabaseAndEnqueuesEvent(t *testing.T) {
 	storagePath := t.TempDir()
 	application := &App{db: panicSQLExecutor{t: t}, storagePath: storagePath, analyticsEvents: make(chan siteAnalyticsEvent, 1)}

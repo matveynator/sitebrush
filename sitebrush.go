@@ -13643,6 +13643,7 @@ func buildGuestNotFoundPageTemplate(languageCode string, translations map[string
 
 func buildGuestContextMenuScriptTemplate(translations map[string]string) string {
 	loginLabel := template.JSEscapeString(translationOrDefault(translations, "menu_login", "Sign in"))
+	standardMenuHint := template.JSEscapeString(template.HTMLEscapeString(translationOrDefault(translations, "menu_standard_context_hint", "Browser standard menu: Ctrl + right mouse click.")))
 	compiledVersionLabel := template.JSEscapeString("v." + CompileVersion)
 	sitebrushHomeURL := "https://sitebrush.com"
 	serverBinaryDownloadURL := latestServerBinaryDownloadURL(runtime.GOOS, runtime.GOARCH)
@@ -13655,14 +13656,24 @@ func buildGuestContextMenuScriptTemplate(translations map[string]string) string 
   window.__sitebrushContextMenuInitialized = true;
   const currentPagePath = "` + guestContextMenuPagePathPlaceholder + `";
   const currentDomainName = "` + guestContextMenuDomainPlaceholder + `";
-  function buildSitebrushGuestMenuEntries() {
-    return [
+  function buildSitebrushGuestMenuEntries(showStandardMenuHint) {
+    const menuEntries = [
       "<ul class='SiteBrushMenuList'>",
       "<li class='SiteBrushContextMenu SiteBrushDomainMenuItem'><a href='/' class='SiteBrushContextMenuLink'>" + currentDomainName + "</a></li>",
       "<li class='SiteBrushContextMenu'><a href='?login' class='SiteBrushContextMenuLink'><img src='/p/static/login.png' class='SiteBrushMenuIcon' alt=''>" + "` + loginLabel + `" + "</a></li>",
-      "` + copyrightMenuEntry + `",
-      "</ul>"
+      "` + copyrightMenuEntry + `"
     ];
+    if (showStandardMenuHint) {
+      menuEntries.splice(menuEntries.length - 1, 0, "<li class='SiteBrushContextMenu SiteBrushStandardMenuHint'>` + standardMenuHint + `</li>");
+    }
+    menuEntries.push("</ul>");
+    return menuEntries;
+  }
+  function sitebrushContextMenuWasOpenedByMouse(browserEvent) {
+    if (browserEvent.pointerType && browserEvent.pointerType !== "mouse") {
+      return false;
+    }
+    return Number(browserEvent.clientX) !== 0 || Number(browserEvent.clientY) !== 0;
   }
   function onContextMenuOpen(browserEvent) {
     if (browserEvent.__sitebrushContextMenuHandled || browserEvent.ctrlKey) {
@@ -13678,12 +13689,12 @@ func buildGuestContextMenuScriptTemplate(translations map[string]string) string 
     browserEvent.__sitebrushContextMenuHandled = true;
     browserEvent.preventDefault();
     browserEvent.stopPropagation();
-    showSitebrushMenu(browserEvent, buildSitebrushGuestMenuEntries(), currentPagePath, false);
+    showSitebrushMenu(browserEvent, buildSitebrushGuestMenuEntries(sitebrushContextMenuWasOpenedByMouse(browserEvent)), currentPagePath, false);
   }
   window.addEventListener("contextmenu", onContextMenuOpen, {capture: true, passive: false});
   document.addEventListener("contextmenu", onContextMenuOpen, {capture: true, passive: false});
   installSitebrushLongPressMenu(function openGuestMenuFromLongPress(menuPoint) {
-    showSitebrushMenu(menuPoint, buildSitebrushGuestMenuEntries(), currentPagePath, false);
+    showSitebrushMenu(menuPoint, buildSitebrushGuestMenuEntries(false), currentPagePath, false);
   });
 })();
 	</script>`
@@ -13707,6 +13718,7 @@ func guestContextMenuStylesAndHelpers() string {
 .SiteBrushContextMenuLink:link,.SiteBrushContextMenuLink:visited,.SiteBrushContextMenuLink:active{color:#1f3f6f;text-decoration:none}
 .SiteBrushContextMenuLink:hover{color:#1f3f6f;background:#eef5ff;text-decoration:none}
 .SiteBrushDomainMenuItem .SiteBrushContextMenuLink{font-weight:700;border-bottom:1px solid #c8d5e7}
+.SiteBrushStandardMenuHint{border-top:1px solid #c8d5e7;margin-top:2px;padding:5px 10px;color:#5b6f8b;font-family:Arial,Helvetica,sans-serif;font-size:10px;line-height:1.25}
 .SiteBrushContextMenuFooter{display:flex;align-items:center;justify-content:space-between;gap:12px;border-top:1px solid #c8d5e7;margin-top:2px;padding:7px 10px 8px 10px;font-family:Arial,Helvetica,sans-serif;font-size:12px;color:#5b6f8b}.SiteBrushMenuIcon{width:18px;height:18px;flex:0 0 18px}
 .SiteBrushContextMenuFooterLink,.SiteBrushContextMenuVersion{color:#5b6f8b;text-decoration:none;font-family:Arial,Helvetica,sans-serif;font-size:12px;cursor:pointer}
 .SiteBrushContextMenuFooterLink:link,.SiteBrushContextMenuFooterLink:visited,.SiteBrushContextMenuFooterLink:active,.SiteBrushContextMenuFooterLink:hover,.SiteBrushContextMenuVersion:link,.SiteBrushContextMenuVersion:visited,.SiteBrushContextMenuVersion:active,.SiteBrushContextMenuVersion:hover{color:#5b6f8b;text-decoration:none}
@@ -13715,6 +13727,7 @@ func guestContextMenuStylesAndHelpers() string {
   .SiteBrushMenuBox{right:auto;min-width:min(220px,calc(100vw - 12px));max-width:calc(100vw - 12px);max-height:calc(100vh - 12px);border-radius:7px;padding:1px;-webkit-overflow-scrolling:touch}
   .SiteBrushContextMenuLink{min-height:34px;padding:7px 9px;font-size:13px;gap:7px}
   .SiteBrushMenuIcon{width:16px;height:16px;flex-basis:16px}
+  .SiteBrushStandardMenuHint{font-size:9px;padding:5px 8px}
   .SiteBrushContextMenuFooter{font-size:11px;flex-wrap:wrap;padding:6px 8px 7px 8px;gap:8px}
   .SiteBrushContextMenuFooterLink,.SiteBrushContextMenuVersion{font-size:11px}
 }
@@ -13724,6 +13737,7 @@ func guestContextMenuStylesAndHelpers() string {
   .SiteBrushContextMenuLink:link,.SiteBrushContextMenuLink:visited,.SiteBrushContextMenuLink:active{color:#dbe8ff}
   .SiteBrushContextMenuLink:hover{color:#dbe8ff;background:#24344d}
   .SiteBrushDomainMenuItem .SiteBrushContextMenuLink{border-bottom-color:#2f405d}
+  .SiteBrushStandardMenuHint{color:#a7bbd8;border-top-color:#2f405d}
   .SiteBrushContextMenuFooter{color:#a7bbd8;border-top-color:#2f405d}
   .SiteBrushContextMenuFooterLink,.SiteBrushContextMenuVersion{color:#a7bbd8}
   .SiteBrushContextMenuFooterLink:link,.SiteBrushContextMenuFooterLink:visited,.SiteBrushContextMenuFooterLink:active,.SiteBrushContextMenuFooterLink:hover,.SiteBrushContextMenuVersion:link,.SiteBrushContextMenuVersion:visited,.SiteBrushContextMenuVersion:active,.SiteBrushContextMenuVersion:hover{color:#a7bbd8}
