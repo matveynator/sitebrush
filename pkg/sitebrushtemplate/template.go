@@ -113,13 +113,14 @@ func ClassActionSetFromHTML(previousHTML, savedHTML string) ClassActionSet {
 	savedTemplateKeys, savedPlainKeys := classKeySets(savedHTML)
 	previousElements := scanClassElements(previousHTML)
 	savedElements := scanClassElements(savedHTML)
+	previousElementBySavedIndex := pairElementsByTagOrder(previousElements, savedElements)
 
 	actionSet := ClassActionSet{
 		addByKey:        make(map[string]classRewrite),
 		addByContentKey: make(map[string]classRewrite),
 		removeByKey:     make(map[string]struct{}),
 	}
-	for _, savedElement := range savedElements {
+	for savedElementIndex, savedElement := range savedElements {
 		if !savedElement.hasTemplate {
 			continue
 		}
@@ -129,6 +130,13 @@ func ClassActionSetFromHTML(previousHTML, savedHTML string) ClassActionSet {
 			actionSet.addByKey[savedElement.matchKey] = classRewrite{classNames: savedElement.classNames}
 			if savedElement.contentKey != "" {
 				actionSet.addByContentKey[classContentElementKey(savedElement.tagName, savedElement.contentKey)] = classRewrite{classNames: savedElement.classNames}
+			}
+		}
+		previousPeer, hasPreviousPeer := previousElementBySavedIndex[savedElementIndex]
+		if hasPreviousPeer && !previousPeer.hasTemplate {
+			actionSet.addByKey[previousPeer.matchKey] = classRewrite{classNames: savedElement.classNames}
+			if previousPeer.contentKey != "" {
+				actionSet.addByContentKey[classContentElementKey(previousPeer.tagName, previousPeer.contentKey)] = classRewrite{classNames: savedElement.classNames}
 			}
 		}
 		for _, previousElement := range previousElements {
@@ -157,6 +165,25 @@ func ClassActionSetFromHTML(previousHTML, savedHTML string) ClassActionSet {
 		}
 	}
 	return actionSet
+}
+
+func pairElementsByTagOrder(previousElements, savedElements []classElement) map[int]classElement {
+	previousElementsByTag := make(map[string][]classElement)
+	for _, previousElement := range previousElements {
+		previousElementsByTag[previousElement.tagName] = append(previousElementsByTag[previousElement.tagName], previousElement)
+	}
+	savedTagCount := make(map[string]int)
+	previousElementBySavedIndex := make(map[int]classElement)
+	for savedElementIndex, savedElement := range savedElements {
+		tagIndex := savedTagCount[savedElement.tagName]
+		savedTagCount[savedElement.tagName] = tagIndex + 1
+		previousTagElements := previousElementsByTag[savedElement.tagName]
+		if tagIndex >= len(previousTagElements) {
+			continue
+		}
+		previousElementBySavedIndex[savedElementIndex] = previousTagElements[tagIndex]
+	}
+	return previousElementBySavedIndex
 }
 
 func (actionSet ClassActionSet) IsEmpty() bool {

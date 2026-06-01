@@ -59,8 +59,27 @@ func TestSynchronizeClassesMatchesStyleContentByCSSMeaning(t *testing.T) {
 	}
 }
 
+func TestSynchronizeClassesUsesPreviousElementContentWhenTemplateContentChanges(t *testing.T) {
+	previousHTML := `<html><head><style type="text/css">body { color: red; }</style></head></html>`
+	savedHTML := `<html><head><style type="text/css" class="SiteBrush-Template mainstyle">body { color: blue; }</style></head></html>`
+	targetHTML := `<html><head><style
+  type="text/css">
+body {
+	color: red;
+}
+</style></head></html>`
+
+	updatedHTML, changed := SynchronizeClasses(targetHTML, ClassActionSetFromHTML(previousHTML, savedHTML))
+	if !changed {
+		t.Fatal("changed = false, want true")
+	}
+	if !strings.Contains(updatedHTML, `class="SiteBrush-Template mainstyle"`) {
+		t.Fatalf("style template class was not synchronized from previous content: %s", updatedHTML)
+	}
+}
+
 func TestSynchronizeClassesDoesNotMatchDifferentStyleSelectors(t *testing.T) {
-	previousHTML := `<html><head><style type="text/css">.menu .item{color:red}</style></head></html>`
+	previousHTML := `<html><head><style type="text/css">.menu.item{color:red}</style></head></html>`
 	savedHTML := `<html><head><style type="text/css" class="SiteBrush-Template mainstyle">.menu.item{color:red}</style></head></html>`
 	targetHTML := `<html><head><style type="text/css">.menu .item { color: red; }</style></head></html>`
 
