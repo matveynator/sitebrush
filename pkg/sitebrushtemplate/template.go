@@ -5,6 +5,7 @@ import (
 	"sort"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 
 	"golang.org/x/net/html"
 )
@@ -60,6 +61,9 @@ type openElement struct {
 }
 
 var htmlClassAttributePattern = regexp.MustCompile(`(?is)\sclass\s*=\s*("([^"]*)"|'([^']*)'|([^\s"'=<>]+))`)
+var cssSingleQuotedURLPattern = regexp.MustCompile(`(?i)url\('([^']*)'\)`)
+var cssDoubleQuotedURLPattern = regexp.MustCompile(`(?i)url\("([^"]*)"\)`)
+var cssSemicolonBeforeBracePattern = regexp.MustCompile(`;+\}`)
 
 func ExtractBlocks(sourceHTML string) map[string]string {
 	matchList := scanMatches(sourceHTML)
@@ -296,7 +300,7 @@ func scanClassElements(sourceHTML string) []classElement {
 				if !strings.EqualFold(openElement.tagName, token.Data) {
 					continue
 				}
-				contentKey := normalizedInnerHTML(sourceHTML[openElement.startTagEnd:tokenStart])
+				contentKey := normalizedElementContent(openElement.tagName, sourceHTML[openElement.startTagEnd:tokenStart])
 				elementList = append(elementList, classElement{
 					startTagStart: openElement.startTagStart,
 					startTagEnd:   openElement.startTagEnd,
@@ -386,6 +390,132 @@ func normalizedInnerHTML(innerHTML string) string {
 		}
 	}
 	return normalizedHTML.String()
+}
+
+func normalizedElementContent(tagName, innerHTML string) string {
+	if strings.EqualFold(tagName, "style") {
+		return normalizedCSS(innerHTML)
+	}
+	return normalizedInnerHTML(innerHTML)
+}
+
+func normalizedCSS(cssText string) string {
+	cssWithoutComments := stripCSSComments(cssText)
+	var normalizedCSS strings.Builder
+	normalizedCSS.Grow(len(cssWithoutComments))
+	quoteRune := rune(0)
+	escaped := false
+	pendingWhitespace := false
+	previousRune := rune(0)
+	for _, currentRune := range cssWithoutComments {
+		if quoteRune != 0 {
+			normalizedCSS.WriteRune(currentRune)
+			if escaped {
+				escaped = false
+				continue
+			}
+			if currentRune == '\\' {
+				escaped = true
+				continue
+			}
+			if currentRune == quoteRune {
+				quoteRune = 0
+			}
+			previousRune = currentRune
+			continue
+		}
+		if unicode.IsSpace(currentRune) {
+			pendingWhitespace = true
+			continue
+		}
+		if pendingWhitespace && normalizedCSS.Len() > 0 && cssWhitespaceIsSignificant(previousRune, currentRune) {
+			normalizedCSS.WriteByte(' ')
+		}
+		pendingWhitespace = false
+		if currentRune == '\'' || currentRune == '"' {
+			quoteRune = currentRune
+			normalizedCSS.WriteRune(currentRune)
+			previousRune = currentRune
+			continue
+		}
+		normalizedCSS.WriteRune(currentRune)
+		previousRune = currentRune
+	}
+	normalizedText := normalizedCSS.String()
+	normalizedText = cssSingleQuotedURLPattern.ReplaceAllString(normalizedText, `url($1)`)
+	normalizedText = cssDoubleQuotedURLPattern.ReplaceAllString(normalizedText, `url($1)`)
+	normalizedText = cssSemicolonBeforeBracePattern.ReplaceAllString(normalizedText, `}`)
+	return normalizedText
+}
+
+func cssWhitespaceIsSignificant(previousRune, nextRune rune) bool {
+	if previousRune == 0 || nextRune == 0 {
+		return false
+	}
+	if strings.ContainsRune("{([:,;>/+~=", previousRune) {
+		return false
+	}
+	if strings.ContainsRune("{})],:;/+~=", nextRune) {
+		return false
+	}
+	return cssCanEndSeparatedToken(previousRune) && cssCanStartSeparatedToken(nextRune)
+}
+
+func cssCanEndSeparatedToken(currentRune rune) bool {
+	return unicode.IsLetter(currentRune) || unicode.IsDigit(currentRune) || currentRune == '_' || currentRune == '-' || currentRune == ')' || currentRune == ']' || currentRune == '\'' || currentRune == '"'
+}
+
+func cssCanStartSeparatedToken(currentRune rune) bool {
+	return unicode.IsLetter(currentRune) || unicode.IsDigit(currentRune) || currentRune == '_' || currentRune == '-' || currentRune == '.' || currentRune == '#' || currentRune == '[' || currentRune == ':' || currentRune == '*' || currentRune == '\'' || currentRune == '"'
+}
+
+func stripCSSComments(cssText string) string {
+	var strippedCSS strings.Builder
+	strippedCSS.Grow(len(cssText))
+	quoteRune := rune(0)
+	escaped := false
+	for index := 0; index < len(cssText); {
+		currentRune, currentSize := rune(cssText[index]), 1
+		if currentRune >= utf8.RuneSelf {
+			currentRune, currentSize = utf8.DecodeRuneInString(cssText[index:])
+		}
+		if quoteRune != 0 {
+			strippedCSS.WriteRune(currentRune)
+			index += currentSize
+			if escaped {
+				escaped = false
+				continue
+			}
+			if currentRune == '\\' {
+				escaped = true
+				continue
+			}
+			if currentRune == quoteRune {
+				quoteRune = 0
+			}
+			continue
+		}
+		if currentRune == '\'' || currentRune == '"' {
+			quoteRune = currentRune
+			strippedCSS.WriteRune(currentRune)
+			index += currentSize
+			continue
+		}
+		if currentRune == '/' && index+1 < len(cssText) && cssText[index+1] == '*' {
+			index += 2
+			for index+1 < len(cssText) {
+				if cssText[index] == '*' && cssText[index+1] == '/' {
+					index += 2
+					break
+				}
+				index++
+			}
+			continue
+		}
+		strippedCSS.WriteRune(currentRune)
+		index += currentSize
+	}
+	return strippedCSS.String()
 }
 
 func normalizedText(text string) string {
