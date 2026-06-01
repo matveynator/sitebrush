@@ -38,6 +38,7 @@ import (
 	"sitebrush/pkg/demo"
 	"sitebrush/pkg/diskusage"
 	"sitebrush/pkg/grabber"
+	"sitebrush/pkg/sitebrushtemplate"
 )
 
 type fakeGrabTransport struct {
@@ -3386,8 +3387,11 @@ func TestSavePageSynchronizesAddedSiteBrushTemplateClassByNormalizedInnerHTML(t 
 	if err := rawDB.QueryRow(`SELECT html FROM pages WHERE domain=? AND path=?`, "localhost", "/contact").Scan(&updatedContactHTML); err != nil {
 		t.Fatalf("read contact page: %v", err)
 	}
-	if updatedContactHTML != contactBefore {
-		t.Fatalf("contact page with different tag or class set changed unexpectedly: %s", updatedContactHTML)
+	if !strings.Contains(updatedContactHTML, `<section class="SiteBrush-Template hero lead target"><h1>Shared</h1><p>Copy</p></section>`) {
+		t.Fatalf("contact section with matching tag/content did not receive synchronized class: %s", updatedContactHTML)
+	}
+	if strings.Contains(updatedContactHTML, `<div class="SiteBrush-Template`) {
+		t.Fatalf("contact div with different tag type changed unexpectedly: %s", updatedContactHTML)
 	}
 
 	var updatedPublishedAboutHTML string
@@ -3412,6 +3416,71 @@ func TestSavePageSynchronizesAddedSiteBrushTemplateClassByNormalizedInnerHTML(t 
 	}
 	if aboutRevisionCount != 2 {
 		t.Fatalf("about revision count = %d, want 2", aboutRevisionCount)
+	}
+}
+
+func TestSavePageSynchronizesAddedSiteBrushTemplateClassToStyleByNormalizedContent(t *testing.T) {
+	application, rawDB := newTestApplication(t)
+	_, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "admin@example.com", "old")
+	if err != nil {
+		t.Fatalf("insert user: %v", err)
+	}
+
+	homeBefore := `<html><head><style type="text/css">body { color: red; }</style></head><body>Home</body></html>`
+	aboutBefore := `<html><head><style
+  type="text/css">
+body {
+	color: red;
+}
+</style></head><body>About</body></html>`
+	tableBefore := `<html><body><table class="mainstyle"><tr><td>body { color: red; }</td></tr></table></body></html>`
+	_, err = rawDB.Exec(`INSERT INTO pages(domain,path,title,html,published) VALUES(?,?,?,?,1),(?,?,?,?,1),(?,?,?,?,1)`,
+		"localhost", "/", "Home", homeBefore,
+		"localhost", "/about", "About", aboutBefore,
+		"localhost", "/table", "Table", tableBefore,
+	)
+	if err != nil {
+		t.Fatalf("insert pages: %v", err)
+	}
+	_, err = rawDB.Exec(`INSERT INTO published_pages(domain,path,title,html) VALUES(?,?,?,?),(?,?,?,?),(?,?,?,?)`,
+		"localhost", "/", "Home", homeBefore,
+		"localhost", "/about", "About", aboutBefore,
+		"localhost", "/table", "Table", tableBefore,
+	)
+	if err != nil {
+		t.Fatalf("insert published pages: %v", err)
+	}
+	application.writePublishedStaticHTML("localhost", "/", homeBefore)
+	application.writePublishedStaticHTML("localhost", "/about", aboutBefore)
+	application.writePublishedStaticHTML("localhost", "/table", tableBefore)
+
+	homeAfter := `<html><head><style type="text/css" class="SiteBrush-Template mainstyle">body{color:red;}</style></head><body>Home</body></html>`
+	form := url.Values{}
+	form.Set("path", "/")
+	form.Set("title", "Home")
+	form.Set("html", homeAfter)
+	request := httptest.NewRequest(http.MethodPost, "http://localhost:8080/?save", strings.NewReader(form.Encode()))
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	request.AddCookie(newAdminSessionCookie(t, application, "admin@example.com"))
+	response := httptest.NewRecorder()
+	application.route(response, request)
+	if response.Code != http.StatusFound {
+		t.Fatalf("status = %d, body=%q", response.Code, response.Body.String())
+	}
+
+	var updatedAboutHTML string
+	if err := rawDB.QueryRow(`SELECT html FROM pages WHERE domain=? AND path=?`, "localhost", "/about").Scan(&updatedAboutHTML); err != nil {
+		t.Fatalf("read about page: %v", err)
+	}
+	if !strings.Contains(updatedAboutHTML, `class="SiteBrush-Template mainstyle"`) {
+		t.Fatalf("style page did not receive synchronized template class: %s", updatedAboutHTML)
+	}
+	var updatedTableHTML string
+	if err := rawDB.QueryRow(`SELECT html FROM pages WHERE domain=? AND path=?`, "localhost", "/table").Scan(&updatedTableHTML); err != nil {
+		t.Fatalf("read table page: %v", err)
+	}
+	if updatedTableHTML != tableBefore {
+		t.Fatalf("different tag type changed unexpectedly: %s", updatedTableHTML)
 	}
 }
 
@@ -6589,7 +6658,7 @@ func TestReplaceTemplateBlocksHandlesNestedTemplateMatches(t *testing.T) {
 	sourceHTML := `<html><body><div class="SiteBrush-Template outer"><section>before<div class="SiteBrush-Template inner">new inner</div>after</section></div></body></html>`
 	targetHTML := `<html><body><div class="SiteBrush-Template outer"><section>before<div class="SiteBrush-Template inner">old inner</div>after</section></div><p>tail</p></body></html>`
 
-	updatedHTML, changed := replaceTemplateBlocks(targetHTML, extractTemplateBlocks(sourceHTML))
+	updatedHTML, changed := sitebrushtemplate.ReplaceBlocks(targetHTML, sitebrushtemplate.ExtractBlocks(sourceHTML))
 	if !changed {
 		t.Fatal("changed = false, want true")
 	}
