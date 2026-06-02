@@ -43,10 +43,14 @@ var htmlFallbackEncodingLabels = []string{
 }
 
 func DecodeHTML(htmlBytes []byte, contentType string) DecodeResult {
-	candidates := htmlEncodingCandidates(htmlBytes, contentType)
+	return DecodeText(htmlBytes, contentType)
+}
+
+func DecodeText(textBytes []byte, contentType string) DecodeResult {
+	candidates := htmlEncodingCandidates(textBytes, contentType)
 	scoredCandidates := make([]scoredTextEncoding, 0, len(candidates))
 	for candidateIndex, candidate := range candidates {
-		decodedText, ok := decodeWithEncoding(htmlBytes, candidate.label, candidate.encoding)
+		decodedText, ok := decodeWithEncoding(textBytes, candidate.label, candidate.encoding)
 		if !ok {
 			continue
 		}
@@ -60,7 +64,7 @@ func DecodeHTML(htmlBytes []byte, contentType string) DecodeResult {
 		scoredCandidates = append(scoredCandidates, scoredTextEncoding{label: candidate.label, text: decodedText, score: score, order: candidateIndex})
 	}
 	if len(scoredCandidates) == 0 {
-		return DecodeResult{Text: string(htmlBytes), Encoding: "unknown"}
+		return DecodeResult{Text: string(textBytes), Encoding: "unknown"}
 	}
 	sort.SliceStable(scoredCandidates, func(leftIndex, rightIndex int) bool {
 		leftCandidate := scoredCandidates[leftIndex]

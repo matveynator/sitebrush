@@ -74,6 +74,7 @@ var importedHTMLCharsetAssignmentPattern = regexp.MustCompile(`(?i)(charset\s*=\
 var importedHTMLCharsetMetaPattern = regexp.MustCompile(`(?i)<meta\b[^>]*charset\s*=`)
 var importedHTMLHeadOpenPattern = regexp.MustCompile(`(?i)<head\b[^>]*>`)
 var importedHTMLHTMLOpenPattern = regexp.MustCompile(`(?i)<html\b[^>]*>`)
+var importedCSSCharsetAssignmentPattern = regexp.MustCompile(`(?i)^(\s*\x{feff}?\s*@charset\s+["'])[a-z0-9._:-]+(["']\s*;)`)
 
 const storageAppName = "sitebrush"
 const defaultDBPath = "storage/db/sitebrush.db"
@@ -1464,18 +1465,20 @@ type analyticsReportRow struct {
 }
 
 type grabProgressEvent struct {
-	Token                  string   `json:"token"`
-	Stage                  string   `json:"stage"`
-	FoundTotal             int      `json:"found_total"`
-	DownloadedTotal        int      `json:"downloaded_total"`
-	FailedTotal            int      `json:"failed_total"`
-	FailedURLs             []string `json:"failed_urls,omitempty"`
-	CurrentURL             string   `json:"current_url"`
-	CurrentPercent         int      `json:"current_percent"`
-	CurrentDownloadedBytes int64    `json:"current_downloaded_bytes"`
-	CurrentSizeBytes       int64    `json:"current_size_bytes"`
-	CompletedPercent       int      `json:"completed_percent"`
-	Message                string   `json:"message"`
+	Token                  string            `json:"token"`
+	Stage                  string            `json:"stage"`
+	FoundTotal             int               `json:"found_total"`
+	DownloadedTotal        int               `json:"downloaded_total"`
+	FailedTotal            int               `json:"failed_total"`
+	FailedURLs             []string          `json:"failed_urls,omitempty"`
+	FailedReasons          map[string]string `json:"failed_reasons,omitempty"`
+	CurrentURL             string            `json:"current_url"`
+	CurrentError           string            `json:"current_error,omitempty"`
+	CurrentPercent         int               `json:"current_percent"`
+	CurrentDownloadedBytes int64             `json:"current_downloaded_bytes"`
+	CurrentSizeBytes       int64             `json:"current_size_bytes"`
+	CompletedPercent       int               `json:"completed_percent"`
+	Message                string            `json:"message"`
 }
 
 type publishProgressEvent struct {
@@ -6069,7 +6072,7 @@ func (a *App) seedDemoSiteContent(ctx context.Context, domain string, settings d
 		if spider.failedTotal > 0 {
 			stage = "partial"
 		}
-		a.grabTracker.publish(grabProgressEvent{Token: progressToken, Stage: stage, FoundTotal: spider.foundTotal, DownloadedTotal: spider.downloadedTotal, FailedTotal: spider.failedTotal, FailedURLs: spider.failedResourceURLList(), CompletedPercent: 100})
+		a.grabTracker.publish(grabProgressEvent{Token: progressToken, Stage: stage, FoundTotal: spider.foundTotal, DownloadedTotal: spider.downloadedTotal, FailedTotal: spider.failedTotal, FailedURLs: spider.failedResourceURLList(), FailedReasons: spider.failedResourceReasonMap(), CompletedPercent: 100})
 	}
 	return spider.failedTotal, nil
 }
@@ -6269,7 +6272,7 @@ func (a *App) retryDemoFailedResources(ctx context.Context, settings demo.Settin
 		if spider.failedTotal > 0 {
 			stage = "partial"
 		}
-		a.grabTracker.publish(grabProgressEvent{Token: progressToken, Stage: stage, FoundTotal: spider.foundTotal, DownloadedTotal: spider.downloadedTotal, FailedTotal: spider.failedTotal, FailedURLs: spider.failedResourceURLList(), CompletedPercent: 100})
+		a.grabTracker.publish(grabProgressEvent{Token: progressToken, Stage: stage, FoundTotal: spider.foundTotal, DownloadedTotal: spider.downloadedTotal, FailedTotal: spider.failedTotal, FailedURLs: spider.failedResourceURLList(), FailedReasons: spider.failedResourceReasonMap(), CompletedPercent: 100})
 	}
 	return spider.failedTotal, nil
 }
@@ -7034,7 +7037,7 @@ func (a *App) grabPage(w http.ResponseWriter, r *http.Request) {
 		if spider.failedTotal > 0 {
 			stage = "partial"
 		}
-		a.grabTracker.publish(grabProgressEvent{Token: progressToken, Stage: stage, FoundTotal: spider.foundTotal, DownloadedTotal: spider.downloadedTotal, FailedTotal: spider.failedTotal, FailedURLs: spider.failedResourceURLList(), CompletedPercent: 100})
+		a.grabTracker.publish(grabProgressEvent{Token: progressToken, Stage: stage, FoundTotal: spider.foundTotal, DownloadedTotal: spider.downloadedTotal, FailedTotal: spider.failedTotal, FailedURLs: spider.failedResourceURLList(), FailedReasons: spider.failedResourceReasonMap(), CompletedPercent: 100})
 	}
 	if wantsJSONResponse(r) {
 		w.Header().Set("Content-Type", "application/json")
@@ -7124,7 +7127,7 @@ func (a *App) retryImportedPageResources(ctx context.Context, domain, pagePath s
 		if spider.failedTotal > 0 {
 			stage = "partial"
 		}
-		a.grabTracker.publish(grabProgressEvent{Token: progressToken, Stage: stage, FoundTotal: spider.foundTotal, DownloadedTotal: spider.downloadedTotal, FailedTotal: spider.failedTotal, FailedURLs: spider.failedResourceURLList(), CompletedPercent: 100})
+		a.grabTracker.publish(grabProgressEvent{Token: progressToken, Stage: stage, FoundTotal: spider.foundTotal, DownloadedTotal: spider.downloadedTotal, FailedTotal: spider.failedTotal, FailedURLs: spider.failedResourceURLList(), FailedReasons: spider.failedResourceReasonMap(), CompletedPercent: 100})
 	}
 	return spider.failedTotal, nil
 }
@@ -7404,6 +7407,21 @@ func decodeImportedHTMLBytes(htmlBytes []byte, contentType string) string {
 	return rewriteImportedHTMLCharsetDeclaration(decodedHTML.Text)
 }
 
+func decodeImportedResourceBytes(resourceURL string, resourceBytes []byte, responseContentType, resourceContentType string) []byte {
+	if isImportedHTMLContentType(resourceContentType) {
+		return []byte(decodeImportedHTMLBytes(resourceBytes, responseContentType))
+	}
+	if !isImportedTextResource(resourceURL, responseContentType, resourceContentType) {
+		return resourceBytes
+	}
+	decodedResource := crawler.DecodeText(resourceBytes, responseContentType)
+	resourceText := decodedResource.Text
+	if isImportedCSSResource(resourceURL, resourceContentType) {
+		resourceText = rewriteImportedCSSCharsetDeclaration(resourceText, decodedResource.Encoding != "" && decodedResource.Encoding != "utf-8")
+	}
+	return []byte(resourceText)
+}
+
 func rewriteImportedHTMLCharsetDeclaration(htmlSource string) string {
 	rewrittenHTML := importedHTMLCharsetAssignmentPattern.ReplaceAllString(htmlSource, "${1}${2}utf-8")
 	if importedHTMLCharsetMetaPattern.MatchString(rewrittenHTML) {
@@ -7419,8 +7437,41 @@ func rewriteImportedHTMLCharsetDeclaration(htmlSource string) string {
 	return metaCharsetTag + rewrittenHTML
 }
 
+func rewriteImportedCSSCharsetDeclaration(cssSource string, addIfMissing bool) string {
+	rewrittenCSS := importedCSSCharsetAssignmentPattern.ReplaceAllString(cssSource, `${1}utf-8${2}`)
+	if rewrittenCSS != cssSource || !addIfMissing {
+		return rewrittenCSS
+	}
+	return `@charset "utf-8";` + "\n" + strings.TrimPrefix(rewrittenCSS, "\uFEFF")
+}
+
 func isImportedHTMLContentType(contentType string) bool {
 	return contentType == "text/html" || contentType == "application/xhtml+xml"
+}
+
+func isImportedTextResource(resourceURL, responseContentType, resourceContentType string) bool {
+	normalizedResponseContentType := normalizedResourceContentType(responseContentType)
+	effectiveResourceContentType := normalizedResourceContentType(resourceContentType)
+	if strings.HasPrefix(normalizedResponseContentType, "text/") || strings.HasPrefix(effectiveResourceContentType, "text/") {
+		return true
+	}
+	if strings.Contains(normalizedResponseContentType, "javascript") || strings.Contains(normalizedResponseContentType, "ecmascript") || strings.Contains(effectiveResourceContentType, "javascript") || strings.Contains(effectiveResourceContentType, "ecmascript") {
+		return true
+	}
+	switch normalizedResponseContentType {
+	case "application/json", "application/manifest+json", "application/ld+json", "application/xml", "application/rss+xml", "application/atom+xml", "image/svg+xml":
+		return true
+	}
+	switch resourceExtension(resourceURL) {
+	case ".css", ".js", ".mjs", ".cjs", ".json", ".map", ".xml", ".svg", ".txt", ".text", ".md", ".markdown", ".csv", ".tsv", ".yaml", ".yml", ".toml", ".ini", ".cfg", ".conf", ".webmanifest", ".htm", ".html", ".xhtml":
+		return true
+	default:
+		return false
+	}
+}
+
+func isImportedCSSResource(resourceURL, resourceContentType string) bool {
+	return normalizedResourceContentType(resourceContentType) == "text/css" || resourceExtension(resourceURL) == ".css"
 }
 
 func isSuccessfulGrabResponse(response *http.Response) bool {
@@ -7644,6 +7695,7 @@ func (a *App) prepareWholeRemoteSiteImport(domain, basePath string, startURL *ur
 			if downloadErr != nil || !downloaded {
 				spider.failedTotal++
 				consecutiveFailures++
+				spider.recordFailedResource(currentJob.URL.String(), grabErrorReason(downloadErr))
 				spider.publishResourceProgress("error", currentJob.URL.String(), 0, 0, -1)
 				continue
 			}
@@ -7711,7 +7763,7 @@ func (a *App) importWholeRemoteSite(ctx context.Context, domain, basePath string
 		if spider.failedTotal > 0 {
 			stage = "partial"
 		}
-		a.grabTracker.publish(grabProgressEvent{Token: progressToken, Stage: stage, FoundTotal: spider.foundTotal, DownloadedTotal: spider.downloadedTotal, FailedTotal: spider.failedTotal, FailedURLs: spider.failedResourceURLList(), CompletedPercent: 100})
+		a.grabTracker.publish(grabProgressEvent{Token: progressToken, Stage: stage, FoundTotal: spider.foundTotal, DownloadedTotal: spider.downloadedTotal, FailedTotal: spider.failedTotal, FailedURLs: spider.failedResourceURLList(), FailedReasons: spider.failedResourceReasonMap(), CompletedPercent: 100})
 	}
 	return basePath, spider.failedTotal, nil
 }
@@ -15318,6 +15370,34 @@ func isLegacyLooseTextResourceContentType(contentType string) bool {
 	}
 }
 
+func grabErrorReason(err error) string {
+	if err == nil {
+		return "error"
+	}
+	errorText := strings.TrimSpace(err.Error())
+	for _, token := range strings.Fields(errorText) {
+		code := strings.Trim(token, ".,:;()[]{}\"'")
+		if len(code) == 3 && code[0] >= '1' && code[0] <= '5' && code[1] >= '0' && code[1] <= '9' && code[2] >= '0' && code[2] <= '9' {
+			return code
+		}
+	}
+	loweredText := strings.ToLower(errorText)
+	switch {
+	case strings.Contains(loweredText, "timeout") || strings.Contains(loweredText, "deadline"):
+		return "timeout"
+	case strings.Contains(loweredText, "no such host") || strings.Contains(loweredText, "dns") || strings.Contains(loweredText, "resolve"):
+		return "dns"
+	case strings.Contains(loweredText, "tls") || strings.Contains(loweredText, "certificate") || strings.Contains(loweredText, "handshake"):
+		return "tls"
+	case strings.Contains(loweredText, "refused"):
+		return "refused"
+	case strings.Contains(loweredText, "read"):
+		return "read"
+	default:
+		return "network"
+	}
+}
+
 func resourceExtensionFromContentType(contentType string) string {
 	switch contentType {
 	case "text/css":
@@ -15442,6 +15522,7 @@ type pageSpider struct {
 	downloadedTotal      int
 	failedTotal          int
 	failedResourceURLs   map[string]struct{}
+	failedResourceErrors map[string]string
 }
 
 type grabReferenceContext = crawler.ReferenceContext
@@ -15496,16 +15577,17 @@ func newGrabHTTPClientForServerIP(sourceHost, sourceIP string) *http.Client {
 
 func newPageSpider(domain string, pageURL *url.URL, maxDepth int, tracker *grabProgressTracker, progressToken string, sourceOptions grabSourceOptions) *pageSpider {
 	return &pageSpider{
-		domain:             domain,
-		pageURL:            pageURL,
-		maxDepth:           maxDepth,
-		client:             grabImportHTTPClient(newGrabHTTPClientForServerIP(pageURL.Hostname(), sourceOptions.IP)),
-		sourceOptions:      sourceOptions,
-		resources:          make(map[string]*mirroredResource),
-		inFlight:           make(map[string]bool),
-		failedResourceURLs: make(map[string]struct{}),
-		tracker:            tracker,
-		progressToken:      progressToken,
+		domain:               domain,
+		pageURL:              pageURL,
+		maxDepth:             maxDepth,
+		client:               grabImportHTTPClient(newGrabHTTPClientForServerIP(pageURL.Hostname(), sourceOptions.IP)),
+		sourceOptions:        sourceOptions,
+		resources:            make(map[string]*mirroredResource),
+		inFlight:             make(map[string]bool),
+		failedResourceURLs:   make(map[string]struct{}),
+		failedResourceErrors: make(map[string]string),
+		tracker:              tracker,
+		progressToken:        progressToken,
 	}
 }
 
@@ -15533,7 +15615,7 @@ func grabPreviewHTTPClient(client *http.Client) *http.Client {
 	return &previewClient
 }
 
-func (spider *pageSpider) recordFailedResource(resourceURL string) {
+func (spider *pageSpider) recordFailedResource(resourceURL, reason string) {
 	resourceURL = strings.TrimSpace(resourceURL)
 	if resourceURL == "" {
 		return
@@ -15541,7 +15623,15 @@ func (spider *pageSpider) recordFailedResource(resourceURL string) {
 	if spider.failedResourceURLs == nil {
 		spider.failedResourceURLs = make(map[string]struct{})
 	}
+	if spider.failedResourceErrors == nil {
+		spider.failedResourceErrors = make(map[string]string)
+	}
 	spider.failedResourceURLs[resourceURL] = struct{}{}
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		reason = "error"
+	}
+	spider.failedResourceErrors[resourceURL] = reason
 }
 
 func (spider *pageSpider) clearFailedResource(resourceURL string) {
@@ -15550,6 +15640,7 @@ func (spider *pageSpider) clearFailedResource(resourceURL string) {
 		return
 	}
 	delete(spider.failedResourceURLs, resourceURL)
+	delete(spider.failedResourceErrors, resourceURL)
 }
 
 func (spider *pageSpider) failedResourceURLList() []string {
@@ -15562,6 +15653,21 @@ func (spider *pageSpider) failedResourceURLList() []string {
 	}
 	sort.Strings(failedURLs)
 	return failedURLs
+}
+
+func (spider *pageSpider) failedResourceReasonMap() map[string]string {
+	if spider == nil || len(spider.failedResourceErrors) == 0 {
+		return nil
+	}
+	failedReasons := make(map[string]string, len(spider.failedResourceErrors))
+	for resourceURL, reason := range spider.failedResourceErrors {
+		resourceURL = strings.TrimSpace(resourceURL)
+		reason = strings.TrimSpace(reason)
+		if resourceURL != "" && reason != "" {
+			failedReasons[resourceURL] = reason
+		}
+	}
+	return failedReasons
 }
 
 func (spider *pageSpider) fetchResource(rawURL string, baseURL *url.URL, depth int, persist bool) (*mirroredResource, error) {
@@ -15595,7 +15701,7 @@ func (spider *pageSpider) fetchResource(rawURL string, baseURL *url.URL, depth i
 	if err != nil {
 		spider.resources[normalizedURL] = &mirroredResource{url: normalizedURL, persist: persist}
 		spider.failedTotal++
-		spider.recordFailedResource(normalizedURL)
+		spider.recordFailedResource(normalizedURL, grabErrorReason(err))
 		spider.publishResourceProgress("error", normalizedURL, 0, 0, -1)
 		return nil, err
 	}
@@ -15603,7 +15709,7 @@ func (spider *pageSpider) fetchResource(rawURL string, baseURL *url.URL, depth i
 	if response.StatusCode >= 400 {
 		spider.resources[normalizedURL] = &mirroredResource{url: normalizedURL, persist: persist}
 		spider.failedTotal++
-		spider.recordFailedResource(normalizedURL)
+		spider.recordFailedResource(normalizedURL, strconv.Itoa(response.StatusCode))
 		spider.publishResourceProgress("error", normalizedURL, 0, 0, response.ContentLength)
 		return nil, fmt.Errorf("resource download failed: %s", response.Status)
 	}
@@ -15611,7 +15717,7 @@ func (spider *pageSpider) fetchResource(rawURL string, baseURL *url.URL, depth i
 	if !spider.isAllowedResourceContentType(normalizedURL, resourceContentType) {
 		spider.resources[normalizedURL] = &mirroredResource{url: normalizedURL, persist: persist}
 		spider.failedTotal++
-		spider.recordFailedResource(normalizedURL)
+		spider.recordFailedResource(normalizedURL, "content-type")
 		spider.publishResourceProgress("error", normalizedURL, 0, 0, response.ContentLength)
 		return nil, fmt.Errorf("resource content-type rejected: %s", response.Header.Get("Content-Type"))
 	}
@@ -15619,13 +15725,11 @@ func (spider *pageSpider) fetchResource(rawURL string, baseURL *url.URL, depth i
 	if err != nil {
 		spider.resources[normalizedURL] = &mirroredResource{url: normalizedURL, persist: persist}
 		spider.failedTotal++
-		spider.recordFailedResource(normalizedURL)
+		spider.recordFailedResource(normalizedURL, grabErrorReason(err))
 		spider.publishResourceProgress("error", normalizedURL, 0, 0, response.ContentLength)
 		return nil, err
 	}
-	if isImportedHTMLContentType(resourceContentType) {
-		body = []byte(decodeImportedHTMLBytes(body, response.Header.Get("Content-Type")))
-	}
+	body = decodeImportedResourceBytes(normalizedURL, body, response.Header.Get("Content-Type"), resourceContentType)
 	resource := &mirroredResource{url: normalizedURL, content: body, contentType: resourceContentType, persist: persist}
 	if persist {
 		assetPath := spider.assetPathFor(body, normalizedURL, resourceContentType)
@@ -15653,9 +15757,13 @@ func (spider *pageSpider) publishResourceProgress(stage, currentURL string, curr
 	if spider.foundTotal > 0 {
 		completedPercent = (spider.downloadedTotal + spider.failedTotal) * 100 / spider.foundTotal
 	}
+	currentError := ""
+	if stage == "error" && currentURL != "" {
+		currentError = strings.TrimSpace(spider.failedResourceErrors[currentURL])
+	}
 	spider.tracker.publish(grabProgressEvent{
 		Token: spider.progressToken, Stage: stage, FoundTotal: spider.foundTotal, DownloadedTotal: spider.downloadedTotal, FailedTotal: spider.failedTotal,
-		CurrentURL: currentURL, CurrentPercent: currentPercent, CurrentDownloadedBytes: downloadedBytes, CurrentSizeBytes: sizeBytes, CompletedPercent: completedPercent,
+		FailedReasons: spider.failedResourceReasonMap(), CurrentURL: currentURL, CurrentError: currentError, CurrentPercent: currentPercent, CurrentDownloadedBytes: downloadedBytes, CurrentSizeBytes: sizeBytes, CompletedPercent: completedPercent,
 	})
 }
 
@@ -16025,9 +16133,7 @@ func (spider *pageSpider) fetchPreviewResourceBody(normalizedURL string) ([]byte
 	if err != nil {
 		return nil, contentType, response.ContentLength, err
 	}
-	if isImportedHTMLContentType(contentType) {
-		body = []byte(decodeImportedHTMLBytes(body, response.Header.Get("Content-Type")))
-	}
+	body = decodeImportedResourceBytes(normalizedURL, body, response.Header.Get("Content-Type"), contentType)
 	return body, contentType, response.ContentLength, nil
 }
 

@@ -59,6 +59,33 @@ func TestEffectiveGrabResourceContentTypeTrustsJavaScriptExtension(t *testing.T)
 	}
 }
 
+func TestDecodeImportedResourceBytesConvertsJavaScriptToUTF8(t *testing.T) {
+	sourceText := `var title = "Текущее время";`
+	sourceBytes, encodeErr := charmap.Windows1251.NewEncoder().Bytes([]byte(sourceText))
+	if encodeErr != nil {
+		t.Fatal(encodeErr)
+	}
+
+	decodedBytes := decodeImportedResourceBytes("http://oldkmv.uprof.info/js/CurrentTime.js", sourceBytes, "text/html; charset=windows-1251", "application/javascript")
+	if string(decodedBytes) != sourceText {
+		t.Fatalf("decoded javascript = %q", string(decodedBytes))
+	}
+}
+
+func TestDecodeImportedResourceBytesRewritesCSSCharset(t *testing.T) {
+	sourceText := `@charset "windows-1251";` + "\n" + `.title{content:"Привет";}`
+	sourceBytes, encodeErr := charmap.Windows1251.NewEncoder().Bytes([]byte(sourceText))
+	if encodeErr != nil {
+		t.Fatal(encodeErr)
+	}
+
+	decodedBytes := decodeImportedResourceBytes("http://example.test/style.css", sourceBytes, "text/css; charset=windows-1251", "text/css")
+	decodedText := string(decodedBytes)
+	if !strings.Contains(decodedText, `@charset "utf-8";`) || !strings.Contains(decodedText, `Привет`) {
+		t.Fatalf("decoded css = %q", decodedText)
+	}
+}
+
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func mustDNSNameForTest(name string) dnsmessage.Name {

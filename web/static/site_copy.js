@@ -27,8 +27,8 @@
       '.SiteBrushCopySiteButton:disabled{opacity:.58;cursor:not-allowed}',
       '.SiteBrushCopySiteProgress{height:22px;border-radius:999px;background:#e5e7eb;overflow:hidden;margin-top:12px}',
       '.SiteBrushCopySiteProgressBar{height:100%;width:0%;background:#2563eb;color:#fff;text-align:center;font-size:12px;line-height:22px;transition:width .18s ease}',
-      '.SiteBrushCopySiteStatus{margin:12px 0 0;font-size:14px;line-height:1.4;overflow-wrap:anywhere}',
-      '.SiteBrushCopySiteURL{margin-top:5px;color:#64748b;font-size:12px;overflow-wrap:anywhere}',
+      '.SiteBrushCopySiteStatus{margin:12px 0 0;color:#111827;font-size:14px;line-height:1.4;overflow-wrap:anywhere}',
+      '.SiteBrushCopySiteURL{margin-top:5px;color:#334155;font-size:12px;overflow-wrap:anywhere}',
       '.SiteBrushCopySiteQuota{display:grid;gap:4px;margin-top:12px;border:1px solid #e2e8f0;border-radius:8px;padding:10px;font-size:13px}',
       '.SiteBrushCopySiteQuotaLine{display:flex;justify-content:space-between;gap:12px}',
       '.SiteBrushCopySiteQuotaStatus{font-weight:700}.SiteBrushCopySiteQuotaStatus.is-ok{color:#15803d}.SiteBrushCopySiteQuotaStatus.is-error{color:#b91c1c}',
@@ -37,12 +37,12 @@
       '.SiteBrushCopySiteResource:last-child{border-bottom:0}',
       '.SiteBrushCopySiteResourceKind{border-radius:999px;background:#64748b;color:#fff;padding:2px 7px;font-size:11px}',
       '.SiteBrushCopySiteResourceURL{overflow-wrap:anywhere}',
-      '.SiteBrushCopySiteResourceMeta{color:#64748b;margin-top:3px}',
+      '.SiteBrushCopySiteResourceMeta{color:#334155;margin-top:3px}',
       '.SiteBrushCopySiteActions{display:flex;justify-content:flex-end;gap:8px;margin-top:14px}',
       '.SiteBrushCopySiteSecondaryButton{border:1px solid #cbd5e1;border-radius:8px;background:#fff;color:#0f172a;font:inherit;font-weight:700;padding:8px 12px;cursor:pointer}',
       '.SiteBrushCopySiteHidden{display:none!important}',
       '@media (max-width:640px){.SiteBrushCopySiteDialog{padding:14px}.SiteBrushCopySitePrimaryRow,.SiteBrushCopySiteSecondaryGrid{grid-template-columns:1fr}.SiteBrushCopySiteActions{flex-direction:column}.SiteBrushCopySiteButton,.SiteBrushCopySiteSecondaryButton{width:100%}}',
-      '@media (prefers-color-scheme:dark){.SiteBrushCopySiteDialog{background:#111827;color:#e5e7eb}.SiteBrushCopySiteInput,.SiteBrushCopySiteSelect,.SiteBrushCopySiteSecondaryButton{background:#0f172a;color:#e5e7eb;border-color:#374151}.SiteBrushCopySiteClose,.SiteBrushCopySiteURL,.SiteBrushCopySiteResourceMeta{color:#a7bbd8}.SiteBrushCopySiteProgress{background:#374151}.SiteBrushCopySiteQuota,.SiteBrushCopySiteResources,.SiteBrushCopySiteResource{border-color:#374151}}'
+      '@media (prefers-color-scheme:dark){.SiteBrushCopySiteDialog{background:#111827;color:#e5e7eb}.SiteBrushCopySiteInput,.SiteBrushCopySiteSelect,.SiteBrushCopySiteSecondaryButton{background:#0f172a;color:#e5e7eb;border-color:#374151}.SiteBrushCopySiteClose,.SiteBrushCopySiteStatus,.SiteBrushCopySiteURL,.SiteBrushCopySiteResourceMeta{color:#e5e7eb}.SiteBrushCopySiteProgress{background:#374151}.SiteBrushCopySiteQuota,.SiteBrushCopySiteResources,.SiteBrushCopySiteResource{border-color:#374151}}'
     ].join('');
     document.head.appendChild(styleElement);
   }
@@ -335,6 +335,7 @@
     let previewPayload = null;
     let downloadFinishedWithErrors = false;
     let failedResourceURLs = new Set();
+    let failedResourceReasons = new Map();
     let importedRedirectPath = '';
     let retryWasAttempted = false;
     let partialImportCanRetry = false;
@@ -368,6 +369,17 @@
       if (!progressPayload) {
         return;
       }
+      const failedReasons = progressPayload.failed_reasons && typeof progressPayload.failed_reasons === 'object' ? progressPayload.failed_reasons : {};
+      for (const failedReasonURL of Object.keys(failedReasons)) {
+        const normalizedFailedReasonURL = String(failedReasonURL || '').trim();
+        const normalizedFailedReason = String(failedReasons[failedReasonURL] || '').trim();
+        if (normalizedFailedReasonURL !== '') {
+          failedResourceURLs.add(normalizedFailedReasonURL);
+          if (normalizedFailedReason !== '') {
+            failedResourceReasons.set(normalizedFailedReasonURL, normalizedFailedReason);
+          }
+        }
+      }
       const failedURLs = Array.isArray(progressPayload.failed_urls) ? progressPayload.failed_urls : [];
       for (const failedURL of failedURLs) {
         const normalizedFailedURL = String(failedURL || '').trim();
@@ -395,7 +407,9 @@
       resourcesElement.appendChild(titleElement);
       for (const failedResourceURL of sortedFailedResourceURLs) {
         const resourceRowElement = createElement('div', 'SiteBrushCopySiteResource');
-        resourceRowElement.appendChild(createElement('span', 'SiteBrushCopySiteResourceKind', textFromConfig(configuration, 'failedResourceBadge', 'failed')));
+        const failedReason = String(failedResourceReasons.get(failedResourceURL) || '').trim();
+        const failedBadgeText = textFromConfig(configuration, 'failedResourceBadge', 'failed') + (failedReason === '' ? '' : ' ' + failedReason);
+        resourceRowElement.appendChild(createElement('span', 'SiteBrushCopySiteResourceKind', failedBadgeText));
         resourceRowElement.appendChild(createElement('span', '', ''));
         resourceRowElement.appendChild(createElement('div', 'SiteBrushCopySiteResourceURL', failedResourceURL));
         resourcesElement.appendChild(resourceRowElement);
@@ -434,10 +448,17 @@
         setProgress(progressBarElement, progressPayload.stage === 'done' ? 100 : completedPercent);
         collectFailedURLs(progressPayload);
         if (progressPayload.stage === 'error' && progressPayload.current_url) {
-          failedResourceURLs.add(String(progressPayload.current_url));
+          const failedCurrentURL = String(progressPayload.current_url);
+          failedResourceURLs.add(failedCurrentURL);
+          const currentError = String(progressPayload.current_error || '').trim();
+          if (currentError !== '') {
+            failedResourceReasons.set(failedCurrentURL, currentError);
+          }
         }
         if (progressPayload.stage === 'downloaded' && progressPayload.current_url) {
-          failedResourceURLs.delete(String(progressPayload.current_url));
+          const downloadedURL = String(progressPayload.current_url);
+          failedResourceURLs.delete(downloadedURL);
+          failedResourceReasons.delete(downloadedURL);
         }
         const downloadedTotal = Number(progressPayload.downloaded_total) || 0;
         const foundTotal = Number(progressPayload.found_total) || 0;
@@ -502,6 +523,7 @@
       tokenFieldElement.value = progressToken;
       previewPayload = null;
       failedResourceURLs = new Set();
+      failedResourceReasons = new Map();
       importedRedirectPath = '';
       retryWasAttempted = false;
       partialImportCanRetry = false;
@@ -556,6 +578,7 @@
       } else {
         retryWasAttempted = false;
         failedResourceURLs = new Set();
+        failedResourceReasons = new Map();
         partialImportCanRetry = false;
         syncSelectedResources(formElement, resourcesElement);
       }
