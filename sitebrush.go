@@ -1466,25 +1466,7 @@ type analyticsReportRow struct {
 	Detail  string
 }
 
-type grabProgressEvent struct {
-	Token                  string            `json:"token"`
-	Stage                  string            `json:"stage"`
-	FoundTotal             int               `json:"found_total"`
-	DownloadedTotal        int               `json:"downloaded_total"`
-	FailedTotal            int               `json:"failed_total"`
-	FailedURLs             []string          `json:"failed_urls,omitempty"`
-	FailedReasons          map[string]string `json:"failed_reasons,omitempty"`
-	RetryAttempt           int               `json:"retry_attempt,omitempty"`
-	RetryTotal             int               `json:"retry_total,omitempty"`
-	RetryDelaySeconds      int               `json:"retry_delay_seconds,omitempty"`
-	CurrentURL             string            `json:"current_url"`
-	CurrentError           string            `json:"current_error,omitempty"`
-	CurrentPercent         int               `json:"current_percent"`
-	CurrentDownloadedBytes int64             `json:"current_downloaded_bytes"`
-	CurrentSizeBytes       int64             `json:"current_size_bytes"`
-	CompletedPercent       int               `json:"completed_percent"`
-	Message                string            `json:"message"`
-}
+type grabProgressEvent = crawler.ProgressEvent
 
 type publishProgressEvent struct {
 	Token            string `json:"token"`
@@ -1502,11 +1484,7 @@ type publishPageCandidate struct {
 	HTML  string
 }
 
-type grabResourcePreview struct {
-	URL       string `json:"url"`
-	Kind      string `json:"kind"`
-	SizeBytes int64  `json:"size_bytes"`
-}
+type grabResourcePreview = crawler.ResourcePreview
 
 type grabPreviewResponse struct {
 	SourceURL             string                `json:"source_url"`
@@ -1524,39 +1502,15 @@ type grabPreviewResponse struct {
 	FitsQuota             bool                  `json:"fits_quota"`
 }
 
-type grabSourceOptions struct {
-	IP           string
-	LanguageCode string
-}
+type grabSourceOptions = crawler.SourceOptions
 
-type grabImportRequest struct {
-	Domain               string
-	PagePath             string
-	SourceURL            string
-	RemoteSourceURL      *url.URL
-	HTML                 string
-	ProgressToken        string
-	SelectedResourceURLs map[string]struct{}
-	SourceOptions        grabSourceOptions
-}
+type grabImportRequest = crawler.ImportRequest
 
-type grabImportResult struct {
-	RedirectPath  string
-	FailedTotal   int
-	FailedURLs    []string
-	FailedReasons map[string]string
-}
+type grabImportResult = crawler.ImportResult
 
-type wholeSiteImportedPage struct {
-	SourceURL string
-	LocalPath string
-	HTML      string
-}
+type wholeSiteImportedPage = crawler.ImportedPage
 
-type wholeSitePageJob struct {
-	URL  *url.URL
-	HTML string
-}
+type wholeSitePageJob = crawler.WholeSitePageJob
 
 type wholeSitePreviewResult struct {
 	PageCount     int
@@ -7408,7 +7362,7 @@ func downloadGrabSourceHTMLWithResolvedURL(sourceURL string, sourceOptions grabS
 		response.Body.Close()
 	}
 	if shouldFallbackGrabSourceToHTTP(remoteSourceURL) {
-		fallbackURL := cloneURL(remoteSourceURL)
+		fallbackURL := crawler.CloneURL(remoteSourceURL)
 		fallbackURL.Scheme = "http"
 		fallbackURL.Host = fallbackURL.Hostname()
 		response, err = doGrabGET(client, fallbackURL.String(), sourceOptions)
@@ -7662,7 +7616,7 @@ func previewResourcesFromSpider(spider *pageSpider, excludedURLs map[string]stru
 		} else if resource.sizeBytes >= 0 {
 			sizeBytes = resource.sizeBytes
 		}
-		resourceKind := previewResourceKind("", "", resourceURL)
+		resourceKind := crawler.PreviewResourceKind("", "", resourceURL)
 		if resource != nil && resourceKind == "file" {
 			if contentTypeKind := resourceKindFromContentType(resource.contentType); contentTypeKind != "" {
 				resourceKind = contentTypeKind
@@ -7699,12 +7653,12 @@ func (a *App) prepareWholeRemoteSiteImport(importRequest grabImportRequest) (*pa
 		if parseErr != nil || !crawler.SameHost(startURL, parsedURL) || !crawler.IsPageURL(parsedURL) {
 			return "", false
 		}
-		return wholeSiteLocalLink(basePath, startURL, parsedURL), true
+		return crawler.WholeSiteLocalLink(basePath, startURL, parsedURL), true
 	}
 
 	pageClient := grabImportHTTPClient(newGrabHTTPClientForServerIP(startURL.Hostname(), importRequest.SourceOptions.IP))
-	knownPagePathsByKey := map[string]string{wholeSitePageKey(startURL): basePath}
-	pageQueue := []wholeSitePageJob{{URL: cloneURL(startURL), HTML: importRequest.HTML}}
+	knownPagePathsByKey := map[string]string{crawler.WholeSitePageKey(startURL): basePath}
+	pageQueue := []wholeSitePageJob{{URL: crawler.CloneURL(startURL), HTML: importRequest.HTML}}
 	importedPages := make([]wholeSiteImportedPage, 0, 32)
 	importedLocalPaths := make(map[string]struct{})
 	consecutiveFailures := 0
@@ -7713,7 +7667,7 @@ func (a *App) prepareWholeRemoteSiteImport(importRequest grabImportRequest) (*pa
 
 	for len(pageQueue) > 0 && len(importedPages) < wholeSiteImportMaxPages {
 		if consecutiveFailures >= wholeSiteImportConsecutiveFailureLimit {
-			spider.publishResourceProgress("partial", currentWholeSiteImportURL(pageQueue), 0, 0, -1)
+			spider.publishResourceProgress("partial", crawler.CurrentWholeSiteImportURL(pageQueue), 0, 0, -1)
 			break
 		}
 		currentJob := pageQueue[0]
@@ -7721,7 +7675,7 @@ func (a *App) prepareWholeRemoteSiteImport(importRequest grabImportRequest) (*pa
 		if currentJob.URL == nil {
 			continue
 		}
-		pageKey := wholeSitePageKey(currentJob.URL)
+		pageKey := crawler.WholeSitePageKey(currentJob.URL)
 		if pageKey == "" {
 			continue
 		}
@@ -7739,7 +7693,7 @@ func (a *App) prepareWholeRemoteSiteImport(importRequest grabImportRequest) (*pa
 		}
 
 		for _, linkedPageURL := range crawler.ExtractPageLinks(pageHTML, currentJob.URL, startURL) {
-			linkedPageKey := wholeSitePageKey(linkedPageURL)
+			linkedPageKey := crawler.WholeSitePageKey(linkedPageURL)
 			if linkedPageKey == "" {
 				continue
 			}
@@ -7749,8 +7703,8 @@ func (a *App) prepareWholeRemoteSiteImport(importRequest grabImportRequest) (*pa
 			if len(knownPagePathsByKey) >= wholeSiteImportMaxPages {
 				break
 			}
-			knownPagePathsByKey[linkedPageKey] = wholeSiteLocalPath(basePath, startURL, linkedPageURL)
-			pageQueue = append(pageQueue, wholeSitePageJob{URL: cloneURL(linkedPageURL)})
+			knownPagePathsByKey[linkedPageKey] = crawler.WholeSiteLocalPath(basePath, startURL, linkedPageURL)
+			pageQueue = append(pageQueue, wholeSitePageJob{URL: crawler.CloneURL(linkedPageURL)})
 			spider.foundTotal++
 			spider.publishProgress("found", linkedPageURL.String(), 0)
 		}
@@ -7813,19 +7767,19 @@ func crawlWholeRemoteSite(startURL *url.URL, startHTML, publicAssetBasePath stri
 		if parseErr != nil || !crawler.SameHost(startURL, parsedURL) || !crawler.IsPageURL(parsedURL) {
 			return "", false
 		}
-		return wholeSiteLocalLink(cleanPath(publicAssetBasePath), startURL, parsedURL), true
+		return crawler.WholeSiteLocalLink(cleanPath(publicAssetBasePath), startURL, parsedURL), true
 	}
 	pageClient := grabPreviewHTTPClient(newGrabHTTPClientForServerIP(startURL.Hostname(), sourceOptions.IP))
-	knownPagePathsByKey := map[string]string{wholeSitePageKey(startURL): cleanPath(publicAssetBasePath)}
+	knownPagePathsByKey := map[string]string{crawler.WholeSitePageKey(startURL): cleanPath(publicAssetBasePath)}
 	pageURLs := map[string]struct{}{startURL.String(): {}}
-	pageQueue := []wholeSitePageJob{{URL: cloneURL(startURL), HTML: startHTML}}
+	pageQueue := []wholeSitePageJob{{URL: crawler.CloneURL(startURL), HTML: startHTML}}
 	importedPages := make([]wholeSiteImportedPage, 0, 32)
 	consecutiveFailures := 0
 	spider.foundTotal++
 	spider.publishProgress("found", startURL.String(), 0)
 	for len(pageQueue) > 0 && len(pageURLs) < wholeSiteImportMaxPages {
 		if consecutiveFailures >= wholeSiteImportConsecutiveFailureLimit {
-			spider.publishResourceProgress("partial", currentWholeSiteImportURL(pageQueue), 0, 0, -1)
+			spider.publishResourceProgress("partial", crawler.CurrentWholeSiteImportURL(pageQueue), 0, 0, -1)
 			break
 		}
 		currentJob := pageQueue[0]
@@ -7833,7 +7787,7 @@ func crawlWholeRemoteSite(startURL *url.URL, startHTML, publicAssetBasePath stri
 		if currentJob.URL == nil {
 			continue
 		}
-		pageKey := wholeSitePageKey(currentJob.URL)
+		pageKey := crawler.WholeSitePageKey(currentJob.URL)
 		if pageKey == "" {
 			continue
 		}
@@ -7849,7 +7803,7 @@ func crawlWholeRemoteSite(startURL *url.URL, startHTML, publicAssetBasePath stri
 			pageHTML = downloadedHTML
 		}
 		for _, linkedPageURL := range crawler.ExtractPageLinks(pageHTML, currentJob.URL, startURL) {
-			linkedPageKey := wholeSitePageKey(linkedPageURL)
+			linkedPageKey := crawler.WholeSitePageKey(linkedPageURL)
 			if linkedPageKey == "" {
 				continue
 			}
@@ -7859,8 +7813,8 @@ func crawlWholeRemoteSite(startURL *url.URL, startHTML, publicAssetBasePath stri
 			if len(knownPagePathsByKey) >= wholeSiteImportMaxPages {
 				break
 			}
-			knownPagePathsByKey[linkedPageKey] = wholeSiteLocalPath(cleanPath(publicAssetBasePath), startURL, linkedPageURL)
-			pageQueue = append(pageQueue, wholeSitePageJob{URL: cloneURL(linkedPageURL)})
+			knownPagePathsByKey[linkedPageKey] = crawler.WholeSiteLocalPath(cleanPath(publicAssetBasePath), startURL, linkedPageURL)
+			pageQueue = append(pageQueue, wholeSitePageJob{URL: crawler.CloneURL(linkedPageURL)})
 			pageURLs[linkedPageURL.String()] = struct{}{}
 			spider.foundTotal++
 			spider.publishProgress("found", linkedPageURL.String(), 0)
@@ -7875,13 +7829,6 @@ func crawlWholeRemoteSite(startURL *url.URL, startHTML, publicAssetBasePath stri
 	}
 	spider.collectPreviewImportedPagesStaticURLTextReferences(importedPages)
 	return spider, pageURLs, importedPages
-}
-
-func currentWholeSiteImportURL(pageQueue []wholeSitePageJob) string {
-	if len(pageQueue) == 0 || pageQueue[0].URL == nil {
-		return ""
-	}
-	return pageQueue[0].URL.String()
 }
 
 func (a *App) storeWholeSiteImportedPages(ctx context.Context, domain string, importedPages []wholeSiteImportedPage) error {
@@ -7989,82 +7936,6 @@ func (spider *pageSpider) downloadWholeSitePageHTMLWithRetries(client *http.Clie
 		}
 	}
 	return "", false, lastErr
-}
-
-func wholeSitePageKey(pageURL *url.URL) string {
-	if pageURL == nil || pageURL.Host == "" {
-		return ""
-	}
-	return strings.ToLower(pageURL.Scheme) + "://" + strings.ToLower(pageURL.Host) + canonicalWholeSitePagePath(pageURL.Path)
-}
-
-func canonicalWholeSitePagePath(rawPath string) string {
-	cleanedPath := cleanPath(rawPath)
-	for _, indexName := range []string{"/index.html", "/index.htm", "/index.xhtml"} {
-		if strings.HasSuffix(strings.ToLower(cleanedPath), indexName) {
-			cleanedPath = cleanedPath[:len(cleanedPath)-len(indexName)]
-			if cleanedPath == "" {
-				return "/"
-			}
-			return cleanPath(cleanedPath)
-		}
-	}
-	return cleanedPath
-}
-
-func wholeSiteLocalPath(basePath string, startURL, pageURL *url.URL) string {
-	basePath = cleanPath(basePath)
-	if wholeSitePageKey(startURL) == wholeSitePageKey(pageURL) {
-		return basePath
-	}
-	sourcePath := canonicalWholeSitePagePath(pageURL.Path)
-	if sourcePath == "/" {
-		return basePath
-	}
-	if basePath == "/" {
-		return sourcePath
-	}
-	return cleanPath(strings.TrimRight(basePath, "/") + sourcePath)
-}
-
-func wholeSiteLocalLink(basePath string, startURL, pageURL *url.URL) string {
-	localPath := wholeSiteLocalPath(basePath, startURL, pageURL)
-	if pageURL != nil && strings.TrimSpace(pageURL.RawQuery) != "" {
-		return localPath + "?" + pageURL.RawQuery
-	}
-	return localPath
-}
-
-func cloneURL(sourceURL *url.URL) *url.URL {
-	if sourceURL == nil {
-		return nil
-	}
-	clonedURL := *sourceURL
-	return &clonedURL
-}
-
-func previewResourceKind(tagName, attributeName, rawRef string) string {
-	tag := strings.ToLower(strings.TrimSpace(tagName))
-	attribute := strings.ToLower(strings.TrimSpace(attributeName))
-	switch tag {
-	case "script":
-		return "script"
-	case "link":
-		return "style"
-	case "img", "source":
-		return "image"
-	case "video", "audio":
-		return tag
-	case "iframe", "embed", "object":
-		return "embedded"
-	}
-	if attribute == "poster" {
-		return "image"
-	}
-	if resourceKind := crawler.ResourceKindFromURL(rawRef); resourceKind != "" {
-		return resourceKind
-	}
-	return "file"
 }
 
 type importedHTMLCleanupRule struct {
@@ -13632,6 +13503,8 @@ func siteCopyMenuConfigJSON(pagePath string, translations map[string]string) str
 			"downloadFailedRetry":       translationOrDefault(translations, "missing_download_failed_retry", "Download failed. Try again."),
 			"partialImportRetry":        translationOrDefault(translations, "missing_partial_import_retry", "Some resources failed. You can retry."),
 			"retryRemaining":            translationOrDefault(translations, "missing_retry_remaining", "Retry remaining"),
+			"retryNextIn":               translationOrDefault(translations, "site_copy_retry_next_in", "Next retry in"),
+			"retrySecondsSuffix":        translationOrDefault(translations, "site_copy_retry_seconds_suffix", "s"),
 			"finishImport":              translationOrDefault(translations, "site_copy_finish_import", "Finish import"),
 			"closeButton":               translationOrDefault(translations, "tree_close", "Close"),
 			"failedResourcesTitle":      translationOrDefault(translations, "site_copy_failed_resources_title", "Failed resources:"),
@@ -16402,15 +16275,8 @@ func (spider *pageSpider) assetPathFor(fileBytes []byte, sourceURL, contentType 
 	return strings.TrimRight(basePath, "/") + "/p/" + hashedFileName
 }
 
-type grabTrackerRequest struct {
-	action string
-	token  string
-	stream chan grabProgressEvent
-	event  grabProgressEvent
-}
-
 type grabProgressTracker struct {
-	requests chan grabTrackerRequest
+	tracker *crawler.ProgressTracker
 }
 
 type publishTrackerRequest struct {
@@ -16429,44 +16295,17 @@ type webSocketTextWriter struct {
 }
 
 func newGrabProgressTracker() *grabProgressTracker {
-	tracker := &grabProgressTracker{requests: make(chan grabTrackerRequest)}
-	go tracker.loop()
-	return tracker
+	return &grabProgressTracker{tracker: crawler.NewProgressTracker()}
 }
 
 func (tracker *grabProgressTracker) subscribe(token string) chan grabProgressEvent {
-	stream := make(chan grabProgressEvent, 32)
-	tracker.requests <- grabTrackerRequest{action: "subscribe", token: token, stream: stream}
-	return stream
+	return tracker.tracker.Subscribe(token)
 }
 func (tracker *grabProgressTracker) unsubscribe(token string, stream chan grabProgressEvent) {
-	tracker.requests <- grabTrackerRequest{action: "unsubscribe", token: token, stream: stream}
+	tracker.tracker.Unsubscribe(token, stream)
 }
 func (tracker *grabProgressTracker) publish(event grabProgressEvent) {
-	tracker.requests <- grabTrackerRequest{action: "publish", token: event.Token, event: event}
-}
-func (tracker *grabProgressTracker) loop() {
-	subscribersByToken := make(map[string]map[chan grabProgressEvent]struct{})
-	for request := range tracker.requests {
-		switch request.action {
-		case "subscribe":
-			if _, exists := subscribersByToken[request.token]; !exists {
-				subscribersByToken[request.token] = make(map[chan grabProgressEvent]struct{})
-			}
-			subscribersByToken[request.token][request.stream] = struct{}{}
-		case "unsubscribe":
-			group := subscribersByToken[request.token]
-			delete(group, request.stream)
-			close(request.stream)
-		case "publish":
-			for stream := range subscribersByToken[request.token] {
-				select {
-				case stream <- request.event:
-				default:
-				}
-			}
-		}
-	}
+	tracker.tracker.Publish(event)
 }
 
 func newPublishProgressTracker() *publishProgressTracker {

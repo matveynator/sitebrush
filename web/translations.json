@@ -564,7 +564,9 @@
     "billing_status_plan_quota_required": "Plan quota is required.",
     "billing_status_plan_saved": "Plan saved.",
     "billing_status_plan_not_selected": "Plan is not selected.",
-    "billing_status_plan_deleted": "Plan deleted."
+    "billing_status_plan_deleted": "Plan deleted.",
+    "site_copy_retry_next_in": "Next retry in",
+    "site_copy_retry_seconds_suffix": "s"
   },
   "fr": {
     "setup_no_admin": "aucun administrateur pour l'instant",
@@ -1125,7 +1127,9 @@
     "billing_backup_created_email_subject": "Site backup created for %s",
     "billing_backup_created_email_body": "A deletion backup for %s was created.\nArchive: %s\nSize: %s\nExpires: %s\nDownload: %s",
     "billing_backup_downloaded_email_subject": "Site backup downloaded for %s",
-    "billing_backup_downloaded_email_body": "The deletion backup for %s was downloaded.\nArchive: %s\nTime: %s\nRemote: %s"
+    "billing_backup_downloaded_email_body": "The deletion backup for %s was downloaded.\nArchive: %s\nTime: %s\nRemote: %s",
+    "site_copy_retry_next_in": "Prochaine tentative dans",
+    "site_copy_retry_seconds_suffix": "s"
   },
   "ru": {
     "setup_no_admin": "пока нет администратора",
@@ -1692,7 +1696,9 @@
     "billing_status_plan_quota_required": "Квота тарифа обязательна.",
     "billing_status_plan_saved": "Тариф сохранен.",
     "billing_status_plan_not_selected": "Тариф не выбран.",
-    "billing_status_plan_deleted": "Тариф удален."
+    "billing_status_plan_deleted": "Тариф удален.",
+    "site_copy_retry_next_in": "Следующий ретрай через",
+    "site_copy_retry_seconds_suffix": "с"
   },
   "ja": {
     "setup_no_admin": "まだ管理者がいません",
@@ -2253,7 +2259,9 @@
     "billing_backup_created_email_subject": "Site backup created for %s",
     "billing_backup_created_email_body": "A deletion backup for %s was created.\nArchive: %s\nSize: %s\nExpires: %s\nDownload: %s",
     "billing_backup_downloaded_email_subject": "Site backup downloaded for %s",
-    "billing_backup_downloaded_email_body": "The deletion backup for %s was downloaded.\nArchive: %s\nTime: %s\nRemote: %s"
+    "billing_backup_downloaded_email_body": "The deletion backup for %s was downloaded.\nArchive: %s\nTime: %s\nRemote: %s",
+    "site_copy_retry_next_in": "次の再試行まで",
+    "site_copy_retry_seconds_suffix": "秒"
   },
   "it": {
     "setup_no_admin": "nessun amministratore ancora",
@@ -2814,7 +2822,9 @@
     "billing_backup_created_email_subject": "Site backup created for %s",
     "billing_backup_created_email_body": "A deletion backup for %s was created.\nArchive: %s\nSize: %s\nExpires: %s\nDownload: %s",
     "billing_backup_downloaded_email_subject": "Site backup downloaded for %s",
-    "billing_backup_downloaded_email_body": "The deletion backup for %s was downloaded.\nArchive: %s\nTime: %s\nRemote: %s"
+    "billing_backup_downloaded_email_body": "The deletion backup for %s was downloaded.\nArchive: %s\nTime: %s\nRemote: %s",
+    "site_copy_retry_next_in": "Prossimo tentativo tra",
+    "site_copy_retry_seconds_suffix": "s"
   },
   "sv": {
     "setup_no_admin": "ingen administratör ännu",
@@ -3375,7 +3385,9 @@
     "billing_backup_created_email_subject": "Site backup created for %s",
     "billing_backup_created_email_body": "A deletion backup for %s was created.\nArchive: %s\nSize: %s\nExpires: %s\nDownload: %s",
     "billing_backup_downloaded_email_subject": "Site backup downloaded for %s",
-    "billing_backup_downloaded_email_body": "The deletion backup for %s was downloaded.\nArchive: %s\nTime: %s\nRemote: %s"
+    "billing_backup_downloaded_email_body": "The deletion backup for %s was downloaded.\nArchive: %s\nTime: %s\nRemote: %s",
+    "site_copy_retry_next_in": "Nästa försök om",
+    "site_copy_retry_seconds_suffix": "s"
   },
   "fi": {
     "setup_no_admin": "ei vielä järjestelmänvalvojaa",
@@ -3936,7 +3948,9 @@
     "billing_backup_created_email_subject": "Site backup created for %s",
     "billing_backup_created_email_body": "A deletion backup for %s was created.\nArchive: %s\nSize: %s\nExpires: %s\nDownload: %s",
     "billing_backup_downloaded_email_subject": "Site backup downloaded for %s",
-    "billing_backup_downloaded_email_body": "The deletion backup for %s was downloaded.\nArchive: %s\nTime: %s\nRemote: %s"
+    "billing_backup_downloaded_email_body": "The deletion backup for %s was downloaded.\nArchive: %s\nTime: %s\nRemote: %s",
+    "site_copy_retry_next_in": "Seuraava yritys",
+    "site_copy_retry_seconds_suffix": "s"
   },
   "mn": {
     "setup_no_admin": "админ хараахан алга",
@@ -4497,7 +4511,9 @@
     "billing_backup_created_email_subject": "Site backup created for %s",
     "billing_backup_created_email_body": "A deletion backup for %s was created.\nArchive: %s\nSize: %s\nExpires: %s\nDownload: %s",
     "billing_backup_downloaded_email_subject": "Site backup downloaded for %s",
-    "billing_backup_downloaded_email_body": "The deletion backup for %s was downloaded.\nArchive: %s\nTime: %s\nRemote: %s"
+    "billing_backup_downloaded_email_body": "The deletion backup for %s was downloaded.\nArchive: %s\nTime: %s\nRemote: %s",
+    "site_copy_retry_next_in": "Дараагийн оролдлого",
+    "site_copy_retry_seconds_suffix": "сек"
   },
   "zh": {
     "setup_no_admin": "尚无管理员",
@@ -5058,7 +5074,9 @@
     "billing_backup_created_email_subject": "Site backup created for %s",
     "billing_backup_created_email_body": "A deletion backup for %s was created.\nArchive: %s\nSize: %s\nExpires: %s\nDownload: %s",
     "billing_backup_downloaded_email_subject": "Site backup downloaded for %s",
-    "billing_backup_downloaded_email_body": "The deletion backup for %s was downloaded.\nArchive: %s\nTime: %s\nRemote: %s"
+    "billing_backup_downloaded_email_body": "The deletion backup for %s was downloaded.\nArchive: %s\nTime: %s\nRemote: %s",
+    "site_copy_retry_next_in": "下次重试倒计时",
+    "site_copy_retry_seconds_suffix": "秒"
   },
   "he": {
     "setup_no_admin": "עדיין אין מנהל",
@@ -5619,7 +5637,9 @@
     "billing_backup_created_email_subject": "Site backup created for %s",
     "billing_backup_created_email_body": "A deletion backup for %s was created.\nArchive: %s\nSize: %s\nExpires: %s\nDownload: %s",
     "billing_backup_downloaded_email_subject": "Site backup downloaded for %s",
-    "billing_backup_downloaded_email_body": "The deletion backup for %s was downloaded.\nArchive: %s\nTime: %s\nRemote: %s"
+    "billing_backup_downloaded_email_body": "The deletion backup for %s was downloaded.\nArchive: %s\nTime: %s\nRemote: %s",
+    "site_copy_retry_next_in": "הניסיון הבא בעוד",
+    "site_copy_retry_seconds_suffix": "שניות"
   },
   "fa": {
     "setup_no_admin": "هنوز مدیر وجود ندارد",
@@ -6180,7 +6200,9 @@
     "billing_backup_created_email_subject": "Site backup created for %s",
     "billing_backup_created_email_body": "A deletion backup for %s was created.\nArchive: %s\nSize: %s\nExpires: %s\nDownload: %s",
     "billing_backup_downloaded_email_subject": "Site backup downloaded for %s",
-    "billing_backup_downloaded_email_body": "The deletion backup for %s was downloaded.\nArchive: %s\nTime: %s\nRemote: %s"
+    "billing_backup_downloaded_email_body": "The deletion backup for %s was downloaded.\nArchive: %s\nTime: %s\nRemote: %s",
+    "site_copy_retry_next_in": "تلاش دوباره بعد از",
+    "site_copy_retry_seconds_suffix": "ثانیه"
   },
   "de": {
     "setup_no_admin": "noch kein Administrator",
@@ -6741,7 +6763,9 @@
     "billing_backup_created_email_subject": "Site backup created for %s",
     "billing_backup_created_email_body": "A deletion backup for %s was created.\nArchive: %s\nSize: %s\nExpires: %s\nDownload: %s",
     "billing_backup_downloaded_email_subject": "Site backup downloaded for %s",
-    "billing_backup_downloaded_email_body": "The deletion backup for %s was downloaded.\nArchive: %s\nTime: %s\nRemote: %s"
+    "billing_backup_downloaded_email_body": "The deletion backup for %s was downloaded.\nArchive: %s\nTime: %s\nRemote: %s",
+    "site_copy_retry_next_in": "Nächster Versuch in",
+    "site_copy_retry_seconds_suffix": "s"
   },
   "tr": {
     "setup_no_admin": "henüz yönetici yok",
@@ -7302,7 +7326,9 @@
     "billing_backup_created_email_subject": "Site backup created for %s",
     "billing_backup_created_email_body": "A deletion backup for %s was created.\nArchive: %s\nSize: %s\nExpires: %s\nDownload: %s",
     "billing_backup_downloaded_email_subject": "Site backup downloaded for %s",
-    "billing_backup_downloaded_email_body": "The deletion backup for %s was downloaded.\nArchive: %s\nTime: %s\nRemote: %s"
+    "billing_backup_downloaded_email_body": "The deletion backup for %s was downloaded.\nArchive: %s\nTime: %s\nRemote: %s",
+    "site_copy_retry_next_in": "Sonraki deneme",
+    "site_copy_retry_seconds_suffix": "sn"
   },
   "kk": {
     "setup_no_admin": "әзірге әкімші жоқ",
@@ -7863,7 +7889,9 @@
     "billing_backup_created_email_subject": "Site backup created for %s",
     "billing_backup_created_email_body": "A deletion backup for %s was created.\nArchive: %s\nSize: %s\nExpires: %s\nDownload: %s",
     "billing_backup_downloaded_email_subject": "Site backup downloaded for %s",
-    "billing_backup_downloaded_email_body": "The deletion backup for %s was downloaded.\nArchive: %s\nTime: %s\nRemote: %s"
+    "billing_backup_downloaded_email_body": "The deletion backup for %s was downloaded.\nArchive: %s\nTime: %s\nRemote: %s",
+    "site_copy_retry_next_in": "Келесі қайталау",
+    "site_copy_retry_seconds_suffix": "с"
   },
   "es": {
     "setup_no_admin": "aún no hay administrador",
@@ -8424,7 +8452,9 @@
     "billing_backup_created_email_subject": "Site backup created for %s",
     "billing_backup_created_email_body": "A deletion backup for %s was created.\nArchive: %s\nSize: %s\nExpires: %s\nDownload: %s",
     "billing_backup_downloaded_email_subject": "Site backup downloaded for %s",
-    "billing_backup_downloaded_email_body": "The deletion backup for %s was downloaded.\nArchive: %s\nTime: %s\nRemote: %s"
+    "billing_backup_downloaded_email_body": "The deletion backup for %s was downloaded.\nArchive: %s\nTime: %s\nRemote: %s",
+    "site_copy_retry_next_in": "Siguiente reintento en",
+    "site_copy_retry_seconds_suffix": "s"
   },
   "pt": {
     "setup_no_admin": "ainda não há administrador",
@@ -8985,6 +9015,8 @@
     "billing_backup_created_email_subject": "Site backup created for %s",
     "billing_backup_created_email_body": "A deletion backup for %s was created.\nArchive: %s\nSize: %s\nExpires: %s\nDownload: %s",
     "billing_backup_downloaded_email_subject": "Site backup downloaded for %s",
-    "billing_backup_downloaded_email_body": "The deletion backup for %s was downloaded.\nArchive: %s\nTime: %s\nRemote: %s"
+    "billing_backup_downloaded_email_body": "The deletion backup for %s was downloaded.\nArchive: %s\nTime: %s\nRemote: %s",
+    "site_copy_retry_next_in": "Próxima tentativa em",
+    "site_copy_retry_seconds_suffix": "s"
   }
 }

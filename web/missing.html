@@ -136,6 +136,8 @@
     downloadFailedRetry: "{{index .T "missing_download_failed_retry"}}",
     partialImportRetry: "{{index .T "missing_partial_import_retry"}}",
     retryRemaining: "{{index .T "missing_retry_remaining"}}",
+    retryNextIn: "{{index .T "site_copy_retry_next_in"}}",
+    retrySecondsSuffix: "{{index .T "site_copy_retry_seconds_suffix"}}",
     finishImport: "{{index .T "site_copy_finish_import"}}",
     failedResourcesTitle: "{{index .T "site_copy_failed_resources_title"}}",
     failedResourceBadge: "{{index .T "site_copy_failed_resource_badge"}}",
@@ -298,7 +300,7 @@
       statusText += ' ' + retryAttempt + '/' + retryTotal;
     }
     if (secondsLeft > 0) {
-      statusText += ': ' + secondsLeft + 's';
+      statusText += '. ' + uiText.retryNextIn + ': ' + secondsLeft + ' ' + uiText.retrySecondsSuffix;
     }
     if (failedTotal > 0) {
       statusText += '. ' + uiText.leftWord + ' ' + failedTotal + '.';
@@ -1022,10 +1024,18 @@
     startConfirmedDownload();
   });
 
-  cancelButtonElement.addEventListener('click', function onCancelClick() {
-    if (!downloadPartial || !downloadRedirectURL) { return; }
+  function finishPartialImport() {
     closeProgressStream();
-    window.location.href = downloadRedirectURL;
+    stopRetryCountdown();
+    const fallbackPath = grabFormElement.querySelector('input[name="path"]').value || {{printf "%q" .Path}} || '/';
+    window.location.href = downloadRedirectURL || fallbackPath;
+  }
+
+  cancelButtonElement.addEventListener('click', function onCancelClick(clickEvent) {
+    if (!downloadPartial) { return; }
+    clickEvent.preventDefault();
+    clickEvent.stopPropagation();
+    finishPartialImport();
   });
 
   progressModalElement.addEventListener('hidden.bs.modal', function onProgressModalHidden() {

@@ -363,11 +363,7 @@
     function finishPartialImport() {
       closeProgressStream();
       stopRetryCountdown();
-      if (importedRedirectPath) {
-        window.location.href = importedRedirectPath;
-        return;
-      }
-      overlayElement.remove();
+      window.location.href = importedRedirectPath || targetPath || '/';
     }
 
     function collectFailedURLs(progressPayload) {
@@ -447,7 +443,7 @@
         statusText += ' ' + retryAttempt + '/' + retryTotal;
       }
       if (secondsLeft > 0) {
-        statusText += ': ' + secondsLeft + 's';
+        statusText += '. ' + textFromConfig(configuration, 'retryNextIn', 'Next retry in') + ': ' + secondsLeft + ' ' + textFromConfig(configuration, 'retrySecondsSuffix', 's');
       }
       if (failedTotal > 0) {
         statusText += '. ' + textFromConfig(configuration, 'leftWord', 'Left') + ' ' + failedTotal + '.';
@@ -723,7 +719,7 @@
 
     closeButtonElement.addEventListener('click', closeModal);
     cancelButtonElement.addEventListener('click', function onCancelClick() {
-      if (importedRedirectPath) {
+      if (downloadFinishedWithErrors || importedRedirectPath) {
         finishPartialImport();
         return;
       }
