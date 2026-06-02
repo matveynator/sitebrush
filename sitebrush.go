@@ -9726,12 +9726,19 @@ func (a *App) createAndSendEmailConfirmation(r *http.Request, action, domain, cu
 	confirmationURL := emailConfirmationURL(r, token)
 	fromAddress := a.emailFromAddress(domain)
 	if action == "register" {
+		fromAddress = a.registrationEmailFromAddress(databaseContext, domain)
 		if dnsSetup, dnsSetupRequired := a.registrationDNSSetupView(databaseContext, domain, languageCode); dnsSetupRequired {
 			return errors.New(dnsSetup.PlainText)
 		}
 	}
-	if dnsSetup, dnsSetupRequired := a.emailDNSSetupView(databaseContext, domain, fromAddress, languageCode); dnsSetupRequired {
-		return errors.New(dnsSetup.PlainText)
+	usesBillingParentMail := false
+	if action == "register" {
+		_, usesBillingParentMail = a.billingParentDomainForThirdLevelSite(databaseContext, domain)
+	}
+	if action != "register" || !usesBillingParentMail {
+		if dnsSetup, dnsSetupRequired := a.emailDNSSetupView(databaseContext, domain, fromAddress, languageCode); dnsSetupRequired {
+			return errors.New(dnsSetup.PlainText)
+		}
 	}
 	message := mailout.Message{
 		From:    fromAddress,
@@ -9792,9 +9799,12 @@ func (a *App) confirmEmailToken(w http.ResponseWriter, r *http.Request) {
 			a.renderEmailConfirmationStatus(w, r, http.StatusBadRequest, dnsSetup.PlainText)
 			return
 		}
-		if dnsSetup, dnsSetupRequired := a.emailDNSSetupView(confirmationContext, confirmation.Domain, a.emailFromAddress(confirmation.Domain), confirmation.LanguageCode); dnsSetupRequired {
-			a.renderEmailConfirmationStatus(w, r, http.StatusBadRequest, dnsSetup.PlainText)
-			return
+		_, usesBillingParentMail := a.billingParentDomainForThirdLevelSite(confirmationContext, confirmation.Domain)
+		if !usesBillingParentMail {
+			if dnsSetup, dnsSetupRequired := a.emailDNSSetupView(confirmationContext, confirmation.Domain, a.registrationEmailFromAddress(confirmationContext, confirmation.Domain), confirmation.LanguageCode); dnsSetupRequired {
+				a.renderEmailConfirmationStatus(w, r, http.StatusBadRequest, dnsSetup.PlainText)
+				return
+			}
 		}
 		registerContext := contextWithSiteDatabaseCreation(confirmationContext)
 		if _, err := a.db.ExecContext(registerContext, `INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, confirmation.Domain, confirmation.Email, confirmation.Password); err != nil {
@@ -10060,6 +10070,48 @@ func (a *App) emailFromAddress(domain string) string {
 	return "SiteBrush <sitebrush@" + normalizedDomain + ">"
 }
 
+func (a *App) registrationEmailFromAddress(ctx context.Context, siteDomain string) string {
+	if parentDomain, found := a.billingParentDomainForThirdLevelSite(ctx, siteDomain); found {
+		return a.emailFromAddress(parentDomain)
+	}
+	return a.emailFromAddress(siteDomain)
+}
+
+func (a *App) billingParentDomainForThirdLevelSite(ctx context.Context, siteDomain string) (string, bool) {
+	registrationDomain := normalizeDomainName(siteDomain)
+	if registrationDomain == "" {
+		return "", false
+	}
+	controlDatabase, err := a.openServerControlDatabase(ctx)
+	if err != nil {
+		return "", false
+	}
+	defer controlDatabase.Close()
+	parentDomain, found := (billing.Store{DB: controlDatabase}).OwnerDomain(ctx)
+	parentDomain = normalizeDomainName(parentDomain)
+	if !found || parentDomain == "" {
+		return "", false
+	}
+	if !directSubdomainOfDomain(registrationDomain, parentDomain) {
+		return "", false
+	}
+	return parentDomain, true
+}
+
+func directSubdomainOfDomain(childDomain, parentDomain string) bool {
+	childDomain = normalizeDomainName(childDomain)
+	parentDomain = normalizeDomainName(parentDomain)
+	if childDomain == "" || parentDomain == "" || childDomain == parentDomain {
+		return false
+	}
+	if !strings.HasSuffix(childDomain, "."+parentDomain) {
+		return false
+	}
+	childLabels := strings.Split(childDomain, ".")
+	parentLabels := strings.Split(parentDomain, ".")
+	return len(childLabels) == len(parentLabels)+1
+}
+
 func (a *App) emailDNSSetupView(ctx context.Context, siteDomain, fromAddress, languageCode string) (EmailDNSSetupView, bool) {
 	fromDomain := emailAddressDomain(fromAddress)
 	if emailDomainCannotUseDNS(fromDomain) {
@@ -10097,22 +10149,32 @@ func (a *App) registrationDNSSetupView(ctx context.Context, siteDomain, language
 	if emailDomainCannotUseDNS(registrationDomain) {
 		return EmailDNSSetupView{}, false
 	}
+	setupFromAddress := "sitebrush@" + registrationDomain
+	if parentDomain, found := a.billingParentDomainForThirdLevelSite(ctx, registrationDomain); found {
+		setupFromAddress = "sitebrush@" + parentDomain
+	}
 	serverIPs, externalIP, err := detectServerIPCandidates(ctx)
 	if err != nil {
-		return emailDNSSetupViewForLanguage(languageCode, registrationDomain, "sitebrush@"+registrationDomain, "SERVER_IP"), true
+		return emailDNSSetupViewForLanguage(languageCode, registrationDomain, setupFromAddress, "SERVER_IP"), true
 	}
 	selectedIP := selectedEmailDNSIP(externalIP, serverIPs)
 	if selectedIP == nil {
-		return emailDNSSetupViewForLanguage(languageCode, registrationDomain, "sitebrush@"+registrationDomain, "SERVER_IP"), true
+		return emailDNSSetupViewForLanguage(languageCode, registrationDomain, setupFromAddress, "SERVER_IP"), true
 	}
 	ipRecords, ipErr := lookupIPRecords(registrationDomain)
 	domainPointsToServer := ipErr == nil && ipRecordsAllowAnyServerIP(ipRecords, serverIPs)
+	if _, found := a.billingParentDomainForThirdLevelSite(ctx, registrationDomain); found {
+		if domainPointsToServer {
+			return EmailDNSSetupView{}, false
+		}
+		return emailDNSSetupViewForLanguage(languageCode, registrationDomain, setupFromAddress, selectedIP.String()), true
+	}
 	txtRecords, txtErr := lookupTXTRecords(registrationDomain)
 	spfAllowsServer := txtErr == nil && spfRecordsAllowAnyServerIP(txtRecords, serverIPs)
 	if domainPointsToServer && spfAllowsServer {
 		return EmailDNSSetupView{}, false
 	}
-	return emailDNSSetupViewForLanguage(languageCode, registrationDomain, "sitebrush@"+registrationDomain, selectedIP.String()), true
+	return emailDNSSetupViewForLanguage(languageCode, registrationDomain, setupFromAddress, selectedIP.String()), true
 }
 
 func emailDomainCannotUseDNS(domain string) bool {
