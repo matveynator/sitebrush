@@ -114,6 +114,82 @@
       opacity: .72;
     }
 
+    #SiteBrush .technical-page .revision-action-list {
+      display: flex;
+      flex-wrap: wrap;
+      gap: .35rem;
+    }
+
+    #SiteBrush .technical-page .revision-preview-backdrop {
+      position: fixed;
+      inset: 0;
+      z-index: 1080;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      padding: 1.25rem;
+      background: rgba(0, 0, 0, .62);
+    }
+
+    #SiteBrush .technical-page .revision-preview-backdrop.is-open {
+      display: flex;
+    }
+
+    #SiteBrush .technical-page .revision-preview-dialog {
+      display: flex;
+      flex-direction: column;
+      width: min(1100px, 96vw);
+      height: min(760px, 92vh);
+      overflow: hidden;
+      border: 1px solid var(--bs-border-color);
+      border-radius: .5rem;
+      background: var(--bs-body-bg);
+      box-shadow: 0 1rem 3rem rgba(0, 0, 0, .3);
+    }
+
+    #SiteBrush .technical-page .revision-preview-backdrop.is-fullscreen {
+      padding: 0;
+    }
+
+    #SiteBrush .technical-page .revision-preview-backdrop.is-fullscreen .revision-preview-dialog {
+      width: 100vw;
+      height: 100vh;
+      border-radius: 0;
+      border: 0;
+    }
+
+    #SiteBrush .technical-page .revision-preview-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: .75rem;
+      padding: .65rem .75rem;
+      border-bottom: 1px solid var(--bs-border-color);
+    }
+
+    #SiteBrush .technical-page .revision-preview-title {
+      min-width: 0;
+      margin: 0;
+      font-size: .95rem;
+      font-weight: 600;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    #SiteBrush .technical-page .revision-preview-controls {
+      display: flex;
+      flex: 0 0 auto;
+      gap: .45rem;
+    }
+
+    #SiteBrush .technical-page .revision-preview-frame {
+      flex: 1 1 auto;
+      width: 100%;
+      border: 0;
+      background: #fff;
+    }
+
     @media (max-width: 991.98px) {
       #SiteBrush .technical-page .container {
         padding-top: 1.5rem !important;
@@ -237,6 +313,15 @@
       #SiteBrush .technical-page td button {
         width: 100%;
       }
+
+      #SiteBrush .technical-page .revision-action-list,
+      #SiteBrush .technical-page .revision-preview-controls {
+        width: 100%;
+      }
+
+      #SiteBrush .technical-page .revision-preview-backdrop {
+        padding: .5rem;
+      }
     }
   </style>
 </head>
@@ -264,6 +349,7 @@
             <th>{{index .T "revisions_table_date"}}</th>
             <th>{{index .T "revisions_table_snippet"}}</th>
             <th>{{index .T "revisions_table_status"}}</th>
+            <th>{{index .T "revisions_table_preview"}}</th>
             <th>{{index .T "revisions_table_action"}}</th>
           </tr>
         </thead>
@@ -296,28 +382,40 @@
               {{end}}
             </td>
 
-            <td data-label="{{index $.T "revisions_table_action"}}">
-              <form method="post" action="{{$.Path}}?revision_toggle" class="d-inline">
-                <input type="hidden" name="id" value="{{.ID}}"/>
-                <input type="hidden" name="path" value="{{.PagePath}}"/>
+            <td data-label="{{index $.T "revisions_table_preview"}}">
+              <a
+                href="{{$.Path}}?revision_preview&id={{.ID}}"
+                class="btn btn-outline-primary btn-sm revision-preview-button"
+                data-revision-preview-url="{{$.Path}}?revision_preview&id={{.ID}}"
+                data-revision-preview-label="{{index $.T "revisions_preview_title"}} #{{.ID}}">
+                {{index $.T "revisions_preview"}}
+              </a>
+            </td>
 
-                {{if eq .IsActive 1}}
-                  <input type="hidden" name="enable" value="0"/>
-                  <button class="btn btn-danger btn-sm revision-disable-button">
-                    {{index $.T "revisions_disable"}}
-                  </button>
-                {{else}}
-                  <input type="hidden" name="enable" value="1"/>
-                  <button class="btn btn-success btn-sm revision-enable-button">
-                    {{index $.T "revisions_enable"}}
-                  </button>
-                {{end}}
-              </form>
+            <td data-label="{{index $.T "revisions_table_action"}}">
+              <div class="revision-action-list">
+                <form method="post" action="{{$.Path}}?revision_toggle" class="d-inline">
+                  <input type="hidden" name="id" value="{{.ID}}"/>
+                  <input type="hidden" name="path" value="{{.PagePath}}"/>
+
+                  {{if eq .IsActive 1}}
+                    <input type="hidden" name="enable" value="0"/>
+                    <button class="btn btn-danger btn-sm revision-disable-button">
+                      {{index $.T "revisions_disable"}}
+                    </button>
+                  {{else}}
+                    <input type="hidden" name="enable" value="1"/>
+                    <button class="btn btn-success btn-sm revision-enable-button">
+                      {{index $.T "revisions_enable"}}
+                    </button>
+                  {{end}}
+                </form>
+              </div>
             </td>
           </tr>
         {{else}}
           <tr>
-            <td colspan="5" class="text-center text-muted py-4">
+            <td colspan="6" class="text-center text-muted py-4">
               {{index .T "revisions_empty"}}
             </td>
           </tr>
@@ -325,6 +423,23 @@
         </tbody>
       </table>
     </div>
+  </div>
+</div>
+
+<div id="revisionPreviewModal" class="revision-preview-backdrop" role="dialog" aria-modal="true" aria-labelledby="revisionPreviewTitle" hidden>
+  <div class="revision-preview-dialog">
+    <div class="revision-preview-header">
+      <h2 id="revisionPreviewTitle" class="revision-preview-title">{{index .T "revisions_preview_title"}}</h2>
+      <div class="revision-preview-controls">
+        <button id="revisionPreviewFullscreenButton" type="button" class="btn btn-outline-secondary btn-sm">
+          {{index .T "revisions_preview_fullscreen"}}
+        </button>
+        <button id="revisionPreviewCloseButton" type="button" class="btn btn-secondary btn-sm">
+          {{index .T "revisions_preview_close"}}
+        </button>
+      </div>
+    </div>
+    <iframe id="revisionPreviewFrame" class="revision-preview-frame" title="{{index .T "revisions_preview_title"}}" referrerpolicy="same-origin"></iframe>
   </div>
 </div>
 
@@ -369,11 +484,71 @@
     }
 
     if (originalElement) {
-      originalElement.textContent = 'original: ' + rawValue;
+      originalElement.textContent = "{{.RevisionText.OriginalDate}}" + ': ' + rawValue;
     }
 
     timeElement.setAttribute('datetime', parsedDate.toISOString());
     timeElement.setAttribute('title', rawValue);
+  });
+})();
+
+(function bindRevisionPreviewModal() {
+  const previewModalElement = document.getElementById('revisionPreviewModal');
+  const previewFrameElement = document.getElementById('revisionPreviewFrame');
+  const previewTitleElement = document.getElementById('revisionPreviewTitle');
+  const closeButtonElement = document.getElementById('revisionPreviewCloseButton');
+  const fullscreenButtonElement = document.getElementById('revisionPreviewFullscreenButton');
+  const fullscreenLabel = "{{.RevisionText.FullscreenLabel}}";
+  const windowedLabel = "{{.RevisionText.WindowedLabel}}";
+
+  function renderRevisionPreviewModal(isOpen) {
+    previewModalElement.hidden = !isOpen;
+    previewModalElement.classList.toggle('is-open', isOpen);
+    document.body.style.overflow = isOpen ? 'hidden' : '';
+  }
+
+  function renderRevisionPreviewSize(isFullscreen) {
+    previewModalElement.classList.toggle('is-fullscreen', isFullscreen);
+    fullscreenButtonElement.textContent = isFullscreen ? windowedLabel : fullscreenLabel;
+  }
+
+  function openRevisionPreview(previewURL, previewLabel) {
+    previewFrameElement.setAttribute('src', previewURL);
+    previewTitleElement.textContent = previewLabel;
+    renderRevisionPreviewSize(false);
+    renderRevisionPreviewModal(true);
+  }
+
+  function closeRevisionPreview() {
+    renderRevisionPreviewModal(false);
+    previewFrameElement.removeAttribute('src');
+  }
+
+  document.querySelectorAll('.revision-preview-button').forEach(function bindPreviewButton(previewButtonElement) {
+    previewButtonElement.addEventListener('click', function handlePreviewClick(browserEvent) {
+      browserEvent.preventDefault();
+      const previewURL = previewButtonElement.getAttribute('data-revision-preview-url');
+      const previewLabel = previewButtonElement.getAttribute('data-revision-preview-label');
+      openRevisionPreview(previewURL, previewLabel);
+    });
+  });
+
+  closeButtonElement.addEventListener('click', closeRevisionPreview);
+
+  fullscreenButtonElement.addEventListener('click', function handleFullscreenClick() {
+    renderRevisionPreviewSize(!previewModalElement.classList.contains('is-fullscreen'));
+  });
+
+  previewModalElement.addEventListener('click', function handleBackdropClick(mouseEvent) {
+    if (mouseEvent.target === previewModalElement) {
+      closeRevisionPreview();
+    }
+  });
+
+  document.addEventListener('keydown', function handlePreviewKeydown(keyboardEvent) {
+    if (keyboardEvent.key === 'Escape' && previewModalElement.classList.contains('is-open')) {
+      closeRevisionPreview();
+    }
   });
 })();
 </script>

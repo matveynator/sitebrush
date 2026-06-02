@@ -3141,6 +3141,36 @@ func TestDeleteRevisionByQueryDisablesRevisionAndAppliesPreviousActiveRevision(t
 	}
 }
 
+func TestRevisionsPageShowsPreviewButtonForEditableUser(t *testing.T) {
+	application, rawDB := newTestApplication(t)
+	if _, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "admin@example.com", "old"); err != nil {
+		t.Fatalf("insert user: %v", err)
+	}
+	result, err := rawDB.Exec(`INSERT INTO revisions(domain,page_path,html,created_at,is_active) VALUES(?,?,?,?,1)`, "localhost", "/docs", "<h1>old</h1>", "2026-01-01T00:00:00Z")
+	if err != nil {
+		t.Fatalf("insert revision: %v", err)
+	}
+	revisionID, err := result.LastInsertId()
+	if err != nil {
+		t.Fatalf("revision id: %v", err)
+	}
+
+	request := httptest.NewRequest(http.MethodGet, "http://localhost:8080/docs?revisions", nil)
+	request.AddCookie(newAdminSessionCookie(t, application, "admin@example.com"))
+	response := httptest.NewRecorder()
+	application.route(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%q", response.Code, response.Body.String())
+	}
+	body := response.Body.String()
+	expectedPreviewURL := `/docs?revision_preview&id=` + strconv.FormatInt(revisionID, 10)
+	for _, expectedFragment := range []string{`revision-preview-button`, `href="` + expectedPreviewURL + `"`, `data-revision-preview-url="/docs?revision_preview&id=` + strconv.FormatInt(revisionID, 10) + `"`} {
+		if !strings.Contains(body, expectedFragment) {
+			t.Fatalf("revisions page missing %q in %s", expectedFragment, body)
+		}
+	}
+}
+
 func TestProfilePageUpdatesAdminEmailAndPassword(t *testing.T) {
 	withEmailSPFAllowed(t)
 	application, rawDB := newTestApplication(t)

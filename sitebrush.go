@@ -1574,6 +1574,12 @@ type Revision struct {
 	IsActive  int
 }
 
+type revisionPageText struct {
+	OriginalDate    string
+	FullscreenLabel string
+	WindowedLabel   string
+}
+
 type ManagedFile struct {
 	Name          string
 	Size          int64
@@ -2119,7 +2125,7 @@ func shouldRecordAnalyticsRequest(r *http.Request) bool {
 		return false
 	}
 	query := r.URL.Query()
-	for _, skippedFlag := range []string{"analytics", "billing", "grab_events", "grab_ws", "publish_events", "captcha"} {
+	for _, skippedFlag := range []string{"analytics", "billing", "grab_events", "grab_ws", "revision_preview", "publish_events", "captcha"} {
 		if _, found := query[skippedFlag]; found {
 			return false
 		}
@@ -2129,7 +2135,7 @@ func shouldRecordAnalyticsRequest(r *http.Request) bool {
 
 func isSitebrushControllerQuery(query url.Values) bool {
 	for _, controllerFlag := range []string{
-		"save", "template_events", "grab_preview", "grab_events", "grab_ws", "revision_restore", "revision_delete", "revision_toggle",
+		"save", "template_events", "grab_preview", "grab_events", "grab_ws", "revision_preview", "revision_restore", "revision_delete", "revision_toggle",
 		"tree", "native_pick_files", "native_save_backup", "edit", "visual", "text", "editraw", "settings", "properties",
 		"backup_download", "billing_backup_download", "backup_import", "profile", "freeze", "publish", "publish_events", "publish_preview", "files",
 		"revisions", "login", "register", "email_confirm", "grab", "recover", "captcha", "analytics", "billing",
@@ -5381,6 +5387,10 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 		a.grabProgressWS(w, r)
 		return
 	}
+	if hasQueryFlag(r, "revision_preview") {
+		a.previewRevision(w, r)
+		return
+	}
 	if hasQueryFlag(r, "revision_restore") {
 		a.restoreRevision(w, r)
 		return
@@ -8193,7 +8203,7 @@ func writePublishProgressEvent(w io.Writer, flusher http.Flusher, event publishP
 }
 
 func (a *App) revisionsPage(w http.ResponseWriter, r *http.Request) {
-	if !a.isAdminRequest(r) {
+	if !a.canEditPages(r) {
 		if !a.hasAdmin(r.Context(), a.siteDomain(r.Context(), r)) {
 			http.Redirect(w, r, r.URL.Path+"?register", http.StatusFound)
 			return
@@ -8222,7 +8232,14 @@ func (a *App) revisionsPage(w http.ResponseWriter, r *http.Request) {
 	if strings.TrimSpace(returnPath) == "" {
 		returnPath = pagePath
 	}
-	a.render(w, r, "revisions.html", map[string]any{"Path": pagePath, "ReturnPath": returnPath, "Revisions": revisionList})
+	w.Header().Set("Cache-Control", "no-store")
+	translations := translationsForRequest(r)
+	text := revisionPageText{
+		OriginalDate:    template.JSEscapeString(translationOrDefault(translations, "revisions_original_date", "original")),
+		FullscreenLabel: template.JSEscapeString(translationOrDefault(translations, "revisions_preview_fullscreen", "Full area")),
+		WindowedLabel:   template.JSEscapeString(translationOrDefault(translations, "revisions_preview_windowed", "Window size")),
+	}
+	a.render(w, r, "revisions.html", map[string]any{"Path": pagePath, "ReturnPath": returnPath, "Revisions": revisionList, "RevisionText": text})
 }
 
 func (a *App) billingPage(w http.ResponseWriter, r *http.Request) {
@@ -9441,6 +9458,28 @@ func (a *App) removeManagedPage(ctx context.Context, domain string, pagePath str
 	_, _ = a.db.ExecContext(ctx, `DELETE FROM pages WHERE domain=? AND path=?`, domain, pagePath)
 	_, _ = a.db.ExecContext(ctx, `DELETE FROM published_pages WHERE domain=? AND path=?`, domain, pagePath)
 	a.removePublishedStaticFile(domain, pagePath)
+}
+
+func (a *App) previewRevision(w http.ResponseWriter, r *http.Request) {
+	if !a.canEditPages(r) || r.Method != http.MethodGet {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	revisionID, _ := strconv.Atoi(r.URL.Query().Get("id"))
+	if revisionID <= 0 {
+		http.Error(w, "revision not found", http.StatusNotFound)
+		return
+	}
+	domain := a.siteDomain(r.Context(), r)
+	var revisionHTML string
+	err := a.db.QueryRowContext(r.Context(), `SELECT html FROM revisions WHERE id=? AND domain=?`, revisionID, domain).Scan(&revisionHTML)
+	if err != nil {
+		http.Error(w, "revision not found", http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	_, _ = w.Write([]byte(revisionHTML))
 }
 
 func (a *App) restoreRevision(w http.ResponseWriter, r *http.Request) {
@@ -12660,6 +12699,10 @@ func (a *App) createSessionForDomain(w http.ResponseWriter, ctx context.Context,
 func (a *App) isAdminRequest(r *http.Request) bool {
 	_, found := a.currentAdminEmail(r)
 	return found
+}
+
+func (a *App) canEditPages(r *http.Request) bool {
+	return a.isAdminRequest(r)
 }
 
 func (a *App) currentAdminEmail(r *http.Request) (string, bool) {
