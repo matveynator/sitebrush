@@ -71,7 +71,6 @@ var embeddedWebFiles embed.FS
 var CompileVersion = "dev"
 var translationCatalog = loadTranslationCatalog()
 var guestContextMenuTemplates = buildGuestContextMenuTemplates()
-var guestNotFoundPageTemplates = buildGuestNotFoundPageTemplates()
 var importedHTMLCharsetAssignmentPattern = regexp.MustCompile(`(?i)(charset\s*=\s*)(["']?)[a-z0-9._:-]+`)
 var importedHTMLCharsetMetaPattern = regexp.MustCompile(`(?i)<meta\b[^>]*charset\s*=`)
 var importedHTMLHeadOpenPattern = regexp.MustCompile(`(?i)<head\b[^>]*>`)
@@ -5520,7 +5519,7 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 			a.grabPage(w, r)
 			return
 		}
-		a.render(w, r, "missing.html", map[string]any{"Path": pagePath})
+		a.renderMissingPage(w, r, pagePath, a.isAdminRequest(r))
 		return
 	}
 	if hasQueryFlag(r, "recover") {
@@ -5585,7 +5584,7 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if isGuestStaticRequest(r) && !pagePasswordUnlockedForGuest {
-		a.serveGuestNotFoundPage(w, r, domain, pagePath)
+		a.renderMissingPage(w, r, pagePath, false)
 		return
 	}
 	domainFrozen := false
@@ -13221,19 +13220,12 @@ func (a *App) serveManagedPageContent(w http.ResponseWriter, r *http.Request, do
 
 func (a *App) renderMissingPage(w http.ResponseWriter, r *http.Request, pagePath string, isAdmin bool) {
 	w.WriteHeader(http.StatusNotFound)
-	a.render(w, r, "missing.html", map[string]any{"Path": pagePath, "EditLink": pagePath + "?visual", "IsAdmin": isAdmin})
+	a.render(w, r, "missing.html", missingPageTemplateData(pagePath, isAdmin))
 }
 
-func (a *App) serveGuestNotFoundPage(w http.ResponseWriter, r *http.Request, domain, pagePath string) {
-	languageCode := preferredLanguageCode(r.Header.Get("Accept-Language"))
-	body := buildGuestNotFoundPageForLanguage(pagePath, domain, languageCode)
-	a.logContentDelivery(w, "static-file")
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.WriteHeader(http.StatusNotFound)
-	if r.Method == http.MethodHead {
-		return
-	}
-	_, _ = w.Write([]byte(body))
+func missingPageTemplateData(pagePath string, isAdmin bool) map[string]any {
+	pagePath = cleanPath(pagePath)
+	return map[string]any{"Path": pagePath, "EditLink": pagePath + "?visual", "IsAdmin": isAdmin}
 }
 
 func (a *App) injectContextMenu(r *http.Request, pagePath, html string) string {
@@ -13881,76 +13873,6 @@ func buildGuestContextMenuScriptForLanguage(pagePath, domain, languageCode strin
 		guestContextMenuPagePathPlaceholder, template.JSEscapeString(pagePath),
 		guestContextMenuDomainPlaceholder, template.JSEscapeString(domain),
 	).Replace(menuTemplate)
-}
-
-func buildGuestNotFoundPageTemplates() map[string]string {
-	templates := make(map[string]string, len(translationCatalog))
-	for languageCode := range translationCatalog {
-		templates[languageCode] = buildGuestNotFoundPageTemplate(languageCode, translationsForLanguageCode(languageCode))
-	}
-	if strings.TrimSpace(templates["ru"]) == "" {
-		templates["ru"] = buildGuestNotFoundPageTemplate("ru", translationsForLanguageCode("ru"))
-	}
-	return templates
-}
-
-func buildGuestNotFoundPageForLanguage(pagePath, domain, languageCode string) string {
-	pageTemplate := guestNotFoundPageTemplates[languageCode]
-	if strings.TrimSpace(pageTemplate) == "" {
-		pageTemplate = guestNotFoundPageTemplates["ru"]
-	}
-	if strings.TrimSpace(pageTemplate) == "" {
-		pageTemplate = buildGuestNotFoundPageTemplate("ru", translationsForLanguageCode("ru"))
-	}
-	normalizedPath := cleanPath(pagePath)
-	if strings.TrimSpace(normalizedPath) == "" {
-		normalizedPath = "/"
-	}
-	return strings.NewReplacer(
-		guestNotFoundPagePathPlaceholder, template.HTMLEscapeString(normalizedPath),
-		guestNotFoundEditLinkPlaceholder, template.HTMLEscapeString(normalizedPath+"?edit"),
-		guestNotFoundMenuPlaceholder, buildGuestContextMenuScriptForLanguage(normalizedPath, domain, languageCode),
-	).Replace(pageTemplate)
-}
-
-func buildGuestNotFoundPageTemplate(languageCode string, translations map[string]string) string {
-	pageTitle := template.HTMLEscapeString(translationOrDefault(translations, "missing_title", "Page not found"))
-	notFoundPrefix := template.HTMLEscapeString(translationOrDefault(translations, "missing_page_not_found_prefix", "Page"))
-	notFoundSuffix := template.HTMLEscapeString(translationOrDefault(translations, "missing_page_not_found_suffix", "not found. Please"))
-	createPageLabel := template.HTMLEscapeString(translationOrDefault(translations, "missing_create_page", "create this page"))
-	escapedLanguageCode := template.HTMLEscapeString(languageCode)
-
-	return `<!doctype html>
-<html lang="` + escapedLanguageCode + `">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>` + pageTitle + `</title>
-  <style>
-    :root{color-scheme:light dark;--guest-bg:#f4f8fc;--guest-text:#1f3f6f;--guest-link:#1a65d8}
-    @media (prefers-color-scheme:dark){:root{--guest-bg:#0f1724;--guest-text:#dbe8ff;--guest-link:#9ec2ff}}
-    html,body{min-height:100%}
-    body{margin:0;background:var(--guest-bg);color:var(--guest-text);font-family:Arial,Helvetica,sans-serif}
-    .SiteBrushGuestNotFoundShell{min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px 16px;box-sizing:border-box}
-    .SiteBrushGuestNotFoundContent{width:min(720px,100%);text-align:left}
-    h1{margin:0 0 12px 0;font-size:clamp(28px,6vw,52px);line-height:1.05;overflow-wrap:anywhere}
-    .SiteBrushGuestNotFoundText{margin:0;font-size:15px;line-height:1.45;overflow-wrap:anywhere}
-    .SiteBrushGuestNotFoundText strong{font-weight:700}
-    .SiteBrushGuestNotFoundText a{color:var(--guest-link);font-weight:700;text-decoration:none}
-    .SiteBrushGuestNotFoundText a:hover{text-decoration:underline}
-    @media (max-width:640px){.SiteBrushGuestNotFoundShell{padding:18px 12px}.SiteBrushGuestNotFoundText{font-size:13px;line-height:1.36}}
-  </style>
-</head>
-<body>
-  <main class="SiteBrushGuestNotFoundShell">
-    <section class="SiteBrushGuestNotFoundContent">
-      <h1>404: ` + guestNotFoundPagePathPlaceholder + `</h1>
-      <p class="SiteBrushGuestNotFoundText">` + notFoundPrefix + ` <strong>` + guestNotFoundPagePathPlaceholder + `</strong> ` + notFoundSuffix + ` <a href="` + guestNotFoundEditLinkPlaceholder + `">` + createPageLabel + `</a>.</p>
-    </section>
-  </main>
-  ` + guestNotFoundMenuPlaceholder + `
-</body>
-</html>`
 }
 
 func buildGuestContextMenuScriptTemplate(translations map[string]string) string {
@@ -14686,9 +14608,6 @@ func translationOrDefault(translations map[string]string, key, fallback string) 
 
 const guestContextMenuPagePathPlaceholder = "__SITEBRUSH_PAGE_PATH__"
 const guestContextMenuDomainPlaceholder = "__SITEBRUSH_DOMAIN__"
-const guestNotFoundPagePathPlaceholder = "__SITEBRUSH_NOT_FOUND_PATH__"
-const guestNotFoundEditLinkPlaceholder = "__SITEBRUSH_NOT_FOUND_EDIT_LINK__"
-const guestNotFoundMenuPlaceholder = "__SITEBRUSH_NOT_FOUND_MENU__"
 
 func (a *App) applyTemplatePropagation(ctx context.Context, domain, sourceHTML, progressToken string) {
 	templateBlockByID := sitebrushtemplate.ExtractBlocks(sourceHTML)

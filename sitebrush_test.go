@@ -7069,8 +7069,8 @@ func TestMissingPageReturns404ForGuest(t *testing.T) {
 	}
 	body := response.Body.String()
 	for _, expectedFragment := range []string{
-		`Страница <strong>/missing</strong> не найдена. Пожалуйста <a href="/missing?edit">создайте эту страницу</a>.`,
-		`initializeSitebrushContextMenuForGuests`,
+		`Страница <strong>/missing</strong> не найдена. Пожалуйста <a class="alert-link" href="/missing?visual">создайте эту страницу</a>.`,
+		`class="alert missing-page-alert alert-info"`,
 	} {
 		if !strings.Contains(body, expectedFragment) {
 			t.Fatalf("missing page did not include %q in %s", expectedFragment, body)
@@ -7081,23 +7081,6 @@ func TestMissingPageReturns404ForGuest(t *testing.T) {
 	}
 	if strings.Contains(body, "sitebrush / /missing") {
 		t.Fatalf("guest missing page still includes the old footer label: %s", body)
-	}
-	if response.Header().Get("X-Sitebrush-Source") != "static" {
-		t.Fatalf("guest missing page source = %q, want static", response.Header().Get("X-Sitebrush-Source"))
-	}
-}
-
-func TestGuestMissingPageTemplatesAreAvailableForEveryLanguage(t *testing.T) {
-	for languageCode := range translationCatalog {
-		body := buildGuestNotFoundPageForLanguage("/missing", "localhost", languageCode)
-		if !strings.Contains(body, `/missing?edit`) {
-			t.Fatalf("%s missing edit link in %s", languageCode, body)
-		}
-		for _, placeholder := range []string{`__SITEBRUSH_NOT_FOUND_PATH__`, `__SITEBRUSH_NOT_FOUND_EDIT_LINK__`, `__SITEBRUSH_NOT_FOUND_MENU__`} {
-			if strings.Contains(body, placeholder) {
-				t.Fatalf("%s still contains placeholder %q in %s", languageCode, placeholder, body)
-			}
-		}
 	}
 }
 
