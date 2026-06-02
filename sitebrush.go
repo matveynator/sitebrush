@@ -81,6 +81,7 @@ const defaultDBPath = "storage/db/sitebrush.db"
 const grabResourceMaxDepth = 64
 const grabPreviewResourceTimeout = 6 * time.Second
 const grabImportResourceTimeout = 10 * time.Second
+const grabImportFailedResourceRetryAttempts = 2
 const wholeSiteImportConsecutiveFailureLimit = 25
 const wholeSiteImportMaxPages = 2048
 const defaultDomainStorageLimitBytes int64 = 10 * 1024 * 1024 * 1024
@@ -1522,6 +1523,24 @@ type grabPreviewResponse struct {
 type grabSourceOptions struct {
 	IP           string
 	LanguageCode string
+}
+
+type grabImportRequest struct {
+	Domain               string
+	PagePath             string
+	SourceURL            string
+	RemoteSourceURL      *url.URL
+	HTML                 string
+	ProgressToken        string
+	SelectedResourceURLs map[string]struct{}
+	SourceOptions        grabSourceOptions
+}
+
+type grabImportResult struct {
+	RedirectPath  string
+	FailedTotal   int
+	FailedURLs    []string
+	FailedReasons map[string]string
 }
 
 type wholeSiteImportedPage struct {
@@ -6048,10 +6067,11 @@ func (a *App) seedDemoSiteContent(ctx context.Context, domain string, settings d
 	}
 	domainContext := contextWithDomain(ctx, domain)
 	if settings.CopyWholeSite {
-		_, failedTotal, err := a.importWholeRemoteSite(domainContext, domain, "/", resolvedSourceURL, string(htmlBytes), progressToken, nil, grabSourceOptions{})
+		importResult, err := a.importWholeRemoteSite(domainContext, grabImportRequest{Domain: domain, PagePath: "/", SourceURL: resolvedSourceURL.String(), RemoteSourceURL: resolvedSourceURL, HTML: string(htmlBytes), ProgressToken: progressToken})
+		failedTotal := importResult.FailedTotal
 		return failedTotal, err
 	}
-	spider, importedHTML := prepareSinglePageImport(domain, "/", resolvedSourceURL.String(), resolvedSourceURL, string(htmlBytes), a.grabTracker, progressToken, nil, grabSourceOptions{})
+	spider, importedHTML := prepareSinglePageImport(grabImportRequest{Domain: domain, PagePath: "/", SourceURL: resolvedSourceURL.String(), RemoteSourceURL: resolvedSourceURL, HTML: string(htmlBytes), ProgressToken: progressToken}, a.grabTracker)
 	importedPages := []wholeSiteImportedPage{{SourceURL: resolvedSourceURL.String(), LocalPath: "/", HTML: importedHTML}}
 	pageDelta, publishedPageDelta, revisionDelta, publishedStaticDelta := a.estimateImportedPagesStorageDelta(domainContext, domain, importedPages)
 	fileDelta := a.estimateImportedFileDelta(domain, spider)
@@ -6060,21 +6080,21 @@ func (a *App) seedDemoSiteContent(ctx context.Context, domain string, settings d
 	}
 	if persistErr := a.persistSpiderAssets(spider, "/"); persistErr != nil {
 		_ = a.applyDomainStorageDelta(domainContext, domain, -pageDelta, -publishedPageDelta, -revisionDelta, -fileDelta, -publishedStaticDelta)
-		return spider.failedTotal, persistErr
+		return spider.unresolvedFailedTotal(), persistErr
 	}
 	if storeErr := a.storeWholeSiteImportedPages(domainContext, domain, importedPages); storeErr != nil {
 		_ = a.applyDomainStorageDelta(domainContext, domain, -pageDelta, -publishedPageDelta, -revisionDelta, -fileDelta, -publishedStaticDelta)
-		return spider.failedTotal, storeErr
+		return spider.unresolvedFailedTotal(), storeErr
 	}
 	a.rebuildDomainStorageUsage(domainContext, domain)
 	if a.grabTracker != nil && progressToken != "" {
 		stage := "done"
-		if spider.failedTotal > 0 {
+		if spider.unresolvedFailedTotal() > 0 {
 			stage = "partial"
 		}
-		a.grabTracker.publish(grabProgressEvent{Token: progressToken, Stage: stage, FoundTotal: spider.foundTotal, DownloadedTotal: spider.downloadedTotal, FailedTotal: spider.failedTotal, FailedURLs: spider.failedResourceURLList(), FailedReasons: spider.failedResourceReasonMap(), CompletedPercent: 100})
+		a.grabTracker.publish(grabProgressEvent{Token: progressToken, Stage: stage, FoundTotal: spider.foundTotal, DownloadedTotal: spider.downloadedTotal, FailedTotal: spider.unresolvedFailedTotal(), FailedURLs: spider.failedResourceURLList(), FailedReasons: spider.failedResourceReasonMap(), CompletedPercent: 100})
 	}
-	return spider.failedTotal, nil
+	return spider.unresolvedFailedTotal(), nil
 }
 
 func (a *App) demoGrabPreview(w http.ResponseWriter, r *http.Request) {
@@ -6132,7 +6152,7 @@ func (a *App) demoGrabPreview(w http.ResponseWriter, r *http.Request) {
 		importedPages = wholeSitePreview.ImportedPages
 		previewSpider = wholeSitePreview.Spider
 	} else {
-		previewSpider, importedHTML := prepareSinglePageImport(domain, pagePath, remoteSourceURL.String(), remoteSourceURL, string(htmlBytes), a.grabTracker, progressToken, nil, grabSourceOptions{})
+		previewSpider, importedHTML := prepareSinglePageImport(grabImportRequest{Domain: domain, PagePath: pagePath, SourceURL: remoteSourceURL.String(), RemoteSourceURL: remoteSourceURL, HTML: string(htmlBytes), ProgressToken: progressToken}, a.grabTracker)
 		resources = previewResourcesFromSpider(previewSpider, map[string]struct{}{remoteSourceURL.String(): {}})
 		importedPages = []wholeSiteImportedPage{{SourceURL: remoteSourceURL.String(), LocalPath: pagePath, HTML: importedHTML}}
 	}
@@ -6251,16 +6271,17 @@ func (a *App) retryDemoFailedResources(ctx context.Context, settings demo.Settin
 	for _, resourceURL := range resourceURLs {
 		_, _ = spider.fetchResource(resourceURL, remoteSourceURL, 0, true)
 	}
+	spider.retryFailedResources(remoteSourceURL, grabImportFailedResourceRetryAttempts)
 	replacements := importedResourceReplacements(spider)
 	fileDelta := a.estimateImportedFileDelta(settings.Domain, spider)
 	domainContext := contextWithDomain(ctx, settings.Domain)
 	pageDelta, publishedPageDelta, publishedStaticDelta := a.estimateRetriedResourcePageDelta(domainContext, settings.Domain, replacements)
 	if storageErr := a.applyDomainStorageDelta(domainContext, settings.Domain, pageDelta, publishedPageDelta, 0, fileDelta, publishedStaticDelta); storageErr != nil {
-		return spider.failedTotal, storageErr
+		return spider.unresolvedFailedTotal(), storageErr
 	}
 	if persistErr := a.persistSpiderAssets(spider, "/"); persistErr != nil {
 		_ = a.applyDomainStorageDelta(domainContext, settings.Domain, -pageDelta, -publishedPageDelta, 0, -fileDelta, -publishedStaticDelta)
-		return spider.failedTotal, persistErr
+		return spider.unresolvedFailedTotal(), persistErr
 	}
 	a.applyRetriedResourcePageReplacements(domainContext, settings.Domain, replacements)
 	a.rebuildDomainStorageUsage(domainContext, settings.Domain)
@@ -6269,12 +6290,12 @@ func (a *App) retryDemoFailedResources(ctx context.Context, settings demo.Settin
 	}
 	if a.grabTracker != nil && progressToken != "" {
 		stage := "done"
-		if spider.failedTotal > 0 {
+		if spider.unresolvedFailedTotal() > 0 {
 			stage = "partial"
 		}
-		a.grabTracker.publish(grabProgressEvent{Token: progressToken, Stage: stage, FoundTotal: spider.foundTotal, DownloadedTotal: spider.downloadedTotal, FailedTotal: spider.failedTotal, FailedURLs: spider.failedResourceURLList(), FailedReasons: spider.failedResourceReasonMap(), CompletedPercent: 100})
+		a.grabTracker.publish(grabProgressEvent{Token: progressToken, Stage: stage, FoundTotal: spider.foundTotal, DownloadedTotal: spider.downloadedTotal, FailedTotal: spider.unresolvedFailedTotal(), FailedURLs: spider.failedResourceURLList(), FailedReasons: spider.failedResourceReasonMap(), CompletedPercent: 100})
 	}
-	return spider.failedTotal, nil
+	return spider.unresolvedFailedTotal(), nil
 }
 
 func importedResourceReplacements(spider *pageSpider) map[string]string {
@@ -6992,9 +7013,18 @@ func (a *App) grabPage(w http.ResponseWriter, r *http.Request) {
 
 	domain := a.siteDomain(r.Context(), r)
 	progressToken := strings.TrimSpace(r.FormValue("progress_token"))
+	importRequest := grabImportRequest{
+		Domain:               domain,
+		PagePath:             pagePath,
+		SourceURL:            sourceURL,
+		RemoteSourceURL:      remoteSourceURL,
+		HTML:                 string(htmlBytes),
+		ProgressToken:        progressToken,
+		SourceOptions:        sourceOptions,
+		SelectedResourceURLs: selectedGrabResourceURLs(r),
+	}
 	if grabCopyWholeSite(r) {
-		selectedResourceURLs := selectedGrabResourceURLs(r)
-		redirectPath, _, importErr := a.importWholeRemoteSite(r.Context(), domain, pagePath, remoteSourceURL, string(htmlBytes), progressToken, selectedResourceURLs, sourceOptions)
+		importResult, importErr := a.importWholeRemoteSite(r.Context(), importRequest)
 		if importErr != nil {
 			statusCode := http.StatusBadGateway
 			if strings.Contains(importErr.Error(), "storage limit reached:") {
@@ -7005,14 +7035,13 @@ func (a *App) grabPage(w http.ResponseWriter, r *http.Request) {
 		}
 		if wantsJSONResponse(r) {
 			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(map[string]string{"redirect": redirectPath})
+			_ = json.NewEncoder(w).Encode(map[string]any{"redirect": importResult.RedirectPath, "failed_total": importResult.FailedTotal, "failed_urls": importResult.FailedURLs, "failed_reasons": importResult.FailedReasons})
 			return
 		}
-		http.Redirect(w, r, redirectPath, http.StatusFound)
+		http.Redirect(w, r, importResult.RedirectPath, http.StatusFound)
 		return
 	}
-	selectedResourceURLs := selectedGrabResourceURLs(r)
-	spider, html := prepareSinglePageImport(domain, pagePath, sourceURL, remoteSourceURL, string(htmlBytes), a.grabTracker, progressToken, selectedResourceURLs, sourceOptions)
+	spider, html := prepareSinglePageImport(importRequest, a.grabTracker)
 	importedPages := []wholeSiteImportedPage{{SourceURL: sourceURL, LocalPath: pagePath, HTML: html}}
 	pageDelta, publishedPageDelta, revisionDelta, publishedStaticDelta := a.estimateImportedPagesStorageDelta(r.Context(), domain, importedPages)
 	fileDelta := a.estimateImportedFileDelta(domain, spider)
@@ -7032,16 +7061,16 @@ func (a *App) grabPage(w http.ResponseWriter, r *http.Request) {
 		a.writePublishedStaticHTML(domain, pagePath, html)
 	}
 	_, _ = a.db.ExecContext(r.Context(), `INSERT INTO revisions(domain,page_path,html,created_at) VALUES(?,?,?,?)`, domain, pagePath, html, time.Now().Format(time.RFC3339))
-	if a.grabTracker != nil && progressToken != "" {
+	if a.grabTracker != nil && importRequest.ProgressToken != "" {
 		stage := "done"
-		if spider.failedTotal > 0 {
+		if spider.unresolvedFailedTotal() > 0 {
 			stage = "partial"
 		}
-		a.grabTracker.publish(grabProgressEvent{Token: progressToken, Stage: stage, FoundTotal: spider.foundTotal, DownloadedTotal: spider.downloadedTotal, FailedTotal: spider.failedTotal, FailedURLs: spider.failedResourceURLList(), FailedReasons: spider.failedResourceReasonMap(), CompletedPercent: 100})
+		a.grabTracker.publish(grabProgressEvent{Token: progressToken, Stage: stage, FoundTotal: spider.foundTotal, DownloadedTotal: spider.downloadedTotal, FailedTotal: spider.unresolvedFailedTotal(), FailedURLs: spider.failedResourceURLList(), FailedReasons: spider.failedResourceReasonMap(), CompletedPercent: 100})
 	}
 	if wantsJSONResponse(r) {
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]string{"redirect": pagePath})
+		_ = json.NewEncoder(w).Encode(map[string]any{"redirect": pagePath, "failed_total": spider.unresolvedFailedTotal(), "failed_urls": spider.failedResourceURLList(), "failed_reasons": spider.failedResourceReasonMap()})
 		return
 	}
 	http.Redirect(w, r, pagePath, http.StatusFound)
@@ -7077,7 +7106,7 @@ func (a *App) retryGrabFailedResources(w http.ResponseWriter, r *http.Request) {
 	domain := a.siteDomain(r.Context(), r)
 	pagePath := grabRequestTargetPath(r)
 	progressToken := strings.TrimSpace(r.FormValue("progress_token"))
-	failedTotal, err := a.retryImportedPageResources(r.Context(), domain, pagePath, remoteSourceURL, progressToken, selectedResourceURLs, sourceOptions)
+	importResult, err := a.retryImportedPageResources(r.Context(), grabImportRequest{Domain: domain, PagePath: pagePath, RemoteSourceURL: remoteSourceURL, ProgressToken: progressToken, SelectedResourceURLs: selectedResourceURLs, SourceOptions: sourceOptions})
 	if err != nil {
 		statusCode := http.StatusBadGateway
 		if strings.Contains(err.Error(), "storage limit reached:") {
@@ -7088,48 +7117,49 @@ func (a *App) retryGrabFailedResources(w http.ResponseWriter, r *http.Request) {
 	}
 	if wantsJSONResponse(r) {
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{"status": "ok", "failed_total": failedTotal})
+		_ = json.NewEncoder(w).Encode(map[string]any{"status": "ok", "redirect": importResult.RedirectPath, "failed_total": importResult.FailedTotal, "failed_urls": importResult.FailedURLs, "failed_reasons": importResult.FailedReasons})
 		return
 	}
 	http.Redirect(w, r, pagePath, http.StatusFound)
 }
 
-func (a *App) retryImportedPageResources(ctx context.Context, domain, pagePath string, sourceURL *url.URL, progressToken string, failedResourceURLs map[string]struct{}, sourceOptions grabSourceOptions) (int, error) {
-	if sourceURL == nil || len(failedResourceURLs) == 0 {
-		return 0, nil
+func (a *App) retryImportedPageResources(ctx context.Context, importRequest grabImportRequest) (grabImportResult, error) {
+	if importRequest.RemoteSourceURL == nil || len(importRequest.SelectedResourceURLs) == 0 {
+		return grabImportResult{RedirectPath: cleanPath(importRequest.PagePath)}, nil
 	}
-	spider := newPageSpider(domain, sourceURL, grabResourceMaxDepth, a.grabTracker, progressToken, sourceOptions)
-	spider.selectedResourceURLs = failedResourceURLs
-	spider.publicAssetBasePath = cleanPath(pagePath)
-	resourceURLs := make([]string, 0, len(failedResourceURLs))
-	for resourceURL := range failedResourceURLs {
+	spider := newPageSpider(importRequest.Domain, importRequest.RemoteSourceURL, grabResourceMaxDepth, a.grabTracker, importRequest.ProgressToken, importRequest.SourceOptions)
+	spider.selectedResourceURLs = importRequest.SelectedResourceURLs
+	spider.publicAssetBasePath = cleanPath(importRequest.PagePath)
+	resourceURLs := make([]string, 0, len(importRequest.SelectedResourceURLs))
+	for resourceURL := range importRequest.SelectedResourceURLs {
 		resourceURLs = append(resourceURLs, resourceURL)
 	}
 	sort.Strings(resourceURLs)
 	for _, resourceURL := range resourceURLs {
-		_, _ = spider.fetchResource(resourceURL, sourceURL, 0, true)
+		_, _ = spider.fetchResource(resourceURL, importRequest.RemoteSourceURL, 0, true)
 	}
+	spider.retryFailedResources(importRequest.RemoteSourceURL, grabImportFailedResourceRetryAttempts)
 	replacements := importedResourceReplacements(spider)
-	fileDelta := a.estimateImportedFileDelta(domain, spider)
-	domainContext := contextWithDomain(ctx, domain)
-	pageDelta, publishedPageDelta, publishedStaticDelta := a.estimateRetriedResourcePageDelta(domainContext, domain, replacements)
-	if storageErr := a.applyDomainStorageDelta(domainContext, domain, pageDelta, publishedPageDelta, 0, fileDelta, publishedStaticDelta); storageErr != nil {
-		return spider.failedTotal, storageErr
+	fileDelta := a.estimateImportedFileDelta(importRequest.Domain, spider)
+	domainContext := contextWithDomain(ctx, importRequest.Domain)
+	pageDelta, publishedPageDelta, publishedStaticDelta := a.estimateRetriedResourcePageDelta(domainContext, importRequest.Domain, replacements)
+	if storageErr := a.applyDomainStorageDelta(domainContext, importRequest.Domain, pageDelta, publishedPageDelta, 0, fileDelta, publishedStaticDelta); storageErr != nil {
+		return grabImportResult{RedirectPath: cleanPath(importRequest.PagePath), FailedTotal: spider.unresolvedFailedTotal(), FailedURLs: spider.failedResourceURLList(), FailedReasons: spider.failedResourceReasonMap()}, storageErr
 	}
-	if persistErr := a.persistSpiderAssets(spider, pagePath); persistErr != nil {
-		_ = a.applyDomainStorageDelta(domainContext, domain, -pageDelta, -publishedPageDelta, 0, -fileDelta, -publishedStaticDelta)
-		return spider.failedTotal, persistErr
+	if persistErr := a.persistSpiderAssets(spider, importRequest.PagePath); persistErr != nil {
+		_ = a.applyDomainStorageDelta(domainContext, importRequest.Domain, -pageDelta, -publishedPageDelta, 0, -fileDelta, -publishedStaticDelta)
+		return grabImportResult{RedirectPath: cleanPath(importRequest.PagePath), FailedTotal: spider.unresolvedFailedTotal(), FailedURLs: spider.failedResourceURLList(), FailedReasons: spider.failedResourceReasonMap()}, persistErr
 	}
-	a.applyRetriedResourcePageReplacements(domainContext, domain, replacements)
-	a.rebuildDomainStorageUsage(domainContext, domain)
-	if a.grabTracker != nil && progressToken != "" {
+	a.applyRetriedResourcePageReplacements(domainContext, importRequest.Domain, replacements)
+	a.rebuildDomainStorageUsage(domainContext, importRequest.Domain)
+	if a.grabTracker != nil && importRequest.ProgressToken != "" {
 		stage := "done"
-		if spider.failedTotal > 0 {
+		if spider.unresolvedFailedTotal() > 0 {
 			stage = "partial"
 		}
-		a.grabTracker.publish(grabProgressEvent{Token: progressToken, Stage: stage, FoundTotal: spider.foundTotal, DownloadedTotal: spider.downloadedTotal, FailedTotal: spider.failedTotal, FailedURLs: spider.failedResourceURLList(), FailedReasons: spider.failedResourceReasonMap(), CompletedPercent: 100})
+		a.grabTracker.publish(grabProgressEvent{Token: importRequest.ProgressToken, Stage: stage, FoundTotal: spider.foundTotal, DownloadedTotal: spider.downloadedTotal, FailedTotal: spider.unresolvedFailedTotal(), FailedURLs: spider.failedResourceURLList(), FailedReasons: spider.failedResourceReasonMap(), CompletedPercent: 100})
 	}
-	return spider.failedTotal, nil
+	return grabImportResult{RedirectPath: cleanPath(importRequest.PagePath), FailedTotal: spider.unresolvedFailedTotal(), FailedURLs: spider.failedResourceURLList(), FailedReasons: spider.failedResourceReasonMap()}, nil
 }
 
 func (a *App) grabPreview(w http.ResponseWriter, r *http.Request) {
@@ -7177,7 +7207,7 @@ func (a *App) grabPreview(w http.ResponseWriter, r *http.Request) {
 		importedPages = wholeSitePreview.ImportedPages
 		previewSpider = wholeSitePreview.Spider
 	} else {
-		previewSpider, importedHTML := prepareSinglePageImport(domain, pagePath, sourceURL, remoteSourceURL, string(htmlBytes), a.grabTracker, progressToken, nil, sourceOptions)
+		previewSpider, importedHTML := prepareSinglePageImport(grabImportRequest{Domain: domain, PagePath: pagePath, SourceURL: sourceURL, RemoteSourceURL: remoteSourceURL, HTML: string(htmlBytes), ProgressToken: progressToken, SourceOptions: sourceOptions}, a.grabTracker)
 		resources = previewResourcesFromSpider(previewSpider, map[string]struct{}{sourceURL: {}})
 		importedPages = []wholeSiteImportedPage{{SourceURL: sourceURL, LocalPath: pagePath, HTML: importedHTML}}
 	}
@@ -7601,14 +7631,15 @@ func previewGrabResources(pageURL *url.URL, htmlSource string, tracker *grabProg
 	return resources
 }
 
-func prepareSinglePageImport(domain, pagePath, sourceURL string, pageURL *url.URL, fallbackHTML string, tracker *grabProgressTracker, progressToken string, selectedResourceURLs map[string]struct{}, sourceOptions grabSourceOptions) (*pageSpider, string) {
-	spider := newPageSpider(domain, pageURL, grabResourceMaxDepth, tracker, progressToken, sourceOptions)
-	spider.selectedResourceURLs = selectedResourceURLs
-	rootResource := &mirroredResource{url: sourceURL, content: []byte(fallbackHTML)}
-	spider.resources[sourceURL] = rootResource
+func prepareSinglePageImport(importRequest grabImportRequest, tracker *grabProgressTracker) (*pageSpider, string) {
+	spider := newPageSpider(importRequest.Domain, importRequest.RemoteSourceURL, grabResourceMaxDepth, tracker, importRequest.ProgressToken, importRequest.SourceOptions)
+	spider.selectedResourceURLs = importRequest.SelectedResourceURLs
+	rootResource := &mirroredResource{url: importRequest.SourceURL, content: []byte(importRequest.HTML)}
+	spider.resources[importRequest.SourceURL] = rootResource
 	spider.rewriteNestedResources(rootResource, 0, "text/html")
 	spider.fetchSelectedResources()
-	rootResource.content = []byte(spider.rewriteStaticURLTextReferences(string(rootResource.content), pageURL, 0))
+	spider.retryFailedResources(importRequest.RemoteSourceURL, grabImportFailedResourceRetryAttempts)
+	rootResource.content = []byte(spider.rewriteStaticURLTextReferences(string(rootResource.content), importRequest.RemoteSourceURL, 0))
 	return spider, string(rootResource.content)
 }
 
@@ -7650,13 +7681,14 @@ func previewWholeRemoteSiteResources(startURL *url.URL, startHTML, publicAssetBa
 	return wholeSitePreviewResult{PageCount: len(pageURLs), Resources: resources, ImportedPages: importedPages, Spider: spider}
 }
 
-func (a *App) prepareWholeRemoteSiteImport(domain, basePath string, startURL *url.URL, startHTML, progressToken string, selectedResourceURLs map[string]struct{}, sourceOptions grabSourceOptions) (*pageSpider, []wholeSiteImportedPage, error) {
-	basePath = cleanPath(basePath)
+func (a *App) prepareWholeRemoteSiteImport(importRequest grabImportRequest) (*pageSpider, []wholeSiteImportedPage, error) {
+	basePath := cleanPath(importRequest.PagePath)
+	startURL := importRequest.RemoteSourceURL
 	if startURL == nil || startURL.Hostname() == "" {
 		return nil, nil, errors.New("source_url is invalid")
 	}
-	spider := newPageSpider(domain, startURL, grabResourceMaxDepth, a.grabTracker, progressToken, sourceOptions)
-	spider.selectedResourceURLs = selectedResourceURLs
+	spider := newPageSpider(importRequest.Domain, startURL, grabResourceMaxDepth, a.grabTracker, importRequest.ProgressToken, importRequest.SourceOptions)
+	spider.selectedResourceURLs = importRequest.SelectedResourceURLs
 	spider.publicAssetBasePath = basePath
 	spider.documentURLRewriter = func(normalizedURL string) (string, bool) {
 		parsedURL, parseErr := url.Parse(normalizedURL)
@@ -7666,9 +7698,9 @@ func (a *App) prepareWholeRemoteSiteImport(domain, basePath string, startURL *ur
 		return wholeSiteLocalLink(basePath, startURL, parsedURL), true
 	}
 
-	pageClient := grabImportHTTPClient(newGrabHTTPClientForServerIP(startURL.Hostname(), sourceOptions.IP))
+	pageClient := grabImportHTTPClient(newGrabHTTPClientForServerIP(startURL.Hostname(), importRequest.SourceOptions.IP))
 	knownPagePathsByKey := map[string]string{wholeSitePageKey(startURL): basePath}
-	pageQueue := []wholeSitePageJob{{URL: cloneURL(startURL), HTML: startHTML}}
+	pageQueue := []wholeSitePageJob{{URL: cloneURL(startURL), HTML: importRequest.HTML}}
 	importedPages := make([]wholeSiteImportedPage, 0, 32)
 	importedLocalPaths := make(map[string]struct{})
 	consecutiveFailures := 0
@@ -7691,7 +7723,7 @@ func (a *App) prepareWholeRemoteSiteImport(domain, basePath string, startURL *ur
 		}
 		pageHTML := currentJob.HTML
 		if strings.TrimSpace(pageHTML) == "" {
-			downloadedHTML, downloaded, downloadErr := downloadWholeSitePageHTML(pageClient, currentJob.URL, sourceOptions)
+			downloadedHTML, downloaded, downloadErr := downloadWholeSitePageHTMLWithRetries(pageClient, currentJob.URL, importRequest.SourceOptions, grabImportFailedResourceRetryAttempts)
 			if downloadErr != nil || !downloaded {
 				spider.failedTotal++
 				consecutiveFailures++
@@ -7735,37 +7767,38 @@ func (a *App) prepareWholeRemoteSiteImport(domain, basePath string, startURL *ur
 	if len(importedPages) == 0 {
 		return nil, nil, errors.New("no pages were imported")
 	}
+	spider.retryFailedResources(startURL, grabImportFailedResourceRetryAttempts)
 	spider.rewriteImportedPagesStaticURLTextReferences(importedPages)
 	return spider, importedPages, nil
 }
 
-func (a *App) importWholeRemoteSite(ctx context.Context, domain, basePath string, startURL *url.URL, startHTML, progressToken string, selectedResourceURLs map[string]struct{}, sourceOptions grabSourceOptions) (string, int, error) {
-	spider, importedPages, prepareErr := a.prepareWholeRemoteSiteImport(domain, basePath, startURL, startHTML, progressToken, selectedResourceURLs, sourceOptions)
+func (a *App) importWholeRemoteSite(ctx context.Context, importRequest grabImportRequest) (grabImportResult, error) {
+	spider, importedPages, prepareErr := a.prepareWholeRemoteSiteImport(importRequest)
 	if prepareErr != nil {
-		return "", 0, prepareErr
+		return grabImportResult{}, prepareErr
 	}
-	pageDelta, publishedPageDelta, revisionDelta, publishedStaticDelta := a.estimateImportedPagesStorageDelta(ctx, domain, importedPages)
-	fileDelta := a.estimateImportedFileDelta(domain, spider)
-	if storageErr := a.applyDomainStorageDelta(ctx, domain, pageDelta, publishedPageDelta, revisionDelta, fileDelta, publishedStaticDelta); storageErr != nil {
-		return "", 0, storageErr
+	pageDelta, publishedPageDelta, revisionDelta, publishedStaticDelta := a.estimateImportedPagesStorageDelta(ctx, importRequest.Domain, importedPages)
+	fileDelta := a.estimateImportedFileDelta(importRequest.Domain, spider)
+	if storageErr := a.applyDomainStorageDelta(ctx, importRequest.Domain, pageDelta, publishedPageDelta, revisionDelta, fileDelta, publishedStaticDelta); storageErr != nil {
+		return grabImportResult{FailedTotal: spider.unresolvedFailedTotal(), FailedURLs: spider.failedResourceURLList(), FailedReasons: spider.failedResourceReasonMap()}, storageErr
 	}
-	if persistErr := a.persistSpiderAssets(spider, basePath); persistErr != nil {
-		_ = a.applyDomainStorageDelta(ctx, domain, -pageDelta, -publishedPageDelta, -revisionDelta, -fileDelta, -publishedStaticDelta)
-		return "", spider.failedTotal, persistErr
+	if persistErr := a.persistSpiderAssets(spider, importRequest.PagePath); persistErr != nil {
+		_ = a.applyDomainStorageDelta(ctx, importRequest.Domain, -pageDelta, -publishedPageDelta, -revisionDelta, -fileDelta, -publishedStaticDelta)
+		return grabImportResult{FailedTotal: spider.unresolvedFailedTotal(), FailedURLs: spider.failedResourceURLList(), FailedReasons: spider.failedResourceReasonMap()}, persistErr
 	}
-	if storeErr := a.storeWholeSiteImportedPages(ctx, domain, importedPages); storeErr != nil {
-		_ = a.applyDomainStorageDelta(ctx, domain, -pageDelta, -publishedPageDelta, -revisionDelta, -fileDelta, -publishedStaticDelta)
-		return "", spider.failedTotal, storeErr
+	if storeErr := a.storeWholeSiteImportedPages(ctx, importRequest.Domain, importedPages); storeErr != nil {
+		_ = a.applyDomainStorageDelta(ctx, importRequest.Domain, -pageDelta, -publishedPageDelta, -revisionDelta, -fileDelta, -publishedStaticDelta)
+		return grabImportResult{FailedTotal: spider.unresolvedFailedTotal(), FailedURLs: spider.failedResourceURLList(), FailedReasons: spider.failedResourceReasonMap()}, storeErr
 	}
-	a.rebuildDomainStorageUsage(ctx, domain)
+	a.rebuildDomainStorageUsage(ctx, importRequest.Domain)
 	if a.grabTracker != nil {
 		stage := "done"
-		if spider.failedTotal > 0 {
+		if spider.unresolvedFailedTotal() > 0 {
 			stage = "partial"
 		}
-		a.grabTracker.publish(grabProgressEvent{Token: progressToken, Stage: stage, FoundTotal: spider.foundTotal, DownloadedTotal: spider.downloadedTotal, FailedTotal: spider.failedTotal, FailedURLs: spider.failedResourceURLList(), FailedReasons: spider.failedResourceReasonMap(), CompletedPercent: 100})
+		a.grabTracker.publish(grabProgressEvent{Token: importRequest.ProgressToken, Stage: stage, FoundTotal: spider.foundTotal, DownloadedTotal: spider.downloadedTotal, FailedTotal: spider.unresolvedFailedTotal(), FailedURLs: spider.failedResourceURLList(), FailedReasons: spider.failedResourceReasonMap(), CompletedPercent: 100})
 	}
-	return basePath, spider.failedTotal, nil
+	return grabImportResult{RedirectPath: cleanPath(importRequest.PagePath), FailedTotal: spider.unresolvedFailedTotal(), FailedURLs: spider.failedResourceURLList(), FailedReasons: spider.failedResourceReasonMap()}, nil
 }
 
 func crawlWholeRemoteSite(startURL *url.URL, startHTML, publicAssetBasePath string, tracker *grabProgressTracker, progressToken string, sourceOptions grabSourceOptions) (*pageSpider, map[string]struct{}, []wholeSiteImportedPage) {
@@ -7919,6 +7952,25 @@ func downloadWholeSitePageHTML(client *http.Client, pageURL *url.URL, sourceOpti
 		applyGrabRequestHeaders(request, sourceOptions)
 		request.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
 	})
+}
+
+func downloadWholeSitePageHTMLWithRetries(client *http.Client, pageURL *url.URL, sourceOptions grabSourceOptions, attempts int) (string, bool, error) {
+	if attempts < 0 {
+		attempts = 0
+	}
+	var lastErr error
+	for attempt := 0; attempt <= attempts; attempt++ {
+		html, downloaded, err := downloadWholeSitePageHTML(client, pageURL, sourceOptions)
+		if err == nil && downloaded {
+			return html, true, nil
+		}
+		if err != nil {
+			lastErr = err
+		} else {
+			lastErr = errors.New("not html")
+		}
+	}
+	return "", false, lastErr
 }
 
 func wholeSitePageKey(pageURL *url.URL) string {
@@ -13565,6 +13617,7 @@ func siteCopyMenuConfigJSON(pagePath string, translations map[string]string) str
 			"downloadFailedRetry":       translationOrDefault(translations, "missing_download_failed_retry", "Download failed. Try again."),
 			"partialImportRetry":        translationOrDefault(translations, "missing_partial_import_retry", "Some resources failed. You can retry."),
 			"retryRemaining":            translationOrDefault(translations, "missing_retry_remaining", "Retry remaining"),
+			"finishImport":              translationOrDefault(translations, "site_copy_finish_import", "Finish import"),
 			"closeButton":               translationOrDefault(translations, "tree_close", "Close"),
 			"failedResourcesTitle":      translationOrDefault(translations, "site_copy_failed_resources_title", "Failed resources:"),
 			"failedResourceBadge":       translationOrDefault(translations, "site_copy_failed_resource_badge", "failed"),
@@ -15450,7 +15503,7 @@ func resourceExtensionFromContentType(contentType string) string {
 }
 
 func (a *App) mirrorRemotePage(domain, pagePath, sourceURL string, pageURL *url.URL, fallbackHTML, progressToken string, selectedResourceURLs map[string]struct{}, sourceIP string) string {
-	spider, html := prepareSinglePageImport(domain, pagePath, sourceURL, pageURL, fallbackHTML, a.grabTracker, progressToken, selectedResourceURLs, grabSourceOptions{IP: sourceIP})
+	spider, html := prepareSinglePageImport(grabImportRequest{Domain: domain, PagePath: pagePath, SourceURL: sourceURL, RemoteSourceURL: pageURL, HTML: fallbackHTML, ProgressToken: progressToken, SelectedResourceURLs: selectedResourceURLs, SourceOptions: grabSourceOptions{IP: sourceIP}}, a.grabTracker)
 	_ = a.persistSpiderAssets(spider, pagePath)
 	a.grabTracker.publish(grabProgressEvent{Token: progressToken, Stage: "done", FoundTotal: spider.foundTotal, DownloadedTotal: spider.downloadedTotal, CompletedPercent: 100})
 	return html
@@ -15643,6 +15696,13 @@ func (spider *pageSpider) clearFailedResource(resourceURL string) {
 	delete(spider.failedResourceErrors, resourceURL)
 }
 
+func (spider *pageSpider) unresolvedFailedTotal() int {
+	if spider == nil {
+		return 0
+	}
+	return len(spider.failedResourceURLs)
+}
+
 func (spider *pageSpider) failedResourceURLList() []string {
 	if spider == nil || len(spider.failedResourceURLs) == 0 {
 		return nil
@@ -15755,14 +15815,14 @@ func (spider *pageSpider) publishResourceProgress(stage, currentURL string, curr
 	}
 	completedPercent := 0
 	if spider.foundTotal > 0 {
-		completedPercent = (spider.downloadedTotal + spider.failedTotal) * 100 / spider.foundTotal
+		completedPercent = (spider.downloadedTotal + spider.unresolvedFailedTotal()) * 100 / spider.foundTotal
 	}
 	currentError := ""
 	if stage == "error" && currentURL != "" {
 		currentError = strings.TrimSpace(spider.failedResourceErrors[currentURL])
 	}
 	spider.tracker.publish(grabProgressEvent{
-		Token: spider.progressToken, Stage: stage, FoundTotal: spider.foundTotal, DownloadedTotal: spider.downloadedTotal, FailedTotal: spider.failedTotal,
+		Token: spider.progressToken, Stage: stage, FoundTotal: spider.foundTotal, DownloadedTotal: spider.downloadedTotal, FailedTotal: spider.unresolvedFailedTotal(),
 		FailedReasons: spider.failedResourceReasonMap(), CurrentURL: currentURL, CurrentError: currentError, CurrentPercent: currentPercent, CurrentDownloadedBytes: downloadedBytes, CurrentSizeBytes: sizeBytes, CompletedPercent: completedPercent,
 	})
 }
@@ -15824,6 +15884,25 @@ func (spider *pageSpider) fetchSelectedResources() {
 			continue
 		}
 		_, _ = spider.fetchResource(selectedURL, spider.pageURL, 0, true)
+	}
+}
+
+func (spider *pageSpider) retryFailedResources(baseURL *url.URL, attempts int) {
+	for attempt := 0; attempt < attempts && spider.unresolvedFailedTotal() > 0; attempt++ {
+		failedURLs := spider.failedResourceURLList()
+		for _, failedURL := range failedURLs {
+			failedPageURL, failedPageParseErr := url.Parse(failedURL)
+			if failedPageParseErr == nil && crawler.SameHost(spider.pageURL, failedPageURL) && crawler.IsWholeSitePageURL(failedPageURL) {
+				continue
+			}
+			failedResource := spider.resources[failedURL]
+			if failedResource != nil && failedResource.content != nil {
+				spider.clearFailedResource(failedURL)
+				continue
+			}
+			delete(spider.resources, failedURL)
+			_, _ = spider.fetchResource(failedURL, baseURL, 0, true)
+		}
 	}
 }
 

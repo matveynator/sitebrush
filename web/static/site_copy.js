@@ -392,7 +392,7 @@
     function renderFailedResources() {
       resourcesElement.replaceChildren();
       const sortedFailedResourceURLs = Array.from(failedResourceURLs).sort();
-      cancelButtonElement.textContent = textFromConfig(configuration, 'closeButton', 'Close');
+      cancelButtonElement.textContent = textFromConfig(configuration, 'finishImport', 'Finish import');
       if (sortedFailedResourceURLs.length === 0) {
         resourcesElement.classList.add('SiteBrushCopySiteHidden');
         continueButtonElement.classList.add('SiteBrushCopySiteHidden');
@@ -417,11 +417,35 @@
       if (retryWasAttempted) {
         continueButtonElement.classList.add('SiteBrushCopySiteHidden');
         partialImportCanRetry = false;
+        statusElement.textContent = textFromConfig(configuration, 'partialImportClose', 'Imported with missing resources. You can close and use what was imported.');
       } else {
         continueButtonElement.textContent = textFromConfig(configuration, 'retryRemaining', 'Retry remaining');
         continueButtonElement.classList.remove('SiteBrushCopySiteHidden');
         partialImportCanRetry = true;
       }
+    }
+
+    function responseIncludesFailureState(downloadPayload) {
+      return downloadPayload && Object.prototype.hasOwnProperty.call(downloadPayload, 'failed_total');
+    }
+
+    function applyDownloadFailureState(downloadPayload) {
+      if (!responseIncludesFailureState(downloadPayload)) {
+        return false;
+      }
+      collectFailedURLs(downloadPayload);
+      const failedTotal = Number(downloadPayload.failed_total) || 0;
+      if (failedTotal <= 0) {
+        failedResourceURLs = new Set();
+        failedResourceReasons = new Map();
+        return false;
+      }
+      downloadFinishedWithErrors = true;
+      statusElement.textContent = textFromConfig(configuration, retryWasAttempted ? 'partialImportClose' : 'partialImportRetry', 'Imported with errors.');
+      setProgress(progressBarElement, 100);
+      closeProgressStream();
+      renderFailedResources();
+      return true;
     }
 
     function connectProgressStream(progressToken, readyCallback, forDownload) {
@@ -604,6 +628,11 @@
             const redirectPath = downloadPayload.redirect || importedRedirectPath || targetPath;
             importedRedirectPath = redirectPath;
             requestIsRunning = false;
+            if (applyDownloadFailureState(downloadPayload)) {
+              submitButtonElement.disabled = false;
+              cancelButtonElement.disabled = false;
+              return;
+            }
             if (downloadFinishedWithErrors) {
               submitButtonElement.disabled = false;
               cancelButtonElement.disabled = false;
