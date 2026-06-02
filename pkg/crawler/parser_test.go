@@ -1,4 +1,4 @@
-package grabber
+package crawler
 
 import (
 	"encoding/json"
@@ -18,6 +18,29 @@ func TestParserResolvesRootAssetJavaScriptReferences(t *testing.T) {
 	}
 	if normalizedURL != "https://karman.cafe/assets/chunks/chunk-BXl3LOEh.js" {
 		t.Fatalf("normalized URL = %q", normalizedURL)
+	}
+}
+
+func TestParserRewritesUppercaseScriptSource(t *testing.T) {
+	source := `<SCRIPT language="JavaScript" type="text/javascript" src="js/CurrentTime.js"></SCRIPT>`
+	var normalizedScriptURL string
+	parser := Parser{
+		RewriteResourceReference: func(rawRef string, baseURL *url.URL, depth int, referenceContext ReferenceContext) string {
+			normalizedURL, blocked := NormalizeURL(rawRef, baseURL, referenceContext)
+			if blocked {
+				t.Fatalf("script source was blocked")
+			}
+			normalizedScriptURL = normalizedURL
+			return "/p/current-time.js"
+		},
+	}
+
+	rewritten := parser.RewriteTextReferences(source, "http://oldkmv.uprof.info/", 0)
+	if normalizedScriptURL != "http://oldkmv.uprof.info/js/CurrentTime.js" {
+		t.Fatalf("normalized script URL = %q", normalizedScriptURL)
+	}
+	if !strings.Contains(rewritten, `src="/p/current-time.js"`) {
+		t.Fatalf("script source was not rewritten: %s", rewritten)
 	}
 }
 

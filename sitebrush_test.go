@@ -35,9 +35,9 @@ import (
 	"golang.org/x/net/dns/dnsmessage"
 	"golang.org/x/text/encoding/charmap"
 	"sitebrush/pkg/billing"
+	"sitebrush/pkg/crawler"
 	"sitebrush/pkg/demo"
 	"sitebrush/pkg/diskusage"
-	"sitebrush/pkg/grabber"
 	"sitebrush/pkg/sitebrushtemplate"
 )
 
@@ -50,6 +50,13 @@ type fakeGrabResponse struct {
 	location    string
 	contentType string
 	body        string
+}
+
+func TestEffectiveGrabResourceContentTypeTrustsJavaScriptExtension(t *testing.T) {
+	contentType := effectiveGrabResourceContentType("http://oldkmv.uprof.info/js/CurrentTime.js", "text/html; charset=windows-1251")
+	if contentType != "application/javascript" {
+		t.Fatalf("content type = %q", contentType)
+	}
 }
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
@@ -4284,7 +4291,7 @@ func TestMirrorRemotePageRewritesDataManifestRelativeURLs(t *testing.T) {
 		t.Fatalf("manifest href is not closed in imported HTML: %s", importedHTML)
 	}
 	manifestHref := importedHTML[manifestHrefStart : manifestHrefStart+manifestHrefEnd]
-	_, manifestPayload, ok := grabber.SplitDataURL(manifestHref)
+	_, manifestPayload, ok := crawler.SplitDataURL(manifestHref)
 	if !ok {
 		t.Fatalf("manifest href is not a data URL: %s", manifestHref)
 	}

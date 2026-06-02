@@ -57,7 +57,6 @@ import (
 	"sitebrush/pkg/dirprotect"
 	"sitebrush/pkg/diskusage"
 	"sitebrush/pkg/geoip"
-	"sitebrush/pkg/grabber"
 	"sitebrush/pkg/mailout"
 	"sitebrush/pkg/serviceinstall"
 	"sitebrush/pkg/shutdownsignals"
@@ -7940,7 +7939,7 @@ func previewResourceKind(tagName, attributeName, rawRef string) string {
 	if attribute == "poster" {
 		return "image"
 	}
-	if resourceKind := grabber.ResourceKindFromURL(rawRef); resourceKind != "" {
+	if resourceKind := crawler.ResourceKindFromURL(rawRef); resourceKind != "" {
 		return resourceKind
 	}
 	return "file"
@@ -15266,7 +15265,7 @@ func contentHashName(fileBytes []byte, extension string) (string, error) {
 }
 
 func resourceExtension(rawRef string) string {
-	return grabber.ResourceExtension(rawRef)
+	return crawler.ResourceExtension(rawRef)
 }
 
 func normalizedResourceContentType(contentTypeHeader string) string {
@@ -15291,6 +15290,31 @@ func resourceKindFromContentType(contentType string) string {
 		return "file"
 	default:
 		return ""
+	}
+}
+
+func effectiveGrabResourceContentType(resourceURL, contentType string) string {
+	contentType = normalizedResourceContentType(contentType)
+	resourceKind := resourceKindFromURL(resourceURL)
+	if resourceKind == "" || !isLegacyLooseTextResourceContentType(contentType) {
+		return contentType
+	}
+	switch resourceKind {
+	case "script":
+		return "application/javascript"
+	case "style":
+		return "text/css"
+	default:
+		return contentType
+	}
+}
+
+func isLegacyLooseTextResourceContentType(contentType string) bool {
+	switch contentType {
+	case "", "text/html", "application/xhtml+xml", "text/plain", "application/octet-stream":
+		return true
+	default:
+		return false
 	}
 }
 
@@ -15420,11 +15444,11 @@ type pageSpider struct {
 	failedResourceURLs   map[string]struct{}
 }
 
-type grabReferenceContext = grabber.ReferenceContext
+type grabReferenceContext = crawler.ReferenceContext
 
 const (
-	grabReferenceDocument   = grabber.ReferenceDocument
-	grabReferenceJavaScript = grabber.ReferenceJavaScript
+	grabReferenceDocument   = crawler.ReferenceDocument
+	grabReferenceJavaScript = crawler.ReferenceJavaScript
 )
 
 var (
@@ -15583,7 +15607,7 @@ func (spider *pageSpider) fetchResource(rawURL string, baseURL *url.URL, depth i
 		spider.publishResourceProgress("error", normalizedURL, 0, 0, response.ContentLength)
 		return nil, fmt.Errorf("resource download failed: %s", response.Status)
 	}
-	resourceContentType := normalizedResourceContentType(response.Header.Get("Content-Type"))
+	resourceContentType := effectiveGrabResourceContentType(normalizedURL, response.Header.Get("Content-Type"))
 	if !spider.isAllowedResourceContentType(normalizedURL, resourceContentType) {
 		spider.resources[normalizedURL] = &mirroredResource{url: normalizedURL, persist: persist}
 		spider.failedTotal++
@@ -15739,8 +15763,8 @@ func (spider *pageSpider) collectPreviewNestedResources(resource *mirroredResour
 	resource.content = []byte(rewritten)
 }
 
-func (spider *pageSpider) grabberParser() grabber.Parser {
-	return grabber.Parser{
+func (spider *pageSpider) grabberParser() crawler.Parser {
+	return crawler.Parser{
 		NormalizeURL:                         spider.normalizeURLForContext,
 		RewriteResourceReference:             spider.rewriteResourceReferenceForContext,
 		RewriteDocumentResourceReference:     spider.rewriteDocumentResourceReference,
@@ -15750,8 +15774,8 @@ func (spider *pageSpider) grabberParser() grabber.Parser {
 	}
 }
 
-func (spider *pageSpider) previewGrabberParser() grabber.Parser {
-	return grabber.Parser{
+func (spider *pageSpider) previewGrabberParser() crawler.Parser {
+	return crawler.Parser{
 		NormalizeURL:                         spider.normalizeURLForContext,
 		RewriteResourceReference:             spider.collectPreviewResourceReferenceForContext,
 		RewriteDocumentResourceReference:     spider.collectPreviewDocumentResourceReference,
@@ -15808,7 +15832,7 @@ func (spider *pageSpider) rewriteDocumentResourceReference(rawRef string, baseUR
 	if blocked || normalizedURL == "" {
 		return rawRef
 	}
-	if grabber.IsWholeSitePageURLString(normalizedURL) {
+	if crawler.IsWholeSitePageURLString(normalizedURL) {
 		return rawRef
 	}
 	if !spider.shouldPersistResource(normalizedURL) {
@@ -15857,7 +15881,7 @@ func (spider *pageSpider) normalizeURL(rawRef string, baseURL *url.URL) (string,
 }
 
 func (spider *pageSpider) normalizeURLForContext(rawRef string, baseURL *url.URL, referenceContext grabReferenceContext) (string, bool) {
-	return grabber.NormalizeURL(rawRef, baseURL, referenceContext)
+	return crawler.NormalizeURL(rawRef, baseURL, referenceContext)
 }
 
 func (spider *pageSpider) rewriteResourceReferenceForContext(rawRef string, baseURL *url.URL, depth int, referenceContext grabReferenceContext) string {
@@ -15880,7 +15904,7 @@ func (spider *pageSpider) collectPreviewDocumentResourceReference(rawRef string,
 	if blocked || normalizedURL == "" {
 		return rawRef
 	}
-	if grabber.IsWholeSitePageURLString(normalizedURL) {
+	if crawler.IsWholeSitePageURLString(normalizedURL) {
 		return rawRef
 	}
 	return spider.collectPreviewResourceReferenceForContext(rawRef, baseURL, depth, grabReferenceDocument)
@@ -15967,7 +15991,7 @@ func (spider *pageSpider) previewResourceMetadata(normalizedURL string) (string,
 	if response.StatusCode >= 400 {
 		return "", -1
 	}
-	contentType := normalizedResourceContentType(response.Header.Get("Content-Type"))
+	contentType := effectiveGrabResourceContentType(normalizedURL, response.Header.Get("Content-Type"))
 	return contentType, response.ContentLength
 }
 
@@ -15993,7 +16017,7 @@ func (spider *pageSpider) fetchPreviewResourceBody(normalizedURL string) ([]byte
 	if response.StatusCode >= 400 {
 		return nil, "", response.ContentLength, fmt.Errorf("resource download failed: %s", response.Status)
 	}
-	contentType := normalizedResourceContentType(response.Header.Get("Content-Type"))
+	contentType := effectiveGrabResourceContentType(normalizedURL, response.Header.Get("Content-Type"))
 	if !spider.isAllowedResourceContentType(normalizedURL, contentType) {
 		return nil, contentType, response.ContentLength, fmt.Errorf("resource content-type rejected: %s", response.Header.Get("Content-Type"))
 	}
@@ -16022,21 +16046,21 @@ func normalizeMirroredAssetReference(assetPath string) string {
 }
 
 func shouldResolveJavaScriptReferenceAgainstOriginRoot(rawRef string, baseURL *url.URL) bool {
-	normalizedURL, blocked := grabber.NormalizeURL(rawRef, baseURL, grabber.ReferenceJavaScript)
-	documentURL, documentBlocked := grabber.NormalizeURL(rawRef, baseURL, grabber.ReferenceDocument)
+	normalizedURL, blocked := crawler.NormalizeURL(rawRef, baseURL, crawler.ReferenceJavaScript)
+	documentURL, documentBlocked := crawler.NormalizeURL(rawRef, baseURL, crawler.ReferenceDocument)
 	return !blocked && !documentBlocked && normalizedURL != documentURL
 }
 
 func originRootURL(baseURL *url.URL) *url.URL {
-	return grabber.OriginRootURL(baseURL)
+	return crawler.OriginRootURL(baseURL)
 }
 
 func firstPathSegment(rawPath string) string {
-	return grabber.FirstPathSegment(rawPath)
+	return crawler.FirstPathSegment(rawPath)
 }
 
 func isSuspiciousGrabReference(rawRef string) bool {
-	return grabber.IsSuspiciousReference(rawRef)
+	return crawler.IsSuspiciousReference(rawRef)
 }
 
 func (spider *pageSpider) shouldSkipMirrorResource(resourceURL string) bool {
@@ -16063,6 +16087,7 @@ func (spider *pageSpider) shouldSkipMirrorResource(resourceURL string) bool {
 }
 
 func (spider *pageSpider) isAllowedResourceContentType(resourceURL, contentType string) bool {
+	contentType = effectiveGrabResourceContentType(resourceURL, contentType)
 	if contentType == "" {
 		return hasAllowedGrabResourceExtension(resourceURL)
 	}
@@ -16095,11 +16120,11 @@ func (spider *pageSpider) isAllowedResourceContentType(resourceURL, contentType 
 }
 
 func resourceKindFromURL(resourceURL string) string {
-	return grabber.ResourceKindFromURL(resourceURL)
+	return crawler.ResourceKindFromURL(resourceURL)
 }
 
 func hasAllowedGrabResourceExtension(resourceURL string) bool {
-	return grabber.HasAllowedResourceExtension(resourceURL)
+	return crawler.HasAllowedResourceExtension(resourceURL)
 }
 
 func (spider *pageSpider) shouldPersistResource(normalizedURL string) bool {
@@ -18585,7 +18610,7 @@ func rewriteStaticExportDocumentLinks(source, domain, sourceSitePath, sourceArch
 	rewriteSingle := func(rawReference string) string {
 		return rewriteStaticExportReference(rawReference, domain, sourceSitePath, sourceArchivePath, pageArchivePathBySitePath)
 	}
-	return grabber.RewriteDocumentResourceReferences(source, rewriteSingle)
+	return crawler.RewriteDocumentResourceReferences(source, rewriteSingle)
 }
 
 func rewriteStaticExportJavaScriptReferences(source, domain, sourceSitePath, sourceArchivePath string, pageArchivePathBySitePath map[string]string) string {
@@ -18974,7 +18999,7 @@ func rewriteBackupInternalLinks(source, basePath, filePrefix string) string {
 	rewriteSingle := func(rawReference string) string {
 		return rewriteBackupReference(rawReference, basePath, filePrefix)
 	}
-	return grabber.RewriteDocumentResourceReferences(source, rewriteSingle)
+	return crawler.RewriteDocumentResourceReferences(source, rewriteSingle)
 }
 
 func rewriteBackupReference(rawReference, basePath, filePrefix string) string {

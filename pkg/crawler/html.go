@@ -13,7 +13,6 @@ import (
 	"golang.org/x/net/html"
 	"golang.org/x/net/html/charset"
 	"golang.org/x/text/encoding"
-	"sitebrush/pkg/grabber"
 )
 
 type DecodeResult struct {
@@ -93,7 +92,7 @@ func ExtractPageLinks(htmlSource string, baseURL, siteURL *url.URL) []*url.URL {
 			if !isDocumentAttribute(tagName, attributeName) {
 				continue
 			}
-			normalizedURL, blocked := grabber.NormalizeURL(attribute.Val, baseURL, grabber.ReferenceDocument)
+			normalizedURL, blocked := NormalizeURL(attribute.Val, baseURL, ReferenceDocument)
 			if blocked || normalizedURL == "" {
 				continue
 			}

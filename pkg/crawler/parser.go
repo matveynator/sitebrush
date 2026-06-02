@@ -1,4 +1,4 @@
-package grabber
+package crawler
 
 import (
 	"encoding/base64"
