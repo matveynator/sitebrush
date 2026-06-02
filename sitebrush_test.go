@@ -1769,6 +1769,124 @@ func TestSiteRequestStoresApplicantWithoutCreatingAdmin(t *testing.T) {
 	}
 }
 
+func TestBillingPlanCanBeEditedWithSiteAndAnalyticsLimits(t *testing.T) {
+	application, rawDB := newTestApplication(t)
+	if _, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "owner@example.com", "old"); err != nil {
+		t.Fatalf("insert owner admin: %v", err)
+	}
+	controlDB := setupBillingOwnerForTest(t, application, "localhost", "owner@example.com", true)
+	defer controlDB.Close()
+
+	createForm := url.Values{}
+	createForm.Set("billing_action", "save_plan")
+	createForm.Set("name", "Pro")
+	createForm.Set("quota", "10gb")
+	createForm.Set("site_limit", "3")
+	createForm.Set("analytics_report_limit", "12")
+	createForm.Set("price", "19")
+	createForm.Set("currency", "USD")
+	createForm.Set("billing_period", "monthly")
+	createRequest := httptest.NewRequest(http.MethodPost, "http://localhost/?billing", strings.NewReader(createForm.Encode()))
+	createRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	createRequest.AddCookie(newAdminSessionCookie(t, application, "owner@example.com"))
+	createResponse := httptest.NewRecorder()
+	application.route(createResponse, createRequest)
+	if createResponse.Code != http.StatusOK {
+		t.Fatalf("create status = %d, body=%q", createResponse.Code, createResponse.Body.String())
+	}
+
+	var planID int
+	if err := controlDB.QueryRow(`SELECT id FROM site_service_plans WHERE name='Pro'`).Scan(&planID); err != nil {
+		t.Fatalf("read created plan: %v", err)
+	}
+	editForm := url.Values{}
+	editForm.Set("billing_action", "save_plan")
+	editForm.Set("plan_id", strconv.Itoa(planID))
+	editForm.Set("name", "Business")
+	editForm.Set("quota", "20gb")
+	editForm.Set("site_limit", "5")
+	editForm.Set("analytics_report_limit", "30")
+	editForm.Set("price", "49")
+	editForm.Set("currency", "EUR")
+	editForm.Set("billing_period", "yearly")
+	editForm.Set("is_default", "1")
+	editRequest := httptest.NewRequest(http.MethodPost, "http://localhost/?billing", strings.NewReader(editForm.Encode()))
+	editRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	editRequest.AddCookie(newAdminSessionCookie(t, application, "owner@example.com"))
+	editResponse := httptest.NewRecorder()
+	application.route(editResponse, editRequest)
+	if editResponse.Code != http.StatusOK {
+		t.Fatalf("edit status = %d, body=%q", editResponse.Code, editResponse.Body.String())
+	}
+
+	var planName string
+	var quotaBytes int64
+	var siteLimit int
+	var analyticsReportLimit int
+	var price string
+	var currency string
+	var billingPeriod string
+	var isDefault int
+	if err := controlDB.QueryRow(`SELECT name,quota_bytes,site_limit,analytics_report_limit,price,currency,billing_period,is_default FROM site_service_plans WHERE id=?`, planID).Scan(&planName, &quotaBytes, &siteLimit, &analyticsReportLimit, &price, &currency, &billingPeriod, &isDefault); err != nil {
+		t.Fatalf("read edited plan: %v", err)
+	}
+	if planName != "Business" || quotaBytes != 20*1024*1024*1024 || siteLimit != 5 || analyticsReportLimit != 30 || price != "49" || currency != "EUR" || billingPeriod != "yearly" || isDefault != 1 {
+		t.Fatalf("edited plan = name:%q quota:%d sites:%d reports:%d price:%q currency:%q period:%q default:%d", planName, quotaBytes, siteLimit, analyticsReportLimit, price, currency, billingPeriod, isDefault)
+	}
+
+	viewRequest := httptest.NewRequest(http.MethodGet, "http://localhost/?billing", nil)
+	viewRequest.AddCookie(newAdminSessionCookie(t, application, "owner@example.com"))
+	viewResponse := httptest.NewRecorder()
+	application.route(viewResponse, viewRequest)
+	if viewResponse.Code != http.StatusOK {
+		t.Fatalf("view status = %d, body=%q", viewResponse.Code, viewResponse.Body.String())
+	}
+	body := viewResponse.Body.String()
+	for _, expectedFragment := range []string{
+		`id="billingPlanEditModal` + strconv.Itoa(planID) + `"`,
+		`name="plan_id" value="` + strconv.Itoa(planID) + `"`,
+		`name="site_limit" type="number" min="1" step="1" class="form-control" value="5"`,
+		`name="analytics_report_limit" type="number" min="0" step="1" class="form-control" value="30"`,
+		`сайтов 5 · отчетов 30`,
+	} {
+		if !strings.Contains(body, expectedFragment) {
+			t.Fatalf("billing page missing %q in %s", expectedFragment, body)
+		}
+	}
+}
+
+func TestBillingMigrationAddsPlanLimitColumns(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "billing.db")
+	controlDB, err := sql.Open("sqlite3", databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer controlDB.Close()
+	if _, err := controlDB.Exec(`CREATE TABLE schema_migrations(component TEXT PRIMARY KEY,version INTEGER,updated_at TEXT)`); err != nil {
+		t.Fatalf("create schema migrations: %v", err)
+	}
+	if _, err := controlDB.Exec(`INSERT INTO schema_migrations(component,version,updated_at) VALUES('billing',4,'2026-01-01T00:00:00Z')`); err != nil {
+		t.Fatalf("seed schema migration: %v", err)
+	}
+	if _, err := controlDB.Exec(`CREATE TABLE site_service_plans(id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT UNIQUE,quota_bytes INTEGER,price TEXT,currency TEXT,billing_period TEXT,is_default INTEGER DEFAULT 0,created_at TEXT,updated_at TEXT)`); err != nil {
+		t.Fatalf("create old plans table: %v", err)
+	}
+	if _, err := controlDB.Exec(`INSERT INTO site_service_plans(name,quota_bytes,price,currency,billing_period,is_default,created_at,updated_at) VALUES('Legacy',1073741824,'5','USD','monthly',0,'2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')`); err != nil {
+		t.Fatalf("seed old plan: %v", err)
+	}
+	if err := billing.Migrate(context.Background(), controlDB); err != nil {
+		t.Fatalf("migrate billing: %v", err)
+	}
+	var siteLimit int
+	var analyticsReportLimit int
+	if err := controlDB.QueryRow(`SELECT site_limit,analytics_report_limit FROM site_service_plans WHERE name='Legacy'`).Scan(&siteLimit, &analyticsReportLimit); err != nil {
+		t.Fatalf("read migrated plan limits: %v", err)
+	}
+	if siteLimit != 1 || analyticsReportLimit != 0 {
+		t.Fatalf("migrated limits = sites:%d reports:%d, want sites:1 reports:0", siteLimit, analyticsReportLimit)
+	}
+}
+
 func TestApproveSiteRequestCreatesSiteAndEmailsApplicant(t *testing.T) {
 	application, _ := newTestApplication(t)
 	controlDB := setupBillingOwnerForTest(t, application, "localhost", "owner@example.com", false)

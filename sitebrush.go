@@ -8294,7 +8294,7 @@ func (a *App) handleBillingAction(r *http.Request) string {
 	case "reject_site_request":
 		return a.rejectSiteRegistrationRequestFromForm(r)
 	default:
-		return "Неизвестное действие биллинга."
+		return translationOrDefault(translationsForRequest(r), "billing_status_unknown_action", "Unknown billing action.")
 	}
 }
 
@@ -8319,8 +8319,9 @@ func (a *App) billingView(ctx context.Context, r *http.Request) (map[string]any,
 		return nil, err
 	}
 	backups := a.managedSiteDeletionBackupViews(ctx, r, controlDatabase)
+	translations := translationsForRequest(r)
 	return map[string]any{
-		"Title":                   "Биллинг",
+		"Title":                   translationOrDefault(translations, "billing_title", "Billing"),
 		"Sites":                   siteRows,
 		"Plans":                   plans,
 		"SiteRequests":            siteRequests,
@@ -8417,6 +8418,7 @@ func (a *App) saveBillingDemoSettingsFromForm(r *http.Request) string {
 }
 
 func (a *App) saveBillingDemoSettingsInDatabase(r *http.Request, controlDatabase *sql.DB) string {
+	translations := translationsForRequest(r)
 	store := billing.Store{DB: controlDatabase}
 	previousDemoSettings := (demo.Store{DB: controlDatabase}).Settings(r.Context())
 	demoDomain := normalizeQuotaDomainName(r.FormValue("demo_site_domain"))
@@ -8426,11 +8428,11 @@ func (a *App) saveBillingDemoSettingsInDatabase(r *http.Request, controlDatabase
 	}
 	demoEnabled := r.FormValue("demo_site_enabled") == "1"
 	if demoEnabled && demoDomain == "" {
-		return "Домен демо-сайта обязателен."
+		return translationOrDefault(translations, "billing_status_demo_domain_required", "Demo site domain is required.")
 	}
 	if demoDomain != "" {
 		if ownerDomain, found := store.OwnerDomain(r.Context()); found && normalizeDomainName(ownerDomain) == demoDomain {
-			return "Сайт владельца сервера нельзя использовать как публичный демо-сайт."
+			return translationOrDefault(translations, "billing_status_demo_owner_blocked", "The owner site cannot be used as the public demo site.")
 		}
 	}
 	demoCopyWholeSite := r.FormValue("demo_site_copy_whole_site") == "1"
@@ -8445,7 +8447,7 @@ func (a *App) saveBillingDemoSettingsInDatabase(r *http.Request, controlDatabase
 			_ = (demo.Store{DB: controlDatabase}).RemoveSessionsForDomain(r.Context(), disabledDemoDomain)
 			_ = os.Remove(a.demoSiteSnapshotPath(disabledDemoDomain))
 		}
-		return translationOrDefault(translationsForRequest(r), "billing_status_settings_saved", "Billing settings saved.")
+		return translationOrDefault(translations, "billing_status_settings_saved", "Billing settings saved.")
 	}
 	if demoEnabled {
 		settings := demo.Settings{Domain: demoDomain, SourceURL: demoSourceURL, CopyWholeSite: demoCopyWholeSite, Enabled: true}
@@ -8454,7 +8456,7 @@ func (a *App) saveBillingDemoSettingsInDatabase(r *http.Request, controlDatabase
 			return err.Error()
 		}
 	}
-	return translationOrDefault(translationsForRequest(r), "billing_status_settings_saved", "Billing settings saved.")
+	return translationOrDefault(translations, "billing_status_settings_saved", "Billing settings saved.")
 }
 
 func uniqueDemoDomains(domains ...string) []string {
@@ -8475,6 +8477,7 @@ func uniqueDemoDomains(domains ...string) []string {
 }
 
 func (a *App) createManagedSiteFromForm(r *http.Request) string {
+	translations := translationsForRequest(r)
 	domain := normalizeQuotaDomainName(r.FormValue("domain"))
 	email := strings.TrimSpace(r.FormValue("email"))
 	password := strings.TrimSpace(r.FormValue("password"))
@@ -8486,18 +8489,18 @@ func (a *App) createManagedSiteFromForm(r *http.Request) string {
 		quotaBytes = defaultDomainStorageLimitBytes
 	}
 	if domain == "" {
-		return "Домен сайта обязателен."
+		return translationOrDefault(translations, "billing_status_site_domain_required", "Site domain is required.")
 	}
 	if email == "" || password == "" {
-		return "Email и пароль первого администратора обязательны."
+		return translationOrDefault(translations, "billing_status_admin_required", "Administrator email and password are required.")
 	}
 	if _, err := stdmail.ParseAddress(email); err != nil {
-		return "Email администратора некорректен."
+		return translationOrDefault(translations, "billing_status_admin_email_invalid", "Administrator email is invalid.")
 	}
 	if err := a.createManagedSite(r.Context(), domain, email, password, quotaBytes); err != nil {
 		return err.Error()
 	}
-	return "Сайт " + domain + " создан."
+	return fmt.Sprintf(translationOrDefault(translations, "billing_status_site_created", "Site %s was created."), domain)
 }
 
 func (a *App) createManagedSite(ctx context.Context, domain, email, password string, quotaBytes int64) error {
@@ -8539,10 +8542,11 @@ func (a *App) createManagedSite(ctx context.Context, domain, email, password str
 }
 
 func (a *App) approveSiteRegistrationRequestFromForm(r *http.Request) string {
+	translations := translationsForRequest(r)
 	requestID, _ := strconv.Atoi(strings.TrimSpace(r.FormValue("request_id")))
 	ownerMessage := strings.TrimSpace(r.FormValue("owner_message"))
 	if requestID <= 0 {
-		return "Заявка не выбрана."
+		return translationOrDefault(translations, "billing_status_request_not_selected", "Request is not selected.")
 	}
 	controlDatabase, err := a.openServerControlDatabase(r.Context())
 	if err != nil {
@@ -8552,14 +8556,14 @@ func (a *App) approveSiteRegistrationRequestFromForm(r *http.Request) string {
 	store := billing.Store{DB: controlDatabase}
 	siteRequest, found := store.SiteRequestByID(r.Context(), requestID)
 	if !found {
-		return "Заявка не найдена."
+		return translationOrDefault(translations, "billing_status_request_not_found", "Request was not found.")
 	}
 	if siteRequest.Status != "pending" {
-		return "Эта заявка уже обработана."
+		return translationOrDefault(translations, "billing_status_request_already_processed", "This request has already been processed.")
 	}
 	plan, planFound := store.PlanByID(r.Context(), siteRequest.PlanID)
 	if !planFound {
-		return "Тариф заявки не найден."
+		return translationOrDefault(translations, "billing_status_request_plan_not_found", "Request plan was not found.")
 	}
 	temporaryPassword := randomAccessToken()
 	if err := a.createManagedSite(r.Context(), siteRequest.Domain, siteRequest.Email, temporaryPassword, plan.QuotaBytes); err != nil {
@@ -8576,16 +8580,17 @@ func (a *App) approveSiteRegistrationRequestFromForm(r *http.Request) string {
 		return err.Error()
 	}
 	if err := a.enqueueSiteRegistrationDecisionEmail(r.Context(), r, siteRequest, plan, "approved", ownerMessage, temporaryPassword); err != nil {
-		return "Сайт " + siteRequest.Domain + " активирован, но email клиенту не поставлен в очередь: " + err.Error()
+		return fmt.Sprintf(translationOrDefault(translations, "billing_status_site_approved_email_failed", "Site %s was activated, but the customer email was not queued: %s"), siteRequest.Domain, err.Error())
 	}
-	return "Сайт " + siteRequest.Domain + " активирован, клиенту отправлено письмо."
+	return fmt.Sprintf(translationOrDefault(translations, "billing_status_site_approved", "Site %s was activated and the customer email was sent."), siteRequest.Domain)
 }
 
 func (a *App) rejectSiteRegistrationRequestFromForm(r *http.Request) string {
+	translations := translationsForRequest(r)
 	requestID, _ := strconv.Atoi(strings.TrimSpace(r.FormValue("request_id")))
 	ownerMessage := strings.TrimSpace(r.FormValue("owner_message"))
 	if requestID <= 0 {
-		return "Заявка не выбрана."
+		return translationOrDefault(translations, "billing_status_request_not_selected", "Request is not selected.")
 	}
 	controlDatabase, err := a.openServerControlDatabase(r.Context())
 	if err != nil {
@@ -8595,19 +8600,19 @@ func (a *App) rejectSiteRegistrationRequestFromForm(r *http.Request) string {
 	store := billing.Store{DB: controlDatabase}
 	siteRequest, found := store.SiteRequestByID(r.Context(), requestID)
 	if !found {
-		return "Заявка не найдена."
+		return translationOrDefault(translations, "billing_status_request_not_found", "Request was not found.")
 	}
 	if siteRequest.Status != "pending" {
-		return "Эта заявка уже обработана."
+		return translationOrDefault(translations, "billing_status_request_already_processed", "This request has already been processed.")
 	}
 	plan, _ := store.PlanByID(r.Context(), siteRequest.PlanID)
 	if err := store.UpdateSiteRequestStatus(r.Context(), requestID, "rejected", ownerMessage); err != nil {
 		return err.Error()
 	}
 	if err := a.enqueueSiteRegistrationDecisionEmail(r.Context(), r, siteRequest, plan, "rejected", ownerMessage, ""); err != nil {
-		return "Заявка отклонена, но email клиенту не поставлен в очередь: " + err.Error()
+		return fmt.Sprintf(translationOrDefault(translations, "billing_status_request_rejected_email_failed", "Request was rejected, but the customer email was not queued: %s"), err.Error())
 	}
-	return "Заявка " + siteRequest.Domain + " отклонена, клиенту отправлено письмо."
+	return fmt.Sprintf(translationOrDefault(translations, "billing_status_request_rejected", "Request %s was rejected and the customer email was sent."), siteRequest.Domain)
 }
 
 func planIsFree(plan billing.Plan) bool {
@@ -8679,9 +8684,10 @@ func billingPlanEmailLabel(plan billing.Plan) string {
 }
 
 func (a *App) updateManagedSiteFromForm(r *http.Request) string {
+	translations := translationsForRequest(r)
 	domain := normalizeQuotaDomainName(r.FormValue("domain"))
 	if domain == "" {
-		return "Домен сайта обязателен."
+		return translationOrDefault(translations, "billing_status_site_domain_required", "Site domain is required.")
 	}
 	controlDatabase, err := a.openServerControlDatabase(r.Context())
 	if err != nil {
@@ -8709,7 +8715,7 @@ func (a *App) updateManagedSiteFromForm(r *http.Request) string {
 	if err := (billing.Store{DB: controlDatabase}).AssignSite(r.Context(), domain, planID, serviceStatus); err != nil {
 		return err.Error()
 	}
-	return "Параметры сайта " + domain + " сохранены."
+	return fmt.Sprintf(translationOrDefault(translations, "billing_status_site_settings_saved", "Site %s settings were saved."), domain)
 }
 
 func (a *App) deleteManagedSiteFromForm(r *http.Request) string {
@@ -8847,13 +8853,14 @@ func (a *App) deleteManagedSiteWithBackup(ctx context.Context, r *http.Request, 
 }
 
 func (a *App) updateManagedSiteDeletionBackupRetentionFromForm(r *http.Request) string {
+	translations := translationsForRequest(r)
 	backupID, _ := strconv.Atoi(strings.TrimSpace(r.FormValue("backup_id")))
 	retentionDays, retentionErr := billing.ParseDeletionBackupRetentionDays(r.FormValue("backup_retention_days"))
 	if retentionErr != nil {
 		return retentionErr.Error()
 	}
 	if backupID <= 0 {
-		return "Бэкап не выбран."
+		return translationOrDefault(translations, "billing_status_backup_not_selected", "Backup is not selected.")
 	}
 	controlDatabase, err := a.openServerControlDatabase(r.Context())
 	if err != nil {
@@ -8877,7 +8884,7 @@ func (a *App) updateManagedSiteDeletionBackupRetentionFromForm(r *http.Request) 
 	if err != nil {
 		return err.Error()
 	}
-	return "Срок хранения бэкапа сохранен."
+	return translationOrDefault(translations, "billing_status_backup_retention_saved", "Backup retention was saved.")
 }
 
 func (a *App) deleteManagedSiteDataAfterBackup(ctx context.Context, controlDatabase *sql.DB, row siteQuotaRow) error {
@@ -9366,16 +9373,17 @@ func splitOwnerContacts(ownerContactsText string) []string {
 }
 
 func (a *App) saveServicePlanFromForm(r *http.Request) string {
+	translations := translationsForRequest(r)
 	name := strings.TrimSpace(r.FormValue("name"))
 	if name == "" {
-		return "Название тарифа обязательно."
+		return translationOrDefault(translations, "billing_status_plan_name_required", "Plan name is required.")
 	}
 	quotaBytes, quotaRequested, err := parseSiteQuotaLimitBytes(r.FormValue("quota"))
 	if err != nil {
 		return err.Error()
 	}
 	if !quotaRequested {
-		return "Квота тарифа обязательна."
+		return translationOrDefault(translations, "billing_status_plan_quota_required", "Plan quota is required.")
 	}
 	controlDatabase, err := a.openServerControlDatabase(r.Context())
 	if err != nil {
@@ -9383,6 +9391,14 @@ func (a *App) saveServicePlanFromForm(r *http.Request) string {
 	}
 	defer controlDatabase.Close()
 	planID, _ := strconv.Atoi(strings.TrimSpace(r.FormValue("plan_id")))
+	siteLimit, err := positiveIntegerFromForm(r, "site_limit", 1)
+	if err != nil {
+		return err.Error()
+	}
+	analyticsReportLimit, err := nonNegativeIntegerFromForm(r, "analytics_report_limit", 0)
+	if err != nil {
+		return err.Error()
+	}
 	price := strings.TrimSpace(r.FormValue("price"))
 	currency := strings.TrimSpace(r.FormValue("currency"))
 	if currency == "" {
@@ -9393,16 +9409,41 @@ func (a *App) saveServicePlanFromForm(r *http.Request) string {
 		billingPeriod = "monthly"
 	}
 	isDefault := r.FormValue("is_default") == "1"
-	if err := (billing.Store{DB: controlDatabase}).SavePlan(r.Context(), planID, name, quotaBytes, price, currency, billingPeriod, isDefault); err != nil {
+	if err := (billing.Store{DB: controlDatabase}).SavePlan(r.Context(), planID, name, quotaBytes, siteLimit, analyticsReportLimit, price, currency, billingPeriod, isDefault); err != nil {
 		return err.Error()
 	}
-	return "Тариф сохранен."
+	return translationOrDefault(translations, "billing_status_plan_saved", "Plan saved.")
+}
+
+func positiveIntegerFromForm(r *http.Request, fieldName string, fallback int) (int, error) {
+	rawText := strings.TrimSpace(r.FormValue(fieldName))
+	if rawText == "" {
+		return fallback, nil
+	}
+	parsedValue, err := strconv.Atoi(rawText)
+	if err != nil || parsedValue <= 0 {
+		return 0, fmt.Errorf("Значение %s должно быть положительным числом.", fieldName)
+	}
+	return parsedValue, nil
+}
+
+func nonNegativeIntegerFromForm(r *http.Request, fieldName string, fallback int) (int, error) {
+	rawText := strings.TrimSpace(r.FormValue(fieldName))
+	if rawText == "" {
+		return fallback, nil
+	}
+	parsedValue, err := strconv.Atoi(rawText)
+	if err != nil || parsedValue < 0 {
+		return 0, fmt.Errorf("Значение %s не может быть отрицательным.", fieldName)
+	}
+	return parsedValue, nil
 }
 
 func (a *App) deleteServicePlanFromForm(r *http.Request) string {
+	translations := translationsForRequest(r)
 	planID, _ := strconv.Atoi(strings.TrimSpace(r.FormValue("plan_id")))
 	if planID <= 0 {
-		return "Тариф не выбран."
+		return translationOrDefault(translations, "billing_status_plan_not_selected", "Plan is not selected.")
 	}
 	controlDatabase, err := a.openServerControlDatabase(r.Context())
 	if err != nil {
@@ -9412,7 +9453,7 @@ func (a *App) deleteServicePlanFromForm(r *http.Request) string {
 	if err := (billing.Store{DB: controlDatabase}).DeletePlan(r.Context(), planID); err != nil {
 		return err.Error()
 	}
-	return "Тариф удален."
+	return translationOrDefault(translations, "billing_status_plan_deleted", "Plan deleted.")
 }
 
 func (a *App) applyLatestActiveRevision(ctx context.Context, domain string, pagePath string) {

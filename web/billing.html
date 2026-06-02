@@ -23,25 +23,32 @@
 
   <section class="card billing-card">
     <div class="card-body">
-      <h2>Тарифы</h2>
+      <h2>{{index .T "billing_plans_title"}}</h2>
       <form method="post" action="?billing" class="billing-plan-form">
         <input type="hidden" name="billing_action" value="save_plan">
-        <label>Название <input name="name" type="text" class="form-control" placeholder="Free / Pro / Business" required></label>
-        <label>Квота <input name="quota" type="text" class="form-control" placeholder="10gb" required></label>
-        <label>Цена <input name="price" type="text" class="form-control" placeholder="0"></label>
-        <label>Валюта <input name="currency" type="text" class="form-control" value="USD"></label>
-        <label>Период <input name="billing_period" type="text" class="form-control" value="monthly"></label>
-        <label class="checkbox-row"><input type="checkbox" name="is_default" value="1"><span>Тариф по умолчанию</span></label>
-        <button type="submit" class="btn btn-primary"><img src="/p/static/save-page.png" alt="">Сохранить тариф</button>
+        <label>{{index .T "billing_plan_name"}} <input name="name" type="text" class="form-control" placeholder="Free / Pro / Business" required></label>
+        <label>{{index .T "billing_quota"}} <input name="quota" type="text" class="form-control" placeholder="10gb" required></label>
+        <label>{{index .T "billing_site_limit"}} <input name="site_limit" type="number" min="1" step="1" class="form-control" value="1" required></label>
+        <label>{{index .T "billing_analytics_reports"}} <input name="analytics_report_limit" type="number" min="0" step="1" class="form-control" value="0" required></label>
+        <label>{{index .T "billing_price"}} <input name="price" type="text" class="form-control" placeholder="0"></label>
+        <label>{{index .T "billing_currency"}} <input name="currency" type="text" class="form-control" value="USD"></label>
+        <label>{{index .T "billing_period"}} <input name="billing_period" type="text" class="form-control" value="monthly"></label>
+        <label class="checkbox-row"><input type="checkbox" name="is_default" value="1"><span>{{index .T "billing_plan_default"}}</span></label>
+        <button type="submit" class="btn btn-primary"><img src="/p/static/save-page.png" alt="">{{index .T "billing_save_plan"}}</button>
       </form>
       <div class="billing-plan-list">
         {{range .Plans}}
-        <form method="post" action="?billing" class="billing-plan-row">
-          <input type="hidden" name="billing_action" value="delete_plan">
-          <input type="hidden" name="plan_id" value="{{.ID}}">
-          <span><button type="button" class="btn btn-link btn-sm p-0 align-baseline" data-bs-toggle="modal" data-bs-target="#billingPlanModal{{.ID}}">{{.Name}}</button> · {{.QuotaLabel}} · {{.Price}} {{.Currency}}/{{.BillingPeriod}}{{if .IsDefault}} · по умолчанию{{end}}</span>
-          <button type="submit" class="btn btn-outline-danger btn-sm"><img src="/p/static/cross.png" alt="">Удалить</button>
-        </form>
+        <div class="billing-plan-row">
+          <span><button type="button" class="btn btn-link btn-sm p-0 align-baseline" data-bs-toggle="modal" data-bs-target="#billingPlanModal{{.ID}}">{{.Name}}</button> · {{.QuotaLabel}} · {{index $.T "billing_sites_short"}} {{.SiteLimit}} · {{index $.T "billing_reports_short"}} {{.AnalyticsReportLimit}} · {{.Price}} {{.Currency}}/{{.BillingPeriod}}{{if .IsDefault}} · {{index $.T "billing_default_suffix"}}{{end}}</span>
+          <div class="d-flex gap-2">
+            <button type="button" class="btn btn-outline-primary btn-sm" data-bs-toggle="modal" data-bs-target="#billingPlanEditModal{{.ID}}"><img src="/p/static/pencil.png" alt="">{{index $.T "billing_edit"}}</button>
+            <form method="post" action="?billing">
+              <input type="hidden" name="billing_action" value="delete_plan">
+              <input type="hidden" name="plan_id" value="{{.ID}}">
+              <button type="submit" class="btn btn-outline-danger btn-sm"><img src="/p/static/cross.png" alt="">{{index $.T "billing_delete"}}</button>
+            </form>
+          </div>
+        </div>
         <div class="modal fade" id="billingPlanModal{{.ID}}" tabindex="-1" aria-hidden="true">
           <div class="modal-dialog modal-dialog-centered"><div class="modal-content">
             <div class="modal-header">
@@ -49,17 +56,45 @@
               <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="{{index $.T "tree_close"}}"></button>
             </div>
             <div class="modal-body">
-              <p class="text-muted">{{.QuotaLabel}} · {{.Price}} {{.Currency}}/{{.BillingPeriod}}</p>
+              <p class="text-muted">{{.QuotaLabel}} · {{index $.T "billing_sites_short"}} {{.SiteLimit}} · {{index $.T "billing_reports_short"}} {{.AnalyticsReportLimit}} · {{.Price}} {{.Currency}}/{{.BillingPeriod}}</p>
               <ul>
-                <li>Редактор страниц Sitebrush и публикация сайта.</li>
-                <li>Файлы и статические ресурсы в пределах квоты {{.QuotaLabel}}.</li>
-                <li>Резервные копии, настройки домена и управление HTTPS.</li>
-                <li>Автоматический SSL после корректной настройки DNS.</li>
+                <li>{{index $.T "billing_plan_feature_editor"}}</li>
+                <li>{{index $.T "billing_plan_feature_quota"}} {{.QuotaLabel}}.</li>
+                <li>{{index $.T "billing_plan_feature_sites"}} {{.SiteLimit}}.</li>
+                <li>{{index $.T "billing_plan_feature_reports"}} {{.AnalyticsReportLimit}}.</li>
+                <li>{{index $.T "billing_plan_feature_backups"}}</li>
+                <li>{{index $.T "billing_plan_feature_ssl"}}</li>
               </ul>
             </div>
             <div class="modal-footer">
               <button type="button" class="btn btn-primary" data-bs-dismiss="modal">{{index $.T "tree_close"}}</button>
             </div>
+          </div></div>
+        </div>
+        <div class="modal fade" id="billingPlanEditModal{{.ID}}" tabindex="-1" aria-hidden="true">
+          <div class="modal-dialog modal-dialog-centered"><div class="modal-content">
+            <form method="post" action="?billing">
+              <div class="modal-header">
+                <h5 class="modal-title">{{index $.T "billing_edit_plan_title"}} {{.Name}}</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="{{index $.T "tree_close"}}"></button>
+              </div>
+              <div class="modal-body billing-plan-form">
+                <input type="hidden" name="billing_action" value="save_plan">
+                <input type="hidden" name="plan_id" value="{{.ID}}">
+                <label>{{index $.T "billing_plan_name"}} <input name="name" type="text" class="form-control" value="{{.Name}}" required></label>
+                <label>{{index $.T "billing_quota"}} <input name="quota" type="text" class="form-control" value="{{.QuotaInput}}" required></label>
+                <label>{{index $.T "billing_site_limit"}} <input name="site_limit" type="number" min="1" step="1" class="form-control" value="{{.SiteLimit}}" required></label>
+                <label>{{index $.T "billing_analytics_reports"}} <input name="analytics_report_limit" type="number" min="0" step="1" class="form-control" value="{{.AnalyticsReportLimit}}" required></label>
+                <label>{{index $.T "billing_price"}} <input name="price" type="text" class="form-control" value="{{.Price}}"></label>
+                <label>{{index $.T "billing_currency"}} <input name="currency" type="text" class="form-control" value="{{.Currency}}"></label>
+                <label>{{index $.T "billing_period"}} <input name="billing_period" type="text" class="form-control" value="{{.BillingPeriod}}"></label>
+                <label class="checkbox-row"><input type="checkbox" name="is_default" value="1" {{if .IsDefault}}checked{{end}}><span>{{index $.T "billing_plan_default"}}</span></label>
+              </div>
+              <div class="modal-footer">
+                <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">{{index $.T "edit_cancel"}}</button>
+                <button type="submit" class="btn btn-primary"><img src="/p/static/save-page.png" alt="">{{index $.T "billing_save_plan"}}</button>
+              </div>
+            </form>
           </div></div>
         </div>
         {{end}}
@@ -70,16 +105,16 @@
   <section class="card billing-card">
     <div class="card-body billing-card-body">
       <div>
-        <h2>Регистрация сайтов</h2>
-        <p class="text-muted">Первый администратор первого сайта становится владельцем сервера. Новые базы сайтов создаются только вместе с первым администратором.</p>
+        <h2>{{index .T "billing_registration_title"}}</h2>
+        <p class="text-muted">{{index .T "billing_registration_hint"}}</p>
       </div>
       <form method="post" action="?billing" class="billing-registration-settings-form">
         <input type="hidden" name="billing_action" value="registration_settings">
         <label class="checkbox-row">
           <input type="checkbox" name="auto_registration_enabled" value="1" {{if .AutoRegistrationEnabled}}checked{{end}}>
-          <span>Разрешить самостоятельную регистрацию новых сайтов</span>
+          <span>{{index .T "billing_registration_allow"}}</span>
         </label>
-        <button type="submit" class="btn btn-primary"><img src="/p/static/save-page.png" alt="">Сохранить</button>
+        <button type="submit" class="btn btn-primary"><img src="/p/static/save-page.png" alt="">{{index .T "billing_save"}}</button>
       </form>
     </div>
   </section>
@@ -87,16 +122,16 @@
   <section class="card billing-card">
     <div class="card-body billing-card-body">
       <div>
-        <h2>Добавить сайт</h2>
-        <p class="text-muted">База сайта будет создана только после проверки домена, email и пароля администратора.</p>
+        <h2>{{index .T "billing_add_site_title"}}</h2>
+        <p class="text-muted">{{index .T "billing_add_site_hint"}}</p>
       </div>
       <form method="post" action="?billing" class="billing-create-form">
         <input type="hidden" name="billing_action" value="create_site">
-        <label>Домен <input name="domain" type="text" class="form-control" placeholder="example.com" required></label>
-        <label>Email администратора <input name="email" type="email" class="form-control" placeholder="admin@example.com" required></label>
-        <label>Пароль <input name="password" type="text" class="form-control" autocomplete="off" required></label>
-        <label>Квота <input name="quota" type="text" class="form-control" placeholder="10gb"></label>
-        <button type="submit" class="btn btn-success"><img src="/p/static/profile.png" alt="">Создать</button>
+        <label>{{index .T "billing_domain"}} <input name="domain" type="text" class="form-control" placeholder="example.com" required></label>
+        <label>{{index .T "billing_admin_email"}} <input name="email" type="email" class="form-control" placeholder="admin@example.com" required></label>
+        <label>{{index .T "billing_password"}} <input name="password" type="text" class="form-control" autocomplete="off" required></label>
+        <label>{{index .T "billing_quota"}} <input name="quota" type="text" class="form-control" placeholder="10gb"></label>
+        <button type="submit" class="btn btn-success"><img src="/p/static/profile.png" alt="">{{index .T "billing_create"}}</button>
       </form>
     </div>
   </section>
@@ -105,8 +140,8 @@
     <div class="card-body">
       <div class="billing-section-header">
         <div>
-          <h2>Заявки на подключение</h2>
-          <p class="text-muted">Новые домены попадают сюда, когда самостоятельная регистрация отключена.</p>
+          <h2>{{index .T "billing_requests_title"}}</h2>
+          <p class="text-muted">{{index .T "billing_requests_hint"}}</p>
         </div>
       </div>
       <div class="billing-site-list">
@@ -115,33 +150,33 @@
           <div class="billing-site-main">
             <div class="billing-domain"><a href="//{{$request.Domain}}/" target="_blank" rel="noopener noreferrer">{{$request.Domain}}</a></div>
             <div class="text-muted small">{{$request.Name}} · {{$request.Email}} · {{$request.Phone}}</div>
-            <div class="text-muted small">Тариф: {{$request.PlanName}} · {{$request.PlanQuotaLabel}} · {{$request.PlanPrice}} {{$request.PlanCurrency}}/{{$request.PlanBillingPeriod}}</div>
-            <div class="text-muted small">Статус: {{$request.Status}} · {{$request.CreatedAt}}</div>
-            {{if $request.OwnerMessage}}<div class="text-muted small">Сообщение: {{$request.OwnerMessage}}</div>{{end}}
+            <div class="text-muted small">{{index $.T "billing_plan_label"}} {{$request.PlanName}} · {{$request.PlanQuotaLabel}} · {{index $.T "billing_sites_short"}} {{$request.PlanSiteLimit}} · {{index $.T "billing_reports_short"}} {{$request.PlanAnalyticsLimit}} · {{$request.PlanPrice}} {{$request.PlanCurrency}}/{{$request.PlanBillingPeriod}}</div>
+            <div class="text-muted small">{{index $.T "billing_status_label"}} {{$request.Status}} · {{$request.CreatedAt}}</div>
+            {{if $request.OwnerMessage}}<div class="text-muted small">{{index $.T "billing_message_label"}} {{$request.OwnerMessage}}</div>{{end}}
           </div>
           {{if $request.CanApproveOrReject}}
           <div class="billing-site-form">
-            <button type="button" class="btn btn-success btn-sm" data-bs-toggle="modal" data-bs-target="#approveSiteRequestModal{{$requestIndex}}"><img src="/p/static/profile.png" alt="">Активировать</button>
-            <button type="button" class="btn btn-outline-danger btn-sm" data-bs-toggle="modal" data-bs-target="#rejectSiteRequestModal{{$requestIndex}}"><img src="/p/static/cross.png" alt="">Отказать</button>
+            <button type="button" class="btn btn-success btn-sm" data-bs-toggle="modal" data-bs-target="#approveSiteRequestModal{{$requestIndex}}"><img src="/p/static/profile.png" alt="">{{index $.T "billing_approve"}}</button>
+            <button type="button" class="btn btn-outline-danger btn-sm" data-bs-toggle="modal" data-bs-target="#rejectSiteRequestModal{{$requestIndex}}"><img src="/p/static/cross.png" alt="">{{index $.T "billing_reject"}}</button>
           </div>
           <div class="modal fade" id="approveSiteRequestModal{{$requestIndex}}" tabindex="-1" aria-hidden="true">
             <div class="modal-dialog modal-dialog-centered"><div class="modal-content">
               <form method="post" action="?billing">
                 <div class="modal-header">
-                  <h5 class="modal-title">Активировать {{$request.Domain}}</h5>
+                  <h5 class="modal-title">{{index $.T "billing_approve_title"}} {{$request.Domain}}</h5>
                   <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="{{index $.T "tree_close"}}"></button>
                 </div>
                 <div class="modal-body">
-                  <p class="text-muted">Будет создан сайт с администратором {{$request.Email}} и тарифом {{$request.PlanName}}. Клиент получит email с временным паролем.</p>
+                  <p class="text-muted">{{index $.T "billing_approve_hint_prefix"}} {{$request.Email}} {{index $.T "billing_approve_hint_middle"}} {{$request.PlanName}}. {{index $.T "billing_approve_hint_suffix"}}</p>
                   <input type="hidden" name="billing_action" value="approve_site_request">
                   <input type="hidden" name="request_id" value="{{$request.ID}}">
-                  <label>Сообщение клиенту
-                    <textarea name="owner_message" class="form-control" rows="4" placeholder="Например: сайт активирован, DNS можно настроить в панели Sitebrush."></textarea>
+                  <label>{{index $.T "billing_client_message"}}
+                    <textarea name="owner_message" class="form-control" rows="4" placeholder="{{index $.T "billing_approve_placeholder"}}"></textarea>
                   </label>
                 </div>
                 <div class="modal-footer">
                   <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">{{index $.T "edit_cancel"}}</button>
-                  <button type="submit" class="btn btn-success"><img src="/p/static/profile.png" alt="">Активировать</button>
+                  <button type="submit" class="btn btn-success"><img src="/p/static/profile.png" alt="">{{index $.T "billing_approve"}}</button>
                 </div>
               </form>
             </div></div>
@@ -150,19 +185,19 @@
             <div class="modal-dialog modal-dialog-centered"><div class="modal-content">
               <form method="post" action="?billing">
                 <div class="modal-header">
-                  <h5 class="modal-title">Отказать {{$request.Domain}}</h5>
+                  <h5 class="modal-title">{{index $.T "billing_reject_title"}} {{$request.Domain}}</h5>
                   <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="{{index $.T "tree_close"}}"></button>
                 </div>
                 <div class="modal-body">
                   <input type="hidden" name="billing_action" value="reject_site_request">
                   <input type="hidden" name="request_id" value="{{$request.ID}}">
-                  <label>Сообщение клиенту
-                    <textarea name="owner_message" class="form-control" rows="4" placeholder="Укажите причину отказа или следующие шаги."></textarea>
+                  <label>{{index $.T "billing_client_message"}}
+                    <textarea name="owner_message" class="form-control" rows="4" placeholder="{{index $.T "billing_reject_placeholder"}}"></textarea>
                   </label>
                 </div>
                 <div class="modal-footer">
                   <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">{{index $.T "edit_cancel"}}</button>
-                  <button type="submit" class="btn btn-outline-danger"><img src="/p/static/cross.png" alt="">Отказать</button>
+                  <button type="submit" class="btn btn-outline-danger"><img src="/p/static/cross.png" alt="">{{index $.T "billing_reject"}}</button>
                 </div>
               </form>
             </div></div>
@@ -170,7 +205,7 @@
           {{end}}
         </article>
         {{else}}
-        <div class="empty">Заявок пока нет.</div>
+        <div class="empty">{{index .T "billing_requests_empty"}}</div>
         {{end}}
       </div>
     </div>
@@ -180,42 +215,42 @@
     <div class="card-body">
       <div class="billing-section-header">
         <div>
-          <h2>Действующие сайты</h2>
-          <p class="text-muted">Показываются только базы, где уже есть администратор сайта.</p>
+          <h2>{{index .T "billing_active_sites_title"}}</h2>
+          <p class="text-muted">{{index .T "billing_active_sites_hint"}}</p>
         </div>
       </div>
       <div class="billing-site-list">
         {{range $siteIndex, $site := .Sites}}
         <article class="billing-site-row">
           <div class="billing-site-main">
-            <div class="billing-domain"><a href="//{{$site.Domain}}/" target="_blank" rel="noopener noreferrer">{{$site.Domain}}</a>{{if $site.IsDemo}} <span class="badge text-bg-info">Демо-сайт</span>{{end}}</div>
-            {{if $site.Aliases}}<div class="text-muted small">Алиасы: {{$site.Aliases}}</div>{{end}}
-            {{if $site.AdminEmails}}<div class="text-muted small">Администраторы: {{$site.AdminEmails}}</div>{{end}}
-            {{if $site.IsDemo}}<div class="text-muted small">Тарифы и удаление не применяются. Сайт удаляется при выключении демо.</div>{{end}}
+            <div class="billing-domain"><a href="//{{$site.Domain}}/" target="_blank" rel="noopener noreferrer">{{$site.Domain}}</a>{{if $site.IsDemo}} <span class="badge text-bg-info">{{index $.T "billing_demo_site_badge"}}</span>{{end}}</div>
+            {{if $site.Aliases}}<div class="text-muted small">{{index $.T "billing_aliases_label"}} {{$site.Aliases}}</div>{{end}}
+            {{if $site.AdminEmails}}<div class="text-muted small">{{index $.T "billing_admins_label"}} {{$site.AdminEmails}}</div>{{end}}
+            {{if $site.IsDemo}}<div class="text-muted small">{{index $.T "billing_demo_site_no_billing"}}</div>{{end}}
             {{if not $site.IsDemo}}<div class="text-muted small">{{index $.T "billing_delete_will_remove"}} {{$site.DeletionSizeLabel}}</div>{{end}}
-            <div class="billing-quota-bar" aria-label="Использовано {{$site.UsedPercent}}%">
+            <div class="billing-quota-bar" aria-label="{{index $.T "billing_used_percent"}} {{$site.UsedPercent}}%">
               <div style="width:{{$site.UsedPercent}}%"></div>
             </div>
-            <div class="text-muted small">Использовано {{$site.UsedLabel}} / {{$site.LimitLabel}}, свободно {{$site.FreeLabel}}</div>
+            <div class="text-muted small">{{index $.T "billing_used_label"}} {{$site.UsedLabel}} / {{$site.LimitLabel}}, {{index $.T "billing_free_label"}} {{$site.FreeLabel}}</div>
           </div>
           {{if not $site.IsDemo}}<form method="post" action="?billing" class="billing-site-form">
             <input type="hidden" name="billing_action" value="update_site">
             <input type="hidden" name="domain" value="{{$site.Domain}}">
-            <label>Квота <input name="quota" type="text" class="form-control form-control-sm" value="{{$site.QuotaInput}}"></label>
-            <label>Тариф
+            <label>{{index $.T "billing_quota"}} <input name="quota" type="text" class="form-control form-control-sm" value="{{$site.QuotaInput}}"></label>
+            <label>{{index $.T "billing_plan"}}
               <select name="plan_id" class="form-select form-select-sm">
-                <option value="0">Без тарифа</option>
+                <option value="0">{{index $.T "billing_no_plan"}}</option>
                 {{$selectedPlanID := $site.PlanID}}{{range $.Plans}}<option value="{{.ID}}" {{if eq .ID $selectedPlanID}}selected{{end}}>{{.Name}} · {{.QuotaLabel}} · {{.Price}} {{.Currency}}/{{.BillingPeriod}}</option>{{end}}
               </select>
             </label>
-            <label>Статус
+            <label>{{index $.T "billing_status"}}
               <select name="service_status" class="form-select form-select-sm">
-                <option value="free" {{if eq $site.ServiceStatus "free"}}selected{{end}}>Бесплатный</option>
-                <option value="paid" {{if eq $site.ServiceStatus "paid"}}selected{{end}}>Платный</option>
-                <option value="paused" {{if eq $site.ServiceStatus "paused"}}selected{{end}}>Приостановлен</option>
+                <option value="free" {{if eq $site.ServiceStatus "free"}}selected{{end}}>{{index $.T "billing_status_free"}}</option>
+                <option value="paid" {{if eq $site.ServiceStatus "paid"}}selected{{end}}>{{index $.T "billing_status_paid"}}</option>
+                <option value="paused" {{if eq $site.ServiceStatus "paused"}}selected{{end}}>{{index $.T "billing_status_paused"}}</option>
               </select>
             </label>
-            <button type="submit" class="btn btn-primary btn-sm"><img src="/p/static/save-page.png" alt="">Сохранить</button>
+            <button type="submit" class="btn btn-primary btn-sm"><img src="/p/static/save-page.png" alt="">{{index $.T "billing_save"}}</button>
           </form>{{end}}
           {{if $site.CanDelete}}<div class="billing-delete-form">
             <button type="button" class="btn btn-outline-danger btn-sm" data-bs-toggle="modal" data-bs-target="#deleteSiteModal{{$siteIndex}}"><img src="/p/static/delete.png" alt="">{{index $.T "billing_delete_button"}}</button>
@@ -236,7 +271,7 @@
                   <label>{{index $.T "billing_backup_retention_days"}}
                     <input name="backup_retention_days" type="number" min="1" max="3650" class="form-control" value="365" required>
                   </label>
-                  <div class="form-text mb-3">Бэкап удаляемого сайта будет храниться этот срок.</div>
+                  <div class="form-text mb-3">{{index $.T "billing_backup_retention_hint"}}</div>
                   <input name="confirm_domain" type="text" class="form-control" placeholder="{{$site.Domain}}" autocomplete="off" required>
                 </div>
                 <div class="modal-footer">
@@ -248,7 +283,7 @@
           </div>{{end}}
         </article>
         {{else}}
-        <div class="empty">Сайты пока не найдены.</div>
+        <div class="empty">{{index .T "billing_sites_empty"}}</div>
         {{end}}
       </div>
     </div>
@@ -284,7 +319,7 @@
             <label>{{index $.T "billing_backup_retention_days"}}
               <input name="backup_retention_days" type="number" min="1" max="3650" class="form-control form-control-sm" value="{{.RetentionDays}}" required>
             </label>
-            <button type="submit" class="btn btn-outline-primary btn-sm"><img src="/p/static/save-page.png" alt="">Сохранить</button>
+            <button type="submit" class="btn btn-outline-primary btn-sm"><img src="/p/static/save-page.png" alt="">{{index $.T "billing_save"}}</button>
             {{if .DownloadURL}}<a class="btn btn-primary btn-sm" href="{{.DownloadURL}}"><img src="/p/static/backup.png" alt="">{{index $.T "billing_backup_download"}}</a>{{end}}
           </form>
         </article>
@@ -297,18 +332,18 @@
   <section class="card billing-card">
     <div class="card-body billing-card-body">
       <div>
-        <h2>Демо-сайт</h2>
-        <p class="text-muted">Локальная копия используется как шаблон для пересоздания демо-сайта после неактивной сессии.</p>
+        <h2>{{index .T "billing_demo_title"}}</h2>
+        <p class="text-muted">{{index .T "billing_demo_hint"}}</p>
       </div>
       <form method="post" action="?billing" class="billing-demo-settings-form">
         <input type="hidden" name="billing_action" value="demo_settings">
         <input type="hidden" name="refresh_demo_site" value="0" data-refresh-demo-site-input>
-        <label>Домен демо-сайта <input name="demo_site_domain" type="text" class="form-control" value="{{.DemoSettings.Domain}}" placeholder="demo.example.com"></label>
-        <label>Источник для скачивания <input name="demo_site_source_url" type="text" class="form-control" value="{{.DemoSettings.SourceURL}}" placeholder="example.com или https://example.com/"></label>
-        <label class="checkbox-row"><input type="checkbox" name="demo_site_copy_whole_site" value="1" {{if .DemoSettings.CopyWholeSite}}checked{{end}}><span>Скачивать весь сайт по ссылкам</span></label>
-        <label class="checkbox-row"><input type="checkbox" name="demo_site_enabled" value="1" {{if .DemoSettings.Enabled}}checked{{end}}><span>Включить публичный демо-сайт</span></label>
-        <button type="submit" class="btn btn-primary"><img src="/p/static/save-page.png" alt="">Сохранить</button>
-        <button type="button" class="btn btn-outline-primary" data-demo-refresh-preview-button><img src="/p/static/backup.png" alt="">Обновить скачанную копию</button>
+        <label>{{index .T "billing_demo_domain"}} <input name="demo_site_domain" type="text" class="form-control" value="{{.DemoSettings.Domain}}" placeholder="demo.example.com"></label>
+        <label>{{index .T "billing_demo_source_url"}} <input name="demo_site_source_url" type="text" class="form-control" value="{{.DemoSettings.SourceURL}}" placeholder="example.com or https://example.com/"></label>
+        <label class="checkbox-row"><input type="checkbox" name="demo_site_copy_whole_site" value="1" {{if .DemoSettings.CopyWholeSite}}checked{{end}}><span>{{index .T "billing_demo_copy_whole_site"}}</span></label>
+        <label class="checkbox-row"><input type="checkbox" name="demo_site_enabled" value="1" {{if .DemoSettings.Enabled}}checked{{end}}><span>{{index .T "billing_demo_enabled"}}</span></label>
+        <button type="submit" class="btn btn-primary"><img src="/p/static/save-page.png" alt="">{{index .T "billing_save"}}</button>
+        <button type="button" class="btn btn-outline-primary" data-demo-refresh-preview-button><img src="/p/static/backup.png" alt="">{{index .T "billing_demo_refresh_copy"}}</button>
       </form>
     </div>
   </section>
@@ -329,9 +364,9 @@
       <div class="list-group mt-3 d-none" data-demo-refresh-resource-list></div>
     </div>
     <div class="modal-footer">
-      <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal" data-demo-refresh-cancel-button>{{index .T edit_cancel}}</button>
-      <button type="button" class="btn btn-primary" data-demo-refresh-confirm-button disabled><img src="/p/static/backup.png" alt="">{{index .T billing_demo_refresh_continue}}</button>
-      <button type="button" class="btn btn-primary d-none" data-bs-dismiss="modal" data-demo-refresh-close-button>{{index .T tree_close}}</button>
+      <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal" data-demo-refresh-cancel-button>{{index .T "edit_cancel"}}</button>
+      <button type="button" class="btn btn-primary" data-demo-refresh-confirm-button disabled><img src="/p/static/backup.png" alt="">{{index .T "billing_demo_refresh_continue"}}</button>
+      <button type="button" class="btn btn-primary d-none" data-bs-dismiss="modal" data-demo-refresh-close-button>{{index .T "tree_close"}}</button>
     </div>
   </div></div>
 </div>

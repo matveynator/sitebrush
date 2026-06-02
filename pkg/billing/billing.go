@@ -15,21 +15,24 @@ import (
 
 const DefaultStorageLimitBytes int64 = 10 * 1024 * 1024 * 1024
 const DefaultDeletionBackupRetentionDays = 365
-const currentBillingSchemaVersion = 4
+const currentBillingSchemaVersion = 5
 
 type Store struct {
 	DB *sql.DB
 }
 
 type Plan struct {
-	ID            int
-	Name          string
-	QuotaLabel    string
-	QuotaBytes    int64
-	Price         string
-	Currency      string
-	BillingPeriod string
-	IsDefault     bool
+	ID                   int
+	Name                 string
+	QuotaLabel           string
+	QuotaInput           string
+	QuotaBytes           int64
+	SiteLimit            int
+	AnalyticsReportLimit int
+	Price                string
+	Currency             string
+	BillingPeriod        string
+	IsDefault            bool
 }
 
 type Site struct {
@@ -59,6 +62,8 @@ type SiteRequest struct {
 	PlanID              int
 	PlanName            string
 	PlanQuotaLabel      string
+	PlanSiteLimit       int
+	PlanAnalyticsLimit  int
 	PlanPrice           string
 	PlanCurrency        string
 	PlanBillingPeriod   string
@@ -116,7 +121,7 @@ func Migrate(ctx context.Context, database *sql.DB) error {
 	queries := []string{
 		`CREATE TABLE IF NOT EXISTS server_managers(domain TEXT,email TEXT,role TEXT,scope_domain TEXT,created_at TEXT,PRIMARY KEY(domain,email,role,scope_domain));`,
 		`CREATE TABLE IF NOT EXISTS server_settings(name TEXT PRIMARY KEY,value TEXT,updated_at TEXT);`,
-		`CREATE TABLE IF NOT EXISTS site_service_plans(id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT UNIQUE,quota_bytes INTEGER,price TEXT,currency TEXT,billing_period TEXT,is_default INTEGER DEFAULT 0,created_at TEXT,updated_at TEXT);`,
+		`CREATE TABLE IF NOT EXISTS site_service_plans(id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT UNIQUE,quota_bytes INTEGER,site_limit INTEGER DEFAULT 1,analytics_report_limit INTEGER DEFAULT 0,price TEXT,currency TEXT,billing_period TEXT,is_default INTEGER DEFAULT 0,created_at TEXT,updated_at TEXT);`,
 		`CREATE TABLE IF NOT EXISTS site_service_assignments(domain TEXT PRIMARY KEY,plan_id INTEGER DEFAULT 0,service_status TEXT,notes TEXT,updated_at TEXT);`,
 		`CREATE TABLE IF NOT EXISTS site_registration_requests(id INTEGER PRIMARY KEY AUTOINCREMENT,domain TEXT,name TEXT,email TEXT,phone TEXT,plan_id INTEGER DEFAULT 0,status TEXT,owner_message TEXT,created_at TEXT,updated_at TEXT);`,
 		`CREATE TABLE IF NOT EXISTS site_deletion_backups(id INTEGER PRIMARY KEY AUTOINCREMENT,domain TEXT,archive_path TEXT,file_name TEXT,size_bytes INTEGER,token TEXT,token_created_at TEXT,created_at TEXT,expires_at TEXT,retention_days INTEGER,owner_contacts TEXT,metadata_json TEXT,language_code TEXT,downloaded_at TEXT,download_count INTEGER DEFAULT 0);`,
@@ -127,10 +132,22 @@ func Migrate(ctx context.Context, database *sql.DB) error {
 			return fmt.Errorf("billing schema statement %d: %w", queryIndex+1, err)
 		}
 	}
+	for _, column := range requiredBillingColumns() {
+		found, err := billingColumnExists(ctx, database, column.tableName, column.columnName)
+		if err != nil {
+			return fmt.Errorf("check billing column %s.%s: %w", column.tableName, column.columnName, err)
+		}
+		if found {
+			continue
+		}
+		if _, err := database.ExecContext(ctx, `ALTER TABLE `+column.tableName+` ADD COLUMN `+column.columnName+` `+column.definition); err != nil {
+			return fmt.Errorf("add billing column %s.%s: %w", column.tableName, column.columnName, err)
+		}
+	}
 	now := time.Now().UTC().Format(time.RFC3339)
 	_, _ = database.ExecContext(ctx, `INSERT OR IGNORE INTO server_settings(name,value,updated_at) VALUES('auto_registration_enabled','1',?)`, now)
 	_, _ = database.ExecContext(ctx, `INSERT OR IGNORE INTO server_settings(name,value,updated_at) VALUES('deletion_backup_retention_days',?,?)`, strconv.Itoa(DefaultDeletionBackupRetentionDays), now)
-	_, _ = database.ExecContext(ctx, `INSERT OR IGNORE INTO site_service_plans(name,quota_bytes,price,currency,billing_period,is_default,created_at,updated_at) VALUES('Free',?,'0','USD','monthly',1,?,?)`,
+	_, _ = database.ExecContext(ctx, `INSERT OR IGNORE INTO site_service_plans(name,quota_bytes,site_limit,analytics_report_limit,price,currency,billing_period,is_default,created_at,updated_at) VALUES('Free',?,1,0,'0','USD','monthly',1,?,?)`,
 		DefaultStorageLimitBytes, now, now)
 	if err := setSchemaMigrationVersion(ctx, database, "billing", currentBillingSchemaVersion); err != nil {
 		return fmt.Errorf("write billing schema version: %w", err)
@@ -162,6 +179,12 @@ func billingSchemaComplete(ctx context.Context, database *sql.DB) (bool, error) 
 			return found, err
 		}
 	}
+	for _, column := range requiredBillingColumns() {
+		found, err := billingColumnExists(ctx, database, column.tableName, column.columnName)
+		if err != nil || !found {
+			return found, err
+		}
+	}
 	return true, nil
 }
 
@@ -172,6 +195,42 @@ func tableExists(ctx context.Context, database *sql.DB, tableName string) (bool,
 		return false, nil
 	}
 	return err == nil && foundName == tableName, err
+}
+
+type billingColumn struct {
+	tableName  string
+	columnName string
+	definition string
+}
+
+func requiredBillingColumns() []billingColumn {
+	return []billingColumn{
+		{tableName: "site_service_plans", columnName: "site_limit", definition: "INTEGER DEFAULT 1"},
+		{tableName: "site_service_plans", columnName: "analytics_report_limit", definition: "INTEGER DEFAULT 0"},
+	}
+}
+
+func billingColumnExists(ctx context.Context, database *sql.DB, tableName, columnName string) (bool, error) {
+	rows, err := database.QueryContext(ctx, `PRAGMA table_info(`+tableName+`)`)
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var columnID int
+		var name string
+		var columnType string
+		var notNull int
+		var defaultValue any
+		var primaryKey int
+		if scanErr := rows.Scan(&columnID, &name, &columnType, &notNull, &defaultValue, &primaryKey); scanErr != nil {
+			return false, scanErr
+		}
+		if strings.EqualFold(name, columnName) {
+			return true, nil
+		}
+	}
+	return false, rows.Err()
 }
 
 func SettingBool(ctx context.Context, database *sql.DB, name string, fallback bool) bool {
@@ -311,13 +370,19 @@ func (store Store) RemoveSiteAssignment(ctx context.Context, domain string) {
 	_, _ = store.DB.ExecContext(ctx, `DELETE FROM site_service_assignments WHERE domain=?`, strings.TrimSpace(domain))
 }
 
-func (store Store) SavePlan(ctx context.Context, planID int, name string, quotaBytes int64, price, currency, billingPeriod string, isDefault bool) error {
+func (store Store) SavePlan(ctx context.Context, planID int, name string, quotaBytes int64, siteLimit, analyticsReportLimit int, price, currency, billingPeriod string, isDefault bool) error {
 	name = strings.TrimSpace(name)
 	if name == "" {
 		return fmt.Errorf("plan name is required")
 	}
 	if quotaBytes <= 0 {
 		return fmt.Errorf("plan quota is required")
+	}
+	if siteLimit <= 0 {
+		return fmt.Errorf("plan site limit is required")
+	}
+	if analyticsReportLimit < 0 {
+		return fmt.Errorf("plan analytics report limit cannot be negative")
 	}
 	currency = strings.TrimSpace(currency)
 	if currency == "" {
@@ -335,11 +400,11 @@ func (store Store) SavePlan(ctx context.Context, planID int, name string, quotaB
 	now := time.Now().UTC().Format(time.RFC3339)
 	var err error
 	if planID > 0 {
-		_, err = store.DB.ExecContext(ctx, `UPDATE site_service_plans SET name=?,quota_bytes=?,price=?,currency=?,billing_period=?,is_default=?,updated_at=? WHERE id=?`,
-			name, quotaBytes, strings.TrimSpace(price), currency, billingPeriod, defaultFlag, now, planID)
+		_, err = store.DB.ExecContext(ctx, `UPDATE site_service_plans SET name=?,quota_bytes=?,site_limit=?,analytics_report_limit=?,price=?,currency=?,billing_period=?,is_default=?,updated_at=? WHERE id=?`,
+			name, quotaBytes, siteLimit, analyticsReportLimit, strings.TrimSpace(price), currency, billingPeriod, defaultFlag, now, planID)
 	} else {
-		_, err = store.DB.ExecContext(ctx, `INSERT INTO site_service_plans(name,quota_bytes,price,currency,billing_period,is_default,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)`,
-			name, quotaBytes, strings.TrimSpace(price), currency, billingPeriod, defaultFlag, now, now)
+		_, err = store.DB.ExecContext(ctx, `INSERT INTO site_service_plans(name,quota_bytes,site_limit,analytics_report_limit,price,currency,billing_period,is_default,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)`,
+			name, quotaBytes, siteLimit, analyticsReportLimit, strings.TrimSpace(price), currency, billingPeriod, defaultFlag, now, now)
 	}
 	return err
 }
@@ -354,7 +419,7 @@ func (store Store) DeletePlan(ctx context.Context, planID int) error {
 }
 
 func (store Store) Plans(ctx context.Context) []Plan {
-	rows, err := store.DB.QueryContext(ctx, `SELECT id,name,quota_bytes,price,currency,billing_period,is_default FROM site_service_plans ORDER BY is_default DESC, quota_bytes ASC, name ASC`)
+	rows, err := store.DB.QueryContext(ctx, `SELECT id,name,quota_bytes,site_limit,analytics_report_limit,price,currency,billing_period,is_default FROM site_service_plans ORDER BY is_default DESC, quota_bytes ASC, name ASC`)
 	if err != nil {
 		return nil
 	}
@@ -363,11 +428,10 @@ func (store Store) Plans(ctx context.Context) []Plan {
 	for rows.Next() {
 		var plan Plan
 		var isDefault int
-		if scanErr := rows.Scan(&plan.ID, &plan.Name, &plan.QuotaBytes, &plan.Price, &plan.Currency, &plan.BillingPeriod, &isDefault); scanErr != nil {
+		if scanErr := rows.Scan(&plan.ID, &plan.Name, &plan.QuotaBytes, &plan.SiteLimit, &plan.AnalyticsReportLimit, &plan.Price, &plan.Currency, &plan.BillingPeriod, &isDefault); scanErr != nil {
 			continue
 		}
-		plan.QuotaLabel = FormatFileSize(plan.QuotaBytes)
-		plan.IsDefault = isDefault == 1
+		preparePlanView(&plan, isDefault)
 		plans = append(plans, plan)
 	}
 	return plans
@@ -376,27 +440,37 @@ func (store Store) Plans(ctx context.Context) []Plan {
 func (store Store) PlanByID(ctx context.Context, planID int) (Plan, bool) {
 	var plan Plan
 	var isDefault int
-	err := store.DB.QueryRowContext(ctx, `SELECT id,name,quota_bytes,price,currency,billing_period,is_default FROM site_service_plans WHERE id=?`, planID).Scan(
-		&plan.ID, &plan.Name, &plan.QuotaBytes, &plan.Price, &plan.Currency, &plan.BillingPeriod, &isDefault)
+	err := store.DB.QueryRowContext(ctx, `SELECT id,name,quota_bytes,site_limit,analytics_report_limit,price,currency,billing_period,is_default FROM site_service_plans WHERE id=?`, planID).Scan(
+		&plan.ID, &plan.Name, &plan.QuotaBytes, &plan.SiteLimit, &plan.AnalyticsReportLimit, &plan.Price, &plan.Currency, &plan.BillingPeriod, &isDefault)
 	if err != nil {
 		return Plan{}, false
 	}
-	plan.QuotaLabel = FormatFileSize(plan.QuotaBytes)
-	plan.IsDefault = isDefault == 1
+	preparePlanView(&plan, isDefault)
 	return plan, true
 }
 
 func (store Store) DefaultPlan(ctx context.Context) (Plan, bool) {
 	var plan Plan
 	var isDefault int
-	err := store.DB.QueryRowContext(ctx, `SELECT id,name,quota_bytes,price,currency,billing_period,is_default FROM site_service_plans ORDER BY is_default DESC, quota_bytes ASC, name ASC LIMIT 1`).Scan(
-		&plan.ID, &plan.Name, &plan.QuotaBytes, &plan.Price, &plan.Currency, &plan.BillingPeriod, &isDefault)
+	err := store.DB.QueryRowContext(ctx, `SELECT id,name,quota_bytes,site_limit,analytics_report_limit,price,currency,billing_period,is_default FROM site_service_plans ORDER BY is_default DESC, quota_bytes ASC, name ASC LIMIT 1`).Scan(
+		&plan.ID, &plan.Name, &plan.QuotaBytes, &plan.SiteLimit, &plan.AnalyticsReportLimit, &plan.Price, &plan.Currency, &plan.BillingPeriod, &isDefault)
 	if err != nil {
 		return Plan{}, false
 	}
-	plan.QuotaLabel = FormatFileSize(plan.QuotaBytes)
-	plan.IsDefault = isDefault == 1
+	preparePlanView(&plan, isDefault)
 	return plan, true
+}
+
+func preparePlanView(plan *Plan, isDefault int) {
+	plan.QuotaLabel = FormatFileSize(plan.QuotaBytes)
+	plan.QuotaInput = FormatQuotaInput(plan.QuotaBytes)
+	if plan.SiteLimit <= 0 {
+		plan.SiteLimit = 1
+	}
+	if plan.AnalyticsReportLimit < 0 {
+		plan.AnalyticsReportLimit = 0
+	}
+	plan.IsDefault = isDefault == 1
 }
 
 func (store Store) ServiceAssignments(ctx context.Context) map[string]ServiceAssignment {
@@ -497,10 +571,12 @@ func applyPlanToSiteRequest(request *SiteRequest, plan Plan) {
 	}
 	request.PlanName = plan.Name
 	request.PlanQuotaLabel = plan.QuotaLabel
+	request.PlanSiteLimit = plan.SiteLimit
+	request.PlanAnalyticsLimit = plan.AnalyticsReportLimit
 	request.PlanPrice = plan.Price
 	request.PlanCurrency = plan.Currency
 	request.PlanBillingPeriod = plan.BillingPeriod
-	request.PlanDescriptionText = fmt.Sprintf("Storage: %s. Price: %s %s/%s. Includes Sitebrush editor, file storage, publishing, backups, domain settings, and automatic SSL when DNS is configured.", plan.QuotaLabel, plan.Price, plan.Currency, plan.BillingPeriod)
+	request.PlanDescriptionText = fmt.Sprintf("Storage: %s. Sites: %d. Analytics reports: %d. Price: %s %s/%s. Includes Sitebrush editor, file storage, publishing, backups, domain settings, and automatic SSL when DNS is configured.", plan.QuotaLabel, plan.SiteLimit, plan.AnalyticsReportLimit, plan.Price, plan.Currency, plan.BillingPeriod)
 }
 
 func BuildSites(usages []SiteUsage, plans []Plan, assignments map[string]ServiceAssignment, currentDomain string) []Site {
