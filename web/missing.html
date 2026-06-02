@@ -136,6 +136,10 @@
     downloadFailedRetry: "{{index .T "missing_download_failed_retry"}}",
     partialImportRetry: "{{index .T "missing_partial_import_retry"}}",
     retryRemaining: "{{index .T "missing_retry_remaining"}}",
+    finishImport: "{{index .T "site_copy_finish_import"}}",
+    failedResourcesTitle: "{{index .T "site_copy_failed_resources_title"}}",
+    failedResourceBadge: "{{index .T "site_copy_failed_resource_badge"}}",
+    partialImportClose: "{{index .T "site_copy_partial_import_close"}}",
     reconnectingStatus: "{{index .T "missing_reconnecting_status"}}",
     connectStatusFailed: "{{index .T "missing_connect_status_failed"}}",
     loadPageFailed: "{{index .T "missing_load_page_failed"}}",
@@ -171,6 +175,7 @@
   const closeButtonElement = document.getElementById('grab_close_button');
   const progressModalController = new bootstrap.Modal(progressModalElement, { backdrop: 'static', keyboard: false });
   const continueButtonOriginalText = continueButtonElement.textContent;
+  const cancelButtonOriginalText = cancelButtonElement.textContent;
 
   let progressStream = null;
   let confirmedSubmitStarted = false;
@@ -184,6 +189,10 @@
   let downloadProgressModel = null;
   let downloadPartial = false;
   let downloadPartialMessage = '';
+  let failedResourceURLs = new Set();
+  let failedResourceReasons = new Map();
+  let retryCountdownTimer = 0;
+  let activeGrabEndpoint = '?grab';
 
   function finishDownloadIfReady() {
     if (!downloadFinished || downloadRedirectURL === '') { return; }
@@ -209,10 +218,106 @@
     progressStream = null;
   }
 
+  function stopRetryCountdown() {
+    if (!retryCountdownTimer) { return; }
+    window.clearInterval(retryCountdownTimer);
+    retryCountdownTimer = 0;
+  }
+
   function clearResourceList() {
     resourceListElement.replaceChildren();
     resourceListElement.classList.add('d-none');
     previewSelectAllElement = null;
+  }
+
+  function collectFailedResources(progressState) {
+    if (!progressState) { return; }
+    const failedReasons = progressState.failed_reasons && typeof progressState.failed_reasons === 'object' ? progressState.failed_reasons : {};
+    for (const failedReasonURL of Object.keys(failedReasons)) {
+      const normalizedFailedReasonURL = String(failedReasonURL || '').trim();
+      const normalizedFailedReason = String(failedReasons[failedReasonURL] || '').trim();
+      if (normalizedFailedReasonURL === '') { continue; }
+      failedResourceURLs.add(normalizedFailedReasonURL);
+      if (normalizedFailedReason !== '') {
+        failedResourceReasons.set(normalizedFailedReasonURL, normalizedFailedReason);
+      }
+    }
+    const failedURLs = Array.isArray(progressState.failed_urls) ? progressState.failed_urls : [];
+    for (const failedURL of failedURLs) {
+      const normalizedFailedURL = String(failedURL || '').trim();
+      if (normalizedFailedURL !== '') {
+        failedResourceURLs.add(normalizedFailedURL);
+      }
+    }
+    if (progressState.stage === 'error' && progressState.current_url) {
+      const failedCurrentURL = String(progressState.current_url || '').trim();
+      const failedCurrentReason = String(progressState.current_error || '').trim();
+      if (failedCurrentURL !== '') {
+        failedResourceURLs.add(failedCurrentURL);
+        if (failedCurrentReason !== '') {
+          failedResourceReasons.set(failedCurrentURL, failedCurrentReason);
+        }
+      }
+    }
+    if (progressState.stage === 'downloaded' && progressState.current_url) {
+      const downloadedURL = String(progressState.current_url || '').trim();
+      failedResourceURLs.delete(downloadedURL);
+      failedResourceReasons.delete(downloadedURL);
+    }
+  }
+
+  function clearFailedResourceFields() {
+    for (const selectedResourceElement of grabFormElement.querySelectorAll('input[name="import_resource_url"], input[name="import_selection_confirmed"]')) {
+      selectedResourceElement.remove();
+    }
+  }
+
+  function appendHiddenGrabField(fieldName, fieldValue) {
+    const hiddenFieldElement = document.createElement('input');
+    hiddenFieldElement.type = 'hidden';
+    hiddenFieldElement.name = fieldName;
+    hiddenFieldElement.value = fieldValue;
+    grabFormElement.appendChild(hiddenFieldElement);
+  }
+
+  function syncFailedResourceFields() {
+    clearFailedResourceFields();
+    appendHiddenGrabField('import_selection_confirmed', '1');
+    const sortedFailedResourceURLs = Array.from(failedResourceURLs).sort();
+    for (const failedResourceURL of sortedFailedResourceURLs) {
+      appendHiddenGrabField('import_resource_url', failedResourceURL);
+    }
+  }
+
+  function retryStatusText(progressState, secondsLeft) {
+    const retryAttempt = Number(progressState.retry_attempt) || 0;
+    const retryTotal = Number(progressState.retry_total) || 0;
+    const failedTotal = Number(progressState.failed_total) || failedResourceURLs.size;
+    let statusText = uiText.retryRemaining;
+    if (retryAttempt > 0 && retryTotal > 0) {
+      statusText += ' ' + retryAttempt + '/' + retryTotal;
+    }
+    if (secondsLeft > 0) {
+      statusText += ': ' + secondsLeft + 's';
+    }
+    if (failedTotal > 0) {
+      statusText += '. ' + uiText.leftWord + ' ' + failedTotal + '.';
+    }
+    return statusText;
+  }
+
+  function startRetryCountdown(progressState) {
+    stopRetryCountdown();
+    let secondsLeft = Math.max(0, Number(progressState.retry_delay_seconds) || 0);
+    progressTextElement.textContent = retryStatusText(progressState, secondsLeft);
+    if (secondsLeft <= 0) { return; }
+    retryCountdownTimer = window.setInterval(function renderRetryCountdown() {
+      secondsLeft -= 1;
+      progressTextElement.textContent = retryStatusText(progressState, Math.max(secondsLeft, 0));
+      if (secondsLeft <= 0) {
+        stopRetryCountdown();
+      }
+    }, 1000);
   }
 
   function formatResourceSize(sizeBytes) {
@@ -307,21 +412,11 @@
   }
 
   function syncSelectedResourceFields() {
-    for (const selectedResourceElement of grabFormElement.querySelectorAll('input[name="import_resource_url"], input[name="import_selection_confirmed"]')) {
-      selectedResourceElement.remove();
-    }
-    const confirmedSelectionElement = document.createElement('input');
-    confirmedSelectionElement.type = 'hidden';
-    confirmedSelectionElement.name = 'import_selection_confirmed';
-    confirmedSelectionElement.value = '1';
-    grabFormElement.appendChild(confirmedSelectionElement);
+    clearFailedResourceFields();
+    appendHiddenGrabField('import_selection_confirmed', '1');
     for (const checkboxElement of resourceListElement.querySelectorAll('input[data-grab-resource-url]')) {
       if (!checkboxElement.checked) { continue; }
-      const selectedResourceElement = document.createElement('input');
-      selectedResourceElement.type = 'hidden';
-      selectedResourceElement.name = 'import_resource_url';
-      selectedResourceElement.value = checkboxElement.dataset.grabResourceUrl || '';
-      grabFormElement.appendChild(selectedResourceElement);
+      appendHiddenGrabField('import_resource_url', checkboxElement.dataset.grabResourceUrl || '');
     }
   }
 
@@ -403,6 +498,59 @@
     if (!resourceRowElement) { return; }
     const resourcePercent = progressState.stage === 'downloaded' ? 100 : Number(progressState.current_percent) || 0;
     setResourceRowProgress(resourceRowElement, resourcePercent, describeDownloadProgress(progressState));
+  }
+
+  function renderFailedResourceList() {
+    resourceListElement.replaceChildren();
+    const sortedFailedResourceURLs = Array.from(failedResourceURLs).sort();
+    if (sortedFailedResourceURLs.length === 0) {
+      resourceListElement.classList.add('d-none');
+      return;
+    }
+    resourceListElement.classList.remove('d-none');
+    const titleElement = document.createElement('div');
+    titleElement.className = 'list-group-item fw-semibold';
+    titleElement.textContent = uiText.failedResourcesTitle + ' ' + sortedFailedResourceURLs.length;
+    resourceListElement.appendChild(titleElement);
+    for (const failedResourceURL of sortedFailedResourceURLs) {
+      const resourceRowElement = document.createElement('div');
+      resourceRowElement.className = 'list-group-item d-flex gap-2 align-items-start';
+      resourceRowElement.dataset.grabResourceRowUrl = failedResourceURL;
+      const badgeElement = document.createElement('span');
+      badgeElement.className = 'badge text-bg-danger flex-shrink-0';
+      badgeElement.textContent = uiText.failedResourceBadge;
+      const detailsElement = document.createElement('div');
+      detailsElement.className = 'flex-grow-1';
+      const urlElement = document.createElement('div');
+      urlElement.className = 'text-break';
+      urlElement.textContent = failedResourceURL;
+      detailsElement.appendChild(urlElement);
+      const failedReason = String(failedResourceReasons.get(failedResourceURL) || '').trim();
+      if (failedReason !== '') {
+        const reasonElement = document.createElement('div');
+        reasonElement.className = 'text-danger small mt-1';
+        reasonElement.textContent = failedReason;
+        detailsElement.appendChild(reasonElement);
+      }
+      const rowProgressElement = document.createElement('div');
+      rowProgressElement.className = 'progress mt-2 d-none';
+      rowProgressElement.style.height = '18px';
+      rowProgressElement.dataset.grabResourceProgress = '1';
+      const rowProgressBarElement = document.createElement('div');
+      rowProgressBarElement.className = 'progress-bar';
+      rowProgressBarElement.style.width = '0%';
+      rowProgressBarElement.textContent = '0%';
+      rowProgressBarElement.setAttribute('role', 'progressbar');
+      rowProgressBarElement.setAttribute('aria-valuemin', '0');
+      rowProgressBarElement.setAttribute('aria-valuemax', '100');
+      rowProgressBarElement.setAttribute('aria-valuenow', '0');
+      rowProgressBarElement.dataset.grabResourceProgressBar = '1';
+      rowProgressElement.appendChild(rowProgressBarElement);
+      detailsElement.appendChild(rowProgressElement);
+      resourceRowElement.appendChild(badgeElement);
+      resourceRowElement.appendChild(detailsElement);
+      resourceListElement.appendChild(resourceRowElement);
+    }
   }
 
   function buildDownloadProgressModel(previewPayload) {
@@ -513,6 +661,7 @@
     setProgressPercent(0);
     downloadFinished = false;
     setModalClosable(false);
+    cancelButtonElement.textContent = cancelButtonOriginalText;
     cancelButtonElement.classList.remove('d-none');
     continueButtonElement.classList.add('d-none');
     progressModalController.show();
@@ -528,6 +677,7 @@
     downloadProgressModel = null;
     updateQuotaSummary();
     setModalClosable(true);
+    cancelButtonElement.textContent = cancelButtonOriginalText;
     cancelButtonElement.classList.add('d-none');
     continueButtonElement.classList.add('d-none');
     if (submitButtonElement) { submitButtonElement.disabled = false; }
@@ -619,49 +769,76 @@
     }
     updateQuotaSummary();
     setModalClosable(true);
+    cancelButtonElement.textContent = cancelButtonOriginalText;
     cancelButtonElement.classList.remove('d-none');
     continueButtonElement.classList.remove('d-none');
     continueButtonElement.textContent = continueButtonOriginalText;
     if (submitButtonElement) { submitButtonElement.disabled = false; }
   }
 
-  function showDownloadProgress() {
+  function buildRetryProgressModel() {
+    return {
+      selectedResourceURLs: new Set(failedResourceURLs),
+      completedURLs: new Set(),
+      downloadedBytesByURL: new Map(),
+      totalTargets: Math.max(1, failedResourceURLs.size),
+      totalBytes: 0
+    };
+  }
+
+  function showDownloadProgress(retryOnlyFailedResources) {
     const previewPayloadForDownload = currentPreviewPayload;
     modalTitleElement.textContent = uiText.loadingPageTitle;
     progressTextElement.textContent = uiText.loadingStarted;
     progressHolderElement.classList.remove('d-none');
     progressUrlElement.textContent = '';
-    prepareResourceRowsForDownload();
-    downloadProgressModel = buildDownloadProgressModel(previewPayloadForDownload);
-    currentPreviewPayload = null;
-    updateQuotaSummary();
+    if (retryOnlyFailedResources) {
+      renderFailedResourceList();
+      downloadProgressModel = buildRetryProgressModel();
+    } else {
+      prepareResourceRowsForDownload();
+      downloadProgressModel = buildDownloadProgressModel(previewPayloadForDownload);
+      currentPreviewPayload = null;
+      updateQuotaSummary();
+      failedResourceURLs = new Set();
+      failedResourceReasons = new Map();
+    }
     setProgressPercent(0);
     setModalClosable(false);
+    cancelButtonElement.textContent = cancelButtonOriginalText;
     cancelButtonElement.classList.add('d-none');
     continueButtonElement.classList.add('d-none');
     downloadFinished = false;
-    downloadRedirectURL = '';
+    if (!retryOnlyFailedResources) {
+      downloadRedirectURL = '';
+    }
     downloadPartial = false;
     downloadPartialMessage = '';
+    stopRetryCountdown();
   }
 
   function showDownloadError(errorText) {
+    stopRetryCountdown();
     modalTitleElement.textContent = uiText.loadingErrorTitle;
     progressTextElement.textContent = errorText;
     downloadProgressModel = null;
     setModalClosable(true);
+    cancelButtonElement.textContent = cancelButtonOriginalText;
     cancelButtonElement.classList.add('d-none');
     continueButtonElement.classList.add('d-none');
     if (submitButtonElement) { submitButtonElement.disabled = false; }
   }
 
   function showPartialDownload() {
+    stopRetryCountdown();
     modalTitleElement.textContent = uiText.loadingErrorTitle;
-    progressTextElement.textContent = downloadPartialMessage || uiText.partialImportRetry;
+    progressTextElement.textContent = downloadPartialMessage || uiText.partialImportClose;
     setProgressPercent(100);
     downloadProgressModel = null;
     setModalClosable(true);
-    cancelButtonElement.classList.add('d-none');
+    renderFailedResourceList();
+    cancelButtonElement.textContent = uiText.finishImport;
+    cancelButtonElement.classList.remove('d-none');
     continueButtonElement.textContent = uiText.retryRemaining || continueButtonOriginalText;
     continueButtonElement.classList.remove('d-none');
     if (submitButtonElement) { submitButtonElement.disabled = false; }
@@ -685,6 +862,21 @@
           readyCallbackWasCalled = true;
           readyCallback();
         }
+        return;
+      }
+      collectFailedResources(progressState);
+      if (progressState.stage !== 'retry_wait') {
+        stopRetryCountdown();
+      }
+      if (progressState.stage === 'retry_wait') {
+        renderFailedResourceList();
+        startRetryCountdown(progressState);
+        progressUrlElement.textContent = progressState.current_url || '';
+        return;
+      }
+      if (progressState.stage === 'retrying') {
+        progressTextElement.textContent = retryStatusText(progressState, 0);
+        progressUrlElement.textContent = progressState.current_url || '';
         return;
       }
       const progressSummary = summarizeDownloadProgress(progressState);
@@ -739,7 +931,7 @@
 
   function submitGrabRequest() {
     grabRequestInFlight = true;
-    fetch({{printf "%q" .Path}} + '?grab', { method: 'POST', body: buildGrabRequestBody(), headers: { 'Accept': 'application/json' } })
+    fetch({{printf "%q" .Path}} + activeGrabEndpoint, { method: 'POST', body: buildGrabRequestBody(), headers: { 'Accept': 'application/json' } })
       .then(function handleGrabHTTPResponse(grabHTTPResponse) {
         if (!grabHTTPResponse.ok) {
           return grabHTTPResponse.text().then(function throwGrabHTTPError(errorText) {
@@ -751,10 +943,20 @@
       .then(function handleGrabPayload(grabPayload) {
         grabRequestInFlight = false;
         downloadRedirectURL = grabPayload.redirect || grabFormElement.querySelector('input[name="path"]').value;
+        collectFailedResources(grabPayload);
+        const failedTotal = Number(grabPayload.failed_total) || 0;
+        if (failedTotal > 0) {
+          downloadPartial = true;
+          downloadPartialMessage = uiText.partialImportRetry + ' (' + failedTotal + ')';
+          showPartialDownload();
+          return;
+        }
         if (downloadPartial) {
           showPartialDownload();
           return;
         }
+        failedResourceURLs = new Set();
+        failedResourceReasons = new Map();
         downloadFinished = true;
         setProgressPercent(100);
         progressTextElement.textContent = uiText.doneOpenPage;
@@ -771,8 +973,15 @@
   function startConfirmedDownload() {
     const progressToken = Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 10);
     tokenFieldElement.value = progressToken;
-    syncSelectedResourceFields();
-    showDownloadProgress();
+    const retryOnlyFailedResources = downloadPartial && failedResourceURLs.size > 0;
+    if (retryOnlyFailedResources) {
+      activeGrabEndpoint = '?grab_retry';
+      syncFailedResourceFields();
+    } else {
+      activeGrabEndpoint = '?grab';
+      syncSelectedResourceFields();
+    }
+    showDownloadProgress(retryOnlyFailedResources);
     connectProgressStream(progressToken, function submitGrabFormAfterProgressReady() {
       confirmedSubmitStarted = true;
       submitGrabRequest();
@@ -813,8 +1022,15 @@
     startConfirmedDownload();
   });
 
+  cancelButtonElement.addEventListener('click', function onCancelClick() {
+    if (!downloadPartial || !downloadRedirectURL) { return; }
+    closeProgressStream();
+    window.location.href = downloadRedirectURL;
+  });
+
   progressModalElement.addEventListener('hidden.bs.modal', function onProgressModalHidden() {
     closeProgressStream();
+    stopRetryCountdown();
   });
 
   grabFormElement.addEventListener('submit', function onGrabSubmit(submitEvent) {

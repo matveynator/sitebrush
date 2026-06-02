@@ -81,7 +81,8 @@ const defaultDBPath = "storage/db/sitebrush.db"
 const grabResourceMaxDepth = 64
 const grabPreviewResourceTimeout = 6 * time.Second
 const grabImportResourceTimeout = 10 * time.Second
-const grabImportFailedResourceRetryAttempts = 2
+const grabImportFailedResourceRetryAttempts = 4
+const grabImportFailedResourceRetryDelay = 2 * time.Second
 const wholeSiteImportConsecutiveFailureLimit = 25
 const wholeSiteImportMaxPages = 2048
 const defaultDomainStorageLimitBytes int64 = 10 * 1024 * 1024 * 1024
@@ -1473,6 +1474,9 @@ type grabProgressEvent struct {
 	FailedTotal            int               `json:"failed_total"`
 	FailedURLs             []string          `json:"failed_urls,omitempty"`
 	FailedReasons          map[string]string `json:"failed_reasons,omitempty"`
+	RetryAttempt           int               `json:"retry_attempt,omitempty"`
+	RetryTotal             int               `json:"retry_total,omitempty"`
+	RetryDelaySeconds      int               `json:"retry_delay_seconds,omitempty"`
 	CurrentURL             string            `json:"current_url"`
 	CurrentError           string            `json:"current_error,omitempty"`
 	CurrentPercent         int               `json:"current_percent"`
@@ -7723,7 +7727,7 @@ func (a *App) prepareWholeRemoteSiteImport(importRequest grabImportRequest) (*pa
 		}
 		pageHTML := currentJob.HTML
 		if strings.TrimSpace(pageHTML) == "" {
-			downloadedHTML, downloaded, downloadErr := downloadWholeSitePageHTMLWithRetries(pageClient, currentJob.URL, importRequest.SourceOptions, grabImportFailedResourceRetryAttempts)
+			downloadedHTML, downloaded, downloadErr := spider.downloadWholeSitePageHTMLWithRetries(pageClient, currentJob.URL, importRequest.SourceOptions, grabImportFailedResourceRetryAttempts)
 			if downloadErr != nil || !downloaded {
 				spider.failedTotal++
 				consecutiveFailures++
@@ -7954,20 +7958,34 @@ func downloadWholeSitePageHTML(client *http.Client, pageURL *url.URL, sourceOpti
 	})
 }
 
-func downloadWholeSitePageHTMLWithRetries(client *http.Client, pageURL *url.URL, sourceOptions grabSourceOptions, attempts int) (string, bool, error) {
-	if attempts < 0 {
-		attempts = 0
+func (spider *pageSpider) downloadWholeSitePageHTMLWithRetries(client *http.Client, pageURL *url.URL, sourceOptions grabSourceOptions, retries int) (string, bool, error) {
+	if retries < 0 {
+		retries = 0
 	}
 	var lastErr error
-	for attempt := 0; attempt <= attempts; attempt++ {
+	totalAttempts := retries + 1
+	pageURLText := ""
+	if pageURL != nil {
+		pageURLText = pageURL.String()
+	}
+	for attempt := 1; attempt <= totalAttempts; attempt++ {
+		if attempt > 1 {
+			spider.waitBeforeRetry(pageURLText, attempt-1, retries)
+			spider.publishRetryProgress("retrying", pageURLText, attempt-1, retries, 0)
+		}
 		html, downloaded, err := downloadWholeSitePageHTML(client, pageURL, sourceOptions)
 		if err == nil && downloaded {
+			spider.clearFailedResource(pageURLText)
 			return html, true, nil
 		}
 		if err != nil {
 			lastErr = err
 		} else {
 			lastErr = errors.New("not html")
+		}
+		if pageURLText != "" {
+			spider.recordFailedResource(pageURLText, grabErrorReason(lastErr))
+			spider.publishResourceProgress("error", pageURLText, 0, 0, -1)
 		}
 	}
 	return "", false, lastErr
@@ -15824,6 +15842,42 @@ func (spider *pageSpider) publishResourceProgress(stage, currentURL string, curr
 	})
 }
 
+func (spider *pageSpider) publishRetryProgress(stage, currentURL string, attempt, total int, delay time.Duration) {
+	if spider.tracker == nil || strings.TrimSpace(spider.progressToken) == "" {
+		return
+	}
+	completedPercent := 0
+	if spider.foundTotal > 0 {
+		completedPercent = (spider.downloadedTotal + spider.unresolvedFailedTotal()) * 100 / spider.foundTotal
+	}
+	delaySeconds := int(delay.Seconds())
+	if delaySeconds < 0 {
+		delaySeconds = 0
+	}
+	spider.tracker.publish(grabProgressEvent{
+		Token:             spider.progressToken,
+		Stage:             stage,
+		FoundTotal:        spider.foundTotal,
+		DownloadedTotal:   spider.downloadedTotal,
+		FailedTotal:       spider.unresolvedFailedTotal(),
+		FailedURLs:        spider.failedResourceURLList(),
+		FailedReasons:     spider.failedResourceReasonMap(),
+		RetryAttempt:      attempt,
+		RetryTotal:        total,
+		RetryDelaySeconds: delaySeconds,
+		CurrentURL:        currentURL,
+		CompletedPercent:  completedPercent,
+	})
+}
+
+func (spider *pageSpider) waitBeforeRetry(currentURL string, attempt, total int) {
+	if spider.tracker == nil || strings.TrimSpace(spider.progressToken) == "" {
+		return
+	}
+	spider.publishRetryProgress("retry_wait", currentURL, attempt, total, grabImportFailedResourceRetryDelay)
+	time.Sleep(grabImportFailedResourceRetryDelay)
+}
+
 func (spider *pageSpider) readResourceBody(reader io.Reader, resourceURL string, sizeBytes int64) ([]byte, error) {
 	var bodyBuffer bytes.Buffer
 	buffer := make([]byte, 32*1024)
@@ -15885,8 +15939,16 @@ func (spider *pageSpider) fetchSelectedResources() {
 }
 
 func (spider *pageSpider) retryFailedResources(baseURL *url.URL, attempts int) {
-	for attempt := 0; attempt < attempts && spider.unresolvedFailedTotal() > 0; attempt++ {
+	if attempts < 1 {
+		return
+	}
+	for attempt := 1; attempt <= attempts && spider.unresolvedFailedTotal() > 0; attempt++ {
 		failedURLs := spider.failedResourceURLList()
+		currentRetryURL := ""
+		if len(failedURLs) > 0 {
+			currentRetryURL = failedURLs[0]
+		}
+		spider.waitBeforeRetry(currentRetryURL, attempt, attempts)
 		for _, failedURL := range failedURLs {
 			failedPageURL, failedPageParseErr := url.Parse(failedURL)
 			if failedPageParseErr == nil && crawler.SameHost(spider.pageURL, failedPageURL) && crawler.IsWholeSitePageURL(failedPageURL) {
@@ -15898,6 +15960,7 @@ func (spider *pageSpider) retryFailedResources(baseURL *url.URL, attempts int) {
 				continue
 			}
 			delete(spider.resources, failedURL)
+			spider.publishRetryProgress("retrying", failedURL, attempt, attempts, 0)
 			_, _ = spider.fetchResource(failedURL, baseURL, 0, true)
 		}
 	}

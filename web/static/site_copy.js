@@ -38,6 +38,7 @@
       '.SiteBrushCopySiteResourceKind{border-radius:999px;background:#64748b;color:#fff;padding:2px 7px;font-size:11px}',
       '.SiteBrushCopySiteResourceURL{overflow-wrap:anywhere}',
       '.SiteBrushCopySiteResourceMeta{color:#334155;margin-top:3px}',
+      '.SiteBrushCopySiteResourceReason{color:#b91c1c;margin-top:3px}',
       '.SiteBrushCopySiteActions{display:flex;justify-content:flex-end;gap:8px;margin-top:14px}',
       '.SiteBrushCopySiteSecondaryButton{border:1px solid #cbd5e1;border-radius:8px;background:#fff;color:#0f172a;font:inherit;font-weight:700;padding:8px 12px;cursor:pointer}',
       '.SiteBrushCopySiteHidden{display:none!important}',
@@ -341,9 +342,12 @@
     let partialImportCanRetry = false;
     let requestIsRunning = false;
     let streamClosedIntentionally = false;
+    let retryCountdownTimer = 0;
+    let activeDownloadEndpoint = '?grab';
 
     function closeModal() {
       closeProgressStream();
+      stopRetryCountdown();
       overlayElement.remove();
     }
 
@@ -358,6 +362,7 @@
 
     function finishPartialImport() {
       closeProgressStream();
+      stopRetryCountdown();
       if (importedRedirectPath) {
         window.location.href = importedRedirectPath;
         return;
@@ -389,6 +394,14 @@
       }
     }
 
+    function stopRetryCountdown() {
+      if (!retryCountdownTimer) {
+        return;
+      }
+      window.clearInterval(retryCountdownTimer);
+      retryCountdownTimer = 0;
+    }
+
     function renderFailedResources() {
       resourcesElement.replaceChildren();
       const sortedFailedResourceURLs = Array.from(failedResourceURLs).sort();
@@ -408,21 +421,54 @@
       for (const failedResourceURL of sortedFailedResourceURLs) {
         const resourceRowElement = createElement('div', 'SiteBrushCopySiteResource');
         const failedReason = String(failedResourceReasons.get(failedResourceURL) || '').trim();
-        const failedBadgeText = textFromConfig(configuration, 'failedResourceBadge', 'failed') + (failedReason === '' ? '' : ' ' + failedReason);
+        const failedBadgeText = textFromConfig(configuration, 'failedResourceBadge', 'failed');
+        const detailsElement = createElement('div', '');
+        detailsElement.appendChild(createElement('div', 'SiteBrushCopySiteResourceURL', failedResourceURL));
+        if (failedReason !== '') {
+          detailsElement.appendChild(createElement('div', 'SiteBrushCopySiteResourceReason', failedReason));
+        }
+        resourceRowElement.dataset.sitebrushFailedResourceUrl = failedResourceURL;
         resourceRowElement.appendChild(createElement('span', 'SiteBrushCopySiteResourceKind', failedBadgeText));
         resourceRowElement.appendChild(createElement('span', '', ''));
-        resourceRowElement.appendChild(createElement('div', 'SiteBrushCopySiteResourceURL', failedResourceURL));
+        resourceRowElement.appendChild(detailsElement);
         resourcesElement.appendChild(resourceRowElement);
       }
-      if (retryWasAttempted) {
-        continueButtonElement.classList.add('SiteBrushCopySiteHidden');
-        partialImportCanRetry = false;
-        statusElement.textContent = textFromConfig(configuration, 'partialImportClose', 'Imported with missing resources. You can close and use what was imported.');
-      } else {
-        continueButtonElement.textContent = textFromConfig(configuration, 'retryRemaining', 'Retry remaining');
-        continueButtonElement.classList.remove('SiteBrushCopySiteHidden');
-        partialImportCanRetry = true;
+      continueButtonElement.textContent = textFromConfig(configuration, 'retryRemaining', 'Retry remaining');
+      continueButtonElement.classList.remove('SiteBrushCopySiteHidden');
+      partialImportCanRetry = true;
+    }
+
+    function retryStatusText(progressPayload, secondsLeft) {
+      const retryAttempt = Number(progressPayload.retry_attempt) || 0;
+      const retryTotal = Number(progressPayload.retry_total) || 0;
+      const failedTotal = Number(progressPayload.failed_total) || failedResourceURLs.size;
+      let statusText = textFromConfig(configuration, 'retryRemaining', 'Retry remaining');
+      if (retryAttempt > 0 && retryTotal > 0) {
+        statusText += ' ' + retryAttempt + '/' + retryTotal;
       }
+      if (secondsLeft > 0) {
+        statusText += ': ' + secondsLeft + 's';
+      }
+      if (failedTotal > 0) {
+        statusText += '. ' + textFromConfig(configuration, 'leftWord', 'Left') + ' ' + failedTotal + '.';
+      }
+      return statusText;
+    }
+
+    function startRetryCountdown(progressPayload) {
+      stopRetryCountdown();
+      let secondsLeft = Math.max(0, Number(progressPayload.retry_delay_seconds) || 0);
+      statusElement.textContent = retryStatusText(progressPayload, secondsLeft);
+      if (secondsLeft <= 0) {
+        return;
+      }
+      retryCountdownTimer = window.setInterval(function renderRetryCountdown() {
+        secondsLeft -= 1;
+        statusElement.textContent = retryStatusText(progressPayload, Math.max(secondsLeft, 0));
+        if (secondsLeft <= 0) {
+          stopRetryCountdown();
+        }
+      }, 1000);
     }
 
     function responseIncludesFailureState(downloadPayload) {
@@ -438,6 +484,7 @@
       if (failedTotal <= 0) {
         failedResourceURLs = new Set();
         failedResourceReasons = new Map();
+        stopRetryCountdown();
         return false;
       }
       downloadFinishedWithErrors = true;
@@ -468,9 +515,25 @@
           }
           return;
         }
+        if (progressPayload.stage !== 'retry_wait') {
+          stopRetryCountdown();
+        }
         const completedPercent = Math.max(0, Math.min(100, Number(progressPayload.completed_percent) || 0));
         setProgress(progressBarElement, progressPayload.stage === 'done' ? 100 : completedPercent);
         collectFailedURLs(progressPayload);
+        if (progressPayload.stage === 'retry_wait') {
+          renderFailedResources();
+          continueButtonElement.classList.add('SiteBrushCopySiteHidden');
+          partialImportCanRetry = false;
+          startRetryCountdown(progressPayload);
+          urlElement.textContent = progressPayload.current_url || '';
+          return;
+        }
+        if (progressPayload.stage === 'retrying') {
+          statusElement.textContent = retryStatusText(progressPayload, 0);
+          urlElement.textContent = progressPayload.current_url || '';
+          return;
+        }
         if (progressPayload.stage === 'error' && progressPayload.current_url) {
           const failedCurrentURL = String(progressPayload.current_url);
           failedResourceURLs.add(failedCurrentURL);
@@ -490,11 +553,13 @@
         statusElement.textContent = textFromConfig(configuration, 'progressDownloadedPrefix', 'Downloaded') + ' ' + downloadedTotal + ' ' + textFromConfig(configuration, 'fromWord', 'of') + ' ' + foundTotal + '. ' + textFromConfig(configuration, 'leftWord', 'Left') + ' ' + remainingTotal + '.';
         urlElement.textContent = progressPayload.current_url || '';
         if (progressPayload.stage === 'done') {
+          stopRetryCountdown();
           statusElement.textContent = forDownload ? textFromConfig(configuration, 'doneOpenPage', 'Done. Opening page...') : textFromConfig(configuration, 'previewResourcesText', 'Checking resources...');
           setProgress(progressBarElement, 100);
           closeProgressStream();
         }
         if (progressPayload.stage === 'partial') {
+          stopRetryCountdown();
           downloadFinishedWithErrors = true;
           statusElement.textContent = progressPayload.message || textFromConfig(configuration, retryWasAttempted ? 'partialImportClose' : 'partialImportRetry', 'Imported with errors.');
           setProgress(progressBarElement, 100);
@@ -598,9 +663,11 @@
       if (retryOnlyFailedResources) {
         retryWasAttempted = true;
         partialImportCanRetry = false;
+        activeDownloadEndpoint = '?grab_retry';
         syncFailedResources(formElement, failedResourceURLs);
       } else {
         retryWasAttempted = false;
+        activeDownloadEndpoint = '?grab';
         failedResourceURLs = new Set();
         failedResourceReasons = new Map();
         partialImportCanRetry = false;
@@ -615,7 +682,7 @@
       urlElement.textContent = '';
       connectProgressStream(progressToken, function submitDownloadRequest() {
         requestIsRunning = true;
-        fetch(targetPath + (retryOnlyFailedResources ? '?grab_retry' : '?grab'), { method: 'POST', body: formRequestBody(formElement), headers: { Accept: 'application/json' } })
+        fetch(targetPath + activeDownloadEndpoint, { method: 'POST', body: formRequestBody(formElement), headers: { Accept: 'application/json' } })
           .then(function parseDownloadResponse(downloadResponse) {
             if (!downloadResponse.ok) {
               return downloadResponse.text().then(function throwDownloadError(errorText) {
