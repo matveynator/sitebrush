@@ -507,10 +507,17 @@ func TestContextMenuShowsRemovePasswordProtectionForProtectedPrefix(t *testing.T
 		t.Fatalf("insert page: %v", err)
 	}
 	application.setPagePasswordRule(context.Background(), "localhost", "/docs", "secret")
+	rule, found := application.pagePasswordRuleForPath(context.Background(), "localhost", "/docs/child")
+	if !found {
+		t.Fatal("page password rule missing")
+	}
 
 	request := httptest.NewRequest(http.MethodGet, "http://localhost:8080/docs/child", nil)
+	request.RemoteAddr = "198.51.100.43:1234"
 	request.Header.Set("Accept-Language", "en")
+	request.Header.Set("User-Agent", "Sitebrush Test Browser")
 	request.AddCookie(newAdminSessionCookie(t, application, "admin@example.com"))
+	request.AddCookie(&http.Cookie{Name: pagePasswordCookieName(rule.Domain, rule.Path), Value: pagePasswordSessionTokenForRequest(rule, request, time.Now().UTC())})
 	response := httptest.NewRecorder()
 	application.route(response, request)
 	if response.Code != http.StatusOK {
@@ -2564,6 +2571,60 @@ func TestPagePasswordProtectionAppliesToNestedPaths(t *testing.T) {
 	application.route(siblingResponse, siblingRequest)
 	if siblingResponse.Code != http.StatusOK || !strings.Contains(siblingResponse.Body.String(), "sibling static public") {
 		t.Fatalf("sibling response = %d %q, want public sibling content", siblingResponse.Code, siblingResponse.Body.String())
+	}
+}
+
+func TestPagePasswordProtectionAppliesToLoggedInAdmin(t *testing.T) {
+	application, rawDB := newTestApplication(t)
+	if _, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "admin@example.com", "old"); err != nil {
+		t.Fatalf("insert user: %v", err)
+	}
+	if _, err := rawDB.Exec(`INSERT INTO pages(domain,path,title,html,published) VALUES(?,?,?,?,1)`, "localhost", "/admin-secret", "Admin Secret", "<html><body>admin draft secret</body></html>"); err != nil {
+		t.Fatalf("insert page: %v", err)
+	}
+	application.setPagePasswordRule(context.Background(), "localhost", "/admin-secret", "secret")
+
+	adminSessionCookie := newAdminSessionCookie(t, application, "admin@example.com")
+	protectedRequest := httptest.NewRequest(http.MethodGet, "http://localhost:8080/admin-secret", nil)
+	protectedRequest.AddCookie(adminSessionCookie)
+	protectedResponse := httptest.NewRecorder()
+	application.route(protectedResponse, protectedRequest)
+	if protectedResponse.Code != http.StatusUnauthorized {
+		t.Fatalf("protected admin status = %d, want %d, body=%q", protectedResponse.Code, http.StatusUnauthorized, protectedResponse.Body.String())
+	}
+	if strings.Contains(protectedResponse.Body.String(), "admin draft secret") {
+		t.Fatalf("protected admin page leaked content: %s", protectedResponse.Body.String())
+	}
+
+	form := url.Values{}
+	form.Set("password", "secret")
+	unlockRequest := httptest.NewRequest(http.MethodPost, "http://localhost:8080/admin-secret?page_password_unlock", strings.NewReader(form.Encode()))
+	unlockRequest.RemoteAddr = "198.51.100.42:1234"
+	unlockRequest.Header.Set("User-Agent", "Sitebrush Test Browser")
+	unlockRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	unlockRequest.AddCookie(adminSessionCookie)
+	unlockResponse := httptest.NewRecorder()
+	application.route(unlockResponse, unlockRequest)
+	if unlockResponse.Code != http.StatusFound {
+		t.Fatalf("unlock status = %d, want %d, body=%q", unlockResponse.Code, http.StatusFound, unlockResponse.Body.String())
+	}
+	unlockCookies := unlockResponse.Result().Cookies()
+	if len(unlockCookies) == 0 {
+		t.Fatal("unlock did not set a page password cookie")
+	}
+
+	openedRequest := httptest.NewRequest(http.MethodGet, "http://localhost:8080/admin-secret", nil)
+	openedRequest.RemoteAddr = "198.51.100.42:1234"
+	openedRequest.Header.Set("User-Agent", "Sitebrush Test Browser")
+	openedRequest.AddCookie(adminSessionCookie)
+	openedRequest.AddCookie(unlockCookies[0])
+	openedResponse := httptest.NewRecorder()
+	application.route(openedResponse, openedRequest)
+	if openedResponse.Code != http.StatusOK {
+		t.Fatalf("opened status = %d, want %d, body=%q", openedResponse.Code, http.StatusOK, openedResponse.Body.String())
+	}
+	if !strings.Contains(openedResponse.Body.String(), "admin draft secret") {
+		t.Fatalf("opened admin page missing content: %s", openedResponse.Body.String())
 	}
 }
 

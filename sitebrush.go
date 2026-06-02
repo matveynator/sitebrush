@@ -5594,7 +5594,7 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 	if hasSitebrushSessionCookie(r) {
 		adminEmail, isAdmin = a.currentAdminEmailForDomain(r, domain)
 	}
-	pagePasswordHandled, pagePasswordUnlocked := a.requirePagePassword(w, r, domain, pagePath, isAdmin)
+	pagePasswordHandled, pagePasswordUnlocked := a.requirePagePassword(w, r, domain, pagePath)
 	if pagePasswordHandled {
 		return
 	}
@@ -13102,10 +13102,7 @@ func (a *App) pagePasswordUnlock(w http.ResponseWriter, r *http.Request, domain,
 	http.Redirect(w, r, pagePath, http.StatusFound)
 }
 
-func (a *App) requirePagePassword(w http.ResponseWriter, r *http.Request, domain, pagePath string, isAdmin bool) (bool, bool) {
-	if isAdmin {
-		return false, false
-	}
+func (a *App) requirePagePassword(w http.ResponseWriter, r *http.Request, domain, pagePath string) (bool, bool) {
 	rule, found := a.pagePasswordRuleForPath(r.Context(), domain, pagePath)
 	if !found {
 		return false, false
