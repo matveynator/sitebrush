@@ -1465,17 +1465,18 @@ type analyticsReportRow struct {
 }
 
 type grabProgressEvent struct {
-	Token                  string `json:"token"`
-	Stage                  string `json:"stage"`
-	FoundTotal             int    `json:"found_total"`
-	DownloadedTotal        int    `json:"downloaded_total"`
-	FailedTotal            int    `json:"failed_total"`
-	CurrentURL             string `json:"current_url"`
-	CurrentPercent         int    `json:"current_percent"`
-	CurrentDownloadedBytes int64  `json:"current_downloaded_bytes"`
-	CurrentSizeBytes       int64  `json:"current_size_bytes"`
-	CompletedPercent       int    `json:"completed_percent"`
-	Message                string `json:"message"`
+	Token                  string   `json:"token"`
+	Stage                  string   `json:"stage"`
+	FoundTotal             int      `json:"found_total"`
+	DownloadedTotal        int      `json:"downloaded_total"`
+	FailedTotal            int      `json:"failed_total"`
+	FailedURLs             []string `json:"failed_urls,omitempty"`
+	CurrentURL             string   `json:"current_url"`
+	CurrentPercent         int      `json:"current_percent"`
+	CurrentDownloadedBytes int64    `json:"current_downloaded_bytes"`
+	CurrentSizeBytes       int64    `json:"current_size_bytes"`
+	CompletedPercent       int      `json:"completed_percent"`
+	Message                string   `json:"message"`
 }
 
 type publishProgressEvent struct {
@@ -5374,6 +5375,10 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 		a.grabPreview(w, r)
 		return
 	}
+	if hasQueryFlag(r, "grab_retry") {
+		a.retryGrabFailedResources(w, r)
+		return
+	}
 	if hasQueryFlag(r, "grab_events") {
 		a.grabProgressEvents(w, r)
 		return
@@ -6065,7 +6070,7 @@ func (a *App) seedDemoSiteContent(ctx context.Context, domain string, settings d
 		if spider.failedTotal > 0 {
 			stage = "partial"
 		}
-		a.grabTracker.publish(grabProgressEvent{Token: progressToken, Stage: stage, FoundTotal: spider.foundTotal, DownloadedTotal: spider.downloadedTotal, FailedTotal: spider.failedTotal, CompletedPercent: 100})
+		a.grabTracker.publish(grabProgressEvent{Token: progressToken, Stage: stage, FoundTotal: spider.foundTotal, DownloadedTotal: spider.downloadedTotal, FailedTotal: spider.failedTotal, FailedURLs: spider.failedResourceURLList(), CompletedPercent: 100})
 	}
 	return spider.failedTotal, nil
 }
@@ -6244,10 +6249,10 @@ func (a *App) retryDemoFailedResources(ctx context.Context, settings demo.Settin
 	for _, resourceURL := range resourceURLs {
 		_, _ = spider.fetchResource(resourceURL, remoteSourceURL, 0, true)
 	}
-	replacements := demoRetriedResourceReplacements(spider)
+	replacements := importedResourceReplacements(spider)
 	fileDelta := a.estimateImportedFileDelta(settings.Domain, spider)
 	domainContext := contextWithDomain(ctx, settings.Domain)
-	pageDelta, publishedPageDelta, publishedStaticDelta := a.estimateDemoRetriedResourcePageDelta(domainContext, settings.Domain, replacements)
+	pageDelta, publishedPageDelta, publishedStaticDelta := a.estimateRetriedResourcePageDelta(domainContext, settings.Domain, replacements)
 	if storageErr := a.applyDomainStorageDelta(domainContext, settings.Domain, pageDelta, publishedPageDelta, 0, fileDelta, publishedStaticDelta); storageErr != nil {
 		return spider.failedTotal, storageErr
 	}
@@ -6255,7 +6260,7 @@ func (a *App) retryDemoFailedResources(ctx context.Context, settings demo.Settin
 		_ = a.applyDomainStorageDelta(domainContext, settings.Domain, -pageDelta, -publishedPageDelta, 0, -fileDelta, -publishedStaticDelta)
 		return spider.failedTotal, persistErr
 	}
-	a.applyDemoRetriedResourcePageReplacements(domainContext, settings.Domain, replacements)
+	a.applyRetriedResourcePageReplacements(domainContext, settings.Domain, replacements)
 	a.rebuildDomainStorageUsage(domainContext, settings.Domain)
 	if snapshotErr := a.createDemoSiteSnapshot(ctx, settings.Domain); snapshotErr != nil {
 		log.Printf("demo site retry snapshot failed domain=%s error=%v", settings.Domain, snapshotErr)
@@ -6265,12 +6270,12 @@ func (a *App) retryDemoFailedResources(ctx context.Context, settings demo.Settin
 		if spider.failedTotal > 0 {
 			stage = "partial"
 		}
-		a.grabTracker.publish(grabProgressEvent{Token: progressToken, Stage: stage, FoundTotal: spider.foundTotal, DownloadedTotal: spider.downloadedTotal, FailedTotal: spider.failedTotal, CompletedPercent: 100})
+		a.grabTracker.publish(grabProgressEvent{Token: progressToken, Stage: stage, FoundTotal: spider.foundTotal, DownloadedTotal: spider.downloadedTotal, FailedTotal: spider.failedTotal, FailedURLs: spider.failedResourceURLList(), CompletedPercent: 100})
 	}
 	return spider.failedTotal, nil
 }
 
-func demoRetriedResourceReplacements(spider *pageSpider) map[string]string {
+func importedResourceReplacements(spider *pageSpider) map[string]string {
 	replacements := make(map[string]string)
 	if spider == nil {
 		return replacements
@@ -6284,7 +6289,7 @@ func demoRetriedResourceReplacements(spider *pageSpider) map[string]string {
 	return replacements
 }
 
-func (a *App) estimateDemoRetriedResourcePageDelta(ctx context.Context, domain string, replacements map[string]string) (int64, int64, int64) {
+func (a *App) estimateRetriedResourcePageDelta(ctx context.Context, domain string, replacements map[string]string) (int64, int64, int64) {
 	if len(replacements) == 0 {
 		return 0, 0, 0
 	}
@@ -6303,7 +6308,7 @@ func (a *App) estimateDemoRetriedResourcePageDelta(ctx context.Context, domain s
 		if scanErr := rows.Scan(&pagePath, &pageHTML); scanErr != nil {
 			continue
 		}
-		updatedHTML := replaceDemoRetriedResourceReferences(pageHTML, replacements)
+		updatedHTML := replaceRetriedResourceReferences(pageHTML, replacements)
 		if updatedHTML == pageHTML {
 			continue
 		}
@@ -6320,7 +6325,7 @@ func (a *App) estimateDemoRetriedResourcePageDelta(ctx context.Context, domain s
 	return pageDelta, publishedPageDelta, publishedStaticDelta
 }
 
-func (a *App) applyDemoRetriedResourcePageReplacements(ctx context.Context, domain string, replacements map[string]string) {
+func (a *App) applyRetriedResourcePageReplacements(ctx context.Context, domain string, replacements map[string]string) {
 	if len(replacements) == 0 {
 		return
 	}
@@ -6343,7 +6348,7 @@ func (a *App) applyDemoRetriedResourcePageReplacements(ctx context.Context, doma
 	_ = rows.Close()
 	frozenDomain := a.isDomainFrozen(ctx, domain)
 	for _, page := range pages {
-		updatedHTML := replaceDemoRetriedResourceReferences(page.html, replacements)
+		updatedHTML := replaceRetriedResourceReferences(page.html, replacements)
 		if updatedHTML == page.html {
 			continue
 		}
@@ -6355,7 +6360,7 @@ func (a *App) applyDemoRetriedResourcePageReplacements(ctx context.Context, doma
 	}
 }
 
-func replaceDemoRetriedResourceReferences(sourceHTML string, replacements map[string]string) string {
+func replaceRetriedResourceReferences(sourceHTML string, replacements map[string]string) string {
 	updatedHTML := sourceHTML
 	resourceURLs := make([]string, 0, len(replacements))
 	for resourceURL := range replacements {
@@ -7022,6 +7027,7 @@ func (a *App) grabPage(w http.ResponseWriter, r *http.Request) {
 	_, _ = a.db.ExecContext(r.Context(), `INSERT OR REPLACE INTO pages(domain,path,title,html,published) VALUES(?,?,?,?,1)`, domain, pagePath, pagePath, html)
 	if !a.isDomainFrozen(r.Context(), domain) {
 		_, _ = a.db.ExecContext(r.Context(), `INSERT OR REPLACE INTO published_pages(domain,path,title,html) VALUES(?,?,?,?)`, domain, pagePath, pagePath, html)
+		a.writePublishedStaticHTML(domain, pagePath, html)
 	}
 	_, _ = a.db.ExecContext(r.Context(), `INSERT INTO revisions(domain,page_path,html,created_at) VALUES(?,?,?,?)`, domain, pagePath, html, time.Now().Format(time.RFC3339))
 	if a.grabTracker != nil && progressToken != "" {
@@ -7029,7 +7035,7 @@ func (a *App) grabPage(w http.ResponseWriter, r *http.Request) {
 		if spider.failedTotal > 0 {
 			stage = "partial"
 		}
-		a.grabTracker.publish(grabProgressEvent{Token: progressToken, Stage: stage, FoundTotal: spider.foundTotal, DownloadedTotal: spider.downloadedTotal, FailedTotal: spider.failedTotal, CompletedPercent: 100})
+		a.grabTracker.publish(grabProgressEvent{Token: progressToken, Stage: stage, FoundTotal: spider.foundTotal, DownloadedTotal: spider.downloadedTotal, FailedTotal: spider.failedTotal, FailedURLs: spider.failedResourceURLList(), CompletedPercent: 100})
 	}
 	if wantsJSONResponse(r) {
 		w.Header().Set("Content-Type", "application/json")
@@ -7037,6 +7043,91 @@ func (a *App) grabPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	http.Redirect(w, r, pagePath, http.StatusFound)
+}
+
+func (a *App) retryGrabFailedResources(w http.ResponseWriter, r *http.Request) {
+	if !a.isAdminRequest(r) || r.Method != http.MethodPost {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+
+	sourceURL := r.FormValue("source_url")
+	if sourceURL == "" {
+		http.Error(w, "source_url is required", http.StatusBadRequest)
+		return
+	}
+	sourceOptions, err := parseGrabSourceOptions(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	remoteSourceURL, err := parseGrabSourceURLForServerIP(sourceURL, sourceOptions.IP)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	selectedResourceURLs := selectedGrabResourceURLs(r)
+	if len(selectedResourceURLs) == 0 {
+		http.Error(w, "import_resource_url is required", http.StatusBadRequest)
+		return
+	}
+
+	domain := a.siteDomain(r.Context(), r)
+	pagePath := grabRequestTargetPath(r)
+	progressToken := strings.TrimSpace(r.FormValue("progress_token"))
+	failedTotal, err := a.retryImportedPageResources(r.Context(), domain, pagePath, remoteSourceURL, progressToken, selectedResourceURLs, sourceOptions)
+	if err != nil {
+		statusCode := http.StatusBadGateway
+		if strings.Contains(err.Error(), "storage limit reached:") {
+			statusCode = http.StatusInsufficientStorage
+		}
+		http.Error(w, err.Error(), statusCode)
+		return
+	}
+	if wantsJSONResponse(r) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"status": "ok", "failed_total": failedTotal})
+		return
+	}
+	http.Redirect(w, r, pagePath, http.StatusFound)
+}
+
+func (a *App) retryImportedPageResources(ctx context.Context, domain, pagePath string, sourceURL *url.URL, progressToken string, failedResourceURLs map[string]struct{}, sourceOptions grabSourceOptions) (int, error) {
+	if sourceURL == nil || len(failedResourceURLs) == 0 {
+		return 0, nil
+	}
+	spider := newPageSpider(domain, sourceURL, grabResourceMaxDepth, a.grabTracker, progressToken, sourceOptions)
+	spider.selectedResourceURLs = failedResourceURLs
+	spider.publicAssetBasePath = cleanPath(pagePath)
+	resourceURLs := make([]string, 0, len(failedResourceURLs))
+	for resourceURL := range failedResourceURLs {
+		resourceURLs = append(resourceURLs, resourceURL)
+	}
+	sort.Strings(resourceURLs)
+	for _, resourceURL := range resourceURLs {
+		_, _ = spider.fetchResource(resourceURL, sourceURL, 0, true)
+	}
+	replacements := importedResourceReplacements(spider)
+	fileDelta := a.estimateImportedFileDelta(domain, spider)
+	domainContext := contextWithDomain(ctx, domain)
+	pageDelta, publishedPageDelta, publishedStaticDelta := a.estimateRetriedResourcePageDelta(domainContext, domain, replacements)
+	if storageErr := a.applyDomainStorageDelta(domainContext, domain, pageDelta, publishedPageDelta, 0, fileDelta, publishedStaticDelta); storageErr != nil {
+		return spider.failedTotal, storageErr
+	}
+	if persistErr := a.persistSpiderAssets(spider, pagePath); persistErr != nil {
+		_ = a.applyDomainStorageDelta(domainContext, domain, -pageDelta, -publishedPageDelta, 0, -fileDelta, -publishedStaticDelta)
+		return spider.failedTotal, persistErr
+	}
+	a.applyRetriedResourcePageReplacements(domainContext, domain, replacements)
+	a.rebuildDomainStorageUsage(domainContext, domain)
+	if a.grabTracker != nil && progressToken != "" {
+		stage := "done"
+		if spider.failedTotal > 0 {
+			stage = "partial"
+		}
+		a.grabTracker.publish(grabProgressEvent{Token: progressToken, Stage: stage, FoundTotal: spider.foundTotal, DownloadedTotal: spider.downloadedTotal, FailedTotal: spider.failedTotal, FailedURLs: spider.failedResourceURLList(), CompletedPercent: 100})
+	}
+	return spider.failedTotal, nil
 }
 
 func (a *App) grabPreview(w http.ResponseWriter, r *http.Request) {
@@ -7621,7 +7712,7 @@ func (a *App) importWholeRemoteSite(ctx context.Context, domain, basePath string
 		if spider.failedTotal > 0 {
 			stage = "partial"
 		}
-		a.grabTracker.publish(grabProgressEvent{Token: progressToken, Stage: stage, FoundTotal: spider.foundTotal, DownloadedTotal: spider.downloadedTotal, FailedTotal: spider.failedTotal, CompletedPercent: 100})
+		a.grabTracker.publish(grabProgressEvent{Token: progressToken, Stage: stage, FoundTotal: spider.foundTotal, DownloadedTotal: spider.downloadedTotal, FailedTotal: spider.failedTotal, FailedURLs: spider.failedResourceURLList(), CompletedPercent: 100})
 	}
 	return basePath, spider.failedTotal, nil
 }
@@ -13396,6 +13487,57 @@ func contentTypeForManagedPage(pagePath, content string) string {
 	return detectedContentType
 }
 
+func siteCopyMenuConfigJSON(pagePath string, translations map[string]string) string {
+	configuration := map[string]any{
+		"path": cleanPath(pagePath),
+		"texts": map[string]string{
+			"title":                     translationOrDefault(translations, "menu_copy_site", "Copy site"),
+			"sourceURLPlaceholder":      translationOrDefault(translations, "missing_source_url_placeholder", "https://example.com/page"),
+			"sourceIPLabel":             translationOrDefault(translations, "missing_source_ip_label", "Source IP if DNS is not ready:"),
+			"sourceIPPlaceholder":       translationOrDefault(translations, "missing_source_ip_placeholder", "203.0.113.10"),
+			"sourceLanguageLabel":       translationOrDefault(translations, "missing_source_language_label", "Preferred language:"),
+			"sourceLanguageAuto":        translationOrDefault(translations, "missing_source_language_auto", "Auto"),
+			"copyButton":                translationOrDefault(translations, "missing_copy_button", "Copy"),
+			"copyWholeSite":             translationOrDefault(translations, "missing_copy_whole_site", "Copy entire website"),
+			"continueButton":            translationOrDefault(translations, "missing_continue", "Continue"),
+			"cancelButton":              translationOrDefault(translations, "edit_cancel", "Cancel"),
+			"sizeUnknown":               translationOrDefault(translations, "missing_size_unknown", "unknown"),
+			"previewResourcesText":      translationOrDefault(translations, "missing_preview_resources_text", "Checking resources before download..."),
+			"previewErrorDefault":       translationOrDefault(translations, "missing_preview_error_default", "Failed to check resources."),
+			"confirmDownloadTextPrefix": translationOrDefault(translations, "missing_confirm_download_text_prefix", "Resources to download:"),
+			"loadingStarted":            translationOrDefault(translations, "missing_loading_started", "Loading started."),
+			"invalidStatusError":        translationOrDefault(translations, "missing_invalid_status_error", "Invalid progress status."),
+			"progressDownloadedPrefix":  translationOrDefault(translations, "missing_progress_downloaded_prefix", "Downloaded"),
+			"fromWord":                  translationOrDefault(translations, "missing_progress_from_word", "from"),
+			"leftWord":                  translationOrDefault(translations, "missing_progress_left_word", "left"),
+			"doneOpenPage":              translationOrDefault(translations, "missing_done_open_editor", "Done. Opening page..."),
+			"downloadFailedRetry":       translationOrDefault(translations, "missing_download_failed_retry", "Download failed. Try again."),
+			"partialImportRetry":        translationOrDefault(translations, "missing_partial_import_retry", "Some resources failed. You can retry."),
+			"retryRemaining":            translationOrDefault(translations, "missing_retry_remaining", "Retry remaining"),
+			"closeButton":               translationOrDefault(translations, "tree_close", "Close"),
+			"failedResourcesTitle":      translationOrDefault(translations, "site_copy_failed_resources_title", "Failed resources:"),
+			"failedResourceBadge":       translationOrDefault(translations, "site_copy_failed_resource_badge", "failed"),
+			"partialImportClose":        translationOrDefault(translations, "site_copy_partial_import_close", "Imported with missing resources. You can close and use what was imported."),
+			"connectStatusFailed":       translationOrDefault(translations, "missing_connect_status_failed", "Failed to connect to progress stream."),
+			"loadPageFailed":            translationOrDefault(translations, "missing_load_page_failed", "Load failed."),
+			"checkResourcesFailed":      translationOrDefault(translations, "missing_check_resources_failed", "Resource check failed."),
+			"quotaSummaryTitle":         translationOrDefault(translations, "missing_quota_summary_title", "Storage quota"),
+			"quotaCurrentUsed":          translationOrDefault(translations, "missing_quota_current_used", "Current usage"),
+			"quotaWillAdd":              translationOrDefault(translations, "missing_quota_will_add", "Will add"),
+			"quotaAfterImport":          translationOrDefault(translations, "missing_quota_after_import", "After import"),
+			"quotaAfterImportOf":        translationOrDefault(translations, "missing_quota_after_import_of", "of"),
+			"quotaWillRemain":           translationOrDefault(translations, "missing_quota_will_remain", "Will remain"),
+			"quotaFits":                 translationOrDefault(translations, "missing_quota_fits", "Enough storage is available."),
+			"quotaExceeded":             translationOrDefault(translations, "missing_quota_exceeded", "Storage limit exceeded."),
+		},
+	}
+	jsonBytes, err := json.Marshal(configuration)
+	if err != nil {
+		return `{"path":"/","texts":{}}`
+	}
+	return string(jsonBytes)
+}
+
 func buildContextMenuScript(isAdmin bool, isServerManager bool, isFrozen bool, pagePasswordProtected bool, showLogout bool, pagePath, domain string, revisionID int, revisionCount int, storageUsageLabel string, translations map[string]string) string {
 	if !isAdmin {
 		return buildGuestContextMenuScript(pagePath, domain, translations)
@@ -13420,6 +13562,7 @@ func buildContextMenuScript(isAdmin bool, isServerManager bool, isFrozen bool, p
 	confirmNoLabel := template.JSEscapeString(translationOrDefault(translations, "confirm_no", "No"))
 	editLabel := template.JSEscapeString(translationOrDefault(translations, "menu_edit", "Edit"))
 	textEditLabel := template.JSEscapeString(translationOrDefault(translations, "menu_text_edit", "Edit as text"))
+	copySiteLabel := template.JSEscapeString(translationOrDefault(translations, "menu_copy_site", "Copy site"))
 	deleteLabel := template.JSEscapeString(translationOrDefault(translations, "menu_delete", "Delete"))
 	protectPasswordLabel := template.JSEscapeString(translationOrDefault(translations, "menu_protect_password", "Protect with password"))
 	removePasswordProtectionLabel := template.JSEscapeString(translationOrDefault(translations, "menu_remove_password_protection", "Remove password protection"))
@@ -13479,6 +13622,7 @@ func buildContextMenuScript(isAdmin bool, isServerManager bool, isFrozen bool, p
   const currentPagePath = "` + escapedPath + `";
   const currentDomainName = "` + escapedDomain + `";
   const isDomainFrozen = ` + strconv.FormatBool(isFrozen) + `;
+  const siteCopyConfig = ` + siteCopyMenuConfigJSON(pagePath, translations) + `;
   const actionConfigByName = {
     delete: { path: "?delete=` + strconv.Itoa(revisionID) + `", message: "` + confirmDeletePrompt + `" },
     freeze: { path: "?freeze", message: "` + confirmFreezePrompt + `" },
@@ -13625,6 +13769,31 @@ func buildContextMenuScript(isAdmin bool, isServerManager bool, isFrozen bool, p
   function randomSitebrushToken() {
     return Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 12);
   }
+  function loadSiteCopyScript(callback) {
+    if (window.SiteBrushCopySite) {
+      callback();
+      return;
+    }
+    const existingScriptElement = document.querySelector("script[data-sitebrush-copy-site-script]");
+    if (existingScriptElement) {
+      existingScriptElement.addEventListener("load", callback, { once: true });
+      return;
+    }
+    const scriptElement = document.createElement("script");
+    scriptElement.src = "/p/static/site_copy.js";
+    scriptElement.async = true;
+    scriptElement.setAttribute("data-sitebrush-copy-site-script", "1");
+    scriptElement.addEventListener("load", callback, { once: true });
+    document.head.appendChild(scriptElement);
+  }
+  function openCopySiteDialog() {
+    closeSitebrushMenu();
+    loadSiteCopyScript(function openLoadedCopySiteDialog() {
+      if (window.SiteBrushCopySite) {
+        window.SiteBrushCopySite.open(siteCopyConfig);
+      }
+    });
+  }
   function labelForPublishStage(stageName) {
     if (stageName === "preparing") { return "` + publishProgressPreparingLabel + `"; }
     if (stageName === "pages") { return "` + publishProgressPagesLabel + `"; }
@@ -13716,6 +13885,10 @@ func buildContextMenuScript(isAdmin bool, isServerManager bool, isFrozen bool, p
       openSiteTreeDialog();
       return;
     }
+    if (actionName === "copy_site") {
+      openCopySiteDialog();
+      return;
+    }
     if (actionName === "protect_password") {
       openPasswordProtectionDialog(function submitProtectedPagePassword(passwordText) {
         submitPasswordActionForm("?page_password=protect", passwordText);
@@ -13793,6 +13966,7 @@ func buildContextMenuScript(isAdmin bool, isServerManager bool, isFrozen bool, p
       "<li class='SiteBrushContextMenu SiteBrushDomainMenuItem'><a href='/' class='SiteBrushContextMenuLink'>" + currentDomainName + "</a></li>",
       "<li class='SiteBrushContextMenu'><a href='?visual' class='SiteBrushContextMenuLink'><img src='/p/static/pencil.png' class='SiteBrushMenuIcon' alt=''>" + "` + editLabel + `" + "</a></li>",
       "<li class='SiteBrushContextMenu'><a href='?text' class='SiteBrushContextMenuLink'><img src='/p/static/pencil-text.png' class='SiteBrushMenuIcon' alt=''>" + "` + textEditLabel + `" + "</a></li>",
+      "<li class='SiteBrushContextMenu'><button type='button' data-sitebrush-action='copy_site' class='SiteBrushContextMenuLink SiteBrushContextMenuButton'><img src='/p/static/copy.png' class='SiteBrushMenuIcon' alt=''>" + "` + copySiteLabel + `" + "</button></li>",
       "<li class='SiteBrushContextMenu'><a href='?revisions' class='SiteBrushContextMenuLink'><img src='/p/static/revisions.png' class='SiteBrushMenuIcon' alt=''>" + "` + revisionsLabel + `" + "</a></li>",
       "` + deleteActionEntry + `",
       "` + passwordActionEntry + `",
@@ -15243,6 +15417,7 @@ type pageSpider struct {
 	foundTotal           int
 	downloadedTotal      int
 	failedTotal          int
+	failedResourceURLs   map[string]struct{}
 }
 
 type grabReferenceContext = grabber.ReferenceContext
@@ -15297,15 +15472,16 @@ func newGrabHTTPClientForServerIP(sourceHost, sourceIP string) *http.Client {
 
 func newPageSpider(domain string, pageURL *url.URL, maxDepth int, tracker *grabProgressTracker, progressToken string, sourceOptions grabSourceOptions) *pageSpider {
 	return &pageSpider{
-		domain:        domain,
-		pageURL:       pageURL,
-		maxDepth:      maxDepth,
-		client:        grabImportHTTPClient(newGrabHTTPClientForServerIP(pageURL.Hostname(), sourceOptions.IP)),
-		sourceOptions: sourceOptions,
-		resources:     make(map[string]*mirroredResource),
-		inFlight:      make(map[string]bool),
-		tracker:       tracker,
-		progressToken: progressToken,
+		domain:             domain,
+		pageURL:            pageURL,
+		maxDepth:           maxDepth,
+		client:             grabImportHTTPClient(newGrabHTTPClientForServerIP(pageURL.Hostname(), sourceOptions.IP)),
+		sourceOptions:      sourceOptions,
+		resources:          make(map[string]*mirroredResource),
+		inFlight:           make(map[string]bool),
+		failedResourceURLs: make(map[string]struct{}),
+		tracker:            tracker,
+		progressToken:      progressToken,
 	}
 }
 
@@ -15331,6 +15507,37 @@ func grabPreviewHTTPClient(client *http.Client) *http.Client {
 	previewClient := *client
 	previewClient.Timeout = grabPreviewResourceTimeout
 	return &previewClient
+}
+
+func (spider *pageSpider) recordFailedResource(resourceURL string) {
+	resourceURL = strings.TrimSpace(resourceURL)
+	if resourceURL == "" {
+		return
+	}
+	if spider.failedResourceURLs == nil {
+		spider.failedResourceURLs = make(map[string]struct{})
+	}
+	spider.failedResourceURLs[resourceURL] = struct{}{}
+}
+
+func (spider *pageSpider) clearFailedResource(resourceURL string) {
+	resourceURL = strings.TrimSpace(resourceURL)
+	if resourceURL == "" || spider.failedResourceURLs == nil {
+		return
+	}
+	delete(spider.failedResourceURLs, resourceURL)
+}
+
+func (spider *pageSpider) failedResourceURLList() []string {
+	if spider == nil || len(spider.failedResourceURLs) == 0 {
+		return nil
+	}
+	failedURLs := make([]string, 0, len(spider.failedResourceURLs))
+	for resourceURL := range spider.failedResourceURLs {
+		failedURLs = append(failedURLs, resourceURL)
+	}
+	sort.Strings(failedURLs)
+	return failedURLs
 }
 
 func (spider *pageSpider) fetchResource(rawURL string, baseURL *url.URL, depth int, persist bool) (*mirroredResource, error) {
@@ -15364,6 +15571,7 @@ func (spider *pageSpider) fetchResource(rawURL string, baseURL *url.URL, depth i
 	if err != nil {
 		spider.resources[normalizedURL] = &mirroredResource{url: normalizedURL, persist: persist}
 		spider.failedTotal++
+		spider.recordFailedResource(normalizedURL)
 		spider.publishResourceProgress("error", normalizedURL, 0, 0, -1)
 		return nil, err
 	}
@@ -15371,6 +15579,7 @@ func (spider *pageSpider) fetchResource(rawURL string, baseURL *url.URL, depth i
 	if response.StatusCode >= 400 {
 		spider.resources[normalizedURL] = &mirroredResource{url: normalizedURL, persist: persist}
 		spider.failedTotal++
+		spider.recordFailedResource(normalizedURL)
 		spider.publishResourceProgress("error", normalizedURL, 0, 0, response.ContentLength)
 		return nil, fmt.Errorf("resource download failed: %s", response.Status)
 	}
@@ -15378,6 +15587,7 @@ func (spider *pageSpider) fetchResource(rawURL string, baseURL *url.URL, depth i
 	if !spider.isAllowedResourceContentType(normalizedURL, resourceContentType) {
 		spider.resources[normalizedURL] = &mirroredResource{url: normalizedURL, persist: persist}
 		spider.failedTotal++
+		spider.recordFailedResource(normalizedURL)
 		spider.publishResourceProgress("error", normalizedURL, 0, 0, response.ContentLength)
 		return nil, fmt.Errorf("resource content-type rejected: %s", response.Header.Get("Content-Type"))
 	}
@@ -15385,6 +15595,7 @@ func (spider *pageSpider) fetchResource(rawURL string, baseURL *url.URL, depth i
 	if err != nil {
 		spider.resources[normalizedURL] = &mirroredResource{url: normalizedURL, persist: persist}
 		spider.failedTotal++
+		spider.recordFailedResource(normalizedURL)
 		spider.publishResourceProgress("error", normalizedURL, 0, 0, response.ContentLength)
 		return nil, err
 	}
@@ -15400,6 +15611,7 @@ func (spider *pageSpider) fetchResource(rawURL string, baseURL *url.URL, depth i
 	}
 	spider.resources[normalizedURL] = resource
 	spider.downloadedTotal++
+	spider.clearFailedResource(normalizedURL)
 	spider.publishResourceProgress("downloaded", normalizedURL, 100, int64(len(body)), response.ContentLength)
 	spider.rewriteNestedResources(resource, depth+1, resourceContentType)
 	return resource, nil
@@ -15596,6 +15808,9 @@ func (spider *pageSpider) rewriteDocumentResourceReference(rawRef string, baseUR
 	if blocked || normalizedURL == "" {
 		return rawRef
 	}
+	if grabber.IsWholeSitePageURLString(normalizedURL) {
+		return rawRef
+	}
 	if !spider.shouldPersistResource(normalizedURL) {
 		return rawRef
 	}
@@ -15665,7 +15880,7 @@ func (spider *pageSpider) collectPreviewDocumentResourceReference(rawRef string,
 	if blocked || normalizedURL == "" {
 		return rawRef
 	}
-	if spider.documentURLRewriter != nil && grabber.IsWholeSitePageURLString(normalizedURL) {
+	if grabber.IsWholeSitePageURLString(normalizedURL) {
 		return rawRef
 	}
 	return spider.collectPreviewResourceReferenceForContext(rawRef, baseURL, depth, grabReferenceDocument)
