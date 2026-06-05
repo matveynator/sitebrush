@@ -113,6 +113,7 @@ type App struct {
 	embeddedStaticAssets      map[string]embeddedStaticAsset
 	autoCertCertificateCache  chan autoCertCertificateCacheRequest
 	grabTracker               *grabProgressTracker
+	grabCancels               *grabCancelTracker
 	publishTracker            *publishProgressTracker
 	analyticsEvents           chan siteAnalyticsEvent
 	analyticsMemoryLimit      int64
@@ -1491,6 +1492,8 @@ type grabPreviewResponse struct {
 	PageCount             int                   `json:"page_count"`
 	ResourceCount         int                   `json:"resource_count"`
 	Resources             []grabResourcePreview `json:"resources"`
+	DownloadTotal         int                   `json:"download_total"`
+	DownloadTotalBytes    int64                 `json:"download_total_bytes"`
 	PageDownloadBytes     int64                 `json:"page_download_bytes"`
 	PageStorageBytes      int64                 `json:"page_storage_bytes"`
 	CurrentUsedBytes      int64                 `json:"current_used_bytes"`
@@ -3994,7 +3997,7 @@ func runSitebrushServer(ctx context.Context, config serverRunConfig) error {
 	}
 
 	var siteDatabaseRouter *perSiteDBRouter
-	application := &App{storagePath: effectiveStoragePath, dbPath: effectiveDBPath, debug: config.Debug, nativeFileDialog: desktop.NativeFileDialogSupported(), grabTracker: newGrabProgressTracker(), publishTracker: newPublishProgressTracker(), analyticsEvents: make(chan siteAnalyticsEvent, 65536), domainLogEvents: make(chan domainLogEvent, 1024)}
+	application := &App{storagePath: effectiveStoragePath, dbPath: effectiveDBPath, debug: config.Debug, nativeFileDialog: desktop.NativeFileDialogSupported(), grabTracker: newGrabProgressTracker(), grabCancels: newGrabCancelTracker(), publishTracker: newPublishProgressTracker(), analyticsEvents: make(chan siteAnalyticsEvent, 65536), domainLogEvents: make(chan domainLogEvent, 1024)}
 	application.guestStaticHTMLCache = startGuestStaticHTMLCacheWorker(ctx, defaultGuestStaticHTMLCacheLimitBytes)
 	application.authIPFailureCache = startAuthIPFailureCacheWorker(ctx)
 	application.registrationConfirmations = startEmailConfirmationMemoryWorker(ctx)
@@ -5358,6 +5361,10 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 		a.retryGrabFailedResources(w, r)
 		return
 	}
+	if hasQueryFlag(r, "grab_cancel") {
+		a.cancelGrabImport(w, r)
+		return
+	}
 	if hasQueryFlag(r, "grab_events") {
 		a.grabProgressEvents(w, r)
 		return
@@ -6050,7 +6057,7 @@ func (a *App) seedDemoSiteContent(ctx context.Context, domain string, settings d
 		if spider.unresolvedFailedTotal() > 0 {
 			stage = "partial"
 		}
-		a.grabTracker.publish(grabProgressEvent{Token: progressToken, Stage: stage, FoundTotal: spider.foundTotal, DownloadedTotal: spider.downloadedTotal, FailedTotal: spider.unresolvedFailedTotal(), FailedURLs: spider.failedResourceURLList(), FailedReasons: spider.failedResourceReasonMap(), CompletedPercent: 100})
+		a.grabTracker.publish(spider.finalProgressEvent(progressToken, stage))
 	}
 	return spider.unresolvedFailedTotal(), nil
 }
@@ -6127,6 +6134,8 @@ func (a *App) demoGrabPreview(w http.ResponseWriter, r *http.Request) {
 		PageCount:             pageCount,
 		ResourceCount:         len(resources),
 		Resources:             resources,
+		DownloadTotal:         pageCount + len(resources),
+		DownloadTotalBytes:    pageDownloadBytes + selectedResourceBytes,
 		PageDownloadBytes:     pageDownloadBytes,
 		PageStorageBytes:      quotaEstimate.PageStorageBytes,
 		CurrentUsedBytes:      quotaEstimate.CurrentUsedBytes,
@@ -6141,7 +6150,7 @@ func (a *App) demoGrabPreview(w http.ResponseWriter, r *http.Request) {
 		a.logProblemEvent("demo grab preview response failed domain=%s source=%s error=%v duration=%s", domain, sourceURL, encodeErr, time.Since(startedAt).String())
 	}
 	if encodeErr == nil && a.grabTracker != nil && progressToken != "" && previewSpider != nil {
-		a.grabTracker.publish(grabProgressEvent{Token: progressToken, Stage: "done", FoundTotal: previewSpider.foundTotal, DownloadedTotal: previewSpider.downloadedTotal, CompletedPercent: 100})
+		a.grabTracker.publish(previewSpider.finalProgressEvent(progressToken, "done"))
 	}
 }
 
@@ -6251,7 +6260,7 @@ func (a *App) retryDemoFailedResources(ctx context.Context, settings demo.Settin
 		if spider.unresolvedFailedTotal() > 0 {
 			stage = "partial"
 		}
-		a.grabTracker.publish(grabProgressEvent{Token: progressToken, Stage: stage, FoundTotal: spider.foundTotal, DownloadedTotal: spider.downloadedTotal, FailedTotal: spider.unresolvedFailedTotal(), FailedURLs: spider.failedResourceURLList(), FailedReasons: spider.failedResourceReasonMap(), CompletedPercent: 100})
+		a.grabTracker.publish(spider.finalProgressEvent(progressToken, stage))
 	}
 	return spider.unresolvedFailedTotal(), nil
 }
@@ -6942,6 +6951,9 @@ func (a *App) grabPage(w http.ResponseWriter, r *http.Request) {
 	}
 
 	pagePath := grabRequestTargetPath(r)
+	progressToken := strings.TrimSpace(r.FormValue("progress_token"))
+	downloadContext, finishDownloadContext := a.grabImportDownloadContext(r.Context(), progressToken)
+	defer finishDownloadContext()
 
 	sourceURL := r.FormValue("source_url")
 	if sourceURL == "" {
@@ -6961,7 +6973,7 @@ func (a *App) grabPage(w http.ResponseWriter, r *http.Request) {
 	}
 	sourceURL = remoteSourceURL.String()
 
-	htmlBytes, resolvedSourceURL, err := downloadGrabSourceHTMLWithResolvedURL(sourceURL, sourceOptions)
+	htmlBytes, resolvedSourceURL, err := downloadGrabSourceHTMLWithResolvedURLContext(downloadContext, sourceURL, sourceOptions)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
@@ -6970,14 +6982,16 @@ func (a *App) grabPage(w http.ResponseWriter, r *http.Request) {
 	sourceURL = remoteSourceURL.String()
 
 	domain := a.siteDomain(r.Context(), r)
-	progressToken := strings.TrimSpace(r.FormValue("progress_token"))
 	importRequest := grabImportRequest{
 		Domain:               domain,
 		PagePath:             pagePath,
 		SourceURL:            sourceURL,
 		RemoteSourceURL:      remoteSourceURL,
 		HTML:                 string(htmlBytes),
+		Context:              downloadContext,
 		ProgressToken:        progressToken,
+		DownloadTotal:        grabImportDownloadTotal(r),
+		DownloadTotalBytes:   grabImportDownloadTotalBytes(r),
 		SourceOptions:        sourceOptions,
 		SelectedResourceURLs: selectedGrabResourceURLs(r),
 	}
@@ -7024,7 +7038,7 @@ func (a *App) grabPage(w http.ResponseWriter, r *http.Request) {
 		if spider.unresolvedFailedTotal() > 0 {
 			stage = "partial"
 		}
-		a.grabTracker.publish(grabProgressEvent{Token: progressToken, Stage: stage, FoundTotal: spider.foundTotal, DownloadedTotal: spider.downloadedTotal, FailedTotal: spider.unresolvedFailedTotal(), FailedURLs: spider.failedResourceURLList(), FailedReasons: spider.failedResourceReasonMap(), CompletedPercent: 100})
+		a.grabTracker.publish(spider.finalProgressEvent(progressToken, stage))
 	}
 	if wantsJSONResponse(r) {
 		w.Header().Set("Content-Type", "application/json")
@@ -7064,7 +7078,9 @@ func (a *App) retryGrabFailedResources(w http.ResponseWriter, r *http.Request) {
 	domain := a.siteDomain(r.Context(), r)
 	pagePath := grabRequestTargetPath(r)
 	progressToken := strings.TrimSpace(r.FormValue("progress_token"))
-	importResult, err := a.retryImportedPageResources(r.Context(), grabImportRequest{Domain: domain, PagePath: pagePath, RemoteSourceURL: remoteSourceURL, ProgressToken: progressToken, SelectedResourceURLs: selectedResourceURLs, SourceOptions: sourceOptions})
+	downloadContext, finishDownloadContext := a.grabImportDownloadContext(r.Context(), progressToken)
+	defer finishDownloadContext()
+	importResult, err := a.retryImportedPageResources(r.Context(), grabImportRequest{Domain: domain, PagePath: pagePath, RemoteSourceURL: remoteSourceURL, Context: downloadContext, ProgressToken: progressToken, DownloadTotal: grabImportDownloadTotal(r), DownloadTotalBytes: grabImportDownloadTotalBytes(r), SelectedResourceURLs: selectedResourceURLs, SourceOptions: sourceOptions})
 	if err != nil {
 		statusCode := http.StatusBadGateway
 		if strings.Contains(err.Error(), "storage limit reached:") {
@@ -7081,11 +7097,28 @@ func (a *App) retryGrabFailedResources(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, pagePath, http.StatusFound)
 }
 
+func (a *App) cancelGrabImport(w http.ResponseWriter, r *http.Request) {
+	if !a.isAdminRequest(r) || r.Method != http.MethodPost {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	progressToken := strings.TrimSpace(r.FormValue("progress_token"))
+	if progressToken == "" {
+		http.Error(w, "progress_token is required", http.StatusBadRequest)
+		return
+	}
+	canceled := a.activeGrabCancelTracker().Cancel(progressToken)
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{"status": "ok", "canceled": canceled})
+}
+
 func (a *App) retryImportedPageResources(ctx context.Context, importRequest grabImportRequest) (grabImportResult, error) {
 	if importRequest.RemoteSourceURL == nil || len(importRequest.SelectedResourceURLs) == 0 {
 		return grabImportResult{RedirectPath: cleanPath(importRequest.PagePath)}, nil
 	}
 	spider := newPageSpider(importRequest.Domain, importRequest.RemoteSourceURL, grabResourceMaxDepth, a.grabTracker, importRequest.ProgressToken, importRequest.SourceOptions)
+	spider.setContext(importRequest.Context)
+	spider.setDownloadPlan(importRequest.DownloadTotal, importRequest.DownloadTotalBytes)
 	spider.selectedResourceURLs = importRequest.SelectedResourceURLs
 	spider.publicAssetBasePath = cleanPath(importRequest.PagePath)
 	resourceURLs := make([]string, 0, len(importRequest.SelectedResourceURLs))
@@ -7115,7 +7148,7 @@ func (a *App) retryImportedPageResources(ctx context.Context, importRequest grab
 		if spider.unresolvedFailedTotal() > 0 {
 			stage = "partial"
 		}
-		a.grabTracker.publish(grabProgressEvent{Token: importRequest.ProgressToken, Stage: stage, FoundTotal: spider.foundTotal, DownloadedTotal: spider.downloadedTotal, FailedTotal: spider.unresolvedFailedTotal(), FailedURLs: spider.failedResourceURLList(), FailedReasons: spider.failedResourceReasonMap(), CompletedPercent: 100})
+		a.grabTracker.publish(spider.finalProgressEvent(importRequest.ProgressToken, stage))
 	}
 	return grabImportResult{RedirectPath: cleanPath(importRequest.PagePath), FailedTotal: spider.unresolvedFailedTotal(), FailedURLs: spider.failedResourceURLList(), FailedReasons: spider.failedResourceReasonMap()}, nil
 }
@@ -7180,6 +7213,8 @@ func (a *App) grabPreview(w http.ResponseWriter, r *http.Request) {
 		PageCount:             pageCount,
 		ResourceCount:         len(resources),
 		Resources:             resources,
+		DownloadTotal:         pageCount + len(resources),
+		DownloadTotalBytes:    pageDownloadBytes + selectedResourceBytes,
 		PageDownloadBytes:     pageDownloadBytes,
 		PageStorageBytes:      quotaEstimate.PageStorageBytes,
 		CurrentUsedBytes:      quotaEstimate.CurrentUsedBytes,
@@ -7194,7 +7229,7 @@ func (a *App) grabPreview(w http.ResponseWriter, r *http.Request) {
 		a.logProblemEvent("grab preview response failed source=%s error=%v duration=%s", sourceURL, encodeErr, time.Since(startedAt).String())
 	}
 	if encodeErr == nil && a.grabTracker != nil && progressToken != "" && previewSpider != nil {
-		a.grabTracker.publish(grabProgressEvent{Token: progressToken, Stage: "done", FoundTotal: previewSpider.foundTotal, DownloadedTotal: previewSpider.downloadedTotal, CompletedPercent: 100})
+		a.grabTracker.publish(previewSpider.finalProgressEvent(progressToken, "done"))
 	}
 }
 
@@ -7340,12 +7375,16 @@ func downloadGrabSourceHTML(sourceURL, sourceIP string) ([]byte, error) {
 }
 
 func downloadGrabSourceHTMLWithResolvedURL(sourceURL string, sourceOptions grabSourceOptions) ([]byte, *url.URL, error) {
+	return downloadGrabSourceHTMLWithResolvedURLContext(context.Background(), sourceURL, sourceOptions)
+}
+
+func downloadGrabSourceHTMLWithResolvedURLContext(ctx context.Context, sourceURL string, sourceOptions grabSourceOptions) ([]byte, *url.URL, error) {
 	remoteSourceURL, err := url.Parse(sourceURL)
 	if err != nil {
 		return nil, nil, errors.New("source_url is invalid")
 	}
 	client := newGrabHTTPClientForServerIP(remoteSourceURL.Hostname(), sourceOptions.IP)
-	response, err := doGrabGET(client, sourceURL, sourceOptions)
+	response, err := doGrabGETContext(ctx, client, sourceURL, sourceOptions)
 	if err == nil && isSuccessfulGrabResponse(response) {
 		defer response.Body.Close()
 		if response.Request != nil && response.Request.URL != nil {
@@ -7365,7 +7404,7 @@ func downloadGrabSourceHTMLWithResolvedURL(sourceURL string, sourceOptions grabS
 		fallbackURL := crawler.CloneURL(remoteSourceURL)
 		fallbackURL.Scheme = "http"
 		fallbackURL.Host = fallbackURL.Hostname()
-		response, err = doGrabGET(client, fallbackURL.String(), sourceOptions)
+		response, err = doGrabGETContext(ctx, client, fallbackURL.String(), sourceOptions)
 		if err == nil && isSuccessfulGrabResponse(response) {
 			defer response.Body.Close()
 			if response.Request != nil && response.Request.URL != nil {
@@ -7467,7 +7506,11 @@ func isSuccessfulGrabResponse(response *http.Response) bool {
 }
 
 func doGrabGET(client *http.Client, rawURL string, sourceOptions grabSourceOptions) (*http.Response, error) {
-	request, err := http.NewRequest(http.MethodGet, rawURL, nil)
+	return doGrabGETContext(context.Background(), client, rawURL, sourceOptions)
+}
+
+func doGrabGETContext(ctx context.Context, client *http.Client, rawURL string, sourceOptions grabSourceOptions) (*http.Response, error) {
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -7530,6 +7573,30 @@ func selectedGrabResourceURLs(r *http.Request) map[string]struct{} {
 	return selectedResourceURLs
 }
 
+func grabImportDownloadTotal(r *http.Request) int {
+	return positiveFormInt(r, "import_download_total")
+}
+
+func grabImportDownloadTotalBytes(r *http.Request) int64 {
+	return positiveFormInt64(r, "import_download_total_bytes")
+}
+
+func positiveFormInt(r *http.Request, fieldName string) int {
+	parsedValue, err := strconv.Atoi(strings.TrimSpace(r.FormValue(fieldName)))
+	if err != nil || parsedValue < 0 {
+		return 0
+	}
+	return parsedValue
+}
+
+func positiveFormInt64(r *http.Request, fieldName string) int64 {
+	parsedValue, err := strconv.ParseInt(strings.TrimSpace(r.FormValue(fieldName)), 10, 64)
+	if err != nil || parsedValue < 0 {
+		return 0
+	}
+	return parsedValue
+}
+
 func grabCopyWholeSite(r *http.Request) bool {
 	rawValue := strings.ToLower(strings.TrimSpace(r.FormValue("copy_whole_site")))
 	return rawValue == "1" || rawValue == "on" || rawValue == "true" || rawValue == "yes"
@@ -7584,13 +7651,15 @@ func previewGrabResources(pageURL *url.URL, htmlSource string, tracker *grabProg
 	spider.collectPreviewNestedResources(rootResource, 0, "text/html")
 	resources := previewResourcesFromSpider(spider, map[string]struct{}{pageURL.String(): {}})
 	if tracker != nil && strings.TrimSpace(progressToken) != "" {
-		tracker.publish(grabProgressEvent{Token: progressToken, Stage: "done", FoundTotal: spider.foundTotal, DownloadedTotal: spider.downloadedTotal, CompletedPercent: 100})
+		tracker.publish(spider.finalProgressEvent(progressToken, "done"))
 	}
 	return resources
 }
 
 func prepareSinglePageImport(importRequest grabImportRequest, tracker *grabProgressTracker) (*pageSpider, string) {
 	spider := newPageSpider(importRequest.Domain, importRequest.RemoteSourceURL, grabResourceMaxDepth, tracker, importRequest.ProgressToken, importRequest.SourceOptions)
+	spider.setContext(importRequest.Context)
+	spider.setDownloadPlan(importRequest.DownloadTotal, importRequest.DownloadTotalBytes)
 	spider.selectedResourceURLs = importRequest.SelectedResourceURLs
 	rootResource := &mirroredResource{url: importRequest.SourceURL, content: []byte(importRequest.HTML)}
 	spider.resources[importRequest.SourceURL] = rootResource
@@ -7646,6 +7715,8 @@ func (a *App) prepareWholeRemoteSiteImport(importRequest grabImportRequest) (*pa
 		return nil, nil, errors.New("source_url is invalid")
 	}
 	spider := newPageSpider(importRequest.Domain, startURL, grabResourceMaxDepth, a.grabTracker, importRequest.ProgressToken, importRequest.SourceOptions)
+	spider.setContext(importRequest.Context)
+	spider.setDownloadPlan(importRequest.DownloadTotal, importRequest.DownloadTotalBytes)
 	spider.selectedResourceURLs = importRequest.SelectedResourceURLs
 	spider.publicAssetBasePath = basePath
 	spider.documentURLRewriter = func(normalizedURL string) (string, bool) {
@@ -7666,6 +7737,10 @@ func (a *App) prepareWholeRemoteSiteImport(importRequest grabImportRequest) (*pa
 	spider.publishProgress("found", startURL.String(), 0)
 
 	for len(pageQueue) > 0 && len(importedPages) < wholeSiteImportMaxPages {
+		if spider.contextCanceled() {
+			spider.publishResourceProgress("partial", crawler.CurrentWholeSiteImportURL(pageQueue), 0, 0, -1)
+			break
+		}
 		if consecutiveFailures >= wholeSiteImportConsecutiveFailureLimit {
 			spider.publishResourceProgress("partial", crawler.CurrentWholeSiteImportURL(pageQueue), 0, 0, -1)
 			break
@@ -7754,7 +7829,7 @@ func (a *App) importWholeRemoteSite(ctx context.Context, importRequest grabImpor
 		if spider.unresolvedFailedTotal() > 0 {
 			stage = "partial"
 		}
-		a.grabTracker.publish(grabProgressEvent{Token: importRequest.ProgressToken, Stage: stage, FoundTotal: spider.foundTotal, DownloadedTotal: spider.downloadedTotal, FailedTotal: spider.unresolvedFailedTotal(), FailedURLs: spider.failedResourceURLList(), FailedReasons: spider.failedResourceReasonMap(), CompletedPercent: 100})
+		a.grabTracker.publish(spider.finalProgressEvent(importRequest.ProgressToken, stage))
 	}
 	return grabImportResult{RedirectPath: cleanPath(importRequest.PagePath), FailedTotal: spider.unresolvedFailedTotal(), FailedURLs: spider.failedResourceURLList(), FailedReasons: spider.failedResourceReasonMap()}, nil
 }
@@ -7899,7 +7974,11 @@ func (a *App) estimateImportedFileDelta(domain string, spider *pageSpider) int64
 }
 
 func downloadWholeSitePageHTML(client *http.Client, pageURL *url.URL, sourceOptions grabSourceOptions) (string, bool, error) {
-	return crawler.DownloadHTML(client, pageURL, func(request *http.Request) {
+	return downloadWholeSitePageHTMLContext(context.Background(), client, pageURL, sourceOptions)
+}
+
+func downloadWholeSitePageHTMLContext(ctx context.Context, client *http.Client, pageURL *url.URL, sourceOptions grabSourceOptions) (string, bool, error) {
+	return crawler.DownloadHTMLContext(ctx, client, pageURL, func(request *http.Request) {
 		applyGrabRequestHeaders(request, sourceOptions)
 		request.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
 	})
@@ -7916,14 +7995,23 @@ func (spider *pageSpider) downloadWholeSitePageHTMLWithRetries(client *http.Clie
 		pageURLText = pageURL.String()
 	}
 	for attempt := 1; attempt <= totalAttempts; attempt++ {
+		if spider.contextCanceled() {
+			return "", false, spider.context().Err()
+		}
 		if attempt > 1 {
 			spider.waitBeforeRetry(pageURLText, attempt-1, retries)
+			if spider.contextCanceled() {
+				return "", false, spider.context().Err()
+			}
 			spider.publishRetryProgress("retrying", pageURLText, attempt-1, retries, 0)
 		}
-		html, downloaded, err := downloadWholeSitePageHTML(client, pageURL, sourceOptions)
+		html, downloaded, err := downloadWholeSitePageHTMLContext(spider.context(), client, pageURL, sourceOptions)
 		if err == nil && downloaded {
 			spider.clearFailedResource(pageURLText)
 			return html, true, nil
+		}
+		if spider.contextCanceled() {
+			return "", false, spider.context().Err()
 		}
 		if err != nil {
 			lastErr = err
@@ -15393,7 +15481,7 @@ func resourceExtensionFromContentType(contentType string) string {
 func (a *App) mirrorRemotePage(domain, pagePath, sourceURL string, pageURL *url.URL, fallbackHTML, progressToken string, selectedResourceURLs map[string]struct{}, sourceIP string) string {
 	spider, html := prepareSinglePageImport(grabImportRequest{Domain: domain, PagePath: pagePath, SourceURL: sourceURL, RemoteSourceURL: pageURL, HTML: fallbackHTML, ProgressToken: progressToken, SelectedResourceURLs: selectedResourceURLs, SourceOptions: grabSourceOptions{IP: sourceIP}}, a.grabTracker)
 	_ = a.persistSpiderAssets(spider, pagePath)
-	a.grabTracker.publish(grabProgressEvent{Token: progressToken, Stage: "done", FoundTotal: spider.foundTotal, DownloadedTotal: spider.downloadedTotal, CompletedPercent: 100})
+	a.grabTracker.publish(spider.finalProgressEvent(progressToken, "done"))
 	return html
 }
 
@@ -15451,6 +15539,7 @@ type pageSpider struct {
 	pageURL              *url.URL
 	maxDepth             int
 	client               *http.Client
+	ctx                  context.Context
 	sourceOptions        grabSourceOptions
 	resources            map[string]*mirroredResource
 	inFlight             map[string]bool
@@ -15461,6 +15550,9 @@ type pageSpider struct {
 	progressToken        string
 	foundTotal           int
 	downloadedTotal      int
+	downloadTotal        int
+	downloadTotalBytes   int64
+	downloadedBytesByURL map[string]int64
 	failedTotal          int
 	failedResourceURLs   map[string]struct{}
 	failedResourceErrors map[string]string
@@ -15522,11 +15614,13 @@ func newPageSpider(domain string, pageURL *url.URL, maxDepth int, tracker *grabP
 		pageURL:              pageURL,
 		maxDepth:             maxDepth,
 		client:               grabImportHTTPClient(newGrabHTTPClientForServerIP(pageURL.Hostname(), sourceOptions.IP)),
+		ctx:                  context.Background(),
 		sourceOptions:        sourceOptions,
 		resources:            make(map[string]*mirroredResource),
 		inFlight:             make(map[string]bool),
 		failedResourceURLs:   make(map[string]struct{}),
 		failedResourceErrors: make(map[string]string),
+		downloadedBytesByURL: make(map[string]int64),
 		tracker:              tracker,
 		progressToken:        progressToken,
 	}
@@ -15545,6 +15639,29 @@ func newPreviewPageSpider(domain string, pageURL *url.URL, maxDepth int, tracker
 	spider := newPageSpider(domain, pageURL, maxDepth, tracker, progressToken, sourceOptions)
 	spider.client = grabPreviewHTTPClient(spider.client)
 	return spider
+}
+
+func (spider *pageSpider) setContext(ctx context.Context) {
+	if spider == nil || ctx == nil {
+		return
+	}
+	spider.ctx = ctx
+}
+
+func (spider *pageSpider) context() context.Context {
+	if spider == nil || spider.ctx == nil {
+		return context.Background()
+	}
+	return spider.ctx
+}
+
+func (spider *pageSpider) contextCanceled() bool {
+	select {
+	case <-spider.context().Done():
+		return true
+	default:
+		return false
+	}
 }
 
 func grabPreviewHTTPClient(client *http.Client) *http.Client {
@@ -15619,6 +15736,9 @@ func (spider *pageSpider) failedResourceReasonMap() map[string]string {
 }
 
 func (spider *pageSpider) fetchResource(rawURL string, baseURL *url.URL, depth int, persist bool) (*mirroredResource, error) {
+	if spider.contextCanceled() {
+		return nil, spider.context().Err()
+	}
 	if depth > spider.maxDepth {
 		return nil, errors.New("max depth reached")
 	}
@@ -15643,7 +15763,7 @@ func (spider *pageSpider) fetchResource(rawURL string, baseURL *url.URL, depth i
 	}
 	spider.inFlight[normalizedURL] = true
 	defer delete(spider.inFlight, normalizedURL)
-	request, _ := http.NewRequest(http.MethodGet, normalizedURL, nil)
+	request, _ := http.NewRequestWithContext(spider.context(), http.MethodGet, normalizedURL, nil)
 	applyGrabRequestHeaders(request, spider.sourceOptions)
 	response, err := spider.client.Do(request)
 	if err != nil {
@@ -15697,21 +15817,93 @@ func (spider *pageSpider) publishProgress(stage, currentURL string, currentPerce
 	spider.publishResourceProgress(stage, currentURL, currentPercent, 0, -1)
 }
 
-func (spider *pageSpider) publishResourceProgress(stage, currentURL string, currentPercent int, downloadedBytes, sizeBytes int64) {
+func (spider *pageSpider) setDownloadPlan(downloadTotal int, downloadTotalBytes int64) {
+	if spider == nil {
+		return
+	}
+	if downloadTotal > 0 {
+		spider.downloadTotal = downloadTotal
+	}
+	if downloadTotalBytes > 0 {
+		spider.downloadTotalBytes = downloadTotalBytes
+	}
+}
+
+func (spider *pageSpider) totalDownloadCount() int {
+	if spider == nil {
+		return 0
+	}
+	if spider.downloadTotal > 0 {
+		return spider.downloadTotal
+	}
+	return spider.foundTotal
+}
+
+func (spider *pageSpider) recordDownloadedBytes(stage, currentURL string, currentDownloadedBytes, currentSizeBytes int64) int64 {
+	if spider == nil {
+		return 0
+	}
+	if spider.downloadedBytesByURL == nil {
+		spider.downloadedBytesByURL = make(map[string]int64)
+	}
+	currentURL = strings.TrimSpace(currentURL)
+	if currentURL != "" {
+		recordedBytes := currentDownloadedBytes
+		if stage == "downloaded" && currentSizeBytes > 0 {
+			recordedBytes = currentSizeBytes
+		}
+		if stage == "downloaded" && recordedBytes <= 0 {
+			if resource := spider.resources[currentURL]; resource != nil && resource.content != nil {
+				recordedBytes = int64(len(resource.content))
+			}
+		}
+		if recordedBytes > 0 {
+			spider.downloadedBytesByURL[currentURL] = recordedBytes
+		}
+	}
+	var totalDownloadedBytes int64
+	for _, downloadedByteCount := range spider.downloadedBytesByURL {
+		if downloadedByteCount > 0 {
+			totalDownloadedBytes += downloadedByteCount
+		}
+	}
+	if spider.downloadTotalBytes > 0 && totalDownloadedBytes > spider.downloadTotalBytes {
+		return spider.downloadTotalBytes
+	}
+	return totalDownloadedBytes
+}
+
+func (spider *pageSpider) progressPercent(totalDownloadedBytes int64) int {
+	if spider == nil {
+		return 0
+	}
+	if spider.downloadTotalBytes > 0 {
+		return resourcePercent(totalDownloadedBytes, spider.downloadTotalBytes)
+	}
+	totalDownloadCount := spider.totalDownloadCount()
+	if totalDownloadCount <= 0 {
+		return 0
+	}
+	completedCount := spider.downloadedTotal + spider.unresolvedFailedTotal()
+	if completedCount > totalDownloadCount {
+		completedCount = totalDownloadCount
+	}
+	return completedCount * 100 / totalDownloadCount
+}
+
+func (spider *pageSpider) publishResourceProgress(stage, currentURL string, currentPercent int, currentDownloadedBytes, sizeBytes int64) {
 	if spider.tracker == nil || strings.TrimSpace(spider.progressToken) == "" {
 		return
 	}
-	completedPercent := 0
-	if spider.foundTotal > 0 {
-		completedPercent = (spider.downloadedTotal + spider.unresolvedFailedTotal()) * 100 / spider.foundTotal
-	}
+	totalDownloadedBytes := spider.recordDownloadedBytes(stage, currentURL, currentDownloadedBytes, sizeBytes)
+	completedPercent := spider.progressPercent(totalDownloadedBytes)
 	currentError := ""
 	if stage == "error" && currentURL != "" {
 		currentError = strings.TrimSpace(spider.failedResourceErrors[currentURL])
 	}
 	spider.tracker.publish(grabProgressEvent{
-		Token: spider.progressToken, Stage: stage, FoundTotal: spider.foundTotal, DownloadedTotal: spider.downloadedTotal, FailedTotal: spider.unresolvedFailedTotal(),
-		FailedReasons: spider.failedResourceReasonMap(), CurrentURL: currentURL, CurrentError: currentError, CurrentPercent: currentPercent, CurrentDownloadedBytes: downloadedBytes, CurrentSizeBytes: sizeBytes, CompletedPercent: completedPercent,
+		Token: spider.progressToken, Stage: stage, FoundTotal: spider.foundTotal, DownloadedTotal: spider.downloadedTotal, DownloadTotal: spider.downloadTotal, DownloadedBytes: totalDownloadedBytes, DownloadTotalBytes: spider.downloadTotalBytes, FailedTotal: spider.unresolvedFailedTotal(),
+		FailedReasons: spider.failedResourceReasonMap(), CurrentURL: currentURL, CurrentError: currentError, CurrentPercent: currentPercent, CurrentDownloadedBytes: currentDownloadedBytes, CurrentSizeBytes: sizeBytes, CompletedPercent: completedPercent,
 	})
 }
 
@@ -15719,28 +15911,49 @@ func (spider *pageSpider) publishRetryProgress(stage, currentURL string, attempt
 	if spider.tracker == nil || strings.TrimSpace(spider.progressToken) == "" {
 		return
 	}
-	completedPercent := 0
-	if spider.foundTotal > 0 {
-		completedPercent = (spider.downloadedTotal + spider.unresolvedFailedTotal()) * 100 / spider.foundTotal
+	totalDownloadedBytes := spider.recordDownloadedBytes("", "", 0, -1)
+	completedPercent := spider.progressPercent(totalDownloadedBytes)
+	if stage == "done" || stage == "partial" {
+		completedPercent = 100
 	}
 	delaySeconds := int(delay.Seconds())
 	if delaySeconds < 0 {
 		delaySeconds = 0
 	}
 	spider.tracker.publish(grabProgressEvent{
-		Token:             spider.progressToken,
-		Stage:             stage,
-		FoundTotal:        spider.foundTotal,
-		DownloadedTotal:   spider.downloadedTotal,
-		FailedTotal:       spider.unresolvedFailedTotal(),
-		FailedURLs:        spider.failedResourceURLList(),
-		FailedReasons:     spider.failedResourceReasonMap(),
-		RetryAttempt:      attempt,
-		RetryTotal:        total,
-		RetryDelaySeconds: delaySeconds,
-		CurrentURL:        currentURL,
-		CompletedPercent:  completedPercent,
+		Token:              spider.progressToken,
+		Stage:              stage,
+		FoundTotal:         spider.foundTotal,
+		DownloadedTotal:    spider.downloadedTotal,
+		DownloadTotal:      spider.downloadTotal,
+		DownloadedBytes:    totalDownloadedBytes,
+		DownloadTotalBytes: spider.downloadTotalBytes,
+		FailedTotal:        spider.unresolvedFailedTotal(),
+		FailedURLs:         spider.failedResourceURLList(),
+		FailedReasons:      spider.failedResourceReasonMap(),
+		RetryAttempt:       attempt,
+		RetryTotal:         total,
+		RetryDelaySeconds:  delaySeconds,
+		CurrentURL:         currentURL,
+		CompletedPercent:   completedPercent,
 	})
+}
+
+func (spider *pageSpider) finalProgressEvent(token, stage string) grabProgressEvent {
+	totalDownloadedBytes := spider.recordDownloadedBytes("", "", 0, -1)
+	return grabProgressEvent{
+		Token:              token,
+		Stage:              stage,
+		FoundTotal:         spider.foundTotal,
+		DownloadedTotal:    spider.downloadedTotal,
+		DownloadTotal:      spider.downloadTotal,
+		DownloadedBytes:    totalDownloadedBytes,
+		DownloadTotalBytes: spider.downloadTotalBytes,
+		FailedTotal:        spider.unresolvedFailedTotal(),
+		FailedURLs:         spider.failedResourceURLList(),
+		FailedReasons:      spider.failedResourceReasonMap(),
+		CompletedPercent:   100,
+	}
 }
 
 func (spider *pageSpider) waitBeforeRetry(currentURL string, attempt, total int) {
@@ -15748,7 +15961,10 @@ func (spider *pageSpider) waitBeforeRetry(currentURL string, attempt, total int)
 		return
 	}
 	spider.publishRetryProgress("retry_wait", currentURL, attempt, total, grabImportFailedResourceRetryDelay)
-	time.Sleep(grabImportFailedResourceRetryDelay)
+	select {
+	case <-spider.context().Done():
+	case <-time.After(grabImportFailedResourceRetryDelay):
+	}
 }
 
 func (spider *pageSpider) readResourceBody(reader io.Reader, resourceURL string, sizeBytes int64) ([]byte, error) {
@@ -15816,13 +16032,22 @@ func (spider *pageSpider) retryFailedResources(baseURL *url.URL, attempts int) {
 		return
 	}
 	for attempt := 1; attempt <= attempts && spider.unresolvedFailedTotal() > 0; attempt++ {
+		if spider.contextCanceled() {
+			return
+		}
 		failedURLs := spider.failedResourceURLList()
 		currentRetryURL := ""
 		if len(failedURLs) > 0 {
 			currentRetryURL = failedURLs[0]
 		}
 		spider.waitBeforeRetry(currentRetryURL, attempt, attempts)
+		if spider.contextCanceled() {
+			return
+		}
 		for _, failedURL := range failedURLs {
+			if spider.contextCanceled() {
+				return
+			}
 			failedPageURL, failedPageParseErr := url.Parse(failedURL)
 			if failedPageParseErr == nil && crawler.SameHost(spider.pageURL, failedPageURL) && crawler.IsWholeSitePageURL(failedPageURL) {
 				continue
@@ -16098,7 +16323,7 @@ func (spider *pageSpider) collectPreviewResource(normalizedURL string, depth int
 }
 
 func (spider *pageSpider) previewResourceMetadata(normalizedURL string) (string, int64) {
-	request, err := http.NewRequest(http.MethodHead, normalizedURL, nil)
+	request, err := http.NewRequestWithContext(spider.context(), http.MethodHead, normalizedURL, nil)
 	if err != nil {
 		return "", -1
 	}
@@ -16124,7 +16349,7 @@ func (spider *pageSpider) shouldFetchPreviewResourceBody(normalizedURL, contentT
 }
 
 func (spider *pageSpider) fetchPreviewResourceBody(normalizedURL string) ([]byte, string, int64, error) {
-	request, err := http.NewRequest(http.MethodGet, normalizedURL, nil)
+	request, err := http.NewRequestWithContext(spider.context(), http.MethodGet, normalizedURL, nil)
 	if err != nil {
 		return nil, "", -1, err
 	}
@@ -16279,6 +16504,19 @@ type grabProgressTracker struct {
 	tracker *crawler.ProgressTracker
 }
 
+type grabCancelRequest struct {
+	action   string
+	token    string
+	parent   context.Context
+	context  chan context.Context
+	canceled chan bool
+	done     chan struct{}
+}
+
+type grabCancelTracker struct {
+	requests chan grabCancelRequest
+}
+
 type publishTrackerRequest struct {
 	action string
 	token  string
@@ -16296,6 +16534,89 @@ type webSocketTextWriter struct {
 
 func newGrabProgressTracker() *grabProgressTracker {
 	return &grabProgressTracker{tracker: crawler.NewProgressTracker()}
+}
+
+func newGrabCancelTracker() *grabCancelTracker {
+	tracker := &grabCancelTracker{requests: make(chan grabCancelRequest)}
+	go tracker.loop()
+	return tracker
+}
+
+var fallbackGrabCancelTracker = newGrabCancelTracker()
+
+func (a *App) activeGrabCancelTracker() *grabCancelTracker {
+	if a != nil && a.grabCancels != nil {
+		return a.grabCancels
+	}
+	return fallbackGrabCancelTracker
+}
+
+func (a *App) grabImportDownloadContext(parent context.Context, token string) (context.Context, func()) {
+	if parent == nil {
+		parent = context.Background()
+	}
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return parent, func() {}
+	}
+	return a.activeGrabCancelTracker().Register(parent, token)
+}
+
+func (tracker *grabCancelTracker) Register(parent context.Context, token string) (context.Context, func()) {
+	response := make(chan context.Context)
+	tracker.requests <- grabCancelRequest{action: "register", token: token, parent: parent, context: response}
+	downloadContext := <-response
+	return downloadContext, func() {
+		done := make(chan struct{})
+		tracker.requests <- grabCancelRequest{action: "finish", token: token, done: done}
+		<-done
+	}
+}
+
+func (tracker *grabCancelTracker) Cancel(token string) bool {
+	response := make(chan bool)
+	tracker.requests <- grabCancelRequest{action: "cancel", token: token, canceled: response}
+	return <-response
+}
+
+func (tracker *grabCancelTracker) loop() {
+	cancelByToken := make(map[string]context.CancelFunc)
+	pendingCancelByToken := make(map[string]struct{})
+	for request := range tracker.requests {
+		switch request.action {
+		case "register":
+			if previousCancel := cancelByToken[request.token]; previousCancel != nil {
+				previousCancel()
+			}
+			parent := request.parent
+			if parent == nil {
+				parent = context.Background()
+			}
+			downloadContext, cancel := context.WithCancel(parent)
+			cancelByToken[request.token] = cancel
+			if _, pending := pendingCancelByToken[request.token]; pending {
+				cancel()
+				delete(pendingCancelByToken, request.token)
+			}
+			request.context <- downloadContext
+		case "cancel":
+			cancel := cancelByToken[request.token]
+			if cancel != nil {
+				cancel()
+				request.canceled <- true
+				continue
+			}
+			pendingCancelByToken[request.token] = struct{}{}
+			request.canceled <- false
+		case "finish":
+			if cancel := cancelByToken[request.token]; cancel != nil {
+				cancel()
+			}
+			delete(cancelByToken, request.token)
+			delete(pendingCancelByToken, request.token)
+			close(request.done)
+		}
+	}
 }
 
 func (tracker *grabProgressTracker) subscribe(token string) chan grabProgressEvent {

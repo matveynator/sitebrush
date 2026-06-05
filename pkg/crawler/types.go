@@ -1,6 +1,9 @@
 package crawler
 
-import "net/url"
+import (
+	"context"
+	"net/url"
+)
 
 // SourceOptions carry transport-level source overrides shared by previews and imports.
 type SourceOptions struct {
@@ -15,7 +18,10 @@ type ImportRequest struct {
 	SourceURL            string
 	RemoteSourceURL      *url.URL
 	HTML                 string
+	Context              context.Context
 	ProgressToken        string
+	DownloadTotal        int
+	DownloadTotalBytes   int64
 	SelectedResourceURLs map[string]struct{}
 	SourceOptions        SourceOptions
 }

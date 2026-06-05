@@ -1,6 +1,7 @@
 package crawler
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -10,13 +11,17 @@ import (
 )
 
 func DownloadHTML(client *http.Client, pageURL *url.URL, applyHeaders func(*http.Request)) (string, bool, error) {
+	return DownloadHTMLContext(context.Background(), client, pageURL, applyHeaders)
+}
+
+func DownloadHTMLContext(ctx context.Context, client *http.Client, pageURL *url.URL, applyHeaders func(*http.Request)) (string, bool, error) {
 	if client == nil {
 		return "", false, errors.New("missing http client")
 	}
 	if pageURL == nil || pageURL.String() == "" {
 		return "", false, errors.New("missing page url")
 	}
-	request, err := http.NewRequest(http.MethodGet, pageURL.String(), nil)
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, pageURL.String(), nil)
 	if err != nil {
 		return "", false, err
 	}

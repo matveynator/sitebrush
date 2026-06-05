@@ -146,7 +146,7 @@
   }
 
   function clearSelectionFields(formElement) {
-    const hiddenFieldElements = formElement.querySelectorAll('input[name="import_selection_confirmed"],input[name="import_resource_url"]');
+    const hiddenFieldElements = formElement.querySelectorAll('input[name="import_selection_confirmed"],input[name="import_resource_url"],input[name="import_download_total"],input[name="import_download_total_bytes"]');
     for (const hiddenFieldElement of hiddenFieldElements) {
       hiddenFieldElement.remove();
     }
@@ -161,6 +161,105 @@
       }
     }
     return byteCount;
+  }
+
+  function appendDownloadPlanFields(formElement, downloadTotal, downloadTotalBytes) {
+    appendHiddenField(formElement, 'import_download_total', String(Math.max(0, Number(downloadTotal) || 0)));
+    appendHiddenField(formElement, 'import_download_total_bytes', String(Math.max(0, Number(downloadTotalBytes) || 0)));
+  }
+
+  function buildDownloadProgressModel(resourcesElement, wholeSiteImportSelected, downloadPreviewPayload) {
+    const selectedResourceURLs = new Set();
+    let selectedResourceBytes = 0;
+    const checkboxElements = resourcesElement.querySelectorAll('input[data-sitebrush-copy-resource-url]');
+    for (const checkboxElement of checkboxElements) {
+      if (!checkboxElement.checked) {
+        continue;
+      }
+      const resourceURL = checkboxElement.dataset.sitebrushCopyResourceUrl || '';
+      if (resourceURL === '') {
+        continue;
+      }
+      const resourceSizeBytes = Number(checkboxElement.dataset.sitebrushCopyResourceSizeBytes) || 0;
+      selectedResourceURLs.add(resourceURL);
+      if (resourceSizeBytes > 0) {
+        selectedResourceBytes += resourceSizeBytes;
+      }
+    }
+    const pageTargetCount = wholeSiteImportSelected ? Math.max(1, Number(downloadPreviewPayload && downloadPreviewPayload.page_count) || 1) : 0;
+    const pageDownloadBytes = wholeSiteImportSelected ? Math.max(0, Number(downloadPreviewPayload && downloadPreviewPayload.page_download_bytes) || 0) : 0;
+    return {
+      selectedResourceURLs: selectedResourceURLs,
+      completedURLs: new Set(),
+      downloadedBytesByURL: new Map(),
+      totalTargets: pageTargetCount + selectedResourceURLs.size,
+      totalBytes: pageDownloadBytes + selectedResourceBytes
+    };
+  }
+
+  function buildRetryProgressModel(failedResourceURLs) {
+    return {
+      selectedResourceURLs: new Set(failedResourceURLs),
+      completedURLs: new Set(),
+      downloadedBytesByURL: new Map(),
+      totalTargets: Math.max(1, failedResourceURLs.size),
+      totalBytes: 0
+    };
+  }
+
+  function summarizeDownloadProgress(downloadProgressModel, progressPayload) {
+    if (!downloadProgressModel || downloadProgressModel.totalTargets <= 0) {
+      const serverDownloadTotal = Number(progressPayload.download_total) || 0;
+      const serverDownloadedBytes = Number(progressPayload.downloaded_bytes) || 0;
+      const serverDownloadTotalBytes = Number(progressPayload.download_total_bytes) || 0;
+      let completedPercent = Number(progressPayload.completed_percent) || 0;
+      if (serverDownloadTotalBytes > 0) {
+        completedPercent = Math.round(Math.min(serverDownloadedBytes, serverDownloadTotalBytes) * 100 / serverDownloadTotalBytes);
+      }
+      return {
+        completedTotal: Number(progressPayload.downloaded_total) || 0,
+        foundTotal: serverDownloadTotal || Number(progressPayload.found_total) || 0,
+        completedPercent: Math.max(0, Math.min(100, completedPercent))
+      };
+    }
+    const currentURL = progressPayload.current_url || '';
+    if (currentURL !== '') {
+      const currentDownloadedBytes = Number(progressPayload.current_downloaded_bytes) || 0;
+      const currentSizeBytes = Number(progressPayload.current_size_bytes) || 0;
+      let recordedDownloadedBytes = currentDownloadedBytes;
+      if (progressPayload.stage === 'downloaded' && currentSizeBytes > 0) {
+        recordedDownloadedBytes = currentSizeBytes;
+      }
+      if (recordedDownloadedBytes > 0) {
+        downloadProgressModel.downloadedBytesByURL.set(currentURL, recordedDownloadedBytes);
+      }
+      if (progressPayload.stage === 'downloaded' || progressPayload.stage === 'error') {
+        downloadProgressModel.completedURLs.add(currentURL);
+      }
+    }
+    let completedTotal = Math.min(downloadProgressModel.completedURLs.size, downloadProgressModel.totalTargets);
+    let downloadedBytes = 0;
+    for (const downloadedByteCount of downloadProgressModel.downloadedBytesByURL.values()) {
+      downloadedBytes += Number(downloadedByteCount) || 0;
+    }
+    if (downloadProgressModel.totalBytes > 0) {
+      downloadedBytes = Math.min(downloadedBytes, downloadProgressModel.totalBytes);
+    }
+    let completedPercent = 0;
+    if (downloadProgressModel.totalBytes > 0) {
+      completedPercent = Math.round(downloadedBytes * 100 / downloadProgressModel.totalBytes);
+    } else {
+      completedPercent = Math.round(completedTotal * 100 / downloadProgressModel.totalTargets);
+    }
+    if (progressPayload.stage === 'done' || progressPayload.stage === 'partial') {
+      completedTotal = downloadProgressModel.totalTargets;
+      completedPercent = 100;
+    }
+    return {
+      completedTotal: completedTotal,
+      foundTotal: downloadProgressModel.totalTargets,
+      completedPercent: Math.max(0, Math.min(100, completedPercent))
+    };
   }
 
   function renderQuotaSummary(quotaElement, resourcesElement, previewPayload, configuration, continueButtonElement) {
@@ -219,7 +318,7 @@
     resourcesElement.appendChild(resourceRowElement);
   }
 
-  function syncSelectedResources(formElement, resourcesElement) {
+  function syncSelectedResources(formElement, resourcesElement, wholeSiteImportSelected, downloadPreviewPayload) {
     clearSelectionFields(formElement);
     appendHiddenField(formElement, 'import_selection_confirmed', '1');
     const checkboxElements = resourcesElement.querySelectorAll('input[data-sitebrush-copy-resource-url]');
@@ -228,6 +327,8 @@
         appendHiddenField(formElement, 'import_resource_url', checkboxElement.dataset.sitebrushCopyResourceUrl || '');
       }
     }
+    const downloadProgressSummary = buildDownloadProgressModel(resourcesElement, wholeSiteImportSelected, downloadPreviewPayload);
+    appendDownloadPlanFields(formElement, downloadProgressSummary.totalTargets, downloadProgressSummary.totalBytes);
   }
 
   function syncFailedResources(formElement, failedResourceURLs) {
@@ -237,6 +338,7 @@
     for (const failedResourceURL of sortedFailedResourceURLs) {
       appendHiddenField(formElement, 'import_resource_url', failedResourceURL);
     }
+    appendDownloadPlanFields(formElement, sortedFailedResourceURLs.length, 0);
   }
 
   function openCopySiteModal(configuration) {
@@ -338,12 +440,15 @@
     let failedResourceURLs = new Set();
     let failedResourceReasons = new Map();
     let importedRedirectPath = '';
+    let downloadProgressModel = null;
     let retryWasAttempted = false;
     let partialImportCanRetry = false;
     let requestIsRunning = false;
     let streamClosedIntentionally = false;
     let retryCountdownTimer = 0;
     let activeDownloadEndpoint = '?grab';
+    let activeGrabToken = '';
+    let downloadCancelRequested = false;
 
     function closeModal() {
       closeProgressStream();
@@ -364,6 +469,21 @@
       closeProgressStream();
       stopRetryCountdown();
       window.location.href = importedRedirectPath || targetPath || '/';
+    }
+
+    function requestActiveDownloadCancel() {
+      if (activeGrabToken === '' || downloadCancelRequested) {
+        return;
+      }
+      downloadCancelRequested = true;
+      cancelButtonElement.disabled = true;
+      statusElement.textContent = textFromConfig(configuration, 'partialImportClose', 'Finishing import...');
+      const cancelRequestBody = new URLSearchParams();
+      cancelRequestBody.append('progress_token', activeGrabToken);
+      fetch(targetPath + '?grab_cancel', { method: 'POST', body: cancelRequestBody, headers: { Accept: 'application/json' } })
+        .catch(function ignoreCancelError() {
+          cancelButtonElement.disabled = false;
+        });
     }
 
     function collectFailedURLs(progressPayload) {
@@ -514,8 +634,9 @@
         if (progressPayload.stage !== 'retry_wait') {
           stopRetryCountdown();
         }
-        const completedPercent = Math.max(0, Math.min(100, Number(progressPayload.completed_percent) || 0));
-        setProgress(progressBarElement, progressPayload.stage === 'done' ? 100 : completedPercent);
+        const progressSummary = summarizeDownloadProgress(downloadProgressModel, progressPayload);
+        const completedPercent = progressPayload.stage === 'done' ? 100 : progressSummary.completedPercent;
+        setProgress(progressBarElement, completedPercent);
         collectFailedURLs(progressPayload);
         if (progressPayload.stage === 'retry_wait') {
           renderFailedResources();
@@ -543,10 +664,11 @@
           failedResourceURLs.delete(downloadedURL);
           failedResourceReasons.delete(downloadedURL);
         }
-        const downloadedTotal = Number(progressPayload.downloaded_total) || 0;
-        const foundTotal = Number(progressPayload.found_total) || 0;
+        const downloadedTotal = progressSummary.completedTotal;
+        const foundTotal = progressSummary.foundTotal;
         const remainingTotal = Math.max(foundTotal - downloadedTotal, 0);
-        statusElement.textContent = textFromConfig(configuration, 'progressDownloadedPrefix', 'Downloaded') + ' ' + downloadedTotal + ' ' + textFromConfig(configuration, 'fromWord', 'of') + ' ' + foundTotal + '. ' + textFromConfig(configuration, 'leftWord', 'Left') + ' ' + remainingTotal + '.';
+        const remainingPercent = Math.max(100 - completedPercent, 0);
+        statusElement.textContent = textFromConfig(configuration, 'progressDownloadedPrefix', 'Downloaded') + ' ' + downloadedTotal + ' ' + textFromConfig(configuration, 'fromWord', 'of') + ' ' + foundTotal + ' (' + completedPercent + '%). ' + textFromConfig(configuration, 'leftWord', 'Left') + ' ' + remainingTotal + ' (' + remainingPercent + '%).';
         urlElement.textContent = progressPayload.current_url || '';
         if (progressPayload.stage === 'done') {
           stopRetryCountdown();
@@ -606,7 +728,10 @@
       }
       const progressToken = randomProgressToken();
       tokenFieldElement.value = progressToken;
+      activeGrabToken = '';
+      downloadCancelRequested = false;
       previewPayload = null;
+      downloadProgressModel = null;
       failedResourceURLs = new Set();
       failedResourceReasons = new Map();
       importedRedirectPath = '';
@@ -616,8 +741,7 @@
       resourcesElement.classList.add('SiteBrushCopySiteHidden');
       quotaElement.classList.add('SiteBrushCopySiteHidden');
       continueButtonElement.classList.add('SiteBrushCopySiteHidden');
-      progressElement.classList.remove('SiteBrushCopySiteHidden');
-      setProgress(progressBarElement, 0);
+      progressElement.classList.add('SiteBrushCopySiteHidden');
       statusElement.textContent = textFromConfig(configuration, 'previewResourcesText', 'Checking resources...');
       urlElement.textContent = sourceUrlElement.value;
       submitButtonElement.disabled = true;
@@ -654,6 +778,8 @@
       }
       const progressToken = randomProgressToken();
       tokenFieldElement.value = progressToken;
+      activeGrabToken = progressToken;
+      downloadCancelRequested = false;
       downloadFinishedWithErrors = false;
       const retryOnlyFailedResources = partialImportCanRetry && failedResourceURLs.size > 0;
       if (retryOnlyFailedResources) {
@@ -661,18 +787,21 @@
         partialImportCanRetry = false;
         activeDownloadEndpoint = '?grab_retry';
         syncFailedResources(formElement, failedResourceURLs);
+        downloadProgressModel = buildRetryProgressModel(failedResourceURLs);
       } else {
         retryWasAttempted = false;
         activeDownloadEndpoint = '?grab';
         failedResourceURLs = new Set();
         failedResourceReasons = new Map();
         partialImportCanRetry = false;
-        syncSelectedResources(formElement, resourcesElement);
+        syncSelectedResources(formElement, resourcesElement, wholeSiteElement.checked, previewPayload);
+        downloadProgressModel = buildDownloadProgressModel(resourcesElement, wholeSiteElement.checked, previewPayload);
       }
       progressElement.classList.remove('SiteBrushCopySiteHidden');
       continueButtonElement.classList.add('SiteBrushCopySiteHidden');
       submitButtonElement.disabled = true;
-      cancelButtonElement.disabled = true;
+      cancelButtonElement.disabled = false;
+      cancelButtonElement.textContent = textFromConfig(configuration, 'finishImport', 'Finish import');
       setProgress(progressBarElement, 0);
       statusElement.textContent = textFromConfig(configuration, 'loadingStarted', 'Loading started...');
       urlElement.textContent = '';
@@ -691,6 +820,7 @@
             const redirectPath = downloadPayload.redirect || importedRedirectPath || targetPath;
             importedRedirectPath = redirectPath;
             requestIsRunning = false;
+            activeGrabToken = '';
             if (applyDownloadFailureState(downloadPayload)) {
               submitButtonElement.disabled = false;
               cancelButtonElement.disabled = false;
@@ -709,8 +839,10 @@
           })
           .catch(function handleDownloadError(downloadError) {
             requestIsRunning = false;
+            activeGrabToken = '';
             submitButtonElement.disabled = false;
             cancelButtonElement.disabled = false;
+            cancelButtonElement.textContent = textFromConfig(configuration, 'cancelButton', 'Cancel');
             closeProgressStream();
             statusElement.textContent = downloadError.message || textFromConfig(configuration, 'loadPageFailed', 'Load failed.');
           });
@@ -719,6 +851,10 @@
 
     closeButtonElement.addEventListener('click', closeModal);
     cancelButtonElement.addEventListener('click', function onCancelClick() {
+      if (requestIsRunning && activeGrabToken !== '') {
+        requestActiveDownloadCancel();
+        return;
+      }
       if (downloadFinishedWithErrors || importedRedirectPath) {
         finishPartialImport();
         return;

@@ -4980,6 +4980,12 @@ func TestGrabPageCanCopyWholeExternalSiteUnderLocalPath(t *testing.T) {
 	if previewPayload.ResourceCount < 8 {
 		t.Fatalf("whole-site preview resource count = %d, want at least 8: %#v", previewPayload.ResourceCount, previewPayload.Resources)
 	}
+	if previewPayload.DownloadTotal != previewPayload.PageCount+previewPayload.ResourceCount {
+		t.Fatalf("whole-site preview download total = %d, want page + resource count %d", previewPayload.DownloadTotal, previewPayload.PageCount+previewPayload.ResourceCount)
+	}
+	if previewPayload.DownloadTotalBytes <= previewPayload.PageDownloadBytes {
+		t.Fatalf("whole-site preview download bytes = %d, want more than page bytes %d", previewPayload.DownloadTotalBytes, previewPayload.PageDownloadBytes)
+	}
 	for _, previewResource := range previewPayload.Resources {
 		if strings.Contains(previewResource.URL, "outside.example") {
 			t.Fatalf("whole-site preview included external document link as resource: %#v", previewPayload.Resources)

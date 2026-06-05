@@ -269,7 +269,7 @@
   }
 
   function clearFailedResourceFields() {
-    for (const selectedResourceElement of grabFormElement.querySelectorAll('input[name="import_resource_url"], input[name="import_selection_confirmed"]')) {
+    for (const selectedResourceElement of grabFormElement.querySelectorAll('input[name="import_resource_url"], input[name="import_selection_confirmed"], input[name="import_download_total"], input[name="import_download_total_bytes"]')) {
       selectedResourceElement.remove();
     }
   }
@@ -282,6 +282,11 @@
     grabFormElement.appendChild(hiddenFieldElement);
   }
 
+  function appendDownloadPlanFields(downloadTotal, downloadTotalBytes) {
+    appendHiddenGrabField('import_download_total', String(Math.max(0, Number(downloadTotal) || 0)));
+    appendHiddenGrabField('import_download_total_bytes', String(Math.max(0, Number(downloadTotalBytes) || 0)));
+  }
+
   function syncFailedResourceFields() {
     clearFailedResourceFields();
     appendHiddenGrabField('import_selection_confirmed', '1');
@@ -289,6 +294,7 @@
     for (const failedResourceURL of sortedFailedResourceURLs) {
       appendHiddenGrabField('import_resource_url', failedResourceURL);
     }
+    appendDownloadPlanFields(sortedFailedResourceURLs.length, 0);
   }
 
   function retryStatusText(progressState, secondsLeft) {
@@ -420,6 +426,8 @@
       if (!checkboxElement.checked) { continue; }
       appendHiddenGrabField('import_resource_url', checkboxElement.dataset.grabResourceUrl || '');
     }
+    const downloadProgressSummary = buildDownloadProgressModel(currentPreviewPayload);
+    appendDownloadPlanFields(downloadProgressSummary.totalTargets, downloadProgressSummary.totalBytes);
   }
 
   function buildGrabRequestBody() {
@@ -582,10 +590,17 @@
 
   function summarizeDownloadProgress(progressState) {
     if (!downloadProgressModel || downloadProgressModel.totalTargets <= 0) {
+      const serverDownloadTotal = Number(progressState.download_total) || 0;
+      const serverDownloadedBytes = Number(progressState.downloaded_bytes) || 0;
+      const serverDownloadTotalBytes = Number(progressState.download_total_bytes) || 0;
+      let completedPercent = Number(progressState.completed_percent) || 0;
+      if (serverDownloadTotalBytes > 0) {
+        completedPercent = Math.round(Math.min(serverDownloadedBytes, serverDownloadTotalBytes) * 100 / serverDownloadTotalBytes);
+      }
       return {
         completedTotal: Number(progressState.downloaded_total) || 0,
-        foundTotal: Number(progressState.found_total) || 0,
-        completedPercent: Number(progressState.completed_percent) || 0
+        foundTotal: serverDownloadTotal || Number(progressState.found_total) || 0,
+        completedPercent: Math.max(0, Math.min(100, completedPercent))
       };
     }
     const currentURL = progressState.current_url || '';

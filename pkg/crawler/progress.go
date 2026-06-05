@@ -6,6 +6,9 @@ type ProgressEvent struct {
 	Stage                  string            `json:"stage"`
 	FoundTotal             int               `json:"found_total"`
 	DownloadedTotal        int               `json:"downloaded_total"`
+	DownloadTotal          int               `json:"download_total,omitempty"`
+	DownloadedBytes        int64             `json:"downloaded_bytes,omitempty"`
+	DownloadTotalBytes     int64             `json:"download_total_bytes,omitempty"`
 	FailedTotal            int               `json:"failed_total"`
 	FailedURLs             []string          `json:"failed_urls,omitempty"`
 	FailedReasons          map[string]string `json:"failed_reasons,omitempty"`
