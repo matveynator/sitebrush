@@ -5719,6 +5719,7 @@ func (a *App) setupAdmin(w http.ResponseWriter, r *http.Request) {
 			a.renderSetupPage(w, r, domain, email, err.Error())
 			return
 		}
+		a.activatePublicTrialAfterAdminRegistration(registerContext, domain)
 		a.promoteFirstServerOwner(registerContext, domain, email)
 		a.createSessionForDomain(w, registerContext, domain, email)
 		http.Redirect(w, r, safeConfirmationReturnPath(requestedReturnPath(r)), http.StatusFound)
@@ -7427,6 +7428,32 @@ func (a *App) cleanupExpiredPublicTrialSite(ctx context.Context, domain string) 
 	if deleteErr := a.deleteDemoManagedSiteWithoutBackup(ctx, controlDatabase, domain); deleteErr != nil {
 		log.Printf("expired public trial cleanup failed domain=%s error=%v", domain, deleteErr)
 	}
+}
+
+func (a *App) activatePublicTrialAfterAdminRegistration(ctx context.Context, domain string) {
+	domain = normalizeDomainName(domain)
+	if domain == "" {
+		return
+	}
+	controlDatabase, err := a.openServerControlDatabase(ctx)
+	if err != nil {
+		return
+	}
+	defer controlDatabase.Close()
+	store := billing.Store{DB: controlDatabase}
+	assignments := store.ServiceAssignments(ctx)
+	assignment, found := assignments[domain]
+	if !found {
+		return
+	}
+	serviceStatus := strings.ToLower(strings.TrimSpace(assignment.ServiceStatus))
+	if serviceStatus == "free" {
+		return
+	}
+	if serviceStatus != "trial" {
+		return
+	}
+	_ = store.AssignSite(ctx, domain, assignment.PlanID, "trial")
 }
 
 func (a *App) rawManagedSiteHasAdmin(ctx context.Context, domain string) bool {
@@ -10623,6 +10650,7 @@ func (a *App) confirmEmailToken(w http.ResponseWriter, r *http.Request) {
 			a.renderEmailConfirmationStatus(w, r, http.StatusBadRequest, err.Error())
 			return
 		}
+		a.activatePublicTrialAfterAdminRegistration(registerContext, confirmation.Domain)
 		a.deleteRegistrationConfirmation(registerContext, token)
 		a.promoteFirstServerOwner(registerContext, confirmation.Domain, confirmation.Email)
 		a.createSessionForDomain(w, registerContext, confirmation.Domain, confirmation.Email)
