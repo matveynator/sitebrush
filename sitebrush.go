@@ -7203,11 +7203,12 @@ func (a *App) publicTrialSitePreview(w http.ResponseWriter, r *http.Request) {
 	initialSpider.resources[sourceURL] = initialRootResource
 	initialSpider.collectPreviewNestedResources(initialRootResource, 0, "text/html")
 	initialHTML := string(initialRootResource.content)
+	initialImportedPages := []wholeSiteImportedPage{{SourceURL: sourceURL, LocalPath: "/", HTML: initialHTML}}
 	initialResources := previewResourcesFromSpider(initialSpider, map[string]struct{}{sourceURL: {}})
 	a.activePublicTrialPreviewStore().Save(publicTrialPreview{
 		Token:          progressToken,
 		SourceURL:      sourceURL,
-		ImportedPages:  []wholeSiteImportedPage{{SourceURL: sourceURL, LocalPath: "/", HTML: initialHTML}},
+		ImportedPages:  initialImportedPages,
 		Resources:      initialResources,
 		Spider:         initialSpider,
 		PageCount:      1,
@@ -7215,9 +7216,17 @@ func (a *App) publicTrialSitePreview(w http.ResponseWriter, r *http.Request) {
 		ResourceCounts: publicTrialResourceCountsFromResources(initialResources),
 	})
 	wholeSitePreview := previewWholeRemoteSiteResources(remoteSourceURL, string(htmlBytes), "/", a.grabTracker, progressToken, grabSourceOptions{})
-	resourceBytes := sumGrabPreviewResourceBytes(wholeSitePreview.Resources)
+	importedPages := wholeSitePreview.ImportedPages
+	if len(importedPages) == 0 {
+		importedPages = initialImportedPages
+	}
+	resources := wholeSitePreview.Resources
+	if len(resources) == 0 {
+		resources = initialResources
+	}
+	resourceBytes := sumGrabPreviewResourceBytes(resources)
 	pageBytes := int64(0)
-	for _, importedPage := range wholeSitePreview.ImportedPages {
+	for _, importedPage := range importedPages {
 		pageBytes += int64(len([]byte(importedPage.HTML)))
 	}
 	requiredBytes := pageBytes + resourceBytes
@@ -7225,12 +7234,12 @@ func (a *App) publicTrialSitePreview(w http.ResponseWriter, r *http.Request) {
 	preview := publicTrialPreview{
 		Token:          progressToken,
 		SourceURL:      sourceURL,
-		ImportedPages:  wholeSitePreview.ImportedPages,
-		Resources:      wholeSitePreview.Resources,
+		ImportedPages:  importedPages,
+		Resources:      resources,
 		Spider:         wholeSitePreview.Spider,
 		PageCount:      wholeSitePreview.PageCount,
-		ResourceCount:  len(wholeSitePreview.Resources),
-		ResourceCounts: publicTrialResourceCountsFromResources(wholeSitePreview.Resources),
+		ResourceCount:  len(resources),
+		ResourceCounts: publicTrialResourceCountsFromResources(resources),
 		TotalBytes:     requiredBytes,
 		RequiredBytes:  requiredBytes,
 		Plan:           plan,
@@ -7246,7 +7255,7 @@ func (a *App) publicTrialSitePreview(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(publicTrialPreviewResponse{
 		SourceURL:      sourceURL,
-		PreviewURL:     "/?trial_site_preview_frame&token=" + url.QueryEscape(progressToken),
+		PreviewURL:     absoluteURLForPath(r, "/?trial_site_preview_frame&token="+url.QueryEscape(progressToken)),
 		PageCount:      preview.PageCount,
 		ResourceCount:  preview.ResourceCount,
 		ResourceCounts: preview.ResourceCounts,
@@ -9139,13 +9148,15 @@ func publicTrialSignupEmbedHTML(r *http.Request, translations map[string]string)
 	formTitle := translationOrDefault(translations, "public_trial_form_title", "Enter the website where you want to launch SiteBrush:")
 	fieldLabel := translationOrDefault(translations, "public_trial_field_label", "Website address")
 	buttonLabel := translationOrDefault(translations, "public_trial_check_button", "Check website")
+	endpointURL := absoluteURLForPath(r, "/")
+	scriptURL := absoluteURLForPath(r, "/p/static/site_copy.js")
 	config := map[string]any{
-		"endpoint": "/",
+		"endpoint": endpointURL,
 		"texts":    publicTrialWidgetTexts(translations),
 	}
 	configJSON, err := json.Marshal(config)
 	if err != nil {
-		configJSON = []byte(`{"endpoint":"/","texts":{}}`)
+		configJSON = []byte(`{"endpoint":` + strconv.Quote(endpointURL) + `,"texts":{}}`)
 	}
 	return `<form class="SiteBrushPublicTrialForm" data-sitebrush-public-trial-form>
   <p data-sitebrush-public-trial-title>` + template.HTMLEscapeString(formTitle) + `</p>
@@ -9154,7 +9165,7 @@ func publicTrialSignupEmbedHTML(r *http.Request, translations map[string]string)
   </label>
   <button type="submit">` + template.HTMLEscapeString(buttonLabel) + `</button>
 </form>
-<script src="/p/static/site_copy.js"></script>
+<script src="` + template.HTMLEscapeString(scriptURL) + `"></script>
 <script>(function(){var currentScript=document.currentScript;var formElement=currentScript&&currentScript.parentNode?currentScript.parentNode.querySelector("[data-sitebrush-public-trial-form]"):null;if(window.SiteBrushPublicTrial&&formElement){window.SiteBrushPublicTrial.attach(formElement, ` + string(configJSON) + `);}})();</script>`
 }
 
