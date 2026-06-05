@@ -9145,28 +9145,34 @@ func (a *App) billingSiteRows(ctx context.Context, plans []billing.Plan, assignm
 }
 
 func publicTrialSignupEmbedHTML(r *http.Request, translations map[string]string) string {
-	formTitle := translationOrDefault(translations, "public_trial_form_title", "Enter the website where you want to launch SiteBrush:")
-	fieldLabel := translationOrDefault(translations, "public_trial_field_label", "Website address")
-	buttonLabel := translationOrDefault(translations, "public_trial_check_button", "Check website")
 	endpointURL := absoluteURLForPath(r, "/")
 	scriptURL := absoluteURLForPath(r, "/p/static/site_copy.js")
-	config := map[string]any{
-		"endpoint": endpointURL,
-		"texts":    publicTrialWidgetTexts(translations),
-	}
+	config := map[string]any{"endpoint": endpointURL}
 	configJSON, err := json.Marshal(config)
 	if err != nil {
-		configJSON = []byte(`{"endpoint":` + strconv.Quote(endpointURL) + `,"texts":{}}`)
+		configJSON = []byte(`{"endpoint":` + strconv.Quote(endpointURL) + `}`)
 	}
-	return `<form class="SiteBrushPublicTrialForm" data-sitebrush-public-trial-form>
-  <p data-sitebrush-public-trial-title>` + template.HTMLEscapeString(formTitle) + `</p>
-  <label><span data-sitebrush-public-trial-label>` + template.HTMLEscapeString(fieldLabel) + `</span>
-    <input type="text" name="source_url" autocomplete="url" inputmode="url" required>
+	return `<form class="SiteBrushPublicTrialForm sitebrush-public-trial-form" data-sitebrush-public-trial-form>
+  <p class="SiteBrushPublicTrialTitle sitebrush-public-trial-title" data-sitebrush-public-trial-title></p>
+  <label class="SiteBrushPublicTrialField sitebrush-public-trial-field">
+    <span class="SiteBrushPublicTrialLabel sitebrush-public-trial-label" data-sitebrush-public-trial-label></span>
+    <input class="SiteBrushPublicTrialInput sitebrush-public-trial-input" data-sitebrush-public-trial-input type="text" name="source_url" autocomplete="url" inputmode="url" required>
   </label>
-  <button type="submit">` + template.HTMLEscapeString(buttonLabel) + `</button>
+  <button class="SiteBrushPublicTrialButton sitebrush-public-trial-button" data-sitebrush-public-trial-submit type="submit"></button>
 </form>
 <script src="` + template.HTMLEscapeString(scriptURL) + `"></script>
-<script>(function(){var currentScript=document.currentScript;var formElement=currentScript&&currentScript.parentNode?currentScript.parentNode.querySelector("[data-sitebrush-public-trial-form]"):null;if(window.SiteBrushPublicTrial&&formElement){window.SiteBrushPublicTrial.attach(formElement, ` + string(configJSON) + `);}})();</script>`
+<script>
+(function () {
+  var currentScript = document.currentScript;
+  var formElement = currentScript && currentScript.parentNode
+    ? currentScript.parentNode.querySelector("[data-sitebrush-public-trial-form]")
+    : null;
+
+  if (window.SiteBrushPublicTrial && formElement) {
+    window.SiteBrushPublicTrial.attach(formElement, ` + string(configJSON) + `);
+  }
+})();
+</script>`
 }
 
 func publicTrialWidgetTexts(translations map[string]string) map[string]string {

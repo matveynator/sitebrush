@@ -430,9 +430,26 @@
     });
   }
 
+  function escapePublicTrialPreviewText(rawText) {
+    return String(rawText)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
+  }
+
+  function localizePublicTrialPreviewHTML(rawHTML) {
+    let localizedHTML = rawHTML;
+    localizedHTML = localizedHTML.replace(/(<p\b[^>]*data-sitebrush-public-trial-title[^>]*>)([\s\S]*?)(<\/p>)/i, '$1' + escapePublicTrialPreviewText({{printf "%q" (index .T "public_trial_form_title")}}) + '$3');
+    localizedHTML = localizedHTML.replace(/(<span\b[^>]*data-sitebrush-public-trial-label[^>]*>)([\s\S]*?)(<\/span>)/i, '$1' + escapePublicTrialPreviewText({{printf "%q" (index .T "public_trial_field_label")}}) + '$3');
+    localizedHTML = localizedHTML.replace(/(<button\b[^>]*data-sitebrush-public-trial-submit[^>]*>)([\s\S]*?)(<\/button>)/i, '$1' + escapePublicTrialPreviewText({{printf "%q" (index .T "public_trial_check_button")}}) + '$3');
+    return localizedHTML;
+  }
+
   if (previewButtonElement && previewFrameElement) {
     previewButtonElement.addEventListener('click', function renderPublicTrialEmbedPreview() {
-      const previewHTML = embedTextAreaElement.value.replace(/<script\b[\s\S]*?<\/script>/gi, '');
+      const previewHTML = localizePublicTrialPreviewHTML(embedTextAreaElement.value.replace(/<script\b[\s\S]*?<\/script>/gi, ''));
       previewFrameElement.srcdoc = '<!doctype html><html><head><base href="' + window.location.origin + '/"><meta name="viewport" content="width=device-width, initial-scale=1"></head><body>' + previewHTML + '</body></html>';
     });
   }

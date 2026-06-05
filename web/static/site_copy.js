@@ -1191,6 +1191,7 @@
     }
     const publicTrialConfiguration = configuration || {};
     formElement.dataset.sitebrushPublicTrialAttached = '1';
+    applyPublicTrialTextsToForm(formElement, publicTrialConfiguration);
     const textsReady = loadPublicTrialTexts(formElement, publicTrialConfiguration);
     formElement.addEventListener('submit', function onPublicTrialSubmit(submitEvent) {
       submitEvent.preventDefault();
