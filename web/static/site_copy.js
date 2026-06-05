@@ -1,5 +1,5 @@
 (function initializeSiteBrushCopySiteModule() {
-  if (window.SiteBrushCopySite) {
+  if (window.SiteBrushCopySite && window.SiteBrushPublicTrial) {
     return;
   }
 
@@ -11,39 +11,51 @@
     styleElement.id = 'SiteBrushCopySiteStyles';
     styleElement.textContent = [
       '.SiteBrushCopySiteOverlay{position:fixed;inset:0;z-index:2147483647;display:flex;align-items:center;justify-content:center;background:rgba(15,23,42,.58);font-family:Arial,Helvetica,sans-serif;color:#1f2937}',
-      '.SiteBrushCopySiteDialog{width:min(760px,calc(100vw - 28px));max-height:calc(100vh - 28px);overflow:auto;background:#fff;border-radius:12px;box-shadow:0 24px 80px rgba(15,23,42,.32);padding:18px}',
+      '.SiteBrushCopySiteDialog{width:min(760px,calc(100vw - 28px));max-height:calc(100vh - 28px);overflow:auto;background:#333;color:#fff;border:1px solid rgba(149,229,239,.28);border-radius:18px;box-shadow:0 28px 70px rgba(0,0,0,.35);padding:18px}',
+      '.SiteBrushPublicTrialForm{display:grid;gap:12px;max-width:640px;padding:18px;border:1px solid rgba(149,229,239,.28);border-radius:18px;background:rgba(0,0,0,.18);color:#fff;font-family:Arial,Helvetica,sans-serif}',
+      '.SiteBrushPublicTrialForm p{margin:0;color:#fff;font-size:20px;font-weight:700;line-height:1.25}',
+      '.SiteBrushPublicTrialForm label{display:grid;gap:6px;color:#b7b7b7;font-size:13px;font-weight:700}',
+      '.SiteBrushPublicTrialForm input{width:100%;box-sizing:border-box;border:1px solid rgba(149,229,239,.28);border-radius:10px;background:rgba(0,0,0,.22);color:#fff;font:inherit;padding:10px 12px}',
+      '.SiteBrushPublicTrialForm button{display:inline-flex;align-items:center;justify-content:center;min-height:38px;border:1px solid rgba(149,229,239,.62);border-radius:10px;background:rgba(149,229,239,.18);color:#fff;font:inherit;font-weight:700;padding:9px 14px;cursor:pointer}',
+      '.SiteBrushPublicTrialDialog{width:min(1180px,calc(100vw - 28px));height:calc(100vh - 28px);display:grid;grid-template-rows:auto minmax(0,1fr) minmax(0,1fr) auto;overflow:hidden}',
       '.SiteBrushCopySiteHeader{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:14px}',
       '.SiteBrushCopySiteTitle{display:flex;align-items:center;gap:8px;margin:0;font-size:20px;line-height:1.2}',
       '.SiteBrushCopySiteTitle img{width:24px;height:24px}',
-      '.SiteBrushCopySiteClose{border:0;background:transparent;color:#64748b;font-size:26px;line-height:1;cursor:pointer;padding:2px 6px}',
+      '.SiteBrushCopySiteClose{border:0;background:transparent;color:#b7b7b7;font-size:26px;line-height:1;cursor:pointer;padding:2px 6px}',
       '.SiteBrushCopySiteForm{display:grid;gap:12px}',
       '.SiteBrushCopySitePrimaryRow{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px}',
       '.SiteBrushCopySiteSecondaryGrid{display:grid;grid-template-columns:1fr 1fr;gap:10px}',
       '.SiteBrushCopySiteField{display:grid;gap:5px;font-size:13px;font-weight:700}',
-      '.SiteBrushCopySiteInput,.SiteBrushCopySiteSelect{width:100%;box-sizing:border-box;border:1px solid #cbd5e1;border-radius:8px;background:#fff;color:#0f172a;font:inherit;font-weight:400;padding:9px 10px}',
+      '.SiteBrushCopySiteInput,.SiteBrushCopySiteSelect{width:100%;box-sizing:border-box;border:1px solid rgba(149,229,239,.28);border-radius:10px;background:rgba(0,0,0,.22);color:#fff;font:inherit;font-weight:400;padding:9px 10px}',
       '.SiteBrushCopySiteCheckbox{display:flex;align-items:center;gap:8px;font-size:14px;font-weight:700}',
-      '.SiteBrushCopySiteButton{display:inline-flex;align-items:center;justify-content:center;gap:7px;border:0;border-radius:8px;background:#198754;color:#fff;font:inherit;font-weight:700;padding:9px 12px;cursor:pointer;white-space:nowrap}',
+      '.SiteBrushCopySiteButton{display:inline-flex;align-items:center;justify-content:center;gap:7px;border:1px solid rgba(149,229,239,.62);border-radius:10px;background:rgba(149,229,239,.18);color:#fff;font:inherit;font-weight:700;padding:9px 12px;cursor:pointer;white-space:nowrap}',
       '.SiteBrushCopySiteButton img{width:18px;height:18px}',
       '.SiteBrushCopySiteButton:disabled{opacity:.58;cursor:not-allowed}',
-      '.SiteBrushCopySiteProgress{height:22px;border-radius:999px;background:#e5e7eb;overflow:hidden;margin-top:12px}',
-      '.SiteBrushCopySiteProgressBar{height:100%;width:0%;background:#2563eb;color:#fff;text-align:center;font-size:12px;line-height:22px;transition:width .18s ease}',
-      '.SiteBrushCopySiteStatus{margin:12px 0 0;color:#111827;font-size:14px;line-height:1.4;overflow-wrap:anywhere}',
-      '.SiteBrushCopySiteURL{margin-top:5px;color:#334155;font-size:12px;overflow-wrap:anywhere}',
-      '.SiteBrushCopySiteQuota{display:grid;gap:4px;margin-top:12px;border:1px solid #e2e8f0;border-radius:8px;padding:10px;font-size:13px}',
+      '.SiteBrushCopySiteProgress{height:22px;border-radius:999px;background:rgba(0,0,0,.38);overflow:hidden;margin-top:12px}',
+      '.SiteBrushCopySiteProgressBar{height:100%;width:0%;background:#95e5ef;color:#252525;text-align:center;font-size:12px;font-weight:700;line-height:22px;transition:width .18s ease}',
+      '.SiteBrushCopySiteStatus{margin:12px 0 0;color:#fff;font-size:14px;line-height:1.4;overflow-wrap:anywhere}',
+      '.SiteBrushCopySiteURL{margin-top:5px;color:#b7b7b7;font-size:12px;overflow-wrap:anywhere}',
+      '.SiteBrushCopySiteQuota{display:grid;gap:4px;margin-top:12px;border:1px solid rgba(149,229,239,.28);border-radius:10px;padding:10px;font-size:13px}',
       '.SiteBrushCopySiteQuotaLine{display:flex;justify-content:space-between;gap:12px}',
-      '.SiteBrushCopySiteQuotaStatus{font-weight:700}.SiteBrushCopySiteQuotaStatus.is-ok{color:#15803d}.SiteBrushCopySiteQuotaStatus.is-error{color:#b91c1c}',
-      '.SiteBrushCopySiteResources{display:grid;gap:0;margin-top:12px;border:1px solid #e2e8f0;border-radius:8px;max-height:270px;overflow:auto}',
-      '.SiteBrushCopySiteResource{display:grid;grid-template-columns:auto auto minmax(0,1fr);gap:8px;align-items:start;padding:9px;border-bottom:1px solid #e2e8f0;font-size:13px}',
+      '.SiteBrushCopySiteQuotaStatus{font-weight:700}.SiteBrushCopySiteQuotaStatus.is-ok{color:#8ee99b}.SiteBrushCopySiteQuotaStatus.is-error{color:#ffa500}',
+      '.SiteBrushCopySiteResources{display:grid;gap:0;margin-top:12px;border:1px solid rgba(149,229,239,.28);border-radius:10px;max-height:270px;overflow:auto}',
+      '.SiteBrushCopySiteResource{display:grid;grid-template-columns:auto auto minmax(0,1fr);gap:8px;align-items:start;padding:9px;border-bottom:1px solid rgba(149,229,239,.18);font-size:13px}',
       '.SiteBrushCopySiteResource:last-child{border-bottom:0}',
-      '.SiteBrushCopySiteResourceKind{border-radius:999px;background:#64748b;color:#fff;padding:2px 7px;font-size:11px}',
+      '.SiteBrushCopySiteResourceKind{border-radius:999px;background:rgba(149,229,239,.18);color:#95e5ef;padding:2px 7px;font-size:11px}',
       '.SiteBrushCopySiteResourceURL{overflow-wrap:anywhere}',
-      '.SiteBrushCopySiteResourceMeta{color:#334155;margin-top:3px}',
-      '.SiteBrushCopySiteResourceReason{color:#b91c1c;margin-top:3px}',
+      '.SiteBrushCopySiteResourceMeta{color:#b7b7b7;margin-top:3px}',
+      '.SiteBrushCopySiteResourceReason{color:#ffa500;margin-top:3px}',
       '.SiteBrushCopySiteActions{display:flex;justify-content:flex-end;gap:8px;margin-top:14px}',
-      '.SiteBrushCopySiteSecondaryButton{border:1px solid #cbd5e1;border-radius:8px;background:#fff;color:#0f172a;font:inherit;font-weight:700;padding:8px 12px;cursor:pointer}',
+      '.SiteBrushCopySiteSecondaryButton{border:1px solid rgba(149,229,239,.28);border-radius:10px;background:rgba(0,0,0,.22);color:#fff;font:inherit;font-weight:700;padding:8px 12px;cursor:pointer}',
+      '.SiteBrushPublicTrialFrame{width:100%;height:100%;border:1px solid rgba(149,229,239,.28);border-radius:10px;background:#fff}',
+      '.SiteBrushPublicTrialStatusPanel{min-height:0;overflow:auto;padding-top:8px}',
+      '.SiteBrushPublicTrialMetrics{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin-top:12px}',
+      '.SiteBrushPublicTrialMetric{display:flex;justify-content:space-between;gap:12px;border:1px solid rgba(149,229,239,.28);border-radius:10px;background:rgba(0,0,0,.18);padding:8px 10px;font-size:13px}',
+      '.SiteBrushPublicTrialMetricLabel{color:#b7b7b7}.SiteBrushPublicTrialMetricValue{color:#fff;text-align:right;overflow-wrap:anywhere}',
+      '.SiteBrushPublicTrialResult{font-weight:700}',
       '.SiteBrushCopySiteHidden{display:none!important}',
-      '@media (max-width:640px){.SiteBrushCopySiteDialog{padding:14px}.SiteBrushCopySitePrimaryRow,.SiteBrushCopySiteSecondaryGrid{grid-template-columns:1fr}.SiteBrushCopySiteActions{flex-direction:column}.SiteBrushCopySiteButton,.SiteBrushCopySiteSecondaryButton{width:100%}}',
-      '@media (prefers-color-scheme:dark){.SiteBrushCopySiteDialog{background:#111827;color:#e5e7eb}.SiteBrushCopySiteInput,.SiteBrushCopySiteSelect,.SiteBrushCopySiteSecondaryButton{background:#0f172a;color:#e5e7eb;border-color:#374151}.SiteBrushCopySiteClose,.SiteBrushCopySiteStatus,.SiteBrushCopySiteURL,.SiteBrushCopySiteResourceMeta{color:#e5e7eb}.SiteBrushCopySiteProgress{background:#374151}.SiteBrushCopySiteQuota,.SiteBrushCopySiteResources,.SiteBrushCopySiteResource{border-color:#374151}}'
+      '@media (max-width:640px){.SiteBrushCopySiteDialog{padding:14px}.SiteBrushCopySitePrimaryRow,.SiteBrushCopySiteSecondaryGrid,.SiteBrushPublicTrialMetrics{grid-template-columns:1fr}.SiteBrushCopySiteActions{flex-direction:column}.SiteBrushCopySiteButton,.SiteBrushCopySiteSecondaryButton{width:100%}}',
+      '.SiteBrushCopySiteButton:hover,.SiteBrushCopySiteSecondaryButton:hover,.SiteBrushPublicTrialForm button:hover{border-color:#95e5ef;background:rgba(149,229,239,.28)}'
     ].join('');
     document.head.appendChild(styleElement);
   }
@@ -67,7 +79,13 @@
     if (normalizedSize < 1024 * 1024) {
       return (normalizedSize / 1024).toFixed(1) + ' KB';
     }
-    return (normalizedSize / 1024 / 1024).toFixed(1) + ' MB';
+    if (normalizedSize < 1024 * 1024 * 1024) {
+      return (normalizedSize / 1024 / 1024).toFixed(1) + ' MB';
+    }
+    if (normalizedSize < 1024 * 1024 * 1024 * 1024) {
+      return (normalizedSize / 1024 / 1024 / 1024).toFixed(1) + ' GB';
+    }
+    return (normalizedSize / 1024 / 1024 / 1024 / 1024).toFixed(1) + ' TB';
   }
 
   function formatSignedSize(sizeBytes, configuration) {
@@ -870,7 +888,297 @@
     sourceUrlElement.focus();
   }
 
+  function publicTrialText(configuration, textName, fallbackText) {
+    return textFromConfig(configuration, textName, fallbackText);
+  }
+
+  function publicTrialWebSocketURL(endpointPath, progressToken) {
+    const eventsURL = new URL(endpointPath || '/', window.location.href);
+    eventsURL.search = '';
+    eventsURL.searchParams.set('trial_site_ws', '');
+    eventsURL.searchParams.set('token', progressToken);
+    eventsURL.protocol = eventsURL.protocol === 'https:' ? 'wss:' : 'ws:';
+    return eventsURL.toString();
+  }
+
+  function publicTrialFetchURL(endpointPath, queryName) {
+    const requestURL = new URL(endpointPath || '/', window.location.href);
+    requestURL.search = '';
+    requestURL.searchParams.set(queryName, '');
+    return requestURL.toString();
+  }
+
+  function publicTrialPreviewFrameURL(endpointPath, progressToken) {
+    const requestURL = new URL(endpointPath || '/', window.location.href);
+    requestURL.search = '';
+    requestURL.searchParams.set('trial_site_preview_frame', '');
+    requestURL.searchParams.set('token', progressToken);
+    return requestURL.toString();
+  }
+
+  function mergePublicTrialTexts(configuration, textsPayload) {
+    if (!textsPayload || !textsPayload.texts) {
+      return configuration;
+    }
+    const nextConfiguration = configuration || {};
+    const mergedTexts = {};
+    const currentTexts = nextConfiguration.texts || {};
+    for (const textName of Object.keys(currentTexts)) {
+      mergedTexts[textName] = currentTexts[textName];
+    }
+    for (const textName of Object.keys(textsPayload.texts)) {
+      mergedTexts[textName] = textsPayload.texts[textName];
+    }
+    nextConfiguration.texts = mergedTexts;
+    return nextConfiguration;
+  }
+
+  function applyPublicTrialTextsToForm(formElement, configuration) {
+    const titleElement = formElement.querySelector('[data-sitebrush-public-trial-title]');
+    const labelTextElement = formElement.querySelector('[data-sitebrush-public-trial-label]');
+    const buttonElement = formElement.querySelector('button[type="submit"]');
+    if (titleElement) {
+      titleElement.textContent = publicTrialText(configuration, 'formTitle', 'Enter the website where you want to launch SiteBrush:');
+    }
+    if (labelTextElement) {
+      labelTextElement.textContent = publicTrialText(configuration, 'fieldLabel', 'Website address');
+    }
+    if (buttonElement) {
+      buttonElement.textContent = publicTrialText(configuration, 'checkButton', 'Check website');
+    }
+  }
+
+  function loadPublicTrialTexts(formElement, configuration) {
+    const endpointPath = configuration.endpoint || '/';
+    return fetch(publicTrialFetchURL(endpointPath, 'trial_site_texts'), { headers: { Accept: 'application/json' } })
+      .then(function parsePublicTrialTexts(textsResponse) {
+        if (!textsResponse.ok) {
+          throw new Error('texts failed');
+        }
+        return textsResponse.json();
+      })
+      .then(function applyLoadedPublicTrialTexts(textsPayload) {
+        mergePublicTrialTexts(configuration, textsPayload);
+        applyPublicTrialTextsToForm(formElement, configuration);
+      })
+      .catch(function ignorePublicTrialTextLoad() {});
+  }
+
+  function createPublicTrialMetric(labelText, metricValue) {
+    const metricElement = createElement('div', 'SiteBrushPublicTrialMetric');
+    metricElement.appendChild(createElement('span', 'SiteBrushPublicTrialMetricLabel', labelText));
+    metricElement.appendChild(createElement('strong', 'SiteBrushPublicTrialMetricValue', String(metricValue)));
+    return metricElement;
+  }
+
+  function publicTrialPlanStorageText(previewPayload, configuration) {
+    const planPayload = previewPayload && previewPayload.plan ? previewPayload.plan : {};
+    const planName = String(planPayload.name || '').trim();
+    const quotaBytes = Number(planPayload.quota_bytes) || 0;
+    const quotaLabel = String(planPayload.quota_label || '').trim();
+    const storageText = quotaLabel !== '' ? quotaLabel : formatSize(quotaBytes, configuration);
+    if (planName === '') {
+      return storageText;
+    }
+    return planName + ': ' + storageText;
+  }
+
+  function publicTrialPlanUsageText(previewPayload) {
+    const planPayload = previewPayload && previewPayload.plan ? previewPayload.plan : {};
+    const requiredBytes = Number(previewPayload && previewPayload.required_bytes) || 0;
+    const quotaBytes = Number(planPayload.quota_bytes) || 0;
+    if (quotaBytes <= 0) {
+      return '0%';
+    }
+    return Math.ceil(requiredBytes * 100 / quotaBytes) + '%';
+  }
+
+  function renderPublicTrialMetrics(metricListElement, configuration, previewPayload, progressState) {
+    const resourceCounts = previewPayload && previewPayload.resource_counts ? previewPayload.resource_counts : {};
+    const foundPages = previewPayload ? previewPayload.page_count : Number(progressState.found_total) || 0;
+    if (!previewPayload) {
+      metricListElement.replaceChildren(createPublicTrialMetric(publicTrialText(configuration, 'pages', 'Found pages'), foundPages));
+      return;
+    }
+    metricListElement.replaceChildren(
+      createPublicTrialMetric(publicTrialText(configuration, 'pages', 'Found pages'), previewPayload.page_count),
+      createPublicTrialMetric(publicTrialText(configuration, 'files', 'Found files'), previewPayload.resource_count),
+      createPublicTrialMetric(publicTrialText(configuration, 'images', 'Images'), Number(resourceCounts.images) || 0),
+      createPublicTrialMetric(publicTrialText(configuration, 'css', 'CSS'), Number(resourceCounts.css) || 0),
+      createPublicTrialMetric(publicTrialText(configuration, 'js', 'JS'), Number(resourceCounts.js) || 0),
+      createPublicTrialMetric(publicTrialText(configuration, 'other', 'Other resources'), Number(resourceCounts.other) || 0),
+      createPublicTrialMetric(publicTrialText(configuration, 'estimatedSize', 'Estimated total size'), formatSize(previewPayload.total_bytes, configuration)),
+      createPublicTrialMetric(publicTrialText(configuration, 'requiredSpace', 'Required disk space'), formatSize(previewPayload.required_bytes, configuration)),
+      createPublicTrialMetric(publicTrialText(configuration, 'planStorage', 'Plan storage'), publicTrialPlanStorageText(previewPayload, configuration)),
+      createPublicTrialMetric(publicTrialText(configuration, 'planUsage', 'Storage used'), publicTrialPlanUsageText(previewPayload))
+    );
+  }
+
+  function openPublicTrialModal(formElement, configuration) {
+    ensureCopySiteStyles();
+    const endpointPath = configuration.endpoint || '/';
+    const progressToken = randomProgressToken();
+    const overlayElement = createElement('div', 'SiteBrushCopySiteOverlay SiteBrushPublicTrialOverlay');
+    const dialogElement = createElement('div', 'SiteBrushCopySiteDialog SiteBrushPublicTrialDialog');
+    const headerElement = createElement('div', 'SiteBrushCopySiteHeader');
+    const titleElement = createElement('h2', 'SiteBrushCopySiteTitle', publicTrialText(configuration, 'modalTitle', 'Checking if SiteBrush can be installed on the selected website:'));
+    const closeButtonElement = createElement('button', 'SiteBrushCopySiteClose', '×');
+    closeButtonElement.type = 'button';
+    headerElement.appendChild(titleElement);
+    headerElement.appendChild(closeButtonElement);
+    const previewFrameElement = createElement('iframe', 'SiteBrushPublicTrialFrame');
+    previewFrameElement.srcdoc = '<!doctype html><html><body></body></html>';
+    previewFrameElement.title = publicTrialText(configuration, 'preparing', 'Preparing the website for SiteBrush...');
+    const statusPanelElement = createElement('div', 'SiteBrushPublicTrialStatusPanel');
+    const statusElement = createElement('p', 'SiteBrushCopySiteStatus', publicTrialText(configuration, 'analyzing', 'Analyzing the website...'));
+    const currentURLElement = createElement('div', 'SiteBrushCopySiteURL', '');
+    const progressElement = createElement('div', 'SiteBrushCopySiteProgress');
+    const progressBarElement = createElement('div', 'SiteBrushCopySiteProgressBar', '0%');
+    const metricListElement = createElement('div', 'SiteBrushPublicTrialMetrics');
+    const resultElement = createElement('p', 'SiteBrushCopySiteStatus SiteBrushPublicTrialResult', '');
+    const actionRowElement = createElement('div', 'SiteBrushCopySiteActions');
+    const createButtonElement = createElement('button', 'SiteBrushCopySiteButton SiteBrushCopySiteHidden', publicTrialText(configuration, 'createButton', 'Create test website'));
+    progressElement.appendChild(progressBarElement);
+    statusPanelElement.appendChild(statusElement);
+    statusPanelElement.appendChild(currentURLElement);
+    statusPanelElement.appendChild(progressElement);
+    statusPanelElement.appendChild(metricListElement);
+    statusPanelElement.appendChild(resultElement);
+    actionRowElement.appendChild(createButtonElement);
+    dialogElement.appendChild(headerElement);
+    dialogElement.appendChild(previewFrameElement);
+    dialogElement.appendChild(statusPanelElement);
+    dialogElement.appendChild(actionRowElement);
+    overlayElement.appendChild(dialogElement);
+    document.body.appendChild(overlayElement);
+    let previewPayload = null;
+    let progressSocket = null;
+    let previewRequestSubmitted = false;
+
+    function closePublicTrialModal() {
+      if (progressSocket) {
+        progressSocket.close();
+        progressSocket = null;
+      }
+      overlayElement.remove();
+    }
+
+    function connectProgressSocket(submitPreviewRequest) {
+      progressSocket = new WebSocket(publicTrialWebSocketURL(endpointPath, progressToken));
+      progressSocket.onmessage = function onPublicTrialProgressMessage(messageEvent) {
+        let progressState = null;
+        try {
+          progressState = JSON.parse(messageEvent.data);
+        } catch (parseError) {
+          return;
+        }
+        if (progressState.stage === 'ready') {
+          submitPreviewRequest();
+          return;
+        }
+        const foundTotal = Number(progressState.found_total) || 0;
+        const downloadedTotal = Number(progressState.downloaded_total) || 0;
+        const progressTotal = Math.max(foundTotal, downloadedTotal, 1);
+        setProgress(progressBarElement, downloadedTotal * 100 / progressTotal);
+        renderPublicTrialMetrics(metricListElement, configuration, previewPayload, progressState);
+        statusElement.textContent = publicTrialText(configuration, 'preparing', 'Preparing the website for SiteBrush...');
+        currentURLElement.textContent = progressState.current_url || '';
+      };
+      progressSocket.onerror = function onPublicTrialProgressError() {
+        statusElement.textContent = publicTrialText(configuration, 'progressLost', 'Progress connection was lost.');
+      };
+      window.setTimeout(function submitPublicTrialIfSocketReadyWasMissed() {
+        if (!previewPayload && !previewRequestSubmitted) {
+          submitPreviewRequest();
+        }
+      }, 900);
+    }
+
+    function submitPreviewRequest() {
+      if (previewRequestSubmitted) {
+        return;
+      }
+      previewRequestSubmitted = true;
+      const requestBody = new URLSearchParams();
+      requestBody.set('progress_token', progressToken);
+      requestBody.set('source_url', String(new FormData(formElement).get('source_url') || ''));
+      fetch(publicTrialFetchURL(endpointPath, 'trial_site_preview'), { method: 'POST', body: requestBody, headers: { Accept: 'application/json' } })
+        .then(function parsePublicTrialPreviewResponse(previewResponse) {
+          if (!previewResponse.ok) {
+            return previewResponse.text().then(function throwPublicTrialPreviewError(errorText) {
+              throw new Error(errorText || publicTrialText(configuration, 'loadFailed', 'Website analysis failed.'));
+            });
+          }
+          return previewResponse.json();
+        })
+        .then(function renderPublicTrialPreview(previewResponsePayload) {
+          previewPayload = previewResponsePayload;
+          setProgress(progressBarElement, 100);
+          previewFrameElement.src = previewPayload.preview_url || publicTrialPreviewFrameURL(endpointPath, progressToken);
+          renderPublicTrialMetrics(metricListElement, configuration, previewPayload, {});
+          resultElement.textContent = previewPayload.message || (previewPayload.fits_free_plan ? publicTrialText(configuration, 'freeResult', 'The website fits the free plan.') : publicTrialText(configuration, 'paidResult', 'This website requires a paid plan, but you can test SiteBrush for free for 1 month. Payment is required only after the trial period.'));
+          statusElement.textContent = publicTrialText(configuration, 'preparing', 'Preparing the website for editing...');
+          createButtonElement.classList.remove('SiteBrushCopySiteHidden');
+        })
+        .catch(function renderPublicTrialPreviewError(previewError) {
+          statusElement.textContent = previewError.message || publicTrialText(configuration, 'loadFailed', 'Website analysis failed.');
+        });
+    }
+
+    function createPublicTrialSite() {
+      if (!previewPayload) {
+        return;
+      }
+      createButtonElement.disabled = true;
+      statusElement.textContent = publicTrialText(configuration, 'creating', 'Creating a test version with the SiteBrush editor...');
+      const requestBody = new URLSearchParams();
+      requestBody.set('progress_token', progressToken);
+      fetch(publicTrialFetchURL(endpointPath, 'trial_site_create'), { method: 'POST', body: requestBody, headers: { Accept: 'application/json' } })
+        .then(function parsePublicTrialCreateResponse(createResponse) {
+          if (!createResponse.ok) {
+            return createResponse.text().then(function throwPublicTrialCreateError(errorText) {
+              throw new Error(errorText || publicTrialText(configuration, 'loadFailed', 'Website creation failed.'));
+            });
+          }
+          return createResponse.json();
+        })
+        .then(function redirectToPublicTrialSite(createPayload) {
+          window.location.href = createPayload.redirect || '/';
+        })
+        .catch(function renderPublicTrialCreateError(createError) {
+          createButtonElement.disabled = false;
+          statusElement.textContent = createError.message || publicTrialText(configuration, 'loadFailed', 'Website creation failed.');
+        });
+    }
+
+    closeButtonElement.addEventListener('click', closePublicTrialModal);
+    createButtonElement.addEventListener('click', createPublicTrialSite);
+    renderPublicTrialMetrics(metricListElement, configuration, null, {});
+    connectProgressSocket(submitPreviewRequest);
+  }
+
+  function attachPublicTrialForm(formElement, configuration) {
+    if (!formElement || formElement.dataset.sitebrushPublicTrialAttached === '1') {
+      return;
+    }
+    const publicTrialConfiguration = configuration || {};
+    formElement.dataset.sitebrushPublicTrialAttached = '1';
+    const textsReady = loadPublicTrialTexts(formElement, publicTrialConfiguration);
+    formElement.addEventListener('submit', function onPublicTrialSubmit(submitEvent) {
+      submitEvent.preventDefault();
+      if (!formElement.reportValidity()) {
+        return;
+      }
+      textsReady.then(function openLocalizedPublicTrialModal() {
+        openPublicTrialModal(formElement, publicTrialConfiguration);
+      });
+    });
+  }
+
   window.SiteBrushCopySite = {
     open: openCopySiteModal
+  };
+  window.SiteBrushPublicTrial = {
+    attach: attachPublicTrialForm
   };
 })();

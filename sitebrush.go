@@ -114,6 +114,7 @@ type App struct {
 	autoCertCertificateCache  chan autoCertCertificateCacheRequest
 	grabTracker               *grabProgressTracker
 	grabCancels               *grabCancelTracker
+	trialPreviews             *publicTrialPreviewStore
 	publishTracker            *publishProgressTracker
 	analyticsEvents           chan siteAnalyticsEvent
 	analyticsMemoryLimit      int64
@@ -1503,6 +1504,52 @@ type grabPreviewResponse struct {
 	EstimatedImportBytes  int64                 `json:"estimated_import_bytes"`
 	ProjectedUsedBytes    int64                 `json:"projected_used_bytes"`
 	FitsQuota             bool                  `json:"fits_quota"`
+}
+
+type publicTrialResourceCounts struct {
+	Images int `json:"images"`
+	CSS    int `json:"css"`
+	JS     int `json:"js"`
+	Other  int `json:"other"`
+}
+
+type publicTrialPlanView struct {
+	ID         int    `json:"id"`
+	Name       string `json:"name"`
+	QuotaBytes int64  `json:"quota_bytes"`
+	QuotaLabel string `json:"quota_label"`
+	IsFree     bool   `json:"is_free"`
+}
+
+type publicTrialPreview struct {
+	Token          string
+	SourceURL      string
+	ImportedPages  []wholeSiteImportedPage
+	Resources      []grabResourcePreview
+	Spider         *pageSpider
+	PageCount      int
+	ResourceCount  int
+	ResourceCounts publicTrialResourceCounts
+	TotalBytes     int64
+	RequiredBytes  int64
+	Plan           publicTrialPlanView
+	FreePlan       publicTrialPlanView
+	FitsFreePlan   bool
+	CreatedAt      time.Time
+}
+
+type publicTrialPreviewResponse struct {
+	SourceURL      string                    `json:"source_url"`
+	PreviewURL     string                    `json:"preview_url"`
+	PageCount      int                       `json:"page_count"`
+	ResourceCount  int                       `json:"resource_count"`
+	ResourceCounts publicTrialResourceCounts `json:"resource_counts"`
+	TotalBytes     int64                     `json:"total_bytes"`
+	RequiredBytes  int64                     `json:"required_bytes"`
+	FitsFreePlan   bool                      `json:"fits_free_plan"`
+	Plan           publicTrialPlanView       `json:"plan"`
+	FreePlan       publicTrialPlanView       `json:"free_plan"`
+	Message        string                    `json:"message"`
 }
 
 type grabSourceOptions = crawler.SourceOptions
@@ -3997,7 +4044,7 @@ func runSitebrushServer(ctx context.Context, config serverRunConfig) error {
 	}
 
 	var siteDatabaseRouter *perSiteDBRouter
-	application := &App{storagePath: effectiveStoragePath, dbPath: effectiveDBPath, debug: config.Debug, nativeFileDialog: desktop.NativeFileDialogSupported(), grabTracker: newGrabProgressTracker(), grabCancels: newGrabCancelTracker(), publishTracker: newPublishProgressTracker(), analyticsEvents: make(chan siteAnalyticsEvent, 65536), domainLogEvents: make(chan domainLogEvent, 1024)}
+	application := &App{storagePath: effectiveStoragePath, dbPath: effectiveDBPath, debug: config.Debug, nativeFileDialog: desktop.NativeFileDialogSupported(), grabTracker: newGrabProgressTracker(), grabCancels: newGrabCancelTracker(), trialPreviews: newPublicTrialPreviewStore(), publishTracker: newPublishProgressTracker(), analyticsEvents: make(chan siteAnalyticsEvent, 65536), domainLogEvents: make(chan domainLogEvent, 1024)}
 	application.guestStaticHTMLCache = startGuestStaticHTMLCacheWorker(ctx, defaultGuestStaticHTMLCacheLimitBytes)
 	application.authIPFailureCache = startAuthIPFailureCacheWorker(ctx)
 	application.registrationConfirmations = startEmailConfirmationMemoryWorker(ctx)
@@ -5317,6 +5364,7 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 	if a.maybeStartDemoSite(w, r, requestDomain) {
 		return
 	}
+	a.cleanupExpiredPublicTrialSite(r.Context(), requestDomain)
 	if isGuestStaticRequest(r) {
 		if rule, found := a.pagePasswordRuleFromPrefixFile(requestDomain, pagePath); found {
 			failureDomainPrefix := pagePasswordFailureDomainPrefix(rule.Domain)
@@ -5375,6 +5423,26 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 	}
 	if hasQueryFlag(r, "grab_ws") {
 		a.grabProgressWS(w, r)
+		return
+	}
+	if hasQueryFlag(r, "trial_site_ws") {
+		a.publicTrialSiteWS(w, r)
+		return
+	}
+	if hasQueryFlag(r, "trial_site_texts") {
+		a.publicTrialSiteTexts(w, r)
+		return
+	}
+	if hasQueryFlag(r, "trial_site_preview") {
+		a.publicTrialSitePreview(w, r)
+		return
+	}
+	if hasQueryFlag(r, "trial_site_preview_frame") {
+		a.publicTrialSitePreviewFrame(w, r)
+		return
+	}
+	if hasQueryFlag(r, "trial_site_create") {
+		a.publicTrialSiteCreate(w, r)
 		return
 	}
 	if hasQueryFlag(r, "revision_preview") {
@@ -7112,6 +7180,532 @@ func (a *App) cancelGrabImport(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(map[string]any{"status": "ok", "canceled": canceled})
 }
 
+// === Public trial site preparation ===
+
+func (a *App) publicTrialSitePreview(w http.ResponseWriter, r *http.Request) {
+	if !a.publicTrialAllowed(r) || r.Method != http.MethodPost {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	progressToken := strings.TrimSpace(r.FormValue("progress_token"))
+	if progressToken == "" {
+		http.Error(w, "progress_token is required", http.StatusBadRequest)
+		return
+	}
+	sourceURL, remoteSourceURL, htmlBytes, err := a.resolvePublicTrialSource(r.Context(), r.FormValue("source_url"))
+	if err != nil {
+		http.Error(w, publicTrialSourceErrorText(translationsForRequest(r), err), http.StatusBadGateway)
+		return
+	}
+	initialSpider := newPreviewPageSpider("", remoteSourceURL, grabResourceMaxDepth, a.grabTracker, progressToken, grabSourceOptions{})
+	initialRootResource := &mirroredResource{url: sourceURL, content: htmlBytes}
+	initialSpider.resources[sourceURL] = initialRootResource
+	initialSpider.collectPreviewNestedResources(initialRootResource, 0, "text/html")
+	initialHTML := string(initialRootResource.content)
+	initialResources := previewResourcesFromSpider(initialSpider, map[string]struct{}{sourceURL: {}})
+	a.activePublicTrialPreviewStore().Save(publicTrialPreview{
+		Token:          progressToken,
+		SourceURL:      sourceURL,
+		ImportedPages:  []wholeSiteImportedPage{{SourceURL: sourceURL, LocalPath: "/", HTML: initialHTML}},
+		Resources:      initialResources,
+		Spider:         initialSpider,
+		PageCount:      1,
+		ResourceCount:  len(initialResources),
+		ResourceCounts: publicTrialResourceCountsFromResources(initialResources),
+	})
+	wholeSitePreview := previewWholeRemoteSiteResources(remoteSourceURL, string(htmlBytes), "/", a.grabTracker, progressToken, grabSourceOptions{})
+	resourceBytes := sumGrabPreviewResourceBytes(wholeSitePreview.Resources)
+	pageBytes := int64(0)
+	for _, importedPage := range wholeSitePreview.ImportedPages {
+		pageBytes += int64(len([]byte(importedPage.HTML)))
+	}
+	requiredBytes := pageBytes + resourceBytes
+	plan, freePlan, fitsFreePlan := a.smallestPublicTrialPlan(r.Context(), requiredBytes)
+	preview := publicTrialPreview{
+		Token:          progressToken,
+		SourceURL:      sourceURL,
+		ImportedPages:  wholeSitePreview.ImportedPages,
+		Resources:      wholeSitePreview.Resources,
+		Spider:         wholeSitePreview.Spider,
+		PageCount:      wholeSitePreview.PageCount,
+		ResourceCount:  len(wholeSitePreview.Resources),
+		ResourceCounts: publicTrialResourceCountsFromResources(wholeSitePreview.Resources),
+		TotalBytes:     requiredBytes,
+		RequiredBytes:  requiredBytes,
+		Plan:           plan,
+		FreePlan:       freePlan,
+		FitsFreePlan:   fitsFreePlan,
+	}
+	a.activePublicTrialPreviewStore().Save(preview)
+	if a.grabTracker != nil {
+		a.grabTracker.publish(wholeSitePreview.Spider.finalProgressEvent(progressToken, "done"))
+	}
+	translations := translationsForRequest(r)
+	message := publicTrialPlanMessage(translations, preview)
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(publicTrialPreviewResponse{
+		SourceURL:      sourceURL,
+		PreviewURL:     "/?trial_site_preview_frame&token=" + url.QueryEscape(progressToken),
+		PageCount:      preview.PageCount,
+		ResourceCount:  preview.ResourceCount,
+		ResourceCounts: preview.ResourceCounts,
+		TotalBytes:     preview.TotalBytes,
+		RequiredBytes:  preview.RequiredBytes,
+		FitsFreePlan:   preview.FitsFreePlan,
+		Plan:           preview.Plan,
+		FreePlan:       preview.FreePlan,
+		Message:        message,
+	})
+}
+
+func (a *App) publicTrialSitePreviewFrame(w http.ResponseWriter, r *http.Request) {
+	if !a.publicTrialAllowed(r) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	preview, found := a.activePublicTrialPreviewStore().Wait(r.URL.Query().Get("token"), 20*time.Second)
+	if !found || len(preview.ImportedPages) == 0 {
+		http.Error(w, "preview not found", http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	_, _ = w.Write([]byte(preview.ImportedPages[0].HTML))
+}
+
+func (a *App) publicTrialSiteTexts(w http.ResponseWriter, r *http.Request) {
+	if !a.publicTrialAllowed(r) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{"texts": publicTrialWidgetTexts(translationsForRequest(r))})
+}
+
+func (a *App) publicTrialSiteCreate(w http.ResponseWriter, r *http.Request) {
+	if !a.publicTrialAllowed(r) || r.Method != http.MethodPost {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	progressToken := strings.TrimSpace(r.FormValue("progress_token"))
+	preview, found := a.activePublicTrialPreviewStore().Get(progressToken)
+	if !found {
+		http.Error(w, "preview not found", http.StatusNotFound)
+		return
+	}
+	controlDatabase, err := a.openServerControlDatabase(r.Context())
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	defer controlDatabase.Close()
+	parentDomain, found := (billing.Store{DB: controlDatabase}).OwnerDomain(r.Context())
+	if !found {
+		http.Error(w, "owner domain is required", http.StatusBadRequest)
+		return
+	}
+	trialDomain, err := a.availablePublicTrialDomain(r.Context(), preview.SourceURL, parentDomain)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusConflict)
+		return
+	}
+	quotaBytes := preview.Plan.QuotaBytes
+	if quotaBytes <= 0 {
+		quotaBytes = defaultDomainStorageLimitBytes
+	}
+	if err := a.createManagedSiteWithoutAdmin(r.Context(), trialDomain, quotaBytes); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	domainContext := contextWithSiteDatabaseCreation(contextWithDomain(r.Context(), trialDomain))
+	if err := a.persistPublicTrialPreview(domainContext, trialDomain, preview); err != nil {
+		_ = a.deleteDemoManagedSiteWithoutBackup(r.Context(), controlDatabase, trialDomain)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	serviceStatus := "trial"
+	if preview.FitsFreePlan {
+		serviceStatus = "free"
+	}
+	if preview.Plan.ID > 0 {
+		_ = (billing.Store{DB: controlDatabase}).AssignSite(r.Context(), trialDomain, preview.Plan.ID, serviceStatus)
+	}
+	a.activePublicTrialPreviewStore().Delete(progressToken)
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{"redirect": requestScheme(r) + "://" + trialDomain + "/"})
+}
+
+func (a *App) publicTrialSiteWS(w http.ResponseWriter, r *http.Request) {
+	if !a.publicTrialAllowed(r) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	progressToken := strings.TrimSpace(r.URL.Query().Get("token"))
+	if progressToken == "" {
+		http.Error(w, "token is required", http.StatusBadRequest)
+		return
+	}
+	connection, err := upgradeToWebSocket(w, r)
+	if err != nil {
+		return
+	}
+	defer connection.Close()
+	events := a.grabTracker.subscribe(progressToken)
+	defer a.grabTracker.unsubscribe(progressToken, events)
+	readyEventJSON, marshalReadyErr := json.Marshal(grabProgressEvent{Token: progressToken, Stage: "ready"})
+	if marshalReadyErr != nil {
+		return
+	}
+	if err := connection.WriteText(readyEventJSON); err != nil {
+		return
+	}
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case event, isOpen := <-events:
+			if !isOpen {
+				return
+			}
+			eventJSON, marshalErr := json.Marshal(event)
+			if marshalErr != nil {
+				return
+			}
+			if err := connection.WriteText(eventJSON); err != nil {
+				return
+			}
+			if event.Stage == "done" || event.Stage == "partial" || (event.Stage == "error" && strings.TrimSpace(event.CurrentURL) == "") {
+				return
+			}
+		}
+	}
+}
+
+func (a *App) publicTrialAllowed(r *http.Request) bool {
+	controlDatabase, err := a.openServerControlDatabase(r.Context())
+	if err != nil {
+		return false
+	}
+	defer controlDatabase.Close()
+	store := billing.Store{DB: controlDatabase}
+	if !store.AutomaticRegistrationAllowed(r.Context()) {
+		return false
+	}
+	ownerDomain, found := store.OwnerDomain(r.Context())
+	if !found {
+		return false
+	}
+	return normalizeDomainName(ownerDomain) == normalizeDomainName(a.siteDomain(r.Context(), r))
+}
+
+func (a *App) cleanupExpiredPublicTrialSite(ctx context.Context, domain string) {
+	domain = normalizeDomainName(domain)
+	if domain == "" {
+		return
+	}
+	controlDatabase, err := a.openServerControlDatabase(ctx)
+	if err != nil {
+		return
+	}
+	defer controlDatabase.Close()
+	var serviceStatus string
+	var updatedAtText string
+	err = controlDatabase.QueryRowContext(ctx, `SELECT service_status,updated_at FROM site_service_assignments WHERE domain=?`, domain).Scan(&serviceStatus, &updatedAtText)
+	if err != nil {
+		return
+	}
+	serviceStatus = strings.ToLower(strings.TrimSpace(serviceStatus))
+	if serviceStatus != "trial" && serviceStatus != "free" {
+		return
+	}
+	updatedAt, parseErr := time.Parse(time.RFC3339, strings.TrimSpace(updatedAtText))
+	if parseErr != nil || time.Since(updatedAt) <= 24*time.Hour {
+		return
+	}
+	if a.rawManagedSiteHasAdmin(ctx, domain) {
+		return
+	}
+	if deleteErr := a.deleteDemoManagedSiteWithoutBackup(ctx, controlDatabase, domain); deleteErr != nil {
+		log.Printf("expired public trial cleanup failed domain=%s error=%v", domain, deleteErr)
+	}
+}
+
+func (a *App) rawManagedSiteHasAdmin(ctx context.Context, domain string) bool {
+	domain = normalizeDomainName(domain)
+	if domain == "" {
+		return false
+	}
+	siteDatabasePath := filepath.Join(siteDatabaseRootPath(a.serverControlDBPath()), domainStorageName(domain)+".db")
+	rawDatabase, err := sql.Open("sqlite", "file:"+siteDatabasePath)
+	if err != nil {
+		return false
+	}
+	defer rawDatabase.Close()
+	var adminCount int
+	_ = rawDatabase.QueryRowContext(ctx, `SELECT COUNT(1) FROM users WHERE domain=? AND is_admin=1`, domain).Scan(&adminCount)
+	return adminCount > 0
+}
+
+func (a *App) resolvePublicTrialSource(ctx context.Context, rawSourceURL string) (string, *url.URL, []byte, error) {
+	sourceText := strings.TrimSpace(rawSourceURL)
+	if sourceText == "" {
+		return "", nil, nil, errors.New("source_url is required")
+	}
+	hasScheme := strings.Contains(sourceText, "://") || strings.HasPrefix(sourceText, "//")
+	candidates := []string{sourceText}
+	if !hasScheme {
+		candidates = []string{"https://" + sourceText, "http://" + sourceText}
+	}
+	var lastErr error
+	for _, candidate := range candidates {
+		remoteSourceURL, parseErr := parseGrabSourceURL(candidate)
+		if parseErr != nil {
+			lastErr = parseErr
+			continue
+		}
+		htmlBytes, resolvedSourceURL, downloadErr := downloadGrabSourceHTMLWithResolvedURLContext(ctx, remoteSourceURL.String(), grabSourceOptions{})
+		if downloadErr == nil {
+			return resolvedSourceURL.String(), resolvedSourceURL, htmlBytes, nil
+		}
+		lastErr = downloadErr
+	}
+	if lastErr == nil {
+		lastErr = errors.New("source_url is invalid")
+	}
+	return "", nil, nil, lastErr
+}
+
+func (a *App) smallestPublicTrialPlan(ctx context.Context, requiredBytes int64) (publicTrialPlanView, publicTrialPlanView, bool) {
+	plans := a.publicBillingPlans(ctx)
+	if requiredBytes <= 0 {
+		requiredBytes = 1
+	}
+	var freePlan billing.Plan
+	freePlanFound := false
+	var selectedPlan billing.Plan
+	for _, plan := range plans {
+		if plan.QuotaBytes < requiredBytes {
+			continue
+		}
+		if selectedPlan.ID == 0 || plan.QuotaBytes < selectedPlan.QuotaBytes {
+			selectedPlan = plan
+		}
+		if planIsFree(plan) && (!freePlanFound || plan.QuotaBytes < freePlan.QuotaBytes) {
+			freePlan = plan
+			freePlanFound = true
+		}
+	}
+	if freePlanFound && freePlan.QuotaBytes >= requiredBytes {
+		freePlanView := publicTrialPlanViewFromBillingPlan(freePlan)
+		return freePlanView, freePlanView, true
+	}
+	if selectedPlan.ID == 0 && len(plans) > 0 {
+		selectedPlan = plans[len(plans)-1]
+	}
+	return publicTrialPlanViewFromBillingPlan(selectedPlan), publicTrialPlanViewFromBillingPlan(freePlan), false
+}
+
+func publicTrialPlanMessage(translations map[string]string, preview publicTrialPreview) string {
+	if preview.FitsFreePlan {
+		return translationOrDefault(translations, "public_trial_free_fit_result", "The website fits the free plan.")
+	}
+	freeQuotaLabel := ""
+	if freePlan, found := publicTrialFreePlanForMessage(preview); found {
+		freeQuotaLabel = freePlan.QuotaLabel
+	}
+	if freeQuotaLabel == "" {
+		freeQuotaLabel = formatFileSize(defaultDomainStorageLimitBytes)
+	}
+	planName := strings.TrimSpace(preview.Plan.Name)
+	if planName == "" {
+		planName = translationOrDefault(translations, "public_trial_paid_plan_fallback", "a paid plan")
+	}
+	return fmt.Sprintf(translationOrDefault(translations, "public_trial_paid_fit_result", "The website does not fit the free plan (%s). We recommend the %s plan."), freeQuotaLabel, planName)
+}
+
+func publicTrialSourceErrorText(translations map[string]string, err error) string {
+	errorPrefix := translationOrDefault(translations, "public_trial_load_failed", "Website analysis failed.")
+	if err == nil {
+		return errorPrefix
+	}
+	errorText := strings.TrimSpace(err.Error())
+	if sourceStatus := strings.TrimSpace(strings.TrimPrefix(errorText, "source page returned ")); sourceStatus != errorText && sourceStatus != "" {
+		return errorPrefix + " HTTP " + strings.TrimPrefix(sourceStatus, "HTTP ")
+	}
+	return errorPrefix + " " + errorText
+}
+
+func publicTrialFreePlanForMessage(preview publicTrialPreview) (publicTrialPlanView, bool) {
+	if preview.FreePlan.ID > 0 {
+		return preview.FreePlan, true
+	}
+	return publicTrialPlanView{}, false
+}
+
+func publicTrialPlanViewFromBillingPlan(plan billing.Plan) publicTrialPlanView {
+	return publicTrialPlanView{ID: plan.ID, Name: plan.Name, QuotaBytes: plan.QuotaBytes, QuotaLabel: plan.QuotaLabel, IsFree: planIsFree(plan)}
+}
+
+func publicTrialResourceCountsFromResources(resources []grabResourcePreview) publicTrialResourceCounts {
+	var counts publicTrialResourceCounts
+	for _, resource := range resources {
+		switch strings.ToLower(strings.TrimSpace(resource.Kind)) {
+		case "image":
+			counts.Images++
+		case "css", "style", "stylesheet":
+			counts.CSS++
+		case "js", "javascript", "script":
+			counts.JS++
+		default:
+			counts.Other++
+		}
+	}
+	return counts
+}
+
+func (a *App) availablePublicTrialDomain(ctx context.Context, sourceURL, parentDomain string) (string, error) {
+	parentDomain = normalizeDomainName(parentDomain)
+	if parentDomain == "" {
+		return "", errors.New("owner domain is required")
+	}
+	baseLabel := publicTrialSubdomainLabel(sourceURL)
+	if baseLabel != "" {
+		for suffix := 0; suffix < 10; suffix++ {
+			label := baseLabel
+			if suffix > 0 {
+				label = fmt.Sprintf("%s%d", baseLabel, suffix+1)
+			}
+			candidateDomain := label + "." + parentDomain
+			if a.publicTrialDomainAvailable(ctx, candidateDomain) {
+				return candidateDomain, nil
+			}
+		}
+	}
+	for attempt := 0; attempt < 20; attempt++ {
+		candidateDomain := randomPublicTrialSubdomain() + "." + parentDomain
+		if a.publicTrialDomainAvailable(ctx, candidateDomain) {
+			return candidateDomain, nil
+		}
+	}
+	return "", errors.New("trial domain is unavailable")
+}
+
+func publicTrialSubdomainLabel(sourceURL string) string {
+	parsedURL, err := url.Parse(sourceURL)
+	if err != nil {
+		return ""
+	}
+	host := normalizeDomainName(parsedURL.Hostname())
+	if host == "" {
+		return ""
+	}
+	parts := strings.Split(host, ".")
+	if len(parts) < 2 {
+		return ""
+	}
+	label := parts[len(parts)-2]
+	if label == "co" || label == "com" || label == "net" || label == "org" {
+		label = parts[0]
+	}
+	return safePublicTrialLabel(label)
+}
+
+func safePublicTrialLabel(rawLabel string) string {
+	var builder strings.Builder
+	for _, labelRune := range strings.ToLower(strings.TrimSpace(rawLabel)) {
+		if (labelRune >= 'a' && labelRune <= 'z') || (labelRune >= '0' && labelRune <= '9') {
+			builder.WriteRune(labelRune)
+			continue
+		}
+		if labelRune == '-' && builder.Len() > 0 {
+			builder.WriteByte('-')
+		}
+	}
+	label := strings.Trim(builder.String(), "-")
+	if len(label) > 24 {
+		label = strings.Trim(label[:24], "-")
+	}
+	return label
+}
+
+func randomPublicTrialSubdomain() string {
+	token := strings.ToLower(randomAccessToken())
+	label := strings.NewReplacer("-", "", "_", "").Replace(token)
+	if len(label) > 4 {
+		label = label[:4]
+	}
+	if len(label) < 4 {
+		label = "k7m2"
+	}
+	return label
+}
+
+func (a *App) publicTrialDomainAvailable(ctx context.Context, domain string) bool {
+	domain = normalizeDomainName(domain)
+	if domain == "" {
+		return false
+	}
+	databasePath := filepath.Join(siteDatabaseRootPath(a.serverControlDBPath()), domainStorageName(domain)+".db")
+	if _, err := os.Stat(databasePath); err == nil {
+		return false
+	}
+	var userCount int
+	_ = a.db.QueryRowContext(contextWithDomain(ctx, domain), `SELECT COUNT(1) FROM users WHERE domain=?`, domain).Scan(&userCount)
+	return userCount == 0
+}
+
+func (a *App) createManagedSiteWithoutAdmin(ctx context.Context, domain string, quotaBytes int64) error {
+	siteDatabasePath := filepath.Join(siteDatabaseRootPath(a.serverControlDBPath()), domainStorageName(domain)+".db")
+	if _, statErr := os.Stat(siteDatabasePath); statErr == nil {
+		return fmt.Errorf("site database for %s already exists", domain)
+	} else if !errors.Is(statErr, os.ErrNotExist) {
+		return statErr
+	}
+	if err := ensureParentDir(siteDatabasePath); err != nil {
+		return err
+	}
+	rawDatabase, err := sql.Open("sqlite", "file:"+siteDatabasePath)
+	if err != nil {
+		return err
+	}
+	created := false
+	defer func() {
+		_ = rawDatabase.Close()
+		if !created {
+			_ = os.Remove(siteDatabasePath)
+		}
+	}()
+	siteApplication := &App{db: rawDatabase, storagePath: a.storagePath, dbPath: a.serverControlDBPath(), debug: a.debug}
+	siteContext := contextWithDomain(ctx, domain)
+	if err := siteApplication.migrate(siteContext); err != nil {
+		return err
+	}
+	siteApplication.ensureDomainStorageUsageRow(siteContext, domain)
+	_, err = rawDatabase.ExecContext(siteContext, `UPDATE domain_storage_usage SET limit_bytes=?, updated_at=? WHERE domain=?`, quotaBytes, time.Now().UTC().Format(time.RFC3339), domain)
+	created = err == nil
+	return err
+}
+
+func (a *App) persistPublicTrialPreview(ctx context.Context, domain string, preview publicTrialPreview) error {
+	if len(preview.ImportedPages) == 0 {
+		return errors.New("preview is empty")
+	}
+	pageDelta, publishedPageDelta, revisionDelta, publishedStaticDelta := a.estimateImportedPagesStorageDelta(ctx, domain, preview.ImportedPages)
+	fileDelta := a.estimateImportedFileDelta(domain, preview.Spider)
+	if storageErr := a.applyDomainStorageDelta(ctx, domain, pageDelta, publishedPageDelta, revisionDelta, fileDelta, publishedStaticDelta); storageErr != nil {
+		return storageErr
+	}
+	if persistErr := a.persistSpiderAssets(preview.Spider, "/"); persistErr != nil {
+		_ = a.applyDomainStorageDelta(ctx, domain, -pageDelta, -publishedPageDelta, -revisionDelta, -fileDelta, -publishedStaticDelta)
+		return persistErr
+	}
+	if storeErr := a.storeWholeSiteImportedPages(ctx, domain, preview.ImportedPages); storeErr != nil {
+		_ = a.applyDomainStorageDelta(ctx, domain, -pageDelta, -publishedPageDelta, -revisionDelta, -fileDelta, -publishedStaticDelta)
+		return storeErr
+	}
+	a.rebuildDomainStorageUsage(ctx, domain)
+	return nil
+}
+
 func (a *App) retryImportedPageResources(ctx context.Context, importRequest grabImportRequest) (grabImportResult, error) {
 	if importRequest.RemoteSourceURL == nil || len(importRequest.SelectedResourceURLs) == 0 {
 		return grabImportResult{RedirectPath: cleanPath(importRequest.PagePath)}, nil
@@ -7384,49 +7978,39 @@ func downloadGrabSourceHTMLWithResolvedURLContext(ctx context.Context, sourceURL
 		return nil, nil, errors.New("source_url is invalid")
 	}
 	client := newGrabHTTPClientForServerIP(remoteSourceURL.Hostname(), sourceOptions.IP)
-	response, err := doGrabGETContext(ctx, client, sourceURL, sourceOptions)
-	if err == nil && isSuccessfulGrabResponse(response) {
-		defer response.Body.Close()
-		if response.Request != nil && response.Request.URL != nil {
-			remoteSourceURL = response.Request.URL
-		}
-		htmlBytes, readErr := io.ReadAll(response.Body)
-		if readErr != nil {
-			return nil, nil, errors.New("failed to read source page")
-		}
-		htmlSource := decodeImportedHTMLBytes(htmlBytes, response.Header.Get("Content-Type"))
-		return []byte(htmlSource), remoteSourceURL, nil
+	lastStatus := ""
+	downloadResult, err := crawler.DownloadHTMLPageContext(ctx, client, remoteSourceURL, func(request *http.Request) {
+		applyGrabRequestHeaders(request, sourceOptions)
+		request.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+	})
+	if err == nil && downloadResult.IsHTML {
+		return []byte(rewriteImportedHTMLCharsetDeclaration(downloadResult.HTML)), downloadResult.ResolvedURL, nil
 	}
-	if response != nil {
-		response.Body.Close()
+	if downloadResult.Status != "" {
+		lastStatus = downloadResult.Status
 	}
 	if shouldFallbackGrabSourceToHTTP(remoteSourceURL) {
 		fallbackURL := crawler.CloneURL(remoteSourceURL)
 		fallbackURL.Scheme = "http"
 		fallbackURL.Host = fallbackURL.Hostname()
-		response, err = doGrabGETContext(ctx, client, fallbackURL.String(), sourceOptions)
-		if err == nil && isSuccessfulGrabResponse(response) {
-			defer response.Body.Close()
-			if response.Request != nil && response.Request.URL != nil {
-				remoteSourceURL = response.Request.URL
-			} else {
-				remoteSourceURL = fallbackURL
-			}
-			htmlBytes, readErr := io.ReadAll(response.Body)
-			if readErr != nil {
-				return nil, nil, errors.New("failed to read source page")
-			}
-			htmlSource := decodeImportedHTMLBytes(htmlBytes, response.Header.Get("Content-Type"))
-			return []byte(htmlSource), remoteSourceURL, nil
+		downloadResult, err = crawler.DownloadHTMLPageContext(ctx, client, fallbackURL, func(request *http.Request) {
+			applyGrabRequestHeaders(request, sourceOptions)
+			request.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+		})
+		if err == nil && downloadResult.IsHTML {
+			return []byte(rewriteImportedHTMLCharsetDeclaration(downloadResult.HTML)), downloadResult.ResolvedURL, nil
 		}
-		if response != nil {
-			response.Body.Close()
+		if downloadResult.Status != "" {
+			lastStatus = downloadResult.Status
 		}
 	}
 	if err != nil {
 		return nil, nil, errors.New("failed to download source page")
 	}
-	return nil, nil, errors.New("source page returned non-success status")
+	if strings.TrimSpace(lastStatus) != "" {
+		return nil, nil, fmt.Errorf("source page returned %s", lastStatus)
+	}
+	return nil, nil, errors.New("source page did not return a public HTML page")
 }
 
 func decodeImportedHTMLBytes(htmlBytes []byte, contentType string) string {
@@ -7520,6 +8104,7 @@ func doGrabGETContext(ctx context.Context, client *http.Client, rawURL string, s
 }
 
 func applyGrabRequestHeaders(request *http.Request, sourceOptions grabSourceOptions) {
+	request.Header.Set("User-Agent", "Mozilla/5.0 (compatible; SiteBrush/1.0)")
 	acceptLanguage := grabSourceAcceptLanguage(sourceOptions.LanguageCode)
 	if acceptLanguage != "" {
 		request.Header.Set("Accept-Language", acceptLanguage)
@@ -8498,6 +9083,7 @@ func (a *App) billingView(ctx context.Context, r *http.Request) (map[string]any,
 		"Backups":                 backups,
 		"DemoSettings":            demoSettings,
 		"AutoRegistrationEnabled": store.AutomaticRegistrationAllowed(ctx),
+		"PublicTrialEmbedHTML":    publicTrialSignupEmbedHTML(r, translations),
 		"CurrentDomain":           a.siteDomain(ctx, r),
 	}, nil
 }
@@ -8531,6 +9117,61 @@ func (a *App) billingSiteRows(ctx context.Context, plans []billing.Plan, assignm
 		}
 	}
 	return siteRows, nil
+}
+
+func publicTrialSignupEmbedHTML(r *http.Request, translations map[string]string) string {
+	formTitle := translationOrDefault(translations, "public_trial_form_title", "Enter the website where you want to launch SiteBrush:")
+	fieldLabel := translationOrDefault(translations, "public_trial_field_label", "Website address")
+	buttonLabel := translationOrDefault(translations, "public_trial_check_button", "Check website")
+	config := map[string]any{
+		"endpoint": "/",
+		"texts":    publicTrialWidgetTexts(translations),
+	}
+	configJSON, err := json.Marshal(config)
+	if err != nil {
+		configJSON = []byte(`{"endpoint":"/","texts":{}}`)
+	}
+	return `<form class="SiteBrushPublicTrialForm" data-sitebrush-public-trial-form>
+  <p data-sitebrush-public-trial-title>` + template.HTMLEscapeString(formTitle) + `</p>
+  <label><span data-sitebrush-public-trial-label>` + template.HTMLEscapeString(fieldLabel) + `</span>
+    <input type="text" name="source_url" autocomplete="url" inputmode="url" required>
+  </label>
+  <button type="submit">` + template.HTMLEscapeString(buttonLabel) + `</button>
+</form>
+<script src="/p/static/site_copy.js"></script>
+<script>(function(){var currentScript=document.currentScript;var formElement=currentScript&&currentScript.parentNode?currentScript.parentNode.querySelector("[data-sitebrush-public-trial-form]"):null;if(window.SiteBrushPublicTrial&&formElement){window.SiteBrushPublicTrial.attach(formElement, ` + string(configJSON) + `);}})();</script>`
+}
+
+func publicTrialWidgetTexts(translations map[string]string) map[string]string {
+	return map[string]string{
+		"modalTitle":       translationOrDefault(translations, "public_trial_modal_title", "Checking if SiteBrush can be installed on the selected website:"),
+		"formTitle":        translationOrDefault(translations, "public_trial_form_title", "Enter the website where you want to launch SiteBrush:"),
+		"fieldLabel":       translationOrDefault(translations, "public_trial_field_label", "Website address"),
+		"checkButton":      translationOrDefault(translations, "public_trial_check_button", "Check website"),
+		"createButton":     translationOrDefault(translations, "public_trial_create_button", "Create test website"),
+		"analyzing":        translationOrDefault(translations, "public_trial_analyzing", "Analyzing the website..."),
+		"preparing":        translationOrDefault(translations, "public_trial_preparing", "Preparing the website for SiteBrush..."),
+		"creating":         translationOrDefault(translations, "public_trial_creating", "Creating a test version with the SiteBrush editor..."),
+		"progressLost":     translationOrDefault(translations, "public_trial_progress_lost", "Progress connection was lost."),
+		"loadFailed":       translationOrDefault(translations, "public_trial_load_failed", "Website analysis failed."),
+		"pages":            translationOrDefault(translations, "public_trial_pages", "Found pages"),
+		"files":            translationOrDefault(translations, "public_trial_files", "Found files"),
+		"images":           translationOrDefault(translations, "public_trial_images", "Images"),
+		"css":              translationOrDefault(translations, "public_trial_css", "CSS"),
+		"js":               translationOrDefault(translations, "public_trial_js", "JS"),
+		"other":            translationOrDefault(translations, "public_trial_other", "Other resources"),
+		"estimatedSize":    translationOrDefault(translations, "public_trial_estimated_size", "Estimated total size"),
+		"requiredSpace":    translationOrDefault(translations, "public_trial_required_space", "Required disk space"),
+		"planStorage":      translationOrDefault(translations, "public_trial_plan_storage", "Plan storage"),
+		"planUsage":        translationOrDefault(translations, "public_trial_plan_usage", "Storage used"),
+		"freeResult":       translationOrDefault(translations, "public_trial_free_fit_result", "The website fits the free plan."),
+		"paidResult":       translationOrDefault(translations, "public_trial_paid_result", "This website requires a paid plan, but you can test SiteBrush for free for 1 month. Payment is required only after the trial period."),
+		"freeFitResult":    translationOrDefault(translations, "public_trial_free_fit_result", "The website fits the free plan."),
+		"paidFitResult":    translationOrDefault(translations, "public_trial_paid_fit_result", "The website does not fit the free plan (%s). We recommend the %s plan."),
+		"paidPlanFallback": translationOrDefault(translations, "public_trial_paid_plan_fallback", "a paid plan"),
+		"yes":              translationOrDefault(translations, "confirm_yes", "Yes"),
+		"no":               translationOrDefault(translations, "confirm_no", "No"),
+	}
 }
 
 func siteAdminEmails(ctx context.Context, databasePath, domain string) []string {
@@ -15567,7 +16208,7 @@ const (
 
 var (
 	newGrabHTTPClient = func() *http.Client {
-		return &http.Client{Timeout: 20 * time.Second, Transport: newGrabHTTPTransport()}
+		return crawler.NewSessionClient(20*time.Second, newGrabHTTPTransport())
 	}
 )
 
@@ -15605,7 +16246,7 @@ func newGrabHTTPClientForServerIP(sourceHost, sourceIP string) *http.Client {
 		}
 		return dialer.DialContext(ctx, network, address)
 	}
-	return &http.Client{Timeout: 20 * time.Second, Transport: transport}
+	return crawler.NewSessionClient(20*time.Second, transport)
 }
 
 func newPageSpider(domain string, pageURL *url.URL, maxDepth int, tracker *grabProgressTracker, progressToken string, sourceOptions grabSourceOptions) *pageSpider {
@@ -16513,8 +17154,21 @@ type grabCancelRequest struct {
 	done     chan struct{}
 }
 
+type publicTrialPreviewRequest struct {
+	action  string
+	token   string
+	preview publicTrialPreview
+	result  chan publicTrialPreview
+	found   chan bool
+	done    chan struct{}
+}
+
 type grabCancelTracker struct {
 	requests chan grabCancelRequest
+}
+
+type publicTrialPreviewStore struct {
+	requests chan publicTrialPreviewRequest
 }
 
 type publishTrackerRequest struct {
@@ -16542,13 +17196,27 @@ func newGrabCancelTracker() *grabCancelTracker {
 	return tracker
 }
 
+func newPublicTrialPreviewStore() *publicTrialPreviewStore {
+	store := &publicTrialPreviewStore{requests: make(chan publicTrialPreviewRequest)}
+	go store.loop()
+	return store
+}
+
 var fallbackGrabCancelTracker = newGrabCancelTracker()
+var fallbackPublicTrialPreviewStore = newPublicTrialPreviewStore()
 
 func (a *App) activeGrabCancelTracker() *grabCancelTracker {
 	if a != nil && a.grabCancels != nil {
 		return a.grabCancels
 	}
 	return fallbackGrabCancelTracker
+}
+
+func (a *App) activePublicTrialPreviewStore() *publicTrialPreviewStore {
+	if a != nil && a.trialPreviews != nil {
+		return a.trialPreviews
+	}
+	return fallbackPublicTrialPreviewStore
 }
 
 func (a *App) grabImportDownloadContext(parent context.Context, token string) (context.Context, func()) {
@@ -16614,6 +17282,70 @@ func (tracker *grabCancelTracker) loop() {
 			}
 			delete(cancelByToken, request.token)
 			delete(pendingCancelByToken, request.token)
+			close(request.done)
+		}
+	}
+}
+
+func (store *publicTrialPreviewStore) Save(preview publicTrialPreview) {
+	done := make(chan struct{})
+	store.requests <- publicTrialPreviewRequest{action: "save", token: preview.Token, preview: preview, done: done}
+	<-done
+}
+
+func (store *publicTrialPreviewStore) Get(token string) (publicTrialPreview, bool) {
+	result := make(chan publicTrialPreview)
+	found := make(chan bool)
+	store.requests <- publicTrialPreviewRequest{action: "get", token: token, result: result, found: found}
+	preview := <-result
+	return preview, <-found
+}
+
+func (store *publicTrialPreviewStore) Wait(token string, timeout time.Duration) (publicTrialPreview, bool) {
+	if timeout <= 0 {
+		return store.Get(token)
+	}
+	deadline := time.Now().Add(timeout)
+	for {
+		preview, found := store.Get(token)
+		if found {
+			return preview, true
+		}
+		if !time.Now().Before(deadline) {
+			return publicTrialPreview{}, false
+		}
+		time.Sleep(150 * time.Millisecond)
+	}
+}
+
+func (store *publicTrialPreviewStore) Delete(token string) {
+	done := make(chan struct{})
+	store.requests <- publicTrialPreviewRequest{action: "delete", token: token, done: done}
+	<-done
+}
+
+func (store *publicTrialPreviewStore) loop() {
+	previewsByToken := make(map[string]publicTrialPreview)
+	for request := range store.requests {
+		now := time.Now()
+		for token, preview := range previewsByToken {
+			if preview.CreatedAt.IsZero() || now.Sub(preview.CreatedAt) > time.Hour {
+				delete(previewsByToken, token)
+			}
+		}
+		switch request.action {
+		case "save":
+			if strings.TrimSpace(request.token) != "" {
+				request.preview.CreatedAt = now
+				previewsByToken[request.token] = request.preview
+			}
+			close(request.done)
+		case "get":
+			preview, found := previewsByToken[strings.TrimSpace(request.token)]
+			request.result <- preview
+			request.found <- found
+		case "delete":
+			delete(previewsByToken, strings.TrimSpace(request.token))
 			close(request.done)
 		}
 	}
