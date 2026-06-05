@@ -517,7 +517,7 @@
     "public_trial_required_space": "Site will occupy",
     "public_trial_free_compatibility": "Free plan compatibility",
     "public_trial_required_plan": "Minimal required paid plan",
-    "public_trial_free_result": "Great - this website can be launched on the free SiteBrush plan.",
+    "public_trial_free_result": "Great – this website can be launched on the free SiteBrush plan.",
     "public_trial_paid_result": "This website requires a paid plan, but you can test SiteBrush for free for 1 month. Payment is required only after the trial period.",
     "public_trial_free_fit_result": "The website fits the free plan.",
     "public_trial_paid_fit_result": "The website does not fit the free plan (%s). We recommend the %s plan.",

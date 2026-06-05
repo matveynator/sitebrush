@@ -7510,15 +7510,15 @@ func (a *App) smallestPublicTrialPlan(ctx context.Context, requiredBytes int64) 
 	freePlanFound := false
 	var selectedPlan billing.Plan
 	for _, plan := range plans {
+		if planIsFree(plan) && (!freePlanFound || plan.QuotaBytes < freePlan.QuotaBytes) {
+			freePlan = plan
+			freePlanFound = true
+		}
 		if plan.QuotaBytes < requiredBytes {
 			continue
 		}
 		if selectedPlan.ID == 0 || plan.QuotaBytes < selectedPlan.QuotaBytes {
 			selectedPlan = plan
-		}
-		if planIsFree(plan) && (!freePlanFound || plan.QuotaBytes < freePlan.QuotaBytes) {
-			freePlan = plan
-			freePlanFound = true
 		}
 	}
 	if freePlanFound && freePlan.QuotaBytes >= requiredBytes {
@@ -7533,20 +7533,9 @@ func (a *App) smallestPublicTrialPlan(ctx context.Context, requiredBytes int64) 
 
 func publicTrialPlanMessage(translations map[string]string, preview publicTrialPreview) string {
 	if preview.FitsFreePlan {
-		return translationOrDefault(translations, "public_trial_free_fit_result", "The website fits the free plan.")
+		return translationOrDefault(translations, "public_trial_free_result", "Great – this website can be launched on the free SiteBrush plan.")
 	}
-	freeQuotaLabel := ""
-	if freePlan, found := publicTrialFreePlanForMessage(preview); found {
-		freeQuotaLabel = freePlan.QuotaLabel
-	}
-	if freeQuotaLabel == "" {
-		freeQuotaLabel = formatFileSize(defaultDomainStorageLimitBytes)
-	}
-	planName := strings.TrimSpace(preview.Plan.Name)
-	if planName == "" {
-		planName = translationOrDefault(translations, "public_trial_paid_plan_fallback", "a paid plan")
-	}
-	return fmt.Sprintf(translationOrDefault(translations, "public_trial_paid_fit_result", "The website does not fit the free plan (%s). We recommend the %s plan."), freeQuotaLabel, planName)
+	return translationOrDefault(translations, "public_trial_paid_result", "This website requires a paid plan, but you can test SiteBrush for free for 1 month. Payment is required only after the trial period.")
 }
 
 func publicTrialSourceErrorText(translations map[string]string, err error) string {
@@ -9171,33 +9160,35 @@ func publicTrialSignupEmbedHTML(r *http.Request, translations map[string]string)
 
 func publicTrialWidgetTexts(translations map[string]string) map[string]string {
 	return map[string]string{
-		"modalTitle":       translationOrDefault(translations, "public_trial_modal_title", "Checking if SiteBrush can be installed on the selected website:"),
-		"formTitle":        translationOrDefault(translations, "public_trial_form_title", "Enter the website where you want to launch SiteBrush:"),
-		"fieldLabel":       translationOrDefault(translations, "public_trial_field_label", "Website address"),
-		"checkButton":      translationOrDefault(translations, "public_trial_check_button", "Check website"),
-		"createButton":     translationOrDefault(translations, "public_trial_create_button", "Create test website"),
-		"analyzing":        translationOrDefault(translations, "public_trial_analyzing", "Analyzing the website..."),
-		"preparing":        translationOrDefault(translations, "public_trial_preparing", "Preparing the website for SiteBrush..."),
-		"creating":         translationOrDefault(translations, "public_trial_creating", "Creating a test version with the SiteBrush editor..."),
-		"progressLost":     translationOrDefault(translations, "public_trial_progress_lost", "Progress connection was lost."),
-		"loadFailed":       translationOrDefault(translations, "public_trial_load_failed", "Website analysis failed."),
-		"pages":            translationOrDefault(translations, "public_trial_pages", "Found pages"),
-		"files":            translationOrDefault(translations, "public_trial_files", "Found files"),
-		"images":           translationOrDefault(translations, "public_trial_images", "Images"),
-		"css":              translationOrDefault(translations, "public_trial_css", "CSS"),
-		"js":               translationOrDefault(translations, "public_trial_js", "JS"),
-		"other":            translationOrDefault(translations, "public_trial_other", "Other resources"),
-		"estimatedSize":    translationOrDefault(translations, "public_trial_estimated_size", "Estimated total size"),
-		"requiredSpace":    translationOrDefault(translations, "public_trial_required_space", "Required disk space"),
-		"planStorage":      translationOrDefault(translations, "public_trial_plan_storage", "Plan storage"),
-		"planUsage":        translationOrDefault(translations, "public_trial_plan_usage", "Storage used"),
-		"freeResult":       translationOrDefault(translations, "public_trial_free_fit_result", "The website fits the free plan."),
-		"paidResult":       translationOrDefault(translations, "public_trial_paid_result", "This website requires a paid plan, but you can test SiteBrush for free for 1 month. Payment is required only after the trial period."),
-		"freeFitResult":    translationOrDefault(translations, "public_trial_free_fit_result", "The website fits the free plan."),
-		"paidFitResult":    translationOrDefault(translations, "public_trial_paid_fit_result", "The website does not fit the free plan (%s). We recommend the %s plan."),
-		"paidPlanFallback": translationOrDefault(translations, "public_trial_paid_plan_fallback", "a paid plan"),
-		"yes":              translationOrDefault(translations, "confirm_yes", "Yes"),
-		"no":               translationOrDefault(translations, "confirm_no", "No"),
+		"modalTitle":        translationOrDefault(translations, "public_trial_modal_title", "Checking if SiteBrush can be installed on the selected website:"),
+		"formTitle":         translationOrDefault(translations, "public_trial_form_title", "Enter the website where you want to launch SiteBrush:"),
+		"fieldLabel":        translationOrDefault(translations, "public_trial_field_label", "Website address"),
+		"checkButton":       translationOrDefault(translations, "public_trial_check_button", "Check website"),
+		"createButton":      translationOrDefault(translations, "public_trial_create_button", "Create test website"),
+		"analyzing":         translationOrDefault(translations, "public_trial_analyzing", "Analyzing the website..."),
+		"preparing":         translationOrDefault(translations, "public_trial_preparing", "Preparing the website for SiteBrush..."),
+		"creating":          translationOrDefault(translations, "public_trial_creating", "Creating a test version with the SiteBrush editor..."),
+		"progressLost":      translationOrDefault(translations, "public_trial_progress_lost", "Progress connection was lost."),
+		"loadFailed":        translationOrDefault(translations, "public_trial_load_failed", "Website analysis failed."),
+		"pages":             translationOrDefault(translations, "public_trial_pages", "Found pages"),
+		"files":             translationOrDefault(translations, "public_trial_files", "Found files"),
+		"images":            translationOrDefault(translations, "public_trial_images", "Images"),
+		"css":               translationOrDefault(translations, "public_trial_css", "CSS"),
+		"js":                translationOrDefault(translations, "public_trial_js", "JS"),
+		"other":             translationOrDefault(translations, "public_trial_other", "Other resources"),
+		"estimatedSize":     translationOrDefault(translations, "public_trial_estimated_size", "Estimated total size"),
+		"requiredSpace":     translationOrDefault(translations, "public_trial_required_space", "Required disk space"),
+		"freeCompatibility": translationOrDefault(translations, "public_trial_free_compatibility", "Free plan compatibility"),
+		"requiredPlan":      translationOrDefault(translations, "public_trial_required_plan", "Minimal required paid plan"),
+		"planStorage":       translationOrDefault(translations, "public_trial_plan_storage", "Plan storage"),
+		"planUsage":         translationOrDefault(translations, "public_trial_plan_usage", "Storage used"),
+		"freeResult":        translationOrDefault(translations, "public_trial_free_result", "Great – this website can be launched on the free SiteBrush plan."),
+		"paidResult":        translationOrDefault(translations, "public_trial_paid_result", "This website requires a paid plan, but you can test SiteBrush for free for 1 month. Payment is required only after the trial period."),
+		"freeFitResult":     translationOrDefault(translations, "public_trial_free_fit_result", "The website fits the free plan."),
+		"paidFitResult":     translationOrDefault(translations, "public_trial_paid_fit_result", "The website does not fit the free plan (%s). We recommend the %s plan."),
+		"paidPlanFallback":  translationOrDefault(translations, "public_trial_paid_plan_fallback", "a paid plan"),
+		"yes":               translationOrDefault(translations, "confirm_yes", "Yes"),
+		"no":                translationOrDefault(translations, "confirm_no", "No"),
 	}
 }
 

@@ -993,6 +993,28 @@
     return Math.ceil(requiredBytes * 100 / quotaBytes) + '%';
   }
 
+  function formatPublicTrialText(templateText, firstValue, secondValue) {
+    return String(templateText || '').replace('%s', firstValue).replace('%s', secondValue);
+  }
+
+  function publicTrialFreeCompatibilityText(previewPayload, configuration) {
+    if (previewPayload && previewPayload.fits_free_plan) {
+      return publicTrialText(configuration, 'freeFitResult', 'The website fits the free plan.');
+    }
+    const freePlanPayload = previewPayload && previewPayload.free_plan ? previewPayload.free_plan : {};
+    const planPayload = previewPayload && previewPayload.plan ? previewPayload.plan : {};
+    const freeQuotaLabel = String(freePlanPayload.quota_label || '').trim() || formatSize(freePlanPayload.quota_bytes, configuration);
+    const planName = String(planPayload.name || '').trim() || publicTrialText(configuration, 'paidPlanFallback', 'a paid plan');
+    return formatPublicTrialText(publicTrialText(configuration, 'paidFitResult', 'The website does not fit the free plan (%s). We recommend the %s plan.'), freeQuotaLabel, planName);
+  }
+
+  function publicTrialRequiredPlanText(previewPayload, configuration) {
+    if (!previewPayload || previewPayload.fits_free_plan) {
+      return '';
+    }
+    return publicTrialPlanStorageText(previewPayload, configuration);
+  }
+
   function renderPublicTrialMetrics(metricListElement, configuration, previewPayload, progressState) {
     const resourceCounts = previewPayload && previewPayload.resource_counts ? previewPayload.resource_counts : {};
     const foundPages = previewPayload ? previewPayload.page_count : Number(progressState.found_total) || 0;
@@ -1000,7 +1022,7 @@
       metricListElement.replaceChildren(createPublicTrialMetric(publicTrialText(configuration, 'pages', 'Found pages'), foundPages));
       return;
     }
-    metricListElement.replaceChildren(
+    const metricElements = [
       createPublicTrialMetric(publicTrialText(configuration, 'pages', 'Found pages'), previewPayload.page_count),
       createPublicTrialMetric(publicTrialText(configuration, 'files', 'Found files'), previewPayload.resource_count),
       createPublicTrialMetric(publicTrialText(configuration, 'images', 'Images'), Number(resourceCounts.images) || 0),
@@ -1009,9 +1031,15 @@
       createPublicTrialMetric(publicTrialText(configuration, 'other', 'Other resources'), Number(resourceCounts.other) || 0),
       createPublicTrialMetric(publicTrialText(configuration, 'estimatedSize', 'Estimated total size'), formatSize(previewPayload.total_bytes, configuration)),
       createPublicTrialMetric(publicTrialText(configuration, 'requiredSpace', 'Required disk space'), formatSize(previewPayload.required_bytes, configuration)),
+      createPublicTrialMetric(publicTrialText(configuration, 'freeCompatibility', 'Free plan compatibility'), publicTrialFreeCompatibilityText(previewPayload, configuration)),
       createPublicTrialMetric(publicTrialText(configuration, 'planStorage', 'Plan storage'), publicTrialPlanStorageText(previewPayload, configuration)),
       createPublicTrialMetric(publicTrialText(configuration, 'planUsage', 'Storage used'), publicTrialPlanUsageText(previewPayload))
-    );
+    ];
+    const requiredPlanText = publicTrialRequiredPlanText(previewPayload, configuration);
+    if (requiredPlanText !== '') {
+      metricElements.push(createPublicTrialMetric(publicTrialText(configuration, 'requiredPlan', 'Minimal required paid plan'), requiredPlanText));
+    }
+    metricListElement.replaceChildren.apply(metricListElement, metricElements);
   }
 
   function openPublicTrialModal(formElement, configuration) {
