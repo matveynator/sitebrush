@@ -1083,13 +1083,32 @@
     let previewPayload = null;
     let progressSocket = null;
     let previewRequestSubmitted = false;
+    let previewFrameReloadTimer = 0;
 
     function closePublicTrialModal() {
       if (progressSocket) {
         progressSocket.close();
         progressSocket = null;
       }
+      if (previewFrameReloadTimer) {
+        window.clearInterval(previewFrameReloadTimer);
+        previewFrameReloadTimer = 0;
+      }
       overlayElement.remove();
+    }
+
+    function publicTrialRetryStatusText(progressState) {
+      const retryAttempt = Number(progressState.retry_attempt) || 0;
+      const retryTotal = Number(progressState.retry_total) || 0;
+      const retryDelaySeconds = Number(progressState.retry_delay_seconds) || 0;
+      let statusText = publicTrialText(configuration, 'preparing', 'Preparing the website for SiteBrush...');
+      if (retryAttempt > 0 && retryTotal > 0) {
+        statusText += ' ' + retryAttempt + '/' + retryTotal;
+      }
+      if (retryDelaySeconds > 0) {
+        statusText += '. ' + publicTrialText(configuration, 'retryNextIn', 'Next retry in') + ': ' + retryDelaySeconds + ' ' + publicTrialText(configuration, 'retrySecondsSuffix', 's');
+      }
+      return statusText;
     }
 
     function connectProgressSocket(submitPreviewRequest) {
@@ -1110,7 +1129,11 @@
         const progressTotal = Math.max(foundTotal, downloadedTotal, 1);
         setProgress(progressBarElement, downloadedTotal * 100 / progressTotal);
         renderPublicTrialMetrics(metricListElement, configuration, previewPayload, progressState);
-        statusElement.textContent = publicTrialText(configuration, 'preparing', 'Preparing the website for SiteBrush...');
+        if (progressState.stage === 'retry_wait' || progressState.stage === 'retrying' || progressState.stage === 'source_attempt') {
+          statusElement.textContent = publicTrialRetryStatusText(progressState);
+        } else {
+          statusElement.textContent = publicTrialText(configuration, 'preparing', 'Preparing the website for SiteBrush...');
+        }
         currentURLElement.textContent = progressState.current_url || '';
       };
       progressSocket.onerror = function onPublicTrialProgressError() {
@@ -1133,6 +1156,14 @@
       requestBody.set('source_url', String(new FormData(formElement).get('source_url') || ''));
       previewFrameElement.removeAttribute('srcdoc');
       previewFrameElement.src = publicTrialPreviewFrameURL(endpointPath, progressToken);
+      previewFrameReloadTimer = window.setInterval(function reloadPublicTrialPreviewFrame() {
+        if (previewPayload) {
+          window.clearInterval(previewFrameReloadTimer);
+          previewFrameReloadTimer = 0;
+          return;
+        }
+        previewFrameElement.src = publicTrialPreviewFrameURL(endpointPath, progressToken) + '&refresh=' + encodeURIComponent(String(Date.now()));
+      }, 4000);
       fetch(publicTrialFetchURL(endpointPath, 'trial_site_preview'), { method: 'POST', body: requestBody, headers: { Accept: 'application/json' } })
         .then(function parsePublicTrialPreviewResponse(previewResponse) {
           if (!previewResponse.ok) {
@@ -1145,6 +1176,10 @@
         .then(function renderPublicTrialPreview(previewResponsePayload) {
           previewPayload = previewResponsePayload;
           setProgress(progressBarElement, 100);
+          if (previewFrameReloadTimer) {
+            window.clearInterval(previewFrameReloadTimer);
+            previewFrameReloadTimer = 0;
+          }
           if (previewPayload.preview_url && previewFrameElement.src !== previewPayload.preview_url) {
             previewFrameElement.src = previewPayload.preview_url;
           }
@@ -1154,6 +1189,10 @@
           createButtonElement.classList.remove('SiteBrushCopySiteHidden');
         })
         .catch(function renderPublicTrialPreviewError(previewError) {
+          if (previewFrameReloadTimer) {
+            window.clearInterval(previewFrameReloadTimer);
+            previewFrameReloadTimer = 0;
+          }
           statusElement.textContent = previewError.message || publicTrialText(configuration, 'loadFailed', 'Website analysis failed.');
         });
     }

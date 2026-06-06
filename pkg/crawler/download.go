@@ -22,6 +22,13 @@ type HTMLDownloadResult struct {
 	StatusCode  int
 }
 
+type HTMLDownloadRetryOptions struct {
+	Attempts  int
+	Delay     time.Duration
+	OnAttempt func(attempt, total int, pageURL *url.URL)
+	OnRetry   func(attempt, total int, pageURL *url.URL, err error, delay time.Duration)
+}
+
 func NewSessionClient(timeout time.Duration, transport http.RoundTripper) *http.Client {
 	jar, _ := cookiejar.New(nil)
 	return &http.Client{Timeout: timeout, Transport: transport, Jar: jar}
@@ -77,4 +84,47 @@ func DownloadHTMLPageContext(ctx context.Context, client *http.Client, pageURL *
 	result.HTML = DecodeHTML(pageBytes, response.Header.Get("Content-Type")).Text
 	result.IsHTML = true
 	return result, nil
+}
+
+func DownloadHTMLPageWithRetriesContext(ctx context.Context, client *http.Client, pageURL *url.URL, applyHeaders func(*http.Request), options HTMLDownloadRetryOptions) (HTMLDownloadResult, error) {
+	attempts := options.Attempts
+	if attempts < 1 {
+		attempts = 1
+	}
+	delay := options.Delay
+	if delay < 0 {
+		delay = 0
+	}
+	var lastResult HTMLDownloadResult
+	var lastErr error
+	for attempt := 1; attempt <= attempts; attempt++ {
+		if options.OnAttempt != nil {
+			options.OnAttempt(attempt, attempts, pageURL)
+		}
+		result, err := DownloadHTMLPageContext(ctx, client, pageURL, applyHeaders)
+		if err == nil && result.IsHTML {
+			return result, nil
+		}
+		lastResult = result
+		if err != nil {
+			lastErr = err
+		} else {
+			lastErr = errors.New("page did not return a public HTML page")
+		}
+		if attempt >= attempts {
+			break
+		}
+		if options.OnRetry != nil {
+			options.OnRetry(attempt, attempts, pageURL, lastErr, delay)
+		}
+		if delay <= 0 {
+			continue
+		}
+		select {
+		case <-ctx.Done():
+			return lastResult, ctx.Err()
+		case <-time.After(delay):
+		}
+	}
+	return lastResult, lastErr
 }

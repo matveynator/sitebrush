@@ -7193,7 +7193,7 @@ func (a *App) publicTrialSitePreview(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "progress_token is required", http.StatusBadRequest)
 		return
 	}
-	sourceURL, remoteSourceURL, htmlBytes, err := a.resolvePublicTrialSource(r.Context(), r.FormValue("source_url"))
+	sourceURL, remoteSourceURL, htmlBytes, err := a.resolvePublicTrialSource(r.Context(), r.FormValue("source_url"), progressToken)
 	if err != nil {
 		http.Error(w, publicTrialSourceErrorText(translationsForRequest(r), err), http.StatusBadGateway)
 		return
@@ -7283,11 +7283,48 @@ func (a *App) publicTrialSitePreviewFrame(w http.ResponseWriter, r *http.Request
 	}
 	preview, found := a.activePublicTrialPreviewStore().Wait(r.URL.Query().Get("token"), 20*time.Second)
 	if !found || len(preview.ImportedPages) == 0 {
-		http.Error(w, "preview not found", http.StatusNotFound)
+		a.renderPublicTrialPreviewWaitingFrame(w, r)
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_, _ = w.Write([]byte(preview.ImportedPages[0].HTML))
+}
+
+func (a *App) renderPublicTrialPreviewWaitingFrame(w http.ResponseWriter, r *http.Request) {
+	translations := translationsForRequest(r)
+	title := template.HTMLEscapeString(translationOrDefault(translations, "public_trial_preparing", "Preparing the website for SiteBrush..."))
+	status := template.HTMLEscapeString(translationOrDefault(translations, "public_trial_analyzing", "Analyzing the website..."))
+	refreshURL := template.HTMLEscapeString(r.URL.RequestURI())
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	_, _ = w.Write([]byte(`<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="refresh" content="3;url=` + refreshURL + `">
+<style>
+html,body{height:100%;margin:0;font-family:Arial,Helvetica,sans-serif;background:#f4f8ff;color:#1f3f6f}
+.SiteBrushPublicTrialFrameWait{height:100%;display:flex;align-items:center;justify-content:center;text-align:center;padding:24px;box-sizing:border-box}
+.SiteBrushPublicTrialFrameWaitBox{max-width:420px}
+.SiteBrushPublicTrialFrameWaitTitle{font-size:18px;font-weight:700;margin:0 0 8px}
+.SiteBrushPublicTrialFrameWaitText{font-size:14px;margin:0;color:#5b6f8b}
+.SiteBrushPublicTrialFrameWaitBar{height:6px;background:#d8e6f8;margin-top:18px;overflow:hidden}
+.SiteBrushPublicTrialFrameWaitBar:before{content:"";display:block;width:35%;height:100%;background:#3f7ecb;animation:sitebrushPreviewWait 1.2s ease-in-out infinite}
+@keyframes sitebrushPreviewWait{0%{transform:translateX(-100%)}100%{transform:translateX(300%)}}
+@media (prefers-color-scheme:dark){html,body{background:#172235;color:#dbe8ff}.SiteBrushPublicTrialFrameWaitText{color:#a7bbd8}.SiteBrushPublicTrialFrameWaitBar{background:#24344d}}
+</style>
+</head>
+<body>
+<div class="SiteBrushPublicTrialFrameWait">
+  <div class="SiteBrushPublicTrialFrameWaitBox">
+    <p class="SiteBrushPublicTrialFrameWaitTitle">` + title + `</p>
+    <p class="SiteBrushPublicTrialFrameWaitText">` + status + `</p>
+    <div class="SiteBrushPublicTrialFrameWaitBar"></div>
+  </div>
+</div>
+</body>
+</html>`))
 }
 
 func (a *App) publicTrialSiteTexts(w http.ResponseWriter, r *http.Request) {
@@ -7489,7 +7526,7 @@ func (a *App) rawManagedSiteHasAdmin(ctx context.Context, domain string) bool {
 	return adminCount > 0
 }
 
-func (a *App) resolvePublicTrialSource(ctx context.Context, rawSourceURL string) (string, *url.URL, []byte, error) {
+func (a *App) resolvePublicTrialSource(ctx context.Context, rawSourceURL, progressToken string) (string, *url.URL, []byte, error) {
 	sourceText := strings.TrimSpace(rawSourceURL)
 	if sourceText == "" {
 		return "", nil, nil, errors.New("source_url is required")
@@ -7506,7 +7543,7 @@ func (a *App) resolvePublicTrialSource(ctx context.Context, rawSourceURL string)
 			lastErr = parseErr
 			continue
 		}
-		htmlBytes, resolvedSourceURL, downloadErr := downloadGrabSourceHTMLWithResolvedURLContext(ctx, remoteSourceURL.String(), grabSourceOptions{})
+		htmlBytes, resolvedSourceURL, downloadErr := a.downloadPublicTrialSourceHTML(ctx, remoteSourceURL.String(), progressToken)
 		if downloadErr == nil {
 			return resolvedSourceURL.String(), resolvedSourceURL, htmlBytes, nil
 		}
@@ -7516,6 +7553,114 @@ func (a *App) resolvePublicTrialSource(ctx context.Context, rawSourceURL string)
 		lastErr = errors.New("source_url is invalid")
 	}
 	return "", nil, nil, lastErr
+}
+
+func (a *App) downloadPublicTrialSourceHTML(ctx context.Context, sourceURL, progressToken string) ([]byte, *url.URL, error) {
+	remoteSourceURL, err := url.Parse(sourceURL)
+	if err != nil {
+		return nil, nil, errors.New("source_url is invalid")
+	}
+	client := newGrabHTTPClientForServerIP(remoteSourceURL.Hostname(), "")
+	lastStatus := ""
+	downloadResult, err := crawler.DownloadHTMLPageWithRetriesContext(ctx, client, remoteSourceURL, func(request *http.Request) {
+		applyGrabRequestHeaders(request, grabSourceOptions{})
+		applyGrabHTMLRequestHeaders(request)
+	}, crawler.HTMLDownloadRetryOptions{
+		Attempts: 3,
+		Delay:    1500 * time.Millisecond,
+		OnAttempt: func(attempt, total int, pageURL *url.URL) {
+			a.publishPublicTrialSourceAttempt(progressToken, "source_attempt", pageURL, attempt, total, 0)
+		},
+		OnRetry: func(attempt, total int, pageURL *url.URL, retryErr error, delay time.Duration) {
+			a.publishPublicTrialSourceRetry(progressToken, pageURL, attempt, total, retryErr, delay)
+		},
+	})
+	if err == nil && downloadResult.IsHTML {
+		return []byte(rewriteImportedHTMLCharsetDeclaration(downloadResult.HTML)), downloadResult.ResolvedURL, nil
+	}
+	if downloadResult.Status != "" {
+		lastStatus = downloadResult.Status
+	}
+	if shouldFallbackGrabSourceToHTTP(remoteSourceURL) {
+		fallbackURL := crawler.CloneURL(remoteSourceURL)
+		fallbackURL.Scheme = "http"
+		fallbackURL.Host = fallbackURL.Hostname()
+		downloadResult, err = crawler.DownloadHTMLPageWithRetriesContext(ctx, client, fallbackURL, func(request *http.Request) {
+			applyGrabRequestHeaders(request, grabSourceOptions{})
+			applyGrabHTMLRequestHeaders(request)
+		}, crawler.HTMLDownloadRetryOptions{
+			Attempts: 2,
+			Delay:    1500 * time.Millisecond,
+			OnAttempt: func(attempt, total int, pageURL *url.URL) {
+				a.publishPublicTrialSourceAttempt(progressToken, "source_attempt", pageURL, attempt, total, 0)
+			},
+			OnRetry: func(attempt, total int, pageURL *url.URL, retryErr error, delay time.Duration) {
+				a.publishPublicTrialSourceRetry(progressToken, pageURL, attempt, total, retryErr, delay)
+			},
+		})
+		if err == nil && downloadResult.IsHTML {
+			return []byte(rewriteImportedHTMLCharsetDeclaration(downloadResult.HTML)), downloadResult.ResolvedURL, nil
+		}
+		if downloadResult.Status != "" {
+			lastStatus = downloadResult.Status
+		}
+	}
+	if err != nil {
+		return nil, nil, errors.New("failed to download source page")
+	}
+	if strings.TrimSpace(lastStatus) != "" {
+		return nil, nil, fmt.Errorf("source page returned %s", lastStatus)
+	}
+	return nil, nil, errors.New("source page did not return a public HTML page")
+}
+
+func (a *App) publishPublicTrialSourceAttempt(progressToken, stage string, pageURL *url.URL, attempt, total int, retryDelaySeconds int) {
+	if a == nil || a.grabTracker == nil || strings.TrimSpace(progressToken) == "" {
+		return
+	}
+	currentURL := ""
+	if pageURL != nil {
+		currentURL = pageURL.String()
+	}
+	a.grabTracker.publish(grabProgressEvent{
+		Token:             progressToken,
+		Stage:             stage,
+		FoundTotal:        1,
+		DownloadTotal:     1,
+		RetryAttempt:      attempt,
+		RetryTotal:        total,
+		RetryDelaySeconds: retryDelaySeconds,
+		CurrentURL:        currentURL,
+		CompletedPercent:  5,
+	})
+}
+
+func (a *App) publishPublicTrialSourceRetry(progressToken string, pageURL *url.URL, attempt, total int, retryErr error, delay time.Duration) {
+	delaySeconds := int(delay.Seconds())
+	if delaySeconds < 0 {
+		delaySeconds = 0
+	}
+	if a == nil || a.grabTracker == nil || strings.TrimSpace(progressToken) == "" {
+		return
+	}
+	currentURL := ""
+	if pageURL != nil {
+		currentURL = pageURL.String()
+	}
+	a.grabTracker.publish(grabProgressEvent{
+		Token:             progressToken,
+		Stage:             "error",
+		FoundTotal:        1,
+		DownloadTotal:     1,
+		FailedTotal:       1,
+		RetryAttempt:      attempt,
+		RetryTotal:        total - 1,
+		RetryDelaySeconds: delaySeconds,
+		CurrentURL:        currentURL,
+		CurrentError:      grabErrorReason(retryErr),
+		CompletedPercent:  5,
+	})
+	a.publishPublicTrialSourceAttempt(progressToken, "retry_wait", pageURL, attempt, total-1, delaySeconds)
 }
 
 func (a *App) smallestPublicTrialPlan(ctx context.Context, requiredBytes int64) (publicTrialPlanView, publicTrialPlanView, bool) {
@@ -8012,9 +8157,12 @@ func downloadGrabSourceHTMLWithResolvedURLContext(ctx context.Context, sourceURL
 	}
 	client := newGrabHTTPClientForServerIP(remoteSourceURL.Hostname(), sourceOptions.IP)
 	lastStatus := ""
-	downloadResult, err := crawler.DownloadHTMLPageContext(ctx, client, remoteSourceURL, func(request *http.Request) {
+	downloadResult, err := crawler.DownloadHTMLPageWithRetriesContext(ctx, client, remoteSourceURL, func(request *http.Request) {
 		applyGrabRequestHeaders(request, sourceOptions)
-		request.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+		applyGrabHTMLRequestHeaders(request)
+	}, crawler.HTMLDownloadRetryOptions{
+		Attempts: 2,
+		Delay:    1500 * time.Millisecond,
 	})
 	if err == nil && downloadResult.IsHTML {
 		return []byte(rewriteImportedHTMLCharsetDeclaration(downloadResult.HTML)), downloadResult.ResolvedURL, nil
@@ -8026,9 +8174,12 @@ func downloadGrabSourceHTMLWithResolvedURLContext(ctx context.Context, sourceURL
 		fallbackURL := crawler.CloneURL(remoteSourceURL)
 		fallbackURL.Scheme = "http"
 		fallbackURL.Host = fallbackURL.Hostname()
-		downloadResult, err = crawler.DownloadHTMLPageContext(ctx, client, fallbackURL, func(request *http.Request) {
+		downloadResult, err = crawler.DownloadHTMLPageWithRetriesContext(ctx, client, fallbackURL, func(request *http.Request) {
 			applyGrabRequestHeaders(request, sourceOptions)
-			request.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+			applyGrabHTMLRequestHeaders(request)
+		}, crawler.HTMLDownloadRetryOptions{
+			Attempts: 2,
+			Delay:    1500 * time.Millisecond,
 		})
 		if err == nil && downloadResult.IsHTML {
 			return []byte(rewriteImportedHTMLCharsetDeclaration(downloadResult.HTML)), downloadResult.ResolvedURL, nil
@@ -8132,7 +8283,7 @@ func doGrabGETContext(ctx context.Context, client *http.Client, rawURL string, s
 		return nil, err
 	}
 	applyGrabRequestHeaders(request, sourceOptions)
-	request.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+	applyGrabHTMLRequestHeaders(request)
 	return client.Do(request)
 }
 
@@ -8142,6 +8293,12 @@ func applyGrabRequestHeaders(request *http.Request, sourceOptions grabSourceOpti
 	if acceptLanguage != "" {
 		request.Header.Set("Accept-Language", acceptLanguage)
 	}
+}
+
+func applyGrabHTMLRequestHeaders(request *http.Request) {
+	request.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+	request.Header.Set("Upgrade-Insecure-Requests", "1")
+	request.Header.Set("DNT", "1")
 }
 
 func shouldFallbackGrabSourceToHTTP(sourceURL *url.URL) bool {
@@ -8598,7 +8755,7 @@ func downloadWholeSitePageHTML(client *http.Client, pageURL *url.URL, sourceOpti
 func downloadWholeSitePageHTMLContext(ctx context.Context, client *http.Client, pageURL *url.URL, sourceOptions grabSourceOptions) (string, bool, error) {
 	return crawler.DownloadHTMLContext(ctx, client, pageURL, func(request *http.Request) {
 		applyGrabRequestHeaders(request, sourceOptions)
-		request.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+		applyGrabHTMLRequestHeaders(request)
 	})
 }
 
@@ -9185,35 +9342,37 @@ func publicTrialSignupEmbedHTML(r *http.Request, translations map[string]string)
 
 func publicTrialWidgetTexts(translations map[string]string) map[string]string {
 	return map[string]string{
-		"modalTitle":        translationOrDefault(translations, "public_trial_modal_title", "Checking if SiteBrush can be installed on the selected website:"),
-		"formTitle":         translationOrDefault(translations, "public_trial_form_title", "Enter the website where you want to launch SiteBrush:"),
-		"fieldLabel":        translationOrDefault(translations, "public_trial_field_label", "Website address"),
-		"checkButton":       translationOrDefault(translations, "public_trial_check_button", "Check website"),
-		"createButton":      translationOrDefault(translations, "public_trial_create_button", "Create test website"),
-		"analyzing":         translationOrDefault(translations, "public_trial_analyzing", "Analyzing the website..."),
-		"preparing":         translationOrDefault(translations, "public_trial_preparing", "Preparing the website for SiteBrush..."),
-		"creating":          translationOrDefault(translations, "public_trial_creating", "Creating a test version with the SiteBrush editor..."),
-		"progressLost":      translationOrDefault(translations, "public_trial_progress_lost", "Progress connection was lost."),
-		"loadFailed":        translationOrDefault(translations, "public_trial_load_failed", "Website analysis failed."),
-		"pages":             translationOrDefault(translations, "public_trial_pages", "Found pages"),
-		"files":             translationOrDefault(translations, "public_trial_files", "Found files"),
-		"images":            translationOrDefault(translations, "public_trial_images", "Images"),
-		"css":               translationOrDefault(translations, "public_trial_css", "CSS"),
-		"js":                translationOrDefault(translations, "public_trial_js", "JS"),
-		"other":             translationOrDefault(translations, "public_trial_other", "Other resources"),
-		"estimatedSize":     translationOrDefault(translations, "public_trial_estimated_size", "Estimated total size"),
-		"requiredSpace":     translationOrDefault(translations, "public_trial_required_space", "Required disk space"),
-		"freeCompatibility": translationOrDefault(translations, "public_trial_free_compatibility", "Free plan compatibility"),
-		"requiredPlan":      translationOrDefault(translations, "public_trial_required_plan", "Minimal required paid plan"),
-		"planStorage":       translationOrDefault(translations, "public_trial_plan_storage", "Plan storage"),
-		"planUsage":         translationOrDefault(translations, "public_trial_plan_usage", "Storage used"),
-		"freeResult":        translationOrDefault(translations, "public_trial_free_result", "Great – this website can be launched on the free SiteBrush plan."),
-		"paidResult":        translationOrDefault(translations, "public_trial_paid_result", "This website requires a paid plan, but you can test SiteBrush for free for 1 month. Payment is required only after the trial period."),
-		"freeFitResult":     translationOrDefault(translations, "public_trial_free_fit_result", "The website fits the free plan."),
-		"paidFitResult":     translationOrDefault(translations, "public_trial_paid_fit_result", "The website does not fit the free plan (%s). We recommend the %s plan."),
-		"paidPlanFallback":  translationOrDefault(translations, "public_trial_paid_plan_fallback", "a paid plan"),
-		"yes":               translationOrDefault(translations, "confirm_yes", "Yes"),
-		"no":                translationOrDefault(translations, "confirm_no", "No"),
+		"modalTitle":         translationOrDefault(translations, "public_trial_modal_title", "Checking if SiteBrush can be installed on the selected website:"),
+		"formTitle":          translationOrDefault(translations, "public_trial_form_title", "Enter the website where you want to launch SiteBrush:"),
+		"fieldLabel":         translationOrDefault(translations, "public_trial_field_label", "Website address"),
+		"checkButton":        translationOrDefault(translations, "public_trial_check_button", "Check website"),
+		"createButton":       translationOrDefault(translations, "public_trial_create_button", "Create test website"),
+		"analyzing":          translationOrDefault(translations, "public_trial_analyzing", "Analyzing the website..."),
+		"preparing":          translationOrDefault(translations, "public_trial_preparing", "Preparing the website for SiteBrush..."),
+		"creating":           translationOrDefault(translations, "public_trial_creating", "Creating a test version with the SiteBrush editor..."),
+		"progressLost":       translationOrDefault(translations, "public_trial_progress_lost", "Progress connection was lost."),
+		"loadFailed":         translationOrDefault(translations, "public_trial_load_failed", "Website analysis failed."),
+		"pages":              translationOrDefault(translations, "public_trial_pages", "Found pages"),
+		"files":              translationOrDefault(translations, "public_trial_files", "Found files"),
+		"images":             translationOrDefault(translations, "public_trial_images", "Images"),
+		"css":                translationOrDefault(translations, "public_trial_css", "CSS"),
+		"js":                 translationOrDefault(translations, "public_trial_js", "JS"),
+		"other":              translationOrDefault(translations, "public_trial_other", "Other resources"),
+		"estimatedSize":      translationOrDefault(translations, "public_trial_estimated_size", "Estimated total size"),
+		"requiredSpace":      translationOrDefault(translations, "public_trial_required_space", "Required disk space"),
+		"freeCompatibility":  translationOrDefault(translations, "public_trial_free_compatibility", "Free plan compatibility"),
+		"requiredPlan":       translationOrDefault(translations, "public_trial_required_plan", "Minimal required paid plan"),
+		"planStorage":        translationOrDefault(translations, "public_trial_plan_storage", "Plan storage"),
+		"planUsage":          translationOrDefault(translations, "public_trial_plan_usage", "Storage used"),
+		"freeResult":         translationOrDefault(translations, "public_trial_free_result", "Great – this website can be launched on the free SiteBrush plan."),
+		"paidResult":         translationOrDefault(translations, "public_trial_paid_result", "This website requires a paid plan, but you can test SiteBrush for free for 1 month. Payment is required only after the trial period."),
+		"freeFitResult":      translationOrDefault(translations, "public_trial_free_fit_result", "The website fits the free plan."),
+		"paidFitResult":      translationOrDefault(translations, "public_trial_paid_fit_result", "The website does not fit the free plan (%s). We recommend the %s plan."),
+		"paidPlanFallback":   translationOrDefault(translations, "public_trial_paid_plan_fallback", "a paid plan"),
+		"retryNextIn":        translationOrDefault(translations, "site_copy_retry_next_in", "Next retry in"),
+		"retrySecondsSuffix": translationOrDefault(translations, "site_copy_retry_seconds_suffix", "s"),
+		"yes":                translationOrDefault(translations, "confirm_yes", "Yes"),
+		"no":                 translationOrDefault(translations, "confirm_no", "No"),
 	}
 }
 
