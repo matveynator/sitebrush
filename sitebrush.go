@@ -9421,7 +9421,7 @@ func (a *App) billingSiteRows(ctx context.Context, plans []billing.Plan, assignm
 			Aliases:      row.Aliases,
 			UsedBytes:    row.UsedBytes,
 			LimitBytes:   row.LimitBytes,
-			AdminEmails:  siteAdminEmails(ctx, row.DatabasePath, row.Domain),
+			AdminEmails:  row.AdminEmails,
 			DatabasePath: row.DatabasePath,
 		})
 	}
@@ -9432,7 +9432,7 @@ func (a *App) billingSiteRows(ctx context.Context, plans []billing.Plan, assignm
 	}
 	for siteIndex := range siteRows {
 		if row, found := rowByDomain[siteRows[siteIndex].Domain]; found {
-			deletionSizeBytes := a.managedSiteDeletionSizeBytes(row)
+			deletionSizeBytes := a.managedSiteDeletionDisplaySizeBytes(row)
 			siteRows[siteIndex].DeletionSizeBytes = deletionSizeBytes
 			siteRows[siteIndex].DeletionSizeLabel = formatFileSize(deletionSizeBytes)
 		}
@@ -9513,7 +9513,11 @@ func siteAdminEmails(ctx context.Context, databasePath, domain string) []string 
 		return nil
 	}
 	defer rawDatabase.Close()
-	rows, err := rawDatabase.QueryContext(ctx, `SELECT email FROM users WHERE domain=? AND is_admin=1 ORDER BY email`, domain)
+	return siteAdminEmailsFromDatabase(ctx, rawDatabase, domain)
+}
+
+func siteAdminEmailsFromDatabase(ctx context.Context, database *sql.DB, domain string) []string {
+	rows, err := database.QueryContext(ctx, `SELECT email FROM users WHERE domain=? AND is_admin=1 ORDER BY email`, domain)
 	if err != nil {
 		return nil
 	}
@@ -10093,6 +10097,13 @@ func (a *App) managedSiteDeletionSizeBytes(row siteQuotaRow) int64 {
 	} {
 		totalBytes += diskusage.DirectorySize(directoryPath)
 	}
+	totalBytes += fileSizeBytes(filepath.Join(a.packsDir(), domainStorageName(row.Domain)+".zip"))
+	return totalBytes
+}
+
+func (a *App) managedSiteDeletionDisplaySizeBytes(row siteQuotaRow) int64 {
+	totalBytes := row.UsedBytes
+	totalBytes += fileSizeBytes(row.DatabasePath)
 	totalBytes += fileSizeBytes(filepath.Join(a.packsDir(), domainStorageName(row.Domain)+".zip"))
 	return totalBytes
 }
@@ -12148,6 +12159,7 @@ type siteQuotaRow struct {
 	Aliases         []string
 	UsedBytes       int64
 	LimitBytes      int64
+	AdminEmails     []string
 	FilesPath       string
 	DatabasePath    string
 	BillingMainSite bool
@@ -12299,23 +12311,19 @@ func siteQuotaRowsFromDatabase(ctx context.Context, storagePath string, candidat
 		return nil, nil
 	}
 	application := &App{db: rawDatabase, storagePath: storagePath, dbPath: candidate.path}
-	migrateDomain := candidate.fallbackDomain
-	if strings.TrimSpace(migrateDomain) == "" {
-		migrateDomain = "localhost"
-	}
-	if err := application.migrate(contextWithDomain(ctx, migrateDomain)); err != nil {
-		return nil, err
-	}
 	domains := siteDomainsInDatabase(ctx, rawDatabase)
 
 	rows := make([]siteQuotaRow, 0, len(domains))
 	for _, domain := range domains {
-		usage := application.domainStorageUsage(contextWithDomain(ctx, domain), domain)
+		domainContext := contextWithDomain(ctx, domain)
+		application.ensureDomainStorageUsageRow(domainContext, domain)
+		usage := application.storedDomainStorageUsage(domainContext, domain)
 		rows = append(rows, siteQuotaRow{
 			Domain:       domain,
 			Aliases:      siteAliasesInDatabase(ctx, rawDatabase, domain),
 			UsedBytes:    usage.totalBytes(),
 			LimitBytes:   usage.LimitBytes,
+			AdminEmails:  siteAdminEmailsFromDatabase(ctx, rawDatabase, domain),
 			FilesPath:    application.domainFilesDirForDomain(domain),
 			DatabasePath: candidate.path,
 		})
@@ -12500,6 +12508,7 @@ func updateSiteQuotaLimit(ctx context.Context, storagePath, dbPath, rawDomain st
 		Aliases:      siteAliasesInDatabase(commandContext, rawDatabase, domain),
 		UsedBytes:    usage.totalBytes(),
 		LimitBytes:   usage.LimitBytes,
+		AdminEmails:  siteAdminEmailsFromDatabase(commandContext, rawDatabase, domain),
 		FilesPath:    application.domainFilesDirForDomain(domain),
 		DatabasePath: candidate.path,
 	}, nil
