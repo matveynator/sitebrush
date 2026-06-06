@@ -7224,6 +7224,14 @@ func (a *App) publicTrialSitePreview(w http.ResponseWriter, r *http.Request) {
 	if len(resources) == 0 {
 		resources = initialResources
 	}
+	previewSpider := wholeSitePreview.Spider
+	if previewSpider == nil {
+		previewSpider = initialSpider
+	}
+	pageCount := wholeSitePreview.PageCount
+	if pageCount < len(importedPages) {
+		pageCount = len(importedPages)
+	}
 	resourceBytes := sumGrabPreviewResourceBytes(resources)
 	pageBytes := int64(0)
 	for _, importedPage := range importedPages {
@@ -7236,8 +7244,8 @@ func (a *App) publicTrialSitePreview(w http.ResponseWriter, r *http.Request) {
 		SourceURL:      sourceURL,
 		ImportedPages:  importedPages,
 		Resources:      resources,
-		Spider:         wholeSitePreview.Spider,
-		PageCount:      wholeSitePreview.PageCount,
+		Spider:         previewSpider,
+		PageCount:      pageCount,
 		ResourceCount:  len(resources),
 		ResourceCounts: publicTrialResourceCountsFromResources(resources),
 		TotalBytes:     requiredBytes,
@@ -7247,8 +7255,8 @@ func (a *App) publicTrialSitePreview(w http.ResponseWriter, r *http.Request) {
 		FitsFreePlan:   fitsFreePlan,
 	}
 	a.activePublicTrialPreviewStore().Save(preview)
-	if a.grabTracker != nil {
-		a.grabTracker.publish(wholeSitePreview.Spider.finalProgressEvent(progressToken, "done"))
+	if a.grabTracker != nil && previewSpider != nil {
+		a.grabTracker.publish(previewSpider.finalProgressEvent(progressToken, "done"))
 	}
 	translations := translationsForRequest(r)
 	message := publicTrialPlanMessage(translations, preview)

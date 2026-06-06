@@ -1055,6 +1055,7 @@
     headerElement.appendChild(titleElement);
     headerElement.appendChild(closeButtonElement);
     const previewFrameElement = createElement('iframe', 'SiteBrushPublicTrialFrame');
+    previewFrameElement.setAttribute('sandbox', '');
     previewFrameElement.srcdoc = '<!doctype html><html><body></body></html>';
     previewFrameElement.title = publicTrialText(configuration, 'preparing', 'Preparing the website for SiteBrush...');
     const statusPanelElement = createElement('div', 'SiteBrushPublicTrialStatusPanel');
@@ -1130,6 +1131,8 @@
       const requestBody = new URLSearchParams();
       requestBody.set('progress_token', progressToken);
       requestBody.set('source_url', String(new FormData(formElement).get('source_url') || ''));
+      previewFrameElement.removeAttribute('srcdoc');
+      previewFrameElement.src = publicTrialPreviewFrameURL(endpointPath, progressToken);
       fetch(publicTrialFetchURL(endpointPath, 'trial_site_preview'), { method: 'POST', body: requestBody, headers: { Accept: 'application/json' } })
         .then(function parsePublicTrialPreviewResponse(previewResponse) {
           if (!previewResponse.ok) {
@@ -1142,7 +1145,9 @@
         .then(function renderPublicTrialPreview(previewResponsePayload) {
           previewPayload = previewResponsePayload;
           setProgress(progressBarElement, 100);
-          previewFrameElement.src = previewPayload.preview_url || publicTrialPreviewFrameURL(endpointPath, progressToken);
+          if (previewPayload.preview_url && previewFrameElement.src !== previewPayload.preview_url) {
+            previewFrameElement.src = previewPayload.preview_url;
+          }
           renderPublicTrialMetrics(metricListElement, configuration, previewPayload, {});
           resultElement.textContent = previewPayload.message || (previewPayload.fits_free_plan ? publicTrialText(configuration, 'freeResult', 'The website fits the free plan.') : publicTrialText(configuration, 'paidResult', 'This website requires a paid plan, but you can test SiteBrush for free for 1 month. Payment is required only after the trial period.'));
           statusElement.textContent = publicTrialText(configuration, 'preparing', 'Preparing the website for editing...');
