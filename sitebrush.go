@@ -6114,7 +6114,7 @@ func (a *App) seedDemoSiteContent(ctx context.Context, domain string, settings d
 	if storageErr := a.applyDomainStorageDelta(domainContext, domain, pageDelta, publishedPageDelta, revisionDelta, fileDelta, publishedStaticDelta); storageErr != nil {
 		return 0, storageErr
 	}
-	if persistErr := a.persistSpiderAssets(spider, "/"); persistErr != nil {
+	if persistErr := a.persistSpiderAssets(domainContext, spider, "/"); persistErr != nil {
 		_ = a.applyDomainStorageDelta(domainContext, domain, -pageDelta, -publishedPageDelta, -revisionDelta, -fileDelta, -publishedStaticDelta)
 		return spider.unresolvedFailedTotal(), persistErr
 	}
@@ -6317,7 +6317,7 @@ func (a *App) retryDemoFailedResources(ctx context.Context, settings demo.Settin
 	if storageErr := a.applyDomainStorageDelta(domainContext, settings.Domain, pageDelta, publishedPageDelta, 0, fileDelta, publishedStaticDelta); storageErr != nil {
 		return spider.unresolvedFailedTotal(), storageErr
 	}
-	if persistErr := a.persistSpiderAssets(spider, "/"); persistErr != nil {
+	if persistErr := a.persistSpiderAssets(domainContext, spider, "/"); persistErr != nil {
 		_ = a.applyDomainStorageDelta(domainContext, settings.Domain, -pageDelta, -publishedPageDelta, 0, -fileDelta, -publishedStaticDelta)
 		return spider.unresolvedFailedTotal(), persistErr
 	}
@@ -7092,7 +7092,7 @@ func (a *App) grabPage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, storageErr.Error(), http.StatusInsufficientStorage)
 		return
 	}
-	if persistErr := a.persistSpiderAssets(spider, pagePath); persistErr != nil {
+	if persistErr := a.persistSpiderAssets(r.Context(), spider, pagePath); persistErr != nil {
 		_ = a.applyDomainStorageDelta(r.Context(), domain, -pageDelta, -publishedPageDelta, -revisionDelta, -fileDelta, -publishedStaticDelta)
 		http.Error(w, persistErr.Error(), http.StatusBadGateway)
 		return
@@ -7970,7 +7970,7 @@ func (a *App) persistPublicTrialPreview(ctx context.Context, domain string, prev
 	if storageErr := a.applyDomainStorageDelta(ctx, domain, pageDelta, publishedPageDelta, revisionDelta, fileDelta, publishedStaticDelta); storageErr != nil {
 		return storageErr
 	}
-	if persistErr := a.persistSpiderAssets(preview.Spider, "/"); persistErr != nil {
+	if persistErr := a.persistSpiderAssets(ctx, preview.Spider, "/"); persistErr != nil {
 		_ = a.applyDomainStorageDelta(ctx, domain, -pageDelta, -publishedPageDelta, -revisionDelta, -fileDelta, -publishedStaticDelta)
 		return persistErr
 	}
@@ -8007,7 +8007,7 @@ func (a *App) retryImportedPageResources(ctx context.Context, importRequest grab
 	if storageErr := a.applyDomainStorageDelta(domainContext, importRequest.Domain, pageDelta, publishedPageDelta, 0, fileDelta, publishedStaticDelta); storageErr != nil {
 		return grabImportResult{RedirectPath: cleanPath(importRequest.PagePath), FailedTotal: spider.unresolvedFailedTotal(), FailedURLs: spider.failedResourceURLList(), FailedReasons: spider.failedResourceReasonMap()}, storageErr
 	}
-	if persistErr := a.persistSpiderAssets(spider, importRequest.PagePath); persistErr != nil {
+	if persistErr := a.persistSpiderAssets(domainContext, spider, importRequest.PagePath); persistErr != nil {
 		_ = a.applyDomainStorageDelta(domainContext, importRequest.Domain, -pageDelta, -publishedPageDelta, 0, -fileDelta, -publishedStaticDelta)
 		return grabImportResult{RedirectPath: cleanPath(importRequest.PagePath), FailedTotal: spider.unresolvedFailedTotal(), FailedURLs: spider.failedResourceURLList(), FailedReasons: spider.failedResourceReasonMap()}, persistErr
 	}
@@ -8688,7 +8688,7 @@ func (a *App) importWholeRemoteSite(ctx context.Context, importRequest grabImpor
 	if storageErr := a.applyDomainStorageDelta(ctx, importRequest.Domain, pageDelta, publishedPageDelta, revisionDelta, fileDelta, publishedStaticDelta); storageErr != nil {
 		return grabImportResult{FailedTotal: spider.unresolvedFailedTotal(), FailedURLs: spider.failedResourceURLList(), FailedReasons: spider.failedResourceReasonMap()}, storageErr
 	}
-	if persistErr := a.persistSpiderAssets(spider, importRequest.PagePath); persistErr != nil {
+	if persistErr := a.persistSpiderAssets(ctx, spider, importRequest.PagePath); persistErr != nil {
 		_ = a.applyDomainStorageDelta(ctx, importRequest.Domain, -pageDelta, -publishedPageDelta, -revisionDelta, -fileDelta, -publishedStaticDelta)
 		return grabImportResult{FailedTotal: spider.unresolvedFailedTotal(), FailedURLs: spider.failedResourceURLList(), FailedReasons: spider.failedResourceReasonMap()}, persistErr
 	}
@@ -14613,7 +14613,7 @@ func buildContextMenuScript(isAdmin bool, isServerManager bool, isFrozen bool, p
 	if strings.TrimSpace(storageUsageLabel) != "" {
 		storageUsageHTML = "<span class='SiteBrushMenuStorageUsage'>" + template.HTMLEscapeString(storageUsageLabel) + "</span>"
 	}
-	copyrightMenuEntry := fmt.Sprintf("<li class='SiteBrushContextMenu ContextMenuCopyright'><div class='SiteBrushContextMenuFooter'><a href='%s' class='SiteBrushContextMenuFooterLink' target='_blank' rel='noopener noreferrer'>sitebrush</a><a href='%s' class='SiteBrushContextMenuVersion' download>%s</a>%s</div></li>", sitebrushHomeURL, serverBinaryDownloadURL, compiledVersionLabel, storageUsageHTML)
+	copyrightMenuEntry := fmt.Sprintf("<li class='SiteBrushContextMenu ContextMenuCopyright'><div class='SiteBrushContextMenuFooter'><a href='%s' class='SiteBrushContextMenuFooterLink' target='_blank' rel='noopener noreferrer'>sitebrush</a>%s<a href='%s' class='SiteBrushContextMenuVersion' download>%s</a></div></li>", sitebrushHomeURL, storageUsageHTML, serverBinaryDownloadURL, compiledVersionLabel)
 	if isAdmin {
 		deleteActionEntry := ""
 		if revisionID > 0 {
@@ -15487,7 +15487,7 @@ func contextMenuStylesAndHelpers() string {
 .SiteBrushContextMenuFooterLink,.SiteBrushContextMenuVersion{color:#5b6f8b;text-decoration:none;font-family:Arial,Helvetica,sans-serif;font-size:12px;cursor:pointer}
 .SiteBrushContextMenuFooterLink:link,.SiteBrushContextMenuFooterLink:visited,.SiteBrushContextMenuFooterLink:active,.SiteBrushContextMenuFooterLink:hover,.SiteBrushContextMenuVersion:link,.SiteBrushContextMenuVersion:visited,.SiteBrushContextMenuVersion:active,.SiteBrushContextMenuVersion:hover{color:#5b6f8b;text-decoration:none}
 .SiteBrushContextMenuVersion{font-weight:700}
-.SiteBrushMenuStorageUsage{margin-left:auto;font-variant-numeric:tabular-nums;white-space:nowrap}
+.SiteBrushMenuStorageUsage{color:#5b6f8b;font-family:Arial,Helvetica,sans-serif;font-size:9px;font-weight:400;font-variant-numeric:tabular-nums;white-space:nowrap}
 .SiteBrushConfirmOverlay{position:fixed;inset:0;background:rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center;z-index:2147483647}
 .SiteBrushConfirmModal{background:#fff;border:1px solid #8ea4c1;min-width:260px;max-width:340px;padding:16px;font-family:Arial,Helvetica,sans-serif}
 .SiteBrushConfirmText{margin:0 0 14px 0;color:#1f3f6f;font-size:14px}
@@ -15533,6 +15533,7 @@ func contextMenuStylesAndHelpers() string {
   .SiteBrushContextMenuFooter{color:#a7bbd8;border-top-color:#2f405d}
   .SiteBrushContextMenuFooterLink,.SiteBrushContextMenuVersion{color:#a7bbd8}
   .SiteBrushContextMenuFooterLink:link,.SiteBrushContextMenuFooterLink:visited,.SiteBrushContextMenuFooterLink:active,.SiteBrushContextMenuFooterLink:hover,.SiteBrushContextMenuVersion:link,.SiteBrushContextMenuVersion:visited,.SiteBrushContextMenuVersion:active,.SiteBrushContextMenuVersion:hover{color:#a7bbd8}
+  .SiteBrushMenuStorageUsage{color:#a7bbd8}
   .SiteBrushConfirmModal{background:#172235;border-color:#2f405d}
   .SiteBrushConfirmText,.SiteBrushPublishPreviewLink{color:#dbe8ff}
   .SiteBrushPasswordInput{background:#0f1724;color:#dbe8ff;border-color:#405674}
@@ -16422,12 +16423,20 @@ func resourceExtensionFromContentType(contentType string) string {
 
 func (a *App) mirrorRemotePage(domain, pagePath, sourceURL string, pageURL *url.URL, fallbackHTML, progressToken string, selectedResourceURLs map[string]struct{}, sourceIP string) string {
 	spider, html := prepareSinglePageImport(grabImportRequest{Domain: domain, PagePath: pagePath, SourceURL: sourceURL, RemoteSourceURL: pageURL, HTML: fallbackHTML, ProgressToken: progressToken, SelectedResourceURLs: selectedResourceURLs, SourceOptions: grabSourceOptions{IP: sourceIP}}, a.grabTracker)
-	_ = a.persistSpiderAssets(spider, pagePath)
+	_ = a.persistSpiderAssets(contextWithDomain(context.Background(), domain), spider, pagePath)
 	a.grabTracker.publish(spider.finalProgressEvent(progressToken, "done"))
 	return html
 }
 
-func (a *App) persistSpiderAssets(spider *pageSpider, pagePath string) error {
+func (a *App) persistSpiderAssets(ctx context.Context, spider *pageSpider, pagePath string) error {
+	if spider == nil {
+		return nil
+	}
+	domain := normalizeDomainName(spider.domain)
+	if domain == "" {
+		return nil
+	}
+	ctx = contextWithDomain(ctx, domain)
 	baseDir := a.domainFilesDirForDomain(spider.domain)
 	_ = os.MkdirAll(baseDir, 0o755)
 	ownerPath := cleanPath(pagePath)
@@ -16448,10 +16457,10 @@ func (a *App) persistSpiderAssets(spider *pageSpider, pagePath string) error {
 		if strings.TrimSpace(resourceContentType) == "" {
 			resourceContentType = mime.TypeByExtension(path.Ext(assetReference))
 		}
-		a.upsertFileMetadata(context.Background(), domainStorageName(spider.domain), assetReference, ownerPath, int64(len(resource.content)), resourceContentType, "import")
+		a.upsertFileMetadata(ctx, domainStorageName(domain), assetReference, ownerPath, int64(len(resource.content)), resourceContentType, "import")
 	}
 	if wroteFile && a != nil && a.db != nil {
-		a.rebuildDomainStorageUsage(context.Background(), spider.domain)
+		a.rebuildDomainStorageUsage(ctx, domain)
 	}
 	return nil
 }
@@ -20605,7 +20614,9 @@ func (a *App) servePublishedStaticFileForAdmin(w http.ResponseWriter, r *http.Re
 	revisionCount := a.revisionCount(r.Context(), domain, pagePath)
 	_, pagePasswordProtected := a.pagePasswordRuleFromPrefixFile(domain, pagePath)
 	isServerManager := a.isServerManagerEmail(r.Context(), domain, adminEmail)
-	menuScript := buildContextMenuScript(true, isServerManager, false, pagePasswordProtected, !a.isDemoSiteDomain(r.Context(), domain), pagePath, domain, revisionID, revisionCount, "", translationsForRequest(r))
+	storageUsage := a.storedDomainStorageUsage(r.Context(), domain)
+	storageUsageLabel := formatFileSize(storageUsage.totalBytes()) + " / " + formatFileSize(storageUsage.LimitBytes)
+	menuScript := buildContextMenuScript(true, isServerManager, false, pagePasswordProtected, !a.isDemoSiteDomain(r.Context(), domain), pagePath, domain, revisionID, revisionCount, storageUsageLabel, translationsForRequest(r))
 	a.logContentDelivery(w, "static-file")
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_, _ = w.Write([]byte(injectMenuScriptIntoHTML(string(staticContent), menuScript)))
