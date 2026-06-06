@@ -529,6 +529,21 @@
     align-items: end;
 }
 
+.technical-page .billing-save-status {
+    align-self: center;
+    color: var(--muted);
+    font-size: 12px;
+    line-height: 1.25;
+}
+
+.technical-page .billing-save-status-success {
+    color: var(--green);
+}
+
+.technical-page .billing-save-status-error {
+    color: #ff8f8f;
+}
+
 .technical-page .billing-delete-form {
     display: grid;
     grid-column: 2;

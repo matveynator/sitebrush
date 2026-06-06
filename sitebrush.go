@@ -7195,7 +7195,9 @@ func (a *App) publicTrialSitePreview(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "progress_token is required", http.StatusBadRequest)
 		return
 	}
-	sourceURL, remoteSourceURL, htmlBytes, err := a.resolvePublicTrialSource(r.Context(), r.FormValue("source_url"), progressToken)
+	previewContext, cancelPreview := context.WithTimeout(context.Background(), 15*time.Minute)
+	defer cancelPreview()
+	sourceURL, remoteSourceURL, htmlBytes, err := a.resolvePublicTrialSource(previewContext, r.FormValue("source_url"), progressToken)
 	if err != nil {
 		http.Error(w, publicTrialSourceErrorText(translationsForRequest(r), err), http.StatusBadGateway)
 		return
@@ -7240,7 +7242,7 @@ func (a *App) publicTrialSitePreview(w http.ResponseWriter, r *http.Request) {
 		pageBytes += int64(len([]byte(importedPage.HTML)))
 	}
 	requiredBytes := pageBytes + resourceBytes
-	plan, freePlan, fitsFreePlan := a.smallestPublicTrialPlan(r.Context(), requiredBytes)
+	plan, freePlan, fitsFreePlan := a.smallestPublicTrialPlan(previewContext, requiredBytes)
 	preview := publicTrialPreview{
 		Token:          progressToken,
 		SourceURL:      sourceURL,
@@ -9301,6 +9303,15 @@ func (a *App) billingPage(w http.ResponseWriter, r *http.Request) {
 	status := ""
 	if r.Method == http.MethodPost {
 		status = a.handleBillingAction(r)
+		if billingActionWantsJSON(r) {
+			saved := billingActionStatusWasSaved(r, status)
+			w.Header().Set("Content-Type", "application/json")
+			if !saved {
+				w.WriteHeader(http.StatusBadRequest)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"status": status, "saved": saved})
+			return
+		}
 	}
 	view, err := a.billingView(r.Context(), r)
 	if err != nil {
@@ -9309,6 +9320,28 @@ func (a *App) billingPage(w http.ResponseWriter, r *http.Request) {
 	}
 	view["Status"] = status
 	a.render(w, r, "billing.html", view)
+}
+
+func billingActionWantsJSON(r *http.Request) bool {
+	return strings.Contains(r.Header.Get("Accept"), "application/json") || r.FormValue("billing_ajax") == "1"
+}
+
+func billingActionStatusWasSaved(r *http.Request, status string) bool {
+	translations := translationsForRequest(r)
+	action := strings.TrimSpace(r.FormValue("billing_action"))
+	status = strings.TrimSpace(status)
+	switch action {
+	case "settings", "registration_settings", "demo_settings":
+		return status == translationOrDefault(translations, "billing_status_settings_saved", "Billing settings saved.")
+	case "update_site":
+		domain := normalizeQuotaDomainName(r.FormValue("domain"))
+		return domain != "" && status == fmt.Sprintf(translationOrDefault(translations, "billing_status_site_settings_saved", "Site %s settings were saved."), domain)
+	case "save_plan":
+		return status == translationOrDefault(translations, "billing_status_plan_saved", "Plan saved.")
+	case "update_backup_retention":
+		return status == translationOrDefault(translations, "billing_status_backup_retention_saved", "Backup retention was saved.")
+	}
+	return false
 }
 
 func (a *App) handleBillingAction(r *http.Request) string {
