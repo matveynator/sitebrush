@@ -1544,6 +1544,8 @@ type publicTrialPreviewResponse struct {
 	PageCount      int                       `json:"page_count"`
 	ResourceCount  int                       `json:"resource_count"`
 	ResourceCounts publicTrialResourceCounts `json:"resource_counts"`
+	Resources      []grabResourcePreview     `json:"resources"`
+	PageBytes      int64                     `json:"page_bytes"`
 	TotalBytes     int64                     `json:"total_bytes"`
 	RequiredBytes  int64                     `json:"required_bytes"`
 	FitsFreePlan   bool                      `json:"fits_free_plan"`
@@ -7267,6 +7269,8 @@ func (a *App) publicTrialSitePreview(w http.ResponseWriter, r *http.Request) {
 		PageCount:      preview.PageCount,
 		ResourceCount:  preview.ResourceCount,
 		ResourceCounts: preview.ResourceCounts,
+		Resources:      preview.Resources,
+		PageBytes:      pageBytes,
 		TotalBytes:     preview.TotalBytes,
 		RequiredBytes:  preview.RequiredBytes,
 		FitsFreePlan:   preview.FitsFreePlan,
@@ -7347,6 +7351,12 @@ func (a *App) publicTrialSiteCreate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "preview not found", http.StatusNotFound)
 		return
 	}
+	selectedResourceURLs := selectedGrabResourceURLs(r)
+	selectionConfirmed := strings.TrimSpace(r.FormValue("import_selection_confirmed")) == "1"
+	if len(selectedResourceURLs) == 0 && !selectionConfirmed {
+		selectedResourceURLs = publicTrialResourceURLMap(preview.Resources)
+	}
+	preview = a.preparePublicTrialPreviewForCreate(r.Context(), preview, selectedResourceURLs, progressToken)
 	controlDatabase, err := a.openServerControlDatabase(r.Context())
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -7740,6 +7750,91 @@ func publicTrialResourceCountsFromResources(resources []grabResourcePreview) pub
 	return counts
 }
 
+func publicTrialResourceURLMap(resources []grabResourcePreview) map[string]struct{} {
+	resourceURLs := make(map[string]struct{})
+	for _, resource := range resources {
+		resourceURL := strings.TrimSpace(resource.URL)
+		if resourceURL != "" {
+			resourceURLs[resourceURL] = struct{}{}
+		}
+	}
+	return resourceURLs
+}
+
+func publicTrialSelectedResources(resources []grabResourcePreview, selectedResourceURLs map[string]struct{}) []grabResourcePreview {
+	if len(selectedResourceURLs) == 0 {
+		return nil
+	}
+	selectedResources := make([]grabResourcePreview, 0, len(resources))
+	for _, resource := range resources {
+		resourceURL := strings.TrimSpace(resource.URL)
+		if _, selected := selectedResourceURLs[resourceURL]; selected {
+			selectedResources = append(selectedResources, resource)
+		}
+	}
+	return selectedResources
+}
+
+func (a *App) preparePublicTrialPreviewForCreate(ctx context.Context, preview publicTrialPreview, selectedResourceURLs map[string]struct{}, progressToken string) publicTrialPreview {
+	selectedResources := publicTrialSelectedResources(preview.Resources, selectedResourceURLs)
+	remoteSourceURL, parseErr := url.Parse(preview.SourceURL)
+	if parseErr != nil || remoteSourceURL.Hostname() == "" {
+		preview.Resources = selectedResources
+		preview.ResourceCount = len(selectedResources)
+		preview.ResourceCounts = publicTrialResourceCountsFromResources(selectedResources)
+		return preview
+	}
+	spider := newPageSpider("", remoteSourceURL, grabResourceMaxDepth, a.grabTracker, progressToken, grabSourceOptions{})
+	spider.setContext(ctx)
+	spider.publicAssetBasePath = "/"
+	spider.selectedResourceURLs = selectedResourceURLs
+	spider.setDownloadPlan(len(preview.ImportedPages)+len(selectedResources), publicTrialPreviewSelectedBytes(preview.ImportedPages, selectedResources))
+	spider.documentURLRewriter = func(normalizedURL string) (string, bool) {
+		parsedURL, err := url.Parse(normalizedURL)
+		if err != nil || !crawler.SameHost(remoteSourceURL, parsedURL) || !crawler.IsPageURL(parsedURL) {
+			return "", false
+		}
+		return crawler.WholeSiteLocalLink("/", remoteSourceURL, parsedURL), true
+	}
+	importedPages := make([]wholeSiteImportedPage, 0, len(preview.ImportedPages))
+	for _, importedPage := range preview.ImportedPages {
+		pageSourceURL, err := url.Parse(importedPage.SourceURL)
+		if err != nil || pageSourceURL.Hostname() == "" {
+			pageSourceURL = remoteSourceURL
+		}
+		rootResource := &mirroredResource{url: pageSourceURL.String(), content: []byte(importedPage.HTML)}
+		spider.resources[pageSourceURL.String()] = rootResource
+		spider.rewriteNestedResources(rootResource, 0, "text/html")
+		importedPages = append(importedPages, wholeSiteImportedPage{SourceURL: importedPage.SourceURL, LocalPath: importedPage.LocalPath, HTML: string(rootResource.content)})
+		spider.downloadedTotal++
+		spider.publishResourceProgress("downloaded", pageSourceURL.String(), 100, int64(len(importedPage.HTML)), int64(len(importedPage.HTML)))
+	}
+	spider.retryFailedResources(remoteSourceURL, grabImportFailedResourceRetryAttempts)
+	spider.rewriteImportedPagesStaticURLTextReferences(importedPages)
+	requiredBytes := publicTrialPreviewSelectedBytes(importedPages, selectedResources)
+	plan, freePlan, fitsFreePlan := a.smallestPublicTrialPlan(ctx, requiredBytes)
+	preview.ImportedPages = importedPages
+	preview.Resources = selectedResources
+	preview.Spider = spider
+	preview.ResourceCount = len(selectedResources)
+	preview.ResourceCounts = publicTrialResourceCountsFromResources(selectedResources)
+	preview.TotalBytes = requiredBytes
+	preview.RequiredBytes = requiredBytes
+	preview.Plan = plan
+	preview.FreePlan = freePlan
+	preview.FitsFreePlan = fitsFreePlan
+	return preview
+}
+
+func publicTrialPreviewSelectedBytes(importedPages []wholeSiteImportedPage, resources []grabResourcePreview) int64 {
+	var totalBytes int64
+	for _, importedPage := range importedPages {
+		totalBytes += int64(len([]byte(importedPage.HTML)))
+	}
+	totalBytes += sumGrabPreviewResourceBytes(resources)
+	return totalBytes
+}
+
 func (a *App) availablePublicTrialDomain(ctx context.Context, sourceURL, parentDomain string) (string, error) {
 	parentDomain = normalizeDomainName(parentDomain)
 	if parentDomain == "" {
@@ -7866,6 +7961,9 @@ func (a *App) createManagedSiteWithoutAdmin(ctx context.Context, domain string, 
 func (a *App) persistPublicTrialPreview(ctx context.Context, domain string, preview publicTrialPreview) error {
 	if len(preview.ImportedPages) == 0 {
 		return errors.New("preview is empty")
+	}
+	if preview.Spider != nil {
+		preview.Spider.domain = domain
 	}
 	pageDelta, publishedPageDelta, revisionDelta, publishedStaticDelta := a.estimateImportedPagesStorageDelta(ctx, domain, preview.ImportedPages)
 	fileDelta := a.estimateImportedFileDelta(domain, preview.Spider)

@@ -45,6 +45,7 @@
       '.SiteBrushCopySiteResourceURL{overflow-wrap:anywhere}',
       '.SiteBrushCopySiteResourceMeta{color:#b7b7b7;margin-top:3px}',
       '.SiteBrushCopySiteResourceReason{color:#ffa500;margin-top:3px}',
+      '.SiteBrushPublicTrialResourceGroup{background:rgba(149,229,239,.08);font-weight:700}',
       '.SiteBrushCopySiteActions{display:flex;justify-content:flex-end;gap:8px;margin-top:14px}',
       '.SiteBrushCopySiteSecondaryButton{border:1px solid rgba(149,229,239,.28);border-radius:10px;background:rgba(0,0,0,.22);color:#fff;font:inherit;font-weight:700;padding:8px 12px;cursor:pointer}',
       '.SiteBrushPublicTrialFrame{width:100%;height:100%;border:1px solid rgba(149,229,239,.28);border-radius:10px;background:#fff}',
@@ -1042,6 +1043,162 @@
     metricListElement.replaceChildren.apply(metricListElement, metricElements);
   }
 
+  function publicTrialResourcePath(resourceURL) {
+    try {
+      const parsedURL = new URL(resourceURL);
+      return parsedURL.pathname || '/';
+    } catch (parseError) {
+      return '/';
+    }
+  }
+
+  function publicTrialResourceGroupKey(resourceURL) {
+    const resourcePath = publicTrialResourcePath(resourceURL);
+    const pathParts = resourcePath.split('/').filter(function keepPathPart(pathPart) { return pathPart !== ''; });
+    if (pathParts.length <= 1) {
+      return '/';
+    }
+    return '/' + pathParts.slice(0, pathParts.length - 1).join('/') + '/';
+  }
+
+  function publicTrialResourceGroupRows(resources) {
+    const groupsByPath = new Map();
+    for (const previewResource of resources || []) {
+      const groupPath = publicTrialResourceGroupKey(previewResource.url || '');
+      const existingGroup = groupsByPath.get(groupPath) || { path: groupPath, count: 0, sizeBytes: 0 };
+      existingGroup.count += 1;
+      existingGroup.sizeBytes += Number(previewResource.size_bytes) || 0;
+      groupsByPath.set(groupPath, existingGroup);
+    }
+    return Array.from(groupsByPath.values()).filter(function keepUsefulGroup(groupPayload) {
+      return groupPayload.count > 1;
+    }).sort(function sortGroupRows(leftGroup, rightGroup) {
+      return rightGroup.sizeBytes - leftGroup.sizeBytes || leftGroup.path.localeCompare(rightGroup.path);
+    });
+  }
+
+  function selectedPublicTrialResourcePayload(resourcesElement) {
+    const selectedResources = [];
+    let selectedBytes = 0;
+    const selectedCounts = { images: 0, css: 0, js: 0, other: 0 };
+    const checkboxElements = resourcesElement.querySelectorAll('input[data-sitebrush-copy-resource-url]');
+    for (const checkboxElement of checkboxElements) {
+      if (!checkboxElement.checked) {
+        continue;
+      }
+      const resourceKind = String(checkboxElement.dataset.sitebrushCopyResourceKind || '').toLowerCase();
+      const resourceSizeBytes = Number(checkboxElement.dataset.sitebrushCopyResourceSizeBytes) || 0;
+      selectedResources.push(checkboxElement.dataset.sitebrushCopyResourceUrl || '');
+      selectedBytes += resourceSizeBytes;
+      if (resourceKind === 'image') {
+        selectedCounts.images += 1;
+      } else if (resourceKind === 'style' || resourceKind === 'css' || resourceKind === 'stylesheet') {
+        selectedCounts.css += 1;
+      } else if (resourceKind === 'script' || resourceKind === 'js' || resourceKind === 'javascript') {
+        selectedCounts.js += 1;
+      } else {
+        selectedCounts.other += 1;
+      }
+    }
+    return { urls: selectedResources, bytes: selectedBytes, counts: selectedCounts };
+  }
+
+  function selectedPublicTrialPreviewPayload(previewPayload, resourcesElement) {
+    if (!previewPayload) {
+      return null;
+    }
+    const selectedPayload = selectedPublicTrialResourcePayload(resourcesElement);
+    const pageBytes = Number(previewPayload.page_bytes) || 0;
+    const requiredBytes = pageBytes + selectedPayload.bytes;
+    const freePlan = previewPayload.free_plan || {};
+    const paidPlan = previewPayload.plan || {};
+    const freeQuotaBytes = Number(freePlan.quota_bytes) || 0;
+    const fitsFreePlan = freeQuotaBytes > 0 && requiredBytes <= freeQuotaBytes;
+    const selectedPlan = fitsFreePlan ? freePlan : paidPlan;
+    return {
+      source_url: previewPayload.source_url,
+      page_count: previewPayload.page_count,
+      resource_count: selectedPayload.urls.length,
+      resource_counts: selectedPayload.counts,
+      total_bytes: requiredBytes,
+      required_bytes: requiredBytes,
+      fits_free_plan: fitsFreePlan,
+      plan: selectedPlan,
+      free_plan: freePlan,
+      message: previewPayload.message
+    };
+  }
+
+  function syncPublicTrialGroupState(resourcesElement) {
+    const groupCheckboxElements = resourcesElement.querySelectorAll('input[data-sitebrush-public-trial-group-path]');
+    for (const groupCheckboxElement of groupCheckboxElements) {
+      const groupPath = groupCheckboxElement.dataset.sitebrushPublicTrialGroupPath || '';
+      const childCheckboxElements = Array.from(resourcesElement.querySelectorAll('input[data-sitebrush-copy-resource-url]')).filter(function keepGroupChild(childCheckboxElement) {
+        return publicTrialResourceGroupKey(childCheckboxElement.dataset.sitebrushCopyResourceUrl || '') === groupPath;
+      });
+      const checkedCount = childCheckboxElements.filter(function countChecked(childCheckboxElement) { return childCheckboxElement.checked; }).length;
+      groupCheckboxElement.checked = childCheckboxElements.length > 0 && checkedCount === childCheckboxElements.length;
+      groupCheckboxElement.indeterminate = checkedCount > 0 && checkedCount < childCheckboxElements.length;
+    }
+  }
+
+  function publicTrialResultText(previewPayload, configuration) {
+    if (!previewPayload) {
+      return '';
+    }
+    if (previewPayload.fits_free_plan) {
+      return publicTrialText(configuration, 'freeResult', 'Great – this website can be launched on the free SiteBrush plan.');
+    }
+    return publicTrialText(configuration, 'paidResult', 'This website requires a paid plan, but you can test SiteBrush for free for 1 month. Payment is required only after the trial period.');
+  }
+
+  function renderPublicTrialResources(resourcesElement, metricListElement, resultElement, configuration, previewPayload) {
+    resourcesElement.replaceChildren();
+    const resources = Array.isArray(previewPayload && previewPayload.resources) ? previewPayload.resources : [];
+    if (resources.length === 0) {
+      resourcesElement.classList.add('SiteBrushCopySiteHidden');
+      return;
+    }
+    function updatePublicTrialSelection() {
+      syncPublicTrialGroupState(resourcesElement);
+      const selectedPreviewPayload = selectedPublicTrialPreviewPayload(previewPayload, resourcesElement);
+      renderPublicTrialMetrics(metricListElement, configuration, selectedPreviewPayload, {});
+      resultElement.textContent = publicTrialResultText(selectedPreviewPayload, configuration);
+    }
+    for (const groupPayload of publicTrialResourceGroupRows(resources)) {
+      const groupRowElement = createElement('label', 'SiteBrushCopySiteResource SiteBrushPublicTrialResourceGroup');
+      const groupCheckboxElement = document.createElement('input');
+      groupCheckboxElement.type = 'checkbox';
+      groupCheckboxElement.checked = true;
+      groupCheckboxElement.dataset.sitebrushPublicTrialGroupPath = groupPayload.path;
+      groupCheckboxElement.addEventListener('change', function onPublicTrialGroupChange() {
+        const childCheckboxElements = resourcesElement.querySelectorAll('input[data-sitebrush-copy-resource-url]');
+        for (const childCheckboxElement of childCheckboxElements) {
+          if (publicTrialResourceGroupKey(childCheckboxElement.dataset.sitebrushCopyResourceUrl || '') === groupPayload.path) {
+            childCheckboxElement.checked = groupCheckboxElement.checked;
+          }
+        }
+        updatePublicTrialSelection();
+      });
+      const detailsElement = createElement('div', '');
+      detailsElement.appendChild(createElement('div', 'SiteBrushCopySiteResourceURL', groupPayload.path));
+      detailsElement.appendChild(createElement('div', 'SiteBrushCopySiteResourceMeta', groupPayload.count + ' · ' + formatSize(groupPayload.sizeBytes, configuration)));
+      groupRowElement.appendChild(groupCheckboxElement);
+      groupRowElement.appendChild(createElement('span', 'SiteBrushCopySiteResourceKind', publicTrialText(configuration, 'files', 'Found files')));
+      groupRowElement.appendChild(detailsElement);
+      resourcesElement.appendChild(groupRowElement);
+    }
+    for (const previewResource of resources) {
+      appendPreviewResource(resourcesElement, previewResource, configuration, updatePublicTrialSelection);
+      const checkboxElement = resourcesElement.lastElementChild ? resourcesElement.lastElementChild.querySelector('input[data-sitebrush-copy-resource-url]') : null;
+      if (checkboxElement) {
+        checkboxElement.dataset.sitebrushCopyResourceKind = previewResource.kind || '';
+      }
+    }
+    resourcesElement.classList.remove('SiteBrushCopySiteHidden');
+    updatePublicTrialSelection();
+  }
+
   function openPublicTrialModal(formElement, configuration) {
     ensureCopySiteStyles();
     const endpointPath = configuration.endpoint || '/';
@@ -1064,6 +1221,7 @@
     const progressElement = createElement('div', 'SiteBrushCopySiteProgress');
     const progressBarElement = createElement('div', 'SiteBrushCopySiteProgressBar', '0%');
     const metricListElement = createElement('div', 'SiteBrushPublicTrialMetrics');
+    const resourcesElement = createElement('div', 'SiteBrushCopySiteResources SiteBrushCopySiteHidden');
     const resultElement = createElement('p', 'SiteBrushCopySiteStatus SiteBrushPublicTrialResult', '');
     const actionRowElement = createElement('div', 'SiteBrushCopySiteActions');
     const createButtonElement = createElement('button', 'SiteBrushCopySiteButton SiteBrushCopySiteHidden', publicTrialText(configuration, 'createButton', 'Create test website'));
@@ -1072,6 +1230,7 @@
     statusPanelElement.appendChild(currentURLElement);
     statusPanelElement.appendChild(progressElement);
     statusPanelElement.appendChild(metricListElement);
+    statusPanelElement.appendChild(resourcesElement);
     statusPanelElement.appendChild(resultElement);
     actionRowElement.appendChild(createButtonElement);
     dialogElement.appendChild(headerElement);
@@ -1146,6 +1305,57 @@
       }, 900);
     }
 
+    function appendSelectedPublicTrialResources(requestBody) {
+      requestBody.set('import_selection_confirmed', '1');
+      const checkboxElements = resourcesElement.querySelectorAll('input[data-sitebrush-copy-resource-url]');
+      for (const checkboxElement of checkboxElements) {
+        if (checkboxElement.checked) {
+          requestBody.append('import_resource_url', checkboxElement.dataset.sitebrushCopyResourceUrl || '');
+        }
+      }
+    }
+
+    function connectCreateProgressSocket(submitCreateRequest) {
+      if (progressSocket) {
+        progressSocket.close();
+        progressSocket = null;
+      }
+      let createRequestSubmitted = false;
+      progressSocket = new WebSocket(publicTrialWebSocketURL(endpointPath, progressToken));
+      progressSocket.onmessage = function onPublicTrialCreateProgressMessage(messageEvent) {
+        let progressState = null;
+        try {
+          progressState = JSON.parse(messageEvent.data);
+        } catch (parseError) {
+          return;
+        }
+        if (progressState.stage === 'ready') {
+          if (!createRequestSubmitted) {
+            createRequestSubmitted = true;
+            submitCreateRequest();
+          }
+          return;
+        }
+        if (progressState.stage === 'retry_wait' || progressState.stage === 'retrying') {
+          statusElement.textContent = publicTrialRetryStatusText(progressState);
+        } else {
+          statusElement.textContent = publicTrialText(configuration, 'creating', 'Creating a test version with the SiteBrush editor...');
+        }
+        currentURLElement.textContent = progressState.current_url || '';
+        const completedPercent = Number(progressState.completed_percent) || 0;
+        setProgress(progressBarElement, completedPercent);
+      };
+      progressSocket.onerror = function onPublicTrialCreateProgressError() {
+        statusElement.textContent = publicTrialText(configuration, 'progressLost', 'Progress connection was lost.');
+      };
+      window.setTimeout(function submitPublicTrialCreateIfSocketReadyWasMissed() {
+        if (!createRequestSubmitted) {
+          createRequestSubmitted = true;
+          submitCreateRequest();
+        }
+      }, 900);
+    }
+
     function submitPreviewRequest() {
       if (previewRequestSubmitted) {
         return;
@@ -1183,8 +1393,10 @@
           if (previewPayload.preview_url && previewFrameElement.src !== previewPayload.preview_url) {
             previewFrameElement.src = previewPayload.preview_url;
           }
-          renderPublicTrialMetrics(metricListElement, configuration, previewPayload, {});
-          resultElement.textContent = previewPayload.message || (previewPayload.fits_free_plan ? publicTrialText(configuration, 'freeResult', 'The website fits the free plan.') : publicTrialText(configuration, 'paidResult', 'This website requires a paid plan, but you can test SiteBrush for free for 1 month. Payment is required only after the trial period.'));
+          renderPublicTrialResources(resourcesElement, metricListElement, resultElement, configuration, previewPayload);
+          if (!resultElement.textContent) {
+            resultElement.textContent = publicTrialResultText(previewPayload, configuration);
+          }
           statusElement.textContent = publicTrialText(configuration, 'preparing', 'Preparing the website for editing...');
           createButtonElement.classList.remove('SiteBrushCopySiteHidden');
         })
@@ -1203,9 +1415,13 @@
       }
       createButtonElement.disabled = true;
       statusElement.textContent = publicTrialText(configuration, 'creating', 'Creating a test version with the SiteBrush editor...');
+      progressElement.classList.remove('SiteBrushCopySiteHidden');
+      setProgress(progressBarElement, 0);
       const requestBody = new URLSearchParams();
       requestBody.set('progress_token', progressToken);
-      fetch(publicTrialFetchURL(endpointPath, 'trial_site_create'), { method: 'POST', body: requestBody, headers: { Accept: 'application/json' } })
+      appendSelectedPublicTrialResources(requestBody);
+      connectCreateProgressSocket(function submitPublicTrialCreateRequest() {
+        fetch(publicTrialFetchURL(endpointPath, 'trial_site_create'), { method: 'POST', body: requestBody, headers: { Accept: 'application/json' } })
         .then(function parsePublicTrialCreateResponse(createResponse) {
           if (!createResponse.ok) {
             return createResponse.text().then(function throwPublicTrialCreateError(errorText) {
@@ -1221,6 +1437,7 @@
           createButtonElement.disabled = false;
           statusElement.textContent = createError.message || publicTrialText(configuration, 'loadFailed', 'Website creation failed.');
         });
+      });
     }
 
     closeButtonElement.addEventListener('click', closePublicTrialModal);
