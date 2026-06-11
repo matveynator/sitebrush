@@ -38,6 +38,7 @@ type Plan struct {
 type Site struct {
 	Domain            string
 	IsDemo            bool
+	IsMainDomain      bool
 	Aliases           string
 	UsedLabel         string
 	LimitLabel        string
@@ -584,10 +585,15 @@ func BuildSites(usages []SiteUsage, plans []Plan, assignments map[string]Service
 }
 
 func BuildSitesWithDemoDomain(usages []SiteUsage, plans []Plan, assignments map[string]ServiceAssignment, currentDomain string, demoDomain string) []Site {
+	return BuildSitesWithDemoAndMainDomain(usages, plans, assignments, currentDomain, demoDomain, "")
+}
+
+func BuildSitesWithDemoAndMainDomain(usages []SiteUsage, plans []Plan, assignments map[string]ServiceAssignment, currentDomain string, demoDomain string, mainDomain string) []Site {
 	planByID := make(map[int]Plan)
 	for _, plan := range plans {
 		planByID[plan.ID] = plan
 	}
+	mainDomain = strings.TrimSpace(mainDomain)
 	sites := make([]Site, 0, len(usages))
 	for _, usage := range usages {
 		freeBytes := usage.LimitBytes - usage.UsedBytes
@@ -612,9 +618,11 @@ func BuildSitesWithDemoDomain(usages []SiteUsage, plans []Plan, assignments map[
 			}
 		}
 		isDemo := strings.TrimSpace(usage.Domain) != "" && strings.EqualFold(strings.TrimSpace(usage.Domain), strings.TrimSpace(demoDomain))
+		isMainDomain := mainDomain != "" && strings.EqualFold(strings.TrimSpace(usage.Domain), mainDomain)
 		sites = append(sites, Site{
 			Domain:        usage.Domain,
 			IsDemo:        isDemo,
+			IsMainDomain:  isMainDomain,
 			Aliases:       strings.Join(usage.Aliases, ", "),
 			UsedLabel:     FormatFileSize(usage.UsedBytes),
 			LimitLabel:    FormatFileSize(usage.LimitBytes),

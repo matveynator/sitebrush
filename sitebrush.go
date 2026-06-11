@@ -9391,7 +9391,11 @@ func (a *App) billingView(ctx context.Context, r *http.Request) (map[string]any,
 	if demoSettings.Enabled {
 		billingDemoDomain = demoSettings.Domain
 	}
-	siteRows, err := a.billingSiteRows(ctx, plans, assignments, a.siteDomain(ctx, r), billingDemoDomain)
+	mainDomain := ""
+	if ownerDomain, found := store.OwnerDomain(ctx); found {
+		mainDomain = ownerDomain
+	}
+	siteRows, err := a.billingSiteRows(ctx, plans, assignments, a.siteDomain(ctx, r), billingDemoDomain, mainDomain)
 	if err != nil {
 		return nil, err
 	}
@@ -9410,7 +9414,7 @@ func (a *App) billingView(ctx context.Context, r *http.Request) (map[string]any,
 	}, nil
 }
 
-func (a *App) billingSiteRows(ctx context.Context, plans []billing.Plan, assignments map[string]billing.ServiceAssignment, currentDomain string, demoDomain string) ([]billing.Site, error) {
+func (a *App) billingSiteRows(ctx context.Context, plans []billing.Plan, assignments map[string]billing.ServiceAssignment, currentDomain string, demoDomain string, mainDomain string) ([]billing.Site, error) {
 	rows, err := listSiteQuotaRows(ctx, a.storagePath, a.serverControlDBPath())
 	if err != nil {
 		return nil, err
@@ -9426,7 +9430,7 @@ func (a *App) billingSiteRows(ctx context.Context, plans []billing.Plan, assignm
 			DatabasePath: row.DatabasePath,
 		})
 	}
-	siteRows := billing.BuildSitesWithDemoDomain(usages, plans, assignments, currentDomain, demoDomain)
+	siteRows := billing.BuildSitesWithDemoAndMainDomain(usages, plans, assignments, currentDomain, demoDomain, mainDomain)
 	rowByDomain := make(map[string]siteQuotaRow, len(rows))
 	for _, row := range rows {
 		rowByDomain[row.Domain] = row

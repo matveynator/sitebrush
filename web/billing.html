@@ -256,7 +256,11 @@
         {{range $siteIndex, $site := .Sites}}
         <article class="billing-site-row">
           <div class="billing-site-main">
-            <div class="billing-domain"><a href="//{{$site.Domain}}/" target="_blank" rel="noopener noreferrer">{{$site.Domain}}</a>{{if $site.IsDemo}} <span class="badge text-bg-info">{{index $.T "billing_demo_site_badge"}}</span>{{end}}</div>
+            <div class="billing-domain">
+              <a href="//{{$site.Domain}}/" target="_blank" rel="noopener noreferrer">{{$site.Domain}}</a>
+              {{if $site.IsMainDomain}}<span class="badge billing-main-domain-badge" title="{{index $.T "billing_main_domain_hint"}}"><span class="billing-main-domain-icon" aria-hidden="true"></span>{{index $.T "billing_main_domain_badge"}}</span>{{end}}
+              {{if $site.IsDemo}}<span class="badge text-bg-info">{{index $.T "billing_demo_site_badge"}}</span>{{end}}
+            </div>
             {{if $site.Aliases}}<div class="text-muted small">{{index $.T "billing_aliases_label"}} {{$site.Aliases}}</div>{{end}}
             {{if $site.AdminEmails}}<div class="text-muted small">{{index $.T "billing_admins_label"}} {{$site.AdminEmails}}</div>{{end}}
             {{if $site.IsDemo}}<div class="text-muted small">{{index $.T "billing_demo_site_no_billing"}}</div>{{end}}

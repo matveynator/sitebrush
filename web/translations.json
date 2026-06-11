@@ -617,7 +617,9 @@
     "public_trial_copy_html": "Copy HTML",
     "public_trial_preview": "Preview",
     "public_trial_disabled_title": "Self-registration is disabled",
-    "public_trial_disabled_text": "The public SiteBrush install form is paused. Enable self-registration to publish the form and activate its endpoints."
+    "public_trial_disabled_text": "The public SiteBrush install form is paused. Enable self-registration to publish the form and activate its endpoints.",
+    "billing_main_domain_badge": "Main server domain",
+    "billing_main_domain_hint": "This second-level domain is the server owner domain used to manage billing. Customer subdomains and their own domain aliases are listed separately."
   },
   "fr": {
     "setup_no_admin": "aucun administrateur pour l'instant",
@@ -1231,7 +1233,9 @@
     "public_trial_copy_html": "Copier le HTML",
     "public_trial_preview": "Apercu",
     "public_trial_disabled_title": "L inscription autonome est desactivee",
-    "public_trial_disabled_text": "Le formulaire public d installation SiteBrush est en pause. Activez l inscription autonome pour publier le formulaire et ouvrir ses endpoints."
+    "public_trial_disabled_text": "Le formulaire public d installation SiteBrush est en pause. Activez l inscription autonome pour publier le formulaire et ouvrir ses endpoints.",
+    "billing_main_domain_badge": "Domaine principal du serveur",
+    "billing_main_domain_hint": "Ce domaine de deuxieme niveau est le domaine proprietaire du serveur utilise pour gerer la facturation. Les sous-domaines clients et leurs alias de domaine sont listes separement."
   },
   "ru": {
     "setup_no_admin": "пока нет администратора",
@@ -1851,7 +1855,9 @@
     "public_trial_copy_html": "Скопировать HTML",
     "public_trial_preview": "Предпросмотр",
     "public_trial_disabled_title": "Самостоятельная регистрация отключена",
-    "public_trial_disabled_text": "Публичная форма установки SiteBrush сейчас приостановлена. Включите самостоятельную регистрацию, чтобы показать HTML формы и открыть ее endpoints."
+    "public_trial_disabled_text": "Публичная форма установки SiteBrush сейчас приостановлена. Включите самостоятельную регистрацию, чтобы показать HTML формы и открыть ее endpoints.",
+    "billing_main_domain_badge": "Главный домен сервера",
+    "billing_main_domain_hint": "Этот домен второго уровня является доменом владельца сервера и управляет биллингом. Клиентские поддомены и их собственные домены-алиасы показаны отдельно."
   },
   "ja": {
     "setup_no_admin": "まだ管理者がいません",
@@ -2465,7 +2471,9 @@
     "public_trial_copy_html": "HTML をコピー",
     "public_trial_preview": "プレビュー",
     "public_trial_disabled_title": "自己登録は無効です",
-    "public_trial_disabled_text": "公開 SiteBrush インストールフォームは一時停止中です。フォームを公開して endpoints を有効にするには自己登録を有効にしてください。"
+    "public_trial_disabled_text": "公開 SiteBrush インストールフォームは一時停止中です。フォームを公開して endpoints を有効にするには自己登録を有効にしてください。",
+    "billing_main_domain_badge": "サーバーのメインドメイン",
+    "billing_main_domain_hint": "この第2レベルドメインは請求管理に使うサーバー所有者のドメインです。顧客のサブドメインと独自ドメインのエイリアスは別に表示されます。"
   },
   "it": {
     "setup_no_admin": "nessun amministratore ancora",
@@ -3079,7 +3087,9 @@
     "public_trial_copy_html": "Copia HTML",
     "public_trial_preview": "Anteprima",
     "public_trial_disabled_title": "Registrazione autonoma disattivata",
-    "public_trial_disabled_text": "Il modulo pubblico di installazione SiteBrush e in pausa. Attiva la registrazione autonoma per pubblicare il modulo e aprire i suoi endpoints."
+    "public_trial_disabled_text": "Il modulo pubblico di installazione SiteBrush e in pausa. Attiva la registrazione autonoma per pubblicare il modulo e aprire i suoi endpoints.",
+    "billing_main_domain_badge": "Dominio principale del server",
+    "billing_main_domain_hint": "Questo dominio di secondo livello e il dominio del proprietario del server usato per gestire la fatturazione. I sottodomini dei clienti e i loro alias di dominio sono elencati separatamente."
   },
   "sv": {
     "setup_no_admin": "ingen administratör ännu",
@@ -3693,7 +3703,9 @@
     "public_trial_copy_html": "Kopiera HTML",
     "public_trial_preview": "Forhandsvisa",
     "public_trial_disabled_title": "Sjalvregistrering ar avstangd",
-    "public_trial_disabled_text": "Det offentliga SiteBrush-installationsformularet ar pausat. Aktivera sjalvregistrering for att publicera formularet och oppna dess endpoints."
+    "public_trial_disabled_text": "Det offentliga SiteBrush-installationsformularet ar pausat. Aktivera sjalvregistrering for att publicera formularet och oppna dess endpoints.",
+    "billing_main_domain_badge": "Serverns huvuddomän",
+    "billing_main_domain_hint": "Denna andranivådomän är serverägarens domän som används för att hantera fakturering. Kundernas underdomäner och egna domänalias visas separat."
   },
   "fi": {
     "setup_no_admin": "ei vielä järjestelmänvalvojaa",
@@ -4307,7 +4319,9 @@
     "public_trial_copy_html": "Kopioi HTML",
     "public_trial_preview": "Esikatselu",
     "public_trial_disabled_title": "Itserekisterointi on poistettu kaytosta",
-    "public_trial_disabled_text": "Julkinen SiteBrush-asennuslomake on tauolla. Ota itserekisterointi kayttoon, jotta lomake ja sen endpoints avautuvat."
+    "public_trial_disabled_text": "Julkinen SiteBrush-asennuslomake on tauolla. Ota itserekisterointi kayttoon, jotta lomake ja sen endpoints avautuvat.",
+    "billing_main_domain_badge": "Palvelimen paaverkkotunnus",
+    "billing_main_domain_hint": "Tama toisen tason verkkotunnus on palvelimen omistajan tunnus laskutuksen hallintaan. Asiakkaiden aliverkkotunnukset ja omat domain-aliakset naytetaan erikseen."
   },
   "mn": {
     "setup_no_admin": "админ хараахан алга",
@@ -4921,7 +4935,9 @@
     "public_trial_copy_html": "HTML хуулах",
     "public_trial_preview": "Урьдчилан харах",
     "public_trial_disabled_title": "Өөрөө бүртгүүлэх боломж унтраалттай",
-    "public_trial_disabled_text": "SiteBrush-ийн нийтийн суулгах форм түр зогссон. Формыг нийтэлж endpoints-ийг нээхийн тулд өөрөө бүртгүүлэхийг асаана уу."
+    "public_trial_disabled_text": "SiteBrush-ийн нийтийн суулгах форм түр зогссон. Формыг нийтэлж endpoints-ийг нээхийн тулд өөрөө бүртгүүлэхийг асаана уу.",
+    "billing_main_domain_badge": "Серверийн үндсэн домэйн",
+    "billing_main_domain_hint": "Энэ хоёрдугаар түвшний домэйн нь биллинг удирдах сервер эзэмшигчийн домэйн юм. Харилцагчийн дэд домэйнүүд болон өөрийн домэйн alias-ууд тусдаа харагдана."
   },
   "zh": {
     "setup_no_admin": "尚无管理员",
@@ -5535,7 +5551,9 @@
     "public_trial_copy_html": "复制 HTML",
     "public_trial_preview": "预览",
     "public_trial_disabled_title": "自助注册已关闭",
-    "public_trial_disabled_text": "公开的 SiteBrush 安装表单已暂停。启用自助注册后，表单和它的 endpoints 才会开放。"
+    "public_trial_disabled_text": "公开的 SiteBrush 安装表单已暂停。启用自助注册后，表单和它的 endpoints 才会开放。",
+    "billing_main_domain_badge": "服务器主域名",
+    "billing_main_domain_hint": "这个二级域名是用于管理账单的服务器所有者域名。客户子域名及其自有域名别名会单独显示。"
   },
   "he": {
     "setup_no_admin": "עדיין אין מנהל",
@@ -6149,7 +6167,9 @@
     "public_trial_copy_html": "העתק HTML",
     "public_trial_preview": "תצוגה מקדימה",
     "public_trial_disabled_title": "הרשמה עצמית כבויה",
-    "public_trial_disabled_text": "טופס ההתקנה הציבורי של SiteBrush מושהה. הפעל הרשמה עצמית כדי לפרסם את הטופס ולפתוח את ה-endpoints שלו."
+    "public_trial_disabled_text": "טופס ההתקנה הציבורי של SiteBrush מושהה. הפעל הרשמה עצמית כדי לפרסם את הטופס ולפתוח את ה-endpoints שלו.",
+    "billing_main_domain_badge": "הדומיין הראשי של השרת",
+    "billing_main_domain_hint": "דומיין מדרגה שנייה זה הוא דומיין בעל השרת המשמש לניהול החיוב. תת-דומיינים של לקוחות וכינויי הדומיין שלהם מוצגים בנפרד."
   },
   "fa": {
     "setup_no_admin": "هنوز مدیر وجود ندارد",
@@ -6763,7 +6783,9 @@
     "public_trial_copy_html": "کپی HTML",
     "public_trial_preview": "پیش‌نمایش",
     "public_trial_disabled_title": "ثبت‌نام خودکار غیرفعال است",
-    "public_trial_disabled_text": "فرم عمومی نصب SiteBrush موقتاً متوقف شده است. برای نمایش فرم و فعال شدن endpoints آن، ثبت‌نام خودکار را فعال کنید."
+    "public_trial_disabled_text": "فرم عمومی نصب SiteBrush موقتاً متوقف شده است. برای نمایش فرم و فعال شدن endpoints آن، ثبت‌نام خودکار را فعال کنید.",
+    "billing_main_domain_badge": "دامنه اصلی سرور",
+    "billing_main_domain_hint": "این دامنه سطح دوم، دامنه مالک سرور برای مدیریت صورتحساب است. زیردامنه های مشتریان و نام های مستعار دامنه آنها جداگانه نمایش داده می شوند."
   },
   "de": {
     "setup_no_admin": "noch kein Administrator",
@@ -7377,7 +7399,9 @@
     "public_trial_copy_html": "HTML kopieren",
     "public_trial_preview": "Vorschau",
     "public_trial_disabled_title": "Selbstregistrierung ist deaktiviert",
-    "public_trial_disabled_text": "Das oeffentliche SiteBrush-Installationsformular ist pausiert. Aktiviere die Selbstregistrierung, um das Formular zu veroeffentlichen und seine endpoints zu oeffnen."
+    "public_trial_disabled_text": "Das oeffentliche SiteBrush-Installationsformular ist pausiert. Aktiviere die Selbstregistrierung, um das Formular zu veroeffentlichen und seine endpoints zu oeffnen.",
+    "billing_main_domain_badge": "Hauptdomain des Servers",
+    "billing_main_domain_hint": "Diese Second-Level-Domain ist die Inhaberdomain des Servers und wird fuer die Abrechnung verwendet. Kunden-Subdomains und ihre eigenen Domain-Aliase werden separat angezeigt."
   },
   "tr": {
     "setup_no_admin": "henüz yönetici yok",
@@ -7991,7 +8015,9 @@
     "public_trial_copy_html": "HTML kopyala",
     "public_trial_preview": "Onizleme",
     "public_trial_disabled_title": "Kendi kendine kayit kapali",
-    "public_trial_disabled_text": "Herkese acik SiteBrush kurulum formu duraklatildi. Formu yayinlamak ve endpoints acmak icin kendi kendine kaydi etkinlestirin."
+    "public_trial_disabled_text": "Herkese acik SiteBrush kurulum formu duraklatildi. Formu yayinlamak ve endpoints acmak icin kendi kendine kaydi etkinlestirin.",
+    "billing_main_domain_badge": "Sunucunun ana alan adi",
+    "billing_main_domain_hint": "Bu ikinci seviye alan adi, faturalandirmayi yoneten sunucu sahibi alan adidir. Musteri alt alan adlari ve kendi alan adi takma adlari ayri gosterilir."
   },
   "kk": {
     "setup_no_admin": "әзірге әкімші жоқ",
@@ -8605,7 +8631,9 @@
     "public_trial_copy_html": "HTML көшіру",
     "public_trial_preview": "Алдын ала қарау",
     "public_trial_disabled_title": "Өзіндік тіркелу өшірілген",
-    "public_trial_disabled_text": "SiteBrush ашық орнату формасы уақытша тоқтатылды. Форманы көрсету және оның endpoints ашу үшін өзіндік тіркелуді қосыңыз."
+    "public_trial_disabled_text": "SiteBrush ашық орнату формасы уақытша тоқтатылды. Форманы көрсету және оның endpoints ашу үшін өзіндік тіркелуді қосыңыз.",
+    "billing_main_domain_badge": "Сервердің негізгі домені",
+    "billing_main_domain_hint": "Бұл екінші деңгейлі домен биллингті басқаруға арналған сервер иесінің домені. Клиенттердің ішкі домендері және өз домен alias-тары бөлек көрсетіледі."
   },
   "es": {
     "setup_no_admin": "aún no hay administrador",
@@ -9219,7 +9247,9 @@
     "public_trial_copy_html": "Copiar HTML",
     "public_trial_preview": "Vista previa",
     "public_trial_disabled_title": "El autorregistro esta desactivado",
-    "public_trial_disabled_text": "El formulario publico de instalacion de SiteBrush esta pausado. Activa el autorregistro para publicar el formulario y abrir sus endpoints."
+    "public_trial_disabled_text": "El formulario publico de instalacion de SiteBrush esta pausado. Activa el autorregistro para publicar el formulario y abrir sus endpoints.",
+    "billing_main_domain_badge": "Dominio principal del servidor",
+    "billing_main_domain_hint": "Este dominio de segundo nivel es el dominio del propietario del servidor usado para gestionar la facturacion. Los subdominios de clientes y sus alias de dominio propios se muestran por separado."
   },
   "pt": {
     "setup_no_admin": "ainda não há administrador",
@@ -9833,6 +9863,8 @@
     "public_trial_copy_html": "Copiar HTML",
     "public_trial_preview": "Pre-visualizar",
     "public_trial_disabled_title": "O registro autonomo esta desativado",
-    "public_trial_disabled_text": "O formulario publico de instalacao do SiteBrush esta pausado. Ative o registro autonomo para publicar o formulario e abrir seus endpoints."
+    "public_trial_disabled_text": "O formulario publico de instalacao do SiteBrush esta pausado. Ative o registro autonomo para publicar o formulario e abrir seus endpoints.",
+    "billing_main_domain_badge": "Dominio principal do servidor",
+    "billing_main_domain_hint": "Este dominio de segundo nivel e o dominio do proprietario do servidor usado para gerenciar o faturamento. Subdominios de clientes e seus aliases de dominio proprios aparecem separadamente."
   }
 }
