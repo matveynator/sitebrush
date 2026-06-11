@@ -636,6 +636,171 @@
     margin-top: 16px;
 }
 
+.technical-page .custom-domain-panel {
+    display: grid;
+    gap: 18px;
+    margin-bottom: 22px;
+}
+
+.technical-page .custom-domain-head {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(210px, 280px);
+    gap: 16px;
+    align-items: start;
+}
+
+.technical-page .custom-domain-head h2 {
+    margin: 0 0 8px;
+    color: var(--text);
+    font-family: Arial, Helvetica, sans-serif;
+    font-size: 28px;
+    line-height: 1.12;
+}
+
+.technical-page .eyebrow {
+    margin: 0 0 6px;
+    color: var(--cyan);
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 0;
+    text-transform: uppercase;
+}
+
+.technical-page .selected-domain-card,
+.technical-page .domain-setup-card {
+    border: 1px solid rgba(149, 229, 239, 0.18);
+    border-radius: 12px;
+    background: rgba(0, 0, 0, 0.18);
+}
+
+.technical-page .selected-domain-card {
+    display: grid;
+    gap: 6px;
+    padding: 14px;
+}
+
+.technical-page .selected-domain-card span {
+    color: var(--muted);
+    font-size: 12px;
+}
+
+.technical-page .selected-domain-card strong {
+    color: var(--green);
+    word-break: break-all;
+}
+
+.technical-page .custom-domain-add-form {
+    margin: 0;
+}
+
+.technical-page .domain-setup-grid {
+    display: grid;
+    grid-template-columns: minmax(0, 1.1fr) minmax(280px, 0.9fr);
+    gap: 12px;
+}
+
+.technical-page .domain-setup-card {
+    padding: 16px;
+}
+
+.technical-page .domain-setup-card p {
+    margin-top: 0;
+}
+
+.technical-page .domain-setup-steps {
+    display: grid;
+    gap: 8px;
+    margin: 10px 0 0;
+    padding-left: 22px;
+}
+
+.technical-page .domain-setup-steps li {
+    padding-left: 4px;
+}
+
+.technical-page .compact-record-grid {
+    margin-bottom: 10px;
+}
+
+.technical-page .dns-record-list {
+    display: grid;
+    gap: 10px;
+    margin-top: 12px;
+}
+
+.technical-page .compact-record-list {
+    margin-bottom: 10px;
+}
+
+.technical-page .compact-record-list .dns-record-row {
+    grid-template-columns: 58px minmax(0, 1fr);
+    align-items: start;
+}
+
+.technical-page .compact-record-list .dns-record-field,
+.technical-page .compact-record-list .dns-record-help {
+    grid-column: 2;
+}
+
+.technical-page .compact-record-list .dns-record-help {
+    margin-top: -4px;
+}
+
+.technical-page .dns-record-row {
+    display: grid;
+    grid-template-columns: 58px minmax(120px, 0.45fr) minmax(220px, 1fr) minmax(190px, 0.8fr);
+    gap: 10px;
+    align-items: center;
+    padding: 12px;
+    border: 1px solid rgba(149, 229, 239, 0.16);
+    border-radius: 10px;
+    background: rgba(0, 0, 0, 0.16);
+}
+
+.technical-page .dns-record-type {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 34px;
+    border: 1px solid rgba(149, 229, 239, 0.26);
+    border-radius: 8px;
+    color: var(--cyan);
+    font-weight: 700;
+}
+
+.technical-page .dns-record-field {
+    display: grid;
+    gap: 5px;
+    min-width: 0;
+}
+
+.technical-page .dns-record-field span,
+.technical-page .dns-record-help {
+    color: var(--muted);
+    font-size: 12px;
+    line-height: 1.3;
+}
+
+.technical-page .dns-record-field code {
+    display: block;
+    box-sizing: border-box;
+    width: 100%;
+    padding: 7px 9px;
+    overflow-wrap: anywhere;
+}
+
+.technical-page .domain-bulk-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+.technical-page .alias-row {
+    display: grid;
+    gap: 14px;
+    padding: 16px;
+}
+
 .technical-page .alias-header {
     display: flex;
     align-items: center;
@@ -658,7 +823,7 @@
 }
 
 .technical-page .status-list {
-    margin: 10px 0;
+    margin: 0;
 }
 
 .technical-page .record-grid,
@@ -813,6 +978,9 @@
     .technical-page .billing-site-form,
     .technical-page .billing-delete-form,
     .technical-page .billing-backup-row,
+    .technical-page .custom-domain-head,
+    .technical-page .domain-setup-grid,
+    .technical-page .dns-record-row,
     .technical-page .record-grid,
     .technical-page .ssl-status-row {
         grid-template-columns: 1fr;

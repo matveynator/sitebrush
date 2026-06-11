@@ -1632,6 +1632,7 @@ type ManagedFile struct {
 
 type DomainAlias struct {
 	Domain            string
+	DNSHostName       string
 	VerificationToken string
 	TXTVerified       bool
 	ARecordVerified   bool
@@ -19406,6 +19407,7 @@ func (a *App) listDomainAliases(ctx context.Context, siteDomain string) ([]Domai
 		if scanErr := aliasRows.Scan(&domainAlias.Domain, &verificationToken, &txtVerified, &aRecordVerified, &isSelected, &lastCheckedAt); scanErr != nil {
 			return nil, scanErr
 		}
+		domainAlias.DNSHostName = dnsHostNameForAlias(domainAlias.Domain)
 		domainAlias.VerificationToken = verificationToken.String
 		domainAlias.LastCheckedAt = lastCheckedAt.String
 		domainAlias.TXTVerified = txtVerified == 1
@@ -19415,6 +19417,18 @@ func (a *App) listDomainAliases(ctx context.Context, siteDomain string) ([]Domai
 		domainAliases = append(domainAliases, domainAlias)
 	}
 	return domainAliases, aliasRows.Err()
+}
+
+func dnsHostNameForAlias(aliasDomain string) string {
+	aliasDomain = strings.Trim(strings.TrimSpace(aliasDomain), ".")
+	if aliasDomain == "" {
+		return "@"
+	}
+	labels := strings.Split(aliasDomain, ".")
+	if len(labels) <= 2 {
+		return "@"
+	}
+	return labels[0]
 }
 
 func boolToInt(state bool) int {

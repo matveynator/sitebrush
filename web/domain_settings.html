@@ -19,8 +19,142 @@
     <a class="btn btn-outline-secondary" href="{{.ReturnPath}}">{{index .T "back_to_uri"}}</a>
   </div>
 
+  <section class="dns-box custom-domain-panel">
+    <div class="custom-domain-head">
+      <div>
+        <p class="eyebrow">{{index .T "domain_settings_custom_domain_eyebrow"}}</p>
+        <h2>{{index .T "domain_settings_custom_domain_title"}}</h2>
+        <p class="hint">{{index .T "domain_settings_custom_domain_intro"}} <code>{{.Domain}}</code></p>
+      </div>
+      <div class="selected-domain-card">
+        <span>{{index .T "domain_settings_selected_domain"}}</span>
+        <strong>{{.SelectedDomain}}</strong>
+      </div>
+    </div>
+
+    {{if .CanAddAlias}}
+    <form class="add-form custom-domain-add-form" method="post" action="?settings">
+      <input type="hidden" name="return" value="{{.ReturnPath}}">
+      <input type="hidden" name="action" value="add_alias">
+      <input type="text" name="alias_domain" placeholder="{{index .T "domain_settings_alias_placeholder"}}" autocomplete="off">
+      <button class="primary" type="submit">{{index .T "domain_settings_custom_domain_add"}}</button>
+    </form>
+    {{else}}
+    <p class="hint">{{index .T "domain_settings_alias_limit"}}</p>
+    {{end}}
+
+    <div class="domain-setup-grid">
+      <section class="domain-setup-card">
+        <p><strong>{{index .T "domain_settings_custom_domain_steps_title"}}</strong></p>
+        <ol class="domain-setup-steps">
+          <li>{{index .T "domain_settings_custom_domain_step_add"}}</li>
+          <li>{{index .T "domain_settings_custom_domain_step_txt"}}</li>
+          <li>{{index .T "domain_settings_custom_domain_step_a"}}</li>
+          <li>{{index .T "domain_settings_custom_domain_step_check"}}</li>
+          <li>{{index .T "domain_settings_custom_domain_step_select"}}</li>
+        </ol>
+      </section>
+
+      <section class="domain-setup-card">
+        <p><strong>{{index .T "domain_settings_custom_domain_dns_title"}}</strong></p>
+        {{if .ExternalIP}}
+          <p class="hint">{{index .T "domain_settings_custom_domain_dns_hint"}}</p>
+          <div class="dns-record-list compact-record-list">
+            <div class="dns-record-row">
+              <span class="dns-record-type">A</span>
+              <span class="dns-record-field"><span>{{index .T "domain_settings_dns_host_label"}}</span><code>@</code></span>
+              <span class="dns-record-field"><span>{{index .T "domain_settings_dns_value_label"}}</span><code>{{.ExternalIP}}</code></span>
+              <span class="dns-record-help">{{index .T "domain_settings_dns_a_help"}}</span>
+            </div>
+          </div>
+          <p class="hint">{{index .T "domain_settings_dns_subdomain_hint"}}</p>
+        {{else}}
+          <p class="status-bad">{{index .T "domain_settings_external_ip_failed"}}</p>
+          {{if .ExternalIPError}}<p class="hint">{{.ExternalIPError}}</p>{{end}}
+        {{end}}
+      </section>
+    </div>
+
+    {{if .Aliases}}
+    <div class="domain-bulk-actions">
+      <form method="post" action="?settings">
+        <input type="hidden" name="return" value="{{.ReturnPath}}">
+        <input type="hidden" name="action" value="check_all">
+        <button type="submit">{{index .T "domain_settings_check_dns_now"}}</button>
+      </form>
+
+      <form method="post" action="?settings">
+        <input type="hidden" name="return" value="{{.ReturnPath}}">
+        <input type="hidden" name="action" value="select_primary">
+        <button type="submit">{{index .T "domain_settings_use_primary"}}</button>
+      </form>
+    </div>
+
+    <p><strong>{{index .T "domain_settings_custom_domain_connected_title"}}</strong></p>
+    <div class="alias-list">
+      {{range .Aliases}}
+      <section class="alias-row {{if .IsSelected}}selected{{end}}">
+        <div class="alias-header">
+          <div>
+            <div class="alias-domain">{{.Domain}}</div>
+            {{if .IsSelected}}<div class="status-ok">{{index $.T "domain_settings_selected"}}</div>{{end}}
+          </div>
+          <div class="alias-actions">
+            <form method="post" action="?settings">
+              <input type="hidden" name="return" value="{{$.ReturnPath}}">
+              <input type="hidden" name="action" value="check_alias">
+              <input type="hidden" name="alias_domain" value="{{.Domain}}">
+              <button type="submit">{{index $.T "domain_settings_check"}}</button>
+            </form>
+            {{if and .IsActive (not .IsSelected)}}
+            <form method="post" action="?settings">
+              <input type="hidden" name="return" value="{{$.ReturnPath}}">
+              <input type="hidden" name="action" value="select_alias">
+              <input type="hidden" name="alias_domain" value="{{.Domain}}">
+              <button type="submit">{{index $.T "domain_settings_use_domain"}}</button>
+            </form>
+            {{end}}
+            <form method="post" action="?settings">
+              <input type="hidden" name="return" value="{{$.ReturnPath}}">
+              <input type="hidden" name="action" value="delete_alias">
+              <input type="hidden" name="alias_domain" value="{{.Domain}}">
+              <button class="danger" type="submit" aria-label="{{index $.T "domain_settings_delete_alias_aria"}} {{.Domain}}">×</button>
+            </form>
+          </div>
+        </div>
+
+        <div class="status-list">
+          {{if .TXTVerified}}<span class="status-ok">{{index $.T "domain_settings_txt_ok"}}</span>{{else}}<span class="status-bad">{{index $.T "domain_settings_txt_missing"}}</span>{{end}}
+          {{if .ARecordVerified}}<span class="status-ok">{{index $.T "domain_settings_a_ok"}}</span>{{else}}<span class="status-bad">{{index $.T "domain_settings_a_missing"}}</span>{{end}}
+          {{if .IsActive}}<span class="status-ok">{{index $.T "domain_settings_active"}}</span>{{else}}<span class="status-bad">{{index $.T "domain_settings_inactive"}}</span>{{end}}
+        </div>
+
+        <div class="dns-record-list">
+          <div class="dns-record-row">
+            <span class="dns-record-type">TXT</span>
+            <span class="dns-record-field"><span>{{index $.T "domain_settings_dns_host_label"}}</span><code>{{.DNSHostName}}</code></span>
+            <span class="dns-record-field"><span>{{index $.T "domain_settings_dns_value_label"}}</span><code>sitebrush={{.VerificationToken}}</code></span>
+            <span class="dns-record-help">{{index $.T "domain_settings_dns_txt_help"}}</span>
+          </div>
+          {{if $.ExternalIP}}
+          <div class="dns-record-row">
+            <span class="dns-record-type">A</span>
+            <span class="dns-record-field"><span>{{index $.T "domain_settings_dns_host_label"}}</span><code>{{.DNSHostName}}</code></span>
+            <span class="dns-record-field"><span>{{index $.T "domain_settings_dns_value_label"}}</span><code>{{$.ExternalIP}}</code></span>
+            <span class="dns-record-help">{{index $.T "domain_settings_dns_a_help"}}</span>
+          </div>
+          {{end}}
+        </div>
+        {{if .LastCheckedAt}}<p class="hint">{{index $.T "domain_settings_last_checked"}} {{.LastCheckedAt}}</p>{{end}}
+      </section>
+      {{end}}
+    </div>
+    {{else}}
+    <p class="empty">{{index .T "domain_settings_custom_domain_empty"}}</p>
+    {{end}}
+  </section>
+
   <p><strong>{{index .T "domain_settings_primary"}}</strong> {{.Domain}}</p>
-  <p><strong>{{index .T "domain_settings_selected_domain"}}</strong> {{.SelectedDomain}}</p>
   <p class="hint">{{index .T "domain_settings_https_hint"}}</p>
 
   <section class="dns-box">
@@ -75,18 +209,6 @@
   </section>
 
   <section class="dns-box">
-    <p><strong>{{index .T "domain_settings_dns_a_title"}}</strong></p>
-    {{if .ExternalIP}}
-      <p>{{index .T "domain_settings_dns_a_hint"}}</p>
-      <p><code>A</code> <code>@</code> <code>{{.ExternalIP}}</code></p>
-      <p class="hint">{{index .T "domain_settings_dns_subdomain_hint"}}</p>
-    {{else}}
-      <p class="status-bad">{{index .T "domain_settings_external_ip_failed"}}</p>
-      {{if .ExternalIPError}}<p class="hint">{{.ExternalIPError}}</p>{{end}}
-    {{end}}
-  </section>
-
-  <section class="dns-box">
     <p><strong>{{index .T "domain_settings_chroot_title"}}</strong></p>
     <form class="add-form static-folder-form" method="post" action="?settings">
       <input type="hidden" name="return" value="{{.ReturnPath}}">
@@ -121,84 +243,6 @@
     <p class="empty">{{index .T "domain_settings_chroot_empty"}}</p>
     {{end}}
   </section>
-
-  {{if .CanAddAlias}}
-  <form class="add-form" method="post" action="?settings">
-    <input type="hidden" name="return" value="{{.ReturnPath}}">
-    <input type="hidden" name="action" value="add_alias">
-    <input type="text" name="alias_domain" placeholder="{{index .T "domain_settings_alias_placeholder"}}" autocomplete="off">
-    <button class="primary" type="submit">{{index .T "domain_settings_save"}}</button>
-  </form>
-  {{else}}
-  <p class="hint">{{index .T "domain_settings_alias_limit"}}</p>
-  {{end}}
-
-  {{if .Aliases}}
-  <form method="post" action="?settings" style="margin: 0 0 12px;">
-    <input type="hidden" name="return" value="{{.ReturnPath}}">
-    <input type="hidden" name="action" value="check_all">
-    <button type="submit">{{index .T "domain_settings_check_dns_now"}}</button>
-  </form>
-
-  <form method="post" action="?settings" style="margin: 0 0 12px;">
-    <input type="hidden" name="return" value="{{.ReturnPath}}">
-    <input type="hidden" name="action" value="select_primary">
-    <button type="submit">{{index .T "domain_settings_use_primary"}}</button>
-  </form>
-
-  <div class="alias-list">
-    {{range .Aliases}}
-    <section class="alias-row {{if .IsSelected}}selected{{end}}">
-      <div class="alias-header">
-        <div>
-          <div class="alias-domain">{{.Domain}}</div>
-          {{if .IsSelected}}<div class="status-ok">{{index $.T "domain_settings_selected"}}</div>{{end}}
-        </div>
-        <div class="alias-actions">
-          <form method="post" action="?settings">
-            <input type="hidden" name="return" value="{{$.ReturnPath}}">
-            <input type="hidden" name="action" value="check_alias">
-            <input type="hidden" name="alias_domain" value="{{.Domain}}">
-            <button type="submit">{{index $.T "domain_settings_check"}}</button>
-          </form>
-          {{if and .IsActive (not .IsSelected)}}
-          <form method="post" action="?settings">
-            <input type="hidden" name="return" value="{{$.ReturnPath}}">
-            <input type="hidden" name="action" value="select_alias">
-            <input type="hidden" name="alias_domain" value="{{.Domain}}">
-            <button type="submit">{{index $.T "domain_settings_use_domain"}}</button>
-          </form>
-          {{end}}
-          <form method="post" action="?settings">
-            <input type="hidden" name="return" value="{{$.ReturnPath}}">
-            <input type="hidden" name="action" value="delete_alias">
-            <input type="hidden" name="alias_domain" value="{{.Domain}}">
-            <button class="danger" type="submit" aria-label="{{index $.T "domain_settings_delete_alias_aria"}} {{.Domain}}">×</button>
-          </form>
-        </div>
-      </div>
-
-      <div class="status-list">
-        {{if .TXTVerified}}<span class="status-ok">{{index $.T "domain_settings_txt_ok"}}</span>{{else}}<span class="status-bad">{{index $.T "domain_settings_txt_missing"}}</span>{{end}}
-        {{if .ARecordVerified}}<span class="status-ok">{{index $.T "domain_settings_a_ok"}}</span>{{else}}<span class="status-bad">{{index $.T "domain_settings_a_missing"}}</span>{{end}}
-        {{if .IsActive}}<span class="status-ok">{{index $.T "domain_settings_active"}}</span>{{else}}<span class="status-bad">{{index $.T "domain_settings_inactive"}}</span>{{end}}
-      </div>
-
-      <div class="record-grid">
-        <span>{{index $.T "domain_settings_txt_name"}}</span><code>{{.Domain}}</code>
-        <span>{{index $.T "domain_settings_txt_value"}}</span><code>sitebrush={{.VerificationToken}}</code>
-        {{if $.ExternalIP}}
-        <span>{{index $.T "domain_settings_a_name"}}</span><code>{{.Domain}}</code>
-        <span>{{index $.T "domain_settings_a_value"}}</span><code>{{$.ExternalIP}}</code>
-        {{end}}
-      </div>
-      {{if .LastCheckedAt}}<p class="hint">{{index $.T "domain_settings_last_checked"}} {{.LastCheckedAt}}</p>{{end}}
-    </section>
-    {{end}}
-  </div>
-  {{else}}
-  <p class="empty">{{index .T "domain_settings_no_aliases"}}</p>
-  {{end}}
 
   <script>
   (function setupNativeBackupDownload() {

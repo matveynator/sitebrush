@@ -898,6 +898,87 @@ func TestChrootLocationSettingsCreatesDirectoryAndServesIndex(t *testing.T) {
 	}
 }
 
+func TestDomainSettingsRendersCustomDomainSetupFirst(t *testing.T) {
+	application, _ := newTestApplication(t)
+	request := httptest.NewRequest(http.MethodGet, "http://localhost:8080/?settings", nil)
+	request.Header.Set("Accept-Language", "en")
+	response := httptest.NewRecorder()
+
+	sslSetting := DomainAutomaticSSLSetting{Domain: "example.com", Enabled: true, Available: true}
+	application.render(response, request, "domain_settings.html", map[string]any{
+		"Domain":         "localhost",
+		"SelectedDomain": "example.com",
+		"Aliases": []DomainAlias{{
+			Domain:            "example.com",
+			DNSHostName:       "@",
+			VerificationToken: "verify-token",
+			TXTVerified:       true,
+			ARecordVerified:   true,
+			IsActive:          true,
+			IsSelected:        true,
+			LastCheckedAt:     "2026-06-12T00:00:00Z",
+		}},
+		"ChrootLocations":    []DomainChrootLocation{},
+		"AliasCount":         1,
+		"CanAddAlias":        true,
+		"ReturnPath":         "/",
+		"ExternalIP":         "203.0.113.10",
+		"AutomaticSSL":       sslSetting,
+		"AutomaticSSLStatus": automaticSSLStatusView(sslSetting, nil),
+		"AutomaticSSLDomain": sslSetting.Domain,
+		"AutomaticSSLReady":  true,
+		"BackupDownloadURL":  "http://localhost:8080/?backup_download&token=backup-token",
+		"BackupDownloadPath": "/?backup_download&token=backup-token",
+		"NativeFileDialog":   false,
+	})
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%q", response.Code, response.Body.String())
+	}
+	body := response.Body.String()
+	for _, expectedFragment := range []string{
+		"First step",
+		"Connect your own second-level domain",
+		"Add domain",
+		"How to turn it on",
+		"DNS for the root domain",
+		"Host/name",
+		"<code>@</code>",
+		"sitebrush=verify-token",
+		"203.0.113.10",
+		"Proves that you own this domain.",
+		"Sends visitors to this Sitebrush server.",
+	} {
+		if !strings.Contains(body, expectedFragment) {
+			t.Fatalf("domain settings page missing %q in %s", expectedFragment, body)
+		}
+	}
+	customDomainIndex := strings.Index(body, "Connect your own second-level domain")
+	sslIndex := strings.Index(body, "SSL certificate")
+	backupIndex := strings.Index(body, "Site backup")
+	staticFoldersIndex := strings.Index(body, "Static folders")
+	if customDomainIndex < 0 || sslIndex < 0 || backupIndex < 0 || staticFoldersIndex < 0 {
+		t.Fatalf("domain settings page missing ordered sections in %s", body)
+	}
+	if customDomainIndex > sslIndex || customDomainIndex > backupIndex || customDomainIndex > staticFoldersIndex {
+		t.Fatalf("custom domain setup is not the first settings section in %s", body)
+	}
+}
+
+func TestDNSHostNameForAliasUsesProviderHostFieldValues(t *testing.T) {
+	for aliasDomain, expectedHostName := range map[string]string{
+		"example.com":     "@",
+		"example.com.":    "@",
+		"www.example.com": "www",
+		"shop.example.ru": "shop",
+		"":                "@",
+	} {
+		if hostName := dnsHostNameForAlias(aliasDomain); hostName != expectedHostName {
+			t.Fatalf("dnsHostNameForAlias(%q) = %q, want %q", aliasDomain, hostName, expectedHostName)
+		}
+	}
+}
+
 func TestChrootDirectoryListingUsesEmbeddedSitebrushStyle(t *testing.T) {
 	application, _ := newTestApplication(t)
 	form := url.Values{}
