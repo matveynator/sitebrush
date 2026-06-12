@@ -192,10 +192,44 @@
     return activeStep;
   }
 
-  profileForm.addEventListener('submit', function showProfileSubmitProgress() {
+  var progressTimer = 0;
+  var isSubmittingWithProgress = false;
+
+  function replaceDocumentWithResponse(responseText) {
+    document.open();
+    document.write(responseText);
+    document.close();
+  }
+
+  function submitWithFetch() {
+    if (!window.fetch || !window.FormData) {
+      profileForm.submit();
+      return;
+    }
+    window.fetch(profileForm.action || window.location.href, {
+      method: profileForm.method || 'POST',
+      body: new window.FormData(profileForm),
+      credentials: 'same-origin',
+      headers: {
+        'X-Requested-With': 'fetch'
+      }
+    }).then(function handleProfileResponse(response) {
+      return response.text();
+    }).then(replaceDocumentWithResponse).catch(function fallBackToNativeSubmit() {
+      profileForm.submit();
+    });
+  }
+
+  profileForm.addEventListener('submit', function showProfileSubmitProgress(event) {
     if (!passwordInput || String(passwordInput.value || '').trim() === '') {
       return;
     }
+    if (isSubmittingWithProgress) {
+      event.preventDefault();
+      return;
+    }
+    event.preventDefault();
+    isSubmittingWithProgress = true;
     var startedAt = Date.now();
     progressElement.hidden = false;
     if (submitButton) {
@@ -214,10 +248,15 @@
       if (countdownElement) {
         countdownElement.textContent = countdownPrefix + ' ' + formatSeconds(secondsLeft);
       }
-      window.setTimeout(renderProgress, 1000);
+      progressTimer = window.setTimeout(renderProgress, 1000);
     }
 
+    if (progressTimer) {
+      window.clearTimeout(progressTimer);
+      progressTimer = 0;
+    }
     renderProgress();
+    window.setTimeout(submitWithFetch, 50);
   });
 })();
 
