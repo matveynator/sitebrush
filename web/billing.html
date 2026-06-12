@@ -330,37 +330,40 @@
     <div class="card-body">
       <div class="billing-section-header">
         <div>
-          <h2>Service email relay</h2>
-          <p class="text-muted">Signed installations, service-code delivery logs, limits, and blocking controls.</p>
+          <h2>{{index .T "billing_service_mail_title"}}</h2>
+          <p class="text-muted">{{index .T "billing_service_mail_hint"}}</p>
         </div>
+      </div>
+      <div class="billing-plan-row">
+        <span>{{index .T "billing_service_mail_limits"}}: {{index .ServiceMailLimits "InstallationHour"}}/{{index .T "billing_service_mail_installation"}}, {{index .ServiceMailLimits "IPHour"}}/IP, {{index .ServiceMailLimits "SubnetHour"}}/{{index .T "billing_service_mail_subnet"}}, {{index .ServiceMailLimits "RecipientHour"}}/{{index .T "billing_service_mail_recipient"}}, {{index .ServiceMailLimits "RecipientDomainHour"}}/{{index .T "billing_service_mail_recipient_domain"}}.</span>
       </div>
       <div class="billing-site-list">
         {{range .ServiceMailInstallations}}
         <article class="billing-site-row">
           <div class="billing-site-main">
             <div class="billing-domain">{{.LastDomain}}</div>
-            <div class="text-muted small">Installation: {{.InstallationID}}</div>
-            <div class="text-muted small">Key: {{.PublicKey}}</div>
-            <div class="text-muted small">IP: {{.LastIP}} · sent: {{.SentCount}} · errors: {{.ErrorCount}} · last: {{.LastSeenAt}}</div>
+            <div class="text-muted small">{{index $.T "billing_service_mail_installation"}}: {{.InstallationID}}</div>
+            <div class="text-muted small">{{index $.T "billing_service_mail_key"}}: {{.PublicKey}}</div>
+            <div class="text-muted small">IP: {{.LastIP}} · {{index $.T "billing_service_mail_sent"}}: {{.SentCount}} · {{index $.T "billing_service_mail_errors"}}: {{.ErrorCount}} · {{index $.T "billing_service_mail_last"}}: {{.LastSeenAt}}</div>
           </div>
           <form method="post" action="?billing" class="billing-site-form">
             <input type="hidden" name="installation_id" value="{{.InstallationID}}">
             {{if .Blocked}}
             <input type="hidden" name="billing_action" value="unblock_service_mail_installation">
-            <button type="submit" class="btn btn-outline-primary btn-sm">Unblock</button>
+            <button type="submit" class="btn btn-outline-primary btn-sm">{{index $.T "billing_service_mail_unblock"}}</button>
             {{else}}
             <input type="hidden" name="billing_action" value="block_service_mail_installation">
-            <button type="submit" class="btn btn-outline-danger btn-sm">Block</button>
+            <button type="submit" class="btn btn-outline-danger btn-sm">{{index $.T "billing_service_mail_block"}}</button>
             {{end}}
           </form>
         </article>
         {{else}}
-        <div class="empty">No relay installations yet.</div>
+        <div class="empty">{{index .T "billing_service_mail_empty"}}</div>
         {{end}}
       </div>
       <form method="post" action="?billing" class="billing-plan-form mt-3">
         <input type="hidden" name="billing_action" value="add_service_mail_block">
-        <label>Block scope
+        <label>{{index .T "billing_service_mail_block_scope"}}
           <select name="scope" class="form-control">
             <option value="installation">installation</option>
             <option value="ip">ip</option>
@@ -369,9 +372,9 @@
             <option value="recipient_domain">recipient_domain</option>
           </select>
         </label>
-        <label>Value <input name="value" type="text" class="form-control" required></label>
-        <label>Reason <input name="reason" type="text" class="form-control"></label>
-        <button type="submit" class="btn btn-outline-danger">Add block</button>
+        <label>{{index .T "billing_service_mail_block_value"}} <input name="value" type="text" class="form-control" required></label>
+        <label>{{index .T "billing_service_mail_block_reason"}} <input name="reason" type="text" class="form-control"></label>
+        <button type="submit" class="btn btn-outline-danger">{{index .T "billing_service_mail_add_block"}}</button>
       </form>
       {{if .ServiceMailBlocks}}
       <div class="billing-plan-list mt-3">
@@ -381,7 +384,7 @@
           <form method="post" action="?billing">
             <input type="hidden" name="billing_action" value="delete_service_mail_block">
             <input type="hidden" name="block_id" value="{{.ID}}">
-            <button type="submit" class="btn btn-outline-primary btn-sm">Remove</button>
+            <button type="submit" class="btn btn-outline-primary btn-sm">{{index $.T "billing_service_mail_remove_block"}}</button>
           </form>
         </div>
         {{end}}
@@ -393,7 +396,7 @@
         <article class="billing-backup-row">
           <div>
             <div class="billing-domain">{{.CodeKind}} · {{.Status}}</div>
-            <div class="text-muted small">{{.Recipient}} · {{.RecipientDomain}}</div>
+            <div class="text-muted small">{{index $.T "billing_service_mail_recipient"}}: {{.Recipient}} · {{.RecipientDomain}}</div>
           </div>
           <div class="billing-backup-meta">
             <span>{{.SourceDomain}}</span>

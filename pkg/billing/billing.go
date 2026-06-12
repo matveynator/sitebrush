@@ -670,7 +670,7 @@ func (store Store) ServiceMailBlocked(ctx context.Context, installationID, sourc
 	}{
 		{scope: "installation", value: strings.TrimSpace(installationID)},
 		{scope: "ip", value: strings.TrimSpace(sourceIP)},
-		{scope: "subnet", value: serviceMailIPv4Subnet(sourceIP)},
+		{scope: "subnet", value: ServiceMailIPv4Subnet(sourceIP)},
 		{scope: "recipient", value: strings.ToLower(strings.TrimSpace(recipient))},
 		{scope: "recipient_domain", value: strings.ToLower(strings.TrimSpace(recipientDomain))},
 	}
@@ -687,7 +687,7 @@ func (store Store) ServiceMailBlocked(ctx context.Context, installationID, sourc
 	return "", false
 }
 
-func serviceMailIPv4Subnet(rawIP string) string {
+func ServiceMailIPv4Subnet(rawIP string) string {
 	parsedIP := netParseIPv4(rawIP)
 	if parsedIP == "" {
 		return ""
@@ -722,6 +722,21 @@ func (store Store) CountServiceMailEventsSince(ctx context.Context, columnName, 
 	var count int
 	_ = store.DB.QueryRowContext(ctx, `SELECT COUNT(1) FROM service_mail_events WHERE `+columnName+`=? AND created_at>=?`,
 		strings.TrimSpace(value), since.UTC().Format(time.RFC3339)).Scan(&count)
+	return count
+}
+
+func (store Store) CountServiceMailSubnetEventsSince(ctx context.Context, subnet string, since time.Time) int {
+	subnet = strings.TrimSpace(subnet)
+	if !strings.HasSuffix(subnet, ".0/24") {
+		return 0
+	}
+	prefix := strings.TrimSuffix(subnet, "0/24")
+	if prefix == "" {
+		return 0
+	}
+	var count int
+	_ = store.DB.QueryRowContext(ctx, `SELECT COUNT(1) FROM service_mail_events WHERE source_ip LIKE ? AND created_at>=?`,
+		prefix+"%", since.UTC().Format(time.RFC3339)).Scan(&count)
 	return count
 }
 

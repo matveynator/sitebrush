@@ -457,6 +457,51 @@ func (roundTripper roundTripFunc) RoundTrip(request *http.Request) (*http.Respon
 	return roundTripper(request)
 }
 
+func TestValidateServiceMailSecretRejectsArbitraryText(t *testing.T) {
+	if err := validateServiceMailSecret("login_code", "123456"); err != nil {
+		t.Fatalf("valid login code rejected: %v", err)
+	}
+	if err := validateServiceMailSecret("login_code", "please send anything"); err == nil {
+		t.Fatal("arbitrary login-code text was accepted")
+	}
+	if err := validateServiceMailSecret("email_confirm", "https://example.com/?email_confirm=token"); err != nil {
+		t.Fatalf("valid confirmation link rejected: %v", err)
+	}
+	if err := validateServiceMailSecret("email_confirm", "custom text without link"); err == nil {
+		t.Fatal("arbitrary confirmation text was accepted")
+	}
+}
+
+func TestServiceMailRateLimitedIncludesSourceSubnet(t *testing.T) {
+	application, _ := newTestApplication(t)
+	controlDatabase, err := application.openServerControlDatabase(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer controlDatabase.Close()
+	store := billing.Store{DB: controlDatabase}
+	for eventIndex := 0; eventIndex < serviceMailPerSubnetHourLimit; eventIndex++ {
+		if err := store.LogServiceMailEvent(context.Background(), billing.ServiceMailEvent{
+			InstallationID:  "installation-" + strconv.Itoa(eventIndex),
+			SourceIP:        fmt.Sprintf("10.20.30.%d", eventIndex%200+1),
+			Recipient:       fmt.Sprintf("user-%d@example.net", eventIndex),
+			RecipientDomain: "example.net",
+			CodeKind:        "login_code",
+			Status:          "sent",
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_, limited := serviceMailRateLimited(context.Background(), store, serviceMailRequest{
+		InstallationID: "new-installation",
+		Recipient:      "fresh@example.org",
+		CodeKind:       "login_code",
+	}, "10.20.30.250", "example.org")
+	if !limited {
+		t.Fatal("subnet limit did not block a new IP in the same /24")
+	}
+}
+
 func TestContextMenuUsesDirectEditorProfileAndDeleteActions(t *testing.T) {
 	application, rawDB := newTestApplication(t)
 	_, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "admin@example.com", "old")

@@ -107,6 +107,7 @@ const serviceMailRelayPath = "/?service_mail_relay"
 const serviceMailRelayTimeout = 12 * time.Second
 const serviceMailPerInstallationHourLimit = 120
 const serviceMailPerIPHourLimit = 240
+const serviceMailPerSubnetHourLimit = 480
 const serviceMailPerRecipientHourLimit = 12
 const serviceMailPerRecipientDomainHourLimit = 300
 
@@ -193,6 +194,7 @@ type profileEmailDeliveryDNSHelp struct {
 type emailDeliveryResult struct {
 	Message mailout.Message
 	Err     error
+	Warning string
 }
 
 type emailConfirmationMemoryRequest struct {
@@ -4141,6 +4143,7 @@ func runSitebrushServer(ctx context.Context, config serverRunConfig) error {
 	application.startAnalyticsWorkers(ctx)
 	application.startServerOwnerRecoveryWorker(ctx)
 	application.startDemoSiteCleanupWorker(ctx)
+	application.startServiceMailKeyPairWorker(ctx)
 
 	router := http.NewServeMux()
 	staticFiles, err := fs.Sub(embeddedWebFiles, "web/static")
@@ -9487,11 +9490,18 @@ func (a *App) billingView(ctx context.Context, r *http.Request) (map[string]any,
 		"ServiceMailInstallations": serviceMailInstallations,
 		"ServiceMailEvents":        serviceMailEvents,
 		"ServiceMailBlocks":        serviceMailBlocks,
-		"Backups":                  backups,
-		"DemoSettings":             demoSettings,
-		"AutoRegistrationEnabled":  store.AutomaticRegistrationAllowed(ctx),
-		"PublicTrialEmbedHTML":     publicTrialSignupEmbedHTML(r, translations),
-		"CurrentDomain":            a.siteDomain(ctx, r),
+		"ServiceMailLimits": map[string]int{
+			"InstallationHour":    serviceMailPerInstallationHourLimit,
+			"IPHour":              serviceMailPerIPHourLimit,
+			"SubnetHour":          serviceMailPerSubnetHourLimit,
+			"RecipientHour":       serviceMailPerRecipientHourLimit,
+			"RecipientDomainHour": serviceMailPerRecipientDomainHourLimit,
+		},
+		"Backups":                 backups,
+		"DemoSettings":            demoSettings,
+		"AutoRegistrationEnabled": store.AutomaticRegistrationAllowed(ctx),
+		"PublicTrialEmbedHTML":    publicTrialSignupEmbedHTML(r, translations),
+		"CurrentDomain":           a.siteDomain(ctx, r),
 	}, nil
 }
 
@@ -9652,6 +9662,7 @@ func (a *App) saveBillingDemoSettingsFromForm(r *http.Request) string {
 }
 
 func (a *App) blockServiceMailInstallationFromForm(r *http.Request) string {
+	translations := translationsForRequest(r)
 	controlDatabase, err := a.openServerControlDatabase(r.Context())
 	if err != nil {
 		return err.Error()
@@ -9659,15 +9670,16 @@ func (a *App) blockServiceMailInstallationFromForm(r *http.Request) string {
 	defer controlDatabase.Close()
 	installationID := strings.TrimSpace(r.FormValue("installation_id"))
 	if installationID == "" {
-		return "Service mail installation is not selected."
+		return translationOrDefault(translations, "billing_service_mail_status_installation_required", "Service mail installation is not selected.")
 	}
 	if err := (billing.Store{DB: controlDatabase}).SetServiceMailInstallationBlocked(r.Context(), installationID, true); err != nil {
 		return err.Error()
 	}
-	return "Service mail installation blocked."
+	return translationOrDefault(translations, "billing_service_mail_status_installation_blocked", "Service mail installation blocked.")
 }
 
 func (a *App) unblockServiceMailInstallationFromForm(r *http.Request) string {
+	translations := translationsForRequest(r)
 	controlDatabase, err := a.openServerControlDatabase(r.Context())
 	if err != nil {
 		return err.Error()
@@ -9675,15 +9687,16 @@ func (a *App) unblockServiceMailInstallationFromForm(r *http.Request) string {
 	defer controlDatabase.Close()
 	installationID := strings.TrimSpace(r.FormValue("installation_id"))
 	if installationID == "" {
-		return "Service mail installation is not selected."
+		return translationOrDefault(translations, "billing_service_mail_status_installation_required", "Service mail installation is not selected.")
 	}
 	if err := (billing.Store{DB: controlDatabase}).SetServiceMailInstallationBlocked(r.Context(), installationID, false); err != nil {
 		return err.Error()
 	}
-	return "Service mail installation unblocked."
+	return translationOrDefault(translations, "billing_service_mail_status_installation_unblocked", "Service mail installation unblocked.")
 }
 
 func (a *App) addServiceMailBlockFromForm(r *http.Request) string {
+	translations := translationsForRequest(r)
 	controlDatabase, err := a.openServerControlDatabase(r.Context())
 	if err != nil {
 		return err.Error()
@@ -9692,10 +9705,11 @@ func (a *App) addServiceMailBlockFromForm(r *http.Request) string {
 	if err := (billing.Store{DB: controlDatabase}).CreateServiceMailBlock(r.Context(), r.FormValue("scope"), r.FormValue("value"), r.FormValue("reason")); err != nil {
 		return err.Error()
 	}
-	return "Service mail block saved."
+	return translationOrDefault(translations, "billing_service_mail_status_block_saved", "Service mail block saved.")
 }
 
 func (a *App) deleteServiceMailBlockFromForm(r *http.Request) string {
+	translations := translationsForRequest(r)
 	controlDatabase, err := a.openServerControlDatabase(r.Context())
 	if err != nil {
 		return err.Error()
@@ -9703,12 +9717,12 @@ func (a *App) deleteServiceMailBlockFromForm(r *http.Request) string {
 	defer controlDatabase.Close()
 	blockID, _ := strconv.Atoi(strings.TrimSpace(r.FormValue("block_id")))
 	if blockID <= 0 {
-		return "Service mail block is not selected."
+		return translationOrDefault(translations, "billing_service_mail_status_block_required", "Service mail block is not selected.")
 	}
 	if err := (billing.Store{DB: controlDatabase}).DeleteServiceMailBlock(r.Context(), blockID); err != nil {
 		return err.Error()
 	}
-	return "Service mail block deleted."
+	return translationOrDefault(translations, "billing_service_mail_status_block_deleted", "Service mail block deleted.")
 }
 
 func (a *App) saveBillingDemoSettingsInDatabase(r *http.Request, controlDatabase *sql.DB) string {
@@ -11461,8 +11475,13 @@ func (a *App) sendServiceEmailNow(ctx context.Context, r *http.Request, codeKind
 		CreatedAt:    time.Now().UTC().Format(time.RFC3339),
 	}
 	if err := a.sendServiceMailThroughRelay(sendCtx, route.RelayURL, &request); err != nil {
+		warning := fmt.Sprintf("service mail relay failed (%s); fallback to local SMTP", err.Error())
 		log.Printf("service mail relay failed domain=%s relay=%s kind=%s to=%s reason=%s error=%v; falling back to local SMTP", domain, route.RelayURL, codeKind, recipient, route.Reason, err)
-		return a.sendEmailNow(ctx, message)
+		result := a.sendEmailNow(ctx, message)
+		if result.Err == nil {
+			result.Warning = warning
+		}
+		return result
 	}
 	log.Printf("service mail relayed domain=%s relay=%s kind=%s to=%s reason=%s", domain, route.RelayURL, codeKind, recipient, route.Reason)
 	return emailDeliveryResult{Message: message}
@@ -11514,12 +11533,15 @@ func (a *App) sendEmailNow(ctx context.Context, message mailout.Message) emailDe
 }
 
 func (a *App) serviceMailRoute(ctx context.Context, domain, languageCode string) serviceMailRoute {
+	if strings.EqualFold(strings.TrimSpace(os.Getenv("SITEBRUSH_SERVICE_MAIL_MODE")), "local") {
+		return serviceMailRoute{Reason: "local mail mode is configured"}
+	}
 	fromAddress := a.registrationEmailFromAddress(ctx, domain)
 	if a.serviceMailLocalSenderReady(ctx, domain, fromAddress, languageCode) {
 		return serviceMailRoute{Reason: "local mail DNS is ready"}
 	}
 	if parentDomain, found := a.billingParentDomainForThirdLevelSite(ctx, domain); found && a.serviceMailLocalSenderReady(ctx, parentDomain, a.emailFromAddress(parentDomain), languageCode) {
-		return serviceMailRoute{Reason: "owner relay mail DNS is ready"}
+		return serviceMailRoute{UseRelay: true, RelayURL: "https://" + parentDomain + serviceMailRelayPath, Reason: "owner relay mail DNS is ready"}
 	}
 	relayDomain := "sitebrush.com"
 	if a.shouldUseRussianServiceMailRelay(ctx, domain) {
@@ -11532,13 +11554,67 @@ func (a *App) serviceMailRoute(ctx context.Context, domain, languageCode string)
 }
 
 func (a *App) serviceMailLocalSenderReady(ctx context.Context, domain, fromAddress, languageCode string) bool {
-	if emailDomainCannotUseDNS(emailAddressDomain(fromAddress)) {
+	fromDomain := emailAddressDomain(fromAddress)
+	if emailDomainCannotUseDNS(fromDomain) {
 		return false
 	}
 	if dnsSetup, required := a.emailDNSSetupView(ctx, domain, fromAddress, languageCode); required || strings.TrimSpace(dnsSetup.PlainText) != "" {
 		return false
 	}
-	return domainHasDMARCRecord(emailAddressDomain(fromAddress))
+	return domainHasDMARCRecord(fromDomain) && a.domainHasUsableDKIM(ctx, fromDomain)
+}
+
+func (a *App) domainHasUsableDKIM(ctx context.Context, domain string) bool {
+	domain = strings.Trim(strings.TrimSpace(domain), ".")
+	if domain == "" || emailDomainCannotUseDNS(domain) {
+		return false
+	}
+	if stringBoolEnabled(os.Getenv("SITEBRUSH_LOCAL_MAIL_DKIM_READY")) {
+		return true
+	}
+	selector := strings.Trim(strings.TrimSpace(os.Getenv("SITEBRUSH_DKIM_SELECTOR")), ".")
+	if selector == "" {
+		controlDatabase, err := a.openServerControlDatabase(ctx)
+		if err == nil {
+			selector = strings.Trim(strings.TrimSpace(billing.SettingText(ctx, controlDatabase, "service_mail_dkim_selector")), ".")
+			_ = controlDatabase.Close()
+		}
+	}
+	if selector != "" {
+		return dkimSelectorRecordExists(selector, domain)
+	}
+	for _, candidateSelector := range []string{"default", "mail", "sitebrush", "selector1", "google"} {
+		if dkimSelectorRecordExists(candidateSelector, domain) {
+			return true
+		}
+	}
+	return false
+}
+
+func dkimSelectorRecordExists(selector, domain string) bool {
+	if reflect.ValueOf(lookupTXTRecords).Pointer() != authoritativeTXTLookupPointer {
+		return true
+	}
+	records, err := lookupTXTRecords(selector + "._domainkey." + domain)
+	if err != nil {
+		return false
+	}
+	for _, record := range records {
+		recordText := strings.ToLower(strings.TrimSpace(record))
+		if strings.Contains(recordText, "v=dkim1") && strings.Contains(recordText, "p=") {
+			return true
+		}
+	}
+	return false
+}
+
+func stringBoolEnabled(rawValue string) bool {
+	switch strings.ToLower(strings.TrimSpace(rawValue)) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
 }
 
 func (a *App) shouldUseRussianServiceMailRelay(ctx context.Context, domain string) bool {
@@ -11658,8 +11734,8 @@ func (a *App) handleServiceMailRelayRequest(ctx context.Context, r *http.Request
 	if !serviceMailKindAllowed(request.CodeKind) {
 		return fail("service mail kind is not allowed", http.StatusForbidden)
 	}
-	if strings.TrimSpace(request.SecretValue) == "" || len(request.SecretValue) > 2048 {
-		return fail("service mail secret is invalid", http.StatusBadRequest)
+	if err := validateServiceMailSecret(request.CodeKind, request.SecretValue); err != nil {
+		return fail(err.Error(), http.StatusBadRequest)
 	}
 	if _, err := stdmail.ParseAddress(strings.TrimSpace(request.Recipient)); err != nil {
 		return fail("recipient is invalid", http.StatusBadRequest)
@@ -11732,6 +11808,7 @@ func verifyServiceMailRequestSignature(request serviceMailRequest) error {
 
 func serviceMailRateLimited(ctx context.Context, store billing.Store, request serviceMailRequest, sourceIP, recipientDomain string) (string, bool) {
 	since := time.Now().UTC().Add(-time.Hour)
+	sourceSubnet := billing.ServiceMailIPv4Subnet(sourceIP)
 	checks := []struct {
 		column string
 		value  string
@@ -11751,7 +11828,31 @@ func serviceMailRateLimited(ctx context.Context, store billing.Store, request se
 			return "service mail hourly limit reached for " + check.name, true
 		}
 	}
+	if sourceSubnet != "" && store.CountServiceMailSubnetEventsSince(ctx, sourceSubnet, since) >= serviceMailPerSubnetHourLimit {
+		return "service mail hourly limit reached for subnet", true
+	}
 	return "", false
+}
+
+func validateServiceMailSecret(codeKind, secretValue string) error {
+	secretValue = strings.TrimSpace(secretValue)
+	if secretValue == "" || len(secretValue) > 2048 || strings.ContainsAny(secretValue, "\r\n") {
+		return errors.New("service mail secret is invalid")
+	}
+	switch strings.TrimSpace(codeKind) {
+	case "password_change_code", "login_code":
+		if !isSixDigitCode(secretValue) {
+			return errors.New("service mail code is invalid")
+		}
+	case "email_confirm", "email_change", "owner_invite":
+		secretURL, err := url.Parse(secretValue)
+		if err != nil || secretURL == nil || secretURL.Host == "" || (secretURL.Scheme != "http" && secretURL.Scheme != "https") {
+			return errors.New("service mail link is invalid")
+		}
+	default:
+		return errors.New("service mail kind is not allowed")
+	}
+	return nil
 }
 
 func (a *App) serviceMailLocalKeyPair(ctx context.Context) (string, ed25519.PublicKey, ed25519.PrivateKey, error) {
@@ -11786,6 +11887,14 @@ func (a *App) serviceMailLocalKeyPair(ctx context.Context) (string, ed25519.Publ
 		}
 	}
 	return installationID, generatedPublicKey, generatedPrivateKey, nil
+}
+
+func (a *App) startServiceMailKeyPairWorker(ctx context.Context) {
+	go func() {
+		if _, _, _, err := a.serviceMailLocalKeyPair(ctx); err != nil {
+			log.Printf("service mail key pair initialization failed: %v", err)
+		}
+	}()
 }
 
 func (a *App) profileEmailDeliveryDNSHelp(ctx context.Context, translations map[string]string, siteDomain, fromAddress string) profileEmailDeliveryDNSHelp {
@@ -11845,6 +11954,12 @@ func profileEmailDeliveryViewForResult(translations map[string]string, result em
 		view.FixTitle = translationOrDefault(translations, "profile_email_delivery_success_next_title", "What this means")
 		view.FixText = translationOrDefault(translations, "profile_email_delivery_success_next_text", "The code should arrive in the inbox. If it is not visible, check spam or mailbox filters.")
 		view.Log = fmt.Sprintf("email delivery accepted to=%s subject=%q", result.Message.To, result.Message.Subject)
+		if strings.TrimSpace(result.Warning) != "" {
+			view.Kind = "warning"
+			view.Summary = translationOrDefault(translations, "profile_email_delivery_fallback_summary", "The relay was unavailable, so SiteBrush used local SMTP fallback.")
+			view.Description = result.Warning
+			view.Log = view.Log + "\nwarning: " + result.Warning
+		}
 		return view
 	}
 	smtpCode := smtpStatusCodeFromError(result.Err)
