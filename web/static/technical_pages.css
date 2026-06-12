@@ -244,6 +244,39 @@
     max-width: 560px;
 }
 
+.technical-page .profile-form-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 16px;
+    width: min(100%, 1120px);
+}
+
+.technical-page .profile-form-grid .profile-form {
+    width: 100%;
+    max-width: none;
+    align-content: start;
+}
+
+.technical-page .profile-form-header {
+    display: grid;
+    gap: 6px;
+    margin-bottom: 2px;
+}
+
+.technical-page .profile-form-header h2 {
+    margin: 0;
+    color: var(--text);
+    font-family: Arial, Helvetica, sans-serif;
+    font-size: 24px;
+    line-height: 1.18;
+}
+
+.technical-page .profile-form-header p {
+    margin: 0;
+    color: var(--muted);
+    line-height: 1.45;
+}
+
 .technical-page .profile-page {
     display: grid;
     justify-items: start;
@@ -1418,6 +1451,14 @@
         flex-direction: column;
         padding: 14px 15px;
         border-radius: 14px;
+    }
+
+    .technical-page .profile-form-grid {
+        grid-template-columns: 1fr;
+    }
+
+    .technical-page .profile-form-header h2 {
+        font-size: 21px;
     }
 
     .technical-page .profile-delivery-link {

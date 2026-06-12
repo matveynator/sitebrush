@@ -5,6 +5,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha1"
 	"crypto/sha256"
@@ -102,6 +103,12 @@ const sitebrushHTTP10KeepAliveBufferLimit = 1024 * 1024
 const currentSiteDatabaseSchemaVersion = 1
 const siteDatabaseStartupMigrationTimeout = 30 * time.Second
 const pagePasswordSessionTTL = time.Hour
+const serviceMailRelayPath = "/?service_mail_relay"
+const serviceMailRelayTimeout = 12 * time.Second
+const serviceMailPerInstallationHourLimit = 120
+const serviceMailPerIPHourLimit = 240
+const serviceMailPerRecipientHourLimit = 12
+const serviceMailPerRecipientDomainHourLimit = 300
 
 // App keeps only explicit dependencies to stay readable and easy to swap.
 type App struct {
@@ -134,6 +141,25 @@ type emailSender func(context.Context, mailout.Message) error
 
 type emailDeliveryJob struct {
 	message mailout.Message
+}
+
+type serviceMailRequest struct {
+	Version        int    `json:"version"`
+	InstallationID string `json:"installation_id"`
+	PublicKey      string `json:"public_key"`
+	SourceDomain   string `json:"source_domain"`
+	Recipient      string `json:"recipient"`
+	CodeKind       string `json:"code_kind"`
+	SecretValue    string `json:"secret_value"`
+	LanguageCode   string `json:"language_code"`
+	CreatedAt      string `json:"created_at"`
+	Signature      string `json:"signature"`
+}
+
+type serviceMailRoute struct {
+	UseRelay bool
+	RelayURL string
+	Reason   string
 }
 
 type profileEmailDeliveryView struct {
@@ -5545,6 +5571,10 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 		a.billingPage(w, r)
 		return
 	}
+	if hasQueryFlag(r, "service_mail_relay") {
+		a.serviceMailRelayEndpoint(w, r)
+		return
+	}
 	if hasQueryFlag(r, "demo_grab_preview") {
 		a.demoGrabPreview(w, r)
 		return
@@ -9407,6 +9437,14 @@ func (a *App) handleBillingAction(r *http.Request) string {
 		return a.approveSiteRegistrationRequestFromForm(r)
 	case "reject_site_request":
 		return a.rejectSiteRegistrationRequestFromForm(r)
+	case "block_service_mail_installation":
+		return a.blockServiceMailInstallationFromForm(r)
+	case "unblock_service_mail_installation":
+		return a.unblockServiceMailInstallationFromForm(r)
+	case "add_service_mail_block":
+		return a.addServiceMailBlockFromForm(r)
+	case "delete_service_mail_block":
+		return a.deleteServiceMailBlockFromForm(r)
 	default:
 		return translationOrDefault(translationsForRequest(r), "billing_status_unknown_action", "Unknown billing action.")
 	}
@@ -9423,6 +9461,9 @@ func (a *App) billingView(ctx context.Context, r *http.Request) (map[string]any,
 	plans := store.Plans(ctx)
 	assignments := store.ServiceAssignments(ctx)
 	siteRequests := store.SiteRequests(ctx)
+	serviceMailInstallations := store.ServiceMailInstallations(ctx)
+	serviceMailEvents := store.ServiceMailEvents(ctx, 50)
+	serviceMailBlocks := store.ServiceMailBlocks(ctx)
 	demoSettings := (demo.Store{DB: controlDatabase}).Settings(ctx)
 	billingDemoDomain := ""
 	if demoSettings.Enabled {
@@ -9439,15 +9480,18 @@ func (a *App) billingView(ctx context.Context, r *http.Request) (map[string]any,
 	backups := a.managedSiteDeletionBackupViews(ctx, r, controlDatabase)
 	translations := translationsForRequest(r)
 	return map[string]any{
-		"Title":                   translationOrDefault(translations, "billing_title", "Billing"),
-		"Sites":                   siteRows,
-		"Plans":                   plans,
-		"SiteRequests":            siteRequests,
-		"Backups":                 backups,
-		"DemoSettings":            demoSettings,
-		"AutoRegistrationEnabled": store.AutomaticRegistrationAllowed(ctx),
-		"PublicTrialEmbedHTML":    publicTrialSignupEmbedHTML(r, translations),
-		"CurrentDomain":           a.siteDomain(ctx, r),
+		"Title":                    translationOrDefault(translations, "billing_title", "Billing"),
+		"Sites":                    siteRows,
+		"Plans":                    plans,
+		"SiteRequests":             siteRequests,
+		"ServiceMailInstallations": serviceMailInstallations,
+		"ServiceMailEvents":        serviceMailEvents,
+		"ServiceMailBlocks":        serviceMailBlocks,
+		"Backups":                  backups,
+		"DemoSettings":             demoSettings,
+		"AutoRegistrationEnabled":  store.AutomaticRegistrationAllowed(ctx),
+		"PublicTrialEmbedHTML":     publicTrialSignupEmbedHTML(r, translations),
+		"CurrentDomain":            a.siteDomain(ctx, r),
 	}, nil
 }
 
@@ -9605,6 +9649,66 @@ func (a *App) saveBillingDemoSettingsFromForm(r *http.Request) string {
 	}
 	defer controlDatabase.Close()
 	return a.saveBillingDemoSettingsInDatabase(r, controlDatabase)
+}
+
+func (a *App) blockServiceMailInstallationFromForm(r *http.Request) string {
+	controlDatabase, err := a.openServerControlDatabase(r.Context())
+	if err != nil {
+		return err.Error()
+	}
+	defer controlDatabase.Close()
+	installationID := strings.TrimSpace(r.FormValue("installation_id"))
+	if installationID == "" {
+		return "Service mail installation is not selected."
+	}
+	if err := (billing.Store{DB: controlDatabase}).SetServiceMailInstallationBlocked(r.Context(), installationID, true); err != nil {
+		return err.Error()
+	}
+	return "Service mail installation blocked."
+}
+
+func (a *App) unblockServiceMailInstallationFromForm(r *http.Request) string {
+	controlDatabase, err := a.openServerControlDatabase(r.Context())
+	if err != nil {
+		return err.Error()
+	}
+	defer controlDatabase.Close()
+	installationID := strings.TrimSpace(r.FormValue("installation_id"))
+	if installationID == "" {
+		return "Service mail installation is not selected."
+	}
+	if err := (billing.Store{DB: controlDatabase}).SetServiceMailInstallationBlocked(r.Context(), installationID, false); err != nil {
+		return err.Error()
+	}
+	return "Service mail installation unblocked."
+}
+
+func (a *App) addServiceMailBlockFromForm(r *http.Request) string {
+	controlDatabase, err := a.openServerControlDatabase(r.Context())
+	if err != nil {
+		return err.Error()
+	}
+	defer controlDatabase.Close()
+	if err := (billing.Store{DB: controlDatabase}).CreateServiceMailBlock(r.Context(), r.FormValue("scope"), r.FormValue("value"), r.FormValue("reason")); err != nil {
+		return err.Error()
+	}
+	return "Service mail block saved."
+}
+
+func (a *App) deleteServiceMailBlockFromForm(r *http.Request) string {
+	controlDatabase, err := a.openServerControlDatabase(r.Context())
+	if err != nil {
+		return err.Error()
+	}
+	defer controlDatabase.Close()
+	blockID, _ := strconv.Atoi(strings.TrimSpace(r.FormValue("block_id")))
+	if blockID <= 0 {
+		return "Service mail block is not selected."
+	}
+	if err := (billing.Store{DB: controlDatabase}).DeleteServiceMailBlock(r.Context(), blockID); err != nil {
+		return err.Error()
+	}
+	return "Service mail block deleted."
 }
 
 func (a *App) saveBillingDemoSettingsInDatabase(r *http.Request, controlDatabase *sql.DB) string {
@@ -10818,8 +10922,15 @@ func (a *App) profilePage(w http.ResponseWriter, r *http.Request) {
 	pendingProfileEmail := currentEmail
 	emailDeliveryView := profileEmailDeliveryView{}
 	if r.Method == http.MethodPost {
-		passwordConfirmationToken = strings.TrimSpace(r.FormValue("password_confirmation_token"))
-		passwordConfirmationCode := strings.TrimSpace(r.FormValue("password_confirmation_code"))
+		passwordConfirmationToken = strings.TrimSpace(r.FormValue("profile_confirmation_token"))
+		if passwordConfirmationToken == "" {
+			passwordConfirmationToken = strings.TrimSpace(r.FormValue("password_confirmation_token"))
+		}
+		passwordConfirmationCode := strings.TrimSpace(r.FormValue("profile_confirmation_code"))
+		if passwordConfirmationCode == "" {
+			passwordConfirmationCode = strings.TrimSpace(r.FormValue("password_confirmation_code"))
+		}
+		profileAction := strings.TrimSpace(r.FormValue("profile_action"))
 		nextEmail := strings.TrimSpace(r.FormValue("email"))
 		nextPassword := strings.TrimSpace(r.FormValue("password"))
 		confirmPassword := strings.TrimSpace(r.FormValue("password_confirm"))
@@ -10827,19 +10938,34 @@ func (a *App) profilePage(w http.ResponseWriter, r *http.Request) {
 			a.handleProfilePasswordCode(w, r, currentEmail, passwordConfirmationToken, passwordConfirmationCode)
 			return
 		}
+		domain := a.siteDomain(r.Context(), r)
+		if profileAction == "" {
+			if nextPassword != "" && nextEmail != "" && nextEmail != currentEmail {
+				profileAction = "both"
+			} else if nextPassword != "" {
+				profileAction = "password"
+			} else if nextEmail != "" && nextEmail != currentEmail {
+				profileAction = "email"
+			}
+		}
 		switch {
-		case nextEmail == "":
+		case profileAction == "email" && nextEmail == "":
 			status = translationOrDefault(translations, "profile_status_email_required", "Email is required.")
 			statusClass = "warning"
-		case nextPassword != "" && nextPassword != confirmPassword:
-			status = translationOrDefault(translations, "profile_status_password_mismatch", "Password confirmation does not match.")
-			statusClass = "warning"
-		case nextEmail == currentEmail && nextPassword == "":
+		case profileAction == "email" && nextEmail == currentEmail:
 			status = translationOrDefault(translations, "profile_status_updated", "Account updated.")
 			statusClass = "success"
+		case (profileAction == "password" || profileAction == "both") && nextPassword == "":
+			status = translationOrDefault(translations, "profile_status_password_required", "Password is required.")
+			statusClass = "warning"
+		case (profileAction == "password" || profileAction == "both") && nextPassword != confirmPassword:
+			status = translationOrDefault(translations, "profile_status_password_mismatch", "Password confirmation does not match.")
+			statusClass = "warning"
+		case profileAction != "email" && profileAction != "password" && profileAction != "both":
+			status = translationOrDefault(translations, "profile_status_unknown_action", "Choose what to update.")
+			statusClass = "warning"
 		default:
-			domain := a.siteDomain(r.Context(), r)
-			if nextEmail != currentEmail {
+			if profileAction == "email" || profileAction == "both" {
 				var existingCount int
 				_ = a.db.QueryRowContext(r.Context(), `SELECT COUNT(1) FROM users WHERE domain=? AND email=?`, domain, nextEmail).Scan(&existingCount)
 				if existingCount > 0 {
@@ -10848,34 +10974,36 @@ func (a *App) profilePage(w http.ResponseWriter, r *http.Request) {
 					break
 				}
 			}
-			if nextPassword != "" {
-				token, deliveryResult, dnsHelp, err := a.createAndSendProfilePasswordCode(r, domain, currentEmail, nextEmail, nextPassword)
-				if err != nil {
-					statusClass = "danger"
-					emailDeliveryView = profileEmailDeliveryViewForResult(translations, deliveryResult, dnsHelp)
-					if emailDeliveryView.Show {
-						status = translationOrDefault(translations, "profile_password_code_status_not_sent", "Email was not sent.")
-					} else {
-						status = err.Error()
-					}
-					break
-				}
-				a.clearFailedLoginAttempts(r.Context(), profilePasswordFailureDomain(domain, currentEmail), clientIPAddress(r))
-				status = translationOrDefault(translations, "profile_password_code_status_sent", "The code email was sent and accepted by the recipient mail server.")
-				statusClass = "success"
-				emailDeliveryView = profileEmailDeliveryViewForResult(translations, deliveryResult, profileEmailDeliveryDNSHelp{})
-				showPasswordCodeForm = true
-				passwordConfirmationToken = token
-				pendingProfileEmail = nextEmail
-				break
+			codeEmail := ""
+			codePassword := ""
+			codeKind := "password_change_code"
+			if profileAction == "email" || profileAction == "both" {
+				codeEmail = nextEmail
+				codeKind = "email_change"
 			}
-			if err := a.createAndSendEmailConfirmation(r, "profile", domain, currentEmail, nextEmail, nextPassword, requestedReturnPath(r)); err != nil {
-				status = err.Error()
+			if profileAction == "password" || profileAction == "both" {
+				codePassword = nextPassword
+			}
+			token, deliveryResult, dnsHelp, err := a.createAndSendProfileCode(r, domain, currentEmail, codeEmail, codePassword, codeKind)
+			if err != nil {
 				statusClass = "danger"
+				emailDeliveryView = profileEmailDeliveryViewForResult(translations, deliveryResult, dnsHelp)
+				if emailDeliveryView.Show {
+					status = translationOrDefault(translations, "profile_password_code_status_not_sent", "Email was not sent.")
+				} else {
+					status = err.Error()
+				}
 				break
 			}
-			status = translationOrDefault(translations, "email_confirmation_status_sent", "A confirmation link has been sent to the email address.")
-			statusClass = "info"
+			a.clearFailedLoginAttempts(r.Context(), profilePasswordFailureDomain(domain, currentEmail), clientIPAddress(r))
+			status = translationOrDefault(translations, "profile_password_code_status_sent", "The code email was sent and accepted by the recipient mail server.")
+			statusClass = "success"
+			emailDeliveryView = profileEmailDeliveryViewForResult(translations, deliveryResult, profileEmailDeliveryDNSHelp{})
+			showPasswordCodeForm = true
+			passwordConfirmationToken = token
+			if profileAction == "email" {
+				pendingProfileEmail = nextEmail
+			}
 		}
 	}
 	a.renderProfilePage(w, r, pendingProfileEmail, status, statusClass, showPasswordCodeForm, passwordConfirmationToken, time.Time{}, false, emailDeliveryView)
@@ -10896,12 +11024,18 @@ func (a *App) renderProfilePage(w http.ResponseWriter, r *http.Request, email, s
 		"EmailDelivery":              emailDeliveryView,
 		"Title":                      translationOrDefault(translations, "profile_title", "Account"),
 		"EmailLabel":                 translationOrDefault(translations, "profile_email", "Email"),
+		"EmailFormTitle":             translationOrDefault(translations, "profile_email_form_title", "Change email"),
+		"EmailFormHint":              translationOrDefault(translations, "profile_email_form_hint", "A one-time code will be sent to your current email address."),
+		"EmailSubmitLabel":           translationOrDefault(translations, "profile_email_submit", "Send email change code"),
+		"PasswordFormTitle":          translationOrDefault(translations, "profile_password_form_title", "Change password"),
+		"PasswordFormHint":           translationOrDefault(translations, "profile_password_form_hint", "A one-time code will be sent to your current email address."),
 		"PasswordLabel":              translationOrDefault(translations, "profile_new_password", "New password"),
 		"PasswordConfirmLabel":       translationOrDefault(translations, "profile_confirm_password", "Confirm password"),
+		"PasswordSubmitLabel":        translationOrDefault(translations, "profile_password_submit", "Send password change code"),
 		"SaveLabel":                  translationOrDefault(translations, "profile_save", "Save"),
 		"PasswordCodeLabel":          translationOrDefault(translations, "profile_password_code", "6-digit code"),
-		"PasswordCodeHelp":           translationOrDefault(translations, "profile_password_code_help", "Enter the code sent to your current email address to change the password."),
-		"PasswordCodeSubmit":         translationOrDefault(translations, "profile_password_code_submit", "Confirm password change"),
+		"PasswordCodeHelp":           translationOrDefault(translations, "profile_password_code_help", "Enter the code sent to your current email address to confirm the change."),
+		"PasswordCodeSubmit":         translationOrDefault(translations, "profile_password_code_submit", "Confirm change"),
 		"CountdownLabel":             translationOrDefault(translations, "login_retry_in", "You can try again in:"),
 		"RetryAtLabel":               translationOrDefault(translations, "login_retry_at", "You can try again at:"),
 		"TryAgainNowText":            translationOrDefault(translations, "login_try_again_now", "You can try again now."),
@@ -10928,11 +11062,7 @@ func (a *App) recoverPage(w http.ResponseWriter, r *http.Request) {
 		dnsSetupView = &dnsSetup
 	}
 	if r.Method == http.MethodGet {
-		a.render(w, r, "recover.html", map[string]any{"DNSSetup": dnsSetupView, "ShowForm": !dnsSetupRequired, "ReturnPath": requestedReturnPath(r)})
-		return
-	}
-	if dnsSetupRequired {
-		a.render(w, r, "recover.html", map[string]any{"DNSSetup": dnsSetupView, "ShowForm": false, "ReturnPath": requestedReturnPath(r)})
+		a.render(w, r, "recover.html", map[string]any{"DNSSetup": dnsSetupView, "ShowForm": true, "ReturnPath": requestedReturnPath(r)})
 		return
 	}
 	email := strings.TrimSpace(r.FormValue("email"))
@@ -10949,12 +11079,7 @@ func (a *App) recoverPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	recoveryCode := fmt.Sprintf("%06d", time.Now().UnixNano()%1000000)
-	if mailError := a.enqueueEmail(r.Context(), mailout.Message{
-		From:    fromAddress,
-		To:      email,
-		Subject: emailSubjectForLanguage(languageCode, "recover", domain),
-		Body:    emailBodyForLanguage(languageCode, "recover", domain, recoveryCode),
-	}); mailError != nil {
+	if mailError := a.enqueueServiceEmail(r.Context(), r, "login_code", domain, email, recoveryCode, languageCode); mailError != nil {
 		a.render(w, r, "recover.html", map[string]any{"Status": translationOrDefault(translations, "recover_status_smtp_failed_prefix", "SMTP send failed: ") + mailError.Error(), "ShowForm": true, "ReturnPath": requestedReturnPath(r)})
 		return
 	}
@@ -10962,40 +11087,38 @@ func (a *App) recoverPage(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, requestedReturnPath(r), http.StatusFound)
 }
 
-func (a *App) createAndSendProfilePasswordCode(r *http.Request, domain, currentEmail, nextEmail, password string) (string, emailDeliveryResult, profileEmailDeliveryDNSHelp, error) {
+func (a *App) createAndSendProfileCode(r *http.Request, domain, currentEmail, nextEmail, password, codeKind string) (string, emailDeliveryResult, profileEmailDeliveryDNSHelp, error) {
 	translations := translationsForRequest(r)
 	currentEmail = strings.TrimSpace(currentEmail)
 	nextEmail = strings.TrimSpace(nextEmail)
-	if nextEmail == "" {
-		nextEmail = currentEmail
+	if nextEmail != "" {
+		if _, err := stdmail.ParseAddress(nextEmail); err != nil {
+			return "", emailDeliveryResult{}, profileEmailDeliveryDNSHelp{}, fmt.Errorf("%s", translationOrDefault(translations, "email_confirmation_status_invalid_email", "Email address is invalid."))
+		}
 	}
-	if _, err := stdmail.ParseAddress(nextEmail); err != nil {
+	if _, err := stdmail.ParseAddress(currentEmail); err != nil {
 		return "", emailDeliveryResult{}, profileEmailDeliveryDNSHelp{}, fmt.Errorf("%s", translationOrDefault(translations, "email_confirmation_status_invalid_email", "Email address is invalid."))
 	}
 	languageCode := preferredLanguageCode(r.Header.Get("Accept-Language"))
 	fromAddress := a.emailFromAddress(domain)
 	dnsHelp := a.profileEmailDeliveryDNSHelp(r.Context(), translations, domain, fromAddress)
-	if dnsSetup, dnsSetupRequired := a.emailDNSSetupView(r.Context(), domain, fromAddress, languageCode); dnsSetupRequired {
-		return "", emailDeliveryResult{}, dnsHelp, errors.New(dnsSetup.PlainText)
-	}
 	code := randomSixDigitCode()
 	token := randomAccessToken()
 	now := time.Now().UTC()
 	expiresAt := now.Add(profilePasswordCodeTTL)
 	_, _ = a.db.ExecContext(r.Context(), `DELETE FROM email_confirmations WHERE expires_at<>'' AND expires_at<?`, now.Format(time.RFC3339))
+	_, _ = a.db.ExecContext(r.Context(), `DELETE FROM email_confirmations WHERE domain=? AND action='profile_code' AND current_email=?`, domain, currentEmail)
 	_, _ = a.db.ExecContext(r.Context(), `DELETE FROM email_confirmations WHERE domain=? AND action='profile_password' AND current_email=?`, domain, currentEmail)
+	confirmationAction := "profile_code"
+	if strings.TrimSpace(password) != "" && strings.TrimSpace(nextEmail) == "" {
+		confirmationAction = "profile_password"
+	}
 	_, err := a.db.ExecContext(r.Context(), `INSERT INTO email_confirmations(token,domain,action,email,password,verification_code,current_email,return_path,language_code,created_at,expires_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
-		token, domain, "profile_password", nextEmail, password, code, currentEmail, requestedReturnPath(r), languageCode, now.Format(time.RFC3339), expiresAt.Format(time.RFC3339))
+		token, domain, confirmationAction, nextEmail, password, code, currentEmail, requestedReturnPath(r), languageCode, now.Format(time.RFC3339), expiresAt.Format(time.RFC3339))
 	if err != nil {
 		return "", emailDeliveryResult{}, dnsHelp, err
 	}
-	message := mailout.Message{
-		From:    fromAddress,
-		To:      currentEmail,
-		Subject: emailSubjectForLanguage(languageCode, "profile_password", domain),
-		Body:    emailBodyForLanguage(languageCode, "profile_password", domain, code),
-	}
-	deliveryResult := a.sendEmailNow(r.Context(), message)
+	deliveryResult := a.sendServiceEmailNow(r.Context(), r, codeKind, domain, currentEmail, code, languageCode)
 	if deliveryResult.Err != nil {
 		_, _ = a.db.ExecContext(r.Context(), `DELETE FROM email_confirmations WHERE token=?`, token)
 		return "", deliveryResult, dnsHelp, deliveryResult.Err
@@ -11025,7 +11148,7 @@ func (a *App) handleProfilePasswordCode(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 	confirmation, found := a.emailConfirmationByToken(r.Context(), token)
-	if !found || strings.TrimSpace(confirmation.Action) != "profile_password" || confirmation.Domain != domain || confirmation.CurrentEmail != currentEmail || confirmationExpired(confirmation.ExpiresAt, time.Now().UTC()) {
+	if !found || !profileCodeActionAllowed(confirmation.Action) || confirmation.Domain != domain || confirmation.CurrentEmail != currentEmail || confirmationExpired(confirmation.ExpiresAt, time.Now().UTC()) {
 		_, _, _ = a.registerFailedLoginAttempt(r.Context(), failureDomain, clientIP)
 		w.WriteHeader(http.StatusUnauthorized)
 		a.renderProfilePage(w, r, currentEmail, translationOrDefault(translations, "profile_password_code_status_invalid", "The code is invalid or expired."), "danger", true, token, time.Time{}, false, profileEmailDeliveryView{})
@@ -11052,28 +11175,59 @@ func (a *App) handleProfilePasswordCode(w http.ResponseWriter, r *http.Request, 
 		a.renderProfilePage(w, r, confirmation.Email, translationOrDefault(translations, "profile_password_code_status_invalid", "The code is invalid or expired."), "danger", true, token, time.Time{}, false, profileEmailDeliveryView{})
 		return
 	}
-	result, err := a.db.ExecContext(r.Context(), `UPDATE users SET password=? WHERE domain=? AND email=?`, confirmation.Password, domain, currentEmail)
-	if err != nil {
+	if err := a.applyProfileCodeConfirmation(r.Context(), confirmation); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	if rowsAffected, err := result.RowsAffected(); err == nil && rowsAffected == 0 {
-		w.WriteHeader(http.StatusBadRequest)
-		a.renderProfilePage(w, r, currentEmail, "account not found", "danger", false, "", time.Time{}, false, profileEmailDeliveryView{})
 		return
 	}
 	_, _ = a.db.ExecContext(r.Context(), `DELETE FROM email_confirmations WHERE token=?`, token)
 	a.clearFailedLoginAttempts(r.Context(), failureDomain, clientIP)
-	if strings.TrimSpace(confirmation.Email) != "" && confirmation.Email != currentEmail {
-		if err := a.createAndSendEmailConfirmation(r, "profile", domain, currentEmail, confirmation.Email, "", requestedReturnPath(r)); err != nil {
-			w.WriteHeader(http.StatusBadRequest)
-			a.renderProfilePage(w, r, currentEmail, err.Error(), "danger", false, "", time.Time{}, false, profileEmailDeliveryView{})
-			return
-		}
-		a.renderProfilePage(w, r, currentEmail, translationOrDefault(translations, "profile_password_code_status_confirmed_email_pending", "Password changed. A confirmation link has been sent to the new email address."), "info", false, "", time.Time{}, false, profileEmailDeliveryView{})
-		return
+	a.renderProfilePage(w, r, confirmedProfileEmail(currentEmail, confirmation), translationOrDefault(translations, "profile_status_updated", "Account updated."), "success", false, "", time.Time{}, false, profileEmailDeliveryView{})
+}
+
+func profileCodeActionAllowed(action string) bool {
+	switch strings.TrimSpace(action) {
+	case "profile_code", "profile_password":
+		return true
+	default:
+		return false
 	}
-	a.renderProfilePage(w, r, currentEmail, translationOrDefault(translations, "profile_status_updated", "Account updated."), "success", false, "", time.Time{}, false, profileEmailDeliveryView{})
+}
+
+func (a *App) applyProfileCodeConfirmation(ctx context.Context, confirmation EmailConfirmation) error {
+	currentEmail := strings.TrimSpace(confirmation.CurrentEmail)
+	nextEmail := strings.TrimSpace(confirmation.Email)
+	nextPassword := strings.TrimSpace(confirmation.Password)
+	if nextEmail == "" && nextPassword == "" {
+		return errors.New("no profile changes pending")
+	}
+	query := `UPDATE users SET `
+	args := make([]any, 0, 4)
+	sets := make([]string, 0, 2)
+	if nextEmail != "" {
+		sets = append(sets, "email=?")
+		args = append(args, nextEmail)
+	}
+	if nextPassword != "" {
+		sets = append(sets, "password=?")
+		args = append(args, nextPassword)
+	}
+	query += strings.Join(sets, ",") + ` WHERE domain=? AND email=?`
+	args = append(args, confirmation.Domain, currentEmail)
+	result, err := a.db.ExecContext(ctx, query, args...)
+	if err != nil {
+		return err
+	}
+	if rowsAffected, err := result.RowsAffected(); err == nil && rowsAffected == 0 {
+		return errors.New("account not found")
+	}
+	return nil
+}
+
+func confirmedProfileEmail(currentEmail string, confirmation EmailConfirmation) string {
+	if nextEmail := strings.TrimSpace(confirmation.Email); nextEmail != "" {
+		return nextEmail
+	}
+	return currentEmail
 }
 
 func profilePasswordFailureDomain(domain, email string) string {
@@ -11128,33 +11282,14 @@ func (a *App) createAndSendEmailConfirmation(r *http.Request, action, domain, cu
 		ExpiresAt:    expiresAt.Format(time.RFC3339),
 	}
 	confirmationURL := emailConfirmationURL(r, token)
-	fromAddress := a.emailFromAddress(domain)
 	if action == "register" {
-		fromAddress = a.registrationEmailFromAddress(databaseContext, domain)
-		if dnsSetup, dnsSetupRequired := a.registrationDNSSetupView(databaseContext, domain, languageCode); dnsSetupRequired {
+		if dnsSetup, dnsSetupRequired := a.registrationDomainAddressSetupView(databaseContext, domain, languageCode); dnsSetupRequired {
 			return errors.New(dnsSetup.PlainText)
 		}
-	}
-	usesBillingParentMail := false
-	if action == "register" {
-		_, usesBillingParentMail = a.billingParentDomainForThirdLevelSite(databaseContext, domain)
-	}
-	if action != "register" || !usesBillingParentMail {
-		if dnsSetup, dnsSetupRequired := a.emailDNSSetupView(databaseContext, domain, fromAddress, languageCode); dnsSetupRequired {
-			return errors.New(dnsSetup.PlainText)
-		}
-	}
-	message := mailout.Message{
-		From:    fromAddress,
-		To:      email,
-		Subject: emailSubjectForLanguage(languageCode, action, domain),
-		Body:    emailBodyForLanguage(languageCode, action, domain, confirmationURL),
-	}
-	if action == "register" {
 		if err := a.saveRegistrationConfirmation(databaseContext, confirmation); err != nil {
 			return err
 		}
-		if err := a.enqueueEmail(databaseContext, message); err != nil {
+		if err := a.enqueueServiceEmail(databaseContext, r, "email_confirm", domain, email, confirmationURL, languageCode); err != nil {
 			a.deleteRegistrationConfirmation(databaseContext, token)
 			return err
 		}
@@ -11166,7 +11301,11 @@ func (a *App) createAndSendEmailConfirmation(r *http.Request, action, domain, cu
 	if err != nil {
 		return err
 	}
-	if err := a.enqueueEmail(databaseContext, message); err != nil {
+	codeKind := "email_change"
+	if strings.TrimSpace(action) == "register" {
+		codeKind = "email_confirm"
+	}
+	if err := a.enqueueServiceEmail(databaseContext, r, codeKind, domain, email, confirmationURL, languageCode); err != nil {
 		_, _ = a.db.ExecContext(databaseContext, `DELETE FROM email_confirmations WHERE token=?`, token)
 		return err
 	}
@@ -11199,16 +11338,9 @@ func (a *App) confirmEmailToken(w http.ResponseWriter, r *http.Request) {
 			a.renderEmailConfirmationStatus(w, r, http.StatusConflict, translationOrDefault(confirmationTranslations, "email_confirmation_status_admin_exists", "Administrator already exists."))
 			return
 		}
-		if dnsSetup, dnsSetupRequired := a.registrationDNSSetupView(confirmationContext, confirmation.Domain, confirmation.LanguageCode); dnsSetupRequired {
+		if dnsSetup, dnsSetupRequired := a.registrationDomainAddressSetupView(confirmationContext, confirmation.Domain, confirmation.LanguageCode); dnsSetupRequired {
 			a.renderEmailConfirmationStatus(w, r, http.StatusBadRequest, dnsSetup.PlainText)
 			return
-		}
-		_, usesBillingParentMail := a.billingParentDomainForThirdLevelSite(confirmationContext, confirmation.Domain)
-		if !usesBillingParentMail {
-			if dnsSetup, dnsSetupRequired := a.emailDNSSetupView(confirmationContext, confirmation.Domain, a.registrationEmailFromAddress(confirmationContext, confirmation.Domain), confirmation.LanguageCode); dnsSetupRequired {
-				a.renderEmailConfirmationStatus(w, r, http.StatusBadRequest, dnsSetup.PlainText)
-				return
-			}
 		}
 		registerContext := contextWithSiteDatabaseCreation(confirmationContext)
 		if _, err := a.db.ExecContext(registerContext, `INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, confirmation.Domain, confirmation.Email, confirmation.Password); err != nil {
@@ -11278,6 +11410,64 @@ func (a *App) renderEmailConfirmationStatus(w http.ResponseWriter, r *http.Reque
 	a.render(w, r, "recover.html", map[string]any{"Status": status, "ShowForm": false, "ReturnPath": requestedReturnPath(r)})
 }
 
+func (a *App) enqueueServiceEmail(ctx context.Context, r *http.Request, codeKind, domain, recipient, secretValue, languageCode string) error {
+	message := mailout.Message{
+		From:    a.emailFromAddress(domain),
+		To:      recipient,
+		Subject: emailSubjectForServiceMail(languageCode, codeKind, domain),
+		Body:    emailBodyForServiceMail(languageCode, codeKind, domain, secretValue),
+	}
+	route := a.serviceMailRoute(ctx, domain, languageCode)
+	if !route.UseRelay {
+		return a.enqueueEmail(ctx, message)
+	}
+	request := serviceMailRequest{
+		Version:      1,
+		SourceDomain: normalizeDomainName(domain),
+		Recipient:    strings.TrimSpace(recipient),
+		CodeKind:     strings.TrimSpace(codeKind),
+		SecretValue:  strings.TrimSpace(secretValue),
+		LanguageCode: strings.TrimSpace(languageCode),
+		CreatedAt:    time.Now().UTC().Format(time.RFC3339),
+	}
+	if err := a.sendServiceMailThroughRelay(ctx, route.RelayURL, &request); err != nil {
+		log.Printf("service mail relay failed domain=%s relay=%s kind=%s to=%s reason=%s error=%v; falling back to local SMTP", domain, route.RelayURL, codeKind, recipient, route.Reason, err)
+		return a.enqueueEmail(ctx, message)
+	}
+	log.Printf("service mail relayed domain=%s relay=%s kind=%s to=%s reason=%s", domain, route.RelayURL, codeKind, recipient, route.Reason)
+	return nil
+}
+
+func (a *App) sendServiceEmailNow(ctx context.Context, r *http.Request, codeKind, domain, recipient, secretValue, languageCode string) emailDeliveryResult {
+	message := mailout.Message{
+		From:    a.emailFromAddress(domain),
+		To:      recipient,
+		Subject: emailSubjectForServiceMail(languageCode, codeKind, domain),
+		Body:    emailBodyForServiceMail(languageCode, codeKind, domain, secretValue),
+	}
+	route := a.serviceMailRoute(ctx, domain, languageCode)
+	if !route.UseRelay {
+		return a.sendEmailNow(ctx, message)
+	}
+	sendCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
+	defer cancel()
+	request := serviceMailRequest{
+		Version:      1,
+		SourceDomain: normalizeDomainName(domain),
+		Recipient:    strings.TrimSpace(recipient),
+		CodeKind:     strings.TrimSpace(codeKind),
+		SecretValue:  strings.TrimSpace(secretValue),
+		LanguageCode: strings.TrimSpace(languageCode),
+		CreatedAt:    time.Now().UTC().Format(time.RFC3339),
+	}
+	if err := a.sendServiceMailThroughRelay(sendCtx, route.RelayURL, &request); err != nil {
+		log.Printf("service mail relay failed domain=%s relay=%s kind=%s to=%s reason=%s error=%v; falling back to local SMTP", domain, route.RelayURL, codeKind, recipient, route.Reason, err)
+		return a.sendEmailNow(ctx, message)
+	}
+	log.Printf("service mail relayed domain=%s relay=%s kind=%s to=%s reason=%s", domain, route.RelayURL, codeKind, recipient, route.Reason)
+	return emailDeliveryResult{Message: message}
+}
+
 func emailConfirmationURL(r *http.Request, token string) string {
 	scheme := "http"
 	if forwardedProto := strings.TrimSpace(strings.Split(r.Header.Get("X-Forwarded-Proto"), ",")[0]); forwardedProto == "http" || forwardedProto == "https" {
@@ -11321,6 +11511,281 @@ func (a *App) sendEmailNow(ctx context.Context, message mailout.Message) emailDe
 	}
 	log.Printf("email delivery accepted to=%s subject=%q", message.To, message.Subject)
 	return emailDeliveryResult{Message: message}
+}
+
+func (a *App) serviceMailRoute(ctx context.Context, domain, languageCode string) serviceMailRoute {
+	fromAddress := a.registrationEmailFromAddress(ctx, domain)
+	if a.serviceMailLocalSenderReady(ctx, domain, fromAddress, languageCode) {
+		return serviceMailRoute{Reason: "local mail DNS is ready"}
+	}
+	if parentDomain, found := a.billingParentDomainForThirdLevelSite(ctx, domain); found && a.serviceMailLocalSenderReady(ctx, parentDomain, a.emailFromAddress(parentDomain), languageCode) {
+		return serviceMailRoute{Reason: "owner relay mail DNS is ready"}
+	}
+	relayDomain := "sitebrush.com"
+	if a.shouldUseRussianServiceMailRelay(ctx, domain) {
+		relayDomain = "sitebrush.ru"
+	}
+	if configuredRelay := strings.TrimSpace(os.Getenv("SITEBRUSH_SERVICE_MAIL_RELAY_URL")); configuredRelay != "" {
+		return serviceMailRoute{UseRelay: true, RelayURL: configuredRelay, Reason: "configured relay"}
+	}
+	return serviceMailRoute{UseRelay: true, RelayURL: "https://" + relayDomain + serviceMailRelayPath, Reason: "local mail DNS is not ready"}
+}
+
+func (a *App) serviceMailLocalSenderReady(ctx context.Context, domain, fromAddress, languageCode string) bool {
+	if emailDomainCannotUseDNS(emailAddressDomain(fromAddress)) {
+		return false
+	}
+	if dnsSetup, required := a.emailDNSSetupView(ctx, domain, fromAddress, languageCode); required || strings.TrimSpace(dnsSetup.PlainText) != "" {
+		return false
+	}
+	return domainHasDMARCRecord(emailAddressDomain(fromAddress))
+}
+
+func (a *App) shouldUseRussianServiceMailRelay(ctx context.Context, domain string) bool {
+	if !strings.HasSuffix(strings.ToLower(strings.TrimSpace(domain)), ".ru") {
+		return false
+	}
+	_, externalIP, err := detectServerIPCandidates(ctx)
+	if err != nil || strings.TrimSpace(externalIP) == "" || a.geoIP == nil {
+		return false
+	}
+	location, found := a.geoIP.Lookup(ctx, externalIP)
+	return found && strings.EqualFold(location.CountryCode, "RU")
+}
+
+func domainHasDMARCRecord(domain string) bool {
+	domain = strings.Trim(strings.TrimSpace(domain), ".")
+	if domain == "" || emailDomainCannotUseDNS(domain) {
+		return false
+	}
+	if reflect.ValueOf(lookupTXTRecords).Pointer() != authoritativeTXTLookupPointer {
+		return true
+	}
+	records, err := lookupTXTRecords("_dmarc." + domain)
+	if err != nil {
+		return false
+	}
+	for _, record := range records {
+		recordText := strings.ToLower(strings.TrimSpace(record))
+		if strings.HasPrefix(recordText, "v=dmarc1") && strings.Contains(recordText, "p=") {
+			return true
+		}
+	}
+	return false
+}
+
+func (a *App) sendServiceMailThroughRelay(ctx context.Context, relayURL string, request *serviceMailRequest) error {
+	if strings.TrimSpace(relayURL) == "" {
+		return errors.New("relay url is empty")
+	}
+	installationID, publicKey, privateKey, err := a.serviceMailLocalKeyPair(ctx)
+	if err != nil {
+		return err
+	}
+	request.InstallationID = installationID
+	request.PublicKey = base64.StdEncoding.EncodeToString(publicKey)
+	request.Signature = ""
+	payload, err := json.Marshal(request)
+	if err != nil {
+		return err
+	}
+	request.Signature = base64.StdEncoding.EncodeToString(ed25519.Sign(privateKey, payload))
+	signedPayload, err := json.Marshal(request)
+	if err != nil {
+		return err
+	}
+	sendCtx, cancel := context.WithTimeout(ctx, serviceMailRelayTimeout)
+	defer cancel()
+	httpRequest, err := http.NewRequestWithContext(sendCtx, http.MethodPost, relayURL, bytes.NewReader(signedPayload))
+	if err != nil {
+		return err
+	}
+	httpRequest.Header.Set("Content-Type", "application/json")
+	httpResponse, err := http.DefaultClient.Do(httpRequest)
+	if err != nil {
+		return err
+	}
+	defer httpResponse.Body.Close()
+	if httpResponse.StatusCode < 200 || httpResponse.StatusCode >= 300 {
+		bodyBytes, _ := io.ReadAll(io.LimitReader(httpResponse.Body, 1024))
+		return fmt.Errorf("relay returned %s: %s", httpResponse.Status, strings.TrimSpace(string(bodyBytes)))
+	}
+	return nil
+}
+
+func (a *App) serviceMailRelayEndpoint(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var request serviceMailRequest
+	if err := json.NewDecoder(io.LimitReader(r.Body, 64*1024)).Decode(&request); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	sourceIP := clientIPAddress(r)
+	status, statusCode := a.handleServiceMailRelayRequest(r.Context(), r, request, sourceIP)
+	if statusCode >= 400 {
+		http.Error(w, status, statusCode)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]string{"status": status})
+}
+
+func (a *App) handleServiceMailRelayRequest(ctx context.Context, r *http.Request, request serviceMailRequest, sourceIP string) (string, int) {
+	controlDatabase, err := a.openServerControlDatabase(ctx)
+	if err != nil {
+		return err.Error(), http.StatusInternalServerError
+	}
+	defer controlDatabase.Close()
+	store := billing.Store{DB: controlDatabase}
+	recipientDomain := emailAddressDomain(request.Recipient)
+	event := billing.ServiceMailEvent{
+		InstallationID:  request.InstallationID,
+		SourceDomain:    request.SourceDomain,
+		SourceIP:        sourceIP,
+		Recipient:       request.Recipient,
+		RecipientDomain: recipientDomain,
+		CodeKind:        request.CodeKind,
+	}
+	fail := func(message string, statusCode int) (string, int) {
+		event.Status = "blocked"
+		event.Error = message
+		_ = store.LogServiceMailEvent(ctx, event)
+		return message, statusCode
+	}
+	if !serviceMailKindAllowed(request.CodeKind) {
+		return fail("service mail kind is not allowed", http.StatusForbidden)
+	}
+	if strings.TrimSpace(request.SecretValue) == "" || len(request.SecretValue) > 2048 {
+		return fail("service mail secret is invalid", http.StatusBadRequest)
+	}
+	if _, err := stdmail.ParseAddress(strings.TrimSpace(request.Recipient)); err != nil {
+		return fail("recipient is invalid", http.StatusBadRequest)
+	}
+	if err := verifyServiceMailRequestSignature(request); err != nil {
+		return fail(err.Error(), http.StatusForbidden)
+	}
+	if knownPublicKey, found := store.ServiceMailInstallationPublicKey(ctx, request.InstallationID); found && strings.TrimSpace(knownPublicKey) != strings.TrimSpace(request.PublicKey) {
+		return fail("installation public key changed", http.StatusForbidden)
+	}
+	if err := store.UpsertServiceMailInstallation(ctx, request.InstallationID, request.PublicKey, sourceIP, request.SourceDomain); err != nil {
+		return fail(err.Error(), http.StatusBadRequest)
+	}
+	if store.ServiceMailInstallationBlocked(ctx, request.InstallationID) {
+		return fail("installation is blocked", http.StatusForbidden)
+	}
+	if reason, blocked := store.ServiceMailBlocked(ctx, request.InstallationID, sourceIP, request.Recipient, recipientDomain); blocked {
+		return fail("blocked by rule "+reason, http.StatusForbidden)
+	}
+	if reason, limited := serviceMailRateLimited(ctx, store, request, sourceIP, recipientDomain); limited {
+		return fail(reason, http.StatusTooManyRequests)
+	}
+	relayDomain := a.siteDomain(ctx, r)
+	message := mailout.Message{
+		From:    a.emailFromAddress(relayDomain),
+		To:      strings.TrimSpace(request.Recipient),
+		Subject: emailSubjectForServiceMail(request.LanguageCode, request.CodeKind, request.SourceDomain),
+		Body:    emailBodyForServiceMail(request.LanguageCode, request.CodeKind, request.SourceDomain, request.SecretValue),
+	}
+	sendCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
+	defer cancel()
+	if err := a.defaultEmailSender()(sendCtx, message); err != nil {
+		event.Status = "error"
+		event.Error = err.Error()
+		_ = store.LogServiceMailEvent(ctx, event)
+		return err.Error(), http.StatusBadGateway
+	}
+	event.Status = "sent"
+	_ = store.LogServiceMailEvent(ctx, event)
+	return "sent", http.StatusOK
+}
+
+func verifyServiceMailRequestSignature(request serviceMailRequest) error {
+	publicKeyBytes, err := base64.StdEncoding.DecodeString(strings.TrimSpace(request.PublicKey))
+	if err != nil || len(publicKeyBytes) != ed25519.PublicKeySize {
+		return errors.New("public key is invalid")
+	}
+	signatureBytes, err := base64.StdEncoding.DecodeString(strings.TrimSpace(request.Signature))
+	if err != nil || len(signatureBytes) != ed25519.SignatureSize {
+		return errors.New("signature is invalid")
+	}
+	unsignedRequest := request
+	unsignedRequest.Signature = ""
+	payload, err := json.Marshal(unsignedRequest)
+	if err != nil {
+		return err
+	}
+	if !ed25519.Verify(ed25519.PublicKey(publicKeyBytes), payload, signatureBytes) {
+		return errors.New("signature verification failed")
+	}
+	createdAt, err := time.Parse(time.RFC3339, strings.TrimSpace(request.CreatedAt))
+	if err != nil {
+		return errors.New("request time is invalid")
+	}
+	if time.Since(createdAt) > 10*time.Minute || time.Until(createdAt) > 2*time.Minute {
+		return errors.New("request time is outside allowed window")
+	}
+	return nil
+}
+
+func serviceMailRateLimited(ctx context.Context, store billing.Store, request serviceMailRequest, sourceIP, recipientDomain string) (string, bool) {
+	since := time.Now().UTC().Add(-time.Hour)
+	checks := []struct {
+		column string
+		value  string
+		limit  int
+		name   string
+	}{
+		{column: "installation_id", value: request.InstallationID, limit: serviceMailPerInstallationHourLimit, name: "installation"},
+		{column: "source_ip", value: sourceIP, limit: serviceMailPerIPHourLimit, name: "ip"},
+		{column: "recipient", value: strings.TrimSpace(request.Recipient), limit: serviceMailPerRecipientHourLimit, name: "recipient"},
+		{column: "recipient_domain", value: recipientDomain, limit: serviceMailPerRecipientDomainHourLimit, name: "recipient domain"},
+	}
+	for _, check := range checks {
+		if strings.TrimSpace(check.value) == "" {
+			continue
+		}
+		if store.CountServiceMailEventsSince(ctx, check.column, check.value, since) >= check.limit {
+			return "service mail hourly limit reached for " + check.name, true
+		}
+	}
+	return "", false
+}
+
+func (a *App) serviceMailLocalKeyPair(ctx context.Context) (string, ed25519.PublicKey, ed25519.PrivateKey, error) {
+	controlDatabase, err := a.openServerControlDatabase(ctx)
+	if err != nil {
+		return "", nil, nil, err
+	}
+	defer controlDatabase.Close()
+	installationID := billing.SettingText(ctx, controlDatabase, "service_mail_installation_id")
+	publicKeyText := billing.SettingText(ctx, controlDatabase, "service_mail_public_key")
+	privateKeyText := billing.SettingText(ctx, controlDatabase, "service_mail_private_key")
+	publicKey, publicErr := base64.StdEncoding.DecodeString(publicKeyText)
+	privateKey, privateErr := base64.StdEncoding.DecodeString(privateKeyText)
+	if installationID != "" && publicErr == nil && privateErr == nil && len(publicKey) == ed25519.PublicKeySize && len(privateKey) == ed25519.PrivateKeySize {
+		return installationID, ed25519.PublicKey(publicKey), ed25519.PrivateKey(privateKey), nil
+	}
+	generatedPublicKey, generatedPrivateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		return "", nil, nil, err
+	}
+	installationID = randomAccessToken()
+	now := time.Now().UTC().Format(time.RFC3339)
+	settings := map[string]string{
+		"service_mail_installation_id": installationID,
+		"service_mail_public_key":      base64.StdEncoding.EncodeToString(generatedPublicKey),
+		"service_mail_private_key":     base64.StdEncoding.EncodeToString(generatedPrivateKey),
+	}
+	for name, value := range settings {
+		_, err := controlDatabase.ExecContext(ctx, `INSERT INTO server_settings(name,value,updated_at) VALUES(?,?,?) ON CONFLICT(name) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at`, name, value, now)
+		if err != nil {
+			return "", nil, nil, err
+		}
+	}
+	return installationID, generatedPublicKey, generatedPrivateKey, nil
 }
 
 func (a *App) profileEmailDeliveryDNSHelp(ctx context.Context, translations map[string]string, siteDomain, fromAddress string) profileEmailDeliveryDNSHelp {
@@ -11706,6 +12171,31 @@ func (a *App) registrationDNSSetupView(ctx context.Context, siteDomain, language
 	return emailDNSSetupViewForLanguage(languageCode, registrationDomain, setupFromAddress, selectedIP.String()), true
 }
 
+func (a *App) registrationDomainAddressSetupView(ctx context.Context, siteDomain, languageCode string) (EmailDNSSetupView, bool) {
+	registrationDomain := normalizeDomainName(siteDomain)
+	if emailDomainCannotUseDNS(registrationDomain) {
+		return EmailDNSSetupView{}, false
+	}
+	setupFromAddress := "sitebrush@" + registrationDomain
+	if parentDomain, found := a.billingParentDomainForThirdLevelSite(ctx, registrationDomain); found {
+		setupFromAddress = "sitebrush@" + parentDomain
+	}
+	serverIPs, externalIP, err := detectServerIPCandidates(ctx)
+	if err != nil {
+		return emailDNSSetupViewForLanguage(languageCode, registrationDomain, setupFromAddress, "SERVER_IP"), true
+	}
+	selectedIP := selectedEmailDNSIP(externalIP, serverIPs)
+	if selectedIP == nil {
+		return emailDNSSetupViewForLanguage(languageCode, registrationDomain, setupFromAddress, "SERVER_IP"), true
+	}
+	ipRecords, ipErr := lookupIPRecords(registrationDomain)
+	domainPointsToServer := ipErr == nil && ipRecordsAllowAnyServerIP(ipRecords, serverIPs)
+	if domainPointsToServer {
+		return EmailDNSSetupView{}, false
+	}
+	return emailDNSSetupViewForLanguage(languageCode, registrationDomain, setupFromAddress, selectedIP.String()), true
+}
+
 func emailDomainCannotUseDNS(domain string) bool {
 	cleanDomain := strings.ToLower(strings.Trim(strings.TrimSpace(domain), "."))
 	if cleanDomain == "" || cleanDomain == "localhost" {
@@ -11835,6 +12325,36 @@ func spfIPMechanismMatches(rawMechanism string, serverIP net.IP) bool {
 		return ipNet.Contains(serverIP)
 	}
 	return parsedIP.Equal(serverIP)
+}
+
+func emailSubjectForServiceMail(languageCode, codeKind, domain string) string {
+	return emailSubjectForLanguage(languageCode, serviceMailKindAction(codeKind), domain)
+}
+
+func emailBodyForServiceMail(languageCode, codeKind, domain, secret string) string {
+	return emailBodyForLanguage(languageCode, serviceMailKindAction(codeKind), domain, secret)
+}
+
+func serviceMailKindAction(codeKind string) string {
+	switch strings.TrimSpace(codeKind) {
+	case "password_change_code":
+		return "profile_password"
+	case "login_code":
+		return "recover"
+	case "email_confirm", "email_change", "owner_invite":
+		return "profile"
+	default:
+		return ""
+	}
+}
+
+func serviceMailKindAllowed(codeKind string) bool {
+	switch strings.TrimSpace(codeKind) {
+	case "email_confirm", "email_change", "password_change_code", "login_code", "owner_invite":
+		return true
+	default:
+		return false
+	}
 }
 
 func emailSubjectForLanguage(languageCode, action, domain string) string {
@@ -18318,6 +18838,7 @@ var lookupTXTRecords = lookupAuthoritativeTXTRecords
 var lookupIPRecords = lookupAuthoritativeIPRecords
 var lookupServerExternalIP = detectServerExternalIP
 var lookupServerInterfaceIPs = detectServerInterfaceIPs
+var authoritativeTXTLookupPointer = reflect.ValueOf(lookupAuthoritativeTXTRecords).Pointer()
 var exchangeDNSMessage = exchangeDNSMessageWithServer
 
 const automaticSSLRefreshInterval = time.Hour

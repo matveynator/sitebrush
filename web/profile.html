@@ -87,21 +87,36 @@
     <div><button class="profile-code-submit" type="submit" disabled>{{.PasswordCodeSubmit}}</button></div>
   </form>
   {{else if .ShowPasswordForm}}
-  <form class="profile-form" method="post" action="?profile" data-profile-form>
-    <label>
-      {{.EmailLabel}}
-      <input type="email" name="email" value="{{.Email}}" autocomplete="email" required>
-    </label>
-    <label>
-      {{.PasswordLabel}}
-      <input type="password" name="password" autocomplete="new-password">
-    </label>
-    <label>
-      {{.PasswordConfirmLabel}}
-      <input type="password" name="password_confirm" autocomplete="new-password">
-    </label>
-    <div><button type="submit">{{.SaveLabel}}</button></div>
-  </form>
+  <div class="profile-form-grid">
+    <form class="profile-form" method="post" action="?profile" data-profile-send-form>
+      <input type="hidden" name="profile_action" value="email">
+      <div class="profile-form-header">
+        <h2>{{.EmailFormTitle}}</h2>
+        <p>{{.EmailFormHint}}</p>
+      </div>
+      <label>
+        {{.EmailLabel}}
+        <input type="email" name="email" value="{{.Email}}" autocomplete="email" required>
+      </label>
+      <div><button type="submit">{{.EmailSubmitLabel}}</button></div>
+    </form>
+    <form class="profile-form" method="post" action="?profile" data-profile-send-form>
+      <input type="hidden" name="profile_action" value="password">
+      <div class="profile-form-header">
+        <h2>{{.PasswordFormTitle}}</h2>
+        <p>{{.PasswordFormHint}}</p>
+      </div>
+      <label>
+        {{.PasswordLabel}}
+        <input type="password" name="password" autocomplete="new-password" required>
+      </label>
+      <label>
+        {{.PasswordConfirmLabel}}
+        <input type="password" name="password_confirm" autocomplete="new-password" required>
+      </label>
+      <div><button type="submit">{{.PasswordSubmitLabel}}</button></div>
+    </form>
+  </div>
   {{else}}
   <div class="card card-body profile-blocked-card">
     {{if .IsHardLocked}}
@@ -153,14 +168,12 @@
 })();
 
 (function prepareProfileSubmitProgress() {
-  var profileForm = document.querySelector('[data-profile-form]');
+  var profileForms = document.querySelectorAll('[data-profile-send-form]');
   var progressElement = document.querySelector('[data-profile-send-progress]');
-  if (!profileForm || !progressElement) {
+  if (!profileForms.length || !progressElement) {
     return;
   }
 
-  var passwordInput = profileForm.querySelector('input[name="password"]');
-  var submitButton = profileForm.querySelector('button[type="submit"]');
   var titleElement = progressElement.querySelector('[data-profile-send-title]');
   var stepElement = progressElement.querySelector('[data-profile-send-step]');
   var countdownElement = progressElement.querySelector('[data-profile-send-countdown]');
@@ -201,7 +214,7 @@
     document.close();
   }
 
-  function submitWithFetch() {
+  function submitWithFetch(profileForm) {
     if (!window.fetch || !window.FormData) {
       profileForm.submit();
       return;
@@ -220,43 +233,45 @@
     });
   }
 
-  profileForm.addEventListener('submit', function showProfileSubmitProgress(event) {
-    if (!passwordInput || String(passwordInput.value || '').trim() === '') {
-      return;
-    }
-    if (isSubmittingWithProgress) {
+  Array.prototype.forEach.call(profileForms, function bindProfileProgress(profileForm) {
+    var submitButton = profileForm.querySelector('button[type="submit"]');
+    profileForm.addEventListener('submit', function showProfileSubmitProgress(event) {
+      if (isSubmittingWithProgress) {
+        event.preventDefault();
+        return;
+      }
       event.preventDefault();
-      return;
-    }
-    event.preventDefault();
-    isSubmittingWithProgress = true;
-    var startedAt = Date.now();
-    progressElement.hidden = false;
-    if (submitButton) {
-      submitButton.disabled = true;
-    }
-    if (titleElement) {
-      titleElement.textContent = progressElement.getAttribute('data-title') || titleElement.textContent;
-    }
-
-    function renderProgress() {
-      var elapsedSeconds = Math.floor((Date.now() - startedAt) / 1000);
-      var secondsLeft = timeoutSeconds - elapsedSeconds;
-      if (stepElement) {
-        stepElement.textContent = secondsLeft >= 0 ? currentStep(elapsedSeconds) : timeoutText;
+      isSubmittingWithProgress = true;
+      var startedAt = Date.now();
+      progressElement.hidden = false;
+      if (submitButton) {
+        submitButton.disabled = true;
       }
-      if (countdownElement) {
-        countdownElement.textContent = countdownPrefix + ' ' + formatSeconds(secondsLeft);
+      if (titleElement) {
+        titleElement.textContent = progressElement.getAttribute('data-title') || titleElement.textContent;
       }
-      progressTimer = window.setTimeout(renderProgress, 1000);
-    }
 
-    if (progressTimer) {
-      window.clearTimeout(progressTimer);
-      progressTimer = 0;
-    }
-    renderProgress();
-    window.setTimeout(submitWithFetch, 50);
+      function renderProgress() {
+        var elapsedSeconds = Math.floor((Date.now() - startedAt) / 1000);
+        var secondsLeft = timeoutSeconds - elapsedSeconds;
+        if (stepElement) {
+          stepElement.textContent = secondsLeft >= 0 ? currentStep(elapsedSeconds) : timeoutText;
+        }
+        if (countdownElement) {
+          countdownElement.textContent = countdownPrefix + ' ' + formatSeconds(secondsLeft);
+        }
+        progressTimer = window.setTimeout(renderProgress, 1000);
+      }
+
+      if (progressTimer) {
+        window.clearTimeout(progressTimer);
+        progressTimer = 0;
+      }
+      renderProgress();
+      window.setTimeout(function submitCurrentProfileForm() {
+        submitWithFetch(profileForm);
+      }, 50);
+    });
   });
 })();
 

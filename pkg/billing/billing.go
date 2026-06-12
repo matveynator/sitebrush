@@ -15,7 +15,7 @@ import (
 
 const DefaultStorageLimitBytes int64 = 10 * 1024 * 1024 * 1024
 const DefaultDeletionBackupRetentionDays = 365
-const currentBillingSchemaVersion = 5
+const currentBillingSchemaVersion = 6
 
 type Store struct {
 	DB *sql.DB
@@ -90,6 +90,39 @@ type ServiceAssignment struct {
 	ServiceStatus string
 }
 
+type ServiceMailInstallation struct {
+	InstallationID string
+	PublicKey      string
+	FirstSeenAt    string
+	LastSeenAt     string
+	LastIP         string
+	LastDomain     string
+	Blocked        bool
+	SentCount      int
+	ErrorCount     int
+}
+
+type ServiceMailEvent struct {
+	ID              int
+	InstallationID  string
+	SourceDomain    string
+	SourceIP        string
+	Recipient       string
+	RecipientDomain string
+	CodeKind        string
+	Status          string
+	Error           string
+	CreatedAt       string
+}
+
+type ServiceMailBlock struct {
+	ID        int
+	Scope     string
+	Value     string
+	Reason    string
+	CreatedAt string
+}
+
 type DeletionBackupMetadata struct {
 	Version           int      `json:"version"`
 	Domain            string   `json:"domain"`
@@ -126,6 +159,12 @@ func Migrate(ctx context.Context, database *sql.DB) error {
 		`CREATE TABLE IF NOT EXISTS site_service_assignments(domain TEXT PRIMARY KEY,plan_id INTEGER DEFAULT 0,service_status TEXT,notes TEXT,updated_at TEXT);`,
 		`CREATE TABLE IF NOT EXISTS site_registration_requests(id INTEGER PRIMARY KEY AUTOINCREMENT,domain TEXT,name TEXT,email TEXT,phone TEXT,plan_id INTEGER DEFAULT 0,status TEXT,owner_message TEXT,created_at TEXT,updated_at TEXT);`,
 		`CREATE TABLE IF NOT EXISTS site_deletion_backups(id INTEGER PRIMARY KEY AUTOINCREMENT,domain TEXT,archive_path TEXT,file_name TEXT,size_bytes INTEGER,token TEXT,token_created_at TEXT,created_at TEXT,expires_at TEXT,retention_days INTEGER,owner_contacts TEXT,metadata_json TEXT,language_code TEXT,downloaded_at TEXT,download_count INTEGER DEFAULT 0);`,
+		`CREATE TABLE IF NOT EXISTS service_mail_installations(installation_id TEXT PRIMARY KEY,public_key TEXT,first_seen_at TEXT,last_seen_at TEXT,last_ip TEXT,last_domain TEXT,blocked INTEGER DEFAULT 0);`,
+		`CREATE TABLE IF NOT EXISTS service_mail_events(id INTEGER PRIMARY KEY AUTOINCREMENT,installation_id TEXT,source_domain TEXT,source_ip TEXT,recipient TEXT,recipient_domain TEXT,code_kind TEXT,status TEXT,error TEXT,created_at TEXT);`,
+		`CREATE INDEX IF NOT EXISTS idx_service_mail_events_installation_created ON service_mail_events(installation_id,created_at);`,
+		`CREATE INDEX IF NOT EXISTS idx_service_mail_events_recipient_created ON service_mail_events(recipient,created_at);`,
+		`CREATE INDEX IF NOT EXISTS idx_service_mail_events_domain_created ON service_mail_events(recipient_domain,created_at);`,
+		`CREATE TABLE IF NOT EXISTS service_mail_blocks(id INTEGER PRIMARY KEY AUTOINCREMENT,scope TEXT,value TEXT,reason TEXT,created_at TEXT,UNIQUE(scope,value));`,
 	}
 	queries = append(queries, demo.SchemaQueries()...)
 	for queryIndex, query := range queries {
@@ -172,7 +211,7 @@ func setSchemaMigrationVersion(ctx context.Context, database *sql.DB, component 
 }
 
 func billingSchemaComplete(ctx context.Context, database *sql.DB) (bool, error) {
-	tableNames := []string{"server_managers", "server_settings", "site_service_plans", "site_service_assignments", "site_registration_requests", "site_deletion_backups"}
+	tableNames := []string{"server_managers", "server_settings", "site_service_plans", "site_service_assignments", "site_registration_requests", "site_deletion_backups", "service_mail_installations", "service_mail_events", "service_mail_blocks"}
 	tableNames = append(tableNames, demo.TableNames()...)
 	for _, tableName := range tableNames {
 		found, err := tableExists(ctx, database, tableName)
@@ -358,13 +397,17 @@ func (store Store) AssignSite(ctx context.Context, domain string, planID int, se
 	return err
 }
 
-func settingText(ctx context.Context, database *sql.DB, name string) string {
+func SettingText(ctx context.Context, database *sql.DB, name string) string {
 	var value string
 	err := database.QueryRowContext(ctx, `SELECT value FROM server_settings WHERE name=?`, name).Scan(&value)
 	if err != nil {
 		return ""
 	}
 	return strings.TrimSpace(value)
+}
+
+func settingText(ctx context.Context, database *sql.DB, name string) string {
+	return SettingText(ctx, database, name)
 }
 
 func (store Store) RemoveSiteAssignment(ctx context.Context, domain string) {
@@ -564,6 +607,200 @@ func (store Store) UpdateSiteRequestStatus(ctx context.Context, requestID int, s
 	_, err := store.DB.ExecContext(ctx, `UPDATE site_registration_requests SET status=?,owner_message=?,updated_at=? WHERE id=?`,
 		status, strings.TrimSpace(ownerMessage), time.Now().UTC().Format(time.RFC3339), requestID)
 	return err
+}
+
+func (store Store) UpsertServiceMailInstallation(ctx context.Context, installationID, publicKey, sourceIP, sourceDomain string) error {
+	installationID = strings.TrimSpace(installationID)
+	publicKey = strings.TrimSpace(publicKey)
+	if installationID == "" {
+		return fmt.Errorf("installation id is required")
+	}
+	if publicKey == "" {
+		return fmt.Errorf("public key is required")
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	_, err := store.DB.ExecContext(ctx, `INSERT INTO service_mail_installations(installation_id,public_key,first_seen_at,last_seen_at,last_ip,last_domain,blocked) VALUES(?,?,?,?,?,?,0) ON CONFLICT(installation_id) DO UPDATE SET last_seen_at=excluded.last_seen_at,last_ip=excluded.last_ip,last_domain=excluded.last_domain`,
+		installationID, publicKey, now, now, strings.TrimSpace(sourceIP), strings.TrimSpace(sourceDomain))
+	return err
+}
+
+func (store Store) ServiceMailInstallationPublicKey(ctx context.Context, installationID string) (string, bool) {
+	var publicKey string
+	err := store.DB.QueryRowContext(ctx, `SELECT public_key FROM service_mail_installations WHERE installation_id=?`, strings.TrimSpace(installationID)).Scan(&publicKey)
+	publicKey = strings.TrimSpace(publicKey)
+	return publicKey, err == nil && publicKey != ""
+}
+
+func (store Store) ServiceMailInstallationBlocked(ctx context.Context, installationID string) bool {
+	var blocked int
+	_ = store.DB.QueryRowContext(ctx, `SELECT blocked FROM service_mail_installations WHERE installation_id=?`, strings.TrimSpace(installationID)).Scan(&blocked)
+	return blocked != 0
+}
+
+func (store Store) SetServiceMailInstallationBlocked(ctx context.Context, installationID string, blocked bool) error {
+	blockedValue := 0
+	if blocked {
+		blockedValue = 1
+	}
+	_, err := store.DB.ExecContext(ctx, `UPDATE service_mail_installations SET blocked=?,last_seen_at=? WHERE installation_id=?`,
+		blockedValue, time.Now().UTC().Format(time.RFC3339), strings.TrimSpace(installationID))
+	return err
+}
+
+func (store Store) CreateServiceMailBlock(ctx context.Context, scope, value, reason string) error {
+	scope = strings.TrimSpace(scope)
+	value = strings.TrimSpace(value)
+	if scope == "" || value == "" {
+		return fmt.Errorf("block scope and value are required")
+	}
+	_, err := store.DB.ExecContext(ctx, `INSERT OR REPLACE INTO service_mail_blocks(scope,value,reason,created_at) VALUES(?,?,?,?)`,
+		scope, value, strings.TrimSpace(reason), time.Now().UTC().Format(time.RFC3339))
+	return err
+}
+
+func (store Store) DeleteServiceMailBlock(ctx context.Context, blockID int) error {
+	_, err := store.DB.ExecContext(ctx, `DELETE FROM service_mail_blocks WHERE id=?`, blockID)
+	return err
+}
+
+func (store Store) ServiceMailBlocked(ctx context.Context, installationID, sourceIP, recipient, recipientDomain string) (string, bool) {
+	candidates := []struct {
+		scope string
+		value string
+	}{
+		{scope: "installation", value: strings.TrimSpace(installationID)},
+		{scope: "ip", value: strings.TrimSpace(sourceIP)},
+		{scope: "subnet", value: serviceMailIPv4Subnet(sourceIP)},
+		{scope: "recipient", value: strings.ToLower(strings.TrimSpace(recipient))},
+		{scope: "recipient_domain", value: strings.ToLower(strings.TrimSpace(recipientDomain))},
+	}
+	for _, candidate := range candidates {
+		if candidate.value == "" {
+			continue
+		}
+		var reason string
+		err := store.DB.QueryRowContext(ctx, `SELECT reason FROM service_mail_blocks WHERE scope=? AND value=?`, candidate.scope, candidate.value).Scan(&reason)
+		if err == nil {
+			return candidate.scope + ":" + candidate.value + " " + strings.TrimSpace(reason), true
+		}
+	}
+	return "", false
+}
+
+func serviceMailIPv4Subnet(rawIP string) string {
+	parsedIP := netParseIPv4(rawIP)
+	if parsedIP == "" {
+		return ""
+	}
+	parts := strings.Split(parsedIP, ".")
+	if len(parts) != 4 {
+		return ""
+	}
+	return strings.Join(parts[:3], ".") + ".0/24"
+}
+
+func netParseIPv4(rawIP string) string {
+	parts := strings.Split(strings.TrimSpace(rawIP), ".")
+	if len(parts) != 4 {
+		return ""
+	}
+	for _, part := range parts {
+		number, err := strconv.Atoi(part)
+		if err != nil || number < 0 || number > 255 {
+			return ""
+		}
+	}
+	return strings.Join(parts, ".")
+}
+
+func (store Store) CountServiceMailEventsSince(ctx context.Context, columnName, value string, since time.Time) int {
+	switch columnName {
+	case "installation_id", "source_ip", "recipient", "recipient_domain":
+	default:
+		return 0
+	}
+	var count int
+	_ = store.DB.QueryRowContext(ctx, `SELECT COUNT(1) FROM service_mail_events WHERE `+columnName+`=? AND created_at>=?`,
+		strings.TrimSpace(value), since.UTC().Format(time.RFC3339)).Scan(&count)
+	return count
+}
+
+func (store Store) LogServiceMailEvent(ctx context.Context, event ServiceMailEvent) error {
+	_, err := store.DB.ExecContext(ctx, `INSERT INTO service_mail_events(installation_id,source_domain,source_ip,recipient,recipient_domain,code_kind,status,error,created_at) VALUES(?,?,?,?,?,?,?,?,?)`,
+		strings.TrimSpace(event.InstallationID),
+		strings.TrimSpace(event.SourceDomain),
+		strings.TrimSpace(event.SourceIP),
+		strings.TrimSpace(event.Recipient),
+		strings.TrimSpace(event.RecipientDomain),
+		strings.TrimSpace(event.CodeKind),
+		strings.TrimSpace(event.Status),
+		strings.TrimSpace(event.Error),
+		time.Now().UTC().Format(time.RFC3339))
+	return err
+}
+
+func (store Store) ServiceMailInstallations(ctx context.Context) []ServiceMailInstallation {
+	rows, err := store.DB.QueryContext(ctx, `SELECT installation_id,public_key,first_seen_at,last_seen_at,last_ip,last_domain,blocked FROM service_mail_installations ORDER BY last_seen_at DESC,installation_id ASC`)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	installations := make([]ServiceMailInstallation, 0, 8)
+	for rows.Next() {
+		var installation ServiceMailInstallation
+		var blocked int
+		if scanErr := rows.Scan(&installation.InstallationID, &installation.PublicKey, &installation.FirstSeenAt, &installation.LastSeenAt, &installation.LastIP, &installation.LastDomain, &blocked); scanErr != nil {
+			continue
+		}
+		installation.Blocked = blocked != 0
+		installation.SentCount = store.CountServiceMailEventsSince(ctx, "installation_id", installation.InstallationID, time.Time{})
+		installation.ErrorCount = store.countServiceMailErrors(ctx, installation.InstallationID)
+		installations = append(installations, installation)
+	}
+	return installations
+}
+
+func (store Store) countServiceMailErrors(ctx context.Context, installationID string) int {
+	var count int
+	_ = store.DB.QueryRowContext(ctx, `SELECT COUNT(1) FROM service_mail_events WHERE installation_id=? AND status<>'sent'`, strings.TrimSpace(installationID)).Scan(&count)
+	return count
+}
+
+func (store Store) ServiceMailEvents(ctx context.Context, limit int) []ServiceMailEvent {
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+	rows, err := store.DB.QueryContext(ctx, `SELECT id,installation_id,source_domain,source_ip,recipient,recipient_domain,code_kind,status,error,created_at FROM service_mail_events ORDER BY id DESC LIMIT ?`, limit)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	events := make([]ServiceMailEvent, 0, limit)
+	for rows.Next() {
+		var event ServiceMailEvent
+		if scanErr := rows.Scan(&event.ID, &event.InstallationID, &event.SourceDomain, &event.SourceIP, &event.Recipient, &event.RecipientDomain, &event.CodeKind, &event.Status, &event.Error, &event.CreatedAt); scanErr != nil {
+			continue
+		}
+		events = append(events, event)
+	}
+	return events
+}
+
+func (store Store) ServiceMailBlocks(ctx context.Context) []ServiceMailBlock {
+	rows, err := store.DB.QueryContext(ctx, `SELECT id,scope,value,reason,created_at FROM service_mail_blocks ORDER BY created_at DESC,id DESC`)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	blocks := make([]ServiceMailBlock, 0, 8)
+	for rows.Next() {
+		var block ServiceMailBlock
+		if scanErr := rows.Scan(&block.ID, &block.Scope, &block.Value, &block.Reason, &block.CreatedAt); scanErr != nil {
+			continue
+		}
+		blocks = append(blocks, block)
+	}
+	return blocks
 }
 
 func applyPlanToSiteRequest(request *SiteRequest, plan Plan) {

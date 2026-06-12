@@ -326,6 +326,88 @@
     </div>
   </section>
 
+  <section class="card billing-card">
+    <div class="card-body">
+      <div class="billing-section-header">
+        <div>
+          <h2>Service email relay</h2>
+          <p class="text-muted">Signed installations, service-code delivery logs, limits, and blocking controls.</p>
+        </div>
+      </div>
+      <div class="billing-site-list">
+        {{range .ServiceMailInstallations}}
+        <article class="billing-site-row">
+          <div class="billing-site-main">
+            <div class="billing-domain">{{.LastDomain}}</div>
+            <div class="text-muted small">Installation: {{.InstallationID}}</div>
+            <div class="text-muted small">Key: {{.PublicKey}}</div>
+            <div class="text-muted small">IP: {{.LastIP}} · sent: {{.SentCount}} · errors: {{.ErrorCount}} · last: {{.LastSeenAt}}</div>
+          </div>
+          <form method="post" action="?billing" class="billing-site-form">
+            <input type="hidden" name="installation_id" value="{{.InstallationID}}">
+            {{if .Blocked}}
+            <input type="hidden" name="billing_action" value="unblock_service_mail_installation">
+            <button type="submit" class="btn btn-outline-primary btn-sm">Unblock</button>
+            {{else}}
+            <input type="hidden" name="billing_action" value="block_service_mail_installation">
+            <button type="submit" class="btn btn-outline-danger btn-sm">Block</button>
+            {{end}}
+          </form>
+        </article>
+        {{else}}
+        <div class="empty">No relay installations yet.</div>
+        {{end}}
+      </div>
+      <form method="post" action="?billing" class="billing-plan-form mt-3">
+        <input type="hidden" name="billing_action" value="add_service_mail_block">
+        <label>Block scope
+          <select name="scope" class="form-control">
+            <option value="installation">installation</option>
+            <option value="ip">ip</option>
+            <option value="subnet">subnet</option>
+            <option value="recipient">recipient</option>
+            <option value="recipient_domain">recipient_domain</option>
+          </select>
+        </label>
+        <label>Value <input name="value" type="text" class="form-control" required></label>
+        <label>Reason <input name="reason" type="text" class="form-control"></label>
+        <button type="submit" class="btn btn-outline-danger">Add block</button>
+      </form>
+      {{if .ServiceMailBlocks}}
+      <div class="billing-plan-list mt-3">
+        {{range .ServiceMailBlocks}}
+        <div class="billing-plan-row">
+          <span>{{.Scope}}: {{.Value}} · {{.Reason}} · {{.CreatedAt}}</span>
+          <form method="post" action="?billing">
+            <input type="hidden" name="billing_action" value="delete_service_mail_block">
+            <input type="hidden" name="block_id" value="{{.ID}}">
+            <button type="submit" class="btn btn-outline-primary btn-sm">Remove</button>
+          </form>
+        </div>
+        {{end}}
+      </div>
+      {{end}}
+      {{if .ServiceMailEvents}}
+      <div class="billing-backup-list mt-3">
+        {{range .ServiceMailEvents}}
+        <article class="billing-backup-row">
+          <div>
+            <div class="billing-domain">{{.CodeKind}} · {{.Status}}</div>
+            <div class="text-muted small">{{.Recipient}} · {{.RecipientDomain}}</div>
+          </div>
+          <div class="billing-backup-meta">
+            <span>{{.SourceDomain}}</span>
+            <span>{{.SourceIP}}</span>
+            <span>{{.CreatedAt}}</span>
+            {{if .Error}}<span>{{.Error}}</span>{{end}}
+          </div>
+        </article>
+        {{end}}
+      </div>
+      {{end}}
+    </div>
+  </section>
+
   {{if .Backups}}
   <section class="card billing-card">
     <div class="card-body">
