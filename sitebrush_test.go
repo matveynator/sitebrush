@@ -38,6 +38,7 @@ import (
 	"sitebrush/pkg/crawler"
 	"sitebrush/pkg/demo"
 	"sitebrush/pkg/diskusage"
+	"sitebrush/pkg/mailout"
 	"sitebrush/pkg/sitebrushtemplate"
 )
 
@@ -150,6 +151,18 @@ func newTestApplication(t *testing.T) (*App, *sql.DB) {
 		t.Fatalf("migrate: %v", err)
 	}
 	return application, rawDB
+}
+
+func captureImmediateProfileEmail(t *testing.T, application *App) {
+	t.Helper()
+	application.sendEmail = func(ctx context.Context, message mailout.Message) error {
+		select {
+		case application.emailDelivery <- emailDeliveryJob{message: message}:
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
 }
 
 func TestMigrateWithSingleSQLiteConnectionRebuildsPagePasswordPrefixFiles(t *testing.T) {
@@ -3468,6 +3481,7 @@ func TestRevisionsPageShowsPreviewButtonForEditableUser(t *testing.T) {
 func TestProfilePageUpdatesAdminEmailAndPassword(t *testing.T) {
 	withEmailSPFAllowed(t)
 	application, rawDB := newTestApplication(t)
+	captureImmediateProfileEmail(t, application)
 	_, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "admin@example.com", "old")
 	if err != nil {
 		t.Fatalf("insert user: %v", err)
@@ -3484,20 +3498,52 @@ func TestProfilePageUpdatesAdminEmailAndPassword(t *testing.T) {
 	if response.Code != http.StatusOK {
 		t.Fatalf("status = %d, body=%q", response.Code, response.Body.String())
 	}
+	for _, expectedFragment := range []string{`name="password_confirmation_code"`, `maxlength="6"`, `class="profile-code-submit" type="submit" disabled`} {
+		if !strings.Contains(response.Body.String(), expectedFragment) {
+			t.Fatalf("profile password code form missing %q in %s", expectedFragment, response.Body.String())
+		}
+	}
+	select {
+	case mailJob := <-application.emailDelivery:
+		if mailJob.message.To != "admin@example.com" || !strings.Contains(mailJob.message.Body, "SiteBrush") {
+			t.Fatalf("unexpected password code email: %#v", mailJob.message)
+		}
+	default:
+		t.Fatal("profile update did not enqueue password code email")
+	}
+
+	var pendingToken, pendingCode string
+	if err := rawDB.QueryRow(`SELECT token,verification_code FROM email_confirmations WHERE domain=? AND action=? AND current_email=?`, "localhost", "profile_password", "admin@example.com").Scan(&pendingToken, &pendingCode); err != nil {
+		t.Fatalf("read password confirmation: %v", err)
+	}
+	if len(pendingCode) != 6 {
+		t.Fatalf("pending code = %q, want 6 digits", pendingCode)
+	}
+	codeForm := url.Values{}
+	codeForm.Set("password_confirmation_token", pendingToken)
+	codeForm.Set("password_confirmation_code", pendingCode)
+	codeRequest := httptest.NewRequest(http.MethodPost, "http://localhost:8080/?profile", strings.NewReader(codeForm.Encode()))
+	codeRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	codeRequest.AddCookie(newAdminSessionCookie(t, application, "admin@example.com"))
+	codeResponse := httptest.NewRecorder()
+	application.route(codeResponse, codeRequest)
+	if codeResponse.Code != http.StatusOK {
+		t.Fatalf("code status = %d, body=%q", codeResponse.Code, codeResponse.Body.String())
+	}
 	select {
 	case mailJob := <-application.emailDelivery:
 		if mailJob.message.To != "new@example.com" || !strings.Contains(mailJob.message.Body, "email_confirm=") {
-			t.Fatalf("unexpected confirmation email: %#v", mailJob.message)
+			t.Fatalf("unexpected email confirmation: %#v", mailJob.message)
 		}
 	default:
-		t.Fatal("profile update did not enqueue confirmation email")
+		t.Fatal("profile update did not enqueue email confirmation")
 	}
 
-	var pendingToken string
-	if err := rawDB.QueryRow(`SELECT token FROM email_confirmations WHERE domain=? AND action=? AND email=?`, "localhost", "profile", "new@example.com").Scan(&pendingToken); err != nil {
-		t.Fatalf("read confirmation token: %v", err)
+	var emailToken string
+	if err := rawDB.QueryRow(`SELECT token FROM email_confirmations WHERE domain=? AND action=? AND email=?`, "localhost", "profile", "new@example.com").Scan(&emailToken); err != nil {
+		t.Fatalf("read email confirmation token: %v", err)
 	}
-	confirmRequest := httptest.NewRequest(http.MethodGet, "http://localhost:8080/?email_confirm="+url.QueryEscape(pendingToken), nil)
+	confirmRequest := httptest.NewRequest(http.MethodGet, "http://localhost:8080/?email_confirm="+url.QueryEscape(emailToken), nil)
 	confirmResponse := httptest.NewRecorder()
 	application.route(confirmResponse, confirmRequest)
 	if confirmResponse.Code != http.StatusFound {
@@ -3519,6 +3565,161 @@ func TestProfilePageUpdatesAdminEmailAndPassword(t *testing.T) {
 	authenticatedRequest.AddCookie(profileCookies[0])
 	if !application.isAdminRequest(authenticatedRequest) {
 		t.Fatal("refreshed profile session is not authenticated")
+	}
+}
+
+func TestProfilePasswordCodeShowsSMTPFailureDetails(t *testing.T) {
+	withEmailSPFAllowed(t)
+	application, rawDB := newTestApplication(t)
+	application.sendEmail = func(context.Context, mailout.Message) error {
+		return errors.New("alt4.gmail-smtp-in.l.google.com close data: 550 5.7.26 Your email has been blocked because the sender is unauthenticated. DKIM = did not pass SPF [localhost] with ip: [148.251.254.62] = did not pass")
+	}
+	if _, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "admin@example.com", "old"); err != nil {
+		t.Fatalf("insert user: %v", err)
+	}
+	form := url.Values{}
+	form.Set("email", "admin@example.com")
+	form.Set("password", "new-secret")
+	form.Set("password_confirm", "new-secret")
+	request := httptest.NewRequest(http.MethodPost, "http://localhost:8080/?profile", strings.NewReader(form.Encode()))
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	request.AddCookie(newAdminSessionCookie(t, application, "admin@example.com"))
+	response := httptest.NewRecorder()
+	application.route(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%q", response.Code, response.Body.String())
+	}
+	body := response.Body.String()
+	for _, expectedFragment := range []string{`alert-danger`, `Письмо не отправлено.`, `data-profile-delivery-modal`, `Код SMTP: 550`, `profile-delivery-dns`, `v=spf1 a mx ip4:203.0.113.10 ~all`, `SPF`, `DKIM`} {
+		if !strings.Contains(body, expectedFragment) {
+			t.Fatalf("SMTP failure page missing %q in %s", expectedFragment, body)
+		}
+	}
+	if strings.Contains(body, `<input class="profile-code-input"`) {
+		t.Fatalf("SMTP failure should not show code form: %s", body)
+	}
+	var pendingCount int
+	if err := rawDB.QueryRow(`SELECT COUNT(1) FROM email_confirmations WHERE domain=? AND action=? AND current_email=?`, "localhost", "profile_password", "admin@example.com").Scan(&pendingCount); err != nil {
+		t.Fatalf("count password confirmations: %v", err)
+	}
+	if pendingCount != 0 {
+		t.Fatalf("pending password confirmations after SMTP failure = %d, want 0", pendingCount)
+	}
+}
+
+func TestProfilePasswordCodeAttemptsEscalateToBlock(t *testing.T) {
+	withEmailSPFAllowed(t)
+	application, rawDB := newTestApplication(t)
+	captureImmediateProfileEmail(t, application)
+	_, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "admin@example.com", "old")
+	if err != nil {
+		t.Fatalf("insert user: %v", err)
+	}
+	form := url.Values{}
+	form.Set("email", "admin@example.com")
+	form.Set("password", "new-secret")
+	form.Set("password_confirm", "new-secret")
+	request := httptest.NewRequest(http.MethodPost, "http://localhost:8080/?profile", strings.NewReader(form.Encode()))
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	request.AddCookie(newAdminSessionCookie(t, application, "admin@example.com"))
+	response := httptest.NewRecorder()
+	application.route(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%q", response.Code, response.Body.String())
+	}
+	select {
+	case <-application.emailDelivery:
+	case <-time.After(time.Second):
+		t.Fatal("profile update did not enqueue password code email")
+	}
+
+	var pendingToken, pendingCode string
+	if err := rawDB.QueryRow(`SELECT token,verification_code FROM email_confirmations WHERE domain=? AND action=? AND current_email=?`, "localhost", "profile_password", "admin@example.com").Scan(&pendingToken, &pendingCode); err != nil {
+		t.Fatalf("read password confirmation: %v", err)
+	}
+	wrongCode := "000000"
+	if pendingCode == wrongCode {
+		wrongCode = "111111"
+	}
+	for attemptIndex := 1; attemptIndex <= 4; attemptIndex++ {
+		codeForm := url.Values{}
+		codeForm.Set("password_confirmation_token", pendingToken)
+		codeForm.Set("password_confirmation_code", wrongCode)
+		codeRequest := httptest.NewRequest(http.MethodPost, "http://localhost:8080/?profile", strings.NewReader(codeForm.Encode()))
+		codeRequest.RemoteAddr = "198.51.100.77:1234"
+		codeRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		codeRequest.AddCookie(newAdminSessionCookie(t, application, "admin@example.com"))
+		codeResponse := httptest.NewRecorder()
+		application.route(codeResponse, codeRequest)
+		expectedStatus := http.StatusUnauthorized
+		if attemptIndex == 4 {
+			expectedStatus = http.StatusTooManyRequests
+		}
+		if codeResponse.Code != expectedStatus {
+			t.Fatalf("attempt %d status = %d, want %d, body=%q", attemptIndex, codeResponse.Code, expectedStatus, codeResponse.Body.String())
+		}
+		if attemptIndex == 4 {
+			if codeResponse.Header().Get("Retry-After") == "" {
+				t.Fatal("blocked profile password code response did not set Retry-After")
+			}
+			body := codeResponse.Body.String()
+			if !strings.Contains(body, `id="SiteBrushLoginCountdown"`) {
+				t.Fatalf("blocked profile password code page missing countdown: %s", body)
+			}
+			if strings.Contains(body, `<input class="profile-code-input"`) {
+				t.Fatalf("blocked profile password code page should hide code field: %s", body)
+			}
+		}
+	}
+	var password string
+	if err := rawDB.QueryRow(`SELECT password FROM users WHERE domain=? AND email=?`, "localhost", "admin@example.com").Scan(&password); err != nil {
+		t.Fatalf("read password: %v", err)
+	}
+	if password != "old" {
+		t.Fatalf("password changed after failed code attempts: %q", password)
+	}
+}
+
+func TestProfilePasswordCodeResendClearsFailedCodeAttempts(t *testing.T) {
+	withEmailSPFAllowed(t)
+	application, rawDB := newTestApplication(t)
+	captureImmediateProfileEmail(t, application)
+	_, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "admin@example.com", "old")
+	if err != nil {
+		t.Fatalf("insert user: %v", err)
+	}
+	_, err = rawDB.Exec(`INSERT INTO auth_ip_failures(domain,client_ip,failure_count,blocked_until,hard_locked,last_failed_at,last_attempt_at) VALUES(?,?,?,?,?,?,?)`,
+		profilePasswordFailureDomain("localhost", "admin@example.com"), "198.51.100.88", 4, time.Now().UTC().Add(time.Minute).Format(time.RFC3339), 0, time.Now().Format(time.RFC3339), time.Now().Format(time.RFC3339))
+	if err != nil {
+		t.Fatalf("seed profile password failures: %v", err)
+	}
+	application.storeAuthIPFailureState(profilePasswordFailureDomain("localhost", "admin@example.com"), "198.51.100.88", authIPFailure{FailureCount: 4, BlockedUntil: time.Now().UTC().Add(time.Minute).Format(time.RFC3339)})
+
+	form := url.Values{}
+	form.Set("email", "admin@example.com")
+	form.Set("password", "new-secret")
+	form.Set("password_confirm", "new-secret")
+	request := httptest.NewRequest(http.MethodPost, "http://localhost:8080/?profile", strings.NewReader(form.Encode()))
+	request.RemoteAddr = "198.51.100.88:1234"
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	request.AddCookie(newAdminSessionCookie(t, application, "admin@example.com"))
+	response := httptest.NewRecorder()
+	application.route(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body=%q", response.Code, http.StatusOK, response.Body.String())
+	}
+	if strings.Contains(response.Body.String(), "Too many failed code attempts") {
+		t.Fatalf("resend should not show previous failed-code error: %s", response.Body.String())
+	}
+	select {
+	case <-application.emailDelivery:
+	case <-time.After(time.Second):
+		t.Fatal("profile password resend did not enqueue code email")
+	}
+	var failureCount int
+	_ = rawDB.QueryRow(`SELECT COUNT(1) FROM auth_ip_failures WHERE domain=? AND client_ip=?`, profilePasswordFailureDomain("localhost", "admin@example.com"), "198.51.100.88").Scan(&failureCount)
+	if failureCount != 0 {
+		t.Fatalf("profile password failure rows after resend = %d, want 0", failureCount)
 	}
 }
 

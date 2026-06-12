@@ -13,13 +13,81 @@
   <link href="/p/static/technical_pages.css" rel="stylesheet">
 </head>
 <body class="technical-page">
-<main class="container">
+<main class="container profile-page">
   <div class="page-header">
     <h1 class="section-heading"><img src="/p/static/profile.png" class="section-icon" alt=""><a href="/">{{.Domain}}</a> <small class="text-muted">| {{.Title}}</small></h1>
     <a class="btn btn-outline-secondary" href="/">{{index .T "back_to_uri"}}</a>
   </div>
-  {{if .Status}}<p class="hint">{{.Status}}</p>{{end}}
-  <form class="profile-form" method="post" action="?profile">
+  {{if .Status}}<div class="alert profile-alert alert-{{if .StatusClass}}{{.StatusClass}}{{else}}warning{{end}}" role="alert">
+    <span>{{.Status}}</span>
+    {{if .EmailDelivery.Show}}<button class="profile-delivery-link" type="button" data-profile-delivery-open>{{.EmailDelivery.LinkText}}</button>{{end}}
+  </div>{{end}}
+  <div class="alert profile-alert profile-send-progress alert-info" role="status" aria-live="polite" hidden
+    data-profile-send-progress
+    data-timeout-seconds="45"
+    data-title="{{.EmailSendProgressTitle}}"
+    data-step-one="{{.EmailSendProgressStepOne}}"
+    data-step-two="{{.EmailSendProgressStepTwo}}"
+    data-step-three="{{.EmailSendProgressStepThree}}"
+    data-step-four="{{.EmailSendProgressStepFour}}"
+    data-step-five="{{.EmailSendProgressStepFive}}"
+    data-timeout-text="{{.EmailSendProgressTimeout}}"
+    data-countdown-prefix="{{.EmailSendProgressPrefix}}">
+    <div class="profile-send-progress-copy">
+      <strong data-profile-send-title>{{.EmailSendProgressTitle}}</strong>
+      <span data-profile-send-step>{{.EmailSendProgressStepOne}}</span>
+    </div>
+    <div class="profile-send-countdown"><span data-profile-send-countdown>00:45</span></div>
+  </div>
+  {{if .EmailDelivery.Show}}
+  <div class="profile-delivery-modal" data-profile-delivery-modal aria-hidden="true">
+    <div class="profile-delivery-backdrop" data-profile-delivery-close></div>
+    <section class="profile-delivery-dialog profile-delivery-dialog-{{.EmailDelivery.Kind}}" role="dialog" aria-modal="true" aria-labelledby="ProfileDeliveryTitle" tabindex="-1">
+      <div class="profile-delivery-header">
+        <div>
+          <div class="profile-delivery-kicker">{{.EmailDelivery.CodeLabel}}: {{.EmailDelivery.Code}}</div>
+          <h2 id="ProfileDeliveryTitle">{{.EmailDelivery.Title}}</h2>
+        </div>
+        <button class="profile-delivery-close" type="button" data-profile-delivery-close aria-label="{{.EmailDelivery.CloseLabel}}">&times;</button>
+      </div>
+      <p class="profile-delivery-summary">{{.EmailDelivery.Summary}}</p>
+      <div class="profile-delivery-grid">
+        <div class="profile-delivery-panel">
+          <h3>{{.EmailDelivery.FixTitle}}</h3>
+          <p>{{.EmailDelivery.FixText}}</p>
+        </div>
+        <div class="profile-delivery-panel">
+          <h3>{{.EmailDelivery.CodeLabel}}</h3>
+          <p>{{.EmailDelivery.Description}}</p>
+        </div>
+      </div>
+      {{if .EmailDelivery.DNSHelp.Show}}
+      <div class="profile-delivery-dns">
+        <h3>{{.EmailDelivery.DNSHelp.Title}}</h3>
+        <p>{{.EmailDelivery.DNSHelp.Intro}}</p>
+        <div class="profile-delivery-dns-record">
+          <span class="profile-delivery-dns-type">{{.EmailDelivery.DNSHelp.Type}}</span>
+          <span class="profile-delivery-dns-field"><span>{{.EmailDelivery.DNSHelp.HostLabel}}</span><code>{{.EmailDelivery.DNSHelp.Host}}</code></span>
+          <span class="profile-delivery-dns-field"><span>{{.EmailDelivery.DNSHelp.ValueLabel}}</span><code>{{.EmailDelivery.DNSHelp.Value}}</code></span>
+        </div>
+      </div>
+      {{end}}
+      <pre class="profile-delivery-log"><code>{{.EmailDelivery.Log}}</code></pre>
+    </section>
+  </div>
+  {{end}}
+  {{if .ShowPasswordCodeForm}}
+  <form class="profile-form profile-code-form" method="post" action="?profile">
+    <input type="hidden" name="password_confirmation_token" value="{{.PasswordConfirmationToken}}">
+    <label>
+      {{.PasswordCodeLabel}}
+      <input class="profile-code-input" type="text" name="password_confirmation_code" inputmode="numeric" pattern="[0-9]{6}" autocomplete="one-time-code" maxlength="6" required>
+    </label>
+    <p class="hint">{{.PasswordCodeHelp}}</p>
+    <div><button class="profile-code-submit" type="submit" disabled>{{.PasswordCodeSubmit}}</button></div>
+  </form>
+  {{else if .ShowPasswordForm}}
+  <form class="profile-form" method="post" action="?profile" data-profile-form>
     <label>
       {{.EmailLabel}}
       <input type="email" name="email" value="{{.Email}}" autocomplete="email" required>
@@ -34,6 +102,217 @@
     </label>
     <div><button type="submit">{{.SaveLabel}}</button></div>
   </form>
+  {{else}}
+  <div class="card card-body profile-blocked-card">
+    {{if .IsHardLocked}}
+    <p class="mb-3">{{.RecoveryRequiredText}}</p>
+    <div><a class="btn btn-primary" href="?recover">{{index .T "login_forgot"}}</a></div>
+    {{else}}
+    <div id="SiteBrushLoginCountdown" data-blocked-until-unix="{{.BlockedUntilUnix}}" data-blocked-until-iso="{{.BlockedUntilISO}}" data-ready-text="{{.TryAgainNowText}}">
+      <div class="text-muted small mb-1">{{.CountdownLabel}}</div>
+      <div class="profile-countdown-value" data-countdown-text>00:00</div>
+      <div class="text-muted small mb-3">{{.RetryAtLabel}} <span data-countdown-at></span></div>
+    </div>
+    {{end}}
+  </div>
+  {{end}}
 </main>
+<script>
+(function prepareProfileCodeForm() {
+  var codeForm = document.querySelector('.profile-code-form');
+  if (!codeForm) {
+    return;
+  }
+
+  var codeInput = codeForm.querySelector('input[name="password_confirmation_code"]');
+  var submitButton = codeForm.querySelector('.profile-code-submit');
+  if (!codeInput || !submitButton) {
+    return;
+  }
+
+  function normalizeCodeInput() {
+    var normalizedValue = String(codeInput.value || '').replace(/\D/g, '').slice(0, 6);
+    if (codeInput.value !== normalizedValue) {
+      codeInput.value = normalizedValue;
+    }
+    submitButton.disabled = normalizedValue.length !== 6;
+  }
+
+  codeInput.addEventListener('input', normalizeCodeInput);
+  codeInput.addEventListener('paste', function normalizePastedCode() {
+    window.setTimeout(normalizeCodeInput, 0);
+  });
+  codeForm.addEventListener('submit', function preventShortCodeSubmit(event) {
+    normalizeCodeInput();
+    if (codeInput.value.length !== 6) {
+      event.preventDefault();
+      codeInput.focus();
+    }
+  });
+  normalizeCodeInput();
+})();
+
+(function prepareProfileSubmitProgress() {
+  var profileForm = document.querySelector('[data-profile-form]');
+  var progressElement = document.querySelector('[data-profile-send-progress]');
+  if (!profileForm || !progressElement) {
+    return;
+  }
+
+  var passwordInput = profileForm.querySelector('input[name="password"]');
+  var submitButton = profileForm.querySelector('button[type="submit"]');
+  var titleElement = progressElement.querySelector('[data-profile-send-title]');
+  var stepElement = progressElement.querySelector('[data-profile-send-step]');
+  var countdownElement = progressElement.querySelector('[data-profile-send-countdown]');
+  var timeoutSeconds = Number(progressElement.getAttribute('data-timeout-seconds')) || 45;
+  var countdownPrefix = progressElement.getAttribute('data-countdown-prefix') || '';
+  var timeoutText = progressElement.getAttribute('data-timeout-text') || '';
+  var steps = [
+    { after: 0, text: progressElement.getAttribute('data-step-one') || '' },
+    { after: 4, text: progressElement.getAttribute('data-step-two') || '' },
+    { after: 10, text: progressElement.getAttribute('data-step-three') || '' },
+    { after: 18, text: progressElement.getAttribute('data-step-four') || '' },
+    { after: 28, text: progressElement.getAttribute('data-step-five') || '' }
+  ];
+
+  function formatSeconds(totalSeconds) {
+    var safeSeconds = Math.max(0, totalSeconds);
+    var minutes = Math.floor(safeSeconds / 60);
+    var seconds = safeSeconds % 60;
+    return String(minutes).padStart(2, '0') + ':' + String(seconds).padStart(2, '0');
+  }
+
+  function currentStep(elapsedSeconds) {
+    var activeStep = steps[0].text;
+    steps.forEach(function selectStep(step) {
+      if (elapsedSeconds >= step.after && step.text) {
+        activeStep = step.text;
+      }
+    });
+    return activeStep;
+  }
+
+  profileForm.addEventListener('submit', function showProfileSubmitProgress() {
+    if (!passwordInput || String(passwordInput.value || '').trim() === '') {
+      return;
+    }
+    var startedAt = Date.now();
+    progressElement.hidden = false;
+    if (submitButton) {
+      submitButton.disabled = true;
+    }
+    if (titleElement) {
+      titleElement.textContent = progressElement.getAttribute('data-title') || titleElement.textContent;
+    }
+
+    function renderProgress() {
+      var elapsedSeconds = Math.floor((Date.now() - startedAt) / 1000);
+      var secondsLeft = timeoutSeconds - elapsedSeconds;
+      if (stepElement) {
+        stepElement.textContent = secondsLeft >= 0 ? currentStep(elapsedSeconds) : timeoutText;
+      }
+      if (countdownElement) {
+        countdownElement.textContent = countdownPrefix + ' ' + formatSeconds(secondsLeft);
+      }
+      window.setTimeout(renderProgress, 1000);
+    }
+
+    renderProgress();
+  });
+})();
+
+(function startProfileBlockCountdown() {
+  var countdownRoot = document.getElementById('SiteBrushLoginCountdown');
+  if (!countdownRoot) {
+    return;
+  }
+
+  var blockedUntilUnix = Number(countdownRoot.getAttribute('data-blocked-until-unix'));
+  if (!Number.isFinite(blockedUntilUnix) || blockedUntilUnix <= 0) {
+    return;
+  }
+
+  var countdownTextElement = countdownRoot.querySelector('[data-countdown-text]');
+  var countdownAtElement = countdownRoot.querySelector('[data-countdown-at]');
+  var readyText = countdownRoot.getAttribute('data-ready-text') || '00:00';
+  var blockedUntilDate = new Date(blockedUntilUnix * 1000);
+
+  if (countdownAtElement) {
+    countdownAtElement.textContent = blockedUntilDate.toLocaleString(document.documentElement.lang || undefined);
+  }
+
+  function formatCountdown(totalSeconds) {
+    var hours = Math.floor(totalSeconds / 3600);
+    var minutes = Math.floor((totalSeconds % 3600) / 60);
+    var seconds = totalSeconds % 60;
+    var parts = [];
+
+    if (hours > 0) {
+      parts.push(String(hours).padStart(2, '0'));
+    }
+    parts.push(String(minutes).padStart(2, '0'));
+    parts.push(String(seconds).padStart(2, '0'));
+    return parts.join(':');
+  }
+
+  function renderCountdown() {
+    var secondsLeft = Math.ceil((blockedUntilDate.getTime() - Date.now()) / 1000);
+    if (secondsLeft <= 0) {
+      if (countdownTextElement) {
+        countdownTextElement.textContent = readyText;
+      }
+      window.setTimeout(function reloadProfilePage() {
+        window.location.reload();
+      }, 1000);
+      return;
+    }
+    if (countdownTextElement) {
+      countdownTextElement.textContent = formatCountdown(secondsLeft);
+    }
+    window.setTimeout(renderCountdown, 1000);
+  }
+
+  renderCountdown();
+})();
+
+(function prepareProfileDeliveryModal() {
+  var modalElement = document.querySelector('[data-profile-delivery-modal]');
+  var openButton = document.querySelector('[data-profile-delivery-open]');
+  if (!modalElement || !openButton) {
+    return;
+  }
+
+  var dialogElement = modalElement.querySelector('[role="dialog"]');
+  var closeElements = modalElement.querySelectorAll('[data-profile-delivery-close]');
+  var previousFocus = null;
+
+  function openModal() {
+    previousFocus = document.activeElement;
+    modalElement.setAttribute('aria-hidden', 'false');
+    document.body.classList.add('profile-delivery-modal-open');
+    if (dialogElement) {
+      dialogElement.focus();
+    }
+  }
+
+  function closeModal() {
+    modalElement.setAttribute('aria-hidden', 'true');
+    document.body.classList.remove('profile-delivery-modal-open');
+    if (previousFocus && typeof previousFocus.focus === 'function') {
+      previousFocus.focus();
+    }
+  }
+
+  openButton.addEventListener('click', openModal);
+  Array.prototype.forEach.call(closeElements, function bindClose(closeElement) {
+    closeElement.addEventListener('click', closeModal);
+  });
+  document.addEventListener('keydown', function closeOnEscape(event) {
+    if (event.key === 'Escape' && modalElement.getAttribute('aria-hidden') === 'false') {
+      closeModal();
+    }
+  });
+})();
+</script>
 </body>
 </html>

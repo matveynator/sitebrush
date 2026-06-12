@@ -25,6 +25,7 @@ import (
 	"io/fs"
 	"log"
 	"math"
+	"math/big"
 	"mime"
 	"net"
 	"net/http"
@@ -92,6 +93,7 @@ const guestStaticHTMLCacheQueueSize = 4096
 const authIPFailureCacheQueueSize = 4096
 const emailDeliveryQueueSize = 256
 const emailConfirmationTTL = 24 * time.Hour
+const profilePasswordCodeTTL = 15 * time.Minute
 const sitebrushHTTPReadTimeout = 10 * time.Second
 const sitebrushHTTPWriteTimeout = 0
 const sitebrushHTTPIdleTimeout = 65 * time.Second
@@ -132,6 +134,39 @@ type emailSender func(context.Context, mailout.Message) error
 
 type emailDeliveryJob struct {
 	message mailout.Message
+}
+
+type profileEmailDeliveryView struct {
+	Show        bool
+	Kind        string
+	LinkText    string
+	Title       string
+	Summary     string
+	CodeLabel   string
+	Code        string
+	Description string
+	FixTitle    string
+	FixText     string
+	Log         string
+	CloseLabel  string
+	DNSHelp     profileEmailDeliveryDNSHelp
+}
+
+type profileEmailDeliveryDNSHelp struct {
+	Show       bool
+	Title      string
+	Intro      string
+	TypeLabel  string
+	HostLabel  string
+	ValueLabel string
+	Type       string
+	Host       string
+	Value      string
+}
+
+type emailDeliveryResult struct {
+	Message mailout.Message
+	Err     error
 }
 
 type emailConfirmationMemoryRequest struct {
@@ -1690,6 +1725,7 @@ type EmailConfirmation struct {
 	Action       string
 	Email        string
 	Password     string
+	Code         string
 	CurrentEmail string
 	ReturnPath   string
 	LanguageCode string
@@ -4874,7 +4910,7 @@ func (a *App) migrate(ctx context.Context) error {
 		`CREATE TABLE IF NOT EXISTS domain_backup_tokens(domain TEXT PRIMARY KEY,token TEXT,updated_at TEXT);`,
 		`CREATE TABLE IF NOT EXISTS file_access_rules(domain TEXT,file_name TEXT,access_mode TEXT,token TEXT,expires_at TEXT,single_use_left INTEGER DEFAULT 0,token_use_count INTEGER DEFAULT 0,PRIMARY KEY(domain,file_name));`,
 		`CREATE TABLE IF NOT EXISTS file_metadata(domain TEXT,file_name TEXT,page_path TEXT,size INTEGER,mime_type TEXT,created_at TEXT,updated_at TEXT,source TEXT,download_count INTEGER DEFAULT 0,PRIMARY KEY(domain,file_name));`,
-		`CREATE TABLE IF NOT EXISTS email_confirmations(token TEXT PRIMARY KEY,domain TEXT,action TEXT,email TEXT,password TEXT,current_email TEXT,return_path TEXT,language_code TEXT,created_at TEXT,expires_at TEXT);`,
+		`CREATE TABLE IF NOT EXISTS email_confirmations(token TEXT PRIMARY KEY,domain TEXT,action TEXT,email TEXT,password TEXT,verification_code TEXT,current_email TEXT,return_path TEXT,language_code TEXT,created_at TEXT,expires_at TEXT);`,
 		`CREATE TABLE IF NOT EXISTS analytics_events(id INTEGER PRIMARY KEY AUTOINCREMENT,domain TEXT,path TEXT,query TEXT,method TEXT,status_code INTEGER,content_source TEXT,occurred_at TEXT,duration_ms INTEGER,client_ip TEXT,remote_addr TEXT,user_agent TEXT,referer TEXT,accept_language TEXT,geo_country_code TEXT,geo_city TEXT,geo_latitude REAL DEFAULT 0,geo_longitude REAL DEFAULT 0,geo_source TEXT,visitor_id TEXT,is_admin INTEGER DEFAULT 0,is_asset INTEGER DEFAULT 0,is_controller INTEGER DEFAULT 0);`,
 		`CREATE INDEX IF NOT EXISTS idx_analytics_events_domain_time ON analytics_events(domain,occurred_at);`,
 		`CREATE INDEX IF NOT EXISTS idx_analytics_events_visitor ON analytics_events(domain,visitor_id,occurred_at);`,
@@ -4978,6 +5014,7 @@ func requiredSiteDatabaseColumns() []siteDatabaseColumnRequirement {
 		{tableName: "email_confirmations", columnName: "action", definition: "TEXT"},
 		{tableName: "email_confirmations", columnName: "email", definition: "TEXT"},
 		{tableName: "email_confirmations", columnName: "password", definition: "TEXT"},
+		{tableName: "email_confirmations", columnName: "verification_code", definition: "TEXT"},
 		{tableName: "email_confirmations", columnName: "current_email", definition: "TEXT"},
 		{tableName: "email_confirmations", columnName: "return_path", definition: "TEXT"},
 		{tableName: "email_confirmations", columnName: "language_code", definition: "TEXT"},
@@ -10775,17 +10812,31 @@ func (a *App) profilePage(w http.ResponseWriter, r *http.Request) {
 	}
 	translations := translationsForRequest(r)
 	status := ""
+	statusClass := ""
+	showPasswordCodeForm := false
+	passwordConfirmationToken := ""
+	pendingProfileEmail := currentEmail
+	emailDeliveryView := profileEmailDeliveryView{}
 	if r.Method == http.MethodPost {
+		passwordConfirmationToken = strings.TrimSpace(r.FormValue("password_confirmation_token"))
+		passwordConfirmationCode := strings.TrimSpace(r.FormValue("password_confirmation_code"))
 		nextEmail := strings.TrimSpace(r.FormValue("email"))
 		nextPassword := strings.TrimSpace(r.FormValue("password"))
 		confirmPassword := strings.TrimSpace(r.FormValue("password_confirm"))
+		if passwordConfirmationToken != "" || passwordConfirmationCode != "" {
+			a.handleProfilePasswordCode(w, r, currentEmail, passwordConfirmationToken, passwordConfirmationCode)
+			return
+		}
 		switch {
 		case nextEmail == "":
 			status = translationOrDefault(translations, "profile_status_email_required", "Email is required.")
+			statusClass = "warning"
 		case nextPassword != "" && nextPassword != confirmPassword:
 			status = translationOrDefault(translations, "profile_status_password_mismatch", "Password confirmation does not match.")
+			statusClass = "warning"
 		case nextEmail == currentEmail && nextPassword == "":
 			status = translationOrDefault(translations, "profile_status_updated", "Account updated.")
+			statusClass = "success"
 		default:
 			domain := a.siteDomain(r.Context(), r)
 			if nextEmail != currentEmail {
@@ -10793,24 +10844,76 @@ func (a *App) profilePage(w http.ResponseWriter, r *http.Request) {
 				_ = a.db.QueryRowContext(r.Context(), `SELECT COUNT(1) FROM users WHERE domain=? AND email=?`, domain, nextEmail).Scan(&existingCount)
 				if existingCount > 0 {
 					status = translationOrDefault(translations, "email_confirmation_status_email_exists", "This email address is already used.")
+					statusClass = "danger"
 					break
 				}
 			}
+			if nextPassword != "" {
+				token, deliveryResult, dnsHelp, err := a.createAndSendProfilePasswordCode(r, domain, currentEmail, nextEmail, nextPassword)
+				if err != nil {
+					statusClass = "danger"
+					emailDeliveryView = profileEmailDeliveryViewForResult(translations, deliveryResult, dnsHelp)
+					if emailDeliveryView.Show {
+						status = translationOrDefault(translations, "profile_password_code_status_not_sent", "Email was not sent.")
+					} else {
+						status = err.Error()
+					}
+					break
+				}
+				a.clearFailedLoginAttempts(r.Context(), profilePasswordFailureDomain(domain, currentEmail), clientIPAddress(r))
+				status = translationOrDefault(translations, "profile_password_code_status_sent", "The code email was sent and accepted by the recipient mail server.")
+				statusClass = "success"
+				emailDeliveryView = profileEmailDeliveryViewForResult(translations, deliveryResult, profileEmailDeliveryDNSHelp{})
+				showPasswordCodeForm = true
+				passwordConfirmationToken = token
+				pendingProfileEmail = nextEmail
+				break
+			}
 			if err := a.createAndSendEmailConfirmation(r, "profile", domain, currentEmail, nextEmail, nextPassword, requestedReturnPath(r)); err != nil {
 				status = err.Error()
+				statusClass = "danger"
 				break
 			}
 			status = translationOrDefault(translations, "email_confirmation_status_sent", "A confirmation link has been sent to the email address.")
+			statusClass = "info"
 		}
 	}
+	a.renderProfilePage(w, r, pendingProfileEmail, status, statusClass, showPasswordCodeForm, passwordConfirmationToken, time.Time{}, false, emailDeliveryView)
+}
+
+func (a *App) renderProfilePage(w http.ResponseWriter, r *http.Request, email, status, statusClass string, showPasswordCodeForm bool, passwordConfirmationToken string, blockedUntil time.Time, hardLocked bool, emailDeliveryView profileEmailDeliveryView) {
+	translations := translationsForRequest(r)
 	a.render(w, r, "profile.html", map[string]any{
-		"Email":                currentEmail,
-		"Status":               status,
-		"Title":                translationOrDefault(translations, "profile_title", "Account"),
-		"EmailLabel":           translationOrDefault(translations, "profile_email", "Email"),
-		"PasswordLabel":        translationOrDefault(translations, "profile_new_password", "New password"),
-		"PasswordConfirmLabel": translationOrDefault(translations, "profile_confirm_password", "Confirm password"),
-		"SaveLabel":            translationOrDefault(translations, "profile_save", "Save"),
+		"Email":                      strings.TrimSpace(email),
+		"Status":                     status,
+		"StatusClass":                statusClass,
+		"ShowPasswordCodeForm":       showPasswordCodeForm,
+		"ShowPasswordForm":           !showPasswordCodeForm && !hardLocked && blockedUntil.IsZero(),
+		"PasswordConfirmationToken":  passwordConfirmationToken,
+		"BlockedUntilUnix":           blockedUntil.Unix(),
+		"BlockedUntilISO":            blockedUntil.UTC().Format(time.RFC3339),
+		"IsHardLocked":               hardLocked,
+		"EmailDelivery":              emailDeliveryView,
+		"Title":                      translationOrDefault(translations, "profile_title", "Account"),
+		"EmailLabel":                 translationOrDefault(translations, "profile_email", "Email"),
+		"PasswordLabel":              translationOrDefault(translations, "profile_new_password", "New password"),
+		"PasswordConfirmLabel":       translationOrDefault(translations, "profile_confirm_password", "Confirm password"),
+		"SaveLabel":                  translationOrDefault(translations, "profile_save", "Save"),
+		"PasswordCodeLabel":          translationOrDefault(translations, "profile_password_code", "6-digit code"),
+		"PasswordCodeHelp":           translationOrDefault(translations, "profile_password_code_help", "Enter the code sent to your current email address to change the password."),
+		"PasswordCodeSubmit":         translationOrDefault(translations, "profile_password_code_submit", "Confirm password change"),
+		"CountdownLabel":             translationOrDefault(translations, "login_retry_in", "You can try again in:"),
+		"RetryAtLabel":               translationOrDefault(translations, "login_retry_at", "You can try again at:"),
+		"TryAgainNowText":            translationOrDefault(translations, "login_try_again_now", "You can try again now."),
+		"RecoveryRequiredText":       translationOrDefault(translations, "login_recovery_required", "Use account recovery to continue."),
+		"EmailSendProgressTitle":     translationOrDefault(translations, "profile_email_send_progress_title", "Sending email and waiting for SMTP confirmation..."),
+		"EmailSendProgressStepOne":   translationOrDefault(translations, "profile_email_send_progress_step_one", "Preparing the confirmation code"),
+		"EmailSendProgressStepTwo":   translationOrDefault(translations, "profile_email_send_progress_step_two", "Looking up the recipient mail server"),
+		"EmailSendProgressStepThree": translationOrDefault(translations, "profile_email_send_progress_step_three", "Opening the SMTP connection"),
+		"EmailSendProgressStepFour":  translationOrDefault(translations, "profile_email_send_progress_step_four", "Sending the message body"),
+		"EmailSendProgressStepFive":  translationOrDefault(translations, "profile_email_send_progress_step_five", "Waiting for the recipient server response"),
+		"EmailSendProgressTimeout":   translationOrDefault(translations, "profile_email_send_progress_timeout", "Still waiting for the mail server. The final result will appear here as soon as it responds."),
+		"EmailSendProgressPrefix":    translationOrDefault(translations, "profile_email_send_progress_prefix", "SMTP timeout countdown:"),
 	})
 }
 
@@ -10857,6 +10960,146 @@ func (a *App) recoverPage(w http.ResponseWriter, r *http.Request) {
 	}
 	a.clearFailedLoginAttempts(r.Context(), domain, clientIPAddress(r))
 	http.Redirect(w, r, requestedReturnPath(r), http.StatusFound)
+}
+
+func (a *App) createAndSendProfilePasswordCode(r *http.Request, domain, currentEmail, nextEmail, password string) (string, emailDeliveryResult, profileEmailDeliveryDNSHelp, error) {
+	translations := translationsForRequest(r)
+	currentEmail = strings.TrimSpace(currentEmail)
+	nextEmail = strings.TrimSpace(nextEmail)
+	if nextEmail == "" {
+		nextEmail = currentEmail
+	}
+	if _, err := stdmail.ParseAddress(nextEmail); err != nil {
+		return "", emailDeliveryResult{}, profileEmailDeliveryDNSHelp{}, fmt.Errorf("%s", translationOrDefault(translations, "email_confirmation_status_invalid_email", "Email address is invalid."))
+	}
+	languageCode := preferredLanguageCode(r.Header.Get("Accept-Language"))
+	fromAddress := a.emailFromAddress(domain)
+	dnsHelp := a.profileEmailDeliveryDNSHelp(r.Context(), translations, domain, fromAddress)
+	if dnsSetup, dnsSetupRequired := a.emailDNSSetupView(r.Context(), domain, fromAddress, languageCode); dnsSetupRequired {
+		return "", emailDeliveryResult{}, dnsHelp, errors.New(dnsSetup.PlainText)
+	}
+	code := randomSixDigitCode()
+	token := randomAccessToken()
+	now := time.Now().UTC()
+	expiresAt := now.Add(profilePasswordCodeTTL)
+	_, _ = a.db.ExecContext(r.Context(), `DELETE FROM email_confirmations WHERE expires_at<>'' AND expires_at<?`, now.Format(time.RFC3339))
+	_, _ = a.db.ExecContext(r.Context(), `DELETE FROM email_confirmations WHERE domain=? AND action='profile_password' AND current_email=?`, domain, currentEmail)
+	_, err := a.db.ExecContext(r.Context(), `INSERT INTO email_confirmations(token,domain,action,email,password,verification_code,current_email,return_path,language_code,created_at,expires_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
+		token, domain, "profile_password", nextEmail, password, code, currentEmail, requestedReturnPath(r), languageCode, now.Format(time.RFC3339), expiresAt.Format(time.RFC3339))
+	if err != nil {
+		return "", emailDeliveryResult{}, dnsHelp, err
+	}
+	message := mailout.Message{
+		From:    fromAddress,
+		To:      currentEmail,
+		Subject: emailSubjectForLanguage(languageCode, "profile_password", domain),
+		Body:    emailBodyForLanguage(languageCode, "profile_password", domain, code),
+	}
+	deliveryResult := a.sendEmailNow(r.Context(), message)
+	if deliveryResult.Err != nil {
+		_, _ = a.db.ExecContext(r.Context(), `DELETE FROM email_confirmations WHERE token=?`, token)
+		return "", deliveryResult, dnsHelp, deliveryResult.Err
+	}
+	return token, deliveryResult, profileEmailDeliveryDNSHelp{}, nil
+}
+
+func (a *App) handleProfilePasswordCode(w http.ResponseWriter, r *http.Request, currentEmail, token, code string) {
+	translations := translationsForRequest(r)
+	domain := a.siteDomain(r.Context(), r)
+	failureDomain := profilePasswordFailureDomain(domain, currentEmail)
+	clientIP := clientIPAddress(r)
+	blocked, hardLocked, blockedUntil := a.authIPIsBlocked(r.Context(), failureDomain, clientIP)
+	if hardLocked {
+		w.WriteHeader(http.StatusForbidden)
+		a.renderProfilePage(w, r, currentEmail, translationOrDefault(translations, "profile_password_code_status_hard_locked", "Too many failed code attempts from this IP. Account recovery is now required."), "danger", false, "", blockedUntil, true, profileEmailDeliveryView{})
+		return
+	}
+	if blocked {
+		retryAfter := int(time.Until(blockedUntil).Seconds())
+		if retryAfter < 1 {
+			retryAfter = 1
+		}
+		w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
+		w.WriteHeader(http.StatusTooManyRequests)
+		a.renderProfilePage(w, r, currentEmail, translationOrDefault(translations, "profile_password_code_status_rate_limited", "Too many failed code attempts from this IP. Please try again later."), "warning", false, "", blockedUntil, false, profileEmailDeliveryView{})
+		return
+	}
+	confirmation, found := a.emailConfirmationByToken(r.Context(), token)
+	if !found || strings.TrimSpace(confirmation.Action) != "profile_password" || confirmation.Domain != domain || confirmation.CurrentEmail != currentEmail || confirmationExpired(confirmation.ExpiresAt, time.Now().UTC()) {
+		_, _, _ = a.registerFailedLoginAttempt(r.Context(), failureDomain, clientIP)
+		w.WriteHeader(http.StatusUnauthorized)
+		a.renderProfilePage(w, r, currentEmail, translationOrDefault(translations, "profile_password_code_status_invalid", "The code is invalid or expired."), "danger", true, token, time.Time{}, false, profileEmailDeliveryView{})
+		return
+	}
+	if !isSixDigitCode(code) || strings.TrimSpace(code) != strings.TrimSpace(confirmation.Code) {
+		_, blockedUntil, hardLocked := a.registerFailedLoginAttempt(r.Context(), failureDomain, clientIP)
+		if hardLocked {
+			w.WriteHeader(http.StatusForbidden)
+			a.renderProfilePage(w, r, currentEmail, translationOrDefault(translations, "profile_password_code_status_hard_locked", "Too many failed code attempts from this IP. Account recovery is now required."), "danger", false, "", blockedUntil, true, profileEmailDeliveryView{})
+			return
+		}
+		if !blockedUntil.IsZero() {
+			retryAfter := int(time.Until(blockedUntil).Seconds())
+			if retryAfter < 1 {
+				retryAfter = 1
+			}
+			w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
+			w.WriteHeader(http.StatusTooManyRequests)
+			a.renderProfilePage(w, r, currentEmail, translationOrDefault(translations, "profile_password_code_status_rate_limited", "Too many failed code attempts from this IP. Please try again later."), "warning", false, "", blockedUntil, false, profileEmailDeliveryView{})
+			return
+		}
+		w.WriteHeader(http.StatusUnauthorized)
+		a.renderProfilePage(w, r, confirmation.Email, translationOrDefault(translations, "profile_password_code_status_invalid", "The code is invalid or expired."), "danger", true, token, time.Time{}, false, profileEmailDeliveryView{})
+		return
+	}
+	result, err := a.db.ExecContext(r.Context(), `UPDATE users SET password=? WHERE domain=? AND email=?`, confirmation.Password, domain, currentEmail)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if rowsAffected, err := result.RowsAffected(); err == nil && rowsAffected == 0 {
+		w.WriteHeader(http.StatusBadRequest)
+		a.renderProfilePage(w, r, currentEmail, "account not found", "danger", false, "", time.Time{}, false, profileEmailDeliveryView{})
+		return
+	}
+	_, _ = a.db.ExecContext(r.Context(), `DELETE FROM email_confirmations WHERE token=?`, token)
+	a.clearFailedLoginAttempts(r.Context(), failureDomain, clientIP)
+	if strings.TrimSpace(confirmation.Email) != "" && confirmation.Email != currentEmail {
+		if err := a.createAndSendEmailConfirmation(r, "profile", domain, currentEmail, confirmation.Email, "", requestedReturnPath(r)); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			a.renderProfilePage(w, r, currentEmail, err.Error(), "danger", false, "", time.Time{}, false, profileEmailDeliveryView{})
+			return
+		}
+		a.renderProfilePage(w, r, currentEmail, translationOrDefault(translations, "profile_password_code_status_confirmed_email_pending", "Password changed. A confirmation link has been sent to the new email address."), "info", false, "", time.Time{}, false, profileEmailDeliveryView{})
+		return
+	}
+	a.renderProfilePage(w, r, currentEmail, translationOrDefault(translations, "profile_status_updated", "Account updated."), "success", false, "", time.Time{}, false, profileEmailDeliveryView{})
+}
+
+func profilePasswordFailureDomain(domain, email string) string {
+	return strings.TrimSpace(domain) + "|profile-password|" + strings.ToLower(strings.TrimSpace(email))
+}
+
+func randomSixDigitCode() string {
+	maxValue := big.NewInt(1000000)
+	randomValue, err := rand.Int(rand.Reader, maxValue)
+	if err != nil {
+		return fmt.Sprintf("%06d", time.Now().UnixNano()%1000000)
+	}
+	return fmt.Sprintf("%06d", randomValue.Int64())
+}
+
+func isSixDigitCode(code string) bool {
+	code = strings.TrimSpace(code)
+	if len(code) != 6 {
+		return false
+	}
+	for _, codeRune := range code {
+		if codeRune < '0' || codeRune > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 func (a *App) createAndSendEmailConfirmation(r *http.Request, action, domain, currentEmail, email, password, returnPath string) error {
@@ -10918,8 +11161,8 @@ func (a *App) createAndSendEmailConfirmation(r *http.Request, action, domain, cu
 		return nil
 	}
 	_, _ = a.db.ExecContext(databaseContext, `DELETE FROM email_confirmations WHERE expires_at<>'' AND expires_at<?`, now.Format(time.RFC3339))
-	_, err := a.db.ExecContext(databaseContext, `INSERT INTO email_confirmations(token,domain,action,email,password,current_email,return_path,language_code,created_at,expires_at) VALUES(?,?,?,?,?,?,?,?,?,?)`,
-		token, domain, action, email, password, strings.TrimSpace(currentEmail), returnPath, languageCode, now.Format(time.RFC3339), expiresAt.Format(time.RFC3339))
+	_, err := a.db.ExecContext(databaseContext, `INSERT INTO email_confirmations(token,domain,action,email,password,verification_code,current_email,return_path,language_code,created_at,expires_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
+		token, domain, action, email, password, "", strings.TrimSpace(currentEmail), returnPath, languageCode, now.Format(time.RFC3339), expiresAt.Format(time.RFC3339))
 	if err != nil {
 		return err
 	}
@@ -10995,8 +11238,8 @@ func (a *App) emailConfirmationByToken(ctx context.Context, token string) (Email
 		return confirmation, true
 	}
 	var confirmation EmailConfirmation
-	err := a.db.QueryRowContext(ctx, `SELECT token,domain,action,email,password,current_email,return_path,language_code,expires_at FROM email_confirmations WHERE token=?`, token).Scan(
-		&confirmation.Token, &confirmation.Domain, &confirmation.Action, &confirmation.Email, &confirmation.Password, &confirmation.CurrentEmail, &confirmation.ReturnPath, &confirmation.LanguageCode, &confirmation.ExpiresAt)
+	err := a.db.QueryRowContext(ctx, `SELECT token,domain,action,email,password,verification_code,current_email,return_path,language_code,expires_at FROM email_confirmations WHERE token=?`, token).Scan(
+		&confirmation.Token, &confirmation.Domain, &confirmation.Action, &confirmation.Email, &confirmation.Password, &confirmation.Code, &confirmation.CurrentEmail, &confirmation.ReturnPath, &confirmation.LanguageCode, &confirmation.ExpiresAt)
 	if err != nil {
 		return EmailConfirmation{}, false
 	}
@@ -11004,17 +11247,7 @@ func (a *App) emailConfirmationByToken(ctx context.Context, token string) (Email
 }
 
 func (a *App) applyProfileEmailConfirmation(ctx context.Context, confirmation EmailConfirmation) error {
-	if strings.TrimSpace(confirmation.Password) == "" {
-		result, err := a.db.ExecContext(ctx, `UPDATE users SET email=? WHERE domain=? AND email=?`, confirmation.Email, confirmation.Domain, confirmation.CurrentEmail)
-		if err != nil {
-			return err
-		}
-		if rowsAffected, err := result.RowsAffected(); err == nil && rowsAffected == 0 {
-			return errors.New("account not found")
-		}
-		return nil
-	}
-	result, err := a.db.ExecContext(ctx, `UPDATE users SET email=?,password=? WHERE domain=? AND email=?`, confirmation.Email, confirmation.Password, confirmation.Domain, confirmation.CurrentEmail)
+	result, err := a.db.ExecContext(ctx, `UPDATE users SET email=? WHERE domain=? AND email=?`, confirmation.Email, confirmation.Domain, confirmation.CurrentEmail)
 	if err != nil {
 		return err
 	}
@@ -11075,6 +11308,140 @@ func (a *App) enqueueEmail(ctx context.Context, message mailout.Message) error {
 	default:
 		return errors.New("email delivery queue is full")
 	}
+}
+
+func (a *App) sendEmailNow(ctx context.Context, message mailout.Message) emailDeliveryResult {
+	sender := a.defaultEmailSender()
+	sendCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
+	defer cancel()
+	err := sender(sendCtx, message)
+	if err != nil {
+		log.Printf("email delivery failed to=%s subject=%q error=%v", message.To, message.Subject, err)
+		return emailDeliveryResult{Message: message, Err: err}
+	}
+	log.Printf("email delivery accepted to=%s subject=%q", message.To, message.Subject)
+	return emailDeliveryResult{Message: message}
+}
+
+func (a *App) profileEmailDeliveryDNSHelp(ctx context.Context, translations map[string]string, siteDomain, fromAddress string) profileEmailDeliveryDNSHelp {
+	fromDomain := emailAddressDomain(fromAddress)
+	setupDomain := emailSetupDomain(siteDomain, fromDomain)
+	if emailDomainCannotUseDNS(setupDomain) || setupDomain == "domain.com" {
+		setupDomain = "your-domain.com"
+	}
+	serverIP := "SERVER_IP"
+	if serverIPs, externalIP, err := detectServerIPCandidates(ctx); err == nil {
+		if selectedIP := selectedEmailDNSIP(externalIP, serverIPs); selectedIP != nil {
+			serverIP = selectedIP.String()
+		}
+	}
+	spfRecord := emailDNSSetupViewForLanguage("en", setupDomain, fromAddress, serverIP)
+	spfValue := "v=spf1 a mx ip4:" + serverIP + " ~all"
+	for _, record := range spfRecord.Records {
+		if record.Label == "SPF TXT" {
+			value := strings.TrimSpace(record.Value)
+			if firstQuote := strings.Index(value, "\""); firstQuote >= 0 {
+				if lastQuote := strings.LastIndex(value, "\""); lastQuote > firstQuote {
+					spfValue = value[firstQuote+1 : lastQuote]
+				}
+			}
+			break
+		}
+	}
+	return profileEmailDeliveryDNSHelp{
+		Show:       true,
+		Title:      translationOrDefault(translations, "profile_email_delivery_dns_title", "DNS record to add"),
+		Intro:      translationOrDefault(translations, "profile_email_delivery_dns_intro", "Add this TXT record at the DNS provider for the sender domain. If an SPF record already exists, add this server IP to the existing v=spf1 record instead of creating a second SPF record."),
+		TypeLabel:  translationOrDefault(translations, "profile_email_delivery_dns_type_label", "Type"),
+		HostLabel:  translationOrDefault(translations, "profile_email_delivery_dns_host_label", "Host/name"),
+		ValueLabel: translationOrDefault(translations, "profile_email_delivery_dns_value_label", "Value"),
+		Type:       "TXT",
+		Host:       "@",
+		Value:      spfValue,
+	}
+}
+
+func profileEmailDeliveryViewForResult(translations map[string]string, result emailDeliveryResult, dnsHelp profileEmailDeliveryDNSHelp) profileEmailDeliveryView {
+	if strings.TrimSpace(result.Message.To) == "" {
+		return profileEmailDeliveryView{}
+	}
+	view := profileEmailDeliveryView{
+		Show:       true,
+		CodeLabel:  translationOrDefault(translations, "profile_email_delivery_modal_code_label", "SMTP code"),
+		CloseLabel: translationOrDefault(translations, "profile_email_delivery_modal_close", "Close"),
+	}
+	if result.Err == nil {
+		view.Kind = "success"
+		view.LinkText = translationOrDefault(translations, "profile_email_delivery_details_success", "View delivery log")
+		view.Title = translationOrDefault(translations, "profile_email_delivery_success_title", "Email accepted")
+		view.Summary = translationOrDefault(translations, "profile_email_delivery_success_summary", "The recipient mail server accepted the message for delivery.")
+		view.Code = translationOrDefault(translations, "profile_email_delivery_success_code", "Accepted")
+		view.Description = translationOrDefault(translations, "profile_email_delivery_success_description", "SMTP finished without an error after sending the message body. This confirms the recipient server accepted the email.")
+		view.FixTitle = translationOrDefault(translations, "profile_email_delivery_success_next_title", "What this means")
+		view.FixText = translationOrDefault(translations, "profile_email_delivery_success_next_text", "The code should arrive in the inbox. If it is not visible, check spam or mailbox filters.")
+		view.Log = fmt.Sprintf("email delivery accepted to=%s subject=%q", result.Message.To, result.Message.Subject)
+		return view
+	}
+	smtpCode := smtpStatusCodeFromError(result.Err)
+	if smtpCode == "" {
+		smtpCode = translationOrDefault(translations, "profile_email_delivery_code_unknown", "unknown")
+	}
+	view.Kind = "danger"
+	view.LinkText = translationOrDefault(translations, "profile_email_delivery_details_error", "View SMTP error")
+	view.Title = translationOrDefault(translations, "profile_email_delivery_error_title", "Email was not sent")
+	view.Summary = translationOrDefault(translations, "profile_email_delivery_error_summary", "The recipient mail server rejected the message.")
+	view.Code = smtpCode
+	view.Description = smtpErrorDescription(translations, smtpCode, result.Err)
+	view.FixTitle = translationOrDefault(translations, "profile_email_delivery_fix_title", "How to fix it")
+	view.FixText = smtpErrorFixText(translations, result.Err)
+	view.Log = fmt.Sprintf("email delivery failed to=%s subject=%q error=%v", result.Message.To, result.Message.Subject, result.Err)
+	if smtpErrorNeedsDNSHelp(result.Err) {
+		view.DNSHelp = dnsHelp
+	}
+	return view
+}
+
+func smtpStatusCodeFromError(err error) string {
+	if err == nil {
+		return ""
+	}
+	text := err.Error()
+	for index := 0; index+2 < len(text); index++ {
+		if text[index] < '4' || text[index] > '5' || text[index+1] < '0' || text[index+1] > '9' || text[index+2] < '0' || text[index+2] > '9' {
+			continue
+		}
+		beforeOK := index == 0 || text[index-1] < '0' || text[index-1] > '9'
+		afterOK := index+3 == len(text) || text[index+3] < '0' || text[index+3] > '9'
+		if beforeOK && afterOK {
+			return text[index : index+3]
+		}
+	}
+	return ""
+}
+
+func smtpErrorDescription(translations map[string]string, code string, err error) string {
+	switch code {
+	case "550":
+		return translationOrDefault(translations, "profile_email_delivery_550_description", "SMTP 550 means the recipient server rejected the message. In this case Gmail says the sender is unauthenticated: SPF and DKIM did not pass.")
+	default:
+		return translationOrDefault(translations, "profile_email_delivery_generic_description", "The SMTP server returned an error while SiteBrush was sending the message.")
+	}
+}
+
+func smtpErrorFixText(translations map[string]string, err error) string {
+	errorText := strings.ToLower(err.Error())
+	if strings.Contains(errorText, "spf") || strings.Contains(errorText, "dkim") || strings.Contains(errorText, "unauthenticated") {
+		return translationOrDefault(translations, "profile_email_delivery_spf_dkim_fix", "Add the SPF TXT record below for the sender domain. Gmail may also require DKIM; if SPF is already present, edit the existing SPF record and include this server IP.")
+	}
+	return translationOrDefault(translations, "profile_email_delivery_generic_fix", "Check the recipient address, the sending domain DNS, and the SMTP response below. Then resend the code.")
+}
+
+func smtpErrorNeedsDNSHelp(err error) bool {
+	if err == nil {
+		return false
+	}
+	errorText := strings.ToLower(err.Error())
+	return strings.Contains(errorText, "550") || strings.Contains(errorText, "spf") || strings.Contains(errorText, "dkim") || strings.Contains(errorText, "unauthenticated")
 }
 
 var fallbackRegistrationConfirmations = startEmailConfirmationMemoryWorker(context.Background())
@@ -11474,81 +11841,129 @@ func emailSubjectForLanguage(languageCode, action, domain string) string {
 	domain = strings.TrimSpace(domain)
 	switch strings.ToLower(strings.TrimSpace(languageCode)) {
 	case "ru":
+		if action == "profile_password" {
+			return "Код смены пароля SiteBrush"
+		}
 		if action == "recover" {
 			return "Код восстановления SiteBrush"
 		}
 		return "Подтвердите email для " + domain
 	case "fr":
+		if action == "profile_password" {
+			return "Code de changement de mot de passe SiteBrush"
+		}
 		if action == "recover" {
 			return "Code de récupération SiteBrush"
 		}
 		return "Confirmez votre e-mail pour " + domain
 	case "ja":
+		if action == "profile_password" {
+			return "SiteBrush パスワード変更コード"
+		}
 		if action == "recover" {
 			return "SiteBrush 復旧コード"
 		}
 		return domain + " のメール確認"
 	case "it":
+		if action == "profile_password" {
+			return "Codice per cambiare la password SiteBrush"
+		}
 		if action == "recover" {
 			return "Codice di recupero SiteBrush"
 		}
 		return "Conferma l'email per " + domain
 	case "sv":
+		if action == "profile_password" {
+			return "SiteBrush-kod för lösenordsändring"
+		}
 		if action == "recover" {
 			return "SiteBrush återställningskod"
 		}
 		return "Bekräfta e-post för " + domain
 	case "fi":
+		if action == "profile_password" {
+			return "SiteBrush-salasanan vaihtokoodi"
+		}
 		if action == "recover" {
 			return "SiteBrush-palautuskoodi"
 		}
 		return "Vahvista sähköposti kohteelle " + domain
 	case "mn":
+		if action == "profile_password" {
+			return "SiteBrush нууц үг солих код"
+		}
 		if action == "recover" {
 			return "SiteBrush сэргээх код"
 		}
 		return domain + " домэйны имэйлийг баталгаажуулна уу"
 	case "zh":
+		if action == "profile_password" {
+			return "SiteBrush 密码更改代码"
+		}
 		if action == "recover" {
 			return "SiteBrush 恢复代码"
 		}
 		return "确认 " + domain + " 的邮箱"
 	case "he":
+		if action == "profile_password" {
+			return "קוד שינוי סיסמה של SiteBrush"
+		}
 		if action == "recover" {
 			return "קוד שחזור של SiteBrush"
 		}
 		return "אימות אימייל עבור " + domain
 	case "fa":
+		if action == "profile_password" {
+			return "کد تغییر رمز عبور SiteBrush"
+		}
 		if action == "recover" {
 			return "کد بازیابی SiteBrush"
 		}
 		return "تأیید ایمیل برای " + domain
 	case "de":
+		if action == "profile_password" {
+			return "SiteBrush-Code zum Ändern des Passworts"
+		}
 		if action == "recover" {
 			return "SiteBrush-Wiederherstellungscode"
 		}
 		return "E-Mail für " + domain + " bestätigen"
 	case "tr":
+		if action == "profile_password" {
+			return "SiteBrush şifre değiştirme kodu"
+		}
 		if action == "recover" {
 			return "SiteBrush kurtarma kodu"
 		}
 		return domain + " için e-postayı doğrulayın"
 	case "kk":
+		if action == "profile_password" {
+			return "SiteBrush құпиясөзін өзгерту коды"
+		}
 		if action == "recover" {
 			return "SiteBrush қалпына келтіру коды"
 		}
 		return domain + " үшін email растаңыз"
 	case "es":
+		if action == "profile_password" {
+			return "Código de cambio de contraseña de SiteBrush"
+		}
 		if action == "recover" {
 			return "Código de recuperación de SiteBrush"
 		}
 		return "Confirma el correo para " + domain
 	case "pt":
+		if action == "profile_password" {
+			return "Código de alteração de senha do SiteBrush"
+		}
 		if action == "recover" {
 			return "Código de recuperação do SiteBrush"
 		}
 		return "Confirme o e-mail de " + domain
 	default:
+		if action == "profile_password" {
+			return "SiteBrush password change code"
+		}
 		if action == "recover" {
 			return "SiteBrush recovery code"
 		}
@@ -11702,10 +12117,50 @@ func emailDNSSetupViewForLanguage(languageCode, domain, fromAddress, serverIP st
 }
 
 func emailBodyForLanguage(languageCode, action, domain, secret string) string {
+	if action == "profile_password" {
+		return profilePasswordCodeEmailBodyForLanguage(languageCode, domain, secret)
+	}
 	if action == "recover" {
 		return recoveryEmailBodyForLanguage(languageCode, domain, secret)
 	}
 	return confirmationEmailBodyForLanguage(languageCode, domain, secret)
+}
+
+func profilePasswordCodeEmailBodyForLanguage(languageCode, domain, code string) string {
+	switch strings.ToLower(strings.TrimSpace(languageCode)) {
+	case "ru":
+		return fmt.Sprintf("Код смены пароля SiteBrush для %s: %s\n\nКод действует 15 минут. Если вы не меняли пароль, войдите в SiteBrush и проверьте учетную запись.", domain, code)
+	case "fr":
+		return fmt.Sprintf("Code de changement de mot de passe SiteBrush pour %s : %s\n\nCe code expire dans 15 minutes. Si vous n'avez pas demandé ce changement, connectez-vous à SiteBrush et vérifiez votre compte.", domain, code)
+	case "ja":
+		return fmt.Sprintf("%s の SiteBrush パスワード変更コード: %s\n\nこのコードは15分で期限切れになります。変更を要求していない場合は、SiteBrush にログインしてアカウントを確認してください。", domain, code)
+	case "it":
+		return fmt.Sprintf("Codice per cambiare la password SiteBrush per %s: %s\n\nIl codice scade tra 15 minuti. Se non hai richiesto questa modifica, accedi a SiteBrush e controlla l'account.", domain, code)
+	case "sv":
+		return fmt.Sprintf("SiteBrush-kod för lösenordsändring för %s: %s\n\nKoden gäller i 15 minuter. Om du inte begärde ändringen, logga in i SiteBrush och kontrollera kontot.", domain, code)
+	case "fi":
+		return fmt.Sprintf("SiteBrush-salasanan vaihtokoodi kohteelle %s: %s\n\nKoodi vanhenee 15 minuutissa. Jos et pyytänyt muutosta, kirjaudu SiteBrushiin ja tarkista tili.", domain, code)
+	case "mn":
+		return fmt.Sprintf("%s домэйны SiteBrush нууц үг солих код: %s\n\nКод 15 минут хүчинтэй. Хэрэв та энэ өөрчлөлтийг хүсээгүй бол SiteBrush-д нэвтэрч бүртгэлээ шалгана уу.", domain, code)
+	case "zh":
+		return fmt.Sprintf("%s 的 SiteBrush 密码更改代码：%s\n\n此代码将在 15 分钟后过期。如果你没有请求此更改，请登录 SiteBrush 并检查账户。", domain, code)
+	case "he":
+		return fmt.Sprintf("קוד שינוי סיסמה של SiteBrush עבור %s: %s\n\nהקוד תקף ל-15 דקות. אם לא ביקשת שינוי זה, התחבר ל-SiteBrush ובדוק את החשבון.", domain, code)
+	case "fa":
+		return fmt.Sprintf("کد تغییر رمز عبور SiteBrush برای %s: %s\n\nاین کد تا ۱۵ دقیقه معتبر است. اگر این تغییر را درخواست نکرده‌اید، وارد SiteBrush شوید و حساب را بررسی کنید.", domain, code)
+	case "de":
+		return fmt.Sprintf("SiteBrush-Code zum Ändern des Passworts für %s: %s\n\nDer Code läuft in 15 Minuten ab. Wenn Sie diese Änderung nicht angefordert haben, melden Sie sich bei SiteBrush an und prüfen Sie Ihr Konto.", domain, code)
+	case "tr":
+		return fmt.Sprintf("%s için SiteBrush şifre değiştirme kodu: %s\n\nKod 15 dakika içinde sona erer. Bu değişikliği istemediyseniz SiteBrush'a giriş yapıp hesabı kontrol edin.", domain, code)
+	case "kk":
+		return fmt.Sprintf("%s үшін SiteBrush құпиясөзін өзгерту коды: %s\n\nКод 15 минут жарамды. Бұл өзгерісті сұрамаған болсаңыз, SiteBrush жүйесіне кіріп, аккаунтты тексеріңіз.", domain, code)
+	case "es":
+		return fmt.Sprintf("Código de cambio de contraseña de SiteBrush para %s: %s\n\nEl código caduca en 15 minutos. Si no solicitaste este cambio, inicia sesión en SiteBrush y revisa la cuenta.", domain, code)
+	case "pt":
+		return fmt.Sprintf("Código de alteração de senha do SiteBrush para %s: %s\n\nO código expira em 15 minutos. Se você não solicitou essa alteração, entre no SiteBrush e verifique a conta.", domain, code)
+	default:
+		return fmt.Sprintf("SiteBrush password change code for %s: %s\n\nThis code expires in 15 minutes. If you did not request this change, sign in to SiteBrush and check the account.", domain, code)
+	}
 }
 
 func confirmationEmailBodyForLanguage(languageCode, domain, confirmationURL string) string {

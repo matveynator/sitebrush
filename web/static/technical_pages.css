@@ -78,6 +78,10 @@
     color: var(--muted) !important;
 }
 
+.technical-page [hidden] {
+    display: none !important;
+}
+
 .technical-page code,
 .technical-page .copy-field {
     border: 1px solid rgba(149, 229, 239, 0.18);
@@ -196,6 +200,8 @@
 .technical-page input[type="password"],
 .technical-page input[type="number"],
 .technical-page input[type="url"] {
+    width: 100%;
+    box-sizing: border-box;
     min-height: 48px;
     padding: 12px 14px;
     border: 1px solid rgba(149, 229, 239, 0.28);
@@ -234,7 +240,346 @@
 .technical-page .profile-form {
     display: grid;
     gap: 14px;
+    width: min(100%, 560px);
     max-width: 560px;
+}
+
+.technical-page .profile-page {
+    display: grid;
+    justify-items: start;
+}
+
+.technical-page .profile-page .page-header {
+    width: 100%;
+    box-sizing: border-box;
+}
+
+.technical-page .profile-alert {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    width: min(100%, 560px);
+    box-sizing: border-box;
+    margin: 0 0 16px;
+    padding: 16px 18px;
+    border-width: 1px;
+    line-height: 1.45;
+    overflow-wrap: anywhere;
+}
+
+.technical-page .profile-alert > span {
+    min-width: 0;
+}
+
+.technical-page .profile-alert.alert-success {
+    border-color: rgba(142, 233, 155, 0.48);
+    background: rgba(28, 94, 45, 0.26);
+    color: var(--green);
+}
+
+.technical-page .profile-alert.alert-danger {
+    border-color: rgba(255, 133, 133, 0.48);
+    background: rgba(117, 27, 27, 0.26);
+    color: #ffb5b5;
+}
+
+.technical-page .profile-delivery-link {
+    flex: 0 0 auto;
+    min-height: 32px;
+    padding: 6px 10px;
+    border-color: currentColor !important;
+    background: rgba(0, 0, 0, 0.20) !important;
+    color: inherit !important;
+    font-size: 13px;
+    font-weight: 700;
+    white-space: nowrap;
+}
+
+.technical-page .profile-delivery-modal {
+    position: fixed;
+    inset: 0;
+    z-index: 1000;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    padding: 18px;
+}
+
+.technical-page .profile-delivery-modal[aria-hidden="false"] {
+    display: flex;
+}
+
+.profile-delivery-modal-open {
+    overflow: hidden;
+}
+
+.technical-page .profile-delivery-backdrop {
+    position: absolute;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.66);
+    backdrop-filter: blur(8px);
+}
+
+.technical-page .profile-delivery-dialog {
+    position: relative;
+    width: min(720px, 100%);
+    max-height: min(760px, calc(100vh - 36px));
+    overflow: auto;
+    padding: 22px;
+    border: 1px solid var(--border-cyan);
+    border-radius: 18px;
+    background:
+        radial-gradient(circle at top right, rgba(149, 229, 239, 0.12), transparent 34%),
+        rgba(37, 37, 37, 0.98);
+    color: var(--text);
+    box-shadow: var(--shadow);
+    outline: none;
+    scrollbar-color: rgba(149, 229, 239, 0.58) rgba(0, 0, 0, 0.22);
+    scrollbar-width: thin;
+}
+
+.technical-page .profile-delivery-dialog::-webkit-scrollbar,
+.technical-page .profile-delivery-log::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+}
+
+.technical-page .profile-delivery-dialog::-webkit-scrollbar-track,
+.technical-page .profile-delivery-log::-webkit-scrollbar-track {
+    border-radius: 999px;
+    background: rgba(0, 0, 0, 0.22);
+}
+
+.technical-page .profile-delivery-dialog::-webkit-scrollbar-thumb,
+.technical-page .profile-delivery-log::-webkit-scrollbar-thumb {
+    border: 2px solid rgba(0, 0, 0, 0.22);
+    border-radius: 999px;
+    background: rgba(149, 229, 239, 0.58);
+}
+
+.technical-page .profile-delivery-dialog::-webkit-scrollbar-thumb:hover,
+.technical-page .profile-delivery-log::-webkit-scrollbar-thumb:hover {
+    background: rgba(142, 233, 155, 0.72);
+}
+
+.technical-page .profile-delivery-dialog-success {
+    border-color: rgba(142, 233, 155, 0.46);
+}
+
+.technical-page .profile-delivery-dialog-danger {
+    border-color: rgba(255, 133, 133, 0.46);
+}
+
+.technical-page .profile-delivery-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 16px;
+    margin-bottom: 14px;
+}
+
+.technical-page .profile-delivery-kicker {
+    margin-bottom: 6px;
+    color: var(--muted);
+    font-size: 13px;
+    font-weight: 700;
+}
+
+.technical-page .profile-delivery-header h2 {
+    margin: 0;
+    color: var(--text);
+    font-family: Arial, Helvetica, sans-serif;
+    font-size: 26px;
+    line-height: 1.15;
+}
+
+.technical-page .profile-delivery-close {
+    width: 36px;
+    min-width: 36px;
+    height: 36px;
+    min-height: 36px;
+    padding: 0;
+    border-radius: 10px;
+    font-size: 24px;
+    line-height: 1;
+}
+
+.technical-page .profile-delivery-summary {
+    margin: 0 0 16px;
+    color: var(--text);
+    line-height: 1.45;
+}
+
+.technical-page .profile-delivery-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 12px;
+    margin-bottom: 14px;
+}
+
+.technical-page .profile-delivery-panel {
+    padding: 14px;
+    border: 1px solid rgba(149, 229, 239, 0.16);
+    border-radius: 10px;
+    background: rgba(0, 0, 0, 0.18);
+}
+
+.technical-page .profile-delivery-panel h3 {
+    margin: 0 0 8px;
+    color: var(--cyan);
+    font-family: Arial, Helvetica, sans-serif;
+    font-size: 15px;
+}
+
+.technical-page .profile-delivery-panel p {
+    margin: 0;
+    color: var(--muted);
+    line-height: 1.45;
+}
+
+.technical-page .profile-delivery-log {
+    max-height: 220px;
+    margin: 0;
+    padding: 14px;
+    overflow: auto;
+    border: 1px solid rgba(149, 229, 239, 0.18);
+    border-radius: 10px;
+    background: rgba(0, 0, 0, 0.28);
+    color: var(--cream);
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    scrollbar-color: rgba(149, 229, 239, 0.58) rgba(0, 0, 0, 0.22);
+    scrollbar-width: thin;
+}
+
+.technical-page .profile-delivery-dns {
+    display: grid;
+    gap: 10px;
+    margin-bottom: 14px;
+    padding: 14px;
+    border: 1px solid rgba(149, 229, 239, 0.18);
+    border-radius: 10px;
+    background: rgba(0, 0, 0, 0.18);
+}
+
+.technical-page .profile-delivery-dns h3 {
+    margin: 0;
+    color: var(--cyan);
+    font-family: Arial, Helvetica, sans-serif;
+    font-size: 15px;
+}
+
+.technical-page .profile-delivery-dns p {
+    margin: 0;
+    color: var(--muted);
+    line-height: 1.45;
+}
+
+.technical-page .profile-delivery-dns-record {
+    display: grid;
+    grid-template-columns: auto minmax(120px, 180px) minmax(0, 1fr);
+    gap: 8px;
+    align-items: stretch;
+}
+
+.technical-page .profile-delivery-dns-type,
+.technical-page .profile-delivery-dns-field {
+    display: grid;
+    align-content: center;
+    gap: 4px;
+    min-width: 0;
+    padding: 9px 10px;
+    border: 1px solid rgba(149, 229, 239, 0.16);
+    border-radius: 8px;
+    background: rgba(0, 0, 0, 0.18);
+}
+
+.technical-page .profile-delivery-dns-type {
+    color: var(--green);
+    font-weight: 700;
+}
+
+.technical-page .profile-delivery-dns-field > span {
+    color: var(--muted);
+    font-size: 12px;
+}
+
+.technical-page .profile-delivery-dns-field code {
+    padding: 0;
+    border: 0;
+    background: transparent;
+    color: var(--cream);
+    overflow-wrap: anywhere;
+}
+
+.technical-page .profile-delivery-log code {
+    border: 0;
+    background: transparent;
+    color: inherit;
+}
+
+.technical-page .profile-send-progress {
+    border-color: rgba(149, 229, 239, 0.42);
+    background: rgba(149, 229, 239, 0.12);
+}
+
+.technical-page .profile-send-progress-copy {
+    display: grid;
+    gap: 4px;
+    min-width: 0;
+}
+
+.technical-page .profile-send-progress-copy strong {
+    color: var(--text);
+    font-size: 15px;
+}
+
+.technical-page .profile-send-progress-copy span {
+    color: var(--muted);
+    font-size: 13px;
+}
+
+.technical-page .profile-send-countdown {
+    flex: 0 0 auto;
+    padding: 7px 10px;
+    border: 1px solid rgba(149, 229, 239, 0.28);
+    border-radius: 10px;
+    background: rgba(0, 0, 0, 0.20);
+    color: var(--cyan);
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+    font-size: 13px;
+    white-space: nowrap;
+}
+
+.technical-page .profile-code-form {
+    gap: 16px;
+}
+
+.technical-page .profile-code-form .hint {
+    margin: -4px 0 2px;
+    line-height: 1.45;
+}
+
+.technical-page .profile-code-input {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+    font-size: 22px;
+    letter-spacing: 0;
+    text-align: center;
+}
+
+.technical-page .profile-blocked-card {
+    width: min(100%, 560px);
+    max-width: 560px;
+    box-sizing: border-box;
+}
+
+.technical-page .profile-countdown-value {
+    margin: 4px 0 12px;
+    color: var(--text);
+    font-size: 34px;
+    font-weight: 700;
+    line-height: 1.1;
 }
 
 .technical-page .profile-form label {
@@ -247,6 +592,13 @@
     border-color: rgba(149, 229, 239, 0.62);
     background: rgba(149, 229, 239, 0.18);
     color: var(--text);
+}
+
+.technical-page .profile-code-submit:disabled {
+    border-color: rgba(149, 229, 239, 0.14);
+    background: rgba(0, 0, 0, 0.18);
+    color: rgba(255, 255, 255, 0.42);
+    cursor: not-allowed;
 }
 
 .technical-page .edit-mode-grid {
@@ -947,6 +1299,8 @@
     border-radius: 16px;
     background: rgba(0, 0, 0, 0.22);
     color: var(--text);
+    padding: 14px 16px;
+    line-height: 1.45;
 }
 
 .technical-page .alert-danger {
@@ -1059,6 +1413,55 @@
         padding: 18px;
     }
 
+    .technical-page .profile-alert {
+        align-items: flex-start;
+        flex-direction: column;
+        padding: 14px 15px;
+        border-radius: 14px;
+    }
+
+    .technical-page .profile-delivery-link {
+        width: 100%;
+        white-space: normal;
+    }
+
+    .technical-page .profile-send-countdown {
+        width: 100%;
+        white-space: normal;
+    }
+
+    .technical-page .profile-delivery-modal {
+        align-items: flex-start;
+        padding: 10px;
+    }
+
+    .technical-page .profile-delivery-dialog {
+        max-height: calc(100vh - 20px);
+        padding: 18px;
+        border-radius: 14px;
+    }
+
+    .technical-page .profile-delivery-grid {
+        grid-template-columns: 1fr;
+    }
+
+    .technical-page .profile-delivery-dns-record {
+        grid-template-columns: 1fr;
+    }
+
+    .technical-page .profile-delivery-header h2 {
+        font-size: 22px;
+    }
+
+    .technical-page .profile-code-input {
+        font-size: 20px;
+        min-height: 46px;
+    }
+
+    .technical-page .profile-countdown-value {
+        font-size: 30px;
+    }
+
     .technical-page .btn,
     .technical-page button,
     .technical-page input[type="submit"],
@@ -1080,6 +1483,11 @@
         min-height: 40px;
         padding: 9px 11px;
         border-radius: 8px;
+    }
+
+    .technical-page .profile-form button[type="submit"],
+    .technical-page .profile-blocked-card .btn {
+        width: 100%;
     }
 
     .technical-page .missing-page {
