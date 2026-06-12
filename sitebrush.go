@@ -15645,13 +15645,13 @@ func buildContextMenuScript(isAdmin bool, isServerManager bool, isFrozen bool, p
 		if isFrozen {
 			freezeActionEntry = "<li class='SiteBrushContextMenu'><button type='button' data-sitebrush-action='publish' class='SiteBrushContextMenuLink SiteBrushContextMenuButton'><img src='/p/static/publish.png' class='SiteBrushMenuIcon' alt=''>" + publishLabel + "</button></li>"
 		}
-		passwordActionEntry := "<li class='SiteBrushContextMenu'><button type='button' data-sitebrush-action='protect_password' class='SiteBrushContextMenuLink SiteBrushContextMenuButton'><img src='/p/static/lock.png' class='SiteBrushMenuIcon' alt=''>" + protectPasswordLabel + "</button></li>"
+		passwordActionEntry := "<li class='SiteBrushContextMenu SiteBrushSeparatedMenuItem'><button type='button' data-sitebrush-action='protect_password' class='SiteBrushContextMenuLink SiteBrushContextMenuButton'><img src='/p/static/lock.png' class='SiteBrushMenuIcon' alt=''>" + protectPasswordLabel + "</button></li>"
 		if pagePasswordProtected {
-			passwordActionEntry = "<li class='SiteBrushContextMenu'><button type='button' data-sitebrush-action='remove_password_protection' class='SiteBrushContextMenuLink SiteBrushContextMenuButton'><img src='/p/static/unlock.png' class='SiteBrushMenuIcon' alt=''>" + removePasswordProtectionLabel + "</button></li>"
+			passwordActionEntry = "<li class='SiteBrushContextMenu SiteBrushSeparatedMenuItem'><button type='button' data-sitebrush-action='remove_password_protection' class='SiteBrushContextMenuLink SiteBrushContextMenuButton'><img src='/p/static/unlock.png' class='SiteBrushMenuIcon' alt=''>" + removePasswordProtectionLabel + "</button></li>"
 		}
 		billingEntry := ""
 		if isServerManager {
-			billingEntry = "<li class='SiteBrushContextMenu SiteBrushPrivilegedMenuItem'><a href='?billing' class='SiteBrushContextMenuLink'><img src='/p/static/sitebrush-app-icon.png' class='SiteBrushMenuIcon' alt=''>" + billingLabel + "</a></li>"
+			billingEntry = "<li class='SiteBrushContextMenu SiteBrushSeparatedMenuItem SiteBrushPrivilegedMenuItem'><a href='?billing' class='SiteBrushContextMenuLink'><img src='/p/static/sitebrush-app-icon.png' class='SiteBrushMenuIcon' alt=''>" + billingLabel + "</a></li>"
 		}
 		logoutEntry := ""
 		if showLogout {
@@ -16011,17 +16011,17 @@ func buildContextMenuScript(isAdmin bool, isServerManager bool, isFrozen bool, p
       "<li class='SiteBrushContextMenu'><a href='?visual' class='SiteBrushContextMenuLink'><img src='/p/static/pencil.png' class='SiteBrushMenuIcon' alt=''>" + "` + editLabel + `" + "</a></li>",
       "<li class='SiteBrushContextMenu'><a href='?text' class='SiteBrushContextMenuLink'><img src='/p/static/pencil-text.png' class='SiteBrushMenuIcon' alt=''>" + "` + textEditLabel + `" + "</a></li>",
       "<li class='SiteBrushContextMenu'><button type='button' data-sitebrush-action='copy_site' class='SiteBrushContextMenuLink SiteBrushContextMenuButton'><img src='/p/static/copy.png' class='SiteBrushMenuIcon' alt=''>" + "` + copySiteLabel + `" + "</button></li>",
-      "<li class='SiteBrushContextMenu'><a href='?revisions' class='SiteBrushContextMenuLink'><img src='/p/static/revisions.png' class='SiteBrushMenuIcon' alt=''>" + "` + revisionsLabel + `" + "</a></li>",
       "` + deleteActionEntry + `",
+      "<li class='SiteBrushContextMenu'><a href='?revisions' class='SiteBrushContextMenuLink'><img src='/p/static/revisions.png' class='SiteBrushMenuIcon' alt=''>" + "` + revisionsLabel + `" + "</a></li>",
       "` + passwordActionEntry + `",
-      "<li class='SiteBrushContextMenu'><a href='?files' class='SiteBrushContextMenuLink'><img src='/p/static/upload.png' class='SiteBrushMenuIcon' alt=''>" + "` + filesLabel + `" + "</a></li>",
-      "<li class='SiteBrushContextMenu'><button type='button' data-sitebrush-action='tree' class='SiteBrushContextMenuLink SiteBrushContextMenuButton'><img src='/p/static/tree.png' class='SiteBrushMenuIcon' alt=''>" + "` + treeLabel + `" + "</button></li>",
       "` + freezeActionEntry + `",
+      "<li class='SiteBrushContextMenu SiteBrushSeparatedMenuItem'><button type='button' data-sitebrush-action='tree' class='SiteBrushContextMenuLink SiteBrushContextMenuButton'><img src='/p/static/tree.png' class='SiteBrushMenuIcon' alt=''>" + "` + treeLabel + `" + "</button></li>",
+      "<li class='SiteBrushContextMenu'><a href='?files' class='SiteBrushContextMenuLink'><img src='/p/static/upload.png' class='SiteBrushMenuIcon' alt=''>" + "` + filesLabel + `" + "</a></li>",
+      "<li class='SiteBrushContextMenu SiteBrushSeparatedMenuItem'><a href='?settings' class='SiteBrushContextMenuLink'><img src='/p/static/settings.png' class='SiteBrushMenuIcon' alt=''>" + "` + settingsLabel + `" + "</a></li>",
       "<li class='SiteBrushContextMenu'><a href='?analytics' class='SiteBrushContextMenuLink'><img src='/p/static/analytics.svg' class='SiteBrushMenuIcon' alt=''>" + "` + analyticsLabel + `" + "</a></li>",
-      "<li class='SiteBrushContextMenu'><a href='?settings' class='SiteBrushContextMenuLink'><img src='/p/static/settings.png' class='SiteBrushMenuIcon' alt=''>" + "` + settingsLabel + `" + "</a></li>",
-      "<li class='SiteBrushContextMenu'><a href='?profile' class='SiteBrushContextMenuLink'><img src='/p/static/profile.png' class='SiteBrushMenuIcon' alt=''>" + "` + profileLabel + `" + "</a></li>",
-      "` + logoutEntry + `",
       "` + billingEntry + `",
+      "<li class='SiteBrushContextMenu SiteBrushSeparatedMenuItem'><a href='?profile' class='SiteBrushContextMenuLink'><img src='/p/static/profile.png' class='SiteBrushMenuIcon' alt=''>" + "` + profileLabel + `" + "</a></li>",
+      "` + logoutEntry + `",
       "` + copyrightMenuEntry + `",
       "</ul>"
     ];
@@ -16227,7 +16227,7 @@ func guestContextMenuStylesAndHelpers() string {
 .SiteBrushMenuBox,.SiteBrushMenuBox *{all:initial;box-sizing:border-box}
 .SiteBrushMenuBox{position:fixed;background:#fff url(/p/static/bg.png) repeat-x top;border:1px solid #8ea4c1;z-index:2147483646;padding:2px;min-width:min(240px,calc(100vw - 16px));max-width:calc(100vw - 16px);max-height:calc(100vh - 16px);overflow:auto;box-shadow:0 2px 12px rgba(0,0,0,0.2);font-family:Arial,Helvetica,sans-serif;touch-action:manipulation}
 .SiteBrushMenuList{list-style:none;margin:0;padding:0}
-.SiteBrushContextMenu{margin:0;padding:0}
+.SiteBrushContextMenu{display:block;margin:0;padding:0}
 .SiteBrushContextMenuLink{display:flex;align-items:center;gap:8px;padding:8px 10px;color:#1f3f6f;text-decoration:none;font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:1.25;cursor:pointer;min-width:0;white-space:normal;word-break:break-word}
 .SiteBrushContextMenuLink:link,.SiteBrushContextMenuLink:visited,.SiteBrushContextMenuLink:active{color:#1f3f6f;text-decoration:none}
 .SiteBrushContextMenuLink:hover{color:#1f3f6f;background:#eef5ff;text-decoration:none}
@@ -16498,13 +16498,13 @@ func contextMenuStylesAndHelpers() string {
 .SiteBrushMenuBox{position:fixed;background:#fff url(/p/static/bg.png) repeat-x top;border:1px solid #8ea4c1;z-index:2147483646;padding:2px;min-width:min(240px,calc(100vw - 16px));max-width:calc(100vw - 16px);max-height:calc(100vh - 16px);overflow:auto;box-shadow:0 2px 12px rgba(0,0,0,0.2);font-family:Arial,Helvetica,sans-serif;touch-action:manipulation}
 .SiteBrushMenuBox.SiteBrushMenuBoxFrozen{background:#e9f5ff;border-color:#6da6d4}
 .SiteBrushMenuList{list-style:none;margin:0;padding:0}
-.SiteBrushContextMenu{margin:0;padding:0}
+.SiteBrushContextMenu{display:block;margin:0;padding:0}
 .SiteBrushContextMenuLink{display:flex;align-items:center;gap:8px;padding:8px 10px;color:#1f3f6f;text-decoration:none;font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:1.25;cursor:pointer;min-width:0;white-space:normal;word-break:break-word}
 .SiteBrushContextMenuLink:link,.SiteBrushContextMenuLink:visited,.SiteBrushContextMenuLink:active{color:#1f3f6f;text-decoration:none}
 .SiteBrushContextMenuLink:hover{color:#1f3f6f;background:#eef5ff;text-decoration:none}
 .SiteBrushContextMenuButton{width:100%;border:0;background:transparent;text-align:left}
 .SiteBrushDomainMenuItem .SiteBrushContextMenuLink{font-weight:700;border-bottom:1px solid #c8d5e7}
-.SiteBrushPrivilegedMenuItem{margin-top:4px;border-top:1px solid #c8d5e7;padding-top:4px}
+.SiteBrushSeparatedMenuItem,.SiteBrushPrivilegedMenuItem{margin-top:4px;border-top:1px dotted #8ea4c1;padding-top:4px}
 .SiteBrushContextMenuFooter{display:flex;align-items:center;justify-content:space-between;gap:12px;border-top:1px solid #c8d5e7;margin-top:2px;padding:7px 10px 8px 10px;font-family:Arial,Helvetica,sans-serif;font-size:12px;color:#5b6f8b}.SiteBrushMenuIcon{width:18px;height:18px;flex:0 0 18px}
 .SiteBrushContextMenuFooterLink,.SiteBrushContextMenuVersion{color:#5b6f8b;text-decoration:none;font-family:Arial,Helvetica,sans-serif;font-size:12px;cursor:pointer}
 .SiteBrushContextMenuFooterLink:link,.SiteBrushContextMenuFooterLink:visited,.SiteBrushContextMenuFooterLink:active,.SiteBrushContextMenuFooterLink:hover,.SiteBrushContextMenuVersion:link,.SiteBrushContextMenuVersion:visited,.SiteBrushContextMenuVersion:active,.SiteBrushContextMenuVersion:hover{color:#5b6f8b;text-decoration:none}
@@ -16551,7 +16551,7 @@ func contextMenuStylesAndHelpers() string {
   .SiteBrushContextMenuLink:link,.SiteBrushContextMenuLink:visited,.SiteBrushContextMenuLink:active{color:#dbe8ff}
   .SiteBrushContextMenuLink:hover{color:#dbe8ff;background:#24344d}
   .SiteBrushDomainMenuItem .SiteBrushContextMenuLink{border-bottom-color:#2f405d}
-  .SiteBrushPrivilegedMenuItem{border-top-color:#2f405d}
+  .SiteBrushSeparatedMenuItem,.SiteBrushPrivilegedMenuItem{border-top-color:#2f405d}
   .SiteBrushContextMenuFooter{color:#a7bbd8;border-top-color:#2f405d}
   .SiteBrushContextMenuFooterLink,.SiteBrushContextMenuVersion{color:#a7bbd8}
   .SiteBrushContextMenuFooterLink:link,.SiteBrushContextMenuFooterLink:visited,.SiteBrushContextMenuFooterLink:active,.SiteBrushContextMenuFooterLink:hover,.SiteBrushContextMenuVersion:link,.SiteBrushContextMenuVersion:visited,.SiteBrushContextMenuVersion:active,.SiteBrushContextMenuVersion:hover{color:#a7bbd8}
@@ -20643,19 +20643,24 @@ func (a *App) countPublishChanges(ctx context.Context, domain string) (int, int,
 
 func (a *App) collectPublishPageCandidates(ctx context.Context, domain string) ([]publishPageCandidate, error) {
 	revisionRows, err := a.db.QueryContext(ctx, `SELECT page_path,html FROM revisions WHERE domain=? AND is_active=1 ORDER BY page_path ASC, id DESC`, domain)
-	if err != nil {
+	if err != nil && !isMissingPublishRevisionStoreError(err) {
 		return nil, err
 	}
-	defer revisionRows.Close()
 	latestRevisionByPath := make(map[string]string)
-	for revisionRows.Next() {
-		var pagePath string
-		var pageHTML string
-		if scanErr := revisionRows.Scan(&pagePath, &pageHTML); scanErr != nil {
-			continue
+	if revisionRows != nil {
+		defer revisionRows.Close()
+		for revisionRows.Next() {
+			var pagePath string
+			var pageHTML string
+			if scanErr := revisionRows.Scan(&pagePath, &pageHTML); scanErr != nil {
+				continue
+			}
+			if _, alreadyStored := latestRevisionByPath[pagePath]; !alreadyStored {
+				latestRevisionByPath[pagePath] = pageHTML
+			}
 		}
-		if _, alreadyStored := latestRevisionByPath[pagePath]; !alreadyStored {
-			latestRevisionByPath[pagePath] = pageHTML
+		if rowsErr := revisionRows.Err(); rowsErr != nil {
+			return nil, rowsErr
 		}
 	}
 	pageRows, pageQueryErr := a.db.QueryContext(ctx, `SELECT path,title,html FROM pages WHERE domain=? ORDER BY path ASC`, domain)
@@ -20675,7 +20680,19 @@ func (a *App) collectPublishPageCandidates(ctx context.Context, domain string) (
 		}
 		pageList = append(pageList, publishPageCandidate{Path: pagePath, Title: pageTitle, HTML: pageHTMLToPublish})
 	}
+	if rowsErr := pageRows.Err(); rowsErr != nil {
+		return nil, rowsErr
+	}
 	return pageList, nil
+}
+
+func isMissingPublishRevisionStoreError(err error) bool {
+	if err == nil {
+		return false
+	}
+	errorText := strings.ToLower(err.Error())
+	return strings.Contains(errorText, "no such table: revisions") ||
+		strings.Contains(errorText, "no such column: is_active")
 }
 
 func normalizePublishedHTML(html string) string {

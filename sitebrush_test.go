@@ -4310,6 +4310,39 @@ func TestFrozenSavePublishUpdatesPublishedStaticForGuests(t *testing.T) {
 	}
 }
 
+func TestFrozenPublishWithoutRevisionsUnfreezesUnchangedSite(t *testing.T) {
+	application, rawDB := newTestApplication(t)
+	_, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "admin@example.com", "old")
+	if err != nil {
+		t.Fatalf("insert user: %v", err)
+	}
+	pageHTML := "<html><body><h1>Published page</h1></body></html>"
+	_, err = rawDB.Exec(`INSERT INTO pages(domain,path,title,html,published) VALUES(?,?,?,?,1)`, "localhost", "/docs", "Docs", pageHTML)
+	if err != nil {
+		t.Fatalf("insert page: %v", err)
+	}
+	_, err = rawDB.Exec(`INSERT INTO published_pages(domain,path,title,html) VALUES(?,?,?,?)`, "localhost", "/docs", "Docs", pageHTML)
+	if err != nil {
+		t.Fatalf("insert published page: %v", err)
+	}
+	application.writePublishedStaticHTML("localhost", "/docs", pageHTML)
+	application.setDomainFrozenState(context.Background(), "localhost", 1)
+	if _, err := rawDB.Exec(`DROP TABLE revisions`); err != nil {
+		t.Fatalf("drop revisions table: %v", err)
+	}
+
+	publishRequest := httptest.NewRequest(http.MethodPost, "http://localhost:8080/docs?publish", nil)
+	publishRequest.AddCookie(newAdminSessionCookie(t, application, "admin@example.com"))
+	publishResponse := httptest.NewRecorder()
+	application.route(publishResponse, publishRequest)
+	if publishResponse.Code != http.StatusFound {
+		t.Fatalf("publish status = %d, body=%q", publishResponse.Code, publishResponse.Body.String())
+	}
+	if application.isDomainFrozen(context.Background(), "localhost") {
+		t.Fatal("unchanged site remained frozen after publish")
+	}
+}
+
 func TestAdminRequestUsesStaticPageWhenDomainIsNotFrozen(t *testing.T) {
 	application, rawDB := newTestApplication(t)
 	_, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "admin@example.com", "old")
