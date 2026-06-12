@@ -208,31 +208,6 @@
   var progressTimer = 0;
   var isSubmittingWithProgress = false;
 
-  function replaceDocumentWithResponse(responseText) {
-    document.open();
-    document.write(responseText);
-    document.close();
-  }
-
-  function submitWithFetch(profileForm) {
-    if (!window.fetch || !window.FormData) {
-      profileForm.submit();
-      return;
-    }
-    window.fetch(profileForm.action || window.location.href, {
-      method: profileForm.method || 'POST',
-      body: new window.FormData(profileForm),
-      credentials: 'same-origin',
-      headers: {
-        'X-Requested-With': 'fetch'
-      }
-    }).then(function handleProfileResponse(response) {
-      return response.text();
-    }).then(replaceDocumentWithResponse).catch(function fallBackToNativeSubmit() {
-      profileForm.submit();
-    });
-  }
-
   Array.prototype.forEach.call(profileForms, function bindProfileProgress(profileForm) {
     var submitButton = profileForm.querySelector('button[type="submit"]');
     profileForm.addEventListener('submit', function showProfileSubmitProgress(event) {
@@ -269,7 +244,7 @@
       }
       renderProgress();
       window.setTimeout(function submitCurrentProfileForm() {
-        submitWithFetch(profileForm);
+        profileForm.submit();
       }, 50);
     });
   });
