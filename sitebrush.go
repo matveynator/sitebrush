@@ -9402,7 +9402,7 @@ func billingActionStatusWasSaved(r *http.Request, status string) bool {
 	action := strings.TrimSpace(r.FormValue("billing_action"))
 	status = strings.TrimSpace(status)
 	switch action {
-	case "settings", "registration_settings", "demo_settings":
+	case "settings", "registration_settings", "service_mail_settings", "demo_settings":
 		return status == translationOrDefault(translations, "billing_status_settings_saved", "Billing settings saved.")
 	case "update_site":
 		domain := normalizeQuotaDomainName(r.FormValue("domain"))
@@ -9422,6 +9422,8 @@ func (a *App) handleBillingAction(r *http.Request) string {
 		return a.saveBillingSettingsFromForm(r)
 	case "registration_settings":
 		return a.saveBillingRegistrationSettingsFromForm(r)
+	case "service_mail_settings":
+		return a.saveBillingServiceMailSettingsFromForm(r)
 	case "demo_settings":
 		return a.saveBillingDemoSettingsFromForm(r)
 	case "create_site":
@@ -9467,6 +9469,7 @@ func (a *App) billingView(ctx context.Context, r *http.Request) (map[string]any,
 	serviceMailInstallations := store.ServiceMailInstallations(ctx)
 	serviceMailEvents := store.ServiceMailEvents(ctx, 50)
 	serviceMailBlocks := store.ServiceMailBlocks(ctx)
+	serviceMailRelayEnabled := store.ServiceMailRelayEnabled(ctx)
 	demoSettings := (demo.Store{DB: controlDatabase}).Settings(ctx)
 	billingDemoDomain := ""
 	if demoSettings.Enabled {
@@ -9490,6 +9493,7 @@ func (a *App) billingView(ctx context.Context, r *http.Request) (map[string]any,
 		"ServiceMailInstallations": serviceMailInstallations,
 		"ServiceMailEvents":        serviceMailEvents,
 		"ServiceMailBlocks":        serviceMailBlocks,
+		"ServiceMailRelayEnabled":  serviceMailRelayEnabled,
 		"ServiceMailLimits": map[string]int{
 			"InstallationHour":    serviceMailPerInstallationHourLimit,
 			"IPHour":              serviceMailPerIPHourLimit,
@@ -9647,6 +9651,18 @@ func (a *App) saveBillingRegistrationSettingsFromForm(r *http.Request) string {
 	}
 	defer controlDatabase.Close()
 	if err := (billing.Store{DB: controlDatabase}).SaveSettings(r.Context(), r.FormValue("auto_registration_enabled") == "1"); err != nil {
+		return err.Error()
+	}
+	return translationOrDefault(translationsForRequest(r), "billing_status_settings_saved", "Billing settings saved.")
+}
+
+func (a *App) saveBillingServiceMailSettingsFromForm(r *http.Request) string {
+	controlDatabase, err := a.openServerControlDatabase(r.Context())
+	if err != nil {
+		return err.Error()
+	}
+	defer controlDatabase.Close()
+	if err := (billing.Store{DB: controlDatabase}).SaveServiceMailSettings(r.Context(), r.FormValue("service_mail_relay_enabled") == "1"); err != nil {
 		return err.Error()
 	}
 	return translationOrDefault(translationsForRequest(r), "billing_status_settings_saved", "Billing settings saved.")
@@ -11536,6 +11552,9 @@ func (a *App) serviceMailRoute(ctx context.Context, domain, languageCode string)
 	if strings.EqualFold(strings.TrimSpace(os.Getenv("SITEBRUSH_SERVICE_MAIL_MODE")), "local") {
 		return serviceMailRoute{Reason: "local mail mode is configured"}
 	}
+	if !a.serviceMailRelayEnabled(ctx) {
+		return serviceMailRoute{Reason: "service mail relay is disabled"}
+	}
 	fromAddress := a.registrationEmailFromAddress(ctx, domain)
 	if a.serviceMailLocalSenderReady(ctx, domain, fromAddress, languageCode) {
 		return serviceMailRoute{Reason: "local mail DNS is ready"}
@@ -11551,6 +11570,16 @@ func (a *App) serviceMailRoute(ctx context.Context, domain, languageCode string)
 		return serviceMailRoute{UseRelay: true, RelayURL: configuredRelay, Reason: "configured relay"}
 	}
 	return serviceMailRoute{UseRelay: true, RelayURL: "https://" + relayDomain + serviceMailRelayPath, Reason: "local mail DNS is not ready"}
+}
+
+func (a *App) serviceMailRelayEnabled(ctx context.Context) bool {
+	controlDatabase, err := a.openServerControlDatabase(ctx)
+	if err != nil {
+		log.Printf("service mail relay setting unavailable: %v", err)
+		return true
+	}
+	defer controlDatabase.Close()
+	return (billing.Store{DB: controlDatabase}).ServiceMailRelayEnabled(ctx)
 }
 
 func (a *App) serviceMailLocalSenderReady(ctx context.Context, domain, fromAddress, languageCode string) bool {
@@ -11730,6 +11759,9 @@ func (a *App) handleServiceMailRelayRequest(ctx context.Context, r *http.Request
 		event.Error = message
 		_ = store.LogServiceMailEvent(ctx, event)
 		return message, statusCode
+	}
+	if !store.ServiceMailRelayEnabled(ctx) {
+		return fail("service mail relay is disabled", http.StatusForbidden)
 	}
 	if !serviceMailKindAllowed(request.CodeKind) {
 		return fail("service mail kind is not allowed", http.StatusForbidden)

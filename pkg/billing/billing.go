@@ -187,6 +187,7 @@ func Migrate(ctx context.Context, database *sql.DB) error {
 	now := time.Now().UTC().Format(time.RFC3339)
 	_, _ = database.ExecContext(ctx, `INSERT OR IGNORE INTO server_settings(name,value,updated_at) VALUES('auto_registration_enabled','1',?)`, now)
 	_, _ = database.ExecContext(ctx, `INSERT OR IGNORE INTO server_settings(name,value,updated_at) VALUES('deletion_backup_retention_days',?,?)`, strconv.Itoa(DefaultDeletionBackupRetentionDays), now)
+	_, _ = database.ExecContext(ctx, `INSERT OR IGNORE INTO server_settings(name,value,updated_at) VALUES('service_mail_relay_enabled','1',?)`, now)
 	_, _ = database.ExecContext(ctx, `INSERT OR IGNORE INTO site_service_plans(name,quota_bytes,site_limit,analytics_report_limit,price,currency,billing_period,is_default,created_at,updated_at) VALUES('Free',?,1,0,'0','USD','monthly',1,?,?)`,
 		DefaultStorageLimitBytes, now, now)
 	if err := setSchemaMigrationVersion(ctx, database, "billing", currentBillingSchemaVersion); err != nil {
@@ -388,6 +389,20 @@ func (store Store) SaveSettings(ctx context.Context, autoRegistrationEnabled boo
 	}
 	_, err := store.DB.ExecContext(ctx, `INSERT INTO server_settings(name,value,updated_at) VALUES(?,?,?) ON CONFLICT(name) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at`,
 		"auto_registration_enabled", settingValue, time.Now().UTC().Format(time.RFC3339))
+	return err
+}
+
+func (store Store) ServiceMailRelayEnabled(ctx context.Context) bool {
+	return SettingBool(ctx, store.DB, "service_mail_relay_enabled", true)
+}
+
+func (store Store) SaveServiceMailSettings(ctx context.Context, relayEnabled bool) error {
+	settingValue := "0"
+	if relayEnabled {
+		settingValue = "1"
+	}
+	_, err := store.DB.ExecContext(ctx, `INSERT INTO server_settings(name,value,updated_at) VALUES(?,?,?) ON CONFLICT(name) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at`,
+		"service_mail_relay_enabled", settingValue, time.Now().UTC().Format(time.RFC3339))
 	return err
 }
 
@@ -759,7 +774,6 @@ func (store Store) ServiceMailInstallations(ctx context.Context) []ServiceMailIn
 	if err != nil {
 		return nil
 	}
-	defer rows.Close()
 	installations := make([]ServiceMailInstallation, 0, 8)
 	for rows.Next() {
 		var installation ServiceMailInstallation
@@ -768,9 +782,12 @@ func (store Store) ServiceMailInstallations(ctx context.Context) []ServiceMailIn
 			continue
 		}
 		installation.Blocked = blocked != 0
-		installation.SentCount = store.CountServiceMailEventsSince(ctx, "installation_id", installation.InstallationID, time.Time{})
-		installation.ErrorCount = store.countServiceMailErrors(ctx, installation.InstallationID)
 		installations = append(installations, installation)
+	}
+	_ = rows.Close()
+	for installationIndex := range installations {
+		installations[installationIndex].SentCount = store.CountServiceMailEventsSince(ctx, "installation_id", installations[installationIndex].InstallationID, time.Time{})
+		installations[installationIndex].ErrorCount = store.countServiceMailErrors(ctx, installations[installationIndex].InstallationID)
 	}
 	return installations
 }

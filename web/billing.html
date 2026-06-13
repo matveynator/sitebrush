@@ -334,6 +334,17 @@
           <p class="text-muted">{{index .T "billing_service_mail_hint"}}</p>
         </div>
       </div>
+      <form method="post" action="?billing" class="billing-service-mail-settings-form" data-billing-ajax-save>
+        <input type="hidden" name="billing_action" value="service_mail_settings">
+        <label class="checkbox-row">
+          <input type="checkbox" name="service_mail_relay_enabled" value="1" {{if .ServiceMailRelayEnabled}}checked{{end}}>
+          <span>
+            {{index .T "billing_service_mail_enable_relay"}}
+            <small class="form-text text-muted">{{index .T "billing_service_mail_enable_relay_help"}}</small>
+          </span>
+        </label>
+        <button type="submit" class="btn btn-primary"><img src="/p/static/save-page.png" alt="">{{index .T "billing_save"}}</button>
+      </form>
       <div class="billing-plan-row">
         <span>{{index .T "billing_service_mail_limits"}}: {{index .ServiceMailLimits "InstallationHour"}}/{{index .T "billing_service_mail_installation"}}, {{index .ServiceMailLimits "IPHour"}}/IP, {{index .ServiceMailLimits "SubnetHour"}}/{{index .T "billing_service_mail_subnet"}}, {{index .ServiceMailLimits "RecipientHour"}}/{{index .T "billing_service_mail_recipient"}}, {{index .ServiceMailLimits "RecipientDomainHour"}}/{{index .T "billing_service_mail_recipient_domain"}}.</span>
       </div>
@@ -361,7 +372,7 @@
         <div class="empty">{{index .T "billing_service_mail_empty"}}</div>
         {{end}}
       </div>
-      <form method="post" action="?billing" class="billing-plan-form mt-3">
+      <form method="post" action="?billing" class="billing-service-mail-block-form mt-3">
         <input type="hidden" name="billing_action" value="add_service_mail_block">
         <label>{{index .T "billing_service_mail_block_scope"}}
           <select name="scope" class="form-control">
@@ -371,9 +382,16 @@
             <option value="recipient">recipient</option>
             <option value="recipient_domain">recipient_domain</option>
           </select>
+          <small class="form-text text-muted">{{index .T "billing_service_mail_block_scope_help"}}</small>
         </label>
-        <label>{{index .T "billing_service_mail_block_value"}} <input name="value" type="text" class="form-control" required></label>
-        <label>{{index .T "billing_service_mail_block_reason"}} <input name="reason" type="text" class="form-control"></label>
+        <label>{{index .T "billing_service_mail_block_value"}}
+          <input name="value" type="text" class="form-control" placeholder="{{index .T "billing_service_mail_block_value_placeholder"}}" required>
+          <small class="form-text text-muted">{{index .T "billing_service_mail_block_value_help"}}</small>
+        </label>
+        <label>{{index .T "billing_service_mail_block_reason"}}
+          <input name="reason" type="text" class="form-control" placeholder="{{index .T "billing_service_mail_block_reason_placeholder"}}">
+          <small class="form-text text-muted">{{index .T "billing_service_mail_block_reason_help"}}</small>
+        </label>
         <button type="submit" class="btn btn-outline-danger">{{index .T "billing_service_mail_add_block"}}</button>
       </form>
       {{if .ServiceMailBlocks}}

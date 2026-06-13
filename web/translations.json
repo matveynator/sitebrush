@@ -693,7 +693,14 @@
     "billing_service_mail_status_block_saved": "Service mail block saved.",
     "billing_service_mail_status_block_required": "Service mail block is not selected.",
     "billing_service_mail_status_block_deleted": "Service mail block deleted.",
-    "profile_email_delivery_fallback_summary": "The relay was unavailable, so SiteBrush used local SMTP fallback."
+    "profile_email_delivery_fallback_summary": "The relay was unavailable, so SiteBrush used local SMTP fallback.",
+    "billing_service_mail_enable_relay": "Use relay for service email codes",
+    "billing_service_mail_enable_relay_help": "When enabled, localhost, IP addresses, and domains without complete mail DNS send service codes through the configured SiteBrush relay. When disabled, SiteBrush uses only local SMTP.",
+    "billing_service_mail_block_scope_help": "Choose what the block applies to: one installation, one IP, a /24 subnet, a recipient address, or a recipient domain.",
+    "billing_service_mail_block_value_placeholder": "Example: 203.0.113.10 or user@example.com",
+    "billing_service_mail_block_value_help": "Use the exact value for the selected scope. Subnet format: 203.0.113.0/24. Recipient domain format: example.com.",
+    "billing_service_mail_block_reason_placeholder": "Example: too many failed deliveries",
+    "billing_service_mail_block_reason_help": "Optional note shown in the relay log so the block can be audited later."
   },
   "fr": {
     "setup_no_admin": "aucun administrateur pour l'instant",
@@ -1366,7 +1373,14 @@
     "billing_service_mail_status_block_saved": "Service mail block saved.",
     "billing_service_mail_status_block_required": "Service mail block is not selected.",
     "billing_service_mail_status_block_deleted": "Service mail block deleted.",
-    "profile_email_delivery_fallback_summary": "The relay was unavailable, so SiteBrush used local SMTP fallback."
+    "profile_email_delivery_fallback_summary": "The relay was unavailable, so SiteBrush used local SMTP fallback.",
+    "billing_service_mail_enable_relay": "Use relay for service email codes",
+    "billing_service_mail_enable_relay_help": "When enabled, localhost, IP addresses, and domains without complete mail DNS send service codes through the configured SiteBrush relay. When disabled, SiteBrush uses only local SMTP.",
+    "billing_service_mail_block_scope_help": "Choose what the block applies to: one installation, one IP, a /24 subnet, a recipient address, or a recipient domain.",
+    "billing_service_mail_block_value_placeholder": "Example: 203.0.113.10 or user@example.com",
+    "billing_service_mail_block_value_help": "Use the exact value for the selected scope. Subnet format: 203.0.113.0/24. Recipient domain format: example.com.",
+    "billing_service_mail_block_reason_placeholder": "Example: too many failed deliveries",
+    "billing_service_mail_block_reason_help": "Optional note shown in the relay log so the block can be audited later."
   },
   "ru": {
     "setup_no_admin": "пока нет администратора",
@@ -2062,7 +2076,14 @@
     "billing_service_mail_status_block_saved": "Блокировка служебной почты сохранена.",
     "billing_service_mail_status_block_required": "Блокировка служебной почты не выбрана.",
     "billing_service_mail_status_block_deleted": "Блокировка служебной почты удалена.",
-    "profile_email_delivery_fallback_summary": "Relay недоступен, поэтому SiteBrush использовал резервную локальную SMTP-отправку."
+    "profile_email_delivery_fallback_summary": "Relay недоступен, поэтому SiteBrush использовал резервную локальную SMTP-отправку.",
+    "billing_service_mail_enable_relay": "Использовать relay для служебных email-кодов",
+    "billing_service_mail_enable_relay_help": "Если включено, localhost, IP-адреса и домены без полной почтовой DNS-настройки отправляют служебные коды через SiteBrush relay. Если выключено, используется только локальная SMTP-отправка.",
+    "billing_service_mail_block_scope_help": "Выберите область блокировки: установка, IP, подсеть /24, адрес получателя или домен получателя.",
+    "billing_service_mail_block_value_placeholder": "Например: 203.0.113.10 или user@example.com",
+    "billing_service_mail_block_value_help": "Укажите точное значение для выбранной области. Подсеть: 203.0.113.0/24. Домен получателя: example.com.",
+    "billing_service_mail_block_reason_placeholder": "Например: слишком много ошибок доставки",
+    "billing_service_mail_block_reason_help": "Необязательная заметка для журнала relay, чтобы позже было понятно, почему добавлена блокировка."
   },
   "ja": {
     "setup_no_admin": "まだ管理者がいません",
@@ -2735,7 +2756,14 @@
     "billing_service_mail_status_block_saved": "Service mail block saved.",
     "billing_service_mail_status_block_required": "Service mail block is not selected.",
     "billing_service_mail_status_block_deleted": "Service mail block deleted.",
-    "profile_email_delivery_fallback_summary": "The relay was unavailable, so SiteBrush used local SMTP fallback."
+    "profile_email_delivery_fallback_summary": "The relay was unavailable, so SiteBrush used local SMTP fallback.",
+    "billing_service_mail_enable_relay": "Use relay for service email codes",
+    "billing_service_mail_enable_relay_help": "When enabled, localhost, IP addresses, and domains without complete mail DNS send service codes through the configured SiteBrush relay. When disabled, SiteBrush uses only local SMTP.",
+    "billing_service_mail_block_scope_help": "Choose what the block applies to: one installation, one IP, a /24 subnet, a recipient address, or a recipient domain.",
+    "billing_service_mail_block_value_placeholder": "Example: 203.0.113.10 or user@example.com",
+    "billing_service_mail_block_value_help": "Use the exact value for the selected scope. Subnet format: 203.0.113.0/24. Recipient domain format: example.com.",
+    "billing_service_mail_block_reason_placeholder": "Example: too many failed deliveries",
+    "billing_service_mail_block_reason_help": "Optional note shown in the relay log so the block can be audited later."
   },
   "it": {
     "setup_no_admin": "nessun amministratore ancora",
@@ -3408,7 +3436,14 @@
     "billing_service_mail_status_block_saved": "Service mail block saved.",
     "billing_service_mail_status_block_required": "Service mail block is not selected.",
     "billing_service_mail_status_block_deleted": "Service mail block deleted.",
-    "profile_email_delivery_fallback_summary": "The relay was unavailable, so SiteBrush used local SMTP fallback."
+    "profile_email_delivery_fallback_summary": "The relay was unavailable, so SiteBrush used local SMTP fallback.",
+    "billing_service_mail_enable_relay": "Use relay for service email codes",
+    "billing_service_mail_enable_relay_help": "When enabled, localhost, IP addresses, and domains without complete mail DNS send service codes through the configured SiteBrush relay. When disabled, SiteBrush uses only local SMTP.",
+    "billing_service_mail_block_scope_help": "Choose what the block applies to: one installation, one IP, a /24 subnet, a recipient address, or a recipient domain.",
+    "billing_service_mail_block_value_placeholder": "Example: 203.0.113.10 or user@example.com",
+    "billing_service_mail_block_value_help": "Use the exact value for the selected scope. Subnet format: 203.0.113.0/24. Recipient domain format: example.com.",
+    "billing_service_mail_block_reason_placeholder": "Example: too many failed deliveries",
+    "billing_service_mail_block_reason_help": "Optional note shown in the relay log so the block can be audited later."
   },
   "sv": {
     "setup_no_admin": "ingen administratör ännu",
@@ -4081,7 +4116,14 @@
     "billing_service_mail_status_block_saved": "Service mail block saved.",
     "billing_service_mail_status_block_required": "Service mail block is not selected.",
     "billing_service_mail_status_block_deleted": "Service mail block deleted.",
-    "profile_email_delivery_fallback_summary": "The relay was unavailable, so SiteBrush used local SMTP fallback."
+    "profile_email_delivery_fallback_summary": "The relay was unavailable, so SiteBrush used local SMTP fallback.",
+    "billing_service_mail_enable_relay": "Use relay for service email codes",
+    "billing_service_mail_enable_relay_help": "When enabled, localhost, IP addresses, and domains without complete mail DNS send service codes through the configured SiteBrush relay. When disabled, SiteBrush uses only local SMTP.",
+    "billing_service_mail_block_scope_help": "Choose what the block applies to: one installation, one IP, a /24 subnet, a recipient address, or a recipient domain.",
+    "billing_service_mail_block_value_placeholder": "Example: 203.0.113.10 or user@example.com",
+    "billing_service_mail_block_value_help": "Use the exact value for the selected scope. Subnet format: 203.0.113.0/24. Recipient domain format: example.com.",
+    "billing_service_mail_block_reason_placeholder": "Example: too many failed deliveries",
+    "billing_service_mail_block_reason_help": "Optional note shown in the relay log so the block can be audited later."
   },
   "fi": {
     "setup_no_admin": "ei vielä järjestelmänvalvojaa",
@@ -4754,7 +4796,14 @@
     "billing_service_mail_status_block_saved": "Service mail block saved.",
     "billing_service_mail_status_block_required": "Service mail block is not selected.",
     "billing_service_mail_status_block_deleted": "Service mail block deleted.",
-    "profile_email_delivery_fallback_summary": "The relay was unavailable, so SiteBrush used local SMTP fallback."
+    "profile_email_delivery_fallback_summary": "The relay was unavailable, so SiteBrush used local SMTP fallback.",
+    "billing_service_mail_enable_relay": "Use relay for service email codes",
+    "billing_service_mail_enable_relay_help": "When enabled, localhost, IP addresses, and domains without complete mail DNS send service codes through the configured SiteBrush relay. When disabled, SiteBrush uses only local SMTP.",
+    "billing_service_mail_block_scope_help": "Choose what the block applies to: one installation, one IP, a /24 subnet, a recipient address, or a recipient domain.",
+    "billing_service_mail_block_value_placeholder": "Example: 203.0.113.10 or user@example.com",
+    "billing_service_mail_block_value_help": "Use the exact value for the selected scope. Subnet format: 203.0.113.0/24. Recipient domain format: example.com.",
+    "billing_service_mail_block_reason_placeholder": "Example: too many failed deliveries",
+    "billing_service_mail_block_reason_help": "Optional note shown in the relay log so the block can be audited later."
   },
   "mn": {
     "setup_no_admin": "админ хараахан алга",
@@ -5427,7 +5476,14 @@
     "billing_service_mail_status_block_saved": "Service mail block saved.",
     "billing_service_mail_status_block_required": "Service mail block is not selected.",
     "billing_service_mail_status_block_deleted": "Service mail block deleted.",
-    "profile_email_delivery_fallback_summary": "The relay was unavailable, so SiteBrush used local SMTP fallback."
+    "profile_email_delivery_fallback_summary": "The relay was unavailable, so SiteBrush used local SMTP fallback.",
+    "billing_service_mail_enable_relay": "Use relay for service email codes",
+    "billing_service_mail_enable_relay_help": "When enabled, localhost, IP addresses, and domains without complete mail DNS send service codes through the configured SiteBrush relay. When disabled, SiteBrush uses only local SMTP.",
+    "billing_service_mail_block_scope_help": "Choose what the block applies to: one installation, one IP, a /24 subnet, a recipient address, or a recipient domain.",
+    "billing_service_mail_block_value_placeholder": "Example: 203.0.113.10 or user@example.com",
+    "billing_service_mail_block_value_help": "Use the exact value for the selected scope. Subnet format: 203.0.113.0/24. Recipient domain format: example.com.",
+    "billing_service_mail_block_reason_placeholder": "Example: too many failed deliveries",
+    "billing_service_mail_block_reason_help": "Optional note shown in the relay log so the block can be audited later."
   },
   "zh": {
     "setup_no_admin": "尚无管理员",
@@ -6100,7 +6156,14 @@
     "billing_service_mail_status_block_saved": "Service mail block saved.",
     "billing_service_mail_status_block_required": "Service mail block is not selected.",
     "billing_service_mail_status_block_deleted": "Service mail block deleted.",
-    "profile_email_delivery_fallback_summary": "The relay was unavailable, so SiteBrush used local SMTP fallback."
+    "profile_email_delivery_fallback_summary": "The relay was unavailable, so SiteBrush used local SMTP fallback.",
+    "billing_service_mail_enable_relay": "Use relay for service email codes",
+    "billing_service_mail_enable_relay_help": "When enabled, localhost, IP addresses, and domains without complete mail DNS send service codes through the configured SiteBrush relay. When disabled, SiteBrush uses only local SMTP.",
+    "billing_service_mail_block_scope_help": "Choose what the block applies to: one installation, one IP, a /24 subnet, a recipient address, or a recipient domain.",
+    "billing_service_mail_block_value_placeholder": "Example: 203.0.113.10 or user@example.com",
+    "billing_service_mail_block_value_help": "Use the exact value for the selected scope. Subnet format: 203.0.113.0/24. Recipient domain format: example.com.",
+    "billing_service_mail_block_reason_placeholder": "Example: too many failed deliveries",
+    "billing_service_mail_block_reason_help": "Optional note shown in the relay log so the block can be audited later."
   },
   "he": {
     "setup_no_admin": "עדיין אין מנהל",
@@ -6773,7 +6836,14 @@
     "billing_service_mail_status_block_saved": "Service mail block saved.",
     "billing_service_mail_status_block_required": "Service mail block is not selected.",
     "billing_service_mail_status_block_deleted": "Service mail block deleted.",
-    "profile_email_delivery_fallback_summary": "The relay was unavailable, so SiteBrush used local SMTP fallback."
+    "profile_email_delivery_fallback_summary": "The relay was unavailable, so SiteBrush used local SMTP fallback.",
+    "billing_service_mail_enable_relay": "Use relay for service email codes",
+    "billing_service_mail_enable_relay_help": "When enabled, localhost, IP addresses, and domains without complete mail DNS send service codes through the configured SiteBrush relay. When disabled, SiteBrush uses only local SMTP.",
+    "billing_service_mail_block_scope_help": "Choose what the block applies to: one installation, one IP, a /24 subnet, a recipient address, or a recipient domain.",
+    "billing_service_mail_block_value_placeholder": "Example: 203.0.113.10 or user@example.com",
+    "billing_service_mail_block_value_help": "Use the exact value for the selected scope. Subnet format: 203.0.113.0/24. Recipient domain format: example.com.",
+    "billing_service_mail_block_reason_placeholder": "Example: too many failed deliveries",
+    "billing_service_mail_block_reason_help": "Optional note shown in the relay log so the block can be audited later."
   },
   "fa": {
     "setup_no_admin": "هنوز مدیر وجود ندارد",
@@ -7446,7 +7516,14 @@
     "billing_service_mail_status_block_saved": "Service mail block saved.",
     "billing_service_mail_status_block_required": "Service mail block is not selected.",
     "billing_service_mail_status_block_deleted": "Service mail block deleted.",
-    "profile_email_delivery_fallback_summary": "The relay was unavailable, so SiteBrush used local SMTP fallback."
+    "profile_email_delivery_fallback_summary": "The relay was unavailable, so SiteBrush used local SMTP fallback.",
+    "billing_service_mail_enable_relay": "Use relay for service email codes",
+    "billing_service_mail_enable_relay_help": "When enabled, localhost, IP addresses, and domains without complete mail DNS send service codes through the configured SiteBrush relay. When disabled, SiteBrush uses only local SMTP.",
+    "billing_service_mail_block_scope_help": "Choose what the block applies to: one installation, one IP, a /24 subnet, a recipient address, or a recipient domain.",
+    "billing_service_mail_block_value_placeholder": "Example: 203.0.113.10 or user@example.com",
+    "billing_service_mail_block_value_help": "Use the exact value for the selected scope. Subnet format: 203.0.113.0/24. Recipient domain format: example.com.",
+    "billing_service_mail_block_reason_placeholder": "Example: too many failed deliveries",
+    "billing_service_mail_block_reason_help": "Optional note shown in the relay log so the block can be audited later."
   },
   "de": {
     "setup_no_admin": "noch kein Administrator",
@@ -8119,7 +8196,14 @@
     "billing_service_mail_status_block_saved": "Service mail block saved.",
     "billing_service_mail_status_block_required": "Service mail block is not selected.",
     "billing_service_mail_status_block_deleted": "Service mail block deleted.",
-    "profile_email_delivery_fallback_summary": "The relay was unavailable, so SiteBrush used local SMTP fallback."
+    "profile_email_delivery_fallback_summary": "The relay was unavailable, so SiteBrush used local SMTP fallback.",
+    "billing_service_mail_enable_relay": "Use relay for service email codes",
+    "billing_service_mail_enable_relay_help": "When enabled, localhost, IP addresses, and domains without complete mail DNS send service codes through the configured SiteBrush relay. When disabled, SiteBrush uses only local SMTP.",
+    "billing_service_mail_block_scope_help": "Choose what the block applies to: one installation, one IP, a /24 subnet, a recipient address, or a recipient domain.",
+    "billing_service_mail_block_value_placeholder": "Example: 203.0.113.10 or user@example.com",
+    "billing_service_mail_block_value_help": "Use the exact value for the selected scope. Subnet format: 203.0.113.0/24. Recipient domain format: example.com.",
+    "billing_service_mail_block_reason_placeholder": "Example: too many failed deliveries",
+    "billing_service_mail_block_reason_help": "Optional note shown in the relay log so the block can be audited later."
   },
   "tr": {
     "setup_no_admin": "henüz yönetici yok",
@@ -8792,7 +8876,14 @@
     "billing_service_mail_status_block_saved": "Service mail block saved.",
     "billing_service_mail_status_block_required": "Service mail block is not selected.",
     "billing_service_mail_status_block_deleted": "Service mail block deleted.",
-    "profile_email_delivery_fallback_summary": "The relay was unavailable, so SiteBrush used local SMTP fallback."
+    "profile_email_delivery_fallback_summary": "The relay was unavailable, so SiteBrush used local SMTP fallback.",
+    "billing_service_mail_enable_relay": "Use relay for service email codes",
+    "billing_service_mail_enable_relay_help": "When enabled, localhost, IP addresses, and domains without complete mail DNS send service codes through the configured SiteBrush relay. When disabled, SiteBrush uses only local SMTP.",
+    "billing_service_mail_block_scope_help": "Choose what the block applies to: one installation, one IP, a /24 subnet, a recipient address, or a recipient domain.",
+    "billing_service_mail_block_value_placeholder": "Example: 203.0.113.10 or user@example.com",
+    "billing_service_mail_block_value_help": "Use the exact value for the selected scope. Subnet format: 203.0.113.0/24. Recipient domain format: example.com.",
+    "billing_service_mail_block_reason_placeholder": "Example: too many failed deliveries",
+    "billing_service_mail_block_reason_help": "Optional note shown in the relay log so the block can be audited later."
   },
   "kk": {
     "setup_no_admin": "әзірге әкімші жоқ",
@@ -9465,7 +9556,14 @@
     "billing_service_mail_status_block_saved": "Service mail block saved.",
     "billing_service_mail_status_block_required": "Service mail block is not selected.",
     "billing_service_mail_status_block_deleted": "Service mail block deleted.",
-    "profile_email_delivery_fallback_summary": "The relay was unavailable, so SiteBrush used local SMTP fallback."
+    "profile_email_delivery_fallback_summary": "The relay was unavailable, so SiteBrush used local SMTP fallback.",
+    "billing_service_mail_enable_relay": "Use relay for service email codes",
+    "billing_service_mail_enable_relay_help": "When enabled, localhost, IP addresses, and domains without complete mail DNS send service codes through the configured SiteBrush relay. When disabled, SiteBrush uses only local SMTP.",
+    "billing_service_mail_block_scope_help": "Choose what the block applies to: one installation, one IP, a /24 subnet, a recipient address, or a recipient domain.",
+    "billing_service_mail_block_value_placeholder": "Example: 203.0.113.10 or user@example.com",
+    "billing_service_mail_block_value_help": "Use the exact value for the selected scope. Subnet format: 203.0.113.0/24. Recipient domain format: example.com.",
+    "billing_service_mail_block_reason_placeholder": "Example: too many failed deliveries",
+    "billing_service_mail_block_reason_help": "Optional note shown in the relay log so the block can be audited later."
   },
   "es": {
     "setup_no_admin": "aún no hay administrador",
@@ -10138,7 +10236,14 @@
     "billing_service_mail_status_block_saved": "Service mail block saved.",
     "billing_service_mail_status_block_required": "Service mail block is not selected.",
     "billing_service_mail_status_block_deleted": "Service mail block deleted.",
-    "profile_email_delivery_fallback_summary": "The relay was unavailable, so SiteBrush used local SMTP fallback."
+    "profile_email_delivery_fallback_summary": "The relay was unavailable, so SiteBrush used local SMTP fallback.",
+    "billing_service_mail_enable_relay": "Use relay for service email codes",
+    "billing_service_mail_enable_relay_help": "When enabled, localhost, IP addresses, and domains without complete mail DNS send service codes through the configured SiteBrush relay. When disabled, SiteBrush uses only local SMTP.",
+    "billing_service_mail_block_scope_help": "Choose what the block applies to: one installation, one IP, a /24 subnet, a recipient address, or a recipient domain.",
+    "billing_service_mail_block_value_placeholder": "Example: 203.0.113.10 or user@example.com",
+    "billing_service_mail_block_value_help": "Use the exact value for the selected scope. Subnet format: 203.0.113.0/24. Recipient domain format: example.com.",
+    "billing_service_mail_block_reason_placeholder": "Example: too many failed deliveries",
+    "billing_service_mail_block_reason_help": "Optional note shown in the relay log so the block can be audited later."
   },
   "pt": {
     "setup_no_admin": "ainda não há administrador",
@@ -10811,6 +10916,13 @@
     "billing_service_mail_status_block_saved": "Service mail block saved.",
     "billing_service_mail_status_block_required": "Service mail block is not selected.",
     "billing_service_mail_status_block_deleted": "Service mail block deleted.",
-    "profile_email_delivery_fallback_summary": "The relay was unavailable, so SiteBrush used local SMTP fallback."
+    "profile_email_delivery_fallback_summary": "The relay was unavailable, so SiteBrush used local SMTP fallback.",
+    "billing_service_mail_enable_relay": "Use relay for service email codes",
+    "billing_service_mail_enable_relay_help": "When enabled, localhost, IP addresses, and domains without complete mail DNS send service codes through the configured SiteBrush relay. When disabled, SiteBrush uses only local SMTP.",
+    "billing_service_mail_block_scope_help": "Choose what the block applies to: one installation, one IP, a /24 subnet, a recipient address, or a recipient domain.",
+    "billing_service_mail_block_value_placeholder": "Example: 203.0.113.10 or user@example.com",
+    "billing_service_mail_block_value_help": "Use the exact value for the selected scope. Subnet format: 203.0.113.0/24. Recipient domain format: example.com.",
+    "billing_service_mail_block_reason_placeholder": "Example: too many failed deliveries",
+    "billing_service_mail_block_reason_help": "Optional note shown in the relay log so the block can be audited later."
   }
 }
