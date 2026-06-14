@@ -5,6 +5,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/ecdh"
 	"crypto/ecdsa"
 	"crypto/ed25519"
 	"crypto/elliptic"
@@ -515,6 +516,7 @@ func TestServiceMailRelayRejectsLoginCodeForUnverifiedRecipient(t *testing.T) {
 		LanguageCode: "en",
 		CreatedAt:    time.Now().UTC().Format(time.RFC3339),
 	})
+	registerServiceMailInstallationForTest(t, application, request)
 	httpRequest := httptest.NewRequest(http.MethodPost, "https://sitebrush.com/?service_mail_relay", nil)
 	status, statusCode := application.handleServiceMailRelayRequest(context.Background(), httpRequest, request, "203.0.113.10")
 	if statusCode != http.StatusForbidden {
@@ -522,6 +524,27 @@ func TestServiceMailRelayRejectsLoginCodeForUnverifiedRecipient(t *testing.T) {
 	}
 	if !strings.Contains(status, "not verified") {
 		t.Fatalf("status = %q, want recipient verification error", status)
+	}
+}
+
+func TestServiceMailRelayRejectsUnregisteredInstallation(t *testing.T) {
+	application, _ := newTestApplication(t)
+	request := signedServiceMailRequestForTest(t, application, serviceMailRequest{
+		Version:      1,
+		SourceDomain: "customer.example",
+		Recipient:    "owner@example.net",
+		CodeKind:     "login_code",
+		SecretValue:  "123456",
+		LanguageCode: "en",
+		CreatedAt:    time.Now().UTC().Format(time.RFC3339),
+	})
+	httpRequest := httptest.NewRequest(http.MethodPost, "https://sitebrush.com/?service_mail_relay", nil)
+	status, statusCode := application.handleServiceMailRelayRequest(context.Background(), httpRequest, request, "203.0.113.10")
+	if statusCode != http.StatusForbidden {
+		t.Fatalf("status = %d %q, want forbidden", statusCode, status)
+	}
+	if !strings.Contains(status, "not registered") {
+		t.Fatalf("status = %q, want registration error", status)
 	}
 }
 
@@ -544,6 +567,9 @@ func TestServiceMailRelayAllowsLoginCodeForVerifiedRecipient(t *testing.T) {
 	if err := store.UpsertServiceMailRecipient(context.Background(), request.InstallationID, request.Recipient, "verified", "confirmed"); err != nil {
 		t.Fatal(err)
 	}
+	if err := store.UpsertServiceMailInstallation(context.Background(), request.InstallationID, request.PublicKey, "203.0.113.10", request.SourceDomain); err != nil {
+		t.Fatal(err)
+	}
 	if err := controlDatabase.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -562,6 +588,58 @@ func TestServiceMailRelayAllowsLoginCodeForVerifiedRecipient(t *testing.T) {
 	}
 	if sentMessage.From != "SiteBrush <sitebrush@sitebrush.com>" {
 		t.Fatalf("from = %q", sentMessage.From)
+	}
+}
+
+func TestServiceMailEncryptedRelayRequestRoundTrip(t *testing.T) {
+	relayPrivateKey, err := ecdh.X25519().GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("SITEBRUSH_SERVICE_MAIL_RELAY_PUBLIC_KEY_SITEBRUSH_COM", base64.StdEncoding.EncodeToString(relayPrivateKey.PublicKey().Bytes()))
+	t.Setenv("SITEBRUSH_SERVICE_MAIL_RELAY_PRIVATE_KEY_SITEBRUSH_COM", base64.StdEncoding.EncodeToString(relayPrivateKey.Bytes()))
+	request := serviceMailRequest{
+		Version:        1,
+		InstallationID: "installation-1",
+		PublicKey:      base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{7}, ed25519.PublicKeySize)),
+		SourceDomain:   "customer.example",
+		Recipient:      "owner@example.net",
+		CodeKind:       "login_code",
+		SecretValue:    "123456",
+		LanguageCode:   "en",
+		CreatedAt:      time.Now().UTC().Format(time.RFC3339),
+		Signature:      base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{9}, ed25519.SignatureSize)),
+	}
+	plainPayload, err := json.Marshal(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encryptedPayload, err := serviceMailEncryptPayloadForRelay("https://sitebrush.com/?service_mail_relay", plainPayload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(encryptedPayload, []byte("123456")) {
+		t.Fatalf("encrypted payload contains secret: %s", string(encryptedPayload))
+	}
+	decodedRequest, err := serviceMailDecodeRelayRequest(encryptedPayload, "sitebrush.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decodedRequest.SecretValue != request.SecretValue || decodedRequest.Recipient != request.Recipient {
+		t.Fatalf("decoded request = %+v", decodedRequest)
+	}
+}
+
+func registerServiceMailInstallationForTest(t *testing.T, application *App, request serviceMailRequest) {
+	t.Helper()
+	controlDatabase, err := application.openServerControlDatabase(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer controlDatabase.Close()
+	store := billing.Store{DB: controlDatabase}
+	if err := store.UpsertServiceMailInstallation(context.Background(), request.InstallationID, request.PublicKey, "203.0.113.10", request.SourceDomain); err != nil {
+		t.Fatal(err)
 	}
 }
 

@@ -346,7 +346,7 @@
         <button type="submit" class="btn btn-primary"><img src="/p/static/save-page.png" alt="">{{index .T "billing_save"}}</button>
       </form>
       <div class="billing-plan-row">
-        <span>{{index .T "billing_service_mail_limits"}}: {{index .ServiceMailLimits "InstallationHour"}}/{{index .T "billing_service_mail_installation"}}, {{index .ServiceMailLimits "IPHour"}}/IP, {{index .ServiceMailLimits "SubnetHour"}}/{{index .T "billing_service_mail_subnet"}}, {{index .ServiceMailLimits "RecipientHour"}}/{{index .T "billing_service_mail_recipient"}}, {{index .ServiceMailLimits "RecipientDomainHour"}}/{{index .T "billing_service_mail_recipient_domain"}}.</span>
+        <span>{{index .T "billing_service_mail_limits"}}: {{index .ServiceMailLimits "NewInstallationHour"}}/new installation, {{index .ServiceMailLimits "InstallationHour"}}/{{index .T "billing_service_mail_installation"}}, {{index .ServiceMailLimits "SourceDomainHour"}}/source domain, {{index .ServiceMailLimits "IPHour"}}/IP, {{index .ServiceMailLimits "SubnetHour"}}/{{index .T "billing_service_mail_subnet"}}, {{index .ServiceMailLimits "RecipientHour"}}/{{index .T "billing_service_mail_recipient"}}, {{index .ServiceMailLimits "RecipientDomainHour"}}/{{index .T "billing_service_mail_recipient_domain"}}.</span>
       </div>
       <div class="billing-site-list">
         {{range .ServiceMailInstallations}}

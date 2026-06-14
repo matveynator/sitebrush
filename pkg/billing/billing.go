@@ -660,6 +660,16 @@ func (store Store) ServiceMailInstallationPublicKey(ctx context.Context, install
 	return publicKey, err == nil && publicKey != ""
 }
 
+func (store Store) ServiceMailInstallationFirstSeenAt(ctx context.Context, installationID string) (time.Time, bool) {
+	var firstSeenText string
+	err := store.DB.QueryRowContext(ctx, `SELECT first_seen_at FROM service_mail_installations WHERE installation_id=?`, strings.TrimSpace(installationID)).Scan(&firstSeenText)
+	if err != nil {
+		return time.Time{}, false
+	}
+	firstSeenAt, parseErr := time.Parse(time.RFC3339, strings.TrimSpace(firstSeenText))
+	return firstSeenAt, parseErr == nil
+}
+
 func (store Store) ServiceMailInstallationBlocked(ctx context.Context, installationID string) bool {
 	var blocked int
 	_ = store.DB.QueryRowContext(ctx, `SELECT blocked FROM service_mail_installations WHERE installation_id=?`, strings.TrimSpace(installationID)).Scan(&blocked)
@@ -744,7 +754,7 @@ func netParseIPv4(rawIP string) string {
 
 func (store Store) CountServiceMailEventsSince(ctx context.Context, columnName, value string, since time.Time) int {
 	switch columnName {
-	case "installation_id", "source_ip", "recipient", "recipient_domain":
+	case "installation_id", "source_domain", "source_ip", "recipient", "recipient_domain":
 	default:
 		return 0
 	}

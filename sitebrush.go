@@ -5,6 +5,9 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/ecdh"
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha1"
@@ -106,11 +109,16 @@ const pagePasswordSessionTTL = time.Hour
 const serviceMailRelayPath = "/?service_mail_relay"
 const serviceMailRelayTimeout = 12 * time.Second
 const serviceMailPerInstallationHourLimit = 120
+const serviceMailNewInstallationHourLimit = 10
 const serviceMailPerIPHourLimit = 240
 const serviceMailPerSubnetHourLimit = 480
+const serviceMailPerSourceDomainHourLimit = 120
 const serviceMailPerRecipientHourLimit = 12
 const serviceMailPerRecipientDomainHourLimit = 300
 const serviceMailNewRecipientDayLimit = 3
+
+var sitebrushComServiceMailRelayPublicKey = ""
+var sitebrushRuServiceMailRelayPublicKey = ""
 
 // App keeps only explicit dependencies to stay readable and easy to swap.
 type App struct {
@@ -158,10 +166,19 @@ type serviceMailRequest struct {
 	Signature      string `json:"signature"`
 }
 
+type serviceMailEncryptedEnvelope struct {
+	Version            int    `json:"version"`
+	Encrypted          bool   `json:"encrypted"`
+	RelayDomain        string `json:"relay_domain"`
+	EphemeralPublicKey string `json:"ephemeral_public_key"`
+	Nonce              string `json:"nonce"`
+	Ciphertext         string `json:"ciphertext"`
+}
+
 type serviceMailRoute struct {
-	UseRelay bool
-	RelayURL string
-	Reason   string
+	UseRelay  bool
+	RelayURLs []string
+	Reason    string
 }
 
 type profileEmailDeliveryView struct {
@@ -9497,6 +9514,8 @@ func (a *App) billingView(ctx context.Context, r *http.Request) (map[string]any,
 		"ServiceMailRelayEnabled":  serviceMailRelayEnabled,
 		"ServiceMailLimits": map[string]int{
 			"InstallationHour":    serviceMailPerInstallationHourLimit,
+			"NewInstallationHour": serviceMailNewInstallationHourLimit,
+			"SourceDomainHour":    serviceMailPerSourceDomainHourLimit,
 			"IPHour":              serviceMailPerIPHourLimit,
 			"SubnetHour":          serviceMailPerSubnetHourLimit,
 			"RecipientHour":       serviceMailPerRecipientHourLimit,
@@ -11463,15 +11482,16 @@ func (a *App) enqueueServiceEmail(ctx context.Context, r *http.Request, codeKind
 		LanguageCode: strings.TrimSpace(languageCode),
 		CreatedAt:    time.Now().UTC().Format(time.RFC3339),
 	}
-	if err := a.sendServiceMailThroughRelay(ctx, route.RelayURL, &request); err != nil {
-		log.Printf("service mail relay failed domain=%s relay=%s kind=%s to=%s reason=%s error=%v", domain, route.RelayURL, codeKind, recipient, route.Reason, err)
+	relayURL, err := a.sendServiceMailThroughRelayChain(ctx, route, &request)
+	if err != nil {
+		log.Printf("service mail relay failed domain=%s relay=%s kind=%s to=%s reason=%s error=%v", domain, route.primaryRelayURL(), codeKind, recipient, route.Reason, err)
 		if !a.serviceMailLocalFallbackAllowed(ctx, domain, languageCode) {
 			return fmt.Errorf("service mail relay failed and local SMTP fallback is not configured: %w", err)
 		}
 		log.Printf("service mail local SMTP fallback used domain=%s kind=%s to=%s", domain, codeKind, recipient)
 		return a.enqueueEmail(ctx, message)
 	}
-	log.Printf("service mail relayed domain=%s relay=%s kind=%s to=%s reason=%s", domain, route.RelayURL, codeKind, recipient, route.Reason)
+	log.Printf("service mail relayed domain=%s relay=%s kind=%s to=%s reason=%s", domain, relayURL, codeKind, recipient, route.Reason)
 	return nil
 }
 
@@ -11497,9 +11517,10 @@ func (a *App) sendServiceEmailNow(ctx context.Context, r *http.Request, codeKind
 		LanguageCode: strings.TrimSpace(languageCode),
 		CreatedAt:    time.Now().UTC().Format(time.RFC3339),
 	}
-	if err := a.sendServiceMailThroughRelay(sendCtx, route.RelayURL, &request); err != nil {
+	relayURL, err := a.sendServiceMailThroughRelayChain(sendCtx, route, &request)
+	if err != nil {
 		warning := fmt.Sprintf("service mail relay failed (%s); fallback to local SMTP", err.Error())
-		log.Printf("service mail relay failed domain=%s relay=%s kind=%s to=%s reason=%s error=%v", domain, route.RelayURL, codeKind, recipient, route.Reason, err)
+		log.Printf("service mail relay failed domain=%s relay=%s kind=%s to=%s reason=%s error=%v", domain, route.primaryRelayURL(), codeKind, recipient, route.Reason, err)
 		if !a.serviceMailLocalFallbackAllowed(ctx, domain, languageCode) {
 			return emailDeliveryResult{Message: message, Err: fmt.Errorf("service mail relay failed and local SMTP fallback is not configured: %w", err)}
 		}
@@ -11510,7 +11531,7 @@ func (a *App) sendServiceEmailNow(ctx context.Context, r *http.Request, codeKind
 		}
 		return result
 	}
-	log.Printf("service mail relayed domain=%s relay=%s kind=%s to=%s reason=%s", domain, route.RelayURL, codeKind, recipient, route.Reason)
+	log.Printf("service mail relayed domain=%s relay=%s kind=%s to=%s reason=%s", domain, relayURL, codeKind, recipient, route.Reason)
 	return emailDeliveryResult{Message: message}
 }
 
@@ -11528,8 +11549,8 @@ func (a *App) markServiceMailRecipientVerified(ctx context.Context, domain, reci
 		LanguageCode: strings.TrimSpace(languageCode),
 		CreatedAt:    time.Now().UTC().Format(time.RFC3339),
 	}
-	if err := a.sendServiceMailThroughRelay(ctx, route.RelayURL, &request); err != nil {
-		log.Printf("service mail recipient verification failed domain=%s relay=%s to=%s error=%v", domain, route.RelayURL, recipient, err)
+	if _, err := a.sendServiceMailThroughRelayChain(ctx, route, &request); err != nil {
+		log.Printf("service mail recipient verification failed domain=%s relay=%s to=%s error=%v", domain, route.primaryRelayURL(), recipient, err)
 	}
 }
 
@@ -11595,21 +11616,25 @@ func (a *App) serviceMailRoute(ctx context.Context, domain, languageCode string)
 	if !a.serviceMailRelayEnabled(ctx) {
 		return serviceMailRoute{Reason: "service mail relay is disabled"}
 	}
-	fromAddress := a.registrationEmailFromAddress(ctx, domain)
-	if a.serviceMailLocalSenderReady(ctx, domain, fromAddress, languageCode) {
-		return serviceMailRoute{Reason: "local mail DNS is ready"}
-	}
-	if parentDomain, found := a.billingParentDomainForThirdLevelSite(ctx, domain); found && a.serviceMailLocalSenderReady(ctx, parentDomain, a.emailFromAddress(parentDomain), languageCode) {
-		return serviceMailRoute{UseRelay: true, RelayURL: "https://" + parentDomain + serviceMailRelayPath, Reason: "owner relay mail DNS is ready"}
-	}
-	relayDomain := "sitebrush.com"
-	if a.shouldUseRussianServiceMailRelay(ctx, domain) {
-		relayDomain = "sitebrush.ru"
-	}
 	if configuredRelay := strings.TrimSpace(os.Getenv("SITEBRUSH_SERVICE_MAIL_RELAY_URL")); configuredRelay != "" {
-		return serviceMailRoute{UseRelay: true, RelayURL: configuredRelay, Reason: "configured relay"}
+		return serviceMailRoute{UseRelay: true, RelayURLs: []string{configuredRelay}, Reason: "configured relay"}
 	}
-	return serviceMailRoute{UseRelay: true, RelayURL: "https://" + relayDomain + serviceMailRelayPath, Reason: "local mail DNS is not ready"}
+	relayDomains := []string{"sitebrush.com", "sitebrush.ru"}
+	if a.shouldUseRussianServiceMailRelay(ctx, domain) {
+		relayDomains = []string{"sitebrush.ru", "sitebrush.com"}
+	}
+	relayURLs := make([]string, 0, len(relayDomains))
+	for _, relayDomain := range relayDomains {
+		relayURLs = append(relayURLs, "https://"+relayDomain+serviceMailRelayPath)
+	}
+	return serviceMailRoute{UseRelay: true, RelayURLs: relayURLs, Reason: "central service mail relay"}
+}
+
+func (route serviceMailRoute) primaryRelayURL() string {
+	if len(route.RelayURLs) == 0 {
+		return ""
+	}
+	return route.RelayURLs[0]
 }
 
 func (a *App) serviceMailRelayEnabled(ctx context.Context) bool {
@@ -11716,14 +11741,230 @@ func domainHasDMARCRecord(domain string) bool {
 	return false
 }
 
+func serviceMailEncryptPayloadForRelay(relayURL string, plainPayload []byte) ([]byte, error) {
+	publicKeyBytes, found := serviceMailRelayPublicKeyForURL(relayURL)
+	if !found {
+		return plainPayload, nil
+	}
+	relayPublicKey, err := ecdh.X25519().NewPublicKey(publicKeyBytes)
+	if err != nil {
+		return nil, err
+	}
+	ephemeralPrivateKey, err := ecdh.X25519().GenerateKey(rand.Reader)
+	if err != nil {
+		return nil, err
+	}
+	sharedSecret, err := ephemeralPrivateKey.ECDH(relayPublicKey)
+	if err != nil {
+		return nil, err
+	}
+	encryptionKey := sha256.Sum256(append([]byte("sitebrush service mail relay\n"), sharedSecret...))
+	block, err := aes.NewCipher(encryptionKey[:])
+	if err != nil {
+		return nil, err
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, err
+	}
+	nonce := make([]byte, gcm.NonceSize())
+	if _, err := rand.Read(nonce); err != nil {
+		return nil, err
+	}
+	envelope := serviceMailEncryptedEnvelope{
+		Version:            1,
+		Encrypted:          true,
+		RelayDomain:        serviceMailRelayDomainFromURL(relayURL),
+		EphemeralPublicKey: base64.StdEncoding.EncodeToString(ephemeralPrivateKey.PublicKey().Bytes()),
+		Nonce:              base64.StdEncoding.EncodeToString(nonce),
+		Ciphertext:         base64.StdEncoding.EncodeToString(gcm.Seal(nil, nonce, plainPayload, nil)),
+	}
+	return json.Marshal(envelope)
+}
+
+func serviceMailDecodeRelayRequest(requestBody []byte, fallbackRelayDomain string) (serviceMailRequest, error) {
+	var envelope serviceMailEncryptedEnvelope
+	if err := json.Unmarshal(requestBody, &envelope); err == nil && envelope.Encrypted {
+		requestBody, err = serviceMailDecryptRelayEnvelope(envelope, fallbackRelayDomain)
+		if err != nil {
+			return serviceMailRequest{}, err
+		}
+	}
+	var request serviceMailRequest
+	if err := json.Unmarshal(requestBody, &request); err != nil {
+		return serviceMailRequest{}, err
+	}
+	return request, nil
+}
+
+func serviceMailDecryptRelayEnvelope(envelope serviceMailEncryptedEnvelope, fallbackRelayDomain string) ([]byte, error) {
+	privateKeyBytes, found := serviceMailRelayPrivateKeyForDomain(firstNonEmpty(envelope.RelayDomain, fallbackRelayDomain))
+	if !found {
+		return nil, errors.New("relay private key is not configured")
+	}
+	relayPrivateKey, err := ecdh.X25519().NewPrivateKey(privateKeyBytes)
+	if err != nil {
+		return nil, err
+	}
+	ephemeralPublicKeyBytes, err := base64.StdEncoding.DecodeString(strings.TrimSpace(envelope.EphemeralPublicKey))
+	if err != nil {
+		return nil, err
+	}
+	ephemeralPublicKey, err := ecdh.X25519().NewPublicKey(ephemeralPublicKeyBytes)
+	if err != nil {
+		return nil, err
+	}
+	sharedSecret, err := relayPrivateKey.ECDH(ephemeralPublicKey)
+	if err != nil {
+		return nil, err
+	}
+	encryptionKey := sha256.Sum256(append([]byte("sitebrush service mail relay\n"), sharedSecret...))
+	block, err := aes.NewCipher(encryptionKey[:])
+	if err != nil {
+		return nil, err
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, err
+	}
+	nonce, err := base64.StdEncoding.DecodeString(strings.TrimSpace(envelope.Nonce))
+	if err != nil {
+		return nil, err
+	}
+	ciphertext, err := base64.StdEncoding.DecodeString(strings.TrimSpace(envelope.Ciphertext))
+	if err != nil {
+		return nil, err
+	}
+	return gcm.Open(nil, nonce, ciphertext, nil)
+}
+
+func serviceMailRelayPublicKeyForURL(relayURL string) ([]byte, bool) {
+	relayDomain := serviceMailRelayDomainFromURL(relayURL)
+	return serviceMailRelayPublicKeyForDomain(relayDomain)
+}
+
+func serviceMailRelayPublicKeyForDomain(relayDomain string) ([]byte, bool) {
+	keyText := serviceMailRelayDomainKeyFromEnv("PUBLIC", relayDomain)
+	if keyText == "" {
+		switch relayDomain {
+		case "sitebrush.com":
+			keyText = sitebrushComServiceMailRelayPublicKey
+		case "sitebrush.ru":
+			keyText = sitebrushRuServiceMailRelayPublicKey
+		}
+	}
+	keyBytes, err := base64.StdEncoding.DecodeString(strings.TrimSpace(keyText))
+	return keyBytes, err == nil && len(keyBytes) == 32
+}
+
+func serviceMailRelayPrivateKeyForDomain(relayDomain string) ([]byte, bool) {
+	keyText := serviceMailRelayDomainKeyFromEnv("PRIVATE", relayDomain)
+	keyBytes, err := base64.StdEncoding.DecodeString(strings.TrimSpace(keyText))
+	return keyBytes, err == nil && len(keyBytes) == 32
+}
+
+func serviceMailRelayDomainKeyFromEnv(kind, relayDomain string) string {
+	relayDomain = normalizeDomainName(relayDomain)
+	envSuffix := strings.NewReplacer(".", "_", "-", "_").Replace(strings.ToUpper(relayDomain))
+	if envSuffix != "" {
+		if keyText := strings.TrimSpace(os.Getenv("SITEBRUSH_SERVICE_MAIL_RELAY_" + kind + "_KEY_" + envSuffix)); keyText != "" {
+			return keyText
+		}
+	}
+	return strings.TrimSpace(os.Getenv("SITEBRUSH_SERVICE_MAIL_RELAY_" + kind + "_KEY"))
+}
+
+func serviceMailRelayDomainFromURL(relayURL string) string {
+	parsedURL, err := url.Parse(strings.TrimSpace(relayURL))
+	if err != nil {
+		return ""
+	}
+	return normalizeDomainName(parsedURL.Hostname())
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func (a *App) sendServiceMailThroughRelayChain(ctx context.Context, route serviceMailRoute, request *serviceMailRequest) (string, error) {
+	if len(route.RelayURLs) == 0 {
+		return "", errors.New("relay url is empty")
+	}
+	var lastErr error
+	for _, relayURL := range route.RelayURLs {
+		if strings.TrimSpace(relayURL) == "" {
+			continue
+		}
+		if err := a.sendServiceMailThroughRelay(ctx, relayURL, request); err != nil {
+			if strings.Contains(err.Error(), "installation is not registered") {
+				if registerErr := a.registerServiceMailInstallationWithRelay(ctx, relayURL); registerErr != nil {
+					lastErr = registerErr
+					log.Printf("service mail installation registration failed relay=%s error=%v", relayURL, registerErr)
+					continue
+				}
+				if retryErr := a.sendServiceMailThroughRelay(ctx, relayURL, request); retryErr == nil {
+					return relayURL, nil
+				} else {
+					lastErr = retryErr
+					log.Printf("service mail relay retry failed relay=%s error=%v", relayURL, retryErr)
+					continue
+				}
+			}
+			lastErr = err
+			log.Printf("service mail relay attempt failed relay=%s error=%v", relayURL, err)
+			continue
+		}
+		return relayURL, nil
+	}
+	if lastErr != nil {
+		return "", lastErr
+	}
+	return "", errors.New("relay url is empty")
+}
+
+func (a *App) registerServiceMailInstallationWithRelay(ctx context.Context, relayURL string) error {
+	request := serviceMailRequest{
+		Version:      1,
+		CodeKind:     "installation_register",
+		CreatedAt:    time.Now().UTC().Format(time.RFC3339),
+		LanguageCode: "en",
+	}
+	return a.sendServiceMailThroughRelay(ctx, relayURL, &request)
+}
+
 func (a *App) sendServiceMailThroughRelay(ctx context.Context, relayURL string, request *serviceMailRequest) error {
 	if strings.TrimSpace(relayURL) == "" {
 		return errors.New("relay url is empty")
 	}
+	if err := a.signServiceMailRequest(ctx, request); err != nil {
+		return err
+	}
+	signedPayload, err := json.Marshal(request)
+	if err != nil {
+		return err
+	}
+	requestPayload, err := serviceMailEncryptPayloadForRelay(relayURL, signedPayload)
+	if err != nil {
+		return err
+	}
+	return postServiceMailRelayPayload(ctx, relayURL, requestPayload)
+}
+
+func (a *App) signServiceMailRequest(ctx context.Context, request *serviceMailRequest) error {
 	installationID, publicKey, privateKey, err := a.serviceMailLocalKeyPair(ctx)
 	if err != nil {
 		return err
 	}
+	if strings.TrimSpace(request.CreatedAt) == "" {
+		request.CreatedAt = time.Now().UTC().Format(time.RFC3339)
+	}
+	request.Version = 1
 	request.InstallationID = installationID
 	request.PublicKey = base64.StdEncoding.EncodeToString(publicKey)
 	request.Signature = ""
@@ -11732,13 +11973,13 @@ func (a *App) sendServiceMailThroughRelay(ctx context.Context, relayURL string, 
 		return err
 	}
 	request.Signature = base64.StdEncoding.EncodeToString(ed25519.Sign(privateKey, payload))
-	signedPayload, err := json.Marshal(request)
-	if err != nil {
-		return err
-	}
+	return nil
+}
+
+func postServiceMailRelayPayload(ctx context.Context, relayURL string, payload []byte) error {
 	sendCtx, cancel := context.WithTimeout(ctx, serviceMailRelayTimeout)
 	defer cancel()
-	httpRequest, err := http.NewRequestWithContext(sendCtx, http.MethodPost, relayURL, bytes.NewReader(signedPayload))
+	httpRequest, err := http.NewRequestWithContext(sendCtx, http.MethodPost, relayURL, bytes.NewReader(payload))
 	if err != nil {
 		return err
 	}
@@ -11760,8 +12001,13 @@ func (a *App) serviceMailRelayEndpoint(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	var request serviceMailRequest
-	if err := json.NewDecoder(io.LimitReader(r.Body, 64*1024)).Decode(&request); err != nil {
+	requestBody, err := io.ReadAll(io.LimitReader(r.Body, 96*1024))
+	if err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	request, err := serviceMailDecodeRelayRequest(requestBody, a.siteDomain(r.Context(), r))
+	if err != nil {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
@@ -11800,14 +12046,24 @@ func (a *App) handleServiceMailRelayRequest(ctx context.Context, r *http.Request
 	if !store.ServiceMailRelayEnabled(ctx) {
 		return fail("service mail relay is disabled", http.StatusForbidden)
 	}
-	if _, err := stdmail.ParseAddress(strings.TrimSpace(request.Recipient)); err != nil {
-		return fail("recipient is invalid", http.StatusBadRequest)
-	}
 	if err := verifyServiceMailRequestSignature(request); err != nil {
 		return fail(err.Error(), http.StatusForbidden)
 	}
-	if knownPublicKey, found := store.ServiceMailInstallationPublicKey(ctx, request.InstallationID); found && strings.TrimSpace(knownPublicKey) != strings.TrimSpace(request.PublicKey) {
+	knownPublicKey, installationFound := store.ServiceMailInstallationPublicKey(ctx, request.InstallationID)
+	if installationFound && strings.TrimSpace(knownPublicKey) != strings.TrimSpace(request.PublicKey) {
 		return fail("installation public key changed", http.StatusForbidden)
+	}
+	if serviceMailKindIsInstallationRegistration(request.CodeKind) {
+		if err := store.UpsertServiceMailInstallation(ctx, request.InstallationID, request.PublicKey, sourceIP, request.SourceDomain); err != nil {
+			return fail(err.Error(), http.StatusBadRequest)
+		}
+		return "registered", http.StatusOK
+	}
+	if !installationFound {
+		return fail("installation is not registered", http.StatusForbidden)
+	}
+	if _, err := stdmail.ParseAddress(strings.TrimSpace(request.Recipient)); err != nil {
+		return fail("recipient is invalid", http.StatusBadRequest)
 	}
 	if err := store.UpsertServiceMailInstallation(ctx, request.InstallationID, request.PublicKey, sourceIP, request.SourceDomain); err != nil {
 		return fail(err.Error(), http.StatusBadRequest)
@@ -11856,6 +12112,10 @@ func (a *App) handleServiceMailRelayRequest(ctx context.Context, r *http.Request
 	event.Status = "sent"
 	_ = store.LogServiceMailEvent(ctx, event)
 	return "sent", http.StatusOK
+}
+
+func serviceMailKindIsInstallationRegistration(codeKind string) bool {
+	return strings.TrimSpace(codeKind) == "installation_register"
 }
 
 func serviceMailKindIsRecipientVerification(codeKind string) bool {
@@ -11941,13 +12201,18 @@ func verifyServiceMailRequestSignature(request serviceMailRequest) error {
 func serviceMailRateLimited(ctx context.Context, store billing.Store, request serviceMailRequest, sourceIP, recipientDomain string) (string, bool) {
 	since := time.Now().UTC().Add(-time.Hour)
 	sourceSubnet := billing.ServiceMailIPv4Subnet(sourceIP)
+	installationLimit := serviceMailPerInstallationHourLimit
+	if firstSeenAt, found := store.ServiceMailInstallationFirstSeenAt(ctx, request.InstallationID); found && time.Since(firstSeenAt) < 24*time.Hour {
+		installationLimit = serviceMailNewInstallationHourLimit
+	}
 	checks := []struct {
 		column string
 		value  string
 		limit  int
 		name   string
 	}{
-		{column: "installation_id", value: request.InstallationID, limit: serviceMailPerInstallationHourLimit, name: "installation"},
+		{column: "installation_id", value: request.InstallationID, limit: installationLimit, name: "installation"},
+		{column: "source_domain", value: request.SourceDomain, limit: serviceMailPerSourceDomainHourLimit, name: "source domain"},
 		{column: "source_ip", value: sourceIP, limit: serviceMailPerIPHourLimit, name: "ip"},
 		{column: "recipient", value: strings.TrimSpace(request.Recipient), limit: serviceMailPerRecipientHourLimit, name: "recipient"},
 		{column: "recipient_domain", value: recipientDomain, limit: serviceMailPerRecipientDomainHourLimit, name: "recipient domain"},
