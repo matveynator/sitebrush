@@ -9560,6 +9560,7 @@ type hostingAndSupportClientView struct {
 	InstallationCount      int
 	RelayInstallationCount int
 	LocalDevelopmentCount  int
+	HostingSitebrushCount  int
 	IPs                    []hostingAndSupportClientIPView
 	IPCount                int
 	Events                 []hostingAndSupportClientEventView
@@ -9571,6 +9572,8 @@ type hostingAndSupportClientSiteView struct {
 	InstallationIP   string
 	RealInstallation bool
 	LocalDevelopment bool
+	HostingSitebrush bool
+	ParentDomain     string
 	Status           string
 }
 
@@ -9597,10 +9600,15 @@ type hostingAndSupportClientAccumulator struct {
 	primaryEmail  string
 	emails        map[string]struct{}
 	domains       map[string]struct{}
-	sites         map[string]string
+	sites         map[string]hostingAndSupportClientSiteSource
 	installations map[string]struct{}
 	ips           map[string]hostingAndSupportClientIPView
 	events        []hostingAndSupportClientEventView
+}
+
+type hostingAndSupportClientSiteSource struct {
+	ip      string
+	aliases string
 }
 
 func (a *App) hostingAndSupportClients(ctx context.Context, siteRows []hostingandsupport.Site, installations []hostingandsupport.ServiceMailInstallation, events []hostingandsupport.ServiceMailEvent) []hostingAndSupportClientView {
@@ -9612,14 +9620,16 @@ func (a *App) hostingAndSupportClients(ctx context.Context, siteRows []hostingan
 	}
 	clientsByEmail := make(map[string]*hostingAndSupportClientAccumulator)
 	clientsByDomain := make(map[string]*hostingAndSupportClientAccumulator)
+	knownSiteDomains := make(map[string]struct{})
 	for _, siteRow := range siteRows {
 		domain := normalizeDomainName(siteRow.Domain)
 		if domain == "" {
 			continue
 		}
+		knownSiteDomains[domain] = struct{}{}
 		for _, email := range splitHostingAndSupportEmailList(siteRow.AdminEmails) {
 			client := hostingAndSupportClientByEmail(clientsByEmail, email)
-			client.sites[domain] = ""
+			client.sites[domain] = hostingAndSupportClientSiteSource{aliases: siteRow.Aliases}
 			client.domains[domain] = struct{}{}
 			clientsByDomain[domain] = client
 		}
@@ -9636,7 +9646,9 @@ func (a *App) hostingAndSupportClients(ctx context.Context, siteRows []hostingan
 		if installation.LastIP != "" {
 			sourceIP := strings.TrimSpace(installation.LastIP)
 			client.ips[sourceIP] = a.hostingAndSupportClientIP(ctx, sourceIP)
-			client.sites[domain] = sourceIP
+			siteSource := client.sites[domain]
+			siteSource.ip = sourceIP
+			client.sites[domain] = siteSource
 		}
 	}
 	for _, event := range events {
@@ -9661,7 +9673,7 @@ func (a *App) hostingAndSupportClients(ctx context.Context, siteRows []hostingan
 		if domain != "" {
 			client.domains[domain] = struct{}{}
 			if _, found := client.sites[domain]; !found {
-				client.sites[domain] = ""
+				client.sites[domain] = hostingAndSupportClientSiteSource{}
 			}
 		}
 		if event.InstallationID != "" {
@@ -9671,7 +9683,9 @@ func (a *App) hostingAndSupportClients(ctx context.Context, siteRows []hostingan
 		if sourceIP != "" {
 			client.ips[sourceIP] = a.hostingAndSupportClientIP(ctx, sourceIP)
 			if domain != "" {
-				client.sites[domain] = sourceIP
+				siteSource := client.sites[domain]
+				siteSource.ip = sourceIP
+				client.sites[domain] = siteSource
 			}
 		}
 		if len(client.events) < 12 {
@@ -9688,7 +9702,7 @@ func (a *App) hostingAndSupportClients(ctx context.Context, siteRows []hostingan
 	}
 	clients := make([]hostingAndSupportClientView, 0, len(clientsByEmail))
 	for _, user := range clientsByEmail {
-		siteViews := hostingAndSupportClientSiteViews(user.sites)
+		siteViews := hostingAndSupportClientSiteViews(user.sites, knownSiteDomains)
 		view := hostingAndSupportClientView{
 			PrimaryEmail:  firstNonEmpty(user.primaryEmail, firstStringFromSet(user.emails)),
 			Emails:        sortedStringsFromSet(user.emails),
@@ -9709,12 +9723,24 @@ func (a *App) hostingAndSupportClients(ctx context.Context, siteRows []hostingan
 			if site.LocalDevelopment {
 				view.LocalDevelopmentCount++
 			}
+			if site.HostingSitebrush {
+				view.HostingSitebrushCount++
+			}
 		}
 		view.IPCount = len(view.IPs)
 		view.MapPointsJSON = hostingAndSupportClientMapPointsJSON(view.IPs)
 		clients = append(clients, view)
 	}
 	sort.Slice(clients, func(left, right int) bool {
+		if clients[left].InstallationCount != clients[right].InstallationCount {
+			return clients[left].InstallationCount > clients[right].InstallationCount
+		}
+		if clients[left].SiteCount != clients[right].SiteCount {
+			return clients[left].SiteCount > clients[right].SiteCount
+		}
+		if clients[left].RelayInstallationCount != clients[right].RelayInstallationCount {
+			return clients[left].RelayInstallationCount > clients[right].RelayInstallationCount
+		}
 		return clients[left].PrimaryEmail < clients[right].PrimaryEmail
 	})
 	return clients
@@ -9729,7 +9755,7 @@ func hostingAndSupportClientByEmail(clients map[string]*hostingAndSupportClientA
 		primaryEmail:  email,
 		emails:        map[string]struct{}{email: {}},
 		domains:       make(map[string]struct{}),
-		sites:         make(map[string]string),
+		sites:         make(map[string]hostingAndSupportClientSiteSource),
 		installations: make(map[string]struct{}),
 		ips:           make(map[string]hostingAndSupportClientIPView),
 	}
@@ -9737,13 +9763,17 @@ func hostingAndSupportClientByEmail(clients map[string]*hostingAndSupportClientA
 	return client
 }
 
-func hostingAndSupportClientSiteViews(sites map[string]string) []hostingAndSupportClientSiteView {
+func hostingAndSupportClientSiteViews(sites map[string]hostingAndSupportClientSiteSource, knownSiteDomains map[string]struct{}) []hostingAndSupportClientSiteView {
 	views := make([]hostingAndSupportClientSiteView, 0, len(sites))
-	for domain, sourceIP := range sites {
-		view := hostingAndSupportClientSiteView{Domain: domain, InstallationIP: strings.TrimSpace(sourceIP)}
+	for domain, siteSource := range sites {
+		view := hostingAndSupportClientSiteView{Domain: domain, InstallationIP: strings.TrimSpace(siteSource.ip)}
 		if hostingAndSupportDomainIsLocalDevelopment(domain, view.InstallationIP) {
 			view.LocalDevelopment = true
 			view.Status = "локальная разработка"
+		} else if parentDomain := hostingAndSupportKnownParentDomain(domain, knownSiteDomains); parentDomain != "" {
+			view.HostingSitebrush = true
+			view.ParentDomain = parentDomain
+			view.Status = "хостинг SiteBrush"
 		} else if domainARecordMatches(domain, view.InstallationIP) {
 			view.RealInstallation = true
 			view.Status = "реальная установка"
@@ -9774,6 +9804,26 @@ func hostingAndSupportDomainIsLocalDevelopment(domain string, sourceIP string) b
 	return parsedIP == nil || parsedIP.IsLoopback() || parsedIP.IsPrivate() || parsedIP.IsUnspecified()
 }
 
+func hostingAndSupportParentDomain(domain string) string {
+	domain = normalizeDomainName(domain)
+	parts := strings.Split(domain, ".")
+	if len(parts) < 3 {
+		return ""
+	}
+	return strings.Join(parts[len(parts)-2:], ".")
+}
+
+func hostingAndSupportKnownParentDomain(domain string, knownSiteDomains map[string]struct{}) string {
+	parentDomain := hostingAndSupportParentDomain(domain)
+	if parentDomain == "" {
+		return ""
+	}
+	if _, found := knownSiteDomains[parentDomain]; found {
+		return parentDomain
+	}
+	return ""
+}
+
 func hostingAndSupportClientByDomain(users map[string]*hostingAndSupportClientAccumulator, domain string) *hostingAndSupportClientAccumulator {
 	domain = normalizeDomainName(domain)
 	if user := users[domain]; user != nil {
@@ -9782,7 +9832,7 @@ func hostingAndSupportClientByDomain(users map[string]*hostingAndSupportClientAc
 	user := &hostingAndSupportClientAccumulator{
 		emails:        make(map[string]struct{}),
 		domains:       make(map[string]struct{}),
-		sites:         make(map[string]string),
+		sites:         make(map[string]hostingAndSupportClientSiteSource),
 		installations: make(map[string]struct{}),
 		ips:           make(map[string]hostingAndSupportClientIPView),
 	}

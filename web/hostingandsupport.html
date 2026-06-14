@@ -24,6 +24,102 @@
 
   <section class="card billing-card">
     <div class="card-body">
+      <div class="billing-section-header">
+        <div>
+          <h2>Клиенты</h2>
+          <p class="text-muted">Клиент определяется по email. Внутри видны его сайты, реальные установки, локальная разработка, старые email и журнал действий.</p>
+        </div>
+        <div class="billing-user-stats">
+          {{if .ClientCount}}<button type="button" data-billing-client-explain="Клиент определяется по текущему email администратора. Старые email остаются в подробностях клиента.">{{.ClientCount}} клиентов</button>{{end}}
+          {{if .ClientSiteCount}}<button type="button" data-billing-client-explain="Сайт — домен, который клиент завёл или администрирует в SiteBrush.">{{.ClientSiteCount}} сайтов</button>{{end}}
+          {{if .ClientInstallationCount}}<button type="button" data-billing-client-explain="Реальная установка — домен не localhost и не IP, а DNS домена указывает на внешний IP установки.">{{.ClientInstallationCount}} реальных установок</button>{{end}}
+          {{if .ClientLocalDevelopmentCount}}<button type="button" data-billing-client-explain="Локальная разработка — SiteBrush запущен на localhost, локальном IP или домене, который не указывает DNS на IP установки.">{{.ClientLocalDevelopmentCount}} локальная разработка</button>{{end}}
+        </div>
+      </div>
+      <div class="billing-client-explanation" data-billing-client-explanation></div>
+      <div class="billing-client-controls" data-billing-client-controls>
+        <label>Поиск клиента
+          <input type="search" class="form-control" placeholder="email или домен" data-billing-client-search-input>
+        </label>
+        <div class="billing-client-pagination">
+          <button type="button" class="btn btn-outline-primary btn-sm" data-billing-client-prev>Назад</button>
+          <span data-billing-client-page-status></span>
+          <button type="button" class="btn btn-outline-primary btn-sm" data-billing-client-next>Вперёд</button>
+        </div>
+      </div>
+      <div class="billing-user-list" data-billing-client-list>
+        {{range $userIndex, $user := .Clients}}
+        <article class="billing-user-row" data-billing-client-row data-billing-client-search="{{$user.PrimaryEmail}} {{range $user.Emails}}{{.}} {{end}} {{range $user.Domains}}{{.}} {{end}} {{range $user.Sites}}{{.Domain}} {{end}}">
+          <div class="billing-user-main">
+            <div class="billing-domain">{{$user.PrimaryEmail}}</div>
+            <div class="billing-user-stats">
+              {{if $user.SiteCount}}<button type="button" data-billing-client-explain="Сайты клиента: домены, где этот email является администратором или фигурировал в системной почте.">{{$user.SiteCount}} сайтов</button>{{end}}
+              {{if $user.InstallationCount}}<button type="button" data-billing-client-explain="Реальные установки этого клиента: домены, чей DNS указывает на внешний IP установки.">{{$user.InstallationCount}} реальных установок</button>{{end}}
+              {{if $user.HostingSitebrushCount}}<button type="button" data-billing-client-explain="Хостинг SiteBrush — клиент поднял SiteBrush на домене второго уровня и обслуживает сайты третьего уровня или клиентские алиасы.">{{$user.HostingSitebrushCount}} хостинг SiteBrush</button>{{end}}
+              {{if $user.LocalDevelopmentCount}}<button type="button" data-billing-client-explain="Локальная разработка — клиент использует SiteBrush на локальном компьютере или домен пока не указывает на IP установки.">{{$user.LocalDevelopmentCount}} локальная разработка</button>{{end}}
+              {{if gt $user.EmailCount 1}}<button type="button" data-billing-client-explain="Связанные email — текущий и старые адреса клиента, например после смены email.">{{$user.EmailCount}} email</button>{{end}}
+              {{if $user.IPCount}}<button type="button" data-billing-client-explain="IP — адреса, с которых клиент регистрировался, менял данные или отправлял системные коды.">{{$user.IPCount}} IP</button>{{end}}
+            </div>
+            {{if gt $user.EmailCount 1}}<div class="billing-user-tags">
+              {{range $user.Emails}}<span>{{.}}</span>{{end}}
+            </div>{{end}}
+            <button type="button" class="btn btn-outline-primary btn-sm" data-billing-client-toggle="billingClientDetails{{$userIndex}}">Подробности</button>
+          </div>
+          <div class="billing-user-details d-none" id="billingClientDetails{{$userIndex}}">
+            <div class="billing-user-side">
+              <div class="billing-user-map" id="billingUserMap{{$userIndex}}"></div>
+              <script type="application/json" id="billingUserMap{{$userIndex}}Data">{{$user.MapPointsJSON}}</script>
+              <div class="billing-user-ip-list">
+                {{range $user.IPs}}
+                <div class="billing-user-ip-row">
+                  <span>{{.IP}}</span>
+                  <span>{{if .Country}}{{.Country}}{{else}}unknown{{end}}</span>
+                  <span>{{if .City}}{{.City}}{{else}}unknown{{end}}</span>
+                  <span>{{.Provider}}</span>
+                </div>
+                {{end}}
+              </div>
+            </div>
+            <div>
+              <h3 class="billing-user-subtitle">Сайты клиента</h3>
+              <div class="billing-user-tags">
+                {{range $user.Sites}}
+                <span>{{.Domain}} · {{.Status}}{{if .InstallationIP}} · {{.InstallationIP}}{{end}}</span>
+                {{end}}
+              </div>
+              {{if or $user.HostingSitebrushCount $user.RelayInstallationCount}}
+              <h3 class="billing-user-subtitle">Локальная разработка и хостинг SiteBrush</h3>
+              <div class="billing-user-tags">
+                {{range $user.Sites}}
+                {{if .ParentDomain}}<span>{{.Domain}} через {{.ParentDomain}}</span>{{end}}
+                {{end}}
+                {{range $user.Installations}}<span>installation {{.}}</span>{{end}}
+              </div>
+              {{end}}
+              <div class="billing-user-activity">
+                {{range $user.Events}}
+                <div class="billing-user-activity-row">
+                  <span class="billing-user-activity-kind">{{.Kind}} · {{.Status}}</span>
+                  <span>{{.Email}}</span>
+                  <span>{{.Domain}}</span>
+                  <span>{{.IP}}</span>
+                  <span>{{.CreatedAt}}</span>
+                  {{if .Error}}<span class="text-danger">{{.Error}}</span>{{end}}
+                </div>
+                {{end}}
+              </div>
+            </div>
+          </div>
+        </article>
+        {{else}}
+        <div class="empty">Клиентов пока нет.</div>
+        {{end}}
+      </div>
+    </div>
+  </section>
+
+  <section class="card billing-card">
+    <div class="card-body">
       <h2>{{index .T "billing_plans_title"}}</h2>
       <form method="post" action="?hosting_and_support" class="billing-plan-form">
         <input type="hidden" name="billing_action" value="save_plan">
@@ -170,85 +266,6 @@
     </div>
   </section>
 
-  <section class="card billing-card">
-    <div class="card-body">
-      <div class="billing-section-header">
-        <div>
-          <h2>Клиенты</h2>
-          <p class="text-muted">Клиент определяется по email. Внутри видны его сайты, реальные установки, локальная разработка, старые email и журнал действий.</p>
-        </div>
-        <div class="billing-user-stats">
-          <span>{{.ClientCount}} клиентов</span>
-          <span>{{.ClientSiteCount}} сайтов</span>
-          <span>{{.ClientInstallationCount}} реальных установок</span>
-          <span>{{.ClientLocalDevelopmentCount}} локальная разработка</span>
-        </div>
-      </div>
-      <div class="billing-user-list">
-        {{range $userIndex, $user := .Clients}}
-        <article class="billing-user-row">
-          <div class="billing-user-main">
-            <div class="billing-domain">{{$user.PrimaryEmail}}</div>
-            <div class="billing-user-stats">
-              <span>{{$user.SiteCount}} сайтов</span>
-              <span>{{$user.InstallationCount}} реальных установок</span>
-              <span>{{$user.LocalDevelopmentCount}} локальная разработка</span>
-              <span>{{$user.EmailCount}} email</span>
-              <span>{{$user.IPCount}} IP</span>
-            </div>
-            <div class="billing-user-tags">
-              {{range $user.Emails}}<span>{{.}}</span>{{end}}
-            </div>
-            <button type="button" class="btn btn-outline-primary btn-sm" data-billing-client-toggle="billingClientDetails{{$userIndex}}">Подробности</button>
-          </div>
-          <div class="billing-user-details d-none" id="billingClientDetails{{$userIndex}}">
-            <div class="billing-user-side">
-              <div class="billing-user-map" id="billingUserMap{{$userIndex}}"></div>
-              <script type="application/json" id="billingUserMap{{$userIndex}}Data">{{$user.MapPointsJSON}}</script>
-              <div class="billing-user-ip-list">
-                {{range $user.IPs}}
-                <div class="billing-user-ip-row">
-                  <span>{{.IP}}</span>
-                  <span>{{if .Country}}{{.Country}}{{else}}unknown{{end}}</span>
-                  <span>{{if .City}}{{.City}}{{else}}unknown{{end}}</span>
-                  <span>{{.Provider}}</span>
-                </div>
-                {{end}}
-              </div>
-            </div>
-            <div>
-              <h3 class="billing-user-subtitle">Сайты клиента</h3>
-              <div class="billing-user-tags">
-                {{range $user.Sites}}
-                <span>{{.Domain}} · {{.Status}}{{if .InstallationIP}} · {{.InstallationIP}}{{end}}</span>
-                {{end}}
-              </div>
-              <h3 class="billing-user-subtitle">Домены и установки relay</h3>
-              <div class="billing-user-tags">
-                {{range $user.Domains}}<span>{{.}}</span>{{end}}
-                {{range $user.Installations}}<span>{{.}}</span>{{end}}
-              </div>
-              <div class="billing-user-activity">
-                {{range $user.Events}}
-                <div class="billing-user-activity-row">
-                  <span class="billing-user-activity-kind">{{.Kind}} · {{.Status}}</span>
-                  <span>{{.Email}}</span>
-                  <span>{{.Domain}}</span>
-                  <span>{{.IP}}</span>
-                  <span>{{.CreatedAt}}</span>
-                  {{if .Error}}<span class="text-danger">{{.Error}}</span>{{end}}
-                </div>
-                {{end}}
-              </div>
-            </div>
-          </div>
-        </article>
-        {{else}}
-        <div class="empty">Клиентов пока нет.</div>
-        {{end}}
-      </div>
-    </div>
-  </section>
 
   <section class="card billing-card">
     <div class="card-body">
@@ -594,6 +611,76 @@
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
 <script src="/p/static/leaflet.min.js"></script>
 <script>
+(function initializeBillingClientListControls() {
+  const controlsElement = document.querySelector('[data-billing-client-controls]');
+  const searchInputElement = document.querySelector('[data-billing-client-search-input]');
+  const previousButtonElement = document.querySelector('[data-billing-client-prev]');
+  const nextButtonElement = document.querySelector('[data-billing-client-next]');
+  const pageStatusElement = document.querySelector('[data-billing-client-page-status]');
+  const clientRowElements = Array.from(document.querySelectorAll('[data-billing-client-row]'));
+  const pageSize = 10;
+  let currentPageIndex = 0;
+
+  if (!controlsElement || !searchInputElement || !previousButtonElement || !nextButtonElement || !pageStatusElement || clientRowElements.length === 0) {
+    return;
+  }
+
+  function matchingClientRows() {
+    const searchText = searchInputElement.value.trim().toLowerCase();
+    if (!searchText) {
+      return clientRowElements;
+    }
+    return clientRowElements.filter(function clientRowMatchesSearch(clientRowElement) {
+      return (clientRowElement.dataset.billingClientSearch || '').toLowerCase().includes(searchText);
+    });
+  }
+
+  function renderClientPage() {
+    const visibleClientRows = matchingClientRows();
+    const pageCount = Math.max(1, Math.ceil(visibleClientRows.length / pageSize));
+    if (currentPageIndex >= pageCount) {
+      currentPageIndex = pageCount - 1;
+    }
+    const firstVisibleIndex = currentPageIndex * pageSize;
+    const lastVisibleIndex = firstVisibleIndex + pageSize;
+    const visibleClientRowSet = new Set(visibleClientRows.slice(firstVisibleIndex, lastVisibleIndex));
+    for (const clientRowElement of clientRowElements) {
+      clientRowElement.classList.toggle('d-none', !visibleClientRowSet.has(clientRowElement));
+    }
+    previousButtonElement.disabled = currentPageIndex === 0;
+    nextButtonElement.disabled = currentPageIndex >= pageCount - 1;
+    controlsElement.classList.toggle('d-none', clientRowElements.length <= pageSize && !searchInputElement.value.trim());
+    pageStatusElement.textContent = visibleClientRows.length + ' клиентов · страница ' + (currentPageIndex + 1) + ' / ' + pageCount;
+  }
+
+  searchInputElement.addEventListener('input', function updateClientSearch() {
+    currentPageIndex = 0;
+    renderClientPage();
+  });
+  previousButtonElement.addEventListener('click', function showPreviousClientPage() {
+    currentPageIndex = Math.max(0, currentPageIndex - 1);
+    renderClientPage();
+  });
+  nextButtonElement.addEventListener('click', function showNextClientPage() {
+    currentPageIndex += 1;
+    renderClientPage();
+  });
+  renderClientPage();
+})();
+
+(function initializeBillingClientMetricExplanations() {
+  const explanationElement = document.querySelector('[data-billing-client-explanation]');
+  const explanationButtonElements = document.querySelectorAll('[data-billing-client-explain]');
+  if (!explanationElement || explanationButtonElements.length === 0) {
+    return;
+  }
+  for (const explanationButtonElement of explanationButtonElements) {
+    explanationButtonElement.addEventListener('click', function showBillingClientMetricExplanation() {
+      explanationElement.textContent = explanationButtonElement.dataset.billingClientExplain || '';
+    });
+  }
+})();
+
 (function initializeBillingClientDetails() {
   function renderBillingClientMap(mapElement) {
     if (!window.L || !mapElement || mapElement.dataset.billingMapRendered === '1') {
@@ -609,13 +696,13 @@
     } catch (parseError) {
       mapPoints = [];
     }
+    const userMap = L.map(mapElement, { zoomControl: false, attributionControl: false });
+    L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 18 }).addTo(userMap);
     if (!Array.isArray(mapPoints) || mapPoints.length === 0) {
-      mapElement.textContent = 'нет координат';
+      userMap.setView([20, 0], 1);
       mapElement.dataset.billingMapRendered = '1';
       return;
     }
-    const userMap = L.map(mapElement, { zoomControl: false, attributionControl: false });
-    L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 18 }).addTo(userMap);
     const bounds = [];
     for (const mapPoint of mapPoints) {
       const latitude = Number(mapPoint.lat);
@@ -631,6 +718,8 @@
       userMap.setView(bounds[0], 7);
     } else if (bounds.length > 1) {
       userMap.fitBounds(bounds, { padding: [12, 12] });
+    } else {
+      userMap.setView([20, 0], 1);
     }
     mapElement.dataset.billingMapRendered = '1';
   }

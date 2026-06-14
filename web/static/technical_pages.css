@@ -944,7 +944,36 @@
     min-width: 0;
 }
 
+.technical-page .billing-client-controls {
+    display: grid;
+    grid-template-columns: minmax(220px, 1fr) auto;
+    gap: 12px;
+    align-items: end;
+    margin-bottom: 12px;
+}
+
+.technical-page .billing-client-controls label {
+    display: grid;
+    gap: 6px;
+    min-width: 0;
+}
+
+.technical-page .billing-client-pagination {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: center;
+    justify-content: flex-end;
+    min-width: 0;
+}
+
+.technical-page .billing-client-pagination span {
+    color: var(--muted);
+    font-size: 12px;
+}
+
 .technical-page .billing-user-stats span,
+.technical-page .billing-user-stats button,
 .technical-page .billing-user-tags span,
 .technical-page .billing-user-ip-row span,
 .technical-page .billing-user-activity-row span {
@@ -953,6 +982,7 @@
 }
 
 .technical-page .billing-user-stats span,
+.technical-page .billing-user-stats button,
 .technical-page .billing-user-tags span {
     padding: 4px 7px;
     border: 1px solid rgba(149, 229, 239, 0.18);
@@ -960,6 +990,24 @@
     background: rgba(255, 255, 255, 0.04);
     color: var(--muted);
     font-size: 12px;
+}
+
+.technical-page .billing-user-stats button {
+    cursor: pointer;
+    text-align: left;
+}
+
+.technical-page .billing-user-stats button:hover,
+.technical-page .billing-user-stats button:focus {
+    border-color: rgba(149, 229, 239, 0.44);
+    color: var(--text);
+}
+
+.technical-page .billing-client-explanation {
+    min-height: 20px;
+    margin-bottom: 10px;
+    color: var(--muted);
+    font-size: 13px;
 }
 
 .technical-page .billing-user-map {
@@ -1505,6 +1553,7 @@
     .technical-page .missing-page-secondary-grid,
     .technical-page .billing-create-form,
     .technical-page .billing-plan-form,
+    .technical-page .billing-client-controls,
     .technical-page .billing-site-row,
     .technical-page .billing-user-row,
     .technical-page .billing-user-details,
