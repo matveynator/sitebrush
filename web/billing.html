@@ -11,6 +11,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{{.Title}}</title>
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+  <link href="/p/static/leaflet.min.css" rel="stylesheet">
   <link href="/p/static/technical_pages.css" rel="stylesheet">
 </head>
 <body class="technical-page bg-body">
@@ -166,6 +167,69 @@
         <label>{{index .T "billing_quota"}} <input name="quota" type="text" class="form-control" placeholder="10gb"></label>
         <button type="submit" class="btn btn-success"><img src="/p/static/profile.png" alt="">{{index .T "billing_create"}}</button>
       </form>
+    </div>
+  </section>
+
+  <section class="card billing-card">
+    <div class="card-body">
+      <div class="billing-section-header">
+        <div>
+          <h2>Пользователи</h2>
+          <p class="text-muted">Администраторы по последнему email, связанные адреса, IP, домены, установки и журнал регистраций/смен.</p>
+        </div>
+      </div>
+      <div class="billing-user-list">
+        {{range $userIndex, $user := .ServiceMailUsers}}
+        <article class="billing-user-row">
+          <div class="billing-user-main">
+            <div class="billing-domain">{{$user.PrimaryEmail}}</div>
+            <div class="billing-user-stats">
+              <span>{{$user.InstallationCount}} installations</span>
+              <span>{{$user.SiteCount}} sites</span>
+              <span>{{$user.EmailCount}} emails</span>
+              <span>{{$user.IPCount}} IP</span>
+            </div>
+            <div class="billing-user-tags">
+              {{range $user.Emails}}<span>{{.}}</span>{{end}}
+            </div>
+            <div class="billing-user-tags">
+              {{range $user.Domains}}<span>{{.}}</span>{{end}}
+            </div>
+            <div class="billing-user-tags">
+              {{range $user.Installations}}<span>{{.}}</span>{{end}}
+            </div>
+          </div>
+          <div class="billing-user-side">
+            <div class="billing-user-map" id="billingUserMap{{$userIndex}}"></div>
+            <script type="application/json" id="billingUserMap{{$userIndex}}Data">{{$user.MapPointsJSON}}</script>
+            <div class="billing-user-ip-list">
+              {{range $user.IPs}}
+              <div class="billing-user-ip-row">
+                <span>{{.IP}}</span>
+                <span>{{if .Country}}{{.Country}}{{else}}unknown{{end}}</span>
+                <span>{{if .City}}{{.City}}{{else}}unknown{{end}}</span>
+                <span>{{.Provider}}</span>
+              </div>
+              {{end}}
+            </div>
+          </div>
+          <div class="billing-user-activity">
+            {{range $user.Events}}
+            <div class="billing-user-activity-row">
+              <span class="billing-user-activity-kind">{{.Kind}} · {{.Status}}</span>
+              <span>{{.Email}}</span>
+              <span>{{.Domain}}</span>
+              <span>{{.IP}}</span>
+              <span>{{.CreatedAt}}</span>
+              {{if .Error}}<span class="text-danger">{{.Error}}</span>{{end}}
+            </div>
+            {{end}}
+          </div>
+        </article>
+        {{else}}
+        <div class="empty">Пользователей relay пока нет.</div>
+        {{end}}
+      </div>
     </div>
   </section>
 
@@ -511,7 +575,49 @@
   </div></div>
 </div>
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+<script src="/p/static/leaflet.min.js"></script>
 <script>
+(function initializeBillingUserMaps() {
+  if (!window.L) {
+    return;
+  }
+  const mapElements = document.querySelectorAll('.billing-user-map[id]');
+  for (const mapElement of mapElements) {
+    const mapDataElement = document.getElementById(mapElement.id + 'Data');
+    if (!mapDataElement) {
+      continue;
+    }
+    let mapPoints = [];
+    try {
+      mapPoints = JSON.parse(mapDataElement.textContent || '[]');
+    } catch (parseError) {
+      mapPoints = [];
+    }
+    if (!Array.isArray(mapPoints) || mapPoints.length === 0) {
+      mapElement.textContent = 'нет координат';
+      continue;
+    }
+    const userMap = L.map(mapElement, { zoomControl: false, attributionControl: false });
+    L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 18 }).addTo(userMap);
+    const bounds = [];
+    for (const mapPoint of mapPoints) {
+      const latitude = Number(mapPoint.lat);
+      const longitude = Number(mapPoint.lng);
+      if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) {
+        continue;
+      }
+      bounds.push([latitude, longitude]);
+      const markerLabel = [mapPoint.ip, mapPoint.country, mapPoint.city, mapPoint.provider].filter(Boolean).join(' · ');
+      L.marker([latitude, longitude]).addTo(userMap).bindPopup(markerLabel);
+    }
+    if (bounds.length === 1) {
+      userMap.setView(bounds[0], 7);
+    } else if (bounds.length > 1) {
+      userMap.fitBounds(bounds, { padding: [12, 12] });
+    }
+  }
+})();
+
 (function initializeBillingAjaxSaveControls() {
   const saveFormElements = document.querySelectorAll('[data-billing-ajax-save]');
   if (saveFormElements.length === 0) {

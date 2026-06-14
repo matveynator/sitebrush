@@ -9485,7 +9485,7 @@ func (a *App) billingView(ctx context.Context, r *http.Request) (map[string]any,
 	assignments := store.ServiceAssignments(ctx)
 	siteRequests := store.SiteRequests(ctx)
 	serviceMailInstallations := store.ServiceMailInstallations(ctx)
-	serviceMailEvents := store.ServiceMailEvents(ctx, 50)
+	serviceMailEvents := store.ServiceMailEvents(ctx, 200)
 	serviceMailBlocks := store.ServiceMailBlocks(ctx)
 	serviceMailRelayEnabled := store.ServiceMailRelayEnabled(ctx)
 	demoSettings := (demo.Store{DB: controlDatabase}).Settings(ctx)
@@ -9501,6 +9501,7 @@ func (a *App) billingView(ctx context.Context, r *http.Request) (map[string]any,
 	if err != nil {
 		return nil, err
 	}
+	serviceMailUsers := a.billingServiceMailUsers(ctx, siteRows, serviceMailInstallations, serviceMailEvents)
 	backups := a.managedSiteDeletionBackupViews(ctx, r, controlDatabase)
 	translations := translationsForRequest(r)
 	return map[string]any{
@@ -9510,6 +9511,7 @@ func (a *App) billingView(ctx context.Context, r *http.Request) (map[string]any,
 		"SiteRequests":             siteRequests,
 		"ServiceMailInstallations": serviceMailInstallations,
 		"ServiceMailEvents":        serviceMailEvents,
+		"ServiceMailUsers":         serviceMailUsers,
 		"ServiceMailBlocks":        serviceMailBlocks,
 		"ServiceMailRelayEnabled":  serviceMailRelayEnabled,
 		"ServiceMailLimits": map[string]int{
@@ -9527,6 +9529,242 @@ func (a *App) billingView(ctx context.Context, r *http.Request) (map[string]any,
 		"PublicTrialEmbedHTML":    publicTrialSignupEmbedHTML(r, translations),
 		"CurrentDomain":           a.siteDomain(ctx, r),
 	}, nil
+}
+
+type billingServiceMailUserView struct {
+	PrimaryEmail      string
+	Emails            []string
+	EmailCount        int
+	Domains           []string
+	DomainCount       int
+	SiteCount         int
+	Installations     []string
+	InstallationCount int
+	IPs               []billingServiceMailUserIPView
+	IPCount           int
+	Events            []billingServiceMailUserEventView
+	MapPointsJSON     template.JS
+}
+
+type billingServiceMailUserIPView struct {
+	IP        string
+	Country   string
+	City      string
+	Provider  string
+	Latitude  float64
+	Longitude float64
+}
+
+type billingServiceMailUserEventView struct {
+	Kind      string
+	Status    string
+	Email     string
+	Domain    string
+	IP        string
+	CreatedAt string
+	Error     string
+}
+
+type billingServiceMailUserAccumulator struct {
+	primaryEmail  string
+	emails        map[string]struct{}
+	domains       map[string]struct{}
+	sites         map[string]struct{}
+	installations map[string]struct{}
+	ips           map[string]billingServiceMailUserIPView
+	events        []billingServiceMailUserEventView
+}
+
+func (a *App) billingServiceMailUsers(ctx context.Context, siteRows []billing.Site, installations []billing.ServiceMailInstallation, events []billing.ServiceMailEvent) []billingServiceMailUserView {
+	installationDomain := make(map[string]string)
+	for _, installation := range installations {
+		installationDomain[strings.TrimSpace(installation.InstallationID)] = normalizeDomainName(installation.LastDomain)
+	}
+	usersByDomain := make(map[string]*billingServiceMailUserAccumulator)
+	for _, siteRow := range siteRows {
+		domain := normalizeDomainName(siteRow.Domain)
+		if domain == "" {
+			continue
+		}
+		user := billingServiceMailUserByDomain(usersByDomain, domain)
+		user.sites[domain] = struct{}{}
+		user.domains[domain] = struct{}{}
+		for _, email := range splitBillingEmailList(siteRow.AdminEmails) {
+			user.emails[email] = struct{}{}
+			if user.primaryEmail == "" {
+				user.primaryEmail = email
+			}
+		}
+	}
+	for _, event := range events {
+		domain := normalizeDomainName(event.SourceDomain)
+		if domain == "" {
+			domain = installationDomain[strings.TrimSpace(event.InstallationID)]
+		}
+		if domain == "" {
+			domain = strings.ToLower(strings.TrimSpace(event.RecipientDomain))
+		}
+		if domain == "" {
+			continue
+		}
+		user := billingServiceMailUserByDomain(usersByDomain, domain)
+		email := strings.ToLower(strings.TrimSpace(event.Recipient))
+		if email != "" {
+			user.emails[email] = struct{}{}
+			if user.primaryEmail == "" || serviceMailEventIsNewerIdentity(event.CodeKind) {
+				user.primaryEmail = email
+			}
+		}
+		if event.SourceDomain != "" {
+			user.domains[normalizeDomainName(event.SourceDomain)] = struct{}{}
+		}
+		if event.InstallationID != "" {
+			user.installations[strings.TrimSpace(event.InstallationID)] = struct{}{}
+		}
+		if event.SourceIP != "" {
+			user.ips[strings.TrimSpace(event.SourceIP)] = a.billingServiceMailUserIP(ctx, event.SourceIP)
+		}
+		if len(user.events) < 12 {
+			user.events = append(user.events, billingServiceMailUserEventView{
+				Kind:      event.CodeKind,
+				Status:    event.Status,
+				Email:     email,
+				Domain:    normalizeDomainName(event.SourceDomain),
+				IP:        strings.TrimSpace(event.SourceIP),
+				CreatedAt: event.CreatedAt,
+				Error:     event.Error,
+			})
+		}
+	}
+	users := make([]billingServiceMailUserView, 0, len(usersByDomain))
+	for _, user := range usersByDomain {
+		view := billingServiceMailUserView{
+			PrimaryEmail:  firstNonEmpty(user.primaryEmail, firstStringFromSet(user.emails)),
+			Emails:        sortedStringsFromSet(user.emails),
+			Domains:       sortedStringsFromSet(user.domains),
+			SiteCount:     len(user.sites),
+			Installations: sortedStringsFromSet(user.installations),
+			IPs:           sortedIPViews(user.ips),
+			Events:        user.events,
+		}
+		view.EmailCount = len(view.Emails)
+		view.DomainCount = len(view.Domains)
+		view.InstallationCount = len(view.Installations)
+		view.IPCount = len(view.IPs)
+		view.MapPointsJSON = billingServiceMailUserMapPointsJSON(view.IPs)
+		users = append(users, view)
+	}
+	sort.Slice(users, func(left, right int) bool {
+		return users[left].PrimaryEmail < users[right].PrimaryEmail
+	})
+	return users
+}
+
+func billingServiceMailUserByDomain(users map[string]*billingServiceMailUserAccumulator, domain string) *billingServiceMailUserAccumulator {
+	domain = normalizeDomainName(domain)
+	if user := users[domain]; user != nil {
+		return user
+	}
+	user := &billingServiceMailUserAccumulator{
+		emails:        make(map[string]struct{}),
+		domains:       make(map[string]struct{}),
+		sites:         make(map[string]struct{}),
+		installations: make(map[string]struct{}),
+		ips:           make(map[string]billingServiceMailUserIPView),
+	}
+	users[domain] = user
+	return user
+}
+
+func (a *App) billingServiceMailUserIP(ctx context.Context, ip string) billingServiceMailUserIPView {
+	view := billingServiceMailUserIPView{IP: strings.TrimSpace(ip), Provider: "unknown"}
+	if a == nil || a.geoIP == nil {
+		return view
+	}
+	location, found := a.geoIP.Lookup(ctx, ip)
+	if !found {
+		return view
+	}
+	view.Country = strings.TrimSpace(location.CountryCode)
+	view.City = strings.TrimSpace(location.City)
+	view.Provider = firstNonEmpty(location.Source, "unknown")
+	view.Latitude = location.Latitude
+	view.Longitude = location.Longitude
+	return view
+}
+
+func serviceMailEventIsNewerIdentity(codeKind string) bool {
+	switch strings.TrimSpace(codeKind) {
+	case "recipient_verified", "email_change", "email_confirm":
+		return true
+	default:
+		return false
+	}
+}
+
+func splitBillingEmailList(rawEmails string) []string {
+	fields := strings.FieldsFunc(rawEmails, func(separator rune) bool {
+		return separator == ',' || separator == '\n' || separator == ';' || separator == ' '
+	})
+	emails := make([]string, 0, len(fields))
+	for _, field := range fields {
+		email := strings.ToLower(strings.TrimSpace(field))
+		if email != "" {
+			emails = append(emails, email)
+		}
+	}
+	return emails
+}
+
+func firstStringFromSet(values map[string]struct{}) string {
+	for value := range values {
+		return value
+	}
+	return ""
+}
+
+func sortedStringsFromSet(values map[string]struct{}) []string {
+	result := make([]string, 0, len(values))
+	for value := range values {
+		if strings.TrimSpace(value) != "" {
+			result = append(result, value)
+		}
+	}
+	sort.Strings(result)
+	return result
+}
+
+func sortedIPViews(values map[string]billingServiceMailUserIPView) []billingServiceMailUserIPView {
+	result := make([]billingServiceMailUserIPView, 0, len(values))
+	for _, value := range values {
+		result = append(result, value)
+	}
+	sort.Slice(result, func(left, right int) bool {
+		return result[left].IP < result[right].IP
+	})
+	return result
+}
+
+func billingServiceMailUserMapPointsJSON(ips []billingServiceMailUserIPView) template.JS {
+	points := make([]map[string]any, 0, len(ips))
+	for _, ip := range ips {
+		if ip.Latitude == 0 && ip.Longitude == 0 {
+			continue
+		}
+		points = append(points, map[string]any{
+			"ip":       ip.IP,
+			"country":  ip.Country,
+			"city":     ip.City,
+			"provider": ip.Provider,
+			"lat":      ip.Latitude,
+			"lng":      ip.Longitude,
+		})
+	}
+	payload, err := json.Marshal(points)
+	if err != nil {
+		return template.JS("[]")
+	}
+	return template.JS(payload)
 }
 
 func (a *App) billingSiteRows(ctx context.Context, plans []billing.Plan, assignments map[string]billing.ServiceAssignment, currentDomain string, demoDomain string, mainDomain string) ([]billing.Site, error) {
@@ -12124,11 +12362,32 @@ func serviceMailKindIsRecipientVerification(codeKind string) bool {
 
 func serviceMailRecipientAllowed(ctx context.Context, store billing.Store, request serviceMailRequest) (string, bool) {
 	switch strings.TrimSpace(request.CodeKind) {
-	case "login_code", "password_change_code":
+	case "login_code":
 		if store.ServiceMailRecipientVerified(ctx, request.InstallationID, request.Recipient) {
 			return "", true
 		}
+		if store.CountServiceMailVerifiedRecipients(ctx, request.InstallationID) == 0 {
+			if err := store.UpsertServiceMailRecipient(ctx, request.InstallationID, request.Recipient, "verified", "bootstrap_admin"); err != nil {
+				return err.Error(), false
+			}
+			return "", true
+		}
 		return "recipient is not verified for this installation", false
+	case "password_change_code":
+		if store.ServiceMailRecipientVerified(ctx, request.InstallationID, request.Recipient) {
+			return "", true
+		}
+		if store.CountServiceMailRecipientsSince(ctx, request.InstallationID, time.Now().UTC().Add(-24*time.Hour)) >= serviceMailNewRecipientDayLimit {
+			return "new recipient daily limit reached", false
+		}
+		status := "pending"
+		if store.CountServiceMailVerifiedRecipients(ctx, request.InstallationID) == 0 {
+			status = "verified"
+		}
+		if err := store.UpsertServiceMailRecipient(ctx, request.InstallationID, request.Recipient, status, "password_change"); err != nil {
+			return err.Error(), false
+		}
+		return "", true
 	case "email_confirm":
 		if store.CountServiceMailVerifiedRecipients(ctx, request.InstallationID) == 0 {
 			if store.CountServiceMailRecipientsSince(ctx, request.InstallationID, time.Now().UTC().Add(-24*time.Hour)) >= serviceMailNewRecipientDayLimit {

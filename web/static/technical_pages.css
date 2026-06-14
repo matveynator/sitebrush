@@ -890,9 +890,91 @@
 
 .technical-page .billing-site-list,
 .technical-page .billing-plan-list,
-.technical-page .billing-backup-list {
+.technical-page .billing-backup-list,
+.technical-page .billing-user-list {
     display: grid;
     gap: 8px;
+}
+
+.technical-page .billing-user-row {
+    display: grid;
+    grid-template-columns: minmax(260px, 1fr) minmax(280px, 0.9fr);
+    gap: 12px;
+    align-items: start;
+    padding: 12px;
+    border: 1px solid rgba(149, 229, 239, 0.16);
+    border-radius: 8px;
+    background: rgba(0, 0, 0, 0.16);
+}
+
+.technical-page .billing-user-main,
+.technical-page .billing-user-side,
+.technical-page .billing-user-activity {
+    display: grid;
+    gap: 8px;
+    min-width: 0;
+}
+
+.technical-page .billing-user-activity {
+    grid-column: 1 / -1;
+}
+
+.technical-page .billing-user-stats,
+.technical-page .billing-user-tags,
+.technical-page .billing-user-ip-row,
+.technical-page .billing-user-activity-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    min-width: 0;
+}
+
+.technical-page .billing-user-stats span,
+.technical-page .billing-user-tags span,
+.technical-page .billing-user-ip-row span,
+.technical-page .billing-user-activity-row span {
+    max-width: 100%;
+    overflow-wrap: anywhere;
+}
+
+.technical-page .billing-user-stats span,
+.technical-page .billing-user-tags span {
+    padding: 4px 7px;
+    border: 1px solid rgba(149, 229, 239, 0.18);
+    border-radius: 6px;
+    background: rgba(255, 255, 255, 0.04);
+    color: var(--muted);
+    font-size: 12px;
+}
+
+.technical-page .billing-user-map {
+    width: 100%;
+    min-height: 170px;
+    border: 1px solid rgba(149, 229, 239, 0.18);
+    border-radius: 8px;
+    background: rgba(255, 255, 255, 0.05);
+    color: var(--muted);
+    overflow: hidden;
+}
+
+.technical-page .billing-user-ip-list {
+    display: grid;
+    gap: 5px;
+}
+
+.technical-page .billing-user-ip-row,
+.technical-page .billing-user-activity-row {
+    padding: 7px 8px;
+    border-radius: 7px;
+    background: rgba(255, 255, 255, 0.04);
+    color: var(--muted);
+    font-size: 12px;
+    line-height: 1.35;
+}
+
+.technical-page .billing-user-activity-kind {
+    color: var(--text);
+    font-weight: 700;
 }
 
 .technical-page .billing-site-row {
@@ -1409,6 +1491,7 @@
     .technical-page .billing-create-form,
     .technical-page .billing-plan-form,
     .technical-page .billing-site-row,
+    .technical-page .billing-user-row,
     .technical-page .billing-site-form,
     .technical-page .billing-delete-form,
     .technical-page .billing-backup-row,

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"os"
@@ -113,24 +114,37 @@ func (resolver *Resolver) run() {
 	importedRelease := metadataValue(database, "imported_release")
 	currentRelease := releaseMonth(time.Now().UTC())
 	hasRanges := rangeCount(database) > 0
+	if geoIPImportRequired(hasRanges, importedRelease, currentRelease) {
+		importInProgress = true
+		log.Printf("geoip database import started: ranges=%t release=%q current=%q", hasRanges, importedRelease, currentRelease)
+		go importLatest(databasePath, resolver.cacheDir, time.Now().UTC(), importResults)
+	}
 
 	for {
 		select {
 		case request := <-resolver.requests:
 			location, found := lookup(database, request.ip)
-			if !found && isPublicIPv4(request.ip) && (!hasRanges || importedRelease != currentRelease) && !importInProgress {
+			if !found && isPublicIPv4(request.ip) && geoIPImportRequired(hasRanges, importedRelease, currentRelease) && !importInProgress {
 				importInProgress = true
+				log.Printf("geoip database import started after lookup miss: ip=%s ranges=%t release=%q current=%q", request.ip, hasRanges, importedRelease, currentRelease)
 				go importLatest(databasePath, resolver.cacheDir, time.Now().UTC(), importResults)
 			}
 			request.response <- lookupResponse{location: location, found: found}
 		case result := <-importResults:
 			importInProgress = false
-			if result.err == nil && result.release != "" {
+			if result.err != nil {
+				log.Printf("geoip database import failed: %v", result.err)
+			} else if result.release != "" {
 				importedRelease = result.release
 				hasRanges = true
+				log.Printf("geoip database import completed: release=%s", result.release)
 			}
 		}
 	}
+}
+
+func geoIPImportRequired(hasRanges bool, importedRelease string, currentRelease string) bool {
+	return !hasRanges || strings.TrimSpace(importedRelease) != strings.TrimSpace(currentRelease)
 }
 
 func (resolver *Resolver) drainWithoutDatabase() {
@@ -222,6 +236,7 @@ func ensureArchive(ctx context.Context, cacheDir string, now time.Time) (string,
 
 func downloadArchive(ctx context.Context, release, archivePath string) error {
 	requestURL := fmt.Sprintf("https://download.db-ip.com/free/dbip-city-lite-%s.csv.gz", release)
+	log.Printf("geoip database download started: release=%s url=%s", release, requestURL)
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, requestURL, nil)
 	if err != nil {
 		return err
@@ -251,7 +266,11 @@ func downloadArchive(ctx context.Context, release, archivePath string) error {
 		_ = os.Remove(temporaryPath)
 		return err
 	}
-	return os.Rename(temporaryPath, archivePath)
+	if err := os.Rename(temporaryPath, archivePath); err != nil {
+		return err
+	}
+	log.Printf("geoip database download completed: release=%s path=%s", release, archivePath)
+	return nil
 }
 
 func importArchive(ctx context.Context, databasePath, archivePath, release string) error {

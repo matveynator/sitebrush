@@ -28,3 +28,15 @@ func TestPrivateAndIPv6AddressesDoNotTriggerLocalLookup(t *testing.T) {
 		t.Fatalf("8.8.8.8 was not treated as public IPv4")
 	}
 }
+
+func TestGeoIPImportRequiredOnStartup(t *testing.T) {
+	if !geoIPImportRequired(false, "", "2026-06") {
+		t.Fatal("empty database should require import")
+	}
+	if !geoIPImportRequired(true, "2026-05", "2026-06") {
+		t.Fatal("stale database should require import")
+	}
+	if geoIPImportRequired(true, "2026-06", "2026-06") {
+		t.Fatal("current database should not require import")
+	}
+}

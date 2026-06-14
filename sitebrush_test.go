@@ -517,6 +517,17 @@ func TestServiceMailRelayRejectsLoginCodeForUnverifiedRecipient(t *testing.T) {
 		CreatedAt:    time.Now().UTC().Format(time.RFC3339),
 	})
 	registerServiceMailInstallationForTest(t, application, request)
+	controlDatabase, err := application.openServerControlDatabase(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := billing.Store{DB: controlDatabase}
+	if err := store.UpsertServiceMailRecipient(context.Background(), request.InstallationID, "owner@example.net", "verified", "confirmed"); err != nil {
+		t.Fatal(err)
+	}
+	if err := controlDatabase.Close(); err != nil {
+		t.Fatal(err)
+	}
 	httpRequest := httptest.NewRequest(http.MethodPost, "https://sitebrush.com/?service_mail_relay", nil)
 	status, statusCode := application.handleServiceMailRelayRequest(context.Background(), httpRequest, request, "203.0.113.10")
 	if statusCode != http.StatusForbidden {
@@ -588,6 +599,33 @@ func TestServiceMailRelayAllowsLoginCodeForVerifiedRecipient(t *testing.T) {
 	}
 	if sentMessage.From != "SiteBrush <sitebrush@sitebrush.com>" {
 		t.Fatalf("from = %q", sentMessage.From)
+	}
+}
+
+func TestServiceMailRelayAllowsPasswordChangeCodeForCurrentAdminBootstrap(t *testing.T) {
+	application, _ := newTestApplication(t)
+	request := signedServiceMailRequestForTest(t, application, serviceMailRequest{
+		Version:      1,
+		SourceDomain: "customer.example",
+		Recipient:    "owner@example.net",
+		CodeKind:     "password_change_code",
+		SecretValue:  "123456",
+		LanguageCode: "en",
+		CreatedAt:    time.Now().UTC().Format(time.RFC3339),
+	})
+	registerServiceMailInstallationForTest(t, application, request)
+	var sentMessage mailout.Message
+	application.sendEmail = func(ctx context.Context, message mailout.Message) error {
+		sentMessage = message
+		return nil
+	}
+	httpRequest := httptest.NewRequest(http.MethodPost, "https://sitebrush.com/?service_mail_relay", nil)
+	status, statusCode := application.handleServiceMailRelayRequest(context.Background(), httpRequest, request, "203.0.113.10")
+	if statusCode != http.StatusOK {
+		t.Fatalf("status = %d %q, want ok", statusCode, status)
+	}
+	if sentMessage.To != "owner@example.net" {
+		t.Fatalf("to = %q", sentMessage.To)
 	}
 }
 
