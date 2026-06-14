@@ -6,11 +6,13 @@ import (
 	"bytes"
 	"context"
 	"crypto/ecdsa"
+	"crypto/ed25519"
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
 	"database/sql"
+	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
 	"errors"
@@ -500,6 +502,84 @@ func TestServiceMailRateLimitedIncludesSourceSubnet(t *testing.T) {
 	if !limited {
 		t.Fatal("subnet limit did not block a new IP in the same /24")
 	}
+}
+
+func TestServiceMailRelayRejectsLoginCodeForUnverifiedRecipient(t *testing.T) {
+	application, _ := newTestApplication(t)
+	request := signedServiceMailRequestForTest(t, application, serviceMailRequest{
+		Version:      1,
+		SourceDomain: "customer.example",
+		Recipient:    "victim@example.net",
+		CodeKind:     "login_code",
+		SecretValue:  "123456",
+		LanguageCode: "en",
+		CreatedAt:    time.Now().UTC().Format(time.RFC3339),
+	})
+	httpRequest := httptest.NewRequest(http.MethodPost, "https://sitebrush.com/?service_mail_relay", nil)
+	status, statusCode := application.handleServiceMailRelayRequest(context.Background(), httpRequest, request, "203.0.113.10")
+	if statusCode != http.StatusForbidden {
+		t.Fatalf("status = %d %q, want forbidden", statusCode, status)
+	}
+	if !strings.Contains(status, "not verified") {
+		t.Fatalf("status = %q, want recipient verification error", status)
+	}
+}
+
+func TestServiceMailRelayAllowsLoginCodeForVerifiedRecipient(t *testing.T) {
+	application, _ := newTestApplication(t)
+	request := signedServiceMailRequestForTest(t, application, serviceMailRequest{
+		Version:      1,
+		SourceDomain: "customer.example",
+		Recipient:    "owner@example.net",
+		CodeKind:     "login_code",
+		SecretValue:  "123456",
+		LanguageCode: "en",
+		CreatedAt:    time.Now().UTC().Format(time.RFC3339),
+	})
+	controlDatabase, err := application.openServerControlDatabase(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := billing.Store{DB: controlDatabase}
+	if err := store.UpsertServiceMailRecipient(context.Background(), request.InstallationID, request.Recipient, "verified", "confirmed"); err != nil {
+		t.Fatal(err)
+	}
+	if err := controlDatabase.Close(); err != nil {
+		t.Fatal(err)
+	}
+	var sentMessage mailout.Message
+	application.sendEmail = func(ctx context.Context, message mailout.Message) error {
+		sentMessage = message
+		return nil
+	}
+	httpRequest := httptest.NewRequest(http.MethodPost, "https://sitebrush.com/?service_mail_relay", nil)
+	status, statusCode := application.handleServiceMailRelayRequest(context.Background(), httpRequest, request, "203.0.113.10")
+	if statusCode != http.StatusOK {
+		t.Fatalf("status = %d %q, want ok", statusCode, status)
+	}
+	if sentMessage.To != "owner@example.net" {
+		t.Fatalf("to = %q", sentMessage.To)
+	}
+	if sentMessage.From != "SiteBrush <sitebrush@sitebrush.com>" {
+		t.Fatalf("from = %q", sentMessage.From)
+	}
+}
+
+func signedServiceMailRequestForTest(t *testing.T, application *App, request serviceMailRequest) serviceMailRequest {
+	t.Helper()
+	installationID, publicKey, privateKey, err := application.serviceMailLocalKeyPair(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.InstallationID = installationID
+	request.PublicKey = base64.StdEncoding.EncodeToString(publicKey)
+	request.Signature = ""
+	payload, err := json.Marshal(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Signature = base64.StdEncoding.EncodeToString(ed25519.Sign(privateKey, payload))
+	return request
 }
 
 func TestContextMenuUsesDirectEditorProfileAndDeleteActions(t *testing.T) {

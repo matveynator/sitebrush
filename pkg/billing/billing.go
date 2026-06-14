@@ -2,7 +2,9 @@ package billing
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -123,6 +125,16 @@ type ServiceMailBlock struct {
 	CreatedAt string
 }
 
+type ServiceMailRecipient struct {
+	InstallationID string
+	RecipientHash  string
+	RecipientMask  string
+	Status         string
+	PurposeScope   string
+	CreatedAt      string
+	VerifiedAt     string
+}
+
 type DeletionBackupMetadata struct {
 	Version           int      `json:"version"`
 	Domain            string   `json:"domain"`
@@ -165,6 +177,8 @@ func Migrate(ctx context.Context, database *sql.DB) error {
 		`CREATE INDEX IF NOT EXISTS idx_service_mail_events_recipient_created ON service_mail_events(recipient,created_at);`,
 		`CREATE INDEX IF NOT EXISTS idx_service_mail_events_domain_created ON service_mail_events(recipient_domain,created_at);`,
 		`CREATE TABLE IF NOT EXISTS service_mail_blocks(id INTEGER PRIMARY KEY AUTOINCREMENT,scope TEXT,value TEXT,reason TEXT,created_at TEXT,UNIQUE(scope,value));`,
+		`CREATE TABLE IF NOT EXISTS service_mail_recipients(installation_id TEXT,recipient_hash TEXT,recipient_mask TEXT,status TEXT,purpose_scope TEXT,created_at TEXT,verified_at TEXT,PRIMARY KEY(installation_id,recipient_hash));`,
+		`CREATE INDEX IF NOT EXISTS idx_service_mail_recipients_installation_status ON service_mail_recipients(installation_id,status);`,
 	}
 	queries = append(queries, demo.SchemaQueries()...)
 	for queryIndex, query := range queries {
@@ -212,7 +226,7 @@ func setSchemaMigrationVersion(ctx context.Context, database *sql.DB, component 
 }
 
 func billingSchemaComplete(ctx context.Context, database *sql.DB) (bool, error) {
-	tableNames := []string{"server_managers", "server_settings", "site_service_plans", "site_service_assignments", "site_registration_requests", "site_deletion_backups", "service_mail_installations", "service_mail_events", "service_mail_blocks"}
+	tableNames := []string{"server_managers", "server_settings", "site_service_plans", "site_service_assignments", "site_registration_requests", "site_deletion_backups", "service_mail_installations", "service_mail_events", "service_mail_blocks", "service_mail_recipients"}
 	tableNames = append(tableNames, demo.TableNames()...)
 	for _, tableName := range tableNames {
 		found, err := tableExists(ctx, database, tableName)
@@ -753,6 +767,69 @@ func (store Store) CountServiceMailSubnetEventsSince(ctx context.Context, subnet
 	_ = store.DB.QueryRowContext(ctx, `SELECT COUNT(1) FROM service_mail_events WHERE source_ip LIKE ? AND created_at>=?`,
 		prefix+"%", since.UTC().Format(time.RFC3339)).Scan(&count)
 	return count
+}
+
+func (store Store) UpsertServiceMailRecipient(ctx context.Context, installationID, recipient, status, purposeScope string) error {
+	installationID = strings.TrimSpace(installationID)
+	recipientHash := ServiceMailRecipientHash(recipient)
+	if installationID == "" || recipientHash == "" {
+		return fmt.Errorf("service mail recipient is invalid")
+	}
+	status = strings.TrimSpace(status)
+	if status == "" {
+		status = "pending"
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	verifiedAt := ""
+	if status == "verified" {
+		verifiedAt = now
+	}
+	_, err := store.DB.ExecContext(ctx, `INSERT INTO service_mail_recipients(installation_id,recipient_hash,recipient_mask,status,purpose_scope,created_at,verified_at) VALUES(?,?,?,?,?,?,?) ON CONFLICT(installation_id,recipient_hash) DO UPDATE SET status=excluded.status,purpose_scope=excluded.purpose_scope,verified_at=CASE WHEN excluded.verified_at<>'' THEN excluded.verified_at ELSE service_mail_recipients.verified_at END`,
+		installationID, recipientHash, MaskServiceMailRecipient(recipient), status, strings.TrimSpace(purposeScope), now, verifiedAt)
+	return err
+}
+
+func (store Store) ServiceMailRecipientVerified(ctx context.Context, installationID, recipient string) bool {
+	var status string
+	err := store.DB.QueryRowContext(ctx, `SELECT status FROM service_mail_recipients WHERE installation_id=? AND recipient_hash=?`,
+		strings.TrimSpace(installationID), ServiceMailRecipientHash(recipient)).Scan(&status)
+	return err == nil && strings.TrimSpace(status) == "verified"
+}
+
+func (store Store) CountServiceMailVerifiedRecipients(ctx context.Context, installationID string) int {
+	var count int
+	_ = store.DB.QueryRowContext(ctx, `SELECT COUNT(1) FROM service_mail_recipients WHERE installation_id=? AND status='verified'`, strings.TrimSpace(installationID)).Scan(&count)
+	return count
+}
+
+func (store Store) CountServiceMailRecipientsSince(ctx context.Context, installationID string, since time.Time) int {
+	var count int
+	_ = store.DB.QueryRowContext(ctx, `SELECT COUNT(1) FROM service_mail_recipients WHERE installation_id=? AND created_at>=?`,
+		strings.TrimSpace(installationID), since.UTC().Format(time.RFC3339)).Scan(&count)
+	return count
+}
+
+func ServiceMailRecipientHash(recipient string) string {
+	normalizedRecipient := strings.ToLower(strings.TrimSpace(recipient))
+	if normalizedRecipient == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte("sitebrush service mail recipient\n" + normalizedRecipient))
+	return hex.EncodeToString(sum[:])
+}
+
+func MaskServiceMailRecipient(recipient string) string {
+	recipient = strings.ToLower(strings.TrimSpace(recipient))
+	atIndex := strings.LastIndex(recipient, "@")
+	if atIndex <= 0 || atIndex == len(recipient)-1 {
+		return ""
+	}
+	localPart := recipient[:atIndex]
+	domain := recipient[atIndex+1:]
+	if len(localPart) <= 2 {
+		return localPart[:1] + "***@" + domain
+	}
+	return localPart[:1] + "***" + localPart[len(localPart)-1:] + "@" + domain
 }
 
 func (store Store) LogServiceMailEvent(ctx context.Context, event ServiceMailEvent) error {

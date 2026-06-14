@@ -110,6 +110,7 @@ const serviceMailPerIPHourLimit = 240
 const serviceMailPerSubnetHourLimit = 480
 const serviceMailPerRecipientHourLimit = 12
 const serviceMailPerRecipientDomainHourLimit = 300
+const serviceMailNewRecipientDayLimit = 3
 
 // App keeps only explicit dependencies to stay readable and easy to swap.
 type App struct {
@@ -11380,6 +11381,7 @@ func (a *App) confirmEmailToken(w http.ResponseWriter, r *http.Request) {
 		a.activatePublicTrialAfterAdminRegistration(registerContext, confirmation.Domain)
 		a.deleteRegistrationConfirmation(registerContext, token)
 		a.promoteFirstServerOwner(registerContext, confirmation.Domain, confirmation.Email)
+		a.markServiceMailRecipientVerified(registerContext, confirmation.Domain, confirmation.Email, confirmation.LanguageCode)
 		a.createSessionForDomain(w, registerContext, confirmation.Domain, confirmation.Email)
 		http.Redirect(w, r, safeConfirmationReturnPath(confirmation.ReturnPath), http.StatusFound)
 	case "profile":
@@ -11388,6 +11390,7 @@ func (a *App) confirmEmailToken(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		_, _ = a.db.ExecContext(r.Context(), `DELETE FROM email_confirmations WHERE token=?`, token)
+		a.markServiceMailRecipientVerified(r.Context(), confirmation.Domain, confirmation.Email, confirmation.LanguageCode)
 		a.createSessionForDomain(w, r.Context(), confirmation.Domain, confirmation.Email)
 		http.Redirect(w, r, safeConfirmationReturnPath(confirmation.ReturnPath), http.StatusFound)
 	default:
@@ -11461,7 +11464,11 @@ func (a *App) enqueueServiceEmail(ctx context.Context, r *http.Request, codeKind
 		CreatedAt:    time.Now().UTC().Format(time.RFC3339),
 	}
 	if err := a.sendServiceMailThroughRelay(ctx, route.RelayURL, &request); err != nil {
-		log.Printf("service mail relay failed domain=%s relay=%s kind=%s to=%s reason=%s error=%v; falling back to local SMTP", domain, route.RelayURL, codeKind, recipient, route.Reason, err)
+		log.Printf("service mail relay failed domain=%s relay=%s kind=%s to=%s reason=%s error=%v", domain, route.RelayURL, codeKind, recipient, route.Reason, err)
+		if !a.serviceMailLocalFallbackAllowed(ctx, domain, languageCode) {
+			return fmt.Errorf("service mail relay failed and local SMTP fallback is not configured: %w", err)
+		}
+		log.Printf("service mail local SMTP fallback used domain=%s kind=%s to=%s", domain, codeKind, recipient)
 		return a.enqueueEmail(ctx, message)
 	}
 	log.Printf("service mail relayed domain=%s relay=%s kind=%s to=%s reason=%s", domain, route.RelayURL, codeKind, recipient, route.Reason)
@@ -11492,7 +11499,11 @@ func (a *App) sendServiceEmailNow(ctx context.Context, r *http.Request, codeKind
 	}
 	if err := a.sendServiceMailThroughRelay(sendCtx, route.RelayURL, &request); err != nil {
 		warning := fmt.Sprintf("service mail relay failed (%s); fallback to local SMTP", err.Error())
-		log.Printf("service mail relay failed domain=%s relay=%s kind=%s to=%s reason=%s error=%v; falling back to local SMTP", domain, route.RelayURL, codeKind, recipient, route.Reason, err)
+		log.Printf("service mail relay failed domain=%s relay=%s kind=%s to=%s reason=%s error=%v", domain, route.RelayURL, codeKind, recipient, route.Reason, err)
+		if !a.serviceMailLocalFallbackAllowed(ctx, domain, languageCode) {
+			return emailDeliveryResult{Message: message, Err: fmt.Errorf("service mail relay failed and local SMTP fallback is not configured: %w", err)}
+		}
+		log.Printf("service mail local SMTP fallback used domain=%s kind=%s to=%s", domain, codeKind, recipient)
 		result := a.sendEmailNow(ctx, message)
 		if result.Err == nil {
 			result.Warning = warning
@@ -11501,6 +11512,35 @@ func (a *App) sendServiceEmailNow(ctx context.Context, r *http.Request, codeKind
 	}
 	log.Printf("service mail relayed domain=%s relay=%s kind=%s to=%s reason=%s", domain, route.RelayURL, codeKind, recipient, route.Reason)
 	return emailDeliveryResult{Message: message}
+}
+
+func (a *App) markServiceMailRecipientVerified(ctx context.Context, domain, recipient, languageCode string) {
+	route := a.serviceMailRoute(ctx, domain, languageCode)
+	if !route.UseRelay {
+		return
+	}
+	request := serviceMailRequest{
+		Version:      1,
+		SourceDomain: normalizeDomainName(domain),
+		Recipient:    strings.TrimSpace(recipient),
+		CodeKind:     "recipient_verified",
+		SecretValue:  "verified",
+		LanguageCode: strings.TrimSpace(languageCode),
+		CreatedAt:    time.Now().UTC().Format(time.RFC3339),
+	}
+	if err := a.sendServiceMailThroughRelay(ctx, route.RelayURL, &request); err != nil {
+		log.Printf("service mail recipient verification failed domain=%s relay=%s to=%s error=%v", domain, route.RelayURL, recipient, err)
+	}
+}
+
+func (a *App) serviceMailLocalFallbackAllowed(ctx context.Context, domain, languageCode string) bool {
+	if strings.EqualFold(strings.TrimSpace(os.Getenv("SITEBRUSH_SERVICE_MAIL_MODE")), "local") {
+		return true
+	}
+	if strings.TrimSpace(os.Getenv("SITEBRUSH_SMTP_FROM")) == "" && strings.TrimSpace(os.Getenv("SITEBRUSH_SMTP_HOSTNAME")) == "" {
+		return false
+	}
+	return a.serviceMailLocalSenderReady(ctx, domain, a.emailFromAddress(domain), languageCode)
 }
 
 func emailConfirmationURL(r *http.Request, token string) string {
@@ -11646,10 +11686,7 @@ func stringBoolEnabled(rawValue string) bool {
 	}
 }
 
-func (a *App) shouldUseRussianServiceMailRelay(ctx context.Context, domain string) bool {
-	if !strings.HasSuffix(strings.ToLower(strings.TrimSpace(domain)), ".ru") {
-		return false
-	}
+func (a *App) shouldUseRussianServiceMailRelay(ctx context.Context, _ string) bool {
 	_, externalIP, err := detectServerIPCandidates(ctx)
 	if err != nil || strings.TrimSpace(externalIP) == "" || a.geoIP == nil {
 		return false
@@ -11763,12 +11800,6 @@ func (a *App) handleServiceMailRelayRequest(ctx context.Context, r *http.Request
 	if !store.ServiceMailRelayEnabled(ctx) {
 		return fail("service mail relay is disabled", http.StatusForbidden)
 	}
-	if !serviceMailKindAllowed(request.CodeKind) {
-		return fail("service mail kind is not allowed", http.StatusForbidden)
-	}
-	if err := validateServiceMailSecret(request.CodeKind, request.SecretValue); err != nil {
-		return fail(err.Error(), http.StatusBadRequest)
-	}
 	if _, err := stdmail.ParseAddress(strings.TrimSpace(request.Recipient)); err != nil {
 		return fail("recipient is invalid", http.StatusBadRequest)
 	}
@@ -11787,12 +11818,29 @@ func (a *App) handleServiceMailRelayRequest(ctx context.Context, r *http.Request
 	if reason, blocked := store.ServiceMailBlocked(ctx, request.InstallationID, sourceIP, request.Recipient, recipientDomain); blocked {
 		return fail("blocked by rule "+reason, http.StatusForbidden)
 	}
+	if serviceMailKindIsRecipientVerification(request.CodeKind) {
+		if err := store.UpsertServiceMailRecipient(ctx, request.InstallationID, request.Recipient, "verified", "confirmed"); err != nil {
+			return fail(err.Error(), http.StatusBadRequest)
+		}
+		event.Status = "verified"
+		_ = store.LogServiceMailEvent(ctx, event)
+		return "verified", http.StatusOK
+	}
+	if !serviceMailKindAllowed(request.CodeKind) {
+		return fail("service mail kind is not allowed", http.StatusForbidden)
+	}
+	if err := validateServiceMailSecret(request.CodeKind, request.SecretValue); err != nil {
+		return fail(err.Error(), http.StatusBadRequest)
+	}
 	if reason, limited := serviceMailRateLimited(ctx, store, request, sourceIP, recipientDomain); limited {
 		return fail(reason, http.StatusTooManyRequests)
 	}
+	if reason, allowed := serviceMailRecipientAllowed(ctx, store, request); !allowed {
+		return fail(reason, http.StatusForbidden)
+	}
 	relayDomain := a.siteDomain(ctx, r)
 	message := mailout.Message{
-		From:    a.emailFromAddress(relayDomain),
+		From:    serviceMailRelayFromAddress(relayDomain),
 		To:      strings.TrimSpace(request.Recipient),
 		Subject: emailSubjectForServiceMail(request.LanguageCode, request.CodeKind, request.SourceDomain),
 		Body:    emailBodyForServiceMail(request.LanguageCode, request.CodeKind, request.SourceDomain, request.SecretValue),
@@ -11808,6 +11856,58 @@ func (a *App) handleServiceMailRelayRequest(ctx context.Context, r *http.Request
 	event.Status = "sent"
 	_ = store.LogServiceMailEvent(ctx, event)
 	return "sent", http.StatusOK
+}
+
+func serviceMailKindIsRecipientVerification(codeKind string) bool {
+	return strings.TrimSpace(codeKind) == "recipient_verified"
+}
+
+func serviceMailRecipientAllowed(ctx context.Context, store billing.Store, request serviceMailRequest) (string, bool) {
+	switch strings.TrimSpace(request.CodeKind) {
+	case "login_code", "password_change_code":
+		if store.ServiceMailRecipientVerified(ctx, request.InstallationID, request.Recipient) {
+			return "", true
+		}
+		return "recipient is not verified for this installation", false
+	case "email_confirm":
+		if store.CountServiceMailVerifiedRecipients(ctx, request.InstallationID) == 0 {
+			if store.CountServiceMailRecipientsSince(ctx, request.InstallationID, time.Now().UTC().Add(-24*time.Hour)) >= serviceMailNewRecipientDayLimit {
+				return "new recipient daily limit reached", false
+			}
+			if err := store.UpsertServiceMailRecipient(ctx, request.InstallationID, request.Recipient, "pending", "owner"); err != nil {
+				return err.Error(), false
+			}
+			return "", true
+		}
+		if store.ServiceMailRecipientVerified(ctx, request.InstallationID, request.Recipient) {
+			return "", true
+		}
+		return "owner recipient is not verified", false
+	case "email_change", "owner_invite":
+		if store.CountServiceMailVerifiedRecipients(ctx, request.InstallationID) == 0 {
+			return "installation owner recipient is not verified", false
+		}
+		if store.ServiceMailRecipientVerified(ctx, request.InstallationID, request.Recipient) {
+			return "", true
+		}
+		if store.CountServiceMailRecipientsSince(ctx, request.InstallationID, time.Now().UTC().Add(-24*time.Hour)) >= serviceMailNewRecipientDayLimit {
+			return "new recipient daily limit reached", false
+		}
+		if err := store.UpsertServiceMailRecipient(ctx, request.InstallationID, request.Recipient, "pending", request.CodeKind); err != nil {
+			return err.Error(), false
+		}
+		return "", true
+	default:
+		return "service mail kind is not allowed", false
+	}
+}
+
+func serviceMailRelayFromAddress(relayDomain string) string {
+	relayDomain = normalizeDomainName(relayDomain)
+	if relayDomain == "" {
+		relayDomain = "sitebrush.com"
+	}
+	return "SiteBrush <sitebrush@" + relayDomain + ">"
 }
 
 func verifyServiceMailRequestSignature(request serviceMailRequest) error {
