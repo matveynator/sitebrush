@@ -52,7 +52,6 @@ import (
 	"golang.org/x/net/dns/dnsmessage"
 	"golang.org/x/net/html"
 	"golang.org/x/term"
-	"sitebrush/pkg/billing"
 	appcli "sitebrush/pkg/cli"
 	"sitebrush/pkg/crawler"
 	_ "sitebrush/pkg/database/drivers"
@@ -62,6 +61,7 @@ import (
 	"sitebrush/pkg/dirprotect"
 	"sitebrush/pkg/diskusage"
 	"sitebrush/pkg/geoip"
+	"sitebrush/pkg/hostingandsupport"
 	"sitebrush/pkg/mailout"
 	"sitebrush/pkg/serviceinstall"
 	"sitebrush/pkg/shutdownsignals"
@@ -2239,7 +2239,7 @@ func shouldRecordAnalyticsRequest(r *http.Request) bool {
 		return false
 	}
 	query := r.URL.Query()
-	for _, skippedFlag := range []string{"analytics", "billing", "grab_events", "grab_ws", "revision_preview", "publish_events", "captcha"} {
+	for _, skippedFlag := range []string{"analytics", "hosting_and_support", "billing", "grab_events", "grab_ws", "revision_preview", "publish_events", "captcha"} {
 		if _, found := query[skippedFlag]; found {
 			return false
 		}
@@ -2251,8 +2251,8 @@ func isSitebrushControllerQuery(query url.Values) bool {
 	for _, controllerFlag := range []string{
 		"save", "template_events", "grab_preview", "grab_events", "grab_ws", "revision_preview", "revision_restore", "revision_delete", "revision_toggle",
 		"tree", "native_pick_files", "native_save_backup", "edit", "visual", "text", "editraw", "settings", "properties",
-		"backup_download", "billing_backup_download", "backup_import", "profile", "freeze", "publish", "publish_events", "publish_preview", "files",
-		"revisions", "login", "register", "email_confirm", "grab", "recover", "captcha", "analytics", "billing",
+		"backup_download", "hosting_and_support_backup_download", "billing_backup_download", "backup_import", "profile", "freeze", "publish", "publish_events", "publish_preview", "files",
+		"revisions", "login", "register", "email_confirm", "grab", "recover", "captcha", "analytics", "hosting_and_support", "billing",
 	} {
 		if _, found := query[controllerFlag]; found {
 			return true
@@ -5588,8 +5588,8 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 		a.analyticsPage(w, r)
 		return
 	}
-	if hasQueryFlag(r, "billing") {
-		a.billingPage(w, r)
+	if hasQueryFlag(r, "hosting_and_support") || hasQueryFlag(r, "billing") {
+		a.hostingAndSupportPage(w, r)
 		return
 	}
 	if hasQueryFlag(r, "service_mail_relay") {
@@ -5604,7 +5604,7 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 		a.demoGrabRefresh(w, r)
 		return
 	}
-	if hasQueryFlag(r, "billing_backup_download") {
+	if hasQueryFlag(r, "hosting_and_support_backup_download") || hasQueryFlag(r, "billing_backup_download") {
 		a.downloadManagedSiteDeletionBackup(w, r)
 		return
 	}
@@ -5880,7 +5880,7 @@ func (a *App) siteRequestPage(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) renderSiteRequestPage(w http.ResponseWriter, r *http.Request, domain, status, name, email, phone string, selectedPlanID int) {
-	plans := a.publicBillingPlans(r.Context())
+	plans := a.publicHostingAndSupportPlans(r.Context())
 	if selectedPlanID == 0 && len(plans) > 0 {
 		selectedPlanID = plans[0].ID
 	}
@@ -5897,13 +5897,13 @@ func (a *App) renderSiteRequestPage(w http.ResponseWriter, r *http.Request, doma
 	})
 }
 
-func (a *App) publicBillingPlans(ctx context.Context) []billing.Plan {
+func (a *App) publicHostingAndSupportPlans(ctx context.Context) []hostingandsupport.Plan {
 	controlDatabase, err := a.openServerControlDatabase(ctx)
 	if err != nil {
 		return nil
 	}
 	defer controlDatabase.Close()
-	return (billing.Store{DB: controlDatabase}).Plans(ctx)
+	return (hostingandsupport.Store{DB: controlDatabase}).Plans(ctx)
 }
 
 func (a *App) createSiteRegistrationRequestFromForm(r *http.Request, domain, name, email, phone string, planID int) string {
@@ -5925,7 +5925,7 @@ func (a *App) createSiteRegistrationRequestFromForm(r *http.Request, domain, nam
 		return err.Error()
 	}
 	defer controlDatabase.Close()
-	store := billing.Store{DB: controlDatabase}
+	store := hostingandsupport.Store{DB: controlDatabase}
 	if planID <= 0 {
 		if defaultPlan, found := store.DefaultPlan(r.Context()); found {
 			planID = defaultPlan.ID
@@ -6087,7 +6087,7 @@ func (a *App) startDemoSiteSession(w http.ResponseWriter, r *http.Request, setti
 		return "", err
 	}
 	defer controlDatabase.Close()
-	store := billing.Store{DB: controlDatabase}
+	store := hostingandsupport.Store{DB: controlDatabase}
 	if ownerDomain, found := store.OwnerDomain(r.Context()); found && normalizeDomainName(ownerDomain) == domain {
 		return "", fmt.Errorf("server owner site cannot be used as the public demo site")
 	}
@@ -6248,7 +6248,7 @@ func (a *App) demoGrabPreview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer controlDatabase.Close()
-	if ownerDomain, found := (billing.Store{DB: controlDatabase}).OwnerDomain(r.Context()); found && normalizeDomainName(ownerDomain) == domain {
+	if ownerDomain, found := (hostingandsupport.Store{DB: controlDatabase}).OwnerDomain(r.Context()); found && normalizeDomainName(ownerDomain) == domain {
 		http.Error(w, "server owner site cannot be used as the public demo site", http.StatusBadRequest)
 		return
 	}
@@ -6325,7 +6325,7 @@ func (a *App) demoGrabRefresh(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer controlDatabase.Close()
-	store := billing.Store{DB: controlDatabase}
+	store := hostingandsupport.Store{DB: controlDatabase}
 	demoDomain := normalizeQuotaDomainName(r.FormValue("demo_site_domain"))
 	demoSourceURL, demoSourceErr := demo.NormalizeSourceURL(r.FormValue("demo_site_source_url"))
 	if demoSourceErr != nil {
@@ -7454,7 +7454,7 @@ func (a *App) publicTrialSiteCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer controlDatabase.Close()
-	parentDomain, found := (billing.Store{DB: controlDatabase}).OwnerDomain(r.Context())
+	parentDomain, found := (hostingandsupport.Store{DB: controlDatabase}).OwnerDomain(r.Context())
 	if !found {
 		http.Error(w, "owner domain is required", http.StatusBadRequest)
 		return
@@ -7483,7 +7483,7 @@ func (a *App) publicTrialSiteCreate(w http.ResponseWriter, r *http.Request) {
 		serviceStatus = "free"
 	}
 	if preview.Plan.ID > 0 {
-		_ = (billing.Store{DB: controlDatabase}).AssignSite(r.Context(), trialDomain, preview.Plan.ID, serviceStatus)
+		_ = (hostingandsupport.Store{DB: controlDatabase}).AssignSite(r.Context(), trialDomain, preview.Plan.ID, serviceStatus)
 	}
 	a.activePublicTrialPreviewStore().Delete(progressToken)
 	w.Header().Set("Content-Type", "application/json")
@@ -7542,7 +7542,7 @@ func (a *App) publicTrialAllowed(r *http.Request) bool {
 		return false
 	}
 	defer controlDatabase.Close()
-	store := billing.Store{DB: controlDatabase}
+	store := hostingandsupport.Store{DB: controlDatabase}
 	if !store.AutomaticRegistrationAllowed(r.Context()) {
 		return false
 	}
@@ -7595,7 +7595,7 @@ func (a *App) activatePublicTrialAfterAdminRegistration(ctx context.Context, dom
 		return
 	}
 	defer controlDatabase.Close()
-	store := billing.Store{DB: controlDatabase}
+	store := hostingandsupport.Store{DB: controlDatabase}
 	assignments := store.ServiceAssignments(ctx)
 	assignment, found := assignments[domain]
 	if !found {
@@ -7765,13 +7765,13 @@ func (a *App) publishPublicTrialSourceRetry(progressToken string, pageURL *url.U
 }
 
 func (a *App) smallestPublicTrialPlan(ctx context.Context, requiredBytes int64) (publicTrialPlanView, publicTrialPlanView, bool) {
-	plans := a.publicBillingPlans(ctx)
+	plans := a.publicHostingAndSupportPlans(ctx)
 	if requiredBytes <= 0 {
 		requiredBytes = 1
 	}
-	var freePlan billing.Plan
+	var freePlan hostingandsupport.Plan
 	freePlanFound := false
-	var selectedPlan billing.Plan
+	var selectedPlan hostingandsupport.Plan
 	for _, plan := range plans {
 		if planIsFree(plan) && (!freePlanFound || plan.QuotaBytes < freePlan.QuotaBytes) {
 			freePlan = plan
@@ -7785,13 +7785,13 @@ func (a *App) smallestPublicTrialPlan(ctx context.Context, requiredBytes int64) 
 		}
 	}
 	if freePlanFound && freePlan.QuotaBytes >= requiredBytes {
-		freePlanView := publicTrialPlanViewFromBillingPlan(freePlan)
+		freePlanView := publicTrialPlanViewFromHostingAndSupportPlan(freePlan)
 		return freePlanView, freePlanView, true
 	}
 	if selectedPlan.ID == 0 && len(plans) > 0 {
 		selectedPlan = plans[len(plans)-1]
 	}
-	return publicTrialPlanViewFromBillingPlan(selectedPlan), publicTrialPlanViewFromBillingPlan(freePlan), false
+	return publicTrialPlanViewFromHostingAndSupportPlan(selectedPlan), publicTrialPlanViewFromHostingAndSupportPlan(freePlan), false
 }
 
 func publicTrialPlanMessage(translations map[string]string, preview publicTrialPreview) string {
@@ -7820,7 +7820,7 @@ func publicTrialFreePlanForMessage(preview publicTrialPreview) (publicTrialPlanV
 	return publicTrialPlanView{}, false
 }
 
-func publicTrialPlanViewFromBillingPlan(plan billing.Plan) publicTrialPlanView {
+func publicTrialPlanViewFromHostingAndSupportPlan(plan hostingandsupport.Plan) publicTrialPlanView {
 	return publicTrialPlanView{ID: plan.ID, Name: plan.Name, QuotaBytes: plan.QuotaBytes, QuotaLabel: plan.QuotaLabel, IsFree: planIsFree(plan)}
 }
 
@@ -9376,7 +9376,7 @@ func (a *App) revisionsPage(w http.ResponseWriter, r *http.Request) {
 	a.render(w, r, "revisions.html", map[string]any{"Path": pagePath, "ReturnPath": returnPath, "Revisions": revisionList, "RevisionText": text})
 }
 
-func (a *App) billingPage(w http.ResponseWriter, r *http.Request) {
+func (a *App) hostingAndSupportPage(w http.ResponseWriter, r *http.Request) {
 	if !a.isAdminRequest(r) {
 		if !a.hasAdmin(r.Context(), a.siteDomain(r.Context(), r)) {
 			http.Redirect(w, r, r.URL.Path+"?register", http.StatusFound)
@@ -9391,9 +9391,9 @@ func (a *App) billingPage(w http.ResponseWriter, r *http.Request) {
 	}
 	status := ""
 	if r.Method == http.MethodPost {
-		status = a.handleBillingAction(r)
-		if billingActionWantsJSON(r) {
-			saved := billingActionStatusWasSaved(r, status)
+		status = a.handleHostingAndSupportAction(r)
+		if hostingAndSupportActionWantsJSON(r) {
+			saved := hostingAndSupportActionStatusWasSaved(r, status)
 			w.Header().Set("Content-Type", "application/json")
 			if !saved {
 				w.WriteHeader(http.StatusBadRequest)
@@ -9402,20 +9402,20 @@ func (a *App) billingPage(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	view, err := a.billingView(r.Context(), r)
+	view, err := a.hostingAndSupportView(r.Context(), r)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	view["Status"] = status
-	a.render(w, r, "billing.html", view)
+	a.render(w, r, "hostingandsupport.html", view)
 }
 
-func billingActionWantsJSON(r *http.Request) bool {
+func hostingAndSupportActionWantsJSON(r *http.Request) bool {
 	return strings.Contains(r.Header.Get("Accept"), "application/json") || r.FormValue("billing_ajax") == "1"
 }
 
-func billingActionStatusWasSaved(r *http.Request, status string) bool {
+func hostingAndSupportActionStatusWasSaved(r *http.Request, status string) bool {
 	translations := translationsForRequest(r)
 	action := strings.TrimSpace(r.FormValue("billing_action"))
 	status = strings.TrimSpace(status)
@@ -9433,17 +9433,17 @@ func billingActionStatusWasSaved(r *http.Request, status string) bool {
 	return false
 }
 
-func (a *App) handleBillingAction(r *http.Request) string {
+func (a *App) handleHostingAndSupportAction(r *http.Request) string {
 	_ = r.ParseMultipartForm(8 << 20)
 	switch strings.TrimSpace(r.FormValue("billing_action")) {
 	case "settings":
-		return a.saveBillingSettingsFromForm(r)
+		return a.saveHostingAndSupportSettingsFromForm(r)
 	case "registration_settings":
-		return a.saveBillingRegistrationSettingsFromForm(r)
+		return a.saveHostingAndSupportRegistrationSettingsFromForm(r)
 	case "service_mail_settings":
-		return a.saveBillingServiceMailSettingsFromForm(r)
+		return a.saveHostingAndSupportServiceMailSettingsFromForm(r)
 	case "demo_settings":
-		return a.saveBillingDemoSettingsFromForm(r)
+		return a.saveHostingAndSupportDemoSettingsFromForm(r)
 	case "create_site":
 		return a.createManagedSiteFromForm(r)
 	case "update_site":
@@ -9473,13 +9473,13 @@ func (a *App) handleBillingAction(r *http.Request) string {
 	}
 }
 
-func (a *App) billingView(ctx context.Context, r *http.Request) (map[string]any, error) {
+func (a *App) hostingAndSupportView(ctx context.Context, r *http.Request) (map[string]any, error) {
 	controlDatabase, err := a.openServerControlDatabase(ctx)
 	if err != nil {
 		return nil, err
 	}
 	defer controlDatabase.Close()
-	store := billing.Store{DB: controlDatabase}
+	store := hostingandsupport.Store{DB: controlDatabase}
 	a.cleanupExpiredManagedSiteDeletionBackups(ctx, controlDatabase)
 	plans := store.Plans(ctx)
 	assignments := store.ServiceAssignments(ctx)
@@ -9489,31 +9489,36 @@ func (a *App) billingView(ctx context.Context, r *http.Request) (map[string]any,
 	serviceMailBlocks := store.ServiceMailBlocks(ctx)
 	serviceMailRelayEnabled := store.ServiceMailRelayEnabled(ctx)
 	demoSettings := (demo.Store{DB: controlDatabase}).Settings(ctx)
-	billingDemoDomain := ""
+	hostingAndSupportDemoDomain := ""
 	if demoSettings.Enabled {
-		billingDemoDomain = demoSettings.Domain
+		hostingAndSupportDemoDomain = demoSettings.Domain
 	}
 	mainDomain := ""
 	if ownerDomain, found := store.OwnerDomain(ctx); found {
 		mainDomain = ownerDomain
 	}
-	siteRows, err := a.billingSiteRows(ctx, plans, assignments, a.siteDomain(ctx, r), billingDemoDomain, mainDomain)
+	siteRows, err := a.hostingAndSupportSiteRows(ctx, plans, assignments, a.siteDomain(ctx, r), hostingAndSupportDemoDomain, mainDomain)
 	if err != nil {
 		return nil, err
 	}
-	serviceMailUsers := a.billingServiceMailUsers(ctx, siteRows, serviceMailInstallations, serviceMailEvents)
+	serviceMailUsers := a.hostingAndSupportClients(ctx, siteRows, serviceMailInstallations, serviceMailEvents)
+	clientSiteCount, clientInstallationCount, clientLocalDevelopmentCount := hostingAndSupportClientTotals(serviceMailUsers)
 	backups := a.managedSiteDeletionBackupViews(ctx, r, controlDatabase)
 	translations := translationsForRequest(r)
 	return map[string]any{
-		"Title":                    translationOrDefault(translations, "billing_title", "Billing"),
-		"Sites":                    siteRows,
-		"Plans":                    plans,
-		"SiteRequests":             siteRequests,
-		"ServiceMailInstallations": serviceMailInstallations,
-		"ServiceMailEvents":        serviceMailEvents,
-		"ServiceMailUsers":         serviceMailUsers,
-		"ServiceMailBlocks":        serviceMailBlocks,
-		"ServiceMailRelayEnabled":  serviceMailRelayEnabled,
+		"Title":                       translationOrDefault(translations, "billing_title", "Хостинг и поддержка"),
+		"Sites":                       siteRows,
+		"Plans":                       plans,
+		"SiteRequests":                siteRequests,
+		"ServiceMailInstallations":    serviceMailInstallations,
+		"ServiceMailEvents":           serviceMailEvents,
+		"Clients":                     serviceMailUsers,
+		"ClientCount":                 len(serviceMailUsers),
+		"ClientSiteCount":             clientSiteCount,
+		"ClientInstallationCount":     clientInstallationCount,
+		"ClientLocalDevelopmentCount": clientLocalDevelopmentCount,
+		"ServiceMailBlocks":           serviceMailBlocks,
+		"ServiceMailRelayEnabled":     serviceMailRelayEnabled,
 		"ServiceMailLimits": map[string]int{
 			"InstallationHour":    serviceMailPerInstallationHourLimit,
 			"NewInstallationHour": serviceMailNewInstallationHourLimit,
@@ -9531,22 +9536,45 @@ func (a *App) billingView(ctx context.Context, r *http.Request) (map[string]any,
 	}, nil
 }
 
-type billingServiceMailUserView struct {
-	PrimaryEmail      string
-	Emails            []string
-	EmailCount        int
-	Domains           []string
-	DomainCount       int
-	SiteCount         int
-	Installations     []string
-	InstallationCount int
-	IPs               []billingServiceMailUserIPView
-	IPCount           int
-	Events            []billingServiceMailUserEventView
-	MapPointsJSON     template.JS
+func hostingAndSupportClientTotals(clients []hostingAndSupportClientView) (int, int, int) {
+	siteCount := 0
+	installationCount := 0
+	localDevelopmentCount := 0
+	for _, client := range clients {
+		siteCount += client.SiteCount
+		installationCount += client.InstallationCount
+		localDevelopmentCount += client.LocalDevelopmentCount
+	}
+	return siteCount, installationCount, localDevelopmentCount
 }
 
-type billingServiceMailUserIPView struct {
+type hostingAndSupportClientView struct {
+	PrimaryEmail           string
+	Emails                 []string
+	EmailCount             int
+	Domains                []string
+	DomainCount            int
+	SiteCount              int
+	Sites                  []hostingAndSupportClientSiteView
+	Installations          []string
+	InstallationCount      int
+	RelayInstallationCount int
+	LocalDevelopmentCount  int
+	IPs                    []hostingAndSupportClientIPView
+	IPCount                int
+	Events                 []hostingAndSupportClientEventView
+	MapPointsJSON          template.JS
+}
+
+type hostingAndSupportClientSiteView struct {
+	Domain           string
+	InstallationIP   string
+	RealInstallation bool
+	LocalDevelopment bool
+	Status           string
+}
+
+type hostingAndSupportClientIPView struct {
 	IP        string
 	Country   string
 	City      string
@@ -9555,7 +9583,7 @@ type billingServiceMailUserIPView struct {
 	Longitude float64
 }
 
-type billingServiceMailUserEventView struct {
+type hostingAndSupportClientEventView struct {
 	Kind      string
 	Status    string
 	Email     string
@@ -9565,35 +9593,50 @@ type billingServiceMailUserEventView struct {
 	Error     string
 }
 
-type billingServiceMailUserAccumulator struct {
+type hostingAndSupportClientAccumulator struct {
 	primaryEmail  string
 	emails        map[string]struct{}
 	domains       map[string]struct{}
-	sites         map[string]struct{}
+	sites         map[string]string
 	installations map[string]struct{}
-	ips           map[string]billingServiceMailUserIPView
-	events        []billingServiceMailUserEventView
+	ips           map[string]hostingAndSupportClientIPView
+	events        []hostingAndSupportClientEventView
 }
 
-func (a *App) billingServiceMailUsers(ctx context.Context, siteRows []billing.Site, installations []billing.ServiceMailInstallation, events []billing.ServiceMailEvent) []billingServiceMailUserView {
+func (a *App) hostingAndSupportClients(ctx context.Context, siteRows []hostingandsupport.Site, installations []hostingandsupport.ServiceMailInstallation, events []hostingandsupport.ServiceMailEvent) []hostingAndSupportClientView {
 	installationDomain := make(map[string]string)
+	installationIP := make(map[string]string)
 	for _, installation := range installations {
 		installationDomain[strings.TrimSpace(installation.InstallationID)] = normalizeDomainName(installation.LastDomain)
+		installationIP[strings.TrimSpace(installation.InstallationID)] = strings.TrimSpace(installation.LastIP)
 	}
-	usersByDomain := make(map[string]*billingServiceMailUserAccumulator)
+	clientsByEmail := make(map[string]*hostingAndSupportClientAccumulator)
+	clientsByDomain := make(map[string]*hostingAndSupportClientAccumulator)
 	for _, siteRow := range siteRows {
 		domain := normalizeDomainName(siteRow.Domain)
 		if domain == "" {
 			continue
 		}
-		user := billingServiceMailUserByDomain(usersByDomain, domain)
-		user.sites[domain] = struct{}{}
-		user.domains[domain] = struct{}{}
-		for _, email := range splitBillingEmailList(siteRow.AdminEmails) {
-			user.emails[email] = struct{}{}
-			if user.primaryEmail == "" {
-				user.primaryEmail = email
-			}
+		for _, email := range splitHostingAndSupportEmailList(siteRow.AdminEmails) {
+			client := hostingAndSupportClientByEmail(clientsByEmail, email)
+			client.sites[domain] = ""
+			client.domains[domain] = struct{}{}
+			clientsByDomain[domain] = client
+		}
+	}
+	for _, installation := range installations {
+		domain := normalizeDomainName(installation.LastDomain)
+		client := clientsByDomain[domain]
+		if client == nil {
+			continue
+		}
+		if installation.InstallationID != "" {
+			client.installations[strings.TrimSpace(installation.InstallationID)] = struct{}{}
+		}
+		if installation.LastIP != "" {
+			sourceIP := strings.TrimSpace(installation.LastIP)
+			client.ips[sourceIP] = a.hostingAndSupportClientIP(ctx, sourceIP)
+			client.sites[domain] = sourceIP
 		}
 	}
 	for _, event := range events {
@@ -9601,83 +9644,154 @@ func (a *App) billingServiceMailUsers(ctx context.Context, siteRows []billing.Si
 		if domain == "" {
 			domain = installationDomain[strings.TrimSpace(event.InstallationID)]
 		}
-		if domain == "" {
-			domain = strings.ToLower(strings.TrimSpace(event.RecipientDomain))
+		email := strings.ToLower(strings.TrimSpace(event.Recipient))
+		client := clientsByDomain[domain]
+		if client == nil && email != "" {
+			client = hostingAndSupportClientByEmail(clientsByEmail, email)
 		}
-		if domain == "" {
+		if client == nil {
 			continue
 		}
-		user := billingServiceMailUserByDomain(usersByDomain, domain)
-		email := strings.ToLower(strings.TrimSpace(event.Recipient))
 		if email != "" {
-			user.emails[email] = struct{}{}
-			if user.primaryEmail == "" || serviceMailEventIsNewerIdentity(event.CodeKind) {
-				user.primaryEmail = email
+			client.emails[email] = struct{}{}
+			if client.primaryEmail == "" || serviceMailEventIsNewerIdentity(event.CodeKind) {
+				client.primaryEmail = email
 			}
 		}
-		if event.SourceDomain != "" {
-			user.domains[normalizeDomainName(event.SourceDomain)] = struct{}{}
+		if domain != "" {
+			client.domains[domain] = struct{}{}
+			if _, found := client.sites[domain]; !found {
+				client.sites[domain] = ""
+			}
 		}
 		if event.InstallationID != "" {
-			user.installations[strings.TrimSpace(event.InstallationID)] = struct{}{}
+			client.installations[strings.TrimSpace(event.InstallationID)] = struct{}{}
 		}
-		if event.SourceIP != "" {
-			user.ips[strings.TrimSpace(event.SourceIP)] = a.billingServiceMailUserIP(ctx, event.SourceIP)
+		sourceIP := firstNonEmpty(strings.TrimSpace(event.SourceIP), installationIP[strings.TrimSpace(event.InstallationID)])
+		if sourceIP != "" {
+			client.ips[sourceIP] = a.hostingAndSupportClientIP(ctx, sourceIP)
+			if domain != "" {
+				client.sites[domain] = sourceIP
+			}
 		}
-		if len(user.events) < 12 {
-			user.events = append(user.events, billingServiceMailUserEventView{
+		if len(client.events) < 12 {
+			client.events = append(client.events, hostingAndSupportClientEventView{
 				Kind:      event.CodeKind,
 				Status:    event.Status,
 				Email:     email,
-				Domain:    normalizeDomainName(event.SourceDomain),
-				IP:        strings.TrimSpace(event.SourceIP),
+				Domain:    domain,
+				IP:        sourceIP,
 				CreatedAt: event.CreatedAt,
 				Error:     event.Error,
 			})
 		}
 	}
-	users := make([]billingServiceMailUserView, 0, len(usersByDomain))
-	for _, user := range usersByDomain {
-		view := billingServiceMailUserView{
+	clients := make([]hostingAndSupportClientView, 0, len(clientsByEmail))
+	for _, user := range clientsByEmail {
+		siteViews := hostingAndSupportClientSiteViews(user.sites)
+		view := hostingAndSupportClientView{
 			PrimaryEmail:  firstNonEmpty(user.primaryEmail, firstStringFromSet(user.emails)),
 			Emails:        sortedStringsFromSet(user.emails),
 			Domains:       sortedStringsFromSet(user.domains),
-			SiteCount:     len(user.sites),
+			Sites:         siteViews,
+			SiteCount:     len(siteViews),
 			Installations: sortedStringsFromSet(user.installations),
 			IPs:           sortedIPViews(user.ips),
 			Events:        user.events,
 		}
 		view.EmailCount = len(view.Emails)
 		view.DomainCount = len(view.Domains)
-		view.InstallationCount = len(view.Installations)
+		view.RelayInstallationCount = len(view.Installations)
+		for _, site := range siteViews {
+			if site.RealInstallation {
+				view.InstallationCount++
+			}
+			if site.LocalDevelopment {
+				view.LocalDevelopmentCount++
+			}
+		}
 		view.IPCount = len(view.IPs)
-		view.MapPointsJSON = billingServiceMailUserMapPointsJSON(view.IPs)
-		users = append(users, view)
+		view.MapPointsJSON = hostingAndSupportClientMapPointsJSON(view.IPs)
+		clients = append(clients, view)
 	}
-	sort.Slice(users, func(left, right int) bool {
-		return users[left].PrimaryEmail < users[right].PrimaryEmail
+	sort.Slice(clients, func(left, right int) bool {
+		return clients[left].PrimaryEmail < clients[right].PrimaryEmail
 	})
-	return users
+	return clients
 }
 
-func billingServiceMailUserByDomain(users map[string]*billingServiceMailUserAccumulator, domain string) *billingServiceMailUserAccumulator {
+func hostingAndSupportClientByEmail(clients map[string]*hostingAndSupportClientAccumulator, email string) *hostingAndSupportClientAccumulator {
+	email = strings.ToLower(strings.TrimSpace(email))
+	if client := clients[email]; client != nil {
+		return client
+	}
+	client := &hostingAndSupportClientAccumulator{
+		primaryEmail:  email,
+		emails:        map[string]struct{}{email: {}},
+		domains:       make(map[string]struct{}),
+		sites:         make(map[string]string),
+		installations: make(map[string]struct{}),
+		ips:           make(map[string]hostingAndSupportClientIPView),
+	}
+	clients[email] = client
+	return client
+}
+
+func hostingAndSupportClientSiteViews(sites map[string]string) []hostingAndSupportClientSiteView {
+	views := make([]hostingAndSupportClientSiteView, 0, len(sites))
+	for domain, sourceIP := range sites {
+		view := hostingAndSupportClientSiteView{Domain: domain, InstallationIP: strings.TrimSpace(sourceIP)}
+		if hostingAndSupportDomainIsLocalDevelopment(domain, view.InstallationIP) {
+			view.LocalDevelopment = true
+			view.Status = "локальная разработка"
+		} else if domainARecordMatches(domain, view.InstallationIP) {
+			view.RealInstallation = true
+			view.Status = "реальная установка"
+		} else {
+			view.LocalDevelopment = true
+			view.Status = "домен не указывает на IP установки"
+		}
+		views = append(views, view)
+	}
+	sort.Slice(views, func(left, right int) bool {
+		return views[left].Domain < views[right].Domain
+	})
+	return views
+}
+
+func hostingAndSupportDomainIsLocalDevelopment(domain string, sourceIP string) bool {
+	domain = normalizeDomainName(domain)
+	if domain == "" || sourceIP == "" {
+		return true
+	}
+	if domain == "localhost" || strings.HasSuffix(domain, ".localhost") {
+		return true
+	}
+	if net.ParseIP(domain) != nil {
+		return true
+	}
+	parsedIP := net.ParseIP(strings.TrimSpace(sourceIP))
+	return parsedIP == nil || parsedIP.IsLoopback() || parsedIP.IsPrivate() || parsedIP.IsUnspecified()
+}
+
+func hostingAndSupportClientByDomain(users map[string]*hostingAndSupportClientAccumulator, domain string) *hostingAndSupportClientAccumulator {
 	domain = normalizeDomainName(domain)
 	if user := users[domain]; user != nil {
 		return user
 	}
-	user := &billingServiceMailUserAccumulator{
+	user := &hostingAndSupportClientAccumulator{
 		emails:        make(map[string]struct{}),
 		domains:       make(map[string]struct{}),
-		sites:         make(map[string]struct{}),
+		sites:         make(map[string]string),
 		installations: make(map[string]struct{}),
-		ips:           make(map[string]billingServiceMailUserIPView),
+		ips:           make(map[string]hostingAndSupportClientIPView),
 	}
 	users[domain] = user
 	return user
 }
 
-func (a *App) billingServiceMailUserIP(ctx context.Context, ip string) billingServiceMailUserIPView {
-	view := billingServiceMailUserIPView{IP: strings.TrimSpace(ip), Provider: "unknown"}
+func (a *App) hostingAndSupportClientIP(ctx context.Context, ip string) hostingAndSupportClientIPView {
+	view := hostingAndSupportClientIPView{IP: strings.TrimSpace(ip), Provider: "unknown"}
 	if a == nil || a.geoIP == nil {
 		return view
 	}
@@ -9702,7 +9816,7 @@ func serviceMailEventIsNewerIdentity(codeKind string) bool {
 	}
 }
 
-func splitBillingEmailList(rawEmails string) []string {
+func splitHostingAndSupportEmailList(rawEmails string) []string {
 	fields := strings.FieldsFunc(rawEmails, func(separator rune) bool {
 		return separator == ',' || separator == '\n' || separator == ';' || separator == ' '
 	})
@@ -9734,8 +9848,8 @@ func sortedStringsFromSet(values map[string]struct{}) []string {
 	return result
 }
 
-func sortedIPViews(values map[string]billingServiceMailUserIPView) []billingServiceMailUserIPView {
-	result := make([]billingServiceMailUserIPView, 0, len(values))
+func sortedIPViews(values map[string]hostingAndSupportClientIPView) []hostingAndSupportClientIPView {
+	result := make([]hostingAndSupportClientIPView, 0, len(values))
 	for _, value := range values {
 		result = append(result, value)
 	}
@@ -9745,7 +9859,7 @@ func sortedIPViews(values map[string]billingServiceMailUserIPView) []billingServ
 	return result
 }
 
-func billingServiceMailUserMapPointsJSON(ips []billingServiceMailUserIPView) template.JS {
+func hostingAndSupportClientMapPointsJSON(ips []hostingAndSupportClientIPView) template.JS {
 	points := make([]map[string]any, 0, len(ips))
 	for _, ip := range ips {
 		if ip.Latitude == 0 && ip.Longitude == 0 {
@@ -9767,14 +9881,14 @@ func billingServiceMailUserMapPointsJSON(ips []billingServiceMailUserIPView) tem
 	return template.JS(payload)
 }
 
-func (a *App) billingSiteRows(ctx context.Context, plans []billing.Plan, assignments map[string]billing.ServiceAssignment, currentDomain string, demoDomain string, mainDomain string) ([]billing.Site, error) {
+func (a *App) hostingAndSupportSiteRows(ctx context.Context, plans []hostingandsupport.Plan, assignments map[string]hostingandsupport.ServiceAssignment, currentDomain string, demoDomain string, mainDomain string) ([]hostingandsupport.Site, error) {
 	rows, err := listSiteQuotaRows(ctx, a.storagePath, a.serverControlDBPath())
 	if err != nil {
 		return nil, err
 	}
-	usages := make([]billing.SiteUsage, 0, len(rows))
+	usages := make([]hostingandsupport.SiteUsage, 0, len(rows))
 	for _, row := range rows {
-		usages = append(usages, billing.SiteUsage{
+		usages = append(usages, hostingandsupport.SiteUsage{
 			Domain:       row.Domain,
 			Aliases:      row.Aliases,
 			UsedBytes:    row.UsedBytes,
@@ -9783,7 +9897,7 @@ func (a *App) billingSiteRows(ctx context.Context, plans []billing.Plan, assignm
 			DatabasePath: row.DatabasePath,
 		})
 	}
-	siteRows := billing.BuildSitesWithDemoAndMainDomain(usages, plans, assignments, currentDomain, demoDomain, mainDomain)
+	siteRows := hostingandsupport.BuildSitesWithDemoAndMainDomain(usages, plans, assignments, currentDomain, demoDomain, mainDomain)
 	rowByDomain := make(map[string]siteQuotaRow, len(rows))
 	for _, row := range rows {
 		rowByDomain[row.Domain] = row
@@ -9890,49 +10004,49 @@ func siteAdminEmailsFromDatabase(ctx context.Context, database *sql.DB, domain s
 	return emails
 }
 
-func (a *App) saveBillingSettingsFromForm(r *http.Request) string {
+func (a *App) saveHostingAndSupportSettingsFromForm(r *http.Request) string {
 	controlDatabase, err := a.openServerControlDatabase(r.Context())
 	if err != nil {
 		return err.Error()
 	}
 	defer controlDatabase.Close()
-	if err := (billing.Store{DB: controlDatabase}).SaveSettings(r.Context(), r.FormValue("auto_registration_enabled") == "1"); err != nil {
+	if err := (hostingandsupport.Store{DB: controlDatabase}).SaveSettings(r.Context(), r.FormValue("auto_registration_enabled") == "1"); err != nil {
 		return err.Error()
 	}
-	return a.saveBillingDemoSettingsInDatabase(r, controlDatabase)
+	return a.saveHostingAndSupportDemoSettingsInDatabase(r, controlDatabase)
 }
 
-func (a *App) saveBillingRegistrationSettingsFromForm(r *http.Request) string {
+func (a *App) saveHostingAndSupportRegistrationSettingsFromForm(r *http.Request) string {
 	controlDatabase, err := a.openServerControlDatabase(r.Context())
 	if err != nil {
 		return err.Error()
 	}
 	defer controlDatabase.Close()
-	if err := (billing.Store{DB: controlDatabase}).SaveSettings(r.Context(), r.FormValue("auto_registration_enabled") == "1"); err != nil {
+	if err := (hostingandsupport.Store{DB: controlDatabase}).SaveSettings(r.Context(), r.FormValue("auto_registration_enabled") == "1"); err != nil {
 		return err.Error()
 	}
 	return translationOrDefault(translationsForRequest(r), "billing_status_settings_saved", "Billing settings saved.")
 }
 
-func (a *App) saveBillingServiceMailSettingsFromForm(r *http.Request) string {
+func (a *App) saveHostingAndSupportServiceMailSettingsFromForm(r *http.Request) string {
 	controlDatabase, err := a.openServerControlDatabase(r.Context())
 	if err != nil {
 		return err.Error()
 	}
 	defer controlDatabase.Close()
-	if err := (billing.Store{DB: controlDatabase}).SaveServiceMailSettings(r.Context(), r.FormValue("service_mail_relay_enabled") == "1"); err != nil {
+	if err := (hostingandsupport.Store{DB: controlDatabase}).SaveServiceMailSettings(r.Context(), r.FormValue("service_mail_relay_enabled") == "1"); err != nil {
 		return err.Error()
 	}
 	return translationOrDefault(translationsForRequest(r), "billing_status_settings_saved", "Billing settings saved.")
 }
 
-func (a *App) saveBillingDemoSettingsFromForm(r *http.Request) string {
+func (a *App) saveHostingAndSupportDemoSettingsFromForm(r *http.Request) string {
 	controlDatabase, err := a.openServerControlDatabase(r.Context())
 	if err != nil {
 		return err.Error()
 	}
 	defer controlDatabase.Close()
-	return a.saveBillingDemoSettingsInDatabase(r, controlDatabase)
+	return a.saveHostingAndSupportDemoSettingsInDatabase(r, controlDatabase)
 }
 
 func (a *App) blockServiceMailInstallationFromForm(r *http.Request) string {
@@ -9946,7 +10060,7 @@ func (a *App) blockServiceMailInstallationFromForm(r *http.Request) string {
 	if installationID == "" {
 		return translationOrDefault(translations, "billing_service_mail_status_installation_required", "Service mail installation is not selected.")
 	}
-	if err := (billing.Store{DB: controlDatabase}).SetServiceMailInstallationBlocked(r.Context(), installationID, true); err != nil {
+	if err := (hostingandsupport.Store{DB: controlDatabase}).SetServiceMailInstallationBlocked(r.Context(), installationID, true); err != nil {
 		return err.Error()
 	}
 	return translationOrDefault(translations, "billing_service_mail_status_installation_blocked", "Service mail installation blocked.")
@@ -9963,7 +10077,7 @@ func (a *App) unblockServiceMailInstallationFromForm(r *http.Request) string {
 	if installationID == "" {
 		return translationOrDefault(translations, "billing_service_mail_status_installation_required", "Service mail installation is not selected.")
 	}
-	if err := (billing.Store{DB: controlDatabase}).SetServiceMailInstallationBlocked(r.Context(), installationID, false); err != nil {
+	if err := (hostingandsupport.Store{DB: controlDatabase}).SetServiceMailInstallationBlocked(r.Context(), installationID, false); err != nil {
 		return err.Error()
 	}
 	return translationOrDefault(translations, "billing_service_mail_status_installation_unblocked", "Service mail installation unblocked.")
@@ -9976,7 +10090,7 @@ func (a *App) addServiceMailBlockFromForm(r *http.Request) string {
 		return err.Error()
 	}
 	defer controlDatabase.Close()
-	if err := (billing.Store{DB: controlDatabase}).CreateServiceMailBlock(r.Context(), r.FormValue("scope"), r.FormValue("value"), r.FormValue("reason")); err != nil {
+	if err := (hostingandsupport.Store{DB: controlDatabase}).CreateServiceMailBlock(r.Context(), r.FormValue("scope"), r.FormValue("value"), r.FormValue("reason")); err != nil {
 		return err.Error()
 	}
 	return translationOrDefault(translations, "billing_service_mail_status_block_saved", "Service mail block saved.")
@@ -9993,15 +10107,15 @@ func (a *App) deleteServiceMailBlockFromForm(r *http.Request) string {
 	if blockID <= 0 {
 		return translationOrDefault(translations, "billing_service_mail_status_block_required", "Service mail block is not selected.")
 	}
-	if err := (billing.Store{DB: controlDatabase}).DeleteServiceMailBlock(r.Context(), blockID); err != nil {
+	if err := (hostingandsupport.Store{DB: controlDatabase}).DeleteServiceMailBlock(r.Context(), blockID); err != nil {
 		return err.Error()
 	}
 	return translationOrDefault(translations, "billing_service_mail_status_block_deleted", "Service mail block deleted.")
 }
 
-func (a *App) saveBillingDemoSettingsInDatabase(r *http.Request, controlDatabase *sql.DB) string {
+func (a *App) saveHostingAndSupportDemoSettingsInDatabase(r *http.Request, controlDatabase *sql.DB) string {
 	translations := translationsForRequest(r)
-	store := billing.Store{DB: controlDatabase}
+	store := hostingandsupport.Store{DB: controlDatabase}
 	previousDemoSettings := (demo.Store{DB: controlDatabase}).Settings(r.Context())
 	demoDomain := normalizeQuotaDomainName(r.FormValue("demo_site_domain"))
 	demoSourceURL, demoSourceErr := demo.NormalizeSourceURL(r.FormValue("demo_site_source_url"))
@@ -10135,7 +10249,7 @@ func (a *App) approveSiteRegistrationRequestFromForm(r *http.Request) string {
 		return err.Error()
 	}
 	defer controlDatabase.Close()
-	store := billing.Store{DB: controlDatabase}
+	store := hostingandsupport.Store{DB: controlDatabase}
 	siteRequest, found := store.SiteRequestByID(r.Context(), requestID)
 	if !found {
 		return translationOrDefault(translations, "billing_status_request_not_found", "Request was not found.")
@@ -10179,7 +10293,7 @@ func (a *App) rejectSiteRegistrationRequestFromForm(r *http.Request) string {
 		return err.Error()
 	}
 	defer controlDatabase.Close()
-	store := billing.Store{DB: controlDatabase}
+	store := hostingandsupport.Store{DB: controlDatabase}
 	siteRequest, found := store.SiteRequestByID(r.Context(), requestID)
 	if !found {
 		return translationOrDefault(translations, "billing_status_request_not_found", "Request was not found.")
@@ -10197,12 +10311,12 @@ func (a *App) rejectSiteRegistrationRequestFromForm(r *http.Request) string {
 	return fmt.Sprintf(translationOrDefault(translations, "billing_status_request_rejected", "Request %s was rejected and the customer email was sent."), siteRequest.Domain)
 }
 
-func planIsFree(plan billing.Plan) bool {
+func planIsFree(plan hostingandsupport.Plan) bool {
 	price := strings.TrimSpace(plan.Price)
 	return price == "" || price == "0" || price == "0.00"
 }
 
-func (a *App) enqueueSiteRegistrationRequestOwnerEmails(ctx context.Context, r *http.Request, store billing.Store, domain, name, email, phone string, planID int) {
+func (a *App) enqueueSiteRegistrationRequestOwnerEmails(ctx context.Context, r *http.Request, store hostingandsupport.Store, domain, name, email, phone string, planID int) {
 	ownerEmails := store.OwnerEmails(ctx)
 	if len(ownerEmails) == 0 {
 		return
@@ -10216,10 +10330,10 @@ func (a *App) enqueueSiteRegistrationRequestOwnerEmails(ctx context.Context, r *
 		"Имя: " + name,
 		"Email: " + email,
 		"Телефон: " + phone,
-		"Тариф: " + billingPlanEmailLabel(plan),
+		"Тариф: " + hostingAndSupportPlanEmailLabel(plan),
 		"",
 		"Откройте биллинг, чтобы активировать или отклонить заявку:",
-		absoluteURLForPath(r, "/?billing"),
+		absoluteURLForPath(r, "/?hosting_and_support"),
 	}, "\n")
 	fromAddress := a.emailFromAddress(a.siteDomain(r.Context(), r))
 	for _, ownerEmail := range ownerEmails {
@@ -10229,7 +10343,7 @@ func (a *App) enqueueSiteRegistrationRequestOwnerEmails(ctx context.Context, r *
 	}
 }
 
-func (a *App) enqueueSiteRegistrationDecisionEmail(ctx context.Context, r *http.Request, siteRequest billing.SiteRequest, plan billing.Plan, decision, ownerMessage, temporaryPassword string) error {
+func (a *App) enqueueSiteRegistrationDecisionEmail(ctx context.Context, r *http.Request, siteRequest hostingandsupport.SiteRequest, plan hostingandsupport.Plan, decision, ownerMessage, temporaryPassword string) error {
 	subject := "Заявка на сайт " + siteRequest.Domain
 	lines := []string{}
 	if decision == "approved" {
@@ -10237,7 +10351,7 @@ func (a *App) enqueueSiteRegistrationDecisionEmail(ctx context.Context, r *http.
 		lines = append(lines,
 			"Ваша заявка на сайт "+siteRequest.Domain+" одобрена.",
 			"",
-			"Тариф: "+billingPlanEmailLabel(plan),
+			"Тариф: "+hostingAndSupportPlanEmailLabel(plan),
 			"Адрес сайта: "+requestScheme(r)+"://"+siteRequest.Domain+"/",
 			"Вход: "+requestScheme(r)+"://"+siteRequest.Domain+"/?login",
 			"Email администратора: "+siteRequest.Email,
@@ -10258,7 +10372,7 @@ func (a *App) enqueueSiteRegistrationDecisionEmail(ctx context.Context, r *http.
 	})
 }
 
-func billingPlanEmailLabel(plan billing.Plan) string {
+func hostingAndSupportPlanEmailLabel(plan hostingandsupport.Plan) string {
 	if plan.ID == 0 {
 		return "не выбран"
 	}
@@ -10283,7 +10397,7 @@ func (a *App) updateManagedSiteFromForm(r *http.Request) string {
 		return err.Error()
 	}
 	if !quotaRequested && planID > 0 {
-		plan, found := (billing.Store{DB: controlDatabase}).PlanByID(r.Context(), planID)
+		plan, found := (hostingandsupport.Store{DB: controlDatabase}).PlanByID(r.Context(), planID)
 		if found {
 			quotaBytes = plan.QuotaBytes
 			quotaRequested = true
@@ -10294,7 +10408,7 @@ func (a *App) updateManagedSiteFromForm(r *http.Request) string {
 			return err.Error()
 		}
 	}
-	if err := (billing.Store{DB: controlDatabase}).AssignSite(r.Context(), domain, planID, serviceStatus); err != nil {
+	if err := (hostingandsupport.Store{DB: controlDatabase}).AssignSite(r.Context(), domain, planID, serviceStatus); err != nil {
 		return err.Error()
 	}
 	return fmt.Sprintf(translationOrDefault(translations, "billing_status_site_settings_saved", "Site %s settings were saved."), domain)
@@ -10304,7 +10418,7 @@ func (a *App) deleteManagedSiteFromForm(r *http.Request) string {
 	translations := translationsForRequest(r)
 	domain := normalizeQuotaDomainName(r.FormValue("domain"))
 	confirmDomain := normalizeQuotaDomainName(r.FormValue("confirm_domain"))
-	retentionDays, retentionErr := billing.ParseDeletionBackupRetentionDays(r.FormValue("backup_retention_days"))
+	retentionDays, retentionErr := hostingandsupport.ParseDeletionBackupRetentionDays(r.FormValue("backup_retention_days"))
 	if retentionErr != nil {
 		return retentionErr.Error()
 	}
@@ -10322,7 +10436,7 @@ func (a *App) deleteManagedSiteFromForm(r *http.Request) string {
 }
 
 func (a *App) deleteManagedSite(ctx context.Context, domain string) error {
-	_, err := a.deleteManagedSiteWithBackup(ctx, nil, domain, billing.DefaultDeletionBackupRetentionDays)
+	_, err := a.deleteManagedSiteWithBackup(ctx, nil, domain, hostingandsupport.DefaultDeletionBackupRetentionDays)
 	return err
 }
 
@@ -10417,7 +10531,7 @@ func (a *App) deleteManagedSiteWithBackup(ctx context.Context, r *http.Request, 
 	}
 	ownerContacts := managedSiteOwnerContacts(ctx, controlDatabase, row.DatabasePath, domain)
 	if retentionDays <= 0 {
-		retentionDays = billing.DefaultDeletionBackupRetentionDays
+		retentionDays = hostingandsupport.DefaultDeletionBackupRetentionDays
 	}
 	languageCode := "ru"
 	if r != nil {
@@ -10437,7 +10551,7 @@ func (a *App) deleteManagedSiteWithBackup(ctx context.Context, r *http.Request, 
 func (a *App) updateManagedSiteDeletionBackupRetentionFromForm(r *http.Request) string {
 	translations := translationsForRequest(r)
 	backupID, _ := strconv.Atoi(strings.TrimSpace(r.FormValue("backup_id")))
-	retentionDays, retentionErr := billing.ParseDeletionBackupRetentionDays(r.FormValue("backup_retention_days"))
+	retentionDays, retentionErr := hostingandsupport.ParseDeletionBackupRetentionDays(r.FormValue("backup_retention_days"))
 	if retentionErr != nil {
 		return retentionErr.Error()
 	}
@@ -10460,7 +10574,7 @@ func (a *App) updateManagedSiteDeletionBackupRetentionFromForm(r *http.Request) 
 		createdAt = time.Now().UTC()
 	}
 	expiresAt := createdAt.AddDate(0, 0, retentionDays)
-	metadataText = billing.RewriteDeletionBackupMetadataRetention(metadataText, retentionDays, expiresAt)
+	metadataText = hostingandsupport.RewriteDeletionBackupMetadataRetention(metadataText, retentionDays, expiresAt)
 	_, err = controlDatabase.ExecContext(r.Context(), `UPDATE site_deletion_backups SET retention_days=?,expires_at=?,metadata_json=? WHERE id=?`,
 		retentionDays, expiresAt.Format(time.RFC3339), metadataText, backupID)
 	if err != nil {
@@ -10474,7 +10588,7 @@ func (a *App) deleteManagedSiteDataAfterBackup(ctx context.Context, controlDatab
 	if domain == "" {
 		return fmt.Errorf("site domain is required")
 	}
-	(billing.Store{DB: controlDatabase}).RemoveSiteAssignment(ctx, domain)
+	(hostingandsupport.Store{DB: controlDatabase}).RemoveSiteAssignment(ctx, domain)
 	_, _ = controlDatabase.ExecContext(ctx, `DELETE FROM server_managers WHERE domain=? AND role<>'owner'`, domain)
 	a.closeManagedSiteDatabase(ctx, domain)
 	if strings.TrimSpace(row.DatabasePath) != "" && !sameSiteQuotaPath(row.DatabasePath, a.serverControlDBPath()) {
@@ -10601,7 +10715,7 @@ func (a *App) createManagedSiteDeletionBackup(ctx context.Context, r *http.Reque
 	archivePath := filepath.Join(backupDirectory, fileName)
 	tempArchivePath := archivePath + ".tmp"
 	_ = os.Remove(tempArchivePath)
-	metadata := billing.DeletionBackupMetadata{
+	metadata := hostingandsupport.DeletionBackupMetadata{
 		Version:           1,
 		Domain:            domain,
 		CreatedAt:         createdAt.Format(time.RFC3339),
@@ -10647,7 +10761,7 @@ func (a *App) createManagedSiteDeletionBackup(ctx context.Context, r *http.Reque
 	}
 	downloadURL := ""
 	if r != nil {
-		downloadURL = absoluteURLForPath(r, "/?billing_backup_download&token="+url.QueryEscape(token))
+		downloadURL = absoluteURLForPath(r, "/?hosting_and_support_backup_download&token="+url.QueryEscape(token))
 	}
 	return managedSiteDeletionBackupView{
 		Domain:        domain,
@@ -10662,7 +10776,7 @@ func (a *App) createManagedSiteDeletionBackup(ctx context.Context, r *http.Reque
 	}, nil
 }
 
-func (a *App) writeManagedSiteDeletionBackupArchive(ctx context.Context, domain, databasePath, archivePath string, metadata billing.DeletionBackupMetadata) error {
+func (a *App) writeManagedSiteDeletionBackupArchive(ctx context.Context, domain, databasePath, archivePath string, metadata hostingandsupport.DeletionBackupMetadata) error {
 	siteDatabase, err := sql.Open("sqlite", "file:"+databasePath)
 	if err != nil {
 		return err
@@ -10744,7 +10858,7 @@ func addFileToZip(zipWriter *zip.Writer, sourcePath, archivePath string) error {
 	return err
 }
 
-func verifyManagedSiteDeletionBackupArchive(archivePath string, metadata billing.DeletionBackupMetadata) error {
+func verifyManagedSiteDeletionBackupArchive(archivePath string, metadata hostingandsupport.DeletionBackupMetadata) error {
 	archiveReader, err := zip.OpenReader(archivePath)
 	if err != nil {
 		return err
@@ -10798,7 +10912,7 @@ func (a *App) managedSiteDeletionBackupViews(ctx context.Context, r *http.Reques
 			view.RetentionDays = int(expiresAt.Sub(createdAt).Hours() / 24)
 		}
 		if view.RetentionDays <= 0 {
-			view.RetentionDays = billing.DefaultDeletionBackupRetentionDays
+			view.RetentionDays = hostingandsupport.DefaultDeletionBackupRetentionDays
 		}
 		view.Expired = !expiresAt.IsZero() && !expiresAt.After(now)
 		if _, statErr := os.Stat(archivePath); statErr != nil {
@@ -10807,7 +10921,7 @@ func (a *App) managedSiteDeletionBackupViews(ctx context.Context, r *http.Reques
 		view.SizeLabel = formatFileSize(sizeBytes)
 		view.TokenStatus = localizedBackupTokenStatus(translations, view.Expired || view.ArchiveMissing, view.DownloadCount)
 		if !view.Expired && !view.ArchiveMissing && strings.TrimSpace(token) != "" {
-			view.DownloadURL = "/?billing_backup_download&token=" + url.QueryEscape(token)
+			view.DownloadURL = "/?hosting_and_support_backup_download&token=" + url.QueryEscape(token)
 		}
 		views = append(views, view)
 	}
@@ -10998,7 +11112,7 @@ func (a *App) saveServicePlanFromForm(r *http.Request) string {
 		billingPeriod = "monthly"
 	}
 	isDefault := r.FormValue("is_default") == "1"
-	if err := (billing.Store{DB: controlDatabase}).SavePlan(r.Context(), planID, name, quotaBytes, siteLimit, analyticsReportLimit, price, currency, billingPeriod, isDefault); err != nil {
+	if err := (hostingandsupport.Store{DB: controlDatabase}).SavePlan(r.Context(), planID, name, quotaBytes, siteLimit, analyticsReportLimit, price, currency, billingPeriod, isDefault); err != nil {
 		return err.Error()
 	}
 	return translationOrDefault(translations, "billing_status_plan_saved", "Plan saved.")
@@ -11039,7 +11153,7 @@ func (a *App) deleteServicePlanFromForm(r *http.Request) string {
 		return err.Error()
 	}
 	defer controlDatabase.Close()
-	if err := (billing.Store{DB: controlDatabase}).DeletePlan(r.Context(), planID); err != nil {
+	if err := (hostingandsupport.Store{DB: controlDatabase}).DeletePlan(r.Context(), planID); err != nil {
 		return err.Error()
 	}
 	return translationOrDefault(translations, "billing_status_plan_deleted", "Plan deleted.")
@@ -11882,7 +11996,7 @@ func (a *App) serviceMailRelayEnabled(ctx context.Context) bool {
 		return true
 	}
 	defer controlDatabase.Close()
-	return (billing.Store{DB: controlDatabase}).ServiceMailRelayEnabled(ctx)
+	return (hostingandsupport.Store{DB: controlDatabase}).ServiceMailRelayEnabled(ctx)
 }
 
 func (a *App) serviceMailLocalSenderReady(ctx context.Context, domain, fromAddress, languageCode string) bool {
@@ -11908,7 +12022,7 @@ func (a *App) domainHasUsableDKIM(ctx context.Context, domain string) bool {
 	if selector == "" {
 		controlDatabase, err := a.openServerControlDatabase(ctx)
 		if err == nil {
-			selector = strings.Trim(strings.TrimSpace(billing.SettingText(ctx, controlDatabase, "service_mail_dkim_selector")), ".")
+			selector = strings.Trim(strings.TrimSpace(hostingandsupport.SettingText(ctx, controlDatabase, "service_mail_dkim_selector")), ".")
 			_ = controlDatabase.Close()
 		}
 	}
@@ -12265,9 +12379,9 @@ func (a *App) handleServiceMailRelayRequest(ctx context.Context, r *http.Request
 		return err.Error(), http.StatusInternalServerError
 	}
 	defer controlDatabase.Close()
-	store := billing.Store{DB: controlDatabase}
+	store := hostingandsupport.Store{DB: controlDatabase}
 	recipientDomain := emailAddressDomain(request.Recipient)
-	event := billing.ServiceMailEvent{
+	event := hostingandsupport.ServiceMailEvent{
 		InstallationID:  request.InstallationID,
 		SourceDomain:    request.SourceDomain,
 		SourceIP:        sourceIP,
@@ -12360,7 +12474,7 @@ func serviceMailKindIsRecipientVerification(codeKind string) bool {
 	return strings.TrimSpace(codeKind) == "recipient_verified"
 }
 
-func serviceMailRecipientAllowed(ctx context.Context, store billing.Store, request serviceMailRequest) (string, bool) {
+func serviceMailRecipientAllowed(ctx context.Context, store hostingandsupport.Store, request serviceMailRequest) (string, bool) {
 	switch strings.TrimSpace(request.CodeKind) {
 	case "login_code":
 		if store.ServiceMailRecipientVerified(ctx, request.InstallationID, request.Recipient) {
@@ -12457,9 +12571,9 @@ func verifyServiceMailRequestSignature(request serviceMailRequest) error {
 	return nil
 }
 
-func serviceMailRateLimited(ctx context.Context, store billing.Store, request serviceMailRequest, sourceIP, recipientDomain string) (string, bool) {
+func serviceMailRateLimited(ctx context.Context, store hostingandsupport.Store, request serviceMailRequest, sourceIP, recipientDomain string) (string, bool) {
 	since := time.Now().UTC().Add(-time.Hour)
-	sourceSubnet := billing.ServiceMailIPv4Subnet(sourceIP)
+	sourceSubnet := hostingandsupport.ServiceMailIPv4Subnet(sourceIP)
 	installationLimit := serviceMailPerInstallationHourLimit
 	if firstSeenAt, found := store.ServiceMailInstallationFirstSeenAt(ctx, request.InstallationID); found && time.Since(firstSeenAt) < 24*time.Hour {
 		installationLimit = serviceMailNewInstallationHourLimit
@@ -12517,9 +12631,9 @@ func (a *App) serviceMailLocalKeyPair(ctx context.Context) (string, ed25519.Publ
 		return "", nil, nil, err
 	}
 	defer controlDatabase.Close()
-	installationID := billing.SettingText(ctx, controlDatabase, "service_mail_installation_id")
-	publicKeyText := billing.SettingText(ctx, controlDatabase, "service_mail_public_key")
-	privateKeyText := billing.SettingText(ctx, controlDatabase, "service_mail_private_key")
+	installationID := hostingandsupport.SettingText(ctx, controlDatabase, "service_mail_installation_id")
+	publicKeyText := hostingandsupport.SettingText(ctx, controlDatabase, "service_mail_public_key")
+	privateKeyText := hostingandsupport.SettingText(ctx, controlDatabase, "service_mail_private_key")
 	publicKey, publicErr := base64.StdEncoding.DecodeString(publicKeyText)
 	privateKey, privateErr := base64.StdEncoding.DecodeString(privateKeyText)
 	if installationID != "" && publicErr == nil && privateErr == nil && len(publicKey) == ed25519.PublicKeySize && len(privateKey) == ed25519.PrivateKeySize {
@@ -12836,13 +12950,13 @@ func (a *App) emailFromAddress(domain string) string {
 }
 
 func (a *App) registrationEmailFromAddress(ctx context.Context, siteDomain string) string {
-	if parentDomain, found := a.billingParentDomainForThirdLevelSite(ctx, siteDomain); found {
+	if parentDomain, found := a.hostingAndSupportParentDomainForThirdLevelSite(ctx, siteDomain); found {
 		return a.emailFromAddress(parentDomain)
 	}
 	return a.emailFromAddress(siteDomain)
 }
 
-func (a *App) billingParentDomainForThirdLevelSite(ctx context.Context, siteDomain string) (string, bool) {
+func (a *App) hostingAndSupportParentDomainForThirdLevelSite(ctx context.Context, siteDomain string) (string, bool) {
 	registrationDomain := normalizeDomainName(siteDomain)
 	if registrationDomain == "" {
 		return "", false
@@ -12852,7 +12966,7 @@ func (a *App) billingParentDomainForThirdLevelSite(ctx context.Context, siteDoma
 		return "", false
 	}
 	defer controlDatabase.Close()
-	parentDomain, found := (billing.Store{DB: controlDatabase}).OwnerDomain(ctx)
+	parentDomain, found := (hostingandsupport.Store{DB: controlDatabase}).OwnerDomain(ctx)
 	parentDomain = normalizeDomainName(parentDomain)
 	if !found || parentDomain == "" {
 		return "", false
@@ -12915,7 +13029,7 @@ func (a *App) registrationDNSSetupView(ctx context.Context, siteDomain, language
 		return EmailDNSSetupView{}, false
 	}
 	setupFromAddress := "sitebrush@" + registrationDomain
-	if parentDomain, found := a.billingParentDomainForThirdLevelSite(ctx, registrationDomain); found {
+	if parentDomain, found := a.hostingAndSupportParentDomainForThirdLevelSite(ctx, registrationDomain); found {
 		setupFromAddress = "sitebrush@" + parentDomain
 	}
 	serverIPs, externalIP, err := detectServerIPCandidates(ctx)
@@ -12928,7 +13042,7 @@ func (a *App) registrationDNSSetupView(ctx context.Context, siteDomain, language
 	}
 	ipRecords, ipErr := lookupIPRecords(registrationDomain)
 	domainPointsToServer := ipErr == nil && ipRecordsAllowAnyServerIP(ipRecords, serverIPs)
-	if _, found := a.billingParentDomainForThirdLevelSite(ctx, registrationDomain); found {
+	if _, found := a.hostingAndSupportParentDomainForThirdLevelSite(ctx, registrationDomain); found {
 		if domainPointsToServer {
 			return EmailDNSSetupView{}, false
 		}
@@ -12948,7 +13062,7 @@ func (a *App) registrationDomainAddressSetupView(ctx context.Context, siteDomain
 		return EmailDNSSetupView{}, false
 	}
 	setupFromAddress := "sitebrush@" + registrationDomain
-	if parentDomain, found := a.billingParentDomainForThirdLevelSite(ctx, registrationDomain); found {
+	if parentDomain, found := a.hostingAndSupportParentDomainForThirdLevelSite(ctx, registrationDomain); found {
 		setupFromAddress = "sitebrush@" + parentDomain
 	}
 	serverIPs, externalIP, err := detectServerIPCandidates(ctx)
@@ -13906,14 +14020,14 @@ type siteQuotaDatabaseCandidate struct {
 }
 
 type siteQuotaRow struct {
-	Domain          string
-	Aliases         []string
-	UsedBytes       int64
-	LimitBytes      int64
-	AdminEmails     []string
-	FilesPath       string
-	DatabasePath    string
-	BillingMainSite bool
+	Domain                    string
+	Aliases                   []string
+	UsedBytes                 int64
+	LimitBytes                int64
+	AdminEmails               []string
+	FilesPath                 string
+	DatabasePath              string
+	HostingAndSupportMainSite bool
 }
 
 func siteDatabaseRootPath(dbPath string) string {
@@ -13982,7 +14096,7 @@ func runSiteQuotaCommand(ctx context.Context, output io.Writer, input io.Reader,
 		if err != nil {
 			return err
 		}
-		rows = markSiteQuotaBillingMainSite(ctx, dbPath, rows)
+		rows = markSiteQuotaHostingAndSupportMainSite(ctx, dbPath, rows)
 		if err := runSiteQuotaInteractiveConsole(ctx, output, input, storagePath, dbPath, rows); err != nil {
 			return err
 		}
@@ -14276,31 +14390,31 @@ func openSiteQuotaControlDatabase(ctx context.Context, dbPath string) (*sql.DB, 
 	}
 	controlDatabase.SetMaxOpenConns(1)
 	controlDatabase.SetMaxIdleConns(1)
-	if err := billing.Migrate(ctx, controlDatabase); err != nil {
+	if err := hostingandsupport.Migrate(ctx, controlDatabase); err != nil {
 		_ = controlDatabase.Close()
 		return nil, err
 	}
 	return controlDatabase, nil
 }
 
-func markSiteQuotaBillingMainSite(ctx context.Context, dbPath string, rows []siteQuotaRow) []siteQuotaRow {
+func markSiteQuotaHostingAndSupportMainSite(ctx context.Context, dbPath string, rows []siteQuotaRow) []siteQuotaRow {
 	controlDatabase, err := openSiteQuotaControlDatabase(ctx, dbPath)
 	if err != nil {
 		return rows
 	}
 	defer controlDatabase.Close()
-	billingDomain, found := (billing.Store{DB: controlDatabase}).OwnerDomain(ctx)
+	billingDomain, found := (hostingandsupport.Store{DB: controlDatabase}).OwnerDomain(ctx)
 	billingDomain = normalizeQuotaDomainName(billingDomain)
 	if !found || billingDomain == "" {
 		return rows
 	}
 	for rowIndex := range rows {
-		rows[rowIndex].BillingMainSite = normalizeQuotaDomainName(rows[rowIndex].Domain) == billingDomain
+		rows[rowIndex].HostingAndSupportMainSite = normalizeQuotaDomainName(rows[rowIndex].Domain) == billingDomain
 	}
 	return rows
 }
 
-func setSiteQuotaBillingMainSite(ctx context.Context, dbPath string, row siteQuotaRow) (string, error) {
+func setSiteQuotaHostingAndSupportMainSite(ctx context.Context, dbPath string, row siteQuotaRow) (string, error) {
 	domain := normalizeQuotaDomainName(row.Domain)
 	if domain == "" {
 		return "", fmt.Errorf("invalid site domain %q", row.Domain)
@@ -14314,7 +14428,7 @@ func setSiteQuotaBillingMainSite(ctx context.Context, dbPath string, row siteQuo
 		return "", err
 	}
 	defer controlDatabase.Close()
-	if err := (billing.Store{DB: controlDatabase}).SetOwner(ctx, domain, ownerEmail); err != nil {
+	if err := (hostingandsupport.Store{DB: controlDatabase}).SetOwner(ctx, domain, ownerEmail); err != nil {
 		return "", err
 	}
 	return ownerEmail, nil
@@ -14403,7 +14517,7 @@ func runSiteQuotaInteractiveConsole(ctx context.Context, output io.Writer, input
 		case "enter":
 		case "billing":
 			selectedRow := rows[selectedIndex]
-			ownerEmail, err := setSiteQuotaBillingMainSite(ctx, dbPath, selectedRow)
+			ownerEmail, err := setSiteQuotaHostingAndSupportMainSite(ctx, dbPath, selectedRow)
 			if err != nil {
 				return err
 			}
@@ -14412,7 +14526,7 @@ func runSiteQuotaInteractiveConsole(ctx context.Context, output io.Writer, input
 			if err != nil {
 				return err
 			}
-			rows = markSiteQuotaBillingMainSite(ctx, dbPath, rows)
+			rows = markSiteQuotaHostingAndSupportMainSite(ctx, dbPath, rows)
 			if selectedIndex >= len(rows) {
 				selectedIndex = len(rows) - 1
 			}
@@ -14664,11 +14778,11 @@ func siteQuotaQuotaPromptLine(layout siteQuotaTerminalLayout, row siteQuotaRow) 
 func siteQuotaRowLine(row siteQuotaRow, index int, selected bool, width int) (string, string) {
 	usageText := compactQuotaUsageText(row)
 	stateText, stateColor := siteQuotaQuotaState(row)
-	billingText := ""
-	if row.BillingMainSite {
-		billingText = " | billing:main"
+	hostingAndSupportText := ""
+	if row.HostingAndSupportMainSite {
+		hostingAndSupportText = " | billing:main"
 	}
-	lineText := fmt.Sprintf("[%d] %s | %s | %s | aliases:%d%s", index, row.Domain, usageText, stateText, len(row.Aliases), billingText)
+	lineText := fmt.Sprintf("[%d] %s | %s | %s | aliases:%d%s", index, row.Domain, usageText, stateText, len(row.Aliases), hostingAndSupportText)
 	lineText = truncateDisplayText(lineText, width)
 	if selected {
 		return lineText, terminalCyan() + terminalBold()
@@ -14903,7 +15017,7 @@ func (a *App) openServerControlDatabase(ctx context.Context) (*sql.DB, error) {
 	}
 	database.SetMaxOpenConns(1)
 	database.SetMaxIdleConns(1)
-	if err := billing.Migrate(ctx, database); err != nil {
+	if err := hostingandsupport.Migrate(ctx, database); err != nil {
 		_ = database.Close()
 		return nil, err
 	}
@@ -14937,7 +15051,7 @@ func (a *App) serverOwnerExists(ctx context.Context) bool {
 		return false
 	}
 	defer controlDatabase.Close()
-	return (billing.Store{DB: controlDatabase}).OwnerExists(ctx)
+	return (hostingandsupport.Store{DB: controlDatabase}).OwnerExists(ctx)
 }
 
 func (a *App) ensureServerOwnerExists(ctx context.Context) {
@@ -14946,7 +15060,7 @@ func (a *App) ensureServerOwnerExists(ctx context.Context) {
 		return
 	}
 	defer controlDatabase.Close()
-	store := billing.Store{DB: controlDatabase}
+	store := hostingandsupport.Store{DB: controlDatabase}
 	if store.OwnerExists(ctx) {
 		return
 	}
@@ -14999,7 +15113,7 @@ func (a *App) promoteFirstServerOwner(ctx context.Context, domain, email string)
 		return
 	}
 	defer controlDatabase.Close()
-	(billing.Store{DB: controlDatabase}).PromoteOwnerIfMissing(ctx, domain, email)
+	(hostingandsupport.Store{DB: controlDatabase}).PromoteOwnerIfMissing(ctx, domain, email)
 }
 
 func (a *App) isServerManagerRequest(r *http.Request) bool {
@@ -15020,7 +15134,7 @@ func (a *App) isServerManagerEmail(ctx context.Context, domain, email string) bo
 		return false
 	}
 	defer controlDatabase.Close()
-	store := billing.Store{DB: controlDatabase}
+	store := hostingandsupport.Store{DB: controlDatabase}
 	ownerDomain, ownerFound := store.OwnerDomain(ctx)
 	if !ownerFound || normalizeQuotaDomainName(ownerDomain) != normalizeQuotaDomainName(domain) {
 		return false
@@ -15037,7 +15151,7 @@ func (a *App) serverAutomaticRegistrationAllowed(ctx context.Context) bool {
 		return true
 	}
 	defer controlDatabase.Close()
-	return (billing.Store{DB: controlDatabase}).AutomaticRegistrationAllowed(ctx)
+	return (hostingandsupport.Store{DB: controlDatabase}).AutomaticRegistrationAllowed(ctx)
 }
 
 func (a *App) domainStorageUsage(ctx context.Context, domain string) domainStorageUsage {
@@ -16388,7 +16502,7 @@ func buildContextMenuScript(isAdmin bool, isServerManager bool, isFrozen bool, p
 	publishLabel := template.JSEscapeString(translationOrDefault(translations, "menu_publish", "Publish"))
 	settingsLabel := template.JSEscapeString(translationOrDefault(translations, "menu_domain_settings", "Settings"))
 	analyticsLabel := template.JSEscapeString(translationOrDefault(translations, "menu_analytics", "Analytics"))
-	billingLabel := template.JSEscapeString(translationOrDefault(translations, "menu_billing", "Биллинг"))
+	hostingAndSupportLabel := template.JSEscapeString(translationOrDefault(translations, "menu_billing", "Хостинг и поддержка"))
 	profileLabel := template.JSEscapeString(translationOrDefault(translations, "menu_profile", "Account"))
 	logoutLabel := template.JSEscapeString(translationOrDefault(translations, "menu_logout", "Sign out"))
 	loginLabel := template.JSEscapeString(translationOrDefault(translations, "menu_login", "Sign in"))
@@ -16420,9 +16534,9 @@ func buildContextMenuScript(isAdmin bool, isServerManager bool, isFrozen bool, p
 		if pagePasswordProtected {
 			passwordActionEntry = "<li class='SiteBrushContextMenu SiteBrushSeparatedMenuItem'><button type='button' data-sitebrush-action='remove_password_protection' class='SiteBrushContextMenuLink SiteBrushContextMenuButton'><img src='/p/static/unlock.png' class='SiteBrushMenuIcon' alt=''>" + removePasswordProtectionLabel + "</button></li>"
 		}
-		billingEntry := ""
+		hostingAndSupportEntry := ""
 		if isServerManager {
-			billingEntry = "<li class='SiteBrushContextMenu SiteBrushSeparatedMenuItem SiteBrushPrivilegedMenuItem'><a href='?billing' class='SiteBrushContextMenuLink'><img src='/p/static/sitebrush-app-icon.png' class='SiteBrushMenuIcon' alt=''>" + billingLabel + "</a></li>"
+			hostingAndSupportEntry = "<li class='SiteBrushContextMenu SiteBrushSeparatedMenuItem SiteBrushPrivilegedMenuItem'><a href='?hosting_and_support' class='SiteBrushContextMenuLink'><img src='/p/static/sitebrush-app-icon.png' class='SiteBrushMenuIcon' alt=''>" + hostingAndSupportLabel + "</a></li>"
 		}
 		logoutEntry := ""
 		if showLogout {
@@ -16790,7 +16904,7 @@ func buildContextMenuScript(isAdmin bool, isServerManager bool, isFrozen bool, p
       "<li class='SiteBrushContextMenu'><a href='?files' class='SiteBrushContextMenuLink'><img src='/p/static/upload.png' class='SiteBrushMenuIcon' alt=''>" + "` + filesLabel + `" + "</a></li>",
       "<li class='SiteBrushContextMenu SiteBrushSeparatedMenuItem'><a href='?settings' class='SiteBrushContextMenuLink'><img src='/p/static/settings.png' class='SiteBrushMenuIcon' alt=''>" + "` + settingsLabel + `" + "</a></li>",
       "<li class='SiteBrushContextMenu'><a href='?analytics' class='SiteBrushContextMenuLink'><img src='/p/static/analytics.svg' class='SiteBrushMenuIcon' alt=''>" + "` + analyticsLabel + `" + "</a></li>",
-      "` + billingEntry + `",
+      "` + hostingAndSupportEntry + `",
       "<li class='SiteBrushContextMenu SiteBrushSeparatedMenuItem'><a href='?profile' class='SiteBrushContextMenuLink'><img src='/p/static/profile.png' class='SiteBrushMenuIcon' alt=''>" + "` + profileLabel + `" + "</a></li>",
       "` + logoutEntry + `",
       "` + copyrightMenuEntry + `",

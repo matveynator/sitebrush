@@ -1,4 +1,4 @@
-package billing
+package hostingandsupport
 
 import (
 	"context"
@@ -38,7 +38,7 @@ func TestBuildSitesMarksOnlyServerMainDomain(t *testing.T) {
 }
 
 func TestServiceMailInstallationsDoesNotBlockSingleConnectionDatabase(t *testing.T) {
-	database, err := sql.Open("sqlite3", filepath.Join(t.TempDir(), "billing.db"))
+	database, err := sql.Open("sqlite3", filepath.Join(t.TempDir(), "hostingandsupport.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -76,7 +76,7 @@ func TestServiceMailInstallationsDoesNotBlockSingleConnectionDatabase(t *testing
 }
 
 func TestServiceMailSettingsRoundTrip(t *testing.T) {
-	database, err := sql.Open("sqlite3", filepath.Join(t.TempDir(), "billing.db"))
+	database, err := sql.Open("sqlite3", filepath.Join(t.TempDir(), "hostingandsupport.db"))
 	if err != nil {
 		t.Fatal(err)
 	}

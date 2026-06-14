@@ -915,8 +915,23 @@
     min-width: 0;
 }
 
+.technical-page .billing-user-details {
+    grid-column: 1 / -1;
+    display: grid;
+    grid-template-columns: minmax(280px, 0.9fr) minmax(0, 1.1fr);
+    gap: 12px;
+    padding-top: 12px;
+    border-top: 1px dotted rgba(149, 229, 239, 0.22);
+}
+
 .technical-page .billing-user-activity {
     grid-column: 1 / -1;
+}
+
+.technical-page .billing-user-subtitle {
+    margin: 0;
+    font-size: 0.95rem;
+    font-weight: 700;
 }
 
 .technical-page .billing-user-stats,
@@ -1492,6 +1507,7 @@
     .technical-page .billing-plan-form,
     .technical-page .billing-site-row,
     .technical-page .billing-user-row,
+    .technical-page .billing-user-details,
     .technical-page .billing-site-form,
     .technical-page .billing-delete-form,
     .technical-page .billing-backup-row,

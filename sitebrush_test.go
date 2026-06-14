@@ -37,10 +37,10 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 	"golang.org/x/net/dns/dnsmessage"
 	"golang.org/x/text/encoding/charmap"
-	"sitebrush/pkg/billing"
 	"sitebrush/pkg/crawler"
 	"sitebrush/pkg/demo"
 	"sitebrush/pkg/diskusage"
+	"sitebrush/pkg/hostingandsupport"
 	"sitebrush/pkg/mailout"
 	"sitebrush/pkg/sitebrushtemplate"
 )
@@ -482,9 +482,9 @@ func TestServiceMailRateLimitedIncludesSourceSubnet(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer controlDatabase.Close()
-	store := billing.Store{DB: controlDatabase}
+	store := hostingandsupport.Store{DB: controlDatabase}
 	for eventIndex := 0; eventIndex < serviceMailPerSubnetHourLimit; eventIndex++ {
-		if err := store.LogServiceMailEvent(context.Background(), billing.ServiceMailEvent{
+		if err := store.LogServiceMailEvent(context.Background(), hostingandsupport.ServiceMailEvent{
 			InstallationID:  "installation-" + strconv.Itoa(eventIndex),
 			SourceIP:        fmt.Sprintf("10.20.30.%d", eventIndex%200+1),
 			Recipient:       fmt.Sprintf("user-%d@example.net", eventIndex),
@@ -521,7 +521,7 @@ func TestServiceMailRelayRejectsLoginCodeForUnverifiedRecipient(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	store := billing.Store{DB: controlDatabase}
+	store := hostingandsupport.Store{DB: controlDatabase}
 	if err := store.UpsertServiceMailRecipient(context.Background(), request.InstallationID, "owner@example.net", "verified", "confirmed"); err != nil {
 		t.Fatal(err)
 	}
@@ -574,7 +574,7 @@ func TestServiceMailRelayAllowsLoginCodeForVerifiedRecipient(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	store := billing.Store{DB: controlDatabase}
+	store := hostingandsupport.Store{DB: controlDatabase}
 	if err := store.UpsertServiceMailRecipient(context.Background(), request.InstallationID, request.Recipient, "verified", "confirmed"); err != nil {
 		t.Fatal(err)
 	}
@@ -675,7 +675,7 @@ func registerServiceMailInstallationForTest(t *testing.T, application *App, requ
 		t.Fatal(err)
 	}
 	defer controlDatabase.Close()
-	store := billing.Store{DB: controlDatabase}
+	store := hostingandsupport.Store{DB: controlDatabase}
 	if err := store.UpsertServiceMailInstallation(context.Background(), request.InstallationID, request.PublicKey, "203.0.113.10", request.SourceDomain); err != nil {
 		t.Fatal(err)
 	}
@@ -2099,7 +2099,7 @@ func TestSiteRequestStoresApplicantWithoutCreatingAdmin(t *testing.T) {
 	application, rawDB := newTestApplication(t)
 	controlDB := setupBillingOwnerForTest(t, application, "localhost", "owner@example.com", false)
 	defer controlDB.Close()
-	store := billing.Store{DB: controlDB}
+	store := hostingandsupport.Store{DB: controlDB}
 	plan, found := store.DefaultPlan(context.Background())
 	if !found {
 		t.Fatal("default plan missing")
@@ -2232,7 +2232,7 @@ func TestBillingPlanCanBeEditedWithSiteAndAnalyticsLimits(t *testing.T) {
 }
 
 func TestBillingMigrationAddsPlanLimitColumns(t *testing.T) {
-	databasePath := filepath.Join(t.TempDir(), "billing.db")
+	databasePath := filepath.Join(t.TempDir(), "hostingandsupport.db")
 	controlDB, err := sql.Open("sqlite3", databasePath)
 	if err != nil {
 		t.Fatal(err)
@@ -2250,7 +2250,7 @@ func TestBillingMigrationAddsPlanLimitColumns(t *testing.T) {
 	if _, err := controlDB.Exec(`INSERT INTO site_service_plans(name,quota_bytes,price,currency,billing_period,is_default,created_at,updated_at) VALUES('Legacy',1073741824,'5','USD','monthly',0,'2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')`); err != nil {
 		t.Fatalf("seed old plan: %v", err)
 	}
-	if err := billing.Migrate(context.Background(), controlDB); err != nil {
+	if err := hostingandsupport.Migrate(context.Background(), controlDB); err != nil {
 		t.Fatalf("migrate billing: %v", err)
 	}
 	var siteLimit int
@@ -2267,7 +2267,7 @@ func TestApproveSiteRequestCreatesSiteAndEmailsApplicant(t *testing.T) {
 	application, _ := newTestApplication(t)
 	controlDB := setupBillingOwnerForTest(t, application, "localhost", "owner@example.com", false)
 	defer controlDB.Close()
-	store := billing.Store{DB: controlDB}
+	store := hostingandsupport.Store{DB: controlDB}
 	plan, found := store.DefaultPlan(context.Background())
 	if !found {
 		t.Fatal("default plan missing")
@@ -2712,7 +2712,7 @@ func setupBillingOwnerForTest(t *testing.T, application *App, domain, email stri
 	if err != nil {
 		t.Fatal(err)
 	}
-	store := billing.Store{DB: controlDB}
+	store := hostingandsupport.Store{DB: controlDB}
 	if err := store.SetOwner(context.Background(), domain, email); err != nil {
 		_ = controlDB.Close()
 		t.Fatalf("set owner: %v", err)
@@ -7971,7 +7971,7 @@ func TestBillingDeleteSiteCreatesVerifiedBackupBeforeRemovingData(t *testing.T) 
 	_ = controlDB.Close()
 
 	request := httptest.NewRequest(http.MethodPost, "http://owner.example/?billing", nil)
-	backup, err := application.deleteManagedSiteWithBackup(context.Background(), request, domain, billing.DefaultDeletionBackupRetentionDays)
+	backup, err := application.deleteManagedSiteWithBackup(context.Background(), request, domain, hostingandsupport.DefaultDeletionBackupRetentionDays)
 	if err != nil {
 		t.Fatalf("delete with backup: %v", err)
 	}
@@ -8071,7 +8071,7 @@ func TestBillingDeleteSiteKeepsDataWhenBackupCreationFails(t *testing.T) {
 		t.Fatalf("block backup dir: %v", err)
 	}
 
-	_, err = application.deleteManagedSiteWithBackup(context.Background(), httptest.NewRequest(http.MethodPost, "http://owner.example/?billing", nil), domain, billing.DefaultDeletionBackupRetentionDays)
+	_, err = application.deleteManagedSiteWithBackup(context.Background(), httptest.NewRequest(http.MethodPost, "http://owner.example/?billing", nil), domain, hostingandsupport.DefaultDeletionBackupRetentionDays)
 	if err == nil {
 		t.Fatal("delete succeeded despite backup directory failure")
 	}

@@ -25,7 +25,7 @@
   <section class="card billing-card">
     <div class="card-body">
       <h2>{{index .T "billing_plans_title"}}</h2>
-      <form method="post" action="?billing" class="billing-plan-form">
+      <form method="post" action="?hosting_and_support" class="billing-plan-form">
         <input type="hidden" name="billing_action" value="save_plan">
         <label>{{index .T "billing_plan_name"}} <input name="name" type="text" class="form-control" placeholder="Free / Pro / Business" required></label>
         <label>{{index .T "billing_quota"}} <input name="quota" type="text" class="form-control" placeholder="10gb" required></label>
@@ -43,7 +43,7 @@
           <span><button type="button" class="btn btn-link btn-sm p-0 align-baseline" data-bs-toggle="modal" data-bs-target="#billingPlanModal{{.ID}}">{{.Name}}</button> · {{.QuotaLabel}} · {{index $.T "billing_sites_short"}} {{.SiteLimit}} · {{index $.T "billing_reports_short"}} {{.AnalyticsReportLimit}} · {{.Price}} {{.Currency}}/{{.BillingPeriod}}{{if .IsDefault}} · {{index $.T "billing_default_suffix"}}{{end}}</span>
           <div class="d-flex gap-2">
             <button type="button" class="btn btn-outline-primary btn-sm" data-bs-toggle="modal" data-bs-target="#billingPlanEditModal{{.ID}}"><img src="/p/static/pencil.png" alt="">{{index $.T "billing_edit"}}</button>
-            <form method="post" action="?billing">
+            <form method="post" action="?hosting_and_support">
               <input type="hidden" name="billing_action" value="delete_plan">
               <input type="hidden" name="plan_id" value="{{.ID}}">
               <button type="submit" class="btn btn-outline-danger btn-sm"><img src="/p/static/cross.png" alt="">{{index $.T "billing_delete"}}</button>
@@ -74,7 +74,7 @@
         </div>
         <div class="modal fade" id="billingPlanEditModal{{.ID}}" tabindex="-1" aria-hidden="true">
           <div class="modal-dialog modal-dialog-centered"><div class="modal-content">
-            <form method="post" action="?billing" data-billing-ajax-save>
+            <form method="post" action="?hosting_and_support" data-billing-ajax-save>
               <div class="modal-header">
                 <h5 class="modal-title">{{index $.T "billing_edit_plan_title"}} {{.Name}}</h5>
                 <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="{{index $.T "tree_close"}}"></button>
@@ -109,7 +109,7 @@
         <h2>{{index .T "billing_registration_title"}}</h2>
         <p class="text-muted">{{index .T "billing_registration_hint"}}</p>
       </div>
-      <form method="post" action="?billing" class="billing-registration-settings-form" data-billing-ajax-save>
+      <form method="post" action="?hosting_and_support" class="billing-registration-settings-form" data-billing-ajax-save>
         <input type="hidden" name="billing_action" value="registration_settings">
         <label class="checkbox-row">
           <input type="checkbox" name="auto_registration_enabled" value="1" {{if .AutoRegistrationEnabled}}checked{{end}}>
@@ -159,7 +159,7 @@
         <h2>{{index .T "billing_add_site_title"}}</h2>
         <p class="text-muted">{{index .T "billing_add_site_hint"}}</p>
       </div>
-      <form method="post" action="?billing" class="billing-create-form">
+      <form method="post" action="?hosting_and_support" class="billing-create-form">
         <input type="hidden" name="billing_action" value="create_site">
         <label>{{index .T "billing_domain"}} <input name="domain" type="text" class="form-control" placeholder="example.com" required></label>
         <label>{{index .T "billing_admin_email"}} <input name="email" type="email" class="form-control" placeholder="admin@example.com" required></label>
@@ -174,60 +174,77 @@
     <div class="card-body">
       <div class="billing-section-header">
         <div>
-          <h2>Пользователи</h2>
-          <p class="text-muted">Администраторы по последнему email, связанные адреса, IP, домены, установки и журнал регистраций/смен.</p>
+          <h2>Клиенты</h2>
+          <p class="text-muted">Клиент определяется по email. Внутри видны его сайты, реальные установки, локальная разработка, старые email и журнал действий.</p>
+        </div>
+        <div class="billing-user-stats">
+          <span>{{.ClientCount}} клиентов</span>
+          <span>{{.ClientSiteCount}} сайтов</span>
+          <span>{{.ClientInstallationCount}} реальных установок</span>
+          <span>{{.ClientLocalDevelopmentCount}} локальная разработка</span>
         </div>
       </div>
       <div class="billing-user-list">
-        {{range $userIndex, $user := .ServiceMailUsers}}
+        {{range $userIndex, $user := .Clients}}
         <article class="billing-user-row">
           <div class="billing-user-main">
             <div class="billing-domain">{{$user.PrimaryEmail}}</div>
             <div class="billing-user-stats">
-              <span>{{$user.InstallationCount}} installations</span>
-              <span>{{$user.SiteCount}} sites</span>
-              <span>{{$user.EmailCount}} emails</span>
+              <span>{{$user.SiteCount}} сайтов</span>
+              <span>{{$user.InstallationCount}} реальных установок</span>
+              <span>{{$user.LocalDevelopmentCount}} локальная разработка</span>
+              <span>{{$user.EmailCount}} email</span>
               <span>{{$user.IPCount}} IP</span>
             </div>
             <div class="billing-user-tags">
               {{range $user.Emails}}<span>{{.}}</span>{{end}}
             </div>
-            <div class="billing-user-tags">
-              {{range $user.Domains}}<span>{{.}}</span>{{end}}
-            </div>
-            <div class="billing-user-tags">
-              {{range $user.Installations}}<span>{{.}}</span>{{end}}
-            </div>
+            <button type="button" class="btn btn-outline-primary btn-sm" data-billing-client-toggle="billingClientDetails{{$userIndex}}">Подробности</button>
           </div>
-          <div class="billing-user-side">
-            <div class="billing-user-map" id="billingUserMap{{$userIndex}}"></div>
-            <script type="application/json" id="billingUserMap{{$userIndex}}Data">{{$user.MapPointsJSON}}</script>
-            <div class="billing-user-ip-list">
-              {{range $user.IPs}}
-              <div class="billing-user-ip-row">
-                <span>{{.IP}}</span>
-                <span>{{if .Country}}{{.Country}}{{else}}unknown{{end}}</span>
-                <span>{{if .City}}{{.City}}{{else}}unknown{{end}}</span>
-                <span>{{.Provider}}</span>
+          <div class="billing-user-details d-none" id="billingClientDetails{{$userIndex}}">
+            <div class="billing-user-side">
+              <div class="billing-user-map" id="billingUserMap{{$userIndex}}"></div>
+              <script type="application/json" id="billingUserMap{{$userIndex}}Data">{{$user.MapPointsJSON}}</script>
+              <div class="billing-user-ip-list">
+                {{range $user.IPs}}
+                <div class="billing-user-ip-row">
+                  <span>{{.IP}}</span>
+                  <span>{{if .Country}}{{.Country}}{{else}}unknown{{end}}</span>
+                  <span>{{if .City}}{{.City}}{{else}}unknown{{end}}</span>
+                  <span>{{.Provider}}</span>
+                </div>
+                {{end}}
               </div>
-              {{end}}
             </div>
-          </div>
-          <div class="billing-user-activity">
-            {{range $user.Events}}
-            <div class="billing-user-activity-row">
-              <span class="billing-user-activity-kind">{{.Kind}} · {{.Status}}</span>
-              <span>{{.Email}}</span>
-              <span>{{.Domain}}</span>
-              <span>{{.IP}}</span>
-              <span>{{.CreatedAt}}</span>
-              {{if .Error}}<span class="text-danger">{{.Error}}</span>{{end}}
+            <div>
+              <h3 class="billing-user-subtitle">Сайты клиента</h3>
+              <div class="billing-user-tags">
+                {{range $user.Sites}}
+                <span>{{.Domain}} · {{.Status}}{{if .InstallationIP}} · {{.InstallationIP}}{{end}}</span>
+                {{end}}
+              </div>
+              <h3 class="billing-user-subtitle">Домены и установки relay</h3>
+              <div class="billing-user-tags">
+                {{range $user.Domains}}<span>{{.}}</span>{{end}}
+                {{range $user.Installations}}<span>{{.}}</span>{{end}}
+              </div>
+              <div class="billing-user-activity">
+                {{range $user.Events}}
+                <div class="billing-user-activity-row">
+                  <span class="billing-user-activity-kind">{{.Kind}} · {{.Status}}</span>
+                  <span>{{.Email}}</span>
+                  <span>{{.Domain}}</span>
+                  <span>{{.IP}}</span>
+                  <span>{{.CreatedAt}}</span>
+                  {{if .Error}}<span class="text-danger">{{.Error}}</span>{{end}}
+                </div>
+                {{end}}
+              </div>
             </div>
-            {{end}}
           </div>
         </article>
         {{else}}
-        <div class="empty">Пользователей relay пока нет.</div>
+        <div class="empty">Клиентов пока нет.</div>
         {{end}}
       </div>
     </div>
@@ -258,7 +275,7 @@
           </div>
           <div class="modal fade" id="approveSiteRequestModal{{$requestIndex}}" tabindex="-1" aria-hidden="true">
             <div class="modal-dialog modal-dialog-centered"><div class="modal-content">
-              <form method="post" action="?billing">
+              <form method="post" action="?hosting_and_support">
                 <div class="modal-header">
                   <h5 class="modal-title">{{index $.T "billing_approve_title"}} {{$request.Domain}}</h5>
                   <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="{{index $.T "tree_close"}}"></button>
@@ -280,7 +297,7 @@
           </div>
           <div class="modal fade" id="rejectSiteRequestModal{{$requestIndex}}" tabindex="-1" aria-hidden="true">
             <div class="modal-dialog modal-dialog-centered"><div class="modal-content">
-              <form method="post" action="?billing">
+              <form method="post" action="?hosting_and_support">
                 <div class="modal-header">
                   <h5 class="modal-title">{{index $.T "billing_reject_title"}} {{$request.Domain}}</h5>
                   <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="{{index $.T "tree_close"}}"></button>
@@ -334,7 +351,7 @@
             </div>
             <div class="text-muted small">{{index $.T "billing_used_label"}} {{$site.UsedLabel}} / {{$site.LimitLabel}}, {{index $.T "billing_free_label"}} {{$site.FreeLabel}}</div>
           </div>
-          {{if not $site.IsDemo}}<form method="post" action="?billing" class="billing-site-form" data-billing-ajax-save>
+          {{if not $site.IsDemo}}<form method="post" action="?hosting_and_support" class="billing-site-form" data-billing-ajax-save>
             <input type="hidden" name="billing_action" value="update_site">
             <input type="hidden" name="domain" value="{{$site.Domain}}">
             <label>{{index $.T "billing_quota"}} <input name="quota" type="text" class="form-control form-control-sm" value="{{$site.QuotaInput}}"></label>
@@ -358,7 +375,7 @@
           </div>
           <div class="modal fade" id="deleteSiteModal{{$siteIndex}}" tabindex="-1" aria-hidden="true">
             <div class="modal-dialog modal-dialog-centered"><div class="modal-content">
-              <form method="post" action="?billing">
+              <form method="post" action="?hosting_and_support">
                 <div class="modal-header">
                   <h5 class="modal-title">{{index $.T "billing_delete_modal_title"}} {{$site.Domain}}</h5>
                   <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="{{index $.T "tree_close"}}"></button>
@@ -398,7 +415,7 @@
           <p class="text-muted">{{index .T "billing_service_mail_hint"}}</p>
         </div>
       </div>
-      <form method="post" action="?billing" class="billing-service-mail-settings-form" data-billing-ajax-save>
+      <form method="post" action="?hosting_and_support" class="billing-service-mail-settings-form" data-billing-ajax-save>
         <input type="hidden" name="billing_action" value="service_mail_settings">
         <label class="checkbox-row">
           <input type="checkbox" name="service_mail_relay_enabled" value="1" {{if .ServiceMailRelayEnabled}}checked{{end}}>
@@ -421,7 +438,7 @@
             <div class="text-muted small">{{index $.T "billing_service_mail_key"}}: {{.PublicKey}}</div>
             <div class="text-muted small">IP: {{.LastIP}} · {{index $.T "billing_service_mail_sent"}}: {{.SentCount}} · {{index $.T "billing_service_mail_errors"}}: {{.ErrorCount}} · {{index $.T "billing_service_mail_last"}}: {{.LastSeenAt}}</div>
           </div>
-          <form method="post" action="?billing" class="billing-site-form">
+          <form method="post" action="?hosting_and_support" class="billing-site-form">
             <input type="hidden" name="installation_id" value="{{.InstallationID}}">
             {{if .Blocked}}
             <input type="hidden" name="billing_action" value="unblock_service_mail_installation">
@@ -436,7 +453,7 @@
         <div class="empty">{{index .T "billing_service_mail_empty"}}</div>
         {{end}}
       </div>
-      <form method="post" action="?billing" class="billing-service-mail-block-form mt-3">
+      <form method="post" action="?hosting_and_support" class="billing-service-mail-block-form mt-3">
         <input type="hidden" name="billing_action" value="add_service_mail_block">
         <label>{{index .T "billing_service_mail_block_scope"}}
           <select name="scope" class="form-control">
@@ -463,7 +480,7 @@
         {{range .ServiceMailBlocks}}
         <div class="billing-plan-row">
           <span>{{.Scope}}: {{.Value}} · {{.Reason}} · {{.CreatedAt}}</span>
-          <form method="post" action="?billing">
+          <form method="post" action="?hosting_and_support">
             <input type="hidden" name="billing_action" value="delete_service_mail_block">
             <input type="hidden" name="block_id" value="{{.ID}}">
             <button type="submit" class="btn btn-outline-primary btn-sm">{{index $.T "billing_service_mail_remove_block"}}</button>
@@ -517,7 +534,7 @@
             <span>{{index $.T "billing_backup_token_status"}} {{.TokenStatus}}</span>
             {{if .DownloadedAt}}<span>{{index $.T "billing_backup_downloaded_at"}} {{.DownloadedAt}}</span>{{end}}
           </div>
-          <form method="post" action="?billing" class="billing-backup-actions" data-billing-ajax-save>
+          <form method="post" action="?hosting_and_support" class="billing-backup-actions" data-billing-ajax-save>
             <input type="hidden" name="billing_action" value="update_backup_retention">
             <input type="hidden" name="backup_id" value="{{.ID}}">
             <label>{{index $.T "billing_backup_retention_days"}}
@@ -539,7 +556,7 @@
         <h2>{{index .T "billing_demo_title"}}</h2>
         <p class="text-muted">{{index .T "billing_demo_hint"}}</p>
       </div>
-      <form method="post" action="?billing" class="billing-demo-settings-form" data-billing-ajax-save>
+      <form method="post" action="?hosting_and_support" class="billing-demo-settings-form" data-billing-ajax-save>
         <input type="hidden" name="billing_action" value="demo_settings">
         <input type="hidden" name="refresh_demo_site" value="0" data-refresh-demo-site-input>
         <label>{{index .T "billing_demo_domain"}} <input name="demo_site_domain" type="text" class="form-control" value="{{.DemoSettings.Domain}}" placeholder="demo.example.com"></label>
@@ -577,15 +594,14 @@
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
 <script src="/p/static/leaflet.min.js"></script>
 <script>
-(function initializeBillingUserMaps() {
-  if (!window.L) {
-    return;
-  }
-  const mapElements = document.querySelectorAll('.billing-user-map[id]');
-  for (const mapElement of mapElements) {
+(function initializeBillingClientDetails() {
+  function renderBillingClientMap(mapElement) {
+    if (!window.L || !mapElement || mapElement.dataset.billingMapRendered === '1') {
+      return;
+    }
     const mapDataElement = document.getElementById(mapElement.id + 'Data');
     if (!mapDataElement) {
-      continue;
+      return;
     }
     let mapPoints = [];
     try {
@@ -595,7 +611,8 @@
     }
     if (!Array.isArray(mapPoints) || mapPoints.length === 0) {
       mapElement.textContent = 'нет координат';
-      continue;
+      mapElement.dataset.billingMapRendered = '1';
+      return;
     }
     const userMap = L.map(mapElement, { zoomControl: false, attributionControl: false });
     L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 18 }).addTo(userMap);
@@ -615,6 +632,21 @@
     } else if (bounds.length > 1) {
       userMap.fitBounds(bounds, { padding: [12, 12] });
     }
+    mapElement.dataset.billingMapRendered = '1';
+  }
+
+  const detailsButtonElements = document.querySelectorAll('[data-billing-client-toggle]');
+  for (const detailsButtonElement of detailsButtonElements) {
+    detailsButtonElement.addEventListener('click', function toggleBillingClientDetails() {
+      const detailsElement = document.getElementById(detailsButtonElement.dataset.billingClientToggle || '');
+      if (!detailsElement) {
+        return;
+      }
+      detailsElement.classList.toggle('d-none');
+      if (!detailsElement.classList.contains('d-none')) {
+        renderBillingClientMap(detailsElement.querySelector('.billing-user-map[id]'));
+      }
+    });
   }
 })();
 

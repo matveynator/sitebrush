@@ -1,4 +1,4 @@
-package billing
+package hostingandsupport
 
 import (
 	"context"
@@ -157,7 +157,7 @@ func Migrate(ctx context.Context, database *sql.DB) error {
 	if err != nil {
 		return fmt.Errorf("read billing schema version: %w", err)
 	}
-	schemaComplete, err := billingSchemaComplete(ctx, database)
+	schemaComplete, err := hostingAndSupportSchemaComplete(ctx, database)
 	if err != nil {
 		return fmt.Errorf("verify billing schema: %w", err)
 	}
@@ -186,8 +186,8 @@ func Migrate(ctx context.Context, database *sql.DB) error {
 			return fmt.Errorf("billing schema statement %d: %w", queryIndex+1, err)
 		}
 	}
-	for _, column := range requiredBillingColumns() {
-		found, err := billingColumnExists(ctx, database, column.tableName, column.columnName)
+	for _, column := range requiredHostingAndSupportColumns() {
+		found, err := hostingAndSupportColumnExists(ctx, database, column.tableName, column.columnName)
 		if err != nil {
 			return fmt.Errorf("check billing column %s.%s: %w", column.tableName, column.columnName, err)
 		}
@@ -225,7 +225,7 @@ func setSchemaMigrationVersion(ctx context.Context, database *sql.DB, component 
 	return err
 }
 
-func billingSchemaComplete(ctx context.Context, database *sql.DB) (bool, error) {
+func hostingAndSupportSchemaComplete(ctx context.Context, database *sql.DB) (bool, error) {
 	tableNames := []string{"server_managers", "server_settings", "site_service_plans", "site_service_assignments", "site_registration_requests", "site_deletion_backups", "service_mail_installations", "service_mail_events", "service_mail_blocks", "service_mail_recipients"}
 	tableNames = append(tableNames, demo.TableNames()...)
 	for _, tableName := range tableNames {
@@ -234,8 +234,8 @@ func billingSchemaComplete(ctx context.Context, database *sql.DB) (bool, error) 
 			return found, err
 		}
 	}
-	for _, column := range requiredBillingColumns() {
-		found, err := billingColumnExists(ctx, database, column.tableName, column.columnName)
+	for _, column := range requiredHostingAndSupportColumns() {
+		found, err := hostingAndSupportColumnExists(ctx, database, column.tableName, column.columnName)
 		if err != nil || !found {
 			return found, err
 		}
@@ -252,20 +252,20 @@ func tableExists(ctx context.Context, database *sql.DB, tableName string) (bool,
 	return err == nil && foundName == tableName, err
 }
 
-type billingColumn struct {
+type hostingAndSupportColumn struct {
 	tableName  string
 	columnName string
 	definition string
 }
 
-func requiredBillingColumns() []billingColumn {
-	return []billingColumn{
+func requiredHostingAndSupportColumns() []hostingAndSupportColumn {
+	return []hostingAndSupportColumn{
 		{tableName: "site_service_plans", columnName: "site_limit", definition: "INTEGER DEFAULT 1"},
 		{tableName: "site_service_plans", columnName: "analytics_report_limit", definition: "INTEGER DEFAULT 0"},
 	}
 }
 
-func billingColumnExists(ctx context.Context, database *sql.DB, tableName, columnName string) (bool, error) {
+func hostingAndSupportColumnExists(ctx context.Context, database *sql.DB, tableName, columnName string) (bool, error) {
 	rows, err := database.QueryContext(ctx, `PRAGMA table_info(`+tableName+`)`)
 	if err != nil {
 		return false, err
