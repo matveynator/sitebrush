@@ -36,6 +36,7 @@ import (
 	stdmail "net/mail"
 	"net/url"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path"
 	"path/filepath"
@@ -3997,7 +3998,21 @@ func printSitebrushUsage(output io.Writer, flagSet *flag.FlagSet) {
 	magenta := "\x1b[35m"
 	reset := "\x1b[0m"
 	fmt.Fprintf(output, "Usage of %s:\n", os.Args[0])
-	flagSet.PrintDefaults()
+	fmt.Fprintf(output, `
+  %[2]s ____  _ _       %[3]s____                 _     %[8]s
+  %[2]s/ ___|(_) |_ ___%[3]s| __ ) _ __ _   _ ___| |__  %[8]s
+  %[4]s\___ \| | __/ _ \%[5]s  _ \| '__| | | / __| '_ \ %[8]s
+  %[4]s ___) | | ||  __/%[5]s |_) | |  | |_| \__ \ | | |%[8]s
+  %[6]s|____/|_|\__\___|%[7]s____/|_|   \__,_|___/_| |_|%[8]s
+
+  BEAUTIFUL STATIC WEBSITES WITHOUT CMS LIMITS
+  Designers and webmasters can create stunning custom HTML/CSS websites - and
+  keep them easy to edit. No theme prison. No block limits. Just beautiful
+  sites, built exactly the way you want.
+
+Options:
+`, programName, red, yellow, green, cyan, blue, magenta, reset)
+	printVisibleFlagDefaults(output, flagSet)
 	fmt.Fprintf(output, `
 Mini manual:
   SiteBrush turns old, slow or hacked CMS websites into fast, editable static
@@ -4005,26 +4020,15 @@ Mini manual:
   MySQL, plugins or a public admin panel.
 
   SiteBrush generates every page in advance and serves it as static content.
-  Request handling is as fast as normal static file delivery, comparable to a
-  simple nginx static server. Because public pages are pre-generated instead of
-  built on every request, the site has a smaller attack surface and predictable
-  high speed.
+  Your website is SUPER FAST, comparable to a very fast nginx static server. 
+  Because public pages are pre-generated instead of built on every request, 
+  the site has a smaller attack surface (SECURE) and predictable high speed.
 
   Best for business sites, landing pages, portfolios, documentation and old
   WordPress, Joomla or custom CMS sites that mostly contain static content.
 
-  %[2]s ____  _ _       %[3]s____                 _     %[8]s
-  %[2]s/ ___|(_) |_ ___%[3]s| __ ) _ __ _   _ ___| |__  %[8]s
-  %[4]s\___ \| | __/ _ \%[5]s  _ \| '__| | | / __| '_ \ %[8]s
-  %[4]s ___) | | ||  __/%[5]s |_) | |  | |_| \__ \ | | |%[8]s
-  %[6]s|____/|_|\__\___|%[7]s____/|_|   \__,_|___/_| |_|%[8]s
-  BEAUTIFUL SITES WITHOUT CMS LIMITS
-  Designers and webmasters can create stunning custom HTML/CSS websites - and
-  keep them easy to edit. No theme prison. No block limits. Just beautiful
-  sites, built exactly the way you want.
-
 Editing and publishing:
-  Open a site, right click on desktop or long press on mobile, edit text, images
+  Open a site, RIGHT CLICK on desktop or LONG TOUCH on mobile, edit text, images
   or blocks directly on the page, preview safely, then publish.
 
   SiteBrush can detect repeated elements while editing. Add the
@@ -4041,10 +4045,10 @@ Common commands:
   %[1]s -port 8080 -path /var/lib/sitebrush
       Start SiteBrush on a custom port with a custom data directory.
 
-  %[1]s -cli -path /var/lib/sitebrush
+  %[1]s -cli
       Open the interactive server console for installed sites, users and quotas.
 
-  %[1]s -install -path /var/lib/sitebrush
+  %[1]s -install 
       Install SiteBrush as a system service and enable automatic startup.
       Service startup targets are detected automatically on macOS, Linux,
       Windows, FreeBSD, OpenBSD and NetBSD.
@@ -4084,7 +4088,63 @@ Networking:
   Use -port 80,443 for the standard public server mode. Use a single custom port
   such as -port 8080 for local development, testing or reverse-proxy deployments.
 
-`, programName, red, yellow, green, cyan, blue, magenta, reset)
+`, programName)
+}
+
+func printSitebrushUsageWithPager(flagSet *flag.FlagSet) {
+	var usageText strings.Builder
+	printSitebrushUsage(&usageText, flagSet)
+	if !term.IsTerminal(int(os.Stdout.Fd())) {
+		fmt.Fprint(os.Stdout, usageText.String())
+		return
+	}
+	lessPath, err := exec.LookPath("less")
+	if err != nil {
+		fmt.Fprint(os.Stdout, usageText.String())
+		return
+	}
+	pager := exec.Command(lessPath, "-R")
+	pager.Stdin = strings.NewReader(usageText.String())
+	pager.Stdout = os.Stdout
+	pager.Stderr = os.Stderr
+	if err := pager.Run(); err != nil {
+		fmt.Fprint(os.Stdout, usageText.String())
+	}
+}
+
+func helpWasRequested(args []string) bool {
+	for _, argument := range args {
+		switch argument {
+		case "-h", "-help", "--help":
+			return true
+		}
+	}
+	return false
+}
+
+func printVisibleFlagDefaults(output io.Writer, flagSet *flag.FlagSet) {
+	visibleFlagNames := []string{"cli", "debug", "desktop", "install", "path", "port", "uninstall", "version"}
+	for _, flagName := range visibleFlagNames {
+		currentFlag := flagSet.Lookup(flagName)
+		if currentFlag == nil {
+			continue
+		}
+		if currentFlag.DefValue == "false" || currentFlag.DefValue == "true" {
+			fmt.Fprintf(output, "  -%s\n    \t%s\n", currentFlag.Name, currentFlag.Usage)
+			continue
+		}
+		fmt.Fprintf(output, "  -%s string\n    \t%s (default %q)\n", currentFlag.Name, currentFlag.Usage, currentFlag.DefValue)
+	}
+}
+
+func flagWasProvided(flagName string) bool {
+	provided := false
+	flag.Visit(func(currentFlag *flag.Flag) {
+		if currentFlag.Name == flagName {
+			provided = true
+		}
+	})
+	return provided
 }
 
 func main() {
@@ -4093,6 +4153,13 @@ func main() {
 	cliMode := flag.Bool("cli", false, "open interactive SiteBrush server console")
 	versionMode := flag.Bool("version", false, "print version and exit")
 	debugMode := flag.Bool("debug", false, "enable verbose HTTP and database diagnostic logs")
+	legacyStoragePath := flag.String("storage-path", "", "")
+	legacyDBPath := flag.String("db-path", "", "")
+	legacyDBType := flag.String("db-type", "", "")
+	legacyListSitesMode := flag.Bool("list-sites", false, "")
+	legacyQuotaSite := flag.String("quota-site", "", "")
+	legacyQuotaValue := flag.String("quota", "", "")
+	legacyVersionMode := flag.Bool("v", false, "")
 	var desktopModeFlag *bool
 	if appcli.DesktopModeFlagSupported() {
 		desktopModeFlag = flag.Bool("desktop", desktop.DefaultEnabled(), "enable desktop mode when desktop build tags are used")
@@ -4106,8 +4173,12 @@ func main() {
 	flag.Usage = func() {
 		printSitebrushUsage(flag.CommandLine.Output(), flag.CommandLine)
 	}
+	if helpWasRequested(os.Args[1:]) {
+		printSitebrushUsageWithPager(flag.CommandLine)
+		return
+	}
 	flag.Parse()
-	if *versionMode {
+	if *versionMode || *legacyVersionMode {
 		fmt.Println(CompileVersion)
 		return
 	}
@@ -4126,11 +4197,21 @@ func main() {
 	if installMode && uninstallMode {
 		log.Fatal("choose only one service action: -install or -uninstall")
 	}
+	if strings.TrimSpace(*legacyDBType) != "" && strings.TrimSpace(*legacyDBType) != "sqlite" {
+		log.Fatalf("unsupported legacy -db-type %q, supported: sqlite", *legacyDBType)
+	}
 
+	if !flagWasProvided("path") && strings.TrimSpace(*legacyStoragePath) != "" {
+		*storagePath = *legacyStoragePath
+	}
 	effectiveStoragePath := cleanStoragePath(*storagePath)
 	effectiveDBPath := filepath.Join(effectiveStoragePath, defaultDBPath)
-	if *cliMode {
-		if err := runSiteQuotaCommand(context.Background(), os.Stdout, os.Stdin, effectiveStoragePath, effectiveDBPath, true, "", ""); err != nil {
+	if strings.TrimSpace(*legacyDBPath) != "" {
+		effectiveDBPath = cleanDBPath(*legacyDBPath)
+	}
+	quotaCommandMode := *cliMode || *legacyListSitesMode || strings.TrimSpace(*legacyQuotaSite) != "" || flagWasProvided("quota")
+	if quotaCommandMode {
+		if err := runSiteQuotaCommand(context.Background(), os.Stdout, os.Stdin, effectiveStoragePath, effectiveDBPath, *cliMode || *legacyListSitesMode, *legacyQuotaSite, *legacyQuotaValue); err != nil {
 			log.Fatal(err)
 		}
 		return
