@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -17,7 +18,7 @@ import (
 
 const DefaultStorageLimitBytes int64 = 10 * 1024 * 1024 * 1024
 const DefaultDeletionBackupRetentionDays = 365
-const currentBillingSchemaVersion = 6
+const currentBillingSchemaVersion = 7
 
 type Store struct {
 	DB *sql.DB
@@ -42,6 +43,8 @@ type Site struct {
 	IsDemo            bool
 	IsMainDomain      bool
 	Aliases           string
+	URL               string
+	UsedBytes         int64
 	UsedLabel         string
 	LimitLabel        string
 	FreeLabel         string
@@ -135,6 +138,51 @@ type ServiceMailRecipient struct {
 	VerifiedAt     string
 }
 
+type HostingSnapshot struct {
+	Version        int                   `json:"version"`
+	InstallationID string                `json:"installation_id"`
+	OwnerEmail     string                `json:"owner_email"`
+	ServerIP       string                `json:"server_ip"`
+	StoragePath    string                `json:"storage_path"`
+	DiskFreeBytes  int64                 `json:"disk_free_bytes"`
+	DiskTotalBytes int64                 `json:"disk_total_bytes"`
+	Sites          []HostingSnapshotSite `json:"sites"`
+	CreatedAt      string                `json:"created_at"`
+}
+
+type HostingSnapshotSite struct {
+	Domain      string   `json:"domain"`
+	UsedBytes   int64    `json:"used_bytes"`
+	LimitBytes  int64    `json:"limit_bytes"`
+	AdminEmails []string `json:"admin_emails"`
+}
+
+type ClientHosting struct {
+	InstallationID string
+	OwnerEmail     string
+	ServerIP       string
+	StoragePath    string
+	DiskFreeBytes  int64
+	DiskTotalBytes int64
+	DiskFreeLabel  string
+	DiskTotalLabel string
+	LastSeenAt     string
+	Sites          []ClientHostingSite
+	ClientEmails   []string
+	SiteCount      int
+	TotalUsedBytes int64
+	TotalUsedLabel string
+}
+
+type ClientHostingSite struct {
+	Domain      string
+	UsedBytes   int64
+	LimitBytes  int64
+	UsedLabel   string
+	LimitLabel  string
+	AdminEmails []string
+}
+
 type DeletionBackupMetadata struct {
 	Version           int      `json:"version"`
 	Domain            string   `json:"domain"`
@@ -179,6 +227,9 @@ func Migrate(ctx context.Context, database *sql.DB) error {
 		`CREATE TABLE IF NOT EXISTS service_mail_blocks(id INTEGER PRIMARY KEY AUTOINCREMENT,scope TEXT,value TEXT,reason TEXT,created_at TEXT,UNIQUE(scope,value));`,
 		`CREATE TABLE IF NOT EXISTS service_mail_recipients(installation_id TEXT,recipient_hash TEXT,recipient_mask TEXT,status TEXT,purpose_scope TEXT,created_at TEXT,verified_at TEXT,PRIMARY KEY(installation_id,recipient_hash));`,
 		`CREATE INDEX IF NOT EXISTS idx_service_mail_recipients_installation_status ON service_mail_recipients(installation_id,status);`,
+		`CREATE TABLE IF NOT EXISTS client_hostings(installation_id TEXT PRIMARY KEY,owner_email TEXT,server_ip TEXT,storage_path TEXT,disk_free_bytes INTEGER DEFAULT 0,disk_total_bytes INTEGER DEFAULT 0,first_seen_at TEXT,last_seen_at TEXT);`,
+		`CREATE TABLE IF NOT EXISTS client_hosting_sites(installation_id TEXT,domain TEXT,used_bytes INTEGER DEFAULT 0,limit_bytes INTEGER DEFAULT 0,admin_emails TEXT,updated_at TEXT,PRIMARY KEY(installation_id,domain));`,
+		`CREATE INDEX IF NOT EXISTS idx_client_hosting_sites_installation ON client_hosting_sites(installation_id);`,
 	}
 	queries = append(queries, demo.SchemaQueries()...)
 	for queryIndex, query := range queries {
@@ -226,7 +277,7 @@ func setSchemaMigrationVersion(ctx context.Context, database *sql.DB, component 
 }
 
 func hostingAndSupportSchemaComplete(ctx context.Context, database *sql.DB) (bool, error) {
-	tableNames := []string{"server_managers", "server_settings", "site_service_plans", "site_service_assignments", "site_registration_requests", "site_deletion_backups", "service_mail_installations", "service_mail_events", "service_mail_blocks", "service_mail_recipients"}
+	tableNames := []string{"server_managers", "server_settings", "site_service_plans", "site_service_assignments", "site_registration_requests", "site_deletion_backups", "service_mail_installations", "service_mail_events", "service_mail_blocks", "service_mail_recipients", "client_hostings", "client_hosting_sites"}
 	tableNames = append(tableNames, demo.TableNames()...)
 	for _, tableName := range tableNames {
 		found, err := tableExists(ctx, database, tableName)
@@ -686,6 +737,128 @@ func (store Store) SetServiceMailInstallationBlocked(ctx context.Context, instal
 	return err
 }
 
+func (store Store) SaveHostingSnapshot(ctx context.Context, snapshot HostingSnapshot) error {
+	installationID := strings.TrimSpace(snapshot.InstallationID)
+	if installationID == "" {
+		return fmt.Errorf("installation id is required")
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	if strings.TrimSpace(snapshot.CreatedAt) != "" {
+		now = strings.TrimSpace(snapshot.CreatedAt)
+	}
+	transaction, err := store.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	_, err = transaction.ExecContext(ctx, `INSERT INTO client_hostings(installation_id,owner_email,server_ip,storage_path,disk_free_bytes,disk_total_bytes,first_seen_at,last_seen_at) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(installation_id) DO UPDATE SET owner_email=excluded.owner_email,server_ip=excluded.server_ip,storage_path=excluded.storage_path,disk_free_bytes=excluded.disk_free_bytes,disk_total_bytes=excluded.disk_total_bytes,last_seen_at=excluded.last_seen_at`,
+		installationID, strings.ToLower(strings.TrimSpace(snapshot.OwnerEmail)), strings.TrimSpace(snapshot.ServerIP), strings.TrimSpace(snapshot.StoragePath), snapshot.DiskFreeBytes, snapshot.DiskTotalBytes, now, now)
+	if err == nil {
+		_, err = transaction.ExecContext(ctx, `DELETE FROM client_hosting_sites WHERE installation_id=?`, installationID)
+	}
+	for _, site := range snapshot.Sites {
+		if err != nil {
+			break
+		}
+		domain := strings.ToLower(strings.TrimSpace(site.Domain))
+		if domain == "" {
+			continue
+		}
+		adminEmails := normalizedHostingEmails(site.AdminEmails)
+		_, err = transaction.ExecContext(ctx, `INSERT INTO client_hosting_sites(installation_id,domain,used_bytes,limit_bytes,admin_emails,updated_at) VALUES(?,?,?,?,?,?)`,
+			installationID, domain, site.UsedBytes, site.LimitBytes, strings.Join(adminEmails, ","), now)
+	}
+	if err != nil {
+		_ = transaction.Rollback()
+		return err
+	}
+	return transaction.Commit()
+}
+
+func normalizedHostingEmails(rawEmails []string) []string {
+	seen := make(map[string]struct{}, len(rawEmails))
+	emails := make([]string, 0, len(rawEmails))
+	for _, rawEmail := range rawEmails {
+		email := strings.ToLower(strings.TrimSpace(rawEmail))
+		if email == "" {
+			continue
+		}
+		if _, found := seen[email]; found {
+			continue
+		}
+		seen[email] = struct{}{}
+		emails = append(emails, email)
+	}
+	sort.Strings(emails)
+	return emails
+}
+
+func (store Store) ClientHostings(ctx context.Context) []ClientHosting {
+	rows, err := store.DB.QueryContext(ctx, `SELECT installation_id,owner_email,server_ip,storage_path,disk_free_bytes,disk_total_bytes,last_seen_at FROM client_hostings ORDER BY last_seen_at DESC,installation_id ASC`)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	hostings := make([]ClientHosting, 0, 8)
+	for rows.Next() {
+		var hosting ClientHosting
+		if scanErr := rows.Scan(&hosting.InstallationID, &hosting.OwnerEmail, &hosting.ServerIP, &hosting.StoragePath, &hosting.DiskFreeBytes, &hosting.DiskTotalBytes, &hosting.LastSeenAt); scanErr != nil {
+			continue
+		}
+		hosting.DiskFreeLabel = FormatFileSize(hosting.DiskFreeBytes)
+		hosting.DiskTotalLabel = FormatFileSize(hosting.DiskTotalBytes)
+		hostings = append(hostings, hosting)
+	}
+	for hostingIndex := range hostings {
+		hostings[hostingIndex].Sites = store.clientHostingSites(ctx, hostings[hostingIndex].InstallationID)
+		hostings[hostingIndex].SiteCount = len(hostings[hostingIndex].Sites)
+		emailSet := make(map[string]struct{})
+		if strings.TrimSpace(hostings[hostingIndex].OwnerEmail) != "" {
+			emailSet[strings.TrimSpace(hostings[hostingIndex].OwnerEmail)] = struct{}{}
+		}
+		for _, site := range hostings[hostingIndex].Sites {
+			hostings[hostingIndex].TotalUsedBytes += site.UsedBytes
+			for _, email := range site.AdminEmails {
+				emailSet[email] = struct{}{}
+			}
+		}
+		hostings[hostingIndex].ClientEmails = sortedStringsFromMap(emailSet)
+		hostings[hostingIndex].TotalUsedLabel = FormatFileSize(hostings[hostingIndex].TotalUsedBytes)
+	}
+	return hostings
+}
+
+func (store Store) clientHostingSites(ctx context.Context, installationID string) []ClientHostingSite {
+	rows, err := store.DB.QueryContext(ctx, `SELECT domain,used_bytes,limit_bytes,admin_emails FROM client_hosting_sites WHERE installation_id=? ORDER BY used_bytes DESC,domain ASC`, strings.TrimSpace(installationID))
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	sites := make([]ClientHostingSite, 0, 8)
+	for rows.Next() {
+		var site ClientHostingSite
+		var adminEmails string
+		if scanErr := rows.Scan(&site.Domain, &site.UsedBytes, &site.LimitBytes, &adminEmails); scanErr != nil {
+			continue
+		}
+		site.AdminEmails = normalizedHostingEmails(strings.Split(adminEmails, ","))
+		site.UsedLabel = FormatFileSize(site.UsedBytes)
+		site.LimitLabel = FormatFileSize(site.LimitBytes)
+		sites = append(sites, site)
+	}
+	return sites
+}
+
+func sortedStringsFromMap(values map[string]struct{}) []string {
+	result := make([]string, 0, len(values))
+	for value := range values {
+		if strings.TrimSpace(value) != "" {
+			result = append(result, value)
+		}
+	}
+	sort.Strings(result)
+	return result
+}
+
 func (store Store) CreateServiceMailBlock(ctx context.Context, scope, value, reason string) error {
 	scope = strings.TrimSpace(scope)
 	value = strings.TrimSpace(value)
@@ -980,6 +1153,7 @@ func BuildSitesWithDemoAndMainDomain(usages []SiteUsage, plans []Plan, assignmen
 			IsDemo:        isDemo,
 			IsMainDomain:  isMainDomain,
 			Aliases:       strings.Join(usage.Aliases, ", "),
+			UsedBytes:     usage.UsedBytes,
 			UsedLabel:     FormatFileSize(usage.UsedBytes),
 			LimitLabel:    FormatFileSize(usage.LimitBytes),
 			FreeLabel:     FormatFileSize(freeBytes),
@@ -992,6 +1166,12 @@ func BuildSitesWithDemoAndMainDomain(usages []SiteUsage, plans []Plan, assignmen
 			DatabasePath:  usage.DatabasePath,
 		})
 	}
+	sort.Slice(sites, func(left, right int) bool {
+		if sites[left].UsedBytes != sites[right].UsedBytes {
+			return sites[left].UsedBytes > sites[right].UsedBytes
+		}
+		return sites[left].Domain < sites[right].Domain
+	})
 	return sites
 }
 

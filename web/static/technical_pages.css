@@ -928,6 +928,41 @@
     grid-column: 1 / -1;
 }
 
+.technical-page .billing-user-site-list,
+.technical-page .billing-client-hosting-list {
+    display: grid;
+    gap: 8px;
+}
+
+.technical-page .billing-user-site-line,
+.technical-page .billing-client-hosting-title {
+    display: grid;
+    grid-template-columns: minmax(180px, 1.4fr) minmax(100px, 0.7fr) minmax(180px, 1fr);
+    gap: 10px;
+    align-items: center;
+    padding: 8px 10px;
+    border: 1px solid var(--bs-border-color);
+    border-radius: 8px;
+    background: var(--bs-body-bg);
+    font-size: 0.9rem;
+}
+
+.technical-page .billing-client-hosting {
+    display: grid;
+    gap: 8px;
+    padding: 10px;
+    border: 1px solid var(--bs-border-color);
+    border-radius: 8px;
+}
+
+.technical-page .billing-client-hosting-title {
+    grid-template-columns: minmax(160px, 1fr) minmax(100px, 0.7fr) minmax(120px, 0.7fr) minmax(150px, 1fr);
+    border: 0;
+    padding: 0;
+    background: transparent;
+    font-weight: 600;
+}
+
 .technical-page .billing-user-subtitle {
     margin: 0;
     font-size: 0.95rem;
@@ -1557,6 +1592,8 @@
     .technical-page .billing-site-row,
     .technical-page .billing-user-row,
     .technical-page .billing-user-details,
+    .technical-page .billing-user-site-line,
+    .technical-page .billing-client-hosting-title,
     .technical-page .billing-site-form,
     .technical-page .billing-delete-form,
     .technical-page .billing-backup-row,

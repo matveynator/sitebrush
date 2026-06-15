@@ -27,7 +27,7 @@
       <div class="billing-section-header">
         <div>
           <h2>Клиенты</h2>
-          <p class="text-muted">Клиент определяется по email. Внутри видны его сайты, реальные установки, локальная разработка, старые email и журнал действий.</p>
+          <p class="text-muted">Клиент определяется по email. Внутри отдельно видны сайты на этом сервере и хостинги, где клиент установил SiteBrush на свой сервер.</p>
         </div>
         <div class="billing-user-stats">
           {{if .ClientCount}}<button type="button" data-billing-client-explain="Клиент определяется по текущему email администратора. Старые email остаются в подробностях клиента.">{{.ClientCount}} клиентов</button>{{end}}
@@ -54,6 +54,7 @@
             <div class="billing-domain">{{$user.PrimaryEmail}}</div>
             <div class="billing-user-stats">
               {{if $user.SiteCount}}<button type="button" data-billing-client-explain="Сайты клиента: домены, где этот email является администратором или фигурировал в системной почте.">{{$user.SiteCount}} сайтов</button>{{end}}
+              {{if $user.HostingCount}}<button type="button" data-billing-client-explain="Хостинги клиента: отдельные серверы, где этот email установил SiteBrush и отправляет снимки сайтов.">{{$user.HostingCount}} хостингов</button>{{end}}
               {{if $user.InstallationCount}}<button type="button" data-billing-client-explain="Реальные установки этого клиента: домены, чей DNS указывает на внешний IP установки.">{{$user.InstallationCount}} реальных установок</button>{{end}}
               {{if $user.HostingSitebrushCount}}<button type="button" data-billing-client-explain="Хостинг SiteBrush — клиент поднял SiteBrush на домене второго уровня и обслуживает сайты третьего уровня или клиентские алиасы.">{{$user.HostingSitebrushCount}} хостинг SiteBrush</button>{{end}}
               {{if $user.LocalDevelopmentCount}}<button type="button" data-billing-client-explain="Локальная разработка — клиент использует SiteBrush на локальном компьютере или домен пока не указывает на IP установки.">{{$user.LocalDevelopmentCount}} локальная разработка</button>{{end}}
@@ -81,19 +82,41 @@
               </div>
             </div>
             <div>
-              <h3 class="billing-user-subtitle">Сайты клиента</h3>
-              <div class="billing-user-tags">
+              <h3 class="billing-user-subtitle">Сайты</h3>
+              <div class="billing-user-site-list">
                 {{range $user.Sites}}
-                <span>{{.Domain}} · {{.Status}}{{if .InstallationIP}} · {{.InstallationIP}}{{end}}</span>
+                <div class="billing-user-site-line">
+                  {{if .URL}}<a href="{{.URL}}" target="_blank" rel="noopener noreferrer">{{.Domain}}</a>{{else}}<span>{{.Domain}}</span>{{end}}
+                  <span>{{.UsedLabel}}</span>
+                  <span>{{.Status}}{{if .InstallationIP}} · {{.InstallationIP}}{{end}}</span>
+                </div>
                 {{end}}
               </div>
-              {{if or $user.HostingSitebrushCount $user.RelayInstallationCount}}
-              <h3 class="billing-user-subtitle">Локальная разработка и хостинг SiteBrush</h3>
-              <div class="billing-user-tags">
-                {{range $user.Sites}}
-                {{if .ParentDomain}}<span>{{.Domain}} через {{.ParentDomain}}</span>{{end}}
+              {{if $user.HostingCount}}
+              <h3 class="billing-user-subtitle">Хостинги</h3>
+              <div class="billing-client-hosting-list">
+                {{range $user.Hostings}}
+                <div class="billing-client-hosting">
+                  <div class="billing-client-hosting-title">
+                    <span>{{.OwnerEmail}}</span>
+                    <span>{{.ServerIP}}</span>
+                    <span>{{.TotalUsedLabel}} / {{.DiskTotalLabel}}</span>
+                    <span>{{.LastSeenAt}}</span>
+                  </div>
+                  <div class="billing-user-tags">
+                    {{range .ClientEmails}}<span>{{.}}</span>{{end}}
+                  </div>
+                  <div class="billing-user-site-list">
+                    {{range .Sites}}
+                    <div class="billing-user-site-line">
+                      <a href="http://{{.Domain}}/" target="_blank" rel="noopener noreferrer">{{.Domain}}</a>
+                      <span>{{.UsedLabel}} / {{.LimitLabel}}</span>
+                      <span>{{range .AdminEmails}}{{.}} {{end}}</span>
+                    </div>
+                    {{end}}
+                  </div>
+                </div>
                 {{end}}
-                {{range $user.Installations}}<span>installation {{.}}</span>{{end}}
               </div>
               {{end}}
               <div class="billing-user-activity">
@@ -355,7 +378,7 @@
         <article class="billing-site-row">
           <div class="billing-site-main">
             <div class="billing-domain">
-              <a href="//{{$site.Domain}}/" target="_blank" rel="noopener noreferrer">{{$site.Domain}}</a>
+              <a href="{{$site.URL}}" target="_blank" rel="noopener noreferrer">{{$site.Domain}}</a>
               {{if $site.IsMainDomain}}<span class="badge billing-main-domain-badge" title="{{index $.T "billing_main_domain_hint"}}"><span class="billing-main-domain-icon" aria-hidden="true"></span>{{index $.T "billing_main_domain_badge"}}</span>{{end}}
               {{if $site.IsDemo}}<span class="badge text-bg-info">{{index $.T "billing_demo_site_badge"}}</span>{{end}}
             </div>

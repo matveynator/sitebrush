@@ -31,3 +31,8 @@ func DirectorySize(rootPath string) int64 {
 	})
 	return totalBytes
 }
+
+// DiskSpace returns filesystem capacity for the path that stores SiteBrush data.
+func DiskSpace(path string) (uint64, uint64, bool) {
+	return diskSpace(path)
+}

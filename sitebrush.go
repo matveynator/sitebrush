@@ -108,6 +108,7 @@ const currentSiteDatabaseSchemaVersion = 1
 const siteDatabaseStartupMigrationTimeout = 30 * time.Second
 const pagePasswordSessionTTL = time.Hour
 const serviceMailRelayPath = "/?service_mail_relay"
+const hostingSnapshotPath = "/?hosting_snapshot"
 const serviceMailRelayTimeout = 12 * time.Second
 const serviceMailPerInstallationHourLimit = 120
 const serviceMailNewInstallationHourLimit = 10
@@ -146,6 +147,7 @@ type App struct {
 	registrationConfirmations chan emailConfirmationMemoryRequest
 	emailDelivery             chan emailDeliveryJob
 	sendEmail                 emailSender
+	hostingSnapshotReports    chan struct{}
 }
 
 type emailSender func(context.Context, mailout.Message) error
@@ -155,16 +157,17 @@ type emailDeliveryJob struct {
 }
 
 type serviceMailRequest struct {
-	Version        int    `json:"version"`
-	InstallationID string `json:"installation_id"`
-	PublicKey      string `json:"public_key"`
-	SourceDomain   string `json:"source_domain"`
-	Recipient      string `json:"recipient"`
-	CodeKind       string `json:"code_kind"`
-	SecretValue    string `json:"secret_value"`
-	LanguageCode   string `json:"language_code"`
-	CreatedAt      string `json:"created_at"`
-	Signature      string `json:"signature"`
+	Version         int                                `json:"version"`
+	InstallationID  string                             `json:"installation_id"`
+	PublicKey       string                             `json:"public_key"`
+	SourceDomain    string                             `json:"source_domain"`
+	Recipient       string                             `json:"recipient"`
+	CodeKind        string                             `json:"code_kind"`
+	SecretValue     string                             `json:"secret_value"`
+	LanguageCode    string                             `json:"language_code"`
+	HostingSnapshot *hostingandsupport.HostingSnapshot `json:"hosting_snapshot,omitempty"`
+	CreatedAt       string                             `json:"created_at"`
+	Signature       string                             `json:"signature"`
 }
 
 type serviceMailEncryptedEnvelope struct {
@@ -4323,6 +4326,7 @@ func runSitebrushServer(ctx context.Context, config serverRunConfig) error {
 	application.startServerOwnerRecoveryWorker(ctx)
 	application.startDemoSiteCleanupWorker(ctx)
 	application.startServiceMailKeyPairWorker(ctx)
+	application.hostingSnapshotReports = application.startHostingSnapshotReporter(ctx)
 
 	router := http.NewServeMux()
 	staticFiles, err := fs.Sub(embeddedWebFiles, "web/static")
@@ -5755,6 +5759,10 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 		a.serviceMailRelayEndpoint(w, r)
 		return
 	}
+	if hasQueryFlag(r, "hosting_snapshot") {
+		a.hostingSnapshotEndpoint(w, r)
+		return
+	}
 	if hasQueryFlag(r, "demo_grab_preview") {
 		a.demoGrabPreview(w, r)
 		return
@@ -5971,6 +5979,7 @@ func (a *App) setupAdmin(w http.ResponseWriter, r *http.Request) {
 		}
 		a.activatePublicTrialAfterAdminRegistration(registerContext, domain)
 		a.promoteFirstServerOwner(registerContext, domain, email)
+		a.reportHostingSnapshotAsync(registerContext)
 		a.createSessionForDomain(w, registerContext, domain, email)
 		http.Redirect(w, r, safeConfirmationReturnPath(requestedReturnPath(r)), http.StatusFound)
 		return
@@ -9646,6 +9655,7 @@ func (a *App) hostingAndSupportView(ctx context.Context, r *http.Request) (map[s
 	serviceMailInstallations := store.ServiceMailInstallations(ctx)
 	serviceMailEvents := store.ServiceMailEvents(ctx, 200)
 	serviceMailBlocks := store.ServiceMailBlocks(ctx)
+	clientHostings := store.ClientHostings(ctx)
 	serviceMailRelayEnabled := store.ServiceMailRelayEnabled(ctx)
 	demoSettings := (demo.Store{DB: controlDatabase}).Settings(ctx)
 	hostingAndSupportDemoDomain := ""
@@ -9660,7 +9670,7 @@ func (a *App) hostingAndSupportView(ctx context.Context, r *http.Request) (map[s
 	if err != nil {
 		return nil, err
 	}
-	serviceMailUsers := a.hostingAndSupportClients(ctx, siteRows, serviceMailInstallations, serviceMailEvents)
+	serviceMailUsers := a.hostingAndSupportClients(ctx, siteRows, serviceMailInstallations, serviceMailEvents, clientHostings)
 	clientSiteCount, clientInstallationCount, clientLocalDevelopmentCount := hostingAndSupportClientTotals(serviceMailUsers)
 	backups := a.managedSiteDeletionBackupViews(ctx, r, controlDatabase)
 	translations := translationsForRequest(r)
@@ -9671,6 +9681,7 @@ func (a *App) hostingAndSupportView(ctx context.Context, r *http.Request) (map[s
 		"SiteRequests":                siteRequests,
 		"ServiceMailInstallations":    serviceMailInstallations,
 		"ServiceMailEvents":           serviceMailEvents,
+		"ClientHostings":              clientHostings,
 		"Clients":                     serviceMailUsers,
 		"ClientCount":                 len(serviceMailUsers),
 		"ClientSiteCount":             clientSiteCount,
@@ -9715,6 +9726,8 @@ type hostingAndSupportClientView struct {
 	DomainCount            int
 	SiteCount              int
 	Sites                  []hostingAndSupportClientSiteView
+	Hostings               []hostingandsupport.ClientHosting
+	HostingCount           int
 	Installations          []string
 	InstallationCount      int
 	RelayInstallationCount int
@@ -9728,6 +9741,9 @@ type hostingAndSupportClientView struct {
 
 type hostingAndSupportClientSiteView struct {
 	Domain           string
+	URL              string
+	UsedBytes        int64
+	UsedLabel        string
 	InstallationIP   string
 	RealInstallation bool
 	LocalDevelopment bool
@@ -9766,11 +9782,14 @@ type hostingAndSupportClientAccumulator struct {
 }
 
 type hostingAndSupportClientSiteSource struct {
-	ip      string
-	aliases string
+	ip        string
+	aliases   string
+	url       string
+	usedBytes int64
+	usedLabel string
 }
 
-func (a *App) hostingAndSupportClients(ctx context.Context, siteRows []hostingandsupport.Site, installations []hostingandsupport.ServiceMailInstallation, events []hostingandsupport.ServiceMailEvent) []hostingAndSupportClientView {
+func (a *App) hostingAndSupportClients(ctx context.Context, siteRows []hostingandsupport.Site, installations []hostingandsupport.ServiceMailInstallation, events []hostingandsupport.ServiceMailEvent, clientHostings []hostingandsupport.ClientHosting) []hostingAndSupportClientView {
 	installationDomain := make(map[string]string)
 	installationIP := make(map[string]string)
 	for _, installation := range installations {
@@ -9788,7 +9807,7 @@ func (a *App) hostingAndSupportClients(ctx context.Context, siteRows []hostingan
 		knownSiteDomains[domain] = struct{}{}
 		for _, email := range splitHostingAndSupportEmailList(siteRow.AdminEmails) {
 			client := hostingAndSupportClientByEmail(clientsByEmail, email)
-			client.sites[domain] = hostingAndSupportClientSiteSource{aliases: siteRow.Aliases}
+			client.sites[domain] = hostingAndSupportClientSiteSource{aliases: siteRow.Aliases, url: siteRow.URL, usedBytes: siteRow.UsedBytes, usedLabel: siteRow.UsedLabel}
 			client.domains[domain] = struct{}{}
 			clientsByDomain[domain] = client
 		}
@@ -9859,15 +9878,38 @@ func (a *App) hostingAndSupportClients(ctx context.Context, siteRows []hostingan
 			})
 		}
 	}
+	for _, clientHosting := range clientHostings {
+		emailCandidates := clientHosting.ClientEmails
+		if len(emailCandidates) == 0 && strings.TrimSpace(clientHosting.OwnerEmail) != "" {
+			emailCandidates = []string{clientHosting.OwnerEmail}
+		}
+		for _, email := range emailCandidates {
+			client := hostingAndSupportClientByEmail(clientsByEmail, email)
+			client.installations[strings.TrimSpace(clientHosting.InstallationID)] = struct{}{}
+			if strings.TrimSpace(clientHosting.ServerIP) != "" {
+				client.ips[strings.TrimSpace(clientHosting.ServerIP)] = a.hostingAndSupportClientIP(ctx, clientHosting.ServerIP)
+			}
+			for _, site := range clientHosting.Sites {
+				domain := normalizeDomainName(site.Domain)
+				if domain == "" {
+					continue
+				}
+				client.domains[domain] = struct{}{}
+			}
+		}
+	}
 	clients := make([]hostingAndSupportClientView, 0, len(clientsByEmail))
 	for _, user := range clientsByEmail {
 		siteViews := hostingAndSupportClientSiteViews(user.sites, knownSiteDomains)
+		hostingViews := hostingAndSupportClientHostingViews(user.emails, clientHostings)
 		view := hostingAndSupportClientView{
 			PrimaryEmail:  firstNonEmpty(user.primaryEmail, firstStringFromSet(user.emails)),
 			Emails:        sortedStringsFromSet(user.emails),
 			Domains:       sortedStringsFromSet(user.domains),
 			Sites:         siteViews,
 			SiteCount:     len(siteViews),
+			Hostings:      hostingViews,
+			HostingCount:  len(hostingViews),
 			Installations: sortedStringsFromSet(user.installations),
 			IPs:           sortedIPViews(user.ips),
 			Events:        user.events,
@@ -9905,6 +9947,35 @@ func (a *App) hostingAndSupportClients(ctx context.Context, siteRows []hostingan
 	return clients
 }
 
+func hostingAndSupportClientHostingViews(emails map[string]struct{}, clientHostings []hostingandsupport.ClientHosting) []hostingandsupport.ClientHosting {
+	views := make([]hostingandsupport.ClientHosting, 0, 2)
+	for _, clientHosting := range clientHostings {
+		if hostingBelongsToClientEmails(clientHosting, emails) {
+			views = append(views, clientHosting)
+		}
+	}
+	sort.Slice(views, func(left, right int) bool {
+		if views[left].TotalUsedBytes != views[right].TotalUsedBytes {
+			return views[left].TotalUsedBytes > views[right].TotalUsedBytes
+		}
+		return views[left].InstallationID < views[right].InstallationID
+	})
+	return views
+}
+
+func hostingBelongsToClientEmails(clientHosting hostingandsupport.ClientHosting, emails map[string]struct{}) bool {
+	for _, email := range append(clientHosting.ClientEmails, clientHosting.OwnerEmail) {
+		email = strings.ToLower(strings.TrimSpace(email))
+		if email == "" {
+			continue
+		}
+		if _, found := emails[email]; found {
+			return true
+		}
+	}
+	return false
+}
+
 func hostingAndSupportClientByEmail(clients map[string]*hostingAndSupportClientAccumulator, email string) *hostingAndSupportClientAccumulator {
 	email = strings.ToLower(strings.TrimSpace(email))
 	if client := clients[email]; client != nil {
@@ -9925,7 +9996,7 @@ func hostingAndSupportClientByEmail(clients map[string]*hostingAndSupportClientA
 func hostingAndSupportClientSiteViews(sites map[string]hostingAndSupportClientSiteSource, knownSiteDomains map[string]struct{}) []hostingAndSupportClientSiteView {
 	views := make([]hostingAndSupportClientSiteView, 0, len(sites))
 	for domain, siteSource := range sites {
-		view := hostingAndSupportClientSiteView{Domain: domain, InstallationIP: strings.TrimSpace(siteSource.ip)}
+		view := hostingAndSupportClientSiteView{Domain: domain, URL: strings.TrimSpace(siteSource.url), UsedBytes: siteSource.usedBytes, UsedLabel: siteSource.usedLabel, InstallationIP: strings.TrimSpace(siteSource.ip)}
 		if hostingAndSupportDomainIsLocalDevelopment(domain, view.InstallationIP) {
 			view.LocalDevelopment = true
 			view.Status = "локальная разработка"
@@ -9943,6 +10014,9 @@ func hostingAndSupportClientSiteViews(sites map[string]hostingAndSupportClientSi
 		views = append(views, view)
 	}
 	sort.Slice(views, func(left, right int) bool {
+		if views[left].UsedBytes != views[right].UsedBytes {
+			return views[left].UsedBytes > views[right].UsedBytes
+		}
 		return views[left].Domain < views[right].Domain
 	})
 	return views
@@ -10117,8 +10191,21 @@ func (a *App) hostingAndSupportSiteRows(ctx context.Context, plans []hostingands
 			siteRows[siteIndex].DeletionSizeBytes = deletionSizeBytes
 			siteRows[siteIndex].DeletionSizeLabel = formatFileSize(deletionSizeBytes)
 		}
+		siteRows[siteIndex].URL = a.hostingAndSupportSiteURL(siteRows[siteIndex].Domain)
 	}
 	return siteRows, nil
+}
+
+func (a *App) hostingAndSupportSiteURL(domain string) string {
+	normalizedDomain := normalizeDomainName(domain)
+	if normalizedDomain == "" {
+		return ""
+	}
+	scheme := "http"
+	if a != nil && a.autoCertCachedCertificateValid(normalizedDomain, time.Now()) {
+		scheme = "https"
+	}
+	return scheme + "://" + normalizedDomain + "/"
 }
 
 func publicTrialSignupEmbedHTML(r *http.Request, translations map[string]string) string {
@@ -10443,6 +10530,9 @@ func (a *App) createManagedSite(ctx context.Context, domain, email, password str
 	adminInserted = true
 	siteApplication.ensureDomainStorageUsageRow(siteContext, domain)
 	_, err = rawDatabase.ExecContext(siteContext, `UPDATE domain_storage_usage SET limit_bytes=?, updated_at=? WHERE domain=?`, quotaBytes, time.Now().UTC().Format(time.RFC3339), domain)
+	if err == nil {
+		a.reportHostingSnapshotAsync(ctx)
+	}
 	return err
 }
 
@@ -11962,6 +12052,7 @@ func (a *App) confirmEmailToken(w http.ResponseWriter, r *http.Request) {
 		a.deleteRegistrationConfirmation(registerContext, token)
 		a.promoteFirstServerOwner(registerContext, confirmation.Domain, confirmation.Email)
 		a.markServiceMailRecipientVerified(registerContext, confirmation.Domain, confirmation.Email, confirmation.LanguageCode)
+		a.reportHostingSnapshotAsync(registerContext)
 		a.createSessionForDomain(w, registerContext, confirmation.Domain, confirmation.Email)
 		http.Redirect(w, r, safeConfirmationReturnPath(confirmation.ReturnPath), http.StatusFound)
 	case "profile":
@@ -12196,6 +12287,13 @@ func (route serviceMailRoute) primaryRelayURL() string {
 		return ""
 	}
 	return route.RelayURLs[0]
+}
+
+func centralHostingSnapshotURLs() []string {
+	if configuredURL := strings.TrimSpace(os.Getenv("SITEBRUSH_HOSTING_SNAPSHOT_URL")); configuredURL != "" {
+		return []string{configuredURL}
+	}
+	return []string{"https://sitebrush.com" + hostingSnapshotPath}
 }
 
 func (a *App) serviceMailRelayEnabled(ctx context.Context) bool {
@@ -12499,6 +12597,130 @@ func (a *App) registerServiceMailInstallationWithRelay(ctx context.Context, rela
 	return a.sendServiceMailThroughRelay(ctx, relayURL, &request)
 }
 
+func (a *App) reportHostingSnapshotAsync(ctx context.Context) {
+	if a == nil {
+		return
+	}
+	if a.hostingSnapshotReports == nil {
+		go a.reportHostingSnapshotWithTimeout(ctx)
+		return
+	}
+	select {
+	case a.hostingSnapshotReports <- struct{}{}:
+	default:
+	}
+}
+
+func (a *App) startHostingSnapshotReporter(ctx context.Context) chan struct{} {
+	reports := make(chan struct{}, 1)
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-reports:
+				timer := time.NewTimer(3 * time.Second)
+				for waiting := true; waiting; {
+					select {
+					case <-ctx.Done():
+						timer.Stop()
+						return
+					case <-reports:
+					case <-timer.C:
+						waiting = false
+					}
+				}
+				a.reportHostingSnapshotWithTimeout(ctx)
+			}
+		}
+	}()
+	return reports
+}
+
+func (a *App) reportHostingSnapshotWithTimeout(ctx context.Context) {
+	reportContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	defer cancel()
+	if err := a.reportHostingSnapshot(reportContext); err != nil {
+		log.Printf("hosting snapshot report failed: %v", err)
+	}
+}
+
+func (a *App) reportHostingSnapshot(ctx context.Context) error {
+	snapshot, err := a.buildHostingSnapshot(ctx)
+	if err != nil {
+		return err
+	}
+	request := serviceMailRequest{
+		Version:         1,
+		CodeKind:        "hosting_snapshot",
+		HostingSnapshot: &snapshot,
+		LanguageCode:    "en",
+		CreatedAt:       time.Now().UTC().Format(time.RFC3339),
+	}
+	if err := a.signServiceMailRequest(ctx, &request); err != nil {
+		return err
+	}
+	snapshot.InstallationID = request.InstallationID
+	request.HostingSnapshot = &snapshot
+	payload, err := json.Marshal(request)
+	if err != nil {
+		return err
+	}
+	var lastErr error
+	for _, snapshotURL := range centralHostingSnapshotURLs() {
+		if strings.TrimSpace(snapshotURL) == "" {
+			continue
+		}
+		if err := postServiceMailRelayPayload(ctx, snapshotURL, payload); err != nil {
+			lastErr = err
+			continue
+		}
+		return nil
+	}
+	if lastErr != nil {
+		return lastErr
+	}
+	return errors.New("hosting snapshot url is empty")
+}
+
+func (a *App) buildHostingSnapshot(ctx context.Context) (hostingandsupport.HostingSnapshot, error) {
+	installationID, _, _, err := a.serviceMailLocalKeyPair(ctx)
+	if err != nil {
+		return hostingandsupport.HostingSnapshot{}, err
+	}
+	rows, err := listSiteQuotaRows(ctx, a.storagePath, a.serverControlDBPath())
+	if err != nil {
+		return hostingandsupport.HostingSnapshot{}, err
+	}
+	_, serverIP, _ := detectServerIPCandidates(ctx)
+	storageRoot := a.storageRootDir()
+	freeBytes, totalBytes, diskOK := diskusage.DiskSpace(storageRoot)
+	snapshot := hostingandsupport.HostingSnapshot{
+		Version:        1,
+		InstallationID: installationID,
+		ServerIP:       serverIP,
+		StoragePath:    storageRoot,
+		CreatedAt:      time.Now().UTC().Format(time.RFC3339),
+	}
+	if diskOK {
+		snapshot.DiskFreeBytes = int64(freeBytes)
+		snapshot.DiskTotalBytes = int64(totalBytes)
+	}
+	for _, row := range rows {
+		site := hostingandsupport.HostingSnapshotSite{
+			Domain:      row.Domain,
+			UsedBytes:   row.UsedBytes,
+			LimitBytes:  row.LimitBytes,
+			AdminEmails: row.AdminEmails,
+		}
+		if snapshot.OwnerEmail == "" && len(row.AdminEmails) > 0 {
+			snapshot.OwnerEmail = strings.ToLower(strings.TrimSpace(row.AdminEmails[0]))
+		}
+		snapshot.Sites = append(snapshot.Sites, site)
+	}
+	return snapshot, nil
+}
+
 func (a *App) sendServiceMailThroughRelay(ctx context.Context, relayURL string, request *serviceMailRequest) error {
 	if strings.TrimSpace(relayURL) == "" {
 		return errors.New("relay url is empty")
@@ -12580,6 +12802,74 @@ func (a *App) serviceMailRelayEndpoint(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]string{"status": status})
+}
+
+func (a *App) hostingSnapshotEndpoint(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	requestBody, err := io.ReadAll(io.LimitReader(r.Body, 256*1024))
+	if err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	var request serviceMailRequest
+	if err := json.Unmarshal(requestBody, &request); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	status, statusCode := a.handleHostingSnapshotRequest(r.Context(), request, clientIPAddress(r))
+	if statusCode >= 400 {
+		http.Error(w, status, statusCode)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]string{"status": status})
+}
+
+func (a *App) handleHostingSnapshotRequest(ctx context.Context, request serviceMailRequest, sourceIP string) (string, int) {
+	if strings.TrimSpace(request.CodeKind) != "hosting_snapshot" {
+		return "unsupported snapshot kind", http.StatusBadRequest
+	}
+	if request.HostingSnapshot == nil {
+		return "hosting snapshot is required", http.StatusBadRequest
+	}
+	if err := verifyServiceMailRequestSignature(request); err != nil {
+		return err.Error(), http.StatusForbidden
+	}
+	controlDatabase, err := a.openServerControlDatabase(ctx)
+	if err != nil {
+		return err.Error(), http.StatusInternalServerError
+	}
+	defer controlDatabase.Close()
+	store := hostingandsupport.Store{DB: controlDatabase}
+	knownPublicKey, installationFound := store.ServiceMailInstallationPublicKey(ctx, request.InstallationID)
+	if installationFound && strings.TrimSpace(knownPublicKey) != strings.TrimSpace(request.PublicKey) {
+		return "installation public key changed", http.StatusForbidden
+	}
+	snapshot := *request.HostingSnapshot
+	snapshot.InstallationID = request.InstallationID
+	if strings.TrimSpace(snapshot.ServerIP) == "" {
+		snapshot.ServerIP = strings.TrimSpace(sourceIP)
+	}
+	if err := store.UpsertServiceMailInstallation(ctx, request.InstallationID, request.PublicKey, snapshot.ServerIP, snapshotOwnerDomain(snapshot)); err != nil {
+		return err.Error(), http.StatusBadRequest
+	}
+	if err := store.SaveHostingSnapshot(ctx, snapshot); err != nil {
+		return err.Error(), http.StatusBadRequest
+	}
+	return "stored", http.StatusOK
+}
+
+func snapshotOwnerDomain(snapshot hostingandsupport.HostingSnapshot) string {
+	for _, site := range snapshot.Sites {
+		domain := normalizeDomainName(site.Domain)
+		if domain != "" {
+			return domain
+		}
+	}
+	return ""
 }
 
 func (a *App) handleServiceMailRelayRequest(ctx context.Context, r *http.Request, request serviceMailRequest, sourceIP string) (string, int) {
@@ -15433,6 +15723,9 @@ WHERE domain=?
 	if updatedRowsCount == 0 {
 		usage := a.domainStorageUsage(ctx, domain)
 		return fmt.Errorf("storage limit reached: %s / %s used", formatFileSize(usage.totalBytes()), formatFileSize(usage.LimitBytes))
+	}
+	if totalDelta != 0 {
+		a.reportHostingSnapshotAsync(ctx)
 	}
 	return nil
 }

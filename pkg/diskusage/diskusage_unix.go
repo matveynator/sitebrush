@@ -14,3 +14,11 @@ func fileInfoDiskBytes(fileInfo os.FileInfo) int64 {
 	}
 	return stat.Blocks * 512
 }
+
+func diskSpace(path string) (uint64, uint64, bool) {
+	var stat syscall.Statfs_t
+	if err := syscall.Statfs(path, &stat); err != nil {
+		return 0, 0, false
+	}
+	return stat.Bavail * uint64(stat.Bsize), stat.Blocks * uint64(stat.Bsize), true
+}
