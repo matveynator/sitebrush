@@ -429,44 +429,12 @@ func TestSyncPublicationDestinationsIncludesRepeatedTargets(t *testing.T) {
 		t.Fatalf("second target Set() error = %v", err)
 	}
 
-	destinations, err := syncPublicationDestinations("", "", targets)
-	if err != nil {
-		t.Fatalf("syncPublicationDestinations() error = %v", err)
-	}
+	destinations := syncPublicationDestinations(targets)
 	if len(destinations) != 2 {
 		t.Fatalf("syncPublicationDestinations() returned %d targets, want 2", len(destinations))
 	}
 	if destinations[0].host != "root@sitebrush.com" || destinations[1].host != "root@sitebrush.ru" {
 		t.Fatalf("unexpected destinations: %+v", destinations)
-	}
-}
-
-func TestSyncPublicationDestinationsIncludesLegacyTarget(t *testing.T) {
-	t.Parallel()
-
-	destinations, err := syncPublicationDestinations("root@sitebrush.com", "/var/lib/sitebrush/storage/chroot/sitebrush.com/download/", nil)
-	if err != nil {
-		t.Fatalf("syncPublicationDestinations() error = %v", err)
-	}
-	if len(destinations) != 1 {
-		t.Fatalf("syncPublicationDestinations() returned %d targets, want 1", len(destinations))
-	}
-	if destinations[0].host != "root@sitebrush.com" {
-		t.Fatalf("legacy destination host = %q, want root@sitebrush.com", destinations[0].host)
-	}
-	if destinations[0].base != "/var/lib/sitebrush/storage/chroot/sitebrush.com/download/" {
-		t.Fatalf("legacy destination base = %q, want remote download directory", destinations[0].base)
-	}
-}
-
-func TestSyncPublicationDestinationsRejectsPartialLegacyTarget(t *testing.T) {
-	t.Parallel()
-
-	if _, err := syncPublicationDestinations("root@sitebrush.com", "", nil); err == nil {
-		t.Fatal("syncPublicationDestinations() accepted -sync-host without -sync-base")
-	}
-	if _, err := syncPublicationDestinations("", "/srv/sitebrush/download", nil); err == nil {
-		t.Fatal("syncPublicationDestinations() accepted -sync-base without -sync-host")
 	}
 }
 

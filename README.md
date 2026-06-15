@@ -25,7 +25,7 @@ go run ./scripts/crosscompile -version 123
 
 Optional rsync publication:
 ```bash
-go run ./scripts/crosscompile -version 123 -sync-host deploy@example.com -sync-base /srv/releases
+go run ./scripts/crosscompile -version 123 -sync deploy@example.com=/srv/releases
 ```
 
 The script writes artifacts to `binaries/<version>/server-app` and
