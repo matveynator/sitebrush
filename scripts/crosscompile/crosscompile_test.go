@@ -403,6 +403,73 @@ func TestRsyncDirectoriesCopyContentsIntoExactDestination(t *testing.T) {
 	}
 }
 
+func TestParseSyncDestination(t *testing.T) {
+	t.Parallel()
+
+	destination, err := parseSyncDestination(" root@sitebrush.com = /var/lib/sitebrush/storage/chroot/sitebrush.com/download/ ")
+	if err != nil {
+		t.Fatalf("parseSyncDestination() error = %v", err)
+	}
+	if destination.host != "root@sitebrush.com" {
+		t.Fatalf("sync target host = %q, want root@sitebrush.com", destination.host)
+	}
+	if destination.base != "/var/lib/sitebrush/storage/chroot/sitebrush.com/download/" {
+		t.Fatalf("sync target base = %q, want remote download directory", destination.base)
+	}
+}
+
+func TestSyncPublicationDestinationsIncludesRepeatedTargets(t *testing.T) {
+	t.Parallel()
+
+	targets := syncDestinationFlags{}
+	if err := targets.Set("root@sitebrush.com=/var/lib/sitebrush/storage/chroot/sitebrush.com/download/"); err != nil {
+		t.Fatalf("first target Set() error = %v", err)
+	}
+	if err := targets.Set("root@sitebrush.ru=/var/lib/sitebrush/storage/chroot/sitebrush.ru/download/"); err != nil {
+		t.Fatalf("second target Set() error = %v", err)
+	}
+
+	destinations, err := syncPublicationDestinations("", "", targets)
+	if err != nil {
+		t.Fatalf("syncPublicationDestinations() error = %v", err)
+	}
+	if len(destinations) != 2 {
+		t.Fatalf("syncPublicationDestinations() returned %d targets, want 2", len(destinations))
+	}
+	if destinations[0].host != "root@sitebrush.com" || destinations[1].host != "root@sitebrush.ru" {
+		t.Fatalf("unexpected destinations: %+v", destinations)
+	}
+}
+
+func TestSyncPublicationDestinationsIncludesLegacyTarget(t *testing.T) {
+	t.Parallel()
+
+	destinations, err := syncPublicationDestinations("root@sitebrush.com", "/var/lib/sitebrush/storage/chroot/sitebrush.com/download/", nil)
+	if err != nil {
+		t.Fatalf("syncPublicationDestinations() error = %v", err)
+	}
+	if len(destinations) != 1 {
+		t.Fatalf("syncPublicationDestinations() returned %d targets, want 1", len(destinations))
+	}
+	if destinations[0].host != "root@sitebrush.com" {
+		t.Fatalf("legacy destination host = %q, want root@sitebrush.com", destinations[0].host)
+	}
+	if destinations[0].base != "/var/lib/sitebrush/storage/chroot/sitebrush.com/download/" {
+		t.Fatalf("legacy destination base = %q, want remote download directory", destinations[0].base)
+	}
+}
+
+func TestSyncPublicationDestinationsRejectsPartialLegacyTarget(t *testing.T) {
+	t.Parallel()
+
+	if _, err := syncPublicationDestinations("root@sitebrush.com", "", nil); err == nil {
+		t.Fatal("syncPublicationDestinations() accepted -sync-host without -sync-base")
+	}
+	if _, err := syncPublicationDestinations("", "/srv/sitebrush/download", nil); err == nil {
+		t.Fatal("syncPublicationDestinations() accepted -sync-base without -sync-host")
+	}
+}
+
 func TestDefaultVersionLabelUsesEnvironment(t *testing.T) {
 	t.Setenv("GITHUB_RUN_NUMBER", "987")
 	got := defaultVersionLabel(t.TempDir())

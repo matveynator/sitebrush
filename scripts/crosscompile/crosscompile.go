@@ -48,6 +48,33 @@ type buildRequest struct {
 	extraEnv   map[string]string
 }
 
+type syncDestination struct {
+	host string
+	base string
+}
+
+type syncDestinationFlags []syncDestination
+
+func (flags *syncDestinationFlags) String() string {
+	if flags == nil || len(*flags) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(*flags))
+	for _, destination := range *flags {
+		parts = append(parts, destination.host+"="+destination.base)
+	}
+	return strings.Join(parts, ",")
+}
+
+func (flags *syncDestinationFlags) Set(value string) error {
+	destination, err := parseSyncDestination(value)
+	if err != nil {
+		return err
+	}
+	*flags = append(*flags, destination)
+	return nil
+}
+
 func main() {
 	var (
 		programName         = flag.String("program", "sitebrush", "program name used in binary names")
@@ -57,7 +84,9 @@ func main() {
 		syncBase            = flag.String("sync-base", "", "exact remote directory used together with -sync-host, for example /var/lib/sitebrush/storage/chroot/sitebrush.com/download")
 		modeFlag            = flag.String("mode", string(modeAll), "build scope: all, server-app, or desktop-app")
 		rebuildDockerImages = flag.Bool("rebuild-docker-images", false, "rebuild cached Docker builder images before Docker-based desktop builds")
+		syncTargets         syncDestinationFlags
 	)
+	flag.Var(&syncTargets, "sync-target", "optional repeatable publication target in host=/remote/base format, for example root@sitebrush.com=/var/lib/sitebrush/storage/chroot/sitebrush.com/download")
 	flag.Parse()
 
 	mode := buildMode(*modeFlag)
@@ -116,12 +145,13 @@ func main() {
 		fatalf("update latest symlink: %v", err)
 	}
 
-	if *syncHost != "" {
-		if *syncBase == "" {
-			fatalf("-sync-base is required when -sync-host is set")
-		}
-		if err := syncArtifacts(repoRoot, filepath.Join(repoRoot, *outputRoot), version, *syncHost, *syncBase); err != nil {
-			fatalf("sync artifacts: %v", err)
+	destinations, err := syncPublicationDestinations(*syncHost, *syncBase, syncTargets)
+	if err != nil {
+		fatalf("sync targets: %v", err)
+	}
+	for _, destination := range destinations {
+		if err := syncArtifacts(repoRoot, filepath.Join(repoRoot, *outputRoot), version, destination.host, destination.base); err != nil {
+			fatalf("sync artifacts to %s: %v", destination.host, err)
 		}
 	}
 
@@ -699,6 +729,40 @@ func syncArtifacts(repoRoot, outputRoot, version, syncHost, syncBase string) err
 	}
 	fmt.Printf("synced latest -> %s via rsync\n", version)
 	return nil
+}
+
+func syncPublicationDestinations(syncHost, syncBase string, syncTargets []syncDestination) ([]syncDestination, error) {
+	destinations := make([]syncDestination, 0, len(syncTargets)+1)
+	if strings.TrimSpace(syncHost) != "" || strings.TrimSpace(syncBase) != "" {
+		if strings.TrimSpace(syncHost) == "" {
+			return nil, errors.New("-sync-host is required when -sync-base is set")
+		}
+		if strings.TrimSpace(syncBase) == "" {
+			return nil, errors.New("-sync-base is required when -sync-host is set")
+		}
+		destinations = append(destinations, syncDestination{
+			host: strings.TrimSpace(syncHost),
+			base: strings.TrimSpace(syncBase),
+		})
+	}
+	destinations = append(destinations, syncTargets...)
+	return destinations, nil
+}
+
+func parseSyncDestination(value string) (syncDestination, error) {
+	host, base, found := strings.Cut(value, "=")
+	host = strings.TrimSpace(host)
+	base = strings.TrimSpace(base)
+	if !found {
+		return syncDestination{}, errors.New("expected host=/remote/base")
+	}
+	if host == "" {
+		return syncDestination{}, errors.New("sync target host is empty")
+	}
+	if base == "" {
+		return syncDestination{}, errors.New("sync target remote base is empty")
+	}
+	return syncDestination{host: host, base: base}, nil
 }
 
 func remoteSyncDirectory(syncBase string) string {

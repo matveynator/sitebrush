@@ -1092,19 +1092,11 @@ func buildInstallPlan(options Options) (installPlan, error) {
 	if port == "" {
 		port = "80,443"
 	}
-	dbType := strings.TrimSpace(options.DBType)
-	if dbType == "" {
-		dbType = "sqlite"
-	}
 	storagePath := strings.TrimSpace(options.StoragePath)
 	if storagePath == "" {
 		storagePath = defaultStoragePath()
 	}
-	dbPath := strings.TrimSpace(options.DBPath)
-	if dbPath == "" {
-		dbPath = filepath.Join(storagePath, "storage", "db", "sitebrush.db")
-	}
-	execArgs := []string{installedBinary, "-port", port, "-storage-path", storagePath, "-db-type", dbType, "-db-path", dbPath}
+	execArgs := []string{installedBinary, "-port", port, "-path", storagePath}
 	return installPlan{Options: options, ServiceName: serviceName, BinaryPath: installedBinary, WorkingDir: workingDir, ExecArgs: execArgs}, nil
 }
 

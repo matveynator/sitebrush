@@ -3949,16 +3949,6 @@ func loginBlockDurationForFailureCount(failureCount int) (time.Duration, bool) {
 	}
 }
 
-func flagWasProvided(flagName string) bool {
-	provided := false
-	flag.Visit(func(currentFlag *flag.Flag) {
-		if currentFlag.Name == flagName {
-			provided = true
-		}
-	})
-	return provided
-}
-
 func cleanStoragePath(storagePath string) string {
 	trimmedStoragePath := strings.TrimSpace(storagePath)
 	if trimmedStoragePath == "" {
@@ -3997,16 +3987,111 @@ type serverRunConfig struct {
 	Debug       bool
 }
 
+func printSitebrushUsage(output io.Writer, flagSet *flag.FlagSet) {
+	programName := filepath.Base(os.Args[0])
+	red := "\x1b[31m"
+	yellow := "\x1b[33m"
+	green := "\x1b[32m"
+	cyan := "\x1b[36m"
+	blue := "\x1b[34m"
+	magenta := "\x1b[35m"
+	reset := "\x1b[0m"
+	fmt.Fprintf(output, "Usage of %s:\n", os.Args[0])
+	flagSet.PrintDefaults()
+	fmt.Fprintf(output, `
+Mini manual:
+  SiteBrush turns old, slow or hacked CMS websites into fast, editable static
+  HTML. It is a WordPress retirement tool for sites that no longer need PHP,
+  MySQL, plugins or a public admin panel.
+
+  SiteBrush generates every page in advance and serves it as static content.
+  Request handling is as fast as normal static file delivery, comparable to a
+  simple nginx static server. Because public pages are pre-generated instead of
+  built on every request, the site has a smaller attack surface and predictable
+  high speed.
+
+  Best for business sites, landing pages, portfolios, documentation and old
+  WordPress, Joomla or custom CMS sites that mostly contain static content.
+
+  %[2]s ____  _ _       %[3]s____                 _     %[8]s
+  %[2]s/ ___|(_) |_ ___%[3]s| __ ) _ __ _   _ ___| |__  %[8]s
+  %[4]s\___ \| | __/ _ \%[5]s  _ \| '__| | | / __| '_ \ %[8]s
+  %[4]s ___) | | ||  __/%[5]s |_) | |  | |_| \__ \ | | |%[8]s
+  %[6]s|____/|_|\__\___|%[7]s____/|_|   \__,_|___/_| |_|%[8]s
+  BEAUTIFUL SITES WITHOUT CMS LIMITS
+  Designers and webmasters can create stunning custom HTML/CSS websites - and
+  keep them easy to edit. No theme prison. No block limits. Just beautiful
+  sites, built exactly the way you want.
+
+Editing and publishing:
+  Open a site, right click on desktop or long press on mobile, edit text, images
+  or blocks directly on the page, preview safely, then publish.
+
+  SiteBrush can detect repeated elements while editing. Add the
+  SiteBrush-Template class to a repeated block, and matching blocks can be
+  updated together across pages.
+
+  Visitors always receive the stable generated version while changes are being
+  prepared. Revisions let you inspect and roll back page changes.
+
+Common commands:
+  %[1]s
+      Start SiteBrush on the default public HTTP/HTTPS ports.
+
+  %[1]s -port 8080 -path /var/lib/sitebrush
+      Start SiteBrush on a custom port with a custom data directory.
+
+  %[1]s -cli -path /var/lib/sitebrush
+      Open the interactive server console for installed sites, users and quotas.
+
+  %[1]s -install -path /var/lib/sitebrush
+      Install SiteBrush as a system service and enable automatic startup.
+      Service startup targets are detected automatically on macOS, Linux,
+      Windows, FreeBSD, OpenBSD and NetBSD.
+
+  %[1]s -uninstall
+      Remove the installed SiteBrush service and delete its automatic startup
+      registration for the current operating system.
+
+  %[1]s -version
+      Print the compiled SiteBrush version and exit.
+
+Data layout:
+  -path is the only required storage root. SiteBrush keeps databases, imported
+  sites, files, backups, published pages, logs and runtime state there.
+
+  One SiteBrush installation can host many independent websites. Each site gets
+  its own SQLite database, so data is separated and easy to move or back up. The
+  usual control database path is:
+
+      -path/storage/db/sitebrush.db
+
+  Per-site databases are stored under the same -path storage tree and keep that
+  site's pages, settings, users, shared blocks and revision history.
+
+Backups and files:
+  Each site has a backup download option in the site control panel opened with
+  right click or long press. The backup link uses a token, so it can be used by
+  another server or a scheduled job to download and store backups externally.
+
+  SiteBrush also has a file manager for uploading files and photos to a site.
+  Published directories can be exported as normal static files with directory
+  listings, like a simple static web server.
+
+Networking:
+  By default SiteBrush listens on ports 80 and 443.
+
+  Use -port 80,443 for the standard public server mode. Use a single custom port
+  such as -port 8080 for local development, testing or reverse-proxy deployments.
+
+`, programName, red, yellow, green, cyan, blue, magenta, reset)
+}
+
 func main() {
 	port := flag.String("port", "80,443", "listen port or standard pair 80,443")
-	dbType := flag.String("db-type", "sqlite", "database driver (supported: sqlite)")
-	storagePath := flag.String("storage-path", defaultAppStoragePath(), "path to the Sitebrush app data directory")
-	dbPath := flag.String("db-path", defaultDBPath, "path to sqlite database file")
-	listSitesMode := flag.Bool("list-sites", false, "open interactive server site quota console")
-	quotaSite := flag.String("quota-site", "", "site domain to update storage quota for")
-	quotaValue := flag.String("quota", "", "set -quota-site storage quota, for example 50mb or 20gb")
-	versionShort := flag.Bool("v", false, "print version and exit")
-	versionLong := flag.Bool("version", false, "print version and exit")
+	storagePath := flag.String("path", defaultAppStoragePath(), "path to the SiteBrush app data directory")
+	cliMode := flag.Bool("cli", false, "open interactive SiteBrush server console")
+	versionMode := flag.Bool("version", false, "print version and exit")
 	debugMode := flag.Bool("debug", false, "enable verbose HTTP and database diagnostic logs")
 	var desktopModeFlag *bool
 	if appcli.DesktopModeFlagSupported() {
@@ -4018,8 +4103,11 @@ func main() {
 		installModeFlag = flag.Bool("install", false, "install Sitebrush as a system service")
 		uninstallModeFlag = flag.Bool("uninstall", false, "uninstall Sitebrush system service and remove startup registration")
 	}
+	flag.Usage = func() {
+		printSitebrushUsage(flag.CommandLine.Output(), flag.CommandLine)
+	}
 	flag.Parse()
-	if *versionShort || *versionLong {
+	if *versionMode {
 		fmt.Println(CompileVersion)
 		return
 	}
@@ -4039,18 +4127,10 @@ func main() {
 		log.Fatal("choose only one service action: -install or -uninstall")
 	}
 
-	if *dbType != "sqlite" {
-		log.Fatalf("unsupported -db-type %q, supported: sqlite", *dbType)
-	}
-
 	effectiveStoragePath := cleanStoragePath(*storagePath)
-	effectiveDBPath := cleanDBPath(*dbPath)
-	if !flagWasProvided("db-path") {
-		effectiveDBPath = filepath.Join(effectiveStoragePath, defaultDBPath)
-	}
-	quotaCommandMode := *listSitesMode || strings.TrimSpace(*quotaSite) != "" || flagWasProvided("quota")
-	if quotaCommandMode {
-		if err := runSiteQuotaCommand(context.Background(), os.Stdout, os.Stdin, effectiveStoragePath, effectiveDBPath, *listSitesMode, *quotaSite, *quotaValue); err != nil {
+	effectiveDBPath := filepath.Join(effectiveStoragePath, defaultDBPath)
+	if *cliMode {
+		if err := runSiteQuotaCommand(context.Background(), os.Stdout, os.Stdin, effectiveStoragePath, effectiveDBPath, true, "", ""); err != nil {
 			log.Fatal(err)
 		}
 		return
@@ -4060,13 +4140,13 @@ func main() {
 		log.Fatal(err)
 	}
 	if installMode {
-		if err := runServiceInstaller(parsedPorts.Raw, *dbType, effectiveStoragePath, effectiveDBPath); err != nil {
+		if err := runServiceInstaller(parsedPorts.Raw, effectiveStoragePath, effectiveDBPath); err != nil {
 			handleServiceControlError(err)
 		}
 		return
 	}
 	if uninstallMode {
-		if err := runServiceUninstaller(parsedPorts.Raw, *dbType, effectiveStoragePath, effectiveDBPath); err != nil {
+		if err := runServiceUninstaller(parsedPorts.Raw, effectiveStoragePath, effectiveDBPath); err != nil {
 			handleServiceControlError(err)
 		}
 		return
@@ -4622,7 +4702,7 @@ func httpStatusAllowsBody(statusCode int) bool {
 	return statusCode != http.StatusNoContent && statusCode != http.StatusNotModified
 }
 
-func runServiceInstaller(port, dbType, storagePath, dbPath string) error {
+func runServiceInstaller(port, storagePath, dbPath string) error {
 	binaryPath, err := os.Executable()
 	if err != nil || strings.TrimSpace(binaryPath) == "" {
 		binaryPath = os.Args[0]
@@ -4630,7 +4710,6 @@ func runServiceInstaller(port, dbType, storagePath, dbPath string) error {
 	_, err = serviceinstall.Install(context.Background(), serviceinstall.Options{
 		Port:        port,
 		StoragePath: storagePath,
-		DBType:      dbType,
 		DBPath:      dbPath,
 		BinaryPath:  binaryPath,
 		WorkingDir:  storagePath,
@@ -4640,7 +4719,7 @@ func runServiceInstaller(port, dbType, storagePath, dbPath string) error {
 	return err
 }
 
-func runServiceUninstaller(port, dbType, storagePath, dbPath string) error {
+func runServiceUninstaller(port, storagePath, dbPath string) error {
 	binaryPath, err := os.Executable()
 	if err != nil || strings.TrimSpace(binaryPath) == "" {
 		binaryPath = os.Args[0]
@@ -4648,7 +4727,6 @@ func runServiceUninstaller(port, dbType, storagePath, dbPath string) error {
 	_, err = serviceinstall.Uninstall(context.Background(), serviceinstall.Options{
 		Port:        port,
 		StoragePath: storagePath,
-		DBType:      dbType,
 		DBPath:      dbPath,
 		BinaryPath:  binaryPath,
 		WorkingDir:  storagePath,
@@ -14128,10 +14206,10 @@ func runSiteQuotaCommand(ctx context.Context, output io.Writer, input io.Reader,
 		return err
 	}
 	if quotaRequested && strings.TrimSpace(quotaSite) == "" {
-		return fmt.Errorf("-quota-site is required when changing quota")
+		return fmt.Errorf("site domain is required when changing quota")
 	}
 	if strings.TrimSpace(quotaSite) != "" && !quotaRequested {
-		return fmt.Errorf("quota value is required: use -quota 50mb or -quota 20gb")
+		return fmt.Errorf("quota value is required, for example 50mb or 20gb")
 	}
 
 	if quotaRequested {

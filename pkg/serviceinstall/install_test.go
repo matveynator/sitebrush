@@ -127,7 +127,7 @@ func TestGeneratedServiceFilesContainSitebrushCommand(t *testing.T) {
 		ServiceName: "sitebrush",
 		BinaryPath:  "/usr/local/bin/sitebrush",
 		WorkingDir:  "/var/lib/sitebrush",
-		ExecArgs:    []string{"/usr/local/bin/sitebrush", "-port", "80,443", "-storage-path", "/var/lib/sitebrush", "-db-type", "sqlite", "-db-path", "/var/lib/sitebrush/storage/db/sitebrush.db"},
+		ExecArgs:    []string{"/usr/local/bin/sitebrush", "-port", "80,443", "-path", "/var/lib/sitebrush"},
 	}
 	for name, content := range map[string]string{
 		"sysv":    sysVRcScript(plan),
@@ -139,7 +139,7 @@ func TestGeneratedServiceFilesContainSitebrushCommand(t *testing.T) {
 		if !strings.Contains(content, "/usr/local/bin/sitebrush") {
 			t.Fatalf("%s script missing binary path:\n%s", name, content)
 		}
-		if !strings.Contains(content, "-storage-path") {
+		if !strings.Contains(content, "-path") {
 			t.Fatalf("%s script missing server args:\n%s", name, content)
 		}
 	}
