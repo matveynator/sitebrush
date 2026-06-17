@@ -9924,8 +9924,9 @@ func (a *App) hostingAndSupportClients(ctx context.Context, siteRows []hostingan
 		view.EmailCount = len(view.Emails)
 		view.DomainCount = len(view.Domains)
 		view.RelayInstallationCount = len(view.Installations)
+		view.InstallationCount = len(hostingViews)
 		for _, site := range siteViews {
-			if site.RealInstallation {
+			if view.InstallationCount == 0 && site.RealInstallation {
 				view.InstallationCount++
 			}
 			if site.LocalDevelopment {
@@ -9933,6 +9934,11 @@ func (a *App) hostingAndSupportClients(ctx context.Context, siteRows []hostingan
 			}
 			if site.HostingSitebrush {
 				view.HostingSitebrushCount++
+			}
+		}
+		for _, hostingView := range hostingViews {
+			if hostingAndSupportHostingHasSpecialStatus(hostingView) {
+				view.LocalDevelopmentCount++
 			}
 		}
 		view.IPCount = len(view.IPs)
@@ -9981,6 +9987,15 @@ func hostingBelongsToClientEmails(clientHosting hostingandsupport.ClientHosting,
 		}
 	}
 	return false
+}
+
+func hostingAndSupportHostingHasSpecialStatus(clientHosting hostingandsupport.ClientHosting) bool {
+	serverIP := strings.TrimSpace(clientHosting.ServerIP)
+	if serverIP == "" {
+		return true
+	}
+	parsedIP := net.ParseIP(serverIP)
+	return parsedIP == nil || parsedIP.IsLoopback() || parsedIP.IsPrivate() || parsedIP.IsUnspecified()
 }
 
 func hostingAndSupportClientByEmail(clients map[string]*hostingAndSupportClientAccumulator, email string) *hostingAndSupportClientAccumulator {
@@ -12918,12 +12933,25 @@ func (a *App) buildHostingSnapshot(ctx context.Context) (hostingandsupport.Hosti
 	_, serverIP, _ := detectServerIPCandidates(ctx)
 	storageRoot := a.storageRootDir()
 	freeBytes, totalBytes, diskOK := diskusage.DiskSpace(storageRoot)
+	osName, osVersion := hostingSnapshotOS()
+	cpuModel := hostingSnapshotCPUModel()
+	ramTotalBytes := hostingSnapshotRAMTotalBytes(ctx)
+	serverDomain := ""
+	if ownerDomain, found := store.OwnerDomain(ctx); found {
+		serverDomain = ownerDomain
+	}
 	snapshot := hostingandsupport.HostingSnapshot{
 		Version:          1,
 		InstallationID:   installationID,
 		ServerIP:         serverIP,
 		ServerStatus:     hostingSnapshotServerStatus(serverIP),
+		ServerDomain:     serverDomain,
 		SitebrushVersion: CompileVersion,
+		OSName:           osName,
+		OSVersion:        osVersion,
+		CPUModel:         cpuModel,
+		CPUCores:         runtime.NumCPU(),
+		RAMTotalBytes:    ramTotalBytes,
 		StoragePath:      storageRoot,
 		CreatedAt:        time.Now().UTC().Format(time.RFC3339),
 	}
@@ -12940,6 +12968,7 @@ func (a *App) buildHostingSnapshot(ctx context.Context) (hostingandsupport.Hosti
 			Price:                plan.Price,
 			Currency:             plan.Currency,
 			BillingPeriod:        plan.BillingPeriod,
+			PaidStatus:           hostingSnapshotPlanPaidStatus(plan),
 			IsDefault:            plan.IsDefault,
 		})
 	}
@@ -12950,12 +12979,14 @@ func (a *App) buildHostingSnapshot(ctx context.Context) (hostingandsupport.Hosti
 			planName = plan.Name
 		}
 		site := hostingandsupport.HostingSnapshotSite{
-			Domain:      row.Domain,
-			UsedBytes:   row.UsedBytes,
-			LimitBytes:  row.LimitBytes,
-			PlanName:    planName,
-			PlanStatus:  assignment.ServiceStatus,
-			AdminEmails: row.AdminEmails,
+			Domain:         row.Domain,
+			OwnerEmail:     firstHostingSnapshotEmail(row.AdminEmails),
+			UsedBytes:      row.UsedBytes,
+			LimitBytes:     row.LimitBytes,
+			PlanName:       planName,
+			PlanStatus:     assignment.ServiceStatus,
+			PlanPaidStatus: hostingSnapshotAssignmentPaidStatus(assignment, plansByID),
+			AdminEmails:    row.AdminEmails,
 		}
 		if snapshot.OwnerEmail == "" && len(row.AdminEmails) > 0 {
 			snapshot.OwnerEmail = strings.ToLower(strings.TrimSpace(row.AdminEmails[0]))
@@ -12969,6 +13000,16 @@ func (a *App) buildHostingSnapshot(ctx context.Context) (hostingandsupport.Hosti
 			})
 		}
 		snapshot.Sites = append(snapshot.Sites, site)
+		if row.LimitBytes > 0 && row.UsedBytes > row.LimitBytes {
+			snapshot.Events = append(snapshot.Events, hostingandsupport.HostingSnapshotEvent{
+				Kind:      "limit_exceeded",
+				Status:    "active",
+				Email:     site.OwnerEmail,
+				Domain:    row.Domain,
+				Message:   "site storage usage exceeds assigned limit",
+				CreatedAt: snapshot.CreatedAt,
+			})
+		}
 	}
 	for _, ownerEmail := range store.OwnerEmails(ctx) {
 		snapshot.Roles = append(snapshot.Roles, hostingandsupport.HostingSnapshotRole{
@@ -12977,22 +13018,150 @@ func (a *App) buildHostingSnapshot(ctx context.Context) (hostingandsupport.Hosti
 			Scope: "installation",
 		})
 	}
+	snapshot.Events = append(snapshot.Events, hostingandsupport.HostingSnapshotEvent{
+		Kind:      "snapshot",
+		Status:    "sent",
+		Email:     snapshot.OwnerEmail,
+		Message:   "full installation snapshot",
+		CreatedAt: snapshot.CreatedAt,
+	})
 	return snapshot, nil
 }
 
 func hostingSnapshotServerStatus(serverIP string) string {
 	serverIP = strings.TrimSpace(serverIP)
 	if serverIP == "" {
-		return "external IP unavailable"
+		return "локальная инсталляция"
 	}
 	parsedIP := net.ParseIP(serverIP)
 	if parsedIP == nil {
 		return "IP " + serverIP
 	}
-	if parsedIP.IsLoopback() || parsedIP.IsPrivate() || parsedIP.IsUnspecified() {
-		return "private IP " + serverIP
-	}
 	return "IP " + serverIP
+}
+
+func hostingSnapshotOS() (string, string) {
+	osName := runtime.GOOS
+	switch runtime.GOOS {
+	case "linux":
+		if osReleaseBytes, err := os.ReadFile("/etc/os-release"); err == nil {
+			if prettyName := osReleaseValue(string(osReleaseBytes), "PRETTY_NAME"); prettyName != "" {
+				return runtime.GOOS, prettyName
+			}
+		}
+	case "darwin":
+		if version := commandOutputOneLine(context.Background(), "sw_vers", "-productVersion"); version != "" {
+			return runtime.GOOS, version
+		}
+	case "freebsd", "openbsd":
+		if version := commandOutputOneLine(context.Background(), "uname", "-r"); version != "" {
+			return runtime.GOOS, version
+		}
+	case "windows":
+		if version := commandOutputOneLine(context.Background(), "cmd", "/c", "ver"); version != "" {
+			return runtime.GOOS, version
+		}
+	}
+	return osName, runtime.GOARCH
+}
+
+func osReleaseValue(osReleaseText string, key string) string {
+	for _, line := range strings.Split(osReleaseText, "\n") {
+		name, value, found := strings.Cut(line, "=")
+		if !found || strings.TrimSpace(name) != key {
+			continue
+		}
+		value = strings.TrimSpace(value)
+		value = strings.Trim(value, `"`)
+		return value
+	}
+	return ""
+}
+
+func hostingSnapshotCPUModel() string {
+	switch runtime.GOOS {
+	case "linux":
+		if cpuInfoBytes, err := os.ReadFile("/proc/cpuinfo"); err == nil {
+			for _, line := range strings.Split(string(cpuInfoBytes), "\n") {
+				name, value, found := strings.Cut(line, ":")
+				if found && strings.TrimSpace(name) == "model name" {
+					return strings.TrimSpace(value)
+				}
+			}
+		}
+	case "darwin":
+		if model := commandOutputOneLine(context.Background(), "sysctl", "-n", "machdep.cpu.brand_string"); model != "" {
+			return model
+		}
+	case "freebsd", "openbsd":
+		if model := commandOutputOneLine(context.Background(), "sysctl", "-n", "hw.model"); model != "" {
+			return model
+		}
+	}
+	return runtime.GOARCH
+}
+
+func hostingSnapshotRAMTotalBytes(ctx context.Context) int64 {
+	switch runtime.GOOS {
+	case "linux":
+		if memInfoBytes, err := os.ReadFile("/proc/meminfo"); err == nil {
+			for _, line := range strings.Split(string(memInfoBytes), "\n") {
+				fields := strings.Fields(line)
+				if len(fields) >= 2 && strings.TrimSuffix(fields[0], ":") == "MemTotal" {
+					kilobytes, parseErr := strconv.ParseInt(fields[1], 10, 64)
+					if parseErr == nil {
+						return kilobytes * 1024
+					}
+				}
+			}
+		}
+	case "darwin", "freebsd", "openbsd":
+		if text := commandOutputOneLine(ctx, "sysctl", "-n", "hw.memsize"); text != "" {
+			if bytes, err := strconv.ParseInt(strings.TrimSpace(text), 10, 64); err == nil {
+				return bytes
+			}
+		}
+		if text := commandOutputOneLine(ctx, "sysctl", "-n", "hw.physmem"); text != "" {
+			if bytes, err := strconv.ParseInt(strings.TrimSpace(text), 10, 64); err == nil {
+				return bytes
+			}
+		}
+	}
+	return 0
+}
+
+func commandOutputOneLine(ctx context.Context, name string, args ...string) string {
+	commandContext, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	outputBytes, err := exec.CommandContext(commandContext, name, args...).Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(strings.SplitN(string(outputBytes), "\n", 2)[0])
+}
+
+func firstHostingSnapshotEmail(emails []string) string {
+	for _, email := range emails {
+		if strings.TrimSpace(email) != "" {
+			return strings.ToLower(strings.TrimSpace(email))
+		}
+	}
+	return ""
+}
+
+func hostingSnapshotPlanPaidStatus(plan hostingandsupport.Plan) string {
+	price := strings.TrimSpace(plan.Price)
+	if price == "" || price == "0" || price == "0.00" {
+		return "free"
+	}
+	return "paid"
+}
+
+func hostingSnapshotAssignmentPaidStatus(assignment hostingandsupport.ServiceAssignment, plansByID map[int]hostingandsupport.Plan) string {
+	if plan, found := plansByID[assignment.PlanID]; found {
+		return hostingSnapshotPlanPaidStatus(plan)
+	}
+	return "free"
 }
 
 func (a *App) sendServiceMailThroughRelay(ctx context.Context, relayURL string, request *serviceMailRequest) error {
@@ -13131,6 +13300,7 @@ func (a *App) handleHostingSnapshotRequest(ctx context.Context, request serviceM
 	if strings.TrimSpace(snapshot.ServerIP) == "" {
 		snapshot.ServerIP = strings.TrimSpace(sourceIP)
 	}
+	snapshot.ServerStatus = hostingSnapshotServerStatus(snapshot.ServerIP)
 	if err := store.UpsertServiceMailInstallation(ctx, request.InstallationID, request.PublicKey, snapshot.ServerIP, snapshotOwnerDomain(snapshot)); err != nil {
 		return fail(err.Error(), http.StatusBadRequest)
 	}

@@ -103,3 +103,90 @@ func TestServiceMailSettingsRoundTrip(t *testing.T) {
 		t.Fatal("service mail relay setting did not save disabled state")
 	}
 }
+
+func TestHostingSnapshotRegistryRoundTrip(t *testing.T) {
+	database, err := sql.Open("sqlite3", filepath.Join(t.TempDir(), "hostingandsupport.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = database.Close()
+	})
+	if err := Migrate(context.Background(), database); err != nil {
+		t.Fatal(err)
+	}
+	store := Store{DB: database}
+	snapshot := HostingSnapshot{
+		Version:          1,
+		InstallationID:   "installation-1",
+		OwnerEmail:       "owner@example.com",
+		ServerIP:         "203.0.113.10",
+		ServerStatus:     "IP 203.0.113.10",
+		ServerDomain:     "host.example.com",
+		SitebrushVersion: "v1",
+		OSName:           "linux",
+		OSVersion:        "Debian",
+		CPUModel:         "amd64",
+		CPUCores:         4,
+		RAMTotalBytes:    8 * 1024 * 1024 * 1024,
+		DiskFreeBytes:    20 * 1024 * 1024 * 1024,
+		DiskTotalBytes:   40 * 1024 * 1024 * 1024,
+		Plans: []HostingSnapshotPlan{{
+			Name:          "Pro",
+			QuotaBytes:    10 * 1024 * 1024 * 1024,
+			SiteLimit:     3,
+			Price:         "10",
+			Currency:      "USD",
+			BillingPeriod: "monthly",
+			PaidStatus:    "paid",
+			IsDefault:     true,
+		}},
+		Roles: []HostingSnapshotRole{
+			{Email: "owner@example.com", Role: "superadmin", Scope: "installation"},
+			{Email: "site@example.com", Role: "site_admin", Scope: "site", Domain: "client.example.com"},
+		},
+		Sites: []HostingSnapshotSite{{
+			Domain:         "client.example.com",
+			OwnerEmail:     "site@example.com",
+			UsedBytes:      12,
+			LimitBytes:     10,
+			PlanName:       "Pro",
+			PlanStatus:     "active",
+			PlanPaidStatus: "paid",
+			AdminEmails:    []string{"site@example.com"},
+		}},
+		Events: []HostingSnapshotEvent{{
+			Kind:      "limit_exceeded",
+			Status:    "active",
+			Email:     "site@example.com",
+			Domain:    "client.example.com",
+			Message:   "site storage usage exceeds assigned limit",
+			CreatedAt: "2026-06-17T10:00:00Z",
+		}},
+		CreatedAt: "2026-06-17T10:00:00Z",
+	}
+	if err := store.SaveHostingSnapshot(context.Background(), snapshot); err != nil {
+		t.Fatal(err)
+	}
+
+	hostings := store.ClientHostings(context.Background())
+	if len(hostings) != 1 {
+		t.Fatalf("hostings = %d, want 1", len(hostings))
+	}
+	hosting := hostings[0]
+	if hosting.ServerDomain != "host.example.com" || hosting.OSName != "linux" || hosting.CPUCores != 4 {
+		t.Fatalf("hosting metadata was not preserved: %#v", hosting)
+	}
+	if len(hosting.Sites) != 1 || !hosting.Sites[0].OverLimit || hosting.Sites[0].OwnerEmail != "site@example.com" {
+		t.Fatalf("site metadata was not preserved: %#v", hosting.Sites)
+	}
+	if len(hosting.Plans) != 1 || hosting.Plans[0].PaidStatus != "paid" || !hosting.Plans[0].IsDefault {
+		t.Fatalf("plan metadata was not preserved: %#v", hosting.Plans)
+	}
+	if len(hosting.Roles) != 2 {
+		t.Fatalf("roles = %d, want 2: %#v", len(hosting.Roles), hosting.Roles)
+	}
+	if len(hosting.Events) != 1 || hosting.Events[0].Kind != "limit_exceeded" {
+		t.Fatalf("events were not preserved: %#v", hosting.Events)
+	}
+}
