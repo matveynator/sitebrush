@@ -1,4 +1,4 @@
-//go:build darwin || linux || freebsd
+//go:build openbsd
 
 package diskusage
 
@@ -20,6 +20,6 @@ func diskSpace(path string) (uint64, uint64, bool) {
 	if err := syscall.Statfs(path, &stat); err != nil {
 		return 0, 0, false
 	}
-	blockSize := uint64(stat.Bsize)
-	return uint64(stat.Bavail) * blockSize, uint64(stat.Blocks) * blockSize, true
+	blockSize := uint64(stat.F_bsize)
+	return uint64(stat.F_bavail) * blockSize, stat.F_blocks * blockSize, true
 }
