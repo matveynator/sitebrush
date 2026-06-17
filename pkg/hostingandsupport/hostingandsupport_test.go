@@ -227,3 +227,66 @@ func TestHostingSnapshotRegistryRoundTrip(t *testing.T) {
 		t.Fatalf("events were not preserved: %#v", hosting.Events)
 	}
 }
+
+func TestSaveHostingSnapshotReplacesCurrentRegistryState(t *testing.T) {
+	database, err := sql.Open("sqlite3", filepath.Join(t.TempDir(), "hostingandsupport.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = database.Close()
+	})
+	if err := Migrate(context.Background(), database); err != nil {
+		t.Fatal(err)
+	}
+	store := Store{DB: database}
+	firstSnapshot := HostingSnapshot{
+		Version:        1,
+		InstallationID: "installation-1",
+		OwnerEmail:     "owner@example.com",
+		Sites: []HostingSnapshotSite{
+			{Domain: "old.example.com", OwnerEmail: "old@example.com", UsedBytes: 1, LimitBytes: 10, AdminEmails: []string{"old@example.com"}},
+			{Domain: "keep.example.com", OwnerEmail: "keep@example.com", UsedBytes: 2, LimitBytes: 10, PlanName: "Free", PlanPaidStatus: "free", AdminEmails: []string{"keep@example.com"}},
+		},
+		Plans: []HostingSnapshotPlan{
+			{Name: "Free", QuotaBytes: 10, PaidStatus: "free", IsDefault: true},
+			{Name: "Old", QuotaBytes: 20, PaidStatus: "paid"},
+		},
+		Roles: []HostingSnapshotRole{
+			{Email: "old@example.com", Role: "site_admin", Scope: "site", Domain: "old.example.com"},
+			{Email: "owner@example.com", Role: "superadmin", Scope: "installation"},
+		},
+		CreatedAt: "2026-06-17T10:00:00Z",
+	}
+	if err := store.SaveHostingSnapshot(context.Background(), firstSnapshot); err != nil {
+		t.Fatal(err)
+	}
+	secondSnapshot := firstSnapshot
+	secondSnapshot.Sites = []HostingSnapshotSite{
+		{Domain: "keep.example.com", OwnerEmail: "keep@example.com", UsedBytes: 12, LimitBytes: 10, PlanName: "Pro", PlanPaidStatus: "paid", AdminEmails: []string{"keep@example.com", "keep@example.com"}},
+	}
+	secondSnapshot.Plans = []HostingSnapshotPlan{{Name: "Pro", QuotaBytes: 10, PaidStatus: "paid", IsDefault: true}}
+	secondSnapshot.Roles = []HostingSnapshotRole{{Email: "keep@example.com", Role: "site_owner", Scope: "site", Domain: "keep.example.com"}}
+	secondSnapshot.CreatedAt = "2026-06-17T10:01:00Z"
+	if err := store.SaveHostingSnapshot(context.Background(), secondSnapshot); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveHostingSnapshot(context.Background(), secondSnapshot); err != nil {
+		t.Fatal(err)
+	}
+
+	hostings := store.ClientHostings(context.Background())
+	if len(hostings) != 1 {
+		t.Fatalf("hostings = %d, want 1", len(hostings))
+	}
+	hosting := hostings[0]
+	if len(hosting.Sites) != 1 || hosting.Sites[0].Domain != "keep.example.com" || !hosting.Sites[0].OverLimit || len(hosting.Sites[0].AdminEmails) != 1 {
+		t.Fatalf("sites were not replaced idempotently: %#v", hosting.Sites)
+	}
+	if len(hosting.Plans) != 1 || hosting.Plans[0].Name != "Pro" || hosting.Plans[0].PaidStatus != "paid" {
+		t.Fatalf("plans were not replaced idempotently: %#v", hosting.Plans)
+	}
+	if len(hosting.Roles) != 1 || hosting.Roles[0].Role != "site_owner" {
+		t.Fatalf("roles were not replaced idempotently: %#v", hosting.Roles)
+	}
+}

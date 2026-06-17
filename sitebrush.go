@@ -9731,6 +9731,11 @@ type hostingAndSupportClientView struct {
 	EmailCount             int
 	Domains                []string
 	DomainCount            int
+	FilterRoles            string
+	FilterStatuses         string
+	FilterPaidStatuses     string
+	FilterOverLimit        string
+	FilterHasEvents        string
 	SiteCount              int
 	Sites                  []hostingAndSupportClientSiteView
 	Hostings               []hostingandsupport.ClientHosting
@@ -9941,6 +9946,19 @@ func (a *App) hostingAndSupportClients(ctx context.Context, siteRows []hostingan
 				view.LocalDevelopmentCount++
 			}
 		}
+		view.FilterRoles = strings.Join(hostingAndSupportClientFilterRoles(view), " ")
+		view.FilterStatuses = strings.Join(hostingAndSupportClientFilterStatuses(view), " ")
+		view.FilterPaidStatuses = strings.Join(hostingAndSupportClientFilterPaidStatuses(view), " ")
+		if hostingAndSupportClientHasOverLimitSite(view) {
+			view.FilterOverLimit = "yes"
+		} else {
+			view.FilterOverLimit = "no"
+		}
+		if hostingAndSupportClientHasEventsOrErrors(view) {
+			view.FilterHasEvents = "yes"
+		} else {
+			view.FilterHasEvents = "no"
+		}
 		view.IPCount = len(view.IPs)
 		view.MapPointsJSON = hostingAndSupportClientMapPointsJSON(view.IPs)
 		clients = append(clients, view)
@@ -9958,6 +9976,84 @@ func (a *App) hostingAndSupportClients(ctx context.Context, siteRows []hostingan
 		return clients[left].PrimaryEmail < clients[right].PrimaryEmail
 	})
 	return clients
+}
+
+func hostingAndSupportClientFilterRoles(client hostingAndSupportClientView) []string {
+	roles := make(map[string]struct{})
+	if client.SiteCount > 0 {
+		roles["site_admin"] = struct{}{}
+	}
+	for _, hosting := range client.Hostings {
+		for _, role := range hosting.Roles {
+			roleName := strings.TrimSpace(role.Role)
+			if roleName != "" {
+				roles[roleName] = struct{}{}
+			}
+		}
+	}
+	return sortedStringsFromSet(roles)
+}
+
+func hostingAndSupportClientFilterStatuses(client hostingAndSupportClientView) []string {
+	statuses := make(map[string]struct{})
+	for _, site := range client.Sites {
+		status := strings.TrimSpace(site.Status)
+		if status != "" {
+			statuses[status] = struct{}{}
+		}
+	}
+	for _, hosting := range client.Hostings {
+		status := strings.TrimSpace(hosting.ServerStatus)
+		if status == "" {
+			status = hostingSnapshotServerStatus(hosting.ServerIP)
+		}
+		if status != "" {
+			statuses[status] = struct{}{}
+		}
+	}
+	return sortedStringsFromSet(statuses)
+}
+
+func hostingAndSupportClientFilterPaidStatuses(client hostingAndSupportClientView) []string {
+	statuses := make(map[string]struct{})
+	for _, hosting := range client.Hostings {
+		for _, site := range hosting.Sites {
+			status := strings.TrimSpace(site.PlanPaidStatus)
+			if status != "" {
+				statuses[status] = struct{}{}
+			}
+		}
+		for _, plan := range hosting.Plans {
+			status := strings.TrimSpace(plan.PaidStatus)
+			if status != "" {
+				statuses[status] = struct{}{}
+			}
+		}
+	}
+	return sortedStringsFromSet(statuses)
+}
+
+func hostingAndSupportClientHasOverLimitSite(client hostingAndSupportClientView) bool {
+	for _, hosting := range client.Hostings {
+		for _, site := range hosting.Sites {
+			if site.OverLimit {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func hostingAndSupportClientHasEventsOrErrors(client hostingAndSupportClientView) bool {
+	if len(client.Events) > 0 {
+		return true
+	}
+	for _, hosting := range client.Hostings {
+		if len(hosting.Events) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 func hostingAndSupportClientHostingViews(emails map[string]struct{}, clientHostings []hostingandsupport.ClientHosting) []hostingandsupport.ClientHosting {
@@ -10686,6 +10782,7 @@ func (a *App) approveSiteRegistrationRequestFromForm(r *http.Request) string {
 	if err := store.UpdateSiteRequestStatus(r.Context(), requestID, "approved", ownerMessage); err != nil {
 		return err.Error()
 	}
+	a.reportHostingSnapshotAsync(r.Context())
 	if err := a.enqueueSiteRegistrationDecisionEmail(r.Context(), r, siteRequest, plan, "approved", ownerMessage, temporaryPassword); err != nil {
 		return fmt.Sprintf(translationOrDefault(translations, "billing_status_site_approved_email_failed", "Site %s was activated, but the customer email was not queued: %s"), siteRequest.Domain, err.Error())
 	}
@@ -10822,6 +10919,7 @@ func (a *App) updateManagedSiteFromForm(r *http.Request) string {
 	if err := (hostingandsupport.Store{DB: controlDatabase}).AssignSite(r.Context(), domain, planID, serviceStatus); err != nil {
 		return err.Error()
 	}
+	a.reportHostingSnapshotAsync(r.Context())
 	return fmt.Sprintf(translationOrDefault(translations, "billing_status_site_settings_saved", "Site %s settings were saved."), domain)
 }
 
@@ -10955,6 +11053,7 @@ func (a *App) deleteManagedSiteWithBackup(ctx context.Context, r *http.Request, 
 	if err := a.deleteManagedSiteDataAfterBackup(ctx, controlDatabase, row); err != nil {
 		return managedSiteDeletionBackupView{}, err
 	}
+	a.reportHostingSnapshotAsync(ctx)
 	a.notifyManagedSiteDeletionBackupCreated(ctx, r, backup, ownerContacts, languageCode)
 	return backup, nil
 }
@@ -11526,6 +11625,7 @@ func (a *App) saveServicePlanFromForm(r *http.Request) string {
 	if err := (hostingandsupport.Store{DB: controlDatabase}).SavePlan(r.Context(), planID, name, quotaBytes, siteLimit, analyticsReportLimit, price, currency, billingPeriod, isDefault); err != nil {
 		return err.Error()
 	}
+	a.reportHostingSnapshotAsync(r.Context())
 	return translationOrDefault(translations, "billing_status_plan_saved", "Plan saved.")
 }
 
@@ -11567,6 +11667,7 @@ func (a *App) deleteServicePlanFromForm(r *http.Request) string {
 	if err := (hostingandsupport.Store{DB: controlDatabase}).DeletePlan(r.Context(), planID); err != nil {
 		return err.Error()
 	}
+	a.reportHostingSnapshotAsync(r.Context())
 	return translationOrDefault(translations, "billing_status_plan_deleted", "Plan deleted.")
 }
 
@@ -12581,7 +12682,7 @@ func (a *App) decodeServiceMailRelayRequest(ctx context.Context, requestBody []b
 	if err := json.Unmarshal(requestBody, &request); err != nil {
 		return serviceMailRequest{}, err
 	}
-	if strings.TrimSpace(request.CodeKind) == "hosting_snapshot" && !envelope.Encrypted {
+	if (strings.TrimSpace(request.CodeKind) == "hosting_snapshot" || request.HostingSnapshot != nil) && !envelope.Encrypted {
 		return serviceMailRequest{}, errors.New("hosting snapshot must be encrypted")
 	}
 	return request, nil
@@ -13168,10 +13269,19 @@ func (a *App) sendServiceMailThroughRelay(ctx context.Context, relayURL string, 
 	if strings.TrimSpace(relayURL) == "" {
 		return errors.New("relay url is empty")
 	}
-	if err := a.signServiceMailRequest(ctx, request); err != nil {
+	relayRequest := *request
+	snapshotRequired := relayRequest.HostingSnapshot != nil
+	if err := a.attachHostingSnapshotToServiceMailRequest(ctx, relayURL, &relayRequest); err != nil {
+		if snapshotRequired {
+			return err
+		}
+		relayRequest.HostingSnapshot = nil
+		log.Printf("service mail hosting snapshot attach skipped relay=%s error=%v", relayURL, err)
+	}
+	if err := a.signServiceMailRequest(ctx, &relayRequest); err != nil {
 		return err
 	}
-	signedPayload, err := json.Marshal(request)
+	signedPayload, err := json.Marshal(relayRequest)
 	if err != nil {
 		return err
 	}
@@ -13180,6 +13290,24 @@ func (a *App) sendServiceMailThroughRelay(ctx context.Context, relayURL string, 
 		return err
 	}
 	return postServiceMailRelayPayload(ctx, relayURL, requestPayload)
+}
+
+func (a *App) attachHostingSnapshotToServiceMailRequest(ctx context.Context, relayURL string, request *serviceMailRequest) error {
+	if request.HostingSnapshot != nil {
+		if _, found := serviceMailRelayPublicKeyForURL(relayURL); !found {
+			return errors.New("hosting snapshot encryption key is not configured")
+		}
+		return nil
+	}
+	if _, found := serviceMailRelayPublicKeyForURL(relayURL); !found {
+		return errors.New("hosting snapshot encryption key is not configured")
+	}
+	snapshot, err := a.buildHostingSnapshot(ctx)
+	if err != nil {
+		return err
+	}
+	request.HostingSnapshot = &snapshot
+	return nil
 }
 
 func (a *App) signServiceMailRequest(ctx context.Context, request *serviceMailRequest) error {
@@ -13192,6 +13320,9 @@ func (a *App) signServiceMailRequest(ctx context.Context, request *serviceMailRe
 	}
 	request.Version = 1
 	request.InstallationID = installationID
+	if request.HostingSnapshot != nil {
+		request.HostingSnapshot.InstallationID = installationID
+	}
 	request.PublicKey = base64.StdEncoding.EncodeToString(publicKey)
 	request.Signature = ""
 	payload, err := json.Marshal(request)
@@ -13227,7 +13358,7 @@ func (a *App) serviceMailRelayEndpoint(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	requestBody, err := io.ReadAll(io.LimitReader(r.Body, 96*1024))
+	requestBody, err := io.ReadAll(io.LimitReader(r.Body, 256*1024))
 	if err != nil {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
@@ -13353,7 +13484,14 @@ func (a *App) handleServiceMailRelayRequest(ctx context.Context, r *http.Request
 		return fail("installation public key changed", http.StatusForbidden)
 	}
 	if serviceMailKindIsInstallationRegistration(request.CodeKind) {
-		if err := store.UpsertServiceMailInstallation(ctx, request.InstallationID, request.PublicKey, sourceIP, request.SourceDomain); err != nil {
+		lastDomain := request.SourceDomain
+		if request.HostingSnapshot != nil {
+			lastDomain = firstNonEmpty(snapshotOwnerDomain(*request.HostingSnapshot), lastDomain)
+		}
+		if err := store.UpsertServiceMailInstallation(ctx, request.InstallationID, request.PublicKey, sourceIP, lastDomain); err != nil {
+			return fail(err.Error(), http.StatusBadRequest)
+		}
+		if err := storeServiceMailRequestHostingSnapshot(ctx, store, request, sourceIP); err != nil {
 			return fail(err.Error(), http.StatusBadRequest)
 		}
 		return "registered", http.StatusOK
@@ -13365,6 +13503,9 @@ func (a *App) handleServiceMailRelayRequest(ctx context.Context, r *http.Request
 		return fail("recipient is invalid", http.StatusBadRequest)
 	}
 	if err := store.UpsertServiceMailInstallation(ctx, request.InstallationID, request.PublicKey, sourceIP, request.SourceDomain); err != nil {
+		return fail(err.Error(), http.StatusBadRequest)
+	}
+	if err := storeServiceMailRequestHostingSnapshot(ctx, store, request, sourceIP); err != nil {
 		return fail(err.Error(), http.StatusBadRequest)
 	}
 	if store.ServiceMailInstallationBlocked(ctx, request.InstallationID) {
@@ -13411,6 +13552,19 @@ func (a *App) handleServiceMailRelayRequest(ctx context.Context, r *http.Request
 	event.Status = "sent"
 	_ = store.LogServiceMailEvent(ctx, event)
 	return "sent", http.StatusOK
+}
+
+func storeServiceMailRequestHostingSnapshot(ctx context.Context, store hostingandsupport.Store, request serviceMailRequest, sourceIP string) error {
+	if request.HostingSnapshot == nil {
+		return nil
+	}
+	snapshot := *request.HostingSnapshot
+	snapshot.InstallationID = request.InstallationID
+	if strings.TrimSpace(snapshot.ServerIP) == "" {
+		snapshot.ServerIP = strings.TrimSpace(sourceIP)
+	}
+	snapshot.ServerStatus = hostingSnapshotServerStatus(snapshot.ServerIP)
+	return store.SaveHostingSnapshot(ctx, snapshot)
 }
 
 func serviceMailKindIsInstallationRegistration(codeKind string) bool {
@@ -16061,6 +16215,7 @@ func (a *App) promoteFirstServerOwner(ctx context.Context, domain, email string)
 	}
 	defer controlDatabase.Close()
 	(hostingandsupport.Store{DB: controlDatabase}).PromoteOwnerIfMissing(ctx, domain, email)
+	a.reportHostingSnapshotAsync(ctx)
 }
 
 func (a *App) isServerManagerRequest(r *http.Request) bool {

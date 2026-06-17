@@ -40,6 +40,44 @@
         <label>Поиск клиента
           <input type="search" class="form-control" placeholder="email или домен" data-billing-client-search-input>
         </label>
+        <label>Роль
+          <select class="form-select" data-billing-client-role-filter>
+            <option value="">Все роли</option>
+            <option value="superadmin">superadmin</option>
+            <option value="site_admin site_owner">site_admin/site_owner</option>
+          </select>
+        </label>
+        <label>Статус сервера
+          <select class="form-select" data-billing-client-status-filter>
+            <option value="">Все статусы</option>
+            <option value="IP ">IP</option>
+            <option value="локальная инсталляция">локальная инсталляция</option>
+            <option value="сервер без публичного IP">сервер без публичного IP</option>
+            <option value="тестовый сервер">тестовый сервер</option>
+            <option value="домен не указывает на IP установки">домен не указывает на IP установки</option>
+          </select>
+        </label>
+        <label>Оплата
+          <select class="form-select" data-billing-client-paid-filter>
+            <option value="">Все</option>
+            <option value="paid">paid</option>
+            <option value="free">free</option>
+          </select>
+        </label>
+        <label>Лимит
+          <select class="form-select" data-billing-client-over-limit-filter>
+            <option value="">Все</option>
+            <option value="yes">превышен</option>
+            <option value="no">не превышен</option>
+          </select>
+        </label>
+        <label>События
+          <select class="form-select" data-billing-client-events-filter>
+            <option value="">Все</option>
+            <option value="yes">есть события/ошибки</option>
+            <option value="no">нет событий/ошибок</option>
+          </select>
+        </label>
         <div class="billing-client-pagination">
           <button type="button" class="btn btn-outline-primary btn-sm" data-billing-client-prev>Назад</button>
           <span data-billing-client-page-status></span>
@@ -48,7 +86,7 @@
       </div>
       <div class="billing-user-list" data-billing-client-list>
         {{range $userIndex, $user := .Clients}}
-        <article class="billing-user-row" data-billing-client-row data-billing-client-search="{{$user.PrimaryEmail}} {{range $user.Emails}}{{.}} {{end}} {{range $user.Domains}}{{.}} {{end}} {{range $user.Sites}}{{.Domain}} {{end}}">
+        <article class="billing-user-row" data-billing-client-row data-billing-client-search="{{$user.PrimaryEmail}} {{range $user.Emails}}{{.}} {{end}} {{range $user.Domains}}{{.}} {{end}} {{range $user.Sites}}{{.Domain}} {{end}}" data-billing-client-roles="{{$user.FilterRoles}}" data-billing-client-statuses="{{$user.FilterStatuses}}" data-billing-client-paid-statuses="{{$user.FilterPaidStatuses}}" data-billing-client-over-limit="{{$user.FilterOverLimit}}" data-billing-client-has-events="{{$user.FilterHasEvents}}">
           <div class="billing-user-main">
             <div class="billing-domain">{{$user.PrimaryEmail}}</div>
             <div class="billing-user-stats">
@@ -714,6 +752,11 @@
 (function initializeBillingClientListControls() {
   const controlsElement = document.querySelector('[data-billing-client-controls]');
   const searchInputElement = document.querySelector('[data-billing-client-search-input]');
+  const roleFilterElement = document.querySelector('[data-billing-client-role-filter]');
+  const statusFilterElement = document.querySelector('[data-billing-client-status-filter]');
+  const paidFilterElement = document.querySelector('[data-billing-client-paid-filter]');
+  const overLimitFilterElement = document.querySelector('[data-billing-client-over-limit-filter]');
+  const eventsFilterElement = document.querySelector('[data-billing-client-events-filter]');
   const previousButtonElement = document.querySelector('[data-billing-client-prev]');
   const nextButtonElement = document.querySelector('[data-billing-client-next]');
   const pageStatusElement = document.querySelector('[data-billing-client-page-status]');
@@ -721,17 +764,45 @@
   const pageSize = 10;
   let currentPageIndex = 0;
 
-  if (!controlsElement || !searchInputElement || !previousButtonElement || !nextButtonElement || !pageStatusElement || clientRowElements.length === 0) {
+  if (!controlsElement || !searchInputElement || !roleFilterElement || !statusFilterElement || !paidFilterElement || !overLimitFilterElement || !eventsFilterElement || !previousButtonElement || !nextButtonElement || !pageStatusElement || clientRowElements.length === 0) {
     return;
+  }
+
+  function textContainsAnyToken(text, rawFilterValue) {
+    const filterTokens = rawFilterValue.trim().toLowerCase().split(/\s+/).filter(Boolean);
+    if (filterTokens.length === 0) {
+      return true;
+    }
+    const lowerText = text.toLowerCase();
+    return filterTokens.some(function filterTokenIsPresent(filterToken) {
+      return lowerText.includes(filterToken);
+    });
+  }
+
+  function clientRowMatchesSelectFilters(clientRowElement) {
+    if (!textContainsAnyToken(clientRowElement.dataset.billingClientRoles || '', roleFilterElement.value)) {
+      return false;
+    }
+    if (!textContainsAnyToken(clientRowElement.dataset.billingClientStatuses || '', statusFilterElement.value)) {
+      return false;
+    }
+    if (!textContainsAnyToken(clientRowElement.dataset.billingClientPaidStatuses || '', paidFilterElement.value)) {
+      return false;
+    }
+    if (overLimitFilterElement.value && clientRowElement.dataset.billingClientOverLimit !== overLimitFilterElement.value) {
+      return false;
+    }
+    if (eventsFilterElement.value && clientRowElement.dataset.billingClientHasEvents !== eventsFilterElement.value) {
+      return false;
+    }
+    return true;
   }
 
   function matchingClientRows() {
     const searchText = searchInputElement.value.trim().toLowerCase();
-    if (!searchText) {
-      return clientRowElements;
-    }
     return clientRowElements.filter(function clientRowMatchesSearch(clientRowElement) {
-      return (clientRowElement.dataset.billingClientSearch || '').toLowerCase().includes(searchText);
+      const searchMatches = !searchText || (clientRowElement.dataset.billingClientSearch || '').toLowerCase().includes(searchText);
+      return searchMatches && clientRowMatchesSelectFilters(clientRowElement);
     });
   }
 
@@ -749,7 +820,7 @@
     }
     previousButtonElement.disabled = currentPageIndex === 0;
     nextButtonElement.disabled = currentPageIndex >= pageCount - 1;
-    controlsElement.classList.toggle('d-none', clientRowElements.length <= pageSize && !searchInputElement.value.trim());
+    controlsElement.classList.toggle('d-none', clientRowElements.length <= pageSize && !searchInputElement.value.trim() && !roleFilterElement.value && !statusFilterElement.value && !paidFilterElement.value && !overLimitFilterElement.value && !eventsFilterElement.value);
     pageStatusElement.textContent = visibleClientRows.length + ' клиентов · страница ' + (currentPageIndex + 1) + ' / ' + pageCount;
   }
 
@@ -757,6 +828,12 @@
     currentPageIndex = 0;
     renderClientPage();
   });
+  for (const filterElement of [roleFilterElement, statusFilterElement, paidFilterElement, overLimitFilterElement, eventsFilterElement]) {
+    filterElement.addEventListener('change', function updateClientFilter() {
+      currentPageIndex = 0;
+      renderClientPage();
+    });
+  }
   previousButtonElement.addEventListener('click', function showPreviousClientPage() {
     currentPageIndex = Math.max(0, currentPageIndex - 1);
     renderClientPage();

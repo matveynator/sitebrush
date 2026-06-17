@@ -668,6 +668,79 @@ func TestServiceMailEncryptedRelayRequestRoundTrip(t *testing.T) {
 	}
 }
 
+func TestServiceMailRelayRegistrationStoresAttachedHostingSnapshot(t *testing.T) {
+	application, _ := newTestApplication(t)
+	request := serviceMailRequest{
+		Version:      1,
+		CodeKind:     "installation_register",
+		LanguageCode: "en",
+		CreatedAt:    time.Now().UTC().Format(time.RFC3339),
+		HostingSnapshot: &hostingandsupport.HostingSnapshot{
+			Version:      1,
+			OwnerEmail:   "owner@example.com",
+			ServerDomain: "host.example.com",
+			Sites: []hostingandsupport.HostingSnapshotSite{{
+				Domain:         "client.example.com",
+				OwnerEmail:     "client@example.com",
+				UsedBytes:      12,
+				LimitBytes:     10,
+				PlanName:       "Pro",
+				PlanStatus:     "paid",
+				PlanPaidStatus: "paid",
+				AdminEmails:    []string{"client@example.com"},
+			}},
+			Roles: []hostingandsupport.HostingSnapshotRole{{
+				Email: "owner@example.com",
+				Role:  "superadmin",
+				Scope: "installation",
+			}},
+			Plans: []hostingandsupport.HostingSnapshotPlan{{
+				Name:       "Pro",
+				QuotaBytes: 10,
+				PaidStatus: "paid",
+			}},
+			CreatedAt: time.Now().UTC().Format(time.RFC3339),
+		},
+	}
+	if err := application.signServiceMailRequest(context.Background(), &request); err != nil {
+		t.Fatal(err)
+	}
+	httpRequest := httptest.NewRequest(http.MethodPost, "https://sitebrush.com/?service_mail_relay", nil)
+	status, statusCode := application.handleServiceMailRelayRequest(context.Background(), httpRequest, request, "203.0.113.10")
+	if statusCode != http.StatusOK {
+		t.Fatalf("status = %d %q, want ok", statusCode, status)
+	}
+	controlDatabase, err := application.openServerControlDatabase(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer controlDatabase.Close()
+	hostings := (hostingandsupport.Store{DB: controlDatabase}).ClientHostings(context.Background())
+	if len(hostings) != 1 {
+		t.Fatalf("hostings = %d, want 1", len(hostings))
+	}
+	if hostings[0].InstallationID != request.InstallationID || hostings[0].ServerIP != "203.0.113.10" {
+		t.Fatalf("hosting identity was not stored from relay snapshot: %#v", hostings[0])
+	}
+	if len(hostings[0].Sites) != 1 || !hostings[0].Sites[0].OverLimit || hostings[0].Sites[0].PlanPaidStatus != "paid" {
+		t.Fatalf("hosting snapshot site was not stored: %#v", hostings[0].Sites)
+	}
+}
+
+func TestHostingSnapshotServerStatusLabels(t *testing.T) {
+	statusWithIP := hostingSnapshotServerStatus("203.0.113.10")
+	if statusWithIP != "IP 203.0.113.10" {
+		t.Fatalf("statusWithIP = %q", statusWithIP)
+	}
+	statusWithoutIP := hostingSnapshotServerStatus("")
+	if strings.Contains(statusWithoutIP, "локальная разработка") {
+		t.Fatalf("statusWithoutIP contains forbidden phrase: %q", statusWithoutIP)
+	}
+	if statusWithoutIP != "локальная инсталляция" {
+		t.Fatalf("statusWithoutIP = %q", statusWithoutIP)
+	}
+}
+
 func registerServiceMailInstallationForTest(t *testing.T, application *App, request serviceMailRequest) {
 	t.Helper()
 	controlDatabase, err := application.openServerControlDatabase(context.Background())
