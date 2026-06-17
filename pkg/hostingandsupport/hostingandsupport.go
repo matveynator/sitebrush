@@ -18,7 +18,7 @@ import (
 
 const DefaultStorageLimitBytes int64 = 10 * 1024 * 1024 * 1024
 const DefaultDeletionBackupRetentionDays = 365
-const currentBillingSchemaVersion = 7
+const currentBillingSchemaVersion = 8
 
 type Store struct {
 	DB *sql.DB
@@ -139,48 +139,101 @@ type ServiceMailRecipient struct {
 }
 
 type HostingSnapshot struct {
-	Version        int                   `json:"version"`
-	InstallationID string                `json:"installation_id"`
-	OwnerEmail     string                `json:"owner_email"`
-	ServerIP       string                `json:"server_ip"`
-	StoragePath    string                `json:"storage_path"`
-	DiskFreeBytes  int64                 `json:"disk_free_bytes"`
-	DiskTotalBytes int64                 `json:"disk_total_bytes"`
-	Sites          []HostingSnapshotSite `json:"sites"`
-	CreatedAt      string                `json:"created_at"`
+	Version          int                    `json:"version"`
+	InstallationID   string                 `json:"installation_id"`
+	OwnerEmail       string                 `json:"owner_email"`
+	ServerIP         string                 `json:"server_ip"`
+	ServerStatus     string                 `json:"server_status"`
+	SitebrushVersion string                 `json:"sitebrush_version"`
+	StoragePath      string                 `json:"storage_path"`
+	DiskFreeBytes    int64                  `json:"disk_free_bytes"`
+	DiskTotalBytes   int64                  `json:"disk_total_bytes"`
+	Plans            []HostingSnapshotPlan  `json:"plans"`
+	Roles            []HostingSnapshotRole  `json:"roles"`
+	Sites            []HostingSnapshotSite  `json:"sites"`
+	Events           []HostingSnapshotEvent `json:"events"`
+	CreatedAt        string                 `json:"created_at"`
 }
 
 type HostingSnapshotSite struct {
 	Domain      string   `json:"domain"`
 	UsedBytes   int64    `json:"used_bytes"`
 	LimitBytes  int64    `json:"limit_bytes"`
+	PlanName    string   `json:"plan_name"`
+	PlanStatus  string   `json:"plan_status"`
 	AdminEmails []string `json:"admin_emails"`
 }
 
+type HostingSnapshotPlan struct {
+	Name                 string `json:"name"`
+	QuotaBytes           int64  `json:"quota_bytes"`
+	SiteLimit            int    `json:"site_limit"`
+	AnalyticsReportLimit int    `json:"analytics_report_limit"`
+	Price                string `json:"price"`
+	Currency             string `json:"currency"`
+	BillingPeriod        string `json:"billing_period"`
+	IsDefault            bool   `json:"is_default"`
+}
+
+type HostingSnapshotRole struct {
+	Email  string `json:"email"`
+	Role   string `json:"role"`
+	Scope  string `json:"scope"`
+	Domain string `json:"domain"`
+}
+
+type HostingSnapshotEvent struct {
+	Kind      string `json:"kind"`
+	Status    string `json:"status"`
+	Email     string `json:"email"`
+	Domain    string `json:"domain"`
+	Message   string `json:"message"`
+	CreatedAt string `json:"created_at"`
+}
+
 type ClientHosting struct {
-	InstallationID string
-	OwnerEmail     string
-	ServerIP       string
-	StoragePath    string
-	DiskFreeBytes  int64
-	DiskTotalBytes int64
-	DiskFreeLabel  string
-	DiskTotalLabel string
-	LastSeenAt     string
-	Sites          []ClientHostingSite
-	ClientEmails   []string
-	SiteCount      int
-	TotalUsedBytes int64
-	TotalUsedLabel string
+	InstallationID   string
+	OwnerEmail       string
+	ServerIP         string
+	ServerStatus     string
+	SitebrushVersion string
+	StoragePath      string
+	DiskFreeBytes    int64
+	DiskTotalBytes   int64
+	DiskFreeLabel    string
+	DiskTotalLabel   string
+	LastSeenAt       string
+	Sites            []ClientHostingSite
+	ClientEmails     []string
+	SiteCount        int
+	TotalUsedBytes   int64
+	TotalUsedLabel   string
 }
 
 type ClientHostingSite struct {
 	Domain      string
 	UsedBytes   int64
 	LimitBytes  int64
+	PlanName    string
+	PlanStatus  string
 	UsedLabel   string
 	LimitLabel  string
 	AdminEmails []string
+}
+
+type RegistrySyncEvent struct {
+	ID             int
+	InstallationID string
+	Status         string
+	Error          string
+	CreatedAt      string
+}
+
+type SitebrushComKey struct {
+	PublicKey   string
+	Fingerprint string
+	CreatedAt   string
+	UpdatedAt   string
 }
 
 type DeletionBackupMetadata struct {
@@ -227,9 +280,17 @@ func Migrate(ctx context.Context, database *sql.DB) error {
 		`CREATE TABLE IF NOT EXISTS service_mail_blocks(id INTEGER PRIMARY KEY AUTOINCREMENT,scope TEXT,value TEXT,reason TEXT,created_at TEXT,UNIQUE(scope,value));`,
 		`CREATE TABLE IF NOT EXISTS service_mail_recipients(installation_id TEXT,recipient_hash TEXT,recipient_mask TEXT,status TEXT,purpose_scope TEXT,created_at TEXT,verified_at TEXT,PRIMARY KEY(installation_id,recipient_hash));`,
 		`CREATE INDEX IF NOT EXISTS idx_service_mail_recipients_installation_status ON service_mail_recipients(installation_id,status);`,
-		`CREATE TABLE IF NOT EXISTS client_hostings(installation_id TEXT PRIMARY KEY,owner_email TEXT,server_ip TEXT,storage_path TEXT,disk_free_bytes INTEGER DEFAULT 0,disk_total_bytes INTEGER DEFAULT 0,first_seen_at TEXT,last_seen_at TEXT);`,
-		`CREATE TABLE IF NOT EXISTS client_hosting_sites(installation_id TEXT,domain TEXT,used_bytes INTEGER DEFAULT 0,limit_bytes INTEGER DEFAULT 0,admin_emails TEXT,updated_at TEXT,PRIMARY KEY(installation_id,domain));`,
+		`CREATE TABLE IF NOT EXISTS client_hostings(installation_id TEXT PRIMARY KEY,owner_email TEXT,server_ip TEXT,server_status TEXT,sitebrush_version TEXT,storage_path TEXT,disk_free_bytes INTEGER DEFAULT 0,disk_total_bytes INTEGER DEFAULT 0,first_seen_at TEXT,last_seen_at TEXT);`,
+		`CREATE TABLE IF NOT EXISTS client_hosting_sites(installation_id TEXT,domain TEXT,used_bytes INTEGER DEFAULT 0,limit_bytes INTEGER DEFAULT 0,plan_name TEXT,plan_status TEXT,admin_emails TEXT,updated_at TEXT,PRIMARY KEY(installation_id,domain));`,
 		`CREATE INDEX IF NOT EXISTS idx_client_hosting_sites_installation ON client_hosting_sites(installation_id);`,
+		`CREATE TABLE IF NOT EXISTS registry_accounts(email TEXT PRIMARY KEY,first_seen_at TEXT,last_seen_at TEXT);`,
+		`CREATE TABLE IF NOT EXISTS registry_installation_roles(installation_id TEXT,email TEXT,role TEXT,scope TEXT,domain TEXT,updated_at TEXT,PRIMARY KEY(installation_id,email,role,scope,domain));`,
+		`CREATE INDEX IF NOT EXISTS idx_registry_installation_roles_email ON registry_installation_roles(email);`,
+		`CREATE TABLE IF NOT EXISTS registry_installation_plans(installation_id TEXT,name TEXT,quota_bytes INTEGER DEFAULT 0,site_limit INTEGER DEFAULT 0,analytics_report_limit INTEGER DEFAULT 0,price TEXT,currency TEXT,billing_period TEXT,is_default INTEGER DEFAULT 0,updated_at TEXT,PRIMARY KEY(installation_id,name));`,
+		`CREATE TABLE IF NOT EXISTS registry_events(id INTEGER PRIMARY KEY AUTOINCREMENT,installation_id TEXT,event_key TEXT,kind TEXT,status TEXT,email TEXT,domain TEXT,message TEXT,created_at TEXT,UNIQUE(installation_id,event_key));`,
+		`CREATE TABLE IF NOT EXISTS registry_sync_events(id INTEGER PRIMARY KEY AUTOINCREMENT,installation_id TEXT,status TEXT,error TEXT,created_at TEXT);`,
+		`CREATE INDEX IF NOT EXISTS idx_registry_sync_events_installation_created ON registry_sync_events(installation_id,created_at);`,
+		`CREATE TABLE IF NOT EXISTS sitebrush_com_keys(domain TEXT PRIMARY KEY,public_key TEXT,private_key TEXT,fingerprint TEXT,created_at TEXT,updated_at TEXT);`,
 	}
 	queries = append(queries, demo.SchemaQueries()...)
 	for queryIndex, query := range queries {
@@ -277,7 +338,7 @@ func setSchemaMigrationVersion(ctx context.Context, database *sql.DB, component 
 }
 
 func hostingAndSupportSchemaComplete(ctx context.Context, database *sql.DB) (bool, error) {
-	tableNames := []string{"server_managers", "server_settings", "site_service_plans", "site_service_assignments", "site_registration_requests", "site_deletion_backups", "service_mail_installations", "service_mail_events", "service_mail_blocks", "service_mail_recipients", "client_hostings", "client_hosting_sites"}
+	tableNames := []string{"server_managers", "server_settings", "site_service_plans", "site_service_assignments", "site_registration_requests", "site_deletion_backups", "service_mail_installations", "service_mail_events", "service_mail_blocks", "service_mail_recipients", "client_hostings", "client_hosting_sites", "registry_accounts", "registry_installation_roles", "registry_installation_plans", "registry_events", "registry_sync_events", "sitebrush_com_keys"}
 	tableNames = append(tableNames, demo.TableNames()...)
 	for _, tableName := range tableNames {
 		found, err := tableExists(ctx, database, tableName)
@@ -313,6 +374,10 @@ func requiredHostingAndSupportColumns() []hostingAndSupportColumn {
 	return []hostingAndSupportColumn{
 		{tableName: "site_service_plans", columnName: "site_limit", definition: "INTEGER DEFAULT 1"},
 		{tableName: "site_service_plans", columnName: "analytics_report_limit", definition: "INTEGER DEFAULT 0"},
+		{tableName: "client_hostings", columnName: "server_status", definition: "TEXT"},
+		{tableName: "client_hostings", columnName: "sitebrush_version", definition: "TEXT"},
+		{tableName: "client_hosting_sites", columnName: "plan_name", definition: "TEXT"},
+		{tableName: "client_hosting_sites", columnName: "plan_status", definition: "TEXT"},
 	}
 }
 
@@ -750,10 +815,16 @@ func (store Store) SaveHostingSnapshot(ctx context.Context, snapshot HostingSnap
 	if err != nil {
 		return err
 	}
-	_, err = transaction.ExecContext(ctx, `INSERT INTO client_hostings(installation_id,owner_email,server_ip,storage_path,disk_free_bytes,disk_total_bytes,first_seen_at,last_seen_at) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(installation_id) DO UPDATE SET owner_email=excluded.owner_email,server_ip=excluded.server_ip,storage_path=excluded.storage_path,disk_free_bytes=excluded.disk_free_bytes,disk_total_bytes=excluded.disk_total_bytes,last_seen_at=excluded.last_seen_at`,
-		installationID, strings.ToLower(strings.TrimSpace(snapshot.OwnerEmail)), strings.TrimSpace(snapshot.ServerIP), strings.TrimSpace(snapshot.StoragePath), snapshot.DiskFreeBytes, snapshot.DiskTotalBytes, now, now)
+	_, err = transaction.ExecContext(ctx, `INSERT INTO client_hostings(installation_id,owner_email,server_ip,server_status,sitebrush_version,storage_path,disk_free_bytes,disk_total_bytes,first_seen_at,last_seen_at) VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(installation_id) DO UPDATE SET owner_email=excluded.owner_email,server_ip=excluded.server_ip,server_status=excluded.server_status,sitebrush_version=excluded.sitebrush_version,storage_path=excluded.storage_path,disk_free_bytes=excluded.disk_free_bytes,disk_total_bytes=excluded.disk_total_bytes,last_seen_at=excluded.last_seen_at`,
+		installationID, strings.ToLower(strings.TrimSpace(snapshot.OwnerEmail)), strings.TrimSpace(snapshot.ServerIP), strings.TrimSpace(snapshot.ServerStatus), strings.TrimSpace(snapshot.SitebrushVersion), strings.TrimSpace(snapshot.StoragePath), snapshot.DiskFreeBytes, snapshot.DiskTotalBytes, now, now)
 	if err == nil {
 		_, err = transaction.ExecContext(ctx, `DELETE FROM client_hosting_sites WHERE installation_id=?`, installationID)
+	}
+	if err == nil {
+		_, err = transaction.ExecContext(ctx, `DELETE FROM registry_installation_roles WHERE installation_id=?`, installationID)
+	}
+	if err == nil {
+		_, err = transaction.ExecContext(ctx, `DELETE FROM registry_installation_plans WHERE installation_id=?`, installationID)
 	}
 	for _, site := range snapshot.Sites {
 		if err != nil {
@@ -764,14 +835,75 @@ func (store Store) SaveHostingSnapshot(ctx context.Context, snapshot HostingSnap
 			continue
 		}
 		adminEmails := normalizedHostingEmails(site.AdminEmails)
-		_, err = transaction.ExecContext(ctx, `INSERT INTO client_hosting_sites(installation_id,domain,used_bytes,limit_bytes,admin_emails,updated_at) VALUES(?,?,?,?,?,?)`,
-			installationID, domain, site.UsedBytes, site.LimitBytes, strings.Join(adminEmails, ","), now)
+		_, err = transaction.ExecContext(ctx, `INSERT INTO client_hosting_sites(installation_id,domain,used_bytes,limit_bytes,plan_name,plan_status,admin_emails,updated_at) VALUES(?,?,?,?,?,?,?,?)`,
+			installationID, domain, site.UsedBytes, site.LimitBytes, strings.TrimSpace(site.PlanName), strings.TrimSpace(site.PlanStatus), strings.Join(adminEmails, ","), now)
+		for _, adminEmail := range adminEmails {
+			if err != nil {
+				break
+			}
+			err = upsertRegistryAccountTx(ctx, transaction, adminEmail, now)
+		}
+	}
+	for _, plan := range snapshot.Plans {
+		if err != nil {
+			break
+		}
+		planName := strings.TrimSpace(plan.Name)
+		if planName == "" {
+			continue
+		}
+		defaultFlag := 0
+		if plan.IsDefault {
+			defaultFlag = 1
+		}
+		_, err = transaction.ExecContext(ctx, `INSERT INTO registry_installation_plans(installation_id,name,quota_bytes,site_limit,analytics_report_limit,price,currency,billing_period,is_default,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(installation_id,name) DO UPDATE SET quota_bytes=excluded.quota_bytes,site_limit=excluded.site_limit,analytics_report_limit=excluded.analytics_report_limit,price=excluded.price,currency=excluded.currency,billing_period=excluded.billing_period,is_default=excluded.is_default,updated_at=excluded.updated_at`,
+			installationID, planName, plan.QuotaBytes, plan.SiteLimit, plan.AnalyticsReportLimit, strings.TrimSpace(plan.Price), strings.TrimSpace(plan.Currency), strings.TrimSpace(plan.BillingPeriod), defaultFlag, now)
+	}
+	for _, role := range snapshot.Roles {
+		if err != nil {
+			break
+		}
+		email := strings.ToLower(strings.TrimSpace(role.Email))
+		roleName := strings.TrimSpace(role.Role)
+		scope := strings.TrimSpace(role.Scope)
+		domain := strings.ToLower(strings.TrimSpace(role.Domain))
+		if email == "" || roleName == "" {
+			continue
+		}
+		if scope == "" {
+			scope = "site"
+		}
+		if err = upsertRegistryAccountTx(ctx, transaction, email, now); err != nil {
+			break
+		}
+		_, err = transaction.ExecContext(ctx, `INSERT OR IGNORE INTO registry_installation_roles(installation_id,email,role,scope,domain,updated_at) VALUES(?,?,?,?,?,?)`,
+			installationID, email, roleName, scope, domain, now)
+	}
+	for _, event := range snapshot.Events {
+		if err != nil {
+			break
+		}
+		eventCreatedAt := strings.TrimSpace(event.CreatedAt)
+		if eventCreatedAt == "" {
+			eventCreatedAt = now
+		}
+		eventKey := registryEventKey(event)
+		if eventKey == "" {
+			continue
+		}
+		_, err = transaction.ExecContext(ctx, `INSERT OR IGNORE INTO registry_events(installation_id,event_key,kind,status,email,domain,message,created_at) VALUES(?,?,?,?,?,?,?,?)`,
+			installationID, eventKey, strings.TrimSpace(event.Kind), strings.TrimSpace(event.Status), strings.ToLower(strings.TrimSpace(event.Email)), strings.ToLower(strings.TrimSpace(event.Domain)), strings.TrimSpace(event.Message), eventCreatedAt)
 	}
 	if err != nil {
 		_ = transaction.Rollback()
+		_ = store.LogRegistrySyncEvent(ctx, installationID, "error", err.Error())
 		return err
 	}
-	return transaction.Commit()
+	if err = transaction.Commit(); err != nil {
+		_ = store.LogRegistrySyncEvent(ctx, installationID, "error", err.Error())
+		return err
+	}
+	return store.LogRegistrySyncEvent(ctx, installationID, "stored", "")
 }
 
 func normalizedHostingEmails(rawEmails []string) []string {
@@ -792,8 +924,45 @@ func normalizedHostingEmails(rawEmails []string) []string {
 	return emails
 }
 
+func upsertRegistryAccountTx(ctx context.Context, transaction *sql.Tx, email string, now string) error {
+	email = strings.ToLower(strings.TrimSpace(email))
+	if email == "" {
+		return nil
+	}
+	_, err := transaction.ExecContext(ctx, `INSERT INTO registry_accounts(email,first_seen_at,last_seen_at) VALUES(?,?,?) ON CONFLICT(email) DO UPDATE SET last_seen_at=excluded.last_seen_at`,
+		email, now, now)
+	return err
+}
+
+func registryEventKey(event HostingSnapshotEvent) string {
+	parts := []string{
+		strings.TrimSpace(event.Kind),
+		strings.TrimSpace(event.Status),
+		strings.ToLower(strings.TrimSpace(event.Email)),
+		strings.ToLower(strings.TrimSpace(event.Domain)),
+		strings.TrimSpace(event.Message),
+		strings.TrimSpace(event.CreatedAt),
+	}
+	joined := strings.Join(parts, "\n")
+	if strings.TrimSpace(joined) == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(joined))
+	return hex.EncodeToString(sum[:])
+}
+
+func (store Store) LogRegistrySyncEvent(ctx context.Context, installationID, status, errorMessage string) error {
+	installationID = strings.TrimSpace(installationID)
+	if installationID == "" {
+		return nil
+	}
+	_, err := store.DB.ExecContext(ctx, `INSERT INTO registry_sync_events(installation_id,status,error,created_at) VALUES(?,?,?,?)`,
+		installationID, strings.TrimSpace(status), strings.TrimSpace(errorMessage), time.Now().UTC().Format(time.RFC3339))
+	return err
+}
+
 func (store Store) ClientHostings(ctx context.Context) []ClientHosting {
-	rows, err := store.DB.QueryContext(ctx, `SELECT installation_id,owner_email,server_ip,storage_path,disk_free_bytes,disk_total_bytes,last_seen_at FROM client_hostings ORDER BY last_seen_at DESC,installation_id ASC`)
+	rows, err := store.DB.QueryContext(ctx, `SELECT installation_id,owner_email,server_ip,server_status,sitebrush_version,storage_path,disk_free_bytes,disk_total_bytes,last_seen_at FROM client_hostings ORDER BY last_seen_at DESC,installation_id ASC`)
 	if err != nil {
 		return nil
 	}
@@ -801,7 +970,7 @@ func (store Store) ClientHostings(ctx context.Context) []ClientHosting {
 	hostings := make([]ClientHosting, 0, 8)
 	for rows.Next() {
 		var hosting ClientHosting
-		if scanErr := rows.Scan(&hosting.InstallationID, &hosting.OwnerEmail, &hosting.ServerIP, &hosting.StoragePath, &hosting.DiskFreeBytes, &hosting.DiskTotalBytes, &hosting.LastSeenAt); scanErr != nil {
+		if scanErr := rows.Scan(&hosting.InstallationID, &hosting.OwnerEmail, &hosting.ServerIP, &hosting.ServerStatus, &hosting.SitebrushVersion, &hosting.StoragePath, &hosting.DiskFreeBytes, &hosting.DiskTotalBytes, &hosting.LastSeenAt); scanErr != nil {
 			continue
 		}
 		hosting.DiskFreeLabel = FormatFileSize(hosting.DiskFreeBytes)
@@ -828,7 +997,7 @@ func (store Store) ClientHostings(ctx context.Context) []ClientHosting {
 }
 
 func (store Store) clientHostingSites(ctx context.Context, installationID string) []ClientHostingSite {
-	rows, err := store.DB.QueryContext(ctx, `SELECT domain,used_bytes,limit_bytes,admin_emails FROM client_hosting_sites WHERE installation_id=? ORDER BY used_bytes DESC,domain ASC`, strings.TrimSpace(installationID))
+	rows, err := store.DB.QueryContext(ctx, `SELECT domain,used_bytes,limit_bytes,plan_name,plan_status,admin_emails FROM client_hosting_sites WHERE installation_id=? ORDER BY used_bytes DESC,domain ASC`, strings.TrimSpace(installationID))
 	if err != nil {
 		return nil
 	}
@@ -837,7 +1006,7 @@ func (store Store) clientHostingSites(ctx context.Context, installationID string
 	for rows.Next() {
 		var site ClientHostingSite
 		var adminEmails string
-		if scanErr := rows.Scan(&site.Domain, &site.UsedBytes, &site.LimitBytes, &adminEmails); scanErr != nil {
+		if scanErr := rows.Scan(&site.Domain, &site.UsedBytes, &site.LimitBytes, &site.PlanName, &site.PlanStatus, &adminEmails); scanErr != nil {
 			continue
 		}
 		site.AdminEmails = normalizedHostingEmails(strings.Split(adminEmails, ","))
@@ -846,6 +1015,59 @@ func (store Store) clientHostingSites(ctx context.Context, installationID string
 		sites = append(sites, site)
 	}
 	return sites
+}
+
+func (store Store) RegistrySyncEvents(ctx context.Context, limit int) []RegistrySyncEvent {
+	if limit <= 0 {
+		limit = 50
+	}
+	rows, err := store.DB.QueryContext(ctx, `SELECT id,installation_id,status,error,created_at FROM registry_sync_events ORDER BY id DESC LIMIT ?`, limit)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	events := make([]RegistrySyncEvent, 0, limit)
+	for rows.Next() {
+		var event RegistrySyncEvent
+		if scanErr := rows.Scan(&event.ID, &event.InstallationID, &event.Status, &event.Error, &event.CreatedAt); scanErr != nil {
+			continue
+		}
+		events = append(events, event)
+	}
+	return events
+}
+
+func (store Store) SitebrushComKey(ctx context.Context) SitebrushComKey {
+	var key SitebrushComKey
+	_ = store.DB.QueryRowContext(ctx, `SELECT public_key,fingerprint,created_at,updated_at FROM sitebrush_com_keys WHERE domain='sitebrush.com'`).Scan(
+		&key.PublicKey, &key.Fingerprint, &key.CreatedAt, &key.UpdatedAt)
+	return key
+}
+
+func (store Store) SaveSitebrushComKey(ctx context.Context, publicKey, privateKey string) (SitebrushComKey, error) {
+	publicKey = strings.TrimSpace(publicKey)
+	privateKey = strings.TrimSpace(privateKey)
+	if publicKey == "" || privateKey == "" {
+		return SitebrushComKey{}, fmt.Errorf("public and private key are required")
+	}
+	fingerprint := FingerprintPublicKey(publicKey)
+	now := time.Now().UTC().Format(time.RFC3339)
+	_, err := store.DB.ExecContext(ctx, `INSERT INTO sitebrush_com_keys(domain,public_key,private_key,fingerprint,created_at,updated_at) VALUES('sitebrush.com',?,?,?,?,?) ON CONFLICT(domain) DO UPDATE SET public_key=excluded.public_key,private_key=excluded.private_key,fingerprint=excluded.fingerprint,updated_at=excluded.updated_at`,
+		publicKey, privateKey, fingerprint, now, now)
+	if err != nil {
+		return SitebrushComKey{}, err
+	}
+	return store.SitebrushComKey(ctx), nil
+}
+
+func FingerprintPublicKey(publicKey string) string {
+	sum := sha256.Sum256([]byte(strings.TrimSpace(publicKey)))
+	encoded := hex.EncodeToString(sum[:])
+	groups := make([]string, 0, 8)
+	for index := 0; index < len(encoded) && index < 32; index += 4 {
+		groups = append(groups, encoded[index:index+4])
+	}
+	return strings.Join(groups, ":")
 }
 
 func sortedStringsFromMap(values map[string]struct{}) []string {

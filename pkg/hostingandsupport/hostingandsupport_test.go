@@ -26,14 +26,20 @@ func TestBuildSitesMarksOnlyServerMainDomain(t *testing.T) {
 	if len(sites) != 2 {
 		t.Fatalf("sites = %d, want 2", len(sites))
 	}
-	if !sites[0].IsMainDomain {
-		t.Fatalf("main domain site was not marked: %#v", sites[0])
+	sitesByDomain := make(map[string]Site, len(sites))
+	for _, site := range sites {
+		sitesByDomain[site.Domain] = site
 	}
-	if sites[1].IsMainDomain {
-		t.Fatalf("client subdomain with second-level alias was marked as main: %#v", sites[1])
+	mainSite := sitesByDomain["example.com"]
+	clientSite := sitesByDomain["client.example.com"]
+	if !mainSite.IsMainDomain {
+		t.Fatalf("main domain site was not marked: %#v", mainSite)
 	}
-	if sites[1].Aliases != "client.com" {
-		t.Fatalf("client aliases = %q, want client.com", sites[1].Aliases)
+	if clientSite.IsMainDomain {
+		t.Fatalf("client subdomain with second-level alias was marked as main: %#v", clientSite)
+	}
+	if clientSite.Aliases != "client.com" {
+		t.Fatalf("client aliases = %q, want client.com", clientSite.Aliases)
 	}
 }
 

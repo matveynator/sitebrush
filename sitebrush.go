@@ -9610,6 +9610,8 @@ func (a *App) handleHostingAndSupportAction(r *http.Request) string {
 		return a.saveHostingAndSupportRegistrationSettingsFromForm(r)
 	case "service_mail_settings":
 		return a.saveHostingAndSupportServiceMailSettingsFromForm(r)
+	case "generate_sitebrush_com_key":
+		return a.generateSitebrushComKeyFromForm(r)
 	case "demo_settings":
 		return a.saveHostingAndSupportDemoSettingsFromForm(r)
 	case "create_site":
@@ -9656,6 +9658,8 @@ func (a *App) hostingAndSupportView(ctx context.Context, r *http.Request) (map[s
 	serviceMailEvents := store.ServiceMailEvents(ctx, 200)
 	serviceMailBlocks := store.ServiceMailBlocks(ctx)
 	clientHostings := store.ClientHostings(ctx)
+	registrySyncEvents := store.RegistrySyncEvents(ctx, 40)
+	sitebrushComKey := store.SitebrushComKey(ctx)
 	serviceMailRelayEnabled := store.ServiceMailRelayEnabled(ctx)
 	demoSettings := (demo.Store{DB: controlDatabase}).Settings(ctx)
 	hostingAndSupportDemoDomain := ""
@@ -9682,6 +9686,8 @@ func (a *App) hostingAndSupportView(ctx context.Context, r *http.Request) (map[s
 		"ServiceMailInstallations":    serviceMailInstallations,
 		"ServiceMailEvents":           serviceMailEvents,
 		"ClientHostings":              clientHostings,
+		"RegistrySyncEvents":          registrySyncEvents,
+		"SitebrushComKey":             sitebrushComKey,
 		"Clients":                     serviceMailUsers,
 		"ClientCount":                 len(serviceMailUsers),
 		"ClientSiteCount":             clientSiteCount,
@@ -9999,7 +10005,7 @@ func hostingAndSupportClientSiteViews(sites map[string]hostingAndSupportClientSi
 		view := hostingAndSupportClientSiteView{Domain: domain, URL: strings.TrimSpace(siteSource.url), UsedBytes: siteSource.usedBytes, UsedLabel: siteSource.usedLabel, InstallationIP: strings.TrimSpace(siteSource.ip)}
 		if hostingAndSupportDomainIsLocalDevelopment(domain, view.InstallationIP) {
 			view.LocalDevelopment = true
-			view.Status = "локальная разработка"
+			view.Status = hostingAndSupportInstallationStatus(domain, view.InstallationIP)
 		} else if parentDomain := hostingAndSupportKnownParentDomain(domain, knownSiteDomains); parentDomain != "" {
 			view.HostingSitebrush = true
 			view.ParentDomain = parentDomain
@@ -10020,6 +10026,28 @@ func hostingAndSupportClientSiteViews(sites map[string]hostingAndSupportClientSi
 		return views[left].Domain < views[right].Domain
 	})
 	return views
+}
+
+func hostingAndSupportInstallationStatus(domain string, sourceIP string) string {
+	domain = normalizeDomainName(domain)
+	sourceIP = strings.TrimSpace(sourceIP)
+	if sourceIP == "" {
+		return "IP не получен"
+	}
+	if domain == "localhost" || strings.HasSuffix(domain, ".localhost") {
+		return "localhost · " + sourceIP
+	}
+	if net.ParseIP(domain) != nil {
+		return "IP-сайт · " + sourceIP
+	}
+	parsedIP := net.ParseIP(sourceIP)
+	if parsedIP == nil {
+		return "IP " + sourceIP
+	}
+	if parsedIP.IsLoopback() || parsedIP.IsPrivate() || parsedIP.IsUnspecified() {
+		return "частный IP " + sourceIP
+	}
+	return "IP " + sourceIP
 }
 
 func hostingAndSupportDomainIsLocalDevelopment(domain string, sourceIP string) bool {
@@ -10334,6 +10362,24 @@ func (a *App) saveHostingAndSupportServiceMailSettingsFromForm(r *http.Request) 
 		return err.Error()
 	}
 	return translationOrDefault(translationsForRequest(r), "billing_status_settings_saved", "Billing settings saved.")
+}
+
+func (a *App) generateSitebrushComKeyFromForm(r *http.Request) string {
+	controlDatabase, err := a.openServerControlDatabase(r.Context())
+	if err != nil {
+		return err.Error()
+	}
+	defer controlDatabase.Close()
+	privateKey, err := ecdh.X25519().GenerateKey(rand.Reader)
+	if err != nil {
+		return err.Error()
+	}
+	publicKeyText := base64.StdEncoding.EncodeToString(privateKey.PublicKey().Bytes())
+	privateKeyText := base64.StdEncoding.EncodeToString(privateKey.Bytes())
+	if _, err := (hostingandsupport.Store{DB: controlDatabase}).SaveSitebrushComKey(r.Context(), publicKeyText, privateKeyText); err != nil {
+		return err.Error()
+	}
+	return "sitebrush.com public key generated."
 }
 
 func (a *App) saveHostingAndSupportDemoSettingsFromForm(r *http.Request) string {
@@ -12456,6 +12502,25 @@ func serviceMailDecodeRelayRequest(requestBody []byte, fallbackRelayDomain strin
 	return request, nil
 }
 
+func (a *App) decodeServiceMailRelayRequest(ctx context.Context, requestBody []byte, fallbackRelayDomain string) (serviceMailRequest, error) {
+	var envelope serviceMailEncryptedEnvelope
+	if err := json.Unmarshal(requestBody, &envelope); err == nil && envelope.Encrypted {
+		decryptedBody, decryptErr := a.decryptServiceMailRelayEnvelope(ctx, envelope, fallbackRelayDomain)
+		if decryptErr != nil {
+			return serviceMailRequest{}, decryptErr
+		}
+		requestBody = decryptedBody
+	}
+	var request serviceMailRequest
+	if err := json.Unmarshal(requestBody, &request); err != nil {
+		return serviceMailRequest{}, err
+	}
+	if strings.TrimSpace(request.CodeKind) == "hosting_snapshot" && !envelope.Encrypted {
+		return serviceMailRequest{}, errors.New("hosting snapshot must be encrypted")
+	}
+	return request, nil
+}
+
 func serviceMailDecryptRelayEnvelope(envelope serviceMailEncryptedEnvelope, fallbackRelayDomain string) ([]byte, error) {
 	privateKeyBytes, found := serviceMailRelayPrivateKeyForDomain(firstNonEmpty(envelope.RelayDomain, fallbackRelayDomain))
 	if !found {
@@ -12495,6 +12560,72 @@ func serviceMailDecryptRelayEnvelope(envelope serviceMailEncryptedEnvelope, fall
 		return nil, err
 	}
 	return gcm.Open(nil, nonce, ciphertext, nil)
+}
+
+func (a *App) decryptServiceMailRelayEnvelope(ctx context.Context, envelope serviceMailEncryptedEnvelope, fallbackRelayDomain string) ([]byte, error) {
+	relayDomain := firstNonEmpty(envelope.RelayDomain, fallbackRelayDomain)
+	privateKeyBytes, found := serviceMailRelayPrivateKeyForDomain(relayDomain)
+	if !found && a != nil {
+		privateKeyBytes, found = a.serviceMailRelayPrivateKeyFromControlDatabase(ctx, relayDomain)
+	}
+	if !found {
+		return nil, errors.New("relay private key is not configured")
+	}
+	return serviceMailDecryptRelayEnvelopeWithPrivateKey(envelope, privateKeyBytes)
+}
+
+func serviceMailDecryptRelayEnvelopeWithPrivateKey(envelope serviceMailEncryptedEnvelope, privateKeyBytes []byte) ([]byte, error) {
+	relayPrivateKey, err := ecdh.X25519().NewPrivateKey(privateKeyBytes)
+	if err != nil {
+		return nil, err
+	}
+	ephemeralPublicKeyBytes, err := base64.StdEncoding.DecodeString(strings.TrimSpace(envelope.EphemeralPublicKey))
+	if err != nil {
+		return nil, err
+	}
+	ephemeralPublicKey, err := ecdh.X25519().NewPublicKey(ephemeralPublicKeyBytes)
+	if err != nil {
+		return nil, err
+	}
+	sharedSecret, err := relayPrivateKey.ECDH(ephemeralPublicKey)
+	if err != nil {
+		return nil, err
+	}
+	encryptionKey := sha256.Sum256(append([]byte("sitebrush service mail relay\n"), sharedSecret...))
+	block, err := aes.NewCipher(encryptionKey[:])
+	if err != nil {
+		return nil, err
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, err
+	}
+	nonce, err := base64.StdEncoding.DecodeString(strings.TrimSpace(envelope.Nonce))
+	if err != nil {
+		return nil, err
+	}
+	ciphertext, err := base64.StdEncoding.DecodeString(strings.TrimSpace(envelope.Ciphertext))
+	if err != nil {
+		return nil, err
+	}
+	return gcm.Open(nil, nonce, ciphertext, nil)
+}
+
+func (a *App) serviceMailRelayPrivateKeyFromControlDatabase(ctx context.Context, relayDomain string) ([]byte, bool) {
+	if normalizeDomainName(relayDomain) != "sitebrush.com" {
+		return nil, false
+	}
+	controlDatabase, err := a.openServerControlDatabase(ctx)
+	if err != nil {
+		return nil, false
+	}
+	defer controlDatabase.Close()
+	privateKeyText := hostingandsupport.SettingText(ctx, controlDatabase, "sitebrush_com_private_key")
+	if privateKeyText == "" {
+		_ = controlDatabase.QueryRowContext(ctx, `SELECT private_key FROM sitebrush_com_keys WHERE domain='sitebrush.com'`).Scan(&privateKeyText)
+	}
+	privateKeyBytes, decodeErr := base64.StdEncoding.DecodeString(strings.TrimSpace(privateKeyText))
+	return privateKeyBytes, decodeErr == nil && len(privateKeyBytes) == 32
 }
 
 func serviceMailRelayPublicKeyForURL(relayURL string) ([]byte, bool) {
@@ -12646,6 +12777,20 @@ func (a *App) reportHostingSnapshotWithTimeout(ctx context.Context) {
 }
 
 func (a *App) reportHostingSnapshot(ctx context.Context) error {
+	snapshotURLs := centralHostingSnapshotURLs()
+	encryptedSnapshotURLs := make([]string, 0, len(snapshotURLs))
+	for _, snapshotURL := range snapshotURLs {
+		if strings.TrimSpace(snapshotURL) == "" {
+			continue
+		}
+		if _, found := serviceMailRelayPublicKeyForURL(snapshotURL); !found {
+			continue
+		}
+		encryptedSnapshotURLs = append(encryptedSnapshotURLs, snapshotURL)
+	}
+	if len(encryptedSnapshotURLs) == 0 {
+		return fmt.Errorf("hosting snapshot encryption key is not configured for %s", serviceMailRelayDomainFromURL(firstNonEmpty(snapshotURLs...)))
+	}
 	snapshot, err := a.buildHostingSnapshot(ctx)
 	if err != nil {
 		return err
@@ -12667,11 +12812,16 @@ func (a *App) reportHostingSnapshot(ctx context.Context) error {
 		return err
 	}
 	var lastErr error
-	for _, snapshotURL := range centralHostingSnapshotURLs() {
+	for _, snapshotURL := range encryptedSnapshotURLs {
 		if strings.TrimSpace(snapshotURL) == "" {
 			continue
 		}
-		if err := postServiceMailRelayPayload(ctx, snapshotURL, payload); err != nil {
+		encryptedPayload, err := serviceMailEncryptPayloadForRelay(snapshotURL, payload)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		if err := postServiceMailRelayPayload(ctx, snapshotURL, encryptedPayload); err != nil {
 			lastErr = err
 			continue
 		}
@@ -12692,33 +12842,96 @@ func (a *App) buildHostingSnapshot(ctx context.Context) (hostingandsupport.Hosti
 	if err != nil {
 		return hostingandsupport.HostingSnapshot{}, err
 	}
+	controlDatabase, err := a.openServerControlDatabase(ctx)
+	if err != nil {
+		return hostingandsupport.HostingSnapshot{}, err
+	}
+	defer controlDatabase.Close()
+	store := hostingandsupport.Store{DB: controlDatabase}
+	plans := store.Plans(ctx)
+	assignments := store.ServiceAssignments(ctx)
+	plansByID := make(map[int]hostingandsupport.Plan, len(plans))
+	for _, plan := range plans {
+		plansByID[plan.ID] = plan
+	}
 	_, serverIP, _ := detectServerIPCandidates(ctx)
 	storageRoot := a.storageRootDir()
 	freeBytes, totalBytes, diskOK := diskusage.DiskSpace(storageRoot)
 	snapshot := hostingandsupport.HostingSnapshot{
-		Version:        1,
-		InstallationID: installationID,
-		ServerIP:       serverIP,
-		StoragePath:    storageRoot,
-		CreatedAt:      time.Now().UTC().Format(time.RFC3339),
+		Version:          1,
+		InstallationID:   installationID,
+		ServerIP:         serverIP,
+		ServerStatus:     hostingSnapshotServerStatus(serverIP),
+		SitebrushVersion: CompileVersion,
+		StoragePath:      storageRoot,
+		CreatedAt:        time.Now().UTC().Format(time.RFC3339),
 	}
 	if diskOK {
 		snapshot.DiskFreeBytes = int64(freeBytes)
 		snapshot.DiskTotalBytes = int64(totalBytes)
 	}
+	for _, plan := range plans {
+		snapshot.Plans = append(snapshot.Plans, hostingandsupport.HostingSnapshotPlan{
+			Name:                 plan.Name,
+			QuotaBytes:           plan.QuotaBytes,
+			SiteLimit:            plan.SiteLimit,
+			AnalyticsReportLimit: plan.AnalyticsReportLimit,
+			Price:                plan.Price,
+			Currency:             plan.Currency,
+			BillingPeriod:        plan.BillingPeriod,
+			IsDefault:            plan.IsDefault,
+		})
+	}
 	for _, row := range rows {
+		assignment := assignments[normalizeDomainName(row.Domain)]
+		planName := ""
+		if plan, found := plansByID[assignment.PlanID]; found {
+			planName = plan.Name
+		}
 		site := hostingandsupport.HostingSnapshotSite{
 			Domain:      row.Domain,
 			UsedBytes:   row.UsedBytes,
 			LimitBytes:  row.LimitBytes,
+			PlanName:    planName,
+			PlanStatus:  assignment.ServiceStatus,
 			AdminEmails: row.AdminEmails,
 		}
 		if snapshot.OwnerEmail == "" && len(row.AdminEmails) > 0 {
 			snapshot.OwnerEmail = strings.ToLower(strings.TrimSpace(row.AdminEmails[0]))
 		}
+		for _, adminEmail := range row.AdminEmails {
+			snapshot.Roles = append(snapshot.Roles, hostingandsupport.HostingSnapshotRole{
+				Email:  adminEmail,
+				Role:   "site_admin",
+				Scope:  "site",
+				Domain: row.Domain,
+			})
+		}
 		snapshot.Sites = append(snapshot.Sites, site)
 	}
+	for _, ownerEmail := range store.OwnerEmails(ctx) {
+		snapshot.Roles = append(snapshot.Roles, hostingandsupport.HostingSnapshotRole{
+			Email: ownerEmail,
+			Role:  "superadmin",
+			Scope: "installation",
+		})
+	}
 	return snapshot, nil
+}
+
+func hostingSnapshotServerStatus(serverIP string) string {
+	serverIP = strings.TrimSpace(serverIP)
+	if serverIP == "" {
+		return "external IP unavailable"
+	}
+	parsedIP := net.ParseIP(serverIP)
+	if parsedIP == nil {
+		return "IP " + serverIP
+	}
+	if parsedIP.IsLoopback() || parsedIP.IsPrivate() || parsedIP.IsUnspecified() {
+		return "private IP " + serverIP
+	}
+	return "IP " + serverIP
 }
 
 func (a *App) sendServiceMailThroughRelay(ctx context.Context, relayURL string, request *serviceMailRequest) error {
@@ -12789,7 +13002,7 @@ func (a *App) serviceMailRelayEndpoint(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
-	request, err := serviceMailDecodeRelayRequest(requestBody, a.siteDomain(r.Context(), r))
+	request, err := a.decodeServiceMailRelayRequest(r.Context(), requestBody, a.siteDomain(r.Context(), r))
 	if err != nil {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
@@ -12814,8 +13027,8 @@ func (a *App) hostingSnapshotEndpoint(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
-	var request serviceMailRequest
-	if err := json.Unmarshal(requestBody, &request); err != nil {
+	request, err := a.decodeServiceMailRelayRequest(r.Context(), requestBody, a.siteDomain(r.Context(), r))
+	if err != nil {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
@@ -12844,9 +13057,13 @@ func (a *App) handleHostingSnapshotRequest(ctx context.Context, request serviceM
 	}
 	defer controlDatabase.Close()
 	store := hostingandsupport.Store{DB: controlDatabase}
+	fail := func(message string, statusCode int) (string, int) {
+		_ = store.LogRegistrySyncEvent(ctx, request.InstallationID, "error", message)
+		return message, statusCode
+	}
 	knownPublicKey, installationFound := store.ServiceMailInstallationPublicKey(ctx, request.InstallationID)
 	if installationFound && strings.TrimSpace(knownPublicKey) != strings.TrimSpace(request.PublicKey) {
-		return "installation public key changed", http.StatusForbidden
+		return fail("installation public key changed", http.StatusForbidden)
 	}
 	snapshot := *request.HostingSnapshot
 	snapshot.InstallationID = request.InstallationID
@@ -12854,10 +13071,10 @@ func (a *App) handleHostingSnapshotRequest(ctx context.Context, request serviceM
 		snapshot.ServerIP = strings.TrimSpace(sourceIP)
 	}
 	if err := store.UpsertServiceMailInstallation(ctx, request.InstallationID, request.PublicKey, snapshot.ServerIP, snapshotOwnerDomain(snapshot)); err != nil {
-		return err.Error(), http.StatusBadRequest
+		return fail(err.Error(), http.StatusBadRequest)
 	}
 	if err := store.SaveHostingSnapshot(ctx, snapshot); err != nil {
-		return err.Error(), http.StatusBadRequest
+		return fail(err.Error(), http.StatusBadRequest)
 	}
 	return "stored", http.StatusOK
 }
