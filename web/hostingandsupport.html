@@ -467,7 +467,7 @@
             <div class="billing-quota-bar" aria-label="{{index $.T "billing_used_percent"}} {{$site.UsedPercent}}%">
               <div style="width:{{$site.UsedPercent}}%"></div>
             </div>
-            <div class="text-muted small">{{index $.T "billing_used_label"}} {{$site.UsedLabel}} / {{$site.LimitLabel}}, {{index $.T "billing_free_label"}} {{$site.FreeLabel}}</div>
+            <div class="text-muted small">{{index $.T "billing_used_label"}} {{$site.UsedLabel}} / выделено {{$site.LimitLabel}}{{if $site.PlanName}} · тариф {{$site.PlanName}}{{if $site.PlanQuotaLabel}} ({{$site.PlanQuotaLabel}}){{end}}{{else}} · тариф не назначен{{end}}, {{index $.T "billing_free_label"}} {{$site.FreeLabel}}</div>
           </div>
           {{if not $site.IsDemo}}<form method="post" action="?hosting_and_support" class="billing-site-form" data-billing-ajax-save>
             <input type="hidden" name="billing_action" value="update_site">

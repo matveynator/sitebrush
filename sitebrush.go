@@ -119,7 +119,7 @@ const serviceMailPerRecipientHourLimit = 12
 const serviceMailPerRecipientDomainHourLimit = 300
 const serviceMailNewRecipientDayLimit = 3
 
-var sitebrushComServiceMailRelayPublicKey = ""
+var sitebrushComServiceMailRelayPublicKey = "axM/Ha8N6Ci/IiLs2SqULfu1DVlQKrkswNsOPgnx4kY="
 var sitebrushRuServiceMailRelayPublicKey = ""
 
 // App keeps only explicit dependencies to stay readable and easy to swap.

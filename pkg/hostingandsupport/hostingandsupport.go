@@ -51,6 +51,8 @@ type Site struct {
 	UsedPercent       int
 	QuotaInput        string
 	PlanID            int
+	PlanName          string
+	PlanQuotaLabel    string
 	ServiceStatus     string
 	AdminEmails       string
 	CanDelete         bool
@@ -1502,29 +1504,37 @@ func BuildSitesWithDemoAndMainDomain(usages []SiteUsage, plans []Plan, assignmen
 			assignment.ServiceStatus = "free"
 		}
 		quotaInput := FormatQuotaInput(usage.LimitBytes)
+		planName := ""
+		planQuotaLabel := ""
 		if assignment.PlanID > 0 {
-			if plan, found := planByID[assignment.PlanID]; found && plan.QuotaBytes > 0 {
-				quotaInput = FormatQuotaInput(plan.QuotaBytes)
+			if plan, found := planByID[assignment.PlanID]; found {
+				planName = plan.Name
+				planQuotaLabel = plan.QuotaLabel
+				if plan.QuotaBytes > 0 {
+					quotaInput = FormatQuotaInput(plan.QuotaBytes)
+				}
 			}
 		}
 		isDemo := strings.TrimSpace(usage.Domain) != "" && strings.EqualFold(strings.TrimSpace(usage.Domain), strings.TrimSpace(demoDomain))
 		isMainDomain := mainDomain != "" && strings.EqualFold(strings.TrimSpace(usage.Domain), mainDomain)
 		sites = append(sites, Site{
-			Domain:        usage.Domain,
-			IsDemo:        isDemo,
-			IsMainDomain:  isMainDomain,
-			Aliases:       strings.Join(usage.Aliases, ", "),
-			UsedBytes:     usage.UsedBytes,
-			UsedLabel:     FormatFileSize(usage.UsedBytes),
-			LimitLabel:    FormatFileSize(usage.LimitBytes),
-			FreeLabel:     FormatFileSize(freeBytes),
-			UsedPercent:   usedPercent,
-			QuotaInput:    quotaInput,
-			PlanID:        assignment.PlanID,
-			ServiceStatus: assignment.ServiceStatus,
-			AdminEmails:   strings.Join(usage.AdminEmails, ", "),
-			CanDelete:     !isDemo && strings.TrimSpace(usage.Domain) != strings.TrimSpace(currentDomain),
-			DatabasePath:  usage.DatabasePath,
+			Domain:         usage.Domain,
+			IsDemo:         isDemo,
+			IsMainDomain:   isMainDomain,
+			Aliases:        strings.Join(usage.Aliases, ", "),
+			UsedBytes:      usage.UsedBytes,
+			UsedLabel:      FormatFileSize(usage.UsedBytes),
+			LimitLabel:     FormatFileSize(usage.LimitBytes),
+			FreeLabel:      FormatFileSize(freeBytes),
+			UsedPercent:    usedPercent,
+			QuotaInput:     quotaInput,
+			PlanID:         assignment.PlanID,
+			PlanName:       planName,
+			PlanQuotaLabel: planQuotaLabel,
+			ServiceStatus:  assignment.ServiceStatus,
+			AdminEmails:    strings.Join(usage.AdminEmails, ", "),
+			CanDelete:      !isDemo && strings.TrimSpace(usage.Domain) != strings.TrimSpace(currentDomain),
+			DatabasePath:   usage.DatabasePath,
 		})
 	}
 	sort.Slice(sites, func(left, right int) bool {

@@ -43,6 +43,43 @@ func TestBuildSitesMarksOnlyServerMainDomain(t *testing.T) {
 	}
 }
 
+func TestBuildSitesIncludesAssignedPlanQuotaLabels(t *testing.T) {
+	plans := []Plan{{
+		ID:         7,
+		Name:       "Pro",
+		QuotaBytes: 20 * 1024 * 1024 * 1024,
+		QuotaLabel: "20 GB",
+	}}
+	assignments := map[string]ServiceAssignment{
+		"paid.example.com": {PlanID: 7, ServiceStatus: "paid"},
+	}
+	sites := BuildSitesWithDemoAndMainDomain([]SiteUsage{
+		{
+			Domain:     "paid.example.com",
+			UsedBytes:  5 * 1024 * 1024 * 1024,
+			LimitBytes: 20 * 1024 * 1024 * 1024,
+		},
+		{
+			Domain:     "free.example.com",
+			UsedBytes:  1024,
+			LimitBytes: DefaultStorageLimitBytes,
+		},
+	}, plans, assignments, "paid.example.com", "", "")
+
+	sitesByDomain := make(map[string]Site, len(sites))
+	for _, site := range sites {
+		sitesByDomain[site.Domain] = site
+	}
+	paidSite := sitesByDomain["paid.example.com"]
+	if paidSite.PlanName != "Pro" || paidSite.PlanQuotaLabel != "20 GB" {
+		t.Fatalf("paid site plan = %q %q, want Pro 20 GB", paidSite.PlanName, paidSite.PlanQuotaLabel)
+	}
+	freeSite := sitesByDomain["free.example.com"]
+	if freeSite.PlanName != "" || freeSite.PlanQuotaLabel != "" {
+		t.Fatalf("free site plan = %q %q, want empty labels", freeSite.PlanName, freeSite.PlanQuotaLabel)
+	}
+}
+
 func TestServiceMailInstallationsDoesNotBlockSingleConnectionDatabase(t *testing.T) {
 	database, err := sql.Open("sqlite3", filepath.Join(t.TempDir(), "hostingandsupport.db"))
 	if err != nil {
