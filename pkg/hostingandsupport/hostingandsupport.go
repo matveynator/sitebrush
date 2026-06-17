@@ -230,10 +230,11 @@ type RegistrySyncEvent struct {
 }
 
 type SitebrushComKey struct {
-	PublicKey   string
-	Fingerprint string
-	CreatedAt   string
-	UpdatedAt   string
+	PublicKey      string
+	Fingerprint    string
+	PrivateKeyPath string
+	CreatedAt      string
+	UpdatedAt      string
 }
 
 type DeletionBackupMetadata struct {
@@ -290,7 +291,7 @@ func Migrate(ctx context.Context, database *sql.DB) error {
 		`CREATE TABLE IF NOT EXISTS registry_events(id INTEGER PRIMARY KEY AUTOINCREMENT,installation_id TEXT,event_key TEXT,kind TEXT,status TEXT,email TEXT,domain TEXT,message TEXT,created_at TEXT,UNIQUE(installation_id,event_key));`,
 		`CREATE TABLE IF NOT EXISTS registry_sync_events(id INTEGER PRIMARY KEY AUTOINCREMENT,installation_id TEXT,status TEXT,error TEXT,created_at TEXT);`,
 		`CREATE INDEX IF NOT EXISTS idx_registry_sync_events_installation_created ON registry_sync_events(installation_id,created_at);`,
-		`CREATE TABLE IF NOT EXISTS sitebrush_com_keys(domain TEXT PRIMARY KEY,public_key TEXT,private_key TEXT,fingerprint TEXT,created_at TEXT,updated_at TEXT);`,
+		`CREATE TABLE IF NOT EXISTS sitebrush_com_keys(domain TEXT PRIMARY KEY,public_key TEXT,private_key_path TEXT,fingerprint TEXT,created_at TEXT,updated_at TEXT);`,
 	}
 	queries = append(queries, demo.SchemaQueries()...)
 	for queryIndex, query := range queries {
@@ -378,6 +379,7 @@ func requiredHostingAndSupportColumns() []hostingAndSupportColumn {
 		{tableName: "client_hostings", columnName: "sitebrush_version", definition: "TEXT"},
 		{tableName: "client_hosting_sites", columnName: "plan_name", definition: "TEXT"},
 		{tableName: "client_hosting_sites", columnName: "plan_status", definition: "TEXT"},
+		{tableName: "sitebrush_com_keys", columnName: "private_key_path", definition: "TEXT"},
 	}
 }
 
@@ -1039,25 +1041,35 @@ func (store Store) RegistrySyncEvents(ctx context.Context, limit int) []Registry
 
 func (store Store) SitebrushComKey(ctx context.Context) SitebrushComKey {
 	var key SitebrushComKey
-	_ = store.DB.QueryRowContext(ctx, `SELECT public_key,fingerprint,created_at,updated_at FROM sitebrush_com_keys WHERE domain='sitebrush.com'`).Scan(
-		&key.PublicKey, &key.Fingerprint, &key.CreatedAt, &key.UpdatedAt)
+	_ = store.DB.QueryRowContext(ctx, `SELECT public_key,fingerprint,private_key_path,created_at,updated_at FROM sitebrush_com_keys WHERE domain='sitebrush.com'`).Scan(
+		&key.PublicKey, &key.Fingerprint, &key.PrivateKeyPath, &key.CreatedAt, &key.UpdatedAt)
 	return key
 }
 
-func (store Store) SaveSitebrushComKey(ctx context.Context, publicKey, privateKey string) (SitebrushComKey, error) {
+func (store Store) SaveSitebrushComKey(ctx context.Context, publicKey, privateKeyPath string) (SitebrushComKey, error) {
 	publicKey = strings.TrimSpace(publicKey)
-	privateKey = strings.TrimSpace(privateKey)
-	if publicKey == "" || privateKey == "" {
-		return SitebrushComKey{}, fmt.Errorf("public and private key are required")
+	privateKeyPath = strings.TrimSpace(privateKeyPath)
+	if publicKey == "" || privateKeyPath == "" {
+		return SitebrushComKey{}, fmt.Errorf("public key and private key path are required")
 	}
 	fingerprint := FingerprintPublicKey(publicKey)
 	now := time.Now().UTC().Format(time.RFC3339)
-	_, err := store.DB.ExecContext(ctx, `INSERT INTO sitebrush_com_keys(domain,public_key,private_key,fingerprint,created_at,updated_at) VALUES('sitebrush.com',?,?,?,?,?) ON CONFLICT(domain) DO UPDATE SET public_key=excluded.public_key,private_key=excluded.private_key,fingerprint=excluded.fingerprint,updated_at=excluded.updated_at`,
-		publicKey, privateKey, fingerprint, now, now)
+	_, err := store.DB.ExecContext(ctx, `INSERT INTO sitebrush_com_keys(domain,public_key,private_key_path,fingerprint,created_at,updated_at) VALUES('sitebrush.com',?,?,?,?,?) ON CONFLICT(domain) DO UPDATE SET public_key=excluded.public_key,private_key_path=excluded.private_key_path,fingerprint=excluded.fingerprint,updated_at=excluded.updated_at`,
+		publicKey, privateKeyPath, fingerprint, now, now)
 	if err != nil {
 		return SitebrushComKey{}, err
 	}
+	_ = store.clearLegacySitebrushComPrivateKey(ctx)
 	return store.SitebrushComKey(ctx), nil
+}
+
+func (store Store) clearLegacySitebrushComPrivateKey(ctx context.Context) error {
+	found, err := hostingAndSupportColumnExists(ctx, store.DB, "sitebrush_com_keys", "private_key")
+	if err != nil || !found {
+		return err
+	}
+	_, err = store.DB.ExecContext(ctx, `UPDATE sitebrush_com_keys SET private_key='' WHERE domain='sitebrush.com'`)
+	return err
 }
 
 func FingerprintPublicKey(publicKey string) string {

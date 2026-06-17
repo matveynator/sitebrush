@@ -9659,6 +9659,7 @@ func (a *App) hostingAndSupportView(ctx context.Context, r *http.Request) (map[s
 	serviceMailBlocks := store.ServiceMailBlocks(ctx)
 	clientHostings := store.ClientHostings(ctx)
 	registrySyncEvents := store.RegistrySyncEvents(ctx, 40)
+	_ = a.migrateLegacySitebrushComPrivateKey(ctx, controlDatabase)
 	sitebrushComKey := store.SitebrushComKey(ctx)
 	serviceMailRelayEnabled := store.ServiceMailRelayEnabled(ctx)
 	demoSettings := (demo.Store{DB: controlDatabase}).Settings(ctx)
@@ -10376,10 +10377,60 @@ func (a *App) generateSitebrushComKeyFromForm(r *http.Request) string {
 	}
 	publicKeyText := base64.StdEncoding.EncodeToString(privateKey.PublicKey().Bytes())
 	privateKeyText := base64.StdEncoding.EncodeToString(privateKey.Bytes())
-	if _, err := (hostingandsupport.Store{DB: controlDatabase}).SaveSitebrushComKey(r.Context(), publicKeyText, privateKeyText); err != nil {
+	privateKeyPath, err := a.writeSitebrushComPrivateKeyFile(privateKeyText)
+	if err != nil {
+		return err.Error()
+	}
+	if _, err := (hostingandsupport.Store{DB: controlDatabase}).SaveSitebrushComKey(r.Context(), publicKeyText, privateKeyPath); err != nil {
 		return err.Error()
 	}
 	return "sitebrush.com public key generated."
+}
+
+func (a *App) writeSitebrushComPrivateKeyFile(privateKeyText string) (string, error) {
+	keysRootDirectory := filepath.Join(a.storageRootDir(), "keys")
+	keyDirectory := filepath.Join(keysRootDirectory, "sitebrush.com")
+	if err := os.MkdirAll(keyDirectory, 0o700); err != nil {
+		return "", err
+	}
+	if err := os.Chmod(keysRootDirectory, 0o700); err != nil {
+		return "", err
+	}
+	if err := os.Chmod(keyDirectory, 0o700); err != nil {
+		return "", err
+	}
+	privateKeyPath := filepath.Join(keyDirectory, "relay-x25519.private")
+	temporaryPath := privateKeyPath + ".tmp"
+	if err := os.WriteFile(temporaryPath, []byte(strings.TrimSpace(privateKeyText)+"\n"), 0o600); err != nil {
+		return "", err
+	}
+	if err := os.Chmod(temporaryPath, 0o600); err != nil {
+		_ = os.Remove(temporaryPath)
+		return "", err
+	}
+	if err := os.Rename(temporaryPath, privateKeyPath); err != nil {
+		_ = os.Remove(temporaryPath)
+		return "", err
+	}
+	if err := os.Chmod(privateKeyPath, 0o600); err != nil {
+		return "", err
+	}
+	return privateKeyPath, nil
+}
+
+func (a *App) migrateLegacySitebrushComPrivateKey(ctx context.Context, controlDatabase *sql.DB) error {
+	var publicKeyText string
+	var privateKeyText string
+	err := controlDatabase.QueryRowContext(ctx, `SELECT public_key,private_key FROM sitebrush_com_keys WHERE domain='sitebrush.com'`).Scan(&publicKeyText, &privateKeyText)
+	if err != nil || strings.TrimSpace(privateKeyText) == "" {
+		return err
+	}
+	privateKeyPath, err := a.writeSitebrushComPrivateKeyFile(privateKeyText)
+	if err != nil {
+		return err
+	}
+	_, err = (hostingandsupport.Store{DB: controlDatabase}).SaveSitebrushComKey(ctx, publicKeyText, privateKeyPath)
+	return err
 }
 
 func (a *App) saveHostingAndSupportDemoSettingsFromForm(r *http.Request) string {
@@ -12620,12 +12671,22 @@ func (a *App) serviceMailRelayPrivateKeyFromControlDatabase(ctx context.Context,
 		return nil, false
 	}
 	defer controlDatabase.Close()
-	privateKeyText := hostingandsupport.SettingText(ctx, controlDatabase, "sitebrush_com_private_key")
-	if privateKeyText == "" {
-		_ = controlDatabase.QueryRowContext(ctx, `SELECT private_key FROM sitebrush_com_keys WHERE domain='sitebrush.com'`).Scan(&privateKeyText)
+	var privateKeyPath string
+	if err := controlDatabase.QueryRowContext(ctx, `SELECT private_key_path FROM sitebrush_com_keys WHERE domain='sitebrush.com'`).Scan(&privateKeyPath); err != nil {
+		return nil, false
 	}
-	privateKeyBytes, decodeErr := base64.StdEncoding.DecodeString(strings.TrimSpace(privateKeyText))
-	return privateKeyBytes, decodeErr == nil && len(privateKeyBytes) == 32
+	if strings.TrimSpace(privateKeyPath) == "" {
+		if err := a.migrateLegacySitebrushComPrivateKey(ctx, controlDatabase); err != nil {
+			return nil, false
+		}
+		_ = controlDatabase.QueryRowContext(ctx, `SELECT private_key_path FROM sitebrush_com_keys WHERE domain='sitebrush.com'`).Scan(&privateKeyPath)
+	}
+	privateKeyBytes, readErr := os.ReadFile(strings.TrimSpace(privateKeyPath))
+	if readErr != nil {
+		return nil, false
+	}
+	decodedKeyBytes, decodeErr := base64.StdEncoding.DecodeString(strings.TrimSpace(string(privateKeyBytes)))
+	return decodedKeyBytes, decodeErr == nil && len(decodedKeyBytes) == 32
 }
 
 func serviceMailRelayPublicKeyForURL(relayURL string) ([]byte, bool) {
