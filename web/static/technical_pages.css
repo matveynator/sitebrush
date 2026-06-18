@@ -199,6 +199,7 @@
 .technical-page input[type="email"],
 .technical-page input[type="password"],
 .technical-page input[type="number"],
+.technical-page input[type="date"],
 .technical-page input[type="url"] {
     width: 100%;
     box-sizing: border-box;
@@ -1234,6 +1235,40 @@
     flex: 0 0 auto;
 }
 
+.technical-page .billing-request-badge {
+    display: inline-flex;
+    align-items: center;
+    min-height: 26px;
+    margin-left: 6px;
+    padding: 4px 8px;
+    border: 1px solid rgba(149, 229, 239, 0.34);
+    border-radius: 999px;
+    background: rgba(149, 229, 239, 0.12);
+    color: var(--cyan);
+    font-size: 12px;
+    font-weight: 700;
+    vertical-align: middle;
+}
+
+.technical-page .billing-request-details {
+    display: grid;
+    grid-template-columns: minmax(90px, 0.32fr) minmax(0, 1fr);
+    gap: 8px 12px;
+    margin: 0;
+}
+
+.technical-page .billing-request-details dt {
+    color: var(--muted);
+    font-size: 12px;
+    font-weight: 700;
+}
+
+.technical-page .billing-request-details dd {
+    margin: 0;
+    color: var(--text);
+    overflow-wrap: anywhere;
+}
+
 .technical-page .billing-quota-bar {
     height: 9px;
     margin: 8px 0 5px;
@@ -1312,6 +1347,105 @@
 
 .technical-page .billing-backup-actions {
     justify-self: end;
+}
+
+.technical-page .billing-service-mail-log-panel {
+    display: grid;
+    gap: 10px;
+}
+
+.technical-page .billing-service-mail-log-toolbar,
+.technical-page .billing-service-mail-log-pager {
+    display: flex;
+    align-items: end;
+    justify-content: space-between;
+    gap: 10px;
+}
+
+.technical-page .billing-service-mail-log-toolbar label {
+    display: grid;
+    gap: 4px;
+    min-width: min(220px, 100%);
+    color: var(--muted);
+    font-size: 12px;
+}
+
+.technical-page .billing-service-mail-log-actions,
+.technical-page .billing-service-mail-log-pager {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.technical-page .billing-service-mail-log-list {
+    display: grid;
+    gap: 6px;
+}
+
+.technical-page .billing-service-mail-log-row {
+    display: grid;
+    grid-template-columns: 34px minmax(210px, 0.9fr) minmax(220px, 1.1fr);
+    gap: 10px;
+    align-items: center;
+    padding: 8px 10px;
+    border: 1px solid rgba(149, 229, 239, 0.14);
+    border-radius: 8px;
+    background: rgba(0, 0, 0, 0.14);
+}
+
+.technical-page .billing-service-mail-log-row:has(input:checked),
+.technical-page .billing-service-mail-log-row.selected {
+    border-color: rgba(142, 233, 155, 0.48);
+    background: rgba(38, 96, 55, 0.16);
+}
+
+.technical-page .billing-service-mail-log-check {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    margin: 0;
+}
+
+.technical-page .billing-service-mail-log-check input {
+    width: 20px;
+    height: 20px;
+    accent-color: var(--green);
+}
+
+.technical-page .billing-service-mail-log-main {
+    min-width: 0;
+}
+
+.technical-page .billing-service-mail-log-title {
+    color: var(--text);
+    font-weight: 700;
+    overflow-wrap: anywhere;
+}
+
+.technical-page .billing-service-mail-log-error {
+    margin-top: 3px;
+    color: #ffb5b5;
+    font-size: 12px;
+    overflow-wrap: anywhere;
+}
+
+.technical-page .billing-service-mail-log-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px 8px;
+    color: var(--muted);
+    font-size: 12px;
+}
+
+.technical-page .billing-service-mail-log-meta span {
+    max-width: 100%;
+    overflow-wrap: anywhere;
+}
+
+.technical-page .billing-service-mail-log-pager span {
+    color: var(--muted);
+    font-size: 12px;
 }
 
 .technical-page .revision-enable-button,
@@ -1716,6 +1850,7 @@
     .technical-page .billing-site-form,
     .technical-page .billing-delete-form,
     .technical-page .billing-backup-row,
+    .technical-page .billing-service-mail-log-row,
     .technical-page .custom-domain-head,
     .technical-page .domain-setup-grid,
     .technical-page .dns-record-row,
@@ -1739,6 +1874,14 @@
 
     .technical-page .billing-backup-actions {
         justify-self: stretch;
+    }
+
+    .technical-page .billing-service-mail-log-row {
+        grid-template-columns: 34px minmax(0, 1fr);
+    }
+
+    .technical-page .billing-service-mail-log-meta {
+        grid-column: 2;
     }
 }
 

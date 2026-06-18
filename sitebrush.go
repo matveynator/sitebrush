@@ -9638,6 +9638,8 @@ func (a *App) handleHostingAndSupportAction(r *http.Request) string {
 		return a.addServiceMailBlockFromForm(r)
 	case "delete_service_mail_block":
 		return a.deleteServiceMailBlockFromForm(r)
+	case "delete_service_mail_events":
+		return a.deleteServiceMailEventsFromForm(r)
 	default:
 		return translationOrDefault(translationsForRequest(r), "billing_status_unknown_action", "Unknown billing action.")
 	}
@@ -9654,6 +9656,7 @@ func (a *App) hostingAndSupportView(ctx context.Context, r *http.Request) (map[s
 	plans := store.Plans(ctx)
 	assignments := store.ServiceAssignments(ctx)
 	siteRequests := store.SiteRequests(ctx)
+	pendingSiteRequests, approvedSiteRequestsByDomain := hostingAndSupportSplitSiteRequests(siteRequests)
 	serviceMailInstallations := store.ServiceMailInstallations(ctx)
 	serviceMailEvents := store.ServiceMailEvents(ctx, 200)
 	serviceMailBlocks := store.ServiceMailBlocks(ctx)
@@ -9675,6 +9678,7 @@ func (a *App) hostingAndSupportView(ctx context.Context, r *http.Request) (map[s
 	if err != nil {
 		return nil, err
 	}
+	hostingAndSupportAttachApprovedSiteRequests(siteRows, approvedSiteRequestsByDomain)
 	serviceMailUsers := a.hostingAndSupportClients(ctx, siteRows, serviceMailInstallations, serviceMailEvents, clientHostings)
 	clientSiteCount, clientInstallationCount, clientLocalDevelopmentCount := hostingAndSupportClientTotals(serviceMailUsers)
 	backups := a.managedSiteDeletionBackupViews(ctx, r, controlDatabase)
@@ -9683,7 +9687,7 @@ func (a *App) hostingAndSupportView(ctx context.Context, r *http.Request) (map[s
 		"Title":                       translationOrDefault(translations, "billing_title", "Хостинг и поддержка"),
 		"Sites":                       siteRows,
 		"Plans":                       plans,
-		"SiteRequests":                siteRequests,
+		"SiteRequests":                pendingSiteRequests,
 		"ServiceMailInstallations":    serviceMailInstallations,
 		"ServiceMailEvents":           serviceMailEvents,
 		"ClientHostings":              clientHostings,
@@ -10402,6 +10406,36 @@ func (a *App) hostingAndSupportSiteRows(ctx context.Context, plans []hostingands
 	return siteRows, nil
 }
 
+func hostingAndSupportSplitSiteRequests(siteRequests []hostingandsupport.SiteRequest) ([]hostingandsupport.SiteRequest, map[string]hostingandsupport.SiteRequest) {
+	pendingSiteRequests := make([]hostingandsupport.SiteRequest, 0, len(siteRequests))
+	approvedSiteRequestsByDomain := make(map[string]hostingandsupport.SiteRequest)
+	for _, siteRequest := range siteRequests {
+		status := strings.TrimSpace(siteRequest.Status)
+		switch status {
+		case "pending":
+			pendingSiteRequests = append(pendingSiteRequests, siteRequest)
+		case "approved":
+			domain := normalizeQuotaDomainName(siteRequest.Domain)
+			if domain != "" {
+				approvedSiteRequestsByDomain[domain] = siteRequest
+			}
+		}
+	}
+	return pendingSiteRequests, approvedSiteRequestsByDomain
+}
+
+func hostingAndSupportAttachApprovedSiteRequests(siteRows []hostingandsupport.Site, approvedSiteRequestsByDomain map[string]hostingandsupport.SiteRequest) {
+	for siteIndex := range siteRows {
+		domain := normalizeQuotaDomainName(siteRows[siteIndex].Domain)
+		siteRequest, found := approvedSiteRequestsByDomain[domain]
+		if !found {
+			continue
+		}
+		siteRows[siteIndex].HasSiteRequest = true
+		siteRows[siteIndex].SiteRequest = siteRequest
+	}
+}
+
 func (a *App) hostingAndSupportSiteURL(domain string) string {
 	normalizedDomain := normalizeDomainName(domain)
 	if normalizedDomain == "" {
@@ -10681,6 +10715,29 @@ func (a *App) deleteServiceMailBlockFromForm(r *http.Request) string {
 		return err.Error()
 	}
 	return translationOrDefault(translations, "billing_service_mail_status_block_deleted", "Service mail block deleted.")
+}
+
+func (a *App) deleteServiceMailEventsFromForm(r *http.Request) string {
+	translations := translationsForRequest(r)
+	eventIDs := make([]int, 0, len(r.Form["service_mail_event_id"]))
+	for _, rawEventID := range r.Form["service_mail_event_id"] {
+		eventID, _ := strconv.Atoi(strings.TrimSpace(rawEventID))
+		if eventID > 0 {
+			eventIDs = append(eventIDs, eventID)
+		}
+	}
+	if len(eventIDs) == 0 {
+		return translationOrDefault(translations, "billing_service_mail_status_events_required", "Select service mail log rows first.")
+	}
+	controlDatabase, err := a.openServerControlDatabase(r.Context())
+	if err != nil {
+		return err.Error()
+	}
+	defer controlDatabase.Close()
+	if err := (hostingandsupport.Store{DB: controlDatabase}).DeleteServiceMailEvents(r.Context(), eventIDs); err != nil {
+		return err.Error()
+	}
+	return translationOrDefault(translations, "billing_service_mail_status_events_deleted", "Selected service mail log rows were deleted.")
 }
 
 func (a *App) saveHostingAndSupportDemoSettingsInDatabase(r *http.Request, controlDatabase *sql.DB) string {

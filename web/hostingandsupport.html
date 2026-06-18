@@ -519,6 +519,7 @@
               <a href="{{$site.URL}}" target="_blank" rel="noopener noreferrer">{{$site.Domain}}</a>
               {{if $site.IsMainDomain}}<span class="badge billing-main-domain-badge" title="{{index $.T "billing_main_domain_hint"}}"><span class="billing-main-domain-icon" aria-hidden="true"></span>{{index $.T "billing_main_domain_badge"}}</span>{{end}}
               {{if $site.IsDemo}}<span class="badge text-bg-info">{{index $.T "billing_demo_site_badge"}}</span>{{end}}
+              {{if $site.HasSiteRequest}}<button type="button" class="billing-request-badge" data-bs-toggle="modal" data-bs-target="#siteRequestDetailsModal{{$siteIndex}}">через заявку</button>{{end}}
             </div>
             {{if $site.Aliases}}<div class="text-muted small">{{index $.T "billing_aliases_label"}} {{$site.Aliases}}</div>{{end}}
             {{if $site.AdminEmails}}<div class="text-muted small">{{index $.T "billing_admins_label"}} {{$site.AdminEmails}}</div>{{end}}
@@ -575,6 +576,29 @@
                   <button type="submit" class="btn btn-outline-danger"><img src="/p/static/delete.png" alt="">{{index $.T "billing_delete_confirm_button"}}</button>
                 </div>
               </form>
+            </div></div>
+          </div>{{end}}
+          {{if $site.HasSiteRequest}}<div class="modal fade" id="siteRequestDetailsModal{{$siteIndex}}" tabindex="-1" aria-hidden="true">
+            <div class="modal-dialog modal-dialog-centered"><div class="modal-content">
+              <div class="modal-header">
+                <h5 class="modal-title">Заявка {{$site.SiteRequest.Domain}}</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="{{index $.T "tree_close"}}"></button>
+              </div>
+              <div class="modal-body">
+                <dl class="billing-request-details">
+                  <dt>Домен</dt><dd>{{$site.SiteRequest.Domain}}</dd>
+                  <dt>Клиент</dt><dd>{{$site.SiteRequest.Name}} · {{$site.SiteRequest.Email}}</dd>
+                  <dt>Телефон</dt><dd>{{$site.SiteRequest.Phone}}</dd>
+                  <dt>Тариф</dt><dd>{{$site.SiteRequest.PlanName}} · {{$site.SiteRequest.PlanQuotaLabel}} · {{$site.SiteRequest.PlanPrice}} {{$site.SiteRequest.PlanCurrency}}/{{$site.SiteRequest.PlanBillingPeriod}}</dd>
+                  <dt>Статус</dt><dd>{{$site.SiteRequest.Status}}</dd>
+                  <dt>Создана</dt><dd>{{$site.SiteRequest.CreatedAt}}</dd>
+                  <dt>Обновлена</dt><dd>{{$site.SiteRequest.UpdatedAt}}</dd>
+                  {{if $site.SiteRequest.OwnerMessage}}<dt>Сообщение</dt><dd>{{$site.SiteRequest.OwnerMessage}}</dd>{{end}}
+                </dl>
+              </div>
+              <div class="modal-footer">
+                <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">{{index $.T "tree_close"}}</button>
+              </div>
             </div></div>
           </div>{{end}}
         </article>
@@ -668,22 +692,44 @@
       </div>
       {{end}}
       {{if .ServiceMailEvents}}
-      <div class="billing-backup-list mt-3">
-        {{range .ServiceMailEvents}}
-        <article class="billing-backup-row">
-          <div>
-            <div class="billing-domain">{{.CodeKind}} · {{.Status}}</div>
-            <div class="text-muted small">{{index $.T "billing_service_mail_recipient"}}: {{.Recipient}} · {{.RecipientDomain}}</div>
+      <form method="post" action="?hosting_and_support" class="billing-service-mail-log-panel mt-3" data-service-mail-log-panel>
+        <input type="hidden" name="billing_action" value="delete_service_mail_events">
+        <div class="billing-service-mail-log-toolbar">
+          <label>Дата логов
+            <input type="date" class="form-control form-control-sm" data-service-mail-log-date>
+          </label>
+          <div class="billing-service-mail-log-actions">
+            <button type="button" class="btn btn-outline-primary btn-sm" data-service-mail-log-select-page>Выделить все</button>
+            <button type="submit" class="btn btn-outline-danger btn-sm" data-service-mail-log-delete disabled>Очистить логи</button>
           </div>
-          <div class="billing-backup-meta">
-            <span>{{.SourceDomain}}</span>
-            <span>{{.SourceIP}}</span>
-            <span>{{.CreatedAt}}</span>
-            {{if .Error}}<span>{{.Error}}</span>{{end}}
-          </div>
-        </article>
-        {{end}}
-      </div>
+        </div>
+        <div class="billing-service-mail-log-list" data-service-mail-log-list>
+          {{range .ServiceMailEvents}}
+          <article class="billing-service-mail-log-row" data-service-mail-log-row data-service-mail-log-date="{{.CreatedAt}}">
+            <label class="billing-service-mail-log-check">
+              <input type="checkbox" name="service_mail_event_id" value="{{.ID}}" data-service-mail-log-checkbox>
+              <span></span>
+            </label>
+            <div class="billing-service-mail-log-main">
+              <div class="billing-service-mail-log-title">{{.CodeKind}} · {{.Status}}</div>
+              <div class="text-muted small">{{index $.T "billing_service_mail_recipient"}}: {{.Recipient}} · {{.RecipientDomain}}</div>
+              {{if .Error}}<div class="billing-service-mail-log-error">{{.Error}}</div>{{end}}
+            </div>
+            <div class="billing-service-mail-log-meta">
+              <span>{{.SourceDomain}}</span>
+              <span>{{.SourceIP}}</span>
+              <span>{{.InstallationID}}</span>
+              <span>{{.CreatedAt}}</span>
+            </div>
+          </article>
+          {{end}}
+        </div>
+        <div class="billing-service-mail-log-pager">
+          <button type="button" class="btn btn-outline-primary btn-sm" data-service-mail-log-prev>Назад</button>
+          <span data-service-mail-log-status></span>
+          <button type="button" class="btn btn-outline-primary btn-sm" data-service-mail-log-next>Вперёд</button>
+        </div>
+      </form>
       {{end}}
     </div>
   </section>
@@ -891,6 +937,109 @@
       detailsElement.classList.toggle('d-none');
     });
   }
+})();
+
+(function initializeServiceMailLogControls() {
+  const panelElement = document.querySelector('[data-service-mail-log-panel]');
+  if (!panelElement) {
+    return;
+  }
+  const dateInputElement = panelElement.querySelector('[data-service-mail-log-date]');
+  const previousButtonElement = panelElement.querySelector('[data-service-mail-log-prev]');
+  const nextButtonElement = panelElement.querySelector('[data-service-mail-log-next]');
+  const pageStatusElement = panelElement.querySelector('[data-service-mail-log-status]');
+  const selectPageButtonElement = panelElement.querySelector('[data-service-mail-log-select-page]');
+  const deleteButtonElement = panelElement.querySelector('[data-service-mail-log-delete]');
+  const logRowElements = Array.from(panelElement.querySelectorAll('[data-service-mail-log-row]'));
+  const checkboxElements = Array.from(panelElement.querySelectorAll('[data-service-mail-log-checkbox]'));
+  const pageSize = 12;
+  let currentPageIndex = 0;
+
+  if (!dateInputElement || !previousButtonElement || !nextButtonElement || !pageStatusElement || !selectPageButtonElement || !deleteButtonElement || logRowElements.length === 0) {
+    return;
+  }
+
+  function logRowMatchesFilters(logRowElement) {
+    const selectedDate = dateInputElement.value;
+    if (!selectedDate) {
+      return true;
+    }
+    return (logRowElement.dataset.serviceMailLogDate || '').startsWith(selectedDate);
+  }
+
+  function matchingLogRows() {
+    return logRowElements.filter(logRowMatchesFilters);
+  }
+
+  function visibleLogRows() {
+    const filteredLogRows = matchingLogRows();
+    const firstVisibleIndex = currentPageIndex * pageSize;
+    return filteredLogRows.slice(firstVisibleIndex, firstVisibleIndex + pageSize);
+  }
+
+  function updateDeleteButtonState() {
+    for (const checkboxElement of checkboxElements) {
+      const logRowElement = checkboxElement.closest('[data-service-mail-log-row]');
+      if (logRowElement) {
+        logRowElement.classList.toggle('selected', checkboxElement.checked);
+      }
+    }
+    deleteButtonElement.disabled = !checkboxElements.some(function serviceMailLogCheckboxIsChecked(checkboxElement) {
+      return checkboxElement.checked;
+    });
+  }
+
+  function renderServiceMailLogPage() {
+    const filteredLogRows = matchingLogRows();
+    const pageCount = Math.max(1, Math.ceil(filteredLogRows.length / pageSize));
+    if (currentPageIndex >= pageCount) {
+      currentPageIndex = pageCount - 1;
+    }
+    const visibleLogRowSet = new Set(visibleLogRows());
+    for (const logRowElement of logRowElements) {
+      logRowElement.classList.toggle('d-none', !visibleLogRowSet.has(logRowElement));
+    }
+    previousButtonElement.disabled = currentPageIndex === 0;
+    nextButtonElement.disabled = currentPageIndex >= pageCount - 1;
+    pageStatusElement.textContent = filteredLogRows.length + ' логов · страница ' + (currentPageIndex + 1) + ' / ' + pageCount;
+    selectPageButtonElement.disabled = filteredLogRows.length === 0;
+    updateDeleteButtonState();
+  }
+
+  dateInputElement.addEventListener('input', function updateServiceMailLogDateFilter() {
+    currentPageIndex = 0;
+    renderServiceMailLogPage();
+  });
+  previousButtonElement.addEventListener('click', function showPreviousServiceMailLogPage() {
+    currentPageIndex = Math.max(0, currentPageIndex - 1);
+    renderServiceMailLogPage();
+  });
+  nextButtonElement.addEventListener('click', function showNextServiceMailLogPage() {
+    currentPageIndex += 1;
+    renderServiceMailLogPage();
+  });
+  selectPageButtonElement.addEventListener('click', function selectVisibleServiceMailLogRows() {
+    for (const logRowElement of visibleLogRows()) {
+      const checkboxElement = logRowElement.querySelector('[data-service-mail-log-checkbox]');
+      if (checkboxElement) {
+        checkboxElement.checked = true;
+      }
+    }
+    updateDeleteButtonState();
+  });
+  for (const checkboxElement of checkboxElements) {
+    checkboxElement.addEventListener('change', updateDeleteButtonState);
+  }
+  panelElement.addEventListener('submit', function confirmServiceMailLogDelete(submitEvent) {
+    if (deleteButtonElement.disabled) {
+      submitEvent.preventDefault();
+      return;
+    }
+    if (!window.confirm('Очистить выбранные логи служебной почты?')) {
+      submitEvent.preventDefault();
+    }
+  });
+  renderServiceMailLogPage();
 })();
 
 (function initializeBillingAjaxSaveControls() {

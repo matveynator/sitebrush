@@ -2428,6 +2428,29 @@ func TestApproveSiteRequestCreatesSiteAndEmailsApplicant(t *testing.T) {
 	}
 }
 
+func TestHostingAndSupportApprovedSiteRequestsAttachToSites(t *testing.T) {
+	siteRequests := []hostingandsupport.SiteRequest{
+		{ID: 1, Domain: "pending.example", Status: "pending"},
+		{ID: 2, Domain: "Approved.Example", Status: "approved", Email: "customer@example.com"},
+		{ID: 3, Domain: "rejected.example", Status: "rejected"},
+	}
+	pendingSiteRequests, approvedSiteRequestsByDomain := hostingAndSupportSplitSiteRequests(siteRequests)
+	if len(pendingSiteRequests) != 1 || pendingSiteRequests[0].ID != 1 {
+		t.Fatalf("pending requests = %#v, want request 1", pendingSiteRequests)
+	}
+	siteRows := []hostingandsupport.Site{
+		{Domain: "approved.example"},
+		{Domain: "other.example"},
+	}
+	hostingAndSupportAttachApprovedSiteRequests(siteRows, approvedSiteRequestsByDomain)
+	if !siteRows[0].HasSiteRequest || siteRows[0].SiteRequest.ID != 2 {
+		t.Fatalf("approved request was not attached to site: %#v", siteRows[0])
+	}
+	if siteRows[1].HasSiteRequest {
+		t.Fatalf("unmatched site received request: %#v", siteRows[1])
+	}
+}
+
 func TestDemoSiteVisitorGetsEditorSessionAndCleanupDeletesSite(t *testing.T) {
 	sourceURL := "https://source.example/"
 	previousGrabHTTPClient := newGrabHTTPClient

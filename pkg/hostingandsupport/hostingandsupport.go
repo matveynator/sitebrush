@@ -59,6 +59,8 @@ type Site struct {
 	DatabasePath      string
 	DeletionSizeBytes int64
 	DeletionSizeLabel string
+	HasSiteRequest    bool
+	SiteRequest       SiteRequest
 }
 
 type SiteRequest struct {
@@ -1439,6 +1441,26 @@ func (store Store) ServiceMailEvents(ctx context.Context, limit int) []ServiceMa
 		events = append(events, event)
 	}
 	return events
+}
+
+func (store Store) DeleteServiceMailEvents(ctx context.Context, eventIDs []int) error {
+	cleanEventIDs := make([]int, 0, len(eventIDs))
+	for _, eventID := range eventIDs {
+		if eventID > 0 {
+			cleanEventIDs = append(cleanEventIDs, eventID)
+		}
+	}
+	if len(cleanEventIDs) == 0 {
+		return nil
+	}
+	placeholders := make([]string, len(cleanEventIDs))
+	arguments := make([]any, len(cleanEventIDs))
+	for eventIndex, eventID := range cleanEventIDs {
+		placeholders[eventIndex] = "?"
+		arguments[eventIndex] = eventID
+	}
+	_, err := store.DB.ExecContext(ctx, `DELETE FROM service_mail_events WHERE id IN (`+strings.Join(placeholders, ",")+`)`, arguments...)
+	return err
 }
 
 func (store Store) ServiceMailBlocks(ctx context.Context) []ServiceMailBlock {

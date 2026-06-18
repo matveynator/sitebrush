@@ -141,6 +141,50 @@ func TestServiceMailSettingsRoundTrip(t *testing.T) {
 	}
 }
 
+func TestDeleteServiceMailEventsDeletesOnlySelectedRows(t *testing.T) {
+	database, err := sql.Open("sqlite3", filepath.Join(t.TempDir(), "hostingandsupport.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = database.Close()
+	})
+	if err := Migrate(context.Background(), database); err != nil {
+		t.Fatal(err)
+	}
+	store := Store{DB: database}
+	for _, event := range []ServiceMailEvent{
+		{InstallationID: "installation-1", SourceIP: "203.0.113.10", Recipient: "one@example.net", RecipientDomain: "example.net", CodeKind: "login_code", Status: "sent"},
+		{InstallationID: "installation-1", SourceIP: "203.0.113.10", Recipient: "two@example.net", RecipientDomain: "example.net", CodeKind: "login_code", Status: "error"},
+		{InstallationID: "installation-2", SourceIP: "203.0.113.11", Recipient: "three@example.net", RecipientDomain: "example.net", CodeKind: "email_confirm", Status: "sent"},
+	} {
+		if err := store.LogServiceMailEvent(context.Background(), event); err != nil {
+			t.Fatal(err)
+		}
+	}
+	events := store.ServiceMailEvents(context.Background(), 10)
+	if len(events) != 3 {
+		t.Fatalf("events = %d, want 3", len(events))
+	}
+	if err := store.DeleteServiceMailEvents(context.Background(), []int{events[0].ID, events[2].ID, 0, -1}); err != nil {
+		t.Fatal(err)
+	}
+	events = store.ServiceMailEvents(context.Background(), 10)
+	if len(events) != 1 {
+		t.Fatalf("events after delete = %d, want 1: %#v", len(events), events)
+	}
+	if events[0].Recipient != "two@example.net" {
+		t.Fatalf("remaining recipient = %q, want two@example.net", events[0].Recipient)
+	}
+	if err := store.DeleteServiceMailEvents(context.Background(), nil); err != nil {
+		t.Fatal(err)
+	}
+	events = store.ServiceMailEvents(context.Background(), 10)
+	if len(events) != 1 {
+		t.Fatalf("events after empty delete = %d, want 1", len(events))
+	}
+}
+
 func TestHostingSnapshotRegistryRoundTrip(t *testing.T) {
 	database, err := sql.Open("sqlite3", filepath.Join(t.TempDir(), "hostingandsupport.db"))
 	if err != nil {
