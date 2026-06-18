@@ -18,7 +18,7 @@ import (
 
 const DefaultStorageLimitBytes int64 = 10 * 1024 * 1024 * 1024
 const DefaultDeletionBackupRetentionDays = 365
-const currentBillingSchemaVersion = 8
+const currentBillingSchemaVersion = 9
 
 type Store struct {
 	DB *sql.DB
@@ -278,8 +278,69 @@ type RegistrySyncEvent struct {
 	ID             int
 	InstallationID string
 	Status         string
+	StatusLabel    string
 	Error          string
 	CreatedAt      string
+	HasSummary     bool
+	Summary        RegistrySyncSummary
+}
+
+type RegistrySyncSummary struct {
+	Version          int                       `json:"version"`
+	OwnerEmail       string                    `json:"owner_email"`
+	ServerIP         string                    `json:"server_ip"`
+	ServerStatus     string                    `json:"server_status"`
+	ServerDomain     string                    `json:"server_domain"`
+	SitebrushVersion string                    `json:"sitebrush_version"`
+	OSName           string                    `json:"os_name"`
+	OSVersion        string                    `json:"os_version"`
+	CPUModel         string                    `json:"cpu_model"`
+	CPUCores         int                       `json:"cpu_cores"`
+	RAMTotalBytes    int64                     `json:"ram_total_bytes"`
+	RAMTotalLabel    string                    `json:"-"`
+	StoragePath      string                    `json:"storage_path"`
+	DiskFreeBytes    int64                     `json:"disk_free_bytes"`
+	DiskTotalBytes   int64                     `json:"disk_total_bytes"`
+	DiskFreeLabel    string                    `json:"-"`
+	DiskTotalLabel   string                    `json:"-"`
+	DiskUsedBytes    int64                     `json:"disk_used_bytes"`
+	DiskUsedLabel    string                    `json:"-"`
+	SiteCount        int                       `json:"site_count"`
+	PlanCount        int                       `json:"plan_count"`
+	RoleCount        int                       `json:"role_count"`
+	EventCount       int                       `json:"event_count"`
+	Sites            []RegistrySyncSummarySite `json:"sites"`
+	Plans            []RegistrySyncSummaryPlan `json:"plans"`
+	Roles            []HostingSnapshotRole     `json:"roles"`
+	Events           []HostingSnapshotEvent    `json:"events"`
+	CreatedAt        string                    `json:"created_at"`
+}
+
+type RegistrySyncSummarySite struct {
+	Domain         string `json:"domain"`
+	OwnerEmail     string `json:"owner_email"`
+	UsedBytes      int64  `json:"used_bytes"`
+	LimitBytes     int64  `json:"limit_bytes"`
+	UsedLabel      string `json:"-"`
+	LimitLabel     string `json:"-"`
+	PlanName       string `json:"plan_name"`
+	PlanStatus     string `json:"plan_status"`
+	PlanPaidStatus string `json:"plan_paid_status"`
+	OverLimit      bool   `json:"over_limit"`
+	AdminEmails    string `json:"admin_emails"`
+}
+
+type RegistrySyncSummaryPlan struct {
+	Name                 string `json:"name"`
+	QuotaBytes           int64  `json:"quota_bytes"`
+	QuotaLabel           string `json:"-"`
+	SiteLimit            int    `json:"site_limit"`
+	AnalyticsReportLimit int    `json:"analytics_report_limit"`
+	Price                string `json:"price"`
+	Currency             string `json:"currency"`
+	BillingPeriod        string `json:"billing_period"`
+	PaidStatus           string `json:"paid_status"`
+	IsDefault            bool   `json:"is_default"`
 }
 
 type SitebrushComKey struct {
@@ -342,7 +403,7 @@ func Migrate(ctx context.Context, database *sql.DB) error {
 		`CREATE INDEX IF NOT EXISTS idx_registry_installation_roles_email ON registry_installation_roles(email);`,
 		`CREATE TABLE IF NOT EXISTS registry_installation_plans(installation_id TEXT,name TEXT,quota_bytes INTEGER DEFAULT 0,site_limit INTEGER DEFAULT 0,analytics_report_limit INTEGER DEFAULT 0,price TEXT,currency TEXT,billing_period TEXT,paid_status TEXT,is_default INTEGER DEFAULT 0,updated_at TEXT,PRIMARY KEY(installation_id,name));`,
 		`CREATE TABLE IF NOT EXISTS registry_events(id INTEGER PRIMARY KEY AUTOINCREMENT,installation_id TEXT,event_key TEXT,kind TEXT,status TEXT,email TEXT,domain TEXT,message TEXT,created_at TEXT,UNIQUE(installation_id,event_key));`,
-		`CREATE TABLE IF NOT EXISTS registry_sync_events(id INTEGER PRIMARY KEY AUTOINCREMENT,installation_id TEXT,status TEXT,error TEXT,created_at TEXT);`,
+		`CREATE TABLE IF NOT EXISTS registry_sync_events(id INTEGER PRIMARY KEY AUTOINCREMENT,installation_id TEXT,status TEXT,error TEXT,created_at TEXT,summary_json TEXT);`,
 		`CREATE INDEX IF NOT EXISTS idx_registry_sync_events_installation_created ON registry_sync_events(installation_id,created_at);`,
 		`CREATE TABLE IF NOT EXISTS sitebrush_com_keys(domain TEXT PRIMARY KEY,public_key TEXT,private_key_path TEXT,fingerprint TEXT,created_at TEXT,updated_at TEXT);`,
 	}
@@ -441,6 +502,7 @@ func requiredHostingAndSupportColumns() []hostingAndSupportColumn {
 		{tableName: "client_hosting_sites", columnName: "plan_status", definition: "TEXT"},
 		{tableName: "client_hosting_sites", columnName: "plan_paid_status", definition: "TEXT"},
 		{tableName: "registry_installation_plans", columnName: "paid_status", definition: "TEXT"},
+		{tableName: "registry_sync_events", columnName: "summary_json", definition: "TEXT"},
 		{tableName: "sitebrush_com_keys", columnName: "private_key_path", definition: "TEXT"},
 	}
 }
@@ -875,6 +937,7 @@ func (store Store) SaveHostingSnapshot(ctx context.Context, snapshot HostingSnap
 	if strings.TrimSpace(snapshot.CreatedAt) != "" {
 		now = strings.TrimSpace(snapshot.CreatedAt)
 	}
+	syncSummary := registrySyncSummaryFromSnapshot(snapshot)
 	transaction, err := store.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -963,14 +1026,14 @@ func (store Store) SaveHostingSnapshot(ctx context.Context, snapshot HostingSnap
 	}
 	if err != nil {
 		_ = transaction.Rollback()
-		_ = store.LogRegistrySyncEvent(ctx, installationID, "error", err.Error())
+		_ = store.LogRegistrySyncEventWithSummary(ctx, installationID, "error", err.Error(), syncSummary)
 		return err
 	}
 	if err = transaction.Commit(); err != nil {
-		_ = store.LogRegistrySyncEvent(ctx, installationID, "error", err.Error())
+		_ = store.LogRegistrySyncEventWithSummary(ctx, installationID, "error", err.Error(), syncSummary)
 		return err
 	}
-	return store.LogRegistrySyncEvent(ctx, installationID, "stored", "")
+	return store.LogRegistrySyncEventWithSummary(ctx, installationID, "stored", "", syncSummary)
 }
 
 func normalizedHostingEmails(rawEmails []string) []string {
@@ -1018,13 +1081,124 @@ func registryEventKey(event HostingSnapshotEvent) string {
 	return hex.EncodeToString(sum[:])
 }
 
+func registrySyncSummaryFromSnapshot(snapshot HostingSnapshot) RegistrySyncSummary {
+	summary := RegistrySyncSummary{
+		Version:          snapshot.Version,
+		OwnerEmail:       strings.ToLower(strings.TrimSpace(snapshot.OwnerEmail)),
+		ServerIP:         strings.TrimSpace(snapshot.ServerIP),
+		ServerStatus:     strings.TrimSpace(snapshot.ServerStatus),
+		ServerDomain:     strings.ToLower(strings.TrimSpace(snapshot.ServerDomain)),
+		SitebrushVersion: strings.TrimSpace(snapshot.SitebrushVersion),
+		OSName:           strings.TrimSpace(snapshot.OSName),
+		OSVersion:        strings.TrimSpace(snapshot.OSVersion),
+		CPUModel:         strings.TrimSpace(snapshot.CPUModel),
+		CPUCores:         snapshot.CPUCores,
+		RAMTotalBytes:    snapshot.RAMTotalBytes,
+		StoragePath:      strings.TrimSpace(snapshot.StoragePath),
+		DiskFreeBytes:    snapshot.DiskFreeBytes,
+		DiskTotalBytes:   snapshot.DiskTotalBytes,
+		SiteCount:        len(snapshot.Sites),
+		PlanCount:        len(snapshot.Plans),
+		RoleCount:        len(snapshot.Roles),
+		EventCount:       len(snapshot.Events),
+		CreatedAt:        strings.TrimSpace(snapshot.CreatedAt),
+	}
+	if summary.DiskTotalBytes > summary.DiskFreeBytes {
+		summary.DiskUsedBytes = summary.DiskTotalBytes - summary.DiskFreeBytes
+	}
+	for _, site := range snapshot.Sites {
+		adminEmails := normalizedHostingEmails(site.AdminEmails)
+		summary.Sites = append(summary.Sites, RegistrySyncSummarySite{
+			Domain:         strings.ToLower(strings.TrimSpace(site.Domain)),
+			OwnerEmail:     strings.ToLower(strings.TrimSpace(site.OwnerEmail)),
+			UsedBytes:      site.UsedBytes,
+			LimitBytes:     site.LimitBytes,
+			PlanName:       strings.TrimSpace(site.PlanName),
+			PlanStatus:     strings.TrimSpace(site.PlanStatus),
+			PlanPaidStatus: strings.TrimSpace(site.PlanPaidStatus),
+			OverLimit:      site.LimitBytes > 0 && site.UsedBytes > site.LimitBytes,
+			AdminEmails:    strings.Join(adminEmails, ", "),
+		})
+	}
+	for _, plan := range snapshot.Plans {
+		summary.Plans = append(summary.Plans, RegistrySyncSummaryPlan{
+			Name:                 strings.TrimSpace(plan.Name),
+			QuotaBytes:           plan.QuotaBytes,
+			SiteLimit:            plan.SiteLimit,
+			AnalyticsReportLimit: plan.AnalyticsReportLimit,
+			Price:                strings.TrimSpace(plan.Price),
+			Currency:             strings.TrimSpace(plan.Currency),
+			BillingPeriod:        strings.TrimSpace(plan.BillingPeriod),
+			PaidStatus:           strings.TrimSpace(plan.PaidStatus),
+			IsDefault:            plan.IsDefault,
+		})
+	}
+	for _, role := range snapshot.Roles {
+		email := strings.ToLower(strings.TrimSpace(role.Email))
+		roleName := strings.TrimSpace(role.Role)
+		if email == "" || roleName == "" {
+			continue
+		}
+		summary.Roles = append(summary.Roles, HostingSnapshotRole{
+			Email:  email,
+			Role:   roleName,
+			Scope:  strings.TrimSpace(role.Scope),
+			Domain: strings.ToLower(strings.TrimSpace(role.Domain)),
+		})
+	}
+	for _, event := range snapshot.Events {
+		kind := strings.TrimSpace(event.Kind)
+		if kind == "" {
+			continue
+		}
+		summary.Events = append(summary.Events, HostingSnapshotEvent{
+			Kind:      kind,
+			Status:    strings.TrimSpace(event.Status),
+			Email:     strings.ToLower(strings.TrimSpace(event.Email)),
+			Domain:    strings.ToLower(strings.TrimSpace(event.Domain)),
+			Message:   strings.TrimSpace(event.Message),
+			CreatedAt: strings.TrimSpace(event.CreatedAt),
+		})
+	}
+	applyRegistrySyncSummaryLabels(&summary)
+	return summary
+}
+
+func applyRegistrySyncSummaryLabels(summary *RegistrySyncSummary) {
+	if summary == nil {
+		return
+	}
+	summary.RAMTotalLabel = FormatFileSize(summary.RAMTotalBytes)
+	summary.DiskFreeLabel = FormatFileSize(summary.DiskFreeBytes)
+	summary.DiskTotalLabel = FormatFileSize(summary.DiskTotalBytes)
+	summary.DiskUsedLabel = FormatFileSize(summary.DiskUsedBytes)
+	for siteIndex := range summary.Sites {
+		summary.Sites[siteIndex].UsedLabel = FormatFileSize(summary.Sites[siteIndex].UsedBytes)
+		summary.Sites[siteIndex].LimitLabel = FormatFileSize(summary.Sites[siteIndex].LimitBytes)
+	}
+	for planIndex := range summary.Plans {
+		summary.Plans[planIndex].QuotaLabel = FormatFileSize(summary.Plans[planIndex].QuotaBytes)
+	}
+}
+
 func (store Store) LogRegistrySyncEvent(ctx context.Context, installationID, status, errorMessage string) error {
+	return store.LogRegistrySyncEventWithSummary(ctx, installationID, status, errorMessage, RegistrySyncSummary{})
+}
+
+func (store Store) LogRegistrySyncEventWithSummary(ctx context.Context, installationID, status, errorMessage string, summary RegistrySyncSummary) error {
 	installationID = strings.TrimSpace(installationID)
 	if installationID == "" {
 		return nil
 	}
-	_, err := store.DB.ExecContext(ctx, `INSERT INTO registry_sync_events(installation_id,status,error,created_at) VALUES(?,?,?,?)`,
-		installationID, strings.TrimSpace(status), strings.TrimSpace(errorMessage), time.Now().UTC().Format(time.RFC3339))
+	summaryJSON := ""
+	if summary.Version != 0 || summary.OwnerEmail != "" || summary.ServerIP != "" || summary.ServerStatus != "" || summary.ServerDomain != "" || summary.SiteCount != 0 || summary.PlanCount != 0 || summary.RoleCount != 0 || summary.EventCount != 0 {
+		summaryBytes, marshalErr := json.Marshal(summary)
+		if marshalErr == nil {
+			summaryJSON = string(summaryBytes)
+		}
+	}
+	_, err := store.DB.ExecContext(ctx, `INSERT INTO registry_sync_events(installation_id,status,error,created_at,summary_json) VALUES(?,?,?,?,?)`,
+		installationID, strings.TrimSpace(status), strings.TrimSpace(errorMessage), time.Now().UTC().Format(time.RFC3339), summaryJSON)
 	return err
 }
 
@@ -1154,7 +1328,7 @@ func (store Store) RegistrySyncEvents(ctx context.Context, limit int) []Registry
 	if limit <= 0 {
 		limit = 50
 	}
-	rows, err := store.DB.QueryContext(ctx, `SELECT id,installation_id,status,error,created_at FROM registry_sync_events ORDER BY id DESC LIMIT ?`, limit)
+	rows, err := store.DB.QueryContext(ctx, `SELECT id,installation_id,status,error,created_at,COALESCE(summary_json,'') FROM registry_sync_events ORDER BY id DESC LIMIT ?`, limit)
 	if err != nil {
 		return nil
 	}
@@ -1162,12 +1336,37 @@ func (store Store) RegistrySyncEvents(ctx context.Context, limit int) []Registry
 	events := make([]RegistrySyncEvent, 0, limit)
 	for rows.Next() {
 		var event RegistrySyncEvent
-		if scanErr := rows.Scan(&event.ID, &event.InstallationID, &event.Status, &event.Error, &event.CreatedAt); scanErr != nil {
+		var summaryJSON string
+		if scanErr := rows.Scan(&event.ID, &event.InstallationID, &event.Status, &event.Error, &event.CreatedAt, &summaryJSON); scanErr != nil {
 			continue
+		}
+		event.StatusLabel = registrySyncStatusLabel(event.Status, summaryJSON)
+		if strings.TrimSpace(summaryJSON) != "" {
+			if err := json.Unmarshal([]byte(summaryJSON), &event.Summary); err == nil {
+				applyRegistrySyncSummaryLabels(&event.Summary)
+				event.HasSummary = true
+			}
 		}
 		events = append(events, event)
 	}
 	return events
+}
+
+func registrySyncStatusLabel(status string, summaryJSON string) string {
+	switch strings.TrimSpace(status) {
+	case "stored":
+		if strings.TrimSpace(summaryJSON) == "" {
+			return "принято · старый формат"
+		}
+		return "принято"
+	case "error":
+		return "ошибка"
+	default:
+		if strings.TrimSpace(status) == "" {
+			return "неизвестно"
+		}
+		return strings.TrimSpace(status)
+	}
 }
 
 func (store Store) SitebrushComKey(ctx context.Context) SitebrushComKey {

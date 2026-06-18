@@ -1103,10 +1103,86 @@
     margin-bottom: 12px;
 }
 
-.technical-page .billing-client-controls label {
+.technical-page .billing-client-controls label,
+.technical-page .billing-sync-controls label {
     display: grid;
     gap: 6px;
     min-width: 0;
+}
+
+.technical-page .billing-sync-history-head {
+    display: grid;
+    gap: 4px;
+}
+
+.technical-page .billing-sync-history-head p {
+    margin: 0 0 8px;
+}
+
+.technical-page .billing-sync-controls {
+    display: grid;
+    grid-template-columns: minmax(220px, 1fr) minmax(130px, 180px) auto;
+    gap: 12px;
+    align-items: end;
+    margin-bottom: 12px;
+}
+
+.technical-page .billing-sync-list {
+    display: grid;
+    gap: 8px;
+}
+
+.technical-page .billing-sync-row {
+    display: grid;
+    grid-template-columns: minmax(260px, 1fr) minmax(240px, 0.9fr) auto;
+    gap: 10px;
+    align-items: start;
+    padding: 12px;
+    border: 1px solid rgba(149, 229, 239, 0.16);
+    border-radius: 8px;
+    background: rgba(0, 0, 0, 0.16);
+}
+
+.technical-page .billing-sync-main {
+    display: grid;
+    gap: 6px;
+    min-width: 0;
+}
+
+.technical-page .billing-sync-title,
+.technical-page .billing-sync-source,
+.technical-page .billing-sync-counts {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px 10px;
+    min-width: 0;
+}
+
+.technical-page .billing-sync-title {
+    color: var(--text);
+    font-weight: 700;
+}
+
+.technical-page .billing-sync-source {
+    color: var(--muted);
+    font-size: 12px;
+}
+
+.technical-page .billing-sync-counts span {
+    padding: 5px 7px;
+    border: 1px solid rgba(149, 229, 239, 0.14);
+    border-radius: 7px;
+    background: rgba(255, 255, 255, 0.04);
+    color: var(--muted);
+    font-size: 12px;
+}
+
+.technical-page .billing-sync-details {
+    grid-column: 1 / -1;
+    display: grid;
+    gap: 10px;
+    padding-top: 10px;
+    border-top: 1px solid rgba(149, 229, 239, 0.12);
 }
 
 .technical-page .billing-client-pagination {
@@ -1838,6 +1914,8 @@
     .technical-page .billing-create-form,
     .technical-page .billing-plan-form,
     .technical-page .billing-client-controls,
+    .technical-page .billing-sync-controls,
+    .technical-page .billing-sync-row,
     .technical-page .billing-site-row,
     .technical-page .billing-user-row,
     .technical-page .billing-user-details,

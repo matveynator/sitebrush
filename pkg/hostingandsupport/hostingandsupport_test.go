@@ -270,6 +270,50 @@ func TestHostingSnapshotRegistryRoundTrip(t *testing.T) {
 	if len(hosting.Events) != 1 || hosting.Events[0].Kind != "limit_exceeded" {
 		t.Fatalf("events were not preserved: %#v", hosting.Events)
 	}
+	syncEvents := store.RegistrySyncEvents(context.Background(), 10)
+	if len(syncEvents) != 1 {
+		t.Fatalf("sync events = %d, want 1", len(syncEvents))
+	}
+	syncEvent := syncEvents[0]
+	if !syncEvent.HasSummary || syncEvent.StatusLabel != "принято" {
+		t.Fatalf("sync summary missing: %#v", syncEvent)
+	}
+	if syncEvent.Summary.SiteCount != 1 || syncEvent.Summary.PlanCount != 1 || syncEvent.Summary.RoleCount != 2 || syncEvent.Summary.EventCount != 1 {
+		t.Fatalf("sync counts = sites:%d plans:%d roles:%d events:%d", syncEvent.Summary.SiteCount, syncEvent.Summary.PlanCount, syncEvent.Summary.RoleCount, syncEvent.Summary.EventCount)
+	}
+	if len(syncEvent.Summary.Sites) != 1 || !syncEvent.Summary.Sites[0].OverLimit || syncEvent.Summary.Sites[0].UsedLabel == "" {
+		t.Fatalf("sync site summary was not preserved: %#v", syncEvent.Summary.Sites)
+	}
+	if len(syncEvent.Summary.Plans) != 1 || syncEvent.Summary.Plans[0].QuotaLabel == "" {
+		t.Fatalf("sync plan summary was not preserved: %#v", syncEvent.Summary.Plans)
+	}
+}
+
+func TestRegistrySyncEventsReadsLegacyRowsWithoutSummary(t *testing.T) {
+	database, err := sql.Open("sqlite3", filepath.Join(t.TempDir(), "hostingandsupport.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = database.Close()
+	})
+	if err := Migrate(context.Background(), database); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.ExecContext(context.Background(), `INSERT INTO registry_sync_events(installation_id,status,error,created_at) VALUES('installation-legacy','stored','','2026-06-17T10:00:00Z')`); err != nil {
+		t.Fatal(err)
+	}
+	store := Store{DB: database}
+	syncEvents := store.RegistrySyncEvents(context.Background(), 10)
+	if len(syncEvents) != 1 {
+		t.Fatalf("sync events = %d, want 1", len(syncEvents))
+	}
+	if syncEvents[0].HasSummary {
+		t.Fatalf("legacy event unexpectedly has summary: %#v", syncEvents[0])
+	}
+	if syncEvents[0].StatusLabel != "принято · старый формат" {
+		t.Fatalf("legacy status label = %q", syncEvents[0].StatusLabel)
+	}
 }
 
 func TestSaveHostingSnapshotReplacesCurrentRegistryState(t *testing.T) {
