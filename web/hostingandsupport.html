@@ -133,62 +133,84 @@
                 {{range $user.Hostings}}
                 {{$hosting := .}}
                 <div class="billing-client-hosting">
-                  <div class="billing-client-hosting-title">
-                    <span>{{if .ServerDomain}}{{.ServerDomain}}{{else}}{{.InstallationID}}{{end}}</span>
-                    <span>владелец: {{.OwnerEmail}}</span>
-                    <span>{{if .ServerStatus}}{{.ServerStatus}}{{else}}{{.ServerIP}}{{end}}</span>
-                    <span>{{.SitebrushVersion}}</span>
-                    <span>{{.OSName}} {{.OSVersion}}</span>
-                    <span>{{.CPUModel}} · {{.CPUCores}} ядер</span>
-                    <span>RAM {{.RAMTotalLabel}}</span>
-                    <span>диск {{.TotalUsedLabel}} занято / {{.DiskFreeLabel}} свободно / {{.DiskTotalLabel}} всего</span>
-                    <span>{{.SiteCount}} сайтов · {{len .ClientEmails}} клиентов</span>
-                    <span>{{.LastSeenAt}}</span>
-                  </div>
-                  <div class="billing-user-tags">
-                    {{range .ClientEmails}}<span>{{.}}</span>{{end}}
-                  </div>
-                  {{if .Roles}}
-                  <div class="billing-user-tags">
-                    {{range .Roles}}<span>{{.Email}} · {{.Role}} · {{.Scope}}{{if .Domain}} · {{.Domain}}{{end}}</span>{{end}}
-                  </div>
-                  {{end}}
-                  {{if .Plans}}
-                  <div class="billing-user-site-list">
-                    {{range .Plans}}
-                    <div class="billing-user-site-line">
-                      <span>{{.Name}}{{if .IsDefault}} · default{{end}}</span>
-                      <span>{{.PaidStatus}} · {{.Price}} {{.Currency}}/{{.BillingPeriod}}</span>
-                      <span>{{.QuotaLabel}} · sites {{.SiteLimit}}</span>
+                  <div class="billing-client-hosting-head">
+                    <div>
+                      <div class="billing-client-hosting-name">{{$hosting.ServerDisplayName}}</div>
+                      <div class="billing-client-hosting-subtitle">{{$hosting.Hosting.InstallationID}}</div>
                     </div>
-                    {{end}}
-                  </div>
-                  {{end}}
-                  <div class="billing-user-site-list">
-                    {{range .Sites}}
-                    <div class="billing-user-site-line">
-                      <a href="http://{{.Domain}}/" target="_blank" rel="noopener noreferrer">{{.Domain}}</a>
-                      <span>владелец сайта: {{.OwnerEmail}}</span>
-                      <span>сервер размещения: {{if $hosting.ServerDomain}}{{$hosting.ServerDomain}}{{else}}{{$hosting.InstallationID}}{{end}} · владелец хостинга: {{$hosting.OwnerEmail}}</span>
-                      <span>{{.UsedLabel}} / {{.LimitLabel}}{{if .OverLimit}} · превышение лимита{{end}}</span>
-                      <span>{{.PlanName}} · {{.PlanPaidStatus}} · {{.PlanStatus}}</span>
-                      <span>{{range .AdminEmails}}{{.}} {{end}}</span>
+                    <div class="billing-client-hosting-badges">
+                      <span class="{{$hosting.SyncStatusClass}}">{{$hosting.SyncStatusLabel}}</span>
+                      <span>{{$hosting.ServerStatusLabel}}</span>
                     </div>
-                    {{end}}
                   </div>
-                  {{if .Events}}
-                  <div class="billing-user-activity">
-                    {{range .Events}}
-                    <div class="billing-user-activity-row">
-                      <span class="billing-user-activity-kind">{{.Kind}} · {{.Status}}</span>
-                      <span>{{.Email}}</span>
-                      <span>{{.Domain}}</span>
-                      <span>{{.CreatedAt}}</span>
-                      <span>{{.Message}}</span>
+                  <div class="billing-client-hosting-meta">
+                    <div><strong>владелец / суперадмин</strong><span>{{$hosting.Hosting.OwnerEmail}}</span></div>
+                    <div><strong>домен</strong><span>{{if $hosting.Hosting.ServerDomain}}{{$hosting.Hosting.ServerDomain}}{{else}}unknown{{end}}</span></div>
+                    <div><strong>версия SiteBrush</strong><span>{{if $hosting.Hosting.SitebrushVersion}}{{$hosting.Hosting.SitebrushVersion}}{{else}}unknown{{end}}</span></div>
+                    <div><strong>ОС</strong><span>{{if $hosting.Hosting.OSName}}{{$hosting.Hosting.OSName}} {{$hosting.Hosting.OSVersion}}{{else}}unknown{{end}}</span></div>
+                    <div><strong>CPU</strong><span>{{$hosting.Hosting.CPUModel}} · {{$hosting.Hosting.CPUCores}} ядер</span></div>
+                    <div><strong>RAM</strong><span>{{$hosting.Hosting.RAMTotalLabel}}</span></div>
+                    <div><strong>диск</strong><span>{{$hosting.Hosting.TotalUsedLabel}} занято / {{$hosting.Hosting.DiskFreeLabel}} свободно / {{$hosting.Hosting.DiskTotalLabel}} всего</span></div>
+                    <div><strong>клиенты / сайты</strong><span>{{len $hosting.Hosting.ClientEmails}} клиентов · {{$hosting.Hosting.SiteCount}} сайтов</span></div>
+                    <div><strong>последняя синхронизация</strong><span>{{if $hosting.Hosting.LastSeenAt}}{{$hosting.Hosting.LastSeenAt}}{{else}}нет данных{{end}}</span></div>
+                  </div>
+                  <div class="billing-client-hosting-section">
+                    <h4>Роли клиента на сервере</h4>
+                    <div class="billing-user-tags">
+                      {{range $hosting.ClientRoles}}<span>{{.Email}} · {{.Role}} · {{.Scope}}{{if .Domain}} · {{.Domain}}{{end}}</span>{{else}}<span>роль не указана в snapshot</span>{{end}}
                     </div>
-                    {{end}}
                   </div>
-                  {{end}}
+                  <div class="billing-client-hosting-section">
+                    <h4>Тарифы сервера</h4>
+                    <div class="billing-client-plan-grid">
+                      {{range $hosting.Hosting.Plans}}
+                      <div class="billing-client-plan-row">
+                        <span>{{.Name}}{{if .IsDefault}} · default{{end}}</span>
+                        <span>{{.PaidStatus}}</span>
+                        <span>{{.Price}} {{.Currency}}/{{.BillingPeriod}}</span>
+                        <span>{{.QuotaLabel}}</span>
+                        <span>{{.SiteLimit}} сайтов</span>
+                      </div>
+                      {{else}}
+                      <div class="billing-client-plan-row"><span>тарифы не переданы</span></div>
+                      {{end}}
+                    </div>
+                  </div>
+                  <div class="billing-client-hosting-section">
+                    <h4>Сайты внутри сервера</h4>
+                    <div class="billing-client-site-grid">
+                      {{range $hosting.Hosting.Sites}}
+                      <div class="billing-client-site-row {{if .OverLimit}}billing-client-site-over-limit{{end}}">
+                        <a href="http://{{.Domain}}/" target="_blank" rel="noopener noreferrer">{{.Domain}}</a>
+                        <span>владелец сайта: {{.OwnerEmail}}</span>
+                        <span>сервер: {{$hosting.ServerDisplayName}}</span>
+                        <span>владелец хостинга: {{$hosting.Hosting.OwnerEmail}}</span>
+                        <span>тариф: {{if .PlanName}}{{.PlanName}}{{else}}не назначен{{end}}</span>
+                        <span>{{if .PlanPaidStatus}}{{.PlanPaidStatus}}{{else}}free{{end}}</span>
+                        <span>{{.UsedLabel}} / {{.LimitLabel}}</span>
+                        <span>{{if .PlanStatus}}{{.PlanStatus}}{{else}}unknown{{end}}{{if .OverLimit}} · превышение лимита{{end}}</span>
+                      </div>
+                      {{else}}
+                      <div class="billing-client-site-row"><span>сайты не переданы</span></div>
+                      {{end}}
+                    </div>
+                  </div>
+                  <div class="billing-client-hosting-section">
+                    <h4>События сервера</h4>
+                    <div class="billing-user-activity">
+                      {{range $hosting.Hosting.Events}}
+                      <div class="billing-user-activity-row">
+                        <span class="billing-user-activity-kind">{{.Kind}} · {{.Status}}</span>
+                        <span>{{.Email}}</span>
+                        <span>{{.Domain}}</span>
+                        <span>{{.CreatedAt}}</span>
+                        <span>{{.Message}}</span>
+                      </div>
+                      {{else}}
+                      <div class="billing-user-activity-row"><span>событий пока нет</span></div>
+                      {{end}}
+                    </div>
+                  </div>
                 </div>
                 {{end}}
               </div>

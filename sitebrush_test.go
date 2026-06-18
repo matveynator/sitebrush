@@ -741,6 +741,42 @@ func TestHostingSnapshotServerStatusLabels(t *testing.T) {
 	}
 }
 
+func TestHostingAndSupportClientHostingViewMarksStaleSync(t *testing.T) {
+	now := time.Date(2026, 6, 18, 12, 0, 0, 0, time.UTC)
+	view := buildHostingAndSupportClientHostingView(hostingandsupport.ClientHosting{
+		InstallationID: "installation-1",
+		ServerIP:       "203.0.113.10",
+		LastSeenAt:     now.Add(-8 * 24 * time.Hour).Format(time.RFC3339),
+	}, map[string]struct{}{}, now)
+	if !view.Stale || view.SyncStatusLabel != "устарело" {
+		t.Fatalf("sync status = stale:%v label:%q", view.Stale, view.SyncStatusLabel)
+	}
+	if view.ServerStatusLabel != "IP 203.0.113.10" {
+		t.Fatalf("server status label = %q", view.ServerStatusLabel)
+	}
+}
+
+func TestHostingAndSupportClientHostingViewKeepsOnlyClientRoles(t *testing.T) {
+	view := buildHostingAndSupportClientHostingView(hostingandsupport.ClientHosting{
+		InstallationID: "installation-1",
+		ServerStatus:   "локальная инсталляция",
+		LastSeenAt:     time.Now().UTC().Format(time.RFC3339),
+		Roles: []hostingandsupport.ClientHostingRole{
+			{Email: "owner@example.com", Role: "superadmin", Scope: "installation"},
+			{Email: "site@example.com", Role: "site_admin", Scope: "site", Domain: "client.example.com"},
+		},
+	}, map[string]struct{}{"site@example.com": {}}, time.Now().UTC())
+	if view.Stale {
+		t.Fatal("fresh sync was marked stale")
+	}
+	if view.ServerStatusLabel != "локальная инсталляция" {
+		t.Fatalf("server status label = %q", view.ServerStatusLabel)
+	}
+	if len(view.ClientRoles) != 1 || view.ClientRoles[0].Email != "site@example.com" || view.ClientRoles[0].Role != "site_admin" {
+		t.Fatalf("client roles = %#v", view.ClientRoles)
+	}
+}
+
 func registerServiceMailInstallationForTest(t *testing.T, application *App, request serviceMailRequest) {
 	t.Helper()
 	controlDatabase, err := application.openServerControlDatabase(context.Background())

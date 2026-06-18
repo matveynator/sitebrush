@@ -9738,7 +9738,7 @@ type hostingAndSupportClientView struct {
 	FilterHasEvents        string
 	SiteCount              int
 	Sites                  []hostingAndSupportClientSiteView
-	Hostings               []hostingandsupport.ClientHosting
+	Hostings               []hostingAndSupportClientHostingView
 	HostingCount           int
 	Installations          []string
 	InstallationCount      int
@@ -9749,6 +9749,16 @@ type hostingAndSupportClientView struct {
 	IPCount                int
 	Events                 []hostingAndSupportClientEventView
 	MapPointsJSON          template.JS
+}
+
+type hostingAndSupportClientHostingView struct {
+	Hosting           hostingandsupport.ClientHosting
+	ServerDisplayName string
+	ServerStatusLabel string
+	SyncStatusLabel   string
+	SyncStatusClass   string
+	Stale             bool
+	ClientRoles       []hostingandsupport.ClientHostingRole
 }
 
 type hostingAndSupportClientSiteView struct {
@@ -9942,7 +9952,7 @@ func (a *App) hostingAndSupportClients(ctx context.Context, siteRows []hostingan
 			}
 		}
 		for _, hostingView := range hostingViews {
-			if hostingAndSupportHostingHasSpecialStatus(hostingView) {
+			if hostingAndSupportHostingHasSpecialStatus(hostingView.Hosting) {
 				view.LocalDevelopmentCount++
 			}
 		}
@@ -9984,7 +9994,7 @@ func hostingAndSupportClientFilterRoles(client hostingAndSupportClientView) []st
 		roles["site_admin"] = struct{}{}
 	}
 	for _, hosting := range client.Hostings {
-		for _, role := range hosting.Roles {
+		for _, role := range hosting.ClientRoles {
 			roleName := strings.TrimSpace(role.Role)
 			if roleName != "" {
 				roles[roleName] = struct{}{}
@@ -10003,10 +10013,7 @@ func hostingAndSupportClientFilterStatuses(client hostingAndSupportClientView) [
 		}
 	}
 	for _, hosting := range client.Hostings {
-		status := strings.TrimSpace(hosting.ServerStatus)
-		if status == "" {
-			status = hostingSnapshotServerStatus(hosting.ServerIP)
-		}
+		status := strings.TrimSpace(hosting.ServerStatusLabel)
 		if status != "" {
 			statuses[status] = struct{}{}
 		}
@@ -10017,13 +10024,13 @@ func hostingAndSupportClientFilterStatuses(client hostingAndSupportClientView) [
 func hostingAndSupportClientFilterPaidStatuses(client hostingAndSupportClientView) []string {
 	statuses := make(map[string]struct{})
 	for _, hosting := range client.Hostings {
-		for _, site := range hosting.Sites {
+		for _, site := range hosting.Hosting.Sites {
 			status := strings.TrimSpace(site.PlanPaidStatus)
 			if status != "" {
 				statuses[status] = struct{}{}
 			}
 		}
-		for _, plan := range hosting.Plans {
+		for _, plan := range hosting.Hosting.Plans {
 			status := strings.TrimSpace(plan.PaidStatus)
 			if status != "" {
 				statuses[status] = struct{}{}
@@ -10035,7 +10042,7 @@ func hostingAndSupportClientFilterPaidStatuses(client hostingAndSupportClientVie
 
 func hostingAndSupportClientHasOverLimitSite(client hostingAndSupportClientView) bool {
 	for _, hosting := range client.Hostings {
-		for _, site := range hosting.Sites {
+		for _, site := range hosting.Hosting.Sites {
 			if site.OverLimit {
 				return true
 			}
@@ -10049,27 +10056,86 @@ func hostingAndSupportClientHasEventsOrErrors(client hostingAndSupportClientView
 		return true
 	}
 	for _, hosting := range client.Hostings {
-		if len(hosting.Events) > 0 {
+		if len(hosting.Hosting.Events) > 0 {
 			return true
 		}
 	}
 	return false
 }
 
-func hostingAndSupportClientHostingViews(emails map[string]struct{}, clientHostings []hostingandsupport.ClientHosting) []hostingandsupport.ClientHosting {
-	views := make([]hostingandsupport.ClientHosting, 0, 2)
+func hostingAndSupportClientHostingViews(emails map[string]struct{}, clientHostings []hostingandsupport.ClientHosting) []hostingAndSupportClientHostingView {
+	views := make([]hostingAndSupportClientHostingView, 0, 2)
 	for _, clientHosting := range clientHostings {
 		if hostingBelongsToClientEmails(clientHosting, emails) {
-			views = append(views, clientHosting)
+			views = append(views, buildHostingAndSupportClientHostingView(clientHosting, emails, time.Now().UTC()))
 		}
 	}
 	sort.Slice(views, func(left, right int) bool {
-		if views[left].TotalUsedBytes != views[right].TotalUsedBytes {
-			return views[left].TotalUsedBytes > views[right].TotalUsedBytes
+		if views[left].Hosting.TotalUsedBytes != views[right].Hosting.TotalUsedBytes {
+			return views[left].Hosting.TotalUsedBytes > views[right].Hosting.TotalUsedBytes
 		}
-		return views[left].InstallationID < views[right].InstallationID
+		return views[left].Hosting.InstallationID < views[right].Hosting.InstallationID
 	})
 	return views
+}
+
+func buildHostingAndSupportClientHostingView(clientHosting hostingandsupport.ClientHosting, emails map[string]struct{}, now time.Time) hostingAndSupportClientHostingView {
+	stale := hostingAndSupportHostingSyncIsStale(clientHosting.LastSeenAt, now)
+	syncStatusLabel := "синхронизировано"
+	syncStatusClass := "billing-sync-ok"
+	if strings.TrimSpace(clientHosting.LastSeenAt) == "" {
+		syncStatusLabel = "нет синхронизации"
+		syncStatusClass = "billing-sync-stale"
+	} else if stale {
+		syncStatusLabel = "устарело"
+		syncStatusClass = "billing-sync-stale"
+	}
+	return hostingAndSupportClientHostingView{
+		Hosting:           clientHosting,
+		ServerDisplayName: hostingAndSupportHostingDisplayName(clientHosting),
+		ServerStatusLabel: hostingAndSupportHostingStatusLabel(clientHosting),
+		SyncStatusLabel:   syncStatusLabel,
+		SyncStatusClass:   syncStatusClass,
+		Stale:             stale,
+		ClientRoles:       hostingAndSupportClientRolesForEmails(clientHosting, emails),
+	}
+}
+
+func hostingAndSupportHostingSyncIsStale(lastSeenAt string, now time.Time) bool {
+	lastSeenAt = strings.TrimSpace(lastSeenAt)
+	if lastSeenAt == "" {
+		return true
+	}
+	parsedTime, err := time.Parse(time.RFC3339, lastSeenAt)
+	if err != nil {
+		return true
+	}
+	return now.Sub(parsedTime) > 7*24*time.Hour
+}
+
+func hostingAndSupportHostingDisplayName(clientHosting hostingandsupport.ClientHosting) string {
+	return firstNonEmpty(clientHosting.ServerDomain, clientHosting.InstallationID)
+}
+
+func hostingAndSupportHostingStatusLabel(clientHosting hostingandsupport.ClientHosting) string {
+	if strings.TrimSpace(clientHosting.ServerIP) != "" {
+		return "IP " + strings.TrimSpace(clientHosting.ServerIP)
+	}
+	return firstNonEmpty(clientHosting.ServerStatus, "локальная инсталляция")
+}
+
+func hostingAndSupportClientRolesForEmails(clientHosting hostingandsupport.ClientHosting, emails map[string]struct{}) []hostingandsupport.ClientHostingRole {
+	roles := make([]hostingandsupport.ClientHostingRole, 0, len(clientHosting.Roles))
+	for _, role := range clientHosting.Roles {
+		email := strings.ToLower(strings.TrimSpace(role.Email))
+		if email == "" {
+			continue
+		}
+		if _, found := emails[email]; found {
+			roles = append(roles, role)
+		}
+	}
+	return roles
 }
 
 func hostingBelongsToClientEmails(clientHosting hostingandsupport.ClientHosting, emails map[string]struct{}) bool {
