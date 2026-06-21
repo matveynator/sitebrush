@@ -263,12 +263,22 @@ func TestCleanupDesktopBuildIntermediates(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "sitebrush_darwin_universal_desktop.dmg"), []byte("dmg"), 0o644); err != nil {
 		t.Fatalf("write dmg: %v", err)
 	}
+	appDir := filepath.Join(dir, "sitebrush.app")
+	if err := os.MkdirAll(filepath.Join(appDir, "Contents", "MacOS"), 0o755); err != nil {
+		t.Fatalf("create app bundle: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(appDir, "Contents", "MacOS", "sitebrush"), []byte("app"), 0o755); err != nil {
+		t.Fatalf("write app bundle binary: %v", err)
+	}
 
 	if err := cleanupDesktopBuildIntermediates(dir); err != nil {
 		t.Fatalf("cleanupDesktopBuildIntermediates() error = %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(dir, "sitebrush_linux_amd64_desktop_gtk40")); !os.IsNotExist(err) {
 		t.Fatalf("expected raw desktop artifact to be removed, err=%v", err)
+	}
+	if _, err := os.Stat(appDir); !os.IsNotExist(err) {
+		t.Fatalf("expected desktop app bundle to be removed, err=%v", err)
 	}
 	if _, err := os.Stat(filepath.Join(dir, "sitebrush_linux_amd64_desktop_gtk40.zip")); err != nil {
 		t.Fatalf("expected desktop zip to stay, err=%v", err)

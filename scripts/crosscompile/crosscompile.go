@@ -549,6 +549,11 @@ func linuxDesktopVariant() (string, bool) {
 
 func packageMacOSDesktopDMG(desktopDir, programName, universalBinary, version string) (string, error) {
 	appDir := filepath.Join(desktopDir, programName+".app")
+	if err := os.RemoveAll(appDir); err != nil {
+		return "", err
+	}
+	defer os.RemoveAll(appDir)
+
 	stagingDir, err := os.MkdirTemp(desktopDir, "dmg-staging-")
 	if err != nil {
 		return "", err
@@ -892,10 +897,15 @@ func cleanupDesktopBuildIntermediates(desktopDir string) error {
 		return err
 	}
 	for _, entry := range entries {
+		name := entry.Name()
 		if entry.IsDir() {
+			if strings.HasSuffix(name, ".app") {
+				if err := os.RemoveAll(filepath.Join(desktopDir, name)); err != nil {
+					return err
+				}
+			}
 			continue
 		}
-		name := entry.Name()
 		if name == "MD5SUMS" {
 			continue
 		}
