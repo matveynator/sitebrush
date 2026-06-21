@@ -4327,6 +4327,7 @@ func runSitebrushServer(ctx context.Context, config serverRunConfig) error {
 	application.startDemoSiteCleanupWorker(ctx)
 	application.startServiceMailKeyPairWorker(ctx)
 	application.hostingSnapshotReports = application.startHostingSnapshotReporter(ctx)
+	application.startHostingServerMonitor(ctx)
 
 	router := http.NewServeMux()
 	staticFiles, err := fs.Sub(embeddedWebFiles, "web/static")
@@ -13436,6 +13437,124 @@ func (a *App) startHostingSnapshotReporter(ctx context.Context) chan struct{} {
 	return reports
 }
 
+func (a *App) startHostingServerMonitor(ctx context.Context) {
+	go func() {
+		timer := time.NewTimer(20 * time.Second)
+		defer timer.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-timer.C:
+				a.runHostingServerMonitorOnce(ctx)
+				timer.Reset(5 * time.Minute)
+			}
+		}
+	}()
+}
+
+func (a *App) runHostingServerMonitorOnce(ctx context.Context) {
+	controlDatabase, err := a.openServerControlDatabase(ctx)
+	if err != nil {
+		return
+	}
+	defer controlDatabase.Close()
+	store := hostingandsupport.Store{DB: controlDatabase}
+	if !a.hostingAndSupportCanShowCentralServers(ctx, store, store.SitebrushComKey(ctx)) {
+		return
+	}
+	for _, hosting := range hostingAndSupportRealClientHostings(store.ClientHostings(ctx)) {
+		success, responseMS, errorMessage := checkHostingServerNetwork(ctx, hosting)
+		if !success {
+			success, responseMS, errorMessage = retryHostingServerNetwork(ctx, hosting)
+		}
+		_ = store.LogServerNetworkCheck(ctx, hosting.InstallationID, hosting.ServerDomain, hosting.ServerIP, success, responseMS, errorMessage)
+		a.checkHostingServerSiteTLS(ctx, store, hosting)
+	}
+}
+
+func checkHostingServerNetwork(ctx context.Context, hosting hostingandsupport.ClientHosting) (bool, int, string) {
+	serverDomain := normalizeDomainName(hosting.ServerDomain)
+	if serverDomain == "" {
+		return false, 0, "server domain is empty"
+	}
+	for _, scheme := range []string{"https", "http"} {
+		startedAt := time.Now()
+		requestURL := scheme + "://" + serverDomain + "/"
+		request, err := http.NewRequestWithContext(ctx, http.MethodGet, requestURL, nil)
+		if err != nil {
+			return false, 0, err.Error()
+		}
+		client := &http.Client{Timeout: 8 * time.Second}
+		response, err := client.Do(request)
+		responseMS := int(time.Since(startedAt).Milliseconds())
+		if err != nil {
+			continue
+		}
+		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 1024))
+		_ = response.Body.Close()
+		return true, responseMS, ""
+	}
+	return false, 0, "root request failed"
+}
+
+func retryHostingServerNetwork(ctx context.Context, hosting hostingandsupport.ClientHosting) (bool, int, string) {
+	lastError := ""
+	for attempt := 0; attempt < 6; attempt++ {
+		select {
+		case <-ctx.Done():
+			return false, 0, ctx.Err().Error()
+		case <-time.After(10 * time.Second):
+		}
+		success, responseMS, errorMessage := checkHostingServerNetwork(ctx, hosting)
+		if success {
+			return true, responseMS, ""
+		}
+		lastError = errorMessage
+	}
+	return false, 0, lastError
+}
+
+func (a *App) checkHostingServerSiteTLS(ctx context.Context, store hostingandsupport.Store, hosting hostingandsupport.ClientHosting) {
+	serverIP := strings.TrimSpace(hosting.ServerIP)
+	for _, site := range hosting.Sites {
+		domain := normalizeDomainName(site.Domain)
+		if domain == "" || !domainARecordMatches(domain, serverIP) {
+			continue
+		}
+		_ = store.SaveSiteTLSCheck(ctx, checkSiteTLSCertificate(ctx, hosting.InstallationID, domain))
+	}
+}
+
+func checkSiteTLSCertificate(ctx context.Context, installationID string, domain string) hostingandsupport.SiteTLSCheck {
+	check := hostingandsupport.SiteTLSCheck{Domain: domain, InstallationID: installationID, StatusClass: "hosting-metric-danger"}
+	dialer := &net.Dialer{Timeout: 8 * time.Second}
+	connection, err := tls.DialWithDialer(dialer, "tcp", net.JoinHostPort(domain, "443"), &tls.Config{ServerName: domain})
+	if err != nil {
+		check.Error = err.Error()
+		return check
+	}
+	defer connection.Close()
+	state := connection.ConnectionState()
+	if len(state.PeerCertificates) == 0 {
+		check.Error = "certificate is missing"
+		return check
+	}
+	check.HTTPSAvailable = true
+	expiresAt := state.PeerCertificates[0].NotAfter.UTC()
+	check.CertExpiresAt = expiresAt.Format(time.RFC3339)
+	check.CertDaysLeft = int(math.Ceil(time.Until(expiresAt).Hours() / 24))
+	switch {
+	case check.CertDaysLeft < 5:
+		check.StatusClass = "hosting-metric-danger"
+	case check.CertDaysLeft <= 10:
+		check.StatusClass = "hosting-metric-warning"
+	default:
+		check.StatusClass = "hosting-metric-ok"
+	}
+	return check
+}
+
 func (a *App) reportHostingSnapshotWithTimeout(ctx context.Context) {
 	reportContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 	defer cancel()
@@ -13534,21 +13653,22 @@ func (a *App) buildHostingSnapshot(ctx context.Context) (hostingandsupport.Hosti
 		serverDomain = ownerDomain
 	}
 	snapshot := hostingandsupport.HostingSnapshot{
-		Version:          1,
-		InstallationID:   installationID,
-		ServerIP:         serverIP,
-		ServerStatus:     hostingSnapshotServerStatus(serverIP),
-		ServerDomain:     serverDomain,
-		SitebrushVersion: CompileVersion,
-		OSName:           osName,
-		OSVersion:        osVersion,
-		CPUModel:         cpuModel,
-		CPUCores:         runtime.NumCPU(),
-		CPUUsagePercent:  cpuUsagePercent,
-		LoadAverage:      loadAverage,
-		RAMTotalBytes:    ramTotalBytes,
-		StoragePath:      storageRoot,
-		CreatedAt:        time.Now().UTC().Format(time.RFC3339),
+		Version:             1,
+		InstallationID:      installationID,
+		ServerIP:            serverIP,
+		ServerStatus:        hostingSnapshotServerStatus(serverIP),
+		ServerDomain:        serverDomain,
+		SitebrushVersion:    CompileVersion,
+		OSName:              osName,
+		OSVersion:           osVersion,
+		CPUModel:            cpuModel,
+		CPUCores:            runtime.NumCPU(),
+		CPUUsagePercent:     cpuUsagePercent,
+		LoadAverage:         loadAverage,
+		RAMTotalBytes:       ramTotalBytes,
+		ServerUptimeSeconds: hostingSnapshotServerUptimeSeconds(),
+		StoragePath:         storageRoot,
+		CreatedAt:           time.Now().UTC().Format(time.RFC3339),
 	}
 	if diskOK {
 		snapshot.DiskFreeBytes = int64(freeBytes)
@@ -13772,6 +13892,46 @@ func hostingSnapshotLoadAverage() float64 {
 		return 0
 	}
 	return math.Round(loadAverage*100) / 100
+}
+
+func hostingSnapshotServerUptimeSeconds() int64 {
+	switch runtime.GOOS {
+	case "linux":
+		uptimeBytes, err := os.ReadFile("/proc/uptime")
+		if err != nil {
+			return 0
+		}
+		fields := strings.Fields(string(uptimeBytes))
+		if len(fields) == 0 {
+			return 0
+		}
+		uptime, parseErr := strconv.ParseFloat(fields[0], 64)
+		if parseErr != nil {
+			return 0
+		}
+		return int64(uptime)
+	case "darwin", "freebsd", "openbsd":
+		output := commandOutputOneLine(context.Background(), "sysctl", "-n", "kern.boottime")
+		timestamp := firstIntegerFromText(output)
+		if timestamp <= 0 {
+			return 0
+		}
+		return int64(time.Since(time.Unix(timestamp, 0)).Seconds())
+	default:
+		return 0
+	}
+}
+
+func firstIntegerFromText(text string) int64 {
+	matches := regexp.MustCompile(`[0-9]+`).FindString(text)
+	if matches == "" {
+		return 0
+	}
+	value, err := strconv.ParseInt(matches, 10, 64)
+	if err != nil {
+		return 0
+	}
+	return value
 }
 
 type hostingSnapshotCPUTimes struct {

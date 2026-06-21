@@ -89,6 +89,8 @@
             <div><strong>CPU</strong><span>{{if $server.CPUModel}}{{$server.CPUModel}}{{else}}не передан{{end}} · {{$server.CPUCores}} ядер</span></div>
             <div><strong>CPU за час</strong><span class="{{$server.CPUStatusClass}}">{{printf "%.1f" $server.CPUUsagePercent}}%</span></div>
             <div><strong>LoadAverage за час</strong><span class="{{$server.LoadStatusClass}}">{{printf "%.2f" $server.LoadAverage}}</span></div>
+            <div><strong>Сетевой uptime</strong><span class="{{$server.NetworkStatusClass}}">{{$server.NetworkUptimeLabel}}{{if $server.LastResponseMS}} · {{$server.LastResponseMS}} ms{{end}}</span></div>
+            <div><strong>Uptime сервера</strong><span class="{{$server.ServerUptimeClass}}">{{$server.ServerUptimeLabel}}</span></div>
             <div><strong>Память</strong><span>{{$server.RAMTotalLabel}}</span></div>
             <div><strong>Сайты</strong><span><button type="button" class="billing-owner-filter" data-bs-toggle="modal" data-bs-target="#hostingServerSitesModal{{$serverIndex}}">{{$server.SiteCount}}</button></span></div>
             <div><strong>Последняя синхронизация</strong><span>{{if $server.LastSeenAt}}{{$server.LastSeenAt}}{{else}}нет данных{{end}}</span></div>
@@ -105,6 +107,7 @@
                 {{range $server.Sites}}
                 <div class="billing-plan-row">
                   <span><a href="//{{.Domain}}/" target="_blank" rel="noopener noreferrer">{{.Domain}}</a> · {{.UsedLabel}} / {{.LimitLabel}} · {{if .PlanName}}{{.PlanName}}{{else}}тариф не назначен{{end}}</span>
+                  <span class="{{.TLSStatusClass}}">{{if .HTTPSAvailable}}HTTPS до {{.CertExpiresAt}} · {{.CertDaysLeft}} дн.{{else}}HTTPS не проверен{{end}}</span>
                   <span>{{if .OwnerEmail}}{{.OwnerEmail}}{{else}}владелец не передан{{end}}</span>
                 </div>
                 {{else}}
