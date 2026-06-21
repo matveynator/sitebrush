@@ -24,7 +24,7 @@
   <nav class="hosting-tabs" aria-label="Разделы хостинга и поддержки">
     <button type="button" class="hosting-tab-button active" data-hosting-tab-button="overview">Обзор</button>
     <button type="button" class="hosting-tab-button" data-hosting-tab-button="clients">Клиенты</button>
-    <button type="button" class="hosting-tab-button" data-hosting-tab-button="servers">Серверы</button>
+    {{if .ShowServers}}<button type="button" class="hosting-tab-button" data-hosting-tab-button="servers">Серверы</button>{{end}}
     <button type="button" class="hosting-tab-button" data-hosting-tab-button="sites">Сайты</button>
     <button type="button" class="hosting-tab-button" data-hosting-tab-button="invoices">Счета</button>
     <button type="button" class="hosting-tab-button" data-hosting-tab-button="settings">Настройки</button>
@@ -44,7 +44,7 @@
       <div class="hosting-overview-metrics">
         <button type="button" data-hosting-tab-jump="clients"><strong>{{.Overview.ClientCount}}</strong><span>клиентов</span></button>
         <button type="button" data-hosting-tab-jump="sites"><strong>{{.Overview.SiteCount}}</strong><span>сайтов</span></button>
-        <button type="button" data-hosting-tab-jump="servers"><strong>{{.Overview.ServerCount}}</strong><span>серверов</span></button>
+        {{if .ShowServers}}<button type="button" data-hosting-tab-jump="servers"><strong>{{.Overview.ServerCount}}</strong><span>серверов</span></button>{{end}}
         <button type="button" data-hosting-tab-jump="invoices"><strong>{{.Overview.UnpaidInvoices}}</strong><span>счетов к оплате</span></button>
       </div>
       <div class="hosting-overview-actions">
@@ -65,7 +65,7 @@
     </div>
   </section>
 
-  <section class="card billing-card hosting-tab-panel-hidden" data-hosting-tab-panel="servers">
+  {{if .ShowServers}}<section class="card billing-card hosting-tab-panel-hidden" data-hosting-tab-panel="servers">
     <div class="card-body">
       <div class="billing-section-header">
         <div>
@@ -73,31 +73,53 @@
           <p class="text-muted">Только реальные SiteBrush-инсталляции: публичный IP и головной домен, который указывает на этот IP.</p>
         </div>
       </div>
-      <div class="billing-site-list">
-        {{range .ClientHostings}}
-        <article class="billing-site-row">
+      <div class="billing-site-list" data-hosting-server-list>
+        {{range $serverIndex, $server := .ClientHostings}}
+        <article class="billing-site-row" data-hosting-server-row data-hosting-server-owner="{{$server.OwnerEmail}}">
           <div class="billing-site-main">
-            <div class="billing-domain">{{if .ServerDomain}}{{.ServerDomain}}{{else}}{{.InstallationID}}{{end}}</div>
-            <div class="text-muted small">IP: {{.ServerIP}} · владелец: {{.OwnerEmail}}</div>
-            <div class="text-muted small">SiteBrush {{if .SitebrushVersion}}{{.SitebrushVersion}}{{else}}версия не передана{{end}} · {{if .OSName}}{{.OSName}} {{.OSVersion}}{{else}}ОС не передана{{end}}</div>
-            <div class="billing-quota-bar" aria-label="Занято {{.DiskUsedPercent}}% диска">
-              <div style="width:{{.DiskUsedPercent}}%"></div>
+            <div class="billing-domain">{{if $server.ServerDomain}}{{$server.ServerDomain}}{{else}}{{$server.InstallationID}}{{end}}</div>
+            <div class="text-muted small">IP: {{$server.ServerIP}} · владелец: <button type="button" class="billing-owner-filter" data-hosting-server-owner-filter="{{$server.OwnerEmail}}">{{$server.OwnerEmail}}</button></div>
+            <div class="text-muted small">SiteBrush {{if $server.SitebrushVersion}}{{$server.SitebrushVersion}}{{else}}версия не передана{{end}} · {{if $server.OSName}}{{$server.OSName}} {{$server.OSVersion}}{{else}}ОС не передана{{end}}</div>
+            <div class="billing-quota-bar {{$server.DiskStatusClass}}" aria-label="Занято {{$server.DiskUsedPercent}}% диска">
+              <div style="width:{{$server.DiskUsedPercent}}%"></div>
             </div>
-            <div class="text-muted small">Диск: {{.TotalUsedLabel}} занято / {{.DiskFreeLabel}} свободно / {{.DiskTotalLabel}} всего</div>
+            <div class="text-muted small">Диск: {{$server.DiskUsedLabel}} занято / {{$server.DiskFreeLabel}} свободно / {{$server.DiskTotalLabel}} всего</div>
           </div>
           <div class="billing-client-hosting-meta">
-            <div><strong>CPU</strong><span>{{if .CPUModel}}{{.CPUModel}}{{else}}не передан{{end}} · {{.CPUCores}} ядер</span></div>
-            <div><strong>Память</strong><span>{{.RAMTotalLabel}}</span></div>
-            <div><strong>Сайты</strong><span>{{.SiteCount}}</span></div>
-            <div><strong>Последняя синхронизация</strong><span>{{if .LastSeenAt}}{{.LastSeenAt}}{{else}}нет данных{{end}}</span></div>
+            <div><strong>CPU</strong><span>{{if $server.CPUModel}}{{$server.CPUModel}}{{else}}не передан{{end}} · {{$server.CPUCores}} ядер</span></div>
+            <div><strong>CPU за час</strong><span class="{{$server.CPUStatusClass}}">{{printf "%.1f" $server.CPUUsagePercent}}%</span></div>
+            <div><strong>LoadAverage за час</strong><span class="{{$server.LoadStatusClass}}">{{printf "%.2f" $server.LoadAverage}}</span></div>
+            <div><strong>Память</strong><span>{{$server.RAMTotalLabel}}</span></div>
+            <div><strong>Сайты</strong><span><button type="button" class="billing-owner-filter" data-bs-toggle="modal" data-bs-target="#hostingServerSitesModal{{$serverIndex}}">{{$server.SiteCount}}</button></span></div>
+            <div><strong>Последняя синхронизация</strong><span>{{if $server.LastSeenAt}}{{$server.LastSeenAt}}{{else}}нет данных{{end}}</span></div>
           </div>
         </article>
+        <div class="modal fade" id="hostingServerSitesModal{{$serverIndex}}" tabindex="-1" aria-hidden="true">
+          <div class="modal-dialog modal-lg modal-dialog-centered modal-dialog-scrollable"><div class="modal-content">
+            <div class="modal-header">
+              <h5 class="modal-title">Сайты на {{if $server.ServerDomain}}{{$server.ServerDomain}}{{else}}{{$server.InstallationID}}{{end}}</h5>
+              <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="{{index $.T "tree_close"}}"></button>
+            </div>
+            <div class="modal-body">
+              <div class="billing-site-list">
+                {{range $server.Sites}}
+                <div class="billing-plan-row">
+                  <span><a href="//{{.Domain}}/" target="_blank" rel="noopener noreferrer">{{.Domain}}</a> · {{.UsedLabel}} / {{.LimitLabel}} · {{if .PlanName}}{{.PlanName}}{{else}}тариф не назначен{{end}}</span>
+                  <span>{{if .OwnerEmail}}{{.OwnerEmail}}{{else}}владелец не передан{{end}}</span>
+                </div>
+                {{else}}
+                <div class="empty">Сайты не переданы.</div>
+                {{end}}
+              </div>
+            </div>
+          </div></div>
+        </div>
         {{else}}
         <div class="empty">Реальных серверов пока нет. Нужен публичный IP и головной домен, направленный на этот IP.</div>
         {{end}}
       </div>
     </div>
-  </section>
+  </section>{{end}}
 
   <section class="card billing-card hosting-tab-panel-hidden" data-hosting-tab-panel="clients">
     <div class="card-body">
@@ -1133,6 +1155,39 @@
     });
   });
   showHostingTab('overview');
+})();
+</script>
+<script>
+(function initializeHostingServerOwnerSorting() {
+  const serverListElement = document.querySelector('[data-hosting-server-list]');
+  const ownerFilterButtonElements = Array.from(document.querySelectorAll('[data-hosting-server-owner-filter]'));
+  if (!serverListElement || ownerFilterButtonElements.length === 0) {
+    return;
+  }
+  const serverRowElements = Array.from(serverListElement.querySelectorAll('[data-hosting-server-row]'));
+
+  function sortServersByOwner(ownerEmail) {
+    const normalizedOwnerEmail = ownerEmail.trim().toLowerCase();
+    const sortedServerRowElements = serverRowElements.slice().sort(function compareServerRows(leftElement, rightElement) {
+      const leftOwner = (leftElement.getAttribute('data-hosting-server-owner') || '').trim().toLowerCase();
+      const rightOwner = (rightElement.getAttribute('data-hosting-server-owner') || '').trim().toLowerCase();
+      const leftMatches = leftOwner === normalizedOwnerEmail ? 0 : 1;
+      const rightMatches = rightOwner === normalizedOwnerEmail ? 0 : 1;
+      if (leftMatches !== rightMatches) {
+        return leftMatches - rightMatches;
+      }
+      return leftOwner.localeCompare(rightOwner);
+    });
+    sortedServerRowElements.forEach(function appendServerRow(serverRowElement) {
+      serverListElement.appendChild(serverRowElement);
+    });
+  }
+
+  ownerFilterButtonElements.forEach(function bindOwnerFilterButton(ownerFilterButtonElement) {
+    ownerFilterButtonElement.addEventListener('click', function handleOwnerFilterClick() {
+      sortServersByOwner(ownerFilterButtonElement.getAttribute('data-hosting-server-owner-filter') || '');
+    });
+  });
 })();
 </script>
 <script>

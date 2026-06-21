@@ -789,6 +789,81 @@ func TestHostingAndSupportRealClientHostingsExcludeLocalAndUnroutedServers(t *te
 	}
 }
 
+func TestHostingAndSupportCentralServersRequireSitebrushComDNSAndKey(t *testing.T) {
+	previousIPLookup := lookupIPRecords
+	previousExternalIPLookup := lookupServerExternalIP
+	t.Cleanup(func() {
+		lookupIPRecords = previousIPLookup
+		lookupServerExternalIP = previousExternalIPLookup
+	})
+	lookupIPRecords = func(domain string) ([]net.IP, error) {
+		if domain == "sitebrush.com" {
+			return []net.IP{net.ParseIP("203.0.113.10")}, nil
+		}
+		return nil, errors.New("unexpected domain")
+	}
+	lookupServerExternalIP = func(context.Context) (string, error) {
+		return "203.0.113.10", nil
+	}
+	database, err := sql.Open("sqlite3", filepath.Join(t.TempDir(), "hostingandsupport.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = database.Close()
+	})
+	if err := hostingandsupport.Migrate(context.Background(), database); err != nil {
+		t.Fatal(err)
+	}
+	store := hostingandsupport.Store{DB: database}
+	if err := store.SetOwner(context.Background(), "sitebrush.com", "owner@sitebrush.com"); err != nil {
+		t.Fatal(err)
+	}
+	application := &App{}
+	if !application.hostingAndSupportCanShowCentralServers(context.Background(), store, hostingandsupport.SitebrushComKey{PublicKey: sitebrushComServiceMailRelayPublicKey}) {
+		t.Fatal("sitebrush.com with matching DNS and public key was not accepted")
+	}
+	if application.hostingAndSupportCanShowCentralServers(context.Background(), store, hostingandsupport.SitebrushComKey{PublicKey: "wrong"}) {
+		t.Fatal("sitebrush.com with wrong public key was accepted")
+	}
+}
+
+func TestHostingSnapshotDiskThresholdSendsSingleOwnerEmail(t *testing.T) {
+	database, err := sql.Open("sqlite3", filepath.Join(t.TempDir(), "hostingandsupport.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = database.Close()
+	})
+	if err := hostingandsupport.Migrate(context.Background(), database); err != nil {
+		t.Fatal(err)
+	}
+	var messages []mailout.Message
+	application := &App{
+		sendEmail: func(ctx context.Context, message mailout.Message) error {
+			messages = append(messages, message)
+			return nil
+		},
+	}
+	snapshot := hostingandsupport.HostingSnapshot{
+		InstallationID: "installation-1",
+		OwnerEmail:     "owner@example.com",
+		ServerDomain:   "sitebrush.ru",
+		ServerIP:       "203.0.113.10",
+		DiskFreeBytes:  4,
+		DiskTotalBytes: 100,
+	}
+	application.notifyHostingSnapshotDiskThreshold(context.Background(), database, snapshot)
+	application.notifyHostingSnapshotDiskThreshold(context.Background(), database, snapshot)
+	if len(messages) != 1 {
+		t.Fatalf("messages = %d, want 1", len(messages))
+	}
+	if messages[0].To != "owner@example.com" || !strings.Contains(messages[0].Body, "занято 96%") {
+		t.Fatalf("unexpected alert message: %#v", messages[0])
+	}
+}
+
 func registerServiceMailInstallationForTest(t *testing.T, application *App, request serviceMailRequest) {
 	t.Helper()
 	controlDatabase, err := application.openServerControlDatabase(context.Background())

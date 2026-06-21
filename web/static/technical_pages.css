@@ -1518,6 +1518,46 @@
     background: linear-gradient(90deg, var(--green), var(--cyan));
 }
 
+.technical-page .billing-quota-bar.hosting-metric-warning > div {
+    background: #ffc107;
+}
+
+.technical-page .billing-quota-bar.hosting-metric-danger > div {
+    background: #dc3545;
+}
+
+.technical-page .hosting-metric-ok {
+    color: var(--green);
+    font-weight: 700;
+}
+
+.technical-page .hosting-metric-warning {
+    color: #ffc107;
+    font-weight: 700;
+}
+
+.technical-page .hosting-metric-danger {
+    color: #ff6b6b;
+    font-weight: 700;
+}
+
+.technical-page .billing-owner-filter {
+    min-height: 0;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    color: var(--cyan);
+    font: inherit;
+    text-align: left;
+    white-space: normal;
+}
+
+.technical-page .billing-owner-filter:hover,
+.technical-page .billing-owner-filter:focus {
+    color: var(--text);
+    text-decoration: underline;
+}
+
 .technical-page .billing-site-form {
     display: grid;
     grid-template-columns: minmax(76px, 94px) minmax(150px, 1fr) minmax(112px, 132px) auto;

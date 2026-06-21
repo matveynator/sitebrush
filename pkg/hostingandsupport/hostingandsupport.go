@@ -19,7 +19,7 @@ import (
 
 const DefaultStorageLimitBytes int64 = 10 * 1024 * 1024 * 1024
 const DefaultDeletionBackupRetentionDays = 365
-const currentBillingSchemaVersion = 10
+const currentBillingSchemaVersion = 11
 
 type Store struct {
 	DB *sql.DB
@@ -182,6 +182,8 @@ type HostingSnapshot struct {
 	OSVersion        string                 `json:"os_version"`
 	CPUModel         string                 `json:"cpu_model"`
 	CPUCores         int                    `json:"cpu_cores"`
+	CPUUsagePercent  float64                `json:"cpu_usage_percent_1h"`
+	LoadAverage      float64                `json:"load_average_1h"`
 	RAMTotalBytes    int64                  `json:"ram_total_bytes"`
 	StoragePath      string                 `json:"storage_path"`
 	DiskFreeBytes    int64                  `json:"disk_free_bytes"`
@@ -243,14 +245,21 @@ type ClientHosting struct {
 	OSVersion        string
 	CPUModel         string
 	CPUCores         int
+	CPUUsagePercent  float64
+	LoadAverage      float64
 	RAMTotalBytes    int64
 	RAMTotalLabel    string
 	StoragePath      string
 	DiskFreeBytes    int64
 	DiskTotalBytes   int64
+	DiskUsedBytes    int64
 	DiskUsedPercent  int
+	DiskStatusClass  string
+	CPUStatusClass   string
+	LoadStatusClass  string
 	DiskFreeLabel    string
 	DiskTotalLabel   string
+	DiskUsedLabel    string
 	LastSeenAt       string
 	Sites            []ClientHostingSite
 	ClientEmails     []string
@@ -325,6 +334,8 @@ type RegistrySyncSummary struct {
 	OSVersion        string                    `json:"os_version"`
 	CPUModel         string                    `json:"cpu_model"`
 	CPUCores         int                       `json:"cpu_cores"`
+	CPUUsagePercent  float64                   `json:"cpu_usage_percent_1h"`
+	LoadAverage      float64                   `json:"load_average_1h"`
 	RAMTotalBytes    int64                     `json:"ram_total_bytes"`
 	RAMTotalLabel    string                    `json:"-"`
 	StoragePath      string                    `json:"storage_path"`
@@ -431,7 +442,7 @@ func Migrate(ctx context.Context, database *sql.DB) error {
 		`CREATE TABLE IF NOT EXISTS service_mail_blocks(id INTEGER PRIMARY KEY AUTOINCREMENT,scope TEXT,value TEXT,reason TEXT,created_at TEXT,UNIQUE(scope,value));`,
 		`CREATE TABLE IF NOT EXISTS service_mail_recipients(installation_id TEXT,recipient_hash TEXT,recipient_mask TEXT,status TEXT,purpose_scope TEXT,created_at TEXT,verified_at TEXT,PRIMARY KEY(installation_id,recipient_hash));`,
 		`CREATE INDEX IF NOT EXISTS idx_service_mail_recipients_installation_status ON service_mail_recipients(installation_id,status);`,
-		`CREATE TABLE IF NOT EXISTS client_hostings(installation_id TEXT PRIMARY KEY,owner_email TEXT,server_ip TEXT,server_status TEXT,server_domain TEXT,sitebrush_version TEXT,os_name TEXT,os_version TEXT,cpu_model TEXT,cpu_cores INTEGER DEFAULT 0,ram_total_bytes INTEGER DEFAULT 0,storage_path TEXT,disk_free_bytes INTEGER DEFAULT 0,disk_total_bytes INTEGER DEFAULT 0,first_seen_at TEXT,last_seen_at TEXT);`,
+		`CREATE TABLE IF NOT EXISTS client_hostings(installation_id TEXT PRIMARY KEY,owner_email TEXT,server_ip TEXT,server_status TEXT,server_domain TEXT,sitebrush_version TEXT,os_name TEXT,os_version TEXT,cpu_model TEXT,cpu_cores INTEGER DEFAULT 0,cpu_usage_percent_1h REAL DEFAULT 0,load_average_1h REAL DEFAULT 0,ram_total_bytes INTEGER DEFAULT 0,storage_path TEXT,disk_free_bytes INTEGER DEFAULT 0,disk_total_bytes INTEGER DEFAULT 0,first_seen_at TEXT,last_seen_at TEXT);`,
 		`CREATE TABLE IF NOT EXISTS client_hosting_sites(installation_id TEXT,domain TEXT,owner_email TEXT,used_bytes INTEGER DEFAULT 0,limit_bytes INTEGER DEFAULT 0,plan_name TEXT,plan_status TEXT,plan_paid_status TEXT,admin_emails TEXT,updated_at TEXT,PRIMARY KEY(installation_id,domain));`,
 		`CREATE INDEX IF NOT EXISTS idx_client_hosting_sites_installation ON client_hosting_sites(installation_id);`,
 		`CREATE TABLE IF NOT EXISTS registry_accounts(email TEXT PRIMARY KEY,first_seen_at TEXT,last_seen_at TEXT);`,
@@ -539,6 +550,8 @@ func requiredHostingAndSupportColumns() []hostingAndSupportColumn {
 		{tableName: "client_hostings", columnName: "os_version", definition: "TEXT"},
 		{tableName: "client_hostings", columnName: "cpu_model", definition: "TEXT"},
 		{tableName: "client_hostings", columnName: "cpu_cores", definition: "INTEGER DEFAULT 0"},
+		{tableName: "client_hostings", columnName: "cpu_usage_percent_1h", definition: "REAL DEFAULT 0"},
+		{tableName: "client_hostings", columnName: "load_average_1h", definition: "REAL DEFAULT 0"},
 		{tableName: "client_hostings", columnName: "ram_total_bytes", definition: "INTEGER DEFAULT 0"},
 		{tableName: "client_hosting_sites", columnName: "owner_email", definition: "TEXT"},
 		{tableName: "client_hosting_sites", columnName: "plan_name", definition: "TEXT"},
@@ -1169,8 +1182,8 @@ func (store Store) SaveHostingSnapshot(ctx context.Context, snapshot HostingSnap
 	if err != nil {
 		return err
 	}
-	_, err = transaction.ExecContext(ctx, `INSERT INTO client_hostings(installation_id,owner_email,server_ip,server_status,server_domain,sitebrush_version,os_name,os_version,cpu_model,cpu_cores,ram_total_bytes,storage_path,disk_free_bytes,disk_total_bytes,first_seen_at,last_seen_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(installation_id) DO UPDATE SET owner_email=excluded.owner_email,server_ip=excluded.server_ip,server_status=excluded.server_status,server_domain=excluded.server_domain,sitebrush_version=excluded.sitebrush_version,os_name=excluded.os_name,os_version=excluded.os_version,cpu_model=excluded.cpu_model,cpu_cores=excluded.cpu_cores,ram_total_bytes=excluded.ram_total_bytes,storage_path=excluded.storage_path,disk_free_bytes=excluded.disk_free_bytes,disk_total_bytes=excluded.disk_total_bytes,last_seen_at=excluded.last_seen_at`,
-		installationID, strings.ToLower(strings.TrimSpace(snapshot.OwnerEmail)), strings.TrimSpace(snapshot.ServerIP), strings.TrimSpace(snapshot.ServerStatus), strings.ToLower(strings.TrimSpace(snapshot.ServerDomain)), strings.TrimSpace(snapshot.SitebrushVersion), strings.TrimSpace(snapshot.OSName), strings.TrimSpace(snapshot.OSVersion), strings.TrimSpace(snapshot.CPUModel), snapshot.CPUCores, snapshot.RAMTotalBytes, strings.TrimSpace(snapshot.StoragePath), snapshot.DiskFreeBytes, snapshot.DiskTotalBytes, now, now)
+	_, err = transaction.ExecContext(ctx, `INSERT INTO client_hostings(installation_id,owner_email,server_ip,server_status,server_domain,sitebrush_version,os_name,os_version,cpu_model,cpu_cores,cpu_usage_percent_1h,load_average_1h,ram_total_bytes,storage_path,disk_free_bytes,disk_total_bytes,first_seen_at,last_seen_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(installation_id) DO UPDATE SET owner_email=excluded.owner_email,server_ip=excluded.server_ip,server_status=excluded.server_status,server_domain=excluded.server_domain,sitebrush_version=excluded.sitebrush_version,os_name=excluded.os_name,os_version=excluded.os_version,cpu_model=excluded.cpu_model,cpu_cores=excluded.cpu_cores,cpu_usage_percent_1h=excluded.cpu_usage_percent_1h,load_average_1h=excluded.load_average_1h,ram_total_bytes=excluded.ram_total_bytes,storage_path=excluded.storage_path,disk_free_bytes=excluded.disk_free_bytes,disk_total_bytes=excluded.disk_total_bytes,last_seen_at=excluded.last_seen_at`,
+		installationID, strings.ToLower(strings.TrimSpace(snapshot.OwnerEmail)), strings.TrimSpace(snapshot.ServerIP), strings.TrimSpace(snapshot.ServerStatus), strings.ToLower(strings.TrimSpace(snapshot.ServerDomain)), strings.TrimSpace(snapshot.SitebrushVersion), strings.TrimSpace(snapshot.OSName), strings.TrimSpace(snapshot.OSVersion), strings.TrimSpace(snapshot.CPUModel), snapshot.CPUCores, snapshot.CPUUsagePercent, snapshot.LoadAverage, snapshot.RAMTotalBytes, strings.TrimSpace(snapshot.StoragePath), snapshot.DiskFreeBytes, snapshot.DiskTotalBytes, now, now)
 	if err == nil {
 		_, err = transaction.ExecContext(ctx, `DELETE FROM client_hosting_sites WHERE installation_id=?`, installationID)
 	}
@@ -1320,6 +1333,8 @@ func registrySyncSummaryFromSnapshot(snapshot HostingSnapshot) RegistrySyncSumma
 		OSVersion:        strings.TrimSpace(snapshot.OSVersion),
 		CPUModel:         strings.TrimSpace(snapshot.CPUModel),
 		CPUCores:         snapshot.CPUCores,
+		CPUUsagePercent:  snapshot.CPUUsagePercent,
+		LoadAverage:      snapshot.LoadAverage,
 		RAMTotalBytes:    snapshot.RAMTotalBytes,
 		StoragePath:      strings.TrimSpace(snapshot.StoragePath),
 		DiskFreeBytes:    snapshot.DiskFreeBytes,
@@ -1430,7 +1445,7 @@ func (store Store) LogRegistrySyncEventWithSummary(ctx context.Context, installa
 }
 
 func (store Store) ClientHostings(ctx context.Context) []ClientHosting {
-	rows, err := store.DB.QueryContext(ctx, `SELECT installation_id,COALESCE(owner_email,''),COALESCE(server_ip,''),COALESCE(server_status,''),COALESCE(server_domain,''),COALESCE(sitebrush_version,''),COALESCE(os_name,''),COALESCE(os_version,''),COALESCE(cpu_model,''),COALESCE(cpu_cores,0),COALESCE(ram_total_bytes,0),COALESCE(storage_path,''),COALESCE(disk_free_bytes,0),COALESCE(disk_total_bytes,0),COALESCE(last_seen_at,'') FROM client_hostings ORDER BY last_seen_at DESC,installation_id ASC`)
+	rows, err := store.DB.QueryContext(ctx, `SELECT installation_id,COALESCE(owner_email,''),COALESCE(server_ip,''),COALESCE(server_status,''),COALESCE(server_domain,''),COALESCE(sitebrush_version,''),COALESCE(os_name,''),COALESCE(os_version,''),COALESCE(cpu_model,''),COALESCE(cpu_cores,0),COALESCE(cpu_usage_percent_1h,0),COALESCE(load_average_1h,0),COALESCE(ram_total_bytes,0),COALESCE(storage_path,''),COALESCE(disk_free_bytes,0),COALESCE(disk_total_bytes,0),COALESCE(last_seen_at,'') FROM client_hostings ORDER BY last_seen_at DESC,installation_id ASC`)
 	if err != nil {
 		return nil
 	}
@@ -1438,11 +1453,15 @@ func (store Store) ClientHostings(ctx context.Context) []ClientHosting {
 	hostings := make([]ClientHosting, 0, 8)
 	for rows.Next() {
 		var hosting ClientHosting
-		if scanErr := rows.Scan(&hosting.InstallationID, &hosting.OwnerEmail, &hosting.ServerIP, &hosting.ServerStatus, &hosting.ServerDomain, &hosting.SitebrushVersion, &hosting.OSName, &hosting.OSVersion, &hosting.CPUModel, &hosting.CPUCores, &hosting.RAMTotalBytes, &hosting.StoragePath, &hosting.DiskFreeBytes, &hosting.DiskTotalBytes, &hosting.LastSeenAt); scanErr != nil {
+		if scanErr := rows.Scan(&hosting.InstallationID, &hosting.OwnerEmail, &hosting.ServerIP, &hosting.ServerStatus, &hosting.ServerDomain, &hosting.SitebrushVersion, &hosting.OSName, &hosting.OSVersion, &hosting.CPUModel, &hosting.CPUCores, &hosting.CPUUsagePercent, &hosting.LoadAverage, &hosting.RAMTotalBytes, &hosting.StoragePath, &hosting.DiskFreeBytes, &hosting.DiskTotalBytes, &hosting.LastSeenAt); scanErr != nil {
 			continue
 		}
 		hosting.DiskFreeLabel = FormatFileSize(hosting.DiskFreeBytes)
 		hosting.DiskTotalLabel = FormatFileSize(hosting.DiskTotalBytes)
+		if hosting.DiskTotalBytes > hosting.DiskFreeBytes {
+			hosting.DiskUsedBytes = hosting.DiskTotalBytes - hosting.DiskFreeBytes
+		}
+		hosting.DiskUsedLabel = FormatFileSize(hosting.DiskUsedBytes)
 		hosting.RAMTotalLabel = FormatFileSize(hosting.RAMTotalBytes)
 		hostings = append(hostings, hosting)
 	}
@@ -1468,13 +1487,39 @@ func (store Store) ClientHostings(ctx context.Context) []ClientHosting {
 		hostings[hostingIndex].ClientEmails = sortedStringsFromMap(emailSet)
 		hostings[hostingIndex].TotalUsedLabel = FormatFileSize(hostings[hostingIndex].TotalUsedBytes)
 		if hostings[hostingIndex].DiskTotalBytes > 0 {
-			hostings[hostingIndex].DiskUsedPercent = int(math.Round(float64(hostings[hostingIndex].TotalUsedBytes) / float64(hostings[hostingIndex].DiskTotalBytes) * 100))
+			hostings[hostingIndex].DiskUsedPercent = int(math.Round(float64(hostings[hostingIndex].DiskUsedBytes) / float64(hostings[hostingIndex].DiskTotalBytes) * 100))
 			if hostings[hostingIndex].DiskUsedPercent > 100 {
 				hostings[hostingIndex].DiskUsedPercent = 100
 			}
 		}
+		hostings[hostingIndex].DiskStatusClass = metricStatusClass(float64(hostings[hostingIndex].DiskUsedPercent), 80, 95)
+		hostings[hostingIndex].CPUStatusClass = metricStatusClass(hostings[hostingIndex].CPUUsagePercent, 80, 95)
+		hostings[hostingIndex].LoadStatusClass = loadAverageStatusClass(hostings[hostingIndex].LoadAverage, hostings[hostingIndex].CPUCores)
 	}
 	return hostings
+}
+
+func metricStatusClass(value float64, warningThreshold float64, dangerThreshold float64) string {
+	if value >= dangerThreshold {
+		return "hosting-metric-danger"
+	}
+	if value >= warningThreshold {
+		return "hosting-metric-warning"
+	}
+	return "hosting-metric-ok"
+}
+
+func loadAverageStatusClass(loadAverage float64, cpuCores int) string {
+	if cpuCores <= 0 || loadAverage <= 0 {
+		return "hosting-metric-ok"
+	}
+	if loadAverage >= float64(cpuCores)*2 {
+		return "hosting-metric-danger"
+	}
+	if loadAverage >= float64(cpuCores) {
+		return "hosting-metric-warning"
+	}
+	return "hosting-metric-ok"
 }
 
 func (store Store) clientHostingSites(ctx context.Context, installationID string) []ClientHostingSite {

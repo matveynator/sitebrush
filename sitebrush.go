@@ -9733,6 +9733,7 @@ func (a *App) hostingAndSupportView(ctx context.Context, r *http.Request) (map[s
 	registrySyncEvents := store.RegistrySyncEvents(ctx, 40)
 	_ = a.migrateLegacySitebrushComPrivateKey(ctx, controlDatabase)
 	sitebrushComKey := store.SitebrushComKey(ctx)
+	showServers := a.hostingAndSupportCanShowCentralServers(ctx, store, sitebrushComKey)
 	serviceMailRelayEnabled := store.ServiceMailRelayEnabled(ctx)
 	demoSettings := (demo.Store{DB: controlDatabase}).Settings(ctx)
 	hostingAndSupportDemoDomain := ""
@@ -9765,6 +9766,7 @@ func (a *App) hostingAndSupportView(ctx context.Context, r *http.Request) (map[s
 		"ClientHostings":              clientHostings,
 		"RegistrySyncEvents":          registrySyncEvents,
 		"SitebrushComKey":             sitebrushComKey,
+		"ShowServers":                 showServers,
 		"Clients":                     serviceMailUsers,
 		"ClientCount":                 len(serviceMailUsers),
 		"ClientSiteCount":             clientSiteCount,
@@ -9885,6 +9887,21 @@ func hostingAndSupportClientHostingIsRealServer(clientHosting hostingandsupport.
 		return false
 	}
 	return domainARecordMatches(serverDomain, serverIP)
+}
+
+func (a *App) hostingAndSupportCanShowCentralServers(ctx context.Context, store hostingandsupport.Store, sitebrushComKey hostingandsupport.SitebrushComKey) bool {
+	ownerDomain, ownerFound := store.OwnerDomain(ctx)
+	if !ownerFound || normalizeDomainName(ownerDomain) != "sitebrush.com" {
+		return false
+	}
+	if strings.TrimSpace(sitebrushComKey.PublicKey) != strings.TrimSpace(sitebrushComServiceMailRelayPublicKey) {
+		return false
+	}
+	ipList, _, err := detectServerIPCandidates(ctx)
+	if err != nil || len(ipList) == 0 {
+		return false
+	}
+	return domainARecordMatchesAny("sitebrush.com", ipList)
 }
 
 func hostingAndSupportOverviewActions(view hostingAndSupportOverviewView) []hostingAndSupportOverviewAction {
@@ -13511,6 +13528,7 @@ func (a *App) buildHostingSnapshot(ctx context.Context) (hostingandsupport.Hosti
 	osName, osVersion := hostingSnapshotOS()
 	cpuModel := hostingSnapshotCPUModel()
 	ramTotalBytes := hostingSnapshotRAMTotalBytes(ctx)
+	cpuUsagePercent, loadAverage := hostingSnapshotHourlySystemMetrics()
 	serverDomain := ""
 	if ownerDomain, found := store.OwnerDomain(ctx); found {
 		serverDomain = ownerDomain
@@ -13526,6 +13544,8 @@ func (a *App) buildHostingSnapshot(ctx context.Context) (hostingandsupport.Hosti
 		OSVersion:        osVersion,
 		CPUModel:         cpuModel,
 		CPUCores:         runtime.NumCPU(),
+		CPUUsagePercent:  cpuUsagePercent,
+		LoadAverage:      loadAverage,
 		RAMTotalBytes:    ramTotalBytes,
 		StoragePath:      storageRoot,
 		CreatedAt:        time.Now().UTC().Format(time.RFC3339),
@@ -13727,6 +13747,92 @@ func hostingSnapshotRAMTotalBytes(ctx context.Context) int64 {
 		}
 	}
 	return 0
+}
+
+func hostingSnapshotHourlySystemMetrics() (float64, float64) {
+	loadAverage := hostingSnapshotLoadAverage()
+	cpuUsagePercent := hostingSnapshotCPUUsagePercent()
+	return cpuUsagePercent, loadAverage
+}
+
+func hostingSnapshotLoadAverage() float64 {
+	if runtime.GOOS != "linux" {
+		return 0
+	}
+	loadAverageBytes, err := os.ReadFile("/proc/loadavg")
+	if err != nil {
+		return 0
+	}
+	fields := strings.Fields(string(loadAverageBytes))
+	if len(fields) < 3 {
+		return 0
+	}
+	loadAverage, parseErr := strconv.ParseFloat(fields[2], 64)
+	if parseErr != nil {
+		return 0
+	}
+	return math.Round(loadAverage*100) / 100
+}
+
+type hostingSnapshotCPUTimes struct {
+	idle  uint64
+	total uint64
+}
+
+func hostingSnapshotCPUUsagePercent() float64 {
+	if runtime.GOOS != "linux" {
+		return 0
+	}
+	firstTimes, firstOK := hostingSnapshotReadCPUTimes()
+	if !firstOK {
+		return 0
+	}
+	time.Sleep(150 * time.Millisecond)
+	secondTimes, secondOK := hostingSnapshotReadCPUTimes()
+	if !secondOK || secondTimes.total <= firstTimes.total {
+		return 0
+	}
+	totalDelta := secondTimes.total - firstTimes.total
+	idleDelta := secondTimes.idle - firstTimes.idle
+	if totalDelta == 0 || idleDelta > totalDelta {
+		return 0
+	}
+	usage := (1 - float64(idleDelta)/float64(totalDelta)) * 100
+	if usage < 0 {
+		usage = 0
+	}
+	if usage > 100 {
+		usage = 100
+	}
+	return math.Round(usage*10) / 10
+}
+
+func hostingSnapshotReadCPUTimes() (hostingSnapshotCPUTimes, bool) {
+	statBytes, err := os.ReadFile("/proc/stat")
+	if err != nil {
+		return hostingSnapshotCPUTimes{}, false
+	}
+	scanner := bufio.NewScanner(strings.NewReader(string(statBytes)))
+	if !scanner.Scan() {
+		return hostingSnapshotCPUTimes{}, false
+	}
+	fields := strings.Fields(scanner.Text())
+	if len(fields) < 5 || fields[0] != "cpu" {
+		return hostingSnapshotCPUTimes{}, false
+	}
+	var total uint64
+	var idle uint64
+	for index := 1; index < len(fields); index++ {
+		value, parseErr := strconv.ParseUint(fields[index], 10, 64)
+		if parseErr != nil {
+			return hostingSnapshotCPUTimes{}, false
+		}
+		total += value
+		if index == 4 || index == 5 {
+			idle += value
+		}
+	}
+	return hostingSnapshotCPUTimes{idle: idle, total: total}, true
 }
 
 func commandOutputOneLine(ctx context.Context, name string, args ...string) string {
@@ -13936,6 +14042,7 @@ func (a *App) handleHostingSnapshotRequest(ctx context.Context, request serviceM
 	if err := store.SaveHostingSnapshot(ctx, snapshot); err != nil {
 		return fail(err.Error(), http.StatusBadRequest)
 	}
+	a.notifyHostingSnapshotDiskThreshold(ctx, controlDatabase, snapshot)
 	return "stored", http.StatusOK
 }
 
@@ -13947,6 +14054,71 @@ func snapshotOwnerDomain(snapshot hostingandsupport.HostingSnapshot) string {
 		}
 	}
 	return ""
+}
+
+func (a *App) notifyHostingSnapshotDiskThreshold(ctx context.Context, controlDatabase *sql.DB, snapshot hostingandsupport.HostingSnapshot) {
+	if snapshot.DiskTotalBytes <= 0 || snapshot.DiskFreeBytes < 0 || snapshot.DiskFreeBytes > snapshot.DiskTotalBytes {
+		return
+	}
+	usedBytes := snapshot.DiskTotalBytes - snapshot.DiskFreeBytes
+	usedPercent := int(math.Round(float64(usedBytes) / float64(snapshot.DiskTotalBytes) * 100))
+	settingName := "disk_alert_95_" + safeServerSettingSuffix(snapshot.InstallationID)
+	if usedPercent < 90 {
+		_, _ = controlDatabase.ExecContext(ctx, `DELETE FROM server_settings WHERE name=?`, settingName)
+		return
+	}
+	if usedPercent < 95 {
+		return
+	}
+	var existingValue string
+	_ = controlDatabase.QueryRowContext(ctx, `SELECT value FROM server_settings WHERE name=?`, settingName).Scan(&existingValue)
+	if strings.TrimSpace(existingValue) != "" {
+		return
+	}
+	ownerEmail := strings.ToLower(strings.TrimSpace(snapshot.OwnerEmail))
+	if ownerEmail == "" {
+		return
+	}
+	serverName := firstNonEmpty(strings.TrimSpace(snapshot.ServerDomain), strings.TrimSpace(snapshot.InstallationID), strings.TrimSpace(snapshot.ServerIP), "сервер SiteBrush")
+	body := fmt.Sprintf("На сервере %s занято %d%% диска.\n\nIP: %s\nЗанято: %s\nСвободно: %s\nВсего: %s\n\nНужно увеличить диск или очистить ненужные данные, например старые логи и временные файлы.",
+		serverName,
+		usedPercent,
+		strings.TrimSpace(snapshot.ServerIP),
+		formatFileSize(usedBytes),
+		formatFileSize(snapshot.DiskFreeBytes),
+		formatFileSize(snapshot.DiskTotalBytes))
+	err := a.enqueueEmail(ctx, mailout.Message{
+		From:    a.emailFromAddress("sitebrush.com"),
+		To:      ownerEmail,
+		Subject: "SiteBrush: на сервере заканчивается место",
+		Body:    body,
+	})
+	if err != nil {
+		log.Printf("hosting disk alert email enqueue failed installation=%s owner=%s error=%v", snapshot.InstallationID, ownerEmail, err)
+		return
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	_, _ = controlDatabase.ExecContext(ctx, `INSERT INTO server_settings(name,value,updated_at) VALUES(?,?,?) ON CONFLICT(name) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at`, settingName, now, now)
+}
+
+func safeServerSettingSuffix(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "unknown"
+	}
+	return regexp.MustCompile(`[^a-zA-Z0-9_.-]+`).ReplaceAllString(value, "_")
+}
+
+func (a *App) notifyServiceMailRequestHostingSnapshotDiskThreshold(ctx context.Context, controlDatabase *sql.DB, request serviceMailRequest, sourceIP string) {
+	if request.HostingSnapshot == nil {
+		return
+	}
+	snapshot := *request.HostingSnapshot
+	snapshot.InstallationID = request.InstallationID
+	if strings.TrimSpace(snapshot.ServerIP) == "" {
+		snapshot.ServerIP = strings.TrimSpace(sourceIP)
+	}
+	a.notifyHostingSnapshotDiskThreshold(ctx, controlDatabase, snapshot)
 }
 
 func (a *App) handleServiceMailRelayRequest(ctx context.Context, r *http.Request, request serviceMailRequest, sourceIP string) (string, int) {
@@ -13992,6 +14164,7 @@ func (a *App) handleServiceMailRelayRequest(ctx context.Context, r *http.Request
 		if err := storeServiceMailRequestHostingSnapshot(ctx, store, request, sourceIP); err != nil {
 			return fail(err.Error(), http.StatusBadRequest)
 		}
+		a.notifyServiceMailRequestHostingSnapshotDiskThreshold(ctx, controlDatabase, request, sourceIP)
 		return "registered", http.StatusOK
 	}
 	if !installationFound {
@@ -14006,6 +14179,7 @@ func (a *App) handleServiceMailRelayRequest(ctx context.Context, r *http.Request
 	if err := storeServiceMailRequestHostingSnapshot(ctx, store, request, sourceIP); err != nil {
 		return fail(err.Error(), http.StatusBadRequest)
 	}
+	a.notifyServiceMailRequestHostingSnapshotDiskThreshold(ctx, controlDatabase, request, sourceIP)
 	if store.ServiceMailInstallationBlocked(ctx, request.InstallationID) {
 		return fail("installation is blocked", http.StatusForbidden)
 	}
