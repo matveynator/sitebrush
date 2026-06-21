@@ -21,7 +21,50 @@
 
   {{if .Status}}<div class="alert alert-info billing-status" role="alert">{{.Status}}</div>{{end}}
 
-  <section class="card billing-card">
+  <nav class="hosting-tabs" aria-label="Разделы хостинга и поддержки">
+    <button type="button" class="hosting-tab-button active" data-hosting-tab-button="overview">Обзор</button>
+    <button type="button" class="hosting-tab-button" data-hosting-tab-button="clients">Клиенты</button>
+    <button type="button" class="hosting-tab-button" data-hosting-tab-button="sites">Сайты</button>
+    <button type="button" class="hosting-tab-button" data-hosting-tab-button="invoices">Счета</button>
+    <button type="button" class="hosting-tab-button" data-hosting-tab-button="settings">Настройки</button>
+    <button type="button" class="hosting-tab-button" data-hosting-tab-button="diagnostics">Диагностика</button>
+  </nav>
+
+  <section class="card billing-card hosting-overview-panel" data-hosting-tab-panel="overview">
+    <div class="card-body">
+      <div class="hosting-overview-hero {{.Overview.HealthClass}}">
+        <div>
+          <div class="hosting-overview-kicker">Хостинг и поддержка</div>
+          <h2>{{.Overview.HealthTitle}}</h2>
+          <p>{{.Overview.HealthText}}</p>
+        </div>
+        <div class="hosting-overview-big-number">{{.Overview.ProblemCount}}</div>
+      </div>
+      <div class="hosting-overview-metrics">
+        <button type="button" data-hosting-tab-jump="clients"><strong>{{.Overview.ClientCount}}</strong><span>клиентов</span></button>
+        <button type="button" data-hosting-tab-jump="sites"><strong>{{.Overview.SiteCount}}</strong><span>сайтов</span></button>
+        <button type="button" data-hosting-tab-jump="clients"><strong>{{.Overview.ServerCount}}</strong><span>серверов</span></button>
+        <button type="button" data-hosting-tab-jump="invoices"><strong>{{.Overview.UnpaidInvoices}}</strong><span>счетов к оплате</span></button>
+      </div>
+      <div class="hosting-overview-actions">
+        {{range .Overview.Actions}}
+        <article class="hosting-overview-action hosting-overview-action-{{.Level}}">
+          <div>
+            <h3>{{.Title}}</h3>
+            <p>{{.Text}}</p>
+          </div>
+          <button type="button" class="btn btn-outline-primary btn-sm" data-hosting-tab-jump="{{.Tab}}">{{.ButtonText}}</button>
+        </article>
+        {{end}}
+      </div>
+      <div class="hosting-overview-footnotes">
+        <span>Последняя синхронизация: {{.Overview.LastSyncLabel}}</span>
+        <span>{{.Overview.PaymentSetupText}}</span>
+      </div>
+    </div>
+  </section>
+
+  <section class="card billing-card hosting-tab-panel-hidden" data-hosting-tab-panel="clients">
     <div class="card-body">
       <div class="billing-section-header">
         <div>
@@ -236,7 +279,9 @@
         <div class="empty">Клиентов пока нет.</div>
         {{end}}
       </div>
-      <div class="billing-sync-history-head mt-4">
+      <details class="billing-technical-details mt-4">
+        <summary>Техническая история синхронизаций</summary>
+      <div class="billing-sync-history-head mt-3">
         <div>
           <h3 class="billing-user-subtitle">История синхронизаций snapshot</h3>
           <p class="text-muted">Что sitebrush.com получил от SiteBrush-серверов и что обновил в реестре.</p>
@@ -378,10 +423,11 @@
       {{else}}
       <div class="empty">История синхронизаций пока пуста.</div>
       {{end}}
+      </details>
     </div>
   </section>
 
-  <section class="card billing-card">
+  <section class="card billing-card hosting-tab-panel-hidden" data-hosting-tab-panel="diagnostics">
     <div class="card-body">
       <div class="billing-section-header">
         <div>
@@ -406,7 +452,7 @@
     </div>
   </section>
 
-  <section class="card billing-card">
+  <section class="card billing-card hosting-tab-panel-hidden" data-hosting-tab-panel="settings">
     <div class="card-body">
       <h2>{{index .T "billing_plans_title"}}</h2>
       <form method="post" action="?hosting_and_support" class="billing-plan-form">
@@ -487,28 +533,15 @@
     </div>
   </section>
 
-  <section class="card billing-card">
+  <section class="card billing-card hosting-tab-panel-hidden" data-hosting-tab-panel="invoices">
     <div class="card-body">
       <div class="billing-section-header">
         <div>
           <h2>Счета и оплата</h2>
-          <p class="text-muted">Первый слой биллинга: выставление счетов клиентам и оплата через Stripe, PayPal или СБП. В snapshot уходят только метаданные счетов и событий.</p>
+          <p class="text-muted">Выставляйте счета клиентам и отмечайте оплату. Технические настройки способов оплаты скрыты ниже.</p>
         </div>
       </div>
-      <div class="billing-plan-list">
-        {{range .PaymentProviders}}
-        <form method="post" action="?hosting_and_support" class="billing-plan-row">
-          <input type="hidden" name="billing_action" value="save_payment_provider">
-          <input type="hidden" name="provider" value="{{.Provider}}">
-          <label class="checkbox-row"><input type="checkbox" name="enabled" value="1" {{if .Enabled}}checked{{end}}><span>{{.DisplayName}}</span></label>
-          <input name="display_name" type="text" class="form-control form-control-sm" value="{{.DisplayName}}" placeholder="Название">
-          <input name="payment_url" type="text" class="form-control form-control-sm" value="{{.PaymentURL}}" placeholder="URL-шаблон: https://.../{invoice}/{amount}/{currency}/{email}/{domain}">
-          <input name="instructions" type="text" class="form-control form-control-sm" value="{{.Instructions}}" placeholder="Инструкция для клиента">
-          <button type="submit" class="btn btn-outline-primary btn-sm"><img src="/p/static/save-page.png" alt="">Сохранить</button>
-        </form>
-        {{end}}
-      </div>
-      <form method="post" action="?hosting_and_support" class="billing-plan-form mt-3">
+      <form method="post" action="?hosting_and_support" class="billing-plan-form">
         <input type="hidden" name="billing_action" value="create_invoice">
         <label>Клиент <input name="customer_email" type="email" class="form-control" placeholder="client@example.com" required></label>
         <label>Сайт <input name="domain" type="text" class="form-control" placeholder="example.com" required></label>
@@ -528,7 +561,7 @@
         {{range .Invoices}}
         <article class="billing-site-row">
           <div class="billing-site-main">
-            <div class="billing-domain">{{.Number}} · {{.Status}}</div>
+            <div class="billing-domain">{{.Number}} · {{if eq .Status "issued"}}ожидает оплаты{{else if eq .Status "paid"}}оплачен{{else if eq .Status "payment_error"}}ошибка оплаты{{else if eq .Status "cancelled"}}отменён{{else}}{{.Status}}{{end}}</div>
             <div class="text-muted small">{{.CustomerEmail}} · {{.Domain}} · {{.PlanName}}</div>
             <div class="text-muted small">{{.Amount}} {{.Currency}} · {{.Provider}} · создан {{.CreatedAt}}{{if .DueAt}} · срок {{.DueAt}}{{end}}{{if .PaidAt}} · оплачен {{.PaidAt}}{{end}}</div>
             {{if .PaymentURL}}<div class="text-muted small"><a href="{{.PaymentURL}}" target="_blank" rel="noopener noreferrer">Ссылка на оплату</a></div>{{end}}
@@ -556,10 +589,26 @@
         <div class="empty">Счетов пока нет.</div>
         {{end}}
       </div>
+      <details class="billing-technical-details mt-3">
+        <summary>Способы оплаты</summary>
+        <div class="billing-plan-list mt-3">
+          {{range .PaymentProviders}}
+          <form method="post" action="?hosting_and_support" class="billing-plan-row">
+            <input type="hidden" name="billing_action" value="save_payment_provider">
+            <input type="hidden" name="provider" value="{{.Provider}}">
+            <label class="checkbox-row"><input type="checkbox" name="enabled" value="1" {{if .Enabled}}checked{{end}}><span>{{.DisplayName}}</span></label>
+            <input name="display_name" type="text" class="form-control form-control-sm" value="{{.DisplayName}}" placeholder="Название">
+            <input name="payment_url" type="text" class="form-control form-control-sm" value="{{.PaymentURL}}" placeholder="URL-шаблон: https://.../{invoice}/{amount}/{currency}/{email}/{domain}">
+            <input name="instructions" type="text" class="form-control form-control-sm" value="{{.Instructions}}" placeholder="Инструкция для клиента">
+            <button type="submit" class="btn btn-outline-primary btn-sm"><img src="/p/static/save-page.png" alt="">Сохранить</button>
+          </form>
+          {{end}}
+        </div>
+      </details>
     </div>
   </section>
 
-  <section class="card billing-card">
+  <section class="card billing-card hosting-tab-panel-hidden" data-hosting-tab-panel="settings">
     <div class="card-body billing-card-body">
       <div>
         <h2>{{index .T "billing_registration_title"}}</h2>
@@ -576,7 +625,7 @@
     </div>
   </section>
 
-  <section class="card billing-card {{if not .AutoRegistrationEnabled}}d-none{{end}}" data-public-trial-embed-section>
+  <section class="card billing-card hosting-tab-panel-hidden {{if not .AutoRegistrationEnabled}}d-none{{end}}" data-hosting-tab-panel="settings" data-public-trial-embed-section>
     <div class="card-body billing-card-body">
       <div>
         <h2>{{index .T "public_trial_embed_title"}}</h2>
@@ -600,7 +649,7 @@
       </div>
     </div></div>
   </div>
-  <section class="card billing-card {{if .AutoRegistrationEnabled}}d-none{{end}}" data-public-trial-disabled-section>
+  <section class="card billing-card hosting-tab-panel-hidden {{if .AutoRegistrationEnabled}}d-none{{end}}" data-hosting-tab-panel="settings" data-public-trial-disabled-section>
     <div class="card-body">
       <div class="alert alert-warning mb-0" role="alert">
         <strong>{{index .T "public_trial_disabled_title"}}</strong>
@@ -609,7 +658,7 @@
     </div>
   </section>
 
-  <section class="card billing-card">
+  <section class="card billing-card hosting-tab-panel-hidden" data-hosting-tab-panel="sites">
     <div class="card-body billing-card-body">
       <div>
         <h2>{{index .T "billing_add_site_title"}}</h2>
@@ -627,7 +676,7 @@
   </section>
 
 
-  <section class="card billing-card">
+  <section class="card billing-card hosting-tab-panel-hidden" data-hosting-tab-panel="sites">
     <div class="card-body">
       <div class="billing-section-header">
         <div>
@@ -702,7 +751,7 @@
     </div>
   </section>
 
-  <section class="card billing-card">
+  <section class="card billing-card hosting-tab-panel-hidden" data-hosting-tab-panel="sites">
     <div class="card-body">
       <div class="billing-section-header">
         <div>
@@ -808,7 +857,7 @@
     </div>
   </section>
 
-  <section class="card billing-card">
+  <section class="card billing-card hosting-tab-panel-hidden" data-hosting-tab-panel="diagnostics">
     <div class="card-body">
       <div class="billing-section-header">
         <div>
@@ -934,7 +983,7 @@
   </section>
 
   {{if .Backups}}
-  <section class="card billing-card">
+  <section class="card billing-card hosting-tab-panel-hidden" data-hosting-tab-panel="settings">
     <div class="card-body">
       <div class="billing-section-header">
         <div>
@@ -973,7 +1022,7 @@
   </section>
   {{end}}
 
-  <section class="card billing-card">
+  <section class="card billing-card hosting-tab-panel-hidden" data-hosting-tab-panel="settings">
     <div class="card-body billing-card-body">
       <div>
         <h2>{{index .T "billing_demo_title"}}</h2>
@@ -1015,6 +1064,42 @@
   </div></div>
 </div>
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+<script>
+(function initializeHostingAndSupportTabs() {
+  const tabButtonElements = Array.from(document.querySelectorAll('[data-hosting-tab-button]'));
+  const tabJumpElements = Array.from(document.querySelectorAll('[data-hosting-tab-jump]'));
+  const tabPanelElements = Array.from(document.querySelectorAll('[data-hosting-tab-panel]'));
+  if (tabButtonElements.length === 0 || tabPanelElements.length === 0) {
+    return;
+  }
+
+  function showHostingTab(tabName) {
+    tabButtonElements.forEach(function updateTabButton(tabButtonElement) {
+      const buttonTabName = tabButtonElement.getAttribute('data-hosting-tab-button') || '';
+      const active = buttonTabName === tabName;
+      tabButtonElement.classList.toggle('active', active);
+      tabButtonElement.setAttribute('aria-selected', active ? 'true' : 'false');
+    });
+    tabPanelElements.forEach(function updateTabPanel(tabPanelElement) {
+      const panelTabName = tabPanelElement.getAttribute('data-hosting-tab-panel') || '';
+      tabPanelElement.classList.toggle('hosting-tab-panel-hidden', panelTabName !== tabName);
+    });
+  }
+
+  tabButtonElements.forEach(function bindTabButton(tabButtonElement) {
+    tabButtonElement.addEventListener('click', function handleTabButtonClick() {
+      showHostingTab(tabButtonElement.getAttribute('data-hosting-tab-button') || 'overview');
+    });
+  });
+  tabJumpElements.forEach(function bindTabJump(tabJumpElement) {
+    tabJumpElement.addEventListener('click', function handleTabJumpClick() {
+      showHostingTab(tabJumpElement.getAttribute('data-hosting-tab-jump') || 'overview');
+      window.scrollTo({top: 0, behavior: 'smooth'});
+    });
+  });
+  showHostingTab('overview');
+})();
+</script>
 <script>
 (function initializeBillingClientListControls() {
   const controlsElement = document.querySelector('[data-billing-client-controls]');

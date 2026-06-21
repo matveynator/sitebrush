@@ -9749,6 +9749,7 @@ func (a *App) hostingAndSupportView(ctx context.Context, r *http.Request) (map[s
 	hostingAndSupportAttachApprovedSiteRequests(siteRows, approvedSiteRequestsByDomain)
 	serviceMailUsers := a.hostingAndSupportClients(ctx, siteRows, serviceMailInstallations, serviceMailEvents, clientHostings)
 	clientSiteCount, clientInstallationCount, clientLocalDevelopmentCount := hostingAndSupportClientTotals(serviceMailUsers)
+	overview := hostingAndSupportOverview(siteRows, serviceMailUsers, pendingSiteRequests, invoices, clientHostings, registrySyncEvents, serviceMailEvents)
 	backups := a.managedSiteDeletionBackupViews(ctx, r, controlDatabase)
 	translations := translationsForRequest(r)
 	return map[string]any{
@@ -9770,6 +9771,7 @@ func (a *App) hostingAndSupportView(ctx context.Context, r *http.Request) (map[s
 		"ClientLocalDevelopmentCount": clientLocalDevelopmentCount,
 		"ServiceMailBlocks":           serviceMailBlocks,
 		"ServiceMailRelayEnabled":     serviceMailRelayEnabled,
+		"Overview":                    overview,
 		"ServiceMailLimits": map[string]int{
 			"InstallationHour":    serviceMailPerInstallationHourLimit,
 			"NewInstallationHour": serviceMailNewInstallationHourLimit,
@@ -9785,6 +9787,103 @@ func (a *App) hostingAndSupportView(ctx context.Context, r *http.Request) (map[s
 		"PublicTrialEmbedHTML":    publicTrialSignupEmbedHTML(r, translations),
 		"CurrentDomain":           a.siteDomain(ctx, r),
 	}, nil
+}
+
+type hostingAndSupportOverviewView struct {
+	HealthTitle      string
+	HealthText       string
+	HealthClass      string
+	ProblemCount     int
+	PendingRequests  int
+	UnpaidInvoices   int
+	OverLimitSites   int
+	StaleServers     int
+	MailErrors       int
+	ClientCount      int
+	SiteCount        int
+	ServerCount      int
+	LastSyncLabel    string
+	PaymentSetupText string
+	Actions          []hostingAndSupportOverviewAction
+}
+
+type hostingAndSupportOverviewAction struct {
+	Title      string
+	Text       string
+	ButtonText string
+	Tab        string
+	Level      string
+}
+
+func hostingAndSupportOverview(sites []hostingandsupport.Site, clients []hostingAndSupportClientView, siteRequests []hostingandsupport.SiteRequest, invoices []hostingandsupport.Invoice, hostings []hostingandsupport.ClientHosting, syncEvents []hostingandsupport.RegistrySyncEvent, serviceMailEvents []hostingandsupport.ServiceMailEvent) hostingAndSupportOverviewView {
+	view := hostingAndSupportOverviewView{
+		PendingRequests:  len(siteRequests),
+		ClientCount:      len(clients),
+		SiteCount:        len(sites),
+		ServerCount:      len(hostings),
+		LastSyncLabel:    "синхронизаций ещё нет",
+		PaymentSetupText: "способы оплаты настраиваются в разделе счетов",
+	}
+	if len(syncEvents) > 0 {
+		view.LastSyncLabel = firstNonEmpty(syncEvents[0].CreatedAt, "синхронизация была, дата не передана")
+	}
+	for _, site := range sites {
+		if site.UsedPercent >= 100 {
+			view.OverLimitSites++
+		}
+	}
+	now := time.Now().UTC()
+	for _, hosting := range hostings {
+		if hostingAndSupportHostingSyncIsStale(hosting.LastSeenAt, now) {
+			view.StaleServers++
+		}
+	}
+	for _, invoice := range invoices {
+		switch strings.TrimSpace(invoice.Status) {
+		case "issued", "payment_error":
+			view.UnpaidInvoices++
+		}
+	}
+	for _, event := range serviceMailEvents {
+		if strings.TrimSpace(event.Error) != "" || strings.TrimSpace(event.Status) == "error" {
+			view.MailErrors++
+		}
+	}
+	view.ProblemCount = view.PendingRequests + view.UnpaidInvoices + view.OverLimitSites + view.StaleServers + view.MailErrors
+	if view.ProblemCount == 0 {
+		view.HealthTitle = "Всё спокойно"
+		view.HealthText = "Заявок, неоплаченных счетов и критичных проблем сейчас нет."
+		view.HealthClass = "hosting-overview-ok"
+	} else {
+		view.HealthTitle = strconv.Itoa(view.ProblemCount) + " требует внимания"
+		view.HealthText = "Сначала разберите эти пункты, остальное можно смотреть позже."
+		view.HealthClass = "hosting-overview-warning"
+	}
+	view.Actions = hostingAndSupportOverviewActions(view)
+	return view
+}
+
+func hostingAndSupportOverviewActions(view hostingAndSupportOverviewView) []hostingAndSupportOverviewAction {
+	actions := make([]hostingAndSupportOverviewAction, 0, 5)
+	if view.PendingRequests > 0 {
+		actions = append(actions, hostingAndSupportOverviewAction{Title: "Новые заявки", Text: strconv.Itoa(view.PendingRequests) + " ждут решения", ButtonText: "Открыть сайты", Tab: "sites", Level: "warning"})
+	}
+	if view.UnpaidInvoices > 0 {
+		actions = append(actions, hostingAndSupportOverviewAction{Title: "Счета", Text: strconv.Itoa(view.UnpaidInvoices) + " ожидают оплаты или требуют проверки", ButtonText: "Открыть счета", Tab: "invoices", Level: "warning"})
+	}
+	if view.OverLimitSites > 0 {
+		actions = append(actions, hostingAndSupportOverviewAction{Title: "Место на диске", Text: strconv.Itoa(view.OverLimitSites) + " сайтов превысили лимит", ButtonText: "Открыть сайты", Tab: "sites", Level: "danger"})
+	}
+	if view.StaleServers > 0 {
+		actions = append(actions, hostingAndSupportOverviewAction{Title: "Синхронизация", Text: strconv.Itoa(view.StaleServers) + " серверов давно не обновлялись", ButtonText: "Диагностика", Tab: "diagnostics", Level: "warning"})
+	}
+	if view.MailErrors > 0 {
+		actions = append(actions, hostingAndSupportOverviewAction{Title: "Отправка писем", Text: strconv.Itoa(view.MailErrors) + " ошибок в журнале", ButtonText: "Диагностика", Tab: "diagnostics", Level: "danger"})
+	}
+	if len(actions) == 0 {
+		actions = append(actions, hostingAndSupportOverviewAction{Title: "Работа идёт штатно", Text: "Можно создавать сайты, выставлять счета и менять тарифы.", ButtonText: "Открыть сайты", Tab: "sites", Level: "ok"})
+	}
+	return actions
 }
 
 func hostingAndSupportClientTotals(clients []hostingAndSupportClientView) (int, int, int) {

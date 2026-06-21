@@ -796,6 +796,164 @@
     margin-bottom: 12px;
 }
 
+.technical-page .hosting-tabs {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin: 0 0 12px;
+    padding: 6px;
+    border: 1px solid rgba(149, 229, 239, 0.14);
+    border-radius: 10px;
+    background: rgba(255, 255, 255, 0.04);
+}
+
+.technical-page .hosting-tab-button {
+    min-height: 38px;
+    padding: 8px 12px;
+    border: 0;
+    border-radius: 8px;
+    background: transparent;
+    color: var(--muted);
+    font-size: 14px;
+    font-weight: 700;
+}
+
+.technical-page .hosting-tab-button:hover,
+.technical-page .hosting-tab-button:focus {
+    background: rgba(149, 229, 239, 0.10);
+    color: var(--text);
+}
+
+.technical-page .hosting-tab-button.active {
+    background: rgba(149, 229, 239, 0.18);
+    color: var(--text);
+}
+
+.technical-page .hosting-tab-panel-hidden {
+    display: none;
+}
+
+.technical-page .hosting-overview-panel .card-body {
+    display: grid;
+    gap: 12px;
+}
+
+.technical-page .hosting-overview-hero {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 14px;
+    align-items: center;
+    padding: 18px;
+    border-radius: 10px;
+}
+
+.technical-page .hosting-overview-ok {
+    border: 1px solid rgba(77, 208, 162, 0.28);
+    background: rgba(77, 208, 162, 0.10);
+}
+
+.technical-page .hosting-overview-warning {
+    border: 1px solid rgba(255, 193, 7, 0.32);
+    background: rgba(255, 193, 7, 0.10);
+}
+
+.technical-page .hosting-overview-kicker {
+    margin-bottom: 4px;
+    color: var(--muted);
+    font-size: 12px;
+    font-weight: 700;
+    text-transform: uppercase;
+}
+
+.technical-page .hosting-overview-hero h2 {
+    margin: 0 0 4px;
+    font-size: 28px;
+}
+
+.technical-page .hosting-overview-big-number {
+    min-width: 58px;
+    color: var(--text);
+    font-size: 42px;
+    font-weight: 800;
+    text-align: center;
+}
+
+.technical-page .hosting-overview-metrics {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 8px;
+}
+
+.technical-page .hosting-overview-metrics button {
+    display: grid;
+    gap: 2px;
+    min-height: 70px;
+    padding: 12px;
+    border: 1px solid rgba(149, 229, 239, 0.16);
+    border-radius: 9px;
+    background: rgba(0, 0, 0, 0.12);
+    color: var(--muted);
+    text-align: left;
+}
+
+.technical-page .hosting-overview-metrics strong {
+    color: var(--text);
+    font-size: 24px;
+    line-height: 1;
+}
+
+.technical-page .hosting-overview-actions {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+}
+
+.technical-page .hosting-overview-action {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 10px;
+    align-items: center;
+    padding: 12px;
+    border: 1px solid rgba(149, 229, 239, 0.16);
+    border-radius: 9px;
+    background: rgba(0, 0, 0, 0.14);
+}
+
+.technical-page .hosting-overview-action-warning {
+    border-color: rgba(255, 193, 7, 0.30);
+}
+
+.technical-page .hosting-overview-action-danger {
+    border-color: rgba(220, 53, 69, 0.34);
+}
+
+.technical-page .hosting-overview-action h3 {
+    margin: 0 0 3px;
+    color: var(--text);
+    font-size: 16px;
+}
+
+.technical-page .hosting-overview-footnotes {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px 14px;
+    color: var(--muted);
+    font-size: 12px;
+}
+
+.technical-page .billing-technical-details {
+    padding: 10px;
+    border: 1px solid rgba(149, 229, 239, 0.14);
+    border-radius: 8px;
+    background: rgba(255, 255, 255, 0.035);
+}
+
+.technical-page .billing-technical-details > summary {
+    cursor: pointer;
+    color: var(--text);
+    font-weight: 700;
+}
+
 .technical-page .billing-card .card-body {
     padding: 16px;
 }
@@ -1913,6 +2071,9 @@
     .technical-page .missing-page-secondary-grid,
     .technical-page .billing-create-form,
     .technical-page .billing-plan-form,
+    .technical-page .hosting-overview-actions,
+    .technical-page .hosting-overview-hero,
+    .technical-page .hosting-overview-metrics,
     .technical-page .billing-client-controls,
     .technical-page .billing-sync-controls,
     .technical-page .billing-sync-row,
@@ -1952,6 +2113,10 @@
 
     .technical-page .billing-backup-actions {
         justify-self: stretch;
+    }
+
+    .technical-page .hosting-overview-big-number {
+        text-align: left;
     }
 
     .technical-page .billing-service-mail-log-row {
