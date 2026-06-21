@@ -24,6 +24,7 @@
   <nav class="hosting-tabs" aria-label="Разделы хостинга и поддержки">
     <button type="button" class="hosting-tab-button active" data-hosting-tab-button="overview">Обзор</button>
     <button type="button" class="hosting-tab-button" data-hosting-tab-button="clients">Клиенты</button>
+    <button type="button" class="hosting-tab-button" data-hosting-tab-button="servers">Серверы</button>
     <button type="button" class="hosting-tab-button" data-hosting-tab-button="sites">Сайты</button>
     <button type="button" class="hosting-tab-button" data-hosting-tab-button="invoices">Счета</button>
     <button type="button" class="hosting-tab-button" data-hosting-tab-button="settings">Настройки</button>
@@ -43,7 +44,7 @@
       <div class="hosting-overview-metrics">
         <button type="button" data-hosting-tab-jump="clients"><strong>{{.Overview.ClientCount}}</strong><span>клиентов</span></button>
         <button type="button" data-hosting-tab-jump="sites"><strong>{{.Overview.SiteCount}}</strong><span>сайтов</span></button>
-        <button type="button" data-hosting-tab-jump="clients"><strong>{{.Overview.ServerCount}}</strong><span>серверов</span></button>
+        <button type="button" data-hosting-tab-jump="servers"><strong>{{.Overview.ServerCount}}</strong><span>серверов</span></button>
         <button type="button" data-hosting-tab-jump="invoices"><strong>{{.Overview.UnpaidInvoices}}</strong><span>счетов к оплате</span></button>
       </div>
       <div class="hosting-overview-actions">
@@ -60,6 +61,40 @@
       <div class="hosting-overview-footnotes">
         <span>Последняя синхронизация: {{.Overview.LastSyncLabel}}</span>
         <span>{{.Overview.PaymentSetupText}}</span>
+      </div>
+    </div>
+  </section>
+
+  <section class="card billing-card hosting-tab-panel-hidden" data-hosting-tab-panel="servers">
+    <div class="card-body">
+      <div class="billing-section-header">
+        <div>
+          <h2>Серверы</h2>
+          <p class="text-muted">Только реальные SiteBrush-инсталляции: публичный IP и головной домен, который указывает на этот IP.</p>
+        </div>
+      </div>
+      <div class="billing-site-list">
+        {{range .ClientHostings}}
+        <article class="billing-site-row">
+          <div class="billing-site-main">
+            <div class="billing-domain">{{if .ServerDomain}}{{.ServerDomain}}{{else}}{{.InstallationID}}{{end}}</div>
+            <div class="text-muted small">IP: {{.ServerIP}} · владелец: {{.OwnerEmail}}</div>
+            <div class="text-muted small">SiteBrush {{if .SitebrushVersion}}{{.SitebrushVersion}}{{else}}версия не передана{{end}} · {{if .OSName}}{{.OSName}} {{.OSVersion}}{{else}}ОС не передана{{end}}</div>
+            <div class="billing-quota-bar" aria-label="Занято {{.DiskUsedPercent}}% диска">
+              <div style="width:{{.DiskUsedPercent}}%"></div>
+            </div>
+            <div class="text-muted small">Диск: {{.TotalUsedLabel}} занято / {{.DiskFreeLabel}} свободно / {{.DiskTotalLabel}} всего</div>
+          </div>
+          <div class="billing-client-hosting-meta">
+            <div><strong>CPU</strong><span>{{if .CPUModel}}{{.CPUModel}}{{else}}не передан{{end}} · {{.CPUCores}} ядер</span></div>
+            <div><strong>Память</strong><span>{{.RAMTotalLabel}}</span></div>
+            <div><strong>Сайты</strong><span>{{.SiteCount}}</span></div>
+            <div><strong>Последняя синхронизация</strong><span>{{if .LastSeenAt}}{{.LastSeenAt}}{{else}}нет данных{{end}}</span></div>
+          </div>
+        </article>
+        {{else}}
+        <div class="empty">Реальных серверов пока нет. Нужен публичный IP и головной домен, направленный на этот IP.</div>
+        {{end}}
       </div>
     </div>
   </section>

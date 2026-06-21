@@ -248,6 +248,7 @@ type ClientHosting struct {
 	StoragePath      string
 	DiskFreeBytes    int64
 	DiskTotalBytes   int64
+	DiskUsedPercent  int
 	DiskFreeLabel    string
 	DiskTotalLabel   string
 	LastSeenAt       string
@@ -1466,6 +1467,12 @@ func (store Store) ClientHostings(ctx context.Context) []ClientHosting {
 		}
 		hostings[hostingIndex].ClientEmails = sortedStringsFromMap(emailSet)
 		hostings[hostingIndex].TotalUsedLabel = FormatFileSize(hostings[hostingIndex].TotalUsedBytes)
+		if hostings[hostingIndex].DiskTotalBytes > 0 {
+			hostings[hostingIndex].DiskUsedPercent = int(math.Round(float64(hostings[hostingIndex].TotalUsedBytes) / float64(hostings[hostingIndex].DiskTotalBytes) * 100))
+			if hostings[hostingIndex].DiskUsedPercent > 100 {
+				hostings[hostingIndex].DiskUsedPercent = 100
+			}
+		}
 	}
 	return hostings
 }

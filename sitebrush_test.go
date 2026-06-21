@@ -777,6 +777,18 @@ func TestHostingAndSupportClientHostingViewKeepsOnlyClientRoles(t *testing.T) {
 	}
 }
 
+func TestHostingAndSupportRealClientHostingsExcludeLocalAndUnroutedServers(t *testing.T) {
+	hostings := hostingAndSupportRealClientHostings([]hostingandsupport.ClientHosting{
+		{InstallationID: "local", ServerIP: "127.0.0.1", ServerDomain: "localhost"},
+		{InstallationID: "private", ServerIP: "192.168.1.10", ServerDomain: "sitebrush.local"},
+		{InstallationID: "no-domain", ServerIP: "203.0.113.10"},
+		{InstallationID: "domain-is-ip", ServerIP: "203.0.113.10", ServerDomain: "203.0.113.10"},
+	})
+	if len(hostings) != 0 {
+		t.Fatalf("real hostings = %#v, want none", hostings)
+	}
+}
+
 func registerServiceMailInstallationForTest(t *testing.T, application *App, request serviceMailRequest) {
 	t.Helper()
 	controlDatabase, err := application.openServerControlDatabase(context.Background())

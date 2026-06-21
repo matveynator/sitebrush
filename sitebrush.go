@@ -9728,7 +9728,8 @@ func (a *App) hostingAndSupportView(ctx context.Context, r *http.Request) (map[s
 	serviceMailInstallations := store.ServiceMailInstallations(ctx)
 	serviceMailEvents := store.ServiceMailEvents(ctx, 200)
 	serviceMailBlocks := store.ServiceMailBlocks(ctx)
-	clientHostings := store.ClientHostings(ctx)
+	allClientHostings := store.ClientHostings(ctx)
+	clientHostings := hostingAndSupportRealClientHostings(allClientHostings)
 	registrySyncEvents := store.RegistrySyncEvents(ctx, 40)
 	_ = a.migrateLegacySitebrushComPrivateKey(ctx, controlDatabase)
 	sitebrushComKey := store.SitebrushComKey(ctx)
@@ -9861,6 +9862,29 @@ func hostingAndSupportOverview(sites []hostingandsupport.Site, clients []hosting
 	}
 	view.Actions = hostingAndSupportOverviewActions(view)
 	return view
+}
+
+func hostingAndSupportRealClientHostings(clientHostings []hostingandsupport.ClientHosting) []hostingandsupport.ClientHosting {
+	realHostings := make([]hostingandsupport.ClientHosting, 0, len(clientHostings))
+	for _, clientHosting := range clientHostings {
+		if hostingAndSupportClientHostingIsRealServer(clientHosting) {
+			realHostings = append(realHostings, clientHosting)
+		}
+	}
+	return realHostings
+}
+
+func hostingAndSupportClientHostingIsRealServer(clientHosting hostingandsupport.ClientHosting) bool {
+	serverIP := strings.TrimSpace(clientHosting.ServerIP)
+	serverDomain := normalizeDomainName(clientHosting.ServerDomain)
+	parsedIP := net.ParseIP(serverIP)
+	if parsedIP == nil || parsedIP.IsLoopback() || parsedIP.IsPrivate() || parsedIP.IsUnspecified() {
+		return false
+	}
+	if serverDomain == "" || serverDomain == "localhost" || strings.HasSuffix(serverDomain, ".localhost") || net.ParseIP(serverDomain) != nil {
+		return false
+	}
+	return domainARecordMatches(serverDomain, serverIP)
 }
 
 func hostingAndSupportOverviewActions(view hostingAndSupportOverviewView) []hostingAndSupportOverviewAction {
