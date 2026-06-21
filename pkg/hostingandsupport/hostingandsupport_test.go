@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -182,6 +183,117 @@ func TestDeleteServiceMailEventsDeletesOnlySelectedRows(t *testing.T) {
 	events = store.ServiceMailEvents(context.Background(), 10)
 	if len(events) != 1 {
 		t.Fatalf("events after empty delete = %d, want 1", len(events))
+	}
+}
+
+func TestSupportEventsRoundTrip(t *testing.T) {
+	database, err := sql.Open("sqlite3", filepath.Join(t.TempDir(), "hostingandsupport.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = database.Close()
+	})
+	if err := Migrate(context.Background(), database); err != nil {
+		t.Fatal(err)
+	}
+	store := Store{DB: database}
+	event := HostingSnapshotEvent{
+		Kind:    "client_login",
+		Status:  "success",
+		Email:   "Owner@Example.COM ",
+		Domain:  "Host.Example.COM ",
+		Message: "client signed in",
+	}
+	if err := store.LogSupportEvent(context.Background(), event); err != nil {
+		t.Fatal(err)
+	}
+	events := store.SupportEvents(context.Background(), 10)
+	if len(events) != 1 {
+		t.Fatalf("events = %d, want 1", len(events))
+	}
+	if events[0].Kind != "client_login" || events[0].Status != "success" {
+		t.Fatalf("event status was not preserved: %#v", events[0])
+	}
+	if events[0].Email != "owner@example.com" || events[0].Domain != "host.example.com" {
+		t.Fatalf("event identity was not normalized: %#v", events[0])
+	}
+	if events[0].Message != "client signed in" || events[0].CreatedAt == "" {
+		t.Fatalf("event details missing: %#v", events[0])
+	}
+}
+
+func TestPaymentProvidersAndInvoicesRoundTrip(t *testing.T) {
+	database, err := sql.Open("sqlite3", filepath.Join(t.TempDir(), "hostingandsupport.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = database.Close()
+	})
+	if err := Migrate(context.Background(), database); err != nil {
+		t.Fatal(err)
+	}
+	store := Store{DB: database}
+	providers := store.PaymentProviders(context.Background())
+	if len(providers) != 3 {
+		t.Fatalf("providers = %d, want 3", len(providers))
+	}
+	if providers[0].Provider != "stripe" || providers[1].Provider != "paypal" || providers[2].Provider != "sbp" {
+		t.Fatalf("providers order = %#v", providers)
+	}
+	if _, err := store.CreateInvoice(context.Background(), Invoice{
+		CustomerEmail: "client@example.com",
+		Domain:        "example.com",
+		Amount:        "1500",
+		Currency:      "RUB",
+		Provider:      "stripe",
+	}); err == nil {
+		t.Fatal("CreateInvoice with disabled provider succeeded")
+	}
+	stripeTemplate := "https://pay.example.test/{invoice}?amount={amount}&currency={currency}&email={email}&domain={domain}"
+	if err := store.SavePaymentProvider(context.Background(), PaymentProvider{
+		Provider:     "stripe",
+		Enabled:      true,
+		PaymentURL:   stripeTemplate,
+		Instructions: "Stripe Checkout link",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	createdInvoice, err := store.CreateInvoice(context.Background(), Invoice{
+		CustomerEmail: "Client+Billing@Example.COM ",
+		Domain:        "Example.COM ",
+		PlanName:      "Pro",
+		Amount:        "1500.50",
+		Currency:      "rub",
+		Provider:      "stripe",
+		DueAt:         "2026-07-01",
+		Notes:         "hosting",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if createdInvoice.ID == 0 || createdInvoice.Number == "" || createdInvoice.Status != "issued" {
+		t.Fatalf("created invoice missing identity or status: %#v", createdInvoice)
+	}
+	if createdInvoice.CustomerEmail != "client+billing@example.com" || createdInvoice.Domain != "example.com" || createdInvoice.Currency != "RUB" {
+		t.Fatalf("created invoice was not normalized: %#v", createdInvoice)
+	}
+	for _, expectedPart := range []string{"amount=1500.50", "currency=RUB", "email=client%2Bbilling%40example.com", "domain=example.com"} {
+		if !strings.Contains(createdInvoice.PaymentURL, expectedPart) {
+			t.Fatalf("payment URL %q does not contain %q", createdInvoice.PaymentURL, expectedPart)
+		}
+	}
+	invoices := store.Invoices(context.Background(), 10)
+	if len(invoices) != 1 {
+		t.Fatalf("invoices = %d, want 1", len(invoices))
+	}
+	paidInvoice, err := store.UpdateInvoiceStatus(context.Background(), createdInvoice.ID, "paid")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if paidInvoice.Status != "paid" || paidInvoice.PaidAt == "" {
+		t.Fatalf("paid invoice status was not saved: %#v", paidInvoice)
 	}
 }
 

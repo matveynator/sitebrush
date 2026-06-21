@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"net/url"
 	"sort"
 	"strconv"
 	"strings"
@@ -18,7 +19,7 @@ import (
 
 const DefaultStorageLimitBytes int64 = 10 * 1024 * 1024 * 1024
 const DefaultDeletionBackupRetentionDays = 365
-const currentBillingSchemaVersion = 9
+const currentBillingSchemaVersion = 10
 
 type Store struct {
 	DB *sql.DB
@@ -97,6 +98,33 @@ type SiteUsage struct {
 type ServiceAssignment struct {
 	PlanID        int
 	ServiceStatus string
+}
+
+type PaymentProvider struct {
+	Provider     string
+	Enabled      bool
+	DisplayName  string
+	PaymentURL   string
+	Instructions string
+	UpdatedAt    string
+}
+
+type Invoice struct {
+	ID            int
+	Number        string
+	CustomerEmail string
+	Domain        string
+	PlanName      string
+	Amount        string
+	Currency      string
+	Status        string
+	Provider      string
+	PaymentURL    string
+	DueAt         string
+	PaidAt        string
+	Notes         string
+	CreatedAt     string
+	UpdatedAt     string
 }
 
 type ServiceMailInstallation struct {
@@ -385,6 +413,10 @@ func Migrate(ctx context.Context, database *sql.DB) error {
 		`CREATE TABLE IF NOT EXISTS server_settings(name TEXT PRIMARY KEY,value TEXT,updated_at TEXT);`,
 		`CREATE TABLE IF NOT EXISTS site_service_plans(id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT UNIQUE,quota_bytes INTEGER,site_limit INTEGER DEFAULT 1,analytics_report_limit INTEGER DEFAULT 0,price TEXT,currency TEXT,billing_period TEXT,is_default INTEGER DEFAULT 0,created_at TEXT,updated_at TEXT);`,
 		`CREATE TABLE IF NOT EXISTS site_service_assignments(domain TEXT PRIMARY KEY,plan_id INTEGER DEFAULT 0,service_status TEXT,notes TEXT,updated_at TEXT);`,
+		`CREATE TABLE IF NOT EXISTS payment_providers(provider TEXT PRIMARY KEY,enabled INTEGER DEFAULT 0,display_name TEXT,payment_url TEXT,instructions TEXT,updated_at TEXT);`,
+		`CREATE TABLE IF NOT EXISTS billing_invoices(id INTEGER PRIMARY KEY AUTOINCREMENT,invoice_number TEXT UNIQUE,customer_email TEXT,domain TEXT,plan_name TEXT,amount TEXT,currency TEXT,status TEXT,provider TEXT,payment_url TEXT,due_at TEXT,paid_at TEXT,notes TEXT,created_at TEXT,updated_at TEXT);`,
+		`CREATE INDEX IF NOT EXISTS idx_billing_invoices_customer_created ON billing_invoices(customer_email,created_at);`,
+		`CREATE INDEX IF NOT EXISTS idx_billing_invoices_domain_created ON billing_invoices(domain,created_at);`,
 		`CREATE TABLE IF NOT EXISTS site_registration_requests(id INTEGER PRIMARY KEY AUTOINCREMENT,domain TEXT,name TEXT,email TEXT,phone TEXT,plan_id INTEGER DEFAULT 0,status TEXT,owner_message TEXT,created_at TEXT,updated_at TEXT);`,
 		`CREATE TABLE IF NOT EXISTS site_deletion_backups(id INTEGER PRIMARY KEY AUTOINCREMENT,domain TEXT,archive_path TEXT,file_name TEXT,size_bytes INTEGER,token TEXT,token_created_at TEXT,created_at TEXT,expires_at TEXT,retention_days INTEGER,owner_contacts TEXT,metadata_json TEXT,language_code TEXT,downloaded_at TEXT,download_count INTEGER DEFAULT 0);`,
 		`CREATE TABLE IF NOT EXISTS service_mail_installations(installation_id TEXT PRIMARY KEY,public_key TEXT,first_seen_at TEXT,last_seen_at TEXT,last_ip TEXT,last_domain TEXT,blocked INTEGER DEFAULT 0);`,
@@ -392,6 +424,9 @@ func Migrate(ctx context.Context, database *sql.DB) error {
 		`CREATE INDEX IF NOT EXISTS idx_service_mail_events_installation_created ON service_mail_events(installation_id,created_at);`,
 		`CREATE INDEX IF NOT EXISTS idx_service_mail_events_recipient_created ON service_mail_events(recipient,created_at);`,
 		`CREATE INDEX IF NOT EXISTS idx_service_mail_events_domain_created ON service_mail_events(recipient_domain,created_at);`,
+		`CREATE TABLE IF NOT EXISTS support_events(id INTEGER PRIMARY KEY AUTOINCREMENT,kind TEXT,status TEXT,email TEXT,domain TEXT,message TEXT,created_at TEXT);`,
+		`CREATE INDEX IF NOT EXISTS idx_support_events_created ON support_events(created_at);`,
+		`CREATE INDEX IF NOT EXISTS idx_support_events_email_created ON support_events(email,created_at);`,
 		`CREATE TABLE IF NOT EXISTS service_mail_blocks(id INTEGER PRIMARY KEY AUTOINCREMENT,scope TEXT,value TEXT,reason TEXT,created_at TEXT,UNIQUE(scope,value));`,
 		`CREATE TABLE IF NOT EXISTS service_mail_recipients(installation_id TEXT,recipient_hash TEXT,recipient_mask TEXT,status TEXT,purpose_scope TEXT,created_at TEXT,verified_at TEXT,PRIMARY KEY(installation_id,recipient_hash));`,
 		`CREATE INDEX IF NOT EXISTS idx_service_mail_recipients_installation_status ON service_mail_recipients(installation_id,status);`,
@@ -429,6 +464,9 @@ func Migrate(ctx context.Context, database *sql.DB) error {
 	_, _ = database.ExecContext(ctx, `INSERT OR IGNORE INTO server_settings(name,value,updated_at) VALUES('auto_registration_enabled','1',?)`, now)
 	_, _ = database.ExecContext(ctx, `INSERT OR IGNORE INTO server_settings(name,value,updated_at) VALUES('deletion_backup_retention_days',?,?)`, strconv.Itoa(DefaultDeletionBackupRetentionDays), now)
 	_, _ = database.ExecContext(ctx, `INSERT OR IGNORE INTO server_settings(name,value,updated_at) VALUES('service_mail_relay_enabled','1',?)`, now)
+	_, _ = database.ExecContext(ctx, `INSERT OR IGNORE INTO payment_providers(provider,enabled,display_name,payment_url,instructions,updated_at) VALUES('stripe',0,'Stripe','','Stripe Checkout or Payment Link URL template',?)`, now)
+	_, _ = database.ExecContext(ctx, `INSERT OR IGNORE INTO payment_providers(provider,enabled,display_name,payment_url,instructions,updated_at) VALUES('paypal',0,'PayPal','','PayPal payment URL template',?)`, now)
+	_, _ = database.ExecContext(ctx, `INSERT OR IGNORE INTO payment_providers(provider,enabled,display_name,payment_url,instructions,updated_at) VALUES('sbp',0,'СБП','','СБП: банк, телефон, получатель или QR/link template',?)`, now)
 	_, _ = database.ExecContext(ctx, `INSERT OR IGNORE INTO site_service_plans(name,quota_bytes,site_limit,analytics_report_limit,price,currency,billing_period,is_default,created_at,updated_at) VALUES('Free',?,1,0,'0','USD','monthly',1,?,?)`,
 		DefaultStorageLimitBytes, now, now)
 	if err := setSchemaMigrationVersion(ctx, database, "billing", currentBillingSchemaVersion); err != nil {
@@ -453,7 +491,7 @@ func setSchemaMigrationVersion(ctx context.Context, database *sql.DB, component 
 }
 
 func hostingAndSupportSchemaComplete(ctx context.Context, database *sql.DB) (bool, error) {
-	tableNames := []string{"server_managers", "server_settings", "site_service_plans", "site_service_assignments", "site_registration_requests", "site_deletion_backups", "service_mail_installations", "service_mail_events", "service_mail_blocks", "service_mail_recipients", "client_hostings", "client_hosting_sites", "registry_accounts", "registry_installation_roles", "registry_installation_plans", "registry_events", "registry_sync_events", "sitebrush_com_keys"}
+	tableNames := []string{"server_managers", "server_settings", "site_service_plans", "site_service_assignments", "payment_providers", "billing_invoices", "site_registration_requests", "site_deletion_backups", "service_mail_installations", "service_mail_events", "support_events", "service_mail_blocks", "service_mail_recipients", "client_hostings", "client_hosting_sites", "registry_accounts", "registry_installation_roles", "registry_installation_plans", "registry_events", "registry_sync_events", "sitebrush_com_keys"}
 	tableNames = append(tableNames, demo.TableNames()...)
 	for _, tableName := range tableNames {
 		found, err := tableExists(ctx, database, tableName)
@@ -489,6 +527,10 @@ func requiredHostingAndSupportColumns() []hostingAndSupportColumn {
 	return []hostingAndSupportColumn{
 		{tableName: "site_service_plans", columnName: "site_limit", definition: "INTEGER DEFAULT 1"},
 		{tableName: "site_service_plans", columnName: "analytics_report_limit", definition: "INTEGER DEFAULT 0"},
+		{tableName: "payment_providers", columnName: "instructions", definition: "TEXT"},
+		{tableName: "billing_invoices", columnName: "provider", definition: "TEXT"},
+		{tableName: "billing_invoices", columnName: "payment_url", definition: "TEXT"},
+		{tableName: "billing_invoices", columnName: "paid_at", definition: "TEXT"},
 		{tableName: "client_hostings", columnName: "server_status", definition: "TEXT"},
 		{tableName: "client_hostings", columnName: "server_domain", definition: "TEXT"},
 		{tableName: "client_hostings", columnName: "sitebrush_version", definition: "TEXT"},
@@ -807,6 +849,190 @@ func (store Store) ServiceAssignments(ctx context.Context) map[string]ServiceAss
 		}
 	}
 	return assignments
+}
+
+func (store Store) PaymentProviders(ctx context.Context) []PaymentProvider {
+	rows, err := store.DB.QueryContext(ctx, `SELECT provider,COALESCE(enabled,0),COALESCE(display_name,''),COALESCE(payment_url,''),COALESCE(instructions,''),COALESCE(updated_at,'') FROM payment_providers ORDER BY CASE provider WHEN 'stripe' THEN 0 WHEN 'paypal' THEN 1 WHEN 'sbp' THEN 2 ELSE 3 END,provider ASC`)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	providers := make([]PaymentProvider, 0, 3)
+	for rows.Next() {
+		var provider PaymentProvider
+		var enabled int
+		if scanErr := rows.Scan(&provider.Provider, &enabled, &provider.DisplayName, &provider.PaymentURL, &provider.Instructions, &provider.UpdatedAt); scanErr != nil {
+			continue
+		}
+		provider.Enabled = enabled != 0
+		providers = append(providers, provider)
+	}
+	return providers
+}
+
+func (store Store) SavePaymentProvider(ctx context.Context, provider PaymentProvider) error {
+	provider.Provider = normalizePaymentProvider(provider.Provider)
+	if provider.Provider == "" {
+		return fmt.Errorf("payment provider is required")
+	}
+	displayName := strings.TrimSpace(provider.DisplayName)
+	if displayName == "" {
+		displayName = defaultPaymentProviderName(provider.Provider)
+	}
+	enabledFlag := 0
+	if provider.Enabled {
+		enabledFlag = 1
+	}
+	_, err := store.DB.ExecContext(ctx, `INSERT INTO payment_providers(provider,enabled,display_name,payment_url,instructions,updated_at) VALUES(?,?,?,?,?,?) ON CONFLICT(provider) DO UPDATE SET enabled=excluded.enabled,display_name=excluded.display_name,payment_url=excluded.payment_url,instructions=excluded.instructions,updated_at=excluded.updated_at`,
+		provider.Provider, enabledFlag, displayName, strings.TrimSpace(provider.PaymentURL), strings.TrimSpace(provider.Instructions), time.Now().UTC().Format(time.RFC3339))
+	return err
+}
+
+func normalizePaymentProvider(provider string) string {
+	switch strings.ToLower(strings.TrimSpace(provider)) {
+	case "stripe", "paypal", "sbp":
+		return strings.ToLower(strings.TrimSpace(provider))
+	default:
+		return ""
+	}
+}
+
+func defaultPaymentProviderName(provider string) string {
+	switch normalizePaymentProvider(provider) {
+	case "stripe":
+		return "Stripe"
+	case "paypal":
+		return "PayPal"
+	case "sbp":
+		return "СБП"
+	default:
+		return strings.TrimSpace(provider)
+	}
+}
+
+func (store Store) Invoices(ctx context.Context, limit int) []Invoice {
+	if limit <= 0 || limit > 200 {
+		limit = 80
+	}
+	rows, err := store.DB.QueryContext(ctx, `SELECT id,invoice_number,COALESCE(customer_email,''),COALESCE(domain,''),COALESCE(plan_name,''),COALESCE(amount,''),COALESCE(currency,''),COALESCE(status,''),COALESCE(provider,''),COALESCE(payment_url,''),COALESCE(due_at,''),COALESCE(paid_at,''),COALESCE(notes,''),COALESCE(created_at,''),COALESCE(updated_at,'') FROM billing_invoices ORDER BY id DESC LIMIT ?`, limit)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	invoices := make([]Invoice, 0, limit)
+	for rows.Next() {
+		var invoice Invoice
+		if scanErr := rows.Scan(&invoice.ID, &invoice.Number, &invoice.CustomerEmail, &invoice.Domain, &invoice.PlanName, &invoice.Amount, &invoice.Currency, &invoice.Status, &invoice.Provider, &invoice.PaymentURL, &invoice.DueAt, &invoice.PaidAt, &invoice.Notes, &invoice.CreatedAt, &invoice.UpdatedAt); scanErr != nil {
+			continue
+		}
+		invoices = append(invoices, invoice)
+	}
+	return invoices
+}
+
+func (store Store) CreateInvoice(ctx context.Context, invoice Invoice) (Invoice, error) {
+	invoice.CustomerEmail = strings.ToLower(strings.TrimSpace(invoice.CustomerEmail))
+	invoice.Domain = strings.ToLower(strings.TrimSpace(invoice.Domain))
+	invoice.PlanName = strings.TrimSpace(invoice.PlanName)
+	invoice.Amount = strings.TrimSpace(invoice.Amount)
+	invoice.Currency = strings.ToUpper(strings.TrimSpace(invoice.Currency))
+	invoice.Provider = normalizePaymentProvider(invoice.Provider)
+	if invoice.CustomerEmail == "" {
+		return Invoice{}, fmt.Errorf("customer email is required")
+	}
+	if invoice.Domain == "" {
+		return Invoice{}, fmt.Errorf("site domain is required")
+	}
+	if invoice.Amount == "" {
+		return Invoice{}, fmt.Errorf("invoice amount is required")
+	}
+	if invoice.Currency == "" {
+		invoice.Currency = "USD"
+	}
+	if invoice.Provider == "" {
+		return Invoice{}, fmt.Errorf("payment provider is required")
+	}
+	if !store.paymentProviderEnabled(ctx, invoice.Provider) {
+		return Invoice{}, fmt.Errorf("payment provider is disabled")
+	}
+	now := time.Now().UTC()
+	invoice.Number = nextInvoiceNumber(now)
+	invoice.Status = "issued"
+	invoice.CreatedAt = now.Format(time.RFC3339)
+	invoice.UpdatedAt = invoice.CreatedAt
+	invoice.PaymentURL = store.renderInvoicePaymentURL(ctx, invoice)
+	result, err := store.DB.ExecContext(ctx, `INSERT INTO billing_invoices(invoice_number,customer_email,domain,plan_name,amount,currency,status,provider,payment_url,due_at,paid_at,notes,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		invoice.Number, invoice.CustomerEmail, invoice.Domain, invoice.PlanName, invoice.Amount, invoice.Currency, invoice.Status, invoice.Provider, invoice.PaymentURL, strings.TrimSpace(invoice.DueAt), "", strings.TrimSpace(invoice.Notes), invoice.CreatedAt, invoice.UpdatedAt)
+	if err != nil {
+		return Invoice{}, err
+	}
+	if invoiceID, idErr := result.LastInsertId(); idErr == nil {
+		invoice.ID = int(invoiceID)
+	}
+	return invoice, nil
+}
+
+func (store Store) UpdateInvoiceStatus(ctx context.Context, invoiceID int, status string) (Invoice, error) {
+	if invoiceID <= 0 {
+		return Invoice{}, fmt.Errorf("invoice is required")
+	}
+	status = strings.TrimSpace(status)
+	switch status {
+	case "issued", "paid", "cancelled", "payment_error":
+	default:
+		return Invoice{}, fmt.Errorf("unsupported invoice status %q", status)
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	paidAt := ""
+	if status == "paid" {
+		paidAt = now
+	}
+	_, err := store.DB.ExecContext(ctx, `UPDATE billing_invoices SET status=?,paid_at=?,updated_at=? WHERE id=?`, status, paidAt, now, invoiceID)
+	if err != nil {
+		return Invoice{}, err
+	}
+	return store.InvoiceByID(ctx, invoiceID)
+}
+
+func (store Store) InvoiceByID(ctx context.Context, invoiceID int) (Invoice, error) {
+	var invoice Invoice
+	err := store.DB.QueryRowContext(ctx, `SELECT id,invoice_number,COALESCE(customer_email,''),COALESCE(domain,''),COALESCE(plan_name,''),COALESCE(amount,''),COALESCE(currency,''),COALESCE(status,''),COALESCE(provider,''),COALESCE(payment_url,''),COALESCE(due_at,''),COALESCE(paid_at,''),COALESCE(notes,''),COALESCE(created_at,''),COALESCE(updated_at,'') FROM billing_invoices WHERE id=?`, invoiceID).Scan(
+		&invoice.ID, &invoice.Number, &invoice.CustomerEmail, &invoice.Domain, &invoice.PlanName, &invoice.Amount, &invoice.Currency, &invoice.Status, &invoice.Provider, &invoice.PaymentURL, &invoice.DueAt, &invoice.PaidAt, &invoice.Notes, &invoice.CreatedAt, &invoice.UpdatedAt)
+	return invoice, err
+}
+
+func (store Store) renderInvoicePaymentURL(ctx context.Context, invoice Invoice) string {
+	var templateText string
+	_ = store.DB.QueryRowContext(ctx, `SELECT payment_url FROM payment_providers WHERE provider=? AND enabled=1`, invoice.Provider).Scan(&templateText)
+	templateText = strings.TrimSpace(templateText)
+	if templateText == "" {
+		return ""
+	}
+	replacements := map[string]string{
+		"{invoice}":  invoice.Number,
+		"{amount}":   invoice.Amount,
+		"{currency}": invoice.Currency,
+		"{email}":    invoice.CustomerEmail,
+		"{domain}":   invoice.Domain,
+	}
+	for placeholder, replacement := range replacements {
+		templateText = strings.ReplaceAll(templateText, placeholder, urlQueryEscape(replacement))
+	}
+	return templateText
+}
+
+func (store Store) paymentProviderEnabled(ctx context.Context, provider string) bool {
+	var enabled int
+	err := store.DB.QueryRowContext(ctx, `SELECT COALESCE(enabled,0) FROM payment_providers WHERE provider=?`, normalizePaymentProvider(provider)).Scan(&enabled)
+	return err == nil && enabled != 0
+}
+
+func nextInvoiceNumber(now time.Time) string {
+	return "SB-" + now.UTC().Format("20060102-150405") + "-" + strconv.FormatInt(now.UnixNano()%1000000, 10)
+}
+
+func urlQueryEscape(value string) string {
+	return url.QueryEscape(value)
 }
 
 func (store Store) CreateSiteRequest(ctx context.Context, domain, name, email, phone string, planID int) error {
@@ -1591,6 +1817,54 @@ func (store Store) LogServiceMailEvent(ctx context.Context, event ServiceMailEve
 		strings.TrimSpace(event.Error),
 		time.Now().UTC().Format(time.RFC3339))
 	return err
+}
+
+func (store Store) LogSupportEvent(ctx context.Context, event HostingSnapshotEvent) error {
+	kind := strings.TrimSpace(event.Kind)
+	if kind == "" {
+		return nil
+	}
+	createdAt := strings.TrimSpace(event.CreatedAt)
+	if createdAt == "" {
+		createdAt = time.Now().UTC().Format(time.RFC3339)
+	}
+	_, err := store.DB.ExecContext(ctx, `INSERT INTO support_events(kind,status,email,domain,message,created_at) VALUES(?,?,?,?,?,?)`,
+		kind,
+		strings.TrimSpace(event.Status),
+		strings.ToLower(strings.TrimSpace(event.Email)),
+		strings.ToLower(strings.TrimSpace(event.Domain)),
+		truncateSupportEventMessage(event.Message),
+		createdAt)
+	return err
+}
+
+func truncateSupportEventMessage(message string) string {
+	message = strings.TrimSpace(message)
+	messageRunes := []rune(message)
+	if len(messageRunes) <= 512 {
+		return message
+	}
+	return string(messageRunes[:512])
+}
+
+func (store Store) SupportEvents(ctx context.Context, limit int) []HostingSnapshotEvent {
+	if limit <= 0 || limit > 200 {
+		limit = 80
+	}
+	rows, err := store.DB.QueryContext(ctx, `SELECT kind,status,email,domain,message,created_at FROM support_events ORDER BY id DESC LIMIT ?`, limit)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	events := make([]HostingSnapshotEvent, 0, limit)
+	for rows.Next() {
+		var event HostingSnapshotEvent
+		if scanErr := rows.Scan(&event.Kind, &event.Status, &event.Email, &event.Domain, &event.Message, &event.CreatedAt); scanErr != nil {
+			continue
+		}
+		events = append(events, event)
+	}
+	return events
 }
 
 func (store Store) ServiceMailInstallations(ctx context.Context) []ServiceMailInstallation {

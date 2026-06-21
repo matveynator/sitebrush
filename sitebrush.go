@@ -5772,6 +5772,9 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if hasQueryFlag(r, "hosting_and_support_backup_download") || hasQueryFlag(r, "billing_backup_download") {
+		if a.redirectToHostingAndSupportMainDomain(w, r) {
+			return
+		}
 		a.downloadManagedSiteDeletionBackup(w, r)
 		return
 	}
@@ -5979,6 +5982,7 @@ func (a *App) setupAdmin(w http.ResponseWriter, r *http.Request) {
 		}
 		a.activatePublicTrialAfterAdminRegistration(registerContext, domain)
 		a.promoteFirstServerOwner(registerContext, domain, email)
+		a.logHostingSupportEvent(registerContext, "client_registered", "success", email, domain, "local first administrator registered")
 		a.reportHostingSnapshotAsync(registerContext)
 		a.createSessionForDomain(w, registerContext, domain, email)
 		http.Redirect(w, r, safeConfirmationReturnPath(requestedReturnPath(r)), http.StatusFound)
@@ -6108,6 +6112,7 @@ func (a *App) createSiteRegistrationRequestFromForm(r *http.Request, domain, nam
 	if err := store.CreateSiteRequest(r.Context(), domain, name, email, phone, planID); err != nil {
 		return err.Error()
 	}
+	a.logHostingSupportEvent(r.Context(), "support_request", "created", email, domain, "site registration request")
 	a.enqueueSiteRegistrationRequestOwnerEmails(r.Context(), r, store, domain, name, email, phone, planID)
 	return "Заявка отправлена владельцу сервера. После проверки вы получите ответ на email."
 }
@@ -6188,6 +6193,7 @@ func (a *App) login(w http.ResponseWriter, r *http.Request) {
 	}
 	a.clearFailedLoginAttempts(r.Context(), domain, clientIP)
 	a.createSessionForDomain(w, r.Context(), domain, email)
+	a.logHostingSupportEvent(r.Context(), "client_login", "success", email, domain, "client signed in")
 	http.Redirect(w, r, returnPath, http.StatusFound)
 }
 
@@ -9545,6 +9551,9 @@ func (a *App) revisionsPage(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) hostingAndSupportPage(w http.ResponseWriter, r *http.Request) {
+	if a.redirectToHostingAndSupportMainDomain(w, r) {
+		return
+	}
 	if !a.isAdminRequest(r) {
 		if !a.hasAdmin(r.Context(), a.siteDomain(r.Context(), r)) {
 			http.Redirect(w, r, r.URL.Path+"?register", http.StatusFound)
@@ -9577,6 +9586,53 @@ func (a *App) hostingAndSupportPage(w http.ResponseWriter, r *http.Request) {
 	}
 	view["Status"] = status
 	a.render(w, r, "hostingandsupport.html", view)
+}
+
+func (a *App) redirectToHostingAndSupportMainDomain(w http.ResponseWriter, r *http.Request) bool {
+	mainDomain := a.hostingAndSupportMainDomain(r.Context())
+	requestDomain := normalizeHostingAndSupportMainDomain(a.siteDomain(r.Context(), r))
+	if mainDomain == "" || requestDomain == "" || sameHostingAndSupportDomain(mainDomain, requestDomain) {
+		return false
+	}
+	redirectURL := *r.URL
+	redirectURL.Scheme = requestScheme(r)
+	redirectURL.Host = hostingAndSupportRedirectHost(mainDomain, r.Host)
+	statusCode := http.StatusFound
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		statusCode = http.StatusTemporaryRedirect
+	}
+	http.Redirect(w, r, redirectURL.String(), statusCode)
+	return true
+}
+
+func (a *App) hostingAndSupportMainDomain(ctx context.Context) string {
+	controlDatabase, err := a.openServerControlDatabase(ctx)
+	if err != nil {
+		return "localhost"
+	}
+	defer controlDatabase.Close()
+	store := hostingandsupport.Store{DB: controlDatabase}
+	if ownerDomain, found := store.OwnerDomain(ctx); found {
+		return normalizeHostingAndSupportMainDomain(ownerDomain)
+	}
+	domain, email, found := a.firstExistingSiteAdmin(ctx)
+	if found {
+		store.PromoteOwnerIfMissing(ctx, domain, email)
+		return normalizeHostingAndSupportMainDomain(domain)
+	}
+	return "localhost"
+}
+
+func hostingAndSupportRedirectHost(mainDomain string, requestHost string) string {
+	mainDomain = normalizeHostingAndSupportMainDomain(mainDomain)
+	if mainDomain == "" {
+		return strings.TrimSpace(requestHost)
+	}
+	_, requestPort, err := net.SplitHostPort(strings.TrimSpace(requestHost))
+	if err != nil || requestPort == "" {
+		return mainDomain
+	}
+	return net.JoinHostPort(mainDomain, requestPort)
 }
 
 func hostingAndSupportActionWantsJSON(r *http.Request) bool {
@@ -9624,6 +9680,16 @@ func (a *App) handleHostingAndSupportAction(r *http.Request) string {
 		return a.saveServicePlanFromForm(r)
 	case "delete_plan":
 		return a.deleteServicePlanFromForm(r)
+	case "save_payment_provider":
+		return a.savePaymentProviderFromForm(r)
+	case "create_invoice":
+		return a.createInvoiceFromForm(r)
+	case "mark_invoice_paid":
+		return a.updateInvoiceStatusFromForm(r, "paid")
+	case "mark_invoice_payment_error":
+		return a.updateInvoiceStatusFromForm(r, "payment_error")
+	case "cancel_invoice":
+		return a.updateInvoiceStatusFromForm(r, "cancelled")
 	case "update_backup_retention":
 		return a.updateManagedSiteDeletionBackupRetentionFromForm(r)
 	case "approve_site_request":
@@ -9654,6 +9720,8 @@ func (a *App) hostingAndSupportView(ctx context.Context, r *http.Request) (map[s
 	store := hostingandsupport.Store{DB: controlDatabase}
 	a.cleanupExpiredManagedSiteDeletionBackups(ctx, controlDatabase)
 	plans := store.Plans(ctx)
+	paymentProviders := store.PaymentProviders(ctx)
+	invoices := store.Invoices(ctx, 80)
 	assignments := store.ServiceAssignments(ctx)
 	siteRequests := store.SiteRequests(ctx)
 	pendingSiteRequests, approvedSiteRequestsByDomain := hostingAndSupportSplitSiteRequests(siteRequests)
@@ -9687,6 +9755,8 @@ func (a *App) hostingAndSupportView(ctx context.Context, r *http.Request) (map[s
 		"Title":                       translationOrDefault(translations, "billing_title", "Хостинг и поддержка"),
 		"Sites":                       siteRows,
 		"Plans":                       plans,
+		"PaymentProviders":            paymentProviders,
+		"Invoices":                    invoices,
 		"SiteRequests":                pendingSiteRequests,
 		"ServiceMailInstallations":    serviceMailInstallations,
 		"ServiceMailEvents":           serviceMailEvents,
@@ -9770,6 +9840,13 @@ type hostingAndSupportClientSiteView struct {
 	URL              string
 	UsedBytes        int64
 	UsedLabel        string
+	LimitBytes       int64
+	LimitLabel       string
+	OverLimit        bool
+	PlanName         string
+	PlanPaidStatus   string
+	HostingOwner     string
+	HostingServer    string
 	InstallationIP   string
 	RealInstallation bool
 	LocalDevelopment bool
@@ -9808,11 +9885,17 @@ type hostingAndSupportClientAccumulator struct {
 }
 
 type hostingAndSupportClientSiteSource struct {
-	ip        string
-	aliases   string
-	url       string
-	usedBytes int64
-	usedLabel string
+	ip             string
+	aliases        string
+	url            string
+	usedBytes      int64
+	usedLabel      string
+	limitBytes     int64
+	limitLabel     string
+	planName       string
+	planPaidStatus string
+	hostingOwner   string
+	hostingServer  string
 }
 
 func (a *App) hostingAndSupportClients(ctx context.Context, siteRows []hostingandsupport.Site, installations []hostingandsupport.ServiceMailInstallation, events []hostingandsupport.ServiceMailEvent, clientHostings []hostingandsupport.ClientHosting) []hostingAndSupportClientView {
@@ -9833,7 +9916,15 @@ func (a *App) hostingAndSupportClients(ctx context.Context, siteRows []hostingan
 		knownSiteDomains[domain] = struct{}{}
 		for _, email := range splitHostingAndSupportEmailList(siteRow.AdminEmails) {
 			client := hostingAndSupportClientByEmail(clientsByEmail, email)
-			client.sites[domain] = hostingAndSupportClientSiteSource{aliases: siteRow.Aliases, url: siteRow.URL, usedBytes: siteRow.UsedBytes, usedLabel: siteRow.UsedLabel}
+			client.sites[domain] = hostingAndSupportClientSiteSource{
+				aliases:        siteRow.Aliases,
+				url:            siteRow.URL,
+				usedBytes:      siteRow.UsedBytes,
+				usedLabel:      siteRow.UsedLabel,
+				limitLabel:     siteRow.LimitLabel,
+				planName:       siteRow.PlanName,
+				planPaidStatus: siteRow.ServiceStatus,
+			}
 			client.domains[domain] = struct{}{}
 			clientsByDomain[domain] = client
 		}
@@ -9921,6 +10012,24 @@ func (a *App) hostingAndSupportClients(ctx context.Context, siteRows []hostingan
 					continue
 				}
 				client.domains[domain] = struct{}{}
+				siteSource := client.sites[domain]
+				if site.UsedBytes > siteSource.usedBytes {
+					siteSource.usedBytes = site.UsedBytes
+					siteSource.usedLabel = site.UsedLabel
+				}
+				if siteSource.usedLabel == "" {
+					siteSource.usedLabel = site.UsedLabel
+				}
+				if site.LimitBytes > 0 {
+					siteSource.limitBytes = site.LimitBytes
+					siteSource.limitLabel = site.LimitLabel
+				}
+				siteSource.planName = firstNonEmpty(site.PlanName, siteSource.planName)
+				siteSource.planPaidStatus = firstNonEmpty(site.PlanPaidStatus, siteSource.planPaidStatus)
+				siteSource.hostingOwner = firstNonEmpty(clientHosting.OwnerEmail, siteSource.hostingOwner)
+				siteSource.hostingServer = firstNonEmpty(clientHosting.ServerDomain, clientHosting.InstallationID, siteSource.hostingServer)
+				siteSource.ip = firstNonEmpty(clientHosting.ServerIP, siteSource.ip)
+				client.sites[domain] = siteSource
 			}
 		}
 	}
@@ -10045,6 +10154,11 @@ func hostingAndSupportClientFilterPaidStatuses(client hostingAndSupportClientVie
 }
 
 func hostingAndSupportClientHasOverLimitSite(client hostingAndSupportClientView) bool {
+	for _, site := range client.Sites {
+		if site.OverLimit {
+			return true
+		}
+	}
 	for _, hosting := range client.Hostings {
 		for _, site := range hosting.Hosting.Sites {
 			if site.OverLimit {
@@ -10184,7 +10298,26 @@ func hostingAndSupportClientByEmail(clients map[string]*hostingAndSupportClientA
 func hostingAndSupportClientSiteViews(sites map[string]hostingAndSupportClientSiteSource, knownSiteDomains map[string]struct{}) []hostingAndSupportClientSiteView {
 	views := make([]hostingAndSupportClientSiteView, 0, len(sites))
 	for domain, siteSource := range sites {
-		view := hostingAndSupportClientSiteView{Domain: domain, URL: strings.TrimSpace(siteSource.url), UsedBytes: siteSource.usedBytes, UsedLabel: siteSource.usedLabel, InstallationIP: strings.TrimSpace(siteSource.ip)}
+		view := hostingAndSupportClientSiteView{
+			Domain:         domain,
+			URL:            strings.TrimSpace(siteSource.url),
+			UsedBytes:      siteSource.usedBytes,
+			UsedLabel:      siteSource.usedLabel,
+			LimitBytes:     siteSource.limitBytes,
+			LimitLabel:     siteSource.limitLabel,
+			PlanName:       siteSource.planName,
+			PlanPaidStatus: siteSource.planPaidStatus,
+			HostingOwner:   siteSource.hostingOwner,
+			HostingServer:  siteSource.hostingServer,
+			InstallationIP: strings.TrimSpace(siteSource.ip),
+		}
+		if view.UsedLabel == "" {
+			view.UsedLabel = formatFileSize(view.UsedBytes)
+		}
+		if view.LimitLabel == "" && view.LimitBytes > 0 {
+			view.LimitLabel = formatFileSize(view.LimitBytes)
+		}
+		view.OverLimit = view.LimitBytes > 0 && view.UsedBytes > view.LimitBytes
 		if hostingAndSupportDomainIsLocalDevelopment(domain, view.InstallationIP) {
 			view.LocalDevelopment = true
 			view.Status = hostingAndSupportInstallationStatus(domain, view.InstallationIP)
@@ -10214,13 +10347,13 @@ func hostingAndSupportInstallationStatus(domain string, sourceIP string) string 
 	domain = normalizeDomainName(domain)
 	sourceIP = strings.TrimSpace(sourceIP)
 	if sourceIP == "" {
-		return "IP не получен"
+		return "сервер без публичного IP"
 	}
 	if domain == "localhost" || strings.HasSuffix(domain, ".localhost") {
-		return "localhost · " + sourceIP
+		return "локальная инсталляция · " + sourceIP
 	}
 	if net.ParseIP(domain) != nil {
-		return "IP-сайт · " + sourceIP
+		return "тестовый сервер · " + sourceIP
 	}
 	parsedIP := net.ParseIP(sourceIP)
 	if parsedIP == nil {
@@ -10862,6 +10995,7 @@ func (a *App) createManagedSite(ctx context.Context, domain, email, password str
 	siteApplication.ensureDomainStorageUsageRow(siteContext, domain)
 	_, err = rawDatabase.ExecContext(siteContext, `UPDATE domain_storage_usage SET limit_bytes=?, updated_at=? WHERE domain=?`, quotaBytes, time.Now().UTC().Format(time.RFC3339), domain)
 	if err == nil {
+		a.logHostingSupportEvent(ctx, "site_created", "success", email, domain, "managed site created")
 		a.reportHostingSnapshotAsync(ctx)
 	}
 	return err
@@ -10905,6 +11039,7 @@ func (a *App) approveSiteRegistrationRequestFromForm(r *http.Request) string {
 	if err := store.UpdateSiteRequestStatus(r.Context(), requestID, "approved", ownerMessage); err != nil {
 		return err.Error()
 	}
+	a.logHostingSupportEvent(r.Context(), "support_request", "approved", siteRequest.Email, siteRequest.Domain, "site registration request approved")
 	a.reportHostingSnapshotAsync(r.Context())
 	if err := a.enqueueSiteRegistrationDecisionEmail(r.Context(), r, siteRequest, plan, "approved", ownerMessage, temporaryPassword); err != nil {
 		return fmt.Sprintf(translationOrDefault(translations, "billing_status_site_approved_email_failed", "Site %s was activated, but the customer email was not queued: %s"), siteRequest.Domain, err.Error())
@@ -10936,6 +11071,7 @@ func (a *App) rejectSiteRegistrationRequestFromForm(r *http.Request) string {
 	if err := store.UpdateSiteRequestStatus(r.Context(), requestID, "rejected", ownerMessage); err != nil {
 		return err.Error()
 	}
+	a.logHostingSupportEvent(r.Context(), "support_request", "rejected", siteRequest.Email, siteRequest.Domain, "site registration request rejected")
 	if err := a.enqueueSiteRegistrationDecisionEmail(r.Context(), r, siteRequest, plan, "rejected", ownerMessage, ""); err != nil {
 		return fmt.Sprintf(translationOrDefault(translations, "billing_status_request_rejected_email_failed", "Request was rejected, but the customer email was not queued: %s"), err.Error())
 	}
@@ -11042,6 +11178,7 @@ func (a *App) updateManagedSiteFromForm(r *http.Request) string {
 	if err := (hostingandsupport.Store{DB: controlDatabase}).AssignSite(r.Context(), domain, planID, serviceStatus); err != nil {
 		return err.Error()
 	}
+	a.logHostingSupportEvent(r.Context(), "plan_changed", "saved", "", domain, "site plan or quota saved")
 	a.reportHostingSnapshotAsync(r.Context())
 	return fmt.Sprintf(translationOrDefault(translations, "billing_status_site_settings_saved", "Site %s settings were saved."), domain)
 }
@@ -11176,6 +11313,7 @@ func (a *App) deleteManagedSiteWithBackup(ctx context.Context, r *http.Request, 
 	if err := a.deleteManagedSiteDataAfterBackup(ctx, controlDatabase, row); err != nil {
 		return managedSiteDeletionBackupView{}, err
 	}
+	a.logHostingSupportEvent(ctx, "site_deleted", "success", strings.Join(ownerContacts, ", "), domain, "managed site deleted with backup")
 	a.reportHostingSnapshotAsync(ctx)
 	a.notifyManagedSiteDeletionBackupCreated(ctx, r, backup, ownerContacts, languageCode)
 	return backup, nil
@@ -11748,6 +11886,11 @@ func (a *App) saveServicePlanFromForm(r *http.Request) string {
 	if err := (hostingandsupport.Store{DB: controlDatabase}).SavePlan(r.Context(), planID, name, quotaBytes, siteLimit, analyticsReportLimit, price, currency, billingPeriod, isDefault); err != nil {
 		return err.Error()
 	}
+	eventKind := "plan_changed"
+	if planID <= 0 {
+		eventKind = "plan_created"
+	}
+	a.logHostingSupportEvent(r.Context(), eventKind, "saved", "", "", name)
 	a.reportHostingSnapshotAsync(r.Context())
 	return translationOrDefault(translations, "billing_status_plan_saved", "Plan saved.")
 }
@@ -11790,8 +11933,81 @@ func (a *App) deleteServicePlanFromForm(r *http.Request) string {
 	if err := (hostingandsupport.Store{DB: controlDatabase}).DeletePlan(r.Context(), planID); err != nil {
 		return err.Error()
 	}
+	a.logHostingSupportEvent(r.Context(), "plan_deleted", "deleted", "", "", strconv.Itoa(planID))
 	a.reportHostingSnapshotAsync(r.Context())
 	return translationOrDefault(translations, "billing_status_plan_deleted", "Plan deleted.")
+}
+
+func (a *App) savePaymentProviderFromForm(r *http.Request) string {
+	provider := hostingandsupport.PaymentProvider{
+		Provider:     r.FormValue("provider"),
+		Enabled:      r.FormValue("enabled") == "1",
+		DisplayName:  r.FormValue("display_name"),
+		PaymentURL:   r.FormValue("payment_url"),
+		Instructions: r.FormValue("instructions"),
+	}
+	controlDatabase, err := a.openServerControlDatabase(r.Context())
+	if err != nil {
+		return err.Error()
+	}
+	defer controlDatabase.Close()
+	if err := (hostingandsupport.Store{DB: controlDatabase}).SavePaymentProvider(r.Context(), provider); err != nil {
+		return err.Error()
+	}
+	a.logHostingSupportEvent(r.Context(), "payment_provider_changed", "saved", "", "", provider.Provider)
+	a.reportHostingSnapshotAsync(r.Context())
+	return "Платёжный провайдер сохранён."
+}
+
+func (a *App) createInvoiceFromForm(r *http.Request) string {
+	customerEmail := strings.TrimSpace(r.FormValue("customer_email"))
+	if _, err := stdmail.ParseAddress(customerEmail); err != nil {
+		return "Email клиента некорректен."
+	}
+	invoice := hostingandsupport.Invoice{
+		CustomerEmail: customerEmail,
+		Domain:        normalizeQuotaDomainName(r.FormValue("domain")),
+		PlanName:      strings.TrimSpace(r.FormValue("plan_name")),
+		Amount:        strings.TrimSpace(r.FormValue("amount")),
+		Currency:      strings.TrimSpace(r.FormValue("currency")),
+		Provider:      strings.TrimSpace(r.FormValue("provider")),
+		DueAt:         strings.TrimSpace(r.FormValue("due_at")),
+		Notes:         strings.TrimSpace(r.FormValue("notes")),
+	}
+	controlDatabase, err := a.openServerControlDatabase(r.Context())
+	if err != nil {
+		return err.Error()
+	}
+	defer controlDatabase.Close()
+	createdInvoice, err := (hostingandsupport.Store{DB: controlDatabase}).CreateInvoice(r.Context(), invoice)
+	if err != nil {
+		return err.Error()
+	}
+	a.logHostingSupportEvent(r.Context(), "invoice", "issued", createdInvoice.CustomerEmail, createdInvoice.Domain, createdInvoice.Number+" "+createdInvoice.Amount+" "+createdInvoice.Currency)
+	a.reportHostingSnapshotAsync(r.Context())
+	return "Счёт " + createdInvoice.Number + " выставлен."
+}
+
+func (a *App) updateInvoiceStatusFromForm(r *http.Request, status string) string {
+	invoiceID, _ := strconv.Atoi(strings.TrimSpace(r.FormValue("invoice_id")))
+	controlDatabase, err := a.openServerControlDatabase(r.Context())
+	if err != nil {
+		return err.Error()
+	}
+	defer controlDatabase.Close()
+	invoice, err := (hostingandsupport.Store{DB: controlDatabase}).UpdateInvoiceStatus(r.Context(), invoiceID, status)
+	if err != nil {
+		return err.Error()
+	}
+	eventKind := "billing_event"
+	if status == "paid" {
+		eventKind = "payment"
+	} else if status == "payment_error" {
+		eventKind = "payment_error"
+	}
+	a.logHostingSupportEvent(r.Context(), eventKind, status, invoice.CustomerEmail, invoice.Domain, invoice.Number+" "+invoice.Provider)
+	a.reportHostingSnapshotAsync(r.Context())
+	return "Статус счёта " + invoice.Number + " обновлён."
 }
 
 func (a *App) applyLatestActiveRevision(ctx context.Context, domain string, pagePath string) {
@@ -12120,6 +12336,7 @@ func (a *App) recoverPage(w http.ResponseWriter, r *http.Request) {
 		a.render(w, r, "recover.html", map[string]any{"Status": translationOrDefault(translations, "recover_status_smtp_failed_prefix", "SMTP send failed: ") + mailError.Error(), "ShowForm": true, "ReturnPath": requestedReturnPath(r)})
 		return
 	}
+	a.logHostingSupportEvent(r.Context(), "code_requested", "sent", email, domain, "login_code")
 	a.clearFailedLoginAttempts(r.Context(), domain, clientIPAddress(r))
 	http.Redirect(w, r, requestedReturnPath(r), http.StatusFound)
 }
@@ -12160,6 +12377,7 @@ func (a *App) createAndSendProfileCode(r *http.Request, domain, currentEmail, ne
 		_, _ = a.db.ExecContext(r.Context(), `DELETE FROM email_confirmations WHERE token=?`, token)
 		return "", deliveryResult, dnsHelp, deliveryResult.Err
 	}
+	a.logHostingSupportEvent(r.Context(), "code_requested", "sent", currentEmail, domain, codeKind)
 	return token, deliveryResult, profileEmailDeliveryDNSHelp{}, nil
 }
 
@@ -12257,6 +12475,12 @@ func (a *App) applyProfileCodeConfirmation(ctx context.Context, confirmation Ema
 	if rowsAffected, err := result.RowsAffected(); err == nil && rowsAffected == 0 {
 		return errors.New("account not found")
 	}
+	if nextEmail != "" {
+		a.logHostingSupportEvent(ctx, "email_changed", "success", nextEmail, confirmation.Domain, "profile email changed")
+	}
+	if nextPassword != "" {
+		a.logHostingSupportEvent(ctx, "password_changed", "success", currentEmail, confirmation.Domain, "profile password changed")
+	}
 	return nil
 }
 
@@ -12330,6 +12554,7 @@ func (a *App) createAndSendEmailConfirmation(r *http.Request, action, domain, cu
 			a.deleteRegistrationConfirmation(databaseContext, token)
 			return err
 		}
+		a.logHostingSupportEvent(databaseContext, "code_requested", "sent", email, domain, "email_confirm")
 		return nil
 	}
 	_, _ = a.db.ExecContext(databaseContext, `DELETE FROM email_confirmations WHERE expires_at<>'' AND expires_at<?`, now.Format(time.RFC3339))
@@ -12346,6 +12571,7 @@ func (a *App) createAndSendEmailConfirmation(r *http.Request, action, domain, cu
 		_, _ = a.db.ExecContext(databaseContext, `DELETE FROM email_confirmations WHERE token=?`, token)
 		return err
 	}
+	a.logHostingSupportEvent(databaseContext, "code_requested", "sent", email, domain, codeKind)
 	return nil
 }
 
@@ -12388,6 +12614,7 @@ func (a *App) confirmEmailToken(w http.ResponseWriter, r *http.Request) {
 		a.deleteRegistrationConfirmation(registerContext, token)
 		a.promoteFirstServerOwner(registerContext, confirmation.Domain, confirmation.Email)
 		a.markServiceMailRecipientVerified(registerContext, confirmation.Domain, confirmation.Email, confirmation.LanguageCode)
+		a.logHostingSupportEvent(registerContext, "client_registered", "success", confirmation.Email, confirmation.Domain, "email confirmed")
 		a.reportHostingSnapshotAsync(registerContext)
 		a.createSessionForDomain(w, registerContext, confirmation.Domain, confirmation.Email)
 		http.Redirect(w, r, safeConfirmationReturnPath(confirmation.ReturnPath), http.StatusFound)
@@ -12398,6 +12625,7 @@ func (a *App) confirmEmailToken(w http.ResponseWriter, r *http.Request) {
 		}
 		_, _ = a.db.ExecContext(r.Context(), `DELETE FROM email_confirmations WHERE token=?`, token)
 		a.markServiceMailRecipientVerified(r.Context(), confirmation.Domain, confirmation.Email, confirmation.LanguageCode)
+		a.logHostingSupportEvent(r.Context(), "email_changed", "success", confirmation.Email, confirmation.Domain, "profile email confirmed")
 		a.createSessionForDomain(w, r.Context(), confirmation.Domain, confirmation.Email)
 		http.Redirect(w, r, safeConfirmationReturnPath(confirmation.ReturnPath), http.StatusFound)
 	default:
@@ -13183,6 +13411,7 @@ func (a *App) buildHostingSnapshot(ctx context.Context) (hostingandsupport.Hosti
 		snapshot.DiskFreeBytes = int64(freeBytes)
 		snapshot.DiskTotalBytes = int64(totalBytes)
 	}
+	snapshot.Events = append(snapshot.Events, store.SupportEvents(ctx, 80)...)
 	for _, plan := range plans {
 		snapshot.Plans = append(snapshot.Plans, hostingandsupport.HostingSnapshotPlan{
 			Name:                 plan.Name,
@@ -13250,6 +13479,29 @@ func (a *App) buildHostingSnapshot(ctx context.Context) (hostingandsupport.Hosti
 		CreatedAt: snapshot.CreatedAt,
 	})
 	return snapshot, nil
+}
+
+func (a *App) logHostingSupportEvent(ctx context.Context, kind, status, email, domain, message string) {
+	if strings.TrimSpace(kind) == "" {
+		return
+	}
+	controlDatabase, err := a.openServerControlDatabase(ctx)
+	if err != nil {
+		log.Printf("hosting support event store unavailable kind=%s error=%v", kind, err)
+		return
+	}
+	defer controlDatabase.Close()
+	event := hostingandsupport.HostingSnapshotEvent{
+		Kind:      strings.TrimSpace(kind),
+		Status:    strings.TrimSpace(status),
+		Email:     strings.TrimSpace(email),
+		Domain:    strings.TrimSpace(domain),
+		Message:   strings.TrimSpace(message),
+		CreatedAt: time.Now().UTC().Format(time.RFC3339),
+	}
+	if err := (hostingandsupport.Store{DB: controlDatabase}).LogSupportEvent(ctx, event); err != nil {
+		log.Printf("hosting support event log failed kind=%s error=%v", kind, err)
+	}
 }
 
 func hostingSnapshotServerStatus(serverIP string) string {
@@ -16361,10 +16613,40 @@ func (a *App) isServerManagerEmail(ctx context.Context, domain, email string) bo
 	defer controlDatabase.Close()
 	store := hostingandsupport.Store{DB: controlDatabase}
 	ownerDomain, ownerFound := store.OwnerDomain(ctx)
-	if !ownerFound || normalizeQuotaDomainName(ownerDomain) != normalizeQuotaDomainName(domain) {
+	if !ownerFound || !sameHostingAndSupportDomain(ownerDomain, domain) {
 		return false
 	}
 	return store.IsOwner(ctx, email)
+}
+
+func sameHostingAndSupportDomain(leftDomain, rightDomain string) bool {
+	leftDomain = normalizeHostingAndSupportMainDomain(leftDomain)
+	rightDomain = normalizeHostingAndSupportMainDomain(rightDomain)
+	return leftDomain != "" && rightDomain != "" && leftDomain == rightDomain
+}
+
+func normalizeHostingAndSupportMainDomain(domain string) string {
+	domain = strings.TrimSpace(domain)
+	if domain == "" {
+		return ""
+	}
+	if host, _, err := net.SplitHostPort(domain); err == nil {
+		domain = host
+	}
+	domain = strings.Trim(domain, "[]")
+	parsedRawIP := net.ParseIP(domain)
+	if parsedRawIP != nil && parsedRawIP.IsLoopback() {
+		return "localhost"
+	}
+	normalizedDomain := normalizeQuotaDomainName(domain)
+	if normalizedDomain == "" {
+		return ""
+	}
+	parsedIP := net.ParseIP(normalizedDomain)
+	if parsedIP != nil && parsedIP.IsLoopback() {
+		return "localhost"
+	}
+	return normalizedDomain
 }
 
 func (a *App) serverAutomaticRegistrationAllowed(ctx context.Context) bool {
@@ -16448,9 +16730,11 @@ WHERE domain=?
 	}
 	if updatedRowsCount == 0 {
 		usage := a.domainStorageUsage(ctx, domain)
+		a.logHostingSupportEvent(ctx, "limit_exceeded", "blocked", "", domain, fmt.Sprintf("storage limit reached: %s / %s used", formatFileSize(usage.totalBytes()), formatFileSize(usage.LimitBytes)))
 		return fmt.Errorf("storage limit reached: %s / %s used", formatFileSize(usage.totalBytes()), formatFileSize(usage.LimitBytes))
 	}
 	if totalDelta != 0 {
+		a.logHostingSupportEvent(ctx, "site_size_changed", "updated", "", domain, fmt.Sprintf("storage delta %s", formatFileSize(totalDelta)))
 		a.reportHostingSnapshotAsync(ctx)
 	}
 	return nil
@@ -22723,6 +23007,7 @@ func (a *App) publishDomain(w http.ResponseWriter, r *http.Request) {
 	publishProgress("unfreeze", "", totalSteps-1, totalSteps, "unfreeze")
 	a.setDomainFrozenState(r.Context(), domain, 0)
 	publishProgress("done", "", totalSteps, totalSteps, "done")
+	a.logHostingSupportEvent(r.Context(), "site_published", "success", "", domain, fmt.Sprintf("updated=%d unchanged=%d", updatedPagesCount, skippedPagesCount))
 	log.Printf("publish completed domain=%s", domain)
 	http.Redirect(w, r, requestedReturnPath(r), http.StatusFound)
 }

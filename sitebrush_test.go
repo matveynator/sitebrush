@@ -1882,6 +1882,109 @@ func TestSiteQuotaInteractiveConsoleSetsBillingMainDomain(t *testing.T) {
 	}
 }
 
+func TestHostingAndSupportMainDomainDefaultsToFirstRegisteredDomain(t *testing.T) {
+	storagePath := t.TempDir()
+	dbPath := filepath.Join(storagePath, defaultDBPath)
+	if err := ensureParentDir(dbPath); err != nil {
+		t.Fatal(err)
+	}
+	rawDB, err := sql.Open("sqlite", "file:"+dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = rawDB.Close()
+	})
+	application := &App{db: rawDB, storagePath: storagePath, dbPath: dbPath}
+	if err := application.migrate(contextWithDomain(context.Background(), "localhost")); err != nil {
+		t.Fatal(err)
+	}
+	insertSiteQuotaAdmin(t, rawDB, "localhost")
+
+	mainDomain := application.hostingAndSupportMainDomain(context.Background())
+	if mainDomain != "localhost" {
+		t.Fatalf("main domain = %q, want localhost", mainDomain)
+	}
+	var ownerDomain string
+	if err := rawDB.QueryRow(`SELECT domain FROM server_managers WHERE role='owner'`).Scan(&ownerDomain); err != nil {
+		t.Fatalf("read promoted owner domain: %v", err)
+	}
+	if ownerDomain != "localhost" {
+		t.Fatalf("owner domain = %q, want localhost", ownerDomain)
+	}
+}
+
+func TestHostingAndSupportRedirectsToMainDomain(t *testing.T) {
+	storagePath := t.TempDir()
+	dbPath := filepath.Join(storagePath, defaultDBPath)
+	if err := ensureParentDir(dbPath); err != nil {
+		t.Fatal(err)
+	}
+	rawDB, err := sql.Open("sqlite", "file:"+dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = rawDB.Close()
+	})
+	application := &App{db: rawDB, storagePath: storagePath, dbPath: dbPath}
+	if err := application.migrate(contextWithDomain(context.Background(), "alpha.com")); err != nil {
+		t.Fatal(err)
+	}
+	if err := hostingandsupport.Migrate(context.Background(), rawDB); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := rawDB.Exec(`INSERT INTO server_managers(domain,email,role,scope_domain,created_at) VALUES(?,?,?,?,?)`, "alpha.com", "admin@alpha.com", "owner", "*", time.Now().UTC().Format(time.RFC3339)); err != nil {
+		t.Fatal(err)
+	}
+
+	request := httptest.NewRequest(http.MethodGet, "http://beta.com/?hosting_and_support", nil)
+	response := httptest.NewRecorder()
+	if !application.redirectToHostingAndSupportMainDomain(response, request) {
+		t.Fatal("redirect was not issued")
+	}
+	if response.Code != http.StatusFound {
+		t.Fatalf("status = %d, want %d", response.Code, http.StatusFound)
+	}
+	if location := response.Header().Get("Location"); location != "http://alpha.com/?hosting_and_support" {
+		t.Fatalf("location = %q, want http://alpha.com/?hosting_and_support", location)
+	}
+	if redirectHost := hostingAndSupportRedirectHost("alpha.com", "beta.com:18080"); redirectHost != "alpha.com:18080" {
+		t.Fatalf("redirect host = %q, want alpha.com:18080", redirectHost)
+	}
+}
+
+func TestServerManagerEmailTreatsLoopbackAsLocalhost(t *testing.T) {
+	storagePath := t.TempDir()
+	dbPath := filepath.Join(storagePath, defaultDBPath)
+	if err := ensureParentDir(dbPath); err != nil {
+		t.Fatal(err)
+	}
+	rawDB, err := sql.Open("sqlite", "file:"+dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = rawDB.Close()
+	})
+	application := &App{db: rawDB, storagePath: storagePath, dbPath: dbPath}
+	if err := application.migrate(contextWithDomain(context.Background(), "localhost")); err != nil {
+		t.Fatal(err)
+	}
+	if err := hostingandsupport.Migrate(context.Background(), rawDB); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := rawDB.Exec(`INSERT INTO server_managers(domain,email,role,scope_domain,created_at) VALUES(?,?,?,?,?)`, "localhost", "admin@localhost", "owner", "*", time.Now().UTC().Format(time.RFC3339)); err != nil {
+		t.Fatal(err)
+	}
+	if !application.isServerManagerEmail(context.Background(), "127.0.0.1", "admin@localhost") {
+		t.Fatal("loopback request domain was not accepted for localhost owner")
+	}
+	if !sameHostingAndSupportDomain("localhost", "[::1]:18080") {
+		t.Fatal("IPv6 loopback was not normalized to localhost")
+	}
+}
+
 func TestSiteQuotaMenuRenderingIsCompact(t *testing.T) {
 	rows := []siteQuotaRow{
 		{

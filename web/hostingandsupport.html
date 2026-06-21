@@ -122,8 +122,10 @@
                 {{range $user.Sites}}
                 <div class="billing-user-site-line">
                   {{if .URL}}<a href="{{.URL}}" target="_blank" rel="noopener noreferrer">{{.Domain}}</a>{{else}}<span>{{.Domain}}</span>{{end}}
-                  <span>{{.UsedLabel}}</span>
-                  <span>{{.Status}}{{if .InstallationIP}} · {{.InstallationIP}}{{end}}</span>
+                  <span>{{.UsedLabel}} / {{if .LimitLabel}}{{.LimitLabel}}{{else}}лимит не передан{{end}}</span>
+                  <span>{{if .PlanName}}{{.PlanName}}{{else}}тариф не назначен{{end}} · {{if .PlanPaidStatus}}{{.PlanPaidStatus}}{{else}}free{{end}}</span>
+                  <span>{{.Status}}{{if .InstallationIP}} · {{.InstallationIP}}{{end}}{{if .OverLimit}} · превышение лимита{{end}}</span>
+                  {{if .HostingOwner}}<span>владелец хостинга: {{.HostingOwner}}</span>{{end}}
                 </div>
                 {{end}}
               </div>
@@ -480,6 +482,78 @@
             </form>
           </div></div>
         </div>
+        {{end}}
+      </div>
+    </div>
+  </section>
+
+  <section class="card billing-card">
+    <div class="card-body">
+      <div class="billing-section-header">
+        <div>
+          <h2>Счета и оплата</h2>
+          <p class="text-muted">Первый слой биллинга: выставление счетов клиентам и оплата через Stripe, PayPal или СБП. В snapshot уходят только метаданные счетов и событий.</p>
+        </div>
+      </div>
+      <div class="billing-plan-list">
+        {{range .PaymentProviders}}
+        <form method="post" action="?hosting_and_support" class="billing-plan-row">
+          <input type="hidden" name="billing_action" value="save_payment_provider">
+          <input type="hidden" name="provider" value="{{.Provider}}">
+          <label class="checkbox-row"><input type="checkbox" name="enabled" value="1" {{if .Enabled}}checked{{end}}><span>{{.DisplayName}}</span></label>
+          <input name="display_name" type="text" class="form-control form-control-sm" value="{{.DisplayName}}" placeholder="Название">
+          <input name="payment_url" type="text" class="form-control form-control-sm" value="{{.PaymentURL}}" placeholder="URL-шаблон: https://.../{invoice}/{amount}/{currency}/{email}/{domain}">
+          <input name="instructions" type="text" class="form-control form-control-sm" value="{{.Instructions}}" placeholder="Инструкция для клиента">
+          <button type="submit" class="btn btn-outline-primary btn-sm"><img src="/p/static/save-page.png" alt="">Сохранить</button>
+        </form>
+        {{end}}
+      </div>
+      <form method="post" action="?hosting_and_support" class="billing-plan-form mt-3">
+        <input type="hidden" name="billing_action" value="create_invoice">
+        <label>Клиент <input name="customer_email" type="email" class="form-control" placeholder="client@example.com" required></label>
+        <label>Сайт <input name="domain" type="text" class="form-control" placeholder="example.com" required></label>
+        <label>Тариф / услуга <input name="plan_name" type="text" class="form-control" placeholder="Pro / обслуживание сайта"></label>
+        <label>Сумма <input name="amount" type="text" class="form-control" placeholder="1000" required></label>
+        <label>Валюта <input name="currency" type="text" class="form-control" value="RUB" required></label>
+        <label>Провайдер
+          <select name="provider" class="form-select" required>
+            {{range .PaymentProviders}}<option value="{{.Provider}}">{{.DisplayName}}{{if not .Enabled}} · выключен{{end}}</option>{{end}}
+          </select>
+        </label>
+        <label>Срок оплаты <input name="due_at" type="date" class="form-control"></label>
+        <label>Примечание <input name="notes" type="text" class="form-control" placeholder="За хостинг и поддержку"></label>
+        <button type="submit" class="btn btn-success"><img src="/p/static/profile.png" alt="">Выставить счёт</button>
+      </form>
+      <div class="billing-site-list mt-3">
+        {{range .Invoices}}
+        <article class="billing-site-row">
+          <div class="billing-site-main">
+            <div class="billing-domain">{{.Number}} · {{.Status}}</div>
+            <div class="text-muted small">{{.CustomerEmail}} · {{.Domain}} · {{.PlanName}}</div>
+            <div class="text-muted small">{{.Amount}} {{.Currency}} · {{.Provider}} · создан {{.CreatedAt}}{{if .DueAt}} · срок {{.DueAt}}{{end}}{{if .PaidAt}} · оплачен {{.PaidAt}}{{end}}</div>
+            {{if .PaymentURL}}<div class="text-muted small"><a href="{{.PaymentURL}}" target="_blank" rel="noopener noreferrer">Ссылка на оплату</a></div>{{end}}
+            {{if .Notes}}<div class="text-muted small">{{.Notes}}</div>{{end}}
+          </div>
+          <div class="billing-site-form">
+            <form method="post" action="?hosting_and_support">
+              <input type="hidden" name="billing_action" value="mark_invoice_paid">
+              <input type="hidden" name="invoice_id" value="{{.ID}}">
+              <button type="submit" class="btn btn-success btn-sm">Оплачен</button>
+            </form>
+            <form method="post" action="?hosting_and_support">
+              <input type="hidden" name="billing_action" value="mark_invoice_payment_error">
+              <input type="hidden" name="invoice_id" value="{{.ID}}">
+              <button type="submit" class="btn btn-outline-danger btn-sm">Ошибка оплаты</button>
+            </form>
+            <form method="post" action="?hosting_and_support">
+              <input type="hidden" name="billing_action" value="cancel_invoice">
+              <input type="hidden" name="invoice_id" value="{{.ID}}">
+              <button type="submit" class="btn btn-outline-secondary btn-sm">Отменить</button>
+            </form>
+          </div>
+        </article>
+        {{else}}
+        <div class="empty">Счетов пока нет.</div>
         {{end}}
       </div>
     </div>
