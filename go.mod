@@ -21,6 +21,7 @@ require (
 	github.com/jchv/go-webview2 v0.0.0-20220126073738-2ea27096a5eb // indirect
 	github.com/jchv/go-winloader v0.0.0-20200815041850-dec1ee9a7fd5 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
+	github.com/matveynator/netchan v0.0.0-20260307171913-997c76957779 // indirect
 	github.com/ncruces/go-strftime v1.0.0 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
 	github.com/webview/webview_go v0.0.0-20240831120633-6173450d4dd6 // indirect

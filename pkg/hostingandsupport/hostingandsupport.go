@@ -19,7 +19,7 @@ import (
 
 const DefaultStorageLimitBytes int64 = 10 * 1024 * 1024 * 1024
 const DefaultDeletionBackupRetentionDays = 365
-const currentBillingSchemaVersion = 12
+const currentBillingSchemaVersion = 13
 
 type Store struct {
 	DB *sql.DB
@@ -492,6 +492,8 @@ func Migrate(ctx context.Context, database *sql.DB) error {
 	_, _ = database.ExecContext(ctx, `INSERT OR IGNORE INTO server_settings(name,value,updated_at) VALUES('auto_registration_enabled','1',?)`, now)
 	_, _ = database.ExecContext(ctx, `INSERT OR IGNORE INTO server_settings(name,value,updated_at) VALUES('deletion_backup_retention_days',?,?)`, strconv.Itoa(DefaultDeletionBackupRetentionDays), now)
 	_, _ = database.ExecContext(ctx, `INSERT OR IGNORE INTO server_settings(name,value,updated_at) VALUES('service_mail_relay_enabled','1',?)`, now)
+	_, _ = database.ExecContext(ctx, `INSERT OR IGNORE INTO payment_providers(provider,enabled,display_name,payment_url,instructions,updated_at) VALUES('sitebrush_com',1,'SiteBrush.com demo payments','/?hosting_and_support_demo_payment&invoice={invoice}','Предустановленная демо-оплата через SiteBrush.com.',?)`, now)
+	_, _ = database.ExecContext(ctx, `UPDATE payment_providers SET enabled=1,display_name='SiteBrush.com demo payments',payment_url='/?hosting_and_support_demo_payment&invoice={invoice}',instructions='Предустановленная демо-оплата через SiteBrush.com.',updated_at=? WHERE provider='sitebrush_com'`, now)
 	_, _ = database.ExecContext(ctx, `INSERT OR IGNORE INTO payment_providers(provider,enabled,display_name,payment_url,instructions,updated_at) VALUES('stripe',0,'Stripe','','Stripe Checkout or Payment Link URL template',?)`, now)
 	_, _ = database.ExecContext(ctx, `INSERT OR IGNORE INTO payment_providers(provider,enabled,display_name,payment_url,instructions,updated_at) VALUES('paypal',0,'PayPal','','PayPal payment URL template',?)`, now)
 	_, _ = database.ExecContext(ctx, `INSERT OR IGNORE INTO payment_providers(provider,enabled,display_name,payment_url,instructions,updated_at) VALUES('sbp',0,'СБП','','СБП: банк, телефон, получатель или QR/link template',?)`, now)
@@ -883,7 +885,7 @@ func (store Store) ServiceAssignments(ctx context.Context) map[string]ServiceAss
 }
 
 func (store Store) PaymentProviders(ctx context.Context) []PaymentProvider {
-	rows, err := store.DB.QueryContext(ctx, `SELECT provider,COALESCE(enabled,0),COALESCE(display_name,''),COALESCE(payment_url,''),COALESCE(instructions,''),COALESCE(updated_at,'') FROM payment_providers ORDER BY CASE provider WHEN 'stripe' THEN 0 WHEN 'paypal' THEN 1 WHEN 'sbp' THEN 2 ELSE 3 END,provider ASC`)
+	rows, err := store.DB.QueryContext(ctx, `SELECT provider,COALESCE(enabled,0),COALESCE(display_name,''),COALESCE(payment_url,''),COALESCE(instructions,''),COALESCE(updated_at,'') FROM payment_providers ORDER BY CASE provider WHEN 'sitebrush_com' THEN 0 WHEN 'stripe' THEN 1 WHEN 'paypal' THEN 2 WHEN 'sbp' THEN 3 ELSE 4 END,provider ASC`)
 	if err != nil {
 		return nil
 	}
@@ -921,7 +923,7 @@ func (store Store) SavePaymentProvider(ctx context.Context, provider PaymentProv
 
 func normalizePaymentProvider(provider string) string {
 	switch strings.ToLower(strings.TrimSpace(provider)) {
-	case "stripe", "paypal", "sbp":
+	case "sitebrush_com", "stripe", "paypal", "sbp":
 		return strings.ToLower(strings.TrimSpace(provider))
 	default:
 		return ""
@@ -932,6 +934,8 @@ func defaultPaymentProviderName(provider string) string {
 	switch normalizePaymentProvider(provider) {
 	case "stripe":
 		return "Stripe"
+	case "sitebrush_com":
+		return "SiteBrush.com demo payments"
 	case "paypal":
 		return "PayPal"
 	case "sbp":

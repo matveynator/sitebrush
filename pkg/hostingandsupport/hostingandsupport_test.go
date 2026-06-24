@@ -236,10 +236,10 @@ func TestPaymentProvidersAndInvoicesRoundTrip(t *testing.T) {
 	}
 	store := Store{DB: database}
 	providers := store.PaymentProviders(context.Background())
-	if len(providers) != 3 {
-		t.Fatalf("providers = %d, want 3", len(providers))
+	if len(providers) != 4 {
+		t.Fatalf("providers = %d, want 4", len(providers))
 	}
-	if providers[0].Provider != "stripe" || providers[1].Provider != "paypal" || providers[2].Provider != "sbp" {
+	if providers[0].Provider != "sitebrush_com" || !providers[0].Enabled || providers[1].Provider != "stripe" || providers[2].Provider != "paypal" || providers[3].Provider != "sbp" {
 		t.Fatalf("providers order = %#v", providers)
 	}
 	if _, err := store.CreateInvoice(context.Background(), Invoice{

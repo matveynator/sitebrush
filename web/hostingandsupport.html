@@ -21,16 +21,6 @@
 
   {{if .Status}}<div class="alert alert-info billing-status" role="alert">{{.Status}}</div>{{end}}
 
-  <nav class="hosting-tabs" aria-label="Разделы хостинга и поддержки">
-    <button type="button" class="hosting-tab-button active" data-hosting-tab-button="overview">Обзор</button>
-    <button type="button" class="hosting-tab-button" data-hosting-tab-button="clients">Клиенты</button>
-    {{if .ShowServers}}<button type="button" class="hosting-tab-button" data-hosting-tab-button="servers">Серверы</button>{{end}}
-    <button type="button" class="hosting-tab-button" data-hosting-tab-button="sites">Сайты</button>
-    <button type="button" class="hosting-tab-button" data-hosting-tab-button="invoices">Счета</button>
-    <button type="button" class="hosting-tab-button" data-hosting-tab-button="settings">Настройки</button>
-    <button type="button" class="hosting-tab-button" data-hosting-tab-button="diagnostics">Диагностика</button>
-  </nav>
-
   <section class="card billing-card hosting-overview-panel" data-hosting-tab-panel="overview">
     <div class="card-body">
       <div class="hosting-overview-hero {{.Overview.HealthClass}}">
@@ -42,10 +32,10 @@
         <div class="hosting-overview-big-number">{{.Overview.ProblemCount}}</div>
       </div>
       <div class="hosting-overview-metrics">
-        <button type="button" data-hosting-tab-jump="clients"><strong>{{.Overview.ClientCount}}</strong><span>клиентов</span></button>
-        <button type="button" data-hosting-tab-jump="sites"><strong>{{.Overview.SiteCount}}</strong><span>сайтов</span></button>
-        {{if .ShowServers}}<button type="button" data-hosting-tab-jump="servers"><strong>{{.Overview.ServerCount}}</strong><span>серверов</span></button>{{end}}
-        <button type="button" data-hosting-tab-jump="invoices"><strong>{{.Overview.UnpaidInvoices}}</strong><span>счетов к оплате</span></button>
+        <a href="#hostingServerList"><strong>{{.Overview.ClientCount}}</strong><span>клиентов</span></a>
+        <a href="#hostingServerList"><strong>{{.Overview.SiteCount}}</strong><span>сайтов</span></a>
+        <a href="#hostingServerList"><strong>{{.Overview.ServerCount}}</strong><span>серверов</span></a>
+        <a href="#hostingServerList"><strong>{{.Overview.UnpaidInvoices}}</strong><span>счетов к оплате</span></a>
       </div>
       <div class="hosting-overview-actions">
         {{range .Overview.Actions}}
@@ -54,7 +44,7 @@
             <h3>{{.Title}}</h3>
             <p>{{.Text}}</p>
           </div>
-          <button type="button" class="btn btn-outline-primary btn-sm" data-hosting-tab-jump="{{.Tab}}">{{.ButtonText}}</button>
+          <a class="btn btn-outline-primary btn-sm" href="#hostingServerList">{{.ButtonText}}</a>
         </article>
         {{end}}
       </div>
@@ -65,64 +55,113 @@
     </div>
   </section>
 
-  {{if .ShowServers}}<section class="card billing-card hosting-tab-panel-hidden" data-hosting-tab-panel="servers">
+  <section class="card billing-card" id="hostingServerList">
     <div class="card-body">
       <div class="billing-section-header">
         <div>
           <h2>Серверы</h2>
-          <p class="text-muted">Только реальные SiteBrush-инсталляции: публичный IP и головной домен, который указывает на этот IP.</p>
+          <p class="text-muted">Сервер — главная сущность раздела. Сайты, клиенты, счета, настройки и диагностика показаны внутри сервера.</p>
         </div>
       </div>
       <div class="billing-site-list" data-hosting-server-list>
-        {{range $serverIndex, $server := .ClientHostings}}
-        <article class="billing-site-row" data-hosting-server-row data-hosting-server-owner="{{$server.OwnerEmail}}">
+        {{range $serverIndex, $server := .Servers}}
+        <article class="billing-site-row hosting-server-card" data-hosting-server-row data-hosting-server-owner="{{$server.OwnerEmail}}">
           <div class="billing-site-main">
-            <div class="billing-domain">{{if $server.ServerDomain}}{{$server.ServerDomain}}{{else}}{{$server.InstallationID}}{{end}}</div>
-            <div class="text-muted small">IP: {{$server.ServerIP}} · владелец: <button type="button" class="billing-owner-filter" data-hosting-server-owner-filter="{{$server.OwnerEmail}}">{{$server.OwnerEmail}}</button></div>
-            <div class="text-muted small">SiteBrush {{if $server.SitebrushVersion}}{{$server.SitebrushVersion}}{{else}}версия не передана{{end}} · {{if $server.OSName}}{{$server.OSName}} {{$server.OSVersion}}{{else}}ОС не передана{{end}}</div>
-            <div class="billing-quota-bar {{$server.DiskStatusClass}}" aria-label="Занято {{$server.DiskUsedPercent}}% диска">
-              <div style="width:{{$server.DiskUsedPercent}}%"></div>
-            </div>
-            <div class="text-muted small">Диск: {{$server.DiskUsedLabel}} занято / {{$server.DiskFreeLabel}} свободно / {{$server.DiskTotalLabel}} всего</div>
+            <div class="billing-domain">{{$server.Name}}{{if $server.Local}} <span class="badge text-bg-info">локальный</span>{{end}}</div>
+            <div class="text-muted small">{{$server.Subtitle}}{{if $server.OwnerEmail}} · владелец: <button type="button" class="billing-owner-filter" data-hosting-server-owner-filter="{{$server.OwnerEmail}}">{{$server.OwnerEmail}}</button>{{end}}</div>
+            <div class="text-muted small">Синхронизация: <span class="{{$server.SyncStatusClass}}">{{$server.SyncStatusLabel}}</span> · сеть: <span class="{{$server.NetworkStatusClass}}">{{$server.NetworkStatusLabel}}</span></div>
+            {{if $server.TotalUsedLabel}}<div class="text-muted small">Данные сайтов: {{$server.TotalUsedLabel}}{{if $server.DiskFreeLabel}} · диск свободно {{$server.DiskFreeLabel}} / {{$server.DiskTotalLabel}}{{end}}</div>{{end}}
           </div>
           <div class="billing-client-hosting-meta">
-            <div><strong>CPU</strong><span>{{if $server.CPUModel}}{{$server.CPUModel}}{{else}}не передан{{end}} · {{$server.CPUCores}} ядер</span></div>
-            <div><strong>CPU за час</strong><span class="{{$server.CPUStatusClass}}">{{printf "%.1f" $server.CPUUsagePercent}}%</span></div>
-            <div><strong>LoadAverage за час</strong><span class="{{$server.LoadStatusClass}}">{{printf "%.2f" $server.LoadAverage}}</span></div>
-            <div><strong>Сетевой uptime</strong><span class="{{$server.NetworkStatusClass}}">{{$server.NetworkUptimeLabel}}{{if $server.LastResponseMS}} · {{$server.LastResponseMS}} ms{{end}}</span></div>
-            <div><strong>Uptime сервера</strong><span class="{{$server.ServerUptimeClass}}">{{$server.ServerUptimeLabel}}</span></div>
-            <div><strong>Память</strong><span>{{$server.RAMTotalLabel}}</span></div>
-            <div><strong>Сайты</strong><span><button type="button" class="billing-owner-filter" data-bs-toggle="modal" data-bs-target="#hostingServerSitesModal{{$serverIndex}}">{{$server.SiteCount}}</button></span></div>
-            <div><strong>Последняя синхронизация</strong><span>{{if $server.LastSeenAt}}{{$server.LastSeenAt}}{{else}}нет данных{{end}}</span></div>
+            <div><strong>Сайты</strong><span>{{$server.SiteCount}}</span></div>
+            <div><strong>Клиенты</strong><span>{{$server.ClientCount}}</span></div>
+            <div><strong>Счета</strong><span>{{$server.InvoiceCount}}</span></div>
+            <div><strong>К выставлению</strong><span>{{$server.BillableCount}}</span></div>
+            <div><strong>Проблемные счета</strong><span>{{$server.UnpaidInvoiceCount}}</span></div>
+            <div><strong>Действие</strong><span><button type="button" class="btn {{$server.InvoiceActionClass}} btn-sm" data-bs-toggle="modal" data-bs-target="#hostingServerInvoicesModal{{$serverIndex}}">{{$server.InvoiceActionLabel}}</button></span></div>
           </div>
         </article>
-        <div class="modal fade" id="hostingServerSitesModal{{$serverIndex}}" tabindex="-1" aria-hidden="true">
-          <div class="modal-dialog modal-lg modal-dialog-centered modal-dialog-scrollable"><div class="modal-content">
+        <div class="hosting-server-details">
+          <details open>
+            <summary>Сайты</summary>
+            <div class="billing-client-site-grid">
+              {{range $server.Sites}}
+              <div class="billing-client-site-row {{if .OverLimit}}billing-client-site-over-limit{{end}}">
+                {{if .URL}}<a href="{{.URL}}" target="_blank" rel="noopener noreferrer">{{.Domain}}</a>{{else}}<span>{{.Domain}}</span>{{end}}
+                <span>клиент: {{.OwnerEmail}}</span>
+                <span>админы: {{if .AdminEmails}}{{.AdminEmails}}{{else}}не переданы{{end}}</span>
+                <span>{{.PlanName}} · {{.PaidStatus}}</span>
+                <span>{{.UsedLabel}} / {{if .LimitLabel}}{{.LimitLabel}}{{else}}лимит не передан{{end}}</span>
+                <span>{{.InvoiceLabel}}</span>
+              </div>
+              {{else}}
+              <div class="empty">Сайты не переданы.</div>
+              {{end}}
+            </div>
+          </details>
+          <details>
+            <summary>Клиенты</summary>
+            <div class="billing-user-tags">
+              {{range $server.Clients}}<span>{{.Email}} · {{.SiteCount}} сайтов{{if .Domains}} · {{.Domains}}{{end}}</span>{{else}}<span>клиенты не определены</span>{{end}}
+            </div>
+          </details>
+          <details>
+            <summary>Счета</summary>
+            <div class="billing-invoice-page-list">
+              {{range $server.Invoices}}
+              <article class="billing-invoice-page">
+                <div class="billing-invoice-page-head">
+                  <div>
+                    <div class="billing-domain">{{.Number}}</div>
+                    <div class="text-muted small">{{.StatusLabel}}</div>
+                  </div>
+                  <strong>{{.AmountLabel}}</strong>
+                </div>
+                <div class="billing-client-hosting-meta">
+                  <div><strong>Клиент</strong><span>{{.CustomerEmail}}</span></div>
+                  <div><strong>Сайт</strong><span>{{.Domain}}</span></div>
+                  <div><strong>Услуга</strong><span>{{.PlanName}}</span></div>
+                  <div><strong>Период</strong><span>{{.PeriodLabel}}</span></div>
+                </div>
+                <div class="text-muted small">{{.HistoryLabel}}</div>
+                {{if .CanPay}}<a class="btn btn-success btn-sm" href="{{.PaymentURL}}" target="_blank" rel="noopener noreferrer">Оплатить</a>{{end}}
+              </article>
+              {{else}}
+              <div class="empty">Счетов пока нет.</div>
+              {{end}}
+            </div>
+          </details>
+          <details>
+            <summary>Настройки</summary>
+            <div class="billing-client-hosting-meta">
+              {{range $server.Settings}}<div><strong>{{.Name}}</strong><span>{{.Value}}</span></div>{{end}}
+            </div>
+          </details>
+          <details>
+            <summary>Диагностика</summary>
+            <div class="billing-client-hosting-meta">
+              {{range $server.Diagnostics}}<div><strong>{{.Name}}</strong><span class="{{.StatusClass}}">{{.Value}}</span></div>{{end}}
+            </div>
+          </details>
+        </div>
+        <div class="modal fade" id="hostingServerInvoicesModal{{$serverIndex}}" tabindex="-1" aria-hidden="true">
+          <div class="modal-dialog modal-lg modal-dialog-centered"><div class="modal-content">
             <div class="modal-header">
-              <h5 class="modal-title">Сайты на {{if $server.ServerDomain}}{{$server.ServerDomain}}{{else}}{{$server.InstallationID}}{{end}}</h5>
+              <h5 class="modal-title">{{$server.InvoiceActionLabel}} · {{$server.Name}}</h5>
               <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="{{index $.T "tree_close"}}"></button>
             </div>
             <div class="modal-body">
-              <div class="billing-site-list">
-                {{range $server.Sites}}
-                <div class="billing-plan-row">
-                  <span><a href="//{{.Domain}}/" target="_blank" rel="noopener noreferrer">{{.Domain}}</a> · {{.UsedLabel}} / {{.LimitLabel}} · {{if .PlanName}}{{.PlanName}}{{else}}тариф не назначен{{end}}</span>
-                  <span class="{{.TLSStatusClass}}">{{if .HTTPSAvailable}}HTTPS до {{.CertExpiresAt}} · {{.CertDaysLeft}} дн.{{else}}HTTPS не проверен{{end}}</span>
-                  <span>{{if .OwnerEmail}}{{.OwnerEmail}}{{else}}владелец не передан{{end}}</span>
-                </div>
-                {{else}}
-                <div class="empty">Сайты не переданы.</div>
-                {{end}}
-              </div>
+              <p class="text-muted">На первом этапе используется предустановленная демо-оплата через SiteBrush.com. Реселлеру не нужно настраивать Stripe или шаблоны оплаты.</p>
+              <a class="btn {{$server.InvoiceActionClass}}" href="#hostingLegacyInvoiceForm" data-bs-dismiss="modal">{{$server.InvoiceActionLabel}}</a>
             </div>
           </div></div>
         </div>
         {{else}}
-        <div class="empty">Реальных серверов пока нет. Нужен публичный IP и головной домен, направленный на этот IP.</div>
+        <div class="empty">Серверов пока нет.</div>
         {{end}}
       </div>
     </div>
-  </section>{{end}}
+  </section>
 
   <section class="card billing-card hosting-tab-panel-hidden" data-hosting-tab-panel="clients">
     <div class="card-body">
@@ -601,7 +640,7 @@
           <p class="text-muted">Выставляйте счета клиентам и отмечайте оплату. Технические настройки способов оплаты скрыты ниже.</p>
         </div>
       </div>
-      <form method="post" action="?hosting_and_support" class="billing-plan-form">
+      <form method="post" action="?hosting_and_support" class="billing-plan-form" id="hostingLegacyInvoiceForm">
         <input type="hidden" name="billing_action" value="create_invoice">
         <label>Клиент <input name="customer_email" type="email" class="form-control" placeholder="client@example.com" required></label>
         <label>Сайт <input name="domain" type="text" class="form-control" placeholder="example.com" required></label>

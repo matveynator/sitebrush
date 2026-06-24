@@ -24,6 +24,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"github.com/matveynator/netchan"
 	"html/template"
 	"io"
 	"io/fs"
@@ -118,6 +119,7 @@ const serviceMailPerSourceDomainHourLimit = 120
 const serviceMailPerRecipientHourLimit = 12
 const serviceMailPerRecipientDomainHourLimit = 300
 const serviceMailNewRecipientDayLimit = 3
+const hostingSnapshotNetChanPort = "9876"
 
 var sitebrushComServiceMailRelayPublicKey = "axM/Ha8N6Ci/IiLs2SqULfu1DVlQKrkswNsOPgnx4kY="
 var sitebrushRuServiceMailRelayPublicKey = ""
@@ -4327,6 +4329,7 @@ func runSitebrushServer(ctx context.Context, config serverRunConfig) error {
 	application.startDemoSiteCleanupWorker(ctx)
 	application.startServiceMailKeyPairWorker(ctx)
 	application.hostingSnapshotReports = application.startHostingSnapshotReporter(ctx)
+	application.startHostingSnapshotNetChanListener(ctx)
 	application.startHostingServerMonitor(ctx)
 
 	router := http.NewServeMux()
@@ -5754,6 +5757,10 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 	}
 	if hasQueryFlag(r, "hosting_and_support") || hasQueryFlag(r, "billing") {
 		a.hostingAndSupportPage(w, r)
+		return
+	}
+	if hasQueryFlag(r, "hosting_and_support_demo_payment") {
+		a.hostingAndSupportDemoPaymentPage(w, r)
 		return
 	}
 	if hasQueryFlag(r, "service_mail_relay") {
@@ -9589,6 +9596,16 @@ func (a *App) hostingAndSupportPage(w http.ResponseWriter, r *http.Request) {
 	a.render(w, r, "hostingandsupport.html", view)
 }
 
+func (a *App) hostingAndSupportDemoPaymentPage(w http.ResponseWriter, r *http.Request) {
+	invoiceNumber := strings.TrimSpace(r.URL.Query().Get("invoice"))
+	if invoiceNumber == "" || strings.ContainsAny(invoiceNumber, "\r\n<>") {
+		http.Error(w, "invoice is required", http.StatusBadRequest)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	_, _ = io.WriteString(w, `<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>SiteBrush.com demo payment</title><link href="/p/static/technical_pages.css" rel="stylesheet"></head><body class="technical-page bg-body"><main class="container billing-page py-5"><section class="card billing-card"><div class="card-body"><p class="text-muted">SiteBrush.com demo payments</p><h1>Демо-оплата счёта `+template.HTMLEscapeString(invoiceNumber)+`</h1><p>Платёжная страница подготовлена как демо-настройка первого этапа. Реальное списание здесь не выполняется.</p><a class="btn btn-primary" href="/?hosting_and_support">Вернуться в Хостинг и поддержку</a></div></section></main></body></html>`)
+}
+
 func (a *App) redirectToHostingAndSupportMainDomain(w http.ResponseWriter, r *http.Request) bool {
 	mainDomain := a.hostingAndSupportMainDomain(r.Context())
 	requestDomain := normalizeHostingAndSupportMainDomain(a.siteDomain(r.Context(), r))
@@ -9719,22 +9736,17 @@ func (a *App) hostingAndSupportView(ctx context.Context, r *http.Request) (map[s
 	}
 	defer controlDatabase.Close()
 	store := hostingandsupport.Store{DB: controlDatabase}
-	a.cleanupExpiredManagedSiteDeletionBackups(ctx, controlDatabase)
 	plans := store.Plans(ctx)
-	paymentProviders := store.PaymentProviders(ctx)
 	invoices := store.Invoices(ctx, 80)
 	assignments := store.ServiceAssignments(ctx)
 	siteRequests := store.SiteRequests(ctx)
 	pendingSiteRequests, approvedSiteRequestsByDomain := hostingAndSupportSplitSiteRequests(siteRequests)
-	serviceMailInstallations := store.ServiceMailInstallations(ctx)
-	serviceMailEvents := store.ServiceMailEvents(ctx, 200)
-	serviceMailBlocks := store.ServiceMailBlocks(ctx)
 	allClientHostings := store.ClientHostings(ctx)
-	clientHostings := hostingAndSupportRealClientHostings(allClientHostings)
+	clientHostings := hostingAndSupportFastServerHostings(allClientHostings)
 	registrySyncEvents := store.RegistrySyncEvents(ctx, 40)
 	_ = a.migrateLegacySitebrushComPrivateKey(ctx, controlDatabase)
 	sitebrushComKey := store.SitebrushComKey(ctx)
-	showServers := a.hostingAndSupportCanShowCentralServers(ctx, store, sitebrushComKey)
+	showServers := true
 	serviceMailRelayEnabled := store.ServiceMailRelayEnabled(ctx)
 	demoSettings := (demo.Store{DB: controlDatabase}).Settings(ctx)
 	hostingAndSupportDemoDomain := ""
@@ -9750,30 +9762,31 @@ func (a *App) hostingAndSupportView(ctx context.Context, r *http.Request) (map[s
 		return nil, err
 	}
 	hostingAndSupportAttachApprovedSiteRequests(siteRows, approvedSiteRequestsByDomain)
-	serviceMailUsers := a.hostingAndSupportClients(ctx, siteRows, serviceMailInstallations, serviceMailEvents, clientHostings)
-	clientSiteCount, clientInstallationCount, clientLocalDevelopmentCount := hostingAndSupportClientTotals(serviceMailUsers)
-	overview := hostingAndSupportOverview(siteRows, serviceMailUsers, pendingSiteRequests, invoices, clientHostings, registrySyncEvents, serviceMailEvents)
-	backups := a.managedSiteDeletionBackupViews(ctx, r, controlDatabase)
+	servers := a.hostingAndSupportServerViews(ctx, siteRows, clientHostings, invoices, plans, assignments, mainDomain, a.siteDomain(ctx, r))
+	overview := hostingAndSupportOverview(siteRows, nil, pendingSiteRequests, invoices, clientHostings, registrySyncEvents, nil)
+	overview.ServerCount = len(servers)
+	overview.ClientCount = hostingAndSupportServerClientCount(servers)
 	translations := translationsForRequest(r)
 	return map[string]any{
 		"Title":                       translationOrDefault(translations, "billing_title", "Хостинг и поддержка"),
 		"Sites":                       siteRows,
 		"Plans":                       plans,
-		"PaymentProviders":            paymentProviders,
+		"PaymentProviders":            hostingAndSupportDemoPaymentProviders(r),
 		"Invoices":                    invoices,
 		"SiteRequests":                pendingSiteRequests,
-		"ServiceMailInstallations":    serviceMailInstallations,
-		"ServiceMailEvents":           serviceMailEvents,
+		"ServiceMailInstallations":    nil,
+		"ServiceMailEvents":           nil,
 		"ClientHostings":              clientHostings,
+		"Servers":                     servers,
 		"RegistrySyncEvents":          registrySyncEvents,
 		"SitebrushComKey":             sitebrushComKey,
 		"ShowServers":                 showServers,
-		"Clients":                     serviceMailUsers,
-		"ClientCount":                 len(serviceMailUsers),
-		"ClientSiteCount":             clientSiteCount,
-		"ClientInstallationCount":     clientInstallationCount,
-		"ClientLocalDevelopmentCount": clientLocalDevelopmentCount,
-		"ServiceMailBlocks":           serviceMailBlocks,
+		"Clients":                     nil,
+		"ClientCount":                 hostingAndSupportServerClientCount(servers),
+		"ClientSiteCount":             len(siteRows),
+		"ClientInstallationCount":     len(servers),
+		"ClientLocalDevelopmentCount": 0,
+		"ServiceMailBlocks":           nil,
 		"ServiceMailRelayEnabled":     serviceMailRelayEnabled,
 		"Overview":                    overview,
 		"ServiceMailLimits": map[string]int{
@@ -9785,7 +9798,7 @@ func (a *App) hostingAndSupportView(ctx context.Context, r *http.Request) (map[s
 			"RecipientHour":       serviceMailPerRecipientHourLimit,
 			"RecipientDomainHour": serviceMailPerRecipientDomainHourLimit,
 		},
-		"Backups":                 backups,
+		"Backups":                 nil,
 		"DemoSettings":            demoSettings,
 		"AutoRegistrationEnabled": store.AutomaticRegistrationAllowed(ctx),
 		"PublicTrialEmbedHTML":    publicTrialSignupEmbedHTML(r, translations),
@@ -9817,6 +9830,77 @@ type hostingAndSupportOverviewAction struct {
 	ButtonText string
 	Tab        string
 	Level      string
+}
+
+type hostingAndSupportServerView struct {
+	ID                 string
+	Name               string
+	Subtitle           string
+	Local              bool
+	OwnerEmail         string
+	SiteCount          int
+	ClientCount        int
+	InvoiceCount       int
+	BillableCount      int
+	UnpaidInvoiceCount int
+	TotalUsedLabel     string
+	DiskFreeLabel      string
+	DiskTotalLabel     string
+	SyncStatusLabel    string
+	SyncStatusClass    string
+	NetworkStatusLabel string
+	NetworkStatusClass string
+	InvoiceActionLabel string
+	InvoiceActionClass string
+	Sites              []hostingAndSupportServerSiteView
+	Clients            []hostingAndSupportServerClientView
+	Invoices           []hostingAndSupportServerInvoiceView
+	Plans              []hostingandsupport.ClientHostingPlan
+	Settings           []hostingAndSupportServerSettingView
+	Diagnostics        []hostingAndSupportServerDiagnosticView
+}
+
+type hostingAndSupportServerSiteView struct {
+	Domain       string
+	URL          string
+	OwnerEmail   string
+	AdminEmails  string
+	PlanName     string
+	PaidStatus   string
+	UsedLabel    string
+	LimitLabel   string
+	OverLimit    bool
+	InvoiceLabel string
+}
+
+type hostingAndSupportServerClientView struct {
+	Email     string
+	SiteCount int
+	Domains   string
+}
+
+type hostingAndSupportServerInvoiceView struct {
+	Number        string
+	CustomerEmail string
+	Domain        string
+	PlanName      string
+	AmountLabel   string
+	StatusLabel   string
+	PaymentURL    string
+	PeriodLabel   string
+	HistoryLabel  string
+	CanPay        bool
+}
+
+type hostingAndSupportServerSettingView struct {
+	Name  string
+	Value string
+}
+
+type hostingAndSupportServerDiagnosticView struct {
+	Name        string
+	Value       string
+	StatusClass string
 }
 
 func hostingAndSupportOverview(sites []hostingandsupport.Site, clients []hostingAndSupportClientView, siteRequests []hostingandsupport.SiteRequest, invoices []hostingandsupport.Invoice, hostings []hostingandsupport.ClientHosting, syncEvents []hostingandsupport.RegistrySyncEvent, serviceMailEvents []hostingandsupport.ServiceMailEvent) hostingAndSupportOverviewView {
@@ -9926,6 +10010,403 @@ func hostingAndSupportOverviewActions(view hostingAndSupportOverviewView) []host
 		actions = append(actions, hostingAndSupportOverviewAction{Title: "Работа идёт штатно", Text: "Можно создавать сайты, выставлять счета и менять тарифы.", ButtonText: "Открыть сайты", Tab: "sites", Level: "ok"})
 	}
 	return actions
+}
+
+func (a *App) hostingAndSupportServerViews(ctx context.Context, siteRows []hostingandsupport.Site, clientHostings []hostingandsupport.ClientHosting, invoices []hostingandsupport.Invoice, plans []hostingandsupport.Plan, assignments map[string]hostingandsupport.ServiceAssignment, mainDomain string, currentDomain string) []hostingAndSupportServerView {
+	servers := make([]hostingAndSupportServerView, 0, len(clientHostings)+1)
+	localServer := a.localHostingAndSupportServerView(siteRows, invoices, plans, assignments, mainDomain, currentDomain)
+	servers = append(servers, localServer)
+	for _, clientHosting := range clientHostings {
+		servers = append(servers, hostingAndSupportRemoteServerView(clientHosting, invoices))
+	}
+	sort.SliceStable(servers[1:], func(left, right int) bool {
+		leftServer := servers[left+1]
+		rightServer := servers[right+1]
+		if leftServer.SiteCount != rightServer.SiteCount {
+			return leftServer.SiteCount > rightServer.SiteCount
+		}
+		return leftServer.Name < rightServer.Name
+	})
+	return servers
+}
+
+func (a *App) localHostingAndSupportServerView(siteRows []hostingandsupport.Site, invoices []hostingandsupport.Invoice, plans []hostingandsupport.Plan, assignments map[string]hostingandsupport.ServiceAssignment, mainDomain string, currentDomain string) hostingAndSupportServerView {
+	serverName := firstNonEmpty(normalizeDomainName(mainDomain), normalizeDomainName(currentDomain), "SiteBrush.com")
+	server := hostingAndSupportServerView{
+		ID:                 "local",
+		Name:               serverName,
+		Subtitle:           "локальный сервер SiteBrush",
+		Local:              true,
+		SyncStatusLabel:    "локальные данные",
+		SyncStatusClass:    "billing-sync-ok",
+		NetworkStatusLabel: "проверяется фоновым мониторингом",
+		NetworkStatusClass: "hosting-metric-ok",
+		Settings: []hostingAndSupportServerSettingView{
+			{Name: "Оплата", Value: "SiteBrush.com demo payments"},
+			{Name: "Тарифы", Value: strconv.Itoa(len(plans))},
+		},
+		Diagnostics: []hostingAndSupportServerDiagnosticView{
+			{Name: "Источник", Value: "локальная control DB и site DB", StatusClass: "hosting-metric-ok"},
+			{Name: "DNS/TLS", Value: "не блокирует открытие раздела", StatusClass: "hosting-metric-ok"},
+		},
+	}
+	clientDomains := make(map[string][]string)
+	for _, siteRow := range siteRows {
+		ownerEmail := firstHostingSnapshotEmail(splitHostingAndSupportEmailList(siteRow.AdminEmails))
+		if ownerEmail == "" {
+			ownerEmail = "owner not set"
+		}
+		clientDomains[ownerEmail] = append(clientDomains[ownerEmail], siteRow.Domain)
+		assignment := assignments[normalizeDomainName(siteRow.Domain)]
+		planName := siteRow.PlanName
+		if planName == "" {
+			planName = "тариф не назначен"
+		}
+		server.Sites = append(server.Sites, hostingAndSupportServerSiteView{
+			Domain:       siteRow.Domain,
+			URL:          siteRow.URL,
+			OwnerEmail:   ownerEmail,
+			AdminEmails:  siteRow.AdminEmails,
+			PlanName:     planName,
+			PaidStatus:   firstNonEmpty(assignment.ServiceStatus, siteRow.ServiceStatus, "free"),
+			UsedLabel:    siteRow.UsedLabel,
+			LimitLabel:   siteRow.LimitLabel,
+			OverLimit:    siteRow.UsedPercent >= 100,
+			InvoiceLabel: hostingAndSupportInvoiceLabelForDomain(invoices, siteRow.Domain),
+		})
+	}
+	server.SiteCount = len(server.Sites)
+	server.Clients = hostingAndSupportServerClientViews(clientDomains)
+	server.ClientCount = len(server.Clients)
+	server.Invoices = hostingAndSupportServerInvoiceViews(invoices, hostingAndSupportServerDomains(server.Sites), nil)
+	server.InvoiceCount = len(server.Invoices)
+	server.BillableCount = hostingAndSupportBillableSiteCount(server.Sites)
+	server.UnpaidInvoiceCount = hostingAndSupportUnpaidInvoiceCount(server.Invoices)
+	server.InvoiceActionLabel, server.InvoiceActionClass = hostingAndSupportInvoiceAction(server.BillableCount, server.UnpaidInvoiceCount)
+	server.TotalUsedLabel = hostingAndSupportServerTotalUsedLabel(server.Sites)
+	server.Plans = hostingAndSupportClientPlansFromPlans(plans)
+	return server
+}
+
+func hostingAndSupportRemoteServerView(clientHosting hostingandsupport.ClientHosting, invoices []hostingandsupport.Invoice) hostingAndSupportServerView {
+	server := hostingAndSupportServerView{
+		ID:                 strings.TrimSpace(clientHosting.InstallationID),
+		Name:               firstNonEmpty(clientHosting.ServerDomain, clientHosting.InstallationID),
+		Subtitle:           firstNonEmpty(clientHosting.ServerStatus, clientHosting.ServerIP, "удалённый сервер SiteBrush"),
+		OwnerEmail:         clientHosting.OwnerEmail,
+		SiteCount:          clientHosting.SiteCount,
+		TotalUsedLabel:     clientHosting.TotalUsedLabel,
+		DiskFreeLabel:      clientHosting.DiskFreeLabel,
+		DiskTotalLabel:     clientHosting.DiskTotalLabel,
+		NetworkStatusLabel: clientHosting.NetworkUptimeLabel,
+		NetworkStatusClass: clientHosting.NetworkStatusClass,
+		Plans:              clientHosting.Plans,
+		Settings: []hostingAndSupportServerSettingView{
+			{Name: "Оплата", Value: "через SiteBrush.com"},
+			{Name: "Владелец", Value: firstNonEmpty(clientHosting.OwnerEmail, "не передан")},
+		},
+		Diagnostics: []hostingAndSupportServerDiagnosticView{
+			{Name: "SiteBrush", Value: firstNonEmpty(clientHosting.SitebrushVersion, "версия не передана"), StatusClass: "hosting-metric-ok"},
+			{Name: "OS", Value: strings.TrimSpace(clientHosting.OSName + " " + clientHosting.OSVersion), StatusClass: "hosting-metric-ok"},
+			{Name: "CPU", Value: fmt.Sprintf("%s · %d ядер", firstNonEmpty(clientHosting.CPUModel, "CPU не передан"), clientHosting.CPUCores), StatusClass: clientHosting.CPUStatusClass},
+			{Name: "Load", Value: fmt.Sprintf("%.2f", clientHosting.LoadAverage), StatusClass: clientHosting.LoadStatusClass},
+			{Name: "Uptime", Value: clientHosting.ServerUptimeLabel, StatusClass: clientHosting.ServerUptimeClass},
+		},
+	}
+	stale := hostingAndSupportHostingSyncIsStale(clientHosting.LastSeenAt, time.Now().UTC())
+	if strings.TrimSpace(clientHosting.LastSeenAt) == "" {
+		server.SyncStatusLabel = "нет синхронизации"
+		server.SyncStatusClass = "billing-sync-stale"
+	} else if stale {
+		server.SyncStatusLabel = "устарело · " + clientHosting.LastSeenAt
+		server.SyncStatusClass = "billing-sync-stale"
+	} else {
+		server.SyncStatusLabel = "синхронизировано · " + clientHosting.LastSeenAt
+		server.SyncStatusClass = "billing-sync-ok"
+	}
+	clientDomains := make(map[string][]string)
+	for _, site := range clientHosting.Sites {
+		ownerEmail := firstNonEmpty(site.OwnerEmail, firstHostingSnapshotEmail(site.AdminEmails), clientHosting.OwnerEmail, "owner not set")
+		clientDomains[ownerEmail] = append(clientDomains[ownerEmail], site.Domain)
+		server.Sites = append(server.Sites, hostingAndSupportServerSiteView{
+			Domain:       site.Domain,
+			URL:          "http://" + site.Domain + "/",
+			OwnerEmail:   ownerEmail,
+			AdminEmails:  strings.Join(site.AdminEmails, ", "),
+			PlanName:     firstNonEmpty(site.PlanName, "тариф не назначен"),
+			PaidStatus:   firstNonEmpty(site.PlanPaidStatus, "free"),
+			UsedLabel:    site.UsedLabel,
+			LimitLabel:   site.LimitLabel,
+			OverLimit:    site.OverLimit,
+			InvoiceLabel: hostingAndSupportInvoiceLabelForDomain(invoices, site.Domain),
+		})
+	}
+	server.Clients = hostingAndSupportServerClientViews(clientDomains)
+	server.ClientCount = len(server.Clients)
+	server.Invoices = hostingAndSupportServerInvoiceViews(invoices, hostingAndSupportServerDomains(server.Sites), hostingAndSupportServerClientEmails(server.Clients))
+	server.InvoiceCount = len(server.Invoices)
+	server.BillableCount = hostingAndSupportBillableSiteCount(server.Sites)
+	server.UnpaidInvoiceCount = hostingAndSupportUnpaidInvoiceCount(server.Invoices)
+	server.InvoiceActionLabel, server.InvoiceActionClass = hostingAndSupportInvoiceAction(server.BillableCount, server.UnpaidInvoiceCount)
+	return server
+}
+
+func hostingAndSupportFastServerHostings(clientHostings []hostingandsupport.ClientHosting) []hostingandsupport.ClientHosting {
+	hostings := make([]hostingandsupport.ClientHosting, 0, len(clientHostings))
+	for _, clientHosting := range clientHostings {
+		serverDomain := normalizeDomainName(clientHosting.ServerDomain)
+		serverIP := strings.TrimSpace(clientHosting.ServerIP)
+		parsedIP := net.ParseIP(serverIP)
+		if serverDomain == "" || serverDomain == "localhost" || strings.HasSuffix(serverDomain, ".localhost") || net.ParseIP(serverDomain) != nil {
+			continue
+		}
+		if parsedIP == nil || parsedIP.IsLoopback() || parsedIP.IsPrivate() || parsedIP.IsUnspecified() {
+			continue
+		}
+		hostings = append(hostings, clientHosting)
+	}
+	return hostings
+}
+
+func hostingAndSupportServerClientViews(clientDomains map[string][]string) []hostingAndSupportServerClientView {
+	clients := make([]hostingAndSupportServerClientView, 0, len(clientDomains))
+	for email, domains := range clientDomains {
+		domains = normalizedHostingDomains(domains)
+		clients = append(clients, hostingAndSupportServerClientView{Email: email, SiteCount: len(domains), Domains: strings.Join(domains, ", ")})
+	}
+	sort.Slice(clients, func(left, right int) bool {
+		if clients[left].SiteCount != clients[right].SiteCount {
+			return clients[left].SiteCount > clients[right].SiteCount
+		}
+		return clients[left].Email < clients[right].Email
+	})
+	return clients
+}
+
+func normalizedHostingDomains(rawDomains []string) []string {
+	seen := make(map[string]struct{}, len(rawDomains))
+	domains := make([]string, 0, len(rawDomains))
+	for _, rawDomain := range rawDomains {
+		domain := normalizeDomainName(rawDomain)
+		if domain == "" {
+			continue
+		}
+		if _, found := seen[domain]; found {
+			continue
+		}
+		seen[domain] = struct{}{}
+		domains = append(domains, domain)
+	}
+	sort.Strings(domains)
+	return domains
+}
+
+func hostingAndSupportServerDomains(sites []hostingAndSupportServerSiteView) map[string]struct{} {
+	domains := make(map[string]struct{}, len(sites))
+	for _, site := range sites {
+		domain := normalizeDomainName(site.Domain)
+		if domain != "" {
+			domains[domain] = struct{}{}
+		}
+	}
+	return domains
+}
+
+func hostingAndSupportServerClientEmails(clients []hostingAndSupportServerClientView) map[string]struct{} {
+	emails := make(map[string]struct{}, len(clients))
+	for _, client := range clients {
+		email := strings.ToLower(strings.TrimSpace(client.Email))
+		if email != "" {
+			emails[email] = struct{}{}
+		}
+	}
+	return emails
+}
+
+func hostingAndSupportServerInvoiceViews(invoices []hostingandsupport.Invoice, domains map[string]struct{}, emails map[string]struct{}) []hostingAndSupportServerInvoiceView {
+	views := make([]hostingAndSupportServerInvoiceView, 0, len(invoices))
+	for _, invoice := range invoices {
+		domain := normalizeDomainName(invoice.Domain)
+		email := strings.ToLower(strings.TrimSpace(invoice.CustomerEmail))
+		_, domainFound := domains[domain]
+		_, emailFound := emails[email]
+		if len(domains) > 0 && !domainFound && (len(emails) == 0 || !emailFound) {
+			continue
+		}
+		statusLabel := hostingAndSupportInvoiceStatusLabel(invoice.Status)
+		views = append(views, hostingAndSupportServerInvoiceView{
+			Number:        invoice.Number,
+			CustomerEmail: invoice.CustomerEmail,
+			Domain:        invoice.Domain,
+			PlanName:      firstNonEmpty(invoice.PlanName, "обслуживание сайта"),
+			AmountLabel:   strings.TrimSpace(invoice.Amount + " " + invoice.Currency),
+			StatusLabel:   statusLabel,
+			PaymentURL:    invoice.PaymentURL,
+			PeriodLabel:   hostingAndSupportInvoicePeriodLabel(invoice),
+			HistoryLabel:  hostingAndSupportInvoiceHistoryLabel(invoice),
+			CanPay:        invoice.PaymentURL != "" && strings.TrimSpace(invoice.Status) != "paid" && strings.TrimSpace(invoice.Status) != "cancelled",
+		})
+	}
+	return views
+}
+
+func hostingAndSupportInvoiceStatusLabel(status string) string {
+	switch strings.TrimSpace(status) {
+	case "issued":
+		return "ожидает оплаты"
+	case "paid":
+		return "оплачен"
+	case "payment_error":
+		return "ошибка оплаты"
+	case "cancelled":
+		return "отменён"
+	default:
+		return firstNonEmpty(status, "неизвестно")
+	}
+}
+
+func hostingAndSupportInvoicePeriodLabel(invoice hostingandsupport.Invoice) string {
+	if strings.TrimSpace(invoice.DueAt) != "" {
+		return "до " + strings.TrimSpace(invoice.DueAt)
+	}
+	return "текущий период обслуживания"
+}
+
+func hostingAndSupportInvoiceHistoryLabel(invoice hostingandsupport.Invoice) string {
+	parts := []string{"создан " + strings.TrimSpace(invoice.CreatedAt)}
+	if strings.TrimSpace(invoice.PaidAt) != "" {
+		parts = append(parts, "оплачен "+strings.TrimSpace(invoice.PaidAt))
+	}
+	if strings.TrimSpace(invoice.UpdatedAt) != "" && strings.TrimSpace(invoice.UpdatedAt) != strings.TrimSpace(invoice.CreatedAt) {
+		parts = append(parts, "обновлён "+strings.TrimSpace(invoice.UpdatedAt))
+	}
+	return strings.Join(parts, " · ")
+}
+
+func hostingAndSupportInvoiceLabelForDomain(invoices []hostingandsupport.Invoice, domain string) string {
+	domain = normalizeDomainName(domain)
+	if domain == "" {
+		return "счёт не нужен"
+	}
+	for _, invoice := range invoices {
+		if normalizeDomainName(invoice.Domain) != domain {
+			continue
+		}
+		return invoice.Number + " · " + hostingAndSupportInvoiceStatusLabel(invoice.Status)
+	}
+	return "можно выставить счёт"
+}
+
+func hostingAndSupportBillableSiteCount(sites []hostingAndSupportServerSiteView) int {
+	count := 0
+	for _, site := range sites {
+		switch strings.TrimSpace(site.PaidStatus) {
+		case "paid", "paused":
+			count++
+		}
+	}
+	return count
+}
+
+func hostingAndSupportUnpaidInvoiceCount(invoices []hostingAndSupportServerInvoiceView) int {
+	count := 0
+	for _, invoice := range invoices {
+		switch invoice.StatusLabel {
+		case "ожидает оплаты", "ошибка оплаты":
+			count++
+		}
+	}
+	return count
+}
+
+func hostingAndSupportInvoiceAction(billableCount int, unpaidInvoiceCount int) (string, string) {
+	if billableCount == 0 {
+		return "Не выставлять счёт", "btn-outline-secondary"
+	}
+	if unpaidInvoiceCount > 0 {
+		return "Проверить счета", "btn-outline-primary"
+	}
+	return "Выставить счёт", "btn-success"
+}
+
+func hostingAndSupportServerTotalUsedLabel(sites []hostingAndSupportServerSiteView) string {
+	var totalBytes int64
+	for _, site := range sites {
+		parsedBytes, ok := hostingAndSupportParseSizeLabel(site.UsedLabel)
+		if ok {
+			totalBytes += parsedBytes
+		}
+	}
+	if totalBytes <= 0 {
+		return ""
+	}
+	return formatFileSize(totalBytes)
+}
+
+func hostingAndSupportParseSizeLabel(label string) (int64, bool) {
+	fields := strings.Fields(strings.TrimSpace(label))
+	if len(fields) == 0 {
+		return 0, false
+	}
+	value, err := strconv.ParseFloat(strings.ReplaceAll(fields[0], ",", "."), 64)
+	if err != nil {
+		return 0, false
+	}
+	multiplier := float64(1)
+	if len(fields) > 1 {
+		switch strings.ToLower(fields[1]) {
+		case "kb", "kib", "кб":
+			multiplier = 1024
+		case "mb", "mib", "мб":
+			multiplier = 1024 * 1024
+		case "gb", "gib", "гб":
+			multiplier = 1024 * 1024 * 1024
+		case "tb", "tib", "тб":
+			multiplier = 1024 * 1024 * 1024 * 1024
+		}
+	}
+	return int64(value * multiplier), true
+}
+
+func hostingAndSupportClientPlansFromPlans(plans []hostingandsupport.Plan) []hostingandsupport.ClientHostingPlan {
+	clientPlans := make([]hostingandsupport.ClientHostingPlan, 0, len(plans))
+	for _, plan := range plans {
+		clientPlans = append(clientPlans, hostingandsupport.ClientHostingPlan{
+			Name:          plan.Name,
+			QuotaLabel:    plan.QuotaLabel,
+			SiteLimit:     plan.SiteLimit,
+			Price:         plan.Price,
+			Currency:      plan.Currency,
+			BillingPeriod: plan.BillingPeriod,
+			PaidStatus:    hostingSnapshotPlanPaidStatus(plan),
+			IsDefault:     plan.IsDefault,
+		})
+	}
+	return clientPlans
+}
+
+func hostingAndSupportServerClientCount(servers []hostingAndSupportServerView) int {
+	clientEmails := make(map[string]struct{})
+	for _, server := range servers {
+		for _, client := range server.Clients {
+			email := strings.ToLower(strings.TrimSpace(client.Email))
+			if email != "" {
+				clientEmails[email] = struct{}{}
+			}
+		}
+	}
+	return len(clientEmails)
+}
+
+func hostingAndSupportDemoPaymentProviders(r *http.Request) []hostingandsupport.PaymentProvider {
+	paymentURL := absoluteURLForPath(r, "/?hosting_and_support_demo_payment&invoice={invoice}")
+	return []hostingandsupport.PaymentProvider{{
+		Provider:     "sitebrush_com",
+		Enabled:      true,
+		DisplayName:  "SiteBrush.com demo payments",
+		PaymentURL:   paymentURL,
+		Instructions: "Предустановленная демо-оплата через SiteBrush.com.",
+	}}
 }
 
 func hostingAndSupportClientTotals(clients []hostingAndSupportClientView) (int, int, int) {
@@ -13564,6 +14045,11 @@ func (a *App) reportHostingSnapshotWithTimeout(ctx context.Context) {
 }
 
 func (a *App) reportHostingSnapshot(ctx context.Context) error {
+	if err := a.reportHostingSnapshotNetChan(ctx); err == nil {
+		return nil
+	} else {
+		log.Printf("hosting snapshot netchan report skipped: %v", err)
+	}
 	snapshotURLs := centralHostingSnapshotURLs()
 	encryptedSnapshotURLs := make([]string, 0, len(snapshotURLs))
 	for _, snapshotURL := range snapshotURLs {
@@ -13618,6 +14104,145 @@ func (a *App) reportHostingSnapshot(ctx context.Context) error {
 		return lastErr
 	}
 	return errors.New("hosting snapshot url is empty")
+}
+
+func (a *App) startHostingSnapshotNetChanListener(ctx context.Context) {
+	if !a.hostingSnapshotNetChanListenerEnabled(ctx) {
+		return
+	}
+	go func() {
+		send, receive, err := netchan.Listen(net.JoinHostPort("", hostingSnapshotNetChanPort))
+		if err != nil {
+			log.Printf("hosting snapshot netchan listen failed: %v", err)
+			return
+		}
+		_ = send
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case payload := <-receive:
+				a.handleHostingSnapshotNetChanPayload(ctx, payload)
+			}
+		}
+	}()
+}
+
+func (a *App) hostingSnapshotNetChanListenerEnabled(ctx context.Context) bool {
+	controlDatabase, err := a.openServerControlDatabase(ctx)
+	if err != nil {
+		return false
+	}
+	defer controlDatabase.Close()
+	ownerDomain, found := (hostingandsupport.Store{DB: controlDatabase}).OwnerDomain(ctx)
+	return found && normalizeDomainName(ownerDomain) == "sitebrush.com"
+}
+
+func (a *App) handleHostingSnapshotNetChanPayload(ctx context.Context, payload any) {
+	var requestBytes []byte
+	switch typedPayload := payload.(type) {
+	case []byte:
+		requestBytes = typedPayload
+	case string:
+		requestBytes = []byte(typedPayload)
+	default:
+		log.Printf("hosting snapshot netchan unsupported payload type %T", payload)
+		return
+	}
+	var request serviceMailRequest
+	if err := json.Unmarshal(requestBytes, &request); err != nil {
+		log.Printf("hosting snapshot netchan decode failed: %v", err)
+		return
+	}
+	status, statusCode := a.handleHostingSnapshotRequest(ctx, request, "netchan")
+	if statusCode >= 400 {
+		log.Printf("hosting snapshot netchan rejected: %s", status)
+	}
+}
+
+func (a *App) reportHostingSnapshotNetChan(ctx context.Context) error {
+	addresses := centralHostingSnapshotNetChanAddresses()
+	if len(addresses) == 0 {
+		return errors.New("hosting snapshot netchan address is not configured")
+	}
+	reachableAddresses := make([]string, 0, len(addresses))
+	for _, address := range addresses {
+		if err := probeHostingSnapshotNetChanAddress(ctx, address); err != nil {
+			continue
+		}
+		reachableAddresses = append(reachableAddresses, address)
+	}
+	if len(reachableAddresses) == 0 {
+		return errors.New("hosting snapshot netchan endpoint is unavailable")
+	}
+	snapshot, err := a.buildHostingSnapshot(ctx)
+	if err != nil {
+		return err
+	}
+	request := serviceMailRequest{
+		Version:         1,
+		CodeKind:        "hosting_snapshot",
+		HostingSnapshot: &snapshot,
+		LanguageCode:    "en",
+		CreatedAt:       time.Now().UTC().Format(time.RFC3339),
+	}
+	if err := a.signServiceMailRequest(ctx, &request); err != nil {
+		return err
+	}
+	request.HostingSnapshot.InstallationID = request.InstallationID
+	payload, err := json.Marshal(request)
+	if err != nil {
+		return err
+	}
+	var lastErr error
+	for _, address := range reachableAddresses {
+		if err := sendHostingSnapshotNetChanPayload(ctx, address, payload); err != nil {
+			lastErr = err
+			continue
+		}
+		return nil
+	}
+	if lastErr != nil {
+		return lastErr
+	}
+	return errors.New("hosting snapshot netchan address is empty")
+}
+
+func centralHostingSnapshotNetChanAddresses() []string {
+	return []string{net.JoinHostPort("sitebrush.com", hostingSnapshotNetChanPort)}
+}
+
+func probeHostingSnapshotNetChanAddress(ctx context.Context, address string) error {
+	address = strings.TrimSpace(address)
+	if address == "" {
+		return errors.New("netchan address is empty")
+	}
+	probeDialer := net.Dialer{Timeout: 2 * time.Second}
+	probeConnection, err := probeDialer.DialContext(ctx, "tcp", address)
+	if err != nil {
+		return err
+	}
+	_ = probeConnection.Close()
+	return nil
+}
+
+func sendHostingSnapshotNetChanPayload(ctx context.Context, address string, payload []byte) error {
+	address = strings.TrimSpace(address)
+	if address == "" {
+		return errors.New("netchan address is empty")
+	}
+	send, _, err := netchan.Dial(address)
+	if err != nil {
+		return err
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case send <- payload:
+		return nil
+	case <-time.After(5 * time.Second):
+		return errors.New("netchan send timed out")
+	}
 }
 
 func (a *App) buildHostingSnapshot(ctx context.Context) (hostingandsupport.HostingSnapshot, error) {

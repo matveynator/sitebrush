@@ -18,6 +18,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"html/template"
 	"io"
 	"io/fs"
 	"math/big"
@@ -738,6 +739,79 @@ func TestHostingSnapshotServerStatusLabels(t *testing.T) {
 	}
 	if statusWithoutIP != "локальная инсталляция" {
 		t.Fatalf("statusWithoutIP = %q", statusWithoutIP)
+	}
+}
+
+func TestHostingAndSupportTemplateRendersServerView(t *testing.T) {
+	templateBytes, err := fs.ReadFile(embeddedWebFiles, "web/hostingandsupport.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsedTemplate, err := template.New("hostingandsupport.html").Parse(string(templateBytes))
+	if err != nil {
+		t.Fatal(err)
+	}
+	view := map[string]any{
+		"Domain":         "sitebrush.com",
+		"Title":          "Хостинг и поддержка",
+		"T":              translationsForLanguageCode("ru"),
+		"CompileVersion": CompileVersion,
+		"Overview":       hostingAndSupportOverview(nil, nil, nil, nil, nil, nil, nil),
+		"Servers": []hostingAndSupportServerView{{
+			Name:               "sitebrush.com",
+			Subtitle:           "локальный сервер SiteBrush",
+			Local:              true,
+			SiteCount:          1,
+			ClientCount:        1,
+			InvoiceActionLabel: "Выставить счёт",
+			InvoiceActionClass: "btn-success",
+			SyncStatusLabel:    "локальные данные",
+			SyncStatusClass:    "billing-sync-ok",
+			NetworkStatusLabel: "ok",
+			NetworkStatusClass: "hosting-metric-ok",
+			Sites: []hostingAndSupportServerSiteView{{
+				Domain:       "example.com",
+				OwnerEmail:   "owner@example.com",
+				PlanName:     "Pro",
+				PaidStatus:   "paid",
+				UsedLabel:    "1 MB",
+				LimitLabel:   "10 MB",
+				InvoiceLabel: "можно выставить счёт",
+			}},
+			Clients: []hostingAndSupportServerClientView{{Email: "owner@example.com", SiteCount: 1, Domains: "example.com"}},
+		}},
+		"Sites":                       nil,
+		"Plans":                       nil,
+		"PaymentProviders":            hostingAndSupportDemoPaymentProviders(httptest.NewRequest(http.MethodGet, "http://sitebrush.com/?hosting_and_support", nil)),
+		"Invoices":                    nil,
+		"SiteRequests":                nil,
+		"ServiceMailInstallations":    nil,
+		"ServiceMailEvents":           nil,
+		"ClientHostings":              nil,
+		"RegistrySyncEvents":          nil,
+		"SitebrushComKey":             hostingandsupport.SitebrushComKey{},
+		"ShowServers":                 true,
+		"Clients":                     nil,
+		"ClientCount":                 1,
+		"ClientSiteCount":             1,
+		"ClientInstallationCount":     1,
+		"ClientLocalDevelopmentCount": 0,
+		"ServiceMailBlocks":           nil,
+		"ServiceMailRelayEnabled":     false,
+		"ServiceMailLimits":           map[string]int{},
+		"Backups":                     nil,
+		"DemoSettings":                demo.Settings{},
+		"AutoRegistrationEnabled":     false,
+		"PublicTrialEmbedHTML":        "",
+		"CurrentDomain":               "sitebrush.com",
+	}
+	var rendered bytes.Buffer
+	if err := parsedTemplate.Execute(&rendered, view); err != nil {
+		t.Fatal(err)
+	}
+	renderedHTML := rendered.String()
+	if !strings.Contains(renderedHTML, "Серверы") || !strings.Contains(renderedHTML, "sitebrush.com") || !strings.Contains(renderedHTML, "Выставить счёт") {
+		t.Fatal("server-first hosting view did not render expected content")
 	}
 }
 
