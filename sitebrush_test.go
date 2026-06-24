@@ -40,6 +40,7 @@ import (
 	"golang.org/x/text/encoding/charmap"
 	"sitebrush/pkg/crawler"
 	"sitebrush/pkg/demo"
+	"sitebrush/pkg/dirprotect"
 	"sitebrush/pkg/diskusage"
 	"sitebrush/pkg/hostingandsupport"
 	"sitebrush/pkg/mailout"
@@ -58,7 +59,7 @@ type fakeGrabResponse struct {
 }
 
 func TestEffectiveGrabResourceContentTypeTrustsJavaScriptExtension(t *testing.T) {
-	contentType := effectiveGrabResourceContentType("http://oldkmv.uprof.info/js/CurrentTime.js", "text/html; charset=windows-1251")
+	contentType := crawler.EffectiveResourceContentType("http://oldkmv.uprof.info/js/CurrentTime.js", "text/html; charset=windows-1251")
 	if contentType != "application/javascript" {
 		t.Fatalf("content type = %q", contentType)
 	}
@@ -219,11 +220,19 @@ func newTestApplication(t *testing.T) (*App, *sql.DB) {
 	t.Cleanup(func() {
 		_ = rawDB.Close()
 	})
-	application := &App{db: rawDB, storagePath: storagePath, storageRealRoot: storageRealRoot, grabTracker: newGrabProgressTracker(), publishTracker: newPublishProgressTracker(), analyticsEvents: make(chan siteAnalyticsEvent, 1024), authIPFailureCache: startAuthIPFailureCacheWorker(context.Background()), emailDelivery: make(chan emailDeliveryJob, emailDeliveryQueueSize)}
+	application := &App{db: rawDB, storagePath: storagePath, storageRealRoot: storageRealRoot, grabTracker: newGrabProgressTracker(), publishTracker: newPublishProgressTracker(), analyticsEvents: make(chan siteAnalyticsEvent, 1024), authIPFailureCache: startAuthIPFailureCacheWorker(context.Background()), emailDelivery: make(chan mailout.DeliveryJob, mailout.DeliveryQueueSize)}
 	if err := application.migrate(context.Background()); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
 	return application, rawDB
+}
+
+func newPagePasswordTestCookie(rule PagePasswordRule, request *http.Request, issuedAt time.Time) *http.Cookie {
+	rule.Domain = normalizeDomainName(rule.Domain)
+	return &http.Cookie{
+		Name:  dirprotect.CookieName(rule.Domain, rule.Path),
+		Value: dirprotect.BoundSessionToken(rule, clientIPAddress(request), request.UserAgent(), issuedAt),
+	}
 }
 
 func TestStorageJailResolvesSymlinkRootAndRejectsEscapes(t *testing.T) {
@@ -374,7 +383,7 @@ func captureImmediateProfileEmail(t *testing.T, application *App) {
 	t.Helper()
 	application.sendEmail = func(ctx context.Context, message mailout.Message) error {
 		select {
-		case application.emailDelivery <- emailDeliveryJob{message: message}:
+		case application.emailDelivery <- mailout.DeliveryJob{Message: message}:
 			return nil
 		case <-ctx.Done():
 			return ctx.Err()
@@ -969,8 +978,8 @@ func TestHostingAndSupportTemplateRendersServerView(t *testing.T) {
 		"Title":          "Хостинг и поддержка",
 		"T":              translationsForLanguageCode("ru"),
 		"CompileVersion": CompileVersion,
-		"Overview":       hostingAndSupportOverview(nil, nil, nil, nil, nil, nil, nil),
-		"Servers": []hostingAndSupportServerView{{
+		"Overview":       hostingandsupport.BuildOverview(nil, 0, nil, nil, nil, nil, nil),
+		"Servers": []hostingandsupport.ServerView{{
 			Name:               "sitebrush.com",
 			Subtitle:           "локальный сервер SiteBrush",
 			Local:              true,
@@ -982,7 +991,7 @@ func TestHostingAndSupportTemplateRendersServerView(t *testing.T) {
 			SyncStatusClass:    "billing-sync-ok",
 			NetworkStatusLabel: "ok",
 			NetworkStatusClass: "hosting-metric-ok",
-			Sites: []hostingAndSupportServerSiteView{{
+			Sites: []hostingandsupport.ServerSiteView{{
 				Domain:       "example.com",
 				OwnerEmail:   "owner@example.com",
 				PlanName:     "Pro",
@@ -991,11 +1000,11 @@ func TestHostingAndSupportTemplateRendersServerView(t *testing.T) {
 				LimitLabel:   "10 MB",
 				InvoiceLabel: "можно выставить счёт",
 			}},
-			Clients: []hostingAndSupportServerClientView{{Email: "owner@example.com", SiteCount: 1, Domains: "example.com"}},
+			Clients: []hostingandsupport.ServerClientView{{Email: "owner@example.com", SiteCount: 1, Domains: "example.com"}},
 		}},
 		"Sites":                       nil,
 		"Plans":                       nil,
-		"PaymentProviders":            hostingAndSupportDemoPaymentProviders(httptest.NewRequest(http.MethodGet, "http://sitebrush.com/?hosting_and_support", nil)),
+		"PaymentProviders":            hostingandsupport.DemoPaymentProviders("http://sitebrush.com/?hosting_and_support_demo_payment&invoice={invoice}"),
 		"Invoices":                    nil,
 		"SiteRequests":                nil,
 		"ServiceMailInstallations":    nil,
@@ -1065,12 +1074,12 @@ func TestHostingAndSupportClientHostingViewKeepsOnlyClientRoles(t *testing.T) {
 }
 
 func TestHostingAndSupportRealClientHostingsExcludeLocalAndUnroutedServers(t *testing.T) {
-	hostings := hostingAndSupportRealClientHostings([]hostingandsupport.ClientHosting{
+	hostings := hostingandsupport.RealClientHostings([]hostingandsupport.ClientHosting{
 		{InstallationID: "local", ServerIP: "127.0.0.1", ServerDomain: "localhost"},
 		{InstallationID: "private", ServerIP: "192.168.1.10", ServerDomain: "sitebrush.local"},
 		{InstallationID: "no-domain", ServerIP: "203.0.113.10"},
 		{InstallationID: "domain-is-ip", ServerIP: "203.0.113.10", ServerDomain: "203.0.113.10"},
-	})
+	}, nil)
 	if len(hostings) != 0 {
 		t.Fatalf("real hostings = %#v, want none", hostings)
 	}
@@ -1254,7 +1263,7 @@ func TestContextMenuShowsRemovePasswordProtectionForProtectedPrefix(t *testing.T
 	request.Header.Set("Accept-Language", "en")
 	request.Header.Set("User-Agent", "Sitebrush Test Browser")
 	request.AddCookie(newAdminSessionCookie(t, application, "admin@example.com"))
-	request.AddCookie(&http.Cookie{Name: pagePasswordCookieName(rule.Domain, rule.Path), Value: pagePasswordSessionTokenForRequest(rule, request, time.Now().UTC())})
+	request.AddCookie(newPagePasswordTestCookie(rule, request, time.Now().UTC()))
 	response := httptest.NewRecorder()
 	application.route(response, request)
 	if response.Code != http.StatusOK {
@@ -2501,13 +2510,13 @@ func TestRegisterRequiresEmailConfirmationBeforeCreatingAdmin(t *testing.T) {
 	var pendingToken string
 	select {
 	case mailJob := <-application.emailDelivery:
-		if mailJob.message.To != "admin@example.com" {
-			t.Fatalf("confirmation recipient = %q", mailJob.message.To)
+		if mailJob.Message.To != "admin@example.com" {
+			t.Fatalf("confirmation recipient = %q", mailJob.Message.To)
 		}
-		if !strings.Contains(mailJob.message.Subject, "Подтвердите email") || !strings.Contains(mailJob.message.Body, "Для подтверждения email") {
-			t.Fatalf("confirmation email is not Russian: %#v", mailJob.message)
+		if !strings.Contains(mailJob.Message.Subject, "Подтвердите email") || !strings.Contains(mailJob.Message.Body, "Для подтверждения email") {
+			t.Fatalf("confirmation email is not Russian: %#v", mailJob.Message)
 		}
-		pendingToken = confirmationTokenFromBody(t, mailJob.message.Body)
+		pendingToken = confirmationTokenFromBody(t, mailJob.Message.Body)
 	default:
 		t.Fatal("registration did not enqueue confirmation email")
 	}
@@ -2556,7 +2565,7 @@ func TestRegisterRejectsUnverifiedDomainBeforeCreatingSiteDatabase(t *testing.T)
 		dbPath:                    dbPath,
 		grabTracker:               newGrabProgressTracker(),
 		registrationConfirmations: startEmailConfirmationMemoryWorker(context.Background()),
-		emailDelivery:             make(chan emailDeliveryJob, 1),
+		emailDelivery:             make(chan mailout.DeliveryJob, 1),
 	}
 	form := url.Values{}
 	form.Set("email", "admin@fake.example")
@@ -2575,7 +2584,7 @@ func TestRegisterRejectsUnverifiedDomainBeforeCreatingSiteDatabase(t *testing.T)
 	}
 	select {
 	case mailJob := <-application.emailDelivery:
-		t.Fatalf("registration email was sent before DNS verification: %#v", mailJob.message)
+		t.Fatalf("registration email was sent before DNS verification: %#v", mailJob.Message)
 	default:
 	}
 }
@@ -2603,7 +2612,7 @@ func TestRegisterCreatesSiteDatabaseOnlyAfterConfirmedVerifiedDomain(t *testing.
 		dbPath:                    dbPath,
 		grabTracker:               newGrabProgressTracker(),
 		registrationConfirmations: startEmailConfirmationMemoryWorker(context.Background()),
-		emailDelivery:             make(chan emailDeliveryJob, 1),
+		emailDelivery:             make(chan mailout.DeliveryJob, 1),
 	}
 	form := url.Values{}
 	form.Set("email", "admin@verified.example")
@@ -2619,7 +2628,7 @@ func TestRegisterCreatesSiteDatabaseOnlyAfterConfirmedVerifiedDomain(t *testing.
 	var pendingToken string
 	select {
 	case mailJob := <-application.emailDelivery:
-		pendingToken = confirmationTokenFromBody(t, mailJob.message.Body)
+		pendingToken = confirmationTokenFromBody(t, mailJob.Message.Body)
 	default:
 		t.Fatal("registration did not enqueue confirmation email")
 	}
@@ -2723,8 +2732,8 @@ func TestSiteRequestStoresApplicantWithoutCreatingAdmin(t *testing.T) {
 	}
 	select {
 	case mailJob := <-application.emailDelivery:
-		if mailJob.message.To != "owner@example.com" || !strings.Contains(mailJob.message.Body, "customer.example") {
-			t.Fatalf("owner notification = %#v", mailJob.message)
+		if mailJob.Message.To != "owner@example.com" || !strings.Contains(mailJob.Message.Body, "customer.example") {
+			t.Fatalf("owner notification = %#v", mailJob.Message)
 		}
 	default:
 		t.Fatal("site request did not enqueue owner notification")
@@ -2897,8 +2906,8 @@ func TestApproveSiteRequestCreatesSiteAndEmailsApplicant(t *testing.T) {
 	}
 	select {
 	case mailJob := <-application.emailDelivery:
-		if mailJob.message.To != "applicant@example.com" || !strings.Contains(mailJob.message.Body, "Временный пароль") {
-			t.Fatalf("applicant notification = %#v", mailJob.message)
+		if mailJob.Message.To != "applicant@example.com" || !strings.Contains(mailJob.Message.Body, "Временный пароль") {
+			t.Fatalf("applicant notification = %#v", mailJob.Message)
 		}
 	default:
 		t.Fatal("approval did not enqueue applicant notification")
@@ -3311,7 +3320,7 @@ func newRouterTestApplication(t *testing.T) *App {
 		storagePath:        storagePath,
 		dbPath:             dbPath,
 		grabTracker:        newGrabProgressTracker(),
-		emailDelivery:      make(chan emailDeliveryJob, 4),
+		emailDelivery:      make(chan mailout.DeliveryJob, 4),
 	}
 }
 
@@ -3408,7 +3417,7 @@ func TestRecoverPageShowsSPFSetupBeforeEmailForm(t *testing.T) {
 	}
 	select {
 	case mailJob := <-application.emailDelivery:
-		t.Fatalf("recovery enqueued email despite invalid SPF: %#v", mailJob.message)
+		t.Fatalf("recovery enqueued email despite invalid SPF: %#v", mailJob.Message)
 	default:
 	}
 }
@@ -3582,7 +3591,7 @@ func TestGuestProtectedStaticRouteUsesPrefixFileWithoutDatabase(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(prefixFilePath), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	rule := PagePasswordRule{Domain: "localhost", Path: "/passport", PasswordHash: pagePasswordHash("secret")}
+	rule := PagePasswordRule{Domain: "localhost", Path: "/passport", PasswordHash: dirprotect.Hash("secret")}
 	if err := os.WriteFile(prefixFilePath, []byte(rule.Path+"\t"+rule.PasswordHash+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -3600,7 +3609,21 @@ func TestGuestProtectedStaticRouteUsesPrefixFileWithoutDatabase(t *testing.T) {
 	openedRequest := httptest.NewRequest(http.MethodGet, "http://localhost:8080/passport/one", nil)
 	openedRequest.RemoteAddr = "198.51.100.41:1234"
 	openedRequest.Header.Set("User-Agent", "Sitebrush Test Browser")
-	openedRequest.AddCookie(&http.Cookie{Name: pagePasswordCookieName(rule.Domain, rule.Path), Value: pagePasswordSessionTokenForRequest(rule, openedRequest, time.Now().UTC())})
+	parsedRule, parsedRuleFound := application.pagePasswordRuleFromPrefixFile("localhost", "/passport/one")
+	if !parsedRuleFound {
+		t.Fatal("prefix-file page password rule missing")
+	}
+	issuedAt := time.Now().UTC()
+	sessionRule := parsedRule
+	sessionRule.Domain = normalizeDomainName(sessionRule.Domain)
+	sessionToken := dirprotect.BoundSessionToken(sessionRule, clientIPAddress(openedRequest), openedRequest.UserAgent(), issuedAt)
+	if !dirprotect.BoundSessionTokenValid(sessionRule, sessionToken, clientIPAddress(openedRequest), openedRequest.UserAgent(), issuedAt.Add(time.Second), pagePasswordSessionTTL) {
+		t.Fatal("prefix-file page password token should be valid before cookie storage")
+	}
+	openedRequest.AddCookie(newPagePasswordTestCookie(parsedRule, openedRequest, issuedAt))
+	if !application.pagePasswordSessionValid(openedRequest, parsedRule) {
+		t.Fatal("prefix-file page password cookie should be valid before routing")
+	}
 	openedResponse := httptest.NewRecorder()
 	application.route(openedResponse, openedRequest)
 	if openedResponse.Code != http.StatusOK {
@@ -3629,32 +3652,32 @@ func TestGuestProtectedStaticRouteUsesPrefixFileWithoutDatabase(t *testing.T) {
 }
 
 func TestPagePasswordSessionFollowsClientIPAddress(t *testing.T) {
-	rule := PagePasswordRule{Domain: "localhost", Path: "/passport", PasswordHash: pagePasswordHash("secret")}
+	rule := PagePasswordRule{Domain: "localhost", Path: "/passport", PasswordHash: dirprotect.Hash("secret")}
 	issuedAt := time.Now().UTC().Add(-time.Minute)
 	originalRequest := httptest.NewRequest(http.MethodGet, "http://localhost:8080/passport", nil)
 	originalRequest.RemoteAddr = "198.51.100.42:1234"
 	originalRequest.Header.Set("User-Agent", "Sitebrush Test Browser")
-	token := pagePasswordSessionTokenForRequest(rule, originalRequest, issuedAt)
+	token := dirprotect.BoundSessionToken(rule, clientIPAddress(originalRequest), originalRequest.UserAgent(), issuedAt)
 
-	if !pagePasswordSessionTokenValid(rule, token, originalRequest, issuedAt.Add(time.Minute)) {
+	if !dirprotect.BoundSessionTokenValid(rule, token, clientIPAddress(originalRequest), originalRequest.UserAgent(), issuedAt.Add(time.Minute), pagePasswordSessionTTL) {
 		t.Fatal("page password token should be valid for the original IP and browser")
 	}
 
 	changedIPRequest := httptest.NewRequest(http.MethodGet, "http://localhost:8080/passport", nil)
 	changedIPRequest.RemoteAddr = "198.51.100.43:1234"
 	changedIPRequest.Header.Set("User-Agent", "Sitebrush Test Browser")
-	if pagePasswordSessionTokenValid(rule, token, changedIPRequest, issuedAt.Add(time.Minute)) {
+	if dirprotect.BoundSessionTokenValid(rule, token, clientIPAddress(changedIPRequest), changedIPRequest.UserAgent(), issuedAt.Add(time.Minute), pagePasswordSessionTTL) {
 		t.Fatal("page password token should expire when the IP address changes")
 	}
 
 	changedBrowserRequest := httptest.NewRequest(http.MethodGet, "http://localhost:8080/passport", nil)
 	changedBrowserRequest.RemoteAddr = "198.51.100.42:1234"
 	changedBrowserRequest.Header.Set("User-Agent", "Other Browser")
-	if !pagePasswordSessionTokenValid(rule, token, changedBrowserRequest, issuedAt.Add(time.Minute)) {
+	if !dirprotect.BoundSessionTokenValid(rule, token, clientIPAddress(changedBrowserRequest), changedBrowserRequest.UserAgent(), issuedAt.Add(time.Minute), pagePasswordSessionTTL) {
 		t.Fatal("page password token should stay valid when only the browser changes")
 	}
 
-	if pagePasswordSessionTokenValid(rule, token, originalRequest, issuedAt.Add(pagePasswordSessionTTL+time.Second)) {
+	if dirprotect.BoundSessionTokenValid(rule, token, clientIPAddress(originalRequest), originalRequest.UserAgent(), issuedAt.Add(pagePasswordSessionTTL+time.Second), pagePasswordSessionTTL) {
 		t.Fatal("page password token should expire after one hour")
 	}
 }
@@ -3826,7 +3849,7 @@ func TestPagePasswordFailedAttemptsEscalateToIPBlock(t *testing.T) {
 	cookieBypassRequest.RemoteAddr = "198.51.100.30:1234"
 	cookieBypassRequest.Header.Set("User-Agent", "First Test Browser")
 	cookieBypassRequest.Header.Set("Accept-Language", "ru")
-	cookieBypassRequest.AddCookie(&http.Cookie{Name: pagePasswordCookieName(rule.Domain, rule.Path), Value: pagePasswordSessionTokenForRequest(rule, cookieBypassRequest, time.Now().UTC())})
+	cookieBypassRequest.AddCookie(newPagePasswordTestCookie(rule, cookieBypassRequest, time.Now().UTC()))
 	cookieBypassResponse := httptest.NewRecorder()
 	application.route(cookieBypassResponse, cookieBypassRequest)
 	if cookieBypassResponse.Code != http.StatusTooManyRequests {
@@ -4355,8 +4378,8 @@ func TestProfilePageUpdatesAdminEmailAndPassword(t *testing.T) {
 	}
 	select {
 	case mailJob := <-application.emailDelivery:
-		if mailJob.message.To != "admin@example.com" || !strings.Contains(mailJob.message.Body, "SiteBrush") {
-			t.Fatalf("unexpected password code email: %#v", mailJob.message)
+		if mailJob.Message.To != "admin@example.com" || !strings.Contains(mailJob.Message.Body, "SiteBrush") {
+			t.Fatalf("unexpected password code email: %#v", mailJob.Message)
 		}
 	default:
 		t.Fatal("profile update did not enqueue password code email")
@@ -4382,8 +4405,8 @@ func TestProfilePageUpdatesAdminEmailAndPassword(t *testing.T) {
 	}
 	select {
 	case mailJob := <-application.emailDelivery:
-		if mailJob.message.To != "new@example.com" || !strings.Contains(mailJob.message.Body, "email_confirm=") {
-			t.Fatalf("unexpected email confirmation: %#v", mailJob.message)
+		if mailJob.Message.To != "new@example.com" || !strings.Contains(mailJob.Message.Body, "email_confirm=") {
+			t.Fatalf("unexpected email confirmation: %#v", mailJob.Message)
 		}
 	default:
 		t.Fatal("profile update did not enqueue email confirmation")
@@ -5570,13 +5593,13 @@ func TestMirrorRemotePageRewritesDataManifestRelativeURLs(t *testing.T) {
 }
 
 func TestNormalizeMirroredAssetReferenceCollapsesProtocolRelativeLocalPath(t *testing.T) {
-	if normalizedReference := normalizeMirroredAssetReference("//p/app.js"); normalizedReference != "/p/app.js" {
+	if normalizedReference := crawler.NormalizeMirroredAssetReference("//p/app.js"); normalizedReference != "/p/app.js" {
 		t.Fatalf("normalized reference = %q", normalizedReference)
 	}
-	if normalizedReference := normalizeMirroredAssetReference("/p/app.js"); normalizedReference != "/p/app.js" {
+	if normalizedReference := crawler.NormalizeMirroredAssetReference("/p/app.js"); normalizedReference != "/p/app.js" {
 		t.Fatalf("stable reference = %q", normalizedReference)
 	}
-	if normalizedReference := normalizeMirroredAssetReference("https://cdn.example/app.js"); normalizedReference != "https://cdn.example/app.js" {
+	if normalizedReference := crawler.NormalizeMirroredAssetReference("https://cdn.example/app.js"); normalizedReference != "https://cdn.example/app.js" {
 		t.Fatalf("external reference = %q", normalizedReference)
 	}
 }
@@ -8678,8 +8701,8 @@ func TestBillingDeleteSiteCreatesVerifiedBackupBeforeRemovingData(t *testing.T) 
 	}
 	select {
 	case mailJob := <-application.emailDelivery:
-		if mailJob.message.To != "admin@customer.example" && mailJob.message.To != "owner@example.com" {
-			t.Fatalf("unexpected backup email recipient: %+v", mailJob.message)
+		if mailJob.Message.To != "admin@customer.example" && mailJob.Message.To != "owner@example.com" {
+			t.Fatalf("unexpected backup email recipient: %+v", mailJob.Message)
 		}
 	default:
 		t.Fatal("backup creation email was not queued")

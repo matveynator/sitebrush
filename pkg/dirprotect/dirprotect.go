@@ -87,6 +87,14 @@ func FailureDomain(domain, pagePath string) string {
 	return NormalizeDomain(domain) + "|page-password|" + CleanPath(pagePath)
 }
 
+func FailureDomainPrefix(domain string) string {
+	normalizedDomain := NormalizeDomain(domain)
+	if normalizedDomain == "" {
+		normalizedDomain = "localhost"
+	}
+	return normalizedDomain + "|page-password|"
+}
+
 func ParsePrefixLine(domain, rawLine string) (Rule, bool) {
 	trimmedLine := strings.TrimSpace(rawLine)
 	if trimmedLine == "" {

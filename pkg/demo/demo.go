@@ -56,6 +56,23 @@ func SnapshotPath(backupRootDir, domainStorageName string) string {
 	return path.Join(backupRootDir, "demo-"+strings.TrimSpace(domainStorageName)+"-snapshot.zip")
 }
 
+func UniqueDomains(domains ...string) []string {
+	seen := make(map[string]struct{}, len(domains))
+	result := make([]string, 0, len(domains))
+	for _, domain := range domains {
+		domain = strings.ToLower(strings.TrimSpace(domain))
+		if domain == "" {
+			continue
+		}
+		if _, found := seen[domain]; found {
+			continue
+		}
+		seen[domain] = struct{}{}
+		result = append(result, domain)
+	}
+	return result
+}
+
 func NormalizeSourceURL(rawSourceURL string) (string, error) {
 	trimmedSourceURL := strings.TrimSpace(rawSourceURL)
 	if trimmedSourceURL == "" {

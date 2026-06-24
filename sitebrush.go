@@ -126,7 +126,6 @@ const defaultAnalyticsMemoryLimitBytes int64 = 500 * 1024 * 1024
 const defaultGuestStaticHTMLCacheLimitBytes int64 = 128 * 1024 * 1024
 const guestStaticHTMLCacheQueueSize = 4096
 const authIPFailureCacheQueueSize = 4096
-const emailDeliveryQueueSize = 256
 const emailConfirmationTTL = 24 * time.Hour
 const profilePasswordCodeTTL = 15 * time.Minute
 const sitebrushHTTPReadTimeout = 10 * time.Second
@@ -185,15 +184,9 @@ type App struct {
 	autoCertGuard             chan autoCertGuardRequest
 	authIPFailureCache        chan authIPFailureCacheRequest
 	registrationConfirmations chan emailConfirmationMemoryRequest
-	emailDelivery             chan emailDeliveryJob
-	sendEmail                 emailSender
+	emailDelivery             chan mailout.DeliveryJob
+	sendEmail                 mailout.Sender
 	hostingSnapshotReports    chan struct{}
-}
-
-type emailSender func(context.Context, mailout.Message) error
-
-type emailDeliveryJob struct {
-	message mailout.Message
 }
 
 type serviceMailRequest struct {
@@ -4392,7 +4385,7 @@ func runSitebrushServer(ctx context.Context, config serverRunConfig) error {
 	application.guestStaticHTMLCache = startGuestStaticHTMLCacheWorker(ctx, defaultGuestStaticHTMLCacheLimitBytes)
 	application.authIPFailureCache = startAuthIPFailureCacheWorker(ctx)
 	application.registrationConfirmations = startEmailConfirmationMemoryWorker(ctx)
-	application.emailDelivery = startEmailDeliveryWorker(ctx, application.defaultEmailSender())
+	application.emailDelivery = mailout.StartDeliveryWorker(ctx, application.defaultEmailSender())
 	application.geoIP = geoip.NewResolver(filepath.Join(application.storageRootDir(), "geoip"))
 	certificateCacheDir := filepath.Join(application.storageRootDir(), "letsencrypt")
 	if mkdirErr := application.mkdirAllInsideStorage(certificateCacheDir, 0o755); mkdirErr != nil {
@@ -6755,7 +6748,7 @@ func importedResourceReplacements(spider *pageSpider) map[string]string {
 		if resource == nil || !resource.persist || strings.TrimSpace(resource.assetPath) == "" || resource.content == nil {
 			continue
 		}
-		replacements[resourceURL] = normalizeMirroredAssetReference(resource.assetPath)
+		replacements[resourceURL] = crawler.NormalizeMirroredAssetReference(resource.assetPath)
 	}
 	return replacements
 }
@@ -6791,7 +6784,7 @@ func (a *App) estimateRetriedResourcePageDelta(ctx context.Context, domain strin
 		var previousPublishedHTML string
 		_ = a.db.QueryRowContext(ctx, `SELECT html FROM published_pages WHERE domain=? AND path=?`, domain, pagePath).Scan(&previousPublishedHTML)
 		publishedPageDelta += updatedHTMLBytes - int64(len([]byte(previousPublishedHTML)))
-		publishedStaticDelta += updatedHTMLBytes - fileSizeBytes(filepath.Join(a.domainStaticDir(domain), staticRelativePathForPage(pagePath)))
+		publishedStaticDelta += updatedHTMLBytes - diskusage.FileSize(filepath.Join(a.domainStaticDir(domain), staticRelativePathForPage(pagePath)))
 	}
 	return pageDelta, publishedPageDelta, publishedStaticDelta
 }
@@ -7407,7 +7400,7 @@ func (a *App) savePage(w http.ResponseWriter, r *http.Request) {
 		_ = a.db.QueryRowContext(saveCtx, `SELECT html FROM published_pages WHERE domain=? AND path=?`, domain, pagePath).Scan(&previousPublishedHTML)
 		publishedPageDelta = newHTMLBytes - int64(len([]byte(previousPublishedHTML)))
 		publishedStaticPath := filepath.Join(a.domainStaticDir(domain), staticRelativePathForPage(pagePath))
-		publishedStaticDelta = newHTMLBytes - fileSizeBytes(publishedStaticPath)
+		publishedStaticDelta = newHTMLBytes - diskusage.FileSize(publishedStaticPath)
 	}
 	if storageErr := a.applyDomainStorageDelta(saveCtx, domain, pageDelta, publishedPageDelta, newHTMLBytes, 0, publishedStaticDelta); storageErr != nil {
 		sitebrushTemplateProgress.Publish(progressToken, templatePropagationProgressEvent{Stage: "error", Domain: domain, Path: pagePath, Error: storageErr.Error(), Done: true})
@@ -8104,7 +8097,7 @@ func (a *App) publishPublicTrialSourceRetry(progressToken string, pageURL *url.U
 		RetryTotal:        total - 1,
 		RetryDelaySeconds: delaySeconds,
 		CurrentURL:        currentURL,
-		CurrentError:      grabErrorReason(retryErr),
+		CurrentError:      crawler.ErrorReason(retryErr),
 		CompletedPercent:  5,
 	})
 	a.publishPublicTrialSourceAttempt(progressToken, "retry_wait", pageURL, attempt, total-1, delaySeconds)
@@ -8825,8 +8818,8 @@ func isImportedHTMLContentType(contentType string) bool {
 }
 
 func isImportedTextResource(resourceURL, responseContentType, resourceContentType string) bool {
-	normalizedResponseContentType := normalizedResourceContentType(responseContentType)
-	effectiveResourceContentType := normalizedResourceContentType(resourceContentType)
+	normalizedResponseContentType := crawler.NormalizedResourceContentType(responseContentType)
+	effectiveResourceContentType := crawler.NormalizedResourceContentType(resourceContentType)
 	if strings.HasPrefix(normalizedResponseContentType, "text/") || strings.HasPrefix(effectiveResourceContentType, "text/") {
 		return true
 	}
@@ -8837,7 +8830,7 @@ func isImportedTextResource(resourceURL, responseContentType, resourceContentTyp
 	case "application/json", "application/manifest+json", "application/ld+json", "application/xml", "application/rss+xml", "application/atom+xml", "image/svg+xml":
 		return true
 	}
-	switch resourceExtension(resourceURL) {
+	switch crawler.ResourceExtension(resourceURL) {
 	case ".css", ".js", ".mjs", ".cjs", ".json", ".map", ".xml", ".svg", ".txt", ".text", ".md", ".markdown", ".csv", ".tsv", ".yaml", ".yml", ".toml", ".ini", ".cfg", ".conf", ".webmanifest", ".htm", ".html", ".xhtml":
 		return true
 	default:
@@ -8846,7 +8839,7 @@ func isImportedTextResource(resourceURL, responseContentType, resourceContentTyp
 }
 
 func isImportedCSSResource(resourceURL, resourceContentType string) bool {
-	return normalizedResourceContentType(resourceContentType) == "text/css" || resourceExtension(resourceURL) == ".css"
+	return crawler.NormalizedResourceContentType(resourceContentType) == "text/css" || crawler.ResourceExtension(resourceURL) == ".css"
 }
 
 func isSuccessfulGrabResponse(response *http.Response) bool {
@@ -9042,7 +9035,7 @@ func previewResourcesFromSpider(spider *pageSpider, excludedURLs map[string]stru
 		}
 		resourceKind := crawler.PreviewResourceKind("", "", resourceURL)
 		if resource != nil && resourceKind == "file" {
-			if contentTypeKind := resourceKindFromContentType(resource.contentType); contentTypeKind != "" {
+			if contentTypeKind := crawler.ResourceKindFromContentType(resource.contentType); contentTypeKind != "" {
 				resourceKind = contentTypeKind
 			}
 		}
@@ -9115,7 +9108,7 @@ func (a *App) prepareWholeRemoteSiteImport(importRequest grabImportRequest) (*pa
 			if downloadErr != nil || !downloaded {
 				spider.failedTotal++
 				consecutiveFailures++
-				spider.recordFailedResource(currentJob.URL.String(), grabErrorReason(downloadErr))
+				spider.recordFailedResource(currentJob.URL.String(), crawler.ErrorReason(downloadErr))
 				spider.publishResourceProgress("error", currentJob.URL.String(), 0, 0, -1)
 				continue
 			}
@@ -9297,7 +9290,7 @@ func (a *App) estimateImportedPagesStorageDelta(ctx context.Context, domain stri
 		var previousPublishedHTML string
 		_ = a.db.QueryRowContext(ctx, `SELECT html FROM published_pages WHERE domain=? AND path=?`, domain, pagePath).Scan(&previousPublishedHTML)
 		publishedPageDelta += newHTMLBytes - int64(len([]byte(previousPublishedHTML)))
-		publishedStaticDelta += newHTMLBytes - fileSizeBytes(filepath.Join(a.domainStaticDir(domain), staticRelativePathForPage(pagePath)))
+		publishedStaticDelta += newHTMLBytes - diskusage.FileSize(filepath.Join(a.domainStaticDir(domain), staticRelativePathForPage(pagePath)))
 	}
 	return pageDelta, publishedPageDelta, revisionDelta, publishedStaticDelta
 }
@@ -9317,7 +9310,7 @@ func (a *App) estimateImportedFileDelta(domain string, spider *pageSpider) int64
 			continue
 		}
 		targetFilePath := filepath.Join(baseDir, filepath.FromSlash(assetReference))
-		existingSize := fileSizeBytes(targetFilePath)
+		existingSize := diskusage.FileSize(targetFilePath)
 		newSize := int64(len(resource.content))
 		if existingSize <= 0 {
 			fileDelta += newSize
@@ -9374,7 +9367,7 @@ func (spider *pageSpider) downloadWholeSitePageHTMLWithRetries(client *http.Clie
 			lastErr = errors.New("not html")
 		}
 		if pageURLText != "" {
-			spider.recordFailedResource(pageURLText, grabErrorReason(lastErr))
+			spider.recordFailedResource(pageURLText, crawler.ErrorReason(lastErr))
 			spider.publishResourceProgress("error", pageURLText, 0, 0, -1)
 		}
 	}
@@ -9938,6 +9931,21 @@ func (a *App) handleHostingAndSupportAction(r *http.Request) string {
 	}
 }
 
+func (a *App) hostingAndSupportCanShowCentralServers(ctx context.Context, store hostingandsupport.Store, sitebrushComKey hostingandsupport.SitebrushComKey) bool {
+	ownerDomain, ownerFound := store.OwnerDomain(ctx)
+	if !ownerFound || normalizeDomainName(ownerDomain) != "sitebrush.com" {
+		return false
+	}
+	if strings.TrimSpace(sitebrushComKey.PublicKey) != strings.TrimSpace(sitebrushComServiceMailRelayPublicKey) {
+		return false
+	}
+	ipList, _, err := detectServerIPCandidates(ctx)
+	if err != nil || len(ipList) == 0 {
+		return false
+	}
+	return domainARecordMatchesAny("sitebrush.com", ipList)
+}
+
 func (a *App) hostingAndSupportView(ctx context.Context, r *http.Request) (map[string]any, error) {
 	controlDatabase, err := a.openServerControlDatabase(ctx)
 	if err != nil {
@@ -9951,7 +9959,7 @@ func (a *App) hostingAndSupportView(ctx context.Context, r *http.Request) (map[s
 	siteRequests := store.SiteRequests(ctx)
 	pendingSiteRequests, approvedSiteRequestsByDomain := hostingAndSupportSplitSiteRequests(siteRequests)
 	allClientHostings := store.ClientHostings(ctx)
-	clientHostings := hostingAndSupportFastServerHostings(allClientHostings)
+	clientHostings := hostingandsupport.FastServerHostings(allClientHostings)
 	registrySyncEvents := store.RegistrySyncEvents(ctx, 40)
 	_ = a.migrateLegacySitebrushComPrivateKey(ctx, controlDatabase)
 	sitebrushComKey := store.SitebrushComKey(ctx)
@@ -9971,16 +9979,25 @@ func (a *App) hostingAndSupportView(ctx context.Context, r *http.Request) (map[s
 		return nil, err
 	}
 	hostingAndSupportAttachApprovedSiteRequests(siteRows, approvedSiteRequestsByDomain)
-	servers := a.hostingAndSupportServerViews(ctx, siteRows, clientHostings, invoices, plans, assignments, mainDomain, a.siteDomain(ctx, r))
-	overview := hostingAndSupportOverview(siteRows, nil, pendingSiteRequests, invoices, clientHostings, registrySyncEvents, nil)
+	localServer := hostingandsupport.BuildLocalServerView(hostingandsupport.LocalServerViewInput{
+		Sites:       siteRows,
+		Invoices:    invoices,
+		Plans:       plans,
+		Assignments: assignments,
+		MainDomain:  mainDomain,
+		CurrentHost: a.siteDomain(ctx, r),
+		SiteURL:     a.hostingAndSupportSiteURL,
+	})
+	servers := hostingandsupport.BuildServerViews(localServer, clientHostings, invoices)
+	overview := hostingandsupport.BuildOverview(siteRows, 0, pendingSiteRequests, invoices, clientHostings, registrySyncEvents, nil)
 	overview.ServerCount = len(servers)
-	overview.ClientCount = hostingAndSupportServerClientCount(servers)
+	overview.ClientCount = hostingandsupport.ServerClientCount(servers)
 	translations := translationsForRequest(r)
 	return map[string]any{
 		"Title":                       translationOrDefault(translations, "billing_title", "Хостинг и поддержка"),
 		"Sites":                       siteRows,
 		"Plans":                       plans,
-		"PaymentProviders":            hostingAndSupportDemoPaymentProviders(r),
+		"PaymentProviders":            hostingandsupport.DemoPaymentProviders(absoluteURLForPath(r, "/?hosting_and_support_demo_payment&invoice={invoice}")),
 		"Invoices":                    invoices,
 		"SiteRequests":                pendingSiteRequests,
 		"ServiceMailInstallations":    nil,
@@ -9991,7 +10008,7 @@ func (a *App) hostingAndSupportView(ctx context.Context, r *http.Request) (map[s
 		"SitebrushComKey":             sitebrushComKey,
 		"ShowServers":                 showServers,
 		"Clients":                     nil,
-		"ClientCount":                 hostingAndSupportServerClientCount(servers),
+		"ClientCount":                 hostingandsupport.ServerClientCount(servers),
 		"ClientSiteCount":             len(siteRows),
 		"ClientInstallationCount":     len(servers),
 		"ClientLocalDevelopmentCount": 0,
@@ -10013,652 +10030,6 @@ func (a *App) hostingAndSupportView(ctx context.Context, r *http.Request) (map[s
 		"PublicTrialEmbedHTML":    publicTrialSignupEmbedHTML(r, translations),
 		"CurrentDomain":           a.siteDomain(ctx, r),
 	}, nil
-}
-
-type hostingAndSupportOverviewView struct {
-	HealthTitle      string
-	HealthText       string
-	HealthClass      string
-	ProblemCount     int
-	PendingRequests  int
-	UnpaidInvoices   int
-	OverLimitSites   int
-	StaleServers     int
-	MailErrors       int
-	ClientCount      int
-	SiteCount        int
-	ServerCount      int
-	LastSyncLabel    string
-	PaymentSetupText string
-	Actions          []hostingAndSupportOverviewAction
-}
-
-type hostingAndSupportOverviewAction struct {
-	Title      string
-	Text       string
-	ButtonText string
-	Tab        string
-	Level      string
-}
-
-type hostingAndSupportServerView struct {
-	ID                     string
-	Name                   string
-	Subtitle               string
-	Local                  bool
-	OwnerEmail             string
-	SiteCount              int
-	ClientCount            int
-	InvoiceCount           int
-	BillableCount          int
-	UnpaidInvoiceCount     int
-	TotalUsedLabel         string
-	DiskFreeLabel          string
-	DiskTotalLabel         string
-	SyncStatusLabel        string
-	SyncStatusClass        string
-	NetworkStatusLabel     string
-	NetworkStatusClass     string
-	InvoiceActionLabel     string
-	InvoiceActionClass     string
-	DefaultInvoiceClient   string
-	DefaultInvoiceDomain   string
-	DefaultInvoicePlan     string
-	DefaultInvoiceAmount   string
-	DefaultInvoiceCurrency string
-	Sites                  []hostingAndSupportServerSiteView
-	Clients                []hostingAndSupportServerClientView
-	Invoices               []hostingAndSupportServerInvoiceView
-	Plans                  []hostingandsupport.ClientHostingPlan
-	Settings               []hostingAndSupportServerSettingView
-	Diagnostics            []hostingAndSupportServerDiagnosticView
-}
-
-type hostingAndSupportServerSiteView struct {
-	Domain       string
-	URL          string
-	OwnerEmail   string
-	AdminEmails  string
-	PlanName     string
-	PaidStatus   string
-	UsedLabel    string
-	LimitLabel   string
-	OverLimit    bool
-	InvoiceLabel string
-}
-
-type hostingAndSupportServerClientView struct {
-	Email     string
-	SiteCount int
-	Domains   string
-}
-
-type hostingAndSupportServerInvoiceView struct {
-	Number        string
-	CustomerEmail string
-	Domain        string
-	PlanName      string
-	AmountLabel   string
-	StatusLabel   string
-	PaymentURL    string
-	PeriodLabel   string
-	HistoryLabel  string
-	CanPay        bool
-}
-
-type hostingAndSupportServerSettingView struct {
-	Name  string
-	Value string
-}
-
-type hostingAndSupportServerDiagnosticView struct {
-	Name        string
-	Value       string
-	StatusClass string
-}
-
-func hostingAndSupportOverview(sites []hostingandsupport.Site, clients []hostingAndSupportClientView, siteRequests []hostingandsupport.SiteRequest, invoices []hostingandsupport.Invoice, hostings []hostingandsupport.ClientHosting, syncEvents []hostingandsupport.RegistrySyncEvent, serviceMailEvents []hostingandsupport.ServiceMailEvent) hostingAndSupportOverviewView {
-	view := hostingAndSupportOverviewView{
-		PendingRequests:  len(siteRequests),
-		ClientCount:      len(clients),
-		SiteCount:        len(sites),
-		ServerCount:      len(hostings),
-		LastSyncLabel:    "синхронизаций ещё нет",
-		PaymentSetupText: "способы оплаты настраиваются в разделе счетов",
-	}
-	if len(syncEvents) > 0 {
-		view.LastSyncLabel = firstNonEmpty(syncEvents[0].CreatedAt, "синхронизация была, дата не передана")
-	}
-	for _, site := range sites {
-		if site.UsedPercent >= 100 {
-			view.OverLimitSites++
-		}
-	}
-	now := time.Now().UTC()
-	for _, hosting := range hostings {
-		if hostingAndSupportHostingSyncIsStale(hosting.LastSeenAt, now) {
-			view.StaleServers++
-		}
-	}
-	for _, invoice := range invoices {
-		switch strings.TrimSpace(invoice.Status) {
-		case "issued", "payment_error":
-			view.UnpaidInvoices++
-		}
-	}
-	for _, event := range serviceMailEvents {
-		if strings.TrimSpace(event.Error) != "" || strings.TrimSpace(event.Status) == "error" {
-			view.MailErrors++
-		}
-	}
-	view.ProblemCount = view.PendingRequests + view.UnpaidInvoices + view.OverLimitSites + view.StaleServers + view.MailErrors
-	if view.ProblemCount == 0 {
-		view.HealthTitle = "Всё спокойно"
-		view.HealthText = "Заявок, неоплаченных счетов и критичных проблем сейчас нет."
-		view.HealthClass = "hosting-overview-ok"
-	} else {
-		view.HealthTitle = strconv.Itoa(view.ProblemCount) + " требует внимания"
-		view.HealthText = "Сначала разберите эти пункты, остальное можно смотреть позже."
-		view.HealthClass = "hosting-overview-warning"
-	}
-	view.Actions = hostingAndSupportOverviewActions(view)
-	return view
-}
-
-func hostingAndSupportRealClientHostings(clientHostings []hostingandsupport.ClientHosting) []hostingandsupport.ClientHosting {
-	realHostings := make([]hostingandsupport.ClientHosting, 0, len(clientHostings))
-	for _, clientHosting := range clientHostings {
-		if hostingAndSupportClientHostingIsRealServer(clientHosting) {
-			realHostings = append(realHostings, clientHosting)
-		}
-	}
-	return realHostings
-}
-
-func hostingAndSupportClientHostingIsRealServer(clientHosting hostingandsupport.ClientHosting) bool {
-	serverIP := strings.TrimSpace(clientHosting.ServerIP)
-	serverDomain := normalizeDomainName(clientHosting.ServerDomain)
-	parsedIP := net.ParseIP(serverIP)
-	if parsedIP == nil || parsedIP.IsLoopback() || parsedIP.IsPrivate() || parsedIP.IsUnspecified() {
-		return false
-	}
-	if serverDomain == "" || serverDomain == "localhost" || strings.HasSuffix(serverDomain, ".localhost") || net.ParseIP(serverDomain) != nil {
-		return false
-	}
-	return domainARecordMatches(serverDomain, serverIP)
-}
-
-func (a *App) hostingAndSupportCanShowCentralServers(ctx context.Context, store hostingandsupport.Store, sitebrushComKey hostingandsupport.SitebrushComKey) bool {
-	ownerDomain, ownerFound := store.OwnerDomain(ctx)
-	if !ownerFound || normalizeDomainName(ownerDomain) != "sitebrush.com" {
-		return false
-	}
-	if strings.TrimSpace(sitebrushComKey.PublicKey) != strings.TrimSpace(sitebrushComServiceMailRelayPublicKey) {
-		return false
-	}
-	ipList, _, err := detectServerIPCandidates(ctx)
-	if err != nil || len(ipList) == 0 {
-		return false
-	}
-	return domainARecordMatchesAny("sitebrush.com", ipList)
-}
-
-func hostingAndSupportOverviewActions(view hostingAndSupportOverviewView) []hostingAndSupportOverviewAction {
-	actions := make([]hostingAndSupportOverviewAction, 0, 5)
-	if view.PendingRequests > 0 {
-		actions = append(actions, hostingAndSupportOverviewAction{Title: "Новые заявки", Text: strconv.Itoa(view.PendingRequests) + " ждут решения", ButtonText: "Открыть сайты", Tab: "sites", Level: "warning"})
-	}
-	if view.UnpaidInvoices > 0 {
-		actions = append(actions, hostingAndSupportOverviewAction{Title: "Счета", Text: strconv.Itoa(view.UnpaidInvoices) + " ожидают оплаты или требуют проверки", ButtonText: "Открыть счета", Tab: "invoices", Level: "warning"})
-	}
-	if view.OverLimitSites > 0 {
-		actions = append(actions, hostingAndSupportOverviewAction{Title: "Место на диске", Text: strconv.Itoa(view.OverLimitSites) + " сайтов превысили лимит", ButtonText: "Открыть сайты", Tab: "sites", Level: "danger"})
-	}
-	if view.StaleServers > 0 {
-		actions = append(actions, hostingAndSupportOverviewAction{Title: "Синхронизация", Text: strconv.Itoa(view.StaleServers) + " серверов давно не обновлялись", ButtonText: "Диагностика", Tab: "diagnostics", Level: "warning"})
-	}
-	if view.MailErrors > 0 {
-		actions = append(actions, hostingAndSupportOverviewAction{Title: "Отправка писем", Text: strconv.Itoa(view.MailErrors) + " ошибок в журнале", ButtonText: "Диагностика", Tab: "diagnostics", Level: "danger"})
-	}
-	if len(actions) == 0 {
-		actions = append(actions, hostingAndSupportOverviewAction{Title: "Работа идёт штатно", Text: "Можно создавать сайты, выставлять счета и менять тарифы.", ButtonText: "Открыть сайты", Tab: "sites", Level: "ok"})
-	}
-	return actions
-}
-
-func (a *App) hostingAndSupportServerViews(ctx context.Context, siteRows []hostingandsupport.Site, clientHostings []hostingandsupport.ClientHosting, invoices []hostingandsupport.Invoice, plans []hostingandsupport.Plan, assignments map[string]hostingandsupport.ServiceAssignment, mainDomain string, currentDomain string) []hostingAndSupportServerView {
-	servers := make([]hostingAndSupportServerView, 0, len(clientHostings)+1)
-	localServer := a.localHostingAndSupportServerView(siteRows, invoices, plans, assignments, mainDomain, currentDomain)
-	servers = append(servers, localServer)
-	for _, clientHosting := range clientHostings {
-		servers = append(servers, hostingAndSupportRemoteServerView(clientHosting, invoices))
-	}
-	sort.SliceStable(servers[1:], func(left, right int) bool {
-		leftServer := servers[left+1]
-		rightServer := servers[right+1]
-		if leftServer.SiteCount != rightServer.SiteCount {
-			return leftServer.SiteCount > rightServer.SiteCount
-		}
-		return leftServer.Name < rightServer.Name
-	})
-	return servers
-}
-
-func (a *App) localHostingAndSupportServerView(siteRows []hostingandsupport.Site, invoices []hostingandsupport.Invoice, plans []hostingandsupport.Plan, assignments map[string]hostingandsupport.ServiceAssignment, mainDomain string, currentDomain string) hostingAndSupportServerView {
-	serverName := firstNonEmpty(normalizeDomainName(mainDomain), normalizeDomainName(currentDomain), "SiteBrush.com")
-	server := hostingAndSupportServerView{
-		ID:                 "local",
-		Name:               serverName,
-		Subtitle:           "локальный сервер SiteBrush",
-		Local:              true,
-		SyncStatusLabel:    "локальные данные",
-		SyncStatusClass:    "billing-sync-ok",
-		NetworkStatusLabel: "проверяется фоновым мониторингом",
-		NetworkStatusClass: "hosting-metric-ok",
-		Settings: []hostingAndSupportServerSettingView{
-			{Name: "Оплата", Value: "SiteBrush.com demo payments"},
-			{Name: "Тарифы", Value: strconv.Itoa(len(plans))},
-		},
-		Diagnostics: []hostingAndSupportServerDiagnosticView{
-			{Name: "Источник", Value: "локальная control DB и site DB", StatusClass: "hosting-metric-ok"},
-			{Name: "DNS/TLS", Value: "не блокирует открытие раздела", StatusClass: "hosting-metric-ok"},
-		},
-	}
-	clientDomains := make(map[string][]string)
-	for _, siteRow := range siteRows {
-		ownerEmail := firstHostingSnapshotEmail(splitHostingAndSupportEmailList(siteRow.AdminEmails))
-		if ownerEmail == "" {
-			ownerEmail = "owner not set"
-		}
-		clientDomains[ownerEmail] = append(clientDomains[ownerEmail], siteRow.Domain)
-		assignment := assignments[normalizeDomainName(siteRow.Domain)]
-		planName := siteRow.PlanName
-		if planName == "" {
-			planName = "тариф не назначен"
-		}
-		server.Sites = append(server.Sites, hostingAndSupportServerSiteView{
-			Domain:       siteRow.Domain,
-			URL:          siteRow.URL,
-			OwnerEmail:   ownerEmail,
-			AdminEmails:  siteRow.AdminEmails,
-			PlanName:     planName,
-			PaidStatus:   firstNonEmpty(assignment.ServiceStatus, siteRow.ServiceStatus, "free"),
-			UsedLabel:    siteRow.UsedLabel,
-			LimitLabel:   siteRow.LimitLabel,
-			OverLimit:    siteRow.UsedPercent >= 100,
-			InvoiceLabel: hostingAndSupportInvoiceLabelForDomain(invoices, siteRow.Domain),
-		})
-	}
-	server.SiteCount = len(server.Sites)
-	server.Clients = hostingAndSupportServerClientViews(clientDomains)
-	server.ClientCount = len(server.Clients)
-	server.Invoices = hostingAndSupportServerInvoiceViews(invoices, hostingAndSupportServerDomains(server.Sites), nil)
-	server.InvoiceCount = len(server.Invoices)
-	server.BillableCount = hostingAndSupportBillableSiteCount(server.Sites)
-	server.UnpaidInvoiceCount = hostingAndSupportUnpaidInvoiceCount(server.Invoices)
-	server.InvoiceActionLabel, server.InvoiceActionClass = hostingAndSupportInvoiceAction(server.BillableCount, server.UnpaidInvoiceCount)
-	server.TotalUsedLabel = hostingAndSupportServerTotalUsedLabel(server.Sites)
-	server.Plans = hostingAndSupportClientPlansFromPlans(plans)
-	applyHostingAndSupportServerInvoiceDefaults(&server)
-	return server
-}
-
-func hostingAndSupportRemoteServerView(clientHosting hostingandsupport.ClientHosting, invoices []hostingandsupport.Invoice) hostingAndSupportServerView {
-	server := hostingAndSupportServerView{
-		ID:                 strings.TrimSpace(clientHosting.InstallationID),
-		Name:               firstNonEmpty(clientHosting.ServerDomain, clientHosting.InstallationID),
-		Subtitle:           firstNonEmpty(clientHosting.ServerStatus, clientHosting.ServerIP, "удалённый сервер SiteBrush"),
-		OwnerEmail:         clientHosting.OwnerEmail,
-		SiteCount:          clientHosting.SiteCount,
-		TotalUsedLabel:     clientHosting.TotalUsedLabel,
-		DiskFreeLabel:      clientHosting.DiskFreeLabel,
-		DiskTotalLabel:     clientHosting.DiskTotalLabel,
-		NetworkStatusLabel: clientHosting.NetworkUptimeLabel,
-		NetworkStatusClass: clientHosting.NetworkStatusClass,
-		Plans:              clientHosting.Plans,
-		Settings: []hostingAndSupportServerSettingView{
-			{Name: "Оплата", Value: "через SiteBrush.com"},
-			{Name: "Владелец", Value: firstNonEmpty(clientHosting.OwnerEmail, "не передан")},
-		},
-		Diagnostics: []hostingAndSupportServerDiagnosticView{
-			{Name: "SiteBrush", Value: firstNonEmpty(clientHosting.SitebrushVersion, "версия не передана"), StatusClass: "hosting-metric-ok"},
-			{Name: "OS", Value: strings.TrimSpace(clientHosting.OSName + " " + clientHosting.OSVersion), StatusClass: "hosting-metric-ok"},
-			{Name: "CPU", Value: fmt.Sprintf("%s · %d ядер", firstNonEmpty(clientHosting.CPUModel, "CPU не передан"), clientHosting.CPUCores), StatusClass: clientHosting.CPUStatusClass},
-			{Name: "Load", Value: fmt.Sprintf("%.2f", clientHosting.LoadAverage), StatusClass: clientHosting.LoadStatusClass},
-			{Name: "Uptime", Value: clientHosting.ServerUptimeLabel, StatusClass: clientHosting.ServerUptimeClass},
-		},
-	}
-	stale := hostingAndSupportHostingSyncIsStale(clientHosting.LastSeenAt, time.Now().UTC())
-	if strings.TrimSpace(clientHosting.LastSeenAt) == "" {
-		server.SyncStatusLabel = "нет синхронизации"
-		server.SyncStatusClass = "billing-sync-stale"
-	} else if stale {
-		server.SyncStatusLabel = "устарело · " + clientHosting.LastSeenAt
-		server.SyncStatusClass = "billing-sync-stale"
-	} else {
-		server.SyncStatusLabel = "синхронизировано · " + clientHosting.LastSeenAt
-		server.SyncStatusClass = "billing-sync-ok"
-	}
-	clientDomains := make(map[string][]string)
-	for _, site := range clientHosting.Sites {
-		ownerEmail := firstNonEmpty(site.OwnerEmail, firstHostingSnapshotEmail(site.AdminEmails), clientHosting.OwnerEmail, "owner not set")
-		clientDomains[ownerEmail] = append(clientDomains[ownerEmail], site.Domain)
-		server.Sites = append(server.Sites, hostingAndSupportServerSiteView{
-			Domain:       site.Domain,
-			URL:          "http://" + site.Domain + "/",
-			OwnerEmail:   ownerEmail,
-			AdminEmails:  strings.Join(site.AdminEmails, ", "),
-			PlanName:     firstNonEmpty(site.PlanName, "тариф не назначен"),
-			PaidStatus:   firstNonEmpty(site.PlanPaidStatus, "free"),
-			UsedLabel:    site.UsedLabel,
-			LimitLabel:   site.LimitLabel,
-			OverLimit:    site.OverLimit,
-			InvoiceLabel: hostingAndSupportInvoiceLabelForDomain(invoices, site.Domain),
-		})
-	}
-	server.Clients = hostingAndSupportServerClientViews(clientDomains)
-	server.ClientCount = len(server.Clients)
-	server.Invoices = hostingAndSupportServerInvoiceViews(invoices, hostingAndSupportServerDomains(server.Sites), hostingAndSupportServerClientEmails(server.Clients))
-	server.InvoiceCount = len(server.Invoices)
-	server.BillableCount = hostingAndSupportBillableSiteCount(server.Sites)
-	server.UnpaidInvoiceCount = hostingAndSupportUnpaidInvoiceCount(server.Invoices)
-	server.InvoiceActionLabel, server.InvoiceActionClass = hostingAndSupportInvoiceAction(server.BillableCount, server.UnpaidInvoiceCount)
-	applyHostingAndSupportServerInvoiceDefaults(&server)
-	return server
-}
-
-func applyHostingAndSupportServerInvoiceDefaults(server *hostingAndSupportServerView) {
-	if server == nil {
-		return
-	}
-	server.DefaultInvoiceCurrency = "RUB"
-	server.DefaultInvoiceAmount = "1000"
-	if len(server.Clients) > 0 {
-		server.DefaultInvoiceClient = server.Clients[0].Email
-	}
-	for _, site := range server.Sites {
-		if server.DefaultInvoiceDomain == "" {
-			server.DefaultInvoiceDomain = site.Domain
-			server.DefaultInvoicePlan = site.PlanName
-		}
-		switch strings.TrimSpace(site.PaidStatus) {
-		case "paid", "paused":
-			server.DefaultInvoiceDomain = site.Domain
-			server.DefaultInvoiceClient = firstNonEmpty(site.OwnerEmail, server.DefaultInvoiceClient)
-			server.DefaultInvoicePlan = site.PlanName
-			return
-		}
-	}
-}
-
-func hostingAndSupportFastServerHostings(clientHostings []hostingandsupport.ClientHosting) []hostingandsupport.ClientHosting {
-	hostings := make([]hostingandsupport.ClientHosting, 0, len(clientHostings))
-	for _, clientHosting := range clientHostings {
-		serverDomain := normalizeDomainName(clientHosting.ServerDomain)
-		serverIP := strings.TrimSpace(clientHosting.ServerIP)
-		parsedIP := net.ParseIP(serverIP)
-		if serverDomain == "" || serverDomain == "localhost" || strings.HasSuffix(serverDomain, ".localhost") || net.ParseIP(serverDomain) != nil {
-			continue
-		}
-		if parsedIP == nil || parsedIP.IsLoopback() || parsedIP.IsPrivate() || parsedIP.IsUnspecified() {
-			continue
-		}
-		hostings = append(hostings, clientHosting)
-	}
-	return hostings
-}
-
-func hostingAndSupportServerClientViews(clientDomains map[string][]string) []hostingAndSupportServerClientView {
-	clients := make([]hostingAndSupportServerClientView, 0, len(clientDomains))
-	for email, domains := range clientDomains {
-		domains = normalizedHostingDomains(domains)
-		clients = append(clients, hostingAndSupportServerClientView{Email: email, SiteCount: len(domains), Domains: strings.Join(domains, ", ")})
-	}
-	sort.Slice(clients, func(left, right int) bool {
-		if clients[left].SiteCount != clients[right].SiteCount {
-			return clients[left].SiteCount > clients[right].SiteCount
-		}
-		return clients[left].Email < clients[right].Email
-	})
-	return clients
-}
-
-func normalizedHostingDomains(rawDomains []string) []string {
-	seen := make(map[string]struct{}, len(rawDomains))
-	domains := make([]string, 0, len(rawDomains))
-	for _, rawDomain := range rawDomains {
-		domain := normalizeDomainName(rawDomain)
-		if domain == "" {
-			continue
-		}
-		if _, found := seen[domain]; found {
-			continue
-		}
-		seen[domain] = struct{}{}
-		domains = append(domains, domain)
-	}
-	sort.Strings(domains)
-	return domains
-}
-
-func hostingAndSupportServerDomains(sites []hostingAndSupportServerSiteView) map[string]struct{} {
-	domains := make(map[string]struct{}, len(sites))
-	for _, site := range sites {
-		domain := normalizeDomainName(site.Domain)
-		if domain != "" {
-			domains[domain] = struct{}{}
-		}
-	}
-	return domains
-}
-
-func hostingAndSupportServerClientEmails(clients []hostingAndSupportServerClientView) map[string]struct{} {
-	emails := make(map[string]struct{}, len(clients))
-	for _, client := range clients {
-		email := strings.ToLower(strings.TrimSpace(client.Email))
-		if email != "" {
-			emails[email] = struct{}{}
-		}
-	}
-	return emails
-}
-
-func hostingAndSupportServerInvoiceViews(invoices []hostingandsupport.Invoice, domains map[string]struct{}, emails map[string]struct{}) []hostingAndSupportServerInvoiceView {
-	views := make([]hostingAndSupportServerInvoiceView, 0, len(invoices))
-	for _, invoice := range invoices {
-		domain := normalizeDomainName(invoice.Domain)
-		email := strings.ToLower(strings.TrimSpace(invoice.CustomerEmail))
-		_, domainFound := domains[domain]
-		_, emailFound := emails[email]
-		if len(domains) > 0 && !domainFound && (len(emails) == 0 || !emailFound) {
-			continue
-		}
-		statusLabel := hostingAndSupportInvoiceStatusLabel(invoice.Status)
-		views = append(views, hostingAndSupportServerInvoiceView{
-			Number:        invoice.Number,
-			CustomerEmail: invoice.CustomerEmail,
-			Domain:        invoice.Domain,
-			PlanName:      firstNonEmpty(invoice.PlanName, "обслуживание сайта"),
-			AmountLabel:   strings.TrimSpace(invoice.Amount + " " + invoice.Currency),
-			StatusLabel:   statusLabel,
-			PaymentURL:    invoice.PaymentURL,
-			PeriodLabel:   hostingAndSupportInvoicePeriodLabel(invoice),
-			HistoryLabel:  hostingAndSupportInvoiceHistoryLabel(invoice),
-			CanPay:        invoice.PaymentURL != "" && strings.TrimSpace(invoice.Status) != "paid" && strings.TrimSpace(invoice.Status) != "cancelled",
-		})
-	}
-	return views
-}
-
-func hostingAndSupportInvoiceStatusLabel(status string) string {
-	switch strings.TrimSpace(status) {
-	case "issued":
-		return "ожидает оплаты"
-	case "paid":
-		return "оплачен"
-	case "payment_error":
-		return "ошибка оплаты"
-	case "cancelled":
-		return "отменён"
-	default:
-		return firstNonEmpty(status, "неизвестно")
-	}
-}
-
-func hostingAndSupportInvoicePeriodLabel(invoice hostingandsupport.Invoice) string {
-	if strings.TrimSpace(invoice.DueAt) != "" {
-		return "до " + strings.TrimSpace(invoice.DueAt)
-	}
-	return "текущий период обслуживания"
-}
-
-func hostingAndSupportInvoiceHistoryLabel(invoice hostingandsupport.Invoice) string {
-	parts := []string{"создан " + strings.TrimSpace(invoice.CreatedAt)}
-	if strings.TrimSpace(invoice.PaidAt) != "" {
-		parts = append(parts, "оплачен "+strings.TrimSpace(invoice.PaidAt))
-	}
-	if strings.TrimSpace(invoice.UpdatedAt) != "" && strings.TrimSpace(invoice.UpdatedAt) != strings.TrimSpace(invoice.CreatedAt) {
-		parts = append(parts, "обновлён "+strings.TrimSpace(invoice.UpdatedAt))
-	}
-	return strings.Join(parts, " · ")
-}
-
-func hostingAndSupportInvoiceLabelForDomain(invoices []hostingandsupport.Invoice, domain string) string {
-	domain = normalizeDomainName(domain)
-	if domain == "" {
-		return "счёт не нужен"
-	}
-	for _, invoice := range invoices {
-		if normalizeDomainName(invoice.Domain) != domain {
-			continue
-		}
-		return invoice.Number + " · " + hostingAndSupportInvoiceStatusLabel(invoice.Status)
-	}
-	return "можно выставить счёт"
-}
-
-func hostingAndSupportBillableSiteCount(sites []hostingAndSupportServerSiteView) int {
-	count := 0
-	for _, site := range sites {
-		switch strings.TrimSpace(site.PaidStatus) {
-		case "paid", "paused":
-			count++
-		}
-	}
-	return count
-}
-
-func hostingAndSupportUnpaidInvoiceCount(invoices []hostingAndSupportServerInvoiceView) int {
-	count := 0
-	for _, invoice := range invoices {
-		switch invoice.StatusLabel {
-		case "ожидает оплаты", "ошибка оплаты":
-			count++
-		}
-	}
-	return count
-}
-
-func hostingAndSupportInvoiceAction(billableCount int, unpaidInvoiceCount int) (string, string) {
-	if billableCount == 0 {
-		return "Не выставлять счёт", "btn-outline-secondary"
-	}
-	if unpaidInvoiceCount > 0 {
-		return "Проверить счета", "btn-outline-primary"
-	}
-	return "Выставить счёт", "btn-success"
-}
-
-func hostingAndSupportServerTotalUsedLabel(sites []hostingAndSupportServerSiteView) string {
-	var totalBytes int64
-	for _, site := range sites {
-		parsedBytes, ok := hostingAndSupportParseSizeLabel(site.UsedLabel)
-		if ok {
-			totalBytes += parsedBytes
-		}
-	}
-	if totalBytes <= 0 {
-		return ""
-	}
-	return formatFileSize(totalBytes)
-}
-
-func hostingAndSupportParseSizeLabel(label string) (int64, bool) {
-	fields := strings.Fields(strings.TrimSpace(label))
-	if len(fields) == 0 {
-		return 0, false
-	}
-	value, err := strconv.ParseFloat(strings.ReplaceAll(fields[0], ",", "."), 64)
-	if err != nil {
-		return 0, false
-	}
-	multiplier := float64(1)
-	if len(fields) > 1 {
-		switch strings.ToLower(fields[1]) {
-		case "kb", "kib", "кб":
-			multiplier = 1024
-		case "mb", "mib", "мб":
-			multiplier = 1024 * 1024
-		case "gb", "gib", "гб":
-			multiplier = 1024 * 1024 * 1024
-		case "tb", "tib", "тб":
-			multiplier = 1024 * 1024 * 1024 * 1024
-		}
-	}
-	return int64(value * multiplier), true
-}
-
-func hostingAndSupportClientPlansFromPlans(plans []hostingandsupport.Plan) []hostingandsupport.ClientHostingPlan {
-	clientPlans := make([]hostingandsupport.ClientHostingPlan, 0, len(plans))
-	for _, plan := range plans {
-		clientPlans = append(clientPlans, hostingandsupport.ClientHostingPlan{
-			Name:          plan.Name,
-			QuotaLabel:    plan.QuotaLabel,
-			SiteLimit:     plan.SiteLimit,
-			Price:         plan.Price,
-			Currency:      plan.Currency,
-			BillingPeriod: plan.BillingPeriod,
-			PaidStatus:    hostingSnapshotPlanPaidStatus(plan),
-			IsDefault:     plan.IsDefault,
-		})
-	}
-	return clientPlans
-}
-
-func hostingAndSupportServerClientCount(servers []hostingAndSupportServerView) int {
-	clientEmails := make(map[string]struct{})
-	for _, server := range servers {
-		for _, client := range server.Clients {
-			email := strings.ToLower(strings.TrimSpace(client.Email))
-			if email != "" {
-				clientEmails[email] = struct{}{}
-			}
-		}
-	}
-	return len(clientEmails)
-}
-
-func hostingAndSupportDemoPaymentProviders(r *http.Request) []hostingandsupport.PaymentProvider {
-	paymentURL := absoluteURLForPath(r, "/?hosting_and_support_demo_payment&invoice={invoice}")
-	return []hostingandsupport.PaymentProvider{{
-		Provider:     "sitebrush_com",
-		Enabled:      true,
-		DisplayName:  "SiteBrush.com demo payments",
-		PaymentURL:   paymentURL,
-		Instructions: "Предустановленная демо-оплата через SiteBrush.com.",
-	}}
-}
-
-func hostingAndSupportClientTotals(clients []hostingAndSupportClientView) (int, int, int) {
-	siteCount := 0
-	installationCount := 0
-	localDevelopmentCount := 0
-	for _, client := range clients {
-		siteCount += client.SiteCount
-		installationCount += client.InstallationCount
-		localDevelopmentCount += client.LocalDevelopmentCount
-	}
-	return siteCount, installationCount, localDevelopmentCount
 }
 
 type hostingAndSupportClientView struct {
@@ -10776,7 +10147,7 @@ func (a *App) hostingAndSupportClients(ctx context.Context, siteRows []hostingan
 			continue
 		}
 		knownSiteDomains[domain] = struct{}{}
-		for _, email := range splitHostingAndSupportEmailList(siteRow.AdminEmails) {
+		for _, email := range hostingandsupport.SplitEmailList(siteRow.AdminEmails) {
 			client := hostingAndSupportClientByEmail(clientsByEmail, email)
 			client.sites[domain] = hostingAndSupportClientSiteSource{
 				aliases:        siteRow.Aliases,
@@ -10927,7 +10298,7 @@ func (a *App) hostingAndSupportClients(ctx context.Context, siteRows []hostingan
 			}
 		}
 		for _, hostingView := range hostingViews {
-			if hostingAndSupportHostingHasSpecialStatus(hostingView.Hosting) {
+			if hostingandsupport.HostingHasSpecialStatus(hostingView.Hosting) {
 				view.LocalDevelopmentCount++
 			}
 		}
@@ -11046,7 +10417,7 @@ func hostingAndSupportClientHasEventsOrErrors(client hostingAndSupportClientView
 func hostingAndSupportClientHostingViews(emails map[string]struct{}, clientHostings []hostingandsupport.ClientHosting) []hostingAndSupportClientHostingView {
 	views := make([]hostingAndSupportClientHostingView, 0, 2)
 	for _, clientHosting := range clientHostings {
-		if hostingBelongsToClientEmails(clientHosting, emails) {
+		if hostingandsupport.HostingBelongsToClientEmails(clientHosting, emails) {
 			views = append(views, buildHostingAndSupportClientHostingView(clientHosting, emails, time.Now().UTC()))
 		}
 	}
@@ -11060,7 +10431,7 @@ func hostingAndSupportClientHostingViews(emails map[string]struct{}, clientHosti
 }
 
 func buildHostingAndSupportClientHostingView(clientHosting hostingandsupport.ClientHosting, emails map[string]struct{}, now time.Time) hostingAndSupportClientHostingView {
-	stale := hostingAndSupportHostingSyncIsStale(clientHosting.LastSeenAt, now)
+	stale := hostingandsupport.HostingSyncIsStale(clientHosting.LastSeenAt, now)
 	syncStatusLabel := "синхронизировано"
 	syncStatusClass := "billing-sync-ok"
 	if strings.TrimSpace(clientHosting.LastSeenAt) == "" {
@@ -11072,72 +10443,13 @@ func buildHostingAndSupportClientHostingView(clientHosting hostingandsupport.Cli
 	}
 	return hostingAndSupportClientHostingView{
 		Hosting:           clientHosting,
-		ServerDisplayName: hostingAndSupportHostingDisplayName(clientHosting),
-		ServerStatusLabel: hostingAndSupportHostingStatusLabel(clientHosting),
+		ServerDisplayName: hostingandsupport.HostingDisplayName(clientHosting),
+		ServerStatusLabel: hostingandsupport.HostingStatusLabel(clientHosting),
 		SyncStatusLabel:   syncStatusLabel,
 		SyncStatusClass:   syncStatusClass,
 		Stale:             stale,
-		ClientRoles:       hostingAndSupportClientRolesForEmails(clientHosting, emails),
+		ClientRoles:       hostingandsupport.ClientRolesForEmails(clientHosting, emails),
 	}
-}
-
-func hostingAndSupportHostingSyncIsStale(lastSeenAt string, now time.Time) bool {
-	lastSeenAt = strings.TrimSpace(lastSeenAt)
-	if lastSeenAt == "" {
-		return true
-	}
-	parsedTime, err := time.Parse(time.RFC3339, lastSeenAt)
-	if err != nil {
-		return true
-	}
-	return now.Sub(parsedTime) > 7*24*time.Hour
-}
-
-func hostingAndSupportHostingDisplayName(clientHosting hostingandsupport.ClientHosting) string {
-	return firstNonEmpty(clientHosting.ServerDomain, clientHosting.InstallationID)
-}
-
-func hostingAndSupportHostingStatusLabel(clientHosting hostingandsupport.ClientHosting) string {
-	if strings.TrimSpace(clientHosting.ServerIP) != "" {
-		return "IP " + strings.TrimSpace(clientHosting.ServerIP)
-	}
-	return firstNonEmpty(clientHosting.ServerStatus, "локальная инсталляция")
-}
-
-func hostingAndSupportClientRolesForEmails(clientHosting hostingandsupport.ClientHosting, emails map[string]struct{}) []hostingandsupport.ClientHostingRole {
-	roles := make([]hostingandsupport.ClientHostingRole, 0, len(clientHosting.Roles))
-	for _, role := range clientHosting.Roles {
-		email := strings.ToLower(strings.TrimSpace(role.Email))
-		if email == "" {
-			continue
-		}
-		if _, found := emails[email]; found {
-			roles = append(roles, role)
-		}
-	}
-	return roles
-}
-
-func hostingBelongsToClientEmails(clientHosting hostingandsupport.ClientHosting, emails map[string]struct{}) bool {
-	for _, email := range append(clientHosting.ClientEmails, clientHosting.OwnerEmail) {
-		email = strings.ToLower(strings.TrimSpace(email))
-		if email == "" {
-			continue
-		}
-		if _, found := emails[email]; found {
-			return true
-		}
-	}
-	return false
-}
-
-func hostingAndSupportHostingHasSpecialStatus(clientHosting hostingandsupport.ClientHosting) bool {
-	serverIP := strings.TrimSpace(clientHosting.ServerIP)
-	if serverIP == "" {
-		return true
-	}
-	parsedIP := net.ParseIP(serverIP)
-	return parsedIP == nil || parsedIP.IsLoopback() || parsedIP.IsPrivate() || parsedIP.IsUnspecified()
 }
 
 func hostingAndSupportClientByEmail(clients map[string]*hostingAndSupportClientAccumulator, email string) *hostingAndSupportClientAccumulator {
@@ -11180,10 +10492,10 @@ func hostingAndSupportClientSiteViews(sites map[string]hostingAndSupportClientSi
 			view.LimitLabel = formatFileSize(view.LimitBytes)
 		}
 		view.OverLimit = view.LimitBytes > 0 && view.UsedBytes > view.LimitBytes
-		if hostingAndSupportDomainIsLocalDevelopment(domain, view.InstallationIP) {
+		if hostingandsupport.DomainIsLocalDevelopment(domain, view.InstallationIP) {
 			view.LocalDevelopment = true
-			view.Status = hostingAndSupportInstallationStatus(domain, view.InstallationIP)
-		} else if parentDomain := hostingAndSupportKnownParentDomain(domain, knownSiteDomains); parentDomain != "" {
+			view.Status = hostingandsupport.InstallationStatus(domain, view.InstallationIP)
+		} else if parentDomain := hostingandsupport.KnownParentDomain(domain, knownSiteDomains); parentDomain != "" {
 			view.HostingSitebrush = true
 			view.ParentDomain = parentDomain
 			view.Status = "хостинг SiteBrush"
@@ -11203,79 +10515,6 @@ func hostingAndSupportClientSiteViews(sites map[string]hostingAndSupportClientSi
 		return views[left].Domain < views[right].Domain
 	})
 	return views
-}
-
-func hostingAndSupportInstallationStatus(domain string, sourceIP string) string {
-	domain = normalizeDomainName(domain)
-	sourceIP = strings.TrimSpace(sourceIP)
-	if sourceIP == "" {
-		return "сервер без публичного IP"
-	}
-	if domain == "localhost" || strings.HasSuffix(domain, ".localhost") {
-		return "локальная инсталляция · " + sourceIP
-	}
-	if net.ParseIP(domain) != nil {
-		return "тестовый сервер · " + sourceIP
-	}
-	parsedIP := net.ParseIP(sourceIP)
-	if parsedIP == nil {
-		return "IP " + sourceIP
-	}
-	if parsedIP.IsLoopback() || parsedIP.IsPrivate() || parsedIP.IsUnspecified() {
-		return "частный IP " + sourceIP
-	}
-	return "IP " + sourceIP
-}
-
-func hostingAndSupportDomainIsLocalDevelopment(domain string, sourceIP string) bool {
-	domain = normalizeDomainName(domain)
-	if domain == "" || sourceIP == "" {
-		return true
-	}
-	if domain == "localhost" || strings.HasSuffix(domain, ".localhost") {
-		return true
-	}
-	if net.ParseIP(domain) != nil {
-		return true
-	}
-	parsedIP := net.ParseIP(strings.TrimSpace(sourceIP))
-	return parsedIP == nil || parsedIP.IsLoopback() || parsedIP.IsPrivate() || parsedIP.IsUnspecified()
-}
-
-func hostingAndSupportParentDomain(domain string) string {
-	domain = normalizeDomainName(domain)
-	parts := strings.Split(domain, ".")
-	if len(parts) < 3 {
-		return ""
-	}
-	return strings.Join(parts[len(parts)-2:], ".")
-}
-
-func hostingAndSupportKnownParentDomain(domain string, knownSiteDomains map[string]struct{}) string {
-	parentDomain := hostingAndSupportParentDomain(domain)
-	if parentDomain == "" {
-		return ""
-	}
-	if _, found := knownSiteDomains[parentDomain]; found {
-		return parentDomain
-	}
-	return ""
-}
-
-func hostingAndSupportClientByDomain(users map[string]*hostingAndSupportClientAccumulator, domain string) *hostingAndSupportClientAccumulator {
-	domain = normalizeDomainName(domain)
-	if user := users[domain]; user != nil {
-		return user
-	}
-	user := &hostingAndSupportClientAccumulator{
-		emails:        make(map[string]struct{}),
-		domains:       make(map[string]struct{}),
-		sites:         make(map[string]hostingAndSupportClientSiteSource),
-		installations: make(map[string]struct{}),
-		ips:           make(map[string]hostingAndSupportClientIPView),
-	}
-	users[domain] = user
-	return user
 }
 
 func (a *App) hostingAndSupportClientIP(ctx context.Context, ip string) hostingAndSupportClientIPView {
@@ -11302,20 +10541,6 @@ func serviceMailEventIsNewerIdentity(codeKind string) bool {
 	default:
 		return false
 	}
-}
-
-func splitHostingAndSupportEmailList(rawEmails string) []string {
-	fields := strings.FieldsFunc(rawEmails, func(separator rune) bool {
-		return separator == ',' || separator == '\n' || separator == ';' || separator == ' '
-	})
-	emails := make([]string, 0, len(fields))
-	for _, field := range fields {
-		email := strings.ToLower(strings.TrimSpace(field))
-		if email != "" {
-			emails = append(emails, email)
-		}
-	}
-	return emails
 }
 
 func firstStringFromSet(values map[string]struct{}) string {
@@ -11774,7 +10999,7 @@ func (a *App) saveHostingAndSupportDemoSettingsInDatabase(r *http.Request, contr
 		return err.Error()
 	}
 	if !demoEnabled {
-		for _, disabledDemoDomain := range uniqueDemoDomains(previousDemoSettings.Domain, demoDomain) {
+		for _, disabledDemoDomain := range demo.UniqueDomains(previousDemoSettings.Domain, demoDomain) {
 			if err := a.deleteDemoManagedSiteWithoutBackup(r.Context(), controlDatabase, disabledDemoDomain); err != nil {
 				return err.Error()
 			}
@@ -11793,23 +11018,6 @@ func (a *App) saveHostingAndSupportDemoSettingsInDatabase(r *http.Request, contr
 		}
 	}
 	return translationOrDefault(translations, "billing_status_settings_saved", "Billing settings saved.")
-}
-
-func uniqueDemoDomains(domains ...string) []string {
-	uniqueDomains := make([]string, 0, len(domains))
-	seenDomains := make(map[string]struct{}, len(domains))
-	for _, domain := range domains {
-		normalizedDomain := normalizeQuotaDomainName(domain)
-		if normalizedDomain == "" {
-			continue
-		}
-		if _, seen := seenDomains[normalizedDomain]; seen {
-			continue
-		}
-		seenDomains[normalizedDomain] = struct{}{}
-		uniqueDomains = append(uniqueDomains, normalizedDomain)
-	}
-	return uniqueDomains
 }
 
 func (a *App) createManagedSiteFromForm(r *http.Request) string {
@@ -12302,7 +11510,7 @@ func (a *App) managedSiteQuotaRow(ctx context.Context, domain string) (siteQuota
 }
 
 func (a *App) managedSiteDeletionSizeBytes(row siteQuotaRow) int64 {
-	totalBytes := fileSizeBytes(row.DatabasePath)
+	totalBytes := diskusage.FileSize(row.DatabasePath)
 	for _, directoryPath := range []string{
 		a.domainFilesDirForDomain(row.Domain),
 		a.domainStaticDir(row.Domain),
@@ -12311,14 +11519,14 @@ func (a *App) managedSiteDeletionSizeBytes(row siteQuotaRow) int64 {
 	} {
 		totalBytes += diskusage.DirectorySize(directoryPath)
 	}
-	totalBytes += fileSizeBytes(filepath.Join(a.packsDir(), domainStorageName(row.Domain)+".zip"))
+	totalBytes += diskusage.FileSize(filepath.Join(a.packsDir(), domainStorageName(row.Domain)+".zip"))
 	return totalBytes
 }
 
 func (a *App) managedSiteDeletionDisplaySizeBytes(row siteQuotaRow) int64 {
 	totalBytes := row.UsedBytes
-	totalBytes += fileSizeBytes(row.DatabasePath)
-	totalBytes += fileSizeBytes(filepath.Join(a.packsDir(), domainStorageName(row.Domain)+".zip"))
+	totalBytes += diskusage.FileSize(row.DatabasePath)
+	totalBytes += diskusage.FileSize(filepath.Join(a.packsDir(), domainStorageName(row.Domain)+".zip"))
 	return totalBytes
 }
 
@@ -12965,7 +12173,7 @@ func (a *App) applyLatestActiveRevision(ctx context.Context, domain string, page
 		var previousPublishedHTML string
 		_ = a.db.QueryRowContext(ctx, `SELECT html FROM published_pages WHERE domain=? AND path=?`, domain, pagePath).Scan(&previousPublishedHTML)
 		publishedPageDelta = newHTMLBytes - int64(len([]byte(previousPublishedHTML)))
-		publishedStaticDelta = newHTMLBytes - fileSizeBytes(filepath.Join(a.domainStaticDir(domain), staticRelativePathForPage(pagePath)))
+		publishedStaticDelta = newHTMLBytes - diskusage.FileSize(filepath.Join(a.domainStaticDir(domain), staticRelativePathForPage(pagePath)))
 	}
 	if storageErr := a.applyDomainStorageDelta(ctx, domain, pageDelta, publishedPageDelta, 0, 0, publishedStaticDelta); storageErr != nil {
 		log.Printf("restore blocked by storage limit domain=%s path=%s error=%v", domain, pagePath, storageErr)
@@ -12984,7 +12192,7 @@ func (a *App) removeManagedPage(ctx context.Context, domain string, pagePath str
 	_ = a.db.QueryRowContext(ctx, `SELECT html FROM pages WHERE domain=? AND path=?`, domain, pagePath).Scan(&storedHTML)
 	var publishedHTML string
 	_ = a.db.QueryRowContext(ctx, `SELECT html FROM published_pages WHERE domain=? AND path=?`, domain, pagePath).Scan(&publishedHTML)
-	publishedStaticBytes := fileSizeBytes(filepath.Join(a.domainStaticDir(domain), staticRelativePathForPage(pagePath)))
+	publishedStaticBytes := diskusage.FileSize(filepath.Join(a.domainStaticDir(domain), staticRelativePathForPage(pagePath)))
 	_ = a.applyDomainStorageDelta(ctx, domain, -int64(len([]byte(storedHTML))), -int64(len([]byte(publishedHTML))), 0, 0, -publishedStaticBytes)
 	_, _ = a.db.ExecContext(ctx, `DELETE FROM pages WHERE domain=? AND path=?`, domain, pagePath)
 	_, _ = a.db.ExecContext(ctx, `DELETE FROM published_pages WHERE domain=? AND path=?`, domain, pagePath)
@@ -13736,10 +12944,10 @@ func emailConfirmationURL(r *http.Request, token string) string {
 
 func (a *App) enqueueEmail(ctx context.Context, message mailout.Message) error {
 	if a.emailDelivery == nil {
-		a.emailDelivery = startEmailDeliveryWorker(context.Background(), a.defaultEmailSender())
+		a.emailDelivery = mailout.StartDeliveryWorker(context.Background(), a.defaultEmailSender())
 	}
 	select {
-	case a.emailDelivery <- emailDeliveryJob{message: message}:
+	case a.emailDelivery <- mailout.DeliveryJob{Message: message}:
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()
@@ -14258,7 +13466,7 @@ func (a *App) runHostingServerMonitorOnce(ctx context.Context) {
 	if !a.hostingAndSupportCanShowCentralServers(ctx, store, store.SitebrushComKey(ctx)) {
 		return
 	}
-	for _, hosting := range hostingAndSupportRealClientHostings(store.ClientHostings(ctx)) {
+	for _, hosting := range hostingandsupport.RealClientHostings(store.ClientHostings(ctx), domainARecordMatches) {
 		success, responseMS, errorMessage := checkHostingServerNetwork(ctx, hosting)
 		if !success {
 			success, responseMS, errorMessage = retryHostingServerNetwork(ctx, hosting)
@@ -14630,7 +13838,7 @@ func (a *App) buildHostingSnapshot(ctx context.Context) (hostingandsupport.Hosti
 			Price:                plan.Price,
 			Currency:             plan.Currency,
 			BillingPeriod:        plan.BillingPeriod,
-			PaidStatus:           hostingSnapshotPlanPaidStatus(plan),
+			PaidStatus:           hostingandsupport.PlanPaidStatus(plan),
 			IsDefault:            plan.IsDefault,
 		})
 	}
@@ -14642,7 +13850,7 @@ func (a *App) buildHostingSnapshot(ctx context.Context) (hostingandsupport.Hosti
 		}
 		site := hostingandsupport.HostingSnapshotSite{
 			Domain:         row.Domain,
-			OwnerEmail:     firstHostingSnapshotEmail(row.AdminEmails),
+			OwnerEmail:     hostingandsupport.FirstHostingSnapshotEmail(row.AdminEmails),
 			UsedBytes:      row.UsedBytes,
 			LimitBytes:     row.LimitBytes,
 			PlanName:       planName,
@@ -14951,26 +14159,9 @@ func commandOutputOneLine(ctx context.Context, name string, args ...string) stri
 	return strings.TrimSpace(strings.SplitN(string(outputBytes), "\n", 2)[0])
 }
 
-func firstHostingSnapshotEmail(emails []string) string {
-	for _, email := range emails {
-		if strings.TrimSpace(email) != "" {
-			return strings.ToLower(strings.TrimSpace(email))
-		}
-	}
-	return ""
-}
-
-func hostingSnapshotPlanPaidStatus(plan hostingandsupport.Plan) string {
-	price := strings.TrimSpace(plan.Price)
-	if price == "" || price == "0" || price == "0.00" {
-		return "free"
-	}
-	return "paid"
-}
-
 func hostingSnapshotAssignmentPaidStatus(assignment hostingandsupport.ServiceAssignment, plansByID map[int]hostingandsupport.Plan) string {
 	if plan, found := plansByID[assignment.PlanID]; found {
-		return hostingSnapshotPlanPaidStatus(plan)
+		return hostingandsupport.PlanPaidStatus(plan)
 	}
 	return "free"
 }
@@ -15776,31 +14967,7 @@ func (a *App) deleteRegistrationConfirmation(ctx context.Context, token string) 
 	}
 }
 
-func startEmailDeliveryWorker(ctx context.Context, sender emailSender) chan emailDeliveryJob {
-	jobs := make(chan emailDeliveryJob, emailDeliveryQueueSize)
-	go runEmailDeliveryWorker(ctx, jobs, sender)
-	return jobs
-}
-
-func runEmailDeliveryWorker(ctx context.Context, jobs <-chan emailDeliveryJob, sender emailSender) {
-	if sender == nil {
-		sender = mailout.DirectSender{}.Send
-	}
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case job := <-jobs:
-			sendCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
-			if err := sender(sendCtx, job.message); err != nil {
-				log.Printf("email delivery failed to=%s subject=%q error=%v", job.message.To, job.message.Subject, err)
-			}
-			cancel()
-		}
-	}
-}
-
-func (a *App) defaultEmailSender() emailSender {
+func (a *App) defaultEmailSender() mailout.Sender {
 	if a.sendEmail != nil {
 		return a.sendEmail
 	}
@@ -16553,7 +15720,7 @@ func (a *App) filesPage(w http.ResponseWriter, r *http.Request) {
 			realFilePath, pathErr := a.existingPathInsideStorageSubtree(rootPath, filePath)
 			fileSize := int64(0)
 			if pathErr == nil {
-				fileSize = fileSizeBytes(realFilePath)
+				fileSize = diskusage.FileSize(realFilePath)
 			}
 			_ = a.applyDomainStorageDelta(r.Context(), a.siteDomain(r.Context(), r), 0, 0, 0, -fileSize, 0)
 			if pathErr == nil {
@@ -18384,10 +17551,6 @@ func (a *App) sumHTMLColumnBytes(ctx context.Context, query string, domain strin
 	return totalBytes
 }
 
-func fileSizeBytes(filePath string) int64 {
-	return diskusage.FileSize(filePath)
-}
-
 func fileExtensionLabel(fileName string) string {
 	extension := strings.TrimPrefix(strings.ToUpper(path.Ext(fileName)), ".")
 	if extension == "" {
@@ -19028,7 +18191,7 @@ func (a *App) pagePasswordUnlock(w http.ResponseWriter, r *http.Request, domain,
 		a.renderBlockedPagePasswordPrompt(w, r, domain, pagePath, hardLocked, blockedUntil)
 		return
 	}
-	if !pagePasswordMatches(rule.PasswordHash, r.FormValue("password")) {
+	if !dirprotect.Matches(rule.PasswordHash, r.FormValue("password")) {
 		translations := translationsForRequest(r)
 		failureCount, blockedUntil, hardLocked := a.registerFailedLoginAttempt(r.Context(), failureDomain, clientIP)
 		if hardLocked {
@@ -19052,7 +18215,8 @@ func (a *App) pagePasswordUnlock(w http.ResponseWriter, r *http.Request, domain,
 	}
 	a.clearFailedLoginAttempts(r.Context(), failureDomain, clientIP)
 	issuedAt := time.Now().UTC()
-	cookie := &http.Cookie{Name: pagePasswordCookieName(rule.Domain, rule.Path), Value: pagePasswordSessionTokenForRequest(rule, r, issuedAt), Path: "/", Expires: issuedAt.Add(pagePasswordSessionTTL), MaxAge: int(pagePasswordSessionTTL.Seconds()), HttpOnly: true, SameSite: http.SameSiteLaxMode}
+	rule.Domain = normalizeDomainName(rule.Domain)
+	cookie := &http.Cookie{Name: dirprotect.CookieName(rule.Domain, rule.Path), Value: dirprotect.BoundSessionToken(rule, clientIPAddress(r), r.UserAgent(), issuedAt), Path: "/", Expires: issuedAt.Add(pagePasswordSessionTTL), MaxAge: int(pagePasswordSessionTTL.Seconds()), HttpOnly: true, SameSite: http.SameSiteLaxMode}
 	if requestScheme(r) == "https" {
 		cookie.Secure = true
 	}
@@ -19077,11 +18241,12 @@ func (a *App) requirePagePassword(w http.ResponseWriter, r *http.Request, domain
 }
 
 func (a *App) pagePasswordSessionValid(r *http.Request, rule PagePasswordRule) bool {
-	cookie, err := r.Cookie(pagePasswordCookieName(rule.Domain, rule.Path))
+	rule.Domain = normalizeDomainName(rule.Domain)
+	cookie, err := r.Cookie(dirprotect.CookieName(rule.Domain, rule.Path))
 	if err != nil || strings.TrimSpace(cookie.Value) == "" {
 		return false
 	}
-	return pagePasswordSessionTokenValid(rule, cookie.Value, r, time.Now().UTC())
+	return dirprotect.BoundSessionTokenValid(rule, cookie.Value, clientIPAddress(r), r.UserAgent(), time.Now().UTC(), pagePasswordSessionTTL)
 }
 
 func (a *App) setPagePasswordRule(ctx context.Context, domain, pagePath, password string) {
@@ -19090,7 +18255,7 @@ func (a *App) setPagePasswordRule(ctx context.Context, domain, pagePath, passwor
 	_, _ = a.db.ExecContext(ctx, `INSERT INTO page_password_rules(domain,path,password_hash,created_at,updated_at)
 VALUES(?,?,?,?,?)
 ON CONFLICT(domain,path) DO UPDATE SET password_hash=excluded.password_hash,updated_at=excluded.updated_at`,
-		domain, normalizedPath, pagePasswordHash(password), now, now)
+		domain, normalizedPath, dirprotect.Hash(password), now, now)
 	_, _ = a.db.ExecContext(ctx, `DELETE FROM page_password_sessions WHERE domain=? AND path=?`, domain, normalizedPath)
 	a.writePagePasswordPrefixFile(ctx, domain)
 }
@@ -19123,7 +18288,7 @@ func (a *App) pagePasswordRuleForPath(ctx context.Context, domain, pagePath stri
 			continue
 		}
 		candidateRule.Path = cleanPath(candidateRule.Path)
-		if !pagePathHasProtectedPrefix(requestPath, candidateRule.Path) {
+		if !dirprotect.HasProtectedPrefix(requestPath, candidateRule.Path) {
 			continue
 		}
 		if len(candidateRule.Path) > len(bestRule.Path) {
@@ -19133,42 +18298,12 @@ func (a *App) pagePasswordRuleForPath(ctx context.Context, domain, pagePath stri
 	return bestRule, bestRule.Path != ""
 }
 
-func pagePathHasProtectedPrefix(pagePath, protectedPrefix string) bool {
-	return dirprotect.HasProtectedPrefix(pagePath, protectedPrefix)
-}
-
-func pagePasswordHash(password string) string {
-	return dirprotect.Hash(password)
-}
-
-func pagePasswordMatches(storedHash, password string) bool {
-	return dirprotect.Matches(storedHash, password)
-}
-
-func pagePasswordCookieName(domain, pagePath string) string {
-	return dirprotect.CookieName(normalizeDomainName(domain), pagePath)
-}
-
-func pagePasswordSessionTokenForRequest(rule PagePasswordRule, r *http.Request, issuedAt time.Time) string {
-	rule.Domain = normalizeDomainName(rule.Domain)
-	return dirprotect.BoundSessionToken(rule, clientIPAddress(r), r.UserAgent(), issuedAt)
-}
-
-func pagePasswordSessionTokenValid(rule PagePasswordRule, token string, r *http.Request, now time.Time) bool {
-	rule.Domain = normalizeDomainName(rule.Domain)
-	return dirprotect.BoundSessionTokenValid(rule, token, clientIPAddress(r), r.UserAgent(), now, pagePasswordSessionTTL)
-}
-
 func pagePasswordFailureDomain(domain, pagePath string) string {
 	return strings.TrimSuffix(pagePasswordFailureDomainPrefix(domain), "|")
 }
 
 func pagePasswordFailureDomainPrefix(domain string) string {
-	normalizedDomain := normalizeDomainName(domain)
-	if normalizedDomain == "" {
-		normalizedDomain = "localhost"
-	}
-	return normalizedDomain + "|page-password|"
+	return dirprotect.FailureDomainPrefix(domain)
 }
 
 func (a *App) pagePasswordRuleFromPrefixFile(domain, pagePath string) (PagePasswordRule, bool) {
@@ -19181,14 +18316,6 @@ func (a *App) pagePasswordRuleFromPrefixFile(domain, pagePath string) (PagePassw
 		normalizedDomain = "localhost"
 	}
 	return dirprotect.FindBestRuleInPrefixData(normalizedDomain, pagePath, prefixBytes)
-}
-
-func parsePagePasswordPrefixLine(domain, rawLine string) (PagePasswordRule, bool) {
-	normalizedDomain := canonicalLocalDomain(domain)
-	if normalizedDomain == "" {
-		normalizedDomain = "localhost"
-	}
-	return dirprotect.ParsePrefixLine(normalizedDomain, rawLine)
 }
 
 func (a *App) rebuildPagePasswordPrefixFiles(ctx context.Context) {
@@ -20955,7 +20082,7 @@ func (a *App) applyTemplatePropagation(ctx context.Context, domain, sourceHTML, 
 			var previousPublishedHTML string
 			_ = a.db.QueryRowContext(ctx, `SELECT html FROM published_pages WHERE domain=? AND path=?`, domain, currentPage.path).Scan(&previousPublishedHTML)
 			publishedPageDelta = updatedHTMLBytes - int64(len([]byte(previousPublishedHTML)))
-			publishedStaticDelta = updatedHTMLBytes - fileSizeBytes(filepath.Join(a.domainStaticDir(domain), staticRelativePathForPage(currentPage.path)))
+			publishedStaticDelta = updatedHTMLBytes - diskusage.FileSize(filepath.Join(a.domainStaticDir(domain), staticRelativePathForPage(currentPage.path)))
 		}
 		if storageErr := a.applyDomainStorageDelta(ctx, domain, pageDelta, publishedPageDelta, updatedHTMLBytes, 0, publishedStaticDelta); storageErr != nil {
 			message := "Template propagation skipped page because of storage limit"
@@ -21026,7 +20153,7 @@ func (a *App) applyTemplateClassSynchronization(ctx context.Context, domain, pre
 			var previousPublishedHTML string
 			_ = a.db.QueryRowContext(ctx, `SELECT html FROM published_pages WHERE domain=? AND path=?`, domain, currentPage.path).Scan(&previousPublishedHTML)
 			publishedPageDelta = updatedHTMLBytes - int64(len([]byte(previousPublishedHTML)))
-			publishedStaticDelta = updatedHTMLBytes - fileSizeBytes(filepath.Join(a.domainStaticDir(domain), staticRelativePathForPage(currentPage.path)))
+			publishedStaticDelta = updatedHTMLBytes - diskusage.FileSize(filepath.Join(a.domainStaticDir(domain), staticRelativePathForPage(currentPage.path)))
 		}
 		if storageErr := a.applyDomainStorageDelta(ctx, domain, pageDelta, publishedPageDelta, updatedHTMLBytes, 0, publishedStaticDelta); storageErr != nil {
 			message := "Template class synchronization skipped page because of storage limit"
@@ -21330,139 +20457,6 @@ func contentHashName(fileBytes []byte, extension string) (string, error) {
 	}
 	hashedBytes := sha256.Sum256(fileBytes)
 	return hex.EncodeToString(hashedBytes[:]) + extension, nil
-}
-
-func resourceExtension(rawRef string) string {
-	return crawler.ResourceExtension(rawRef)
-}
-
-func normalizedResourceContentType(contentTypeHeader string) string {
-	return strings.ToLower(strings.TrimSpace(strings.Split(contentTypeHeader, ";")[0]))
-}
-
-func resourceKindFromContentType(contentType string) string {
-	switch {
-	case contentType == "text/css":
-		return "style"
-	case strings.Contains(contentType, "javascript"), strings.Contains(contentType, "ecmascript"):
-		return "script"
-	case strings.HasPrefix(contentType, "image/"):
-		return "image"
-	case strings.HasPrefix(contentType, "font/"), strings.Contains(contentType, "font"):
-		return "font"
-	case strings.HasPrefix(contentType, "video/"):
-		return "video"
-	case strings.HasPrefix(contentType, "audio/"):
-		return "audio"
-	case strings.HasPrefix(contentType, "text/"), strings.HasPrefix(contentType, "application/"):
-		return "file"
-	default:
-		return ""
-	}
-}
-
-func effectiveGrabResourceContentType(resourceURL, contentType string) string {
-	contentType = normalizedResourceContentType(contentType)
-	resourceKind := resourceKindFromURL(resourceURL)
-	if resourceKind == "" || !isLegacyLooseTextResourceContentType(contentType) {
-		return contentType
-	}
-	switch resourceKind {
-	case "script":
-		return "application/javascript"
-	case "style":
-		return "text/css"
-	default:
-		return contentType
-	}
-}
-
-func isLegacyLooseTextResourceContentType(contentType string) bool {
-	switch contentType {
-	case "", "text/html", "application/xhtml+xml", "text/plain", "application/octet-stream":
-		return true
-	default:
-		return false
-	}
-}
-
-func grabErrorReason(err error) string {
-	if err == nil {
-		return "error"
-	}
-	errorText := strings.TrimSpace(err.Error())
-	for _, token := range strings.Fields(errorText) {
-		code := strings.Trim(token, ".,:;()[]{}\"'")
-		if len(code) == 3 && code[0] >= '1' && code[0] <= '5' && code[1] >= '0' && code[1] <= '9' && code[2] >= '0' && code[2] <= '9' {
-			return code
-		}
-	}
-	loweredText := strings.ToLower(errorText)
-	switch {
-	case strings.Contains(loweredText, "timeout") || strings.Contains(loweredText, "deadline"):
-		return "timeout"
-	case strings.Contains(loweredText, "no such host") || strings.Contains(loweredText, "dns") || strings.Contains(loweredText, "resolve"):
-		return "dns"
-	case strings.Contains(loweredText, "tls") || strings.Contains(loweredText, "certificate") || strings.Contains(loweredText, "handshake"):
-		return "tls"
-	case strings.Contains(loweredText, "refused"):
-		return "refused"
-	case strings.Contains(loweredText, "read"):
-		return "read"
-	default:
-		return "network"
-	}
-}
-
-func resourceExtensionFromContentType(contentType string) string {
-	switch contentType {
-	case "text/css":
-		return ".css"
-	case "application/javascript", "text/javascript", "application/x-javascript":
-		return ".js"
-	case "application/ecmascript", "text/ecmascript":
-		return ".mjs"
-	case "image/png":
-		return ".png"
-	case "image/jpeg":
-		return ".jpg"
-	case "image/gif":
-		return ".gif"
-	case "image/svg+xml":
-		return ".svg"
-	case "image/webp":
-		return ".webp"
-	case "image/x-icon", "image/vnd.microsoft.icon":
-		return ".ico"
-	case "font/woff":
-		return ".woff"
-	case "font/woff2":
-		return ".woff2"
-	case "font/ttf", "application/x-font-ttf":
-		return ".ttf"
-	case "font/otf", "application/x-font-opentype":
-		return ".otf"
-	case "application/vnd.ms-fontobject":
-		return ".eot"
-	case "video/mp4":
-		return ".mp4"
-	case "video/webm":
-		return ".webm"
-	case "video/quicktime":
-		return ".mov"
-	case "audio/mpeg":
-		return ".mp3"
-	case "audio/ogg":
-		return ".ogg"
-	case "audio/wav", "audio/wave", "audio/x-wav":
-		return ".wav"
-	}
-	extensions, err := mime.ExtensionsByType(contentType)
-	if err != nil || len(extensions) == 0 {
-		return ""
-	}
-	sort.Strings(extensions)
-	return strings.ToLower(strings.TrimSpace(extensions[0]))
 }
 
 func (a *App) mirrorRemotePage(domain, pagePath, sourceURL string, pageURL *url.URL, fallbackHTML, progressToken string, selectedResourceURLs map[string]struct{}, sourceIP string) string {
@@ -21870,7 +20864,7 @@ func (spider *pageSpider) fetchResource(rawURL string, baseURL *url.URL, depth i
 	if err != nil {
 		spider.resources[normalizedURL] = &mirroredResource{url: normalizedURL, persist: persist}
 		spider.failedTotal++
-		spider.recordFailedResource(normalizedURL, grabErrorReason(err))
+		spider.recordFailedResource(normalizedURL, crawler.ErrorReason(err))
 		spider.publishResourceProgress("error", normalizedURL, 0, 0, -1)
 		return nil, err
 	}
@@ -21882,7 +20876,7 @@ func (spider *pageSpider) fetchResource(rawURL string, baseURL *url.URL, depth i
 		spider.publishResourceProgress("error", normalizedURL, 0, 0, response.ContentLength)
 		return nil, fmt.Errorf("resource download failed: %s", response.Status)
 	}
-	resourceContentType := effectiveGrabResourceContentType(normalizedURL, response.Header.Get("Content-Type"))
+	resourceContentType := crawler.EffectiveResourceContentType(normalizedURL, response.Header.Get("Content-Type"))
 	if !spider.isAllowedResourceContentType(normalizedURL, resourceContentType) {
 		spider.resources[normalizedURL] = &mirroredResource{url: normalizedURL, persist: persist}
 		spider.failedTotal++
@@ -21894,7 +20888,7 @@ func (spider *pageSpider) fetchResource(rawURL string, baseURL *url.URL, depth i
 	if err != nil {
 		spider.resources[normalizedURL] = &mirroredResource{url: normalizedURL, persist: persist}
 		spider.failedTotal++
-		spider.recordFailedResource(normalizedURL, grabErrorReason(err))
+		spider.recordFailedResource(normalizedURL, crawler.ErrorReason(err))
 		spider.publishResourceProgress("error", normalizedURL, 0, 0, response.ContentLength)
 		return nil, err
 	}
@@ -22174,7 +21168,7 @@ func (spider *pageSpider) retryFailedResources(baseURL *url.URL, attempts int) {
 func (spider *pageSpider) rewriteNestedResources(resource *mirroredResource, depth int, contentType string) {
 	isHTML := isImportedHTMLContentType(contentType)
 	isCSS := strings.Contains(contentType, "text/css")
-	isJS := strings.Contains(contentType, "javascript") || strings.Contains(contentType, "ecmascript") || strings.HasSuffix(resourceExtension(resource.url), ".js") || strings.HasSuffix(resourceExtension(resource.url), ".mjs")
+	isJS := strings.Contains(contentType, "javascript") || strings.Contains(contentType, "ecmascript") || strings.HasSuffix(crawler.ResourceExtension(resource.url), ".js") || strings.HasSuffix(crawler.ResourceExtension(resource.url), ".mjs")
 	if !(isHTML || isCSS || isJS) {
 		return
 	}
@@ -22196,7 +21190,7 @@ func (spider *pageSpider) rewriteNestedResources(resource *mirroredResource, dep
 func (spider *pageSpider) collectPreviewNestedResources(resource *mirroredResource, depth int, contentType string) {
 	isHTML := isImportedHTMLContentType(contentType)
 	isCSS := strings.Contains(contentType, "text/css")
-	isJS := strings.Contains(contentType, "javascript") || strings.Contains(contentType, "ecmascript") || strings.HasSuffix(resourceExtension(resource.url), ".js") || strings.HasSuffix(resourceExtension(resource.url), ".mjs")
+	isJS := strings.Contains(contentType, "javascript") || strings.Contains(contentType, "ecmascript") || strings.HasSuffix(crawler.ResourceExtension(resource.url), ".js") || strings.HasSuffix(crawler.ResourceExtension(resource.url), ".mjs")
 	if !(isHTML || isCSS || isJS) {
 		return
 	}
@@ -22261,7 +21255,7 @@ func (spider *pageSpider) shouldRewriteImageAltResourceReference(rawRef string, 
 	if blocked || normalizedURL == "" {
 		return false
 	}
-	return hasAllowedGrabResourceExtension(normalizedURL)
+	return crawler.HasAllowedResourceExtension(normalizedURL)
 }
 
 func (spider *pageSpider) rewriteResourceReference(rawRef string, baseURL *url.URL, depth int) string {
@@ -22276,7 +21270,7 @@ func (spider *pageSpider) rewriteResourceReference(rawRef string, baseURL *url.U
 	if err != nil || dependency == nil || dependency.assetPath == "" {
 		return normalizedURL
 	}
-	return normalizeMirroredAssetReference(dependency.assetPath)
+	return crawler.NormalizeMirroredAssetReference(dependency.assetPath)
 }
 
 func (spider *pageSpider) rewriteDocumentResourceReference(rawRef string, baseURL *url.URL, depth int) string {
@@ -22294,7 +21288,7 @@ func (spider *pageSpider) rewriteDocumentResourceReference(rawRef string, baseUR
 	if err != nil || dependency == nil || dependency.assetPath == "" {
 		return rawRef
 	}
-	return normalizeMirroredAssetReference(dependency.assetPath)
+	return crawler.NormalizeMirroredAssetReference(dependency.assetPath)
 }
 
 func (spider *pageSpider) shouldBlankEmbeddedDocumentReference(tagName, normalizedURL string) bool {
@@ -22348,7 +21342,7 @@ func (spider *pageSpider) rewriteResourceReferenceForContext(rawRef string, base
 	if err != nil || dependency == nil || dependency.assetPath == "" {
 		return normalizedURL
 	}
-	return normalizeMirroredAssetReference(dependency.assetPath)
+	return crawler.NormalizeMirroredAssetReference(dependency.assetPath)
 }
 
 func (spider *pageSpider) collectPreviewDocumentResourceReference(rawRef string, baseURL *url.URL, depth int) string {
@@ -22443,14 +21437,14 @@ func (spider *pageSpider) previewResourceMetadata(normalizedURL string) (string,
 	if response.StatusCode >= 400 {
 		return "", -1
 	}
-	contentType := effectiveGrabResourceContentType(normalizedURL, response.Header.Get("Content-Type"))
+	contentType := crawler.EffectiveResourceContentType(normalizedURL, response.Header.Get("Content-Type"))
 	return contentType, response.ContentLength
 }
 
 func (spider *pageSpider) shouldFetchPreviewResourceBody(normalizedURL, contentType string) bool {
-	resourceKind := resourceKindFromURL(normalizedURL)
+	resourceKind := crawler.ResourceKindFromURL(normalizedURL)
 	if resourceKind == "" && contentType != "" {
-		resourceKind = resourceKindFromContentType(contentType)
+		resourceKind = crawler.ResourceKindFromContentType(contentType)
 	}
 	return resourceKind == "style" || resourceKind == "script"
 }
@@ -22469,7 +21463,7 @@ func (spider *pageSpider) fetchPreviewResourceBody(normalizedURL string) ([]byte
 	if response.StatusCode >= 400 {
 		return nil, "", response.ContentLength, fmt.Errorf("resource download failed: %s", response.Status)
 	}
-	contentType := effectiveGrabResourceContentType(normalizedURL, response.Header.Get("Content-Type"))
+	contentType := crawler.EffectiveResourceContentType(normalizedURL, response.Header.Get("Content-Type"))
 	if !spider.isAllowedResourceContentType(normalizedURL, contentType) {
 		return nil, contentType, response.ContentLength, fmt.Errorf("resource content-type rejected: %s", response.Header.Get("Content-Type"))
 	}
@@ -22479,38 +21473,6 @@ func (spider *pageSpider) fetchPreviewResourceBody(normalizedURL string) ([]byte
 	}
 	body = decodeImportedResourceBytes(normalizedURL, body, response.Header.Get("Content-Type"), contentType)
 	return body, contentType, response.ContentLength, nil
-}
-
-func normalizeMirroredAssetReference(assetPath string) string {
-	trimmedPath := strings.TrimSpace(assetPath)
-	if trimmedPath == "" {
-		return ""
-	}
-	if strings.HasPrefix(trimmedPath, "http://") || strings.HasPrefix(trimmedPath, "https://") || strings.HasPrefix(trimmedPath, "data:") || strings.HasPrefix(trimmedPath, "blob:") {
-		return trimmedPath
-	}
-	if strings.HasPrefix(trimmedPath, "//") {
-		return "/" + strings.TrimLeft(trimmedPath, "/")
-	}
-	return trimmedPath
-}
-
-func shouldResolveJavaScriptReferenceAgainstOriginRoot(rawRef string, baseURL *url.URL) bool {
-	normalizedURL, blocked := crawler.NormalizeURL(rawRef, baseURL, crawler.ReferenceJavaScript)
-	documentURL, documentBlocked := crawler.NormalizeURL(rawRef, baseURL, crawler.ReferenceDocument)
-	return !blocked && !documentBlocked && normalizedURL != documentURL
-}
-
-func originRootURL(baseURL *url.URL) *url.URL {
-	return crawler.OriginRootURL(baseURL)
-}
-
-func firstPathSegment(rawPath string) string {
-	return crawler.FirstPathSegment(rawPath)
-}
-
-func isSuspiciousGrabReference(rawRef string) bool {
-	return crawler.IsSuspiciousReference(rawRef)
 }
 
 func (spider *pageSpider) shouldSkipMirrorResource(resourceURL string) bool {
@@ -22537,17 +21499,17 @@ func (spider *pageSpider) shouldSkipMirrorResource(resourceURL string) bool {
 }
 
 func (spider *pageSpider) isAllowedResourceContentType(resourceURL, contentType string) bool {
-	contentType = effectiveGrabResourceContentType(resourceURL, contentType)
+	contentType = crawler.EffectiveResourceContentType(resourceURL, contentType)
 	if contentType == "" {
-		return hasAllowedGrabResourceExtension(resourceURL)
+		return crawler.HasAllowedResourceExtension(resourceURL)
 	}
 	switch contentType {
 	case "text/html", "application/xhtml+xml":
 		return false
 	}
-	resourceKind := resourceKindFromURL(resourceURL)
+	resourceKind := crawler.ResourceKindFromURL(resourceURL)
 	if resourceKind == "" {
-		resourceKind = resourceKindFromContentType(contentType)
+		resourceKind = crawler.ResourceKindFromContentType(contentType)
 	}
 	switch resourceKind {
 	case "style":
@@ -22569,14 +21531,6 @@ func (spider *pageSpider) isAllowedResourceContentType(resourceURL, contentType 
 	}
 }
 
-func resourceKindFromURL(resourceURL string) string {
-	return crawler.ResourceKindFromURL(resourceURL)
-}
-
-func hasAllowedGrabResourceExtension(resourceURL string) bool {
-	return crawler.HasAllowedResourceExtension(resourceURL)
-}
-
 func (spider *pageSpider) shouldPersistResource(normalizedURL string) bool {
 	if spider.selectedResourceURLs == nil {
 		return true
@@ -22589,9 +21543,9 @@ func (spider *pageSpider) shouldPersistResource(normalizedURL string) bool {
 }
 
 func (spider *pageSpider) assetPathFor(fileBytes []byte, sourceURL, contentType string) string {
-	extension := resourceExtension(sourceURL)
+	extension := crawler.ResourceExtension(sourceURL)
 	if extension == "" {
-		extension = resourceExtensionFromContentType(contentType)
+		extension = crawler.ResourceExtensionFromContentType(contentType)
 	}
 	if extension == "" {
 		extension = ".bin"
@@ -24986,7 +23940,7 @@ func (a *App) publishDomain(w http.ResponseWriter, r *http.Request) {
 		var previousPublishedHTML string
 		_ = a.db.QueryRowContext(r.Context(), `SELECT html FROM published_pages WHERE domain=? AND path=?`, domain, pageCandidate.Path).Scan(&previousPublishedHTML)
 		publishedPageDelta := publishedHTMLBytes - int64(len([]byte(previousPublishedHTML)))
-		publishedStaticDelta := publishedHTMLBytes - fileSizeBytes(filepath.Join(a.domainStaticDir(domain), staticRelativePathForPage(pageCandidate.Path)))
+		publishedStaticDelta := publishedHTMLBytes - diskusage.FileSize(filepath.Join(a.domainStaticDir(domain), staticRelativePathForPage(pageCandidate.Path)))
 		if storageErr := a.applyDomainStorageDelta(r.Context(), domain, 0, publishedPageDelta, 0, 0, publishedStaticDelta); storageErr != nil {
 			log.Printf("publish skipped by storage limit domain=%s path=%s error=%v", domain, pageCandidate.Path, storageErr)
 			skippedPagesCount++

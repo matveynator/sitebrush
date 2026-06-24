@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"mime"
 	"net"
 	"net/mail"
@@ -22,6 +23,20 @@ type Message struct {
 	To      string
 	Subject string
 	Body    string
+}
+
+const DeliveryQueueSize = 256
+
+type Sender func(context.Context, Message) error
+
+type DeliveryJob struct {
+	Message Message
+}
+
+func StartDeliveryWorker(ctx context.Context, sender Sender) chan DeliveryJob {
+	jobs := make(chan DeliveryJob, DeliveryQueueSize)
+	go runDeliveryWorker(ctx, jobs, sender)
+	return jobs
 }
 
 type DirectSender struct {
@@ -59,6 +74,24 @@ func (sender DirectSender) Send(ctx context.Context, message Message) error {
 		return lastErr
 	}
 	return errors.New("no mail hosts found")
+}
+
+func runDeliveryWorker(ctx context.Context, jobs <-chan DeliveryJob, sender Sender) {
+	if sender == nil {
+		sender = DirectSender{}.Send
+	}
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case job := <-jobs:
+			sendCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
+			if err := sender(sendCtx, job.Message); err != nil {
+				log.Printf("email delivery failed to=%s subject=%q error=%v", job.Message.To, job.Message.Subject, err)
+			}
+			cancel()
+		}
+	}
 }
 
 func (sender DirectSender) sendToHost(ctx context.Context, targetHost, fromAddress, toAddress string, payload []byte) error {
