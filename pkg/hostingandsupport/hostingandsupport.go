@@ -972,6 +972,9 @@ func (store Store) CreateInvoice(ctx context.Context, invoice Invoice) (Invoice,
 	invoice.Amount = strings.TrimSpace(invoice.Amount)
 	invoice.Currency = strings.ToUpper(strings.TrimSpace(invoice.Currency))
 	invoice.Provider = normalizePaymentProvider(invoice.Provider)
+	if invoice.Provider == "" {
+		invoice.Provider = "sitebrush_com"
+	}
 	if invoice.CustomerEmail == "" {
 		return Invoice{}, fmt.Errorf("customer email is required")
 	}
@@ -983,9 +986,6 @@ func (store Store) CreateInvoice(ctx context.Context, invoice Invoice) (Invoice,
 	}
 	if invoice.Currency == "" {
 		invoice.Currency = "USD"
-	}
-	if invoice.Provider == "" {
-		return Invoice{}, fmt.Errorf("payment provider is required")
 	}
 	if !store.paymentProviderEnabled(ctx, invoice.Provider) {
 		return Invoice{}, fmt.Errorf("payment provider is disabled")

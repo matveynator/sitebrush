@@ -242,6 +242,18 @@ func TestPaymentProvidersAndInvoicesRoundTrip(t *testing.T) {
 	if providers[0].Provider != "sitebrush_com" || !providers[0].Enabled || providers[1].Provider != "stripe" || providers[2].Provider != "paypal" || providers[3].Provider != "sbp" {
 		t.Fatalf("providers order = %#v", providers)
 	}
+	demoInvoice, err := store.CreateInvoice(context.Background(), Invoice{
+		CustomerEmail: "demo@example.com",
+		Domain:        "demo.example.com",
+		Amount:        "1000",
+		Currency:      "RUB",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if demoInvoice.Provider != "sitebrush_com" || !strings.Contains(demoInvoice.PaymentURL, "hosting_and_support_demo_payment") {
+		t.Fatalf("demo invoice did not use SiteBrush.com payment defaults: %#v", demoInvoice)
+	}
 	if _, err := store.CreateInvoice(context.Background(), Invoice{
 		CustomerEmail: "client@example.com",
 		Domain:        "example.com",
@@ -285,8 +297,8 @@ func TestPaymentProvidersAndInvoicesRoundTrip(t *testing.T) {
 		}
 	}
 	invoices := store.Invoices(context.Background(), 10)
-	if len(invoices) != 1 {
-		t.Fatalf("invoices = %d, want 1", len(invoices))
+	if len(invoices) != 2 {
+		t.Fatalf("invoices = %d, want 2", len(invoices))
 	}
 	paidInvoice, err := store.UpdateInvoiceStatus(context.Background(), createdInvoice.ID, "paid")
 	if err != nil {

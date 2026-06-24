@@ -12,6 +12,7 @@ import (
 	"crypto/rand"
 	"crypto/sha1"
 	"crypto/sha256"
+	"crypto/subtle"
 	"crypto/tls"
 	"crypto/x509"
 	"database/sql"
@@ -35,6 +36,7 @@ import (
 	"net"
 	"net/http"
 	stdmail "net/mail"
+	"net/netip"
 	"net/url"
 	"os"
 	"os/exec"
@@ -82,6 +84,33 @@ var importedHTMLCharsetMetaPattern = regexp.MustCompile(`(?i)<meta\b[^>]*charset
 var importedHTMLHeadOpenPattern = regexp.MustCompile(`(?i)<head\b[^>]*>`)
 var importedHTMLHTMLOpenPattern = regexp.MustCompile(`(?i)<html\b[^>]*>`)
 var importedCSSCharsetAssignmentPattern = regexp.MustCompile(`(?i)^(\s*\x{feff}?\s*@charset\s+["'])[a-z0-9._:-]+(["']\s*;)`)
+var errReadLimitExceeded = errors.New("read limit exceeded")
+var publicOutboundBlockedIPPrefixes = []netip.Prefix{
+	netip.MustParsePrefix("0.0.0.0/8"),
+	netip.MustParsePrefix("10.0.0.0/8"),
+	netip.MustParsePrefix("100.64.0.0/10"),
+	netip.MustParsePrefix("127.0.0.0/8"),
+	netip.MustParsePrefix("169.254.0.0/16"),
+	netip.MustParsePrefix("172.16.0.0/12"),
+	netip.MustParsePrefix("192.0.0.0/24"),
+	netip.MustParsePrefix("192.0.2.0/24"),
+	netip.MustParsePrefix("192.168.0.0/16"),
+	netip.MustParsePrefix("198.18.0.0/15"),
+	netip.MustParsePrefix("198.51.100.0/24"),
+	netip.MustParsePrefix("203.0.113.0/24"),
+	netip.MustParsePrefix("224.0.0.0/4"),
+	netip.MustParsePrefix("240.0.0.0/4"),
+	netip.MustParsePrefix("255.255.255.255/32"),
+	netip.MustParsePrefix("::/128"),
+	netip.MustParsePrefix("::1/128"),
+	netip.MustParsePrefix("64:ff9b::/96"),
+	netip.MustParsePrefix("100::/64"),
+	netip.MustParsePrefix("2001::/23"),
+	netip.MustParsePrefix("2001:db8::/32"),
+	netip.MustParsePrefix("fc00::/7"),
+	netip.MustParsePrefix("fe80::/10"),
+	netip.MustParsePrefix("ff00::/8"),
+}
 
 const storageAppName = "sitebrush"
 const defaultDBPath = "storage/db/sitebrush.db"
@@ -111,6 +140,8 @@ const pagePasswordSessionTTL = time.Hour
 const serviceMailRelayPath = "/?service_mail_relay"
 const hostingSnapshotPath = "/?hosting_snapshot"
 const serviceMailRelayTimeout = 12 * time.Second
+const serviceMailRelayBodyLimitBytes int64 = 256 * 1024
+const hostingSnapshotNetChanPayloadLimitBytes int64 = serviceMailRelayBodyLimitBytes
 const serviceMailPerInstallationHourLimit = 120
 const serviceMailNewInstallationHourLimit = 10
 const serviceMailPerIPHourLimit = 240
@@ -119,6 +150,12 @@ const serviceMailPerSourceDomainHourLimit = 120
 const serviceMailPerRecipientHourLimit = 12
 const serviceMailPerRecipientDomainHourLimit = 300
 const serviceMailNewRecipientDayLimit = 3
+const grabResourceBodyLimitBytes int64 = 64 * 1024 * 1024
+const backupImportUploadLimitBytes int64 = 512 * 1024 * 1024
+const backupImportJSONLimitBytes int64 = 4 * 1024 * 1024
+const backupImportTextEntryLimitBytes int64 = 16 * 1024 * 1024
+const backupImportFileEntryLimitBytes int64 = 128 * 1024 * 1024
+const backupImportUncompressedLimitBytes int64 = 1024 * 1024 * 1024
 const hostingSnapshotNetChanPort = "9876"
 
 var sitebrushComServiceMailRelayPublicKey = "axM/Ha8N6Ci/IiLs2SqULfu1DVlQKrkswNsOPgnx4kY="
@@ -7473,7 +7510,8 @@ func (a *App) publicTrialSitePreview(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, publicTrialSourceErrorText(translationsForRequest(r), err), http.StatusBadGateway)
 		return
 	}
-	initialSpider := newPreviewPageSpider("", remoteSourceURL, grabResourceMaxDepth, a.grabTracker, progressToken, grabSourceOptions{})
+	publicSourceOptions := publicTrialGrabSourceOptions()
+	initialSpider := newPreviewPageSpider("", remoteSourceURL, grabResourceMaxDepth, a.grabTracker, progressToken, publicSourceOptions)
 	initialRootResource := &mirroredResource{url: sourceURL, content: htmlBytes}
 	initialSpider.resources[sourceURL] = initialRootResource
 	initialSpider.collectPreviewNestedResources(initialRootResource, 0, "text/html")
@@ -7490,7 +7528,7 @@ func (a *App) publicTrialSitePreview(w http.ResponseWriter, r *http.Request) {
 		ResourceCount:  len(initialResources),
 		ResourceCounts: publicTrialResourceCountsFromResources(initialResources),
 	})
-	wholeSitePreview := previewWholeRemoteSiteResources(remoteSourceURL, string(htmlBytes), "/", a.grabTracker, progressToken, grabSourceOptions{})
+	wholeSitePreview := previewWholeRemoteSiteResources(remoteSourceURL, string(htmlBytes), "/", a.grabTracker, progressToken, publicSourceOptions)
 	importedPages := wholeSitePreview.ImportedPages
 	if len(importedPages) == 0 {
 		importedPages = initialImportedPages
@@ -7843,10 +7881,14 @@ func (a *App) downloadPublicTrialSourceHTML(ctx context.Context, sourceURL, prog
 	if err != nil {
 		return nil, nil, errors.New("source_url is invalid")
 	}
-	client := newGrabHTTPClientForServerIP(remoteSourceURL.Hostname(), "")
+	sourceOptions := publicTrialGrabSourceOptions()
+	if err := requirePublicOutboundURL(remoteSourceURL); err != nil {
+		return nil, nil, err
+	}
+	client := newGrabHTTPClientForSourceOptions(remoteSourceURL.Hostname(), sourceOptions)
 	lastStatus := ""
 	downloadResult, err := crawler.DownloadHTMLPageWithRetriesContext(ctx, client, remoteSourceURL, func(request *http.Request) {
-		applyGrabRequestHeaders(request, grabSourceOptions{})
+		applyGrabRequestHeaders(request, sourceOptions)
 		applyGrabHTMLRequestHeaders(request)
 	}, crawler.HTMLDownloadRetryOptions{
 		Attempts: 3,
@@ -7868,8 +7910,11 @@ func (a *App) downloadPublicTrialSourceHTML(ctx context.Context, sourceURL, prog
 		fallbackURL := crawler.CloneURL(remoteSourceURL)
 		fallbackURL.Scheme = "http"
 		fallbackURL.Host = fallbackURL.Hostname()
+		if err := requirePublicOutboundURL(fallbackURL); err != nil {
+			return nil, nil, err
+		}
 		downloadResult, err = crawler.DownloadHTMLPageWithRetriesContext(ctx, client, fallbackURL, func(request *http.Request) {
-			applyGrabRequestHeaders(request, grabSourceOptions{})
+			applyGrabRequestHeaders(request, sourceOptions)
 			applyGrabHTMLRequestHeaders(request)
 		}, crawler.HTMLDownloadRetryOptions{
 			Attempts: 2,
@@ -8057,7 +8102,7 @@ func (a *App) preparePublicTrialPreviewForCreate(ctx context.Context, preview pu
 		preview.ResourceCounts = publicTrialResourceCountsFromResources(selectedResources)
 		return preview
 	}
-	spider := newPageSpider("", remoteSourceURL, grabResourceMaxDepth, a.grabTracker, progressToken, grabSourceOptions{})
+	spider := newPageSpider("", remoteSourceURL, grabResourceMaxDepth, a.grabTracker, progressToken, publicTrialGrabSourceOptions())
 	spider.setContext(ctx)
 	spider.publicAssetBasePath = "/"
 	spider.selectedResourceURLs = selectedResourceURLs
@@ -8512,6 +8557,43 @@ func wantsJSONResponse(r *http.Request) bool {
 	return strings.Contains(strings.ToLower(r.Header.Get("Accept")), "application/json")
 }
 
+func readRequestBodyWithLimit(reader io.Reader, limitBytes int64) ([]byte, error) {
+	return readAllWithLimit(reader, limitBytes)
+}
+
+func readAllWithLimit(reader io.Reader, limitBytes int64) ([]byte, error) {
+	if limitBytes <= 0 {
+		return io.ReadAll(reader)
+	}
+	requestBody, err := io.ReadAll(io.LimitReader(reader, limitBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(requestBody)) > limitBytes {
+		return nil, errReadLimitExceeded
+	}
+	return requestBody, nil
+}
+
+func copyWithLimit(writer io.Writer, reader io.Reader, limitBytes int64) (int64, error) {
+	if limitBytes <= 0 {
+		return io.Copy(writer, reader)
+	}
+	limitedReader := &io.LimitedReader{R: reader, N: limitBytes + 1}
+	writtenBytes, err := io.Copy(writer, limitedReader)
+	if err != nil {
+		return writtenBytes, err
+	}
+	if writtenBytes > limitBytes {
+		return writtenBytes, errReadLimitExceeded
+	}
+	return writtenBytes, nil
+}
+
+func publicTrialGrabSourceOptions() grabSourceOptions {
+	return grabSourceOptions{PublicNetworkOnly: true}
+}
+
 func downloadGrabSourceHTML(sourceURL, sourceIP string) ([]byte, error) {
 	htmlBytes, _, err := downloadGrabSourceHTMLWithResolvedURL(sourceURL, grabSourceOptions{IP: sourceIP})
 	return htmlBytes, err
@@ -8526,7 +8608,7 @@ func downloadGrabSourceHTMLWithResolvedURLContext(ctx context.Context, sourceURL
 	if err != nil {
 		return nil, nil, errors.New("source_url is invalid")
 	}
-	client := newGrabHTTPClientForServerIP(remoteSourceURL.Hostname(), sourceOptions.IP)
+	client := newGrabHTTPClientForSourceOptions(remoteSourceURL.Hostname(), sourceOptions)
 	lastStatus := ""
 	downloadResult, err := crawler.DownloadHTMLPageWithRetriesContext(ctx, client, remoteSourceURL, func(request *http.Request) {
 		applyGrabRequestHeaders(request, sourceOptions)
@@ -8873,7 +8955,7 @@ func (a *App) prepareWholeRemoteSiteImport(importRequest grabImportRequest) (*pa
 		return crawler.WholeSiteLocalLink(basePath, startURL, parsedURL), true
 	}
 
-	pageClient := grabImportHTTPClient(newGrabHTTPClientForServerIP(startURL.Hostname(), importRequest.SourceOptions.IP))
+	pageClient := grabImportHTTPClient(newGrabHTTPClientForSourceOptions(startURL.Hostname(), importRequest.SourceOptions))
 	knownPagePathsByKey := map[string]string{crawler.WholeSitePageKey(startURL): basePath}
 	pageQueue := []wholeSitePageJob{{URL: crawler.CloneURL(startURL), HTML: importRequest.HTML}}
 	importedPages := make([]wholeSiteImportedPage, 0, 32)
@@ -8990,7 +9072,7 @@ func crawlWholeRemoteSite(startURL *url.URL, startHTML, publicAssetBasePath stri
 		}
 		return crawler.WholeSiteLocalLink(cleanPath(publicAssetBasePath), startURL, parsedURL), true
 	}
-	pageClient := grabPreviewHTTPClient(newGrabHTTPClientForServerIP(startURL.Hostname(), sourceOptions.IP))
+	pageClient := grabPreviewHTTPClient(newGrabHTTPClientForSourceOptions(startURL.Hostname(), sourceOptions))
 	knownPagePathsByKey := map[string]string{crawler.WholeSitePageKey(startURL): cleanPath(publicAssetBasePath)}
 	pageURLs := map[string]struct{}{startURL.String(): {}}
 	pageQueue := []wholeSitePageJob{{URL: crawler.CloneURL(startURL), HTML: startHTML}}
@@ -9833,31 +9915,36 @@ type hostingAndSupportOverviewAction struct {
 }
 
 type hostingAndSupportServerView struct {
-	ID                 string
-	Name               string
-	Subtitle           string
-	Local              bool
-	OwnerEmail         string
-	SiteCount          int
-	ClientCount        int
-	InvoiceCount       int
-	BillableCount      int
-	UnpaidInvoiceCount int
-	TotalUsedLabel     string
-	DiskFreeLabel      string
-	DiskTotalLabel     string
-	SyncStatusLabel    string
-	SyncStatusClass    string
-	NetworkStatusLabel string
-	NetworkStatusClass string
-	InvoiceActionLabel string
-	InvoiceActionClass string
-	Sites              []hostingAndSupportServerSiteView
-	Clients            []hostingAndSupportServerClientView
-	Invoices           []hostingAndSupportServerInvoiceView
-	Plans              []hostingandsupport.ClientHostingPlan
-	Settings           []hostingAndSupportServerSettingView
-	Diagnostics        []hostingAndSupportServerDiagnosticView
+	ID                     string
+	Name                   string
+	Subtitle               string
+	Local                  bool
+	OwnerEmail             string
+	SiteCount              int
+	ClientCount            int
+	InvoiceCount           int
+	BillableCount          int
+	UnpaidInvoiceCount     int
+	TotalUsedLabel         string
+	DiskFreeLabel          string
+	DiskTotalLabel         string
+	SyncStatusLabel        string
+	SyncStatusClass        string
+	NetworkStatusLabel     string
+	NetworkStatusClass     string
+	InvoiceActionLabel     string
+	InvoiceActionClass     string
+	DefaultInvoiceClient   string
+	DefaultInvoiceDomain   string
+	DefaultInvoicePlan     string
+	DefaultInvoiceAmount   string
+	DefaultInvoiceCurrency string
+	Sites                  []hostingAndSupportServerSiteView
+	Clients                []hostingAndSupportServerClientView
+	Invoices               []hostingAndSupportServerInvoiceView
+	Plans                  []hostingandsupport.ClientHostingPlan
+	Settings               []hostingAndSupportServerSettingView
+	Diagnostics            []hostingAndSupportServerDiagnosticView
 }
 
 type hostingAndSupportServerSiteView struct {
@@ -10085,6 +10172,7 @@ func (a *App) localHostingAndSupportServerView(siteRows []hostingandsupport.Site
 	server.InvoiceActionLabel, server.InvoiceActionClass = hostingAndSupportInvoiceAction(server.BillableCount, server.UnpaidInvoiceCount)
 	server.TotalUsedLabel = hostingAndSupportServerTotalUsedLabel(server.Sites)
 	server.Plans = hostingAndSupportClientPlansFromPlans(plans)
+	applyHostingAndSupportServerInvoiceDefaults(&server)
 	return server
 }
 
@@ -10148,7 +10236,32 @@ func hostingAndSupportRemoteServerView(clientHosting hostingandsupport.ClientHos
 	server.BillableCount = hostingAndSupportBillableSiteCount(server.Sites)
 	server.UnpaidInvoiceCount = hostingAndSupportUnpaidInvoiceCount(server.Invoices)
 	server.InvoiceActionLabel, server.InvoiceActionClass = hostingAndSupportInvoiceAction(server.BillableCount, server.UnpaidInvoiceCount)
+	applyHostingAndSupportServerInvoiceDefaults(&server)
 	return server
+}
+
+func applyHostingAndSupportServerInvoiceDefaults(server *hostingAndSupportServerView) {
+	if server == nil {
+		return
+	}
+	server.DefaultInvoiceCurrency = "RUB"
+	server.DefaultInvoiceAmount = "1000"
+	if len(server.Clients) > 0 {
+		server.DefaultInvoiceClient = server.Clients[0].Email
+	}
+	for _, site := range server.Sites {
+		if server.DefaultInvoiceDomain == "" {
+			server.DefaultInvoiceDomain = site.Domain
+			server.DefaultInvoicePlan = site.PlanName
+		}
+		switch strings.TrimSpace(site.PaidStatus) {
+		case "paid", "paused":
+			server.DefaultInvoiceDomain = site.Domain
+			server.DefaultInvoiceClient = firstNonEmpty(site.OwnerEmail, server.DefaultInvoiceClient)
+			server.DefaultInvoicePlan = site.PlanName
+			return
+		}
+	}
 }
 
 func hostingAndSupportFastServerHostings(clientHostings []hostingandsupport.ClientHosting) []hostingandsupport.ClientHosting {
@@ -12086,6 +12199,19 @@ func (a *App) backupRootDir() string {
 	return filepath.Join(storagePath, "backup")
 }
 
+func (a *App) backupArchivePathAllowed(archivePath string) bool {
+	archivePath = strings.TrimSpace(archivePath)
+	if archivePath == "" || strings.ToLower(filepath.Ext(archivePath)) != ".zip" {
+		return false
+	}
+	rootPath, rootErr := filepath.Abs(a.backupRootDir())
+	candidatePath, candidateErr := filepath.Abs(archivePath)
+	if rootErr != nil || candidateErr != nil {
+		return false
+	}
+	return isPathWithinRoot(rootPath, candidatePath)
+}
+
 func (a *App) createManagedSiteDeletionBackup(ctx context.Context, r *http.Request, controlDatabase *sql.DB, row siteQuotaRow, ownerContacts []string, retentionDays int, languageCode string) (managedSiteDeletionBackupView, error) {
 	domain := normalizeQuotaDomainName(row.Domain)
 	if domain == "" {
@@ -12308,7 +12434,9 @@ func (a *App) managedSiteDeletionBackupViews(ctx context.Context, r *http.Reques
 			view.RetentionDays = hostingandsupport.DefaultDeletionBackupRetentionDays
 		}
 		view.Expired = !expiresAt.IsZero() && !expiresAt.After(now)
-		if _, statErr := os.Stat(archivePath); statErr != nil {
+		if !a.backupArchivePathAllowed(archivePath) {
+			view.ArchiveMissing = true
+		} else if _, statErr := os.Stat(archivePath); statErr != nil {
 			view.ArchiveMissing = true
 		}
 		view.SizeLabel = formatFileSize(sizeBytes)
@@ -12355,7 +12483,9 @@ func (a *App) cleanupExpiredManagedSiteDeletionBackups(ctx context.Context, cont
 	}
 	_ = rows.Close()
 	for _, backup := range expiredBackups {
-		_ = os.Remove(backup.archivePath)
+		if a.backupArchivePathAllowed(backup.archivePath) {
+			_ = os.Remove(backup.archivePath)
+		}
 		_, _ = controlDatabase.ExecContext(ctx, `UPDATE site_deletion_backups SET token='' WHERE id=?`, backup.id)
 	}
 }
@@ -12407,7 +12537,7 @@ func (a *App) downloadManagedSiteDeletionBackup(w http.ResponseWriter, r *http.R
 		return
 	}
 	token := strings.TrimSpace(r.URL.Query().Get("token"))
-	if token == "" {
+	if !validOpaqueAccessToken(token) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
@@ -12434,6 +12564,10 @@ func (a *App) downloadManagedSiteDeletionBackup(w http.ResponseWriter, r *http.R
 		http.Error(w, "backup expired", http.StatusGone)
 		return
 	}
+	if !a.backupArchivePathAllowed(archivePath) {
+		http.Error(w, "backup archive unavailable", http.StatusNotFound)
+		return
+	}
 	archiveFile, err := os.Open(archivePath)
 	if err != nil {
 		http.Error(w, "backup archive missing", http.StatusNotFound)
@@ -12446,8 +12580,12 @@ func (a *App) downloadManagedSiteDeletionBackup(w http.ResponseWriter, r *http.R
 		return
 	}
 	backup.SizeLabel = formatFileSize(archiveInfo.Size())
+	downloadFileName := safeFileName(backup.FileName)
+	if downloadFileName == "" {
+		downloadFileName = backupFileName(backup.Domain)
+	}
 	w.Header().Set("Content-Type", "application/zip")
-	w.Header().Set("Content-Disposition", "attachment; filename=\""+backup.FileName+"\"")
+	w.Header().Set("Content-Disposition", "attachment; filename=\""+downloadFileName+"\"")
 	if _, err := io.Copy(w, archiveFile); err != nil {
 		return
 	}
@@ -12595,6 +12733,9 @@ func (a *App) createInvoiceFromForm(r *http.Request) string {
 		Provider:      strings.TrimSpace(r.FormValue("provider")),
 		DueAt:         strings.TrimSpace(r.FormValue("due_at")),
 		Notes:         strings.TrimSpace(r.FormValue("notes")),
+	}
+	if invoice.Provider == "" {
+		invoice.Provider = "sitebrush_com"
 	}
 	controlDatabase, err := a.openServerControlDatabase(r.Context())
 	if err != nil {
@@ -14121,7 +14262,10 @@ func (a *App) startHostingSnapshotNetChanListener(ctx context.Context) {
 			select {
 			case <-ctx.Done():
 				return
-			case payload := <-receive:
+			case payload, isOpen := <-receive:
+				if !isOpen {
+					return
+				}
 				a.handleHostingSnapshotNetChanPayload(ctx, payload)
 			}
 		}
@@ -14147,6 +14291,10 @@ func (a *App) handleHostingSnapshotNetChanPayload(ctx context.Context, payload a
 		requestBytes = []byte(typedPayload)
 	default:
 		log.Printf("hosting snapshot netchan unsupported payload type %T", payload)
+		return
+	}
+	if len(requestBytes) == 0 || int64(len(requestBytes)) > hostingSnapshotNetChanPayloadLimitBytes {
+		log.Printf("hosting snapshot netchan rejected oversized payload bytes=%d", len(requestBytes))
 		return
 	}
 	var request serviceMailRequest
@@ -14747,9 +14895,9 @@ func (a *App) serviceMailRelayEndpoint(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	requestBody, err := io.ReadAll(io.LimitReader(r.Body, 256*1024))
+	requestBody, err := readRequestBodyWithLimit(r.Body, serviceMailRelayBodyLimitBytes)
 	if err != nil {
-		http.Error(w, "bad request", http.StatusBadRequest)
+		http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
 		return
 	}
 	request, err := a.decodeServiceMailRelayRequest(r.Context(), requestBody, a.siteDomain(r.Context(), r))
@@ -14772,9 +14920,9 @@ func (a *App) hostingSnapshotEndpoint(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	requestBody, err := io.ReadAll(io.LimitReader(r.Body, 256*1024))
+	requestBody, err := readRequestBodyWithLimit(r.Body, serviceMailRelayBodyLimitBytes)
 	if err != nil {
-		http.Error(w, "bad request", http.StatusBadRequest)
+		http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
 		return
 	}
 	request, err := a.decodeServiceMailRelayRequest(r.Context(), requestBody, a.siteDomain(r.Context(), r))
@@ -17920,6 +18068,33 @@ func randomAccessToken() string {
 	return base64.RawURLEncoding.EncodeToString(tokenBytes[:])
 }
 
+func validOpaqueAccessToken(token string) bool {
+	token = strings.TrimSpace(token)
+	if len(token) < 16 || len(token) > 128 {
+		return false
+	}
+	for _, tokenRune := range token {
+		switch {
+		case tokenRune >= 'a' && tokenRune <= 'z':
+		case tokenRune >= 'A' && tokenRune <= 'Z':
+		case tokenRune >= '0' && tokenRune <= '9':
+		case tokenRune == '-' || tokenRune == '_':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func opaqueAccessTokensEqual(leftToken, rightToken string) bool {
+	leftToken = strings.TrimSpace(leftToken)
+	rightToken = strings.TrimSpace(rightToken)
+	if !validOpaqueAccessToken(leftToken) || !validOpaqueAccessToken(rightToken) {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(leftToken), []byte(rightToken)) == 1
+}
+
 func (a *App) fileAccessRulesByName(ctx context.Context, r *http.Request) map[string]ManagedFileAccess {
 	accessRulesByName := make(map[string]ManagedFileAccess)
 	rows, err := a.db.QueryContext(ctx, `SELECT file_name,access_mode,token,expires_at,single_use_left,token_use_count FROM file_access_rules WHERE domain=?`, domainStorageName(a.siteDomain(ctx, r)))
@@ -21060,12 +21235,108 @@ func newGrabHTTPClientForServerIP(sourceHost, sourceIP string) *http.Client {
 	return crawler.NewSessionClient(20*time.Second, transport)
 }
 
+func newGrabHTTPClientForSourceOptions(sourceHost string, sourceOptions grabSourceOptions) *http.Client {
+	if sourceOptions.PublicNetworkOnly {
+		return newPublicGrabHTTPClient()
+	}
+	return newGrabHTTPClientForServerIP(sourceHost, sourceOptions.IP)
+}
+
+func newPublicGrabHTTPClient() *http.Client {
+	transport := newGrabHTTPTransport()
+	transport.Proxy = nil
+	dialer := &net.Dialer{Timeout: 20 * time.Second}
+	transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+		return dialPublicOutboundAddress(ctx, dialer, network, address)
+	}
+	client := crawler.NewSessionClient(20*time.Second, transport)
+	client.CheckRedirect = func(request *http.Request, via []*http.Request) error {
+		return requirePublicOutboundURL(request.URL)
+	}
+	return client
+}
+
+func requirePublicOutboundURL(targetURL *url.URL) error {
+	if targetURL == nil {
+		return errors.New("source_url is invalid")
+	}
+	scheme := strings.ToLower(strings.TrimSpace(targetURL.Scheme))
+	if scheme != "http" && scheme != "https" {
+		return errors.New("source_url is invalid")
+	}
+	hostName := strings.TrimSpace(targetURL.Hostname())
+	if hostName == "" || strings.Contains(hostName, "%") {
+		return errors.New("source_url is invalid")
+	}
+	if targetURL.User != nil {
+		return errors.New("source_url must not contain credentials")
+	}
+	if parsedIP := net.ParseIP(hostName); parsedIP != nil && !publicOutboundIPAllowed(parsedIP) {
+		return errors.New("private network addresses are not allowed")
+	}
+	return nil
+}
+
+func dialPublicOutboundAddress(ctx context.Context, dialer *net.Dialer, network, address string) (net.Conn, error) {
+	hostName, port, splitErr := net.SplitHostPort(address)
+	if splitErr != nil || strings.TrimSpace(hostName) == "" || strings.TrimSpace(port) == "" {
+		return nil, errors.New("source address is invalid")
+	}
+	if strings.Contains(hostName, "%") {
+		return nil, errors.New("private network addresses are not allowed")
+	}
+	ipAddresses, lookupErr := net.DefaultResolver.LookupIPAddr(ctx, hostName)
+	if lookupErr != nil {
+		return nil, lookupErr
+	}
+	if len(ipAddresses) == 0 {
+		return nil, errors.New("source host did not resolve")
+	}
+	for _, ipAddress := range ipAddresses {
+		if !publicOutboundIPAllowed(ipAddress.IP) {
+			return nil, errors.New("private network addresses are not allowed")
+		}
+	}
+	var lastErr error
+	for _, ipAddress := range ipAddresses {
+		connection, dialErr := dialer.DialContext(ctx, network, net.JoinHostPort(ipAddress.IP.String(), port))
+		if dialErr == nil {
+			return connection, nil
+		}
+		lastErr = dialErr
+	}
+	if lastErr != nil {
+		return nil, lastErr
+	}
+	return nil, errors.New("source host did not connect")
+}
+
+func publicOutboundIPAllowed(ip net.IP) bool {
+	if ip == nil {
+		return false
+	}
+	address, ok := netip.AddrFromSlice(ip)
+	if !ok {
+		return false
+	}
+	address = address.Unmap()
+	if !address.IsGlobalUnicast() || address.IsPrivate() || address.IsLoopback() || address.IsLinkLocalUnicast() || address.IsLinkLocalMulticast() || address.IsMulticast() || address.IsUnspecified() {
+		return false
+	}
+	for _, blockedPrefix := range publicOutboundBlockedIPPrefixes {
+		if blockedPrefix.Contains(address) {
+			return false
+		}
+	}
+	return true
+}
+
 func newPageSpider(domain string, pageURL *url.URL, maxDepth int, tracker *grabProgressTracker, progressToken string, sourceOptions grabSourceOptions) *pageSpider {
 	return &pageSpider{
 		domain:               domain,
 		pageURL:              pageURL,
 		maxDepth:             maxDepth,
-		client:               grabImportHTTPClient(newGrabHTTPClientForServerIP(pageURL.Hostname(), sourceOptions.IP)),
+		client:               grabImportHTTPClient(newGrabHTTPClientForSourceOptions(pageURL.Hostname(), sourceOptions)),
 		ctx:                  context.Background(),
 		sourceOptions:        sourceOptions,
 		resources:            make(map[string]*mirroredResource),
@@ -21420,6 +21691,9 @@ func (spider *pageSpider) waitBeforeRetry(currentURL string, attempt, total int)
 }
 
 func (spider *pageSpider) readResourceBody(reader io.Reader, resourceURL string, sizeBytes int64) ([]byte, error) {
+	if sizeBytes > grabResourceBodyLimitBytes {
+		return nil, fmt.Errorf("resource body exceeds %d bytes", grabResourceBodyLimitBytes)
+	}
 	var bodyBuffer bytes.Buffer
 	buffer := make([]byte, 32*1024)
 	downloadedBytes := int64(0)
@@ -21429,6 +21703,9 @@ func (spider *pageSpider) readResourceBody(reader io.Reader, resourceURL string,
 		readCount, readErr := reader.Read(buffer)
 		if readCount > 0 {
 			downloadedBytes += int64(readCount)
+			if downloadedBytes > grabResourceBodyLimitBytes {
+				return nil, fmt.Errorf("resource body exceeds %d bytes", grabResourceBodyLimitBytes)
+			}
 			if _, writeErr := bodyBuffer.Write(buffer[:readCount]); writeErr != nil {
 				return nil, writeErr
 			}
@@ -24202,7 +24479,7 @@ func (a *App) downloadBackup(w http.ResponseWriter, r *http.Request) {
 	if !a.isAdminRequest(r) {
 		requestedToken := strings.TrimSpace(r.URL.Query().Get("token"))
 		backupToken := a.backupTokenForDomain(r.Context(), domain)
-		if requestedToken == "" || requestedToken != backupToken {
+		if !opaqueAccessTokensEqual(requestedToken, backupToken) {
 			http.Error(w, "forbidden", http.StatusForbidden)
 			return
 		}
@@ -24280,7 +24557,12 @@ func (a *App) importBackup(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if err := r.ParseMultipartForm(512 << 20); err != nil {
+	r.Body = http.MaxBytesReader(w, r.Body, backupImportUploadLimitBytes)
+	if err := r.ParseMultipartForm(32 << 20); err != nil {
+		if strings.Contains(strings.ToLower(err.Error()), "too large") {
+			http.Error(w, "backup zip is too large", http.StatusRequestEntityTooLarge)
+			return
+		}
 		http.Error(w, "failed to parse upload", http.StatusBadRequest)
 		return
 	}
@@ -24301,11 +24583,15 @@ func (a *App) importBackup(w http.ResponseWriter, r *http.Request) {
 	}
 	tempFilePath := tempFile.Name()
 	defer os.Remove(tempFilePath)
-	writtenBytes, copyErr := io.Copy(tempFile, backupFile)
+	writtenBytes, copyErr := copyWithLimit(tempFile, backupFile, backupImportUploadLimitBytes)
 	if closeErr := tempFile.Close(); closeErr != nil && copyErr == nil {
 		copyErr = closeErr
 	}
 	if copyErr != nil {
+		if errors.Is(copyErr, errReadLimitExceeded) {
+			http.Error(w, "backup zip is too large", http.StatusRequestEntityTooLarge)
+			return
+		}
 		http.Error(w, "failed to stage backup zip", http.StatusInternalServerError)
 		return
 	}
@@ -24740,6 +25026,45 @@ func normalizedStaticExportHost(rawHost string) string {
 	return canonicalLocalDomain(trimmedHost)
 }
 
+func safeBackupZIPEntryName(rawName string) (string, bool) {
+	entryName := filepath.ToSlash(strings.TrimSpace(rawName))
+	if entryName == "" || strings.HasPrefix(entryName, "/") || strings.Contains(entryName, "\\") {
+		return "", false
+	}
+	cleanEntryName := path.Clean(entryName)
+	if cleanEntryName == "." || strings.HasPrefix(cleanEntryName, "../") || cleanEntryName == ".." {
+		return "", false
+	}
+	if strings.HasPrefix(entryName, "./") {
+		entryName = strings.TrimPrefix(cleanEntryName, "./")
+	} else {
+		entryName = cleanEntryName
+	}
+	return entryName, true
+}
+
+func readBackupZIPEntryWithLimit(zipEntry *zip.File, limitBytes int64) ([]byte, error) {
+	if zipEntry == nil {
+		return nil, errors.New("backup entry is missing")
+	}
+	entryReader, openErr := zipEntry.Open()
+	if openErr != nil {
+		return nil, openErr
+	}
+	defer entryReader.Close()
+	return readAllWithLimit(entryReader, limitBytes)
+}
+
+func zipEntryDeclaredSize(zipEntry *zip.File) int64 {
+	if zipEntry == nil {
+		return 0
+	}
+	if zipEntry.UncompressedSize64 > math.MaxInt64 {
+		return math.MaxInt64
+	}
+	return int64(zipEntry.UncompressedSize64)
+}
+
 func staticExportURLSuffix(parsedReference *url.URL) string {
 	var suffixBuilder strings.Builder
 	if parsedReference.ForceQuery || parsedReference.RawQuery != "" {
@@ -24779,30 +25104,43 @@ func resolveStaticExportRelativeSitePaths(rawPath, sourceSitePath string) []stri
 func (a *App) importDomainBackupZIP(ctx context.Context, domain string, importBasePath string, backupZIP *zip.Reader) (string, error) {
 	var backupJSON []byte
 	filesByName := make(map[string]*zip.File)
+	var totalUncompressedBytes int64
 	for _, zipEntry := range backupZIP.File {
-		entryName := filepath.ToSlash(strings.TrimSpace(zipEntry.Name))
+		entryName, safeEntry := safeBackupZIPEntryName(zipEntry.Name)
+		if !safeEntry {
+			return "/", fmt.Errorf("unsafe backup entry %q", zipEntry.Name)
+		}
+		entrySize := zipEntryDeclaredSize(zipEntry)
+		if entrySize > backupImportUncompressedLimitBytes || totalUncompressedBytes > backupImportUncompressedLimitBytes-entrySize {
+			return "/", fmt.Errorf("backup uncompressed size exceeds %d bytes", backupImportUncompressedLimitBytes)
+		}
+		totalUncompressedBytes += entrySize
 		switch {
 		case entryName == "backup.json":
-			reader, openErr := zipEntry.Open()
-			if openErr != nil {
-				return "/", openErr
+			if zipEntry.FileInfo().IsDir() {
+				return "/", errors.New("backup.json is a directory")
 			}
-			payload, readErr := io.ReadAll(reader)
-			_ = reader.Close()
+			payload, readErr := readBackupZIPEntryWithLimit(zipEntry, backupImportJSONLimitBytes)
 			if readErr != nil {
 				return "/", readErr
 			}
 			backupJSON = payload
 		case strings.HasPrefix(entryName, "files/"):
 			relativeName := safeRelativeAssetPath(strings.TrimPrefix(entryName, "files/"))
-			if relativeName == "" || strings.HasSuffix(entryName, "/") {
+			if relativeName == "" || zipEntry.FileInfo().IsDir() {
 				continue
+			}
+			if zipEntryDeclaredSize(zipEntry) > backupImportFileEntryLimitBytes {
+				return "/", fmt.Errorf("backup file %s exceeds %d bytes", relativeName, backupImportFileEntryLimitBytes)
 			}
 			filesByName[relativeName] = zipEntry
 		case strings.HasPrefix(entryName, "p/"):
 			relativeName := safeRelativeAssetPath(strings.TrimPrefix(entryName, "p/"))
-			if relativeName == "" || strings.HasSuffix(entryName, "/") {
+			if relativeName == "" || zipEntry.FileInfo().IsDir() {
 				continue
+			}
+			if zipEntryDeclaredSize(zipEntry) > backupImportFileEntryLimitBytes {
+				return "/", fmt.Errorf("backup file %s exceeds %d bytes", relativeName, backupImportFileEntryLimitBytes)
 			}
 			filesByName[relativeName] = zipEntry
 		}
@@ -24855,24 +25193,43 @@ func (a *App) importDomainBackupZIP(ctx context.Context, domain string, importBa
 		if nextFileName == "" {
 			continue
 		}
+		targetFilePath := filepath.Join(domainDir, filepath.FromSlash(nextFileName))
+		if !isPathWithinRoot(domainDir, targetFilePath) {
+			return rootRedirectPath, fmt.Errorf("backup file path escapes site directory: %s", nextFileName)
+		}
+		if err := os.MkdirAll(filepath.Dir(targetFilePath), 0o755); err != nil {
+			return rootRedirectPath, err
+		}
+		if shouldRewriteImportedTextFile(nextFileName) {
+			fileBytes, readErr := readBackupZIPEntryWithLimit(zipEntry, backupImportTextEntryLimitBytes)
+			if readErr != nil {
+				return rootRedirectPath, readErr
+			}
+			fileBytes = []byte(rewriteBackupInternalLinks(string(fileBytes), basePath, filePrefix))
+			if err := os.WriteFile(targetFilePath, fileBytes, 0o644); err != nil {
+				return rootRedirectPath, err
+			}
+			continue
+		}
 		entryReader, openErr := zipEntry.Open()
 		if openErr != nil {
 			return rootRedirectPath, openErr
 		}
-		fileBytes, readErr := io.ReadAll(entryReader)
+		targetFile, createErr := os.Create(targetFilePath)
+		if createErr != nil {
+			_ = entryReader.Close()
+			return rootRedirectPath, createErr
+		}
+		_, copyErr := copyWithLimit(targetFile, entryReader, backupImportFileEntryLimitBytes)
+		closeErr := targetFile.Close()
 		_ = entryReader.Close()
-		if readErr != nil {
-			return rootRedirectPath, readErr
+		if copyErr != nil {
+			_ = os.Remove(targetFilePath)
+			return rootRedirectPath, copyErr
 		}
-		if shouldRewriteImportedTextFile(nextFileName) {
-			fileBytes = []byte(rewriteBackupInternalLinks(string(fileBytes), basePath, filePrefix))
-		}
-		targetFilePath := filepath.Join(domainDir, filepath.FromSlash(nextFileName))
-		if err := os.MkdirAll(filepath.Dir(targetFilePath), 0o755); err != nil {
-			return rootRedirectPath, err
-		}
-		if err := os.WriteFile(targetFilePath, fileBytes, 0o644); err != nil {
-			return rootRedirectPath, err
+		if closeErr != nil {
+			_ = os.Remove(targetFilePath)
+			return rootRedirectPath, closeErr
 		}
 	}
 

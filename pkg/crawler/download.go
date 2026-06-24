@@ -12,6 +12,8 @@ import (
 	"time"
 )
 
+const maxHTMLDownloadBytes int64 = 32 * 1024 * 1024
+
 // HTMLDownloadResult carries the document and transport metadata together so
 // callers can keep HTTP details out of application-level download code.
 type HTMLDownloadResult struct {
@@ -77,7 +79,7 @@ func DownloadHTMLPageContext(ctx context.Context, client *http.Client, pageURL *
 	if contentType != "" && contentType != "text/html" && contentType != "application/xhtml+xml" {
 		return result, nil
 	}
-	pageBytes, readErr := io.ReadAll(response.Body)
+	pageBytes, readErr := readHTMLBodyWithLimit(response.Body, maxHTMLDownloadBytes)
 	if readErr != nil {
 		return result, readErr
 	}
@@ -127,4 +129,18 @@ func DownloadHTMLPageWithRetriesContext(ctx context.Context, client *http.Client
 		}
 	}
 	return lastResult, lastErr
+}
+
+func readHTMLBodyWithLimit(reader io.Reader, limitBytes int64) ([]byte, error) {
+	if limitBytes <= 0 {
+		return io.ReadAll(reader)
+	}
+	pageBytes, err := io.ReadAll(io.LimitReader(reader, limitBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(pageBytes)) > limitBytes {
+		return nil, fmt.Errorf("html body exceeds %d bytes", limitBytes)
+	}
+	return pageBytes, nil
 }

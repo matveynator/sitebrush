@@ -91,6 +91,71 @@ func TestDecodeImportedResourceBytesRewritesCSSCharset(t *testing.T) {
 	}
 }
 
+func TestPublicOutboundIPAllowedRejectsPrivateNetworks(t *testing.T) {
+	blockedIPs := []string{
+		"127.0.0.1",
+		"10.0.0.1",
+		"172.16.0.1",
+		"192.168.0.1",
+		"169.254.1.1",
+		"100.64.0.1",
+		"198.51.100.1",
+		"::1",
+		"fc00::1",
+		"fe80::1",
+	}
+	for _, ipText := range blockedIPs {
+		if publicOutboundIPAllowed(net.ParseIP(ipText)) {
+			t.Fatalf("private or special IP %s was allowed", ipText)
+		}
+	}
+	allowedIPs := []string{"1.1.1.1", "8.8.8.8", "2606:4700:4700::1111"}
+	for _, ipText := range allowedIPs {
+		if !publicOutboundIPAllowed(net.ParseIP(ipText)) {
+			t.Fatalf("public IP %s was rejected", ipText)
+		}
+	}
+}
+
+func TestRequirePublicOutboundURLRejectsCredentialsAndPrivateIP(t *testing.T) {
+	privateURL, _ := url.Parse("https://127.0.0.1/")
+	if err := requirePublicOutboundURL(privateURL); err == nil {
+		t.Fatal("private IP URL was allowed")
+	}
+	credentialURL, _ := url.Parse("https://user:pass@example.com/")
+	if err := requirePublicOutboundURL(credentialURL); err == nil {
+		t.Fatal("credential URL was allowed")
+	}
+	publicURL, _ := url.Parse("https://example.com/")
+	if err := requirePublicOutboundURL(publicURL); err != nil {
+		t.Fatalf("public URL was rejected: %v", err)
+	}
+}
+
+func TestReadRequestBodyWithLimitRejectsOversizedBody(t *testing.T) {
+	if _, err := readRequestBodyWithLimit(strings.NewReader("abcdef"), 5); !errors.Is(err, errReadLimitExceeded) {
+		t.Fatalf("oversized body error = %v", err)
+	}
+	body, err := readRequestBodyWithLimit(strings.NewReader("abcde"), 5)
+	if err != nil {
+		t.Fatalf("body at limit rejected: %v", err)
+	}
+	if string(body) != "abcde" {
+		t.Fatalf("body = %q", string(body))
+	}
+}
+
+func TestServiceMailRelayEndpointRejectsOversizedBody(t *testing.T) {
+	application := &App{}
+	requestBody := strings.NewReader(strings.Repeat("x", int(serviceMailRelayBodyLimitBytes)+1))
+	request := httptest.NewRequest(http.MethodPost, "http://localhost/?service_mail_relay", requestBody)
+	response := httptest.NewRecorder()
+	application.serviceMailRelayEndpoint(response, request)
+	if response.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, body=%q", response.Code, response.Body.String())
+	}
+}
+
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func mustDNSNameForTest(name string) dnsmessage.Name {
@@ -8194,6 +8259,45 @@ func TestStaticArchivePathForURI(t *testing.T) {
 		if actualFilePath != testCase.expectedFilePath {
 			t.Fatalf("staticArchivePathForURI(%q) = %q, want %q", testCase.pageURI, actualFilePath, testCase.expectedFilePath)
 		}
+	}
+}
+
+func TestBackupArchivePathAllowedRequiresBackupRoot(t *testing.T) {
+	application := &App{storagePath: t.TempDir()}
+	backupRoot := application.backupRootDir()
+	insideArchive := filepath.Join(backupRoot, "site.zip")
+	outsideArchive := filepath.Join(t.TempDir(), "site.zip")
+	if !application.backupArchivePathAllowed(insideArchive) {
+		t.Fatalf("archive under backup root was rejected: %s", insideArchive)
+	}
+	if application.backupArchivePathAllowed(outsideArchive) {
+		t.Fatalf("archive outside backup root was allowed: %s", outsideArchive)
+	}
+	if application.backupArchivePathAllowed(filepath.Join(backupRoot, "site.txt")) {
+		t.Fatal("non-zip backup archive was allowed")
+	}
+}
+
+func TestImportDomainBackupRejectsUnsafeZIPEntry(t *testing.T) {
+	var archiveBuffer bytes.Buffer
+	zipWriter := zip.NewWriter(&archiveBuffer)
+	unsafeWriter, err := zipWriter.Create("../outside.txt")
+	if err != nil {
+		t.Fatalf("create unsafe entry: %v", err)
+	}
+	if _, err := unsafeWriter.Write([]byte("outside")); err != nil {
+		t.Fatalf("write unsafe entry: %v", err)
+	}
+	if err := zipWriter.Close(); err != nil {
+		t.Fatalf("close zip: %v", err)
+	}
+	backupZIP, err := zip.NewReader(bytes.NewReader(archiveBuffer.Bytes()), int64(archiveBuffer.Len()))
+	if err != nil {
+		t.Fatalf("zip.NewReader: %v", err)
+	}
+	_, err = (&App{}).importDomainBackupZIP(context.Background(), "localhost", "/", backupZIP)
+	if err == nil || !strings.Contains(err.Error(), "unsafe backup entry") {
+		t.Fatalf("unsafe backup entry error = %v", err)
 	}
 }
 

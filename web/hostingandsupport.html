@@ -152,7 +152,22 @@
             </div>
             <div class="modal-body">
               <p class="text-muted">На первом этапе используется предустановленная демо-оплата через SiteBrush.com. Реселлеру не нужно настраивать Stripe или шаблоны оплаты.</p>
-              <a class="btn {{$server.InvoiceActionClass}}" href="#hostingLegacyInvoiceForm" data-bs-dismiss="modal">{{$server.InvoiceActionLabel}}</a>
+              {{if $server.BillableCount}}
+              <form method="post" action="?hosting_and_support" class="billing-plan-form">
+                <input type="hidden" name="billing_action" value="create_invoice">
+                <input type="hidden" name="provider" value="sitebrush_com">
+                <label>Клиент <input name="customer_email" type="email" class="form-control" value="{{$server.DefaultInvoiceClient}}" placeholder="client@example.com" required></label>
+                <label>Сайт <input name="domain" type="text" class="form-control" value="{{$server.DefaultInvoiceDomain}}" placeholder="example.com" required></label>
+                <label>Услуга <input name="plan_name" type="text" class="form-control" value="{{$server.DefaultInvoicePlan}}" placeholder="Хостинг и поддержка"></label>
+                <label>Сумма <input name="amount" type="text" class="form-control" value="{{$server.DefaultInvoiceAmount}}" required></label>
+                <label>Валюта <input name="currency" type="text" class="form-control" value="{{$server.DefaultInvoiceCurrency}}" required></label>
+                <label>Период обслуживания <input name="due_at" type="date" class="form-control"></label>
+                <label>История / комментарий <input name="notes" type="text" class="form-control" value="За хостинг и поддержку"></label>
+                <button type="submit" class="btn {{$server.InvoiceActionClass}}">{{$server.InvoiceActionLabel}}</button>
+              </form>
+              {{else}}
+              <div class="alert alert-secondary mb-0" role="alert">На этом сервере нет платных или приостановленных сайтов, поэтому счёт выставлять не нужно.</div>
+              {{end}}
             </div>
           </div></div>
         </div>
@@ -640,7 +655,7 @@
           <p class="text-muted">Выставляйте счета клиентам и отмечайте оплату. Технические настройки способов оплаты скрыты ниже.</p>
         </div>
       </div>
-      <form method="post" action="?hosting_and_support" class="billing-plan-form" id="hostingLegacyInvoiceForm">
+      <form method="post" action="?hosting_and_support" class="billing-plan-form">
         <input type="hidden" name="billing_action" value="create_invoice">
         <label>Клиент <input name="customer_email" type="email" class="form-control" placeholder="client@example.com" required></label>
         <label>Сайт <input name="domain" type="text" class="form-control" placeholder="example.com" required></label>

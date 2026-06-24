@@ -7,8 +7,9 @@ import (
 
 // SourceOptions carry transport-level source overrides shared by previews and imports.
 type SourceOptions struct {
-	IP           string
-	LanguageCode string
+	IP                string
+	LanguageCode      string
+	PublicNetworkOnly bool
 }
 
 // ImportRequest is the application-facing input for single page and whole site imports.

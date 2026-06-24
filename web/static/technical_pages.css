@@ -884,7 +884,8 @@
     gap: 8px;
 }
 
-.technical-page .hosting-overview-metrics button {
+.technical-page .hosting-overview-metrics button,
+.technical-page .hosting-overview-metrics a {
     display: grid;
     gap: 2px;
     min-height: 70px;
@@ -894,6 +895,7 @@
     background: rgba(0, 0, 0, 0.12);
     color: var(--muted);
     text-align: left;
+    text-decoration: none;
 }
 
 .technical-page .hosting-overview-metrics strong {
@@ -1235,6 +1237,72 @@
 .technical-page .billing-client-site-over-limit {
     border-color: rgba(220, 53, 69, 0.55);
     background: rgba(220, 53, 69, 0.08);
+}
+
+.technical-page .hosting-server-card {
+    border-bottom-right-radius: 0;
+    border-bottom-left-radius: 0;
+}
+
+.technical-page .hosting-server-details {
+    display: grid;
+    gap: 8px;
+    margin-top: -8px;
+    margin-bottom: 8px;
+    padding: 12px;
+    border: 1px solid rgba(149, 229, 239, 0.16);
+    border-top: 0;
+    border-radius: 0 0 8px 8px;
+    background: rgba(0, 0, 0, 0.10);
+}
+
+.technical-page .hosting-server-details details {
+    padding: 9px;
+    border: 1px solid rgba(149, 229, 239, 0.12);
+    border-radius: 7px;
+    background: rgba(255, 255, 255, 0.025);
+}
+
+.technical-page .hosting-server-details summary {
+    cursor: pointer;
+    color: var(--text);
+    font-weight: 700;
+}
+
+.technical-page .hosting-server-details details[open] summary {
+    margin-bottom: 8px;
+}
+
+.technical-page .hosting-server-details .billing-client-site-row {
+    grid-template-columns: minmax(160px, 1.2fr) minmax(130px, 0.9fr) minmax(160px, 1fr) minmax(120px, 0.8fr) minmax(100px, 0.7fr) minmax(130px, 0.9fr);
+}
+
+.technical-page .billing-invoice-page-list {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    gap: 10px;
+}
+
+.technical-page .billing-invoice-page {
+    display: grid;
+    gap: 10px;
+    padding: 14px;
+    border: 1px solid rgba(149, 229, 239, 0.18);
+    border-radius: 8px;
+    background: linear-gradient(180deg, rgba(255, 255, 255, 0.055), rgba(255, 255, 255, 0.025));
+}
+
+.technical-page .billing-invoice-page-head {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 10px;
+}
+
+.technical-page .billing-invoice-page-head strong {
+    color: var(--text);
+    font-size: 18px;
+    white-space: nowrap;
 }
 
 .technical-page .billing-user-subtitle {
