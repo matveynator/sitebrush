@@ -166,6 +166,7 @@ type App struct {
 	db                        sqlExecutor
 	siteDatabaseRouter        *perSiteDBRouter
 	storagePath               string
+	storageRealRoot           string
 	dbPath                    string
 	debug                     bool
 	nativeFileDialog          bool
@@ -2138,12 +2139,17 @@ func (a *App) drainDomainLogEvents(events <-chan domainLogEvent) {
 
 func (a *App) appendDomainLogEvent(event domainLogEvent) {
 	logDir := a.domainLogDir(event.Domain)
-	if err := os.MkdirAll(logDir, 0o755); err != nil {
+	if err := a.mkdirAllInsideStorage(logDir, 0o755); err != nil {
 		log.Printf("failed to create domain log dir for %s: %v", event.Domain, err)
 		return
 	}
 	logPath := filepath.Join(logDir, event.OccurredAt.Format("2006-01-02")+".log")
-	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	realLogPath, pathErr := a.writablePathInsideStorageSubtree(logDir, logPath)
+	if pathErr != nil {
+		log.Printf("failed to resolve domain log path for %s: %v", event.Domain, pathErr)
+		return
+	}
+	logFile, err := os.OpenFile(realLogPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
 	if err != nil {
 		log.Printf("failed to open domain log for %s: %v", event.Domain, err)
 		return
@@ -2156,7 +2162,11 @@ func (a *App) appendDomainLogEvent(event domainLogEvent) {
 
 func (a *App) cleanupOldDomainLogs(domain string, now time.Time) {
 	logDir := a.domainLogDir(domain)
-	entries, err := os.ReadDir(logDir)
+	realLogDir, pathErr := a.existingPathInsideStorage(logDir)
+	if pathErr != nil {
+		return
+	}
+	entries, err := os.ReadDir(realLogDir)
 	if err != nil {
 		return
 	}
@@ -2169,7 +2179,11 @@ func (a *App) cleanupOldDomainLogs(domain string, now time.Time) {
 		if parseErr != nil || !logDate.Before(cutoffDate) {
 			continue
 		}
-		if removeErr := os.Remove(filepath.Join(logDir, entry.Name())); removeErr != nil {
+		realLogPath, pathErr := a.existingPathInsideStorageSubtree(realLogDir, filepath.Join(realLogDir, entry.Name()))
+		if pathErr != nil {
+			continue
+		}
+		if removeErr := os.Remove(realLogPath); removeErr != nil {
 			log.Printf("failed to remove old domain log %s/%s: %v", domain, entry.Name(), removeErr)
 		}
 	}
@@ -2186,12 +2200,17 @@ func (a *App) appendProblemLogEvent(occurredAt time.Time, message string) {
 		occurredAt = time.Now().UTC()
 	}
 	logDir := a.problemLogDir()
-	if err := os.MkdirAll(logDir, 0o755); err != nil {
+	if err := a.mkdirAllInsideStorage(logDir, 0o755); err != nil {
 		log.Printf("failed to create problem log dir: %v", err)
 		return
 	}
 	logPath := filepath.Join(logDir, occurredAt.Format("2006-01-02")+".log")
-	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	realLogPath, pathErr := a.writablePathInsideStorageSubtree(logDir, logPath)
+	if pathErr != nil {
+		log.Printf("failed to resolve problem log path: %v", pathErr)
+		return
+	}
+	logFile, err := os.OpenFile(realLogPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
 	if err != nil {
 		log.Printf("failed to open problem log: %v", err)
 		return
@@ -2205,7 +2224,11 @@ func (a *App) appendProblemLogEvent(occurredAt time.Time, message string) {
 
 func (a *App) cleanupOldProblemLogs(now time.Time) {
 	logDir := a.problemLogDir()
-	entries, err := os.ReadDir(logDir)
+	realLogDir, pathErr := a.existingPathInsideStorage(logDir)
+	if pathErr != nil {
+		return
+	}
+	entries, err := os.ReadDir(realLogDir)
 	if err != nil {
 		return
 	}
@@ -2218,7 +2241,11 @@ func (a *App) cleanupOldProblemLogs(now time.Time) {
 		if parseErr != nil || !logDate.Before(cutoffDate) {
 			continue
 		}
-		if removeErr := os.Remove(filepath.Join(logDir, entry.Name())); removeErr != nil {
+		realLogPath, pathErr := a.existingPathInsideStorageSubtree(realLogDir, filepath.Join(realLogDir, entry.Name()))
+		if pathErr != nil {
+			continue
+		}
+		if removeErr := os.Remove(realLogPath); removeErr != nil {
 			log.Printf("failed to remove old problem log %s: %v", entry.Name(), removeErr)
 		}
 	}
@@ -4000,6 +4027,22 @@ func cleanStoragePath(storagePath string) string {
 	return filepath.Clean(trimmedStoragePath)
 }
 
+func prepareStorageJailRoot(storagePath string) (string, error) {
+	cleanedStoragePath := cleanStoragePath(storagePath)
+	if err := os.MkdirAll(cleanedStoragePath, 0o755); err != nil {
+		return "", err
+	}
+	absoluteStoragePath, err := filepath.Abs(cleanedStoragePath)
+	if err != nil {
+		return "", err
+	}
+	realStoragePath, err := filepath.EvalSymlinks(absoluteStoragePath)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Clean(realStoragePath), nil
+}
+
 func cleanDBPath(dbPath string) string {
 	trimmedDBPath := strings.TrimSpace(dbPath)
 	if trimmedDBPath == "" {
@@ -4327,26 +4370,42 @@ func runSitebrushServer(ctx context.Context, config serverRunConfig) error {
 	parsedPorts := config.ParsedPorts
 	effectiveDBPath := config.DBPath
 	effectiveStoragePath := config.StoragePath
+	storageRealRoot, err := prepareStorageJailRoot(effectiveStoragePath)
+	if err != nil {
+		return fmt.Errorf("prepare storage path: %w", err)
+	}
+	defaultConfiguredDBPath := filepath.Join(cleanStoragePath(effectiveStoragePath), defaultDBPath)
+	if sameCleanPath(effectiveDBPath, defaultConfiguredDBPath) {
+		effectiveStoragePath = storageRealRoot
+		effectiveDBPath = filepath.Join(effectiveStoragePath, defaultDBPath)
+	} else if _, err := resolvePathInsideRootForWrite(storageRealRoot, effectiveDBPath); err != nil {
+		return fmt.Errorf("db path must be inside -path: %w", err)
+	} else {
+		effectiveStoragePath = storageRealRoot
+	}
 	if err := ensureParentDir(effectiveDBPath); err != nil {
 		return err
 	}
 
 	var siteDatabaseRouter *perSiteDBRouter
-	application := &App{storagePath: effectiveStoragePath, dbPath: effectiveDBPath, debug: config.Debug, nativeFileDialog: desktop.NativeFileDialogSupported(), grabTracker: newGrabProgressTracker(), grabCancels: newGrabCancelTracker(), trialPreviews: newPublicTrialPreviewStore(), publishTracker: newPublishProgressTracker(), analyticsEvents: make(chan siteAnalyticsEvent, 65536), domainLogEvents: make(chan domainLogEvent, 1024)}
+	application := &App{storagePath: effectiveStoragePath, storageRealRoot: storageRealRoot, dbPath: effectiveDBPath, debug: config.Debug, nativeFileDialog: desktop.NativeFileDialogSupported(), grabTracker: newGrabProgressTracker(), grabCancels: newGrabCancelTracker(), trialPreviews: newPublicTrialPreviewStore(), publishTracker: newPublishProgressTracker(), analyticsEvents: make(chan siteAnalyticsEvent, 65536), domainLogEvents: make(chan domainLogEvent, 1024)}
 	application.guestStaticHTMLCache = startGuestStaticHTMLCacheWorker(ctx, defaultGuestStaticHTMLCacheLimitBytes)
 	application.authIPFailureCache = startAuthIPFailureCacheWorker(ctx)
 	application.registrationConfirmations = startEmailConfirmationMemoryWorker(ctx)
 	application.emailDelivery = startEmailDeliveryWorker(ctx, application.defaultEmailSender())
 	application.geoIP = geoip.NewResolver(filepath.Join(application.storageRootDir(), "geoip"))
 	certificateCacheDir := filepath.Join(application.storageRootDir(), "letsencrypt")
-	if mkdirErr := os.MkdirAll(certificateCacheDir, 0o755); mkdirErr != nil {
+	if mkdirErr := application.mkdirAllInsideStorage(certificateCacheDir, 0o755); mkdirErr != nil {
 		application.logProblemEvent("AUTOCERT disabled: failed to create certificate cache %s: %v", certificateCacheDir, mkdirErr)
+	} else if realCertificateCacheDir, pathErr := application.existingPathInsideStorage(certificateCacheDir); pathErr != nil {
+		application.logProblemEvent("AUTOCERT disabled: failed to resolve certificate cache %s: %v", certificateCacheDir, pathErr)
 	} else {
+		certificateCacheDir = realCertificateCacheDir
 		application.autoCertCertificateCache = startAutoCertCertificateMemoryCache(ctx, certificateCacheDir)
 	}
 	siteDatabaseRootDir := siteDatabaseRootPath(effectiveDBPath)
 	siteDatabaseRouter = newPerSiteDBRouter(siteDatabaseRootDir, "localhost", func(migrationCtx context.Context, rawDatabase *sql.DB, domain string) error {
-		bootstrapApplication := &App{db: rawDatabase, storagePath: effectiveStoragePath, dbPath: effectiveDBPath, debug: config.Debug}
+		bootstrapApplication := &App{db: rawDatabase, storagePath: effectiveStoragePath, storageRealRoot: storageRealRoot, dbPath: effectiveDBPath, debug: config.Debug}
 		return bootstrapApplication.migrate(contextWithDomain(migrationCtx, domain))
 	}, config.Debug)
 	defer func() {
@@ -4583,23 +4642,34 @@ type startupChrootPreloadStats struct {
 func (a *App) preloadPublishedStaticFiles(ctx context.Context) startupStaticPreloadStats {
 	rootPath := a.staticRootDir()
 	stats := startupStaticPreloadStats{}
-	err := filepath.WalkDir(rootPath, func(filePath string, entry os.DirEntry, walkErr error) error {
+	realRootPath, pathErr := a.existingPathInsideStorage(rootPath)
+	if pathErr != nil {
+		if !errors.Is(pathErr, os.ErrNotExist) {
+			log.Printf("%sPRELOAD%s static files skipped root=%s err=%v", terminalYellow(), terminalReset(), rootPath, pathErr)
+		}
+		return stats
+	}
+	err := filepath.WalkDir(realRootPath, func(filePath string, entry os.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return nil
 		}
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		if entry.IsDir() {
+		if entry.IsDir() || entry.Type()&os.ModeSymlink != 0 {
+			return nil
+		}
+		realFilePath, pathErr := filepath.EvalSymlinks(filePath)
+		if pathErr != nil || !isPathWithinRoot(realRootPath, realFilePath) {
 			return nil
 		}
 		stats.files++
-		_, _ = os.ReadFile(filePath)
-		if pageContentKind(filePath, "") != "html" {
+		_, _ = os.ReadFile(realFilePath)
+		if pageContentKind(realFilePath, "") != "html" {
 			return nil
 		}
 		stats.htmlFiles++
-		a.preloadGuestStaticHTMLFile(filePath, rootPath)
+		a.preloadGuestStaticHTMLFile(realFilePath, realRootPath)
 		return nil
 	})
 	if err != nil && !errors.Is(err, os.ErrNotExist) && !errors.Is(err, context.Canceled) {
@@ -4670,7 +4740,18 @@ func startupPreloadLanguageCodes() []string {
 func (a *App) preloadChrootStorage(ctx context.Context) startupChrootPreloadStats {
 	rootPath := filepath.Join(a.storageRootDir(), "chroot")
 	stats := startupChrootPreloadStats{}
-	err := filepath.WalkDir(rootPath, func(filePath string, entry os.DirEntry, walkErr error) error {
+	if err := a.rejectStorageSymlinkComponents(rootPath); err != nil {
+		log.Printf("%sPRELOAD%s chroot storage skipped root=%s err=%v", terminalYellow(), terminalReset(), rootPath, err)
+		return stats
+	}
+	realRootPath, pathErr := a.existingPathInsideStorage(rootPath)
+	if pathErr != nil {
+		if !errors.Is(pathErr, os.ErrNotExist) {
+			log.Printf("%sPRELOAD%s chroot storage skipped root=%s err=%v", terminalYellow(), terminalReset(), rootPath, pathErr)
+		}
+		return stats
+	}
+	err := filepath.WalkDir(realRootPath, func(filePath string, entry os.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return nil
 		}
@@ -4680,6 +4761,9 @@ func (a *App) preloadChrootStorage(ctx context.Context) startupChrootPreloadStat
 		stats.entries++
 		if entry.IsDir() {
 			_, _ = os.ReadDir(filePath)
+			return nil
+		}
+		if entry.Type()&os.ModeSymlink != 0 {
 			return nil
 		}
 		_, _ = entry.Info()
@@ -5453,7 +5537,12 @@ func (a *App) autoCertCachedCertificate(domain string, now time.Time, minimumRem
 	certificateCacheDir := filepath.Join(a.storageRootDir(), "letsencrypt")
 	cacheNames := []string{certificateDomain, certificateDomain + "+rsa"}
 	for _, cacheName := range cacheNames {
-		cacheBytes, err := os.ReadFile(filepath.Join(certificateCacheDir, cacheName))
+		cachePath := filepath.Join(certificateCacheDir, cacheName)
+		realCachePath, pathErr := a.existingPathInsideStorageSubtree(certificateCacheDir, cachePath)
+		if pathErr != nil {
+			continue
+		}
+		cacheBytes, err := os.ReadFile(realCachePath)
 		if err != nil {
 			continue
 		}
@@ -5556,8 +5645,12 @@ func preloadAutoCertCertificatesFromDisk(certificateCacheDir string) map[string]
 		return certificatesByDomain
 	}
 	now := time.Now()
+	realCertificateCacheDir, realErr := filepath.EvalSymlinks(certificateCacheDir)
+	if realErr != nil {
+		return certificatesByDomain
+	}
 	for _, entry := range entries {
-		if entry.IsDir() {
+		if entry.IsDir() || entry.Type()&os.ModeSymlink != 0 {
 			continue
 		}
 		cacheName := entry.Name()
@@ -5565,7 +5658,12 @@ func preloadAutoCertCertificatesFromDisk(certificateCacheDir string) map[string]
 		if certificateDomain == "" {
 			continue
 		}
-		cacheBytes, readErr := os.ReadFile(filepath.Join(certificateCacheDir, cacheName))
+		cachePath := filepath.Join(certificateCacheDir, cacheName)
+		realCachePath, pathErr := filepath.EvalSymlinks(cachePath)
+		if pathErr != nil || !isPathWithinRoot(realCertificateCacheDir, realCachePath) {
+			continue
+		}
+		cacheBytes, readErr := os.ReadFile(realCachePath)
 		if readErr != nil {
 			continue
 		}
@@ -6329,7 +6427,11 @@ func (a *App) ensureDemoSiteReady(ctx context.Context, controlDatabase *sql.DB, 
 	adminEmail, hasAdmin := a.firstAdminEmailForDomain(ctx, domain)
 	if !hasAdmin {
 		databasePath := filepath.Join(siteDatabaseRootPath(a.serverControlDBPath()), domainStorageName(domain)+".db")
-		if _, statErr := os.Stat(databasePath); statErr == nil {
+		realDatabasePath, pathErr := a.writablePathInsideStorage(databasePath)
+		if pathErr != nil {
+			return "", 0, pathErr
+		}
+		if _, statErr := os.Stat(realDatabasePath); statErr == nil {
 			if err := a.deleteDemoManagedSiteWithoutBackup(ctx, controlDatabase, domain); err != nil {
 				return "", 0, err
 			}
@@ -6766,11 +6868,20 @@ func (a *App) createDemoSiteSnapshot(ctx context.Context, domain string) error {
 	if domain == "" {
 		return fmt.Errorf("demo domain is required")
 	}
-	if err := os.MkdirAll(a.backupRootDir(), 0o755); err != nil {
+	backupRoot := a.backupRootDir()
+	if err := a.mkdirAllInsideStorage(backupRoot, 0o755); err != nil {
 		return err
 	}
 	tempPath := a.demoSiteSnapshotPath(domain) + ".tmp"
-	snapshotFile, err := os.Create(tempPath)
+	realTempPath, err := a.writablePathInsideStorageSubtree(backupRoot, tempPath)
+	if err != nil {
+		return err
+	}
+	realSnapshotPath, err := a.writablePathInsideStorageSubtree(backupRoot, a.demoSiteSnapshotPath(domain))
+	if err != nil {
+		return err
+	}
+	snapshotFile, err := os.Create(realTempPath)
 	if err != nil {
 		return err
 	}
@@ -6779,24 +6890,28 @@ func (a *App) createDemoSiteSnapshot(ctx context.Context, domain string) error {
 	closeZipErr := zipWriter.Close()
 	closeFileErr := snapshotFile.Close()
 	if writeErr != nil {
-		_ = os.Remove(tempPath)
+		_ = os.Remove(realTempPath)
 		return writeErr
 	}
 	if closeZipErr != nil {
-		_ = os.Remove(tempPath)
+		_ = os.Remove(realTempPath)
 		return closeZipErr
 	}
 	if closeFileErr != nil {
-		_ = os.Remove(tempPath)
+		_ = os.Remove(realTempPath)
 		return closeFileErr
 	}
-	return os.Rename(tempPath, a.demoSiteSnapshotPath(domain))
+	return os.Rename(realTempPath, realSnapshotPath)
 }
 
 func (a *App) restoreDemoSiteFromSnapshot(ctx context.Context, controlDatabase *sql.DB, domain string) error {
 	domain = normalizeDomainName(domain)
 	snapshotPath := a.demoSiteSnapshotPath(domain)
-	snapshotFile, err := os.Open(snapshotPath)
+	realSnapshotPath, err := a.existingPathInsideStorageSubtree(a.backupRootDir(), snapshotPath)
+	if err != nil {
+		return err
+	}
+	snapshotFile, err := os.Open(realSnapshotPath)
 	if err != nil {
 		return err
 	}
@@ -6845,7 +6960,7 @@ func (a *App) clearDemoSiteContent(ctx context.Context, domain string) error {
 		}
 	}
 	for _, directoryPath := range []string{a.domainFilesDirForDomain(domain), a.domainStaticDir(domain)} {
-		if err := os.RemoveAll(directoryPath); err != nil {
+		if err := a.removeAllInsideStorage(directoryPath); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
 	}
@@ -7837,7 +7952,11 @@ func (a *App) rawManagedSiteHasAdmin(ctx context.Context, domain string) bool {
 		return false
 	}
 	siteDatabasePath := filepath.Join(siteDatabaseRootPath(a.serverControlDBPath()), domainStorageName(domain)+".db")
-	rawDatabase, err := sql.Open("sqlite", "file:"+siteDatabasePath)
+	realSiteDatabasePath, pathErr := a.existingPathInsideStorage(siteDatabasePath)
+	if pathErr != nil {
+		return false
+	}
+	rawDatabase, err := sql.Open("sqlite", "file:"+realSiteDatabasePath)
 	if err != nil {
 		return false
 	}
@@ -8236,7 +8355,11 @@ func (a *App) publicTrialDomainAvailable(ctx context.Context, domain string) boo
 		return false
 	}
 	databasePath := filepath.Join(siteDatabaseRootPath(a.serverControlDBPath()), domainStorageName(domain)+".db")
-	if _, err := os.Stat(databasePath); err == nil {
+	realDatabasePath, pathErr := a.writablePathInsideStorage(databasePath)
+	if pathErr != nil {
+		return false
+	}
+	if _, err := os.Stat(realDatabasePath); err == nil {
 		return false
 	}
 	var userCount int
@@ -8246,15 +8369,19 @@ func (a *App) publicTrialDomainAvailable(ctx context.Context, domain string) boo
 
 func (a *App) createManagedSiteWithoutAdmin(ctx context.Context, domain string, quotaBytes int64) error {
 	siteDatabasePath := filepath.Join(siteDatabaseRootPath(a.serverControlDBPath()), domainStorageName(domain)+".db")
-	if _, statErr := os.Stat(siteDatabasePath); statErr == nil {
+	realSiteDatabasePath, pathErr := a.writablePathInsideStorage(siteDatabasePath)
+	if pathErr != nil {
+		return pathErr
+	}
+	if _, statErr := os.Stat(realSiteDatabasePath); statErr == nil {
 		return fmt.Errorf("site database for %s already exists", domain)
 	} else if !errors.Is(statErr, os.ErrNotExist) {
 		return statErr
 	}
-	if err := ensureParentDir(siteDatabasePath); err != nil {
+	if err := ensureParentDir(realSiteDatabasePath); err != nil {
 		return err
 	}
-	rawDatabase, err := sql.Open("sqlite", "file:"+siteDatabasePath)
+	rawDatabase, err := sql.Open("sqlite", "file:"+realSiteDatabasePath)
 	if err != nil {
 		return err
 	}
@@ -8262,10 +8389,10 @@ func (a *App) createManagedSiteWithoutAdmin(ctx context.Context, domain string, 
 	defer func() {
 		_ = rawDatabase.Close()
 		if !created {
-			_ = os.Remove(siteDatabasePath)
+			_ = os.Remove(realSiteDatabasePath)
 		}
 	}()
-	siteApplication := &App{db: rawDatabase, storagePath: a.storagePath, dbPath: a.serverControlDBPath(), debug: a.debug}
+	siteApplication := &App{db: rawDatabase, storagePath: a.storagePath, storageRealRoot: a.storageRealRoot, dbPath: a.serverControlDBPath(), debug: a.debug}
 	siteContext := contextWithDomain(ctx, domain)
 	if err := siteApplication.migrate(siteContext); err != nil {
 		return err
@@ -11243,7 +11370,7 @@ func hostingAndSupportClientMapPointsJSON(ips []hostingAndSupportClientIPView) t
 }
 
 func (a *App) hostingAndSupportSiteRows(ctx context.Context, plans []hostingandsupport.Plan, assignments map[string]hostingandsupport.ServiceAssignment, currentDomain string, demoDomain string, mainDomain string) ([]hostingandsupport.Site, error) {
-	rows, err := listSiteQuotaRows(ctx, a.storagePath, a.serverControlDBPath())
+	rows, err := a.listSiteQuotaRows(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -11469,32 +11596,48 @@ func (a *App) generateSitebrushComKeyFromForm(r *http.Request) string {
 func (a *App) writeSitebrushComPrivateKeyFile(privateKeyText string) (string, error) {
 	keysRootDirectory := filepath.Join(a.storageRootDir(), "keys")
 	keyDirectory := filepath.Join(keysRootDirectory, "sitebrush.com")
-	if err := os.MkdirAll(keyDirectory, 0o700); err != nil {
+	if err := a.mkdirAllInsideStorage(keyDirectory, 0o700); err != nil {
 		return "", err
 	}
-	if err := os.Chmod(keysRootDirectory, 0o700); err != nil {
+	realKeysRootDirectory, err := a.existingPathInsideStorage(keysRootDirectory)
+	if err != nil {
 		return "", err
 	}
-	if err := os.Chmod(keyDirectory, 0o700); err != nil {
+	realKeyDirectory, err := a.existingPathInsideStorageSubtree(keysRootDirectory, keyDirectory)
+	if err != nil {
+		return "", err
+	}
+	if err := os.Chmod(realKeysRootDirectory, 0o700); err != nil {
+		return "", err
+	}
+	if err := os.Chmod(realKeyDirectory, 0o700); err != nil {
 		return "", err
 	}
 	privateKeyPath := filepath.Join(keyDirectory, "relay-x25519.private")
 	temporaryPath := privateKeyPath + ".tmp"
-	if err := os.WriteFile(temporaryPath, []byte(strings.TrimSpace(privateKeyText)+"\n"), 0o600); err != nil {
+	realPrivateKeyPath, err := a.writablePathInsideStorageSubtree(keyDirectory, privateKeyPath)
+	if err != nil {
 		return "", err
 	}
-	if err := os.Chmod(temporaryPath, 0o600); err != nil {
-		_ = os.Remove(temporaryPath)
+	realTemporaryPath, err := a.writablePathInsideStorageSubtree(keyDirectory, temporaryPath)
+	if err != nil {
 		return "", err
 	}
-	if err := os.Rename(temporaryPath, privateKeyPath); err != nil {
-		_ = os.Remove(temporaryPath)
+	if err := os.WriteFile(realTemporaryPath, []byte(strings.TrimSpace(privateKeyText)+"\n"), 0o600); err != nil {
 		return "", err
 	}
-	if err := os.Chmod(privateKeyPath, 0o600); err != nil {
+	if err := os.Chmod(realTemporaryPath, 0o600); err != nil {
+		_ = os.Remove(realTemporaryPath)
 		return "", err
 	}
-	return privateKeyPath, nil
+	if err := os.Rename(realTemporaryPath, realPrivateKeyPath); err != nil {
+		_ = os.Remove(realTemporaryPath)
+		return "", err
+	}
+	if err := os.Chmod(realPrivateKeyPath, 0o600); err != nil {
+		return "", err
+	}
+	return realPrivateKeyPath, nil
 }
 
 func (a *App) migrateLegacySitebrushComPrivateKey(ctx context.Context, controlDatabase *sql.DB) error {
@@ -11636,7 +11779,9 @@ func (a *App) saveHostingAndSupportDemoSettingsInDatabase(r *http.Request, contr
 				return err.Error()
 			}
 			_ = (demo.Store{DB: controlDatabase}).RemoveSessionsForDomain(r.Context(), disabledDemoDomain)
-			_ = os.Remove(a.demoSiteSnapshotPath(disabledDemoDomain))
+			if realSnapshotPath, pathErr := a.existingPathInsideStorageSubtree(a.backupRootDir(), a.demoSiteSnapshotPath(disabledDemoDomain)); pathErr == nil {
+				_ = os.Remove(realSnapshotPath)
+			}
 		}
 		return translationOrDefault(translations, "billing_status_settings_saved", "Billing settings saved.")
 	}
@@ -11696,15 +11841,19 @@ func (a *App) createManagedSiteFromForm(r *http.Request) string {
 
 func (a *App) createManagedSite(ctx context.Context, domain, email, password string, quotaBytes int64) error {
 	siteDatabasePath := filepath.Join(siteDatabaseRootPath(a.serverControlDBPath()), domainStorageName(domain)+".db")
-	if _, statErr := os.Stat(siteDatabasePath); statErr == nil {
+	realSiteDatabasePath, pathErr := a.writablePathInsideStorage(siteDatabasePath)
+	if pathErr != nil {
+		return pathErr
+	}
+	if _, statErr := os.Stat(realSiteDatabasePath); statErr == nil {
 		return fmt.Errorf("site database for %s already exists", domain)
 	} else if !errors.Is(statErr, os.ErrNotExist) {
 		return statErr
 	}
-	if err := ensureParentDir(siteDatabasePath); err != nil {
+	if err := ensureParentDir(realSiteDatabasePath); err != nil {
 		return err
 	}
-	rawDatabase, err := sql.Open("sqlite", "file:"+siteDatabasePath)
+	rawDatabase, err := sql.Open("sqlite", "file:"+realSiteDatabasePath)
 	if err != nil {
 		return err
 	}
@@ -11712,10 +11861,10 @@ func (a *App) createManagedSite(ctx context.Context, domain, email, password str
 	defer func() {
 		_ = rawDatabase.Close()
 		if !adminInserted {
-			_ = os.Remove(siteDatabasePath)
+			_ = os.Remove(realSiteDatabasePath)
 		}
 	}()
-	siteApplication := &App{db: rawDatabase, storagePath: a.storagePath, dbPath: a.serverControlDBPath(), debug: a.debug}
+	siteApplication := &App{db: rawDatabase, storagePath: a.storagePath, storageRealRoot: a.storageRealRoot, dbPath: a.serverControlDBPath(), debug: a.debug}
 	siteContext := contextWithDomain(ctx, domain)
 	if err := siteApplication.migrate(siteContext); err != nil {
 		return err
@@ -11906,7 +12055,7 @@ func (a *App) updateManagedSiteFromForm(r *http.Request) string {
 		}
 	}
 	if quotaRequested {
-		if _, err := updateSiteQuotaLimit(r.Context(), a.storagePath, a.serverControlDBPath(), domain, quotaBytes); err != nil {
+		if _, err := a.updateSiteQuotaLimit(r.Context(), domain, quotaBytes); err != nil {
 			return err.Error()
 		}
 	}
@@ -12098,8 +12247,14 @@ func (a *App) deleteManagedSiteDataAfterBackup(ctx context.Context, controlDatab
 	_, _ = controlDatabase.ExecContext(ctx, `DELETE FROM server_managers WHERE domain=? AND role<>'owner'`, domain)
 	a.closeManagedSiteDatabase(ctx, domain)
 	if strings.TrimSpace(row.DatabasePath) != "" && !sameSiteQuotaPath(row.DatabasePath, a.serverControlDBPath()) {
-		if err := os.Remove(row.DatabasePath); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return err
+		realDatabasePath, pathErr := a.existingPathInsideStorage(row.DatabasePath)
+		if pathErr != nil && !errors.Is(pathErr, os.ErrNotExist) {
+			return pathErr
+		}
+		if pathErr == nil {
+			if err := os.Remove(realDatabasePath); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return err
+			}
 		}
 	}
 	for _, directoryPath := range []string{
@@ -12108,13 +12263,18 @@ func (a *App) deleteManagedSiteDataAfterBackup(ctx context.Context, controlDatab
 		a.domainChrootRootDir(domain),
 		a.domainLogDir(domain),
 	} {
-		if err := os.RemoveAll(directoryPath); err != nil {
+		if err := a.removeAllInsideStorage(directoryPath); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
 	}
 	packPath := filepath.Join(a.packsDir(), domainStorageName(domain)+".zip")
-	if err := os.Remove(packPath); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return err
+	realPackPath, pathErr := a.existingPathInsideStorage(packPath)
+	if pathErr == nil {
+		if err := os.Remove(realPackPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	} else if !errors.Is(pathErr, os.ErrNotExist) {
+		return pathErr
 	}
 	return nil
 }
@@ -12129,7 +12289,7 @@ func (a *App) closeManagedSiteDatabase(ctx context.Context, domain string) {
 }
 
 func (a *App) managedSiteQuotaRow(ctx context.Context, domain string) (siteQuotaRow, bool, error) {
-	rows, err := listSiteQuotaRows(ctx, a.storagePath, a.serverControlDBPath())
+	rows, err := a.listSiteQuotaRows(ctx)
 	if err != nil {
 		return siteQuotaRow{}, false, err
 	}
@@ -12204,12 +12364,8 @@ func (a *App) backupArchivePathAllowed(archivePath string) bool {
 	if archivePath == "" || strings.ToLower(filepath.Ext(archivePath)) != ".zip" {
 		return false
 	}
-	rootPath, rootErr := filepath.Abs(a.backupRootDir())
-	candidatePath, candidateErr := filepath.Abs(archivePath)
-	if rootErr != nil || candidateErr != nil {
-		return false
-	}
-	return isPathWithinRoot(rootPath, candidatePath)
+	_, err := a.writablePathInsideStorageSubtree(a.backupRootDir(), archivePath)
+	return err == nil
 }
 
 func (a *App) createManagedSiteDeletionBackup(ctx context.Context, r *http.Request, controlDatabase *sql.DB, row siteQuotaRow, ownerContacts []string, retentionDays int, languageCode string) (managedSiteDeletionBackupView, error) {
@@ -12227,13 +12383,21 @@ func (a *App) createManagedSiteDeletionBackup(ctx context.Context, r *http.Reque
 		return managedSiteDeletionBackupView{}, fmt.Errorf("backup download token was not created")
 	}
 	backupDirectory := a.backupRootDir()
-	if err := os.MkdirAll(backupDirectory, 0o755); err != nil {
+	if err := a.mkdirAllInsideStorage(backupDirectory, 0o755); err != nil {
 		return managedSiteDeletionBackupView{}, err
 	}
 	fileName := domainStorageName(domain) + "-deleted-" + createdAt.Format("20060102-150405") + ".zip"
 	archivePath := filepath.Join(backupDirectory, fileName)
 	tempArchivePath := archivePath + ".tmp"
-	_ = os.Remove(tempArchivePath)
+	realTempArchivePath, err := a.writablePathInsideStorageSubtree(backupDirectory, tempArchivePath)
+	if err != nil {
+		return managedSiteDeletionBackupView{}, err
+	}
+	realArchivePath, err := a.writablePathInsideStorageSubtree(backupDirectory, archivePath)
+	if err != nil {
+		return managedSiteDeletionBackupView{}, err
+	}
+	_ = os.Remove(realTempArchivePath)
 	metadata := hostingandsupport.DeletionBackupMetadata{
 		Version:           1,
 		Domain:            domain,
@@ -12247,21 +12411,21 @@ func (a *App) createManagedSiteDeletionBackup(ctx context.Context, r *http.Reque
 		OriginalDatabase:  row.DatabasePath,
 		OriginalStaticDir: a.domainStaticDir(domain),
 	}
-	if err := a.writeManagedSiteDeletionBackupArchive(ctx, domain, row.DatabasePath, tempArchivePath, metadata); err != nil {
-		_ = os.Remove(tempArchivePath)
+	if err := a.writeManagedSiteDeletionBackupArchive(ctx, domain, row.DatabasePath, realTempArchivePath, metadata); err != nil {
+		_ = os.Remove(realTempArchivePath)
 		return managedSiteDeletionBackupView{}, err
 	}
-	if err := verifyManagedSiteDeletionBackupArchive(tempArchivePath, metadata); err != nil {
-		_ = os.Remove(tempArchivePath)
+	if err := verifyManagedSiteDeletionBackupArchive(realTempArchivePath, metadata); err != nil {
+		_ = os.Remove(realTempArchivePath)
 		return managedSiteDeletionBackupView{}, err
 	}
-	if err := os.Rename(tempArchivePath, archivePath); err != nil {
-		_ = os.Remove(tempArchivePath)
+	if err := os.Rename(realTempArchivePath, realArchivePath); err != nil {
+		_ = os.Remove(realTempArchivePath)
 		return managedSiteDeletionBackupView{}, err
 	}
-	archiveInfo, err := os.Stat(archivePath)
+	archiveInfo, err := os.Stat(realArchivePath)
 	if err != nil || archiveInfo.Size() <= 0 {
-		_ = os.Remove(archivePath)
+		_ = os.Remove(realArchivePath)
 		if err != nil {
 			return managedSiteDeletionBackupView{}, err
 		}
@@ -12269,13 +12433,13 @@ func (a *App) createManagedSiteDeletionBackup(ctx context.Context, r *http.Reque
 	}
 	metadataJSON, err := json.Marshal(metadata)
 	if err != nil {
-		_ = os.Remove(archivePath)
+		_ = os.Remove(realArchivePath)
 		return managedSiteDeletionBackupView{}, err
 	}
 	_, err = controlDatabase.ExecContext(ctx, `INSERT INTO site_deletion_backups(domain,archive_path,file_name,size_bytes,token,token_created_at,created_at,expires_at,retention_days,owner_contacts,metadata_json,language_code,download_count) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,0)`,
-		domain, archivePath, fileName, archiveInfo.Size(), token, createdAt.Format(time.RFC3339), createdAt.Format(time.RFC3339), expiresAt.Format(time.RFC3339), retentionDays, strings.Join(ownerContacts, ", "), string(metadataJSON), languageCode)
+		domain, realArchivePath, fileName, archiveInfo.Size(), token, createdAt.Format(time.RFC3339), createdAt.Format(time.RFC3339), expiresAt.Format(time.RFC3339), retentionDays, strings.Join(ownerContacts, ", "), string(metadataJSON), languageCode)
 	if err != nil {
-		_ = os.Remove(archivePath)
+		_ = os.Remove(realArchivePath)
 		return managedSiteDeletionBackupView{}, err
 	}
 	downloadURL := ""
@@ -12296,13 +12460,21 @@ func (a *App) createManagedSiteDeletionBackup(ctx context.Context, r *http.Reque
 }
 
 func (a *App) writeManagedSiteDeletionBackupArchive(ctx context.Context, domain, databasePath, archivePath string, metadata hostingandsupport.DeletionBackupMetadata) error {
-	siteDatabase, err := sql.Open("sqlite", "file:"+databasePath)
+	realDatabasePath, err := a.existingPathInsideStorage(databasePath)
+	if err != nil {
+		return err
+	}
+	realArchivePath, err := a.writablePathInsideStorageSubtree(a.backupRootDir(), archivePath)
+	if err != nil {
+		return err
+	}
+	siteDatabase, err := sql.Open("sqlite", "file:"+realDatabasePath)
 	if err != nil {
 		return err
 	}
 	defer siteDatabase.Close()
-	siteApplication := &App{db: siteDatabase, storagePath: a.storagePath, dbPath: a.serverControlDBPath(), debug: a.debug}
-	archiveFile, err := os.Create(archivePath)
+	siteApplication := &App{db: siteDatabase, storagePath: a.storagePath, storageRealRoot: a.storageRealRoot, dbPath: a.serverControlDBPath(), debug: a.debug}
+	archiveFile, err := os.Create(realArchivePath)
 	if err != nil {
 		return err
 	}
@@ -12325,7 +12497,7 @@ func (a *App) writeManagedSiteDeletionBackupArchive(ctx context.Context, domain,
 		_ = zipWriter.Close()
 		return err
 	}
-	if err := addFileToZip(zipWriter, databasePath, metadata.DatabaseFile); err != nil {
+	if err := addFileToZip(zipWriter, realDatabasePath, metadata.DatabaseFile); err != nil {
 		_ = zipWriter.Close()
 		return err
 	}
@@ -12434,9 +12606,9 @@ func (a *App) managedSiteDeletionBackupViews(ctx context.Context, r *http.Reques
 			view.RetentionDays = hostingandsupport.DefaultDeletionBackupRetentionDays
 		}
 		view.Expired = !expiresAt.IsZero() && !expiresAt.After(now)
-		if !a.backupArchivePathAllowed(archivePath) {
+		if realArchivePath, pathErr := a.existingPathInsideStorageSubtree(a.backupRootDir(), archivePath); pathErr != nil {
 			view.ArchiveMissing = true
-		} else if _, statErr := os.Stat(archivePath); statErr != nil {
+		} else if _, statErr := os.Stat(realArchivePath); statErr != nil {
 			view.ArchiveMissing = true
 		}
 		view.SizeLabel = formatFileSize(sizeBytes)
@@ -12483,8 +12655,8 @@ func (a *App) cleanupExpiredManagedSiteDeletionBackups(ctx context.Context, cont
 	}
 	_ = rows.Close()
 	for _, backup := range expiredBackups {
-		if a.backupArchivePathAllowed(backup.archivePath) {
-			_ = os.Remove(backup.archivePath)
+		if realArchivePath, pathErr := a.existingPathInsideStorageSubtree(a.backupRootDir(), backup.archivePath); pathErr == nil {
+			_ = os.Remove(realArchivePath)
 		}
 		_, _ = controlDatabase.ExecContext(ctx, `UPDATE site_deletion_backups SET token='' WHERE id=?`, backup.id)
 	}
@@ -12564,11 +12736,12 @@ func (a *App) downloadManagedSiteDeletionBackup(w http.ResponseWriter, r *http.R
 		http.Error(w, "backup expired", http.StatusGone)
 		return
 	}
-	if !a.backupArchivePathAllowed(archivePath) {
+	realArchivePath, pathErr := a.existingPathInsideStorageSubtree(a.backupRootDir(), archivePath)
+	if pathErr != nil {
 		http.Error(w, "backup archive unavailable", http.StatusNotFound)
 		return
 	}
-	archiveFile, err := os.Open(archivePath)
+	archiveFile, err := os.Open(realArchivePath)
 	if err != nil {
 		http.Error(w, "backup archive missing", http.StatusNotFound)
 		return
@@ -13911,7 +14084,7 @@ func (a *App) serviceMailRelayPrivateKeyFromControlDatabase(ctx context.Context,
 		}
 		_ = controlDatabase.QueryRowContext(ctx, `SELECT private_key_path FROM sitebrush_com_keys WHERE domain='sitebrush.com'`).Scan(&privateKeyPath)
 	}
-	privateKeyBytes, readErr := os.ReadFile(strings.TrimSpace(privateKeyPath))
+	privateKeyBytes, readErr := a.readFileInsideStorage(strings.TrimSpace(privateKeyPath))
 	if readErr != nil {
 		return nil, false
 	}
@@ -14398,7 +14571,7 @@ func (a *App) buildHostingSnapshot(ctx context.Context) (hostingandsupport.Hosti
 	if err != nil {
 		return hostingandsupport.HostingSnapshot{}, err
 	}
-	rows, err := listSiteQuotaRows(ctx, a.storagePath, a.serverControlDBPath())
+	rows, err := a.listSiteQuotaRows(ctx)
 	if err != nil {
 		return hostingandsupport.HostingSnapshot{}, err
 	}
@@ -16375,9 +16548,17 @@ func (a *App) filesPage(w http.ResponseWriter, r *http.Request) {
 		if action == "save_access" && fileName != "" {
 			a.saveFileAccessRule(r.Context(), r, fileName)
 		} else if fileName != "" {
-			fileSize := fileSizeBytes(filepath.Join(a.domainFilesDir(r), fileName))
+			rootPath := a.domainFilesDir(r)
+			filePath := filepath.Join(rootPath, filepath.FromSlash(fileName))
+			realFilePath, pathErr := a.existingPathInsideStorageSubtree(rootPath, filePath)
+			fileSize := int64(0)
+			if pathErr == nil {
+				fileSize = fileSizeBytes(realFilePath)
+			}
 			_ = a.applyDomainStorageDelta(r.Context(), a.siteDomain(r.Context(), r), 0, 0, 0, -fileSize, 0)
-			_ = os.Remove(filepath.Join(a.domainFilesDir(r), fileName))
+			if pathErr == nil {
+				_ = os.Remove(realFilePath)
+			}
 			_, _ = a.db.ExecContext(r.Context(), `DELETE FROM file_access_rules WHERE domain=? AND file_name=?`, domainStorageName(a.siteDomain(r.Context(), r)), fileName)
 			_, _ = a.db.ExecContext(r.Context(), `DELETE FROM file_metadata WHERE domain=? AND file_name=?`, domainStorageName(a.siteDomain(r.Context(), r)), fileName)
 		}
@@ -16464,6 +16645,9 @@ func (a *App) servePublicAsset(w http.ResponseWriter, r *http.Request) {
 func (a *App) listManagedFiles(ctx context.Context, r *http.Request, currentPath string) ([]ManagedFile, error) {
 	fileList := make([]ManagedFile, 0, 32)
 	rootPath := a.domainFilesDir(r)
+	if _, err := a.existingPathInsideStorage(rootPath); err != nil {
+		return fileList, nil
+	}
 	domain := domainStorageName(a.siteDomain(ctx, r))
 	metadata := a.fileMetadataByName(ctx, domain)
 	currentPath = cleanPath(currentPath)
@@ -16479,7 +16663,11 @@ func (a *App) listManagedFiles(ctx context.Context, r *http.Request, currentPath
 		if safeRelativeAssetPath(normalizedPath) == "" {
 			return nil
 		}
-		fileInfo, statErr := currentEntry.Info()
+		realFilePath, pathErr := a.existingPathInsideStorageSubtree(rootPath, filePath)
+		if pathErr != nil {
+			return nil
+		}
+		fileInfo, statErr := os.Stat(realFilePath)
 		if statErr != nil {
 			return nil
 		}
@@ -16542,7 +16730,7 @@ func (a *App) uploadFiles(w http.ResponseWriter, r *http.Request, currentPath st
 	domain := domainStorageName(a.siteDomain(r.Context(), r))
 	siteDomain := a.siteDomain(r.Context(), r)
 	baseDir := a.domainFilesDir(r)
-	if err := os.MkdirAll(baseDir, 0o755); err != nil {
+	if err := a.mkdirAllInsideStorage(baseDir, 0o755); err != nil {
 		http.Error(w, "failed to create files directory", http.StatusInternalServerError)
 		return
 	}
@@ -16570,7 +16758,15 @@ func (a *App) uploadFiles(w http.ResponseWriter, r *http.Request, currentPath st
 
 		storedName := uniqueUploadedFileName(baseDir, fileName)
 		targetPath := filepath.Join(baseDir, storedName)
-		targetFile, createErr := os.Create(targetPath)
+		realTargetPath, pathErr := a.writablePathInsideStorageSubtree(baseDir, targetPath)
+		if pathErr != nil {
+			_ = sourceFile.Close()
+			if reservedFileBytes > 0 {
+				_ = a.applyDomainStorageDelta(r.Context(), siteDomain, 0, 0, 0, -reservedFileBytes, 0)
+			}
+			continue
+		}
+		targetFile, createErr := os.Create(realTargetPath)
 		if createErr != nil {
 			_ = sourceFile.Close()
 			if reservedFileBytes > 0 {
@@ -16582,7 +16778,7 @@ func (a *App) uploadFiles(w http.ResponseWriter, r *http.Request, currentPath st
 		closeErr := targetFile.Close()
 		_ = sourceFile.Close()
 		if copyErr != nil || closeErr != nil {
-			_ = os.Remove(targetPath)
+			_ = os.Remove(realTargetPath)
 			if reservedFileBytes > 0 {
 				_ = a.applyDomainStorageDelta(r.Context(), siteDomain, 0, 0, 0, -reservedFileBytes, 0)
 			}
@@ -16590,14 +16786,14 @@ func (a *App) uploadFiles(w http.ResponseWriter, r *http.Request, currentPath st
 		}
 		if reservedFileBytes <= 0 {
 			if storageErr := a.applyDomainStorageDelta(r.Context(), siteDomain, 0, 0, 0, writtenBytes, 0); storageErr != nil {
-				_ = os.Remove(targetPath)
+				_ = os.Remove(realTargetPath)
 				http.Error(w, storageErr.Error(), http.StatusInsufficientStorage)
 				return
 			}
 		}
 		if reservedFileBytes > 0 && writtenBytes != reservedFileBytes {
 			if storageErr := a.applyDomainStorageDelta(r.Context(), siteDomain, 0, 0, 0, writtenBytes-reservedFileBytes, 0); storageErr != nil {
-				_ = os.Remove(targetPath)
+				_ = os.Remove(realTargetPath)
 				_ = a.applyDomainStorageDelta(r.Context(), siteDomain, 0, 0, 0, -reservedFileBytes, 0)
 				http.Error(w, storageErr.Error(), http.StatusInsufficientStorage)
 				return
@@ -16831,6 +17027,79 @@ func listSiteQuotaRows(ctx context.Context, storagePath, dbPath string) ([]siteQ
 		return rows[left].Domain < rows[right].Domain
 	})
 	return rows, nil
+}
+
+func (a *App) listSiteQuotaRows(ctx context.Context) ([]siteQuotaRow, error) {
+	candidates, err := a.siteQuotaDatabaseCandidatesInsideStorage()
+	if err != nil {
+		return nil, err
+	}
+	rows := make([]siteQuotaRow, 0, len(candidates))
+	for _, candidate := range candidates {
+		candidateRows, err := siteQuotaRowsFromDatabase(ctx, a.storagePath, candidate)
+		if err != nil {
+			return nil, err
+		}
+		rows = append(rows, candidateRows...)
+	}
+	rows = mergeSiteQuotaRows(rows, a.serverControlDBPath())
+	sort.Slice(rows, func(left, right int) bool {
+		if rows[left].Domain == rows[right].Domain {
+			return rows[left].DatabasePath < rows[right].DatabasePath
+		}
+		return rows[left].Domain < rows[right].Domain
+	})
+	return rows, nil
+}
+
+func (a *App) siteQuotaDatabaseCandidatesInsideStorage() ([]siteQuotaDatabaseCandidate, error) {
+	candidates := make([]siteQuotaDatabaseCandidate, 0, 8)
+	seenPaths := make(map[string]struct{})
+	addCandidate := func(candidatePath string, fallbackDomain string) {
+		realCandidatePath, pathErr := a.existingPathInsideStorage(candidatePath)
+		if pathErr != nil {
+			return
+		}
+		fileInfo, statErr := os.Stat(realCandidatePath)
+		if statErr != nil || fileInfo.IsDir() {
+			return
+		}
+		absolutePath, absErr := filepath.Abs(realCandidatePath)
+		if absErr != nil {
+			absolutePath = realCandidatePath
+		}
+		if _, seen := seenPaths[absolutePath]; seen {
+			return
+		}
+		seenPaths[absolutePath] = struct{}{}
+		candidates = append(candidates, siteQuotaDatabaseCandidate{path: realCandidatePath, fallbackDomain: fallbackDomain})
+	}
+
+	dbPath := a.serverControlDBPath()
+	addCandidate(dbPath, "")
+	siteDatabaseDir := siteDatabaseRootPath(dbPath)
+	realSiteDatabaseDir, pathErr := a.existingPathInsideStorage(siteDatabaseDir)
+	if pathErr != nil {
+		if errors.Is(pathErr, os.ErrNotExist) {
+			return candidates, nil
+		}
+		return nil, pathErr
+	}
+	databaseFiles, err := os.ReadDir(realSiteDatabaseDir)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return candidates, nil
+		}
+		return nil, err
+	}
+	for _, databaseFile := range databaseFiles {
+		if databaseFile.IsDir() || databaseFile.Type()&os.ModeSymlink != 0 || strings.ToLower(filepath.Ext(databaseFile.Name())) != ".db" {
+			continue
+		}
+		fallbackDomain := strings.TrimSuffix(databaseFile.Name(), filepath.Ext(databaseFile.Name()))
+		addCandidate(filepath.Join(realSiteDatabaseDir, databaseFile.Name()), fallbackDomain)
+	}
+	return candidates, nil
 }
 
 func siteQuotaDatabaseCandidates(dbPath string) ([]siteQuotaDatabaseCandidate, error) {
@@ -17085,6 +17354,44 @@ func updateSiteQuotaLimit(ctx context.Context, storagePath, dbPath, rawDomain st
 	}, nil
 }
 
+func (a *App) updateSiteQuotaLimit(ctx context.Context, rawDomain string, limitBytes int64) (siteQuotaRow, error) {
+	domain := normalizeQuotaDomainName(rawDomain)
+	if domain == "" {
+		return siteQuotaRow{}, fmt.Errorf("invalid site domain %q", rawDomain)
+	}
+	candidate, err := a.siteQuotaDatabaseCandidateForDomainInsideStorage(ctx, domain)
+	if err != nil {
+		return siteQuotaRow{}, err
+	}
+
+	rawDatabase, err := sql.Open("sqlite", "file:"+candidate.path)
+	if err != nil {
+		return siteQuotaRow{}, err
+	}
+	defer rawDatabase.Close()
+
+	application := &App{db: rawDatabase, storagePath: a.storagePath, storageRealRoot: a.storageRealRoot, dbPath: a.serverControlDBPath(), debug: a.debug}
+	commandContext := contextWithDomain(ctx, domain)
+	if err := application.migrate(commandContext); err != nil {
+		return siteQuotaRow{}, err
+	}
+	application.ensureDomainStorageUsageRow(commandContext, domain)
+	_, err = rawDatabase.ExecContext(commandContext, `UPDATE domain_storage_usage SET limit_bytes=?, updated_at=? WHERE domain=?`, limitBytes, time.Now().UTC().Format(time.RFC3339), domain)
+	if err != nil {
+		return siteQuotaRow{}, err
+	}
+	usage := application.domainStorageUsage(commandContext, domain)
+	return siteQuotaRow{
+		Domain:       domain,
+		Aliases:      siteAliasesInDatabase(commandContext, rawDatabase, domain),
+		UsedBytes:    usage.totalBytes(),
+		LimitBytes:   usage.LimitBytes,
+		AdminEmails:  siteAdminEmailsFromDatabase(commandContext, rawDatabase, domain),
+		FilesPath:    application.domainFilesDirForDomain(domain),
+		DatabasePath: candidate.path,
+	}, nil
+}
+
 func openSiteQuotaControlDatabase(ctx context.Context, dbPath string) (*sql.DB, error) {
 	controlDatabasePath := cleanDBPath(dbPath)
 	if err := ensureParentDir(controlDatabasePath); err != nil {
@@ -17161,6 +17468,34 @@ func siteQuotaDatabaseCandidateForDomain(ctx context.Context, storagePath, dbPat
 		}
 	}
 	return siteQuotaDatabaseCandidate{}, fmt.Errorf("site %q was not found under %s", domain, siteDatabaseRootPath(dbPath))
+}
+
+func (a *App) siteQuotaDatabaseCandidateForDomainInsideStorage(ctx context.Context, domain string) (siteQuotaDatabaseCandidate, error) {
+	siteDatabasePath := filepath.Join(siteDatabaseRootPath(a.serverControlDBPath()), domainStorageName(domain)+".db")
+	realSiteDatabasePath, pathErr := a.existingPathInsideStorage(siteDatabasePath)
+	if pathErr == nil {
+		if fileInfo, statErr := os.Stat(realSiteDatabasePath); statErr == nil && !fileInfo.IsDir() {
+			return siteQuotaDatabaseCandidate{path: realSiteDatabasePath, fallbackDomain: domain}, nil
+		}
+	} else if !errors.Is(pathErr, os.ErrNotExist) {
+		return siteQuotaDatabaseCandidate{}, pathErr
+	}
+	candidates, err := a.siteQuotaDatabaseCandidatesInsideStorage()
+	if err != nil {
+		return siteQuotaDatabaseCandidate{}, err
+	}
+	for _, candidate := range candidates {
+		rows, err := siteQuotaRowsFromDatabase(ctx, a.storagePath, candidate)
+		if err != nil {
+			return siteQuotaDatabaseCandidate{}, err
+		}
+		for _, row := range rows {
+			if row.Domain == domain {
+				return candidate, nil
+			}
+		}
+	}
+	return siteQuotaDatabaseCandidate{}, fmt.Errorf("site %q was not found under %s", domain, siteDatabaseRootPath(a.serverControlDBPath()))
 }
 
 func normalizeQuotaDomainName(rawDomain string) string {
@@ -17714,10 +18049,14 @@ func (a *App) serverControlDBPath() string {
 
 func (a *App) openServerControlDatabase(ctx context.Context) (*sql.DB, error) {
 	databasePath := a.serverControlDBPath()
-	if err := ensureParentDir(databasePath); err != nil {
+	realDatabasePath, pathErr := a.writablePathInsideStorage(databasePath)
+	if pathErr != nil {
+		return nil, pathErr
+	}
+	if err := ensureParentDir(realDatabasePath); err != nil {
 		return nil, err
 	}
-	database, err := sql.Open("sqlite", "file:"+databasePath)
+	database, err := sql.Open("sqlite", "file:"+realDatabasePath)
 	if err != nil {
 		return nil, err
 	}
@@ -17778,7 +18117,7 @@ func (a *App) ensureServerOwnerExists(ctx context.Context) {
 }
 
 func (a *App) firstExistingSiteAdmin(ctx context.Context) (string, string, bool) {
-	rows, err := listSiteQuotaRows(ctx, a.storagePath, a.serverControlDBPath())
+	rows, err := a.listSiteQuotaRows(ctx)
 	if err != nil {
 		return "", "", false
 	}
@@ -18171,6 +18510,11 @@ ON CONFLICT(domain,file_name) DO UPDATE SET access_mode=excluded.access_mode,tok
 }
 
 func (a *App) serveAssetFile(w http.ResponseWriter, r *http.Request, domain, fileName string) {
+	fileName = safeRelativeAssetPath(fileName)
+	if fileName == "" {
+		http.NotFound(w, r)
+		return
+	}
 	rule := ManagedFileAccess{AccessMode: "public"}
 	_ = a.db.QueryRowContext(r.Context(), `SELECT access_mode,token,expires_at,single_use_left,token_use_count FROM file_access_rules WHERE domain=? AND file_name=?`, domain, fileName).Scan(&rule.AccessMode, &rule.Token, &rule.ExpiresAt, &rule.SingleUseLeft, &rule.TokenUseCount)
 	if strings.TrimSpace(rule.AccessMode) == "timer" {
@@ -18201,27 +18545,46 @@ func (a *App) serveAssetFile(w http.ResponseWriter, r *http.Request, domain, fil
 		_, _ = a.db.ExecContext(r.Context(), `UPDATE file_access_rules SET token_use_count=token_use_count+1 WHERE domain=? AND file_name=?`, domain, fileName)
 		_, _ = a.db.ExecContext(r.Context(), `UPDATE file_metadata SET download_count=download_count+1 WHERE domain=? AND file_name=?`, domain, fileName)
 	}
-	filePath := filepath.Join(a.filesRootDir(), domain, filepath.FromSlash(fileName))
-	if _, err := os.Stat(filePath); err != nil && !strings.HasPrefix(fileName, "p/") {
-		legacyPath := filepath.Join(a.filesRootDir(), domain, "p", filepath.FromSlash(fileName))
-		if _, legacyErr := os.Stat(legacyPath); legacyErr == nil {
-			filePath = legacyPath
+	domainFilesRoot := filepath.Join(a.filesRootDir(), domain)
+	filePath := filepath.Join(domainFilesRoot, filepath.FromSlash(fileName))
+	realFilePath, err := a.existingPathInsideStorageSubtree(domainFilesRoot, filePath)
+	if err != nil && !strings.HasPrefix(fileName, "p/") {
+		legacyPath := filepath.Join(domainFilesRoot, "p", filepath.FromSlash(fileName))
+		realLegacyPath, legacyErr := a.existingPathInsideStorageSubtree(domainFilesRoot, legacyPath)
+		if legacyErr == nil {
+			realFilePath = realLegacyPath
+			err = nil
 		}
 	}
-	http.ServeFile(w, r, filePath)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	http.ServeFile(w, r, realFilePath)
 }
 
 func (a *App) publicAssetExists(domain, fileName string) bool {
-	filePath := filepath.Join(a.filesRootDir(), domain, filepath.FromSlash(fileName))
-	if fileInfo, err := os.Stat(filePath); err == nil && !fileInfo.IsDir() {
-		return true
+	fileName = safeRelativeAssetPath(fileName)
+	if fileName == "" {
+		return false
+	}
+	domainFilesRoot := filepath.Join(a.filesRootDir(), domain)
+	filePath := filepath.Join(domainFilesRoot, filepath.FromSlash(fileName))
+	if realFilePath, err := a.existingPathInsideStorageSubtree(domainFilesRoot, filePath); err == nil {
+		fileInfo, statErr := os.Stat(realFilePath)
+		if statErr == nil && !fileInfo.IsDir() {
+			return true
+		}
 	}
 	if strings.HasPrefix(fileName, "p/") {
 		return false
 	}
-	legacyPath := filepath.Join(a.filesRootDir(), domain, "p", filepath.FromSlash(fileName))
-	fileInfo, err := os.Stat(legacyPath)
-	return err == nil && !fileInfo.IsDir()
+	legacyPath := filepath.Join(domainFilesRoot, "p", filepath.FromSlash(fileName))
+	if realLegacyPath, err := a.existingPathInsideStorageSubtree(domainFilesRoot, legacyPath); err == nil {
+		fileInfo, statErr := os.Stat(realLegacyPath)
+		return statErr == nil && !fileInfo.IsDir()
+	}
+	return false
 }
 
 func publicAssetFileNameFromPath(requestPath, domain string) string {
@@ -18809,7 +19172,7 @@ func pagePasswordFailureDomainPrefix(domain string) string {
 }
 
 func (a *App) pagePasswordRuleFromPrefixFile(domain, pagePath string) (PagePasswordRule, bool) {
-	prefixBytes, err := os.ReadFile(a.pagePasswordPrefixFilePath(domain))
+	prefixBytes, err := a.readFileInsideStorage(a.pagePasswordPrefixFilePath(domain))
 	if err != nil {
 		return PagePasswordRule{}, false
 	}
@@ -18873,13 +19236,18 @@ func (a *App) writePagePasswordPrefixFile(ctx context.Context, domain string) {
 	}
 	prefixFilePath := a.pagePasswordPrefixFilePath(normalizedDomain)
 	if len(rules) == 0 {
-		_ = os.Remove(prefixFilePath)
+		_ = a.removeInsideStorage(prefixFilePath)
 		return
 	}
-	if mkdirErr := os.MkdirAll(filepath.Dir(prefixFilePath), 0o700); mkdirErr != nil {
+	prefixDirectory := filepath.Dir(prefixFilePath)
+	if mkdirErr := a.mkdirAllInsideStorage(prefixDirectory, 0o700); mkdirErr != nil {
 		return
 	}
-	_ = os.WriteFile(prefixFilePath, dirprotect.PrefixFileBody(rules), 0o600)
+	realPrefixFilePath, pathErr := a.writablePathInsideStorageSubtree(prefixDirectory, prefixFilePath)
+	if pathErr != nil {
+		return
+	}
+	_ = os.WriteFile(realPrefixFilePath, dirprotect.PrefixFileBody(rules), 0o600)
 }
 
 func (a *App) pagePasswordPrefixFilePath(domain string) string {
@@ -21114,7 +21482,9 @@ func (a *App) persistSpiderAssets(ctx context.Context, spider *pageSpider, pageP
 	}
 	ctx = contextWithDomain(ctx, domain)
 	baseDir := a.domainFilesDirForDomain(spider.domain)
-	_ = os.MkdirAll(baseDir, 0o755)
+	if err := a.mkdirAllInsideStorage(baseDir, 0o755); err != nil {
+		return err
+	}
 	ownerPath := cleanPath(pagePath)
 	wroteFile := false
 	for _, resource := range spider.resources {
@@ -21126,8 +21496,16 @@ func (a *App) persistSpiderAssets(ctx context.Context, spider *pageSpider, pageP
 			continue
 		}
 		targetFilePath := filepath.Join(baseDir, filepath.FromSlash(assetReference))
-		_ = os.MkdirAll(filepath.Dir(targetFilePath), 0o755)
-		_ = os.WriteFile(targetFilePath, resource.content, 0o644)
+		realTargetFilePath, pathErr := a.writablePathInsideStorageSubtree(baseDir, targetFilePath)
+		if pathErr != nil {
+			return pathErr
+		}
+		if err := os.MkdirAll(filepath.Dir(realTargetFilePath), 0o755); err != nil {
+			return err
+		}
+		if err := os.WriteFile(realTargetFilePath, resource.content, 0o644); err != nil {
+			return err
+		}
 		wroteFile = true
 		resourceContentType := resource.contentType
 		if strings.TrimSpace(resourceContentType) == "" {
@@ -23299,12 +23677,268 @@ func normalizeChrootLocationURLPath(rawPath string) string {
 }
 
 func isPathWithinRoot(rootPath string, candidatePath string) bool {
-	cleanRoot := filepath.Clean(rootPath)
-	cleanCandidate := filepath.Clean(candidatePath)
-	if cleanRoot == cleanCandidate {
+	rootAbsolutePath, rootErr := filepath.Abs(rootPath)
+	candidateAbsolutePath, candidateErr := filepath.Abs(candidatePath)
+	if rootErr != nil || candidateErr != nil {
+		return false
+	}
+	cleanRoot := filepath.Clean(rootAbsolutePath)
+	cleanCandidate := filepath.Clean(candidateAbsolutePath)
+	if sameCleanPath(cleanRoot, cleanCandidate) {
 		return true
 	}
-	return strings.HasPrefix(cleanCandidate, cleanRoot+string(os.PathSeparator))
+	relativePath, err := filepath.Rel(cleanRoot, cleanCandidate)
+	if err != nil || relativePath == "." || filepath.IsAbs(relativePath) {
+		return false
+	}
+	return relativePath != ".." && !strings.HasPrefix(relativePath, ".."+string(os.PathSeparator))
+}
+
+func sameCleanPath(leftPath string, rightPath string) bool {
+	leftPath = filepath.Clean(leftPath)
+	rightPath = filepath.Clean(rightPath)
+	if runtime.GOOS == "windows" {
+		return strings.EqualFold(leftPath, rightPath)
+	}
+	return leftPath == rightPath
+}
+
+func nearestExistingPath(absolutePath string) (string, error) {
+	currentPath := filepath.Clean(absolutePath)
+	for {
+		if _, err := os.Lstat(currentPath); err == nil {
+			return currentPath, nil
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return "", err
+		}
+		parentPath := filepath.Dir(currentPath)
+		if sameCleanPath(parentPath, currentPath) {
+			return "", os.ErrNotExist
+		}
+		currentPath = parentPath
+	}
+}
+
+func resolveExistingPathInsideRoot(rootRealPath string, candidatePath string) (string, error) {
+	candidateAbsolutePath, err := filepath.Abs(candidatePath)
+	if err != nil {
+		return "", err
+	}
+	candidateRealPath, err := filepath.EvalSymlinks(candidateAbsolutePath)
+	if err != nil {
+		return "", err
+	}
+	if !isPathWithinRoot(rootRealPath, candidateRealPath) {
+		return "", errors.New("path escapes allowed storage root")
+	}
+	return candidateRealPath, nil
+}
+
+func resolvePathInsideRootForWrite(rootRealPath string, candidatePath string) (string, error) {
+	candidateAbsolutePath, err := filepath.Abs(candidatePath)
+	if err != nil {
+		return "", err
+	}
+	if candidateRealPath, err := filepath.EvalSymlinks(candidateAbsolutePath); err == nil {
+		if !isPathWithinRoot(rootRealPath, candidateRealPath) {
+			return "", errors.New("path escapes allowed storage root")
+		}
+		return candidateRealPath, nil
+	}
+	existingPath, err := nearestExistingPath(candidateAbsolutePath)
+	if err != nil {
+		return "", err
+	}
+	if !sameCleanPath(existingPath, candidateAbsolutePath) {
+		existingInfo, statErr := os.Stat(existingPath)
+		if statErr != nil {
+			return "", statErr
+		}
+		if !existingInfo.IsDir() {
+			return "", errors.New("path parent is not a directory")
+		}
+	}
+	existingRealPath, err := filepath.EvalSymlinks(existingPath)
+	if err != nil {
+		return "", err
+	}
+	if !isPathWithinRoot(rootRealPath, existingRealPath) {
+		return "", errors.New("path parent escapes allowed storage root")
+	}
+	relativeTail, err := filepath.Rel(existingPath, candidateAbsolutePath)
+	if err != nil {
+		return "", err
+	}
+	candidateRealPath := filepath.Clean(filepath.Join(existingRealPath, relativeTail))
+	if !isPathWithinRoot(rootRealPath, candidateRealPath) {
+		return "", errors.New("path escapes allowed storage root")
+	}
+	return candidateRealPath, nil
+}
+
+func (a *App) storageJailRootPath() (string, error) {
+	if a != nil && strings.TrimSpace(a.storageRealRoot) != "" {
+		return filepath.Clean(a.storageRealRoot), nil
+	}
+	storagePath := ""
+	if a != nil {
+		storagePath = a.storagePath
+	}
+	return prepareStorageJailRoot(storagePath)
+}
+
+func (a *App) existingPathInsideStorage(candidatePath string) (string, error) {
+	storageRoot, err := a.storageJailRootPath()
+	if err != nil {
+		return "", err
+	}
+	return resolveExistingPathInsideRoot(storageRoot, candidatePath)
+}
+
+func (a *App) writablePathInsideStorage(candidatePath string) (string, error) {
+	storageRoot, err := a.storageJailRootPath()
+	if err != nil {
+		return "", err
+	}
+	return resolvePathInsideRootForWrite(storageRoot, candidatePath)
+}
+
+func (a *App) existingPathInsideStorageSubtree(rootPath string, candidatePath string) (string, error) {
+	if err := a.rejectStorageSymlinkComponents(rootPath); err != nil {
+		return "", err
+	}
+	rootRealPath, err := a.existingPathInsideStorage(rootPath)
+	if err != nil {
+		return "", err
+	}
+	candidateRealPath, err := a.existingPathInsideStorage(candidatePath)
+	if err != nil {
+		return "", err
+	}
+	if !isPathWithinRoot(rootRealPath, candidateRealPath) {
+		return "", errors.New("path escapes allowed storage subtree")
+	}
+	return candidateRealPath, nil
+}
+
+func (a *App) writablePathInsideStorageSubtree(rootPath string, candidatePath string) (string, error) {
+	if err := a.rejectStorageSymlinkComponents(rootPath); err != nil {
+		return "", err
+	}
+	if err := a.mkdirAllInsideStorage(rootPath, 0o755); err != nil {
+		return "", err
+	}
+	rootRealPath, err := a.existingPathInsideStorage(rootPath)
+	if err != nil {
+		return "", err
+	}
+	candidateRealPath, err := a.writablePathInsideStorage(candidatePath)
+	if err != nil {
+		return "", err
+	}
+	if !isPathWithinRoot(rootRealPath, candidateRealPath) {
+		return "", errors.New("path escapes allowed storage subtree")
+	}
+	return candidateRealPath, nil
+}
+
+func (a *App) mkdirAllInsideStorage(directoryPath string, perm os.FileMode) error {
+	realDirectoryPath, err := a.writablePathInsideStorage(directoryPath)
+	if err != nil {
+		return err
+	}
+	return os.MkdirAll(realDirectoryPath, perm)
+}
+
+func (a *App) openFileInsideStorage(filePath string) (*os.File, error) {
+	realFilePath, err := a.existingPathInsideStorage(filePath)
+	if err != nil {
+		return nil, err
+	}
+	return os.Open(realFilePath)
+}
+
+func (a *App) createFileInsideStorage(filePath string) (*os.File, error) {
+	realFilePath, err := a.writablePathInsideStorage(filePath)
+	if err != nil {
+		return nil, err
+	}
+	if err := os.MkdirAll(filepath.Dir(realFilePath), 0o755); err != nil {
+		return nil, err
+	}
+	return os.Create(realFilePath)
+}
+
+func (a *App) readFileInsideStorage(filePath string) ([]byte, error) {
+	realFilePath, err := a.existingPathInsideStorage(filePath)
+	if err != nil {
+		return nil, err
+	}
+	return os.ReadFile(realFilePath)
+}
+
+func (a *App) writeFileInsideStorage(filePath string, payload []byte, perm os.FileMode) error {
+	realFilePath, err := a.writablePathInsideStorage(filePath)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(realFilePath), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(realFilePath, payload, perm)
+}
+
+func (a *App) removeInsideStorage(filePath string) error {
+	realFilePath, err := a.writablePathInsideStorage(filePath)
+	if err != nil {
+		return err
+	}
+	return os.Remove(realFilePath)
+}
+
+func (a *App) removeAllInsideStorage(pathToRemove string) error {
+	realPath, err := a.writablePathInsideStorage(pathToRemove)
+	if err != nil {
+		return err
+	}
+	return os.RemoveAll(realPath)
+}
+
+func (a *App) rejectStorageSymlinkComponents(candidatePath string) error {
+	storagePath := ""
+	if a != nil {
+		storagePath = a.storagePath
+	}
+	storageRootPath, err := filepath.Abs(cleanStoragePath(storagePath))
+	if err != nil {
+		return err
+	}
+	candidateAbsolutePath, err := filepath.Abs(candidatePath)
+	if err != nil {
+		return err
+	}
+	relativePath, err := filepath.Rel(storageRootPath, candidateAbsolutePath)
+	if err != nil || relativePath == "." || filepath.IsAbs(relativePath) || strings.HasPrefix(relativePath, ".."+string(os.PathSeparator)) || relativePath == ".." {
+		return nil
+	}
+	currentPath := storageRootPath
+	for _, pathPart := range strings.Split(relativePath, string(os.PathSeparator)) {
+		if pathPart == "" || pathPart == "." {
+			continue
+		}
+		currentPath = filepath.Join(currentPath, pathPart)
+		fileInfo, statErr := os.Lstat(currentPath)
+		if statErr != nil {
+			if errors.Is(statErr, os.ErrNotExist) {
+				return nil
+			}
+			return statErr
+		}
+		if fileInfo.Mode()&os.ModeSymlink != 0 {
+			return errors.New("storage subtree root contains a symlink")
+		}
+	}
+	return nil
 }
 
 func (a *App) domainChrootRootDir(domain string) string {
@@ -23313,7 +23947,10 @@ func (a *App) domainChrootRootDir(domain string) string {
 
 func (a *App) domainChrootRealRootDir(domain string) (string, error) {
 	rootPath := a.domainChrootRootDir(domain)
-	if err := os.MkdirAll(rootPath, 0o755); err != nil {
+	if err := a.rejectStorageSymlinkComponents(rootPath); err != nil {
+		return "", err
+	}
+	if err := a.mkdirAllInsideStorage(rootPath, 0o755); err != nil {
 		return "", err
 	}
 	rootAbsPath, err := filepath.Abs(rootPath)
@@ -23335,10 +23972,14 @@ func (a *App) chrootLocationDirectoryPath(domain, urlPath string) string {
 
 func (a *App) ensureChrootLocationDirectory(domain, urlPath string) (string, error) {
 	directoryPath := a.chrootLocationDirectoryPath(domain, urlPath)
-	if err := os.MkdirAll(directoryPath, 0o755); err != nil {
+	realDirectoryPath, err := a.writablePathInsideStorageSubtree(a.domainChrootRootDir(domain), directoryPath)
+	if err != nil {
 		return "", err
 	}
-	return a.normalizeAndValidateChrootLocationPath(domain, directoryPath)
+	if err := os.MkdirAll(realDirectoryPath, 0o755); err != nil {
+		return "", err
+	}
+	return a.normalizeAndValidateChrootLocationPath(domain, realDirectoryPath)
 }
 
 func (a *App) normalizeAndValidateChrootLocationPath(domain, rawDirectoryPath string) (string, error) {
@@ -24462,8 +25103,13 @@ func (a *App) shouldUpdatePublishedPage(ctx context.Context, domain, pagePath, n
 	if publishedErr != nil || normalizePublishedHTML(previousPublishedHTML) != normalizePublishedHTML(nextRenderedHTML) {
 		return true
 	}
-	staticFilePath := filepath.Join(a.domainStaticDir(domain), staticRelativePathForPage(pagePath))
-	previousRenderedHTMLBytes, readErr := os.ReadFile(staticFilePath)
+	staticRoot := a.domainStaticDir(domain)
+	staticFilePath := filepath.Join(staticRoot, staticRelativePathForPage(pagePath))
+	realStaticFilePath, pathErr := a.existingPathInsideStorageSubtree(staticRoot, staticFilePath)
+	if pathErr != nil {
+		return true
+	}
+	previousRenderedHTMLBytes, readErr := os.ReadFile(realStaticFilePath)
 	if readErr != nil {
 		return true
 	}
@@ -24623,11 +25269,15 @@ func (a *App) importBackup(w http.ResponseWriter, r *http.Request) {
 func (a *App) generateDomainPack(domain string) error {
 	domainDirName := domainStorageName(domain)
 	packsDirPath := a.packsDir()
-	if makeErr := os.MkdirAll(packsDirPath, 0o755); makeErr != nil {
+	if makeErr := a.mkdirAllInsideStorage(packsDirPath, 0o755); makeErr != nil {
 		return makeErr
 	}
 	packFilePath := filepath.Join(packsDirPath, domainDirName+".zip")
-	packFile, createErr := os.Create(packFilePath)
+	realPackFilePath, pathErr := a.writablePathInsideStorageSubtree(packsDirPath, packFilePath)
+	if pathErr != nil {
+		return pathErr
+	}
+	packFile, createErr := os.Create(realPackFilePath)
 	if createErr != nil {
 		return createErr
 	}
@@ -24792,9 +25442,23 @@ func addDirectoryToZip(zipWriter *zip.Writer, sourceDirPath, archiveDirPrefix st
 	if statErr != nil || !directoryInfo.IsDir() {
 		return nil
 	}
+	sourceRealPath, realErr := filepath.EvalSymlinks(sourceDirPath)
+	if realErr != nil {
+		return realErr
+	}
 	return filepath.WalkDir(sourceDirPath, func(currentPath string, currentEntry fs.DirEntry, walkErr error) error {
 		if walkErr != nil || currentEntry.IsDir() {
 			return walkErr
+		}
+		if currentEntry.Type()&os.ModeSymlink != 0 {
+			return nil
+		}
+		currentRealPath, realErr := filepath.EvalSymlinks(currentPath)
+		if realErr != nil {
+			return realErr
+		}
+		if !isPathWithinRoot(sourceRealPath, currentRealPath) {
+			return fmt.Errorf("archive source path escapes %s", sourceDirPath)
 		}
 		relativePath, relErr := filepath.Rel(sourceDirPath, currentPath)
 		if relErr != nil {
@@ -24806,14 +25470,14 @@ func addDirectoryToZip(zipWriter *zip.Writer, sourceDirPath, archiveDirPrefix st
 			return createErr
 		}
 		if rewriteFile != nil && shouldReadStaticExportArchiveFile(archivePath) {
-			sourceBytes, readErr := os.ReadFile(currentPath)
+			sourceBytes, readErr := os.ReadFile(currentRealPath)
 			if readErr != nil {
 				return readErr
 			}
 			_, writeErr := archiveFileWriter.Write(rewriteFile(archivePath, sourceBytes))
 			return writeErr
 		}
-		sourceFile, openErr := os.Open(currentPath)
+		sourceFile, openErr := os.Open(currentRealPath)
 		if openErr != nil {
 			return openErr
 		}
@@ -25160,7 +25824,7 @@ func (a *App) importDomainBackupZIP(ctx context.Context, domain string, importBa
 	filePrefix := importFilePrefix(basePath)
 	rootRedirectPath := applyImportBasePath(basePath, "/")
 	domainDir := a.domainFilesDirForDomain(domain)
-	if err := os.MkdirAll(domainDir, 0o755); err != nil {
+	if err := a.mkdirAllInsideStorage(domainDir, 0o755); err != nil {
 		return rootRedirectPath, err
 	}
 
@@ -25194,10 +25858,11 @@ func (a *App) importDomainBackupZIP(ctx context.Context, domain string, importBa
 			continue
 		}
 		targetFilePath := filepath.Join(domainDir, filepath.FromSlash(nextFileName))
-		if !isPathWithinRoot(domainDir, targetFilePath) {
+		realTargetFilePath, pathErr := a.writablePathInsideStorageSubtree(domainDir, targetFilePath)
+		if pathErr != nil {
 			return rootRedirectPath, fmt.Errorf("backup file path escapes site directory: %s", nextFileName)
 		}
-		if err := os.MkdirAll(filepath.Dir(targetFilePath), 0o755); err != nil {
+		if err := os.MkdirAll(filepath.Dir(realTargetFilePath), 0o755); err != nil {
 			return rootRedirectPath, err
 		}
 		if shouldRewriteImportedTextFile(nextFileName) {
@@ -25206,7 +25871,7 @@ func (a *App) importDomainBackupZIP(ctx context.Context, domain string, importBa
 				return rootRedirectPath, readErr
 			}
 			fileBytes = []byte(rewriteBackupInternalLinks(string(fileBytes), basePath, filePrefix))
-			if err := os.WriteFile(targetFilePath, fileBytes, 0o644); err != nil {
+			if err := os.WriteFile(realTargetFilePath, fileBytes, 0o644); err != nil {
 				return rootRedirectPath, err
 			}
 			continue
@@ -25215,7 +25880,7 @@ func (a *App) importDomainBackupZIP(ctx context.Context, domain string, importBa
 		if openErr != nil {
 			return rootRedirectPath, openErr
 		}
-		targetFile, createErr := os.Create(targetFilePath)
+		targetFile, createErr := os.Create(realTargetFilePath)
 		if createErr != nil {
 			_ = entryReader.Close()
 			return rootRedirectPath, createErr
@@ -25224,11 +25889,11 @@ func (a *App) importDomainBackupZIP(ctx context.Context, domain string, importBa
 		closeErr := targetFile.Close()
 		_ = entryReader.Close()
 		if copyErr != nil {
-			_ = os.Remove(targetFilePath)
+			_ = os.Remove(realTargetFilePath)
 			return rootRedirectPath, copyErr
 		}
 		if closeErr != nil {
-			_ = os.Remove(targetFilePath)
+			_ = os.Remove(realTargetFilePath)
 			return rootRedirectPath, closeErr
 		}
 	}
@@ -25456,27 +26121,32 @@ func hasSitebrushSessionCookie(r *http.Request) bool {
 
 func (a *App) servePublishedStaticFileFromDisk(w http.ResponseWriter, r *http.Request, domain, pagePath string, injectPublicMenu bool) bool {
 	pagePath = cleanPath(pagePath)
-	staticFilePath := filepath.Join(a.domainStaticDir(domain), staticRelativePathForPage(pagePath))
-	fileInfo, statErr := os.Stat(staticFilePath)
+	staticRoot := a.domainStaticDir(domain)
+	staticFilePath := filepath.Join(staticRoot, staticRelativePathForPage(pagePath))
+	realStaticFilePath, pathErr := a.existingPathInsideStorageSubtree(staticRoot, staticFilePath)
+	if pathErr != nil {
+		return false
+	}
+	fileInfo, statErr := os.Stat(realStaticFilePath)
 	if statErr != nil || fileInfo.IsDir() {
 		return false
 	}
 	if pageContentKind(pagePath, "") != "html" {
 		a.logContentDelivery(w, "static-file")
-		http.ServeFile(w, r, staticFilePath)
+		http.ServeFile(w, r, realStaticFilePath)
 		return true
 	}
 	a.logContentDelivery(w, "static-file")
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if injectPublicMenu {
-		staticContent, readErr := a.guestStaticHTML(staticFilePath, pagePath, domain, preferredLanguageCode(r.Header.Get("Accept-Language")), fileInfo)
+		staticContent, readErr := a.guestStaticHTML(realStaticFilePath, pagePath, domain, preferredLanguageCode(r.Header.Get("Accept-Language")), fileInfo)
 		if readErr != nil {
 			return false
 		}
 		_, _ = w.Write(staticContent)
 		return true
 	}
-	staticContent, readErr := os.ReadFile(staticFilePath)
+	staticContent, readErr := os.ReadFile(realStaticFilePath)
 	if readErr != nil {
 		return false
 	}
@@ -25486,17 +26156,22 @@ func (a *App) servePublishedStaticFileFromDisk(w http.ResponseWriter, r *http.Re
 
 func (a *App) servePublishedStaticFileForAdmin(w http.ResponseWriter, r *http.Request, domain, pagePath string, adminEmail string) bool {
 	pagePath = cleanPath(pagePath)
-	staticFilePath := filepath.Join(a.domainStaticDir(domain), staticRelativePathForPage(pagePath))
-	fileInfo, statErr := os.Stat(staticFilePath)
+	staticRoot := a.domainStaticDir(domain)
+	staticFilePath := filepath.Join(staticRoot, staticRelativePathForPage(pagePath))
+	realStaticFilePath, pathErr := a.existingPathInsideStorageSubtree(staticRoot, staticFilePath)
+	if pathErr != nil {
+		return false
+	}
+	fileInfo, statErr := os.Stat(realStaticFilePath)
 	if statErr != nil || fileInfo.IsDir() {
 		return false
 	}
 	if pageContentKind(pagePath, "") != "html" {
 		a.logContentDelivery(w, "static-file")
-		http.ServeFile(w, r, staticFilePath)
+		http.ServeFile(w, r, realStaticFilePath)
 		return true
 	}
-	staticContent, readErr := os.ReadFile(staticFilePath)
+	staticContent, readErr := os.ReadFile(realStaticFilePath)
 	if readErr != nil {
 		return false
 	}
@@ -25514,8 +26189,13 @@ func (a *App) servePublishedStaticFileForAdmin(w http.ResponseWriter, r *http.Re
 }
 
 func (a *App) publishedStaticPageExists(domain, pagePath string) bool {
-	staticFilePath := filepath.Join(a.domainStaticDir(domain), staticRelativePathForPage(cleanPath(pagePath)))
-	fileInfo, statErr := os.Stat(staticFilePath)
+	staticRoot := a.domainStaticDir(domain)
+	staticFilePath := filepath.Join(staticRoot, staticRelativePathForPage(cleanPath(pagePath)))
+	realStaticFilePath, pathErr := a.existingPathInsideStorageSubtree(staticRoot, staticFilePath)
+	if pathErr != nil {
+		return false
+	}
+	fileInfo, statErr := os.Stat(realStaticFilePath)
 	return statErr == nil && !fileInfo.IsDir()
 }
 
@@ -25694,14 +26374,24 @@ func (a *App) injectPublicContextMenu(r *http.Request, pagePath, html string) st
 }
 
 func (a *App) writePublishedStaticHTML(domain, pagePath, html string) {
-	staticFilePath := filepath.Join(a.domainStaticDir(domain), staticRelativePathForPage(pagePath))
-	_ = os.MkdirAll(filepath.Dir(staticFilePath), 0755)
-	_ = os.WriteFile(staticFilePath, []byte(html), 0644)
+	staticRoot := a.domainStaticDir(domain)
+	staticFilePath := filepath.Join(staticRoot, staticRelativePathForPage(pagePath))
+	realStaticFilePath, err := a.writablePathInsideStorageSubtree(staticRoot, staticFilePath)
+	if err != nil {
+		return
+	}
+	_ = os.MkdirAll(filepath.Dir(realStaticFilePath), 0o755)
+	_ = os.WriteFile(realStaticFilePath, []byte(html), 0o644)
 }
 
 func (a *App) removePublishedStaticFile(domain, pagePath string) {
-	staticFilePath := filepath.Join(a.domainStaticDir(domain), staticRelativePathForPage(pagePath))
-	_ = os.Remove(staticFilePath)
+	staticRoot := a.domainStaticDir(domain)
+	staticFilePath := filepath.Join(staticRoot, staticRelativePathForPage(pagePath))
+	realStaticFilePath, err := a.existingPathInsideStorageSubtree(staticRoot, staticFilePath)
+	if err != nil {
+		return
+	}
+	_ = os.Remove(realStaticFilePath)
 }
 
 func staticRelativePathForPage(pagePath string) string {

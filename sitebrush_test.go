@@ -208,6 +208,10 @@ func writeCachedAutoCertForTest(t *testing.T, application *App, domain string, n
 func newTestApplication(t *testing.T) (*App, *sql.DB) {
 	t.Helper()
 	storagePath := t.TempDir()
+	storageRealRoot, err := prepareStorageJailRoot(storagePath)
+	if err != nil {
+		t.Fatalf("prepare storage root: %v", err)
+	}
 	rawDB, err := sql.Open("sqlite3", filepath.Join(storagePath, "sitebrush.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -215,11 +219,155 @@ func newTestApplication(t *testing.T) (*App, *sql.DB) {
 	t.Cleanup(func() {
 		_ = rawDB.Close()
 	})
-	application := &App{db: rawDB, storagePath: storagePath, grabTracker: newGrabProgressTracker(), publishTracker: newPublishProgressTracker(), analyticsEvents: make(chan siteAnalyticsEvent, 1024), authIPFailureCache: startAuthIPFailureCacheWorker(context.Background()), emailDelivery: make(chan emailDeliveryJob, emailDeliveryQueueSize)}
+	application := &App{db: rawDB, storagePath: storagePath, storageRealRoot: storageRealRoot, grabTracker: newGrabProgressTracker(), publishTracker: newPublishProgressTracker(), analyticsEvents: make(chan siteAnalyticsEvent, 1024), authIPFailureCache: startAuthIPFailureCacheWorker(context.Background()), emailDelivery: make(chan emailDeliveryJob, emailDeliveryQueueSize)}
 	if err := application.migrate(context.Background()); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
 	return application, rawDB
+}
+
+func TestStorageJailResolvesSymlinkRootAndRejectsEscapes(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink behavior differs on Windows")
+	}
+	realStorageRoot := t.TempDir()
+	linkParent := t.TempDir()
+	linkStorageRoot := filepath.Join(linkParent, "sitebrush-storage")
+	if err := os.Symlink(realStorageRoot, linkStorageRoot); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	application := &App{storagePath: linkStorageRoot}
+	resolvedRoot, err := application.storageJailRootPath()
+	if err != nil {
+		t.Fatalf("storageJailRootPath: %v", err)
+	}
+	expectedStorageRoot, err := filepath.EvalSymlinks(realStorageRoot)
+	if err != nil {
+		t.Fatalf("resolve expected storage root: %v", err)
+	}
+	if !sameCleanPath(resolvedRoot, expectedStorageRoot) {
+		t.Fatalf("resolved storage root = %q, want %q", resolvedRoot, expectedStorageRoot)
+	}
+
+	outsideFilePath := filepath.Join(t.TempDir(), "secret.txt")
+	if err := os.WriteFile(outsideFilePath, []byte("secret"), 0o600); err != nil {
+		t.Fatalf("write outside file: %v", err)
+	}
+	if _, err := application.existingPathInsideStorage(outsideFilePath); err == nil {
+		t.Fatalf("outside file was accepted inside storage")
+	}
+
+	siteFilesRoot := application.domainFilesDirForDomain("site.example")
+	if err := application.mkdirAllInsideStorage(siteFilesRoot, 0o755); err != nil {
+		t.Fatalf("create site files root: %v", err)
+	}
+	leakPath := filepath.Join(siteFilesRoot, "leak.txt")
+	if err := os.Symlink(outsideFilePath, leakPath); err != nil {
+		t.Skipf("file symlink unavailable: %v", err)
+	}
+	if _, err := application.existingPathInsideStorageSubtree(siteFilesRoot, leakPath); err == nil {
+		t.Fatalf("symlink escape from site files root was accepted")
+	}
+
+	outsideDirectoryPath := t.TempDir()
+	escapeDirectoryPath := filepath.Join(siteFilesRoot, "escape-dir")
+	if err := os.Symlink(outsideDirectoryPath, escapeDirectoryPath); err != nil {
+		t.Skipf("directory symlink unavailable: %v", err)
+	}
+	if _, err := application.writablePathInsideStorageSubtree(siteFilesRoot, filepath.Join(escapeDirectoryPath, "created.txt")); err == nil {
+		t.Fatalf("write through symlinked parent was accepted")
+	}
+}
+
+func TestPublicAssetRejectsSymlinkToNeighborSite(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink behavior differs on Windows")
+	}
+	application := &App{storagePath: t.TempDir()}
+	siteDomain := "a.example"
+	neighborDomain := "b.example"
+	siteFilesRoot := application.domainFilesDirForDomain(siteDomain)
+	neighborFilesRoot := application.domainFilesDirForDomain(neighborDomain)
+	if err := application.mkdirAllInsideStorage(siteFilesRoot, 0o755); err != nil {
+		t.Fatalf("create site files root: %v", err)
+	}
+	if err := application.mkdirAllInsideStorage(neighborFilesRoot, 0o755); err != nil {
+		t.Fatalf("create neighbor files root: %v", err)
+	}
+	neighborSecretPath := filepath.Join(neighborFilesRoot, "secret.txt")
+	if err := application.writeFileInsideStorage(neighborSecretPath, []byte("secret"), 0o644); err != nil {
+		t.Fatalf("write neighbor secret: %v", err)
+	}
+	if err := os.Symlink(neighborSecretPath, filepath.Join(siteFilesRoot, "leak.txt")); err != nil {
+		t.Skipf("file symlink unavailable: %v", err)
+	}
+	if application.publicAssetExists(domainStorageName(siteDomain), "leak.txt") {
+		t.Fatalf("public asset lookup accepted symlink into neighbor site")
+	}
+}
+
+func TestPublicAssetRejectsSymlinkedSiteRootToNeighborSite(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink behavior differs on Windows")
+	}
+	application := &App{storagePath: t.TempDir()}
+	siteDomain := "a.example"
+	neighborDomain := "b.example"
+	siteFilesRoot := application.domainFilesDirForDomain(siteDomain)
+	neighborFilesRoot := application.domainFilesDirForDomain(neighborDomain)
+	if err := application.mkdirAllInsideStorage(filepath.Dir(siteFilesRoot), 0o755); err != nil {
+		t.Fatalf("create files root: %v", err)
+	}
+	if err := application.mkdirAllInsideStorage(neighborFilesRoot, 0o755); err != nil {
+		t.Fatalf("create neighbor files root: %v", err)
+	}
+	neighborSecretPath := filepath.Join(neighborFilesRoot, "secret.txt")
+	if err := application.writeFileInsideStorage(neighborSecretPath, []byte("secret"), 0o644); err != nil {
+		t.Fatalf("write neighbor secret: %v", err)
+	}
+	if err := os.Symlink(neighborFilesRoot, siteFilesRoot); err != nil {
+		t.Skipf("directory symlink unavailable: %v", err)
+	}
+	if application.publicAssetExists(domainStorageName(siteDomain), "secret.txt") {
+		t.Fatalf("public asset lookup accepted symlinked site root into neighbor site")
+	}
+}
+
+func TestPublishedStaticRejectsSymlinkToNeighborSite(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink behavior differs on Windows")
+	}
+	application := &App{storagePath: t.TempDir()}
+	siteDomain := "a.example"
+	neighborDomain := "b.example"
+	siteStaticRoot := application.domainStaticDir(siteDomain)
+	neighborStaticRoot := application.domainStaticDir(neighborDomain)
+	if err := application.mkdirAllInsideStorage(siteStaticRoot, 0o755); err != nil {
+		t.Fatalf("create site static root: %v", err)
+	}
+	if err := application.mkdirAllInsideStorage(neighborStaticRoot, 0o755); err != nil {
+		t.Fatalf("create neighbor static root: %v", err)
+	}
+	neighborIndexPath := filepath.Join(neighborStaticRoot, "index.html")
+	if err := application.writeFileInsideStorage(neighborIndexPath, []byte("<!doctype html><p>secret</p>"), 0o644); err != nil {
+		t.Fatalf("write neighbor static file: %v", err)
+	}
+	if err := os.Symlink(neighborIndexPath, filepath.Join(siteStaticRoot, "index.html")); err != nil {
+		t.Skipf("file symlink unavailable: %v", err)
+	}
+	request := httptest.NewRequest(http.MethodGet, "/", nil)
+	response := httptest.NewRecorder()
+	if application.servePublishedStaticFileFromDisk(response, request, siteDomain, "/", false) {
+		t.Fatalf("published static serving accepted symlink into neighbor site")
+	}
+}
+
+func TestOpenServerControlDatabaseRejectsPathOutsideStorage(t *testing.T) {
+	application := &App{storagePath: t.TempDir(), dbPath: filepath.Join(t.TempDir(), "outside.db")}
+	if database, err := application.openServerControlDatabase(context.Background()); err == nil {
+		_ = database.Close()
+		t.Fatalf("openServerControlDatabase accepted db path outside storage")
+	}
 }
 
 func captureImmediateProfileEmail(t *testing.T, application *App) {
