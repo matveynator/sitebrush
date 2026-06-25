@@ -62,6 +62,7 @@ type ServerView struct {
 	DefaultInvoicePlan     string
 	DefaultInvoiceAmount   string
 	DefaultInvoiceCurrency string
+	SystemMetrics          []ServerMetricView
 	Sites                  []ServerSiteView
 	Clients                []ServerClientView
 	Invoices               []ServerInvoiceView
@@ -71,35 +72,48 @@ type ServerView struct {
 }
 
 type ServerSiteView struct {
-	Domain       string
-	URL          string
-	OwnerEmail   string
-	AdminEmails  string
-	PlanName     string
-	PaidStatus   string
-	UsedLabel    string
-	LimitLabel   string
-	OverLimit    bool
-	InvoiceLabel string
+	Domain            string
+	URL               string
+	OwnerEmail        string
+	AdminEmails       string
+	PlanName          string
+	PaidStatus        string
+	UsedLabel         string
+	LimitLabel        string
+	OverLimit         bool
+	InvoiceLabel      string
+	BillingPriceLabel string
+	BillingStatusText string
+	BillingAmount     string
+	BillingCurrency   string
+	BillingBillable   bool
 }
 
 type ServerClientView struct {
 	Email     string
 	SiteCount int
 	Domains   string
+	Sites     []ServerSiteView
 }
 
 type ServerInvoiceView struct {
-	Number        string
-	CustomerEmail string
-	Domain        string
-	PlanName      string
-	AmountLabel   string
-	StatusLabel   string
-	PaymentURL    string
-	PeriodLabel   string
-	HistoryLabel  string
-	CanPay        bool
+	Number         string
+	CustomerEmail  string
+	Domain         string
+	PlanName       string
+	AmountLabel    string
+	StatusLabel    string
+	PaymentURL     string
+	PeriodLabel    string
+	HistoryLabel   string
+	RecurringLabel string
+	CanPay         bool
+}
+
+type ServerMetricView struct {
+	Name        string
+	Value       string
+	StatusClass string
 }
 
 type ServerSettingView struct {
@@ -114,13 +128,14 @@ type ServerDiagnosticView struct {
 }
 
 type LocalServerViewInput struct {
-	Sites       []Site
-	Invoices    []Invoice
-	Plans       []Plan
-	Assignments map[string]ServiceAssignment
-	MainDomain  string
-	CurrentHost string
-	SiteURL     func(string) string
+	Sites         []Site
+	Invoices      []Invoice
+	Plans         []Plan
+	Assignments   map[string]ServiceAssignment
+	SystemMetrics []ServerMetricView
+	MainDomain    string
+	CurrentHost   string
+	SiteURL       func(string) string
 }
 
 func BuildOverview(sites []Site, clientCount int, siteRequests []SiteRequest, invoices []Invoice, hostings []ClientHosting, syncEvents []RegistrySyncEvent, serviceMailEvents []ServiceMailEvent) OverviewView {
@@ -130,7 +145,7 @@ func BuildOverview(sites []Site, clientCount int, siteRequests []SiteRequest, in
 		SiteCount:        len(sites),
 		ServerCount:      len(hostings),
 		LastSyncLabel:    "синхронизаций ещё нет",
-		PaymentSetupText: "способы оплаты настраиваются в разделе счетов",
+		PaymentSetupText: "стоимость считается по занятым мегабайтам",
 	}
 	if len(syncEvents) > 0 {
 		view.LastSyncLabel = firstNonEmpty(syncEvents[0].CreatedAt, "синхронизация была, дата не передана")
@@ -160,7 +175,7 @@ func BuildOverview(sites []Site, clientCount int, siteRequests []SiteRequest, in
 	view.ProblemCount = view.PendingRequests + view.UnpaidInvoices + view.OverLimitSites + view.StaleServers + view.MailErrors
 	if view.ProblemCount == 0 {
 		view.HealthTitle = "Всё спокойно"
-		view.HealthText = "Заявок, неоплаченных счетов и критичных проблем сейчас нет."
+		view.HealthText = "Заявок, неоплаченных записей и критичных проблем сейчас нет."
 		view.HealthClass = "hosting-overview-ok"
 	} else {
 		view.HealthTitle = strconv.Itoa(view.ProblemCount) + " требует внимания"
@@ -199,46 +214,42 @@ func BuildLocalServerView(input LocalServerViewInput) ServerView {
 		SyncStatusClass:    "billing-sync-ok",
 		NetworkStatusLabel: "проверяется фоновым мониторингом",
 		NetworkStatusClass: "hosting-metric-ok",
-		Settings: []ServerSettingView{
-			{Name: "Оплата", Value: "SiteBrush.com demo payments"},
-			{Name: "Тарифы", Value: strconv.Itoa(len(input.Plans))},
-		},
-		Diagnostics: []ServerDiagnosticView{
-			{Name: "Источник", Value: "локальная control DB и site DB", StatusClass: "hosting-metric-ok"},
-			{Name: "DNS/TLS", Value: "не блокирует открытие раздела", StatusClass: "hosting-metric-ok"},
-		},
+		SystemMetrics:      input.SystemMetrics,
 	}
-	clientDomains := make(map[string][]string)
+	if len(server.SystemMetrics) == 0 {
+		server.SystemMetrics = []ServerMetricView{
+			{Name: "Статус", Value: "локальные данные", StatusClass: "hosting-metric-ok"},
+		}
+	}
 	for _, siteRow := range input.Sites {
 		ownerEmail := firstHostingSnapshotEmail(splitEmailList(siteRow.AdminEmails))
 		if ownerEmail == "" {
 			ownerEmail = "owner not set"
-		}
-		clientDomains[ownerEmail] = append(clientDomains[ownerEmail], siteRow.Domain)
-		assignment := input.Assignments[normalizeDomainName(siteRow.Domain)]
-		planName := siteRow.PlanName
-		if planName == "" {
-			planName = "тариф не назначен"
 		}
 		siteURL := siteRow.URL
 		if input.SiteURL != nil {
 			siteURL = input.SiteURL(siteRow.Domain)
 		}
 		server.Sites = append(server.Sites, ServerSiteView{
-			Domain:       siteRow.Domain,
-			URL:          siteURL,
-			OwnerEmail:   ownerEmail,
-			AdminEmails:  siteRow.AdminEmails,
-			PlanName:     planName,
-			PaidStatus:   firstNonEmpty(assignment.ServiceStatus, siteRow.ServiceStatus, "free"),
-			UsedLabel:    siteRow.UsedLabel,
-			LimitLabel:   siteRow.LimitLabel,
-			OverLimit:    siteRow.UsedPercent >= 100,
-			InvoiceLabel: InvoiceLabelForDomain(input.Invoices, siteRow.Domain),
+			Domain:            siteRow.Domain,
+			URL:               siteURL,
+			OwnerEmail:        ownerEmail,
+			AdminEmails:       siteRow.AdminEmails,
+			PlanName:          "Дисковое пространство",
+			PaidStatus:        siteRow.BillingStatusText,
+			UsedLabel:         siteRow.UsedLabel,
+			LimitLabel:        siteRow.LimitLabel,
+			OverLimit:         siteRow.UsedPercent >= 100,
+			InvoiceLabel:      InvoiceLabelForDomain(input.Invoices, siteRow.Domain),
+			BillingPriceLabel: siteRow.BillingPriceLabel,
+			BillingStatusText: siteRow.BillingStatusText,
+			BillingAmount:     siteRow.BillingAmount,
+			BillingCurrency:   siteRow.BillingCurrency,
+			BillingBillable:   siteRow.BillingBillable,
 		})
 	}
 	server.SiteCount = len(server.Sites)
-	server.Clients = serverClientViews(clientDomains)
+	server.Clients = serverClientViewsFromSites(server.Sites)
 	server.ClientCount = len(server.Clients)
 	server.Invoices = ServerInvoiceViews(input.Invoices, serverDomains(server.Sites), nil)
 	server.InvoiceCount = len(server.Invoices)
@@ -246,7 +257,6 @@ func BuildLocalServerView(input LocalServerViewInput) ServerView {
 	server.UnpaidInvoiceCount = UnpaidInvoiceCount(server.Invoices)
 	server.InvoiceActionLabel, server.InvoiceActionClass = InvoiceAction(server.BillableCount, server.UnpaidInvoiceCount)
 	server.TotalUsedLabel = serverTotalUsedLabel(server.Sites)
-	server.Plans = ClientPlansFromPlans(input.Plans)
 	applyServerInvoiceDefaults(&server)
 	return server
 }
@@ -263,18 +273,7 @@ func BuildRemoteServerView(clientHosting ClientHosting, invoices []Invoice) Serv
 		DiskTotalLabel:     clientHosting.DiskTotalLabel,
 		NetworkStatusLabel: clientHosting.NetworkUptimeLabel,
 		NetworkStatusClass: clientHosting.NetworkStatusClass,
-		Plans:              clientHosting.Plans,
-		Settings: []ServerSettingView{
-			{Name: "Оплата", Value: "через SiteBrush.com"},
-			{Name: "Владелец", Value: firstNonEmpty(clientHosting.OwnerEmail, "не передан")},
-		},
-		Diagnostics: []ServerDiagnosticView{
-			{Name: "SiteBrush", Value: firstNonEmpty(clientHosting.SitebrushVersion, "версия не передана"), StatusClass: "hosting-metric-ok"},
-			{Name: "OS", Value: strings.TrimSpace(clientHosting.OSName + " " + clientHosting.OSVersion), StatusClass: "hosting-metric-ok"},
-			{Name: "CPU", Value: fmt.Sprintf("%s · %d ядер", firstNonEmpty(clientHosting.CPUModel, "CPU не передан"), clientHosting.CPUCores), StatusClass: clientHosting.CPUStatusClass},
-			{Name: "Load", Value: fmt.Sprintf("%.2f", clientHosting.LoadAverage), StatusClass: clientHosting.LoadStatusClass},
-			{Name: "Uptime", Value: clientHosting.ServerUptimeLabel, StatusClass: clientHosting.ServerUptimeClass},
-		},
+		SystemMetrics:      ServerSystemMetricViews(clientHosting),
 	}
 	stale := HostingSyncIsStale(clientHosting.LastSeenAt, time.Now().UTC())
 	if strings.TrimSpace(clientHosting.LastSeenAt) == "" {
@@ -287,24 +286,28 @@ func BuildRemoteServerView(clientHosting ClientHosting, invoices []Invoice) Serv
 		server.SyncStatusLabel = "синхронизировано · " + clientHosting.LastSeenAt
 		server.SyncStatusClass = "billing-sync-ok"
 	}
-	clientDomains := make(map[string][]string)
 	for _, site := range clientHosting.Sites {
 		ownerEmail := firstNonEmpty(site.OwnerEmail, firstHostingSnapshotEmail(site.AdminEmails), clientHosting.OwnerEmail, "owner not set")
-		clientDomains[ownerEmail] = append(clientDomains[ownerEmail], site.Domain)
+		billingPrice := BillingPriceForUsedBytes(site.UsedBytes)
 		server.Sites = append(server.Sites, ServerSiteView{
-			Domain:       site.Domain,
-			URL:          "http://" + site.Domain + "/",
-			OwnerEmail:   ownerEmail,
-			AdminEmails:  strings.Join(site.AdminEmails, ", "),
-			PlanName:     firstNonEmpty(site.PlanName, "тариф не назначен"),
-			PaidStatus:   firstNonEmpty(site.PlanPaidStatus, "free"),
-			UsedLabel:    site.UsedLabel,
-			LimitLabel:   site.LimitLabel,
-			OverLimit:    site.OverLimit,
-			InvoiceLabel: InvoiceLabelForDomain(invoices, site.Domain),
+			Domain:            site.Domain,
+			URL:               "http://" + site.Domain + "/",
+			OwnerEmail:        ownerEmail,
+			AdminEmails:       strings.Join(site.AdminEmails, ", "),
+			PlanName:          "Дисковое пространство",
+			PaidStatus:        billingPrice.StatusText,
+			UsedLabel:         site.UsedLabel,
+			LimitLabel:        site.LimitLabel,
+			OverLimit:         site.OverLimit,
+			InvoiceLabel:      InvoiceLabelForDomain(invoices, site.Domain),
+			BillingPriceLabel: billingPrice.PriceLabel,
+			BillingStatusText: billingPrice.StatusText,
+			BillingAmount:     billingPrice.Amount,
+			BillingCurrency:   billingPrice.Currency,
+			BillingBillable:   billingPrice.Billable,
 		})
 	}
-	server.Clients = serverClientViews(clientDomains)
+	server.Clients = serverClientViewsFromSites(server.Sites)
 	server.ClientCount = len(server.Clients)
 	server.Invoices = ServerInvoiceViews(invoices, serverDomains(server.Sites), serverClientEmails(server.Clients))
 	server.InvoiceCount = len(server.Invoices)
@@ -313,6 +316,21 @@ func BuildRemoteServerView(clientHosting ClientHosting, invoices []Invoice) Serv
 	server.InvoiceActionLabel, server.InvoiceActionClass = InvoiceAction(server.BillableCount, server.UnpaidInvoiceCount)
 	applyServerInvoiceDefaults(&server)
 	return server
+}
+
+func ServerSystemMetricViews(clientHosting ClientHosting) []ServerMetricView {
+	osLabel := strings.TrimSpace(clientHosting.OSName + " " + clientHosting.OSVersion)
+	cpuLabel := fmt.Sprintf("%s · %d ядер", firstNonEmpty(clientHosting.CPUModel, "CPU не передан"), clientHosting.CPUCores)
+	diskLabel := clientHosting.DiskUsedLabel + " занято / " + clientHosting.DiskFreeLabel + " свободно / " + clientHosting.DiskTotalLabel + " всего"
+	return []ServerMetricView{
+		{Name: "OS", Value: firstNonEmpty(osLabel, "ОС не передана"), StatusClass: "hosting-metric-ok"},
+		{Name: "CPU", Value: cpuLabel, StatusClass: clientHosting.CPUStatusClass},
+		{Name: "CPU %", Value: fmt.Sprintf("%.1f%%", clientHosting.CPUUsagePercent), StatusClass: clientHosting.CPUStatusClass},
+		{Name: "LA", Value: fmt.Sprintf("%.2f", clientHosting.LoadAverage), StatusClass: clientHosting.LoadStatusClass},
+		{Name: "Memory", Value: firstNonEmpty(clientHosting.RAMTotalLabel, "память не передана"), StatusClass: "hosting-metric-ok"},
+		{Name: "Disk", Value: diskLabel, StatusClass: clientHosting.DiskStatusClass},
+		{Name: "Uptime", Value: clientHosting.ServerUptimeLabel, StatusClass: clientHosting.ServerUptimeClass},
+	}
 }
 
 func FastServerHostings(clientHostings []ClientHosting) []ClientHosting {
@@ -512,16 +530,17 @@ func ServerInvoiceViews(invoices []Invoice, domains map[string]struct{}, emails 
 		}
 		statusLabel := InvoiceStatusLabel(invoice.Status)
 		views = append(views, ServerInvoiceView{
-			Number:        invoice.Number,
-			CustomerEmail: invoice.CustomerEmail,
-			Domain:        invoice.Domain,
-			PlanName:      firstNonEmpty(invoice.PlanName, "обслуживание сайта"),
-			AmountLabel:   strings.TrimSpace(invoice.Amount + " " + invoice.Currency),
-			StatusLabel:   statusLabel,
-			PaymentURL:    invoice.PaymentURL,
-			PeriodLabel:   InvoicePeriodLabel(invoice),
-			HistoryLabel:  InvoiceHistoryLabel(invoice),
-			CanPay:        invoice.PaymentURL != "" && strings.TrimSpace(invoice.Status) != "paid" && strings.TrimSpace(invoice.Status) != "cancelled",
+			Number:         invoice.Number,
+			CustomerEmail:  invoice.CustomerEmail,
+			Domain:         invoice.Domain,
+			PlanName:       firstNonEmpty(invoice.PlanName, "обслуживание сайта"),
+			AmountLabel:    strings.TrimSpace(invoice.Amount + " " + invoice.Currency),
+			StatusLabel:    statusLabel,
+			PaymentURL:     invoice.PaymentURL,
+			PeriodLabel:    InvoicePeriodLabel(invoice),
+			HistoryLabel:   InvoiceHistoryLabel(invoice),
+			RecurringLabel: InvoiceRecurringLabel(invoice),
+			CanPay:         invoice.PaymentURL != "" && strings.TrimSpace(invoice.Status) != "paid" && strings.TrimSpace(invoice.Status) != "cancelled",
 		})
 	}
 	return views
@@ -560,6 +579,17 @@ func InvoiceHistoryLabel(invoice Invoice) string {
 	return strings.Join(parts, " · ")
 }
 
+func InvoiceRecurringLabel(invoice Invoice) string {
+	if !invoice.Recurring {
+		return "разовый счёт"
+	}
+	period := strings.TrimSpace(invoice.RecurringPeriod)
+	if period == "" {
+		period = "monthly"
+	}
+	return "периодический · " + period
+}
+
 func InvoiceLabelForDomain(invoices []Invoice, domain string) string {
 	domain = normalizeDomainName(domain)
 	if domain == "" {
@@ -577,8 +607,7 @@ func InvoiceLabelForDomain(invoices []Invoice, domain string) string {
 func BillableSiteCount(sites []ServerSiteView) int {
 	count := 0
 	for _, site := range sites {
-		switch strings.TrimSpace(site.PaidStatus) {
-		case "paid", "paused":
+		if normalizeDomainName(site.Domain) != "" && site.BillingBillable {
 			count++
 		}
 	}
@@ -612,19 +641,19 @@ func overviewActions(view OverviewView) []OverviewAction {
 		actions = append(actions, OverviewAction{Title: "Новые заявки", Text: strconv.Itoa(view.PendingRequests) + " ждут решения", ButtonText: "Открыть сайты", Tab: "sites", Level: "warning"})
 	}
 	if view.UnpaidInvoices > 0 {
-		actions = append(actions, OverviewAction{Title: "Счета", Text: strconv.Itoa(view.UnpaidInvoices) + " ожидают оплаты или требуют проверки", ButtonText: "Открыть счета", Tab: "invoices", Level: "warning"})
+		actions = append(actions, OverviewAction{Title: "История счетов", Text: strconv.Itoa(view.UnpaidInvoices) + " записей ожидают оплаты или требуют проверки", ButtonText: "Открыть клиентов", Tab: "clients", Level: "warning"})
 	}
 	if view.OverLimitSites > 0 {
 		actions = append(actions, OverviewAction{Title: "Место на диске", Text: strconv.Itoa(view.OverLimitSites) + " сайтов превысили лимит", ButtonText: "Открыть сайты", Tab: "sites", Level: "danger"})
 	}
 	if view.StaleServers > 0 {
-		actions = append(actions, OverviewAction{Title: "Синхронизация", Text: strconv.Itoa(view.StaleServers) + " серверов давно не обновлялись", ButtonText: "Диагностика", Tab: "diagnostics", Level: "warning"})
+		actions = append(actions, OverviewAction{Title: "Синхронизация", Text: strconv.Itoa(view.StaleServers) + " серверов давно не обновлялись", ButtonText: "Открыть серверы", Tab: "overview", Level: "warning"})
 	}
 	if view.MailErrors > 0 {
-		actions = append(actions, OverviewAction{Title: "Отправка писем", Text: strconv.Itoa(view.MailErrors) + " ошибок в журнале", ButtonText: "Диагностика", Tab: "diagnostics", Level: "danger"})
+		actions = append(actions, OverviewAction{Title: "Отправка писем", Text: strconv.Itoa(view.MailErrors) + " ошибок в журнале", ButtonText: "Открыть клиентов", Tab: "clients", Level: "danger"})
 	}
 	if len(actions) == 0 {
-		actions = append(actions, OverviewAction{Title: "Работа идёт штатно", Text: "Можно создавать сайты, выставлять счета и менять тарифы.", ButtonText: "Открыть сайты", Tab: "sites", Level: "ok"})
+		actions = append(actions, OverviewAction{Title: "Работа идёт штатно", Text: "Можно смотреть клиентов, сайты и помесячный расход диска.", ButtonText: "Открыть клиентов", Tab: "clients", Level: "ok"})
 	}
 	return actions
 }
@@ -633,8 +662,8 @@ func applyServerInvoiceDefaults(server *ServerView) {
 	if server == nil {
 		return
 	}
-	server.DefaultInvoiceCurrency = "RUB"
-	server.DefaultInvoiceAmount = "1000"
+	server.DefaultInvoiceCurrency = "EUR"
+	server.DefaultInvoiceAmount = "0.00"
 	if len(server.Clients) > 0 {
 		server.DefaultInvoiceClient = server.Clients[0].Email
 	}
@@ -643,21 +672,44 @@ func applyServerInvoiceDefaults(server *ServerView) {
 			server.DefaultInvoiceDomain = site.Domain
 			server.DefaultInvoicePlan = site.PlanName
 		}
-		switch strings.TrimSpace(site.PaidStatus) {
-		case "paid", "paused":
+		if site.BillingBillable {
 			server.DefaultInvoiceDomain = site.Domain
 			server.DefaultInvoiceClient = firstNonEmpty(site.OwnerEmail, server.DefaultInvoiceClient)
 			server.DefaultInvoicePlan = site.PlanName
+			if site.BillingAmount != "" {
+				server.DefaultInvoiceAmount = site.BillingAmount
+				server.DefaultInvoiceCurrency = firstNonEmpty(site.BillingCurrency, server.DefaultInvoiceCurrency)
+			}
 			return
 		}
 	}
 }
 
-func serverClientViews(clientDomains map[string][]string) []ServerClientView {
-	clients := make([]ServerClientView, 0, len(clientDomains))
-	for email, domains := range clientDomains {
+func serverClientViewsFromSites(sites []ServerSiteView) []ServerClientView {
+	clientSites := make(map[string][]ServerSiteView)
+	for _, site := range sites {
+		email := strings.ToLower(strings.TrimSpace(site.OwnerEmail))
+		if email == "" {
+			email = "owner not set"
+		}
+		clientSites[email] = append(clientSites[email], site)
+	}
+	clients := make([]ServerClientView, 0, len(clientSites))
+	for email, sites := range clientSites {
+		sort.SliceStable(sites, func(left, right int) bool {
+			return normalizeDomainName(sites[left].Domain) < normalizeDomainName(sites[right].Domain)
+		})
+		domains := make([]string, 0, len(sites))
+		for _, site := range sites {
+			domains = append(domains, site.Domain)
+		}
 		domains = normalizedDomains(domains)
-		clients = append(clients, ServerClientView{Email: email, SiteCount: len(domains), Domains: strings.Join(domains, ", ")})
+		clients = append(clients, ServerClientView{
+			Email:     email,
+			SiteCount: len(domains),
+			Domains:   strings.Join(domains, ", "),
+			Sites:     sites,
+		})
 	}
 	sort.Slice(clients, func(left, right int) bool {
 		if clients[left].SiteCount != clients[right].SiteCount {

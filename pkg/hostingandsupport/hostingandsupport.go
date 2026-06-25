@@ -19,7 +19,7 @@ import (
 
 const DefaultStorageLimitBytes int64 = 10 * 1024 * 1024 * 1024
 const DefaultDeletionBackupRetentionDays = 365
-const currentBillingSchemaVersion = 13
+const currentBillingSchemaVersion = 15
 
 type Store struct {
 	DB *sql.DB
@@ -55,6 +55,12 @@ type Site struct {
 	PlanName          string
 	PlanQuotaLabel    string
 	ServiceStatus     string
+	BillingUsageLabel string
+	BillingPriceLabel string
+	BillingStatusText string
+	BillingAmount     string
+	BillingCurrency   string
+	BillingBillable   bool
 	AdminEmails       string
 	CanDelete         bool
 	DatabasePath      string
@@ -95,6 +101,10 @@ type SiteUsage struct {
 	DatabasePath string
 }
 
+const billingIncludedMegabytes int64 = 500
+const billingStepMegabytes int64 = 50
+const billingStepCents int64 = 10
+
 type ServiceAssignment struct {
 	PlanID        int
 	ServiceStatus string
@@ -110,21 +120,23 @@ type PaymentProvider struct {
 }
 
 type Invoice struct {
-	ID            int
-	Number        string
-	CustomerEmail string
-	Domain        string
-	PlanName      string
-	Amount        string
-	Currency      string
-	Status        string
-	Provider      string
-	PaymentURL    string
-	DueAt         string
-	PaidAt        string
-	Notes         string
-	CreatedAt     string
-	UpdatedAt     string
+	ID              int
+	Number          string
+	CustomerEmail   string
+	Domain          string
+	PlanName        string
+	Amount          string
+	Currency        string
+	Status          string
+	Provider        string
+	PaymentURL      string
+	DueAt           string
+	PaidAt          string
+	Notes           string
+	Recurring       bool
+	RecurringPeriod string
+	CreatedAt       string
+	UpdatedAt       string
 }
 
 type ServiceMailInstallation struct {
@@ -280,21 +292,27 @@ type ClientHosting struct {
 }
 
 type ClientHostingSite struct {
-	Domain         string
-	OwnerEmail     string
-	UsedBytes      int64
-	LimitBytes     int64
-	PlanName       string
-	PlanStatus     string
-	PlanPaidStatus string
-	UsedLabel      string
-	LimitLabel     string
-	OverLimit      bool
-	AdminEmails    []string
-	HTTPSAvailable bool
-	CertExpiresAt  string
-	CertDaysLeft   int
-	TLSStatusClass string
+	Domain            string
+	OwnerEmail        string
+	UsedBytes         int64
+	LimitBytes        int64
+	PlanName          string
+	PlanStatus        string
+	PlanPaidStatus    string
+	UsedLabel         string
+	LimitLabel        string
+	BillingUsageLabel string
+	BillingPriceLabel string
+	BillingStatusText string
+	BillingAmount     string
+	BillingCurrency   string
+	BillingBillable   bool
+	OverLimit         bool
+	AdminEmails       []string
+	HTTPSAvailable    bool
+	CertExpiresAt     string
+	CertDaysLeft      int
+	TLSStatusClass    string
 }
 
 type ClientHostingPlan struct {
@@ -439,7 +457,7 @@ func Migrate(ctx context.Context, database *sql.DB) error {
 		`CREATE TABLE IF NOT EXISTS site_service_plans(id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT UNIQUE,quota_bytes INTEGER,site_limit INTEGER DEFAULT 1,analytics_report_limit INTEGER DEFAULT 0,price TEXT,currency TEXT,billing_period TEXT,is_default INTEGER DEFAULT 0,created_at TEXT,updated_at TEXT);`,
 		`CREATE TABLE IF NOT EXISTS site_service_assignments(domain TEXT PRIMARY KEY,plan_id INTEGER DEFAULT 0,service_status TEXT,notes TEXT,updated_at TEXT);`,
 		`CREATE TABLE IF NOT EXISTS payment_providers(provider TEXT PRIMARY KEY,enabled INTEGER DEFAULT 0,display_name TEXT,payment_url TEXT,instructions TEXT,updated_at TEXT);`,
-		`CREATE TABLE IF NOT EXISTS billing_invoices(id INTEGER PRIMARY KEY AUTOINCREMENT,invoice_number TEXT UNIQUE,customer_email TEXT,domain TEXT,plan_name TEXT,amount TEXT,currency TEXT,status TEXT,provider TEXT,payment_url TEXT,due_at TEXT,paid_at TEXT,notes TEXT,created_at TEXT,updated_at TEXT);`,
+		`CREATE TABLE IF NOT EXISTS billing_invoices(id INTEGER PRIMARY KEY AUTOINCREMENT,invoice_number TEXT UNIQUE,customer_email TEXT,domain TEXT,plan_name TEXT,amount TEXT,currency TEXT,status TEXT,provider TEXT,payment_url TEXT,due_at TEXT,paid_at TEXT,notes TEXT,recurring_enabled INTEGER DEFAULT 0,recurring_period TEXT,created_at TEXT,updated_at TEXT);`,
 		`CREATE INDEX IF NOT EXISTS idx_billing_invoices_customer_created ON billing_invoices(customer_email,created_at);`,
 		`CREATE INDEX IF NOT EXISTS idx_billing_invoices_domain_created ON billing_invoices(domain,created_at);`,
 		`CREATE TABLE IF NOT EXISTS site_registration_requests(id INTEGER PRIMARY KEY AUTOINCREMENT,domain TEXT,name TEXT,email TEXT,phone TEXT,plan_id INTEGER DEFAULT 0,status TEXT,owner_message TEXT,created_at TEXT,updated_at TEXT);`,
@@ -458,6 +476,8 @@ func Migrate(ctx context.Context, database *sql.DB) error {
 		`CREATE TABLE IF NOT EXISTS client_hostings(installation_id TEXT PRIMARY KEY,owner_email TEXT,server_ip TEXT,server_status TEXT,server_domain TEXT,sitebrush_version TEXT,os_name TEXT,os_version TEXT,cpu_model TEXT,cpu_cores INTEGER DEFAULT 0,cpu_usage_percent_1h REAL DEFAULT 0,load_average_1h REAL DEFAULT 0,ram_total_bytes INTEGER DEFAULT 0,server_uptime_seconds INTEGER DEFAULT 0,storage_path TEXT,disk_free_bytes INTEGER DEFAULT 0,disk_total_bytes INTEGER DEFAULT 0,first_seen_at TEXT,last_seen_at TEXT);`,
 		`CREATE TABLE IF NOT EXISTS client_hosting_sites(installation_id TEXT,domain TEXT,owner_email TEXT,used_bytes INTEGER DEFAULT 0,limit_bytes INTEGER DEFAULT 0,plan_name TEXT,plan_status TEXT,plan_paid_status TEXT,admin_emails TEXT,updated_at TEXT,PRIMARY KEY(installation_id,domain));`,
 		`CREATE INDEX IF NOT EXISTS idx_client_hosting_sites_installation ON client_hosting_sites(installation_id);`,
+		`CREATE TABLE IF NOT EXISTS server_resource_checks(id INTEGER PRIMARY KEY AUTOINCREMENT,installation_id TEXT,cpu_usage_percent REAL DEFAULT 0,load_average REAL DEFAULT 0,ram_total_bytes INTEGER DEFAULT 0,disk_free_bytes INTEGER DEFAULT 0,disk_total_bytes INTEGER DEFAULT 0,checked_at TEXT);`,
+		`CREATE INDEX IF NOT EXISTS idx_server_resource_checks_installation_checked ON server_resource_checks(installation_id,checked_at);`,
 		`CREATE TABLE IF NOT EXISTS server_network_checks(id INTEGER PRIMARY KEY AUTOINCREMENT,installation_id TEXT,server_domain TEXT,server_ip TEXT,success INTEGER DEFAULT 0,response_ms INTEGER DEFAULT 0,error TEXT,checked_at TEXT);`,
 		`CREATE INDEX IF NOT EXISTS idx_server_network_checks_installation_checked ON server_network_checks(installation_id,checked_at);`,
 		`CREATE TABLE IF NOT EXISTS site_tls_checks(domain TEXT PRIMARY KEY,installation_id TEXT,https_available INTEGER DEFAULT 0,cert_expires_at TEXT,cert_days_left INTEGER DEFAULT 0,status TEXT,error TEXT,checked_at TEXT);`,
@@ -521,7 +541,7 @@ func setSchemaMigrationVersion(ctx context.Context, database *sql.DB, component 
 }
 
 func hostingAndSupportSchemaComplete(ctx context.Context, database *sql.DB) (bool, error) {
-	tableNames := []string{"server_managers", "server_settings", "site_service_plans", "site_service_assignments", "payment_providers", "billing_invoices", "site_registration_requests", "site_deletion_backups", "service_mail_installations", "service_mail_events", "support_events", "service_mail_blocks", "service_mail_recipients", "client_hostings", "client_hosting_sites", "server_network_checks", "site_tls_checks", "registry_accounts", "registry_installation_roles", "registry_installation_plans", "registry_events", "registry_sync_events", "sitebrush_com_keys"}
+	tableNames := []string{"server_managers", "server_settings", "site_service_plans", "site_service_assignments", "payment_providers", "billing_invoices", "site_registration_requests", "site_deletion_backups", "service_mail_installations", "service_mail_events", "support_events", "service_mail_blocks", "service_mail_recipients", "client_hostings", "client_hosting_sites", "server_resource_checks", "server_network_checks", "site_tls_checks", "registry_accounts", "registry_installation_roles", "registry_installation_plans", "registry_events", "registry_sync_events", "sitebrush_com_keys"}
 	tableNames = append(tableNames, demo.TableNames()...)
 	for _, tableName := range tableNames {
 		found, err := tableExists(ctx, database, tableName)
@@ -561,6 +581,8 @@ func requiredHostingAndSupportColumns() []hostingAndSupportColumn {
 		{tableName: "billing_invoices", columnName: "provider", definition: "TEXT"},
 		{tableName: "billing_invoices", columnName: "payment_url", definition: "TEXT"},
 		{tableName: "billing_invoices", columnName: "paid_at", definition: "TEXT"},
+		{tableName: "billing_invoices", columnName: "recurring_enabled", definition: "INTEGER DEFAULT 0"},
+		{tableName: "billing_invoices", columnName: "recurring_period", definition: "TEXT"},
 		{tableName: "client_hostings", columnName: "server_status", definition: "TEXT"},
 		{tableName: "client_hostings", columnName: "server_domain", definition: "TEXT"},
 		{tableName: "client_hostings", columnName: "sitebrush_version", definition: "TEXT"},
@@ -949,7 +971,7 @@ func (store Store) Invoices(ctx context.Context, limit int) []Invoice {
 	if limit <= 0 || limit > 200 {
 		limit = 80
 	}
-	rows, err := store.DB.QueryContext(ctx, `SELECT id,invoice_number,COALESCE(customer_email,''),COALESCE(domain,''),COALESCE(plan_name,''),COALESCE(amount,''),COALESCE(currency,''),COALESCE(status,''),COALESCE(provider,''),COALESCE(payment_url,''),COALESCE(due_at,''),COALESCE(paid_at,''),COALESCE(notes,''),COALESCE(created_at,''),COALESCE(updated_at,'') FROM billing_invoices ORDER BY id DESC LIMIT ?`, limit)
+	rows, err := store.DB.QueryContext(ctx, `SELECT id,invoice_number,COALESCE(customer_email,''),COALESCE(domain,''),COALESCE(plan_name,''),COALESCE(amount,''),COALESCE(currency,''),COALESCE(status,''),COALESCE(provider,''),COALESCE(payment_url,''),COALESCE(due_at,''),COALESCE(paid_at,''),COALESCE(notes,''),COALESCE(recurring_enabled,0),COALESCE(recurring_period,''),COALESCE(created_at,''),COALESCE(updated_at,'') FROM billing_invoices ORDER BY id DESC LIMIT ?`, limit)
 	if err != nil {
 		return nil
 	}
@@ -957,9 +979,11 @@ func (store Store) Invoices(ctx context.Context, limit int) []Invoice {
 	invoices := make([]Invoice, 0, limit)
 	for rows.Next() {
 		var invoice Invoice
-		if scanErr := rows.Scan(&invoice.ID, &invoice.Number, &invoice.CustomerEmail, &invoice.Domain, &invoice.PlanName, &invoice.Amount, &invoice.Currency, &invoice.Status, &invoice.Provider, &invoice.PaymentURL, &invoice.DueAt, &invoice.PaidAt, &invoice.Notes, &invoice.CreatedAt, &invoice.UpdatedAt); scanErr != nil {
+		var recurringEnabled int
+		if scanErr := rows.Scan(&invoice.ID, &invoice.Number, &invoice.CustomerEmail, &invoice.Domain, &invoice.PlanName, &invoice.Amount, &invoice.Currency, &invoice.Status, &invoice.Provider, &invoice.PaymentURL, &invoice.DueAt, &invoice.PaidAt, &invoice.Notes, &recurringEnabled, &invoice.RecurringPeriod, &invoice.CreatedAt, &invoice.UpdatedAt); scanErr != nil {
 			continue
 		}
+		invoice.Recurring = recurringEnabled != 0
 		invoices = append(invoices, invoice)
 	}
 	return invoices
@@ -972,6 +996,11 @@ func (store Store) CreateInvoice(ctx context.Context, invoice Invoice) (Invoice,
 	invoice.Amount = strings.TrimSpace(invoice.Amount)
 	invoice.Currency = strings.ToUpper(strings.TrimSpace(invoice.Currency))
 	invoice.Provider = normalizePaymentProvider(invoice.Provider)
+	if invoice.Recurring {
+		invoice.RecurringPeriod = normalizeInvoiceRecurringPeriod(invoice.RecurringPeriod)
+	} else {
+		invoice.RecurringPeriod = ""
+	}
 	if invoice.Provider == "" {
 		invoice.Provider = "sitebrush_com"
 	}
@@ -996,8 +1025,12 @@ func (store Store) CreateInvoice(ctx context.Context, invoice Invoice) (Invoice,
 	invoice.CreatedAt = now.Format(time.RFC3339)
 	invoice.UpdatedAt = invoice.CreatedAt
 	invoice.PaymentURL = store.renderInvoicePaymentURL(ctx, invoice)
-	result, err := store.DB.ExecContext(ctx, `INSERT INTO billing_invoices(invoice_number,customer_email,domain,plan_name,amount,currency,status,provider,payment_url,due_at,paid_at,notes,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		invoice.Number, invoice.CustomerEmail, invoice.Domain, invoice.PlanName, invoice.Amount, invoice.Currency, invoice.Status, invoice.Provider, invoice.PaymentURL, strings.TrimSpace(invoice.DueAt), "", strings.TrimSpace(invoice.Notes), invoice.CreatedAt, invoice.UpdatedAt)
+	recurringEnabled := 0
+	if invoice.Recurring {
+		recurringEnabled = 1
+	}
+	result, err := store.DB.ExecContext(ctx, `INSERT INTO billing_invoices(invoice_number,customer_email,domain,plan_name,amount,currency,status,provider,payment_url,due_at,paid_at,notes,recurring_enabled,recurring_period,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		invoice.Number, invoice.CustomerEmail, invoice.Domain, invoice.PlanName, invoice.Amount, invoice.Currency, invoice.Status, invoice.Provider, invoice.PaymentURL, strings.TrimSpace(invoice.DueAt), "", strings.TrimSpace(invoice.Notes), recurringEnabled, invoice.RecurringPeriod, invoice.CreatedAt, invoice.UpdatedAt)
 	if err != nil {
 		return Invoice{}, err
 	}
@@ -1031,9 +1064,20 @@ func (store Store) UpdateInvoiceStatus(ctx context.Context, invoiceID int, statu
 
 func (store Store) InvoiceByID(ctx context.Context, invoiceID int) (Invoice, error) {
 	var invoice Invoice
-	err := store.DB.QueryRowContext(ctx, `SELECT id,invoice_number,COALESCE(customer_email,''),COALESCE(domain,''),COALESCE(plan_name,''),COALESCE(amount,''),COALESCE(currency,''),COALESCE(status,''),COALESCE(provider,''),COALESCE(payment_url,''),COALESCE(due_at,''),COALESCE(paid_at,''),COALESCE(notes,''),COALESCE(created_at,''),COALESCE(updated_at,'') FROM billing_invoices WHERE id=?`, invoiceID).Scan(
-		&invoice.ID, &invoice.Number, &invoice.CustomerEmail, &invoice.Domain, &invoice.PlanName, &invoice.Amount, &invoice.Currency, &invoice.Status, &invoice.Provider, &invoice.PaymentURL, &invoice.DueAt, &invoice.PaidAt, &invoice.Notes, &invoice.CreatedAt, &invoice.UpdatedAt)
+	var recurringEnabled int
+	err := store.DB.QueryRowContext(ctx, `SELECT id,invoice_number,COALESCE(customer_email,''),COALESCE(domain,''),COALESCE(plan_name,''),COALESCE(amount,''),COALESCE(currency,''),COALESCE(status,''),COALESCE(provider,''),COALESCE(payment_url,''),COALESCE(due_at,''),COALESCE(paid_at,''),COALESCE(notes,''),COALESCE(recurring_enabled,0),COALESCE(recurring_period,''),COALESCE(created_at,''),COALESCE(updated_at,'') FROM billing_invoices WHERE id=?`, invoiceID).Scan(
+		&invoice.ID, &invoice.Number, &invoice.CustomerEmail, &invoice.Domain, &invoice.PlanName, &invoice.Amount, &invoice.Currency, &invoice.Status, &invoice.Provider, &invoice.PaymentURL, &invoice.DueAt, &invoice.PaidAt, &invoice.Notes, &recurringEnabled, &invoice.RecurringPeriod, &invoice.CreatedAt, &invoice.UpdatedAt)
+	invoice.Recurring = recurringEnabled != 0
 	return invoice, err
+}
+
+func normalizeInvoiceRecurringPeriod(period string) string {
+	switch strings.ToLower(strings.TrimSpace(period)) {
+	case "weekly", "monthly", "quarterly", "yearly":
+		return strings.ToLower(strings.TrimSpace(period))
+	default:
+		return "monthly"
+	}
 }
 
 func (store Store) renderInvoicePaymentURL(ctx context.Context, invoice Invoice) string {
@@ -1205,6 +1249,10 @@ func (store Store) SaveHostingSnapshot(ctx context.Context, snapshot HostingSnap
 	}
 	_, err = transaction.ExecContext(ctx, `INSERT INTO client_hostings(installation_id,owner_email,server_ip,server_status,server_domain,sitebrush_version,os_name,os_version,cpu_model,cpu_cores,cpu_usage_percent_1h,load_average_1h,ram_total_bytes,server_uptime_seconds,storage_path,disk_free_bytes,disk_total_bytes,first_seen_at,last_seen_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(installation_id) DO UPDATE SET owner_email=excluded.owner_email,server_ip=excluded.server_ip,server_status=excluded.server_status,server_domain=excluded.server_domain,sitebrush_version=excluded.sitebrush_version,os_name=excluded.os_name,os_version=excluded.os_version,cpu_model=excluded.cpu_model,cpu_cores=excluded.cpu_cores,cpu_usage_percent_1h=excluded.cpu_usage_percent_1h,load_average_1h=excluded.load_average_1h,ram_total_bytes=excluded.ram_total_bytes,server_uptime_seconds=excluded.server_uptime_seconds,storage_path=excluded.storage_path,disk_free_bytes=excluded.disk_free_bytes,disk_total_bytes=excluded.disk_total_bytes,last_seen_at=excluded.last_seen_at`,
 		installationID, strings.ToLower(strings.TrimSpace(snapshot.OwnerEmail)), strings.TrimSpace(snapshot.ServerIP), strings.TrimSpace(snapshot.ServerStatus), strings.ToLower(strings.TrimSpace(snapshot.ServerDomain)), strings.TrimSpace(snapshot.SitebrushVersion), strings.TrimSpace(snapshot.OSName), strings.TrimSpace(snapshot.OSVersion), strings.TrimSpace(snapshot.CPUModel), snapshot.CPUCores, snapshot.CPUUsagePercent, snapshot.LoadAverage, snapshot.RAMTotalBytes, snapshot.ServerUptimeSeconds, strings.TrimSpace(snapshot.StoragePath), snapshot.DiskFreeBytes, snapshot.DiskTotalBytes, now, now)
+	if err == nil {
+		_, err = transaction.ExecContext(ctx, `INSERT INTO server_resource_checks(installation_id,cpu_usage_percent,load_average,ram_total_bytes,disk_free_bytes,disk_total_bytes,checked_at) VALUES(?,?,?,?,?,?,?)`,
+			installationID, snapshot.CPUUsagePercent, snapshot.LoadAverage, snapshot.RAMTotalBytes, snapshot.DiskFreeBytes, snapshot.DiskTotalBytes, now)
+	}
 	if err == nil {
 		_, err = transaction.ExecContext(ctx, `DELETE FROM client_hosting_sites WHERE installation_id=?`, installationID)
 	}
@@ -1623,6 +1671,10 @@ func metricStatusClass(value float64, warningThreshold float64, dangerThreshold 
 	return "hosting-metric-ok"
 }
 
+func MetricStatusClass(value float64, warningThreshold float64, dangerThreshold float64) string {
+	return metricStatusClass(value, warningThreshold, dangerThreshold)
+}
+
 func loadAverageStatusClass(loadAverage float64, cpuCores int) string {
 	if cpuCores <= 0 || loadAverage <= 0 {
 		return "hosting-metric-ok"
@@ -1634,6 +1686,10 @@ func loadAverageStatusClass(loadAverage float64, cpuCores int) string {
 		return "hosting-metric-warning"
 	}
 	return "hosting-metric-ok"
+}
+
+func LoadAverageStatusClass(loadAverage float64, cpuCores int) string {
+	return loadAverageStatusClass(loadAverage, cpuCores)
 }
 
 func serverUptimeStatusClass(seconds int64) string {
@@ -1648,6 +1704,10 @@ func serverUptimeStatusClass(seconds int64) string {
 		return "hosting-metric-warning"
 	}
 	return "hosting-metric-ok"
+}
+
+func ServerUptimeStatusClass(seconds int64) string {
+	return serverUptimeStatusClass(seconds)
 }
 
 func formatDurationDays(seconds int64) string {
@@ -1666,6 +1726,10 @@ func formatDurationDays(seconds int64) string {
 	return fmt.Sprintf("%d д", days)
 }
 
+func FormatDurationDays(seconds int64) string {
+	return formatDurationDays(seconds)
+}
+
 func (store Store) clientHostingSites(ctx context.Context, installationID string) []ClientHostingSite {
 	rows, err := store.DB.QueryContext(ctx, `SELECT domain,COALESCE(owner_email,''),COALESCE(used_bytes,0),COALESCE(limit_bytes,0),COALESCE(plan_name,''),COALESCE(plan_status,''),COALESCE(plan_paid_status,''),COALESCE(admin_emails,'') FROM client_hosting_sites WHERE installation_id=? ORDER BY used_bytes DESC,domain ASC`, strings.TrimSpace(installationID))
 	if err != nil {
@@ -1682,6 +1746,13 @@ func (store Store) clientHostingSites(ctx context.Context, installationID string
 		site.AdminEmails = normalizedHostingEmails(strings.Split(adminEmails, ","))
 		site.UsedLabel = FormatFileSize(site.UsedBytes)
 		site.LimitLabel = FormatFileSize(site.LimitBytes)
+		billingPrice := BillingPriceForUsedBytes(site.UsedBytes)
+		site.BillingUsageLabel = BillingUsageLabel(site.UsedBytes)
+		site.BillingPriceLabel = billingPrice.PriceLabel
+		site.BillingStatusText = billingPrice.StatusText
+		site.BillingAmount = billingPrice.Amount
+		site.BillingCurrency = billingPrice.Currency
+		site.BillingBillable = billingPrice.Billable
 		site.OverLimit = site.LimitBytes > 0 && site.UsedBytes > site.LimitBytes
 		sites = append(sites, site)
 	}
@@ -2194,6 +2265,7 @@ func BuildSitesWithDemoAndMainDomain(usages []SiteUsage, plans []Plan, assignmen
 		if assignment.ServiceStatus == "" {
 			assignment.ServiceStatus = "free"
 		}
+		billingPrice := BillingPriceForUsedBytes(usage.UsedBytes)
 		quotaInput := FormatQuotaInput(usage.LimitBytes)
 		planName := ""
 		planQuotaLabel := ""
@@ -2209,23 +2281,29 @@ func BuildSitesWithDemoAndMainDomain(usages []SiteUsage, plans []Plan, assignmen
 		isDemo := strings.TrimSpace(usage.Domain) != "" && strings.EqualFold(strings.TrimSpace(usage.Domain), strings.TrimSpace(demoDomain))
 		isMainDomain := mainDomain != "" && strings.EqualFold(strings.TrimSpace(usage.Domain), mainDomain)
 		sites = append(sites, Site{
-			Domain:         usage.Domain,
-			IsDemo:         isDemo,
-			IsMainDomain:   isMainDomain,
-			Aliases:        strings.Join(usage.Aliases, ", "),
-			UsedBytes:      usage.UsedBytes,
-			UsedLabel:      FormatFileSize(usage.UsedBytes),
-			LimitLabel:     FormatFileSize(usage.LimitBytes),
-			FreeLabel:      FormatFileSize(freeBytes),
-			UsedPercent:    usedPercent,
-			QuotaInput:     quotaInput,
-			PlanID:         assignment.PlanID,
-			PlanName:       planName,
-			PlanQuotaLabel: planQuotaLabel,
-			ServiceStatus:  assignment.ServiceStatus,
-			AdminEmails:    strings.Join(usage.AdminEmails, ", "),
-			CanDelete:      !isDemo && strings.TrimSpace(usage.Domain) != strings.TrimSpace(currentDomain),
-			DatabasePath:   usage.DatabasePath,
+			Domain:            usage.Domain,
+			IsDemo:            isDemo,
+			IsMainDomain:      isMainDomain,
+			Aliases:           strings.Join(usage.Aliases, ", "),
+			UsedBytes:         usage.UsedBytes,
+			UsedLabel:         FormatFileSize(usage.UsedBytes),
+			LimitLabel:        FormatFileSize(usage.LimitBytes),
+			FreeLabel:         FormatFileSize(freeBytes),
+			UsedPercent:       usedPercent,
+			QuotaInput:        quotaInput,
+			PlanID:            assignment.PlanID,
+			PlanName:          planName,
+			PlanQuotaLabel:    planQuotaLabel,
+			ServiceStatus:     assignment.ServiceStatus,
+			BillingUsageLabel: BillingUsageLabel(usage.UsedBytes),
+			BillingPriceLabel: billingPrice.PriceLabel,
+			BillingStatusText: billingPrice.StatusText,
+			BillingAmount:     billingPrice.Amount,
+			BillingCurrency:   billingPrice.Currency,
+			BillingBillable:   billingPrice.Billable,
+			AdminEmails:       strings.Join(usage.AdminEmails, ", "),
+			CanDelete:         !isDemo && strings.TrimSpace(usage.Domain) != strings.TrimSpace(currentDomain),
+			DatabasePath:      usage.DatabasePath,
 		})
 	}
 	sort.Slice(sites, func(left, right int) bool {
@@ -2235,6 +2313,69 @@ func BuildSitesWithDemoAndMainDomain(usages []SiteUsage, plans []Plan, assignmen
 		return sites[left].Domain < sites[right].Domain
 	})
 	return sites
+}
+
+type BillingPrice struct {
+	UsedMegabytes     int64
+	BillableMegabytes int64
+	Amount            string
+	Currency          string
+	PriceLabel        string
+	StatusText        string
+	Billable          bool
+}
+
+func BillingPriceForUsedBytes(usedBytes int64) BillingPrice {
+	usedMegabytes := bytesToRoundedMegabytes(usedBytes)
+	billableMegabytes := roundMegabytesUpToBillingStep(usedMegabytes)
+	if usedMegabytes == 0 {
+		billableMegabytes = 0
+	}
+	cents := billableMegabytes / billingStepMegabytes * billingStepCents
+	price := BillingPrice{
+		UsedMegabytes:     usedMegabytes,
+		BillableMegabytes: billableMegabytes,
+		Amount:            formatEuroAmount(cents),
+		Currency:          "EUR",
+		PriceLabel:        "€" + formatEuroAmount(cents) + "/мес",
+		Billable:          usedMegabytes > billingIncludedMegabytes,
+	}
+	if price.Billable {
+		price.StatusText = "к выставлению"
+	} else {
+		price.StatusText = "бесплатно до 500 MB"
+	}
+	return price
+}
+
+func BillingUsageLabel(usedBytes int64) string {
+	usedMegabytes := bytesToRoundedMegabytes(usedBytes)
+	return strconv.FormatInt(usedMegabytes, 10) + " MB"
+}
+
+func bytesToRoundedMegabytes(bytes int64) int64 {
+	if bytes <= 0 {
+		return 0
+	}
+	const megabyte = int64(1000 * 1000)
+	return (bytes + megabyte - 1) / megabyte
+}
+
+func roundMegabytesUpToBillingStep(megabytes int64) int64 {
+	if megabytes <= 0 {
+		return billingStepMegabytes
+	}
+	if megabytes%billingStepMegabytes == 0 {
+		return megabytes
+	}
+	return ((megabytes / billingStepMegabytes) + 1) * billingStepMegabytes
+}
+
+func formatEuroAmount(cents int64) string {
+	if cents <= 0 {
+		return "0.00"
+	}
+	return fmt.Sprintf("%d.%02d", cents/100, cents%100)
 }
 
 func ParseQuotaLimitBytes(rawQuota string) (int64, bool, error) {

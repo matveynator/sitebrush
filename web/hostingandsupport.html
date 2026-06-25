@@ -35,7 +35,7 @@
         <a href="#hostingServerList"><strong>{{.Overview.ClientCount}}</strong><span>клиентов</span></a>
         <a href="#hostingServerList"><strong>{{.Overview.SiteCount}}</strong><span>сайтов</span></a>
         <a href="#hostingServerList"><strong>{{.Overview.ServerCount}}</strong><span>серверов</span></a>
-        <a href="#hostingServerList"><strong>{{.Overview.UnpaidInvoices}}</strong><span>счетов к оплате</span></a>
+        <a href="#hostingClients"><strong>{{.Overview.UnpaidInvoices}}</strong><span>записей к оплате</span></a>
       </div>
       <div class="hosting-overview-actions">
         {{range .Overview.Actions}}
@@ -60,7 +60,7 @@
       <div class="billing-section-header">
         <div>
           <h2>Серверы</h2>
-          <p class="text-muted">Сервер — главная сущность раздела. Сайты, клиенты, счета, настройки и диагностика показаны внутри сервера.</p>
+          <p class="text-muted">Сайты сгруппированы по клиентам, стоимость считается от фактически занятого дискового пространства.</p>
         </div>
       </div>
       <div class="billing-site-list" data-hosting-server-list>
@@ -71,105 +71,38 @@
             <div class="text-muted small">{{$server.Subtitle}}{{if $server.OwnerEmail}} · владелец: <button type="button" class="billing-owner-filter" data-hosting-server-owner-filter="{{$server.OwnerEmail}}">{{$server.OwnerEmail}}</button>{{end}}</div>
             <div class="text-muted small">Синхронизация: <span class="{{$server.SyncStatusClass}}">{{$server.SyncStatusLabel}}</span> · сеть: <span class="{{$server.NetworkStatusClass}}">{{$server.NetworkStatusLabel}}</span></div>
             {{if $server.TotalUsedLabel}}<div class="text-muted small">Данные сайтов: {{$server.TotalUsedLabel}}{{if $server.DiskFreeLabel}} · диск свободно {{$server.DiskFreeLabel}} / {{$server.DiskTotalLabel}}{{end}}</div>{{end}}
+            <div class="hosting-server-system-metrics">
+              {{range $server.SystemMetrics}}<span><strong>{{.Name}}</strong> <em class="{{.StatusClass}}">{{.Value}}</em></span>{{end}}
+            </div>
           </div>
           <div class="billing-client-hosting-meta">
             <div><strong>Сайты</strong><span>{{$server.SiteCount}}</span></div>
             <div><strong>Клиенты</strong><span>{{$server.ClientCount}}</span></div>
-            <div><strong>Счета</strong><span>{{$server.InvoiceCount}}</span></div>
             <div><strong>К выставлению</strong><span>{{$server.BillableCount}}</span></div>
-            <div><strong>Проблемные счета</strong><span>{{$server.UnpaidInvoiceCount}}</span></div>
-            <div><strong>Действие</strong><span><button type="button" class="btn {{$server.InvoiceActionClass}} btn-sm" data-bs-toggle="modal" data-bs-target="#hostingServerInvoicesModal{{$serverIndex}}">{{$server.InvoiceActionLabel}}</button></span></div>
           </div>
         </article>
         <div class="hosting-server-details">
           <details open>
-            <summary>Сайты</summary>
-            <div class="billing-client-site-grid">
-              {{range $server.Sites}}
-              <div class="billing-client-site-row {{if .OverLimit}}billing-client-site-over-limit{{end}}">
-                {{if .URL}}<a href="{{.URL}}" target="_blank" rel="noopener noreferrer">{{.Domain}}</a>{{else}}<span>{{.Domain}}</span>{{end}}
-                <span>клиент: {{.OwnerEmail}}</span>
-                <span>админы: {{if .AdminEmails}}{{.AdminEmails}}{{else}}не переданы{{end}}</span>
-                <span>{{.PlanName}} · {{.PaidStatus}}</span>
-                <span>{{.UsedLabel}} / {{if .LimitLabel}}{{.LimitLabel}}{{else}}лимит не передан{{end}}</span>
-                <span>{{.InvoiceLabel}}</span>
-              </div>
+            <summary>Сайты по клиентам</summary>
+            <div class="hosting-server-client-site-list">
+              {{range $server.Clients}}
+              <section class="hosting-server-client-site-group">
+                <h3>{{.Email}} <span>{{.SiteCount}} сайтов</span></h3>
+                <div class="billing-client-site-grid">
+                  {{range .Sites}}
+                  <div class="billing-client-site-row {{if .OverLimit}}billing-client-site-over-limit{{end}}">
+                    {{if .URL}}<a href="{{.URL}}" target="_blank" rel="noopener noreferrer">{{.Domain}}</a>{{else}}<span>{{.Domain}}</span>{{end}}
+                    <span>{{.UsedLabel}} / {{if .LimitLabel}}{{.LimitLabel}}{{else}}лимит не передан{{end}}</span>
+                    <span>{{.BillingPriceLabel}} · {{.BillingStatusText}}</span>
+                  </div>
+                  {{end}}
+                </div>
+              </section>
               {{else}}
               <div class="empty">Сайты не переданы.</div>
               {{end}}
             </div>
           </details>
-          <details>
-            <summary>Клиенты</summary>
-            <div class="billing-user-tags">
-              {{range $server.Clients}}<span>{{.Email}} · {{.SiteCount}} сайтов{{if .Domains}} · {{.Domains}}{{end}}</span>{{else}}<span>клиенты не определены</span>{{end}}
-            </div>
-          </details>
-          <details>
-            <summary>Счета</summary>
-            <div class="billing-invoice-page-list">
-              {{range $server.Invoices}}
-              <article class="billing-invoice-page">
-                <div class="billing-invoice-page-head">
-                  <div>
-                    <div class="billing-domain">{{.Number}}</div>
-                    <div class="text-muted small">{{.StatusLabel}}</div>
-                  </div>
-                  <strong>{{.AmountLabel}}</strong>
-                </div>
-                <div class="billing-client-hosting-meta">
-                  <div><strong>Клиент</strong><span>{{.CustomerEmail}}</span></div>
-                  <div><strong>Сайт</strong><span>{{.Domain}}</span></div>
-                  <div><strong>Услуга</strong><span>{{.PlanName}}</span></div>
-                  <div><strong>Период</strong><span>{{.PeriodLabel}}</span></div>
-                </div>
-                <div class="text-muted small">{{.HistoryLabel}}</div>
-                {{if .CanPay}}<a class="btn btn-success btn-sm" href="{{.PaymentURL}}" target="_blank" rel="noopener noreferrer">Оплатить</a>{{end}}
-              </article>
-              {{else}}
-              <div class="empty">Счетов пока нет.</div>
-              {{end}}
-            </div>
-          </details>
-          <details>
-            <summary>Настройки</summary>
-            <div class="billing-client-hosting-meta">
-              {{range $server.Settings}}<div><strong>{{.Name}}</strong><span>{{.Value}}</span></div>{{end}}
-            </div>
-          </details>
-          <details>
-            <summary>Диагностика</summary>
-            <div class="billing-client-hosting-meta">
-              {{range $server.Diagnostics}}<div><strong>{{.Name}}</strong><span class="{{.StatusClass}}">{{.Value}}</span></div>{{end}}
-            </div>
-          </details>
-        </div>
-        <div class="modal fade" id="hostingServerInvoicesModal{{$serverIndex}}" tabindex="-1" aria-hidden="true">
-          <div class="modal-dialog modal-lg modal-dialog-centered"><div class="modal-content">
-            <div class="modal-header">
-              <h5 class="modal-title">{{$server.InvoiceActionLabel}} · {{$server.Name}}</h5>
-              <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="{{index $.T "tree_close"}}"></button>
-            </div>
-            <div class="modal-body">
-              <p class="text-muted">На первом этапе используется предустановленная демо-оплата через SiteBrush.com. Реселлеру не нужно настраивать Stripe или шаблоны оплаты.</p>
-              {{if $server.BillableCount}}
-              <form method="post" action="?hosting_and_support" class="billing-plan-form">
-                <input type="hidden" name="billing_action" value="create_invoice">
-                <input type="hidden" name="provider" value="sitebrush_com">
-                <label>Клиент <input name="customer_email" type="email" class="form-control" value="{{$server.DefaultInvoiceClient}}" placeholder="client@example.com" required></label>
-                <label>Сайт <input name="domain" type="text" class="form-control" value="{{$server.DefaultInvoiceDomain}}" placeholder="example.com" required></label>
-                <label>Услуга <input name="plan_name" type="text" class="form-control" value="{{$server.DefaultInvoicePlan}}" placeholder="Хостинг и поддержка"></label>
-                <label>Сумма <input name="amount" type="text" class="form-control" value="{{$server.DefaultInvoiceAmount}}" required></label>
-                <label>Валюта <input name="currency" type="text" class="form-control" value="{{$server.DefaultInvoiceCurrency}}" required></label>
-                <label>Период обслуживания <input name="due_at" type="date" class="form-control"></label>
-                <label>История / комментарий <input name="notes" type="text" class="form-control" value="За хостинг и поддержку"></label>
-                <button type="submit" class="btn {{$server.InvoiceActionClass}}">{{$server.InvoiceActionLabel}}</button>
-              </form>
-              {{else}}
-              <div class="alert alert-secondary mb-0" role="alert">На этом сервере нет платных или приостановленных сайтов, поэтому счёт выставлять не нужно.</div>
-              {{end}}
-            </div>
-          </div></div>
         </div>
         {{else}}
         <div class="empty">Серверов пока нет.</div>
@@ -178,12 +111,12 @@
     </div>
   </section>
 
-  <section class="card billing-card hosting-tab-panel-hidden" data-hosting-tab-panel="clients">
+  <section class="card billing-card" id="hostingClients">
     <div class="card-body">
       <div class="billing-section-header">
         <div>
           <h2>Клиенты</h2>
-          <p class="text-muted">Единый реестр клиентов по email: роли на инсталляциях, сайты, тарифы, лимиты, события и история snapshot-синхронизаций.</p>
+          <p class="text-muted">По каждому клиенту показаны его сайты, занятое место, помесячная стоимость и история счетов.</p>
         </div>
         <div class="billing-user-stats">
           {{if .ClientCount}}<button type="button" data-billing-client-explain="Клиент определяется по текущему email администратора. Старые email остаются в подробностях клиента.">{{.ClientCount}} клиентов</button>{{end}}
@@ -197,28 +130,11 @@
         <label>Поиск клиента
           <input type="search" class="form-control" placeholder="email или домен" data-billing-client-search-input>
         </label>
-        <label>Роль
-          <select class="form-select" data-billing-client-role-filter>
-            <option value="">Все роли</option>
-            <option value="superadmin">superadmin</option>
-            <option value="site_admin site_owner">site_admin/site_owner</option>
-          </select>
-        </label>
-        <label>Статус сервера
-          <select class="form-select" data-billing-client-status-filter>
-            <option value="">Все статусы</option>
-            <option value="IP ">IP</option>
-            <option value="локальная инсталляция">локальная инсталляция</option>
-            <option value="сервер без публичного IP">сервер без публичного IP</option>
-            <option value="тестовый сервер">тестовый сервер</option>
-            <option value="домен не указывает на IP установки">домен не указывает на IP установки</option>
-          </select>
-        </label>
-        <label>Оплата
+        <label>Оплата за диск
           <select class="form-select" data-billing-client-paid-filter>
             <option value="">Все</option>
-            <option value="paid">paid</option>
-            <option value="free">free</option>
+            <option value="paid">к выставлению</option>
+            <option value="free">бесплатно</option>
           </select>
         </label>
         <label>Лимит
@@ -248,7 +164,8 @@
             <div class="billing-domain">{{$user.PrimaryEmail}}</div>
             <div class="billing-user-stats">
               {{if $user.SiteCount}}<button type="button" data-billing-client-explain="Сайты клиента: домены, где этот email является администратором или фигурировал в системной почте.">{{$user.SiteCount}} сайтов</button>{{end}}
-              {{if $user.HostingCount}}<button type="button" data-billing-client-explain="Хостинги клиента: отдельные серверы, где этот email установил SiteBrush и отправляет снимки сайтов.">{{$user.HostingCount}} хостингов</button>{{end}}
+              {{if $user.InvoiceCount}}<button type="button" data-billing-client-explain="История счетов клиента по сайтам.">{{$user.InvoiceCount}} счетов</button>{{end}}
+              {{if $user.HostingCount}}<button type="button" data-billing-client-explain="Хостинги клиента: отдельные серверы, где этот email установил SiteBrush и отправляет снимки сайтов.">{{$user.HostingCount}} серверов</button>{{end}}
               {{if $user.InstallationCount}}<button type="button" data-billing-client-explain="Инсталляции этого клиента: SiteBrush-серверы, где клиент присутствует как суперадмин или владелец сайта.">{{$user.InstallationCount}} инсталляций</button>{{end}}
               {{if $user.HostingSitebrushCount}}<button type="button" data-billing-client-explain="Хостинг SiteBrush — клиент поднял SiteBrush на домене второго уровня и обслуживает сайты третьего уровня или клиентские алиасы.">{{$user.HostingSitebrushCount}} хостинг SiteBrush</button>{{end}}
               {{if $user.LocalDevelopmentCount}}<button type="button" data-billing-client-explain="Особый статус: локальная инсталляция, сервер без публичного IP, тестовый сервер или домен пока не указывает на IP сервера.">{{$user.LocalDevelopmentCount}} особых статусов</button>{{end}}
@@ -274,16 +191,33 @@
               </div>
             </div>
             <div>
-              <h3 class="billing-user-subtitle">Сайты</h3>
+              <h3 class="billing-user-subtitle">Сайты за текущий месяц</h3>
               <div class="billing-user-site-list">
                 {{range $user.Sites}}
                 <div class="billing-user-site-line">
                   {{if .URL}}<a href="{{.URL}}" target="_blank" rel="noopener noreferrer">{{.Domain}}</a>{{else}}<span>{{.Domain}}</span>{{end}}
                   <span>{{.UsedLabel}} / {{if .LimitLabel}}{{.LimitLabel}}{{else}}лимит не передан{{end}}</span>
-                  <span>{{if .PlanName}}{{.PlanName}}{{else}}тариф не назначен{{end}} · {{if .PlanPaidStatus}}{{.PlanPaidStatus}}{{else}}free{{end}}</span>
+                  <span>{{.BillingUsageLabel}} · {{.BillingPriceLabel}} · {{.BillingStatusText}}</span>
                   <span>{{.Status}}{{if .InstallationIP}} · {{.InstallationIP}}{{end}}{{if .OverLimit}} · превышение лимита{{end}}</span>
                   {{if .HostingOwner}}<span>владелец хостинга: {{.HostingOwner}}</span>{{end}}
                 </div>
+                {{end}}
+              </div>
+              <h3 class="billing-user-subtitle">История счетов</h3>
+              <div class="billing-invoice-page-list">
+                {{range $user.Invoices}}
+                <article class="billing-invoice-page">
+                  <div class="billing-invoice-page-head">
+                    <div>
+                      <div class="billing-domain">{{.Number}}</div>
+                      <div class="text-muted small">{{.Domain}} · {{.StatusLabel}}</div>
+                    </div>
+                    <strong>{{.AmountLabel}}</strong>
+                  </div>
+                  <div class="text-muted small">{{.PeriodLabel}} · {{.HistoryLabel}}</div>
+                </article>
+                {{else}}
+                <div class="empty">Истории счетов пока нет.</div>
                 {{end}}
               </div>
               {{if $user.HostingCount}}
@@ -320,34 +254,14 @@
                     </div>
                   </div>
                   <div class="billing-client-hosting-section">
-                    <h4>Тарифы сервера</h4>
-                    <div class="billing-client-plan-grid">
-                      {{range $hosting.Hosting.Plans}}
-                      <div class="billing-client-plan-row">
-                        <span>{{.Name}}{{if .IsDefault}} · default{{end}}</span>
-                        <span>{{.PaidStatus}}</span>
-                        <span>{{.Price}} {{.Currency}}/{{.BillingPeriod}}</span>
-                        <span>{{.QuotaLabel}}</span>
-                        <span>{{.SiteLimit}} сайтов</span>
-                      </div>
-                      {{else}}
-                      <div class="billing-client-plan-row"><span>тарифы не переданы</span></div>
-                      {{end}}
-                    </div>
-                  </div>
-                  <div class="billing-client-hosting-section">
                     <h4>Сайты внутри сервера</h4>
                     <div class="billing-client-site-grid">
                       {{range $hosting.Hosting.Sites}}
                       <div class="billing-client-site-row {{if .OverLimit}}billing-client-site-over-limit{{end}}">
                         <a href="http://{{.Domain}}/" target="_blank" rel="noopener noreferrer">{{.Domain}}</a>
-                        <span>владелец сайта: {{.OwnerEmail}}</span>
                         <span>сервер: {{$hosting.ServerDisplayName}}</span>
-                        <span>владелец хостинга: {{$hosting.Hosting.OwnerEmail}}</span>
-                        <span>тариф: {{if .PlanName}}{{.PlanName}}{{else}}не назначен{{end}}</span>
-                        <span>{{if .PlanPaidStatus}}{{.PlanPaidStatus}}{{else}}free{{end}}</span>
                         <span>{{.UsedLabel}} / {{.LimitLabel}}</span>
-                        <span>{{if .PlanStatus}}{{.PlanStatus}}{{else}}unknown{{end}}{{if .OverLimit}} · превышение лимита{{end}}</span>
+                        <span>{{.BillingPriceLabel}} · {{.BillingStatusText}}</span>
                       </div>
                       {{else}}
                       <div class="billing-client-site-row"><span>сайты не переданы</span></div>
@@ -393,151 +307,6 @@
         <div class="empty">Клиентов пока нет.</div>
         {{end}}
       </div>
-      <details class="billing-technical-details mt-4">
-        <summary>Техническая история синхронизаций</summary>
-      <div class="billing-sync-history-head mt-3">
-        <div>
-          <h3 class="billing-user-subtitle">История синхронизаций snapshot</h3>
-          <p class="text-muted">Что sitebrush.com получил от SiteBrush-серверов и что обновил в реестре.</p>
-        </div>
-      </div>
-      {{if .RegistrySyncEvents}}
-      <div class="billing-sync-controls" data-billing-sync-controls>
-        <label>Поиск синхронизации
-          <input type="search" class="form-control" placeholder="installation, домен, IP, владелец" data-billing-sync-search-input>
-        </label>
-        <label>Статус
-          <select class="form-select" data-billing-sync-status-filter>
-            <option value="">Все</option>
-            <option value="stored">принято</option>
-            <option value="error">ошибка</option>
-          </select>
-        </label>
-        <div class="billing-client-pagination">
-          <button type="button" class="btn btn-outline-primary btn-sm" data-billing-sync-prev>Назад</button>
-          <span data-billing-sync-page-status></span>
-          <button type="button" class="btn btn-outline-primary btn-sm" data-billing-sync-next>Вперёд</button>
-        </div>
-      </div>
-      <div class="billing-sync-list" data-billing-sync-list>
-        {{range .RegistrySyncEvents}}
-        <article class="billing-sync-row" data-billing-sync-row data-billing-sync-status="{{.Status}}" data-billing-sync-search="{{.InstallationID}} {{.StatusLabel}} {{.Error}} {{.Summary.OwnerEmail}} {{.Summary.ServerIP}} {{.Summary.ServerStatus}} {{.Summary.ServerDomain}} {{.Summary.SitebrushVersion}} {{.Summary.OSName}} {{.Summary.OSVersion}} {{range .Summary.Sites}}{{.Domain}} {{.OwnerEmail}} {{.PlanName}} {{end}} {{range .Summary.Plans}}{{.Name}} {{.PaidStatus}} {{end}} {{range .Summary.Roles}}{{.Email}} {{.Role}} {{.Domain}} {{end}}">
-          <div class="billing-sync-main">
-            <div class="billing-sync-title">
-              <span class="{{if eq .Status "error"}}status-bad{{else}}status-ok{{end}}">{{.StatusLabel}}</span>
-              <span>{{.CreatedAt}}</span>
-            </div>
-            <div class="billing-client-hosting-subtitle">{{.InstallationID}}</div>
-            {{if .HasSummary}}
-            <div class="billing-sync-source">
-              <span>откуда: {{if .Summary.ServerDomain}}{{.Summary.ServerDomain}}{{else}}домен не передан{{end}}</span>
-              <span>{{if .Summary.ServerIP}}{{.Summary.ServerIP}}{{else if .Summary.ServerStatus}}{{.Summary.ServerStatus}}{{else}}IP не передан{{end}}</span>
-              <span>владелец: {{if .Summary.OwnerEmail}}{{.Summary.OwnerEmail}}{{else}}не передан{{end}}</span>
-            </div>
-            <div class="billing-sync-source">
-              <span>SiteBrush {{if .Summary.SitebrushVersion}}{{.Summary.SitebrushVersion}}{{else}}unknown{{end}}</span>
-              <span>{{if .Summary.OSName}}{{.Summary.OSName}} {{.Summary.OSVersion}}{{else}}ОС не передана{{end}}</span>
-              <span>{{if .Summary.CPUModel}}{{.Summary.CPUModel}}{{else}}CPU не передан{{end}} · {{.Summary.CPUCores}} ядер</span>
-            </div>
-            {{else}}
-            <div class="billing-sync-source">
-              <span>старый формат истории: подробный состав snapshot не сохранён</span>
-            </div>
-            {{end}}
-            {{if .Error}}<div class="billing-service-mail-log-error">{{.Error}}</div>{{end}}
-          </div>
-          <div class="billing-sync-counts">
-            {{if .HasSummary}}
-            <span>{{.Summary.SiteCount}} сайтов</span>
-            <span>{{.Summary.RoleCount}} ролей</span>
-            <span>{{.Summary.PlanCount}} тарифов</span>
-            <span>{{.Summary.EventCount}} событий</span>
-            <span>{{.Summary.DiskUsedLabel}} занято / {{.Summary.DiskFreeLabel}} свободно</span>
-            {{else}}
-            <span>нет summary</span>
-            {{end}}
-          </div>
-          <button type="button" class="btn btn-outline-primary btn-sm" data-billing-client-toggle="billingSyncDetails{{.ID}}">Подробности</button>
-          <div class="billing-sync-details d-none" id="billingSyncDetails{{.ID}}">
-            {{if .HasSummary}}
-            <div class="billing-client-hosting-meta">
-              <div><strong>installation</strong><span>{{.InstallationID}}</span></div>
-              <div><strong>сервер</strong><span>{{if .Summary.ServerDomain}}{{.Summary.ServerDomain}}{{else}}unknown{{end}}</span></div>
-              <div><strong>IP / статус</strong><span>{{if .Summary.ServerIP}}{{.Summary.ServerIP}}{{else if .Summary.ServerStatus}}{{.Summary.ServerStatus}}{{else}}unknown{{end}}</span></div>
-              <div><strong>владелец</strong><span>{{if .Summary.OwnerEmail}}{{.Summary.OwnerEmail}}{{else}}unknown{{end}}</span></div>
-              <div><strong>версия</strong><span>{{if .Summary.SitebrushVersion}}{{.Summary.SitebrushVersion}}{{else}}unknown{{end}}</span></div>
-              <div><strong>ОС</strong><span>{{if .Summary.OSName}}{{.Summary.OSName}} {{.Summary.OSVersion}}{{else}}unknown{{end}}</span></div>
-              <div><strong>CPU</strong><span>{{if .Summary.CPUModel}}{{.Summary.CPUModel}}{{else}}unknown{{end}} · {{.Summary.CPUCores}} ядер</span></div>
-              <div><strong>RAM</strong><span>{{.Summary.RAMTotalLabel}}</span></div>
-              <div><strong>диск</strong><span>{{.Summary.DiskUsedLabel}} занято / {{.Summary.DiskFreeLabel}} свободно / {{.Summary.DiskTotalLabel}} всего</span></div>
-            </div>
-            <div class="billing-client-hosting-section">
-              <h4>Сайты в snapshot</h4>
-              <div class="billing-client-site-grid">
-                {{range .Summary.Sites}}
-                <div class="billing-client-site-row {{if .OverLimit}}billing-client-site-over-limit{{end}}">
-                  <span>{{.Domain}}</span>
-                  <span>владелец сайта: {{.OwnerEmail}}</span>
-                  <span>админы: {{if .AdminEmails}}{{.AdminEmails}}{{else}}не переданы{{end}}</span>
-                  <span>тариф: {{if .PlanName}}{{.PlanName}}{{else}}не назначен{{end}}</span>
-                  <span>{{if .PlanPaidStatus}}{{.PlanPaidStatus}}{{else}}free{{end}}</span>
-                  <span>{{.UsedLabel}} / {{.LimitLabel}}</span>
-                  <span>{{if .PlanStatus}}{{.PlanStatus}}{{else}}unknown{{end}}{{if .OverLimit}} · превышение лимита{{end}}</span>
-                </div>
-                {{else}}
-                <div class="billing-client-site-row"><span>сайты не переданы</span></div>
-                {{end}}
-              </div>
-            </div>
-            <div class="billing-client-hosting-section">
-              <h4>Тарифы в snapshot</h4>
-              <div class="billing-client-plan-grid">
-                {{range .Summary.Plans}}
-                <div class="billing-client-plan-row">
-                  <span>{{.Name}}{{if .IsDefault}} · default{{end}}</span>
-                  <span>{{if .PaidStatus}}{{.PaidStatus}}{{else}}unknown{{end}}</span>
-                  <span>{{.Price}} {{.Currency}}/{{.BillingPeriod}}</span>
-                  <span>{{.QuotaLabel}}</span>
-                  <span>{{.SiteLimit}} сайтов · {{.AnalyticsReportLimit}} отчетов</span>
-                </div>
-                {{else}}
-                <div class="billing-client-plan-row"><span>тарифы не переданы</span></div>
-                {{end}}
-              </div>
-            </div>
-            <div class="billing-client-hosting-section">
-              <h4>Роли в snapshot</h4>
-              <div class="billing-user-tags">
-                {{range .Summary.Roles}}<span>{{.Email}} · {{.Role}} · {{.Scope}}{{if .Domain}} · {{.Domain}}{{end}}</span>{{else}}<span>роли не переданы</span>{{end}}
-              </div>
-            </div>
-            <div class="billing-client-hosting-section">
-              <h4>События в snapshot</h4>
-              <div class="billing-user-activity">
-                {{range .Summary.Events}}
-                <div class="billing-user-activity-row">
-                  <span class="billing-user-activity-kind">{{.Kind}} · {{.Status}}</span>
-                  <span>{{.Email}}</span>
-                  <span>{{.Domain}}</span>
-                  <span>{{.CreatedAt}}</span>
-                  <span>{{.Message}}</span>
-                </div>
-                {{else}}
-                <div class="billing-user-activity-row"><span>события не переданы</span></div>
-                {{end}}
-              </div>
-            </div>
-            {{else}}
-            <div class="empty">Эта запись была создана до подробной истории snapshot. Доступны только installation ID, статус и дата.</div>
-            {{end}}
-          </div>
-        </article>
-        {{end}}
-      </div>
-      {{else}}
-      <div class="empty">История синхронизаций пока пуста.</div>
-      {{end}}
-      </details>
     </div>
   </section>
 
@@ -575,8 +344,8 @@
         <label>{{index .T "billing_quota"}} <input name="quota" type="text" class="form-control" placeholder="10gb" required></label>
         <label>{{index .T "billing_site_limit"}} <input name="site_limit" type="number" min="1" step="1" class="form-control" value="1" required></label>
         <label>{{index .T "billing_analytics_reports"}} <input name="analytics_report_limit" type="number" min="0" step="1" class="form-control" value="0" required></label>
-        <label>{{index .T "billing_price"}} <input name="price" type="text" class="form-control" placeholder="0"></label>
-        <label>{{index .T "billing_currency"}} <input name="currency" type="text" class="form-control" value="USD"></label>
+        <label>{{index .T "billing_price"}} <input name="price" type="text" class="form-control" placeholder="2.00"></label>
+        <label>{{index .T "billing_currency"}} <input name="currency" type="text" class="form-control" value="EUR"></label>
         <label>{{index .T "billing_period"}} <input name="billing_period" type="text" class="form-control" value="monthly"></label>
         <label class="checkbox-row"><input type="checkbox" name="is_default" value="1"><span>{{index .T "billing_plan_default"}}</span></label>
         <button type="submit" class="btn btn-primary"><img src="/p/static/save-page.png" alt="">{{index .T "billing_save_plan"}}</button>
@@ -651,23 +420,32 @@
     <div class="card-body">
       <div class="billing-section-header">
         <div>
-          <h2>Счета и оплата</h2>
-          <p class="text-muted">Выставляйте счета клиентам и отмечайте оплату. Технические настройки способов оплаты скрыты ниже.</p>
+          <h2>История оплаты</h2>
+          <p class="text-muted">История хранится персонально у клиента; общий ввод новых счетов больше не используется.</p>
         </div>
       </div>
       <form method="post" action="?hosting_and_support" class="billing-plan-form">
         <input type="hidden" name="billing_action" value="create_invoice">
         <label>Клиент <input name="customer_email" type="email" class="form-control" placeholder="client@example.com" required></label>
         <label>Сайт <input name="domain" type="text" class="form-control" placeholder="example.com" required></label>
-        <label>Тариф / услуга <input name="plan_name" type="text" class="form-control" placeholder="Pro / обслуживание сайта"></label>
-        <label>Сумма <input name="amount" type="text" class="form-control" placeholder="1000" required></label>
-        <label>Валюта <input name="currency" type="text" class="form-control" value="RUB" required></label>
+        <label>Услуга <input name="plan_name" type="text" class="form-control" placeholder="Дисковое пространство"></label>
+        <label>Сумма <input name="amount" type="text" class="form-control" placeholder="1.00" required></label>
+        <label>Валюта <input name="currency" type="text" class="form-control" value="EUR" required></label>
         <label>Провайдер
           <select name="provider" class="form-select" required>
             {{range .PaymentProviders}}<option value="{{.Provider}}">{{.DisplayName}}{{if not .Enabled}} · выключен{{end}}</option>{{end}}
           </select>
         </label>
         <label>Срок оплаты <input name="due_at" type="date" class="form-control"></label>
+        <label class="checkbox-row"><input type="checkbox" name="recurring_enabled" value="1"><span>Периодический счёт</span></label>
+        <label>Повторять
+          <select name="recurring_period" class="form-select">
+            <option value="monthly">ежемесячно</option>
+            <option value="quarterly">ежеквартально</option>
+            <option value="yearly">ежегодно</option>
+            <option value="weekly">еженедельно</option>
+          </select>
+        </label>
         <label>Примечание <input name="notes" type="text" class="form-control" placeholder="За хостинг и поддержку"></label>
         <button type="submit" class="btn btn-success"><img src="/p/static/profile.png" alt="">Выставить счёт</button>
       </form>
@@ -678,6 +456,7 @@
             <div class="billing-domain">{{.Number}} · {{if eq .Status "issued"}}ожидает оплаты{{else if eq .Status "paid"}}оплачен{{else if eq .Status "payment_error"}}ошибка оплаты{{else if eq .Status "cancelled"}}отменён{{else}}{{.Status}}{{end}}</div>
             <div class="text-muted small">{{.CustomerEmail}} · {{.Domain}} · {{.PlanName}}</div>
             <div class="text-muted small">{{.Amount}} {{.Currency}} · {{.Provider}} · создан {{.CreatedAt}}{{if .DueAt}} · срок {{.DueAt}}{{end}}{{if .PaidAt}} · оплачен {{.PaidAt}}{{end}}</div>
+            <div class="text-muted small">{{if .Recurring}}периодический · {{.RecurringPeriod}}{{else}}разовый счёт{{end}}</div>
             {{if .PaymentURL}}<div class="text-muted small"><a href="{{.PaymentURL}}" target="_blank" rel="noopener noreferrer">Ссылка на оплату</a></div>{{end}}
             {{if .Notes}}<div class="text-muted small">{{.Notes}}</div>{{end}}
           </div>
@@ -804,7 +583,6 @@
           <div class="billing-site-main">
             <div class="billing-domain"><a href="//{{$request.Domain}}/" target="_blank" rel="noopener noreferrer">{{$request.Domain}}</a></div>
             <div class="text-muted small">{{$request.Name}} · {{$request.Email}} · {{$request.Phone}}</div>
-            <div class="text-muted small">{{index $.T "billing_plan_label"}} {{$request.PlanName}} · {{$request.PlanQuotaLabel}} · {{index $.T "billing_sites_short"}} {{$request.PlanSiteLimit}} · {{index $.T "billing_reports_short"}} {{$request.PlanAnalyticsLimit}} · {{$request.PlanPrice}} {{$request.PlanCurrency}}/{{$request.PlanBillingPeriod}}</div>
             <div class="text-muted small">{{index $.T "billing_status_label"}} {{$request.Status}} · {{$request.CreatedAt}}</div>
             {{if $request.OwnerMessage}}<div class="text-muted small">{{index $.T "billing_message_label"}} {{$request.OwnerMessage}}</div>{{end}}
           </div>
@@ -821,7 +599,7 @@
                   <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="{{index $.T "tree_close"}}"></button>
                 </div>
                 <div class="modal-body">
-                  <p class="text-muted">{{index $.T "billing_approve_hint_prefix"}} {{$request.Email}} {{index $.T "billing_approve_hint_middle"}} {{$request.PlanName}}. {{index $.T "billing_approve_hint_suffix"}}</p>
+                  <p class="text-muted">{{index $.T "billing_approve_hint_prefix"}} {{$request.Email}}. {{index $.T "billing_approve_hint_suffix"}}</p>
                   <input type="hidden" name="billing_action" value="approve_site_request">
                   <input type="hidden" name="request_id" value="{{$request.ID}}">
                   <label>{{index $.T "billing_client_message"}}
@@ -890,18 +668,13 @@
             <div class="billing-quota-bar" aria-label="{{index $.T "billing_used_percent"}} {{$site.UsedPercent}}%">
               <div style="width:{{$site.UsedPercent}}%"></div>
             </div>
-            <div class="text-muted small">{{index $.T "billing_used_label"}} {{$site.UsedLabel}} / выделено {{$site.LimitLabel}}{{if $site.PlanName}} · тариф {{$site.PlanName}}{{if $site.PlanQuotaLabel}} ({{$site.PlanQuotaLabel}}){{end}}{{else}} · тариф не назначен{{end}}, {{index $.T "billing_free_label"}} {{$site.FreeLabel}}</div>
+            <div class="text-muted small">{{index $.T "billing_used_label"}} {{$site.UsedLabel}} / выделено {{$site.LimitLabel}}, {{index $.T "billing_free_label"}} {{$site.FreeLabel}}</div>
+            <div class="text-muted small">Расчёт: {{$site.BillingUsageLabel}} · {{$site.BillingPriceLabel}} · {{$site.BillingStatusText}}</div>
           </div>
           {{if not $site.IsDemo}}<form method="post" action="?hosting_and_support" class="billing-site-form" data-billing-ajax-save>
             <input type="hidden" name="billing_action" value="update_site">
             <input type="hidden" name="domain" value="{{$site.Domain}}">
             <label>{{index $.T "billing_quota"}} <input name="quota" type="text" class="form-control form-control-sm" value="{{$site.QuotaInput}}"></label>
-            <label>{{index $.T "billing_plan"}}
-              <select name="plan_id" class="form-select form-select-sm">
-                <option value="0">{{index $.T "billing_no_plan"}}</option>
-                {{$selectedPlanID := $site.PlanID}}{{range $.Plans}}<option value="{{.ID}}" {{if eq .ID $selectedPlanID}}selected{{end}}>{{.Name}} · {{.QuotaLabel}} · {{.Price}} {{.Currency}}/{{.BillingPeriod}}</option>{{end}}
-              </select>
-            </label>
             <label>{{index $.T "billing_status"}}
               <select name="service_status" class="form-select form-select-sm">
                 <option value="free" {{if eq $site.ServiceStatus "free"}}selected{{end}}>{{index $.T "billing_status_free"}}</option>
@@ -951,7 +724,6 @@
                   <dt>Домен</dt><dd>{{$site.SiteRequest.Domain}}</dd>
                   <dt>Клиент</dt><dd>{{$site.SiteRequest.Name}} · {{$site.SiteRequest.Email}}</dd>
                   <dt>Телефон</dt><dd>{{$site.SiteRequest.Phone}}</dd>
-                  <dt>Тариф</dt><dd>{{$site.SiteRequest.PlanName}} · {{$site.SiteRequest.PlanQuotaLabel}} · {{$site.SiteRequest.PlanPrice}} {{$site.SiteRequest.PlanCurrency}}/{{$site.SiteRequest.PlanBillingPeriod}}</dd>
                   <dt>Статус</dt><dd>{{$site.SiteRequest.Status}}</dd>
                   <dt>Создана</dt><dd>{{$site.SiteRequest.CreatedAt}}</dd>
                   <dt>Обновлена</dt><dd>{{$site.SiteRequest.UpdatedAt}}</dd>
@@ -1263,7 +1035,7 @@
   const pageSize = 10;
   let currentPageIndex = 0;
 
-  if (!controlsElement || !searchInputElement || !roleFilterElement || !statusFilterElement || !paidFilterElement || !overLimitFilterElement || !eventsFilterElement || !previousButtonElement || !nextButtonElement || !pageStatusElement || clientRowElements.length === 0) {
+  if (!controlsElement || !searchInputElement || !paidFilterElement || !overLimitFilterElement || !eventsFilterElement || !previousButtonElement || !nextButtonElement || !pageStatusElement || clientRowElements.length === 0) {
     return;
   }
 
@@ -1279,10 +1051,10 @@
   }
 
   function clientRowMatchesSelectFilters(clientRowElement) {
-    if (!textContainsAnyToken(clientRowElement.dataset.billingClientRoles || '', roleFilterElement.value)) {
+    if (roleFilterElement && !textContainsAnyToken(clientRowElement.dataset.billingClientRoles || '', roleFilterElement.value)) {
       return false;
     }
-    if (!textContainsAnyToken(clientRowElement.dataset.billingClientStatuses || '', statusFilterElement.value)) {
+    if (statusFilterElement && !textContainsAnyToken(clientRowElement.dataset.billingClientStatuses || '', statusFilterElement.value)) {
       return false;
     }
     if (!textContainsAnyToken(clientRowElement.dataset.billingClientPaidStatuses || '', paidFilterElement.value)) {
@@ -1319,7 +1091,9 @@
     }
     previousButtonElement.disabled = currentPageIndex === 0;
     nextButtonElement.disabled = currentPageIndex >= pageCount - 1;
-    controlsElement.classList.toggle('d-none', clientRowElements.length <= pageSize && !searchInputElement.value.trim() && !roleFilterElement.value && !statusFilterElement.value && !paidFilterElement.value && !overLimitFilterElement.value && !eventsFilterElement.value);
+    const roleFilterValue = roleFilterElement ? roleFilterElement.value : '';
+    const statusFilterValue = statusFilterElement ? statusFilterElement.value : '';
+    controlsElement.classList.toggle('d-none', clientRowElements.length <= pageSize && !searchInputElement.value.trim() && !roleFilterValue && !statusFilterValue && !paidFilterElement.value && !overLimitFilterElement.value && !eventsFilterElement.value);
     pageStatusElement.textContent = visibleClientRows.length + ' клиентов · страница ' + (currentPageIndex + 1) + ' / ' + pageCount;
   }
 
@@ -1328,6 +1102,9 @@
     renderClientPage();
   });
   for (const filterElement of [roleFilterElement, statusFilterElement, paidFilterElement, overLimitFilterElement, eventsFilterElement]) {
+    if (!filterElement) {
+      continue;
+    }
     filterElement.addEventListener('change', function updateClientFilter() {
       currentPageIndex = 0;
       renderClientPage();

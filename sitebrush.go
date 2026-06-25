@@ -4418,6 +4418,7 @@ func runSitebrushServer(ctx context.Context, config serverRunConfig) error {
 	application.startDemoSiteCleanupWorker(ctx)
 	application.startServiceMailKeyPairWorker(ctx)
 	application.hostingSnapshotReports = application.startHostingSnapshotReporter(ctx)
+	application.startHostingSnapshotMetricsMonitor(ctx)
 	application.startHostingSnapshotNetChanListener(ctx)
 	application.startHostingServerMonitor(ctx)
 
@@ -9974,24 +9975,27 @@ func (a *App) hostingAndSupportView(ctx context.Context, r *http.Request) (map[s
 	if ownerDomain, found := store.OwnerDomain(ctx); found {
 		mainDomain = ownerDomain
 	}
-	siteRows, err := a.hostingAndSupportSiteRows(ctx, plans, assignments, a.siteDomain(ctx, r), hostingAndSupportDemoDomain, mainDomain)
+	deletionBackupSizesByDomain := a.managedSiteDeletionBackupSizesByDomain(ctx, controlDatabase)
+	siteRows, err := a.hostingAndSupportSiteRows(ctx, plans, assignments, deletionBackupSizesByDomain, a.siteDomain(ctx, r), hostingAndSupportDemoDomain, mainDomain)
 	if err != nil {
 		return nil, err
 	}
 	hostingAndSupportAttachApprovedSiteRequests(siteRows, approvedSiteRequestsByDomain)
 	localServer := hostingandsupport.BuildLocalServerView(hostingandsupport.LocalServerViewInput{
-		Sites:       siteRows,
-		Invoices:    invoices,
-		Plans:       plans,
-		Assignments: assignments,
-		MainDomain:  mainDomain,
-		CurrentHost: a.siteDomain(ctx, r),
-		SiteURL:     a.hostingAndSupportSiteURL,
+		Sites:         siteRows,
+		Invoices:      invoices,
+		Plans:         plans,
+		Assignments:   assignments,
+		SystemMetrics: a.localHostingServerSystemMetrics(ctx),
+		MainDomain:    mainDomain,
+		CurrentHost:   a.siteDomain(ctx, r),
+		SiteURL:       a.hostingAndSupportSiteURL,
 	})
 	servers := hostingandsupport.BuildServerViews(localServer, clientHostings, invoices)
+	clients := a.hostingAndSupportClients(ctx, siteRows, nil, nil, clientHostings, invoices)
 	overview := hostingandsupport.BuildOverview(siteRows, 0, pendingSiteRequests, invoices, clientHostings, registrySyncEvents, nil)
 	overview.ServerCount = len(servers)
-	overview.ClientCount = hostingandsupport.ServerClientCount(servers)
+	overview.ClientCount = len(clients)
 	translations := translationsForRequest(r)
 	return map[string]any{
 		"Title":                       translationOrDefault(translations, "billing_title", "Хостинг и поддержка"),
@@ -10007,8 +10011,8 @@ func (a *App) hostingAndSupportView(ctx context.Context, r *http.Request) (map[s
 		"RegistrySyncEvents":          registrySyncEvents,
 		"SitebrushComKey":             sitebrushComKey,
 		"ShowServers":                 showServers,
-		"Clients":                     nil,
-		"ClientCount":                 hostingandsupport.ServerClientCount(servers),
+		"Clients":                     clients,
+		"ClientCount":                 len(clients),
 		"ClientSiteCount":             len(siteRows),
 		"ClientInstallationCount":     len(servers),
 		"ClientLocalDevelopmentCount": 0,
@@ -10045,6 +10049,8 @@ type hostingAndSupportClientView struct {
 	FilterHasEvents        string
 	SiteCount              int
 	Sites                  []hostingAndSupportClientSiteView
+	Invoices               []hostingAndSupportClientInvoiceView
+	InvoiceCount           int
 	Hostings               []hostingAndSupportClientHostingView
 	HostingCount           int
 	Installations          []string
@@ -10069,23 +10075,36 @@ type hostingAndSupportClientHostingView struct {
 }
 
 type hostingAndSupportClientSiteView struct {
-	Domain           string
-	URL              string
-	UsedBytes        int64
-	UsedLabel        string
-	LimitBytes       int64
-	LimitLabel       string
-	OverLimit        bool
-	PlanName         string
-	PlanPaidStatus   string
-	HostingOwner     string
-	HostingServer    string
-	InstallationIP   string
-	RealInstallation bool
-	LocalDevelopment bool
-	HostingSitebrush bool
-	ParentDomain     string
-	Status           string
+	Domain            string
+	URL               string
+	UsedBytes         int64
+	UsedLabel         string
+	LimitBytes        int64
+	LimitLabel        string
+	OverLimit         bool
+	BillingUsageLabel string
+	BillingPriceLabel string
+	BillingStatusText string
+	BillingAmount     string
+	BillingCurrency   string
+	BillingBillable   bool
+	HostingOwner      string
+	HostingServer     string
+	InstallationIP    string
+	RealInstallation  bool
+	LocalDevelopment  bool
+	HostingSitebrush  bool
+	ParentDomain      string
+	Status            string
+}
+
+type hostingAndSupportClientInvoiceView struct {
+	Number       string
+	Domain       string
+	AmountLabel  string
+	StatusLabel  string
+	PeriodLabel  string
+	HistoryLabel string
 }
 
 type hostingAndSupportClientIPView struct {
@@ -10118,20 +10137,24 @@ type hostingAndSupportClientAccumulator struct {
 }
 
 type hostingAndSupportClientSiteSource struct {
-	ip             string
-	aliases        string
-	url            string
-	usedBytes      int64
-	usedLabel      string
-	limitBytes     int64
-	limitLabel     string
-	planName       string
-	planPaidStatus string
-	hostingOwner   string
-	hostingServer  string
+	ip                string
+	aliases           string
+	url               string
+	usedBytes         int64
+	usedLabel         string
+	limitBytes        int64
+	limitLabel        string
+	billingUsageLabel string
+	billingPriceLabel string
+	billingStatusText string
+	billingAmount     string
+	billingCurrency   string
+	billingBillable   bool
+	hostingOwner      string
+	hostingServer     string
 }
 
-func (a *App) hostingAndSupportClients(ctx context.Context, siteRows []hostingandsupport.Site, installations []hostingandsupport.ServiceMailInstallation, events []hostingandsupport.ServiceMailEvent, clientHostings []hostingandsupport.ClientHosting) []hostingAndSupportClientView {
+func (a *App) hostingAndSupportClients(ctx context.Context, siteRows []hostingandsupport.Site, installations []hostingandsupport.ServiceMailInstallation, events []hostingandsupport.ServiceMailEvent, clientHostings []hostingandsupport.ClientHosting, invoices []hostingandsupport.Invoice) []hostingAndSupportClientView {
 	installationDomain := make(map[string]string)
 	installationIP := make(map[string]string)
 	for _, installation := range installations {
@@ -10150,13 +10173,17 @@ func (a *App) hostingAndSupportClients(ctx context.Context, siteRows []hostingan
 		for _, email := range hostingandsupport.SplitEmailList(siteRow.AdminEmails) {
 			client := hostingAndSupportClientByEmail(clientsByEmail, email)
 			client.sites[domain] = hostingAndSupportClientSiteSource{
-				aliases:        siteRow.Aliases,
-				url:            siteRow.URL,
-				usedBytes:      siteRow.UsedBytes,
-				usedLabel:      siteRow.UsedLabel,
-				limitLabel:     siteRow.LimitLabel,
-				planName:       siteRow.PlanName,
-				planPaidStatus: siteRow.ServiceStatus,
+				aliases:           siteRow.Aliases,
+				url:               siteRow.URL,
+				usedBytes:         siteRow.UsedBytes,
+				usedLabel:         siteRow.UsedLabel,
+				limitLabel:        siteRow.LimitLabel,
+				billingUsageLabel: siteRow.BillingUsageLabel,
+				billingPriceLabel: siteRow.BillingPriceLabel,
+				billingStatusText: siteRow.BillingStatusText,
+				billingAmount:     siteRow.BillingAmount,
+				billingCurrency:   siteRow.BillingCurrency,
+				billingBillable:   siteRow.BillingBillable,
 			}
 			client.domains[domain] = struct{}{}
 			clientsByDomain[domain] = client
@@ -10257,8 +10284,13 @@ func (a *App) hostingAndSupportClients(ctx context.Context, siteRows []hostingan
 					siteSource.limitBytes = site.LimitBytes
 					siteSource.limitLabel = site.LimitLabel
 				}
-				siteSource.planName = firstNonEmpty(site.PlanName, siteSource.planName)
-				siteSource.planPaidStatus = firstNonEmpty(site.PlanPaidStatus, siteSource.planPaidStatus)
+				billingPrice := hostingandsupport.BillingPriceForUsedBytes(siteSource.usedBytes)
+				siteSource.billingUsageLabel = hostingandsupport.BillingUsageLabel(siteSource.usedBytes)
+				siteSource.billingPriceLabel = billingPrice.PriceLabel
+				siteSource.billingStatusText = billingPrice.StatusText
+				siteSource.billingAmount = billingPrice.Amount
+				siteSource.billingCurrency = billingPrice.Currency
+				siteSource.billingBillable = billingPrice.Billable
 				siteSource.hostingOwner = firstNonEmpty(clientHosting.OwnerEmail, siteSource.hostingOwner)
 				siteSource.hostingServer = firstNonEmpty(clientHosting.ServerDomain, clientHosting.InstallationID, siteSource.hostingServer)
 				siteSource.ip = firstNonEmpty(clientHosting.ServerIP, siteSource.ip)
@@ -10276,6 +10308,7 @@ func (a *App) hostingAndSupportClients(ctx context.Context, siteRows []hostingan
 			Domains:       sortedStringsFromSet(user.domains),
 			Sites:         siteViews,
 			SiteCount:     len(siteViews),
+			Invoices:      hostingAndSupportClientInvoiceViews(invoices, user.emails, user.domains),
 			Hostings:      hostingViews,
 			HostingCount:  len(hostingViews),
 			Installations: sortedStringsFromSet(user.installations),
@@ -10283,6 +10316,7 @@ func (a *App) hostingAndSupportClients(ctx context.Context, siteRows []hostingan
 			Events:        user.events,
 		}
 		view.EmailCount = len(view.Emails)
+		view.InvoiceCount = len(view.Invoices)
 		view.DomainCount = len(view.Domains)
 		view.RelayInstallationCount = len(view.Installations)
 		view.InstallationCount = len(hostingViews)
@@ -10369,21 +10403,36 @@ func hostingAndSupportClientFilterStatuses(client hostingAndSupportClientView) [
 
 func hostingAndSupportClientFilterPaidStatuses(client hostingAndSupportClientView) []string {
 	statuses := make(map[string]struct{})
-	for _, hosting := range client.Hostings {
-		for _, site := range hosting.Hosting.Sites {
-			status := strings.TrimSpace(site.PlanPaidStatus)
-			if status != "" {
-				statuses[status] = struct{}{}
-			}
-		}
-		for _, plan := range hosting.Hosting.Plans {
-			status := strings.TrimSpace(plan.PaidStatus)
-			if status != "" {
-				statuses[status] = struct{}{}
-			}
+	for _, site := range client.Sites {
+		if site.BillingBillable {
+			statuses["paid"] = struct{}{}
+		} else {
+			statuses["free"] = struct{}{}
 		}
 	}
 	return sortedStringsFromSet(statuses)
+}
+
+func hostingAndSupportClientInvoiceViews(invoices []hostingandsupport.Invoice, emails map[string]struct{}, domains map[string]struct{}) []hostingAndSupportClientInvoiceView {
+	views := make([]hostingAndSupportClientInvoiceView, 0, len(invoices))
+	for _, invoice := range invoices {
+		email := strings.ToLower(strings.TrimSpace(invoice.CustomerEmail))
+		domain := normalizeDomainName(invoice.Domain)
+		_, emailFound := emails[email]
+		_, domainFound := domains[domain]
+		if !emailFound && !domainFound {
+			continue
+		}
+		views = append(views, hostingAndSupportClientInvoiceView{
+			Number:       invoice.Number,
+			Domain:       domain,
+			AmountLabel:  strings.TrimSpace(invoice.Amount + " " + invoice.Currency),
+			StatusLabel:  hostingandsupport.InvoiceStatusLabel(invoice.Status),
+			PeriodLabel:  hostingandsupport.InvoicePeriodLabel(invoice),
+			HistoryLabel: hostingandsupport.InvoiceHistoryLabel(invoice),
+		})
+	}
+	return views
 }
 
 func hostingAndSupportClientHasOverLimitSite(client hostingAndSupportClientView) bool {
@@ -10473,20 +10522,33 @@ func hostingAndSupportClientSiteViews(sites map[string]hostingAndSupportClientSi
 	views := make([]hostingAndSupportClientSiteView, 0, len(sites))
 	for domain, siteSource := range sites {
 		view := hostingAndSupportClientSiteView{
-			Domain:         domain,
-			URL:            strings.TrimSpace(siteSource.url),
-			UsedBytes:      siteSource.usedBytes,
-			UsedLabel:      siteSource.usedLabel,
-			LimitBytes:     siteSource.limitBytes,
-			LimitLabel:     siteSource.limitLabel,
-			PlanName:       siteSource.planName,
-			PlanPaidStatus: siteSource.planPaidStatus,
-			HostingOwner:   siteSource.hostingOwner,
-			HostingServer:  siteSource.hostingServer,
-			InstallationIP: strings.TrimSpace(siteSource.ip),
+			Domain:            domain,
+			URL:               strings.TrimSpace(siteSource.url),
+			UsedBytes:         siteSource.usedBytes,
+			UsedLabel:         siteSource.usedLabel,
+			LimitBytes:        siteSource.limitBytes,
+			LimitLabel:        siteSource.limitLabel,
+			BillingUsageLabel: siteSource.billingUsageLabel,
+			BillingPriceLabel: siteSource.billingPriceLabel,
+			BillingStatusText: siteSource.billingStatusText,
+			BillingAmount:     siteSource.billingAmount,
+			BillingCurrency:   siteSource.billingCurrency,
+			BillingBillable:   siteSource.billingBillable,
+			HostingOwner:      siteSource.hostingOwner,
+			HostingServer:     siteSource.hostingServer,
+			InstallationIP:    strings.TrimSpace(siteSource.ip),
 		}
 		if view.UsedLabel == "" {
 			view.UsedLabel = formatFileSize(view.UsedBytes)
+		}
+		if view.BillingUsageLabel == "" {
+			billingPrice := hostingandsupport.BillingPriceForUsedBytes(view.UsedBytes)
+			view.BillingUsageLabel = hostingandsupport.BillingUsageLabel(view.UsedBytes)
+			view.BillingPriceLabel = billingPrice.PriceLabel
+			view.BillingStatusText = billingPrice.StatusText
+			view.BillingAmount = billingPrice.Amount
+			view.BillingCurrency = billingPrice.Currency
+			view.BillingBillable = billingPrice.Billable
 		}
 		if view.LimitLabel == "" && view.LimitBytes > 0 {
 			view.LimitLabel = formatFileSize(view.LimitBytes)
@@ -10594,17 +10656,18 @@ func hostingAndSupportClientMapPointsJSON(ips []hostingAndSupportClientIPView) t
 	return template.JS(payload)
 }
 
-func (a *App) hostingAndSupportSiteRows(ctx context.Context, plans []hostingandsupport.Plan, assignments map[string]hostingandsupport.ServiceAssignment, currentDomain string, demoDomain string, mainDomain string) ([]hostingandsupport.Site, error) {
+func (a *App) hostingAndSupportSiteRows(ctx context.Context, plans []hostingandsupport.Plan, assignments map[string]hostingandsupport.ServiceAssignment, deletionBackupSizesByDomain map[string]int64, currentDomain string, demoDomain string, mainDomain string) ([]hostingandsupport.Site, error) {
 	rows, err := a.listSiteQuotaRows(ctx)
 	if err != nil {
 		return nil, err
 	}
 	usages := make([]hostingandsupport.SiteUsage, 0, len(rows))
 	for _, row := range rows {
+		billingUsedBytes := a.managedSiteBillingDiskBytes(row, deletionBackupSizesByDomain)
 		usages = append(usages, hostingandsupport.SiteUsage{
 			Domain:       row.Domain,
 			Aliases:      row.Aliases,
-			UsedBytes:    row.UsedBytes,
+			UsedBytes:    billingUsedBytes,
 			LimitBytes:   row.LimitBytes,
 			AdminEmails:  row.AdminEmails,
 			DatabasePath: row.DatabasePath,
@@ -10617,7 +10680,7 @@ func (a *App) hostingAndSupportSiteRows(ctx context.Context, plans []hostingands
 	}
 	for siteIndex := range siteRows {
 		if row, found := rowByDomain[siteRows[siteIndex].Domain]; found {
-			deletionSizeBytes := a.managedSiteDeletionDisplaySizeBytes(row)
+			deletionSizeBytes := a.managedSiteBillingDiskBytes(row, deletionBackupSizesByDomain)
 			siteRows[siteIndex].DeletionSizeBytes = deletionSizeBytes
 			siteRows[siteIndex].DeletionSizeLabel = formatFileSize(deletionSizeBytes)
 		}
@@ -11523,11 +11586,43 @@ func (a *App) managedSiteDeletionSizeBytes(row siteQuotaRow) int64 {
 	return totalBytes
 }
 
-func (a *App) managedSiteDeletionDisplaySizeBytes(row siteQuotaRow) int64 {
-	totalBytes := row.UsedBytes
-	totalBytes += diskusage.FileSize(row.DatabasePath)
-	totalBytes += diskusage.FileSize(filepath.Join(a.packsDir(), domainStorageName(row.Domain)+".zip"))
+func (a *App) managedSiteBillingDiskBytes(row siteQuotaRow, deletionBackupSizesByDomain map[string]int64) int64 {
+	totalBytes := a.managedSiteDeletionSizeBytes(row)
+	totalBytes += deletionBackupSizesByDomain[normalizeQuotaDomainName(row.Domain)]
 	return totalBytes
+}
+
+func (a *App) managedSiteDeletionBackupSizesByDomain(ctx context.Context, controlDatabase *sql.DB) map[string]int64 {
+	sizesByDomain := make(map[string]int64)
+	if controlDatabase == nil {
+		return sizesByDomain
+	}
+	rows, err := controlDatabase.QueryContext(ctx, `SELECT domain,archive_path FROM site_deletion_backups`)
+	if err != nil {
+		return sizesByDomain
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var domain string
+		var archivePath string
+		if scanErr := rows.Scan(&domain, &archivePath); scanErr != nil {
+			continue
+		}
+		normalizedDomain := normalizeQuotaDomainName(domain)
+		if normalizedDomain == "" {
+			continue
+		}
+		archiveSizeBytes := int64(0)
+		if realArchivePath, pathErr := a.existingPathInsideStorageSubtree(a.backupRootDir(), archivePath); pathErr == nil {
+			if fileSizeBytes := diskusage.FileSize(realArchivePath); fileSizeBytes > 0 {
+				archiveSizeBytes = fileSizeBytes
+			}
+		}
+		if archiveSizeBytes > 0 {
+			sizesByDomain[normalizedDomain] += archiveSizeBytes
+		}
+	}
+	return sizesByDomain
 }
 
 func managedSiteOwnerContacts(ctx context.Context, controlDatabase *sql.DB, databasePath, domain string) []string {
@@ -12106,14 +12201,16 @@ func (a *App) createInvoiceFromForm(r *http.Request) string {
 		return "Email клиента некорректен."
 	}
 	invoice := hostingandsupport.Invoice{
-		CustomerEmail: customerEmail,
-		Domain:        normalizeQuotaDomainName(r.FormValue("domain")),
-		PlanName:      strings.TrimSpace(r.FormValue("plan_name")),
-		Amount:        strings.TrimSpace(r.FormValue("amount")),
-		Currency:      strings.TrimSpace(r.FormValue("currency")),
-		Provider:      strings.TrimSpace(r.FormValue("provider")),
-		DueAt:         strings.TrimSpace(r.FormValue("due_at")),
-		Notes:         strings.TrimSpace(r.FormValue("notes")),
+		CustomerEmail:   customerEmail,
+		Domain:          normalizeQuotaDomainName(r.FormValue("domain")),
+		PlanName:        strings.TrimSpace(r.FormValue("plan_name")),
+		Amount:          strings.TrimSpace(r.FormValue("amount")),
+		Currency:        strings.TrimSpace(r.FormValue("currency")),
+		Provider:        strings.TrimSpace(r.FormValue("provider")),
+		DueAt:           strings.TrimSpace(r.FormValue("due_at")),
+		Notes:           strings.TrimSpace(r.FormValue("notes")),
+		Recurring:       r.FormValue("recurring_enabled") == "1",
+		RecurringPeriod: strings.TrimSpace(r.FormValue("recurring_period")),
 	}
 	if invoice.Provider == "" {
 		invoice.Provider = "sitebrush_com"
@@ -13440,6 +13537,22 @@ func (a *App) startHostingSnapshotReporter(ctx context.Context) chan struct{} {
 	return reports
 }
 
+func (a *App) startHostingSnapshotMetricsMonitor(ctx context.Context) {
+	go func() {
+		timer := time.NewTimer(30 * time.Second)
+		defer timer.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-timer.C:
+				a.reportHostingSnapshotAsync(ctx)
+				timer.Reset(5 * time.Minute)
+			}
+		}
+	}()
+}
+
 func (a *App) startHostingServerMonitor(ctx context.Context) {
 	go func() {
 		timer := time.NewTimer(20 * time.Second)
@@ -13791,6 +13904,7 @@ func (a *App) buildHostingSnapshot(ctx context.Context) (hostingandsupport.Hosti
 	store := hostingandsupport.Store{DB: controlDatabase}
 	plans := store.Plans(ctx)
 	assignments := store.ServiceAssignments(ctx)
+	deletionBackupSizesByDomain := a.managedSiteDeletionBackupSizesByDomain(ctx, controlDatabase)
 	plansByID := make(map[int]hostingandsupport.Plan, len(plans))
 	for _, plan := range plans {
 		plansByID[plan.ID] = plan
@@ -13848,10 +13962,11 @@ func (a *App) buildHostingSnapshot(ctx context.Context) (hostingandsupport.Hosti
 		if plan, found := plansByID[assignment.PlanID]; found {
 			planName = plan.Name
 		}
+		billingUsedBytes := a.managedSiteBillingDiskBytes(row, deletionBackupSizesByDomain)
 		site := hostingandsupport.HostingSnapshotSite{
 			Domain:         row.Domain,
 			OwnerEmail:     hostingandsupport.FirstHostingSnapshotEmail(row.AdminEmails),
-			UsedBytes:      row.UsedBytes,
+			UsedBytes:      billingUsedBytes,
 			LimitBytes:     row.LimitBytes,
 			PlanName:       planName,
 			PlanStatus:     assignment.ServiceStatus,
@@ -13870,7 +13985,7 @@ func (a *App) buildHostingSnapshot(ctx context.Context) (hostingandsupport.Hosti
 			})
 		}
 		snapshot.Sites = append(snapshot.Sites, site)
-		if row.LimitBytes > 0 && row.UsedBytes > row.LimitBytes {
+		if row.LimitBytes > 0 && billingUsedBytes > row.LimitBytes {
 			snapshot.Events = append(snapshot.Events, hostingandsupport.HostingSnapshotEvent{
 				Kind:      "limit_exceeded",
 				Status:    "active",
@@ -13896,6 +14011,46 @@ func (a *App) buildHostingSnapshot(ctx context.Context) (hostingandsupport.Hosti
 		CreatedAt: snapshot.CreatedAt,
 	})
 	return snapshot, nil
+}
+
+func (a *App) localHostingServerSystemMetrics(ctx context.Context) []hostingandsupport.ServerMetricView {
+	storageRoot := a.storageRootDir()
+	freeBytes, totalBytes, diskOK := diskusage.DiskSpace(storageRoot)
+	osName, osVersion := hostingSnapshotOS()
+	cpuModel := hostingSnapshotCPUModel()
+	cpuCores := runtime.NumCPU()
+	ramTotalBytes := hostingSnapshotRAMTotalBytes(ctx)
+	cpuUsagePercent, loadAverage := hostingSnapshotHourlySystemMetrics()
+	uptimeSeconds := hostingSnapshotServerUptimeSeconds()
+	diskUsedBytes := int64(0)
+	diskLabel := "диск не передан"
+	diskStatusClass := "hosting-metric-warning"
+	if diskOK {
+		diskFreeBytes := int64(freeBytes)
+		diskTotalBytes := int64(totalBytes)
+		if diskTotalBytes > diskFreeBytes {
+			diskUsedBytes = diskTotalBytes - diskFreeBytes
+		}
+		diskUsedPercent := 0
+		if diskTotalBytes > 0 {
+			diskUsedPercent = int(math.Round(float64(diskUsedBytes) / float64(diskTotalBytes) * 100))
+			if diskUsedPercent > 100 {
+				diskUsedPercent = 100
+			}
+		}
+		diskStatusClass = hostingandsupport.MetricStatusClass(float64(diskUsedPercent), 80, 95)
+		diskLabel = formatFileSize(diskUsedBytes) + " занято / " + formatFileSize(diskFreeBytes) + " свободно / " + formatFileSize(diskTotalBytes) + " всего"
+	}
+	osLabel := strings.TrimSpace(osName + " " + osVersion)
+	return []hostingandsupport.ServerMetricView{
+		{Name: "OS", Value: firstNonEmpty(osLabel, "ОС не передана"), StatusClass: "hosting-metric-ok"},
+		{Name: "CPU", Value: fmt.Sprintf("%s · %d ядер", firstNonEmpty(cpuModel, "CPU не передан"), cpuCores), StatusClass: hostingandsupport.MetricStatusClass(cpuUsagePercent, 80, 95)},
+		{Name: "CPU %", Value: fmt.Sprintf("%.1f%%", cpuUsagePercent), StatusClass: hostingandsupport.MetricStatusClass(cpuUsagePercent, 80, 95)},
+		{Name: "LA", Value: fmt.Sprintf("%.2f", loadAverage), StatusClass: hostingandsupport.LoadAverageStatusClass(loadAverage, cpuCores)},
+		{Name: "Memory", Value: firstNonEmpty(formatFileSize(ramTotalBytes), "память не передана"), StatusClass: "hosting-metric-ok"},
+		{Name: "Disk", Value: diskLabel, StatusClass: diskStatusClass},
+		{Name: "Uptime", Value: hostingandsupport.FormatDurationDays(uptimeSeconds), StatusClass: hostingandsupport.ServerUptimeStatusClass(uptimeSeconds)},
+	}
 }
 
 func (a *App) logHostingSupportEvent(ctx context.Context, kind, status, email, domain, message string) {

@@ -81,6 +81,90 @@ func TestBuildSitesIncludesAssignedPlanQuotaLabels(t *testing.T) {
 	}
 }
 
+func TestBillingPriceForUsedBytesRoundsToFiftyMegabytes(t *testing.T) {
+	const megabyte = int64(1000 * 1000)
+	tests := []struct {
+		name              string
+		usedBytes         int64
+		wantUsedMegabytes int64
+		wantBillableMB    int64
+		wantAmount        string
+		wantBillable      bool
+		wantStatus        string
+	}{
+		{
+			name:              "empty site is free with zero price",
+			usedBytes:         0,
+			wantUsedMegabytes: 0,
+			wantBillableMB:    0,
+			wantAmount:        "0.00",
+			wantBillable:      false,
+			wantStatus:        "бесплатно до 500 MB",
+		},
+		{
+			name:              "included five hundred megabytes is displayed but free",
+			usedBytes:         500 * megabyte,
+			wantUsedMegabytes: 500,
+			wantBillableMB:    500,
+			wantAmount:        "1.00",
+			wantBillable:      false,
+			wantStatus:        "бесплатно до 500 MB",
+		},
+		{
+			name:              "next megabyte is rounded up to next fifty megabytes",
+			usedBytes:         501 * megabyte,
+			wantUsedMegabytes: 501,
+			wantBillableMB:    550,
+			wantAmount:        "1.10",
+			wantBillable:      true,
+			wantStatus:        "к выставлению",
+		},
+		{
+			name:              "one thousand megabytes costs two euros",
+			usedBytes:         1000 * megabyte,
+			wantUsedMegabytes: 1000,
+			wantBillableMB:    1000,
+			wantAmount:        "2.00",
+			wantBillable:      true,
+			wantStatus:        "к выставлению",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			price := BillingPriceForUsedBytes(test.usedBytes)
+			if price.UsedMegabytes != test.wantUsedMegabytes {
+				t.Fatalf("UsedMegabytes = %d, want %d", price.UsedMegabytes, test.wantUsedMegabytes)
+			}
+			if price.BillableMegabytes != test.wantBillableMB {
+				t.Fatalf("BillableMegabytes = %d, want %d", price.BillableMegabytes, test.wantBillableMB)
+			}
+			if price.Amount != test.wantAmount {
+				t.Fatalf("Amount = %q, want %q", price.Amount, test.wantAmount)
+			}
+			if price.Billable != test.wantBillable {
+				t.Fatalf("Billable = %v, want %v", price.Billable, test.wantBillable)
+			}
+			if price.StatusText != test.wantStatus {
+				t.Fatalf("StatusText = %q, want %q", price.StatusText, test.wantStatus)
+			}
+			if price.Currency != "EUR" {
+				t.Fatalf("Currency = %q, want EUR", price.Currency)
+			}
+		})
+	}
+}
+
+func TestBillableSiteCountUsesBillingThreshold(t *testing.T) {
+	sites := []ServerSiteView{
+		{Domain: "free.example.com", BillingBillable: false},
+		{Domain: "paid.example.com", BillingBillable: true},
+		{Domain: "", BillingBillable: true},
+	}
+	if count := BillableSiteCount(sites); count != 1 {
+		t.Fatalf("BillableSiteCount = %d, want 1", count)
+	}
+}
+
 func TestServiceMailInstallationsDoesNotBlockSingleConnectionDatabase(t *testing.T) {
 	database, err := sql.Open("sqlite3", filepath.Join(t.TempDir(), "hostingandsupport.db"))
 	if err != nil {
@@ -273,14 +357,16 @@ func TestPaymentProvidersAndInvoicesRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	createdInvoice, err := store.CreateInvoice(context.Background(), Invoice{
-		CustomerEmail: "Client+Billing@Example.COM ",
-		Domain:        "Example.COM ",
-		PlanName:      "Pro",
-		Amount:        "1500.50",
-		Currency:      "rub",
-		Provider:      "stripe",
-		DueAt:         "2026-07-01",
-		Notes:         "hosting",
+		CustomerEmail:   "Client+Billing@Example.COM ",
+		Domain:          "Example.COM ",
+		PlanName:        "Pro",
+		Amount:          "1500.50",
+		Currency:        "rub",
+		Provider:        "stripe",
+		DueAt:           "2026-07-01",
+		Notes:           "hosting",
+		Recurring:       true,
+		RecurringPeriod: "quarterly",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -291,6 +377,9 @@ func TestPaymentProvidersAndInvoicesRoundTrip(t *testing.T) {
 	if createdInvoice.CustomerEmail != "client+billing@example.com" || createdInvoice.Domain != "example.com" || createdInvoice.Currency != "RUB" {
 		t.Fatalf("created invoice was not normalized: %#v", createdInvoice)
 	}
+	if !createdInvoice.Recurring || createdInvoice.RecurringPeriod != "quarterly" {
+		t.Fatalf("created invoice recurring settings were not saved: %#v", createdInvoice)
+	}
 	for _, expectedPart := range []string{"amount=1500.50", "currency=RUB", "email=client%2Bbilling%40example.com", "domain=example.com"} {
 		if !strings.Contains(createdInvoice.PaymentURL, expectedPart) {
 			t.Fatalf("payment URL %q does not contain %q", createdInvoice.PaymentURL, expectedPart)
@@ -299,6 +388,9 @@ func TestPaymentProvidersAndInvoicesRoundTrip(t *testing.T) {
 	invoices := store.Invoices(context.Background(), 10)
 	if len(invoices) != 2 {
 		t.Fatalf("invoices = %d, want 2", len(invoices))
+	}
+	if !invoices[0].Recurring || invoices[0].RecurringPeriod != "quarterly" {
+		t.Fatalf("stored invoice recurring settings were not loaded: %#v", invoices[0])
 	}
 	paidInvoice, err := store.UpdateInvoiceStatus(context.Background(), createdInvoice.ID, "paid")
 	if err != nil {

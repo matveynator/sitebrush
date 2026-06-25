@@ -1244,6 +1244,32 @@
     border-bottom-left-radius: 0;
 }
 
+.technical-page .hosting-server-system-metrics {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-top: 8px;
+}
+
+.technical-page .hosting-server-system-metrics span {
+    max-width: 100%;
+    padding: 5px 7px;
+    border: 1px solid rgba(149, 229, 239, 0.12);
+    border-radius: 7px;
+    background: rgba(255, 255, 255, 0.03);
+    color: var(--muted);
+    font-size: 0.78rem;
+    overflow-wrap: anywhere;
+}
+
+.technical-page .hosting-server-system-metrics strong {
+    color: var(--text);
+}
+
+.technical-page .hosting-server-system-metrics em {
+    font-style: normal;
+}
+
 .technical-page .hosting-server-details {
     display: grid;
     gap: 8px;
@@ -1273,8 +1299,38 @@
     margin-bottom: 8px;
 }
 
+.technical-page .hosting-server-client-site-list {
+    display: grid;
+    gap: 10px;
+}
+
+.technical-page .hosting-server-client-site-group {
+    display: grid;
+    gap: 6px;
+}
+
+.technical-page .hosting-server-client-site-group h3 {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: baseline;
+    margin: 0;
+    color: var(--text);
+    font-size: 0.96rem;
+}
+
+.technical-page .hosting-server-client-site-group h3 span {
+    color: var(--muted);
+    font-size: 0.8rem;
+    font-weight: 400;
+}
+
 .technical-page .hosting-server-details .billing-client-site-row {
-    grid-template-columns: minmax(160px, 1.2fr) minmax(130px, 0.9fr) minmax(160px, 1fr) minmax(120px, 0.8fr) minmax(100px, 0.7fr) minmax(130px, 0.9fr);
+    grid-template-columns: minmax(160px, 1.2fr) minmax(120px, 0.8fr) minmax(140px, 0.9fr);
+}
+
+.technical-page .billing-client-hosting-section .billing-client-site-row {
+    grid-template-columns: minmax(160px, 1.2fr) minmax(120px, 0.8fr) minmax(120px, 0.8fr) minmax(140px, 0.9fr);
 }
 
 .technical-page .billing-invoice-page-list {
