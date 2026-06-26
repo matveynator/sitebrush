@@ -413,21 +413,27 @@ func TestHostingSnapshotRegistryRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	store := Store{DB: database}
+	now := time.Now().UTC().Format(time.RFC3339)
 	snapshot := HostingSnapshot{
-		Version:          1,
-		InstallationID:   "installation-1",
-		OwnerEmail:       "owner@example.com",
-		ServerIP:         "203.0.113.10",
-		ServerStatus:     "IP 203.0.113.10",
-		ServerDomain:     "host.example.com",
-		SitebrushVersion: "v1",
-		OSName:           "linux",
-		OSVersion:        "Debian",
-		CPUModel:         "amd64",
-		CPUCores:         4,
-		RAMTotalBytes:    8 * 1024 * 1024 * 1024,
-		DiskFreeBytes:    20 * 1024 * 1024 * 1024,
-		DiskTotalBytes:   40 * 1024 * 1024 * 1024,
+		Version:              1,
+		InstallationID:       "installation-1",
+		OwnerEmail:           "owner@example.com",
+		ServerIP:             "203.0.113.10",
+		ServerStatus:         "IP 203.0.113.10",
+		ServerDomain:         "host.example.com",
+		SitebrushVersion:     "v1",
+		OSName:               "linux",
+		OSVersion:            "Debian",
+		CPUModel:             "amd64",
+		CPUCores:             4,
+		CPUUsagePercent:      42.5,
+		LoadAverage:          1.25,
+		TopCPUProcessName:    "sitebrush",
+		TopCPUProcessPID:     1234,
+		TopCPUProcessPercent: 88.4,
+		RAMTotalBytes:        8 * 1024 * 1024 * 1024,
+		DiskFreeBytes:        20 * 1024 * 1024 * 1024,
+		DiskTotalBytes:       40 * 1024 * 1024 * 1024,
 		Plans: []HostingSnapshotPlan{{
 			Name:          "Pro",
 			QuotaBytes:    10 * 1024 * 1024 * 1024,
@@ -458,9 +464,9 @@ func TestHostingSnapshotRegistryRoundTrip(t *testing.T) {
 			Email:     "site@example.com",
 			Domain:    "client.example.com",
 			Message:   "site storage usage exceeds assigned limit",
-			CreatedAt: "2026-06-17T10:00:00Z",
+			CreatedAt: now,
 		}},
-		CreatedAt: "2026-06-17T10:00:00Z",
+		CreatedAt: now,
 	}
 	if err := store.SaveHostingSnapshot(context.Background(), snapshot); err != nil {
 		t.Fatal(err)
@@ -473,6 +479,12 @@ func TestHostingSnapshotRegistryRoundTrip(t *testing.T) {
 	hosting := hostings[0]
 	if hosting.ServerDomain != "host.example.com" || hosting.OSName != "linux" || hosting.CPUCores != 4 {
 		t.Fatalf("hosting metadata was not preserved: %#v", hosting)
+	}
+	if hosting.TopCPUProcessName != "sitebrush" || hosting.TopCPUProcessPID != 1234 || hosting.TopCPUProcessPercent != 88.4 {
+		t.Fatalf("top cpu process was not preserved: %#v", hosting)
+	}
+	if len(hosting.ResourceHistory) != 1 || hosting.ResourceHistory[0].CPUUsagePercent != 42.5 || hosting.ResourceHistory[0].TopCPUProcessName != "sitebrush" || hosting.ResourceHistory[0].DiskUsedPercent != 50 {
+		t.Fatalf("resource history was not preserved: %#v", hosting.ResourceHistory)
 	}
 	if len(hosting.Sites) != 1 || !hosting.Sites[0].OverLimit || hosting.Sites[0].OwnerEmail != "site@example.com" {
 		t.Fatalf("site metadata was not preserved: %#v", hosting.Sites)
@@ -496,6 +508,9 @@ func TestHostingSnapshotRegistryRoundTrip(t *testing.T) {
 	}
 	if syncEvent.Summary.SiteCount != 1 || syncEvent.Summary.PlanCount != 1 || syncEvent.Summary.RoleCount != 2 || syncEvent.Summary.EventCount != 1 {
 		t.Fatalf("sync counts = sites:%d plans:%d roles:%d events:%d", syncEvent.Summary.SiteCount, syncEvent.Summary.PlanCount, syncEvent.Summary.RoleCount, syncEvent.Summary.EventCount)
+	}
+	if syncEvent.Summary.TopCPUProcessName != "sitebrush" || syncEvent.Summary.TopCPUProcessPercent != 88.4 {
+		t.Fatalf("sync top cpu process was not preserved: %#v", syncEvent.Summary)
 	}
 	if len(syncEvent.Summary.Sites) != 1 || !syncEvent.Summary.Sites[0].OverLimit || syncEvent.Summary.Sites[0].UsedLabel == "" {
 		t.Fatalf("sync site summary was not preserved: %#v", syncEvent.Summary.Sites)
@@ -529,6 +544,65 @@ func TestRegistrySyncEventsReadsLegacyRowsWithoutSummary(t *testing.T) {
 	}
 	if syncEvents[0].StatusLabel != "принято · старый формат" {
 		t.Fatalf("legacy status label = %q", syncEvents[0].StatusLabel)
+	}
+}
+
+func TestBuildServerViewsMergesDuplicateLocalAndRemoteServer(t *testing.T) {
+	localServer := BuildLocalServerView(LocalServerViewInput{
+		Sites: []Site{{
+			Domain:            "sitebrush.com",
+			UsedLabel:         "1 GB",
+			BillingStatusText: "к выставлению",
+			BillingBillable:   true,
+		}},
+		SystemMetrics: []ServerMetricView{
+			{Name: "OS", Value: "darwin 15", StatusClass: "hosting-metric-ok"},
+			{Name: "CPU", Value: "Apple · 8 ядер", StatusClass: "hosting-metric-ok"},
+		},
+		MainDomain: "sitebrush.com",
+	})
+	remoteHosting := ClientHosting{
+		InstallationID:       "installation-1",
+		ServerDomain:         "sitebrush.com",
+		ServerStatus:         "IP 203.0.113.10",
+		OSName:               "linux",
+		OSVersion:            "Debian",
+		CPUModel:             "amd64",
+		CPUCores:             4,
+		CPUUsagePercent:      12,
+		LoadAverage:          0.5,
+		TopCPUProcessName:    "sitebrush",
+		TopCPUProcessPID:     10,
+		TopCPUProcessPercent: 7,
+		RAMTotalLabel:        "8 GB",
+		DiskUsedLabel:        "20 GB",
+		DiskFreeLabel:        "20 GB",
+		DiskTotalLabel:       "40 GB",
+		DiskUsedPercent:      50,
+		DiskStatusClass:      "hosting-metric-ok",
+		NetworkUptimeLabel:   "100.00%",
+		NetworkStatusClass:   "hosting-metric-ok",
+		ServerUptimeLabel:    "1 дн.",
+		ServerUptimeClass:    "hosting-metric-ok",
+		Sites: []ClientHostingSite{{
+			Domain:      "sitebrush.com",
+			UsedLabel:   "20 GB",
+			LimitLabel:  "40 GB",
+			AdminEmails: []string{"owner@example.com"},
+		}},
+		SiteCount:      1,
+		TotalUsedLabel: "20 GB",
+	}
+
+	servers := BuildServerViews(localServer, []ClientHosting{remoteHosting}, nil)
+	if len(servers) != 1 {
+		t.Fatalf("servers = %d, want 1: %#v", len(servers), servers)
+	}
+	if !servers[0].Local || servers[0].ID != "installation-1" || servers[0].OSLabel != "linux Debian" {
+		t.Fatalf("merged server did not keep local badge and remote metrics: %#v", servers[0])
+	}
+	if len(servers[0].SystemMetrics) == 0 || servers[0].SystemMetrics[0].Name != "CPU" {
+		t.Fatalf("merged server metrics were not built from remote hosting: %#v", servers[0].SystemMetrics)
 	}
 }
 

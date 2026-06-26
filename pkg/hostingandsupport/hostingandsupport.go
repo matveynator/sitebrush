@@ -19,7 +19,7 @@ import (
 
 const DefaultStorageLimitBytes int64 = 10 * 1024 * 1024 * 1024
 const DefaultDeletionBackupRetentionDays = 365
-const currentBillingSchemaVersion = 15
+const currentBillingSchemaVersion = 17
 
 type Store struct {
 	DB *sql.DB
@@ -183,29 +183,39 @@ type ServiceMailRecipient struct {
 }
 
 type HostingSnapshot struct {
-	Version             int                    `json:"version"`
-	InstallationID      string                 `json:"installation_id"`
-	OwnerEmail          string                 `json:"owner_email"`
-	ServerIP            string                 `json:"server_ip"`
-	ServerStatus        string                 `json:"server_status"`
-	ServerDomain        string                 `json:"server_domain"`
-	SitebrushVersion    string                 `json:"sitebrush_version"`
-	OSName              string                 `json:"os_name"`
-	OSVersion           string                 `json:"os_version"`
-	CPUModel            string                 `json:"cpu_model"`
-	CPUCores            int                    `json:"cpu_cores"`
-	CPUUsagePercent     float64                `json:"cpu_usage_percent_1h"`
-	LoadAverage         float64                `json:"load_average_1h"`
-	RAMTotalBytes       int64                  `json:"ram_total_bytes"`
-	ServerUptimeSeconds int64                  `json:"server_uptime_seconds"`
-	StoragePath         string                 `json:"storage_path"`
-	DiskFreeBytes       int64                  `json:"disk_free_bytes"`
-	DiskTotalBytes      int64                  `json:"disk_total_bytes"`
-	Plans               []HostingSnapshotPlan  `json:"plans"`
-	Roles               []HostingSnapshotRole  `json:"roles"`
-	Sites               []HostingSnapshotSite  `json:"sites"`
-	Events              []HostingSnapshotEvent `json:"events"`
-	CreatedAt           string                 `json:"created_at"`
+	Version              int                      `json:"version"`
+	InstallationID       string                   `json:"installation_id"`
+	OwnerEmail           string                   `json:"owner_email"`
+	ServerIP             string                   `json:"server_ip"`
+	ServerStatus         string                   `json:"server_status"`
+	ServerDomain         string                   `json:"server_domain"`
+	SitebrushVersion     string                   `json:"sitebrush_version"`
+	OSName               string                   `json:"os_name"`
+	OSVersion            string                   `json:"os_version"`
+	CPUModel             string                   `json:"cpu_model"`
+	CPUCores             int                      `json:"cpu_cores"`
+	CPUUsagePercent      float64                  `json:"cpu_usage_percent_1h"`
+	LoadAverage          float64                  `json:"load_average_1h"`
+	TopCPUProcessName    string                   `json:"top_cpu_process_name"`
+	TopCPUProcessPID     int                      `json:"top_cpu_process_pid"`
+	TopCPUProcessPercent float64                  `json:"top_cpu_process_percent"`
+	TopCPUProcesses      []HostingSnapshotProcess `json:"top_cpu_processes"`
+	RAMTotalBytes        int64                    `json:"ram_total_bytes"`
+	ServerUptimeSeconds  int64                    `json:"server_uptime_seconds"`
+	StoragePath          string                   `json:"storage_path"`
+	DiskFreeBytes        int64                    `json:"disk_free_bytes"`
+	DiskTotalBytes       int64                    `json:"disk_total_bytes"`
+	Plans                []HostingSnapshotPlan    `json:"plans"`
+	Roles                []HostingSnapshotRole    `json:"roles"`
+	Sites                []HostingSnapshotSite    `json:"sites"`
+	Events               []HostingSnapshotEvent   `json:"events"`
+	CreatedAt            string                   `json:"created_at"`
+}
+
+type HostingSnapshotProcess struct {
+	Name       string  `json:"name"`
+	PID        int     `json:"pid"`
+	CPUPercent float64 `json:"cpu_percent"`
 }
 
 type HostingSnapshotSite struct {
@@ -260,6 +270,10 @@ type ClientHosting struct {
 	CPUCores             int
 	CPUUsagePercent      float64
 	LoadAverage          float64
+	TopCPUProcessName    string
+	TopCPUProcessPID     int
+	TopCPUProcessPercent float64
+	TopCPUProcesses      []HostingSnapshotProcess
 	RAMTotalBytes        int64
 	ServerUptimeSeconds  int64
 	ServerUptimeLabel    string
@@ -289,6 +303,22 @@ type ClientHosting struct {
 	Plans                []ClientHostingPlan
 	Roles                []ClientHostingRole
 	Events               []ClientHostingEvent
+	ResourceHistory      []ServerResourceCheck
+}
+
+type ServerResourceCheck struct {
+	CPUUsagePercent      float64
+	LoadAverage          float64
+	TopCPUProcessName    string
+	TopCPUProcessPID     int
+	TopCPUProcessPercent float64
+	TopCPUProcesses      []HostingSnapshotProcess
+	RAMTotalBytes        int64
+	DiskFreeBytes        int64
+	DiskTotalBytes       int64
+	DiskUsedBytes        int64
+	DiskUsedPercent      int
+	CheckedAt            string
 }
 
 type ClientHostingSite struct {
@@ -354,37 +384,41 @@ type RegistrySyncEvent struct {
 }
 
 type RegistrySyncSummary struct {
-	Version             int                       `json:"version"`
-	OwnerEmail          string                    `json:"owner_email"`
-	ServerIP            string                    `json:"server_ip"`
-	ServerStatus        string                    `json:"server_status"`
-	ServerDomain        string                    `json:"server_domain"`
-	SitebrushVersion    string                    `json:"sitebrush_version"`
-	OSName              string                    `json:"os_name"`
-	OSVersion           string                    `json:"os_version"`
-	CPUModel            string                    `json:"cpu_model"`
-	CPUCores            int                       `json:"cpu_cores"`
-	CPUUsagePercent     float64                   `json:"cpu_usage_percent_1h"`
-	LoadAverage         float64                   `json:"load_average_1h"`
-	RAMTotalBytes       int64                     `json:"ram_total_bytes"`
-	ServerUptimeSeconds int64                     `json:"server_uptime_seconds"`
-	RAMTotalLabel       string                    `json:"-"`
-	StoragePath         string                    `json:"storage_path"`
-	DiskFreeBytes       int64                     `json:"disk_free_bytes"`
-	DiskTotalBytes      int64                     `json:"disk_total_bytes"`
-	DiskFreeLabel       string                    `json:"-"`
-	DiskTotalLabel      string                    `json:"-"`
-	DiskUsedBytes       int64                     `json:"disk_used_bytes"`
-	DiskUsedLabel       string                    `json:"-"`
-	SiteCount           int                       `json:"site_count"`
-	PlanCount           int                       `json:"plan_count"`
-	RoleCount           int                       `json:"role_count"`
-	EventCount          int                       `json:"event_count"`
-	Sites               []RegistrySyncSummarySite `json:"sites"`
-	Plans               []RegistrySyncSummaryPlan `json:"plans"`
-	Roles               []HostingSnapshotRole     `json:"roles"`
-	Events              []HostingSnapshotEvent    `json:"events"`
-	CreatedAt           string                    `json:"created_at"`
+	Version              int                       `json:"version"`
+	OwnerEmail           string                    `json:"owner_email"`
+	ServerIP             string                    `json:"server_ip"`
+	ServerStatus         string                    `json:"server_status"`
+	ServerDomain         string                    `json:"server_domain"`
+	SitebrushVersion     string                    `json:"sitebrush_version"`
+	OSName               string                    `json:"os_name"`
+	OSVersion            string                    `json:"os_version"`
+	CPUModel             string                    `json:"cpu_model"`
+	CPUCores             int                       `json:"cpu_cores"`
+	CPUUsagePercent      float64                   `json:"cpu_usage_percent_1h"`
+	LoadAverage          float64                   `json:"load_average_1h"`
+	TopCPUProcessName    string                    `json:"top_cpu_process_name"`
+	TopCPUProcessPID     int                       `json:"top_cpu_process_pid"`
+	TopCPUProcessPercent float64                   `json:"top_cpu_process_percent"`
+	TopCPUProcesses      []HostingSnapshotProcess  `json:"top_cpu_processes"`
+	RAMTotalBytes        int64                     `json:"ram_total_bytes"`
+	ServerUptimeSeconds  int64                     `json:"server_uptime_seconds"`
+	RAMTotalLabel        string                    `json:"-"`
+	StoragePath          string                    `json:"storage_path"`
+	DiskFreeBytes        int64                     `json:"disk_free_bytes"`
+	DiskTotalBytes       int64                     `json:"disk_total_bytes"`
+	DiskFreeLabel        string                    `json:"-"`
+	DiskTotalLabel       string                    `json:"-"`
+	DiskUsedBytes        int64                     `json:"disk_used_bytes"`
+	DiskUsedLabel        string                    `json:"-"`
+	SiteCount            int                       `json:"site_count"`
+	PlanCount            int                       `json:"plan_count"`
+	RoleCount            int                       `json:"role_count"`
+	EventCount           int                       `json:"event_count"`
+	Sites                []RegistrySyncSummarySite `json:"sites"`
+	Plans                []RegistrySyncSummaryPlan `json:"plans"`
+	Roles                []HostingSnapshotRole     `json:"roles"`
+	Events               []HostingSnapshotEvent    `json:"events"`
+	CreatedAt            string                    `json:"created_at"`
 }
 
 type RegistrySyncSummarySite struct {
@@ -473,10 +507,10 @@ func Migrate(ctx context.Context, database *sql.DB) error {
 		`CREATE TABLE IF NOT EXISTS service_mail_blocks(id INTEGER PRIMARY KEY AUTOINCREMENT,scope TEXT,value TEXT,reason TEXT,created_at TEXT,UNIQUE(scope,value));`,
 		`CREATE TABLE IF NOT EXISTS service_mail_recipients(installation_id TEXT,recipient_hash TEXT,recipient_mask TEXT,status TEXT,purpose_scope TEXT,created_at TEXT,verified_at TEXT,PRIMARY KEY(installation_id,recipient_hash));`,
 		`CREATE INDEX IF NOT EXISTS idx_service_mail_recipients_installation_status ON service_mail_recipients(installation_id,status);`,
-		`CREATE TABLE IF NOT EXISTS client_hostings(installation_id TEXT PRIMARY KEY,owner_email TEXT,server_ip TEXT,server_status TEXT,server_domain TEXT,sitebrush_version TEXT,os_name TEXT,os_version TEXT,cpu_model TEXT,cpu_cores INTEGER DEFAULT 0,cpu_usage_percent_1h REAL DEFAULT 0,load_average_1h REAL DEFAULT 0,ram_total_bytes INTEGER DEFAULT 0,server_uptime_seconds INTEGER DEFAULT 0,storage_path TEXT,disk_free_bytes INTEGER DEFAULT 0,disk_total_bytes INTEGER DEFAULT 0,first_seen_at TEXT,last_seen_at TEXT);`,
+		`CREATE TABLE IF NOT EXISTS client_hostings(installation_id TEXT PRIMARY KEY,owner_email TEXT,server_ip TEXT,server_status TEXT,server_domain TEXT,sitebrush_version TEXT,os_name TEXT,os_version TEXT,cpu_model TEXT,cpu_cores INTEGER DEFAULT 0,cpu_usage_percent_1h REAL DEFAULT 0,load_average_1h REAL DEFAULT 0,top_cpu_process_name TEXT,top_cpu_process_pid INTEGER DEFAULT 0,top_cpu_process_percent REAL DEFAULT 0,top_cpu_processes_json TEXT,ram_total_bytes INTEGER DEFAULT 0,server_uptime_seconds INTEGER DEFAULT 0,storage_path TEXT,disk_free_bytes INTEGER DEFAULT 0,disk_total_bytes INTEGER DEFAULT 0,first_seen_at TEXT,last_seen_at TEXT);`,
 		`CREATE TABLE IF NOT EXISTS client_hosting_sites(installation_id TEXT,domain TEXT,owner_email TEXT,used_bytes INTEGER DEFAULT 0,limit_bytes INTEGER DEFAULT 0,plan_name TEXT,plan_status TEXT,plan_paid_status TEXT,admin_emails TEXT,updated_at TEXT,PRIMARY KEY(installation_id,domain));`,
 		`CREATE INDEX IF NOT EXISTS idx_client_hosting_sites_installation ON client_hosting_sites(installation_id);`,
-		`CREATE TABLE IF NOT EXISTS server_resource_checks(id INTEGER PRIMARY KEY AUTOINCREMENT,installation_id TEXT,cpu_usage_percent REAL DEFAULT 0,load_average REAL DEFAULT 0,ram_total_bytes INTEGER DEFAULT 0,disk_free_bytes INTEGER DEFAULT 0,disk_total_bytes INTEGER DEFAULT 0,checked_at TEXT);`,
+		`CREATE TABLE IF NOT EXISTS server_resource_checks(id INTEGER PRIMARY KEY AUTOINCREMENT,installation_id TEXT,cpu_usage_percent REAL DEFAULT 0,load_average REAL DEFAULT 0,top_cpu_process_name TEXT,top_cpu_process_pid INTEGER DEFAULT 0,top_cpu_process_percent REAL DEFAULT 0,ram_total_bytes INTEGER DEFAULT 0,disk_free_bytes INTEGER DEFAULT 0,disk_total_bytes INTEGER DEFAULT 0,checked_at TEXT);`,
 		`CREATE INDEX IF NOT EXISTS idx_server_resource_checks_installation_checked ON server_resource_checks(installation_id,checked_at);`,
 		`CREATE TABLE IF NOT EXISTS server_network_checks(id INTEGER PRIMARY KEY AUTOINCREMENT,installation_id TEXT,server_domain TEXT,server_ip TEXT,success INTEGER DEFAULT 0,response_ms INTEGER DEFAULT 0,error TEXT,checked_at TEXT);`,
 		`CREATE INDEX IF NOT EXISTS idx_server_network_checks_installation_checked ON server_network_checks(installation_id,checked_at);`,
@@ -592,8 +626,15 @@ func requiredHostingAndSupportColumns() []hostingAndSupportColumn {
 		{tableName: "client_hostings", columnName: "cpu_cores", definition: "INTEGER DEFAULT 0"},
 		{tableName: "client_hostings", columnName: "cpu_usage_percent_1h", definition: "REAL DEFAULT 0"},
 		{tableName: "client_hostings", columnName: "load_average_1h", definition: "REAL DEFAULT 0"},
+		{tableName: "client_hostings", columnName: "top_cpu_process_name", definition: "TEXT"},
+		{tableName: "client_hostings", columnName: "top_cpu_process_pid", definition: "INTEGER DEFAULT 0"},
+		{tableName: "client_hostings", columnName: "top_cpu_process_percent", definition: "REAL DEFAULT 0"},
+		{tableName: "client_hostings", columnName: "top_cpu_processes_json", definition: "TEXT"},
 		{tableName: "client_hostings", columnName: "ram_total_bytes", definition: "INTEGER DEFAULT 0"},
 		{tableName: "client_hostings", columnName: "server_uptime_seconds", definition: "INTEGER DEFAULT 0"},
+		{tableName: "server_resource_checks", columnName: "top_cpu_process_name", definition: "TEXT"},
+		{tableName: "server_resource_checks", columnName: "top_cpu_process_pid", definition: "INTEGER DEFAULT 0"},
+		{tableName: "server_resource_checks", columnName: "top_cpu_process_percent", definition: "REAL DEFAULT 0"},
 		{tableName: "client_hosting_sites", columnName: "owner_email", definition: "TEXT"},
 		{tableName: "client_hosting_sites", columnName: "plan_name", definition: "TEXT"},
 		{tableName: "client_hosting_sites", columnName: "plan_status", definition: "TEXT"},
@@ -1242,16 +1283,23 @@ func (store Store) SaveHostingSnapshot(ctx context.Context, snapshot HostingSnap
 	if strings.TrimSpace(snapshot.CreatedAt) != "" {
 		now = strings.TrimSpace(snapshot.CreatedAt)
 	}
+	topCPUProcesses := normalizedHostingSnapshotProcesses(snapshot)
+	topCPUProcessesJSON := ""
+	if len(topCPUProcesses) > 0 {
+		if processBytes, marshalErr := json.Marshal(topCPUProcesses); marshalErr == nil {
+			topCPUProcessesJSON = string(processBytes)
+		}
+	}
 	syncSummary := registrySyncSummaryFromSnapshot(snapshot)
 	transaction, err := store.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
-	_, err = transaction.ExecContext(ctx, `INSERT INTO client_hostings(installation_id,owner_email,server_ip,server_status,server_domain,sitebrush_version,os_name,os_version,cpu_model,cpu_cores,cpu_usage_percent_1h,load_average_1h,ram_total_bytes,server_uptime_seconds,storage_path,disk_free_bytes,disk_total_bytes,first_seen_at,last_seen_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(installation_id) DO UPDATE SET owner_email=excluded.owner_email,server_ip=excluded.server_ip,server_status=excluded.server_status,server_domain=excluded.server_domain,sitebrush_version=excluded.sitebrush_version,os_name=excluded.os_name,os_version=excluded.os_version,cpu_model=excluded.cpu_model,cpu_cores=excluded.cpu_cores,cpu_usage_percent_1h=excluded.cpu_usage_percent_1h,load_average_1h=excluded.load_average_1h,ram_total_bytes=excluded.ram_total_bytes,server_uptime_seconds=excluded.server_uptime_seconds,storage_path=excluded.storage_path,disk_free_bytes=excluded.disk_free_bytes,disk_total_bytes=excluded.disk_total_bytes,last_seen_at=excluded.last_seen_at`,
-		installationID, strings.ToLower(strings.TrimSpace(snapshot.OwnerEmail)), strings.TrimSpace(snapshot.ServerIP), strings.TrimSpace(snapshot.ServerStatus), strings.ToLower(strings.TrimSpace(snapshot.ServerDomain)), strings.TrimSpace(snapshot.SitebrushVersion), strings.TrimSpace(snapshot.OSName), strings.TrimSpace(snapshot.OSVersion), strings.TrimSpace(snapshot.CPUModel), snapshot.CPUCores, snapshot.CPUUsagePercent, snapshot.LoadAverage, snapshot.RAMTotalBytes, snapshot.ServerUptimeSeconds, strings.TrimSpace(snapshot.StoragePath), snapshot.DiskFreeBytes, snapshot.DiskTotalBytes, now, now)
+	_, err = transaction.ExecContext(ctx, `INSERT INTO client_hostings(installation_id,owner_email,server_ip,server_status,server_domain,sitebrush_version,os_name,os_version,cpu_model,cpu_cores,cpu_usage_percent_1h,load_average_1h,top_cpu_process_name,top_cpu_process_pid,top_cpu_process_percent,top_cpu_processes_json,ram_total_bytes,server_uptime_seconds,storage_path,disk_free_bytes,disk_total_bytes,first_seen_at,last_seen_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(installation_id) DO UPDATE SET owner_email=excluded.owner_email,server_ip=excluded.server_ip,server_status=excluded.server_status,server_domain=excluded.server_domain,sitebrush_version=excluded.sitebrush_version,os_name=excluded.os_name,os_version=excluded.os_version,cpu_model=excluded.cpu_model,cpu_cores=excluded.cpu_cores,cpu_usage_percent_1h=excluded.cpu_usage_percent_1h,load_average_1h=excluded.load_average_1h,top_cpu_process_name=excluded.top_cpu_process_name,top_cpu_process_pid=excluded.top_cpu_process_pid,top_cpu_process_percent=excluded.top_cpu_process_percent,top_cpu_processes_json=excluded.top_cpu_processes_json,ram_total_bytes=excluded.ram_total_bytes,server_uptime_seconds=excluded.server_uptime_seconds,storage_path=excluded.storage_path,disk_free_bytes=excluded.disk_free_bytes,disk_total_bytes=excluded.disk_total_bytes,last_seen_at=excluded.last_seen_at`,
+		installationID, strings.ToLower(strings.TrimSpace(snapshot.OwnerEmail)), strings.TrimSpace(snapshot.ServerIP), strings.TrimSpace(snapshot.ServerStatus), strings.ToLower(strings.TrimSpace(snapshot.ServerDomain)), strings.TrimSpace(snapshot.SitebrushVersion), strings.TrimSpace(snapshot.OSName), strings.TrimSpace(snapshot.OSVersion), strings.TrimSpace(snapshot.CPUModel), snapshot.CPUCores, snapshot.CPUUsagePercent, snapshot.LoadAverage, strings.TrimSpace(snapshot.TopCPUProcessName), snapshot.TopCPUProcessPID, snapshot.TopCPUProcessPercent, topCPUProcessesJSON, snapshot.RAMTotalBytes, snapshot.ServerUptimeSeconds, strings.TrimSpace(snapshot.StoragePath), snapshot.DiskFreeBytes, snapshot.DiskTotalBytes, now, now)
 	if err == nil {
-		_, err = transaction.ExecContext(ctx, `INSERT INTO server_resource_checks(installation_id,cpu_usage_percent,load_average,ram_total_bytes,disk_free_bytes,disk_total_bytes,checked_at) VALUES(?,?,?,?,?,?,?)`,
-			installationID, snapshot.CPUUsagePercent, snapshot.LoadAverage, snapshot.RAMTotalBytes, snapshot.DiskFreeBytes, snapshot.DiskTotalBytes, now)
+		_, err = transaction.ExecContext(ctx, `INSERT INTO server_resource_checks(installation_id,cpu_usage_percent,load_average,top_cpu_process_name,top_cpu_process_pid,top_cpu_process_percent,ram_total_bytes,disk_free_bytes,disk_total_bytes,checked_at) VALUES(?,?,?,?,?,?,?,?,?,?)`,
+			installationID, snapshot.CPUUsagePercent, snapshot.LoadAverage, strings.TrimSpace(snapshot.TopCPUProcessName), snapshot.TopCPUProcessPID, snapshot.TopCPUProcessPercent, snapshot.RAMTotalBytes, snapshot.DiskFreeBytes, snapshot.DiskTotalBytes, now)
 	}
 	if err == nil {
 		_, err = transaction.ExecContext(ctx, `DELETE FROM client_hosting_sites WHERE installation_id=?`, installationID)
@@ -1392,28 +1440,32 @@ func registryEventKey(event HostingSnapshotEvent) string {
 
 func registrySyncSummaryFromSnapshot(snapshot HostingSnapshot) RegistrySyncSummary {
 	summary := RegistrySyncSummary{
-		Version:             snapshot.Version,
-		OwnerEmail:          strings.ToLower(strings.TrimSpace(snapshot.OwnerEmail)),
-		ServerIP:            strings.TrimSpace(snapshot.ServerIP),
-		ServerStatus:        strings.TrimSpace(snapshot.ServerStatus),
-		ServerDomain:        strings.ToLower(strings.TrimSpace(snapshot.ServerDomain)),
-		SitebrushVersion:    strings.TrimSpace(snapshot.SitebrushVersion),
-		OSName:              strings.TrimSpace(snapshot.OSName),
-		OSVersion:           strings.TrimSpace(snapshot.OSVersion),
-		CPUModel:            strings.TrimSpace(snapshot.CPUModel),
-		CPUCores:            snapshot.CPUCores,
-		CPUUsagePercent:     snapshot.CPUUsagePercent,
-		LoadAverage:         snapshot.LoadAverage,
-		RAMTotalBytes:       snapshot.RAMTotalBytes,
-		ServerUptimeSeconds: snapshot.ServerUptimeSeconds,
-		StoragePath:         strings.TrimSpace(snapshot.StoragePath),
-		DiskFreeBytes:       snapshot.DiskFreeBytes,
-		DiskTotalBytes:      snapshot.DiskTotalBytes,
-		SiteCount:           len(snapshot.Sites),
-		PlanCount:           len(snapshot.Plans),
-		RoleCount:           len(snapshot.Roles),
-		EventCount:          len(snapshot.Events),
-		CreatedAt:           strings.TrimSpace(snapshot.CreatedAt),
+		Version:              snapshot.Version,
+		OwnerEmail:           strings.ToLower(strings.TrimSpace(snapshot.OwnerEmail)),
+		ServerIP:             strings.TrimSpace(snapshot.ServerIP),
+		ServerStatus:         strings.TrimSpace(snapshot.ServerStatus),
+		ServerDomain:         strings.ToLower(strings.TrimSpace(snapshot.ServerDomain)),
+		SitebrushVersion:     strings.TrimSpace(snapshot.SitebrushVersion),
+		OSName:               strings.TrimSpace(snapshot.OSName),
+		OSVersion:            strings.TrimSpace(snapshot.OSVersion),
+		CPUModel:             strings.TrimSpace(snapshot.CPUModel),
+		CPUCores:             snapshot.CPUCores,
+		CPUUsagePercent:      snapshot.CPUUsagePercent,
+		LoadAverage:          snapshot.LoadAverage,
+		TopCPUProcessName:    strings.TrimSpace(snapshot.TopCPUProcessName),
+		TopCPUProcessPID:     snapshot.TopCPUProcessPID,
+		TopCPUProcessPercent: snapshot.TopCPUProcessPercent,
+		TopCPUProcesses:      normalizedHostingSnapshotProcesses(snapshot),
+		RAMTotalBytes:        snapshot.RAMTotalBytes,
+		ServerUptimeSeconds:  snapshot.ServerUptimeSeconds,
+		StoragePath:          strings.TrimSpace(snapshot.StoragePath),
+		DiskFreeBytes:        snapshot.DiskFreeBytes,
+		DiskTotalBytes:       snapshot.DiskTotalBytes,
+		SiteCount:            len(snapshot.Sites),
+		PlanCount:            len(snapshot.Plans),
+		RoleCount:            len(snapshot.Roles),
+		EventCount:           len(snapshot.Events),
+		CreatedAt:            strings.TrimSpace(snapshot.CreatedAt),
 	}
 	if summary.DiskTotalBytes > summary.DiskFreeBytes {
 		summary.DiskUsedBytes = summary.DiskTotalBytes - summary.DiskFreeBytes
@@ -1476,6 +1528,48 @@ func registrySyncSummaryFromSnapshot(snapshot HostingSnapshot) RegistrySyncSumma
 	return summary
 }
 
+func normalizedHostingSnapshotProcesses(snapshot HostingSnapshot) []HostingSnapshotProcess {
+	processes := make([]HostingSnapshotProcess, 0, 5)
+	for _, process := range snapshot.TopCPUProcesses {
+		process.Name = strings.TrimSpace(process.Name)
+		if process.Name == "" {
+			continue
+		}
+		if process.CPUPercent < 0 {
+			process.CPUPercent = 0
+		}
+		process.CPUPercent = math.Round(process.CPUPercent*10) / 10
+		processes = append(processes, process)
+	}
+	if len(processes) == 0 && strings.TrimSpace(snapshot.TopCPUProcessName) != "" {
+		processes = append(processes, HostingSnapshotProcess{
+			Name:       strings.TrimSpace(snapshot.TopCPUProcessName),
+			PID:        snapshot.TopCPUProcessPID,
+			CPUPercent: math.Round(snapshot.TopCPUProcessPercent*10) / 10,
+		})
+	}
+	sort.SliceStable(processes, func(left, right int) bool {
+		return processes[left].CPUPercent > processes[right].CPUPercent
+	})
+	if len(processes) > 5 {
+		processes = processes[:5]
+	}
+	return processes
+}
+
+func decodeHostingSnapshotProcesses(processesJSON, fallbackName string, fallbackPID int, fallbackPercent float64) []HostingSnapshotProcess {
+	processes := make([]HostingSnapshotProcess, 0, 5)
+	if strings.TrimSpace(processesJSON) != "" {
+		_ = json.Unmarshal([]byte(processesJSON), &processes)
+	}
+	return normalizedHostingSnapshotProcesses(HostingSnapshot{
+		TopCPUProcessName:    fallbackName,
+		TopCPUProcessPID:     fallbackPID,
+		TopCPUProcessPercent: fallbackPercent,
+		TopCPUProcesses:      processes,
+	})
+}
+
 func applyRegistrySyncSummaryLabels(summary *RegistrySyncSummary) {
 	if summary == nil {
 		return
@@ -1515,7 +1609,7 @@ func (store Store) LogRegistrySyncEventWithSummary(ctx context.Context, installa
 }
 
 func (store Store) ClientHostings(ctx context.Context) []ClientHosting {
-	rows, err := store.DB.QueryContext(ctx, `SELECT installation_id,COALESCE(owner_email,''),COALESCE(server_ip,''),COALESCE(server_status,''),COALESCE(server_domain,''),COALESCE(sitebrush_version,''),COALESCE(os_name,''),COALESCE(os_version,''),COALESCE(cpu_model,''),COALESCE(cpu_cores,0),COALESCE(cpu_usage_percent_1h,0),COALESCE(load_average_1h,0),COALESCE(ram_total_bytes,0),COALESCE(server_uptime_seconds,0),COALESCE(storage_path,''),COALESCE(disk_free_bytes,0),COALESCE(disk_total_bytes,0),COALESCE(last_seen_at,'') FROM client_hostings ORDER BY last_seen_at DESC,installation_id ASC`)
+	rows, err := store.DB.QueryContext(ctx, `SELECT installation_id,COALESCE(owner_email,''),COALESCE(server_ip,''),COALESCE(server_status,''),COALESCE(server_domain,''),COALESCE(sitebrush_version,''),COALESCE(os_name,''),COALESCE(os_version,''),COALESCE(cpu_model,''),COALESCE(cpu_cores,0),COALESCE(cpu_usage_percent_1h,0),COALESCE(load_average_1h,0),COALESCE(top_cpu_process_name,''),COALESCE(top_cpu_process_pid,0),COALESCE(top_cpu_process_percent,0),COALESCE(top_cpu_processes_json,''),COALESCE(ram_total_bytes,0),COALESCE(server_uptime_seconds,0),COALESCE(storage_path,''),COALESCE(disk_free_bytes,0),COALESCE(disk_total_bytes,0),COALESCE(last_seen_at,'') FROM client_hostings ORDER BY last_seen_at DESC,installation_id ASC`)
 	if err != nil {
 		return nil
 	}
@@ -1523,9 +1617,11 @@ func (store Store) ClientHostings(ctx context.Context) []ClientHosting {
 	hostings := make([]ClientHosting, 0, 8)
 	for rows.Next() {
 		var hosting ClientHosting
-		if scanErr := rows.Scan(&hosting.InstallationID, &hosting.OwnerEmail, &hosting.ServerIP, &hosting.ServerStatus, &hosting.ServerDomain, &hosting.SitebrushVersion, &hosting.OSName, &hosting.OSVersion, &hosting.CPUModel, &hosting.CPUCores, &hosting.CPUUsagePercent, &hosting.LoadAverage, &hosting.RAMTotalBytes, &hosting.ServerUptimeSeconds, &hosting.StoragePath, &hosting.DiskFreeBytes, &hosting.DiskTotalBytes, &hosting.LastSeenAt); scanErr != nil {
+		topCPUProcessesJSON := ""
+		if scanErr := rows.Scan(&hosting.InstallationID, &hosting.OwnerEmail, &hosting.ServerIP, &hosting.ServerStatus, &hosting.ServerDomain, &hosting.SitebrushVersion, &hosting.OSName, &hosting.OSVersion, &hosting.CPUModel, &hosting.CPUCores, &hosting.CPUUsagePercent, &hosting.LoadAverage, &hosting.TopCPUProcessName, &hosting.TopCPUProcessPID, &hosting.TopCPUProcessPercent, &topCPUProcessesJSON, &hosting.RAMTotalBytes, &hosting.ServerUptimeSeconds, &hosting.StoragePath, &hosting.DiskFreeBytes, &hosting.DiskTotalBytes, &hosting.LastSeenAt); scanErr != nil {
 			continue
 		}
+		hosting.TopCPUProcesses = decodeHostingSnapshotProcesses(topCPUProcessesJSON, hosting.TopCPUProcessName, hosting.TopCPUProcessPID, hosting.TopCPUProcessPercent)
 		hosting.DiskFreeLabel = FormatFileSize(hosting.DiskFreeBytes)
 		hosting.DiskTotalLabel = FormatFileSize(hosting.DiskTotalBytes)
 		if hosting.DiskTotalBytes > hosting.DiskFreeBytes {
@@ -1550,6 +1646,7 @@ func (store Store) ClientHostings(ctx context.Context) []ClientHosting {
 		hostings[hostingIndex].Plans = store.clientHostingPlans(ctx, hostings[hostingIndex].InstallationID)
 		hostings[hostingIndex].Roles = store.clientHostingRoles(ctx, hostings[hostingIndex].InstallationID)
 		hostings[hostingIndex].Events = store.clientHostingEvents(ctx, hostings[hostingIndex].InstallationID, 12)
+		hostings[hostingIndex].ResourceHistory = store.serverResourceHistory(ctx, hostings[hostingIndex].InstallationID, 24*time.Hour)
 		hostings[hostingIndex].SiteCount = len(hostings[hostingIndex].Sites)
 		emailSet := make(map[string]struct{})
 		if strings.TrimSpace(hostings[hostingIndex].OwnerEmail) != "" {
@@ -1582,6 +1679,34 @@ func (store Store) ClientHostings(ctx context.Context) []ClientHosting {
 		hostings[hostingIndex].NetworkStatusClass = metricStatusClass(100-uptimePercent, 1, 5)
 	}
 	return hostings
+}
+
+func (store Store) serverResourceHistory(ctx context.Context, installationID string, window time.Duration) []ServerResourceCheck {
+	since := time.Now().UTC().Add(-window).Format(time.RFC3339)
+	rows, err := store.DB.QueryContext(ctx, `SELECT COALESCE(cpu_usage_percent,0),COALESCE(load_average,0),COALESCE(top_cpu_process_name,''),COALESCE(top_cpu_process_pid,0),COALESCE(top_cpu_process_percent,0),COALESCE(ram_total_bytes,0),COALESCE(disk_free_bytes,0),COALESCE(disk_total_bytes,0),COALESCE(checked_at,'') FROM server_resource_checks WHERE installation_id=? AND checked_at>=? ORDER BY checked_at ASC`,
+		strings.TrimSpace(installationID), since)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	checks := make([]ServerResourceCheck, 0, 32)
+	for rows.Next() {
+		var check ServerResourceCheck
+		if scanErr := rows.Scan(&check.CPUUsagePercent, &check.LoadAverage, &check.TopCPUProcessName, &check.TopCPUProcessPID, &check.TopCPUProcessPercent, &check.RAMTotalBytes, &check.DiskFreeBytes, &check.DiskTotalBytes, &check.CheckedAt); scanErr != nil {
+			continue
+		}
+		if check.DiskTotalBytes > check.DiskFreeBytes {
+			check.DiskUsedBytes = check.DiskTotalBytes - check.DiskFreeBytes
+		}
+		if check.DiskTotalBytes > 0 {
+			check.DiskUsedPercent = int(math.Round(float64(check.DiskUsedBytes) / float64(check.DiskTotalBytes) * 100))
+			if check.DiskUsedPercent > 100 {
+				check.DiskUsedPercent = 100
+			}
+		}
+		checks = append(checks, check)
+	}
+	return checks
 }
 
 type SiteTLSCheck struct {

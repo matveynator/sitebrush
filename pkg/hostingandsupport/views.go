@@ -2,6 +2,7 @@ package hostingandsupport
 
 import (
 	"fmt"
+	"math"
 	"net"
 	"sort"
 	"strconv"
@@ -43,6 +44,8 @@ type ServerView struct {
 	Subtitle               string
 	Local                  bool
 	OwnerEmail             string
+	OSLabel                string
+	CPULabel               string
 	SiteCount              int
 	ClientCount            int
 	InvoiceCount           int
@@ -55,6 +58,9 @@ type ServerView struct {
 	SyncStatusClass        string
 	NetworkStatusLabel     string
 	NetworkStatusClass     string
+	DiskUsedLabel          string
+	DiskUsedPercent        int
+	DiskStatusClass        string
 	InvoiceActionLabel     string
 	InvoiceActionClass     string
 	DefaultInvoiceClient   string
@@ -111,9 +117,16 @@ type ServerInvoiceView struct {
 }
 
 type ServerMetricView struct {
-	Name        string
-	Value       string
-	StatusClass string
+	Name            string
+	Value           string
+	Detail          string
+	StatusClass     string
+	Percent         int
+	HasPercent      bool
+	SparklinePoints string
+	HasSparkline    bool
+	HasProcessModal bool
+	Processes       []HostingSnapshotProcess
 }
 
 type ServerSettingView struct {
@@ -190,7 +203,12 @@ func BuildServerViews(localServer ServerView, clientHostings []ClientHosting, in
 	servers := make([]ServerView, 0, len(clientHostings)+1)
 	servers = append(servers, localServer)
 	for _, clientHosting := range clientHostings {
-		servers = append(servers, BuildRemoteServerView(clientHosting, invoices))
+		remoteServer := BuildRemoteServerView(clientHosting, invoices)
+		if len(servers) > 0 && serverViewsLookDuplicate(servers[0], remoteServer) {
+			servers[0] = mergeLocalAndRemoteServerViews(servers[0], remoteServer)
+			continue
+		}
+		servers = append(servers, remoteServer)
 	}
 	sort.SliceStable(servers[1:], func(left, right int) bool {
 		leftServer := servers[left+1]
@@ -201,6 +219,50 @@ func BuildServerViews(localServer ServerView, clientHostings []ClientHosting, in
 		return leftServer.Name < rightServer.Name
 	})
 	return servers
+}
+
+func serverViewsLookDuplicate(localServer ServerView, remoteServer ServerView) bool {
+	localName := normalizeDomainName(localServer.Name)
+	remoteName := normalizeDomainName(remoteServer.Name)
+	if localName != "" && remoteName != "" && localName == remoteName {
+		return true
+	}
+	localDomains := serverDomains(localServer.Sites)
+	if len(localDomains) == 0 {
+		return false
+	}
+	overlap := 0
+	for _, remoteSite := range remoteServer.Sites {
+		if _, found := localDomains[normalizeDomainName(remoteSite.Domain)]; found {
+			overlap++
+		}
+	}
+	return overlap > 0 && overlap == len(remoteServer.Sites)
+}
+
+func mergeLocalAndRemoteServerViews(localServer ServerView, remoteServer ServerView) ServerView {
+	merged := remoteServer
+	merged.Local = true
+	if merged.ID == "" {
+		merged.ID = localServer.ID
+	}
+	merged.Subtitle = firstNonEmpty(remoteServer.Subtitle, localServer.Subtitle)
+	if len(merged.Sites) == 0 {
+		merged.Sites = localServer.Sites
+		merged.Clients = localServer.Clients
+		merged.SiteCount = localServer.SiteCount
+		merged.ClientCount = localServer.ClientCount
+		merged.TotalUsedLabel = localServer.TotalUsedLabel
+	}
+	if len(merged.Invoices) == 0 {
+		merged.Invoices = localServer.Invoices
+		merged.InvoiceCount = localServer.InvoiceCount
+		merged.BillableCount = localServer.BillableCount
+		merged.UnpaidInvoiceCount = localServer.UnpaidInvoiceCount
+		merged.InvoiceActionLabel = localServer.InvoiceActionLabel
+		merged.InvoiceActionClass = localServer.InvoiceActionClass
+	}
+	return merged
 }
 
 func BuildLocalServerView(input LocalServerViewInput) ServerView {
@@ -221,6 +283,7 @@ func BuildLocalServerView(input LocalServerViewInput) ServerView {
 			{Name: "Статус", Value: "локальные данные", StatusClass: "hosting-metric-ok"},
 		}
 	}
+	server.OSLabel, server.CPULabel = serverIdentityLabelsFromMetrics(server.SystemMetrics)
 	for _, siteRow := range input.Sites {
 		ownerEmail := firstHostingSnapshotEmail(splitEmailList(siteRow.AdminEmails))
 		if ownerEmail == "" {
@@ -267,10 +330,15 @@ func BuildRemoteServerView(clientHosting ClientHosting, invoices []Invoice) Serv
 		Name:               firstNonEmpty(clientHosting.ServerDomain, clientHosting.InstallationID),
 		Subtitle:           firstNonEmpty(clientHosting.ServerStatus, clientHosting.ServerIP, "удалённый сервер SiteBrush"),
 		OwnerEmail:         clientHosting.OwnerEmail,
+		OSLabel:            firstNonEmpty(strings.TrimSpace(clientHosting.OSName+" "+clientHosting.OSVersion), "ОС не передана"),
+		CPULabel:           fmt.Sprintf("%s · %d ядер", firstNonEmpty(clientHosting.CPUModel, "CPU не передан"), clientHosting.CPUCores),
 		SiteCount:          clientHosting.SiteCount,
 		TotalUsedLabel:     clientHosting.TotalUsedLabel,
+		DiskUsedLabel:      clientHosting.DiskUsedLabel,
 		DiskFreeLabel:      clientHosting.DiskFreeLabel,
 		DiskTotalLabel:     clientHosting.DiskTotalLabel,
+		DiskUsedPercent:    clientHosting.DiskUsedPercent,
+		DiskStatusClass:    clientHosting.DiskStatusClass,
 		NetworkStatusLabel: clientHosting.NetworkUptimeLabel,
 		NetworkStatusClass: clientHosting.NetworkStatusClass,
 		SystemMetrics:      ServerSystemMetricViews(clientHosting),
@@ -319,18 +387,77 @@ func BuildRemoteServerView(clientHosting ClientHosting, invoices []Invoice) Serv
 }
 
 func ServerSystemMetricViews(clientHosting ClientHosting) []ServerMetricView {
-	osLabel := strings.TrimSpace(clientHosting.OSName + " " + clientHosting.OSVersion)
-	cpuLabel := fmt.Sprintf("%s · %d ядер", firstNonEmpty(clientHosting.CPUModel, "CPU не передан"), clientHosting.CPUCores)
 	diskLabel := clientHosting.DiskUsedLabel + " занято / " + clientHosting.DiskFreeLabel + " свободно / " + clientHosting.DiskTotalLabel + " всего"
-	return []ServerMetricView{
-		{Name: "OS", Value: firstNonEmpty(osLabel, "ОС не передана"), StatusClass: "hosting-metric-ok"},
-		{Name: "CPU", Value: cpuLabel, StatusClass: clientHosting.CPUStatusClass},
-		{Name: "CPU %", Value: fmt.Sprintf("%.1f%%", clientHosting.CPUUsagePercent), StatusClass: clientHosting.CPUStatusClass},
-		{Name: "LA", Value: fmt.Sprintf("%.2f", clientHosting.LoadAverage), StatusClass: clientHosting.LoadStatusClass},
-		{Name: "Memory", Value: firstNonEmpty(clientHosting.RAMTotalLabel, "память не передана"), StatusClass: "hosting-metric-ok"},
-		{Name: "Disk", Value: diskLabel, StatusClass: clientHosting.DiskStatusClass},
-		{Name: "Uptime", Value: clientHosting.ServerUptimeLabel, StatusClass: clientHosting.ServerUptimeClass},
+	topCPUProcesses := clientHosting.TopCPUProcesses
+	if len(topCPUProcesses) == 0 && strings.TrimSpace(clientHosting.TopCPUProcessName) != "" {
+		topCPUProcesses = []HostingSnapshotProcess{{Name: strings.TrimSpace(clientHosting.TopCPUProcessName), PID: clientHosting.TopCPUProcessPID, CPUPercent: clientHosting.TopCPUProcessPercent}}
 	}
+	return []ServerMetricView{
+		{Name: "CPU", Value: fmt.Sprintf("%.1f%%", clientHosting.CPUUsagePercent), Detail: "загрузка сейчас", StatusClass: clientHosting.CPUStatusClass, Percent: clampPercent(int(math.Round(clientHosting.CPUUsagePercent))), HasPercent: true, SparklinePoints: serverMetricSparklinePoints(clientHosting.ResourceHistory, func(check ServerResourceCheck) float64 { return check.CPUUsagePercent }, 100), HasSparkline: len(clientHosting.ResourceHistory) > 1, HasProcessModal: clientHosting.CPUStatusClass == "hosting-metric-danger" && len(topCPUProcesses) > 0, Processes: topCPUProcesses},
+		{Name: "Load", Value: fmt.Sprintf("%.2f", clientHosting.LoadAverage), Detail: "средняя нагрузка", StatusClass: clientHosting.LoadStatusClass, Percent: loadAveragePercent(clientHosting.LoadAverage, clientHosting.CPUCores), HasPercent: true, SparklinePoints: serverMetricSparklinePoints(clientHosting.ResourceHistory, func(check ServerResourceCheck) float64 { return check.LoadAverage }, math.Max(1, float64(clientHosting.CPUCores))), HasSparkline: len(clientHosting.ResourceHistory) > 1},
+		{Name: "Disk", Value: strconv.Itoa(clientHosting.DiskUsedPercent) + "%", Detail: diskLabel, StatusClass: clientHosting.DiskStatusClass, Percent: clientHosting.DiskUsedPercent, HasPercent: true, SparklinePoints: serverMetricSparklinePoints(clientHosting.ResourceHistory, func(check ServerResourceCheck) float64 { return float64(check.DiskUsedPercent) }, 100), HasSparkline: len(clientHosting.ResourceHistory) > 1},
+		{Name: "RAM", Value: firstNonEmpty(clientHosting.RAMTotalLabel, "память не передана"), Detail: "всего на сервере", StatusClass: "hosting-metric-ok"},
+		{Name: "Uptime", Value: clientHosting.ServerUptimeLabel, Detail: "без перезапуска", StatusClass: clientHosting.ServerUptimeClass},
+		{Name: "Сеть", Value: clientHosting.NetworkUptimeLabel, Detail: fmt.Sprintf("последний ответ %d ms", clientHosting.LastResponseMS), StatusClass: clientHosting.NetworkStatusClass},
+	}
+}
+
+func serverIdentityLabelsFromMetrics(metrics []ServerMetricView) (string, string) {
+	osLabel := "ОС не передана"
+	cpuLabel := "CPU не передан"
+	for _, metric := range metrics {
+		switch strings.TrimSpace(metric.Name) {
+		case "OS":
+			osLabel = firstNonEmpty(metric.Value, osLabel)
+		case "CPU":
+			if !strings.Contains(metric.Value, "%") {
+				cpuLabel = firstNonEmpty(metric.Value, cpuLabel)
+			}
+		}
+	}
+	return osLabel, cpuLabel
+}
+
+func serverMetricSparklinePoints(history []ServerResourceCheck, value func(ServerResourceCheck) float64, maxValue float64) string {
+	if len(history) < 2 || maxValue <= 0 {
+		return ""
+	}
+	points := make([]string, 0, len(history))
+	lastIndex := len(history) - 1
+	for index, check := range history {
+		x := 0.0
+		if lastIndex > 0 {
+			x = float64(index) * 100 / float64(lastIndex)
+		}
+		yValue := value(check)
+		if yValue < 0 {
+			yValue = 0
+		}
+		if yValue > maxValue {
+			yValue = maxValue
+		}
+		y := 28 - (yValue / maxValue * 24) - 2
+		points = append(points, fmt.Sprintf("%.1f,%.1f", x, y))
+	}
+	return strings.Join(points, " ")
+}
+
+func loadAveragePercent(loadAverage float64, cpuCores int) int {
+	maxValue := float64(cpuCores)
+	if maxValue <= 0 {
+		maxValue = 1
+	}
+	return clampPercent(int(math.Round(loadAverage / maxValue * 100)))
+}
+
+func clampPercent(value int) int {
+	if value < 0 {
+		return 0
+	}
+	if value > 100 {
+		return 100
+	}
+	return value
 }
 
 func FastServerHostings(clientHostings []ClientHosting) []ClientHosting {

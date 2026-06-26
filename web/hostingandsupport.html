@@ -66,19 +66,69 @@
       <div class="billing-site-list" data-hosting-server-list>
         {{range $serverIndex, $server := .Servers}}
         <article class="billing-site-row hosting-server-card" data-hosting-server-row data-hosting-server-owner="{{$server.OwnerEmail}}">
-          <div class="billing-site-main">
-            <div class="billing-domain">{{$server.Name}}{{if $server.Local}} <span class="badge text-bg-info">локальный</span>{{end}}</div>
-            <div class="text-muted small">{{$server.Subtitle}}{{if $server.OwnerEmail}} · владелец: <button type="button" class="billing-owner-filter" data-hosting-server-owner-filter="{{$server.OwnerEmail}}">{{$server.OwnerEmail}}</button>{{end}}</div>
-            <div class="text-muted small">Синхронизация: <span class="{{$server.SyncStatusClass}}">{{$server.SyncStatusLabel}}</span> · сеть: <span class="{{$server.NetworkStatusClass}}">{{$server.NetworkStatusLabel}}</span></div>
-            {{if $server.TotalUsedLabel}}<div class="text-muted small">Данные сайтов: {{$server.TotalUsedLabel}}{{if $server.DiskFreeLabel}} · диск свободно {{$server.DiskFreeLabel}} / {{$server.DiskTotalLabel}}{{end}}</div>{{end}}
-            <div class="hosting-server-system-metrics">
-              {{range $server.SystemMetrics}}<span><strong>{{.Name}}</strong> <em class="{{.StatusClass}}">{{.Value}}</em></span>{{end}}
+          <div class="hosting-server-head">
+            <div class="hosting-server-topline">
+              <div class="hosting-server-identity">
+                <div class="billing-domain">{{$server.Name}}{{if $server.Local}} <span class="hosting-server-local-badge">локальный</span>{{end}}</div>
+                <div class="text-muted small">{{$server.Subtitle}}{{if $server.OwnerEmail}} · владелец: <button type="button" class="billing-owner-filter" data-hosting-server-owner-filter="{{$server.OwnerEmail}}">{{$server.OwnerEmail}}</button>{{end}}</div>
+                <div class="hosting-server-status-line">
+                  <span>Синхронизация: <em class="{{$server.SyncStatusClass}}">{{$server.SyncStatusLabel}}</em></span>
+                  <span>Сеть: <em class="{{$server.NetworkStatusClass}}">{{$server.NetworkStatusLabel}}</em></span>
+                </div>
+              </div>
+              <div class="hosting-server-machine">
+                <div><strong>OS</strong><span>{{$server.OSLabel}}</span></div>
+                <div><strong>CPU</strong><span>{{$server.CPULabel}}</span></div>
+                {{if $server.TotalUsedLabel}}<div><strong>Сайты</strong><span>{{$server.TotalUsedLabel}}</span></div>{{end}}
+              </div>
+              {{if $server.DiskTotalLabel}}
+              <div class="hosting-server-disk {{$server.DiskStatusClass}}">
+                <div class="hosting-server-disk-chart" style="--metric-percent: {{$server.DiskUsedPercent}}%;">
+                  <span>{{$server.DiskUsedPercent}}%</span>
+                </div>
+                <div class="hosting-server-disk-copy">
+                  <div class="hosting-server-disk-head"><strong>Диск</strong><span>{{$server.DiskUsedLabel}}</span></div>
+                  <div class="hosting-server-disk-detail">{{$server.DiskFreeLabel}} свободно · {{$server.DiskTotalLabel}} всего</div>
+                </div>
+              </div>
+              {{end}}
             </div>
-          </div>
-          <div class="billing-client-hosting-meta">
-            <div><strong>Сайты</strong><span>{{$server.SiteCount}}</span></div>
-            <div><strong>Клиенты</strong><span>{{$server.ClientCount}}</span></div>
-            <div><strong>К выставлению</strong><span>{{$server.BillableCount}}</span></div>
+            <div class="hosting-server-system-metrics">
+              {{range $server.SystemMetrics}}
+              {{if and (ne .Name "OS") (or (ne .Name "CPU") .HasPercent)}}
+              {{if .HasProcessModal}}<button type="button" class="hosting-server-metric hosting-server-metric-button {{.StatusClass}}" data-bs-toggle="modal" data-bs-target="#hostingCPUProcesses{{$serverIndex}}">{{else}}<div class="hosting-server-metric {{.StatusClass}}">{{end}}
+                <div class="hosting-server-metric-head"><strong>{{.Name}}</strong><em class="{{.StatusClass}}">{{.Value}}</em></div>
+                {{if .HasPercent}}<div class="hosting-server-percent-bar" style="--metric-percent: {{.Percent}}%;"><span></span></div>{{end}}
+                <div class="hosting-server-sparkline-frame {{if not .HasSparkline}}hosting-server-sparkline-empty{{end}}">
+                  {{if .HasSparkline}}<svg class="hosting-server-sparkline" viewBox="0 0 100 28" preserveAspectRatio="none" aria-hidden="true"><polyline points="{{.SparklinePoints}}"></polyline></svg>{{end}}
+                </div>
+                {{if .Detail}}<div class="hosting-server-metric-detail">{{.Detail}}{{if .HasProcessModal}} · top 5 процессов{{end}}</div>{{end}}
+              {{if .HasProcessModal}}</button>
+              <div class="modal fade hosting-process-modal" id="hostingCPUProcesses{{$serverIndex}}" tabindex="-1" aria-hidden="true">
+                <div class="modal-dialog modal-dialog-centered">
+                  <div class="modal-content">
+                    <div class="modal-header">
+                      <h2 class="modal-title h5">Top 5 CPU процессов · {{$server.Name}}</h2>
+                      <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Закрыть"></button>
+                    </div>
+                    <div class="modal-body">
+                      <div class="hosting-process-list">
+                        {{range .Processes}}
+                        <div class="hosting-process-row">
+                          <span>{{.Name}}</span>
+                          <span>pid {{.PID}}</span>
+                          <strong>{{printf "%.1f" .CPUPercent}}%</strong>
+                        </div>
+                        {{end}}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              {{else}}</div>{{end}}
+              {{end}}
+              {{end}}
+            </div>
           </div>
         </article>
         <div class="hosting-server-details">

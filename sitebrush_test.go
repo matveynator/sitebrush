@@ -950,6 +950,63 @@ func TestServiceMailRelayRegistrationStoresAttachedHostingSnapshot(t *testing.T)
 	}
 }
 
+func TestHostingSnapshotEndpointRejectsUnknownInstallation(t *testing.T) {
+	application, _ := newTestApplication(t)
+	request := serviceMailRequest{
+		Version:      1,
+		CodeKind:     "hosting_snapshot",
+		LanguageCode: "en",
+		CreatedAt:    time.Now().UTC().Format(time.RFC3339),
+		HostingSnapshot: &hostingandsupport.HostingSnapshot{
+			Version:  1,
+			OSName:   "linux",
+			CPUModel: "amd64",
+		},
+	}
+	if err := application.signServiceMailRequest(context.Background(), &request); err != nil {
+		t.Fatal(err)
+	}
+	status, statusCode := application.handleHostingSnapshotRequest(context.Background(), request, "203.0.113.10")
+	if statusCode != http.StatusForbidden || !strings.Contains(status, "installation is not registered") {
+		t.Fatalf("status = %d %q, want unregistered forbidden", statusCode, status)
+	}
+}
+
+func TestHostingSnapshotEndpointAcceptsRegisteredSignedInstallation(t *testing.T) {
+	application, _ := newTestApplication(t)
+	request := serviceMailRequest{
+		Version:      1,
+		CodeKind:     "hosting_snapshot",
+		LanguageCode: "en",
+		CreatedAt:    time.Now().UTC().Format(time.RFC3339),
+		HostingSnapshot: &hostingandsupport.HostingSnapshot{
+			Version:      1,
+			OwnerEmail:   "owner@example.com",
+			ServerDomain: "host.example.com",
+			OSName:       "linux",
+			CPUModel:     "amd64",
+			CreatedAt:    time.Now().UTC().Format(time.RFC3339),
+		},
+	}
+	if err := application.signServiceMailRequest(context.Background(), &request); err != nil {
+		t.Fatal(err)
+	}
+	controlDatabase, err := application.openServerControlDatabase(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := hostingandsupport.Store{DB: controlDatabase}
+	if err := store.UpsertServiceMailInstallation(context.Background(), request.InstallationID, request.PublicKey, "203.0.113.10", "host.example.com"); err != nil {
+		t.Fatal(err)
+	}
+	_ = controlDatabase.Close()
+
+	status, statusCode := application.handleHostingSnapshotRequest(context.Background(), request, "203.0.113.10")
+	if statusCode != http.StatusOK || status != "stored" {
+		t.Fatalf("status = %d %q, want stored", statusCode, status)
+	}
+}
+
 func TestHostingSnapshotServerStatusLabels(t *testing.T) {
 	statusWithIP := hostingSnapshotServerStatus("203.0.113.10")
 	if statusWithIP != "IP 203.0.113.10" {
@@ -991,6 +1048,19 @@ func TestHostingAndSupportTemplateRendersServerView(t *testing.T) {
 			SyncStatusClass:    "billing-sync-ok",
 			NetworkStatusLabel: "ok",
 			NetworkStatusClass: "hosting-metric-ok",
+			SystemMetrics: []hostingandsupport.ServerMetricView{{
+				Name:            "CPU",
+				Value:           "97.0%",
+				Detail:          "загрузка сейчас",
+				StatusClass:     "hosting-metric-danger",
+				Percent:         97,
+				HasPercent:      true,
+				HasProcessModal: true,
+				Processes: []hostingandsupport.HostingSnapshotProcess{
+					{Name: "sitebrush", PID: 100, CPUPercent: 97},
+					{Name: "sqlite", PID: 101, CPUPercent: 12.5},
+				},
+			}},
 			Sites: []hostingandsupport.ServerSiteView{{
 				Domain:       "example.com",
 				OwnerEmail:   "owner@example.com",
@@ -1034,6 +1104,12 @@ func TestHostingAndSupportTemplateRendersServerView(t *testing.T) {
 	renderedHTML := rendered.String()
 	if !strings.Contains(renderedHTML, "Серверы") || !strings.Contains(renderedHTML, "sitebrush.com") || !strings.Contains(renderedHTML, "Выставить счёт") {
 		t.Fatal("server-first hosting view did not render expected content")
+	}
+	if !strings.Contains(renderedHTML, "Top 5 CPU процессов") || !strings.Contains(renderedHTML, "sitebrush") {
+		t.Fatal("high CPU process modal did not render")
+	}
+	if strings.Contains(renderedHTML, "<strong>Процесс</strong>") {
+		t.Fatal("process metric rendered as a permanent server card")
 	}
 }
 
@@ -2338,6 +2414,22 @@ func TestHostingAndSupportRedirectsToMainDomain(t *testing.T) {
 }
 
 func TestServerManagerEmailTreatsLoopbackAsLocalhost(t *testing.T) {
+	previousIPLookup := lookupIPRecords
+	previousExternalIPLookup := lookupServerExternalIP
+	t.Cleanup(func() {
+		lookupIPRecords = previousIPLookup
+		lookupServerExternalIP = previousExternalIPLookup
+	})
+	lookupIPRecords = func(domain string) ([]net.IP, error) {
+		if domain == "example.com" {
+			return []net.IP{net.ParseIP("198.51.100.10")}, nil
+		}
+		return nil, fmt.Errorf("unexpected domain %s", domain)
+	}
+	lookupServerExternalIP = func(context.Context) (string, error) {
+		return "203.0.113.10", nil
+	}
+
 	storagePath := t.TempDir()
 	dbPath := filepath.Join(storagePath, defaultDBPath)
 	if err := ensureParentDir(dbPath); err != nil {
@@ -2365,6 +2457,33 @@ func TestServerManagerEmailTreatsLoopbackAsLocalhost(t *testing.T) {
 	}
 	if !sameHostingAndSupportDomain("localhost", "[::1]:18080") {
 		t.Fatal("IPv6 loopback was not normalized to localhost")
+	}
+	if _, err := rawDB.Exec(`DELETE FROM server_managers`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := rawDB.Exec(`INSERT INTO server_managers(domain,email,role,scope_domain,created_at) VALUES(?,?,?,?,?)`, "example.com", "owner@example.com", "owner", "*", time.Now().UTC().Format(time.RFC3339)); err != nil {
+		t.Fatal(err)
+	}
+	if !application.isServerManagerEmail(context.Background(), "example.com", "owner@example.com") {
+		t.Fatal("unbound owner domain was not treated as effective localhost")
+	}
+	if application.isServerManagerEmail(context.Background(), "example.com", "other@example.com") {
+		t.Fatal("non-owner admin was accepted for effective localhost")
+	}
+	menuScript := buildContextMenuScript(true, true, false, false, true, "/", "example.com", 0, 0, "", translationsForLanguageCode("ru"))
+	if !strings.Contains(menuScript, "?hosting_and_support") {
+		t.Fatal("server manager menu does not contain hosting link")
+	}
+}
+
+func TestHostingSnapshotProcessNameIsSanitized(t *testing.T) {
+	processName := sanitizeHostingSnapshotProcessName("/usr/local/bin/sitebrush\n--token secret")
+	if processName != "sitebrush" {
+		t.Fatalf("processName = %q", processName)
+	}
+	longName := sanitizeHostingSnapshotProcessName(strings.Repeat("a", 100))
+	if len(longName) != 80 {
+		t.Fatalf("longName length = %d, want 80", len(longName))
 	}
 }
 

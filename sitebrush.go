@@ -13916,27 +13916,33 @@ func (a *App) buildHostingSnapshot(ctx context.Context) (hostingandsupport.Hosti
 	cpuModel := hostingSnapshotCPUModel()
 	ramTotalBytes := hostingSnapshotRAMTotalBytes(ctx)
 	cpuUsagePercent, loadAverage := hostingSnapshotHourlySystemMetrics()
+	topCPUProcesses := hostingSnapshotTopCPUProcesses(ctx, 5)
+	topCPUProcess := firstHostingSnapshotTopCPUProcess(topCPUProcesses)
 	serverDomain := ""
 	if ownerDomain, found := store.OwnerDomain(ctx); found {
 		serverDomain = ownerDomain
 	}
 	snapshot := hostingandsupport.HostingSnapshot{
-		Version:             1,
-		InstallationID:      installationID,
-		ServerIP:            serverIP,
-		ServerStatus:        hostingSnapshotServerStatus(serverIP),
-		ServerDomain:        serverDomain,
-		SitebrushVersion:    CompileVersion,
-		OSName:              osName,
-		OSVersion:           osVersion,
-		CPUModel:            cpuModel,
-		CPUCores:            runtime.NumCPU(),
-		CPUUsagePercent:     cpuUsagePercent,
-		LoadAverage:         loadAverage,
-		RAMTotalBytes:       ramTotalBytes,
-		ServerUptimeSeconds: hostingSnapshotServerUptimeSeconds(),
-		StoragePath:         storageRoot,
-		CreatedAt:           time.Now().UTC().Format(time.RFC3339),
+		Version:              1,
+		InstallationID:       installationID,
+		ServerIP:             serverIP,
+		ServerStatus:         hostingSnapshotServerStatus(serverIP),
+		ServerDomain:         serverDomain,
+		SitebrushVersion:     CompileVersion,
+		OSName:               osName,
+		OSVersion:            osVersion,
+		CPUModel:             cpuModel,
+		CPUCores:             runtime.NumCPU(),
+		CPUUsagePercent:      cpuUsagePercent,
+		LoadAverage:          loadAverage,
+		TopCPUProcessName:    sanitizeHostingSnapshotProcessName(topCPUProcess.Name),
+		TopCPUProcessPID:     topCPUProcess.PID,
+		TopCPUProcessPercent: topCPUProcess.CPUPercent,
+		TopCPUProcesses:      hostingSnapshotProcessViews(topCPUProcesses),
+		RAMTotalBytes:        ramTotalBytes,
+		ServerUptimeSeconds:  hostingSnapshotServerUptimeSeconds(),
+		StoragePath:          storageRoot,
+		CreatedAt:            time.Now().UTC().Format(time.RFC3339),
 	}
 	if diskOK {
 		snapshot.DiskFreeBytes = int64(freeBytes)
@@ -14021,8 +14027,10 @@ func (a *App) localHostingServerSystemMetrics(ctx context.Context) []hostingands
 	cpuCores := runtime.NumCPU()
 	ramTotalBytes := hostingSnapshotRAMTotalBytes(ctx)
 	cpuUsagePercent, loadAverage := hostingSnapshotHourlySystemMetrics()
+	topCPUProcesses := hostingSnapshotTopCPUProcesses(ctx, 5)
 	uptimeSeconds := hostingSnapshotServerUptimeSeconds()
 	diskUsedBytes := int64(0)
+	diskUsedPercent := 0
 	diskLabel := "диск не передан"
 	diskStatusClass := "hosting-metric-warning"
 	if diskOK {
@@ -14031,7 +14039,6 @@ func (a *App) localHostingServerSystemMetrics(ctx context.Context) []hostingands
 		if diskTotalBytes > diskFreeBytes {
 			diskUsedBytes = diskTotalBytes - diskFreeBytes
 		}
-		diskUsedPercent := 0
 		if diskTotalBytes > 0 {
 			diskUsedPercent = int(math.Round(float64(diskUsedBytes) / float64(diskTotalBytes) * 100))
 			if diskUsedPercent > 100 {
@@ -14045,11 +14052,11 @@ func (a *App) localHostingServerSystemMetrics(ctx context.Context) []hostingands
 	return []hostingandsupport.ServerMetricView{
 		{Name: "OS", Value: firstNonEmpty(osLabel, "ОС не передана"), StatusClass: "hosting-metric-ok"},
 		{Name: "CPU", Value: fmt.Sprintf("%s · %d ядер", firstNonEmpty(cpuModel, "CPU не передан"), cpuCores), StatusClass: hostingandsupport.MetricStatusClass(cpuUsagePercent, 80, 95)},
-		{Name: "CPU %", Value: fmt.Sprintf("%.1f%%", cpuUsagePercent), StatusClass: hostingandsupport.MetricStatusClass(cpuUsagePercent, 80, 95)},
-		{Name: "LA", Value: fmt.Sprintf("%.2f", loadAverage), StatusClass: hostingandsupport.LoadAverageStatusClass(loadAverage, cpuCores)},
-		{Name: "Memory", Value: firstNonEmpty(formatFileSize(ramTotalBytes), "память не передана"), StatusClass: "hosting-metric-ok"},
-		{Name: "Disk", Value: diskLabel, StatusClass: diskStatusClass},
-		{Name: "Uptime", Value: hostingandsupport.FormatDurationDays(uptimeSeconds), StatusClass: hostingandsupport.ServerUptimeStatusClass(uptimeSeconds)},
+		{Name: "CPU", Value: fmt.Sprintf("%.1f%%", cpuUsagePercent), Detail: "загрузка сейчас", StatusClass: hostingandsupport.MetricStatusClass(cpuUsagePercent, 80, 95), Percent: int(math.Round(cpuUsagePercent)), HasPercent: true, HasProcessModal: hostingandsupport.MetricStatusClass(cpuUsagePercent, 80, 95) == "hosting-metric-danger" && len(topCPUProcesses) > 0, Processes: hostingSnapshotProcessViews(topCPUProcesses)},
+		{Name: "Load", Value: fmt.Sprintf("%.2f", loadAverage), Detail: "средняя нагрузка", StatusClass: hostingandsupport.LoadAverageStatusClass(loadAverage, cpuCores), Percent: int(math.Round(loadAverage / math.Max(1, float64(cpuCores)) * 100)), HasPercent: true},
+		{Name: "Disk", Value: strconv.Itoa(diskUsedPercent) + "%", Detail: diskLabel, StatusClass: diskStatusClass, Percent: diskUsedPercent, HasPercent: diskOK},
+		{Name: "RAM", Value: firstNonEmpty(formatFileSize(ramTotalBytes), "память не передана"), Detail: "всего на сервере", StatusClass: "hosting-metric-ok"},
+		{Name: "Uptime", Value: hostingandsupport.FormatDurationDays(uptimeSeconds), Detail: "без перезапуска", StatusClass: hostingandsupport.ServerUptimeStatusClass(uptimeSeconds)},
 	}
 }
 
@@ -14248,6 +14255,12 @@ type hostingSnapshotCPUTimes struct {
 	total uint64
 }
 
+type hostingSnapshotTopProcess struct {
+	Name       string
+	PID        int
+	CPUPercent float64
+}
+
 func hostingSnapshotCPUUsagePercent() float64 {
 	if runtime.GOOS != "linux" {
 		return 0
@@ -14304,14 +14317,249 @@ func hostingSnapshotReadCPUTimes() (hostingSnapshotCPUTimes, bool) {
 	return hostingSnapshotCPUTimes{idle: idle, total: total}, true
 }
 
+func hostingSnapshotTopCPUProcess(ctx context.Context) hostingSnapshotTopProcess {
+	return firstHostingSnapshotTopCPUProcess(hostingSnapshotTopCPUProcesses(ctx, 1))
+}
+
+func hostingSnapshotTopCPUProcesses(ctx context.Context, limit int) []hostingSnapshotTopProcess {
+	switch runtime.GOOS {
+	case "linux":
+		return hostingSnapshotTopCPUProcessesLinux(limit)
+	case "darwin", "freebsd", "openbsd":
+		return hostingSnapshotTopCPUProcessesPS(ctx, limit)
+	case "windows":
+		return hostingSnapshotTopCPUProcessesWindows(ctx, limit)
+	default:
+		return nil
+	}
+}
+
+func firstHostingSnapshotTopCPUProcess(processes []hostingSnapshotTopProcess) hostingSnapshotTopProcess {
+	if len(processes) == 0 {
+		return hostingSnapshotTopProcess{}
+	}
+	return processes[0]
+}
+
+func hostingSnapshotProcessViews(processes []hostingSnapshotTopProcess) []hostingandsupport.HostingSnapshotProcess {
+	processViews := make([]hostingandsupport.HostingSnapshotProcess, 0, len(processes))
+	for _, process := range processes {
+		processName := sanitizeHostingSnapshotProcessName(process.Name)
+		if processName == "" {
+			continue
+		}
+		processViews = append(processViews, hostingandsupport.HostingSnapshotProcess{
+			Name:       processName,
+			PID:        process.PID,
+			CPUPercent: math.Round(process.CPUPercent*10) / 10,
+		})
+	}
+	return processViews
+}
+
+type hostingSnapshotProcessSample struct {
+	name  string
+	ticks uint64
+}
+
+func hostingSnapshotTopCPUProcessLinux() hostingSnapshotTopProcess {
+	return firstHostingSnapshotTopCPUProcess(hostingSnapshotTopCPUProcessesLinux(1))
+}
+
+func hostingSnapshotTopCPUProcessesLinux(limit int) []hostingSnapshotTopProcess {
+	firstTotal, firstProcesses := hostingSnapshotLinuxProcessSamples()
+	if firstTotal == 0 || len(firstProcesses) == 0 {
+		return nil
+	}
+	time.Sleep(150 * time.Millisecond)
+	secondTotal, secondProcesses := hostingSnapshotLinuxProcessSamples()
+	if secondTotal <= firstTotal || len(secondProcesses) == 0 {
+		return nil
+	}
+	totalDelta := float64(secondTotal - firstTotal)
+	topProcesses := make([]hostingSnapshotTopProcess, 0, limit)
+	for pid, secondSample := range secondProcesses {
+		firstSample, found := firstProcesses[pid]
+		if !found || secondSample.ticks <= firstSample.ticks {
+			continue
+		}
+		processDelta := float64(secondSample.ticks - firstSample.ticks)
+		cpuPercent := processDelta / totalDelta * float64(runtime.NumCPU()) * 100
+		if cpuPercent <= 0 {
+			continue
+		}
+		topProcesses = append(topProcesses, hostingSnapshotTopProcess{Name: sanitizeHostingSnapshotProcessName(secondSample.name), PID: pid, CPUPercent: math.Round(cpuPercent*10) / 10})
+	}
+	return limitHostingSnapshotTopProcesses(topProcesses, limit)
+}
+
+func hostingSnapshotLinuxProcessSamples() (uint64, map[int]hostingSnapshotProcessSample) {
+	cpuTimes, ok := hostingSnapshotReadCPUTimes()
+	if !ok || cpuTimes.total == 0 {
+		return 0, nil
+	}
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return 0, nil
+	}
+	samples := make(map[int]hostingSnapshotProcessSample)
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		pid, parseErr := strconv.Atoi(entry.Name())
+		if parseErr != nil {
+			continue
+		}
+		sample, sampleOK := hostingSnapshotLinuxProcessSample(pid)
+		if sampleOK {
+			samples[pid] = sample
+		}
+	}
+	return cpuTimes.total, samples
+}
+
+func hostingSnapshotLinuxProcessSample(pid int) (hostingSnapshotProcessSample, bool) {
+	statBytes, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "stat"))
+	if err != nil {
+		return hostingSnapshotProcessSample{}, false
+	}
+	statText := string(statBytes)
+	rightParen := strings.LastIndex(statText, ")")
+	if rightParen < 0 || rightParen+2 >= len(statText) {
+		return hostingSnapshotProcessSample{}, false
+	}
+	fields := strings.Fields(statText[rightParen+2:])
+	if len(fields) < 15 {
+		return hostingSnapshotProcessSample{}, false
+	}
+	userTicks, userErr := strconv.ParseUint(fields[11], 10, 64)
+	systemTicks, systemErr := strconv.ParseUint(fields[12], 10, 64)
+	if userErr != nil || systemErr != nil {
+		return hostingSnapshotProcessSample{}, false
+	}
+	name := strings.Trim(statText[strings.Index(statText, "(")+1:rightParen], " ")
+	if commBytes, commErr := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "comm")); commErr == nil {
+		if comm := strings.TrimSpace(string(commBytes)); comm != "" {
+			name = comm
+		}
+	}
+	return hostingSnapshotProcessSample{name: name, ticks: userTicks + systemTicks}, true
+}
+
+func hostingSnapshotTopCPUProcessPS(ctx context.Context) hostingSnapshotTopProcess {
+	return firstHostingSnapshotTopCPUProcess(hostingSnapshotTopCPUProcessesPS(ctx, 1))
+}
+
+func hostingSnapshotTopCPUProcessesPS(ctx context.Context, limit int) []hostingSnapshotTopProcess {
+	output := commandOutput(ctx, "ps", "-Ao", "pid=,pcpu=,comm=")
+	topProcesses := make([]hostingSnapshotTopProcess, 0, limit)
+	for _, line := range strings.Split(output, "\n") {
+		fields := strings.Fields(strings.TrimSpace(line))
+		if len(fields) < 3 {
+			continue
+		}
+		pid, pidErr := strconv.Atoi(fields[0])
+		cpuPercent, cpuErr := strconv.ParseFloat(fields[1], 64)
+		if pidErr != nil || cpuErr != nil || cpuPercent <= 0 {
+			continue
+		}
+		topProcesses = append(topProcesses, hostingSnapshotTopProcess{Name: sanitizeHostingSnapshotProcessName(strings.Join(fields[2:], " ")), PID: pid, CPUPercent: math.Round(cpuPercent*10) / 10})
+	}
+	return limitHostingSnapshotTopProcesses(topProcesses, limit)
+}
+
+func hostingSnapshotTopCPUProcessWindows(ctx context.Context) hostingSnapshotTopProcess {
+	return firstHostingSnapshotTopCPUProcess(hostingSnapshotTopCPUProcessesWindows(ctx, 1))
+}
+
+func hostingSnapshotTopCPUProcessesWindows(ctx context.Context, limit int) []hostingSnapshotTopProcess {
+	if limit <= 0 {
+		limit = 5
+	}
+	output := commandOutput(ctx, "powershell", "-NoProfile", "-Command", fmt.Sprintf("Get-CimInstance Win32_PerfFormattedData_PerfProc_Process | Sort-Object PercentProcessorTime -Descending | Select-Object -First %d IDProcess,PercentProcessorTime,Name | ConvertTo-Csv -NoTypeInformation", limit))
+	lines := strings.Split(strings.TrimSpace(output), "\n")
+	if len(lines) < 2 {
+		return nil
+	}
+	topProcesses := make([]hostingSnapshotTopProcess, 0, limit)
+	for _, line := range lines[1:] {
+		fields := parseSimpleCSVLine(line)
+		if len(fields) < 3 {
+			continue
+		}
+		pid, pidErr := strconv.Atoi(strings.TrimSpace(fields[0]))
+		cpuPercent, cpuErr := strconv.ParseFloat(strings.TrimSpace(fields[1]), 64)
+		if pidErr != nil || cpuErr != nil || cpuPercent <= 0 {
+			continue
+		}
+		topProcesses = append(topProcesses, hostingSnapshotTopProcess{Name: sanitizeHostingSnapshotProcessName(fields[2]), PID: pid, CPUPercent: math.Round(cpuPercent*10) / 10})
+	}
+	return limitHostingSnapshotTopProcesses(topProcesses, limit)
+}
+
+func limitHostingSnapshotTopProcesses(processes []hostingSnapshotTopProcess, limit int) []hostingSnapshotTopProcess {
+	if limit <= 0 {
+		limit = 5
+	}
+	sort.SliceStable(processes, func(left, right int) bool {
+		return processes[left].CPUPercent > processes[right].CPUPercent
+	})
+	if len(processes) > limit {
+		processes = processes[:limit]
+	}
+	return processes
+}
+
+func parseSimpleCSVLine(line string) []string {
+	fields := make([]string, 0, 4)
+	for _, field := range strings.Split(line, ",") {
+		fields = append(fields, strings.Trim(strings.TrimSpace(field), `"`))
+	}
+	return fields
+}
+
+func sanitizeHostingSnapshotProcessName(name string) string {
+	for index, character := range name {
+		if character < 32 || character == 127 {
+			name = name[:index]
+			break
+		}
+	}
+	name = filepath.Base(strings.TrimSpace(name))
+	cleaned := strings.Builder{}
+	for _, character := range name {
+		if character < 32 || character == 127 {
+			continue
+		}
+		cleaned.WriteRune(character)
+		if cleaned.Len() >= 80 {
+			break
+		}
+	}
+	return strings.TrimSpace(cleaned.String())
+}
+
+func hostingTopProcessDetail(process hostingSnapshotTopProcess) string {
+	if strings.TrimSpace(process.Name) == "" {
+		return "данные недоступны"
+	}
+	return fmt.Sprintf("pid %d · %.1f%% CPU", process.PID, process.CPUPercent)
+}
+
 func commandOutputOneLine(ctx context.Context, name string, args ...string) string {
+	output := commandOutput(ctx, name, args...)
+	return strings.TrimSpace(strings.SplitN(output, "\n", 2)[0])
+}
+
+func commandOutput(ctx context.Context, name string, args ...string) string {
 	commandContext, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
 	outputBytes, err := exec.CommandContext(commandContext, name, args...).Output()
 	if err != nil {
 		return ""
 	}
-	return strings.TrimSpace(strings.SplitN(string(outputBytes), "\n", 2)[0])
+	return strings.TrimSpace(string(outputBytes))
 }
 
 func hostingSnapshotAssignmentPaidStatus(assignment hostingandsupport.ServiceAssignment, plansByID map[int]hostingandsupport.Plan) string {
@@ -14479,6 +14727,9 @@ func (a *App) handleHostingSnapshotRequest(ctx context.Context, request serviceM
 		return message, statusCode
 	}
 	knownPublicKey, installationFound := store.ServiceMailInstallationPublicKey(ctx, request.InstallationID)
+	if !installationFound {
+		return fail("installation is not registered", http.StatusForbidden)
+	}
 	if installationFound && strings.TrimSpace(knownPublicKey) != strings.TrimSpace(request.PublicKey) {
 		return fail("installation public key changed", http.StatusForbidden)
 	}
@@ -17497,6 +17748,9 @@ func (a *App) isServerManagerEmail(ctx context.Context, domain, email string) bo
 	if email == "" {
 		return false
 	}
+	if !a.serverOwnerExists(ctx) {
+		a.ensureServerOwnerExists(ctx)
+	}
 	controlDatabase, err := a.openServerControlDatabase(ctx)
 	if err != nil {
 		return false
@@ -17504,10 +17758,32 @@ func (a *App) isServerManagerEmail(ctx context.Context, domain, email string) bo
 	defer controlDatabase.Close()
 	store := hostingandsupport.Store{DB: controlDatabase}
 	ownerDomain, ownerFound := store.OwnerDomain(ctx)
-	if !ownerFound || !sameHostingAndSupportDomain(ownerDomain, domain) {
+	if !ownerFound {
 		return false
 	}
-	return store.IsOwner(ctx, email)
+	if sameHostingAndSupportDomain(ownerDomain, domain) {
+		return store.IsOwner(ctx, email)
+	}
+	if a.hostingAndSupportEffectiveLocalhost(ctx, ownerDomain, domain) {
+		return store.IsOwner(ctx, email)
+	}
+	return false
+}
+
+func (a *App) hostingAndSupportEffectiveLocalhost(ctx context.Context, ownerDomain, requestDomain string) bool {
+	normalizedRequestDomain := normalizeHostingAndSupportMainDomain(requestDomain)
+	if normalizedRequestDomain == "localhost" {
+		return true
+	}
+	normalizedOwnerDomain := normalizeHostingAndSupportMainDomain(ownerDomain)
+	if normalizedOwnerDomain == "" || normalizedRequestDomain != normalizedOwnerDomain {
+		return false
+	}
+	serverIPs, _, err := detectServerIPCandidates(ctx)
+	if err != nil || len(serverIPs) == 0 {
+		return true
+	}
+	return !domainARecordMatchesAny(normalizedOwnerDomain, serverIPs)
 }
 
 func sameHostingAndSupportDomain(leftDomain, rightDomain string) bool {
