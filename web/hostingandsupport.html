@@ -68,6 +68,9 @@
         <article class="billing-site-row hosting-server-card" data-hosting-server-row data-hosting-server-owner="{{$server.OwnerEmail}}">
           <div class="hosting-server-head">
             <div class="hosting-server-topline">
+              
+              sdsd1
+
               <div class="hosting-server-identity">
                 <div class="billing-domain">{{$server.Name}}{{if $server.Local}} <span class="hosting-server-local-badge">локальный</span>{{end}}</div>
                 <div class="text-muted small">{{$server.Subtitle}}{{if $server.OwnerEmail}} · владелец: <button type="button" class="billing-owner-filter" data-hosting-server-owner-filter="{{$server.OwnerEmail}}">{{$server.OwnerEmail}}</button>{{end}}</div>
@@ -76,11 +79,17 @@
                   <span>Сеть: <em class="{{$server.NetworkStatusClass}}">{{$server.NetworkStatusLabel}}</em></span>
                 </div>
               </div>
+
+              sdsd2
+
               <div class="hosting-server-machine">
                 <div><strong>OS</strong><span>{{$server.OSLabel}}</span></div>
                 <div><strong>CPU</strong><span>{{$server.CPULabel}}</span></div>
                 {{if $server.TotalUsedLabel}}<div><strong>Сайты</strong><span>{{$server.TotalUsedLabel}}</span></div>{{end}}
               </div>
+
+              sdsd3
+
               {{if $server.DiskTotalLabel}}
               <div class="hosting-server-disk {{$server.DiskStatusClass}}">
                 <div class="hosting-server-disk-chart" style="--metric-percent: {{$server.DiskUsedPercent}}%;">
@@ -92,7 +101,10 @@
                 </div>
               </div>
               {{end}}
-            </div>
+
+              sdsd4
+
+
             <div class="hosting-server-system-metrics">
               {{range $server.SystemMetrics}}
               {{if and (ne .Name "OS") (or (ne .Name "CPU") .HasPercent)}}
@@ -129,6 +141,10 @@
               {{end}}
               {{end}}
             </div>
+
+            sdsd5
+            
+          </div> 
           </div>
         </article>
         <div class="hosting-server-details">
