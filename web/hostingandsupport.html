@@ -63,89 +63,572 @@
           <p class="text-muted">Сайты сгруппированы по клиентам, стоимость считается от фактически занятого дискового пространства.</p>
         </div>
       </div>
+      <style>
+        /* server-header-card: makes the article a full-width technical header card. */
+        .technical-page .hosting-server-card {
+          grid-template-columns: minmax(0, 1fr);
+          border-bottom-right-radius: 0;
+          border-bottom-left-radius: 0;
+        }
+
+        /* server-header-root: controls the outer header spacing and prevents grid overflow. */
+        .technical-page .hosting-server-head {
+          display: grid;
+          gap: 12px;
+          align-items: stretch;
+          min-width: 0;
+        }
+
+        /* server-header-topline: places identity, machine, disk, and metrics in one desktop row. */
+        .technical-page .hosting-server-topline {
+          display: grid;
+          grid-template-columns: minmax(0, 1.15fr) minmax(0, 0.75fr) minmax(0, 1fr) minmax(0, 2.1fr);
+          gap: 10px;
+          align-items: stretch;
+          min-width: 0;
+        }
+
+        /* server-header-columns: gives identity, machine, and disk blocks consistent internal gaps. */
+        .technical-page .hosting-server-identity,
+        .technical-page .hosting-server-machine,
+        .technical-page .hosting-server-disk {
+          display: grid;
+          gap: 7px;
+          min-width: 0;
+        }
+
+        /* server-header-local-badge: marks localhost/local installations near the server name. */
+        .technical-page .hosting-server-local-badge {
+          display: inline-flex;
+          align-items: center;
+          min-height: 22px;
+          margin-left: 6px;
+          padding: 3px 7px;
+          border: 1px solid rgba(149, 229, 239, 0.36);
+          border-radius: 999px;
+          background: rgba(149, 229, 239, 0.12);
+          color: var(--cyan);
+          font-size: 11px;
+          font-weight: 700;
+          vertical-align: middle;
+        }
+
+        /* server-header-status: keeps sync and network states readable under the title. */
+        .technical-page .hosting-server-status-line {
+          display: flex;
+          flex-wrap: wrap;
+          gap: 6px;
+          color: var(--muted);
+          font-size: 12px;
+        }
+
+        /* server-header-mini-card: shared visual shell for small status, machine, disk, and metric cards. */
+        .technical-page .hosting-server-status-line span,
+        .technical-page .hosting-server-machine div,
+        .technical-page .hosting-server-disk,
+        .technical-page .hosting-server-metric {
+          border: 1px solid rgba(149, 229, 239, 0.18);
+          border-radius: 8px;
+          background: linear-gradient(180deg, rgba(255, 255, 255, 0.055), rgba(255, 255, 255, 0.025)), rgba(0, 0, 0, 0.10);
+        }
+
+        .technical-page .hosting-server-status-line span {
+          padding: 5px 7px;
+        }
+
+        .technical-page .hosting-server-status-line em {
+          font-style: normal;
+        }
+
+        /* server-header-machine: stacks OS, CPU, and site storage summary in the machine column. */
+        .technical-page .hosting-server-machine {
+          grid-template-columns: 1fr;
+        }
+
+        .technical-page .hosting-server-machine div {
+          display: grid;
+          gap: 3px;
+          min-width: 0;
+          padding: 10px;
+        }
+
+        .technical-page .hosting-server-machine strong,
+        .technical-page .hosting-server-disk-head strong,
+        .technical-page .hosting-server-metric-head strong {
+          color: var(--muted);
+          font-size: 11px;
+          font-weight: 800;
+          line-height: 1.1;
+          text-transform: uppercase;
+        }
+
+        .technical-page .hosting-server-machine span {
+          color: var(--text);
+          font-size: 13px;
+          line-height: 1.25;
+          overflow-wrap: anywhere;
+        }
+
+        /* server-header-disk: keeps the donut chart and disk text in one compact visual block. */
+        .technical-page .hosting-server-disk {
+          grid-template-columns: 76px minmax(0, 1fr);
+          align-items: center;
+          padding: 10px;
+        }
+
+        .technical-page .hosting-server-disk-chart {
+          position: relative;
+          display: grid;
+          place-items: center;
+          width: 68px;
+          aspect-ratio: 1;
+          border-radius: 50%;
+          background: radial-gradient(circle closest-side, rgba(0, 0, 0, 0.72) 64%, transparent 66%), conic-gradient(var(--metric-accent, var(--green)) var(--metric-percent), rgba(255, 255, 255, 0.12) 0);
+          box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.08), 0 0 18px var(--metric-glow, rgba(77, 208, 162, 0.16));
+        }
+
+        .technical-page .hosting-server-disk-chart::after {
+          content: "";
+          position: absolute;
+          inset: 7px;
+          border: 1px solid rgba(255, 255, 255, 0.08);
+          border-radius: inherit;
+        }
+
+        .technical-page .hosting-server-disk-chart span {
+          position: relative;
+          z-index: 1;
+          color: var(--text);
+          font-size: 15px;
+          font-weight: 800;
+          line-height: 1;
+        }
+
+        .technical-page .hosting-server-disk-copy {
+          display: grid;
+          gap: 7px;
+          min-width: 0;
+        }
+
+        /* server-header-card-heads: aligns labels and values inside disk and metric cards. */
+        .technical-page .hosting-server-disk-head,
+        .technical-page .hosting-server-metric-head {
+          display: flex;
+          align-items: baseline;
+          justify-content: space-between;
+          gap: 8px;
+          min-width: 0;
+        }
+
+        .technical-page .hosting-server-disk-head span,
+        .technical-page .hosting-server-metric-head em {
+          color: var(--text);
+          font-size: 16px;
+          font-style: normal;
+          font-weight: 800;
+          line-height: 1.1;
+          overflow-wrap: anywhere;
+        }
+
+        .technical-page .hosting-server-metric-head em {
+          max-width: 58%;
+          overflow: hidden;
+          text-align: right;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+        }
+
+        .technical-page .hosting-server-disk-detail,
+        .technical-page .hosting-server-metric-detail {
+          color: var(--muted);
+          font-size: 11px;
+          line-height: 1.25;
+          overflow-wrap: anywhere;
+        }
+
+        .technical-page .hosting-server-metric-detail {
+          min-height: 14px;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+        }
+
+        /* server-header-system-metrics: lays CPU, load, disk, RAM, uptime, and graph cards in the right area. */
+        .technical-page .hosting-server-system-metrics {
+          display: grid;
+          grid-template-columns: repeat(auto-fit, minmax(108px, 1fr));
+          grid-auto-flow: dense;
+          gap: 8px;
+          min-width: 0;
+        }
+
+        /* server-header-metric-card: preserves compact metric card sizes and graph height. */
+        .technical-page .hosting-server-metric {
+          display: grid;
+          grid-template-rows: auto auto 42px auto;
+          gap: 6px;
+          min-width: 0;
+          min-height: 118px;
+          padding: 9px;
+          overflow: hidden;
+        }
+
+        /* server-header-cpu-button: turns only dangerous CPU cards into modal triggers. */
+        .technical-page .hosting-server-metric-button {
+          width: 100%;
+          align-items: stretch;
+          justify-content: stretch;
+          border-color: rgba(220, 53, 69, 0.62);
+          color: var(--text);
+          text-align: left;
+        }
+
+        .technical-page .hosting-server-metric-button:hover,
+        .technical-page .hosting-server-metric-button:focus {
+          border-color: #ff7b86;
+          color: var(--text);
+          transform: translateY(-1px);
+        }
+
+        .technical-page .hosting-server-metric:nth-child(1),
+        .technical-page .hosting-server-metric:nth-child(2),
+        .technical-page .hosting-server-metric:nth-child(3),
+        .technical-page .hosting-server-metric:nth-child(4) {
+          min-height: 118px;
+        }
+
+        /* server-header-sparkline: controls the mini graph frame inside each metric card. */
+        .technical-page .hosting-server-sparkline-frame {
+          position: relative;
+          min-height: 42px;
+          border: 1px solid rgba(149, 229, 239, 0.12);
+          border-radius: 7px;
+          background: linear-gradient(rgba(149, 229, 239, 0.08) 1px, transparent 1px), linear-gradient(90deg, rgba(149, 229, 239, 0.07) 1px, transparent 1px), rgba(0, 0, 0, 0.16);
+          background-size: 100% 14px, 25% 100%, auto;
+          overflow: hidden;
+        }
+
+        .technical-page .hosting-server-sparkline-frame::after {
+          content: "";
+          position: absolute;
+          inset: auto 0 0;
+          height: 36%;
+          background: linear-gradient(180deg, transparent, rgba(149, 229, 239, 0.09));
+          pointer-events: none;
+        }
+
+        .technical-page .hosting-server-sparkline-empty::before {
+          content: "";
+          position: absolute;
+          right: 10px;
+          bottom: 11px;
+          left: 10px;
+          height: 2px;
+          border-radius: 999px;
+          background: rgba(149, 229, 239, 0.22);
+        }
+
+        .technical-page .hosting-server-sparkline {
+          position: absolute;
+          inset: 5px 7px;
+          width: calc(100% - 14px);
+          height: calc(100% - 10px);
+          overflow: visible;
+        }
+
+        .technical-page .hosting-server-sparkline polyline {
+          fill: none;
+          stroke: var(--cyan);
+          stroke-linecap: round;
+          stroke-linejoin: round;
+          stroke-width: 2.8;
+          filter: drop-shadow(0 0 5px rgba(149, 229, 239, 0.35));
+          vector-effect: non-scaling-stroke;
+        }
+
+        /* server-header-percent: controls the percentage bar under percent-based metrics. */
+        .technical-page .hosting-server-percent-bar {
+          height: 7px;
+          border: 1px solid rgba(149, 229, 239, 0.18);
+          border-radius: 999px;
+          background: rgba(255, 255, 255, 0.05);
+          overflow: hidden;
+        }
+
+        .technical-page .hosting-server-percent-bar span {
+          display: block;
+          width: var(--metric-percent);
+          max-width: 100%;
+          height: 100%;
+          border-radius: inherit;
+          background: linear-gradient(90deg, var(--metric-accent, var(--green)), var(--metric-accent-strong, var(--cyan)));
+        }
+
+        /* server-header-state-colors: applies green, yellow, and red state colors to disk and metric cards. */
+        .technical-page .hosting-server-disk.hosting-metric-warning .hosting-server-percent-bar span,
+        .technical-page .hosting-server-metric.hosting-metric-warning .hosting-server-percent-bar span {
+          background: #ffc107;
+        }
+
+        .technical-page .hosting-server-disk.hosting-metric-danger .hosting-server-percent-bar span,
+        .technical-page .hosting-server-metric.hosting-metric-danger .hosting-server-percent-bar span {
+          background: #dc3545;
+        }
+
+        .technical-page .hosting-server-disk.hosting-metric-ok,
+        .technical-page .hosting-server-metric.hosting-metric-ok {
+          --metric-accent: var(--green);
+          --metric-accent-strong: var(--cyan);
+          --metric-glow: rgba(77, 208, 162, 0.20);
+          border-color: rgba(77, 208, 162, 0.38);
+          background: linear-gradient(180deg, rgba(77, 208, 162, 0.11), rgba(77, 208, 162, 0.035)), rgba(0, 0, 0, 0.10);
+        }
+
+        .technical-page .hosting-server-disk.hosting-metric-warning,
+        .technical-page .hosting-server-metric.hosting-metric-warning {
+          --metric-accent: #ffc107;
+          --metric-accent-strong: #ffd45c;
+          --metric-glow: rgba(255, 193, 7, 0.22);
+          border-color: rgba(255, 193, 7, 0.52);
+          background: linear-gradient(180deg, rgba(255, 193, 7, 0.15), rgba(255, 193, 7, 0.045)), rgba(0, 0, 0, 0.10);
+        }
+
+        .technical-page .hosting-server-disk.hosting-metric-danger,
+        .technical-page .hosting-server-metric.hosting-metric-danger {
+          --metric-accent: #dc3545;
+          --metric-accent-strong: #ff7b86;
+          --metric-glow: rgba(220, 53, 69, 0.26);
+          border-color: rgba(220, 53, 69, 0.62);
+          background: linear-gradient(180deg, rgba(220, 53, 69, 0.17), rgba(220, 53, 69, 0.055)), rgba(0, 0, 0, 0.10);
+        }
+
+        .technical-page .hosting-server-metric.hosting-metric-ok .hosting-server-sparkline polyline {
+          stroke: var(--green);
+        }
+
+        .technical-page .hosting-server-metric.hosting-metric-warning .hosting-server-sparkline polyline {
+          stroke: #ffc107;
+        }
+
+        .technical-page .hosting-server-metric.hosting-metric-danger .hosting-server-sparkline polyline {
+          stroke: #dc3545;
+        }
+
+        /* server-header-process-modal: styles the top 5 CPU process dialog opened from a red CPU card. */
+        .technical-page .hosting-process-modal .modal-content {
+          border: 1px solid rgba(149, 229, 239, 0.24);
+          border-radius: 12px;
+          background: #252525;
+          color: var(--text);
+        }
+
+        .technical-page .hosting-process-modal .modal-header {
+          border-bottom-color: rgba(149, 229, 239, 0.16);
+        }
+
+        .technical-page .hosting-process-list {
+          display: grid;
+          gap: 8px;
+        }
+
+        .technical-page .hosting-process-row {
+          display: grid;
+          grid-template-columns: minmax(0, 1fr) 88px 72px;
+          gap: 10px;
+          align-items: center;
+          padding: 10px;
+          border: 1px solid rgba(149, 229, 239, 0.14);
+          border-radius: 8px;
+          background: rgba(0, 0, 0, 0.18);
+        }
+
+        .technical-page .hosting-process-row span {
+          min-width: 0;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+        }
+
+        .technical-page .hosting-process-row strong {
+          color: #ff7b86;
+          text-align: right;
+        }
+
+        /* server-header-responsive: adjusts the header and metric cards on narrower screens. */
+        @media (min-width: 901px) and (max-width: 1180px) {
+          .technical-page .hosting-server-topline {
+            grid-template-columns: minmax(0, 1.1fr) minmax(0, 0.75fr) minmax(0, 1fr) minmax(0, 1.8fr);
+          }
+
+          .technical-page .hosting-server-system-metrics {
+            grid-template-columns: repeat(auto-fit, minmax(96px, 1fr));
+          }
+        }
+
+        @media (max-width: 900px) {
+          .technical-page .hosting-server-card,
+          .technical-page .hosting-server-head,
+          .technical-page .hosting-server-topline {
+            grid-template-columns: 1fr;
+          }
+
+          .technical-page .hosting-server-system-metrics {
+            grid-template-columns: repeat(auto-fit, minmax(118px, 1fr));
+          }
+
+          .technical-page .hosting-server-metric {
+            min-height: 112px;
+          }
+        }
+
+        @media (max-width: 520px) {
+          .technical-page .hosting-server-system-metrics {
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+          }
+
+          .technical-page .hosting-server-metric {
+            min-height: 108px;
+            padding: 8px;
+          }
+
+          .technical-page .hosting-server-metric-head {
+            align-items: flex-start;
+            flex-direction: column;
+            gap: 3px;
+          }
+
+          .technical-page .hosting-server-metric-head em {
+            max-width: 100%;
+            text-align: left;
+          }
+        }
+      </style>
       <div class="billing-site-list" data-hosting-server-list>
         {{range $serverIndex, $server := .Servers}}
         <article class="billing-site-row hosting-server-card" data-hosting-server-row data-hosting-server-owner="{{$server.OwnerEmail}}">
+          <!-- server-header:start -->
           <div class="hosting-server-head">
+            <!-- server-header-topline:start -->
             <div class="hosting-server-topline">
-              
-              sdsd1
-
+              <!-- server-header-identity:start -->
               <div class="hosting-server-identity">
+                <!-- server-header-title:start -->
                 <div class="billing-domain">{{$server.Name}}{{if $server.Local}} <span class="hosting-server-local-badge">локальный</span>{{end}}</div>
+                <!-- server-header-title:end -->
+                <!-- server-header-subtitle:start -->
                 <div class="text-muted small">{{$server.Subtitle}}{{if $server.OwnerEmail}} · владелец: <button type="button" class="billing-owner-filter" data-hosting-server-owner-filter="{{$server.OwnerEmail}}">{{$server.OwnerEmail}}</button>{{end}}</div>
+                <!-- server-header-subtitle:end -->
+                <!-- server-header-status-line:start -->
                 <div class="hosting-server-status-line">
                   <span>Синхронизация: <em class="{{$server.SyncStatusClass}}">{{$server.SyncStatusLabel}}</em></span>
                   <span>Сеть: <em class="{{$server.NetworkStatusClass}}">{{$server.NetworkStatusLabel}}</em></span>
                 </div>
+                <!-- server-header-status-line:end -->
               </div>
+              <!-- server-header-identity:end -->
 
-              sdsd2
-
+              <!-- server-header-machine:start -->
               <div class="hosting-server-machine">
+                <!-- server-header-os:start -->
                 <div><strong>OS</strong><span>{{$server.OSLabel}}</span></div>
+                <!-- server-header-os:end -->
+                <!-- server-header-cpu:start -->
                 <div><strong>CPU</strong><span>{{$server.CPULabel}}</span></div>
+                <!-- server-header-cpu:end -->
+                <!-- server-header-sites-usage:start -->
                 {{if $server.TotalUsedLabel}}<div><strong>Сайты</strong><span>{{$server.TotalUsedLabel}}</span></div>{{end}}
+                <!-- server-header-sites-usage:end -->
               </div>
-
-              sdsd3
+              <!-- server-header-machine:end -->
 
               {{if $server.DiskTotalLabel}}
+              <!-- server-header-disk:start -->
               <div class="hosting-server-disk {{$server.DiskStatusClass}}">
+                <!-- server-header-disk-chart:start -->
                 <div class="hosting-server-disk-chart" style="--metric-percent: {{$server.DiskUsedPercent}}%;">
                   <span>{{$server.DiskUsedPercent}}%</span>
                 </div>
+                <!-- server-header-disk-chart:end -->
+                <!-- server-header-disk-copy:start -->
                 <div class="hosting-server-disk-copy">
+                  <!-- server-header-disk-head:start -->
                   <div class="hosting-server-disk-head"><strong>Диск</strong><span>{{$server.DiskUsedLabel}}</span></div>
+                  <!-- server-header-disk-head:end -->
+                  <!-- server-header-disk-detail:start -->
                   <div class="hosting-server-disk-detail">{{$server.DiskFreeLabel}} свободно · {{$server.DiskTotalLabel}} всего</div>
+                  <!-- server-header-disk-detail:end -->
                 </div>
+                <!-- server-header-disk-copy:end -->
               </div>
+              <!-- server-header-disk:end -->
               {{end}}
 
-              sdsd4
-
-
-            <div class="hosting-server-system-metrics">
-              {{range $server.SystemMetrics}}
-              {{if and (ne .Name "OS") (or (ne .Name "CPU") .HasPercent)}}
-              {{if .HasProcessModal}}<button type="button" class="hosting-server-metric hosting-server-metric-button {{.StatusClass}}" data-bs-toggle="modal" data-bs-target="#hostingCPUProcesses{{$serverIndex}}">{{else}}<div class="hosting-server-metric {{.StatusClass}}">{{end}}
-                <div class="hosting-server-metric-head"><strong>{{.Name}}</strong><em class="{{.StatusClass}}">{{.Value}}</em></div>
-                {{if .HasPercent}}<div class="hosting-server-percent-bar" style="--metric-percent: {{.Percent}}%;"><span></span></div>{{end}}
-                <div class="hosting-server-sparkline-frame {{if not .HasSparkline}}hosting-server-sparkline-empty{{end}}">
-                  {{if .HasSparkline}}<svg class="hosting-server-sparkline" viewBox="0 0 100 28" preserveAspectRatio="none" aria-hidden="true"><polyline points="{{.SparklinePoints}}"></polyline></svg>{{end}}
-                </div>
-                {{if .Detail}}<div class="hosting-server-metric-detail">{{.Detail}}{{if .HasProcessModal}} · top 5 процессов{{end}}</div>{{end}}
-              {{if .HasProcessModal}}</button>
-              <div class="modal fade hosting-process-modal" id="hostingCPUProcesses{{$serverIndex}}" tabindex="-1" aria-hidden="true">
-                <div class="modal-dialog modal-dialog-centered">
-                  <div class="modal-content">
-                    <div class="modal-header">
-                      <h2 class="modal-title h5">Top 5 CPU процессов · {{$server.Name}}</h2>
-                      <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Закрыть"></button>
-                    </div>
-                    <div class="modal-body">
-                      <div class="hosting-process-list">
-                        {{range .Processes}}
-                        <div class="hosting-process-row">
-                          <span>{{.Name}}</span>
-                          <span>pid {{.PID}}</span>
-                          <strong>{{printf "%.1f" .CPUPercent}}%</strong>
-                        </div>
-                        {{end}}
-                      </div>
-                    </div>
+              <!-- server-header-system-metrics:start -->
+              <div class="hosting-server-system-metrics">
+                {{range $server.SystemMetrics}}
+                {{if and (ne .Name "OS") (or (ne .Name "CPU") .HasPercent)}}
+                <!-- server-header-metric-card:start -->
+                {{if .HasProcessModal}}<button type="button" class="hosting-server-metric hosting-server-metric-button {{.StatusClass}}" data-bs-toggle="modal" data-bs-target="#hostingCPUProcesses{{$serverIndex}}">{{else}}<div class="hosting-server-metric {{.StatusClass}}">{{end}}
+                  <!-- server-header-metric-head:start -->
+                  <div class="hosting-server-metric-head"><strong>{{.Name}}</strong><em class="{{.StatusClass}}">{{.Value}}</em></div>
+                  <!-- server-header-metric-head:end -->
+                  <!-- server-header-metric-percent:start -->
+                  {{if .HasPercent}}<div class="hosting-server-percent-bar" style="--metric-percent: {{.Percent}}%;"><span></span></div>{{end}}
+                  <!-- server-header-metric-percent:end -->
+                  <!-- server-header-metric-sparkline:start -->
+                  <div class="hosting-server-sparkline-frame {{if not .HasSparkline}}hosting-server-sparkline-empty{{end}}">
+                    {{if .HasSparkline}}<svg class="hosting-server-sparkline" viewBox="0 0 100 28" preserveAspectRatio="none" aria-hidden="true"><polyline points="{{.SparklinePoints}}"></polyline></svg>{{end}}
                   </div>
+                  <!-- server-header-metric-sparkline:end -->
+                  <!-- server-header-metric-detail:start -->
+                  {{if .Detail}}<div class="hosting-server-metric-detail">{{.Detail}}{{if .HasProcessModal}} · top 5 процессов{{end}}</div>{{end}}
+                  <!-- server-header-metric-detail:end -->
+                {{if .HasProcessModal}}</button>
+                <!-- server-header-cpu-process-modal:start -->
+                <div class="modal fade hosting-process-modal" id="hostingCPUProcesses{{$serverIndex}}" tabindex="-1" aria-hidden="true">
+                  <!-- server-header-cpu-process-dialog:start -->
+                  <div class="modal-dialog modal-dialog-centered">
+                    <!-- server-header-cpu-process-content:start -->
+                    <div class="modal-content">
+                      <!-- server-header-cpu-process-header:start -->
+                      <div class="modal-header">
+                        <h2 class="modal-title h5">Top 5 CPU процессов · {{$server.Name}}</h2>
+                        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Закрыть"></button>
+                      </div>
+                      <!-- server-header-cpu-process-header:end -->
+                      <!-- server-header-cpu-process-body:start -->
+                      <div class="modal-body">
+                        <!-- server-header-cpu-process-list:start -->
+                        <div class="hosting-process-list">
+                          {{range .Processes}}
+                          <!-- server-header-cpu-process-row:start -->
+                          <div class="hosting-process-row">
+                            <span>{{.Name}}</span>
+                            <span>pid {{.PID}}</span>
+                            <strong>{{printf "%.1f" .CPUPercent}}%</strong>
+                          </div>
+                          <!-- server-header-cpu-process-row:end -->
+                          {{end}}
+                        </div>
+                        <!-- server-header-cpu-process-list:end -->
+                      </div>
+                      <!-- server-header-cpu-process-body:end -->
+                    </div>
+                    <!-- server-header-cpu-process-content:end -->
+                  </div>
+                  <!-- server-header-cpu-process-dialog:end -->
                 </div>
+                <!-- server-header-cpu-process-modal:end -->
+                {{else}}</div>{{end}}
+                <!-- server-header-metric-card:end -->
+                {{end}}
+                {{end}}
               </div>
-              {{else}}</div>{{end}}
-              {{end}}
-              {{end}}
+              <!-- server-header-system-metrics:end -->
             </div>
-
-            sdsd5
-            
-          </div> 
+            <!-- server-header-topline:end -->
           </div>
+          <!-- server-header:end -->
         </article>
         <div class="hosting-server-details">
           <details open>
