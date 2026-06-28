@@ -79,10 +79,10 @@
           min-width: 0;
         }
 
-        /* server-header-topline: places identity, machine, disk, and metrics in one desktop row. */
+        /* server-header-topline: places identity, machine, and metrics in one desktop row. */
         .technical-page .hosting-server-topline {
           display: grid;
-          grid-template-columns: minmax(0, 1.15fr) minmax(0, 0.75fr) minmax(0, 1fr) minmax(0, 2.1fr);
+          grid-template-columns: minmax(0, 1.15fr) minmax(0, 0.75fr) minmax(0, 3.1fr);
           gap: 10px;
           align-items: stretch;
           min-width: 0;
@@ -253,7 +253,7 @@
           white-space: nowrap;
         }
 
-        /* server-header-system-metrics: lays CPU, load, disk, RAM, uptime, and graph cards in the right area. */
+        /* server-header-system-metrics: lays CPU, queue, disk, RAM, uptime, and graph cards in the right area. */
         .technical-page .hosting-server-system-metrics {
           display: grid;
           grid-template-columns: repeat(auto-fit, minmax(108px, 1fr));
@@ -457,7 +457,7 @@
         /* server-header-responsive: adjusts the header and metric cards on narrower screens. */
         @media (min-width: 901px) and (max-width: 1180px) {
           .technical-page .hosting-server-topline {
-            grid-template-columns: minmax(0, 1.1fr) minmax(0, 0.75fr) minmax(0, 1fr) minmax(0, 1.8fr);
+            grid-template-columns: minmax(0, 1.1fr) minmax(0, 0.75fr) minmax(0, 2.8fr);
           }
 
           .technical-page .hosting-server-system-metrics {
@@ -532,6 +532,7 @@
 .technical-page .hosting-server-system-metrics {
   grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
   grid-auto-flow: row;
+  align-items: start;
 }
 
 /* server-header-metric-compact: smaller metric cards and graphs. */
@@ -542,7 +543,16 @@
 .technical-page .hosting-server-metric:nth-child(4) {
   grid-template-rows: auto auto 30px auto;
   min-height: 88px;
+  height: fit-content;
+  align-self: start;
   padding: 8px;
+}
+
+.technical-page .hosting-server-disk {
+  grid-column: span 2;
+  min-width: min(100%, 248px);
+  height: fit-content;
+  align-self: start;
 }
 
 .technical-page .hosting-server-sparkline-frame {
@@ -577,6 +587,11 @@
   .technical-page .hosting-server-system-metrics {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
+
+  .technical-page .hosting-server-disk {
+    grid-column: 1 / -1;
+    min-width: 0;
+  }
 }
       </style>
       <div class="billing-site-list" data-hosting-server-list>
@@ -585,7 +600,7 @@
           <!-- server-header:start -->
           <div class="hosting-server-head">
             <!-- server-header-topline:start -->
-            <div class="hosting-server-topline {{if not $server.DiskTotalLabel}}hosting-server-topline-no-disk{{end}}">
+            <div class="hosting-server-topline">
               <!-- server-header-identity:start -->
               <div class="hosting-server-identity">
                 <!-- server-header-title:start -->
@@ -596,8 +611,8 @@
                 <!-- server-header-subtitle:end -->
                 <!-- server-header-status-line:start -->
                 <div class="hosting-server-status-line">
-                  <span>Синхронизация: <em class="{{$server.SyncStatusClass}}">{{$server.SyncStatusLabel}}</em></span>
-                  <span>Сеть: <em class="{{$server.NetworkStatusClass}}">{{$server.NetworkStatusLabel}}</em></span>
+                  <span>Синхронизация <em class="{{$server.SyncStatusClass}}">{{$server.SyncStatusLabel}}</em></span>
+                  <span>Доступность: <em class="{{$server.NetworkStatusClass}}">{{$server.NetworkStatusLabel}}</em></span>
                 </div>
                 <!-- server-header-status-line:end -->
               </div>
@@ -611,36 +626,35 @@
                 <!-- server-header-cpu:start -->
                 <div><strong>CPU</strong><span>{{$server.CPULabel}}</span></div>
                 <!-- server-header-cpu:end -->
-                <!-- server-header-sites-usage:start -->
-                {{if $server.TotalUsedLabel}}<div><strong>Сайты</strong><span>{{$server.TotalUsedLabel}}</span></div>{{end}}
-                <!-- server-header-sites-usage:end -->
+                <!-- server-header-sitebrush-version:start -->
+                <div><strong>SiteBrush</strong><span class="{{$server.SitebrushVersionClass}}">{{$server.SitebrushVersionLabel}}</span></div>
+                <!-- server-header-sitebrush-version:end -->
               </div>
               <!-- server-header-machine:end -->
 
-              {{if $server.DiskTotalLabel}}
-              <!-- server-header-disk:start -->
-              <div class="hosting-server-disk {{$server.DiskStatusClass}}">
-                <!-- server-header-disk-chart:start -->
-                <div class="hosting-server-disk-chart" style="--metric-percent: {{$server.DiskUsedPercent}}%;">
-                  <span>{{$server.DiskUsedPercent}}%</span>
-                </div>
-                <!-- server-header-disk-chart:end -->
-                <!-- server-header-disk-copy:start -->
-                <div class="hosting-server-disk-copy">
-                  <!-- server-header-disk-head:start -->
-                  <div class="hosting-server-disk-head"><strong>Диск</strong><span>{{$server.DiskUsedLabel}}</span></div>
-                  <!-- server-header-disk-head:end -->
-                  <!-- server-header-disk-detail:start -->
-                  <div class="hosting-server-disk-detail">{{$server.DiskFreeLabel}} свободно · {{$server.DiskTotalLabel}} всего</div>
-                  <!-- server-header-disk-detail:end -->
-                </div>
-                <!-- server-header-disk-copy:end -->
-              </div>
-              <!-- server-header-disk:end -->
-              {{end}}
-
               <!-- server-header-system-metrics:start -->
               <div class="hosting-server-system-metrics">
+                {{if $server.DiskTotalLabel}}
+                <!-- server-header-disk:start -->
+                <div class="hosting-server-disk {{$server.DiskStatusClass}}">
+                  <!-- server-header-disk-chart:start -->
+                  <div class="hosting-server-disk-chart" style="--metric-percent: {{$server.DiskUsedPercent}}%;">
+                    <span>{{$server.DiskUsedPercent}}%</span>
+                  </div>
+                  <!-- server-header-disk-chart:end -->
+                  <!-- server-header-disk-copy:start -->
+                  <div class="hosting-server-disk-copy">
+                    <!-- server-header-disk-head:start -->
+                    <div class="hosting-server-disk-head"><strong>Диск</strong><span>{{$server.DiskUsedLabel}}</span></div>
+                    <!-- server-header-disk-head:end -->
+                    <!-- server-header-disk-detail:start -->
+                    <div class="hosting-server-disk-detail">{{$server.DiskFreeLabel}} свободно · {{$server.DiskTotalLabel}} всего</div>
+                    <!-- server-header-disk-detail:end -->
+                  </div>
+                  <!-- server-header-disk-copy:end -->
+                </div>
+                <!-- server-header-disk:end -->
+                {{end}}
                 {{range $server.SystemMetrics}}
                 {{if and (ne .Name "OS") (or (ne .Name "CPU") .HasPercent)}}
                 <!-- server-header-metric-card:start -->

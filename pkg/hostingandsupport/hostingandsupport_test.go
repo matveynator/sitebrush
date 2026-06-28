@@ -594,7 +594,7 @@ func TestBuildServerViewsMergesDuplicateLocalAndRemoteServer(t *testing.T) {
 		TotalUsedLabel: "20 GB",
 	}
 
-	servers := BuildServerViews(localServer, []ClientHosting{remoteHosting}, nil)
+	servers := BuildServerViews(localServer, []ClientHosting{remoteHosting}, nil, "v1")
 	if len(servers) != 1 {
 		t.Fatalf("servers = %d, want 1: %#v", len(servers), servers)
 	}
@@ -603,6 +603,58 @@ func TestBuildServerViewsMergesDuplicateLocalAndRemoteServer(t *testing.T) {
 	}
 	if len(servers[0].SystemMetrics) == 0 || servers[0].SystemMetrics[0].Name != "CPU" {
 		t.Fatalf("merged server metrics were not built from remote hosting: %#v", servers[0].SystemMetrics)
+	}
+}
+
+func TestServerClientViewsSortSitesByUsedBytes(t *testing.T) {
+	clients := serverClientViewsFromSites([]ServerSiteView{
+		{Domain: "small.example.com", OwnerEmail: "owner@example.com", UsedBytes: 10},
+		{Domain: "large.example.com", OwnerEmail: "owner@example.com", UsedBytes: 30},
+		{Domain: "alpha.example.com", OwnerEmail: "owner@example.com", UsedBytes: 30},
+	})
+	if len(clients) != 1 {
+		t.Fatalf("clients = %d, want 1: %#v", len(clients), clients)
+	}
+	got := []string{clients[0].Sites[0].Domain, clients[0].Sites[1].Domain, clients[0].Sites[2].Domain}
+	want := []string{"alpha.example.com", "large.example.com", "small.example.com"}
+	for index := range want {
+		if got[index] != want[index] {
+			t.Fatalf("site order = %#v, want %#v", got, want)
+		}
+	}
+}
+
+func TestServerSystemMetricViewsQueuePercentAndStatus(t *testing.T) {
+	tests := []struct {
+		name            string
+		loadAverage     float64
+		wantValue       string
+		wantStatusClass string
+		wantPercent     int
+	}{
+		{name: "full queue is ok", loadAverage: 4, wantValue: "100%", wantStatusClass: "hosting-metric-ok", wantPercent: 100},
+		{name: "over full queue warns", loadAverage: 5, wantValue: "125%", wantStatusClass: "hosting-metric-warning", wantPercent: 100},
+		{name: "double queue is critical", loadAverage: 9, wantValue: "225%", wantStatusClass: "hosting-metric-danger", wantPercent: 100},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			metrics := ServerSystemMetricViews(ClientHosting{CPUCores: 4, LoadAverage: test.loadAverage})
+			var queueMetric ServerMetricView
+			for _, metric := range metrics {
+				if metric.Name == "Очередь" {
+					queueMetric = metric
+				}
+				if metric.Name == "Disk" {
+					t.Fatalf("unexpected Disk metric: %#v", metrics)
+				}
+			}
+			if queueMetric.Name == "" {
+				t.Fatalf("queue metric was not found: %#v", metrics)
+			}
+			if queueMetric.Value != test.wantValue || queueMetric.StatusClass != test.wantStatusClass || queueMetric.Percent != test.wantPercent {
+				t.Fatalf("queue metric = %#v, want value=%q status=%q percent=%d", queueMetric, test.wantValue, test.wantStatusClass, test.wantPercent)
+			}
+		})
 	}
 }
 

@@ -58,6 +58,8 @@ type ServerView struct {
 	SyncStatusClass        string
 	NetworkStatusLabel     string
 	NetworkStatusClass     string
+	SitebrushVersionLabel  string
+	SitebrushVersionClass  string
 	DiskUsedLabel          string
 	DiskUsedPercent        int
 	DiskStatusClass        string
@@ -84,6 +86,7 @@ type ServerSiteView struct {
 	AdminEmails       string
 	PlanName          string
 	PaidStatus        string
+	UsedBytes         int64
 	UsedLabel         string
 	LimitLabel        string
 	OverLimit         bool
@@ -141,14 +144,15 @@ type ServerDiagnosticView struct {
 }
 
 type LocalServerViewInput struct {
-	Sites         []Site
-	Invoices      []Invoice
-	Plans         []Plan
-	Assignments   map[string]ServiceAssignment
-	SystemMetrics []ServerMetricView
-	MainDomain    string
-	CurrentHost   string
-	SiteURL       func(string) string
+	Sites          []Site
+	Invoices       []Invoice
+	Plans          []Plan
+	Assignments    map[string]ServiceAssignment
+	SystemMetrics  []ServerMetricView
+	CompileVersion string
+	MainDomain     string
+	CurrentHost    string
+	SiteURL        func(string) string
 }
 
 func BuildOverview(sites []Site, clientCount int, siteRequests []SiteRequest, invoices []Invoice, hostings []ClientHosting, syncEvents []RegistrySyncEvent, serviceMailEvents []ServiceMailEvent) OverviewView {
@@ -199,11 +203,11 @@ func BuildOverview(sites []Site, clientCount int, siteRequests []SiteRequest, in
 	return view
 }
 
-func BuildServerViews(localServer ServerView, clientHostings []ClientHosting, invoices []Invoice) []ServerView {
+func BuildServerViews(localServer ServerView, clientHostings []ClientHosting, invoices []Invoice, latestSitebrushVersion string) []ServerView {
 	servers := make([]ServerView, 0, len(clientHostings)+1)
 	servers = append(servers, localServer)
 	for _, clientHosting := range clientHostings {
-		remoteServer := BuildRemoteServerView(clientHosting, invoices)
+		remoteServer := BuildRemoteServerView(clientHosting, invoices, latestSitebrushVersion)
 		if len(servers) > 0 && serverViewsLookDuplicate(servers[0], remoteServer) {
 			servers[0] = mergeLocalAndRemoteServerViews(servers[0], remoteServer)
 			continue
@@ -267,16 +271,19 @@ func mergeLocalAndRemoteServerViews(localServer ServerView, remoteServer ServerV
 
 func BuildLocalServerView(input LocalServerViewInput) ServerView {
 	serverName := firstNonEmpty(normalizeDomainName(input.MainDomain), normalizeDomainName(input.CurrentHost), "SiteBrush.com")
+	compileVersion := firstNonEmpty(strings.TrimSpace(input.CompileVersion), "unknown")
 	server := ServerView{
-		ID:                 "local",
-		Name:               serverName,
-		Subtitle:           "локальный сервер SiteBrush",
-		Local:              true,
-		SyncStatusLabel:    "локальные данные",
-		SyncStatusClass:    "billing-sync-ok",
-		NetworkStatusLabel: "проверяется фоновым мониторингом",
-		NetworkStatusClass: "hosting-metric-ok",
-		SystemMetrics:      input.SystemMetrics,
+		ID:                    "local",
+		Name:                  serverName,
+		Subtitle:              "локальный сервер SiteBrush",
+		Local:                 true,
+		SyncStatusLabel:       "локальные данные",
+		SyncStatusClass:       "billing-sync-ok",
+		NetworkStatusLabel:    "проверяется фоновым мониторингом",
+		NetworkStatusClass:    "hosting-metric-ok",
+		SitebrushVersionLabel: sitebrushVersionLabel(compileVersion, compileVersion),
+		SitebrushVersionClass: "hosting-metric-ok",
+		SystemMetrics:         input.SystemMetrics,
 	}
 	if len(server.SystemMetrics) == 0 {
 		server.SystemMetrics = []ServerMetricView{
@@ -300,6 +307,7 @@ func BuildLocalServerView(input LocalServerViewInput) ServerView {
 			AdminEmails:       siteRow.AdminEmails,
 			PlanName:          "Дисковое пространство",
 			PaidStatus:        siteRow.BillingStatusText,
+			UsedBytes:         siteRow.UsedBytes,
 			UsedLabel:         siteRow.UsedLabel,
 			LimitLabel:        siteRow.LimitLabel,
 			OverLimit:         siteRow.UsedPercent >= 100,
@@ -320,28 +328,32 @@ func BuildLocalServerView(input LocalServerViewInput) ServerView {
 	server.UnpaidInvoiceCount = UnpaidInvoiceCount(server.Invoices)
 	server.InvoiceActionLabel, server.InvoiceActionClass = InvoiceAction(server.BillableCount, server.UnpaidInvoiceCount)
 	server.TotalUsedLabel = serverTotalUsedLabel(server.Sites)
+	applyServerDiskFromMetrics(&server)
 	applyServerInvoiceDefaults(&server)
 	return server
 }
 
-func BuildRemoteServerView(clientHosting ClientHosting, invoices []Invoice) ServerView {
+func BuildRemoteServerView(clientHosting ClientHosting, invoices []Invoice, latestSitebrushVersion string) ServerView {
+	sitebrushVersionLabel, sitebrushVersionClass := remoteSitebrushVersionDisplay(clientHosting.SitebrushVersion, latestSitebrushVersion)
 	server := ServerView{
-		ID:                 strings.TrimSpace(clientHosting.InstallationID),
-		Name:               firstNonEmpty(clientHosting.ServerDomain, clientHosting.InstallationID),
-		Subtitle:           firstNonEmpty(clientHosting.ServerStatus, clientHosting.ServerIP, "удалённый сервер SiteBrush"),
-		OwnerEmail:         clientHosting.OwnerEmail,
-		OSLabel:            firstNonEmpty(strings.TrimSpace(clientHosting.OSName+" "+clientHosting.OSVersion), "ОС не передана"),
-		CPULabel:           fmt.Sprintf("%s · %d ядер", firstNonEmpty(clientHosting.CPUModel, "CPU не передан"), clientHosting.CPUCores),
-		SiteCount:          clientHosting.SiteCount,
-		TotalUsedLabel:     clientHosting.TotalUsedLabel,
-		DiskUsedLabel:      clientHosting.DiskUsedLabel,
-		DiskFreeLabel:      clientHosting.DiskFreeLabel,
-		DiskTotalLabel:     clientHosting.DiskTotalLabel,
-		DiskUsedPercent:    clientHosting.DiskUsedPercent,
-		DiskStatusClass:    clientHosting.DiskStatusClass,
-		NetworkStatusLabel: clientHosting.NetworkUptimeLabel,
-		NetworkStatusClass: clientHosting.NetworkStatusClass,
-		SystemMetrics:      ServerSystemMetricViews(clientHosting),
+		ID:                    strings.TrimSpace(clientHosting.InstallationID),
+		Name:                  firstNonEmpty(clientHosting.ServerDomain, clientHosting.InstallationID),
+		Subtitle:              firstNonEmpty(clientHosting.ServerStatus, clientHosting.ServerIP, "удалённый сервер SiteBrush"),
+		OwnerEmail:            clientHosting.OwnerEmail,
+		OSLabel:               firstNonEmpty(strings.TrimSpace(clientHosting.OSName+" "+clientHosting.OSVersion), "ОС не передана"),
+		CPULabel:              fmt.Sprintf("%s · %d ядер", firstNonEmpty(clientHosting.CPUModel, "CPU не передан"), clientHosting.CPUCores),
+		SiteCount:             clientHosting.SiteCount,
+		TotalUsedLabel:        clientHosting.TotalUsedLabel,
+		DiskUsedLabel:         clientHosting.DiskUsedLabel,
+		DiskFreeLabel:         clientHosting.DiskFreeLabel,
+		DiskTotalLabel:        clientHosting.DiskTotalLabel,
+		DiskUsedPercent:       clientHosting.DiskUsedPercent,
+		DiskStatusClass:       clientHosting.DiskStatusClass,
+		NetworkStatusLabel:    clientHosting.NetworkUptimeLabel,
+		NetworkStatusClass:    clientHosting.NetworkStatusClass,
+		SitebrushVersionLabel: sitebrushVersionLabel,
+		SitebrushVersionClass: sitebrushVersionClass,
+		SystemMetrics:         ServerSystemMetricViews(clientHosting),
 	}
 	stale := HostingSyncIsStale(clientHosting.LastSeenAt, time.Now().UTC())
 	if strings.TrimSpace(clientHosting.LastSeenAt) == "" {
@@ -364,6 +376,7 @@ func BuildRemoteServerView(clientHosting ClientHosting, invoices []Invoice) Serv
 			AdminEmails:       strings.Join(site.AdminEmails, ", "),
 			PlanName:          "Дисковое пространство",
 			PaidStatus:        billingPrice.StatusText,
+			UsedBytes:         site.UsedBytes,
 			UsedLabel:         site.UsedLabel,
 			LimitLabel:        site.LimitLabel,
 			OverLimit:         site.OverLimit,
@@ -387,18 +400,17 @@ func BuildRemoteServerView(clientHosting ClientHosting, invoices []Invoice) Serv
 }
 
 func ServerSystemMetricViews(clientHosting ClientHosting) []ServerMetricView {
-	diskLabel := clientHosting.DiskUsedLabel + " занято / " + clientHosting.DiskFreeLabel + " свободно / " + clientHosting.DiskTotalLabel + " всего"
 	topCPUProcesses := clientHosting.TopCPUProcesses
 	if len(topCPUProcesses) == 0 && strings.TrimSpace(clientHosting.TopCPUProcessName) != "" {
 		topCPUProcesses = []HostingSnapshotProcess{{Name: strings.TrimSpace(clientHosting.TopCPUProcessName), PID: clientHosting.TopCPUProcessPID, CPUPercent: clientHosting.TopCPUProcessPercent}}
 	}
+	queuePercent := loadAveragePercent(clientHosting.LoadAverage, clientHosting.CPUCores)
 	return []ServerMetricView{
 		{Name: "CPU", Value: fmt.Sprintf("%.1f%%", clientHosting.CPUUsagePercent), Detail: "загрузка сейчас", StatusClass: clientHosting.CPUStatusClass, Percent: clampPercent(int(math.Round(clientHosting.CPUUsagePercent))), HasPercent: true, SparklinePoints: serverMetricSparklinePoints(clientHosting.ResourceHistory, func(check ServerResourceCheck) float64 { return check.CPUUsagePercent }, 100), HasSparkline: len(clientHosting.ResourceHistory) > 1, HasProcessModal: clientHosting.CPUStatusClass == "hosting-metric-danger" && len(topCPUProcesses) > 0, Processes: topCPUProcesses},
-		{Name: "Load", Value: fmt.Sprintf("%.2f", clientHosting.LoadAverage), Detail: "средняя нагрузка", StatusClass: clientHosting.LoadStatusClass, Percent: loadAveragePercent(clientHosting.LoadAverage, clientHosting.CPUCores), HasPercent: true, SparklinePoints: serverMetricSparklinePoints(clientHosting.ResourceHistory, func(check ServerResourceCheck) float64 { return check.LoadAverage }, math.Max(1, float64(clientHosting.CPUCores))), HasSparkline: len(clientHosting.ResourceHistory) > 1},
-		{Name: "Disk", Value: strconv.Itoa(clientHosting.DiskUsedPercent) + "%", Detail: diskLabel, StatusClass: clientHosting.DiskStatusClass, Percent: clientHosting.DiskUsedPercent, HasPercent: true, SparklinePoints: serverMetricSparklinePoints(clientHosting.ResourceHistory, func(check ServerResourceCheck) float64 { return float64(check.DiskUsedPercent) }, 100), HasSparkline: len(clientHosting.ResourceHistory) > 1},
+		{Name: "Очередь", Value: strconv.Itoa(queuePercent) + "%", Detail: fmt.Sprintf("LA %.2f / %d ядер", clientHosting.LoadAverage, maxCPUCoreCount(clientHosting.CPUCores)), StatusClass: QueueStatusClass(queuePercent), Percent: clampPercent(queuePercent), HasPercent: true, SparklinePoints: serverMetricSparklinePoints(clientHosting.ResourceHistory, func(check ServerResourceCheck) float64 { return check.LoadAverage }, math.Max(1, float64(clientHosting.CPUCores))), HasSparkline: len(clientHosting.ResourceHistory) > 1},
 		{Name: "RAM", Value: firstNonEmpty(clientHosting.RAMTotalLabel, "память не передана"), Detail: "всего на сервере", StatusClass: "hosting-metric-ok"},
 		{Name: "Uptime", Value: clientHosting.ServerUptimeLabel, Detail: "без перезапуска", StatusClass: clientHosting.ServerUptimeClass},
-		{Name: "Сеть", Value: clientHosting.NetworkUptimeLabel, Detail: fmt.Sprintf("последний ответ %d ms", clientHosting.LastResponseMS), StatusClass: clientHosting.NetworkStatusClass},
+		{Name: "Доступность", Value: clientHosting.NetworkUptimeLabel, Detail: fmt.Sprintf("последний ответ %d ms", clientHosting.LastResponseMS), StatusClass: clientHosting.NetworkStatusClass},
 	}
 }
 
@@ -443,11 +455,73 @@ func serverMetricSparklinePoints(history []ServerResourceCheck, value func(Serve
 }
 
 func loadAveragePercent(loadAverage float64, cpuCores int) int {
-	maxValue := float64(cpuCores)
-	if maxValue <= 0 {
-		maxValue = 1
+	maxValue := float64(maxCPUCoreCount(cpuCores))
+	if loadAverage < 0 {
+		loadAverage = 0
 	}
-	return clampPercent(int(math.Round(loadAverage / maxValue * 100)))
+	return int(math.Round(loadAverage / maxValue * 100))
+}
+
+func maxCPUCoreCount(cpuCores int) int {
+	if cpuCores <= 0 {
+		return 1
+	}
+	return cpuCores
+}
+
+func QueueStatusClass(queuePercent int) string {
+	if queuePercent > 200 {
+		return "hosting-metric-danger"
+	}
+	if queuePercent > 100 {
+		return "hosting-metric-warning"
+	}
+	return "hosting-metric-ok"
+}
+
+func sitebrushVersionLabel(serverVersion string, latestVersion string) string {
+	serverVersion = firstNonEmpty(strings.TrimSpace(serverVersion), "unknown")
+	latestVersion = firstNonEmpty(strings.TrimSpace(latestVersion), "unknown")
+	label := serverVersion + " (актуальная " + latestVersion
+	if serverVersion != latestVersion {
+		label += ", устарело"
+	}
+	return label + ")"
+}
+
+func remoteSitebrushVersionDisplay(serverVersion string, latestVersion string) (string, string) {
+	serverVersion = firstNonEmpty(strings.TrimSpace(serverVersion), "unknown")
+	latestVersion = firstNonEmpty(strings.TrimSpace(latestVersion), "unknown")
+	statusClass := "hosting-metric-ok"
+	if serverVersion != latestVersion {
+		statusClass = "hosting-metric-warning"
+	}
+	return sitebrushVersionLabel(serverVersion, latestVersion), statusClass
+}
+
+func applyServerDiskFromMetrics(server *ServerView) {
+	if server == nil {
+		return
+	}
+	metrics := make([]ServerMetricView, 0, len(server.SystemMetrics))
+	for _, metric := range server.SystemMetrics {
+		if strings.TrimSpace(metric.Name) == "Disk" {
+			server.DiskStatusClass = firstNonEmpty(metric.StatusClass, server.DiskStatusClass)
+			server.DiskUsedPercent = metric.Percent
+			if strings.HasSuffix(strings.TrimSpace(metric.Value), "%") {
+				server.DiskUsedLabel = strings.TrimSpace(metric.Value)
+			}
+			diskLabels := strings.Split(metric.Detail, " / ")
+			if len(diskLabels) == 3 {
+				server.DiskUsedLabel = strings.TrimSuffix(strings.TrimSpace(diskLabels[0]), " занято")
+				server.DiskFreeLabel = strings.TrimSuffix(strings.TrimSpace(diskLabels[1]), " свободно")
+				server.DiskTotalLabel = strings.TrimSuffix(strings.TrimSpace(diskLabels[2]), " всего")
+			}
+			continue
+		}
+		metrics = append(metrics, metric)
+	}
+	server.SystemMetrics = metrics
 }
 
 func clampPercent(value int) int {
@@ -824,6 +898,9 @@ func serverClientViewsFromSites(sites []ServerSiteView) []ServerClientView {
 	clients := make([]ServerClientView, 0, len(clientSites))
 	for email, sites := range clientSites {
 		sort.SliceStable(sites, func(left, right int) bool {
+			if sites[left].UsedBytes != sites[right].UsedBytes {
+				return sites[left].UsedBytes > sites[right].UsedBytes
+			}
 			return normalizeDomainName(sites[left].Domain) < normalizeDomainName(sites[right].Domain)
 		})
 		domains := make([]string, 0, len(sites))
@@ -890,6 +967,10 @@ func serverClientEmails(clients []ServerClientView) map[string]struct{} {
 func serverTotalUsedLabel(sites []ServerSiteView) string {
 	var totalBytes int64
 	for _, site := range sites {
+		if site.UsedBytes > 0 {
+			totalBytes += site.UsedBytes
+			continue
+		}
 		parsedBytes, ok := parseSizeLabel(site.UsedLabel)
 		if ok {
 			totalBytes += parsedBytes

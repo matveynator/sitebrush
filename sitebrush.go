@@ -9982,16 +9982,17 @@ func (a *App) hostingAndSupportView(ctx context.Context, r *http.Request) (map[s
 	}
 	hostingAndSupportAttachApprovedSiteRequests(siteRows, approvedSiteRequestsByDomain)
 	localServer := hostingandsupport.BuildLocalServerView(hostingandsupport.LocalServerViewInput{
-		Sites:         siteRows,
-		Invoices:      invoices,
-		Plans:         plans,
-		Assignments:   assignments,
-		SystemMetrics: a.localHostingServerSystemMetrics(ctx),
-		MainDomain:    mainDomain,
-		CurrentHost:   a.siteDomain(ctx, r),
-		SiteURL:       a.hostingAndSupportSiteURL,
+		Sites:          siteRows,
+		Invoices:       invoices,
+		Plans:          plans,
+		Assignments:    assignments,
+		SystemMetrics:  a.localHostingServerSystemMetrics(ctx),
+		CompileVersion: CompileVersion,
+		MainDomain:     mainDomain,
+		CurrentHost:    a.siteDomain(ctx, r),
+		SiteURL:        a.hostingAndSupportSiteURL,
 	})
-	servers := hostingandsupport.BuildServerViews(localServer, clientHostings, invoices)
+	servers := hostingandsupport.BuildServerViews(localServer, clientHostings, invoices, CompileVersion)
 	clients := a.hostingAndSupportClients(ctx, siteRows, nil, nil, clientHostings, invoices)
 	overview := hostingandsupport.BuildOverview(siteRows, 0, pendingSiteRequests, invoices, clientHostings, registrySyncEvents, nil)
 	overview.ServerCount = len(servers)
@@ -14033,6 +14034,9 @@ func (a *App) localHostingServerSystemMetrics(ctx context.Context) []hostingands
 	diskUsedPercent := 0
 	diskLabel := "диск не передан"
 	diskStatusClass := "hosting-metric-warning"
+	diskUsedLabel := ""
+	diskFreeLabel := ""
+	diskTotalLabel := ""
 	if diskOK {
 		diskFreeBytes := int64(freeBytes)
 		diskTotalBytes := int64(totalBytes)
@@ -14046,14 +14050,22 @@ func (a *App) localHostingServerSystemMetrics(ctx context.Context) []hostingands
 			}
 		}
 		diskStatusClass = hostingandsupport.MetricStatusClass(float64(diskUsedPercent), 80, 95)
-		diskLabel = formatFileSize(diskUsedBytes) + " занято / " + formatFileSize(diskFreeBytes) + " свободно / " + formatFileSize(diskTotalBytes) + " всего"
+		diskUsedLabel = formatFileSize(diskUsedBytes)
+		diskFreeLabel = formatFileSize(diskFreeBytes)
+		diskTotalLabel = formatFileSize(diskTotalBytes)
+		diskLabel = diskUsedLabel + " занято / " + diskFreeLabel + " свободно / " + diskTotalLabel + " всего"
 	}
 	osLabel := strings.TrimSpace(osName + " " + osVersion)
+	queuePercent := int(math.Round(math.Max(0, loadAverage) / math.Max(1, float64(cpuCores)) * 100))
+	queueBarPercent := queuePercent
+	if queueBarPercent > 100 {
+		queueBarPercent = 100
+	}
 	return []hostingandsupport.ServerMetricView{
 		{Name: "OS", Value: firstNonEmpty(osLabel, "ОС не передана"), StatusClass: "hosting-metric-ok"},
 		{Name: "CPU", Value: fmt.Sprintf("%s · %d ядер", firstNonEmpty(cpuModel, "CPU не передан"), cpuCores), StatusClass: hostingandsupport.MetricStatusClass(cpuUsagePercent, 80, 95)},
 		{Name: "CPU", Value: fmt.Sprintf("%.1f%%", cpuUsagePercent), Detail: "загрузка сейчас", StatusClass: hostingandsupport.MetricStatusClass(cpuUsagePercent, 80, 95), Percent: int(math.Round(cpuUsagePercent)), HasPercent: true, HasProcessModal: hostingandsupport.MetricStatusClass(cpuUsagePercent, 80, 95) == "hosting-metric-danger" && len(topCPUProcesses) > 0, Processes: hostingSnapshotProcessViews(topCPUProcesses)},
-		{Name: "Load", Value: fmt.Sprintf("%.2f", loadAverage), Detail: "средняя нагрузка", StatusClass: hostingandsupport.LoadAverageStatusClass(loadAverage, cpuCores), Percent: int(math.Round(loadAverage / math.Max(1, float64(cpuCores)) * 100)), HasPercent: true},
+		{Name: "Очередь", Value: strconv.Itoa(queuePercent) + "%", Detail: fmt.Sprintf("LA %.2f / %d ядер", loadAverage, cpuCores), StatusClass: hostingandsupport.QueueStatusClass(queuePercent), Percent: queueBarPercent, HasPercent: true},
 		{Name: "Disk", Value: strconv.Itoa(diskUsedPercent) + "%", Detail: diskLabel, StatusClass: diskStatusClass, Percent: diskUsedPercent, HasPercent: diskOK},
 		{Name: "RAM", Value: firstNonEmpty(formatFileSize(ramTotalBytes), "память не передана"), Detail: "всего на сервере", StatusClass: "hosting-metric-ok"},
 		{Name: "Uptime", Value: hostingandsupport.FormatDurationDays(uptimeSeconds), Detail: "без перезапуска", StatusClass: hostingandsupport.ServerUptimeStatusClass(uptimeSeconds)},
