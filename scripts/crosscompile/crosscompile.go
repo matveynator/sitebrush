@@ -35,8 +35,14 @@ type serverAppTarget struct {
 	goarch string
 }
 
+type buildTargetFilter struct {
+	goos   string
+	goarch string
+}
+
 type desktopBuildOptions struct {
 	rebuildDockerImages bool
+	targetFilter        buildTargetFilter
 }
 
 type buildRequest struct {
@@ -81,12 +87,18 @@ func main() {
 		versionFlag         = flag.String("version", "", "version folder under binaries/; defaults to GITHUB_RUN_NUMBER, then git rev-list count, then git describe")
 		outputRoot          = flag.String("output-dir", "binaries", "root output directory for generated artifacts")
 		modeFlag            = flag.String("mode", string(modeAll), "build scope: all, server-app, or desktop-app")
+		targetOS            = flag.String("os", "", "optional GOOS target filter, for example linux")
+		targetArch          = flag.String("arch", "", "optional GOARCH target filter, for example amd64")
 		rebuildDockerImages = flag.Bool("rebuild-docker-images", false, "rebuild cached Docker builder images before Docker-based desktop builds")
 		syncTargets         syncDestinationFlags
 	)
 	flag.Var(&syncTargets, "sync", "optional repeatable publication target in host=/remote/base format, for example root@sitebrush.com=/var/lib/sitebrush/storage/chroot/sitebrush.com/download")
 	flag.Parse()
 
+	targetFilter := buildTargetFilter{
+		goos:   strings.TrimSpace(*targetOS),
+		goarch: strings.TrimSpace(*targetArch),
+	}
 	mode := buildMode(*modeFlag)
 	if mode == "portable" {
 		mode = modeServerApp
@@ -94,6 +106,7 @@ func main() {
 	if mode == "desktop" {
 		mode = modeDesktopApp
 	}
+	mode = effectiveBuildMode(mode, targetFilter, flagWasSet("mode"))
 	if mode != modeAll && mode != modeServerApp && mode != modeDesktopApp {
 		fatalf("invalid -mode %q", *modeFlag)
 	}
@@ -124,9 +137,12 @@ func main() {
 	fmt.Printf("program: %s\n", *programName)
 	fmt.Printf("version: %s\n", version)
 	fmt.Printf("output: %s\n", outputDir)
+	if targetFilter.active() {
+		fmt.Printf("target filter: %s\n", targetFilter.label())
+	}
 
 	if mode == modeAll || mode == modeServerApp {
-		if err := buildServerAppArtifacts(repoRoot, outputDir, *programName, version); err != nil {
+		if err := buildServerAppArtifacts(repoRoot, outputDir, *programName, version, targetFilter); err != nil {
 			fatalf("server-app build: %v", err)
 		}
 	}
@@ -134,6 +150,7 @@ func main() {
 	if mode == modeAll || mode == modeDesktopApp {
 		if err := buildDesktopAppArtifacts(repoRoot, outputDir, *programName, version, desktopBuildOptions{
 			rebuildDockerImages: *rebuildDockerImages,
+			targetFilter:        targetFilter,
 		}); err != nil {
 			fatalf("desktop-app build: %v", err)
 		}
@@ -153,14 +170,18 @@ func main() {
 	fmt.Println("done")
 }
 
-func buildServerAppArtifacts(repoRoot, outputDir, programName, version string) error {
+func buildServerAppArtifacts(repoRoot, outputDir, programName, version string, targetFilter buildTargetFilter) error {
 	serverAppDir := filepath.Join(outputDir, "server-app")
 	if err := os.MkdirAll(serverAppDir, 0o755); err != nil {
 		return err
 	}
 
 	fmt.Println("== server-app builds ==")
-	for _, target := range serverAppTargets() {
+	targets := filteredServerAppTargets(serverAppTargets(), targetFilter)
+	if len(targets) == 0 {
+		return fmt.Errorf("no server-app targets match %s", targetFilter.label())
+	}
+	for _, target := range targets {
 		artifactName := serverAppArtifactName(programName, target.goos, target.goarch)
 		artifactPath := filepath.Join(serverAppDir, artifactName)
 		fmt.Printf("build %s/%s -> %s\n", target.goos, target.goarch, artifactPath)
@@ -184,19 +205,28 @@ func buildDesktopAppArtifacts(repoRoot, outputDir, programName, version string, 
 		return err
 	}
 
-	if runtime.GOOS == "darwin" {
+	builtAny := false
+	if options.targetFilter.matches("darwin", "universal") && runtime.GOOS == "darwin" {
 		if err := buildMacOSDesktopArtifacts(repoRoot, desktopDir, programName, version); err != nil {
 			return err
 		}
-	} else {
+		builtAny = true
+	} else if options.targetFilter.matches("darwin", "universal") {
 		fmt.Printf("skip macOS desktop build on host %s\n", runtime.GOOS)
 	}
 
-	if err := buildLinuxDesktopArtifacts(repoRoot, desktopDir, programName, version, options); err != nil {
+	linuxBuilt, err := buildLinuxDesktopArtifacts(repoRoot, desktopDir, programName, version, options)
+	if err != nil {
 		return err
 	}
-	if err := buildWindowsDesktopArtifacts(repoRoot, desktopDir, programName, version, options); err != nil {
+	builtAny = builtAny || linuxBuilt
+	windowsBuilt, err := buildWindowsDesktopArtifacts(repoRoot, desktopDir, programName, version, options)
+	if err != nil {
 		return err
+	}
+	builtAny = builtAny || windowsBuilt
+	if !builtAny {
+		return fmt.Errorf("no desktop-app targets match %s", options.targetFilter.label())
 	}
 
 	if err := cleanupDesktopBuildIntermediates(desktopDir); err != nil {
@@ -267,13 +297,12 @@ func buildMacOSDesktopArtifacts(repoRoot, desktopDir, programName, version strin
 	return nil
 }
 
-func buildLinuxDesktopArtifacts(repoRoot, desktopDir, programName, version string, options desktopBuildOptions) error {
+func buildLinuxDesktopArtifacts(repoRoot, desktopDir, programName, version string, options desktopBuildOptions) (bool, error) {
 	fmt.Println("== Linux desktop builds via docker ==")
-	if !commandExists("docker") {
-		return fmt.Errorf("docker is required to build Linux desktop variants")
+	if !options.targetFilter.matchesOS("linux") {
+		return false, nil
 	}
-
-	for _, target := range []struct {
+	targets := []struct {
 		goarch  string
 		variant string
 	}{
@@ -281,27 +310,58 @@ func buildLinuxDesktopArtifacts(repoRoot, desktopDir, programName, version strin
 		{goarch: "amd64", variant: "gtk41"},
 		{goarch: "arm64", variant: "gtk40"},
 		{goarch: "arm64", variant: "gtk41"},
-	} {
+	}
+	matchingTargets := make([]struct {
+		goarch  string
+		variant string
+	}, 0, len(targets))
+	for _, target := range targets {
+		if !options.targetFilter.matches("linux", target.goarch) {
+			continue
+		}
+		matchingTargets = append(matchingTargets, target)
+	}
+	if len(matchingTargets) == 0 {
+		return false, nil
+	}
+	if !commandExists("docker") {
+		return false, fmt.Errorf("docker is required to build Linux desktop variants")
+	}
+
+	for _, target := range matchingTargets {
 		if err := buildLinuxDesktopArtifactInDocker(repoRoot, desktopDir, programName, version, target.goarch, target.variant, options); err != nil {
-			return err
+			return false, err
 		}
 	}
 
-	return nil
+	return true, nil
 }
 
-func buildWindowsDesktopArtifacts(repoRoot, desktopDir, programName, version string, options desktopBuildOptions) error {
+func buildWindowsDesktopArtifacts(repoRoot, desktopDir, programName, version string, options desktopBuildOptions) (bool, error) {
 	fmt.Println("== Windows desktop builds via docker ==")
+	if !options.targetFilter.matchesOS("windows") {
+		return false, nil
+	}
+	matchingArchitectures := make([]string, 0, 2)
+	for _, goarch := range []string{"amd64", "arm64"} {
+		if !options.targetFilter.matches("windows", goarch) {
+			continue
+		}
+		matchingArchitectures = append(matchingArchitectures, goarch)
+	}
+	if len(matchingArchitectures) == 0 {
+		return false, nil
+	}
 	if !commandExists("docker") {
-		return fmt.Errorf("docker is required to build Windows desktop variants")
+		return false, fmt.Errorf("docker is required to build Windows desktop variants")
 	}
 
-	for _, goarch := range []string{"amd64", "arm64"} {
+	for _, goarch := range matchingArchitectures {
 		if err := buildWindowsDesktopArtifactInDocker(repoRoot, desktopDir, programName, version, goarch, options); err != nil {
-			return err
+			return false, err
 		}
 	}
-	return nil
+	return true, nil
 }
 
 func buildLinuxDesktopArtifactInDocker(repoRoot, desktopDir, programName, version, goarch, variant string, options desktopBuildOptions) error {
@@ -512,6 +572,58 @@ func serverAppTargets() []serverAppTarget {
 		{goos: "windows", goarch: "amd64"},
 		{goos: "windows", goarch: "arm64"},
 	}
+}
+
+func filteredServerAppTargets(targets []serverAppTarget, targetFilter buildTargetFilter) []serverAppTarget {
+	if !targetFilter.active() {
+		return targets
+	}
+	filteredTargets := make([]serverAppTarget, 0, len(targets))
+	for _, target := range targets {
+		if targetFilter.matches(target.goos, target.goarch) {
+			filteredTargets = append(filteredTargets, target)
+		}
+	}
+	return filteredTargets
+}
+
+func (targetFilter buildTargetFilter) active() bool {
+	return targetFilter.goos != "" || targetFilter.goarch != ""
+}
+
+func (targetFilter buildTargetFilter) matches(goos, goarch string) bool {
+	if targetFilter.goos != "" && targetFilter.goos != goos {
+		return false
+	}
+	if targetFilter.goarch != "" && targetFilter.goarch != goarch {
+		return false
+	}
+	return true
+}
+
+func (targetFilter buildTargetFilter) matchesOS(goos string) bool {
+	return targetFilter.goos == "" || targetFilter.goos == goos
+}
+
+func (targetFilter buildTargetFilter) label() string {
+	parts := make([]string, 0, 2)
+	if targetFilter.goos != "" {
+		parts = append(parts, "os="+targetFilter.goos)
+	}
+	if targetFilter.goarch != "" {
+		parts = append(parts, "arch="+targetFilter.goarch)
+	}
+	if len(parts) == 0 {
+		return "all targets"
+	}
+	return strings.Join(parts, " ")
+}
+
+func effectiveBuildMode(mode buildMode, targetFilter buildTargetFilter, modeWasSet bool) buildMode {
+	if mode == modeAll && targetFilter.active() && !modeWasSet {
+		return modeServerApp
+	}
+	return mode
 }
 
 func serverAppArtifactName(programName, goos, goarch string) string {
@@ -751,6 +863,16 @@ func parseSyncDestination(value string) (syncDestination, error) {
 		return syncDestination{}, errors.New("sync target remote base is empty")
 	}
 	return syncDestination{host: host, base: base}, nil
+}
+
+func flagWasSet(name string) bool {
+	found := false
+	flag.Visit(func(parsedFlag *flag.Flag) {
+		if parsedFlag.Name == name {
+			found = true
+		}
+	})
+	return found
 }
 
 func remoteSyncDirectory(syncBase string) string {

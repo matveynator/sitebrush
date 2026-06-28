@@ -28,6 +28,11 @@ Optional rsync publication:
 go run ./scripts/crosscompile -version 123 -sync deploy@example.com=/srv/releases
 ```
 
+Fast server-only build for one target:
+```bash
+go run ./scripts/crosscompile -version 123 -os linux -arch amd64 -sync deploy@example.com=/srv/releases
+```
+
 The script writes artifacts to `binaries/<version>/server-app` and
 `binaries/<version>/desktop-app`, updates `binaries/latest`, and mirrors the
 release layout used in `.github/workflows/release.yml`.

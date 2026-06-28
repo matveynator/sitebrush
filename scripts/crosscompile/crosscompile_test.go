@@ -34,6 +34,50 @@ func TestServerAppTargets(t *testing.T) {
 	}
 }
 
+func TestFilteredServerAppTargets(t *testing.T) {
+	t.Parallel()
+
+	targets := filteredServerAppTargets(serverAppTargets(), buildTargetFilter{goos: "linux", goarch: "amd64"})
+	if len(targets) != 1 {
+		t.Fatalf("filtered targets = %d, want 1: %#v", len(targets), targets)
+	}
+	if targets[0].goos != "linux" || targets[0].goarch != "amd64" {
+		t.Fatalf("filtered target = %#v, want linux/amd64", targets[0])
+	}
+}
+
+func TestFilteredServerAppTargetsCanSelectOneOS(t *testing.T) {
+	t.Parallel()
+
+	targets := filteredServerAppTargets(serverAppTargets(), buildTargetFilter{goos: "openbsd"})
+	if len(targets) != 2 {
+		t.Fatalf("filtered targets = %d, want openbsd amd64 and arm64: %#v", len(targets), targets)
+	}
+	for _, target := range targets {
+		if target.goos != "openbsd" {
+			t.Fatalf("filtered target = %#v, want only openbsd", target)
+		}
+	}
+}
+
+func TestEffectiveBuildModeUsesServerAppForImplicitFilteredBuilds(t *testing.T) {
+	t.Parallel()
+
+	got := effectiveBuildMode(modeAll, buildTargetFilter{goos: "linux", goarch: "amd64"}, false)
+	if got != modeServerApp {
+		t.Fatalf("effectiveBuildMode() = %q, want %q", got, modeServerApp)
+	}
+}
+
+func TestEffectiveBuildModeKeepsExplicitAll(t *testing.T) {
+	t.Parallel()
+
+	got := effectiveBuildMode(modeAll, buildTargetFilter{goos: "linux", goarch: "amd64"}, true)
+	if got != modeAll {
+		t.Fatalf("effectiveBuildMode() = %q, want %q", got, modeAll)
+	}
+}
+
 func TestServerAppArtifactName(t *testing.T) {
 	t.Parallel()
 
