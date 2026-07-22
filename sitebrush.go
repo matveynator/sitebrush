@@ -206,9 +206,10 @@ type renderTemplateResponse struct {
 }
 
 type hostingAndSupportPanelRequest struct {
-	kind    string
-	metrics []hostingandsupport.ServerMetricView
-	reply   chan hostingAndSupportPanelResponse
+	kind        string
+	metrics     []hostingandsupport.ServerMetricView
+	quotaChange siteQuotaRow
+	reply       chan hostingAndSupportPanelResponse
 }
 
 type hostingAndSupportPanelResponse struct {
@@ -217,8 +218,9 @@ type hostingAndSupportPanelResponse struct {
 }
 
 type hostingAndSupportPanelBuildResult struct {
-	snapshot hostingAndSupportPanelSnapshot
-	err      error
+	snapshot   hostingAndSupportPanelSnapshot
+	generation uint64
+	err        error
 }
 
 type hostingAndSupportPanelSnapshot struct {
@@ -9896,6 +9898,7 @@ func (a *App) runHostingAndSupportPanelProcess(stop <-chan struct{}, requests <-
 	fullRefreshTicker := time.NewTicker(hostingAndSupportFullRefreshInterval)
 	defer fullRefreshTicker.Stop()
 	snapshot := initialSnapshot
+	snapshotGeneration := uint64(0)
 	buildRunning := false
 	buildPending := false
 	startBuild := func() {
@@ -9904,19 +9907,10 @@ func (a *App) runHostingAndSupportPanelProcess(stop <-chan struct{}, requests <-
 			return
 		}
 		buildRunning = true
+		buildGeneration := snapshotGeneration
 		go func() {
 			builtSnapshot, buildErr := a.collectHostingAndSupportPanelSnapshot(context.Background(), controlDatabase)
-			if buildErr == nil && controlDatabase != nil {
-				payload, encodeErr := json.Marshal(builtSnapshot)
-				if encodeErr != nil {
-					buildErr = encodeErr
-				} else {
-					buildErr = (hostingandsupport.Store{DB: controlDatabase}).SavePanelSnapshot(context.Background(), hostingandsupport.PanelSnapshotRecord{
-						Version: hostingAndSupportPanelSnapshotVersion, PayloadJSON: string(payload), BuiltAt: builtSnapshot.BuiltAt,
-					})
-				}
-			}
-			buildResults <- hostingAndSupportPanelBuildResult{snapshot: builtSnapshot, err: buildErr}
+			buildResults <- hostingAndSupportPanelBuildResult{snapshot: builtSnapshot, generation: buildGeneration, err: buildErr}
 		}()
 	}
 	startBuild()
@@ -9935,13 +9929,22 @@ func (a *App) runHostingAndSupportPanelProcess(stop <-chan struct{}, requests <-
 				startBuild()
 			case "metrics":
 				snapshot = a.applyHostingAndSupportPanelMetrics(snapshot, request.metrics)
+			case "quota_changed":
+				snapshotGeneration++
+				snapshot = a.applyHostingAndSupportPanelQuotaChange(snapshot, request.quotaChange)
+				persistErr := saveHostingAndSupportPanelSnapshot(controlDatabase, snapshot)
+				request.reply <- hostingAndSupportPanelResponse{snapshot: snapshot, err: persistErr}
+				startBuild()
 			}
 		case result := <-buildResults:
 			buildRunning = false
 			if result.err != nil {
 				log.Printf("hosting panel snapshot refresh failed: %v", result.err)
-			} else {
+			} else if result.generation == snapshotGeneration {
 				snapshot = result.snapshot
+				if persistErr := saveHostingAndSupportPanelSnapshot(controlDatabase, snapshot); persistErr != nil {
+					log.Printf("hosting panel snapshot save failed: %v", persistErr)
+				}
 			}
 			if buildPending {
 				buildPending = false
@@ -9989,6 +9992,31 @@ func (a *App) preparedHostingAndSupportPanelSnapshot() (hostingAndSupportPanelSn
 	a.hostingAndSupportPanel <- hostingAndSupportPanelRequest{kind: "get", reply: reply}
 	response := <-reply
 	return response.snapshot, response.err == nil
+}
+
+func (a *App) applyPreparedHostingAndSupportQuotaChange(quotaChange siteQuotaRow) {
+	if a == nil || a.hostingAndSupportPanel == nil {
+		return
+	}
+	reply := make(chan hostingAndSupportPanelResponse, 1)
+	a.hostingAndSupportPanel <- hostingAndSupportPanelRequest{kind: "quota_changed", quotaChange: quotaChange, reply: reply}
+	response := <-reply
+	if response.err != nil {
+		log.Printf("hosting panel quota snapshot save failed: %v", response.err)
+	}
+}
+
+func saveHostingAndSupportPanelSnapshot(controlDatabase *sql.DB, snapshot hostingAndSupportPanelSnapshot) error {
+	if controlDatabase == nil {
+		return nil
+	}
+	payload, err := json.Marshal(snapshot)
+	if err != nil {
+		return err
+	}
+	return (hostingandsupport.Store{DB: controlDatabase}).SavePanelSnapshot(context.Background(), hostingandsupport.PanelSnapshotRecord{
+		Version: hostingAndSupportPanelSnapshotVersion, PayloadJSON: string(payload), BuiltAt: snapshot.BuiltAt,
+	})
 }
 
 func (a *App) hostingAndSupportDemoPaymentPage(w http.ResponseWriter, r *http.Request) {
@@ -10250,6 +10278,42 @@ func (a *App) applyHostingAndSupportPanelMetrics(snapshot hostingAndSupportPanel
 	snapshot.Servers = hostingandsupport.BuildServerViews(localServer, snapshot.ClientHostings, snapshot.Invoices, CompileVersion)
 	snapshot.Overview.ServerCount = len(snapshot.Servers)
 	snapshot.MetricsBuiltAt = time.Now().UTC().Format(time.RFC3339)
+	return snapshot
+}
+
+func (a *App) applyHostingAndSupportPanelQuotaChange(snapshot hostingAndSupportPanelSnapshot, quotaChange siteQuotaRow) hostingAndSupportPanelSnapshot {
+	domain := normalizeQuotaDomainName(quotaChange.Domain)
+	for siteIndex := range snapshot.Sites {
+		if normalizeQuotaDomainName(snapshot.Sites[siteIndex].Domain) != domain {
+			continue
+		}
+		freeBytes := quotaChange.LimitBytes - quotaChange.UsedBytes
+		if freeBytes < 0 {
+			freeBytes = 0
+		}
+		usedPercent := 0
+		if quotaChange.LimitBytes > 0 {
+			usedPercent = int(math.Round(float64(quotaChange.UsedBytes) / float64(quotaChange.LimitBytes) * 100))
+			if usedPercent > 100 {
+				usedPercent = 100
+			}
+		}
+		snapshot.Sites[siteIndex].UsedBytes = quotaChange.UsedBytes
+		snapshot.Sites[siteIndex].UsedLabel = formatFileSize(quotaChange.UsedBytes)
+		snapshot.Sites[siteIndex].LimitLabel = formatFileSize(quotaChange.LimitBytes)
+		snapshot.Sites[siteIndex].FreeLabel = formatFileSize(freeBytes)
+		snapshot.Sites[siteIndex].UsedPercent = usedPercent
+		snapshot.Sites[siteIndex].QuotaInput = hostingandsupport.FormatQuotaInput(quotaChange.LimitBytes)
+	}
+	metrics := []hostingandsupport.ServerMetricView(nil)
+	for _, server := range snapshot.Servers {
+		if server.Local {
+			metrics = server.SystemMetrics
+			break
+		}
+	}
+	snapshot = a.applyHostingAndSupportPanelMetrics(snapshot, metrics)
+	snapshot.BuiltAt = time.Now().UTC().Format(time.RFC3339)
 	return snapshot
 }
 
@@ -11611,9 +11675,11 @@ func (a *App) updateManagedSiteQuotaFromForm(r *http.Request) string {
 	if !quotaRequested {
 		return translationOrDefault(translations, "billing_status_quota_required", "Quota is required.")
 	}
-	if _, err := a.updateSiteQuotaLimit(r.Context(), domain, quotaBytes); err != nil {
+	updatedQuota, err := a.updateSiteQuotaLimit(r.Context(), domain, quotaBytes)
+	if err != nil {
 		return err.Error()
 	}
+	a.applyPreparedHostingAndSupportQuotaChange(updatedQuota)
 	a.logHostingSupportEvent(r.Context(), "quota_changed", "saved", "", domain, "site quota saved")
 	a.reportHostingSnapshotAsync(r.Context())
 	return fmt.Sprintf(translationOrDefault(translations, "billing_status_site_settings_saved", "Site %s settings were saved."), domain)

@@ -1170,6 +1170,35 @@ func TestHostingAndSupportViewUsesPreparedSnapshot(t *testing.T) {
 	}
 }
 
+func TestApplyHostingAndSupportPanelQuotaChangeUpdatesServerView(t *testing.T) {
+	application := &App{}
+	snapshot := hostingAndSupportPanelSnapshot{
+		Version:    hostingAndSupportPanelSnapshotVersion,
+		MainDomain: "sitebrush.com",
+		Sites: []hostingandsupport.Site{{
+			Domain:      "sitebrush.com",
+			UsedBytes:   24 * 1024 * 1024 * 1024,
+			UsedLabel:   "24.0 GB",
+			LimitLabel:  "20.0 GB",
+			QuotaInput:  "20gb",
+			UsedPercent: 100,
+		}},
+	}
+
+	updatedSnapshot := application.applyHostingAndSupportPanelQuotaChange(snapshot, siteQuotaRow{
+		Domain:     "sitebrush.com",
+		UsedBytes:  24 * 1024 * 1024 * 1024,
+		LimitBytes: 30 * 1024 * 1024 * 1024,
+	})
+
+	if len(updatedSnapshot.Sites) != 1 || updatedSnapshot.Sites[0].QuotaInput != "30gb" || updatedSnapshot.Sites[0].LimitLabel != "30.0 GB" || updatedSnapshot.Sites[0].UsedPercent != 80 {
+		t.Fatalf("updated site quota = %#v", updatedSnapshot.Sites)
+	}
+	if len(updatedSnapshot.Servers) != 1 || len(updatedSnapshot.Servers[0].Sites) != 1 || updatedSnapshot.Servers[0].Sites[0].QuotaInput != "30gb" || updatedSnapshot.Servers[0].Sites[0].LimitLabel != "30.0 GB" {
+		t.Fatalf("updated server quota = %#v", updatedSnapshot.Servers)
+	}
+}
+
 func TestRenderTemplateProcessUsesPreparedTemplate(t *testing.T) {
 	stop := make(chan struct{})
 	requests := startRenderTemplateProcess(stop)

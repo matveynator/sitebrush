@@ -58,7 +58,7 @@ func TestBuildSitesIncludesAssignedPlanQuotaLabels(t *testing.T) {
 		{
 			Domain:     "paid.example.com",
 			UsedBytes:  5 * 1024 * 1024 * 1024,
-			LimitBytes: 20 * 1024 * 1024 * 1024,
+			LimitBytes: 30 * 1024 * 1024 * 1024,
 		},
 		{
 			Domain:     "free.example.com",
@@ -74,6 +74,9 @@ func TestBuildSitesIncludesAssignedPlanQuotaLabels(t *testing.T) {
 	paidSite := sitesByDomain["paid.example.com"]
 	if paidSite.PlanName != "Pro" || paidSite.PlanQuotaLabel != "20 GB" {
 		t.Fatalf("paid site plan = %q %q, want Pro 20 GB", paidSite.PlanName, paidSite.PlanQuotaLabel)
+	}
+	if paidSite.QuotaInput != "30gb" || paidSite.LimitLabel != "30.0 GB" {
+		t.Fatalf("paid site quota = input:%q label:%q, want actual 30 GB limit", paidSite.QuotaInput, paidSite.LimitLabel)
 	}
 	freeSite := sitesByDomain["free.example.com"]
 	if freeSite.PlanName != "" || freeSite.PlanQuotaLabel != "" {

@@ -2474,9 +2474,6 @@ func BuildSitesWithDemoAndMainDomain(usages []SiteUsage, plans []Plan, assignmen
 			if plan, found := planByID[assignment.PlanID]; found {
 				planName = plan.Name
 				planQuotaLabel = plan.QuotaLabel
-				if plan.QuotaBytes > 0 {
-					quotaInput = FormatQuotaInput(plan.QuotaBytes)
-				}
 			}
 		}
 		isDemo := strings.TrimSpace(usage.Domain) != "" && strings.EqualFold(strings.TrimSpace(usage.Domain), strings.TrimSpace(demoDomain))
