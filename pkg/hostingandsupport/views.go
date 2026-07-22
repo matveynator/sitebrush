@@ -4,11 +4,21 @@ import (
 	"fmt"
 	"math"
 	"net"
+	"net/netip"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
 )
+
+var nonPublicHostingIPPrefixes = []netip.Prefix{
+	netip.MustParsePrefix("100.64.0.0/10"),
+	netip.MustParsePrefix("192.0.2.0/24"),
+	netip.MustParsePrefix("198.18.0.0/15"),
+	netip.MustParsePrefix("198.51.100.0/24"),
+	netip.MustParsePrefix("203.0.113.0/24"),
+	netip.MustParsePrefix("2001:db8::/32"),
+}
 
 // View models live in the hosting package because the section is a control plane,
 // while sitebrush.go only wires HTTP requests and application-specific callbacks.
@@ -563,6 +573,169 @@ func FastServerHostings(clientHostings []ClientHosting) []ClientHosting {
 	return hostings
 }
 
+const DesktopQualificationMinimumAge = 7 * 24 * time.Hour
+const DesktopQualificationMinimumAvailability = 90.0
+const HostingSnapshotFreshness = 15 * time.Minute
+const HostingArchiveAfter = 24 * time.Hour
+
+const QualificationReasonUpdateRequired = "update_required"
+const QualificationReasonObservation = "observation_period"
+const QualificationReasonAvailability = "availability"
+const QualificationReasonSnapshotStale = "snapshot_stale"
+const QualificationReasonEmail = "email_unverified"
+const QualificationReasonPublicIP = "public_ip"
+const QualificationReasonDomain = "domain_unverified"
+
+type DesktopHostingGroup struct {
+	ServerIP string
+	Hostings []ClientHosting
+}
+
+func ClassifyClientHostings(clientHostings []ClientHosting, now time.Time) ([]ClientHosting, []DesktopHostingGroup, []ClientHosting) {
+	production := make([]ClientHosting, 0, len(clientHostings))
+	temporary := make([]ClientHosting, 0, len(clientHostings))
+	archived := make([]ClientHosting, 0, len(clientHostings))
+	for _, clientHosting := range clientHostings {
+		clientHosting = classifyClientHosting(clientHosting, now)
+		if clientHosting.Archived {
+			archived = append(archived, clientHosting)
+			continue
+		}
+		if clientHosting.Qualified {
+			production = append(production, clientHosting)
+			continue
+		}
+		if clientHosting.InstallationKind == InstallationKindServer {
+			continue
+		}
+		temporary = append(temporary, clientHosting)
+	}
+	return production, groupDesktopHostings(temporary), archived
+}
+
+func classifyClientHosting(clientHosting ClientHosting, now time.Time) ClientHosting {
+	lastSeenAt, lastSeenValid := parseHostingTime(clientHosting.LastSeenAt)
+	clientHosting.Archived = !lastSeenValid || now.Sub(lastSeenAt) > HostingArchiveAfter
+	if clientHosting.Archived {
+		return clientHosting
+	}
+	if clientHosting.InstallationKind == InstallationKindServer {
+		clientHosting.Qualified = clientHostingLooksPublic(clientHosting)
+		if !clientHosting.Qualified {
+			clientHosting.QualificationReasons = []string{QualificationReasonPublicIP}
+		}
+		return clientHosting
+	}
+	if clientHosting.SnapshotVersion < 2 || clientHosting.InstallationKind != InstallationKindDesktop {
+		clientHosting.QualificationReasons = append(clientHosting.QualificationReasons, QualificationReasonUpdateRequired)
+	}
+	observationStartedAt, observationValid := parseHostingTime(clientHosting.ObservationStartedAt)
+	observationAge := time.Duration(0)
+	if observationValid {
+		observationAge = now.Sub(observationStartedAt)
+		expectedSlots := int(observationAge/DesktopPresenceInterval) + 1
+		if expectedSlots > 0 {
+			observedSlots := clientHosting.PresenceSlots
+			if observedSlots > expectedSlots {
+				observedSlots = expectedSlots
+			}
+			clientHosting.AvailabilityPercent = math.Round(float64(observedSlots)/float64(expectedSlots)*10000) / 100
+		}
+	}
+	clientHosting.AvailabilityLabel = fmt.Sprintf("%.2f%%", clientHosting.AvailabilityPercent)
+	if !observationValid || observationAge < DesktopQualificationMinimumAge {
+		clientHosting.QualificationReasons = append(clientHosting.QualificationReasons, QualificationReasonObservation)
+	}
+	if clientHosting.AvailabilityPercent < DesktopQualificationMinimumAvailability {
+		clientHosting.QualificationReasons = append(clientHosting.QualificationReasons, QualificationReasonAvailability)
+	}
+	if now.Sub(lastSeenAt) > HostingSnapshotFreshness {
+		clientHosting.QualificationReasons = append(clientHosting.QualificationReasons, QualificationReasonSnapshotStale)
+	}
+	if !clientHosting.OwnerEmailVerified {
+		clientHosting.QualificationReasons = append(clientHosting.QualificationReasons, QualificationReasonEmail)
+	}
+	if !clientHostingHasPublicIP(clientHosting) {
+		clientHosting.QualificationReasons = append(clientHosting.QualificationReasons, QualificationReasonPublicIP)
+	}
+	verifiedSites := verifiedClientHostingSites(clientHosting.Sites, now)
+	if len(verifiedSites) == 0 {
+		clientHosting.QualificationReasons = append(clientHosting.QualificationReasons, QualificationReasonDomain)
+	}
+	clientHosting.Qualified = len(clientHosting.QualificationReasons) == 0
+	if clientHosting.Qualified {
+		clientHosting.Sites = verifiedSites
+		recalculateClientHostingSites(&clientHosting)
+	}
+	return clientHosting
+}
+
+func verifiedClientHostingSites(sites []ClientHostingSite, now time.Time) []ClientHostingSite {
+	verifiedSites := make([]ClientHostingSite, 0, len(sites))
+	for _, site := range sites {
+		checkedAt, valid := parseHostingTime(site.ReachabilityCheckedAt)
+		if valid && now.Sub(checkedAt) <= HostingSnapshotFreshness && site.DNSMatchesServer && site.ReachableByServer {
+			verifiedSites = append(verifiedSites, site)
+		}
+	}
+	return verifiedSites
+}
+
+func recalculateClientHostingSites(clientHosting *ClientHosting) {
+	clientHosting.SiteCount = len(clientHosting.Sites)
+	clientHosting.TotalUsedBytes = 0
+	emails := make(map[string]struct{})
+	if email := strings.TrimSpace(clientHosting.OwnerEmail); email != "" {
+		emails[email] = struct{}{}
+	}
+	for _, site := range clientHosting.Sites {
+		clientHosting.TotalUsedBytes += site.UsedBytes
+		if email := strings.TrimSpace(site.OwnerEmail); email != "" {
+			emails[email] = struct{}{}
+		}
+		for _, email := range site.AdminEmails {
+			emails[email] = struct{}{}
+		}
+	}
+	clientHosting.TotalUsedLabel = FormatFileSize(clientHosting.TotalUsedBytes)
+	clientHosting.ClientEmails = sortedStringsFromMap(emails)
+}
+
+func groupDesktopHostings(hostings []ClientHosting) []DesktopHostingGroup {
+	groupIndexByIP := make(map[string]int)
+	groups := make([]DesktopHostingGroup, 0, len(hostings))
+	for _, hosting := range hostings {
+		serverIP := strings.TrimSpace(hosting.ServerIP)
+		if serverIP == "" {
+			serverIP = "unknown"
+		}
+		groupIndex, found := groupIndexByIP[serverIP]
+		if !found {
+			groupIndex = len(groups)
+			groupIndexByIP[serverIP] = groupIndex
+			groups = append(groups, DesktopHostingGroup{ServerIP: serverIP})
+		}
+		groups[groupIndex].Hostings = append(groups[groupIndex].Hostings, hosting)
+	}
+	sort.Slice(groups, func(leftIndex, rightIndex int) bool {
+		return groups[leftIndex].ServerIP < groups[rightIndex].ServerIP
+	})
+	return groups
+}
+
+func parseHostingTime(rawTime string) (time.Time, bool) {
+	parsedTime, err := time.Parse(time.RFC3339, strings.TrimSpace(rawTime))
+	return parsedTime, err == nil
+}
+
+func ClientHostingLooksPublic(clientHosting ClientHosting) bool {
+	return clientHostingLooksPublic(clientHosting)
+}
+
+func ClientHostingHasPublicIP(clientHosting ClientHosting) bool {
+	return clientHostingHasPublicIP(clientHosting)
+}
+
 func RealClientHostings(clientHostings []ClientHosting, domainMatches func(string, string) bool) []ClientHosting {
 	realHostings := make([]ClientHosting, 0, len(clientHostings))
 	for _, clientHosting := range clientHostings {
@@ -1028,13 +1201,29 @@ func parseSizeLabel(label string) (int64, bool) {
 
 func clientHostingLooksPublic(clientHosting ClientHosting) bool {
 	serverDomain := normalizeDomainName(clientHosting.ServerDomain)
-	serverIP := strings.TrimSpace(clientHosting.ServerIP)
-	parsedIP := net.ParseIP(serverIP)
+	parsedIP := net.ParseIP(strings.TrimSpace(clientHosting.ServerIP))
 	if parsedIP == nil || parsedIP.IsLoopback() || parsedIP.IsPrivate() || parsedIP.IsUnspecified() {
 		return false
 	}
 	if serverDomain == "" || serverDomain == "localhost" || strings.HasSuffix(serverDomain, ".localhost") || net.ParseIP(serverDomain) != nil {
 		return false
+	}
+	return true
+}
+
+func clientHostingHasPublicIP(clientHosting ClientHosting) bool {
+	parsedIP, err := netip.ParseAddr(strings.TrimSpace(clientHosting.ServerIP))
+	if err != nil {
+		return false
+	}
+	parsedIP = parsedIP.Unmap()
+	if !parsedIP.IsGlobalUnicast() || parsedIP.IsPrivate() || parsedIP.IsLoopback() || parsedIP.IsLinkLocalUnicast() {
+		return false
+	}
+	for _, prefix := range nonPublicHostingIPPrefixes {
+		if prefix.Contains(parsedIP) {
+			return false
+		}
 	}
 	return true
 }

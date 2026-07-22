@@ -758,3 +758,111 @@ func TestSaveHostingSnapshotReplacesCurrentRegistryState(t *testing.T) {
 		t.Fatalf("roles were not replaced idempotently: %#v", hosting.Roles)
 	}
 }
+
+func TestSaveHostingSnapshotTracksCentralPresenceBuckets(t *testing.T) {
+	database, err := sql.Open("sqlite3", filepath.Join(t.TempDir(), "hostingandsupport.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+	if err := Migrate(context.Background(), database); err != nil {
+		t.Fatal(err)
+	}
+	store := Store{DB: database}
+	snapshot := HostingSnapshot{
+		Version:          2,
+		InstallationKind: InstallationKindDesktop,
+		InstallationID:   "desktop-1",
+		OwnerEmail:       "owner@example.com",
+		ServerIP:         "8.8.8.8",
+		Sites:            []HostingSnapshotSite{{Domain: "site.example.com"}},
+		CreatedAt:        "2000-01-01T00:00:00Z",
+	}
+	if err := store.SaveHostingSnapshot(context.Background(), snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveHostingSnapshot(context.Background(), snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertServiceMailRecipient(context.Background(), "desktop-1", "owner@example.com", "verified", "confirmed"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveClientHostingDomainCheck(context.Background(), ClientHostingDomainCheck{InstallationID: "desktop-1", Domain: "site.example.com", ServerIP: snapshot.ServerIP, DNSMatches: true, Reachable: true, Scheme: "https"}); err != nil {
+		t.Fatal(err)
+	}
+	hostings := store.ClientHostings(context.Background())
+	if len(hostings) != 1 {
+		t.Fatalf("hostings = %d, want 1", len(hostings))
+	}
+	hosting := hostings[0]
+	if hosting.SnapshotVersion != 2 || hosting.InstallationKind != InstallationKindDesktop {
+		t.Fatalf("snapshot identity was not stored: %#v", hosting)
+	}
+	if hosting.PresenceSlots != 1 {
+		t.Fatalf("presence slots = %d, want 1", hosting.PresenceSlots)
+	}
+	if !hosting.OwnerEmailVerified || len(hosting.Sites) != 1 || !hosting.Sites[0].DNSMatchesServer || !hosting.Sites[0].ReachableByServer {
+		t.Fatalf("verification details were not loaded: %#v", hosting)
+	}
+	lastSeenAt, err := time.Parse(time.RFC3339, hosting.LastSeenAt)
+	if err != nil || time.Since(lastSeenAt) > time.Minute {
+		t.Fatalf("last seen must use central receipt time, got %q", hosting.LastSeenAt)
+	}
+}
+
+func TestClassifyClientHostingsPromotesQualifiedDesktopWithVerifiedSitesOnly(t *testing.T) {
+	now := time.Date(2026, 7, 23, 12, 0, 0, 0, time.UTC)
+	hosting := ClientHosting{
+		InstallationID:       "desktop-1",
+		SnapshotVersion:      2,
+		InstallationKind:     InstallationKindDesktop,
+		OwnerEmail:           "owner@example.com",
+		OwnerEmailVerified:   true,
+		ServerIP:             "8.8.8.8",
+		LastSeenAt:           now.Add(-5 * time.Minute).Format(time.RFC3339),
+		ObservationStartedAt: now.Add(-7 * 24 * time.Hour).Format(time.RFC3339),
+		PresenceSlots:        1900,
+		Sites: []ClientHostingSite{
+			{Domain: "verified.example.com", UsedBytes: 10, DNSMatchesServer: true, ReachableByServer: true, ReachabilityCheckedAt: now.Add(-5 * time.Minute).Format(time.RFC3339)},
+			{Domain: "unverified.example.com", UsedBytes: 20},
+		},
+	}
+	production, temporaryGroups, archived := ClassifyClientHostings([]ClientHosting{hosting}, now)
+	if len(production) != 1 || len(temporaryGroups) != 0 || len(archived) != 0 {
+		t.Fatalf("classification = production %d, temporary %#v, archived %d", len(production), temporaryGroups, len(archived))
+	}
+	if len(production[0].Sites) != 1 || production[0].Sites[0].Domain != "verified.example.com" {
+		t.Fatalf("production sites = %#v", production[0].Sites)
+	}
+	if production[0].TotalUsedBytes != 10 {
+		t.Fatalf("production used bytes = %d, want 10", production[0].TotalUsedBytes)
+	}
+}
+
+func TestClassifyClientHostingsKeepsUnqualifiedDesktopTemporaryAndArchivesOldData(t *testing.T) {
+	now := time.Date(2026, 7, 23, 12, 0, 0, 0, time.UTC)
+	temporary := ClientHosting{
+		InstallationID:   "desktop-1",
+		SnapshotVersion:  2,
+		InstallationKind: InstallationKindDesktop,
+		ServerIP:         "1.1.1.1",
+		LastSeenAt:       now.Add(-20 * time.Minute).Format(time.RFC3339),
+	}
+	old := ClientHosting{
+		InstallationID:   "desktop-old",
+		SnapshotVersion:  2,
+		InstallationKind: InstallationKindDesktop,
+		ServerIP:         "1.1.1.1",
+		LastSeenAt:       now.Add(-25 * time.Hour).Format(time.RFC3339),
+	}
+	production, temporaryGroups, archived := ClassifyClientHostings([]ClientHosting{temporary, old}, now)
+	if len(production) != 0 || len(temporaryGroups) != 1 || len(temporaryGroups[0].Hostings) != 1 || len(archived) != 1 {
+		t.Fatalf("classification = production %#v, temporary %#v, archived %#v", production, temporaryGroups, archived)
+	}
+	reasons := strings.Join(temporaryGroups[0].Hostings[0].QualificationReasons, ",")
+	for _, expectedReason := range []string{QualificationReasonObservation, QualificationReasonAvailability, QualificationReasonSnapshotStale, QualificationReasonEmail, QualificationReasonDomain} {
+		if !strings.Contains(reasons, expectedReason) {
+			t.Fatalf("reasons %q do not contain %q", reasons, expectedReason)
+		}
+	}
+}

@@ -55,7 +55,13 @@
     </div>
   </section>
 
-  <section class="card billing-card" id="hostingServerList">
+  <nav class="nav nav-tabs mb-3" aria-label="{{index .T "billing_installations"}}" data-hosting-installation-tabs>
+    <button type="button" class="nav-link active" data-hosting-installation-tab="servers">{{index .T "billing_servers"}}</button>
+    <button type="button" class="nav-link" data-hosting-installation-tab="desktop">{{index .T "billing_desktop_installations"}}</button>
+    <button type="button" class="nav-link" data-hosting-installation-tab="archive">{{index .T "billing_archive"}}</button>
+  </nav>
+
+  <section class="card billing-card" id="hostingServerList" data-hosting-installation-panel="servers">
     <div class="card-body">
       <div class="billing-section-header">
         <div>
@@ -811,6 +817,63 @@
         </div>
         {{else}}
         <div class="empty">Серверов пока нет.</div>
+        {{end}}
+      </div>
+    </div>
+  </section>
+
+  <section class="card billing-card" data-hosting-installation-panel="desktop" hidden>
+    <div class="card-body">
+      <div class="billing-section-header">
+        <div>
+          <h2>{{index .T "billing_desktop_installations"}}</h2>
+          <p class="text-muted">{{index .T "billing_desktop_installations_description"}}</p>
+        </div>
+      </div>
+      {{range .DesktopHostingGroups}}
+      <section class="mb-4">
+        <h3 class="h6">{{index $.T "billing_public_ip"}}: {{.ServerIP}}</h3>
+        <div class="d-grid gap-2">
+          {{range .Hostings}}
+          <article class="border rounded p-3">
+            <div class="d-flex flex-wrap justify-content-between gap-2">
+              <div><strong>{{if .ServerDomain}}{{.ServerDomain}}{{else}}{{.InstallationID}}{{end}}</strong> <span class="badge text-bg-secondary">{{index $.T "billing_temporary_desktop"}}</span></div>
+              <span>{{index $.T "billing_activity"}}: {{.AvailabilityLabel}}</span>
+            </div>
+            <div class="small text-muted mt-1">{{.OwnerEmail}} · {{.OSName}} {{.OSVersion}} · {{index $.T "billing_last_sync"}}: {{.LastSeenAt}}</div>
+            {{if .Sites}}<div class="small mt-2">{{index $.T "billing_domains"}}: {{range $siteIndex, $site := .Sites}}{{if $siteIndex}}, {{end}}{{$site.Domain}}{{end}}</div>{{end}}
+            <ul class="small mb-0 mt-2">
+              {{range .QualificationReasons}}
+              <li>{{if eq . "update_required"}}{{index $.T "billing_qualification_update_required"}}{{else if eq . "observation_period"}}{{index $.T "billing_qualification_observation"}}{{else if eq . "availability"}}{{index $.T "billing_qualification_availability"}}{{else if eq . "snapshot_stale"}}{{index $.T "billing_qualification_snapshot_stale"}}{{else if eq . "email_unverified"}}{{index $.T "billing_qualification_email"}}{{else if eq . "public_ip"}}{{index $.T "billing_qualification_public_ip"}}{{else if eq . "domain_unverified"}}{{index $.T "billing_qualification_domain"}}{{end}}</li>
+              {{end}}
+            </ul>
+          </article>
+          {{end}}
+        </div>
+      </section>
+      {{else}}
+      <div class="empty">{{index .T "billing_no_desktop_installations"}}</div>
+      {{end}}
+    </div>
+  </section>
+
+  <section class="card billing-card" data-hosting-installation-panel="archive" hidden>
+    <div class="card-body">
+      <div class="billing-section-header">
+        <div>
+          <h2>{{index .T "billing_archive"}}</h2>
+          <p class="text-muted">{{index .T "billing_archive_description"}}</p>
+        </div>
+        <input type="search" class="form-control" style="max-width: 320px" placeholder="{{index .T "billing_archive_search"}}" data-hosting-archive-search>
+      </div>
+      <div class="d-grid gap-2" data-hosting-archive-list>
+        {{range .ArchivedHostings}}
+        <article class="border rounded p-3" data-hosting-archive-entry="{{.InstallationID}} {{.ServerDomain}} {{.ServerIP}} {{.OwnerEmail}}">
+          <strong>{{if .ServerDomain}}{{.ServerDomain}}{{else}}{{.InstallationID}}{{end}}</strong>
+          <div class="small text-muted">{{.ServerIP}} · {{.OwnerEmail}} · {{index $.T "billing_last_sync"}}: {{.LastSeenAt}}</div>
+        </article>
+        {{else}}
+        <div class="empty">{{index .T "billing_archive_empty"}}</div>
         {{end}}
       </div>
     </div>
@@ -2620,6 +2683,44 @@
   modalElement.addEventListener('hidden.bs.modal', function handleDemoRefreshModalHidden() {
     closeProgressStream();
   });
+})();
+</script>
+<script>
+(function initializeHostingInstallationTabs() {
+  const tabContainerElement = document.querySelector('[data-hosting-installation-tabs]');
+  if (!tabContainerElement) {
+    return;
+  }
+  const tabButtonElements = Array.from(tabContainerElement.querySelectorAll('[data-hosting-installation-tab]'));
+  const panelElements = Array.from(document.querySelectorAll('[data-hosting-installation-panel]'));
+
+  function selectInstallationTab(tabName) {
+    for (const tabButtonElement of tabButtonElements) {
+      const selected = tabButtonElement.dataset.hostingInstallationTab === tabName;
+      tabButtonElement.classList.toggle('active', selected);
+      tabButtonElement.setAttribute('aria-selected', selected ? 'true' : 'false');
+    }
+    for (const panelElement of panelElements) {
+      panelElement.hidden = panelElement.dataset.hostingInstallationPanel !== tabName;
+    }
+  }
+
+  for (const tabButtonElement of tabButtonElements) {
+    tabButtonElement.addEventListener('click', function handleInstallationTabClick() {
+      selectInstallationTab(tabButtonElement.dataset.hostingInstallationTab);
+    });
+  }
+
+  const archiveSearchInputElement = document.querySelector('[data-hosting-archive-search]');
+  if (archiveSearchInputElement) {
+    archiveSearchInputElement.addEventListener('input', function filterArchivedInstallations() {
+      const searchText = archiveSearchInputElement.value.trim().toLowerCase();
+      const archiveEntryElements = document.querySelectorAll('[data-hosting-archive-entry]');
+      for (const archiveEntryElement of archiveEntryElements) {
+        archiveEntryElement.hidden = searchText !== '' && !archiveEntryElement.dataset.hostingArchiveEntry.toLowerCase().includes(searchText);
+      }
+    });
+  }
 })();
 </script>
 </body>

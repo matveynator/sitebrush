@@ -156,7 +156,7 @@ const backupImportTextEntryLimitBytes int64 = 16 * 1024 * 1024
 const backupImportFileEntryLimitBytes int64 = 128 * 1024 * 1024
 const backupImportUncompressedLimitBytes int64 = 1024 * 1024 * 1024
 const hostingSnapshotNetChanPort = "9876"
-const hostingAndSupportPanelSnapshotVersion = 1
+const hostingAndSupportPanelSnapshotVersion = 2
 const hostingAndSupportMetricsRefreshInterval = 30 * time.Second
 const hostingAndSupportFullRefreshInterval = 5 * time.Minute
 
@@ -171,6 +171,7 @@ type App struct {
 	storageRealRoot           string
 	dbPath                    string
 	debug                     bool
+	desktopMode               bool
 	nativeFileDialog          bool
 	automaticSSLAvailable     bool
 	embeddedStaticAssets      map[string]embeddedStaticAsset
@@ -235,6 +236,8 @@ type hostingAndSupportPanelSnapshot struct {
 	Assignments             map[string]hostingandsupport.ServiceAssignment
 	SiteRequests            []hostingandsupport.SiteRequest
 	ClientHostings          []hostingandsupport.ClientHosting
+	DesktopHostingGroups    []hostingandsupport.DesktopHostingGroup
+	ArchivedHostings        []hostingandsupport.ClientHosting
 	Servers                 []hostingandsupport.ServerView
 	RegistrySyncEvents      []hostingandsupport.RegistrySyncEvent
 	SitebrushComKey         hostingandsupport.SitebrushComKey
@@ -4437,7 +4440,7 @@ func runSitebrushServer(ctx context.Context, config serverRunConfig) error {
 	}
 
 	var siteDatabaseRouter *perSiteDBRouter
-	application := &App{storagePath: effectiveStoragePath, storageRealRoot: storageRealRoot, dbPath: effectiveDBPath, debug: config.Debug, nativeFileDialog: desktop.NativeFileDialogSupported(), grabTracker: newGrabProgressTracker(), grabCancels: newGrabCancelTracker(), trialPreviews: newPublicTrialPreviewStore(), publishTracker: newPublishProgressTracker(), analyticsEvents: make(chan siteAnalyticsEvent, 65536), domainLogEvents: make(chan domainLogEvent, 1024)}
+	application := &App{storagePath: effectiveStoragePath, storageRealRoot: storageRealRoot, dbPath: effectiveDBPath, debug: config.Debug, desktopMode: config.DesktopMode, nativeFileDialog: desktop.NativeFileDialogSupported(), grabTracker: newGrabProgressTracker(), grabCancels: newGrabCancelTracker(), trialPreviews: newPublicTrialPreviewStore(), publishTracker: newPublishProgressTracker(), analyticsEvents: make(chan siteAnalyticsEvent, 65536), domainLogEvents: make(chan domainLogEvent, 1024)}
 	application.guestStaticHTMLCache = startGuestStaticHTMLCacheWorker(ctx, defaultGuestStaticHTMLCacheLimitBytes)
 	application.authIPFailureCache = startAuthIPFailureCacheWorker(ctx)
 	application.registrationConfirmations = startEmailConfirmationMemoryWorker(ctx)
@@ -10207,7 +10210,7 @@ func (a *App) collectHostingAndSupportPanelSnapshot(ctx context.Context, control
 	siteRequests := store.SiteRequests(ctx)
 	pendingSiteRequests, approvedSiteRequestsByDomain := hostingAndSupportSplitSiteRequests(siteRequests)
 	allClientHostings := store.ClientHostings(ctx)
-	clientHostings := hostingandsupport.FastServerHostings(allClientHostings)
+	clientHostings, desktopHostingGroups, archivedHostings := hostingandsupport.ClassifyClientHostings(allClientHostings, time.Now().UTC())
 	registrySyncEvents := store.RegistrySyncEvents(ctx, 40)
 	_ = a.migrateLegacySitebrushComPrivateKey(ctx, controlDatabase)
 	sitebrushComKey := store.SitebrushComKey(ctx)
@@ -10256,6 +10259,8 @@ func (a *App) collectHostingAndSupportPanelSnapshot(ctx context.Context, control
 		Assignments:             assignments,
 		SiteRequests:            pendingSiteRequests,
 		ClientHostings:          clientHostings,
+		DesktopHostingGroups:    desktopHostingGroups,
+		ArchivedHostings:        archivedHostings,
 		Servers:                 servers,
 		RegistrySyncEvents:      registrySyncEvents,
 		SitebrushComKey:         sitebrushComKey,
@@ -10330,6 +10335,8 @@ func (a *App) hostingAndSupportPanelView(r *http.Request, snapshot hostingAndSup
 		"ServiceMailInstallations":    nil,
 		"ServiceMailEvents":           nil,
 		"ClientHostings":              snapshot.ClientHostings,
+		"DesktopHostingGroups":        snapshot.DesktopHostingGroups,
+		"ArchivedHostings":            snapshot.ArchivedHostings,
 		"Servers":                     snapshot.Servers,
 		"RegistrySyncEvents":          snapshot.RegistrySyncEvents,
 		"SitebrushComKey":             snapshot.SitebrushComKey,
@@ -13926,7 +13933,11 @@ func (a *App) runHostingServerMonitorOnce(ctx context.Context) {
 	if !a.hostingAndSupportCanShowCentralServers(ctx, store, store.SitebrushComKey(ctx)) {
 		return
 	}
-	for _, hosting := range hostingandsupport.RealClientHostings(store.ClientHostings(ctx), domainARecordMatches) {
+	for _, hosting := range store.ClientHostings(ctx) {
+		a.checkClientHostingDomains(ctx, store, hosting)
+		if hosting.InstallationKind != hostingandsupport.InstallationKindServer || !hostingandsupport.ClientHostingIsRealServer(hosting, domainARecordMatches) {
+			continue
+		}
 		success, responseMS, errorMessage := checkHostingServerNetwork(ctx, hosting)
 		if !success {
 			success, responseMS, errorMessage = retryHostingServerNetwork(ctx, hosting)
@@ -13935,6 +13946,77 @@ func (a *App) runHostingServerMonitorOnce(ctx context.Context) {
 		a.checkHostingServerSiteTLS(ctx, store, hosting)
 	}
 	a.refreshHostingAndSupportPanel()
+}
+
+func (a *App) checkClientHostingDomains(ctx context.Context, store hostingandsupport.Store, hosting hostingandsupport.ClientHosting) {
+	serverIP := strings.TrimSpace(hosting.ServerIP)
+	for _, site := range hosting.Sites {
+		domain := normalizeDomainName(site.Domain)
+		if domain == "" {
+			continue
+		}
+		check := hostingandsupport.ClientHostingDomainCheck{
+			InstallationID: hosting.InstallationID,
+			Domain:         domain,
+			ServerIP:       serverIP,
+			DNSMatches:     domainARecordMatches(domain, serverIP),
+			CheckedAt:      time.Now().UTC().Format(time.RFC3339),
+		}
+		if !hostingandsupport.ClientHostingHasPublicIP(hosting) {
+			check.Error = "installation does not have a public IP and domain"
+		} else if !check.DNSMatches {
+			check.Error = "domain does not resolve to the reported IP"
+		} else {
+			check.Reachable, check.Scheme, check.ResponseMS, check.Error = checkDomainAtServerIP(ctx, domain, serverIP)
+		}
+		_ = store.SaveClientHostingDomainCheck(ctx, check)
+	}
+}
+
+func checkDomainAtServerIP(ctx context.Context, domain string, serverIP string) (bool, string, int, string) {
+	lastError := "domain request failed"
+	for _, scheme := range []string{"https", "http"} {
+		port := "443"
+		if scheme == "http" {
+			port = "80"
+		}
+		dialer := &net.Dialer{Timeout: 8 * time.Second}
+		transport := &http.Transport{
+			DialContext: func(dialContext context.Context, network string, _ string) (net.Conn, error) {
+				return dialer.DialContext(dialContext, network, net.JoinHostPort(serverIP, port))
+			},
+			TLSClientConfig: &tls.Config{ServerName: domain, MinVersion: tls.VersionTLS12},
+		}
+		client := &http.Client{
+			Timeout:   8 * time.Second,
+			Transport: transport,
+			CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
+		}
+		startedAt := time.Now()
+		request, err := http.NewRequestWithContext(ctx, http.MethodGet, scheme+"://"+domain+"/", nil)
+		if err != nil {
+			transport.CloseIdleConnections()
+			return false, "", 0, err.Error()
+		}
+		request.Host = domain
+		response, err := client.Do(request)
+		responseMS := int(time.Since(startedAt).Milliseconds())
+		if err != nil {
+			lastError = err.Error()
+			transport.CloseIdleConnections()
+			continue
+		}
+		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 1024))
+		_ = response.Body.Close()
+		transport.CloseIdleConnections()
+		if response.StatusCode >= http.StatusOK && response.StatusCode < http.StatusBadRequest {
+			return true, scheme, responseMS, ""
+		}
+		lastError = fmt.Sprintf("unexpected HTTP status %d", response.StatusCode)
+	}
+	return false, "", 0, lastError
 }
 
 func checkHostingServerNetwork(ctx context.Context, hosting hostingandsupport.ClientHosting) (bool, int, string) {
@@ -14271,7 +14353,8 @@ func (a *App) buildHostingSnapshot(ctx context.Context) (hostingandsupport.Hosti
 		serverDomain = ownerDomain
 	}
 	snapshot := hostingandsupport.HostingSnapshot{
-		Version:              1,
+		Version:              2,
+		InstallationKind:     hostingandsupport.InstallationKindServer,
 		InstallationID:       installationID,
 		ServerIP:             serverIP,
 		ServerStatus:         hostingSnapshotServerStatus(serverIP),
@@ -14291,6 +14374,9 @@ func (a *App) buildHostingSnapshot(ctx context.Context) (hostingandsupport.Hosti
 		ServerUptimeSeconds:  hostingSnapshotServerUptimeSeconds(),
 		StoragePath:          storageRoot,
 		CreatedAt:            time.Now().UTC().Format(time.RFC3339),
+	}
+	if a.desktopMode {
+		snapshot.InstallationKind = hostingandsupport.InstallationKindDesktop
 	}
 	if diskOK {
 		snapshot.DiskFreeBytes = int64(freeBytes)

@@ -19,7 +19,11 @@ import (
 
 const DefaultStorageLimitBytes int64 = 10 * 1024 * 1024 * 1024
 const DefaultDeletionBackupRetentionDays = 365
-const currentBillingSchemaVersion = 18
+const currentBillingSchemaVersion = 19
+
+const InstallationKindServer = "server"
+const InstallationKindDesktop = "desktop"
+const DesktopPresenceInterval = 5 * time.Minute
 
 type Store struct {
 	DB *sql.DB
@@ -190,6 +194,7 @@ type ServiceMailRecipient struct {
 
 type HostingSnapshot struct {
 	Version              int                      `json:"version"`
+	InstallationKind     string                   `json:"installation_kind"`
 	InstallationID       string                   `json:"installation_id"`
 	OwnerEmail           string                   `json:"owner_email"`
 	ServerIP             string                   `json:"server_ip"`
@@ -265,6 +270,8 @@ type HostingSnapshotEvent struct {
 
 type ClientHosting struct {
 	InstallationID       string
+	SnapshotVersion      int
+	InstallationKind     string
 	OwnerEmail           string
 	ServerIP             string
 	ServerStatus         string
@@ -300,7 +307,16 @@ type ClientHosting struct {
 	DiskFreeLabel        string
 	DiskTotalLabel       string
 	DiskUsedLabel        string
+	FirstSeenAt          string
 	LastSeenAt           string
+	ObservationStartedAt string
+	PresenceSlots        int
+	AvailabilityPercent  float64
+	AvailabilityLabel    string
+	OwnerEmailVerified   bool
+	QualificationReasons []string
+	Qualified            bool
+	Archived             bool
 	Sites                []ClientHostingSite
 	ClientEmails         []string
 	SiteCount            int
@@ -328,27 +344,44 @@ type ServerResourceCheck struct {
 }
 
 type ClientHostingSite struct {
-	Domain            string
-	OwnerEmail        string
-	UsedBytes         int64
-	LimitBytes        int64
-	PlanName          string
-	PlanStatus        string
-	PlanPaidStatus    string
-	UsedLabel         string
-	LimitLabel        string
-	BillingUsageLabel string
-	BillingPriceLabel string
-	BillingStatusText string
-	BillingAmount     string
-	BillingCurrency   string
-	BillingBillable   bool
-	OverLimit         bool
-	AdminEmails       []string
-	HTTPSAvailable    bool
-	CertExpiresAt     string
-	CertDaysLeft      int
-	TLSStatusClass    string
+	Domain                string
+	OwnerEmail            string
+	UsedBytes             int64
+	LimitBytes            int64
+	PlanName              string
+	PlanStatus            string
+	PlanPaidStatus        string
+	UsedLabel             string
+	LimitLabel            string
+	BillingUsageLabel     string
+	BillingPriceLabel     string
+	BillingStatusText     string
+	BillingAmount         string
+	BillingCurrency       string
+	BillingBillable       bool
+	OverLimit             bool
+	AdminEmails           []string
+	HTTPSAvailable        bool
+	CertExpiresAt         string
+	CertDaysLeft          int
+	TLSStatusClass        string
+	DNSMatchesServer      bool
+	ReachableByServer     bool
+	ReachabilityScheme    string
+	ReachabilityError     string
+	ReachabilityCheckedAt string
+}
+
+type ClientHostingDomainCheck struct {
+	InstallationID string
+	Domain         string
+	ServerIP       string
+	DNSMatches     bool
+	Reachable      bool
+	Scheme         string
+	ResponseMS     int
+	Error          string
+	CheckedAt      string
 }
 
 type ClientHostingPlan struct {
@@ -519,9 +552,11 @@ func Migrate(ctx context.Context, database *sql.DB) error {
 		`CREATE TABLE IF NOT EXISTS service_mail_blocks(id INTEGER PRIMARY KEY AUTOINCREMENT,scope TEXT,value TEXT,reason TEXT,created_at TEXT,UNIQUE(scope,value));`,
 		`CREATE TABLE IF NOT EXISTS service_mail_recipients(installation_id TEXT,recipient_hash TEXT,recipient_mask TEXT,status TEXT,purpose_scope TEXT,created_at TEXT,verified_at TEXT,PRIMARY KEY(installation_id,recipient_hash));`,
 		`CREATE INDEX IF NOT EXISTS idx_service_mail_recipients_installation_status ON service_mail_recipients(installation_id,status);`,
-		`CREATE TABLE IF NOT EXISTS client_hostings(installation_id TEXT PRIMARY KEY,owner_email TEXT,server_ip TEXT,server_status TEXT,server_domain TEXT,sitebrush_version TEXT,os_name TEXT,os_version TEXT,cpu_model TEXT,cpu_cores INTEGER DEFAULT 0,cpu_usage_percent_1h REAL DEFAULT 0,load_average_1h REAL DEFAULT 0,top_cpu_process_name TEXT,top_cpu_process_pid INTEGER DEFAULT 0,top_cpu_process_percent REAL DEFAULT 0,top_cpu_processes_json TEXT,ram_total_bytes INTEGER DEFAULT 0,server_uptime_seconds INTEGER DEFAULT 0,storage_path TEXT,disk_free_bytes INTEGER DEFAULT 0,disk_total_bytes INTEGER DEFAULT 0,first_seen_at TEXT,last_seen_at TEXT);`,
+		`CREATE TABLE IF NOT EXISTS client_hostings(installation_id TEXT PRIMARY KEY,snapshot_version INTEGER DEFAULT 1,installation_kind TEXT,owner_email TEXT,server_ip TEXT,server_status TEXT,server_domain TEXT,sitebrush_version TEXT,os_name TEXT,os_version TEXT,cpu_model TEXT,cpu_cores INTEGER DEFAULT 0,cpu_usage_percent_1h REAL DEFAULT 0,load_average_1h REAL DEFAULT 0,top_cpu_process_name TEXT,top_cpu_process_pid INTEGER DEFAULT 0,top_cpu_process_percent REAL DEFAULT 0,top_cpu_processes_json TEXT,ram_total_bytes INTEGER DEFAULT 0,server_uptime_seconds INTEGER DEFAULT 0,storage_path TEXT,disk_free_bytes INTEGER DEFAULT 0,disk_total_bytes INTEGER DEFAULT 0,first_seen_at TEXT,last_seen_at TEXT,observation_started_at TEXT,presence_slots INTEGER DEFAULT 0,last_presence_bucket TEXT);`,
 		`CREATE TABLE IF NOT EXISTS client_hosting_sites(installation_id TEXT,domain TEXT,owner_email TEXT,used_bytes INTEGER DEFAULT 0,limit_bytes INTEGER DEFAULT 0,plan_name TEXT,plan_status TEXT,plan_paid_status TEXT,admin_emails TEXT,updated_at TEXT,PRIMARY KEY(installation_id,domain));`,
 		`CREATE INDEX IF NOT EXISTS idx_client_hosting_sites_installation ON client_hosting_sites(installation_id);`,
+		`CREATE TABLE IF NOT EXISTS client_hosting_domain_checks(installation_id TEXT,domain TEXT,server_ip TEXT,dns_matches INTEGER DEFAULT 0,reachable INTEGER DEFAULT 0,scheme TEXT,response_ms INTEGER DEFAULT 0,error TEXT,checked_at TEXT,PRIMARY KEY(installation_id,domain));`,
+		`CREATE INDEX IF NOT EXISTS idx_client_hosting_domain_checks_installation ON client_hosting_domain_checks(installation_id);`,
 		`CREATE TABLE IF NOT EXISTS server_resource_checks(id INTEGER PRIMARY KEY AUTOINCREMENT,installation_id TEXT,cpu_usage_percent REAL DEFAULT 0,load_average REAL DEFAULT 0,top_cpu_process_name TEXT,top_cpu_process_pid INTEGER DEFAULT 0,top_cpu_process_percent REAL DEFAULT 0,ram_total_bytes INTEGER DEFAULT 0,disk_free_bytes INTEGER DEFAULT 0,disk_total_bytes INTEGER DEFAULT 0,checked_at TEXT);`,
 		`CREATE INDEX IF NOT EXISTS idx_server_resource_checks_installation_checked ON server_resource_checks(installation_id,checked_at);`,
 		`CREATE TABLE IF NOT EXISTS server_network_checks(id INTEGER PRIMARY KEY AUTOINCREMENT,installation_id TEXT,server_domain TEXT,server_ip TEXT,success INTEGER DEFAULT 0,response_ms INTEGER DEFAULT 0,error TEXT,checked_at TEXT);`,
@@ -588,7 +623,7 @@ func setSchemaMigrationVersion(ctx context.Context, database *sql.DB, component 
 }
 
 func hostingAndSupportSchemaComplete(ctx context.Context, database *sql.DB) (bool, error) {
-	tableNames := []string{"server_managers", "server_settings", "site_service_plans", "site_service_assignments", "payment_providers", "billing_invoices", "site_registration_requests", "site_deletion_backups", "service_mail_installations", "service_mail_events", "support_events", "service_mail_blocks", "service_mail_recipients", "client_hostings", "client_hosting_sites", "server_resource_checks", "server_network_checks", "site_tls_checks", "registry_accounts", "registry_installation_roles", "registry_installation_plans", "registry_events", "registry_sync_events", "sitebrush_com_keys", "hosting_panel_snapshots"}
+	tableNames := []string{"server_managers", "server_settings", "site_service_plans", "site_service_assignments", "payment_providers", "billing_invoices", "site_registration_requests", "site_deletion_backups", "service_mail_installations", "service_mail_events", "support_events", "service_mail_blocks", "service_mail_recipients", "client_hostings", "client_hosting_sites", "client_hosting_domain_checks", "server_resource_checks", "server_network_checks", "site_tls_checks", "registry_accounts", "registry_installation_roles", "registry_installation_plans", "registry_events", "registry_sync_events", "sitebrush_com_keys", "hosting_panel_snapshots"}
 	tableNames = append(tableNames, demo.TableNames()...)
 	for _, tableName := range tableNames {
 		found, err := tableExists(ctx, database, tableName)
@@ -631,6 +666,12 @@ func requiredHostingAndSupportColumns() []hostingAndSupportColumn {
 		{tableName: "billing_invoices", columnName: "recurring_enabled", definition: "INTEGER DEFAULT 0"},
 		{tableName: "billing_invoices", columnName: "recurring_period", definition: "TEXT"},
 		{tableName: "client_hostings", columnName: "server_status", definition: "TEXT"},
+		{tableName: "client_hostings", columnName: "snapshot_version", definition: "INTEGER DEFAULT 1"},
+		{tableName: "client_hostings", columnName: "installation_kind", definition: "TEXT"},
+		{tableName: "client_hostings", columnName: "observation_started_at", definition: "TEXT"},
+		{tableName: "client_hostings", columnName: "presence_slots", definition: "INTEGER DEFAULT 0"},
+		{tableName: "client_hostings", columnName: "last_presence_bucket", definition: "TEXT"},
+		{tableName: "client_hosting_domain_checks", columnName: "server_ip", definition: "TEXT"},
 		{tableName: "client_hostings", columnName: "server_domain", definition: "TEXT"},
 		{tableName: "client_hostings", columnName: "sitebrush_version", definition: "TEXT"},
 		{tableName: "client_hostings", columnName: "os_name", definition: "TEXT"},
@@ -1292,9 +1333,11 @@ func (store Store) SaveHostingSnapshot(ctx context.Context, snapshot HostingSnap
 	if installationID == "" {
 		return fmt.Errorf("installation id is required")
 	}
-	now := time.Now().UTC().Format(time.RFC3339)
-	if strings.TrimSpace(snapshot.CreatedAt) != "" {
-		now = strings.TrimSpace(snapshot.CreatedAt)
+	receivedAt := time.Now().UTC()
+	now := receivedAt.Format(time.RFC3339)
+	installationKind := strings.ToLower(strings.TrimSpace(snapshot.InstallationKind))
+	if installationKind != InstallationKindServer && installationKind != InstallationKindDesktop {
+		installationKind = ""
 	}
 	topCPUProcesses := normalizedHostingSnapshotProcesses(snapshot)
 	topCPUProcessesJSON := ""
@@ -1308,8 +1351,24 @@ func (store Store) SaveHostingSnapshot(ctx context.Context, snapshot HostingSnap
 	if err != nil {
 		return err
 	}
-	_, err = transaction.ExecContext(ctx, `INSERT INTO client_hostings(installation_id,owner_email,server_ip,server_status,server_domain,sitebrush_version,os_name,os_version,cpu_model,cpu_cores,cpu_usage_percent_1h,load_average_1h,top_cpu_process_name,top_cpu_process_pid,top_cpu_process_percent,top_cpu_processes_json,ram_total_bytes,server_uptime_seconds,storage_path,disk_free_bytes,disk_total_bytes,first_seen_at,last_seen_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(installation_id) DO UPDATE SET owner_email=excluded.owner_email,server_ip=excluded.server_ip,server_status=excluded.server_status,server_domain=excluded.server_domain,sitebrush_version=excluded.sitebrush_version,os_name=excluded.os_name,os_version=excluded.os_version,cpu_model=excluded.cpu_model,cpu_cores=excluded.cpu_cores,cpu_usage_percent_1h=excluded.cpu_usage_percent_1h,load_average_1h=excluded.load_average_1h,top_cpu_process_name=excluded.top_cpu_process_name,top_cpu_process_pid=excluded.top_cpu_process_pid,top_cpu_process_percent=excluded.top_cpu_process_percent,top_cpu_processes_json=excluded.top_cpu_processes_json,ram_total_bytes=excluded.ram_total_bytes,server_uptime_seconds=excluded.server_uptime_seconds,storage_path=excluded.storage_path,disk_free_bytes=excluded.disk_free_bytes,disk_total_bytes=excluded.disk_total_bytes,last_seen_at=excluded.last_seen_at`,
-		installationID, strings.ToLower(strings.TrimSpace(snapshot.OwnerEmail)), strings.TrimSpace(snapshot.ServerIP), strings.TrimSpace(snapshot.ServerStatus), strings.ToLower(strings.TrimSpace(snapshot.ServerDomain)), strings.TrimSpace(snapshot.SitebrushVersion), strings.TrimSpace(snapshot.OSName), strings.TrimSpace(snapshot.OSVersion), strings.TrimSpace(snapshot.CPUModel), snapshot.CPUCores, snapshot.CPUUsagePercent, snapshot.LoadAverage, strings.TrimSpace(snapshot.TopCPUProcessName), snapshot.TopCPUProcessPID, snapshot.TopCPUProcessPercent, topCPUProcessesJSON, snapshot.RAMTotalBytes, snapshot.ServerUptimeSeconds, strings.TrimSpace(snapshot.StoragePath), snapshot.DiskFreeBytes, snapshot.DiskTotalBytes, now, now)
+	observationStartedAt, presenceSlots, lastPresenceBucket := "", 0, ""
+	queryErr := transaction.QueryRowContext(ctx, `SELECT COALESCE(observation_started_at,''),COALESCE(presence_slots,0),COALESCE(last_presence_bucket,'') FROM client_hostings WHERE installation_id=?`, installationID).Scan(&observationStartedAt, &presenceSlots, &lastPresenceBucket)
+	if queryErr != nil && queryErr != sql.ErrNoRows {
+		_ = transaction.Rollback()
+		return queryErr
+	}
+	if snapshot.Version >= 2 && installationKind != "" {
+		presenceBucket := receivedAt.Truncate(DesktopPresenceInterval).Format(time.RFC3339)
+		if strings.TrimSpace(observationStartedAt) == "" {
+			observationStartedAt = now
+		}
+		if presenceBucket != lastPresenceBucket {
+			presenceSlots++
+			lastPresenceBucket = presenceBucket
+		}
+	}
+	_, err = transaction.ExecContext(ctx, `INSERT INTO client_hostings(installation_id,snapshot_version,installation_kind,owner_email,server_ip,server_status,server_domain,sitebrush_version,os_name,os_version,cpu_model,cpu_cores,cpu_usage_percent_1h,load_average_1h,top_cpu_process_name,top_cpu_process_pid,top_cpu_process_percent,top_cpu_processes_json,ram_total_bytes,server_uptime_seconds,storage_path,disk_free_bytes,disk_total_bytes,first_seen_at,last_seen_at,observation_started_at,presence_slots,last_presence_bucket) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(installation_id) DO UPDATE SET snapshot_version=CASE WHEN excluded.snapshot_version>client_hostings.snapshot_version THEN excluded.snapshot_version ELSE client_hostings.snapshot_version END,installation_kind=CASE WHEN excluded.installation_kind<>'' THEN excluded.installation_kind ELSE client_hostings.installation_kind END,owner_email=excluded.owner_email,server_ip=excluded.server_ip,server_status=excluded.server_status,server_domain=excluded.server_domain,sitebrush_version=excluded.sitebrush_version,os_name=excluded.os_name,os_version=excluded.os_version,cpu_model=excluded.cpu_model,cpu_cores=excluded.cpu_cores,cpu_usage_percent_1h=excluded.cpu_usage_percent_1h,load_average_1h=excluded.load_average_1h,top_cpu_process_name=excluded.top_cpu_process_name,top_cpu_process_pid=excluded.top_cpu_process_pid,top_cpu_process_percent=excluded.top_cpu_process_percent,top_cpu_processes_json=excluded.top_cpu_processes_json,ram_total_bytes=excluded.ram_total_bytes,server_uptime_seconds=excluded.server_uptime_seconds,storage_path=excluded.storage_path,disk_free_bytes=excluded.disk_free_bytes,disk_total_bytes=excluded.disk_total_bytes,last_seen_at=excluded.last_seen_at,observation_started_at=excluded.observation_started_at,presence_slots=excluded.presence_slots,last_presence_bucket=excluded.last_presence_bucket`,
+		installationID, snapshot.Version, installationKind, strings.ToLower(strings.TrimSpace(snapshot.OwnerEmail)), strings.TrimSpace(snapshot.ServerIP), strings.TrimSpace(snapshot.ServerStatus), strings.ToLower(strings.TrimSpace(snapshot.ServerDomain)), strings.TrimSpace(snapshot.SitebrushVersion), strings.TrimSpace(snapshot.OSName), strings.TrimSpace(snapshot.OSVersion), strings.TrimSpace(snapshot.CPUModel), snapshot.CPUCores, snapshot.CPUUsagePercent, snapshot.LoadAverage, strings.TrimSpace(snapshot.TopCPUProcessName), snapshot.TopCPUProcessPID, snapshot.TopCPUProcessPercent, topCPUProcessesJSON, snapshot.RAMTotalBytes, snapshot.ServerUptimeSeconds, strings.TrimSpace(snapshot.StoragePath), snapshot.DiskFreeBytes, snapshot.DiskTotalBytes, now, now, observationStartedAt, presenceSlots, lastPresenceBucket)
 	if err == nil {
 		_, err = transaction.ExecContext(ctx, `INSERT INTO server_resource_checks(installation_id,cpu_usage_percent,load_average,top_cpu_process_name,top_cpu_process_pid,top_cpu_process_percent,ram_total_bytes,disk_free_bytes,disk_total_bytes,checked_at) VALUES(?,?,?,?,?,?,?,?,?,?)`,
 			installationID, snapshot.CPUUsagePercent, snapshot.LoadAverage, strings.TrimSpace(snapshot.TopCPUProcessName), snapshot.TopCPUProcessPID, snapshot.TopCPUProcessPercent, snapshot.RAMTotalBytes, snapshot.DiskFreeBytes, snapshot.DiskTotalBytes, now)
@@ -1622,7 +1681,7 @@ func (store Store) LogRegistrySyncEventWithSummary(ctx context.Context, installa
 }
 
 func (store Store) ClientHostings(ctx context.Context) []ClientHosting {
-	rows, err := store.DB.QueryContext(ctx, `SELECT installation_id,COALESCE(owner_email,''),COALESCE(server_ip,''),COALESCE(server_status,''),COALESCE(server_domain,''),COALESCE(sitebrush_version,''),COALESCE(os_name,''),COALESCE(os_version,''),COALESCE(cpu_model,''),COALESCE(cpu_cores,0),COALESCE(cpu_usage_percent_1h,0),COALESCE(load_average_1h,0),COALESCE(top_cpu_process_name,''),COALESCE(top_cpu_process_pid,0),COALESCE(top_cpu_process_percent,0),COALESCE(top_cpu_processes_json,''),COALESCE(ram_total_bytes,0),COALESCE(server_uptime_seconds,0),COALESCE(storage_path,''),COALESCE(disk_free_bytes,0),COALESCE(disk_total_bytes,0),COALESCE(last_seen_at,'') FROM client_hostings ORDER BY last_seen_at DESC,installation_id ASC`)
+	rows, err := store.DB.QueryContext(ctx, `SELECT installation_id,COALESCE(snapshot_version,1),COALESCE(installation_kind,''),COALESCE(owner_email,''),COALESCE(server_ip,''),COALESCE(server_status,''),COALESCE(server_domain,''),COALESCE(sitebrush_version,''),COALESCE(os_name,''),COALESCE(os_version,''),COALESCE(cpu_model,''),COALESCE(cpu_cores,0),COALESCE(cpu_usage_percent_1h,0),COALESCE(load_average_1h,0),COALESCE(top_cpu_process_name,''),COALESCE(top_cpu_process_pid,0),COALESCE(top_cpu_process_percent,0),COALESCE(top_cpu_processes_json,''),COALESCE(ram_total_bytes,0),COALESCE(server_uptime_seconds,0),COALESCE(storage_path,''),COALESCE(disk_free_bytes,0),COALESCE(disk_total_bytes,0),COALESCE(first_seen_at,''),COALESCE(last_seen_at,''),COALESCE(observation_started_at,''),COALESCE(presence_slots,0) FROM client_hostings ORDER BY last_seen_at DESC,installation_id ASC`)
 	if err != nil {
 		return nil
 	}
@@ -1631,7 +1690,7 @@ func (store Store) ClientHostings(ctx context.Context) []ClientHosting {
 	for rows.Next() {
 		var hosting ClientHosting
 		topCPUProcessesJSON := ""
-		if scanErr := rows.Scan(&hosting.InstallationID, &hosting.OwnerEmail, &hosting.ServerIP, &hosting.ServerStatus, &hosting.ServerDomain, &hosting.SitebrushVersion, &hosting.OSName, &hosting.OSVersion, &hosting.CPUModel, &hosting.CPUCores, &hosting.CPUUsagePercent, &hosting.LoadAverage, &hosting.TopCPUProcessName, &hosting.TopCPUProcessPID, &hosting.TopCPUProcessPercent, &topCPUProcessesJSON, &hosting.RAMTotalBytes, &hosting.ServerUptimeSeconds, &hosting.StoragePath, &hosting.DiskFreeBytes, &hosting.DiskTotalBytes, &hosting.LastSeenAt); scanErr != nil {
+		if scanErr := rows.Scan(&hosting.InstallationID, &hosting.SnapshotVersion, &hosting.InstallationKind, &hosting.OwnerEmail, &hosting.ServerIP, &hosting.ServerStatus, &hosting.ServerDomain, &hosting.SitebrushVersion, &hosting.OSName, &hosting.OSVersion, &hosting.CPUModel, &hosting.CPUCores, &hosting.CPUUsagePercent, &hosting.LoadAverage, &hosting.TopCPUProcessName, &hosting.TopCPUProcessPID, &hosting.TopCPUProcessPercent, &topCPUProcessesJSON, &hosting.RAMTotalBytes, &hosting.ServerUptimeSeconds, &hosting.StoragePath, &hosting.DiskFreeBytes, &hosting.DiskTotalBytes, &hosting.FirstSeenAt, &hosting.LastSeenAt, &hosting.ObservationStartedAt, &hosting.PresenceSlots); scanErr != nil {
 			continue
 		}
 		hosting.TopCPUProcesses = decodeHostingSnapshotProcesses(topCPUProcessesJSON, hosting.TopCPUProcessName, hosting.TopCPUProcessPID, hosting.TopCPUProcessPercent)
@@ -1650,14 +1709,25 @@ func (store Store) ClientHostings(ctx context.Context) []ClientHosting {
 	for hostingIndex := range hostings {
 		installationID := hostings[hostingIndex].InstallationID
 		hostings[hostingIndex].Sites = details.sites[installationID]
+		domainChecks := details.domainChecks[installationID]
 		tlsChecks := details.tlsChecks[installationID]
 		for siteIndex := range hostings[hostingIndex].Sites {
-			check := tlsChecks[hostings[hostingIndex].Sites[siteIndex].Domain]
+			domain := hostings[hostingIndex].Sites[siteIndex].Domain
+			check := tlsChecks[domain]
 			hostings[hostingIndex].Sites[siteIndex].HTTPSAvailable = check.HTTPSAvailable
 			hostings[hostingIndex].Sites[siteIndex].CertExpiresAt = check.CertExpiresAt
 			hostings[hostingIndex].Sites[siteIndex].CertDaysLeft = check.CertDaysLeft
 			hostings[hostingIndex].Sites[siteIndex].TLSStatusClass = check.StatusClass
+			domainCheck := domainChecks[domain]
+			if strings.TrimSpace(domainCheck.ServerIP) == strings.TrimSpace(hostings[hostingIndex].ServerIP) {
+				hostings[hostingIndex].Sites[siteIndex].DNSMatchesServer = domainCheck.DNSMatches
+				hostings[hostingIndex].Sites[siteIndex].ReachableByServer = domainCheck.Reachable
+				hostings[hostingIndex].Sites[siteIndex].ReachabilityScheme = domainCheck.Scheme
+				hostings[hostingIndex].Sites[siteIndex].ReachabilityError = domainCheck.Error
+				hostings[hostingIndex].Sites[siteIndex].ReachabilityCheckedAt = domainCheck.CheckedAt
+			}
 		}
+		hostings[hostingIndex].OwnerEmailVerified = details.verifiedRecipients[installationID][ServiceMailRecipientHash(hostings[hostingIndex].OwnerEmail)]
 		hostings[hostingIndex].Plans = details.plans[installationID]
 		hostings[hostingIndex].Roles = details.roles[installationID]
 		hostings[hostingIndex].Events = details.events[installationID]
@@ -1708,33 +1778,80 @@ type clientHostingNetworkSummary struct {
 }
 
 type clientHostingDetails struct {
-	sites            map[string][]ClientHostingSite
-	tlsChecks        map[string]map[string]SiteTLSCheck
-	plans            map[string][]ClientHostingPlan
-	roles            map[string][]ClientHostingRole
-	events           map[string][]ClientHostingEvent
-	resourceHistory  map[string][]ServerResourceCheck
-	networkSummaries map[string]clientHostingNetworkSummary
+	sites              map[string][]ClientHostingSite
+	domainChecks       map[string]map[string]ClientHostingDomainCheck
+	tlsChecks          map[string]map[string]SiteTLSCheck
+	verifiedRecipients map[string]map[string]bool
+	plans              map[string][]ClientHostingPlan
+	roles              map[string][]ClientHostingRole
+	events             map[string][]ClientHostingEvent
+	resourceHistory    map[string][]ServerResourceCheck
+	networkSummaries   map[string]clientHostingNetworkSummary
 }
 
 func (store Store) loadClientHostingDetails(ctx context.Context) clientHostingDetails {
 	details := clientHostingDetails{
-		sites:            make(map[string][]ClientHostingSite),
-		tlsChecks:        make(map[string]map[string]SiteTLSCheck),
-		plans:            make(map[string][]ClientHostingPlan),
-		roles:            make(map[string][]ClientHostingRole),
-		events:           make(map[string][]ClientHostingEvent),
-		resourceHistory:  make(map[string][]ServerResourceCheck),
-		networkSummaries: make(map[string]clientHostingNetworkSummary),
+		sites:              make(map[string][]ClientHostingSite),
+		domainChecks:       make(map[string]map[string]ClientHostingDomainCheck),
+		tlsChecks:          make(map[string]map[string]SiteTLSCheck),
+		verifiedRecipients: make(map[string]map[string]bool),
+		plans:              make(map[string][]ClientHostingPlan),
+		roles:              make(map[string][]ClientHostingRole),
+		events:             make(map[string][]ClientHostingEvent),
+		resourceHistory:    make(map[string][]ServerResourceCheck),
+		networkSummaries:   make(map[string]clientHostingNetworkSummary),
 	}
 	store.loadAllClientHostingSites(ctx, details.sites)
+	store.loadAllClientHostingDomainChecks(ctx, details.domainChecks)
 	store.loadAllSiteTLSChecks(ctx, details.tlsChecks)
+	store.loadAllVerifiedServiceMailRecipients(ctx, details.verifiedRecipients)
 	store.loadAllClientHostingPlans(ctx, details.plans)
 	store.loadAllClientHostingRoles(ctx, details.roles)
 	store.loadAllClientHostingEvents(ctx, details.events, 12)
 	store.loadAllServerResourceHistory(ctx, details.resourceHistory, 24*time.Hour)
 	store.loadAllServerNetworkSummaries(ctx, details.networkSummaries, 30*24*time.Hour)
 	return details
+}
+
+func (store Store) loadAllClientHostingDomainChecks(ctx context.Context, checksByInstallation map[string]map[string]ClientHostingDomainCheck) {
+	rows, err := store.DB.QueryContext(ctx, `SELECT installation_id,domain,COALESCE(server_ip,''),COALESCE(dns_matches,0),COALESCE(reachable,0),COALESCE(scheme,''),COALESCE(response_ms,0),COALESCE(error,''),COALESCE(checked_at,'') FROM client_hosting_domain_checks ORDER BY installation_id ASC,domain ASC`)
+	if err != nil {
+		return
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var check ClientHostingDomainCheck
+		var dnsMatches int
+		var reachable int
+		if scanErr := rows.Scan(&check.InstallationID, &check.Domain, &check.ServerIP, &dnsMatches, &reachable, &check.Scheme, &check.ResponseMS, &check.Error, &check.CheckedAt); scanErr != nil {
+			continue
+		}
+		check.DNSMatches = dnsMatches != 0
+		check.Reachable = reachable != 0
+		if checksByInstallation[check.InstallationID] == nil {
+			checksByInstallation[check.InstallationID] = make(map[string]ClientHostingDomainCheck)
+		}
+		checksByInstallation[check.InstallationID][check.Domain] = check
+	}
+}
+
+func (store Store) loadAllVerifiedServiceMailRecipients(ctx context.Context, recipientsByInstallation map[string]map[string]bool) {
+	rows, err := store.DB.QueryContext(ctx, `SELECT installation_id,recipient_hash FROM service_mail_recipients WHERE status='verified' AND purpose_scope='confirmed' AND COALESCE(verified_at,'')<>''`)
+	if err != nil {
+		return
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var installationID string
+		var recipientHash string
+		if scanErr := rows.Scan(&installationID, &recipientHash); scanErr != nil {
+			continue
+		}
+		if recipientsByInstallation[installationID] == nil {
+			recipientsByInstallation[installationID] = make(map[string]bool)
+		}
+		recipientsByInstallation[installationID][recipientHash] = true
+	}
 }
 
 func (store Store) loadAllClientHostingSites(ctx context.Context, sitesByInstallation map[string][]ClientHostingSite) {
@@ -1905,6 +2022,24 @@ type SiteTLSCheck struct {
 	CertDaysLeft   int
 	StatusClass    string
 	Error          string
+}
+
+func (store Store) SaveClientHostingDomainCheck(ctx context.Context, check ClientHostingDomainCheck) error {
+	dnsMatches := 0
+	if check.DNSMatches {
+		dnsMatches = 1
+	}
+	reachable := 0
+	if check.Reachable {
+		reachable = 1
+	}
+	checkedAt := strings.TrimSpace(check.CheckedAt)
+	if checkedAt == "" {
+		checkedAt = time.Now().UTC().Format(time.RFC3339)
+	}
+	_, err := store.DB.ExecContext(ctx, `INSERT INTO client_hosting_domain_checks(installation_id,domain,server_ip,dns_matches,reachable,scheme,response_ms,error,checked_at) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(installation_id,domain) DO UPDATE SET server_ip=excluded.server_ip,dns_matches=excluded.dns_matches,reachable=excluded.reachable,scheme=excluded.scheme,response_ms=excluded.response_ms,error=excluded.error,checked_at=excluded.checked_at`,
+		strings.TrimSpace(check.InstallationID), strings.ToLower(strings.TrimSpace(check.Domain)), strings.TrimSpace(check.ServerIP), dnsMatches, reachable, strings.TrimSpace(check.Scheme), check.ResponseMS, strings.TrimSpace(check.Error), checkedAt)
+	return err
 }
 
 func (store Store) LogServerNetworkCheck(ctx context.Context, installationID, serverDomain, serverIP string, success bool, responseMS int, errorMessage string) error {
