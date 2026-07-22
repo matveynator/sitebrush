@@ -156,6 +156,9 @@ const backupImportTextEntryLimitBytes int64 = 16 * 1024 * 1024
 const backupImportFileEntryLimitBytes int64 = 128 * 1024 * 1024
 const backupImportUncompressedLimitBytes int64 = 1024 * 1024 * 1024
 const hostingSnapshotNetChanPort = "9876"
+const hostingAndSupportPanelSnapshotVersion = 1
+const hostingAndSupportMetricsRefreshInterval = 30 * time.Second
+const hostingAndSupportFullRefreshInterval = 5 * time.Minute
 
 var sitebrushComServiceMailRelayPublicKey = "axM/Ha8N6Ci/IiLs2SqULfu1DVlQKrkswNsOPgnx4kY="
 var sitebrushRuServiceMailRelayPublicKey = ""
@@ -187,6 +190,57 @@ type App struct {
 	emailDelivery             chan mailout.DeliveryJob
 	sendEmail                 mailout.Sender
 	hostingSnapshotReports    chan struct{}
+	hostingAndSupportPanel    chan hostingAndSupportPanelRequest
+	renderTemplates           chan renderTemplateRequest
+}
+
+type renderTemplateRequest struct {
+	name     string
+	envelope map[string]any
+	reply    chan renderTemplateResponse
+}
+
+type renderTemplateResponse struct {
+	html []byte
+	err  error
+}
+
+type hostingAndSupportPanelRequest struct {
+	kind    string
+	metrics []hostingandsupport.ServerMetricView
+	reply   chan hostingAndSupportPanelResponse
+}
+
+type hostingAndSupportPanelResponse struct {
+	snapshot hostingAndSupportPanelSnapshot
+	err      error
+}
+
+type hostingAndSupportPanelBuildResult struct {
+	snapshot hostingAndSupportPanelSnapshot
+	err      error
+}
+
+type hostingAndSupportPanelSnapshot struct {
+	Version                 int
+	BuiltAt                 string
+	MetricsBuiltAt          string
+	MainDomain              string
+	OwnerEmails             []string
+	Sites                   []hostingandsupport.Site
+	Plans                   []hostingandsupport.Plan
+	Invoices                []hostingandsupport.Invoice
+	Assignments             map[string]hostingandsupport.ServiceAssignment
+	SiteRequests            []hostingandsupport.SiteRequest
+	ClientHostings          []hostingandsupport.ClientHosting
+	Servers                 []hostingandsupport.ServerView
+	RegistrySyncEvents      []hostingandsupport.RegistrySyncEvent
+	SitebrushComKey         hostingandsupport.SitebrushComKey
+	Clients                 []hostingAndSupportClientView
+	ServiceMailRelayEnabled bool
+	Overview                hostingandsupport.OverviewView
+	DemoSettings            demo.Settings
+	AutoRegistrationEnabled bool
 }
 
 type serviceMailRequest struct {
@@ -4412,6 +4466,8 @@ func runSitebrushServer(ctx context.Context, config serverRunConfig) error {
 	application.db = siteDatabaseRouter
 	application.siteDatabaseRouter = siteDatabaseRouter
 	application.ensureAutoCertGuard()
+	application.renderTemplates = startRenderTemplateProcess(ctx.Done())
+	application.hostingAndSupportPanel = application.startHostingAndSupportPanelProcess(ctx.Done())
 	application.startDomainLogWorker(ctx)
 	application.startAnalyticsWorkers(ctx)
 	application.startServerOwnerRecoveryWorker(ctx)
@@ -9765,21 +9821,24 @@ func (a *App) hostingAndSupportPage(w http.ResponseWriter, r *http.Request) {
 	if a.redirectToHostingAndSupportMainDomain(w, r) {
 		return
 	}
-	if !a.isAdminRequest(r) {
-		if !a.hasAdmin(r.Context(), a.siteDomain(r.Context(), r)) {
+	requestDomain := domainFromRequest(r)
+	adminEmail, adminFound := a.currentAdminEmailForDomain(r, requestDomain)
+	if !adminFound {
+		if !a.hasAdmin(r.Context(), requestDomain) {
 			http.Redirect(w, r, r.URL.Path+"?register", http.StatusFound)
 			return
 		}
 		http.Redirect(w, r, loginURLForRequest(r), http.StatusFound)
 		return
 	}
-	if !a.isServerManagerRequest(r) {
+	if !a.isServerManagerEmail(r.Context(), requestDomain, adminEmail) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
 	status := ""
 	if r.Method == http.MethodPost {
 		status = a.handleHostingAndSupportAction(r)
+		a.refreshHostingAndSupportPanel()
 		if hostingAndSupportActionWantsJSON(r) {
 			saved := hostingAndSupportActionStatusWasSaved(r, status)
 			w.Header().Set("Content-Type", "application/json")
@@ -9799,6 +9858,139 @@ func (a *App) hostingAndSupportPage(w http.ResponseWriter, r *http.Request) {
 	a.render(w, r, "hostingandsupport.html", view)
 }
 
+func (a *App) startHostingAndSupportPanelProcess(stop <-chan struct{}) chan hostingAndSupportPanelRequest {
+	requests := make(chan hostingAndSupportPanelRequest, 16)
+	controlDatabase, err := a.openServerControlDatabase(context.Background())
+	if err != nil {
+		log.Printf("hosting panel snapshot store unavailable: %v", err)
+	}
+	initialSnapshot := hostingAndSupportPanelSnapshot{Version: hostingAndSupportPanelSnapshotVersion}
+	if controlDatabase != nil {
+		store := hostingandsupport.Store{DB: controlDatabase}
+		storedSnapshot, found := store.PanelSnapshot(context.Background())
+		if found && storedSnapshot.Version == hostingAndSupportPanelSnapshotVersion {
+			if decodeErr := json.Unmarshal([]byte(storedSnapshot.PayloadJSON), &initialSnapshot); decodeErr != nil {
+				log.Printf("hosting panel snapshot decode failed: %v", decodeErr)
+				initialSnapshot = hostingAndSupportPanelSnapshot{Version: hostingAndSupportPanelSnapshotVersion}
+			} else if initialSnapshot.Version != hostingAndSupportPanelSnapshotVersion {
+				initialSnapshot = hostingAndSupportPanelSnapshot{Version: hostingAndSupportPanelSnapshotVersion}
+			}
+		}
+		if strings.TrimSpace(initialSnapshot.MainDomain) == "" {
+			if ownerDomain, ownerFound := store.OwnerDomain(context.Background()); ownerFound {
+				initialSnapshot.MainDomain = ownerDomain
+				initialSnapshot.OwnerEmails = store.OwnerEmails(context.Background())
+			}
+		}
+	}
+	buildResults := make(chan hostingAndSupportPanelBuildResult, 1)
+	go a.runHostingAndSupportPanelProcess(stop, requests, buildResults, controlDatabase, initialSnapshot)
+	go a.runHostingAndSupportMetricsProcess(stop, requests)
+	return requests
+}
+
+func (a *App) runHostingAndSupportPanelProcess(stop <-chan struct{}, requests <-chan hostingAndSupportPanelRequest, buildResults chan hostingAndSupportPanelBuildResult, controlDatabase *sql.DB, initialSnapshot hostingAndSupportPanelSnapshot) {
+	if controlDatabase != nil {
+		defer controlDatabase.Close()
+	}
+	fullRefreshTicker := time.NewTicker(hostingAndSupportFullRefreshInterval)
+	defer fullRefreshTicker.Stop()
+	snapshot := initialSnapshot
+	buildRunning := false
+	buildPending := false
+	startBuild := func() {
+		if buildRunning {
+			buildPending = true
+			return
+		}
+		buildRunning = true
+		go func() {
+			builtSnapshot, buildErr := a.collectHostingAndSupportPanelSnapshot(context.Background(), controlDatabase)
+			if buildErr == nil && controlDatabase != nil {
+				payload, encodeErr := json.Marshal(builtSnapshot)
+				if encodeErr != nil {
+					buildErr = encodeErr
+				} else {
+					buildErr = (hostingandsupport.Store{DB: controlDatabase}).SavePanelSnapshot(context.Background(), hostingandsupport.PanelSnapshotRecord{
+						Version: hostingAndSupportPanelSnapshotVersion, PayloadJSON: string(payload), BuiltAt: builtSnapshot.BuiltAt,
+					})
+				}
+			}
+			buildResults <- hostingAndSupportPanelBuildResult{snapshot: builtSnapshot, err: buildErr}
+		}()
+	}
+	startBuild()
+	for {
+		select {
+		case <-stop:
+			if buildRunning {
+				<-buildResults
+			}
+			return
+		case request := <-requests:
+			switch request.kind {
+			case "get":
+				request.reply <- hostingAndSupportPanelResponse{snapshot: snapshot}
+			case "refresh":
+				startBuild()
+			case "metrics":
+				snapshot = a.applyHostingAndSupportPanelMetrics(snapshot, request.metrics)
+			}
+		case result := <-buildResults:
+			buildRunning = false
+			if result.err != nil {
+				log.Printf("hosting panel snapshot refresh failed: %v", result.err)
+			} else {
+				snapshot = result.snapshot
+			}
+			if buildPending {
+				buildPending = false
+				startBuild()
+			}
+		case <-fullRefreshTicker.C:
+			startBuild()
+		}
+	}
+}
+
+func (a *App) runHostingAndSupportMetricsProcess(stop <-chan struct{}, requests chan<- hostingAndSupportPanelRequest) {
+	metricsTicker := time.NewTicker(hostingAndSupportMetricsRefreshInterval)
+	defer metricsTicker.Stop()
+	for {
+		metrics := a.localHostingServerSystemMetrics(context.Background())
+		select {
+		case requests <- hostingAndSupportPanelRequest{kind: "metrics", metrics: metrics}:
+		case <-stop:
+			return
+		}
+		select {
+		case <-metricsTicker.C:
+		case <-stop:
+			return
+		}
+	}
+}
+
+func (a *App) refreshHostingAndSupportPanel() {
+	if a == nil || a.hostingAndSupportPanel == nil {
+		return
+	}
+	select {
+	case a.hostingAndSupportPanel <- hostingAndSupportPanelRequest{kind: "refresh"}:
+	default:
+	}
+}
+
+func (a *App) preparedHostingAndSupportPanelSnapshot() (hostingAndSupportPanelSnapshot, bool) {
+	if a == nil || a.hostingAndSupportPanel == nil {
+		return hostingAndSupportPanelSnapshot{}, false
+	}
+	reply := make(chan hostingAndSupportPanelResponse, 1)
+	a.hostingAndSupportPanel <- hostingAndSupportPanelRequest{kind: "get", reply: reply}
+	response := <-reply
+	return response.snapshot, response.err == nil
+}
+
 func (a *App) hostingAndSupportDemoPaymentPage(w http.ResponseWriter, r *http.Request) {
 	invoiceNumber := strings.TrimSpace(r.URL.Query().Get("invoice"))
 	if invoiceNumber == "" || strings.ContainsAny(invoiceNumber, "\r\n<>") {
@@ -9811,7 +10003,7 @@ func (a *App) hostingAndSupportDemoPaymentPage(w http.ResponseWriter, r *http.Re
 
 func (a *App) redirectToHostingAndSupportMainDomain(w http.ResponseWriter, r *http.Request) bool {
 	mainDomain := a.hostingAndSupportMainDomain(r.Context())
-	requestDomain := normalizeHostingAndSupportMainDomain(a.siteDomain(r.Context(), r))
+	requestDomain := normalizeHostingAndSupportMainDomain(domainFromRequest(r))
 	if mainDomain == "" || requestDomain == "" || sameHostingAndSupportDomain(mainDomain, requestDomain) {
 		return false
 	}
@@ -9827,6 +10019,9 @@ func (a *App) redirectToHostingAndSupportMainDomain(w http.ResponseWriter, r *ht
 }
 
 func (a *App) hostingAndSupportMainDomain(ctx context.Context) string {
+	if snapshot, found := a.preparedHostingAndSupportPanelSnapshot(); found && strings.TrimSpace(snapshot.MainDomain) != "" {
+		return normalizeHostingAndSupportMainDomain(snapshot.MainDomain)
+	}
 	controlDatabase, err := a.openServerControlDatabase(ctx)
 	if err != nil {
 		return "localhost"
@@ -9870,6 +10065,9 @@ func hostingAndSupportActionStatusWasSaved(r *http.Request, status string) bool 
 	case "update_site":
 		domain := normalizeQuotaDomainName(r.FormValue("domain"))
 		return domain != "" && status == fmt.Sprintf(translationOrDefault(translations, "billing_status_site_settings_saved", "Site %s settings were saved."), domain)
+	case "update_site_quota":
+		domain := normalizeQuotaDomainName(r.FormValue("domain"))
+		return domain != "" && status == fmt.Sprintf(translationOrDefault(translations, "billing_status_site_settings_saved", "Site %s settings were saved."), domain)
 	case "save_plan":
 		return status == translationOrDefault(translations, "billing_status_plan_saved", "Plan saved.")
 	case "update_backup_retention":
@@ -9895,6 +10093,8 @@ func (a *App) handleHostingAndSupportAction(r *http.Request) string {
 		return a.createManagedSiteFromForm(r)
 	case "update_site":
 		return a.updateManagedSiteFromForm(r)
+	case "update_site_quota":
+		return a.updateManagedSiteQuotaFromForm(r)
 	case "delete_site":
 		return a.deleteManagedSiteFromForm(r)
 	case "save_plan":
@@ -9948,11 +10148,30 @@ func (a *App) hostingAndSupportCanShowCentralServers(ctx context.Context, store 
 }
 
 func (a *App) hostingAndSupportView(ctx context.Context, r *http.Request) (map[string]any, error) {
-	controlDatabase, err := a.openServerControlDatabase(ctx)
-	if err != nil {
-		return nil, err
+	snapshot, found := a.preparedHostingAndSupportPanelSnapshot()
+	if !found {
+		var err error
+		snapshot, err = a.collectHostingAndSupportPanelSnapshot(ctx, nil)
+		if err != nil {
+			return nil, err
+		}
 	}
-	defer controlDatabase.Close()
+	return a.hostingAndSupportPanelView(r, snapshot), nil
+}
+
+func (a *App) collectHostingAndSupportPanelSnapshot(ctx context.Context, controlDatabase *sql.DB) (hostingAndSupportPanelSnapshot, error) {
+	closeControlDatabase := false
+	if controlDatabase == nil {
+		var err error
+		controlDatabase, err = a.openServerControlDatabase(ctx)
+		if err != nil {
+			return hostingAndSupportPanelSnapshot{}, err
+		}
+		closeControlDatabase = true
+	}
+	if closeControlDatabase {
+		defer controlDatabase.Close()
+	}
 	store := hostingandsupport.Store{DB: controlDatabase}
 	plans := store.Plans(ctx)
 	invoices := store.Invoices(ctx, 80)
@@ -9964,7 +10183,6 @@ func (a *App) hostingAndSupportView(ctx context.Context, r *http.Request) (map[s
 	registrySyncEvents := store.RegistrySyncEvents(ctx, 40)
 	_ = a.migrateLegacySitebrushComPrivateKey(ctx, controlDatabase)
 	sitebrushComKey := store.SitebrushComKey(ctx)
-	showServers := true
 	serviceMailRelayEnabled := store.ServiceMailRelayEnabled(ctx)
 	demoSettings := (demo.Store{DB: controlDatabase}).Settings(ctx)
 	hostingAndSupportDemoDomain := ""
@@ -9976,9 +10194,9 @@ func (a *App) hostingAndSupportView(ctx context.Context, r *http.Request) (map[s
 		mainDomain = ownerDomain
 	}
 	deletionBackupSizesByDomain := a.managedSiteDeletionBackupSizesByDomain(ctx, controlDatabase)
-	siteRows, err := a.hostingAndSupportSiteRows(ctx, plans, assignments, deletionBackupSizesByDomain, a.siteDomain(ctx, r), hostingAndSupportDemoDomain, mainDomain)
+	siteRows, err := a.hostingAndSupportSiteRows(ctx, plans, assignments, deletionBackupSizesByDomain, mainDomain, hostingAndSupportDemoDomain, mainDomain)
 	if err != nil {
-		return nil, err
+		return hostingAndSupportPanelSnapshot{}, err
 	}
 	hostingAndSupportAttachApprovedSiteRequests(siteRows, approvedSiteRequestsByDomain)
 	localServer := hostingandsupport.BuildLocalServerView(hostingandsupport.LocalServerViewInput{
@@ -9989,7 +10207,7 @@ func (a *App) hostingAndSupportView(ctx context.Context, r *http.Request) (map[s
 		SystemMetrics:  a.localHostingServerSystemMetrics(ctx),
 		CompileVersion: CompileVersion,
 		MainDomain:     mainDomain,
-		CurrentHost:    a.siteDomain(ctx, r),
+		CurrentHost:    mainDomain,
 		SiteURL:        a.hostingAndSupportSiteURL,
 	})
 	servers := hostingandsupport.BuildServerViews(localServer, clientHostings, invoices, CompileVersion)
@@ -9997,29 +10215,69 @@ func (a *App) hostingAndSupportView(ctx context.Context, r *http.Request) (map[s
 	overview := hostingandsupport.BuildOverview(siteRows, 0, pendingSiteRequests, invoices, clientHostings, registrySyncEvents, nil)
 	overview.ServerCount = len(servers)
 	overview.ClientCount = len(clients)
+	now := time.Now().UTC().Format(time.RFC3339)
+	return hostingAndSupportPanelSnapshot{
+		Version:                 hostingAndSupportPanelSnapshotVersion,
+		BuiltAt:                 now,
+		MetricsBuiltAt:          now,
+		MainDomain:              mainDomain,
+		OwnerEmails:             store.OwnerEmails(ctx),
+		Sites:                   siteRows,
+		Plans:                   plans,
+		Invoices:                invoices,
+		Assignments:             assignments,
+		SiteRequests:            pendingSiteRequests,
+		ClientHostings:          clientHostings,
+		Servers:                 servers,
+		RegistrySyncEvents:      registrySyncEvents,
+		SitebrushComKey:         sitebrushComKey,
+		Clients:                 clients,
+		ServiceMailRelayEnabled: serviceMailRelayEnabled,
+		Overview:                overview,
+		DemoSettings:            demoSettings,
+		AutoRegistrationEnabled: store.AutomaticRegistrationAllowed(ctx),
+	}, nil
+}
+
+func (a *App) applyHostingAndSupportPanelMetrics(snapshot hostingAndSupportPanelSnapshot, metrics []hostingandsupport.ServerMetricView) hostingAndSupportPanelSnapshot {
+	if snapshot.Version == 0 {
+		snapshot.Version = hostingAndSupportPanelSnapshotVersion
+	}
+	localServer := hostingandsupport.BuildLocalServerView(hostingandsupport.LocalServerViewInput{
+		Sites: snapshot.Sites, Invoices: snapshot.Invoices, Plans: snapshot.Plans, Assignments: snapshot.Assignments,
+		SystemMetrics: metrics, CompileVersion: CompileVersion, MainDomain: snapshot.MainDomain, CurrentHost: snapshot.MainDomain, SiteURL: a.hostingAndSupportSiteURL,
+	})
+	snapshot.Servers = hostingandsupport.BuildServerViews(localServer, snapshot.ClientHostings, snapshot.Invoices, CompileVersion)
+	snapshot.Overview.ServerCount = len(snapshot.Servers)
+	snapshot.MetricsBuiltAt = time.Now().UTC().Format(time.RFC3339)
+	return snapshot
+}
+
+func (a *App) hostingAndSupportPanelView(r *http.Request, snapshot hostingAndSupportPanelSnapshot) map[string]any {
 	translations := translationsForRequest(r)
 	return map[string]any{
+		"T":                           translations,
 		"Title":                       translationOrDefault(translations, "billing_title", "Хостинг и поддержка"),
-		"Sites":                       siteRows,
-		"Plans":                       plans,
+		"Sites":                       snapshot.Sites,
+		"Plans":                       snapshot.Plans,
 		"PaymentProviders":            hostingandsupport.DemoPaymentProviders(absoluteURLForPath(r, "/?hosting_and_support_demo_payment&invoice={invoice}")),
-		"Invoices":                    invoices,
-		"SiteRequests":                pendingSiteRequests,
+		"Invoices":                    snapshot.Invoices,
+		"SiteRequests":                snapshot.SiteRequests,
 		"ServiceMailInstallations":    nil,
 		"ServiceMailEvents":           nil,
-		"ClientHostings":              clientHostings,
-		"Servers":                     servers,
-		"RegistrySyncEvents":          registrySyncEvents,
-		"SitebrushComKey":             sitebrushComKey,
-		"ShowServers":                 showServers,
-		"Clients":                     clients,
-		"ClientCount":                 len(clients),
-		"ClientSiteCount":             len(siteRows),
-		"ClientInstallationCount":     len(servers),
+		"ClientHostings":              snapshot.ClientHostings,
+		"Servers":                     snapshot.Servers,
+		"RegistrySyncEvents":          snapshot.RegistrySyncEvents,
+		"SitebrushComKey":             snapshot.SitebrushComKey,
+		"ShowServers":                 true,
+		"Clients":                     snapshot.Clients,
+		"ClientCount":                 len(snapshot.Clients),
+		"ClientSiteCount":             len(snapshot.Sites),
+		"ClientInstallationCount":     len(snapshot.Servers),
 		"ClientLocalDevelopmentCount": 0,
 		"ServiceMailBlocks":           nil,
-		"ServiceMailRelayEnabled":     serviceMailRelayEnabled,
-		"Overview":                    overview,
+		"ServiceMailRelayEnabled":     snapshot.ServiceMailRelayEnabled,
+		"Overview":                    snapshot.Overview,
 		"ServiceMailLimits": map[string]int{
 			"InstallationHour":    serviceMailPerInstallationHourLimit,
 			"NewInstallationHour": serviceMailNewInstallationHourLimit,
@@ -10030,11 +10288,12 @@ func (a *App) hostingAndSupportView(ctx context.Context, r *http.Request) (map[s
 			"RecipientDomainHour": serviceMailPerRecipientDomainHourLimit,
 		},
 		"Backups":                 nil,
-		"DemoSettings":            demoSettings,
-		"AutoRegistrationEnabled": store.AutomaticRegistrationAllowed(ctx),
+		"DemoSettings":            snapshot.DemoSettings,
+		"AutoRegistrationEnabled": snapshot.AutoRegistrationEnabled,
 		"PublicTrialEmbedHTML":    publicTrialSignupEmbedHTML(r, translations),
-		"CurrentDomain":           a.siteDomain(ctx, r),
-	}, nil
+		"CurrentDomain":           domainFromRequest(r),
+		"PanelSnapshotBuiltAt":    snapshot.BuiltAt,
+	}
 }
 
 type hostingAndSupportClientView struct {
@@ -11335,6 +11594,27 @@ func (a *App) updateManagedSiteFromForm(r *http.Request) string {
 		return err.Error()
 	}
 	a.logHostingSupportEvent(r.Context(), "plan_changed", "saved", "", domain, "site plan or quota saved")
+	a.reportHostingSnapshotAsync(r.Context())
+	return fmt.Sprintf(translationOrDefault(translations, "billing_status_site_settings_saved", "Site %s settings were saved."), domain)
+}
+
+func (a *App) updateManagedSiteQuotaFromForm(r *http.Request) string {
+	translations := translationsForRequest(r)
+	domain := normalizeQuotaDomainName(r.FormValue("domain"))
+	if domain == "" {
+		return translationOrDefault(translations, "billing_status_site_domain_required", "Site domain is required.")
+	}
+	quotaBytes, quotaRequested, err := parseSiteQuotaLimitBytes(r.FormValue("quota"))
+	if err != nil {
+		return err.Error()
+	}
+	if !quotaRequested {
+		return translationOrDefault(translations, "billing_status_quota_required", "Quota is required.")
+	}
+	if _, err := a.updateSiteQuotaLimit(r.Context(), domain, quotaBytes); err != nil {
+		return err.Error()
+	}
+	a.logHostingSupportEvent(r.Context(), "quota_changed", "saved", "", domain, "site quota saved")
 	a.reportHostingSnapshotAsync(r.Context())
 	return fmt.Sprintf(translationOrDefault(translations, "billing_status_site_settings_saved", "Site %s settings were saved."), domain)
 }
@@ -13588,6 +13868,7 @@ func (a *App) runHostingServerMonitorOnce(ctx context.Context) {
 		_ = store.LogServerNetworkCheck(ctx, hosting.InstallationID, hosting.ServerDomain, hosting.ServerIP, success, responseMS, errorMessage)
 		a.checkHostingServerSiteTLS(ctx, store, hosting)
 	}
+	a.refreshHostingAndSupportPanel()
 }
 
 func checkHostingServerNetwork(ctx context.Context, hosting hostingandsupport.ClientHosting) (bool, int, string) {
@@ -14757,6 +15038,7 @@ func (a *App) handleHostingSnapshotRequest(ctx context.Context, request serviceM
 	if err := store.SaveHostingSnapshot(ctx, snapshot); err != nil {
 		return fail(err.Error(), http.StatusBadRequest)
 	}
+	a.refreshHostingAndSupportPanel()
 	a.notifyHostingSnapshotDiskThreshold(ctx, controlDatabase, snapshot)
 	return "stored", http.StatusOK
 }
@@ -14879,6 +15161,7 @@ func (a *App) handleServiceMailRelayRequest(ctx context.Context, r *http.Request
 		if err := storeServiceMailRequestHostingSnapshot(ctx, store, request, sourceIP); err != nil {
 			return fail(err.Error(), http.StatusBadRequest)
 		}
+		a.refreshHostingAndSupportPanel()
 		a.notifyServiceMailRequestHostingSnapshotDiskThreshold(ctx, controlDatabase, request, sourceIP)
 		return "registered", http.StatusOK
 	}
@@ -14894,6 +15177,7 @@ func (a *App) handleServiceMailRelayRequest(ctx context.Context, r *http.Request
 	if err := storeServiceMailRequestHostingSnapshot(ctx, store, request, sourceIP); err != nil {
 		return fail(err.Error(), http.StatusBadRequest)
 	}
+	a.refreshHostingAndSupportPanel()
 	a.notifyServiceMailRequestHostingSnapshotDiskThreshold(ctx, controlDatabase, request, sourceIP)
 	if store.ServiceMailInstallationBlocked(ctx, request.InstallationID) {
 		return fail("installation is blocked", http.StatusForbidden)
@@ -17699,6 +17983,7 @@ func (a *App) ensureServerOwnerExists(ctx context.Context) {
 		return
 	}
 	store.PromoteOwnerIfMissing(ctx, domain, email)
+	a.refreshHostingAndSupportPanel()
 }
 
 func (a *App) firstExistingSiteAdmin(ctx context.Context) (string, string, bool) {
@@ -17748,16 +18033,25 @@ func (a *App) promoteFirstServerOwner(ctx context.Context, domain, email string)
 }
 
 func (a *App) isServerManagerRequest(r *http.Request) bool {
-	email, found := a.currentAdminEmail(r)
+	requestDomain := domainFromRequest(r)
+	email, found := a.currentAdminEmailForDomain(r, requestDomain)
 	if !found {
 		return false
 	}
-	return a.isServerManagerEmail(r.Context(), a.siteDomain(r.Context(), r), email)
+	return a.isServerManagerEmail(r.Context(), requestDomain, email)
 }
 
 func (a *App) isServerManagerEmail(ctx context.Context, domain, email string) bool {
 	email = strings.TrimSpace(email)
 	if email == "" {
+		return false
+	}
+	if snapshot, found := a.preparedHostingAndSupportPanelSnapshot(); found && sameHostingAndSupportDomain(snapshot.MainDomain, domain) {
+		for _, ownerEmail := range snapshot.OwnerEmails {
+			if strings.EqualFold(strings.TrimSpace(ownerEmail), email) {
+				return true
+			}
+		}
 		return false
 	}
 	if !a.serverOwnerExists(ctx) {
@@ -20621,14 +20915,48 @@ func (a *App) applyTemplateClassSynchronization(ctx context.Context, domain, pre
 }
 
 func (a *App) render(w http.ResponseWriter, r *http.Request, templateName string, templateData any) {
+	var translations map[string]string
+	domain := ""
+	if templateMap, ok := templateData.(map[string]any); ok {
+		if preparedTranslations, prepared := templateMap["T"].(map[string]string); prepared {
+			translations = preparedTranslations
+		}
+		if preparedDomain, prepared := templateMap["CurrentDomain"].(string); prepared {
+			domain = preparedDomain
+		}
+	}
+	if translations == nil {
+		translations = translationsForRequest(r)
+	}
+	if strings.TrimSpace(domain) == "" {
+		domain = a.siteDomain(r.Context(), r)
+	}
+	envelope := map[string]any{"Domain": domain, "T": translations, "CompileVersion": CompileVersion}
+	mergeTemplateData(envelope, templateData)
+	if a != nil && a.renderTemplates != nil {
+		reply := make(chan renderTemplateResponse, 1)
+		a.renderTemplates <- renderTemplateRequest{name: templateName, envelope: envelope, reply: reply}
+		response := <-reply
+		if response.err != nil {
+			http.Error(w, response.err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if templateName == "edit.html" {
+			response.html = injectTemplatePropagationProgressModal(response.html)
+		}
+		_, _ = w.Write(response.html)
+		return
+	}
 	fileBytes, err := fs.ReadFile(embeddedWebFiles, "web/"+templateName)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	parsedTemplate := template.Must(template.New(templateName).Parse(string(fileBytes)))
-	envelope := map[string]any{"Domain": a.siteDomain(r.Context(), r), "T": translationsForRequest(r), "CompileVersion": CompileVersion}
-	mergeTemplateData(envelope, templateData)
+	parsedTemplate, err := template.New(templateName).Parse(string(fileBytes))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 	if templateName == "edit.html" {
 		var rendered bytes.Buffer
 		_ = parsedTemplate.Execute(&rendered, envelope)
@@ -20636,6 +20964,49 @@ func (a *App) render(w http.ResponseWriter, r *http.Request, templateName string
 		return
 	}
 	_ = parsedTemplate.Execute(w, envelope)
+}
+
+func startRenderTemplateProcess(stop <-chan struct{}) chan renderTemplateRequest {
+	requests := make(chan renderTemplateRequest, 32)
+	parsedTemplates := make(map[string]*template.Template)
+	parseErrors := make(map[string]error)
+	templatePaths, _ := fs.Glob(embeddedWebFiles, "web/*.html")
+	for _, templatePath := range templatePaths {
+		templateName := filepath.Base(templatePath)
+		fileBytes, readErr := fs.ReadFile(embeddedWebFiles, templatePath)
+		if readErr != nil {
+			parseErrors[templateName] = readErr
+			continue
+		}
+		parsedTemplate, parseErr := template.New(templateName).Parse(string(fileBytes))
+		if parseErr != nil {
+			parseErrors[templateName] = parseErr
+			continue
+		}
+		parsedTemplates[templateName] = parsedTemplate
+	}
+	go func() {
+		for {
+			select {
+			case <-stop:
+				return
+			case request := <-requests:
+				if parseErr := parseErrors[request.name]; parseErr != nil {
+					request.reply <- renderTemplateResponse{err: parseErr}
+					continue
+				}
+				parsedTemplate := parsedTemplates[request.name]
+				if parsedTemplate == nil {
+					request.reply <- renderTemplateResponse{err: fmt.Errorf("template %s is not embedded", request.name)}
+					continue
+				}
+				var rendered bytes.Buffer
+				renderErr := parsedTemplate.Execute(&rendered, request.envelope)
+				request.reply <- renderTemplateResponse{html: rendered.Bytes(), err: renderErr}
+			}
+		}
+	}()
+	return requests
 }
 
 func injectTemplatePropagationProgressModal(pageHTML []byte) []byte {

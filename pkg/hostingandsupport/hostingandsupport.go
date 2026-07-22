@@ -19,10 +19,16 @@ import (
 
 const DefaultStorageLimitBytes int64 = 10 * 1024 * 1024 * 1024
 const DefaultDeletionBackupRetentionDays = 365
-const currentBillingSchemaVersion = 17
+const currentBillingSchemaVersion = 18
 
 type Store struct {
 	DB *sql.DB
+}
+
+type PanelSnapshotRecord struct {
+	Version     int
+	PayloadJSON string
+	BuiltAt     string
 }
 
 type Plan struct {
@@ -478,11 +484,17 @@ func Migrate(ctx context.Context, database *sql.DB) error {
 	if err != nil {
 		return fmt.Errorf("read billing schema version: %w", err)
 	}
+	if schemaVersion >= currentBillingSchemaVersion {
+		return nil
+	}
 	schemaComplete, err := hostingAndSupportSchemaComplete(ctx, database)
 	if err != nil {
 		return fmt.Errorf("verify billing schema: %w", err)
 	}
-	if schemaVersion >= currentBillingSchemaVersion && schemaComplete {
+	if schemaComplete {
+		if err := setSchemaMigrationVersion(ctx, database, "billing", currentBillingSchemaVersion); err != nil {
+			return fmt.Errorf("write billing schema version: %w", err)
+		}
 		return nil
 	}
 	queries := []string{
@@ -523,6 +535,7 @@ func Migrate(ctx context.Context, database *sql.DB) error {
 		`CREATE TABLE IF NOT EXISTS registry_sync_events(id INTEGER PRIMARY KEY AUTOINCREMENT,installation_id TEXT,status TEXT,error TEXT,created_at TEXT,summary_json TEXT);`,
 		`CREATE INDEX IF NOT EXISTS idx_registry_sync_events_installation_created ON registry_sync_events(installation_id,created_at);`,
 		`CREATE TABLE IF NOT EXISTS sitebrush_com_keys(domain TEXT PRIMARY KEY,public_key TEXT,private_key_path TEXT,fingerprint TEXT,created_at TEXT,updated_at TEXT);`,
+		`CREATE TABLE IF NOT EXISTS hosting_panel_snapshots(name TEXT PRIMARY KEY,version INTEGER NOT NULL,payload_json TEXT NOT NULL,built_at TEXT NOT NULL);`,
 	}
 	queries = append(queries, demo.SchemaQueries()...)
 	for queryIndex, query := range queries {
@@ -575,7 +588,7 @@ func setSchemaMigrationVersion(ctx context.Context, database *sql.DB, component 
 }
 
 func hostingAndSupportSchemaComplete(ctx context.Context, database *sql.DB) (bool, error) {
-	tableNames := []string{"server_managers", "server_settings", "site_service_plans", "site_service_assignments", "payment_providers", "billing_invoices", "site_registration_requests", "site_deletion_backups", "service_mail_installations", "service_mail_events", "support_events", "service_mail_blocks", "service_mail_recipients", "client_hostings", "client_hosting_sites", "server_resource_checks", "server_network_checks", "site_tls_checks", "registry_accounts", "registry_installation_roles", "registry_installation_plans", "registry_events", "registry_sync_events", "sitebrush_com_keys"}
+	tableNames := []string{"server_managers", "server_settings", "site_service_plans", "site_service_assignments", "payment_providers", "billing_invoices", "site_registration_requests", "site_deletion_backups", "service_mail_installations", "service_mail_events", "support_events", "service_mail_blocks", "service_mail_recipients", "client_hostings", "client_hosting_sites", "server_resource_checks", "server_network_checks", "site_tls_checks", "registry_accounts", "registry_installation_roles", "registry_installation_plans", "registry_events", "registry_sync_events", "sitebrush_com_keys", "hosting_panel_snapshots"}
 	tableNames = append(tableNames, demo.TableNames()...)
 	for _, tableName := range tableNames {
 		found, err := tableExists(ctx, database, tableName)
@@ -1633,9 +1646,11 @@ func (store Store) ClientHostings(ctx context.Context) []ClientHosting {
 		hosting.ServerUptimeClass = serverUptimeStatusClass(hosting.ServerUptimeSeconds)
 		hostings = append(hostings, hosting)
 	}
+	details := store.loadClientHostingDetails(ctx)
 	for hostingIndex := range hostings {
-		hostings[hostingIndex].Sites = store.clientHostingSites(ctx, hostings[hostingIndex].InstallationID)
-		tlsChecks := store.siteTLSChecks(ctx, hostings[hostingIndex].InstallationID)
+		installationID := hostings[hostingIndex].InstallationID
+		hostings[hostingIndex].Sites = details.sites[installationID]
+		tlsChecks := details.tlsChecks[installationID]
 		for siteIndex := range hostings[hostingIndex].Sites {
 			check := tlsChecks[hostings[hostingIndex].Sites[siteIndex].Domain]
 			hostings[hostingIndex].Sites[siteIndex].HTTPSAvailable = check.HTTPSAvailable
@@ -1643,10 +1658,10 @@ func (store Store) ClientHostings(ctx context.Context) []ClientHosting {
 			hostings[hostingIndex].Sites[siteIndex].CertDaysLeft = check.CertDaysLeft
 			hostings[hostingIndex].Sites[siteIndex].TLSStatusClass = check.StatusClass
 		}
-		hostings[hostingIndex].Plans = store.clientHostingPlans(ctx, hostings[hostingIndex].InstallationID)
-		hostings[hostingIndex].Roles = store.clientHostingRoles(ctx, hostings[hostingIndex].InstallationID)
-		hostings[hostingIndex].Events = store.clientHostingEvents(ctx, hostings[hostingIndex].InstallationID, 12)
-		hostings[hostingIndex].ResourceHistory = store.serverResourceHistory(ctx, hostings[hostingIndex].InstallationID, 24*time.Hour)
+		hostings[hostingIndex].Plans = details.plans[installationID]
+		hostings[hostingIndex].Roles = details.roles[installationID]
+		hostings[hostingIndex].Events = details.events[installationID]
+		hostings[hostingIndex].ResourceHistory = details.resourceHistory[installationID]
 		hostings[hostingIndex].SiteCount = len(hostings[hostingIndex].Sites)
 		emailSet := make(map[string]struct{})
 		if strings.TrimSpace(hostings[hostingIndex].OwnerEmail) != "" {
@@ -1672,7 +1687,11 @@ func (store Store) ClientHostings(ctx context.Context) []ClientHosting {
 		hostings[hostingIndex].DiskStatusClass = metricStatusClass(float64(hostings[hostingIndex].DiskUsedPercent), 80, 95)
 		hostings[hostingIndex].CPUStatusClass = metricStatusClass(hostings[hostingIndex].CPUUsagePercent, 80, 95)
 		hostings[hostingIndex].LoadStatusClass = loadAverageStatusClass(hostings[hostingIndex].LoadAverage, hostings[hostingIndex].CPUCores)
-		uptimePercent, responseMS := store.serverNetworkSummary(ctx, hostings[hostingIndex].InstallationID)
+		networkSummary, found := details.networkSummaries[installationID]
+		if !found {
+			networkSummary.uptimePercent = 100
+		}
+		uptimePercent, responseMS := networkSummary.uptimePercent, networkSummary.lastResponseMS
 		hostings[hostingIndex].NetworkUptimePercent = uptimePercent
 		hostings[hostingIndex].NetworkUptimeLabel = fmt.Sprintf("%.2f%%", uptimePercent)
 		hostings[hostingIndex].LastResponseMS = responseMS
@@ -1681,18 +1700,158 @@ func (store Store) ClientHostings(ctx context.Context) []ClientHosting {
 	return hostings
 }
 
-func (store Store) serverResourceHistory(ctx context.Context, installationID string, window time.Duration) []ServerResourceCheck {
-	since := time.Now().UTC().Add(-window).Format(time.RFC3339)
-	rows, err := store.DB.QueryContext(ctx, `SELECT COALESCE(cpu_usage_percent,0),COALESCE(load_average,0),COALESCE(top_cpu_process_name,''),COALESCE(top_cpu_process_pid,0),COALESCE(top_cpu_process_percent,0),COALESCE(ram_total_bytes,0),COALESCE(disk_free_bytes,0),COALESCE(disk_total_bytes,0),COALESCE(checked_at,'') FROM server_resource_checks WHERE installation_id=? AND checked_at>=? ORDER BY checked_at ASC`,
-		strings.TrimSpace(installationID), since)
+type clientHostingNetworkSummary struct {
+	uptimePercent  float64
+	lastResponseMS int
+	total          int
+	successful     int
+}
+
+type clientHostingDetails struct {
+	sites            map[string][]ClientHostingSite
+	tlsChecks        map[string]map[string]SiteTLSCheck
+	plans            map[string][]ClientHostingPlan
+	roles            map[string][]ClientHostingRole
+	events           map[string][]ClientHostingEvent
+	resourceHistory  map[string][]ServerResourceCheck
+	networkSummaries map[string]clientHostingNetworkSummary
+}
+
+func (store Store) loadClientHostingDetails(ctx context.Context) clientHostingDetails {
+	details := clientHostingDetails{
+		sites:            make(map[string][]ClientHostingSite),
+		tlsChecks:        make(map[string]map[string]SiteTLSCheck),
+		plans:            make(map[string][]ClientHostingPlan),
+		roles:            make(map[string][]ClientHostingRole),
+		events:           make(map[string][]ClientHostingEvent),
+		resourceHistory:  make(map[string][]ServerResourceCheck),
+		networkSummaries: make(map[string]clientHostingNetworkSummary),
+	}
+	store.loadAllClientHostingSites(ctx, details.sites)
+	store.loadAllSiteTLSChecks(ctx, details.tlsChecks)
+	store.loadAllClientHostingPlans(ctx, details.plans)
+	store.loadAllClientHostingRoles(ctx, details.roles)
+	store.loadAllClientHostingEvents(ctx, details.events, 12)
+	store.loadAllServerResourceHistory(ctx, details.resourceHistory, 24*time.Hour)
+	store.loadAllServerNetworkSummaries(ctx, details.networkSummaries, 30*24*time.Hour)
+	return details
+}
+
+func (store Store) loadAllClientHostingSites(ctx context.Context, sitesByInstallation map[string][]ClientHostingSite) {
+	rows, err := store.DB.QueryContext(ctx, `SELECT installation_id,domain,COALESCE(owner_email,''),COALESCE(used_bytes,0),COALESCE(limit_bytes,0),COALESCE(plan_name,''),COALESCE(plan_status,''),COALESCE(plan_paid_status,''),COALESCE(admin_emails,'') FROM client_hosting_sites ORDER BY installation_id ASC,used_bytes DESC,domain ASC`)
 	if err != nil {
-		return nil
+		return
 	}
 	defer rows.Close()
-	checks := make([]ServerResourceCheck, 0, 32)
 	for rows.Next() {
+		var installationID string
+		var site ClientHostingSite
+		var adminEmails string
+		if scanErr := rows.Scan(&installationID, &site.Domain, &site.OwnerEmail, &site.UsedBytes, &site.LimitBytes, &site.PlanName, &site.PlanStatus, &site.PlanPaidStatus, &adminEmails); scanErr != nil {
+			continue
+		}
+		site.AdminEmails = normalizedHostingEmails(strings.Split(adminEmails, ","))
+		site.UsedLabel = FormatFileSize(site.UsedBytes)
+		site.LimitLabel = FormatFileSize(site.LimitBytes)
+		billingPrice := BillingPriceForUsedBytes(site.UsedBytes)
+		site.BillingUsageLabel = BillingUsageLabel(site.UsedBytes)
+		site.BillingPriceLabel = billingPrice.PriceLabel
+		site.BillingStatusText = billingPrice.StatusText
+		site.BillingAmount = billingPrice.Amount
+		site.BillingCurrency = billingPrice.Currency
+		site.BillingBillable = billingPrice.Billable
+		site.OverLimit = site.LimitBytes > 0 && site.UsedBytes > site.LimitBytes
+		sitesByInstallation[installationID] = append(sitesByInstallation[installationID], site)
+	}
+}
+
+func (store Store) loadAllSiteTLSChecks(ctx context.Context, checksByInstallation map[string]map[string]SiteTLSCheck) {
+	rows, err := store.DB.QueryContext(ctx, `SELECT installation_id,domain,COALESCE(https_available,0),COALESCE(cert_expires_at,''),COALESCE(cert_days_left,0),COALESCE(status,''),COALESCE(error,'') FROM site_tls_checks ORDER BY installation_id ASC,domain ASC`)
+	if err != nil {
+		return
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var installationID string
+		var check SiteTLSCheck
+		var available int
+		if scanErr := rows.Scan(&installationID, &check.Domain, &available, &check.CertExpiresAt, &check.CertDaysLeft, &check.StatusClass, &check.Error); scanErr != nil {
+			continue
+		}
+		check.InstallationID = installationID
+		check.HTTPSAvailable = available != 0
+		if checksByInstallation[installationID] == nil {
+			checksByInstallation[installationID] = make(map[string]SiteTLSCheck)
+		}
+		checksByInstallation[installationID][check.Domain] = check
+	}
+}
+
+func (store Store) loadAllClientHostingPlans(ctx context.Context, plansByInstallation map[string][]ClientHostingPlan) {
+	rows, err := store.DB.QueryContext(ctx, `SELECT installation_id,name,COALESCE(quota_bytes,0),COALESCE(site_limit,0),COALESCE(price,''),COALESCE(currency,''),COALESCE(billing_period,''),COALESCE(paid_status,''),COALESCE(is_default,0) FROM registry_installation_plans ORDER BY installation_id ASC,is_default DESC,name ASC`)
+	if err != nil {
+		return
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var installationID string
+		var plan ClientHostingPlan
+		var quotaBytes int64
+		var defaultFlag int
+		if scanErr := rows.Scan(&installationID, &plan.Name, &quotaBytes, &plan.SiteLimit, &plan.Price, &plan.Currency, &plan.BillingPeriod, &plan.PaidStatus, &defaultFlag); scanErr != nil {
+			continue
+		}
+		plan.QuotaLabel = FormatFileSize(quotaBytes)
+		plan.IsDefault = defaultFlag != 0
+		plansByInstallation[installationID] = append(plansByInstallation[installationID], plan)
+	}
+}
+
+func (store Store) loadAllClientHostingRoles(ctx context.Context, rolesByInstallation map[string][]ClientHostingRole) {
+	rows, err := store.DB.QueryContext(ctx, `SELECT installation_id,COALESCE(email,''),COALESCE(role,''),COALESCE(scope,''),COALESCE(domain,'') FROM registry_installation_roles ORDER BY installation_id ASC,email ASC,scope ASC,domain ASC,role ASC`)
+	if err != nil {
+		return
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var installationID string
+		var role ClientHostingRole
+		if scanErr := rows.Scan(&installationID, &role.Email, &role.Role, &role.Scope, &role.Domain); scanErr != nil {
+			continue
+		}
+		rolesByInstallation[installationID] = append(rolesByInstallation[installationID], role)
+	}
+}
+
+func (store Store) loadAllClientHostingEvents(ctx context.Context, eventsByInstallation map[string][]ClientHostingEvent, limit int) {
+	rows, err := store.DB.QueryContext(ctx, `SELECT installation_id,COALESCE(kind,''),COALESCE(status,''),COALESCE(email,''),COALESCE(domain,''),COALESCE(message,''),COALESCE(created_at,'') FROM registry_events ORDER BY installation_id ASC,id DESC`)
+	if err != nil {
+		return
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var installationID string
+		var event ClientHostingEvent
+		if scanErr := rows.Scan(&installationID, &event.Kind, &event.Status, &event.Email, &event.Domain, &event.Message, &event.CreatedAt); scanErr != nil {
+			continue
+		}
+		if len(eventsByInstallation[installationID]) < limit {
+			eventsByInstallation[installationID] = append(eventsByInstallation[installationID], event)
+		}
+	}
+}
+
+func (store Store) loadAllServerResourceHistory(ctx context.Context, historyByInstallation map[string][]ServerResourceCheck, window time.Duration) {
+	since := time.Now().UTC().Add(-window).Format(time.RFC3339)
+	rows, err := store.DB.QueryContext(ctx, `SELECT installation_id,COALESCE(cpu_usage_percent,0),COALESCE(load_average,0),COALESCE(top_cpu_process_name,''),COALESCE(top_cpu_process_pid,0),COALESCE(top_cpu_process_percent,0),COALESCE(ram_total_bytes,0),COALESCE(disk_free_bytes,0),COALESCE(disk_total_bytes,0),COALESCE(checked_at,'') FROM server_resource_checks WHERE checked_at>=? ORDER BY installation_id ASC,checked_at ASC`, since)
+	if err != nil {
+		return
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var installationID string
 		var check ServerResourceCheck
-		if scanErr := rows.Scan(&check.CPUUsagePercent, &check.LoadAverage, &check.TopCPUProcessName, &check.TopCPUProcessPID, &check.TopCPUProcessPercent, &check.RAMTotalBytes, &check.DiskFreeBytes, &check.DiskTotalBytes, &check.CheckedAt); scanErr != nil {
+		if scanErr := rows.Scan(&installationID, &check.CPUUsagePercent, &check.LoadAverage, &check.TopCPUProcessName, &check.TopCPUProcessPID, &check.TopCPUProcessPercent, &check.RAMTotalBytes, &check.DiskFreeBytes, &check.DiskTotalBytes, &check.CheckedAt); scanErr != nil {
 			continue
 		}
 		if check.DiskTotalBytes > check.DiskFreeBytes {
@@ -1704,9 +1863,38 @@ func (store Store) serverResourceHistory(ctx context.Context, installationID str
 				check.DiskUsedPercent = 100
 			}
 		}
-		checks = append(checks, check)
+		historyByInstallation[installationID] = append(historyByInstallation[installationID], check)
 	}
-	return checks
+}
+
+func (store Store) loadAllServerNetworkSummaries(ctx context.Context, summariesByInstallation map[string]clientHostingNetworkSummary, window time.Duration) {
+	since := time.Now().UTC().Add(-window).Format(time.RFC3339)
+	rows, err := store.DB.QueryContext(ctx, `SELECT installation_id,COALESCE(success,0),COALESCE(response_ms,0) FROM server_network_checks WHERE checked_at>=? ORDER BY installation_id ASC,checked_at ASC`, since)
+	if err != nil {
+		return
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var installationID string
+		var success int
+		var responseMS int
+		if scanErr := rows.Scan(&installationID, &success, &responseMS); scanErr != nil {
+			continue
+		}
+		summary := summariesByInstallation[installationID]
+		summary.total++
+		if success != 0 {
+			summary.successful++
+		}
+		summary.lastResponseMS = responseMS
+		summariesByInstallation[installationID] = summary
+	}
+	for installationID, summary := range summariesByInstallation {
+		if summary.total > 0 {
+			summary.uptimePercent = math.Round(float64(summary.successful)/float64(summary.total)*10000) / 100
+		}
+		summariesByInstallation[installationID] = summary
+	}
 }
 
 type SiteTLSCheck struct {
@@ -1737,53 +1925,6 @@ func (store Store) SaveSiteTLSCheck(ctx context.Context, check SiteTLSCheck) err
 	_, err := store.DB.ExecContext(ctx, `INSERT INTO site_tls_checks(domain,installation_id,https_available,cert_expires_at,cert_days_left,status,error,checked_at) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(domain) DO UPDATE SET installation_id=excluded.installation_id,https_available=excluded.https_available,cert_expires_at=excluded.cert_expires_at,cert_days_left=excluded.cert_days_left,status=excluded.status,error=excluded.error,checked_at=excluded.checked_at`,
 		strings.ToLower(strings.TrimSpace(check.Domain)), strings.TrimSpace(check.InstallationID), availableFlag, strings.TrimSpace(check.CertExpiresAt), check.CertDaysLeft, strings.TrimSpace(check.StatusClass), strings.TrimSpace(check.Error), time.Now().UTC().Format(time.RFC3339))
 	return err
-}
-
-func (store Store) serverNetworkSummary(ctx context.Context, installationID string) (float64, int) {
-	since := time.Now().UTC().Add(-30 * 24 * time.Hour).Format(time.RFC3339)
-	rows, err := store.DB.QueryContext(ctx, `SELECT COALESCE(success,0),COALESCE(response_ms,0) FROM server_network_checks WHERE installation_id=? AND checked_at>=? ORDER BY checked_at ASC`, strings.TrimSpace(installationID), since)
-	if err != nil {
-		return 100, 0
-	}
-	defer rows.Close()
-	total := 0
-	successful := 0
-	lastResponseMS := 0
-	for rows.Next() {
-		var success int
-		var responseMS int
-		if scanErr := rows.Scan(&success, &responseMS); scanErr != nil {
-			continue
-		}
-		total++
-		if success != 0 {
-			successful++
-		}
-		lastResponseMS = responseMS
-	}
-	if total == 0 {
-		return 100, 0
-	}
-	return math.Round(float64(successful)/float64(total)*10000) / 100, lastResponseMS
-}
-
-func (store Store) siteTLSChecks(ctx context.Context, installationID string) map[string]SiteTLSCheck {
-	rows, err := store.DB.QueryContext(ctx, `SELECT domain,COALESCE(https_available,0),COALESCE(cert_expires_at,''),COALESCE(cert_days_left,0),COALESCE(status,''),COALESCE(error,'') FROM site_tls_checks WHERE installation_id=?`, strings.TrimSpace(installationID))
-	if err != nil {
-		return nil
-	}
-	defer rows.Close()
-	checks := make(map[string]SiteTLSCheck)
-	for rows.Next() {
-		var check SiteTLSCheck
-		var available int
-		if scanErr := rows.Scan(&check.Domain, &available, &check.CertExpiresAt, &check.CertDaysLeft, &check.StatusClass, &check.Error); scanErr != nil {
-			continue
-		}
-		check.HTTPSAvailable = available != 0
-		checks[check.Domain] = check
-	}
-	return checks
 }
 
 func metricStatusClass(value float64, warningThreshold float64, dangerThreshold float64) string {
@@ -1855,93 +1996,6 @@ func FormatDurationDays(seconds int64) string {
 	return formatDurationDays(seconds)
 }
 
-func (store Store) clientHostingSites(ctx context.Context, installationID string) []ClientHostingSite {
-	rows, err := store.DB.QueryContext(ctx, `SELECT domain,COALESCE(owner_email,''),COALESCE(used_bytes,0),COALESCE(limit_bytes,0),COALESCE(plan_name,''),COALESCE(plan_status,''),COALESCE(plan_paid_status,''),COALESCE(admin_emails,'') FROM client_hosting_sites WHERE installation_id=? ORDER BY used_bytes DESC,domain ASC`, strings.TrimSpace(installationID))
-	if err != nil {
-		return nil
-	}
-	defer rows.Close()
-	sites := make([]ClientHostingSite, 0, 8)
-	for rows.Next() {
-		var site ClientHostingSite
-		var adminEmails string
-		if scanErr := rows.Scan(&site.Domain, &site.OwnerEmail, &site.UsedBytes, &site.LimitBytes, &site.PlanName, &site.PlanStatus, &site.PlanPaidStatus, &adminEmails); scanErr != nil {
-			continue
-		}
-		site.AdminEmails = normalizedHostingEmails(strings.Split(adminEmails, ","))
-		site.UsedLabel = FormatFileSize(site.UsedBytes)
-		site.LimitLabel = FormatFileSize(site.LimitBytes)
-		billingPrice := BillingPriceForUsedBytes(site.UsedBytes)
-		site.BillingUsageLabel = BillingUsageLabel(site.UsedBytes)
-		site.BillingPriceLabel = billingPrice.PriceLabel
-		site.BillingStatusText = billingPrice.StatusText
-		site.BillingAmount = billingPrice.Amount
-		site.BillingCurrency = billingPrice.Currency
-		site.BillingBillable = billingPrice.Billable
-		site.OverLimit = site.LimitBytes > 0 && site.UsedBytes > site.LimitBytes
-		sites = append(sites, site)
-	}
-	return sites
-}
-
-func (store Store) clientHostingPlans(ctx context.Context, installationID string) []ClientHostingPlan {
-	rows, err := store.DB.QueryContext(ctx, `SELECT name,COALESCE(quota_bytes,0),COALESCE(site_limit,0),COALESCE(price,''),COALESCE(currency,''),COALESCE(billing_period,''),COALESCE(paid_status,''),COALESCE(is_default,0) FROM registry_installation_plans WHERE installation_id=? ORDER BY is_default DESC,name ASC`, strings.TrimSpace(installationID))
-	if err != nil {
-		return nil
-	}
-	defer rows.Close()
-	plans := make([]ClientHostingPlan, 0, 4)
-	for rows.Next() {
-		var plan ClientHostingPlan
-		var quotaBytes int64
-		var defaultFlag int
-		if scanErr := rows.Scan(&plan.Name, &quotaBytes, &plan.SiteLimit, &plan.Price, &plan.Currency, &plan.BillingPeriod, &plan.PaidStatus, &defaultFlag); scanErr != nil {
-			continue
-		}
-		plan.QuotaLabel = FormatFileSize(quotaBytes)
-		plan.IsDefault = defaultFlag != 0
-		plans = append(plans, plan)
-	}
-	return plans
-}
-
-func (store Store) clientHostingRoles(ctx context.Context, installationID string) []ClientHostingRole {
-	rows, err := store.DB.QueryContext(ctx, `SELECT COALESCE(email,''),COALESCE(role,''),COALESCE(scope,''),COALESCE(domain,'') FROM registry_installation_roles WHERE installation_id=? ORDER BY email ASC,scope ASC,domain ASC,role ASC`, strings.TrimSpace(installationID))
-	if err != nil {
-		return nil
-	}
-	defer rows.Close()
-	roles := make([]ClientHostingRole, 0, 8)
-	for rows.Next() {
-		var role ClientHostingRole
-		if scanErr := rows.Scan(&role.Email, &role.Role, &role.Scope, &role.Domain); scanErr != nil {
-			continue
-		}
-		roles = append(roles, role)
-	}
-	return roles
-}
-
-func (store Store) clientHostingEvents(ctx context.Context, installationID string, limit int) []ClientHostingEvent {
-	if limit <= 0 {
-		limit = 12
-	}
-	rows, err := store.DB.QueryContext(ctx, `SELECT COALESCE(kind,''),COALESCE(status,''),COALESCE(email,''),COALESCE(domain,''),COALESCE(message,''),COALESCE(created_at,'') FROM registry_events WHERE installation_id=? ORDER BY id DESC LIMIT ?`, strings.TrimSpace(installationID), limit)
-	if err != nil {
-		return nil
-	}
-	defer rows.Close()
-	events := make([]ClientHostingEvent, 0, limit)
-	for rows.Next() {
-		var event ClientHostingEvent
-		if scanErr := rows.Scan(&event.Kind, &event.Status, &event.Email, &event.Domain, &event.Message, &event.CreatedAt); scanErr != nil {
-			continue
-		}
-		events = append(events, event)
-	}
-	return events
-}
-
 func (store Store) RegistrySyncEvents(ctx context.Context, limit int) []RegistrySyncEvent {
 	if limit <= 0 {
 		limit = 50
@@ -1992,6 +2046,28 @@ func (store Store) SitebrushComKey(ctx context.Context) SitebrushComKey {
 	_ = store.DB.QueryRowContext(ctx, `SELECT public_key,fingerprint,private_key_path,created_at,updated_at FROM sitebrush_com_keys WHERE domain='sitebrush.com'`).Scan(
 		&key.PublicKey, &key.Fingerprint, &key.PrivateKeyPath, &key.CreatedAt, &key.UpdatedAt)
 	return key
+}
+
+func (store Store) PanelSnapshot(ctx context.Context) (PanelSnapshotRecord, bool) {
+	var snapshot PanelSnapshotRecord
+	err := store.DB.QueryRowContext(ctx, `SELECT version,payload_json,built_at FROM hosting_panel_snapshots WHERE name=?`, "hosting_and_support").Scan(
+		&snapshot.Version, &snapshot.PayloadJSON, &snapshot.BuiltAt)
+	return snapshot, err == nil
+}
+
+func (store Store) SavePanelSnapshot(ctx context.Context, snapshot PanelSnapshotRecord) error {
+	result, err := store.DB.ExecContext(ctx, `UPDATE hosting_panel_snapshots SET version=?,payload_json=?,built_at=? WHERE name=?`,
+		snapshot.Version, snapshot.PayloadJSON, snapshot.BuiltAt, "hosting_and_support")
+	if err != nil {
+		return err
+	}
+	updatedRows, err := result.RowsAffected()
+	if err != nil || updatedRows > 0 {
+		return err
+	}
+	_, err = store.DB.ExecContext(ctx, `INSERT INTO hosting_panel_snapshots(name,version,payload_json,built_at) VALUES(?,?,?,?)`,
+		"hosting_and_support", snapshot.Version, snapshot.PayloadJSON, snapshot.BuiltAt)
+	return err
 }
 
 func (store Store) SaveSitebrushComKey(ctx context.Context, publicKey, privateKeyPath string) (SitebrushComKey, error) {

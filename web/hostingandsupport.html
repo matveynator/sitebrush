@@ -140,6 +140,38 @@
           font-style: normal;
         }
 
+        /* server-site-quota: keeps quota editing compact inside the existing site row. */
+        .technical-page .hosting-server-site-quota,
+        .technical-page .hosting-server-quota-editor {
+          display: flex;
+          gap: 6px;
+          align-items: center;
+          min-width: 0;
+        }
+
+        .technical-page .hosting-server-quota-button {
+          border: 0;
+          padding: 0;
+          color: var(--bs-link-color);
+          background: transparent;
+          font: inherit;
+          text-decoration: underline;
+          text-underline-offset: 2px;
+        }
+
+        .technical-page .hosting-server-quota-button:hover,
+        .technical-page .hosting-server-quota-button:focus-visible {
+          color: var(--bs-link-hover-color);
+        }
+
+        .technical-page .hosting-server-quota-editor[hidden] {
+          display: none;
+        }
+
+        .technical-page .hosting-server-quota-editor input {
+          width: 88px;
+        }
+
         /* server-header-machine: stacks OS, CPU, and site storage summary in the machine column. */
         .technical-page .hosting-server-machine {
           grid-template-columns: 1fr;
@@ -724,16 +756,50 @@
           <details open>
             <summary>Сайты по клиентам</summary>
             <div class="hosting-server-client-site-list">
-              {{range $server.Clients}}
+              {{range $clientIndex, $client := $server.Clients}}
               <section class="hosting-server-client-site-group">
-                <h3>{{.Email}} <span>{{.SiteCount}} сайтов</span></h3>
+                <h3>{{$client.Email}} <span>{{$client.SiteCount}} сайтов</span></h3>
                 <div class="billing-client-site-grid">
-                  {{range .Sites}}
-                  <div class="billing-client-site-row {{if .OverLimit}}billing-client-site-over-limit{{end}}">
-                    {{if .URL}}<a href="{{.URL}}" target="_blank" rel="noopener noreferrer">{{.Domain}}</a>{{else}}<span>{{.Domain}}</span>{{end}}
-                    <span>{{.UsedLabel}} / {{if .LimitLabel}}{{.LimitLabel}}{{else}}лимит не передан{{end}}</span>
-                    <span>{{.BillingPriceLabel}} · {{.BillingStatusText}}</span>
+                  {{range $siteIndex, $site := $client.Sites}}
+                  <div class="billing-client-site-row {{if $site.OverLimit}}billing-client-site-over-limit{{end}}">
+                    {{if $site.URL}}<a href="{{$site.URL}}" target="_blank" rel="noopener noreferrer">{{$site.Domain}}</a>{{else}}<span>{{$site.Domain}}</span>{{end}}
+                    <div class="hosting-server-site-quota">
+                      <span>{{$site.UsedLabel}} /</span>
+                      {{if $site.CanEditQuota}}
+                      <button type="button" class="hosting-server-quota-button" data-hosting-quota-edit="hostingQuotaEditor{{$serverIndex}}_{{$clientIndex}}_{{$siteIndex}}">{{$site.LimitLabel}}</button>
+                      <form id="hostingQuotaEditor{{$serverIndex}}_{{$clientIndex}}_{{$siteIndex}}" class="hosting-server-quota-editor" data-hosting-quota-editor data-hosting-quota-modal="hostingQuotaModal{{$serverIndex}}_{{$clientIndex}}_{{$siteIndex}}" hidden>
+                        <input name="quota" type="text" class="form-control form-control-sm" value="{{$site.QuotaInput}}" aria-label="{{index $.T "billing_quota"}}" required>
+                        <button type="submit" class="btn btn-primary btn-sm">{{index $.T "billing_save"}}</button>
+                      </form>
+                      {{else}}
+                      <span>{{if $site.LimitLabel}}{{$site.LimitLabel}}{{else}}лимит не передан{{end}}</span>
+                      {{end}}
+                    </div>
+                    <span>{{$site.BillingPriceLabel}} · {{$site.BillingStatusText}}</span>
                   </div>
+                  {{if $site.CanEditQuota}}
+                  <div class="modal fade" id="hostingQuotaModal{{$serverIndex}}_{{$clientIndex}}_{{$siteIndex}}" tabindex="-1" aria-hidden="true">
+                    <div class="modal-dialog modal-dialog-centered"><div class="modal-content">
+                      <form method="post" action="?hosting_and_support">
+                        <div class="modal-header">
+                          <h2 class="modal-title h5">{{index $.T "billing_quota_change_title"}}</h2>
+                          <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="{{index $.T "tree_close"}}"></button>
+                        </div>
+                        <div class="modal-body">
+                          <p><strong>{{$site.Domain}}</strong></p>
+                          <p>{{index $.T "billing_quota"}}: {{$site.LimitLabel}} &rarr; <strong data-hosting-quota-confirm-label></strong></p>
+                          <input type="hidden" name="billing_action" value="update_site_quota">
+                          <input type="hidden" name="domain" value="{{$site.Domain}}">
+                          <input type="hidden" name="quota" data-hosting-quota-confirm-input>
+                        </div>
+                        <div class="modal-footer">
+                          <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">{{index $.T "edit_cancel"}}</button>
+                          <button type="submit" class="btn btn-primary">{{index $.T "billing_apply"}}</button>
+                        </div>
+                      </form>
+                    </div></div>
+                  </div>
+                  {{end}}
                   {{end}}
                 </div>
               </section>
@@ -1949,6 +2015,52 @@
     }
   });
   renderServiceMailLogPage();
+})();
+
+(function initializeHostingQuotaEditors() {
+  const quotaEditButtonElements = document.querySelectorAll('[data-hosting-quota-edit]');
+  if (quotaEditButtonElements.length === 0 || !window.bootstrap) {
+    return;
+  }
+
+  for (const quotaEditButtonElement of quotaEditButtonElements) {
+    quotaEditButtonElement.addEventListener('click', function showHostingQuotaEditor() {
+      const editorElement = document.getElementById(quotaEditButtonElement.dataset.hostingQuotaEdit);
+      if (!editorElement) {
+        return;
+      }
+      quotaEditButtonElement.hidden = true;
+      editorElement.hidden = false;
+      const quotaInputElement = editorElement.querySelector('input[name="quota"]');
+      if (quotaInputElement) {
+        quotaInputElement.focus();
+        quotaInputElement.select();
+      }
+    });
+  }
+
+  const quotaEditorElements = document.querySelectorAll('[data-hosting-quota-editor]');
+  for (const quotaEditorElement of quotaEditorElements) {
+    quotaEditorElement.addEventListener('submit', function confirmHostingQuotaChange(submitEvent) {
+      submitEvent.preventDefault();
+      if (!quotaEditorElement.reportValidity()) {
+        return;
+      }
+      const modalElement = document.getElementById(quotaEditorElement.dataset.hostingQuotaModal);
+      const quotaInputElement = quotaEditorElement.querySelector('input[name="quota"]');
+      if (!modalElement || !quotaInputElement) {
+        return;
+      }
+      const confirmInputElement = modalElement.querySelector('[data-hosting-quota-confirm-input]');
+      const confirmLabelElement = modalElement.querySelector('[data-hosting-quota-confirm-label]');
+      if (!confirmInputElement || !confirmLabelElement) {
+        return;
+      }
+      confirmInputElement.value = quotaInputElement.value.trim();
+      confirmLabelElement.textContent = quotaInputElement.value.trim();
+      bootstrap.Modal.getOrCreateInstance(modalElement).show();
+    });
+  }
 })();
 
 (function initializeBillingAjaxSaveControls() {

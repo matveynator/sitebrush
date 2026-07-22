@@ -226,6 +226,36 @@ func TestServiceMailSettingsRoundTrip(t *testing.T) {
 	}
 }
 
+func TestPanelSnapshotRoundTrip(t *testing.T) {
+	database, err := sql.Open("sqlite3", filepath.Join(t.TempDir(), "hostingandsupport.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = database.Close()
+	})
+	if err := Migrate(context.Background(), database); err != nil {
+		t.Fatal(err)
+	}
+	store := Store{DB: database}
+	want := PanelSnapshotRecord{Version: 1, PayloadJSON: `{"main_domain":"sitebrush.com"}`, BuiltAt: "2026-07-22T12:00:00Z"}
+	if err := store.SavePanelSnapshot(context.Background(), want); err != nil {
+		t.Fatal(err)
+	}
+	got, found := store.PanelSnapshot(context.Background())
+	if !found || got != want {
+		t.Fatalf("snapshot = %#v found=%v, want %#v", got, found, want)
+	}
+	want.PayloadJSON = `{"main_domain":"example.com"}`
+	if err := store.SavePanelSnapshot(context.Background(), want); err != nil {
+		t.Fatal(err)
+	}
+	got, found = store.PanelSnapshot(context.Background())
+	if !found || got != want {
+		t.Fatalf("updated snapshot = %#v found=%v, want %#v", got, found, want)
+	}
+}
+
 func TestDeleteServiceMailEventsDeletesOnlySelectedRows(t *testing.T) {
 	database, err := sql.Open("sqlite3", filepath.Join(t.TempDir(), "hostingandsupport.db"))
 	if err != nil {
@@ -552,6 +582,8 @@ func TestBuildServerViewsMergesDuplicateLocalAndRemoteServer(t *testing.T) {
 		Sites: []Site{{
 			Domain:            "sitebrush.com",
 			UsedLabel:         "1 GB",
+			LimitLabel:        "40 GB",
+			QuotaInput:        "40gb",
 			BillingStatusText: "к выставлению",
 			BillingBillable:   true,
 		}},
@@ -603,6 +635,9 @@ func TestBuildServerViewsMergesDuplicateLocalAndRemoteServer(t *testing.T) {
 	}
 	if len(servers[0].SystemMetrics) == 0 || servers[0].SystemMetrics[0].Name != "CPU" {
 		t.Fatalf("merged server metrics were not built from remote hosting: %#v", servers[0].SystemMetrics)
+	}
+	if len(servers[0].Sites) != 1 || !servers[0].Sites[0].CanEditQuota || servers[0].Sites[0].QuotaInput != "40gb" || servers[0].Sites[0].LimitLabel != "40 GB" {
+		t.Fatalf("merged local quota is not editable: %#v", servers[0].Sites)
 	}
 }
 

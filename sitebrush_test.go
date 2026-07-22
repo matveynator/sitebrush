@@ -1068,9 +1068,22 @@ func TestHostingAndSupportTemplateRendersServerView(t *testing.T) {
 				PaidStatus:   "paid",
 				UsedLabel:    "1 MB",
 				LimitLabel:   "10 MB",
+				QuotaInput:   "10mb",
+				CanEditQuota: true,
 				InvoiceLabel: "можно выставить счёт",
 			}},
-			Clients: []hostingandsupport.ServerClientView{{Email: "owner@example.com", SiteCount: 1, Domains: "example.com"}},
+			Clients: []hostingandsupport.ServerClientView{{
+				Email:     "owner@example.com",
+				SiteCount: 1,
+				Domains:   "example.com",
+				Sites: []hostingandsupport.ServerSiteView{{
+					Domain:       "example.com",
+					UsedLabel:    "1 MB",
+					LimitLabel:   "10 MB",
+					QuotaInput:   "10mb",
+					CanEditQuota: true,
+				}},
+			}},
 		}},
 		"Sites":                       nil,
 		"Plans":                       nil,
@@ -1110,6 +1123,74 @@ func TestHostingAndSupportTemplateRendersServerView(t *testing.T) {
 	}
 	if strings.Contains(renderedHTML, "<strong>Процесс</strong>") {
 		t.Fatal("process metric rendered as a permanent server card")
+	}
+	if !strings.Contains(renderedHTML, `data-hosting-quota-edit="hostingQuotaEditor0_0_0"`) || !strings.Contains(renderedHTML, "Изменение квоты") || !strings.Contains(renderedHTML, "Применить") {
+		t.Fatal("editable server quota confirmation did not render")
+	}
+	if !strings.Contains(renderedHTML, `name="billing_action" value="update_site_quota"`) {
+		t.Fatal("server quota form does not use the isolated quota action")
+	}
+}
+
+func TestHostingAndSupportViewUsesPreparedSnapshot(t *testing.T) {
+	requests := make(chan hostingAndSupportPanelRequest, 4)
+	stop := make(chan struct{})
+	t.Cleanup(func() { close(stop) })
+	wantSnapshot := hostingAndSupportPanelSnapshot{
+		Version:     hostingAndSupportPanelSnapshotVersion,
+		BuiltAt:     "2026-07-22T12:00:00Z",
+		MainDomain:  "sitebrush.com",
+		OwnerEmails: []string{"owner@sitebrush.com"},
+		Sites:       []hostingandsupport.Site{{Domain: "sitebrush.com"}},
+	}
+	go func() {
+		for {
+			select {
+			case <-stop:
+				return
+			case request := <-requests:
+				if request.kind == "get" {
+					request.reply <- hostingAndSupportPanelResponse{snapshot: wantSnapshot}
+				}
+			}
+		}
+	}()
+	application := &App{hostingAndSupportPanel: requests}
+	request := httptest.NewRequest(http.MethodGet, "https://sitebrush.com/?hosting_and_support", nil)
+	view, err := application.hostingAndSupportView(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sites, ok := view["Sites"].([]hostingandsupport.Site)
+	if !ok || len(sites) != 1 || sites[0].Domain != "sitebrush.com" {
+		t.Fatalf("prepared sites = %#v", view["Sites"])
+	}
+	if view["PanelSnapshotBuiltAt"] != wantSnapshot.BuiltAt {
+		t.Fatalf("built at = %#v, want %q", view["PanelSnapshotBuiltAt"], wantSnapshot.BuiltAt)
+	}
+}
+
+func TestRenderTemplateProcessUsesPreparedTemplate(t *testing.T) {
+	stop := make(chan struct{})
+	requests := startRenderTemplateProcess(stop)
+	t.Cleanup(func() { close(stop) })
+	reply := make(chan renderTemplateResponse, 1)
+	requests <- renderTemplateRequest{
+		name: "login.html",
+		envelope: map[string]any{
+			"Domain":         "sitebrush.com",
+			"T":              translationsForLanguageCode("ru"),
+			"CompileVersion": CompileVersion,
+			"ShowForm":       true,
+		},
+		reply: reply,
+	}
+	response := <-reply
+	if response.err != nil {
+		t.Fatal(response.err)
+	}
+	if !bytes.Contains(response.html, []byte("<html")) {
+		t.Fatalf("rendered template does not contain html: %q", response.html)
 	}
 }
 

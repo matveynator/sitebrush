@@ -89,6 +89,8 @@ type ServerSiteView struct {
 	UsedBytes         int64
 	UsedLabel         string
 	LimitLabel        string
+	QuotaInput        string
+	CanEditQuota      bool
 	OverLimit         bool
 	InvoiceLabel      string
 	BillingPriceLabel string
@@ -257,6 +259,21 @@ func mergeLocalAndRemoteServerViews(localServer ServerView, remoteServer ServerV
 		merged.SiteCount = localServer.SiteCount
 		merged.ClientCount = localServer.ClientCount
 		merged.TotalUsedLabel = localServer.TotalUsedLabel
+	} else {
+		localSitesByDomain := make(map[string]ServerSiteView, len(localServer.Sites))
+		for _, localSite := range localServer.Sites {
+			localSitesByDomain[normalizeDomainName(localSite.Domain)] = localSite
+		}
+		for siteIndex := range merged.Sites {
+			localSite, found := localSitesByDomain[normalizeDomainName(merged.Sites[siteIndex].Domain)]
+			if !found {
+				continue
+			}
+			merged.Sites[siteIndex].LimitLabel = localSite.LimitLabel
+			merged.Sites[siteIndex].QuotaInput = localSite.QuotaInput
+			merged.Sites[siteIndex].CanEditQuota = true
+		}
+		merged.Clients = serverClientViewsFromSites(merged.Sites)
 	}
 	if len(merged.Invoices) == 0 {
 		merged.Invoices = localServer.Invoices
@@ -310,6 +327,8 @@ func BuildLocalServerView(input LocalServerViewInput) ServerView {
 			UsedBytes:         siteRow.UsedBytes,
 			UsedLabel:         siteRow.UsedLabel,
 			LimitLabel:        siteRow.LimitLabel,
+			QuotaInput:        siteRow.QuotaInput,
+			CanEditQuota:      true,
 			OverLimit:         siteRow.UsedPercent >= 100,
 			InvoiceLabel:      InvoiceLabelForDomain(input.Invoices, siteRow.Domain),
 			BillingPriceLabel: siteRow.BillingPriceLabel,
