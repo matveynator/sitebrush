@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en" id="SiteBrush">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>{{.Invoice.Number}} · {{.Title}}</title>
+  <link href="/p/static/technical_pages.css" rel="stylesheet">
+  <style>
+    body { margin: 0; background: #eef3f4; color: #172126; font-family: Arial, sans-serif; }
+    .invoice-document { width: min(920px, calc(100% - 32px)); margin: 32px auto; background: #fff; border: 1px solid #d9e2e5; box-shadow: 0 12px 36px rgba(23,33,38,.08); }
+    .invoice-head, .invoice-parties, .invoice-total { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }
+    .invoice-head, .invoice-parties, .invoice-lines, .invoice-total, .invoice-actions { padding: 28px 34px; }
+    .invoice-brand { color: #087f8c; font-size: 28px; font-weight: 800; }
+    .invoice-number { text-align: right; }
+    .invoice-number h1 { margin: 0 0 8px; font-size: 24px; }
+    .invoice-parties { border-top: 1px solid #e4eaec; border-bottom: 1px solid #e4eaec; background: #f8fafb; }
+    .invoice-label { color: #68777d; font-size: 12px; text-transform: uppercase; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { padding: 13px 10px; border-bottom: 1px solid #e4eaec; text-align: left; vertical-align: top; }
+    th:last-child, td:last-child { text-align: right; }
+    .invoice-bonus { color: #087f8c; font-weight: 700; }
+    .invoice-total { align-items: end; }
+    .invoice-total-amount { text-align: right; font-size: 32px; font-weight: 800; }
+    .invoice-actions { display: flex; justify-content: flex-end; gap: 10px; border-top: 1px solid #e4eaec; }
+    .invoice-button { border: 1px solid #087f8c; border-radius: 6px; padding: 11px 16px; background: #fff; color: #087f8c; text-decoration: none; cursor: pointer; }
+    .invoice-button-primary { background: #087f8c; color: #fff; }
+    @media (max-width: 680px) { .invoice-head, .invoice-parties, .invoice-total { grid-template-columns: 1fr; } .invoice-number, .invoice-total-amount { text-align: left; } .invoice-lines { overflow-x: auto; padding: 18px; } }
+    @media print { body { background: #fff; } .invoice-document { width: 100%; margin: 0; border: 0; box-shadow: none; } .invoice-actions { display: none; } }
+  </style>
+</head>
+<body>
+<main class="invoice-document">
+  <header class="invoice-head">
+    <div><div class="invoice-brand">SiteBrush</div><p>{{index .T "billing_invoice_commercial"}}</p></div>
+    <div class="invoice-number"><h1>{{.Invoice.Number}}</h1><div>{{index .T "billing_invoice_created"}}: {{.Invoice.CreatedAt}}</div><div>{{index .T "billing_invoice_due"}}: {{.Invoice.DueAt}}</div></div>
+  </header>
+  <section class="invoice-parties">
+    <div><div class="invoice-label">{{index .T "billing_invoice_provider"}}</div><strong>{{if .Invoice.ServerName}}{{.Invoice.ServerName}}{{else}}SiteBrush{{end}}</strong><div>SiteBrush.com {{index .T "billing_invoice_payment_operator"}}</div></div>
+    <div><div class="invoice-label">{{index .T "billing_invoice_customer"}}</div><strong>{{.Invoice.CustomerEmail}}</strong><div>{{index .T "billing_invoice_period"}}: {{.Invoice.PeriodStart}} – {{.Invoice.PeriodEnd}}</div></div>
+  </section>
+  <section class="invoice-lines">
+    <table>
+      <thead><tr><th>{{index .T "billing_invoice_service"}}</th><th>{{index .T "billing_invoice_usage"}}</th><th>{{index .T "billing_invoice_price"}}</th><th>{{index .T "billing_invoice_discount"}}</th><th>{{index .T "billing_invoice_line_total"}}</th></tr></thead>
+      <tbody>{{range .Lines}}<tr><td><strong>{{.Domain}}</strong><div>{{.Description}}</div>{{if .Bonus}}<div class="invoice-bonus">{{index $.T "billing_invoice_bonus"}}</div>{{end}}</td><td>{{.UsedLabel}}</td><td>{{.ListLabel}}</td><td>{{if .Bonus}}−{{.DiscountLabel}}{{else}}—{{end}}</td><td>{{.TotalLabel}}</td></tr>{{end}}</tbody>
+    </table>
+  </section>
+  <section class="invoice-total">
+    <div>{{if .HasBonus}}<div class="invoice-bonus">{{index .T "billing_invoice_bonus_total"}}: {{.BonusLabel}}</div>{{end}}<div>{{index .T "billing_invoice_cost_coverage"}}: {{.CoveredLabel}}</div>{{if .HasReserve}}<div>{{index .T "billing_invoice_support_reserve"}}: {{.ReserveLabel}}</div>{{end}}<p>{{index .T "billing_invoice_thank_you"}}</p></div>
+    <div class="invoice-total-amount"><div class="invoice-label">{{index .T "billing_invoice_to_pay"}}</div>{{.AmountLabel}}</div>
+  </section>
+  <footer class="invoice-actions">
+    <button type="button" class="invoice-button" onclick="window.print()">{{index .T "billing_invoice_print"}}</button>
+    {{if .Invoice.PaymentURL}}<a class="invoice-button invoice-button-primary" href="{{.Invoice.PaymentURL}}" rel="noopener noreferrer">{{index .T "billing_invoice_pay"}}</a>{{end}}
+  </footer>
+</main>
+</body>
+</html>

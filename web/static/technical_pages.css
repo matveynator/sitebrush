@@ -833,6 +833,78 @@
     display: none;
 }
 
+.technical-page .hosting-installation-tabs {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 4px;
+    width: min(100%, 680px);
+    margin: 0 0 12px;
+    padding: 4px;
+    border: 1px solid rgba(149, 229, 239, 0.18);
+    border-radius: 8px;
+    background: rgba(0, 0, 0, 0.20);
+}
+
+.technical-page .hosting-installation-tabs button.hosting-installation-tab {
+    min-width: 0;
+    min-height: 38px;
+    padding: 7px 12px;
+    border: 1px solid transparent;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--muted);
+    font-size: 14px;
+    font-weight: 700;
+    white-space: normal;
+}
+
+.technical-page .hosting-installation-tabs button.hosting-installation-tab:hover,
+.technical-page .hosting-installation-tabs button.hosting-installation-tab:focus-visible {
+    border-color: rgba(149, 229, 239, 0.26);
+    background: rgba(149, 229, 239, 0.08);
+    color: var(--text);
+}
+
+.technical-page .hosting-installation-tabs button.hosting-installation-tab.active {
+    border-color: rgba(149, 229, 239, 0.44);
+    background: rgba(149, 229, 239, 0.17);
+    color: var(--text);
+    box-shadow: 0 1px 8px rgba(0, 0, 0, 0.18);
+}
+
+.technical-page .billing-demo-exclusion {
+    display: grid;
+    gap: 3px;
+    padding: 10px 12px;
+    border-left: 3px solid var(--green);
+    background: rgba(142, 233, 155, 0.08);
+    color: var(--text);
+    font-size: 14px;
+}
+
+.technical-page .billing-demo-exclusion span {
+    color: var(--muted);
+}
+
+.technical-page .billing-demo-settings-form {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px 12px;
+    align-items: end;
+}
+
+.technical-page .billing-demo-settings-form > label:not(.checkbox-row) {
+    display: grid;
+    gap: 6px;
+}
+
+.technical-page .billing-demo-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    grid-column: 1 / -1;
+}
+
 .technical-page .hosting-overview-panel .card-body {
     display: grid;
     gap: 12px;
@@ -2395,6 +2467,15 @@
     .technical-page .billing-card button {
         max-width: 100%;
         white-space: normal;
+    }
+
+    .technical-page .hosting-installation-tabs {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        width: 100%;
+    }
+
+    .technical-page .billing-demo-settings-form {
+        grid-template-columns: 1fr;
     }
 
     .technical-page .demo-refresh-modal-dialog {

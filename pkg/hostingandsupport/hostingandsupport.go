@@ -2,6 +2,7 @@ package hostingandsupport
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
@@ -19,7 +20,7 @@ import (
 
 const DefaultStorageLimitBytes int64 = 10 * 1024 * 1024 * 1024
 const DefaultDeletionBackupRetentionDays = 365
-const currentBillingSchemaVersion = 19
+const currentBillingSchemaVersion = 21
 
 const InstallationKindServer = "server"
 const InstallationKindDesktop = "desktop"
@@ -113,7 +114,6 @@ type SiteUsage struct {
 
 const billingIncludedMegabytes int64 = 500
 const billingStepMegabytes int64 = 50
-const billingStepCents int64 = 10
 
 type ServiceAssignment struct {
 	PlanID        int
@@ -147,6 +147,81 @@ type Invoice struct {
 	RecurringPeriod string
 	CreatedAt       string
 	UpdatedAt       string
+	CustomerID      string
+	InstallationID  string
+	ServerName      string
+	PeriodStart     string
+	PeriodEnd       string
+	AmountMinor     int64
+	CommissionBPS   int
+	PublicToken     string
+	SentAt          string
+	DeliveryStatus  string
+	ServerCostMinor int64
+	ReserveMinor    int64
+	Lines           []InvoiceLine
+}
+
+type InvoiceLine struct {
+	ID                  int
+	InvoiceID           int
+	Domain              string
+	Description         string
+	UsedBytes           int64
+	BillableMegabytes   int64
+	ListAmountMinor     int64
+	DiscountAmountMinor int64
+	TotalAmountMinor    int64
+	CostShareMinor      int64
+	MinimumAmountMinor  int64
+	Bonus               bool
+}
+
+type ServerCostPolicy struct {
+	InstallationID      string
+	MonthlyCostMinor    int64
+	Currency            string
+	MinimumPriceGBMinor int64
+	EffectiveAt         string
+	UpdatedAt           string
+}
+
+type BillingCustomer struct {
+	ID                string
+	PrimaryEmail      string
+	Emails            []string
+	InvoiceDay        int
+	PaymentTermDays   int
+	Timezone          string
+	AutomaticEnabled  bool
+	ScheduleUpdatedAt string
+}
+
+type BillingPayment struct {
+	ID                int
+	InvoiceID         int
+	Provider          string
+	ExternalID        string
+	AmountMinor       int64
+	Currency          string
+	Status            string
+	CommissionBPS     int
+	CommissionMinor   int64
+	ServerPayoutMinor int64
+	PaidAt            string
+}
+
+type BillingCustomerFinancialTotals struct {
+	PaidThisMonthMinor         int64
+	LifetimePaidMinor          int64
+	CoveredThisMonthMinor      int64
+	LifetimeCoveredMinor       int64
+	LifetimeReserveMinor       int64
+	CommissionThisMonthMinor   int64
+	LifetimeCommissionMinor    int64
+	CoveredThisMonthByCurrency map[string]int64
+	LifetimeCoveredByCurrency  map[string]int64
+	LifetimeReserveByCurrency  map[string]int64
 }
 
 type ServiceMailInstallation struct {
@@ -216,6 +291,10 @@ type HostingSnapshot struct {
 	StoragePath          string                   `json:"storage_path"`
 	DiskFreeBytes        int64                    `json:"disk_free_bytes"`
 	DiskTotalBytes       int64                    `json:"disk_total_bytes"`
+	MonthlyCostMinor     int64                    `json:"monthly_cost_minor"`
+	BillingCurrency      string                   `json:"billing_currency"`
+	MinimumPriceGBMinor  int64                    `json:"minimum_price_gb_minor"`
+	BillingCostUpdatedAt string                   `json:"billing_cost_updated_at"`
 	Plans                []HostingSnapshotPlan    `json:"plans"`
 	Roles                []HostingSnapshotRole    `json:"roles"`
 	Sites                []HostingSnapshotSite    `json:"sites"`
@@ -238,6 +317,7 @@ type HostingSnapshotSite struct {
 	PlanStatus     string   `json:"plan_status"`
 	PlanPaidStatus string   `json:"plan_paid_status"`
 	AdminEmails    []string `json:"admin_emails"`
+	IsDemo         bool     `json:"is_demo"`
 }
 
 type HostingSnapshotPlan struct {
@@ -295,6 +375,10 @@ type ClientHosting struct {
 	StoragePath          string
 	DiskFreeBytes        int64
 	DiskTotalBytes       int64
+	MonthlyCostMinor     int64
+	BillingCurrency      string
+	MinimumPriceGBMinor  int64
+	BillingCostUpdatedAt string
 	DiskUsedBytes        int64
 	DiskUsedPercent      int
 	DiskStatusClass      string
@@ -370,6 +454,7 @@ type ClientHostingSite struct {
 	ReachabilityScheme    string
 	ReachabilityError     string
 	ReachabilityCheckedAt string
+	IsDemo                bool
 }
 
 type ClientHostingDomainCheck struct {
@@ -537,6 +622,20 @@ func Migrate(ctx context.Context, database *sql.DB) error {
 		`CREATE TABLE IF NOT EXISTS site_service_assignments(domain TEXT PRIMARY KEY,plan_id INTEGER DEFAULT 0,service_status TEXT,notes TEXT,updated_at TEXT);`,
 		`CREATE TABLE IF NOT EXISTS payment_providers(provider TEXT PRIMARY KEY,enabled INTEGER DEFAULT 0,display_name TEXT,payment_url TEXT,instructions TEXT,updated_at TEXT);`,
 		`CREATE TABLE IF NOT EXISTS billing_invoices(id INTEGER PRIMARY KEY AUTOINCREMENT,invoice_number TEXT UNIQUE,customer_email TEXT,domain TEXT,plan_name TEXT,amount TEXT,currency TEXT,status TEXT,provider TEXT,payment_url TEXT,due_at TEXT,paid_at TEXT,notes TEXT,recurring_enabled INTEGER DEFAULT 0,recurring_period TEXT,created_at TEXT,updated_at TEXT);`,
+		`CREATE TABLE IF NOT EXISTS billing_customers(id TEXT PRIMARY KEY,primary_email TEXT UNIQUE,created_at TEXT,updated_at TEXT);`,
+		`CREATE TABLE IF NOT EXISTS billing_customer_emails(customer_id TEXT,email TEXT UNIQUE,created_at TEXT,PRIMARY KEY(customer_id,email));`,
+		`CREATE INDEX IF NOT EXISTS idx_billing_customer_emails_customer ON billing_customer_emails(customer_id);`,
+		`CREATE TABLE IF NOT EXISTS billing_customer_profiles(customer_id TEXT PRIMARY KEY,invoice_day INTEGER DEFAULT 1,payment_term_days INTEGER DEFAULT 7,timezone TEXT,automatic_enabled INTEGER DEFAULT 0,schedule_updated_at TEXT);`,
+		`CREATE TABLE IF NOT EXISTS billing_customer_tokens(token_hash TEXT PRIMARY KEY,customer_id TEXT,purpose TEXT,expires_at TEXT,created_at TEXT);`,
+		`CREATE INDEX IF NOT EXISTS idx_billing_customer_tokens_customer ON billing_customer_tokens(customer_id);`,
+		`CREATE TABLE IF NOT EXISTS billing_invoice_lines(id INTEGER PRIMARY KEY AUTOINCREMENT,invoice_id INTEGER,domain TEXT,description TEXT,used_bytes INTEGER DEFAULT 0,billable_megabytes INTEGER DEFAULT 0,list_amount_minor INTEGER DEFAULT 0,discount_amount_minor INTEGER DEFAULT 0,total_amount_minor INTEGER DEFAULT 0,bonus INTEGER DEFAULT 0);`,
+		`CREATE INDEX IF NOT EXISTS idx_billing_invoice_lines_invoice ON billing_invoice_lines(invoice_id);`,
+		`CREATE TABLE IF NOT EXISTS hosting_server_cost_policies(id INTEGER PRIMARY KEY AUTOINCREMENT,installation_id TEXT,monthly_cost_minor INTEGER DEFAULT 0,currency TEXT,minimum_price_gb_minor INTEGER DEFAULT 0,effective_at TEXT,created_at TEXT,UNIQUE(installation_id,effective_at));`,
+		`CREATE INDEX IF NOT EXISTS idx_hosting_server_cost_policies_current ON hosting_server_cost_policies(installation_id,effective_at);`,
+		`CREATE TABLE IF NOT EXISTS billing_invoice_cycles(customer_id TEXT,installation_id TEXT,period_start TEXT,invoice_id INTEGER DEFAULT 0,PRIMARY KEY(customer_id,installation_id,period_start));`,
+		`CREATE TABLE IF NOT EXISTS billing_payments(id INTEGER PRIMARY KEY AUTOINCREMENT,invoice_id INTEGER,provider TEXT,external_id TEXT UNIQUE,amount_minor INTEGER DEFAULT 0,currency TEXT,status TEXT,commission_bps INTEGER DEFAULT 0,commission_minor INTEGER DEFAULT 0,server_payout_minor INTEGER DEFAULT 0,paid_at TEXT,created_at TEXT,updated_at TEXT);`,
+		`CREATE INDEX IF NOT EXISTS idx_billing_payments_invoice ON billing_payments(invoice_id);`,
+		`CREATE TABLE IF NOT EXISTS billing_invoice_deliveries(id INTEGER PRIMARY KEY AUTOINCREMENT,invoice_id INTEGER,status TEXT,error TEXT,created_at TEXT);`,
 		`CREATE INDEX IF NOT EXISTS idx_billing_invoices_customer_created ON billing_invoices(customer_email,created_at);`,
 		`CREATE INDEX IF NOT EXISTS idx_billing_invoices_domain_created ON billing_invoices(domain,created_at);`,
 		`CREATE TABLE IF NOT EXISTS site_registration_requests(id INTEGER PRIMARY KEY AUTOINCREMENT,domain TEXT,name TEXT,email TEXT,phone TEXT,plan_id INTEGER DEFAULT 0,status TEXT,owner_message TEXT,created_at TEXT,updated_at TEXT);`,
@@ -594,6 +693,7 @@ func Migrate(ctx context.Context, database *sql.DB) error {
 	_, _ = database.ExecContext(ctx, `INSERT OR IGNORE INTO server_settings(name,value,updated_at) VALUES('auto_registration_enabled','1',?)`, now)
 	_, _ = database.ExecContext(ctx, `INSERT OR IGNORE INTO server_settings(name,value,updated_at) VALUES('deletion_backup_retention_days',?,?)`, strconv.Itoa(DefaultDeletionBackupRetentionDays), now)
 	_, _ = database.ExecContext(ctx, `INSERT OR IGNORE INTO server_settings(name,value,updated_at) VALUES('service_mail_relay_enabled','1',?)`, now)
+	_, _ = database.ExecContext(ctx, `INSERT OR IGNORE INTO server_settings(name,value,updated_at) VALUES('sitebrush_commission_bps','500',?)`, now)
 	_, _ = database.ExecContext(ctx, `INSERT OR IGNORE INTO payment_providers(provider,enabled,display_name,payment_url,instructions,updated_at) VALUES('sitebrush_com',1,'SiteBrush.com demo payments','/?hosting_and_support_demo_payment&invoice={invoice}','Предустановленная демо-оплата через SiteBrush.com.',?)`, now)
 	_, _ = database.ExecContext(ctx, `UPDATE payment_providers SET enabled=1,display_name='SiteBrush.com demo payments',payment_url='/?hosting_and_support_demo_payment&invoice={invoice}',instructions='Предустановленная демо-оплата через SiteBrush.com.',updated_at=? WHERE provider='sitebrush_com'`, now)
 	_, _ = database.ExecContext(ctx, `INSERT OR IGNORE INTO payment_providers(provider,enabled,display_name,payment_url,instructions,updated_at) VALUES('stripe',0,'Stripe','','Stripe Checkout or Payment Link URL template',?)`, now)
@@ -623,7 +723,7 @@ func setSchemaMigrationVersion(ctx context.Context, database *sql.DB, component 
 }
 
 func hostingAndSupportSchemaComplete(ctx context.Context, database *sql.DB) (bool, error) {
-	tableNames := []string{"server_managers", "server_settings", "site_service_plans", "site_service_assignments", "payment_providers", "billing_invoices", "site_registration_requests", "site_deletion_backups", "service_mail_installations", "service_mail_events", "support_events", "service_mail_blocks", "service_mail_recipients", "client_hostings", "client_hosting_sites", "client_hosting_domain_checks", "server_resource_checks", "server_network_checks", "site_tls_checks", "registry_accounts", "registry_installation_roles", "registry_installation_plans", "registry_events", "registry_sync_events", "sitebrush_com_keys", "hosting_panel_snapshots"}
+	tableNames := []string{"server_managers", "server_settings", "site_service_plans", "site_service_assignments", "payment_providers", "billing_invoices", "billing_customers", "billing_customer_emails", "billing_customer_profiles", "billing_customer_tokens", "billing_invoice_lines", "billing_invoice_cycles", "billing_payments", "billing_invoice_deliveries", "hosting_server_cost_policies", "site_registration_requests", "site_deletion_backups", "service_mail_installations", "service_mail_events", "support_events", "service_mail_blocks", "service_mail_recipients", "client_hostings", "client_hosting_sites", "client_hosting_domain_checks", "server_resource_checks", "server_network_checks", "site_tls_checks", "registry_accounts", "registry_installation_roles", "registry_installation_plans", "registry_events", "registry_sync_events", "sitebrush_com_keys", "hosting_panel_snapshots"}
 	tableNames = append(tableNames, demo.TableNames()...)
 	for _, tableName := range tableNames {
 		found, err := tableExists(ctx, database, tableName)
@@ -665,6 +765,20 @@ func requiredHostingAndSupportColumns() []hostingAndSupportColumn {
 		{tableName: "billing_invoices", columnName: "paid_at", definition: "TEXT"},
 		{tableName: "billing_invoices", columnName: "recurring_enabled", definition: "INTEGER DEFAULT 0"},
 		{tableName: "billing_invoices", columnName: "recurring_period", definition: "TEXT"},
+		{tableName: "billing_invoices", columnName: "customer_id", definition: "TEXT"},
+		{tableName: "billing_invoices", columnName: "installation_id", definition: "TEXT"},
+		{tableName: "billing_invoices", columnName: "server_name", definition: "TEXT"},
+		{tableName: "billing_invoices", columnName: "period_start", definition: "TEXT"},
+		{tableName: "billing_invoices", columnName: "period_end", definition: "TEXT"},
+		{tableName: "billing_invoices", columnName: "amount_minor", definition: "INTEGER DEFAULT 0"},
+		{tableName: "billing_invoices", columnName: "commission_bps", definition: "INTEGER DEFAULT 0"},
+		{tableName: "billing_invoices", columnName: "public_token_hash", definition: "TEXT"},
+		{tableName: "billing_invoices", columnName: "sent_at", definition: "TEXT"},
+		{tableName: "billing_invoices", columnName: "delivery_status", definition: "TEXT"},
+		{tableName: "billing_invoices", columnName: "server_cost_minor", definition: "INTEGER DEFAULT 0"},
+		{tableName: "billing_invoices", columnName: "reserve_minor", definition: "INTEGER DEFAULT 0"},
+		{tableName: "billing_invoice_lines", columnName: "cost_share_minor", definition: "INTEGER DEFAULT 0"},
+		{tableName: "billing_invoice_lines", columnName: "minimum_amount_minor", definition: "INTEGER DEFAULT 0"},
 		{tableName: "client_hostings", columnName: "server_status", definition: "TEXT"},
 		{tableName: "client_hostings", columnName: "snapshot_version", definition: "INTEGER DEFAULT 1"},
 		{tableName: "client_hostings", columnName: "installation_kind", definition: "TEXT"},
@@ -686,6 +800,10 @@ func requiredHostingAndSupportColumns() []hostingAndSupportColumn {
 		{tableName: "client_hostings", columnName: "top_cpu_processes_json", definition: "TEXT"},
 		{tableName: "client_hostings", columnName: "ram_total_bytes", definition: "INTEGER DEFAULT 0"},
 		{tableName: "client_hostings", columnName: "server_uptime_seconds", definition: "INTEGER DEFAULT 0"},
+		{tableName: "client_hostings", columnName: "monthly_cost_minor", definition: "INTEGER DEFAULT 0"},
+		{tableName: "client_hostings", columnName: "billing_currency", definition: "TEXT"},
+		{tableName: "client_hostings", columnName: "minimum_price_gb_minor", definition: "INTEGER DEFAULT 0"},
+		{tableName: "client_hostings", columnName: "billing_cost_updated_at", definition: "TEXT"},
 		{tableName: "server_resource_checks", columnName: "top_cpu_process_name", definition: "TEXT"},
 		{tableName: "server_resource_checks", columnName: "top_cpu_process_pid", definition: "INTEGER DEFAULT 0"},
 		{tableName: "server_resource_checks", columnName: "top_cpu_process_percent", definition: "REAL DEFAULT 0"},
@@ -693,6 +811,7 @@ func requiredHostingAndSupportColumns() []hostingAndSupportColumn {
 		{tableName: "client_hosting_sites", columnName: "plan_name", definition: "TEXT"},
 		{tableName: "client_hosting_sites", columnName: "plan_status", definition: "TEXT"},
 		{tableName: "client_hosting_sites", columnName: "plan_paid_status", definition: "TEXT"},
+		{tableName: "client_hosting_sites", columnName: "is_demo", definition: "INTEGER DEFAULT 0"},
 		{tableName: "registry_installation_plans", columnName: "paid_status", definition: "TEXT"},
 		{tableName: "registry_sync_events", columnName: "summary_json", definition: "TEXT"},
 		{tableName: "sitebrush_com_keys", columnName: "private_key_path", definition: "TEXT"},
@@ -871,6 +990,172 @@ func SettingText(ctx context.Context, database *sql.DB, name string) string {
 
 func settingText(ctx context.Context, database *sql.DB, name string) string {
 	return SettingText(ctx, database, name)
+}
+
+func (store Store) SitebrushCommissionBPS(ctx context.Context) int {
+	commissionBPS, err := strconv.Atoi(SettingText(ctx, store.DB, "sitebrush_commission_bps"))
+	if err != nil || commissionBPS < 0 || commissionBPS > 10000 {
+		return 500
+	}
+	return commissionBPS
+}
+
+func (store Store) SaveSitebrushCommissionBPS(ctx context.Context, commissionBPS int) error {
+	if commissionBPS < 0 || commissionBPS > 10000 {
+		return fmt.Errorf("commission must be between 0 and 100 percent")
+	}
+	_, err := store.DB.ExecContext(ctx, `INSERT INTO server_settings(name,value,updated_at) VALUES('sitebrush_commission_bps',?,?) ON CONFLICT(name) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at`,
+		strconv.Itoa(commissionBPS), time.Now().UTC().Format(time.RFC3339))
+	return err
+}
+
+func normalizeBillingCurrency(currency string) string {
+	currency = strings.ToUpper(strings.TrimSpace(currency))
+	if len(currency) != 3 {
+		return ""
+	}
+	for _, character := range currency {
+		if character < 'A' || character > 'Z' {
+			return ""
+		}
+	}
+	return currency
+}
+
+func (store Store) SaveServerCostPolicy(ctx context.Context, policy ServerCostPolicy) (ServerCostPolicy, error) {
+	policy.InstallationID = strings.TrimSpace(policy.InstallationID)
+	policy.Currency = normalizeBillingCurrency(policy.Currency)
+	if policy.InstallationID == "" {
+		return ServerCostPolicy{}, fmt.Errorf("installation id is required")
+	}
+	if policy.MonthlyCostMinor < 0 {
+		return ServerCostPolicy{}, fmt.Errorf("monthly hosting cost cannot be negative")
+	}
+	if policy.Currency == "" {
+		return ServerCostPolicy{}, fmt.Errorf("billing currency must be a three-letter code")
+	}
+	if policy.MinimumPriceGBMinor <= 0 {
+		return ServerCostPolicy{}, fmt.Errorf("minimum price per GB must be greater than zero")
+	}
+	now := time.Now().UTC()
+	policy.EffectiveAt = now.Format(time.RFC3339Nano)
+	policy.UpdatedAt = policy.EffectiveAt
+	_, err := store.DB.ExecContext(ctx, `INSERT INTO hosting_server_cost_policies(installation_id,monthly_cost_minor,currency,minimum_price_gb_minor,effective_at,created_at) VALUES(?,?,?,?,?,?)`,
+		policy.InstallationID, policy.MonthlyCostMinor, policy.Currency, policy.MinimumPriceGBMinor, policy.EffectiveAt, policy.UpdatedAt)
+	return policy, err
+}
+
+func (store Store) ServerCostPolicy(ctx context.Context, installationID string) (ServerCostPolicy, bool) {
+	var policy ServerCostPolicy
+	err := store.DB.QueryRowContext(ctx, `SELECT installation_id,COALESCE(monthly_cost_minor,0),COALESCE(currency,''),COALESCE(minimum_price_gb_minor,0),COALESCE(effective_at,''),COALESCE(created_at,'') FROM hosting_server_cost_policies WHERE installation_id=? ORDER BY effective_at DESC,id DESC LIMIT 1`,
+		strings.TrimSpace(installationID)).Scan(&policy.InstallationID, &policy.MonthlyCostMinor, &policy.Currency, &policy.MinimumPriceGBMinor, &policy.EffectiveAt, &policy.UpdatedAt)
+	return policy, err == nil
+}
+
+func (store Store) EnsureBillingCustomer(ctx context.Context, primaryEmail string, relatedEmails []string) (BillingCustomer, error) {
+	primaryEmail = strings.ToLower(strings.TrimSpace(primaryEmail))
+	emails := normalizedHostingEmails(append(append([]string(nil), relatedEmails...), primaryEmail))
+	if primaryEmail == "" || len(emails) == 0 {
+		return BillingCustomer{}, fmt.Errorf("billing customer email is required")
+	}
+	transaction, err := store.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return BillingCustomer{}, err
+	}
+	customerID := ""
+	for _, email := range emails {
+		queryErr := transaction.QueryRowContext(ctx, `SELECT customer_id FROM billing_customer_emails WHERE email=?`, email).Scan(&customerID)
+		if queryErr == nil {
+			break
+		}
+		if queryErr != sql.ErrNoRows {
+			_ = transaction.Rollback()
+			return BillingCustomer{}, queryErr
+		}
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	if customerID == "" {
+		customerID, err = randomBillingIdentifier("customer")
+		if err != nil {
+			_ = transaction.Rollback()
+			return BillingCustomer{}, err
+		}
+		_, err = transaction.ExecContext(ctx, `INSERT INTO billing_customers(id,primary_email,created_at,updated_at) VALUES(?,?,?,?)`, customerID, primaryEmail, now, now)
+		if err == nil {
+			_, err = transaction.ExecContext(ctx, `INSERT INTO billing_customer_profiles(customer_id,invoice_day,payment_term_days,timezone,automatic_enabled,schedule_updated_at) VALUES(?,1,7,'UTC',0,'')`, customerID)
+		}
+	} else {
+		_, err = transaction.ExecContext(ctx, `UPDATE billing_customers SET primary_email=?,updated_at=? WHERE id=?`, primaryEmail, now, customerID)
+	}
+	for _, email := range emails {
+		if err != nil {
+			break
+		}
+		_, err = transaction.ExecContext(ctx, `INSERT OR IGNORE INTO billing_customer_emails(customer_id,email,created_at) VALUES(?,?,?)`, customerID, email, now)
+	}
+	if err != nil {
+		_ = transaction.Rollback()
+		return BillingCustomer{}, err
+	}
+	if err = transaction.Commit(); err != nil {
+		return BillingCustomer{}, err
+	}
+	return store.BillingCustomerByID(ctx, customerID)
+}
+
+func (store Store) BillingCustomerByID(ctx context.Context, customerID string) (BillingCustomer, error) {
+	var customer BillingCustomer
+	var automaticEnabled int
+	err := store.DB.QueryRowContext(ctx, `SELECT c.id,c.primary_email,COALESCE(p.invoice_day,1),COALESCE(p.payment_term_days,7),COALESCE(p.timezone,'UTC'),COALESCE(p.automatic_enabled,0),COALESCE(p.schedule_updated_at,'') FROM billing_customers c LEFT JOIN billing_customer_profiles p ON p.customer_id=c.id WHERE c.id=?`, strings.TrimSpace(customerID)).Scan(
+		&customer.ID, &customer.PrimaryEmail, &customer.InvoiceDay, &customer.PaymentTermDays, &customer.Timezone, &automaticEnabled, &customer.ScheduleUpdatedAt)
+	if err != nil {
+		return BillingCustomer{}, err
+	}
+	customer.AutomaticEnabled = automaticEnabled != 0
+	rows, rowsErr := store.DB.QueryContext(ctx, `SELECT email FROM billing_customer_emails WHERE customer_id=? ORDER BY email`, customer.ID)
+	if rowsErr == nil {
+		defer rows.Close()
+		for rows.Next() {
+			var email string
+			if rows.Scan(&email) == nil {
+				customer.Emails = append(customer.Emails, email)
+			}
+		}
+	}
+	return customer, nil
+}
+
+func (store Store) BillingCustomerByEmail(ctx context.Context, email string) (BillingCustomer, error) {
+	var customerID string
+	err := store.DB.QueryRowContext(ctx, `SELECT customer_id FROM billing_customer_emails WHERE email=?`, strings.ToLower(strings.TrimSpace(email))).Scan(&customerID)
+	if err != nil {
+		return BillingCustomer{}, err
+	}
+	return store.BillingCustomerByID(ctx, customerID)
+}
+
+func (store Store) SaveBillingCustomerSchedule(ctx context.Context, customerID string, invoiceDay int, paymentTermDays int, timezone string) error {
+	if invoiceDay < 1 || invoiceDay > 28 {
+		return fmt.Errorf("invoice day must be between 1 and 28")
+	}
+	if paymentTermDays < 1 || paymentTermDays > 60 {
+		return fmt.Errorf("payment term must be between 1 and 60 days")
+	}
+	timezone = strings.TrimSpace(timezone)
+	if _, err := time.LoadLocation(timezone); err != nil {
+		return fmt.Errorf("invalid timezone")
+	}
+	_, err := store.DB.ExecContext(ctx, `INSERT INTO billing_customer_profiles(customer_id,invoice_day,payment_term_days,timezone,automatic_enabled,schedule_updated_at) VALUES(?,?,?,?,1,?) ON CONFLICT(customer_id) DO UPDATE SET invoice_day=excluded.invoice_day,payment_term_days=excluded.payment_term_days,timezone=excluded.timezone,automatic_enabled=1,schedule_updated_at=excluded.schedule_updated_at`,
+		strings.TrimSpace(customerID), invoiceDay, paymentTermDays, timezone, time.Now().UTC().Format(time.RFC3339))
+	return err
+}
+
+func randomBillingIdentifier(prefix string) (string, error) {
+	randomBytes := make([]byte, 24)
+	if _, err := rand.Read(randomBytes); err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(prefix) + "_" + hex.EncodeToString(randomBytes), nil
 }
 
 func (store Store) RemoveSiteAssignment(ctx context.Context, domain string) {
@@ -1066,19 +1351,18 @@ func (store Store) Invoices(ctx context.Context, limit int) []Invoice {
 	if limit <= 0 || limit > 200 {
 		limit = 80
 	}
-	rows, err := store.DB.QueryContext(ctx, `SELECT id,invoice_number,COALESCE(customer_email,''),COALESCE(domain,''),COALESCE(plan_name,''),COALESCE(amount,''),COALESCE(currency,''),COALESCE(status,''),COALESCE(provider,''),COALESCE(payment_url,''),COALESCE(due_at,''),COALESCE(paid_at,''),COALESCE(notes,''),COALESCE(recurring_enabled,0),COALESCE(recurring_period,''),COALESCE(created_at,''),COALESCE(updated_at,'') FROM billing_invoices ORDER BY id DESC LIMIT ?`, limit)
+	rows, err := store.DB.QueryContext(ctx, invoiceSelectColumns+` FROM billing_invoices ORDER BY id DESC LIMIT ?`, limit)
 	if err != nil {
 		return nil
 	}
 	defer rows.Close()
 	invoices := make([]Invoice, 0, limit)
 	for rows.Next() {
-		var invoice Invoice
-		var recurringEnabled int
-		if scanErr := rows.Scan(&invoice.ID, &invoice.Number, &invoice.CustomerEmail, &invoice.Domain, &invoice.PlanName, &invoice.Amount, &invoice.Currency, &invoice.Status, &invoice.Provider, &invoice.PaymentURL, &invoice.DueAt, &invoice.PaidAt, &invoice.Notes, &recurringEnabled, &invoice.RecurringPeriod, &invoice.CreatedAt, &invoice.UpdatedAt); scanErr != nil {
+		invoice, scanErr := scanInvoice(rows)
+		if scanErr != nil {
 			continue
 		}
-		invoice.Recurring = recurringEnabled != 0
+		invoice.Lines = store.InvoiceLines(ctx, invoice.ID)
 		invoices = append(invoices, invoice)
 	}
 	return invoices
@@ -1105,6 +1389,12 @@ func (store Store) CreateInvoice(ctx context.Context, invoice Invoice) (Invoice,
 	if invoice.Domain == "" {
 		return Invoice{}, fmt.Errorf("site domain is required")
 	}
+	if invoice.AmountMinor <= 0 && invoice.Amount != "" {
+		invoice.AmountMinor = parseMoneyMinor(invoice.Amount)
+	}
+	if invoice.Amount == "" && invoice.AmountMinor > 0 {
+		invoice.Amount = formatMoneyMinor(invoice.AmountMinor)
+	}
 	if invoice.Amount == "" {
 		return Invoice{}, fmt.Errorf("invoice amount is required")
 	}
@@ -1115,6 +1405,11 @@ func (store Store) CreateInvoice(ctx context.Context, invoice Invoice) (Invoice,
 		return Invoice{}, fmt.Errorf("payment provider is disabled")
 	}
 	now := time.Now().UTC()
+	publicToken, err := randomBillingIdentifier("invoice")
+	if err != nil {
+		return Invoice{}, err
+	}
+	publicTokenHash := billingTokenHash(publicToken)
 	invoice.Number = nextInvoiceNumber(now)
 	invoice.Status = "issued"
 	invoice.CreatedAt = now.Format(time.RFC3339)
@@ -1124,14 +1419,60 @@ func (store Store) CreateInvoice(ctx context.Context, invoice Invoice) (Invoice,
 	if invoice.Recurring {
 		recurringEnabled = 1
 	}
-	result, err := store.DB.ExecContext(ctx, `INSERT INTO billing_invoices(invoice_number,customer_email,domain,plan_name,amount,currency,status,provider,payment_url,due_at,paid_at,notes,recurring_enabled,recurring_period,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		invoice.Number, invoice.CustomerEmail, invoice.Domain, invoice.PlanName, invoice.Amount, invoice.Currency, invoice.Status, invoice.Provider, invoice.PaymentURL, strings.TrimSpace(invoice.DueAt), "", strings.TrimSpace(invoice.Notes), recurringEnabled, invoice.RecurringPeriod, invoice.CreatedAt, invoice.UpdatedAt)
+	transaction, err := store.DB.BeginTx(ctx, nil)
 	if err != nil {
+		return Invoice{}, err
+	}
+	if invoice.CustomerID != "" && invoice.InstallationID != "" && invoice.PeriodStart != "" {
+		cycleResult, cycleErr := transaction.ExecContext(ctx, `INSERT OR IGNORE INTO billing_invoice_cycles(customer_id,installation_id,period_start,invoice_id) VALUES(?,?,?,0)`, invoice.CustomerID, invoice.InstallationID, invoice.PeriodStart)
+		if cycleErr != nil {
+			_ = transaction.Rollback()
+			return Invoice{}, cycleErr
+		}
+		inserted, _ := cycleResult.RowsAffected()
+		if inserted == 0 {
+			var existingInvoiceID int
+			queryErr := transaction.QueryRowContext(ctx, `SELECT invoice_id FROM billing_invoice_cycles WHERE customer_id=? AND installation_id=? AND period_start=?`, invoice.CustomerID, invoice.InstallationID, invoice.PeriodStart).Scan(&existingInvoiceID)
+			_ = transaction.Rollback()
+			if queryErr != nil || existingInvoiceID <= 0 {
+				return Invoice{}, fmt.Errorf("invoice cycle is already being created")
+			}
+			return store.InvoiceByID(ctx, existingInvoiceID)
+		}
+	}
+	result, err := transaction.ExecContext(ctx, `INSERT INTO billing_invoices(invoice_number,customer_email,domain,plan_name,amount,currency,status,provider,payment_url,due_at,paid_at,notes,recurring_enabled,recurring_period,created_at,updated_at,customer_id,installation_id,server_name,period_start,period_end,amount_minor,commission_bps,public_token_hash,sent_at,delivery_status,server_cost_minor,reserve_minor) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		invoice.Number, invoice.CustomerEmail, invoice.Domain, invoice.PlanName, invoice.Amount, invoice.Currency, invoice.Status, invoice.Provider, invoice.PaymentURL, strings.TrimSpace(invoice.DueAt), "", strings.TrimSpace(invoice.Notes), recurringEnabled, invoice.RecurringPeriod, invoice.CreatedAt, invoice.UpdatedAt, strings.TrimSpace(invoice.CustomerID), strings.TrimSpace(invoice.InstallationID), strings.TrimSpace(invoice.ServerName), strings.TrimSpace(invoice.PeriodStart), strings.TrimSpace(invoice.PeriodEnd), invoice.AmountMinor, invoice.CommissionBPS, publicTokenHash, "", "pending", invoice.ServerCostMinor, invoice.ReserveMinor)
+	if err != nil {
+		_ = transaction.Rollback()
 		return Invoice{}, err
 	}
 	if invoiceID, idErr := result.LastInsertId(); idErr == nil {
 		invoice.ID = int(invoiceID)
 	}
+	for _, line := range invoice.Lines {
+		bonusFlag := 0
+		if line.Bonus {
+			bonusFlag = 1
+		}
+		_, err = transaction.ExecContext(ctx, `INSERT INTO billing_invoice_lines(invoice_id,domain,description,used_bytes,billable_megabytes,list_amount_minor,discount_amount_minor,total_amount_minor,bonus,cost_share_minor,minimum_amount_minor) VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
+			invoice.ID, strings.ToLower(strings.TrimSpace(line.Domain)), strings.TrimSpace(line.Description), line.UsedBytes, line.BillableMegabytes, line.ListAmountMinor, line.DiscountAmountMinor, line.TotalAmountMinor, bonusFlag, line.CostShareMinor, line.MinimumAmountMinor)
+		if err != nil {
+			_ = transaction.Rollback()
+			return Invoice{}, err
+		}
+	}
+	if invoice.CustomerID != "" && invoice.InstallationID != "" && invoice.PeriodStart != "" {
+		_, err = transaction.ExecContext(ctx, `UPDATE billing_invoice_cycles SET invoice_id=? WHERE customer_id=? AND installation_id=? AND period_start=?`, invoice.ID, invoice.CustomerID, invoice.InstallationID, invoice.PeriodStart)
+	}
+	if err != nil {
+		_ = transaction.Rollback()
+		return Invoice{}, err
+	}
+	if err = transaction.Commit(); err != nil {
+		return Invoice{}, err
+	}
+	invoice.PublicToken = publicToken
+	invoice.DeliveryStatus = "pending"
 	return invoice, nil
 }
 
@@ -1158,12 +1499,209 @@ func (store Store) UpdateInvoiceStatus(ctx context.Context, invoiceID int, statu
 }
 
 func (store Store) InvoiceByID(ctx context.Context, invoiceID int) (Invoice, error) {
+	invoice, err := scanInvoice(store.DB.QueryRowContext(ctx, invoiceSelectColumns+` FROM billing_invoices WHERE id=?`, invoiceID))
+	if err == nil {
+		invoice.Lines = store.InvoiceLines(ctx, invoice.ID)
+	}
+	return invoice, err
+}
+
+const invoiceSelectColumns = `SELECT id,invoice_number,COALESCE(customer_email,''),COALESCE(domain,''),COALESCE(plan_name,''),COALESCE(amount,''),COALESCE(currency,''),COALESCE(status,''),COALESCE(provider,''),COALESCE(payment_url,''),COALESCE(due_at,''),COALESCE(paid_at,''),COALESCE(notes,''),COALESCE(recurring_enabled,0),COALESCE(recurring_period,''),COALESCE(created_at,''),COALESCE(updated_at,''),COALESCE(customer_id,''),COALESCE(installation_id,''),COALESCE(server_name,''),COALESCE(period_start,''),COALESCE(period_end,''),COALESCE(amount_minor,0),COALESCE(commission_bps,0),COALESCE(sent_at,''),COALESCE(delivery_status,''),COALESCE(server_cost_minor,0),COALESCE(reserve_minor,0)`
+
+type invoiceScanner interface {
+	Scan(dest ...any) error
+}
+
+func scanInvoice(scanner invoiceScanner) (Invoice, error) {
 	var invoice Invoice
 	var recurringEnabled int
-	err := store.DB.QueryRowContext(ctx, `SELECT id,invoice_number,COALESCE(customer_email,''),COALESCE(domain,''),COALESCE(plan_name,''),COALESCE(amount,''),COALESCE(currency,''),COALESCE(status,''),COALESCE(provider,''),COALESCE(payment_url,''),COALESCE(due_at,''),COALESCE(paid_at,''),COALESCE(notes,''),COALESCE(recurring_enabled,0),COALESCE(recurring_period,''),COALESCE(created_at,''),COALESCE(updated_at,'') FROM billing_invoices WHERE id=?`, invoiceID).Scan(
-		&invoice.ID, &invoice.Number, &invoice.CustomerEmail, &invoice.Domain, &invoice.PlanName, &invoice.Amount, &invoice.Currency, &invoice.Status, &invoice.Provider, &invoice.PaymentURL, &invoice.DueAt, &invoice.PaidAt, &invoice.Notes, &recurringEnabled, &invoice.RecurringPeriod, &invoice.CreatedAt, &invoice.UpdatedAt)
+	err := scanner.Scan(&invoice.ID, &invoice.Number, &invoice.CustomerEmail, &invoice.Domain, &invoice.PlanName, &invoice.Amount, &invoice.Currency, &invoice.Status, &invoice.Provider, &invoice.PaymentURL, &invoice.DueAt, &invoice.PaidAt, &invoice.Notes, &recurringEnabled, &invoice.RecurringPeriod, &invoice.CreatedAt, &invoice.UpdatedAt, &invoice.CustomerID, &invoice.InstallationID, &invoice.ServerName, &invoice.PeriodStart, &invoice.PeriodEnd, &invoice.AmountMinor, &invoice.CommissionBPS, &invoice.SentAt, &invoice.DeliveryStatus, &invoice.ServerCostMinor, &invoice.ReserveMinor)
 	invoice.Recurring = recurringEnabled != 0
+	if invoice.AmountMinor == 0 && strings.TrimSpace(invoice.Amount) != "" {
+		invoice.AmountMinor = parseMoneyMinor(invoice.Amount)
+	}
 	return invoice, err
+}
+
+func (store Store) InvoiceLines(ctx context.Context, invoiceID int) []InvoiceLine {
+	rows, err := store.DB.QueryContext(ctx, `SELECT id,invoice_id,COALESCE(domain,''),COALESCE(description,''),COALESCE(used_bytes,0),COALESCE(billable_megabytes,0),COALESCE(list_amount_minor,0),COALESCE(discount_amount_minor,0),COALESCE(total_amount_minor,0),COALESCE(bonus,0),COALESCE(cost_share_minor,0),COALESCE(minimum_amount_minor,0) FROM billing_invoice_lines WHERE invoice_id=? ORDER BY id`, invoiceID)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	lines := make([]InvoiceLine, 0, 8)
+	for rows.Next() {
+		var line InvoiceLine
+		var bonusFlag int
+		if rows.Scan(&line.ID, &line.InvoiceID, &line.Domain, &line.Description, &line.UsedBytes, &line.BillableMegabytes, &line.ListAmountMinor, &line.DiscountAmountMinor, &line.TotalAmountMinor, &bonusFlag, &line.CostShareMinor, &line.MinimumAmountMinor) != nil {
+			continue
+		}
+		line.Bonus = bonusFlag != 0
+		lines = append(lines, line)
+	}
+	return lines
+}
+
+func (store Store) InvoiceByPublicToken(ctx context.Context, publicToken string) (Invoice, error) {
+	var invoiceID int
+	err := store.DB.QueryRowContext(ctx, `SELECT id FROM billing_invoices WHERE public_token_hash=?`, billingTokenHash(publicToken)).Scan(&invoiceID)
+	if err != nil {
+		return Invoice{}, err
+	}
+	return store.InvoiceByID(ctx, invoiceID)
+}
+
+func (store Store) PurgeDemoBilling(ctx context.Context, demoDomains []string, demoEmails []string, protectedEmails []string) error {
+	domainSet := make(map[string]struct{})
+	for _, domain := range demoDomains {
+		domain = strings.ToLower(strings.TrimSpace(domain))
+		if domain != "" {
+			domainSet[domain] = struct{}{}
+		}
+	}
+	protectedEmailSet := make(map[string]struct{})
+	for _, email := range protectedEmails {
+		email = strings.ToLower(strings.TrimSpace(email))
+		if email != "" {
+			protectedEmailSet[email] = struct{}{}
+		}
+	}
+	if len(domainSet) == 0 && len(demoEmails) == 0 {
+		return nil
+	}
+	transaction, err := store.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	rows, err := transaction.QueryContext(ctx, `SELECT id,COALESCE(domain,'') FROM billing_invoices`)
+	if err != nil {
+		_ = transaction.Rollback()
+		return err
+	}
+	type invoiceCandidate struct {
+		id     int
+		domain string
+	}
+	candidates := make([]invoiceCandidate, 0)
+	for rows.Next() {
+		var candidate invoiceCandidate
+		if rows.Scan(&candidate.id, &candidate.domain) == nil {
+			candidates = append(candidates, candidate)
+		}
+	}
+	rows.Close()
+	for _, candidate := range candidates {
+		lineRows, queryErr := transaction.QueryContext(ctx, `SELECT id,COALESCE(domain,'') FROM billing_invoice_lines WHERE invoice_id=?`, candidate.id)
+		if queryErr != nil {
+			err = queryErr
+			break
+		}
+		lineIDs := make([]int, 0)
+		demoLineIDs := make([]int, 0)
+		for lineRows.Next() {
+			var lineID int
+			var lineDomain string
+			if lineRows.Scan(&lineID, &lineDomain) != nil {
+				continue
+			}
+			lineIDs = append(lineIDs, lineID)
+			if _, isDemo := domainSet[strings.ToLower(strings.TrimSpace(lineDomain))]; isDemo {
+				demoLineIDs = append(demoLineIDs, lineID)
+			}
+		}
+		lineRows.Close()
+		_, invoiceDomainIsDemo := domainSet[strings.ToLower(strings.TrimSpace(candidate.domain))]
+		if invoiceDomainIsDemo || (len(lineIDs) > 0 && len(lineIDs) == len(demoLineIDs)) {
+			for _, query := range []string{
+				`DELETE FROM billing_payments WHERE invoice_id=?`,
+				`DELETE FROM billing_invoice_deliveries WHERE invoice_id=?`,
+				`DELETE FROM billing_invoice_cycles WHERE invoice_id=?`,
+				`DELETE FROM billing_invoice_lines WHERE invoice_id=?`,
+				`DELETE FROM billing_invoices WHERE id=?`,
+			} {
+				if _, err = transaction.ExecContext(ctx, query, candidate.id); err != nil {
+					break
+				}
+			}
+			if err != nil {
+				break
+			}
+			continue
+		}
+		for _, lineID := range demoLineIDs {
+			if _, err = transaction.ExecContext(ctx, `DELETE FROM billing_invoice_lines WHERE id=?`, lineID); err != nil {
+				break
+			}
+		}
+		if err != nil {
+			break
+		}
+		var amountMinor int64
+		var costShareMinor int64
+		err = transaction.QueryRowContext(ctx, `SELECT COALESCE(SUM(total_amount_minor),0),COALESCE(SUM(cost_share_minor),0) FROM billing_invoice_lines WHERE invoice_id=?`, candidate.id).Scan(&amountMinor, &costShareMinor)
+		if err != nil {
+			break
+		}
+		reserveMinor := amountMinor - costShareMinor
+		if reserveMinor < 0 {
+			reserveMinor = 0
+		}
+		_, err = transaction.ExecContext(ctx, `UPDATE billing_invoices SET amount_minor=?,amount=?,reserve_minor=?,updated_at=? WHERE id=?`,
+			amountMinor, formatMoneyMinor(amountMinor), reserveMinor, time.Now().UTC().Format(time.RFC3339), candidate.id)
+		if err != nil {
+			break
+		}
+	}
+	for _, demoEmail := range demoEmails {
+		if err != nil {
+			break
+		}
+		demoEmail = strings.ToLower(strings.TrimSpace(demoEmail))
+		if demoEmail == "" {
+			continue
+		}
+		if _, protected := protectedEmailSet[demoEmail]; protected {
+			continue
+		}
+		var customerID string
+		queryErr := transaction.QueryRowContext(ctx, `SELECT customer_id FROM billing_customer_emails WHERE email=?`, demoEmail).Scan(&customerID)
+		if queryErr != nil {
+			continue
+		}
+		var invoiceCount int
+		_ = transaction.QueryRowContext(ctx, `SELECT COUNT(*) FROM billing_invoices WHERE customer_id=?`, customerID).Scan(&invoiceCount)
+		if invoiceCount != 0 {
+			continue
+		}
+		for _, query := range []string{
+			`DELETE FROM billing_customer_tokens WHERE customer_id=?`,
+			`DELETE FROM billing_customer_profiles WHERE customer_id=?`,
+			`DELETE FROM billing_customer_emails WHERE customer_id=?`,
+			`DELETE FROM billing_customers WHERE id=?`,
+		} {
+			if _, err = transaction.ExecContext(ctx, query, customerID); err != nil {
+				break
+			}
+		}
+	}
+	if err != nil {
+		_ = transaction.Rollback()
+		return err
+	}
+	return transaction.Commit()
+}
+
+func (store Store) IsDemoDomain(ctx context.Context, domain string) bool {
+	domain = strings.ToLower(strings.TrimSpace(domain))
+	if domain == "" {
+		return false
+	}
+	if strings.EqualFold(SettingText(ctx, store.DB, "demo_site_domain"), domain) {
+		return true
+	}
+	var count int
+	err := store.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM client_hosting_sites WHERE domain=? AND COALESCE(is_demo,0)=1`, domain).Scan(&count)
+	return err == nil && count > 0
 }
 
 func normalizeInvoiceRecurringPeriod(period string) string {
@@ -1207,6 +1745,215 @@ func nextInvoiceNumber(now time.Time) string {
 
 func urlQueryEscape(value string) string {
 	return url.QueryEscape(value)
+}
+
+func parseMoneyMinor(amount string) int64 {
+	normalizedAmount := strings.ReplaceAll(strings.TrimSpace(amount), ",", ".")
+	parts := strings.SplitN(normalizedAmount, ".", 2)
+	whole, err := strconv.ParseInt(parts[0], 10, 64)
+	if err != nil || whole < 0 {
+		return 0
+	}
+	fraction := ""
+	if len(parts) == 2 {
+		fraction = parts[1]
+	}
+	fraction += "00"
+	fraction = fraction[:2]
+	cents, err := strconv.ParseInt(fraction, 10, 64)
+	if err != nil {
+		return 0
+	}
+	return whole*100 + cents
+}
+
+func formatMoneyMinor(amountMinor int64) string {
+	if amountMinor < 0 {
+		amountMinor = 0
+	}
+	return fmt.Sprintf("%d.%02d", amountMinor/100, amountMinor%100)
+}
+
+func MoneyMinor(amount string) int64 {
+	return parseMoneyMinor(amount)
+}
+
+func MoneyAmount(amountMinor int64) string {
+	return formatMoneyMinor(amountMinor)
+}
+
+func MoneyLabel(amountMinor int64, currency string) string {
+	return formatMoneyMinor(amountMinor) + " " + strings.ToUpper(strings.TrimSpace(currency))
+}
+
+func MoneyTotalsLabel(amounts map[string]int64) string {
+	if len(amounts) == 0 {
+		return MoneyLabel(0, "EUR")
+	}
+	currencies := make([]string, 0, len(amounts))
+	for currency := range amounts {
+		currencies = append(currencies, currency)
+	}
+	sort.Strings(currencies)
+	labels := make([]string, 0, len(currencies))
+	for _, currency := range currencies {
+		labels = append(labels, MoneyLabel(amounts[currency], currency))
+	}
+	return strings.Join(labels, " + ")
+}
+
+func billingTokenHash(token string) string {
+	sum := sha256.Sum256([]byte("sitebrush billing token\n" + strings.TrimSpace(token)))
+	return hex.EncodeToString(sum[:])
+}
+
+func (store Store) NewBillingCustomerAccessToken(ctx context.Context, customerID string, validity time.Duration) (string, error) {
+	if validity <= 0 {
+		validity = 30 * 24 * time.Hour
+	}
+	token, err := randomBillingIdentifier("schedule")
+	if err != nil {
+		return "", err
+	}
+	now := time.Now().UTC()
+	_, err = store.DB.ExecContext(ctx, `INSERT INTO billing_customer_tokens(token_hash,customer_id,purpose,expires_at,created_at) VALUES(?,?,?,?,?)`,
+		billingTokenHash(token), strings.TrimSpace(customerID), "schedule", now.Add(validity).Format(time.RFC3339), now.Format(time.RFC3339))
+	return token, err
+}
+
+func (store Store) BillingCustomerByAccessToken(ctx context.Context, token string) (BillingCustomer, error) {
+	var customerID string
+	err := store.DB.QueryRowContext(ctx, `SELECT customer_id FROM billing_customer_tokens WHERE token_hash=? AND purpose='schedule' AND expires_at>=?`, billingTokenHash(token), time.Now().UTC().Format(time.RFC3339)).Scan(&customerID)
+	if err != nil {
+		return BillingCustomer{}, err
+	}
+	return store.BillingCustomerByID(ctx, customerID)
+}
+
+func (store Store) MarkInvoiceDelivery(ctx context.Context, invoiceID int, status string, errorMessage string) error {
+	now := time.Now().UTC().Format(time.RFC3339)
+	sentAt := ""
+	if status == "sent" {
+		sentAt = now
+	}
+	transaction, err := store.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	_, err = transaction.ExecContext(ctx, `UPDATE billing_invoices SET delivery_status=?,sent_at=CASE WHEN ?<>'' THEN ? ELSE sent_at END,updated_at=? WHERE id=?`, status, sentAt, sentAt, now, invoiceID)
+	if err == nil {
+		_, err = transaction.ExecContext(ctx, `INSERT INTO billing_invoice_deliveries(invoice_id,status,error,created_at) VALUES(?,?,?,?)`, invoiceID, status, strings.TrimSpace(errorMessage), now)
+	}
+	if err != nil {
+		_ = transaction.Rollback()
+		return err
+	}
+	return transaction.Commit()
+}
+
+func (store Store) RecordBillingPayment(ctx context.Context, payment BillingPayment) (BillingPayment, error) {
+	if payment.InvoiceID <= 0 || payment.AmountMinor <= 0 {
+		return BillingPayment{}, fmt.Errorf("payment invoice and amount are required")
+	}
+	payment.Provider = normalizePaymentProvider(payment.Provider)
+	if payment.Status == "" {
+		payment.Status = "paid"
+	}
+	if payment.Provider == "stripe" && payment.Status == "paid" {
+		payment.CommissionMinor = payment.AmountMinor * int64(payment.CommissionBPS) / 10000
+		payment.ServerPayoutMinor = payment.AmountMinor - payment.CommissionMinor
+	} else {
+		payment.CommissionBPS = 0
+		payment.CommissionMinor = 0
+		payment.ServerPayoutMinor = payment.AmountMinor
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	if payment.PaidAt == "" && payment.Status == "paid" {
+		payment.PaidAt = now
+	}
+	result, err := store.DB.ExecContext(ctx, `INSERT INTO billing_payments(invoice_id,provider,external_id,amount_minor,currency,status,commission_bps,commission_minor,server_payout_minor,paid_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
+		payment.InvoiceID, payment.Provider, strings.TrimSpace(payment.ExternalID), payment.AmountMinor, strings.ToUpper(strings.TrimSpace(payment.Currency)), payment.Status, payment.CommissionBPS, payment.CommissionMinor, payment.ServerPayoutMinor, payment.PaidAt, now, now)
+	if err != nil {
+		return BillingPayment{}, err
+	}
+	if paymentID, idErr := result.LastInsertId(); idErr == nil {
+		payment.ID = int(paymentID)
+	}
+	return payment, nil
+}
+
+func (store Store) BillingCustomerFinancialTotals(ctx context.Context, customer BillingCustomer, now time.Time) BillingCustomerFinancialTotals {
+	emails := make(map[string]struct{}, len(customer.Emails)+1)
+	for _, email := range append(append([]string(nil), customer.Emails...), customer.PrimaryEmail) {
+		emails[strings.ToLower(strings.TrimSpace(email))] = struct{}{}
+	}
+	monthStart := time.Date(now.UTC().Year(), now.UTC().Month(), 1, 0, 0, 0, 0, time.UTC)
+	totals := BillingCustomerFinancialTotals{
+		CoveredThisMonthByCurrency: make(map[string]int64),
+		LifetimeCoveredByCurrency:  make(map[string]int64),
+		LifetimeReserveByCurrency:  make(map[string]int64),
+	}
+	rows, err := store.DB.QueryContext(ctx, `SELECT id,COALESCE(customer_id,''),COALESCE(customer_email,''),COALESCE(amount_minor,0),COALESCE(amount,''),COALESCE(paid_at,''),COALESCE((SELECT SUM(cost_share_minor) FROM billing_invoice_lines WHERE invoice_id=billing_invoices.id),0),COALESCE(reserve_minor,0),COALESCE(currency,'EUR') FROM billing_invoices WHERE status='paid'`)
+	if err == nil {
+		defer rows.Close()
+		for rows.Next() {
+			var invoiceID int
+			var customerID string
+			var customerEmail string
+			var amountMinor int64
+			var amount string
+			var paidAt string
+			var coveredMinor int64
+			var reserveMinor int64
+			var currency string
+			if rows.Scan(&invoiceID, &customerID, &customerEmail, &amountMinor, &amount, &paidAt, &coveredMinor, &reserveMinor, &currency) != nil {
+				continue
+			}
+			_, emailMatches := emails[strings.ToLower(strings.TrimSpace(customerEmail))]
+			if strings.TrimSpace(customerID) != customer.ID && !emailMatches {
+				continue
+			}
+			if amountMinor == 0 {
+				amountMinor = parseMoneyMinor(amount)
+			}
+			if coveredMinor == 0 {
+				coveredMinor = amountMinor
+			}
+			totals.LifetimePaidMinor += amountMinor
+			totals.LifetimeCoveredMinor += coveredMinor
+			totals.LifetimeReserveMinor += reserveMinor
+			currency = firstNonEmpty(normalizeBillingCurrency(currency), "EUR")
+			totals.LifetimeCoveredByCurrency[currency] += coveredMinor
+			totals.LifetimeReserveByCurrency[currency] += reserveMinor
+			if parsedPaidAt, parseErr := time.Parse(time.RFC3339, strings.TrimSpace(paidAt)); parseErr == nil && !parsedPaidAt.Before(monthStart) {
+				totals.PaidThisMonthMinor += amountMinor
+				totals.CoveredThisMonthMinor += coveredMinor
+				totals.CoveredThisMonthByCurrency[currency] += coveredMinor
+			}
+		}
+	}
+	paymentRows, paymentErr := store.DB.QueryContext(ctx, `SELECT COALESCE(i.customer_id,''),COALESCE(i.customer_email,''),COALESCE(p.commission_minor,0),COALESCE(p.paid_at,'') FROM billing_payments p JOIN billing_invoices i ON i.id=p.invoice_id WHERE p.status='paid' AND p.provider='stripe'`)
+	if paymentErr == nil {
+		defer paymentRows.Close()
+		for paymentRows.Next() {
+			var customerID string
+			var customerEmail string
+			var commissionMinor int64
+			var paidAt string
+			if paymentRows.Scan(&customerID, &customerEmail, &commissionMinor, &paidAt) != nil {
+				continue
+			}
+			_, emailMatches := emails[strings.ToLower(strings.TrimSpace(customerEmail))]
+			if strings.TrimSpace(customerID) != customer.ID && !emailMatches {
+				continue
+			}
+			totals.LifetimeCommissionMinor += commissionMinor
+			if parsedPaidAt, parseErr := time.Parse(time.RFC3339, strings.TrimSpace(paidAt)); parseErr == nil && !parsedPaidAt.Before(monthStart) {
+				totals.CommissionThisMonthMinor += commissionMinor
+			}
+		}
+	}
+	return totals
 }
 
 func (store Store) CreateSiteRequest(ctx context.Context, domain, name, email, phone string, planID int) error {
@@ -1367,8 +2114,12 @@ func (store Store) SaveHostingSnapshot(ctx context.Context, snapshot HostingSnap
 			lastPresenceBucket = presenceBucket
 		}
 	}
-	_, err = transaction.ExecContext(ctx, `INSERT INTO client_hostings(installation_id,snapshot_version,installation_kind,owner_email,server_ip,server_status,server_domain,sitebrush_version,os_name,os_version,cpu_model,cpu_cores,cpu_usage_percent_1h,load_average_1h,top_cpu_process_name,top_cpu_process_pid,top_cpu_process_percent,top_cpu_processes_json,ram_total_bytes,server_uptime_seconds,storage_path,disk_free_bytes,disk_total_bytes,first_seen_at,last_seen_at,observation_started_at,presence_slots,last_presence_bucket) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(installation_id) DO UPDATE SET snapshot_version=CASE WHEN excluded.snapshot_version>client_hostings.snapshot_version THEN excluded.snapshot_version ELSE client_hostings.snapshot_version END,installation_kind=CASE WHEN excluded.installation_kind<>'' THEN excluded.installation_kind ELSE client_hostings.installation_kind END,owner_email=excluded.owner_email,server_ip=excluded.server_ip,server_status=excluded.server_status,server_domain=excluded.server_domain,sitebrush_version=excluded.sitebrush_version,os_name=excluded.os_name,os_version=excluded.os_version,cpu_model=excluded.cpu_model,cpu_cores=excluded.cpu_cores,cpu_usage_percent_1h=excluded.cpu_usage_percent_1h,load_average_1h=excluded.load_average_1h,top_cpu_process_name=excluded.top_cpu_process_name,top_cpu_process_pid=excluded.top_cpu_process_pid,top_cpu_process_percent=excluded.top_cpu_process_percent,top_cpu_processes_json=excluded.top_cpu_processes_json,ram_total_bytes=excluded.ram_total_bytes,server_uptime_seconds=excluded.server_uptime_seconds,storage_path=excluded.storage_path,disk_free_bytes=excluded.disk_free_bytes,disk_total_bytes=excluded.disk_total_bytes,last_seen_at=excluded.last_seen_at,observation_started_at=excluded.observation_started_at,presence_slots=excluded.presence_slots,last_presence_bucket=excluded.last_presence_bucket`,
-		installationID, snapshot.Version, installationKind, strings.ToLower(strings.TrimSpace(snapshot.OwnerEmail)), strings.TrimSpace(snapshot.ServerIP), strings.TrimSpace(snapshot.ServerStatus), strings.ToLower(strings.TrimSpace(snapshot.ServerDomain)), strings.TrimSpace(snapshot.SitebrushVersion), strings.TrimSpace(snapshot.OSName), strings.TrimSpace(snapshot.OSVersion), strings.TrimSpace(snapshot.CPUModel), snapshot.CPUCores, snapshot.CPUUsagePercent, snapshot.LoadAverage, strings.TrimSpace(snapshot.TopCPUProcessName), snapshot.TopCPUProcessPID, snapshot.TopCPUProcessPercent, topCPUProcessesJSON, snapshot.RAMTotalBytes, snapshot.ServerUptimeSeconds, strings.TrimSpace(snapshot.StoragePath), snapshot.DiskFreeBytes, snapshot.DiskTotalBytes, now, now, observationStartedAt, presenceSlots, lastPresenceBucket)
+	_, err = transaction.ExecContext(ctx, `INSERT INTO client_hostings(installation_id,snapshot_version,installation_kind,owner_email,server_ip,server_status,server_domain,sitebrush_version,os_name,os_version,cpu_model,cpu_cores,cpu_usage_percent_1h,load_average_1h,top_cpu_process_name,top_cpu_process_pid,top_cpu_process_percent,top_cpu_processes_json,ram_total_bytes,server_uptime_seconds,storage_path,disk_free_bytes,disk_total_bytes,monthly_cost_minor,billing_currency,minimum_price_gb_minor,billing_cost_updated_at,first_seen_at,last_seen_at,observation_started_at,presence_slots,last_presence_bucket) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(installation_id) DO UPDATE SET snapshot_version=CASE WHEN excluded.snapshot_version>client_hostings.snapshot_version THEN excluded.snapshot_version ELSE client_hostings.snapshot_version END,installation_kind=CASE WHEN excluded.installation_kind<>'' THEN excluded.installation_kind ELSE client_hostings.installation_kind END,owner_email=excluded.owner_email,server_ip=excluded.server_ip,server_status=excluded.server_status,server_domain=excluded.server_domain,sitebrush_version=excluded.sitebrush_version,os_name=excluded.os_name,os_version=excluded.os_version,cpu_model=excluded.cpu_model,cpu_cores=excluded.cpu_cores,cpu_usage_percent_1h=excluded.cpu_usage_percent_1h,load_average_1h=excluded.load_average_1h,top_cpu_process_name=excluded.top_cpu_process_name,top_cpu_process_pid=excluded.top_cpu_process_pid,top_cpu_process_percent=excluded.top_cpu_process_percent,top_cpu_processes_json=excluded.top_cpu_processes_json,ram_total_bytes=excluded.ram_total_bytes,server_uptime_seconds=excluded.server_uptime_seconds,storage_path=excluded.storage_path,disk_free_bytes=excluded.disk_free_bytes,disk_total_bytes=excluded.disk_total_bytes,monthly_cost_minor=excluded.monthly_cost_minor,billing_currency=excluded.billing_currency,minimum_price_gb_minor=excluded.minimum_price_gb_minor,billing_cost_updated_at=excluded.billing_cost_updated_at,last_seen_at=excluded.last_seen_at,observation_started_at=excluded.observation_started_at,presence_slots=excluded.presence_slots,last_presence_bucket=excluded.last_presence_bucket`,
+		installationID, snapshot.Version, installationKind, strings.ToLower(strings.TrimSpace(snapshot.OwnerEmail)), strings.TrimSpace(snapshot.ServerIP), strings.TrimSpace(snapshot.ServerStatus), strings.ToLower(strings.TrimSpace(snapshot.ServerDomain)), strings.TrimSpace(snapshot.SitebrushVersion), strings.TrimSpace(snapshot.OSName), strings.TrimSpace(snapshot.OSVersion), strings.TrimSpace(snapshot.CPUModel), snapshot.CPUCores, snapshot.CPUUsagePercent, snapshot.LoadAverage, strings.TrimSpace(snapshot.TopCPUProcessName), snapshot.TopCPUProcessPID, snapshot.TopCPUProcessPercent, topCPUProcessesJSON, snapshot.RAMTotalBytes, snapshot.ServerUptimeSeconds, strings.TrimSpace(snapshot.StoragePath), snapshot.DiskFreeBytes, snapshot.DiskTotalBytes, snapshot.MonthlyCostMinor, normalizeBillingCurrency(snapshot.BillingCurrency), snapshot.MinimumPriceGBMinor, strings.TrimSpace(snapshot.BillingCostUpdatedAt), now, now, observationStartedAt, presenceSlots, lastPresenceBucket)
+	if err == nil && snapshot.MonthlyCostMinor > 0 && normalizeBillingCurrency(snapshot.BillingCurrency) != "" && snapshot.MinimumPriceGBMinor > 0 && strings.TrimSpace(snapshot.BillingCostUpdatedAt) != "" {
+		_, err = transaction.ExecContext(ctx, `INSERT OR IGNORE INTO hosting_server_cost_policies(installation_id,monthly_cost_minor,currency,minimum_price_gb_minor,effective_at,created_at) VALUES(?,?,?,?,?,?)`,
+			installationID, snapshot.MonthlyCostMinor, normalizeBillingCurrency(snapshot.BillingCurrency), snapshot.MinimumPriceGBMinor, strings.TrimSpace(snapshot.BillingCostUpdatedAt), now)
+	}
 	if err == nil {
 		_, err = transaction.ExecContext(ctx, `INSERT INTO server_resource_checks(installation_id,cpu_usage_percent,load_average,top_cpu_process_name,top_cpu_process_pid,top_cpu_process_percent,ram_total_bytes,disk_free_bytes,disk_total_bytes,checked_at) VALUES(?,?,?,?,?,?,?,?,?,?)`,
 			installationID, snapshot.CPUUsagePercent, snapshot.LoadAverage, strings.TrimSpace(snapshot.TopCPUProcessName), snapshot.TopCPUProcessPID, snapshot.TopCPUProcessPercent, snapshot.RAMTotalBytes, snapshot.DiskFreeBytes, snapshot.DiskTotalBytes, now)
@@ -1391,8 +2142,12 @@ func (store Store) SaveHostingSnapshot(ctx context.Context, snapshot HostingSnap
 			continue
 		}
 		adminEmails := normalizedHostingEmails(site.AdminEmails)
-		_, err = transaction.ExecContext(ctx, `INSERT INTO client_hosting_sites(installation_id,domain,owner_email,used_bytes,limit_bytes,plan_name,plan_status,plan_paid_status,admin_emails,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)`,
-			installationID, domain, strings.ToLower(strings.TrimSpace(site.OwnerEmail)), site.UsedBytes, site.LimitBytes, strings.TrimSpace(site.PlanName), strings.TrimSpace(site.PlanStatus), strings.TrimSpace(site.PlanPaidStatus), strings.Join(adminEmails, ","), now)
+		demoFlag := 0
+		if site.IsDemo {
+			demoFlag = 1
+		}
+		_, err = transaction.ExecContext(ctx, `INSERT INTO client_hosting_sites(installation_id,domain,owner_email,used_bytes,limit_bytes,plan_name,plan_status,plan_paid_status,admin_emails,is_demo,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
+			installationID, domain, strings.ToLower(strings.TrimSpace(site.OwnerEmail)), site.UsedBytes, site.LimitBytes, strings.TrimSpace(site.PlanName), strings.TrimSpace(site.PlanStatus), strings.TrimSpace(site.PlanPaidStatus), strings.Join(adminEmails, ","), demoFlag, now)
 		if err == nil {
 			err = upsertRegistryAccountTx(ctx, transaction, site.OwnerEmail, now)
 		}
@@ -1681,7 +2436,7 @@ func (store Store) LogRegistrySyncEventWithSummary(ctx context.Context, installa
 }
 
 func (store Store) ClientHostings(ctx context.Context) []ClientHosting {
-	rows, err := store.DB.QueryContext(ctx, `SELECT installation_id,COALESCE(snapshot_version,1),COALESCE(installation_kind,''),COALESCE(owner_email,''),COALESCE(server_ip,''),COALESCE(server_status,''),COALESCE(server_domain,''),COALESCE(sitebrush_version,''),COALESCE(os_name,''),COALESCE(os_version,''),COALESCE(cpu_model,''),COALESCE(cpu_cores,0),COALESCE(cpu_usage_percent_1h,0),COALESCE(load_average_1h,0),COALESCE(top_cpu_process_name,''),COALESCE(top_cpu_process_pid,0),COALESCE(top_cpu_process_percent,0),COALESCE(top_cpu_processes_json,''),COALESCE(ram_total_bytes,0),COALESCE(server_uptime_seconds,0),COALESCE(storage_path,''),COALESCE(disk_free_bytes,0),COALESCE(disk_total_bytes,0),COALESCE(first_seen_at,''),COALESCE(last_seen_at,''),COALESCE(observation_started_at,''),COALESCE(presence_slots,0) FROM client_hostings ORDER BY last_seen_at DESC,installation_id ASC`)
+	rows, err := store.DB.QueryContext(ctx, `SELECT installation_id,COALESCE(snapshot_version,1),COALESCE(installation_kind,''),COALESCE(owner_email,''),COALESCE(server_ip,''),COALESCE(server_status,''),COALESCE(server_domain,''),COALESCE(sitebrush_version,''),COALESCE(os_name,''),COALESCE(os_version,''),COALESCE(cpu_model,''),COALESCE(cpu_cores,0),COALESCE(cpu_usage_percent_1h,0),COALESCE(load_average_1h,0),COALESCE(top_cpu_process_name,''),COALESCE(top_cpu_process_pid,0),COALESCE(top_cpu_process_percent,0),COALESCE(top_cpu_processes_json,''),COALESCE(ram_total_bytes,0),COALESCE(server_uptime_seconds,0),COALESCE(storage_path,''),COALESCE(disk_free_bytes,0),COALESCE(disk_total_bytes,0),COALESCE(monthly_cost_minor,0),COALESCE(billing_currency,''),COALESCE(minimum_price_gb_minor,0),COALESCE(billing_cost_updated_at,''),COALESCE(first_seen_at,''),COALESCE(last_seen_at,''),COALESCE(observation_started_at,''),COALESCE(presence_slots,0) FROM client_hostings ORDER BY last_seen_at DESC,installation_id ASC`)
 	if err != nil {
 		return nil
 	}
@@ -1690,7 +2445,7 @@ func (store Store) ClientHostings(ctx context.Context) []ClientHosting {
 	for rows.Next() {
 		var hosting ClientHosting
 		topCPUProcessesJSON := ""
-		if scanErr := rows.Scan(&hosting.InstallationID, &hosting.SnapshotVersion, &hosting.InstallationKind, &hosting.OwnerEmail, &hosting.ServerIP, &hosting.ServerStatus, &hosting.ServerDomain, &hosting.SitebrushVersion, &hosting.OSName, &hosting.OSVersion, &hosting.CPUModel, &hosting.CPUCores, &hosting.CPUUsagePercent, &hosting.LoadAverage, &hosting.TopCPUProcessName, &hosting.TopCPUProcessPID, &hosting.TopCPUProcessPercent, &topCPUProcessesJSON, &hosting.RAMTotalBytes, &hosting.ServerUptimeSeconds, &hosting.StoragePath, &hosting.DiskFreeBytes, &hosting.DiskTotalBytes, &hosting.FirstSeenAt, &hosting.LastSeenAt, &hosting.ObservationStartedAt, &hosting.PresenceSlots); scanErr != nil {
+		if scanErr := rows.Scan(&hosting.InstallationID, &hosting.SnapshotVersion, &hosting.InstallationKind, &hosting.OwnerEmail, &hosting.ServerIP, &hosting.ServerStatus, &hosting.ServerDomain, &hosting.SitebrushVersion, &hosting.OSName, &hosting.OSVersion, &hosting.CPUModel, &hosting.CPUCores, &hosting.CPUUsagePercent, &hosting.LoadAverage, &hosting.TopCPUProcessName, &hosting.TopCPUProcessPID, &hosting.TopCPUProcessPercent, &topCPUProcessesJSON, &hosting.RAMTotalBytes, &hosting.ServerUptimeSeconds, &hosting.StoragePath, &hosting.DiskFreeBytes, &hosting.DiskTotalBytes, &hosting.MonthlyCostMinor, &hosting.BillingCurrency, &hosting.MinimumPriceGBMinor, &hosting.BillingCostUpdatedAt, &hosting.FirstSeenAt, &hosting.LastSeenAt, &hosting.ObservationStartedAt, &hosting.PresenceSlots); scanErr != nil {
 			continue
 		}
 		hosting.TopCPUProcesses = decodeHostingSnapshotProcesses(topCPUProcessesJSON, hosting.TopCPUProcessName, hosting.TopCPUProcessPID, hosting.TopCPUProcessPercent)
@@ -1855,7 +2610,7 @@ func (store Store) loadAllVerifiedServiceMailRecipients(ctx context.Context, rec
 }
 
 func (store Store) loadAllClientHostingSites(ctx context.Context, sitesByInstallation map[string][]ClientHostingSite) {
-	rows, err := store.DB.QueryContext(ctx, `SELECT installation_id,domain,COALESCE(owner_email,''),COALESCE(used_bytes,0),COALESCE(limit_bytes,0),COALESCE(plan_name,''),COALESCE(plan_status,''),COALESCE(plan_paid_status,''),COALESCE(admin_emails,'') FROM client_hosting_sites ORDER BY installation_id ASC,used_bytes DESC,domain ASC`)
+	rows, err := store.DB.QueryContext(ctx, `SELECT installation_id,domain,COALESCE(owner_email,''),COALESCE(used_bytes,0),COALESCE(limit_bytes,0),COALESCE(plan_name,''),COALESCE(plan_status,''),COALESCE(plan_paid_status,''),COALESCE(admin_emails,''),COALESCE(is_demo,0) FROM client_hosting_sites ORDER BY installation_id ASC,used_bytes DESC,domain ASC`)
 	if err != nil {
 		return
 	}
@@ -1864,9 +2619,11 @@ func (store Store) loadAllClientHostingSites(ctx context.Context, sitesByInstall
 		var installationID string
 		var site ClientHostingSite
 		var adminEmails string
-		if scanErr := rows.Scan(&installationID, &site.Domain, &site.OwnerEmail, &site.UsedBytes, &site.LimitBytes, &site.PlanName, &site.PlanStatus, &site.PlanPaidStatus, &adminEmails); scanErr != nil {
+		var demoFlag int
+		if scanErr := rows.Scan(&installationID, &site.Domain, &site.OwnerEmail, &site.UsedBytes, &site.LimitBytes, &site.PlanName, &site.PlanStatus, &site.PlanPaidStatus, &adminEmails, &demoFlag); scanErr != nil {
 			continue
 		}
+		site.IsDemo = demoFlag != 0
 		site.AdminEmails = normalizedHostingEmails(strings.Split(adminEmails, ","))
 		site.UsedLabel = FormatFileSize(site.UsedBytes)
 		site.LimitLabel = FormatFileSize(site.LimitBytes)
@@ -2658,20 +3415,96 @@ type BillingPrice struct {
 	Billable          bool
 }
 
+type ServerCostSite struct {
+	Key       string
+	UsedBytes int64
+	Excluded  bool
+}
+
+type ServerCostAmount struct {
+	Price          BillingPrice
+	CostShareMinor int64
+	TotalMinor     int64
+}
+
+func AllocateServerCost(policy ServerCostPolicy, sites []ServerCostSite) map[string]ServerCostAmount {
+	amounts := make(map[string]ServerCostAmount, len(sites))
+	type weightedSite struct {
+		key       string
+		weight    int64
+		share     int64
+		remainder int64
+	}
+	weightedSites := make([]weightedSite, 0, len(sites))
+	totalWeight := int64(0)
+	for _, site := range sites {
+		price := BillingPriceForUsedBytesWithMinimum(site.UsedBytes, policy.MinimumPriceGBMinor, policy.Currency)
+		amounts[site.Key] = ServerCostAmount{Price: price, TotalMinor: MoneyMinor(price.Amount)}
+		if site.Excluded || !price.Billable {
+			continue
+		}
+		totalWeight += price.BillableMegabytes
+		weightedSites = append(weightedSites, weightedSite{key: site.Key, weight: price.BillableMegabytes})
+	}
+	if policy.MonthlyCostMinor <= 0 || totalWeight == 0 {
+		return amounts
+	}
+	allocatedMinor := int64(0)
+	for weightedIndex := range weightedSites {
+		numerator := policy.MonthlyCostMinor * weightedSites[weightedIndex].weight
+		weightedSites[weightedIndex].share = numerator / totalWeight
+		weightedSites[weightedIndex].remainder = numerator % totalWeight
+		allocatedMinor += weightedSites[weightedIndex].share
+	}
+	sort.SliceStable(weightedSites, func(left int, right int) bool {
+		if weightedSites[left].remainder != weightedSites[right].remainder {
+			return weightedSites[left].remainder > weightedSites[right].remainder
+		}
+		return weightedSites[left].key < weightedSites[right].key
+	})
+	unallocatedMinor := policy.MonthlyCostMinor - allocatedMinor
+	for remainderIndex := int64(0); remainderIndex < unallocatedMinor; remainderIndex++ {
+		weightedSites[int(remainderIndex%int64(len(weightedSites)))].share++
+	}
+	for _, weighted := range weightedSites {
+		amount := amounts[weighted.key]
+		amount.CostShareMinor = weighted.share
+		if weighted.share > amount.TotalMinor {
+			amount.TotalMinor = weighted.share
+		}
+		amounts[weighted.key] = amount
+	}
+	return amounts
+}
+
 func BillingPriceForUsedBytes(usedBytes int64) BillingPrice {
+	return BillingPriceForUsedBytesWithMinimum(usedBytes, 200, "EUR")
+}
+
+func BillingPriceForUsedBytesWithMinimum(usedBytes int64, minimumPriceGBMinor int64, currency string) BillingPrice {
+	if minimumPriceGBMinor <= 0 {
+		minimumPriceGBMinor = 200
+	}
+	currency = normalizeBillingCurrency(currency)
+	if currency == "" {
+		currency = "EUR"
+	}
 	usedMegabytes := bytesToRoundedMegabytes(usedBytes)
 	billableMegabytes := roundMegabytesUpToBillingStep(usedMegabytes)
 	if usedMegabytes == 0 {
 		billableMegabytes = 0
 	}
-	cents := billableMegabytes / billingStepMegabytes * billingStepCents
+	minor := (billableMegabytes*minimumPriceGBMinor + 999) / 1000
 	price := BillingPrice{
 		UsedMegabytes:     usedMegabytes,
 		BillableMegabytes: billableMegabytes,
-		Amount:            formatEuroAmount(cents),
-		Currency:          "EUR",
-		PriceLabel:        "€" + formatEuroAmount(cents) + "/мес",
+		Amount:            formatMoneyMinor(minor),
+		Currency:          currency,
+		PriceLabel:        formatMoneyMinor(minor) + " " + currency + "/мес",
 		Billable:          usedMegabytes > billingIncludedMegabytes,
+	}
+	if currency == "EUR" {
+		price.PriceLabel = "€" + formatMoneyMinor(minor) + "/мес"
 	}
 	if price.Billable {
 		price.StatusText = "к выставлению"
@@ -2702,13 +3535,6 @@ func roundMegabytesUpToBillingStep(megabytes int64) int64 {
 		return megabytes
 	}
 	return ((megabytes / billingStepMegabytes) + 1) * billingStepMegabytes
-}
-
-func formatEuroAmount(cents int64) string {
-	if cents <= 0 {
-		return "0.00"
-	}
-	return fmt.Sprintf("%d.%02d", cents/100, cents%100)
 }
 
 func ParseQuotaLimitBytes(rawQuota string) (int64, bool, error) {

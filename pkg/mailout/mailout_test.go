@@ -27,3 +27,14 @@ func TestBuildMessagePayloadIncludesMessageID(t *testing.T) {
 		t.Fatalf("payload missing encoded subject: %s", payload)
 	}
 }
+
+func TestBuildMessagePayloadUsesMultipartAlternativeForHTML(t *testing.T) {
+	fromAddress, _ := mail.ParseAddress("SiteBrush <noreply@example.com>")
+	toAddress, _ := mail.ParseAddress("User <user@example.net>")
+	payload := string(buildMessagePayload(fromAddress, toAddress, "Invoice", "Plain invoice", "<strong>HTML invoice</strong>"))
+	for _, expected := range []string{"multipart/alternative", "Content-Type: text/plain", "Content-Type: text/html", "Plain invoice", "<strong>HTML invoice</strong>"} {
+		if !strings.Contains(payload, expected) {
+			t.Fatalf("payload does not contain %q: %s", expected, payload)
+		}
+	}
+}

@@ -649,6 +649,7 @@ func TestServerClientViewsSortSitesByUsedBytes(t *testing.T) {
 		{Domain: "small.example.com", OwnerEmail: "owner@example.com", UsedBytes: 10},
 		{Domain: "large.example.com", OwnerEmail: "owner@example.com", UsedBytes: 30},
 		{Domain: "alpha.example.com", OwnerEmail: "owner@example.com", UsedBytes: 30},
+		{Domain: "demo.example.com", OwnerEmail: "demo@example.com", UsedBytes: 40, IsDemo: true},
 	})
 	if len(clients) != 1 {
 		t.Fatalf("clients = %d, want 1: %#v", len(clients), clients)
@@ -659,6 +660,52 @@ func TestServerClientViewsSortSitesByUsedBytes(t *testing.T) {
 		if got[index] != want[index] {
 			t.Fatalf("site order = %#v, want %#v", got, want)
 		}
+	}
+}
+
+func TestServerViewsExcludeDemoSites(t *testing.T) {
+	localServer := BuildLocalServerView(LocalServerViewInput{
+		Sites: []Site{
+			{Domain: "client.example.com", AdminEmails: "client@example.com"},
+			{Domain: "demo.example.com", AdminEmails: "demo@example.com", IsDemo: true},
+		},
+	})
+	if localServer.SiteCount != 1 || len(localServer.Sites) != 1 || localServer.Sites[0].Domain != "client.example.com" {
+		t.Fatalf("local server sites = %#v, count = %d", localServer.Sites, localServer.SiteCount)
+	}
+	if localServer.ClientCount != 1 || len(localServer.Clients) != 1 || localServer.Clients[0].Email != "client@example.com" {
+		t.Fatalf("local server clients = %#v, count = %d", localServer.Clients, localServer.ClientCount)
+	}
+
+	remoteServer := BuildRemoteServerView(ClientHosting{
+		InstallationID: "remote",
+		Sites: []ClientHostingSite{
+			{Domain: "remote.example.com", OwnerEmail: "remote@example.com"},
+			{Domain: "demo-remote.example.com", OwnerEmail: "demo@example.com", IsDemo: true},
+		},
+	}, nil, "v1")
+	if remoteServer.SiteCount != 1 || len(remoteServer.Sites) != 1 || remoteServer.Sites[0].Domain != "remote.example.com" {
+		t.Fatalf("remote server sites = %#v, count = %d", remoteServer.Sites, remoteServer.SiteCount)
+	}
+	if remoteServer.ClientCount != 1 || len(remoteServer.Clients) != 1 || remoteServer.Clients[0].Email != "remote@example.com" {
+		t.Fatalf("remote server clients = %#v, count = %d", remoteServer.Clients, remoteServer.ClientCount)
+	}
+}
+
+func TestClientHostingsWithDemoDomainMarksDisabledConfiguredDemo(t *testing.T) {
+	hostings := []ClientHosting{{
+		InstallationID: "remote",
+		Sites: []ClientHostingSite{
+			{Domain: "client.example.com"},
+			{Domain: "DEMO.EXAMPLE.COM"},
+		},
+	}}
+	classifiedHostings := ClientHostingsWithDemoDomain(hostings, "demo.example.com")
+	if classifiedHostings[0].Sites[0].IsDemo || !classifiedHostings[0].Sites[1].IsDemo {
+		t.Fatalf("classified sites = %#v", classifiedHostings[0].Sites)
+	}
+	if hostings[0].Sites[1].IsDemo {
+		t.Fatal("demo classification mutated the prepared registry input")
 	}
 }
 
@@ -864,5 +911,211 @@ func TestClassifyClientHostingsKeepsUnqualifiedDesktopTemporaryAndArchivesOldDat
 		if !strings.Contains(reasons, expectedReason) {
 			t.Fatalf("reasons %q do not contain %q", reasons, expectedReason)
 		}
+	}
+}
+
+func TestAutomaticInvoiceStoresLinesAndIsIdempotentPerServerCycle(t *testing.T) {
+	database, err := sql.Open("sqlite3", filepath.Join(t.TempDir(), "billing.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+	if err := Migrate(context.Background(), database); err != nil {
+		t.Fatal(err)
+	}
+	store := Store{DB: database}
+	customer, err := store.EnsureBillingCustomer(context.Background(), "client@example.com", []string{"old@example.com"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	invoice := Invoice{
+		CustomerID: customer.ID, CustomerEmail: customer.PrimaryEmail,
+		InstallationID: "server-1", ServerName: "host.example.com", Domain: "paid.example.com",
+		PlanName: "Hosting and support", AmountMinor: 120, Currency: "EUR", Provider: "sitebrush_com",
+		PeriodStart: "2026-07-05", PeriodEnd: "2026-08-05", DueAt: "2026-07-12", CommissionBPS: 500,
+		Lines: []InvoiceLine{
+			{Domain: "paid.example.com", UsedBytes: 600_000_000, BillableMegabytes: 600, ListAmountMinor: 120, TotalAmountMinor: 120},
+			{Domain: "bonus.example.com", UsedBytes: 100_000_000, BillableMegabytes: 100, ListAmountMinor: 20, DiscountAmountMinor: 20, Bonus: true},
+		},
+	}
+	created, err := store.CreateInvoice(context.Background(), invoice)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created.ID <= 0 || created.PublicToken == "" || created.Amount != "1.20" {
+		t.Fatalf("created invoice = %#v", created)
+	}
+	duplicate, err := store.CreateInvoice(context.Background(), invoice)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if duplicate.ID != created.ID {
+		t.Fatalf("duplicate invoice id = %d, want %d", duplicate.ID, created.ID)
+	}
+	loaded, err := store.InvoiceByPublicToken(context.Background(), created.PublicToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(loaded.Lines) != 2 || !loaded.Lines[1].Bonus || loaded.Lines[1].DiscountAmountMinor != 20 || loaded.AmountMinor != 120 {
+		t.Fatalf("loaded invoice = %#v", loaded)
+	}
+}
+
+func TestBillingCustomerScheduleTokenAndStripeCommission(t *testing.T) {
+	database, err := sql.Open("sqlite3", filepath.Join(t.TempDir(), "billing.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+	if err := Migrate(context.Background(), database); err != nil {
+		t.Fatal(err)
+	}
+	store := Store{DB: database}
+	customer, err := store.EnsureBillingCustomer(context.Background(), "client@example.com", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if customer.AutomaticEnabled {
+		t.Fatal("automatic billing must be disabled before the schedule is confirmed")
+	}
+	token, err := store.NewBillingCustomerAccessToken(context.Background(), customer.ID, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveBillingCustomerSchedule(context.Background(), customer.ID, 5, 7, "Europe/Moscow"); err != nil {
+		t.Fatal(err)
+	}
+	loadedCustomer, err := store.BillingCustomerByAccessToken(context.Background(), token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !loadedCustomer.AutomaticEnabled || loadedCustomer.InvoiceDay != 5 || loadedCustomer.Timezone != "Europe/Moscow" {
+		t.Fatalf("customer schedule = %#v", loadedCustomer)
+	}
+	invoice, err := store.CreateInvoice(context.Background(), Invoice{CustomerID: customer.ID, CustomerEmail: customer.PrimaryEmail, InstallationID: "server-1", Domain: "site.example.com", Amount: "10.00", Currency: "EUR", Provider: "sitebrush_com", PeriodStart: "2026-07-05", CommissionBPS: 500})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stripePayment, err := store.RecordBillingPayment(context.Background(), BillingPayment{InvoiceID: invoice.ID, Provider: "stripe", ExternalID: "pi_1", AmountMinor: 1000, Currency: "EUR", CommissionBPS: invoice.CommissionBPS, Status: "paid"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stripePayment.CommissionMinor != 50 || stripePayment.ServerPayoutMinor != 950 {
+		t.Fatalf("stripe payment = %#v", stripePayment)
+	}
+	manualPayment, err := store.RecordBillingPayment(context.Background(), BillingPayment{InvoiceID: invoice.ID, Provider: "sitebrush_com", ExternalID: "manual_1", AmountMinor: 1000, Currency: "EUR", CommissionBPS: 500, Status: "paid"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if manualPayment.CommissionMinor != 0 || manualPayment.ServerPayoutMinor != 1000 {
+		t.Fatalf("manual payment = %#v", manualPayment)
+	}
+}
+
+func TestServerCostPolicyAndSnapshotDemoStateRoundTrip(t *testing.T) {
+	database, err := sql.Open("sqlite3", filepath.Join(t.TempDir(), "billing.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+	if err := Migrate(context.Background(), database); err != nil {
+		t.Fatal(err)
+	}
+	store := Store{DB: database}
+	firstPolicy, err := store.SaveServerCostPolicy(context.Background(), ServerCostPolicy{
+		InstallationID: "local", MonthlyCostMinor: 5000, Currency: "usd", MinimumPriceGBMinor: 250,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(time.Millisecond)
+	latestPolicy, err := store.SaveServerCostPolicy(context.Background(), ServerCostPolicy{
+		InstallationID: "local", MonthlyCostMinor: 6000, Currency: "USD", MinimumPriceGBMinor: 300,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	loadedPolicy, found := store.ServerCostPolicy(context.Background(), "local")
+	if !found || loadedPolicy.MonthlyCostMinor != 6000 || loadedPolicy.Currency != "USD" || loadedPolicy.EffectiveAt == firstPolicy.EffectiveAt || loadedPolicy.EffectiveAt != latestPolicy.EffectiveAt {
+		t.Fatalf("loaded policy = %#v", loadedPolicy)
+	}
+	snapshot := HostingSnapshot{
+		Version: 3, InstallationKind: InstallationKindServer, InstallationID: "server-1",
+		MonthlyCostMinor: 7000, BillingCurrency: "GBP", MinimumPriceGBMinor: 350, BillingCostUpdatedAt: "2026-07-23T10:00:00Z",
+		Sites: []HostingSnapshotSite{
+			{Domain: "demo.example.com", OwnerEmail: "demo@example.com", UsedBytes: 100, IsDemo: true},
+			{Domain: "client.example.com", OwnerEmail: "client@example.com", UsedBytes: 200},
+		},
+	}
+	if err := store.SaveHostingSnapshot(context.Background(), snapshot); err != nil {
+		t.Fatal(err)
+	}
+	hostings := store.ClientHostings(context.Background())
+	demoFound := false
+	if len(hostings) == 1 {
+		for _, site := range hostings[0].Sites {
+			demoFound = demoFound || (site.Domain == "demo.example.com" && site.IsDemo)
+		}
+	}
+	if len(hostings) != 1 || hostings[0].MonthlyCostMinor != 7000 || hostings[0].BillingCurrency != "GBP" || hostings[0].MinimumPriceGBMinor != 350 || len(hostings[0].Sites) != 2 || !demoFound {
+		t.Fatalf("client hosting = %#v", hostings)
+	}
+}
+
+func TestPurgeDemoBillingRemovesDemoOnlyAndKeepsRealCustomer(t *testing.T) {
+	database, err := sql.Open("sqlite3", filepath.Join(t.TempDir(), "billing.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+	if err := Migrate(context.Background(), database); err != nil {
+		t.Fatal(err)
+	}
+	store := Store{DB: database}
+	customer, err := store.EnsureBillingCustomer(context.Background(), "demo-user@example.com", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	demoInvoice, err := store.CreateInvoice(context.Background(), Invoice{
+		CustomerID: customer.ID, CustomerEmail: customer.PrimaryEmail, InstallationID: "server-1",
+		Domain: "demo.example.com", AmountMinor: 100, Currency: "EUR", Provider: "sitebrush_com", PeriodStart: "2026-07-01",
+		Lines: []InvoiceLine{{Domain: "demo.example.com", TotalAmountMinor: 100, CostShareMinor: 100}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.RecordBillingPayment(context.Background(), BillingPayment{InvoiceID: demoInvoice.ID, Provider: "sitebrush_com", ExternalID: "demo-payment", AmountMinor: 100, Currency: "EUR", Status: "paid"}); err != nil {
+		t.Fatal(err)
+	}
+	realCustomer, err := store.EnsureBillingCustomer(context.Background(), "real@example.com", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mixedInvoice, err := store.CreateInvoice(context.Background(), Invoice{
+		CustomerID: realCustomer.ID, CustomerEmail: realCustomer.PrimaryEmail, InstallationID: "server-2",
+		Domain: "real.example.com", AmountMinor: 300, Currency: "EUR", Provider: "sitebrush_com", PeriodStart: "2026-07-01",
+		Lines: []InvoiceLine{
+			{Domain: "real.example.com", TotalAmountMinor: 200, CostShareMinor: 150},
+			{Domain: "demo.example.com", TotalAmountMinor: 100, CostShareMinor: 100},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.PurgeDemoBilling(context.Background(), []string{"demo.example.com"}, []string{"demo-user@example.com"}, []string{"real@example.com"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.InvoiceByID(context.Background(), demoInvoice.ID); err == nil {
+		t.Fatal("demo-only invoice still exists")
+	}
+	loadedMixed, err := store.InvoiceByID(context.Background(), mixedInvoice.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(loadedMixed.Lines) != 1 || loadedMixed.Lines[0].Domain != "real.example.com" || loadedMixed.AmountMinor != 200 || loadedMixed.ReserveMinor != 50 {
+		t.Fatalf("mixed invoice after purge = %#v", loadedMixed)
+	}
+	if _, err := store.BillingCustomerByEmail(context.Background(), "demo-user@example.com"); err == nil {
+		t.Fatal("orphan demo customer still exists")
 	}
 }

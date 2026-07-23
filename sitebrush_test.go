@@ -1130,6 +1130,18 @@ func TestHostingAndSupportTemplateRendersServerView(t *testing.T) {
 	if !strings.Contains(renderedHTML, `name="billing_action" value="update_site_quota"`) {
 		t.Fatal("server quota form does not use the isolated quota action")
 	}
+	if !strings.Contains(renderedHTML, `class="hosting-installation-tabs"`) ||
+		!strings.Contains(renderedHTML, `data-hosting-installation-tab="demo"`) ||
+		!strings.Contains(renderedHTML, `data-hosting-installation-panel="demo"`) {
+		t.Fatal("installation switcher does not render the styled demo tab")
+	}
+	if strings.Count(renderedHTML, `class="billing-demo-settings-form"`) != 1 {
+		t.Fatal("demo settings form must have one source of truth")
+	}
+	if !strings.Contains(renderedHTML, "Демо-сайты не участвуют в биллинге.") ||
+		!strings.Contains(renderedHTML, "Они не создают клиентов, счетов, оплат и покрытия расходов хостинга.") {
+		t.Fatal("demo tab does not explain its billing exclusion")
+	}
 }
 
 func TestHostingAndSupportViewUsesPreparedSnapshot(t *testing.T) {
@@ -1343,6 +1355,183 @@ func TestHostingSnapshotDiskThresholdSendsSingleOwnerEmail(t *testing.T) {
 	}
 	if messages[0].To != "owner@example.com" || !strings.Contains(messages[0].Body, "занято 96%") {
 		t.Fatalf("unexpected alert message: %#v", messages[0])
+	}
+}
+
+func TestAutomaticBillingCreatesOneServerInvoiceWithPaidAndBonusSites(t *testing.T) {
+	database, err := sql.Open("sqlite3", filepath.Join(t.TempDir(), "billing.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+	if err := hostingandsupport.Migrate(context.Background(), database); err != nil {
+		t.Fatal(err)
+	}
+	store := hostingandsupport.Store{DB: database}
+	for _, email := range []string{"client@example.com", "free@example.com", "demo@example.com", "owner@example.com"} {
+		customer, customerErr := store.EnsureBillingCustomer(context.Background(), email, nil)
+		if customerErr != nil {
+			t.Fatal(customerErr)
+		}
+		if scheduleErr := store.SaveBillingCustomerSchedule(context.Background(), customer.ID, 23, 7, "UTC"); scheduleErr != nil {
+			t.Fatal(scheduleErr)
+		}
+	}
+	mailQueue := make(chan mailout.DeliveryJob, 4)
+	application := &App{emailDelivery: mailQueue}
+	snapshot := hostingAndSupportPanelSnapshot{
+		MainDomain: "sitebrush.com", CommissionBPS: 500,
+		OwnerEmails: []string{"owner@example.com"},
+		LocalCostPolicy: hostingandsupport.ServerCostPolicy{
+			InstallationID: "local", MonthlyCostMinor: 100, Currency: "EUR", MinimumPriceGBMinor: 200,
+		},
+		Sites: []hostingandsupport.Site{
+			{Domain: "paid.example.com", UsedBytes: 600_000_000, BillingAmount: "1.20", BillingCurrency: "EUR", BillingBillable: true, AdminEmails: "client@example.com"},
+			{Domain: "bonus.example.com", UsedBytes: 100_000_000, BillingAmount: "0.20", BillingCurrency: "EUR", BillingBillable: false, AdminEmails: "client@example.com"},
+			{Domain: "free-only.example.com", UsedBytes: 100_000_000, BillingAmount: "0.20", BillingCurrency: "EUR", BillingBillable: false, AdminEmails: "free@example.com"},
+			{Domain: "demo.example.com", UsedBytes: 700_000_000, BillingAmount: "1.40", BillingCurrency: "EUR", BillingBillable: true, AdminEmails: "demo@example.com", IsDemo: true},
+			{Domain: "owner.example.com", UsedBytes: 700_000_000, BillingAmount: "1.40", BillingCurrency: "EUR", BillingBillable: true, AdminEmails: "owner@example.com"},
+		},
+	}
+	snapshotWithoutCost := snapshot
+	snapshotWithoutCost.LocalCostPolicy = hostingandsupport.ServerCostPolicy{}
+	application.runAutomaticBillingOnce(context.Background(), store, snapshotWithoutCost, time.Date(2026, 7, 23, 11, 0, 0, 0, time.UTC))
+	if invoicesWithoutCost := store.Invoices(context.Background(), 10); len(invoicesWithoutCost) != 0 {
+		t.Fatalf("invoices without server cost = %d, want 0", len(invoicesWithoutCost))
+	}
+	application.runAutomaticBillingOnce(context.Background(), store, snapshot, time.Date(2026, 7, 23, 12, 0, 0, 0, time.UTC))
+	invoices := store.Invoices(context.Background(), 10)
+	if len(invoices) != 1 {
+		t.Fatalf("invoices = %d, want 1: %#v", len(invoices), invoices)
+	}
+	if invoices[0].CustomerEmail != "client@example.com" || invoices[0].InstallationID != "local:sitebrush.com" || invoices[0].AmountMinor != 120 || invoices[0].ServerCostMinor != 100 || invoices[0].ReserveMinor != 20 || len(invoices[0].Lines) != 2 || !invoices[0].Lines[1].Bonus {
+		t.Fatalf("automatic invoice = %#v", invoices[0])
+	}
+	select {
+	case delivery := <-mailQueue:
+		if delivery.Message.To != "client@example.com" || delivery.Message.HTMLBody == "" || !strings.Contains(delivery.Message.HTMLBody, invoices[0].Number) {
+			t.Fatalf("invoice email = %#v", delivery.Message)
+		}
+	default:
+		t.Fatal("invoice email was not queued")
+	}
+	application.runAutomaticBillingOnce(context.Background(), store, snapshot, time.Date(2026, 7, 23, 13, 0, 0, 0, time.UTC))
+	if duplicateInvoices := store.Invoices(context.Background(), 10); len(duplicateInvoices) != 1 {
+		t.Fatalf("duplicate invoices = %d, want 1", len(duplicateInvoices))
+	}
+}
+
+func TestAutomaticBillingDistributesServerCostByStorage(t *testing.T) {
+	database, err := sql.Open("sqlite3", filepath.Join(t.TempDir(), "billing.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+	if err := hostingandsupport.Migrate(context.Background(), database); err != nil {
+		t.Fatal(err)
+	}
+	store := hostingandsupport.Store{DB: database}
+	for _, email := range []string{"small@example.com", "large@example.com"} {
+		customer, customerErr := store.EnsureBillingCustomer(context.Background(), email, nil)
+		if customerErr != nil {
+			t.Fatal(customerErr)
+		}
+		if scheduleErr := store.SaveBillingCustomerSchedule(context.Background(), customer.ID, 23, 7, "UTC"); scheduleErr != nil {
+			t.Fatal(scheduleErr)
+		}
+	}
+	application := &App{emailDelivery: make(chan mailout.DeliveryJob, 4)}
+	snapshot := hostingAndSupportPanelSnapshot{
+		MainDomain: "sitebrush.com",
+		LocalCostPolicy: hostingandsupport.ServerCostPolicy{
+			InstallationID: "local", MonthlyCostMinor: 101, Currency: "USD", MinimumPriceGBMinor: 1,
+		},
+		Sites: []hostingandsupport.Site{
+			{Domain: "small.example.com", UsedBytes: 600_000_000, AdminEmails: "small@example.com"},
+			{Domain: "large.example.com", UsedBytes: 900_000_000, AdminEmails: "large@example.com"},
+		},
+	}
+	application.runAutomaticBillingOnce(context.Background(), store, snapshot, time.Date(2026, 7, 23, 12, 0, 0, 0, time.UTC))
+	invoices := store.Invoices(context.Background(), 10)
+	if len(invoices) != 2 {
+		t.Fatalf("invoices = %d, want 2: %#v", len(invoices), invoices)
+	}
+	shares := make(map[string]int64)
+	totalCostMinor := int64(0)
+	for _, invoice := range invoices {
+		if invoice.Currency != "USD" || len(invoice.Lines) != 1 {
+			t.Fatalf("invoice = %#v", invoice)
+		}
+		shares[invoice.CustomerEmail] = invoice.Lines[0].CostShareMinor
+		totalCostMinor += invoice.Lines[0].CostShareMinor
+	}
+	if shares["small@example.com"] != 40 || shares["large@example.com"] != 61 || totalCostMinor != 101 {
+		t.Fatalf("cost shares = %#v, total = %d", shares, totalCostMinor)
+	}
+}
+
+func TestHostingAndSupportClientsExcludeDemoAndServerOwnerSites(t *testing.T) {
+	database, err := sql.Open("sqlite3", filepath.Join(t.TempDir(), "billing.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+	if err := hostingandsupport.Migrate(context.Background(), database); err != nil {
+		t.Fatal(err)
+	}
+	hosting := hostingandsupport.ClientHosting{
+		InstallationID: "server-1", ServerDomain: "host.example.com", MonthlyCostMinor: 1000,
+		BillingCurrency: "EUR", MinimumPriceGBMinor: 200,
+		Roles: []hostingandsupport.ClientHostingRole{{Email: "owner@example.com", Role: "superadmin", Scope: "installation"}},
+		Sites: []hostingandsupport.ClientHostingSite{
+			{Domain: "real.example.com", OwnerEmail: "client@example.com", AdminEmails: []string{"client@example.com"}, UsedBytes: 600_000_000},
+			{Domain: "demo.example.com", OwnerEmail: "demo@example.com", AdminEmails: []string{"demo@example.com"}, UsedBytes: 700_000_000, IsDemo: true},
+			{Domain: "owner.example.com", OwnerEmail: "owner@example.com", AdminEmails: []string{"owner@example.com"}, UsedBytes: 700_000_000},
+		},
+	}
+	clients := (&App{}).hostingAndSupportClients(context.Background(), hostingandsupport.Store{DB: database}, nil, nil, nil, []hostingandsupport.ClientHosting{hosting}, nil, 500, nil)
+	if len(clients) != 1 || clients[0].PrimaryEmail != "client@example.com" || clients[0].SiteCount != 1 || clients[0].Sites[0].Domain != "real.example.com" {
+		t.Fatalf("clients = %#v", clients)
+	}
+}
+
+func TestBillingDocumentTemplatesRender(t *testing.T) {
+	invoiceBytes, err := fs.ReadFile(embeddedWebFiles, "web/billing_invoice.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	invoiceTemplate, err := template.New("billing_invoice.html").Parse(string(invoiceBytes))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var renderedInvoice bytes.Buffer
+	err = invoiceTemplate.Execute(&renderedInvoice, map[string]any{
+		"T": translationsForLanguageCode("en"), "Title": "Invoice",
+		"Invoice":     hostingandsupport.Invoice{Number: "SB-1", CustomerEmail: "client@example.com", ServerName: "host.example.com", Currency: "EUR", PaymentURL: "https://pay.example.com", CreatedAt: "2026-07-23", DueAt: "2026-07-30", PeriodStart: "2026-07-23", PeriodEnd: "2026-08-23"},
+		"Lines":       []billingInvoiceLineView{{Domain: "bonus.example.com", Description: "Hosting", UsedLabel: "100 MB", ListLabel: "0.20 EUR", DiscountLabel: "0.20 EUR", TotalLabel: "0.00 EUR", Bonus: true}},
+		"AmountLabel": "1.20 EUR", "BonusLabel": "0.20 EUR",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(renderedInvoice.String(), "SiteBrush bonus") || !strings.Contains(renderedInvoice.String(), "Print / save PDF") {
+		t.Fatalf("invoice template did not render expected content: %s", renderedInvoice.String())
+	}
+	scheduleBytes, err := fs.ReadFile(embeddedWebFiles, "web/billing_schedule.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	scheduleTemplate, err := template.New("billing_schedule.html").Parse(string(scheduleBytes))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var renderedSchedule bytes.Buffer
+	err = scheduleTemplate.Execute(&renderedSchedule, map[string]any{"T": translationsForLanguageCode("en"), "Title": "Schedule", "Token": "secret", "Customer": hostingandsupport.BillingCustomer{PrimaryEmail: "client@example.com", InvoiceDay: 5, PaymentTermDays: 7, Timezone: "UTC"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(renderedSchedule.String(), "client@example.com") || !strings.Contains(renderedSchedule.String(), "name=\"timezone\"") {
+		t.Fatalf("schedule template did not render expected content: %s", renderedSchedule.String())
 	}
 }
 

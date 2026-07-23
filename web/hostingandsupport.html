@@ -55,18 +55,19 @@
     </div>
   </section>
 
-  <nav class="nav nav-tabs mb-3" aria-label="{{index .T "billing_installations"}}" data-hosting-installation-tabs>
-    <button type="button" class="nav-link active" data-hosting-installation-tab="servers">{{index .T "billing_servers"}}</button>
-    <button type="button" class="nav-link" data-hosting-installation-tab="desktop">{{index .T "billing_desktop_installations"}}</button>
-    <button type="button" class="nav-link" data-hosting-installation-tab="archive">{{index .T "billing_archive"}}</button>
+  <nav class="hosting-installation-tabs" role="tablist" aria-label="{{index .T "billing_installations"}}" data-hosting-installation-tabs>
+    <button type="button" class="hosting-installation-tab active" role="tab" aria-selected="true" data-hosting-installation-tab="servers">{{index .T "billing_servers"}}</button>
+    <button type="button" class="hosting-installation-tab" role="tab" aria-selected="false" data-hosting-installation-tab="desktop">{{index .T "billing_desktop_installations"}}</button>
+    <button type="button" class="hosting-installation-tab" role="tab" aria-selected="false" data-hosting-installation-tab="archive">{{index .T "billing_archive"}}</button>
+    <button type="button" class="hosting-installation-tab" role="tab" aria-selected="false" data-hosting-installation-tab="demo">{{index .T "billing_demo_title"}}</button>
   </nav>
 
   <section class="card billing-card" id="hostingServerList" data-hosting-installation-panel="servers">
     <div class="card-body">
       <div class="billing-section-header">
         <div>
-          <h2>Серверы</h2>
-          <p class="text-muted">Сайты сгруппированы по клиентам, стоимость считается от фактически занятого дискового пространства.</p>
+          <h2>{{index .T "billing_servers"}}</h2>
+          <p class="text-muted">{{index .T "billing_servers_cost_hint"}}</p>
         </div>
       </div>
       <style>
@@ -83,6 +84,18 @@
           gap: 12px;
           align-items: stretch;
           min-width: 0;
+        }
+
+        .technical-page .hosting-server-cost-summary {
+          display: grid;
+          gap: 10px;
+          padding-top: 12px;
+          border-top: 1px solid var(--bs-border-color);
+          min-width: 0;
+        }
+
+        .technical-page .hosting-server-cost-summary .billing-plan-form {
+          align-items: end;
         }
 
         /* server-header-topline: places identity, machine, and metrics in one desktop row. */
@@ -757,6 +770,30 @@
             <!-- server-header-topline:end -->
           </div>
           <!-- server-header:end -->
+          <div class="hosting-server-cost-summary">
+            {{if $server.CostConfigured}}
+            <div class="billing-user-stats">
+              <span><strong>{{$server.MonthlyCostLabel}}</strong> {{index $.T "billing_server_monthly_cost"}}</span>
+              <span><strong>{{if $server.CostPerGBLabel}}{{$server.CostPerGBLabel}}{{else}}—{{end}}</strong> {{index $.T "billing_server_cost_per_gb"}}</span>
+              <span><strong>{{$server.CoveredMonthLabel}}</strong> {{index $.T "billing_server_cost_covered"}}</span>
+              <span><strong>{{$server.UncoveredMonthLabel}}</strong> {{index $.T "billing_server_cost_uncovered"}}</span>
+              <span><strong>{{$server.ReserveLabel}}</strong> {{index $.T "billing_server_reserve"}}</span>
+            </div>
+            {{else}}
+            <div class="alert alert-warning mb-2">{{index $.T "billing_server_cost_required"}}</div>
+            {{end}}
+            {{if $server.Local}}
+            <form method="post" action="?hosting_and_support" class="billing-plan-form">
+              <input type="hidden" name="billing_action" value="server_cost_policy">
+              <label>{{index $.T "billing_server_monthly_cost"}} <input name="monthly_cost" type="number" min="0.01" step="0.01" class="form-control" value="{{$server.MonthlyCostInput}}" required></label>
+              <label>{{index $.T "billing_currency"}} <input name="currency" type="text" minlength="3" maxlength="3" class="form-control" value="{{$server.BillingCurrency}}" required></label>
+              <label>{{index $.T "billing_server_minimum_gb"}} <input name="minimum_price_gb" type="number" min="0.01" step="0.01" class="form-control" value="{{if $server.CostConfigured}}{{$server.MinimumPriceGBInput}}{{else}}2.00{{end}}" required></label>
+              <button type="submit" class="btn btn-primary"><img src="/p/static/save-page.png" alt="">{{index $.T "billing_save"}}</button>
+            </form>
+            {{else if $server.CostConfigured}}
+            <div class="text-muted small">{{index $.T "billing_server_cost_remote_readonly"}}</div>
+            {{end}}
+          </div>
         </article>
         <div class="hosting-server-details">
           <details open>
@@ -879,6 +916,31 @@
     </div>
   </section>
 
+  <section class="card billing-card" data-hosting-installation-panel="demo" hidden>
+    <div class="card-body billing-card-body">
+      <div>
+        <h2>{{index .T "billing_demo_title"}}</h2>
+        <p class="text-muted">{{index .T "billing_demo_hint"}}</p>
+      </div>
+      <div class="billing-demo-exclusion" role="note">
+        <strong>{{index .T "billing_demo_billing_blocked"}}</strong>
+        <span>{{index .T "billing_demo_exclusion_hint"}}</span>
+      </div>
+      <form method="post" action="?hosting_and_support" class="billing-demo-settings-form" data-billing-ajax-save>
+        <input type="hidden" name="billing_action" value="demo_settings">
+        <input type="hidden" name="refresh_demo_site" value="0" data-refresh-demo-site-input>
+        <label>{{index .T "billing_demo_domain"}} <input name="demo_site_domain" type="text" class="form-control" value="{{.DemoSettings.Domain}}" placeholder="demo.example.com"></label>
+        <label>{{index .T "billing_demo_source_url"}} <input name="demo_site_source_url" type="text" class="form-control" value="{{.DemoSettings.SourceURL}}" placeholder="example.com or https://example.com/"></label>
+        <label class="checkbox-row"><input type="checkbox" name="demo_site_copy_whole_site" value="1" {{if .DemoSettings.CopyWholeSite}}checked{{end}}><span>{{index .T "billing_demo_copy_whole_site"}}</span></label>
+        <label class="checkbox-row"><input type="checkbox" name="demo_site_enabled" value="1" {{if .DemoSettings.Enabled}}checked{{end}}><span>{{index .T "billing_demo_enabled"}}</span></label>
+        <div class="billing-demo-actions">
+          <button type="submit" class="btn btn-primary"><img src="/p/static/save-page.png" alt="">{{index .T "billing_save"}}</button>
+          <button type="button" class="btn btn-outline-primary" data-demo-refresh-preview-button><img src="/p/static/backup.png" alt="">{{index .T "billing_demo_refresh_copy"}}</button>
+        </div>
+      </form>
+    </div>
+  </section>
+
   <section class="card billing-card" id="hostingClients">
     <div class="card-body">
       <div class="billing-section-header">
@@ -890,7 +952,6 @@
           {{if .ClientCount}}<button type="button" data-billing-client-explain="Клиент определяется по текущему email администратора. Старые email остаются в подробностях клиента.">{{.ClientCount}} клиентов</button>{{end}}
           {{if .ClientSiteCount}}<button type="button" data-billing-client-explain="Сайт — домен, который клиент завёл или администрирует в SiteBrush.">{{.ClientSiteCount}} сайтов</button>{{end}}
           {{if .ClientInstallationCount}}<button type="button" data-billing-client-explain="Инсталляция — SiteBrush-сервер, который прислал snapshot и связан с клиентом.">{{.ClientInstallationCount}} инсталляций</button>{{end}}
-          {{if .ClientLocalDevelopmentCount}}<button type="button" data-billing-client-explain="Особый статус: локальная инсталляция, сервер без публичного IP, тестовый сервер или домен пока не указывает на IP сервера.">{{.ClientLocalDevelopmentCount}} особых статусов</button>{{end}}
         </div>
       </div>
       <div class="billing-client-explanation" data-billing-client-explanation></div>
@@ -931,12 +992,12 @@
           <div class="billing-user-main">
             <div class="billing-domain">{{$user.PrimaryEmail}}</div>
             <div class="billing-user-stats">
-              {{if $user.SiteCount}}<button type="button" data-billing-client-explain="Сайты клиента: домены, где этот email является администратором или фигурировал в системной почте.">{{$user.SiteCount}} сайтов</button>{{end}}
-              {{if $user.InvoiceCount}}<button type="button" data-billing-client-explain="История счетов клиента по сайтам.">{{$user.InvoiceCount}} счетов</button>{{end}}
-              {{if $user.HostingCount}}<button type="button" data-billing-client-explain="Хостинги клиента: отдельные серверы, где этот email установил SiteBrush и отправляет снимки сайтов.">{{$user.HostingCount}} серверов</button>{{end}}
-              {{if $user.InstallationCount}}<button type="button" data-billing-client-explain="Инсталляции этого клиента: SiteBrush-серверы, где клиент присутствует как суперадмин или владелец сайта.">{{$user.InstallationCount}} инсталляций</button>{{end}}
-              {{if $user.HostingSitebrushCount}}<button type="button" data-billing-client-explain="Хостинг SiteBrush — клиент поднял SiteBrush на домене второго уровня и обслуживает сайты третьего уровня или клиентские алиасы.">{{$user.HostingSitebrushCount}} хостинг SiteBrush</button>{{end}}
-              {{if $user.LocalDevelopmentCount}}<button type="button" data-billing-client-explain="Особый статус: локальная инсталляция, сервер без публичного IP, тестовый сервер или домен пока не указывает на IP сервера.">{{$user.LocalDevelopmentCount}} особых статусов</button>{{end}}
+              <button type="button" data-billing-client-explain="{{index $.T "billing_client_sites_hint"}}"><strong>{{$user.SiteCount}}</strong> {{index $.T "billing_client_sites"}}</button>
+              <button type="button" data-billing-client-explain="{{index $.T "billing_client_storage_hint"}}"><strong>{{$user.TotalStorageLabel}}</strong> {{index $.T "billing_client_storage"}}</button>
+              <button type="button" data-billing-client-explain="{{index $.T "billing_client_paid_sites_hint"}}"><strong>{{$user.PaidSiteCount}}</strong> {{index $.T "billing_client_paid_sites"}}</button>
+              <button type="button" data-billing-client-explain="{{index $.T "billing_client_monthly_due_hint"}}"><strong>{{$user.MonthlyDueLabel}}</strong> {{index $.T "billing_client_monthly_due"}}</button>
+              <button type="button" data-billing-client-explain="{{index $.T "billing_client_paid_month_hint"}}"><strong>{{$user.PaidThisMonthLabel}}</strong> {{index $.T "billing_client_paid_month"}}</button>
+              <button type="button" data-billing-client-explain="{{index $.T "billing_client_lifetime_hint"}}"><strong>{{$user.LifetimePaidLabel}}</strong> {{index $.T "billing_client_lifetime"}}</button>
               {{if gt $user.EmailCount 1}}<button type="button" data-billing-client-explain="Связанные email — текущий и старые адреса клиента, например после смены email.">{{$user.EmailCount}} email</button>{{end}}
               {{if $user.IPCount}}<button type="button" data-billing-client-explain="IP — адреса, с которых клиент регистрировался, менял данные или отправлял системные коды.">{{$user.IPCount}} IP</button>{{end}}
             </div>
@@ -959,6 +1020,23 @@
               </div>
             </div>
             <div>
+              {{if $user.BillingCustomerID}}
+              <section class="billing-client-schedule mb-3">
+                <div>
+                  <h3 class="billing-user-subtitle">{{index $.T "billing_schedule_title"}}</h3>
+                  <p class="text-muted small">{{if $user.AutomaticBillingEnabled}}{{index $.T "billing_schedule_active"}}{{else}}{{index $.T "billing_schedule_inactive"}}{{end}}</p>
+                </div>
+                <form method="post" action="?hosting_and_support" class="billing-plan-form">
+                  <input type="hidden" name="billing_action" value="billing_customer_schedule">
+                  <input type="hidden" name="customer_id" value="{{$user.BillingCustomerID}}">
+                  <label>{{index $.T "billing_invoice_day"}} <input type="number" name="invoice_day" class="form-control" min="1" max="28" value="{{$user.InvoiceDay}}" required></label>
+                  <label>{{index $.T "billing_payment_term_days"}} <input type="number" name="payment_term_days" class="form-control" min="1" max="60" value="{{$user.PaymentTermDays}}" required></label>
+                  <label>{{index $.T "billing_timezone"}} <input type="text" name="timezone" class="form-control" value="{{$user.BillingTimezone}}" list="billingTimezoneList" required></label>
+                  <button type="submit" class="btn btn-primary"><img src="/p/static/save-page.png" alt="">{{index $.T "billing_save"}}</button>
+                </form>
+                {{if $.ShowCommissionSetting}}<div class="small text-muted">{{index $.T "billing_expected_commission"}}: {{$user.ExpectedCommissionLabel}} · {{index $.T "billing_commission_paid_month"}}: {{$user.CommissionThisMonthLabel}} · {{index $.T "billing_commission_lifetime"}}: {{$user.LifetimeCommissionLabel}}</div>{{end}}
+              </section>
+              {{end}}
               <h3 class="billing-user-subtitle">Сайты за текущий месяц</h3>
               <div class="billing-user-site-list">
                 {{range $user.Sites}}
@@ -1283,6 +1361,16 @@
         </label>
         <button type="submit" class="btn btn-primary"><img src="/p/static/save-page.png" alt="">{{index .T "billing_save"}}</button>
       </form>
+      {{if .ShowCommissionSetting}}
+      <form method="post" action="?hosting_and_support" class="billing-registration-settings-form mt-3">
+        <input type="hidden" name="billing_action" value="sitebrush_commission">
+        <label>{{index .T "billing_commission_percent"}}
+          <div class="input-group"><input type="number" name="commission_percent" class="form-control" min="0" max="100" step="0.01" value="{{.CommissionPercent}}" required><span class="input-group-text">%</span></div>
+        </label>
+        <p class="text-muted small">{{index .T "billing_commission_hint"}}</p>
+        <button type="submit" class="btn btn-primary"><img src="/p/static/save-page.png" alt="">{{index .T "billing_save"}}</button>
+      </form>
+      {{end}}
     </div>
   </section>
 
@@ -1676,24 +1764,6 @@
   </section>
   {{end}}
 
-  <section class="card billing-card hosting-tab-panel-hidden" data-hosting-tab-panel="settings">
-    <div class="card-body billing-card-body">
-      <div>
-        <h2>{{index .T "billing_demo_title"}}</h2>
-        <p class="text-muted">{{index .T "billing_demo_hint"}}</p>
-      </div>
-      <form method="post" action="?hosting_and_support" class="billing-demo-settings-form" data-billing-ajax-save>
-        <input type="hidden" name="billing_action" value="demo_settings">
-        <input type="hidden" name="refresh_demo_site" value="0" data-refresh-demo-site-input>
-        <label>{{index .T "billing_demo_domain"}} <input name="demo_site_domain" type="text" class="form-control" value="{{.DemoSettings.Domain}}" placeholder="demo.example.com"></label>
-        <label>{{index .T "billing_demo_source_url"}} <input name="demo_site_source_url" type="text" class="form-control" value="{{.DemoSettings.SourceURL}}" placeholder="example.com or https://example.com/"></label>
-        <label class="checkbox-row"><input type="checkbox" name="demo_site_copy_whole_site" value="1" {{if .DemoSettings.CopyWholeSite}}checked{{end}}><span>{{index .T "billing_demo_copy_whole_site"}}</span></label>
-        <label class="checkbox-row"><input type="checkbox" name="demo_site_enabled" value="1" {{if .DemoSettings.Enabled}}checked{{end}}><span>{{index .T "billing_demo_enabled"}}</span></label>
-        <button type="submit" class="btn btn-primary"><img src="/p/static/save-page.png" alt="">{{index .T "billing_save"}}</button>
-        <button type="button" class="btn btn-outline-primary" data-demo-refresh-preview-button><img src="/p/static/backup.png" alt="">{{index .T "billing_demo_refresh_copy"}}</button>
-      </form>
-    </div>
-  </section>
 </main>
 <div class="modal fade" id="demoRefreshModal" tabindex="-1" aria-hidden="true">
   <div class="modal-dialog modal-dialog-centered modal-dialog-scrollable modal-lg demo-refresh-modal-dialog"><div class="modal-content">
@@ -1717,6 +1787,10 @@
     </div>
   </div></div>
 </div>
+<datalist id="billingTimezoneList">
+  <option value="UTC"><option value="Europe/Moscow"><option value="Europe/Berlin"><option value="Europe/London">
+  <option value="Asia/Almaty"><option value="Asia/Dubai"><option value="Asia/Tokyo"><option value="America/New_York"><option value="America/Los_Angeles">
+</datalist>
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
 <script>
 (function initializeHostingAndSupportTabs() {

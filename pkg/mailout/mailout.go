@@ -19,10 +19,11 @@ import (
 )
 
 type Message struct {
-	From    string
-	To      string
-	Subject string
-	Body    string
+	From     string
+	To       string
+	Subject  string
+	Body     string
+	HTMLBody string
 }
 
 const DeliveryQueueSize = 256
@@ -61,7 +62,7 @@ func (sender DirectSender) Send(ctx context.Context, message Message) error {
 	if err != nil {
 		return err
 	}
-	payload := buildMessagePayload(fromAddress, toAddress, message.Subject, message.Body)
+	payload := buildMessagePayload(fromAddress, toAddress, message.Subject, message.Body, message.HTMLBody)
 	var lastErr error
 	for _, targetHost := range targetHosts {
 		if err := sender.sendToHost(ctx, targetHost, fromAddress.Address, toAddress.Address, payload); err != nil {
@@ -195,7 +196,7 @@ func lookupMailHosts(ctx context.Context, domain string) ([]string, error) {
 	return []string{domain}, nil
 }
 
-func buildMessagePayload(fromAddress, toAddress *mail.Address, subject, body string) []byte {
+func buildMessagePayload(fromAddress, toAddress *mail.Address, subject, body string, htmlBody ...string) []byte {
 	headers := []string{
 		"From: " + fromAddress.String(),
 		"To: " + toAddress.String(),
@@ -203,10 +204,23 @@ func buildMessagePayload(fromAddress, toAddress *mail.Address, subject, body str
 		"Date: " + time.Now().Format(time.RFC1123Z),
 		"Message-ID: " + messageID(fromAddress),
 		"MIME-Version: 1.0",
-		"Content-Type: text/plain; charset=utf-8",
-		"Content-Transfer-Encoding: 8bit",
 	}
-	return []byte(strings.Join(headers, "\r\n") + "\r\n\r\n" + strings.TrimRight(body, "\r\n") + "\r\n")
+	selectedHTMLBody := ""
+	if len(htmlBody) > 0 {
+		selectedHTMLBody = strings.TrimSpace(htmlBody[0])
+	}
+	if selectedHTMLBody == "" {
+		headers = append(headers, "Content-Type: text/plain; charset=utf-8", "Content-Transfer-Encoding: 8bit")
+		return []byte(strings.Join(headers, "\r\n") + "\r\n\r\n" + strings.TrimRight(body, "\r\n") + "\r\n")
+	}
+	boundary := "sitebrush-" + strings.Trim(messageID(fromAddress), "<>")
+	headers = append(headers, `Content-Type: multipart/alternative; boundary="`+boundary+`"`)
+	parts := []string{
+		"--" + boundary + "\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Transfer-Encoding: 8bit\r\n\r\n" + strings.TrimRight(body, "\r\n") + "\r\n",
+		"--" + boundary + "\r\nContent-Type: text/html; charset=utf-8\r\nContent-Transfer-Encoding: 8bit\r\n\r\n" + strings.TrimRight(selectedHTMLBody, "\r\n") + "\r\n",
+		"--" + boundary + "--\r\n",
+	}
+	return []byte(strings.Join(headers, "\r\n") + "\r\n\r\n" + strings.Join(parts, ""))
 }
 
 func messageID(fromAddress *mail.Address) string {

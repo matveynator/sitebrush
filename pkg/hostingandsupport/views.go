@@ -80,6 +80,16 @@ type ServerView struct {
 	DefaultInvoicePlan     string
 	DefaultInvoiceAmount   string
 	DefaultInvoiceCurrency string
+	CostConfigured         bool
+	MonthlyCostLabel       string
+	MinimumPriceGBLabel    string
+	CostPerGBLabel         string
+	CoveredMonthLabel      string
+	UncoveredMonthLabel    string
+	ReserveLabel           string
+	BillingCurrency        string
+	MonthlyCostInput       string
+	MinimumPriceGBInput    string
 	SystemMetrics          []ServerMetricView
 	Sites                  []ServerSiteView
 	Clients                []ServerClientView
@@ -108,6 +118,8 @@ type ServerSiteView struct {
 	BillingAmount     string
 	BillingCurrency   string
 	BillingBillable   bool
+	IsDemo            bool
+	BillingExcluded   bool
 }
 
 type ServerClientView struct {
@@ -165,6 +177,8 @@ type LocalServerViewInput struct {
 	MainDomain     string
 	CurrentHost    string
 	SiteURL        func(string) string
+	CostPolicy     ServerCostPolicy
+	OwnerEmails    []string
 }
 
 func BuildOverview(sites []Site, clientCount int, siteRequests []SiteRequest, invoices []Invoice, hostings []ClientHosting, syncEvents []RegistrySyncEvent, serviceMailEvents []ServiceMailEvent) OverviewView {
@@ -318,7 +332,14 @@ func BuildLocalServerView(input LocalServerViewInput) ServerView {
 		}
 	}
 	server.OSLabel, server.CPULabel = serverIdentityLabelsFromMetrics(server.SystemMetrics)
+	ownerEmails := make(map[string]struct{}, len(input.OwnerEmails))
+	for _, email := range input.OwnerEmails {
+		ownerEmails[strings.ToLower(strings.TrimSpace(email))] = struct{}{}
+	}
 	for _, siteRow := range input.Sites {
+		if siteRow.IsDemo {
+			continue
+		}
 		ownerEmail := firstHostingSnapshotEmail(splitEmailList(siteRow.AdminEmails))
 		if ownerEmail == "" {
 			ownerEmail = "owner not set"
@@ -326,6 +347,12 @@ func BuildLocalServerView(input LocalServerViewInput) ServerView {
 		siteURL := siteRow.URL
 		if input.SiteURL != nil {
 			siteURL = input.SiteURL(siteRow.Domain)
+		}
+		billingExcluded := siteRow.IsDemo
+		for _, email := range splitEmailList(siteRow.AdminEmails) {
+			if _, isOwner := ownerEmails[strings.ToLower(strings.TrimSpace(email))]; isOwner {
+				billingExcluded = true
+			}
 		}
 		server.Sites = append(server.Sites, ServerSiteView{
 			Domain:            siteRow.Domain,
@@ -345,7 +372,9 @@ func BuildLocalServerView(input LocalServerViewInput) ServerView {
 			BillingStatusText: siteRow.BillingStatusText,
 			BillingAmount:     siteRow.BillingAmount,
 			BillingCurrency:   siteRow.BillingCurrency,
-			BillingBillable:   siteRow.BillingBillable,
+			BillingBillable:   siteRow.BillingBillable && !billingExcluded,
+			IsDemo:            siteRow.IsDemo,
+			BillingExcluded:   billingExcluded,
 		})
 	}
 	server.SiteCount = len(server.Sites)
@@ -359,6 +388,7 @@ func BuildLocalServerView(input LocalServerViewInput) ServerView {
 	server.TotalUsedLabel = serverTotalUsedLabel(server.Sites)
 	applyServerDiskFromMetrics(&server)
 	applyServerInvoiceDefaults(&server)
+	ApplyServerCostView(&server, input.CostPolicy, input.Invoices)
 	return server
 }
 
@@ -395,9 +425,30 @@ func BuildRemoteServerView(clientHosting ClientHosting, invoices []Invoice, late
 		server.SyncStatusLabel = "синхронизировано · " + clientHosting.LastSeenAt
 		server.SyncStatusClass = "billing-sync-ok"
 	}
+	ownerEmails := make(map[string]struct{})
+	for _, role := range clientHosting.Roles {
+		if role.Role == "superadmin" {
+			ownerEmails[strings.ToLower(strings.TrimSpace(role.Email))] = struct{}{}
+		}
+	}
 	for _, site := range clientHosting.Sites {
+		if site.IsDemo {
+			continue
+		}
 		ownerEmail := firstNonEmpty(site.OwnerEmail, firstHostingSnapshotEmail(site.AdminEmails), clientHosting.OwnerEmail, "owner not set")
-		billingPrice := BillingPriceForUsedBytes(site.UsedBytes)
+		billingPrice := BillingPriceForUsedBytesWithMinimum(site.UsedBytes, clientHosting.MinimumPriceGBMinor, clientHosting.BillingCurrency)
+		if clientHosting.MonthlyCostMinor <= 0 || clientHosting.MinimumPriceGBMinor <= 0 || normalizeBillingCurrency(clientHosting.BillingCurrency) == "" {
+			billingPrice.Amount = "0.00"
+			billingPrice.PriceLabel = ""
+			billingPrice.StatusText = ""
+			billingPrice.Billable = false
+		}
+		billingExcluded := site.IsDemo
+		for _, email := range append(append([]string(nil), site.AdminEmails...), site.OwnerEmail) {
+			if _, isOwner := ownerEmails[strings.ToLower(strings.TrimSpace(email))]; isOwner {
+				billingExcluded = true
+			}
+		}
 		server.Sites = append(server.Sites, ServerSiteView{
 			Domain:            site.Domain,
 			URL:               "http://" + site.Domain + "/",
@@ -414,9 +465,13 @@ func BuildRemoteServerView(clientHosting ClientHosting, invoices []Invoice, late
 			BillingStatusText: billingPrice.StatusText,
 			BillingAmount:     billingPrice.Amount,
 			BillingCurrency:   billingPrice.Currency,
-			BillingBillable:   billingPrice.Billable,
+			BillingBillable:   billingPrice.Billable && !billingExcluded,
+			IsDemo:            site.IsDemo,
+			BillingExcluded:   billingExcluded,
 		})
 	}
+	server.SiteCount = len(server.Sites)
+	server.TotalUsedLabel = serverTotalUsedLabel(server.Sites)
 	server.Clients = serverClientViewsFromSites(server.Sites)
 	server.ClientCount = len(server.Clients)
 	server.Invoices = ServerInvoiceViews(invoices, serverDomains(server.Sites), serverClientEmails(server.Clients))
@@ -425,7 +480,75 @@ func BuildRemoteServerView(clientHosting ClientHosting, invoices []Invoice, late
 	server.UnpaidInvoiceCount = UnpaidInvoiceCount(server.Invoices)
 	server.InvoiceActionLabel, server.InvoiceActionClass = InvoiceAction(server.BillableCount, server.UnpaidInvoiceCount)
 	applyServerInvoiceDefaults(&server)
+	ApplyServerCostView(&server, ServerCostPolicy{
+		InstallationID: clientHosting.InstallationID, MonthlyCostMinor: clientHosting.MonthlyCostMinor,
+		Currency: clientHosting.BillingCurrency, MinimumPriceGBMinor: clientHosting.MinimumPriceGBMinor,
+		EffectiveAt: clientHosting.BillingCostUpdatedAt,
+	}, invoices)
 	return server
+}
+
+func ClientHostingsWithDemoDomain(clientHostings []ClientHosting, demoDomain string) []ClientHosting {
+	normalizedDemoDomain := normalizeDomainName(demoDomain)
+	if normalizedDemoDomain == "" {
+		return clientHostings
+	}
+	classifiedHostings := append([]ClientHosting(nil), clientHostings...)
+	for hostingIndex := range classifiedHostings {
+		classifiedHostings[hostingIndex].Sites = append([]ClientHostingSite(nil), classifiedHostings[hostingIndex].Sites...)
+		for siteIndex := range classifiedHostings[hostingIndex].Sites {
+			site := &classifiedHostings[hostingIndex].Sites[siteIndex]
+			if normalizeDomainName(site.Domain) == normalizedDemoDomain {
+				site.IsDemo = true
+			}
+		}
+	}
+	return classifiedHostings
+}
+
+func ApplyServerCostView(server *ServerView, policy ServerCostPolicy, invoices []Invoice) {
+	if server == nil {
+		return
+	}
+	server.BillingCurrency = firstNonEmpty(normalizeBillingCurrency(policy.Currency), "EUR")
+	server.MonthlyCostInput = formatMoneyMinor(policy.MonthlyCostMinor)
+	server.MinimumPriceGBInput = formatMoneyMinor(policy.MinimumPriceGBMinor)
+	server.MonthlyCostLabel = MoneyLabel(policy.MonthlyCostMinor, server.BillingCurrency)
+	server.MinimumPriceGBLabel = MoneyLabel(policy.MinimumPriceGBMinor, server.BillingCurrency)
+	server.CostConfigured = policy.MonthlyCostMinor > 0 && policy.MinimumPriceGBMinor > 0 && normalizeBillingCurrency(policy.Currency) != ""
+	totalBillableMegabytes := int64(0)
+	for _, site := range server.Sites {
+		if site.BillingExcluded || !site.BillingBillable {
+			continue
+		}
+		totalBillableMegabytes += BillingPriceForUsedBytesWithMinimum(site.UsedBytes, policy.MinimumPriceGBMinor, server.BillingCurrency).BillableMegabytes
+	}
+	if totalBillableMegabytes > 0 {
+		costPerGBMinor := (policy.MonthlyCostMinor*1000 + totalBillableMegabytes - 1) / totalBillableMegabytes
+		server.CostPerGBLabel = MoneyLabel(costPerGBMinor, server.BillingCurrency)
+	}
+	monthPrefix := time.Now().UTC().Format("2006-01")
+	coveredMinor := int64(0)
+	reserveMinor := int64(0)
+	for _, invoice := range invoices {
+		installationMatches := invoice.InstallationID == server.ID || (server.Local && strings.HasPrefix(invoice.InstallationID, "local:"))
+		if !installationMatches || invoice.Status != "paid" {
+			continue
+		}
+		reserveMinor += invoice.ReserveMinor
+		if strings.HasPrefix(invoice.PeriodStart, monthPrefix) {
+			for _, line := range invoice.Lines {
+				coveredMinor += line.CostShareMinor
+			}
+		}
+	}
+	uncoveredMinor := policy.MonthlyCostMinor - coveredMinor
+	if uncoveredMinor < 0 {
+		uncoveredMinor = 0
+	}
+	server.CoveredMonthLabel = MoneyLabel(coveredMinor, server.BillingCurrency)
+	server.UncoveredMonthLabel = MoneyLabel(uncoveredMinor, server.BillingCurrency)
+	server.ReserveLabel = MoneyLabel(reserveMinor, server.BillingCurrency)
 }
 
 func ServerSystemMetricViews(clientHosting ClientHosting) []ServerMetricView {
@@ -1081,6 +1204,9 @@ func applyServerInvoiceDefaults(server *ServerView) {
 func serverClientViewsFromSites(sites []ServerSiteView) []ServerClientView {
 	clientSites := make(map[string][]ServerSiteView)
 	for _, site := range sites {
+		if site.IsDemo {
+			continue
+		}
 		email := strings.ToLower(strings.TrimSpace(site.OwnerEmail))
 		if email == "" {
 			email = "owner not set"

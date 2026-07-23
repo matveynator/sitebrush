@@ -192,7 +192,12 @@ type App struct {
 	sendEmail                 mailout.Sender
 	hostingSnapshotReports    chan struct{}
 	hostingAndSupportPanel    chan hostingAndSupportPanelRequest
+	billingInvoices           chan billingInvoiceProcessRequest
 	renderTemplates           chan renderTemplateRequest
+}
+
+type billingInvoiceProcessRequest struct {
+	kind string
 }
 
 type renderTemplateRequest struct {
@@ -210,6 +215,7 @@ type hostingAndSupportPanelRequest struct {
 	kind        string
 	metrics     []hostingandsupport.ServerMetricView
 	quotaChange siteQuotaRow
+	costPolicy  hostingandsupport.ServerCostPolicy
 	reply       chan hostingAndSupportPanelResponse
 }
 
@@ -246,6 +252,8 @@ type hostingAndSupportPanelSnapshot struct {
 	Overview                hostingandsupport.OverviewView
 	DemoSettings            demo.Settings
 	AutoRegistrationEnabled bool
+	CommissionBPS           int
+	LocalCostPolicy         hostingandsupport.ServerCostPolicy
 }
 
 type serviceMailRequest struct {
@@ -4473,6 +4481,7 @@ func runSitebrushServer(ctx context.Context, config serverRunConfig) error {
 	application.ensureAutoCertGuard()
 	application.renderTemplates = startRenderTemplateProcess(ctx.Done())
 	application.hostingAndSupportPanel = application.startHostingAndSupportPanelProcess(ctx.Done())
+	application.billingInvoices = application.startBillingInvoiceProcess(ctx.Done())
 	application.startDomainLogWorker(ctx)
 	application.startAnalyticsWorkers(ctx)
 	application.startServerOwnerRecoveryWorker(ctx)
@@ -5945,6 +5954,14 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 		a.analyticsPage(w, r)
 		return
 	}
+	if hasQueryFlag(r, "hosting_invoice") {
+		a.billingInvoicePage(w, r)
+		return
+	}
+	if hasQueryFlag(r, "billing_schedule") {
+		a.billingSchedulePage(w, r)
+		return
+	}
 	if hasQueryFlag(r, "hosting_and_support") || hasQueryFlag(r, "billing") {
 		a.hostingAndSupportPage(w, r)
 		return
@@ -6126,6 +6143,101 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.renderMissingPage(w, r, pagePath, isAdmin)
+}
+
+type billingInvoiceLineView struct {
+	Domain        string
+	Description   string
+	UsedLabel     string
+	ListLabel     string
+	DiscountLabel string
+	TotalLabel    string
+	Bonus         bool
+}
+
+func (a *App) billingInvoicePage(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("X-Robots-Tag", "noindex, nofollow")
+	token := strings.TrimSpace(r.URL.Query().Get("token"))
+	controlDatabase, err := a.openServerControlDatabase(r.Context())
+	if err != nil {
+		http.Error(w, "invoice unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	defer controlDatabase.Close()
+	invoice, err := (hostingandsupport.Store{DB: controlDatabase}).InvoiceByPublicToken(r.Context(), token)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	translations := translationsForRequest(r)
+	lineViews := make([]billingInvoiceLineView, 0, len(invoice.Lines))
+	bonusMinor := int64(0)
+	coveredMinor := int64(0)
+	for _, line := range invoice.Lines {
+		if line.Bonus {
+			bonusMinor += line.DiscountAmountMinor
+		}
+		coveredMinor += line.CostShareMinor
+		lineViews = append(lineViews, billingInvoiceLineView{
+			Domain:        line.Domain,
+			Description:   translationOrDefault(translations, "billing_invoice_hosting_service", "Hosting and support") + " · " + line.Domain,
+			UsedLabel:     formatFileSize(line.UsedBytes),
+			ListLabel:     hostingandsupport.MoneyLabel(line.ListAmountMinor, invoice.Currency),
+			DiscountLabel: hostingandsupport.MoneyLabel(line.DiscountAmountMinor, invoice.Currency),
+			TotalLabel:    hostingandsupport.MoneyLabel(line.TotalAmountMinor, invoice.Currency),
+			Bonus:         line.Bonus,
+		})
+	}
+	a.render(w, r, "billing_invoice.html", map[string]any{
+		"T": translations, "Title": translationOrDefault(translations, "billing_invoice_document", "Invoice"),
+		"Invoice": invoice, "Lines": lineViews,
+		"AmountLabel":  hostingandsupport.MoneyLabel(invoice.AmountMinor, invoice.Currency),
+		"BonusLabel":   hostingandsupport.MoneyLabel(bonusMinor, invoice.Currency),
+		"CoveredLabel": hostingandsupport.MoneyLabel(coveredMinor, invoice.Currency),
+		"ReserveLabel": hostingandsupport.MoneyLabel(invoice.ReserveMinor, invoice.Currency),
+		"HasBonus":     bonusMinor > 0, "HasReserve": invoice.ReserveMinor > 0,
+	})
+}
+
+func (a *App) billingSchedulePage(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("X-Robots-Tag", "noindex, nofollow")
+	token := strings.TrimSpace(r.URL.Query().Get("token"))
+	controlDatabase, err := a.openServerControlDatabase(r.Context())
+	if err != nil {
+		http.Error(w, "billing schedule unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	defer controlDatabase.Close()
+	store := hostingandsupport.Store{DB: controlDatabase}
+	customer, err := store.BillingCustomerByAccessToken(r.Context(), token)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	status := ""
+	if r.Method == http.MethodPost {
+		invoiceDay, _ := strconv.Atoi(strings.TrimSpace(r.FormValue("invoice_day")))
+		paymentTermDays, _ := strconv.Atoi(strings.TrimSpace(r.FormValue("payment_term_days")))
+		if saveErr := store.SaveBillingCustomerSchedule(r.Context(), customer.ID, invoiceDay, paymentTermDays, r.FormValue("timezone")); saveErr != nil {
+			status = saveErr.Error()
+		} else {
+			status = translationOrDefault(translationsForRequest(r), "billing_schedule_saved", "Billing schedule saved.")
+			customer, _ = store.BillingCustomerByID(r.Context(), customer.ID)
+			if a.billingInvoices != nil {
+				select {
+				case a.billingInvoices <- billingInvoiceProcessRequest{kind: "run"}:
+				default:
+				}
+			}
+		}
+	}
+	translations := translationsForRequest(r)
+	a.render(w, r, "billing_schedule.html", map[string]any{
+		"T": translations, "Title": translationOrDefault(translations, "billing_schedule_title", "Billing schedule"),
+		"Token": token, "Customer": customer, "Status": status,
+	})
 }
 
 func (a *App) dynamicDatabaseReady(w http.ResponseWriter, r *http.Request, domain string) bool {
@@ -9938,6 +10050,19 @@ func (a *App) runHostingAndSupportPanelProcess(stop <-chan struct{}, requests <-
 				persistErr := saveHostingAndSupportPanelSnapshot(controlDatabase, snapshot)
 				request.reply <- hostingAndSupportPanelResponse{snapshot: snapshot, err: persistErr}
 				startBuild()
+			case "cost_policy_changed":
+				snapshotGeneration++
+				snapshot.LocalCostPolicy = request.costPolicy
+				for serverIndex := range snapshot.Servers {
+					if snapshot.Servers[serverIndex].Local {
+						hostingandsupport.ApplyServerCostView(&snapshot.Servers[serverIndex], request.costPolicy, snapshot.Invoices)
+						break
+					}
+				}
+				snapshot.BuiltAt = time.Now().UTC().Format(time.RFC3339)
+				persistErr := saveHostingAndSupportPanelSnapshot(controlDatabase, snapshot)
+				request.reply <- hostingAndSupportPanelResponse{snapshot: snapshot, err: persistErr}
+				startBuild()
 			}
 		case result := <-buildResults:
 			buildRunning = false
@@ -9977,6 +10102,259 @@ func (a *App) runHostingAndSupportMetricsProcess(stop <-chan struct{}, requests 
 	}
 }
 
+type billingInvoiceGroup struct {
+	customer        hostingandsupport.BillingCustomer
+	installationID  string
+	serverName      string
+	currency        string
+	lines           []hostingandsupport.InvoiceLine
+	amountMinor     int64
+	serverCostMinor int64
+	hasPaidSite     bool
+}
+
+type billingServerSite struct {
+	domain      string
+	usedBytes   int64
+	ownerEmail  string
+	adminEmails []string
+	isDemo      bool
+	isOwner     bool
+}
+
+func normalizedEmailSet(emails []string) map[string]struct{} {
+	result := make(map[string]struct{}, len(emails))
+	for _, email := range emails {
+		email = strings.ToLower(strings.TrimSpace(email))
+		if email != "" {
+			result[email] = struct{}{}
+		}
+	}
+	return result
+}
+
+func emailsIntersectSet(emails []string, expected map[string]struct{}) bool {
+	for _, email := range emails {
+		if _, found := expected[strings.ToLower(strings.TrimSpace(email))]; found {
+			return true
+		}
+	}
+	return false
+}
+
+func (a *App) startBillingInvoiceProcess(stop <-chan struct{}) chan billingInvoiceProcessRequest {
+	requests := make(chan billingInvoiceProcessRequest, 1)
+	go func() {
+		ticker := time.NewTicker(time.Hour)
+		defer ticker.Stop()
+		run := func() {
+			snapshot, found := a.preparedHostingAndSupportPanelSnapshot()
+			if !found {
+				return
+			}
+			controlDatabase, err := a.openServerControlDatabase(context.Background())
+			if err != nil {
+				log.Printf("automatic billing database unavailable: %v", err)
+				return
+			}
+			defer controlDatabase.Close()
+			a.runAutomaticBillingOnce(context.Background(), hostingandsupport.Store{DB: controlDatabase}, snapshot, time.Now().UTC())
+			a.refreshHostingAndSupportPanel()
+		}
+		for {
+			select {
+			case <-stop:
+				return
+			case <-ticker.C:
+				run()
+			case <-requests:
+				run()
+			}
+		}
+	}()
+	return requests
+}
+
+func (a *App) runAutomaticBillingOnce(ctx context.Context, store hostingandsupport.Store, snapshot hostingAndSupportPanelSnapshot, now time.Time) {
+	groups := make(map[string]*billingInvoiceGroup)
+	addSite := func(installationID string, serverName string, currency string, site billingServerSite, price hostingandsupport.BillingPrice, costShareMinor int64) {
+		if site.isDemo || site.isOwner {
+			return
+		}
+		ownerEmail := site.ownerEmail
+		adminEmails := site.adminEmails
+		ownerEmail = strings.ToLower(strings.TrimSpace(ownerEmail))
+		if ownerEmail == "" && len(adminEmails) > 0 {
+			ownerEmail = strings.ToLower(strings.TrimSpace(adminEmails[0]))
+		}
+		if ownerEmail == "" || normalizeDomainName(site.domain) == "" {
+			return
+		}
+		customer, err := store.EnsureBillingCustomer(ctx, ownerEmail, adminEmails)
+		if err != nil || !customer.AutomaticEnabled || !billingCustomerInvoiceDue(customer, now) {
+			return
+		}
+		groupKey := customer.ID + "\x00" + installationID
+		group := groups[groupKey]
+		if group == nil {
+			group = &billingInvoiceGroup{customer: customer, installationID: installationID, serverName: serverName, currency: currency}
+			groups[groupKey] = group
+		}
+		listAmountMinor := hostingandsupport.MoneyMinor(price.Amount)
+		line := hostingandsupport.InvoiceLine{
+			Domain:             normalizeDomainName(site.domain),
+			Description:        "Hosting and support for " + normalizeDomainName(site.domain),
+			UsedBytes:          site.usedBytes,
+			BillableMegabytes:  price.BillableMegabytes,
+			ListAmountMinor:    listAmountMinor,
+			TotalAmountMinor:   listAmountMinor,
+			CostShareMinor:     costShareMinor,
+			MinimumAmountMinor: listAmountMinor,
+		}
+		if !price.Billable {
+			line.Bonus = true
+			line.DiscountAmountMinor = listAmountMinor
+			line.TotalAmountMinor = 0
+		} else {
+			if costShareMinor > line.TotalAmountMinor {
+				line.TotalAmountMinor = costShareMinor
+				line.ListAmountMinor = costShareMinor
+			}
+			group.hasPaidSite = true
+			group.amountMinor += line.TotalAmountMinor
+			group.serverCostMinor += costShareMinor
+		}
+		group.lines = append(group.lines, line)
+	}
+	processServer := func(installationID string, serverName string, policy hostingandsupport.ServerCostPolicy, sites []billingServerSite) {
+		if policy.MonthlyCostMinor <= 0 || policy.MinimumPriceGBMinor <= 0 || strings.TrimSpace(policy.Currency) == "" {
+			return
+		}
+		costSites := make([]hostingandsupport.ServerCostSite, 0, len(sites))
+		for siteIndex, site := range sites {
+			costSites = append(costSites, hostingandsupport.ServerCostSite{
+				Key: fmt.Sprintf("%s\x00%06d", normalizeDomainName(site.domain), siteIndex), UsedBytes: site.usedBytes, Excluded: site.isDemo || site.isOwner,
+			})
+		}
+		amounts := hostingandsupport.AllocateServerCost(policy, costSites)
+		for siteIndex, site := range sites {
+			amount := amounts[fmt.Sprintf("%s\x00%06d", normalizeDomainName(site.domain), siteIndex)]
+			addSite(installationID, serverName, policy.Currency, site, amount.Price, amount.CostShareMinor)
+		}
+	}
+	localInstallationID := "local:" + normalizeDomainName(snapshot.MainDomain)
+	localOwners := normalizedEmailSet(snapshot.OwnerEmails)
+	localSites := make([]billingServerSite, 0, len(snapshot.Sites))
+	for _, site := range snapshot.Sites {
+		adminEmails := hostingandsupport.SplitEmailList(site.AdminEmails)
+		localSites = append(localSites, billingServerSite{
+			domain: site.Domain, usedBytes: site.UsedBytes, adminEmails: adminEmails, isDemo: site.IsDemo,
+			isOwner: emailsIntersectSet(adminEmails, localOwners),
+		})
+	}
+	processServer(localInstallationID, snapshot.MainDomain, snapshot.LocalCostPolicy, localSites)
+	for _, hosting := range snapshot.ClientHostings {
+		serverName := firstNonEmpty(hosting.ServerDomain, hosting.InstallationID)
+		ownerEmails := make(map[string]struct{})
+		for _, role := range hosting.Roles {
+			if role.Role == "superadmin" {
+				ownerEmails[strings.ToLower(strings.TrimSpace(role.Email))] = struct{}{}
+			}
+		}
+		remoteSites := make([]billingServerSite, 0, len(hosting.Sites))
+		for _, site := range hosting.Sites {
+			siteEmails := append([]string{site.OwnerEmail}, site.AdminEmails...)
+			remoteSites = append(remoteSites, billingServerSite{
+				domain: site.Domain, usedBytes: site.UsedBytes, ownerEmail: site.OwnerEmail, adminEmails: site.AdminEmails,
+				isDemo: site.IsDemo, isOwner: emailsIntersectSet(siteEmails, ownerEmails),
+			})
+		}
+		processServer(hosting.InstallationID, serverName, hostingandsupport.ServerCostPolicy{
+			InstallationID: hosting.InstallationID, MonthlyCostMinor: hosting.MonthlyCostMinor, Currency: hosting.BillingCurrency,
+			MinimumPriceGBMinor: hosting.MinimumPriceGBMinor, EffectiveAt: hosting.BillingCostUpdatedAt,
+		}, remoteSites)
+	}
+	for _, group := range groups {
+		if !group.hasPaidSite || group.amountMinor <= 0 || len(group.lines) == 0 {
+			continue
+		}
+		location, err := time.LoadLocation(group.customer.Timezone)
+		if err != nil {
+			location = time.UTC
+		}
+		localNow := now.In(location)
+		periodStart := time.Date(localNow.Year(), localNow.Month(), group.customer.InvoiceDay, 0, 0, 0, 0, location)
+		periodEnd := periodStart.AddDate(0, 1, 0)
+		dueAt := periodStart.AddDate(0, 0, group.customer.PaymentTermDays)
+		invoice := hostingandsupport.Invoice{
+			CustomerID:      group.customer.ID,
+			CustomerEmail:   group.customer.PrimaryEmail,
+			InstallationID:  group.installationID,
+			ServerName:      group.serverName,
+			Domain:          group.lines[0].Domain,
+			PlanName:        "Hosting and support",
+			AmountMinor:     group.amountMinor,
+			Currency:        group.currency,
+			Provider:        "sitebrush_com",
+			DueAt:           dueAt.Format("2006-01-02"),
+			Recurring:       true,
+			RecurringPeriod: "monthly",
+			PeriodStart:     periodStart.Format("2006-01-02"),
+			PeriodEnd:       periodEnd.Format("2006-01-02"),
+			CommissionBPS:   snapshot.CommissionBPS,
+			ServerCostMinor: group.serverCostMinor,
+			ReserveMinor:    group.amountMinor - group.serverCostMinor,
+			Lines:           group.lines,
+		}
+		createdInvoice, createErr := store.CreateInvoice(ctx, invoice)
+		if createErr != nil {
+			log.Printf("automatic invoice creation failed customer=%s server=%s: %v", group.customer.PrimaryEmail, group.serverName, createErr)
+			continue
+		}
+		if createdInvoice.PublicToken == "" {
+			continue
+		}
+		scheduleToken, tokenErr := store.NewBillingCustomerAccessToken(ctx, group.customer.ID, 30*24*time.Hour)
+		if tokenErr != nil {
+			_ = store.MarkInvoiceDelivery(ctx, createdInvoice.ID, "error", tokenErr.Error())
+			continue
+		}
+		invoiceURL := billingPublicURL(snapshot.MainDomain, "hosting_invoice", createdInvoice.PublicToken)
+		scheduleURL := billingPublicURL(snapshot.MainDomain, "billing_schedule", scheduleToken)
+		message := billingInvoiceEmailMessage(a.emailFromAddress(snapshot.MainDomain), createdInvoice, invoiceURL, scheduleURL)
+		if enqueueErr := a.enqueueEmail(ctx, message); enqueueErr != nil {
+			_ = store.MarkInvoiceDelivery(ctx, createdInvoice.ID, "error", enqueueErr.Error())
+			continue
+		}
+		_ = store.MarkInvoiceDelivery(ctx, createdInvoice.ID, "sent", "")
+	}
+}
+
+func billingCustomerInvoiceDue(customer hostingandsupport.BillingCustomer, now time.Time) bool {
+	location, err := time.LoadLocation(customer.Timezone)
+	if err != nil {
+		location = time.UTC
+	}
+	return now.In(location).Day() == customer.InvoiceDay
+}
+
+func billingPublicURL(mainDomain string, queryFlag string, token string) string {
+	mainDomain = normalizeDomainName(mainDomain)
+	scheme := "https"
+	if mainDomain == "" || mainDomain == "localhost" {
+		mainDomain = "localhost"
+		scheme = "http"
+	}
+	return scheme + "://" + mainDomain + "/?" + url.QueryEscape(queryFlag) + "&token=" + url.QueryEscape(token)
+}
+
+func billingInvoiceEmailMessage(fromAddress string, invoice hostingandsupport.Invoice, invoiceURL string, scheduleURL string) mailout.Message {
+	amountLabel := hostingandsupport.MoneyLabel(invoice.AmountMinor, invoice.Currency)
+	textBody := "Invoice " + invoice.Number + "\n\nServer: " + invoice.ServerName + "\nPeriod: " + invoice.PeriodStart + " - " + invoice.PeriodEnd + "\nTotal: " + amountLabel + "\nDue: " + invoice.DueAt + "\n\nView and pay: " + invoiceURL + "\nBilling schedule: " + scheduleURL
+	htmlBody := `<!doctype html><html><body style="margin:0;background:#f4f7f8;color:#172126;font-family:Arial,sans-serif"><div style="max-width:680px;margin:0 auto;padding:32px 18px"><div style="background:#fff;border:1px solid #d9e2e5;border-radius:8px;padding:28px"><div style="font-size:22px;font-weight:700;color:#087f8c">SiteBrush</div><h1 style="font-size:26px;margin:24px 0 8px">Invoice ` + template.HTMLEscapeString(invoice.Number) + `</h1><p style="color:#607078">` + template.HTMLEscapeString(invoice.ServerName) + ` · ` + template.HTMLEscapeString(invoice.PeriodStart) + ` - ` + template.HTMLEscapeString(invoice.PeriodEnd) + `</p><div style="font-size:30px;font-weight:700;margin:24px 0">` + template.HTMLEscapeString(amountLabel) + `</div><p>Payment due: <strong>` + template.HTMLEscapeString(invoice.DueAt) + `</strong></p><p><a href="` + template.HTMLEscapeString(invoiceURL) + `" style="display:inline-block;background:#087f8c;color:white;text-decoration:none;padding:12px 18px;border-radius:6px">View invoice and pay</a></p><p style="margin-top:28px;font-size:13px;color:#607078"><a href="` + template.HTMLEscapeString(scheduleURL) + `">Choose invoice day and payment term</a></p></div></div></body></html>`
+	return mailout.Message{From: fromAddress, To: invoice.CustomerEmail, Subject: "SiteBrush invoice " + invoice.Number, Body: textBody, HTMLBody: htmlBody}
+}
+
 func (a *App) refreshHostingAndSupportPanel() {
 	if a == nil || a.hostingAndSupportPanel == nil {
 		return
@@ -10006,6 +10384,18 @@ func (a *App) applyPreparedHostingAndSupportQuotaChange(quotaChange siteQuotaRow
 	response := <-reply
 	if response.err != nil {
 		log.Printf("hosting panel quota snapshot save failed: %v", response.err)
+	}
+}
+
+func (a *App) applyPreparedHostingAndSupportCostPolicy(costPolicy hostingandsupport.ServerCostPolicy) {
+	if a == nil || a.hostingAndSupportPanel == nil {
+		return
+	}
+	reply := make(chan hostingAndSupportPanelResponse, 1)
+	a.hostingAndSupportPanel <- hostingAndSupportPanelRequest{kind: "cost_policy_changed", costPolicy: costPolicy, reply: reply}
+	response := <-reply
+	if response.err != nil {
+		log.Printf("hosting panel cost policy snapshot save failed: %v", response.err)
 	}
 }
 
@@ -10116,6 +10506,12 @@ func (a *App) handleHostingAndSupportAction(r *http.Request) string {
 		return a.saveHostingAndSupportRegistrationSettingsFromForm(r)
 	case "service_mail_settings":
 		return a.saveHostingAndSupportServiceMailSettingsFromForm(r)
+	case "billing_customer_schedule":
+		return a.saveBillingCustomerScheduleFromForm(r)
+	case "server_cost_policy":
+		return a.saveServerCostPolicyFromForm(r)
+	case "sitebrush_commission":
+		return a.saveSitebrushCommissionFromForm(r)
 	case "generate_sitebrush_com_key":
 		return a.generateSitebrushComKeyFromForm(r)
 	case "demo_settings":
@@ -10161,6 +10557,80 @@ func (a *App) handleHostingAndSupportAction(r *http.Request) string {
 	default:
 		return translationOrDefault(translationsForRequest(r), "billing_status_unknown_action", "Unknown billing action.")
 	}
+}
+
+func (a *App) saveServerCostPolicyFromForm(r *http.Request) string {
+	translations := translationsForRequest(r)
+	monthlyCostMinor := hostingandsupport.MoneyMinor(strings.ReplaceAll(strings.TrimSpace(r.FormValue("monthly_cost")), ",", "."))
+	minimumPriceGBMinor := hostingandsupport.MoneyMinor(strings.ReplaceAll(strings.TrimSpace(r.FormValue("minimum_price_gb")), ",", "."))
+	if monthlyCostMinor <= 0 || minimumPriceGBMinor <= 0 {
+		return translationOrDefault(translations, "billing_server_cost_invalid", "Monthly cost and minimum price per GB must be greater than zero.")
+	}
+	controlDatabase, err := a.openServerControlDatabase(r.Context())
+	if err != nil {
+		return err.Error()
+	}
+	defer controlDatabase.Close()
+	savedPolicy, err := (hostingandsupport.Store{DB: controlDatabase}).SaveServerCostPolicy(r.Context(), hostingandsupport.ServerCostPolicy{
+		InstallationID: "local", MonthlyCostMinor: monthlyCostMinor,
+		Currency: r.FormValue("currency"), MinimumPriceGBMinor: minimumPriceGBMinor,
+	})
+	if err != nil {
+		return err.Error()
+	}
+	a.applyPreparedHostingAndSupportCostPolicy(savedPolicy)
+	a.reportHostingSnapshotAsync(r.Context())
+	if a.billingInvoices != nil {
+		select {
+		case a.billingInvoices <- billingInvoiceProcessRequest{kind: "run"}:
+		default:
+		}
+	}
+	return translationOrDefault(translations, "billing_server_cost_saved", "Server hosting cost saved.")
+}
+
+func (a *App) saveBillingCustomerScheduleFromForm(r *http.Request) string {
+	customerID := strings.TrimSpace(r.FormValue("customer_id"))
+	invoiceDay, _ := strconv.Atoi(strings.TrimSpace(r.FormValue("invoice_day")))
+	paymentTermDays, _ := strconv.Atoi(strings.TrimSpace(r.FormValue("payment_term_days")))
+	timezone := strings.TrimSpace(r.FormValue("timezone"))
+	controlDatabase, err := a.openServerControlDatabase(r.Context())
+	if err != nil {
+		return err.Error()
+	}
+	defer controlDatabase.Close()
+	if err := (hostingandsupport.Store{DB: controlDatabase}).SaveBillingCustomerSchedule(r.Context(), customerID, invoiceDay, paymentTermDays, timezone); err != nil {
+		return err.Error()
+	}
+	if a.billingInvoices != nil {
+		select {
+		case a.billingInvoices <- billingInvoiceProcessRequest{kind: "run"}:
+		default:
+		}
+	}
+	return translationOrDefault(translationsForRequest(r), "billing_schedule_saved", "Billing schedule saved.")
+}
+
+func (a *App) saveSitebrushCommissionFromForm(r *http.Request) string {
+	commissionPercent, err := strconv.ParseFloat(strings.ReplaceAll(strings.TrimSpace(r.FormValue("commission_percent")), ",", "."), 64)
+	if err != nil {
+		return translationOrDefault(translationsForRequest(r), "billing_commission_invalid", "Commission is invalid.")
+	}
+	commissionBPS := int(math.Round(commissionPercent * 100))
+	controlDatabase, err := a.openServerControlDatabase(r.Context())
+	if err != nil {
+		return err.Error()
+	}
+	defer controlDatabase.Close()
+	store := hostingandsupport.Store{DB: controlDatabase}
+	ownerDomain, ownerFound := store.OwnerDomain(r.Context())
+	if !ownerFound || normalizeDomainName(ownerDomain) != "sitebrush.com" {
+		return translationOrDefault(translationsForRequest(r), "billing_commission_central_only", "Commission can only be changed on sitebrush.com.")
+	}
+	if err := store.SaveSitebrushCommissionBPS(r.Context(), commissionBPS); err != nil {
+		return err.Error()
+	}
+	return translationOrDefault(translationsForRequest(r), "billing_commission_saved", "Commission saved.")
 }
 
 func (a *App) hostingAndSupportCanShowCentralServers(ctx context.Context, store hostingandsupport.Store, sitebrushComKey hostingandsupport.SitebrushComKey) bool {
@@ -10216,10 +10686,8 @@ func (a *App) collectHostingAndSupportPanelSnapshot(ctx context.Context, control
 	sitebrushComKey := store.SitebrushComKey(ctx)
 	serviceMailRelayEnabled := store.ServiceMailRelayEnabled(ctx)
 	demoSettings := (demo.Store{DB: controlDatabase}).Settings(ctx)
-	hostingAndSupportDemoDomain := ""
-	if demoSettings.Enabled {
-		hostingAndSupportDemoDomain = demoSettings.Domain
-	}
+	hostingAndSupportDemoDomain := demoSettings.Domain
+	clientHostings = hostingandsupport.ClientHostingsWithDemoDomain(clientHostings, hostingAndSupportDemoDomain)
 	mainDomain := ""
 	if ownerDomain, found := store.OwnerDomain(ctx); found {
 		mainDomain = ownerDomain
@@ -10229,7 +10697,66 @@ func (a *App) collectHostingAndSupportPanelSnapshot(ctx context.Context, control
 	if err != nil {
 		return hostingAndSupportPanelSnapshot{}, err
 	}
+	demoDomains := make([]string, 0, 4)
+	demoEmails := make([]string, 0, 8)
+	protectedEmails := make([]string, 0, 16)
+	if hostingAndSupportDemoDomain != "" {
+		demoDomains = append(demoDomains, hostingAndSupportDemoDomain)
+	}
+	for _, session := range (demo.Store{DB: controlDatabase}).Sessions(ctx) {
+		demoDomains = append(demoDomains, session.Domain)
+		demoEmails = append(demoEmails, session.UserEmail)
+	}
+	for _, site := range siteRows {
+		if site.IsDemo {
+			continue
+		}
+		protectedEmails = append(protectedEmails, hostingandsupport.SplitEmailList(site.AdminEmails)...)
+	}
+	for _, hosting := range clientHostings {
+		for _, site := range hosting.Sites {
+			if site.IsDemo {
+				demoDomains = append(demoDomains, site.Domain)
+				demoEmails = append(demoEmails, append(append([]string(nil), site.AdminEmails...), site.OwnerEmail)...)
+				continue
+			}
+			protectedEmails = append(protectedEmails, append(append([]string(nil), site.AdminEmails...), site.OwnerEmail)...)
+		}
+	}
+	if purgeErr := store.PurgeDemoBilling(ctx, demoDomains, demoEmails, protectedEmails); purgeErr != nil {
+		return hostingAndSupportPanelSnapshot{}, purgeErr
+	}
+	invoices = store.Invoices(ctx, 80)
 	hostingAndSupportAttachApprovedSiteRequests(siteRows, approvedSiteRequestsByDomain)
+	localCostPolicy, _ := store.ServerCostPolicy(ctx, "local")
+	if localCostPolicy.MinimumPriceGBMinor > 0 && localCostPolicy.Currency != "" {
+		localOwners := normalizedEmailSet(store.OwnerEmails(ctx))
+		costSites := make([]hostingandsupport.ServerCostSite, 0, len(siteRows))
+		for _, site := range siteRows {
+			costSites = append(costSites, hostingandsupport.ServerCostSite{
+				Key: site.Domain, UsedBytes: site.UsedBytes,
+				Excluded: site.IsDemo || emailsIntersectSet(hostingandsupport.SplitEmailList(site.AdminEmails), localOwners),
+			})
+		}
+		costAmounts := hostingandsupport.AllocateServerCost(localCostPolicy, costSites)
+		for siteIndex := range siteRows {
+			costAmount := costAmounts[siteRows[siteIndex].Domain]
+			billingPrice := costAmount.Price
+			siteRows[siteIndex].BillingPriceLabel = billingPrice.PriceLabel
+			siteRows[siteIndex].BillingStatusText = billingPrice.StatusText
+			siteRows[siteIndex].BillingAmount = hostingandsupport.MoneyAmount(costAmount.TotalMinor)
+			siteRows[siteIndex].BillingCurrency = billingPrice.Currency
+			siteRows[siteIndex].BillingBillable = billingPrice.Billable
+		}
+	} else {
+		for siteIndex := range siteRows {
+			siteRows[siteIndex].BillingPriceLabel = ""
+			siteRows[siteIndex].BillingStatusText = ""
+			siteRows[siteIndex].BillingAmount = "0.00"
+			siteRows[siteIndex].BillingCurrency = ""
+			siteRows[siteIndex].BillingBillable = false
+		}
+	}
 	localServer := hostingandsupport.BuildLocalServerView(hostingandsupport.LocalServerViewInput{
 		Sites:          siteRows,
 		Invoices:       invoices,
@@ -10240,9 +10767,12 @@ func (a *App) collectHostingAndSupportPanelSnapshot(ctx context.Context, control
 		MainDomain:     mainDomain,
 		CurrentHost:    mainDomain,
 		SiteURL:        a.hostingAndSupportSiteURL,
+		CostPolicy:     localCostPolicy,
+		OwnerEmails:    store.OwnerEmails(ctx),
 	})
 	servers := hostingandsupport.BuildServerViews(localServer, clientHostings, invoices, CompileVersion)
-	clients := a.hostingAndSupportClients(ctx, siteRows, nil, nil, clientHostings, invoices)
+	commissionBPS := store.SitebrushCommissionBPS(ctx)
+	clients := a.hostingAndSupportClients(ctx, store, siteRows, nil, nil, clientHostings, invoices, commissionBPS, store.OwnerEmails(ctx))
 	overview := hostingandsupport.BuildOverview(siteRows, 0, pendingSiteRequests, invoices, clientHostings, registrySyncEvents, nil)
 	overview.ServerCount = len(servers)
 	overview.ClientCount = len(clients)
@@ -10269,6 +10799,8 @@ func (a *App) collectHostingAndSupportPanelSnapshot(ctx context.Context, control
 		Overview:                overview,
 		DemoSettings:            demoSettings,
 		AutoRegistrationEnabled: store.AutomaticRegistrationAllowed(ctx),
+		CommissionBPS:           commissionBPS,
+		LocalCostPolicy:         localCostPolicy,
 	}, nil
 }
 
@@ -10279,6 +10811,8 @@ func (a *App) applyHostingAndSupportPanelMetrics(snapshot hostingAndSupportPanel
 	localServer := hostingandsupport.BuildLocalServerView(hostingandsupport.LocalServerViewInput{
 		Sites: snapshot.Sites, Invoices: snapshot.Invoices, Plans: snapshot.Plans, Assignments: snapshot.Assignments,
 		SystemMetrics: metrics, CompileVersion: CompileVersion, MainDomain: snapshot.MainDomain, CurrentHost: snapshot.MainDomain, SiteURL: a.hostingAndSupportSiteURL,
+		CostPolicy:  snapshot.LocalCostPolicy,
+		OwnerEmails: snapshot.OwnerEmails,
 	})
 	snapshot.Servers = hostingandsupport.BuildServerViews(localServer, snapshot.ClientHostings, snapshot.Invoices, CompileVersion)
 	snapshot.Overview.ServerCount = len(snapshot.Servers)
@@ -10325,30 +10859,29 @@ func (a *App) applyHostingAndSupportPanelQuotaChange(snapshot hostingAndSupportP
 func (a *App) hostingAndSupportPanelView(r *http.Request, snapshot hostingAndSupportPanelSnapshot) map[string]any {
 	translations := translationsForRequest(r)
 	return map[string]any{
-		"T":                           translations,
-		"Title":                       translationOrDefault(translations, "billing_title", "Хостинг и поддержка"),
-		"Sites":                       snapshot.Sites,
-		"Plans":                       snapshot.Plans,
-		"PaymentProviders":            hostingandsupport.DemoPaymentProviders(absoluteURLForPath(r, "/?hosting_and_support_demo_payment&invoice={invoice}")),
-		"Invoices":                    snapshot.Invoices,
-		"SiteRequests":                snapshot.SiteRequests,
-		"ServiceMailInstallations":    nil,
-		"ServiceMailEvents":           nil,
-		"ClientHostings":              snapshot.ClientHostings,
-		"DesktopHostingGroups":        snapshot.DesktopHostingGroups,
-		"ArchivedHostings":            snapshot.ArchivedHostings,
-		"Servers":                     snapshot.Servers,
-		"RegistrySyncEvents":          snapshot.RegistrySyncEvents,
-		"SitebrushComKey":             snapshot.SitebrushComKey,
-		"ShowServers":                 true,
-		"Clients":                     snapshot.Clients,
-		"ClientCount":                 len(snapshot.Clients),
-		"ClientSiteCount":             len(snapshot.Sites),
-		"ClientInstallationCount":     len(snapshot.Servers),
-		"ClientLocalDevelopmentCount": 0,
-		"ServiceMailBlocks":           nil,
-		"ServiceMailRelayEnabled":     snapshot.ServiceMailRelayEnabled,
-		"Overview":                    snapshot.Overview,
+		"T":                        translations,
+		"Title":                    translationOrDefault(translations, "billing_title", "Хостинг и поддержка"),
+		"Sites":                    snapshot.Sites,
+		"Plans":                    snapshot.Plans,
+		"PaymentProviders":         hostingandsupport.DemoPaymentProviders(absoluteURLForPath(r, "/?hosting_and_support_demo_payment&invoice={invoice}")),
+		"Invoices":                 snapshot.Invoices,
+		"SiteRequests":             snapshot.SiteRequests,
+		"ServiceMailInstallations": nil,
+		"ServiceMailEvents":        nil,
+		"ClientHostings":           snapshot.ClientHostings,
+		"DesktopHostingGroups":     snapshot.DesktopHostingGroups,
+		"ArchivedHostings":         snapshot.ArchivedHostings,
+		"Servers":                  snapshot.Servers,
+		"RegistrySyncEvents":       snapshot.RegistrySyncEvents,
+		"SitebrushComKey":          snapshot.SitebrushComKey,
+		"ShowServers":              true,
+		"Clients":                  snapshot.Clients,
+		"ClientCount":              len(snapshot.Clients),
+		"ClientSiteCount":          len(snapshot.Sites),
+		"ClientInstallationCount":  len(snapshot.Servers),
+		"ServiceMailBlocks":        nil,
+		"ServiceMailRelayEnabled":  snapshot.ServiceMailRelayEnabled,
+		"Overview":                 snapshot.Overview,
 		"ServiceMailLimits": map[string]int{
 			"InstallationHour":    serviceMailPerInstallationHourLimit,
 			"NewInstallationHour": serviceMailNewInstallationHourLimit,
@@ -10364,35 +10897,52 @@ func (a *App) hostingAndSupportPanelView(r *http.Request, snapshot hostingAndSup
 		"PublicTrialEmbedHTML":    publicTrialSignupEmbedHTML(r, translations),
 		"CurrentDomain":           domainFromRequest(r),
 		"PanelSnapshotBuiltAt":    snapshot.BuiltAt,
+		"CommissionBPS":           snapshot.CommissionBPS,
+		"CommissionPercent":       fmt.Sprintf("%.2f", float64(snapshot.CommissionBPS)/100),
+		"ShowCommissionSetting":   normalizeDomainName(snapshot.MainDomain) == "sitebrush.com",
 	}
 }
 
 type hostingAndSupportClientView struct {
-	PrimaryEmail           string
-	Emails                 []string
-	EmailCount             int
-	Domains                []string
-	DomainCount            int
-	FilterRoles            string
-	FilterStatuses         string
-	FilterPaidStatuses     string
-	FilterOverLimit        string
-	FilterHasEvents        string
-	SiteCount              int
-	Sites                  []hostingAndSupportClientSiteView
-	Invoices               []hostingAndSupportClientInvoiceView
-	InvoiceCount           int
-	Hostings               []hostingAndSupportClientHostingView
-	HostingCount           int
-	Installations          []string
-	InstallationCount      int
-	RelayInstallationCount int
-	LocalDevelopmentCount  int
-	HostingSitebrushCount  int
-	IPs                    []hostingAndSupportClientIPView
-	IPCount                int
-	Events                 []hostingAndSupportClientEventView
-	MapPointsJSON          template.JS
+	PrimaryEmail             string
+	Emails                   []string
+	EmailCount               int
+	Domains                  []string
+	DomainCount              int
+	FilterRoles              string
+	FilterStatuses           string
+	FilterPaidStatuses       string
+	FilterOverLimit          string
+	FilterHasEvents          string
+	SiteCount                int
+	Sites                    []hostingAndSupportClientSiteView
+	Invoices                 []hostingAndSupportClientInvoiceView
+	InvoiceCount             int
+	Hostings                 []hostingAndSupportClientHostingView
+	HostingCount             int
+	Installations            []string
+	InstallationCount        int
+	RelayInstallationCount   int
+	HostingSitebrushCount    int
+	IPs                      []hostingAndSupportClientIPView
+	IPCount                  int
+	Events                   []hostingAndSupportClientEventView
+	MapPointsJSON            template.JS
+	BillingCustomerID        string
+	TotalStorageBytes        int64
+	TotalStorageLabel        string
+	PaidSiteCount            int
+	MonthlyDueMinor          int64
+	MonthlyDueLabel          string
+	PaidThisMonthLabel       string
+	LifetimePaidLabel        string
+	ExpectedCommissionLabel  string
+	CommissionThisMonthLabel string
+	LifetimeCommissionLabel  string
+	InvoiceDay               int
+	PaymentTermDays          int
+	BillingTimezone          string
+	AutomaticBillingEnabled  bool
 }
 
 type hostingAndSupportClientHostingView struct {
@@ -10485,7 +11035,7 @@ type hostingAndSupportClientSiteSource struct {
 	hostingServer     string
 }
 
-func (a *App) hostingAndSupportClients(ctx context.Context, siteRows []hostingandsupport.Site, installations []hostingandsupport.ServiceMailInstallation, events []hostingandsupport.ServiceMailEvent, clientHostings []hostingandsupport.ClientHosting, invoices []hostingandsupport.Invoice) []hostingAndSupportClientView {
+func (a *App) hostingAndSupportClients(ctx context.Context, billingStore hostingandsupport.Store, siteRows []hostingandsupport.Site, installations []hostingandsupport.ServiceMailInstallation, events []hostingandsupport.ServiceMailEvent, clientHostings []hostingandsupport.ClientHosting, invoices []hostingandsupport.Invoice, commissionBPS int, localOwnerEmails []string) []hostingAndSupportClientView {
 	installationDomain := make(map[string]string)
 	installationIP := make(map[string]string)
 	for _, installation := range installations {
@@ -10495,30 +11045,39 @@ func (a *App) hostingAndSupportClients(ctx context.Context, siteRows []hostingan
 	clientsByEmail := make(map[string]*hostingAndSupportClientAccumulator)
 	clientsByDomain := make(map[string]*hostingAndSupportClientAccumulator)
 	knownSiteDomains := make(map[string]struct{})
+	localOwners := normalizedEmailSet(localOwnerEmails)
 	for _, siteRow := range siteRows {
+		if siteRow.IsDemo {
+			continue
+		}
+		siteAdminEmails := hostingandsupport.SplitEmailList(siteRow.AdminEmails)
+		if emailsIntersectSet(siteAdminEmails, localOwners) {
+			continue
+		}
 		domain := normalizeDomainName(siteRow.Domain)
 		if domain == "" {
 			continue
 		}
 		knownSiteDomains[domain] = struct{}{}
-		for _, email := range hostingandsupport.SplitEmailList(siteRow.AdminEmails) {
-			client := hostingAndSupportClientByEmail(clientsByEmail, email)
-			client.sites[domain] = hostingAndSupportClientSiteSource{
-				aliases:           siteRow.Aliases,
-				url:               siteRow.URL,
-				usedBytes:         siteRow.UsedBytes,
-				usedLabel:         siteRow.UsedLabel,
-				limitLabel:        siteRow.LimitLabel,
-				billingUsageLabel: siteRow.BillingUsageLabel,
-				billingPriceLabel: siteRow.BillingPriceLabel,
-				billingStatusText: siteRow.BillingStatusText,
-				billingAmount:     siteRow.BillingAmount,
-				billingCurrency:   siteRow.BillingCurrency,
-				billingBillable:   siteRow.BillingBillable,
-			}
-			client.domains[domain] = struct{}{}
-			clientsByDomain[domain] = client
+		client := hostingAndSupportClientForEmails(clientsByEmail, siteAdminEmails)
+		if client == nil {
+			continue
 		}
+		client.sites[domain] = hostingAndSupportClientSiteSource{
+			aliases:           siteRow.Aliases,
+			url:               siteRow.URL,
+			usedBytes:         siteRow.UsedBytes,
+			usedLabel:         siteRow.UsedLabel,
+			limitLabel:        siteRow.LimitLabel,
+			billingUsageLabel: siteRow.BillingUsageLabel,
+			billingPriceLabel: siteRow.BillingPriceLabel,
+			billingStatusText: siteRow.BillingStatusText,
+			billingAmount:     siteRow.BillingAmount,
+			billingCurrency:   siteRow.BillingCurrency,
+			billingBillable:   siteRow.BillingBillable,
+		}
+		client.domains[domain] = struct{}{}
+		clientsByDomain[domain] = client
 	}
 	for _, installation := range installations {
 		domain := normalizeDomainName(installation.LastDomain)
@@ -10587,50 +11146,82 @@ func (a *App) hostingAndSupportClients(ctx context.Context, siteRows []hostingan
 		}
 	}
 	for _, clientHosting := range clientHostings {
-		emailCandidates := clientHosting.ClientEmails
-		if len(emailCandidates) == 0 && strings.TrimSpace(clientHosting.OwnerEmail) != "" {
-			emailCandidates = []string{clientHosting.OwnerEmail}
+		remoteOwners := make(map[string]struct{})
+		for _, role := range clientHosting.Roles {
+			if role.Role == "superadmin" {
+				remoteOwners[strings.ToLower(strings.TrimSpace(role.Email))] = struct{}{}
+			}
 		}
-		for _, email := range emailCandidates {
-			client := hostingAndSupportClientByEmail(clientsByEmail, email)
+		remoteCostSites := make([]hostingandsupport.ServerCostSite, 0, len(clientHosting.Sites))
+		for _, site := range clientHosting.Sites {
+			siteEmails := append([]string{site.OwnerEmail}, site.AdminEmails...)
+			remoteCostSites = append(remoteCostSites, hostingandsupport.ServerCostSite{
+				Key: site.Domain, UsedBytes: site.UsedBytes,
+				Excluded: site.IsDemo || emailsIntersectSet(siteEmails, remoteOwners),
+			})
+		}
+		remoteCostAmounts := hostingandsupport.AllocateServerCost(hostingandsupport.ServerCostPolicy{
+			InstallationID: clientHosting.InstallationID, MonthlyCostMinor: clientHosting.MonthlyCostMinor,
+			Currency: clientHosting.BillingCurrency, MinimumPriceGBMinor: clientHosting.MinimumPriceGBMinor,
+		}, remoteCostSites)
+		for _, site := range clientHosting.Sites {
+			siteEmails := append([]string{site.OwnerEmail}, site.AdminEmails...)
+			if site.IsDemo || emailsIntersectSet(siteEmails, remoteOwners) {
+				continue
+			}
+			client := hostingAndSupportClientForEmails(clientsByEmail, siteEmails)
+			if client == nil {
+				continue
+			}
 			client.installations[strings.TrimSpace(clientHosting.InstallationID)] = struct{}{}
 			if strings.TrimSpace(clientHosting.ServerIP) != "" {
 				client.ips[strings.TrimSpace(clientHosting.ServerIP)] = a.hostingAndSupportClientIP(ctx, clientHosting.ServerIP)
 			}
-			for _, site := range clientHosting.Sites {
-				domain := normalizeDomainName(site.Domain)
-				if domain == "" {
-					continue
-				}
-				client.domains[domain] = struct{}{}
-				siteSource := client.sites[domain]
-				if site.UsedBytes > siteSource.usedBytes {
-					siteSource.usedBytes = site.UsedBytes
-					siteSource.usedLabel = site.UsedLabel
-				}
-				if siteSource.usedLabel == "" {
-					siteSource.usedLabel = site.UsedLabel
-				}
-				if site.LimitBytes > 0 {
-					siteSource.limitBytes = site.LimitBytes
-					siteSource.limitLabel = site.LimitLabel
-				}
-				billingPrice := hostingandsupport.BillingPriceForUsedBytes(siteSource.usedBytes)
-				siteSource.billingUsageLabel = hostingandsupport.BillingUsageLabel(siteSource.usedBytes)
-				siteSource.billingPriceLabel = billingPrice.PriceLabel
-				siteSource.billingStatusText = billingPrice.StatusText
-				siteSource.billingAmount = billingPrice.Amount
-				siteSource.billingCurrency = billingPrice.Currency
-				siteSource.billingBillable = billingPrice.Billable
-				siteSource.hostingOwner = firstNonEmpty(clientHosting.OwnerEmail, siteSource.hostingOwner)
-				siteSource.hostingServer = firstNonEmpty(clientHosting.ServerDomain, clientHosting.InstallationID, siteSource.hostingServer)
-				siteSource.ip = firstNonEmpty(clientHosting.ServerIP, siteSource.ip)
-				client.sites[domain] = siteSource
+			domain := normalizeDomainName(site.Domain)
+			if domain == "" {
+				continue
 			}
+			client.domains[domain] = struct{}{}
+			siteSource := client.sites[domain]
+			if site.UsedBytes > siteSource.usedBytes {
+				siteSource.usedBytes = site.UsedBytes
+				siteSource.usedLabel = site.UsedLabel
+			}
+			if siteSource.usedLabel == "" {
+				siteSource.usedLabel = site.UsedLabel
+			}
+			if site.LimitBytes > 0 {
+				siteSource.limitBytes = site.LimitBytes
+				siteSource.limitLabel = site.LimitLabel
+			}
+			costAmount := remoteCostAmounts[site.Domain]
+			billingPrice := costAmount.Price
+			if clientHosting.MonthlyCostMinor <= 0 || clientHosting.MinimumPriceGBMinor <= 0 || clientHosting.BillingCurrency == "" {
+				costAmount.TotalMinor = 0
+				billingPrice.Amount = "0.00"
+				billingPrice.PriceLabel = ""
+				billingPrice.StatusText = ""
+				billingPrice.Billable = false
+			}
+			siteSource.billingUsageLabel = hostingandsupport.BillingUsageLabel(siteSource.usedBytes)
+			siteSource.billingPriceLabel = billingPrice.PriceLabel
+			siteSource.billingStatusText = billingPrice.StatusText
+			siteSource.billingAmount = hostingandsupport.MoneyAmount(costAmount.TotalMinor)
+			siteSource.billingCurrency = billingPrice.Currency
+			siteSource.billingBillable = billingPrice.Billable
+			siteSource.hostingOwner = firstNonEmpty(clientHosting.OwnerEmail, siteSource.hostingOwner)
+			siteSource.hostingServer = firstNonEmpty(clientHosting.ServerDomain, clientHosting.InstallationID, siteSource.hostingServer)
+			siteSource.ip = firstNonEmpty(clientHosting.ServerIP, siteSource.ip)
+			client.sites[domain] = siteSource
 		}
 	}
 	clients := make([]hostingAndSupportClientView, 0, len(clientsByEmail))
+	seenClients := make(map[*hostingAndSupportClientAccumulator]struct{})
 	for _, user := range clientsByEmail {
+		if _, seen := seenClients[user]; seen {
+			continue
+		}
+		seenClients[user] = struct{}{}
 		siteViews := hostingAndSupportClientSiteViews(user.sites, knownSiteDomains)
 		hostingViews := hostingAndSupportClientHostingViews(user.emails, clientHostings)
 		view := hostingAndSupportClientView{
@@ -10655,16 +11246,8 @@ func (a *App) hostingAndSupportClients(ctx context.Context, siteRows []hostingan
 			if view.InstallationCount == 0 && site.RealInstallation {
 				view.InstallationCount++
 			}
-			if site.LocalDevelopment {
-				view.LocalDevelopmentCount++
-			}
 			if site.HostingSitebrush {
 				view.HostingSitebrushCount++
-			}
-		}
-		for _, hostingView := range hostingViews {
-			if hostingandsupport.HostingHasSpecialStatus(hostingView.Hosting) {
-				view.LocalDevelopmentCount++
 			}
 		}
 		view.FilterRoles = strings.Join(hostingAndSupportClientFilterRoles(view), " ")
@@ -10682,6 +11265,40 @@ func (a *App) hostingAndSupportClients(ctx context.Context, siteRows []hostingan
 		}
 		view.IPCount = len(view.IPs)
 		view.MapPointsJSON = hostingAndSupportClientMapPointsJSON(view.IPs)
+		monthlyDueByCurrency := make(map[string]int64)
+		for _, site := range view.Sites {
+			view.TotalStorageBytes += site.UsedBytes
+			if site.BillingBillable {
+				view.PaidSiteCount++
+				siteAmountMinor := hostingandsupport.MoneyMinor(site.BillingAmount)
+				view.MonthlyDueMinor += siteAmountMinor
+				currency := strings.ToUpper(strings.TrimSpace(site.BillingCurrency))
+				if currency == "" {
+					currency = "EUR"
+				}
+				monthlyDueByCurrency[currency] += siteAmountMinor
+			}
+		}
+		view.TotalStorageLabel = formatFileSize(view.TotalStorageBytes)
+		view.MonthlyDueLabel = hostingandsupport.MoneyTotalsLabel(monthlyDueByCurrency)
+		billingCustomer, customerErr := billingStore.EnsureBillingCustomer(ctx, view.PrimaryEmail, view.Emails)
+		if customerErr == nil {
+			view.BillingCustomerID = billingCustomer.ID
+			view.InvoiceDay = billingCustomer.InvoiceDay
+			view.PaymentTermDays = billingCustomer.PaymentTermDays
+			view.BillingTimezone = billingCustomer.Timezone
+			view.AutomaticBillingEnabled = billingCustomer.AutomaticEnabled
+			financialTotals := billingStore.BillingCustomerFinancialTotals(ctx, billingCustomer, time.Now().UTC())
+			view.PaidThisMonthLabel = hostingandsupport.MoneyTotalsLabel(financialTotals.CoveredThisMonthByCurrency)
+			view.LifetimePaidLabel = hostingandsupport.MoneyTotalsLabel(financialTotals.LifetimeCoveredByCurrency)
+			view.CommissionThisMonthLabel = hostingandsupport.MoneyLabel(financialTotals.CommissionThisMonthMinor, "EUR")
+			view.LifetimeCommissionLabel = hostingandsupport.MoneyLabel(financialTotals.LifetimeCommissionMinor, "EUR")
+		}
+		expectedCommissionByCurrency := make(map[string]int64, len(monthlyDueByCurrency))
+		for currency, amountMinor := range monthlyDueByCurrency {
+			expectedCommissionByCurrency[currency] = amountMinor * int64(commissionBPS) / 10000
+		}
+		view.ExpectedCommissionLabel = hostingandsupport.MoneyTotalsLabel(expectedCommissionByCurrency)
 		clients = append(clients, view)
 	}
 	sort.Slice(clients, func(left, right int) bool {
@@ -10846,6 +11463,34 @@ func hostingAndSupportClientByEmail(clients map[string]*hostingAndSupportClientA
 		ips:           make(map[string]hostingAndSupportClientIPView),
 	}
 	clients[email] = client
+	return client
+}
+
+func hostingAndSupportClientForEmails(clients map[string]*hostingAndSupportClientAccumulator, emails []string) *hostingAndSupportClientAccumulator {
+	normalizedEmails := make([]string, 0, len(emails))
+	for _, email := range emails {
+		email = strings.ToLower(strings.TrimSpace(email))
+		if email != "" {
+			normalizedEmails = append(normalizedEmails, email)
+		}
+	}
+	if len(normalizedEmails) == 0 {
+		return nil
+	}
+	var client *hostingAndSupportClientAccumulator
+	for _, email := range normalizedEmails {
+		if clients[email] != nil {
+			client = clients[email]
+			break
+		}
+	}
+	if client == nil {
+		client = hostingAndSupportClientByEmail(clients, normalizedEmails[0])
+	}
+	for _, email := range normalizedEmails {
+		client.emails[email] = struct{}{}
+		clients[email] = client
+	}
 	return client
 }
 
@@ -12574,7 +13219,11 @@ func (a *App) createInvoiceFromForm(r *http.Request) string {
 		return err.Error()
 	}
 	defer controlDatabase.Close()
-	createdInvoice, err := (hostingandsupport.Store{DB: controlDatabase}).CreateInvoice(r.Context(), invoice)
+	store := hostingandsupport.Store{DB: controlDatabase}
+	if store.IsDemoDomain(r.Context(), invoice.Domain) {
+		return translationOrDefault(translationsForRequest(r), "billing_demo_billing_blocked", "Demo sites do not participate in billing.")
+	}
+	createdInvoice, err := store.CreateInvoice(r.Context(), invoice)
 	if err != nil {
 		return err.Error()
 	}
@@ -14334,6 +14983,8 @@ func (a *App) buildHostingSnapshot(ctx context.Context) (hostingandsupport.Hosti
 	store := hostingandsupport.Store{DB: controlDatabase}
 	plans := store.Plans(ctx)
 	assignments := store.ServiceAssignments(ctx)
+	demoSettings := (demo.Store{DB: controlDatabase}).Settings(ctx)
+	serverCostPolicy, _ := store.ServerCostPolicy(ctx, "local")
 	deletionBackupSizesByDomain := a.managedSiteDeletionBackupSizesByDomain(ctx, controlDatabase)
 	plansByID := make(map[int]hostingandsupport.Plan, len(plans))
 	for _, plan := range plans {
@@ -14353,7 +15004,7 @@ func (a *App) buildHostingSnapshot(ctx context.Context) (hostingandsupport.Hosti
 		serverDomain = ownerDomain
 	}
 	snapshot := hostingandsupport.HostingSnapshot{
-		Version:              2,
+		Version:              3,
 		InstallationKind:     hostingandsupport.InstallationKindServer,
 		InstallationID:       installationID,
 		ServerIP:             serverIP,
@@ -14373,6 +15024,10 @@ func (a *App) buildHostingSnapshot(ctx context.Context) (hostingandsupport.Hosti
 		RAMTotalBytes:        ramTotalBytes,
 		ServerUptimeSeconds:  hostingSnapshotServerUptimeSeconds(),
 		StoragePath:          storageRoot,
+		MonthlyCostMinor:     serverCostPolicy.MonthlyCostMinor,
+		BillingCurrency:      serverCostPolicy.Currency,
+		MinimumPriceGBMinor:  serverCostPolicy.MinimumPriceGBMinor,
+		BillingCostUpdatedAt: serverCostPolicy.EffectiveAt,
 		CreatedAt:            time.Now().UTC().Format(time.RFC3339),
 	}
 	if a.desktopMode {
@@ -14381,6 +15036,10 @@ func (a *App) buildHostingSnapshot(ctx context.Context) (hostingandsupport.Hosti
 	if diskOK {
 		snapshot.DiskFreeBytes = int64(freeBytes)
 		snapshot.DiskTotalBytes = int64(totalBytes)
+	}
+	serverOwnerEmails := store.OwnerEmails(ctx)
+	if len(serverOwnerEmails) > 0 {
+		snapshot.OwnerEmail = strings.ToLower(strings.TrimSpace(serverOwnerEmails[0]))
 	}
 	snapshot.Events = append(snapshot.Events, store.SupportEvents(ctx, 80)...)
 	for _, plan := range plans {
@@ -14412,6 +15071,7 @@ func (a *App) buildHostingSnapshot(ctx context.Context) (hostingandsupport.Hosti
 			PlanStatus:     assignment.ServiceStatus,
 			PlanPaidStatus: hostingSnapshotAssignmentPaidStatus(assignment, plansByID),
 			AdminEmails:    row.AdminEmails,
+			IsDemo:         normalizeDomainName(row.Domain) == normalizeDomainName(demoSettings.Domain),
 		}
 		if snapshot.OwnerEmail == "" && len(row.AdminEmails) > 0 {
 			snapshot.OwnerEmail = strings.ToLower(strings.TrimSpace(row.AdminEmails[0]))
@@ -14436,7 +15096,7 @@ func (a *App) buildHostingSnapshot(ctx context.Context) (hostingandsupport.Hosti
 			})
 		}
 	}
-	for _, ownerEmail := range store.OwnerEmails(ctx) {
+	for _, ownerEmail := range serverOwnerEmails {
 		snapshot.Roles = append(snapshot.Roles, hostingandsupport.HostingSnapshotRole{
 			Email: ownerEmail,
 			Role:  "superadmin",
