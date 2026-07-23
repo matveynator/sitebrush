@@ -9,7 +9,35 @@ import (
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
+	"sitebrush/pkg/expenses"
 )
+
+func TestServerExpensePolicyRoundTrip(t *testing.T) {
+	database, err := sql.Open("sqlite3", filepath.Join(t.TempDir(), "expenses.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+	if err := Migrate(context.Background(), database); err != nil {
+		t.Fatal(err)
+	}
+	store := Store{DB: database}
+	saved, err := store.SaveServerExpensePolicy(context.Background(), expenses.ServerPolicy{
+		InstallationID:            "local",
+		Mode:                      expenses.ModeActual,
+		DiskRatePer100GBMinor:     1500,
+		ActualMonthlyExpenseMinor: 7500,
+		Currency:                  "eur",
+		FreeSiteThresholdBytes:    100 * expenses.DecimalMegabyte,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	loaded, found := store.ServerExpensePolicy(context.Background(), "local", 500*expenses.DecimalGigabyte)
+	if !found || loaded.Mode != expenses.ModeActual || loaded.ActualMonthlyExpenseMinor != 7500 || loaded.DiskRatePer100GBMinor != 1500 || loaded.FreeSiteThresholdBytes != 100*expenses.DecimalMegabyte || loaded.Currency != "EUR" || loaded.EffectiveAt != saved.EffectiveAt {
+		t.Fatalf("loaded policy = %#v", loaded)
+	}
+}
 
 func TestBuildSitesMarksOnlyServerMainDomain(t *testing.T) {
 	sites := BuildSitesWithDemoAndMainDomain([]SiteUsage{
@@ -992,22 +1020,22 @@ func TestBillingCustomerScheduleTokenAndStripeCommission(t *testing.T) {
 	if !loadedCustomer.AutomaticEnabled || loadedCustomer.InvoiceDay != 5 || loadedCustomer.Timezone != "Europe/Moscow" {
 		t.Fatalf("customer schedule = %#v", loadedCustomer)
 	}
-	invoice, err := store.CreateInvoice(context.Background(), Invoice{CustomerID: customer.ID, CustomerEmail: customer.PrimaryEmail, InstallationID: "server-1", Domain: "site.example.com", Amount: "10.00", Currency: "EUR", Provider: "sitebrush_com", PeriodStart: "2026-07-05", CommissionBPS: 500})
+	invoice, err := store.CreateInvoice(context.Background(), Invoice{CustomerID: customer.ID, CustomerEmail: customer.PrimaryEmail, InstallationID: "server-1", Domain: "site.example.com", Amount: "10.50", AmountMinor: 1050, ServerCostMinor: 1000, PaymentFeeMinor: 50, Currency: "EUR", Provider: "sitebrush_com", PeriodStart: "2026-07-05", CommissionBPS: 500})
 	if err != nil {
 		t.Fatal(err)
 	}
-	stripePayment, err := store.RecordBillingPayment(context.Background(), BillingPayment{InvoiceID: invoice.ID, Provider: "stripe", ExternalID: "pi_1", AmountMinor: 1000, Currency: "EUR", CommissionBPS: invoice.CommissionBPS, Status: "paid"})
+	stripePayment, err := store.RecordBillingPayment(context.Background(), BillingPayment{InvoiceID: invoice.ID, Provider: "stripe", ExternalID: "pi_1", AmountMinor: 1050, Currency: "EUR", CommissionBPS: invoice.CommissionBPS, Status: "paid"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if stripePayment.CommissionMinor != 50 || stripePayment.ServerPayoutMinor != 950 {
+	if stripePayment.CommissionMinor != 50 || stripePayment.ServerPayoutMinor != 1000 {
 		t.Fatalf("stripe payment = %#v", stripePayment)
 	}
-	manualPayment, err := store.RecordBillingPayment(context.Background(), BillingPayment{InvoiceID: invoice.ID, Provider: "sitebrush_com", ExternalID: "manual_1", AmountMinor: 1000, Currency: "EUR", CommissionBPS: 500, Status: "paid"})
+	manualPayment, err := store.RecordBillingPayment(context.Background(), BillingPayment{InvoiceID: invoice.ID, Provider: "sitebrush_com", ExternalID: "manual_1", AmountMinor: 1050, Currency: "EUR", CommissionBPS: 500, Status: "paid"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if manualPayment.CommissionMinor != 0 || manualPayment.ServerPayoutMinor != 1000 {
+	if manualPayment.CommissionMinor != 0 || manualPayment.ServerPayoutMinor != 1050 {
 		t.Fatalf("manual payment = %#v", manualPayment)
 	}
 }

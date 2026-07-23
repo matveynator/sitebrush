@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"sitebrush/pkg/expenses"
 )
 
 var nonPublicHostingIPPrefixes = []netip.Prefix{
@@ -90,6 +92,13 @@ type ServerView struct {
 	BillingCurrency        string
 	MonthlyCostInput       string
 	MinimumPriceGBInput    string
+	ExpenseMode            string
+	DiskRatePer100GBLabel  string
+	DiskRatePer100GBInput  string
+	ActualExpenseInput     string
+	FreeThresholdInput     string
+	CapacityCostPerGBLabel string
+	SharedCostPerGBLabel   string
 	SystemMetrics          []ServerMetricView
 	Sites                  []ServerSiteView
 	Clients                []ServerClientView
@@ -177,7 +186,7 @@ type LocalServerViewInput struct {
 	MainDomain     string
 	CurrentHost    string
 	SiteURL        func(string) string
-	CostPolicy     ServerCostPolicy
+	CostPolicy     expenses.ServerPolicy
 	OwnerEmails    []string
 }
 
@@ -431,17 +440,39 @@ func BuildRemoteServerView(clientHosting ClientHosting, invoices []Invoice, late
 			ownerEmails[strings.ToLower(strings.TrimSpace(role.Email))] = struct{}{}
 		}
 	}
-	for _, site := range clientHosting.Sites {
+	expenseSites := make([]expenses.SiteUsage, 0, len(clientHosting.Sites))
+	for siteIndex, site := range clientHosting.Sites {
+		billingExcluded := site.IsDemo
+		for _, email := range append(append([]string(nil), site.AdminEmails...), site.OwnerEmail) {
+			if _, isOwner := ownerEmails[strings.ToLower(strings.TrimSpace(email))]; isOwner {
+				billingExcluded = true
+			}
+		}
+		expenseSites = append(expenseSites, expenses.SiteUsage{
+			Key: strconv.Itoa(siteIndex), UsedBytes: site.UsedBytes, Excluded: billingExcluded,
+		})
+	}
+	expensePolicy := clientHosting.ExpensePolicy
+	expensePolicy.DiskTotalBytes = clientHosting.DiskTotalBytes
+	expenseAllocations := expenses.AllocateMonthlyExpense(expensePolicy, expenseSites)
+	for siteIndex, site := range clientHosting.Sites {
 		if site.IsDemo {
 			continue
 		}
 		ownerEmail := firstNonEmpty(site.OwnerEmail, firstHostingSnapshotEmail(site.AdminEmails), clientHosting.OwnerEmail, "owner not set")
-		billingPrice := BillingPriceForUsedBytesWithMinimum(site.UsedBytes, clientHosting.MinimumPriceGBMinor, clientHosting.BillingCurrency)
-		if clientHosting.MonthlyCostMinor <= 0 || clientHosting.MinimumPriceGBMinor <= 0 || normalizeBillingCurrency(clientHosting.BillingCurrency) == "" {
-			billingPrice.Amount = "0.00"
-			billingPrice.PriceLabel = ""
-			billingPrice.StatusText = ""
-			billingPrice.Billable = false
+		allocation := expenseAllocations[strconv.Itoa(siteIndex)]
+		billingPrice := BillingPrice{
+			UsedMegabytes:     bytesToRoundedMegabytes(site.UsedBytes),
+			BillableMegabytes: bytesToRoundedMegabytes(site.UsedBytes),
+			Amount:            formatMoneyMinor(allocation.ExpenseShareMinor),
+			Currency:          expensePolicy.Currency,
+			PriceLabel:        MoneyLabel(allocation.ExpenseShareMinor, expensePolicy.Currency) + "/мес",
+			StatusText:        "доля расходов",
+			Billable:          allocation.ExpenseShareMinor > 0,
+		}
+		if allocation.Free {
+			billingPrice.PriceLabel = MoneyLabel(0, expensePolicy.Currency)
+			billingPrice.StatusText = "бесплатно до " + FormatFileSize(expensePolicy.FreeSiteThresholdBytes)
 		}
 		billingExcluded := site.IsDemo
 		for _, email := range append(append([]string(nil), site.AdminEmails...), site.OwnerEmail) {
@@ -480,11 +511,7 @@ func BuildRemoteServerView(clientHosting ClientHosting, invoices []Invoice, late
 	server.UnpaidInvoiceCount = UnpaidInvoiceCount(server.Invoices)
 	server.InvoiceActionLabel, server.InvoiceActionClass = InvoiceAction(server.BillableCount, server.UnpaidInvoiceCount)
 	applyServerInvoiceDefaults(&server)
-	ApplyServerCostView(&server, ServerCostPolicy{
-		InstallationID: clientHosting.InstallationID, MonthlyCostMinor: clientHosting.MonthlyCostMinor,
-		Currency: clientHosting.BillingCurrency, MinimumPriceGBMinor: clientHosting.MinimumPriceGBMinor,
-		EffectiveAt: clientHosting.BillingCostUpdatedAt,
-	}, invoices)
+	ApplyServerCostView(&server, expensePolicy, invoices)
 	return server
 }
 
@@ -506,26 +533,36 @@ func ClientHostingsWithDemoDomain(clientHostings []ClientHosting, demoDomain str
 	return classifiedHostings
 }
 
-func ApplyServerCostView(server *ServerView, policy ServerCostPolicy, invoices []Invoice) {
+func ApplyServerCostView(server *ServerView, policy expenses.ServerPolicy, invoices []Invoice) {
 	if server == nil {
 		return
 	}
+	policy = expenses.NormalizePolicy(policy)
+	monthlyExpenseMinor := expenses.CalculateMonthlyExpense(policy)
 	server.BillingCurrency = firstNonEmpty(normalizeBillingCurrency(policy.Currency), "EUR")
-	server.MonthlyCostInput = formatMoneyMinor(policy.MonthlyCostMinor)
-	server.MinimumPriceGBInput = formatMoneyMinor(policy.MinimumPriceGBMinor)
-	server.MonthlyCostLabel = MoneyLabel(policy.MonthlyCostMinor, server.BillingCurrency)
-	server.MinimumPriceGBLabel = MoneyLabel(policy.MinimumPriceGBMinor, server.BillingCurrency)
-	server.CostConfigured = policy.MonthlyCostMinor > 0 && policy.MinimumPriceGBMinor > 0 && normalizeBillingCurrency(policy.Currency) != ""
-	totalBillableMegabytes := int64(0)
+	server.ExpenseMode = string(policy.Mode)
+	server.MonthlyCostInput = formatMoneyMinor(monthlyExpenseMinor)
+	server.ActualExpenseInput = formatMoneyMinor(policy.ActualMonthlyExpenseMinor)
+	server.DiskRatePer100GBInput = formatMoneyMinor(policy.DiskRatePer100GBMinor)
+	server.DiskRatePer100GBLabel = MoneyLabel(policy.DiskRatePer100GBMinor, server.BillingCurrency)
+	server.FreeThresholdInput = strconv.FormatInt(policy.FreeSiteThresholdBytes/expenses.DecimalMegabyte, 10)
+	server.MonthlyCostLabel = MoneyLabel(monthlyExpenseMinor, server.BillingCurrency)
+	server.CostConfigured = monthlyExpenseMinor > 0 && normalizeBillingCurrency(policy.Currency) != ""
+	if policy.DiskTotalBytes > 0 {
+		capacityCostPerGBMinor := (monthlyExpenseMinor*expenses.DecimalGigabyte + policy.DiskTotalBytes/2) / policy.DiskTotalBytes
+		server.CapacityCostPerGBLabel = MoneyLabel(capacityCostPerGBMinor, server.BillingCurrency)
+	}
+	totalBillableBytes := int64(0)
 	for _, site := range server.Sites {
 		if site.BillingExcluded || !site.BillingBillable {
 			continue
 		}
-		totalBillableMegabytes += BillingPriceForUsedBytesWithMinimum(site.UsedBytes, policy.MinimumPriceGBMinor, server.BillingCurrency).BillableMegabytes
+		totalBillableBytes += site.UsedBytes
 	}
-	if totalBillableMegabytes > 0 {
-		costPerGBMinor := (policy.MonthlyCostMinor*1000 + totalBillableMegabytes - 1) / totalBillableMegabytes
-		server.CostPerGBLabel = MoneyLabel(costPerGBMinor, server.BillingCurrency)
+	if totalBillableBytes > 0 {
+		sharedCostPerGBMinor := (monthlyExpenseMinor*expenses.DecimalGigabyte + totalBillableBytes/2) / totalBillableBytes
+		server.SharedCostPerGBLabel = MoneyLabel(sharedCostPerGBMinor, server.BillingCurrency)
+		server.CostPerGBLabel = server.SharedCostPerGBLabel
 	}
 	monthPrefix := time.Now().UTC().Format("2006-01")
 	coveredMinor := int64(0)
@@ -542,7 +579,7 @@ func ApplyServerCostView(server *ServerView, policy ServerCostPolicy, invoices [
 			}
 		}
 	}
-	uncoveredMinor := policy.MonthlyCostMinor - coveredMinor
+	uncoveredMinor := monthlyExpenseMinor - coveredMinor
 	if uncoveredMinor < 0 {
 		uncoveredMinor = 0
 	}

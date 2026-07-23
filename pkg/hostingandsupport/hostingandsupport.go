@@ -16,18 +16,26 @@ import (
 	"time"
 
 	"sitebrush/pkg/demo"
+	"sitebrush/pkg/expenses"
 )
 
 const DefaultStorageLimitBytes int64 = 10 * 1024 * 1024 * 1024
 const DefaultDeletionBackupRetentionDays = 365
-const currentBillingSchemaVersion = 21
+const currentBillingSchemaVersion = 22
 
 const InstallationKindServer = "server"
 const InstallationKindDesktop = "desktop"
 const DesktopPresenceInterval = 5 * time.Minute
 
 type Store struct {
-	DB *sql.DB
+	DB Database
+}
+
+type Database interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+	BeginTx(context.Context, *sql.TxOptions) (*sql.Tx, error)
 }
 
 type PanelSnapshotRecord struct {
@@ -158,6 +166,7 @@ type Invoice struct {
 	SentAt          string
 	DeliveryStatus  string
 	ServerCostMinor int64
+	PaymentFeeMinor int64
 	ReserveMinor    int64
 	Lines           []InvoiceLine
 }
@@ -268,38 +277,43 @@ type ServiceMailRecipient struct {
 }
 
 type HostingSnapshot struct {
-	Version              int                      `json:"version"`
-	InstallationKind     string                   `json:"installation_kind"`
-	InstallationID       string                   `json:"installation_id"`
-	OwnerEmail           string                   `json:"owner_email"`
-	ServerIP             string                   `json:"server_ip"`
-	ServerStatus         string                   `json:"server_status"`
-	ServerDomain         string                   `json:"server_domain"`
-	SitebrushVersion     string                   `json:"sitebrush_version"`
-	OSName               string                   `json:"os_name"`
-	OSVersion            string                   `json:"os_version"`
-	CPUModel             string                   `json:"cpu_model"`
-	CPUCores             int                      `json:"cpu_cores"`
-	CPUUsagePercent      float64                  `json:"cpu_usage_percent_1h"`
-	LoadAverage          float64                  `json:"load_average_1h"`
-	TopCPUProcessName    string                   `json:"top_cpu_process_name"`
-	TopCPUProcessPID     int                      `json:"top_cpu_process_pid"`
-	TopCPUProcessPercent float64                  `json:"top_cpu_process_percent"`
-	TopCPUProcesses      []HostingSnapshotProcess `json:"top_cpu_processes"`
-	RAMTotalBytes        int64                    `json:"ram_total_bytes"`
-	ServerUptimeSeconds  int64                    `json:"server_uptime_seconds"`
-	StoragePath          string                   `json:"storage_path"`
-	DiskFreeBytes        int64                    `json:"disk_free_bytes"`
-	DiskTotalBytes       int64                    `json:"disk_total_bytes"`
-	MonthlyCostMinor     int64                    `json:"monthly_cost_minor"`
-	BillingCurrency      string                   `json:"billing_currency"`
-	MinimumPriceGBMinor  int64                    `json:"minimum_price_gb_minor"`
-	BillingCostUpdatedAt string                   `json:"billing_cost_updated_at"`
-	Plans                []HostingSnapshotPlan    `json:"plans"`
-	Roles                []HostingSnapshotRole    `json:"roles"`
-	Sites                []HostingSnapshotSite    `json:"sites"`
-	Events               []HostingSnapshotEvent   `json:"events"`
-	CreatedAt            string                   `json:"created_at"`
+	Version                   int                      `json:"version"`
+	InstallationKind          string                   `json:"installation_kind"`
+	InstallationID            string                   `json:"installation_id"`
+	OwnerEmail                string                   `json:"owner_email"`
+	ServerIP                  string                   `json:"server_ip"`
+	ServerStatus              string                   `json:"server_status"`
+	ServerDomain              string                   `json:"server_domain"`
+	SitebrushVersion          string                   `json:"sitebrush_version"`
+	OSName                    string                   `json:"os_name"`
+	OSVersion                 string                   `json:"os_version"`
+	CPUModel                  string                   `json:"cpu_model"`
+	CPUCores                  int                      `json:"cpu_cores"`
+	CPUUsagePercent           float64                  `json:"cpu_usage_percent_1h"`
+	LoadAverage               float64                  `json:"load_average_1h"`
+	TopCPUProcessName         string                   `json:"top_cpu_process_name"`
+	TopCPUProcessPID          int                      `json:"top_cpu_process_pid"`
+	TopCPUProcessPercent      float64                  `json:"top_cpu_process_percent"`
+	TopCPUProcesses           []HostingSnapshotProcess `json:"top_cpu_processes"`
+	RAMTotalBytes             int64                    `json:"ram_total_bytes"`
+	ServerUptimeSeconds       int64                    `json:"server_uptime_seconds"`
+	StoragePath               string                   `json:"storage_path"`
+	DiskFreeBytes             int64                    `json:"disk_free_bytes"`
+	DiskTotalBytes            int64                    `json:"disk_total_bytes"`
+	MonthlyCostMinor          int64                    `json:"monthly_cost_minor"`
+	BillingCurrency           string                   `json:"billing_currency"`
+	MinimumPriceGBMinor       int64                    `json:"minimum_price_gb_minor"`
+	BillingCostUpdatedAt      string                   `json:"billing_cost_updated_at"`
+	ExpenseMode               string                   `json:"expense_mode,omitempty"`
+	DiskRatePer100GBMinor     int64                    `json:"disk_rate_per_100_gb_minor,omitempty"`
+	ActualMonthlyExpenseMinor int64                    `json:"actual_monthly_expense_minor,omitempty"`
+	MonthlyExpenseMinor       int64                    `json:"monthly_expense_minor,omitempty"`
+	FreeSiteThresholdBytes    int64                    `json:"free_site_threshold_bytes,omitempty"`
+	Plans                     []HostingSnapshotPlan    `json:"plans"`
+	Roles                     []HostingSnapshotRole    `json:"roles"`
+	Sites                     []HostingSnapshotSite    `json:"sites"`
+	Events                    []HostingSnapshotEvent   `json:"events"`
+	CreatedAt                 string                   `json:"created_at"`
 }
 
 type HostingSnapshotProcess struct {
@@ -379,6 +393,7 @@ type ClientHosting struct {
 	BillingCurrency      string
 	MinimumPriceGBMinor  int64
 	BillingCostUpdatedAt string
+	ExpensePolicy        expenses.ServerPolicy
 	DiskUsedBytes        int64
 	DiskUsedPercent      int
 	DiskStatusClass      string
@@ -632,6 +647,8 @@ func Migrate(ctx context.Context, database *sql.DB) error {
 		`CREATE INDEX IF NOT EXISTS idx_billing_invoice_lines_invoice ON billing_invoice_lines(invoice_id);`,
 		`CREATE TABLE IF NOT EXISTS hosting_server_cost_policies(id INTEGER PRIMARY KEY AUTOINCREMENT,installation_id TEXT,monthly_cost_minor INTEGER DEFAULT 0,currency TEXT,minimum_price_gb_minor INTEGER DEFAULT 0,effective_at TEXT,created_at TEXT,UNIQUE(installation_id,effective_at));`,
 		`CREATE INDEX IF NOT EXISTS idx_hosting_server_cost_policies_current ON hosting_server_cost_policies(installation_id,effective_at);`,
+		`CREATE TABLE IF NOT EXISTS server_expense_policies(id INTEGER PRIMARY KEY AUTOINCREMENT,installation_id TEXT,expense_mode TEXT,disk_rate_per_100_gb_minor INTEGER DEFAULT 1500,actual_monthly_expense_minor INTEGER DEFAULT 0,currency TEXT,free_site_threshold_bytes INTEGER DEFAULT 100000000,effective_at TEXT,created_at TEXT,UNIQUE(installation_id,effective_at));`,
+		`CREATE INDEX IF NOT EXISTS idx_server_expense_policies_current ON server_expense_policies(installation_id,effective_at);`,
 		`CREATE TABLE IF NOT EXISTS billing_invoice_cycles(customer_id TEXT,installation_id TEXT,period_start TEXT,invoice_id INTEGER DEFAULT 0,PRIMARY KEY(customer_id,installation_id,period_start));`,
 		`CREATE TABLE IF NOT EXISTS billing_payments(id INTEGER PRIMARY KEY AUTOINCREMENT,invoice_id INTEGER,provider TEXT,external_id TEXT UNIQUE,amount_minor INTEGER DEFAULT 0,currency TEXT,status TEXT,commission_bps INTEGER DEFAULT 0,commission_minor INTEGER DEFAULT 0,server_payout_minor INTEGER DEFAULT 0,paid_at TEXT,created_at TEXT,updated_at TEXT);`,
 		`CREATE INDEX IF NOT EXISTS idx_billing_payments_invoice ON billing_payments(invoice_id);`,
@@ -701,6 +718,8 @@ func Migrate(ctx context.Context, database *sql.DB) error {
 	_, _ = database.ExecContext(ctx, `INSERT OR IGNORE INTO payment_providers(provider,enabled,display_name,payment_url,instructions,updated_at) VALUES('sbp',0,'СБП','','СБП: банк, телефон, получатель или QR/link template',?)`, now)
 	_, _ = database.ExecContext(ctx, `INSERT OR IGNORE INTO site_service_plans(name,quota_bytes,site_limit,analytics_report_limit,price,currency,billing_period,is_default,created_at,updated_at) VALUES('Free',?,1,0,'0','USD','monthly',1,?,?)`,
 		DefaultStorageLimitBytes, now, now)
+	_, _ = database.ExecContext(ctx, `INSERT OR IGNORE INTO server_expense_policies(installation_id,expense_mode,disk_rate_per_100_gb_minor,actual_monthly_expense_minor,currency,free_site_threshold_bytes,effective_at,created_at)
+		SELECT installation_id,'actual',1500,monthly_cost_minor,currency,100000000,effective_at,created_at FROM hosting_server_cost_policies WHERE monthly_cost_minor>0`)
 	if err := setSchemaMigrationVersion(ctx, database, "billing", currentBillingSchemaVersion); err != nil {
 		return fmt.Errorf("write billing schema version: %w", err)
 	}
@@ -723,7 +742,7 @@ func setSchemaMigrationVersion(ctx context.Context, database *sql.DB, component 
 }
 
 func hostingAndSupportSchemaComplete(ctx context.Context, database *sql.DB) (bool, error) {
-	tableNames := []string{"server_managers", "server_settings", "site_service_plans", "site_service_assignments", "payment_providers", "billing_invoices", "billing_customers", "billing_customer_emails", "billing_customer_profiles", "billing_customer_tokens", "billing_invoice_lines", "billing_invoice_cycles", "billing_payments", "billing_invoice_deliveries", "hosting_server_cost_policies", "site_registration_requests", "site_deletion_backups", "service_mail_installations", "service_mail_events", "support_events", "service_mail_blocks", "service_mail_recipients", "client_hostings", "client_hosting_sites", "client_hosting_domain_checks", "server_resource_checks", "server_network_checks", "site_tls_checks", "registry_accounts", "registry_installation_roles", "registry_installation_plans", "registry_events", "registry_sync_events", "sitebrush_com_keys", "hosting_panel_snapshots"}
+	tableNames := []string{"server_managers", "server_settings", "site_service_plans", "site_service_assignments", "payment_providers", "billing_invoices", "billing_customers", "billing_customer_emails", "billing_customer_profiles", "billing_customer_tokens", "billing_invoice_lines", "billing_invoice_cycles", "billing_payments", "billing_invoice_deliveries", "hosting_server_cost_policies", "server_expense_policies", "site_registration_requests", "site_deletion_backups", "service_mail_installations", "service_mail_events", "support_events", "service_mail_blocks", "service_mail_recipients", "client_hostings", "client_hosting_sites", "client_hosting_domain_checks", "server_resource_checks", "server_network_checks", "site_tls_checks", "registry_accounts", "registry_installation_roles", "registry_installation_plans", "registry_events", "registry_sync_events", "sitebrush_com_keys", "hosting_panel_snapshots"}
 	tableNames = append(tableNames, demo.TableNames()...)
 	for _, tableName := range tableNames {
 		found, err := tableExists(ctx, database, tableName)
@@ -776,6 +795,7 @@ func requiredHostingAndSupportColumns() []hostingAndSupportColumn {
 		{tableName: "billing_invoices", columnName: "sent_at", definition: "TEXT"},
 		{tableName: "billing_invoices", columnName: "delivery_status", definition: "TEXT"},
 		{tableName: "billing_invoices", columnName: "server_cost_minor", definition: "INTEGER DEFAULT 0"},
+		{tableName: "billing_invoices", columnName: "payment_fee_minor", definition: "INTEGER DEFAULT 0"},
 		{tableName: "billing_invoices", columnName: "reserve_minor", definition: "INTEGER DEFAULT 0"},
 		{tableName: "billing_invoice_lines", columnName: "cost_share_minor", definition: "INTEGER DEFAULT 0"},
 		{tableName: "billing_invoice_lines", columnName: "minimum_amount_minor", definition: "INTEGER DEFAULT 0"},
@@ -818,7 +838,7 @@ func requiredHostingAndSupportColumns() []hostingAndSupportColumn {
 	}
 }
 
-func hostingAndSupportColumnExists(ctx context.Context, database *sql.DB, tableName, columnName string) (bool, error) {
+func hostingAndSupportColumnExists(ctx context.Context, database Database, tableName, columnName string) (bool, error) {
 	rows, err := database.QueryContext(ctx, `PRAGMA table_info(`+tableName+`)`)
 	if err != nil {
 		return false, err
@@ -841,7 +861,7 @@ func hostingAndSupportColumnExists(ctx context.Context, database *sql.DB, tableN
 	return false, rows.Err()
 }
 
-func SettingBool(ctx context.Context, database *sql.DB, name string, fallback bool) bool {
+func SettingBool(ctx context.Context, database Database, name string, fallback bool) bool {
 	var value string
 	err := database.QueryRowContext(ctx, `SELECT value FROM server_settings WHERE name=?`, name).Scan(&value)
 	if err != nil {
@@ -979,7 +999,7 @@ func (store Store) AssignSite(ctx context.Context, domain string, planID int, se
 	return err
 }
 
-func SettingText(ctx context.Context, database *sql.DB, name string) string {
+func SettingText(ctx context.Context, database Database, name string) string {
 	var value string
 	err := database.QueryRowContext(ctx, `SELECT value FROM server_settings WHERE name=?`, name).Scan(&value)
 	if err != nil {
@@ -1049,6 +1069,30 @@ func (store Store) ServerCostPolicy(ctx context.Context, installationID string) 
 	var policy ServerCostPolicy
 	err := store.DB.QueryRowContext(ctx, `SELECT installation_id,COALESCE(monthly_cost_minor,0),COALESCE(currency,''),COALESCE(minimum_price_gb_minor,0),COALESCE(effective_at,''),COALESCE(created_at,'') FROM hosting_server_cost_policies WHERE installation_id=? ORDER BY effective_at DESC,id DESC LIMIT 1`,
 		strings.TrimSpace(installationID)).Scan(&policy.InstallationID, &policy.MonthlyCostMinor, &policy.Currency, &policy.MinimumPriceGBMinor, &policy.EffectiveAt, &policy.UpdatedAt)
+	return policy, err == nil
+}
+
+func (store Store) SaveServerExpensePolicy(ctx context.Context, policy expenses.ServerPolicy) (expenses.ServerPolicy, error) {
+	policy = expenses.NormalizePolicy(policy)
+	if err := policy.Validate(); err != nil {
+		return expenses.ServerPolicy{}, err
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	policy.EffectiveAt = now
+	policy.UpdatedAt = now
+	_, err := store.DB.ExecContext(ctx, `INSERT INTO server_expense_policies(installation_id,expense_mode,disk_rate_per_100_gb_minor,actual_monthly_expense_minor,currency,free_site_threshold_bytes,effective_at,created_at) VALUES(?,?,?,?,?,?,?,?)`,
+		policy.InstallationID, string(policy.Mode), policy.DiskRatePer100GBMinor, policy.ActualMonthlyExpenseMinor, policy.Currency, policy.FreeSiteThresholdBytes, policy.EffectiveAt, policy.UpdatedAt)
+	return policy, err
+}
+
+func (store Store) ServerExpensePolicy(ctx context.Context, installationID string, diskTotalBytes int64) (expenses.ServerPolicy, bool) {
+	policy := expenses.DefaultServerPolicy(installationID, diskTotalBytes)
+	var mode string
+	err := store.DB.QueryRowContext(ctx, `SELECT installation_id,COALESCE(expense_mode,''),COALESCE(disk_rate_per_100_gb_minor,1500),COALESCE(actual_monthly_expense_minor,0),COALESCE(currency,'EUR'),COALESCE(free_site_threshold_bytes,100000000),COALESCE(effective_at,''),COALESCE(created_at,'') FROM server_expense_policies WHERE installation_id=? ORDER BY effective_at DESC,id DESC LIMIT 1`,
+		strings.TrimSpace(installationID)).Scan(&policy.InstallationID, &mode, &policy.DiskRatePer100GBMinor, &policy.ActualMonthlyExpenseMinor, &policy.Currency, &policy.FreeSiteThresholdBytes, &policy.EffectiveAt, &policy.UpdatedAt)
+	policy.Mode = expenses.Mode(mode)
+	policy.DiskTotalBytes = diskTotalBytes
+	policy = expenses.NormalizePolicy(policy)
 	return policy, err == nil
 }
 
@@ -1440,8 +1484,8 @@ func (store Store) CreateInvoice(ctx context.Context, invoice Invoice) (Invoice,
 			return store.InvoiceByID(ctx, existingInvoiceID)
 		}
 	}
-	result, err := transaction.ExecContext(ctx, `INSERT INTO billing_invoices(invoice_number,customer_email,domain,plan_name,amount,currency,status,provider,payment_url,due_at,paid_at,notes,recurring_enabled,recurring_period,created_at,updated_at,customer_id,installation_id,server_name,period_start,period_end,amount_minor,commission_bps,public_token_hash,sent_at,delivery_status,server_cost_minor,reserve_minor) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		invoice.Number, invoice.CustomerEmail, invoice.Domain, invoice.PlanName, invoice.Amount, invoice.Currency, invoice.Status, invoice.Provider, invoice.PaymentURL, strings.TrimSpace(invoice.DueAt), "", strings.TrimSpace(invoice.Notes), recurringEnabled, invoice.RecurringPeriod, invoice.CreatedAt, invoice.UpdatedAt, strings.TrimSpace(invoice.CustomerID), strings.TrimSpace(invoice.InstallationID), strings.TrimSpace(invoice.ServerName), strings.TrimSpace(invoice.PeriodStart), strings.TrimSpace(invoice.PeriodEnd), invoice.AmountMinor, invoice.CommissionBPS, publicTokenHash, "", "pending", invoice.ServerCostMinor, invoice.ReserveMinor)
+	result, err := transaction.ExecContext(ctx, `INSERT INTO billing_invoices(invoice_number,customer_email,domain,plan_name,amount,currency,status,provider,payment_url,due_at,paid_at,notes,recurring_enabled,recurring_period,created_at,updated_at,customer_id,installation_id,server_name,period_start,period_end,amount_minor,commission_bps,public_token_hash,sent_at,delivery_status,server_cost_minor,payment_fee_minor,reserve_minor) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		invoice.Number, invoice.CustomerEmail, invoice.Domain, invoice.PlanName, invoice.Amount, invoice.Currency, invoice.Status, invoice.Provider, invoice.PaymentURL, strings.TrimSpace(invoice.DueAt), "", strings.TrimSpace(invoice.Notes), recurringEnabled, invoice.RecurringPeriod, invoice.CreatedAt, invoice.UpdatedAt, strings.TrimSpace(invoice.CustomerID), strings.TrimSpace(invoice.InstallationID), strings.TrimSpace(invoice.ServerName), strings.TrimSpace(invoice.PeriodStart), strings.TrimSpace(invoice.PeriodEnd), invoice.AmountMinor, invoice.CommissionBPS, publicTokenHash, "", "pending", invoice.ServerCostMinor, invoice.PaymentFeeMinor, invoice.ReserveMinor)
 	if err != nil {
 		_ = transaction.Rollback()
 		return Invoice{}, err
@@ -1506,7 +1550,7 @@ func (store Store) InvoiceByID(ctx context.Context, invoiceID int) (Invoice, err
 	return invoice, err
 }
 
-const invoiceSelectColumns = `SELECT id,invoice_number,COALESCE(customer_email,''),COALESCE(domain,''),COALESCE(plan_name,''),COALESCE(amount,''),COALESCE(currency,''),COALESCE(status,''),COALESCE(provider,''),COALESCE(payment_url,''),COALESCE(due_at,''),COALESCE(paid_at,''),COALESCE(notes,''),COALESCE(recurring_enabled,0),COALESCE(recurring_period,''),COALESCE(created_at,''),COALESCE(updated_at,''),COALESCE(customer_id,''),COALESCE(installation_id,''),COALESCE(server_name,''),COALESCE(period_start,''),COALESCE(period_end,''),COALESCE(amount_minor,0),COALESCE(commission_bps,0),COALESCE(sent_at,''),COALESCE(delivery_status,''),COALESCE(server_cost_minor,0),COALESCE(reserve_minor,0)`
+const invoiceSelectColumns = `SELECT id,invoice_number,COALESCE(customer_email,''),COALESCE(domain,''),COALESCE(plan_name,''),COALESCE(amount,''),COALESCE(currency,''),COALESCE(status,''),COALESCE(provider,''),COALESCE(payment_url,''),COALESCE(due_at,''),COALESCE(paid_at,''),COALESCE(notes,''),COALESCE(recurring_enabled,0),COALESCE(recurring_period,''),COALESCE(created_at,''),COALESCE(updated_at,''),COALESCE(customer_id,''),COALESCE(installation_id,''),COALESCE(server_name,''),COALESCE(period_start,''),COALESCE(period_end,''),COALESCE(amount_minor,0),COALESCE(commission_bps,0),COALESCE(sent_at,''),COALESCE(delivery_status,''),COALESCE(server_cost_minor,0),COALESCE(payment_fee_minor,0),COALESCE(reserve_minor,0)`
 
 type invoiceScanner interface {
 	Scan(dest ...any) error
@@ -1515,7 +1559,7 @@ type invoiceScanner interface {
 func scanInvoice(scanner invoiceScanner) (Invoice, error) {
 	var invoice Invoice
 	var recurringEnabled int
-	err := scanner.Scan(&invoice.ID, &invoice.Number, &invoice.CustomerEmail, &invoice.Domain, &invoice.PlanName, &invoice.Amount, &invoice.Currency, &invoice.Status, &invoice.Provider, &invoice.PaymentURL, &invoice.DueAt, &invoice.PaidAt, &invoice.Notes, &recurringEnabled, &invoice.RecurringPeriod, &invoice.CreatedAt, &invoice.UpdatedAt, &invoice.CustomerID, &invoice.InstallationID, &invoice.ServerName, &invoice.PeriodStart, &invoice.PeriodEnd, &invoice.AmountMinor, &invoice.CommissionBPS, &invoice.SentAt, &invoice.DeliveryStatus, &invoice.ServerCostMinor, &invoice.ReserveMinor)
+	err := scanner.Scan(&invoice.ID, &invoice.Number, &invoice.CustomerEmail, &invoice.Domain, &invoice.PlanName, &invoice.Amount, &invoice.Currency, &invoice.Status, &invoice.Provider, &invoice.PaymentURL, &invoice.DueAt, &invoice.PaidAt, &invoice.Notes, &recurringEnabled, &invoice.RecurringPeriod, &invoice.CreatedAt, &invoice.UpdatedAt, &invoice.CustomerID, &invoice.InstallationID, &invoice.ServerName, &invoice.PeriodStart, &invoice.PeriodEnd, &invoice.AmountMinor, &invoice.CommissionBPS, &invoice.SentAt, &invoice.DeliveryStatus, &invoice.ServerCostMinor, &invoice.PaymentFeeMinor, &invoice.ReserveMinor)
 	invoice.Recurring = recurringEnabled != 0
 	if invoice.AmountMinor == 0 && strings.TrimSpace(invoice.Amount) != "" {
 		invoice.AmountMinor = parseMoneyMinor(invoice.Amount)
@@ -1860,7 +1904,18 @@ func (store Store) RecordBillingPayment(ctx context.Context, payment BillingPaym
 		payment.Status = "paid"
 	}
 	if payment.Provider == "stripe" && payment.Status == "paid" {
-		payment.CommissionMinor = payment.AmountMinor * int64(payment.CommissionBPS) / 10000
+		invoice, invoiceErr := store.InvoiceByID(ctx, payment.InvoiceID)
+		if invoiceErr == nil && invoice.PaymentFeeMinor > 0 && invoice.AmountMinor > 0 {
+			payment.CommissionMinor = (payment.AmountMinor*invoice.PaymentFeeMinor + invoice.AmountMinor - 1) / invoice.AmountMinor
+			var recordedCommissionMinor int64
+			_ = store.DB.QueryRowContext(ctx, `SELECT COALESCE(SUM(commission_minor),0) FROM billing_payments WHERE invoice_id=? AND status='paid'`, payment.InvoiceID).Scan(&recordedCommissionMinor)
+			remainingCommissionMinor := max(invoice.PaymentFeeMinor-recordedCommissionMinor, 0)
+			if payment.CommissionMinor > remainingCommissionMinor {
+				payment.CommissionMinor = remainingCommissionMinor
+			}
+		} else {
+			payment.CommissionMinor = payment.AmountMinor * int64(payment.CommissionBPS) / 10000
+		}
 		payment.ServerPayoutMinor = payment.AmountMinor - payment.CommissionMinor
 	} else {
 		payment.CommissionBPS = 0
@@ -2119,6 +2174,25 @@ func (store Store) SaveHostingSnapshot(ctx context.Context, snapshot HostingSnap
 	if err == nil && snapshot.MonthlyCostMinor > 0 && normalizeBillingCurrency(snapshot.BillingCurrency) != "" && snapshot.MinimumPriceGBMinor > 0 && strings.TrimSpace(snapshot.BillingCostUpdatedAt) != "" {
 		_, err = transaction.ExecContext(ctx, `INSERT OR IGNORE INTO hosting_server_cost_policies(installation_id,monthly_cost_minor,currency,minimum_price_gb_minor,effective_at,created_at) VALUES(?,?,?,?,?,?)`,
 			installationID, snapshot.MonthlyCostMinor, normalizeBillingCurrency(snapshot.BillingCurrency), snapshot.MinimumPriceGBMinor, strings.TrimSpace(snapshot.BillingCostUpdatedAt), now)
+	}
+	if err == nil && strings.TrimSpace(snapshot.BillingCostUpdatedAt) != "" {
+		expensePolicy := expenses.NormalizePolicy(expenses.ServerPolicy{
+			InstallationID:            installationID,
+			Mode:                      expenses.Mode(snapshot.ExpenseMode),
+			DiskRatePer100GBMinor:     snapshot.DiskRatePer100GBMinor,
+			ActualMonthlyExpenseMinor: snapshot.ActualMonthlyExpenseMinor,
+			Currency:                  snapshot.BillingCurrency,
+			FreeSiteThresholdBytes:    snapshot.FreeSiteThresholdBytes,
+			DiskTotalBytes:            snapshot.DiskTotalBytes,
+		})
+		if snapshot.ExpenseMode == "" && snapshot.MonthlyCostMinor > 0 {
+			expensePolicy.Mode = expenses.ModeActual
+			expensePolicy.ActualMonthlyExpenseMinor = snapshot.MonthlyCostMinor
+		}
+		if expensePolicy.Validate() == nil {
+			_, err = transaction.ExecContext(ctx, `INSERT OR IGNORE INTO server_expense_policies(installation_id,expense_mode,disk_rate_per_100_gb_minor,actual_monthly_expense_minor,currency,free_site_threshold_bytes,effective_at,created_at) VALUES(?,?,?,?,?,?,?,?)`,
+				installationID, string(expensePolicy.Mode), expensePolicy.DiskRatePer100GBMinor, expensePolicy.ActualMonthlyExpenseMinor, expensePolicy.Currency, expensePolicy.FreeSiteThresholdBytes, strings.TrimSpace(snapshot.BillingCostUpdatedAt), now)
+		}
 	}
 	if err == nil {
 		_, err = transaction.ExecContext(ctx, `INSERT INTO server_resource_checks(installation_id,cpu_usage_percent,load_average,top_cpu_process_name,top_cpu_process_pid,top_cpu_process_percent,ram_total_bytes,disk_free_bytes,disk_total_bytes,checked_at) VALUES(?,?,?,?,?,?,?,?,?,?)`,
@@ -2459,6 +2533,20 @@ func (store Store) ClientHostings(ctx context.Context) []ClientHosting {
 		hosting.ServerUptimeLabel = formatDurationDays(hosting.ServerUptimeSeconds)
 		hosting.ServerUptimeClass = serverUptimeStatusClass(hosting.ServerUptimeSeconds)
 		hostings = append(hostings, hosting)
+	}
+	_ = rows.Close()
+	for hostingIndex := range hostings {
+		hosting := &hostings[hostingIndex]
+		if expensePolicy, found := store.ServerExpensePolicy(ctx, hosting.InstallationID, hosting.DiskTotalBytes); found {
+			hosting.ExpensePolicy = expensePolicy
+			continue
+		}
+		hosting.ExpensePolicy = expenses.DefaultServerPolicy(hosting.InstallationID, hosting.DiskTotalBytes)
+		if hosting.MonthlyCostMinor > 0 {
+			hosting.ExpensePolicy.Mode = expenses.ModeActual
+			hosting.ExpensePolicy.ActualMonthlyExpenseMinor = hosting.MonthlyCostMinor
+			hosting.ExpensePolicy.Currency = firstNonEmpty(hosting.BillingCurrency, "EUR")
+		}
 	}
 	details := store.loadClientHostingDetails(ctx)
 	for hostingIndex := range hostings {

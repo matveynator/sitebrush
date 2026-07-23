@@ -31,7 +31,14 @@ type Session struct {
 }
 
 type Store struct {
-	DB *sql.DB
+	DB Database
+}
+
+type Database interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+	BeginTx(context.Context, *sql.TxOptions) (*sql.Tx, error)
 }
 
 func SchemaQueries() []string {
@@ -243,13 +250,13 @@ func (store Store) RemoveSessionsForDomain(ctx context.Context, domain string) e
 	return err
 }
 
-func settingText(ctx context.Context, database *sql.DB, name string) string {
+func settingText(ctx context.Context, database Database, name string) string {
 	var value string
 	_ = database.QueryRowContext(ctx, `SELECT value FROM server_settings WHERE name=?`, strings.TrimSpace(name)).Scan(&value)
 	return strings.TrimSpace(value)
 }
 
-func settingBool(ctx context.Context, database *sql.DB, name string, fallback bool) bool {
+func settingBool(ctx context.Context, database Database, name string, fallback bool) bool {
 	rawValue := strings.ToLower(strings.TrimSpace(settingText(ctx, database, name)))
 	if rawValue == "" {
 		return fallback

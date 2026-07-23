@@ -46,7 +46,7 @@
     </table>
   </section>
   <section class="invoice-total">
-    <div>{{if .HasBonus}}<div class="invoice-bonus">{{index .T "billing_invoice_bonus_total"}}: {{.BonusLabel}}</div>{{end}}<div>{{index .T "billing_invoice_cost_coverage"}}: {{.CoveredLabel}}</div>{{if .HasReserve}}<div>{{index .T "billing_invoice_support_reserve"}}: {{.ReserveLabel}}</div>{{end}}<p>{{index .T "billing_invoice_thank_you"}}</p></div>
+    <div>{{if .HasBonus}}<div class="invoice-bonus">{{index .T "billing_invoice_bonus_total"}}: {{.BonusLabel}}</div>{{end}}<div>{{index .T "billing_invoice_cost_coverage"}}: {{.CoveredLabel}}</div>{{if .HasPaymentFee}}<div>{{index .T "expenses_payment_fee"}}: {{.PaymentFeeLabel}}</div>{{end}}{{if .HasReserve}}<div>{{index .T "billing_invoice_support_reserve"}}: {{.ReserveLabel}}</div>{{end}}<p>{{index .T "billing_invoice_thank_you"}}</p></div>
     <div class="invoice-total-amount"><div class="invoice-label">{{index .T "billing_invoice_to_pay"}}</div>{{.AmountLabel}}</div>
   </section>
   <footer class="invoice-actions">

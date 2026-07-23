@@ -36,12 +36,15 @@ import (
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
+	"golang.org/x/crypto/acme/autocert"
 	"golang.org/x/net/dns/dnsmessage"
 	"golang.org/x/text/encoding/charmap"
 	"sitebrush/pkg/crawler"
 	"sitebrush/pkg/demo"
+	"sitebrush/pkg/diagnosticlog"
 	"sitebrush/pkg/dirprotect"
 	"sitebrush/pkg/diskusage"
+	"sitebrush/pkg/expenses"
 	"sitebrush/pkg/hostingandsupport"
 	"sitebrush/pkg/mailout"
 	"sitebrush/pkg/sitebrushtemplate"
@@ -376,6 +379,200 @@ func TestOpenServerControlDatabaseRejectsPathOutsideStorage(t *testing.T) {
 	if database, err := application.openServerControlDatabase(context.Background()); err == nil {
 		_ = database.Close()
 		t.Fatalf("openServerControlDatabase accepted db path outside storage")
+	}
+}
+
+func TestServerControlDatabaseDispatcherLimitsAccessAndCancelsReply(t *testing.T) {
+	dispatcher, err := startServerControlDatabaseDispatcher(filepath.Join(t.TempDir(), "control.db"), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dispatcher.Close()
+
+	firstWriter, err := dispatcher.acquire(context.Background(), serverControlDatabaseWrite)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondWriterResult := make(chan *serverControlDatabaseSession, 1)
+	go func() {
+		session, acquireErr := dispatcher.acquire(context.Background(), serverControlDatabaseWrite)
+		if acquireErr == nil {
+			secondWriterResult <- session
+		}
+	}()
+	select {
+	case session := <-secondWriterResult:
+		_ = session.Close()
+		t.Fatal("second writer ran while the first writer was active")
+	case <-time.After(50 * time.Millisecond):
+	}
+	_ = firstWriter.Close()
+	var secondWriter *serverControlDatabaseSession
+	select {
+	case secondWriter = <-secondWriterResult:
+	case <-time.After(time.Second):
+		t.Fatal("second writer did not run after the first writer released access")
+	}
+	_ = secondWriter.Close()
+
+	readers := make([]*serverControlDatabaseSession, 0, serverControlDatabaseReaderCount)
+	for range serverControlDatabaseReaderCount {
+		reader, acquireErr := dispatcher.acquire(context.Background(), serverControlDatabaseRead)
+		if acquireErr != nil {
+			t.Fatal(acquireErr)
+		}
+		readers = append(readers, reader)
+	}
+	sixthReaderResult := make(chan *serverControlDatabaseSession, 1)
+	go func() {
+		session, acquireErr := dispatcher.acquire(context.Background(), serverControlDatabaseRead)
+		if acquireErr == nil {
+			sixthReaderResult <- session
+		}
+	}()
+	select {
+	case session := <-sixthReaderResult:
+		_ = session.Close()
+		t.Fatal("sixth reader ran while five readers were active")
+	case <-time.After(50 * time.Millisecond):
+	}
+	_ = readers[0].Close()
+	select {
+	case sixthReader := <-sixthReaderResult:
+		_ = sixthReader.Close()
+	case <-time.After(time.Second):
+		t.Fatal("sixth reader did not run after one reader released access")
+	}
+	for _, reader := range readers[1:] {
+		_ = reader.Close()
+	}
+
+	blockingWriter, err := dispatcher.acquire(context.Background(), serverControlDatabaseWrite)
+	if err != nil {
+		t.Fatal(err)
+	}
+	timeoutContext, cancelTimeout := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancelTimeout()
+	if _, timeoutErr := dispatcher.acquire(timeoutContext, serverControlDatabaseWrite); !errors.Is(timeoutErr, context.DeadlineExceeded) {
+		t.Fatalf("timed out writer error = %v, want context deadline exceeded", timeoutErr)
+	}
+	cancel := make(chan struct{})
+	reply := make(chan serverControlDatabaseAccessResponse, 1)
+	request := serverControlDatabaseAccessRequest{
+		cancel:      cancel,
+		reply:       reply,
+		workerReply: make(chan serverControlDatabaseAccessResponse, 1),
+	}
+	go dispatcher.relayResponse(request)
+	dispatcher.writeRequests <- request
+	close(cancel)
+	select {
+	case _, open := <-reply:
+		if open {
+			t.Fatal("cancelled request returned a database session")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("cancelled request reply channel was not closed")
+	}
+	_ = blockingWriter.Close()
+	dispatcher.Close()
+}
+
+func TestServerControlDatabaseDispatcherSerializesWritesAndKeepsWALReadersAvailable(t *testing.T) {
+	dispatcher, err := startServerControlDatabaseDispatcher(filepath.Join(t.TempDir(), "control.db"), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dispatcher.Close()
+
+	writer, err := dispatcher.acquire(context.Background(), serverControlDatabaseWrite)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writer.ExecContext(context.Background(), `CREATE TABLE dispatcher_test(id INTEGER PRIMARY KEY,value TEXT)`); err != nil {
+		t.Fatal(err)
+	}
+	transaction, err := writer.BeginTx(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := transaction.ExecContext(context.Background(), `INSERT INTO dispatcher_test(value) VALUES('pending')`); err != nil {
+		t.Fatal(err)
+	}
+	reader, err := dispatcher.acquire(context.Background(), serverControlDatabaseRead)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var visibleRows int
+	if err := reader.QueryRowContext(context.Background(), `SELECT COUNT(1) FROM dispatcher_test`).Scan(&visibleRows); err != nil {
+		t.Fatal(err)
+	}
+	if visibleRows != 0 {
+		t.Fatalf("reader saw uncommitted writer rows = %d", visibleRows)
+	}
+	_ = reader.Close()
+	if err := transaction.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+	_ = writer.Close()
+
+	const writeCount = 20
+	writeResults := make(chan error, writeCount)
+	for writeIndex := range writeCount {
+		go func(index int) {
+			session, acquireErr := dispatcher.acquire(context.Background(), serverControlDatabaseWrite)
+			if acquireErr != nil {
+				writeResults <- acquireErr
+				return
+			}
+			_, writeErr := session.ExecContext(context.Background(), `INSERT INTO dispatcher_test(value) VALUES(?)`, strconv.Itoa(index))
+			_ = session.Close()
+			writeResults <- writeErr
+		}(writeIndex)
+	}
+	for range writeCount {
+		if writeErr := <-writeResults; writeErr != nil {
+			t.Fatalf("serialized write failed: %v", writeErr)
+		}
+	}
+	reader, err = dispatcher.acquire(context.Background(), serverControlDatabaseRead)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+	if err := reader.QueryRowContext(context.Background(), `SELECT COUNT(1) FROM dispatcher_test`).Scan(&visibleRows); err != nil {
+		t.Fatal(err)
+	}
+	if visibleRows != writeCount {
+		t.Fatalf("visible rows = %d, want %d", visibleRows, writeCount)
+	}
+}
+
+func TestHostingAndSupportSnapshotUsesExistingWriterSession(t *testing.T) {
+	storagePath := t.TempDir()
+	storageRealRoot, err := prepareStorageJailRoot(storagePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	databasePath := filepath.Join(storageRealRoot, "storage", "db", "sitebrush.db")
+	if err := os.MkdirAll(filepath.Dir(databasePath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	dispatcher, err := startServerControlDatabaseDispatcher(databasePath, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dispatcher.Close()
+	application := &App{
+		storagePath:     storageRealRoot,
+		storageRealRoot: storageRealRoot,
+		dbPath:          databasePath,
+		controlDatabase: dispatcher,
+	}
+	snapshotContext, cancelSnapshot := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancelSnapshot()
+	if _, err := application.collectHostingAndSupportPanelSnapshot(snapshotContext, nil); err != nil {
+		t.Fatalf("collect snapshot through dispatcher: %v", err)
 	}
 }
 
@@ -1022,11 +1219,11 @@ func TestHostingSnapshotServerStatusLabels(t *testing.T) {
 }
 
 func TestHostingAndSupportTemplateRendersServerView(t *testing.T) {
-	templateBytes, err := fs.ReadFile(embeddedWebFiles, "web/hostingandsupport.html")
+	templateBytes, err := fs.ReadFile(embeddedWebFiles, "web/expenses.html")
 	if err != nil {
 		t.Fatal(err)
 	}
-	parsedTemplate, err := template.New("hostingandsupport.html").Parse(string(templateBytes))
+	parsedTemplate, err := template.New("expenses.html").Parse(string(templateBytes))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1096,6 +1293,8 @@ func TestHostingAndSupportTemplateRendersServerView(t *testing.T) {
 		"RegistrySyncEvents":          nil,
 		"SitebrushComKey":             hostingandsupport.SitebrushComKey{},
 		"ShowServers":                 true,
+		"ShowCentralRegistry":         true,
+		"ShowDemo":                    true,
 		"Clients":                     nil,
 		"ClientCount":                 1,
 		"ClientSiteCount":             1,
@@ -1105,7 +1304,7 @@ func TestHostingAndSupportTemplateRendersServerView(t *testing.T) {
 		"ServiceMailRelayEnabled":     false,
 		"ServiceMailLimits":           map[string]int{},
 		"Backups":                     nil,
-		"DemoSettings":                demo.Settings{},
+		"DemoSettings":                demo.Settings{Domain: "demo.sitebrush.com", Enabled: true},
 		"AutoRegistrationEnabled":     false,
 		"PublicTrialEmbedHTML":        "",
 		"CurrentDomain":               "sitebrush.com",
@@ -1144,6 +1343,89 @@ func TestHostingAndSupportTemplateRendersServerView(t *testing.T) {
 	}
 }
 
+func TestExpensesTemplateShowsOnlyLocalServerAndEnabledDemoOutsideSitebrushCom(t *testing.T) {
+	templateBytes, err := fs.ReadFile(embeddedWebFiles, "web/expenses.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsedTemplate, err := template.New("expenses.html").Parse(string(templateBytes))
+	if err != nil {
+		t.Fatal(err)
+	}
+	application := &App{}
+	request := httptest.NewRequest(http.MethodGet, "https://owner.example/?expenses", nil)
+	baseSnapshot := hostingAndSupportPanelSnapshot{
+		Version:    hostingAndSupportPanelSnapshotVersion,
+		MainDomain: "owner.example",
+		Sites:      []hostingandsupport.Site{{Domain: "owner.example"}},
+		Servers: []hostingandsupport.ServerView{{
+			Name: "owner.example", Local: true,
+			Sites: []hostingandsupport.ServerSiteView{{Domain: "owner.example"}},
+		}},
+		Overview: hostingandsupport.BuildOverview([]hostingandsupport.Site{{Domain: "owner.example"}}, 0, nil, nil, nil, nil, nil),
+		DemoSettings: demo.Settings{
+			Domain:  "demo.owner.example",
+			Enabled: false,
+		},
+	}
+	renderSnapshot := func(snapshot hostingAndSupportPanelSnapshot) string {
+		t.Helper()
+		view := application.hostingAndSupportPanelView(request, snapshot)
+		view["Domain"] = snapshot.MainDomain
+		view["CompileVersion"] = CompileVersion
+		var rendered bytes.Buffer
+		if executeErr := parsedTemplate.Execute(&rendered, view); executeErr != nil {
+			t.Fatal(executeErr)
+		}
+		return rendered.String()
+	}
+
+	disabledDemoHTML := renderSnapshot(baseSnapshot)
+	for _, forbiddenFragment := range []string{
+		`data-hosting-installation-tab="desktop"`,
+		`data-hosting-installation-panel="desktop"`,
+		`data-hosting-installation-tab="archive"`,
+		`data-hosting-installation-panel="archive"`,
+		`data-hosting-installation-tab="demo"`,
+		`data-hosting-installation-panel="demo"`,
+		"Ключ sitebrush.com",
+	} {
+		if strings.Contains(disabledDemoHTML, forbiddenFragment) {
+			t.Fatalf("regular server rendered forbidden central or demo fragment %q", forbiddenFragment)
+		}
+	}
+	if !strings.Contains(disabledDemoHTML, "owner.example") || !strings.Contains(disabledDemoHTML, `id="hostingServerList"`) {
+		t.Fatal("regular server did not render its local server")
+	}
+
+	enabledDemoSnapshot := baseSnapshot
+	enabledDemoSnapshot.DemoSettings.Enabled = true
+	enabledDemoHTML := renderSnapshot(enabledDemoSnapshot)
+	if !strings.Contains(enabledDemoHTML, `data-hosting-installation-tab="demo"`) ||
+		!strings.Contains(enabledDemoHTML, `data-hosting-installation-panel="demo"`) {
+		t.Fatal("enabled local demo did not render its tab and panel")
+	}
+	if strings.Contains(enabledDemoHTML, `data-hosting-installation-tab="desktop"`) ||
+		strings.Contains(enabledDemoHTML, `data-hosting-installation-tab="archive"`) {
+		t.Fatal("enabled demo exposed central desktop or archive tabs")
+	}
+}
+
+func TestVisibleHostingAndSupportLocalSitesHidesDisabledDemo(t *testing.T) {
+	sites := []hostingandsupport.Site{
+		{Domain: "owner.example"},
+		{Domain: "demo.owner.example", IsDemo: true},
+	}
+	disabledSites := visibleHostingAndSupportLocalSites(sites, demo.Settings{Domain: "demo.owner.example"})
+	if len(disabledSites) != 1 || disabledSites[0].Domain != "owner.example" {
+		t.Fatalf("disabled demo sites = %#v", disabledSites)
+	}
+	enabledSites := visibleHostingAndSupportLocalSites(sites, demo.Settings{Domain: "demo.owner.example", Enabled: true})
+	if len(enabledSites) != 2 || !enabledSites[1].IsDemo {
+		t.Fatalf("enabled demo sites = %#v", enabledSites)
+	}
+}
+
 func TestHostingAndSupportViewUsesPreparedSnapshot(t *testing.T) {
 	requests := make(chan hostingAndSupportPanelRequest, 4)
 	stop := make(chan struct{})
@@ -1169,7 +1451,7 @@ func TestHostingAndSupportViewUsesPreparedSnapshot(t *testing.T) {
 	}()
 	application := &App{hostingAndSupportPanel: requests}
 	request := httptest.NewRequest(http.MethodGet, "https://sitebrush.com/?hosting_and_support", nil)
-	view, err := application.hostingAndSupportView(context.Background(), request)
+	view, err := application.expensesView(context.Background(), request)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1382,8 +1664,8 @@ func TestAutomaticBillingCreatesOneServerInvoiceWithPaidAndBonusSites(t *testing
 	snapshot := hostingAndSupportPanelSnapshot{
 		MainDomain: "sitebrush.com", CommissionBPS: 500,
 		OwnerEmails: []string{"owner@example.com"},
-		LocalCostPolicy: hostingandsupport.ServerCostPolicy{
-			InstallationID: "local", MonthlyCostMinor: 100, Currency: "EUR", MinimumPriceGBMinor: 200,
+		LocalCostPolicy: expenses.ServerPolicy{
+			InstallationID: "local", Mode: expenses.ModeActual, ActualMonthlyExpenseMinor: 100, DiskRatePer100GBMinor: 1500, Currency: "EUR", FreeSiteThresholdBytes: 100_000_000,
 		},
 		Sites: []hostingandsupport.Site{
 			{Domain: "paid.example.com", UsedBytes: 600_000_000, BillingAmount: "1.20", BillingCurrency: "EUR", BillingBillable: true, AdminEmails: "client@example.com"},
@@ -1394,7 +1676,7 @@ func TestAutomaticBillingCreatesOneServerInvoiceWithPaidAndBonusSites(t *testing
 		},
 	}
 	snapshotWithoutCost := snapshot
-	snapshotWithoutCost.LocalCostPolicy = hostingandsupport.ServerCostPolicy{}
+	snapshotWithoutCost.LocalCostPolicy = expenses.ServerPolicy{}
 	application.runAutomaticBillingOnce(context.Background(), store, snapshotWithoutCost, time.Date(2026, 7, 23, 11, 0, 0, 0, time.UTC))
 	if invoicesWithoutCost := store.Invoices(context.Background(), 10); len(invoicesWithoutCost) != 0 {
 		t.Fatalf("invoices without server cost = %d, want 0", len(invoicesWithoutCost))
@@ -1404,7 +1686,7 @@ func TestAutomaticBillingCreatesOneServerInvoiceWithPaidAndBonusSites(t *testing
 	if len(invoices) != 1 {
 		t.Fatalf("invoices = %d, want 1: %#v", len(invoices), invoices)
 	}
-	if invoices[0].CustomerEmail != "client@example.com" || invoices[0].InstallationID != "local:sitebrush.com" || invoices[0].AmountMinor != 120 || invoices[0].ServerCostMinor != 100 || invoices[0].ReserveMinor != 20 || len(invoices[0].Lines) != 2 || !invoices[0].Lines[1].Bonus {
+	if invoices[0].CustomerEmail != "client@example.com" || invoices[0].InstallationID != "local:sitebrush.com" || invoices[0].AmountMinor != 105 || invoices[0].ServerCostMinor != 100 || invoices[0].PaymentFeeMinor != 5 || invoices[0].ReserveMinor != 0 || len(invoices[0].Lines) != 3 || !invoices[0].Lines[1].Bonus {
 		t.Fatalf("automatic invoice = %#v", invoices[0])
 	}
 	select {
@@ -1443,8 +1725,8 @@ func TestAutomaticBillingDistributesServerCostByStorage(t *testing.T) {
 	application := &App{emailDelivery: make(chan mailout.DeliveryJob, 4)}
 	snapshot := hostingAndSupportPanelSnapshot{
 		MainDomain: "sitebrush.com",
-		LocalCostPolicy: hostingandsupport.ServerCostPolicy{
-			InstallationID: "local", MonthlyCostMinor: 101, Currency: "USD", MinimumPriceGBMinor: 1,
+		LocalCostPolicy: expenses.ServerPolicy{
+			InstallationID: "local", Mode: expenses.ModeActual, ActualMonthlyExpenseMinor: 101, DiskRatePer100GBMinor: 1500, Currency: "USD", FreeSiteThresholdBytes: 100_000_000,
 		},
 		Sites: []hostingandsupport.Site{
 			{Domain: "small.example.com", UsedBytes: 600_000_000, AdminEmails: "small@example.com"},
@@ -2770,8 +3052,8 @@ func TestServerManagerEmailTreatsLoopbackAsLocalhost(t *testing.T) {
 		t.Fatal("non-owner admin was accepted for effective localhost")
 	}
 	menuScript := buildContextMenuScript(true, true, false, false, true, "/", "example.com", 0, 0, "", translationsForLanguageCode("ru"))
-	if !strings.Contains(menuScript, "?hosting_and_support") {
-		t.Fatal("server manager menu does not contain hosting link")
+	if !strings.Contains(menuScript, "?expenses") {
+		t.Fatal("server manager menu does not contain expenses link")
 	}
 }
 
@@ -3757,7 +4039,7 @@ func setupBillingOwnerForTest(t *testing.T, application *App, domain, email stri
 		_ = controlDB.Close()
 		t.Fatalf("save billing settings: %v", err)
 	}
-	return controlDB
+	return controlDB.DB
 }
 
 func TestRecoverPageShowsSPFSetupBeforeEmailForm(t *testing.T) {
@@ -8358,6 +8640,297 @@ func TestAutoCertCertificateMemoryCachePreloadsDiskCertificate(t *testing.T) {
 	}
 	if certificate == nil || expiresAt.IsZero() {
 		t.Fatalf("certificate=%#v expiresAt=%s", certificate, expiresAt)
+	}
+}
+
+func TestAutomaticSSLFallbackCertificatePersistsWithPrivatePermissions(t *testing.T) {
+	application, _ := newTestApplication(t)
+	firstCertificate, err := application.loadOrCreateAutomaticSSLFallbackCertificate(time.Now())
+	if err != nil {
+		t.Fatalf("create fallback certificate: %v", err)
+	}
+	secondCertificate, err := application.loadOrCreateAutomaticSSLFallbackCertificate(time.Now().Add(time.Hour))
+	if err != nil {
+		t.Fatalf("load fallback certificate: %v", err)
+	}
+	if !bytes.Equal(firstCertificate.Certificate[0], secondCertificate.Certificate[0]) {
+		t.Fatal("fallback certificate changed instead of loading the persisted certificate")
+	}
+	certificatePath := filepath.Join(application.storageRootDir(), "keys", "tls", "sitebrush-fallback.pem")
+	fileInfo, err := os.Stat(certificatePath)
+	if err != nil {
+		t.Fatalf("stat fallback certificate: %v", err)
+	}
+	if fileInfo.Mode().Perm() != 0o600 {
+		t.Fatalf("fallback certificate permissions = %o, want 600", fileInfo.Mode().Perm())
+	}
+}
+
+func TestAutoCertTLSConfigReturnsFallbackAndOnlyObservesDomain(t *testing.T) {
+	fallbackPEM, fallbackCertificate, err := generateAutomaticSSLFallbackCertificate(time.Now())
+	if err != nil || len(fallbackPEM) == 0 {
+		t.Fatalf("generate fallback certificate: bytes=%d err=%v", len(fallbackPEM), err)
+	}
+	application := &App{automaticSSL: make(chan automaticSSLRequest, 1)}
+	certificateManager := &autocert.Manager{
+		HostPolicy: func(context.Context, string) error {
+			t.Fatal("ordinary TLS handshake invoked autocert host policy")
+			return errors.New("unexpected host policy call")
+		},
+	}
+	tlsConfig := application.autoCertTLSConfig(certificateManager, fallbackCertificate)
+	certificate, err := tlsConfig.GetCertificate(&tls.ClientHelloInfo{ServerName: "lcs-robs.adobe.io"})
+	if err != nil {
+		t.Fatalf("get fallback certificate: %v", err)
+	}
+	if certificate != fallbackCertificate {
+		t.Fatal("ordinary TLS handshake did not return the shared fallback certificate")
+	}
+	select {
+	case request := <-application.automaticSSL:
+		if request.action != "observe" || request.domain != "lcs-robs.adobe.io" {
+			t.Fatalf("automatic SSL observation = %+v", request)
+		}
+	default:
+		t.Fatal("ordinary TLS handshake did not enqueue a background observation")
+	}
+}
+
+func TestAutoCertTLSConfigPrefersPreparedPublicCertificate(t *testing.T) {
+	_, fallbackCertificate, err := generateAutomaticSSLFallbackCertificate(time.Now())
+	if err != nil {
+		t.Fatalf("generate fallback certificate: %v", err)
+	}
+	_, preparedCertificate, err := generateAutomaticSSLFallbackCertificate(time.Now().Add(time.Minute))
+	if err != nil {
+		t.Fatalf("generate prepared certificate: %v", err)
+	}
+	preparedExpiresAt, err := tlsCertificateExpiresAt(preparedCertificate)
+	if err != nil {
+		t.Fatalf("read prepared certificate expiry: %v", err)
+	}
+	certificateCacheDirectory := t.TempDir()
+	cacheContext, cancelCache := context.WithCancel(context.Background())
+	defer cancelCache()
+	application := &App{
+		autoCertCertificateCache: startAutoCertCertificateMemoryCache(cacheContext, certificateCacheDirectory),
+		automaticSSL:             make(chan automaticSSLRequest, 1),
+	}
+	application.rememberAutoCertCachedCertificate("example.com", preparedCertificate, preparedExpiresAt)
+	if _, _, found := application.autoCertCachedCertificateFromMemory("example.com", time.Now(), 0); !found {
+		t.Fatal("prepared certificate was not stored in memory")
+	}
+
+	tlsConfig := application.autoCertTLSConfig(&autocert.Manager{}, fallbackCertificate)
+	certificate, err := tlsConfig.GetCertificate(&tls.ClientHelloInfo{ServerName: "example.com"})
+	if err != nil {
+		t.Fatalf("get prepared certificate: %v", err)
+	}
+	if certificate != preparedCertificate {
+		t.Fatal("TLS handshake did not prefer the prepared certificate")
+	}
+	select {
+	case request := <-application.automaticSSL:
+		t.Fatalf("prepared certificate unexpectedly enqueued observation: %+v", request)
+	default:
+	}
+}
+
+func TestPrepareAutomaticSSLDomainIgnoresUnmanagedSNIWithoutDNS(t *testing.T) {
+	application, _ := newTestApplication(t)
+	application.automaticSSLAvailable = true
+	previousIPLookup := lookupIPRecords
+	defer func() {
+		lookupIPRecords = previousIPLookup
+	}()
+	lookupIPRecords = func(string) ([]net.IP, error) {
+		t.Fatal("unmanaged TLS SNI initiated an authoritative DNS lookup")
+		return nil, os.ErrInvalid
+	}
+
+	result := application.prepareAutomaticSSLDomain(nil, "lcs-cops.adobe.io", []net.IP{net.ParseIP("8.8.8.8")})
+	if result.state != "ignored" || result.err != nil {
+		t.Fatalf("unmanaged automatic SSL result = %+v, want ignored without error", result)
+	}
+}
+
+func TestPrepareAutomaticSSLDomainDoesNotIssueCertificateWhenDNSDiffersFromExternalIP(t *testing.T) {
+	application, rawDB := newTestApplication(t)
+	application.automaticSSLAvailable = true
+	if _, err := rawDB.Exec(`INSERT INTO pages(domain,path,title,html,published) VALUES(?,?,?,?,1)`, "customer.example.com", "/", "Home", "<h1>Home</h1>"); err != nil {
+		t.Fatalf("insert managed page: %v", err)
+	}
+	previousIPLookup := lookupIPRecords
+	defer func() {
+		lookupIPRecords = previousIPLookup
+	}()
+	lookupIPRecords = func(domain string) ([]net.IP, error) {
+		if domain != "customer.example.com" {
+			t.Fatalf("unexpected DNS lookup for %q", domain)
+		}
+		return []net.IP{net.ParseIP("1.1.1.1")}, nil
+	}
+	certificateManager := &autocert.Manager{
+		HostPolicy: func(context.Context, string) error {
+			t.Fatal("DNS mismatch reached autocert certificate issuance")
+			return errors.New("unexpected certificate issuance")
+		},
+	}
+
+	result := application.prepareAutomaticSSLDomain(certificateManager, "customer.example.com", []net.IP{net.ParseIP("8.8.8.8")})
+	if result.state != "waiting_dns" || result.err == nil {
+		t.Fatalf("automatic SSL mismatch result = %+v, want waiting_dns with reason", result)
+	}
+}
+
+func TestDetectPublicAutomaticSSLServerIPsUsesOnlyExternalAddress(t *testing.T) {
+	previousExternalIPLookup := lookupServerExternalIP
+	previousInterfaceLookup := lookupServerInterfaceIPs
+	defer func() {
+		lookupServerExternalIP = previousExternalIPLookup
+		lookupServerInterfaceIPs = previousInterfaceLookup
+	}()
+	lookupServerExternalIP = func(context.Context) (string, error) {
+		return "8.8.8.8", nil
+	}
+	lookupServerInterfaceIPs = func() ([]net.IP, error) {
+		t.Fatal("automatic SSL external IP detection inspected interface addresses")
+		return nil, os.ErrInvalid
+	}
+
+	serverIPs, err := detectPublicAutomaticSSLServerIPs()
+	if err != nil {
+		t.Fatalf("detect external automatic SSL IP: %v", err)
+	}
+	if len(serverIPs) != 1 || !serverIPs[0].Equal(net.ParseIP("8.8.8.8")) {
+		t.Fatalf("automatic SSL server IPs = %v, want only 8.8.8.8", serverIPs)
+	}
+}
+
+func TestTLSHandshakeNoiseAggregateLogsFirstEventThenProgressiveSummaries(t *testing.T) {
+	startedAt := time.Date(2026, 7, 24, 0, 30, 0, 0, time.UTC)
+	noise, ok := diagnosticlog.ParseTLSHandshakeNoise(`http: TLS handshake error from 127.0.0.1:53497: EOF`)
+	if !ok {
+		t.Fatal("test TLS noise was not classified")
+	}
+	aggregate := newTLSHandshakeNoiseAggregate()
+	firstMessages := aggregate.observe(tlsHandshakeNoiseEvent{Noise: noise, OccurredAt: startedAt})
+	if len(firstMessages) != 1 || firstMessages[0] != noise.Message {
+		t.Fatalf("first messages = %#v, want original message", firstMessages)
+	}
+	for eventIndex := 0; eventIndex < 3; eventIndex++ {
+		if messages := aggregate.observe(tlsHandshakeNoiseEvent{Noise: noise, OccurredAt: startedAt.Add(time.Duration(eventIndex+1) * time.Minute)}); len(messages) != 0 {
+			t.Fatalf("repeat %d produced immediate messages: %#v", eventIndex, messages)
+		}
+	}
+	if messages := aggregate.flushDue(startedAt.Add(4*time.Minute), false); len(messages) != 0 {
+		t.Fatalf("summary was emitted before five minutes: %#v", messages)
+	}
+	fiveMinuteMessages := aggregate.flushDue(startedAt.Add(5*time.Minute), false)
+	if len(fiveMinuteMessages) != 1 ||
+		!strings.Contains(fiveMinuteMessages[0], "class=connection_closed") ||
+		!strings.Contains(fiveMinuteMessages[0], "source=loopback") ||
+		!strings.Contains(fiveMinuteMessages[0], "interval=5m") ||
+		!strings.Contains(fiveMinuteMessages[0], "new=3 total=4") {
+		t.Fatalf("five minute summary = %#v", fiveMinuteMessages)
+	}
+
+	aggregate.observe(tlsHandshakeNoiseEvent{Noise: noise, OccurredAt: startedAt.Add(6 * time.Minute)})
+	if messages := aggregate.flushDue(startedAt.Add(34*time.Minute), false); len(messages) != 0 {
+		t.Fatalf("thirty minute summary was emitted early: %#v", messages)
+	}
+	thirtyMinuteMessages := aggregate.flushDue(startedAt.Add(35*time.Minute), false)
+	if len(thirtyMinuteMessages) != 1 ||
+		!strings.Contains(thirtyMinuteMessages[0], "interval=30m") ||
+		!strings.Contains(thirtyMinuteMessages[0], "new=1 total=5") {
+		t.Fatalf("thirty minute summary = %#v", thirtyMinuteMessages)
+	}
+}
+
+func TestTLSHandshakeNoiseAggregateFinalizesRepeatsAndDropsSingleIdleEvent(t *testing.T) {
+	startedAt := time.Date(2026, 7, 24, 0, 30, 0, 0, time.UTC)
+	noise, ok := diagnosticlog.ParseTLSHandshakeNoise(`http: TLS handshake error from 127.0.0.1:53497: EOF`)
+	if !ok {
+		t.Fatal("test TLS noise was not classified")
+	}
+	aggregate := newTLSHandshakeNoiseAggregate()
+	aggregate.observe(tlsHandshakeNoiseEvent{Noise: noise, OccurredAt: startedAt})
+	if messages := aggregate.flushDue(startedAt.Add(tlsHandshakeNoiseIdleTTL), false); len(messages) != 0 {
+		t.Fatalf("single idle event produced an extra summary: %#v", messages)
+	}
+	if len(aggregate.groupsByKey) != 0 {
+		t.Fatalf("single idle group was not removed: %#v", aggregate.groupsByKey)
+	}
+
+	aggregate.observe(tlsHandshakeNoiseEvent{Noise: noise, OccurredAt: startedAt})
+	aggregate.observe(tlsHandshakeNoiseEvent{Noise: noise, OccurredAt: startedAt.Add(time.Minute)})
+	finalMessages := aggregate.flushDue(startedAt.Add(tlsHandshakeNoiseIdleTTL+time.Minute), false)
+	if len(finalMessages) != 1 ||
+		!strings.Contains(finalMessages[0], "interval=final") ||
+		!strings.Contains(finalMessages[0], "new=1 total=2") {
+		t.Fatalf("final summary = %#v", finalMessages)
+	}
+}
+
+func TestTLSHandshakeNoiseAggregateMarksSaturatedCountsAsLowerBounds(t *testing.T) {
+	startedAt := time.Date(2026, 7, 24, 0, 30, 0, 0, time.UTC)
+	noise, ok := diagnosticlog.ParseTLSHandshakeNoise(`http: TLS handshake error from 127.0.0.1:53497: EOF`)
+	if !ok {
+		t.Fatal("test TLS noise was not classified")
+	}
+	aggregate := newTLSHandshakeNoiseAggregate()
+	aggregate.observe(tlsHandshakeNoiseEvent{Noise: noise, OccurredAt: startedAt})
+	aggregate.observe(tlsHandshakeNoiseEvent{Noise: noise, OccurredAt: startedAt.Add(time.Minute)})
+	aggregate.saturated = true
+	messages := aggregate.flushDue(startedAt.Add(5*time.Minute), false)
+	if len(messages) != 1 || !strings.Contains(messages[0], "lower_bound=true") {
+		t.Fatalf("saturated summary = %#v", messages)
+	}
+	if aggregate.saturated {
+		t.Fatal("saturation marker was not cleared after summary")
+	}
+}
+
+func TestTLSHandshakeNoiseAggregateFlushesPendingRepeatsOnShutdown(t *testing.T) {
+	startedAt := time.Date(2026, 7, 24, 0, 30, 0, 0, time.UTC)
+	noise, ok := diagnosticlog.ParseTLSHandshakeNoise(`http: TLS handshake error from 127.0.0.1:53497: EOF`)
+	if !ok {
+		t.Fatal("test TLS noise was not classified")
+	}
+	aggregate := newTLSHandshakeNoiseAggregate()
+	aggregate.observe(tlsHandshakeNoiseEvent{Noise: noise, OccurredAt: startedAt})
+	aggregate.observe(tlsHandshakeNoiseEvent{Noise: noise, OccurredAt: startedAt.Add(time.Second)})
+	messages := aggregate.flushDue(startedAt.Add(time.Minute), true)
+	if len(messages) != 1 ||
+		!strings.Contains(messages[0], "interval=shutdown") ||
+		!strings.Contains(messages[0], "new=1 total=2") {
+		t.Fatalf("shutdown summary = %#v", messages)
+	}
+	if len(aggregate.groupsByKey) != 0 {
+		t.Fatalf("shutdown retained groups: %d", len(aggregate.groupsByKey))
+	}
+}
+
+func TestTLSHandshakeNoiseAggregateBoundsSourceGroups(t *testing.T) {
+	startedAt := time.Date(2026, 7, 24, 0, 30, 0, 0, time.UTC)
+	aggregate := newTLSHandshakeNoiseAggregate()
+	normalGroupLimit := tlsHandshakeNoiseMaximumGroups - tlsHandshakeNoiseReservedOverflowGroups
+	for sourceIndex := 0; sourceIndex < normalGroupLimit+100; sourceIndex++ {
+		source := fmt.Sprintf("source-%d", sourceIndex)
+		noise := diagnosticlog.TLSHandshakeNoise{
+			Class:   "connection_closed",
+			Source:  source,
+			Message: "http: TLS handshake error from 127.0.0.1:1: EOF",
+		}
+		aggregate.observe(tlsHandshakeNoiseEvent{Noise: noise, OccurredAt: startedAt})
+	}
+	if len(aggregate.groupsByKey) > tlsHandshakeNoiseMaximumGroups {
+		t.Fatalf("group count = %d, maximum = %d", len(aggregate.groupsByKey), tlsHandshakeNoiseMaximumGroups)
+	}
+	overflowKey := strings.Join([]string{"connection_closed", "other"}, "\x00")
+	overflowGroup, found := aggregate.groupsByKey[overflowKey]
+	if !found || overflowGroup.displaySource != "other" || overflowGroup.total != 100 {
+		t.Fatalf("overflow group = %+v found=%t", overflowGroup, found)
 	}
 }
 

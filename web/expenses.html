@@ -25,9 +25,10 @@
     <div class="card-body">
       <div class="hosting-overview-hero {{.Overview.HealthClass}}">
         <div>
-          <div class="hosting-overview-kicker">Хостинг и поддержка</div>
+          <div class="hosting-overview-kicker">{{index .T "expenses_title"}}</div>
           <h2>{{.Overview.HealthTitle}}</h2>
           <p>{{.Overview.HealthText}}</p>
+          <p>{{index .T "expenses_purpose"}}</p>
         </div>
         <div class="hosting-overview-big-number">{{.Overview.ProblemCount}}</div>
       </div>
@@ -55,12 +56,18 @@
     </div>
   </section>
 
+  {{if or .ShowCentralRegistry .ShowDemo}}
   <nav class="hosting-installation-tabs" role="tablist" aria-label="{{index .T "billing_installations"}}" data-hosting-installation-tabs>
     <button type="button" class="hosting-installation-tab active" role="tab" aria-selected="true" data-hosting-installation-tab="servers">{{index .T "billing_servers"}}</button>
+    {{if .ShowCentralRegistry}}
     <button type="button" class="hosting-installation-tab" role="tab" aria-selected="false" data-hosting-installation-tab="desktop">{{index .T "billing_desktop_installations"}}</button>
     <button type="button" class="hosting-installation-tab" role="tab" aria-selected="false" data-hosting-installation-tab="archive">{{index .T "billing_archive"}}</button>
+    {{end}}
+    {{if .ShowDemo}}
     <button type="button" class="hosting-installation-tab" role="tab" aria-selected="false" data-hosting-installation-tab="demo">{{index .T "billing_demo_title"}}</button>
+    {{end}}
   </nav>
+  {{end}}
 
   <section class="card billing-card" id="hostingServerList" data-hosting-installation-panel="servers">
     <div class="card-body">
@@ -773,21 +780,29 @@
           <div class="hosting-server-cost-summary">
             {{if $server.CostConfigured}}
             <div class="billing-user-stats">
-              <span><strong>{{$server.MonthlyCostLabel}}</strong> {{index $.T "billing_server_monthly_cost"}}</span>
-              <span><strong>{{if $server.CostPerGBLabel}}{{$server.CostPerGBLabel}}{{else}}—{{end}}</strong> {{index $.T "billing_server_cost_per_gb"}}</span>
+              <span><strong>{{$server.MonthlyCostLabel}}</strong> {{index $.T "expenses_server_monthly_expense"}}</span>
+              <span><strong>{{if $server.CapacityCostPerGBLabel}}{{$server.CapacityCostPerGBLabel}}{{else}}—{{end}}</strong> {{index $.T "expenses_capacity_cost_per_gb"}}</span>
+              <span><strong>{{if $server.SharedCostPerGBLabel}}{{$server.SharedCostPerGBLabel}}{{else}}—{{end}}</strong> {{index $.T "expenses_shared_cost_per_gb"}}</span>
               <span><strong>{{$server.CoveredMonthLabel}}</strong> {{index $.T "billing_server_cost_covered"}}</span>
               <span><strong>{{$server.UncoveredMonthLabel}}</strong> {{index $.T "billing_server_cost_uncovered"}}</span>
-              <span><strong>{{$server.ReserveLabel}}</strong> {{index $.T "billing_server_reserve"}}</span>
             </div>
+            <div class="text-muted small">{{index $.T "expenses_allocation_explanation"}}</div>
             {{else}}
             <div class="alert alert-warning mb-2">{{index $.T "billing_server_cost_required"}}</div>
             {{end}}
             {{if $server.Local}}
-            <form method="post" action="?hosting_and_support" class="billing-plan-form">
-              <input type="hidden" name="billing_action" value="server_cost_policy">
-              <label>{{index $.T "billing_server_monthly_cost"}} <input name="monthly_cost" type="number" min="0.01" step="0.01" class="form-control" value="{{$server.MonthlyCostInput}}" required></label>
+            <form method="post" action="?expenses" class="billing-plan-form">
+              <input type="hidden" name="billing_action" value="save_server_expense_policy">
+              <label>{{index $.T "expenses_calculation_mode"}}
+                <select name="expense_mode" class="form-control">
+                  <option value="automatic" {{if eq $server.ExpenseMode "automatic"}}selected{{end}}>{{index $.T "expenses_mode_automatic"}}</option>
+                  <option value="actual" {{if eq $server.ExpenseMode "actual"}}selected{{end}}>{{index $.T "expenses_mode_actual"}}</option>
+                </select>
+              </label>
               <label>{{index $.T "billing_currency"}} <input name="currency" type="text" minlength="3" maxlength="3" class="form-control" value="{{$server.BillingCurrency}}" required></label>
-              <label>{{index $.T "billing_server_minimum_gb"}} <input name="minimum_price_gb" type="number" min="0.01" step="0.01" class="form-control" value="{{if $server.CostConfigured}}{{$server.MinimumPriceGBInput}}{{else}}2.00{{end}}" required></label>
+              <label>{{index $.T "expenses_rate_per_100_gb"}} <input name="disk_rate_per_100_gb" type="number" min="0.01" step="0.01" class="form-control" value="{{$server.DiskRatePer100GBInput}}" required></label>
+              <label>{{index $.T "expenses_actual_monthly_expense"}} <input name="actual_monthly_expense" type="number" min="0" step="0.01" class="form-control" value="{{$server.ActualExpenseInput}}"></label>
+              <label>{{index $.T "expenses_free_threshold_mb"}} <input name="free_site_threshold_mb" type="number" min="0" step="1" class="form-control" value="{{$server.FreeThresholdInput}}" required></label>
               <button type="submit" class="btn btn-primary"><img src="/p/static/save-page.png" alt="">{{index $.T "billing_save"}}</button>
             </form>
             {{else if $server.CostConfigured}}
@@ -823,7 +838,7 @@
                   {{if $site.CanEditQuota}}
                   <div class="modal fade" id="hostingQuotaModal{{$serverIndex}}_{{$clientIndex}}_{{$siteIndex}}" tabindex="-1" aria-hidden="true">
                     <div class="modal-dialog modal-dialog-centered"><div class="modal-content">
-                      <form method="post" action="?hosting_and_support">
+                      <form method="post" action="?expenses">
                         <div class="modal-header">
                           <h2 class="modal-title h5">{{index $.T "billing_quota_change_title"}}</h2>
                           <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="{{index $.T "tree_close"}}"></button>
@@ -859,6 +874,7 @@
     </div>
   </section>
 
+  {{if .ShowCentralRegistry}}
   <section class="card billing-card" data-hosting-installation-panel="desktop" hidden>
     <div class="card-body">
       <div class="billing-section-header">
@@ -915,7 +931,9 @@
       </div>
     </div>
   </section>
+  {{end}}
 
+  {{if .ShowDemo}}
   <section class="card billing-card" data-hosting-installation-panel="demo" hidden>
     <div class="card-body billing-card-body">
       <div>
@@ -926,7 +944,7 @@
         <strong>{{index .T "billing_demo_billing_blocked"}}</strong>
         <span>{{index .T "billing_demo_exclusion_hint"}}</span>
       </div>
-      <form method="post" action="?hosting_and_support" class="billing-demo-settings-form" data-billing-ajax-save>
+      <form method="post" action="?expenses" class="billing-demo-settings-form" data-billing-ajax-save>
         <input type="hidden" name="billing_action" value="demo_settings">
         <input type="hidden" name="refresh_demo_site" value="0" data-refresh-demo-site-input>
         <label>{{index .T "billing_demo_domain"}} <input name="demo_site_domain" type="text" class="form-control" value="{{.DemoSettings.Domain}}" placeholder="demo.example.com"></label>
@@ -940,6 +958,7 @@
       </form>
     </div>
   </section>
+  {{end}}
 
   <section class="card billing-card" id="hostingClients">
     <div class="card-body">
@@ -1026,7 +1045,7 @@
                   <h3 class="billing-user-subtitle">{{index $.T "billing_schedule_title"}}</h3>
                   <p class="text-muted small">{{if $user.AutomaticBillingEnabled}}{{index $.T "billing_schedule_active"}}{{else}}{{index $.T "billing_schedule_inactive"}}{{end}}</p>
                 </div>
-                <form method="post" action="?hosting_and_support" class="billing-plan-form">
+                <form method="post" action="?expenses" class="billing-plan-form">
                   <input type="hidden" name="billing_action" value="billing_customer_schedule">
                   <input type="hidden" name="customer_id" value="{{$user.BillingCustomerID}}">
                   <label>{{index $.T "billing_invoice_day"}} <input type="number" name="invoice_day" class="form-control" min="1" max="28" value="{{$user.InvoiceDay}}" required></label>
@@ -1156,6 +1175,7 @@
     </div>
   </section>
 
+  {{if .ShowCentralRegistry}}
   <section class="card billing-card hosting-tab-panel-hidden" data-hosting-tab-panel="diagnostics">
     <div class="card-body">
       <div class="billing-section-header">
@@ -1163,7 +1183,7 @@
           <h2>Ключ sitebrush.com</h2>
           <p class="text-muted">Private key хранится только на sitebrush.com. Public key встраивается в сборку SiteBrush, чтобы snapshot уходил по HTTPS, подписанно и зашифрованно.</p>
         </div>
-        <form method="post" action="?hosting_and_support">
+        <form method="post" action="?expenses">
           <input type="hidden" name="billing_action" value="generate_sitebrush_com_key">
           <button type="submit" class="btn btn-outline-primary"><img src="/p/static/save-page.png" alt="">Сгенерировать keypair</button>
         </form>
@@ -1180,11 +1200,12 @@
       {{end}}
     </div>
   </section>
+  {{end}}
 
   <section class="card billing-card hosting-tab-panel-hidden" data-hosting-tab-panel="settings">
     <div class="card-body">
       <h2>{{index .T "billing_plans_title"}}</h2>
-      <form method="post" action="?hosting_and_support" class="billing-plan-form">
+      <form method="post" action="?expenses" class="billing-plan-form">
         <input type="hidden" name="billing_action" value="save_plan">
         <label>{{index .T "billing_plan_name"}} <input name="name" type="text" class="form-control" placeholder="Free / Pro / Business" required></label>
         <label>{{index .T "billing_quota"}} <input name="quota" type="text" class="form-control" placeholder="10gb" required></label>
@@ -1202,7 +1223,7 @@
           <span><button type="button" class="btn btn-link btn-sm p-0 align-baseline" data-bs-toggle="modal" data-bs-target="#billingPlanModal{{.ID}}">{{.Name}}</button> · {{.QuotaLabel}} · {{index $.T "billing_sites_short"}} {{.SiteLimit}} · {{index $.T "billing_reports_short"}} {{.AnalyticsReportLimit}} · {{.Price}} {{.Currency}}/{{.BillingPeriod}}{{if .IsDefault}} · {{index $.T "billing_default_suffix"}}{{end}}</span>
           <div class="d-flex gap-2">
             <button type="button" class="btn btn-outline-primary btn-sm" data-bs-toggle="modal" data-bs-target="#billingPlanEditModal{{.ID}}"><img src="/p/static/pencil.png" alt="">{{index $.T "billing_edit"}}</button>
-            <form method="post" action="?hosting_and_support">
+            <form method="post" action="?expenses">
               <input type="hidden" name="billing_action" value="delete_plan">
               <input type="hidden" name="plan_id" value="{{.ID}}">
               <button type="submit" class="btn btn-outline-danger btn-sm"><img src="/p/static/cross.png" alt="">{{index $.T "billing_delete"}}</button>
@@ -1233,7 +1254,7 @@
         </div>
         <div class="modal fade" id="billingPlanEditModal{{.ID}}" tabindex="-1" aria-hidden="true">
           <div class="modal-dialog modal-dialog-centered"><div class="modal-content">
-            <form method="post" action="?hosting_and_support" data-billing-ajax-save>
+            <form method="post" action="?expenses" data-billing-ajax-save>
               <div class="modal-header">
                 <h5 class="modal-title">{{index $.T "billing_edit_plan_title"}} {{.Name}}</h5>
                 <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="{{index $.T "tree_close"}}"></button>
@@ -1270,7 +1291,7 @@
           <p class="text-muted">История хранится персонально у клиента; общий ввод новых счетов больше не используется.</p>
         </div>
       </div>
-      <form method="post" action="?hosting_and_support" class="billing-plan-form">
+      <form method="post" action="?expenses" class="billing-plan-form">
         <input type="hidden" name="billing_action" value="create_invoice">
         <label>Клиент <input name="customer_email" type="email" class="form-control" placeholder="client@example.com" required></label>
         <label>Сайт <input name="domain" type="text" class="form-control" placeholder="example.com" required></label>
@@ -1307,17 +1328,17 @@
             {{if .Notes}}<div class="text-muted small">{{.Notes}}</div>{{end}}
           </div>
           <div class="billing-site-form">
-            <form method="post" action="?hosting_and_support">
+            <form method="post" action="?expenses">
               <input type="hidden" name="billing_action" value="mark_invoice_paid">
               <input type="hidden" name="invoice_id" value="{{.ID}}">
               <button type="submit" class="btn btn-success btn-sm">Оплачен</button>
             </form>
-            <form method="post" action="?hosting_and_support">
+            <form method="post" action="?expenses">
               <input type="hidden" name="billing_action" value="mark_invoice_payment_error">
               <input type="hidden" name="invoice_id" value="{{.ID}}">
               <button type="submit" class="btn btn-outline-danger btn-sm">Ошибка оплаты</button>
             </form>
-            <form method="post" action="?hosting_and_support">
+            <form method="post" action="?expenses">
               <input type="hidden" name="billing_action" value="cancel_invoice">
               <input type="hidden" name="invoice_id" value="{{.ID}}">
               <button type="submit" class="btn btn-outline-secondary btn-sm">Отменить</button>
@@ -1332,7 +1353,7 @@
         <summary>Способы оплаты</summary>
         <div class="billing-plan-list mt-3">
           {{range .PaymentProviders}}
-          <form method="post" action="?hosting_and_support" class="billing-plan-row">
+          <form method="post" action="?expenses" class="billing-plan-row">
             <input type="hidden" name="billing_action" value="save_payment_provider">
             <input type="hidden" name="provider" value="{{.Provider}}">
             <label class="checkbox-row"><input type="checkbox" name="enabled" value="1" {{if .Enabled}}checked{{end}}><span>{{.DisplayName}}</span></label>
@@ -1353,7 +1374,7 @@
         <h2>{{index .T "billing_registration_title"}}</h2>
         <p class="text-muted">{{index .T "billing_registration_hint"}}</p>
       </div>
-      <form method="post" action="?hosting_and_support" class="billing-registration-settings-form" data-billing-ajax-save>
+      <form method="post" action="?expenses" class="billing-registration-settings-form" data-billing-ajax-save>
         <input type="hidden" name="billing_action" value="registration_settings">
         <label class="checkbox-row">
           <input type="checkbox" name="auto_registration_enabled" value="1" {{if .AutoRegistrationEnabled}}checked{{end}}>
@@ -1362,7 +1383,7 @@
         <button type="submit" class="btn btn-primary"><img src="/p/static/save-page.png" alt="">{{index .T "billing_save"}}</button>
       </form>
       {{if .ShowCommissionSetting}}
-      <form method="post" action="?hosting_and_support" class="billing-registration-settings-form mt-3">
+      <form method="post" action="?expenses" class="billing-registration-settings-form mt-3">
         <input type="hidden" name="billing_action" value="sitebrush_commission">
         <label>{{index .T "billing_commission_percent"}}
           <div class="input-group"><input type="number" name="commission_percent" class="form-control" min="0" max="100" step="0.01" value="{{.CommissionPercent}}" required><span class="input-group-text">%</span></div>
@@ -1413,7 +1434,7 @@
         <h2>{{index .T "billing_add_site_title"}}</h2>
         <p class="text-muted">{{index .T "billing_add_site_hint"}}</p>
       </div>
-      <form method="post" action="?hosting_and_support" class="billing-create-form">
+      <form method="post" action="?expenses" class="billing-create-form">
         <input type="hidden" name="billing_action" value="create_site">
         <label>{{index .T "billing_domain"}} <input name="domain" type="text" class="form-control" placeholder="example.com" required></label>
         <label>{{index .T "billing_admin_email"}} <input name="email" type="email" class="form-control" placeholder="admin@example.com" required></label>
@@ -1449,7 +1470,7 @@
           </div>
           <div class="modal fade" id="approveSiteRequestModal{{$requestIndex}}" tabindex="-1" aria-hidden="true">
             <div class="modal-dialog modal-dialog-centered"><div class="modal-content">
-              <form method="post" action="?hosting_and_support">
+              <form method="post" action="?expenses">
                 <div class="modal-header">
                   <h5 class="modal-title">{{index $.T "billing_approve_title"}} {{$request.Domain}}</h5>
                   <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="{{index $.T "tree_close"}}"></button>
@@ -1471,7 +1492,7 @@
           </div>
           <div class="modal fade" id="rejectSiteRequestModal{{$requestIndex}}" tabindex="-1" aria-hidden="true">
             <div class="modal-dialog modal-dialog-centered"><div class="modal-content">
-              <form method="post" action="?hosting_and_support">
+              <form method="post" action="?expenses">
                 <div class="modal-header">
                   <h5 class="modal-title">{{index $.T "billing_reject_title"}} {{$request.Domain}}</h5>
                   <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="{{index $.T "tree_close"}}"></button>
@@ -1527,7 +1548,7 @@
             <div class="text-muted small">{{index $.T "billing_used_label"}} {{$site.UsedLabel}} / выделено {{$site.LimitLabel}}, {{index $.T "billing_free_label"}} {{$site.FreeLabel}}</div>
             <div class="text-muted small">Расчёт: {{$site.BillingUsageLabel}} · {{$site.BillingPriceLabel}} · {{$site.BillingStatusText}}</div>
           </div>
-          {{if not $site.IsDemo}}<form method="post" action="?hosting_and_support" class="billing-site-form" data-billing-ajax-save>
+          {{if not $site.IsDemo}}<form method="post" action="?expenses" class="billing-site-form" data-billing-ajax-save>
             <input type="hidden" name="billing_action" value="update_site">
             <input type="hidden" name="domain" value="{{$site.Domain}}">
             <label>{{index $.T "billing_quota"}} <input name="quota" type="text" class="form-control form-control-sm" value="{{$site.QuotaInput}}"></label>
@@ -1545,7 +1566,7 @@
           </div>
           <div class="modal fade" id="deleteSiteModal{{$siteIndex}}" tabindex="-1" aria-hidden="true">
             <div class="modal-dialog modal-dialog-centered"><div class="modal-content">
-              <form method="post" action="?hosting_and_support">
+              <form method="post" action="?expenses">
                 <div class="modal-header">
                   <h5 class="modal-title">{{index $.T "billing_delete_modal_title"}} {{$site.Domain}}</h5>
                   <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="{{index $.T "tree_close"}}"></button>
@@ -1607,7 +1628,7 @@
           <p class="text-muted">{{index .T "billing_service_mail_hint"}}</p>
         </div>
       </div>
-      <form method="post" action="?hosting_and_support" class="billing-service-mail-settings-form" data-billing-ajax-save>
+      <form method="post" action="?expenses" class="billing-service-mail-settings-form" data-billing-ajax-save>
         <input type="hidden" name="billing_action" value="service_mail_settings">
         <label class="checkbox-row">
           <input type="checkbox" name="service_mail_relay_enabled" value="1" {{if .ServiceMailRelayEnabled}}checked{{end}}>
@@ -1630,7 +1651,7 @@
             <div class="text-muted small">{{index $.T "billing_service_mail_key"}}: {{.PublicKey}}</div>
             <div class="text-muted small">IP: {{.LastIP}} · {{index $.T "billing_service_mail_sent"}}: {{.SentCount}} · {{index $.T "billing_service_mail_errors"}}: {{.ErrorCount}} · {{index $.T "billing_service_mail_last"}}: {{.LastSeenAt}}</div>
           </div>
-          <form method="post" action="?hosting_and_support" class="billing-site-form">
+          <form method="post" action="?expenses" class="billing-site-form">
             <input type="hidden" name="installation_id" value="{{.InstallationID}}">
             {{if .Blocked}}
             <input type="hidden" name="billing_action" value="unblock_service_mail_installation">
@@ -1645,7 +1666,7 @@
         <div class="empty">{{index .T "billing_service_mail_empty"}}</div>
         {{end}}
       </div>
-      <form method="post" action="?hosting_and_support" class="billing-service-mail-block-form mt-3">
+      <form method="post" action="?expenses" class="billing-service-mail-block-form mt-3">
         <input type="hidden" name="billing_action" value="add_service_mail_block">
         <label>{{index .T "billing_service_mail_block_scope"}}
           <select name="scope" class="form-control">
@@ -1672,7 +1693,7 @@
         {{range .ServiceMailBlocks}}
         <div class="billing-plan-row">
           <span>{{.Scope}}: {{.Value}} · {{.Reason}} · {{.CreatedAt}}</span>
-          <form method="post" action="?hosting_and_support">
+          <form method="post" action="?expenses">
             <input type="hidden" name="billing_action" value="delete_service_mail_block">
             <input type="hidden" name="block_id" value="{{.ID}}">
             <button type="submit" class="btn btn-outline-primary btn-sm">{{index $.T "billing_service_mail_remove_block"}}</button>
@@ -1682,7 +1703,7 @@
       </div>
       {{end}}
       {{if .ServiceMailEvents}}
-      <form method="post" action="?hosting_and_support" class="billing-service-mail-log-panel mt-3" data-service-mail-log-panel>
+      <form method="post" action="?expenses" class="billing-service-mail-log-panel mt-3" data-service-mail-log-panel>
         <input type="hidden" name="billing_action" value="delete_service_mail_events">
         <div class="billing-service-mail-log-toolbar">
           <label>Дата логов
@@ -1748,7 +1769,7 @@
             <span>{{index $.T "billing_backup_token_status"}} {{.TokenStatus}}</span>
             {{if .DownloadedAt}}<span>{{index $.T "billing_backup_downloaded_at"}} {{.DownloadedAt}}</span>{{end}}
           </div>
-          <form method="post" action="?hosting_and_support" class="billing-backup-actions" data-billing-ajax-save>
+          <form method="post" action="?expenses" class="billing-backup-actions" data-billing-ajax-save>
             <input type="hidden" name="billing_action" value="update_backup_retention">
             <input type="hidden" name="backup_id" value="{{.ID}}">
             <label>{{index $.T "billing_backup_retention_days"}}

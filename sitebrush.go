@@ -10,11 +10,13 @@ import (
 	"crypto/ecdh"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/rsa"
 	"crypto/sha1"
 	"crypto/sha256"
 	"crypto/subtle"
 	"crypto/tls"
 	"crypto/x509"
+	"crypto/x509/pkix"
 	"database/sql"
 	"embed"
 	"encoding/base64"
@@ -52,6 +54,7 @@ import (
 	"sync"
 	"time"
 
+	"golang.org/x/crypto/acme"
 	"golang.org/x/crypto/acme/autocert"
 	"golang.org/x/net/dns/dnsmessage"
 	"golang.org/x/net/html"
@@ -64,6 +67,7 @@ import (
 	"sitebrush/pkg/diagnosticlog"
 	"sitebrush/pkg/dirprotect"
 	"sitebrush/pkg/diskusage"
+	"sitebrush/pkg/expenses"
 	"sitebrush/pkg/geoip"
 	"sitebrush/pkg/hostingandsupport"
 	"sitebrush/pkg/mailout"
@@ -156,7 +160,7 @@ const backupImportTextEntryLimitBytes int64 = 16 * 1024 * 1024
 const backupImportFileEntryLimitBytes int64 = 128 * 1024 * 1024
 const backupImportUncompressedLimitBytes int64 = 1024 * 1024 * 1024
 const hostingSnapshotNetChanPort = "9876"
-const hostingAndSupportPanelSnapshotVersion = 2
+const hostingAndSupportPanelSnapshotVersion = 4
 const hostingAndSupportMetricsRefreshInterval = 30 * time.Second
 const hostingAndSupportFullRefreshInterval = 5 * time.Minute
 
@@ -176,6 +180,7 @@ type App struct {
 	automaticSSLAvailable     bool
 	embeddedStaticAssets      map[string]embeddedStaticAsset
 	autoCertCertificateCache  chan autoCertCertificateCacheRequest
+	automaticSSL              chan automaticSSLRequest
 	grabTracker               *grabProgressTracker
 	grabCancels               *grabCancelTracker
 	trialPreviews             *publicTrialPreviewStore
@@ -185,6 +190,8 @@ type App struct {
 	guestStaticHTMLCache      chan guestStaticHTMLCacheRequest
 	geoIP                     *geoip.Resolver
 	domainLogEvents           chan domainLogEvent
+	tlsHandshakeNoiseEvents   chan tlsHandshakeNoiseEvent
+	tlsHandshakeNoiseOverflow chan struct{}
 	autoCertGuard             chan autoCertGuardRequest
 	authIPFailureCache        chan authIPFailureCacheRequest
 	registrationConfirmations chan emailConfirmationMemoryRequest
@@ -194,6 +201,8 @@ type App struct {
 	hostingAndSupportPanel    chan hostingAndSupportPanelRequest
 	billingInvoices           chan billingInvoiceProcessRequest
 	renderTemplates           chan renderTemplateRequest
+	controlDatabase           *serverControlDatabaseDispatcher
+	hostingSupportEvents      chan hostingandsupport.HostingSnapshotEvent
 }
 
 type billingInvoiceProcessRequest struct {
@@ -215,7 +224,7 @@ type hostingAndSupportPanelRequest struct {
 	kind        string
 	metrics     []hostingandsupport.ServerMetricView
 	quotaChange siteQuotaRow
-	costPolicy  hostingandsupport.ServerCostPolicy
+	costPolicy  expenses.ServerPolicy
 	reply       chan hostingAndSupportPanelResponse
 }
 
@@ -253,7 +262,8 @@ type hostingAndSupportPanelSnapshot struct {
 	DemoSettings            demo.Settings
 	AutoRegistrationEnabled bool
 	CommissionBPS           int
-	LocalCostPolicy         hostingandsupport.ServerCostPolicy
+	LocalCostPolicy         expenses.ServerPolicy
+	ShowCentralRegistry     bool
 }
 
 type serviceMailRequest struct {
@@ -357,6 +367,30 @@ type autoCertCertificateCacheResponse struct {
 	certificate *tls.Certificate
 	expiresAt   time.Time
 	found       bool
+}
+
+type automaticSSLRequest struct {
+	action string
+	domain string
+}
+
+type automaticSSLResponse struct {
+	certificate *tls.Certificate
+	err         error
+}
+
+type automaticSSLDomainResult struct {
+	domain      string
+	certificate *tls.Certificate
+	expiresAt   time.Time
+	retryAfter  time.Time
+	state       string
+	err         error
+}
+
+type automaticSSLIPResult struct {
+	serverIPs []net.IP
+	err       error
 }
 
 type embeddedStaticAsset struct {
@@ -540,6 +574,269 @@ type siteDBOperationResponse struct {
 	rows   *sql.Rows
 	row    *sql.Row
 	err    error
+}
+
+type serverControlDatabaseAccessKind int
+
+const (
+	serverControlDatabaseRead serverControlDatabaseAccessKind = iota
+	serverControlDatabaseWrite
+	serverControlDatabaseReaderCount = 5
+)
+
+// A private worker reply keeps the public one-shot channel single-owner.
+// Cancellation can therefore close the public reply without racing a database worker.
+type serverControlDatabaseAccessRequest struct {
+	cancel      chan struct{}
+	reply       chan serverControlDatabaseAccessResponse
+	workerReply chan serverControlDatabaseAccessResponse
+}
+
+type serverControlDatabaseAccessResponse struct {
+	session *serverControlDatabaseSession
+	err     error
+}
+
+type serverControlDatabaseSession struct {
+	*sql.DB
+	release    chan<- struct{}
+	standalone bool
+}
+
+func (session *serverControlDatabaseSession) Close() error {
+	if session == nil || session.DB == nil {
+		return nil
+	}
+	if session.standalone {
+		return session.DB.Close()
+	}
+	select {
+	case session.release <- struct{}{}:
+	default:
+	}
+	return nil
+}
+
+type serverControlDatabaseDispatcher struct {
+	readRequests  chan serverControlDatabaseAccessRequest
+	writeRequests chan serverControlDatabaseAccessRequest
+	stop          chan struct{}
+	workersDone   chan struct{}
+	closeRequests chan chan struct{}
+	stopped       chan struct{}
+}
+
+// The control database uses one write participant and five read participants.
+// WAL keeps readers available while the writer owns the only write connection.
+func startServerControlDatabaseDispatcher(databasePath string, debug bool) (*serverControlDatabaseDispatcher, error) {
+	writerDatabase, err := openServerControlDatabaseHandle(databasePath, true)
+	if err != nil {
+		return nil, err
+	}
+	if err := hostingandsupport.Migrate(context.Background(), writerDatabase); err != nil {
+		_ = writerDatabase.Close()
+		return nil, err
+	}
+
+	readerDatabases := make([]*sql.DB, 0, serverControlDatabaseReaderCount)
+	for range serverControlDatabaseReaderCount {
+		readerDatabase, openErr := openServerControlDatabaseHandle(databasePath, false)
+		if openErr != nil {
+			_ = writerDatabase.Close()
+			for _, openedDatabase := range readerDatabases {
+				_ = openedDatabase.Close()
+			}
+			return nil, openErr
+		}
+		readerDatabases = append(readerDatabases, readerDatabase)
+	}
+
+	dispatcher := &serverControlDatabaseDispatcher{
+		readRequests:  make(chan serverControlDatabaseAccessRequest, 256),
+		writeRequests: make(chan serverControlDatabaseAccessRequest, 128),
+		stop:          make(chan struct{}),
+		workersDone:   make(chan struct{}, serverControlDatabaseReaderCount+1),
+		closeRequests: make(chan chan struct{}),
+		stopped:       make(chan struct{}),
+	}
+	go dispatcher.runWorker(writerDatabase, dispatcher.writeRequests, "writer", debug)
+	for readerIndex, readerDatabase := range readerDatabases {
+		go dispatcher.runWorker(readerDatabase, dispatcher.readRequests, fmt.Sprintf("reader-%d", readerIndex+1), debug)
+	}
+	go dispatcher.runCloser()
+	return dispatcher, nil
+}
+
+func openServerControlDatabaseHandle(databasePath string, writer bool) (*sql.DB, error) {
+	database, err := sql.Open("sqlite", "file:"+databasePath)
+	if err != nil {
+		return nil, err
+	}
+	database.SetMaxOpenConns(1)
+	database.SetMaxIdleConns(1)
+	database.SetConnMaxLifetime(0)
+	pragmas := []string{
+		"PRAGMA busy_timeout=5000",
+		"PRAGMA foreign_keys=ON",
+		"PRAGMA synchronous=NORMAL",
+	}
+	if writer {
+		pragmas = append([]string{"PRAGMA journal_mode=WAL"}, pragmas...)
+	}
+	for _, pragma := range pragmas {
+		if _, err := database.ExecContext(context.Background(), pragma); err != nil {
+			_ = database.Close()
+			return nil, err
+		}
+	}
+	return database, nil
+}
+
+func (dispatcher *serverControlDatabaseDispatcher) runWorker(database *sql.DB, requests <-chan serverControlDatabaseAccessRequest, workerName string, debug bool) {
+	defer func() {
+		_ = database.Close()
+		dispatcher.workersDone <- struct{}{}
+	}()
+	for {
+		select {
+		case <-dispatcher.stop:
+			return
+		case request := <-requests:
+			select {
+			case <-request.cancel:
+				continue
+			default:
+			}
+			release := make(chan struct{}, 1)
+			response := serverControlDatabaseAccessResponse{session: &serverControlDatabaseSession{DB: database, release: release}}
+			delivered := false
+			select {
+			case request.workerReply <- response:
+				delivered = true
+			case <-request.cancel:
+			case <-dispatcher.stop:
+			}
+			if !delivered {
+				continue
+			}
+			startedAt := time.Now()
+			select {
+			case <-release:
+			case <-request.cancel:
+			case <-dispatcher.stop:
+			}
+			if debug && time.Since(startedAt) >= slowDatabaseOperationLogAfter {
+				log.Printf("%sCONTROL DB%s worker=%s session=%s", terminalCyan(), terminalReset(), workerName, time.Since(startedAt).String())
+			}
+		}
+	}
+}
+
+func (dispatcher *serverControlDatabaseDispatcher) acquire(ctx context.Context, kind serverControlDatabaseAccessKind) (*serverControlDatabaseSession, error) {
+	if dispatcher == nil {
+		return nil, errors.New("server control database dispatcher is not running")
+	}
+	select {
+	case <-dispatcher.stopped:
+		return nil, errors.New("server control database dispatcher stopped")
+	default:
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	request := serverControlDatabaseAccessRequest{
+		cancel:      make(chan struct{}),
+		reply:       make(chan serverControlDatabaseAccessResponse, 1),
+		workerReply: make(chan serverControlDatabaseAccessResponse, 1),
+	}
+	go dispatcher.relayResponse(request)
+	requests := dispatcher.readRequests
+	queueTimeout := 5 * time.Second
+	if kind == serverControlDatabaseWrite {
+		requests = dispatcher.writeRequests
+		queueTimeout = 15 * time.Second
+	}
+	timer := time.NewTimer(queueTimeout)
+	defer timer.Stop()
+	cancelRequest := func() {
+		close(request.cancel)
+	}
+	select {
+	case requests <- request:
+	case <-ctx.Done():
+		cancelRequest()
+		return nil, ctx.Err()
+	case <-timer.C:
+		cancelRequest()
+		return nil, fmt.Errorf("server control database queue timeout")
+	case <-dispatcher.stop:
+		cancelRequest()
+		return nil, errors.New("server control database dispatcher stopped")
+	}
+	select {
+	case response, open := <-request.reply:
+		if !open {
+			return nil, context.Canceled
+		}
+		return response.session, response.err
+	case <-ctx.Done():
+		cancelRequest()
+		return nil, ctx.Err()
+	case <-timer.C:
+		cancelRequest()
+		return nil, fmt.Errorf("server control database queue timeout")
+	case <-dispatcher.stop:
+		cancelRequest()
+		return nil, errors.New("server control database dispatcher stopped")
+	}
+}
+
+func (dispatcher *serverControlDatabaseDispatcher) relayResponse(request serverControlDatabaseAccessRequest) {
+	defer close(request.reply)
+	select {
+	case response := <-request.workerReply:
+		select {
+		case request.reply <- response:
+		case <-request.cancel:
+		case <-dispatcher.stop:
+		}
+	case <-request.cancel:
+	case <-dispatcher.stop:
+	}
+}
+
+func (dispatcher *serverControlDatabaseDispatcher) Close() {
+	if dispatcher == nil {
+		return
+	}
+	reply := make(chan struct{})
+	select {
+	case dispatcher.closeRequests <- reply:
+	case <-dispatcher.stopped:
+		return
+	}
+	select {
+	case <-reply:
+	case <-dispatcher.stopped:
+	}
+}
+
+func (dispatcher *serverControlDatabaseDispatcher) runCloser() {
+	reply := <-dispatcher.closeRequests
+	close(dispatcher.stop)
+	for range serverControlDatabaseReaderCount + 1 {
+		<-dispatcher.workersDone
+	}
+	for {
+		select {
+		case <-dispatcher.readRequests:
+		case <-dispatcher.writeRequests:
+		default:
+			close(dispatcher.stopped)
+			close(reply)
+			return
+		}
+	}
 }
 
 // siteFileDatabase owns one file-backed database handle from one goroutine.
@@ -2013,6 +2310,32 @@ type domainLogEvent struct {
 }
 
 const domainLogRetentionDays = 5
+const tlsHandshakeNoiseQueueSize = 4096
+const tlsHandshakeNoiseMaximumGroups = 2048
+const tlsHandshakeNoiseReservedOverflowGroups = 4
+const tlsHandshakeNoiseIdleTTL = 24 * time.Hour
+const tlsHandshakeNoiseFlushInterval = 15 * time.Second
+
+type tlsHandshakeNoiseEvent struct {
+	Noise      diagnosticlog.TLSHandshakeNoise
+	OccurredAt time.Time
+}
+
+type tlsHandshakeNoiseGroup struct {
+	noise         diagnosticlog.TLSHandshakeNoise
+	firstAt       time.Time
+	lastAt        time.Time
+	nextSummaryAt time.Time
+	total         uint64
+	reported      uint64
+	summaryCount  int
+	displaySource string
+}
+
+type tlsHandshakeNoiseAggregate struct {
+	groupsByKey map[string]tlsHandshakeNoiseGroup
+	saturated   bool
+}
 
 type requestDiagnosticFields struct {
 	Scheme string
@@ -2315,12 +2638,194 @@ type problemLogWriter struct {
 	application *App
 }
 
+// The HTTP server writes from connection goroutines, so this adapter only
+// classifies and transfers noisy events without waiting for disk logging.
 func (writer problemLogWriter) Write(payload []byte) (int, error) {
 	message := strings.TrimSpace(string(payload))
-	if writer.application != nil && message != "" {
+	if writer.application == nil || message == "" {
+		return len(payload), nil
+	}
+	noise, noisy := diagnosticlog.ParseTLSHandshakeNoise(message)
+	if !noisy || writer.application.tlsHandshakeNoiseEvents == nil {
 		writer.application.logProblemEvent("%s", message)
+		return len(payload), nil
+	}
+	event := tlsHandshakeNoiseEvent{Noise: noise, OccurredAt: time.Now().UTC()}
+	select {
+	case writer.application.tlsHandshakeNoiseEvents <- event:
+	default:
+		select {
+		case writer.application.tlsHandshakeNoiseOverflow <- struct{}{}:
+		default:
+		}
 	}
 	return len(payload), nil
+}
+
+// One process owns all aggregation state and serializes summary publication.
+func (a *App) startTLSHandshakeNoiseProcess(stop <-chan struct{}) {
+	events := make(chan tlsHandshakeNoiseEvent, tlsHandshakeNoiseQueueSize)
+	overflow := make(chan struct{}, 1)
+	a.tlsHandshakeNoiseEvents = events
+	a.tlsHandshakeNoiseOverflow = overflow
+	go a.runTLSHandshakeNoiseProcess(stop, events, overflow)
+}
+
+func (a *App) runTLSHandshakeNoiseProcess(stop <-chan struct{}, events <-chan tlsHandshakeNoiseEvent, overflow <-chan struct{}) {
+	aggregate := newTLSHandshakeNoiseAggregate()
+	ticker := time.NewTicker(tlsHandshakeNoiseFlushInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-stop:
+			for {
+				select {
+				case event := <-events:
+					a.logTLSHandshakeNoiseMessages(aggregate.observe(event))
+				case <-overflow:
+					aggregate.saturated = true
+				default:
+					a.logTLSHandshakeNoiseMessages(aggregate.flushDue(time.Now().UTC(), true))
+					return
+				}
+			}
+		case event := <-events:
+			a.logTLSHandshakeNoiseMessages(aggregate.observe(event))
+		case <-overflow:
+			aggregate.saturated = true
+		case now := <-ticker.C:
+			select {
+			case <-overflow:
+				aggregate.saturated = true
+			default:
+			}
+			a.logTLSHandshakeNoiseMessages(aggregate.flushDue(now.UTC(), false))
+		}
+	}
+}
+
+func (a *App) logTLSHandshakeNoiseMessages(messages []string) {
+	for _, message := range messages {
+		a.logProblemEvent("%s", message)
+	}
+}
+
+func newTLSHandshakeNoiseAggregate() *tlsHandshakeNoiseAggregate {
+	return &tlsHandshakeNoiseAggregate{groupsByKey: make(map[string]tlsHandshakeNoiseGroup)}
+}
+
+func (aggregate *tlsHandshakeNoiseAggregate) observe(event tlsHandshakeNoiseEvent) []string {
+	if event.OccurredAt.IsZero() {
+		event.OccurredAt = time.Now().UTC()
+	}
+	groupKey := strings.Join([]string{event.Noise.Class, event.Noise.Source}, "\x00")
+	group, found := aggregate.groupsByKey[groupKey]
+	messages := make([]string, 0, 2)
+	if found && event.OccurredAt.Sub(group.lastAt) >= tlsHandshakeNoiseIdleTTL {
+		if group.total > group.reported {
+			messages = append(messages, formatTLSHandshakeNoiseSummary(group, "final", aggregate.saturated))
+		}
+		delete(aggregate.groupsByKey, groupKey)
+		found = false
+	}
+	if !found && len(aggregate.groupsByKey) >= tlsHandshakeNoiseMaximumGroups-tlsHandshakeNoiseReservedOverflowGroups {
+		groupKey = strings.Join([]string{event.Noise.Class, "other"}, "\x00")
+		group, found = aggregate.groupsByKey[groupKey]
+	}
+	if !found {
+		group = tlsHandshakeNoiseGroup{
+			noise:         event.Noise,
+			firstAt:       event.OccurredAt,
+			lastAt:        event.OccurredAt,
+			nextSummaryAt: event.OccurredAt.Add(diagnosticlog.TLSHandshakeNoiseInterval(0)),
+			total:         1,
+			reported:      1,
+			displaySource: event.Noise.Source,
+		}
+		if strings.HasSuffix(groupKey, "\x00other") {
+			group.displaySource = "other"
+		}
+		aggregate.groupsByKey[groupKey] = group
+		return append(messages, event.Noise.Message)
+	}
+	group.total++
+	group.lastAt = event.OccurredAt
+	aggregate.groupsByKey[groupKey] = group
+	return messages
+}
+
+func (aggregate *tlsHandshakeNoiseAggregate) flushDue(now time.Time, stopping bool) []string {
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	groupKeys := make([]string, 0, len(aggregate.groupsByKey))
+	for groupKey := range aggregate.groupsByKey {
+		groupKeys = append(groupKeys, groupKey)
+	}
+	sort.Strings(groupKeys)
+
+	lowerBound := aggregate.saturated
+	messages := make([]string, 0, len(groupKeys))
+	for _, groupKey := range groupKeys {
+		group := aggregate.groupsByKey[groupKey]
+		idle := now.Sub(group.lastAt) >= tlsHandshakeNoiseIdleTTL
+		if stopping || idle {
+			if group.total > group.reported {
+				intervalLabel := "shutdown"
+				if idle {
+					intervalLabel = "final"
+				}
+				messages = append(messages, formatTLSHandshakeNoiseSummary(group, intervalLabel, lowerBound))
+			}
+			delete(aggregate.groupsByKey, groupKey)
+			continue
+		}
+		if now.Before(group.nextSummaryAt) || group.total == group.reported {
+			continue
+		}
+		interval := diagnosticlog.TLSHandshakeNoiseInterval(group.summaryCount)
+		messages = append(messages, formatTLSHandshakeNoiseSummary(group, tlsHandshakeNoiseIntervalLabel(interval), lowerBound))
+		group.reported = group.total
+		group.summaryCount++
+		group.nextSummaryAt = now.Add(diagnosticlog.TLSHandshakeNoiseInterval(group.summaryCount))
+		aggregate.groupsByKey[groupKey] = group
+	}
+	if len(messages) > 0 {
+		aggregate.saturated = false
+	}
+	return messages
+}
+
+func tlsHandshakeNoiseIntervalLabel(interval time.Duration) string {
+	switch interval {
+	case 5 * time.Minute:
+		return "5m"
+	case 30 * time.Minute:
+		return "30m"
+	case time.Hour:
+		return "1h"
+	case 6 * time.Hour:
+		return "6h"
+	case 24 * time.Hour:
+		return "24h"
+	default:
+		return interval.String()
+	}
+}
+
+func formatTLSHandshakeNoiseSummary(group tlsHandshakeNoiseGroup, intervalLabel string, lowerBound bool) string {
+	return fmt.Sprintf(
+		"TLS handshake noise summary class=%s source=%s interval=%s new=%d total=%d first_at=%s last_at=%s lower_bound=%t sample=%q",
+		group.noise.Class,
+		group.displaySource,
+		intervalLabel,
+		group.total-group.reported,
+		group.total,
+		group.firstAt.Format(time.RFC3339),
+		group.lastAt.Format(time.RFC3339),
+		lowerBound,
+		diagnosticlog.SafeLogValue(group.noise.Message),
+	)
 }
 
 func (a *App) analyticsMiddleware(next http.Handler) http.Handler {
@@ -2369,7 +2874,7 @@ func shouldRecordAnalyticsRequest(r *http.Request) bool {
 		return false
 	}
 	query := r.URL.Query()
-	for _, skippedFlag := range []string{"analytics", "hosting_and_support", "billing", "grab_events", "grab_ws", "revision_preview", "publish_events", "captcha"} {
+	for _, skippedFlag := range []string{"analytics", "expenses", "hosting_and_support", "billing", "grab_events", "grab_ws", "revision_preview", "publish_events", "captcha"} {
 		if _, found := query[skippedFlag]; found {
 			return false
 		}
@@ -2382,7 +2887,7 @@ func isSitebrushControllerQuery(query url.Values) bool {
 		"save", "template_events", "grab_preview", "grab_events", "grab_ws", "revision_preview", "revision_restore", "revision_delete", "revision_toggle",
 		"tree", "native_pick_files", "native_save_backup", "edit", "visual", "text", "editraw", "settings", "properties",
 		"backup_download", "hosting_and_support_backup_download", "billing_backup_download", "backup_import", "profile", "freeze", "publish", "publish_events", "publish_preview", "files",
-		"revisions", "login", "register", "email_confirm", "grab", "recover", "captcha", "analytics", "hosting_and_support", "billing",
+		"revisions", "login", "register", "email_confirm", "grab", "recover", "captcha", "analytics", "expenses", "hosting_and_support", "billing",
 	} {
 		if _, found := query[controllerFlag]; found {
 			return true
@@ -4449,10 +4954,22 @@ func runSitebrushServer(ctx context.Context, config serverRunConfig) error {
 
 	var siteDatabaseRouter *perSiteDBRouter
 	application := &App{storagePath: effectiveStoragePath, storageRealRoot: storageRealRoot, dbPath: effectiveDBPath, debug: config.Debug, desktopMode: config.DesktopMode, nativeFileDialog: desktop.NativeFileDialogSupported(), grabTracker: newGrabProgressTracker(), grabCancels: newGrabCancelTracker(), trialPreviews: newPublicTrialPreviewStore(), publishTracker: newPublishProgressTracker(), analyticsEvents: make(chan siteAnalyticsEvent, 65536), domainLogEvents: make(chan domainLogEvent, 1024)}
+	controlDatabaseDispatcher, err := startServerControlDatabaseDispatcher(effectiveDBPath, config.Debug)
+	if err != nil {
+		return fmt.Errorf("start server control database dispatcher: %w", err)
+	}
+	application.controlDatabase = controlDatabaseDispatcher
+	defer func() {
+		logShutdownStep("closing server control database dispatcher")
+		controlDatabaseDispatcher.Close()
+		logShutdownDone("server control database dispatcher closed")
+	}()
+	application.startTLSHandshakeNoiseProcess(ctx.Done())
 	application.guestStaticHTMLCache = startGuestStaticHTMLCacheWorker(ctx, defaultGuestStaticHTMLCacheLimitBytes)
 	application.authIPFailureCache = startAuthIPFailureCacheWorker(ctx)
 	application.registrationConfirmations = startEmailConfirmationMemoryWorker(ctx)
 	application.emailDelivery = mailout.StartDeliveryWorker(ctx, application.defaultEmailSender())
+	application.hostingSupportEvents = application.startHostingSupportEventWorker(ctx.Done())
 	application.geoIP = geoip.NewResolver(filepath.Join(application.storageRootDir(), "geoip"))
 	certificateCacheDir := filepath.Join(application.storageRootDir(), "letsencrypt")
 	if mkdirErr := application.mkdirAllInsideStorage(certificateCacheDir, 0o755); mkdirErr != nil {
@@ -4532,7 +5049,7 @@ func runSitebrushServer(ctx context.Context, config serverRunConfig) error {
 		certificateManager := &autocert.Manager{
 			Prompt:     autocert.AcceptTOS,
 			Cache:      autocert.DirCache(certificateCacheDir),
-			HostPolicy: application.autoCertHostPolicy,
+			HostPolicy: application.autoCertPreparedHostPolicy,
 		}
 		tlsListener, tlsListenErr := listenTLSForAutoCert()
 		if tlsListenErr != nil {
@@ -4540,10 +5057,17 @@ func runSitebrushServer(ctx context.Context, config serverRunConfig) error {
 		} else {
 			defer tlsListener.Close()
 			application.automaticSSLAvailable = true
-			httpHandler = certificateManager.HTTPHandler(appHandler)
-			application.logProblemEvent("AUTOCERT enabled: HTTP challenge on port 80, HTTPS TLS listener on port 443, certificate cache=%s", certificateCacheDir)
-			go application.serveTLSWithAutoCert(ctx, tlsListener, application.autoCertTLSConfig(certificateManager), appHandler)
-			application.startAutomaticSSLRefreshWorker(ctx)
+			automaticSSL, fallbackCertificate, automaticSSLErr := application.startAutomaticSSLProcess(ctx.Done(), certificateManager)
+			if automaticSSLErr != nil {
+				application.automaticSSLAvailable = false
+				_ = tlsListener.Close()
+				application.logProblemEvent("AUTOCERT disabled: cannot prepare fallback certificate: %v", automaticSSLErr)
+			} else {
+				application.automaticSSL = automaticSSL
+				httpHandler = certificateManager.HTTPHandler(appHandler)
+				application.logProblemEvent("AUTOCERT enabled: HTTP challenge on port 80, HTTPS TLS listener on port 443, certificate cache=%s", certificateCacheDir)
+				go application.serveTLSWithAutoCert(ctx, tlsListener, application.autoCertTLSConfig(certificateManager, fallbackCertificate), appHandler)
+			}
 		}
 	}
 
@@ -5108,112 +5632,173 @@ func (a *App) serveTLSWithAutoCert(ctx context.Context, tlsListener net.Listener
 	close(serverStopped)
 }
 
-func (a *App) autoCertTLSConfig(certificateManager *autocert.Manager) *tls.Config {
+func (a *App) autoCertTLSConfig(certificateManager *autocert.Manager, fallbackCertificate *tls.Certificate) *tls.Config {
 	tlsConfig := certificateManager.TLSConfig()
 	originalGetCertificate := tlsConfig.GetCertificate
 	tlsConfig.GetCertificate = func(clientHello *tls.ClientHelloInfo) (*tls.Certificate, error) {
-		certificateDomain := normalizeDomainName(clientHello.ServerName)
-		if certificateDomain == "" {
-			certificateDomain = "localhost"
+		if automaticSSLClientHelloIsChallenge(clientHello) {
+			return originalGetCertificate(clientHello)
 		}
-		remoteAddress := tlsClientRemoteAddress(clientHello)
+		certificateDomain := normalizeDomainName(clientHello.ServerName)
 		now := time.Now()
-		cachedCertificate, cachedExpiresAt, cachedCertificateOK := a.autoCertCachedCertificate(certificateDomain, now, 0)
-		if cachedCertificateOK && !cachedExpiresAt.Before(now.Add(automaticSSLCertificateRenewBefore)) {
-			a.logDomainEvent(certificateDomain, "AUTOCERT certificate loaded from cache server_name=%s remote=%s expires_at=%s", clientHello.ServerName, remoteAddress, cachedExpiresAt.Format(time.RFC3339))
+		cachedCertificate, _, cachedCertificateOK := a.autoCertCachedCertificateFromMemory(certificateDomain, now, 0)
+		if cachedCertificateOK {
 			return cachedCertificate, nil
 		}
-		certificateContext := contextWithDomain(context.Background(), certificateDomain)
-		if err := a.autoCertHandshakePrecheck(certificateContext, certificateDomain); err != nil {
-			if cachedCertificateOK {
-				a.logDomainEvent(certificateDomain, "AUTOCERT renewal rejected; serving cached certificate server_name=%s remote=%s expires_at=%s error=%v", clientHello.ServerName, remoteAddress, cachedExpiresAt.Format(time.RFC3339), err)
-				return cachedCertificate, nil
+		if certificateDomain != "" && a.automaticSSL != nil {
+			select {
+			case a.automaticSSL <- automaticSSLRequest{action: "observe", domain: certificateDomain}:
+			default:
 			}
-			a.logDomainEvent(certificateDomain, "AUTOCERT certificate request rejected server_name=%s remote=%s error=%v", clientHello.ServerName, remoteAddress, err)
-			return nil, err
 		}
-		if err := a.autoCertRetryDelayError(certificateContext, certificateDomain, now); err != nil {
-			if cachedCertificateOK {
-				a.logDomainEvent(certificateDomain, "AUTOCERT renewal delayed; serving cached certificate server_name=%s remote=%s expires_at=%s error=%v", clientHello.ServerName, remoteAddress, cachedExpiresAt.Format(time.RFC3339), err)
-				return cachedCertificate, nil
-			}
-			a.logDomainEvent(certificateDomain, "AUTOCERT certificate request delayed server_name=%s remote=%s error=%v", clientHello.ServerName, remoteAddress, err)
-			return nil, err
+		if fallbackCertificate == nil {
+			return nil, errors.New("automatic SSL fallback certificate is unavailable")
 		}
-		if err := a.beginAutoCertIssuance(context.Background(), certificateDomain); err != nil {
-			if cachedCertificateOK {
-				a.logDomainEvent(certificateDomain, "AUTOCERT renewal skipped; serving cached certificate server_name=%s remote=%s expires_at=%s error=%v", clientHello.ServerName, remoteAddress, cachedExpiresAt.Format(time.RFC3339), err)
-				return cachedCertificate, nil
-			}
-			a.logDomainEvent(certificateDomain, "AUTOCERT certificate request skipped server_name=%s remote=%s error=%v", clientHello.ServerName, remoteAddress, err)
-			return nil, err
-		}
-		defer a.finishAutoCertIssuance(certificateDomain)
-		a.logDomainEvent(certificateDomain, "AUTOCERT certificate request started server_name=%s remote=%s", clientHello.ServerName, remoteAddress)
-		var certificateRequestDone chan struct{}
-		if a.debug {
-			certificateRequestDone = make(chan struct{})
-			certificateRequestStartedAt := time.Now()
-			go a.logSlowAutoCertCertificateRequest(certificateRequestDone, certificateDomain, clientHello.ServerName, remoteAddress, certificateRequestStartedAt)
-		}
-		certificate, err := originalGetCertificate(clientHello)
-		if certificateRequestDone != nil {
-			close(certificateRequestDone)
-		}
-		if err != nil {
-			retryDelay := automaticSSLRetryDelayForCertificateError(err)
-			a.recordDomainAutomaticSSLFailure(certificateContext, certificateDomain, fmt.Sprintf("certificate request failed: %v", err), retryDelay)
-			if cachedCertificateOK {
-				a.logDomainEvent(certificateDomain, "AUTOCERT certificate request failed; serving cached certificate server_name=%s remote=%s expires_at=%s error=%v", clientHello.ServerName, remoteAddress, cachedExpiresAt.Format(time.RFC3339), err)
-				return cachedCertificate, nil
-			}
-			a.logDomainEvent(certificateDomain, "AUTOCERT certificate request failed server_name=%s remote=%s error=%v", clientHello.ServerName, remoteAddress, err)
-			return nil, err
-		}
-		a.clearDomainAutomaticSSLFailure(certificateContext, certificateDomain)
-		a.logDomainEvent(certificateDomain, "AUTOCERT certificate ready server_name=%s remote=%s", clientHello.ServerName, remoteAddress)
-		return certificate, nil
+		return fallbackCertificate, nil
 	}
 	return tlsConfig
 }
 
-func (a *App) autoCertHandshakePrecheck(ctx context.Context, domain string) error {
-	certificateDomain := normalizeDomainName(domain)
-	if certificateDomain == "" {
-		return fmt.Errorf("invalid certificate domain %q", domain)
+func automaticSSLClientHelloIsChallenge(clientHello *tls.ClientHelloInfo) bool {
+	if clientHello == nil {
+		return false
 	}
-	if !a.domainIsAutomaticSSLCandidate(ctx, certificateDomain) {
-		return fmt.Errorf("automatic SSL domain %q is not managed by Sitebrush", certificateDomain)
-	}
-	setting := a.domainAutomaticSSLSetting(ctx, certificateDomain)
-	if setting.ManuallyDisabled {
-		return fmt.Errorf("automatic SSL is manually disabled for %q", certificateDomain)
-	}
-	if strings.TrimSpace(setting.LastCheckedAt) != "" && !setting.Enabled {
-		return fmt.Errorf("automatic SSL DNS check failed for %q", certificateDomain)
-	}
-	return nil
-}
-
-func (a *App) logSlowAutoCertCertificateRequest(done <-chan struct{}, certificateDomain, serverName, remoteAddress string, startedAt time.Time) {
-	timer := time.NewTimer(slowHTTPRequestLogAfter)
-	defer timer.Stop()
-	for {
-		select {
-		case <-done:
-			return
-		case <-timer.C:
-			a.logDomainEvent(certificateDomain, "AUTOCERT certificate request still running server_name=%s remote=%s duration=%s", serverName, remoteAddress, time.Since(startedAt).String())
-			timer.Reset(slowHTTPRequestRepeatAfter)
+	for _, protocol := range clientHello.SupportedProtos {
+		if protocol == acme.ALPNProto {
+			return true
 		}
 	}
+	return false
 }
 
-func tlsClientRemoteAddress(clientHello *tls.ClientHelloInfo) string {
-	if clientHello == nil || clientHello.Conn == nil || clientHello.Conn.RemoteAddr() == nil {
-		return ""
+func (a *App) loadOrCreateAutomaticSSLFallbackCertificate(now time.Time) (*tls.Certificate, error) {
+	keysRootDirectory := filepath.Join(a.storageRootDir(), "keys")
+	certificateDirectory := filepath.Join(keysRootDirectory, "tls")
+	if err := a.mkdirAllInsideStorage(certificateDirectory, 0o700); err != nil {
+		return nil, err
 	}
-	return clientHello.Conn.RemoteAddr().String()
+	realKeysRootDirectory, err := a.existingPathInsideStorage(keysRootDirectory)
+	if err != nil {
+		return nil, err
+	}
+	realCertificateDirectory, err := a.existingPathInsideStorageSubtree(keysRootDirectory, certificateDirectory)
+	if err != nil {
+		return nil, err
+	}
+	if err := os.Chmod(realKeysRootDirectory, 0o700); err != nil {
+		return nil, err
+	}
+	if err := os.Chmod(realCertificateDirectory, 0o700); err != nil {
+		return nil, err
+	}
+
+	certificatePath := filepath.Join(certificateDirectory, "sitebrush-fallback.pem")
+	if certificate, loadErr := a.loadAutomaticSSLFallbackCertificate(certificatePath, now); loadErr == nil {
+		return certificate, nil
+	}
+	certificatePEM, certificate, err := generateAutomaticSSLFallbackCertificate(now)
+	if err != nil {
+		return nil, err
+	}
+	realCertificatePath, err := a.writablePathInsideStorageSubtree(certificateDirectory, certificatePath)
+	if err != nil {
+		return nil, err
+	}
+	temporaryPath := realCertificatePath + ".tmp"
+	if err := os.WriteFile(temporaryPath, certificatePEM, 0o600); err != nil {
+		return nil, err
+	}
+	if err := os.Chmod(temporaryPath, 0o600); err != nil {
+		_ = os.Remove(temporaryPath)
+		return nil, err
+	}
+	if err := os.Rename(temporaryPath, realCertificatePath); err != nil {
+		_ = os.Remove(temporaryPath)
+		return nil, err
+	}
+	if err := os.Chmod(realCertificatePath, 0o600); err != nil {
+		return nil, err
+	}
+	return certificate, nil
+}
+
+func (a *App) loadAutomaticSSLFallbackCertificate(certificatePath string, now time.Time) (*tls.Certificate, error) {
+	certificatePEM, err := a.readFileInsideStorage(certificatePath)
+	if err != nil {
+		return nil, err
+	}
+	certificate, err := tls.X509KeyPair(certificatePEM, certificatePEM)
+	if err != nil {
+		return nil, err
+	}
+	expiresAt, err := tlsCertificateExpiresAt(&certificate)
+	if err != nil {
+		return nil, err
+	}
+	if expiresAt.Before(now.Add(automaticSSLFallbackRenewBefore)) {
+		return nil, errors.New("automatic SSL fallback certificate requires renewal")
+	}
+	return &certificate, nil
+}
+
+func generateAutomaticSSLFallbackCertificate(now time.Time) ([]byte, *tls.Certificate, error) {
+	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		return nil, nil, err
+	}
+	serialLimit := new(big.Int).Lsh(big.NewInt(1), 128)
+	serialNumber, err := rand.Int(rand.Reader, serialLimit)
+	if err != nil {
+		return nil, nil, err
+	}
+	template := x509.Certificate{
+		SerialNumber: serialNumber,
+		Subject: pkix.Name{
+			CommonName:   "SiteBrush local fallback",
+			Organization: []string{"SiteBrush"},
+		},
+		NotBefore:             now.Add(-time.Hour),
+		NotAfter:              now.Add(automaticSSLFallbackValidity),
+		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		BasicConstraintsValid: true,
+		DNSNames:              []string{"localhost"},
+		IPAddresses:           []net.IP{net.ParseIP("127.0.0.1"), net.ParseIP("::1")},
+	}
+	certificateDER, err := x509.CreateCertificate(rand.Reader, &template, &template, &privateKey.PublicKey, privateKey)
+	if err != nil {
+		return nil, nil, err
+	}
+	privateKeyDER, err := x509.MarshalPKCS8PrivateKey(privateKey)
+	if err != nil {
+		return nil, nil, err
+	}
+	certificatePEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certificateDER})
+	privateKeyPEM := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: privateKeyDER})
+	combinedPEM := append(certificatePEM, privateKeyPEM...)
+	certificate, err := tls.X509KeyPair(combinedPEM, combinedPEM)
+	if err != nil {
+		return nil, nil, err
+	}
+	certificate.Leaf, err = x509.ParseCertificate(certificateDER)
+	if err != nil {
+		return nil, nil, err
+	}
+	return combinedPEM, &certificate, nil
+}
+
+func tlsCertificateExpiresAt(certificate *tls.Certificate) (time.Time, error) {
+	if certificate == nil || len(certificate.Certificate) == 0 {
+		return time.Time{}, errors.New("TLS certificate chain is empty")
+	}
+	if certificate.Leaf == nil {
+		leaf, err := x509.ParseCertificate(certificate.Certificate[0])
+		if err != nil {
+			return time.Time{}, err
+		}
+		certificate.Leaf = leaf
+	}
+	return certificate.Leaf.NotAfter, nil
 }
 
 func (a *App) ensureAutoCertGuard() {
@@ -5962,8 +6547,8 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 		a.billingSchedulePage(w, r)
 		return
 	}
-	if hasQueryFlag(r, "hosting_and_support") || hasQueryFlag(r, "billing") {
-		a.hostingAndSupportPage(w, r)
+	if hasQueryFlag(r, "expenses") || hasQueryFlag(r, "hosting_and_support") || hasQueryFlag(r, "billing") {
+		a.expensesPage(w, r)
 		return
 	}
 	if hasQueryFlag(r, "hosting_and_support_demo_payment") {
@@ -6159,7 +6744,7 @@ func (a *App) billingInvoicePage(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Robots-Tag", "noindex, nofollow")
 	token := strings.TrimSpace(r.URL.Query().Get("token"))
-	controlDatabase, err := a.openServerControlDatabase(r.Context())
+	controlDatabase, err := a.openServerControlDatabaseRead(r.Context())
 	if err != nil {
 		http.Error(w, "invoice unavailable", http.StatusServiceUnavailable)
 		return
@@ -6174,14 +6759,20 @@ func (a *App) billingInvoicePage(w http.ResponseWriter, r *http.Request) {
 	lineViews := make([]billingInvoiceLineView, 0, len(invoice.Lines))
 	bonusMinor := int64(0)
 	coveredMinor := int64(0)
+	hasBonus := false
 	for _, line := range invoice.Lines {
 		if line.Bonus {
+			hasBonus = true
 			bonusMinor += line.DiscountAmountMinor
 		}
 		coveredMinor += line.CostShareMinor
+		description := strings.TrimSpace(line.Description)
+		if description == "" {
+			description = translationOrDefault(translations, "billing_invoice_hosting_service", "Share of server expenses") + " · " + line.Domain
+		}
 		lineViews = append(lineViews, billingInvoiceLineView{
 			Domain:        line.Domain,
-			Description:   translationOrDefault(translations, "billing_invoice_hosting_service", "Hosting and support") + " · " + line.Domain,
+			Description:   description,
 			UsedLabel:     formatFileSize(line.UsedBytes),
 			ListLabel:     hostingandsupport.MoneyLabel(line.ListAmountMinor, invoice.Currency),
 			DiscountLabel: hostingandsupport.MoneyLabel(line.DiscountAmountMinor, invoice.Currency),
@@ -6192,11 +6783,12 @@ func (a *App) billingInvoicePage(w http.ResponseWriter, r *http.Request) {
 	a.render(w, r, "billing_invoice.html", map[string]any{
 		"T": translations, "Title": translationOrDefault(translations, "billing_invoice_document", "Invoice"),
 		"Invoice": invoice, "Lines": lineViews,
-		"AmountLabel":  hostingandsupport.MoneyLabel(invoice.AmountMinor, invoice.Currency),
-		"BonusLabel":   hostingandsupport.MoneyLabel(bonusMinor, invoice.Currency),
-		"CoveredLabel": hostingandsupport.MoneyLabel(coveredMinor, invoice.Currency),
-		"ReserveLabel": hostingandsupport.MoneyLabel(invoice.ReserveMinor, invoice.Currency),
-		"HasBonus":     bonusMinor > 0, "HasReserve": invoice.ReserveMinor > 0,
+		"AmountLabel":     hostingandsupport.MoneyLabel(invoice.AmountMinor, invoice.Currency),
+		"BonusLabel":      hostingandsupport.MoneyLabel(bonusMinor, invoice.Currency),
+		"CoveredLabel":    hostingandsupport.MoneyLabel(coveredMinor, invoice.Currency),
+		"PaymentFeeLabel": hostingandsupport.MoneyLabel(invoice.PaymentFeeMinor, invoice.Currency),
+		"ReserveLabel":    hostingandsupport.MoneyLabel(invoice.ReserveMinor, invoice.Currency),
+		"HasBonus":        hasBonus, "HasPaymentFee": invoice.PaymentFeeMinor > 0, "HasReserve": invoice.ReserveMinor > 0,
 	})
 }
 
@@ -6380,7 +6972,7 @@ func (a *App) renderSiteRequestPage(w http.ResponseWriter, r *http.Request, doma
 }
 
 func (a *App) publicHostingAndSupportPlans(ctx context.Context) []hostingandsupport.Plan {
-	controlDatabase, err := a.openServerControlDatabase(ctx)
+	controlDatabase, err := a.openServerControlDatabaseRead(ctx)
 	if err != nil {
 		return nil
 	}
@@ -6551,7 +7143,7 @@ func (a *App) maybeStartDemoSite(w http.ResponseWriter, r *http.Request, request
 }
 
 func (a *App) demoSiteSettings(ctx context.Context) (demo.Settings, bool) {
-	controlDatabase, err := a.openServerControlDatabase(ctx)
+	controlDatabase, err := a.openServerControlDatabaseRead(ctx)
 	if err != nil {
 		return demo.Settings{}, false
 	}
@@ -6575,7 +7167,7 @@ func (a *App) startDemoSiteSession(w http.ResponseWriter, r *http.Request, setti
 	if ownerDomain, found := store.OwnerDomain(r.Context()); found && normalizeDomainName(ownerDomain) == domain {
 		return "", fmt.Errorf("server owner site cannot be used as the public demo site")
 	}
-	adminEmail, _, err := a.ensureDemoSiteReady(r.Context(), controlDatabase, settings, false, "")
+	adminEmail, _, err := a.ensureDemoSiteReady(r.Context(), controlDatabase.DB, settings, false, "")
 	if err != nil {
 		return "", err
 	}
@@ -6730,7 +7322,7 @@ func (a *App) demoGrabPreview(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "demo_site_source_url is required", http.StatusBadRequest)
 		return
 	}
-	controlDatabase, err := a.openServerControlDatabase(r.Context())
+	controlDatabase, err := a.openServerControlDatabaseRead(r.Context())
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -6840,7 +7432,7 @@ func (a *App) demoGrabRefresh(w http.ResponseWriter, r *http.Request) {
 	if len(failedResourceURLs) > 0 {
 		failedTotal, err = a.retryDemoFailedResources(r.Context(), settings, progressToken, failedResourceURLs)
 	} else {
-		_, failedTotal, err = a.ensureDemoSiteReady(r.Context(), controlDatabase, settings, true, progressToken)
+		_, failedTotal, err = a.ensureDemoSiteReady(r.Context(), controlDatabase.DB, settings, true, progressToken)
 	}
 	if err != nil {
 		statusCode := http.StatusBadGateway
@@ -7976,7 +8568,7 @@ func (a *App) publicTrialSiteCreate(w http.ResponseWriter, r *http.Request) {
 	}
 	domainContext := contextWithSiteDatabaseCreation(contextWithDomain(r.Context(), trialDomain))
 	if err := a.persistPublicTrialPreview(domainContext, trialDomain, preview); err != nil {
-		_ = a.deleteDemoManagedSiteWithoutBackup(r.Context(), controlDatabase, trialDomain)
+		_ = a.deleteDemoManagedSiteWithoutBackup(r.Context(), controlDatabase.DB, trialDomain)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -8039,7 +8631,7 @@ func (a *App) publicTrialSiteWS(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) publicTrialAllowed(r *http.Request) bool {
-	controlDatabase, err := a.openServerControlDatabase(r.Context())
+	controlDatabase, err := a.openServerControlDatabaseRead(r.Context())
 	if err != nil {
 		return false
 	}
@@ -8082,7 +8674,7 @@ func (a *App) cleanupExpiredPublicTrialSite(ctx context.Context, domain string) 
 	if a.rawManagedSiteHasAdmin(ctx, domain) {
 		return
 	}
-	if deleteErr := a.deleteDemoManagedSiteWithoutBackup(ctx, controlDatabase, domain); deleteErr != nil {
+	if deleteErr := a.deleteDemoManagedSiteWithoutBackup(ctx, controlDatabase.DB, domain); deleteErr != nil {
 		log.Printf("expired public trial cleanup failed domain=%s error=%v", domain, deleteErr)
 	}
 }
@@ -9934,7 +10526,7 @@ func (a *App) revisionsPage(w http.ResponseWriter, r *http.Request) {
 	a.render(w, r, "revisions.html", map[string]any{"Path": pagePath, "ReturnPath": returnPath, "Revisions": revisionList, "RevisionText": text})
 }
 
-func (a *App) hostingAndSupportPage(w http.ResponseWriter, r *http.Request) {
+func (a *App) expensesPage(w http.ResponseWriter, r *http.Request) {
 	if a.redirectToHostingAndSupportMainDomain(w, r) {
 		return
 	}
@@ -9954,10 +10546,10 @@ func (a *App) hostingAndSupportPage(w http.ResponseWriter, r *http.Request) {
 	}
 	status := ""
 	if r.Method == http.MethodPost {
-		status = a.handleHostingAndSupportAction(r)
+		status = a.handleExpensesAction(r)
 		a.refreshHostingAndSupportPanel()
-		if hostingAndSupportActionWantsJSON(r) {
-			saved := hostingAndSupportActionStatusWasSaved(r, status)
+		if expensesActionWantsJSON(r) {
+			saved := expensesActionStatusWasSaved(r, status)
 			w.Header().Set("Content-Type", "application/json")
 			if !saved {
 				w.WriteHeader(http.StatusBadRequest)
@@ -9966,23 +10558,24 @@ func (a *App) hostingAndSupportPage(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	view, err := a.hostingAndSupportView(r.Context(), r)
+	view, err := a.expensesView(r.Context(), r)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	view["Status"] = status
-	a.render(w, r, "hostingandsupport.html", view)
+	a.render(w, r, "expenses.html", view)
 }
 
 func (a *App) startHostingAndSupportPanelProcess(stop <-chan struct{}) chan hostingAndSupportPanelRequest {
 	requests := make(chan hostingAndSupportPanelRequest, 16)
-	controlDatabase, err := a.openServerControlDatabase(context.Background())
+	controlDatabase, err := a.openServerControlDatabaseRead(context.Background())
 	if err != nil {
 		log.Printf("hosting panel snapshot store unavailable: %v", err)
 	}
 	initialSnapshot := hostingAndSupportPanelSnapshot{Version: hostingAndSupportPanelSnapshotVersion}
 	if controlDatabase != nil {
+		defer controlDatabase.Close()
 		store := hostingandsupport.Store{DB: controlDatabase}
 		storedSnapshot, found := store.PanelSnapshot(context.Background())
 		if found && storedSnapshot.Version == hostingAndSupportPanelSnapshotVersion {
@@ -10001,15 +10594,12 @@ func (a *App) startHostingAndSupportPanelProcess(stop <-chan struct{}) chan host
 		}
 	}
 	buildResults := make(chan hostingAndSupportPanelBuildResult, 1)
-	go a.runHostingAndSupportPanelProcess(stop, requests, buildResults, controlDatabase, initialSnapshot)
+	go a.runHostingAndSupportPanelProcess(stop, requests, buildResults, initialSnapshot)
 	go a.runHostingAndSupportMetricsProcess(stop, requests)
 	return requests
 }
 
-func (a *App) runHostingAndSupportPanelProcess(stop <-chan struct{}, requests <-chan hostingAndSupportPanelRequest, buildResults chan hostingAndSupportPanelBuildResult, controlDatabase *sql.DB, initialSnapshot hostingAndSupportPanelSnapshot) {
-	if controlDatabase != nil {
-		defer controlDatabase.Close()
-	}
+func (a *App) runHostingAndSupportPanelProcess(stop <-chan struct{}, requests <-chan hostingAndSupportPanelRequest, buildResults chan hostingAndSupportPanelBuildResult, initialSnapshot hostingAndSupportPanelSnapshot) {
 	fullRefreshTicker := time.NewTicker(hostingAndSupportFullRefreshInterval)
 	defer fullRefreshTicker.Stop()
 	snapshot := initialSnapshot
@@ -10024,7 +10614,7 @@ func (a *App) runHostingAndSupportPanelProcess(stop <-chan struct{}, requests <-
 		buildRunning = true
 		buildGeneration := snapshotGeneration
 		go func() {
-			builtSnapshot, buildErr := a.collectHostingAndSupportPanelSnapshot(context.Background(), controlDatabase)
+			builtSnapshot, buildErr := a.collectHostingAndSupportPanelSnapshot(context.Background(), nil)
 			buildResults <- hostingAndSupportPanelBuildResult{snapshot: builtSnapshot, generation: buildGeneration, err: buildErr}
 		}()
 	}
@@ -10047,10 +10637,10 @@ func (a *App) runHostingAndSupportPanelProcess(stop <-chan struct{}, requests <-
 			case "quota_changed":
 				snapshotGeneration++
 				snapshot = a.applyHostingAndSupportPanelQuotaChange(snapshot, request.quotaChange)
-				persistErr := saveHostingAndSupportPanelSnapshot(controlDatabase, snapshot)
+				persistErr := a.saveHostingAndSupportPanelSnapshot(snapshot)
 				request.reply <- hostingAndSupportPanelResponse{snapshot: snapshot, err: persistErr}
 				startBuild()
-			case "cost_policy_changed":
+			case "expense_policy_changed":
 				snapshotGeneration++
 				snapshot.LocalCostPolicy = request.costPolicy
 				for serverIndex := range snapshot.Servers {
@@ -10060,7 +10650,7 @@ func (a *App) runHostingAndSupportPanelProcess(stop <-chan struct{}, requests <-
 					}
 				}
 				snapshot.BuiltAt = time.Now().UTC().Format(time.RFC3339)
-				persistErr := saveHostingAndSupportPanelSnapshot(controlDatabase, snapshot)
+				persistErr := a.saveHostingAndSupportPanelSnapshot(snapshot)
 				request.reply <- hostingAndSupportPanelResponse{snapshot: snapshot, err: persistErr}
 				startBuild()
 			}
@@ -10070,7 +10660,7 @@ func (a *App) runHostingAndSupportPanelProcess(stop <-chan struct{}, requests <-
 				log.Printf("hosting panel snapshot refresh failed: %v", result.err)
 			} else if result.generation == snapshotGeneration {
 				snapshot = result.snapshot
-				if persistErr := saveHostingAndSupportPanelSnapshot(controlDatabase, snapshot); persistErr != nil {
+				if persistErr := a.saveHostingAndSupportPanelSnapshot(snapshot); persistErr != nil {
 					log.Printf("hosting panel snapshot save failed: %v", persistErr)
 				}
 			}
@@ -10177,7 +10767,7 @@ func (a *App) startBillingInvoiceProcess(stop <-chan struct{}) chan billingInvoi
 
 func (a *App) runAutomaticBillingOnce(ctx context.Context, store hostingandsupport.Store, snapshot hostingAndSupportPanelSnapshot, now time.Time) {
 	groups := make(map[string]*billingInvoiceGroup)
-	addSite := func(installationID string, serverName string, currency string, site billingServerSite, price hostingandsupport.BillingPrice, costShareMinor int64) {
+	addSite := func(installationID string, serverName string, policy expenses.ServerPolicy, site billingServerSite, allocation expenses.SiteAllocation) {
 		if site.isDemo || site.isOwner {
 			return
 		}
@@ -10197,49 +10787,44 @@ func (a *App) runAutomaticBillingOnce(ctx context.Context, store hostingandsuppo
 		groupKey := customer.ID + "\x00" + installationID
 		group := groups[groupKey]
 		if group == nil {
-			group = &billingInvoiceGroup{customer: customer, installationID: installationID, serverName: serverName, currency: currency}
+			group = &billingInvoiceGroup{customer: customer, installationID: installationID, serverName: serverName, currency: policy.Currency}
 			groups[groupKey] = group
 		}
-		listAmountMinor := hostingandsupport.MoneyMinor(price.Amount)
 		line := hostingandsupport.InvoiceLine{
-			Domain:             normalizeDomainName(site.domain),
-			Description:        "Hosting and support for " + normalizeDomainName(site.domain),
-			UsedBytes:          site.usedBytes,
-			BillableMegabytes:  price.BillableMegabytes,
-			ListAmountMinor:    listAmountMinor,
-			TotalAmountMinor:   listAmountMinor,
-			CostShareMinor:     costShareMinor,
-			MinimumAmountMinor: listAmountMinor,
+			Domain:            normalizeDomainName(site.domain),
+			Description:       "Доля расходов на размещение " + normalizeDomainName(site.domain),
+			UsedBytes:         site.usedBytes,
+			BillableMegabytes: (site.usedBytes + expenses.DecimalMegabyte - 1) / expenses.DecimalMegabyte,
+			ListAmountMinor:   allocation.ExpenseShareMinor,
+			TotalAmountMinor:  allocation.ExpenseShareMinor,
+			CostShareMinor:    allocation.ExpenseShareMinor,
 		}
-		if !price.Billable {
+		if allocation.Free {
 			line.Bonus = true
-			line.DiscountAmountMinor = listAmountMinor
+			line.Description = "Бонус: размещение " + normalizeDomainName(site.domain) + " до бесплатного порога"
 			line.TotalAmountMinor = 0
-		} else {
-			if costShareMinor > line.TotalAmountMinor {
-				line.TotalAmountMinor = costShareMinor
-				line.ListAmountMinor = costShareMinor
-			}
+		} else if allocation.ExpenseShareMinor > 0 {
 			group.hasPaidSite = true
 			group.amountMinor += line.TotalAmountMinor
-			group.serverCostMinor += costShareMinor
+			group.serverCostMinor += allocation.ExpenseShareMinor
 		}
 		group.lines = append(group.lines, line)
 	}
-	processServer := func(installationID string, serverName string, policy hostingandsupport.ServerCostPolicy, sites []billingServerSite) {
-		if policy.MonthlyCostMinor <= 0 || policy.MinimumPriceGBMinor <= 0 || strings.TrimSpace(policy.Currency) == "" {
+	processServer := func(installationID string, serverName string, policy expenses.ServerPolicy, sites []billingServerSite) {
+		policy = expenses.NormalizePolicy(policy)
+		if expenses.CalculateMonthlyExpense(policy) <= 0 || strings.TrimSpace(policy.Currency) == "" {
 			return
 		}
-		costSites := make([]hostingandsupport.ServerCostSite, 0, len(sites))
+		expenseSites := make([]expenses.SiteUsage, 0, len(sites))
 		for siteIndex, site := range sites {
-			costSites = append(costSites, hostingandsupport.ServerCostSite{
+			expenseSites = append(expenseSites, expenses.SiteUsage{
 				Key: fmt.Sprintf("%s\x00%06d", normalizeDomainName(site.domain), siteIndex), UsedBytes: site.usedBytes, Excluded: site.isDemo || site.isOwner,
 			})
 		}
-		amounts := hostingandsupport.AllocateServerCost(policy, costSites)
+		allocations := expenses.AllocateMonthlyExpense(policy, expenseSites)
 		for siteIndex, site := range sites {
-			amount := amounts[fmt.Sprintf("%s\x00%06d", normalizeDomainName(site.domain), siteIndex)]
-			addSite(installationID, serverName, policy.Currency, site, amount.Price, amount.CostShareMinor)
+			allocation := allocations[fmt.Sprintf("%s\x00%06d", normalizeDomainName(site.domain), siteIndex)]
+			addSite(installationID, serverName, policy, site, allocation)
 		}
 	}
 	localInstallationID := "local:" + normalizeDomainName(snapshot.MainDomain)
@@ -10269,10 +10854,7 @@ func (a *App) runAutomaticBillingOnce(ctx context.Context, store hostingandsuppo
 				isDemo: site.IsDemo, isOwner: emailsIntersectSet(siteEmails, ownerEmails),
 			})
 		}
-		processServer(hosting.InstallationID, serverName, hostingandsupport.ServerCostPolicy{
-			InstallationID: hosting.InstallationID, MonthlyCostMinor: hosting.MonthlyCostMinor, Currency: hosting.BillingCurrency,
-			MinimumPriceGBMinor: hosting.MinimumPriceGBMinor, EffectiveAt: hosting.BillingCostUpdatedAt,
-		}, remoteSites)
+		processServer(hosting.InstallationID, serverName, hosting.ExpensePolicy, remoteSites)
 	}
 	for _, group := range groups {
 		if !group.hasPaidSite || group.amountMinor <= 0 || len(group.lines) == 0 {
@@ -10286,14 +10868,23 @@ func (a *App) runAutomaticBillingOnce(ctx context.Context, store hostingandsuppo
 		periodStart := time.Date(localNow.Year(), localNow.Month(), group.customer.InvoiceDay, 0, 0, 0, 0, location)
 		periodEnd := periodStart.AddDate(0, 1, 0)
 		dueAt := periodStart.AddDate(0, 0, group.customer.PaymentTermDays)
+		paymentFeeMinor := expenses.PaymentCommissionMinor(group.serverCostMinor, snapshot.CommissionBPS)
+		if paymentFeeMinor > 0 {
+			group.lines = append(group.lines, hostingandsupport.InvoiceLine{
+				Domain:           "sitebrush.com",
+				Description:      fmt.Sprintf("Проведение платежа SiteBrush (%.2f%%)", float64(snapshot.CommissionBPS)/100),
+				ListAmountMinor:  paymentFeeMinor,
+				TotalAmountMinor: paymentFeeMinor,
+			})
+		}
 		invoice := hostingandsupport.Invoice{
 			CustomerID:      group.customer.ID,
 			CustomerEmail:   group.customer.PrimaryEmail,
 			InstallationID:  group.installationID,
 			ServerName:      group.serverName,
 			Domain:          group.lines[0].Domain,
-			PlanName:        "Hosting and support",
-			AmountMinor:     group.amountMinor,
+			PlanName:        "Доля расходов сервера",
+			AmountMinor:     group.amountMinor + paymentFeeMinor,
 			Currency:        group.currency,
 			Provider:        "sitebrush_com",
 			DueAt:           dueAt.Format("2006-01-02"),
@@ -10303,7 +10894,8 @@ func (a *App) runAutomaticBillingOnce(ctx context.Context, store hostingandsuppo
 			PeriodEnd:       periodEnd.Format("2006-01-02"),
 			CommissionBPS:   snapshot.CommissionBPS,
 			ServerCostMinor: group.serverCostMinor,
-			ReserveMinor:    group.amountMinor - group.serverCostMinor,
+			PaymentFeeMinor: paymentFeeMinor,
+			ReserveMinor:    0,
 			Lines:           group.lines,
 		}
 		createdInvoice, createErr := store.CreateInvoice(ctx, invoice)
@@ -10387,26 +10979,28 @@ func (a *App) applyPreparedHostingAndSupportQuotaChange(quotaChange siteQuotaRow
 	}
 }
 
-func (a *App) applyPreparedHostingAndSupportCostPolicy(costPolicy hostingandsupport.ServerCostPolicy) {
+func (a *App) applyPreparedExpensePolicy(costPolicy expenses.ServerPolicy) {
 	if a == nil || a.hostingAndSupportPanel == nil {
 		return
 	}
 	reply := make(chan hostingAndSupportPanelResponse, 1)
-	a.hostingAndSupportPanel <- hostingAndSupportPanelRequest{kind: "cost_policy_changed", costPolicy: costPolicy, reply: reply}
+	a.hostingAndSupportPanel <- hostingAndSupportPanelRequest{kind: "expense_policy_changed", costPolicy: costPolicy, reply: reply}
 	response := <-reply
 	if response.err != nil {
-		log.Printf("hosting panel cost policy snapshot save failed: %v", response.err)
+		log.Printf("expenses panel policy snapshot save failed: %v", response.err)
 	}
 }
 
-func saveHostingAndSupportPanelSnapshot(controlDatabase *sql.DB, snapshot hostingAndSupportPanelSnapshot) error {
-	if controlDatabase == nil {
-		return nil
-	}
+func (a *App) saveHostingAndSupportPanelSnapshot(snapshot hostingAndSupportPanelSnapshot) error {
 	payload, err := json.Marshal(snapshot)
 	if err != nil {
 		return err
 	}
+	controlDatabase, err := a.openServerControlDatabase(context.Background())
+	if err != nil {
+		return err
+	}
+	defer controlDatabase.Close()
 	return (hostingandsupport.Store{DB: controlDatabase}).SavePanelSnapshot(context.Background(), hostingandsupport.PanelSnapshotRecord{
 		Version: hostingAndSupportPanelSnapshotVersion, PayloadJSON: string(payload), BuiltAt: snapshot.BuiltAt,
 	})
@@ -10419,7 +11013,7 @@ func (a *App) hostingAndSupportDemoPaymentPage(w http.ResponseWriter, r *http.Re
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	_, _ = io.WriteString(w, `<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>SiteBrush.com demo payment</title><link href="/p/static/technical_pages.css" rel="stylesheet"></head><body class="technical-page bg-body"><main class="container billing-page py-5"><section class="card billing-card"><div class="card-body"><p class="text-muted">SiteBrush.com demo payments</p><h1>Демо-оплата счёта `+template.HTMLEscapeString(invoiceNumber)+`</h1><p>Платёжная страница подготовлена как демо-настройка первого этапа. Реальное списание здесь не выполняется.</p><a class="btn btn-primary" href="/?hosting_and_support">Вернуться в Хостинг и поддержку</a></div></section></main></body></html>`)
+	_, _ = io.WriteString(w, `<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>SiteBrush.com demo payment</title><link href="/p/static/technical_pages.css" rel="stylesheet"></head><body class="technical-page bg-body"><main class="container billing-page py-5"><section class="card billing-card"><div class="card-body"><p class="text-muted">SiteBrush.com demo payments</p><h1>Демо-оплата счёта `+template.HTMLEscapeString(invoiceNumber)+`</h1><p>Платёжная страница подготовлена как демо-настройка первого этапа. Реальное списание здесь не выполняется.</p><a class="btn btn-primary" href="/?expenses">Вернуться в Расходы</a></div></section></main></body></html>`)
 }
 
 func (a *App) redirectToHostingAndSupportMainDomain(w http.ResponseWriter, r *http.Request) bool {
@@ -10472,11 +11066,11 @@ func hostingAndSupportRedirectHost(mainDomain string, requestHost string) string
 	return net.JoinHostPort(mainDomain, requestPort)
 }
 
-func hostingAndSupportActionWantsJSON(r *http.Request) bool {
+func expensesActionWantsJSON(r *http.Request) bool {
 	return strings.Contains(r.Header.Get("Accept"), "application/json") || r.FormValue("billing_ajax") == "1"
 }
 
-func hostingAndSupportActionStatusWasSaved(r *http.Request, status string) bool {
+func expensesActionStatusWasSaved(r *http.Request, status string) bool {
 	translations := translationsForRequest(r)
 	action := strings.TrimSpace(r.FormValue("billing_action"))
 	status = strings.TrimSpace(status)
@@ -10493,11 +11087,13 @@ func hostingAndSupportActionStatusWasSaved(r *http.Request, status string) bool 
 		return status == translationOrDefault(translations, "billing_status_plan_saved", "Plan saved.")
 	case "update_backup_retention":
 		return status == translationOrDefault(translations, "billing_status_backup_retention_saved", "Backup retention was saved.")
+	case "server_cost_policy", "save_server_expense_policy":
+		return status == translationOrDefault(translations, "expenses_server_policy_saved", "Server expense settings saved.")
 	}
 	return false
 }
 
-func (a *App) handleHostingAndSupportAction(r *http.Request) string {
+func (a *App) handleExpensesAction(r *http.Request) string {
 	_ = r.ParseMultipartForm(8 << 20)
 	switch strings.TrimSpace(r.FormValue("billing_action")) {
 	case "settings":
@@ -10508,8 +11104,8 @@ func (a *App) handleHostingAndSupportAction(r *http.Request) string {
 		return a.saveHostingAndSupportServiceMailSettingsFromForm(r)
 	case "billing_customer_schedule":
 		return a.saveBillingCustomerScheduleFromForm(r)
-	case "server_cost_policy":
-		return a.saveServerCostPolicyFromForm(r)
+	case "server_cost_policy", "save_server_expense_policy":
+		return a.saveServerExpensePolicyFromForm(r)
 	case "sitebrush_commission":
 		return a.saveSitebrushCommissionFromForm(r)
 	case "generate_sitebrush_com_key":
@@ -10559,26 +11155,38 @@ func (a *App) handleHostingAndSupportAction(r *http.Request) string {
 	}
 }
 
-func (a *App) saveServerCostPolicyFromForm(r *http.Request) string {
+func (a *App) saveServerExpensePolicyFromForm(r *http.Request) string {
 	translations := translationsForRequest(r)
-	monthlyCostMinor := hostingandsupport.MoneyMinor(strings.ReplaceAll(strings.TrimSpace(r.FormValue("monthly_cost")), ",", "."))
-	minimumPriceGBMinor := hostingandsupport.MoneyMinor(strings.ReplaceAll(strings.TrimSpace(r.FormValue("minimum_price_gb")), ",", "."))
-	if monthlyCostMinor <= 0 || minimumPriceGBMinor <= 0 {
-		return translationOrDefault(translations, "billing_server_cost_invalid", "Monthly cost and minimum price per GB must be greater than zero.")
+	mode := expenses.Mode(strings.TrimSpace(r.FormValue("expense_mode")))
+	diskRateMinor := hostingandsupport.MoneyMinor(strings.ReplaceAll(strings.TrimSpace(r.FormValue("disk_rate_per_100_gb")), ",", "."))
+	actualExpenseMinor := hostingandsupport.MoneyMinor(strings.ReplaceAll(strings.TrimSpace(r.FormValue("actual_monthly_expense")), ",", "."))
+	freeThresholdMB, _ := strconv.ParseInt(strings.TrimSpace(r.FormValue("free_site_threshold_mb")), 10, 64)
+	_, diskTotalBytes, diskAvailable := diskusage.DiskSpace(a.storageRootDir())
+	policy := expenses.ServerPolicy{
+		InstallationID:            "local",
+		Mode:                      mode,
+		DiskRatePer100GBMinor:     diskRateMinor,
+		ActualMonthlyExpenseMinor: actualExpenseMinor,
+		Currency:                  r.FormValue("currency"),
+		FreeSiteThresholdBytes:    freeThresholdMB * expenses.DecimalMegabyte,
+		DiskTotalBytes:            int64(diskTotalBytes),
+	}
+	if !diskAvailable {
+		policy.DiskTotalBytes = 0
+	}
+	if err := policy.Validate(); err != nil || (policy.Mode == expenses.ModeAutomatic && policy.DiskTotalBytes <= 0) {
+		return translationOrDefault(translations, "expenses_server_policy_invalid", "Check the server expense settings.")
 	}
 	controlDatabase, err := a.openServerControlDatabase(r.Context())
 	if err != nil {
 		return err.Error()
 	}
 	defer controlDatabase.Close()
-	savedPolicy, err := (hostingandsupport.Store{DB: controlDatabase}).SaveServerCostPolicy(r.Context(), hostingandsupport.ServerCostPolicy{
-		InstallationID: "local", MonthlyCostMinor: monthlyCostMinor,
-		Currency: r.FormValue("currency"), MinimumPriceGBMinor: minimumPriceGBMinor,
-	})
+	savedPolicy, err := (hostingandsupport.Store{DB: controlDatabase}).SaveServerExpensePolicy(r.Context(), policy)
 	if err != nil {
 		return err.Error()
 	}
-	a.applyPreparedHostingAndSupportCostPolicy(savedPolicy)
+	a.applyPreparedExpensePolicy(savedPolicy)
 	a.reportHostingSnapshotAsync(r.Context())
 	if a.billingInvoices != nil {
 		select {
@@ -10586,7 +11194,7 @@ func (a *App) saveServerCostPolicyFromForm(r *http.Request) string {
 		default:
 		}
 	}
-	return translationOrDefault(translations, "billing_server_cost_saved", "Server hosting cost saved.")
+	return translationOrDefault(translations, "expenses_server_policy_saved", "Server expense settings saved.")
 }
 
 func (a *App) saveBillingCustomerScheduleFromForm(r *http.Request) string {
@@ -10648,7 +11256,7 @@ func (a *App) hostingAndSupportCanShowCentralServers(ctx context.Context, store 
 	return domainARecordMatchesAny("sitebrush.com", ipList)
 }
 
-func (a *App) hostingAndSupportView(ctx context.Context, r *http.Request) (map[string]any, error) {
+func (a *App) expensesView(ctx context.Context, r *http.Request) (map[string]any, error) {
 	snapshot, found := a.preparedHostingAndSupportPanelSnapshot()
 	if !found {
 		var err error
@@ -10661,17 +11269,17 @@ func (a *App) hostingAndSupportView(ctx context.Context, r *http.Request) (map[s
 }
 
 func (a *App) collectHostingAndSupportPanelSnapshot(ctx context.Context, controlDatabase *sql.DB) (hostingAndSupportPanelSnapshot, error) {
-	closeControlDatabase := false
+	var controlDatabaseSession *serverControlDatabaseSession
 	if controlDatabase == nil {
 		var err error
-		controlDatabase, err = a.openServerControlDatabase(ctx)
+		controlDatabaseSession, err = a.openServerControlDatabase(ctx)
 		if err != nil {
 			return hostingAndSupportPanelSnapshot{}, err
 		}
-		closeControlDatabase = true
+		controlDatabase = controlDatabaseSession.DB
 	}
-	if closeControlDatabase {
-		defer controlDatabase.Close()
+	if controlDatabaseSession != nil {
+		defer controlDatabaseSession.Close()
 	}
 	store := hostingandsupport.Store{DB: controlDatabase}
 	plans := store.Plans(ctx)
@@ -10679,29 +11287,38 @@ func (a *App) collectHostingAndSupportPanelSnapshot(ctx context.Context, control
 	assignments := store.ServiceAssignments(ctx)
 	siteRequests := store.SiteRequests(ctx)
 	pendingSiteRequests, approvedSiteRequestsByDomain := hostingAndSupportSplitSiteRequests(siteRequests)
-	allClientHostings := store.ClientHostings(ctx)
-	clientHostings, desktopHostingGroups, archivedHostings := hostingandsupport.ClassifyClientHostings(allClientHostings, time.Now().UTC())
-	registrySyncEvents := store.RegistrySyncEvents(ctx, 40)
 	_ = a.migrateLegacySitebrushComPrivateKey(ctx, controlDatabase)
 	sitebrushComKey := store.SitebrushComKey(ctx)
 	serviceMailRelayEnabled := store.ServiceMailRelayEnabled(ctx)
 	demoSettings := (demo.Store{DB: controlDatabase}).Settings(ctx)
-	hostingAndSupportDemoDomain := demoSettings.Domain
-	clientHostings = hostingandsupport.ClientHostingsWithDemoDomain(clientHostings, hostingAndSupportDemoDomain)
 	mainDomain := ""
 	if ownerDomain, found := store.OwnerDomain(ctx); found {
 		mainDomain = ownerDomain
 	}
+	showCentralRegistry := a.hostingAndSupportCanShowCentralServers(ctx, store, sitebrushComKey)
+	allClientHostings := make([]hostingandsupport.ClientHosting, 0)
+	registrySyncEvents := make([]hostingandsupport.RegistrySyncEvent, 0)
+	if showCentralRegistry {
+		allClientHostings = store.ClientHostings(ctx)
+		registrySyncEvents = store.RegistrySyncEvents(ctx, 40)
+	}
+	clientHostings, desktopHostingGroups, archivedHostings := hostingandsupport.ClassifyClientHostings(allClientHostings, time.Now().UTC())
+	hostingAndSupportDemoDomain := ""
+	if demoSettings.Enabled {
+		hostingAndSupportDemoDomain = demoSettings.Domain
+	}
+	clientHostings = hostingandsupport.ClientHostingsWithDemoDomain(clientHostings, hostingAndSupportDemoDomain)
 	deletionBackupSizesByDomain := a.managedSiteDeletionBackupSizesByDomain(ctx, controlDatabase)
-	siteRows, err := a.hostingAndSupportSiteRows(ctx, plans, assignments, deletionBackupSizesByDomain, mainDomain, hostingAndSupportDemoDomain, mainDomain)
+	siteRows, err := a.hostingAndSupportSiteRows(ctx, controlDatabase, plans, assignments, deletionBackupSizesByDomain, mainDomain, hostingAndSupportDemoDomain, mainDomain)
 	if err != nil {
 		return hostingAndSupportPanelSnapshot{}, err
 	}
+	siteRows = visibleHostingAndSupportLocalSites(siteRows, demoSettings)
 	demoDomains := make([]string, 0, 4)
 	demoEmails := make([]string, 0, 8)
 	protectedEmails := make([]string, 0, 16)
-	if hostingAndSupportDemoDomain != "" {
-		demoDomains = append(demoDomains, hostingAndSupportDemoDomain)
+	if configuredDemoDomain := normalizeDomainName(demoSettings.Domain); configuredDemoDomain != "" {
+		demoDomains = append(demoDomains, configuredDemoDomain)
 	}
 	for _, session := range (demo.Store{DB: controlDatabase}).Sessions(ctx) {
 		demoDomains = append(demoDomains, session.Domain)
@@ -10728,25 +11345,36 @@ func (a *App) collectHostingAndSupportPanelSnapshot(ctx context.Context, control
 	}
 	invoices = store.Invoices(ctx, 80)
 	hostingAndSupportAttachApprovedSiteRequests(siteRows, approvedSiteRequestsByDomain)
-	localCostPolicy, _ := store.ServerCostPolicy(ctx, "local")
-	if localCostPolicy.MinimumPriceGBMinor > 0 && localCostPolicy.Currency != "" {
+	_, localDiskTotalBytes, localDiskAvailable := diskusage.DiskSpace(a.storageRootDir())
+	localExpensePolicy, policyFound := store.ServerExpensePolicy(ctx, "local", int64(localDiskTotalBytes))
+	if !policyFound {
+		localExpensePolicy = expenses.DefaultServerPolicy("local", int64(localDiskTotalBytes))
+	}
+	if !localDiskAvailable {
+		localExpensePolicy.DiskTotalBytes = 0
+	}
+	if expenses.CalculateMonthlyExpense(localExpensePolicy) > 0 && localExpensePolicy.Currency != "" {
 		localOwners := normalizedEmailSet(store.OwnerEmails(ctx))
-		costSites := make([]hostingandsupport.ServerCostSite, 0, len(siteRows))
+		expenseSites := make([]expenses.SiteUsage, 0, len(siteRows))
 		for _, site := range siteRows {
-			costSites = append(costSites, hostingandsupport.ServerCostSite{
+			expenseSites = append(expenseSites, expenses.SiteUsage{
 				Key: site.Domain, UsedBytes: site.UsedBytes,
 				Excluded: site.IsDemo || emailsIntersectSet(hostingandsupport.SplitEmailList(site.AdminEmails), localOwners),
 			})
 		}
-		costAmounts := hostingandsupport.AllocateServerCost(localCostPolicy, costSites)
+		expenseAllocations := expenses.AllocateMonthlyExpense(localExpensePolicy, expenseSites)
 		for siteIndex := range siteRows {
-			costAmount := costAmounts[siteRows[siteIndex].Domain]
-			billingPrice := costAmount.Price
-			siteRows[siteIndex].BillingPriceLabel = billingPrice.PriceLabel
-			siteRows[siteIndex].BillingStatusText = billingPrice.StatusText
-			siteRows[siteIndex].BillingAmount = hostingandsupport.MoneyAmount(costAmount.TotalMinor)
-			siteRows[siteIndex].BillingCurrency = billingPrice.Currency
-			siteRows[siteIndex].BillingBillable = billingPrice.Billable
+			allocation := expenseAllocations[siteRows[siteIndex].Domain]
+			siteRows[siteIndex].BillingAmount = hostingandsupport.MoneyAmount(allocation.ExpenseShareMinor)
+			siteRows[siteIndex].BillingCurrency = localExpensePolicy.Currency
+			siteRows[siteIndex].BillingBillable = allocation.ExpenseShareMinor > 0
+			if allocation.Free {
+				siteRows[siteIndex].BillingPriceLabel = hostingandsupport.MoneyLabel(0, localExpensePolicy.Currency)
+				siteRows[siteIndex].BillingStatusText = "бесплатно до " + hostingandsupport.FormatFileSize(localExpensePolicy.FreeSiteThresholdBytes)
+			} else if allocation.ExpenseShareMinor > 0 {
+				siteRows[siteIndex].BillingPriceLabel = hostingandsupport.MoneyLabel(allocation.ExpenseShareMinor, localExpensePolicy.Currency) + "/мес"
+				siteRows[siteIndex].BillingStatusText = "доля расходов"
+			}
 		}
 	} else {
 		for siteIndex := range siteRows {
@@ -10767,7 +11395,7 @@ func (a *App) collectHostingAndSupportPanelSnapshot(ctx context.Context, control
 		MainDomain:     mainDomain,
 		CurrentHost:    mainDomain,
 		SiteURL:        a.hostingAndSupportSiteURL,
-		CostPolicy:     localCostPolicy,
+		CostPolicy:     localExpensePolicy,
 		OwnerEmails:    store.OwnerEmails(ctx),
 	})
 	servers := hostingandsupport.BuildServerViews(localServer, clientHostings, invoices, CompileVersion)
@@ -10800,7 +11428,8 @@ func (a *App) collectHostingAndSupportPanelSnapshot(ctx context.Context, control
 		DemoSettings:            demoSettings,
 		AutoRegistrationEnabled: store.AutomaticRegistrationAllowed(ctx),
 		CommissionBPS:           commissionBPS,
-		LocalCostPolicy:         localCostPolicy,
+		LocalCostPolicy:         localExpensePolicy,
+		ShowCentralRegistry:     showCentralRegistry,
 	}, nil
 }
 
@@ -10860,7 +11489,7 @@ func (a *App) hostingAndSupportPanelView(r *http.Request, snapshot hostingAndSup
 	translations := translationsForRequest(r)
 	return map[string]any{
 		"T":                        translations,
-		"Title":                    translationOrDefault(translations, "billing_title", "Хостинг и поддержка"),
+		"Title":                    translationOrDefault(translations, "expenses_title", "Расходы"),
 		"Sites":                    snapshot.Sites,
 		"Plans":                    snapshot.Plans,
 		"PaymentProviders":         hostingandsupport.DemoPaymentProviders(absoluteURLForPath(r, "/?hosting_and_support_demo_payment&invoice={invoice}")),
@@ -10899,7 +11528,9 @@ func (a *App) hostingAndSupportPanelView(r *http.Request, snapshot hostingAndSup
 		"PanelSnapshotBuiltAt":    snapshot.BuiltAt,
 		"CommissionBPS":           snapshot.CommissionBPS,
 		"CommissionPercent":       fmt.Sprintf("%.2f", float64(snapshot.CommissionBPS)/100),
-		"ShowCommissionSetting":   normalizeDomainName(snapshot.MainDomain) == "sitebrush.com",
+		"ShowCommissionSetting":   snapshot.ShowCentralRegistry,
+		"ShowCentralRegistry":     snapshot.ShowCentralRegistry,
+		"ShowDemo":                snapshot.DemoSettings.Enabled && normalizeDomainName(snapshot.DemoSettings.Domain) != "",
 	}
 }
 
@@ -11152,18 +11783,17 @@ func (a *App) hostingAndSupportClients(ctx context.Context, billingStore hosting
 				remoteOwners[strings.ToLower(strings.TrimSpace(role.Email))] = struct{}{}
 			}
 		}
-		remoteCostSites := make([]hostingandsupport.ServerCostSite, 0, len(clientHosting.Sites))
+		remoteExpenseSites := make([]expenses.SiteUsage, 0, len(clientHosting.Sites))
 		for _, site := range clientHosting.Sites {
 			siteEmails := append([]string{site.OwnerEmail}, site.AdminEmails...)
-			remoteCostSites = append(remoteCostSites, hostingandsupport.ServerCostSite{
+			remoteExpenseSites = append(remoteExpenseSites, expenses.SiteUsage{
 				Key: site.Domain, UsedBytes: site.UsedBytes,
 				Excluded: site.IsDemo || emailsIntersectSet(siteEmails, remoteOwners),
 			})
 		}
-		remoteCostAmounts := hostingandsupport.AllocateServerCost(hostingandsupport.ServerCostPolicy{
-			InstallationID: clientHosting.InstallationID, MonthlyCostMinor: clientHosting.MonthlyCostMinor,
-			Currency: clientHosting.BillingCurrency, MinimumPriceGBMinor: clientHosting.MinimumPriceGBMinor,
-		}, remoteCostSites)
+		remoteExpensePolicy := clientHosting.ExpensePolicy
+		remoteExpensePolicy.DiskTotalBytes = clientHosting.DiskTotalBytes
+		remoteExpenseAllocations := expenses.AllocateMonthlyExpense(remoteExpensePolicy, remoteExpenseSites)
 		for _, site := range clientHosting.Sites {
 			siteEmails := append([]string{site.OwnerEmail}, site.AdminEmails...)
 			if site.IsDemo || emailsIntersectSet(siteEmails, remoteOwners) {
@@ -11194,21 +11824,18 @@ func (a *App) hostingAndSupportClients(ctx context.Context, billingStore hosting
 				siteSource.limitBytes = site.LimitBytes
 				siteSource.limitLabel = site.LimitLabel
 			}
-			costAmount := remoteCostAmounts[site.Domain]
-			billingPrice := costAmount.Price
-			if clientHosting.MonthlyCostMinor <= 0 || clientHosting.MinimumPriceGBMinor <= 0 || clientHosting.BillingCurrency == "" {
-				costAmount.TotalMinor = 0
-				billingPrice.Amount = "0.00"
-				billingPrice.PriceLabel = ""
-				billingPrice.StatusText = ""
-				billingPrice.Billable = false
-			}
+			allocation := remoteExpenseAllocations[site.Domain]
 			siteSource.billingUsageLabel = hostingandsupport.BillingUsageLabel(siteSource.usedBytes)
-			siteSource.billingPriceLabel = billingPrice.PriceLabel
-			siteSource.billingStatusText = billingPrice.StatusText
-			siteSource.billingAmount = hostingandsupport.MoneyAmount(costAmount.TotalMinor)
-			siteSource.billingCurrency = billingPrice.Currency
-			siteSource.billingBillable = billingPrice.Billable
+			siteSource.billingAmount = hostingandsupport.MoneyAmount(allocation.ExpenseShareMinor)
+			siteSource.billingCurrency = remoteExpensePolicy.Currency
+			siteSource.billingBillable = allocation.ExpenseShareMinor > 0
+			if allocation.Free {
+				siteSource.billingPriceLabel = hostingandsupport.MoneyLabel(0, remoteExpensePolicy.Currency)
+				siteSource.billingStatusText = "бесплатно до " + hostingandsupport.FormatFileSize(remoteExpensePolicy.FreeSiteThresholdBytes)
+			} else if allocation.ExpenseShareMinor > 0 {
+				siteSource.billingPriceLabel = hostingandsupport.MoneyLabel(allocation.ExpenseShareMinor, remoteExpensePolicy.Currency) + "/мес"
+				siteSource.billingStatusText = "доля расходов"
+			}
 			siteSource.hostingOwner = firstNonEmpty(clientHosting.OwnerEmail, siteSource.hostingOwner)
 			siteSource.hostingServer = firstNonEmpty(clientHosting.ServerDomain, clientHosting.InstallationID, siteSource.hostingServer)
 			siteSource.ip = firstNonEmpty(clientHosting.ServerIP, siteSource.ip)
@@ -11632,8 +12259,8 @@ func hostingAndSupportClientMapPointsJSON(ips []hostingAndSupportClientIPView) t
 	return template.JS(payload)
 }
 
-func (a *App) hostingAndSupportSiteRows(ctx context.Context, plans []hostingandsupport.Plan, assignments map[string]hostingandsupport.ServiceAssignment, deletionBackupSizesByDomain map[string]int64, currentDomain string, demoDomain string, mainDomain string) ([]hostingandsupport.Site, error) {
-	rows, err := a.listSiteQuotaRows(ctx)
+func (a *App) hostingAndSupportSiteRows(ctx context.Context, controlDatabase *sql.DB, plans []hostingandsupport.Plan, assignments map[string]hostingandsupport.ServiceAssignment, deletionBackupSizesByDomain map[string]int64, currentDomain string, demoDomain string, mainDomain string) ([]hostingandsupport.Site, error) {
+	rows, err := a.listSiteQuotaRowsWithControlDatabase(ctx, controlDatabase)
 	if err != nil {
 		return nil, err
 	}
@@ -11663,6 +12290,21 @@ func (a *App) hostingAndSupportSiteRows(ctx context.Context, plans []hostingands
 		siteRows[siteIndex].URL = a.hostingAndSupportSiteURL(siteRows[siteIndex].Domain)
 	}
 	return siteRows, nil
+}
+
+func visibleHostingAndSupportLocalSites(sites []hostingandsupport.Site, demoSettings demo.Settings) []hostingandsupport.Site {
+	disabledDemoDomain := normalizeDomainName(demoSettings.Domain)
+	if demoSettings.Enabled || disabledDemoDomain == "" {
+		return sites
+	}
+	visibleSites := make([]hostingandsupport.Site, 0, len(sites))
+	for _, site := range sites {
+		if normalizeDomainName(site.Domain) == disabledDemoDomain {
+			continue
+		}
+		visibleSites = append(visibleSites, site)
+	}
+	return visibleSites
 }
 
 func hostingAndSupportSplitSiteRequests(siteRequests []hostingandsupport.SiteRequest) ([]hostingandsupport.SiteRequest, map[string]hostingandsupport.SiteRequest) {
@@ -11808,7 +12450,7 @@ func (a *App) saveHostingAndSupportSettingsFromForm(r *http.Request) string {
 	if err := (hostingandsupport.Store{DB: controlDatabase}).SaveSettings(r.Context(), r.FormValue("auto_registration_enabled") == "1"); err != nil {
 		return err.Error()
 	}
-	return a.saveHostingAndSupportDemoSettingsInDatabase(r, controlDatabase)
+	return a.saveHostingAndSupportDemoSettingsInDatabase(r, controlDatabase.DB)
 }
 
 func (a *App) saveHostingAndSupportRegistrationSettingsFromForm(r *http.Request) string {
@@ -11925,7 +12567,7 @@ func (a *App) saveHostingAndSupportDemoSettingsFromForm(r *http.Request) string 
 		return err.Error()
 	}
 	defer controlDatabase.Close()
-	return a.saveHostingAndSupportDemoSettingsInDatabase(r, controlDatabase)
+	return a.saveHostingAndSupportDemoSettingsInDatabase(r, controlDatabase.DB)
 }
 
 func (a *App) blockServiceMailInstallationFromForm(r *http.Request) string {
@@ -12231,7 +12873,7 @@ func (a *App) enqueueSiteRegistrationRequestOwnerEmails(ctx context.Context, r *
 		"Тариф: " + hostingAndSupportPlanEmailLabel(plan),
 		"",
 		"Откройте биллинг, чтобы активировать или отклонить заявку:",
-		absoluteURLForPath(r, "/?hosting_and_support"),
+		absoluteURLForPath(r, "/?expenses"),
 	}, "\n")
 	fromAddress := a.emailFromAddress(a.siteDomain(r.Context(), r))
 	for _, ownerEmail := range ownerEmails {
@@ -12398,7 +13040,7 @@ func (a *App) cleanupExpiredDemoSites(ctx context.Context, now time.Time) {
 		if !demo.SessionsReadyForReset(sessions, now) {
 			continue
 		}
-		if err := a.restoreDemoSiteFromSnapshot(ctx, controlDatabase, domain); err != nil {
+		if err := a.restoreDemoSiteFromSnapshot(ctx, controlDatabase.DB, domain); err != nil {
 			log.Printf("demo site restore failed domain=%s error=%v", domain, err)
 			continue
 		}
@@ -12452,7 +13094,7 @@ func (a *App) deleteManagedSiteWithBackup(ctx context.Context, r *http.Request, 
 	if sameSiteQuotaPath(row.DatabasePath, a.serverControlDBPath()) {
 		return managedSiteDeletionBackupView{}, fmt.Errorf("site %s is stored in the server control database and cannot be safely deleted as a separate site", domain)
 	}
-	ownerContacts := managedSiteOwnerContacts(ctx, controlDatabase, row.DatabasePath, domain)
+	ownerContacts := managedSiteOwnerContacts(ctx, controlDatabase.DB, row.DatabasePath, domain)
 	if retentionDays <= 0 {
 		retentionDays = hostingandsupport.DefaultDeletionBackupRetentionDays
 	}
@@ -12460,11 +13102,11 @@ func (a *App) deleteManagedSiteWithBackup(ctx context.Context, r *http.Request, 
 	if r != nil {
 		languageCode = preferredLanguageCode(r.Header.Get("Accept-Language"))
 	}
-	backup, err := a.createManagedSiteDeletionBackup(ctx, r, controlDatabase, row, ownerContacts, retentionDays, languageCode)
+	backup, err := a.createManagedSiteDeletionBackup(ctx, r, controlDatabase.DB, row, ownerContacts, retentionDays, languageCode)
 	if err != nil {
 		return managedSiteDeletionBackupView{}, err
 	}
-	if err := a.deleteManagedSiteDataAfterBackup(ctx, controlDatabase, row); err != nil {
+	if err := a.deleteManagedSiteDataAfterBackup(ctx, controlDatabase.DB, row); err != nil {
 		return managedSiteDeletionBackupView{}, err
 	}
 	a.logHostingSupportEvent(ctx, "site_deleted", "success", strings.Join(ownerContacts, ", "), domain, "managed site deleted with backup")
@@ -13222,6 +13864,16 @@ func (a *App) createInvoiceFromForm(r *http.Request) string {
 	store := hostingandsupport.Store{DB: controlDatabase}
 	if store.IsDemoDomain(r.Context(), invoice.Domain) {
 		return translationOrDefault(translationsForRequest(r), "billing_demo_billing_blocked", "Demo sites do not participate in billing.")
+	}
+	invoice.ServerCostMinor = hostingandsupport.MoneyMinor(strings.ReplaceAll(invoice.Amount, ",", "."))
+	if invoice.ServerCostMinor > 0 && (invoice.Provider == "stripe" || invoice.Provider == "sitebrush_com") {
+		invoice.CommissionBPS = store.SitebrushCommissionBPS(r.Context())
+		invoice.PaymentFeeMinor = expenses.PaymentCommissionMinor(invoice.ServerCostMinor, invoice.CommissionBPS)
+		invoice.AmountMinor = invoice.ServerCostMinor + invoice.PaymentFeeMinor
+		invoice.Amount = hostingandsupport.MoneyAmount(invoice.AmountMinor)
+	}
+	if invoice.PlanName == "" {
+		invoice.PlanName = "Доля расходов сервера"
 	}
 	createdInvoice, err := store.CreateInvoice(r.Context(), invoice)
 	if err != nil {
@@ -14105,7 +14757,7 @@ func centralHostingSnapshotURLs() []string {
 }
 
 func (a *App) serviceMailRelayEnabled(ctx context.Context) bool {
-	controlDatabase, err := a.openServerControlDatabase(ctx)
+	controlDatabase, err := a.openServerControlDatabaseRead(ctx)
 	if err != nil {
 		log.Printf("service mail relay setting unavailable: %v", err)
 		return true
@@ -14135,7 +14787,7 @@ func (a *App) domainHasUsableDKIM(ctx context.Context, domain string) bool {
 	}
 	selector := strings.Trim(strings.TrimSpace(os.Getenv("SITEBRUSH_DKIM_SELECTOR")), ".")
 	if selector == "" {
-		controlDatabase, err := a.openServerControlDatabase(ctx)
+		controlDatabase, err := a.openServerControlDatabaseRead(ctx)
 		if err == nil {
 			selector = strings.Trim(strings.TrimSpace(hostingandsupport.SettingText(ctx, controlDatabase, "service_mail_dkim_selector")), ".")
 			_ = controlDatabase.Close()
@@ -14387,7 +15039,7 @@ func (a *App) serviceMailRelayPrivateKeyFromControlDatabase(ctx context.Context,
 		return nil, false
 	}
 	if strings.TrimSpace(privateKeyPath) == "" {
-		if err := a.migrateLegacySitebrushComPrivateKey(ctx, controlDatabase); err != nil {
+		if err := a.migrateLegacySitebrushComPrivateKey(ctx, controlDatabase.DB); err != nil {
 			return nil, false
 		}
 		_ = controlDatabase.QueryRowContext(ctx, `SELECT private_key_path FROM sitebrush_com_keys WHERE domain='sitebrush.com'`).Scan(&privateKeyPath)
@@ -14846,7 +15498,7 @@ func (a *App) startHostingSnapshotNetChanListener(ctx context.Context) {
 }
 
 func (a *App) hostingSnapshotNetChanListenerEnabled(ctx context.Context) bool {
-	controlDatabase, err := a.openServerControlDatabase(ctx)
+	controlDatabase, err := a.openServerControlDatabaseRead(ctx)
 	if err != nil {
 		return false
 	}
@@ -14971,21 +15623,20 @@ func (a *App) buildHostingSnapshot(ctx context.Context) (hostingandsupport.Hosti
 	if err != nil {
 		return hostingandsupport.HostingSnapshot{}, err
 	}
-	rows, err := a.listSiteQuotaRows(ctx)
-	if err != nil {
-		return hostingandsupport.HostingSnapshot{}, err
-	}
 	controlDatabase, err := a.openServerControlDatabase(ctx)
 	if err != nil {
 		return hostingandsupport.HostingSnapshot{}, err
 	}
 	defer controlDatabase.Close()
+	rows, err := a.listSiteQuotaRowsWithControlDatabase(ctx, controlDatabase.DB)
+	if err != nil {
+		return hostingandsupport.HostingSnapshot{}, err
+	}
 	store := hostingandsupport.Store{DB: controlDatabase}
 	plans := store.Plans(ctx)
 	assignments := store.ServiceAssignments(ctx)
 	demoSettings := (demo.Store{DB: controlDatabase}).Settings(ctx)
-	serverCostPolicy, _ := store.ServerCostPolicy(ctx, "local")
-	deletionBackupSizesByDomain := a.managedSiteDeletionBackupSizesByDomain(ctx, controlDatabase)
+	deletionBackupSizesByDomain := a.managedSiteDeletionBackupSizesByDomain(ctx, controlDatabase.DB)
 	plansByID := make(map[int]hostingandsupport.Plan, len(plans))
 	for _, plan := range plans {
 		plansByID[plan.ID] = plan
@@ -14993,6 +15644,18 @@ func (a *App) buildHostingSnapshot(ctx context.Context) (hostingandsupport.Hosti
 	_, serverIP, _ := detectServerIPCandidates(ctx)
 	storageRoot := a.storageRootDir()
 	freeBytes, totalBytes, diskOK := diskusage.DiskSpace(storageRoot)
+	serverExpensePolicy, expensePolicyFound := store.ServerExpensePolicy(ctx, "local", int64(totalBytes))
+	if !expensePolicyFound {
+		serverExpensePolicy = expenses.DefaultServerPolicy("local", int64(totalBytes))
+	}
+	if !diskOK {
+		serverExpensePolicy.DiskTotalBytes = 0
+	}
+	snapshotCreatedAt := time.Now().UTC().Format(time.RFC3339)
+	expensePolicyUpdatedAt := serverExpensePolicy.EffectiveAt
+	if expensePolicyUpdatedAt == "" {
+		expensePolicyUpdatedAt = snapshotCreatedAt
+	}
 	osName, osVersion := hostingSnapshotOS()
 	cpuModel := hostingSnapshotCPUModel()
 	ramTotalBytes := hostingSnapshotRAMTotalBytes(ctx)
@@ -15004,31 +15667,36 @@ func (a *App) buildHostingSnapshot(ctx context.Context) (hostingandsupport.Hosti
 		serverDomain = ownerDomain
 	}
 	snapshot := hostingandsupport.HostingSnapshot{
-		Version:              3,
-		InstallationKind:     hostingandsupport.InstallationKindServer,
-		InstallationID:       installationID,
-		ServerIP:             serverIP,
-		ServerStatus:         hostingSnapshotServerStatus(serverIP),
-		ServerDomain:         serverDomain,
-		SitebrushVersion:     CompileVersion,
-		OSName:               osName,
-		OSVersion:            osVersion,
-		CPUModel:             cpuModel,
-		CPUCores:             runtime.NumCPU(),
-		CPUUsagePercent:      cpuUsagePercent,
-		LoadAverage:          loadAverage,
-		TopCPUProcessName:    sanitizeHostingSnapshotProcessName(topCPUProcess.Name),
-		TopCPUProcessPID:     topCPUProcess.PID,
-		TopCPUProcessPercent: topCPUProcess.CPUPercent,
-		TopCPUProcesses:      hostingSnapshotProcessViews(topCPUProcesses),
-		RAMTotalBytes:        ramTotalBytes,
-		ServerUptimeSeconds:  hostingSnapshotServerUptimeSeconds(),
-		StoragePath:          storageRoot,
-		MonthlyCostMinor:     serverCostPolicy.MonthlyCostMinor,
-		BillingCurrency:      serverCostPolicy.Currency,
-		MinimumPriceGBMinor:  serverCostPolicy.MinimumPriceGBMinor,
-		BillingCostUpdatedAt: serverCostPolicy.EffectiveAt,
-		CreatedAt:            time.Now().UTC().Format(time.RFC3339),
+		Version:                   4,
+		InstallationKind:          hostingandsupport.InstallationKindServer,
+		InstallationID:            installationID,
+		ServerIP:                  serverIP,
+		ServerStatus:              hostingSnapshotServerStatus(serverIP),
+		ServerDomain:              serverDomain,
+		SitebrushVersion:          CompileVersion,
+		OSName:                    osName,
+		OSVersion:                 osVersion,
+		CPUModel:                  cpuModel,
+		CPUCores:                  runtime.NumCPU(),
+		CPUUsagePercent:           cpuUsagePercent,
+		LoadAverage:               loadAverage,
+		TopCPUProcessName:         sanitizeHostingSnapshotProcessName(topCPUProcess.Name),
+		TopCPUProcessPID:          topCPUProcess.PID,
+		TopCPUProcessPercent:      topCPUProcess.CPUPercent,
+		TopCPUProcesses:           hostingSnapshotProcessViews(topCPUProcesses),
+		RAMTotalBytes:             ramTotalBytes,
+		ServerUptimeSeconds:       hostingSnapshotServerUptimeSeconds(),
+		StoragePath:               storageRoot,
+		MonthlyCostMinor:          expenses.CalculateMonthlyExpense(serverExpensePolicy),
+		BillingCurrency:           serverExpensePolicy.Currency,
+		MinimumPriceGBMinor:       serverExpensePolicy.DiskRatePer100GBMinor,
+		BillingCostUpdatedAt:      expensePolicyUpdatedAt,
+		ExpenseMode:               string(serverExpensePolicy.Mode),
+		DiskRatePer100GBMinor:     serverExpensePolicy.DiskRatePer100GBMinor,
+		ActualMonthlyExpenseMinor: serverExpensePolicy.ActualMonthlyExpenseMinor,
+		MonthlyExpenseMinor:       expenses.CalculateMonthlyExpense(serverExpensePolicy),
+		FreeSiteThresholdBytes:    serverExpensePolicy.FreeSiteThresholdBytes,
+		CreatedAt:                 snapshotCreatedAt,
 	}
 	if a.desktopMode {
 		snapshot.InstallationKind = hostingandsupport.InstallationKindDesktop
@@ -15169,12 +15837,6 @@ func (a *App) logHostingSupportEvent(ctx context.Context, kind, status, email, d
 	if strings.TrimSpace(kind) == "" {
 		return
 	}
-	controlDatabase, err := a.openServerControlDatabase(ctx)
-	if err != nil {
-		log.Printf("hosting support event store unavailable kind=%s error=%v", kind, err)
-		return
-	}
-	defer controlDatabase.Close()
 	event := hostingandsupport.HostingSnapshotEvent{
 		Kind:      strings.TrimSpace(kind),
 		Status:    strings.TrimSpace(status),
@@ -15183,8 +15845,42 @@ func (a *App) logHostingSupportEvent(ctx context.Context, kind, status, email, d
 		Message:   strings.TrimSpace(message),
 		CreatedAt: time.Now().UTC().Format(time.RFC3339),
 	}
+	if a.hostingSupportEvents != nil {
+		select {
+		case a.hostingSupportEvents <- event:
+		case <-ctx.Done():
+		default:
+			log.Printf("hosting support event queue full kind=%s", kind)
+		}
+		return
+	}
+	a.storeHostingSupportEvent(ctx, event)
+}
+
+func (a *App) startHostingSupportEventWorker(stop <-chan struct{}) chan hostingandsupport.HostingSnapshotEvent {
+	events := make(chan hostingandsupport.HostingSnapshotEvent, 1024)
+	go func() {
+		for {
+			select {
+			case <-stop:
+				return
+			case event := <-events:
+				a.storeHostingSupportEvent(context.Background(), event)
+			}
+		}
+	}()
+	return events
+}
+
+func (a *App) storeHostingSupportEvent(ctx context.Context, event hostingandsupport.HostingSnapshotEvent) {
+	controlDatabase, err := a.openServerControlDatabase(ctx)
+	if err != nil {
+		log.Printf("hosting support event store unavailable kind=%s error=%v", event.Kind, err)
+		return
+	}
+	defer controlDatabase.Close()
 	if err := (hostingandsupport.Store{DB: controlDatabase}).LogSupportEvent(ctx, event); err != nil {
-		log.Printf("hosting support event log failed kind=%s error=%v", kind, err)
+		log.Printf("hosting support event log failed kind=%s error=%v", event.Kind, err)
 	}
 }
 
@@ -15851,7 +16547,7 @@ func (a *App) handleHostingSnapshotRequest(ctx context.Context, request serviceM
 		return fail(err.Error(), http.StatusBadRequest)
 	}
 	a.refreshHostingAndSupportPanel()
-	a.notifyHostingSnapshotDiskThreshold(ctx, controlDatabase, snapshot)
+	a.notifyHostingSnapshotDiskThreshold(ctx, controlDatabase.DB, snapshot)
 	return "stored", http.StatusOK
 }
 
@@ -15974,7 +16670,7 @@ func (a *App) handleServiceMailRelayRequest(ctx context.Context, r *http.Request
 			return fail(err.Error(), http.StatusBadRequest)
 		}
 		a.refreshHostingAndSupportPanel()
-		a.notifyServiceMailRequestHostingSnapshotDiskThreshold(ctx, controlDatabase, request, sourceIP)
+		a.notifyServiceMailRequestHostingSnapshotDiskThreshold(ctx, controlDatabase.DB, request, sourceIP)
 		return "registered", http.StatusOK
 	}
 	if !installationFound {
@@ -15990,7 +16686,7 @@ func (a *App) handleServiceMailRelayRequest(ctx context.Context, r *http.Request
 		return fail(err.Error(), http.StatusBadRequest)
 	}
 	a.refreshHostingAndSupportPanel()
-	a.notifyServiceMailRequestHostingSnapshotDiskThreshold(ctx, controlDatabase, request, sourceIP)
+	a.notifyServiceMailRequestHostingSnapshotDiskThreshold(ctx, controlDatabase.DB, request, sourceIP)
 	if store.ServiceMailInstallationBlocked(ctx, request.InstallationID) {
 		return fail("installation is blocked", http.StatusForbidden)
 	}
@@ -16521,7 +17217,7 @@ func (a *App) hostingAndSupportParentDomainForThirdLevelSite(ctx context.Context
 	if registrationDomain == "" {
 		return "", false
 	}
-	controlDatabase, err := a.openServerControlDatabase(ctx)
+	controlDatabase, err := a.openServerControlDatabaseRead(ctx)
 	if err != nil {
 		return "", false
 	}
@@ -17711,13 +18407,34 @@ func listSiteQuotaRows(ctx context.Context, storagePath, dbPath string) ([]siteQ
 }
 
 func (a *App) listSiteQuotaRows(ctx context.Context) ([]siteQuotaRow, error) {
+	return a.listSiteQuotaRowsWithControlDatabase(ctx, nil)
+}
+
+func (a *App) listSiteQuotaRowsWithControlDatabase(ctx context.Context, controlDatabase *sql.DB) ([]siteQuotaRow, error) {
 	candidates, err := a.siteQuotaDatabaseCandidatesInsideStorage()
 	if err != nil {
 		return nil, err
 	}
 	rows := make([]siteQuotaRow, 0, len(candidates))
 	for _, candidate := range candidates {
-		candidateRows, err := siteQuotaRowsFromDatabase(ctx, a.storagePath, candidate)
+		var candidateRows []siteQuotaRow
+		if sameSiteQuotaPath(candidate.path, a.serverControlDBPath()) {
+			var controlSession *serverControlDatabaseSession
+			if controlDatabase == nil {
+				controlSession, err = a.openServerControlDatabase(ctx)
+				if err != nil {
+					return nil, err
+				}
+				controlDatabase = controlSession.DB
+			}
+			candidateRows, err = siteQuotaRowsFromOpenDatabase(ctx, a.storagePath, candidate, controlDatabase)
+			if controlSession != nil {
+				_ = controlSession.Close()
+				controlDatabase = nil
+			}
+		} else {
+			candidateRows, err = siteQuotaRowsFromDatabase(ctx, a.storagePath, candidate)
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -17827,7 +18544,10 @@ func siteQuotaRowsFromDatabase(ctx context.Context, storagePath string, candidat
 		return nil, err
 	}
 	defer rawDatabase.Close()
+	return siteQuotaRowsFromOpenDatabase(ctx, storagePath, candidate, rawDatabase)
+}
 
+func siteQuotaRowsFromOpenDatabase(ctx context.Context, storagePath string, candidate siteQuotaDatabaseCandidate, rawDatabase *sql.DB) ([]siteQuotaRow, error) {
 	if !siteDatabaseHasRegisteredAdmin(ctx, rawDatabase) {
 		return nil, nil
 	}
@@ -18045,11 +18765,22 @@ func (a *App) updateSiteQuotaLimit(ctx context.Context, rawDomain string, limitB
 		return siteQuotaRow{}, err
 	}
 
-	rawDatabase, err := sql.Open("sqlite", "file:"+candidate.path)
-	if err != nil {
-		return siteQuotaRow{}, err
+	var rawDatabase *sql.DB
+	var controlSession *serverControlDatabaseSession
+	if sameSiteQuotaPath(candidate.path, a.serverControlDBPath()) {
+		controlSession, err = a.openServerControlDatabase(ctx)
+		if err != nil {
+			return siteQuotaRow{}, err
+		}
+		rawDatabase = controlSession.DB
+		defer controlSession.Close()
+	} else {
+		rawDatabase, err = sql.Open("sqlite", "file:"+candidate.path)
+		if err != nil {
+			return siteQuotaRow{}, err
+		}
+		defer rawDatabase.Close()
 	}
-	defer rawDatabase.Close()
 
 	application := &App{db: rawDatabase, storagePath: a.storagePath, storageRealRoot: a.storageRealRoot, dbPath: a.serverControlDBPath(), debug: a.debug}
 	commandContext := contextWithDomain(ctx, domain)
@@ -18078,12 +18809,10 @@ func openSiteQuotaControlDatabase(ctx context.Context, dbPath string) (*sql.DB, 
 	if err := ensureParentDir(controlDatabasePath); err != nil {
 		return nil, err
 	}
-	controlDatabase, err := sql.Open("sqlite", "file:"+controlDatabasePath)
+	controlDatabase, err := openServerControlDatabaseHandle(controlDatabasePath, true)
 	if err != nil {
 		return nil, err
 	}
-	controlDatabase.SetMaxOpenConns(1)
-	controlDatabase.SetMaxIdleConns(1)
 	if err := hostingandsupport.Migrate(ctx, controlDatabase); err != nil {
 		_ = controlDatabase.Close()
 		return nil, err
@@ -18728,7 +19457,15 @@ func (a *App) serverControlDBPath() string {
 	return cleanDBPath(defaultDBPath)
 }
 
-func (a *App) openServerControlDatabase(ctx context.Context) (*sql.DB, error) {
+func (a *App) openServerControlDatabase(ctx context.Context) (*serverControlDatabaseSession, error) {
+	return a.openServerControlDatabaseForAccess(ctx, serverControlDatabaseWrite)
+}
+
+func (a *App) openServerControlDatabaseRead(ctx context.Context) (*serverControlDatabaseSession, error) {
+	return a.openServerControlDatabaseForAccess(ctx, serverControlDatabaseRead)
+}
+
+func (a *App) openServerControlDatabaseForAccess(ctx context.Context, kind serverControlDatabaseAccessKind) (*serverControlDatabaseSession, error) {
 	databasePath := a.serverControlDBPath()
 	realDatabasePath, pathErr := a.writablePathInsideStorage(databasePath)
 	if pathErr != nil {
@@ -18737,17 +19474,18 @@ func (a *App) openServerControlDatabase(ctx context.Context) (*sql.DB, error) {
 	if err := ensureParentDir(realDatabasePath); err != nil {
 		return nil, err
 	}
-	database, err := sql.Open("sqlite", "file:"+realDatabasePath)
+	if a.controlDatabase != nil {
+		return a.controlDatabase.acquire(ctx, kind)
+	}
+	database, err := openServerControlDatabaseHandle(realDatabasePath, true)
 	if err != nil {
 		return nil, err
 	}
-	database.SetMaxOpenConns(1)
-	database.SetMaxIdleConns(1)
 	if err := hostingandsupport.Migrate(ctx, database); err != nil {
 		_ = database.Close()
 		return nil, err
 	}
-	return database, nil
+	return &serverControlDatabaseSession{DB: database, standalone: true}, nil
 }
 
 func (a *App) startServerOwnerRecoveryWorker(ctx context.Context) {
@@ -18772,7 +19510,7 @@ func (a *App) startServerOwnerRecoveryWorker(ctx context.Context) {
 }
 
 func (a *App) serverOwnerExists(ctx context.Context) bool {
-	controlDatabase, err := a.openServerControlDatabase(ctx)
+	controlDatabase, err := a.openServerControlDatabaseRead(ctx)
 	if err != nil {
 		return false
 	}
@@ -18804,12 +19542,24 @@ func (a *App) firstExistingSiteAdmin(ctx context.Context) (string, string, bool)
 		return "", "", false
 	}
 	for _, row := range rows {
-		domain, email, found := firstAdminInDatabase(ctx, row.DatabasePath, row.Domain)
+		domain, email, found := a.firstAdminInDatabase(ctx, row.DatabasePath, row.Domain)
 		if found {
 			return domain, email, true
 		}
 	}
 	return "", "", false
+}
+
+func (a *App) firstAdminInDatabase(ctx context.Context, databasePath, fallbackDomain string) (string, string, bool) {
+	if !sameSiteQuotaPath(databasePath, a.serverControlDBPath()) {
+		return firstAdminInDatabase(ctx, databasePath, fallbackDomain)
+	}
+	controlDatabase, err := a.openServerControlDatabaseRead(ctx)
+	if err != nil {
+		return "", "", false
+	}
+	defer controlDatabase.Close()
+	return firstAdminFromOpenDatabase(ctx, controlDatabase.DB, fallbackDomain)
 }
 
 func firstAdminInDatabase(ctx context.Context, databasePath, fallbackDomain string) (string, string, bool) {
@@ -18818,9 +19568,13 @@ func firstAdminInDatabase(ctx context.Context, databasePath, fallbackDomain stri
 		return "", "", false
 	}
 	defer rawDatabase.Close()
+	return firstAdminFromOpenDatabase(ctx, rawDatabase, fallbackDomain)
+}
+
+func firstAdminFromOpenDatabase(ctx context.Context, rawDatabase *sql.DB, fallbackDomain string) (string, string, bool) {
 	var domain string
 	var email string
-	err = rawDatabase.QueryRowContext(ctx, `SELECT domain,email FROM users WHERE is_admin=1 ORDER BY id ASC LIMIT 1`).Scan(&domain, &email)
+	err := rawDatabase.QueryRowContext(ctx, `SELECT domain,email FROM users WHERE is_admin=1 ORDER BY id ASC LIMIT 1`).Scan(&domain, &email)
 	domain = normalizeQuotaDomainName(domain)
 	if domain == "" {
 		domain = normalizeQuotaDomainName(fallbackDomain)
@@ -18869,7 +19623,7 @@ func (a *App) isServerManagerEmail(ctx context.Context, domain, email string) bo
 	if !a.serverOwnerExists(ctx) {
 		a.ensureServerOwnerExists(ctx)
 	}
-	controlDatabase, err := a.openServerControlDatabase(ctx)
+	controlDatabase, err := a.openServerControlDatabaseRead(ctx)
 	if err != nil {
 		return false
 	}
@@ -18938,7 +19692,7 @@ func (a *App) serverAutomaticRegistrationAllowed(ctx context.Context) bool {
 	if !a.serverOwnerExists(ctx) {
 		return true
 	}
-	controlDatabase, err := a.openServerControlDatabase(ctx)
+	controlDatabase, err := a.openServerControlDatabaseRead(ctx)
 	if err != nil {
 		return true
 	}
@@ -20315,7 +21069,7 @@ func buildContextMenuScript(isAdmin bool, isServerManager bool, isFrozen bool, p
 	publishLabel := template.JSEscapeString(translationOrDefault(translations, "menu_publish", "Publish"))
 	settingsLabel := template.JSEscapeString(translationOrDefault(translations, "menu_domain_settings", "Settings"))
 	analyticsLabel := template.JSEscapeString(translationOrDefault(translations, "menu_analytics", "Analytics"))
-	hostingAndSupportLabel := template.JSEscapeString(translationOrDefault(translations, "menu_billing", "Хостинг и поддержка"))
+	hostingAndSupportLabel := template.JSEscapeString(translationOrDefault(translations, "menu_expenses", "Расходы"))
 	profileLabel := template.JSEscapeString(translationOrDefault(translations, "menu_profile", "Account"))
 	logoutLabel := template.JSEscapeString(translationOrDefault(translations, "menu_logout", "Sign out"))
 	loginLabel := template.JSEscapeString(translationOrDefault(translations, "menu_login", "Sign in"))
@@ -20349,7 +21103,7 @@ func buildContextMenuScript(isAdmin bool, isServerManager bool, isFrozen bool, p
 		}
 		hostingAndSupportEntry := ""
 		if isServerManager {
-			hostingAndSupportEntry = "<li class='SiteBrushContextMenu SiteBrushSeparatedMenuItem SiteBrushPrivilegedMenuItem'><a href='?hosting_and_support' class='SiteBrushContextMenuLink'><img src='/p/static/sitebrush-app-icon.png' class='SiteBrushMenuIcon' alt=''>" + hostingAndSupportLabel + "</a></li>"
+			hostingAndSupportEntry = "<li class='SiteBrushContextMenu SiteBrushSeparatedMenuItem SiteBrushPrivilegedMenuItem'><a href='?expenses' class='SiteBrushContextMenuLink'><img src='/p/static/sitebrush-app-icon.png' class='SiteBrushMenuIcon' alt=''>" + hostingAndSupportLabel + "</a></li>"
 		}
 		logoutEntry := ""
 		if showLogout {
@@ -23561,6 +24315,12 @@ const automaticSSLRetryDelayEligibility = 24 * time.Hour
 const automaticSSLRetryDelayDNS = 6 * time.Hour
 const automaticSSLRetryDelayChallenge = time.Hour
 const automaticSSLRetryDelayACME = 12 * time.Hour
+const automaticSSLObservedDomainTTL = 24 * time.Hour
+const automaticSSLMaximumObservedDomains = 4096
+const automaticSSLProcessQueueSize = 1024
+const automaticSSLFallbackValidity = 397 * 24 * time.Hour
+const automaticSSLFallbackRenewBefore = 30 * 24 * time.Hour
+const automaticSSLPreparationConcurrency = 4
 
 const authoritativeDNSMaxDepth = 16
 const authoritativeDNSTimeout = 3 * time.Second
@@ -25006,36 +25766,247 @@ func autoCertDomainEligibilityError(domain string) error {
 	return nil
 }
 
-func (a *App) startAutomaticSSLRefreshWorker(ctx context.Context) {
+func (a *App) startAutomaticSSLProcess(stop <-chan struct{}, certificateManager *autocert.Manager) (chan automaticSSLRequest, *tls.Certificate, error) {
+	fallbackReady := make(chan automaticSSLResponse, 1)
 	go func() {
-		a.refreshAutomaticSSLDomains(ctx)
-		ticker := time.NewTicker(automaticSSLRefreshInterval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				a.refreshAutomaticSSLDomains(ctx)
-			}
-		}
+		certificate, err := a.loadOrCreateAutomaticSSLFallbackCertificate(time.Now())
+		fallbackReady <- automaticSSLResponse{certificate: certificate, err: err}
+		close(fallbackReady)
 	}()
+	var fallbackResponse automaticSSLResponse
+	select {
+	case fallbackResponse = <-fallbackReady:
+	case <-stop:
+		return nil, nil, errors.New("automatic SSL stopped while preparing fallback certificate")
+	case <-time.After(30 * time.Second):
+		return nil, nil, errors.New("automatic SSL fallback certificate preparation timed out")
+	}
+	if fallbackResponse.err != nil {
+		return nil, nil, fallbackResponse.err
+	}
+	requests := make(chan automaticSSLRequest, automaticSSLProcessQueueSize)
+	go a.runAutomaticSSLProcess(stop, certificateManager, requests)
+	return requests, fallbackResponse.certificate, nil
 }
 
-func (a *App) refreshAutomaticSSLDomains(ctx context.Context) {
+func (a *App) runAutomaticSSLProcess(stop <-chan struct{}, certificateManager *autocert.Manager, requests chan automaticSSLRequest) {
+	// This goroutine exclusively owns scheduling state; workers return immutable results through channels.
+	observedAt := make(map[string]time.Time)
+	nextAttemptAt := make(map[string]time.Time)
+	inFlight := make(map[string]bool)
+	serverIPs := make([]net.IP, 0)
+	serverIPsCheckedAt := time.Time{}
+	ipResult := make(chan automaticSSLIPResult, 1)
+	domainResults := make(chan automaticSSLDomainResult, automaticSSLPreparationConcurrency)
+	preparationSlots := make(chan struct{}, automaticSSLPreparationConcurrency)
+	ipInFlight := false
+
+	// External IP detection never blocks TLS or the scheduling loop.
+	startIPDetection := func() {
+		if ipInFlight {
+			return
+		}
+		ipInFlight = true
+		go func() {
+			ipList, err := detectPublicAutomaticSSLServerIPs()
+			select {
+			case ipResult <- automaticSSLIPResult{serverIPs: ipList, err: err}:
+			case <-stop:
+			}
+		}()
+	}
+	// DNS and ACME work is bounded so observations cannot create unbounded goroutines.
+	startDomainPreparation := func(domain string, now time.Time) {
+		if domain == "" || inFlight[domain] || nextAttemptAt[domain].After(now) || len(serverIPs) == 0 {
+			return
+		}
+		select {
+		case preparationSlots <- struct{}{}:
+		default:
+			return
+		}
+		inFlight[domain] = true
+		currentServerIPs := append([]net.IP(nil), serverIPs...)
+		go func() {
+			result := a.prepareAutomaticSSLDomain(certificateManager, domain, currentServerIPs)
+			<-preparationSlots
+			select {
+			case domainResults <- result:
+			case <-stop:
+			}
+		}()
+	}
+	// Periodic discovery prepares managed domains before their first TLS request.
+	discoverDomains := func() {
+		go func() {
+			for _, domain := range a.listAutomaticSSLDomainCandidates(context.Background()) {
+				select {
+				case requests <- automaticSSLRequest{action: "discover", domain: domain}:
+				case <-stop:
+					return
+				}
+			}
+		}()
+	}
+
+	startIPDetection()
+	discoverDomains()
+	ticker := time.NewTicker(automaticSSLRefreshInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-stop:
+			return
+		case request := <-requests:
+			domain := normalizeDomainName(request.domain)
+			if domain != "" {
+				now := time.Now()
+				if len(observedAt) < automaticSSLMaximumObservedDomains || !observedAt[domain].IsZero() {
+					observedAt[domain] = now
+				}
+				if serverIPsCheckedAt.IsZero() || now.Sub(serverIPsCheckedAt) >= automaticSSLRefreshInterval {
+					startIPDetection()
+				} else {
+					startDomainPreparation(domain, now)
+				}
+			}
+		case result := <-ipResult:
+			ipInFlight = false
+			serverIPsCheckedAt = time.Now()
+			if result.err == nil {
+				serverIPs = result.serverIPs
+				for domain := range observedAt {
+					startDomainPreparation(domain, serverIPsCheckedAt)
+				}
+			} else {
+				serverIPs = serverIPs[:0]
+				a.logProblemEvent("AUTOCERT background IP detection failed: %v", result.err)
+			}
+		case result := <-domainResults:
+			delete(inFlight, result.domain)
+			nextAttemptAt[result.domain] = result.retryAfter
+			if result.certificate != nil && !result.expiresAt.IsZero() {
+				a.rememberAutoCertCachedCertificate(result.domain, result.certificate, result.expiresAt)
+			}
+			if result.state == "certificate_error" && result.err != nil {
+				a.logDomainEvent(result.domain, "AUTOCERT background certificate request failed: %v", result.err)
+			}
+			startDomainPreparation(result.domain, time.Now())
+		case now := <-ticker.C:
+			for domain, lastObservedAt := range observedAt {
+				if now.Sub(lastObservedAt) > automaticSSLObservedDomainTTL {
+					delete(observedAt, domain)
+					delete(nextAttemptAt, domain)
+				}
+			}
+			startIPDetection()
+			discoverDomains()
+		}
+	}
+}
+
+func detectPublicAutomaticSSLServerIPs() ([]net.IP, error) {
+	detectionContext, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	externalIPText, err := lookupServerExternalIP(detectionContext)
+	if err != nil {
+		return nil, err
+	}
+	externalIP := net.ParseIP(strings.TrimSpace(externalIPText))
+	publicServerIPs := publicAutoCertIPRecords([]net.IP{externalIP})
+	if len(publicServerIPs) == 0 {
+		return nil, fmt.Errorf("external IP service returned non-public address %q", externalIPText)
+	}
+	return publicServerIPs, nil
+}
+
+func (a *App) prepareAutomaticSSLDomain(certificateManager *autocert.Manager, domain string, serverIPs []net.IP) automaticSSLDomainResult {
+	certificateDomain := normalizeDomainName(domain)
+	result := automaticSSLDomainResult{domain: certificateDomain, retryAfter: time.Now().Add(automaticSSLRefreshInterval)}
+	if certificateDomain == "" || autoCertDomainEligibilityError(certificateDomain) != nil {
+		result.state = "ignored"
+		result.retryAfter = time.Now().Add(automaticSSLRetryDelayEligibility)
+		return result
+	}
+	domainContext := contextWithDomain(context.Background(), certificateDomain)
+	if !a.domainIsAutomaticSSLCandidate(domainContext, certificateDomain) {
+		result.state = "ignored"
+		result.retryAfter = time.Now().Add(automaticSSLRetryDelayEligibility)
+		return result
+	}
+	setting := a.domainAutomaticSSLSetting(domainContext, certificateDomain)
+	if setting.ManuallyDisabled {
+		result.state = "disabled"
+		result.retryAfter = time.Now().Add(automaticSSLRetryDelayEligibility)
+		return result
+	}
+	now := time.Now()
+	if certificate, expiresAt, ok := a.autoCertCachedCertificateFromMemory(certificateDomain, now, automaticSSLCertificateRenewBefore); ok {
+		result.state = "ready"
+		result.certificate = certificate
+		result.expiresAt = expiresAt
+		result.retryAfter = now.Add(automaticSSLRefreshInterval)
+		return result
+	}
+	if retryAfter, delayed := automaticSSLRetryAfter(setting, now); delayed {
+		result.state = "delayed"
+		result.retryAfter = retryAfter
+		return result
+	}
+	setting, err := a.precheckDomainAutomaticSSL(domainContext, certificateDomain, serverIPs)
+	if err != nil || !setting.Enabled {
+		result.state = "waiting_dns"
+		result.err = err
+		result.retryAfter = time.Now().Add(automaticSSLRetryDelayDNS)
+		return result
+	}
+	a.clearDomainAutomaticSSLFailure(domainContext, certificateDomain)
+	certificate, err := certificateManager.GetCertificate(&tls.ClientHelloInfo{ServerName: certificateDomain})
+	if err != nil {
+		retryDelay := automaticSSLRetryDelayForCertificateError(err)
+		a.recordDomainAutomaticSSLFailure(domainContext, certificateDomain, fmt.Sprintf("certificate request failed: %v", err), retryDelay)
+		result.state = "certificate_error"
+		result.err = err
+		result.retryAfter = time.Now().Add(retryDelay)
+		return result
+	}
+	expiresAt, err := tlsCertificateExpiresAt(certificate)
+	if err != nil {
+		result.state = "certificate_error"
+		result.err = err
+		result.retryAfter = time.Now().Add(automaticSSLRetryDelayACME)
+		return result
+	}
+	a.clearDomainAutomaticSSLFailure(domainContext, certificateDomain)
+	result.state = "ready"
+	result.certificate = certificate
+	result.expiresAt = expiresAt
+	result.retryAfter = time.Now().Add(automaticSSLRefreshInterval)
+	return result
+}
+
+func automaticSSLRetryAfter(setting DomainAutomaticSSLSetting, now time.Time) (time.Time, bool) {
+	retryAfter, err := time.Parse(time.RFC3339, strings.TrimSpace(setting.RetryAfter))
+	return retryAfter, err == nil && retryAfter.After(now)
+}
+
+func (a *App) autoCertPreparedHostPolicy(ctx context.Context, host string) error {
+	certificateDomain := normalizeDomainName(host)
+	if err := autoCertDomainEligibilityError(certificateDomain); err != nil {
+		return err
+	}
 	if !a.automaticSSLAvailable {
-		return
+		return errors.New("automatic SSL listeners are unavailable")
 	}
-	serverIPs, _, err := detectServerIPCandidates(ctx)
-	if err != nil || len(serverIPs) == 0 {
-		a.logProblemEvent("AUTOCERT DNS refresh skipped: server IP detection failed: %v", err)
-		return
+	domainContext := contextWithDomain(ctx, certificateDomain)
+	if !a.domainIsAutomaticSSLCandidate(domainContext, certificateDomain) {
+		return fmt.Errorf("automatic SSL domain %q is not managed by Sitebrush", certificateDomain)
 	}
-	domainList := a.listAutomaticSSLDomainCandidates(ctx)
-	a.logProblemEvent("AUTOCERT DNS refresh started: domains=%d server_ips=%s", len(domainList), ipListForLog(serverIPs))
-	for _, domain := range domainList {
-		a.refreshDomainAutomaticSSL(ctx, domain, serverIPs)
+	setting := a.domainAutomaticSSLSetting(domainContext, certificateDomain)
+	if setting.ManuallyDisabled || !setting.Enabled {
+		return fmt.Errorf("automatic SSL domain %q has not passed its background DNS check", certificateDomain)
 	}
+	return nil
 }
 
 func (a *App) listAutomaticSSLDomainCandidates(ctx context.Context) []string {
@@ -25126,7 +26097,9 @@ func (a *App) precheckDomainAutomaticSSL(ctx context.Context, domain string, ser
 	if domainFromContext(ctx) != setting.Domain {
 		a.upsertDomainAutomaticSSLSetting(contextWithDomain(ctx, setting.Domain), setting)
 	}
-	a.logDomainEvent(setting.Domain, "AUTOCERT DNS precheck domain=%s matched=%t dns_ips=%s server_ips=%s", setting.Domain, setting.Enabled, ipListForLog(publicRecords), ipListForLog(serverIPs))
+	if a.debug {
+		a.logDomainEvent(setting.Domain, "AUTOCERT DNS precheck domain=%s matched=%t dns_ips=%s server_ips=%s", setting.Domain, setting.Enabled, ipListForLog(publicRecords), ipListForLog(serverIPs))
+	}
 	if !setting.Enabled {
 		err := fmt.Errorf("automatic SSL domain %q does not point to this server", setting.Domain)
 		a.recordDomainAutomaticSSLFailure(ctx, setting.Domain, err.Error(), automaticSSLRetryDelayDNS)
