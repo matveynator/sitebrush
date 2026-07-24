@@ -1394,8 +1394,25 @@ func TestExpensesTemplateShowsOnlyLocalServerAndEnabledDemoOutsideSitebrushCom(t
 			t.Fatalf("regular server rendered forbidden central or demo fragment %q", forbiddenFragment)
 		}
 	}
-	if !strings.Contains(disabledDemoHTML, "owner.example") || !strings.Contains(disabledDemoHTML, `id="hostingServerList"`) {
+	if !strings.Contains(disabledDemoHTML, "owner.example") || !strings.Contains(disabledDemoHTML, `data-expense-server-panel="0"`) {
 		t.Fatal("regular server did not render its local server")
+	}
+	if !strings.Contains(disabledDemoHTML, `name="monthly_server_expense"`) {
+		t.Fatal("simplified expenses did not render the monthly server price")
+	}
+	for _, removedFragment := range []string{
+		`name="disk_rate_per_100_gb"`,
+		`name="expense_mode"`,
+		`data-hosting-tab-panel="settings"`,
+		`data-hosting-tab-panel="diagnostics"`,
+		`id="hostingServerList"`,
+		"Ключ sitebrush.com",
+		"CPU",
+		"RAM",
+	} {
+		if strings.Contains(disabledDemoHTML, removedFragment) {
+			t.Fatalf("simplified expenses rendered technical fragment %q", removedFragment)
+		}
 	}
 
 	enabledDemoSnapshot := baseSnapshot
@@ -1408,6 +1425,62 @@ func TestExpensesTemplateShowsOnlyLocalServerAndEnabledDemoOutsideSitebrushCom(t
 	if strings.Contains(enabledDemoHTML, `data-hosting-installation-tab="desktop"`) ||
 		strings.Contains(enabledDemoHTML, `data-hosting-installation-tab="archive"`) {
 		t.Fatal("enabled demo exposed central desktop or archive tabs")
+	}
+
+	centralSnapshot := baseSnapshot
+	centralSnapshot.ShowCentralRegistry = true
+	centralSnapshot.DesktopHostingGroups = []hostingandsupport.DesktopHostingGroup{{
+		ServerIP: "203.0.113.10",
+		Hostings: []hostingandsupport.ClientHosting{{
+			InstallationID: "desktop-1", ServerIP: "203.0.113.10",
+			Sites: []hostingandsupport.ClientHostingSite{{Domain: "desktop.example.com"}},
+		}},
+	}}
+	centralSnapshot.ArchivedHostings = []hostingandsupport.ClientHosting{{InstallationID: "archive-1", LastSeenAt: "2026-07-20"}}
+	centralHTML := renderSnapshot(centralSnapshot)
+	for _, expectedFragment := range []string{
+		`data-hosting-installation-tab="desktop"`,
+		`data-hosting-installation-tab="archive"`,
+		"desktop.example.com",
+		"archive-1",
+	} {
+		if !strings.Contains(centralHTML, expectedFragment) {
+			t.Fatalf("central expenses missing %q", expectedFragment)
+		}
+	}
+}
+
+func TestSimplifiedExpenseServerViewsExcludeOwnerAndKeepClientDetails(t *testing.T) {
+	server := hostingandsupport.ServerView{
+		ID:              "local",
+		Local:           true,
+		BillingCurrency: "EUR",
+		Clients: []hostingandsupport.ServerClientView{
+			{
+				Email: "client@example.com",
+				Sites: []hostingandsupport.ServerSiteView{
+					{Domain: "paid.example.com", UsedBytes: 30 * expenses.DecimalGigabyte, BillingAmount: "15.00", BillingPriceLabel: "€15.00/мес"},
+					{Domain: "bonus.example.com", UsedBytes: 100 * expenses.DecimalMegabyte, BillingAmount: "0.00", BillingPriceLabel: "€0.00"},
+				},
+			},
+			{
+				Email: "owner@example.com",
+				Sites: []hostingandsupport.ServerSiteView{{Domain: "owner.example.com", UsedBytes: 10 * expenses.DecimalGigabyte, BillingExcluded: true}},
+			},
+		},
+	}
+	clientDetails := []hostingAndSupportClientView{{
+		PrimaryEmail: "client@example.com",
+		Emails:       []string{"client@example.com"},
+		InvoiceDay:   5,
+	}}
+	views := simplifiedExpenseServerViews([]hostingandsupport.ServerView{server}, clientDetails, nil)
+	if len(views) != 1 || len(views[0].Clients) != 1 {
+		t.Fatalf("simplified servers = %#v", views)
+	}
+	client := views[0].Clients[0]
+	if client.Email != "client@example.com" || client.SiteCount != 2 || client.TotalStorageLabel != "28.0 GB" || client.MonthlyShareLabel != "15.00 EUR" {
+		t.Fatalf("simplified client = %#v", client)
 	}
 }
 
@@ -1665,7 +1738,7 @@ func TestAutomaticBillingCreatesOneServerInvoiceWithPaidAndBonusSites(t *testing
 		MainDomain: "sitebrush.com", CommissionBPS: 500,
 		OwnerEmails: []string{"owner@example.com"},
 		LocalCostPolicy: expenses.ServerPolicy{
-			InstallationID: "local", Mode: expenses.ModeActual, ActualMonthlyExpenseMinor: 100, DiskRatePer100GBMinor: 1500, Currency: "EUR", FreeSiteThresholdBytes: 100_000_000,
+			InstallationID: "local", Mode: expenses.ModeActual, ActualMonthlyExpenseMinor: 100, DiskRatePer100GBMinor: 1500, Currency: "EUR", FreeSiteThresholdBytes: 100_000_000, DiskTotalBytes: 2_000_000_000,
 		},
 		Sites: []hostingandsupport.Site{
 			{Domain: "paid.example.com", UsedBytes: 600_000_000, BillingAmount: "1.20", BillingCurrency: "EUR", BillingBillable: true, AdminEmails: "client@example.com"},
@@ -1703,6 +1776,27 @@ func TestAutomaticBillingCreatesOneServerInvoiceWithPaidAndBonusSites(t *testing
 	}
 }
 
+func TestSaveServerExpensePolicyUsesOnlyMonthlyServerPrice(t *testing.T) {
+	application, _ := newTestApplication(t)
+	controlDatabase := setupBillingOwnerForTest(t, application, "localhost", "owner@example.com", false)
+	defer controlDatabase.Close()
+
+	form := url.Values{}
+	form.Set("monthly_server_expense", "75.00")
+	form.Set("currency", "EUR")
+	form.Set("free_site_threshold_mb", "100")
+	request := httptest.NewRequest(http.MethodPost, "http://localhost/?expenses", strings.NewReader(form.Encode()))
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	status := application.saveServerExpensePolicyFromForm(request)
+	if status != translationsForLanguageCode("ru")["expenses_server_policy_saved"] {
+		t.Fatalf("save status = %q", status)
+	}
+	policy, found := (hostingandsupport.Store{DB: controlDatabase}).ServerExpensePolicy(context.Background(), "local", 500*expenses.DecimalGigabyte)
+	if !found || policy.Mode != expenses.ModeActual || policy.ActualMonthlyExpenseMinor != 7500 || expenses.CalculateMonthlyExpense(policy) != 7500 {
+		t.Fatalf("saved expense policy = %+v, found=%t", policy, found)
+	}
+}
+
 func TestAutomaticBillingDistributesServerCostByStorage(t *testing.T) {
 	database, err := sql.Open("sqlite3", filepath.Join(t.TempDir(), "billing.db"))
 	if err != nil {
@@ -1726,7 +1820,7 @@ func TestAutomaticBillingDistributesServerCostByStorage(t *testing.T) {
 	snapshot := hostingAndSupportPanelSnapshot{
 		MainDomain: "sitebrush.com",
 		LocalCostPolicy: expenses.ServerPolicy{
-			InstallationID: "local", Mode: expenses.ModeActual, ActualMonthlyExpenseMinor: 101, DiskRatePer100GBMinor: 1500, Currency: "USD", FreeSiteThresholdBytes: 100_000_000,
+			InstallationID: "local", Mode: expenses.ModeActual, ActualMonthlyExpenseMinor: 101, DiskRatePer100GBMinor: 1500, Currency: "USD", FreeSiteThresholdBytes: 100_000_000, DiskTotalBytes: 5_000_000_000,
 		},
 		Sites: []hostingandsupport.Site{
 			{Domain: "small.example.com", UsedBytes: 600_000_000, AdminEmails: "small@example.com"},
@@ -3513,16 +3607,11 @@ func TestBillingPlanCanBeEditedWithSiteAndAnalyticsLimits(t *testing.T) {
 		t.Fatalf("view status = %d, body=%q", viewResponse.Code, viewResponse.Body.String())
 	}
 	body := viewResponse.Body.String()
-	for _, expectedFragment := range []string{
-		`id="billingPlanEditModal` + strconv.Itoa(planID) + `"`,
-		`name="plan_id" value="` + strconv.Itoa(planID) + `"`,
-		`name="site_limit" type="number" min="1" step="1" class="form-control" value="5"`,
-		`name="analytics_report_limit" type="number" min="0" step="1" class="form-control" value="30"`,
-		`сайтов 5 · отчетов 30`,
-	} {
-		if !strings.Contains(body, expectedFragment) {
-			t.Fatalf("billing page missing %q in %s", expectedFragment, body)
-		}
+	if !strings.Contains(body, `class="expense-simple-page"`) {
+		t.Fatal("expenses page did not render the simplified view")
+	}
+	if strings.Contains(body, `id="billingPlanEditModal`+strconv.Itoa(planID)+`"`) {
+		t.Fatal("expenses page rendered the unrelated plan editor")
 	}
 }
 
@@ -7649,6 +7738,32 @@ func TestGuestContextMenuStandardMenuHintIsMouseOnlyAndTranslated(t *testing.T) 
 	} {
 		if !strings.Contains(body, expectedFragment) {
 			t.Fatalf("guest context menu missing %q in %s", expectedFragment, body)
+		}
+	}
+}
+
+func TestSimplifiedExpenseLabelsExistInEveryLanguage(t *testing.T) {
+	requiredKeys := []string{
+		"expenses_server_select",
+		"expenses_monthly_server_price",
+		"expenses_automatic_price_per_gb",
+		"expenses_gb_short",
+		"expenses_purpose_simple",
+		"expenses_disk_unknown",
+		"expenses_paid_capacity",
+		"expenses_allocated_month",
+		"expenses_paid_and_uncovered",
+		"expenses_billing_capacity",
+		"expenses_capacity_reserve_hint",
+		"expenses_capacity_exceeded",
+		"expenses_clients_simple_hint",
+		"expenses_client_share",
+	}
+	for languageCode, translations := range translationCatalog {
+		for _, requiredKey := range requiredKeys {
+			if strings.TrimSpace(translations[requiredKey]) == "" {
+				t.Fatalf("missing %s translation for %s", requiredKey, languageCode)
+			}
 		}
 	}
 }

@@ -160,7 +160,7 @@ const backupImportTextEntryLimitBytes int64 = 16 * 1024 * 1024
 const backupImportFileEntryLimitBytes int64 = 128 * 1024 * 1024
 const backupImportUncompressedLimitBytes int64 = 1024 * 1024 * 1024
 const hostingSnapshotNetChanPort = "9876"
-const hostingAndSupportPanelSnapshotVersion = 4
+const hostingAndSupportPanelSnapshotVersion = 5
 const hostingAndSupportMetricsRefreshInterval = 30 * time.Second
 const hostingAndSupportFullRefreshInterval = 5 * time.Minute
 
@@ -10823,7 +10823,7 @@ func (a *App) runAutomaticBillingOnce(ctx context.Context, store hostingandsuppo
 		}
 		allocations := expenses.AllocateMonthlyExpense(policy, expenseSites)
 		for siteIndex, site := range sites {
-			allocation := allocations[fmt.Sprintf("%s\x00%06d", normalizeDomainName(site.domain), siteIndex)]
+			allocation := allocations.Sites[fmt.Sprintf("%s\x00%06d", normalizeDomainName(site.domain), siteIndex)]
 			addSite(installationID, serverName, policy, site, allocation)
 		}
 	}
@@ -11157,15 +11157,14 @@ func (a *App) handleExpensesAction(r *http.Request) string {
 
 func (a *App) saveServerExpensePolicyFromForm(r *http.Request) string {
 	translations := translationsForRequest(r)
-	mode := expenses.Mode(strings.TrimSpace(r.FormValue("expense_mode")))
-	diskRateMinor := hostingandsupport.MoneyMinor(strings.ReplaceAll(strings.TrimSpace(r.FormValue("disk_rate_per_100_gb")), ",", "."))
-	actualExpenseMinor := hostingandsupport.MoneyMinor(strings.ReplaceAll(strings.TrimSpace(r.FormValue("actual_monthly_expense")), ",", "."))
+	monthlyExpense := firstNonEmpty(r.FormValue("monthly_server_expense"), r.FormValue("actual_monthly_expense"))
+	actualExpenseMinor := hostingandsupport.MoneyMinor(strings.ReplaceAll(strings.TrimSpace(monthlyExpense), ",", "."))
 	freeThresholdMB, _ := strconv.ParseInt(strings.TrimSpace(r.FormValue("free_site_threshold_mb")), 10, 64)
 	_, diskTotalBytes, diskAvailable := diskusage.DiskSpace(a.storageRootDir())
 	policy := expenses.ServerPolicy{
 		InstallationID:            "local",
-		Mode:                      mode,
-		DiskRatePer100GBMinor:     diskRateMinor,
+		Mode:                      expenses.ModeActual,
+		DiskRatePer100GBMinor:     expenses.DefaultDiskRatePer100GBMinor,
 		ActualMonthlyExpenseMinor: actualExpenseMinor,
 		Currency:                  r.FormValue("currency"),
 		FreeSiteThresholdBytes:    freeThresholdMB * expenses.DecimalMegabyte,
@@ -11174,7 +11173,7 @@ func (a *App) saveServerExpensePolicyFromForm(r *http.Request) string {
 	if !diskAvailable {
 		policy.DiskTotalBytes = 0
 	}
-	if err := policy.Validate(); err != nil || (policy.Mode == expenses.ModeAutomatic && policy.DiskTotalBytes <= 0) {
+	if err := policy.Validate(); err != nil {
 		return translationOrDefault(translations, "expenses_server_policy_invalid", "Check the server expense settings.")
 	}
 	controlDatabase, err := a.openServerControlDatabase(r.Context())
@@ -11364,7 +11363,7 @@ func (a *App) collectHostingAndSupportPanelSnapshot(ctx context.Context, control
 		}
 		expenseAllocations := expenses.AllocateMonthlyExpense(localExpensePolicy, expenseSites)
 		for siteIndex := range siteRows {
-			allocation := expenseAllocations[siteRows[siteIndex].Domain]
+			allocation := expenseAllocations.Sites[siteRows[siteIndex].Domain]
 			siteRows[siteIndex].BillingAmount = hostingandsupport.MoneyAmount(allocation.ExpenseShareMinor)
 			siteRows[siteIndex].BillingCurrency = localExpensePolicy.Currency
 			siteRows[siteIndex].BillingBillable = allocation.ExpenseShareMinor > 0
@@ -11531,7 +11530,106 @@ func (a *App) hostingAndSupportPanelView(r *http.Request, snapshot hostingAndSup
 		"ShowCommissionSetting":   snapshot.ShowCentralRegistry,
 		"ShowCentralRegistry":     snapshot.ShowCentralRegistry,
 		"ShowDemo":                snapshot.DemoSettings.Enabled && normalizeDomainName(snapshot.DemoSettings.Domain) != "",
+		"SimplifiedExpenses":      true,
+		"ExpenseServers":          simplifiedExpenseServerViews(snapshot.Servers, snapshot.Clients, snapshot.Invoices),
 	}
+}
+
+type simplifiedExpenseServerView struct {
+	Server  hostingandsupport.ServerView
+	Clients []simplifiedExpenseClientView
+}
+
+type simplifiedExpenseClientView struct {
+	Email                   string
+	SiteCount               int
+	TotalStorageLabel       string
+	MonthlyShareLabel       string
+	PaidThisMonthLabel      string
+	PaymentStatus           string
+	Sites                   []hostingandsupport.ServerSiteView
+	BillingCustomerID       string
+	InvoiceDay              int
+	PaymentTermDays         int
+	BillingTimezone         string
+	AutomaticBillingEnabled bool
+	Invoices                []hostingAndSupportClientInvoiceView
+}
+
+func simplifiedExpenseServerViews(servers []hostingandsupport.ServerView, clients []hostingAndSupportClientView, invoices []hostingandsupport.Invoice) []simplifiedExpenseServerView {
+	clientDetailsByEmail := make(map[string]hostingAndSupportClientView)
+	for _, client := range clients {
+		for _, email := range append(append([]string(nil), client.Emails...), client.PrimaryEmail) {
+			email = strings.ToLower(strings.TrimSpace(email))
+			if email != "" {
+				clientDetailsByEmail[email] = client
+			}
+		}
+	}
+	views := make([]simplifiedExpenseServerView, 0, len(servers))
+	for _, server := range servers {
+		view := simplifiedExpenseServerView{Server: server}
+		for _, serverClient := range server.Clients {
+			email := strings.ToLower(strings.TrimSpace(serverClient.Email))
+			clientDetails := clientDetailsByEmail[email]
+			monthlyShareMinor := int64(0)
+			totalStorageBytes := int64(0)
+			clientSites := make([]hostingandsupport.ServerSiteView, 0, len(serverClient.Sites))
+			for _, site := range serverClient.Sites {
+				if site.BillingExcluded {
+					continue
+				}
+				clientSites = append(clientSites, site)
+				totalStorageBytes += max(site.UsedBytes, 0)
+				monthlyShareMinor += hostingandsupport.MoneyMinor(site.BillingAmount)
+			}
+			if len(clientSites) == 0 {
+				continue
+			}
+			paidThisMonthMinor := paidServerExpenseForClient(invoices, server, email, time.Now().UTC())
+			paymentStatus := "due"
+			switch {
+			case monthlyShareMinor <= 0:
+				paymentStatus = "free"
+			case paidThisMonthMinor >= monthlyShareMinor:
+				paymentStatus = "paid"
+			case paidThisMonthMinor > 0:
+				paymentStatus = "partial"
+			}
+			view.Clients = append(view.Clients, simplifiedExpenseClientView{
+				Email:                   serverClient.Email,
+				SiteCount:               len(clientSites),
+				TotalStorageLabel:       hostingandsupport.FormatFileSize(totalStorageBytes),
+				MonthlyShareLabel:       hostingandsupport.MoneyLabel(monthlyShareMinor, server.BillingCurrency),
+				PaidThisMonthLabel:      hostingandsupport.MoneyLabel(paidThisMonthMinor, server.BillingCurrency),
+				PaymentStatus:           paymentStatus,
+				Sites:                   clientSites,
+				BillingCustomerID:       clientDetails.BillingCustomerID,
+				InvoiceDay:              clientDetails.InvoiceDay,
+				PaymentTermDays:         clientDetails.PaymentTermDays,
+				BillingTimezone:         clientDetails.BillingTimezone,
+				AutomaticBillingEnabled: clientDetails.AutomaticBillingEnabled,
+				Invoices:                clientDetails.Invoices,
+			})
+		}
+		views = append(views, view)
+	}
+	return views
+}
+
+func paidServerExpenseForClient(invoices []hostingandsupport.Invoice, server hostingandsupport.ServerView, email string, now time.Time) int64 {
+	monthPrefix := now.UTC().Format("2006-01")
+	paidMinor := int64(0)
+	for _, invoice := range invoices {
+		installationMatches := invoice.InstallationID == server.ID || (server.Local && strings.HasPrefix(invoice.InstallationID, "local:"))
+		if !installationMatches || invoice.Status != "paid" || !strings.EqualFold(strings.TrimSpace(invoice.CustomerEmail), email) || !strings.HasPrefix(invoice.PeriodStart, monthPrefix) {
+			continue
+		}
+		for _, line := range invoice.Lines {
+			paidMinor += line.CostShareMinor
+		}
+	}
+	return paidMinor
 }
 
 type hostingAndSupportClientView struct {
@@ -11824,7 +11922,7 @@ func (a *App) hostingAndSupportClients(ctx context.Context, billingStore hosting
 				siteSource.limitBytes = site.LimitBytes
 				siteSource.limitLabel = site.LimitLabel
 			}
-			allocation := remoteExpenseAllocations[site.Domain]
+			allocation := remoteExpenseAllocations.Sites[site.Domain]
 			siteSource.billingUsageLabel = hostingandsupport.BillingUsageLabel(siteSource.usedBytes)
 			siteSource.billingAmount = hostingandsupport.MoneyAmount(allocation.ExpenseShareMinor)
 			siteSource.billingCurrency = remoteExpensePolicy.Currency
@@ -15689,7 +15787,7 @@ func (a *App) buildHostingSnapshot(ctx context.Context) (hostingandsupport.Hosti
 		StoragePath:               storageRoot,
 		MonthlyCostMinor:          expenses.CalculateMonthlyExpense(serverExpensePolicy),
 		BillingCurrency:           serverExpensePolicy.Currency,
-		MinimumPriceGBMinor:       serverExpensePolicy.DiskRatePer100GBMinor,
+		MinimumPriceGBMinor:       expenses.BillingCostPerGBMinor(serverExpensePolicy),
 		BillingCostUpdatedAt:      expensePolicyUpdatedAt,
 		ExpenseMode:               string(serverExpensePolicy.Mode),
 		DiskRatePer100GBMinor:     serverExpensePolicy.DiskRatePer100GBMinor,

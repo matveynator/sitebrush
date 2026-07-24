@@ -21,6 +21,200 @@
 
   {{if .Status}}<div class="alert alert-info billing-status" role="alert">{{.Status}}</div>{{end}}
 
+  {{if .SimplifiedExpenses}}
+  <style>
+    .expense-simple-page { display: grid; gap: 16px; }
+    .expense-simple-toolbar { display: flex; justify-content: space-between; gap: 12px; align-items: end; flex-wrap: wrap; }
+    .expense-simple-toolbar label { min-width: min(100%, 320px); }
+    .expense-simple-summary { display: grid; gap: 16px; padding: 20px; border: 1px solid var(--bs-border-color); border-radius: 6px; background: var(--bs-body-bg); }
+    .expense-simple-summary-head { display: flex; justify-content: space-between; align-items: start; gap: 12px; flex-wrap: wrap; }
+    .expense-simple-summary-head h2, .expense-simple-client-head strong { overflow-wrap: anywhere; }
+    .expense-simple-metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 1px; background: var(--bs-border-color); border: 1px solid var(--bs-border-color); }
+    .expense-simple-metric { display: grid; gap: 3px; min-width: 0; padding: 12px; background: var(--bs-body-bg); }
+    .expense-simple-metric strong { font-size: 1.15rem; overflow-wrap: anywhere; }
+    .expense-simple-capacity { display: grid; gap: 6px; }
+    .expense-simple-progress { height: 8px; overflow: hidden; background: var(--bs-secondary-bg); }
+    .expense-simple-progress span { display: block; height: 100%; background: var(--bs-primary); }
+    .expense-simple-progress.is-over span { background: var(--bs-danger); }
+    .expense-simple-clients { display: grid; gap: 8px; }
+    .expense-simple-client { border-top: 1px solid var(--bs-border-color); }
+    .expense-simple-client summary { display: grid; grid-template-columns: minmax(180px, 1fr) repeat(3, minmax(110px, auto)); gap: 12px; align-items: center; padding: 14px 2px; cursor: pointer; list-style-position: inside; }
+    .expense-simple-client-head { display: grid; gap: 2px; }
+    .expense-simple-client-body { display: grid; gap: 16px; padding: 4px 0 18px 24px; }
+    .expense-simple-sites { display: grid; gap: 1px; background: var(--bs-border-color); border: 1px solid var(--bs-border-color); }
+    .expense-simple-site { display: grid; grid-template-columns: minmax(170px, 1fr) auto auto; gap: 12px; align-items: center; padding: 10px 12px; background: var(--bs-body-bg); }
+    .expense-simple-invoices { display: grid; gap: 6px; }
+    .expense-simple-invoice { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 12px; padding: 9px 0; border-top: 1px solid var(--bs-border-color); }
+    @media (max-width: 760px) {
+      .expense-simple-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .expense-simple-client summary, .expense-simple-site { grid-template-columns: minmax(0, 1fr); gap: 5px; }
+      .expense-simple-client-body { padding-left: 0; }
+    }
+  </style>
+
+  <div class="expense-simple-page">
+    {{if or .ShowCentralRegistry .ShowDemo}}
+    <nav class="hosting-installation-tabs" role="tablist" aria-label="{{index .T "billing_installations"}}" data-hosting-installation-tabs>
+      <button type="button" class="hosting-installation-tab active" role="tab" aria-selected="true" data-hosting-installation-tab="servers">{{index .T "billing_servers"}}</button>
+      {{if .ShowCentralRegistry}}
+      <button type="button" class="hosting-installation-tab" role="tab" aria-selected="false" data-hosting-installation-tab="desktop">{{index .T "billing_desktop_installations"}}</button>
+      <button type="button" class="hosting-installation-tab" role="tab" aria-selected="false" data-hosting-installation-tab="archive">{{index .T "billing_archive"}}</button>
+      {{end}}
+      {{if .ShowDemo}}<button type="button" class="hosting-installation-tab" role="tab" aria-selected="false" data-hosting-installation-tab="demo">{{index .T "billing_demo_title"}}</button>{{end}}
+    </nav>
+    {{end}}
+
+    <section data-hosting-installation-panel="servers">
+      {{if gt (len .ExpenseServers) 1}}
+      <div class="expense-simple-toolbar mb-3">
+        <label>{{index .T "expenses_server_select"}}
+          <select class="form-select" data-expense-server-select>
+            {{range $serverIndex, $expenseServer := .ExpenseServers}}<option value="{{$serverIndex}}">{{$expenseServer.Server.Name}}</option>{{end}}
+          </select>
+        </label>
+      </div>
+      {{end}}
+      {{range $serverIndex, $expenseServer := .ExpenseServers}}
+      {{$server := $expenseServer.Server}}
+      <div data-expense-server-panel="{{$serverIndex}}" {{if $serverIndex}}hidden{{end}}>
+        <section class="expense-simple-summary">
+          <div class="expense-simple-summary-head">
+            <div>
+              <h2>{{$server.Name}}</h2>
+              <div class="text-muted">{{index $.T "expenses_purpose_simple"}}</div>
+            </div>
+            {{if $server.Local}}<button type="button" class="btn btn-outline-primary" data-bs-toggle="modal" data-bs-target="#expenseSettings{{$serverIndex}}">{{index $.T "expenses_configure"}}</button>{{end}}
+          </div>
+          {{if not $server.DiskCapacityKnown}}
+          <div class="alert alert-warning mb-0">{{index $.T "expenses_disk_unknown"}}</div>
+          {{else}}
+          <div class="expense-simple-metrics">
+            <div class="expense-simple-metric"><strong>{{$server.MonthlyCostLabel}}</strong><span>{{index $.T "expenses_monthly_server_price"}} · {{$server.BillingCostPerGBLabel}}/{{index $.T "expenses_gb_short"}}</span></div>
+            <div class="expense-simple-metric"><strong>{{$server.BillableUsedLabel}} / {{$server.BillingCapacityLabel}}</strong><span>{{index $.T "expenses_paid_capacity"}}</span></div>
+            <div class="expense-simple-metric"><strong>{{$server.AllocatedMonthLabel}}</strong><span>{{index $.T "expenses_allocated_month"}}</span></div>
+            <div class="expense-simple-metric"><strong>{{$server.CoveredMonthLabel}} / {{$server.UncoveredMonthLabel}}</strong><span>{{index $.T "expenses_paid_and_uncovered"}}</span></div>
+          </div>
+          <div class="expense-simple-capacity">
+            <div class="d-flex justify-content-between gap-2"><span>{{index $.T "expenses_billing_capacity"}}</span><strong>{{$server.CapacityUsedPercent}}%</strong></div>
+            <div class="expense-simple-progress {{if $server.CapacityExceeded}}is-over{{end}}"><span style="width:{{$server.CapacityUsedPercent}}%"></span></div>
+            <small class="text-muted">{{index $.T "expenses_capacity_reserve_hint"}}</small>
+          </div>
+          {{if $server.CapacityExceeded}}<div class="alert alert-danger mb-0">{{index $.T "expenses_capacity_exceeded"}}</div>{{end}}
+          {{end}}
+        </section>
+
+        <section class="mt-4">
+          <div class="billing-section-header">
+            <div><h2>{{index $.T "billing_clients"}}</h2><p class="text-muted">{{index $.T "expenses_clients_simple_hint"}}</p></div>
+          </div>
+          <div class="expense-simple-clients">
+            {{range $clientIndex, $client := $expenseServer.Clients}}
+            <details class="expense-simple-client">
+              <summary>
+                <span class="expense-simple-client-head"><strong>{{$client.Email}}</strong><small class="text-muted">{{$client.SiteCount}} {{index $.T "billing_client_sites"}}</small></span>
+                <span><strong>{{$client.TotalStorageLabel}}</strong><br><small>{{index $.T "billing_client_storage"}}</small></span>
+                <span><strong>{{$client.MonthlyShareLabel}}</strong><br><small>{{index $.T "expenses_client_share"}}</small></span>
+                <span><strong>{{$client.PaidThisMonthLabel}}</strong><br><small>{{if eq $client.PaymentStatus "paid"}}{{index $.T "expenses_payment_paid"}}{{else if eq $client.PaymentStatus "partial"}}{{index $.T "expenses_payment_partial"}}{{else if eq $client.PaymentStatus "free"}}{{index $.T "billing_status_free"}}{{else}}{{index $.T "expenses_payment_due"}}{{end}}</small></span>
+              </summary>
+              <div class="expense-simple-client-body">
+                <div class="expense-simple-sites">
+                  {{range $siteIndex, $site := $client.Sites}}
+                  <div class="expense-simple-site">
+                    <span>{{if $site.URL}}<a href="{{$site.URL}}" target="_blank" rel="noopener noreferrer">{{$site.Domain}}</a>{{else}}{{$site.Domain}}{{end}}</span>
+                    <span>{{$site.UsedLabel}} · {{$site.BillingPriceLabel}}</span>
+                    <span>
+                      {{if $site.CanEditQuota}}<button type="button" class="btn btn-outline-primary btn-sm" data-bs-toggle="modal" data-bs-target="#simpleQuota{{$serverIndex}}_{{$clientIndex}}_{{$siteIndex}}">{{index $.T "billing_quota"}}: {{$site.LimitLabel}}</button>
+                      {{else}}{{index $.T "billing_quota"}}: {{$site.LimitLabel}}{{end}}
+                    </span>
+                  </div>
+                  {{if $site.CanEditQuota}}
+                  <div class="modal fade" id="simpleQuota{{$serverIndex}}_{{$clientIndex}}_{{$siteIndex}}" tabindex="-1" aria-hidden="true">
+                    <div class="modal-dialog modal-dialog-centered"><div class="modal-content">
+                      <form method="post" action="?expenses">
+                        <div class="modal-header"><h2 class="modal-title h5">{{index $.T "billing_quota_change_title"}}</h2><button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="{{index $.T "tree_close"}}"></button></div>
+                        <div class="modal-body">
+                          <p><strong>{{$site.Domain}}</strong></p>
+                          <input type="hidden" name="billing_action" value="update_site_quota">
+                          <input type="hidden" name="domain" value="{{$site.Domain}}">
+                          <label>{{index $.T "billing_quota"}} <input name="quota" type="text" class="form-control" value="{{$site.QuotaInput}}" required></label>
+                        </div>
+                        <div class="modal-footer"><button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">{{index $.T "edit_cancel"}}</button><button type="submit" class="btn btn-primary">{{index $.T "billing_apply"}}</button></div>
+                      </form>
+                    </div></div>
+                  </div>
+                  {{end}}
+                  {{end}}
+                </div>
+                {{if $client.BillingCustomerID}}
+                <form method="post" action="?expenses" class="billing-plan-form">
+                  <input type="hidden" name="billing_action" value="billing_customer_schedule">
+                  <input type="hidden" name="customer_id" value="{{$client.BillingCustomerID}}">
+                  <label>{{index $.T "billing_invoice_day"}} <input type="number" name="invoice_day" class="form-control" min="1" max="28" value="{{$client.InvoiceDay}}" required></label>
+                  <label>{{index $.T "billing_payment_term_days"}} <input type="number" name="payment_term_days" class="form-control" min="1" max="60" value="{{$client.PaymentTermDays}}" required></label>
+                  <label>{{index $.T "billing_timezone"}} <input type="text" name="timezone" class="form-control" value="{{$client.BillingTimezone}}" list="billingTimezoneList" required></label>
+                  <button type="submit" class="btn btn-primary"><img src="/p/static/save-page.png" alt="">{{index $.T "billing_save"}}</button>
+                </form>
+                {{end}}
+                <div class="expense-simple-invoices">
+                  <h3 class="h6 mb-0">{{index $.T "expenses_invoice_history"}}</h3>
+                  {{range $client.Invoices}}<div class="expense-simple-invoice"><span><strong>{{.Number}}</strong><br><small class="text-muted">{{.PeriodLabel}} · {{.StatusLabel}}</small></span><strong>{{.AmountLabel}}</strong></div>{{else}}<div class="text-muted">{{index $.T "expenses_invoice_history_empty"}}</div>{{end}}
+                </div>
+              </div>
+            </details>
+            {{else}}<div class="empty">{{index $.T "expenses_clients_empty"}}</div>{{end}}
+          </div>
+        </section>
+
+        {{if $server.Local}}
+        <div class="modal fade" id="expenseSettings{{$serverIndex}}" tabindex="-1" aria-hidden="true">
+          <div class="modal-dialog modal-dialog-centered"><div class="modal-content">
+            <form method="post" action="?expenses">
+              <div class="modal-header"><h2 class="modal-title h5">{{index $.T "expenses_settings_title"}}</h2><button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="{{index $.T "tree_close"}}"></button></div>
+              <div class="modal-body billing-plan-form">
+                <input type="hidden" name="billing_action" value="save_server_expense_policy">
+                <label>{{index $.T "billing_currency"}} <input name="currency" type="text" minlength="3" maxlength="3" class="form-control" value="{{$server.BillingCurrency}}" required></label>
+                <label>{{index $.T "expenses_monthly_server_price"}} <input name="monthly_server_expense" type="number" min="0.01" step="0.01" class="form-control" value="{{$server.MonthlyCostInput}}" required></label>
+                <div class="form-text">{{index $.T "expenses_automatic_price_per_gb"}}: {{$server.BillingCostPerGBLabel}}/{{index $.T "expenses_gb_short"}}</div>
+                <label>{{index $.T "expenses_free_threshold_mb"}} <input name="free_site_threshold_mb" type="number" min="0" step="1" class="form-control" value="{{$server.FreeThresholdInput}}" required></label>
+              </div>
+              <div class="modal-footer"><button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">{{index $.T "edit_cancel"}}</button><button type="submit" class="btn btn-primary">{{index $.T "billing_save"}}</button></div>
+            </form>
+          </div></div>
+        </div>
+        {{end}}
+      </div>
+      {{else}}<div class="empty">{{index .T "expenses_servers_empty"}}</div>{{end}}
+    </section>
+
+    {{if .ShowCentralRegistry}}
+    <section data-hosting-installation-panel="desktop" hidden>
+      <h2>{{index .T "billing_desktop_installations"}}</h2>
+      <div class="billing-plan-list">{{range .DesktopHostingGroups}}{{range .Hostings}}<div class="billing-plan-row"><span><strong>{{if .ServerDomain}}{{.ServerDomain}}{{else}}{{.InstallationID}}{{end}}</strong><br><small>{{.ServerIP}} · {{len .Sites}} {{index $.T "billing_client_sites"}}{{range .Sites}} · {{.Domain}}{{end}}</small></span></div>{{end}}{{else}}<div class="empty">{{index .T "billing_no_desktop_installations"}}</div>{{end}}</div>
+    </section>
+    <section data-hosting-installation-panel="archive" hidden>
+      <h2>{{index .T "billing_archive"}}</h2>
+      <div class="billing-plan-list">{{range .ArchivedHostings}}<div class="billing-plan-row"><span><strong>{{if .ServerDomain}}{{.ServerDomain}}{{else}}{{.InstallationID}}{{end}}</strong><br><small>{{.LastSeenAt}}</small></span></div>{{else}}<div class="empty">{{index .T "billing_archive_empty"}}</div>{{end}}</div>
+    </section>
+    {{end}}
+    {{if .ShowDemo}}
+    <section data-hosting-installation-panel="demo" hidden>
+      <h2>{{index .T "billing_demo_title"}}</h2>
+      <p class="text-muted">{{index .T "billing_demo_exclusion_hint"}}</p>
+      <form method="post" action="?expenses" class="billing-demo-settings-form" data-billing-ajax-save>
+        <input type="hidden" name="billing_action" value="demo_settings"><input type="hidden" name="refresh_demo_site" value="0" data-refresh-demo-site-input>
+        <label>{{index .T "billing_demo_domain"}} <input name="demo_site_domain" type="text" class="form-control" value="{{.DemoSettings.Domain}}"></label>
+        <label>{{index .T "billing_demo_source_url"}} <input name="demo_site_source_url" type="text" class="form-control" value="{{.DemoSettings.SourceURL}}"></label>
+        <label class="checkbox-row"><input type="checkbox" name="demo_site_copy_whole_site" value="1" {{if .DemoSettings.CopyWholeSite}}checked{{end}}><span>{{index .T "billing_demo_copy_whole_site"}}</span></label>
+        <label class="checkbox-row"><input type="checkbox" name="demo_site_enabled" value="1" {{if .DemoSettings.Enabled}}checked{{end}}><span>{{index .T "billing_demo_enabled"}}</span></label>
+        <div class="billing-demo-actions">
+          <button type="submit" class="btn btn-primary"><img src="/p/static/save-page.png" alt="">{{index .T "billing_save"}}</button>
+          <button type="button" class="btn btn-outline-primary" data-demo-refresh-preview-button><img src="/p/static/backup.png" alt="">{{index .T "billing_demo_refresh_copy"}}</button>
+        </div>
+      </form>
+    </section>
+    {{end}}
+  </div>
+  {{else}}
   <section class="card billing-card hosting-overview-panel" data-hosting-tab-panel="overview">
     <div class="card-body">
       <div class="hosting-overview-hero {{.Overview.HealthClass}}">
@@ -1785,6 +1979,7 @@
   </section>
   {{end}}
 
+  {{end}}
 </main>
 <div class="modal fade" id="demoRefreshModal" tabindex="-1" aria-hidden="true">
   <div class="modal-dialog modal-dialog-centered modal-dialog-scrollable modal-lg demo-refresh-modal-dialog"><div class="modal-content">
@@ -2777,6 +2972,20 @@
 
   modalElement.addEventListener('hidden.bs.modal', function handleDemoRefreshModalHidden() {
     closeProgressStream();
+  });
+})();
+</script>
+<script>
+(function initializeExpenseServerSelection() {
+  const serverSelectElement = document.querySelector('[data-expense-server-select]');
+  if (!serverSelectElement) {
+    return;
+  }
+  const serverPanelElements = Array.from(document.querySelectorAll('[data-expense-server-panel]'));
+  serverSelectElement.addEventListener('change', function selectExpenseServer() {
+    for (const serverPanelElement of serverPanelElements) {
+      serverPanelElement.hidden = serverPanelElement.dataset.expenseServerPanel !== serverSelectElement.value;
+    }
   });
 })();
 </script>

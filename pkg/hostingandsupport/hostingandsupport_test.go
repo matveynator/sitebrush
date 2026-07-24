@@ -1090,6 +1090,25 @@ func TestServerCostPolicyAndSnapshotDemoStateRoundTrip(t *testing.T) {
 	}
 }
 
+func TestApplyServerCostViewUsesThirtyPercentBillingCapacity(t *testing.T) {
+	server := ServerView{
+		ID: "local",
+		Sites: []ServerSiteView{
+			{Domain: "small.example.com", UsedBytes: 30 * expenses.DecimalGigabyte},
+			{Domain: "large.example.com", UsedBytes: 60 * expenses.DecimalGigabyte},
+			{Domain: "owner.example.com", UsedBytes: 90 * expenses.DecimalGigabyte, BillingExcluded: true},
+		},
+	}
+	policy := expenses.DefaultServerPolicy("local", 500*expenses.DecimalGigabyte)
+	ApplyServerCostView(&server, policy, nil)
+	if server.BillingCapacityLabel != "139.7 GB" || server.BillableUsedLabel != "83.8 GB" {
+		t.Fatalf("capacity labels = %q / %q", server.BillableUsedLabel, server.BillingCapacityLabel)
+	}
+	if server.AllocatedMonthLabel != "45.00 EUR" || server.BillingCostPerGBLabel != "0.50 EUR" || server.CapacityUsedPercent != 60 || server.CapacityExceeded {
+		t.Fatalf("server expense summary = %+v", server)
+	}
+}
+
 func TestPurgeDemoBillingRemovesDemoOnlyAndKeepsRealCustomer(t *testing.T) {
 	database, err := sql.Open("sqlite3", filepath.Join(t.TempDir(), "billing.db"))
 	if err != nil {

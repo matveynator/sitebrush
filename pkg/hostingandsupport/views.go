@@ -99,6 +99,13 @@ type ServerView struct {
 	FreeThresholdInput     string
 	CapacityCostPerGBLabel string
 	SharedCostPerGBLabel   string
+	BillingCapacityLabel   string
+	BillingCostPerGBLabel  string
+	BillableUsedLabel      string
+	AllocatedMonthLabel    string
+	CapacityUsedPercent    int
+	CapacityExceeded       bool
+	DiskCapacityKnown      bool
 	SystemMetrics          []ServerMetricView
 	Sites                  []ServerSiteView
 	Clients                []ServerClientView
@@ -454,13 +461,13 @@ func BuildRemoteServerView(clientHosting ClientHosting, invoices []Invoice, late
 	}
 	expensePolicy := clientHosting.ExpensePolicy
 	expensePolicy.DiskTotalBytes = clientHosting.DiskTotalBytes
-	expenseAllocations := expenses.AllocateMonthlyExpense(expensePolicy, expenseSites)
+	expenseAllocation := expenses.AllocateMonthlyExpense(expensePolicy, expenseSites)
 	for siteIndex, site := range clientHosting.Sites {
 		if site.IsDemo {
 			continue
 		}
 		ownerEmail := firstNonEmpty(site.OwnerEmail, firstHostingSnapshotEmail(site.AdminEmails), clientHosting.OwnerEmail, "owner not set")
-		allocation := expenseAllocations[strconv.Itoa(siteIndex)]
+		allocation := expenseAllocation.Sites[strconv.Itoa(siteIndex)]
 		billingPrice := BillingPrice{
 			UsedMegabytes:     bytesToRoundedMegabytes(site.UsedBytes),
 			BillableMegabytes: bytesToRoundedMegabytes(site.UsedBytes),
@@ -548,6 +555,25 @@ func ApplyServerCostView(server *ServerView, policy expenses.ServerPolicy, invoi
 	server.FreeThresholdInput = strconv.FormatInt(policy.FreeSiteThresholdBytes/expenses.DecimalMegabyte, 10)
 	server.MonthlyCostLabel = MoneyLabel(monthlyExpenseMinor, server.BillingCurrency)
 	server.CostConfigured = monthlyExpenseMinor > 0 && normalizeBillingCurrency(policy.Currency) != ""
+	expenseSites := make([]expenses.SiteUsage, 0, len(server.Sites))
+	for siteIndex, site := range server.Sites {
+		expenseSites = append(expenseSites, expenses.SiteUsage{
+			Key: strconv.Itoa(siteIndex), UsedBytes: site.UsedBytes, Excluded: site.BillingExcluded,
+		})
+	}
+	allocation := expenses.AllocateMonthlyExpense(policy, expenseSites)
+	server.BillingCapacityLabel = FormatFileSize(allocation.BillingCapacityBytes)
+	server.BillableUsedLabel = FormatFileSize(allocation.BillableUsedBytes)
+	server.AllocatedMonthLabel = MoneyLabel(allocation.AllocatedMinor, server.BillingCurrency)
+	server.CapacityExceeded = allocation.CapacityExceeded
+	server.DiskCapacityKnown = policy.DiskTotalBytes > 0
+	if allocation.BillingCapacityBytes > 0 {
+		server.BillingCostPerGBLabel = MoneyLabel(expenses.BillingCostPerGBMinor(policy), server.BillingCurrency)
+		server.CapacityUsedPercent = int(math.Round(float64(allocation.BillableUsedBytes) / float64(allocation.BillingCapacityBytes) * 100))
+		if server.CapacityUsedPercent > 100 {
+			server.CapacityUsedPercent = 100
+		}
+	}
 	if policy.DiskTotalBytes > 0 {
 		capacityCostPerGBMinor := (monthlyExpenseMinor*expenses.DecimalGigabyte + policy.DiskTotalBytes/2) / policy.DiskTotalBytes
 		server.CapacityCostPerGBLabel = MoneyLabel(capacityCostPerGBMinor, server.BillingCurrency)

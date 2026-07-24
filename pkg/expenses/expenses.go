@@ -12,6 +12,7 @@ const (
 
 	DefaultDiskRatePer100GBMinor  int64 = 1500
 	DefaultFreeSiteThresholdBytes       = 100 * DecimalMegabyte
+	BillingCapacityPercent        int64 = 30
 )
 
 type Mode string
@@ -80,6 +81,19 @@ func CalculateMonthlyExpense(policy ServerPolicy) int64 {
 		(remainderBytes*policy.DiskRatePer100GBMinor+rateBytes/2)/rateBytes
 }
 
+func BillingCapacityBytes(policy ServerPolicy) int64 {
+	return percentageOfBytes(policy.DiskTotalBytes, BillingCapacityPercent)
+}
+
+func BillingCostPerGBMinor(policy ServerPolicy) int64 {
+	billingCapacityBytes := BillingCapacityBytes(policy)
+	monthlyExpenseMinor := CalculateMonthlyExpense(policy)
+	if billingCapacityBytes <= 0 || monthlyExpenseMinor <= 0 {
+		return 0
+	}
+	return (monthlyExpenseMinor*DecimalGigabyte + billingCapacityBytes/2) / billingCapacityBytes
+}
+
 type SiteUsage struct {
 	Key       string
 	UsedBytes int64
@@ -93,7 +107,16 @@ type SiteAllocation struct {
 	Excluded          bool
 }
 
-func AllocateMonthlyExpense(policy ServerPolicy, sites []SiteUsage) map[string]SiteAllocation {
+type MonthlyAllocation struct {
+	Sites                map[string]SiteAllocation
+	MonthlyExpenseMinor  int64
+	BillingCapacityBytes int64
+	BillableUsedBytes    int64
+	AllocatedMinor       int64
+	CapacityExceeded     bool
+}
+
+func AllocateMonthlyExpense(policy ServerPolicy, sites []SiteUsage) MonthlyAllocation {
 	allocations := make(map[string]SiteAllocation, len(sites))
 	type weightedSite struct {
 		key       string
@@ -119,14 +142,30 @@ func AllocateMonthlyExpense(policy ServerPolicy, sites []SiteUsage) map[string]S
 	}
 
 	monthlyExpenseMinor := CalculateMonthlyExpense(policy)
-	if monthlyExpenseMinor <= 0 || totalWeight <= 0 {
-		return allocations
+	billingCapacityBytes := BillingCapacityBytes(policy)
+	result := MonthlyAllocation{
+		Sites:                allocations,
+		MonthlyExpenseMinor:  monthlyExpenseMinor,
+		BillingCapacityBytes: billingCapacityBytes,
+		BillableUsedBytes:    totalWeight,
+		CapacityExceeded:     billingCapacityBytes > 0 && totalWeight > billingCapacityBytes,
+	}
+	if monthlyExpenseMinor <= 0 || totalWeight <= 0 || billingCapacityBytes <= 0 {
+		return result
+	}
+	allocationDenominator := billingCapacityBytes
+	if totalWeight > billingCapacityBytes {
+		allocationDenominator = totalWeight
+	}
+	targetAllocatedMinor := (monthlyExpenseMinor*totalWeight + allocationDenominator/2) / allocationDenominator
+	if targetAllocatedMinor > monthlyExpenseMinor {
+		targetAllocatedMinor = monthlyExpenseMinor
 	}
 	allocatedMinor := int64(0)
 	for weightedIndex := range weightedSites {
 		numerator := monthlyExpenseMinor * weightedSites[weightedIndex].weight
-		weightedSites[weightedIndex].share = numerator / totalWeight
-		weightedSites[weightedIndex].remainder = numerator % totalWeight
+		weightedSites[weightedIndex].share = numerator / allocationDenominator
+		weightedSites[weightedIndex].remainder = numerator % allocationDenominator
 		allocatedMinor += weightedSites[weightedIndex].share
 	}
 	sort.SliceStable(weightedSites, func(left int, right int) bool {
@@ -135,7 +174,7 @@ func AllocateMonthlyExpense(policy ServerPolicy, sites []SiteUsage) map[string]S
 		}
 		return weightedSites[left].key < weightedSites[right].key
 	})
-	for remainderIndex := int64(0); remainderIndex < monthlyExpenseMinor-allocatedMinor; remainderIndex++ {
+	for remainderIndex := int64(0); remainderIndex < targetAllocatedMinor-allocatedMinor; remainderIndex++ {
 		weightedSites[remainderIndex%int64(len(weightedSites))].share++
 	}
 	for _, weighted := range weightedSites {
@@ -143,7 +182,15 @@ func AllocateMonthlyExpense(policy ServerPolicy, sites []SiteUsage) map[string]S
 		allocation.ExpenseShareMinor = weighted.share
 		allocations[weighted.key] = allocation
 	}
-	return allocations
+	result.AllocatedMinor = targetAllocatedMinor
+	return result
+}
+
+func percentageOfBytes(totalBytes int64, percent int64) int64 {
+	if totalBytes <= 0 || percent <= 0 {
+		return 0
+	}
+	return totalBytes/100*percent + totalBytes%100*percent/100
 }
 
 func PaymentCommissionMinor(expenseShareMinor int64, commissionBPS int) int64 {
