@@ -1096,7 +1096,7 @@ func TestApplyServerCostViewUsesThirtyPercentBillingCapacity(t *testing.T) {
 		Sites: []ServerSiteView{
 			{Domain: "small.example.com", UsedBytes: 30 * expenses.DecimalGigabyte},
 			{Domain: "large.example.com", UsedBytes: 60 * expenses.DecimalGigabyte},
-			{Domain: "owner.example.com", UsedBytes: 90 * expenses.DecimalGigabyte, BillingExcluded: true},
+			{Domain: "demo.example.com", UsedBytes: 90 * expenses.DecimalGigabyte, BillingExcluded: true},
 		},
 	}
 	policy := expenses.DefaultServerPolicy("local", 500*expenses.DecimalGigabyte)

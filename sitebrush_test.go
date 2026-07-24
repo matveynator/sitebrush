@@ -1359,8 +1359,10 @@ func TestExpensesTemplateShowsOnlyLocalServerAndEnabledDemoOutsideSitebrushCom(t
 		MainDomain: "owner.example",
 		Sites:      []hostingandsupport.Site{{Domain: "owner.example"}},
 		Servers: []hostingandsupport.ServerView{{
-			Name: "owner.example", Local: true,
-			Sites: []hostingandsupport.ServerSiteView{{Domain: "owner.example"}},
+			Name: "owner.example", Local: true, Subtitle: "локальный сервер SiteBrush",
+			OSLabel: "Linux", CPULabel: "AMD64", SyncStatusLabel: "локальные данные", NetworkStatusLabel: "доступен",
+			SystemMetrics: []hostingandsupport.ServerMetricView{{Name: "CPU", Value: "12%", Detail: "загрузка сейчас"}},
+			Sites:         []hostingandsupport.ServerSiteView{{Domain: "owner.example"}},
 		}},
 		Overview: hostingandsupport.BuildOverview([]hostingandsupport.Site{{Domain: "owner.example"}}, 0, nil, nil, nil, nil, nil),
 		DemoSettings: demo.Settings{
@@ -1407,11 +1409,14 @@ func TestExpensesTemplateShowsOnlyLocalServerAndEnabledDemoOutsideSitebrushCom(t
 		`data-hosting-tab-panel="diagnostics"`,
 		`id="hostingServerList"`,
 		"Ключ sitebrush.com",
-		"CPU",
-		"RAM",
 	} {
 		if strings.Contains(disabledDemoHTML, removedFragment) {
 			t.Fatalf("simplified expenses rendered technical fragment %q", removedFragment)
+		}
+	}
+	for _, monitoringFragment := range []string{"локальный сервер SiteBrush", "Linux", "AMD64", "CPU", "12%", "доступен"} {
+		if !strings.Contains(disabledDemoHTML, monitoringFragment) {
+			t.Fatalf("simplified expenses missing server monitoring fragment %q", monitoringFragment)
 		}
 	}
 
@@ -1450,7 +1455,7 @@ func TestExpensesTemplateShowsOnlyLocalServerAndEnabledDemoOutsideSitebrushCom(t
 	}
 }
 
-func TestSimplifiedExpenseServerViewsExcludeOwnerAndKeepClientDetails(t *testing.T) {
+func TestSimplifiedExpenseServerViewsIncludeOwnerAndClientDetails(t *testing.T) {
 	server := hostingandsupport.ServerView{
 		ID:              "local",
 		Local:           true,
@@ -1465,22 +1470,25 @@ func TestSimplifiedExpenseServerViewsExcludeOwnerAndKeepClientDetails(t *testing
 			},
 			{
 				Email: "owner@example.com",
-				Sites: []hostingandsupport.ServerSiteView{{Domain: "owner.example.com", UsedBytes: 10 * expenses.DecimalGigabyte, BillingExcluded: true}},
+				Sites: []hostingandsupport.ServerSiteView{{Domain: "owner.example.com", UsedBytes: 10 * expenses.DecimalGigabyte, BillingAmount: "5.00"}},
 			},
 		},
 	}
-	clientDetails := []hostingAndSupportClientView{{
-		PrimaryEmail: "client@example.com",
-		Emails:       []string{"client@example.com"},
-		InvoiceDay:   5,
-	}}
+	clientDetails := []hostingAndSupportClientView{
+		{PrimaryEmail: "client@example.com", Emails: []string{"client@example.com"}, InvoiceDay: 5},
+		{PrimaryEmail: "owner@example.com", Emails: []string{"owner@example.com"}, InvoiceDay: 7},
+	}
 	views := simplifiedExpenseServerViews([]hostingandsupport.ServerView{server}, clientDetails, nil)
-	if len(views) != 1 || len(views[0].Clients) != 1 {
+	if len(views) != 1 || len(views[0].Clients) != 2 {
 		t.Fatalf("simplified servers = %#v", views)
 	}
 	client := views[0].Clients[0]
 	if client.Email != "client@example.com" || client.SiteCount != 2 || client.TotalStorageLabel != "28.0 GB" || client.MonthlyShareLabel != "15.00 EUR" {
 		t.Fatalf("simplified client = %#v", client)
+	}
+	owner := views[0].Clients[1]
+	if owner.Email != "owner@example.com" || owner.SiteCount != 1 || owner.MonthlyShareLabel != "5.00 EUR" {
+		t.Fatalf("simplified owner = %#v", owner)
 	}
 }
 
@@ -1713,7 +1721,7 @@ func TestHostingSnapshotDiskThresholdSendsSingleOwnerEmail(t *testing.T) {
 	}
 }
 
-func TestAutomaticBillingCreatesOneServerInvoiceWithPaidAndBonusSites(t *testing.T) {
+func TestAutomaticBillingCreatesInvoicesForClientAndServerOwner(t *testing.T) {
 	database, err := sql.Open("sqlite3", filepath.Join(t.TempDir(), "billing.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -1756,23 +1764,40 @@ func TestAutomaticBillingCreatesOneServerInvoiceWithPaidAndBonusSites(t *testing
 	}
 	application.runAutomaticBillingOnce(context.Background(), store, snapshot, time.Date(2026, 7, 23, 12, 0, 0, 0, time.UTC))
 	invoices := store.Invoices(context.Background(), 10)
-	if len(invoices) != 1 {
-		t.Fatalf("invoices = %d, want 1: %#v", len(invoices), invoices)
+	if len(invoices) != 2 {
+		t.Fatalf("invoices = %d, want 2: %#v", len(invoices), invoices)
 	}
-	if invoices[0].CustomerEmail != "client@example.com" || invoices[0].InstallationID != "local:sitebrush.com" || invoices[0].AmountMinor != 105 || invoices[0].ServerCostMinor != 100 || invoices[0].PaymentFeeMinor != 5 || invoices[0].ReserveMinor != 0 || len(invoices[0].Lines) != 3 || !invoices[0].Lines[1].Bonus {
-		t.Fatalf("automatic invoice = %#v", invoices[0])
+	invoicesByEmail := make(map[string]hostingandsupport.Invoice, len(invoices))
+	for _, invoice := range invoices {
+		invoicesByEmail[invoice.CustomerEmail] = invoice
 	}
-	select {
-	case delivery := <-mailQueue:
-		if delivery.Message.To != "client@example.com" || delivery.Message.HTMLBody == "" || !strings.Contains(delivery.Message.HTMLBody, invoices[0].Number) {
-			t.Fatalf("invoice email = %#v", delivery.Message)
+	clientInvoice := invoicesByEmail["client@example.com"]
+	if clientInvoice.InstallationID != "local:sitebrush.com" || clientInvoice.AmountMinor != 49 || clientInvoice.ServerCostMinor != 46 || clientInvoice.PaymentFeeMinor != 3 || clientInvoice.ReserveMinor != 0 || len(clientInvoice.Lines) != 3 || !clientInvoice.Lines[1].Bonus {
+		t.Fatalf("client invoice = %#v", clientInvoice)
+	}
+	ownerInvoice := invoicesByEmail["owner@example.com"]
+	if ownerInvoice.InstallationID != "local:sitebrush.com" || ownerInvoice.AmountMinor != 57 || ownerInvoice.ServerCostMinor != 54 || ownerInvoice.PaymentFeeMinor != 3 || len(ownerInvoice.Lines) != 2 {
+		t.Fatalf("owner invoice = %#v", ownerInvoice)
+	}
+	deliveredTo := make(map[string]bool)
+	for deliveryIndex := 0; deliveryIndex < 2; deliveryIndex++ {
+		select {
+		case delivery := <-mailQueue:
+			invoice := invoicesByEmail[delivery.Message.To]
+			if delivery.Message.HTMLBody == "" || !strings.Contains(delivery.Message.HTMLBody, invoice.Number) {
+				t.Fatalf("invoice email = %#v", delivery.Message)
+			}
+			deliveredTo[delivery.Message.To] = true
+		default:
+			t.Fatal("invoice email was not queued")
 		}
-	default:
-		t.Fatal("invoice email was not queued")
+	}
+	if !deliveredTo["client@example.com"] || !deliveredTo["owner@example.com"] {
+		t.Fatalf("invoice recipients = %#v", deliveredTo)
 	}
 	application.runAutomaticBillingOnce(context.Background(), store, snapshot, time.Date(2026, 7, 23, 13, 0, 0, 0, time.UTC))
-	if duplicateInvoices := store.Invoices(context.Background(), 10); len(duplicateInvoices) != 1 {
-		t.Fatalf("duplicate invoices = %d, want 1", len(duplicateInvoices))
+	if duplicateInvoices := store.Invoices(context.Background(), 10); len(duplicateInvoices) != 2 {
+		t.Fatalf("duplicate invoices = %d, want 2", len(duplicateInvoices))
 	}
 }
 
@@ -1846,7 +1871,7 @@ func TestAutomaticBillingDistributesServerCostByStorage(t *testing.T) {
 	}
 }
 
-func TestHostingAndSupportClientsExcludeDemoAndServerOwnerSites(t *testing.T) {
+func TestHostingAndSupportClientsExcludeDemoAndIncludeServerOwnerSites(t *testing.T) {
 	database, err := sql.Open("sqlite3", filepath.Join(t.TempDir(), "billing.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -1866,8 +1891,17 @@ func TestHostingAndSupportClientsExcludeDemoAndServerOwnerSites(t *testing.T) {
 		},
 	}
 	clients := (&App{}).hostingAndSupportClients(context.Background(), hostingandsupport.Store{DB: database}, nil, nil, nil, []hostingandsupport.ClientHosting{hosting}, nil, 500, nil)
-	if len(clients) != 1 || clients[0].PrimaryEmail != "client@example.com" || clients[0].SiteCount != 1 || clients[0].Sites[0].Domain != "real.example.com" {
+	if len(clients) != 2 {
 		t.Fatalf("clients = %#v", clients)
+	}
+	domainsByEmail := make(map[string]string)
+	for _, client := range clients {
+		if len(client.Sites) == 1 {
+			domainsByEmail[client.PrimaryEmail] = client.Sites[0].Domain
+		}
+	}
+	if domainsByEmail["client@example.com"] != "real.example.com" || domainsByEmail["owner@example.com"] != "owner.example.com" {
+		t.Fatalf("client domains = %#v", domainsByEmail)
 	}
 }
 

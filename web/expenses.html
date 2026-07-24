@@ -29,6 +29,11 @@
     .expense-simple-summary { display: grid; gap: 16px; padding: 20px; border: 1px solid var(--bs-border-color); border-radius: 6px; background: var(--bs-body-bg); }
     .expense-simple-summary-head { display: flex; justify-content: space-between; align-items: start; gap: 12px; flex-wrap: wrap; }
     .expense-simple-summary-head h2, .expense-simple-client-head strong { overflow-wrap: anywhere; }
+    .expense-simple-server-description { display: grid; gap: 10px; padding: 12px 0; border-top: 1px solid var(--bs-border-color); border-bottom: 1px solid var(--bs-border-color); }
+    .expense-simple-server-description-main { display: flex; gap: 8px 16px; align-items: baseline; flex-wrap: wrap; }
+    .expense-simple-server-monitoring { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 1px; background: var(--bs-border-color); border: 1px solid var(--bs-border-color); }
+    .expense-simple-server-metric { display: grid; gap: 2px; min-width: 0; padding: 9px 10px; background: var(--bs-body-bg); }
+    .expense-simple-server-metric strong, .expense-simple-server-metric span, .expense-simple-server-metric small { overflow-wrap: anywhere; }
     .expense-simple-metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 1px; background: var(--bs-border-color); border: 1px solid var(--bs-border-color); }
     .expense-simple-metric { display: grid; gap: 3px; min-width: 0; padding: 12px; background: var(--bs-body-bg); }
     .expense-simple-metric strong { font-size: 1.15rem; overflow-wrap: anywhere; }
@@ -84,6 +89,28 @@
               <div class="text-muted">{{index $.T "expenses_purpose_simple"}}</div>
             </div>
             {{if $server.Local}}<button type="button" class="btn btn-outline-primary" data-bs-toggle="modal" data-bs-target="#expenseSettings{{$serverIndex}}">{{index $.T "expenses_configure"}}</button>{{end}}
+          </div>
+          <div class="expense-simple-server-description">
+            <div class="expense-simple-server-description-main">
+              <strong>{{$server.Subtitle}}</strong>
+              {{if $server.OSLabel}}<span>{{$server.OSLabel}}</span>{{end}}
+              {{if $server.CPULabel}}<span>{{$server.CPULabel}}</span>{{end}}
+              {{if $server.SyncStatusLabel}}<span class="{{$server.SyncStatusClass}}">{{$server.SyncStatusLabel}}</span>{{end}}
+              {{if $server.NetworkStatusLabel}}<span class="{{$server.NetworkStatusClass}}">{{$server.NetworkStatusLabel}}</span>{{end}}
+              {{if $server.DiskUsedLabel}}<span class="{{$server.DiskStatusClass}}">{{$server.DiskUsedLabel}} / {{$server.DiskTotalLabel}}</span>{{end}}
+              {{if $server.SitebrushVersionLabel}}<span class="{{$server.SitebrushVersionClass}}">SiteBrush {{$server.SitebrushVersionLabel}}</span>{{end}}
+            </div>
+            {{if $server.SystemMetrics}}
+            <div class="expense-simple-server-monitoring">
+              {{range $server.SystemMetrics}}
+              <div class="expense-simple-server-metric {{.StatusClass}}">
+                <span>{{.Name}}</span>
+                <strong>{{.Value}}</strong>
+                {{if .Detail}}<small class="text-muted">{{.Detail}}</small>{{end}}
+              </div>
+              {{end}}
+            </div>
+            {{end}}
           </div>
           {{if not $server.DiskCapacityKnown}}
           <div class="alert alert-warning mb-0">{{index $.T "expenses_disk_unknown"}}</div>

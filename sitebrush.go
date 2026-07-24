@@ -10709,27 +10709,6 @@ type billingServerSite struct {
 	ownerEmail  string
 	adminEmails []string
 	isDemo      bool
-	isOwner     bool
-}
-
-func normalizedEmailSet(emails []string) map[string]struct{} {
-	result := make(map[string]struct{}, len(emails))
-	for _, email := range emails {
-		email = strings.ToLower(strings.TrimSpace(email))
-		if email != "" {
-			result[email] = struct{}{}
-		}
-	}
-	return result
-}
-
-func emailsIntersectSet(emails []string, expected map[string]struct{}) bool {
-	for _, email := range emails {
-		if _, found := expected[strings.ToLower(strings.TrimSpace(email))]; found {
-			return true
-		}
-	}
-	return false
 }
 
 func (a *App) startBillingInvoiceProcess(stop <-chan struct{}) chan billingInvoiceProcessRequest {
@@ -10768,7 +10747,7 @@ func (a *App) startBillingInvoiceProcess(stop <-chan struct{}) chan billingInvoi
 func (a *App) runAutomaticBillingOnce(ctx context.Context, store hostingandsupport.Store, snapshot hostingAndSupportPanelSnapshot, now time.Time) {
 	groups := make(map[string]*billingInvoiceGroup)
 	addSite := func(installationID string, serverName string, policy expenses.ServerPolicy, site billingServerSite, allocation expenses.SiteAllocation) {
-		if site.isDemo || site.isOwner {
+		if site.isDemo {
 			return
 		}
 		ownerEmail := site.ownerEmail
@@ -10818,7 +10797,7 @@ func (a *App) runAutomaticBillingOnce(ctx context.Context, store hostingandsuppo
 		expenseSites := make([]expenses.SiteUsage, 0, len(sites))
 		for siteIndex, site := range sites {
 			expenseSites = append(expenseSites, expenses.SiteUsage{
-				Key: fmt.Sprintf("%s\x00%06d", normalizeDomainName(site.domain), siteIndex), UsedBytes: site.usedBytes, Excluded: site.isDemo || site.isOwner,
+				Key: fmt.Sprintf("%s\x00%06d", normalizeDomainName(site.domain), siteIndex), UsedBytes: site.usedBytes, Excluded: site.isDemo,
 			})
 		}
 		allocations := expenses.AllocateMonthlyExpense(policy, expenseSites)
@@ -10828,30 +10807,21 @@ func (a *App) runAutomaticBillingOnce(ctx context.Context, store hostingandsuppo
 		}
 	}
 	localInstallationID := "local:" + normalizeDomainName(snapshot.MainDomain)
-	localOwners := normalizedEmailSet(snapshot.OwnerEmails)
 	localSites := make([]billingServerSite, 0, len(snapshot.Sites))
 	for _, site := range snapshot.Sites {
 		adminEmails := hostingandsupport.SplitEmailList(site.AdminEmails)
 		localSites = append(localSites, billingServerSite{
 			domain: site.Domain, usedBytes: site.UsedBytes, adminEmails: adminEmails, isDemo: site.IsDemo,
-			isOwner: emailsIntersectSet(adminEmails, localOwners),
 		})
 	}
 	processServer(localInstallationID, snapshot.MainDomain, snapshot.LocalCostPolicy, localSites)
 	for _, hosting := range snapshot.ClientHostings {
 		serverName := firstNonEmpty(hosting.ServerDomain, hosting.InstallationID)
-		ownerEmails := make(map[string]struct{})
-		for _, role := range hosting.Roles {
-			if role.Role == "superadmin" {
-				ownerEmails[strings.ToLower(strings.TrimSpace(role.Email))] = struct{}{}
-			}
-		}
 		remoteSites := make([]billingServerSite, 0, len(hosting.Sites))
 		for _, site := range hosting.Sites {
-			siteEmails := append([]string{site.OwnerEmail}, site.AdminEmails...)
 			remoteSites = append(remoteSites, billingServerSite{
 				domain: site.Domain, usedBytes: site.UsedBytes, ownerEmail: site.OwnerEmail, adminEmails: site.AdminEmails,
-				isDemo: site.IsDemo, isOwner: emailsIntersectSet(siteEmails, ownerEmails),
+				isDemo: site.IsDemo,
 			})
 		}
 		processServer(hosting.InstallationID, serverName, hosting.ExpensePolicy, remoteSites)
@@ -11353,12 +11323,11 @@ func (a *App) collectHostingAndSupportPanelSnapshot(ctx context.Context, control
 		localExpensePolicy.DiskTotalBytes = 0
 	}
 	if expenses.CalculateMonthlyExpense(localExpensePolicy) > 0 && localExpensePolicy.Currency != "" {
-		localOwners := normalizedEmailSet(store.OwnerEmails(ctx))
 		expenseSites := make([]expenses.SiteUsage, 0, len(siteRows))
 		for _, site := range siteRows {
 			expenseSites = append(expenseSites, expenses.SiteUsage{
 				Key: site.Domain, UsedBytes: site.UsedBytes,
-				Excluded: site.IsDemo || emailsIntersectSet(hostingandsupport.SplitEmailList(site.AdminEmails), localOwners),
+				Excluded: site.IsDemo,
 			})
 		}
 		expenseAllocations := expenses.AllocateMonthlyExpense(localExpensePolicy, expenseSites)
@@ -11764,7 +11733,7 @@ type hostingAndSupportClientSiteSource struct {
 	hostingServer     string
 }
 
-func (a *App) hostingAndSupportClients(ctx context.Context, billingStore hostingandsupport.Store, siteRows []hostingandsupport.Site, installations []hostingandsupport.ServiceMailInstallation, events []hostingandsupport.ServiceMailEvent, clientHostings []hostingandsupport.ClientHosting, invoices []hostingandsupport.Invoice, commissionBPS int, localOwnerEmails []string) []hostingAndSupportClientView {
+func (a *App) hostingAndSupportClients(ctx context.Context, billingStore hostingandsupport.Store, siteRows []hostingandsupport.Site, installations []hostingandsupport.ServiceMailInstallation, events []hostingandsupport.ServiceMailEvent, clientHostings []hostingandsupport.ClientHosting, invoices []hostingandsupport.Invoice, commissionBPS int, _ []string) []hostingAndSupportClientView {
 	installationDomain := make(map[string]string)
 	installationIP := make(map[string]string)
 	for _, installation := range installations {
@@ -11774,15 +11743,11 @@ func (a *App) hostingAndSupportClients(ctx context.Context, billingStore hosting
 	clientsByEmail := make(map[string]*hostingAndSupportClientAccumulator)
 	clientsByDomain := make(map[string]*hostingAndSupportClientAccumulator)
 	knownSiteDomains := make(map[string]struct{})
-	localOwners := normalizedEmailSet(localOwnerEmails)
 	for _, siteRow := range siteRows {
 		if siteRow.IsDemo {
 			continue
 		}
 		siteAdminEmails := hostingandsupport.SplitEmailList(siteRow.AdminEmails)
-		if emailsIntersectSet(siteAdminEmails, localOwners) {
-			continue
-		}
 		domain := normalizeDomainName(siteRow.Domain)
 		if domain == "" {
 			continue
@@ -11875,18 +11840,11 @@ func (a *App) hostingAndSupportClients(ctx context.Context, billingStore hosting
 		}
 	}
 	for _, clientHosting := range clientHostings {
-		remoteOwners := make(map[string]struct{})
-		for _, role := range clientHosting.Roles {
-			if role.Role == "superadmin" {
-				remoteOwners[strings.ToLower(strings.TrimSpace(role.Email))] = struct{}{}
-			}
-		}
 		remoteExpenseSites := make([]expenses.SiteUsage, 0, len(clientHosting.Sites))
 		for _, site := range clientHosting.Sites {
-			siteEmails := append([]string{site.OwnerEmail}, site.AdminEmails...)
 			remoteExpenseSites = append(remoteExpenseSites, expenses.SiteUsage{
 				Key: site.Domain, UsedBytes: site.UsedBytes,
-				Excluded: site.IsDemo || emailsIntersectSet(siteEmails, remoteOwners),
+				Excluded: site.IsDemo,
 			})
 		}
 		remoteExpensePolicy := clientHosting.ExpensePolicy
@@ -11894,7 +11852,7 @@ func (a *App) hostingAndSupportClients(ctx context.Context, billingStore hosting
 		remoteExpenseAllocations := expenses.AllocateMonthlyExpense(remoteExpensePolicy, remoteExpenseSites)
 		for _, site := range clientHosting.Sites {
 			siteEmails := append([]string{site.OwnerEmail}, site.AdminEmails...)
-			if site.IsDemo || emailsIntersectSet(siteEmails, remoteOwners) {
+			if site.IsDemo {
 				continue
 			}
 			client := hostingAndSupportClientForEmails(clientsByEmail, siteEmails)

@@ -348,10 +348,6 @@ func BuildLocalServerView(input LocalServerViewInput) ServerView {
 		}
 	}
 	server.OSLabel, server.CPULabel = serverIdentityLabelsFromMetrics(server.SystemMetrics)
-	ownerEmails := make(map[string]struct{}, len(input.OwnerEmails))
-	for _, email := range input.OwnerEmails {
-		ownerEmails[strings.ToLower(strings.TrimSpace(email))] = struct{}{}
-	}
 	for _, siteRow := range input.Sites {
 		if siteRow.IsDemo {
 			continue
@@ -363,12 +359,6 @@ func BuildLocalServerView(input LocalServerViewInput) ServerView {
 		siteURL := siteRow.URL
 		if input.SiteURL != nil {
 			siteURL = input.SiteURL(siteRow.Domain)
-		}
-		billingExcluded := siteRow.IsDemo
-		for _, email := range splitEmailList(siteRow.AdminEmails) {
-			if _, isOwner := ownerEmails[strings.ToLower(strings.TrimSpace(email))]; isOwner {
-				billingExcluded = true
-			}
 		}
 		server.Sites = append(server.Sites, ServerSiteView{
 			Domain:            siteRow.Domain,
@@ -388,9 +378,9 @@ func BuildLocalServerView(input LocalServerViewInput) ServerView {
 			BillingStatusText: siteRow.BillingStatusText,
 			BillingAmount:     siteRow.BillingAmount,
 			BillingCurrency:   siteRow.BillingCurrency,
-			BillingBillable:   siteRow.BillingBillable && !billingExcluded,
+			BillingBillable:   siteRow.BillingBillable,
 			IsDemo:            siteRow.IsDemo,
-			BillingExcluded:   billingExcluded,
+			BillingExcluded:   siteRow.IsDemo,
 		})
 	}
 	server.SiteCount = len(server.Sites)
@@ -441,22 +431,10 @@ func BuildRemoteServerView(clientHosting ClientHosting, invoices []Invoice, late
 		server.SyncStatusLabel = "синхронизировано · " + clientHosting.LastSeenAt
 		server.SyncStatusClass = "billing-sync-ok"
 	}
-	ownerEmails := make(map[string]struct{})
-	for _, role := range clientHosting.Roles {
-		if role.Role == "superadmin" {
-			ownerEmails[strings.ToLower(strings.TrimSpace(role.Email))] = struct{}{}
-		}
-	}
 	expenseSites := make([]expenses.SiteUsage, 0, len(clientHosting.Sites))
 	for siteIndex, site := range clientHosting.Sites {
-		billingExcluded := site.IsDemo
-		for _, email := range append(append([]string(nil), site.AdminEmails...), site.OwnerEmail) {
-			if _, isOwner := ownerEmails[strings.ToLower(strings.TrimSpace(email))]; isOwner {
-				billingExcluded = true
-			}
-		}
 		expenseSites = append(expenseSites, expenses.SiteUsage{
-			Key: strconv.Itoa(siteIndex), UsedBytes: site.UsedBytes, Excluded: billingExcluded,
+			Key: strconv.Itoa(siteIndex), UsedBytes: site.UsedBytes, Excluded: site.IsDemo,
 		})
 	}
 	expensePolicy := clientHosting.ExpensePolicy
@@ -481,12 +459,6 @@ func BuildRemoteServerView(clientHosting ClientHosting, invoices []Invoice, late
 			billingPrice.PriceLabel = MoneyLabel(0, expensePolicy.Currency)
 			billingPrice.StatusText = "бесплатно до " + FormatFileSize(expensePolicy.FreeSiteThresholdBytes)
 		}
-		billingExcluded := site.IsDemo
-		for _, email := range append(append([]string(nil), site.AdminEmails...), site.OwnerEmail) {
-			if _, isOwner := ownerEmails[strings.ToLower(strings.TrimSpace(email))]; isOwner {
-				billingExcluded = true
-			}
-		}
 		server.Sites = append(server.Sites, ServerSiteView{
 			Domain:            site.Domain,
 			URL:               "http://" + site.Domain + "/",
@@ -503,9 +475,9 @@ func BuildRemoteServerView(clientHosting ClientHosting, invoices []Invoice, late
 			BillingStatusText: billingPrice.StatusText,
 			BillingAmount:     billingPrice.Amount,
 			BillingCurrency:   billingPrice.Currency,
-			BillingBillable:   billingPrice.Billable && !billingExcluded,
+			BillingBillable:   billingPrice.Billable,
 			IsDemo:            site.IsDemo,
-			BillingExcluded:   billingExcluded,
+			BillingExcluded:   site.IsDemo,
 		})
 	}
 	server.SiteCount = len(server.Sites)
