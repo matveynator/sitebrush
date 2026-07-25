@@ -548,6 +548,68 @@ func TestServerControlDatabaseDispatcherSerializesWritesAndKeepsWALReadersAvaila
 	}
 }
 
+func TestGuestPublishedStaticRouteDoesNotWaitForControlDatabaseWriter(t *testing.T) {
+	application := newRouterTestApplication(t)
+	application.writePublishedStaticHTML("localhost", "/", "<html><body>ready</body></html>")
+
+	if err := os.MkdirAll(filepath.Dir(application.serverControlDBPath()), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	dispatcher, err := startServerControlDatabaseDispatcher(application.serverControlDBPath(), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	application.controlDatabase = dispatcher
+	stopDemoRuntime := make(chan struct{})
+	application.demoSiteRuntime = application.startDemoSiteRuntimeProcess(stopDemoRuntime)
+	t.Cleanup(func() {
+		close(stopDemoRuntime)
+		dispatcher.Close()
+	})
+
+	writer, err := dispatcher.acquireForPurpose(context.Background(), serverControlDatabaseWrite, "test-blocking-writer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writer.Close()
+
+	request := httptest.NewRequest(http.MethodGet, "http://localhost/", nil)
+	request = request.WithContext(contextWithDomain(request.Context(), "localhost"))
+	response := httptest.NewRecorder()
+	startedAt := time.Now()
+	application.route(response, request)
+	duration := time.Since(startedAt)
+
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "ready") {
+		t.Fatalf("static response = %d %q", response.Code, response.Body.String())
+	}
+	if duration >= time.Second {
+		t.Fatalf("static route waited for control database writer: %s", duration)
+	}
+}
+
+func TestHostingClientSiteViewsUsePreparedDNSResult(t *testing.T) {
+	previousIPLookup := lookupIPRecords
+	lookupIPRecords = func(string) ([]net.IP, error) {
+		t.Fatal("prepared hosting view performed a live DNS lookup")
+		return nil, nil
+	}
+	t.Cleanup(func() {
+		lookupIPRecords = previousIPLookup
+	})
+
+	views := hostingAndSupportClientSiteViews(map[string]hostingAndSupportClientSiteSource{
+		"site.example": {
+			ip:                "203.0.113.10",
+			dnsMatchesServer:  true,
+			dnsCheckAvailable: true,
+		},
+	}, map[string]struct{}{})
+	if len(views) != 1 || !views[0].RealInstallation {
+		t.Fatalf("prepared DNS site view = %#v", views)
+	}
+}
+
 func TestHostingAndSupportSnapshotUsesExistingWriterSession(t *testing.T) {
 	storagePath := t.TempDir()
 	storageRealRoot, err := prepareStorageJailRoot(storagePath)

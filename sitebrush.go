@@ -203,6 +203,13 @@ type App struct {
 	renderTemplates           chan renderTemplateRequest
 	controlDatabase           *serverControlDatabaseDispatcher
 	hostingSupportEvents      chan hostingandsupport.HostingSnapshotEvent
+	demoSiteRuntime           chan demoSiteRuntimeRequest
+}
+
+type demoSiteRuntimeRequest struct {
+	kind     string
+	settings demo.Settings
+	reply    chan demo.Settings
 }
 
 type billingInvoiceProcessRequest struct {
@@ -590,6 +597,8 @@ type serverControlDatabaseAccessRequest struct {
 	cancel      chan struct{}
 	reply       chan serverControlDatabaseAccessResponse
 	workerReply chan serverControlDatabaseAccessResponse
+	purpose     string
+	queuedAt    time.Time
 }
 
 type serverControlDatabaseAccessResponse struct {
@@ -707,6 +716,13 @@ func (dispatcher *serverControlDatabaseDispatcher) runWorker(database *sql.DB, r
 				continue
 			default:
 			}
+			queueDuration := time.Duration(0)
+			if !request.queuedAt.IsZero() {
+				queueDuration = time.Since(request.queuedAt)
+			}
+			if debug || queueDuration >= 5*time.Second {
+				log.Printf("%sCONTROL DB%s worker=%s purpose=%s queue=%s", terminalCyan(), terminalReset(), workerName, request.purpose, queueDuration.String())
+			}
 			release := make(chan struct{}, 1)
 			response := serverControlDatabaseAccessResponse{session: &serverControlDatabaseSession{DB: database, release: release}}
 			delivered := false
@@ -725,14 +741,19 @@ func (dispatcher *serverControlDatabaseDispatcher) runWorker(database *sql.DB, r
 			case <-request.cancel:
 			case <-dispatcher.stop:
 			}
-			if debug && time.Since(startedAt) >= slowDatabaseOperationLogAfter {
-				log.Printf("%sCONTROL DB%s worker=%s session=%s", terminalCyan(), terminalReset(), workerName, time.Since(startedAt).String())
+			sessionDuration := time.Since(startedAt)
+			if (debug && sessionDuration >= slowDatabaseOperationLogAfter) || sessionDuration >= 5*time.Second {
+				log.Printf("%sCONTROL DB%s worker=%s purpose=%s session=%s", terminalCyan(), terminalReset(), workerName, request.purpose, sessionDuration.String())
 			}
 		}
 	}
 }
 
 func (dispatcher *serverControlDatabaseDispatcher) acquire(ctx context.Context, kind serverControlDatabaseAccessKind) (*serverControlDatabaseSession, error) {
+	return dispatcher.acquireForPurpose(ctx, kind, "unspecified")
+}
+
+func (dispatcher *serverControlDatabaseDispatcher) acquireForPurpose(ctx context.Context, kind serverControlDatabaseAccessKind, purpose string) (*serverControlDatabaseSession, error) {
 	if dispatcher == nil {
 		return nil, errors.New("server control database dispatcher is not running")
 	}
@@ -748,6 +769,8 @@ func (dispatcher *serverControlDatabaseDispatcher) acquire(ctx context.Context, 
 		cancel:      make(chan struct{}),
 		reply:       make(chan serverControlDatabaseAccessResponse, 1),
 		workerReply: make(chan serverControlDatabaseAccessResponse, 1),
+		purpose:     firstNonEmpty(strings.TrimSpace(purpose), "unspecified"),
+		queuedAt:    time.Now(),
 	}
 	go dispatcher.relayResponse(request)
 	requests := dispatcher.readRequests
@@ -4998,6 +5021,7 @@ func runSitebrushServer(ctx context.Context, config serverRunConfig) error {
 	application.ensureAutoCertGuard()
 	application.renderTemplates = startRenderTemplateProcess(ctx.Done())
 	application.hostingAndSupportPanel = application.startHostingAndSupportPanelProcess(ctx.Done())
+	application.demoSiteRuntime = application.startDemoSiteRuntimeProcess(ctx.Done())
 	application.billingInvoices = application.startBillingInvoiceProcess(ctx.Done())
 	application.startDomainLogWorker(ctx)
 	application.startAnalyticsWorkers(ctx)
@@ -6402,7 +6426,6 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 	if a.maybeStartDemoSite(w, r, requestDomain) {
 		return
 	}
-	a.cleanupExpiredPublicTrialSite(r.Context(), requestDomain)
 	if isGuestStaticRequest(r) {
 		if rule, found := a.pagePasswordRuleFromPrefixFile(requestDomain, pagePath); found {
 			failureDomainPrefix := pagePasswordFailureDomainPrefix(rule.Domain)
@@ -7124,7 +7147,7 @@ func (a *App) maybeStartDemoSite(w http.ResponseWriter, r *http.Request, request
 	if !demo.CanStartFromRequest(r) {
 		return false
 	}
-	settings, found := a.demoSiteSettings(r.Context())
+	settings, found := a.runtimeDemoSiteSettings(r.Context())
 	if !found || normalizeDomainName(settings.Domain) != normalizeDomainName(requestDomain) {
 		return false
 	}
@@ -7140,6 +7163,65 @@ func (a *App) maybeStartDemoSite(w http.ResponseWriter, r *http.Request, request
 	}
 	http.Redirect(w, r, redirectPath, http.StatusFound)
 	return true
+}
+
+func (a *App) startDemoSiteRuntimeProcess(stop <-chan struct{}) chan demoSiteRuntimeRequest {
+	requests := make(chan demoSiteRuntimeRequest, 16)
+	initialSettings, _ := a.demoSiteSettings(context.Background())
+	go func() {
+		settings := initialSettings
+		for {
+			select {
+			case <-stop:
+				return
+			case request := <-requests:
+				switch request.kind {
+				case "get":
+					select {
+					case request.reply <- settings:
+					case <-stop:
+						return
+					}
+				case "set":
+					settings = request.settings
+				}
+			}
+		}
+	}()
+	return requests
+}
+
+func (a *App) runtimeDemoSiteSettings(ctx context.Context) (demo.Settings, bool) {
+	if a == nil {
+		return demo.Settings{}, false
+	}
+	if a.demoSiteRuntime == nil {
+		return a.demoSiteSettings(ctx)
+	}
+	reply := make(chan demo.Settings, 1)
+	request := demoSiteRuntimeRequest{kind: "get", reply: reply}
+	select {
+	case a.demoSiteRuntime <- request:
+	case <-ctx.Done():
+		return demo.Settings{}, false
+	}
+	select {
+	case settings := <-reply:
+		settings.Domain = normalizeDomainName(settings.Domain)
+		return settings, settings.Enabled && settings.Domain != ""
+	case <-ctx.Done():
+		return demo.Settings{}, false
+	}
+}
+
+func (a *App) updateRuntimeDemoSiteSettings(ctx context.Context, settings demo.Settings) {
+	if a == nil || a.demoSiteRuntime == nil {
+		return
+	}
+	select {
+	case a.demoSiteRuntime <- demoSiteRuntimeRequest{kind: "set", settings: settings}:
+	case <-ctx.Done():
+	}
 }
 
 func (a *App) demoSiteSettings(ctx context.Context) (demo.Settings, bool) {
@@ -7327,11 +7409,12 @@ func (a *App) demoGrabPreview(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	defer controlDatabase.Close()
 	if ownerDomain, found := (hostingandsupport.Store{DB: controlDatabase}).OwnerDomain(r.Context()); found && normalizeDomainName(ownerDomain) == domain {
+		_ = controlDatabase.Close()
 		http.Error(w, "server owner site cannot be used as the public demo site", http.StatusBadRequest)
 		return
 	}
+	_ = controlDatabase.Close()
 	remoteSourceURL, err := parseGrabSourceURL(sourceURL)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -7426,6 +7509,7 @@ func (a *App) demoGrabRefresh(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	settings := demo.Settings{Domain: demoDomain, SourceURL: demoSourceURL, CopyWholeSite: demoCopyWholeSite, Enabled: true}
+	a.updateRuntimeDemoSiteSettings(r.Context(), settings)
 	progressToken := strings.TrimSpace(r.FormValue("progress_token"))
 	failedResourceURLs := demoFailedResourceURLs(r)
 	var failedTotal int
@@ -8652,14 +8736,14 @@ func (a *App) cleanupExpiredPublicTrialSite(ctx context.Context, domain string) 
 	if domain == "" {
 		return
 	}
-	controlDatabase, err := a.openServerControlDatabase(ctx)
+	controlDatabase, err := a.openServerControlDatabaseForPurpose(ctx, serverControlDatabaseRead, "trial-cleanup-check")
 	if err != nil {
 		return
 	}
-	defer controlDatabase.Close()
 	var serviceStatus string
 	var updatedAtText string
 	err = controlDatabase.QueryRowContext(ctx, `SELECT service_status,updated_at FROM site_service_assignments WHERE domain=?`, domain).Scan(&serviceStatus, &updatedAtText)
+	_ = controlDatabase.Close()
 	if err != nil {
 		return
 	}
@@ -8674,8 +8758,75 @@ func (a *App) cleanupExpiredPublicTrialSite(ctx context.Context, domain string) 
 	if a.rawManagedSiteHasAdmin(ctx, domain) {
 		return
 	}
-	if deleteErr := a.deleteDemoManagedSiteWithoutBackup(ctx, controlDatabase.DB, domain); deleteErr != nil {
-		log.Printf("expired public trial cleanup failed domain=%s error=%v", domain, deleteErr)
+	row, found, rowErr := a.managedSiteQuotaRow(ctx, domain)
+	if rowErr != nil {
+		return
+	}
+	if found && sameSiteQuotaPath(row.DatabasePath, a.serverControlDBPath()) {
+		return
+	}
+	writeDatabase, err := a.openServerControlDatabaseForPurpose(ctx, serverControlDatabaseWrite, "trial-cleanup-delete")
+	if err != nil {
+		return
+	}
+	err = writeDatabase.QueryRowContext(ctx, `SELECT service_status,updated_at FROM site_service_assignments WHERE domain=?`, domain).Scan(&serviceStatus, &updatedAtText)
+	if err != nil {
+		_ = writeDatabase.Close()
+		return
+	}
+	serviceStatus = strings.ToLower(strings.TrimSpace(serviceStatus))
+	updatedAt, parseErr = time.Parse(time.RFC3339, strings.TrimSpace(updatedAtText))
+	if (serviceStatus != "trial" && serviceStatus != "free") || parseErr != nil || time.Since(updatedAt) <= 24*time.Hour {
+		_ = writeDatabase.Close()
+		return
+	}
+	var ownerCount int
+	_ = writeDatabase.QueryRowContext(ctx, `SELECT COUNT(1) FROM server_managers WHERE domain=? AND role='owner'`, domain).Scan(&ownerCount)
+	if ownerCount > 0 {
+		_ = writeDatabase.Close()
+		return
+	}
+	(hostingandsupport.Store{DB: writeDatabase}).RemoveSiteAssignment(ctx, domain)
+	_, _ = writeDatabase.ExecContext(ctx, `DELETE FROM server_managers WHERE domain=? AND role<>'owner'`, domain)
+	_ = writeDatabase.Close()
+	if found {
+		if deleteErr := a.deleteManagedSiteFiles(ctx, row); deleteErr != nil {
+			log.Printf("expired public trial cleanup failed domain=%s error=%v", domain, deleteErr)
+		}
+	}
+}
+
+func (a *App) cleanupExpiredPublicTrialSites(ctx context.Context, now time.Time) {
+	controlDatabase, err := a.openServerControlDatabaseForPurpose(ctx, serverControlDatabaseRead, "trial-cleanup-scan")
+	if err != nil {
+		return
+	}
+	rows, err := controlDatabase.QueryContext(ctx, `SELECT domain,updated_at FROM site_service_assignments WHERE service_status IN ('trial','free')`)
+	if err != nil {
+		_ = controlDatabase.Close()
+		return
+	}
+	expiredDomains := make([]string, 0)
+	for rows.Next() {
+		var domain string
+		var updatedAtText string
+		if scanErr := rows.Scan(&domain, &updatedAtText); scanErr != nil {
+			continue
+		}
+		updatedAt, parseErr := time.Parse(time.RFC3339, strings.TrimSpace(updatedAtText))
+		if parseErr == nil && now.Sub(updatedAt) > 24*time.Hour {
+			expiredDomains = append(expiredDomains, domain)
+		}
+	}
+	_ = rows.Close()
+	_ = controlDatabase.Close()
+	for _, domain := range expiredDomains {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+			a.cleanupExpiredPublicTrialSite(ctx, domain)
+		}
 	}
 }
 
@@ -10594,12 +10745,14 @@ func (a *App) startHostingAndSupportPanelProcess(stop <-chan struct{}) chan host
 		}
 	}
 	buildResults := make(chan hostingAndSupportPanelBuildResult, 1)
-	go a.runHostingAndSupportPanelProcess(stop, requests, buildResults, initialSnapshot)
+	snapshotSaves := make(chan hostingAndSupportPanelSnapshot, 1)
+	go a.runHostingAndSupportPanelSnapshotSaver(stop, snapshotSaves)
+	go a.runHostingAndSupportPanelProcess(stop, requests, buildResults, snapshotSaves, initialSnapshot)
 	go a.runHostingAndSupportMetricsProcess(stop, requests)
 	return requests
 }
 
-func (a *App) runHostingAndSupportPanelProcess(stop <-chan struct{}, requests <-chan hostingAndSupportPanelRequest, buildResults chan hostingAndSupportPanelBuildResult, initialSnapshot hostingAndSupportPanelSnapshot) {
+func (a *App) runHostingAndSupportPanelProcess(stop <-chan struct{}, requests <-chan hostingAndSupportPanelRequest, buildResults chan hostingAndSupportPanelBuildResult, snapshotSaves chan hostingAndSupportPanelSnapshot, initialSnapshot hostingAndSupportPanelSnapshot) {
 	fullRefreshTicker := time.NewTicker(hostingAndSupportFullRefreshInterval)
 	defer fullRefreshTicker.Stop()
 	snapshot := initialSnapshot
@@ -10637,8 +10790,8 @@ func (a *App) runHostingAndSupportPanelProcess(stop <-chan struct{}, requests <-
 			case "quota_changed":
 				snapshotGeneration++
 				snapshot = a.applyHostingAndSupportPanelQuotaChange(snapshot, request.quotaChange)
-				persistErr := a.saveHostingAndSupportPanelSnapshot(snapshot)
-				request.reply <- hostingAndSupportPanelResponse{snapshot: snapshot, err: persistErr}
+				queueLatestHostingAndSupportPanelSnapshot(snapshotSaves, snapshot)
+				request.reply <- hostingAndSupportPanelResponse{snapshot: snapshot}
 				startBuild()
 			case "expense_policy_changed":
 				snapshotGeneration++
@@ -10650,8 +10803,8 @@ func (a *App) runHostingAndSupportPanelProcess(stop <-chan struct{}, requests <-
 					}
 				}
 				snapshot.BuiltAt = time.Now().UTC().Format(time.RFC3339)
-				persistErr := a.saveHostingAndSupportPanelSnapshot(snapshot)
-				request.reply <- hostingAndSupportPanelResponse{snapshot: snapshot, err: persistErr}
+				queueLatestHostingAndSupportPanelSnapshot(snapshotSaves, snapshot)
+				request.reply <- hostingAndSupportPanelResponse{snapshot: snapshot}
 				startBuild()
 			}
 		case result := <-buildResults:
@@ -10659,10 +10812,15 @@ func (a *App) runHostingAndSupportPanelProcess(stop <-chan struct{}, requests <-
 			if result.err != nil {
 				log.Printf("hosting panel snapshot refresh failed: %v", result.err)
 			} else if result.generation == snapshotGeneration {
-				snapshot = result.snapshot
-				if persistErr := a.saveHostingAndSupportPanelSnapshot(snapshot); persistErr != nil {
-					log.Printf("hosting panel snapshot save failed: %v", persistErr)
+				currentMetrics := []hostingandsupport.ServerMetricView(nil)
+				for _, server := range snapshot.Servers {
+					if server.Local {
+						currentMetrics = server.SystemMetrics
+						break
+					}
 				}
+				snapshot = a.applyHostingAndSupportPanelMetrics(result.snapshot, currentMetrics)
+				queueLatestHostingAndSupportPanelSnapshot(snapshotSaves, snapshot)
 			}
 			if buildPending {
 				buildPending = false
@@ -10670,6 +10828,35 @@ func (a *App) runHostingAndSupportPanelProcess(stop <-chan struct{}, requests <-
 			}
 		case <-fullRefreshTicker.C:
 			startBuild()
+		}
+	}
+}
+
+func queueLatestHostingAndSupportPanelSnapshot(requests chan hostingAndSupportPanelSnapshot, snapshot hostingAndSupportPanelSnapshot) {
+	select {
+	case requests <- snapshot:
+		return
+	default:
+	}
+	select {
+	case <-requests:
+	default:
+	}
+	select {
+	case requests <- snapshot:
+	default:
+	}
+}
+
+func (a *App) runHostingAndSupportPanelSnapshotSaver(stop <-chan struct{}, requests <-chan hostingAndSupportPanelSnapshot) {
+	for {
+		select {
+		case <-stop:
+			return
+		case snapshot := <-requests:
+			if persistErr := a.saveHostingAndSupportPanelSnapshot(snapshot); persistErr != nil {
+				log.Printf("hosting panel snapshot save failed: %v", persistErr)
+			}
 		}
 	}
 }
@@ -10721,7 +10908,7 @@ func (a *App) startBillingInvoiceProcess(stop <-chan struct{}) chan billingInvoi
 			if !found {
 				return
 			}
-			controlDatabase, err := a.openServerControlDatabase(context.Background())
+			controlDatabase, err := a.openServerControlDatabaseForPurpose(context.Background(), serverControlDatabaseWrite, "automatic-billing")
 			if err != nil {
 				log.Printf("automatic billing database unavailable: %v", err)
 				return
@@ -10966,7 +11153,7 @@ func (a *App) saveHostingAndSupportPanelSnapshot(snapshot hostingAndSupportPanel
 	if err != nil {
 		return err
 	}
-	controlDatabase, err := a.openServerControlDatabase(context.Background())
+	controlDatabase, err := a.openServerControlDatabaseForPurpose(context.Background(), serverControlDatabaseWrite, "expenses-snapshot-save")
 	if err != nil {
 		return err
 	}
@@ -11241,7 +11428,7 @@ func (a *App) collectHostingAndSupportPanelSnapshot(ctx context.Context, control
 	var controlDatabaseSession *serverControlDatabaseSession
 	if controlDatabase == nil {
 		var err error
-		controlDatabaseSession, err = a.openServerControlDatabase(ctx)
+		controlDatabaseSession, err = a.openServerControlDatabaseForPurpose(ctx, serverControlDatabaseWrite, "expenses-snapshot-build")
 		if err != nil {
 			return hostingAndSupportPanelSnapshot{}, err
 		}
@@ -11358,7 +11545,7 @@ func (a *App) collectHostingAndSupportPanelSnapshot(ctx context.Context, control
 		Invoices:       invoices,
 		Plans:          plans,
 		Assignments:    assignments,
-		SystemMetrics:  a.localHostingServerSystemMetrics(ctx),
+		SystemMetrics:  nil,
 		CompileVersion: CompileVersion,
 		MainDomain:     mainDomain,
 		CurrentHost:    mainDomain,
@@ -11717,6 +11904,8 @@ type hostingAndSupportClientAccumulator struct {
 
 type hostingAndSupportClientSiteSource struct {
 	ip                string
+	dnsMatchesServer  bool
+	dnsCheckAvailable bool
 	aliases           string
 	url               string
 	usedBytes         int64
@@ -11895,6 +12084,8 @@ func (a *App) hostingAndSupportClients(ctx context.Context, billingStore hosting
 			siteSource.hostingOwner = firstNonEmpty(clientHosting.OwnerEmail, siteSource.hostingOwner)
 			siteSource.hostingServer = firstNonEmpty(clientHosting.ServerDomain, clientHosting.InstallationID, siteSource.hostingServer)
 			siteSource.ip = firstNonEmpty(clientHosting.ServerIP, siteSource.ip)
+			siteSource.dnsMatchesServer = site.DNSMatchesServer
+			siteSource.dnsCheckAvailable = strings.TrimSpace(site.ReachabilityCheckedAt) != "" || site.DNSMatchesServer
 			client.sites[domain] = siteSource
 		}
 	}
@@ -12220,7 +12411,7 @@ func hostingAndSupportClientSiteViews(sites map[string]hostingAndSupportClientSi
 			view.HostingSitebrush = true
 			view.ParentDomain = parentDomain
 			view.Status = "хостинг SiteBrush"
-		} else if domainARecordMatches(domain, view.InstallationIP) {
+		} else if siteSource.dnsCheckAvailable && siteSource.dnsMatchesServer {
 			view.RealInstallation = true
 			view.Status = "реальная установка"
 		} else {
@@ -12735,6 +12926,9 @@ func (a *App) saveHostingAndSupportDemoSettingsInDatabase(r *http.Request, contr
 	if err := (demo.Store{DB: controlDatabase}).SaveSettings(r.Context(), demoDomain, demoSourceURL, demoCopyWholeSite, demoEnabled); err != nil {
 		return err.Error()
 	}
+	a.updateRuntimeDemoSiteSettings(r.Context(), demo.Settings{
+		Domain: demoDomain, SourceURL: demoSourceURL, CopyWholeSite: demoCopyWholeSite, Enabled: demoEnabled,
+	})
 	if !demoEnabled {
 		for _, disabledDemoDomain := range demo.UniqueDomains(previousDemoSettings.Domain, demoDomain) {
 			if err := a.deleteDemoManagedSiteWithoutBackup(r.Context(), controlDatabase, disabledDemoDomain); err != nil {
@@ -13063,7 +13257,11 @@ func (a *App) deleteManagedSite(ctx context.Context, domain string) error {
 
 func (a *App) startDemoSiteCleanupWorker(ctx context.Context) {
 	go func() {
-		a.cleanupExpiredDemoSites(ctx, time.Now())
+		runCleanup := func(now time.Time) {
+			a.cleanupExpiredDemoSites(ctx, now)
+			a.cleanupExpiredPublicTrialSites(ctx, now)
+		}
+		runCleanup(time.Now())
 		ticker := time.NewTicker(time.Minute)
 		defer ticker.Stop()
 		for {
@@ -13071,18 +13269,17 @@ func (a *App) startDemoSiteCleanupWorker(ctx context.Context) {
 			case <-ctx.Done():
 				return
 			case now := <-ticker.C:
-				a.cleanupExpiredDemoSites(ctx, now)
+				runCleanup(now)
 			}
 		}
 	}()
 }
 
 func (a *App) cleanupExpiredDemoSites(ctx context.Context, now time.Time) {
-	controlDatabase, err := a.openServerControlDatabase(ctx)
+	controlDatabase, err := a.openServerControlDatabaseForPurpose(ctx, serverControlDatabaseRead, "demo-cleanup-scan")
 	if err != nil {
 		return
 	}
-	defer controlDatabase.Close()
 	store := demo.Store{DB: controlDatabase}
 	sessionsByDomain := make(map[string][]demo.Session)
 	for _, session := range store.Sessions(ctx) {
@@ -13092,16 +13289,24 @@ func (a *App) cleanupExpiredDemoSites(ctx context.Context, now time.Time) {
 		}
 		sessionsByDomain[domain] = append(sessionsByDomain[domain], session)
 	}
+	_ = controlDatabase.Close()
 	for domain, sessions := range sessionsByDomain {
 		if !demo.SessionsReadyForReset(sessions, now) {
 			continue
 		}
-		if err := a.restoreDemoSiteFromSnapshot(ctx, controlDatabase.DB, domain); err != nil {
+		if err := a.restoreDemoSiteFromSnapshot(ctx, nil, domain); err != nil {
 			log.Printf("demo site restore failed domain=%s error=%v", domain, err)
 			continue
 		}
-		if err := store.RemoveSessionsForDomain(ctx, domain); err != nil {
-			log.Printf("demo session cleanup failed domain=%s error=%v", domain, err)
+		writeDatabase, openErr := a.openServerControlDatabaseForPurpose(ctx, serverControlDatabaseWrite, "demo-cleanup-finish")
+		if openErr != nil {
+			log.Printf("demo session cleanup database unavailable domain=%s error=%v", domain, openErr)
+			continue
+		}
+		removeErr := (demo.Store{DB: writeDatabase}).RemoveSessionsForDomain(ctx, domain)
+		_ = writeDatabase.Close()
+		if removeErr != nil {
+			log.Printf("demo session cleanup failed domain=%s error=%v", domain, removeErr)
 		}
 	}
 }
@@ -13213,6 +13418,14 @@ func (a *App) deleteManagedSiteDataAfterBackup(ctx context.Context, controlDatab
 	}
 	(hostingandsupport.Store{DB: controlDatabase}).RemoveSiteAssignment(ctx, domain)
 	_, _ = controlDatabase.ExecContext(ctx, `DELETE FROM server_managers WHERE domain=? AND role<>'owner'`, domain)
+	return a.deleteManagedSiteFiles(ctx, row)
+}
+
+func (a *App) deleteManagedSiteFiles(ctx context.Context, row siteQuotaRow) error {
+	domain := normalizeQuotaDomainName(row.Domain)
+	if domain == "" {
+		return fmt.Errorf("site domain is required")
+	}
 	a.closeManagedSiteDatabase(ctx, domain)
 	if strings.TrimSpace(row.DatabasePath) != "" && !sameSiteQuotaPath(row.DatabasePath, a.serverControlDBPath()) {
 		realDatabasePath, pathErr := a.existingPathInsideStorage(row.DatabasePath)
@@ -19514,14 +19727,18 @@ func (a *App) serverControlDBPath() string {
 }
 
 func (a *App) openServerControlDatabase(ctx context.Context) (*serverControlDatabaseSession, error) {
-	return a.openServerControlDatabaseForAccess(ctx, serverControlDatabaseWrite)
+	return a.openServerControlDatabaseForPurpose(ctx, serverControlDatabaseWrite, "write")
 }
 
 func (a *App) openServerControlDatabaseRead(ctx context.Context) (*serverControlDatabaseSession, error) {
-	return a.openServerControlDatabaseForAccess(ctx, serverControlDatabaseRead)
+	return a.openServerControlDatabaseForPurpose(ctx, serverControlDatabaseRead, "read")
 }
 
 func (a *App) openServerControlDatabaseForAccess(ctx context.Context, kind serverControlDatabaseAccessKind) (*serverControlDatabaseSession, error) {
+	return a.openServerControlDatabaseForPurpose(ctx, kind, "unspecified")
+}
+
+func (a *App) openServerControlDatabaseForPurpose(ctx context.Context, kind serverControlDatabaseAccessKind, purpose string) (*serverControlDatabaseSession, error) {
 	databasePath := a.serverControlDBPath()
 	realDatabasePath, pathErr := a.writablePathInsideStorage(databasePath)
 	if pathErr != nil {
@@ -19531,7 +19748,7 @@ func (a *App) openServerControlDatabaseForAccess(ctx context.Context, kind serve
 		return nil, err
 	}
 	if a.controlDatabase != nil {
-		return a.controlDatabase.acquire(ctx, kind)
+		return a.controlDatabase.acquireForPurpose(ctx, kind, purpose)
 	}
 	database, err := openServerControlDatabaseHandle(realDatabasePath, true)
 	if err != nil {
