@@ -8426,12 +8426,15 @@ func (a *App) savePage(w http.ResponseWriter, r *http.Request) {
 		title = pagePath
 	}
 	html := r.FormValue("html")
+	resourceSpider, localizedHTML := localizeSavedPageExternalResources(r.Context(), domain, pagePath, html, r, a.grabTracker)
+	html = localizedHTML
 	newHTMLBytes := int64(len([]byte(html)))
 	var previousStoredHTML string
 	_ = a.db.QueryRowContext(saveCtx, `SELECT html FROM pages WHERE domain=? AND path=?`, domain, pagePath).Scan(&previousStoredHTML)
 	pageDelta := newHTMLBytes - int64(len([]byte(previousStoredHTML)))
 	publishedPageDelta := int64(0)
 	publishedStaticDelta := int64(0)
+	fileDelta := a.estimateImportedFileDelta(domain, resourceSpider)
 	if !a.isDomainFrozen(saveCtx, domain) {
 		var previousPublishedHTML string
 		_ = a.db.QueryRowContext(saveCtx, `SELECT html FROM published_pages WHERE domain=? AND path=?`, domain, pagePath).Scan(&previousPublishedHTML)
@@ -8439,9 +8442,14 @@ func (a *App) savePage(w http.ResponseWriter, r *http.Request) {
 		publishedStaticPath := filepath.Join(a.domainStaticDir(domain), staticRelativePathForPage(pagePath))
 		publishedStaticDelta = newHTMLBytes - diskusage.FileSize(publishedStaticPath)
 	}
-	if storageErr := a.applyDomainStorageDelta(saveCtx, domain, pageDelta, publishedPageDelta, newHTMLBytes, 0, publishedStaticDelta); storageErr != nil {
+	if storageErr := a.applyDomainStorageDelta(saveCtx, domain, pageDelta, publishedPageDelta, newHTMLBytes, fileDelta, publishedStaticDelta); storageErr != nil {
 		sitebrushTemplateProgress.Publish(progressToken, templatePropagationProgressEvent{Stage: "error", Domain: domain, Path: pagePath, Error: storageErr.Error(), Done: true})
 		http.Error(w, storageErr.Error(), http.StatusInsufficientStorage)
+		return
+	}
+	if persistErr := a.persistSpiderAssets(saveCtx, resourceSpider, pagePath); persistErr != nil {
+		_ = a.applyDomainStorageDelta(saveCtx, domain, -pageDelta, -publishedPageDelta, -newHTMLBytes, -fileDelta, -publishedStaticDelta)
+		http.Error(w, persistErr.Error(), http.StatusBadGateway)
 		return
 	}
 	a.clearPageRedirectSource(saveCtx, domain, pagePath)
@@ -10119,6 +10127,20 @@ func prepareSinglePageImport(importRequest grabImportRequest, tracker *grabProgr
 	spider.fetchSelectedResources()
 	spider.retryFailedResources(importRequest.RemoteSourceURL, grabImportFailedResourceRetryAttempts)
 	rootResource.content = []byte(spider.rewriteStaticURLTextReferences(string(rootResource.content), importRequest.RemoteSourceURL, 0))
+	return spider, string(rootResource.content)
+}
+
+func localizeSavedPageExternalResources(ctx context.Context, domain, pagePath, htmlSource string, request *http.Request, tracker *grabProgressTracker) (*pageSpider, string) {
+	pageURL, parseErr := url.Parse(absoluteURLForPath(request, cleanPath(pagePath)))
+	if parseErr != nil {
+		return nil, htmlSource
+	}
+	spider := newPageSpider(domain, pageURL, grabResourceMaxDepth, tracker, "", grabSourceOptions{})
+	spider.setContext(ctx)
+	spider.externalResourcesOnly = true
+	rootResource := &mirroredResource{url: pageURL.String(), content: []byte(htmlSource)}
+	spider.resources[pageURL.String()] = rootResource
+	spider.rewriteNestedResources(rootResource, 0, "text/html")
 	return spider, string(rootResource.content)
 }
 
@@ -23364,12 +23386,15 @@ func (a *App) persistSpiderAssets(ctx context.Context, spider *pageSpider, pageP
 	if spider == nil {
 		return nil
 	}
-	domain := normalizeDomainName(spider.domain)
+	domain := canonicalLocalDomain(spider.domain)
+	if domain != "localhost" {
+		domain = normalizeDomainName(domain)
+	}
 	if domain == "" {
 		return nil
 	}
 	ctx = contextWithDomain(ctx, domain)
-	baseDir := a.domainFilesDirForDomain(spider.domain)
+	baseDir := a.domainFilesDirForDomain(domain)
 	if err := a.mkdirAllInsideStorage(baseDir, 0o755); err != nil {
 		return err
 	}
@@ -23428,27 +23453,28 @@ type mirroredResource struct {
 }
 
 type pageSpider struct {
-	domain               string
-	pageURL              *url.URL
-	maxDepth             int
-	client               *http.Client
-	ctx                  context.Context
-	sourceOptions        grabSourceOptions
-	resources            map[string]*mirroredResource
-	inFlight             map[string]bool
-	selectedResourceURLs map[string]struct{}
-	publicAssetBasePath  string
-	documentURLRewriter  func(string) (string, bool)
-	tracker              *grabProgressTracker
-	progressToken        string
-	foundTotal           int
-	downloadedTotal      int
-	downloadTotal        int
-	downloadTotalBytes   int64
-	downloadedBytesByURL map[string]int64
-	failedTotal          int
-	failedResourceURLs   map[string]struct{}
-	failedResourceErrors map[string]string
+	domain                string
+	pageURL               *url.URL
+	maxDepth              int
+	client                *http.Client
+	ctx                   context.Context
+	sourceOptions         grabSourceOptions
+	resources             map[string]*mirroredResource
+	inFlight              map[string]bool
+	selectedResourceURLs  map[string]struct{}
+	externalResourcesOnly bool
+	publicAssetBasePath   string
+	documentURLRewriter   func(string) (string, bool)
+	tracker               *grabProgressTracker
+	progressToken         string
+	foundTotal            int
+	downloadedTotal       int
+	downloadTotal         int
+	downloadTotalBytes    int64
+	downloadedBytesByURL  map[string]int64
+	failedTotal           int
+	failedResourceURLs    map[string]struct{}
+	failedResourceErrors  map[string]string
 }
 
 type grabReferenceContext = crawler.ReferenceContext
@@ -24172,7 +24198,10 @@ func (spider *pageSpider) rewriteDocumentResourceReference(rawRef string, baseUR
 	if blocked || normalizedURL == "" {
 		return rawRef
 	}
-	if crawler.IsWholeSitePageURLString(normalizedURL) {
+	if spider.externalResourcesOnly {
+		return rawRef
+	}
+	if spider.isSameHostWholeSitePageURL(normalizedURL) {
 		return rawRef
 	}
 	if !spider.shouldPersistResource(normalizedURL) {
@@ -24185,7 +24214,18 @@ func (spider *pageSpider) rewriteDocumentResourceReference(rawRef string, baseUR
 	return crawler.NormalizeMirroredAssetReference(dependency.assetPath)
 }
 
+func (spider *pageSpider) isSameHostWholeSitePageURL(normalizedURL string) bool {
+	parsedURL, err := url.Parse(normalizedURL)
+	if err != nil {
+		return false
+	}
+	return crawler.SameHost(spider.pageURL, parsedURL) && crawler.IsWholeSitePageURL(parsedURL)
+}
+
 func (spider *pageSpider) shouldBlankEmbeddedDocumentReference(tagName, normalizedURL string) bool {
+	if spider.externalResourcesOnly {
+		return false
+	}
 	switch tagName {
 	case "iframe", "embed", "object":
 	default:
@@ -24229,6 +24269,9 @@ func (spider *pageSpider) rewriteResourceReferenceForContext(rawRef string, base
 	if blocked || normalizedURL == "" {
 		return rawRef
 	}
+	if spider.externalResourcesOnly && spider.isPageHostURL(normalizedURL) {
+		return rawRef
+	}
 	if !spider.shouldPersistResource(normalizedURL) {
 		return normalizedURL
 	}
@@ -24239,12 +24282,20 @@ func (spider *pageSpider) rewriteResourceReferenceForContext(rawRef string, base
 	return crawler.NormalizeMirroredAssetReference(dependency.assetPath)
 }
 
+func (spider *pageSpider) isPageHostURL(normalizedURL string) bool {
+	parsedURL, err := url.Parse(normalizedURL)
+	if err != nil || spider.pageURL == nil {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(spider.pageURL.Hostname()), strings.TrimSpace(parsedURL.Hostname()))
+}
+
 func (spider *pageSpider) collectPreviewDocumentResourceReference(rawRef string, baseURL *url.URL, depth int) string {
 	normalizedURL, blocked := spider.normalizeURLForContext(rawRef, baseURL, grabReferenceDocument)
 	if blocked || normalizedURL == "" {
 		return rawRef
 	}
-	if crawler.IsWholeSitePageURLString(normalizedURL) {
+	if spider.isSameHostWholeSitePageURL(normalizedURL) {
 		return rawRef
 	}
 	return spider.collectPreviewResourceReferenceForContext(rawRef, baseURL, depth, grabReferenceDocument)

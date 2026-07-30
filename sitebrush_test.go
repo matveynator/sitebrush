@@ -5651,6 +5651,73 @@ func TestProfilePasswordCodeResendClearsFailedCodeAttempts(t *testing.T) {
 	}
 }
 
+func TestSavePageImportsExternalImageAndKeepsLocalReferences(t *testing.T) {
+	application, rawDB := newTestApplication(t)
+	_, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "admin@example.com", "old")
+	if err != nil {
+		t.Fatalf("insert user: %v", err)
+	}
+
+	imageURL := "https://images.example/render?id=hero"
+	previousGrabHTTPClient := newGrabHTTPClient
+	newGrabHTTPClient = func() *http.Client {
+		return &http.Client{Transport: fakeGrabTransport{responses: map[string]fakeGrabResponse{
+			imageURL: {contentType: "image/png", body: "image-bytes"},
+		}}}
+	}
+	defer func() {
+		newGrabHTTPClient = previousGrabHTTPClient
+	}()
+
+	form := url.Values{}
+	form.Set("path", "/")
+	form.Set("title", "Home")
+	form.Set("html", `<html><body><img src="`+imageURL+`"><img src="/p/existing.png"><iframe src="/preview"></iframe><a href="https://external.example/page">External</a></body></html>`)
+	request := httptest.NewRequest(http.MethodPost, "http://localhost:8080/?save", strings.NewReader(form.Encode()))
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	request.AddCookie(newAdminSessionCookie(t, application, "admin@example.com"))
+	response := httptest.NewRecorder()
+	application.route(response, request)
+	if response.Code != http.StatusFound {
+		t.Fatalf("status = %d, body=%q", response.Code, response.Body.String())
+	}
+
+	var storedHTML string
+	if err := rawDB.QueryRow(`SELECT html FROM pages WHERE domain=? AND path=?`, "localhost", "/").Scan(&storedHTML); err != nil {
+		t.Fatalf("read saved page: %v", err)
+	}
+	if strings.Contains(storedHTML, imageURL) {
+		t.Fatalf("saved page still contains external image URL: %s", storedHTML)
+	}
+	if !strings.Contains(storedHTML, `src="/p/`) || !strings.Contains(storedHTML, `.png"`) {
+		t.Fatalf("saved page does not contain hashed local image URL: %s", storedHTML)
+	}
+	if !strings.Contains(storedHTML, `src="/p/existing.png"`) {
+		t.Fatalf("saved page changed an existing local resource: %s", storedHTML)
+	}
+	if !strings.Contains(storedHTML, `<iframe src="/preview">`) {
+		t.Fatalf("saved page changed a local embedded document: %s", storedHTML)
+	}
+	if !strings.Contains(storedHTML, `href="https://external.example/page"`) {
+		t.Fatalf("saved page changed an external navigation link: %s", storedHTML)
+	}
+
+	storedFiles, listErr := listStoredFiles(application.domainFilesDirForDomain("localhost"))
+	if listErr != nil {
+		t.Fatal(listErr)
+	}
+	if len(storedFiles) != 1 || filepath.Ext(storedFiles[0]) != ".png" {
+		t.Fatalf("stored external image files = %#v, want one png", storedFiles)
+	}
+	storedImage, readErr := os.ReadFile(storedFiles[0])
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if string(storedImage) != "image-bytes" {
+		t.Fatalf("stored external image = %q", storedImage)
+	}
+}
+
 func TestSavePagePropagatesSiteBrushTemplateToOtherPagesAndPublishedOutputs(t *testing.T) {
 	application, rawDB := newTestApplication(t)
 	_, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "admin@example.com", "old")
