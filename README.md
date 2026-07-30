@@ -74,7 +74,7 @@ Linux desktop builds use **GTK 4.1** for newer distributions and **GTK 4.0** for
 Each block below is ready to copy and paste. It automatically selects `amd64` or `arm64`, downloads SiteBrush, makes it executable, and installs the system service.
 
 <details open>
-<summary><img src="https://sitebrush.com/p/04b158d78c93b65c714bb6256da221a490a73a31d1159732fe66604b68a64799.png" alt="Linux" width="28" height="28" align="middle"> <strong>Linux — copy and paste into the terminal</strong></summary>
+<summary><img src="https://sitebrush.com/p/04b158d78c93b65c714bb6256da221a490a73a31d1159732fe66604b68a64799.png" alt="Linux" width="28" align="middle"> <strong>Linux — copy and paste into the terminal</strong></summary>
 
 ```sh
 (
@@ -100,7 +100,7 @@ The installer detects the available Linux service manager and configures automat
 </details>
 
 <details>
-<summary><img src="https://sitebrush.com/p/fbad588e1b8c94b6b80708bc9917706efe4e7b5757c09e0946831b90e3e75722.png" alt="macOS" width="28" height="28" align="middle"> <strong>macOS — Intel and Apple Silicon</strong></summary>
+<summary><img src="https://sitebrush.com/p/fbad588e1b8c94b6b80708bc9917706efe4e7b5757c09e0946831b90e3e75722.png" alt="macOS" width="28" align="middle"> <strong>macOS — Intel and Apple Silicon</strong></summary>
 
 ```sh
 (
@@ -126,7 +126,7 @@ The installer configures SiteBrush as a `launchd` service.
 </details>
 
 <details>
-<summary><img src="https://sitebrush.com/p/66aab89d1af641ee0ae190f6b3ea4e09ba8adae71f979ad315609cd825209c45.png" alt="Windows" width="28" height="28" align="middle"> <strong>Windows — PowerShell as Administrator</strong></summary>
+<summary><img src="https://sitebrush.com/p/66aab89d1af641ee0ae190f6b3ea4e09ba8adae71f979ad315609cd825209c45.png" alt="Windows" width="28" align="middle"> <strong>Windows — PowerShell as Administrator</strong></summary>
 
 Open **PowerShell as Administrator**, then paste:
 
@@ -158,7 +158,7 @@ The installer creates and verifies the Windows service and enables automatic sta
 </details>
 
 <details>
-<summary><img src="https://sitebrush.com/p/c1ce8baa90a2ffd348069e69fa4fda93baa5c431020737bc1f5efd176d5e77e6.png" alt="FreeBSD" width="28" height="28" align="middle"> <strong>FreeBSD — amd64 and arm64</strong></summary>
+<summary><img src="https://sitebrush.com/p/c1ce8baa90a2ffd348069e69fa4fda93baa5c431020737bc1f5efd176d5e77e6.png" alt="FreeBSD" width="28" align="middle"> <strong>FreeBSD — amd64 and arm64</strong></summary>
 
 ```sh
 (
@@ -182,7 +182,7 @@ The installer creates and verifies the Windows service and enables automatic sta
 </details>
 
 <details>
-<summary><img src="https://sitebrush.com/p/e3124d65b5feeb6af8ec8f882b167a35ab8e4cc791701789479d0523394267ba.png" alt="OpenBSD" width="28" height="28" align="middle"> <strong>OpenBSD — amd64 and arm64</strong></summary>
+<summary><img src="https://sitebrush.com/p/e3124d65b5feeb6af8ec8f882b167a35ab8e4cc791701789479d0523394267ba.png" alt="OpenBSD" width="28" align="middle"> <strong>OpenBSD — amd64 and arm64</strong></summary>
 
 ```sh
 (
@@ -208,7 +208,7 @@ Run the commands as `root` when `doas` is not configured.
 </details>
 
 <details>
-<summary><img src="https://sitebrush.com/p/c1ce8baa90a2ffd348069e69fa4fda93baa5c431020737bc1f5efd176d5e77e6.png" alt="NetBSD" width="28" height="28" align="middle"> <strong>NetBSD — amd64 and arm64</strong></summary>
+<summary><img src="https://sitebrush.com/p/c1ce8baa90a2ffd348069e69fa4fda93baa5c431020737bc1f5efd176d5e77e6.png" alt="NetBSD" width="28" align="middle"> <strong>NetBSD — amd64 and arm64</strong></summary>
 
 ```sh
 (
