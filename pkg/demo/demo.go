@@ -14,10 +14,11 @@ import (
 const ResetDelay = 30 * time.Minute
 
 type Settings struct {
-	Domain        string
-	SourceURL     string
-	CopyWholeSite bool
-	Enabled       bool
+	Domain         string
+	SourceURL      string
+	CopyWholeSite  bool
+	Enabled        bool
+	LastRestoredAt string
 }
 
 type Session struct {
@@ -161,6 +162,10 @@ func (store Store) Settings(ctx context.Context) Settings {
 	}
 	settings.CopyWholeSite = settingBool(ctx, store.DB, "demo_site_copy_whole_site", false)
 	settings.Enabled = settingBool(ctx, store.DB, "demo_site_enabled", strings.TrimSpace(settings.Domain) != "")
+	restoredDomain := settingText(ctx, store.DB, "demo_site_last_restored_domain")
+	if strings.EqualFold(restoredDomain, settings.Domain) {
+		settings.LastRestoredAt = settingText(ctx, store.DB, "demo_site_last_restored_at")
+	}
 	return settings
 }
 
@@ -226,6 +231,35 @@ func (store Store) ScheduleSessionReset(ctx context.Context, sessionToken string
 	_, err := store.DB.ExecContext(ctx, `UPDATE demo_site_sessions SET status='deleting',delete_after=? WHERE session_token=? AND status='active'`,
 		resetAfter.UTC().Format(time.RFC3339), sessionToken)
 	return err
+}
+
+func (store Store) MarkContentRestored(ctx context.Context, domain string, restoredAt time.Time) error {
+	domain = strings.TrimSpace(domain)
+	if domain == "" {
+		return fmt.Errorf("demo domain is required")
+	}
+	if restoredAt.IsZero() {
+		restoredAt = time.Now()
+	}
+	updatedAt := time.Now().UTC().Format(time.RFC3339)
+	transaction, err := store.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	for _, setting := range []struct {
+		name  string
+		value string
+	}{
+		{name: "demo_site_last_restored_domain", value: domain},
+		{name: "demo_site_last_restored_at", value: restoredAt.UTC().Format(time.RFC3339)},
+	} {
+		if _, err = transaction.ExecContext(ctx, `INSERT INTO server_settings(name,value,updated_at) VALUES(?,?,?) ON CONFLICT(name) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at`,
+			setting.name, setting.value, updatedAt); err != nil {
+			_ = transaction.Rollback()
+			return err
+		}
+	}
+	return transaction.Commit()
 }
 
 func (store Store) Sessions(ctx context.Context) []Session {

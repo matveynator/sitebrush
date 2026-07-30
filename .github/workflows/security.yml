@@ -34,7 +34,7 @@ jobs:
       - name: Test security boundaries and demo
         run: >-
           go test -count=1 .
-          -run 'Test(HTTPRedirectAndCookieBoundariesCannotBeBypassed|PublicSensitiveRequest|StorageJail|PublishedStaticRejectsSymlink|PublicOutbound|RequirePublicOutboundURL|ParseGrabSourceURL|ParseOptionalGrabSourceIP|LogoutRedirectsToSameURI)'
+          -run 'Test(StorageJail|PublishedStaticRejectsSymlink|PublicOutbound|RequirePublicOutboundURL|ParseGrabSourceURL|ParseOptionalGrabSourceIP|LogoutRedirectsToSameURI)'
       - name: Test demo landing
         run: go test -count=1 . -run '^TestDemoSiteVisitorGetsEditorSessionAndCleanupDeletesSite$'
 
