@@ -4004,6 +4004,24 @@ func TestDemoSiteVisitorGetsEditorSessionAndCleanupDeletesSite(t *testing.T) {
 		t.Fatalf("prepare demo site: %v", err)
 	}
 
+	// A partial or old snapshot must not mark the demo ready without its landing page.
+	demoContext := contextWithDomain(context.Background(), "demo.example")
+	if _, err := application.db.ExecContext(demoContext, `DELETE FROM pages WHERE domain=? AND path='/'`, "demo.example"); err != nil {
+		t.Fatalf("delete demo landing page: %v", err)
+	}
+	if _, err := application.db.ExecContext(demoContext, `INSERT OR REPLACE INTO pages(domain,path,title,html,published) VALUES(?,?,?,?,1)`, "demo.example", "/orphan", "Orphan", "<h1>Orphan</h1>"); err != nil {
+		t.Fatalf("create orphan demo page: %v", err)
+	}
+	if err := application.createDemoSiteSnapshot(context.Background(), "demo.example"); err != nil {
+		t.Fatalf("create partial demo snapshot: %v", err)
+	}
+	if _, _, err := application.ensureDemoSiteReady(context.Background(), controlDB, demoSettings, false, ""); err != nil {
+		t.Fatalf("repair demo landing page: %v", err)
+	}
+	if !application.demoSiteHasLandingPage(context.Background(), "demo.example") {
+		t.Fatal("demo landing page was not repaired")
+	}
+
 	request := httptest.NewRequest(http.MethodGet, "http://demo.example/", nil)
 	request = request.WithContext(contextWithDomain(request.Context(), "demo.example"))
 	response := httptest.NewRecorder()
@@ -4027,6 +4045,18 @@ func TestDemoSiteVisitorGetsEditorSessionAndCleanupDeletesSite(t *testing.T) {
 	}
 	if sessionCookie == nil || strings.TrimSpace(sessionCookie.Value) == "" {
 		t.Fatalf("demo session cookie missing in %#v", cookies)
+	}
+
+	landingRequest := httptest.NewRequest(http.MethodGet, "http://demo.example/", nil)
+	landingRequest = landingRequest.WithContext(contextWithDomain(landingRequest.Context(), "demo.example"))
+	landingRequest.AddCookie(sessionCookie)
+	landingResponse := httptest.NewRecorder()
+	application.route(landingResponse, landingRequest)
+	if landingResponse.Code != http.StatusOK {
+		t.Fatalf("demo landing status = %d, body=%q", landingResponse.Code, landingResponse.Body.String())
+	}
+	if !strings.Contains(landingResponse.Body.String(), "External Demo") {
+		t.Fatalf("demo landing content missing after redirect: %s", landingResponse.Body.String())
 	}
 
 	siteDatabasePath := filepath.Join(siteDatabaseRootPath(application.serverControlDBPath()), domainStorageName("demo.example")+".db")

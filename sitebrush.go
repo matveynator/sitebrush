@@ -7237,7 +7237,7 @@ func (a *App) loadDemoSiteRuntimeState(ctx context.Context) demoSiteRuntimeState
 		return demoSiteRuntimeState{Settings: settings, Status: "error", Error: "server owner site cannot be used as the public demo site"}
 	}
 	adminEmail, hasAdmin := a.firstAdminEmailForDomain(ctx, settings.Domain)
-	if hasAdmin && a.demoSiteHasPages(ctx, settings.Domain) && a.demoSiteSnapshotAvailable(settings.Domain) {
+	if hasAdmin && a.demoSiteHasLandingPage(ctx, settings.Domain) && a.demoSiteSnapshotAvailable(settings.Domain) {
 		return demoSiteRuntimeState{Settings: settings, AdminEmail: adminEmail, Status: "ready"}
 	}
 	return demoSiteRuntimeState{Settings: settings, Status: "preparing"}
@@ -7453,19 +7453,15 @@ func (a *App) ensureDemoSiteReady(ctx context.Context, controlDatabase *sql.DB, 
 			return "", 0, err
 		}
 	}
-	if refreshSnapshot || !a.demoSiteHasPages(ctx, domain) {
+	if refreshSnapshot || !a.demoSiteHasLandingPage(ctx, domain) {
 		if !refreshSnapshot {
-			if err := a.restoreDemoSiteFromSnapshot(ctx, controlDatabase, domain); err == nil {
+			restoreErr := a.restoreDemoSiteFromSnapshot(ctx, controlDatabase, domain)
+			if restoreErr == nil && a.demoSiteHasLandingPage(ctx, domain) {
 				return adminEmail, 0, nil
 			}
 		}
-		if refreshSnapshot {
-			if err := a.clearDemoSiteContent(ctx, domain); err != nil {
-				return "", 0, err
-			}
-		}
-		if !refreshSnapshot && a.demoSiteHasPages(ctx, domain) {
-			return adminEmail, 0, nil
+		if err := a.clearDemoSiteContent(ctx, domain); err != nil {
+			return "", 0, err
 		}
 		failedTotal := 0
 		if settings.SourceURL != "" {
@@ -7477,6 +7473,9 @@ func (a *App) ensureDemoSiteReady(ctx context.Context, controlDatabase *sql.DB, 
 			failedTotal = seedFailedTotal
 		} else {
 			a.createDemoWelcomePage(ctx, domain)
+		}
+		if !a.demoSiteHasLandingPage(ctx, domain) {
+			return "", 0, fmt.Errorf("demo landing page was not created")
 		}
 		if err := a.createDemoSiteSnapshot(ctx, domain); err != nil {
 			log.Printf("demo site snapshot failed domain=%s error=%v", domain, err)
@@ -7493,9 +7492,9 @@ func (a *App) firstAdminEmailForDomain(ctx context.Context, domain string) (stri
 	return email, err == nil && email != ""
 }
 
-func (a *App) demoSiteHasPages(ctx context.Context, domain string) bool {
+func (a *App) demoSiteHasLandingPage(ctx context.Context, domain string) bool {
 	var pageCount int
-	_ = a.db.QueryRowContext(contextWithDomain(ctx, domain), `SELECT COUNT(1) FROM pages WHERE domain=?`, domain).Scan(&pageCount)
+	_ = a.db.QueryRowContext(contextWithDomain(ctx, domain), `SELECT COUNT(1) FROM pages WHERE domain=? AND path='/'`, domain).Scan(&pageCount)
 	return pageCount > 0
 }
 
