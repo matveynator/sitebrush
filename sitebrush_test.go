@@ -4676,7 +4676,11 @@ func TestGuestProtectedStaticRouteUsesPrefixFileWithoutDatabase(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(prefixFilePath), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	rule := PagePasswordRule{Domain: "localhost", Path: "/passport", PasswordHash: dirprotect.Hash("secret")}
+	passwordHash, hashErr := dirprotect.Hash("secret")
+	if hashErr != nil {
+		t.Fatalf("hash password: %v", hashErr)
+	}
+	rule := PagePasswordRule{Domain: "localhost", Path: "/passport", PasswordHash: passwordHash}
 	if err := os.WriteFile(prefixFilePath, []byte(rule.Path+"\t"+rule.PasswordHash+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -4737,7 +4741,11 @@ func TestGuestProtectedStaticRouteUsesPrefixFileWithoutDatabase(t *testing.T) {
 }
 
 func TestPagePasswordSessionFollowsClientIPAddress(t *testing.T) {
-	rule := PagePasswordRule{Domain: "localhost", Path: "/passport", PasswordHash: dirprotect.Hash("secret")}
+	passwordHash, hashErr := dirprotect.Hash("secret")
+	if hashErr != nil {
+		t.Fatalf("hash password: %v", hashErr)
+	}
+	rule := PagePasswordRule{Domain: "localhost", Path: "/passport", PasswordHash: passwordHash}
 	issuedAt := time.Now().UTC().Add(-time.Minute)
 	originalRequest := httptest.NewRequest(http.MethodGet, "http://localhost:8080/passport", nil)
 	originalRequest.RemoteAddr = "198.51.100.42:1234"

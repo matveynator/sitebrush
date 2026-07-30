@@ -1,13 +1,16 @@
 package dirprotect
 
 import (
+	"crypto/hmac"
 	"crypto/sha256"
-	"crypto/subtle"
 	"fmt"
+	"hash/fnv"
 	"path"
 	"strconv"
 	"strings"
 	"time"
+
+	"golang.org/x/crypto/bcrypt"
 )
 
 type Rule struct {
@@ -40,18 +43,29 @@ func HasProtectedPrefix(pagePath, protectedPrefix string) bool {
 	return pagePath == protectedPrefix || strings.HasPrefix(pagePath, protectedPrefix+"/")
 }
 
-func Hash(password string) string {
-	hashedBytes := sha256.Sum256([]byte("sitebrush page password\n" + password))
-	return fmt.Sprintf("sha256:%x", hashedBytes)
+func Hash(password string) (string, error) {
+	hashedBytes, err := bcrypt.GenerateFromPassword(passwordPrehash(password), bcrypt.DefaultCost)
+	if err != nil {
+		return "", fmt.Errorf("hash page password: %w", err)
+	}
+	return string(hashedBytes), nil
 }
 
 func Matches(storedHash, password string) bool {
-	return strings.TrimSpace(storedHash) == Hash(password)
+	err := bcrypt.CompareHashAndPassword([]byte(strings.TrimSpace(storedHash)), passwordPrehash(password))
+	return err == nil
+}
+
+func passwordPrehash(password string) []byte {
+	prehash := hmac.New(sha256.New, []byte("sitebrush page password bcrypt prehash v1"))
+	_, _ = prehash.Write([]byte(password))
+	return prehash.Sum(nil)
 }
 
 func CookieName(domain, pagePath string) string {
-	hashedBytes := sha256.Sum256([]byte(NormalizeDomain(domain) + "\n" + CleanPath(pagePath)))
-	return "sitebrush_page_password_" + fmt.Sprintf("%x", hashedBytes)[:16]
+	cookieIdentifier := fnv.New64a()
+	_, _ = cookieIdentifier.Write([]byte(NormalizeDomain(domain) + "\n" + CleanPath(pagePath)))
+	return "sitebrush_page_password_" + fmt.Sprintf("%016x", cookieIdentifier.Sum64())
 }
 
 func BoundSessionToken(rule Rule, clientIP, userAgent string, issuedAt time.Time) string {
@@ -80,7 +94,7 @@ func BoundSessionTokenValid(rule Rule, token, clientIP, userAgent string, now ti
 		return false
 	}
 	expectedToken := BoundSessionToken(rule, clientIP, userAgent, issuedAt)
-	return subtle.ConstantTimeCompare([]byte(expectedToken), []byte(strings.TrimSpace(token))) == 1
+	return hmac.Equal([]byte(expectedToken), []byte(strings.TrimSpace(token)))
 }
 
 func FailureDomain(domain, pagePath string) string {
@@ -171,13 +185,13 @@ func NormalizeDomain(domain string) string {
 }
 
 func boundSessionSignature(rule Rule, clientIP string, issuedUnix int64) string {
-	hashedBytes := sha256.Sum256([]byte(strings.Join([]string{
+	signature := hmac.New(sha256.New, []byte(strings.TrimSpace(rule.PasswordHash)))
+	_, _ = signature.Write([]byte(strings.Join([]string{
 		"sitebrush page password session v2",
 		NormalizeDomain(rule.Domain),
 		CleanPath(rule.Path),
-		strings.TrimSpace(rule.PasswordHash),
 		strings.TrimSpace(clientIP),
 		strconv.FormatInt(issuedUnix, 10),
 	}, "\n")))
-	return fmt.Sprintf("%x", hashedBytes)
+	return fmt.Sprintf("%x", signature.Sum(nil))
 }

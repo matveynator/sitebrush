@@ -21,7 +21,9 @@ func SQLSummary(query string) string {
 }
 
 func SafeLogValue(rawValue string) string {
-	cleanValue := strings.TrimSpace(rawValue)
+	cleanValue := strings.ReplaceAll(rawValue, "\r", "")
+	cleanValue = strings.ReplaceAll(cleanValue, "\n", "")
+	cleanValue = strings.TrimSpace(cleanValue)
 	if cleanValue == "" {
 		return "-"
 	}

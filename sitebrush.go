@@ -1188,36 +1188,44 @@ func siteDBWorkloadName(kind siteDBWorkloadKind) string {
 }
 
 func (db *siteFileDatabase) logDatabaseOperationWaiting(stage string, operation siteDBOperation, duration time.Duration) {
-	log.Printf("%sDB WORKER%s waiting stage=%s path=%s domain=%s kind=%s duration=%s queues=write:%d,read:%d,general:%d sql=%q",
-		terminalYellow(), terminalReset(), stage, db.path, domainFromContext(operation.ctx), siteDBWorkloadName(operation.kind), duration.String(),
-		len(db.writeQueue), len(db.readQueue), len(db.generalQueue), diagnosticlog.SQLSummary(operation.query))
+	log.Printf("%sDB WORKER%s waiting stage=%s path=%s domain=%s kind=%s duration=%s queues=write:%d,read:%d,general:%d",
+		terminalYellow(), terminalReset(), diagnosticlog.SafeLogValue(stage), diagnosticlog.SafeLogValue(db.path),
+		diagnosticlog.SafeLogValue(domainFromContext(operation.ctx)), siteDBWorkloadName(operation.kind), duration.String(),
+		len(db.writeQueue), len(db.readQueue), len(db.generalQueue))
 }
 
 func (db *siteFileDatabase) logDatabaseOperationFinished(operation siteDBOperation, duration time.Duration, err error) {
 	status := "ok"
 	logColor := terminalCyan()
 	if err != nil {
-		status = err.Error()
+		status = diagnosticlog.SafeLogValue(err.Error())
 		logColor = terminalRed()
 	}
-	log.Printf("%sDB WORKER%s operation finished path=%s domain=%s kind=%s duration=%s status=%q sql=%q",
-		logColor, terminalReset(), db.path, domainFromContext(operation.ctx), siteDBWorkloadName(operation.kind), duration.String(), status, diagnosticlog.SQLSummary(operation.query))
+	log.Printf("%sDB WORKER%s operation finished path=%s domain=%s kind=%s duration=%s status=%q",
+		logColor, terminalReset(), diagnosticlog.SafeLogValue(db.path), diagnosticlog.SafeLogValue(domainFromContext(operation.ctx)),
+		siteDBWorkloadName(operation.kind), duration.String(), status)
 }
 
 func (db *siteFileDatabase) logDatabaseOperationResponse(operation siteDBOperation, duration time.Duration, err error) {
 	status := "ok"
 	logColor := terminalCyan()
 	if err != nil {
-		status = err.Error()
+		status = diagnosticlog.SafeLogValue(err.Error())
 		logColor = terminalRed()
 	}
-	log.Printf("%sDB WORKER%s response delivered path=%s domain=%s kind=%s duration=%s status=%q sql=%q",
-		logColor, terminalReset(), db.path, domainFromContext(operation.ctx), siteDBWorkloadName(operation.kind), duration.String(), status, diagnosticlog.SQLSummary(operation.query))
+	log.Printf("%sDB WORKER%s response delivered path=%s domain=%s kind=%s duration=%s status=%q",
+		logColor, terminalReset(), diagnosticlog.SafeLogValue(db.path), diagnosticlog.SafeLogValue(domainFromContext(operation.ctx)),
+		siteDBWorkloadName(operation.kind), duration.String(), status)
 }
 
 func (db *siteFileDatabase) logDatabaseOperationCanceled(operation siteDBOperation) {
-	log.Printf("%sDB WORKER%s operation skipped path=%s domain=%s kind=%s status=%q sql=%q",
-		terminalYellow(), terminalReset(), db.path, domainFromContext(operation.ctx), siteDBWorkloadName(operation.kind), operation.ctx.Err(), diagnosticlog.SQLSummary(operation.query))
+	status := "-"
+	if operation.ctx.Err() != nil {
+		status = diagnosticlog.SafeLogValue(operation.ctx.Err().Error())
+	}
+	log.Printf("%sDB WORKER%s operation skipped path=%s domain=%s kind=%s status=%q",
+		terminalYellow(), terminalReset(), diagnosticlog.SafeLogValue(db.path), diagnosticlog.SafeLogValue(domainFromContext(operation.ctx)),
+		siteDBWorkloadName(operation.kind), status)
 }
 
 // perSiteDBRouter resolves a separate sqlite file per domain and keeps the map
@@ -1736,14 +1744,17 @@ func (r *perSiteDBRouter) QueryRowContext(ctx context.Context, query string, arg
 	database, err := r.databaseForContext(ctx)
 	if err != nil {
 		if r.debug {
-			log.Printf("%sDB ROUTER%s query-row fallback domain=%s err=%v sql=%q", terminalYellow(), terminalReset(), domainFromContext(ctx), err, diagnosticlog.SQLSummary(query))
+			log.Printf("%sDB ROUTER%s query-row fallback domain=%s err=%s",
+				terminalYellow(), terminalReset(), diagnosticlog.SafeLogValue(domainFromContext(ctx)), diagnosticlog.SafeLogValue(err.Error()))
 		}
 		return r.noopDatabase.QueryRowContext(ctx, `SELECT 1 WHERE 0`)
 	}
 	row, err := database.QueryRowContext(ctx, query, args...)
 	if err != nil {
 		if r.debug {
-			log.Printf("%sDB ROUTER%s query-row fallback domain=%s path=%s err=%v sql=%q", terminalYellow(), terminalReset(), domainFromContext(ctx), database.path, err, diagnosticlog.SQLSummary(query))
+			log.Printf("%sDB ROUTER%s query-row fallback domain=%s path=%s err=%s",
+				terminalYellow(), terminalReset(), diagnosticlog.SafeLogValue(domainFromContext(ctx)),
+				diagnosticlog.SafeLogValue(database.path), diagnosticlog.SafeLogValue(err.Error()))
 		}
 		return r.noopDatabase.QueryRowContext(ctx, `SELECT 1 WHERE 0`)
 	}
@@ -1782,10 +1793,13 @@ func (r *perSiteDBRouter) databaseForContext(ctx context.Context) (*siteFileData
 		case r.requests <- request:
 			sent = true
 		case <-ctx.Done():
-			log.Printf("%sDB ROUTER%s request canceled before send domain=%s duration=%s err=%v", terminalYellow(), terminalReset(), domain, time.Since(sendStartedAt).String(), ctx.Err())
+			log.Printf("%sDB ROUTER%s request canceled before send domain=%s duration=%s err=%s",
+				terminalYellow(), terminalReset(), diagnosticlog.SafeLogValue(domain), time.Since(sendStartedAt).String(),
+				diagnosticlog.SafeLogValue(ctx.Err().Error()))
 			return nil, ctx.Err()
 		case <-sendTimer.C:
-			log.Printf("%sDB ROUTER%s waiting stage=send domain=%s duration=%s", terminalYellow(), terminalReset(), domain, time.Since(sendStartedAt).String())
+			log.Printf("%sDB ROUTER%s waiting stage=send domain=%s duration=%s",
+				terminalYellow(), terminalReset(), diagnosticlog.SafeLogValue(domain), time.Since(sendStartedAt).String())
 			sendTimer.Reset(slowDatabaseOperationRepeatAfter)
 		}
 	}
@@ -1796,12 +1810,15 @@ func (r *perSiteDBRouter) databaseForContext(ctx context.Context) (*siteFileData
 	for {
 		select {
 		case <-ctx.Done():
-			log.Printf("%sDB ROUTER%s request canceled while waiting domain=%s duration=%s err=%v", terminalYellow(), terminalReset(), domain, time.Since(waitStartedAt).String(), ctx.Err())
+			log.Printf("%sDB ROUTER%s request canceled while waiting domain=%s duration=%s err=%s",
+				terminalYellow(), terminalReset(), diagnosticlog.SafeLogValue(domain), time.Since(waitStartedAt).String(),
+				diagnosticlog.SafeLogValue(ctx.Err().Error()))
 			return nil, ctx.Err()
 		case next := <-response:
 			return next.db, next.err
 		case <-waitTimer.C:
-			log.Printf("%sDB ROUTER%s waiting stage=response domain=%s duration=%s", terminalYellow(), terminalReset(), domain, time.Since(waitStartedAt).String())
+			log.Printf("%sDB ROUTER%s waiting stage=response domain=%s duration=%s",
+				terminalYellow(), terminalReset(), diagnosticlog.SafeLogValue(domain), time.Since(waitStartedAt).String())
 			waitTimer.Reset(slowDatabaseOperationRepeatAfter)
 		}
 	}
@@ -2411,16 +2428,20 @@ func (a *App) accessLogMiddleware(next http.Handler) http.Handler {
 			colorReset  = "\033[0m"
 		)
 		startedAt := time.Now()
-		requestDomain := requestLogDomain(r)
+		requestDomain := diagnosticlog.SafeLogValue(requestLogDomain(r))
+		requestMethod := diagnosticlog.SafeLogValue(r.Method)
+		requestPath := diagnosticlog.SafeLogValue(r.URL.Path)
+		requestQuery := diagnosticlog.SafeLogValue(r.URL.RawQuery)
+		requestRemoteAddress := diagnosticlog.SafeLogValue(r.RemoteAddr)
 		if a.debug {
 			requestFields := requestDiagnosticFields{
-				Scheme: requestScheme(r),
+				Scheme: diagnosticlog.SafeLogValue(requestScheme(r)),
 				Host:   diagnosticlog.SafeLogValue(r.Host),
 				Domain: requestDomain,
-				Method: r.Method,
-				Path:   r.URL.Path,
-				Query:  diagnosticlog.SafeLogValue(r.URL.RawQuery),
-				Remote: r.RemoteAddr,
+				Method: requestMethod,
+				Path:   requestPath,
+				Query:  requestQuery,
+				Remote: requestRemoteAddress,
 			}
 			done := make(chan struct{})
 			log.Printf("%sREQUEST [%s]%s started scheme=%s host=%s method=%s path=%s query=%s remote=%s",
@@ -2451,12 +2472,16 @@ func (a *App) accessLogMiddleware(next http.Handler) http.Handler {
 		}
 		duration := time.Since(startedAt)
 		if strings.TrimSpace(r.URL.RawQuery) == "" {
-			log.Printf("%s%s [%s]%s method=%s path=%s status=%d remote=%s duration=%s", logColor, logType, requestDomain, colorReset, r.Method, r.URL.Path, writer.statusCode, r.RemoteAddr, duration.String())
-			a.writeDomainLog(requestDomain, "%s [%s] method=%s path=%s status=%d remote=%s duration=%s", logType, requestDomain, r.Method, r.URL.Path, writer.statusCode, r.RemoteAddr, duration.String())
+			log.Printf("%s%s [%s]%s method=%s path=%s status=%d remote=%s duration=%s",
+				logColor, logType, requestDomain, colorReset, requestMethod, requestPath, writer.statusCode, requestRemoteAddress, duration.String())
+			a.writeDomainLog(requestDomain, "%s [%s] method=%s path=%s status=%d remote=%s duration=%s",
+				logType, requestDomain, requestMethod, requestPath, writer.statusCode, requestRemoteAddress, duration.String())
 			return
 		}
-		log.Printf("%s%s [%s]%s method=%s path=%s query=%s status=%d remote=%s duration=%s", logColor, logType, requestDomain, colorReset, r.Method, r.URL.Path, r.URL.RawQuery, writer.statusCode, r.RemoteAddr, duration.String())
-		a.writeDomainLog(requestDomain, "%s [%s] method=%s path=%s query=%s status=%d remote=%s duration=%s", logType, requestDomain, r.Method, r.URL.Path, r.URL.RawQuery, writer.statusCode, r.RemoteAddr, duration.String())
+		log.Printf("%s%s [%s]%s method=%s path=%s query=%s status=%d remote=%s duration=%s",
+			logColor, logType, requestDomain, colorReset, requestMethod, requestPath, requestQuery, writer.statusCode, requestRemoteAddress, duration.String())
+		a.writeDomainLog(requestDomain, "%s [%s] method=%s path=%s query=%s status=%d remote=%s duration=%s",
+			logType, requestDomain, requestMethod, requestPath, requestQuery, writer.statusCode, requestRemoteAddress, duration.String())
 	})
 }
 
@@ -2500,7 +2525,8 @@ func (a *App) writeDomainLog(domain string, format string, args ...any) {
 	if cleanDomain == "" {
 		cleanDomain = "localhost"
 	}
-	message := fmt.Sprintf(format, args...)
+	cleanDomain = diagnosticlog.SafeLogValue(cleanDomain)
+	message := diagnosticlog.SafeLogValue(fmt.Sprintf(format, args...))
 	if a.domainLogEvents == nil {
 		return
 	}
@@ -2508,7 +2534,7 @@ func (a *App) writeDomainLog(domain string, format string, args ...any) {
 	select {
 	case a.domainLogEvents <- event:
 	default:
-		log.Printf("domain log queue is full, skipped log for %s: %s", cleanDomain, message)
+		log.Printf("domain log queue is full, skipped log for domain=%s", cleanDomain)
 	}
 }
 
@@ -2517,7 +2543,8 @@ func (a *App) logDomainEvent(domain string, format string, args ...any) {
 	if cleanDomain == "" {
 		cleanDomain = "localhost"
 	}
-	message := fmt.Sprintf(format, args...)
+	cleanDomain = diagnosticlog.SafeLogValue(cleanDomain)
+	message := diagnosticlog.SafeLogValue(fmt.Sprintf(format, args...))
 	log.Printf("domain=%s %s", cleanDomain, message)
 	a.writeDomainLog(cleanDomain, "%s", message)
 }
@@ -2559,6 +2586,8 @@ func (a *App) drainDomainLogEvents(events <-chan domainLogEvent) {
 }
 
 func (a *App) appendDomainLogEvent(event domainLogEvent) {
+	event.Domain = diagnosticlog.SafeLogValue(event.Domain)
+	event.Message = diagnosticlog.SafeLogValue(event.Message)
 	logDir := a.domainLogDir(event.Domain)
 	if err := a.mkdirAllInsideStorage(logDir, 0o755); err != nil {
 		log.Printf("failed to create domain log dir for %s: %v", event.Domain, err)
@@ -2611,7 +2640,7 @@ func (a *App) cleanupOldDomainLogs(domain string, now time.Time) {
 }
 
 func (a *App) logProblemEvent(format string, args ...any) {
-	message := fmt.Sprintf(format, args...)
+	message := diagnosticlog.SafeLogValue(fmt.Sprintf(format, args...))
 	log.Printf("PROBLEM %s", message)
 	a.appendProblemLogEvent(time.Now().UTC(), message)
 }
@@ -2620,6 +2649,7 @@ func (a *App) appendProblemLogEvent(occurredAt time.Time, message string) {
 	if occurredAt.IsZero() {
 		occurredAt = time.Now().UTC()
 	}
+	message = diagnosticlog.SafeLogValue(message)
 	logDir := a.problemLogDir()
 	if err := a.mkdirAllInsideStorage(logDir, 0o755); err != nil {
 		log.Printf("failed to create problem log dir: %v", err)
@@ -5916,7 +5946,8 @@ func (a *App) migrate(ctx context.Context) error {
 	if schemaVersion >= currentSiteDatabaseSchemaVersion && schemaComplete {
 		a.migrateLoopbackDomainsToLocalhost(ctx)
 		if a.debug {
-			log.Printf("%sDB MIGRATION%s skipped domain=%s version=%d", terminalCyan(), terminalReset(), domainFromContext(ctx), schemaVersion)
+			log.Printf("%sDB MIGRATION%s skipped domain=%s version=%d",
+				terminalCyan(), terminalReset(), diagnosticlog.SafeLogValue(domainFromContext(ctx)), schemaVersion)
 		}
 		return nil
 	}
@@ -7531,7 +7562,9 @@ func (a *App) ensureDemoSiteReady(ctx context.Context, controlDatabase *sql.DB, 
 		if settings.SourceURL != "" {
 			seedFailedTotal, err := a.seedDemoSiteContent(ctx, domain, settings, progressToken)
 			if err != nil {
-				log.Printf("demo site source import failed domain=%s source=%s error=%v", domain, settings.SourceURL, err)
+				log.Printf("demo site source import failed domain=%s source=%s error=%s",
+					diagnosticlog.SafeLogValue(domain), diagnosticlog.SafeLogValue(settings.SourceURL),
+					diagnosticlog.SafeLogValue(err.Error()))
 				return "", 0, err
 			}
 			failedTotal = seedFailedTotal
@@ -7542,7 +7575,8 @@ func (a *App) ensureDemoSiteReady(ctx context.Context, controlDatabase *sql.DB, 
 			return "", 0, fmt.Errorf("demo landing page was not created")
 		}
 		if err := a.createDemoSiteSnapshot(ctx, domain); err != nil {
-			log.Printf("demo site snapshot failed domain=%s error=%v", domain, err)
+			log.Printf("demo site snapshot failed domain=%s error=%s",
+				diagnosticlog.SafeLogValue(domain), diagnosticlog.SafeLogValue(err.Error()))
 		}
 		return adminEmail, failedTotal, nil
 	}
@@ -7850,7 +7884,8 @@ func (a *App) retryDemoFailedResources(ctx context.Context, settings demo.Settin
 	a.applyRetriedResourcePageReplacements(domainContext, settings.Domain, replacements)
 	a.rebuildDomainStorageUsage(domainContext, settings.Domain)
 	if snapshotErr := a.createDemoSiteSnapshot(ctx, settings.Domain); snapshotErr != nil {
-		log.Printf("demo site retry snapshot failed domain=%s error=%v", settings.Domain, snapshotErr)
+		log.Printf("demo site retry snapshot failed domain=%s error=%s",
+			diagnosticlog.SafeLogValue(settings.Domain), diagnosticlog.SafeLogValue(snapshotErr.Error()))
 	}
 	if a.grabTracker != nil && progressToken != "" {
 		stage := "done"
@@ -8090,7 +8125,7 @@ func (a *App) scheduleDemoSiteDeletionForLogout(r *http.Request) {
 	if err := a.enqueueDemoSessionEvent(r.Context(), demoSessionEvent{
 		kind: "logout", sessionToken: cookie.Value, resetAfter: time.Now().Add(demo.ResetDelay),
 	}); err != nil {
-		log.Printf("demo site deletion schedule failed token=%s error=%v", diagnosticlog.SafeLogValue(cookie.Value), err)
+		log.Printf("demo site deletion schedule failed error=%s", diagnosticlog.SafeLogValue(err.Error()))
 	}
 }
 
@@ -14805,7 +14840,8 @@ func (a *App) applyLatestActiveRevision(ctx context.Context, domain string, page
 		publishedStaticDelta = newHTMLBytes - a.fileSizeInsideStorage(filepath.Join(a.domainStaticDir(domain), staticRelativePathForPage(pagePath)))
 	}
 	if storageErr := a.applyDomainStorageDelta(ctx, domain, pageDelta, publishedPageDelta, 0, 0, publishedStaticDelta); storageErr != nil {
-		log.Printf("restore blocked by storage limit domain=%s path=%s error=%v", domain, pagePath, storageErr)
+		log.Printf("restore blocked by storage limit domain=%s path=%s error=%s",
+			diagnosticlog.SafeLogValue(domain), diagnosticlog.SafeLogValue(pagePath), diagnosticlog.SafeLogValue(storageErr.Error()))
 		return
 	}
 	a.clearPageRedirectSource(ctx, domain, pagePath)
@@ -15469,14 +15505,21 @@ func (a *App) enqueueServiceEmail(ctx context.Context, r *http.Request, codeKind
 	}
 	relayURL, err := a.sendServiceMailThroughRelayChain(ctx, route, &request)
 	if err != nil {
-		log.Printf("service mail relay failed domain=%s relay=%s kind=%s to=%s reason=%s error=%v", domain, route.primaryRelayURL(), codeKind, recipient, route.Reason, err)
+		log.Printf("service mail relay failed domain=%s relay=%s kind=%s recipient_domain=%s reason=%s error=%s",
+			diagnosticlog.SafeLogValue(domain), diagnosticlog.SafeLogValue(route.primaryRelayURL()),
+			diagnosticlog.SafeLogValue(codeKind), diagnosticlog.SafeLogValue(emailAddressDomain(recipient)),
+			diagnosticlog.SafeLogValue(route.Reason), diagnosticlog.SafeLogValue(err.Error()))
 		if !a.serviceMailLocalFallbackAllowed(ctx, domain, languageCode) {
 			return fmt.Errorf("service mail relay failed and local SMTP fallback is not configured: %w", err)
 		}
-		log.Printf("service mail local SMTP fallback used domain=%s kind=%s to=%s", domain, codeKind, recipient)
+		log.Printf("service mail local SMTP fallback used domain=%s kind=%s recipient_domain=%s",
+			diagnosticlog.SafeLogValue(domain), diagnosticlog.SafeLogValue(codeKind),
+			diagnosticlog.SafeLogValue(emailAddressDomain(recipient)))
 		return a.enqueueEmail(ctx, message)
 	}
-	log.Printf("service mail relayed domain=%s relay=%s kind=%s to=%s reason=%s", domain, relayURL, codeKind, recipient, route.Reason)
+	log.Printf("service mail relayed domain=%s relay=%s kind=%s recipient_domain=%s reason=%s",
+		diagnosticlog.SafeLogValue(domain), diagnosticlog.SafeLogValue(relayURL), diagnosticlog.SafeLogValue(codeKind),
+		diagnosticlog.SafeLogValue(emailAddressDomain(recipient)), diagnosticlog.SafeLogValue(route.Reason))
 	return nil
 }
 
@@ -15505,18 +15548,25 @@ func (a *App) sendServiceEmailNow(ctx context.Context, r *http.Request, codeKind
 	relayURL, err := a.sendServiceMailThroughRelayChain(sendCtx, route, &request)
 	if err != nil {
 		warning := fmt.Sprintf("service mail relay failed (%s); fallback to local SMTP", err.Error())
-		log.Printf("service mail relay failed domain=%s relay=%s kind=%s to=%s reason=%s error=%v", domain, route.primaryRelayURL(), codeKind, recipient, route.Reason, err)
+		log.Printf("service mail relay failed domain=%s relay=%s kind=%s recipient_domain=%s reason=%s error=%s",
+			diagnosticlog.SafeLogValue(domain), diagnosticlog.SafeLogValue(route.primaryRelayURL()),
+			diagnosticlog.SafeLogValue(codeKind), diagnosticlog.SafeLogValue(emailAddressDomain(recipient)),
+			diagnosticlog.SafeLogValue(route.Reason), diagnosticlog.SafeLogValue(err.Error()))
 		if !a.serviceMailLocalFallbackAllowed(ctx, domain, languageCode) {
 			return emailDeliveryResult{Message: message, Err: fmt.Errorf("service mail relay failed and local SMTP fallback is not configured: %w", err)}
 		}
-		log.Printf("service mail local SMTP fallback used domain=%s kind=%s to=%s", domain, codeKind, recipient)
+		log.Printf("service mail local SMTP fallback used domain=%s kind=%s recipient_domain=%s",
+			diagnosticlog.SafeLogValue(domain), diagnosticlog.SafeLogValue(codeKind),
+			diagnosticlog.SafeLogValue(emailAddressDomain(recipient)))
 		result := a.sendEmailNow(ctx, message)
 		if result.Err == nil {
 			result.Warning = warning
 		}
 		return result
 	}
-	log.Printf("service mail relayed domain=%s relay=%s kind=%s to=%s reason=%s", domain, relayURL, codeKind, recipient, route.Reason)
+	log.Printf("service mail relayed domain=%s relay=%s kind=%s recipient_domain=%s reason=%s",
+		diagnosticlog.SafeLogValue(domain), diagnosticlog.SafeLogValue(relayURL), diagnosticlog.SafeLogValue(codeKind),
+		diagnosticlog.SafeLogValue(emailAddressDomain(recipient)), diagnosticlog.SafeLogValue(route.Reason))
 	return emailDeliveryResult{Message: message}
 }
 
@@ -15535,7 +15585,9 @@ func (a *App) markServiceMailRecipientVerified(ctx context.Context, domain, reci
 		CreatedAt:    time.Now().UTC().Format(time.RFC3339),
 	}
 	if _, err := a.sendServiceMailThroughRelayChain(ctx, route, &request); err != nil {
-		log.Printf("service mail recipient verification failed domain=%s relay=%s to=%s error=%v", domain, route.primaryRelayURL(), recipient, err)
+		log.Printf("service mail recipient verification failed domain=%s relay=%s recipient_domain=%s error=%s",
+			diagnosticlog.SafeLogValue(domain), diagnosticlog.SafeLogValue(route.primaryRelayURL()),
+			diagnosticlog.SafeLogValue(emailAddressDomain(recipient)), diagnosticlog.SafeLogValue(err.Error()))
 	}
 }
 
@@ -15587,10 +15639,11 @@ func (a *App) sendEmailNow(ctx context.Context, message mailout.Message) emailDe
 	defer cancel()
 	err := sender(sendCtx, message)
 	if err != nil {
-		log.Printf("email delivery failed to=%s subject=%q error=%v", message.To, message.Subject, err)
+		log.Printf("email delivery failed recipient_domain=%s error=%s",
+			diagnosticlog.SafeLogValue(emailAddressDomain(message.To)), diagnosticlog.SafeLogValue(err.Error()))
 		return emailDeliveryResult{Message: message, Err: err}
 	}
-	log.Printf("email delivery accepted to=%s subject=%q", message.To, message.Subject)
+	log.Printf("email delivery accepted recipient_domain=%s", diagnosticlog.SafeLogValue(emailAddressDomain(message.To)))
 	return emailDeliveryResult{Message: message}
 }
 
@@ -17472,7 +17525,8 @@ func (a *App) notifyHostingSnapshotDiskThreshold(ctx context.Context, controlDat
 		Body:    body,
 	})
 	if err != nil {
-		log.Printf("hosting disk alert email enqueue failed installation=%s owner=%s error=%v", snapshot.InstallationID, ownerEmail, err)
+		log.Printf("hosting disk alert email enqueue failed installation=%s error=%s",
+			diagnosticlog.SafeLogValue(snapshot.InstallationID), diagnosticlog.SafeLogValue(err.Error()))
 		return
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
@@ -21342,7 +21396,10 @@ func (a *App) pagePasswordAction(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "password is required", http.StatusBadRequest)
 			return
 		}
-		a.setPagePasswordRule(r.Context(), domain, pagePath, password)
+		if err := a.setPagePasswordRule(r.Context(), domain, pagePath, password); err != nil {
+			http.Error(w, "password could not be stored", http.StatusBadRequest)
+			return
+		}
 	case "remove":
 		if rule, found := a.pagePasswordRuleForPath(r.Context(), domain, pagePath); found {
 			a.removePagePasswordRule(r.Context(), domain, rule.Path)
@@ -21433,15 +21490,23 @@ func (a *App) pagePasswordSessionValid(r *http.Request, rule PagePasswordRule) b
 	return dirprotect.BoundSessionTokenValid(rule, cookie.Value, clientIPAddress(r), r.UserAgent(), time.Now().UTC(), pagePasswordSessionTTL)
 }
 
-func (a *App) setPagePasswordRule(ctx context.Context, domain, pagePath, password string) {
+func (a *App) setPagePasswordRule(ctx context.Context, domain, pagePath, password string) error {
 	normalizedPath := cleanPath(pagePath)
+	passwordHash, err := dirprotect.Hash(password)
+	if err != nil {
+		return err
+	}
 	now := time.Now().UTC().Format(time.RFC3339)
-	_, _ = a.db.ExecContext(ctx, `INSERT INTO page_password_rules(domain,path,password_hash,created_at,updated_at)
+	_, err = a.db.ExecContext(ctx, `INSERT INTO page_password_rules(domain,path,password_hash,created_at,updated_at)
 VALUES(?,?,?,?,?)
 ON CONFLICT(domain,path) DO UPDATE SET password_hash=excluded.password_hash,updated_at=excluded.updated_at`,
-		domain, normalizedPath, dirprotect.Hash(password), now, now)
+		domain, normalizedPath, passwordHash, now, now)
+	if err != nil {
+		return err
+	}
 	_, _ = a.db.ExecContext(ctx, `DELETE FROM page_password_sessions WHERE domain=? AND path=?`, domain, normalizedPath)
 	a.writePagePasswordPrefixFile(ctx, domain)
+	return nil
 }
 
 func (a *App) removePagePasswordRule(ctx context.Context, domain, pagePath string) {
@@ -23464,6 +23529,9 @@ func injectTemplatePropagationProgressModal(pageHTML []byte) []byte {
 	injection := []byte(templatePropagationProgressModalHTML())
 	lowerPageHTML := bytes.ToLower(pageHTML)
 	bodyCloseIndex := bytes.LastIndex(lowerPageHTML, []byte("</body>"))
+	if len(pageHTML) > math.MaxInt-len(injection) {
+		return pageHTML
+	}
 	if bodyCloseIndex < 0 {
 		return append(pageHTML, injection...)
 	}
