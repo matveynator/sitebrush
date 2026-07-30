@@ -588,6 +588,122 @@ func TestGuestPublishedStaticRouteDoesNotWaitForControlDatabaseWriter(t *testing
 	}
 }
 
+func TestPreparedDemoSiteStartsAndLogsOutWhileControlDatabaseWriterIsBusy(t *testing.T) {
+	application := newRouterTestApplication(t)
+	controlDatabase := setupBillingOwnerForTest(t, application, "owner.example", "owner@example.com", true)
+	settings := demo.Settings{Domain: "demo-fast.example", Enabled: true}
+	if err := (demo.Store{DB: controlDatabase}).SaveSettings(context.Background(), settings.Domain, "", false, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := application.ensureDemoSiteReady(context.Background(), controlDatabase, settings, false, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := controlDatabase.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	dispatcher, err := startServerControlDatabaseDispatcher(application.serverControlDBPath(), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	application.controlDatabase = dispatcher
+	stop := make(chan struct{})
+	application.demoSessionEvents = application.startDemoSessionEventProcess(stop)
+	application.demoSiteRuntime = application.startDemoSiteRuntimeProcess(stop)
+	t.Cleanup(func() {
+		close(stop)
+		dispatcher.Close()
+	})
+	waitForDemoSiteRuntimeStatus(t, application, "ready")
+
+	writer, err := dispatcher.acquireForPurpose(context.Background(), serverControlDatabaseWrite, "test-blocking-demo-writer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodGet, "http://demo-fast.example/", nil)
+	request = request.WithContext(contextWithDomain(request.Context(), settings.Domain))
+	response := httptest.NewRecorder()
+	startedAt := time.Now()
+	application.route(response, request)
+	if duration := time.Since(startedAt); duration >= time.Second {
+		t.Fatalf("prepared demo start waited for control database: %s", duration)
+	}
+	if response.Code != http.StatusFound {
+		t.Fatalf("prepared demo start status = %d, body=%q", response.Code, response.Body.String())
+	}
+	var sessionCookie *http.Cookie
+	for _, responseCookie := range response.Result().Cookies() {
+		if responseCookie.Name == "sitebrush_session" {
+			sessionCookie = responseCookie
+			break
+		}
+	}
+	if sessionCookie == nil {
+		t.Fatal("prepared demo response did not set a session cookie")
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	waitForDemoSessionStatus(t, application, sessionCookie.Value, "active")
+
+	writer, err = dispatcher.acquireForPurpose(context.Background(), serverControlDatabaseWrite, "test-blocking-demo-logout-writer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	logoutRequest := httptest.NewRequest(http.MethodGet, "http://demo-fast.example/?logout", nil)
+	logoutRequest = logoutRequest.WithContext(contextWithDomain(logoutRequest.Context(), settings.Domain))
+	logoutRequest.AddCookie(sessionCookie)
+	logoutResponse := httptest.NewRecorder()
+	startedAt = time.Now()
+	application.route(logoutResponse, logoutRequest)
+	if duration := time.Since(startedAt); duration >= time.Second {
+		t.Fatalf("prepared demo logout waited for control database: %s", duration)
+	}
+	if logoutResponse.Code != http.StatusFound {
+		t.Fatalf("prepared demo logout status = %d, body=%q", logoutResponse.Code, logoutResponse.Body.String())
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	waitForDemoSessionStatus(t, application, sessionCookie.Value, "deleting")
+}
+
+func waitForDemoSiteRuntimeStatus(t *testing.T, application *App, expectedStatus string) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		state, found := application.runtimeDemoSiteState(context.Background())
+		if found && state.Status == expectedStatus {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("demo runtime status = %q error=%q, want %q", state.Status, state.Error, expectedStatus)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func waitForDemoSessionStatus(t *testing.T, application *App, sessionToken, expectedStatus string) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		controlDatabase, err := application.openServerControlDatabaseRead(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		var status string
+		queryErr := controlDatabase.QueryRowContext(context.Background(), `SELECT status FROM demo_site_sessions WHERE session_token=?`, sessionToken).Scan(&status)
+		_ = controlDatabase.Close()
+		if queryErr == nil && status == expectedStatus {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("demo session status = %q error=%v, want %q", status, queryErr, expectedStatus)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 func TestHostingClientSiteViewsUsePreparedDNSResult(t *testing.T) {
 	previousIPLookup := lookupIPRecords
 	lookupIPRecords = func(string) ([]net.IP, error) {
@@ -3841,6 +3957,10 @@ func TestDemoSiteVisitorGetsEditorSessionAndCleanupDeletesSite(t *testing.T) {
 	if err := store.SaveSettings(context.Background(), "demo.example", sourceURL, false, true); err != nil {
 		t.Fatalf("save demo settings: %v", err)
 	}
+	demoSettings := demo.Settings{Domain: "demo.example", SourceURL: sourceURL, Enabled: true}
+	if _, _, err := application.ensureDemoSiteReady(context.Background(), controlDB, demoSettings, false, ""); err != nil {
+		t.Fatalf("prepare demo site: %v", err)
+	}
 
 	request := httptest.NewRequest(http.MethodGet, "http://demo.example/", nil)
 	request = request.WithContext(contextWithDomain(request.Context(), "demo.example"))
@@ -3938,12 +4058,16 @@ func TestDemoSiteSourceImportFailureDoesNotCreateWelcomePage(t *testing.T) {
 	if err := store.SaveSettings(context.Background(), "demo-fail.example", sourceURL, false, true); err != nil {
 		t.Fatalf("save demo settings: %v", err)
 	}
+	demoSettings := demo.Settings{Domain: "demo-fail.example", SourceURL: sourceURL, Enabled: true}
+	if _, _, err := application.ensureDemoSiteReady(context.Background(), controlDB, demoSettings, false, ""); err == nil {
+		t.Fatal("demo preparation unexpectedly succeeded")
+	}
 
 	request := httptest.NewRequest(http.MethodGet, "http://demo-fail.example/", nil)
 	request = request.WithContext(contextWithDomain(request.Context(), "demo-fail.example"))
 	response := httptest.NewRecorder()
 	application.route(response, request)
-	if response.Code != http.StatusInternalServerError {
+	if response.Code != http.StatusServiceUnavailable {
 		t.Fatalf("demo start status = %d, body=%q", response.Code, response.Body.String())
 	}
 
@@ -4142,6 +4266,10 @@ func TestActiveDemoSessionDoesNotBlockScheduledSiteRecreation(t *testing.T) {
 	store := demo.Store{DB: controlDB}
 	if err := store.SaveSettings(context.Background(), "demo-active.example", "", false, true); err != nil {
 		t.Fatalf("save demo settings: %v", err)
+	}
+	demoSettings := demo.Settings{Domain: "demo-active.example", Enabled: true}
+	if _, _, err := application.ensureDemoSiteReady(context.Background(), controlDB, demoSettings, false, ""); err != nil {
+		t.Fatalf("prepare demo site: %v", err)
 	}
 
 	request := httptest.NewRequest(http.MethodGet, "http://demo-active.example/", nil)

@@ -204,12 +204,28 @@ type App struct {
 	controlDatabase           *serverControlDatabaseDispatcher
 	hostingSupportEvents      chan hostingandsupport.HostingSnapshotEvent
 	demoSiteRuntime           chan demoSiteRuntimeRequest
+	demoSessionEvents         chan demoSessionEvent
 }
 
 type demoSiteRuntimeRequest struct {
-	kind     string
-	settings demo.Settings
-	reply    chan demo.Settings
+	kind  string
+	state demoSiteRuntimeState
+	reply chan demoSiteRuntimeState
+}
+
+type demoSiteRuntimeState struct {
+	Settings   demo.Settings
+	AdminEmail string
+	Status     string
+	Error      string
+}
+
+type demoSessionEvent struct {
+	kind         string
+	domain       string
+	sessionToken string
+	userEmail    string
+	resetAfter   time.Time
 }
 
 type billingInvoiceProcessRequest struct {
@@ -5020,8 +5036,9 @@ func runSitebrushServer(ctx context.Context, config serverRunConfig) error {
 	application.siteDatabaseRouter = siteDatabaseRouter
 	application.ensureAutoCertGuard()
 	application.renderTemplates = startRenderTemplateProcess(ctx.Done())
-	application.hostingAndSupportPanel = application.startHostingAndSupportPanelProcess(ctx.Done())
+	application.demoSessionEvents = application.startDemoSessionEventProcess(ctx.Done())
 	application.demoSiteRuntime = application.startDemoSiteRuntimeProcess(ctx.Done())
+	application.hostingAndSupportPanel = application.startHostingAndSupportPanelProcess(ctx.Done())
 	application.billingInvoices = application.startBillingInvoiceProcess(ctx.Done())
 	application.startDomainLogWorker(ctx)
 	application.startAnalyticsWorkers(ctx)
@@ -7147,8 +7164,8 @@ func (a *App) maybeStartDemoSite(w http.ResponseWriter, r *http.Request, request
 	if !demo.CanStartFromRequest(r) {
 		return false
 	}
-	settings, found := a.runtimeDemoSiteSettings(r.Context())
-	if !found || normalizeDomainName(settings.Domain) != normalizeDomainName(requestDomain) {
+	state, found := a.runtimeDemoSiteState(r.Context())
+	if !found || normalizeDomainName(state.Settings.Domain) != normalizeDomainName(requestDomain) {
 		return false
 	}
 	if hasSitebrushSessionCookie(r) {
@@ -7156,7 +7173,12 @@ func (a *App) maybeStartDemoSite(w http.ResponseWriter, r *http.Request, request
 			return false
 		}
 	}
-	redirectPath, err := a.startDemoSiteSession(w, r, settings)
+	if state.Status != "ready" || strings.TrimSpace(state.AdminEmail) == "" {
+		w.Header().Set("Retry-After", "2")
+		http.Error(w, "demo site is preparing", http.StatusServiceUnavailable)
+		return true
+	}
+	redirectPath, err := a.startDemoSiteSession(w, r, state)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return true
@@ -7167,9 +7189,9 @@ func (a *App) maybeStartDemoSite(w http.ResponseWriter, r *http.Request, request
 
 func (a *App) startDemoSiteRuntimeProcess(stop <-chan struct{}) chan demoSiteRuntimeRequest {
 	requests := make(chan demoSiteRuntimeRequest, 16)
-	initialSettings, _ := a.demoSiteSettings(context.Background())
+	initialState := a.loadDemoSiteRuntimeState(context.Background())
 	go func() {
-		settings := initialSettings
+		state := initialState
 		for {
 			select {
 			case <-stop:
@@ -7178,48 +7200,127 @@ func (a *App) startDemoSiteRuntimeProcess(stop <-chan struct{}) chan demoSiteRun
 				switch request.kind {
 				case "get":
 					select {
-					case request.reply <- settings:
+					case request.reply <- state:
 					case <-stop:
 						return
 					}
 				case "set":
-					settings = request.settings
+					state = request.state
+				case "prepared":
+					if sameDemoSiteSettings(state.Settings, request.state.Settings) {
+						state = request.state
+					}
 				}
 			}
 		}
 	}()
+	if initialState.Settings.Enabled && initialState.Status != "ready" {
+		go a.prepareDemoSiteRuntime(stop, requests, initialState.Settings)
+	}
 	return requests
 }
 
-func (a *App) runtimeDemoSiteSettings(ctx context.Context) (demo.Settings, bool) {
+func (a *App) loadDemoSiteRuntimeState(ctx context.Context) demoSiteRuntimeState {
+	controlDatabase, err := a.openServerControlDatabaseForPurpose(ctx, serverControlDatabaseRead, "demo-runtime-load")
+	if err != nil {
+		return demoSiteRuntimeState{Status: "error", Error: err.Error()}
+	}
+	store := hostingandsupport.Store{DB: controlDatabase}
+	settings := (demo.Store{DB: controlDatabase}).Settings(ctx)
+	settings.Domain = normalizeDomainName(settings.Domain)
+	ownerDomain, ownerFound := store.OwnerDomain(ctx)
+	_ = controlDatabase.Close()
+	if !settings.Enabled || settings.Domain == "" {
+		return demoSiteRuntimeState{Settings: settings, Status: "disabled"}
+	}
+	if ownerFound && normalizeDomainName(ownerDomain) == settings.Domain {
+		return demoSiteRuntimeState{Settings: settings, Status: "error", Error: "server owner site cannot be used as the public demo site"}
+	}
+	adminEmail, hasAdmin := a.firstAdminEmailForDomain(ctx, settings.Domain)
+	if hasAdmin && a.demoSiteHasPages(ctx, settings.Domain) && a.demoSiteSnapshotAvailable(settings.Domain) {
+		return demoSiteRuntimeState{Settings: settings, AdminEmail: adminEmail, Status: "ready"}
+	}
+	return demoSiteRuntimeState{Settings: settings, Status: "preparing"}
+}
+
+func (a *App) prepareDemoSiteRuntime(stop <-chan struct{}, requests chan<- demoSiteRuntimeRequest, settings demo.Settings) {
+	select {
+	case <-stop:
+		return
+	default:
+	}
+	a.waitForSiteDatabaseStartupMigrations(context.Background())
+	controlDatabase, err := a.openServerControlDatabaseForPurpose(context.Background(), serverControlDatabaseWrite, "demo-runtime-prepare")
+	if err != nil {
+		publishDemoSiteRuntimeState(stop, requests, demoSiteRuntimeState{Settings: settings, Status: "error", Error: err.Error()})
+		return
+	}
+	adminEmail, _, prepareErr := a.ensureDemoSiteReady(context.Background(), controlDatabase.DB, settings, false, "")
+	_ = controlDatabase.Close()
+	if prepareErr == nil && !a.demoSiteSnapshotAvailable(settings.Domain) {
+		prepareErr = a.createDemoSiteSnapshot(context.Background(), settings.Domain)
+	}
+	if prepareErr != nil {
+		publishDemoSiteRuntimeState(stop, requests, demoSiteRuntimeState{Settings: settings, Status: "error", Error: prepareErr.Error()})
+		return
+	}
+	publishDemoSiteRuntimeState(stop, requests, demoSiteRuntimeState{Settings: settings, AdminEmail: adminEmail, Status: "ready"})
+}
+
+func publishDemoSiteRuntimeState(stop <-chan struct{}, requests chan<- demoSiteRuntimeRequest, state demoSiteRuntimeState) {
+	select {
+	case requests <- demoSiteRuntimeRequest{kind: "prepared", state: state}:
+	case <-stop:
+	}
+}
+
+func sameDemoSiteSettings(left, right demo.Settings) bool {
+	return normalizeDomainName(left.Domain) == normalizeDomainName(right.Domain) &&
+		strings.TrimSpace(left.SourceURL) == strings.TrimSpace(right.SourceURL) &&
+		left.CopyWholeSite == right.CopyWholeSite &&
+		left.Enabled == right.Enabled
+}
+
+func (a *App) demoSiteSnapshotAvailable(domain string) bool {
+	_, err := a.existingPathInsideStorageSubtree(a.backupRootDir(), a.demoSiteSnapshotPath(domain))
+	return err == nil
+}
+
+func (a *App) runtimeDemoSiteState(ctx context.Context) (demoSiteRuntimeState, bool) {
 	if a == nil {
-		return demo.Settings{}, false
+		return demoSiteRuntimeState{}, false
 	}
 	if a.demoSiteRuntime == nil {
-		return a.demoSiteSettings(ctx)
+		state := a.loadDemoSiteRuntimeState(ctx)
+		return state, state.Settings.Enabled && state.Settings.Domain != ""
 	}
-	reply := make(chan demo.Settings, 1)
+	reply := make(chan demoSiteRuntimeState, 1)
 	request := demoSiteRuntimeRequest{kind: "get", reply: reply}
 	select {
 	case a.demoSiteRuntime <- request:
 	case <-ctx.Done():
-		return demo.Settings{}, false
+		return demoSiteRuntimeState{}, false
 	}
 	select {
-	case settings := <-reply:
-		settings.Domain = normalizeDomainName(settings.Domain)
-		return settings, settings.Enabled && settings.Domain != ""
+	case state := <-reply:
+		state.Settings.Domain = normalizeDomainName(state.Settings.Domain)
+		return state, state.Settings.Enabled && state.Settings.Domain != ""
 	case <-ctx.Done():
-		return demo.Settings{}, false
+		return demoSiteRuntimeState{}, false
 	}
 }
 
-func (a *App) updateRuntimeDemoSiteSettings(ctx context.Context, settings demo.Settings) {
+func (a *App) runtimeDemoSiteSettings(ctx context.Context) (demo.Settings, bool) {
+	state, found := a.runtimeDemoSiteState(ctx)
+	return state.Settings, found
+}
+
+func (a *App) updateRuntimeDemoSiteState(ctx context.Context, state demoSiteRuntimeState) {
 	if a == nil || a.demoSiteRuntime == nil {
 		return
 	}
 	select {
-	case a.demoSiteRuntime <- demoSiteRuntimeRequest{kind: "set", settings: settings}:
+	case a.demoSiteRuntime <- demoSiteRuntimeRequest{kind: "set", state: state}:
 	case <-ctx.Done():
 	}
 }
@@ -7235,29 +7336,97 @@ func (a *App) demoSiteSettings(ctx context.Context) (demo.Settings, bool) {
 	return settings, settings.Enabled && settings.Domain != ""
 }
 
-func (a *App) startDemoSiteSession(w http.ResponseWriter, r *http.Request, settings demo.Settings) (string, error) {
-	domain := normalizeDomainName(settings.Domain)
+func (a *App) startDemoSiteSession(w http.ResponseWriter, r *http.Request, state demoSiteRuntimeState) (string, error) {
+	domain := normalizeDomainName(state.Settings.Domain)
 	if domain == "" {
 		return "", fmt.Errorf("demo domain is not configured")
 	}
-	controlDatabase, err := a.openServerControlDatabase(r.Context())
-	if err != nil {
-		return "", err
-	}
-	defer controlDatabase.Close()
-	store := hostingandsupport.Store{DB: controlDatabase}
-	if ownerDomain, found := store.OwnerDomain(r.Context()); found && normalizeDomainName(ownerDomain) == domain {
-		return "", fmt.Errorf("server owner site cannot be used as the public demo site")
-	}
-	adminEmail, _, err := a.ensureDemoSiteReady(r.Context(), controlDatabase.DB, settings, false, "")
-	if err != nil {
-		return "", err
+	adminEmail := strings.TrimSpace(state.AdminEmail)
+	if state.Status != "ready" || adminEmail == "" {
+		return "", fmt.Errorf("demo site is not ready")
 	}
 	sessionToken := a.createSessionForDomain(w, r.Context(), domain, adminEmail)
-	if err := (demo.Store{DB: controlDatabase}).CreateSession(r.Context(), domain, sessionToken, adminEmail, time.Now().Add(demo.ResetDelay)); err != nil {
+	if err := a.enqueueDemoSessionEvent(r.Context(), demoSessionEvent{
+		kind: "create", domain: domain, sessionToken: sessionToken, userEmail: adminEmail, resetAfter: time.Now().Add(demo.ResetDelay),
+	}); err != nil {
+		_, _ = a.db.ExecContext(contextWithDomain(r.Context(), domain), `DELETE FROM sessions WHERE token=?`, sessionToken)
+		http.SetCookie(w, &http.Cookie{Name: "sitebrush_session", Value: "", Path: "/", Expires: time.Unix(0, 0), HttpOnly: true})
 		return "", err
 	}
 	return "/", nil
+}
+
+func (a *App) startDemoSessionEventProcess(stop <-chan struct{}) chan demoSessionEvent {
+	events := make(chan demoSessionEvent, 1024)
+	go func() {
+		for {
+			select {
+			case <-stop:
+				return
+			case event := <-events:
+				a.persistDemoSessionEventWithRetry(stop, event)
+			}
+		}
+	}()
+	return events
+}
+
+func (a *App) enqueueDemoSessionEvent(ctx context.Context, event demoSessionEvent) error {
+	if a == nil {
+		return errors.New("demo session process is unavailable")
+	}
+	if a.demoSessionEvents == nil {
+		return a.persistDemoSessionEvent(ctx, event)
+	}
+	select {
+	case a.demoSessionEvents <- event:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+		return errors.New("demo session queue is full")
+	}
+}
+
+func (a *App) persistDemoSessionEventWithRetry(stop <-chan struct{}, event demoSessionEvent) {
+	retryDelay := time.Second
+	for {
+		err := a.persistDemoSessionEvent(context.Background(), event)
+		if err == nil {
+			return
+		}
+		log.Printf("demo session event retry kind=%s domain=%s error=%v", event.kind, event.domain, err)
+		timer := time.NewTimer(retryDelay)
+		select {
+		case <-stop:
+			timer.Stop()
+			return
+		case <-timer.C:
+		}
+		if retryDelay < 30*time.Second {
+			retryDelay *= 2
+			if retryDelay > 30*time.Second {
+				retryDelay = 30 * time.Second
+			}
+		}
+	}
+}
+
+func (a *App) persistDemoSessionEvent(ctx context.Context, event demoSessionEvent) error {
+	controlDatabase, err := a.openServerControlDatabaseForPurpose(ctx, serverControlDatabaseWrite, "demo-session-"+event.kind)
+	if err != nil {
+		return err
+	}
+	defer controlDatabase.Close()
+	store := demo.Store{DB: controlDatabase}
+	switch event.kind {
+	case "create":
+		return store.CreateSession(ctx, event.domain, event.sessionToken, event.userEmail, event.resetAfter)
+	case "logout":
+		return store.ScheduleSessionReset(ctx, event.sessionToken, event.resetAfter)
+	default:
+		return fmt.Errorf("unsupported demo session event %q", event.kind)
+	}
 }
 
 func (a *App) ensureDemoSiteReady(ctx context.Context, controlDatabase *sql.DB, settings demo.Settings, refreshSnapshot bool, progressToken string) (string, int, error) {
@@ -7331,7 +7500,7 @@ func (a *App) demoSiteHasPages(ctx context.Context, domain string) bool {
 }
 
 func (a *App) isDemoSiteDomain(ctx context.Context, domain string) bool {
-	settings, found := a.demoSiteSettings(ctx)
+	settings, found := a.runtimeDemoSiteSettings(ctx)
 	if !found {
 		return false
 	}
@@ -7509,22 +7678,43 @@ func (a *App) demoGrabRefresh(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	settings := demo.Settings{Domain: demoDomain, SourceURL: demoSourceURL, CopyWholeSite: demoCopyWholeSite, Enabled: true}
-	a.updateRuntimeDemoSiteSettings(r.Context(), settings)
+	a.updateRuntimeDemoSiteState(r.Context(), demoSiteRuntimeState{Settings: settings, Status: "preparing"})
 	progressToken := strings.TrimSpace(r.FormValue("progress_token"))
 	failedResourceURLs := demoFailedResourceURLs(r)
 	var failedTotal int
+	var adminEmail string
 	if len(failedResourceURLs) > 0 {
 		failedTotal, err = a.retryDemoFailedResources(r.Context(), settings, progressToken, failedResourceURLs)
+		adminEmail, _ = a.firstAdminEmailForDomain(r.Context(), demoDomain)
 	} else {
-		_, failedTotal, err = a.ensureDemoSiteReady(r.Context(), controlDatabase.DB, settings, true, progressToken)
+		adminEmail, failedTotal, err = a.ensureDemoSiteReady(r.Context(), controlDatabase.DB, settings, true, progressToken)
 	}
 	if err != nil {
+		a.updateRuntimeDemoSiteState(r.Context(), demoSiteRuntimeState{Settings: settings, Status: "error", Error: err.Error()})
 		statusCode := http.StatusBadGateway
 		if strings.Contains(err.Error(), "storage limit reached:") {
 			statusCode = http.StatusInsufficientStorage
 		}
 		http.Error(w, err.Error(), statusCode)
 		return
+	}
+	if !a.demoSiteSnapshotAvailable(demoDomain) {
+		err = a.createDemoSiteSnapshot(r.Context(), demoDomain)
+	}
+	if err != nil {
+		a.updateRuntimeDemoSiteState(r.Context(), demoSiteRuntimeState{Settings: settings, Status: "error", Error: err.Error()})
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if strings.TrimSpace(adminEmail) == "" {
+		err = errors.New("demo administrator is unavailable")
+		a.updateRuntimeDemoSiteState(r.Context(), demoSiteRuntimeState{Settings: settings, Status: "error", Error: err.Error()})
+		if len(failedResourceURLs) == 0 {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+	} else {
+		a.updateRuntimeDemoSiteState(r.Context(), demoSiteRuntimeState{Settings: settings, AdminEmail: adminEmail, Status: "ready"})
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{"status": "ok", "failed_total": failedTotal})
@@ -7825,12 +8015,9 @@ func (a *App) scheduleDemoSiteDeletionForLogout(r *http.Request) {
 	if err != nil || strings.TrimSpace(cookie.Value) == "" {
 		return
 	}
-	controlDatabase, err := a.openServerControlDatabase(r.Context())
-	if err != nil {
-		return
-	}
-	defer controlDatabase.Close()
-	if err := (demo.Store{DB: controlDatabase}).ScheduleSessionReset(r.Context(), cookie.Value, time.Now().Add(demo.ResetDelay)); err != nil {
+	if err := a.enqueueDemoSessionEvent(r.Context(), demoSessionEvent{
+		kind: "logout", sessionToken: cookie.Value, resetAfter: time.Now().Add(demo.ResetDelay),
+	}); err != nil {
 		log.Printf("demo site deletion schedule failed token=%s error=%v", diagnosticlog.SafeLogValue(cookie.Value), err)
 	}
 }
@@ -12926,10 +13113,9 @@ func (a *App) saveHostingAndSupportDemoSettingsInDatabase(r *http.Request, contr
 	if err := (demo.Store{DB: controlDatabase}).SaveSettings(r.Context(), demoDomain, demoSourceURL, demoCopyWholeSite, demoEnabled); err != nil {
 		return err.Error()
 	}
-	a.updateRuntimeDemoSiteSettings(r.Context(), demo.Settings{
-		Domain: demoDomain, SourceURL: demoSourceURL, CopyWholeSite: demoCopyWholeSite, Enabled: demoEnabled,
-	})
+	settings := demo.Settings{Domain: demoDomain, SourceURL: demoSourceURL, CopyWholeSite: demoCopyWholeSite, Enabled: demoEnabled}
 	if !demoEnabled {
+		a.updateRuntimeDemoSiteState(r.Context(), demoSiteRuntimeState{Settings: settings, Status: "disabled"})
 		for _, disabledDemoDomain := range demo.UniqueDomains(previousDemoSettings.Domain, demoDomain) {
 			if err := a.deleteDemoManagedSiteWithoutBackup(r.Context(), controlDatabase, disabledDemoDomain); err != nil {
 				return err.Error()
@@ -12942,11 +13128,22 @@ func (a *App) saveHostingAndSupportDemoSettingsInDatabase(r *http.Request, contr
 		return translationOrDefault(translations, "billing_status_settings_saved", "Billing settings saved.")
 	}
 	if demoEnabled {
-		settings := demo.Settings{Domain: demoDomain, SourceURL: demoSourceURL, CopyWholeSite: demoCopyWholeSite, Enabled: true}
+		a.updateRuntimeDemoSiteState(r.Context(), demoSiteRuntimeState{Settings: settings, Status: "preparing"})
 		refreshDemoSite := r.FormValue("refresh_demo_site") == "1"
-		if _, _, err := a.ensureDemoSiteReady(r.Context(), controlDatabase, settings, refreshDemoSite, ""); err != nil {
-			return err.Error()
+		adminEmail, _, readyErr := a.ensureDemoSiteReady(r.Context(), controlDatabase, settings, refreshDemoSite, "")
+		if readyErr == nil && !a.demoSiteSnapshotAvailable(demoDomain) {
+			readyErr = a.createDemoSiteSnapshot(r.Context(), demoDomain)
 		}
+		if readyErr != nil {
+			a.updateRuntimeDemoSiteState(r.Context(), demoSiteRuntimeState{Settings: settings, Status: "error", Error: readyErr.Error()})
+			return readyErr.Error()
+		}
+		if strings.TrimSpace(adminEmail) == "" {
+			readyErr = errors.New("demo administrator is unavailable")
+			a.updateRuntimeDemoSiteState(r.Context(), demoSiteRuntimeState{Settings: settings, Status: "error", Error: readyErr.Error()})
+			return readyErr.Error()
+		}
+		a.updateRuntimeDemoSiteState(r.Context(), demoSiteRuntimeState{Settings: settings, AdminEmail: adminEmail, Status: "ready"})
 	}
 	return translationOrDefault(translations, "billing_status_settings_saved", "Billing settings saved.")
 }
@@ -13294,7 +13491,9 @@ func (a *App) cleanupExpiredDemoSites(ctx context.Context, now time.Time) {
 		if !demo.SessionsReadyForReset(sessions, now) {
 			continue
 		}
+		a.updateRuntimeDemoSiteStatusForDomain(ctx, domain, "preparing", "")
 		if err := a.restoreDemoSiteFromSnapshot(ctx, nil, domain); err != nil {
+			a.updateRuntimeDemoSiteStatusForDomain(ctx, domain, "error", err.Error())
 			log.Printf("demo site restore failed domain=%s error=%v", domain, err)
 			continue
 		}
@@ -13308,7 +13507,30 @@ func (a *App) cleanupExpiredDemoSites(ctx context.Context, now time.Time) {
 		if removeErr != nil {
 			log.Printf("demo session cleanup failed domain=%s error=%v", domain, removeErr)
 		}
+		adminEmail, hasAdmin := a.firstAdminEmailForDomain(ctx, domain)
+		if hasAdmin {
+			state, found := a.runtimeDemoSiteState(ctx)
+			if found && normalizeDomainName(state.Settings.Domain) == normalizeDomainName(domain) {
+				state.AdminEmail = adminEmail
+				state.Status = "ready"
+				state.Error = ""
+				a.updateRuntimeDemoSiteState(ctx, state)
+			}
+		}
 	}
+}
+
+func (a *App) updateRuntimeDemoSiteStatusForDomain(ctx context.Context, domain, status, errorText string) {
+	state, found := a.runtimeDemoSiteState(ctx)
+	if !found || normalizeDomainName(state.Settings.Domain) != normalizeDomainName(domain) {
+		return
+	}
+	state.Status = status
+	state.Error = strings.TrimSpace(errorText)
+	if status != "ready" {
+		state.AdminEmail = ""
+	}
+	a.updateRuntimeDemoSiteState(ctx, state)
 }
 
 func (a *App) deleteDemoManagedSiteWithoutBackup(ctx context.Context, controlDatabase *sql.DB, domain string) error {
