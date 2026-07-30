@@ -38,13 +38,15 @@ type Parser struct {
 }
 
 var (
-	htmlResourcePattern = regexp.MustCompile(`(?is)<(a|area|link|script|img|source|video|audio|iframe|embed|object|form)\b[^>]*(href|xlink:href|src|poster|data|action)\s*=\s*["']([^"']+)["']`)
-	htmlImageAltPattern = regexp.MustCompile(`(?is)<img\b[^>]*\balt\s*=\s*["']([^"']+)["'][^>]*>`)
-	htmlSrcSetPattern   = regexp.MustCompile(`(?is)\bsrcset\s*=\s*["']([^"']+)["']`)
-	cssURLPattern       = regexp.MustCompile(`(?is)url\(\s*['"]?([^'")]+)['"]?\s*\)`)
-	cssImportPattern    = regexp.MustCompile(`(?is)@import\s+(?:url\(\s*)?['"]?([^'")\s;]+)['"]?`)
-	staticURLPattern    = regexp.MustCompile(`(?is)https?://[^\s"'<>\\)]+`)
-	linkManifestPattern = regexp.MustCompile(`(?is)\brel\s*=\s*["'][^"']*\bmanifest\b[^"']*["']`)
+	htmlResourcePattern     = regexp.MustCompile(`(?is)<(a|area|link|script|img|source|video|audio|iframe|embed|object|form)\b[^>]*?\s(href|xlink:href|src|poster|data|action)\s*=\s*["']([^"']+)["']`)
+	htmlTagPattern          = regexp.MustCompile(`(?is)<[a-z][^>]*>`)
+	htmlLazyResourcePattern = regexp.MustCompile(`(?is)\b(data-src|data-original|data-original-src|data-lazy-src|data-bg|data-background-image)\s*=\s*["']([^"']+)["']`)
+	htmlImageAltPattern     = regexp.MustCompile(`(?is)<img\b[^>]*\balt\s*=\s*["']([^"']+)["'][^>]*>`)
+	htmlSrcSetPattern       = regexp.MustCompile(`(?is)\b(srcset|data-srcset|data-lazy-srcset)\s*=\s*["']([^"']+)["']`)
+	cssURLPattern           = regexp.MustCompile(`(?is)url\(\s*['"]?([^'")]+)['"]?\s*\)`)
+	cssImportPattern        = regexp.MustCompile(`(?is)@import\s+(?:url\(\s*)?['"]?([^'")\s;]+)['"]?`)
+	staticURLPattern        = regexp.MustCompile(`(?is)https?://[^\s"'<>\\)]+`)
+	linkManifestPattern     = regexp.MustCompile(`(?is)\brel\s*=\s*["'][^"']*\bmanifest\b[^"']*["']`)
 )
 
 func (parser Parser) RewriteTextReferences(source, baseRawURL string, depth int) string {
@@ -86,6 +88,7 @@ func (parser Parser) RewriteTextReferences(source, baseRawURL string, depth int)
 		}
 		return strings.Replace(match, parts[3], rewriteSingle(parts[3]), 1)
 	})
+	rewritten = rewriteLazyResourceReferences(rewritten, rewriteSingle)
 	rewritten = htmlImageAltPattern.ReplaceAllStringFunc(rewritten, func(match string) string {
 		parts := htmlImageAltPattern.FindStringSubmatch(match)
 		if len(parts) != 2 || parser.ShouldRewriteImageAltResource == nil || !parser.ShouldRewriteImageAltResource(parts[1], baseURL) {
@@ -173,10 +176,10 @@ func (parser Parser) RewriteStaticURLTextReferences(source string, baseURL *url.
 func RewriteSrcSetReferences(source string, rewriteSingle func(string) string) string {
 	return htmlSrcSetPattern.ReplaceAllStringFunc(source, func(match string) string {
 		parts := htmlSrcSetPattern.FindStringSubmatch(match)
-		if len(parts) != 2 {
+		if len(parts) != 3 {
 			return match
 		}
-		candidates := strings.Split(parts[1], ",")
+		candidates := strings.Split(parts[2], ",")
 		for index, candidate := range candidates {
 			fields := strings.Fields(strings.TrimSpace(candidate))
 			if len(fields) == 0 {
@@ -185,7 +188,23 @@ func RewriteSrcSetReferences(source string, rewriteSingle func(string) string) s
 			fields[0] = rewriteSingle(fields[0])
 			candidates[index] = strings.Join(fields, " ")
 		}
-		return strings.Replace(match, parts[1], strings.Join(candidates, ", "), 1)
+		return strings.Replace(match, parts[2], strings.Join(candidates, ", "), 1)
+	})
+}
+
+func rewriteLazyResourceReferences(source string, rewriteSingle func(string) string) string {
+	return htmlTagPattern.ReplaceAllStringFunc(source, func(tag string) string {
+		return htmlLazyResourcePattern.ReplaceAllStringFunc(tag, func(match string) string {
+			parts := htmlLazyResourcePattern.FindStringSubmatch(match)
+			if len(parts) != 3 {
+				return match
+			}
+			rewrittenReference := rewriteSingle(parts[2])
+			if strings.Contains(strings.ToLower(parts[2]), "url(") {
+				rewrittenReference = RewriteCSSURLReferences(parts[2], rewriteSingle)
+			}
+			return strings.Replace(match, parts[2], rewrittenReference, 1)
+		})
 	})
 }
 
@@ -207,6 +226,7 @@ func RewriteDocumentResourceReferences(source string, rewriteSingle func(string)
 		}
 		return strings.Replace(match, parts[3], rewriteSingle(parts[3]), 1)
 	})
+	rewritten = rewriteLazyResourceReferences(rewritten, rewriteSingle)
 	rewritten = RewriteSrcSetReferences(rewritten, rewriteSingle)
 	rewritten = RewriteCSSImportReferences(rewritten, rewriteSingle)
 	rewritten = RewriteCSSURLReferences(rewritten, rewriteSingle)

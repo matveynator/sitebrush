@@ -101,6 +101,7 @@ const grabImportFailedResourceRetryAttempts = 4
 const grabImportFailedResourceRetryDelay = 2 * time.Second
 const wholeSiteImportConsecutiveFailureLimit = 25
 const wholeSiteImportMaxPages = 2048
+const wholeSitePreviewPageConcurrency = 8
 const defaultDomainStorageLimitBytes int64 = 10 * 1024 * 1024 * 1024
 const defaultAnalyticsMemoryLimitBytes int64 = 500 * 1024 * 1024
 const defaultGuestStaticHTMLCacheLimitBytes int64 = 128 * 1024 * 1024
@@ -2037,6 +2038,7 @@ type publicTrialPreview struct {
 }
 
 type publicTrialPreviewResponse struct {
+	Status         string                    `json:"status,omitempty"`
 	SourceURL      string                    `json:"source_url"`
 	PreviewURL     string                    `json:"preview_url"`
 	PageCount      int                       `json:"page_count"`
@@ -2050,6 +2052,21 @@ type publicTrialPreviewResponse struct {
 	Plan           publicTrialPlanView       `json:"plan"`
 	FreePlan       publicTrialPlanView       `json:"free_plan"`
 	Message        string                    `json:"message"`
+	FailedTotal    int                       `json:"failed_total,omitempty"`
+	FailedURLs     []string                  `json:"failed_urls,omitempty"`
+	FailedReasons  map[string]string         `json:"failed_reasons,omitempty"`
+}
+
+type publicTrialPreviewJobStatus struct {
+	Status    string
+	Response  publicTrialPreviewResponse
+	ErrorText string
+	UpdatedAt time.Time
+}
+
+type publicTrialPreviewJob struct {
+	status        publicTrialPreviewJobStatus
+	cancelSession chan struct{}
 }
 
 type grabSourceOptions = crawler.SourceOptions
@@ -2067,6 +2084,7 @@ type wholeSitePreviewResult struct {
 	Resources     []grabResourcePreview
 	ImportedPages []wholeSiteImportedPage
 	Spider        *pageSpider
+	Partial       bool
 }
 
 type nativePickedFile struct {
@@ -6497,6 +6515,14 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 		a.publicTrialSitePreview(w, r)
 		return
 	}
+	if hasQueryFlag(r, "trial_site_preview_status") {
+		a.publicTrialSitePreviewStatus(w, r)
+		return
+	}
+	if hasQueryFlag(r, "trial_site_preview_cancel") {
+		a.publicTrialSitePreviewCancel(w, r)
+		return
+	}
 	if hasQueryFlag(r, "trial_site_preview_frame") {
 		a.publicTrialSitePreviewFrame(w, r)
 		return
@@ -7588,7 +7614,7 @@ func (a *App) demoGrabPreview(w http.ResponseWriter, r *http.Request) {
 	var importedPages []wholeSiteImportedPage
 	var previewSpider *pageSpider
 	if r.FormValue("demo_site_copy_whole_site") == "1" {
-		wholeSitePreview := previewWholeRemoteSiteResources(remoteSourceURL, string(htmlBytes), pagePath, a.grabTracker, progressToken, grabSourceOptions{})
+		wholeSitePreview := previewWholeRemoteSiteResources(r.Context(), remoteSourceURL, string(htmlBytes), pagePath, a.grabTracker, progressToken, grabSourceOptions{})
 		resources = wholeSitePreview.Resources
 		pageCount = wholeSitePreview.PageCount
 		importedPages = wholeSitePreview.ImportedPages
@@ -8645,15 +8671,74 @@ func (a *App) publicTrialSitePreview(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "progress_token is required", http.StatusBadRequest)
 		return
 	}
+	sourceURL := strings.TrimSpace(r.FormValue("source_url"))
+	if sourceURL == "" {
+		http.Error(w, "source_url is required", http.StatusBadRequest)
+		return
+	}
+	cancelSession, started := a.activePublicTrialPreviewStore().Start(progressToken)
+	if !started {
+		status, found := a.activePublicTrialPreviewStore().Status(progressToken)
+		if !found {
+			http.Error(w, "preview token is unavailable", http.StatusConflict)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if status.Status == "done" || status.Status == "partial" {
+			_ = json.NewEncoder(w).Encode(status.Response)
+			return
+		}
+		w.WriteHeader(http.StatusAccepted)
+		_ = json.NewEncoder(w).Encode(map[string]string{"token": progressToken, "status": status.Status})
+		return
+	}
+	previewURL := absoluteURLForPath(r, "/?trial_site_preview_frame&token="+url.QueryEscape(progressToken))
+	translations := translationsForRequest(r)
+	if strings.TrimSpace(r.FormValue("async_preview")) != "1" {
+		a.runPublicTrialSitePreview(progressToken, sourceURL, previewURL, translations, cancelSession)
+		status, found := a.activePublicTrialPreviewStore().Status(progressToken)
+		if !found {
+			http.Error(w, "preview result is unavailable", http.StatusInternalServerError)
+			return
+		}
+		if status.Status == "error" {
+			http.Error(w, status.ErrorText, http.StatusBadGateway)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(status.Response)
+		return
+	}
+	go a.runPublicTrialSitePreview(progressToken, sourceURL, previewURL, translations, cancelSession)
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusAccepted)
+	_ = json.NewEncoder(w).Encode(map[string]string{"token": progressToken, "status": "running"})
+}
+
+func (a *App) runPublicTrialSitePreview(progressToken, requestedSourceURL, previewURL string, translations map[string]string, cancelSession <-chan struct{}) {
 	previewContext, cancelPreview := context.WithTimeout(context.Background(), 15*time.Minute)
 	defer cancelPreview()
-	sourceURL, remoteSourceURL, htmlBytes, err := a.resolvePublicTrialSource(previewContext, r.FormValue("source_url"), progressToken)
+	go func() {
+		select {
+		case <-cancelSession:
+			cancelPreview()
+		case <-previewContext.Done():
+		}
+	}()
+
+	sourceURL, remoteSourceURL, htmlBytes, err := a.resolvePublicTrialSource(previewContext, requestedSourceURL, progressToken)
 	if err != nil {
-		http.Error(w, publicTrialSourceErrorText(translationsForRequest(r), err), http.StatusBadGateway)
+		errorText := publicTrialSourceErrorText(translations, err)
+		a.activePublicTrialPreviewStore().Fail(progressToken, errorText)
+		if a.grabTracker != nil {
+			a.grabTracker.publish(grabProgressEvent{Token: progressToken, Stage: "error", CurrentError: errorText, Message: errorText})
+		}
 		return
 	}
 	publicSourceOptions := publicTrialGrabSourceOptions()
 	initialSpider := newPreviewPageSpider("", remoteSourceURL, grabResourceMaxDepth, a.grabTracker, progressToken, publicSourceOptions)
+	initialSpider.setContext(previewContext)
 	initialRootResource := &mirroredResource{url: sourceURL, content: htmlBytes}
 	initialSpider.resources[sourceURL] = initialRootResource
 	initialSpider.collectPreviewNestedResources(initialRootResource, 0, "text/html")
@@ -8670,7 +8755,7 @@ func (a *App) publicTrialSitePreview(w http.ResponseWriter, r *http.Request) {
 		ResourceCount:  len(initialResources),
 		ResourceCounts: publicTrialResourceCountsFromResources(initialResources),
 	})
-	wholeSitePreview := previewWholeRemoteSiteResources(remoteSourceURL, string(htmlBytes), "/", a.grabTracker, progressToken, publicSourceOptions)
+	wholeSitePreview := previewWholeRemoteSiteResources(previewContext, remoteSourceURL, string(htmlBytes), "/", a.grabTracker, progressToken, publicSourceOptions)
 	importedPages := wholeSitePreview.ImportedPages
 	if len(importedPages) == 0 {
 		importedPages = initialImportedPages
@@ -8710,15 +8795,15 @@ func (a *App) publicTrialSitePreview(w http.ResponseWriter, r *http.Request) {
 		FitsFreePlan:   fitsFreePlan,
 	}
 	a.activePublicTrialPreviewStore().Save(preview)
-	if a.grabTracker != nil && previewSpider != nil {
-		a.grabTracker.publish(previewSpider.finalProgressEvent(progressToken, "done"))
+	status := "done"
+	if wholeSitePreview.Partial || previewSpider.unresolvedFailedTotal() > 0 || previewContext.Err() != nil {
+		status = "partial"
 	}
-	translations := translationsForRequest(r)
 	message := publicTrialPlanMessage(translations, preview)
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(publicTrialPreviewResponse{
+	response := publicTrialPreviewResponse{
+		Status:         status,
 		SourceURL:      sourceURL,
-		PreviewURL:     absoluteURLForPath(r, "/?trial_site_preview_frame&token="+url.QueryEscape(progressToken)),
+		PreviewURL:     previewURL,
 		PageCount:      preview.PageCount,
 		ResourceCount:  preview.ResourceCount,
 		ResourceCounts: preview.ResourceCounts,
@@ -8730,7 +8815,53 @@ func (a *App) publicTrialSitePreview(w http.ResponseWriter, r *http.Request) {
 		Plan:           preview.Plan,
 		FreePlan:       preview.FreePlan,
 		Message:        message,
-	})
+		FailedTotal:    previewSpider.unresolvedFailedTotal(),
+		FailedURLs:     previewSpider.failedResourceURLList(),
+		FailedReasons:  previewSpider.failedResourceReasonMap(),
+	}
+	a.activePublicTrialPreviewStore().Complete(progressToken, status, response)
+	if a.grabTracker != nil && previewSpider != nil {
+		a.grabTracker.publish(previewSpider.finalProgressEvent(progressToken, status))
+	}
+}
+
+func (a *App) publicTrialSitePreviewStatus(w http.ResponseWriter, r *http.Request) {
+	if !a.publicTrialAllowed(r) || r.Method != http.MethodGet {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	progressToken := strings.TrimSpace(r.URL.Query().Get("token"))
+	status, found := a.activePublicTrialPreviewStore().Status(progressToken)
+	if !found {
+		http.Error(w, "preview not found", http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Content-Type", "application/json")
+	switch status.Status {
+	case "done", "partial":
+		_ = json.NewEncoder(w).Encode(status.Response)
+	case "error":
+		_ = json.NewEncoder(w).Encode(map[string]string{"status": "error", "error": status.ErrorText})
+	default:
+		w.WriteHeader(http.StatusAccepted)
+		_ = json.NewEncoder(w).Encode(map[string]string{"token": progressToken, "status": status.Status})
+	}
+}
+
+func (a *App) publicTrialSitePreviewCancel(w http.ResponseWriter, r *http.Request) {
+	if !a.publicTrialAllowed(r) || r.Method != http.MethodPost {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	progressToken := strings.TrimSpace(r.FormValue("progress_token"))
+	if progressToken == "" {
+		http.Error(w, "progress_token is required", http.StatusBadRequest)
+		return
+	}
+	canceled := a.activePublicTrialPreviewStore().Cancel(progressToken)
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{"status": "ok", "canceled": canceled})
 }
 
 func (a *App) publicTrialSitePreviewFrame(w http.ResponseWriter, r *http.Request) {
@@ -8799,6 +8930,10 @@ func (a *App) publicTrialSiteCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	progressToken := strings.TrimSpace(r.FormValue("progress_token"))
+	createProgressToken := strings.TrimSpace(r.FormValue("create_progress_token"))
+	if createProgressToken == "" {
+		createProgressToken = progressToken
+	}
 	preview, found := a.activePublicTrialPreviewStore().Get(progressToken)
 	if !found {
 		http.Error(w, "preview not found", http.StatusNotFound)
@@ -8809,7 +8944,7 @@ func (a *App) publicTrialSiteCreate(w http.ResponseWriter, r *http.Request) {
 	if len(selectedResourceURLs) == 0 && !selectionConfirmed {
 		selectedResourceURLs = publicTrialResourceURLMap(preview.Resources)
 	}
-	preview = a.preparePublicTrialPreviewForCreate(r.Context(), preview, selectedResourceURLs, progressToken)
+	preview = a.preparePublicTrialPreviewForCreate(r.Context(), preview, selectedResourceURLs, createProgressToken)
 	controlDatabase, err := a.openServerControlDatabase(r.Context())
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -8876,10 +9011,17 @@ func (a *App) publicTrialSiteWS(w http.ResponseWriter, r *http.Request) {
 	if err := connection.WriteText(readyEventJSON); err != nil {
 		return
 	}
+	heartbeatTicker := time.NewTicker(20 * time.Second)
+	defer heartbeatTicker.Stop()
 	for {
 		select {
 		case <-r.Context().Done():
 			return
+		case <-heartbeatTicker.C:
+			heartbeatJSON, marshalHeartbeatErr := json.Marshal(grabProgressEvent{Token: progressToken, Stage: "heartbeat"})
+			if marshalHeartbeatErr != nil || connection.WriteText(heartbeatJSON) != nil {
+				return
+			}
 		case event, isOpen := <-events:
 			if !isOpen {
 				return
@@ -9601,7 +9743,7 @@ func (a *App) grabPreview(w http.ResponseWriter, r *http.Request) {
 	var pageDownloadBytes int64
 	var previewSpider *pageSpider
 	if grabCopyWholeSite(r) {
-		wholeSitePreview := previewWholeRemoteSiteResources(remoteSourceURL, string(htmlBytes), pagePath, a.grabTracker, progressToken, sourceOptions)
+		wholeSitePreview := previewWholeRemoteSiteResources(r.Context(), remoteSourceURL, string(htmlBytes), pagePath, a.grabTracker, progressToken, sourceOptions)
 		resources = wholeSitePreview.Resources
 		pageCount = wholeSitePreview.PageCount
 		importedPages = wholeSitePreview.ImportedPages
@@ -10181,10 +10323,10 @@ func previewResourcesFromSpider(spider *pageSpider, excludedURLs map[string]stru
 	return resources
 }
 
-func previewWholeRemoteSiteResources(startURL *url.URL, startHTML, publicAssetBasePath string, tracker *grabProgressTracker, progressToken string, sourceOptions grabSourceOptions) wholeSitePreviewResult {
-	spider, pageURLs, importedPages := crawlWholeRemoteSite(startURL, startHTML, publicAssetBasePath, tracker, progressToken, sourceOptions)
+func previewWholeRemoteSiteResources(ctx context.Context, startURL *url.URL, startHTML, publicAssetBasePath string, tracker *grabProgressTracker, progressToken string, sourceOptions grabSourceOptions) wholeSitePreviewResult {
+	spider, pageURLs, importedPages, partial := crawlWholeRemoteSite(ctx, startURL, startHTML, publicAssetBasePath, tracker, progressToken, sourceOptions)
 	resources := previewResourcesFromSpider(spider, pageURLs)
-	return wholeSitePreviewResult{PageCount: len(pageURLs), Resources: resources, ImportedPages: importedPages, Spider: spider}
+	return wholeSitePreviewResult{PageCount: len(pageURLs), Resources: resources, ImportedPages: importedPages, Spider: spider, Partial: partial}
 }
 
 func (a *App) prepareWholeRemoteSiteImport(importRequest grabImportRequest) (*pageSpider, []wholeSiteImportedPage, error) {
@@ -10313,8 +10455,19 @@ func (a *App) importWholeRemoteSite(ctx context.Context, importRequest grabImpor
 	return grabImportResult{RedirectPath: cleanPath(importRequest.PagePath), FailedTotal: spider.unresolvedFailedTotal(), FailedURLs: spider.failedResourceURLList(), FailedReasons: spider.failedResourceReasonMap()}, nil
 }
 
-func crawlWholeRemoteSite(startURL *url.URL, startHTML, publicAssetBasePath string, tracker *grabProgressTracker, progressToken string, sourceOptions grabSourceOptions) (*pageSpider, map[string]struct{}, []wholeSiteImportedPage) {
+type wholeSitePreviewPageResult struct {
+	job        wholeSitePageJob
+	html       string
+	downloaded bool
+	err        error
+}
+
+func crawlWholeRemoteSite(ctx context.Context, startURL *url.URL, startHTML, publicAssetBasePath string, tracker *grabProgressTracker, progressToken string, sourceOptions grabSourceOptions) (*pageSpider, map[string]struct{}, []wholeSiteImportedPage, bool) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	spider := newPreviewPageSpider("", startURL, grabResourceMaxDepth, tracker, progressToken, sourceOptions)
+	spider.setContext(ctx)
 	spider.publicAssetBasePath = publicAssetBasePath
 	spider.documentURLRewriter = func(normalizedURL string) (string, bool) {
 		parsedURL, parseErr := url.Parse(normalizedURL)
@@ -10329,60 +10482,143 @@ func crawlWholeRemoteSite(startURL *url.URL, startHTML, publicAssetBasePath stri
 	pageQueue := []wholeSitePageJob{{URL: crawler.CloneURL(startURL), HTML: startHTML}}
 	importedPages := make([]wholeSiteImportedPage, 0, 32)
 	consecutiveFailures := 0
+	partial := false
 	spider.foundTotal++
 	spider.publishProgress("found", startURL.String(), 0)
-	for len(pageQueue) > 0 && len(pageURLs) < wholeSiteImportMaxPages {
-		if consecutiveFailures >= wholeSiteImportConsecutiveFailureLimit {
-			spider.publishResourceProgress("partial", crawler.CurrentWholeSiteImportURL(pageQueue), 0, 0, -1)
-			break
+
+	pageJobs := make(chan wholeSitePageJob)
+	pageResults := make(chan wholeSitePreviewPageResult, wholeSitePreviewPageConcurrency)
+	workerDone := make(chan struct{}, wholeSitePreviewPageConcurrency)
+	for workerIndex := 0; workerIndex < wholeSitePreviewPageConcurrency; workerIndex++ {
+		go func() {
+			defer func() {
+				workerDone <- struct{}{}
+			}()
+			for pageJob := range pageJobs {
+				pageHTML := pageJob.HTML
+				downloaded := true
+				var downloadErr error
+				if strings.TrimSpace(pageHTML) == "" {
+					pageHTML, downloaded, downloadErr = downloadWholeSitePageHTMLWithRetries(ctx, pageClient, pageJob.URL, sourceOptions, grabImportFailedResourceRetryAttempts)
+				}
+				pageResults <- wholeSitePreviewPageResult{job: pageJob, html: pageHTML, downloaded: downloaded, err: downloadErr}
+			}
+		}()
+	}
+
+	inFlight := 0
+	stopDispatch := false
+	contextDone := ctx.Done()
+	for (len(pageQueue) > 0 && !stopDispatch) || inFlight > 0 {
+		var nextJob wholeSitePageJob
+		var nextJobChannel chan wholeSitePageJob
+		if !stopDispatch && len(pageQueue) > 0 && inFlight < wholeSitePreviewPageConcurrency {
+			nextJob = pageQueue[0]
+			nextJobChannel = pageJobs
 		}
-		currentJob := pageQueue[0]
-		pageQueue = pageQueue[1:]
-		if currentJob.URL == nil {
-			continue
-		}
-		pageKey := crawler.WholeSitePageKey(currentJob.URL)
-		if pageKey == "" {
-			continue
-		}
-		pageHTML := currentJob.HTML
-		if strings.TrimSpace(pageHTML) == "" {
-			downloadedHTML, downloaded, downloadErr := downloadWholeSitePageHTML(pageClient, currentJob.URL, sourceOptions)
-			if downloadErr != nil || !downloaded {
+		select {
+		case <-contextDone:
+			partial = true
+			stopDispatch = true
+			pageQueue = nil
+			contextDone = nil
+		case nextJobChannel <- nextJob:
+			pageQueue = pageQueue[1:]
+			inFlight++
+		case pageResult := <-pageResults:
+			inFlight--
+			currentJob := pageResult.job
+			if currentJob.URL == nil {
+				continue
+			}
+			pageKey := crawler.WholeSitePageKey(currentJob.URL)
+			if pageKey == "" {
+				continue
+			}
+			if pageResult.err != nil || !pageResult.downloaded {
 				spider.failedTotal++
 				consecutiveFailures++
+				spider.recordFailedResource(currentJob.URL.String(), crawler.ErrorReason(pageResult.err))
 				spider.publishResourceProgress("error", currentJob.URL.String(), 0, 0, -1)
+				if consecutiveFailures >= wholeSiteImportConsecutiveFailureLimit {
+					partial = true
+					stopDispatch = true
+					pageQueue = nil
+					spider.publishResourceProgress("partial", currentJob.URL.String(), 0, 0, -1)
+				}
 				continue
 			}
-			pageHTML = downloadedHTML
+			pageHTML := pageResult.html
+			for _, linkedPageURL := range crawler.ExtractPageLinks(pageHTML, currentJob.URL, startURL) {
+				linkedPageKey := crawler.WholeSitePageKey(linkedPageURL)
+				if linkedPageKey == "" {
+					continue
+				}
+				if _, alreadyKnown := knownPagePathsByKey[linkedPageKey]; alreadyKnown {
+					continue
+				}
+				if len(knownPagePathsByKey) >= wholeSiteImportMaxPages {
+					partial = true
+					break
+				}
+				knownPagePathsByKey[linkedPageKey] = crawler.WholeSiteLocalPath(cleanPath(publicAssetBasePath), startURL, linkedPageURL)
+				pageQueue = append(pageQueue, wholeSitePageJob{URL: crawler.CloneURL(linkedPageURL)})
+				pageURLs[linkedPageURL.String()] = struct{}{}
+				spider.foundTotal++
+				spider.publishProgress("found", linkedPageURL.String(), 0)
+			}
+			rootResource := &mirroredResource{url: currentJob.URL.String(), content: []byte(pageHTML)}
+			spider.resources[currentJob.URL.String()] = rootResource
+			spider.collectPreviewNestedResources(rootResource, 0, "text/html")
+			importedPages = append(importedPages, wholeSiteImportedPage{SourceURL: currentJob.URL.String(), LocalPath: knownPagePathsByKey[pageKey], HTML: string(rootResource.content)})
+			spider.downloadedTotal++
+			consecutiveFailures = 0
+			spider.publishResourceProgress("downloaded", currentJob.URL.String(), 100, int64(len(pageHTML)), int64(len(pageHTML)))
 		}
-		for _, linkedPageURL := range crawler.ExtractPageLinks(pageHTML, currentJob.URL, startURL) {
-			linkedPageKey := crawler.WholeSitePageKey(linkedPageURL)
-			if linkedPageKey == "" {
-				continue
-			}
-			if _, alreadyKnown := knownPagePathsByKey[linkedPageKey]; alreadyKnown {
-				continue
-			}
-			if len(knownPagePathsByKey) >= wholeSiteImportMaxPages {
-				break
-			}
-			knownPagePathsByKey[linkedPageKey] = crawler.WholeSiteLocalPath(cleanPath(publicAssetBasePath), startURL, linkedPageURL)
-			pageQueue = append(pageQueue, wholeSitePageJob{URL: crawler.CloneURL(linkedPageURL)})
-			pageURLs[linkedPageURL.String()] = struct{}{}
-			spider.foundTotal++
-			spider.publishProgress("found", linkedPageURL.String(), 0)
-		}
-		rootResource := &mirroredResource{url: currentJob.URL.String(), content: []byte(pageHTML)}
-		spider.resources[currentJob.URL.String()] = rootResource
-		spider.collectPreviewNestedResources(rootResource, 0, "text/html")
-		importedPages = append(importedPages, wholeSiteImportedPage{SourceURL: currentJob.URL.String(), LocalPath: knownPagePathsByKey[pageKey], HTML: string(rootResource.content)})
-		spider.downloadedTotal++
-		consecutiveFailures = 0
-		spider.publishResourceProgress("downloaded", currentJob.URL.String(), 100, int64(len(pageHTML)), int64(len(pageHTML)))
+	}
+	close(pageJobs)
+	for workerIndex := 0; workerIndex < wholeSitePreviewPageConcurrency; workerIndex++ {
+		<-workerDone
+	}
+
+	if ctx.Err() != nil {
+		partial = true
 	}
 	spider.collectPreviewImportedPagesStaticURLTextReferences(importedPages)
-	return spider, pageURLs, importedPages
+	return spider, pageURLs, importedPages, partial
+}
+
+func downloadWholeSitePageHTMLWithRetries(ctx context.Context, client *http.Client, pageURL *url.URL, sourceOptions grabSourceOptions, retries int) (string, bool, error) {
+	if retries < 0 {
+		retries = 0
+	}
+	var lastErr error
+	for attempt := 0; attempt <= retries; attempt++ {
+		if attempt > 0 {
+			retryTimer := time.NewTimer(grabImportFailedResourceRetryDelay)
+			select {
+			case <-ctx.Done():
+				if !retryTimer.Stop() {
+					select {
+					case <-retryTimer.C:
+					default:
+					}
+				}
+				return "", false, ctx.Err()
+			case <-retryTimer.C:
+			}
+		}
+		pageHTML, downloaded, err := downloadWholeSitePageHTMLContext(ctx, client, pageURL, sourceOptions)
+		if err == nil && downloaded {
+			return pageHTML, true, nil
+		}
+		if err != nil {
+			lastErr = err
+		} else {
+			lastErr = errors.New("page was not downloaded")
+		}
+	}
+	return "", false, lastErr
 }
 
 func (a *App) storeWholeSiteImportedPages(ctx context.Context, domain string, importedPages []wholeSiteImportedPage) error {
@@ -24237,14 +24473,21 @@ func (spider *pageSpider) collectPreviewResource(normalizedURL string, depth int
 	spider.inFlight[normalizedURL] = true
 	defer delete(spider.inFlight, normalizedURL)
 
-	contentType, contentLength := spider.previewResourceMetadata(normalizedURL)
+	contentType, contentLength, metadataErr := spider.previewResourceMetadata(normalizedURL)
 	resource.contentType = contentType
 	if contentLength >= 0 {
 		resource.sizeBytes = contentLength
 	}
+	if metadataErr != nil {
+		spider.failedTotal++
+		spider.recordFailedResource(normalizedURL, crawler.ErrorReason(metadataErr))
+	}
 	if isImportedHTMLContentType(contentType) {
 		delete(spider.resources, normalizedURL)
-		spider.failedTotal++
+		if metadataErr == nil {
+			spider.failedTotal++
+		}
+		spider.recordFailedResource(normalizedURL, "content-type")
 		spider.publishResourceProgress("error", normalizedURL, 0, 0, contentLength)
 		return
 	}
@@ -24260,6 +24503,7 @@ func (spider *pageSpider) collectPreviewResource(normalizedURL string, depth int
 	body, bodyContentType, bodySizeBytes, fetchErr := spider.fetchPreviewResourceBody(normalizedURL)
 	if fetchErr != nil {
 		spider.failedTotal++
+		spider.recordFailedResource(normalizedURL, crawler.ErrorReason(fetchErr))
 		spider.publishResourceProgress("error", normalizedURL, 0, 0, resource.sizeBytes)
 		return
 	}
@@ -24271,30 +24515,57 @@ func (spider *pageSpider) collectPreviewResource(normalizedURL string, depth int
 	}
 	resource.content = body
 	spider.downloadedTotal++
+	spider.clearFailedResource(normalizedURL)
 	spider.publishResourceProgress("downloaded", normalizedURL, 100, int64(len(body)), resource.sizeBytes)
 	spider.collectPreviewNestedResources(resource, depth+1, resource.contentType)
 }
 
-func (spider *pageSpider) previewResourceMetadata(normalizedURL string) (string, int64) {
+func (spider *pageSpider) previewResourceMetadata(normalizedURL string) (string, int64, error) {
 	resourceURL, parseErr := url.Parse(normalizedURL)
 	if parseErr != nil || outboundhttp.RequirePublicURL(resourceURL) != nil {
-		return "", -1
+		return "", -1, errors.New("resource URL is not public")
 	}
 	request, err := http.NewRequestWithContext(spider.context(), http.MethodHead, normalizedURL, nil)
 	if err != nil {
-		return "", -1
+		return "", -1, err
 	}
 	applyGrabRequestHeaders(request, spider.sourceOptions)
 	response, err := spider.client.Do(request)
+	if err == nil && response.StatusCode < 400 {
+		defer response.Body.Close()
+		contentType := crawler.EffectiveResourceContentType(normalizedURL, response.Header.Get("Content-Type"))
+		return contentType, response.ContentLength, nil
+	}
+	if response != nil {
+		response.Body.Close()
+	}
+	return spider.previewResourceMetadataWithRangeGET(normalizedURL)
+}
+
+func (spider *pageSpider) previewResourceMetadataWithRangeGET(normalizedURL string) (string, int64, error) {
+	request, err := http.NewRequestWithContext(spider.context(), http.MethodGet, normalizedURL, nil)
 	if err != nil {
-		return "", -1
+		return "", -1, err
+	}
+	applyGrabRequestHeaders(request, spider.sourceOptions)
+	request.Header.Set("Range", "bytes=0-0")
+	response, err := spider.client.Do(request)
+	if err != nil {
+		return "", -1, err
 	}
 	defer response.Body.Close()
 	if response.StatusCode >= 400 {
-		return "", -1
+		return "", -1, fmt.Errorf("resource metadata failed: %s", response.Status)
 	}
 	contentType := crawler.EffectiveResourceContentType(normalizedURL, response.Header.Get("Content-Type"))
-	return contentType, response.ContentLength
+	contentLength := response.ContentLength
+	contentRange := strings.TrimSpace(response.Header.Get("Content-Range"))
+	if slashIndex := strings.LastIndex(contentRange, "/"); slashIndex >= 0 {
+		if totalLength, parseLengthErr := strconv.ParseInt(strings.TrimSpace(contentRange[slashIndex+1:]), 10, 64); parseLengthErr == nil {
+			contentLength = totalLength
+		}
+	}
+	return contentType, contentLength, nil
 }
 
 func (spider *pageSpider) shouldFetchPreviewResourceBody(normalizedURL, contentType string) bool {
@@ -24438,12 +24709,18 @@ type grabCancelRequest struct {
 }
 
 type publicTrialPreviewRequest struct {
-	action  string
-	token   string
-	preview publicTrialPreview
-	result  chan publicTrialPreview
-	found   chan bool
-	done    chan struct{}
+	action        string
+	token         string
+	preview       publicTrialPreview
+	response      publicTrialPreviewResponse
+	status        string
+	errorText     string
+	result        chan publicTrialPreview
+	statusResult  chan publicTrialPreviewJobStatus
+	cancelSession chan chan struct{}
+	started       chan bool
+	found         chan bool
+	done          chan struct{}
 }
 
 type grabCancelTracker struct {
@@ -24607,13 +24884,56 @@ func (store *publicTrialPreviewStore) Delete(token string) {
 	<-done
 }
 
+func (store *publicTrialPreviewStore) Start(token string) (<-chan struct{}, bool) {
+	cancelSessionResult := make(chan chan struct{})
+	startedResult := make(chan bool)
+	store.requests <- publicTrialPreviewRequest{action: "start", token: token, cancelSession: cancelSessionResult, started: startedResult}
+	cancelSession := <-cancelSessionResult
+	return cancelSession, <-startedResult
+}
+
+func (store *publicTrialPreviewStore) Complete(token, status string, response publicTrialPreviewResponse) {
+	done := make(chan struct{})
+	store.requests <- publicTrialPreviewRequest{action: "complete", token: token, status: status, response: response, done: done}
+	<-done
+}
+
+func (store *publicTrialPreviewStore) Fail(token, errorText string) {
+	done := make(chan struct{})
+	store.requests <- publicTrialPreviewRequest{action: "fail", token: token, errorText: errorText, done: done}
+	<-done
+}
+
+func (store *publicTrialPreviewStore) Status(token string) (publicTrialPreviewJobStatus, bool) {
+	statusResult := make(chan publicTrialPreviewJobStatus)
+	foundResult := make(chan bool)
+	store.requests <- publicTrialPreviewRequest{action: "status", token: token, statusResult: statusResult, found: foundResult}
+	status := <-statusResult
+	return status, <-foundResult
+}
+
+func (store *publicTrialPreviewStore) Cancel(token string) bool {
+	canceledResult := make(chan bool)
+	store.requests <- publicTrialPreviewRequest{action: "cancel", token: token, started: canceledResult}
+	return <-canceledResult
+}
+
 func (store *publicTrialPreviewStore) loop() {
 	previewsByToken := make(map[string]publicTrialPreview)
+	jobsByToken := make(map[string]publicTrialPreviewJob)
 	for request := range store.requests {
 		now := time.Now()
 		for token, preview := range previewsByToken {
 			if preview.CreatedAt.IsZero() || now.Sub(preview.CreatedAt) > time.Hour {
 				delete(previewsByToken, token)
+			}
+		}
+		for token, job := range jobsByToken {
+			if job.status.UpdatedAt.IsZero() || now.Sub(job.status.UpdatedAt) > time.Hour {
+				if job.status.Status == "running" {
+					close(job.cancelSession)
+				}
+				delete(jobsByToken, token)
 			}
 		}
 		switch request.action {
@@ -24629,7 +24949,53 @@ func (store *publicTrialPreviewStore) loop() {
 			request.found <- found
 		case "delete":
 			delete(previewsByToken, strings.TrimSpace(request.token))
+			delete(jobsByToken, strings.TrimSpace(request.token))
 			close(request.done)
+		case "start":
+			token := strings.TrimSpace(request.token)
+			_, found := jobsByToken[token]
+			if token == "" || found {
+				request.cancelSession <- nil
+				request.started <- false
+				continue
+			}
+			cancelSession := make(chan struct{})
+			jobsByToken[token] = publicTrialPreviewJob{
+				status:        publicTrialPreviewJobStatus{Status: "running", UpdatedAt: now},
+				cancelSession: cancelSession,
+			}
+			request.cancelSession <- cancelSession
+			request.started <- true
+		case "complete":
+			job, found := jobsByToken[request.token]
+			if found {
+				job.status = publicTrialPreviewJobStatus{Status: request.status, Response: request.response, UpdatedAt: now}
+				jobsByToken[request.token] = job
+			}
+			close(request.done)
+		case "fail":
+			job, found := jobsByToken[request.token]
+			if found {
+				job.status = publicTrialPreviewJobStatus{Status: "error", ErrorText: request.errorText, UpdatedAt: now}
+				jobsByToken[request.token] = job
+			}
+			close(request.done)
+		case "status":
+			job, found := jobsByToken[strings.TrimSpace(request.token)]
+			request.statusResult <- job.status
+			request.found <- found
+		case "cancel":
+			job, found := jobsByToken[strings.TrimSpace(request.token)]
+			if !found || job.status.Status != "running" {
+				request.started <- false
+				continue
+			}
+			close(job.cancelSession)
+			job.cancelSession = nil
+			job.status.Status = "canceling"
+			job.status.UpdatedAt = now
+			jobsByToken[request.token] = job
+			request.started <- true
 		}
 	}
 }
