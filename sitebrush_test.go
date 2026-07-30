@@ -1561,6 +1561,9 @@ func TestExpensesTemplateShowsOnlyLocalServerAndEnabledDemoOutsideSitebrushCom(t
 	}
 
 	disabledDemoHTML := renderSnapshot(baseSnapshot)
+	if !strings.Contains(disabledDemoHTML, "Сервер и расходы") {
+		t.Fatal("regular server did not render the singular expenses title")
+	}
 	for _, forbiddenFragment := range []string{
 		`data-hosting-installation-tab="desktop"`,
 		`data-hosting-installation-panel="desktop"`,
@@ -1630,6 +1633,38 @@ func TestExpensesTemplateShowsOnlyLocalServerAndEnabledDemoOutsideSitebrushCom(t
 		if !strings.Contains(centralHTML, expectedFragment) {
 			t.Fatalf("central expenses missing %q", expectedFragment)
 		}
+	}
+}
+
+func TestExpensesTitlesUseServerScopeInEveryLanguage(t *testing.T) {
+	for languageCode, translations := range translationCatalog {
+		for _, translationKey := range []string{"expenses_title", "expenses_central_title", "menu_expenses", "menu_expenses_central"} {
+			if strings.TrimSpace(translations[translationKey]) == "" {
+				t.Fatalf("language %s is missing %s", languageCode, translationKey)
+			}
+		}
+	}
+
+	application := &App{}
+	for _, testCase := range []struct {
+		name       string
+		language   string
+		mainDomain string
+		expected   string
+	}{
+		{name: "regular Russian server", language: "ru", mainDomain: "owner.example", expected: "Сервер и расходы"},
+		{name: "central Russian server", language: "ru", mainDomain: "sitebrush.com", expected: "Серверы и расходы"},
+		{name: "regular English server", language: "en", mainDomain: "owner.example", expected: "Server and expenses"},
+		{name: "central English server", language: "en", mainDomain: "sitebrush.com", expected: "Servers and expenses"},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodGet, "https://"+testCase.mainDomain+"/?expenses", nil)
+			request.Header.Set("Accept-Language", testCase.language)
+			view := application.hostingAndSupportPanelView(request, hostingAndSupportPanelSnapshot{MainDomain: testCase.mainDomain})
+			if title := view["Title"]; title != testCase.expected {
+				t.Fatalf("title = %q, want %q", title, testCase.expected)
+			}
+		})
 	}
 }
 
@@ -3360,6 +3395,13 @@ func TestServerManagerEmailTreatsLoopbackAsLocalhost(t *testing.T) {
 	menuScript := buildContextMenuScript(true, true, false, false, true, "/", "example.com", 0, 0, "", translationsForLanguageCode("ru"))
 	if !strings.Contains(menuScript, "?expenses") {
 		t.Fatal("server manager menu does not contain expenses link")
+	}
+	if !strings.Contains(menuScript, "Сервер и расходы") {
+		t.Fatal("regular server menu does not use the singular expenses title")
+	}
+	centralMenuScript := buildContextMenuScript(true, true, false, false, true, "/", "sitebrush.com", 0, 0, "", translationsForLanguageCode("ru"))
+	if !strings.Contains(centralMenuScript, "Серверы и расходы") {
+		t.Fatal("sitebrush.com menu does not use the plural expenses title")
 	}
 }
 

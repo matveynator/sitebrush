@@ -11357,7 +11357,7 @@ func (a *App) hostingAndSupportDemoPaymentPage(w http.ResponseWriter, r *http.Re
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	_, _ = io.WriteString(w, `<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>SiteBrush.com demo payment</title><link href="/p/static/technical_pages.css" rel="stylesheet"></head><body class="technical-page bg-body"><main class="container billing-page py-5"><section class="card billing-card"><div class="card-body"><p class="text-muted">SiteBrush.com demo payments</p><h1>Демо-оплата счёта `+template.HTMLEscapeString(invoiceNumber)+`</h1><p>Платёжная страница подготовлена как демо-настройка первого этапа. Реальное списание здесь не выполняется.</p><a class="btn btn-primary" href="/?expenses">Вернуться в Расходы</a></div></section></main></body></html>`)
+	_, _ = io.WriteString(w, `<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>SiteBrush.com demo payment</title><link href="/p/static/technical_pages.css" rel="stylesheet"></head><body class="technical-page bg-body"><main class="container billing-page py-5"><section class="card billing-card"><div class="card-body"><p class="text-muted">SiteBrush.com demo payments</p><h1>Демо-оплата счёта `+template.HTMLEscapeString(invoiceNumber)+`</h1><p>Платёжная страница подготовлена как демо-настройка первого этапа. Реальное списание здесь не выполняется.</p><a class="btn btn-primary" href="/?expenses">Вернуться в «Серверы и расходы»</a></div></section></main></body></html>`)
 }
 
 func (a *App) redirectToHostingAndSupportMainDomain(w http.ResponseWriter, r *http.Request) bool {
@@ -11829,9 +11829,13 @@ func (a *App) applyHostingAndSupportPanelQuotaChange(snapshot hostingAndSupportP
 
 func (a *App) hostingAndSupportPanelView(r *http.Request, snapshot hostingAndSupportPanelSnapshot) map[string]any {
 	translations := translationsForRequest(r)
+	expensesTitle := translationOrDefault(translations, "expenses_title", "Сервер и расходы")
+	if normalizeDomainName(snapshot.MainDomain) == "sitebrush.com" {
+		expensesTitle = translationOrDefault(translations, "expenses_central_title", "Серверы и расходы")
+	}
 	return map[string]any{
 		"T":                        translations,
-		"Title":                    translationOrDefault(translations, "expenses_title", "Расходы"),
+		"Title":                    expensesTitle,
 		"Sites":                    snapshot.Sites,
 		"Plans":                    snapshot.Plans,
 		"PaymentProviders":         hostingandsupport.DemoPaymentProviders(absoluteURLForPath(r, "/?hosting_and_support_demo_payment&invoice={invoice}")),
@@ -21564,7 +21568,11 @@ func buildContextMenuScript(isAdmin bool, isServerManager bool, isFrozen bool, p
 	publishLabel := template.JSEscapeString(translationOrDefault(translations, "menu_publish", "Publish"))
 	settingsLabel := template.JSEscapeString(translationOrDefault(translations, "menu_domain_settings", "Settings"))
 	analyticsLabel := template.JSEscapeString(translationOrDefault(translations, "menu_analytics", "Analytics"))
-	hostingAndSupportLabel := template.JSEscapeString(translationOrDefault(translations, "menu_expenses", "Расходы"))
+	hostingAndSupportLabel := translationOrDefault(translations, "menu_expenses", "Сервер и расходы")
+	if normalizeDomainName(domain) == "sitebrush.com" {
+		hostingAndSupportLabel = translationOrDefault(translations, "menu_expenses_central", "Серверы и расходы")
+	}
+	hostingAndSupportLabel = template.JSEscapeString(hostingAndSupportLabel)
 	profileLabel := template.JSEscapeString(translationOrDefault(translations, "menu_profile", "Account"))
 	logoutLabel := template.JSEscapeString(translationOrDefault(translations, "menu_logout", "Sign out"))
 	loginLabel := template.JSEscapeString(translationOrDefault(translations, "menu_login", "Sign in"))

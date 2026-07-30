@@ -487,8 +487,10 @@
     "billing_demo_refresh_updating_progress": "Local copy is updating...",
     "billing_demo_refresh_finish_hint": "The repeated attempt failed too. You can finish the update and leave these files external.",
     "billing_title": "Hosting and Support",
-    "expenses_title": "Expenses",
-    "menu_expenses": "Expenses",
+    "expenses_title": "Server and expenses",
+    "expenses_central_title": "Servers and expenses",
+    "menu_expenses": "Server and expenses",
+    "menu_expenses_central": "Servers and expenses",
     "expenses_server_monthly_expense": "server expenses per month",
     "expenses_capacity_cost_per_gb": "provider cost per GB of capacity",
     "expenses_shared_cost_per_gb": "shared cost per occupied GB",
@@ -828,8 +830,10 @@
     "billing_service_mail_block_reason_help": "Optional note shown in the relay log so the block can be audited later."
   },
   "fr": {
-    "expenses_title": "Dépenses",
-    "menu_expenses": "Dépenses",
+    "expenses_title": "Serveur et dépenses",
+    "expenses_central_title": "Serveurs et dépenses",
+    "menu_expenses": "Serveur et dépenses",
+    "menu_expenses_central": "Serveurs et dépenses",
     "expenses_server_select": "Serveur",
     "expenses_monthly_server_price": "prix mensuel du serveur",
     "expenses_automatic_price_per_gb": "Prix automatique basé sur les 30 % facturables",
@@ -2023,8 +2027,10 @@
     "billing_demo_refresh_updating_progress": "Локальная копия обновляется...",
     "billing_demo_refresh_finish_hint": "Повторная попытка тоже не скачала эти файлы. Можно завершить обновление и оставить их внешними.",
     "billing_title": "Хостинг и поддержка",
-    "expenses_title": "Расходы",
-    "menu_expenses": "Расходы",
+    "expenses_title": "Сервер и расходы",
+    "expenses_central_title": "Серверы и расходы",
+    "menu_expenses": "Сервер и расходы",
+    "menu_expenses_central": "Серверы и расходы",
     "expenses_server_monthly_expense": "расходы сервера в месяц",
     "expenses_capacity_cost_per_gb": "себестоимость ГБ емкости",
     "expenses_shared_cost_per_gb": "доля на занятый платный ГБ",
@@ -2364,8 +2370,10 @@
     "billing_service_mail_block_reason_help": "Необязательная заметка для журнала relay, чтобы позже было понятно, почему добавлена блокировка."
   },
   "ja": {
-    "expenses_title": "経費",
-    "menu_expenses": "経費",
+    "expenses_title": "サーバーと費用",
+    "expenses_central_title": "サーバーと費用",
+    "menu_expenses": "サーバーと費用",
+    "menu_expenses_central": "サーバーと費用",
     "expenses_server_select": "サーバー",
     "expenses_monthly_server_price": "サーバーの月額",
     "expenses_automatic_price_per_gb": "課金容量30%からの自動単価",
@@ -3072,8 +3080,10 @@
     "billing_service_mail_block_reason_help": "Optional note shown in the relay log so the block can be audited later."
   },
   "it": {
-    "expenses_title": "Spese",
-    "menu_expenses": "Spese",
+    "expenses_title": "Server e spese",
+    "expenses_central_title": "Server e spese",
+    "menu_expenses": "Server e spese",
+    "menu_expenses_central": "Server e spese",
     "expenses_server_select": "Server",
     "expenses_monthly_server_price": "prezzo mensile del server",
     "expenses_automatic_price_per_gb": "Prezzo automatico dalla capacità fatturabile del 30%",
@@ -3780,8 +3790,10 @@
     "billing_service_mail_block_reason_help": "Optional note shown in the relay log so the block can be audited later."
   },
   "sv": {
-    "expenses_title": "Kostnader",
-    "menu_expenses": "Kostnader",
+    "expenses_title": "Server och kostnader",
+    "expenses_central_title": "Servrar och kostnader",
+    "menu_expenses": "Server och kostnader",
+    "menu_expenses_central": "Servrar och kostnader",
     "expenses_server_select": "Server",
     "expenses_monthly_server_price": "serverpris per månad",
     "expenses_automatic_price_per_gb": "Automatiskt pris från 30% debiterbar kapacitet",
@@ -4488,8 +4500,10 @@
     "billing_service_mail_block_reason_help": "Optional note shown in the relay log so the block can be audited later."
   },
   "fi": {
-    "expenses_title": "Kulut",
-    "menu_expenses": "Kulut",
+    "expenses_title": "Palvelin ja kulut",
+    "expenses_central_title": "Palvelimet ja kulut",
+    "menu_expenses": "Palvelin ja kulut",
+    "menu_expenses_central": "Palvelimet ja kulut",
     "expenses_server_select": "Palvelin",
     "expenses_monthly_server_price": "palvelimen kuukausihinta",
     "expenses_automatic_price_per_gb": "Automaattinen hinta 30% laskutuskapasiteetista",
@@ -5196,8 +5210,10 @@
     "billing_service_mail_block_reason_help": "Optional note shown in the relay log so the block can be audited later."
   },
   "mn": {
-    "expenses_title": "Зардал",
-    "menu_expenses": "Зардал",
+    "expenses_title": "Сервер ба зардал",
+    "expenses_central_title": "Серверүүд ба зардал",
+    "menu_expenses": "Сервер ба зардал",
+    "menu_expenses_central": "Серверүүд ба зардал",
     "expenses_server_select": "Сервер",
     "expenses_monthly_server_price": "серверийн сарын үнэ",
     "expenses_automatic_price_per_gb": "30% тооцооны багтаамжаас гаргасан автомат үнэ",
@@ -5904,8 +5920,10 @@
     "billing_service_mail_block_reason_help": "Optional note shown in the relay log so the block can be audited later."
   },
   "zh": {
-    "expenses_title": "费用",
-    "menu_expenses": "费用",
+    "expenses_title": "服务器与费用",
+    "expenses_central_title": "服务器与费用",
+    "menu_expenses": "服务器与费用",
+    "menu_expenses_central": "服务器与费用",
     "expenses_server_select": "服务器",
     "expenses_monthly_server_price": "服务器月费",
     "expenses_automatic_price_per_gb": "按30%计费容量自动计算的单价",
@@ -6612,8 +6630,10 @@
     "billing_service_mail_block_reason_help": "Optional note shown in the relay log so the block can be audited later."
   },
   "he": {
-    "expenses_title": "הוצאות",
-    "menu_expenses": "הוצאות",
+    "expenses_title": "שרת והוצאות",
+    "expenses_central_title": "שרתים והוצאות",
+    "menu_expenses": "שרת והוצאות",
+    "menu_expenses_central": "שרתים והוצאות",
     "expenses_server_select": "שרת",
     "expenses_monthly_server_price": "מחיר השרת לחודש",
     "expenses_automatic_price_per_gb": "מחיר אוטומטי לפי 30% קיבולת לחיוב",
@@ -7320,8 +7340,10 @@
     "billing_service_mail_block_reason_help": "Optional note shown in the relay log so the block can be audited later."
   },
   "fa": {
-    "expenses_title": "هزینه‌ها",
-    "menu_expenses": "هزینه‌ها",
+    "expenses_title": "سرور و هزینه‌ها",
+    "expenses_central_title": "سرورها و هزینه‌ها",
+    "menu_expenses": "سرور و هزینه‌ها",
+    "menu_expenses_central": "سرورها و هزینه‌ها",
     "expenses_server_select": "سرور",
     "expenses_monthly_server_price": "هزینه ماهانه سرور",
     "expenses_automatic_price_per_gb": "قیمت خودکار بر اساس ۳۰٪ ظرفیت",
@@ -8028,8 +8050,10 @@
     "billing_service_mail_block_reason_help": "Optional note shown in the relay log so the block can be audited later."
   },
   "de": {
-    "expenses_title": "Ausgaben",
-    "menu_expenses": "Ausgaben",
+    "expenses_title": "Server und Kosten",
+    "expenses_central_title": "Server und Kosten",
+    "menu_expenses": "Server und Kosten",
+    "menu_expenses_central": "Server und Kosten",
     "expenses_server_select": "Server",
     "expenses_monthly_server_price": "monatlicher Serverpreis",
     "expenses_automatic_price_per_gb": "Automatischer Preis aus 30% Abrechnungskapazität",
@@ -8736,8 +8760,10 @@
     "billing_service_mail_block_reason_help": "Optional note shown in the relay log so the block can be audited later."
   },
   "tr": {
-    "expenses_title": "Giderler",
-    "menu_expenses": "Giderler",
+    "expenses_title": "Sunucu ve giderler",
+    "expenses_central_title": "Sunucular ve giderler",
+    "menu_expenses": "Sunucu ve giderler",
+    "menu_expenses_central": "Sunucular ve giderler",
     "expenses_server_select": "Sunucu",
     "expenses_monthly_server_price": "aylık sunucu fiyatı",
     "expenses_automatic_price_per_gb": "%30 faturalama kapasitesinden otomatik fiyat",
@@ -9444,8 +9470,10 @@
     "billing_service_mail_block_reason_help": "Optional note shown in the relay log so the block can be audited later."
   },
   "kk": {
-    "expenses_title": "Шығындар",
-    "menu_expenses": "Шығындар",
+    "expenses_title": "Сервер және шығындар",
+    "expenses_central_title": "Серверлер және шығындар",
+    "menu_expenses": "Сервер және шығындар",
+    "menu_expenses_central": "Серверлер және шығындар",
     "expenses_server_select": "Сервер",
     "expenses_monthly_server_price": "сервердің айлық бағасы",
     "expenses_automatic_price_per_gb": "30% есептік көлемнен автоматты баға",
@@ -10152,8 +10180,10 @@
     "billing_service_mail_block_reason_help": "Optional note shown in the relay log so the block can be audited later."
   },
   "es": {
-    "expenses_title": "Gastos",
-    "menu_expenses": "Gastos",
+    "expenses_title": "Servidor y gastos",
+    "expenses_central_title": "Servidores y gastos",
+    "menu_expenses": "Servidor y gastos",
+    "menu_expenses_central": "Servidores y gastos",
     "expenses_server_select": "Servidor",
     "expenses_monthly_server_price": "precio mensual del servidor",
     "expenses_automatic_price_per_gb": "Precio automático según el 30% facturable",
@@ -10860,8 +10890,10 @@
     "billing_service_mail_block_reason_help": "Optional note shown in the relay log so the block can be audited later."
   },
   "pt": {
-    "expenses_title": "Despesas",
-    "menu_expenses": "Despesas",
+    "expenses_title": "Servidor e despesas",
+    "expenses_central_title": "Servidores e despesas",
+    "menu_expenses": "Servidor e despesas",
+    "menu_expenses_central": "Servidores e despesas",
     "expenses_server_select": "Servidor",
     "expenses_monthly_server_price": "preço mensal do servidor",
     "expenses_automatic_price_per_gb": "Preço automático pelos 30% faturáveis",
