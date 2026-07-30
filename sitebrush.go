@@ -38,7 +38,6 @@ import (
 	"net"
 	"net/http"
 	stdmail "net/mail"
-	"net/netip"
 	"net/url"
 	"os"
 	"os/exec"
@@ -70,10 +69,13 @@ import (
 	"sitebrush/pkg/expenses"
 	"sitebrush/pkg/geoip"
 	"sitebrush/pkg/hostingandsupport"
+	"sitebrush/pkg/httpsecurity"
 	"sitebrush/pkg/mailout"
+	"sitebrush/pkg/outboundhttp"
 	"sitebrush/pkg/serviceinstall"
 	"sitebrush/pkg/shutdownsignals"
 	"sitebrush/pkg/sitebrushtemplate"
+	"sitebrush/pkg/storagejail"
 	"sitebrush/pkg/systeminit"
 	"sitebrush/pkg/winservice"
 )
@@ -89,32 +91,6 @@ var importedHTMLHeadOpenPattern = regexp.MustCompile(`(?i)<head\b[^>]*>`)
 var importedHTMLHTMLOpenPattern = regexp.MustCompile(`(?i)<html\b[^>]*>`)
 var importedCSSCharsetAssignmentPattern = regexp.MustCompile(`(?i)^(\s*\x{feff}?\s*@charset\s+["'])[a-z0-9._:-]+(["']\s*;)`)
 var errReadLimitExceeded = errors.New("read limit exceeded")
-var publicOutboundBlockedIPPrefixes = []netip.Prefix{
-	netip.MustParsePrefix("0.0.0.0/8"),
-	netip.MustParsePrefix("10.0.0.0/8"),
-	netip.MustParsePrefix("100.64.0.0/10"),
-	netip.MustParsePrefix("127.0.0.0/8"),
-	netip.MustParsePrefix("169.254.0.0/16"),
-	netip.MustParsePrefix("172.16.0.0/12"),
-	netip.MustParsePrefix("192.0.0.0/24"),
-	netip.MustParsePrefix("192.0.2.0/24"),
-	netip.MustParsePrefix("192.168.0.0/16"),
-	netip.MustParsePrefix("198.18.0.0/15"),
-	netip.MustParsePrefix("198.51.100.0/24"),
-	netip.MustParsePrefix("203.0.113.0/24"),
-	netip.MustParsePrefix("224.0.0.0/4"),
-	netip.MustParsePrefix("240.0.0.0/4"),
-	netip.MustParsePrefix("255.255.255.255/32"),
-	netip.MustParsePrefix("::/128"),
-	netip.MustParsePrefix("::1/128"),
-	netip.MustParsePrefix("64:ff9b::/96"),
-	netip.MustParsePrefix("100::/64"),
-	netip.MustParsePrefix("2001::/23"),
-	netip.MustParsePrefix("2001:db8::/32"),
-	netip.MustParsePrefix("fc00::/7"),
-	netip.MustParsePrefix("fe80::/10"),
-	netip.MustParsePrefix("ff00::/8"),
-}
 
 const storageAppName = "sitebrush"
 const defaultDBPath = "storage/db/sitebrush.db"
@@ -424,6 +400,7 @@ type embeddedStaticAsset struct {
 
 type guestStaticHTMLCacheRequest struct {
 	filePath     string
+	staticHTML   []byte
 	pagePath     string
 	domain       string
 	languageCode string
@@ -4328,10 +4305,10 @@ func formatDurationMS(milliseconds int64) string {
 func (a *App) analyticsPage(w http.ResponseWriter, r *http.Request) {
 	if !a.isAdminRequest(r) {
 		if !a.hasAdmin(r.Context(), a.siteDomain(r.Context(), r)) {
-			http.Redirect(w, r, r.URL.Path+"?register", http.StatusFound)
+			httpsecurity.RedirectLocal(w, r, r.URL.Path+"?register", http.StatusFound)
 			return
 		}
-		http.Redirect(w, r, loginURLForRequest(r), http.StatusFound)
+		httpsecurity.RedirectLocal(w, r, loginURLForRequest(r), http.StatusFound)
 		return
 	}
 	domain := a.siteDomain(r.Context(), r)
@@ -4660,6 +4637,7 @@ func ensureParentDir(filePath string) error {
 	if parentDir == "." || parentDir == "" {
 		return nil
 	}
+	// #nosec G703 -- callers provide application configuration paths, not HTTP input.
 	return os.MkdirAll(parentDir, 0o755)
 }
 
@@ -6428,6 +6406,10 @@ func (a *App) assignMissingDomainAliasTokens(ctx context.Context) {
 
 func (a *App) route(w http.ResponseWriter, r *http.Request) {
 	pagePath := cleanPath(r.URL.Path)
+	if requestWithSensitiveCookieRequiresHTTPS(r) {
+		httpsecurity.RedirectHTTPS(w, r, http.StatusTemporaryRedirect)
+		return
+	}
 	if a.isDomainPrefixedPublicAssetPath(r) {
 		a.servePublicAsset(w, r)
 		return
@@ -6437,7 +6419,7 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 		requestDomain = domainFromRequest(r)
 	}
 	if redirectTarget := a.canonicalTrailingSlashStaticRedirectTarget(r, requestDomain, pagePath); redirectTarget != "" {
-		http.Redirect(w, r, redirectTarget, http.StatusMovedPermanently)
+		httpsecurity.RedirectLocal(w, r, redirectTarget, http.StatusMovedPermanently)
 		return
 	}
 	if a.maybeStartDemoSite(w, r, requestDomain) {
@@ -6716,7 +6698,7 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 	domain := a.siteDomain(r.Context(), r)
 	redirectTargetPath := a.resolvedPageRedirectPath(r.Context(), domain, pagePath)
 	if redirectTarget := a.canonicalTrailingSlashRedirectTargetForResolvedPath(r, domain, pagePath, redirectTargetPath); redirectTarget != "" {
-		http.Redirect(w, r, redirectTarget, http.StatusMovedPermanently)
+		httpsecurity.RedirectLocal(w, r, redirectTarget, http.StatusMovedPermanently)
 		return
 	}
 	if hasQueryFlag(r, "page_password_unlock") {
@@ -6740,7 +6722,7 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if redirectTargetPath != "" && redirectTargetPath != pagePath {
-		http.Redirect(w, r, redirectTargetPath, http.StatusMovedPermanently)
+		httpsecurity.RedirectLocal(w, r, redirectTargetPath, http.StatusMovedPermanently)
 		return
 	}
 	if isGuestStaticRequest(r) && !pagePasswordUnlockedForGuest {
@@ -6900,7 +6882,7 @@ func (a *App) setupAdmin(w http.ResponseWriter, r *http.Request) {
 	domain := a.siteDomain(r.Context(), r)
 	translations := translationsForRequest(r)
 	if a.hasAdmin(r.Context(), domain) {
-		http.Redirect(w, r, "/", http.StatusFound)
+		httpsecurity.RedirectLocal(w, r, "/", http.StatusFound)
 		return
 	}
 	email := strings.TrimSpace(r.FormValue("email"))
@@ -6926,8 +6908,8 @@ func (a *App) setupAdmin(w http.ResponseWriter, r *http.Request) {
 		a.promoteFirstServerOwner(registerContext, domain, email)
 		a.logHostingSupportEvent(registerContext, "client_registered", "success", email, domain, "local first administrator registered")
 		a.reportHostingSnapshotAsync(registerContext)
-		a.createSessionForDomain(w, registerContext, domain, email)
-		http.Redirect(w, r, safeConfirmationReturnPath(requestedReturnPath(r)), http.StatusFound)
+		a.createSessionForDomain(w, r, registerContext, domain, email)
+		httpsecurity.RedirectLocal(w, r, safeConfirmationReturnPath(requestedReturnPath(r)), http.StatusFound)
 		return
 	}
 	if err := a.createAndSendEmailConfirmation(r, "register", domain, "", email, password, requestedReturnPath(r)); err != nil {
@@ -6950,10 +6932,10 @@ func (a *App) registerPage(w http.ResponseWriter, r *http.Request) {
 	domain := a.siteDomain(r.Context(), r)
 	if a.hasAdmin(r.Context(), domain) {
 		if a.isAdminRequest(r) {
-			http.Redirect(w, r, requestedReturnTarget(r), http.StatusFound)
+			httpsecurity.RedirectLocal(w, r, requestedReturnTarget(r), http.StatusFound)
 			return
 		}
-		http.Redirect(w, r, loginURLForRequest(r), http.StatusFound)
+		httpsecurity.RedirectLocal(w, r, loginURLForRequest(r), http.StatusFound)
 		return
 	}
 	if a.serverOwnerExists(r.Context()) && !a.serverAutomaticRegistrationAllowed(r.Context()) {
@@ -6970,7 +6952,7 @@ func (a *App) renderSetupPage(w http.ResponseWriter, r *http.Request, domain, em
 func (a *App) siteRequestPage(w http.ResponseWriter, r *http.Request) {
 	domain := a.siteDomain(r.Context(), r)
 	if a.hasAdmin(r.Context(), domain) {
-		http.Redirect(w, r, loginURLForRequest(r), http.StatusFound)
+		httpsecurity.RedirectLocal(w, r, loginURLForRequest(r), http.StatusFound)
 		return
 	}
 	if !a.serverOwnerExists(r.Context()) || a.serverAutomaticRegistrationAllowed(r.Context()) {
@@ -7062,7 +7044,7 @@ func (a *App) createSiteRegistrationRequestFromForm(r *http.Request, domain, nam
 func (a *App) login(w http.ResponseWriter, r *http.Request) {
 	domain := a.siteDomain(r.Context(), r)
 	if !a.hasAdmin(r.Context(), domain) {
-		http.Redirect(w, r, r.URL.Path+"?register", http.StatusFound)
+		httpsecurity.RedirectLocal(w, r, r.URL.Path+"?register", http.StatusFound)
 		return
 	}
 	clientIP := clientIPAddress(r)
@@ -7134,9 +7116,9 @@ func (a *App) login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.clearFailedLoginAttempts(r.Context(), domain, clientIP)
-	a.createSessionForDomain(w, r.Context(), domain, email)
+	a.createSessionForDomain(w, r, r.Context(), domain, email)
 	a.logHostingSupportEvent(r.Context(), "client_login", "success", email, domain, "client signed in")
-	http.Redirect(w, r, returnPath, http.StatusFound)
+	httpsecurity.RedirectLocal(w, r, returnPath, http.StatusFound)
 }
 
 func (a *App) renderLoginPage(w http.ResponseWriter, r *http.Request, returnPath, email, status, statusClass string, blockedUntil time.Time, hardLocked bool) {
@@ -7168,6 +7150,10 @@ func (a *App) maybeStartDemoSite(w http.ResponseWriter, r *http.Request, request
 	if !found || normalizeDomainName(state.Settings.Domain) != normalizeDomainName(requestDomain) {
 		return false
 	}
+	if !httpsecurity.IsLocalRequest(r) && !httpsecurity.UsesHTTPS(r) {
+		httpsecurity.RedirectHTTPS(w, r, http.StatusTemporaryRedirect)
+		return true
+	}
 	if hasSitebrushSessionCookie(r) {
 		if _, isAdmin := a.currentAdminEmailForDomain(r, requestDomain); isAdmin {
 			return false
@@ -7183,7 +7169,7 @@ func (a *App) maybeStartDemoSite(w http.ResponseWriter, r *http.Request, request
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return true
 	}
-	http.Redirect(w, r, redirectPath, http.StatusFound)
+	httpsecurity.RedirectLocal(w, r, redirectPath, http.StatusFound)
 	return true
 }
 
@@ -7345,12 +7331,12 @@ func (a *App) startDemoSiteSession(w http.ResponseWriter, r *http.Request, state
 	if state.Status != "ready" || adminEmail == "" {
 		return "", fmt.Errorf("demo site is not ready")
 	}
-	sessionToken := a.createSessionForDomain(w, r.Context(), domain, adminEmail)
+	sessionToken := a.createSessionForDomain(w, r, r.Context(), domain, adminEmail)
 	if err := a.enqueueDemoSessionEvent(r.Context(), demoSessionEvent{
 		kind: "create", domain: domain, sessionToken: sessionToken, userEmail: adminEmail, resetAfter: time.Now().Add(demo.ResetDelay),
 	}); err != nil {
 		_, _ = a.db.ExecContext(contextWithDomain(r.Context(), domain), `DELETE FROM sessions WHERE token=?`, sessionToken)
-		http.SetCookie(w, &http.Cookie{Name: "sitebrush_session", Value: "", Path: "/", Expires: time.Unix(0, 0), HttpOnly: true})
+		httpsecurity.SetSensitiveCookie(w, r, &http.Cookie{Name: "sitebrush_session", Value: "", Expires: time.Unix(0, 0), MaxAge: -1})
 		return "", err
 	}
 	return "/", nil
@@ -7905,15 +7891,8 @@ func (a *App) createDemoSiteSnapshot(ctx context.Context, domain string) error {
 		return err
 	}
 	tempPath := a.demoSiteSnapshotPath(domain) + ".tmp"
-	realTempPath, err := a.writablePathInsideStorageSubtree(backupRoot, tempPath)
-	if err != nil {
-		return err
-	}
-	realSnapshotPath, err := a.writablePathInsideStorageSubtree(backupRoot, a.demoSiteSnapshotPath(domain))
-	if err != nil {
-		return err
-	}
-	snapshotFile, err := os.Create(realTempPath)
+	snapshotPath := a.demoSiteSnapshotPath(domain)
+	snapshotFile, err := a.createFileInsideStorage(tempPath)
 	if err != nil {
 		return err
 	}
@@ -7922,28 +7901,24 @@ func (a *App) createDemoSiteSnapshot(ctx context.Context, domain string) error {
 	closeZipErr := zipWriter.Close()
 	closeFileErr := snapshotFile.Close()
 	if writeErr != nil {
-		_ = os.Remove(realTempPath)
+		_ = a.removeInsideStorage(tempPath)
 		return writeErr
 	}
 	if closeZipErr != nil {
-		_ = os.Remove(realTempPath)
+		_ = a.removeInsideStorage(tempPath)
 		return closeZipErr
 	}
 	if closeFileErr != nil {
-		_ = os.Remove(realTempPath)
+		_ = a.removeInsideStorage(tempPath)
 		return closeFileErr
 	}
-	return os.Rename(realTempPath, realSnapshotPath)
+	return a.renameInsideStorage(tempPath, snapshotPath)
 }
 
 func (a *App) restoreDemoSiteFromSnapshot(ctx context.Context, controlDatabase *sql.DB, domain string) error {
 	domain = normalizeDomainName(domain)
 	snapshotPath := a.demoSiteSnapshotPath(domain)
-	realSnapshotPath, err := a.existingPathInsideStorageSubtree(a.backupRootDir(), snapshotPath)
-	if err != nil {
-		return err
-	}
-	snapshotFile, err := os.Open(realSnapshotPath)
+	snapshotFile, err := a.openFileInsideStorage(snapshotPath)
 	if err != nil {
 		return err
 	}
@@ -8005,8 +7980,8 @@ func (a *App) logout(w http.ResponseWriter, r *http.Request) {
 	if cookie, err := r.Cookie("sitebrush_session"); err == nil {
 		_, _ = a.db.ExecContext(r.Context(), `DELETE FROM sessions WHERE token=?`, cookie.Value)
 	}
-	http.SetCookie(w, &http.Cookie{Name: "sitebrush_session", Value: "", Path: "/", Expires: time.Unix(0, 0)})
-	http.Redirect(w, r, requestedReturnTarget(r), http.StatusFound)
+	httpsecurity.SetSensitiveCookie(w, r, &http.Cookie{Name: "sitebrush_session", Value: "", Expires: time.Unix(0, 0), MaxAge: -1})
+	httpsecurity.RedirectLocal(w, r, requestedReturnTarget(r), http.StatusFound)
 }
 
 func (a *App) scheduleDemoSiteDeletionForLogout(r *http.Request) {
@@ -8024,10 +7999,10 @@ func (a *App) scheduleDemoSiteDeletionForLogout(r *http.Request) {
 func (a *App) editPage(w http.ResponseWriter, r *http.Request) {
 	if !a.isAdminRequest(r) {
 		if !a.hasAdmin(r.Context(), a.siteDomain(r.Context(), r)) {
-			http.Redirect(w, r, r.URL.Path+"?register", http.StatusFound)
+			httpsecurity.RedirectLocal(w, r, r.URL.Path+"?register", http.StatusFound)
 			return
 		}
-		http.Redirect(w, r, loginURLForRequest(r), http.StatusFound)
+		httpsecurity.RedirectLocal(w, r, loginURLForRequest(r), http.StatusFound)
 		return
 	}
 	pagePath := cleanPath(r.URL.Query().Get("path"))
@@ -8043,11 +8018,11 @@ func (a *App) editPage(w http.ResponseWriter, r *http.Request) {
 	domain := a.siteDomain(r.Context(), r)
 	record, _ := a.findPage(r.Context(), domain, pagePath)
 	if record.Path != "" && pageContentKind(record.Path, record.HTML) != "html" {
-		http.Redirect(w, r, pagePath+"?text", http.StatusFound)
+		httpsecurity.RedirectLocal(w, r, pagePath+"?text", http.StatusFound)
 		return
 	}
 	if record.Path == "" && pageContentKind(pagePath, "") != "html" {
-		http.Redirect(w, r, pagePath+"?text", http.StatusFound)
+		httpsecurity.RedirectLocal(w, r, pagePath+"?text", http.StatusFound)
 		return
 	}
 	if record.Path == "" {
@@ -8060,10 +8035,10 @@ func (a *App) editPage(w http.ResponseWriter, r *http.Request) {
 func (a *App) editModePage(w http.ResponseWriter, r *http.Request) {
 	if !a.isAdminRequest(r) {
 		if !a.hasAdmin(r.Context(), a.siteDomain(r.Context(), r)) {
-			http.Redirect(w, r, r.URL.Path+"?register", http.StatusFound)
+			httpsecurity.RedirectLocal(w, r, r.URL.Path+"?register", http.StatusFound)
 			return
 		}
-		http.Redirect(w, r, loginURLForRequest(r), http.StatusFound)
+		httpsecurity.RedirectLocal(w, r, loginURLForRequest(r), http.StatusFound)
 		return
 	}
 	pagePath := cleanPath(r.URL.Query().Get("path"))
@@ -8088,10 +8063,10 @@ func (a *App) editModePage(w http.ResponseWriter, r *http.Request) {
 func (a *App) editRawPage(w http.ResponseWriter, r *http.Request) {
 	if !a.isAdminRequest(r) {
 		if !a.hasAdmin(r.Context(), a.siteDomain(r.Context(), r)) {
-			http.Redirect(w, r, r.URL.Path+"?register", http.StatusFound)
+			httpsecurity.RedirectLocal(w, r, r.URL.Path+"?register", http.StatusFound)
 			return
 		}
-		http.Redirect(w, r, loginURLForRequest(r), http.StatusFound)
+		httpsecurity.RedirectLocal(w, r, loginURLForRequest(r), http.StatusFound)
 		return
 	}
 	pagePath := cleanPath(r.URL.Query().Get("path"))
@@ -8251,6 +8226,21 @@ func hasQueryFlag(r *http.Request, flagName string) bool {
 	}
 	_, hasFlag := r.URL.Query()[flagName]
 	return hasFlag
+}
+
+func requestWithSensitiveCookieRequiresHTTPS(r *http.Request) bool {
+	if r == nil || httpsecurity.IsLocalRequest(r) || httpsecurity.UsesHTTPS(r) {
+		return false
+	}
+	if hasSitebrushSessionCookie(r) {
+		return true
+	}
+	for _, queryFlag := range []string{"login", "logout", "register", "email_confirm", "captcha", "page_password", "page_password_unlock"} {
+		if hasQueryFlag(r, queryFlag) {
+			return true
+		}
+	}
+	return false
 }
 
 func requestedReturnTarget(r *http.Request) string {
@@ -8472,7 +8462,7 @@ func (a *App) savePage(w http.ResponseWriter, r *http.Request) {
 		sitebrushTemplateProgress.Publish(progressToken, templatePropagationProgressEvent{Stage: "done", Domain: domain, Path: pagePath, Done: true, Message: "Template update completed"})
 		sitebrushTemplateProgress.Finish(progressToken)
 	}
-	http.Redirect(w, r, pagePath, http.StatusFound)
+	httpsecurity.RedirectLocal(w, r, pagePath, http.StatusFound)
 }
 
 func (a *App) grabPage(w http.ResponseWriter, r *http.Request) {
@@ -8538,10 +8528,10 @@ func (a *App) grabPage(w http.ResponseWriter, r *http.Request) {
 		}
 		if wantsJSONResponse(r) {
 			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(map[string]any{"redirect": importResult.RedirectPath, "failed_total": importResult.FailedTotal, "failed_urls": importResult.FailedURLs, "failed_reasons": importResult.FailedReasons})
+			_ = json.NewEncoder(w).Encode(map[string]any{"redirect": httpsecurity.LocalRedirectTarget(importResult.RedirectPath, "/"), "failed_total": importResult.FailedTotal, "failed_urls": importResult.FailedURLs, "failed_reasons": importResult.FailedReasons})
 			return
 		}
-		http.Redirect(w, r, importResult.RedirectPath, http.StatusFound)
+		httpsecurity.RedirectLocal(w, r, importResult.RedirectPath, http.StatusFound)
 		return
 	}
 	spider, html := prepareSinglePageImport(importRequest, a.grabTracker)
@@ -8573,10 +8563,10 @@ func (a *App) grabPage(w http.ResponseWriter, r *http.Request) {
 	}
 	if wantsJSONResponse(r) {
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{"redirect": pagePath, "failed_total": spider.unresolvedFailedTotal(), "failed_urls": spider.failedResourceURLList(), "failed_reasons": spider.failedResourceReasonMap()})
+		_ = json.NewEncoder(w).Encode(map[string]any{"redirect": httpsecurity.LocalRedirectTarget(pagePath, "/"), "failed_total": spider.unresolvedFailedTotal(), "failed_urls": spider.failedResourceURLList(), "failed_reasons": spider.failedResourceReasonMap()})
 		return
 	}
-	http.Redirect(w, r, pagePath, http.StatusFound)
+	httpsecurity.RedirectLocal(w, r, pagePath, http.StatusFound)
 }
 
 func (a *App) retryGrabFailedResources(w http.ResponseWriter, r *http.Request) {
@@ -8622,10 +8612,10 @@ func (a *App) retryGrabFailedResources(w http.ResponseWriter, r *http.Request) {
 	}
 	if wantsJSONResponse(r) {
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{"status": "ok", "redirect": importResult.RedirectPath, "failed_total": importResult.FailedTotal, "failed_urls": importResult.FailedURLs, "failed_reasons": importResult.FailedReasons})
+		_ = json.NewEncoder(w).Encode(map[string]any{"status": "ok", "redirect": httpsecurity.LocalRedirectTarget(importResult.RedirectPath, "/"), "failed_total": importResult.FailedTotal, "failed_urls": importResult.FailedURLs, "failed_reasons": importResult.FailedReasons})
 		return
 	}
-	http.Redirect(w, r, pagePath, http.StatusFound)
+	httpsecurity.RedirectLocal(w, r, pagePath, http.StatusFound)
 }
 
 func (a *App) cancelGrabImport(w http.ResponseWriter, r *http.Request) {
@@ -9680,6 +9670,9 @@ func parseGrabSourceURLForServerIP(sourceURL, sourceIP string) (*url.URL, error)
 	if err != nil || remoteSourceURL.Hostname() == "" || (remoteSourceURL.Scheme != "http" && remoteSourceURL.Scheme != "https") {
 		return nil, errors.New("source_url is invalid")
 	}
+	if err := outboundhttp.RequirePublicURL(remoteSourceURL); err != nil {
+		return nil, err
+	}
 	if sourceIPPort != "" {
 		remoteSourceURL.Host = net.JoinHostPort(remoteSourceURL.Hostname(), sourceIPPort)
 	}
@@ -9722,6 +9715,9 @@ func parseOptionalGrabSourceIP(rawSourceIP string) (string, error) {
 	parsedIP, portPart := splitGrabSourceIP(trimmedSourceIP)
 	if parsedIP == nil {
 		return "", errors.New("source_ip is invalid")
+	}
+	if !outboundhttp.IPAllowed(parsedIP) {
+		return "", errors.New("source_ip must be a public network address")
 	}
 	if portPart == "" {
 		return parsedIP.String(), nil
@@ -9822,7 +9818,7 @@ func copyWithLimit(writer io.Writer, reader io.Reader, limitBytes int64) (int64,
 }
 
 func publicTrialGrabSourceOptions() grabSourceOptions {
-	return grabSourceOptions{PublicNetworkOnly: true}
+	return grabSourceOptions{}
 }
 
 func downloadGrabSourceHTML(sourceURL, sourceIP string) ([]byte, error) {
@@ -9838,6 +9834,9 @@ func downloadGrabSourceHTMLWithResolvedURLContext(ctx context.Context, sourceURL
 	remoteSourceURL, err := url.Parse(sourceURL)
 	if err != nil {
 		return nil, nil, errors.New("source_url is invalid")
+	}
+	if err := outboundhttp.RequirePublicURL(remoteSourceURL); err != nil {
+		return nil, nil, err
 	}
 	client := newGrabHTTPClientForSourceOptions(remoteSourceURL.Hostname(), sourceOptions)
 	lastStatus := ""
@@ -9962,6 +9961,13 @@ func doGrabGET(client *http.Client, rawURL string, sourceOptions grabSourceOptio
 }
 
 func doGrabGETContext(ctx context.Context, client *http.Client, rawURL string, sourceOptions grabSourceOptions) (*http.Response, error) {
+	parsedURL, err := url.Parse(rawURL)
+	if err != nil {
+		return nil, err
+	}
+	if err := outboundhttp.RequirePublicURL(parsedURL); err != nil {
+		return nil, err
+	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
 		return nil, err
@@ -10848,10 +10854,10 @@ func writePublishProgressEvent(w io.Writer, flusher http.Flusher, event publishP
 func (a *App) revisionsPage(w http.ResponseWriter, r *http.Request) {
 	if !a.canEditPages(r) {
 		if !a.hasAdmin(r.Context(), a.siteDomain(r.Context(), r)) {
-			http.Redirect(w, r, r.URL.Path+"?register", http.StatusFound)
+			httpsecurity.RedirectLocal(w, r, r.URL.Path+"?register", http.StatusFound)
 			return
 		}
-		http.Redirect(w, r, loginURLForRequest(r), http.StatusFound)
+		httpsecurity.RedirectLocal(w, r, loginURLForRequest(r), http.StatusFound)
 		return
 	}
 	pagePath := cleanPath(r.URL.Query().Get("path"))
@@ -10893,10 +10899,10 @@ func (a *App) expensesPage(w http.ResponseWriter, r *http.Request) {
 	adminEmail, adminFound := a.currentAdminEmailForDomain(r, requestDomain)
 	if !adminFound {
 		if !a.hasAdmin(r.Context(), requestDomain) {
-			http.Redirect(w, r, r.URL.Path+"?register", http.StatusFound)
+			httpsecurity.RedirectLocal(w, r, r.URL.Path+"?register", http.StatusFound)
 			return
 		}
-		http.Redirect(w, r, loginURLForRequest(r), http.StatusFound)
+		httpsecurity.RedirectLocal(w, r, loginURLForRequest(r), http.StatusFound)
 		return
 	}
 	if !a.isServerManagerEmail(r.Context(), requestDomain, adminEmail) {
@@ -11394,7 +11400,7 @@ func (a *App) redirectToHostingAndSupportMainDomain(w http.ResponseWriter, r *ht
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		statusCode = http.StatusTemporaryRedirect
 	}
-	http.Redirect(w, r, redirectURL.String(), statusCode)
+	httpsecurity.RedirectExternal(w, r, &redirectURL, statusCode)
 	return true
 }
 
@@ -13146,9 +13152,7 @@ func (a *App) saveHostingAndSupportDemoSettingsInDatabase(r *http.Request, contr
 				return err.Error()
 			}
 			_ = (demo.Store{DB: controlDatabase}).RemoveSessionsForDomain(r.Context(), disabledDemoDomain)
-			if realSnapshotPath, pathErr := a.existingPathInsideStorageSubtree(a.backupRootDir(), a.demoSiteSnapshotPath(disabledDemoDomain)); pathErr == nil {
-				_ = os.Remove(realSnapshotPath)
-			}
+			_ = a.removeInsideStorage(a.demoSiteSnapshotPath(disabledDemoDomain))
 		}
 		return translationOrDefault(translations, "billing_status_settings_saved", "Billing settings saved.")
 	}
@@ -13206,6 +13210,7 @@ func (a *App) createManagedSite(ctx context.Context, domain, email, password str
 	if pathErr != nil {
 		return pathErr
 	}
+	// #nosec G703 -- SQLite requires a native path after the storage jail has validated it.
 	if _, statErr := os.Stat(realSiteDatabasePath); statErr == nil {
 		return fmt.Errorf("site database for %s already exists", domain)
 	} else if !errors.Is(statErr, os.ErrNotExist) {
@@ -13222,6 +13227,7 @@ func (a *App) createManagedSite(ctx context.Context, domain, email, password str
 	defer func() {
 		_ = rawDatabase.Close()
 		if !adminInserted {
+			// #nosec G703 -- SQLite requires a native path after the storage jail has validated it.
 			_ = os.Remove(realSiteDatabasePath)
 		}
 	}()
@@ -14509,7 +14515,7 @@ func (a *App) restoreRevision(w http.ResponseWriter, r *http.Request) {
 	_, _ = a.db.ExecContext(r.Context(), `UPDATE pages SET html=? WHERE domain=? AND path=?`, html, domain, pagePath)
 	_, _ = a.db.ExecContext(r.Context(), `INSERT INTO revisions(domain,page_path,html,created_at) VALUES(?,?,?,?)`, domain, pagePath, html, time.Now().Format(time.RFC3339))
 	a.applyLatestActiveRevision(r.Context(), domain, pagePath)
-	http.Redirect(w, r, pagePath, http.StatusFound)
+	httpsecurity.RedirectLocal(w, r, pagePath, http.StatusFound)
 }
 
 func (a *App) deleteRevision(w http.ResponseWriter, r *http.Request) {
@@ -14522,7 +14528,7 @@ func (a *App) deleteRevision(w http.ResponseWriter, r *http.Request) {
 	domain := a.siteDomain(r.Context(), r)
 	_, _ = a.db.ExecContext(r.Context(), `UPDATE revisions SET is_active=0 WHERE id=? AND domain=?`, revisionID, domain)
 	a.applyLatestActiveRevision(r.Context(), domain, pagePath)
-	http.Redirect(w, r, pagePath+"?revisions", http.StatusFound)
+	httpsecurity.RedirectLocal(w, r, pagePath+"?revisions", http.StatusFound)
 }
 
 func (a *App) deleteRevisionByQuery(w http.ResponseWriter, r *http.Request) {
@@ -14544,7 +14550,7 @@ func (a *App) deleteRevisionByQuery(w http.ResponseWriter, r *http.Request) {
 	}
 	_, _ = a.db.ExecContext(r.Context(), `UPDATE revisions SET is_active=0 WHERE id=? AND domain=?`, revisionID, domain)
 	a.applyLatestActiveRevision(r.Context(), domain, pagePath)
-	http.Redirect(w, r, pagePath, http.StatusFound)
+	httpsecurity.RedirectLocal(w, r, pagePath, http.StatusFound)
 }
 
 func (a *App) toggleRevision(w http.ResponseWriter, r *http.Request) {
@@ -14562,16 +14568,16 @@ func (a *App) toggleRevision(w http.ResponseWriter, r *http.Request) {
 	}
 	_, _ = a.db.ExecContext(r.Context(), `UPDATE revisions SET is_active=? WHERE id=? AND domain=?`, nextActiveState, revisionID, domain)
 	a.applyLatestActiveRevision(r.Context(), domain, pagePath)
-	http.Redirect(w, r, pagePath+"?revisions", http.StatusFound)
+	httpsecurity.RedirectLocal(w, r, pagePath+"?revisions", http.StatusFound)
 }
 
 func (a *App) profilePage(w http.ResponseWriter, r *http.Request) {
 	if !a.isAdminRequest(r) {
 		if !a.hasAdmin(r.Context(), a.siteDomain(r.Context(), r)) {
-			http.Redirect(w, r, r.URL.Path+"?register", http.StatusFound)
+			httpsecurity.RedirectLocal(w, r, r.URL.Path+"?register", http.StatusFound)
 			return
 		}
-		http.Redirect(w, r, loginURLForRequest(r), http.StatusFound)
+		httpsecurity.RedirectLocal(w, r, loginURLForRequest(r), http.StatusFound)
 		return
 	}
 	currentEmail, found := a.currentAdminEmail(r)
@@ -14740,7 +14746,7 @@ func (a *App) recoverPage(w http.ResponseWriter, r *http.Request) {
 	var userCount int
 	_ = a.db.QueryRowContext(r.Context(), `SELECT COUNT(1) FROM users WHERE domain=? AND email=? AND is_admin=1`, domain, email).Scan(&userCount)
 	if userCount == 0 {
-		http.Redirect(w, r, requestedReturnPath(r), http.StatusFound)
+		httpsecurity.RedirectLocal(w, r, requestedReturnPath(r), http.StatusFound)
 		return
 	}
 	recoveryCode := fmt.Sprintf("%06d", time.Now().UnixNano()%1000000)
@@ -14750,7 +14756,7 @@ func (a *App) recoverPage(w http.ResponseWriter, r *http.Request) {
 	}
 	a.logHostingSupportEvent(r.Context(), "code_requested", "sent", email, domain, "login_code")
 	a.clearFailedLoginAttempts(r.Context(), domain, clientIPAddress(r))
-	http.Redirect(w, r, requestedReturnPath(r), http.StatusFound)
+	httpsecurity.RedirectLocal(w, r, requestedReturnPath(r), http.StatusFound)
 }
 
 func (a *App) createAndSendProfileCode(r *http.Request, domain, currentEmail, nextEmail, password, codeKind string) (string, emailDeliveryResult, profileEmailDeliveryDNSHelp, error) {
@@ -15028,8 +15034,8 @@ func (a *App) confirmEmailToken(w http.ResponseWriter, r *http.Request) {
 		a.markServiceMailRecipientVerified(registerContext, confirmation.Domain, confirmation.Email, confirmation.LanguageCode)
 		a.logHostingSupportEvent(registerContext, "client_registered", "success", confirmation.Email, confirmation.Domain, "email confirmed")
 		a.reportHostingSnapshotAsync(registerContext)
-		a.createSessionForDomain(w, registerContext, confirmation.Domain, confirmation.Email)
-		http.Redirect(w, r, safeConfirmationReturnPath(confirmation.ReturnPath), http.StatusFound)
+		a.createSessionForDomain(w, r, registerContext, confirmation.Domain, confirmation.Email)
+		httpsecurity.RedirectLocal(w, r, safeConfirmationReturnPath(confirmation.ReturnPath), http.StatusFound)
 	case "profile":
 		if err := a.applyProfileEmailConfirmation(r.Context(), confirmation); err != nil {
 			a.renderEmailConfirmationStatus(w, r, http.StatusBadRequest, err.Error())
@@ -15038,8 +15044,8 @@ func (a *App) confirmEmailToken(w http.ResponseWriter, r *http.Request) {
 		_, _ = a.db.ExecContext(r.Context(), `DELETE FROM email_confirmations WHERE token=?`, token)
 		a.markServiceMailRecipientVerified(r.Context(), confirmation.Domain, confirmation.Email, confirmation.LanguageCode)
 		a.logHostingSupportEvent(r.Context(), "email_changed", "success", confirmation.Email, confirmation.Domain, "profile email confirmed")
-		a.createSessionForDomain(w, r.Context(), confirmation.Domain, confirmation.Email)
-		http.Redirect(w, r, safeConfirmationReturnPath(confirmation.ReturnPath), http.StatusFound)
+		a.createSessionForDomain(w, r, r.Context(), confirmation.Domain, confirmation.Email)
+		httpsecurity.RedirectLocal(w, r, safeConfirmationReturnPath(confirmation.ReturnPath), http.StatusFound)
 	default:
 		a.renderEmailConfirmationStatus(w, r, http.StatusBadRequest, translationOrDefault(confirmationTranslations, "email_confirmation_status_invalid", "Confirmation link is invalid."))
 	}
@@ -18416,7 +18422,7 @@ func recoveryEmailBodyForLanguage(languageCode, domain, code string) string {
 
 func (a *App) captchaImage(w http.ResponseWriter, r *http.Request) {
 	captchaCode := fmt.Sprintf("%04d", time.Now().UnixNano()%10000)
-	http.SetCookie(w, &http.Cookie{Name: "sitebrush_captcha", Value: captchaCode, Path: "/", HttpOnly: true, MaxAge: 300})
+	httpsecurity.SetSensitiveCookie(w, r, &http.Cookie{Name: "sitebrush_captcha", Value: captchaCode, MaxAge: 300})
 	w.Header().Set("Content-Type", "image/svg+xml")
 	_, _ = w.Write([]byte("<svg xmlns='http://www.w3.org/2000/svg' width='140' height='40'><rect width='100%' height='100%' fill='#f4f4f4'/><text x='15' y='28' font-size='24' font-family='monospace' fill='#333'>" + captchaCode + "</text></svg>"))
 }
@@ -18424,10 +18430,10 @@ func (a *App) captchaImage(w http.ResponseWriter, r *http.Request) {
 func (a *App) filesPage(w http.ResponseWriter, r *http.Request) {
 	if !a.isAdminRequest(r) {
 		if !a.hasAdmin(r.Context(), a.siteDomain(r.Context(), r)) {
-			http.Redirect(w, r, r.URL.Path+"?register", http.StatusFound)
+			httpsecurity.RedirectLocal(w, r, r.URL.Path+"?register", http.StatusFound)
 			return
 		}
-		http.Redirect(w, r, loginURLForRequest(r), http.StatusFound)
+		httpsecurity.RedirectLocal(w, r, loginURLForRequest(r), http.StatusFound)
 		return
 	}
 	currentPath := currentFilesPath(r)
@@ -18443,19 +18449,16 @@ func (a *App) filesPage(w http.ResponseWriter, r *http.Request) {
 		} else if fileName != "" {
 			rootPath := a.domainFilesDir(r)
 			filePath := filepath.Join(rootPath, filepath.FromSlash(fileName))
-			realFilePath, pathErr := a.existingPathInsideStorageSubtree(rootPath, filePath)
 			fileSize := int64(0)
-			if pathErr == nil {
-				fileSize = diskusage.FileSize(realFilePath)
+			if fileInfo, statErr := a.statInsideStorage(filePath); statErr == nil && !fileInfo.IsDir() {
+				fileSize = fileInfo.Size()
 			}
 			_ = a.applyDomainStorageDelta(r.Context(), a.siteDomain(r.Context(), r), 0, 0, 0, -fileSize, 0)
-			if pathErr == nil {
-				_ = os.Remove(realFilePath)
-			}
+			_ = a.removeInsideStorage(filePath)
 			_, _ = a.db.ExecContext(r.Context(), `DELETE FROM file_access_rules WHERE domain=? AND file_name=?`, domainStorageName(a.siteDomain(r.Context(), r)), fileName)
 			_, _ = a.db.ExecContext(r.Context(), `DELETE FROM file_metadata WHERE domain=? AND file_name=?`, domainStorageName(a.siteDomain(r.Context(), r)), fileName)
 		}
-		http.Redirect(w, r, currentPath+"?files", http.StatusFound)
+		httpsecurity.RedirectLocal(w, r, currentPath+"?files", http.StatusFound)
 		return
 	}
 	fileList, listErr := a.listManagedFiles(r.Context(), r, currentPath)
@@ -18544,6 +18547,7 @@ func (a *App) listManagedFiles(ctx context.Context, r *http.Request, currentPath
 	domain := domainStorageName(a.siteDomain(ctx, r))
 	metadata := a.fileMetadataByName(ctx, domain)
 	currentPath = cleanPath(currentPath)
+	// #nosec G703 -- rootPath is an application-owned directory validated by the storage jail.
 	walkErr := filepath.WalkDir(rootPath, func(filePath string, currentEntry fs.DirEntry, entryErr error) error {
 		if entryErr != nil || currentEntry.IsDir() {
 			return nil
@@ -18556,11 +18560,7 @@ func (a *App) listManagedFiles(ctx context.Context, r *http.Request, currentPath
 		if safeRelativeAssetPath(normalizedPath) == "" {
 			return nil
 		}
-		realFilePath, pathErr := a.existingPathInsideStorageSubtree(rootPath, filePath)
-		if pathErr != nil {
-			return nil
-		}
-		fileInfo, statErr := os.Stat(realFilePath)
+		fileInfo, statErr := a.statInsideStorage(filePath)
 		if statErr != nil {
 			return nil
 		}
@@ -18649,17 +18649,9 @@ func (a *App) uploadFiles(w http.ResponseWriter, r *http.Request, currentPath st
 			continue
 		}
 
-		storedName := uniqueUploadedFileName(baseDir, fileName)
+		storedName := a.uniqueUploadedFileName(baseDir, fileName)
 		targetPath := filepath.Join(baseDir, storedName)
-		realTargetPath, pathErr := a.writablePathInsideStorageSubtree(baseDir, targetPath)
-		if pathErr != nil {
-			_ = sourceFile.Close()
-			if reservedFileBytes > 0 {
-				_ = a.applyDomainStorageDelta(r.Context(), siteDomain, 0, 0, 0, -reservedFileBytes, 0)
-			}
-			continue
-		}
-		targetFile, createErr := os.Create(realTargetPath)
+		targetFile, createErr := a.createFileInsideStorage(targetPath)
 		if createErr != nil {
 			_ = sourceFile.Close()
 			if reservedFileBytes > 0 {
@@ -18671,7 +18663,7 @@ func (a *App) uploadFiles(w http.ResponseWriter, r *http.Request, currentPath st
 		closeErr := targetFile.Close()
 		_ = sourceFile.Close()
 		if copyErr != nil || closeErr != nil {
-			_ = os.Remove(realTargetPath)
+			_ = a.removeInsideStorage(targetPath)
 			if reservedFileBytes > 0 {
 				_ = a.applyDomainStorageDelta(r.Context(), siteDomain, 0, 0, 0, -reservedFileBytes, 0)
 			}
@@ -18679,14 +18671,14 @@ func (a *App) uploadFiles(w http.ResponseWriter, r *http.Request, currentPath st
 		}
 		if reservedFileBytes <= 0 {
 			if storageErr := a.applyDomainStorageDelta(r.Context(), siteDomain, 0, 0, 0, writtenBytes, 0); storageErr != nil {
-				_ = os.Remove(realTargetPath)
+				_ = a.removeInsideStorage(targetPath)
 				http.Error(w, storageErr.Error(), http.StatusInsufficientStorage)
 				return
 			}
 		}
 		if reservedFileBytes > 0 && writtenBytes != reservedFileBytes {
 			if storageErr := a.applyDomainStorageDelta(r.Context(), siteDomain, 0, 0, 0, writtenBytes-reservedFileBytes, 0); storageErr != nil {
-				_ = os.Remove(realTargetPath)
+				_ = a.removeInsideStorage(targetPath)
 				_ = a.applyDomainStorageDelta(r.Context(), siteDomain, 0, 0, 0, -reservedFileBytes, 0)
 				http.Error(w, storageErr.Error(), http.StatusInsufficientStorage)
 				return
@@ -18710,18 +18702,18 @@ func (a *App) uploadFiles(w http.ResponseWriter, r *http.Request, currentPath st
 			uploadedPaths = append(uploadedPaths, "/p/"+uploadedName)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{"uploaded": len(uploadedNames), "files": uploadedNames, "paths": uploadedPaths, "redirect": currentPath + "?files"})
+		_ = json.NewEncoder(w).Encode(map[string]any{"uploaded": len(uploadedNames), "files": uploadedNames, "paths": uploadedPaths, "redirect": httpsecurity.LocalRedirectTarget(currentPath+"?files", "/")})
 		return
 	}
-	http.Redirect(w, r, currentPath+"?files", http.StatusFound)
+	httpsecurity.RedirectLocal(w, r, currentPath+"?files", http.StatusFound)
 }
 
-func uniqueUploadedFileName(baseDir, requestedName string) string {
+func (a *App) uniqueUploadedFileName(baseDir, requestedName string) string {
 	candidate := requestedName
 	extension := path.Ext(requestedName)
 	stem := strings.TrimSuffix(requestedName, extension)
 	for index := 1; ; index++ {
-		if _, err := os.Stat(filepath.Join(baseDir, candidate)); os.IsNotExist(err) {
+		if _, err := a.statInsideStorage(filepath.Join(baseDir, candidate)); os.IsNotExist(err) {
 			return candidate
 		}
 		candidate = fmt.Sprintf("%s-%d%s", stem, index, extension)
@@ -19400,7 +19392,7 @@ func (a *App) siteQuotaDatabaseCandidateForDomainInsideStorage(ctx context.Conte
 	siteDatabasePath := filepath.Join(siteDatabaseRootPath(a.serverControlDBPath()), domainStorageName(domain)+".db")
 	realSiteDatabasePath, pathErr := a.existingPathInsideStorage(siteDatabasePath)
 	if pathErr == nil {
-		if fileInfo, statErr := os.Stat(realSiteDatabasePath); statErr == nil && !fileInfo.IsDir() {
+		if fileInfo, statErr := a.statInsideStorage(siteDatabasePath); statErr == nil && !fileInfo.IsDir() {
 			return siteQuotaDatabaseCandidate{path: realSiteDatabasePath, fallbackDomain: domain}, nil
 		}
 	} else if !errors.Is(pathErr, os.ErrNotExist) {
@@ -20544,20 +20536,16 @@ func (a *App) serveAssetFile(w http.ResponseWriter, r *http.Request, domain, fil
 	}
 	domainFilesRoot := filepath.Join(a.filesRootDir(), domain)
 	filePath := filepath.Join(domainFilesRoot, filepath.FromSlash(fileName))
-	realFilePath, err := a.existingPathInsideStorageSubtree(domainFilesRoot, filePath)
-	if err != nil && !strings.HasPrefix(fileName, "p/") {
+	selectedFilePath := filePath
+	if _, err := a.statInsideStorage(selectedFilePath); err != nil && !strings.HasPrefix(fileName, "p/") {
 		legacyPath := filepath.Join(domainFilesRoot, "p", filepath.FromSlash(fileName))
-		realLegacyPath, legacyErr := a.existingPathInsideStorageSubtree(domainFilesRoot, legacyPath)
-		if legacyErr == nil {
-			realFilePath = realLegacyPath
-			err = nil
+		if _, legacyErr := a.statInsideStorage(legacyPath); legacyErr == nil {
+			selectedFilePath = legacyPath
 		}
 	}
-	if err != nil {
+	if !a.serveFileInsideStorage(w, r, selectedFilePath) {
 		http.NotFound(w, r)
-		return
 	}
-	http.ServeFile(w, r, realFilePath)
 }
 
 func (a *App) publicAssetExists(domain, fileName string) bool {
@@ -20567,8 +20555,7 @@ func (a *App) publicAssetExists(domain, fileName string) bool {
 	}
 	domainFilesRoot := filepath.Join(a.filesRootDir(), domain)
 	filePath := filepath.Join(domainFilesRoot, filepath.FromSlash(fileName))
-	if realFilePath, err := a.existingPathInsideStorageSubtree(domainFilesRoot, filePath); err == nil {
-		fileInfo, statErr := os.Stat(realFilePath)
+	if fileInfo, statErr := a.statInsideStorage(filePath); statErr == nil {
 		if statErr == nil && !fileInfo.IsDir() {
 			return true
 		}
@@ -20577,8 +20564,7 @@ func (a *App) publicAssetExists(domain, fileName string) bool {
 		return false
 	}
 	legacyPath := filepath.Join(domainFilesRoot, "p", filepath.FromSlash(fileName))
-	if realLegacyPath, err := a.existingPathInsideStorageSubtree(domainFilesRoot, legacyPath); err == nil {
-		fileInfo, statErr := os.Stat(realLegacyPath)
+	if fileInfo, statErr := a.statInsideStorage(legacyPath); statErr == nil {
 		return statErr == nil && !fileInfo.IsDir()
 	}
 	return false
@@ -20933,17 +20919,17 @@ func absoluteURLForPath(r *http.Request, relativePath string) string {
 }
 
 func (a *App) createSession(w http.ResponseWriter, r *http.Request, email string) {
-	a.createSessionForDomain(w, r.Context(), a.siteDomain(r.Context(), r), email)
+	a.createSessionForDomain(w, r, r.Context(), a.siteDomain(r.Context(), r), email)
 }
 
-func (a *App) createSessionForDomain(w http.ResponseWriter, ctx context.Context, domain string, email string) string {
+func (a *App) createSessionForDomain(w http.ResponseWriter, r *http.Request, ctx context.Context, domain string, email string) string {
 	sessionDomain := normalizeDomainName(domain)
 	if sessionDomain == "" {
 		sessionDomain = "localhost"
 	}
 	token := fmt.Sprintf("%x", sha256.Sum256([]byte(email+time.Now().String())))
 	_, _ = a.db.ExecContext(ctx, `INSERT OR REPLACE INTO sessions(token,user_email,created_at) VALUES(?,?,?)`, token, sessionDomain+"|"+email, time.Now().Format(time.RFC3339))
-	http.SetCookie(w, &http.Cookie{Name: "sitebrush_session", Value: token, Path: "/", HttpOnly: true})
+	httpsecurity.SetSensitiveCookie(w, r, &http.Cookie{Name: "sitebrush_session", Value: token})
 	return token
 }
 
@@ -21003,7 +20989,7 @@ func (a *App) pagePasswordAction(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unknown password action", http.StatusBadRequest)
 		return
 	}
-	http.Redirect(w, r, pagePath, http.StatusFound)
+	httpsecurity.RedirectLocal(w, r, pagePath, http.StatusFound)
 }
 
 func (a *App) pagePasswordUnlock(w http.ResponseWriter, r *http.Request, domain, pagePath string) {
@@ -21012,7 +20998,7 @@ func (a *App) pagePasswordUnlock(w http.ResponseWriter, r *http.Request, domain,
 		rule, found = a.pagePasswordRuleForPath(r.Context(), domain, pagePath)
 	}
 	if !found {
-		http.Redirect(w, r, pagePath, http.StatusFound)
+		httpsecurity.RedirectLocal(w, r, pagePath, http.StatusFound)
 		return
 	}
 	if r.Method != http.MethodPost {
@@ -21054,8 +21040,8 @@ func (a *App) pagePasswordUnlock(w http.ResponseWriter, r *http.Request, domain,
 	if requestScheme(r) == "https" {
 		cookie.Secure = true
 	}
-	http.SetCookie(w, cookie)
-	http.Redirect(w, r, pagePath, http.StatusFound)
+	httpsecurity.SetSensitiveCookie(w, r, cookie)
+	httpsecurity.RedirectLocal(w, r, pagePath, http.StatusFound)
 }
 
 func (a *App) requirePagePassword(w http.ResponseWriter, r *http.Request, domain, pagePath string) (bool, bool) {
@@ -23485,7 +23471,7 @@ const (
 
 var (
 	newGrabHTTPClient = func() *http.Client {
-		return crawler.NewSessionClient(20*time.Second, newGrabHTTPTransport())
+		return newPublicGrabHTTPClient("", "")
 	}
 )
 
@@ -23500,126 +23486,44 @@ func newGrabHTTPTransport() *http.Transport {
 	return transport
 }
 
-func newGrabHTTPClientForServerIP(sourceHost, sourceIP string) *http.Client {
-	trimmedSourceIP := strings.TrimSpace(sourceIP)
-	if trimmedSourceIP == "" {
-		return newGrabHTTPClient()
-	}
-	parsedIP, sourcePort := splitGrabSourceIP(trimmedSourceIP)
-	if parsedIP == nil {
-		return newGrabHTTPClient()
-	}
-	sourceHost = strings.TrimSpace(strings.ToLower(sourceHost))
-	transport := newGrabHTTPTransport()
-	transport.Proxy = nil
-	dialer := &net.Dialer{Timeout: 20 * time.Second}
-	transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
-		host, port, splitErr := net.SplitHostPort(address)
-		if splitErr == nil && strings.EqualFold(host, sourceHost) {
-			if sourcePort != "" {
-				port = sourcePort
-			}
-			address = net.JoinHostPort(parsedIP.String(), port)
-		}
-		return dialer.DialContext(ctx, network, address)
-	}
-	return crawler.NewSessionClient(20*time.Second, transport)
-}
-
 func newGrabHTTPClientForSourceOptions(sourceHost string, sourceOptions grabSourceOptions) *http.Client {
-	if sourceOptions.PublicNetworkOnly {
-		return newPublicGrabHTTPClient()
+	if strings.TrimSpace(sourceOptions.IP) == "" {
+		return newGrabHTTPClient()
 	}
-	return newGrabHTTPClientForServerIP(sourceHost, sourceOptions.IP)
+	return newPublicGrabHTTPClient(sourceHost, sourceOptions.IP)
 }
 
-func newPublicGrabHTTPClient() *http.Client {
-	transport := newGrabHTTPTransport()
-	transport.Proxy = nil
-	dialer := &net.Dialer{Timeout: 20 * time.Second}
-	transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
-		return dialPublicOutboundAddress(ctx, dialer, network, address)
+func newPublicGrabHTTPClient(sourceHost string, sourceIP string) *http.Client {
+	parsedIP, sourcePort := splitGrabSourceIP(strings.TrimSpace(sourceIP))
+	transport, err := outboundhttp.NewTransport(newGrabHTTPTransport(), outboundhttp.TransportOptions{
+		SourceOverride: outboundhttp.SourceOverride{
+			Host:    sourceHost,
+			Address: parsedIP,
+			Port:    sourcePort,
+		},
+	})
+	if err != nil {
+		return &http.Client{Transport: rejectedOutboundTransport{err: err}}
 	}
 	client := crawler.NewSessionClient(20*time.Second, transport)
-	client.CheckRedirect = func(request *http.Request, via []*http.Request) error {
-		return requirePublicOutboundURL(request.URL)
-	}
+	client.CheckRedirect = outboundhttp.CheckRedirect
 	return client
 }
 
 func requirePublicOutboundURL(targetURL *url.URL) error {
-	if targetURL == nil {
-		return errors.New("source_url is invalid")
-	}
-	scheme := strings.ToLower(strings.TrimSpace(targetURL.Scheme))
-	if scheme != "http" && scheme != "https" {
-		return errors.New("source_url is invalid")
-	}
-	hostName := strings.TrimSpace(targetURL.Hostname())
-	if hostName == "" || strings.Contains(hostName, "%") {
-		return errors.New("source_url is invalid")
-	}
-	if targetURL.User != nil {
-		return errors.New("source_url must not contain credentials")
-	}
-	if parsedIP := net.ParseIP(hostName); parsedIP != nil && !publicOutboundIPAllowed(parsedIP) {
-		return errors.New("private network addresses are not allowed")
-	}
-	return nil
+	return outboundhttp.RequirePublicURL(targetURL)
 }
 
-func dialPublicOutboundAddress(ctx context.Context, dialer *net.Dialer, network, address string) (net.Conn, error) {
-	hostName, port, splitErr := net.SplitHostPort(address)
-	if splitErr != nil || strings.TrimSpace(hostName) == "" || strings.TrimSpace(port) == "" {
-		return nil, errors.New("source address is invalid")
-	}
-	if strings.Contains(hostName, "%") {
-		return nil, errors.New("private network addresses are not allowed")
-	}
-	ipAddresses, lookupErr := net.DefaultResolver.LookupIPAddr(ctx, hostName)
-	if lookupErr != nil {
-		return nil, lookupErr
-	}
-	if len(ipAddresses) == 0 {
-		return nil, errors.New("source host did not resolve")
-	}
-	for _, ipAddress := range ipAddresses {
-		if !publicOutboundIPAllowed(ipAddress.IP) {
-			return nil, errors.New("private network addresses are not allowed")
-		}
-	}
-	var lastErr error
-	for _, ipAddress := range ipAddresses {
-		connection, dialErr := dialer.DialContext(ctx, network, net.JoinHostPort(ipAddress.IP.String(), port))
-		if dialErr == nil {
-			return connection, nil
-		}
-		lastErr = dialErr
-	}
-	if lastErr != nil {
-		return nil, lastErr
-	}
-	return nil, errors.New("source host did not connect")
+type rejectedOutboundTransport struct {
+	err error
+}
+
+func (transport rejectedOutboundTransport) RoundTrip(*http.Request) (*http.Response, error) {
+	return nil, transport.err
 }
 
 func publicOutboundIPAllowed(ip net.IP) bool {
-	if ip == nil {
-		return false
-	}
-	address, ok := netip.AddrFromSlice(ip)
-	if !ok {
-		return false
-	}
-	address = address.Unmap()
-	if !address.IsGlobalUnicast() || address.IsPrivate() || address.IsLoopback() || address.IsLinkLocalUnicast() || address.IsLinkLocalMulticast() || address.IsMulticast() || address.IsUnspecified() {
-		return false
-	}
-	for _, blockedPrefix := range publicOutboundBlockedIPPrefixes {
-		if blockedPrefix.Contains(address) {
-			return false
-		}
-	}
-	return true
+	return outboundhttp.IPAllowed(ip)
 }
 
 func newPageSpider(domain string, pageURL *url.URL, maxDepth int, tracker *grabProgressTracker, progressToken string, sourceOptions grabSourceOptions) *pageSpider {
@@ -23777,8 +23681,17 @@ func (spider *pageSpider) fetchResource(rawURL string, baseURL *url.URL, depth i
 	}
 	spider.inFlight[normalizedURL] = true
 	defer delete(spider.inFlight, normalizedURL)
+	resourceURL, parseErr := url.Parse(normalizedURL)
+	if parseErr != nil {
+		return nil, parseErr
+	}
+	if validationErr := outboundhttp.RequirePublicURL(resourceURL); validationErr != nil {
+		return nil, validationErr
+	}
+	// #nosec G704 -- URL validation and the pinned public-only transport are both mandatory.
 	request, _ := http.NewRequestWithContext(spider.context(), http.MethodGet, normalizedURL, nil)
 	applyGrabRequestHeaders(request, spider.sourceOptions)
+	// #nosec G704 -- the client transport rejects private DNS results and validates every redirect.
 	response, err := spider.client.Do(request)
 	if err != nil {
 		spider.resources[normalizedURL] = &mirroredResource{url: normalizedURL, persist: persist}
@@ -24368,6 +24281,10 @@ func (spider *pageSpider) collectPreviewResource(normalizedURL string, depth int
 }
 
 func (spider *pageSpider) previewResourceMetadata(normalizedURL string) (string, int64) {
+	resourceURL, parseErr := url.Parse(normalizedURL)
+	if parseErr != nil || outboundhttp.RequirePublicURL(resourceURL) != nil {
+		return "", -1
+	}
 	request, err := http.NewRequestWithContext(spider.context(), http.MethodHead, normalizedURL, nil)
 	if err != nil {
 		return "", -1
@@ -24394,6 +24311,13 @@ func (spider *pageSpider) shouldFetchPreviewResourceBody(normalizedURL, contentT
 }
 
 func (spider *pageSpider) fetchPreviewResourceBody(normalizedURL string) ([]byte, string, int64, error) {
+	resourceURL, parseErr := url.Parse(normalizedURL)
+	if parseErr != nil {
+		return nil, "", -1, parseErr
+	}
+	if validationErr := outboundhttp.RequirePublicURL(resourceURL); validationErr != nil {
+		return nil, "", -1, validationErr
+	}
 	request, err := http.NewRequestWithContext(spider.context(), http.MethodGet, normalizedURL, nil)
 	if err != nil {
 		return nil, "", -1, err
@@ -25747,65 +25671,130 @@ func (a *App) writablePathInsideStorageSubtree(rootPath string, candidatePath st
 }
 
 func (a *App) mkdirAllInsideStorage(directoryPath string, perm os.FileMode) error {
-	realDirectoryPath, err := a.writablePathInsideStorage(directoryPath)
+	jail, relativeDirectoryPath, err := a.storageJailForPath(directoryPath)
 	if err != nil {
 		return err
 	}
-	return os.MkdirAll(realDirectoryPath, perm)
+	return jail.MkdirAll(relativeDirectoryPath, perm)
 }
 
 func (a *App) openFileInsideStorage(filePath string) (*os.File, error) {
-	realFilePath, err := a.existingPathInsideStorage(filePath)
+	jail, relativeFilePath, err := a.storageJailForPath(filePath)
 	if err != nil {
 		return nil, err
 	}
-	return os.Open(realFilePath)
+	return jail.Open(relativeFilePath)
 }
 
 func (a *App) createFileInsideStorage(filePath string) (*os.File, error) {
-	realFilePath, err := a.writablePathInsideStorage(filePath)
+	jail, relativeFilePath, err := a.storageJailForPath(filePath)
 	if err != nil {
 		return nil, err
 	}
-	if err := os.MkdirAll(filepath.Dir(realFilePath), 0o755); err != nil {
-		return nil, err
-	}
-	return os.Create(realFilePath)
+	return jail.Create(relativeFilePath)
 }
 
 func (a *App) readFileInsideStorage(filePath string) ([]byte, error) {
-	realFilePath, err := a.existingPathInsideStorage(filePath)
+	jail, relativeFilePath, err := a.storageJailForPath(filePath)
 	if err != nil {
 		return nil, err
 	}
-	return os.ReadFile(realFilePath)
+	return jail.ReadFile(relativeFilePath)
+}
+
+func (a *App) statInsideStorage(filePath string) (os.FileInfo, error) {
+	jail, relativeFilePath, err := a.storageJailForPath(filePath)
+	if err != nil {
+		return nil, err
+	}
+	return jail.Stat(relativeFilePath)
+}
+
+func (a *App) serveFileInsideStorage(w http.ResponseWriter, r *http.Request, filePath string) bool {
+	fileInfo, err := a.statInsideStorage(filePath)
+	if err != nil || fileInfo.IsDir() {
+		return false
+	}
+	file, err := a.openFileInsideStorage(filePath)
+	if err != nil {
+		return false
+	}
+	defer file.Close()
+	http.ServeContent(w, r, filepath.Base(filePath), fileInfo.ModTime(), file)
+	return true
 }
 
 func (a *App) writeFileInsideStorage(filePath string, payload []byte, perm os.FileMode) error {
-	realFilePath, err := a.writablePathInsideStorage(filePath)
+	jail, relativeFilePath, err := a.storageJailForPath(filePath)
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(realFilePath), 0o755); err != nil {
-		return err
-	}
-	return os.WriteFile(realFilePath, payload, perm)
+	return jail.WriteFile(relativeFilePath, payload, perm)
 }
 
 func (a *App) removeInsideStorage(filePath string) error {
-	realFilePath, err := a.writablePathInsideStorage(filePath)
+	jail, relativeFilePath, err := a.storageJailForPath(filePath)
 	if err != nil {
 		return err
 	}
-	return os.Remove(realFilePath)
+	return jail.Remove(relativeFilePath)
 }
 
 func (a *App) removeAllInsideStorage(pathToRemove string) error {
-	realPath, err := a.writablePathInsideStorage(pathToRemove)
+	jail, relativePath, err := a.storageJailForPath(pathToRemove)
 	if err != nil {
 		return err
 	}
-	return os.RemoveAll(realPath)
+	return jail.RemoveAll(relativePath)
+}
+
+func (a *App) renameInsideStorage(oldPath string, newPath string) error {
+	oldJail, oldRelativePath, err := a.storageJailForPath(oldPath)
+	if err != nil {
+		return err
+	}
+	_, newRelativePath, err := a.storageJailForPath(newPath)
+	if err != nil {
+		return err
+	}
+	return oldJail.Rename(oldRelativePath, newRelativePath)
+}
+
+func (a *App) storageJailForPath(candidatePath string) (storagejail.Root, string, error) {
+	rootPath, err := a.storageJailRootPath()
+	if err != nil {
+		return storagejail.Root{}, "", err
+	}
+	jail, err := storagejail.New(rootPath)
+	if err != nil {
+		return storagejail.Root{}, "", err
+	}
+	configuredRootPath := ""
+	if a != nil {
+		configuredRootPath = a.storagePath
+	}
+	configuredRootAbsolutePath, err := filepath.Abs(cleanStoragePath(configuredRootPath))
+	if err != nil {
+		return storagejail.Root{}, "", err
+	}
+	candidateAbsolutePath, err := filepath.Abs(candidatePath)
+	if err != nil {
+		return storagejail.Root{}, "", err
+	}
+	relativePath, err := filepath.Rel(configuredRootAbsolutePath, candidateAbsolutePath)
+	if err != nil || filepath.IsAbs(relativePath) || relativePath == ".." || strings.HasPrefix(relativePath, ".."+string(os.PathSeparator)) {
+		relativePath, err = jail.RelativePath(candidateAbsolutePath)
+		if err != nil {
+			return storagejail.Root{}, "", errors.New("path escapes storage root")
+		}
+	}
+	if relativePath == "" {
+		relativePath = "."
+	}
+	if _, err := jail.RelativePath(filepath.Join(rootPath, relativePath)); err != nil {
+		return storagejail.Root{}, "", err
+	}
+	return jail, relativePath, nil
 }
 
 func (a *App) rejectStorageSymlinkComponents(candidatePath string) error {
@@ -26034,13 +26023,17 @@ func (a *App) serveDomainChrootLocation(w http.ResponseWriter, r *http.Request, 
 	if info.IsDir() {
 		indexPath := filepath.Join(targetPath, "index.html")
 		if indexRealPath, indexInfo, indexErr := a.resolveExistingChrootPath(domain, indexPath); indexErr == nil && !indexInfo.IsDir() {
-			http.ServeFile(w, r, indexRealPath)
+			if !a.serveFileInsideStorage(w, r, indexRealPath) {
+				http.NotFound(w, r)
+			}
 			return true
 		}
 		a.renderDirectoryListing(w, r, domain, requestPath, targetPath, location.URLPath)
 		return true
 	}
-	http.ServeFile(w, r, targetPath)
+	if !a.serveFileInsideStorage(w, r, targetPath) {
+		http.NotFound(w, r)
+	}
 	return true
 }
 
@@ -26958,10 +26951,10 @@ ON CONFLICT(domain) DO UPDATE SET token=excluded.token,updated_at=excluded.updat
 func (a *App) domainSettingsPage(w http.ResponseWriter, r *http.Request) {
 	if !a.isAdminRequest(r) {
 		if !a.hasAdmin(r.Context(), a.siteDomain(r.Context(), r)) {
-			http.Redirect(w, r, r.URL.Path+"?register", http.StatusFound)
+			httpsecurity.RedirectLocal(w, r, r.URL.Path+"?register", http.StatusFound)
 			return
 		}
-		http.Redirect(w, r, loginURLForRequest(r), http.StatusFound)
+		httpsecurity.RedirectLocal(w, r, loginURLForRequest(r), http.StatusFound)
 		return
 	}
 	siteDomain := a.siteDomain(r.Context(), r)
@@ -26979,7 +26972,7 @@ func (a *App) domainSettingsPage(w http.ResponseWriter, r *http.Request) {
 			_, externalIP, _ = detectServerIPCandidates(r.Context())
 		}
 		a.handleDomainSettingsPost(r.Context(), r, siteDomain, externalIP)
-		http.Redirect(w, r, returnPath+"?settings", http.StatusFound)
+		httpsecurity.RedirectLocal(w, r, returnPath+"?settings", http.StatusFound)
 		return
 	}
 	serverIPs, externalIP, externalIPErr := detectServerIPCandidates(r.Context())
@@ -27040,7 +27033,7 @@ func (a *App) freezeDomain(w http.ResponseWriter, r *http.Request) {
 	}
 	domain := a.siteDomain(r.Context(), r)
 	a.setDomainFrozenState(r.Context(), domain, 1)
-	http.Redirect(w, r, requestedReturnPath(r), http.StatusFound)
+	httpsecurity.RedirectLocal(w, r, requestedReturnPath(r), http.StatusFound)
 }
 
 func (a *App) publishDomain(w http.ResponseWriter, r *http.Request) {
@@ -27126,7 +27119,7 @@ func (a *App) publishDomain(w http.ResponseWriter, r *http.Request) {
 	publishProgress("done", "", totalSteps, totalSteps, "done")
 	a.logHostingSupportEvent(r.Context(), "site_published", "success", "", domain, fmt.Sprintf("updated=%d unchanged=%d", updatedPagesCount, skippedPagesCount))
 	log.Printf("publish completed domain=%s", domain)
-	http.Redirect(w, r, requestedReturnPath(r), http.StatusFound)
+	httpsecurity.RedirectLocal(w, r, requestedReturnPath(r), http.StatusFound)
 }
 
 func (a *App) publishPreviewJSON(w http.ResponseWriter, r *http.Request) {
@@ -27284,6 +27277,7 @@ func (a *App) nativeSaveBackupJSON(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// #nosec G703 -- destinationPath is returned by the native user-controlled save dialog.
 	destinationFile, err := os.Create(destinationPath)
 	if err != nil {
 		http.Error(w, "failed to open backup destination", http.StatusInternalServerError)
@@ -27292,12 +27286,14 @@ func (a *App) nativeSaveBackupJSON(w http.ResponseWriter, r *http.Request) {
 	writeErr := a.writeDomainBackupZIP(r.Context(), domain, destinationFile)
 	closeErr := destinationFile.Close()
 	if writeErr != nil {
+		// #nosec G703 -- destinationPath is returned by the native user-controlled save dialog.
 		_ = os.Remove(destinationPath)
 		log.Printf("native backup save failed domain=%s error=%v", domain, writeErr)
 		http.Error(w, "failed to create backup", http.StatusInternalServerError)
 		return
 	}
 	if closeErr != nil {
+		// #nosec G703 -- destinationPath is returned by the native user-controlled save dialog.
 		_ = os.Remove(destinationPath)
 		http.Error(w, "failed to finish backup file", http.StatusInternalServerError)
 		return
@@ -27380,7 +27376,7 @@ func (a *App) importBackup(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "failed to import backup: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	http.Redirect(w, r, redirectPath+"?visual", http.StatusFound)
+	httpsecurity.RedirectLocal(w, r, redirectPath+"?visual", http.StatusFound)
 }
 
 func (a *App) generateDomainPack(domain string) error {
@@ -27390,11 +27386,7 @@ func (a *App) generateDomainPack(domain string) error {
 		return makeErr
 	}
 	packFilePath := filepath.Join(packsDirPath, domainDirName+".zip")
-	realPackFilePath, pathErr := a.writablePathInsideStorageSubtree(packsDirPath, packFilePath)
-	if pathErr != nil {
-		return pathErr
-	}
-	packFile, createErr := os.Create(realPackFilePath)
+	packFile, createErr := a.createFileInsideStorage(packFilePath)
 	if createErr != nil {
 		return createErr
 	}
@@ -27975,12 +27967,8 @@ func (a *App) importDomainBackupZIP(ctx context.Context, domain string, importBa
 			continue
 		}
 		targetFilePath := filepath.Join(domainDir, filepath.FromSlash(nextFileName))
-		realTargetFilePath, pathErr := a.writablePathInsideStorageSubtree(domainDir, targetFilePath)
-		if pathErr != nil {
+		if _, pathErr := a.writablePathInsideStorageSubtree(domainDir, targetFilePath); pathErr != nil {
 			return rootRedirectPath, fmt.Errorf("backup file path escapes site directory: %s", nextFileName)
-		}
-		if err := os.MkdirAll(filepath.Dir(realTargetFilePath), 0o755); err != nil {
-			return rootRedirectPath, err
 		}
 		if shouldRewriteImportedTextFile(nextFileName) {
 			fileBytes, readErr := readBackupZIPEntryWithLimit(zipEntry, backupImportTextEntryLimitBytes)
@@ -27988,7 +27976,7 @@ func (a *App) importDomainBackupZIP(ctx context.Context, domain string, importBa
 				return rootRedirectPath, readErr
 			}
 			fileBytes = []byte(rewriteBackupInternalLinks(string(fileBytes), basePath, filePrefix))
-			if err := os.WriteFile(realTargetFilePath, fileBytes, 0o644); err != nil {
+			if err := a.writeFileInsideStorage(targetFilePath, fileBytes, 0o644); err != nil {
 				return rootRedirectPath, err
 			}
 			continue
@@ -27997,7 +27985,7 @@ func (a *App) importDomainBackupZIP(ctx context.Context, domain string, importBa
 		if openErr != nil {
 			return rootRedirectPath, openErr
 		}
-		targetFile, createErr := os.Create(realTargetFilePath)
+		targetFile, createErr := a.createFileInsideStorage(targetFilePath)
 		if createErr != nil {
 			_ = entryReader.Close()
 			return rootRedirectPath, createErr
@@ -28006,11 +27994,11 @@ func (a *App) importDomainBackupZIP(ctx context.Context, domain string, importBa
 		closeErr := targetFile.Close()
 		_ = entryReader.Close()
 		if copyErr != nil {
-			_ = os.Remove(realTargetFilePath)
+			_ = a.removeInsideStorage(targetFilePath)
 			return rootRedirectPath, copyErr
 		}
 		if closeErr != nil {
-			_ = os.Remove(realTargetFilePath)
+			_ = a.removeInsideStorage(targetFilePath)
 			return rootRedirectPath, closeErr
 		}
 	}
@@ -28240,30 +28228,31 @@ func (a *App) servePublishedStaticFileFromDisk(w http.ResponseWriter, r *http.Re
 	pagePath = cleanPath(pagePath)
 	staticRoot := a.domainStaticDir(domain)
 	staticFilePath := filepath.Join(staticRoot, staticRelativePathForPage(pagePath))
-	realStaticFilePath, pathErr := a.existingPathInsideStorageSubtree(staticRoot, staticFilePath)
-	if pathErr != nil {
-		return false
-	}
-	fileInfo, statErr := os.Stat(realStaticFilePath)
+	fileInfo, statErr := a.statInsideStorage(staticFilePath)
 	if statErr != nil || fileInfo.IsDir() {
 		return false
 	}
 	if pageContentKind(pagePath, "") != "html" {
+		staticFile, openErr := a.openFileInsideStorage(staticFilePath)
+		if openErr != nil {
+			return false
+		}
+		defer staticFile.Close()
 		a.logContentDelivery(w, "static-file")
-		http.ServeFile(w, r, realStaticFilePath)
+		http.ServeContent(w, r, filepath.Base(staticFilePath), fileInfo.ModTime(), staticFile)
 		return true
 	}
 	a.logContentDelivery(w, "static-file")
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if injectPublicMenu {
-		staticContent, readErr := a.guestStaticHTML(realStaticFilePath, pagePath, domain, preferredLanguageCode(r.Header.Get("Accept-Language")), fileInfo)
+		staticContent, readErr := a.guestStaticHTML(staticFilePath, pagePath, domain, preferredLanguageCode(r.Header.Get("Accept-Language")), fileInfo)
 		if readErr != nil {
 			return false
 		}
 		_, _ = w.Write(staticContent)
 		return true
 	}
-	staticContent, readErr := os.ReadFile(realStaticFilePath)
+	staticContent, readErr := a.readFileInsideStorage(staticFilePath)
 	if readErr != nil {
 		return false
 	}
@@ -28275,20 +28264,21 @@ func (a *App) servePublishedStaticFileForAdmin(w http.ResponseWriter, r *http.Re
 	pagePath = cleanPath(pagePath)
 	staticRoot := a.domainStaticDir(domain)
 	staticFilePath := filepath.Join(staticRoot, staticRelativePathForPage(pagePath))
-	realStaticFilePath, pathErr := a.existingPathInsideStorageSubtree(staticRoot, staticFilePath)
-	if pathErr != nil {
-		return false
-	}
-	fileInfo, statErr := os.Stat(realStaticFilePath)
+	fileInfo, statErr := a.statInsideStorage(staticFilePath)
 	if statErr != nil || fileInfo.IsDir() {
 		return false
 	}
 	if pageContentKind(pagePath, "") != "html" {
+		staticFile, openErr := a.openFileInsideStorage(staticFilePath)
+		if openErr != nil {
+			return false
+		}
+		defer staticFile.Close()
 		a.logContentDelivery(w, "static-file")
-		http.ServeFile(w, r, realStaticFilePath)
+		http.ServeContent(w, r, filepath.Base(staticFilePath), fileInfo.ModTime(), staticFile)
 		return true
 	}
-	staticContent, readErr := os.ReadFile(realStaticFilePath)
+	staticContent, readErr := a.readFileInsideStorage(staticFilePath)
 	if readErr != nil {
 		return false
 	}
@@ -28308,32 +28298,22 @@ func (a *App) servePublishedStaticFileForAdmin(w http.ResponseWriter, r *http.Re
 func (a *App) publishedStaticPageExists(domain, pagePath string) bool {
 	staticRoot := a.domainStaticDir(domain)
 	staticFilePath := filepath.Join(staticRoot, staticRelativePathForPage(cleanPath(pagePath)))
-	realStaticFilePath, pathErr := a.existingPathInsideStorageSubtree(staticRoot, staticFilePath)
-	if pathErr != nil {
-		return false
-	}
-	fileInfo, statErr := os.Stat(realStaticFilePath)
+	fileInfo, statErr := a.statInsideStorage(staticFilePath)
 	return statErr == nil && !fileInfo.IsDir()
 }
 
 func (a *App) guestStaticHTML(staticFilePath, pagePath, domain, languageCode string, fileInfo os.FileInfo) ([]byte, error) {
+	staticContent, readErr := a.readFileInsideStorage(staticFilePath)
+	if readErr != nil {
+		return nil, readErr
+	}
 	if a.guestStaticHTMLCache == nil {
-		staticContent, readErr := os.ReadFile(staticFilePath)
-		if readErr != nil {
-			return nil, readErr
-		}
-		html := string(staticContent)
-		menuScript := buildGuestContextMenuScriptForLanguage(pagePath, domain, languageCode)
-		lowerHTML := strings.ToLower(html)
-		bodyCloseIndex := strings.LastIndex(lowerHTML, "</body>")
-		if bodyCloseIndex < 0 {
-			return []byte(html + menuScript), nil
-		}
-		return []byte(html[:bodyCloseIndex] + menuScript + html[bodyCloseIndex:]), nil
+		return buildGuestStaticHTMLBody(staticContent, pagePath, domain, languageCode), nil
 	}
 	response := make(chan guestStaticHTMLCacheResponse, 1)
 	request := guestStaticHTMLCacheRequest{
 		filePath:     staticFilePath,
+		staticHTML:   staticContent,
 		pagePath:     pagePath,
 		domain:       domain,
 		languageCode: languageCode,
@@ -28344,13 +28324,13 @@ func (a *App) guestStaticHTML(staticFilePath, pagePath, domain, languageCode str
 	select {
 	case a.guestStaticHTMLCache <- request:
 	default:
-		return buildGuestStaticHTMLBody(staticFilePath, pagePath, domain, languageCode)
+		return buildGuestStaticHTMLBody(staticContent, pagePath, domain, languageCode), nil
 	}
 	select {
 	case result := <-response:
 		return result.body, result.err
 	case <-time.After(2 * time.Second):
-		return buildGuestStaticHTMLBody(staticFilePath, pagePath, domain, languageCode)
+		return buildGuestStaticHTMLBody(staticContent, pagePath, domain, languageCode), nil
 	}
 }
 
@@ -28444,11 +28424,7 @@ func runGuestStaticHTMLCache(ctx context.Context, requests <-chan guestStaticHTM
 				usedBytes -= int64(len(cachedEntry.body))
 				delete(cacheEntries, cacheKey)
 			}
-			body, readErr := buildGuestStaticHTMLBody(request.filePath, request.pagePath, request.domain, request.languageCode)
-			if readErr != nil {
-				request.response <- guestStaticHTMLCacheResponse{err: readErr}
-				continue
-			}
+			body := buildGuestStaticHTMLBody(request.staticHTML, request.pagePath, request.domain, request.languageCode)
 			bodySize := int64(len(body))
 			if bodySize > limitBytes {
 				request.response <- guestStaticHTMLCacheResponse{body: body}
@@ -28465,19 +28441,15 @@ func runGuestStaticHTMLCache(ctx context.Context, requests <-chan guestStaticHTM
 	}
 }
 
-func buildGuestStaticHTMLBody(staticFilePath, pagePath, domain, languageCode string) ([]byte, error) {
-	staticContent, readErr := os.ReadFile(staticFilePath)
-	if readErr != nil {
-		return nil, readErr
-	}
+func buildGuestStaticHTMLBody(staticContent []byte, pagePath, domain, languageCode string) []byte {
 	html := string(staticContent)
 	menuScript := buildGuestContextMenuScriptForLanguage(pagePath, domain, languageCode)
 	lowerHTML := strings.ToLower(html)
 	bodyCloseIndex := strings.LastIndex(lowerHTML, "</body>")
 	if bodyCloseIndex < 0 {
-		return []byte(html + menuScript), nil
+		return []byte(html + menuScript)
 	}
-	return []byte(html[:bodyCloseIndex] + menuScript + html[bodyCloseIndex:]), nil
+	return []byte(html[:bodyCloseIndex] + menuScript + html[bodyCloseIndex:])
 }
 
 func (a *App) injectPublicContextMenu(r *http.Request, pagePath, html string) string {
@@ -28493,22 +28465,13 @@ func (a *App) injectPublicContextMenu(r *http.Request, pagePath, html string) st
 func (a *App) writePublishedStaticHTML(domain, pagePath, html string) {
 	staticRoot := a.domainStaticDir(domain)
 	staticFilePath := filepath.Join(staticRoot, staticRelativePathForPage(pagePath))
-	realStaticFilePath, err := a.writablePathInsideStorageSubtree(staticRoot, staticFilePath)
-	if err != nil {
-		return
-	}
-	_ = os.MkdirAll(filepath.Dir(realStaticFilePath), 0o755)
-	_ = os.WriteFile(realStaticFilePath, []byte(html), 0o644)
+	_ = a.writeFileInsideStorage(staticFilePath, []byte(html), 0o644)
 }
 
 func (a *App) removePublishedStaticFile(domain, pagePath string) {
 	staticRoot := a.domainStaticDir(domain)
 	staticFilePath := filepath.Join(staticRoot, staticRelativePathForPage(pagePath))
-	realStaticFilePath, err := a.existingPathInsideStorageSubtree(staticRoot, staticFilePath)
-	if err != nil {
-		return
-	}
-	_ = os.Remove(realStaticFilePath)
+	_ = a.removeInsideStorage(staticFilePath)
 }
 
 func staticRelativePathForPage(pagePath string) string {
