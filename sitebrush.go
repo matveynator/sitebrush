@@ -8677,14 +8677,17 @@ func (a *App) savePage(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) grabPage(w http.ResponseWriter, r *http.Request) {
+	allowLongStreamingResponse(w)
 	if !a.isAdminRequest(r) || r.Method != http.MethodPost {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
 
 	pagePath := grabRequestTargetPath(r)
+	domain := a.siteDomain(r.Context(), r)
+	importContext := contextWithDomain(context.Background(), domain)
 	progressToken := strings.TrimSpace(r.FormValue("progress_token"))
-	downloadContext, finishDownloadContext := a.grabImportDownloadContext(r.Context(), progressToken)
+	downloadContext, finishDownloadContext := a.grabImportDownloadContext(importContext, progressToken)
 	defer finishDownloadContext()
 
 	sourceURL := r.FormValue("source_url")
@@ -8713,7 +8716,6 @@ func (a *App) grabPage(w http.ResponseWriter, r *http.Request) {
 	remoteSourceURL = resolvedSourceURL
 	sourceURL = remoteSourceURL.String()
 
-	domain := a.siteDomain(r.Context(), r)
 	importRequest := grabImportRequest{
 		Domain:               domain,
 		PagePath:             pagePath,
@@ -8728,7 +8730,7 @@ func (a *App) grabPage(w http.ResponseWriter, r *http.Request) {
 		SelectedResourceURLs: selectedGrabResourceURLs(r),
 	}
 	if grabCopyWholeSite(r) {
-		importResult, importErr := a.importWholeRemoteSite(r.Context(), importRequest)
+		importResult, importErr := a.importWholeRemoteSite(importContext, importRequest)
 		if importErr != nil {
 			statusCode := http.StatusBadGateway
 			if strings.Contains(importErr.Error(), "storage limit reached:") {
@@ -8747,24 +8749,23 @@ func (a *App) grabPage(w http.ResponseWriter, r *http.Request) {
 	}
 	spider, html := prepareSinglePageImport(importRequest, a.grabTracker)
 	importedPages := []wholeSiteImportedPage{{SourceURL: sourceURL, LocalPath: pagePath, HTML: html}}
-	pageDelta, publishedPageDelta, revisionDelta, publishedStaticDelta := a.estimateImportedPagesStorageDelta(r.Context(), domain, importedPages)
+	pageDelta, publishedPageDelta, revisionDelta, publishedStaticDelta := a.estimateImportedPagesStorageDelta(importContext, domain, importedPages)
 	fileDelta := a.estimateImportedFileDelta(domain, spider)
-	if storageErr := a.applyDomainStorageDelta(r.Context(), domain, pageDelta, publishedPageDelta, revisionDelta, fileDelta, publishedStaticDelta); storageErr != nil {
+	if storageErr := a.applyDomainStorageDelta(importContext, domain, pageDelta, publishedPageDelta, revisionDelta, fileDelta, publishedStaticDelta); storageErr != nil {
 		http.Error(w, storageErr.Error(), http.StatusInsufficientStorage)
 		return
 	}
-	if persistErr := a.persistSpiderAssets(r.Context(), spider, pagePath); persistErr != nil {
-		_ = a.applyDomainStorageDelta(r.Context(), domain, -pageDelta, -publishedPageDelta, -revisionDelta, -fileDelta, -publishedStaticDelta)
+	if persistErr := a.persistSpiderAssets(importContext, spider, pagePath); persistErr != nil {
+		_ = a.applyDomainStorageDelta(importContext, domain, -pageDelta, -publishedPageDelta, -revisionDelta, -fileDelta, -publishedStaticDelta)
 		http.Error(w, persistErr.Error(), http.StatusBadGateway)
 		return
 	}
-	a.clearPageRedirectSource(r.Context(), domain, pagePath)
-	_, _ = a.db.ExecContext(r.Context(), `INSERT OR REPLACE INTO pages(domain,path,title,html,published) VALUES(?,?,?,?,1)`, domain, pagePath, pagePath, html)
-	if !a.isDomainFrozen(r.Context(), domain) {
-		_, _ = a.db.ExecContext(r.Context(), `INSERT OR REPLACE INTO published_pages(domain,path,title,html) VALUES(?,?,?,?)`, domain, pagePath, pagePath, html)
-		a.writePublishedStaticHTML(domain, pagePath, html)
+	if storeErr := a.storeWholeSiteImportedPages(importContext, domain, importedPages); storeErr != nil {
+		a.rebuildDomainStorageUsage(importContext, domain)
+		http.Error(w, storeErr.Error(), http.StatusInternalServerError)
+		return
 	}
-	_, _ = a.db.ExecContext(r.Context(), `INSERT INTO revisions(domain,page_path,html,created_at) VALUES(?,?,?,?)`, domain, pagePath, html, time.Now().Format(time.RFC3339))
+	a.rebuildDomainStorageUsage(importContext, domain)
 	if a.grabTracker != nil && importRequest.ProgressToken != "" {
 		stage := "done"
 		if spider.unresolvedFailedTotal() > 0 {
@@ -10958,12 +10959,18 @@ func (a *App) storeWholeSiteImportedPages(ctx context.Context, domain string, im
 		pagePath := cleanPath(importedPage.LocalPath)
 		pageHTML := importedPage.HTML
 		a.clearPageRedirectSource(ctx, domain, pagePath)
-		_, _ = a.db.ExecContext(ctx, `INSERT OR REPLACE INTO pages(domain,path,title,html,published) VALUES(?,?,?,?,1)`, domain, pagePath, pagePath, pageHTML)
+		if _, err := a.db.ExecContext(ctx, `INSERT OR REPLACE INTO pages(domain,path,title,html,published) VALUES(?,?,?,?,1)`, domain, pagePath, pagePath, pageHTML); err != nil {
+			return fmt.Errorf("store imported page %s: %w", pagePath, err)
+		}
 		if !frozenDomain {
-			_, _ = a.db.ExecContext(ctx, `INSERT OR REPLACE INTO published_pages(domain,path,title,html) VALUES(?,?,?,?)`, domain, pagePath, pagePath, pageHTML)
+			if _, err := a.db.ExecContext(ctx, `INSERT OR REPLACE INTO published_pages(domain,path,title,html) VALUES(?,?,?,?)`, domain, pagePath, pagePath, pageHTML); err != nil {
+				return fmt.Errorf("publish imported page %s: %w", pagePath, err)
+			}
 			a.writePublishedStaticHTML(domain, pagePath, pageHTML)
 		}
-		_, _ = a.db.ExecContext(ctx, `INSERT INTO revisions(domain,page_path,html,created_at) VALUES(?,?,?,?)`, domain, pagePath, pageHTML, time.Now().Format(time.RFC3339))
+		if _, err := a.db.ExecContext(ctx, `INSERT INTO revisions(domain,page_path,html,created_at) VALUES(?,?,?,?)`, domain, pagePath, pageHTML, time.Now().Format(time.RFC3339)); err != nil {
+			return fmt.Errorf("store imported page revision %s: %w", pagePath, err)
+		}
 	}
 	return nil
 }
