@@ -27,10 +27,8 @@ github.com/mattn/go-isatty v0.0.20 h1:xfD0iDuEKnDkl03q4limB+vH+GxLEtL/jb4xVJSWWE
 github.com/mattn/go-isatty v0.0.20/go.mod h1:W+V8PltTTMOvKvAeJH7IuucS94S2C6jfK/D7dTCTo3Y=
 github.com/mattn/go-sqlite3 v1.14.44 h1:3VSe+xafpbzsLbdr2AWlAZk9yRHiBhTBakioXaCKTF8=
 github.com/mattn/go-sqlite3 v1.14.44/go.mod h1:pjEuOr8IwzLJP2MfGeTb0A35jauH+C2kbHKBr7yXKVQ=
-github.com/matveynator/netchan v0.0.0-20260307171913-997c76957779 h1:9GbdftdhC4MJABpfr1aaqLyfQwcZjW19H3kfDxF7Td0=
-github.com/matveynator/netchan v0.0.0-20260307171913-997c76957779/go.mod h1:pp9DNxYkqaM+L7m/k5aZCcemPnTBaqJxyzlmBinaGkg=
-github.com/matveynator/netchan v0.0.0-20260730195756-c1fea782b82c h1:7tEMn98tAwTI/g6evg9hDKcYxpCheRz9UGG9CIo/v8Q=
-github.com/matveynator/netchan v0.0.0-20260730195756-c1fea782b82c/go.mod h1:pp9DNxYkqaM+L7m/k5aZCcemPnTBaqJxyzlmBinaGkg=
+github.com/matveynator/netchan v0.0.0-20260730202529-f9eaab14ed9f h1:7B3rL/tcay7t6vDtoQ8k4Wa7gUSHsRzJXzIV0Q4wrvc=
+github.com/matveynator/netchan v0.0.0-20260730202529-f9eaab14ed9f/go.mod h1:pp9DNxYkqaM+L7m/k5aZCcemPnTBaqJxyzlmBinaGkg=
 github.com/ncruces/go-strftime v1.0.0 h1:HMFp8mLCTPp341M/ZnA4qaf7ZlsbTc+miZjCLOFAw7w=
 github.com/ncruces/go-strftime v1.0.0/go.mod h1:Fwc5htZGVVkseilnfgOVb9mKy6w1naJmn9CehxcKcls=
 github.com/pmezard/go-difflib v1.0.0 h1:4DBwDE0NGyQoBHbLQYPwSUPoCMWR5BEzIk/f1lZbAQM=
