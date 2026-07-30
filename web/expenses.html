@@ -231,8 +231,16 @@
         <input type="hidden" name="billing_action" value="demo_settings"><input type="hidden" name="refresh_demo_site" value="0" data-refresh-demo-site-input>
         <label>{{index .T "billing_demo_domain"}} <input name="demo_site_domain" type="text" class="form-control" value="{{.DemoSettings.Domain}}"></label>
         <label>{{index .T "billing_demo_source_url"}} <input name="demo_site_source_url" type="text" class="form-control" value="{{.DemoSettings.SourceURL}}"></label>
-        <label class="checkbox-row"><input type="checkbox" name="demo_site_copy_whole_site" value="1" {{if .DemoSettings.CopyWholeSite}}checked{{end}}><span>{{index .T "billing_demo_copy_whole_site"}}</span></label>
+        <fieldset class="billing-demo-copy-scope">
+          <legend>{{.DemoCopyScopeLabel}}</legend>
+          <label class="checkbox-row"><input type="radio" name="demo_site_copy_scope" value="page" {{if not .DemoSettings.CopyWholeSite}}checked{{end}}><span>{{.DemoCopyPageLabel}}</span></label>
+          <label class="checkbox-row"><input type="radio" name="demo_site_copy_scope" value="site" {{if .DemoSettings.CopyWholeSite}}checked{{end}}><span>{{index .T "billing_demo_copy_whole_site"}}</span></label>
+        </fieldset>
         <label class="checkbox-row"><input type="checkbox" name="demo_site_enabled" value="1" {{if .DemoSettings.Enabled}}checked{{end}}><span>{{index .T "billing_demo_enabled"}}</span></label>
+        <div class="billing-demo-copy-status">
+          <div><strong>{{.DemoSnapshotLabel}}</strong><span>{{if .DemoStatus.SnapshotAvailable}}{{.DemoStatus.SnapshotCreatedAt}} · {{.DemoStatus.SnapshotSize}}{{else}}{{.DemoSnapshotMissingLabel}}{{end}}</span></div>
+          <div><strong>{{.DemoLastRestoredLabel}}</strong><span>{{if .DemoStatus.LastRestoredAt}}{{.DemoStatus.LastRestoredAt}}{{else}}{{.DemoNeverRestoredLabel}}{{end}}</span></div>
+        </div>
         <div class="billing-demo-actions">
           <button type="submit" class="btn btn-primary"><img src="/p/static/save-page.png" alt="">{{index .T "billing_save"}}</button>
           <button type="button" class="btn btn-outline-primary" data-demo-refresh-preview-button><img src="/p/static/backup.png" alt="">{{index .T "billing_demo_refresh_copy"}}</button>
@@ -1170,8 +1178,16 @@
         <input type="hidden" name="refresh_demo_site" value="0" data-refresh-demo-site-input>
         <label>{{index .T "billing_demo_domain"}} <input name="demo_site_domain" type="text" class="form-control" value="{{.DemoSettings.Domain}}" placeholder="demo.example.com"></label>
         <label>{{index .T "billing_demo_source_url"}} <input name="demo_site_source_url" type="text" class="form-control" value="{{.DemoSettings.SourceURL}}" placeholder="example.com or https://example.com/"></label>
-        <label class="checkbox-row"><input type="checkbox" name="demo_site_copy_whole_site" value="1" {{if .DemoSettings.CopyWholeSite}}checked{{end}}><span>{{index .T "billing_demo_copy_whole_site"}}</span></label>
+        <fieldset class="billing-demo-copy-scope">
+          <legend>{{.DemoCopyScopeLabel}}</legend>
+          <label class="checkbox-row"><input type="radio" name="demo_site_copy_scope" value="page" {{if not .DemoSettings.CopyWholeSite}}checked{{end}}><span>{{.DemoCopyPageLabel}}</span></label>
+          <label class="checkbox-row"><input type="radio" name="demo_site_copy_scope" value="site" {{if .DemoSettings.CopyWholeSite}}checked{{end}}><span>{{index .T "billing_demo_copy_whole_site"}}</span></label>
+        </fieldset>
         <label class="checkbox-row"><input type="checkbox" name="demo_site_enabled" value="1" {{if .DemoSettings.Enabled}}checked{{end}}><span>{{index .T "billing_demo_enabled"}}</span></label>
+        <div class="billing-demo-copy-status">
+          <div><strong>{{.DemoSnapshotLabel}}</strong><span>{{if .DemoStatus.SnapshotAvailable}}{{.DemoStatus.SnapshotCreatedAt}} · {{.DemoStatus.SnapshotSize}}{{else}}{{.DemoSnapshotMissingLabel}}{{end}}</span></div>
+          <div><strong>{{.DemoLastRestoredLabel}}</strong><span>{{if .DemoStatus.LastRestoredAt}}{{.DemoStatus.LastRestoredAt}}{{else}}{{.DemoNeverRestoredLabel}}{{end}}</span></div>
+        </div>
         <div class="billing-demo-actions">
           <button type="submit" class="btn btn-primary"><img src="/p/static/save-page.png" alt="">{{index .T "billing_save"}}</button>
           <button type="button" class="btn btn-outline-primary" data-demo-refresh-preview-button><img src="/p/static/backup.png" alt="">{{index .T "billing_demo_refresh_copy"}}</button>
@@ -2025,8 +2041,8 @@
     </div>
     <div class="modal-footer">
       <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal" data-demo-refresh-cancel-button>{{index .T "edit_cancel"}}</button>
-      <button type="button" class="btn btn-primary" data-demo-refresh-confirm-button disabled><img src="/p/static/backup.png" alt="">{{index .T "billing_demo_refresh_continue"}}</button>
-      <button type="button" class="btn btn-primary d-none" data-bs-dismiss="modal" data-demo-refresh-close-button>{{index .T "tree_close"}}</button>
+      <button type="button" class="btn btn-success" data-demo-refresh-confirm-button disabled><img src="/p/static/backup.png" alt="">{{index .T "billing_demo_refresh_continue"}}</button>
+      <button type="button" class="btn btn-success d-none" data-bs-dismiss="modal" data-demo-refresh-close-button>{{index .T "tree_close"}}</button>
     </div>
   </div></div>
 </div>
@@ -2723,6 +2739,8 @@
     failedResourceURLs = new Set();
     confirmButtonElement.disabled = true;
     confirmButtonElement.classList.remove('d-none');
+    confirmButtonElement.classList.remove('btn-outline-primary');
+    confirmButtonElement.classList.add('btn-success');
     confirmButtonElement.innerHTML = '<img src="/p/static/backup.png" alt="">' + escapeHTML(demoRefreshText.continueButton);
     cancelButtonElement.classList.remove('d-none');
     closeButtonElement.classList.add('d-none');
@@ -2830,6 +2848,8 @@
       return;
     }
     confirmButtonElement.disabled = !currentPreviewPayload || failedResourceURLs.size === 0;
+    confirmButtonElement.classList.remove('btn-success');
+    confirmButtonElement.classList.add('btn-outline-primary');
     confirmButtonElement.innerHTML = '<img src="/p/static/backup.png" alt="">' + escapeHTML(demoRefreshText.retryButton);
   }
 

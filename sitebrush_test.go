@@ -4061,12 +4061,13 @@ func TestDemoSiteVisitorGetsEditorSessionAndCleanupDeletesSite(t *testing.T) {
 		t.Fatalf("prepare demo site: %v", err)
 	}
 
-	// A partial or old snapshot must not mark the demo ready without its landing page.
+	// A partial or old snapshot must not mark the demo ready without a usable page.
 	demoContext := contextWithDomain(context.Background(), "demo.example")
 	if _, err := application.db.ExecContext(demoContext, `DELETE FROM pages WHERE domain=? AND path='/'`, "demo.example"); err != nil {
 		t.Fatalf("delete demo landing page: %v", err)
 	}
-	if _, err := application.db.ExecContext(demoContext, `INSERT OR REPLACE INTO pages(domain,path,title,html,published) VALUES(?,?,?,?,1)`, "demo.example", "/orphan", "Orphan", "<h1>Orphan</h1>"); err != nil {
+	orphanMissingHTML := `<!doctype html><html id="SiteBrush"><body><main class="container missing-page"><div class="missing-page-alert">Not found</div></main></body></html>`
+	if _, err := application.db.ExecContext(demoContext, `INSERT OR REPLACE INTO pages(domain,path,title,html,published) VALUES(?,?,?,?,1)`, "demo.example", "/orphan", "Orphan", orphanMissingHTML); err != nil {
 		t.Fatalf("create orphan demo page: %v", err)
 	}
 	if err := application.createDemoSiteSnapshot(context.Background(), "demo.example"); err != nil {
@@ -4166,9 +4167,12 @@ func TestDemoSiteVisitorGetsEditorSessionAndCleanupDeletesSite(t *testing.T) {
 	if remainingDemoSessions != 0 {
 		t.Fatalf("remaining demo sessions = %d, want 0", remainingDemoSessions)
 	}
+	if restoredAt := store.Settings(context.Background()).LastRestoredAt; restoredAt == "" {
+		t.Fatal("demo content reset time was not recorded")
+	}
 }
 
-func TestDemoSiteSourceImportFailureDoesNotCreateWelcomePage(t *testing.T) {
+func TestDemoSiteSourceImportFailureKeepsUsableWelcomePage(t *testing.T) {
 	sourceURL := "https://source.example/"
 	previousGrabHTTPClient := newGrabHTTPClient
 	newGrabHTTPClient = func() *http.Client {
@@ -4206,12 +4210,48 @@ func TestDemoSiteSourceImportFailureDoesNotCreateWelcomePage(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer siteDB.Close()
-	var pageCount int
-	if err := siteDB.QueryRow(`SELECT COUNT(1) FROM pages WHERE domain=?`, "demo-fail.example").Scan(&pageCount); err != nil {
-		t.Fatalf("read demo page count: %v", err)
+	var pageHTML string
+	if err := siteDB.QueryRow(`SELECT html FROM pages WHERE domain=? AND path='/'`, "demo-fail.example").Scan(&pageHTML); err != nil {
+		t.Fatalf("read demo landing page: %v", err)
 	}
-	if pageCount != 0 {
-		t.Fatalf("demo page count = %d, want 0", pageCount)
+	if !strings.Contains(pageHTML, "Sitebrush Demo") {
+		t.Fatalf("failed source import did not retain a usable landing page: %s", pageHTML)
+	}
+}
+
+func TestDemoSiteLandingPathSkipsImportedSitebrush404(t *testing.T) {
+	application, rawDB := newTestApplication(t)
+	missingHTML := `<!doctype html><html id="SiteBrush"><body><main class="container missing-page"><div class="missing-page-alert">Not found</div></main></body></html>`
+	if _, err := rawDB.Exec(`INSERT INTO pages(domain,path,title,html,published) VALUES(?,?,?,?,1),(?,?,?,?,1)`,
+		"demo.example", "/", "Missing", missingHTML,
+		"demo.example", "/products/example", "Product", "<h1>Product</h1>",
+	); err != nil {
+		t.Fatalf("insert demo pages: %v", err)
+	}
+
+	landingPath, found := application.demoSiteLandingPath(context.Background(), "demo.example")
+	if !found {
+		t.Fatal("usable imported demo page was not found")
+	}
+	if landingPath != "/products/example" {
+		t.Fatalf("demo landing path = %q, want /products/example", landingPath)
+	}
+}
+
+func TestDownloadGrabSourceRejectsSitebrushSoft404(t *testing.T) {
+	sourceURL := "https://source.example/"
+	previousGrabHTTPClient := newGrabHTTPClient
+	newGrabHTTPClient = func() *http.Client {
+		return &http.Client{Transport: fakeGrabTransport{responses: map[string]fakeGrabResponse{
+			sourceURL: {contentType: "text/html; charset=utf-8", body: `<!doctype html><html id="SiteBrush"><body><main class="container missing-page"><div class="missing-page-alert">Not found</div></main></body></html>`},
+		}}}
+	}
+	defer func() {
+		newGrabHTTPClient = previousGrabHTTPClient
+	}()
+
+	if _, _, err := downloadGrabSourceHTMLWithResolvedURL(sourceURL, grabSourceOptions{}); err == nil {
+		t.Fatal("SiteBrush soft 404 was accepted as source content")
 	}
 }
 
@@ -4302,6 +4342,10 @@ func TestBillingDemoGrabRefreshUpdatesLocalSnapshot(t *testing.T) {
 	}
 	if _, err := os.Stat(application.demoSiteSnapshotPath("demo-refresh.example")); err != nil {
 		t.Fatalf("demo snapshot stat err = %v", err)
+	}
+	demoStatus := application.demoSiteStatusView(context.Background(), demo.Settings{Domain: "demo-refresh.example"})
+	if !demoStatus.SnapshotAvailable || demoStatus.SnapshotCreatedAt == "" || demoStatus.SnapshotSize == "" {
+		t.Fatalf("demo snapshot status is incomplete: %#v", demoStatus)
 	}
 }
 

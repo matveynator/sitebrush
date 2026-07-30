@@ -267,6 +267,13 @@ type hostingAndSupportPanelSnapshot struct {
 	ShowCentralRegistry     bool
 }
 
+type demoSiteStatusView struct {
+	SnapshotAvailable bool
+	SnapshotCreatedAt string
+	SnapshotSize      string
+	LastRestoredAt    string
+}
+
 type serviceMailRequest struct {
 	Version         int                                `json:"version"`
 	InstallationID  string                             `json:"installation_id"`
@@ -7459,6 +7466,10 @@ func (a *App) startDemoSiteSession(w http.ResponseWriter, r *http.Request, state
 	if state.Status != "ready" || adminEmail == "" {
 		return "", fmt.Errorf("demo site is not ready")
 	}
+	landingPath, hasLandingPage := a.demoSiteLandingPath(r.Context(), domain)
+	if !hasLandingPage {
+		return "", fmt.Errorf("demo site has no usable pages")
+	}
 	sessionToken := a.createSessionForDomain(w, r, r.Context(), domain, adminEmail)
 	if err := a.enqueueDemoSessionEvent(r.Context(), demoSessionEvent{
 		kind: "create", domain: domain, sessionToken: sessionToken, userEmail: adminEmail, resetAfter: time.Now().Add(demo.ResetDelay),
@@ -7467,7 +7478,7 @@ func (a *App) startDemoSiteSession(w http.ResponseWriter, r *http.Request, state
 		httpsecurity.SetSensitiveCookie(w, r, &http.Cookie{Name: "sitebrush_session", Value: "", Expires: time.Unix(0, 0), MaxAge: -1})
 		return "", err
 	}
-	return "/", nil
+	return landingPath, nil
 }
 
 func (a *App) startDemoSessionEventProcess(stop <-chan struct{}) chan demoSessionEvent {
@@ -7581,6 +7592,9 @@ func (a *App) ensureDemoSiteReady(ctx context.Context, controlDatabase *sql.DB, 
 				log.Printf("demo site source import failed domain=%s source=%s error=%s",
 					diagnosticlog.SafeLogValue(domain), diagnosticlog.SafeLogValue(settings.SourceURL),
 					diagnosticlog.SafeLogValue(err.Error()))
+				if !a.demoSiteHasLandingPage(ctx, domain) {
+					a.createDemoWelcomePage(ctx, domain)
+				}
 				return "", 0, err
 			}
 			failedTotal = seedFailedTotal
@@ -7607,9 +7621,43 @@ func (a *App) firstAdminEmailForDomain(ctx context.Context, domain string) (stri
 }
 
 func (a *App) demoSiteHasLandingPage(ctx context.Context, domain string) bool {
-	var pageCount int
-	_ = a.db.QueryRowContext(contextWithDomain(ctx, domain), `SELECT COUNT(1) FROM pages WHERE domain=? AND path='/'`, domain).Scan(&pageCount)
-	return pageCount > 0
+	_, found := a.demoSiteLandingPath(ctx, domain)
+	return found
+}
+
+func (a *App) demoSiteLandingPath(ctx context.Context, domain string) (string, bool) {
+	domainContext := contextWithDomain(ctx, domain)
+	var rootHTML string
+	rootErr := a.db.QueryRowContext(domainContext, `SELECT html FROM pages WHERE domain=? AND path='/'`, domain).Scan(&rootHTML)
+	if rootErr == nil && !isSitebrushMissingPageHTML(rootHTML) {
+		return "/", true
+	}
+	pageRows, err := a.db.QueryContext(domainContext, `SELECT path,html FROM pages WHERE domain=? AND path<>'/' ORDER BY path ASC`, domain)
+	if err != nil {
+		return "", false
+	}
+	defer pageRows.Close()
+	for pageRows.Next() {
+		var pagePath string
+		var pageHTML string
+		if scanErr := pageRows.Scan(&pagePath, &pageHTML); scanErr != nil {
+			continue
+		}
+		if !isSitebrushMissingPageHTML(pageHTML) {
+			return cleanPath(pagePath), true
+		}
+	}
+	return "", false
+}
+
+func isSitebrushMissingPageHTML(pageHTML string) bool {
+	lowerHTML := strings.ToLower(pageHTML)
+	if strings.Contains(lowerHTML, `name="sitebrush-page-kind" content="missing"`) {
+		return true
+	}
+	return strings.Contains(lowerHTML, `id="sitebrush"`) &&
+		strings.Contains(lowerHTML, `class="container missing-page`) &&
+		strings.Contains(lowerHTML, "missing-page-alert")
 }
 
 func (a *App) demoSiteRefreshingState(ctx context.Context, settings demo.Settings) demoSiteRuntimeState {
@@ -7735,7 +7783,7 @@ func (a *App) demoGrabPreview(w http.ResponseWriter, r *http.Request) {
 	var resources []grabResourcePreview
 	var importedPages []wholeSiteImportedPage
 	var previewSpider *pageSpider
-	if r.FormValue("demo_site_copy_whole_site") == "1" {
+	if demoCopyWholeSiteFromRequest(r) {
 		wholeSitePreview := previewWholeRemoteSiteResources(r.Context(), remoteSourceURL, string(htmlBytes), pagePath, a.grabTracker, progressToken, grabSourceOptions{})
 		resources = wholeSitePreview.Resources
 		pageCount = wholeSitePreview.PageCount
@@ -7805,7 +7853,7 @@ func (a *App) demoGrabRefresh(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Сайт владельца сервера нельзя использовать как публичный демо-сайт.", http.StatusBadRequest)
 		return
 	}
-	demoCopyWholeSite := r.FormValue("demo_site_copy_whole_site") == "1"
+	demoCopyWholeSite := demoCopyWholeSiteFromRequest(r)
 	if err := (demo.Store{DB: controlDatabase}).SaveSettings(r.Context(), demoDomain, demoSourceURL, demoCopyWholeSite, true); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -7851,6 +7899,14 @@ func (a *App) demoGrabRefresh(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{"status": "ok", "failed_total": failedTotal})
+}
+
+func demoCopyWholeSiteFromRequest(r *http.Request) bool {
+	copyScope := strings.ToLower(strings.TrimSpace(r.FormValue("demo_site_copy_scope")))
+	if copyScope != "" {
+		return copyScope == "site"
+	}
+	return r.FormValue("demo_site_copy_whole_site") == "1"
 }
 
 func demoFailedResourceURLs(r *http.Request) map[string]struct{} {
@@ -8088,7 +8144,13 @@ func (a *App) restoreDemoSiteFromSnapshot(ctx context.Context, controlDatabase *
 		return err
 	}
 	if controlDatabase != nil {
-		_ = (demo.Store{DB: controlDatabase}).RemoveSessionsForDomain(ctx, domain)
+		demoStore := demo.Store{DB: controlDatabase}
+		if err := demoStore.RemoveSessionsForDomain(ctx, domain); err != nil {
+			return err
+		}
+		if err := demoStore.MarkContentRestored(ctx, domain, time.Now()); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -9424,7 +9486,11 @@ func (a *App) downloadPublicTrialSourceHTML(ctx context.Context, sourceURL, prog
 	})
 	if err == nil && downloadResult.IsHTML {
 		logImportedHTMLDecodeDecision(remoteSourceURL, downloadResult)
-		return []byte(rewriteImportedHTMLCharsetDeclaration(downloadResult.HTML)), downloadResult.ResolvedURL, nil
+		downloadedHTML := rewriteImportedHTMLCharsetDeclaration(downloadResult.HTML)
+		if isSitebrushMissingPageHTML(downloadedHTML) {
+			return nil, downloadResult.ResolvedURL, errors.New("source page is a SiteBrush 404 page")
+		}
+		return []byte(downloadedHTML), downloadResult.ResolvedURL, nil
 	}
 	if downloadResult.Status != "" {
 		lastStatus = downloadResult.Status
@@ -9451,17 +9517,21 @@ func (a *App) downloadPublicTrialSourceHTML(ctx context.Context, sourceURL, prog
 		})
 		if err == nil && downloadResult.IsHTML {
 			logImportedHTMLDecodeDecision(fallbackURL, downloadResult)
-			return []byte(rewriteImportedHTMLCharsetDeclaration(downloadResult.HTML)), downloadResult.ResolvedURL, nil
+			downloadedHTML := rewriteImportedHTMLCharsetDeclaration(downloadResult.HTML)
+			if isSitebrushMissingPageHTML(downloadedHTML) {
+				return nil, downloadResult.ResolvedURL, errors.New("source page is a SiteBrush 404 page")
+			}
+			return []byte(downloadedHTML), downloadResult.ResolvedURL, nil
 		}
 		if downloadResult.Status != "" {
 			lastStatus = downloadResult.Status
 		}
 	}
-	if err != nil {
-		return nil, nil, errors.New("failed to download source page")
-	}
 	if strings.TrimSpace(lastStatus) != "" {
 		return nil, nil, fmt.Errorf("source page returned %s", lastStatus)
+	}
+	if err != nil {
+		return nil, nil, errors.New("failed to download source page")
 	}
 	return nil, nil, errors.New("source page did not return a public HTML page")
 }
@@ -10160,7 +10230,11 @@ func downloadGrabSourceHTMLWithResolvedURLContext(ctx context.Context, sourceURL
 	})
 	if err == nil && downloadResult.IsHTML {
 		logImportedHTMLDecodeDecision(remoteSourceURL, downloadResult)
-		return []byte(rewriteImportedHTMLCharsetDeclaration(downloadResult.HTML)), downloadResult.ResolvedURL, nil
+		downloadedHTML := rewriteImportedHTMLCharsetDeclaration(downloadResult.HTML)
+		if isSitebrushMissingPageHTML(downloadedHTML) {
+			return nil, downloadResult.ResolvedURL, errors.New("source page is a SiteBrush 404 page")
+		}
+		return []byte(downloadedHTML), downloadResult.ResolvedURL, nil
 	}
 	if downloadResult.Status != "" {
 		lastStatus = downloadResult.Status
@@ -10178,17 +10252,21 @@ func downloadGrabSourceHTMLWithResolvedURLContext(ctx context.Context, sourceURL
 		})
 		if err == nil && downloadResult.IsHTML {
 			logImportedHTMLDecodeDecision(fallbackURL, downloadResult)
-			return []byte(rewriteImportedHTMLCharsetDeclaration(downloadResult.HTML)), downloadResult.ResolvedURL, nil
+			downloadedHTML := rewriteImportedHTMLCharsetDeclaration(downloadResult.HTML)
+			if isSitebrushMissingPageHTML(downloadedHTML) {
+				return nil, downloadResult.ResolvedURL, errors.New("source page is a SiteBrush 404 page")
+			}
+			return []byte(downloadedHTML), downloadResult.ResolvedURL, nil
 		}
 		if downloadResult.Status != "" {
 			lastStatus = downloadResult.Status
 		}
 	}
-	if err != nil {
-		return nil, nil, errors.New("failed to download source page")
-	}
 	if strings.TrimSpace(lastStatus) != "" {
 		return nil, nil, fmt.Errorf("source page returned %s", lastStatus)
+	}
+	if err != nil {
+		return nil, nil, errors.New("failed to download source page")
 	}
 	return nil, nil, errors.New("source page did not return a public HTML page")
 }
@@ -12386,20 +12464,51 @@ func (a *App) hostingAndSupportPanelView(r *http.Request, snapshot hostingAndSup
 			"RecipientHour":       serviceMailPerRecipientHourLimit,
 			"RecipientDomainHour": serviceMailPerRecipientDomainHourLimit,
 		},
-		"Backups":                 nil,
-		"DemoSettings":            snapshot.DemoSettings,
-		"AutoRegistrationEnabled": snapshot.AutoRegistrationEnabled,
-		"PublicTrialEmbedHTML":    publicTrialSignupEmbedHTML(r, translations),
-		"CurrentDomain":           domainFromRequest(r),
-		"PanelSnapshotBuiltAt":    snapshot.BuiltAt,
-		"CommissionBPS":           snapshot.CommissionBPS,
-		"CommissionPercent":       fmt.Sprintf("%.2f", float64(snapshot.CommissionBPS)/100),
-		"ShowCommissionSetting":   snapshot.ShowCentralRegistry,
-		"ShowCentralRegistry":     snapshot.ShowCentralRegistry,
-		"ShowDemo":                snapshot.DemoSettings.Enabled && normalizeDomainName(snapshot.DemoSettings.Domain) != "",
-		"SimplifiedExpenses":      true,
-		"ExpenseServers":          simplifiedExpenseServerViews(snapshot.Servers, snapshot.Clients, snapshot.Invoices),
+		"Backups":                  nil,
+		"DemoSettings":             snapshot.DemoSettings,
+		"DemoStatus":               a.demoSiteStatusView(r.Context(), snapshot.DemoSettings),
+		"DemoCopyScopeLabel":       translationOrDefault(translations, "billing_demo_copy_scope", "Content to download"),
+		"DemoCopyPageLabel":        translationOrDefault(translations, "billing_demo_copy_single_page", "Only the specified page"),
+		"DemoSnapshotLabel":        translationOrDefault(translations, "billing_demo_snapshot", "Current demo copy"),
+		"DemoSnapshotMissingLabel": translationOrDefault(translations, "billing_demo_snapshot_missing", "The copy has not been created yet"),
+		"DemoLastRestoredLabel":    translationOrDefault(translations, "billing_demo_last_restored", "Last content reset"),
+		"DemoNeverRestoredLabel":   translationOrDefault(translations, "billing_demo_never_restored", "No resets yet"),
+		"AutoRegistrationEnabled":  snapshot.AutoRegistrationEnabled,
+		"PublicTrialEmbedHTML":     publicTrialSignupEmbedHTML(r, translations),
+		"CurrentDomain":            domainFromRequest(r),
+		"PanelSnapshotBuiltAt":     snapshot.BuiltAt,
+		"CommissionBPS":            snapshot.CommissionBPS,
+		"CommissionPercent":        fmt.Sprintf("%.2f", float64(snapshot.CommissionBPS)/100),
+		"ShowCommissionSetting":    snapshot.ShowCentralRegistry,
+		"ShowCentralRegistry":      snapshot.ShowCentralRegistry,
+		"ShowDemo":                 snapshot.DemoSettings.Enabled && normalizeDomainName(snapshot.DemoSettings.Domain) != "",
+		"SimplifiedExpenses":       true,
+		"ExpenseServers":           simplifiedExpenseServerViews(snapshot.Servers, snapshot.Clients, snapshot.Invoices),
 	}
+}
+
+func (a *App) demoSiteStatusView(ctx context.Context, settings demo.Settings) demoSiteStatusView {
+	if controlDatabase, err := a.openServerControlDatabaseRead(ctx); err == nil {
+		currentSettings := (demo.Store{DB: controlDatabase}).Settings(ctx)
+		_ = controlDatabase.Close()
+		if normalizeDomainName(currentSettings.Domain) == normalizeDomainName(settings.Domain) {
+			settings.LastRestoredAt = currentSettings.LastRestoredAt
+		}
+	}
+	status := demoSiteStatusView{LastRestoredAt: formatAnalyticsTime(settings.LastRestoredAt)}
+	snapshotFile, err := a.openFileInsideStorage(a.demoSiteSnapshotPath(settings.Domain))
+	if err != nil {
+		return status
+	}
+	defer snapshotFile.Close()
+	snapshotInfo, err := snapshotFile.Stat()
+	if err != nil {
+		return status
+	}
+	status.SnapshotAvailable = true
+	status.SnapshotCreatedAt = snapshotInfo.ModTime().Local().Format("2006-01-02 15:04:05")
+	status.SnapshotSize = formatFileSize(snapshotInfo.Size())
+	return status
 }
 
 type simplifiedExpenseServerView struct {
@@ -13644,7 +13753,7 @@ func (a *App) saveHostingAndSupportDemoSettingsInDatabase(r *http.Request, contr
 			return translationOrDefault(translations, "billing_status_demo_owner_blocked", "The owner site cannot be used as the public demo site.")
 		}
 	}
-	demoCopyWholeSite := r.FormValue("demo_site_copy_whole_site") == "1"
+	demoCopyWholeSite := demoCopyWholeSiteFromRequest(r)
 	if err := (demo.Store{DB: controlDatabase}).SaveSettings(r.Context(), demoDomain, demoSourceURL, demoCopyWholeSite, demoEnabled); err != nil {
 		return err.Error()
 	}
@@ -14041,8 +14150,13 @@ func (a *App) cleanupExpiredDemoSites(ctx context.Context, now time.Time) {
 			log.Printf("demo session cleanup database unavailable domain=%s error=%v", domain, openErr)
 			continue
 		}
-		removeErr := (demo.Store{DB: writeDatabase}).RemoveSessionsForDomain(ctx, domain)
+		demoStore := demo.Store{DB: writeDatabase}
+		restoreStatusErr := demoStore.MarkContentRestored(ctx, domain, time.Now())
+		removeErr := demoStore.RemoveSessionsForDomain(ctx, domain)
 		_ = writeDatabase.Close()
+		if restoreStatusErr != nil {
+			log.Printf("demo content restore status failed domain=%s error=%v", domain, restoreStatusErr)
+		}
 		if removeErr != nil {
 			log.Printf("demo session cleanup failed domain=%s error=%v", domain, removeErr)
 		}

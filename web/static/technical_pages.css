@@ -911,6 +911,41 @@
     gap: 6px;
 }
 
+.technical-page .billing-demo-copy-scope {
+    display: grid;
+    gap: 6px;
+    min-width: 0;
+    margin: 0;
+    padding: 0;
+    border: 0;
+}
+
+.technical-page .billing-demo-copy-scope legend {
+    margin: 0;
+    font-size: inherit;
+}
+
+.technical-page .billing-demo-copy-status {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px 12px;
+    grid-column: 1 / -1;
+    padding: 10px 12px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: rgba(255, 255, 255, 0.03);
+}
+
+.technical-page .billing-demo-copy-status > div {
+    display: grid;
+    gap: 2px;
+}
+
+.technical-page .billing-demo-copy-status span {
+    color: var(--muted);
+    font-size: 13px;
+}
+
 .technical-page .billing-demo-actions {
     display: flex;
     flex-wrap: wrap;
@@ -2488,6 +2523,10 @@
     }
 
     .technical-page .billing-demo-settings-form {
+        grid-template-columns: 1fr;
+    }
+
+    .technical-page .billing-demo-copy-status {
         grid-template-columns: 1fr;
     }
 
