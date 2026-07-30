@@ -7569,12 +7569,73 @@ func TestGrabUsesRequestPathWhenPostedPathIsMissing(t *testing.T) {
 		t.Fatalf("grab status = %d, body=%q", grabResponse.Code, grabResponse.Body.String())
 	}
 
-	var grabPayload map[string]string
+	var grabPayload struct {
+		Redirect string `json:"redirect"`
+	}
 	if err := json.Unmarshal(grabResponse.Body.Bytes(), &grabPayload); err != nil {
 		t.Fatalf("decode grab payload: %v", err)
 	}
-	if grabPayload["redirect"] != "/fallback" {
-		t.Fatalf("redirect = %q, want /fallback", grabPayload["redirect"])
+	if grabPayload.Redirect != "/fallback" {
+		t.Fatalf("redirect = %q, want /fallback", grabPayload.Redirect)
+	}
+}
+
+func TestGrabStoresPageAndRevisionAfterRequestConnectionIsLost(t *testing.T) {
+	application, rawDB := newTestApplication(t)
+	if _, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "admin@example.com", "old"); err != nil {
+		t.Fatalf("insert user: %v", err)
+	}
+
+	sourceURL := "https://kmv.ru/for-home.html"
+	imageURL := "https://kmv.ru/images/for-home.jpg"
+	requestContext, cancelRequest := context.WithCancel(context.Background())
+	previousGrabHTTPClient := newGrabHTTPClient
+	newGrabHTTPClient = func() *http.Client {
+		return &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+			switch request.URL.String() {
+			case sourceURL:
+				return fakeGrabResponse{
+					contentType: "text/html; charset=utf-8",
+					body:        `<!doctype html><html><body><h1>Для дома</h1><img src="/images/for-home.jpg"></body></html>`,
+				}.httpResponse(request), nil
+			case imageURL:
+				cancelRequest()
+				return fakeGrabResponse{contentType: "image/jpeg", body: "image"}.httpResponse(request), nil
+			default:
+				return fakeGrabResponse{statusCode: http.StatusNotFound, body: "not found"}.httpResponse(request), nil
+			}
+		})}
+	}
+	defer func() {
+		newGrabHTTPClient = previousGrabHTTPClient
+	}()
+
+	grabForm := url.Values{}
+	grabForm.Set("path", "/for-home.html")
+	grabForm.Set("source_url", sourceURL)
+	grabRequest := httptest.NewRequest(http.MethodPost, "http://localhost:8080/for-home.html?grab", strings.NewReader(grabForm.Encode())).WithContext(requestContext)
+	grabRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	grabRequest.Header.Set("Accept", "application/json")
+	grabRequest.AddCookie(newAdminSessionCookie(t, application, "admin@example.com"))
+	grabResponse := httptest.NewRecorder()
+	application.route(grabResponse, grabRequest)
+	if grabResponse.Code != http.StatusOK {
+		t.Fatalf("grab status = %d, body=%q", grabResponse.Code, grabResponse.Body.String())
+	}
+
+	var storedHTML string
+	if err := rawDB.QueryRow(`SELECT html FROM pages WHERE domain=? AND path=?`, "localhost", "/for-home.html").Scan(&storedHTML); err != nil {
+		t.Fatalf("read imported page: %v", err)
+	}
+	if !strings.Contains(storedHTML, "Для дома") {
+		t.Fatalf("imported page HTML = %q", storedHTML)
+	}
+	var revisionCount int
+	if err := rawDB.QueryRow(`SELECT COUNT(1) FROM revisions WHERE domain=? AND page_path=?`, "localhost", "/for-home.html").Scan(&revisionCount); err != nil {
+		t.Fatalf("count imported page revisions: %v", err)
+	}
+	if revisionCount != 1 {
+		t.Fatalf("revision count = %d, want 1", revisionCount)
 	}
 }
 
