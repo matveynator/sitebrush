@@ -19,11 +19,14 @@ const maxHTMLDownloadBytes int64 = 32 * 1024 * 1024
 // HTMLDownloadResult carries the document and transport metadata together so
 // callers can keep HTTP details out of application-level download code.
 type HTMLDownloadResult struct {
-	HTML        string
-	IsHTML      bool
-	ResolvedURL *url.URL
-	Status      string
-	StatusCode  int
+	HTML            string
+	IsHTML          bool
+	ResolvedURL     *url.URL
+	Status          string
+	StatusCode      int
+	Encoding        string
+	EncodingSource  string
+	EncodingCertain bool
 }
 
 type HTMLDownloadRetryOptions struct {
@@ -88,7 +91,11 @@ func DownloadHTMLPageContext(ctx context.Context, client *http.Client, pageURL *
 	if readErr != nil {
 		return result, readErr
 	}
-	result.HTML = DecodeHTML(pageBytes, response.Header.Get("Content-Type")).Text
+	decodedHTML := DecodeHTML(pageBytes, response.Header.Get("Content-Type"))
+	result.HTML = decodedHTML.Text
+	result.Encoding = decodedHTML.Encoding
+	result.EncodingSource = decodedHTML.EncodingSource
+	result.EncodingCertain = decodedHTML.Certain
 	result.IsHTML = true
 	return result, nil
 }
