@@ -102,6 +102,35 @@ func (root Root) Stat(relativePath string) (fs.FileInfo, error) {
 	return fileInfo, err
 }
 
+func (root Root) FileSize(relativePath string) (int64, error) {
+	fileInfo, err := root.Stat(relativePath)
+	if err != nil || fileInfo.IsDir() {
+		return 0, err
+	}
+	return fileInfo.Size(), nil
+}
+
+func (root Root) DirectorySize(relativePath string) (int64, error) {
+	var totalBytes int64
+	err := root.withOpenRoot(func(openRoot *os.Root) error {
+		return fs.WalkDir(openRoot.FS(), relativePath, func(filePath string, directoryEntry fs.DirEntry, walkErr error) error {
+			if walkErr != nil {
+				return walkErr
+			}
+			if directoryEntry.IsDir() {
+				return nil
+			}
+			fileInfo, infoErr := directoryEntry.Info()
+			if infoErr != nil {
+				return infoErr
+			}
+			totalBytes += fileInfo.Size()
+			return nil
+		})
+	})
+	return totalBytes, err
+}
+
 func (root Root) WriteFile(relativePath string, payload []byte, perm fs.FileMode) error {
 	return root.withOpenRoot(func(openRoot *os.Root) error {
 		if err := openRoot.MkdirAll(filepath.Dir(relativePath), 0o755); err != nil {

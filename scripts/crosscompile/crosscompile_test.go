@@ -145,7 +145,7 @@ func TestLinuxDesktopDockerImage(t *testing.T) {
 	t.Parallel()
 
 	got := linuxDesktopDockerImage("amd64", "gtk40")
-	if want := "sitebrush-crosscompile:linux-amd64-gtk40-go1.25.0-v1"; got != want {
+	if want := "sitebrush-crosscompile:linux-amd64-gtk40-go1.26.5-v1"; got != want {
 		t.Fatalf("linuxDesktopDockerImage() = %q, want %q", got, want)
 	}
 }
@@ -163,7 +163,7 @@ func TestLinuxDesktopDockerfile(t *testing.T) {
 	if !strings.Contains(dockerfile, "libwebkit2gtk-4.0-dev") {
 		t.Fatalf("linuxDesktopDockerfile() missing gtk40 webkit package")
 	}
-	if !strings.Contains(dockerfile, "go1.25.0.linux-amd64.tar.gz") {
+	if !strings.Contains(dockerfile, "go1.26.5.linux-amd64.tar.gz") {
 		t.Fatalf("linuxDesktopDockerfile() missing Go tarball URL")
 	}
 }
@@ -184,7 +184,7 @@ func TestWindowsDesktopDockerImage(t *testing.T) {
 	t.Parallel()
 
 	got := windowsDesktopDockerImage("arm64")
-	if want := "sitebrush-crosscompile:windows-arm64-go1.25.0-v1"; got != want {
+	if want := "sitebrush-crosscompile:windows-arm64-go1.26.5-v1"; got != want {
 		t.Fatalf("windowsDesktopDockerImage() = %q, want %q", got, want)
 	}
 }
@@ -199,7 +199,7 @@ func TestWindowsDesktopDockerfile(t *testing.T) {
 	if !strings.Contains(dockerfile, `SHELL ["/bin/bash", "-o", "pipefail", "-c"]`) {
 		t.Fatalf("windowsDesktopDockerfile() missing pipefail shell")
 	}
-	if !strings.Contains(dockerfile, "go1.25.0.linux-amd64.tar.gz") {
+	if !strings.Contains(dockerfile, "go1.26.5.linux-amd64.tar.gz") {
 		t.Fatalf("windowsDesktopDockerfile() missing Go tarball URL")
 	}
 	if !strings.Contains(dockerfile, "go install github.com/akavel/rsrc@latest") {
@@ -240,8 +240,8 @@ func TestWindowsDesktopDockerScript(t *testing.T) {
 func TestDockerVolumeName(t *testing.T) {
 	t.Parallel()
 
-	got := dockerVolumeName("sitebrush-crosscompile:linux-amd64-gtk40-go1.25.0-v1", "gomod")
-	want := "sitebrush-crosscompile-linux-amd64-gtk40-go1.25.0-v1-gomod"
+	got := dockerVolumeName("sitebrush-crosscompile:linux-amd64-gtk40-go1.26.5-v1", "gomod")
+	want := "sitebrush-crosscompile-linux-amd64-gtk40-go1.26.5-v1-gomod"
 	if got != want {
 		t.Fatalf("dockerVolumeName() = %q, want %q", got, want)
 	}

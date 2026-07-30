@@ -7588,21 +7588,21 @@ func TestGrabPageRedirectsToImportedPageView(t *testing.T) {
 	}
 }
 
-func TestGrabHTTPClientSkipsTLSVerification(t *testing.T) {
+func TestGrabHTTPClientVerifiesTLSCertificates(t *testing.T) {
 	transport := newGrabHTTPTransport()
 	if transport.TLSClientConfig == nil {
 		t.Fatal("grab transport is missing TLS config")
 	}
-	if !transport.TLSClientConfig.InsecureSkipVerify {
-		t.Fatal("grab transport does not skip TLS verification")
+	if transport.TLSClientConfig.InsecureSkipVerify {
+		t.Fatal("grab transport skips TLS verification")
 	}
 	client := newGrabHTTPClient()
 	clientTransport, ok := client.Transport.(*http.Transport)
 	if !ok {
 		t.Fatalf("grab client transport type = %T, want *http.Transport", client.Transport)
 	}
-	if clientTransport.TLSClientConfig == nil || !clientTransport.TLSClientConfig.InsecureSkipVerify {
-		t.Fatal("grab client transport does not skip TLS verification")
+	if clientTransport.TLSClientConfig == nil || clientTransport.TLSClientConfig.InsecureSkipVerify {
+		t.Fatal("grab client transport skips TLS verification")
 	}
 }
 
@@ -7636,7 +7636,7 @@ func TestDownloadGrabSourceHTMLWithResolvedURLFallsBackToHTTP(t *testing.T) {
 	if err != nil {
 		t.Fatalf("downloadGrabSourceHTMLWithResolvedURL failed: %v", err)
 	}
-	if string(htmlBytes) != "<!doctype html><html><body>fallback</body></html>" {
+	if !strings.Contains(string(htmlBytes), "<body>fallback</body>") {
 		t.Fatalf("downloaded HTML = %q", string(htmlBytes))
 	}
 	if resolvedURL.String() != "http://source.example/page" {

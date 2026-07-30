@@ -2,6 +2,8 @@ module sitebrush
 
 go 1.25.0
 
+toolchain go1.26.5
+
 require (
 	github.com/jackc/pgx/v5 v5.9.2
 	github.com/jchv/go-webview-selector v0.0.0-20250730141630-a5f64a01ba3a
