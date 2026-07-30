@@ -1,274 +1,297 @@
 <p align="center">
-  <a href="https://sitebrush.com">
-    <img src="https://sitebrush.com/p/ad311fa907c60a01022a1f14a934f5ab.png" alt="Sitebrush logo" width="180">
+  <a href="https://sitebrush.com/">
+    <img src="https://sitebrush.com/p/ad311fa907c60a01022a1f14a934f5ab.png" alt="SiteBrush logo" width="170">
   </a>
 </p>
 
-<h1 align="center">Sitebrush</h1>
+<h1 align="center">SiteBrush</h1>
 
 <p align="center">
-  <strong>Replace hacked WordPress with editable static HTML.</strong>
-</p>
-
-<p align="center">
-  WordPress rescue CMS · Static HTML · One binary
+  <strong>Replace hacked WordPress with editable static HTML.</strong><br>
+  Keep the website and its design. Remove the fragile public CMS backend.
 </p>
 
 <p align="center">
-  <a href="https://sitebrush.com">Website</a> ·
-  <a href="#download">Download</a> ·
-  <a href="#how-it-works">How it works</a>
+  <a href="https://sitebrush.com/">Website</a> ·
+  <a href="https://demo.sitebrush.com/">Live demo</a> ·
+  <a href="#downloads">Downloads</a> ·
+  <a href="#install-the-server-version">Install</a>
 </p>
 
-Sitebrush imports an existing website, removes the risky dynamic backend, and creates a fast static website that can still be edited directly in the browser.
-
-It is designed for old business websites, landing pages, portfolios, documentation, small company websites, and abandoned WordPress installations that no longer need a database, plugins, or a public admin panel.
-
-Why Sitebrush?
-
-Many websites contain only pages, text, images, menus, articles, and contact information, but still depend on WordPress, PHP, MySQL, themes, plugins, updates, and public login pages.
-
-Sitebrush keeps the website and its design while removing the fragile backend.
-
-Static HTML for visitors
-
-Browser-based visual editing
-
-Import of pages, images, CSS, JavaScript, and other files
-
-Revisions and safe publishing
-
-Shared headers, footers, menus, and other template blocks
-
-Protection for old URLs
-
-One standalone binary
-
-No plugin maintenance stack
-
-Linux, Windows, macOS, FreeBSD, OpenBSD, and NetBSD support
-
-Sitebrush is not a WordPress clone. It is a WordPress retirement tool.
-
-How it works
-
-ImportPoint Sitebrush at an existing WordPress, Joomla, Wix, Readymag, or custom website.
-
-EditOpen the imported website and use right click on desktop or long press on mobile to edit its content.
-
-Publish safelyFreeze the public version while editing. Visitors continue to see the stable website until the new version is ready.
-
-Download
-
-Latest builds are available at:
-
-https://sitebrush.com/download/latest
-
-Desktop applications
-
-macOS
-
-<p>
-  <img src="https://sitebrush.com/p/fbad588e1b8c94b6b80708bc9917706e.png" alt="macOS" width="42">
+<p align="center">
+  <img src="https://img.shields.io/badge/output-static_HTML-0ea5e9" alt="Static HTML">
+  <img src="https://img.shields.io/badge/deployment-one_binary-f97316" alt="One binary">
+  <img src="https://img.shields.io/badge/editing-right--click_or_long--press-22c55e" alt="Browser editing">
 </p>
 
-Universal build for Intel and Apple Silicon:
+---
 
-Download Sitebrush for macOS
+SiteBrush imports an existing website, preserves its pages and design, and replaces the risky public-facing CMS with fast static files.
 
-Windows
+Visitors receive ordinary HTML, CSS, JavaScript, and images. The site owner can still edit text, pictures, buttons, menus, and page blocks directly in the browser.
 
-<p>
-  <img src="https://sitebrush.com/p/66aab89d1af641ee0ae190f6b3ea4e09.png" alt="Windows" width="42">
-</p>
+**SiteBrush is not a WordPress clone. It is a WordPress retirement tool.**
 
-Windows amd64 ZIP
+## Why SiteBrush?
 
-Windows arm64 ZIP
+- Preserve the existing design instead of rebuilding the website.
+- Remove WordPress, public login forms, plugins, themes, PHP, and the database from the visitor-facing side.
+- Reduce the attack surface and ongoing maintenance burden.
+- Edit content directly on the page with a right-click or long-press.
+- Freeze the public version while preparing changes, then publish safely.
+- Run the server as one standalone binary without a separate dependency stack.
+- Import existing WordPress, Joomla, Wix, Readymag, and custom websites.
 
-Linux
+Nothing is completely invulnerable, but a static public website exposes far fewer moving parts than a traditional WordPress installation.
 
-<p>
-  <img src="https://sitebrush.com/p/04b158d78c93b65c714bb6256da221a4.png" alt="Linux" width="42">
-</p>
+## How it works
 
-GTK 4.1 is intended for newer distributions. GTK 4.0 is intended for older LTS distributions.
+1. **Import** — SiteBrush copies pages, media, styles, scripts, and other website files.
+2. **Edit** — open the site and use **right-click** on desktop or **long-press** on mobile.
+3. **Publish safely** — visitors keep seeing the stable version until your changes are ready.
 
-Linux amd64 — GTK 4.1
+[Try SiteBrush with your own website](https://sitebrush.com/) without changing the live site, or [open the demo](https://demo.sitebrush.com/).
 
-Linux amd64 — GTK 4.0
+# Downloads
 
-Linux arm64 — GTK 4.1
+The **server version is recommended** for a public website. Desktop builds are useful for local work with a graphical interface.
 
-Linux arm64 — GTK 4.0
+| Platform | Desktop application | Server binary |
+|---|---|---|
+| <img src="https://img.shields.io/badge/Linux-111827?logo=linux&logoColor=white" alt="Linux"> | [amd64 GTK 4.1](https://sitebrush.com/download/latest/desktop-app/sitebrush_linux_amd64_desktop_gtk41.zip) · [GTK 4.0](https://sitebrush.com/download/latest/desktop-app/sitebrush_linux_amd64_desktop_gtk40.zip)<br>[arm64 GTK 4.1](https://sitebrush.com/download/latest/desktop-app/sitebrush_linux_arm64_desktop_gtk41.zip) · [GTK 4.0](https://sitebrush.com/download/latest/desktop-app/sitebrush_linux_arm64_desktop_gtk40.zip) | [amd64](https://sitebrush.com/download/latest/server-app/sitebrush_linux_amd64) · [arm64](https://sitebrush.com/download/latest/server-app/sitebrush_linux_arm64) |
+| <img src="https://img.shields.io/badge/macOS-111827?logo=apple&logoColor=white" alt="macOS"> | [Universal DMG](https://sitebrush.com/download/latest/desktop-app/sitebrush_darwin_universal_desktop.dmg) | [Intel amd64](https://sitebrush.com/download/latest/server-app/sitebrush_darwin_amd64) · [Apple Silicon arm64](https://sitebrush.com/download/latest/server-app/sitebrush_darwin_arm64) |
+| <img src="https://img.shields.io/badge/Windows-0078D4?logo=windows11&logoColor=white" alt="Windows"> | [amd64 ZIP](https://sitebrush.com/download/latest/desktop-app/sitebrush_windows_amd64_desktop.exe.zip) · [arm64 ZIP](https://sitebrush.com/download/latest/desktop-app/sitebrush_windows_arm64_desktop.exe.zip) | [amd64 EXE](https://sitebrush.com/download/latest/server-app/sitebrush_windows_amd64.exe) · [arm64 EXE](https://sitebrush.com/download/latest/server-app/sitebrush_windows_arm64.exe) |
+| <img src="https://img.shields.io/badge/FreeBSD-AB2B28?logo=freebsd&logoColor=white" alt="FreeBSD"> | — | [amd64](https://sitebrush.com/download/latest/server-app/sitebrush_freebsd_amd64) · [arm64](https://sitebrush.com/download/latest/server-app/sitebrush_freebsd_arm64) |
+| <img src="https://img.shields.io/badge/OpenBSD-F2CA30?logo=openbsd&logoColor=black" alt="OpenBSD"> | — | [amd64](https://sitebrush.com/download/latest/server-app/sitebrush_openbsd_amd64) · [arm64](https://sitebrush.com/download/latest/server-app/sitebrush_openbsd_arm64) |
+| <img src="https://img.shields.io/badge/NetBSD-F0544C?logo=netbsd&logoColor=white" alt="NetBSD"> | — | [amd64](https://sitebrush.com/download/latest/server-app/sitebrush_netbsd_amd64) · [arm64](https://sitebrush.com/download/latest/server-app/sitebrush_netbsd_arm64) |
 
-Server installation
+Linux desktop builds use **GTK 4.1** for newer distributions and **GTK 4.0** for older LTS distributions.
 
-The server version is recommended for public websites. Sitebrush installs itself as a system service and automatically detects the operating system, CPU architecture, and available service manager.
+[Server checksums](https://sitebrush.com/download/latest/server-app/MD5SUMS) · [Desktop checksums](https://sitebrush.com/download/latest/desktop-app/MD5SUMS) · [All latest builds](https://sitebrush.com/download/latest/)
 
-Linux
+# Install the server version
 
-<p>
-  <img src="https://sitebrush.com/p/04b158d78c93b65c714bb6256da221a4.png" alt="Linux" width="42">
-</p>
+Each block below is ready to copy and paste. It automatically selects `amd64` or `arm64`, downloads SiteBrush, makes it executable, and installs the system service.
 
-amd64
+<details open>
+<summary><strong>🐧 Linux — copy and paste into the terminal</strong></summary>
 
-sudo curl -L -o /usr/local/bin/sitebrush \
-  https://sitebrush.com/download/latest/server-app/sitebrush_linux_amd64
+```sh
+(
+  set -eu
 
-sudo chmod +x /usr/local/bin/sitebrush
-sudo /usr/local/bin/sitebrush -install
+  case "$(uname -m)" in
+    x86_64|amd64) ARCH="amd64" ;;
+    aarch64|arm64) ARCH="arm64" ;;
+    *) echo "Unsupported CPU architecture: $(uname -m)" >&2; exit 1 ;;
+  esac
 
-arm64
+  sudo mkdir -p /usr/local/bin
+  sudo curl -fL \
+    "https://sitebrush.com/download/latest/server-app/sitebrush_linux_${ARCH}" \
+    -o /usr/local/bin/sitebrush
+  sudo chmod +x /usr/local/bin/sitebrush
+  sudo /usr/local/bin/sitebrush -install
+)
+```
 
-sudo curl -L -o /usr/local/bin/sitebrush \
-  https://sitebrush.com/download/latest/server-app/sitebrush_linux_arm64
+The installer detects the available Linux service manager and configures automatic startup.
 
-sudo chmod +x /usr/local/bin/sitebrush
-sudo /usr/local/bin/sitebrush -install
+</details>
 
-macOS
+<details>
+<summary><strong>🍎 macOS — Intel and Apple Silicon</strong></summary>
 
-<p>
-  <img src="https://sitebrush.com/p/fbad588e1b8c94b6b80708bc9917706e.png" alt="macOS" width="42">
-</p>
+```sh
+(
+  set -eu
 
-Intel amd64
+  case "$(uname -m)" in
+    x86_64|amd64) ARCH="amd64" ;;
+    arm64|aarch64) ARCH="arm64" ;;
+    *) echo "Unsupported CPU architecture: $(uname -m)" >&2; exit 1 ;;
+  esac
 
-sudo curl -L -o /usr/local/bin/sitebrush \
-  https://sitebrush.com/download/latest/server-app/sitebrush_darwin_amd64
+  sudo mkdir -p /usr/local/bin
+  sudo curl -fL \
+    "https://sitebrush.com/download/latest/server-app/sitebrush_darwin_${ARCH}" \
+    -o /usr/local/bin/sitebrush
+  sudo chmod +x /usr/local/bin/sitebrush
+  sudo /usr/local/bin/sitebrush -install
+)
+```
 
-sudo chmod +x /usr/local/bin/sitebrush
-sudo /usr/local/bin/sitebrush -install
+The installer configures SiteBrush as a `launchd` service.
 
-Apple Silicon arm64
+</details>
 
-sudo curl -L -o /usr/local/bin/sitebrush \
-  https://sitebrush.com/download/latest/server-app/sitebrush_darwin_arm64
+<details>
+<summary><strong>🪟 Windows — PowerShell as Administrator</strong></summary>
 
-sudo chmod +x /usr/local/bin/sitebrush
-sudo /usr/local/bin/sitebrush -install
+Open **PowerShell as Administrator**, then paste:
 
-Windows
-
-<p>
-  <img src="https://sitebrush.com/p/66aab89d1af641ee0ae190f6b3ea4e09.png" alt="Windows" width="42">
-</p>
-
-Run PowerShell as Administrator.
-
-amd64
-
+```powershell
 $ErrorActionPreference = "Stop"
+
+$Arch = if ($env:PROCESSOR_ARCHITECTURE -eq "AMD64") {
+    "amd64"
+} elseif ($env:PROCESSOR_ARCHITECTURE -eq "ARM64") {
+    "arm64"
+} else {
+    throw "Unsupported CPU architecture: $env:PROCESSOR_ARCHITECTURE"
+}
+
 $Dir = Join-Path $env:ProgramFiles "sitebrush"
 $Exe = Join-Path $Dir "sitebrush.exe"
 
 New-Item -ItemType Directory -Force -Path $Dir | Out-Null
+
 Invoke-WebRequest `
-  -Uri "https://sitebrush.com/download/latest/server-app/sitebrush_windows_amd64.exe" `
-  -OutFile $Exe
+    -Uri "https://sitebrush.com/download/latest/server-app/sitebrush_windows_${Arch}.exe" `
+    -OutFile $Exe
 
 & $Exe -install
+```
 
-arm64
+The installer creates and verifies the Windows service and enables automatic startup.
 
-$ErrorActionPreference = "Stop"
-$Dir = Join-Path $env:ProgramFiles "sitebrush"
-$Exe = Join-Path $Dir "sitebrush.exe"
+</details>
 
-New-Item -ItemType Directory -Force -Path $Dir | Out-Null
-Invoke-WebRequest `
-  -Uri "https://sitebrush.com/download/latest/server-app/sitebrush_windows_arm64.exe" `
-  -OutFile $Exe
+<details>
+<summary><strong>🔴 FreeBSD — amd64 and arm64</strong></summary>
 
-& $Exe -install
+```sh
+(
+  set -eu
 
-FreeBSD
+  case "$(uname -m)" in
+    x86_64|amd64) ARCH="amd64" ;;
+    aarch64|arm64) ARCH="arm64" ;;
+    *) echo "Unsupported CPU architecture: $(uname -m)" >&2; exit 1 ;;
+  esac
 
-<p>
-  <img src="https://sitebrush.com/p/c1ce8baa90a2ffd348069e69fa4fda93.png" alt="FreeBSD" width="42">
-</p>
+  sudo mkdir -p /usr/local/bin
+  sudo fetch \
+    -o /usr/local/bin/sitebrush \
+    "https://sitebrush.com/download/latest/server-app/sitebrush_freebsd_${ARCH}"
+  sudo chmod +x /usr/local/bin/sitebrush
+  sudo /usr/local/bin/sitebrush -install
+)
+```
 
-Replace ARCH with amd64 or arm64.
+</details>
 
-sudo fetch -o /usr/local/bin/sitebrush \
-  https://sitebrush.com/download/latest/server-app/sitebrush_freebsd_ARCH
+<details>
+<summary><strong>🐡 OpenBSD — amd64 and arm64</strong></summary>
 
-sudo chmod +x /usr/local/bin/sitebrush
-sudo /usr/local/bin/sitebrush -install
+```sh
+(
+  set -eu
 
-OpenBSD
+  case "$(uname -m)" in
+    x86_64|amd64) ARCH="amd64" ;;
+    aarch64|arm64) ARCH="arm64" ;;
+    *) echo "Unsupported CPU architecture: $(uname -m)" >&2; exit 1 ;;
+  esac
 
-<p>
-  <img src="https://sitebrush.com/p/e3124d65b5feeb6af8ec8f882b167a35.png" alt="OpenBSD" width="42">
-</p>
+  doas mkdir -p /usr/local/bin
+  doas ftp \
+    -o /usr/local/bin/sitebrush \
+    "https://sitebrush.com/download/latest/server-app/sitebrush_openbsd_${ARCH}"
+  doas chmod +x /usr/local/bin/sitebrush
+  doas /usr/local/bin/sitebrush -install
+)
+```
 
-Replace ARCH with amd64 or arm64.
+Run the commands as `root` when `doas` is not configured.
 
-sudo ftp -o /usr/local/bin/sitebrush \
-  https://sitebrush.com/download/latest/server-app/sitebrush_openbsd_ARCH
+</details>
 
-sudo chmod +x /usr/local/bin/sitebrush
-sudo /usr/local/bin/sitebrush -install
+<details>
+<summary><strong>🚩 NetBSD — amd64 and arm64</strong></summary>
 
-NetBSD
+```sh
+(
+  set -eu
 
-<p>
-  <img src="https://sitebrush.com/p/c1ce8baa90a2ffd348069e69fa4fda93.png" alt="NetBSD" width="42">
-</p>
+  case "$(uname -m)" in
+    x86_64|amd64) ARCH="amd64" ;;
+    aarch64|arm64) ARCH="arm64" ;;
+    *) echo "Unsupported CPU architecture: $(uname -m)" >&2; exit 1 ;;
+  esac
 
-Replace ARCH with amd64 or arm64.
+  sudo mkdir -p /usr/local/bin
+  sudo ftp \
+    -o /usr/local/bin/sitebrush \
+    "https://sitebrush.com/download/latest/server-app/sitebrush_netbsd_${ARCH}"
+  sudo chmod +x /usr/local/bin/sitebrush
+  sudo /usr/local/bin/sitebrush -install
+)
+```
 
-sudo ftp -o /usr/local/bin/sitebrush \
-  https://sitebrush.com/download/latest/server-app/sitebrush_netbsd_ARCH
+</details>
 
-sudo chmod +x /usr/local/bin/sitebrush
-sudo /usr/local/bin/sitebrush -install
+# Uninstall
 
-Uninstall
+The `-uninstall` command removes the configured system service.
 
-Linux, macOS, and BSD
+<details open>
+<summary><strong>Linux, macOS, FreeBSD, and NetBSD</strong></summary>
 
+```sh
 sudo /usr/local/bin/sitebrush -uninstall
+```
 
-Windows
+</details>
 
-Run PowerShell as Administrator:
+<details>
+<summary><strong>OpenBSD</strong></summary>
 
+```sh
+doas /usr/local/bin/sitebrush -uninstall
+```
+
+</details>
+
+<details>
+<summary><strong>Windows — PowerShell as Administrator</strong></summary>
+
+```powershell
 & "$env:ProgramFiles\sitebrush\sitebrush.exe" -uninstall
+```
 
-Editing a website
+</details>
 
-After installation, open your domain in a browser.
+# Start editing
 
+After installation:
+
+1. Point the website domain to the server.
+2. Open the domain in a browser.
+3. Use **right-click** on a computer or **long-press** on a phone.
+4. Edit the content and save it.
+
+```text
 https://your-domain.example
+```
 
-Use right click on desktop or long press on mobile to open the Sitebrush editor.
+## Best suited for
 
-Best use cases
-
-Sitebrush is a good choice for:
-
-Business websites
-
-Landing pages
-
-Portfolios and agency websites
-
-Documentation and knowledge bases
-
-Old WordPress websites that keep breaking
-
-Mostly static websites that still need simple browser editing
+- Business websites and landing pages
+- Portfolios and agency websites
+- Documentation and knowledge bases
+- Old WordPress websites that keep breaking
+- Mostly static websites that still need easy browser editing
 
 Keep a traditional dynamic CMS when the project requires complex e-commerce, memberships, extensive server-side workflows, or custom plugin logic.
 
+---
+
 <p align="center">
-  <strong>Keep the website. Keep the design. Keep browser editing.<br>
-  Remove the database, plugin stack, public admin backend, and endless update anxiety.</strong>
+  <strong>Keep the website. Keep the design. Keep simple browser editing.<br>
+  Leave the database, plugin stack, public admin backend, and constant maintenance behind.</strong>
 </p>
 
 <p align="center">
-  <a href="https://sitebrush.com">sitebrush.com</a>
+  <a href="https://sitebrush.com/"><strong>sitebrush.com</strong></a>
 </p>
