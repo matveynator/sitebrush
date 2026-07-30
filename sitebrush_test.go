@@ -6698,6 +6698,89 @@ func TestPreviewGrabResourcesDoesNotDownloadBinaryBodies(t *testing.T) {
 	}
 }
 
+func TestPreviewResourceMetadataFallsBackToRangeGET(t *testing.T) {
+	pageRawURL := "https://preview.example/"
+	imageURL := "https://assets.example/render?id=hero"
+	sourceHTML := `<img src="` + imageURL + `">`
+	rangeRequestHeaders := make(chan string, 1)
+
+	previousGrabHTTPClient := newGrabHTTPClient
+	newGrabHTTPClient = func() *http.Client {
+		return &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+			header := make(http.Header)
+			if request.URL.String() != imageURL {
+				return &http.Response{StatusCode: http.StatusNotFound, Status: "404 Not Found", Header: header, Body: io.NopCloser(strings.NewReader("")), Request: request}, nil
+			}
+			if request.Method == http.MethodHead {
+				return &http.Response{StatusCode: http.StatusMethodNotAllowed, Status: "405 Method Not Allowed", Header: header, Body: io.NopCloser(strings.NewReader("")), Request: request}, nil
+			}
+			rangeRequestHeaders <- request.Header.Get("Range")
+			header.Set("Content-Type", "image/jpeg")
+			header.Set("Content-Range", "bytes 0-0/12345")
+			return &http.Response{StatusCode: http.StatusPartialContent, Status: "206 Partial Content", Header: header, Body: io.NopCloser(strings.NewReader("x")), ContentLength: 1, Request: request}, nil
+		})}
+	}
+	defer func() {
+		newGrabHTTPClient = previousGrabHTTPClient
+	}()
+
+	pageURL, parseErr := url.Parse(pageRawURL)
+	if parseErr != nil {
+		t.Fatal(parseErr)
+	}
+	previewResources := previewGrabResources(pageURL, sourceHTML, nil, "", grabSourceOptions{})
+	if len(previewResources) != 1 {
+		t.Fatalf("preview resources = %#v, want one image", previewResources)
+	}
+	if previewResources[0].SizeBytes != 12345 || previewResources[0].Kind != "image" {
+		t.Fatalf("preview image = %#v, want image with full range size", previewResources[0])
+	}
+	select {
+	case rangeHeader := <-rangeRequestHeaders:
+		if rangeHeader != "bytes=0-0" {
+			t.Fatalf("Range = %q, want bytes=0-0", rangeHeader)
+		}
+	default:
+		t.Fatal("metadata fallback did not send a range GET")
+	}
+}
+
+func TestWholeSitePreviewProcesses594Pages(t *testing.T) {
+	const pageCount = 594
+	var startHTML strings.Builder
+	startHTML.WriteString("<!doctype html><html><body>")
+	for pageIndex := 1; pageIndex < pageCount; pageIndex++ {
+		startHTML.WriteString(`<a href="/page/` + strconv.Itoa(pageIndex) + `">Page</a>`)
+	}
+	startHTML.WriteString("</body></html>")
+
+	previousGrabHTTPClient := newGrabHTTPClient
+	newGrabHTTPClient = func() *http.Client {
+		return &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+			body := "<!doctype html><html><body>Imported</body></html>"
+			header := http.Header{"Content-Type": []string{"text/html; charset=utf-8"}}
+			return &http.Response{StatusCode: http.StatusOK, Status: "200 OK", Header: header, Body: io.NopCloser(strings.NewReader(body)), ContentLength: int64(len(body)), Request: request}, nil
+		})}
+	}
+	defer func() {
+		newGrabHTTPClient = previousGrabHTTPClient
+	}()
+
+	startURL, parseErr := url.Parse("https://large.example/")
+	if parseErr != nil {
+		t.Fatal(parseErr)
+	}
+	previewContext, cancelPreview := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancelPreview()
+	preview := previewWholeRemoteSiteResources(previewContext, startURL, startHTML.String(), "/", nil, "", grabSourceOptions{})
+	if preview.Partial {
+		t.Fatal("594-page preview unexpectedly completed partially")
+	}
+	if preview.PageCount != pageCount || len(preview.ImportedPages) != pageCount {
+		t.Fatalf("preview pages = %d/%d, want %d", preview.PageCount, len(preview.ImportedPages), pageCount)
+	}
+}
+
 func TestMirrorRemotePageRewritesDataManifestRelativeURLs(t *testing.T) {
 	pageRawURL := "https://karman.cafe/"
 	manifest := `{"name":"Karman","start_url":"/","icons":[{"src":"./assets/apple-touch-icon.png","sizes":"180x180","type":"image/png"}]}`
@@ -7955,6 +8038,49 @@ func TestStatusCapturingResponseWriterSupportsWebSocketHijack(t *testing.T) {
 	}
 	if !strings.Contains(handshake, "Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=") {
 		t.Fatalf("handshake missing websocket accept header: %q", handshake)
+	}
+}
+
+func TestPublicTrialPreviewStoreRetainsTerminalJobStatus(t *testing.T) {
+	store := newPublicTrialPreviewStore()
+	cancelSession, started := store.Start("preview-token")
+	if !started || cancelSession == nil {
+		t.Fatal("preview job was not started")
+	}
+	runningStatus, found := store.Status("preview-token")
+	if !found || runningStatus.Status != "running" {
+		t.Fatalf("running status = %#v, found=%t", runningStatus, found)
+	}
+
+	response := publicTrialPreviewResponse{Status: "done", SourceURL: "https://example.com/", PageCount: 594}
+	store.Complete("preview-token", "done", response)
+	terminalStatus, found := store.Status("preview-token")
+	if !found || terminalStatus.Status != "done" || terminalStatus.Response.PageCount != 594 {
+		t.Fatalf("terminal status = %#v, found=%t", terminalStatus, found)
+	}
+	if _, restarted := store.Start("preview-token"); restarted {
+		t.Fatal("completed preview token started a duplicate job")
+	}
+}
+
+func TestPublicTrialScriptReconnectsAndPollsPreviewStatus(t *testing.T) {
+	scriptBytes, readErr := embeddedWebFiles.ReadFile("web/static/site_copy.js")
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	script := string(scriptBytes)
+	for _, expectedFragment := range []string{
+		"function schedulePublicTrialProgressReconnect",
+		"trial_site_preview_status",
+		"window.setInterval(requestPublicTrialPreviewStatus, 5000)",
+		"progressState.stage === 'heartbeat'",
+		"trial_site_preview_cancel",
+		"create_progress_token",
+		"requestBody.set('async_preview', '1')",
+	} {
+		if !strings.Contains(script, expectedFragment) {
+			t.Fatalf("public trial script does not contain %q", expectedFragment)
+		}
 	}
 }
 

@@ -1222,6 +1222,7 @@
     const progressBarElement = createElement('div', 'SiteBrushCopySiteProgressBar', '0%');
     const metricListElement = createElement('div', 'SiteBrushPublicTrialMetrics');
     const resourcesElement = createElement('div', 'SiteBrushCopySiteResources SiteBrushCopySiteHidden');
+    const failuresElement = createElement('div', 'SiteBrushCopySiteResources SiteBrushCopySiteHidden');
     const resultElement = createElement('p', 'SiteBrushCopySiteStatus SiteBrushPublicTrialResult', '');
     const actionRowElement = createElement('div', 'SiteBrushCopySiteActions');
     const createButtonElement = createElement('button', 'SiteBrushCopySiteButton SiteBrushCopySiteHidden', publicTrialText(configuration, 'createButton', 'Create test website'));
@@ -1231,6 +1232,7 @@
     statusPanelElement.appendChild(progressElement);
     statusPanelElement.appendChild(metricListElement);
     statusPanelElement.appendChild(resourcesElement);
+    statusPanelElement.appendChild(failuresElement);
     statusPanelElement.appendChild(resultElement);
     actionRowElement.appendChild(createButtonElement);
     dialogElement.appendChild(headerElement);
@@ -1243,15 +1245,37 @@
     let progressSocket = null;
     let previewRequestSubmitted = false;
     let previewFrameReloadTimer = 0;
+    let previewStatusTimer = 0;
+    let previewStatusRequestRunning = false;
+    let progressReconnectTimer = 0;
+    let progressReconnectAttempt = 0;
+    let progressSocketPhase = 'preview';
+    let modalClosed = false;
 
     function closePublicTrialModal() {
+      modalClosed = true;
+      progressSocketPhase = 'closed';
       if (progressSocket) {
-        progressSocket.close();
+        const socketToClose = progressSocket;
         progressSocket = null;
+        socketToClose.close();
       }
       if (previewFrameReloadTimer) {
         window.clearInterval(previewFrameReloadTimer);
         previewFrameReloadTimer = 0;
+      }
+      if (previewStatusTimer) {
+        window.clearInterval(previewStatusTimer);
+        previewStatusTimer = 0;
+      }
+      if (progressReconnectTimer) {
+        window.clearTimeout(progressReconnectTimer);
+        progressReconnectTimer = 0;
+      }
+      if (!previewPayload) {
+        const cancelBody = new URLSearchParams();
+        cancelBody.set('progress_token', progressToken);
+        fetch(publicTrialFetchURL(endpointPath, 'trial_site_preview_cancel'), { method: 'POST', body: cancelBody, keepalive: true }).catch(function ignorePreviewCancelError() {});
       }
       overlayElement.remove();
     }
@@ -1270,9 +1294,149 @@
       return statusText;
     }
 
+    function stopPublicTrialStatusPolling() {
+      if (!previewStatusTimer) {
+        return;
+      }
+      window.clearInterval(previewStatusTimer);
+      previewStatusTimer = 0;
+    }
+
+    function renderPublicTrialFailures(previewResponsePayload) {
+      failuresElement.replaceChildren();
+      const failedReasons = previewResponsePayload && previewResponsePayload.failed_reasons && typeof previewResponsePayload.failed_reasons === 'object' ? previewResponsePayload.failed_reasons : {};
+      const failedURLs = new Set(Array.isArray(previewResponsePayload && previewResponsePayload.failed_urls) ? previewResponsePayload.failed_urls : []);
+      for (const failedURL of Object.keys(failedReasons)) {
+        failedURLs.add(failedURL);
+      }
+      if (failedURLs.size === 0) {
+        failuresElement.classList.add('SiteBrushCopySiteHidden');
+        return;
+      }
+      const titleElement = createElement('div', 'SiteBrushCopySiteResource');
+      titleElement.appendChild(createElement('span', 'SiteBrushCopySiteResourceKind', String(failedURLs.size)));
+      titleElement.appendChild(createElement('span', '', ''));
+      titleElement.appendChild(createElement('div', 'SiteBrushCopySiteResourceURL', textFromConfig(configuration, 'failedResourcesTitle', 'Failed resources:')));
+      failuresElement.appendChild(titleElement);
+      for (const failedURL of Array.from(failedURLs).sort()) {
+        const failureRowElement = createElement('div', 'SiteBrushCopySiteResource');
+        const failureDetailsElement = createElement('div', '');
+        failureDetailsElement.appendChild(createElement('div', 'SiteBrushCopySiteResourceURL', failedURL));
+        const failureReason = String(failedReasons[failedURL] || '').trim();
+        if (failureReason !== '') {
+          failureDetailsElement.appendChild(createElement('div', 'SiteBrushCopySiteResourceReason', failureReason));
+        }
+        failureRowElement.appendChild(createElement('span', 'SiteBrushCopySiteResourceKind', textFromConfig(configuration, 'failedResourceBadge', 'failed')));
+        failureRowElement.appendChild(createElement('span', '', ''));
+        failureRowElement.appendChild(failureDetailsElement);
+        failuresElement.appendChild(failureRowElement);
+      }
+      failuresElement.classList.remove('SiteBrushCopySiteHidden');
+    }
+
+    function finishPublicTrialPreview(previewResponsePayload) {
+      if (previewPayload || modalClosed) {
+        return;
+      }
+      previewPayload = previewResponsePayload;
+      progressSocketPhase = 'done';
+      stopPublicTrialStatusPolling();
+      setProgress(progressBarElement, 100);
+      if (previewFrameReloadTimer) {
+        window.clearInterval(previewFrameReloadTimer);
+        previewFrameReloadTimer = 0;
+      }
+      if (previewPayload.preview_url && previewFrameElement.src !== previewPayload.preview_url) {
+        previewFrameElement.src = previewPayload.preview_url;
+      }
+      renderPublicTrialResources(resourcesElement, metricListElement, resultElement, configuration, previewPayload);
+      renderPublicTrialFailures(previewPayload);
+      if (!resultElement.textContent) {
+        resultElement.textContent = publicTrialResultText(previewPayload, configuration);
+      }
+      statusElement.textContent = publicTrialText(configuration, 'preparing', 'Preparing the website for editing...');
+      createButtonElement.classList.remove('SiteBrushCopySiteHidden');
+      if (progressSocket) {
+        const socketToClose = progressSocket;
+        progressSocket = null;
+        socketToClose.close();
+      }
+    }
+
+    function requestPublicTrialPreviewStatus() {
+      if (previewPayload || previewStatusRequestRunning || modalClosed) {
+        return;
+      }
+      previewStatusRequestRunning = true;
+      const statusURL = new URL(publicTrialFetchURL(endpointPath, 'trial_site_preview_status'));
+      statusURL.searchParams.set('token', progressToken);
+      fetch(statusURL.toString(), { headers: { Accept: 'application/json' }, cache: 'no-store' })
+        .then(function parsePublicTrialStatus(statusResponse) {
+          if (!statusResponse.ok && statusResponse.status !== 202) {
+            throw new Error(publicTrialText(configuration, 'loadFailed', 'Website analysis failed.'));
+          }
+          return statusResponse.json();
+        })
+        .then(function applyPublicTrialStatus(statusPayload) {
+          previewStatusRequestRunning = false;
+          if (statusPayload.status === 'done' || statusPayload.status === 'partial' || statusPayload.source_url) {
+            finishPublicTrialPreview(statusPayload);
+            return;
+          }
+          if (statusPayload.status === 'error') {
+            progressSocketPhase = 'done';
+            stopPublicTrialStatusPolling();
+            if (previewFrameReloadTimer) {
+              window.clearInterval(previewFrameReloadTimer);
+              previewFrameReloadTimer = 0;
+            }
+            if (progressSocket) {
+              const socketToClose = progressSocket;
+              progressSocket = null;
+              socketToClose.close();
+            }
+            statusElement.textContent = statusPayload.error || publicTrialText(configuration, 'loadFailed', 'Website analysis failed.');
+          }
+        })
+        .catch(function keepWaitingAfterStatusError() {
+          previewStatusRequestRunning = false;
+        });
+    }
+
+    function startPublicTrialStatusPolling() {
+      if (previewStatusTimer || previewPayload || modalClosed) {
+        return;
+      }
+      requestPublicTrialPreviewStatus();
+      previewStatusTimer = window.setInterval(requestPublicTrialPreviewStatus, 5000);
+    }
+
+    function schedulePublicTrialProgressReconnect(submitPreviewRequest) {
+      if (progressReconnectTimer || progressSocketPhase !== 'preview' || previewPayload || modalClosed) {
+        return;
+      }
+      const reconnectDelaySeconds = Math.min(Math.pow(2, progressReconnectAttempt), 10);
+      progressReconnectAttempt += 1;
+      statusElement.textContent = publicTrialText(configuration, 'preparing', 'Preparing the website for SiteBrush...');
+      progressReconnectTimer = window.setTimeout(function reconnectPublicTrialProgress() {
+        progressReconnectTimer = 0;
+        connectProgressSocket(submitPreviewRequest);
+      }, reconnectDelaySeconds * 1000);
+    }
+
     function connectProgressSocket(submitPreviewRequest) {
-      progressSocket = new WebSocket(publicTrialWebSocketURL(endpointPath, progressToken));
-      progressSocket.onmessage = function onPublicTrialProgressMessage(messageEvent) {
+      if (progressSocketPhase !== 'preview' || modalClosed) {
+        return;
+      }
+      const connectedSocket = new WebSocket(publicTrialWebSocketURL(endpointPath, progressToken));
+      progressSocket = connectedSocket;
+      connectedSocket.onopen = function onPublicTrialProgressOpen() {
+        progressReconnectAttempt = 0;
+      };
+      connectedSocket.onmessage = function onPublicTrialProgressMessage(messageEvent) {
+        if (connectedSocket !== progressSocket) {
+          return;
+        }
         let progressState = null;
         try {
           progressState = JSON.parse(messageEvent.data);
@@ -1281,6 +1445,9 @@
         }
         if (progressState.stage === 'ready') {
           submitPreviewRequest();
+          return;
+        }
+        if (progressState.stage === 'heartbeat') {
           return;
         }
         const foundTotal = Number(progressState.found_total) || 0;
@@ -1294,9 +1461,22 @@
           statusElement.textContent = publicTrialText(configuration, 'preparing', 'Preparing the website for SiteBrush...');
         }
         currentURLElement.textContent = progressState.current_url || '';
+        if (progressState.stage === 'done' || progressState.stage === 'partial' || (progressState.stage === 'error' && !progressState.current_url)) {
+          progressSocketPhase = 'preview-result';
+          requestPublicTrialPreviewStatus();
+        }
       };
-      progressSocket.onerror = function onPublicTrialProgressError() {
-        statusElement.textContent = publicTrialText(configuration, 'progressLost', 'Progress connection was lost.');
+      connectedSocket.onerror = function onPublicTrialProgressError() {
+        if (progressSocketPhase === 'preview') {
+          statusElement.textContent = publicTrialText(configuration, 'preparing', 'Preparing the website for SiteBrush...');
+        }
+      };
+      connectedSocket.onclose = function onPublicTrialProgressClose() {
+        if (connectedSocket !== progressSocket) {
+          return;
+        }
+        progressSocket = null;
+        schedulePublicTrialProgressReconnect(submitPreviewRequest);
       };
       window.setTimeout(function submitPublicTrialIfSocketReadyWasMissed() {
         if (!previewPayload && !previewRequestSubmitted) {
@@ -1315,13 +1495,15 @@
       }
     }
 
-    function connectCreateProgressSocket(submitCreateRequest) {
+    function connectCreateProgressSocket(createProgressToken, submitCreateRequest) {
+      progressSocketPhase = 'create';
       if (progressSocket) {
-        progressSocket.close();
+        const socketToClose = progressSocket;
         progressSocket = null;
+        socketToClose.close();
       }
       let createRequestSubmitted = false;
-      progressSocket = new WebSocket(publicTrialWebSocketURL(endpointPath, progressToken));
+      progressSocket = new WebSocket(publicTrialWebSocketURL(endpointPath, createProgressToken));
       progressSocket.onmessage = function onPublicTrialCreateProgressMessage(messageEvent) {
         let progressState = null;
         try {
@@ -1336,6 +1518,9 @@
           }
           return;
         }
+        if (progressState.stage === 'heartbeat') {
+          return;
+        }
         if (progressState.stage === 'retry_wait' || progressState.stage === 'retrying') {
           statusElement.textContent = publicTrialRetryStatusText(progressState);
         } else {
@@ -1346,7 +1531,7 @@
         setProgress(progressBarElement, completedPercent);
       };
       progressSocket.onerror = function onPublicTrialCreateProgressError() {
-        statusElement.textContent = publicTrialText(configuration, 'progressLost', 'Progress connection was lost.');
+        statusElement.textContent = publicTrialText(configuration, 'creating', 'Creating a test version with the SiteBrush editor...');
       };
       window.setTimeout(function submitPublicTrialCreateIfSocketReadyWasMissed() {
         if (!createRequestSubmitted) {
@@ -1364,6 +1549,7 @@
       const requestBody = new URLSearchParams();
       requestBody.set('progress_token', progressToken);
       requestBody.set('source_url', String(new FormData(formElement).get('source_url') || ''));
+      requestBody.set('async_preview', '1');
       previewFrameElement.removeAttribute('srcdoc');
       previewFrameElement.src = publicTrialPreviewFrameURL(endpointPath, progressToken);
       previewFrameReloadTimer = window.setInterval(function reloadPublicTrialPreviewFrame() {
@@ -1374,6 +1560,7 @@
         }
         previewFrameElement.src = publicTrialPreviewFrameURL(endpointPath, progressToken) + '&refresh=' + encodeURIComponent(String(Date.now()));
       }, 4000);
+      startPublicTrialStatusPolling();
       fetch(publicTrialFetchURL(endpointPath, 'trial_site_preview'), { method: 'POST', body: requestBody, headers: { Accept: 'application/json' } })
         .then(function parsePublicTrialPreviewResponse(previewResponse) {
           if (!previewResponse.ok) {
@@ -1384,28 +1571,13 @@
           return previewResponse.json();
         })
         .then(function renderPublicTrialPreview(previewResponsePayload) {
-          previewPayload = previewResponsePayload;
-          setProgress(progressBarElement, 100);
-          if (previewFrameReloadTimer) {
-            window.clearInterval(previewFrameReloadTimer);
-            previewFrameReloadTimer = 0;
+          if (previewResponsePayload.status === 'running' || previewResponsePayload.status === 'canceling') {
+            return;
           }
-          if (previewPayload.preview_url && previewFrameElement.src !== previewPayload.preview_url) {
-            previewFrameElement.src = previewPayload.preview_url;
-          }
-          renderPublicTrialResources(resourcesElement, metricListElement, resultElement, configuration, previewPayload);
-          if (!resultElement.textContent) {
-            resultElement.textContent = publicTrialResultText(previewPayload, configuration);
-          }
-          statusElement.textContent = publicTrialText(configuration, 'preparing', 'Preparing the website for editing...');
-          createButtonElement.classList.remove('SiteBrushCopySiteHidden');
+          finishPublicTrialPreview(previewResponsePayload);
         })
-        .catch(function renderPublicTrialPreviewError(previewError) {
-          if (previewFrameReloadTimer) {
-            window.clearInterval(previewFrameReloadTimer);
-            previewFrameReloadTimer = 0;
-          }
-          statusElement.textContent = previewError.message || publicTrialText(configuration, 'loadFailed', 'Website analysis failed.');
+        .catch(function keepWaitingAfterPreviewRequestError() {
+          startPublicTrialStatusPolling();
         });
     }
 
@@ -1419,8 +1591,10 @@
       setProgress(progressBarElement, 0);
       const requestBody = new URLSearchParams();
       requestBody.set('progress_token', progressToken);
+      const createProgressToken = randomProgressToken();
+      requestBody.set('create_progress_token', createProgressToken);
       appendSelectedPublicTrialResources(requestBody);
-      connectCreateProgressSocket(function submitPublicTrialCreateRequest() {
+      connectCreateProgressSocket(createProgressToken, function submitPublicTrialCreateRequest() {
         fetch(publicTrialFetchURL(endpointPath, 'trial_site_create'), { method: 'POST', body: requestBody, headers: { Accept: 'application/json' } })
         .then(function parsePublicTrialCreateResponse(createResponse) {
           if (!createResponse.ok) {

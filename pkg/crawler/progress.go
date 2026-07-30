@@ -1,5 +1,7 @@
 package crawler
 
+import "time"
+
 // ProgressEvent is emitted by page and site import crawlers.
 type ProgressEvent struct {
 	Token                  string            `json:"token"`
@@ -36,6 +38,11 @@ type ProgressTracker struct {
 	requests chan progressTrackerRequest
 }
 
+type retainedProgressEvent struct {
+	event     ProgressEvent
+	updatedAt time.Time
+}
+
 func NewProgressTracker() *ProgressTracker {
 	tracker := &ProgressTracker{requests: make(chan progressTrackerRequest)}
 	go tracker.loop()
@@ -43,7 +50,7 @@ func NewProgressTracker() *ProgressTracker {
 }
 
 func (tracker *ProgressTracker) Subscribe(token string) chan ProgressEvent {
-	stream := make(chan ProgressEvent, 32)
+	stream := make(chan ProgressEvent, 1)
 	tracker.requests <- progressTrackerRequest{action: "subscribe", token: token, stream: stream}
 	return stream
 }
@@ -58,22 +65,44 @@ func (tracker *ProgressTracker) Publish(event ProgressEvent) {
 
 func (tracker *ProgressTracker) loop() {
 	subscribersByToken := make(map[string]map[chan ProgressEvent]struct{})
+	latestEventByToken := make(map[string]retainedProgressEvent)
 	for request := range tracker.requests {
+		now := time.Now()
+		for token, retainedEvent := range latestEventByToken {
+			if now.Sub(retainedEvent.updatedAt) > time.Hour {
+				delete(latestEventByToken, token)
+			}
+		}
 		switch request.action {
 		case "subscribe":
 			if _, exists := subscribersByToken[request.token]; !exists {
 				subscribersByToken[request.token] = make(map[chan ProgressEvent]struct{})
 			}
 			subscribersByToken[request.token][request.stream] = struct{}{}
+			if retainedEvent, exists := latestEventByToken[request.token]; exists {
+				request.stream <- retainedEvent.event
+			}
 		case "unsubscribe":
 			group := subscribersByToken[request.token]
 			delete(group, request.stream)
+			if len(group) == 0 {
+				delete(subscribersByToken, request.token)
+			}
 			close(request.stream)
 		case "publish":
+			latestEventByToken[request.token] = retainedProgressEvent{event: request.event, updatedAt: now}
 			for stream := range subscribersByToken[request.token] {
+				// Every progress event is a complete snapshot. Replacing a stale
+				// snapshot keeps publishers non-blocking while ensuring that a
+				// reconnecting or slow subscriber observes the newest state.
 				select {
 				case stream <- request.event:
 				default:
+					select {
+					case <-stream:
+					default:
+					}
+					stream <- request.event
 				}
 			}
 		}

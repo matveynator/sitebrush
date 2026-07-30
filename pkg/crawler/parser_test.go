@@ -3,6 +3,7 @@ package crawler
 import (
 	"encoding/json"
 	"net/url"
+	"path"
 	"strings"
 	"testing"
 )
@@ -94,5 +95,37 @@ func TestParserRewritesDataManifestRelativeURLs(t *testing.T) {
 	shortcutIcon := shortcutIcons[0].(map[string]any)
 	if shortcutIcon["src"] != "https://karman.cafe/assets/menu.png" {
 		t.Fatalf("shortcut icon src = %#v", shortcutIcon["src"])
+	}
+}
+
+func TestParserRewritesLazyImageReferences(t *testing.T) {
+	source := `<img data-src="/hero.jpg" data-original="https://cdn.example/original.jpg">` +
+		`<source data-srcset="/small.jpg 1x, /large.jpg 2x">` +
+		`<img data-lazy-src="/lazy.jpg" data-lazy-srcset="/lazy-small.jpg 400w, /lazy-large.jpg 800w">` +
+		`<video data-bg="url('/poster.jpg')" data-background-image="/background.jpg"></video>`
+	parser := Parser{
+		RewriteResourceReference: func(rawRef string, _ *url.URL, _ int, _ ReferenceContext) string {
+			normalizedReference := strings.Trim(strings.TrimSpace(rawRef), `"'`)
+			parsedReference, parseErr := url.Parse(normalizedReference)
+			if parseErr != nil {
+				t.Fatal(parseErr)
+			}
+			return "/p/" + path.Base(parsedReference.Path)
+		},
+	}
+
+	rewritten := parser.RewriteTextReferences(source, "https://page.example/", 0)
+	for _, expectedReference := range []string{
+		`data-src="/p/hero.jpg"`,
+		`data-original="/p/original.jpg"`,
+		`data-srcset="/p/small.jpg 1x, /p/large.jpg 2x"`,
+		`data-lazy-src="/p/lazy.jpg"`,
+		`data-lazy-srcset="/p/lazy-small.jpg 400w, /p/lazy-large.jpg 800w"`,
+		`data-bg="url('/p/poster.jpg')"`,
+		`data-background-image="/p/background.jpg"`,
+	} {
+		if !strings.Contains(rewritten, expectedReference) {
+			t.Fatalf("lazy image reference %q was not rewritten: %s", expectedReference, rewritten)
+		}
 	}
 }
