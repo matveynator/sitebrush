@@ -56,7 +56,9 @@
       '.SiteBrushPublicTrialResult{font-weight:700}',
       '.SiteBrushCopySiteHidden{display:none!important}',
       '@media (max-width:640px){.SiteBrushCopySiteDialog{padding:14px}.SiteBrushCopySitePrimaryRow,.SiteBrushCopySiteSecondaryGrid,.SiteBrushPublicTrialMetrics{grid-template-columns:1fr}.SiteBrushCopySiteActions{flex-direction:column}.SiteBrushCopySiteButton,.SiteBrushCopySiteSecondaryButton{width:100%}}',
-      '.SiteBrushCopySiteButton:hover,.SiteBrushCopySiteSecondaryButton:hover,.SiteBrushPublicTrialForm button:hover{border-color:#95e5ef;background:rgba(149,229,239,.28)}'
+      '.SiteBrushCopySiteButton:hover,.SiteBrushCopySiteSecondaryButton:hover,.SiteBrushPublicTrialForm button:hover{border-color:#95e5ef;background:rgba(149,229,239,.28)}',
+      '.SiteBrushCopySiteContinueButton{border-color:#2fbf71!important;background:#198754!important;color:#fff!important;box-shadow:0 0 0 1px rgba(25,135,84,.22)}',
+      '.SiteBrushCopySiteContinueButton:hover{border-color:#48d589!important;background:#157347!important;color:#fff!important}'
     ].join('');
     document.head.appendChild(styleElement);
   }
@@ -434,7 +436,7 @@
     const actionRowElement = createElement('div', 'SiteBrushCopySiteActions');
     const cancelButtonElement = createElement('button', 'SiteBrushCopySiteSecondaryButton', textFromConfig(configuration, 'cancelButton', 'Cancel'));
     cancelButtonElement.type = 'button';
-    const continueButtonElement = createElement('button', 'SiteBrushCopySiteButton SiteBrushCopySiteHidden', textFromConfig(configuration, 'continueButton', 'Continue'));
+    const continueButtonElement = createElement('button', 'SiteBrushCopySiteButton SiteBrushCopySiteContinueButton SiteBrushCopySiteHidden', textFromConfig(configuration, 'continueButton', 'Continue'));
     continueButtonElement.type = 'button';
     actionRowElement.appendChild(cancelButtonElement);
     actionRowElement.appendChild(continueButtonElement);
@@ -468,6 +470,17 @@
     let activeDownloadEndpoint = '?grab';
     let activeGrabToken = '';
     let downloadCancelRequested = false;
+
+    function setFinishImportButtonMode(finishImportMode) {
+      cancelButtonElement.textContent = finishImportMode
+        ? textFromConfig(configuration, 'finishImport', 'Finish import')
+        : textFromConfig(configuration, 'cancelButton', 'Cancel');
+      cancelButtonElement.classList.toggle('SiteBrushCopySiteContinueButton', finishImportMode);
+    }
+
+    function setContinueButtonPrimaryAction(primaryAction) {
+      continueButtonElement.classList.toggle('SiteBrushCopySiteContinueButton', primaryAction);
+    }
 
     function closeModal() {
       closeProgressStream();
@@ -540,7 +553,7 @@
     function renderFailedResources() {
       resourcesElement.replaceChildren();
       const sortedFailedResourceURLs = Array.from(failedResourceURLs).sort();
-      cancelButtonElement.textContent = textFromConfig(configuration, 'finishImport', 'Finish import');
+      setFinishImportButtonMode(true);
       if (sortedFailedResourceURLs.length === 0) {
         resourcesElement.classList.add('SiteBrushCopySiteHidden');
         continueButtonElement.classList.add('SiteBrushCopySiteHidden');
@@ -569,6 +582,7 @@
         resourcesElement.appendChild(resourceRowElement);
       }
       continueButtonElement.textContent = textFromConfig(configuration, 'retryRemaining', 'Retry remaining');
+      setContinueButtonPrimaryAction(false);
       continueButtonElement.classList.remove('SiteBrushCopySiteHidden');
       partialImportCanRetry = true;
     }
@@ -724,8 +738,9 @@
       const targetCount = pageCount + resourceCount;
       statusElement.textContent = textFromConfig(configuration, 'confirmDownloadTextPrefix', 'Ready to download') + ' ' + targetCount + '.';
       urlElement.textContent = previewPayload.source_url || sourceUrlElement.value;
-      cancelButtonElement.textContent = textFromConfig(configuration, 'cancelButton', 'Cancel');
+      setFinishImportButtonMode(false);
       partialImportCanRetry = false;
+      setContinueButtonPrimaryAction(true);
       continueButtonElement.classList.remove('SiteBrushCopySiteHidden');
       progressElement.classList.add('SiteBrushCopySiteHidden');
       if (resourceCount > 0) {
@@ -760,6 +775,8 @@
       resourcesElement.classList.add('SiteBrushCopySiteHidden');
       quotaElement.classList.add('SiteBrushCopySiteHidden');
       continueButtonElement.classList.add('SiteBrushCopySiteHidden');
+      setContinueButtonPrimaryAction(true);
+      setFinishImportButtonMode(false);
       progressElement.classList.add('SiteBrushCopySiteHidden');
       statusElement.textContent = textFromConfig(configuration, 'previewResourcesText', 'Checking resources...');
       urlElement.textContent = sourceUrlElement.value;
@@ -820,7 +837,7 @@
       continueButtonElement.classList.add('SiteBrushCopySiteHidden');
       submitButtonElement.disabled = true;
       cancelButtonElement.disabled = false;
-      cancelButtonElement.textContent = textFromConfig(configuration, 'finishImport', 'Finish import');
+      setFinishImportButtonMode(true);
       setProgress(progressBarElement, 0);
       statusElement.textContent = textFromConfig(configuration, 'loadingStarted', 'Loading started...');
       urlElement.textContent = '';
@@ -861,7 +878,7 @@
             activeGrabToken = '';
             submitButtonElement.disabled = false;
             cancelButtonElement.disabled = false;
-            cancelButtonElement.textContent = textFromConfig(configuration, 'cancelButton', 'Cancel');
+            setFinishImportButtonMode(false);
             closeProgressStream();
             statusElement.textContent = downloadError.message || textFromConfig(configuration, 'loadPageFailed', 'Load failed.');
           });
@@ -1251,6 +1268,7 @@
     let progressReconnectAttempt = 0;
     let progressSocketPhase = 'preview';
     let modalClosed = false;
+    let previewComplete = false;
 
     function closePublicTrialModal() {
       modalClosed = true;
@@ -1272,7 +1290,7 @@
         window.clearTimeout(progressReconnectTimer);
         progressReconnectTimer = 0;
       }
-      if (!previewPayload) {
+      if (!previewComplete) {
         const cancelBody = new URLSearchParams();
         cancelBody.set('progress_token', progressToken);
         fetch(publicTrialFetchURL(endpointPath, 'trial_site_preview_cancel'), { method: 'POST', body: cancelBody, keepalive: true }).catch(function ignorePreviewCancelError() {});
@@ -1334,15 +1352,18 @@
       failuresElement.classList.remove('SiteBrushCopySiteHidden');
     }
 
-    function finishPublicTrialPreview(previewResponsePayload) {
-      if (previewPayload || modalClosed) {
+    function applyPublicTrialPreview(previewResponsePayload, terminal) {
+      if (modalClosed) {
         return;
       }
       previewPayload = previewResponsePayload;
-      progressSocketPhase = 'done';
-      stopPublicTrialStatusPolling();
-      setProgress(progressBarElement, 100);
-      if (previewFrameReloadTimer) {
+      if (terminal) {
+        previewComplete = true;
+        progressSocketPhase = 'done';
+        stopPublicTrialStatusPolling();
+        setProgress(progressBarElement, 100);
+      }
+      if (previewFrameReloadTimer && terminal) {
         window.clearInterval(previewFrameReloadTimer);
         previewFrameReloadTimer = 0;
       }
@@ -1354,17 +1375,23 @@
       if (!resultElement.textContent) {
         resultElement.textContent = publicTrialResultText(previewPayload, configuration);
       }
-      statusElement.textContent = publicTrialText(configuration, 'preparing', 'Preparing the website for editing...');
+      statusElement.textContent = terminal
+        ? publicTrialText(configuration, 'partialReady', 'The available pages are ready for testing.')
+        : publicTrialText(configuration, 'usableWhileChecking', 'The preview is ready. The remaining pages are still being checked.');
       createButtonElement.classList.remove('SiteBrushCopySiteHidden');
-      if (progressSocket) {
+      if (terminal && progressSocket) {
         const socketToClose = progressSocket;
         progressSocket = null;
         socketToClose.close();
       }
     }
 
+    function finishPublicTrialPreview(previewResponsePayload) {
+      applyPublicTrialPreview(previewResponsePayload, true);
+    }
+
     function requestPublicTrialPreviewStatus() {
-      if (previewPayload || previewStatusRequestRunning || modalClosed) {
+      if (previewComplete || previewStatusRequestRunning || modalClosed) {
         return;
       }
       previewStatusRequestRunning = true;
@@ -1379,9 +1406,12 @@
         })
         .then(function applyPublicTrialStatus(statusPayload) {
           previewStatusRequestRunning = false;
-          if (statusPayload.status === 'done' || statusPayload.status === 'partial' || statusPayload.source_url) {
+          if (statusPayload.status === 'done' || statusPayload.status === 'partial') {
             finishPublicTrialPreview(statusPayload);
             return;
+          }
+          if (statusPayload.usable || statusPayload.source_url) {
+            applyPublicTrialPreview(statusPayload, false);
           }
           if (statusPayload.status === 'error') {
             progressSocketPhase = 'done';
@@ -1404,7 +1434,7 @@
     }
 
     function startPublicTrialStatusPolling() {
-      if (previewStatusTimer || previewPayload || modalClosed) {
+      if (previewStatusTimer || previewComplete || modalClosed) {
         return;
       }
       requestPublicTrialPreviewStatus();
@@ -1412,12 +1442,12 @@
     }
 
     function schedulePublicTrialProgressReconnect(submitPreviewRequest) {
-      if (progressReconnectTimer || progressSocketPhase !== 'preview' || previewPayload || modalClosed) {
+      if (progressReconnectTimer || progressSocketPhase !== 'preview' || modalClosed) {
         return;
       }
       const reconnectDelaySeconds = Math.min(Math.pow(2, progressReconnectAttempt), 10);
       progressReconnectAttempt += 1;
-      statusElement.textContent = publicTrialText(configuration, 'preparing', 'Preparing the website for SiteBrush...');
+      statusElement.textContent = publicTrialText(configuration, 'reconnecting', 'Restoring the connection. The website check continues...');
       progressReconnectTimer = window.setTimeout(function reconnectPublicTrialProgress() {
         progressReconnectTimer = 0;
         connectProgressSocket(submitPreviewRequest);
@@ -1468,7 +1498,7 @@
       };
       connectedSocket.onerror = function onPublicTrialProgressError() {
         if (progressSocketPhase === 'preview') {
-          statusElement.textContent = publicTrialText(configuration, 'preparing', 'Preparing the website for SiteBrush...');
+          statusElement.textContent = publicTrialText(configuration, 'reconnecting', 'Restoring the connection. The website check continues...');
         }
       };
       connectedSocket.onclose = function onPublicTrialProgressClose() {
@@ -1553,7 +1583,7 @@
       previewFrameElement.removeAttribute('srcdoc');
       previewFrameElement.src = publicTrialPreviewFrameURL(endpointPath, progressToken);
       previewFrameReloadTimer = window.setInterval(function reloadPublicTrialPreviewFrame() {
-        if (previewPayload) {
+        if (previewComplete) {
           window.clearInterval(previewFrameReloadTimer);
           previewFrameReloadTimer = 0;
           return;
@@ -1572,6 +1602,9 @@
         })
         .then(function renderPublicTrialPreview(previewResponsePayload) {
           if (previewResponsePayload.status === 'running' || previewResponsePayload.status === 'canceling') {
+            if (previewResponsePayload.usable || previewResponsePayload.source_url) {
+              applyPublicTrialPreview(previewResponsePayload, false);
+            }
             return;
           }
           finishPublicTrialPreview(previewResponsePayload);

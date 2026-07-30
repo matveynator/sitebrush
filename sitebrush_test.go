@@ -6781,6 +6781,46 @@ func TestWholeSitePreviewProcesses594Pages(t *testing.T) {
 	}
 }
 
+func TestDemoRefreshFailureKeepsExistingLandingPage(t *testing.T) {
+	sourceURL := "https://source.example/"
+	previousGrabHTTPClient := newGrabHTTPClient
+	newGrabHTTPClient = func() *http.Client {
+		return &http.Client{Transport: fakeGrabTransport{responses: map[string]fakeGrabResponse{
+			sourceURL: {statusCode: http.StatusBadGateway, contentType: "text/plain", body: "upstream failed"},
+		}}}
+	}
+	defer func() {
+		newGrabHTTPClient = previousGrabHTTPClient
+	}()
+
+	application := newRouterTestApplication(t)
+	controlDB := setupBillingOwnerForTest(t, application, "owner.example", "owner@example.com", true)
+	defer controlDB.Close()
+	fallbackSettings := demo.Settings{Domain: "demo-preserve.example", Enabled: true}
+	adminEmail, _, fallbackErr := application.ensureDemoSiteReady(context.Background(), controlDB, fallbackSettings, false, "")
+	if fallbackErr != nil || adminEmail == "" {
+		t.Fatalf("create fallback demo: email=%q error=%v", adminEmail, fallbackErr)
+	}
+	var originalHTML string
+	demoContext := contextWithDomain(context.Background(), fallbackSettings.Domain)
+	if err := application.db.QueryRowContext(demoContext, `SELECT html FROM pages WHERE domain=? AND path='/'`, fallbackSettings.Domain).Scan(&originalHTML); err != nil {
+		t.Fatal(err)
+	}
+
+	refreshSettings := fallbackSettings
+	refreshSettings.SourceURL = sourceURL
+	if _, _, refreshErr := application.ensureDemoSiteReady(context.Background(), controlDB, refreshSettings, true, ""); refreshErr == nil {
+		t.Fatal("demo refresh unexpectedly succeeded")
+	}
+	var retainedHTML string
+	if err := application.db.QueryRowContext(demoContext, `SELECT html FROM pages WHERE domain=? AND path='/'`, fallbackSettings.Domain).Scan(&retainedHTML); err != nil {
+		t.Fatal(err)
+	}
+	if retainedHTML != originalHTML {
+		t.Fatal("failed demo refresh replaced the working landing page")
+	}
+}
+
 func TestMirrorRemotePageRewritesDataManifestRelativeURLs(t *testing.T) {
 	pageRawURL := "https://karman.cafe/"
 	manifest := `{"name":"Karman","start_url":"/","icons":[{"src":"./assets/apple-touch-icon.png","sizes":"180x180","type":"image/png"}]}`
@@ -6836,6 +6876,120 @@ func TestNormalizeMirroredAssetReferenceCollapsesProtocolRelativeLocalPath(t *te
 	}
 	if normalizedReference := crawler.NormalizeMirroredAssetReference("https://cdn.example/app.js"); normalizedReference != "https://cdn.example/app.js" {
 		t.Fatalf("external reference = %q", normalizedReference)
+	}
+}
+
+func TestMirrorRemotePagePersistsInlineJavaScriptGalleryImage(t *testing.T) {
+	const pageRawURL = "https://twochicks.ru/products/klatch-transformer-black/"
+	const galleryImageURL = "https://twochicks.ru/p/gallery-image.jpg"
+	const galleryImageBody = "gallery-image-body"
+	sourceHTML := `<script>const galleryImages = ['/p/gallery-image.jpg'];</script>`
+
+	previousGrabHTTPClient := newGrabHTTPClient
+	newGrabHTTPClient = func() *http.Client {
+		return &http.Client{Transport: fakeGrabTransport{responses: map[string]fakeGrabResponse{
+			galleryImageURL: {contentType: "image/jpeg", body: galleryImageBody},
+		}}}
+	}
+	defer func() {
+		newGrabHTTPClient = previousGrabHTTPClient
+	}()
+
+	pageURL, parseErr := url.Parse(pageRawURL)
+	if parseErr != nil {
+		t.Fatal(parseErr)
+	}
+	previewResources := previewGrabResources(pageURL, sourceHTML, nil, "", grabSourceOptions{})
+	if len(previewResources) != 1 || previewResources[0].URL != galleryImageURL {
+		t.Fatalf("gallery preview resources = %#v", previewResources)
+	}
+	selectedResourceURLs := map[string]struct{}{galleryImageURL: {}}
+	application, _ := newTestApplication(t)
+	importedHTML := application.mirrorRemotePage("gallery.example", "/product", pageRawURL, pageURL, sourceHTML, "", selectedResourceURLs, "")
+
+	expectedFileName, hashErr := contentHashName([]byte(galleryImageBody), ".jpg")
+	if hashErr != nil {
+		t.Fatal(hashErr)
+	}
+	expectedAssetReference := "/p/" + expectedFileName
+	if !strings.Contains(importedHTML, expectedAssetReference) {
+		t.Fatalf("gallery image reference was not rewritten to %q: %s", expectedAssetReference, importedHTML)
+	}
+	storedImagePath := filepath.Join(application.domainFilesDirForDomain("gallery.example"), expectedFileName)
+	storedImageBody, readErr := os.ReadFile(storedImagePath)
+	if readErr != nil {
+		t.Fatalf("read stored gallery image: %v", readErr)
+	}
+	if string(storedImageBody) != galleryImageBody {
+		t.Fatalf("stored gallery image = %q", storedImageBody)
+	}
+}
+
+func TestMirrorRemotePagePersistsImagesReferencedByExternalJavaScript(t *testing.T) {
+	const pageRawURL = "https://shop.example/products/item/"
+	const scriptURL = "https://shop.example/assets/gallery.js"
+	const imageURL = "https://cdn.example/images/gallery.webp?width=1600&format=webp"
+	const imageBody = "external-javascript-gallery-image"
+	sourceHTML := `<script type="module" src="/assets/gallery.js"></script>`
+	scriptBody := `const galleryImages = ["https:\/\/cdn.example\/images\/gallery.webp?width=1600\u0026format=webp"];`
+
+	previousGrabHTTPClient := newGrabHTTPClient
+	newGrabHTTPClient = func() *http.Client {
+		return &http.Client{Transport: fakeGrabTransport{responses: map[string]fakeGrabResponse{
+			scriptURL: {contentType: "application/javascript", body: scriptBody},
+			imageURL:  {contentType: "image/webp", body: imageBody},
+		}}}
+	}
+	defer func() {
+		newGrabHTTPClient = previousGrabHTTPClient
+	}()
+
+	pageURL, parseErr := url.Parse(pageRawURL)
+	if parseErr != nil {
+		t.Fatal(parseErr)
+	}
+	previewResources := previewGrabResources(pageURL, sourceHTML, nil, "", grabSourceOptions{})
+	selectedResourceURLs := make(map[string]struct{}, len(previewResources))
+	for _, previewResource := range previewResources {
+		selectedResourceURLs[previewResource.URL] = struct{}{}
+	}
+	for _, expectedURL := range []string{scriptURL, imageURL} {
+		if _, found := selectedResourceURLs[expectedURL]; !found {
+			t.Fatalf("external JavaScript resource was not discovered: %q, resources = %#v", expectedURL, previewResources)
+		}
+	}
+
+	application, _ := newTestApplication(t)
+	_ = application.mirrorRemotePage("external-script.example", "/product", pageRawURL, pageURL, sourceHTML, "", selectedResourceURLs, "")
+	expectedImageFileName, hashErr := contentHashName([]byte(imageBody), ".webp")
+	if hashErr != nil {
+		t.Fatal(hashErr)
+	}
+	storedImagePath := filepath.Join(application.domainFilesDirForDomain("external-script.example"), expectedImageFileName)
+	if _, statErr := os.Stat(storedImagePath); statErr != nil {
+		t.Fatalf("external JavaScript image was not persisted: %v", statErr)
+	}
+
+	storedFiles, listErr := listStoredFiles(application.domainFilesDirForDomain("external-script.example"))
+	if listErr != nil {
+		t.Fatal(listErr)
+	}
+	expectedImageReference := "/p/" + expectedImageFileName
+	rewrittenScriptFound := false
+	for _, storedFilePath := range storedFiles {
+		if filepath.Ext(storedFilePath) != ".js" {
+			continue
+		}
+		storedScriptBody, readErr := os.ReadFile(storedFilePath)
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		if strings.Contains(string(storedScriptBody), expectedImageReference) {
+			rewrittenScriptFound = true
+		}
+	}
+	if !rewrittenScriptFound {
+		t.Fatalf("stored external JavaScript does not reference %q", expectedImageReference)
 	}
 }
 
@@ -8051,6 +8205,16 @@ func TestPublicTrialPreviewStoreRetainsTerminalJobStatus(t *testing.T) {
 	if !found || runningStatus.Status != "running" {
 		t.Fatalf("running status = %#v, found=%t", runningStatus, found)
 	}
+	store.Save(publicTrialPreview{
+		Token:         "preview-token",
+		SourceURL:     "https://example.com/",
+		ImportedPages: []wholeSiteImportedPage{{SourceURL: "https://example.com/", LocalPath: "/", HTML: "<h1>Ready</h1>"}},
+		PageCount:     1,
+	})
+	runningPreview, previewFound := store.Get("preview-token")
+	if !previewFound || len(runningPreview.ImportedPages) != 1 {
+		t.Fatalf("running preview = %#v, found=%t", runningPreview, previewFound)
+	}
 
 	response := publicTrialPreviewResponse{Status: "done", SourceURL: "https://example.com/", PageCount: 594}
 	store.Complete("preview-token", "done", response)
@@ -8060,6 +8224,20 @@ func TestPublicTrialPreviewStoreRetainsTerminalJobStatus(t *testing.T) {
 	}
 	if _, restarted := store.Start("preview-token"); restarted {
 		t.Fatal("completed preview token started a duplicate job")
+	}
+}
+
+func TestPublicTrialRunningPreviewIsUsable(t *testing.T) {
+	preview := publicTrialPreview{
+		SourceURL:     "https://example.com/",
+		ImportedPages: []wholeSiteImportedPage{{SourceURL: "https://example.com/", LocalPath: "/", HTML: "<h1>Ready</h1>"}},
+		PageCount:     1,
+		RequiredBytes: 14,
+		TotalBytes:    14,
+	}
+	response := publicTrialPreviewResponseFromPreview(preview, "running", "https://sitebrush.example/?trial_site_preview_frame", nil)
+	if !response.Usable || !response.Refreshing || response.Status != "running" {
+		t.Fatalf("running preview response = %#v", response)
 	}
 }
 
@@ -8077,10 +8255,112 @@ func TestPublicTrialScriptReconnectsAndPollsPreviewStatus(t *testing.T) {
 		"trial_site_preview_cancel",
 		"create_progress_token",
 		"requestBody.set('async_preview', '1')",
+		"Restoring the connection. The website check continues...",
+		"applyPublicTrialPreview(previewResponsePayload, terminal)",
 	} {
 		if !strings.Contains(script, expectedFragment) {
 			t.Fatalf("public trial script does not contain %q", expectedFragment)
 		}
+	}
+}
+
+func TestExternalSiteImportPrimaryActionsAreGreen(t *testing.T) {
+	scriptBytes, readErr := embeddedWebFiles.ReadFile("web/static/site_copy.js")
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	script := string(scriptBytes)
+	for _, expectedFragment := range []string{
+		"SiteBrushCopySiteButton SiteBrushCopySiteContinueButton SiteBrushCopySiteHidden",
+		".SiteBrushCopySiteContinueButton{border-color:#2fbf71!important;background:#198754!important",
+		".SiteBrushCopySiteContinueButton:hover{border-color:#48d589!important;background:#157347!important",
+		"cancelButtonElement.classList.toggle('SiteBrushCopySiteContinueButton', finishImportMode)",
+		"continueButtonElement.classList.toggle('SiteBrushCopySiteContinueButton', primaryAction)",
+		"continueButtonElement.textContent = textFromConfig(configuration, 'retryRemaining', 'Retry remaining');\n      setContinueButtonPrimaryAction(false)",
+	} {
+		if !strings.Contains(script, expectedFragment) {
+			t.Fatalf("external site import script does not contain %q", expectedFragment)
+		}
+	}
+
+	templateBytes, readErr := embeddedWebFiles.ReadFile("web/missing.html")
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	template := string(templateBytes)
+	for _, expectedFragment := range []string{
+		`/p/static/technical_pages.css?v={{.CompileVersion}}`,
+		"btn btn-success sitebrush-import-primary-action",
+		"cancelButtonElement.classList.toggle('btn-success', finishImportMode)",
+		"cancelButtonElement.classList.toggle('btn-outline-secondary', !finishImportMode)",
+		"cancelButtonElement.classList.toggle('sitebrush-import-primary-action', finishImportMode)",
+		"continueButtonElement.classList.toggle('sitebrush-import-primary-action', primaryAction)",
+		"continueButtonElement.textContent = uiText.retryRemaining || continueButtonOriginalText;\n    setContinueButtonPrimaryAction(false)",
+		"setFinishImportButtonMode(true)",
+	} {
+		if !strings.Contains(template, expectedFragment) {
+			t.Fatalf("external site import template does not contain %q", expectedFragment)
+		}
+	}
+
+	styleBytes, readErr := embeddedWebFiles.ReadFile("web/static/technical_pages.css")
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	style := string(styleBytes)
+	for _, expectedFragment := range []string{
+		".technical-page #grabProgressModal button.sitebrush-import-primary-action",
+		"background: #198754 !important",
+		"background: #157347 !important",
+	} {
+		if !strings.Contains(style, expectedFragment) {
+			t.Fatalf("external site import stylesheet does not contain %q", expectedFragment)
+		}
+	}
+}
+
+func TestPublicTrialEmbedKeepsWidgetLiveAndVersioned(t *testing.T) {
+	request := httptest.NewRequest(http.MethodGet, "https://sitebrush.example/?expenses", nil)
+	embedHTML := publicTrialSignupEmbedHTML(request, nil)
+	if !strings.Contains(embedHTML, `data-sitebrush-live-asset`) {
+		t.Fatalf("public trial embed does not preserve the live widget: %s", embedHTML)
+	}
+	if !strings.Contains(embedHTML, `/p/static/site_copy.js?v=`+publicTrialWidgetScriptVersion()) {
+		t.Fatalf("public trial embed does not version the widget: %s", embedHTML)
+	}
+}
+
+func TestLegacyPublicTrialWidgetAssetServesCurrentScript(t *testing.T) {
+	scriptBytes, readErr := embeddedWebFiles.ReadFile("web/static/site_copy.js")
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	application := &App{embeddedStaticAssets: map[string]embeddedStaticAsset{
+		"site_copy.js": {body: scriptBytes, contentType: "text/javascript; charset=utf-8"},
+	}}
+	request := httptest.NewRequest(http.MethodGet, "https://sitebrush.com/p/"+legacyPublicTrialWidgetAssetName, nil)
+	request = request.WithContext(contextWithDomain(request.Context(), "sitebrush.com"))
+	response := httptest.NewRecorder()
+	application.servePublicAsset(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("legacy widget status = %d, body=%q", response.Code, response.Body.String())
+	}
+	if !bytes.Equal(response.Body.Bytes(), scriptBytes) {
+		t.Fatal("legacy widget URL did not serve the current embedded script")
+	}
+	if cacheControl := response.Header().Get("Cache-Control"); !strings.Contains(cacheControl, "no-store") {
+		t.Fatalf("legacy widget Cache-Control = %q", cacheControl)
+	}
+}
+
+func TestGuestPageRewritesLegacyPublicTrialWidgetReference(t *testing.T) {
+	legacyHTML := `<html><body><script src="/p/` + legacyPublicTrialWidgetAssetName + `"></script></body></html>`
+	rewrittenHTML := string(buildGuestStaticHTMLBody([]byte(legacyHTML), "/", "sitebrush.com", "en"))
+	if strings.Contains(rewrittenHTML, legacyPublicTrialWidgetAssetName) {
+		t.Fatalf("guest page keeps legacy trial widget: %s", rewrittenHTML)
+	}
+	if !strings.Contains(rewrittenHTML, `/p/static/site_copy.js?v=`+publicTrialWidgetScriptVersion()) {
+		t.Fatalf("guest page does not load current trial widget: %s", rewrittenHTML)
 	}
 }
 

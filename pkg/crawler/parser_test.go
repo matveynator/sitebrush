@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/url"
 	"path"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -127,5 +128,115 @@ func TestParserRewritesLazyImageReferences(t *testing.T) {
 		if !strings.Contains(rewritten, expectedReference) {
 			t.Fatalf("lazy image reference %q was not rewritten: %s", expectedReference, rewritten)
 		}
+	}
+}
+
+func TestParserRewritesInlineJavaScriptGalleryImages(t *testing.T) {
+	source := `<script>
+const galleryImages = [
+  '/p/86e1ee24627992539f1e5f9b1f7c327560ad9469c5c9959a70f6587443ff7a0d.jpg',
+  "/p/430460da69f3162faa07b19a2b9c48d6034c4fbfc09ab4b42cce542207dd2d88.jpg"
+];
+</script>`
+	rewrittenURLs := make([]string, 0, 2)
+	parser := Parser{
+		RewriteResourceReference: func(rawRef string, baseURL *url.URL, _ int, referenceContext ReferenceContext) string {
+			if referenceContext != ReferenceJavaScript {
+				t.Fatalf("reference context = %d", referenceContext)
+			}
+			normalizedURL, blocked := NormalizeURL(rawRef, baseURL, referenceContext)
+			if blocked {
+				t.Fatalf("inline gallery image was blocked: %q", rawRef)
+			}
+			rewrittenURLs = append(rewrittenURLs, normalizedURL)
+			return "/p/imported-" + path.Base(normalizedURL)
+		},
+	}
+
+	rewritten := parser.RewriteTextReferences(source, "https://twochicks.ru/products/klatch-transformer-black/", 0)
+	if len(rewrittenURLs) != 2 {
+		t.Fatalf("rewritten gallery URL count = %d, URLs = %#v", len(rewrittenURLs), rewrittenURLs)
+	}
+	for _, expectedURL := range []string{
+		"https://twochicks.ru/p/86e1ee24627992539f1e5f9b1f7c327560ad9469c5c9959a70f6587443ff7a0d.jpg",
+		"https://twochicks.ru/p/430460da69f3162faa07b19a2b9c48d6034c4fbfc09ab4b42cce542207dd2d88.jpg",
+	} {
+		if !slices.Contains(rewrittenURLs, expectedURL) {
+			t.Fatalf("gallery URL was not resolved: %q, URLs = %#v", expectedURL, rewrittenURLs)
+		}
+		if !strings.Contains(rewritten, "/p/imported-"+path.Base(expectedURL)) {
+			t.Fatalf("gallery URL was not rewritten: %q, HTML = %s", expectedURL, rewritten)
+		}
+	}
+}
+
+func TestParserRewritesImagesFromUnknownJavaScriptFormats(t *testing.T) {
+	source := `<script type="application/json">
+{"image":"https:\/\/cdn.example\/hero.webp?width=1200\u0026format=webp"}
+</script>
+<script type="module">
+const rootImage = "\u002Fmedia\u002Fphoto.avif?size=large";
+const relativeImage = ` + "`../assets/module.png?v=2`" + `;
+const dynamicImage = ` + "`/images/${imageName}.jpg`" + `;
+</script>`
+	rewrittenURLs := make([]string, 0, 3)
+	parser := Parser{
+		RewriteResourceReference: func(rawRef string, baseURL *url.URL, _ int, referenceContext ReferenceContext) string {
+			if referenceContext != ReferenceJavaScript {
+				t.Fatalf("reference context = %d", referenceContext)
+			}
+			normalizedURL, blocked := NormalizeURL(rawRef, baseURL, referenceContext)
+			if blocked {
+				t.Fatalf("JavaScript image was blocked: %q", rawRef)
+			}
+			rewrittenURLs = append(rewrittenURLs, normalizedURL)
+			return "/p/imported-" + path.Base(normalizedURL)
+		},
+	}
+
+	rewritten := parser.RewriteTextReferences(source, "https://shop.example/products/item/", 0)
+	for _, expectedURL := range []string{
+		"https://cdn.example/hero.webp?width=1200&format=webp",
+		"https://shop.example/media/photo.avif?size=large",
+		"https://shop.example/products/assets/module.png?v=2",
+	} {
+		if !slices.Contains(rewrittenURLs, expectedURL) {
+			t.Fatalf("JavaScript image URL was not resolved: %q, URLs = %#v", expectedURL, rewrittenURLs)
+		}
+		if !strings.Contains(rewritten, "/p/imported-"+path.Base(expectedURL)) {
+			t.Fatalf("JavaScript image URL was not rewritten: %q, HTML = %s", expectedURL, rewritten)
+		}
+	}
+	if len(rewrittenURLs) != 3 {
+		t.Fatalf("rewritten JavaScript URL count = %d, URLs = %#v", len(rewrittenURLs), rewrittenURLs)
+	}
+	if !strings.Contains(rewritten, "`${imageName}") && !strings.Contains(rewritten, "${imageName}") {
+		t.Fatalf("dynamic JavaScript expression was changed: %s", rewritten)
+	}
+}
+
+func TestRewriteTextReferencesPreservesLiveSiteBrushAsset(t *testing.T) {
+	source := `<script src="/p/static/site_copy.js?v=123" data-sitebrush-live-asset></script>`
+	parser := Parser{
+		RewriteResourceReference: func(rawRef string, _ *url.URL, _ int, _ ReferenceContext) string {
+			return "/p/mirrored.js"
+		},
+	}
+	rewritten := parser.RewriteTextReferences(source, "https://example.com/", 0)
+	if rewritten != source {
+		t.Fatalf("live SiteBrush asset was rewritten: %s", rewritten)
+	}
+}
+
+func TestRewriteTextReferencesDoesNotPreserveExternalMarkedScript(t *testing.T) {
+	source := `<script src="https://attacker.example/script.js" data-sitebrush-live-asset></script>`
+	parser := Parser{
+		RewriteResourceReference: func(rawRef string, _ *url.URL, _ int, _ ReferenceContext) string {
+			return "/p/mirrored.js"
+		},
+	}
+	rewritten := parser.RewriteTextReferences(source, "https://example.com/", 0)
+	if !strings.Contains(rewritten, `src="/p/mirrored.js"`) {
+		t.Fatalf("external marked script was preserved: %s", rewritten)
 	}
 }
