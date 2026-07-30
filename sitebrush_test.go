@@ -8408,6 +8408,34 @@ func TestUploadFilesRejectsWhenDomainStorageLimitIsExceeded(t *testing.T) {
 	}
 }
 
+func TestStorageLimitErrorShowsCurrentOperationAndProjectedUsage(t *testing.T) {
+	application, rawDB := newTestApplication(t)
+	currentHTML := strings.Repeat("A", 80)
+	if _, err := rawDB.Exec(`INSERT INTO pages(domain,path,title,html,published) VALUES(?,?,?,?,1)`, "localhost", "/", "/", currentHTML); err != nil {
+		t.Fatal(err)
+	}
+	application.ensureDomainStorageUsageRow(context.Background(), "localhost")
+	if _, err := rawDB.Exec(`UPDATE domain_storage_usage SET limit_bytes=? WHERE domain=?`, 100, "localhost"); err != nil {
+		t.Fatal(err)
+	}
+
+	storageErr := application.applyDomainStorageDelta(context.Background(), "localhost", 0, 0, 30, 0, 0)
+	if storageErr == nil {
+		t.Fatal("storage update unexpectedly fitted into the quota")
+	}
+	for _, expectedFragment := range []string{
+		"storage limit reached:",
+		"80 B used",
+		"30 B required by this operation",
+		"110 B projected",
+		"100 B limit",
+	} {
+		if !strings.Contains(storageErr.Error(), expectedFragment) {
+			t.Fatalf("storage error %q does not contain %q", storageErr.Error(), expectedFragment)
+		}
+	}
+}
+
 func TestVisualEditorUsesLocalJoditAssetsAndServerImageUpload(t *testing.T) {
 	application, rawDB := newTestApplication(t)
 	_, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "admin@example.com", "old")

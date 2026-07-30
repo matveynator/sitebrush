@@ -20268,8 +20268,19 @@ WHERE domain=?
 	}
 	if updatedRowsCount == 0 {
 		usage := a.domainStorageUsage(ctx, domain)
-		a.logHostingSupportEvent(ctx, "limit_exceeded", "blocked", "", domain, fmt.Sprintf("storage limit reached: %s / %s used", formatFileSize(usage.totalBytes()), formatFileSize(usage.LimitBytes)))
-		return fmt.Errorf("storage limit reached: %s / %s used", formatFileSize(usage.totalBytes()), formatFileSize(usage.LimitBytes))
+		projectedBytes := usage.totalBytes() + totalDelta
+		if totalDelta > 0 && projectedBytes > usage.LimitBytes {
+			limitErr := fmt.Errorf(
+				"storage limit reached: %s used + %s required by this operation = %s projected / %s limit",
+				formatFileSize(usage.totalBytes()),
+				formatFileSize(totalDelta),
+				formatFileSize(projectedBytes),
+				formatFileSize(usage.LimitBytes),
+			)
+			a.logHostingSupportEvent(ctx, "limit_exceeded", "blocked", "", domain, limitErr.Error())
+			return limitErr
+		}
+		return fmt.Errorf("storage usage update rejected for %s", domain)
 	}
 	if totalDelta != 0 {
 		a.logHostingSupportEvent(ctx, "site_size_changed", "updated", "", domain, fmt.Sprintf("storage delta %s", formatFileSize(totalDelta)))
