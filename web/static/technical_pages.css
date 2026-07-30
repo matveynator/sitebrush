@@ -153,6 +153,19 @@
     color: var(--green);
 }
 
+.technical-page #grabProgressModal button.sitebrush-import-primary-action {
+    border-color: #2fbf71 !important;
+    background: #198754 !important;
+    color: #ffffff !important;
+    box-shadow: 0 0 0 1px rgba(25, 135, 84, 0.22);
+}
+
+.technical-page #grabProgressModal button.sitebrush-import-primary-action:hover {
+    border-color: #48d589 !important;
+    background: #157347 !important;
+    color: #ffffff !important;
+}
+
 .technical-page .card,
 .technical-page .bg-body-tertiary.border,
 .technical-page .dns-box,

@@ -102,6 +102,7 @@ const grabImportFailedResourceRetryDelay = 2 * time.Second
 const wholeSiteImportConsecutiveFailureLimit = 25
 const wholeSiteImportMaxPages = 2048
 const wholeSitePreviewPageConcurrency = 8
+const legacyPublicTrialWidgetAssetName = "c2e28115960ae946dd3b7bd3be07562715528484255f9a1e42e65f850e32f964.js"
 const defaultDomainStorageLimitBytes int64 = 10 * 1024 * 1024 * 1024
 const defaultAnalyticsMemoryLimitBytes int64 = 500 * 1024 * 1024
 const defaultGuestStaticHTMLCacheLimitBytes int64 = 128 * 1024 * 1024
@@ -195,6 +196,7 @@ type demoSiteRuntimeState struct {
 	AdminEmail string
 	Status     string
 	Error      string
+	Refreshing bool
 }
 
 type demoSessionEvent struct {
@@ -2039,6 +2041,8 @@ type publicTrialPreview struct {
 
 type publicTrialPreviewResponse struct {
 	Status         string                    `json:"status,omitempty"`
+	Usable         bool                      `json:"usable"`
+	Refreshing     bool                      `json:"refreshing,omitempty"`
 	SourceURL      string                    `json:"source_url"`
 	PreviewURL     string                    `json:"preview_url"`
 	PageCount      int                       `json:"page_count"`
@@ -5213,6 +5217,9 @@ func (a *App) serveEmbeddedStaticAsset(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
+	if relativePath == "site_copy.js" {
+		w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+	}
 	w.Header().Set("Content-Type", asset.contentType)
 	http.ServeContent(w, r, relativePath, asset.modTime, bytes.NewReader(asset.body))
 }
@@ -7267,16 +7274,64 @@ func (a *App) prepareDemoSiteRuntime(stop <-chan struct{}, requests chan<- demoS
 		publishDemoSiteRuntimeState(stop, requests, demoSiteRuntimeState{Settings: settings, Status: "error", Error: err.Error()})
 		return
 	}
-	adminEmail, _, prepareErr := a.ensureDemoSiteReady(context.Background(), controlDatabase.DB, settings, false, "")
-	_ = controlDatabase.Close()
-	if prepareErr == nil && !a.demoSiteSnapshotAvailable(settings.Domain) {
-		prepareErr = a.createDemoSiteSnapshot(context.Background(), settings.Domain)
+	fallbackSettings := settings
+	fallbackSettings.SourceURL = ""
+	fallbackSettings.CopyWholeSite = false
+	adminEmail, _, fallbackErr := a.ensureDemoSiteReady(context.Background(), controlDatabase.DB, fallbackSettings, false, "")
+	if fallbackErr == nil && !a.demoSiteSnapshotAvailable(settings.Domain) {
+		fallbackErr = a.createDemoSiteSnapshot(context.Background(), settings.Domain)
 	}
-	if prepareErr != nil {
-		publishDemoSiteRuntimeState(stop, requests, demoSiteRuntimeState{Settings: settings, Status: "error", Error: prepareErr.Error()})
+	if fallbackErr != nil {
+		_ = controlDatabase.Close()
+		publishDemoSiteRuntimeState(stop, requests, demoSiteRuntimeState{Settings: settings, Status: "error", Error: fallbackErr.Error()})
 		return
 	}
-	publishDemoSiteRuntimeState(stop, requests, demoSiteRuntimeState{Settings: settings, AdminEmail: adminEmail, Status: "ready"})
+	refreshing := strings.TrimSpace(settings.SourceURL) != ""
+	publishDemoSiteRuntimeState(stop, requests, demoSiteRuntimeState{Settings: settings, AdminEmail: adminEmail, Status: "ready", Refreshing: refreshing})
+	_ = controlDatabase.Close()
+	if !refreshing {
+		return
+	}
+	a.refreshDemoSiteRuntime(stop, requests, settings, adminEmail)
+}
+
+func (a *App) refreshDemoSiteRuntime(stop <-chan struct{}, requests chan<- demoSiteRuntimeRequest, settings demo.Settings, adminEmail string) {
+	retryDelay := 30 * time.Second
+	for {
+		refreshContext, cancelRefresh := context.WithTimeout(context.Background(), 15*time.Minute)
+		go func() {
+			select {
+			case <-stop:
+				cancelRefresh()
+			case <-refreshContext.Done():
+			}
+		}()
+		controlDatabase, openErr := a.openServerControlDatabaseForPurpose(refreshContext, serverControlDatabaseWrite, "demo-runtime-refresh")
+		refreshErr := openErr
+		if openErr == nil {
+			_, _, refreshErr = a.ensureDemoSiteReady(refreshContext, controlDatabase.DB, settings, true, "")
+			_ = controlDatabase.Close()
+		}
+		cancelRefresh()
+		if refreshErr == nil {
+			publishDemoSiteRuntimeState(stop, requests, demoSiteRuntimeState{Settings: settings, AdminEmail: adminEmail, Status: "ready"})
+			return
+		}
+		publishDemoSiteRuntimeState(stop, requests, demoSiteRuntimeState{Settings: settings, AdminEmail: adminEmail, Status: "ready", Error: refreshErr.Error()})
+		retryTimer := time.NewTimer(retryDelay)
+		select {
+		case <-stop:
+			retryTimer.Stop()
+			return
+		case <-retryTimer.C:
+		}
+		if retryDelay < 5*time.Minute {
+			retryDelay *= 2
+			if retryDelay > 5*time.Minute {
+				retryDelay = 5 * time.Minute
+			}
+		}
+	}
 }
 
 func publishDemoSiteRuntimeState(stop <-chan struct{}, requests chan<- demoSiteRuntimeRequest, state demoSiteRuntimeState) {
@@ -7472,9 +7527,6 @@ func (a *App) ensureDemoSiteReady(ctx context.Context, controlDatabase *sql.DB, 
 				return adminEmail, 0, nil
 			}
 		}
-		if err := a.clearDemoSiteContent(ctx, domain); err != nil {
-			return "", 0, err
-		}
 		failedTotal := 0
 		if settings.SourceURL != "" {
 			seedFailedTotal, err := a.seedDemoSiteContent(ctx, domain, settings, progressToken)
@@ -7508,6 +7560,26 @@ func (a *App) demoSiteHasLandingPage(ctx context.Context, domain string) bool {
 	var pageCount int
 	_ = a.db.QueryRowContext(contextWithDomain(ctx, domain), `SELECT COUNT(1) FROM pages WHERE domain=? AND path='/'`, domain).Scan(&pageCount)
 	return pageCount > 0
+}
+
+func (a *App) demoSiteRefreshingState(ctx context.Context, settings demo.Settings) demoSiteRuntimeState {
+	adminEmail, hasAdmin := a.firstAdminEmailForDomain(ctx, settings.Domain)
+	if hasAdmin && a.demoSiteHasLandingPage(ctx, settings.Domain) {
+		return demoSiteRuntimeState{Settings: settings, AdminEmail: adminEmail, Status: "ready", Refreshing: true}
+	}
+	return demoSiteRuntimeState{Settings: settings, Status: "preparing", Refreshing: true}
+}
+
+func (a *App) demoSiteRefreshFailureState(ctx context.Context, settings demo.Settings, refreshErr error) demoSiteRuntimeState {
+	state := a.demoSiteRefreshingState(ctx, settings)
+	state.Refreshing = false
+	if refreshErr != nil {
+		state.Error = refreshErr.Error()
+	}
+	if state.Status != "ready" {
+		state.Status = "error"
+	}
+	return state
 }
 
 func (a *App) isDemoSiteDomain(ctx context.Context, domain string) bool {
@@ -7689,7 +7761,7 @@ func (a *App) demoGrabRefresh(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	settings := demo.Settings{Domain: demoDomain, SourceURL: demoSourceURL, CopyWholeSite: demoCopyWholeSite, Enabled: true}
-	a.updateRuntimeDemoSiteState(r.Context(), demoSiteRuntimeState{Settings: settings, Status: "preparing"})
+	a.updateRuntimeDemoSiteState(r.Context(), a.demoSiteRefreshingState(r.Context(), settings))
 	progressToken := strings.TrimSpace(r.FormValue("progress_token"))
 	failedResourceURLs := demoFailedResourceURLs(r)
 	var failedTotal int
@@ -7701,7 +7773,7 @@ func (a *App) demoGrabRefresh(w http.ResponseWriter, r *http.Request) {
 		adminEmail, failedTotal, err = a.ensureDemoSiteReady(r.Context(), controlDatabase.DB, settings, true, progressToken)
 	}
 	if err != nil {
-		a.updateRuntimeDemoSiteState(r.Context(), demoSiteRuntimeState{Settings: settings, Status: "error", Error: err.Error()})
+		a.updateRuntimeDemoSiteState(r.Context(), a.demoSiteRefreshFailureState(r.Context(), settings, err))
 		statusCode := http.StatusBadGateway
 		if strings.Contains(err.Error(), "storage limit reached:") {
 			statusCode = http.StatusInsufficientStorage
@@ -7713,7 +7785,7 @@ func (a *App) demoGrabRefresh(w http.ResponseWriter, r *http.Request) {
 		err = a.createDemoSiteSnapshot(r.Context(), demoDomain)
 	}
 	if err != nil {
-		a.updateRuntimeDemoSiteState(r.Context(), demoSiteRuntimeState{Settings: settings, Status: "error", Error: err.Error()})
+		a.updateRuntimeDemoSiteState(r.Context(), a.demoSiteRefreshFailureState(r.Context(), settings, err))
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -8688,32 +8760,51 @@ func (a *App) publicTrialSitePreview(w http.ResponseWriter, r *http.Request) {
 			_ = json.NewEncoder(w).Encode(status.Response)
 			return
 		}
+		if preview, usable := a.activePublicTrialPreviewStore().Get(progressToken); usable && len(preview.ImportedPages) > 0 {
+			previewURL := absoluteURLForPath(r, "/?trial_site_preview_frame&token="+url.QueryEscape(progressToken))
+			_ = json.NewEncoder(w).Encode(publicTrialPreviewResponseFromPreview(preview, "running", previewURL, translationsForRequest(r)))
+			return
+		}
 		w.WriteHeader(http.StatusAccepted)
 		_ = json.NewEncoder(w).Encode(map[string]string{"token": progressToken, "status": status.Status})
 		return
 	}
 	previewURL := absoluteURLForPath(r, "/?trial_site_preview_frame&token="+url.QueryEscape(progressToken))
 	translations := translationsForRequest(r)
-	if strings.TrimSpace(r.FormValue("async_preview")) != "1" {
-		a.runPublicTrialSitePreview(progressToken, sourceURL, previewURL, translations, cancelSession)
-		status, found := a.activePublicTrialPreviewStore().Status(progressToken)
-		if !found {
-			http.Error(w, "preview result is unavailable", http.StatusInternalServerError)
-			return
-		}
-		if status.Status == "error" {
-			http.Error(w, status.ErrorText, http.StatusBadGateway)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(status.Response)
-		return
-	}
 	go a.runPublicTrialSitePreview(progressToken, sourceURL, previewURL, translations, cancelSession)
 
 	w.Header().Set("Content-Type", "application/json")
+	if strings.TrimSpace(r.FormValue("async_preview")) != "1" {
+		a.writeFirstUsablePublicTrialPreview(w, r, progressToken, previewURL, translations)
+		return
+	}
 	w.WriteHeader(http.StatusAccepted)
 	_ = json.NewEncoder(w).Encode(map[string]string{"token": progressToken, "status": "running"})
+}
+
+func (a *App) writeFirstUsablePublicTrialPreview(w http.ResponseWriter, r *http.Request, progressToken, previewURL string, translations map[string]string) {
+	timer := time.NewTimer(45 * time.Second)
+	defer timer.Stop()
+	ticker := time.NewTicker(150 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		if preview, found := a.activePublicTrialPreviewStore().Get(progressToken); found && len(preview.ImportedPages) > 0 {
+			_ = json.NewEncoder(w).Encode(publicTrialPreviewResponseFromPreview(preview, "running", previewURL, translations))
+			return
+		}
+		if status, found := a.activePublicTrialPreviewStore().Status(progressToken); found && status.Status == "error" {
+			http.Error(w, status.ErrorText, http.StatusBadGateway)
+			return
+		}
+		select {
+		case <-r.Context().Done():
+			return
+		case <-timer.C:
+			http.Error(w, "preview is still preparing", http.StatusGatewayTimeout)
+			return
+		case <-ticker.C:
+		}
+	}
 }
 
 func (a *App) runPublicTrialSitePreview(progressToken, requestedSourceURL, previewURL string, translations map[string]string, cancelSession <-chan struct{}) {
@@ -8741,10 +8832,11 @@ func (a *App) runPublicTrialSitePreview(progressToken, requestedSourceURL, previ
 	initialSpider.setContext(previewContext)
 	initialRootResource := &mirroredResource{url: sourceURL, content: htmlBytes}
 	initialSpider.resources[sourceURL] = initialRootResource
-	initialSpider.collectPreviewNestedResources(initialRootResource, 0, "text/html")
 	initialHTML := string(initialRootResource.content)
 	initialImportedPages := []wholeSiteImportedPage{{SourceURL: sourceURL, LocalPath: "/", HTML: initialHTML}}
-	initialResources := previewResourcesFromSpider(initialSpider, map[string]struct{}{sourceURL: {}})
+	initialResources := []grabResourcePreview{}
+	initialBytes := int64(len(htmlBytes))
+	initialPlan, initialFreePlan, initialFitsFreePlan := a.smallestPublicTrialPlan(previewContext, initialBytes)
 	a.activePublicTrialPreviewStore().Save(publicTrialPreview{
 		Token:          progressToken,
 		SourceURL:      sourceURL,
@@ -8754,6 +8846,11 @@ func (a *App) runPublicTrialSitePreview(progressToken, requestedSourceURL, previ
 		PageCount:      1,
 		ResourceCount:  len(initialResources),
 		ResourceCounts: publicTrialResourceCountsFromResources(initialResources),
+		TotalBytes:     initialBytes,
+		RequiredBytes:  initialBytes,
+		Plan:           initialPlan,
+		FreePlan:       initialFreePlan,
+		FitsFreePlan:   initialFitsFreePlan,
 	})
 	wholeSitePreview := previewWholeRemoteSiteResources(previewContext, remoteSourceURL, string(htmlBytes), "/", a.grabTracker, progressToken, publicSourceOptions)
 	importedPages := wholeSitePreview.ImportedPages
@@ -8799,10 +8896,24 @@ func (a *App) runPublicTrialSitePreview(progressToken, requestedSourceURL, previ
 	if wholeSitePreview.Partial || previewSpider.unresolvedFailedTotal() > 0 || previewContext.Err() != nil {
 		status = "partial"
 	}
-	message := publicTrialPlanMessage(translations, preview)
+	response := publicTrialPreviewResponseFromPreview(preview, status, previewURL, translations)
+	response.PageBytes = pageBytes
+	a.activePublicTrialPreviewStore().Complete(progressToken, status, response)
+	if a.grabTracker != nil && previewSpider != nil {
+		a.grabTracker.publish(previewSpider.finalProgressEvent(progressToken, status))
+	}
+}
+
+func publicTrialPreviewResponseFromPreview(preview publicTrialPreview, status, previewURL string, translations map[string]string) publicTrialPreviewResponse {
+	pageBytes := int64(0)
+	for _, importedPage := range preview.ImportedPages {
+		pageBytes += int64(len([]byte(importedPage.HTML)))
+	}
 	response := publicTrialPreviewResponse{
 		Status:         status,
-		SourceURL:      sourceURL,
+		Usable:         len(preview.ImportedPages) > 0,
+		Refreshing:     status == "running",
+		SourceURL:      preview.SourceURL,
 		PreviewURL:     previewURL,
 		PageCount:      preview.PageCount,
 		ResourceCount:  preview.ResourceCount,
@@ -8814,15 +8925,14 @@ func (a *App) runPublicTrialSitePreview(progressToken, requestedSourceURL, previ
 		FitsFreePlan:   preview.FitsFreePlan,
 		Plan:           preview.Plan,
 		FreePlan:       preview.FreePlan,
-		Message:        message,
-		FailedTotal:    previewSpider.unresolvedFailedTotal(),
-		FailedURLs:     previewSpider.failedResourceURLList(),
-		FailedReasons:  previewSpider.failedResourceReasonMap(),
+		Message:        publicTrialPlanMessage(translations, preview),
 	}
-	a.activePublicTrialPreviewStore().Complete(progressToken, status, response)
-	if a.grabTracker != nil && previewSpider != nil {
-		a.grabTracker.publish(previewSpider.finalProgressEvent(progressToken, status))
+	if preview.Spider != nil {
+		response.FailedTotal = preview.Spider.unresolvedFailedTotal()
+		response.FailedURLs = preview.Spider.failedResourceURLList()
+		response.FailedReasons = preview.Spider.failedResourceReasonMap()
 	}
+	return response
 }
 
 func (a *App) publicTrialSitePreviewStatus(w http.ResponseWriter, r *http.Request) {
@@ -8844,6 +8954,11 @@ func (a *App) publicTrialSitePreviewStatus(w http.ResponseWriter, r *http.Reques
 	case "error":
 		_ = json.NewEncoder(w).Encode(map[string]string{"status": "error", "error": status.ErrorText})
 	default:
+		if preview, usable := a.activePublicTrialPreviewStore().Get(progressToken); usable && len(preview.ImportedPages) > 0 {
+			previewURL := absoluteURLForPath(r, "/?trial_site_preview_frame&token="+url.QueryEscape(progressToken))
+			_ = json.NewEncoder(w).Encode(publicTrialPreviewResponseFromPreview(preview, "running", previewURL, translationsForRequest(r)))
+			return
+		}
 		w.WriteHeader(http.StatusAccepted)
 		_ = json.NewEncoder(w).Encode(map[string]string{"token": progressToken, "status": status.Status})
 	}
@@ -8934,6 +9049,7 @@ func (a *App) publicTrialSiteCreate(w http.ResponseWriter, r *http.Request) {
 	if createProgressToken == "" {
 		createProgressToken = progressToken
 	}
+	a.activePublicTrialPreviewStore().Cancel(progressToken)
 	preview, found := a.activePublicTrialPreviewStore().Get(progressToken)
 	if !found {
 		http.Error(w, "preview not found", http.StatusNotFound)
@@ -13052,7 +13168,7 @@ func (a *App) hostingAndSupportSiteURL(domain string) string {
 
 func publicTrialSignupEmbedHTML(r *http.Request, translations map[string]string) string {
 	endpointURL := absoluteURLForPath(r, "/")
-	scriptURL := absoluteURLForPath(r, "/p/static/site_copy.js")
+	scriptURL := "/p/static/site_copy.js?v=" + url.QueryEscape(publicTrialWidgetScriptVersion())
 	config := map[string]any{"endpoint": endpointURL}
 	configJSON, err := json.Marshal(config)
 	if err != nil {
@@ -13066,7 +13182,7 @@ func publicTrialSignupEmbedHTML(r *http.Request, translations map[string]string)
   </label>
   <button class="SiteBrushPublicTrialButton sitebrush-public-trial-button" data-sitebrush-public-trial-submit type="submit"></button>
 </form>
-<script src="` + template.HTMLEscapeString(scriptURL) + `"></script>
+<script src="` + template.HTMLEscapeString(scriptURL) + `" data-sitebrush-live-asset></script>
 <script>
 (function () {
   var currentScript = document.currentScript;
@@ -13081,39 +13197,50 @@ func publicTrialSignupEmbedHTML(r *http.Request, translations map[string]string)
 </script>`
 }
 
+func publicTrialWidgetScriptVersion() string {
+	scriptBytes, err := embeddedWebFiles.ReadFile("web/static/site_copy.js")
+	if err != nil {
+		return CompileVersion
+	}
+	scriptHash := sha256.Sum256(scriptBytes)
+	return hex.EncodeToString(scriptHash[:8])
+}
+
 func publicTrialWidgetTexts(translations map[string]string) map[string]string {
 	return map[string]string{
-		"modalTitle":         translationOrDefault(translations, "public_trial_modal_title", "Checking if SiteBrush can be installed on the selected website:"),
-		"formTitle":          translationOrDefault(translations, "public_trial_form_title", "Enter the website where you want to launch SiteBrush:"),
-		"fieldLabel":         translationOrDefault(translations, "public_trial_field_label", "Website address"),
-		"checkButton":        translationOrDefault(translations, "public_trial_check_button", "Check website"),
-		"createButton":       translationOrDefault(translations, "public_trial_create_button", "Create test website"),
-		"analyzing":          translationOrDefault(translations, "public_trial_analyzing", "Analyzing the website..."),
-		"preparing":          translationOrDefault(translations, "public_trial_preparing", "Preparing the website for SiteBrush..."),
-		"creating":           translationOrDefault(translations, "public_trial_creating", "Creating a test version with the SiteBrush editor..."),
-		"progressLost":       translationOrDefault(translations, "public_trial_progress_lost", "Progress connection was lost."),
-		"loadFailed":         translationOrDefault(translations, "public_trial_load_failed", "Website analysis failed."),
-		"pages":              translationOrDefault(translations, "public_trial_pages", "Found pages"),
-		"files":              translationOrDefault(translations, "public_trial_files", "Found files"),
-		"images":             translationOrDefault(translations, "public_trial_images", "Images"),
-		"css":                translationOrDefault(translations, "public_trial_css", "CSS"),
-		"js":                 translationOrDefault(translations, "public_trial_js", "JS"),
-		"other":              translationOrDefault(translations, "public_trial_other", "Other resources"),
-		"estimatedSize":      translationOrDefault(translations, "public_trial_estimated_size", "Estimated total size"),
-		"requiredSpace":      translationOrDefault(translations, "public_trial_required_space", "Required disk space"),
-		"freeCompatibility":  translationOrDefault(translations, "public_trial_free_compatibility", "Free plan compatibility"),
-		"requiredPlan":       translationOrDefault(translations, "public_trial_required_plan", "Minimal required paid plan"),
-		"planStorage":        translationOrDefault(translations, "public_trial_plan_storage", "Plan storage"),
-		"planUsage":          translationOrDefault(translations, "public_trial_plan_usage", "Storage used"),
-		"freeResult":         translationOrDefault(translations, "public_trial_free_result", "Great – this website can be launched on the free SiteBrush plan."),
-		"paidResult":         translationOrDefault(translations, "public_trial_paid_result", "This website requires a paid plan, but you can test SiteBrush for free for 1 month. Payment is required only after the trial period."),
-		"freeFitResult":      translationOrDefault(translations, "public_trial_free_fit_result", "The website fits the free plan."),
-		"paidFitResult":      translationOrDefault(translations, "public_trial_paid_fit_result", "The website does not fit the free plan (%s). We recommend the %s plan."),
-		"paidPlanFallback":   translationOrDefault(translations, "public_trial_paid_plan_fallback", "a paid plan"),
-		"retryNextIn":        translationOrDefault(translations, "site_copy_retry_next_in", "Next retry in"),
-		"retrySecondsSuffix": translationOrDefault(translations, "site_copy_retry_seconds_suffix", "s"),
-		"yes":                translationOrDefault(translations, "confirm_yes", "Yes"),
-		"no":                 translationOrDefault(translations, "confirm_no", "No"),
+		"modalTitle":          translationOrDefault(translations, "public_trial_modal_title", "Checking if SiteBrush can be installed on the selected website:"),
+		"formTitle":           translationOrDefault(translations, "public_trial_form_title", "Enter the website where you want to launch SiteBrush:"),
+		"fieldLabel":          translationOrDefault(translations, "public_trial_field_label", "Website address"),
+		"checkButton":         translationOrDefault(translations, "public_trial_check_button", "Check website"),
+		"createButton":        translationOrDefault(translations, "public_trial_create_button", "Create test website"),
+		"analyzing":           translationOrDefault(translations, "public_trial_analyzing", "Analyzing the website..."),
+		"preparing":           translationOrDefault(translations, "public_trial_preparing", "Preparing the website for SiteBrush..."),
+		"creating":            translationOrDefault(translations, "public_trial_creating", "Creating a test version with the SiteBrush editor..."),
+		"reconnecting":        translationOrDefault(translations, "public_trial_reconnecting", "Restoring the connection. The website check continues..."),
+		"usableWhileChecking": translationOrDefault(translations, "public_trial_usable_while_checking", "The preview is ready. The remaining pages are still being checked."),
+		"partialReady":        translationOrDefault(translations, "public_trial_partial_ready", "The available pages are ready for testing."),
+		"loadFailed":          translationOrDefault(translations, "public_trial_load_failed", "Website analysis failed."),
+		"pages":               translationOrDefault(translations, "public_trial_pages", "Found pages"),
+		"files":               translationOrDefault(translations, "public_trial_files", "Found files"),
+		"images":              translationOrDefault(translations, "public_trial_images", "Images"),
+		"css":                 translationOrDefault(translations, "public_trial_css", "CSS"),
+		"js":                  translationOrDefault(translations, "public_trial_js", "JS"),
+		"other":               translationOrDefault(translations, "public_trial_other", "Other resources"),
+		"estimatedSize":       translationOrDefault(translations, "public_trial_estimated_size", "Estimated total size"),
+		"requiredSpace":       translationOrDefault(translations, "public_trial_required_space", "Required disk space"),
+		"freeCompatibility":   translationOrDefault(translations, "public_trial_free_compatibility", "Free plan compatibility"),
+		"requiredPlan":        translationOrDefault(translations, "public_trial_required_plan", "Minimal required paid plan"),
+		"planStorage":         translationOrDefault(translations, "public_trial_plan_storage", "Plan storage"),
+		"planUsage":           translationOrDefault(translations, "public_trial_plan_usage", "Storage used"),
+		"freeResult":          translationOrDefault(translations, "public_trial_free_result", "Great – this website can be launched on the free SiteBrush plan."),
+		"paidResult":          translationOrDefault(translations, "public_trial_paid_result", "This website requires a paid plan, but you can test SiteBrush for free for 1 month. Payment is required only after the trial period."),
+		"freeFitResult":       translationOrDefault(translations, "public_trial_free_fit_result", "The website fits the free plan."),
+		"paidFitResult":       translationOrDefault(translations, "public_trial_paid_fit_result", "The website does not fit the free plan (%s). We recommend the %s plan."),
+		"paidPlanFallback":    translationOrDefault(translations, "public_trial_paid_plan_fallback", "a paid plan"),
+		"retryNextIn":         translationOrDefault(translations, "site_copy_retry_next_in", "Next retry in"),
+		"retrySecondsSuffix":  translationOrDefault(translations, "site_copy_retry_seconds_suffix", "s"),
+		"yes":                 translationOrDefault(translations, "confirm_yes", "Yes"),
+		"no":                  translationOrDefault(translations, "confirm_no", "No"),
 	}
 }
 
@@ -13393,19 +13520,19 @@ func (a *App) saveHostingAndSupportDemoSettingsInDatabase(r *http.Request, contr
 		return translationOrDefault(translations, "billing_status_settings_saved", "Billing settings saved.")
 	}
 	if demoEnabled {
-		a.updateRuntimeDemoSiteState(r.Context(), demoSiteRuntimeState{Settings: settings, Status: "preparing"})
+		a.updateRuntimeDemoSiteState(r.Context(), a.demoSiteRefreshingState(r.Context(), settings))
 		refreshDemoSite := r.FormValue("refresh_demo_site") == "1"
 		adminEmail, _, readyErr := a.ensureDemoSiteReady(r.Context(), controlDatabase, settings, refreshDemoSite, "")
 		if readyErr == nil && !a.demoSiteSnapshotAvailable(demoDomain) {
 			readyErr = a.createDemoSiteSnapshot(r.Context(), demoDomain)
 		}
 		if readyErr != nil {
-			a.updateRuntimeDemoSiteState(r.Context(), demoSiteRuntimeState{Settings: settings, Status: "error", Error: readyErr.Error()})
+			a.updateRuntimeDemoSiteState(r.Context(), a.demoSiteRefreshFailureState(r.Context(), settings, readyErr))
 			return readyErr.Error()
 		}
 		if strings.TrimSpace(adminEmail) == "" {
 			readyErr = errors.New("demo administrator is unavailable")
-			a.updateRuntimeDemoSiteState(r.Context(), demoSiteRuntimeState{Settings: settings, Status: "error", Error: readyErr.Error()})
+			a.updateRuntimeDemoSiteState(r.Context(), a.demoSiteRefreshFailureState(r.Context(), settings, readyErr))
 			return readyErr.Error()
 		}
 		a.updateRuntimeDemoSiteState(r.Context(), demoSiteRuntimeState{Settings: settings, AdminEmail: adminEmail, Status: "ready"})
@@ -13758,9 +13885,13 @@ func (a *App) cleanupExpiredDemoSites(ctx context.Context, now time.Time) {
 		if !demo.SessionsReadyForReset(sessions, now) {
 			continue
 		}
-		a.updateRuntimeDemoSiteStatusForDomain(ctx, domain, "preparing", "")
+		if state, found := a.runtimeDemoSiteState(ctx); found && normalizeDomainName(state.Settings.Domain) == normalizeDomainName(domain) {
+			a.updateRuntimeDemoSiteState(ctx, a.demoSiteRefreshingState(ctx, state.Settings))
+		}
 		if err := a.restoreDemoSiteFromSnapshot(ctx, nil, domain); err != nil {
-			a.updateRuntimeDemoSiteStatusForDomain(ctx, domain, "error", err.Error())
+			if state, found := a.runtimeDemoSiteState(ctx); found && normalizeDomainName(state.Settings.Domain) == normalizeDomainName(domain) {
+				a.updateRuntimeDemoSiteState(ctx, a.demoSiteRefreshFailureState(ctx, state.Settings, err))
+			}
 			log.Printf("demo site restore failed domain=%s error=%v", domain, err)
 			continue
 		}
@@ -13781,23 +13912,11 @@ func (a *App) cleanupExpiredDemoSites(ctx context.Context, now time.Time) {
 				state.AdminEmail = adminEmail
 				state.Status = "ready"
 				state.Error = ""
+				state.Refreshing = false
 				a.updateRuntimeDemoSiteState(ctx, state)
 			}
 		}
 	}
-}
-
-func (a *App) updateRuntimeDemoSiteStatusForDomain(ctx context.Context, domain, status, errorText string) {
-	state, found := a.runtimeDemoSiteState(ctx)
-	if !found || normalizeDomainName(state.Settings.Domain) != normalizeDomainName(domain) {
-		return
-	}
-	state.Status = status
-	state.Error = strings.TrimSpace(errorText)
-	if status != "ready" {
-		state.AdminEmail = ""
-	}
-	a.updateRuntimeDemoSiteState(ctx, state)
 }
 
 func (a *App) deleteDemoManagedSiteWithoutBackup(ctx context.Context, controlDatabase *sql.DB, domain string) error {
@@ -18758,6 +18877,19 @@ func (a *App) servePublicAsset(w http.ResponseWriter, r *http.Request) {
 	fileName := publicAssetFileNameFromPath(r.URL.Path, requestDomain)
 	if fileName == "" {
 		http.NotFound(w, r)
+		return
+	}
+	// Historical public pages embedded a content-addressed copy of the trial
+	// widget. Keep that URL working while serving the current recovery protocol.
+	if fileName == legacyPublicTrialWidgetAssetName {
+		asset, found := a.embeddedStaticAssets["site_copy.js"]
+		if !found {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+		w.Header().Set("Content-Type", asset.contentType)
+		http.ServeContent(w, r, "site_copy.js", asset.modTime, bytes.NewReader(asset.body))
 		return
 	}
 	domain := domainStorageName(requestDomain)
@@ -24938,7 +25070,8 @@ func (store *publicTrialPreviewStore) loop() {
 		}
 		switch request.action {
 		case "save":
-			if strings.TrimSpace(request.token) != "" {
+			_, jobFound := jobsByToken[strings.TrimSpace(request.token)]
+			if strings.TrimSpace(request.token) != "" && jobFound {
 				request.preview.CreatedAt = now
 				previewsByToken[request.token] = request.preview
 			}
@@ -28827,7 +28960,7 @@ func runGuestStaticHTMLCache(ctx context.Context, requests <-chan guestStaticHTM
 }
 
 func buildGuestStaticHTMLBody(staticContent []byte, pagePath, domain, languageCode string) []byte {
-	html := string(staticContent)
+	html := rewriteLegacyPublicTrialWidgetReference(string(staticContent))
 	menuScript := buildGuestContextMenuScriptForLanguage(pagePath, domain, languageCode)
 	lowerHTML := strings.ToLower(html)
 	bodyCloseIndex := strings.LastIndex(lowerHTML, "</body>")
@@ -28837,7 +28970,17 @@ func buildGuestStaticHTMLBody(staticContent []byte, pagePath, domain, languageCo
 	return []byte(html[:bodyCloseIndex] + menuScript + html[bodyCloseIndex:])
 }
 
+func rewriteLegacyPublicTrialWidgetReference(html string) string {
+	legacyReference := "/p/" + legacyPublicTrialWidgetAssetName
+	if !strings.Contains(html, legacyReference) {
+		return html
+	}
+	currentReference := "/p/static/site_copy.js?v=" + url.QueryEscape(publicTrialWidgetScriptVersion())
+	return strings.ReplaceAll(html, legacyReference, currentReference)
+}
+
 func (a *App) injectPublicContextMenu(r *http.Request, pagePath, html string) string {
+	html = rewriteLegacyPublicTrialWidgetReference(html)
 	menuScript := buildGuestContextMenuScriptForLanguage(pagePath, domainFromContext(r.Context()), preferredLanguageCode(r.Header.Get("Accept-Language")))
 	lowerHTML := strings.ToLower(html)
 	bodyCloseIndex := strings.LastIndex(lowerHTML, "</body>")

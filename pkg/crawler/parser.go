@@ -38,19 +38,44 @@ type Parser struct {
 }
 
 var (
-	htmlResourcePattern     = regexp.MustCompile(`(?is)<(a|area|link|script|img|source|video|audio|iframe|embed|object|form)\b[^>]*?\s(href|xlink:href|src|poster|data|action)\s*=\s*["']([^"']+)["']`)
-	htmlTagPattern          = regexp.MustCompile(`(?is)<[a-z][^>]*>`)
-	htmlLazyResourcePattern = regexp.MustCompile(`(?is)\b(data-src|data-original|data-original-src|data-lazy-src|data-bg|data-background-image)\s*=\s*["']([^"']+)["']`)
-	htmlImageAltPattern     = regexp.MustCompile(`(?is)<img\b[^>]*\balt\s*=\s*["']([^"']+)["'][^>]*>`)
-	htmlSrcSetPattern       = regexp.MustCompile(`(?is)\b(srcset|data-srcset|data-lazy-srcset)\s*=\s*["']([^"']+)["']`)
-	cssURLPattern           = regexp.MustCompile(`(?is)url\(\s*['"]?([^'")]+)['"]?\s*\)`)
-	cssImportPattern        = regexp.MustCompile(`(?is)@import\s+(?:url\(\s*)?['"]?([^'")\s;]+)['"]?`)
-	staticURLPattern        = regexp.MustCompile(`(?is)https?://[^\s"'<>\\)]+`)
-	linkManifestPattern     = regexp.MustCompile(`(?is)\brel\s*=\s*["'][^"']*\bmanifest\b[^"']*["']`)
+	htmlResourcePattern            = regexp.MustCompile(`(?is)<(a|area|link|script|img|source|video|audio|iframe|embed|object|form)\b[^>]*?\s(href|xlink:href|src|poster|data|action)\s*=\s*["']([^"']+)["']`)
+	htmlTagPattern                 = regexp.MustCompile(`(?is)<[a-z][^>]*>`)
+	htmlLazyResourcePattern        = regexp.MustCompile(`(?is)\b(data-src|data-original|data-original-src|data-lazy-src|data-bg|data-background-image)\s*=\s*["']([^"']+)["']`)
+	htmlImageAltPattern            = regexp.MustCompile(`(?is)<img\b[^>]*\balt\s*=\s*["']([^"']+)["'][^>]*>`)
+	htmlSrcSetPattern              = regexp.MustCompile(`(?is)\b(srcset|data-srcset|data-lazy-srcset)\s*=\s*["']([^"']+)["']`)
+	htmlInlineScriptPattern        = regexp.MustCompile(`(?is)<script\b([^>]*)>(.*?)</script\s*>`)
+	htmlScriptSrcPattern           = regexp.MustCompile(`(?is)(?:^|\s)src\s*=`)
+	cssURLPattern                  = regexp.MustCompile(`(?is)url\(\s*['"]?([^'")]+)['"]?\s*\)`)
+	cssImportPattern               = regexp.MustCompile(`(?is)@import\s+(?:url\(\s*)?['"]?([^'")\s;]+)['"]?`)
+	staticURLPattern               = regexp.MustCompile(`(?is)https?://[^\s"'<>\\)]+`)
+	linkManifestPattern            = regexp.MustCompile(`(?is)\brel\s*=\s*["'][^"']*\bmanifest\b[^"']*["']`)
+	javascriptURLReferenceReplacer = strings.NewReplacer(
+		`\/`, `/`,
+		`\u002f`, `/`, `\u002F`, `/`, `\x2f`, `/`, `\x2F`, `/`,
+		`\u003a`, `:`, `\u003A`, `:`, `\x3a`, `:`, `\x3A`, `:`,
+		`\u003f`, `?`, `\u003F`, `?`, `\x3f`, `?`, `\x3F`, `?`,
+		`\u0026`, `&`, `\x26`, `&`,
+		`\u003d`, `=`, `\u003D`, `=`, `\x3d`, `=`, `\x3D`, `=`,
+	)
 )
 
 func (parser Parser) RewriteTextReferences(source, baseRawURL string, depth int) string {
 	baseURL, _ := url.Parse(baseRawURL)
+	preservedReferences := make(map[string]string)
+	source = htmlTagPattern.ReplaceAllStringFunc(source, func(tag string) string {
+		if !strings.Contains(strings.ToLower(tag), "data-sitebrush-live-asset") {
+			return tag
+		}
+		return htmlResourcePattern.ReplaceAllStringFunc(tag, func(match string) string {
+			parts := htmlResourcePattern.FindStringSubmatch(match)
+			if len(parts) != 4 || !isLiveSiteBrushAssetReference(parts[3]) {
+				return match
+			}
+			placeholder := "sitebrush-live-asset:" + base64.RawURLEncoding.EncodeToString([]byte(parts[3]))
+			preservedReferences[placeholder] = parts[3]
+			return strings.Replace(match, parts[3], placeholder, 1)
+		})
+	})
 	rewriteSingle := func(rawRef string) string {
 		return parser.rewriteResource(rawRef, baseURL, depth, ReferenceDocument)
 	}
@@ -64,6 +89,14 @@ func (parser Parser) RewriteTextReferences(source, baseRawURL string, depth int)
 		parts := htmlResourcePattern.FindStringSubmatch(match)
 		if len(parts) != 4 {
 			return match
+		}
+		if strings.HasPrefix(parts[3], "sitebrush-live-asset:") {
+			return match
+		}
+		if strings.Contains(strings.ToLower(match), "data-sitebrush-live-asset") && isLiveSiteBrushAssetReference(parts[3]) {
+			placeholder := "sitebrush-live-asset:" + base64.RawURLEncoding.EncodeToString([]byte(parts[3]))
+			preservedReferences[placeholder] = parts[3]
+			return strings.Replace(match, parts[3], placeholder, 1)
 		}
 		tagName := strings.ToLower(strings.TrimSpace(parts[1]))
 		attributeName := strings.ToLower(strings.TrimSpace(parts[2]))
@@ -99,8 +132,20 @@ func (parser Parser) RewriteTextReferences(source, baseRawURL string, depth int)
 	rewritten = RewriteSrcSetReferences(rewritten, rewriteSingle)
 	rewritten = RewriteCSSImportReferences(rewritten, rewriteSingle)
 	rewritten = RewriteCSSURLReferences(rewritten, rewriteSingle)
+	rewritten = parser.rewriteInlineJavaScriptReferences(rewritten, baseRawURL, depth)
 	rewritten = parser.RewriteStaticURLTextReferences(rewritten, baseURL, depth)
+	for placeholder, originalReference := range preservedReferences {
+		rewritten = strings.ReplaceAll(rewritten, placeholder, originalReference)
+	}
 	return rewritten
+}
+
+func isLiveSiteBrushAssetReference(rawReference string) bool {
+	parsedReference, err := url.Parse(strings.TrimSpace(rawReference))
+	if err != nil || parsedReference.IsAbs() || parsedReference.Host != "" {
+		return false
+	}
+	return path.Clean("/"+strings.TrimSpace(parsedReference.Path)) == "/p/static/site_copy.js"
 }
 
 func (parser Parser) RewriteJavaScriptReferences(source, baseRawURL string, depth int) string {
@@ -136,14 +181,15 @@ func (parser Parser) RewriteJavaScriptReferences(source, baseRawURL string, dept
 			break
 		}
 		rawReference := source[referenceStart:referenceEnd]
-		if !ShouldRewriteJSResourceReference(rawReference) {
+		decodedReference := decodeJavaScriptResourceReference(rawReference)
+		if !ShouldRewriteJSResourceReference(decodedReference) {
 			currentIndex = referenceEnd
 			continue
 		}
-		normalizedURL, blocked := parser.normalize(rawReference, baseURL, ReferenceJavaScript)
+		normalizedURL, blocked := parser.normalize(decodedReference, baseURL, ReferenceJavaScript)
 		if !blocked && HasAllowedResourceExtension(normalizedURL) {
 			rewritten.WriteString(source[lastWrittenIndex:referenceStart])
-			rewritten.WriteString(parser.rewriteResource(rawReference, baseURL, depth, ReferenceJavaScript))
+			rewritten.WriteString(parser.rewriteResource(decodedReference, baseURL, depth, ReferenceJavaScript))
 			lastWrittenIndex = referenceEnd
 		}
 		currentIndex = referenceEnd
@@ -153,6 +199,23 @@ func (parser Parser) RewriteJavaScriptReferences(source, baseRawURL string, dept
 	}
 	rewritten.WriteString(source[lastWrittenIndex:])
 	return rewritten.String()
+}
+
+func decodeJavaScriptResourceReference(rawReference string) string {
+	// JavaScript and serialized JSON commonly escape URL delimiters. Decode only
+	// delimiters that can form a URL so arbitrary script escapes remain untouched.
+	return javascriptURLReferenceReplacer.Replace(strings.TrimSpace(rawReference))
+}
+
+func (parser Parser) rewriteInlineJavaScriptReferences(source, baseRawURL string, depth int) string {
+	return htmlInlineScriptPattern.ReplaceAllStringFunc(source, func(scriptElement string) string {
+		parts := htmlInlineScriptPattern.FindStringSubmatch(scriptElement)
+		if len(parts) != 3 || htmlScriptSrcPattern.MatchString(parts[1]) {
+			return scriptElement
+		}
+		rewrittenScript := parser.RewriteJavaScriptReferences(parts[2], baseRawURL, depth)
+		return strings.Replace(scriptElement, parts[2], rewrittenScript, 1)
+	})
 }
 
 func (parser Parser) RewriteStaticURLTextReferences(source string, baseURL *url.URL, depth int) string {
