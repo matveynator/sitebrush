@@ -16,14 +16,18 @@ import (
 )
 
 type DecodeResult struct {
-	Text     string
-	Encoding string
+	Text           string
+	Encoding       string
+	EncodingSource string
+	Certain        bool
 }
 
 type htmlEncodingCandidate struct {
-	label     string
-	encoding  encoding.Encoding
-	preferred bool
+	label          string
+	encoding       encoding.Encoding
+	encodingSource string
+	preferred      bool
+	certain        bool
 }
 
 type scoredTextEncoding struct {
@@ -43,10 +47,23 @@ var htmlFallbackEncodingLabels = []string{
 }
 
 func DecodeHTML(htmlBytes []byte, contentType string) DecodeResult {
-	return DecodeText(htmlBytes, contentType)
+	return decodeText(htmlBytes, contentType, true)
 }
 
 func DecodeText(textBytes []byte, contentType string) DecodeResult {
+	return decodeText(textBytes, contentType, false)
+}
+
+func decodeText(textBytes []byte, contentType string, inspectHTMLMeta bool) DecodeResult {
+	if utf8.Valid(textBytes) {
+		return DecodeResult{
+			Text:           strings.TrimPrefix(string(textBytes), "\uFEFF"),
+			Encoding:       "utf-8",
+			EncodingSource: validUTF8EncodingSource(textBytes, contentType, inspectHTMLMeta),
+			Certain:        true,
+		}
+	}
+
 	candidates := htmlEncodingCandidates(textBytes, contentType)
 	scoredCandidates := make([]scoredTextEncoding, 0, len(candidates))
 	for candidateIndex, candidate := range candidates {
@@ -54,7 +71,7 @@ func DecodeText(textBytes []byte, contentType string) DecodeResult {
 		if !ok {
 			continue
 		}
-		score := scoreDecodedHTMLText(decodedText)
+		score := normalizedDecodedHTMLTextScore(decodedText)
 		if candidate.preferred {
 			score += 250
 		}
@@ -64,7 +81,7 @@ func DecodeText(textBytes []byte, contentType string) DecodeResult {
 		scoredCandidates = append(scoredCandidates, scoredTextEncoding{label: candidate.label, text: decodedText, score: score, order: candidateIndex})
 	}
 	if len(scoredCandidates) == 0 {
-		return DecodeResult{Text: string(textBytes), Encoding: "unknown"}
+		return DecodeResult{Text: string(textBytes), Encoding: "unknown", EncodingSource: "raw"}
 	}
 	sort.SliceStable(scoredCandidates, func(leftIndex, rightIndex int) bool {
 		leftCandidate := scoredCandidates[leftIndex]
@@ -75,7 +92,18 @@ func DecodeText(textBytes []byte, contentType string) DecodeResult {
 		return leftCandidate.order < rightCandidate.order
 	})
 	bestCandidate := scoredCandidates[0]
-	return DecodeResult{Text: bestCandidate.text, Encoding: bestCandidate.label}
+	for _, candidate := range candidates {
+		if candidate.label != bestCandidate.label {
+			continue
+		}
+		return DecodeResult{
+			Text:           bestCandidate.text,
+			Encoding:       bestCandidate.label,
+			EncodingSource: candidate.encodingSource,
+			Certain:        candidate.certain,
+		}
+	}
+	return DecodeResult{Text: bestCandidate.text, Encoding: bestCandidate.label, EncodingSource: "heuristic"}
 }
 
 func ExtractPageLinks(htmlSource string, baseURL, siteURL *url.URL) []*url.URL {
@@ -136,8 +164,8 @@ func IsPageURL(pageURL *url.URL) bool {
 func htmlEncodingCandidates(htmlBytes []byte, contentType string) []htmlEncodingCandidate {
 	candidates := make([]htmlEncodingCandidate, 0, len(htmlFallbackEncodingLabels)+3)
 	addedLabels := make(map[string]struct{})
-	addCandidate := func(label string, preferred bool) {
-		normalizedLabel := strings.ToLower(strings.TrimSpace(label))
+	addCandidate := func(label, encodingSource string, preferred, certain bool) {
+		normalizedLabel := normalizeEncodingLabel(label)
 		if normalizedLabel == "" {
 			return
 		}
@@ -153,15 +181,52 @@ func htmlEncodingCandidates(htmlBytes []byte, contentType string) []htmlEncoding
 			return
 		}
 		addedLabels[canonicalName] = struct{}{}
-		candidates = append(candidates, htmlEncodingCandidate{label: canonicalName, encoding: candidateEncoding, preferred: preferred})
+		candidates = append(candidates, htmlEncodingCandidate{
+			label:          canonicalName,
+			encoding:       candidateEncoding,
+			encodingSource: encodingSource,
+			preferred:      preferred,
+			certain:        certain,
+		})
 	}
 	_, charsetLabel, certain := charset.DetermineEncoding(htmlBytes, contentType)
-	addCandidate(charsetLabel, certain)
-	addCandidate(charsetFromContentType(contentType), true)
+	addCandidate(charsetFromContentType(contentType), "http", true, true)
+	addCandidate(charsetLabel, "document", certain, certain)
 	for _, fallbackLabel := range htmlFallbackEncodingLabels {
-		addCandidate(fallbackLabel, false)
+		addCandidate(fallbackLabel, "heuristic", false, false)
 	}
 	return candidates
+}
+
+func validUTF8EncodingSource(textBytes []byte, contentType string, inspectHTMLMeta bool) string {
+	if bytes.HasPrefix(textBytes, []byte{0xEF, 0xBB, 0xBF}) {
+		return "bom"
+	}
+	if normalizeEncodingLabel(charsetFromContentType(contentType)) == "utf-8" {
+		return "http"
+	}
+	if inspectHTMLMeta {
+		_, encodingLabel, _ := charset.DetermineEncoding(textBytes, "")
+		if normalizeEncodingLabel(encodingLabel) == "utf-8" {
+			return "meta"
+		}
+	}
+	return "valid-utf8"
+}
+
+func normalizeEncodingLabel(label string) string {
+	normalizedLabel := strings.ToLower(strings.TrimSpace(label))
+	normalizedLabel = strings.Trim(normalizedLabel, `"'`)
+	compactLabel := strings.ReplaceAll(normalizedLabel, "-", "")
+	compactLabel = strings.ReplaceAll(compactLabel, "_", "")
+	switch {
+	case compactLabel == "utf8", compactLabel == "utf8mb3", compactLabel == "utf8mb4":
+		return "utf-8"
+	case strings.HasPrefix(normalizedLabel, "utf8mb3_"), strings.HasPrefix(normalizedLabel, "utf8mb4_"), strings.HasPrefix(normalizedLabel, "utf8_"):
+		return "utf-8"
+	default:
+		return normalizedLabel
+	}
 }
 
 func charsetFromContentType(contentType string) string {
@@ -255,6 +320,14 @@ func scoreDecodedHTMLText(decodedText string) int {
 		score -= (replacementCharacters + controlCharacters + zeroRunes) * 100
 	}
 	return score
+}
+
+func normalizedDecodedHTMLTextScore(decodedText string) int {
+	runeCount := utf8.RuneCountInString(decodedText)
+	if runeCount == 0 {
+		return scoreDecodedHTMLText(decodedText)
+	}
+	return scoreDecodedHTMLText(decodedText) * 1000 / runeCount
 }
 
 func scoreRussianTextShape(decodedText string) int {

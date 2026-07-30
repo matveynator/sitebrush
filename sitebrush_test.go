@@ -28,6 +28,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -59,6 +60,50 @@ type fakeGrabResponse struct {
 	location    string
 	contentType string
 	body        string
+}
+
+func TestVersionCommandPrintsOnlyVersionWithoutCreatingStorage(t *testing.T) {
+	binaryName := "sitebrush-version-test"
+	if runtime.GOOS == "windows" {
+		binaryName += ".exe"
+	}
+	binaryPath := filepath.Join(t.TempDir(), binaryName)
+	buildCommand := exec.Command("go", "build", "-o", binaryPath, "-ldflags=-X main.CompileVersion=version-test", ".")
+	if buildOutput, buildErr := buildCommand.CombinedOutput(); buildErr != nil {
+		t.Fatalf("build version test binary: %v\n%s", buildErr, buildOutput)
+	}
+
+	for _, versionFlag := range []string{"--version", "-version", "-v"} {
+		t.Run(versionFlag, func(t *testing.T) {
+			homePath := t.TempDir()
+			command := exec.Command(binaryPath, versionFlag)
+			command.Env = append(os.Environ(),
+				"HOME="+homePath,
+				"XDG_CONFIG_HOME="+filepath.Join(homePath, "config"),
+				"XDG_DATA_HOME="+filepath.Join(homePath, "data"),
+			)
+			var standardOutput bytes.Buffer
+			var standardError bytes.Buffer
+			command.Stdout = &standardOutput
+			command.Stderr = &standardError
+			if commandErr := command.Run(); commandErr != nil {
+				t.Fatalf("run %s: %v", versionFlag, commandErr)
+			}
+			if standardOutput.String() != "version-test\n" {
+				t.Fatalf("stdout = %q", standardOutput.String())
+			}
+			if standardError.Len() != 0 {
+				t.Fatalf("stderr = %q", standardError.String())
+			}
+			homeEntries, readErr := os.ReadDir(homePath)
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			if len(homeEntries) != 0 {
+				t.Fatalf("version command created files in HOME: %#v", homeEntries)
+			}
+		})
+	}
 }
 
 func TestEffectiveGrabResourceContentTypeTrustsJavaScriptExtension(t *testing.T) {
@@ -223,7 +268,19 @@ func newTestApplication(t *testing.T) (*App, *sql.DB) {
 	t.Cleanup(func() {
 		_ = rawDB.Close()
 	})
-	application := &App{db: rawDB, storagePath: storagePath, storageRealRoot: storageRealRoot, grabTracker: newGrabProgressTracker(), publishTracker: newPublishProgressTracker(), analyticsEvents: make(chan siteAnalyticsEvent, 1024), authIPFailureCache: startAuthIPFailureCacheWorker(context.Background()), emailDelivery: make(chan mailout.DeliveryJob, mailout.DeliveryQueueSize)}
+	application := &App{
+		db:                        rawDB,
+		storagePath:               storagePath,
+		storageRealRoot:           storageRealRoot,
+		grabTracker:               newGrabProgressTracker(),
+		grabCancels:               newGrabCancelTracker(),
+		trialPreviews:             newPublicTrialPreviewStore(),
+		publishTracker:            newPublishProgressTracker(),
+		analyticsEvents:           make(chan siteAnalyticsEvent, 1024),
+		authIPFailureCache:        startAuthIPFailureCacheWorker(context.Background()),
+		registrationConfirmations: startEmailConfirmationMemoryWorker(context.Background()),
+		emailDelivery:             make(chan mailout.DeliveryJob, mailout.DeliveryQueueSize),
+	}
 	if err := application.migrate(context.Background()); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
@@ -7075,6 +7132,36 @@ func TestRewriteImportedHTMLCharsetDeclarationAddsHeadWhenMissing(t *testing.T) 
 	importedHTML := rewriteImportedHTMLCharsetDeclaration(`<html><body>Imported</body></html>`)
 	if !strings.Contains(importedHTML, `<head><meta charset="utf-8"></head>`) {
 		t.Fatalf("imported HTML is missing generated UTF-8 head: %s", importedHTML)
+	}
+}
+
+func TestRewriteImportedHTMLCharsetDeclarationOnlyChangesMetaTags(t *testing.T) {
+	sourceHTML := `<html><head><meta charset="windows-1251"><script>window.database = "charset=utf8mb4_unicode_ci";</script></head><body></body></html>`
+
+	importedHTML := rewriteImportedHTMLCharsetDeclaration(sourceHTML)
+	if !strings.Contains(importedHTML, `<meta charset="utf-8">`) {
+		t.Fatalf("meta charset was not rewritten: %s", importedHTML)
+	}
+	if !strings.Contains(importedHTML, `"charset=utf8mb4_unicode_ci"`) {
+		t.Fatalf("JavaScript charset text was changed: %s", importedHTML)
+	}
+}
+
+func TestRewriteImportedHTMLCharsetDeclarationUpdatesHTTPMeta(t *testing.T) {
+	sourceHTML := `<html><head><meta http-equiv="Content-Type" content="text/html; charset=windows-1251"></head><body></body></html>`
+
+	importedHTML := rewriteImportedHTMLCharsetDeclaration(sourceHTML)
+	if !strings.Contains(importedHTML, `content="text/html; charset=utf-8"`) {
+		t.Fatalf("HTTP meta charset was not rewritten: %s", importedHTML)
+	}
+}
+
+func TestRewriteImportedHTMLCharsetDeclarationPreservesMalformedRemainder(t *testing.T) {
+	sourceHTML := `<html><head><meta charset="windows-1251"></head><body><div title="unfinished`
+
+	importedHTML := rewriteImportedHTMLCharsetDeclaration(sourceHTML)
+	if !strings.HasSuffix(importedHTML, `<body><div title="unfinished`) {
+		t.Fatalf("malformed HTML remainder was lost: %s", importedHTML)
 	}
 }
 

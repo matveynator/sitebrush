@@ -85,8 +85,7 @@ var embeddedWebFiles embed.FS
 var CompileVersion = "dev"
 var translationCatalog = loadTranslationCatalog()
 var guestContextMenuTemplates = buildGuestContextMenuTemplates()
-var importedHTMLCharsetAssignmentPattern = regexp.MustCompile(`(?i)(charset\s*=\s*)(["']?)[a-z0-9._:-]+`)
-var importedHTMLCharsetMetaPattern = regexp.MustCompile(`(?i)<meta\b[^>]*charset\s*=`)
+var importedMetaContentCharsetPattern = regexp.MustCompile(`(?i)(charset\s*=\s*)(["']?)[a-z0-9._:-]+`)
 var importedHTMLHeadOpenPattern = regexp.MustCompile(`(?i)<head\b[^>]*>`)
 var importedHTMLHTMLOpenPattern = regexp.MustCompile(`(?i)<html\b[^>]*>`)
 var importedCSSCharsetAssignmentPattern = regexp.MustCompile(`(?i)^(\s*\x{feff}?\s*@charset\s+["'])[a-z0-9._:-]+(["']\s*;)`)
@@ -4866,7 +4865,24 @@ func flagWasProvided(flagName string) bool {
 	return provided
 }
 
+func versionOnlyRequested(args []string) bool {
+	if len(args) != 1 {
+		return false
+	}
+	switch args[0] {
+	case "-version", "--version", "-v":
+		return true
+	default:
+		return false
+	}
+}
+
 func main() {
+	if versionOnlyRequested(os.Args[1:]) {
+		fmt.Println(CompileVersion)
+		return
+	}
+
 	port := flag.String("port", "80,443", "listen port or standard pair 80,443")
 	storagePath := flag.String("path", defaultAppStoragePath(), "path to the SiteBrush app data directory")
 	cliMode := flag.Bool("cli", false, "open interactive SiteBrush server console")
@@ -9407,6 +9423,7 @@ func (a *App) downloadPublicTrialSourceHTML(ctx context.Context, sourceURL, prog
 		},
 	})
 	if err == nil && downloadResult.IsHTML {
+		logImportedHTMLDecodeDecision(remoteSourceURL, downloadResult)
 		return []byte(rewriteImportedHTMLCharsetDeclaration(downloadResult.HTML)), downloadResult.ResolvedURL, nil
 	}
 	if downloadResult.Status != "" {
@@ -9433,6 +9450,7 @@ func (a *App) downloadPublicTrialSourceHTML(ctx context.Context, sourceURL, prog
 			},
 		})
 		if err == nil && downloadResult.IsHTML {
+			logImportedHTMLDecodeDecision(fallbackURL, downloadResult)
 			return []byte(rewriteImportedHTMLCharsetDeclaration(downloadResult.HTML)), downloadResult.ResolvedURL, nil
 		}
 		if downloadResult.Status != "" {
@@ -10141,6 +10159,7 @@ func downloadGrabSourceHTMLWithResolvedURLContext(ctx context.Context, sourceURL
 		Delay:    1500 * time.Millisecond,
 	})
 	if err == nil && downloadResult.IsHTML {
+		logImportedHTMLDecodeDecision(remoteSourceURL, downloadResult)
 		return []byte(rewriteImportedHTMLCharsetDeclaration(downloadResult.HTML)), downloadResult.ResolvedURL, nil
 	}
 	if downloadResult.Status != "" {
@@ -10158,6 +10177,7 @@ func downloadGrabSourceHTMLWithResolvedURLContext(ctx context.Context, sourceURL
 			Delay:    1500 * time.Millisecond,
 		})
 		if err == nil && downloadResult.IsHTML {
+			logImportedHTMLDecodeDecision(fallbackURL, downloadResult)
 			return []byte(rewriteImportedHTMLCharsetDeclaration(downloadResult.HTML)), downloadResult.ResolvedURL, nil
 		}
 		if downloadResult.Status != "" {
@@ -10178,6 +10198,26 @@ func decodeImportedHTMLBytes(htmlBytes []byte, contentType string) string {
 	return rewriteImportedHTMLCharsetDeclaration(decodedHTML.Text)
 }
 
+func logImportedHTMLDecodeDecision(requestedURL *url.URL, downloadResult crawler.HTMLDownloadResult) {
+	if downloadResult.EncodingCertain {
+		return
+	}
+	encodingURL := requestedURL
+	if downloadResult.ResolvedURL != nil {
+		encodingURL = downloadResult.ResolvedURL
+	}
+	encodingURLText := ""
+	if encodingURL != nil {
+		encodingURLText = encodingURL.String()
+	}
+	log.Printf(
+		"IMPORT uncertain character encoding url=%q encoding=%q source=%q",
+		encodingURLText,
+		downloadResult.Encoding,
+		downloadResult.EncodingSource,
+	)
+}
+
 func decodeImportedResourceBytes(resourceURL string, resourceBytes []byte, responseContentType, resourceContentType string) []byte {
 	if isImportedHTMLContentType(resourceContentType) {
 		return []byte(decodeImportedHTMLBytes(resourceBytes, responseContentType))
@@ -10194,8 +10234,39 @@ func decodeImportedResourceBytes(resourceURL string, resourceBytes []byte, respo
 }
 
 func rewriteImportedHTMLCharsetDeclaration(htmlSource string) string {
-	rewrittenHTML := importedHTMLCharsetAssignmentPattern.ReplaceAllString(htmlSource, "${1}${2}utf-8")
-	if importedHTMLCharsetMetaPattern.MatchString(rewrittenHTML) {
+	tokenizer := html.NewTokenizer(strings.NewReader(htmlSource))
+	var rewrittenSource strings.Builder
+	rewrittenSource.Grow(len(htmlSource) + 64)
+	charsetDeclarationFound := false
+	consumedSourceBytes := 0
+	for {
+		tokenType := tokenizer.Next()
+		if tokenType == html.ErrorToken {
+			rewrittenSource.WriteString(htmlSource[consumedSourceBytes:])
+			break
+		}
+		rawToken := string(tokenizer.Raw())
+		consumedSourceBytes += len(rawToken)
+		if tokenType != html.StartTagToken && tokenType != html.SelfClosingTagToken {
+			rewrittenSource.WriteString(rawToken)
+			continue
+		}
+		currentToken := tokenizer.Token()
+		if !strings.EqualFold(currentToken.Data, "meta") {
+			rewrittenSource.WriteString(rawToken)
+			continue
+		}
+		rewrittenToken, found := rewriteImportedHTMLMetaCharset(currentToken)
+		if found {
+			charsetDeclarationFound = true
+			rewrittenSource.WriteString(rewrittenToken.String())
+			continue
+		}
+		rewrittenSource.WriteString(rawToken)
+	}
+
+	rewrittenHTML := rewrittenSource.String()
+	if charsetDeclarationFound {
 		return rewrittenHTML
 	}
 	metaCharsetTag := `<meta charset="utf-8">`
@@ -10206,6 +10277,37 @@ func rewriteImportedHTMLCharsetDeclaration(htmlSource string) string {
 		return rewrittenHTML[:htmlOpenMatch[1]] + `<head>` + metaCharsetTag + `</head>` + rewrittenHTML[htmlOpenMatch[1]:]
 	}
 	return metaCharsetTag + rewrittenHTML
+}
+
+func rewriteImportedHTMLMetaCharset(metaToken html.Token) (html.Token, bool) {
+	httpEquivContentType := false
+	for _, attribute := range metaToken.Attr {
+		if strings.EqualFold(attribute.Key, "http-equiv") && strings.EqualFold(strings.TrimSpace(attribute.Val), "content-type") {
+			httpEquivContentType = true
+			break
+		}
+	}
+
+	for attributeIndex := range metaToken.Attr {
+		attribute := &metaToken.Attr[attributeIndex]
+		switch {
+		case strings.EqualFold(attribute.Key, "charset"):
+			attribute.Val = "utf-8"
+			return metaToken, true
+		case httpEquivContentType && strings.EqualFold(attribute.Key, "content"):
+			if importedMetaContentCharsetPattern.MatchString(attribute.Val) {
+				attribute.Val = importedMetaContentCharsetPattern.ReplaceAllString(attribute.Val, "${1}${2}utf-8")
+			} else {
+				attribute.Val = strings.TrimSpace(attribute.Val) + "; charset=utf-8"
+			}
+			return metaToken, true
+		}
+	}
+	if httpEquivContentType {
+		metaToken.Attr = append(metaToken.Attr, html.Attribute{Key: "charset", Val: "utf-8"})
+		return metaToken, true
+	}
+	return metaToken, false
 }
 
 func rewriteImportedCSSCharsetDeclaration(cssSource string, addIfMissing bool) string {
@@ -10844,10 +10946,14 @@ func downloadWholeSitePageHTML(client *http.Client, pageURL *url.URL, sourceOpti
 }
 
 func downloadWholeSitePageHTMLContext(ctx context.Context, client *http.Client, pageURL *url.URL, sourceOptions grabSourceOptions) (string, bool, error) {
-	return crawler.DownloadHTMLContext(ctx, client, pageURL, func(request *http.Request) {
+	downloadResult, err := crawler.DownloadHTMLPageContext(ctx, client, pageURL, func(request *http.Request) {
 		applyGrabRequestHeaders(request, sourceOptions)
 		applyGrabHTMLRequestHeaders(request)
 	})
+	if err == nil && downloadResult.IsHTML {
+		logImportedHTMLDecodeDecision(pageURL, downloadResult)
+	}
+	return downloadResult.HTML, downloadResult.IsHTML, err
 }
 
 func (spider *pageSpider) downloadWholeSitePageHTMLWithRetries(client *http.Client, pageURL *url.URL, sourceOptions grabSourceOptions, retries int) (string, bool, error) {
@@ -18001,13 +18107,11 @@ func smtpErrorNeedsDNSHelp(err error) bool {
 	return strings.Contains(errorText, "550") || strings.Contains(errorText, "spf") || strings.Contains(errorText, "dkim") || strings.Contains(errorText, "unauthenticated")
 }
 
-var fallbackRegistrationConfirmations = startEmailConfirmationMemoryWorker(context.Background())
-
 func (a *App) activeRegistrationConfirmations() chan emailConfirmationMemoryRequest {
 	if a != nil && a.registrationConfirmations != nil {
 		return a.registrationConfirmations
 	}
-	return fallbackRegistrationConfirmations
+	panic("registration confirmation process is not initialized")
 }
 
 func startEmailConfirmationMemoryWorker(ctx context.Context) chan emailConfirmationMemoryRequest {
@@ -24962,21 +25066,18 @@ func newPublicTrialPreviewStore() *publicTrialPreviewStore {
 	return store
 }
 
-var fallbackGrabCancelTracker = newGrabCancelTracker()
-var fallbackPublicTrialPreviewStore = newPublicTrialPreviewStore()
-
 func (a *App) activeGrabCancelTracker() *grabCancelTracker {
 	if a != nil && a.grabCancels != nil {
 		return a.grabCancels
 	}
-	return fallbackGrabCancelTracker
+	panic("grab cancellation process is not initialized")
 }
 
 func (a *App) activePublicTrialPreviewStore() *publicTrialPreviewStore {
 	if a != nil && a.trialPreviews != nil {
 		return a.trialPreviews
 	}
-	return fallbackPublicTrialPreviewStore
+	panic("public trial preview process is not initialized")
 }
 
 func (a *App) grabImportDownloadContext(parent context.Context, token string) (context.Context, func()) {
@@ -25217,13 +25318,11 @@ func newPublishProgressTracker() *publishProgressTracker {
 	return tracker
 }
 
-var fallbackPublishProgressTracker = newPublishProgressTracker()
-
 func (a *App) activePublishTracker() *publishProgressTracker {
 	if a != nil && a.publishTracker != nil {
 		return a.publishTracker
 	}
-	return fallbackPublishProgressTracker
+	panic("publish progress process is not initialized")
 }
 
 func (tracker *publishProgressTracker) subscribe(token string) chan publishProgressEvent {
