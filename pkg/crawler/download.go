@@ -10,6 +10,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"sitebrush/pkg/outboundhttp"
 )
 
 const maxHTMLDownloadBytes int64 = 32 * 1024 * 1024
@@ -51,6 +53,9 @@ func DownloadHTMLPageContext(ctx context.Context, client *http.Client, pageURL *
 	}
 	if pageURL == nil || pageURL.String() == "" {
 		return HTMLDownloadResult{}, errors.New("missing page url")
+	}
+	if err := outboundhttp.RequirePublicURL(pageURL); err != nil {
+		return HTMLDownloadResult{}, err
 	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, pageURL.String(), nil)
 	if err != nil {

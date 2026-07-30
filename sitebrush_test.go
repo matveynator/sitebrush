@@ -620,7 +620,7 @@ func TestPreparedDemoSiteStartsAndLogsOutWhileControlDatabaseWriterIsBusy(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
-	request := httptest.NewRequest(http.MethodGet, "http://demo-fast.example/", nil)
+	request := httptest.NewRequest(http.MethodGet, "https://demo-fast.example/", nil)
 	request = request.WithContext(contextWithDomain(request.Context(), settings.Domain))
 	response := httptest.NewRecorder()
 	startedAt := time.Now()
@@ -650,7 +650,7 @@ func TestPreparedDemoSiteStartsAndLogsOutWhileControlDatabaseWriterIsBusy(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
-	logoutRequest := httptest.NewRequest(http.MethodGet, "http://demo-fast.example/?logout", nil)
+	logoutRequest := httptest.NewRequest(http.MethodGet, "https://demo-fast.example/?logout", nil)
 	logoutRequest = logoutRequest.WithContext(contextWithDomain(logoutRequest.Context(), settings.Domain))
 	logoutRequest.AddCookie(sessionCookie)
 	logoutResponse := httptest.NewRecorder()
@@ -3618,7 +3618,7 @@ func TestRegisterRejectsUnverifiedDomainBeforeCreatingSiteDatabase(t *testing.T)
 	form := url.Values{}
 	form.Set("email", "admin@fake.example")
 	form.Set("password", "secret")
-	request := httptest.NewRequest(http.MethodPost, "http://"+domain+"/?register", strings.NewReader(form.Encode()))
+	request := httptest.NewRequest(http.MethodPost, "https://"+domain+"/?register", strings.NewReader(form.Encode()))
 	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	response := httptest.NewRecorder()
 
@@ -3665,7 +3665,7 @@ func TestRegisterCreatesSiteDatabaseOnlyAfterConfirmedVerifiedDomain(t *testing.
 	form := url.Values{}
 	form.Set("email", "admin@verified.example")
 	form.Set("password", "secret")
-	request := httptest.NewRequest(http.MethodPost, "http://"+domain+"/?register", strings.NewReader(form.Encode()))
+	request := httptest.NewRequest(http.MethodPost, "https://"+domain+"/?register", strings.NewReader(form.Encode()))
 	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	response := httptest.NewRecorder()
 
@@ -3685,7 +3685,7 @@ func TestRegisterCreatesSiteDatabaseOnlyAfterConfirmedVerifiedDomain(t *testing.
 		t.Fatalf("site database before confirmation stat err = %v, want not exist", err)
 	}
 
-	confirmRequest := httptest.NewRequest(http.MethodGet, "http://"+domain+"/?email_confirm="+url.QueryEscape(pendingToken), nil)
+	confirmRequest := httptest.NewRequest(http.MethodGet, "https://"+domain+"/?email_confirm="+url.QueryEscape(pendingToken), nil)
 	confirmResponse := httptest.NewRecorder()
 	application.route(confirmResponse, confirmRequest)
 	if confirmResponse.Code != http.StatusFound {
@@ -3708,7 +3708,7 @@ func TestDisabledAutoRegistrationShowsOnlySiteRequestForm(t *testing.T) {
 	controlDB := setupBillingOwnerForTest(t, application, "localhost", "owner@example.com", false)
 	defer controlDB.Close()
 
-	request := httptest.NewRequest(http.MethodGet, "http://newsite.example/?register", nil)
+	request := httptest.NewRequest(http.MethodGet, "https://newsite.example/?register", nil)
 	response := httptest.NewRecorder()
 	application.route(response, request)
 	if response.Code != http.StatusOK {
@@ -4022,7 +4022,7 @@ func TestDemoSiteVisitorGetsEditorSessionAndCleanupDeletesSite(t *testing.T) {
 		t.Fatal("demo landing page was not repaired")
 	}
 
-	request := httptest.NewRequest(http.MethodGet, "http://demo.example/", nil)
+	request := httptest.NewRequest(http.MethodGet, "https://demo.example/", nil)
 	request = request.WithContext(contextWithDomain(request.Context(), "demo.example"))
 	response := httptest.NewRecorder()
 	application.route(response, request)
@@ -4047,7 +4047,7 @@ func TestDemoSiteVisitorGetsEditorSessionAndCleanupDeletesSite(t *testing.T) {
 		t.Fatalf("demo session cookie missing in %#v", cookies)
 	}
 
-	landingRequest := httptest.NewRequest(http.MethodGet, "http://demo.example/", nil)
+	landingRequest := httptest.NewRequest(http.MethodGet, "https://demo.example/", nil)
 	landingRequest = landingRequest.WithContext(contextWithDomain(landingRequest.Context(), "demo.example"))
 	landingRequest.AddCookie(sessionCookie)
 	landingResponse := httptest.NewRecorder()
@@ -4082,7 +4082,7 @@ func TestDemoSiteVisitorGetsEditorSessionAndCleanupDeletesSite(t *testing.T) {
 		t.Fatalf("close demo db: %v", err)
 	}
 
-	logoutRequest := httptest.NewRequest(http.MethodGet, "http://demo.example/?logout", nil)
+	logoutRequest := httptest.NewRequest(http.MethodGet, "https://demo.example/?logout", nil)
 	logoutRequest = logoutRequest.WithContext(contextWithDomain(logoutRequest.Context(), "demo.example"))
 	logoutRequest.AddCookie(sessionCookie)
 	logoutResponse := httptest.NewRecorder()
@@ -4135,7 +4135,7 @@ func TestDemoSiteSourceImportFailureDoesNotCreateWelcomePage(t *testing.T) {
 		t.Fatal("demo preparation unexpectedly succeeded")
 	}
 
-	request := httptest.NewRequest(http.MethodGet, "http://demo-fail.example/", nil)
+	request := httptest.NewRequest(http.MethodGet, "https://demo-fail.example/", nil)
 	request = request.WithContext(contextWithDomain(request.Context(), "demo-fail.example"))
 	response := httptest.NewRecorder()
 	application.route(response, request)
@@ -4344,7 +4344,7 @@ func TestActiveDemoSessionDoesNotBlockScheduledSiteRecreation(t *testing.T) {
 		t.Fatalf("prepare demo site: %v", err)
 	}
 
-	request := httptest.NewRequest(http.MethodGet, "http://demo-active.example/", nil)
+	request := httptest.NewRequest(http.MethodGet, "https://demo-active.example/", nil)
 	request = request.WithContext(contextWithDomain(request.Context(), "demo-active.example"))
 	response := httptest.NewRecorder()
 	application.route(response, request)
@@ -4369,7 +4369,7 @@ func TestActiveDemoSessionDoesNotBlockScheduledSiteRecreation(t *testing.T) {
 		t.Fatalf("remaining demo sessions = %d, want 0", remainingDemoSessions)
 	}
 
-	recreateRequest := httptest.NewRequest(http.MethodGet, "http://demo-active.example/", nil)
+	recreateRequest := httptest.NewRequest(http.MethodGet, "https://demo-active.example/", nil)
 	recreateRequest = recreateRequest.WithContext(contextWithDomain(recreateRequest.Context(), "demo-active.example"))
 	recreateResponse := httptest.NewRecorder()
 	application.route(recreateResponse, recreateRequest)
@@ -7789,8 +7789,6 @@ func TestParseGrabSourceURLAcceptsCommonURLForms(t *testing.T) {
 		"http://example.com/path":    "http://example.com/path",
 		"sitebrush.com":              "https://sitebrush.com",
 		"example.com/path":           "https://example.com/path",
-		"127.0.0.1:8080/admin":       "http://127.0.0.1:8080/admin",
-		"localhost:18080/admin":      "http://localhost:18080/admin",
 		"//cdn.example.com/file.css": "https://cdn.example.com/file.css",
 	}
 	for rawSourceURL, expectedSourceURL := range testCases {
@@ -7804,8 +7802,16 @@ func TestParseGrabSourceURLAcceptsCommonURLForms(t *testing.T) {
 	}
 }
 
+func TestParseGrabSourceURLRejectsPrivateNetworks(t *testing.T) {
+	for _, rawSourceURL := range []string{"127.0.0.1:8080/admin", "localhost:18080/admin", "http://[::1]/"} {
+		if _, parseErr := parseGrabSourceURL(rawSourceURL); parseErr == nil {
+			t.Fatalf("parseGrabSourceURL(%q) allowed a private target", rawSourceURL)
+		}
+	}
+}
+
 func TestParseGrabSourceURLUsesHTTPSDefaultWhenServerIPIsProvided(t *testing.T) {
-	parsedSourceURL, parseErr := parseGrabSourceURLForServerIP("expired.example/page", "127.0.0.1")
+	parsedSourceURL, parseErr := parseGrabSourceURLForServerIP("expired.example/page", "1.1.1.1")
 	if parseErr != nil {
 		t.Fatalf("parseGrabSourceURLForServerIP failed: %v", parseErr)
 	}
@@ -7815,7 +7821,7 @@ func TestParseGrabSourceURLUsesHTTPSDefaultWhenServerIPIsProvided(t *testing.T) 
 }
 
 func TestParseGrabSourceURLUsesSourceIPPortWhenProvided(t *testing.T) {
-	parsedSourceURL, parseErr := parseGrabSourceURLForServerIP("expired.example/page", "127.0.0.1:8080")
+	parsedSourceURL, parseErr := parseGrabSourceURLForServerIP("expired.example/page", "1.1.1.1:8080")
 	if parseErr != nil {
 		t.Fatalf("parseGrabSourceURLForServerIP failed: %v", parseErr)
 	}
@@ -7825,12 +7831,18 @@ func TestParseGrabSourceURLUsesSourceIPPortWhenProvided(t *testing.T) {
 }
 
 func TestParseOptionalGrabSourceIPAcceptsPort(t *testing.T) {
-	sourceIP, parseErr := parseOptionalGrabSourceIP("127.0.0.1:8080")
+	sourceIP, parseErr := parseOptionalGrabSourceIP("1.1.1.1:8080")
 	if parseErr != nil {
 		t.Fatalf("parseOptionalGrabSourceIP failed: %v", parseErr)
 	}
-	if sourceIP != "127.0.0.1:8080" {
-		t.Fatalf("sourceIP = %q, want 127.0.0.1:8080", sourceIP)
+	if sourceIP != "1.1.1.1:8080" {
+		t.Fatalf("sourceIP = %q, want 1.1.1.1:8080", sourceIP)
+	}
+}
+
+func TestParseOptionalGrabSourceIPRejectsPrivateAddress(t *testing.T) {
+	if _, parseErr := parseOptionalGrabSourceIP("127.0.0.1:8080"); parseErr == nil {
+		t.Fatal("private source_ip was allowed")
 	}
 }
 
@@ -7862,56 +7874,14 @@ func TestLogoutRedirectsToSameURIWithoutLogoutFlag(t *testing.T) {
 }
 
 func TestDownloadGrabSourceHTMLCanDialSourceIPWithDomainHost(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
-		if !strings.HasPrefix(request.Host, "expired.example:") {
-			t.Fatalf("Host = %q, want expired.example with server port", request.Host)
-		}
-		_, _ = response.Write([]byte("<html>expired domain copy</html>"))
-	}))
-	defer server.Close()
-
-	serverURL, parseErr := url.Parse(server.URL)
-	if parseErr != nil {
-		t.Fatal(parseErr)
-	}
-	_, serverPort, splitErr := net.SplitHostPort(serverURL.Host)
-	if splitErr != nil {
-		t.Fatal(splitErr)
-	}
-	sourceURL := "http://expired.example:" + serverPort + "/page"
-	htmlBytes, downloadErr := downloadGrabSourceHTML(sourceURL, "127.0.0.1")
-	if downloadErr != nil {
-		t.Fatalf("download with source IP failed: %v", downloadErr)
-	}
-	if string(htmlBytes) != "<html>expired domain copy</html>" {
-		t.Fatalf("downloaded HTML = %q", string(htmlBytes))
+	if _, downloadErr := downloadGrabSourceHTML("http://expired.example/page", "127.0.0.1"); downloadErr == nil {
+		t.Fatal("download with private source IP was allowed")
 	}
 }
 
 func TestDownloadGrabSourceHTMLUsesSourceIPPort(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
-		if request.Host != "expired.example:8080" {
-			t.Fatalf("Host = %q, want expired.example:8080", request.Host)
-		}
-		_, _ = response.Write([]byte("<html>custom port copy</html>"))
-	}))
-	defer server.Close()
-
-	serverURL, parseErr := url.Parse(server.URL)
-	if parseErr != nil {
-		t.Fatal(parseErr)
-	}
-	serverHost, serverPort, splitErr := net.SplitHostPort(serverURL.Host)
-	if splitErr != nil {
-		t.Fatal(splitErr)
-	}
-	sourceURL := "http://expired.example:8080/page"
-	htmlBytes, downloadErr := downloadGrabSourceHTML(sourceURL, net.JoinHostPort(serverHost, serverPort))
-	if downloadErr != nil {
-		t.Fatalf("download with source IP port failed: %v", downloadErr)
-	}
-	if string(htmlBytes) != "<html>custom port copy</html>" {
-		t.Fatalf("downloaded HTML = %q", string(htmlBytes))
+	if _, downloadErr := downloadGrabSourceHTML("http://expired.example:8080/page", "169.254.169.254:8080"); downloadErr == nil {
+		t.Fatal("download with private source IP and port was allowed")
 	}
 }
 

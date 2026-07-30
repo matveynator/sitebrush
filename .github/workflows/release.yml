@@ -20,7 +20,7 @@ jobs:
   # GitHub-hosted Debian runners are unavailable, so Linux-hosted jobs use Ubuntu 22.04 LTS
   # as the closest stable base with broad package compatibility.
   build_portable:
-    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main' && (contains(join(github.event.commits.*.message, ' || '), 'stable release') || contains(join(github.event.commits.*.message, ' || '), 'Stable Release')))
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main' && (contains(join(github.event.commits.*.message, ' || '), 'stable release') || contains(join(github.event.commits.*.message, ' || '), 'Stable Release') || contains(github.event.head_commit.message, 'stable release') || contains(github.event.head_commit.message, 'Stable Release')))
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -122,7 +122,7 @@ jobs:
 
 # ---------- DESKTOP WEBVIEW: macOS / Linux / Windows ----------
   build_desktop:
-    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main' && (contains(join(github.event.commits.*.message, ' || '), 'stable release') || contains(join(github.event.commits.*.message, ' || '), 'Stable Release')))
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main' && (contains(join(github.event.commits.*.message, ' || '), 'stable release') || contains(join(github.event.commits.*.message, ' || '), 'Stable Release') || contains(github.event.head_commit.message, 'stable release') || contains(github.event.head_commit.message, 'Stable Release')))
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -326,7 +326,7 @@ jobs:
           path: dist/windows-desktop-icon.ico
 
   build_desktop_macos_universal:
-    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main' && (contains(join(github.event.commits.*.message, ' || '), 'stable release') || contains(join(github.event.commits.*.message, ' || '), 'Stable Release')))
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main' && (contains(join(github.event.commits.*.message, ' || '), 'stable release') || contains(join(github.event.commits.*.message, ' || '), 'Stable Release') || contains(github.event.head_commit.message, 'stable release') || contains(github.event.head_commit.message, 'Stable Release')))
     needs: [build_desktop]
     runs-on: macos-14
     steps:
@@ -459,7 +459,7 @@ jobs:
           path: dist/MD5SUMS-sitebrush_darwin_universal_desktop.dmg.txt
 
   release:
-    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main' && (contains(join(github.event.commits.*.message, ' || '), 'stable release') || contains(join(github.event.commits.*.message, ' || '), 'Stable Release')))
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main' && (contains(join(github.event.commits.*.message, ' || '), 'stable release') || contains(join(github.event.commits.*.message, ' || '), 'Stable Release') || contains(github.event.head_commit.message, 'stable release') || contains(github.event.head_commit.message, 'Stable Release')))
     needs: [build_portable, build_desktop, build_desktop_macos_universal]
     runs-on: ubuntu-22.04
     steps:

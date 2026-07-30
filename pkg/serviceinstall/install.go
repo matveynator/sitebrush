@@ -1740,6 +1740,7 @@ func removeRcConfLines(key string) error {
 	if strings.TrimSpace(output) != "" && !strings.HasSuffix(output, "\n") {
 		output += "\n"
 	}
+	// #nosec G703 -- /etc/rc.conf is a fixed operating-system integration path.
 	if err := os.WriteFile("/etc/rc.conf", []byte(output), 0o644); err != nil {
 		return fmt.Errorf("write /etc/rc.conf: %w", err)
 	}
