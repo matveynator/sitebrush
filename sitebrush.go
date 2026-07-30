@@ -7809,7 +7809,7 @@ func (a *App) estimateRetriedResourcePageDelta(ctx context.Context, domain strin
 		var previousPublishedHTML string
 		_ = a.db.QueryRowContext(ctx, `SELECT html FROM published_pages WHERE domain=? AND path=?`, domain, pagePath).Scan(&previousPublishedHTML)
 		publishedPageDelta += updatedHTMLBytes - int64(len([]byte(previousPublishedHTML)))
-		publishedStaticDelta += updatedHTMLBytes - diskusage.FileSize(filepath.Join(a.domainStaticDir(domain), staticRelativePathForPage(pagePath)))
+		publishedStaticDelta += updatedHTMLBytes - a.fileSizeInsideStorage(filepath.Join(a.domainStaticDir(domain), staticRelativePathForPage(pagePath)))
 	}
 	return pageDelta, publishedPageDelta, publishedStaticDelta
 }
@@ -8123,7 +8123,7 @@ func cleanPath(rawPath string) string {
 	if trimmedPath == "" {
 		return "/"
 	}
-	if !strings.HasPrefix(trimmedPath, "/") {
+	if trimmedPath[0] != '/' {
 		trimmedPath = "/" + trimmedPath
 	}
 	normalizedPath := path.Clean(trimmedPath)
@@ -8429,7 +8429,7 @@ func (a *App) savePage(w http.ResponseWriter, r *http.Request) {
 		_ = a.db.QueryRowContext(saveCtx, `SELECT html FROM published_pages WHERE domain=? AND path=?`, domain, pagePath).Scan(&previousPublishedHTML)
 		publishedPageDelta = newHTMLBytes - int64(len([]byte(previousPublishedHTML)))
 		publishedStaticPath := filepath.Join(a.domainStaticDir(domain), staticRelativePathForPage(pagePath))
-		publishedStaticDelta = newHTMLBytes - diskusage.FileSize(publishedStaticPath)
+		publishedStaticDelta = newHTMLBytes - a.fileSizeInsideStorage(publishedStaticPath)
 	}
 	if storageErr := a.applyDomainStorageDelta(saveCtx, domain, pageDelta, publishedPageDelta, newHTMLBytes, fileDelta, publishedStaticDelta); storageErr != nil {
 		sitebrushTemplateProgress.Publish(progressToken, templatePropagationProgressEvent{Stage: "error", Domain: domain, Path: pagePath, Error: storageErr.Error(), Done: true})
@@ -10421,7 +10421,7 @@ func (a *App) estimateImportedPagesStorageDelta(ctx context.Context, domain stri
 		var previousPublishedHTML string
 		_ = a.db.QueryRowContext(ctx, `SELECT html FROM published_pages WHERE domain=? AND path=?`, domain, pagePath).Scan(&previousPublishedHTML)
 		publishedPageDelta += newHTMLBytes - int64(len([]byte(previousPublishedHTML)))
-		publishedStaticDelta += newHTMLBytes - diskusage.FileSize(filepath.Join(a.domainStaticDir(domain), staticRelativePathForPage(pagePath)))
+		publishedStaticDelta += newHTMLBytes - a.fileSizeInsideStorage(filepath.Join(a.domainStaticDir(domain), staticRelativePathForPage(pagePath)))
 	}
 	return pageDelta, publishedPageDelta, revisionDelta, publishedStaticDelta
 }
@@ -10441,7 +10441,7 @@ func (a *App) estimateImportedFileDelta(domain string, spider *pageSpider) int64
 			continue
 		}
 		targetFilePath := filepath.Join(baseDir, filepath.FromSlash(assetReference))
-		existingSize := diskusage.FileSize(targetFilePath)
+		existingSize := a.fileSizeInsideStorage(targetFilePath)
 		newSize := int64(len(resource.content))
 		if existingSize <= 0 {
 			fileDelta += newSize
@@ -13736,16 +13736,16 @@ func (a *App) managedSiteQuotaRow(ctx context.Context, domain string) (siteQuota
 }
 
 func (a *App) managedSiteDeletionSizeBytes(row siteQuotaRow) int64 {
-	totalBytes := diskusage.FileSize(row.DatabasePath)
+	totalBytes := a.fileSizeInsideStorage(row.DatabasePath)
 	for _, directoryPath := range []string{
 		a.domainFilesDirForDomain(row.Domain),
 		a.domainStaticDir(row.Domain),
 		a.domainChrootRootDir(row.Domain),
 		a.domainLogDir(row.Domain),
 	} {
-		totalBytes += diskusage.DirectorySize(directoryPath)
+		totalBytes += a.directorySizeInsideStorage(directoryPath)
 	}
-	totalBytes += diskusage.FileSize(filepath.Join(a.packsDir(), domainStorageName(row.Domain)+".zip"))
+	totalBytes += a.fileSizeInsideStorage(filepath.Join(a.packsDir(), domainStorageName(row.Domain)+".zip"))
 	return totalBytes
 }
 
@@ -13777,7 +13777,7 @@ func (a *App) managedSiteDeletionBackupSizesByDomain(ctx context.Context, contro
 		}
 		archiveSizeBytes := int64(0)
 		if realArchivePath, pathErr := a.existingPathInsideStorageSubtree(a.backupRootDir(), archivePath); pathErr == nil {
-			if fileSizeBytes := diskusage.FileSize(realArchivePath); fileSizeBytes > 0 {
+			if fileSizeBytes := a.fileSizeInsideStorage(realArchivePath); fileSizeBytes > 0 {
 				archiveSizeBytes = fileSizeBytes
 			}
 		}
@@ -14447,7 +14447,7 @@ func (a *App) applyLatestActiveRevision(ctx context.Context, domain string, page
 		var previousPublishedHTML string
 		_ = a.db.QueryRowContext(ctx, `SELECT html FROM published_pages WHERE domain=? AND path=?`, domain, pagePath).Scan(&previousPublishedHTML)
 		publishedPageDelta = newHTMLBytes - int64(len([]byte(previousPublishedHTML)))
-		publishedStaticDelta = newHTMLBytes - diskusage.FileSize(filepath.Join(a.domainStaticDir(domain), staticRelativePathForPage(pagePath)))
+		publishedStaticDelta = newHTMLBytes - a.fileSizeInsideStorage(filepath.Join(a.domainStaticDir(domain), staticRelativePathForPage(pagePath)))
 	}
 	if storageErr := a.applyDomainStorageDelta(ctx, domain, pageDelta, publishedPageDelta, 0, 0, publishedStaticDelta); storageErr != nil {
 		log.Printf("restore blocked by storage limit domain=%s path=%s error=%v", domain, pagePath, storageErr)
@@ -14466,7 +14466,7 @@ func (a *App) removeManagedPage(ctx context.Context, domain string, pagePath str
 	_ = a.db.QueryRowContext(ctx, `SELECT html FROM pages WHERE domain=? AND path=?`, domain, pagePath).Scan(&storedHTML)
 	var publishedHTML string
 	_ = a.db.QueryRowContext(ctx, `SELECT html FROM published_pages WHERE domain=? AND path=?`, domain, pagePath).Scan(&publishedHTML)
-	publishedStaticBytes := diskusage.FileSize(filepath.Join(a.domainStaticDir(domain), staticRelativePathForPage(pagePath)))
+	publishedStaticBytes := a.fileSizeInsideStorage(filepath.Join(a.domainStaticDir(domain), staticRelativePathForPage(pagePath)))
 	_ = a.applyDomainStorageDelta(ctx, domain, -int64(len([]byte(storedHTML))), -int64(len([]byte(publishedHTML))), 0, 0, -publishedStaticBytes)
 	_, _ = a.db.ExecContext(ctx, `DELETE FROM pages WHERE domain=? AND path=?`, domain, pagePath)
 	_, _ = a.db.ExecContext(ctx, `DELETE FROM published_pages WHERE domain=? AND path=?`, domain, pagePath)
@@ -15084,11 +15084,7 @@ func confirmationExpired(rawExpiresAt string, now time.Time) bool {
 }
 
 func safeConfirmationReturnPath(returnPath string) string {
-	trimmedReturnPath := strings.TrimSpace(returnPath)
-	if trimmedReturnPath == "" || !strings.HasPrefix(trimmedReturnPath, "/") || strings.HasPrefix(trimmedReturnPath, "//") {
-		return "/"
-	}
-	return trimmedReturnPath
+	return httpsecurity.LocalRedirectTarget(returnPath, "/")
 }
 
 func (a *App) renderEmailConfirmationStatus(w http.ResponseWriter, r *http.Request, statusCode int, status string) {
@@ -20353,8 +20349,8 @@ func (a *App) rebuildDomainStorageUsage(ctx context.Context, domain string) {
 	pageBytes := a.sumHTMLColumnBytes(ctx, `SELECT html FROM pages WHERE domain=?`, domain)
 	publishedPageBytes := a.sumHTMLColumnBytes(ctx, `SELECT html FROM published_pages WHERE domain=?`, domain)
 	revisionBytes := a.sumHTMLColumnBytes(ctx, `SELECT html FROM revisions WHERE domain=?`, domain)
-	fileBytes := diskusage.DirectorySize(a.domainFilesDirForDomain(domain)) + diskusage.DirectorySize(a.domainChrootRootDir(domain))
-	publishedStaticBytes := diskusage.DirectorySize(a.domainStaticDir(domain))
+	fileBytes := a.directorySizeInsideStorage(a.domainFilesDirForDomain(domain)) + a.directorySizeInsideStorage(a.domainChrootRootDir(domain))
+	publishedStaticBytes := a.directorySizeInsideStorage(a.domainStaticDir(domain))
 	a.ensureDomainStorageUsageRow(ctx, domain)
 	_, _ = a.db.ExecContext(ctx, `UPDATE domain_storage_usage SET page_bytes=?, published_page_bytes=?, revision_bytes=?, file_bytes=?, published_static_bytes=?, updated_at=?, limit_bytes=COALESCE(NULLIF(limit_bytes,0),?) WHERE domain=?`,
 		pageBytes, publishedPageBytes, revisionBytes, fileBytes, publishedStaticBytes, time.Now().UTC().Format(time.RFC3339), defaultDomainStorageLimitBytes, domain)
@@ -22906,7 +22902,7 @@ func (a *App) applyTemplatePropagation(ctx context.Context, domain, sourceHTML, 
 			var previousPublishedHTML string
 			_ = a.db.QueryRowContext(ctx, `SELECT html FROM published_pages WHERE domain=? AND path=?`, domain, currentPage.path).Scan(&previousPublishedHTML)
 			publishedPageDelta = updatedHTMLBytes - int64(len([]byte(previousPublishedHTML)))
-			publishedStaticDelta = updatedHTMLBytes - diskusage.FileSize(filepath.Join(a.domainStaticDir(domain), staticRelativePathForPage(currentPage.path)))
+			publishedStaticDelta = updatedHTMLBytes - a.fileSizeInsideStorage(filepath.Join(a.domainStaticDir(domain), staticRelativePathForPage(currentPage.path)))
 		}
 		if storageErr := a.applyDomainStorageDelta(ctx, domain, pageDelta, publishedPageDelta, updatedHTMLBytes, 0, publishedStaticDelta); storageErr != nil {
 			message := "Template propagation skipped page because of storage limit"
@@ -22977,7 +22973,7 @@ func (a *App) applyTemplateClassSynchronization(ctx context.Context, domain, pre
 			var previousPublishedHTML string
 			_ = a.db.QueryRowContext(ctx, `SELECT html FROM published_pages WHERE domain=? AND path=?`, domain, currentPage.path).Scan(&previousPublishedHTML)
 			publishedPageDelta = updatedHTMLBytes - int64(len([]byte(previousPublishedHTML)))
-			publishedStaticDelta = updatedHTMLBytes - diskusage.FileSize(filepath.Join(a.domainStaticDir(domain), staticRelativePathForPage(currentPage.path)))
+			publishedStaticDelta = updatedHTMLBytes - a.fileSizeInsideStorage(filepath.Join(a.domainStaticDir(domain), staticRelativePathForPage(currentPage.path)))
 		}
 		if storageErr := a.applyDomainStorageDelta(ctx, domain, pageDelta, publishedPageDelta, updatedHTMLBytes, 0, publishedStaticDelta); storageErr != nil {
 			message := "Template class synchronization skipped page because of storage limit"
@@ -23482,7 +23478,6 @@ func newGrabHTTPTransport() *http.Transport {
 	} else {
 		transport.TLSClientConfig = transport.TLSClientConfig.Clone()
 	}
-	transport.TLSClientConfig.InsecureSkipVerify = true
 	return transport
 }
 
@@ -25710,6 +25705,30 @@ func (a *App) statInsideStorage(filePath string) (os.FileInfo, error) {
 	return jail.Stat(relativeFilePath)
 }
 
+func (a *App) fileSizeInsideStorage(filePath string) int64 {
+	jail, relativeFilePath, err := a.storageJailForPath(filePath)
+	if err != nil {
+		return 0
+	}
+	fileSize, err := jail.FileSize(relativeFilePath)
+	if err != nil {
+		return 0
+	}
+	return fileSize
+}
+
+func (a *App) directorySizeInsideStorage(directoryPath string) int64 {
+	jail, relativeDirectoryPath, err := a.storageJailForPath(directoryPath)
+	if err != nil {
+		return 0
+	}
+	directorySize, err := jail.DirectorySize(relativeDirectoryPath)
+	if err != nil {
+		return 0
+	}
+	return directorySize
+}
+
 func (a *App) serveFileInsideStorage(w http.ResponseWriter, r *http.Request, filePath string) bool {
 	fileInfo, err := a.statInsideStorage(filePath)
 	if err != nil || fileInfo.IsDir() {
@@ -27096,7 +27115,7 @@ func (a *App) publishDomain(w http.ResponseWriter, r *http.Request) {
 		var previousPublishedHTML string
 		_ = a.db.QueryRowContext(r.Context(), `SELECT html FROM published_pages WHERE domain=? AND path=?`, domain, pageCandidate.Path).Scan(&previousPublishedHTML)
 		publishedPageDelta := publishedHTMLBytes - int64(len([]byte(previousPublishedHTML)))
-		publishedStaticDelta := publishedHTMLBytes - diskusage.FileSize(filepath.Join(a.domainStaticDir(domain), staticRelativePathForPage(pageCandidate.Path)))
+		publishedStaticDelta := publishedHTMLBytes - a.fileSizeInsideStorage(filepath.Join(a.domainStaticDir(domain), staticRelativePathForPage(pageCandidate.Path)))
 		if storageErr := a.applyDomainStorageDelta(r.Context(), domain, 0, publishedPageDelta, 0, 0, publishedStaticDelta); storageErr != nil {
 			log.Printf("publish skipped by storage limit domain=%s path=%s error=%v", domain, pageCandidate.Path, storageErr)
 			skippedPagesCount++

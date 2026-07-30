@@ -46,4 +46,12 @@ func TestRootReadsAndWritesInsideCapability(t *testing.T) {
 	if string(payload) != "ok" {
 		t.Fatalf("payload = %q", payload)
 	}
+	fileSize, err := root.FileSize(filepath.Join("site", "index.html"))
+	if err != nil || fileSize != 2 {
+		t.Fatalf("FileSize = %d, %v", fileSize, err)
+	}
+	directorySize, err := root.DirectorySize("site")
+	if err != nil || directorySize != 2 {
+		t.Fatalf("DirectorySize = %d, %v", directorySize, err)
+	}
 }
