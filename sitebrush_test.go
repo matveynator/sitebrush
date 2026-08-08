@@ -31,6 +31,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -217,6 +218,18 @@ func mustDNSNameForTest(name string) dnsmessage.Name {
 
 func writeCachedAutoCertForTest(t *testing.T, application *App, domain string, notBefore time.Time, notAfter time.Time) {
 	t.Helper()
+	certificatePEM := cachedAutoCertPEMForTest(t, domain, notBefore, notAfter)
+	certificateCacheDir := filepath.Join(application.storageRootDir(), "letsencrypt")
+	if err := os.MkdirAll(certificateCacheDir, 0o700); err != nil {
+		t.Fatalf("create certificate cache: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(certificateCacheDir, domain), certificatePEM, 0o600); err != nil {
+		t.Fatalf("write cached certificate: %v", err)
+	}
+}
+
+func cachedAutoCertPEMForTest(t *testing.T, domain string, notBefore time.Time, notAfter time.Time) []byte {
+	t.Helper()
 	privateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		t.Fatalf("generate certificate key: %v", err)
@@ -245,13 +258,7 @@ func writeCachedAutoCertForTest(t *testing.T, application *App, domain string, n
 	if err := pem.Encode(&certificatePEM, &pem.Block{Type: "CERTIFICATE", Bytes: certificateDER}); err != nil {
 		t.Fatalf("encode certificate: %v", err)
 	}
-	certificateCacheDir := filepath.Join(application.storageRootDir(), "letsencrypt")
-	if err := os.MkdirAll(certificateCacheDir, 0o700); err != nil {
-		t.Fatalf("create certificate cache: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(certificateCacheDir, domain), certificatePEM.Bytes(), 0o600); err != nil {
-		t.Fatalf("write cached certificate: %v", err)
-	}
+	return certificatePEM.Bytes()
 }
 
 func newTestApplication(t *testing.T) (*App, *sql.DB) {
@@ -9362,7 +9369,11 @@ func TestPerSiteDBRouterRoutesActiveAliasRequestsToPrimarySiteDatabase(t *testin
 		t.Fatalf("insert active alias: %v", err)
 	}
 
-	application := &App{db: router, storagePath: storagePath, grabTracker: newGrabProgressTracker()}
+	application := &App{db: router, siteDatabaseRouter: router, storagePath: storagePath, grabTracker: newGrabProgressTracker()}
+	certificateDomains := application.listAutomaticSSLDomainCandidates(context.Background())
+	if !slices.Contains(certificateDomains, primaryDomain) || !slices.Contains(certificateDomains, "twochicks.ru") {
+		t.Fatalf("automatic SSL domains = %v, want primary and alias from site database", certificateDomains)
+	}
 	request := httptest.NewRequest(http.MethodGet, "http://twochicks.ru/", nil)
 	request = request.WithContext(contextWithDomain(request.Context(), "twochicks.ru"))
 	if domain := application.siteDomain(request.Context(), request); domain != primaryDomain {
@@ -9722,6 +9733,150 @@ func TestAutoCertCertificateMemoryCachePreloadsDiskCertificate(t *testing.T) {
 	}
 	if certificate == nil || expiresAt.IsZero() {
 		t.Fatalf("certificate=%#v expiresAt=%s", certificate, expiresAt)
+	}
+}
+
+func TestAutomaticSSLDurableCacheAppliesRenewedCertificateWithoutRestart(t *testing.T) {
+	application, _ := newTestApplication(t)
+	certificateDomain := "renewed.example.com"
+	certificateCacheDirectory := filepath.Join(application.storageRootDir(), "letsencrypt")
+	if err := os.MkdirAll(certificateCacheDirectory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	oldCertificatePEM := cachedAutoCertPEMForTest(t, certificateDomain, now.Add(-24*time.Hour), now.Add(5*24*time.Hour))
+	if err := os.WriteFile(filepath.Join(certificateCacheDirectory, certificateDomain), oldCertificatePEM, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cacheContext, cancelCache := context.WithCancel(context.Background())
+	defer cancelCache()
+	application.autoCertCertificateCache = startAutoCertCertificateMemoryCache(cacheContext, certificateCacheDirectory)
+	oldCertificate, oldExpiresAt, found := application.autoCertCachedCertificateFromMemory(certificateDomain, now, 0)
+	if !found || oldCertificate == nil {
+		t.Fatal("old certificate was not preloaded")
+	}
+
+	cache := automaticSSLDurableCache{cache: autocert.DirCache(certificateCacheDirectory), application: application}
+	newCertificatePEM := cachedAutoCertPEMForTest(t, certificateDomain, now.Add(-time.Hour), now.Add(90*24*time.Hour))
+	if err := cache.Put(context.Background(), certificateDomain, newCertificatePEM); err != nil {
+		t.Fatalf("put renewed certificate: %v", err)
+	}
+	newCertificate, newExpiresAt, found := application.autoCertCachedCertificateFromMemory(certificateDomain, now, 0)
+	if !found || newCertificate == nil {
+		t.Fatal("renewed certificate was not published")
+	}
+	if !newExpiresAt.After(oldExpiresAt) {
+		t.Fatalf("renewed expiry = %s, old expiry = %s", newExpiresAt, oldExpiresAt)
+	}
+	if bytes.Equal(newCertificate.Certificate[0], oldCertificate.Certificate[0]) {
+		t.Fatal("live certificate did not change after durable cache put")
+	}
+
+	_, fallbackCertificate, err := generateAutomaticSSLFallbackCertificate(now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tlsConfig := application.autoCertTLSConfig(&autocert.Manager{}, fallbackCertificate)
+	servedCertificate, err := tlsConfig.GetCertificate(&tls.ClientHelloInfo{ServerName: certificateDomain})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(servedCertificate.Certificate[0], newCertificate.Certificate[0]) {
+		t.Fatal("TLS did not serve the renewed certificate")
+	}
+}
+
+func TestAutoCertRenewalCheckKeepsStillValidCertificateAvailable(t *testing.T) {
+	application, _ := newTestApplication(t)
+	certificateDomain := "expiring-cache.example.com"
+	now := time.Now()
+	writeCachedAutoCertForTest(t, application, certificateDomain, now.Add(-time.Hour), now.Add(24*time.Hour))
+	cacheContext, cancelCache := context.WithCancel(context.Background())
+	defer cancelCache()
+	application.autoCertCertificateCache = startAutoCertCertificateMemoryCache(cacheContext, filepath.Join(application.storageRootDir(), "letsencrypt"))
+	if _, _, reusable := application.autoCertCachedCertificateFromMemory(certificateDomain, now, automaticSSLCertificateRenewBefore); reusable {
+		t.Fatal("expiring certificate was considered reusable without renewal")
+	}
+	if certificate, _, valid := application.autoCertCachedCertificateFromMemory(certificateDomain, now, 0); !valid || certificate == nil {
+		t.Fatal("renewal check removed the still-valid certificate")
+	}
+}
+
+func TestAutomaticSSLDurableCacheRejectsInvalidReplacement(t *testing.T) {
+	application, _ := newTestApplication(t)
+	certificateDomain := "stable.example.com"
+	certificateCacheDirectory := filepath.Join(application.storageRootDir(), "letsencrypt")
+	if err := os.MkdirAll(certificateCacheDirectory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	oldCertificatePEM := cachedAutoCertPEMForTest(t, certificateDomain, now.Add(-time.Hour), now.Add(30*24*time.Hour))
+	if err := os.WriteFile(filepath.Join(certificateCacheDirectory, certificateDomain), oldCertificatePEM, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cacheContext, cancelCache := context.WithCancel(context.Background())
+	defer cancelCache()
+	application.autoCertCertificateCache = startAutoCertCertificateMemoryCache(cacheContext, certificateCacheDirectory)
+	cache := automaticSSLDurableCache{cache: autocert.DirCache(certificateCacheDirectory), application: application}
+	shorterCertificatePEM := cachedAutoCertPEMForTest(t, certificateDomain, now.Add(-time.Hour), now.Add(5*24*time.Hour))
+	if err := cache.Put(context.Background(), certificateDomain, shorterCertificatePEM); err == nil {
+		t.Fatal("certificate expiry downgrade was accepted")
+	}
+	if err := cache.Put(context.Background(), certificateDomain, []byte("invalid certificate")); err == nil {
+		t.Fatal("invalid certificate replacement was accepted")
+	}
+	storedCertificatePEM, err := os.ReadFile(filepath.Join(certificateCacheDirectory, certificateDomain))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(storedCertificatePEM, oldCertificatePEM) {
+		t.Fatal("invalid replacement changed the durable certificate")
+	}
+}
+
+func TestNextAutomaticSSLRenewalAuditTimeUsesNextLocalDay(t *testing.T) {
+	location := time.FixedZone("test", 3*60*60)
+	now := time.Date(2026, 8, 8, 17, 30, 0, 0, location)
+	nextDayStart := time.Date(2026, 8, 9, 0, 0, 0, 0, location)
+	followingDayStart := time.Date(2026, 8, 10, 0, 0, 0, 0, location)
+
+	auditAt, err := nextAutomaticSSLRenewalAuditTime(now, bytes.NewReader(make([]byte, 16)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if auditAt.Before(nextDayStart) || !auditAt.Before(followingDayStart) {
+		t.Fatalf("audit time = %s, want next local calendar day", auditAt)
+	}
+}
+
+func TestAutomaticSSLRenewalAuditRunsAtStartupAndStops(t *testing.T) {
+	application, _ := newTestApplication(t)
+	certificateDomain := "startup-renewal.example.com"
+	now := time.Now()
+	writeCachedAutoCertForTest(t, application, certificateDomain, now.Add(-time.Hour), now.Add(24*time.Hour))
+	cacheContext, cancelCache := context.WithCancel(context.Background())
+	defer cancelCache()
+	application.autoCertCertificateCache = startAutoCertCertificateMemoryCache(cacheContext, filepath.Join(application.storageRootDir(), "letsencrypt"))
+	stop := make(chan struct{})
+	requests := make(chan automaticSSLRequest, 1)
+	done := make(chan struct{})
+	go func() {
+		application.runAutomaticSSLRenewalAudits(stop, requests, time.Now, bytes.NewReader(make([]byte, 16)))
+		close(done)
+	}()
+	select {
+	case request := <-requests:
+		if request.action != "renewal_audit" || request.domain != certificateDomain {
+			t.Fatalf("startup renewal request = %+v", request)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("startup renewal audit did not run")
+	}
+	close(stop)
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("renewal audit did not stop")
 	}
 }
 
