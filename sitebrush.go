@@ -375,6 +375,73 @@ type autoCertCertificateCacheResponse struct {
 	certificate *tls.Certificate
 	expiresAt   time.Time
 	found       bool
+	domains     []string
+}
+
+// automaticSSLDurableCache publishes a certificate only after autocert has
+// durably replaced it. This keeps the TLS-serving cache and the ACME cache on
+// the same successful write boundary.
+type automaticSSLDurableCache struct {
+	cache       autocert.Cache
+	application *App
+}
+
+func (cache automaticSSLDurableCache) Get(ctx context.Context, name string) ([]byte, error) {
+	return cache.cache.Get(ctx, name)
+}
+
+func (cache automaticSSLDurableCache) Put(ctx context.Context, name string, certificateBytes []byte) error {
+	domain, certificate, expiresAt, certificateEntry := automaticSSLCertificateCacheEntry(name, certificateBytes, time.Now())
+	if certificateEntry && certificate == nil {
+		return fmt.Errorf("autocert cache rejected invalid certificate entry %q", name)
+	}
+	if certificateEntry {
+		if currentCertificateBytes, err := cache.cache.Get(ctx, name); err == nil {
+			currentExpiresAt, currentValid := cachedCertificatePEMExpiresForDomain(currentCertificateBytes, domain, time.Now(), 0)
+			if currentValid && expiresAt.Before(currentExpiresAt) {
+				return fmt.Errorf("autocert cache rejected certificate expiry downgrade for %s", domain)
+			}
+		}
+	}
+	if err := cache.cache.Put(ctx, name, certificateBytes); err != nil {
+		return err
+	}
+	if !certificateEntry {
+		return nil
+	}
+	publishContext, cancelPublish := context.WithTimeout(ctx, 5*time.Second)
+	defer cancelPublish()
+	if err := cache.application.storeAutoCertCachedCertificate(publishContext, domain, certificate, expiresAt); err != nil {
+		return fmt.Errorf("publish renewed certificate for %s: %w", domain, err)
+	}
+	cache.application.logDomainEvent(domain, "AUTOCERT certificate applied expires_at=%s", expiresAt.UTC().Format(time.RFC3339))
+	return nil
+}
+
+func (cache automaticSSLDurableCache) Delete(ctx context.Context, name string) error {
+	return cache.cache.Delete(ctx, name)
+}
+
+func automaticSSLCertificateCacheEntry(name string, certificateBytes []byte, now time.Time) (string, *tls.Certificate, time.Time, bool) {
+	cacheName := strings.TrimSpace(name)
+	if strings.HasSuffix(cacheName, "+rsa") {
+		cacheName = strings.TrimSuffix(cacheName, "+rsa")
+	} else if strings.Contains(cacheName, "+") {
+		return "", nil, time.Time{}, false
+	}
+	domain := normalizeDomainName(cacheName)
+	if autoCertDomainEligibilityError(domain) != nil {
+		return "", nil, time.Time{}, false
+	}
+	expiresAt, valid := cachedCertificatePEMExpiresForDomain(certificateBytes, domain, now, 0)
+	if !valid {
+		return domain, nil, time.Time{}, true
+	}
+	certificate, err := tls.X509KeyPair(certificateBytes, certificateBytes)
+	if err != nil {
+		return domain, nil, time.Time{}, true
+	}
+	return domain, &certificate, expiresAt, true
 }
 
 type automaticSSLRequest struct {
@@ -463,6 +530,10 @@ type siteDBResponse struct {
 
 type siteDBPreloadRequest struct {
 	response chan siteDBPreloadResponse
+}
+
+type siteDBDomainListRequest struct {
+	response chan []string
 }
 
 type siteDBForgetDomainRequest struct {
@@ -1241,6 +1312,7 @@ type perSiteDBRouter struct {
 	debug                   bool
 	requests                chan siteDBRequest
 	preloadRequests         chan siteDBPreloadRequest
+	domainListRequests      chan siteDBDomainListRequest
 	forgetDomainRequests    chan siteDBForgetDomainRequest
 	migrationStatusRequests chan siteDBMigrationStatusRequest
 	migrationEvents         chan siteDBMigrationEvent
@@ -1254,6 +1326,7 @@ func newPerSiteDBRouter(siteDatabaseRootDir string, fallbackDomain string, migra
 		debug:                   debug,
 		requests:                make(chan siteDBRequest),
 		preloadRequests:         make(chan siteDBPreloadRequest),
+		domainListRequests:      make(chan siteDBDomainListRequest),
 		forgetDomainRequests:    make(chan siteDBForgetDomainRequest),
 		migrationStatusRequests: make(chan siteDBMigrationStatusRequest),
 		migrationEvents:         make(chan siteDBMigrationEvent, 256),
@@ -1313,6 +1386,15 @@ func (r *perSiteDBRouter) run(siteDatabaseRootDir string, migrate siteDBMigrator
 			}
 			response := r.preloadMigratedDatabases(siteDatabaseRootDir, databasesByDomain, migratedDomains, degradedDomains, migrate)
 			preloadRequest.response <- response
+		case domainListRequest := <-r.domainListRequests:
+			domainList := make([]string, 0, len(migratedDomains))
+			for domain := range migratedDomains {
+				if degradedDomains[domain] == nil {
+					domainList = append(domainList, domain)
+				}
+			}
+			sort.Strings(domainList)
+			domainListRequest.response <- domainList
 		case forgetRequest := <-r.forgetDomainRequests:
 			domain := normalizeDomainName(forgetRequest.domain)
 			if domain == "" {
@@ -1708,6 +1790,24 @@ func (r *perSiteDBRouter) Preload(ctx context.Context) siteDBPreloadResponse {
 		return preloadResponse
 	case <-ctx.Done():
 		return siteDBPreloadResponse{err: ctx.Err()}
+	}
+}
+
+func (r *perSiteDBRouter) Domains(ctx context.Context) []string {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	response := make(chan []string, 1)
+	select {
+	case r.domainListRequests <- siteDBDomainListRequest{response: response}:
+	case <-ctx.Done():
+		return nil
+	}
+	select {
+	case domains := <-response:
+		return domains
+	case <-ctx.Done():
+		return nil
 	}
 }
 
@@ -5140,9 +5240,13 @@ func runSitebrushServer(ctx context.Context, config serverRunConfig) error {
 	if application.autoCertCertificateCache == nil {
 		// The startup path already logged the filesystem problem. Leave HTTP available.
 	} else if parsedPorts.TLSEnabled && listenPort == 80 {
+		durableCertificateCache := automaticSSLDurableCache{
+			cache:       autocert.DirCache(certificateCacheDir),
+			application: application,
+		}
 		certificateManager := &autocert.Manager{
 			Prompt:     autocert.AcceptTOS,
-			Cache:      autocert.DirCache(certificateCacheDir),
+			Cache:      durableCertificateCache,
 			HostPolicy: application.autoCertPreparedHostPolicy,
 		}
 		tlsListener, tlsListenErr := listenTLSForAutoCert()
@@ -6348,6 +6452,44 @@ func (a *App) rememberAutoCertCachedCertificate(domain string, certificate *tls.
 	}
 }
 
+func (a *App) storeAutoCertCachedCertificate(ctx context.Context, domain string, certificate *tls.Certificate, expiresAt time.Time) error {
+	if a.autoCertCertificateCache == nil {
+		return errors.New("automatic SSL certificate cache is unavailable")
+	}
+	response := make(chan autoCertCertificateCacheResponse, 1)
+	request := autoCertCertificateCacheRequest{action: "put", domain: domain, certificate: certificate, expiresAt: expiresAt, response: response}
+	select {
+	case a.autoCertCertificateCache <- request:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	select {
+	case <-response:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (a *App) autoCertCachedCertificateDomains(ctx context.Context) []string {
+	if a.autoCertCertificateCache == nil {
+		return nil
+	}
+	response := make(chan autoCertCertificateCacheResponse, 1)
+	request := autoCertCertificateCacheRequest{action: "list", response: response}
+	select {
+	case a.autoCertCertificateCache <- request:
+	case <-ctx.Done():
+		return nil
+	}
+	select {
+	case cacheResponse := <-response:
+		return cacheResponse.domains
+	case <-ctx.Done():
+		return nil
+	}
+}
+
 func startAutoCertCertificateMemoryCache(ctx context.Context, certificateCacheDir string) chan autoCertCertificateCacheRequest {
 	requests := make(chan autoCertCertificateCacheRequest, 256)
 	go runAutoCertCertificateMemoryCache(ctx, certificateCacheDir, requests)
@@ -6361,6 +6503,15 @@ func runAutoCertCertificateMemoryCache(ctx context.Context, certificateCacheDir 
 		case <-ctx.Done():
 			return
 		case request := <-requests:
+			if request.action == "list" {
+				domains := make([]string, 0, len(certificatesByDomain))
+				for domain := range certificatesByDomain {
+					domains = append(domains, domain)
+				}
+				sort.Strings(domains)
+				request.response <- autoCertCertificateCacheResponse{domains: domains}
+				continue
+			}
 			domain := normalizeDomainName(request.domain)
 			if domain == "" {
 				if request.response != nil {
@@ -6371,7 +6522,7 @@ func runAutoCertCertificateMemoryCache(ctx context.Context, certificateCacheDir 
 			switch request.action {
 			case "get":
 				cacheResponse := certificatesByDomain[domain]
-				if cacheResponse.found && cacheResponse.expiresAt.Before(time.Now().Add(request.minimumRemaining)) {
+				if cacheResponse.found && !cacheResponse.expiresAt.After(time.Now()) {
 					delete(certificatesByDomain, domain)
 					cacheResponse = autoCertCertificateCacheResponse{}
 				}
@@ -6379,6 +6530,9 @@ func runAutoCertCertificateMemoryCache(ctx context.Context, certificateCacheDir 
 			case "put":
 				if request.certificate != nil && !request.expiresAt.IsZero() {
 					certificatesByDomain[domain] = autoCertCertificateCacheResponse{certificate: request.certificate, expiresAt: request.expiresAt, found: true}
+				}
+				if request.response != nil {
+					request.response <- autoCertCertificateCacheResponse{}
 				}
 			}
 		}
@@ -25580,7 +25734,7 @@ var authoritativeTXTLookupPointer = reflect.ValueOf(lookupAuthoritativeTXTRecord
 var exchangeDNSMessage = exchangeDNSMessageWithServer
 
 const automaticSSLRefreshInterval = time.Hour
-const automaticSSLCertificateRenewBefore = 10 * 24 * time.Hour
+const automaticSSLCertificateRenewBefore = 30 * 24 * time.Hour
 const automaticSSLRetryDelayEligibility = 24 * time.Hour
 const automaticSSLRetryDelayDNS = 6 * time.Hour
 const automaticSSLRetryDelayChallenge = time.Hour
@@ -27149,7 +27303,76 @@ func (a *App) startAutomaticSSLProcess(stop <-chan struct{}, certificateManager 
 	}
 	requests := make(chan automaticSSLRequest, automaticSSLProcessQueueSize)
 	go a.runAutomaticSSLProcess(stop, certificateManager, requests)
+	go a.runAutomaticSSLRenewalAudits(stop, requests, time.Now, rand.Reader)
 	return requests, fallbackResponse.certificate, nil
+}
+
+func (a *App) runAutomaticSSLRenewalAudits(stop <-chan struct{}, requests chan<- automaticSSLRequest, now func() time.Time, random io.Reader) {
+	for a.siteDatabaseRouter != nil {
+		migrationStatus := a.siteDatabaseRouter.MigrationStatus(context.Background(), "localhost")
+		if migrationStatus.startupFinished {
+			break
+		}
+		migrationTimer := time.NewTimer(time.Second)
+		select {
+		case <-stop:
+			if !migrationTimer.Stop() {
+				<-migrationTimer.C
+			}
+			return
+		case <-migrationTimer.C:
+		}
+	}
+	runAudit := func() bool {
+		domains := a.listAutomaticSSLDomainCandidates(context.Background())
+		a.logProblemEvent("AUTOCERT renewal audit started: domains=%d", len(domains))
+		for _, domain := range domains {
+			select {
+			case requests <- automaticSSLRequest{action: "renewal_audit", domain: domain}:
+			case <-stop:
+				return false
+			}
+		}
+		a.logProblemEvent("AUTOCERT renewal audit queued: domains=%d", len(domains))
+		return true
+	}
+	if !runAudit() {
+		return
+	}
+	for {
+		nextAuditAt, err := nextAutomaticSSLRenewalAuditTime(now(), random)
+		if err != nil {
+			nextAuditAt = now().Add(24 * time.Hour)
+			a.logProblemEvent("AUTOCERT renewal audit random scheduling failed: %v", err)
+		}
+		waitDuration := nextAuditAt.Sub(now())
+		if waitDuration < 0 {
+			waitDuration = 0
+		}
+		timer := time.NewTimer(waitDuration)
+		select {
+		case <-stop:
+			if !timer.Stop() {
+				<-timer.C
+			}
+			return
+		case <-timer.C:
+			if !runAudit() {
+				return
+			}
+		}
+	}
+}
+
+func nextAutomaticSSLRenewalAuditTime(now time.Time, random io.Reader) (time.Time, error) {
+	nextDayStart := time.Date(now.Year(), now.Month(), now.Day()+1, 0, 0, 0, 0, now.Location())
+	followingDayStart := nextDayStart.AddDate(0, 0, 1)
+	randomRange := followingDayStart.Sub(nextDayStart)
+	randomNanoseconds, err := rand.Int(random, big.NewInt(int64(randomRange)))
+	if err != nil {
+		return time.Time{}, err
+	}
+	return nextDayStart.Add(time.Duration(randomNanoseconds.Int64())), nil
 }
 
 func (a *App) runAutomaticSSLProcess(stop <-chan struct{}, certificateManager *autocert.Manager, requests chan automaticSSLRequest) {
@@ -27199,21 +27422,7 @@ func (a *App) runAutomaticSSLProcess(stop <-chan struct{}, certificateManager *a
 			}
 		}()
 	}
-	// Periodic discovery prepares managed domains before their first TLS request.
-	discoverDomains := func() {
-		go func() {
-			for _, domain := range a.listAutomaticSSLDomainCandidates(context.Background()) {
-				select {
-				case requests <- automaticSSLRequest{action: "discover", domain: domain}:
-				case <-stop:
-					return
-				}
-			}
-		}()
-	}
-
 	startIPDetection()
-	discoverDomains()
 	ticker := time.NewTicker(automaticSSLRefreshInterval)
 	defer ticker.Stop()
 	for {
@@ -27224,7 +27433,8 @@ func (a *App) runAutomaticSSLProcess(stop <-chan struct{}, certificateManager *a
 			domain := normalizeDomainName(request.domain)
 			if domain != "" {
 				now := time.Now()
-				if len(observedAt) < automaticSSLMaximumObservedDomains || !observedAt[domain].IsZero() {
+				trustedAuditDomain := request.action == "renewal_audit"
+				if trustedAuditDomain || len(observedAt) < automaticSSLMaximumObservedDomains || !observedAt[domain].IsZero() {
 					observedAt[domain] = now
 				}
 				if serverIPsCheckedAt.IsZero() || now.Sub(serverIPsCheckedAt) >= automaticSSLRefreshInterval {
@@ -27263,7 +27473,6 @@ func (a *App) runAutomaticSSLProcess(stop <-chan struct{}, certificateManager *a
 				}
 			}
 			startIPDetection()
-			discoverDomains()
 		}
 	}
 }
@@ -27362,17 +27571,47 @@ func (a *App) autoCertPreparedHostPolicy(ctx context.Context, host string) error
 		return errors.New("automatic SSL listeners are unavailable")
 	}
 	domainContext := contextWithDomain(ctx, certificateDomain)
+	setting := a.domainAutomaticSSLSetting(domainContext, certificateDomain)
+	if setting.ManuallyDisabled {
+		return fmt.Errorf("automatic SSL domain %q is manually disabled", certificateDomain)
+	}
+	if a.autoCertCachedCertificateValid(certificateDomain, time.Now()) {
+		return nil
+	}
 	if !a.domainIsAutomaticSSLCandidate(domainContext, certificateDomain) {
 		return fmt.Errorf("automatic SSL domain %q is not managed by Sitebrush", certificateDomain)
 	}
-	setting := a.domainAutomaticSSLSetting(domainContext, certificateDomain)
-	if setting.ManuallyDisabled || !setting.Enabled {
+	if !setting.Enabled {
 		return fmt.Errorf("automatic SSL domain %q has not passed its background DNS check", certificateDomain)
 	}
 	return nil
 }
 
 func (a *App) listAutomaticSSLDomainCandidates(ctx context.Context) []string {
+	databaseDomains := []string{"localhost"}
+	if a.siteDatabaseRouter != nil {
+		if knownDomains := a.siteDatabaseRouter.Domains(ctx); len(knownDomains) > 0 {
+			databaseDomains = knownDomains
+		}
+	}
+	seenDomains := make(map[string]struct{})
+	for _, databaseDomain := range databaseDomains {
+		a.collectAutomaticSSLDomainCandidates(contextWithDomain(ctx, databaseDomain), seenDomains)
+	}
+	for _, domain := range a.autoCertCachedCertificateDomains(ctx) {
+		if autoCertDomainEligibilityError(domain) == nil {
+			seenDomains[domain] = struct{}{}
+		}
+	}
+	domainList := make([]string, 0, len(seenDomains))
+	for domain := range seenDomains {
+		domainList = append(domainList, domain)
+	}
+	sort.Strings(domainList)
+	return domainList
+}
+
+func (a *App) collectAutomaticSSLDomainCandidates(ctx context.Context, seenDomains map[string]struct{}) {
 	query := `
 SELECT domain FROM pages
 UNION SELECT domain FROM users
@@ -27382,11 +27621,9 @@ UNION SELECT alias_domain FROM domain_aliases
 UNION SELECT domain FROM domain_ssl_settings`
 	rows, err := a.db.QueryContext(ctx, query)
 	if err != nil {
-		return nil
+		return
 	}
 	defer rows.Close()
-	seenDomains := make(map[string]struct{})
-	domainList := make([]string, 0)
 	for rows.Next() {
 		var rawDomain sql.NullString
 		if scanErr := rows.Scan(&rawDomain); scanErr != nil {
@@ -27400,16 +27637,16 @@ UNION SELECT domain FROM domain_ssl_settings`
 			continue
 		}
 		seenDomains[domain] = struct{}{}
-		domainList = append(domainList, domain)
 	}
-	sort.Strings(domainList)
-	return domainList
 }
 
 func (a *App) domainIsAutomaticSSLCandidate(ctx context.Context, domain string) bool {
 	certificateDomain := normalizeDomainName(domain)
 	if certificateDomain == "" {
 		return false
+	}
+	if a.autoCertCachedCertificateValid(certificateDomain, time.Now()) {
+		return true
 	}
 	query := `
 SELECT COUNT(1) FROM (
