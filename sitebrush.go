@@ -666,39 +666,12 @@ const (
 	serverControlDatabaseReaderCount = 5
 )
 
-// A private worker reply keeps the public one-shot channel single-owner.
-// Cancellation can therefore close the public reply without racing a database worker.
 type serverControlDatabaseAccessRequest struct {
-	cancel      chan struct{}
-	reply       chan serverControlDatabaseAccessResponse
-	workerReply chan serverControlDatabaseAccessResponse
-	purpose     string
-	queuedAt    time.Time
-}
-
-type serverControlDatabaseAccessResponse struct {
-	session *serverControlDatabaseSession
-	err     error
-}
-
-type serverControlDatabaseSession struct {
-	*sql.DB
-	release    chan<- struct{}
-	standalone bool
-}
-
-func (session *serverControlDatabaseSession) Close() error {
-	if session == nil || session.DB == nil {
-		return nil
-	}
-	if session.standalone {
-		return session.DB.Close()
-	}
-	select {
-	case session.release <- struct{}{}:
-	default:
-	}
-	return nil
+	ctx      context.Context
+	reply    chan error
+	purpose  string
+	queuedAt time.Time
+	run      func(*sql.DB) error
 }
 
 type serverControlDatabaseDispatcher struct {
@@ -787,7 +760,11 @@ func (dispatcher *serverControlDatabaseDispatcher) runWorker(database *sql.DB, r
 			return
 		case request := <-requests:
 			select {
-			case <-request.cancel:
+			case <-request.ctx.Done():
+				select {
+				case request.reply <- request.ctx.Err():
+				default:
+				}
 				continue
 			default:
 			}
@@ -798,108 +775,61 @@ func (dispatcher *serverControlDatabaseDispatcher) runWorker(database *sql.DB, r
 			if debug || queueDuration >= 5*time.Second {
 				log.Printf("%sCONTROL DB%s worker=%s purpose=%s queue=%s", terminalCyan(), terminalReset(), workerName, request.purpose, queueDuration.String())
 			}
-			release := make(chan struct{}, 1)
-			response := serverControlDatabaseAccessResponse{session: &serverControlDatabaseSession{DB: database, release: release}}
-			delivered := false
-			select {
-			case request.workerReply <- response:
-				delivered = true
-			case <-request.cancel:
-			case <-dispatcher.stop:
-			}
-			if !delivered {
-				continue
-			}
 			startedAt := time.Now()
-			select {
-			case <-release:
-			case <-request.cancel:
-			case <-dispatcher.stop:
-			}
+			err := request.run(database)
 			sessionDuration := time.Since(startedAt)
 			if (debug && sessionDuration >= slowDatabaseOperationLogAfter) || sessionDuration >= 5*time.Second {
-				log.Printf("%sCONTROL DB%s worker=%s purpose=%s session=%s", terminalCyan(), terminalReset(), workerName, request.purpose, sessionDuration.String())
+				log.Printf("%sCONTROL DB%s worker=%s purpose=%s operation=%s", terminalCyan(), terminalReset(), workerName, request.purpose, sessionDuration.String())
+			}
+			select {
+			case request.reply <- err:
+			case <-request.ctx.Done():
+			case <-dispatcher.stop:
 			}
 		}
 	}
 }
 
-func (dispatcher *serverControlDatabaseDispatcher) acquire(ctx context.Context, kind serverControlDatabaseAccessKind) (*serverControlDatabaseSession, error) {
-	return dispatcher.acquireForPurpose(ctx, kind, "unspecified")
-}
-
-func (dispatcher *serverControlDatabaseDispatcher) acquireForPurpose(ctx context.Context, kind serverControlDatabaseAccessKind, purpose string) (*serverControlDatabaseSession, error) {
+func (dispatcher *serverControlDatabaseDispatcher) execute(ctx context.Context, kind serverControlDatabaseAccessKind, purpose string, run func(*sql.DB) error) error {
 	if dispatcher == nil {
-		return nil, errors.New("server control database dispatcher is not running")
+		return errors.New("server control database dispatcher is not running")
 	}
 	select {
 	case <-dispatcher.stopped:
-		return nil, errors.New("server control database dispatcher stopped")
+		return errors.New("server control database dispatcher stopped")
 	default:
 	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	request := serverControlDatabaseAccessRequest{
-		cancel:      make(chan struct{}),
-		reply:       make(chan serverControlDatabaseAccessResponse, 1),
-		workerReply: make(chan serverControlDatabaseAccessResponse, 1),
-		purpose:     firstNonEmpty(strings.TrimSpace(purpose), "unspecified"),
-		queuedAt:    time.Now(),
+	if run == nil {
+		return errors.New("server control database operation is required")
 	}
-	go dispatcher.relayResponse(request)
+	request := serverControlDatabaseAccessRequest{
+		ctx:      ctx,
+		reply:    make(chan error, 1),
+		purpose:  firstNonEmpty(strings.TrimSpace(purpose), "unspecified"),
+		queuedAt: time.Now(),
+		run:      run,
+	}
 	requests := dispatcher.readRequests
-	queueTimeout := 5 * time.Second
 	if kind == serverControlDatabaseWrite {
 		requests = dispatcher.writeRequests
-		queueTimeout = 15 * time.Second
-	}
-	timer := time.NewTimer(queueTimeout)
-	defer timer.Stop()
-	cancelRequest := func() {
-		close(request.cancel)
 	}
 	select {
 	case requests <- request:
 	case <-ctx.Done():
-		cancelRequest()
-		return nil, ctx.Err()
-	case <-timer.C:
-		cancelRequest()
-		return nil, fmt.Errorf("server control database queue timeout")
+		return ctx.Err()
 	case <-dispatcher.stop:
-		cancelRequest()
-		return nil, errors.New("server control database dispatcher stopped")
+		return errors.New("server control database dispatcher stopped")
 	}
 	select {
-	case response, open := <-request.reply:
-		if !open {
-			return nil, context.Canceled
-		}
-		return response.session, response.err
+	case err := <-request.reply:
+		return err
 	case <-ctx.Done():
-		cancelRequest()
-		return nil, ctx.Err()
-	case <-timer.C:
-		cancelRequest()
-		return nil, fmt.Errorf("server control database queue timeout")
+		return ctx.Err()
 	case <-dispatcher.stop:
-		cancelRequest()
-		return nil, errors.New("server control database dispatcher stopped")
-	}
-}
-
-func (dispatcher *serverControlDatabaseDispatcher) relayResponse(request serverControlDatabaseAccessRequest) {
-	defer close(request.reply)
-	select {
-	case response := <-request.workerReply:
-		select {
-		case request.reply <- response:
-		case <-request.cancel:
-		case <-dispatcher.stop:
-		}
-	case <-request.cancel:
-	case <-dispatcher.stop:
+		return errors.New("server control database dispatcher stopped")
 	}
 }
 
@@ -7029,13 +6959,12 @@ func (a *App) billingInvoicePage(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Robots-Tag", "noindex, nofollow")
 	token := strings.TrimSpace(r.URL.Query().Get("token"))
-	controlDatabase, err := a.openServerControlDatabaseRead(r.Context())
-	if err != nil {
-		http.Error(w, "invoice unavailable", http.StatusServiceUnavailable)
-		return
-	}
-	defer controlDatabase.Close()
-	invoice, err := (hostingandsupport.Store{DB: controlDatabase}).InvoiceByPublicToken(r.Context(), token)
+	var invoice hostingandsupport.Invoice
+	err := a.withServerControlDatabaseRead(r.Context(), "billing-invoice-page", func(database *sql.DB) error {
+		var queryErr error
+		invoice, queryErr = (hostingandsupport.Store{DB: database}).InvoiceByPublicToken(r.Context(), token)
+		return queryErr
+	})
 	if err != nil {
 		http.NotFound(w, r)
 		return
@@ -7081,33 +7010,36 @@ func (a *App) billingSchedulePage(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Robots-Tag", "noindex, nofollow")
 	token := strings.TrimSpace(r.URL.Query().Get("token"))
-	controlDatabase, err := a.openServerControlDatabase(r.Context())
-	if err != nil {
-		http.Error(w, "billing schedule unavailable", http.StatusServiceUnavailable)
-		return
-	}
-	defer controlDatabase.Close()
-	store := hostingandsupport.Store{DB: controlDatabase}
-	customer, err := store.BillingCustomerByAccessToken(r.Context(), token)
-	if err != nil {
-		http.NotFound(w, r)
-		return
-	}
+	var customer hostingandsupport.BillingCustomer
 	status := ""
-	if r.Method == http.MethodPost {
+	err := a.withServerControlDatabaseWrite(r.Context(), "billing-schedule-page", func(database *sql.DB) error {
+		store := hostingandsupport.Store{DB: database}
+		var queryErr error
+		customer, queryErr = store.BillingCustomerByAccessToken(r.Context(), token)
+		if queryErr != nil {
+			return queryErr
+		}
+		if r.Method != http.MethodPost {
+			return nil
+		}
 		invoiceDay, _ := strconv.Atoi(strings.TrimSpace(r.FormValue("invoice_day")))
 		paymentTermDays, _ := strconv.Atoi(strings.TrimSpace(r.FormValue("payment_term_days")))
 		if saveErr := store.SaveBillingCustomerSchedule(r.Context(), customer.ID, invoiceDay, paymentTermDays, r.FormValue("timezone")); saveErr != nil {
 			status = saveErr.Error()
-		} else {
-			status = translationOrDefault(translationsForRequest(r), "billing_schedule_saved", "Billing schedule saved.")
-			customer, _ = store.BillingCustomerByID(r.Context(), customer.ID)
-			if a.billingInvoices != nil {
-				select {
-				case a.billingInvoices <- billingInvoiceProcessRequest{kind: "run"}:
-				default:
-				}
-			}
+			return nil
+		}
+		status = translationOrDefault(translationsForRequest(r), "billing_schedule_saved", "Billing schedule saved.")
+		customer, _ = store.BillingCustomerByID(r.Context(), customer.ID)
+		return nil
+	})
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	if r.Method == http.MethodPost && status != "" && a.billingInvoices != nil {
+		select {
+		case a.billingInvoices <- billingInvoiceProcessRequest{kind: "run"}:
+		default:
 		}
 	}
 	translations := translationsForRequest(r)
@@ -7257,12 +7189,12 @@ func (a *App) renderSiteRequestPage(w http.ResponseWriter, r *http.Request, doma
 }
 
 func (a *App) publicHostingAndSupportPlans(ctx context.Context) []hostingandsupport.Plan {
-	controlDatabase, err := a.openServerControlDatabaseRead(ctx)
-	if err != nil {
+	var plans []hostingandsupport.Plan
+	_ = a.withServerControlDatabaseRead(ctx, "public-plans", func(database *sql.DB) error {
+		plans = (hostingandsupport.Store{DB: database}).Plans(ctx)
 		return nil
-	}
-	defer controlDatabase.Close()
-	return (hostingandsupport.Store{DB: controlDatabase}).Plans(ctx)
+	})
+	return plans
 }
 
 func (a *App) createSiteRegistrationRequestFromForm(r *http.Request, domain, name, email, phone string, planID int) string {
@@ -7279,28 +7211,26 @@ func (a *App) createSiteRegistrationRequestFromForm(r *http.Request, domain, nam
 	if phone == "" {
 		return "Укажите телефон."
 	}
-	controlDatabase, err := a.openServerControlDatabase(r.Context())
+	err := a.withServerControlDatabaseWrite(r.Context(), "site-registration-request", func(database *sql.DB) error {
+		store := hostingandsupport.Store{DB: database}
+		if planID <= 0 {
+			if defaultPlan, found := store.DefaultPlan(r.Context()); found {
+				planID = defaultPlan.ID
+			}
+		}
+		if planID <= 0 {
+			return errors.New("Выберите тарифный план.")
+		}
+		if _, found := store.PlanByID(r.Context(), planID); !found {
+			return errors.New("Выбранный тариф не найден.")
+		}
+		return store.CreateSiteRequest(r.Context(), domain, name, email, phone, planID)
+	})
 	if err != nil {
 		return err.Error()
 	}
-	defer controlDatabase.Close()
-	store := hostingandsupport.Store{DB: controlDatabase}
-	if planID <= 0 {
-		if defaultPlan, found := store.DefaultPlan(r.Context()); found {
-			planID = defaultPlan.ID
-		}
-	}
-	if planID <= 0 {
-		return "Выберите тарифный план."
-	}
-	if _, found := store.PlanByID(r.Context(), planID); !found {
-		return "Выбранный тариф не найден."
-	}
-	if err := store.CreateSiteRequest(r.Context(), domain, name, email, phone, planID); err != nil {
-		return err.Error()
-	}
 	a.logHostingSupportEvent(r.Context(), "support_request", "created", email, domain, "site registration request")
-	a.enqueueSiteRegistrationRequestOwnerEmails(r.Context(), r, store, domain, name, email, phone, planID)
+	a.enqueueSiteRegistrationRequestOwnerEmails(r.Context(), r, domain, name, email, phone, planID)
 	return "Заявка отправлена владельцу сервера. После проверки вы получите ответ на email."
 }
 
@@ -7470,15 +7400,19 @@ func (a *App) startDemoSiteRuntimeProcess(stop <-chan struct{}) chan demoSiteRun
 }
 
 func (a *App) loadDemoSiteRuntimeState(ctx context.Context) demoSiteRuntimeState {
-	controlDatabase, err := a.openServerControlDatabaseForPurpose(ctx, serverControlDatabaseRead, "demo-runtime-load")
+	var settings demo.Settings
+	var ownerDomain string
+	var ownerFound bool
+	err := a.withServerControlDatabaseRead(ctx, "demo-runtime-load", func(database *sql.DB) error {
+		store := hostingandsupport.Store{DB: database}
+		settings = (demo.Store{DB: database}).Settings(ctx)
+		ownerDomain, ownerFound = store.OwnerDomain(ctx)
+		return nil
+	})
 	if err != nil {
 		return demoSiteRuntimeState{Status: "error", Error: err.Error()}
 	}
-	store := hostingandsupport.Store{DB: controlDatabase}
-	settings := (demo.Store{DB: controlDatabase}).Settings(ctx)
 	settings.Domain = normalizeDomainName(settings.Domain)
-	ownerDomain, ownerFound := store.OwnerDomain(ctx)
-	_ = controlDatabase.Close()
 	if !settings.Enabled || settings.Domain == "" {
 		return demoSiteRuntimeState{Settings: settings, Status: "disabled"}
 	}
@@ -7499,26 +7433,19 @@ func (a *App) prepareDemoSiteRuntime(stop <-chan struct{}, requests chan<- demoS
 	default:
 	}
 	a.waitForSiteDatabaseStartupMigrations(context.Background())
-	controlDatabase, err := a.openServerControlDatabaseForPurpose(context.Background(), serverControlDatabaseWrite, "demo-runtime-prepare")
-	if err != nil {
-		publishDemoSiteRuntimeState(stop, requests, demoSiteRuntimeState{Settings: settings, Status: "error", Error: err.Error()})
-		return
-	}
 	fallbackSettings := settings
 	fallbackSettings.SourceURL = ""
 	fallbackSettings.CopyWholeSite = false
-	adminEmail, _, fallbackErr := a.ensureDemoSiteReady(context.Background(), controlDatabase.DB, fallbackSettings, false, "")
+	adminEmail, _, fallbackErr := a.ensureDemoSiteReady(context.Background(), fallbackSettings, false, "")
 	if fallbackErr == nil && !a.demoSiteSnapshotAvailable(settings.Domain) {
 		fallbackErr = a.createDemoSiteSnapshot(context.Background(), settings.Domain)
 	}
 	if fallbackErr != nil {
-		_ = controlDatabase.Close()
 		publishDemoSiteRuntimeState(stop, requests, demoSiteRuntimeState{Settings: settings, Status: "error", Error: fallbackErr.Error()})
 		return
 	}
 	refreshing := strings.TrimSpace(settings.SourceURL) != ""
 	publishDemoSiteRuntimeState(stop, requests, demoSiteRuntimeState{Settings: settings, AdminEmail: adminEmail, Status: "ready", Refreshing: refreshing})
-	_ = controlDatabase.Close()
 	if !refreshing {
 		return
 	}
@@ -7536,12 +7463,7 @@ func (a *App) refreshDemoSiteRuntime(stop <-chan struct{}, requests chan<- demoS
 			case <-refreshContext.Done():
 			}
 		}()
-		controlDatabase, openErr := a.openServerControlDatabaseForPurpose(refreshContext, serverControlDatabaseWrite, "demo-runtime-refresh")
-		refreshErr := openErr
-		if openErr == nil {
-			_, _, refreshErr = a.ensureDemoSiteReady(refreshContext, controlDatabase.DB, settings, true, "")
-			_ = controlDatabase.Close()
-		}
+		_, _, refreshErr := a.ensureDemoSiteReady(refreshContext, settings, true, "")
 		cancelRefresh()
 		if refreshErr == nil {
 			publishDemoSiteRuntimeState(stop, requests, demoSiteRuntimeState{Settings: settings, AdminEmail: adminEmail, Status: "ready"})
@@ -7623,12 +7545,14 @@ func (a *App) updateRuntimeDemoSiteState(ctx context.Context, state demoSiteRunt
 }
 
 func (a *App) demoSiteSettings(ctx context.Context) (demo.Settings, bool) {
-	controlDatabase, err := a.openServerControlDatabaseRead(ctx)
+	var settings demo.Settings
+	err := a.withServerControlDatabaseRead(ctx, "demo-settings", func(database *sql.DB) error {
+		settings = (demo.Store{DB: database}).Settings(ctx)
+		return nil
+	})
 	if err != nil {
 		return demo.Settings{}, false
 	}
-	defer controlDatabase.Close()
-	settings := (demo.Store{DB: controlDatabase}).Settings(ctx)
 	settings.Domain = normalizeDomainName(settings.Domain)
 	return settings, settings.Enabled && settings.Domain != ""
 }
@@ -7714,23 +7638,20 @@ func (a *App) persistDemoSessionEventWithRetry(stop <-chan struct{}, event demoS
 }
 
 func (a *App) persistDemoSessionEvent(ctx context.Context, event demoSessionEvent) error {
-	controlDatabase, err := a.openServerControlDatabaseForPurpose(ctx, serverControlDatabaseWrite, "demo-session-"+event.kind)
-	if err != nil {
-		return err
-	}
-	defer controlDatabase.Close()
-	store := demo.Store{DB: controlDatabase}
-	switch event.kind {
-	case "create":
-		return store.CreateSession(ctx, event.domain, event.sessionToken, event.userEmail, event.resetAfter)
-	case "logout":
-		return store.ScheduleSessionReset(ctx, event.sessionToken, event.resetAfter)
-	default:
-		return fmt.Errorf("unsupported demo session event %q", event.kind)
-	}
+	return a.withServerControlDatabaseWrite(ctx, "demo-session-"+event.kind, func(database *sql.DB) error {
+		store := demo.Store{DB: database}
+		switch event.kind {
+		case "create":
+			return store.CreateSession(ctx, event.domain, event.sessionToken, event.userEmail, event.resetAfter)
+		case "logout":
+			return store.ScheduleSessionReset(ctx, event.sessionToken, event.resetAfter)
+		default:
+			return fmt.Errorf("unsupported demo session event %q", event.kind)
+		}
+	})
 }
 
-func (a *App) ensureDemoSiteReady(ctx context.Context, controlDatabase *sql.DB, settings demo.Settings, refreshSnapshot bool, progressToken string) (string, int, error) {
+func (a *App) ensureDemoSiteReady(ctx context.Context, settings demo.Settings, refreshSnapshot bool, progressToken string) (string, int, error) {
 	domain := normalizeDomainName(settings.Domain)
 	if domain == "" {
 		return "", 0, fmt.Errorf("demo domain is required")
@@ -7743,7 +7664,7 @@ func (a *App) ensureDemoSiteReady(ctx context.Context, controlDatabase *sql.DB, 
 			return "", 0, pathErr
 		}
 		if _, statErr := os.Stat(realDatabasePath); statErr == nil {
-			if err := a.deleteDemoManagedSiteWithoutBackup(ctx, controlDatabase, domain); err != nil {
+			if err := a.deleteDemoManagedSiteWithoutBackup(ctx, domain); err != nil {
 				return "", 0, err
 			}
 		} else if !errors.Is(statErr, os.ErrNotExist) {
@@ -7756,7 +7677,7 @@ func (a *App) ensureDemoSiteReady(ctx context.Context, controlDatabase *sql.DB, 
 	}
 	if refreshSnapshot || !a.demoSiteHasLandingPage(ctx, domain) {
 		if !refreshSnapshot {
-			restoreErr := a.restoreDemoSiteFromSnapshot(ctx, controlDatabase, domain)
+			restoreErr := a.restoreDemoSiteFromSnapshot(ctx, domain)
 			if restoreErr == nil && a.demoSiteHasLandingPage(ctx, domain) {
 				return adminEmail, 0, nil
 			}
@@ -7930,17 +7851,21 @@ func (a *App) demoGrabPreview(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "demo_site_source_url is required", http.StatusBadRequest)
 		return
 	}
-	controlDatabase, err := a.openServerControlDatabaseRead(r.Context())
+	ownerMatchesDemo := false
+	err := a.withServerControlDatabaseRead(r.Context(), "demo-preview-owner-check", func(database *sql.DB) error {
+		if ownerDomain, found := (hostingandsupport.Store{DB: database}).OwnerDomain(r.Context()); found {
+			ownerMatchesDemo = normalizeDomainName(ownerDomain) == domain
+		}
+		return nil
+	})
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	if ownerDomain, found := (hostingandsupport.Store{DB: controlDatabase}).OwnerDomain(r.Context()); found && normalizeDomainName(ownerDomain) == domain {
-		_ = controlDatabase.Close()
+	if ownerMatchesDemo {
 		http.Error(w, "server owner site cannot be used as the public demo site", http.StatusBadRequest)
 		return
 	}
-	_ = controlDatabase.Close()
 	remoteSourceURL, err := parseGrabSourceURL(sourceURL)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -8008,13 +7933,6 @@ func (a *App) demoGrabRefresh(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
-	controlDatabase, err := a.openServerControlDatabase(r.Context())
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	defer controlDatabase.Close()
-	store := hostingandsupport.Store{DB: controlDatabase}
 	demoDomain := normalizeQuotaDomainName(r.FormValue("demo_site_domain"))
 	demoSourceURL, demoSourceErr := demo.NormalizeSourceURL(r.FormValue("demo_site_source_url"))
 	if demoSourceErr != nil {
@@ -8025,12 +7943,19 @@ func (a *App) demoGrabRefresh(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Домен демо-сайта обязателен.", http.StatusBadRequest)
 		return
 	}
-	if ownerDomain, found := store.OwnerDomain(r.Context()); found && normalizeDomainName(ownerDomain) == demoDomain {
-		http.Error(w, "Сайт владельца сервера нельзя использовать как публичный демо-сайт.", http.StatusBadRequest)
-		return
-	}
 	demoCopyWholeSite := demoCopyWholeSiteFromRequest(r)
-	if err := (demo.Store{DB: controlDatabase}).SaveSettings(r.Context(), demoDomain, demoSourceURL, demoCopyWholeSite, true); err != nil {
+	err := a.withServerControlDatabaseWrite(r.Context(), "demo-refresh-settings", func(database *sql.DB) error {
+		store := hostingandsupport.Store{DB: database}
+		if ownerDomain, found := store.OwnerDomain(r.Context()); found && normalizeDomainName(ownerDomain) == demoDomain {
+			return errors.New("Сайт владельца сервера нельзя использовать как публичный демо-сайт.")
+		}
+		return (demo.Store{DB: database}).SaveSettings(r.Context(), demoDomain, demoSourceURL, demoCopyWholeSite, true)
+	})
+	if err != nil {
+		if strings.Contains(err.Error(), "владельца сервера") {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -8044,7 +7969,7 @@ func (a *App) demoGrabRefresh(w http.ResponseWriter, r *http.Request) {
 		failedTotal, err = a.retryDemoFailedResources(r.Context(), settings, progressToken, failedResourceURLs)
 		adminEmail, _ = a.firstAdminEmailForDomain(r.Context(), demoDomain)
 	} else {
-		adminEmail, failedTotal, err = a.ensureDemoSiteReady(r.Context(), controlDatabase.DB, settings, true, progressToken)
+		adminEmail, failedTotal, err = a.ensureDemoSiteReady(r.Context(), settings, true, progressToken)
 	}
 	if err != nil {
 		a.updateRuntimeDemoSiteState(r.Context(), a.demoSiteRefreshFailureState(r.Context(), settings, err))
@@ -8296,7 +8221,7 @@ func (a *App) createDemoSiteSnapshot(ctx context.Context, domain string) error {
 	return a.renameInsideStorage(tempPath, snapshotPath)
 }
 
-func (a *App) restoreDemoSiteFromSnapshot(ctx context.Context, controlDatabase *sql.DB, domain string) error {
+func (a *App) restoreDemoSiteFromSnapshot(ctx context.Context, domain string) error {
 	domain = normalizeDomainName(domain)
 	snapshotPath := a.demoSiteSnapshotPath(domain)
 	snapshotFile, err := a.openFileInsideStorage(snapshotPath)
@@ -8319,16 +8244,13 @@ func (a *App) restoreDemoSiteFromSnapshot(ctx context.Context, controlDatabase *
 	if err != nil {
 		return err
 	}
-	if controlDatabase != nil {
-		demoStore := demo.Store{DB: controlDatabase}
+	return a.withServerControlDatabaseWrite(ctx, "demo-snapshot-restored", func(database *sql.DB) error {
+		demoStore := demo.Store{DB: database}
 		if err := demoStore.RemoveSessionsForDomain(ctx, domain); err != nil {
 			return err
 		}
-		if err := demoStore.MarkContentRestored(ctx, domain, time.Now()); err != nil {
-			return err
-		}
-	}
-	return nil
+		return demoStore.MarkContentRestored(ctx, domain, time.Now())
+	})
 }
 
 func (a *App) clearDemoSiteContent(ctx context.Context, domain string) error {
@@ -9484,15 +9406,17 @@ func (a *App) publicTrialSiteCreate(w http.ResponseWriter, r *http.Request) {
 		selectedResourceURLs = publicTrialResourceURLMap(preview.Resources)
 	}
 	preview = a.preparePublicTrialPreviewForCreate(r.Context(), preview, selectedResourceURLs, createProgressToken)
-	controlDatabase, err := a.openServerControlDatabase(r.Context())
+	var parentDomain string
+	err := a.withServerControlDatabaseRead(r.Context(), "public-trial-owner", func(database *sql.DB) error {
+		var ownerFound bool
+		parentDomain, ownerFound = (hostingandsupport.Store{DB: database}).OwnerDomain(r.Context())
+		if !ownerFound {
+			return errors.New("owner domain is required")
+		}
+		return nil
+	})
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	defer controlDatabase.Close()
-	parentDomain, found := (hostingandsupport.Store{DB: controlDatabase}).OwnerDomain(r.Context())
-	if !found {
-		http.Error(w, "owner domain is required", http.StatusBadRequest)
 		return
 	}
 	trialDomain, err := a.availablePublicTrialDomain(r.Context(), preview.SourceURL, parentDomain)
@@ -9510,7 +9434,7 @@ func (a *App) publicTrialSiteCreate(w http.ResponseWriter, r *http.Request) {
 	}
 	domainContext := contextWithSiteDatabaseCreation(contextWithDomain(r.Context(), trialDomain))
 	if err := a.persistPublicTrialPreview(domainContext, trialDomain, preview); err != nil {
-		_ = a.deleteDemoManagedSiteWithoutBackup(r.Context(), controlDatabase.DB, trialDomain)
+		_ = a.deleteDemoManagedSiteWithoutBackup(r.Context(), trialDomain)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -9519,7 +9443,13 @@ func (a *App) publicTrialSiteCreate(w http.ResponseWriter, r *http.Request) {
 		serviceStatus = "free"
 	}
 	if preview.Plan.ID > 0 {
-		_ = (hostingandsupport.Store{DB: controlDatabase}).AssignSite(r.Context(), trialDomain, preview.Plan.ID, serviceStatus)
+		if err := a.withServerControlDatabaseWrite(r.Context(), "public-trial-assign", func(database *sql.DB) error {
+			return (hostingandsupport.Store{DB: database}).AssignSite(r.Context(), trialDomain, preview.Plan.ID, serviceStatus)
+		}); err != nil {
+			_ = a.deleteDemoManagedSiteWithoutBackup(r.Context(), trialDomain)
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
 	}
 	a.activePublicTrialPreviewStore().Delete(progressToken)
 	w.Header().Set("Content-Type", "application/json")
@@ -9580,20 +9510,14 @@ func (a *App) publicTrialSiteWS(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) publicTrialAllowed(r *http.Request) bool {
-	controlDatabase, err := a.openServerControlDatabaseRead(r.Context())
-	if err != nil {
-		return false
-	}
-	defer controlDatabase.Close()
-	store := hostingandsupport.Store{DB: controlDatabase}
-	if !store.AutomaticRegistrationAllowed(r.Context()) {
-		return false
-	}
-	ownerDomain, found := store.OwnerDomain(r.Context())
-	if !found {
-		return false
-	}
-	return normalizeDomainName(ownerDomain) == normalizeDomainName(a.siteDomain(r.Context(), r))
+	allowed := false
+	_ = a.withServerControlDatabaseRead(r.Context(), "public-trial-allowed", func(database *sql.DB) error {
+		store := hostingandsupport.Store{DB: database}
+		ownerDomain, found := store.OwnerDomain(r.Context())
+		allowed = store.AutomaticRegistrationAllowed(r.Context()) && found && normalizeDomainName(ownerDomain) == normalizeDomainName(a.siteDomain(r.Context(), r))
+		return nil
+	})
+	return allowed
 }
 
 func (a *App) cleanupExpiredPublicTrialSite(ctx context.Context, domain string) {
@@ -9601,14 +9525,11 @@ func (a *App) cleanupExpiredPublicTrialSite(ctx context.Context, domain string) 
 	if domain == "" {
 		return
 	}
-	controlDatabase, err := a.openServerControlDatabaseForPurpose(ctx, serverControlDatabaseRead, "trial-cleanup-check")
-	if err != nil {
-		return
-	}
 	var serviceStatus string
 	var updatedAtText string
-	err = controlDatabase.QueryRowContext(ctx, `SELECT service_status,updated_at FROM site_service_assignments WHERE domain=?`, domain).Scan(&serviceStatus, &updatedAtText)
-	_ = controlDatabase.Close()
+	err := a.withServerControlDatabaseRead(ctx, "trial-cleanup-check", func(database *sql.DB) error {
+		return database.QueryRowContext(ctx, `SELECT service_status,updated_at FROM site_service_assignments WHERE domain=?`, domain).Scan(&serviceStatus, &updatedAtText)
+	})
 	if err != nil {
 		return
 	}
@@ -9630,30 +9551,29 @@ func (a *App) cleanupExpiredPublicTrialSite(ctx context.Context, domain string) 
 	if found && sameSiteQuotaPath(row.DatabasePath, a.serverControlDBPath()) {
 		return
 	}
-	writeDatabase, err := a.openServerControlDatabaseForPurpose(ctx, serverControlDatabaseWrite, "trial-cleanup-delete")
-	if err != nil {
+	deleted := false
+	_ = a.withServerControlDatabaseWrite(ctx, "trial-cleanup-delete", func(database *sql.DB) error {
+		if queryErr := database.QueryRowContext(ctx, `SELECT service_status,updated_at FROM site_service_assignments WHERE domain=?`, domain).Scan(&serviceStatus, &updatedAtText); queryErr != nil {
+			return queryErr
+		}
+		serviceStatus = strings.ToLower(strings.TrimSpace(serviceStatus))
+		updatedAt, parseErr = time.Parse(time.RFC3339, strings.TrimSpace(updatedAtText))
+		if (serviceStatus != "trial" && serviceStatus != "free") || parseErr != nil || time.Since(updatedAt) <= 24*time.Hour {
+			return nil
+		}
+		var ownerCount int
+		_ = database.QueryRowContext(ctx, `SELECT COUNT(1) FROM server_managers WHERE domain=? AND role='owner'`, domain).Scan(&ownerCount)
+		if ownerCount > 0 {
+			return nil
+		}
+		(hostingandsupport.Store{DB: database}).RemoveSiteAssignment(ctx, domain)
+		_, deleteErr := database.ExecContext(ctx, `DELETE FROM server_managers WHERE domain=? AND role<>'owner'`, domain)
+		deleted = deleteErr == nil
+		return deleteErr
+	})
+	if !deleted {
 		return
 	}
-	err = writeDatabase.QueryRowContext(ctx, `SELECT service_status,updated_at FROM site_service_assignments WHERE domain=?`, domain).Scan(&serviceStatus, &updatedAtText)
-	if err != nil {
-		_ = writeDatabase.Close()
-		return
-	}
-	serviceStatus = strings.ToLower(strings.TrimSpace(serviceStatus))
-	updatedAt, parseErr = time.Parse(time.RFC3339, strings.TrimSpace(updatedAtText))
-	if (serviceStatus != "trial" && serviceStatus != "free") || parseErr != nil || time.Since(updatedAt) <= 24*time.Hour {
-		_ = writeDatabase.Close()
-		return
-	}
-	var ownerCount int
-	_ = writeDatabase.QueryRowContext(ctx, `SELECT COUNT(1) FROM server_managers WHERE domain=? AND role='owner'`, domain).Scan(&ownerCount)
-	if ownerCount > 0 {
-		_ = writeDatabase.Close()
-		return
-	}
-	(hostingandsupport.Store{DB: writeDatabase}).RemoveSiteAssignment(ctx, domain)
-	_, _ = writeDatabase.ExecContext(ctx, `DELETE FROM server_managers WHERE domain=? AND role<>'owner'`, domain)
-	_ = writeDatabase.Close()
 	if found {
 		if deleteErr := a.deleteManagedSiteFiles(ctx, row); deleteErr != nil {
 			log.Printf("expired public trial cleanup failed domain=%s error=%v", domain, deleteErr)
@@ -9662,29 +9582,28 @@ func (a *App) cleanupExpiredPublicTrialSite(ctx context.Context, domain string) 
 }
 
 func (a *App) cleanupExpiredPublicTrialSites(ctx context.Context, now time.Time) {
-	controlDatabase, err := a.openServerControlDatabaseForPurpose(ctx, serverControlDatabaseRead, "trial-cleanup-scan")
-	if err != nil {
-		return
-	}
-	rows, err := controlDatabase.QueryContext(ctx, `SELECT domain,updated_at FROM site_service_assignments WHERE service_status IN ('trial','free')`)
-	if err != nil {
-		_ = controlDatabase.Close()
-		return
-	}
 	expiredDomains := make([]string, 0)
-	for rows.Next() {
-		var domain string
-		var updatedAtText string
-		if scanErr := rows.Scan(&domain, &updatedAtText); scanErr != nil {
-			continue
+	if err := a.withServerControlDatabaseRead(ctx, "trial-cleanup-scan", func(database *sql.DB) error {
+		rows, queryErr := database.QueryContext(ctx, `SELECT domain,updated_at FROM site_service_assignments WHERE service_status IN ('trial','free')`)
+		if queryErr != nil {
+			return queryErr
 		}
-		updatedAt, parseErr := time.Parse(time.RFC3339, strings.TrimSpace(updatedAtText))
-		if parseErr == nil && now.Sub(updatedAt) > 24*time.Hour {
-			expiredDomains = append(expiredDomains, domain)
+		defer rows.Close()
+		for rows.Next() {
+			var domain string
+			var updatedAtText string
+			if scanErr := rows.Scan(&domain, &updatedAtText); scanErr != nil {
+				continue
+			}
+			updatedAt, parseErr := time.Parse(time.RFC3339, strings.TrimSpace(updatedAtText))
+			if parseErr == nil && now.Sub(updatedAt) > 24*time.Hour {
+				expiredDomains = append(expiredDomains, domain)
+			}
 		}
+		return rows.Err()
+	}); err != nil {
+		return
 	}
-	_ = rows.Close()
-	_ = controlDatabase.Close()
 	for _, domain := range expiredDomains {
 		select {
 		case <-ctx.Done():
@@ -9700,25 +9619,14 @@ func (a *App) activatePublicTrialAfterAdminRegistration(ctx context.Context, dom
 	if domain == "" {
 		return
 	}
-	controlDatabase, err := a.openServerControlDatabase(ctx)
-	if err != nil {
-		return
-	}
-	defer controlDatabase.Close()
-	store := hostingandsupport.Store{DB: controlDatabase}
-	assignments := store.ServiceAssignments(ctx)
-	assignment, found := assignments[domain]
-	if !found {
-		return
-	}
-	serviceStatus := strings.ToLower(strings.TrimSpace(assignment.ServiceStatus))
-	if serviceStatus == "free" {
-		return
-	}
-	if serviceStatus != "trial" {
-		return
-	}
-	_ = store.AssignSite(ctx, domain, assignment.PlanID, "trial")
+	_ = a.withServerControlDatabaseWrite(ctx, "public-trial-activate", func(database *sql.DB) error {
+		store := hostingandsupport.Store{DB: database}
+		assignment, found := store.ServiceAssignments(ctx)[domain]
+		if !found || strings.ToLower(strings.TrimSpace(assignment.ServiceStatus)) != "trial" {
+			return nil
+		}
+		return store.AssignSite(ctx, domain, assignment.PlanID, "trial")
+	})
 }
 
 func (a *App) rawManagedSiteHasAdmin(ctx context.Context, domain string) bool {
@@ -11684,10 +11592,17 @@ func (a *App) streamGrabProgressEvents(w http.ResponseWriter, r *http.Request) {
 	if !writeGrabProgressEvent(w, flusher, grabProgressEvent{Token: progressToken, Stage: "ready"}) {
 		return
 	}
+	heartbeat := time.NewTicker(15 * time.Second)
+	defer heartbeat.Stop()
 	for {
 		select {
 		case <-r.Context().Done():
 			return
+		case <-heartbeat.C:
+			if _, writeErr := io.WriteString(w, ": heartbeat\n\n"); writeErr != nil {
+				return
+			}
+			flusher.Flush()
 		case event, isOpen := <-events:
 			if !isOpen {
 				return
@@ -11858,21 +11773,13 @@ func (a *App) expensesPage(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) startHostingAndSupportPanelProcess(stop <-chan struct{}) chan hostingAndSupportPanelRequest {
 	requests := make(chan hostingAndSupportPanelRequest, 16)
-	controlDatabase, err := a.openServerControlDatabaseRead(context.Background())
-	if err != nil {
-		log.Printf("hosting panel snapshot store unavailable: %v", err)
-	}
 	initialSnapshot := hostingAndSupportPanelSnapshot{Version: hostingAndSupportPanelSnapshotVersion}
-	if controlDatabase != nil {
-		defer controlDatabase.Close()
-		store := hostingandsupport.Store{DB: controlDatabase}
+	err := a.withServerControlDatabaseRead(context.Background(), "hosting-panel-initial", func(database *sql.DB) error {
+		store := hostingandsupport.Store{DB: database}
 		storedSnapshot, found := store.PanelSnapshot(context.Background())
 		if found && storedSnapshot.Version == hostingAndSupportPanelSnapshotVersion {
 			if decodeErr := json.Unmarshal([]byte(storedSnapshot.PayloadJSON), &initialSnapshot); decodeErr != nil {
-				log.Printf("hosting panel snapshot decode failed: %v", decodeErr)
-				initialSnapshot = hostingAndSupportPanelSnapshot{Version: hostingAndSupportPanelSnapshotVersion}
-			} else if initialSnapshot.Version != hostingAndSupportPanelSnapshotVersion {
-				initialSnapshot = hostingAndSupportPanelSnapshot{Version: hostingAndSupportPanelSnapshotVersion}
+				return decodeErr
 			}
 		}
 		if strings.TrimSpace(initialSnapshot.MainDomain) == "" {
@@ -11881,6 +11788,14 @@ func (a *App) startHostingAndSupportPanelProcess(stop <-chan struct{}) chan host
 				initialSnapshot.OwnerEmails = store.OwnerEmails(context.Background())
 			}
 		}
+		return nil
+	})
+	if err != nil {
+		log.Printf("hosting panel snapshot store unavailable: %v", err)
+		initialSnapshot = hostingAndSupportPanelSnapshot{Version: hostingAndSupportPanelSnapshotVersion}
+	}
+	if initialSnapshot.Version != hostingAndSupportPanelSnapshotVersion {
+		initialSnapshot = hostingAndSupportPanelSnapshot{Version: hostingAndSupportPanelSnapshotVersion}
 	}
 	buildResults := make(chan hostingAndSupportPanelBuildResult, 1)
 	snapshotSaves := make(chan hostingAndSupportPanelSnapshot, 1)
@@ -12046,13 +11961,14 @@ func (a *App) startBillingInvoiceProcess(stop <-chan struct{}) chan billingInvoi
 			if !found {
 				return
 			}
-			controlDatabase, err := a.openServerControlDatabaseForPurpose(context.Background(), serverControlDatabaseWrite, "automatic-billing")
+			err := a.withServerControlDatabaseWrite(context.Background(), "automatic-billing", func(database *sql.DB) error {
+				a.runAutomaticBillingOnce(context.Background(), hostingandsupport.Store{DB: database}, snapshot, time.Now().UTC())
+				return nil
+			})
 			if err != nil {
 				log.Printf("automatic billing database unavailable: %v", err)
 				return
 			}
-			defer controlDatabase.Close()
-			a.runAutomaticBillingOnce(context.Background(), hostingandsupport.Store{DB: controlDatabase}, snapshot, time.Now().UTC())
 			a.refreshHostingAndSupportPanel()
 		}
 		for {
@@ -12291,13 +12207,10 @@ func (a *App) saveHostingAndSupportPanelSnapshot(snapshot hostingAndSupportPanel
 	if err != nil {
 		return err
 	}
-	controlDatabase, err := a.openServerControlDatabaseForPurpose(context.Background(), serverControlDatabaseWrite, "expenses-snapshot-save")
-	if err != nil {
-		return err
-	}
-	defer controlDatabase.Close()
-	return (hostingandsupport.Store{DB: controlDatabase}).SavePanelSnapshot(context.Background(), hostingandsupport.PanelSnapshotRecord{
-		Version: hostingAndSupportPanelSnapshotVersion, PayloadJSON: string(payload), BuiltAt: snapshot.BuiltAt,
+	return a.withServerControlDatabaseWrite(context.Background(), "expenses-snapshot-save", func(database *sql.DB) error {
+		return (hostingandsupport.Store{DB: database}).SavePanelSnapshot(context.Background(), hostingandsupport.PanelSnapshotRecord{
+			Version: hostingAndSupportPanelSnapshotVersion, PayloadJSON: string(payload), BuiltAt: snapshot.BuiltAt,
+		})
 	})
 }
 
@@ -12332,18 +12245,22 @@ func (a *App) hostingAndSupportMainDomain(ctx context.Context) string {
 	if snapshot, found := a.preparedHostingAndSupportPanelSnapshot(); found && strings.TrimSpace(snapshot.MainDomain) != "" {
 		return normalizeHostingAndSupportMainDomain(snapshot.MainDomain)
 	}
-	controlDatabase, err := a.openServerControlDatabase(ctx)
-	if err != nil {
-		return "localhost"
-	}
-	defer controlDatabase.Close()
-	store := hostingandsupport.Store{DB: controlDatabase}
-	if ownerDomain, found := store.OwnerDomain(ctx); found {
-		return normalizeHostingAndSupportMainDomain(ownerDomain)
+	mainDomain := ""
+	_ = a.withServerControlDatabaseRead(ctx, "hosting-main-domain", func(database *sql.DB) error {
+		if ownerDomain, found := (hostingandsupport.Store{DB: database}).OwnerDomain(ctx); found {
+			mainDomain = normalizeHostingAndSupportMainDomain(ownerDomain)
+		}
+		return nil
+	})
+	if mainDomain != "" {
+		return mainDomain
 	}
 	domain, email, found := a.firstExistingSiteAdmin(ctx)
 	if found {
-		store.PromoteOwnerIfMissing(ctx, domain, email)
+		_ = a.withServerControlDatabaseWrite(ctx, "hosting-promote-owner", func(database *sql.DB) error {
+			(hostingandsupport.Store{DB: database}).PromoteOwnerIfMissing(ctx, domain, email)
+			return nil
+		})
 		return normalizeHostingAndSupportMainDomain(domain)
 	}
 	return "localhost"
@@ -12471,12 +12388,12 @@ func (a *App) saveServerExpensePolicyFromForm(r *http.Request) string {
 	if err := policy.Validate(); err != nil {
 		return translationOrDefault(translations, "expenses_server_policy_invalid", "Check the server expense settings.")
 	}
-	controlDatabase, err := a.openServerControlDatabase(r.Context())
-	if err != nil {
-		return err.Error()
-	}
-	defer controlDatabase.Close()
-	savedPolicy, err := (hostingandsupport.Store{DB: controlDatabase}).SaveServerExpensePolicy(r.Context(), policy)
+	var savedPolicy expenses.ServerPolicy
+	err := a.withServerControlDatabaseWrite(r.Context(), "save-expense-policy", func(database *sql.DB) error {
+		var saveErr error
+		savedPolicy, saveErr = (hostingandsupport.Store{DB: database}).SaveServerExpensePolicy(r.Context(), policy)
+		return saveErr
+	})
 	if err != nil {
 		return err.Error()
 	}
@@ -12496,12 +12413,9 @@ func (a *App) saveBillingCustomerScheduleFromForm(r *http.Request) string {
 	invoiceDay, _ := strconv.Atoi(strings.TrimSpace(r.FormValue("invoice_day")))
 	paymentTermDays, _ := strconv.Atoi(strings.TrimSpace(r.FormValue("payment_term_days")))
 	timezone := strings.TrimSpace(r.FormValue("timezone"))
-	controlDatabase, err := a.openServerControlDatabase(r.Context())
-	if err != nil {
-		return err.Error()
-	}
-	defer controlDatabase.Close()
-	if err := (hostingandsupport.Store{DB: controlDatabase}).SaveBillingCustomerSchedule(r.Context(), customerID, invoiceDay, paymentTermDays, timezone); err != nil {
+	if err := a.withServerControlDatabaseWrite(r.Context(), "save-billing-schedule", func(database *sql.DB) error {
+		return (hostingandsupport.Store{DB: database}).SaveBillingCustomerSchedule(r.Context(), customerID, invoiceDay, paymentTermDays, timezone)
+	}); err != nil {
 		return err.Error()
 	}
 	if a.billingInvoices != nil {
@@ -12519,25 +12433,22 @@ func (a *App) saveSitebrushCommissionFromForm(r *http.Request) string {
 		return translationOrDefault(translationsForRequest(r), "billing_commission_invalid", "Commission is invalid.")
 	}
 	commissionBPS := int(math.Round(commissionPercent * 100))
-	controlDatabase, err := a.openServerControlDatabase(r.Context())
+	err = a.withServerControlDatabaseWrite(r.Context(), "save-sitebrush-commission", func(database *sql.DB) error {
+		store := hostingandsupport.Store{DB: database}
+		ownerDomain, ownerFound := store.OwnerDomain(r.Context())
+		if !ownerFound || normalizeDomainName(ownerDomain) != "sitebrush.com" {
+			return errors.New(translationOrDefault(translationsForRequest(r), "billing_commission_central_only", "Commission can only be changed on sitebrush.com."))
+		}
+		return store.SaveSitebrushCommissionBPS(r.Context(), commissionBPS)
+	})
 	if err != nil {
-		return err.Error()
-	}
-	defer controlDatabase.Close()
-	store := hostingandsupport.Store{DB: controlDatabase}
-	ownerDomain, ownerFound := store.OwnerDomain(r.Context())
-	if !ownerFound || normalizeDomainName(ownerDomain) != "sitebrush.com" {
-		return translationOrDefault(translationsForRequest(r), "billing_commission_central_only", "Commission can only be changed on sitebrush.com.")
-	}
-	if err := store.SaveSitebrushCommissionBPS(r.Context(), commissionBPS); err != nil {
 		return err.Error()
 	}
 	return translationOrDefault(translationsForRequest(r), "billing_commission_saved", "Commission saved.")
 }
 
-func (a *App) hostingAndSupportCanShowCentralServers(ctx context.Context, store hostingandsupport.Store, sitebrushComKey hostingandsupport.SitebrushComKey) bool {
-	ownerDomain, ownerFound := store.OwnerDomain(ctx)
-	if !ownerFound || normalizeDomainName(ownerDomain) != "sitebrush.com" {
+func (a *App) hostingAndSupportCanShowCentralServers(ctx context.Context, ownerDomain string, sitebrushComKey hostingandsupport.SitebrushComKey) bool {
+	if normalizeDomainName(ownerDomain) != "sitebrush.com" {
 		return false
 	}
 	if strings.TrimSpace(sitebrushComKey.PublicKey) != strings.TrimSpace(sitebrushComServiceMailRelayPublicKey) {
@@ -12563,38 +12474,46 @@ func (a *App) expensesView(ctx context.Context, r *http.Request) (map[string]any
 }
 
 func (a *App) collectHostingAndSupportPanelSnapshot(ctx context.Context, controlDatabase *sql.DB) (hostingAndSupportPanelSnapshot, error) {
-	var controlDatabaseSession *serverControlDatabaseSession
-	if controlDatabase == nil {
-		var err error
-		controlDatabaseSession, err = a.openServerControlDatabaseForPurpose(ctx, serverControlDatabaseWrite, "expenses-snapshot-build")
-		if err != nil {
-			return hostingAndSupportPanelSnapshot{}, err
-		}
-		controlDatabase = controlDatabaseSession.DB
-	}
-	if controlDatabaseSession != nil {
-		defer controlDatabaseSession.Close()
-	}
-	store := hostingandsupport.Store{DB: controlDatabase}
-	plans := store.Plans(ctx)
-	invoices := store.Invoices(ctx, 80)
-	assignments := store.ServiceAssignments(ctx)
-	siteRequests := store.SiteRequests(ctx)
-	pendingSiteRequests, approvedSiteRequestsByDomain := hostingAndSupportSplitSiteRequests(siteRequests)
-	_ = a.migrateLegacySitebrushComPrivateKey(ctx, controlDatabase)
-	sitebrushComKey := store.SitebrushComKey(ctx)
-	serviceMailRelayEnabled := store.ServiceMailRelayEnabled(ctx)
-	demoSettings := (demo.Store{DB: controlDatabase}).Settings(ctx)
-	mainDomain := ""
-	if ownerDomain, found := store.OwnerDomain(ctx); found {
-		mainDomain = ownerDomain
-	}
-	showCentralRegistry := a.hostingAndSupportCanShowCentralServers(ctx, store, sitebrushComKey)
-	allClientHostings := make([]hostingandsupport.ClientHosting, 0)
-	registrySyncEvents := make([]hostingandsupport.RegistrySyncEvent, 0)
-	if showCentralRegistry {
+	_ = controlDatabase
+	_ = a.migrateLegacySitebrushComPrivateKey(ctx)
+	var plans []hostingandsupport.Plan
+	var invoices []hostingandsupport.Invoice
+	var assignments map[string]hostingandsupport.ServiceAssignment
+	var siteRequests []hostingandsupport.SiteRequest
+	var sitebrushComKey hostingandsupport.SitebrushComKey
+	var serviceMailRelayEnabled bool
+	var demoSettings demo.Settings
+	var mainDomain string
+	var allClientHostings []hostingandsupport.ClientHosting
+	var registrySyncEvents []hostingandsupport.RegistrySyncEvent
+	var demoSessions []demo.Session
+	var ownerEmails []string
+	var deletionBackupPathsByDomain map[string][]string
+	if err := a.withServerControlDatabaseRead(ctx, "expenses-snapshot-control-data", func(database *sql.DB) error {
+		store := hostingandsupport.Store{DB: database}
+		plans = store.Plans(ctx)
+		invoices = store.Invoices(ctx, 80)
+		assignments = store.ServiceAssignments(ctx)
+		siteRequests = store.SiteRequests(ctx)
+		sitebrushComKey = store.SitebrushComKey(ctx)
+		serviceMailRelayEnabled = store.ServiceMailRelayEnabled(ctx)
+		demoStore := demo.Store{DB: database}
+		demoSettings = demoStore.Settings(ctx)
+		demoSessions = demoStore.Sessions(ctx)
+		mainDomain, _ = store.OwnerDomain(ctx)
+		ownerEmails = store.OwnerEmails(ctx)
 		allClientHostings = store.ClientHostings(ctx)
 		registrySyncEvents = store.RegistrySyncEvents(ctx, 40)
+		deletionBackupPathsByDomain = a.managedSiteDeletionBackupPathsByDomain(ctx, database)
+		return nil
+	}); err != nil {
+		return hostingAndSupportPanelSnapshot{}, err
+	}
+	pendingSiteRequests, approvedSiteRequestsByDomain := hostingAndSupportSplitSiteRequests(siteRequests)
+	showCentralRegistry := a.hostingAndSupportCanShowCentralServers(ctx, mainDomain, sitebrushComKey)
+	if !showCentralRegistry {
+		allClientHostings = nil
+		registrySyncEvents = nil
 	}
 	clientHostings, desktopHostingGroups, archivedHostings := hostingandsupport.ClassifyClientHostings(allClientHostings, time.Now().UTC())
 	hostingAndSupportDemoDomain := ""
@@ -12602,8 +12521,8 @@ func (a *App) collectHostingAndSupportPanelSnapshot(ctx context.Context, control
 		hostingAndSupportDemoDomain = demoSettings.Domain
 	}
 	clientHostings = hostingandsupport.ClientHostingsWithDemoDomain(clientHostings, hostingAndSupportDemoDomain)
-	deletionBackupSizesByDomain := a.managedSiteDeletionBackupSizesByDomain(ctx, controlDatabase)
-	siteRows, err := a.hostingAndSupportSiteRows(ctx, controlDatabase, plans, assignments, deletionBackupSizesByDomain, mainDomain, hostingAndSupportDemoDomain, mainDomain)
+	deletionBackupSizesByDomain := a.managedSiteDeletionBackupSizesByDomain(deletionBackupPathsByDomain)
+	siteRows, err := a.hostingAndSupportSiteRows(ctx, nil, plans, assignments, deletionBackupSizesByDomain, mainDomain, hostingAndSupportDemoDomain, mainDomain)
 	if err != nil {
 		return hostingAndSupportPanelSnapshot{}, err
 	}
@@ -12614,7 +12533,7 @@ func (a *App) collectHostingAndSupportPanelSnapshot(ctx context.Context, control
 	if configuredDemoDomain := normalizeDomainName(demoSettings.Domain); configuredDemoDomain != "" {
 		demoDomains = append(demoDomains, configuredDemoDomain)
 	}
-	for _, session := range (demo.Store{DB: controlDatabase}).Sessions(ctx) {
+	for _, session := range demoSessions {
 		demoDomains = append(demoDomains, session.Domain)
 		demoEmails = append(demoEmails, session.UserEmail)
 	}
@@ -12634,13 +12553,27 @@ func (a *App) collectHostingAndSupportPanelSnapshot(ctx context.Context, control
 			protectedEmails = append(protectedEmails, append(append([]string(nil), site.AdminEmails...), site.OwnerEmail)...)
 		}
 	}
-	if purgeErr := store.PurgeDemoBilling(ctx, demoDomains, demoEmails, protectedEmails); purgeErr != nil {
+	if purgeErr := a.withServerControlDatabaseWrite(ctx, "purge-demo-billing", func(database *sql.DB) error {
+		return (hostingandsupport.Store{DB: database}).PurgeDemoBilling(ctx, demoDomains, demoEmails, protectedEmails)
+	}); purgeErr != nil {
 		return hostingAndSupportPanelSnapshot{}, purgeErr
 	}
-	invoices = store.Invoices(ctx, 80)
 	hostingAndSupportAttachApprovedSiteRequests(siteRows, approvedSiteRequestsByDomain)
 	_, localDiskTotalBytes, localDiskAvailable := diskusage.DiskSpace(a.storageRootDir())
-	localExpensePolicy, policyFound := store.ServerExpensePolicy(ctx, "local", int64(localDiskTotalBytes))
+	var localExpensePolicy expenses.ServerPolicy
+	policyFound := false
+	commissionBPS := 0
+	autoRegistrationEnabled := true
+	if err := a.withServerControlDatabaseRead(ctx, "expenses-snapshot-billing-data", func(database *sql.DB) error {
+		store := hostingandsupport.Store{DB: database}
+		invoices = store.Invoices(ctx, 80)
+		localExpensePolicy, policyFound = store.ServerExpensePolicy(ctx, "local", int64(localDiskTotalBytes))
+		commissionBPS = store.SitebrushCommissionBPS(ctx)
+		autoRegistrationEnabled = store.AutomaticRegistrationAllowed(ctx)
+		return nil
+	}); err != nil {
+		return hostingAndSupportPanelSnapshot{}, err
+	}
 	if !policyFound {
 		localExpensePolicy = expenses.DefaultServerPolicy("local", int64(localDiskTotalBytes))
 	}
@@ -12689,11 +12622,16 @@ func (a *App) collectHostingAndSupportPanelSnapshot(ctx context.Context, control
 		CurrentHost:    mainDomain,
 		SiteURL:        a.hostingAndSupportSiteURL,
 		CostPolicy:     localExpensePolicy,
-		OwnerEmails:    store.OwnerEmails(ctx),
+		OwnerEmails:    ownerEmails,
 	})
 	servers := hostingandsupport.BuildServerViews(localServer, clientHostings, invoices, CompileVersion)
-	commissionBPS := store.SitebrushCommissionBPS(ctx)
-	clients := a.hostingAndSupportClients(ctx, store, siteRows, nil, nil, clientHostings, invoices, commissionBPS, store.OwnerEmails(ctx))
+	clients := a.hostingAndSupportClients(ctx, hostingandsupport.Store{}, siteRows, nil, nil, clientHostings, invoices, commissionBPS, ownerEmails)
+	if err := a.withServerControlDatabaseWrite(ctx, "expenses-snapshot-billing-customers", func(database *sql.DB) error {
+		a.enrichHostingAndSupportClientsWithBilling(ctx, hostingandsupport.Store{DB: database}, clients)
+		return nil
+	}); err != nil {
+		return hostingAndSupportPanelSnapshot{}, err
+	}
 	overview := hostingandsupport.BuildOverview(siteRows, 0, pendingSiteRequests, invoices, clientHostings, registrySyncEvents, nil)
 	overview.ServerCount = len(servers)
 	overview.ClientCount = len(clients)
@@ -12703,7 +12641,7 @@ func (a *App) collectHostingAndSupportPanelSnapshot(ctx context.Context, control
 		BuiltAt:                 now,
 		MetricsBuiltAt:          now,
 		MainDomain:              mainDomain,
-		OwnerEmails:             store.OwnerEmails(ctx),
+		OwnerEmails:             ownerEmails,
 		Sites:                   siteRows,
 		Plans:                   plans,
 		Invoices:                invoices,
@@ -12719,7 +12657,7 @@ func (a *App) collectHostingAndSupportPanelSnapshot(ctx context.Context, control
 		ServiceMailRelayEnabled: serviceMailRelayEnabled,
 		Overview:                overview,
 		DemoSettings:            demoSettings,
-		AutoRegistrationEnabled: store.AutomaticRegistrationAllowed(ctx),
+		AutoRegistrationEnabled: autoRegistrationEnabled,
 		CommissionBPS:           commissionBPS,
 		LocalCostPolicy:         localExpensePolicy,
 		ShowCentralRegistry:     showCentralRegistry,
@@ -12841,13 +12779,13 @@ func (a *App) hostingAndSupportPanelView(r *http.Request, snapshot hostingAndSup
 }
 
 func (a *App) demoSiteStatusView(ctx context.Context, settings demo.Settings) demoSiteStatusView {
-	if controlDatabase, err := a.openServerControlDatabaseRead(ctx); err == nil {
-		currentSettings := (demo.Store{DB: controlDatabase}).Settings(ctx)
-		_ = controlDatabase.Close()
+	_ = a.withServerControlDatabaseRead(ctx, "demo-status", func(database *sql.DB) error {
+		currentSettings := (demo.Store{DB: database}).Settings(ctx)
 		if normalizeDomainName(currentSettings.Domain) == normalizeDomainName(settings.Domain) {
 			settings.LastRestoredAt = currentSettings.LastRestoredAt
 		}
-	}
+		return nil
+	})
 	status := demoSiteStatusView{LastRestoredAt: formatAnalyticsTime(settings.LastRestoredAt)}
 	snapshotFile, err := a.openFileInsideStorage(a.demoSiteSnapshotPath(settings.Domain))
 	if err != nil {
@@ -13328,18 +13266,11 @@ func (a *App) hostingAndSupportClients(ctx context.Context, billingStore hosting
 		}
 		view.TotalStorageLabel = formatFileSize(view.TotalStorageBytes)
 		view.MonthlyDueLabel = hostingandsupport.MoneyTotalsLabel(monthlyDueByCurrency)
-		billingCustomer, customerErr := billingStore.EnsureBillingCustomer(ctx, view.PrimaryEmail, view.Emails)
-		if customerErr == nil {
-			view.BillingCustomerID = billingCustomer.ID
-			view.InvoiceDay = billingCustomer.InvoiceDay
-			view.PaymentTermDays = billingCustomer.PaymentTermDays
-			view.BillingTimezone = billingCustomer.Timezone
-			view.AutomaticBillingEnabled = billingCustomer.AutomaticEnabled
-			financialTotals := billingStore.BillingCustomerFinancialTotals(ctx, billingCustomer, time.Now().UTC())
-			view.PaidThisMonthLabel = hostingandsupport.MoneyTotalsLabel(financialTotals.CoveredThisMonthByCurrency)
-			view.LifetimePaidLabel = hostingandsupport.MoneyTotalsLabel(financialTotals.LifetimeCoveredByCurrency)
-			view.CommissionThisMonthLabel = hostingandsupport.MoneyLabel(financialTotals.CommissionThisMonthMinor, "EUR")
-			view.LifetimeCommissionLabel = hostingandsupport.MoneyLabel(financialTotals.LifetimeCommissionMinor, "EUR")
+		if billingStore.DB != nil {
+			billingCustomer, customerErr := billingStore.EnsureBillingCustomer(ctx, view.PrimaryEmail, view.Emails)
+			if customerErr == nil {
+				applyHostingAndSupportClientBilling(ctx, billingStore, &view, billingCustomer)
+			}
 		}
 		expectedCommissionByCurrency := make(map[string]int64, len(monthlyDueByCurrency))
 		for currency, amountMinor := range monthlyDueByCurrency {
@@ -13361,6 +13292,28 @@ func (a *App) hostingAndSupportClients(ctx context.Context, billingStore hosting
 		return clients[left].PrimaryEmail < clients[right].PrimaryEmail
 	})
 	return clients
+}
+
+func (a *App) enrichHostingAndSupportClientsWithBilling(ctx context.Context, billingStore hostingandsupport.Store, clients []hostingAndSupportClientView) {
+	for clientIndex := range clients {
+		billingCustomer, err := billingStore.EnsureBillingCustomer(ctx, clients[clientIndex].PrimaryEmail, clients[clientIndex].Emails)
+		if err == nil {
+			applyHostingAndSupportClientBilling(ctx, billingStore, &clients[clientIndex], billingCustomer)
+		}
+	}
+}
+
+func applyHostingAndSupportClientBilling(ctx context.Context, billingStore hostingandsupport.Store, view *hostingAndSupportClientView, billingCustomer hostingandsupport.BillingCustomer) {
+	view.BillingCustomerID = billingCustomer.ID
+	view.InvoiceDay = billingCustomer.InvoiceDay
+	view.PaymentTermDays = billingCustomer.PaymentTermDays
+	view.BillingTimezone = billingCustomer.Timezone
+	view.AutomaticBillingEnabled = billingCustomer.AutomaticEnabled
+	financialTotals := billingStore.BillingCustomerFinancialTotals(ctx, billingCustomer, time.Now().UTC())
+	view.PaidThisMonthLabel = hostingandsupport.MoneyTotalsLabel(financialTotals.CoveredThisMonthByCurrency)
+	view.LifetimePaidLabel = hostingandsupport.MoneyTotalsLabel(financialTotals.LifetimeCoveredByCurrency)
+	view.CommissionThisMonthLabel = hostingandsupport.MoneyLabel(financialTotals.CommissionThisMonthMinor, "EUR")
+	view.LifetimeCommissionLabel = hostingandsupport.MoneyLabel(financialTotals.LifetimeCommissionMinor, "EUR")
 }
 
 func hostingAndSupportClientFilterRoles(client hostingAndSupportClientView) []string {
@@ -13879,47 +13832,33 @@ func siteAdminEmailsFromDatabase(ctx context.Context, database *sql.DB, domain s
 }
 
 func (a *App) saveHostingAndSupportSettingsFromForm(r *http.Request) string {
-	controlDatabase, err := a.openServerControlDatabase(r.Context())
-	if err != nil {
+	if err := a.withServerControlDatabaseWrite(r.Context(), "save-hosting-settings", func(database *sql.DB) error {
+		return (hostingandsupport.Store{DB: database}).SaveSettings(r.Context(), r.FormValue("auto_registration_enabled") == "1")
+	}); err != nil {
 		return err.Error()
 	}
-	defer controlDatabase.Close()
-	if err := (hostingandsupport.Store{DB: controlDatabase}).SaveSettings(r.Context(), r.FormValue("auto_registration_enabled") == "1"); err != nil {
-		return err.Error()
-	}
-	return a.saveHostingAndSupportDemoSettingsInDatabase(r, controlDatabase.DB)
+	return a.saveHostingAndSupportDemoSettings(r)
 }
 
 func (a *App) saveHostingAndSupportRegistrationSettingsFromForm(r *http.Request) string {
-	controlDatabase, err := a.openServerControlDatabase(r.Context())
-	if err != nil {
-		return err.Error()
-	}
-	defer controlDatabase.Close()
-	if err := (hostingandsupport.Store{DB: controlDatabase}).SaveSettings(r.Context(), r.FormValue("auto_registration_enabled") == "1"); err != nil {
+	if err := a.withServerControlDatabaseWrite(r.Context(), "save-registration-settings", func(database *sql.DB) error {
+		return (hostingandsupport.Store{DB: database}).SaveSettings(r.Context(), r.FormValue("auto_registration_enabled") == "1")
+	}); err != nil {
 		return err.Error()
 	}
 	return translationOrDefault(translationsForRequest(r), "billing_status_settings_saved", "Billing settings saved.")
 }
 
 func (a *App) saveHostingAndSupportServiceMailSettingsFromForm(r *http.Request) string {
-	controlDatabase, err := a.openServerControlDatabase(r.Context())
-	if err != nil {
-		return err.Error()
-	}
-	defer controlDatabase.Close()
-	if err := (hostingandsupport.Store{DB: controlDatabase}).SaveServiceMailSettings(r.Context(), r.FormValue("service_mail_relay_enabled") == "1"); err != nil {
+	if err := a.withServerControlDatabaseWrite(r.Context(), "save-service-mail-settings", func(database *sql.DB) error {
+		return (hostingandsupport.Store{DB: database}).SaveServiceMailSettings(r.Context(), r.FormValue("service_mail_relay_enabled") == "1")
+	}); err != nil {
 		return err.Error()
 	}
 	return translationOrDefault(translationsForRequest(r), "billing_status_settings_saved", "Billing settings saved.")
 }
 
 func (a *App) generateSitebrushComKeyFromForm(r *http.Request) string {
-	controlDatabase, err := a.openServerControlDatabase(r.Context())
-	if err != nil {
-		return err.Error()
-	}
-	defer controlDatabase.Close()
 	privateKey, err := ecdh.X25519().GenerateKey(rand.Reader)
 	if err != nil {
 		return err.Error()
@@ -13930,7 +13869,10 @@ func (a *App) generateSitebrushComKeyFromForm(r *http.Request) string {
 	if err != nil {
 		return err.Error()
 	}
-	if _, err := (hostingandsupport.Store{DB: controlDatabase}).SaveSitebrushComKey(r.Context(), publicKeyText, privateKeyPath); err != nil {
+	if err := a.withServerControlDatabaseWrite(r.Context(), "save-sitebrush-key", func(database *sql.DB) error {
+		_, saveErr := (hostingandsupport.Store{DB: database}).SaveSitebrushComKey(r.Context(), publicKeyText, privateKeyPath)
+		return saveErr
+	}); err != nil {
 		return err.Error()
 	}
 	return "sitebrush.com public key generated."
@@ -13983,10 +13925,12 @@ func (a *App) writeSitebrushComPrivateKeyFile(privateKeyText string) (string, er
 	return realPrivateKeyPath, nil
 }
 
-func (a *App) migrateLegacySitebrushComPrivateKey(ctx context.Context, controlDatabase *sql.DB) error {
+func (a *App) migrateLegacySitebrushComPrivateKey(ctx context.Context) error {
 	var publicKeyText string
 	var privateKeyText string
-	err := controlDatabase.QueryRowContext(ctx, `SELECT public_key,private_key FROM sitebrush_com_keys WHERE domain='sitebrush.com'`).Scan(&publicKeyText, &privateKeyText)
+	err := a.withServerControlDatabaseRead(ctx, "migrate-sitebrush-key-read", func(database *sql.DB) error {
+		return database.QueryRowContext(ctx, `SELECT public_key,private_key FROM sitebrush_com_keys WHERE domain='sitebrush.com'`).Scan(&publicKeyText, &privateKeyText)
+	})
 	if err != nil || strings.TrimSpace(privateKeyText) == "" {
 		return err
 	}
@@ -13994,31 +13938,25 @@ func (a *App) migrateLegacySitebrushComPrivateKey(ctx context.Context, controlDa
 	if err != nil {
 		return err
 	}
-	_, err = (hostingandsupport.Store{DB: controlDatabase}).SaveSitebrushComKey(ctx, publicKeyText, privateKeyPath)
-	return err
+	return a.withServerControlDatabaseWrite(ctx, "migrate-sitebrush-key-save", func(database *sql.DB) error {
+		_, saveErr := (hostingandsupport.Store{DB: database}).SaveSitebrushComKey(ctx, publicKeyText, privateKeyPath)
+		return saveErr
+	})
 }
 
 func (a *App) saveHostingAndSupportDemoSettingsFromForm(r *http.Request) string {
-	controlDatabase, err := a.openServerControlDatabase(r.Context())
-	if err != nil {
-		return err.Error()
-	}
-	defer controlDatabase.Close()
-	return a.saveHostingAndSupportDemoSettingsInDatabase(r, controlDatabase.DB)
+	return a.saveHostingAndSupportDemoSettings(r)
 }
 
 func (a *App) blockServiceMailInstallationFromForm(r *http.Request) string {
 	translations := translationsForRequest(r)
-	controlDatabase, err := a.openServerControlDatabase(r.Context())
-	if err != nil {
-		return err.Error()
-	}
-	defer controlDatabase.Close()
 	installationID := strings.TrimSpace(r.FormValue("installation_id"))
 	if installationID == "" {
 		return translationOrDefault(translations, "billing_service_mail_status_installation_required", "Service mail installation is not selected.")
 	}
-	if err := (hostingandsupport.Store{DB: controlDatabase}).SetServiceMailInstallationBlocked(r.Context(), installationID, true); err != nil {
+	if err := a.withServerControlDatabaseWrite(r.Context(), "block-service-mail-installation", func(database *sql.DB) error {
+		return (hostingandsupport.Store{DB: database}).SetServiceMailInstallationBlocked(r.Context(), installationID, true)
+	}); err != nil {
 		return err.Error()
 	}
 	return translationOrDefault(translations, "billing_service_mail_status_installation_blocked", "Service mail installation blocked.")
@@ -14026,16 +13964,13 @@ func (a *App) blockServiceMailInstallationFromForm(r *http.Request) string {
 
 func (a *App) unblockServiceMailInstallationFromForm(r *http.Request) string {
 	translations := translationsForRequest(r)
-	controlDatabase, err := a.openServerControlDatabase(r.Context())
-	if err != nil {
-		return err.Error()
-	}
-	defer controlDatabase.Close()
 	installationID := strings.TrimSpace(r.FormValue("installation_id"))
 	if installationID == "" {
 		return translationOrDefault(translations, "billing_service_mail_status_installation_required", "Service mail installation is not selected.")
 	}
-	if err := (hostingandsupport.Store{DB: controlDatabase}).SetServiceMailInstallationBlocked(r.Context(), installationID, false); err != nil {
+	if err := a.withServerControlDatabaseWrite(r.Context(), "unblock-service-mail-installation", func(database *sql.DB) error {
+		return (hostingandsupport.Store{DB: database}).SetServiceMailInstallationBlocked(r.Context(), installationID, false)
+	}); err != nil {
 		return err.Error()
 	}
 	return translationOrDefault(translations, "billing_service_mail_status_installation_unblocked", "Service mail installation unblocked.")
@@ -14043,12 +13978,9 @@ func (a *App) unblockServiceMailInstallationFromForm(r *http.Request) string {
 
 func (a *App) addServiceMailBlockFromForm(r *http.Request) string {
 	translations := translationsForRequest(r)
-	controlDatabase, err := a.openServerControlDatabase(r.Context())
-	if err != nil {
-		return err.Error()
-	}
-	defer controlDatabase.Close()
-	if err := (hostingandsupport.Store{DB: controlDatabase}).CreateServiceMailBlock(r.Context(), r.FormValue("scope"), r.FormValue("value"), r.FormValue("reason")); err != nil {
+	if err := a.withServerControlDatabaseWrite(r.Context(), "add-service-mail-block", func(database *sql.DB) error {
+		return (hostingandsupport.Store{DB: database}).CreateServiceMailBlock(r.Context(), r.FormValue("scope"), r.FormValue("value"), r.FormValue("reason"))
+	}); err != nil {
 		return err.Error()
 	}
 	return translationOrDefault(translations, "billing_service_mail_status_block_saved", "Service mail block saved.")
@@ -14056,16 +13988,13 @@ func (a *App) addServiceMailBlockFromForm(r *http.Request) string {
 
 func (a *App) deleteServiceMailBlockFromForm(r *http.Request) string {
 	translations := translationsForRequest(r)
-	controlDatabase, err := a.openServerControlDatabase(r.Context())
-	if err != nil {
-		return err.Error()
-	}
-	defer controlDatabase.Close()
 	blockID, _ := strconv.Atoi(strings.TrimSpace(r.FormValue("block_id")))
 	if blockID <= 0 {
 		return translationOrDefault(translations, "billing_service_mail_status_block_required", "Service mail block is not selected.")
 	}
-	if err := (hostingandsupport.Store{DB: controlDatabase}).DeleteServiceMailBlock(r.Context(), blockID); err != nil {
+	if err := a.withServerControlDatabaseWrite(r.Context(), "delete-service-mail-block", func(database *sql.DB) error {
+		return (hostingandsupport.Store{DB: database}).DeleteServiceMailBlock(r.Context(), blockID)
+	}); err != nil {
 		return err.Error()
 	}
 	return translationOrDefault(translations, "billing_service_mail_status_block_deleted", "Service mail block deleted.")
@@ -14083,21 +14012,16 @@ func (a *App) deleteServiceMailEventsFromForm(r *http.Request) string {
 	if len(eventIDs) == 0 {
 		return translationOrDefault(translations, "billing_service_mail_status_events_required", "Select service mail log rows first.")
 	}
-	controlDatabase, err := a.openServerControlDatabase(r.Context())
-	if err != nil {
-		return err.Error()
-	}
-	defer controlDatabase.Close()
-	if err := (hostingandsupport.Store{DB: controlDatabase}).DeleteServiceMailEvents(r.Context(), eventIDs); err != nil {
+	if err := a.withServerControlDatabaseWrite(r.Context(), "delete-service-mail-events", func(database *sql.DB) error {
+		return (hostingandsupport.Store{DB: database}).DeleteServiceMailEvents(r.Context(), eventIDs)
+	}); err != nil {
 		return err.Error()
 	}
 	return translationOrDefault(translations, "billing_service_mail_status_events_deleted", "Selected service mail log rows were deleted.")
 }
 
-func (a *App) saveHostingAndSupportDemoSettingsInDatabase(r *http.Request, controlDatabase *sql.DB) string {
+func (a *App) saveHostingAndSupportDemoSettings(r *http.Request) string {
 	translations := translationsForRequest(r)
-	store := hostingandsupport.Store{DB: controlDatabase}
-	previousDemoSettings := (demo.Store{DB: controlDatabase}).Settings(r.Context())
 	demoDomain := normalizeQuotaDomainName(r.FormValue("demo_site_domain"))
 	demoSourceURL, demoSourceErr := demo.NormalizeSourceURL(r.FormValue("demo_site_source_url"))
 	if demoSourceErr != nil {
@@ -14107,23 +14031,31 @@ func (a *App) saveHostingAndSupportDemoSettingsInDatabase(r *http.Request, contr
 	if demoEnabled && demoDomain == "" {
 		return translationOrDefault(translations, "billing_status_demo_domain_required", "Demo site domain is required.")
 	}
-	if demoDomain != "" {
-		if ownerDomain, found := store.OwnerDomain(r.Context()); found && normalizeDomainName(ownerDomain) == demoDomain {
-			return translationOrDefault(translations, "billing_status_demo_owner_blocked", "The owner site cannot be used as the public demo site.")
-		}
-	}
 	demoCopyWholeSite := demoCopyWholeSiteFromRequest(r)
-	if err := (demo.Store{DB: controlDatabase}).SaveSettings(r.Context(), demoDomain, demoSourceURL, demoCopyWholeSite, demoEnabled); err != nil {
+	var previousDemoSettings demo.Settings
+	err := a.withServerControlDatabaseWrite(r.Context(), "save-demo-settings", func(database *sql.DB) error {
+		store := hostingandsupport.Store{DB: database}
+		previousDemoSettings = (demo.Store{DB: database}).Settings(r.Context())
+		if demoDomain != "" {
+			if ownerDomain, found := store.OwnerDomain(r.Context()); found && normalizeDomainName(ownerDomain) == demoDomain {
+				return errors.New(translationOrDefault(translations, "billing_status_demo_owner_blocked", "The owner site cannot be used as the public demo site."))
+			}
+		}
+		return (demo.Store{DB: database}).SaveSettings(r.Context(), demoDomain, demoSourceURL, demoCopyWholeSite, demoEnabled)
+	})
+	if err != nil {
 		return err.Error()
 	}
 	settings := demo.Settings{Domain: demoDomain, SourceURL: demoSourceURL, CopyWholeSite: demoCopyWholeSite, Enabled: demoEnabled}
 	if !demoEnabled {
 		a.updateRuntimeDemoSiteState(r.Context(), demoSiteRuntimeState{Settings: settings, Status: "disabled"})
 		for _, disabledDemoDomain := range demo.UniqueDomains(previousDemoSettings.Domain, demoDomain) {
-			if err := a.deleteDemoManagedSiteWithoutBackup(r.Context(), controlDatabase, disabledDemoDomain); err != nil {
+			if err := a.deleteDemoManagedSiteWithoutBackup(r.Context(), disabledDemoDomain); err != nil {
 				return err.Error()
 			}
-			_ = (demo.Store{DB: controlDatabase}).RemoveSessionsForDomain(r.Context(), disabledDemoDomain)
+			_ = a.withServerControlDatabaseWrite(r.Context(), "disable-demo-sessions", func(database *sql.DB) error {
+				return (demo.Store{DB: database}).RemoveSessionsForDomain(r.Context(), disabledDemoDomain)
+			})
 			_ = a.removeInsideStorage(a.demoSiteSnapshotPath(disabledDemoDomain))
 		}
 		return translationOrDefault(translations, "billing_status_settings_saved", "Billing settings saved.")
@@ -14131,7 +14063,7 @@ func (a *App) saveHostingAndSupportDemoSettingsInDatabase(r *http.Request, contr
 	if demoEnabled {
 		a.updateRuntimeDemoSiteState(r.Context(), a.demoSiteRefreshingState(r.Context(), settings))
 		refreshDemoSite := r.FormValue("refresh_demo_site") == "1"
-		adminEmail, _, readyErr := a.ensureDemoSiteReady(r.Context(), controlDatabase, settings, refreshDemoSite, "")
+		adminEmail, _, readyErr := a.ensureDemoSiteReady(r.Context(), settings, refreshDemoSite, "")
 		if readyErr == nil && !a.demoSiteSnapshotAvailable(demoDomain) {
 			readyErr = a.createDemoSiteSnapshot(r.Context(), demoDomain)
 		}
@@ -14231,22 +14163,26 @@ func (a *App) approveSiteRegistrationRequestFromForm(r *http.Request) string {
 	if requestID <= 0 {
 		return translationOrDefault(translations, "billing_status_request_not_selected", "Request is not selected.")
 	}
-	controlDatabase, err := a.openServerControlDatabase(r.Context())
+	var siteRequest hostingandsupport.SiteRequest
+	var plan hostingandsupport.Plan
+	err := a.withServerControlDatabaseRead(r.Context(), "approve-site-request-read", func(database *sql.DB) error {
+		store := hostingandsupport.Store{DB: database}
+		var found bool
+		siteRequest, found = store.SiteRequestByID(r.Context(), requestID)
+		if !found {
+			return errors.New(translationOrDefault(translations, "billing_status_request_not_found", "Request was not found."))
+		}
+		if siteRequest.Status != "pending" {
+			return errors.New(translationOrDefault(translations, "billing_status_request_already_processed", "This request has already been processed."))
+		}
+		plan, found = store.PlanByID(r.Context(), siteRequest.PlanID)
+		if !found {
+			return errors.New(translationOrDefault(translations, "billing_status_request_plan_not_found", "Request plan was not found."))
+		}
+		return nil
+	})
 	if err != nil {
 		return err.Error()
-	}
-	defer controlDatabase.Close()
-	store := hostingandsupport.Store{DB: controlDatabase}
-	siteRequest, found := store.SiteRequestByID(r.Context(), requestID)
-	if !found {
-		return translationOrDefault(translations, "billing_status_request_not_found", "Request was not found.")
-	}
-	if siteRequest.Status != "pending" {
-		return translationOrDefault(translations, "billing_status_request_already_processed", "This request has already been processed.")
-	}
-	plan, planFound := store.PlanByID(r.Context(), siteRequest.PlanID)
-	if !planFound {
-		return translationOrDefault(translations, "billing_status_request_plan_not_found", "Request plan was not found.")
 	}
 	temporaryPassword := randomAccessToken()
 	if err := a.createManagedSite(r.Context(), siteRequest.Domain, siteRequest.Email, temporaryPassword, plan.QuotaBytes); err != nil {
@@ -14256,10 +14192,17 @@ func (a *App) approveSiteRegistrationRequestFromForm(r *http.Request) string {
 	if planIsFree(plan) {
 		serviceStatus = "free"
 	}
-	if err := store.AssignSite(r.Context(), siteRequest.Domain, plan.ID, serviceStatus); err != nil {
-		return err.Error()
-	}
-	if err := store.UpdateSiteRequestStatus(r.Context(), requestID, "approved", ownerMessage); err != nil {
+	if err := a.withServerControlDatabaseWrite(r.Context(), "approve-site-request-finish", func(database *sql.DB) error {
+		store := hostingandsupport.Store{DB: database}
+		currentRequest, found := store.SiteRequestByID(r.Context(), requestID)
+		if !found || currentRequest.Status != "pending" {
+			return errors.New(translationOrDefault(translations, "billing_status_request_already_processed", "This request has already been processed."))
+		}
+		if assignErr := store.AssignSite(r.Context(), siteRequest.Domain, plan.ID, serviceStatus); assignErr != nil {
+			return assignErr
+		}
+		return store.UpdateSiteRequestStatus(r.Context(), requestID, "approved", ownerMessage)
+	}); err != nil {
 		return err.Error()
 	}
 	a.logHostingSupportEvent(r.Context(), "support_request", "approved", siteRequest.Email, siteRequest.Domain, "site registration request approved")
@@ -14277,21 +14220,22 @@ func (a *App) rejectSiteRegistrationRequestFromForm(r *http.Request) string {
 	if requestID <= 0 {
 		return translationOrDefault(translations, "billing_status_request_not_selected", "Request is not selected.")
 	}
-	controlDatabase, err := a.openServerControlDatabase(r.Context())
+	var siteRequest hostingandsupport.SiteRequest
+	var plan hostingandsupport.Plan
+	err := a.withServerControlDatabaseWrite(r.Context(), "reject-site-request", func(database *sql.DB) error {
+		store := hostingandsupport.Store{DB: database}
+		var found bool
+		siteRequest, found = store.SiteRequestByID(r.Context(), requestID)
+		if !found {
+			return errors.New(translationOrDefault(translations, "billing_status_request_not_found", "Request was not found."))
+		}
+		if siteRequest.Status != "pending" {
+			return errors.New(translationOrDefault(translations, "billing_status_request_already_processed", "This request has already been processed."))
+		}
+		plan, _ = store.PlanByID(r.Context(), siteRequest.PlanID)
+		return store.UpdateSiteRequestStatus(r.Context(), requestID, "rejected", ownerMessage)
+	})
 	if err != nil {
-		return err.Error()
-	}
-	defer controlDatabase.Close()
-	store := hostingandsupport.Store{DB: controlDatabase}
-	siteRequest, found := store.SiteRequestByID(r.Context(), requestID)
-	if !found {
-		return translationOrDefault(translations, "billing_status_request_not_found", "Request was not found.")
-	}
-	if siteRequest.Status != "pending" {
-		return translationOrDefault(translations, "billing_status_request_already_processed", "This request has already been processed.")
-	}
-	plan, _ := store.PlanByID(r.Context(), siteRequest.PlanID)
-	if err := store.UpdateSiteRequestStatus(r.Context(), requestID, "rejected", ownerMessage); err != nil {
 		return err.Error()
 	}
 	a.logHostingSupportEvent(r.Context(), "support_request", "rejected", siteRequest.Email, siteRequest.Domain, "site registration request rejected")
@@ -14306,12 +14250,20 @@ func planIsFree(plan hostingandsupport.Plan) bool {
 	return price == "" || price == "0" || price == "0.00"
 }
 
-func (a *App) enqueueSiteRegistrationRequestOwnerEmails(ctx context.Context, r *http.Request, store hostingandsupport.Store, domain, name, email, phone string, planID int) {
-	ownerEmails := store.OwnerEmails(ctx)
+func (a *App) enqueueSiteRegistrationRequestOwnerEmails(ctx context.Context, r *http.Request, domain, name, email, phone string, planID int) {
+	var ownerEmails []string
+	var plan hostingandsupport.Plan
+	if err := a.withServerControlDatabaseRead(ctx, "site-registration-owner-email", func(database *sql.DB) error {
+		store := hostingandsupport.Store{DB: database}
+		ownerEmails = store.OwnerEmails(ctx)
+		plan, _ = store.PlanByID(ctx, planID)
+		return nil
+	}); err != nil {
+		return
+	}
 	if len(ownerEmails) == 0 {
 		return
 	}
-	plan, _ := store.PlanByID(ctx, planID)
 	subject := "Новая заявка на сайт " + domain
 	body := strings.Join([]string{
 		"Поступила новая заявка на подключение сайта.",
@@ -14375,11 +14327,6 @@ func (a *App) updateManagedSiteFromForm(r *http.Request) string {
 	if domain == "" {
 		return translationOrDefault(translations, "billing_status_site_domain_required", "Site domain is required.")
 	}
-	controlDatabase, err := a.openServerControlDatabase(r.Context())
-	if err != nil {
-		return err.Error()
-	}
-	defer controlDatabase.Close()
 	planID, _ := strconv.Atoi(strings.TrimSpace(r.FormValue("plan_id")))
 	serviceStatus := strings.TrimSpace(r.FormValue("service_status"))
 	quotaBytes, quotaRequested, err := parseSiteQuotaLimitBytes(r.FormValue("quota"))
@@ -14387,7 +14334,12 @@ func (a *App) updateManagedSiteFromForm(r *http.Request) string {
 		return err.Error()
 	}
 	if !quotaRequested && planID > 0 {
-		plan, found := (hostingandsupport.Store{DB: controlDatabase}).PlanByID(r.Context(), planID)
+		var plan hostingandsupport.Plan
+		found := false
+		_ = a.withServerControlDatabaseRead(r.Context(), "update-site-plan", func(database *sql.DB) error {
+			plan, found = (hostingandsupport.Store{DB: database}).PlanByID(r.Context(), planID)
+			return nil
+		})
 		if found {
 			quotaBytes = plan.QuotaBytes
 			quotaRequested = true
@@ -14398,7 +14350,9 @@ func (a *App) updateManagedSiteFromForm(r *http.Request) string {
 			return err.Error()
 		}
 	}
-	if err := (hostingandsupport.Store{DB: controlDatabase}).AssignSite(r.Context(), domain, planID, serviceStatus); err != nil {
+	if err := a.withServerControlDatabaseWrite(r.Context(), "update-site-assignment", func(database *sql.DB) error {
+		return (hostingandsupport.Store{DB: database}).AssignSite(r.Context(), domain, planID, serviceStatus)
+	}); err != nil {
 		return err.Error()
 	}
 	a.logHostingSupportEvent(r.Context(), "plan_changed", "saved", "", domain, "site plan or quota saved")
@@ -14476,20 +14430,19 @@ func (a *App) startDemoSiteCleanupWorker(ctx context.Context) {
 }
 
 func (a *App) cleanupExpiredDemoSites(ctx context.Context, now time.Time) {
-	controlDatabase, err := a.openServerControlDatabaseForPurpose(ctx, serverControlDatabaseRead, "demo-cleanup-scan")
-	if err != nil {
+	sessionsByDomain := make(map[string][]demo.Session)
+	if err := a.withServerControlDatabaseRead(ctx, "demo-cleanup-scan", func(database *sql.DB) error {
+		for _, session := range (demo.Store{DB: database}).Sessions(ctx) {
+			domain := normalizeDomainName(session.Domain)
+			if domain == "" {
+				continue
+			}
+			sessionsByDomain[domain] = append(sessionsByDomain[domain], session)
+		}
+		return nil
+	}); err != nil {
 		return
 	}
-	store := demo.Store{DB: controlDatabase}
-	sessionsByDomain := make(map[string][]demo.Session)
-	for _, session := range store.Sessions(ctx) {
-		domain := normalizeDomainName(session.Domain)
-		if domain == "" {
-			continue
-		}
-		sessionsByDomain[domain] = append(sessionsByDomain[domain], session)
-	}
-	_ = controlDatabase.Close()
 	for domain, sessions := range sessionsByDomain {
 		if !demo.SessionsReadyForReset(sessions, now) {
 			continue
@@ -14497,27 +14450,12 @@ func (a *App) cleanupExpiredDemoSites(ctx context.Context, now time.Time) {
 		if state, found := a.runtimeDemoSiteState(ctx); found && normalizeDomainName(state.Settings.Domain) == normalizeDomainName(domain) {
 			a.updateRuntimeDemoSiteState(ctx, a.demoSiteRefreshingState(ctx, state.Settings))
 		}
-		if err := a.restoreDemoSiteFromSnapshot(ctx, nil, domain); err != nil {
+		if err := a.restoreDemoSiteFromSnapshot(ctx, domain); err != nil {
 			if state, found := a.runtimeDemoSiteState(ctx); found && normalizeDomainName(state.Settings.Domain) == normalizeDomainName(domain) {
 				a.updateRuntimeDemoSiteState(ctx, a.demoSiteRefreshFailureState(ctx, state.Settings, err))
 			}
 			log.Printf("demo site restore failed domain=%s error=%v", domain, err)
 			continue
-		}
-		writeDatabase, openErr := a.openServerControlDatabaseForPurpose(ctx, serverControlDatabaseWrite, "demo-cleanup-finish")
-		if openErr != nil {
-			log.Printf("demo session cleanup database unavailable domain=%s error=%v", domain, openErr)
-			continue
-		}
-		demoStore := demo.Store{DB: writeDatabase}
-		restoreStatusErr := demoStore.MarkContentRestored(ctx, domain, time.Now())
-		removeErr := demoStore.RemoveSessionsForDomain(ctx, domain)
-		_ = writeDatabase.Close()
-		if restoreStatusErr != nil {
-			log.Printf("demo content restore status failed domain=%s error=%v", domain, restoreStatusErr)
-		}
-		if removeErr != nil {
-			log.Printf("demo session cleanup failed domain=%s error=%v", domain, removeErr)
 		}
 		adminEmail, hasAdmin := a.firstAdminEmailForDomain(ctx, domain)
 		if hasAdmin {
@@ -14533,15 +14471,22 @@ func (a *App) cleanupExpiredDemoSites(ctx context.Context, now time.Time) {
 	}
 }
 
-func (a *App) deleteDemoManagedSiteWithoutBackup(ctx context.Context, controlDatabase *sql.DB, domain string) error {
+func (a *App) deleteDemoManagedSiteWithoutBackup(ctx context.Context, domain string) error {
 	domain = normalizeQuotaDomainName(domain)
 	if domain == "" {
 		return fmt.Errorf("demo domain is required")
 	}
-	var ownerCount int
-	_ = controlDatabase.QueryRowContext(ctx, `SELECT COUNT(1) FROM server_managers WHERE domain=? AND role='owner'`, domain).Scan(&ownerCount)
-	if ownerCount > 0 {
-		return fmt.Errorf("server owner site %s cannot be deleted as a demo site", domain)
+	var row siteQuotaRow
+	err := a.withServerControlDatabaseRead(ctx, "demo-delete-owner-check", func(database *sql.DB) error {
+		var ownerCount int
+		_ = database.QueryRowContext(ctx, `SELECT COUNT(1) FROM server_managers WHERE domain=? AND role='owner'`, domain).Scan(&ownerCount)
+		if ownerCount > 0 {
+			return fmt.Errorf("server owner site %s cannot be deleted as a demo site", domain)
+		}
+		return nil
+	})
+	if err != nil {
+		return err
 	}
 	row, found, err := a.managedSiteQuotaRow(ctx, domain)
 	if err != nil {
@@ -14553,17 +14498,24 @@ func (a *App) deleteDemoManagedSiteWithoutBackup(ctx context.Context, controlDat
 	if sameSiteQuotaPath(row.DatabasePath, a.serverControlDBPath()) {
 		return fmt.Errorf("demo site %s is stored in the server control database and cannot be deleted as a separate site", domain)
 	}
-	return a.deleteManagedSiteDataAfterBackup(ctx, controlDatabase, row)
+	if err := a.deleteManagedSiteFiles(ctx, row); err != nil {
+		return err
+	}
+	return a.withServerControlDatabaseWrite(ctx, "demo-delete-finish", func(database *sql.DB) error {
+		(hostingandsupport.Store{DB: database}).RemoveSiteAssignment(ctx, domain)
+		_, deleteErr := database.ExecContext(ctx, `DELETE FROM server_managers WHERE domain=? AND role<>'owner'`, domain)
+		return deleteErr
+	})
 }
 
 func (a *App) deleteManagedSiteWithBackup(ctx context.Context, r *http.Request, domain string, retentionDays int) (managedSiteDeletionBackupView, error) {
-	controlDatabase, err := a.openServerControlDatabase(ctx)
+	var ownerCount int
+	err := a.withServerControlDatabaseRead(ctx, "delete-site-owner-check", func(database *sql.DB) error {
+		return database.QueryRowContext(ctx, `SELECT COUNT(1) FROM server_managers WHERE domain=? AND role='owner'`, domain).Scan(&ownerCount)
+	})
 	if err != nil {
 		return managedSiteDeletionBackupView{}, err
 	}
-	defer controlDatabase.Close()
-	var ownerCount int
-	_ = controlDatabase.QueryRowContext(ctx, `SELECT COUNT(1) FROM server_managers WHERE domain=? AND role='owner'`, domain).Scan(&ownerCount)
 	if ownerCount > 0 {
 		return managedSiteDeletionBackupView{}, fmt.Errorf("server owner site %s cannot be deleted", domain)
 	}
@@ -14577,7 +14529,12 @@ func (a *App) deleteManagedSiteWithBackup(ctx context.Context, r *http.Request, 
 	if sameSiteQuotaPath(row.DatabasePath, a.serverControlDBPath()) {
 		return managedSiteDeletionBackupView{}, fmt.Errorf("site %s is stored in the server control database and cannot be safely deleted as a separate site", domain)
 	}
-	ownerContacts := managedSiteOwnerContacts(ctx, controlDatabase.DB, row.DatabasePath, domain)
+	ownerContacts := managedSiteOwnerContacts(ctx, nil, row.DatabasePath, domain)
+	_ = a.withServerControlDatabaseRead(ctx, "delete-site-owner-contacts", func(database *sql.DB) error {
+		ownerContacts = append(ownerContacts, managedSiteOwnerContacts(ctx, database, "", domain)...)
+		ownerContacts = uniqueStrings(ownerContacts)
+		return nil
+	})
 	if retentionDays <= 0 {
 		retentionDays = hostingandsupport.DefaultDeletionBackupRetentionDays
 	}
@@ -14585,11 +14542,16 @@ func (a *App) deleteManagedSiteWithBackup(ctx context.Context, r *http.Request, 
 	if r != nil {
 		languageCode = preferredLanguageCode(r.Header.Get("Accept-Language"))
 	}
-	backup, err := a.createManagedSiteDeletionBackup(ctx, r, controlDatabase.DB, row, ownerContacts, retentionDays, languageCode)
+	backup, err := a.createManagedSiteDeletionBackup(ctx, r, row, ownerContacts, retentionDays, languageCode)
 	if err != nil {
 		return managedSiteDeletionBackupView{}, err
 	}
-	if err := a.deleteManagedSiteDataAfterBackup(ctx, controlDatabase.DB, row); err != nil {
+	if err := a.withServerControlDatabaseWrite(ctx, "delete-site-control-rows", func(database *sql.DB) error {
+		return a.deleteManagedSiteControlRows(ctx, database, row)
+	}); err != nil {
+		return managedSiteDeletionBackupView{}, err
+	}
+	if err := a.deleteManagedSiteFiles(ctx, row); err != nil {
 		return managedSiteDeletionBackupView{}, err
 	}
 	a.logHostingSupportEvent(ctx, "site_deleted", "success", strings.Join(ownerContacts, ", "), domain, "managed site deleted with backup")
@@ -14608,39 +14570,36 @@ func (a *App) updateManagedSiteDeletionBackupRetentionFromForm(r *http.Request) 
 	if backupID <= 0 {
 		return translationOrDefault(translations, "billing_status_backup_not_selected", "Backup is not selected.")
 	}
-	controlDatabase, err := a.openServerControlDatabase(r.Context())
-	if err != nil {
-		return err.Error()
-	}
-	defer controlDatabase.Close()
 	var createdAtText string
 	var metadataText string
-	err = controlDatabase.QueryRowContext(r.Context(), `SELECT created_at,metadata_json FROM site_deletion_backups WHERE id=?`, backupID).Scan(&createdAtText, &metadataText)
-	if err != nil {
-		return err.Error()
-	}
-	createdAt, parseErr := time.Parse(time.RFC3339, createdAtText)
-	if parseErr != nil {
-		createdAt = time.Now().UTC()
-	}
-	expiresAt := createdAt.AddDate(0, 0, retentionDays)
-	metadataText = hostingandsupport.RewriteDeletionBackupMetadataRetention(metadataText, retentionDays, expiresAt)
-	_, err = controlDatabase.ExecContext(r.Context(), `UPDATE site_deletion_backups SET retention_days=?,expires_at=?,metadata_json=? WHERE id=?`,
-		retentionDays, expiresAt.Format(time.RFC3339), metadataText, backupID)
+	err := a.withServerControlDatabaseWrite(r.Context(), "update-backup-retention", func(database *sql.DB) error {
+		if queryErr := database.QueryRowContext(r.Context(), `SELECT created_at,metadata_json FROM site_deletion_backups WHERE id=?`, backupID).Scan(&createdAtText, &metadataText); queryErr != nil {
+			return queryErr
+		}
+		createdAt, parseErr := time.Parse(time.RFC3339, createdAtText)
+		if parseErr != nil {
+			createdAt = time.Now().UTC()
+		}
+		expiresAt := createdAt.AddDate(0, 0, retentionDays)
+		metadataText = hostingandsupport.RewriteDeletionBackupMetadataRetention(metadataText, retentionDays, expiresAt)
+		_, updateErr := database.ExecContext(r.Context(), `UPDATE site_deletion_backups SET retention_days=?,expires_at=?,metadata_json=? WHERE id=?`,
+			retentionDays, expiresAt.Format(time.RFC3339), metadataText, backupID)
+		return updateErr
+	})
 	if err != nil {
 		return err.Error()
 	}
 	return translationOrDefault(translations, "billing_status_backup_retention_saved", "Backup retention was saved.")
 }
 
-func (a *App) deleteManagedSiteDataAfterBackup(ctx context.Context, controlDatabase *sql.DB, row siteQuotaRow) error {
+func (a *App) deleteManagedSiteControlRows(ctx context.Context, controlDatabase *sql.DB, row siteQuotaRow) error {
 	domain := normalizeQuotaDomainName(row.Domain)
 	if domain == "" {
 		return fmt.Errorf("site domain is required")
 	}
 	(hostingandsupport.Store{DB: controlDatabase}).RemoveSiteAssignment(ctx, domain)
 	_, _ = controlDatabase.ExecContext(ctx, `DELETE FROM server_managers WHERE domain=? AND role<>'owner'`, domain)
-	return a.deleteManagedSiteFiles(ctx, row)
+	return nil
 }
 
 func (a *App) deleteManagedSiteFiles(ctx context.Context, row siteQuotaRow) error {
@@ -14724,14 +14683,14 @@ func (a *App) managedSiteBillingDiskBytes(row siteQuotaRow, deletionBackupSizesB
 	return totalBytes
 }
 
-func (a *App) managedSiteDeletionBackupSizesByDomain(ctx context.Context, controlDatabase *sql.DB) map[string]int64 {
-	sizesByDomain := make(map[string]int64)
+func (a *App) managedSiteDeletionBackupPathsByDomain(ctx context.Context, controlDatabase *sql.DB) map[string][]string {
+	pathsByDomain := make(map[string][]string)
 	if controlDatabase == nil {
-		return sizesByDomain
+		return pathsByDomain
 	}
 	rows, err := controlDatabase.QueryContext(ctx, `SELECT domain,archive_path FROM site_deletion_backups`)
 	if err != nil {
-		return sizesByDomain
+		return pathsByDomain
 	}
 	defer rows.Close()
 	for rows.Next() {
@@ -14744,14 +14703,24 @@ func (a *App) managedSiteDeletionBackupSizesByDomain(ctx context.Context, contro
 		if normalizedDomain == "" {
 			continue
 		}
-		archiveSizeBytes := int64(0)
-		if realArchivePath, pathErr := a.existingPathInsideStorageSubtree(a.backupRootDir(), archivePath); pathErr == nil {
-			if fileSizeBytes := a.fileSizeInsideStorage(realArchivePath); fileSizeBytes > 0 {
-				archiveSizeBytes = fileSizeBytes
+		pathsByDomain[normalizedDomain] = append(pathsByDomain[normalizedDomain], archivePath)
+	}
+	return pathsByDomain
+}
+
+func (a *App) managedSiteDeletionBackupSizesByDomain(pathsByDomain map[string][]string) map[string]int64 {
+	sizesByDomain := make(map[string]int64, len(pathsByDomain))
+	for normalizedDomain, archivePaths := range pathsByDomain {
+		for _, archivePath := range archivePaths {
+			archiveSizeBytes := int64(0)
+			if realArchivePath, pathErr := a.existingPathInsideStorageSubtree(a.backupRootDir(), archivePath); pathErr == nil {
+				if fileSizeBytes := a.fileSizeInsideStorage(realArchivePath); fileSizeBytes > 0 {
+					archiveSizeBytes = fileSizeBytes
+				}
 			}
-		}
-		if archiveSizeBytes > 0 {
-			sizesByDomain[normalizedDomain] += archiveSizeBytes
+			if archiveSizeBytes > 0 {
+				sizesByDomain[normalizedDomain] += archiveSizeBytes
+			}
 		}
 	}
 	return sizesByDomain
@@ -14786,6 +14755,25 @@ func managedSiteOwnerContacts(ctx context.Context, controlDatabase *sql.DB, data
 	return contacts
 }
 
+func uniqueStrings(values []string) []string {
+	seen := make(map[string]struct{}, len(values))
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		key := strings.ToLower(value)
+		if _, found := seen[key]; found {
+			continue
+		}
+		seen[key] = struct{}{}
+		result = append(result, value)
+	}
+	sort.Strings(result)
+	return result
+}
+
 func (a *App) backupRootDir() string {
 	storagePath := a.storagePath
 	if strings.TrimSpace(storagePath) == "" {
@@ -14803,7 +14791,7 @@ func (a *App) backupArchivePathAllowed(archivePath string) bool {
 	return err == nil
 }
 
-func (a *App) createManagedSiteDeletionBackup(ctx context.Context, r *http.Request, controlDatabase *sql.DB, row siteQuotaRow, ownerContacts []string, retentionDays int, languageCode string) (managedSiteDeletionBackupView, error) {
+func (a *App) createManagedSiteDeletionBackup(ctx context.Context, r *http.Request, row siteQuotaRow, ownerContacts []string, retentionDays int, languageCode string) (managedSiteDeletionBackupView, error) {
 	domain := normalizeQuotaDomainName(row.Domain)
 	if domain == "" {
 		return managedSiteDeletionBackupView{}, fmt.Errorf("site domain is required")
@@ -14871,8 +14859,11 @@ func (a *App) createManagedSiteDeletionBackup(ctx context.Context, r *http.Reque
 		_ = os.Remove(realArchivePath)
 		return managedSiteDeletionBackupView{}, err
 	}
-	_, err = controlDatabase.ExecContext(ctx, `INSERT INTO site_deletion_backups(domain,archive_path,file_name,size_bytes,token,token_created_at,created_at,expires_at,retention_days,owner_contacts,metadata_json,language_code,download_count) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,0)`,
-		domain, realArchivePath, fileName, archiveInfo.Size(), token, createdAt.Format(time.RFC3339), createdAt.Format(time.RFC3339), expiresAt.Format(time.RFC3339), retentionDays, strings.Join(ownerContacts, ", "), string(metadataJSON), languageCode)
+	err = a.withServerControlDatabaseWrite(ctx, "save-deletion-backup", func(database *sql.DB) error {
+		_, insertErr := database.ExecContext(ctx, `INSERT INTO site_deletion_backups(domain,archive_path,file_name,size_bytes,token,token_created_at,created_at,expires_at,retention_days,owner_contacts,metadata_json,language_code,download_count) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,0)`,
+			domain, realArchivePath, fileName, archiveInfo.Size(), token, createdAt.Format(time.RFC3339), createdAt.Format(time.RFC3339), expiresAt.Format(time.RFC3339), retentionDays, strings.Join(ownerContacts, ", "), string(metadataJSON), languageCode)
+		return insertErr
+	})
 	if err != nil {
 		_ = os.Remove(realArchivePath)
 		return managedSiteDeletionBackupView{}, err
@@ -15148,20 +15139,16 @@ func (a *App) downloadManagedSiteDeletionBackup(w http.ResponseWriter, r *http.R
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
-	controlDatabase, err := a.openServerControlDatabase(r.Context())
-	if err != nil {
-		http.Error(w, "backup store unavailable", http.StatusInternalServerError)
-		return
-	}
-	defer controlDatabase.Close()
 	var backup managedSiteDeletionBackupView
 	var archivePath string
 	var ownerContactsText string
 	var languageCodeValue sql.NullString
 	var downloadedAt sql.NullString
 	var sizeBytes int64
-	err = controlDatabase.QueryRowContext(r.Context(), `SELECT id,domain,archive_path,file_name,size_bytes,created_at,expires_at,owner_contacts,downloaded_at,download_count,language_code FROM site_deletion_backups WHERE token=?`, token).Scan(
-		&backup.ID, &backup.Domain, &archivePath, &backup.FileName, &sizeBytes, &backup.CreatedAt, &backup.ExpiresAt, &ownerContactsText, &downloadedAt, &backup.DownloadCount, &languageCodeValue)
+	err := a.withServerControlDatabaseRead(r.Context(), "download-backup-lookup", func(database *sql.DB) error {
+		return database.QueryRowContext(r.Context(), `SELECT id,domain,archive_path,file_name,size_bytes,created_at,expires_at,owner_contacts,downloaded_at,download_count,language_code FROM site_deletion_backups WHERE token=?`, token).Scan(
+			&backup.ID, &backup.Domain, &archivePath, &backup.FileName, &sizeBytes, &backup.CreatedAt, &backup.ExpiresAt, &ownerContactsText, &downloadedAt, &backup.DownloadCount, &languageCodeValue)
+	})
 	if err != nil {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
@@ -15198,7 +15185,10 @@ func (a *App) downloadManagedSiteDeletionBackup(w http.ResponseWriter, r *http.R
 		return
 	}
 	nowText := time.Now().UTC().Format(time.RFC3339)
-	_, _ = controlDatabase.ExecContext(context.Background(), `UPDATE site_deletion_backups SET downloaded_at=?,download_count=COALESCE(download_count,0)+1 WHERE id=?`, nowText, backup.ID)
+	_ = a.withServerControlDatabaseWrite(context.Background(), "download-backup-record", func(database *sql.DB) error {
+		_, updateErr := database.ExecContext(context.Background(), `UPDATE site_deletion_backups SET downloaded_at=?,download_count=COALESCE(download_count,0)+1 WHERE id=?`, nowText, backup.ID)
+		return updateErr
+	})
 	ownerContacts := splitOwnerContacts(ownerContactsText)
 	a.notifyManagedSiteDeletionBackupDownloaded(context.Background(), backup, ownerContacts, languageCodeValue.String, r.RemoteAddr)
 }
@@ -15227,11 +15217,6 @@ func (a *App) saveServicePlanFromForm(r *http.Request) string {
 	if !quotaRequested {
 		return translationOrDefault(translations, "billing_status_plan_quota_required", "Plan quota is required.")
 	}
-	controlDatabase, err := a.openServerControlDatabase(r.Context())
-	if err != nil {
-		return err.Error()
-	}
-	defer controlDatabase.Close()
 	planID, _ := strconv.Atoi(strings.TrimSpace(r.FormValue("plan_id")))
 	siteLimit, err := positiveIntegerFromForm(r, "site_limit", 1)
 	if err != nil {
@@ -15251,7 +15236,9 @@ func (a *App) saveServicePlanFromForm(r *http.Request) string {
 		billingPeriod = "monthly"
 	}
 	isDefault := r.FormValue("is_default") == "1"
-	if err := (hostingandsupport.Store{DB: controlDatabase}).SavePlan(r.Context(), planID, name, quotaBytes, siteLimit, analyticsReportLimit, price, currency, billingPeriod, isDefault); err != nil {
+	if err := a.withServerControlDatabaseWrite(r.Context(), "save-service-plan", func(database *sql.DB) error {
+		return (hostingandsupport.Store{DB: database}).SavePlan(r.Context(), planID, name, quotaBytes, siteLimit, analyticsReportLimit, price, currency, billingPeriod, isDefault)
+	}); err != nil {
 		return err.Error()
 	}
 	eventKind := "plan_changed"
@@ -15293,12 +15280,9 @@ func (a *App) deleteServicePlanFromForm(r *http.Request) string {
 	if planID <= 0 {
 		return translationOrDefault(translations, "billing_status_plan_not_selected", "Plan is not selected.")
 	}
-	controlDatabase, err := a.openServerControlDatabase(r.Context())
-	if err != nil {
-		return err.Error()
-	}
-	defer controlDatabase.Close()
-	if err := (hostingandsupport.Store{DB: controlDatabase}).DeletePlan(r.Context(), planID); err != nil {
+	if err := a.withServerControlDatabaseWrite(r.Context(), "delete-service-plan", func(database *sql.DB) error {
+		return (hostingandsupport.Store{DB: database}).DeletePlan(r.Context(), planID)
+	}); err != nil {
 		return err.Error()
 	}
 	a.logHostingSupportEvent(r.Context(), "plan_deleted", "deleted", "", "", strconv.Itoa(planID))
@@ -15314,12 +15298,9 @@ func (a *App) savePaymentProviderFromForm(r *http.Request) string {
 		PaymentURL:   r.FormValue("payment_url"),
 		Instructions: r.FormValue("instructions"),
 	}
-	controlDatabase, err := a.openServerControlDatabase(r.Context())
-	if err != nil {
-		return err.Error()
-	}
-	defer controlDatabase.Close()
-	if err := (hostingandsupport.Store{DB: controlDatabase}).SavePaymentProvider(r.Context(), provider); err != nil {
+	if err := a.withServerControlDatabaseWrite(r.Context(), "save-payment-provider", func(database *sql.DB) error {
+		return (hostingandsupport.Store{DB: database}).SavePaymentProvider(r.Context(), provider)
+	}); err != nil {
 		return err.Error()
 	}
 	a.logHostingSupportEvent(r.Context(), "payment_provider_changed", "saved", "", "", provider.Provider)
@@ -15347,26 +15328,26 @@ func (a *App) createInvoiceFromForm(r *http.Request) string {
 	if invoice.Provider == "" {
 		invoice.Provider = "sitebrush_com"
 	}
-	controlDatabase, err := a.openServerControlDatabase(r.Context())
-	if err != nil {
-		return err.Error()
-	}
-	defer controlDatabase.Close()
-	store := hostingandsupport.Store{DB: controlDatabase}
-	if store.IsDemoDomain(r.Context(), invoice.Domain) {
-		return translationOrDefault(translationsForRequest(r), "billing_demo_billing_blocked", "Demo sites do not participate in billing.")
-	}
-	invoice.ServerCostMinor = hostingandsupport.MoneyMinor(strings.ReplaceAll(invoice.Amount, ",", "."))
-	if invoice.ServerCostMinor > 0 && (invoice.Provider == "stripe" || invoice.Provider == "sitebrush_com") {
-		invoice.CommissionBPS = store.SitebrushCommissionBPS(r.Context())
-		invoice.PaymentFeeMinor = expenses.PaymentCommissionMinor(invoice.ServerCostMinor, invoice.CommissionBPS)
-		invoice.AmountMinor = invoice.ServerCostMinor + invoice.PaymentFeeMinor
-		invoice.Amount = hostingandsupport.MoneyAmount(invoice.AmountMinor)
-	}
-	if invoice.PlanName == "" {
-		invoice.PlanName = "Доля расходов сервера"
-	}
-	createdInvoice, err := store.CreateInvoice(r.Context(), invoice)
+	var createdInvoice hostingandsupport.Invoice
+	err := a.withServerControlDatabaseWrite(r.Context(), "create-invoice", func(database *sql.DB) error {
+		store := hostingandsupport.Store{DB: database}
+		if store.IsDemoDomain(r.Context(), invoice.Domain) {
+			return errors.New(translationOrDefault(translationsForRequest(r), "billing_demo_billing_blocked", "Demo sites do not participate in billing."))
+		}
+		invoice.ServerCostMinor = hostingandsupport.MoneyMinor(strings.ReplaceAll(invoice.Amount, ",", "."))
+		if invoice.ServerCostMinor > 0 && (invoice.Provider == "stripe" || invoice.Provider == "sitebrush_com") {
+			invoice.CommissionBPS = store.SitebrushCommissionBPS(r.Context())
+			invoice.PaymentFeeMinor = expenses.PaymentCommissionMinor(invoice.ServerCostMinor, invoice.CommissionBPS)
+			invoice.AmountMinor = invoice.ServerCostMinor + invoice.PaymentFeeMinor
+			invoice.Amount = hostingandsupport.MoneyAmount(invoice.AmountMinor)
+		}
+		if invoice.PlanName == "" {
+			invoice.PlanName = "Доля расходов сервера"
+		}
+		var createErr error
+		createdInvoice, createErr = store.CreateInvoice(r.Context(), invoice)
+		return createErr
+	})
 	if err != nil {
 		return err.Error()
 	}
@@ -15377,12 +15358,12 @@ func (a *App) createInvoiceFromForm(r *http.Request) string {
 
 func (a *App) updateInvoiceStatusFromForm(r *http.Request, status string) string {
 	invoiceID, _ := strconv.Atoi(strings.TrimSpace(r.FormValue("invoice_id")))
-	controlDatabase, err := a.openServerControlDatabase(r.Context())
-	if err != nil {
-		return err.Error()
-	}
-	defer controlDatabase.Close()
-	invoice, err := (hostingandsupport.Store{DB: controlDatabase}).UpdateInvoiceStatus(r.Context(), invoiceID, status)
+	var invoice hostingandsupport.Invoice
+	err := a.withServerControlDatabaseWrite(r.Context(), "update-invoice-status", func(database *sql.DB) error {
+		var updateErr error
+		invoice, updateErr = (hostingandsupport.Store{DB: database}).UpdateInvoiceStatus(r.Context(), invoiceID, status)
+		return updateErr
+	})
 	if err != nil {
 		return err.Error()
 	}
@@ -16262,13 +16243,16 @@ func centralHostingSnapshotURLs() []string {
 }
 
 func (a *App) serviceMailRelayEnabled(ctx context.Context) bool {
-	controlDatabase, err := a.openServerControlDatabaseRead(ctx)
+	enabled := true
+	err := a.withServerControlDatabaseRead(ctx, "service-mail-relay-enabled", func(database *sql.DB) error {
+		enabled = (hostingandsupport.Store{DB: database}).ServiceMailRelayEnabled(ctx)
+		return nil
+	})
 	if err != nil {
 		log.Printf("service mail relay setting unavailable: %v", err)
 		return true
 	}
-	defer controlDatabase.Close()
-	return (hostingandsupport.Store{DB: controlDatabase}).ServiceMailRelayEnabled(ctx)
+	return enabled
 }
 
 func (a *App) serviceMailLocalSenderReady(ctx context.Context, domain, fromAddress, languageCode string) bool {
@@ -16292,11 +16276,10 @@ func (a *App) domainHasUsableDKIM(ctx context.Context, domain string) bool {
 	}
 	selector := strings.Trim(strings.TrimSpace(os.Getenv("SITEBRUSH_DKIM_SELECTOR")), ".")
 	if selector == "" {
-		controlDatabase, err := a.openServerControlDatabaseRead(ctx)
-		if err == nil {
-			selector = strings.Trim(strings.TrimSpace(hostingandsupport.SettingText(ctx, controlDatabase, "service_mail_dkim_selector")), ".")
-			_ = controlDatabase.Close()
-		}
+		_ = a.withServerControlDatabaseRead(ctx, "service-mail-dkim-selector", func(database *sql.DB) error {
+			selector = strings.Trim(strings.TrimSpace(hostingandsupport.SettingText(ctx, database, "service_mail_dkim_selector")), ".")
+			return nil
+		})
 	}
 	if selector != "" {
 		return dkimSelectorRecordExists(selector, domain)
@@ -16534,20 +16517,19 @@ func (a *App) serviceMailRelayPrivateKeyFromControlDatabase(ctx context.Context,
 	if normalizeDomainName(relayDomain) != "sitebrush.com" {
 		return nil, false
 	}
-	controlDatabase, err := a.openServerControlDatabase(ctx)
-	if err != nil {
-		return nil, false
-	}
-	defer controlDatabase.Close()
 	var privateKeyPath string
-	if err := controlDatabase.QueryRowContext(ctx, `SELECT private_key_path FROM sitebrush_com_keys WHERE domain='sitebrush.com'`).Scan(&privateKeyPath); err != nil {
+	if err := a.withServerControlDatabaseRead(ctx, "service-mail-relay-key", func(database *sql.DB) error {
+		return database.QueryRowContext(ctx, `SELECT private_key_path FROM sitebrush_com_keys WHERE domain='sitebrush.com'`).Scan(&privateKeyPath)
+	}); err != nil {
 		return nil, false
 	}
 	if strings.TrimSpace(privateKeyPath) == "" {
-		if err := a.migrateLegacySitebrushComPrivateKey(ctx, controlDatabase.DB); err != nil {
+		if err := a.migrateLegacySitebrushComPrivateKey(ctx); err != nil {
 			return nil, false
 		}
-		_ = controlDatabase.QueryRowContext(ctx, `SELECT private_key_path FROM sitebrush_com_keys WHERE domain='sitebrush.com'`).Scan(&privateKeyPath)
+		_ = a.withServerControlDatabaseRead(ctx, "service-mail-relay-key-reload", func(database *sql.DB) error {
+			return database.QueryRowContext(ctx, `SELECT private_key_path FROM sitebrush_com_keys WHERE domain='sitebrush.com'`).Scan(&privateKeyPath)
+		})
 	}
 	privateKeyBytes, readErr := a.readFileInsideStorage(strings.TrimSpace(privateKeyPath))
 	if readErr != nil {
@@ -16730,17 +16712,20 @@ func (a *App) startHostingServerMonitor(ctx context.Context) {
 }
 
 func (a *App) runHostingServerMonitorOnce(ctx context.Context) {
-	controlDatabase, err := a.openServerControlDatabase(ctx)
-	if err != nil {
+	var ownerDomain string
+	var sitebrushComKey hostingandsupport.SitebrushComKey
+	var hostings []hostingandsupport.ClientHosting
+	if err := a.withServerControlDatabaseRead(ctx, "hosting-monitor-load", func(database *sql.DB) error {
+		store := hostingandsupport.Store{DB: database}
+		ownerDomain, _ = store.OwnerDomain(ctx)
+		sitebrushComKey = store.SitebrushComKey(ctx)
+		hostings = store.ClientHostings(ctx)
+		return nil
+	}); err != nil || !a.hostingAndSupportCanShowCentralServers(ctx, ownerDomain, sitebrushComKey) {
 		return
 	}
-	defer controlDatabase.Close()
-	store := hostingandsupport.Store{DB: controlDatabase}
-	if !a.hostingAndSupportCanShowCentralServers(ctx, store, store.SitebrushComKey(ctx)) {
-		return
-	}
-	for _, hosting := range store.ClientHostings(ctx) {
-		a.checkClientHostingDomains(ctx, store, hosting)
+	for _, hosting := range hostings {
+		a.checkClientHostingDomains(ctx, hosting)
 		if hosting.InstallationKind != hostingandsupport.InstallationKindServer || !hostingandsupport.ClientHostingIsRealServer(hosting, domainARecordMatches) {
 			continue
 		}
@@ -16748,13 +16733,15 @@ func (a *App) runHostingServerMonitorOnce(ctx context.Context) {
 		if !success {
 			success, responseMS, errorMessage = retryHostingServerNetwork(ctx, hosting)
 		}
-		_ = store.LogServerNetworkCheck(ctx, hosting.InstallationID, hosting.ServerDomain, hosting.ServerIP, success, responseMS, errorMessage)
-		a.checkHostingServerSiteTLS(ctx, store, hosting)
+		_ = a.withServerControlDatabaseWrite(ctx, "hosting-monitor-network", func(database *sql.DB) error {
+			return (hostingandsupport.Store{DB: database}).LogServerNetworkCheck(ctx, hosting.InstallationID, hosting.ServerDomain, hosting.ServerIP, success, responseMS, errorMessage)
+		})
+		a.checkHostingServerSiteTLS(ctx, hosting)
 	}
 	a.refreshHostingAndSupportPanel()
 }
 
-func (a *App) checkClientHostingDomains(ctx context.Context, store hostingandsupport.Store, hosting hostingandsupport.ClientHosting) {
+func (a *App) checkClientHostingDomains(ctx context.Context, hosting hostingandsupport.ClientHosting) {
 	serverIP := strings.TrimSpace(hosting.ServerIP)
 	for _, site := range hosting.Sites {
 		domain := normalizeDomainName(site.Domain)
@@ -16775,7 +16762,9 @@ func (a *App) checkClientHostingDomains(ctx context.Context, store hostingandsup
 		} else {
 			check.Reachable, check.Scheme, check.ResponseMS, check.Error = checkDomainAtServerIP(ctx, domain, serverIP)
 		}
-		_ = store.SaveClientHostingDomainCheck(ctx, check)
+		_ = a.withServerControlDatabaseWrite(ctx, "hosting-monitor-domain", func(database *sql.DB) error {
+			return (hostingandsupport.Store{DB: database}).SaveClientHostingDomainCheck(ctx, check)
+		})
 	}
 }
 
@@ -16867,14 +16856,17 @@ func retryHostingServerNetwork(ctx context.Context, hosting hostingandsupport.Cl
 	return false, 0, lastError
 }
 
-func (a *App) checkHostingServerSiteTLS(ctx context.Context, store hostingandsupport.Store, hosting hostingandsupport.ClientHosting) {
+func (a *App) checkHostingServerSiteTLS(ctx context.Context, hosting hostingandsupport.ClientHosting) {
 	serverIP := strings.TrimSpace(hosting.ServerIP)
 	for _, site := range hosting.Sites {
 		domain := normalizeDomainName(site.Domain)
 		if domain == "" || !domainARecordMatches(domain, serverIP) {
 			continue
 		}
-		_ = store.SaveSiteTLSCheck(ctx, checkSiteTLSCertificate(ctx, hosting.InstallationID, domain))
+		check := checkSiteTLSCertificate(ctx, hosting.InstallationID, domain)
+		_ = a.withServerControlDatabaseWrite(ctx, "hosting-monitor-tls", func(database *sql.DB) error {
+			return (hostingandsupport.Store{DB: database}).SaveSiteTLSCheck(ctx, check)
+		})
 	}
 }
 
@@ -17003,13 +16995,13 @@ func (a *App) startHostingSnapshotNetChanListener(ctx context.Context) {
 }
 
 func (a *App) hostingSnapshotNetChanListenerEnabled(ctx context.Context) bool {
-	controlDatabase, err := a.openServerControlDatabaseRead(ctx)
-	if err != nil {
-		return false
-	}
-	defer controlDatabase.Close()
-	ownerDomain, found := (hostingandsupport.Store{DB: controlDatabase}).OwnerDomain(ctx)
-	return found && normalizeDomainName(ownerDomain) == "sitebrush.com"
+	enabled := false
+	_ = a.withServerControlDatabaseRead(ctx, "hosting-snapshot-listener-enabled", func(database *sql.DB) error {
+		ownerDomain, found := (hostingandsupport.Store{DB: database}).OwnerDomain(ctx)
+		enabled = found && normalizeDomainName(ownerDomain) == "sitebrush.com"
+		return nil
+	})
+	return enabled
 }
 
 func (a *App) handleHostingSnapshotNetChanPayload(ctx context.Context, payload any) {
@@ -17128,20 +17120,32 @@ func (a *App) buildHostingSnapshot(ctx context.Context) (hostingandsupport.Hosti
 	if err != nil {
 		return hostingandsupport.HostingSnapshot{}, err
 	}
-	controlDatabase, err := a.openServerControlDatabase(ctx)
+	rows, err := a.listSiteQuotaRows(ctx)
 	if err != nil {
 		return hostingandsupport.HostingSnapshot{}, err
 	}
-	defer controlDatabase.Close()
-	rows, err := a.listSiteQuotaRowsWithControlDatabase(ctx, controlDatabase.DB)
+	var plans []hostingandsupport.Plan
+	var assignments map[string]hostingandsupport.ServiceAssignment
+	var demoSettings demo.Settings
+	var deletionBackupPathsByDomain map[string][]string
+	var serverDomain string
+	var serverOwnerEmails []string
+	var supportEvents []hostingandsupport.HostingSnapshotEvent
+	err = a.withServerControlDatabaseRead(ctx, "hosting-snapshot-control-data", func(database *sql.DB) error {
+		store := hostingandsupport.Store{DB: database}
+		plans = store.Plans(ctx)
+		assignments = store.ServiceAssignments(ctx)
+		demoSettings = (demo.Store{DB: database}).Settings(ctx)
+		deletionBackupPathsByDomain = a.managedSiteDeletionBackupPathsByDomain(ctx, database)
+		serverDomain, _ = store.OwnerDomain(ctx)
+		serverOwnerEmails = store.OwnerEmails(ctx)
+		supportEvents = store.SupportEvents(ctx, 80)
+		return nil
+	})
 	if err != nil {
 		return hostingandsupport.HostingSnapshot{}, err
 	}
-	store := hostingandsupport.Store{DB: controlDatabase}
-	plans := store.Plans(ctx)
-	assignments := store.ServiceAssignments(ctx)
-	demoSettings := (demo.Store{DB: controlDatabase}).Settings(ctx)
-	deletionBackupSizesByDomain := a.managedSiteDeletionBackupSizesByDomain(ctx, controlDatabase.DB)
+	deletionBackupSizesByDomain := a.managedSiteDeletionBackupSizesByDomain(deletionBackupPathsByDomain)
 	plansByID := make(map[int]hostingandsupport.Plan, len(plans))
 	for _, plan := range plans {
 		plansByID[plan.ID] = plan
@@ -17149,7 +17153,12 @@ func (a *App) buildHostingSnapshot(ctx context.Context) (hostingandsupport.Hosti
 	_, serverIP, _ := detectServerIPCandidates(ctx)
 	storageRoot := a.storageRootDir()
 	freeBytes, totalBytes, diskOK := diskusage.DiskSpace(storageRoot)
-	serverExpensePolicy, expensePolicyFound := store.ServerExpensePolicy(ctx, "local", int64(totalBytes))
+	var serverExpensePolicy expenses.ServerPolicy
+	expensePolicyFound := false
+	_ = a.withServerControlDatabaseRead(ctx, "hosting-snapshot-expense-policy", func(database *sql.DB) error {
+		serverExpensePolicy, expensePolicyFound = (hostingandsupport.Store{DB: database}).ServerExpensePolicy(ctx, "local", int64(totalBytes))
+		return nil
+	})
 	if !expensePolicyFound {
 		serverExpensePolicy = expenses.DefaultServerPolicy("local", int64(totalBytes))
 	}
@@ -17167,10 +17176,6 @@ func (a *App) buildHostingSnapshot(ctx context.Context) (hostingandsupport.Hosti
 	cpuUsagePercent, loadAverage := hostingSnapshotHourlySystemMetrics()
 	topCPUProcesses := hostingSnapshotTopCPUProcesses(ctx, 5)
 	topCPUProcess := firstHostingSnapshotTopCPUProcess(topCPUProcesses)
-	serverDomain := ""
-	if ownerDomain, found := store.OwnerDomain(ctx); found {
-		serverDomain = ownerDomain
-	}
 	snapshot := hostingandsupport.HostingSnapshot{
 		Version:                   4,
 		InstallationKind:          hostingandsupport.InstallationKindServer,
@@ -17210,11 +17215,10 @@ func (a *App) buildHostingSnapshot(ctx context.Context) (hostingandsupport.Hosti
 		snapshot.DiskFreeBytes = int64(freeBytes)
 		snapshot.DiskTotalBytes = int64(totalBytes)
 	}
-	serverOwnerEmails := store.OwnerEmails(ctx)
 	if len(serverOwnerEmails) > 0 {
 		snapshot.OwnerEmail = strings.ToLower(strings.TrimSpace(serverOwnerEmails[0]))
 	}
-	snapshot.Events = append(snapshot.Events, store.SupportEvents(ctx, 80)...)
+	snapshot.Events = append(snapshot.Events, supportEvents...)
 	for _, plan := range plans {
 		snapshot.Plans = append(snapshot.Plans, hostingandsupport.HostingSnapshotPlan{
 			Name:                 plan.Name,
@@ -17378,14 +17382,11 @@ func (a *App) startHostingSupportEventWorker(stop <-chan struct{}) chan hostinga
 }
 
 func (a *App) storeHostingSupportEvent(ctx context.Context, event hostingandsupport.HostingSnapshotEvent) {
-	controlDatabase, err := a.openServerControlDatabase(ctx)
+	err := a.withServerControlDatabaseWrite(ctx, "hosting-support-event", func(database *sql.DB) error {
+		return (hostingandsupport.Store{DB: database}).LogSupportEvent(ctx, event)
+	})
 	if err != nil {
 		log.Printf("hosting support event store unavailable kind=%s error=%v", event.Kind, err)
-		return
-	}
-	defer controlDatabase.Close()
-	if err := (hostingandsupport.Store{DB: controlDatabase}).LogSupportEvent(ctx, event); err != nil {
-		log.Printf("hosting support event log failed kind=%s error=%v", event.Kind, err)
 	}
 }
 
@@ -18022,37 +18023,42 @@ func (a *App) handleHostingSnapshotRequest(ctx context.Context, request serviceM
 	if err := verifyServiceMailRequestSignature(request); err != nil {
 		return err.Error(), http.StatusForbidden
 	}
-	controlDatabase, err := a.openServerControlDatabase(ctx)
-	if err != nil {
-		return err.Error(), http.StatusInternalServerError
-	}
-	defer controlDatabase.Close()
-	store := hostingandsupport.Store{DB: controlDatabase}
-	fail := func(message string, statusCode int) (string, int) {
-		_ = store.LogRegistrySyncEvent(ctx, request.InstallationID, "error", message)
-		return message, statusCode
-	}
-	knownPublicKey, installationFound := store.ServiceMailInstallationPublicKey(ctx, request.InstallationID)
-	if !installationFound {
-		return fail("installation is not registered", http.StatusForbidden)
-	}
-	if installationFound && strings.TrimSpace(knownPublicKey) != strings.TrimSpace(request.PublicKey) {
-		return fail("installation public key changed", http.StatusForbidden)
-	}
 	snapshot := *request.HostingSnapshot
 	snapshot.InstallationID = request.InstallationID
 	if strings.TrimSpace(snapshot.ServerIP) == "" {
 		snapshot.ServerIP = strings.TrimSpace(sourceIP)
 	}
 	snapshot.ServerStatus = hostingSnapshotServerStatus(snapshot.ServerIP)
-	if err := store.UpsertServiceMailInstallation(ctx, request.InstallationID, request.PublicKey, snapshot.ServerIP, snapshotOwnerDomain(snapshot)); err != nil {
-		return fail(err.Error(), http.StatusBadRequest)
-	}
-	if err := store.SaveHostingSnapshot(ctx, snapshot); err != nil {
-		return fail(err.Error(), http.StatusBadRequest)
+	status := "stored"
+	statusCode := http.StatusOK
+	err := a.withServerControlDatabaseWrite(ctx, "store-hosting-snapshot", func(database *sql.DB) error {
+		store := hostingandsupport.Store{DB: database}
+		fail := func(message string, code int) error {
+			status = message
+			statusCode = code
+			_ = store.LogRegistrySyncEvent(ctx, request.InstallationID, "error", message)
+			return errors.New(message)
+		}
+		knownPublicKey, installationFound := store.ServiceMailInstallationPublicKey(ctx, request.InstallationID)
+		if !installationFound {
+			return fail("installation is not registered", http.StatusForbidden)
+		}
+		if strings.TrimSpace(knownPublicKey) != strings.TrimSpace(request.PublicKey) {
+			return fail("installation public key changed", http.StatusForbidden)
+		}
+		if upsertErr := store.UpsertServiceMailInstallation(ctx, request.InstallationID, request.PublicKey, snapshot.ServerIP, snapshotOwnerDomain(snapshot)); upsertErr != nil {
+			return fail(upsertErr.Error(), http.StatusBadRequest)
+		}
+		if saveErr := store.SaveHostingSnapshot(ctx, snapshot); saveErr != nil {
+			return fail(saveErr.Error(), http.StatusBadRequest)
+		}
+		return nil
+	})
+	if err != nil {
+		return status, statusCode
 	}
 	a.refreshHostingAndSupportPanel()
-	a.notifyHostingSnapshotDiskThreshold(ctx, controlDatabase.DB, snapshot)
+	a.notifyHostingSnapshotDiskThreshold(ctx, snapshot)
 	return "stored", http.StatusOK
 }
 
@@ -18066,7 +18072,7 @@ func snapshotOwnerDomain(snapshot hostingandsupport.HostingSnapshot) string {
 	return ""
 }
 
-func (a *App) notifyHostingSnapshotDiskThreshold(ctx context.Context, controlDatabase *sql.DB, snapshot hostingandsupport.HostingSnapshot) {
+func (a *App) notifyHostingSnapshotDiskThreshold(ctx context.Context, snapshot hostingandsupport.HostingSnapshot) {
 	if snapshot.DiskTotalBytes <= 0 || snapshot.DiskFreeBytes < 0 || snapshot.DiskFreeBytes > snapshot.DiskTotalBytes {
 		return
 	}
@@ -18074,14 +18080,19 @@ func (a *App) notifyHostingSnapshotDiskThreshold(ctx context.Context, controlDat
 	usedPercent := int(math.Round(float64(usedBytes) / float64(snapshot.DiskTotalBytes) * 100))
 	settingName := "disk_alert_95_" + safeServerSettingSuffix(snapshot.InstallationID)
 	if usedPercent < 90 {
-		_, _ = controlDatabase.ExecContext(ctx, `DELETE FROM server_settings WHERE name=?`, settingName)
+		_ = a.withServerControlDatabaseWrite(ctx, "clear-disk-alert", func(database *sql.DB) error {
+			_, deleteErr := database.ExecContext(ctx, `DELETE FROM server_settings WHERE name=?`, settingName)
+			return deleteErr
+		})
 		return
 	}
 	if usedPercent < 95 {
 		return
 	}
 	var existingValue string
-	_ = controlDatabase.QueryRowContext(ctx, `SELECT value FROM server_settings WHERE name=?`, settingName).Scan(&existingValue)
+	_ = a.withServerControlDatabaseRead(ctx, "check-disk-alert", func(database *sql.DB) error {
+		return database.QueryRowContext(ctx, `SELECT value FROM server_settings WHERE name=?`, settingName).Scan(&existingValue)
+	})
 	if strings.TrimSpace(existingValue) != "" {
 		return
 	}
@@ -18109,7 +18120,10 @@ func (a *App) notifyHostingSnapshotDiskThreshold(ctx context.Context, controlDat
 		return
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
-	_, _ = controlDatabase.ExecContext(ctx, `INSERT INTO server_settings(name,value,updated_at) VALUES(?,?,?) ON CONFLICT(name) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at`, settingName, now, now)
+	_ = a.withServerControlDatabaseWrite(ctx, "save-disk-alert", func(database *sql.DB) error {
+		_, saveErr := database.ExecContext(ctx, `INSERT INTO server_settings(name,value,updated_at) VALUES(?,?,?) ON CONFLICT(name) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at`, settingName, now, now)
+		return saveErr
+	})
 }
 
 func safeServerSettingSuffix(value string) string {
@@ -18120,7 +18134,7 @@ func safeServerSettingSuffix(value string) string {
 	return regexp.MustCompile(`[^a-zA-Z0-9_.-]+`).ReplaceAllString(value, "_")
 }
 
-func (a *App) notifyServiceMailRequestHostingSnapshotDiskThreshold(ctx context.Context, controlDatabase *sql.DB, request serviceMailRequest, sourceIP string) {
+func (a *App) notifyServiceMailRequestHostingSnapshotDiskThreshold(ctx context.Context, request serviceMailRequest, sourceIP string) {
 	if request.HostingSnapshot == nil {
 		return
 	}
@@ -18129,16 +18143,10 @@ func (a *App) notifyServiceMailRequestHostingSnapshotDiskThreshold(ctx context.C
 	if strings.TrimSpace(snapshot.ServerIP) == "" {
 		snapshot.ServerIP = strings.TrimSpace(sourceIP)
 	}
-	a.notifyHostingSnapshotDiskThreshold(ctx, controlDatabase, snapshot)
+	a.notifyHostingSnapshotDiskThreshold(ctx, snapshot)
 }
 
 func (a *App) handleServiceMailRelayRequest(ctx context.Context, r *http.Request, request serviceMailRequest, sourceIP string) (string, int) {
-	controlDatabase, err := a.openServerControlDatabase(ctx)
-	if err != nil {
-		return err.Error(), http.StatusInternalServerError
-	}
-	defer controlDatabase.Close()
-	store := hostingandsupport.Store{DB: controlDatabase}
 	recipientDomain := emailAddressDomain(request.Recipient)
 	event := hostingandsupport.ServiceMailEvent{
 		InstallationID:  request.InstallationID,
@@ -18148,76 +18156,107 @@ func (a *App) handleServiceMailRelayRequest(ctx context.Context, r *http.Request
 		RecipientDomain: recipientDomain,
 		CodeKind:        request.CodeKind,
 	}
-	fail := func(message string, statusCode int) (string, int) {
-		event.Status = "blocked"
-		event.Error = message
-		_ = store.LogServiceMailEvent(ctx, event)
-		return message, statusCode
-	}
-	if !store.ServiceMailRelayEnabled(ctx) {
-		return fail("service mail relay is disabled", http.StatusForbidden)
-	}
 	if err := verifyServiceMailRequestSignature(request); err != nil {
-		return fail(err.Error(), http.StatusForbidden)
+		return err.Error(), http.StatusForbidden
 	}
-	knownPublicKey, installationFound := store.ServiceMailInstallationPublicKey(ctx, request.InstallationID)
-	if installationFound && strings.TrimSpace(knownPublicKey) != strings.TrimSpace(request.PublicKey) {
-		return fail("installation public key changed", http.StatusForbidden)
-	}
-	if serviceMailKindIsInstallationRegistration(request.CodeKind) {
-		lastDomain := request.SourceDomain
-		if request.HostingSnapshot != nil {
-			lastDomain = firstNonEmpty(snapshotOwnerDomain(*request.HostingSnapshot), lastDomain)
+	if !serviceMailKindIsInstallationRegistration(request.CodeKind) {
+		if _, err := stdmail.ParseAddress(strings.TrimSpace(request.Recipient)); err != nil {
+			return "recipient is invalid", http.StatusBadRequest
 		}
-		if err := store.UpsertServiceMailInstallation(ctx, request.InstallationID, request.PublicKey, sourceIP, lastDomain); err != nil {
-			return fail(err.Error(), http.StatusBadRequest)
+	}
+	responseMessage := ""
+	responseStatus := 0
+	shouldSend := false
+	err := a.withServerControlDatabaseWrite(ctx, "service-mail-request", func(database *sql.DB) error {
+		store := hostingandsupport.Store{DB: database}
+		fail := func(message string, statusCode int) {
+			responseMessage = message
+			responseStatus = statusCode
+			event.Status = "blocked"
+			event.Error = message
+			_ = store.LogServiceMailEvent(ctx, event)
+		}
+		if !store.ServiceMailRelayEnabled(ctx) {
+			fail("service mail relay is disabled", http.StatusForbidden)
+			return nil
+		}
+		knownPublicKey, installationFound := store.ServiceMailInstallationPublicKey(ctx, request.InstallationID)
+		if installationFound && strings.TrimSpace(knownPublicKey) != strings.TrimSpace(request.PublicKey) {
+			fail("installation public key changed", http.StatusForbidden)
+			return nil
+		}
+		if serviceMailKindIsInstallationRegistration(request.CodeKind) {
+			lastDomain := request.SourceDomain
+			if request.HostingSnapshot != nil {
+				lastDomain = firstNonEmpty(snapshotOwnerDomain(*request.HostingSnapshot), lastDomain)
+			}
+			if err := store.UpsertServiceMailInstallation(ctx, request.InstallationID, request.PublicKey, sourceIP, lastDomain); err != nil {
+				fail(err.Error(), http.StatusBadRequest)
+				return nil
+			}
+			if err := storeServiceMailRequestHostingSnapshot(ctx, store, request, sourceIP); err != nil {
+				fail(err.Error(), http.StatusBadRequest)
+				return nil
+			}
+			responseMessage, responseStatus = "registered", http.StatusOK
+			return nil
+		}
+		if !installationFound {
+			fail("installation is not registered", http.StatusForbidden)
+			return nil
+		}
+		if err := store.UpsertServiceMailInstallation(ctx, request.InstallationID, request.PublicKey, sourceIP, request.SourceDomain); err != nil {
+			fail(err.Error(), http.StatusBadRequest)
+			return nil
 		}
 		if err := storeServiceMailRequestHostingSnapshot(ctx, store, request, sourceIP); err != nil {
-			return fail(err.Error(), http.StatusBadRequest)
+			fail(err.Error(), http.StatusBadRequest)
+			return nil
 		}
-		a.refreshHostingAndSupportPanel()
-		a.notifyServiceMailRequestHostingSnapshotDiskThreshold(ctx, controlDatabase.DB, request, sourceIP)
-		return "registered", http.StatusOK
-	}
-	if !installationFound {
-		return fail("installation is not registered", http.StatusForbidden)
-	}
-	if _, err := stdmail.ParseAddress(strings.TrimSpace(request.Recipient)); err != nil {
-		return fail("recipient is invalid", http.StatusBadRequest)
-	}
-	if err := store.UpsertServiceMailInstallation(ctx, request.InstallationID, request.PublicKey, sourceIP, request.SourceDomain); err != nil {
-		return fail(err.Error(), http.StatusBadRequest)
-	}
-	if err := storeServiceMailRequestHostingSnapshot(ctx, store, request, sourceIP); err != nil {
-		return fail(err.Error(), http.StatusBadRequest)
+		if store.ServiceMailInstallationBlocked(ctx, request.InstallationID) {
+			fail("installation is blocked", http.StatusForbidden)
+			return nil
+		}
+		if reason, blocked := store.ServiceMailBlocked(ctx, request.InstallationID, sourceIP, request.Recipient, recipientDomain); blocked {
+			fail("blocked by rule "+reason, http.StatusForbidden)
+			return nil
+		}
+		if serviceMailKindIsRecipientVerification(request.CodeKind) {
+			if err := store.UpsertServiceMailRecipient(ctx, request.InstallationID, request.Recipient, "verified", "confirmed"); err != nil {
+				fail(err.Error(), http.StatusBadRequest)
+				return nil
+			}
+			event.Status = "verified"
+			_ = store.LogServiceMailEvent(ctx, event)
+			responseMessage, responseStatus = "verified", http.StatusOK
+			return nil
+		}
+		if !serviceMailKindAllowed(request.CodeKind) {
+			fail("service mail kind is not allowed", http.StatusForbidden)
+			return nil
+		}
+		if err := validateServiceMailSecret(request.CodeKind, request.SecretValue); err != nil {
+			fail(err.Error(), http.StatusBadRequest)
+			return nil
+		}
+		if reason, limited := serviceMailRateLimited(ctx, store, request, sourceIP, recipientDomain); limited {
+			fail(reason, http.StatusTooManyRequests)
+			return nil
+		}
+		if reason, allowed := serviceMailRecipientAllowed(ctx, store, request); !allowed {
+			fail(reason, http.StatusForbidden)
+			return nil
+		}
+		shouldSend = true
+		return nil
+	})
+	if err != nil {
+		return err.Error(), http.StatusInternalServerError
 	}
 	a.refreshHostingAndSupportPanel()
-	a.notifyServiceMailRequestHostingSnapshotDiskThreshold(ctx, controlDatabase.DB, request, sourceIP)
-	if store.ServiceMailInstallationBlocked(ctx, request.InstallationID) {
-		return fail("installation is blocked", http.StatusForbidden)
-	}
-	if reason, blocked := store.ServiceMailBlocked(ctx, request.InstallationID, sourceIP, request.Recipient, recipientDomain); blocked {
-		return fail("blocked by rule "+reason, http.StatusForbidden)
-	}
-	if serviceMailKindIsRecipientVerification(request.CodeKind) {
-		if err := store.UpsertServiceMailRecipient(ctx, request.InstallationID, request.Recipient, "verified", "confirmed"); err != nil {
-			return fail(err.Error(), http.StatusBadRequest)
-		}
-		event.Status = "verified"
-		_ = store.LogServiceMailEvent(ctx, event)
-		return "verified", http.StatusOK
-	}
-	if !serviceMailKindAllowed(request.CodeKind) {
-		return fail("service mail kind is not allowed", http.StatusForbidden)
-	}
-	if err := validateServiceMailSecret(request.CodeKind, request.SecretValue); err != nil {
-		return fail(err.Error(), http.StatusBadRequest)
-	}
-	if reason, limited := serviceMailRateLimited(ctx, store, request, sourceIP, recipientDomain); limited {
-		return fail(reason, http.StatusTooManyRequests)
-	}
-	if reason, allowed := serviceMailRecipientAllowed(ctx, store, request); !allowed {
-		return fail(reason, http.StatusForbidden)
+	a.notifyServiceMailRequestHostingSnapshotDiskThreshold(ctx, request, sourceIP)
+	if !shouldSend {
+		return responseMessage, responseStatus
 	}
 	relayDomain := a.siteDomain(ctx, r)
 	message := mailout.Message{
@@ -18231,11 +18270,15 @@ func (a *App) handleServiceMailRelayRequest(ctx context.Context, r *http.Request
 	if err := a.defaultEmailSender()(sendCtx, message); err != nil {
 		event.Status = "error"
 		event.Error = err.Error()
-		_ = store.LogServiceMailEvent(ctx, event)
+		_ = a.withServerControlDatabaseWrite(ctx, "log-service-mail-error", func(database *sql.DB) error {
+			return (hostingandsupport.Store{DB: database}).LogServiceMailEvent(ctx, event)
+		})
 		return err.Error(), http.StatusBadGateway
 	}
 	event.Status = "sent"
-	_ = store.LogServiceMailEvent(ctx, event)
+	_ = a.withServerControlDatabaseWrite(ctx, "log-service-mail-sent", func(database *sql.DB) error {
+		return (hostingandsupport.Store{DB: database}).LogServiceMailEvent(ctx, event)
+	})
 	return "sent", http.StatusOK
 }
 
@@ -18412,14 +18455,18 @@ func validateServiceMailSecret(codeKind, secretValue string) error {
 }
 
 func (a *App) serviceMailLocalKeyPair(ctx context.Context) (string, ed25519.PublicKey, ed25519.PrivateKey, error) {
-	controlDatabase, err := a.openServerControlDatabase(ctx)
+	var installationID string
+	var publicKeyText string
+	var privateKeyText string
+	err := a.withServerControlDatabaseRead(ctx, "service-mail-key-read", func(database *sql.DB) error {
+		installationID = hostingandsupport.SettingText(ctx, database, "service_mail_installation_id")
+		publicKeyText = hostingandsupport.SettingText(ctx, database, "service_mail_public_key")
+		privateKeyText = hostingandsupport.SettingText(ctx, database, "service_mail_private_key")
+		return nil
+	})
 	if err != nil {
 		return "", nil, nil, err
 	}
-	defer controlDatabase.Close()
-	installationID := hostingandsupport.SettingText(ctx, controlDatabase, "service_mail_installation_id")
-	publicKeyText := hostingandsupport.SettingText(ctx, controlDatabase, "service_mail_public_key")
-	privateKeyText := hostingandsupport.SettingText(ctx, controlDatabase, "service_mail_private_key")
 	publicKey, publicErr := base64.StdEncoding.DecodeString(publicKeyText)
 	privateKey, privateErr := base64.StdEncoding.DecodeString(privateKeyText)
 	if installationID != "" && publicErr == nil && privateErr == nil && len(publicKey) == ed25519.PublicKeySize && len(privateKey) == ed25519.PrivateKeySize {
@@ -18436,11 +18483,16 @@ func (a *App) serviceMailLocalKeyPair(ctx context.Context) (string, ed25519.Publ
 		"service_mail_public_key":      base64.StdEncoding.EncodeToString(generatedPublicKey),
 		"service_mail_private_key":     base64.StdEncoding.EncodeToString(generatedPrivateKey),
 	}
-	for name, value := range settings {
-		_, err := controlDatabase.ExecContext(ctx, `INSERT INTO server_settings(name,value,updated_at) VALUES(?,?,?) ON CONFLICT(name) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at`, name, value, now)
-		if err != nil {
-			return "", nil, nil, err
+	err = a.withServerControlDatabaseWrite(ctx, "service-mail-key-save", func(database *sql.DB) error {
+		for name, value := range settings {
+			if _, writeErr := database.ExecContext(ctx, `INSERT INTO server_settings(name,value,updated_at) VALUES(?,?,?) ON CONFLICT(name) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at`, name, value, now); writeErr != nil {
+				return writeErr
+			}
 		}
+		return nil
+	})
+	if err != nil {
+		return "", nil, nil, err
 	}
 	return installationID, generatedPublicKey, generatedPrivateKey, nil
 }
@@ -18721,12 +18773,14 @@ func (a *App) hostingAndSupportParentDomainForThirdLevelSite(ctx context.Context
 	if registrationDomain == "" {
 		return "", false
 	}
-	controlDatabase, err := a.openServerControlDatabaseRead(ctx)
-	if err != nil {
+	parentDomain := ""
+	found := false
+	if err := a.withServerControlDatabaseRead(ctx, "load-owner-domain-for-registration", func(database *sql.DB) error {
+		parentDomain, found = (hostingandsupport.Store{DB: database}).OwnerDomain(ctx)
+		return nil
+	}); err != nil {
 		return "", false
 	}
-	defer controlDatabase.Close()
-	parentDomain, found := (hostingandsupport.Store{DB: controlDatabase}).OwnerDomain(ctx)
 	parentDomain = normalizeDomainName(parentDomain)
 	if !found || parentDomain == "" {
 		return "", false
@@ -19922,18 +19976,13 @@ func (a *App) listSiteQuotaRowsWithControlDatabase(ctx context.Context, controlD
 	for _, candidate := range candidates {
 		var candidateRows []siteQuotaRow
 		if sameSiteQuotaPath(candidate.path, a.serverControlDBPath()) {
-			var controlSession *serverControlDatabaseSession
-			if controlDatabase == nil {
-				controlSession, err = a.openServerControlDatabase(ctx)
-				if err != nil {
-					return nil, err
-				}
-				controlDatabase = controlSession.DB
-			}
-			candidateRows, err = siteQuotaRowsFromOpenDatabase(ctx, a.storagePath, candidate, controlDatabase)
-			if controlSession != nil {
-				_ = controlSession.Close()
-				controlDatabase = nil
+			if controlDatabase != nil {
+				candidateRows, err = siteQuotaRowsFromOpenDatabase(ctx, a.storagePath, candidate, controlDatabase)
+			} else {
+				err = a.withServerControlDatabaseRead(ctx, "list-control-database-quota", func(database *sql.DB) error {
+					candidateRows, err = siteQuotaRowsFromOpenDatabase(ctx, a.storagePath, candidate, database)
+					return err
+				})
 			}
 		} else {
 			candidateRows, err = siteQuotaRowsFromDatabase(ctx, a.storagePath, candidate)
@@ -20268,30 +20317,31 @@ func (a *App) updateSiteQuotaLimit(ctx context.Context, rawDomain string, limitB
 		return siteQuotaRow{}, err
 	}
 
-	var rawDatabase *sql.DB
-	var controlSession *serverControlDatabaseSession
 	if sameSiteQuotaPath(candidate.path, a.serverControlDBPath()) {
-		controlSession, err = a.openServerControlDatabase(ctx)
-		if err != nil {
-			return siteQuotaRow{}, err
-		}
-		rawDatabase = controlSession.DB
-		defer controlSession.Close()
-	} else {
-		rawDatabase, err = sql.Open("sqlite", "file:"+candidate.path)
-		if err != nil {
-			return siteQuotaRow{}, err
-		}
-		defer rawDatabase.Close()
+		var updatedRow siteQuotaRow
+		var err error
+		err = a.withServerControlDatabaseWrite(ctx, "update-control-database-quota", func(database *sql.DB) error {
+			updatedRow, err = a.updateSiteQuotaLimitInDatabase(ctx, database, candidate, domain, limitBytes)
+			return err
+		})
+		return updatedRow, err
 	}
+	rawDatabase, err := sql.Open("sqlite", "file:"+candidate.path)
+	if err != nil {
+		return siteQuotaRow{}, err
+	}
+	defer rawDatabase.Close()
+	return a.updateSiteQuotaLimitInDatabase(ctx, rawDatabase, candidate, domain, limitBytes)
+}
 
+func (a *App) updateSiteQuotaLimitInDatabase(ctx context.Context, rawDatabase *sql.DB, candidate siteQuotaDatabaseCandidate, domain string, limitBytes int64) (siteQuotaRow, error) {
 	application := &App{db: rawDatabase, storagePath: a.storagePath, storageRealRoot: a.storageRealRoot, dbPath: a.serverControlDBPath(), debug: a.debug}
 	commandContext := contextWithDomain(ctx, domain)
 	if err := application.migrate(commandContext); err != nil {
 		return siteQuotaRow{}, err
 	}
 	application.ensureDomainStorageUsageRow(commandContext, domain)
-	_, err = rawDatabase.ExecContext(commandContext, `UPDATE domain_storage_usage SET limit_bytes=?, updated_at=? WHERE domain=?`, limitBytes, time.Now().UTC().Format(time.RFC3339), domain)
+	_, err := rawDatabase.ExecContext(commandContext, `UPDATE domain_storage_usage SET limit_bytes=?, updated_at=? WHERE domain=?`, limitBytes, time.Now().UTC().Format(time.RFC3339), domain)
 	if err != nil {
 		return siteQuotaRow{}, err
 	}
@@ -20960,39 +21010,38 @@ func (a *App) serverControlDBPath() string {
 	return cleanDBPath(defaultDBPath)
 }
 
-func (a *App) openServerControlDatabase(ctx context.Context) (*serverControlDatabaseSession, error) {
-	return a.openServerControlDatabaseForPurpose(ctx, serverControlDatabaseWrite, "write")
+func (a *App) withServerControlDatabaseRead(ctx context.Context, purpose string, run func(*sql.DB) error) error {
+	return a.withServerControlDatabase(ctx, serverControlDatabaseRead, purpose, run)
 }
 
-func (a *App) openServerControlDatabaseRead(ctx context.Context) (*serverControlDatabaseSession, error) {
-	return a.openServerControlDatabaseForPurpose(ctx, serverControlDatabaseRead, "read")
+func (a *App) withServerControlDatabaseWrite(ctx context.Context, purpose string, run func(*sql.DB) error) error {
+	return a.withServerControlDatabase(ctx, serverControlDatabaseWrite, purpose, run)
 }
 
-func (a *App) openServerControlDatabaseForAccess(ctx context.Context, kind serverControlDatabaseAccessKind) (*serverControlDatabaseSession, error) {
-	return a.openServerControlDatabaseForPurpose(ctx, kind, "unspecified")
-}
-
-func (a *App) openServerControlDatabaseForPurpose(ctx context.Context, kind serverControlDatabaseAccessKind, purpose string) (*serverControlDatabaseSession, error) {
+func (a *App) withServerControlDatabase(ctx context.Context, kind serverControlDatabaseAccessKind, purpose string, run func(*sql.DB) error) error {
+	if run == nil {
+		return errors.New("server control database operation is required")
+	}
 	databasePath := a.serverControlDBPath()
 	realDatabasePath, pathErr := a.writablePathInsideStorage(databasePath)
 	if pathErr != nil {
-		return nil, pathErr
+		return pathErr
 	}
 	if err := ensureParentDir(realDatabasePath); err != nil {
-		return nil, err
+		return err
 	}
 	if a.controlDatabase != nil {
-		return a.controlDatabase.acquireForPurpose(ctx, kind, purpose)
+		return a.controlDatabase.execute(ctx, kind, purpose, run)
 	}
-	database, err := openServerControlDatabaseHandle(realDatabasePath, true)
+	database, err := openServerControlDatabaseHandle(realDatabasePath, kind == serverControlDatabaseWrite)
 	if err != nil {
-		return nil, err
+		return err
 	}
+	defer database.Close()
 	if err := hostingandsupport.Migrate(ctx, database); err != nil {
-		_ = database.Close()
-		return nil, err
+		return err
 	}
-	return &serverControlDatabaseSession{DB: database, standalone: true}, nil
+	return run(database)
 }
 
 func (a *App) startServerOwnerRecoveryWorker(ctx context.Context) {
@@ -21017,29 +21066,26 @@ func (a *App) startServerOwnerRecoveryWorker(ctx context.Context) {
 }
 
 func (a *App) serverOwnerExists(ctx context.Context) bool {
-	controlDatabase, err := a.openServerControlDatabaseRead(ctx)
-	if err != nil {
-		return false
-	}
-	defer controlDatabase.Close()
-	return (hostingandsupport.Store{DB: controlDatabase}).OwnerExists(ctx)
+	exists := false
+	_ = a.withServerControlDatabaseRead(ctx, "check-server-owner", func(database *sql.DB) error {
+		exists = (hostingandsupport.Store{DB: database}).OwnerExists(ctx)
+		return nil
+	})
+	return exists
 }
 
 func (a *App) ensureServerOwnerExists(ctx context.Context) {
-	controlDatabase, err := a.openServerControlDatabase(ctx)
-	if err != nil {
-		return
-	}
-	defer controlDatabase.Close()
-	store := hostingandsupport.Store{DB: controlDatabase}
-	if store.OwnerExists(ctx) {
+	if a.serverOwnerExists(ctx) {
 		return
 	}
 	domain, email, found := a.firstExistingSiteAdmin(ctx)
 	if !found {
 		return
 	}
-	store.PromoteOwnerIfMissing(ctx, domain, email)
+	_ = a.withServerControlDatabaseWrite(ctx, "promote-recovered-server-owner", func(database *sql.DB) error {
+		(hostingandsupport.Store{DB: database}).PromoteOwnerIfMissing(ctx, domain, email)
+		return nil
+	})
 	a.refreshHostingAndSupportPanel()
 }
 
@@ -21061,12 +21107,15 @@ func (a *App) firstAdminInDatabase(ctx context.Context, databasePath, fallbackDo
 	if !sameSiteQuotaPath(databasePath, a.serverControlDBPath()) {
 		return firstAdminInDatabase(ctx, databasePath, fallbackDomain)
 	}
-	controlDatabase, err := a.openServerControlDatabaseRead(ctx)
-	if err != nil {
+	var domain, email string
+	found := false
+	if err := a.withServerControlDatabaseRead(ctx, "load-first-control-database-admin", func(database *sql.DB) error {
+		domain, email, found = firstAdminFromOpenDatabase(ctx, database, fallbackDomain)
+		return nil
+	}); err != nil {
 		return "", "", false
 	}
-	defer controlDatabase.Close()
-	return firstAdminFromOpenDatabase(ctx, controlDatabase.DB, fallbackDomain)
+	return domain, email, found
 }
 
 func firstAdminInDatabase(ctx context.Context, databasePath, fallbackDomain string) (string, string, bool) {
@@ -21096,12 +21145,10 @@ func (a *App) promoteFirstServerOwner(ctx context.Context, domain, email string)
 	if domain == "" || email == "" {
 		return
 	}
-	controlDatabase, err := a.openServerControlDatabase(ctx)
-	if err != nil {
-		return
-	}
-	defer controlDatabase.Close()
-	(hostingandsupport.Store{DB: controlDatabase}).PromoteOwnerIfMissing(ctx, domain, email)
+	_ = a.withServerControlDatabaseWrite(ctx, "promote-first-server-owner", func(database *sql.DB) error {
+		(hostingandsupport.Store{DB: database}).PromoteOwnerIfMissing(ctx, domain, email)
+		return nil
+	})
 	a.reportHostingSnapshotAsync(ctx)
 }
 
@@ -21130,21 +21177,25 @@ func (a *App) isServerManagerEmail(ctx context.Context, domain, email string) bo
 	if !a.serverOwnerExists(ctx) {
 		a.ensureServerOwnerExists(ctx)
 	}
-	controlDatabase, err := a.openServerControlDatabaseRead(ctx)
-	if err != nil {
+	ownerDomain := ""
+	ownerFound := false
+	isOwner := false
+	if err := a.withServerControlDatabaseRead(ctx, "check-server-manager", func(database *sql.DB) error {
+		store := hostingandsupport.Store{DB: database}
+		ownerDomain, ownerFound = store.OwnerDomain(ctx)
+		isOwner = store.IsOwner(ctx, email)
+		return nil
+	}); err != nil {
 		return false
 	}
-	defer controlDatabase.Close()
-	store := hostingandsupport.Store{DB: controlDatabase}
-	ownerDomain, ownerFound := store.OwnerDomain(ctx)
 	if !ownerFound {
 		return false
 	}
 	if sameHostingAndSupportDomain(ownerDomain, domain) {
-		return store.IsOwner(ctx, email)
+		return isOwner
 	}
 	if a.hostingAndSupportEffectiveLocalhost(ctx, ownerDomain, domain) {
-		return store.IsOwner(ctx, email)
+		return isOwner
 	}
 	return false
 }
@@ -21199,12 +21250,14 @@ func (a *App) serverAutomaticRegistrationAllowed(ctx context.Context) bool {
 	if !a.serverOwnerExists(ctx) {
 		return true
 	}
-	controlDatabase, err := a.openServerControlDatabaseRead(ctx)
-	if err != nil {
+	allowed := true
+	if err := a.withServerControlDatabaseRead(ctx, "check-automatic-registration", func(database *sql.DB) error {
+		allowed = (hostingandsupport.Store{DB: database}).AutomaticRegistrationAllowed(ctx)
+		return nil
+	}); err != nil {
 		return true
 	}
-	defer controlDatabase.Close()
-	return (hostingandsupport.Store{DB: controlDatabase}).AutomaticRegistrationAllowed(ctx)
+	return allowed
 }
 
 func (a *App) domainStorageUsage(ctx context.Context, domain string) domainStorageUsage {
