@@ -6565,6 +6565,10 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 		httpsecurity.RedirectHTTPS(w, r, http.StatusTemporaryRedirect)
 		return
 	}
+	publicTrialEndpoint := publicTrialEndpointFromRequest(r)
+	if a.preparePublicTrialEndpoint(w, r, publicTrialEndpoint) {
+		return
+	}
 	if a.isDomainPrefixedPublicAssetPath(r) {
 		a.servePublicAsset(w, r)
 		return
@@ -6640,36 +6644,8 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 		a.grabProgressWS(w, r)
 		return
 	}
-	if hasQueryFlag(r, "trial_site_ws") {
-		a.publicTrialSiteWS(w, r)
-		return
-	}
-	if hasQueryFlag(r, "trial_site_events") {
-		a.publicTrialSiteEvents(w, r)
-		return
-	}
-	if hasQueryFlag(r, "trial_site_texts") {
-		a.publicTrialSiteTexts(w, r)
-		return
-	}
-	if hasQueryFlag(r, "trial_site_preview") {
-		a.publicTrialSitePreview(w, r)
-		return
-	}
-	if hasQueryFlag(r, "trial_site_preview_status") {
-		a.publicTrialSitePreviewStatus(w, r)
-		return
-	}
-	if hasQueryFlag(r, "trial_site_preview_cancel") {
-		a.publicTrialSitePreviewCancel(w, r)
-		return
-	}
-	if hasQueryFlag(r, "trial_site_preview_frame") {
-		a.publicTrialSitePreviewFrame(w, r)
-		return
-	}
-	if hasQueryFlag(r, "trial_site_create") {
-		a.publicTrialSiteCreate(w, r)
+	if publicTrialEndpoint != publicTrialEndpointNone {
+		a.servePublicTrialEndpoint(w, r, publicTrialEndpoint)
 		return
 	}
 	if hasQueryFlag(r, "revision_preview") {
@@ -9576,6 +9552,87 @@ func (a *App) publicTrialAllowed(r *http.Request) bool {
 	return allowed
 }
 
+type publicTrialEndpoint uint8
+
+const (
+	publicTrialEndpointNone publicTrialEndpoint = iota
+	publicTrialEndpointWebSocket
+	publicTrialEndpointEvents
+	publicTrialEndpointTexts
+	publicTrialEndpointPreview
+	publicTrialEndpointPreviewStatus
+	publicTrialEndpointPreviewCancel
+	publicTrialEndpointPreviewFrame
+	publicTrialEndpointCreate
+)
+
+func publicTrialEndpointFromRequest(r *http.Request) publicTrialEndpoint {
+	if r == nil {
+		return publicTrialEndpointNone
+	}
+	switch {
+	case hasQueryFlag(r, "trial_site_ws"):
+		return publicTrialEndpointWebSocket
+	case hasQueryFlag(r, "trial_site_events"):
+		return publicTrialEndpointEvents
+	case hasQueryFlag(r, "trial_site_texts"):
+		return publicTrialEndpointTexts
+	case hasQueryFlag(r, "trial_site_preview"):
+		return publicTrialEndpointPreview
+	case hasQueryFlag(r, "trial_site_preview_status"):
+		return publicTrialEndpointPreviewStatus
+	case hasQueryFlag(r, "trial_site_preview_cancel"):
+		return publicTrialEndpointPreviewCancel
+	case hasQueryFlag(r, "trial_site_preview_frame"):
+		return publicTrialEndpointPreviewFrame
+	case hasQueryFlag(r, "trial_site_create"):
+		return publicTrialEndpointCreate
+	default:
+		return publicTrialEndpointNone
+	}
+}
+
+func (a *App) preparePublicTrialEndpoint(w http.ResponseWriter, r *http.Request, endpoint publicTrialEndpoint) bool {
+	if endpoint == publicTrialEndpointNone {
+		return false
+	}
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Accept, Content-Type")
+	if r.Method != http.MethodOptions {
+		return false
+	}
+	if !a.publicTrialAllowed(r) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return true
+	}
+	w.WriteHeader(http.StatusNoContent)
+	return true
+}
+
+func (a *App) servePublicTrialEndpoint(w http.ResponseWriter, r *http.Request, endpoint publicTrialEndpoint) {
+	switch endpoint {
+	case publicTrialEndpointWebSocket:
+		a.publicTrialSiteWS(w, r)
+	case publicTrialEndpointEvents:
+		a.publicTrialSiteEvents(w, r)
+	case publicTrialEndpointTexts:
+		a.publicTrialSiteTexts(w, r)
+	case publicTrialEndpointPreview:
+		a.publicTrialSitePreview(w, r)
+	case publicTrialEndpointPreviewStatus:
+		a.publicTrialSitePreviewStatus(w, r)
+	case publicTrialEndpointPreviewCancel:
+		a.publicTrialSitePreviewCancel(w, r)
+	case publicTrialEndpointPreviewFrame:
+		a.publicTrialSitePreviewFrame(w, r)
+	case publicTrialEndpointCreate:
+		a.publicTrialSiteCreate(w, r)
+	default:
+		http.NotFound(w, r)
+	}
+}
+
 func (a *App) cleanupExpiredPublicTrialSite(ctx context.Context, domain string) {
 	domain = normalizeDomainName(domain)
 	if domain == "" {
@@ -9603,6 +9660,14 @@ func (a *App) cleanupExpiredPublicTrialSite(ctx context.Context, domain string) 
 	row, found, rowErr := a.managedSiteQuotaRow(ctx, domain)
 	if rowErr != nil {
 		return
+	}
+	if !found {
+		databasePath := filepath.Join(siteDatabaseRootPath(a.serverControlDBPath()), domainStorageName(domain)+".db")
+		if _, pathErr := a.writablePathInsideStorage(databasePath); pathErr != nil {
+			return
+		}
+		row = siteQuotaRow{Domain: domain, DatabasePath: databasePath}
+		found = true
 	}
 	if found && sameSiteQuotaPath(row.DatabasePath, a.serverControlDBPath()) {
 		return
@@ -13798,7 +13863,7 @@ func (a *App) hostingAndSupportSiteURL(domain string) string {
 
 func publicTrialSignupEmbedHTML(r *http.Request, translations map[string]string) string {
 	endpointURL := absoluteURLForPath(r, "/")
-	scriptURL := "/p/static/site_copy.js?v=" + url.QueryEscape(publicTrialWidgetScriptVersion())
+	scriptURL := absoluteURLForPath(r, "/p/static/site_copy.js?v="+url.QueryEscape(publicTrialWidgetScriptVersion()))
 	config := map[string]any{"endpoint": endpointURL}
 	configJSON, err := json.Marshal(config)
 	if err != nil {
