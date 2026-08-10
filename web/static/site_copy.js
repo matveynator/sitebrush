@@ -105,6 +105,12 @@
     return endpointURL.toString();
   }
 
+  function configuredWebSocketEndpoint(configuration, queryName, extraParameters) {
+    const endpointURL = new URL(configuredEndpoint(configuration, queryName, extraParameters));
+    endpointURL.protocol = endpointURL.protocol === 'https:' ? 'wss:' : 'ws:';
+    return endpointURL.toString();
+  }
+
   function configuredAssetURL(configuration, assetPath) {
     if (!configuration || !configuration.endpoint) {
       return assetPath;
@@ -378,7 +384,7 @@
     const downloadQuery = String(configuration && configuration.downloadQuery ? configuration.downloadQuery : 'grab');
     const retryQuery = String(configuration && configuration.retryQuery ? configuration.retryQuery : 'grab_retry');
     const cancelQuery = String(configuration && configuration.cancelQuery ? configuration.cancelQuery : 'grab_cancel');
-    const eventsQuery = String(configuration && configuration.eventsQuery ? configuration.eventsQuery : 'grab_events');
+    const webSocketQuery = String(configuration && configuration.webSocketQuery ? configuration.webSocketQuery : 'grab_ws');
     const publicTrialMode = Boolean(configuration && configuration.publicTrial);
     const overlayElement = createElement('div', 'SiteBrushCopySiteOverlay');
     const dialogElement = createElement('div', 'SiteBrushCopySiteDialog');
@@ -480,7 +486,7 @@
     overlayElement.appendChild(dialogElement);
     document.body.appendChild(overlayElement);
 
-    let progressStream = null;
+    let progressWebSocket = null;
     let previewPayload = null;
     let downloadFinishedWithErrors = false;
     let failedResourceURLs = new Set();
@@ -490,7 +496,8 @@
     let retryWasAttempted = false;
     let partialImportCanRetry = false;
     let requestIsRunning = false;
-    let streamClosedIntentionally = false;
+    let progressWebSocketClosedIntentionally = false;
+    let progressWebSocketFailureHandled = false;
     let progressReadyFallbackTimer = 0;
     let retryCountdownTimer = 0;
     let activeDownloadEndpoint = '?grab';
@@ -514,26 +521,26 @@
         cancelRequestBody.set('progress_token', activeGrabToken);
         fetch(configuredEndpoint(configuration, cancelQuery), { method: 'POST', body: cancelRequestBody, keepalive: true }).catch(function ignoreCloseCancelError() {});
       }
-      closeProgressStream();
+      closeProgressWebSocket();
       stopRetryCountdown();
       overlayElement.remove();
     }
 
-    function closeProgressStream() {
+    function closeProgressWebSocket() {
       if (progressReadyFallbackTimer) {
         window.clearTimeout(progressReadyFallbackTimer);
         progressReadyFallbackTimer = 0;
       }
-      if (!progressStream) {
+      if (!progressWebSocket) {
         return;
       }
-      streamClosedIntentionally = true;
-      progressStream.close();
-      progressStream = null;
+      progressWebSocketClosedIntentionally = true;
+      progressWebSocket.close();
+      progressWebSocket = null;
     }
 
     function finishPartialImport() {
-      closeProgressStream();
+      closeProgressWebSocket();
       stopRetryCountdown();
       window.location.href = importedRedirectPath || targetPath || '/';
     }
@@ -674,12 +681,12 @@
       downloadFinishedWithErrors = true;
       statusElement.textContent = textFromConfig(configuration, retryWasAttempted ? 'partialImportClose' : 'partialImportRetry', 'Imported with errors.');
       setProgress(progressBarElement, 100);
-      closeProgressStream();
+      closeProgressWebSocket();
       renderFailedResources();
       return true;
     }
 
-    function connectProgressStream(progressToken, readyCallback, forDownload) {
+    function connectProgressWebSocket(progressToken, readyCallback, forDownload) {
       let readyCallbackWasCalled = false;
       function startRequestOnce() {
         if (readyCallbackWasCalled) {
@@ -692,25 +699,26 @@
         }
         readyCallback();
       }
-      streamClosedIntentionally = false;
+      progressWebSocketClosedIntentionally = false;
+      progressWebSocketFailureHandled = false;
       progressReadyFallbackTimer = window.setTimeout(startRequestOnce, 1000);
-      if (typeof EventSource !== 'function') {
+      if (typeof WebSocket !== 'function') {
         startRequestOnce();
         return;
       }
       try {
-        progressStream = new EventSource(configuredEndpoint(configuration, eventsQuery, { token: progressToken }));
-      } catch (streamError) {
+        progressWebSocket = new WebSocket(configuredWebSocketEndpoint(configuration, webSocketQuery, { token: progressToken }));
+      } catch (connectionError) {
         startRequestOnce();
         return;
       }
-      progressStream.onmessage = function onProgressMessage(messageEvent) {
+      progressWebSocket.onmessage = function onProgressMessage(messageEvent) {
         let progressPayload = null;
         try {
           progressPayload = JSON.parse(messageEvent.data);
         } catch (parseError) {
           statusElement.textContent = textFromConfig(configuration, 'invalidStatusError', 'Invalid status.');
-          closeProgressStream();
+          closeProgressWebSocket();
           return;
         }
         if (progressPayload.stage === 'ready') {
@@ -760,7 +768,7 @@
           stopRetryCountdown();
           statusElement.textContent = forDownload ? textFromConfig(configuration, 'doneOpenPage', 'Done. Opening page...') : textFromConfig(configuration, 'previewResourcesText', 'Checking resources...');
           setProgress(progressBarElement, 100);
-          closeProgressStream();
+          closeProgressWebSocket();
         }
         if (progressPayload.stage === 'partial') {
           stopRetryCountdown();
@@ -768,25 +776,30 @@
           statusElement.textContent = progressPayload.message || textFromConfig(configuration, retryWasAttempted ? 'partialImportClose' : 'partialImportRetry', 'Imported with errors.');
           setProgress(progressBarElement, 100);
           renderFailedResources();
-          closeProgressStream();
+          closeProgressWebSocket();
         }
         if (progressPayload.stage === 'error' && !progressPayload.current_url) {
           statusElement.textContent = textFromConfig(configuration, 'downloadFailedRetry', 'Download failed.');
-          closeProgressStream();
+          closeProgressWebSocket();
         }
       };
-      progressStream.onerror = function onProgressError() {
-        if (streamClosedIntentionally || requestIsRunning) {
+      function handleProgressConnectionFailure() {
+        if (progressWebSocketClosedIntentionally || progressWebSocketFailureHandled) {
           return;
         }
+        progressWebSocketFailureHandled = true;
         if (!readyCallbackWasCalled) {
-          closeProgressStream();
+          closeProgressWebSocket();
           statusElement.textContent = textFromConfig(configuration, 'loadingStarted', 'Loading started...');
           startRequestOnce();
           return;
         }
-        statusElement.textContent = textFromConfig(configuration, 'reconnectingStatus', 'Reconnecting...');
-      };
+        if (requestIsRunning) {
+          statusElement.textContent = textFromConfig(configuration, 'connectionLostStatus', 'Connection lost. Waiting for the operation to finish...');
+        }
+      }
+      progressWebSocket.onerror = handleProgressConnectionFailure;
+      progressWebSocket.onclose = handleProgressConnectionFailure;
     }
 
     function showPreview(previewResponsePayload) {
@@ -868,7 +881,7 @@
       statusElement.textContent = textFromConfig(configuration, 'previewResourcesText', 'Checking resources...');
       urlElement.textContent = sourceUrlElement.value;
       submitButtonElement.disabled = true;
-      connectProgressStream(progressToken, function submitPreviewRequest() {
+      connectProgressWebSocket(progressToken, function submitPreviewRequest() {
         requestIsRunning = true;
         fetch(configuredEndpoint(configuration, previewQuery), { method: 'POST', body: formRequestBody(formElement), headers: { Accept: 'application/json' } })
           .then(function parsePreviewResponse(previewResponse) {
@@ -883,7 +896,7 @@
             requestIsRunning = false;
             activeGrabToken = '';
             submitButtonElement.disabled = false;
-            closeProgressStream();
+            closeProgressWebSocket();
             previewTokenFieldElement.value = progressToken;
             showPreview(previewResponsePayload);
           })
@@ -891,7 +904,7 @@
             requestIsRunning = false;
             activeGrabToken = '';
             submitButtonElement.disabled = false;
-            closeProgressStream();
+            closeProgressWebSocket();
             statusElement.textContent = previewError.message || textFromConfig(configuration, 'previewErrorDefault', 'Preview failed.');
           });
       }, false);
@@ -937,7 +950,7 @@
       setProgress(progressBarElement, 0);
       statusElement.textContent = textFromConfig(configuration, 'loadingStarted', 'Loading started...');
       urlElement.textContent = '';
-      connectProgressStream(progressToken, function submitDownloadRequest() {
+      connectProgressWebSocket(progressToken, function submitDownloadRequest() {
         requestIsRunning = true;
         const downloadBody = formRequestBody(formElement);
         if (publicTrialMode) {
@@ -970,7 +983,7 @@
             }
             setProgress(progressBarElement, 100);
             statusElement.textContent = textFromConfig(configuration, 'doneOpenPage', 'Done. Opening page...');
-            closeProgressStream();
+            closeProgressWebSocket();
             window.location.href = redirectPath;
           })
           .catch(function handleDownloadError(downloadError) {
@@ -979,7 +992,7 @@
             submitButtonElement.disabled = false;
             cancelButtonElement.disabled = false;
             setFinishImportButtonMode(false);
-            closeProgressStream();
+            closeProgressWebSocket();
             statusElement.textContent = downloadError.message || textFromConfig(configuration, 'loadPageFailed', 'Load failed.');
           });
       }, true);
@@ -1096,7 +1109,7 @@
           downloadQuery: 'trial_site_create',
           retryQuery: 'trial_site_create',
           cancelQuery: 'trial_site_preview_cancel',
-          eventsQuery: 'trial_site_events'
+          webSocketQuery: 'trial_site_ws'
         });
         openCopySiteModal(unifiedConfiguration);
       });
