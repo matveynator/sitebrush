@@ -34,6 +34,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -8448,22 +8449,143 @@ func TestPublicTrialRunningPreviewIsUsable(t *testing.T) {
 	}
 }
 
-func TestPublicTrialScriptReconnectsAndPollsPreviewStatus(t *testing.T) {
+func TestPublicTrialPreviewResponseRequiresSinglePageFallback(t *testing.T) {
+	preview := publicTrialPreview{
+		SourceURL:          "https://example.com/",
+		ImportedPages:      []wholeSiteImportedPage{{SourceURL: "https://example.com/", LocalPath: "/", HTML: "<h1>Ready</h1>"}},
+		PageCount:          1,
+		RequiredBytes:      14,
+		TotalBytes:         14,
+		CopyWholeSite:      true,
+		SinglePageRequired: true,
+	}
+	response := publicTrialPreviewResponseFromPreview(preview, "partial", "", nil)
+	if !response.Usable || !response.SinglePageRequired {
+		t.Fatalf("single-page fallback response = %#v", response)
+	}
+}
+
+func TestPublicTrialSinglePagePreviewDoesNotCrawlDocumentLinks(t *testing.T) {
+	application, _ := newTestApplication(t)
+	sourceURL := "https://source.example/landing"
+	imageURL := "https://source.example/hero.png"
+	linkedPageURL := "https://source.example/catalog"
+	requestedURLs := make(map[string]int)
+	previousGrabHTTPClient := newGrabHTTPClient
+	newGrabHTTPClient = func() *http.Client {
+		return &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+			requestedURLs[request.URL.String()]++
+			switch request.URL.String() {
+			case sourceURL:
+				return fakeGrabResponse{contentType: "text/html", body: `<html><body><a href="/catalog">Catalog</a><img src="/hero.png"></body></html>`}.httpResponse(request), nil
+			case imageURL:
+				return fakeGrabResponse{contentType: "image/png", body: "image"}.httpResponse(request), nil
+			default:
+				return fakeGrabResponse{statusCode: http.StatusNotFound, body: "not found"}.httpResponse(request), nil
+			}
+		})}
+	}
+	t.Cleanup(func() { newGrabHTTPClient = previousGrabHTTPClient })
+
+	cancelSession, started := application.activePublicTrialPreviewStore().Start("single-page-preview")
+	if !started {
+		t.Fatal("single-page preview did not start")
+	}
+	application.runPublicTrialSitePreview("single-page-preview", sourceURL, "", nil, cancelSession, false, grabSourceOptions{})
+	status, found := application.activePublicTrialPreviewStore().Status("single-page-preview")
+	if !found || status.Status != "done" {
+		t.Fatalf("single-page preview status = %#v, found=%t", status, found)
+	}
+	if status.Response.PageCount != 1 {
+		t.Fatalf("single-page preview pages = %d, want 1", status.Response.PageCount)
+	}
+	if requestedURLs[linkedPageURL] != 0 {
+		t.Fatalf("single-page preview requested linked document %q %d times", linkedPageURL, requestedURLs[linkedPageURL])
+	}
+	if requestedURLs[imageURL] == 0 {
+		t.Fatalf("single-page preview did not inspect required image %q", imageURL)
+	}
+}
+
+func TestPublicTrialFormUsesUnifiedCopyDialog(t *testing.T) {
 	scriptBytes, readErr := embeddedWebFiles.ReadFile("web/static/site_copy.js")
 	if readErr != nil {
 		t.Fatal(readErr)
 	}
 	script := string(scriptBytes)
 	for _, expectedFragment := range []string{
-		"function schedulePublicTrialProgressReconnect",
-		"trial_site_preview_status",
-		"window.setInterval(requestPublicTrialPreviewStatus, 5000)",
-		"progressState.stage === 'heartbeat'",
-		"trial_site_preview_cancel",
-		"create_progress_token",
-		"requestBody.set('async_preview', '1')",
-		"Restoring the connection. The website check continues...",
-		"applyPublicTrialPreview(previewResponsePayload, terminal)",
+		"openCopySiteModal(unifiedConfiguration)",
+		"previewQuery: 'trial_site_preview'",
+		"downloadQuery: 'trial_site_create'",
+		"eventsQuery: 'trial_site_events'",
+		"appendHiddenField(formElement, 'unified_copy', '1')",
+		"copyWholeSite: true",
+		"if (previewPayload.single_page_required)",
+		"wholeSiteElement.checked = false",
+	} {
+		if !strings.Contains(script, expectedFragment) {
+			t.Fatalf("unified public trial script does not contain %q", expectedFragment)
+		}
+	}
+}
+
+func TestWholeSitePreviewStopsAtFreeByteLimitWithUsableFirstPage(t *testing.T) {
+	startHTML := `<!doctype html><html><body><a href="/next">Next</a><img src="/huge.png"></body></html>`
+	startURL, parseErr := url.Parse("https://limited.example/")
+	if parseErr != nil {
+		t.Fatal(parseErr)
+	}
+	var requestMutex sync.Mutex
+	requestedURLs := make(map[string]int)
+	previousGrabHTTPClient := newGrabHTTPClient
+	newGrabHTTPClient = func() *http.Client {
+		return &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+			requestMutex.Lock()
+			requestedURLs[request.URL.String()]++
+			requestMutex.Unlock()
+			header := make(http.Header)
+			switch request.URL.String() {
+			case "https://limited.example/huge.png":
+				header.Set("Content-Type", "image/png")
+				return &http.Response{StatusCode: http.StatusOK, Status: "200 OK", Header: header, Body: io.NopCloser(strings.NewReader("")), ContentLength: 1024, Request: request}, nil
+			case "https://limited.example/next":
+				header.Set("Content-Type", "text/html")
+				return &http.Response{StatusCode: http.StatusOK, Status: "200 OK", Header: header, Body: io.NopCloser(strings.NewReader("<p>next</p>")), ContentLength: 11, Request: request}, nil
+			default:
+				return &http.Response{StatusCode: http.StatusNotFound, Status: "404 Not Found", Header: header, Body: io.NopCloser(strings.NewReader("")), Request: request}, nil
+			}
+		})}
+	}
+	t.Cleanup(func() { newGrabHTTPClient = previousGrabHTTPClient })
+
+	preview := previewWholeRemoteSiteResourcesWithLimit(context.Background(), startURL, startHTML, "/", nil, "", grabSourceOptions{}, int64(len(startHTML)+100))
+	if !preview.LimitReached || !preview.Partial {
+		t.Fatalf("limited preview = limit reached %t, partial %t", preview.LimitReached, preview.Partial)
+	}
+	if len(preview.ImportedPages) != 1 || preview.ImportedPages[0].SourceURL != startURL.String() {
+		t.Fatalf("limited preview pages = %#v, want usable first page", preview.ImportedPages)
+	}
+	requestMutex.Lock()
+	nextRequests := requestedURLs["https://limited.example/next"]
+	requestMutex.Unlock()
+	if nextRequests != 0 {
+		t.Fatalf("preview continued crawling after free limit: next page requested %d times", nextRequests)
+	}
+}
+
+func TestPublicTrialScriptUsesCanonicalImportProgress(t *testing.T) {
+	scriptBytes, readErr := embeddedWebFiles.ReadFile("web/static/site_copy.js")
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	script := string(scriptBytes)
+	for _, expectedFragment := range []string{
+		"function openCopySiteModal(configuration)",
+		"new EventSource(configuredEndpoint(configuration, eventsQuery",
+		"previewQuery: 'trial_site_preview'",
+		"downloadQuery: 'trial_site_create'",
+		"cancelQuery: 'trial_site_preview_cancel'",
+		"eventsQuery: 'trial_site_events'",
 	} {
 		if !strings.Contains(script, expectedFragment) {
 			t.Fatalf("public trial script does not contain %q", expectedFragment)
