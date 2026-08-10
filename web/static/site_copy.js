@@ -491,6 +491,7 @@
     let partialImportCanRetry = false;
     let requestIsRunning = false;
     let streamClosedIntentionally = false;
+    let progressReadyFallbackTimer = 0;
     let retryCountdownTimer = 0;
     let activeDownloadEndpoint = '?grab';
     let activeGrabToken = '';
@@ -519,6 +520,10 @@
     }
 
     function closeProgressStream() {
+      if (progressReadyFallbackTimer) {
+        window.clearTimeout(progressReadyFallbackTimer);
+        progressReadyFallbackTimer = 0;
+      }
       if (!progressStream) {
         return;
       }
@@ -676,8 +681,29 @@
 
     function connectProgressStream(progressToken, readyCallback, forDownload) {
       let readyCallbackWasCalled = false;
+      function startRequestOnce() {
+        if (readyCallbackWasCalled) {
+          return;
+        }
+        readyCallbackWasCalled = true;
+        if (progressReadyFallbackTimer) {
+          window.clearTimeout(progressReadyFallbackTimer);
+          progressReadyFallbackTimer = 0;
+        }
+        readyCallback();
+      }
       streamClosedIntentionally = false;
-      progressStream = new EventSource(configuredEndpoint(configuration, eventsQuery, { token: progressToken }));
+      progressReadyFallbackTimer = window.setTimeout(startRequestOnce, 1000);
+      if (typeof EventSource !== 'function') {
+        startRequestOnce();
+        return;
+      }
+      try {
+        progressStream = new EventSource(configuredEndpoint(configuration, eventsQuery, { token: progressToken }));
+      } catch (streamError) {
+        startRequestOnce();
+        return;
+      }
       progressStream.onmessage = function onProgressMessage(messageEvent) {
         let progressPayload = null;
         try {
@@ -688,10 +714,7 @@
           return;
         }
         if (progressPayload.stage === 'ready') {
-          if (!readyCallbackWasCalled) {
-            readyCallbackWasCalled = true;
-            readyCallback();
-          }
+          startRequestOnce();
           return;
         }
         if (progressPayload.stage !== 'retry_wait') {
@@ -756,7 +779,13 @@
         if (streamClosedIntentionally || requestIsRunning) {
           return;
         }
-        statusElement.textContent = textFromConfig(configuration, 'connectStatusFailed', 'Connection failed.');
+        if (!readyCallbackWasCalled) {
+          closeProgressStream();
+          statusElement.textContent = textFromConfig(configuration, 'loadingStarted', 'Loading started...');
+          startRequestOnce();
+          return;
+        }
+        statusElement.textContent = textFromConfig(configuration, 'reconnectingStatus', 'Reconnecting...');
       };
     }
 
@@ -1060,7 +1089,7 @@
         const sourceURL = String(new FormData(formElement).get('source_url') || '');
         const unifiedConfiguration = Object.assign({}, publicTrialConfiguration, {
           publicTrial: true,
-          copyWholeSite: true,
+          copyWholeSite: false,
           sourceURL: sourceURL,
           path: '/',
           previewQuery: 'trial_site_preview',
