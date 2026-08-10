@@ -29,6 +29,7 @@
       <div class="selected-domain-card">
         <span>{{index .T "domain_settings_selected_domain"}}</span>
         <strong>{{.SelectedDomain}}</strong>
+        {{if .ExternalIPs}}<small>{{index .T "domain_settings_confirmed_ips"}} {{.ExternalIPs}}</small>{{end}}
       </div>
     </div>
 
@@ -127,7 +128,11 @@
           {{if .TXTVerified}}<span class="status-ok">{{index $.T "domain_settings_txt_ok"}}</span>{{else}}<span class="status-bad">{{index $.T "domain_settings_txt_missing"}}</span>{{end}}
           {{if .ARecordVerified}}<span class="status-ok">{{index $.T "domain_settings_a_ok"}}</span>{{else}}<span class="status-bad">{{index $.T "domain_settings_a_missing"}}</span>{{end}}
           {{if .IsActive}}<span class="status-ok">{{index $.T "domain_settings_active"}}</span>{{else}}<span class="status-bad">{{index $.T "domain_settings_inactive"}}</span>{{end}}
+          {{if .AutomaticSSL.CertificateValid}}<span class="status-ok">{{index $.T "domain_settings_ssl_valid"}}</span>{{else}}<span class="status-bad">{{index $.T "domain_settings_ssl_invalid"}}</span>{{end}}
         </div>
+
+        {{if .AutomaticSSL.CertificateExpiresAt}}<p class="hint">{{index $.T "domain_settings_ssl_expires"}} {{.AutomaticSSL.CertificateExpiresAt}} ({{.AutomaticSSL.CertificateRemaining}})</p>{{end}}
+        {{if .IsActive}}<button type="button" data-certificate-renew="{{.Domain}}">{{index $.T "domain_settings_ssl_renew_now"}}</button><span class="hint" data-certificate-renew-status="{{.Domain}}" aria-live="polite"></span>{{end}}
 
         <div class="dns-record-list">
           <div class="dns-record-row">
@@ -185,7 +190,9 @@
           <p class="hint">{{index .T "domain_settings_ssl_available_hint"}}</p>
         {{end}}
         {{if .AutomaticSSL.LastCheckedAt}}<p class="hint">{{index .T "domain_settings_ssl_last_checked"}} {{.AutomaticSSL.LastCheckedAt}}</p>{{end}}
+        {{if .AutomaticSSL.CertificateExpiresAt}}<p class="hint">{{index .T "domain_settings_ssl_expires"}} {{.AutomaticSSL.CertificateExpiresAt}} ({{.AutomaticSSL.CertificateRemaining}})</p>{{end}}
         <button type="submit">{{index .T "domain_settings_ssl_save"}}</button>
+        {{if not .AutomaticSSL.ManuallyDisabled}}<button type="button" data-certificate-renew="{{.AutomaticSSLDomain}}">{{index .T "domain_settings_ssl_renew_now"}}</button><span class="hint" data-certificate-renew-status="{{.AutomaticSSLDomain}}" aria-live="polite"></span>{{end}}
       {{else}}
         <p class="status-bad">{{index .T "domain_settings_ssl_unavailable_hint"}}</p>
       {{end}}
@@ -245,6 +252,61 @@
   </section>
 
   <script>
+  (function setupCertificateRenewalControls() {
+    const renewalButtonElements = document.querySelectorAll('[data-certificate-renew]');
+    if (!renewalButtonElements.length || !window.WebSocket) { return; }
+    const certificateModelsByDomain = Object.create(null);
+
+    function renderCertificateModel(domain) {
+      const certificateModel = certificateModelsByDomain[domain];
+      const statusElements = document.querySelectorAll('[data-certificate-renew-status="' + CSS.escape(domain) + '"]');
+      const buttonElements = document.querySelectorAll('[data-certificate-renew="' + CSS.escape(domain) + '"]');
+      Array.prototype.forEach.call(statusElements, function renderStatus(statusElement) {
+        statusElement.textContent = certificateModel.message;
+        statusElement.classList.toggle('status-bad', certificateModel.failed);
+        statusElement.classList.toggle('status-ok', certificateModel.state === 'ready');
+      });
+      Array.prototype.forEach.call(buttonElements, function renderButton(buttonElement) {
+        buttonElement.disabled = certificateModel.busy;
+      });
+    }
+
+    function updateCertificateModel(domain, nextState, message) {
+      certificateModelsByDomain[domain] = {
+        state: nextState,
+        message: message,
+        busy: nextState === 'connecting' || nextState === 'queued',
+        failed: nextState === 'certificate_error' || nextState === 'waiting_dns' || nextState === 'timeout'
+      };
+      renderCertificateModel(domain);
+    }
+
+    Array.prototype.forEach.call(renewalButtonElements, function bindCertificateRenewal(renewalButtonElement) {
+      const domain = renewalButtonElement.getAttribute('data-certificate-renew');
+      if (!domain) { return; }
+      certificateModelsByDomain[domain] = { state: 'idle', message: '', busy: false, failed: false };
+      renewalButtonElement.addEventListener('click', function renewCertificate() {
+        updateCertificateModel(domain, 'connecting', {{printf "%q" (index .T "domain_settings_ssl_renew_connecting")}});
+        const socketProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const socketURL = socketProtocol + '//' + window.location.host + window.location.pathname + '?certificate_renew_ws&domain=' + encodeURIComponent(domain);
+        const certificateSocket = new WebSocket(socketURL);
+        certificateSocket.addEventListener('message', function receiveCertificateState(messageEvent) {
+          let responseModel;
+          try { responseModel = JSON.parse(messageEvent.data); } catch (parseError) { responseModel = { state: 'certificate_error', error: String(parseError) }; }
+          const responseMessage = responseModel.error || (responseModel.state === 'ready' ? {{printf "%q" (index .T "domain_settings_ssl_renewed")}} : responseModel.state);
+          updateCertificateModel(domain, responseModel.state || 'certificate_error', responseMessage);
+        });
+        certificateSocket.addEventListener('close', function finishCertificateSocket() {
+          const certificateModel = certificateModelsByDomain[domain];
+          if (certificateModel && certificateModel.busy) { updateCertificateModel(domain, 'certificate_error', {{printf "%q" (index .T "domain_settings_ssl_connection_closed")}}); }
+        });
+        certificateSocket.addEventListener('error', function failCertificateSocket() {
+          updateCertificateModel(domain, 'certificate_error', {{printf "%q" (index .T "domain_settings_ssl_connection_closed")}});
+        });
+      });
+    });
+  })();
+
   (function setupNativeBackupDownload() {
     const nativeFileDialogEnabled = {{.NativeFileDialog}};
     const backupDownloadElement = document.querySelector('[data-native-backup-download]');

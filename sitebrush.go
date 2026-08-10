@@ -50,14 +50,12 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
-	"golang.org/x/crypto/acme"
-	"golang.org/x/crypto/acme/autocert"
 	"golang.org/x/net/dns/dnsmessage"
 	"golang.org/x/net/html"
 	"golang.org/x/term"
+	"sitebrush/pkg/channelacme"
 	appcli "sitebrush/pkg/cli"
 	"sitebrush/pkg/crawler"
 	_ "sitebrush/pkg/database/drivers"
@@ -380,50 +378,6 @@ type autoCertCertificateCacheResponse struct {
 	domains     []string
 }
 
-// automaticSSLDurableCache publishes a certificate only after autocert has
-// durably replaced it. This keeps the TLS-serving cache and the ACME cache on
-// the same successful write boundary.
-type automaticSSLDurableCache struct {
-	cache       autocert.Cache
-	application *App
-}
-
-func (cache automaticSSLDurableCache) Get(ctx context.Context, name string) ([]byte, error) {
-	return cache.cache.Get(ctx, name)
-}
-
-func (cache automaticSSLDurableCache) Put(ctx context.Context, name string, certificateBytes []byte) error {
-	domain, certificate, expiresAt, certificateEntry := automaticSSLCertificateCacheEntry(name, certificateBytes, time.Now())
-	if certificateEntry && certificate == nil {
-		return fmt.Errorf("autocert cache rejected invalid certificate entry %q", name)
-	}
-	if certificateEntry {
-		if currentCertificateBytes, err := cache.cache.Get(ctx, name); err == nil {
-			currentExpiresAt, currentValid := cachedCertificatePEMExpiresForDomain(currentCertificateBytes, domain, time.Now(), 0)
-			if currentValid && expiresAt.Before(currentExpiresAt) {
-				return fmt.Errorf("autocert cache rejected certificate expiry downgrade for %s", domain)
-			}
-		}
-	}
-	if err := cache.cache.Put(ctx, name, certificateBytes); err != nil {
-		return err
-	}
-	if !certificateEntry {
-		return nil
-	}
-	publishContext, cancelPublish := context.WithTimeout(ctx, 5*time.Second)
-	defer cancelPublish()
-	if err := cache.application.storeAutoCertCachedCertificate(publishContext, domain, certificate, expiresAt); err != nil {
-		return fmt.Errorf("publish renewed certificate for %s: %w", domain, err)
-	}
-	cache.application.logDomainEvent(domain, "AUTOCERT certificate applied expires_at=%s", expiresAt.UTC().Format(time.RFC3339))
-	return nil
-}
-
-func (cache automaticSSLDurableCache) Delete(ctx context.Context, name string) error {
-	return cache.cache.Delete(ctx, name)
-}
-
 func automaticSSLCertificateCacheEntry(name string, certificateBytes []byte, now time.Time) (string, *tls.Certificate, time.Time, bool) {
 	cacheName := strings.TrimSpace(name)
 	if strings.HasSuffix(cacheName, "+rsa") {
@@ -447,8 +401,14 @@ func automaticSSLCertificateCacheEntry(name string, certificateBytes []byte, now
 }
 
 type automaticSSLRequest struct {
-	action string
-	domain string
+	action     string
+	domain     string
+	response   chan automaticSSLDomainResult
+	ipResponse chan automaticSSLIPResult
+}
+
+type automaticSSLIssuer interface {
+	Issue(context.Context, string) channelacme.IssueResult
 }
 
 type automaticSSLResponse struct {
@@ -468,6 +428,18 @@ type automaticSSLDomainResult struct {
 type automaticSSLIPResult struct {
 	serverIPs []net.IP
 	err       error
+}
+
+type automaticSSLExternalIPProbe struct {
+	name    string
+	url     string
+	network string
+}
+
+type automaticSSLExternalIPResult struct {
+	probe automaticSSLExternalIPProbe
+	ip    net.IP
+	err   error
 }
 
 type embeddedStaticAsset struct {
@@ -2230,6 +2202,7 @@ type DomainAlias struct {
 	IsActive          bool
 	IsSelected        bool
 	LastCheckedAt     string
+	AutomaticSSL      DomainAutomaticSSLSetting
 }
 
 type DomainChrootLocation struct {
@@ -2248,14 +2221,20 @@ type directoryListingEntry struct {
 }
 
 type DomainAutomaticSSLSetting struct {
-	Domain            string
-	Enabled           bool
-	ManuallyDisabled  bool
-	Available         bool
-	LastCheckedAt     string
-	LastFailedAt      string
-	LastFailureReason string
-	RetryAfter        string
+	Domain               string
+	Enabled              bool
+	ManuallyDisabled     bool
+	Available            bool
+	LastCheckedAt        string
+	LastFailedAt         string
+	LastFailureReason    string
+	RetryAfter           string
+	LastACMEAttemptAt    string
+	LastACMESuccessAt    string
+	CertificatePresent   bool
+	CertificateValid     bool
+	CertificateExpiresAt string
+	CertificateRemaining string
 }
 
 type DomainAutomaticSSLStatus struct {
@@ -5188,19 +5167,26 @@ func runSitebrushServer(ctx context.Context, config serverRunConfig) error {
 	if application.autoCertCertificateCache == nil {
 		// The startup path already logged the filesystem problem. Leave HTTP available.
 	} else if parsedPorts.TLSEnabled && listenPort == 80 {
-		durableCertificateCache := automaticSSLDurableCache{
-			cache:       autocert.DirCache(certificateCacheDir),
-			application: application,
-		}
-		certificateManager := &autocert.Manager{
-			Prompt:     autocert.AcceptTOS,
-			Cache:      durableCertificateCache,
-			HostPolicy: application.autoCertPreparedHostPolicy,
+		certificateManager, managerErr := channelacme.Start(channelacme.Config{
+			CacheDir: certificateCacheDir,
+			OnStored: func(domain string, certificate *tls.Certificate, expiresAt time.Time) error {
+				storeContext, cancelStore := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancelStore()
+				if err := application.storeAutoCertCachedCertificate(storeContext, domain, certificate, expiresAt); err != nil {
+					return err
+				}
+				application.logDomainEvent(domain, "AUTOCERT certificate applied expires_at=%s", expiresAt.UTC().Format(time.RFC3339))
+				return nil
+			},
+		})
+		if managerErr != nil {
+			application.logProblemEvent("AUTOCERT disabled: cannot initialize ACME process: %v", managerErr)
+			certificateManager = nil
 		}
 		tlsListener, tlsListenErr := listenTLSForAutoCert()
 		if tlsListenErr != nil {
 			application.logProblemEvent("AUTOCERT disabled: cannot listen on port 443: %v", tlsListenErr)
-		} else {
+		} else if certificateManager != nil {
 			defer tlsListener.Close()
 			application.automaticSSLAvailable = true
 			automaticSSL, fallbackCertificate, automaticSSLErr := application.startAutomaticSSLProcess(ctx.Done(), certificateManager)
@@ -5212,7 +5198,7 @@ func runSitebrushServer(ctx context.Context, config serverRunConfig) error {
 				application.automaticSSL = automaticSSL
 				httpHandler = certificateManager.HTTPHandler(appHandler)
 				application.logProblemEvent("AUTOCERT enabled: HTTP challenge on port 80, HTTPS TLS listener on port 443, certificate cache=%s", certificateCacheDir)
-				go application.serveTLSWithAutoCert(ctx, tlsListener, application.autoCertTLSConfig(certificateManager, fallbackCertificate), appHandler)
+				go application.serveTLSWithAutoCert(ctx, tlsListener, application.autoCertTLSConfig(fallbackCertificate), appHandler)
 			}
 		}
 	}
@@ -5781,13 +5767,9 @@ func (a *App) serveTLSWithAutoCert(ctx context.Context, tlsListener net.Listener
 	close(serverStopped)
 }
 
-func (a *App) autoCertTLSConfig(certificateManager *autocert.Manager, fallbackCertificate *tls.Certificate) *tls.Config {
-	tlsConfig := certificateManager.TLSConfig()
-	originalGetCertificate := tlsConfig.GetCertificate
+func (a *App) autoCertTLSConfig(fallbackCertificate *tls.Certificate) *tls.Config {
+	tlsConfig := &tls.Config{MinVersion: tls.VersionTLS12}
 	tlsConfig.GetCertificate = func(clientHello *tls.ClientHelloInfo) (*tls.Certificate, error) {
-		if automaticSSLClientHelloIsChallenge(clientHello) {
-			return originalGetCertificate(clientHello)
-		}
 		certificateDomain := normalizeDomainName(clientHello.ServerName)
 		now := time.Now()
 		cachedCertificate, _, cachedCertificateOK := a.autoCertCachedCertificateFromMemory(certificateDomain, now, 0)
@@ -5806,18 +5788,6 @@ func (a *App) autoCertTLSConfig(certificateManager *autocert.Manager, fallbackCe
 		return fallbackCertificate, nil
 	}
 	return tlsConfig
-}
-
-func automaticSSLClientHelloIsChallenge(clientHello *tls.ClientHelloInfo) bool {
-	if clientHello == nil {
-		return false
-	}
-	for _, protocol := range clientHello.SupportedProtos {
-		if protocol == acme.ALPNProto {
-			return true
-		}
-	}
-	return false
 }
 
 func (a *App) loadOrCreateAutomaticSSLFallbackCertificate(now time.Time) (*tls.Certificate, error) {
@@ -6037,7 +6007,7 @@ func (a *App) migrate(ctx context.Context) error {
 		`CREATE TABLE IF NOT EXISTS revisions(id INTEGER PRIMARY KEY AUTOINCREMENT,domain TEXT,page_path TEXT,html TEXT,created_at TEXT,is_active INTEGER DEFAULT 1);`,
 		`CREATE TABLE IF NOT EXISTS domain_aliases(primary_domain TEXT,alias_domain TEXT UNIQUE,verification_token TEXT,is_verified INTEGER DEFAULT 0,dns_a_ok INTEGER DEFAULT 0,is_selected INTEGER DEFAULT 0,last_checked_at TEXT);`,
 		`CREATE TABLE IF NOT EXISTS domain_states(domain TEXT PRIMARY KEY,is_frozen INTEGER DEFAULT 0);`,
-		`CREATE TABLE IF NOT EXISTS domain_ssl_settings(domain TEXT PRIMARY KEY,auto_ssl_enabled INTEGER DEFAULT 0,manually_disabled INTEGER DEFAULT 0,last_checked_at TEXT,last_failed_at TEXT,last_failure_reason TEXT,retry_after TEXT);`,
+		`CREATE TABLE IF NOT EXISTS domain_ssl_settings(domain TEXT PRIMARY KEY,auto_ssl_enabled INTEGER DEFAULT 0,manually_disabled INTEGER DEFAULT 0,last_checked_at TEXT,last_failed_at TEXT,last_failure_reason TEXT,retry_after TEXT,certificate_expires_at TEXT,last_acme_attempt_at TEXT,last_acme_success_at TEXT,certificate_last_validated_at TEXT);`,
 		`CREATE TABLE IF NOT EXISTS page_password_rules(domain TEXT,path TEXT,password_hash TEXT,created_at TEXT,updated_at TEXT,PRIMARY KEY(domain,path));`,
 		`CREATE TABLE IF NOT EXISTS page_password_sessions(token TEXT PRIMARY KEY,domain TEXT,path TEXT,created_at TEXT);`,
 		`CREATE TABLE IF NOT EXISTS domain_chroot_locations(domain TEXT,url_path TEXT,directory_path TEXT,updated_at TEXT,PRIMARY KEY(domain,url_path));`,
@@ -6122,6 +6092,10 @@ func requiredSiteDatabaseColumns() []siteDatabaseColumnRequirement {
 		{tableName: "domain_ssl_settings", columnName: "last_failed_at", definition: "TEXT"},
 		{tableName: "domain_ssl_settings", columnName: "last_failure_reason", definition: "TEXT"},
 		{tableName: "domain_ssl_settings", columnName: "retry_after", definition: "TEXT"},
+		{tableName: "domain_ssl_settings", columnName: "certificate_expires_at", definition: "TEXT"},
+		{tableName: "domain_ssl_settings", columnName: "last_acme_attempt_at", definition: "TEXT"},
+		{tableName: "domain_ssl_settings", columnName: "last_acme_success_at", definition: "TEXT"},
+		{tableName: "domain_ssl_settings", columnName: "certificate_last_validated_at", definition: "TEXT"},
 		{tableName: "page_password_rules", columnName: "created_at", definition: "TEXT"},
 		{tableName: "page_password_rules", columnName: "updated_at", definition: "TEXT"},
 		{tableName: "file_access_rules", columnName: "token", definition: "TEXT"},
@@ -6334,14 +6308,16 @@ func (a *App) autoCertCachedCertificate(domain string, now time.Time, minimumRem
 		return certificate, expiresAt, true
 	}
 	certificateCacheDir := filepath.Join(a.storageRootDir(), "letsencrypt")
-	cacheNames := []string{certificateDomain, certificateDomain + "+rsa"}
-	for _, cacheName := range cacheNames {
-		cachePath := filepath.Join(certificateCacheDir, cacheName)
-		realCachePath, pathErr := a.existingPathInsideStorageSubtree(certificateCacheDir, cachePath)
-		if pathErr != nil {
+	cacheRoot, cacheEntries, err := a.openAutomaticSSLCertificateCache(certificateCacheDir)
+	if err != nil {
+		return nil, time.Time{}, false
+	}
+	defer cacheRoot.Close()
+	for _, cacheEntry := range cacheEntries {
+		if !cacheEntry.Type().IsRegular() || !automaticSSLCertificateCacheNameMatchesDomain(cacheEntry.Name(), certificateDomain) {
 			continue
 		}
-		cacheBytes, err := os.ReadFile(realCachePath)
+		cacheBytes, err := cacheRoot.ReadFile(cacheEntry.Name())
 		if err != nil {
 			continue
 		}
@@ -6357,6 +6333,27 @@ func (a *App) autoCertCachedCertificate(domain string, now time.Time, minimumRem
 		return &certificate, expiresAt, true
 	}
 	return nil, time.Time{}, false
+}
+
+func (a *App) openAutomaticSSLCertificateCache(certificateCacheDir string) (*os.Root, []os.DirEntry, error) {
+	realCacheDir, err := a.existingPathInsideStorageSubtree(certificateCacheDir, certificateCacheDir)
+	if err != nil {
+		return nil, nil, err
+	}
+	cacheRoot, err := os.OpenRoot(realCacheDir)
+	if err != nil {
+		return nil, nil, err
+	}
+	cacheEntries, err := os.ReadDir(realCacheDir)
+	if err != nil {
+		_ = cacheRoot.Close()
+		return nil, nil, err
+	}
+	return cacheRoot, cacheEntries, nil
+}
+
+func automaticSSLCertificateCacheNameMatchesDomain(cacheName string, certificateDomain string) bool {
+	return cacheName == certificateDomain || cacheName == certificateDomain+"+rsa"
 }
 
 func (a *App) autoCertCachedCertificateFromMemory(domain string, now time.Time, minimumRemaining time.Duration) (*tls.Certificate, time.Time, bool) {
@@ -6722,6 +6719,10 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 		a.editRawPage(w, r)
 		return
 	}
+	if hasQueryFlag(r, "certificate_renew_ws") {
+		a.certificateRenewalWebSocket(w, r)
+		return
+	}
 	if hasQueryFlag(r, "settings") || hasQueryFlag(r, "properties") {
 		a.domainSettingsPage(w, r)
 		return
@@ -6919,6 +6920,61 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.renderMissingPage(w, r, pagePath, isAdmin)
+}
+
+func (a *App) certificateRenewalWebSocket(w http.ResponseWriter, r *http.Request) {
+	if !a.isAdminRequest(r) || a.automaticSSL == nil {
+		http.Error(w, "automatic SSL is unavailable", http.StatusForbidden)
+		return
+	}
+	if originText := strings.TrimSpace(r.Header.Get("Origin")); originText != "" {
+		originURL, err := url.Parse(originText)
+		if err != nil || !strings.EqualFold(originURL.Host, r.Host) {
+			http.Error(w, "invalid websocket origin", http.StatusForbidden)
+			return
+		}
+	}
+	targetDomain := normalizeDomainName(r.URL.Query().Get("domain"))
+	siteDomain := a.siteDomain(r.Context(), r)
+	currentEmail, emailFound := a.currentAdminEmail(r)
+	serverManager := emailFound && a.isServerManagerEmail(r.Context(), siteDomain, currentEmail)
+	targetContext := contextWithDomain(r.Context(), targetDomain)
+	if targetDomain == "" || (!a.domainBelongsToSite(r.Context(), siteDomain, targetDomain) && !(serverManager && a.domainIsAutomaticSSLCandidate(targetContext, targetDomain))) {
+		http.Error(w, "certificate domain is not managed by this account", http.StatusForbidden)
+		return
+	}
+	connection, err := upgradeToWebSocket(w, r)
+	if err != nil {
+		return
+	}
+	defer connection.Close()
+	queuedJSON, _ := json.Marshal(map[string]any{"domain": targetDomain, "state": "queued"})
+	if connection.WriteText(queuedJSON) != nil {
+		return
+	}
+	resultChannel := make(chan automaticSSLDomainResult, 1)
+	select {
+	case a.automaticSSL <- automaticSSLRequest{action: "force", domain: targetDomain, response: resultChannel}:
+	case <-r.Context().Done():
+		return
+	}
+	select {
+	case result := <-resultChannel:
+		response := map[string]any{
+			"domain":     targetDomain,
+			"state":      result.state,
+			"expires_at": result.expiresAt.UTC().Format(time.RFC3339),
+		}
+		if result.err != nil {
+			response["error"] = result.err.Error()
+		}
+		responseJSON, _ := json.Marshal(response)
+		_ = connection.WriteText(responseJSON)
+	case <-time.After(5 * time.Minute):
+		timeoutJSON, _ := json.Marshal(map[string]any{"domain": targetDomain, "state": "timeout", "error": "certificate update timed out"})
+		_ = connection.WriteText(timeoutJSON)
+	case <-r.Context().Done():
+	}
 }
 
 type billingInvoiceLineView struct {
@@ -8568,12 +8624,56 @@ type templatePropagationProgressEvent struct {
 }
 
 type templatePropagationProgressTracker struct {
-	mu          sync.Mutex
-	subscribers map[string]chan templatePropagationProgressEvent
+	requests chan templatePropagationProgressRequest
+}
+
+type templatePropagationProgressRequest struct {
+	action   string
+	token    string
+	event    templatePropagationProgressEvent
+	channel  chan templatePropagationProgressEvent
+	response chan chan templatePropagationProgressEvent
 }
 
 func newTemplatePropagationProgressTracker() *templatePropagationProgressTracker {
-	return &templatePropagationProgressTracker{subscribers: make(map[string]chan templatePropagationProgressEvent)}
+	tracker := &templatePropagationProgressTracker{requests: make(chan templatePropagationProgressRequest, 256)}
+	go tracker.run()
+	return tracker
+}
+
+func (tracker *templatePropagationProgressTracker) run() {
+	subscribers := make(map[string]chan templatePropagationProgressEvent)
+	for request := range tracker.requests {
+		switch request.action {
+		case "subscribe":
+			channel := subscribers[request.token]
+			if channel == nil {
+				channel = make(chan templatePropagationProgressEvent, 256)
+				subscribers[request.token] = channel
+			}
+			request.response <- channel
+		case "unsubscribe":
+			if subscribers[request.token] == request.channel {
+				delete(subscribers, request.token)
+				close(request.channel)
+			}
+		case "publish":
+			channel := subscribers[request.token]
+			if channel == nil {
+				continue
+			}
+			select {
+			case channel <- request.event:
+			default:
+			}
+		case "finish":
+			channel := subscribers[request.token]
+			if channel != nil {
+				delete(subscribers, request.token)
+				close(channel)
+			}
+		}
+	}
 }
 
 var sitebrushTemplateProgress = newTemplatePropagationProgressTracker()
@@ -8583,20 +8683,11 @@ func (tracker *templatePropagationProgressTracker) Subscribe(token string) (<-ch
 	if token == "" {
 		return nil, func() {}, false
 	}
-	tracker.mu.Lock()
-	channel := tracker.subscribers[token]
-	if channel == nil {
-		channel = make(chan templatePropagationProgressEvent, 256)
-		tracker.subscribers[token] = channel
-	}
-	tracker.mu.Unlock()
+	response := make(chan chan templatePropagationProgressEvent, 1)
+	tracker.requests <- templatePropagationProgressRequest{action: "subscribe", token: token, response: response}
+	channel := <-response
 	cancel := func() {
-		tracker.mu.Lock()
-		if tracker.subscribers[token] == channel {
-			delete(tracker.subscribers, token)
-			close(channel)
-		}
-		tracker.mu.Unlock()
+		tracker.requests <- templatePropagationProgressRequest{action: "unsubscribe", token: token, channel: channel}
 	}
 	return channel, cancel, true
 }
@@ -8606,14 +8697,8 @@ func (tracker *templatePropagationProgressTracker) Publish(token string, event t
 	if token == "" {
 		return
 	}
-	tracker.mu.Lock()
-	channel := tracker.subscribers[token]
-	tracker.mu.Unlock()
-	if channel == nil {
-		return
-	}
 	select {
-	case channel <- event:
+	case tracker.requests <- templatePropagationProgressRequest{action: "publish", token: token, event: event}:
 	default:
 	}
 }
@@ -8623,13 +8708,7 @@ func (tracker *templatePropagationProgressTracker) Finish(token string) {
 	if token == "" {
 		return
 	}
-	tracker.mu.Lock()
-	channel := tracker.subscribers[token]
-	if channel != nil {
-		delete(tracker.subscribers, token)
-		close(channel)
-	}
-	tracker.mu.Unlock()
+	tracker.requests <- templatePropagationProgressRequest{action: "finish", token: token}
 }
 
 func (a *App) templatePropagationProgressEvents(w http.ResponseWriter, r *http.Request) {
@@ -13726,6 +13805,24 @@ func (a *App) hostingAndSupportSiteRows(ctx context.Context, controlDatabase *sq
 			siteRows[siteIndex].DeletionSizeLabel = formatFileSize(deletionSizeBytes)
 		}
 		siteRows[siteIndex].URL = a.hostingAndSupportSiteURL(siteRows[siteIndex].Domain)
+		certificateSetting := a.domainAutomaticSSLSetting(contextWithDomain(ctx, siteRows[siteIndex].Domain), siteRows[siteIndex].Domain)
+		siteRows[siteIndex].CertificateValid = certificateSetting.CertificateValid
+		siteRows[siteIndex].CertificateExpiresAt = certificateSetting.CertificateExpiresAt
+		siteRows[siteIndex].CertificateRemaining = certificateSetting.CertificateRemaining
+		siteRows[siteIndex].CertificateLastError = certificateSetting.LastFailureReason
+		certificateDomains := []string{siteRows[siteIndex].Domain}
+		for _, aliasText := range strings.Split(siteRows[siteIndex].Aliases, ",") {
+			if aliasDomain := normalizeDomainName(aliasText); aliasDomain != "" {
+				certificateDomains = append(certificateDomains, aliasDomain)
+			}
+		}
+		for _, certificateDomain := range certificateDomains {
+			domainSetting := a.domainAutomaticSSLSetting(contextWithDomain(ctx, certificateDomain), certificateDomain)
+			siteRows[siteIndex].CertificateDomains = append(siteRows[siteIndex].CertificateDomains, hostingandsupport.CertificateDomainView{
+				Domain: certificateDomain, Valid: domainSetting.CertificateValid, ExpiresAt: domainSetting.CertificateExpiresAt,
+				Remaining: domainSetting.CertificateRemaining, LastError: domainSetting.LastFailureReason, CanRenew: true,
+			})
+		}
 	}
 	return siteRows, nil
 }
@@ -26077,6 +26174,8 @@ var authoritativeTXTLookupPointer = reflect.ValueOf(lookupAuthoritativeTXTRecord
 var exchangeDNSMessage = exchangeDNSMessageWithServer
 
 const automaticSSLRefreshInterval = time.Hour
+const automaticSSLIPFreshForIssuance = 15 * time.Minute
+const automaticSSLSchedulerInterval = 15 * time.Minute
 const automaticSSLCertificateRenewBefore = 30 * 24 * time.Hour
 const automaticSSLRetryDelayEligibility = 24 * time.Hour
 const automaticSSLRetryDelayDNS = 6 * time.Hour
@@ -27595,6 +27694,25 @@ func domainIPRecordsMatchAny(ipRecords []net.IP, serverIPs []net.IP) bool {
 	return false
 }
 
+func domainIPRecordsMatchAll(ipRecords []net.IP, serverIPs []net.IP) bool {
+	if len(ipRecords) == 0 || len(serverIPs) == 0 {
+		return false
+	}
+	for _, ipRecord := range ipRecords {
+		matched := false
+		for _, serverIP := range serverIPs {
+			if serverIP != nil && ipRecord != nil && ipRecord.Equal(serverIP) {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return false
+		}
+	}
+	return true
+}
+
 func publicAutoCertIPRecords(ipRecords []net.IP) []net.IP {
 	publicRecords := make([]net.IP, 0, len(ipRecords))
 	for _, ipRecord := range ipRecords {
@@ -27626,7 +27744,7 @@ func autoCertDomainEligibilityError(domain string) error {
 	return nil
 }
 
-func (a *App) startAutomaticSSLProcess(stop <-chan struct{}, certificateManager *autocert.Manager) (chan automaticSSLRequest, *tls.Certificate, error) {
+func (a *App) startAutomaticSSLProcess(stop <-chan struct{}, certificateManager automaticSSLIssuer) (chan automaticSSLRequest, *tls.Certificate, error) {
 	fallbackReady := make(chan automaticSSLResponse, 1)
 	go func() {
 		certificate, err := a.loadOrCreateAutomaticSSLFallbackCertificate(time.Now())
@@ -27718,17 +27836,19 @@ func nextAutomaticSSLRenewalAuditTime(now time.Time, random io.Reader) (time.Tim
 	return nextDayStart.Add(time.Duration(randomNanoseconds.Int64())), nil
 }
 
-func (a *App) runAutomaticSSLProcess(stop <-chan struct{}, certificateManager *autocert.Manager, requests chan automaticSSLRequest) {
+func (a *App) runAutomaticSSLProcess(stop <-chan struct{}, certificateManager automaticSSLIssuer, requests chan automaticSSLRequest) {
 	// This goroutine exclusively owns scheduling state; workers return immutable results through channels.
 	observedAt := make(map[string]time.Time)
 	nextAttemptAt := make(map[string]time.Time)
 	inFlight := make(map[string]bool)
+	forceResponses := make(map[string][]chan automaticSSLDomainResult)
 	serverIPs := make([]net.IP, 0)
 	serverIPsCheckedAt := time.Time{}
 	ipResult := make(chan automaticSSLIPResult, 1)
 	domainResults := make(chan automaticSSLDomainResult, automaticSSLPreparationConcurrency)
 	preparationSlots := make(chan struct{}, automaticSSLPreparationConcurrency)
 	ipInFlight := false
+	pendingIPResponses := make([]chan automaticSSLIPResult, 0)
 
 	// External IP detection never blocks TLS or the scheduling loop.
 	startIPDetection := func() {
@@ -27749,6 +27869,10 @@ func (a *App) runAutomaticSSLProcess(stop <-chan struct{}, certificateManager *a
 		if domain == "" || inFlight[domain] || nextAttemptAt[domain].After(now) || len(serverIPs) == 0 {
 			return
 		}
+		if serverIPsCheckedAt.IsZero() || now.Sub(serverIPsCheckedAt) >= automaticSSLIPFreshForIssuance {
+			startIPDetection()
+			return
+		}
 		select {
 		case preparationSlots <- struct{}{}:
 		default:
@@ -27766,21 +27890,37 @@ func (a *App) runAutomaticSSLProcess(stop <-chan struct{}, certificateManager *a
 		}()
 	}
 	startIPDetection()
-	ticker := time.NewTicker(automaticSSLRefreshInterval)
+	ticker := time.NewTicker(automaticSSLSchedulerInterval)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-stop:
 			return
 		case request := <-requests:
+			if request.action == "ips" && request.ipResponse != nil {
+				now := time.Now()
+				if len(serverIPs) > 0 && now.Sub(serverIPsCheckedAt) < automaticSSLRefreshInterval {
+					request.ipResponse <- automaticSSLIPResult{serverIPs: append([]net.IP(nil), serverIPs...)}
+				} else {
+					pendingIPResponses = append(pendingIPResponses, request.ipResponse)
+					startIPDetection()
+				}
+				continue
+			}
 			domain := normalizeDomainName(request.domain)
 			if domain != "" {
 				now := time.Now()
+				if request.action == "force" {
+					delete(nextAttemptAt, domain)
+					if request.response != nil {
+						forceResponses[domain] = append(forceResponses[domain], request.response)
+					}
+				}
 				trustedAuditDomain := request.action == "renewal_audit"
 				if trustedAuditDomain || len(observedAt) < automaticSSLMaximumObservedDomains || !observedAt[domain].IsZero() {
 					observedAt[domain] = now
 				}
-				if serverIPsCheckedAt.IsZero() || now.Sub(serverIPsCheckedAt) >= automaticSSLRefreshInterval {
+				if serverIPsCheckedAt.IsZero() || now.Sub(serverIPsCheckedAt) >= automaticSSLIPFreshForIssuance {
 					startIPDetection()
 				} else {
 					startDomainPreparation(domain, now)
@@ -27798,6 +27938,10 @@ func (a *App) runAutomaticSSLProcess(stop <-chan struct{}, certificateManager *a
 				serverIPs = serverIPs[:0]
 				a.logProblemEvent("AUTOCERT background IP detection failed: %v", result.err)
 			}
+			for _, response := range pendingIPResponses {
+				response <- automaticSSLIPResult{serverIPs: append([]net.IP(nil), serverIPs...), err: result.err}
+			}
+			pendingIPResponses = pendingIPResponses[:0]
 		case result := <-domainResults:
 			delete(inFlight, result.domain)
 			nextAttemptAt[result.domain] = result.retryAfter
@@ -27807,6 +27951,13 @@ func (a *App) runAutomaticSSLProcess(stop <-chan struct{}, certificateManager *a
 			if result.state == "certificate_error" && result.err != nil {
 				a.logDomainEvent(result.domain, "AUTOCERT background certificate request failed: %v", result.err)
 			}
+			for _, response := range forceResponses[result.domain] {
+				select {
+				case response <- result:
+				default:
+				}
+			}
+			delete(forceResponses, result.domain)
 			startDomainPreparation(result.domain, time.Now())
 		case now := <-ticker.C:
 			for domain, lastObservedAt := range observedAt {
@@ -27815,27 +27966,149 @@ func (a *App) runAutomaticSSLProcess(stop <-chan struct{}, certificateManager *a
 					delete(nextAttemptAt, domain)
 				}
 			}
-			startIPDetection()
+			if serverIPsCheckedAt.IsZero() || now.Sub(serverIPsCheckedAt) >= automaticSSLRefreshInterval {
+				startIPDetection()
+				continue
+			}
+			for domain := range observedAt {
+				startDomainPreparation(domain, now)
+			}
 		}
 	}
 }
 
+func (a *App) automaticSSLServerIPs(ctx context.Context) ([]net.IP, error) {
+	if a.automaticSSL == nil {
+		return detectPublicAutomaticSSLServerIPs()
+	}
+	response := make(chan automaticSSLIPResult, 1)
+	select {
+	case a.automaticSSL <- automaticSSLRequest{action: "ips", ipResponse: response}:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	select {
+	case result := <-response:
+		return result.serverIPs, result.err
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
 func detectPublicAutomaticSSLServerIPs() ([]net.IP, error) {
-	detectionContext, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	detectionContext, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	externalIPText, err := lookupServerExternalIP(detectionContext)
+	probes := []automaticSSLExternalIPProbe{
+		{name: "ipify-v4", url: "https://api4.ipify.org", network: "tcp4"},
+		{name: "icanhazip-v4", url: "https://ipv4.icanhazip.com", network: "tcp4"},
+		{name: "amazon-v4", url: "https://checkip.amazonaws.com", network: "tcp4"},
+		{name: "ipify-v6", url: "https://api6.ipify.org", network: "tcp6"},
+		{name: "icanhazip-v6", url: "https://ipv6.icanhazip.com", network: "tcp6"},
+		{name: "ident-v6", url: "https://v6.ident.me", network: "tcp6"},
+	}
+	results := make(chan automaticSSLExternalIPResult, len(probes))
+	for _, probe := range probes {
+		currentProbe := probe
+		go func() {
+			ip, err := detectExternalIPWithProbe(detectionContext, currentProbe)
+			results <- automaticSSLExternalIPResult{probe: currentProbe, ip: ip, err: err}
+		}()
+	}
+	probeResults := make([]automaticSSLExternalIPResult, 0, len(probes))
+	for range probes {
+		select {
+		case result := <-results:
+			probeResults = append(probeResults, result)
+		case <-detectionContext.Done():
+			probeResults = append(probeResults, automaticSSLExternalIPResult{err: detectionContext.Err()})
+		}
+	}
+	interfaceIPs, err := lookupServerInterfaceIPs()
+	if err != nil {
+		interfaceIPs = nil
+	}
+	return confirmedAutomaticSSLServerIPs(probeResults, interfaceIPs)
+}
+
+func confirmedAutomaticSSLServerIPs(probeResults []automaticSSLExternalIPResult, interfaceIPs []net.IP) ([]net.IP, error) {
+	externalVotes := make(map[string]int)
+	addressesByText := make(map[string]net.IP)
+	probeErrors := make([]error, 0)
+	for _, result := range probeResults {
+		if result.err != nil {
+			probeName := result.probe.name
+			if probeName == "" {
+				probeName = "external IP probe"
+			}
+			probeErrors = append(probeErrors, fmt.Errorf("%s: %w", probeName, result.err))
+			continue
+		}
+		if len(publicAutoCertIPRecords([]net.IP{result.ip})) == 0 {
+			probeErrors = append(probeErrors, fmt.Errorf("%s returned no public IP", result.probe.name))
+			continue
+		}
+		ipText := result.ip.String()
+		externalVotes[ipText]++
+		addressesByText[ipText] = result.ip
+	}
+	interfaceVotes := make(map[string]bool)
+	for _, interfaceIP := range publicAutoCertIPRecords(interfaceIPs) {
+		interfaceVotes[interfaceIP.String()] = true
+		addressesByText[interfaceIP.String()] = interfaceIP
+	}
+	confirmedIPs := make([]net.IP, 0)
+	for ipText, candidateIP := range addressesByText {
+		votes := externalVotes[ipText]
+		if votes >= 2 || (votes >= 1 && interfaceVotes[ipText]) {
+			confirmedIPs = append(confirmedIPs, candidateIP)
+		}
+	}
+	sortIPListForDisplay(confirmedIPs)
+	if len(confirmedIPs) == 0 {
+		return nil, fmt.Errorf("external IP quorum was not reached: %w", errors.Join(probeErrors...))
+	}
+	return confirmedIPs, nil
+}
+
+func detectExternalIPWithProbe(ctx context.Context, probe automaticSSLExternalIPProbe) (net.IP, error) {
+	dialer := &net.Dialer{Timeout: 3 * time.Second}
+	transport := &http.Transport{
+		DialContext: func(dialContext context.Context, _, address string) (net.Conn, error) {
+			return dialer.DialContext(dialContext, probe.network, address)
+		},
+	}
+	defer transport.CloseIdleConnections()
+	client := &http.Client{Timeout: 4 * time.Second, Transport: transport}
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, probe.url, nil)
 	if err != nil {
 		return nil, err
 	}
-	externalIP := net.ParseIP(strings.TrimSpace(externalIPText))
-	publicServerIPs := publicAutoCertIPRecords([]net.IP{externalIP})
-	if len(publicServerIPs) == 0 {
-		return nil, fmt.Errorf("external IP service returned non-public address %q", externalIPText)
+	response, err := client.Do(request)
+	if err != nil {
+		return nil, err
 	}
-	return publicServerIPs, nil
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("returned %s", response.Status)
+	}
+	body, err := io.ReadAll(io.LimitReader(response.Body, 128))
+	if err != nil {
+		return nil, err
+	}
+	ip := net.ParseIP(strings.TrimSpace(string(body)))
+	if ip == nil || len(publicAutoCertIPRecords([]net.IP{ip})) == 0 {
+		return nil, fmt.Errorf("returned invalid public address %q", strings.TrimSpace(string(body)))
+	}
+	if probe.network == "tcp4" && ip.To4() == nil {
+		return nil, fmt.Errorf("returned non-IPv4 address %s", ip)
+	}
+	if probe.network == "tcp6" && ip.To4() != nil {
+		return nil, fmt.Errorf("returned non-IPv6 address %s", ip)
+	}
+	return ip, nil
 }
 
-func (a *App) prepareAutomaticSSLDomain(certificateManager *autocert.Manager, domain string, serverIPs []net.IP) automaticSSLDomainResult {
+func (a *App) prepareAutomaticSSLDomain(certificateManager automaticSSLIssuer, domain string, serverIPs []net.IP) automaticSSLDomainResult {
 	certificateDomain := normalizeDomainName(domain)
 	result := automaticSSLDomainResult{domain: certificateDomain, retryAfter: time.Now().Add(automaticSSLRefreshInterval)}
 	if certificateDomain == "" || autoCertDomainEligibilityError(certificateDomain) != nil {
@@ -27856,11 +28129,12 @@ func (a *App) prepareAutomaticSSLDomain(certificateManager *autocert.Manager, do
 		return result
 	}
 	now := time.Now()
+	_, currentExpiresAt, _ := a.autoCertCachedCertificateFromMemory(certificateDomain, now, 0)
 	if certificate, expiresAt, ok := a.autoCertCachedCertificateFromMemory(certificateDomain, now, automaticSSLCertificateRenewBefore); ok {
 		result.state = "ready"
 		result.certificate = certificate
 		result.expiresAt = expiresAt
-		result.retryAfter = now.Add(automaticSSLRefreshInterval)
+		result.retryAfter = now.Add(automaticSSLNextCheckDelay(expiresAt, now))
 		return result
 	}
 	if retryAfter, delayed := automaticSSLRetryAfter(setting, now); delayed {
@@ -27872,32 +28146,55 @@ func (a *App) prepareAutomaticSSLDomain(certificateManager *autocert.Manager, do
 	if err != nil || !setting.Enabled {
 		result.state = "waiting_dns"
 		result.err = err
-		result.retryAfter = time.Now().Add(automaticSSLRetryDelayDNS)
+		retryDelay := min(automaticSSLRetryDelayDNS, automaticSSLNextCheckDelay(currentExpiresAt, time.Now()))
+		result.retryAfter = time.Now().Add(retryDelay)
+		return result
+	}
+	if lastAttemptAt, parseErr := time.Parse(time.RFC3339, setting.LastACMEAttemptAt); parseErr == nil && time.Since(lastAttemptAt) < time.Hour {
+		result.state = "delayed"
+		result.retryAfter = lastAttemptAt.Add(time.Hour)
 		return result
 	}
 	a.clearDomainAutomaticSSLFailure(domainContext, certificateDomain)
-	certificate, err := certificateManager.GetCertificate(&tls.ClientHelloInfo{ServerName: certificateDomain})
-	if err != nil {
+	attemptedAt := time.Now().UTC()
+	_, _ = a.db.ExecContext(domainContext, `UPDATE domain_ssl_settings SET last_acme_attempt_at=?,retry_after=? WHERE domain=?`, attemptedAt.Format(time.RFC3339), attemptedAt.Add(time.Hour).Format(time.RFC3339), certificateDomain)
+	issueContext, cancelIssue := context.WithTimeout(context.Background(), 5*time.Minute)
+	issueResult := certificateManager.Issue(issueContext, certificateDomain)
+	cancelIssue()
+	if issueResult.Err != nil {
+		err := issueResult.Err
 		retryDelay := automaticSSLRetryDelayForCertificateError(err)
+		retryDelay = max(time.Hour, min(retryDelay, automaticSSLNextCheckDelay(currentExpiresAt, time.Now())))
+		if retryAfter, found := channelacme.RetryAfter(err); found && retryAfter.After(time.Now()) {
+			retryDelay = time.Until(retryAfter)
+		}
 		a.recordDomainAutomaticSSLFailure(domainContext, certificateDomain, fmt.Sprintf("certificate request failed: %v", err), retryDelay)
 		result.state = "certificate_error"
 		result.err = err
 		result.retryAfter = time.Now().Add(retryDelay)
 		return result
 	}
-	expiresAt, err := tlsCertificateExpiresAt(certificate)
-	if err != nil {
-		result.state = "certificate_error"
-		result.err = err
-		result.retryAfter = time.Now().Add(automaticSSLRetryDelayACME)
-		return result
-	}
 	a.clearDomainAutomaticSSLFailure(domainContext, certificateDomain)
+	_, _ = a.db.ExecContext(domainContext, `UPDATE domain_ssl_settings SET certificate_expires_at=?,last_acme_success_at=?,certificate_last_validated_at=? WHERE domain=?`, issueResult.ExpiresAt.UTC().Format(time.RFC3339), time.Now().UTC().Format(time.RFC3339), time.Now().UTC().Format(time.RFC3339), certificateDomain)
 	result.state = "ready"
-	result.certificate = certificate
-	result.expiresAt = expiresAt
-	result.retryAfter = time.Now().Add(automaticSSLRefreshInterval)
+	result.certificate = issueResult.Certificate
+	result.expiresAt = issueResult.ExpiresAt
+	result.retryAfter = time.Now().Add(automaticSSLNextCheckDelay(issueResult.ExpiresAt, time.Now()))
 	return result
+}
+
+func automaticSSLNextCheckDelay(expiresAt time.Time, now time.Time) time.Duration {
+	remaining := expiresAt.Sub(now)
+	switch {
+	case expiresAt.IsZero() || remaining <= 48*time.Hour:
+		return 15 * time.Minute
+	case remaining <= 7*24*time.Hour:
+		return time.Hour
+	case remaining <= 14*24*time.Hour:
+		return 6 * time.Hour
+	default:
+		return 24 * time.Hour
+	}
 }
 
 func automaticSSLRetryAfter(setting DomainAutomaticSSLSetting, now time.Time) (time.Time, bool) {
@@ -28034,7 +28331,7 @@ func (a *App) precheckDomainAutomaticSSL(ctx context.Context, domain string, ser
 		a.recordDomainAutomaticSSLFailure(ctx, setting.Domain, err.Error(), automaticSSLRetryDelayEligibility)
 		return setting, err
 	}
-	setting.Enabled = domainIPRecordsMatchAny(publicRecords, serverIPs)
+	setting.Enabled = domainIPRecordsMatchAll(publicRecords, serverIPs)
 	setting.LastCheckedAt = time.Now().UTC().Format(time.RFC3339)
 	a.upsertDomainAutomaticSSLSetting(ctx, setting)
 	if domainFromContext(ctx) != setting.Domain {
@@ -28106,7 +28403,10 @@ func (a *App) domainAutomaticSSLSetting(ctx context.Context, domain string) Doma
 	var lastFailedAt sql.NullString
 	var lastFailureReason sql.NullString
 	var retryAfter sql.NullString
-	err := a.db.QueryRowContext(ctx, `SELECT auto_ssl_enabled,manually_disabled,last_checked_at,last_failed_at,last_failure_reason,retry_after FROM domain_ssl_settings WHERE domain=?`, certificateDomain).Scan(&enabled, &manuallyDisabled, &lastCheckedAt, &lastFailedAt, &lastFailureReason, &retryAfter)
+	var certificateExpiresAt sql.NullString
+	var lastACMEAttemptAt sql.NullString
+	var lastACMESuccessAt sql.NullString
+	err := a.db.QueryRowContext(ctx, `SELECT auto_ssl_enabled,manually_disabled,last_checked_at,last_failed_at,last_failure_reason,retry_after,certificate_expires_at,last_acme_attempt_at,last_acme_success_at FROM domain_ssl_settings WHERE domain=?`, certificateDomain).Scan(&enabled, &manuallyDisabled, &lastCheckedAt, &lastFailedAt, &lastFailureReason, &retryAfter, &certificateExpiresAt, &lastACMEAttemptAt, &lastACMESuccessAt)
 	if err == nil {
 		setting.Enabled = enabled == 1
 		setting.ManuallyDisabled = manuallyDisabled == 1
@@ -28114,8 +28414,56 @@ func (a *App) domainAutomaticSSLSetting(ctx context.Context, domain string) Doma
 		setting.LastFailedAt = lastFailedAt.String
 		setting.LastFailureReason = lastFailureReason.String
 		setting.RetryAfter = retryAfter.String
+		setting.CertificateExpiresAt = certificateExpiresAt.String
+		setting.LastACMEAttemptAt = lastACMEAttemptAt.String
+		setting.LastACMESuccessAt = lastACMESuccessAt.String
+	}
+	if certificate, expiresAt, found := a.autoCertCachedCertificateFromMemory(certificateDomain, time.Now(), 0); found {
+		setting.CertificatePresent = true
+		setting.CertificateExpiresAt = expiresAt.Local().Format("2006-01-02 15:04:05 MST")
+		setting.CertificateRemaining = automaticSSLCertificateRemainingLabel(expiresAt, time.Now())
+		setting.CertificateValid = automaticSSLCertificateValidForDomain(certificate, certificateDomain, time.Now())
+		_, _ = a.db.ExecContext(ctx, `UPDATE domain_ssl_settings SET certificate_expires_at=?,certificate_last_validated_at=? WHERE domain=?`, expiresAt.UTC().Format(time.RFC3339), time.Now().UTC().Format(time.RFC3339), certificateDomain)
 	}
 	return setting
+}
+
+func automaticSSLCertificateValidForDomain(certificate *tls.Certificate, domain string, now time.Time) bool {
+	if certificate == nil || len(certificate.Certificate) == 0 {
+		return false
+	}
+	leaf := certificate.Leaf
+	if leaf == nil {
+		parsedLeaf, err := x509.ParseCertificate(certificate.Certificate[0])
+		if err != nil {
+			return false
+		}
+		leaf = parsedLeaf
+	}
+	if now.Before(leaf.NotBefore) || !now.Before(leaf.NotAfter) || leaf.VerifyHostname(domain) != nil {
+		return false
+	}
+	intermediates := x509.NewCertPool()
+	for _, certificateDER := range certificate.Certificate[1:] {
+		parsedCertificate, err := x509.ParseCertificate(certificateDER)
+		if err != nil {
+			return false
+		}
+		intermediates.AddCert(parsedCertificate)
+	}
+	_, err := leaf.Verify(x509.VerifyOptions{DNSName: domain, Intermediates: intermediates, CurrentTime: now})
+	return err == nil
+}
+
+func automaticSSLCertificateRemainingLabel(expiresAt time.Time, now time.Time) string {
+	remaining := expiresAt.Sub(now)
+	if remaining <= 0 {
+		return "expired"
+	}
+	if remaining < 48*time.Hour {
+		return fmt.Sprintf("%d h", max(1, int(math.Ceil(remaining.Hours()))))
+	}
+	return fmt.Sprintf("%d days", max(1, int(math.Ceil(remaining.Hours()/24))))
 }
 
 func (a *App) domainAutomaticSSLEnabled(ctx context.Context, domain string) bool {
@@ -28355,17 +28703,22 @@ func (a *App) domainSettingsPage(w http.ResponseWriter, r *http.Request) {
 		externalIP := ""
 		action := strings.TrimSpace(r.FormValue("action"))
 		if action == "add_alias" || action == "select_alias" || action == "check_alias" || action == "check_all" || action == "update_auto_ssl" {
-			_, externalIP, _ = detectServerIPCandidates(r.Context())
+			serverIPs, _ := a.automaticSSLServerIPs(r.Context())
+			externalIP = firstAutomaticSSLIPv4(serverIPs)
 		}
 		a.handleDomainSettingsPost(r.Context(), r, siteDomain, externalIP)
 		httpsecurity.RedirectLocal(w, r, returnPath+"?settings", http.StatusFound)
 		return
 	}
-	serverIPs, externalIP, externalIPErr := detectServerIPCandidates(r.Context())
+	serverIPs, externalIPErr := a.automaticSSLServerIPs(r.Context())
+	externalIP := firstAutomaticSSLIPv4(serverIPs)
 	domainAliases, err := a.listDomainAliases(r.Context(), siteDomain)
 	if err != nil {
 		http.Error(w, "failed to load domain aliases", http.StatusInternalServerError)
 		return
+	}
+	for aliasIndex := range domainAliases {
+		domainAliases[aliasIndex].AutomaticSSL = a.domainAutomaticSSLSetting(contextWithDomain(r.Context(), domainAliases[aliasIndex].Domain), domainAliases[aliasIndex].Domain)
 	}
 	chrootLocations, err := a.listDomainChrootLocations(r.Context(), siteDomain)
 	if err != nil {
@@ -28398,6 +28751,7 @@ func (a *App) domainSettingsPage(w http.ResponseWriter, r *http.Request) {
 		"ReturnPath":         returnPath,
 		"ExternalIP":         externalIP,
 		"ExternalIPError":    externalIPError,
+		"ExternalIPs":        ipListForLog(serverIPs),
 		"AutomaticSSL":       automaticSSLSetting,
 		"AutomaticSSLStatus": automaticSSLStatus,
 		"AutomaticSSLDomain": automaticSSLSetting.Domain,
@@ -28406,6 +28760,15 @@ func (a *App) domainSettingsPage(w http.ResponseWriter, r *http.Request) {
 		"BackupDownloadPath": backupDownloadPath,
 		"NativeFileDialog":   a.nativeFileDialog,
 	})
+}
+
+func firstAutomaticSSLIPv4(ipList []net.IP) string {
+	for _, ip := range ipList {
+		if ip != nil && ip.To4() != nil {
+			return ip.String()
+		}
+	}
+	return ""
 }
 
 func (a *App) freezeDomain(w http.ResponseWriter, r *http.Request) {
