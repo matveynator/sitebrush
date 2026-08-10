@@ -1759,8 +1759,6 @@ func TestExpensesTemplateShowsOnlyLocalServerAndEnabledDemoOutsideSitebrushCom(t
 		`data-hosting-installation-panel="desktop"`,
 		`data-hosting-installation-tab="archive"`,
 		`data-hosting-installation-panel="archive"`,
-		`data-hosting-installation-tab="demo"`,
-		`data-hosting-installation-panel="demo"`,
 		"Ключ sitebrush.com",
 	} {
 		if strings.Contains(disabledDemoHTML, forbiddenFragment) {
@@ -1772,6 +1770,18 @@ func TestExpensesTemplateShowsOnlyLocalServerAndEnabledDemoOutsideSitebrushCom(t
 	}
 	if !strings.Contains(disabledDemoHTML, `name="monthly_server_expense"`) {
 		t.Fatal("simplified expenses did not render the monthly server price")
+	}
+	for _, settingsFragment := range []string{
+		`data-hosting-installation-tab="settings"`,
+		`data-site-settings-tab="general"`,
+		`data-site-settings-tab="demo"`,
+		`data-site-settings-tab="test-drive"`,
+		`data-site-settings-panel="demo"`,
+		`name="demo_site_enabled"`,
+	} {
+		if !strings.Contains(disabledDemoHTML, settingsFragment) {
+			t.Fatalf("disabled demo settings missing recoverable fragment %q", settingsFragment)
+		}
 	}
 	for _, removedFragment := range []string{
 		`name="disk_rate_per_100_gb"`,
@@ -1794,9 +1804,9 @@ func TestExpensesTemplateShowsOnlyLocalServerAndEnabledDemoOutsideSitebrushCom(t
 	enabledDemoSnapshot := baseSnapshot
 	enabledDemoSnapshot.DemoSettings.Enabled = true
 	enabledDemoHTML := renderSnapshot(enabledDemoSnapshot)
-	if !strings.Contains(enabledDemoHTML, `data-hosting-installation-tab="demo"`) ||
-		!strings.Contains(enabledDemoHTML, `data-hosting-installation-panel="demo"`) {
-		t.Fatal("enabled local demo did not render its tab and panel")
+	if !strings.Contains(enabledDemoHTML, `data-site-settings-tab="demo"`) ||
+		!strings.Contains(enabledDemoHTML, `data-site-settings-panel="demo"`) {
+		t.Fatal("enabled local demo did not render its settings tab and panel")
 	}
 	if strings.Contains(enabledDemoHTML, `data-hosting-installation-tab="desktop"`) ||
 		strings.Contains(enabledDemoHTML, `data-hosting-installation-tab="archive"`) {
@@ -8646,7 +8656,7 @@ func TestPublicTrialFormUsesUnifiedCopyDialog(t *testing.T) {
 		"openCopySiteModal(unifiedConfiguration)",
 		"previewQuery: 'trial_site_preview'",
 		"downloadQuery: 'trial_site_create'",
-		"eventsQuery: 'trial_site_events'",
+		"webSocketQuery: 'trial_site_ws'",
 		"appendHiddenField(formElement, 'unified_copy', '1')",
 		"copyWholeSite: false",
 		"progressReadyFallbackTimer = window.setTimeout(startRequestOnce, 1000)",
@@ -8713,15 +8723,18 @@ func TestPublicTrialScriptUsesCanonicalImportProgress(t *testing.T) {
 	script := string(scriptBytes)
 	for _, expectedFragment := range []string{
 		"function openCopySiteModal(configuration)",
-		"new EventSource(configuredEndpoint(configuration, eventsQuery",
+		"new WebSocket(configuredWebSocketEndpoint(configuration, webSocketQuery",
 		"previewQuery: 'trial_site_preview'",
 		"downloadQuery: 'trial_site_create'",
 		"cancelQuery: 'trial_site_preview_cancel'",
-		"eventsQuery: 'trial_site_events'",
+		"webSocketQuery: 'trial_site_ws'",
 	} {
 		if !strings.Contains(script, expectedFragment) {
 			t.Fatalf("public trial script does not contain %q", expectedFragment)
 		}
+	}
+	if strings.Contains(script, "EventSource") {
+		t.Fatal("copy site progress must use WebSocket networking")
 	}
 }
 
@@ -8786,8 +8799,183 @@ func TestPublicTrialEmbedKeepsWidgetLiveAndVersioned(t *testing.T) {
 	if !strings.Contains(embedHTML, `data-sitebrush-live-asset`) {
 		t.Fatalf("public trial embed does not preserve the live widget: %s", embedHTML)
 	}
-	if !strings.Contains(embedHTML, `/p/static/site_copy.js?v=`+publicTrialWidgetScriptVersion()) {
+	if !strings.Contains(embedHTML, `src="https://sitebrush.example/p/static/site_copy.js?v=`+publicTrialWidgetScriptVersion()+`"`) {
 		t.Fatalf("public trial embed does not version the widget: %s", embedHTML)
+	}
+}
+
+func TestPublicTrialEndpointsAllowCredentialFreeCrossOriginEmbedding(t *testing.T) {
+	application := newRouterTestApplication(t)
+	controlDatabase := setupBillingOwnerForTest(t, application, "sitebrush.example", "owner@sitebrush.example", true)
+	if err := controlDatabase.Close(); err != nil {
+		t.Fatal(err)
+	}
+	dispatcher, err := startServerControlDatabaseDispatcher(application.serverControlDBPath(), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	application.controlDatabase = dispatcher
+	t.Cleanup(dispatcher.Close)
+
+	request := httptest.NewRequest(http.MethodOptions, "https://sitebrush.example/?trial_site_preview", nil)
+	request.Header.Set("Origin", "https://embedded.example")
+	request.Header.Set("Access-Control-Request-Method", http.MethodPost)
+	request = request.WithContext(contextWithDomain(request.Context(), "sitebrush.example"))
+	response := httptest.NewRecorder()
+	application.route(response, request)
+
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("preflight status = %d, body=%q", response.Code, response.Body.String())
+	}
+	if allowOrigin := response.Header().Get("Access-Control-Allow-Origin"); allowOrigin != "*" {
+		t.Fatalf("Access-Control-Allow-Origin = %q, want *", allowOrigin)
+	}
+	if allowMethods := response.Header().Get("Access-Control-Allow-Methods"); !strings.Contains(allowMethods, http.MethodPost) {
+		t.Fatalf("Access-Control-Allow-Methods = %q", allowMethods)
+	}
+	if allowCredentials := response.Header().Get("Access-Control-Allow-Credentials"); allowCredentials != "" {
+		t.Fatalf("credentialed cross-origin trial unexpectedly enabled: %q", allowCredentials)
+	}
+	getRequest := httptest.NewRequest(http.MethodGet, "https://sitebrush.example/?trial_site_texts", nil)
+	getRequest.Header.Set("Origin", "https://embedded.example")
+	getRequest = getRequest.WithContext(contextWithDomain(getRequest.Context(), "sitebrush.example"))
+	getResponse := httptest.NewRecorder()
+	application.route(getResponse, getRequest)
+	if getResponse.Code != http.StatusOK {
+		t.Fatalf("cross-origin texts status = %d, body=%q", getResponse.Code, getResponse.Body.String())
+	}
+	if allowOrigin := getResponse.Header().Get("Access-Control-Allow-Origin"); allowOrigin != "*" {
+		t.Fatalf("cross-origin texts Access-Control-Allow-Origin = %q, want *", allowOrigin)
+	}
+
+	nonTrialRequest := httptest.NewRequest(http.MethodGet, "https://sitebrush.example/", nil)
+	nonTrialResponse := httptest.NewRecorder()
+	if application.preparePublicTrialEndpoint(nonTrialResponse, nonTrialRequest, publicTrialEndpointFromRequest(nonTrialRequest)) {
+		t.Fatal("ordinary page was handled as a public trial endpoint")
+	}
+	if allowOrigin := nonTrialResponse.Header().Get("Access-Control-Allow-Origin"); allowOrigin != "" {
+		t.Fatalf("ordinary page received trial CORS header %q", allowOrigin)
+	}
+}
+
+func TestExpiredPublicTrialCleanupKeepsRegisteredSiteAndDeletesAnonymousSite(t *testing.T) {
+	application := newRouterTestApplication(t)
+	controlDatabase := setupBillingOwnerForTest(t, application, "sitebrush.example", "owner@sitebrush.example", true)
+	store := hostingandsupport.Store{DB: controlDatabase}
+	plan, found := store.DefaultPlan(context.Background())
+	if !found {
+		plans := store.Plans(context.Background())
+		if len(plans) == 0 {
+			t.Fatal("public trial cleanup test requires a service plan")
+		}
+		plan = plans[0]
+	}
+	oldTimestamp := time.Now().UTC().Add(-25 * time.Hour).Format(time.RFC3339)
+	for _, trialDomain := range []string{"anonymous.sitebrush.example", "registered.sitebrush.example"} {
+		if err := application.createManagedSiteWithoutAdmin(context.Background(), trialDomain, defaultDomainStorageLimitBytes); err != nil {
+			t.Fatalf("create %s: %v", trialDomain, err)
+		}
+		if err := store.AssignSite(context.Background(), trialDomain, plan.ID, "trial"); err != nil {
+			t.Fatalf("assign %s: %v", trialDomain, err)
+		}
+		if _, err := controlDatabase.ExecContext(context.Background(), `UPDATE site_service_assignments SET updated_at=? WHERE domain=?`, oldTimestamp, trialDomain); err != nil {
+			t.Fatalf("age %s: %v", trialDomain, err)
+		}
+	}
+	if err := controlDatabase.Close(); err != nil {
+		t.Fatal(err)
+	}
+	dispatcher, err := startServerControlDatabaseDispatcher(application.serverControlDBPath(), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	application.controlDatabase = dispatcher
+	t.Cleanup(dispatcher.Close)
+
+	registeredContext := contextWithSiteDatabaseCreation(contextWithDomain(context.Background(), "registered.sitebrush.example"))
+	if _, err := application.db.ExecContext(registeredContext, `INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "registered.sitebrush.example", "admin@example.com", "password"); err != nil {
+		t.Fatal(err)
+	}
+	application.cleanupExpiredPublicTrialSite(context.Background(), "anonymous.sitebrush.example")
+	application.cleanupExpiredPublicTrialSite(context.Background(), "registered.sitebrush.example")
+
+	anonymousPath := filepath.Join(siteDatabaseRootPath(application.serverControlDBPath()), "anonymous.sitebrush.example.db")
+	if _, err := os.Stat(anonymousPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("anonymous expired trial still exists: %v", err)
+	}
+	registeredPath := filepath.Join(siteDatabaseRootPath(application.serverControlDBPath()), "registered.sitebrush.example.db")
+	if _, err := os.Stat(registeredPath); err != nil {
+		t.Fatalf("registered trial was deleted: %v", err)
+	}
+	if err := application.withServerControlDatabaseRead(context.Background(), "verify-trial-cleanup", func(database *sql.DB) error {
+		var anonymousCount int
+		if queryErr := database.QueryRowContext(context.Background(), `SELECT COUNT(1) FROM site_service_assignments WHERE domain=?`, "anonymous.sitebrush.example").Scan(&anonymousCount); queryErr != nil {
+			return queryErr
+		}
+		if anonymousCount != 0 {
+			return fmt.Errorf("anonymous assignment count = %d, want 0", anonymousCount)
+		}
+		var registeredCount int
+		if queryErr := database.QueryRowContext(context.Background(), `SELECT COUNT(1) FROM site_service_assignments WHERE domain=?`, "registered.sitebrush.example").Scan(&registeredCount); queryErr != nil {
+			return queryErr
+		}
+		if registeredCount != 1 {
+			return fmt.Errorf("registered assignment count = %d, want 1", registeredCount)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSimplifiedExpensesRestoresGeneralDemoAndTestDriveSettingsTabs(t *testing.T) {
+	templateBytes, err := fs.ReadFile(embeddedWebFiles, "web/expenses.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsedTemplate, err := template.New("expenses.html").Parse(string(templateBytes))
+	if err != nil {
+		t.Fatal(err)
+	}
+	view := map[string]any{
+		"Domain":                   "sitebrush.example",
+		"Title":                    "Server expenses",
+		"T":                        translationsForLanguageCode("en"),
+		"SimplifiedExpenses":       true,
+		"ExpenseServers":           []simplifiedExpenseServerView{},
+		"ShowCentralRegistry":      false,
+		"DemoSettings":             demo.Settings{},
+		"DemoStatus":               demoSiteStatusView{},
+		"DemoCopyScopeLabel":       "Content to download",
+		"DemoCopyPageLabel":        "Only the specified page",
+		"DemoSnapshotLabel":        "Current demo copy",
+		"DemoSnapshotMissingLabel": "The copy has not been created yet",
+		"DemoLastRestoredLabel":    "Last content reset",
+		"DemoNeverRestoredLabel":   "No resets yet",
+		"AutoRegistrationEnabled":  false,
+		"PublicTrialEmbedHTML":     "<form data-sitebrush-public-trial-form></form>",
+	}
+	var rendered bytes.Buffer
+	if err := parsedTemplate.Execute(&rendered, view); err != nil {
+		t.Fatal(err)
+	}
+	body := rendered.String()
+	for _, expectedFragment := range []string{
+		`data-hosting-installation-tab="settings"`,
+		`data-site-settings-tab="general"`,
+		`data-site-settings-tab="demo"`,
+		`data-site-settings-tab="test-drive"`,
+		`data-site-settings-panel="general"`,
+		`data-site-settings-panel="demo"`,
+		`data-site-settings-panel="test-drive"`,
+		`name="auto_registration_enabled"`,
+		`name="demo_site_enabled"`,
+		`id="publicTrialEmbedHTML"`,
+		`data-public-trial-disabled-section`,
+	} {
+		if !strings.Contains(body, expectedFragment) {
+			t.Fatalf("simplified settings missing %q", expectedFragment)
+		}
 	}
 }
 
