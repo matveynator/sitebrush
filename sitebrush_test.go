@@ -10197,6 +10197,58 @@ func TestAutoCertCertificateMemoryCachePreloadsDiskCertificate(t *testing.T) {
 	}
 }
 
+func TestAutoCertDiskCacheRejectsPathTraversalDomains(t *testing.T) {
+	application, _ := newTestApplication(t)
+	for _, untrustedDomain := range []string{
+		"../../outside.example.com",
+		"/etc/passwd.example.com",
+		`..\..\outside.example.com`,
+		"valid.example.com/../../../outside.example.com",
+	} {
+		if _, _, found := application.autoCertCachedCertificate(untrustedDomain, time.Now(), 0); found {
+			t.Fatalf("disk certificate cache accepted untrusted domain %q", untrustedDomain)
+		}
+	}
+}
+
+func TestAutoCertDiskCacheRejectsSymlinkedCertificate(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink tests require privileges on Windows")
+	}
+	application, _ := newTestApplication(t)
+	certificateDomain := "symlink-cache.example.com"
+	certificateCacheDirectory := filepath.Join(application.storageRootDir(), "letsencrypt")
+	if err := os.MkdirAll(certificateCacheDirectory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	outsideCertificatePath := filepath.Join(t.TempDir(), "outside-certificate.pem")
+	certificatePEM := cachedAutoCertPEMForTest(t, certificateDomain, time.Now().Add(-time.Hour), time.Now().Add(30*24*time.Hour))
+	if err := os.WriteFile(outsideCertificatePath, certificatePEM, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outsideCertificatePath, filepath.Join(certificateCacheDirectory, certificateDomain)); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, _, found := application.autoCertCachedCertificate(certificateDomain, time.Now(), 0); found {
+		t.Fatal("disk certificate cache followed a symlinked certificate outside its root")
+	}
+}
+
+func TestAutomaticSSLCertificateCacheNameMatchesOnlyDomainFiles(t *testing.T) {
+	certificateDomain := "cache.example.com"
+	for _, acceptedCacheName := range []string{certificateDomain, certificateDomain + "+rsa"} {
+		if !automaticSSLCertificateCacheNameMatchesDomain(acceptedCacheName, certificateDomain) {
+			t.Fatalf("certificate cache name %q was rejected", acceptedCacheName)
+		}
+	}
+	for _, rejectedCacheName := range []string{"../" + certificateDomain, certificateDomain + "/key", certificateDomain + "-other"} {
+		if automaticSSLCertificateCacheNameMatchesDomain(rejectedCacheName, certificateDomain) {
+			t.Fatalf("certificate cache name %q was accepted", rejectedCacheName)
+		}
+	}
+}
+
 func TestAutomaticSSLStoredCertificateAppliesWithoutRestart(t *testing.T) {
 	application, _ := newTestApplication(t)
 	certificateDomain := "renewed.example.com"

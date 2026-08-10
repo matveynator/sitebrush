@@ -6308,14 +6308,16 @@ func (a *App) autoCertCachedCertificate(domain string, now time.Time, minimumRem
 		return certificate, expiresAt, true
 	}
 	certificateCacheDir := filepath.Join(a.storageRootDir(), "letsencrypt")
-	cacheNames := []string{certificateDomain, certificateDomain + "+rsa"}
-	for _, cacheName := range cacheNames {
-		cachePath := filepath.Join(certificateCacheDir, cacheName)
-		realCachePath, pathErr := a.existingPathInsideStorageSubtree(certificateCacheDir, cachePath)
-		if pathErr != nil {
+	cacheRoot, cacheEntries, err := a.openAutomaticSSLCertificateCache(certificateCacheDir)
+	if err != nil {
+		return nil, time.Time{}, false
+	}
+	defer cacheRoot.Close()
+	for _, cacheEntry := range cacheEntries {
+		if !cacheEntry.Type().IsRegular() || !automaticSSLCertificateCacheNameMatchesDomain(cacheEntry.Name(), certificateDomain) {
 			continue
 		}
-		cacheBytes, err := os.ReadFile(realCachePath)
+		cacheBytes, err := cacheRoot.ReadFile(cacheEntry.Name())
 		if err != nil {
 			continue
 		}
@@ -6331,6 +6333,27 @@ func (a *App) autoCertCachedCertificate(domain string, now time.Time, minimumRem
 		return &certificate, expiresAt, true
 	}
 	return nil, time.Time{}, false
+}
+
+func (a *App) openAutomaticSSLCertificateCache(certificateCacheDir string) (*os.Root, []os.DirEntry, error) {
+	realCacheDir, err := a.existingPathInsideStorageSubtree(certificateCacheDir, certificateCacheDir)
+	if err != nil {
+		return nil, nil, err
+	}
+	cacheRoot, err := os.OpenRoot(realCacheDir)
+	if err != nil {
+		return nil, nil, err
+	}
+	cacheEntries, err := os.ReadDir(realCacheDir)
+	if err != nil {
+		_ = cacheRoot.Close()
+		return nil, nil, err
+	}
+	return cacheRoot, cacheEntries, nil
+}
+
+func automaticSSLCertificateCacheNameMatchesDomain(cacheName string, certificateDomain string) bool {
+	return cacheName == certificateDomain || cacheName == certificateDomain+"+rsa"
 }
 
 func (a *App) autoCertCachedCertificateFromMemory(domain string, now time.Time, minimumRemaining time.Duration) (*tls.Certificate, time.Time, bool) {
