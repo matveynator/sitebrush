@@ -116,26 +116,32 @@ type ServerView struct {
 }
 
 type ServerSiteView struct {
-	Domain            string
-	URL               string
-	OwnerEmail        string
-	AdminEmails       string
-	PlanName          string
-	PaidStatus        string
-	UsedBytes         int64
-	UsedLabel         string
-	LimitLabel        string
-	QuotaInput        string
-	CanEditQuota      bool
-	OverLimit         bool
-	InvoiceLabel      string
-	BillingPriceLabel string
-	BillingStatusText string
-	BillingAmount     string
-	BillingCurrency   string
-	BillingBillable   bool
-	IsDemo            bool
-	BillingExcluded   bool
+	Domain               string
+	URL                  string
+	OwnerEmail           string
+	AdminEmails          string
+	PlanName             string
+	PaidStatus           string
+	UsedBytes            int64
+	UsedLabel            string
+	LimitLabel           string
+	QuotaInput           string
+	CanEditQuota         bool
+	OverLimit            bool
+	InvoiceLabel         string
+	BillingPriceLabel    string
+	BillingStatusText    string
+	BillingAmount        string
+	BillingCurrency      string
+	BillingBillable      bool
+	IsDemo               bool
+	BillingExcluded      bool
+	CertificateValid     bool
+	CertificateExpiresAt string
+	CertificateRemaining string
+	CertificateLastError string
+	CertificateCanRenew  bool
+	CertificateDomains   []CertificateDomainView
 }
 
 type ServerClientView struct {
@@ -361,26 +367,32 @@ func BuildLocalServerView(input LocalServerViewInput) ServerView {
 			siteURL = input.SiteURL(siteRow.Domain)
 		}
 		server.Sites = append(server.Sites, ServerSiteView{
-			Domain:            siteRow.Domain,
-			URL:               siteURL,
-			OwnerEmail:        ownerEmail,
-			AdminEmails:       siteRow.AdminEmails,
-			PlanName:          "Дисковое пространство",
-			PaidStatus:        siteRow.BillingStatusText,
-			UsedBytes:         siteRow.UsedBytes,
-			UsedLabel:         siteRow.UsedLabel,
-			LimitLabel:        siteRow.LimitLabel,
-			QuotaInput:        siteRow.QuotaInput,
-			CanEditQuota:      true,
-			OverLimit:         siteRow.UsedPercent >= 100,
-			InvoiceLabel:      InvoiceLabelForDomain(input.Invoices, siteRow.Domain),
-			BillingPriceLabel: siteRow.BillingPriceLabel,
-			BillingStatusText: siteRow.BillingStatusText,
-			BillingAmount:     siteRow.BillingAmount,
-			BillingCurrency:   siteRow.BillingCurrency,
-			BillingBillable:   siteRow.BillingBillable,
-			IsDemo:            siteRow.IsDemo,
-			BillingExcluded:   siteRow.IsDemo,
+			Domain:               siteRow.Domain,
+			URL:                  siteURL,
+			OwnerEmail:           ownerEmail,
+			AdminEmails:          siteRow.AdminEmails,
+			PlanName:             "Дисковое пространство",
+			PaidStatus:           siteRow.BillingStatusText,
+			UsedBytes:            siteRow.UsedBytes,
+			UsedLabel:            siteRow.UsedLabel,
+			LimitLabel:           siteRow.LimitLabel,
+			QuotaInput:           siteRow.QuotaInput,
+			CanEditQuota:         true,
+			OverLimit:            siteRow.UsedPercent >= 100,
+			InvoiceLabel:         InvoiceLabelForDomain(input.Invoices, siteRow.Domain),
+			BillingPriceLabel:    siteRow.BillingPriceLabel,
+			BillingStatusText:    siteRow.BillingStatusText,
+			BillingAmount:        siteRow.BillingAmount,
+			BillingCurrency:      siteRow.BillingCurrency,
+			BillingBillable:      siteRow.BillingBillable,
+			IsDemo:               siteRow.IsDemo,
+			BillingExcluded:      siteRow.IsDemo,
+			CertificateValid:     siteRow.CertificateValid,
+			CertificateExpiresAt: siteRow.CertificateExpiresAt,
+			CertificateRemaining: siteRow.CertificateRemaining,
+			CertificateLastError: siteRow.CertificateLastError,
+			CertificateCanRenew:  true,
+			CertificateDomains:   siteRow.CertificateDomains,
 		})
 	}
 	server.SiteCount = len(server.Sites)

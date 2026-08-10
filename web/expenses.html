@@ -147,7 +147,7 @@
                 <div class="expense-simple-sites">
                   {{range $siteIndex, $site := $client.Sites}}
                   <div class="expense-simple-site">
-                    <span>{{if $site.URL}}<a href="{{$site.URL}}" target="_blank" rel="noopener noreferrer">{{$site.Domain}}</a>{{else}}{{$site.Domain}}{{end}}</span>
+                    <span>{{if $site.URL}}<a href="{{$site.URL}}" target="_blank" rel="noopener noreferrer">{{$site.Domain}}</a>{{else}}{{$site.Domain}}{{end}}{{range $certificate := $site.CertificateDomains}}<br><small>{{if $certificate.Valid}}<span class="status-ok">{{$certificate.Domain}} · {{index $.T "domain_settings_ssl_valid"}} · {{$certificate.ExpiresAt}} ({{$certificate.Remaining}})</span>{{else}}<span class="status-bad">{{$certificate.Domain}} · {{index $.T "domain_settings_ssl_invalid"}}{{if $certificate.LastError}} · {{$certificate.LastError}}{{end}}</span>{{end}} {{if $certificate.CanRenew}}<button type="button" class="btn btn-outline-primary btn-sm" data-certificate-renew="{{$certificate.Domain}}">{{index $.T "domain_settings_ssl_renew_now"}}</button><span data-certificate-renew-status="{{$certificate.Domain}}" aria-live="polite"></span>{{end}}</small>{{end}}</span>
                     <span>{{$site.UsedLabel}} · {{$site.BillingPriceLabel}}</span>
                     <span>
                       {{if $site.CanEditQuota}}<button type="button" class="btn btn-outline-primary btn-sm" data-bs-toggle="modal" data-bs-target="#simpleQuota{{$serverIndex}}_{{$clientIndex}}_{{$siteIndex}}">{{index $.T "billing_quota"}}: {{$site.LimitLabel}}</button>
@@ -1063,6 +1063,7 @@
                       {{end}}
                     </div>
                     <span>{{$site.BillingPriceLabel}} · {{$site.BillingStatusText}}</span>
+                    <span>{{range $certificate := $site.CertificateDomains}}<span>{{if $certificate.Valid}}<span class="status-ok">{{$certificate.Domain}} · {{index $.T "domain_settings_ssl_valid"}} · {{$certificate.ExpiresAt}} ({{$certificate.Remaining}})</span>{{else}}<span class="status-bad">{{$certificate.Domain}} · {{index $.T "domain_settings_ssl_invalid"}}{{if $certificate.LastError}} · {{$certificate.LastError}}{{end}}</span>{{end}} {{if $certificate.CanRenew}}<button type="button" class="btn btn-outline-primary btn-sm" data-certificate-renew="{{$certificate.Domain}}">{{index $.T "domain_settings_ssl_renew_now"}}</button><small data-certificate-renew-status="{{$certificate.Domain}}" aria-live="polite"></small>{{end}}</span><br>{{end}}</span>
                   </div>
                   {{if $site.CanEditQuota}}
                   <div class="modal fade" id="hostingQuotaModal{{$serverIndex}}_{{$clientIndex}}_{{$siteIndex}}" tabindex="-1" aria-hidden="true">
@@ -1784,6 +1785,7 @@
             </div>
             <div class="text-muted small">{{index $.T "billing_used_label"}} {{$site.UsedLabel}} / выделено {{$site.LimitLabel}}, {{index $.T "billing_free_label"}} {{$site.FreeLabel}}</div>
             <div class="text-muted small">Расчёт: {{$site.BillingUsageLabel}} · {{$site.BillingPriceLabel}} · {{$site.BillingStatusText}}</div>
+            <div class="small">{{range $certificate := $site.CertificateDomains}}<div>{{if $certificate.Valid}}<span class="status-ok">{{$certificate.Domain}} · {{index $.T "domain_settings_ssl_valid"}} · {{$certificate.ExpiresAt}} ({{$certificate.Remaining}})</span>{{else}}<span class="status-bad">{{$certificate.Domain}} · {{index $.T "domain_settings_ssl_invalid"}}{{if $certificate.LastError}} · {{$certificate.LastError}}{{end}}</span>{{end}} {{if $certificate.CanRenew}}<button type="button" class="btn btn-outline-primary btn-sm" data-certificate-renew="{{$certificate.Domain}}">{{index $.T "domain_settings_ssl_renew_now"}}</button><span data-certificate-renew-status="{{$certificate.Domain}}" aria-live="polite"></span>{{end}}</div>{{end}}</div>
           </div>
           {{if not $site.IsDemo}}<form method="post" action="?expenses" class="billing-site-form" data-billing-ajax-save>
             <input type="hidden" name="billing_action" value="update_site">
@@ -3070,6 +3072,59 @@
       for (const archiveEntryElement of archiveEntryElements) {
         archiveEntryElement.hidden = searchText !== '' && !archiveEntryElement.dataset.hostingArchiveEntry.toLowerCase().includes(searchText);
       }
+    });
+  }
+})();
+</script>
+<script>
+(function setupServerCertificateRenewalControls() {
+  const renewalButtonElements = document.querySelectorAll('[data-certificate-renew]');
+  if (!renewalButtonElements.length || !window.WebSocket) { return; }
+  const certificateModelsByDomain = Object.create(null);
+
+  function renderCertificateModel(domain) {
+    const certificateModel = certificateModelsByDomain[domain];
+    const escapedDomain = CSS.escape(domain);
+    for (const statusElement of document.querySelectorAll('[data-certificate-renew-status="' + escapedDomain + '"]')) {
+      statusElement.textContent = certificateModel.message;
+      statusElement.classList.toggle('status-bad', certificateModel.failed);
+      statusElement.classList.toggle('status-ok', certificateModel.state === 'ready');
+    }
+    for (const buttonElement of document.querySelectorAll('[data-certificate-renew="' + escapedDomain + '"]')) {
+      buttonElement.disabled = certificateModel.busy;
+    }
+  }
+
+  function updateCertificateModel(domain, state, message) {
+    certificateModelsByDomain[domain] = {
+      state: state,
+      message: message,
+      busy: state === 'connecting' || state === 'queued',
+      failed: state === 'certificate_error' || state === 'waiting_dns' || state === 'timeout'
+    };
+    renderCertificateModel(domain);
+  }
+
+  for (const renewalButtonElement of renewalButtonElements) {
+    const domain = renewalButtonElement.dataset.certificateRenew;
+    if (!domain) { continue; }
+    certificateModelsByDomain[domain] = { state: 'idle', message: '', busy: false, failed: false };
+    renewalButtonElement.addEventListener('click', function renewServerCertificate() {
+      updateCertificateModel(domain, 'connecting', {{printf "%q" (index .T "domain_settings_ssl_renew_connecting")}});
+      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      const certificateSocket = new WebSocket(protocol + '//' + window.location.host + window.location.pathname + '?certificate_renew_ws&domain=' + encodeURIComponent(domain));
+      certificateSocket.addEventListener('message', function receiveCertificateState(messageEvent) {
+        let responseModel;
+        try { responseModel = JSON.parse(messageEvent.data); } catch (parseError) { responseModel = { state: 'certificate_error', error: String(parseError) }; }
+        updateCertificateModel(domain, responseModel.state || 'certificate_error', responseModel.error || (responseModel.state === 'ready' ? {{printf "%q" (index .T "domain_settings_ssl_renewed")}} : responseModel.state));
+      });
+      certificateSocket.addEventListener('close', function finishCertificateRenewal() {
+        const certificateModel = certificateModelsByDomain[domain];
+        if (certificateModel && certificateModel.busy) { updateCertificateModel(domain, 'certificate_error', {{printf "%q" (index .T "domain_settings_ssl_connection_closed")}}); }
+      });
+      certificateSocket.addEventListener('error', function failCertificateRenewal() {
+        updateCertificateModel(domain, 'certificate_error', {{printf "%q" (index .T "domain_settings_ssl_connection_closed")}});
+      });
     });
   }
 })();

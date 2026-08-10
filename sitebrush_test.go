@@ -34,14 +34,13 @@ import (
 	"slices"
 	"strconv"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
-	"golang.org/x/crypto/acme/autocert"
 	"golang.org/x/net/dns/dnsmessage"
 	"golang.org/x/text/encoding/charmap"
+	"sitebrush/pkg/channelacme"
 	"sitebrush/pkg/crawler"
 	"sitebrush/pkg/demo"
 	"sitebrush/pkg/diagnosticlog"
@@ -52,6 +51,12 @@ import (
 	"sitebrush/pkg/mailout"
 	"sitebrush/pkg/sitebrushtemplate"
 )
+
+type automaticSSLIssuerFunc func(context.Context, string) channelacme.IssueResult
+
+func (issue automaticSSLIssuerFunc) Issue(ctx context.Context, domain string) channelacme.IssueResult {
+	return issue(ctx, domain)
+}
 
 func openServerControlDatabaseForTest(ctx context.Context, application *App) (*sql.DB, error) {
 	databasePath, err := application.writablePathInsideStorage(application.serverControlDBPath())
@@ -1627,26 +1632,28 @@ func TestHostingAndSupportTemplateRendersServerView(t *testing.T) {
 				},
 			}},
 			Sites: []hostingandsupport.ServerSiteView{{
-				Domain:       "example.com",
-				OwnerEmail:   "owner@example.com",
-				PlanName:     "Pro",
-				PaidStatus:   "paid",
-				UsedLabel:    "1 MB",
-				LimitLabel:   "10 MB",
-				QuotaInput:   "10mb",
-				CanEditQuota: true,
-				InvoiceLabel: "можно выставить счёт",
+				Domain:             "example.com",
+				OwnerEmail:         "owner@example.com",
+				PlanName:           "Pro",
+				PaidStatus:         "paid",
+				UsedLabel:          "1 MB",
+				LimitLabel:         "10 MB",
+				QuotaInput:         "10mb",
+				CanEditQuota:       true,
+				InvoiceLabel:       "можно выставить счёт",
+				CertificateDomains: []hostingandsupport.CertificateDomainView{{Domain: "example.com", Valid: true, ExpiresAt: "2026-09-01 12:00:00 UTC", Remaining: "22 days", CanRenew: true}},
 			}},
 			Clients: []hostingandsupport.ServerClientView{{
 				Email:     "owner@example.com",
 				SiteCount: 1,
 				Domains:   "example.com",
 				Sites: []hostingandsupport.ServerSiteView{{
-					Domain:       "example.com",
-					UsedLabel:    "1 MB",
-					LimitLabel:   "10 MB",
-					QuotaInput:   "10mb",
-					CanEditQuota: true,
+					Domain:             "example.com",
+					UsedLabel:          "1 MB",
+					LimitLabel:         "10 MB",
+					QuotaInput:         "10mb",
+					CanEditQuota:       true,
+					CertificateDomains: []hostingandsupport.CertificateDomainView{{Domain: "example.com", Valid: true, ExpiresAt: "2026-09-01 12:00:00 UTC", Remaining: "22 days", CanRenew: true}},
 				}},
 			}},
 		}},
@@ -1696,6 +1703,9 @@ func TestHostingAndSupportTemplateRendersServerView(t *testing.T) {
 	}
 	if !strings.Contains(renderedHTML, `name="billing_action" value="update_site_quota"`) {
 		t.Fatal("server quota form does not use the isolated quota action")
+	}
+	if !strings.Contains(renderedHTML, `data-certificate-renew="example.com"`) || !strings.Contains(renderedHTML, "2026-09-01 12:00:00 UTC") {
+		t.Fatal("server domain certificate status and renewal control did not render")
 	}
 	if !strings.Contains(renderedHTML, `class="hosting-installation-tabs"`) ||
 		!strings.Contains(renderedHTML, `data-hosting-installation-tab="demo"`) ||
@@ -2855,6 +2865,7 @@ func TestDomainSettingsRendersCustomDomainSetupFirst(t *testing.T) {
 			IsActive:          true,
 			IsSelected:        true,
 			LastCheckedAt:     "2026-06-12T00:00:00Z",
+			AutomaticSSL:      DomainAutomaticSSLSetting{Domain: "example.com", CertificateValid: true, CertificateExpiresAt: "2026-09-01 12:00:00 UTC", CertificateRemaining: "22 days"},
 		}},
 		"ChrootLocations":    []DomainChrootLocation{},
 		"AliasCount":         1,
@@ -2886,6 +2897,8 @@ func TestDomainSettingsRendersCustomDomainSetupFirst(t *testing.T) {
 		"203.0.113.10",
 		"Proves that you own this domain.",
 		"Sends visitors to this Sitebrush server.",
+		"Renew certificate now",
+		"2026-09-01 12:00:00 UTC",
 	} {
 		if !strings.Contains(body, expectedFragment) {
 			t.Fatalf("domain settings page missing %q in %s", expectedFragment, body)
@@ -8667,14 +8680,11 @@ func TestWholeSitePreviewStopsAtFreeByteLimitWithUsableFirstPage(t *testing.T) {
 	if parseErr != nil {
 		t.Fatal(parseErr)
 	}
-	var requestMutex sync.Mutex
-	requestedURLs := make(map[string]int)
+	requestedURLs := make(chan string, 16)
 	previousGrabHTTPClient := newGrabHTTPClient
 	newGrabHTTPClient = func() *http.Client {
 		return &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
-			requestMutex.Lock()
-			requestedURLs[request.URL.String()]++
-			requestMutex.Unlock()
+			requestedURLs <- request.URL.String()
 			header := make(http.Header)
 			switch request.URL.String() {
 			case "https://limited.example/huge.png":
@@ -8697,9 +8707,18 @@ func TestWholeSitePreviewStopsAtFreeByteLimitWithUsableFirstPage(t *testing.T) {
 	if len(preview.ImportedPages) != 1 || preview.ImportedPages[0].SourceURL != startURL.String() {
 		t.Fatalf("limited preview pages = %#v, want usable first page", preview.ImportedPages)
 	}
-	requestMutex.Lock()
-	nextRequests := requestedURLs["https://limited.example/next"]
-	requestMutex.Unlock()
+	nextRequests := 0
+	for {
+		select {
+		case requestedURL := <-requestedURLs:
+			if requestedURL == "https://limited.example/next" {
+				nextRequests++
+			}
+		default:
+			goto requestsDrained
+		}
+	}
+requestsDrained:
 	if nextRequests != 0 {
 		t.Fatalf("preview continued crawling after free limit: next page requested %d times", nextRequests)
 	}
@@ -9990,7 +10009,7 @@ func TestAutoCertCertificateMemoryCachePreloadsDiskCertificate(t *testing.T) {
 	}
 }
 
-func TestAutomaticSSLDurableCacheAppliesRenewedCertificateWithoutRestart(t *testing.T) {
+func TestAutomaticSSLStoredCertificateAppliesWithoutRestart(t *testing.T) {
 	application, _ := newTestApplication(t)
 	certificateDomain := "renewed.example.com"
 	certificateCacheDirectory := filepath.Join(application.storageRootDir(), "letsencrypt")
@@ -10010,10 +10029,16 @@ func TestAutomaticSSLDurableCacheAppliesRenewedCertificateWithoutRestart(t *test
 		t.Fatal("old certificate was not preloaded")
 	}
 
-	cache := automaticSSLDurableCache{cache: autocert.DirCache(certificateCacheDirectory), application: application}
 	newCertificatePEM := cachedAutoCertPEMForTest(t, certificateDomain, now.Add(-time.Hour), now.Add(90*24*time.Hour))
-	if err := cache.Put(context.Background(), certificateDomain, newCertificatePEM); err != nil {
-		t.Fatalf("put renewed certificate: %v", err)
+	_, newParsedCertificate, newParsedExpiresAt, certificateEntry := automaticSSLCertificateCacheEntry(certificateDomain, newCertificatePEM, now)
+	if !certificateEntry || newParsedCertificate == nil {
+		t.Fatal("renewed certificate did not parse")
+	}
+	if err := os.WriteFile(filepath.Join(certificateCacheDirectory, certificateDomain), newCertificatePEM, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := application.storeAutoCertCachedCertificate(context.Background(), certificateDomain, newParsedCertificate, newParsedExpiresAt); err != nil {
+		t.Fatalf("publish renewed certificate: %v", err)
 	}
 	newCertificate, newExpiresAt, found := application.autoCertCachedCertificateFromMemory(certificateDomain, now, 0)
 	if !found || newCertificate == nil {
@@ -10030,7 +10055,7 @@ func TestAutomaticSSLDurableCacheAppliesRenewedCertificateWithoutRestart(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
-	tlsConfig := application.autoCertTLSConfig(&autocert.Manager{}, fallbackCertificate)
+	tlsConfig := application.autoCertTLSConfig(fallbackCertificate)
 	servedCertificate, err := tlsConfig.GetCertificate(&tls.ClientHelloInfo{ServerName: certificateDomain})
 	if err != nil {
 		t.Fatal(err)
@@ -10053,38 +10078,6 @@ func TestAutoCertRenewalCheckKeepsStillValidCertificateAvailable(t *testing.T) {
 	}
 	if certificate, _, valid := application.autoCertCachedCertificateFromMemory(certificateDomain, now, 0); !valid || certificate == nil {
 		t.Fatal("renewal check removed the still-valid certificate")
-	}
-}
-
-func TestAutomaticSSLDurableCacheRejectsInvalidReplacement(t *testing.T) {
-	application, _ := newTestApplication(t)
-	certificateDomain := "stable.example.com"
-	certificateCacheDirectory := filepath.Join(application.storageRootDir(), "letsencrypt")
-	if err := os.MkdirAll(certificateCacheDirectory, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	now := time.Now()
-	oldCertificatePEM := cachedAutoCertPEMForTest(t, certificateDomain, now.Add(-time.Hour), now.Add(30*24*time.Hour))
-	if err := os.WriteFile(filepath.Join(certificateCacheDirectory, certificateDomain), oldCertificatePEM, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	cacheContext, cancelCache := context.WithCancel(context.Background())
-	defer cancelCache()
-	application.autoCertCertificateCache = startAutoCertCertificateMemoryCache(cacheContext, certificateCacheDirectory)
-	cache := automaticSSLDurableCache{cache: autocert.DirCache(certificateCacheDirectory), application: application}
-	shorterCertificatePEM := cachedAutoCertPEMForTest(t, certificateDomain, now.Add(-time.Hour), now.Add(5*24*time.Hour))
-	if err := cache.Put(context.Background(), certificateDomain, shorterCertificatePEM); err == nil {
-		t.Fatal("certificate expiry downgrade was accepted")
-	}
-	if err := cache.Put(context.Background(), certificateDomain, []byte("invalid certificate")); err == nil {
-		t.Fatal("invalid certificate replacement was accepted")
-	}
-	storedCertificatePEM, err := os.ReadFile(filepath.Join(certificateCacheDirectory, certificateDomain))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Equal(storedCertificatePEM, oldCertificatePEM) {
-		t.Fatal("invalid replacement changed the durable certificate")
 	}
 }
 
@@ -10163,13 +10156,7 @@ func TestAutoCertTLSConfigReturnsFallbackAndOnlyObservesDomain(t *testing.T) {
 		t.Fatalf("generate fallback certificate: bytes=%d err=%v", len(fallbackPEM), err)
 	}
 	application := &App{automaticSSL: make(chan automaticSSLRequest, 1)}
-	certificateManager := &autocert.Manager{
-		HostPolicy: func(context.Context, string) error {
-			t.Fatal("ordinary TLS handshake invoked autocert host policy")
-			return errors.New("unexpected host policy call")
-		},
-	}
-	tlsConfig := application.autoCertTLSConfig(certificateManager, fallbackCertificate)
+	tlsConfig := application.autoCertTLSConfig(fallbackCertificate)
 	certificate, err := tlsConfig.GetCertificate(&tls.ClientHelloInfo{ServerName: "lcs-robs.adobe.io"})
 	if err != nil {
 		t.Fatalf("get fallback certificate: %v", err)
@@ -10212,7 +10199,7 @@ func TestAutoCertTLSConfigPrefersPreparedPublicCertificate(t *testing.T) {
 		t.Fatal("prepared certificate was not stored in memory")
 	}
 
-	tlsConfig := application.autoCertTLSConfig(&autocert.Manager{}, fallbackCertificate)
+	tlsConfig := application.autoCertTLSConfig(fallbackCertificate)
 	certificate, err := tlsConfig.GetCertificate(&tls.ClientHelloInfo{ServerName: "example.com"})
 	if err != nil {
 		t.Fatalf("get prepared certificate: %v", err)
@@ -10261,12 +10248,10 @@ func TestPrepareAutomaticSSLDomainDoesNotIssueCertificateWhenDNSDiffersFromExter
 		}
 		return []net.IP{net.ParseIP("1.1.1.1")}, nil
 	}
-	certificateManager := &autocert.Manager{
-		HostPolicy: func(context.Context, string) error {
-			t.Fatal("DNS mismatch reached autocert certificate issuance")
-			return errors.New("unexpected certificate issuance")
-		},
-	}
+	certificateManager := automaticSSLIssuerFunc(func(context.Context, string) channelacme.IssueResult {
+		t.Fatal("DNS mismatch reached certificate issuance")
+		return channelacme.IssueResult{Err: errors.New("unexpected certificate issuance")}
+	})
 
 	result := application.prepareAutomaticSSLDomain(certificateManager, "customer.example.com", []net.IP{net.ParseIP("8.8.8.8")})
 	if result.state != "waiting_dns" || result.err == nil {
@@ -10274,27 +10259,67 @@ func TestPrepareAutomaticSSLDomainDoesNotIssueCertificateWhenDNSDiffersFromExter
 	}
 }
 
-func TestDetectPublicAutomaticSSLServerIPsUsesOnlyExternalAddress(t *testing.T) {
-	previousExternalIPLookup := lookupServerExternalIP
-	previousInterfaceLookup := lookupServerInterfaceIPs
-	defer func() {
-		lookupServerExternalIP = previousExternalIPLookup
-		lookupServerInterfaceIPs = previousInterfaceLookup
-	}()
-	lookupServerExternalIP = func(context.Context) (string, error) {
-		return "8.8.8.8", nil
+func TestAutomaticSSLDNSRequiresEveryPublicRecordToMatch(t *testing.T) {
+	serverIPs := []net.IP{net.ParseIP("8.8.8.8")}
+	if !domainIPRecordsMatchAll([]net.IP{net.ParseIP("8.8.8.8")}, serverIPs) {
+		t.Fatal("matching DNS record was rejected")
 	}
-	lookupServerInterfaceIPs = func() ([]net.IP, error) {
-		t.Fatal("automatic SSL external IP detection inspected interface addresses")
-		return nil, os.ErrInvalid
+	if domainIPRecordsMatchAll([]net.IP{net.ParseIP("8.8.8.8"), net.ParseIP("1.1.1.1")}, serverIPs) {
+		t.Fatal("partially matching DNS records were accepted")
+	}
+}
+
+func TestAutomaticSSLExternalIPRequiresIndependentConfirmation(t *testing.T) {
+	confirmedIPv4 := net.ParseIP("8.8.8.8")
+	confirmedIPv6 := net.ParseIP("2001:4860:4860::8888")
+	conflictingIPv4 := net.ParseIP("1.1.1.1")
+	probeResults := []automaticSSLExternalIPResult{
+		{probe: automaticSSLExternalIPProbe{name: "first-v4"}, ip: confirmedIPv4},
+		{probe: automaticSSLExternalIPProbe{name: "second-v4"}, ip: confirmedIPv4},
+		{probe: automaticSSLExternalIPProbe{name: "conflicting-v4"}, ip: conflictingIPv4},
+		{probe: automaticSSLExternalIPProbe{name: "first-v6"}, ip: confirmedIPv6},
 	}
 
-	serverIPs, err := detectPublicAutomaticSSLServerIPs()
+	confirmedIPs, err := confirmedAutomaticSSLServerIPs(probeResults, []net.IP{confirmedIPv6})
 	if err != nil {
-		t.Fatalf("detect external automatic SSL IP: %v", err)
+		t.Fatalf("confirm external server IPs: %v", err)
 	}
-	if len(serverIPs) != 1 || !serverIPs[0].Equal(net.ParseIP("8.8.8.8")) {
-		t.Fatalf("automatic SSL server IPs = %v, want only 8.8.8.8", serverIPs)
+	if len(confirmedIPs) != 2 || !automaticSSLIPListContains(confirmedIPs, confirmedIPv4) || !automaticSSLIPListContains(confirmedIPs, confirmedIPv6) {
+		t.Fatalf("confirmed IPs = %v, want independently confirmed IPv4 and IPv6", confirmedIPs)
+	}
+	if automaticSSLIPListContains(confirmedIPs, conflictingIPv4) {
+		t.Fatalf("single unconfirmed provider address was accepted: %v", confirmedIPs)
+	}
+
+	_, err = confirmedAutomaticSSLServerIPs([]automaticSSLExternalIPResult{{probe: automaticSSLExternalIPProbe{name: "single"}, ip: confirmedIPv4}}, nil)
+	if err == nil {
+		t.Fatal("single provider address was accepted without an interface match")
+	}
+}
+
+func automaticSSLIPListContains(ipList []net.IP, expectedIP net.IP) bool {
+	for _, candidateIP := range ipList {
+		if candidateIP.Equal(expectedIP) {
+			return true
+		}
+	}
+	return false
+}
+
+func TestAutomaticSSLNextCheckDelayEscalatesNearExpiry(t *testing.T) {
+	now := time.Now()
+	for _, testCase := range []struct {
+		remaining time.Duration
+		want      time.Duration
+	}{
+		{remaining: 20 * 24 * time.Hour, want: 24 * time.Hour},
+		{remaining: 10 * 24 * time.Hour, want: 6 * time.Hour},
+		{remaining: 5 * 24 * time.Hour, want: time.Hour},
+		{remaining: 24 * time.Hour, want: 15 * time.Minute},
+	} {
+		if got := automaticSSLNextCheckDelay(now.Add(testCase.remaining), now); got != testCase.want {
+			t.Fatalf("remaining %s: delay=%s want=%s", testCase.remaining, got, testCase.want)
+		}
 	}
 }
 

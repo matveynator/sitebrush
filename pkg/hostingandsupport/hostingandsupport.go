@@ -59,34 +59,48 @@ type Plan struct {
 }
 
 type Site struct {
-	Domain            string
-	IsDemo            bool
-	IsMainDomain      bool
-	Aliases           string
-	URL               string
-	UsedBytes         int64
-	UsedLabel         string
-	LimitLabel        string
-	FreeLabel         string
-	UsedPercent       int
-	QuotaInput        string
-	PlanID            int
-	PlanName          string
-	PlanQuotaLabel    string
-	ServiceStatus     string
-	BillingUsageLabel string
-	BillingPriceLabel string
-	BillingStatusText string
-	BillingAmount     string
-	BillingCurrency   string
-	BillingBillable   bool
-	AdminEmails       string
-	CanDelete         bool
-	DatabasePath      string
-	DeletionSizeBytes int64
-	DeletionSizeLabel string
-	HasSiteRequest    bool
-	SiteRequest       SiteRequest
+	Domain               string
+	IsDemo               bool
+	IsMainDomain         bool
+	Aliases              string
+	URL                  string
+	UsedBytes            int64
+	UsedLabel            string
+	LimitLabel           string
+	FreeLabel            string
+	UsedPercent          int
+	QuotaInput           string
+	PlanID               int
+	PlanName             string
+	PlanQuotaLabel       string
+	ServiceStatus        string
+	BillingUsageLabel    string
+	BillingPriceLabel    string
+	BillingStatusText    string
+	BillingAmount        string
+	BillingCurrency      string
+	BillingBillable      bool
+	AdminEmails          string
+	CanDelete            bool
+	DatabasePath         string
+	CertificateValid     bool
+	CertificateExpiresAt string
+	CertificateRemaining string
+	CertificateLastError string
+	CertificateDomains   []CertificateDomainView
+	DeletionSizeBytes    int64
+	DeletionSizeLabel    string
+	HasSiteRequest       bool
+	SiteRequest          SiteRequest
+}
+
+type CertificateDomainView struct {
+	Domain    string
+	Valid     bool
+	ExpiresAt string
+	Remaining string
+	LastError string
+	CanRenew  bool
 }
 
 type SiteRequest struct {
