@@ -101,6 +101,8 @@ const grabImportFailedResourceRetryDelay = 2 * time.Second
 const wholeSiteImportConsecutiveFailureLimit = 25
 const wholeSiteImportMaxPages = 2048
 const wholeSitePreviewPageConcurrency = 8
+const publicTrialPreviewMaxDuration = 5 * time.Minute
+const publicTrialPreviewStallTimeout = 45 * time.Second
 const legacyPublicTrialWidgetAssetName = "c2e28115960ae946dd3b7bd3be07562715528484255f9a1e42e65f850e32f964.js"
 const defaultDomainStorageLimitBytes int64 = 10 * 1024 * 1024 * 1024
 const defaultAnalyticsMemoryLimitBytes int64 = 500 * 1024 * 1024
@@ -2146,42 +2148,57 @@ type publicTrialPlanView struct {
 }
 
 type publicTrialPreview struct {
-	Token          string
-	SourceURL      string
-	ImportedPages  []wholeSiteImportedPage
-	Resources      []grabResourcePreview
-	Spider         *pageSpider
-	PageCount      int
-	ResourceCount  int
-	ResourceCounts publicTrialResourceCounts
-	TotalBytes     int64
-	RequiredBytes  int64
-	Plan           publicTrialPlanView
-	FreePlan       publicTrialPlanView
-	FitsFreePlan   bool
-	CreatedAt      time.Time
+	Token              string
+	SourceURL          string
+	ImportedPages      []wholeSiteImportedPage
+	Resources          []grabResourcePreview
+	Spider             *pageSpider
+	PageCount          int
+	ResourceCount      int
+	ResourceCounts     publicTrialResourceCounts
+	TotalBytes         int64
+	RequiredBytes      int64
+	Plan               publicTrialPlanView
+	FreePlan           publicTrialPlanView
+	FitsFreePlan       bool
+	SinglePageRequired bool
+	CopyWholeSite      bool
+	SourceOptions      grabSourceOptions
+	CreatedAt          time.Time
 }
 
 type publicTrialPreviewResponse struct {
-	Status         string                    `json:"status,omitempty"`
-	Usable         bool                      `json:"usable"`
-	Refreshing     bool                      `json:"refreshing,omitempty"`
-	SourceURL      string                    `json:"source_url"`
-	PreviewURL     string                    `json:"preview_url"`
-	PageCount      int                       `json:"page_count"`
-	ResourceCount  int                       `json:"resource_count"`
-	ResourceCounts publicTrialResourceCounts `json:"resource_counts"`
-	Resources      []grabResourcePreview     `json:"resources"`
-	PageBytes      int64                     `json:"page_bytes"`
-	TotalBytes     int64                     `json:"total_bytes"`
-	RequiredBytes  int64                     `json:"required_bytes"`
-	FitsFreePlan   bool                      `json:"fits_free_plan"`
-	Plan           publicTrialPlanView       `json:"plan"`
-	FreePlan       publicTrialPlanView       `json:"free_plan"`
-	Message        string                    `json:"message"`
-	FailedTotal    int                       `json:"failed_total,omitempty"`
-	FailedURLs     []string                  `json:"failed_urls,omitempty"`
-	FailedReasons  map[string]string         `json:"failed_reasons,omitempty"`
+	Status                string                    `json:"status,omitempty"`
+	Usable                bool                      `json:"usable"`
+	Refreshing            bool                      `json:"refreshing,omitempty"`
+	SourceURL             string                    `json:"source_url"`
+	PreviewURL            string                    `json:"preview_url"`
+	PageCount             int                       `json:"page_count"`
+	ResourceCount         int                       `json:"resource_count"`
+	ResourceCounts        publicTrialResourceCounts `json:"resource_counts"`
+	Resources             []grabResourcePreview     `json:"resources"`
+	PageBytes             int64                     `json:"page_bytes"`
+	TotalBytes            int64                     `json:"total_bytes"`
+	RequiredBytes         int64                     `json:"required_bytes"`
+	FitsFreePlan          bool                      `json:"fits_free_plan"`
+	SinglePageRequired    bool                      `json:"single_page_required,omitempty"`
+	Plan                  publicTrialPlanView       `json:"plan"`
+	FreePlan              publicTrialPlanView       `json:"free_plan"`
+	Message               string                    `json:"message"`
+	FailedTotal           int                       `json:"failed_total,omitempty"`
+	FailedURLs            []string                  `json:"failed_urls,omitempty"`
+	FailedReasons         map[string]string         `json:"failed_reasons,omitempty"`
+	DownloadTotal         int                       `json:"download_total"`
+	DownloadTotalBytes    int64                     `json:"download_total_bytes"`
+	PageDownloadBytes     int64                     `json:"page_download_bytes"`
+	PageStorageBytes      int64                     `json:"page_storage_bytes"`
+	CurrentUsedBytes      int64                     `json:"current_used_bytes"`
+	LimitBytes            int64                     `json:"limit_bytes"`
+	FreeBytes             int64                     `json:"free_bytes"`
+	SelectedResourceBytes int64                     `json:"selected_resource_bytes"`
+	EstimatedImportBytes  int64                     `json:"estimated_import_bytes"`
+	ProjectedUsedBytes    int64                     `json:"projected_used_bytes"`
+	FitsQuota             bool                      `json:"fits_quota"`
 }
 
 type publicTrialPreviewJobStatus struct {
@@ -2212,6 +2229,7 @@ type wholeSitePreviewResult struct {
 	ImportedPages []wholeSiteImportedPage
 	Spider        *pageSpider
 	Partial       bool
+	LimitReached  bool
 }
 
 type nativePickedFile struct {
@@ -6722,6 +6740,10 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 		a.publicTrialSiteWS(w, r)
 		return
 	}
+	if hasQueryFlag(r, "trial_site_events") {
+		a.publicTrialSiteEvents(w, r)
+		return
+	}
 	if hasQueryFlag(r, "trial_site_texts") {
 		a.publicTrialSiteTexts(w, r)
 		return
@@ -9039,15 +9061,65 @@ func (a *App) publicTrialSitePreview(w http.ResponseWriter, r *http.Request) {
 	}
 	previewURL := absoluteURLForPath(r, "/?trial_site_preview_frame&token="+url.QueryEscape(progressToken))
 	translations := translationsForRequest(r)
-	go a.runPublicTrialSitePreview(progressToken, sourceURL, previewURL, translations, cancelSession)
+	copyWholeSite := grabCopyWholeSite(r)
+	sourceOptions, sourceOptionsErr := parseGrabSourceOptions(r)
+	if sourceOptionsErr != nil {
+		a.activePublicTrialPreviewStore().Fail(progressToken, sourceOptionsErr.Error())
+		http.Error(w, sourceOptionsErr.Error(), http.StatusBadRequest)
+		return
+	}
+	go a.runPublicTrialSitePreview(progressToken, sourceURL, previewURL, translations, cancelSession, copyWholeSite, sourceOptions)
 
 	w.Header().Set("Content-Type", "application/json")
+	if strings.TrimSpace(r.FormValue("unified_copy")) == "1" {
+		a.writeTerminalPublicTrialPreview(w, r, progressToken)
+		return
+	}
 	if strings.TrimSpace(r.FormValue("async_preview")) != "1" {
 		a.writeFirstUsablePublicTrialPreview(w, r, progressToken, previewURL, translations)
 		return
 	}
 	w.WriteHeader(http.StatusAccepted)
 	_ = json.NewEncoder(w).Encode(map[string]string{"token": progressToken, "status": "running"})
+}
+
+func (a *App) writeTerminalPublicTrialPreview(w http.ResponseWriter, r *http.Request, progressToken string) {
+	ticker := time.NewTicker(150 * time.Millisecond)
+	defer ticker.Stop()
+	timer := time.NewTimer(publicTrialPreviewMaxDuration + 5*time.Second)
+	defer timer.Stop()
+	for {
+		status, found := a.activePublicTrialPreviewStore().Status(progressToken)
+		if found {
+			switch status.Status {
+			case "done", "partial":
+				_ = json.NewEncoder(w).Encode(status.Response)
+				return
+			case "error":
+				http.Error(w, status.ErrorText, http.StatusBadGateway)
+				return
+			case "canceled":
+				http.Error(w, "preview canceled", http.StatusConflict)
+				return
+			}
+		}
+		select {
+		case <-r.Context().Done():
+			return
+		case <-timer.C:
+			if preview, usable := a.activePublicTrialPreviewStore().Get(progressToken); usable && len(preview.ImportedPages) > 0 {
+				preview.SinglePageRequired = preview.CopyWholeSite
+				response := publicTrialPreviewResponseFromPreview(preview, "partial", "", translationsForRequest(r))
+				response.Message = translationOrDefault(translationsForRequest(r), "public_trial_partial_timeout", "The whole-site analysis time limit was reached. Copy the first page to get a reliable test-drive result.")
+				a.activePublicTrialPreviewStore().Complete(progressToken, "partial", response)
+				_ = json.NewEncoder(w).Encode(response)
+				return
+			}
+			http.Error(w, translationOrDefault(translationsForRequest(r), "public_trial_load_failed", "Website analysis failed."), http.StatusGatewayTimeout)
+			return
+		case <-ticker.C:
+		}
+	}
 }
 
 func (a *App) writeFirstUsablePublicTrialPreview(w http.ResponseWriter, r *http.Request, progressToken, previewURL string, translations map[string]string) {
@@ -9075,9 +9147,50 @@ func (a *App) writeFirstUsablePublicTrialPreview(w http.ResponseWriter, r *http.
 	}
 }
 
-func (a *App) runPublicTrialSitePreview(progressToken, requestedSourceURL, previewURL string, translations map[string]string, cancelSession <-chan struct{}) {
-	previewContext, cancelPreview := context.WithTimeout(context.Background(), 15*time.Minute)
+func (a *App) runPublicTrialSitePreview(progressToken, requestedSourceURL, previewURL string, translations map[string]string, cancelSession <-chan struct{}, copyWholeSite bool, sourceOptions grabSourceOptions) {
+	previewContext, cancelPreview := context.WithTimeout(context.Background(), publicTrialPreviewMaxDuration)
 	defer cancelPreview()
+	watchdogDone := make(chan struct{})
+	defer close(watchdogDone)
+	if a.grabTracker != nil {
+		activityStream := a.grabTracker.subscribe(progressToken)
+		defer a.grabTracker.unsubscribe(progressToken, activityStream)
+		go func() {
+			timer := time.NewTimer(publicTrialPreviewStallTimeout)
+			defer timer.Stop()
+			for {
+				select {
+				case _, streamOpen := <-activityStream:
+					if !streamOpen {
+						return
+					}
+					if !timer.Stop() {
+						select {
+						case <-timer.C:
+						default:
+						}
+					}
+					timer.Reset(publicTrialPreviewStallTimeout)
+				case <-timer.C:
+					cancelPreview()
+					return
+				case <-watchdogDone:
+					return
+				case <-previewContext.Done():
+					return
+				}
+			}
+		}()
+	}
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			errorText := translationOrDefault(translations, "public_trial_load_failed", "Website analysis failed.")
+			a.activePublicTrialPreviewStore().Fail(progressToken, errorText)
+			if a.grabTracker != nil {
+				a.grabTracker.publish(grabProgressEvent{Token: progressToken, Stage: "error", CurrentError: errorText, Message: errorText})
+			}
+		}
+	}()
 	go func() {
 		select {
 		case <-cancelSession:
@@ -9086,7 +9199,7 @@ func (a *App) runPublicTrialSitePreview(progressToken, requestedSourceURL, previ
 		}
 	}()
 
-	sourceURL, remoteSourceURL, htmlBytes, err := a.resolvePublicTrialSource(previewContext, requestedSourceURL, progressToken)
+	sourceURL, remoteSourceURL, htmlBytes, err := a.resolvePublicTrialSource(previewContext, requestedSourceURL, progressToken, sourceOptions)
 	if err != nil {
 		errorText := publicTrialSourceErrorText(translations, err)
 		a.activePublicTrialPreviewStore().Fail(progressToken, errorText)
@@ -9095,7 +9208,7 @@ func (a *App) runPublicTrialSitePreview(progressToken, requestedSourceURL, previ
 		}
 		return
 	}
-	publicSourceOptions := publicTrialGrabSourceOptions()
+	publicSourceOptions := sourceOptions
 	initialSpider := newPreviewPageSpider("", remoteSourceURL, grabResourceMaxDepth, a.grabTracker, progressToken, publicSourceOptions)
 	initialSpider.setContext(previewContext)
 	initialRootResource := &mirroredResource{url: sourceURL, content: htmlBytes}
@@ -9119,8 +9232,20 @@ func (a *App) runPublicTrialSitePreview(progressToken, requestedSourceURL, previ
 		Plan:           initialPlan,
 		FreePlan:       initialFreePlan,
 		FitsFreePlan:   initialFitsFreePlan,
+		CopyWholeSite:  copyWholeSite,
+		SourceOptions:  sourceOptions,
 	})
-	wholeSitePreview := previewWholeRemoteSiteResources(previewContext, remoteSourceURL, string(htmlBytes), "/", a.grabTracker, progressToken, publicSourceOptions)
+	wholeSitePreview := wholeSitePreviewResult{PageCount: 1, ImportedPages: initialImportedPages, Spider: initialSpider}
+	if copyWholeSite {
+		freePreviewByteLimit := initialFreePlan.QuotaBytes
+		if freePreviewByteLimit <= 0 {
+			freePreviewByteLimit = defaultDomainStorageLimitBytes
+		}
+		wholeSitePreview = previewWholeRemoteSiteResourcesWithLimit(previewContext, remoteSourceURL, string(htmlBytes), "/", a.grabTracker, progressToken, publicSourceOptions, freePreviewByteLimit)
+	} else {
+		initialSpider.collectPreviewNestedResources(initialRootResource, 0, "text/html")
+		wholeSitePreview.Resources = previewResourcesFromSpider(initialSpider, map[string]struct{}{sourceURL: {}})
+	}
 	importedPages := wholeSitePreview.ImportedPages
 	if len(importedPages) == 0 {
 		importedPages = initialImportedPages
@@ -9144,20 +9269,24 @@ func (a *App) runPublicTrialSitePreview(progressToken, requestedSourceURL, previ
 	}
 	requiredBytes := pageBytes + resourceBytes
 	plan, freePlan, fitsFreePlan := a.smallestPublicTrialPlan(previewContext, requiredBytes)
+	previewTimedOut := previewContext.Err() != nil
 	preview := publicTrialPreview{
-		Token:          progressToken,
-		SourceURL:      sourceURL,
-		ImportedPages:  importedPages,
-		Resources:      resources,
-		Spider:         previewSpider,
-		PageCount:      pageCount,
-		ResourceCount:  len(resources),
-		ResourceCounts: publicTrialResourceCountsFromResources(resources),
-		TotalBytes:     requiredBytes,
-		RequiredBytes:  requiredBytes,
-		Plan:           plan,
-		FreePlan:       freePlan,
-		FitsFreePlan:   fitsFreePlan,
+		Token:              progressToken,
+		SourceURL:          sourceURL,
+		ImportedPages:      importedPages,
+		Resources:          resources,
+		Spider:             previewSpider,
+		PageCount:          pageCount,
+		ResourceCount:      len(resources),
+		ResourceCounts:     publicTrialResourceCountsFromResources(resources),
+		TotalBytes:         requiredBytes,
+		RequiredBytes:      requiredBytes,
+		Plan:               plan,
+		FreePlan:           freePlan,
+		FitsFreePlan:       fitsFreePlan,
+		SinglePageRequired: copyWholeSite && (wholeSitePreview.LimitReached || previewTimedOut),
+		CopyWholeSite:      copyWholeSite,
+		SourceOptions:      sourceOptions,
 	}
 	a.activePublicTrialPreviewStore().Save(preview)
 	status := "done"
@@ -9165,6 +9294,9 @@ func (a *App) runPublicTrialSitePreview(progressToken, requestedSourceURL, previ
 		status = "partial"
 	}
 	response := publicTrialPreviewResponseFromPreview(preview, status, previewURL, translations)
+	if previewTimedOut && preview.SinglePageRequired {
+		response.Message = translationOrDefault(translations, "public_trial_partial_timeout", "The whole-site analysis time limit was reached. Copy the first page to get a reliable test-drive result.")
+	}
 	response.PageBytes = pageBytes
 	a.activePublicTrialPreviewStore().Complete(progressToken, status, response)
 	if a.grabTracker != nil && previewSpider != nil {
@@ -9177,23 +9309,39 @@ func publicTrialPreviewResponseFromPreview(preview publicTrialPreview, status, p
 	for _, importedPage := range preview.ImportedPages {
 		pageBytes += int64(len([]byte(importedPage.HTML)))
 	}
+	limitBytes := preview.Plan.QuotaBytes
+	if limitBytes <= 0 {
+		limitBytes = defaultDomainStorageLimitBytes
+	}
 	response := publicTrialPreviewResponse{
-		Status:         status,
-		Usable:         len(preview.ImportedPages) > 0,
-		Refreshing:     status == "running",
-		SourceURL:      preview.SourceURL,
-		PreviewURL:     previewURL,
-		PageCount:      preview.PageCount,
-		ResourceCount:  preview.ResourceCount,
-		ResourceCounts: preview.ResourceCounts,
-		Resources:      preview.Resources,
-		PageBytes:      pageBytes,
-		TotalBytes:     preview.TotalBytes,
-		RequiredBytes:  preview.RequiredBytes,
-		FitsFreePlan:   preview.FitsFreePlan,
-		Plan:           preview.Plan,
-		FreePlan:       preview.FreePlan,
-		Message:        publicTrialPlanMessage(translations, preview),
+		Status:                status,
+		Usable:                len(preview.ImportedPages) > 0,
+		Refreshing:            status == "running",
+		SourceURL:             preview.SourceURL,
+		PreviewURL:            previewURL,
+		PageCount:             preview.PageCount,
+		ResourceCount:         preview.ResourceCount,
+		ResourceCounts:        preview.ResourceCounts,
+		Resources:             preview.Resources,
+		PageBytes:             pageBytes,
+		TotalBytes:            preview.TotalBytes,
+		RequiredBytes:         preview.RequiredBytes,
+		FitsFreePlan:          preview.FitsFreePlan,
+		SinglePageRequired:    preview.SinglePageRequired,
+		Plan:                  preview.Plan,
+		FreePlan:              preview.FreePlan,
+		Message:               publicTrialPlanMessage(translations, preview),
+		DownloadTotal:         preview.PageCount + preview.ResourceCount,
+		DownloadTotalBytes:    preview.RequiredBytes,
+		PageDownloadBytes:     pageBytes,
+		PageStorageBytes:      pageBytes,
+		CurrentUsedBytes:      0,
+		LimitBytes:            limitBytes,
+		FreeBytes:             limitBytes,
+		SelectedResourceBytes: max(int64(0), preview.RequiredBytes-pageBytes),
+		EstimatedImportBytes:  preview.RequiredBytes,
+		ProjectedUsedBytes:    preview.RequiredBytes,
+		FitsQuota:             preview.RequiredBytes <= limitBytes,
 	}
 	if preview.Spider != nil {
 		response.FailedTotal = preview.Spider.unresolvedFailedTotal()
@@ -9312,7 +9460,10 @@ func (a *App) publicTrialSiteCreate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
-	progressToken := strings.TrimSpace(r.FormValue("progress_token"))
+	progressToken := strings.TrimSpace(r.FormValue("preview_token"))
+	if progressToken == "" {
+		progressToken = strings.TrimSpace(r.FormValue("progress_token"))
+	}
 	createProgressToken := strings.TrimSpace(r.FormValue("create_progress_token"))
 	if createProgressToken == "" {
 		createProgressToken = progressToken
@@ -9321,6 +9472,10 @@ func (a *App) publicTrialSiteCreate(w http.ResponseWriter, r *http.Request) {
 	preview, found := a.activePublicTrialPreviewStore().Get(progressToken)
 	if !found {
 		http.Error(w, "preview not found", http.StatusNotFound)
+		return
+	}
+	if preview.SinglePageRequired && preview.CopyWholeSite {
+		http.Error(w, translationOrDefault(translationsForRequest(r), "public_trial_single_page_required", "The website is larger than the free test-drive limit. Stop scanning the website and copy only its first page."), http.StatusConflict)
 		return
 	}
 	selectedResourceURLs := selectedGrabResourceURLs(r)
@@ -9586,7 +9741,7 @@ func (a *App) rawManagedSiteHasAdmin(ctx context.Context, domain string) bool {
 	return adminCount > 0
 }
 
-func (a *App) resolvePublicTrialSource(ctx context.Context, rawSourceURL, progressToken string) (string, *url.URL, []byte, error) {
+func (a *App) resolvePublicTrialSource(ctx context.Context, rawSourceURL, progressToken string, sourceOptions grabSourceOptions) (string, *url.URL, []byte, error) {
 	sourceText := strings.TrimSpace(rawSourceURL)
 	if sourceText == "" {
 		return "", nil, nil, errors.New("source_url is required")
@@ -9603,7 +9758,7 @@ func (a *App) resolvePublicTrialSource(ctx context.Context, rawSourceURL, progre
 			lastErr = parseErr
 			continue
 		}
-		htmlBytes, resolvedSourceURL, downloadErr := a.downloadPublicTrialSourceHTML(ctx, remoteSourceURL.String(), progressToken)
+		htmlBytes, resolvedSourceURL, downloadErr := a.downloadPublicTrialSourceHTML(ctx, remoteSourceURL.String(), progressToken, sourceOptions)
 		if downloadErr == nil {
 			return resolvedSourceURL.String(), resolvedSourceURL, htmlBytes, nil
 		}
@@ -9615,12 +9770,11 @@ func (a *App) resolvePublicTrialSource(ctx context.Context, rawSourceURL, progre
 	return "", nil, nil, lastErr
 }
 
-func (a *App) downloadPublicTrialSourceHTML(ctx context.Context, sourceURL, progressToken string) ([]byte, *url.URL, error) {
+func (a *App) downloadPublicTrialSourceHTML(ctx context.Context, sourceURL, progressToken string, sourceOptions grabSourceOptions) ([]byte, *url.URL, error) {
 	remoteSourceURL, err := url.Parse(sourceURL)
 	if err != nil {
 		return nil, nil, errors.New("source_url is invalid")
 	}
-	sourceOptions := publicTrialGrabSourceOptions()
 	if err := requirePublicOutboundURL(remoteSourceURL); err != nil {
 		return nil, nil, err
 	}
@@ -9771,10 +9925,13 @@ func (a *App) smallestPublicTrialPlan(ctx context.Context, requiredBytes int64) 
 }
 
 func publicTrialPlanMessage(translations map[string]string, preview publicTrialPreview) string {
+	if preview.SinglePageRequired {
+		return translationOrDefault(translations, "public_trial_single_page_required", "The website is larger than the free test-drive limit. Stop scanning the website and copy only its first page.")
+	}
 	if preview.FitsFreePlan {
 		return translationOrDefault(translations, "public_trial_free_result", "Great – this website can be launched on the free SiteBrush plan.")
 	}
-	return translationOrDefault(translations, "public_trial_paid_result", "This website requires a paid plan, but you can test SiteBrush for free for 1 month. Payment is required only after the trial period.")
+	return translationOrDefault(translations, "public_trial_oversize_result", "This website is larger than the free plan. You can still test its first page free for 24 hours.")
 }
 
 func publicTrialSourceErrorText(translations map[string]string, err error) string {
@@ -9851,7 +10008,7 @@ func (a *App) preparePublicTrialPreviewForCreate(ctx context.Context, preview pu
 		preview.ResourceCounts = publicTrialResourceCountsFromResources(selectedResources)
 		return preview
 	}
-	spider := newPageSpider("", remoteSourceURL, grabResourceMaxDepth, a.grabTracker, progressToken, publicTrialGrabSourceOptions())
+	spider := newPageSpider("", remoteSourceURL, grabResourceMaxDepth, a.grabTracker, progressToken, preview.SourceOptions)
 	spider.setContext(ctx)
 	spider.publicAssetBasePath = "/"
 	spider.selectedResourceURLs = selectedResourceURLs
@@ -10810,9 +10967,13 @@ func previewResourcesFromSpider(spider *pageSpider, excludedURLs map[string]stru
 }
 
 func previewWholeRemoteSiteResources(ctx context.Context, startURL *url.URL, startHTML, publicAssetBasePath string, tracker *grabProgressTracker, progressToken string, sourceOptions grabSourceOptions) wholeSitePreviewResult {
-	spider, pageURLs, importedPages, partial := crawlWholeRemoteSite(ctx, startURL, startHTML, publicAssetBasePath, tracker, progressToken, sourceOptions)
+	return previewWholeRemoteSiteResourcesWithLimit(ctx, startURL, startHTML, publicAssetBasePath, tracker, progressToken, sourceOptions, 0)
+}
+
+func previewWholeRemoteSiteResourcesWithLimit(ctx context.Context, startURL *url.URL, startHTML, publicAssetBasePath string, tracker *grabProgressTracker, progressToken string, sourceOptions grabSourceOptions, byteLimit int64) wholeSitePreviewResult {
+	spider, pageURLs, importedPages, partial := crawlWholeRemoteSite(ctx, startURL, startHTML, publicAssetBasePath, tracker, progressToken, sourceOptions, byteLimit)
 	resources := previewResourcesFromSpider(spider, pageURLs)
-	return wholeSitePreviewResult{PageCount: len(pageURLs), Resources: resources, ImportedPages: importedPages, Spider: spider, Partial: partial}
+	return wholeSitePreviewResult{PageCount: len(pageURLs), Resources: resources, ImportedPages: importedPages, Spider: spider, Partial: partial, LimitReached: spider.previewLimitReached}
 }
 
 func (a *App) prepareWholeRemoteSiteImport(importRequest grabImportRequest) (*pageSpider, []wholeSiteImportedPage, error) {
@@ -10948,12 +11109,13 @@ type wholeSitePreviewPageResult struct {
 	err        error
 }
 
-func crawlWholeRemoteSite(ctx context.Context, startURL *url.URL, startHTML, publicAssetBasePath string, tracker *grabProgressTracker, progressToken string, sourceOptions grabSourceOptions) (*pageSpider, map[string]struct{}, []wholeSiteImportedPage, bool) {
+func crawlWholeRemoteSite(ctx context.Context, startURL *url.URL, startHTML, publicAssetBasePath string, tracker *grabProgressTracker, progressToken string, sourceOptions grabSourceOptions, byteLimit int64) (*pageSpider, map[string]struct{}, []wholeSiteImportedPage, bool) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	spider := newPreviewPageSpider("", startURL, grabResourceMaxDepth, tracker, progressToken, sourceOptions)
 	spider.setContext(ctx)
+	spider.previewByteLimit = byteLimit
 	spider.publicAssetBasePath = publicAssetBasePath
 	spider.documentURLRewriter = func(normalizedURL string) (string, bool) {
 		parsedURL, parseErr := url.Parse(normalizedURL)
@@ -11035,6 +11197,19 @@ func crawlWholeRemoteSite(ctx context.Context, startURL *url.URL, startHTML, pub
 				continue
 			}
 			pageHTML := pageResult.html
+			if !spider.recordPreviewBytes(int64(len([]byte(pageHTML)))) {
+				partial = true
+				stopDispatch = true
+				pageQueue = nil
+			}
+			if spider.previewLimitReached {
+				rootResource := &mirroredResource{url: currentJob.URL.String(), content: []byte(pageHTML)}
+				spider.resources[currentJob.URL.String()] = rootResource
+				importedPages = append(importedPages, wholeSiteImportedPage{SourceURL: currentJob.URL.String(), LocalPath: knownPagePathsByKey[pageKey], HTML: pageHTML})
+				spider.downloadedTotal++
+				spider.publishResourceProgress("partial", currentJob.URL.String(), 100, int64(len(pageHTML)), int64(len(pageHTML)))
+				continue
+			}
 			for _, linkedPageURL := range crawler.ExtractPageLinks(pageHTML, currentJob.URL, startURL) {
 				linkedPageKey := crawler.WholeSitePageKey(linkedPageURL)
 				if linkedPageKey == "" {
@@ -11056,6 +11231,11 @@ func crawlWholeRemoteSite(ctx context.Context, startURL *url.URL, startHTML, pub
 			rootResource := &mirroredResource{url: currentJob.URL.String(), content: []byte(pageHTML)}
 			spider.resources[currentJob.URL.String()] = rootResource
 			spider.collectPreviewNestedResources(rootResource, 0, "text/html")
+			if spider.previewLimitReached {
+				partial = true
+				stopDispatch = true
+				pageQueue = nil
+			}
 			importedPages = append(importedPages, wholeSiteImportedPage{SourceURL: currentJob.URL.String(), LocalPath: knownPagePathsByKey[pageKey], HTML: string(rootResource.content)})
 			spider.downloadedTotal++
 			consecutiveFailures = 0
@@ -11473,6 +11653,18 @@ func (a *App) grabProgressEvents(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
+	a.streamGrabProgressEvents(w, r)
+}
+
+func (a *App) publicTrialSiteEvents(w http.ResponseWriter, r *http.Request) {
+	if !a.publicTrialAllowed(r) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	a.streamGrabProgressEvents(w, r)
+}
+
+func (a *App) streamGrabProgressEvents(w http.ResponseWriter, r *http.Request) {
 	progressToken := strings.TrimSpace(r.URL.Query().Get("token"))
 	if progressToken == "" {
 		http.Error(w, "token is required", http.StatusBadRequest)
@@ -11503,7 +11695,7 @@ func (a *App) grabProgressEvents(w http.ResponseWriter, r *http.Request) {
 			if !writeGrabProgressEvent(w, flusher, event) {
 				return
 			}
-			if event.Stage == "done" || (event.Stage == "error" && strings.TrimSpace(event.CurrentURL) == "") {
+			if event.Stage == "done" || event.Stage == "partial" || event.Stage == "canceled" || (event.Stage == "error" && strings.TrimSpace(event.CurrentURL) == "") {
 				return
 			}
 		}
@@ -13618,7 +13810,8 @@ func publicTrialWidgetScriptVersion() string {
 }
 
 func publicTrialWidgetTexts(translations map[string]string) map[string]string {
-	return map[string]string{
+	texts := siteCopyMenuTexts(translations)
+	for key, value := range map[string]string{
 		"modalTitle":          translationOrDefault(translations, "public_trial_modal_title", "Checking if SiteBrush can be installed on the selected website:"),
 		"formTitle":           translationOrDefault(translations, "public_trial_form_title", "Enter the website where you want to launch SiteBrush:"),
 		"fieldLabel":          translationOrDefault(translations, "public_trial_field_label", "Website address"),
@@ -13652,7 +13845,12 @@ func publicTrialWidgetTexts(translations map[string]string) map[string]string {
 		"retrySecondsSuffix":  translationOrDefault(translations, "site_copy_retry_seconds_suffix", "s"),
 		"yes":                 translationOrDefault(translations, "confirm_yes", "Yes"),
 		"no":                  translationOrDefault(translations, "confirm_no", "No"),
+	} {
+		texts[key] = value
 	}
+	texts["copyButton"] = translationOrDefault(translations, "public_trial_check_button", "Check website")
+	texts["doneOpenPage"] = translationOrDefault(translations, "public_trial_creating", "Creating a test version with the SiteBrush editor...")
+	return texts
 }
 
 func siteAdminEmails(ctx context.Context, databasePath, domain string) []string {
@@ -22307,56 +22505,62 @@ func contentTypeForManagedPage(pagePath, content string) string {
 
 func siteCopyMenuConfigJSON(pagePath string, translations map[string]string) string {
 	configuration := map[string]any{
-		"path": cleanPath(pagePath),
-		"texts": map[string]string{
-			"title":                     translationOrDefault(translations, "menu_copy_site", "Copy site"),
-			"sourceURLPlaceholder":      translationOrDefault(translations, "missing_source_url_placeholder", "https://example.com/page"),
-			"sourceIPLabel":             translationOrDefault(translations, "missing_source_ip_label", "Source IP if DNS is not ready:"),
-			"sourceIPPlaceholder":       translationOrDefault(translations, "missing_source_ip_placeholder", "203.0.113.10"),
-			"sourceLanguageLabel":       translationOrDefault(translations, "missing_source_language_label", "Preferred language:"),
-			"sourceLanguageAuto":        translationOrDefault(translations, "missing_source_language_auto", "Auto"),
-			"copyButton":                translationOrDefault(translations, "missing_copy_button", "Copy"),
-			"copyWholeSite":             translationOrDefault(translations, "missing_copy_whole_site", "Copy entire website"),
-			"continueButton":            translationOrDefault(translations, "missing_continue", "Continue"),
-			"cancelButton":              translationOrDefault(translations, "edit_cancel", "Cancel"),
-			"sizeUnknown":               translationOrDefault(translations, "missing_size_unknown", "unknown"),
-			"previewResourcesText":      translationOrDefault(translations, "missing_preview_resources_text", "Checking resources before download..."),
-			"previewErrorDefault":       translationOrDefault(translations, "missing_preview_error_default", "Failed to check resources."),
-			"confirmDownloadTextPrefix": translationOrDefault(translations, "missing_confirm_download_text_prefix", "Resources to download:"),
-			"loadingStarted":            translationOrDefault(translations, "missing_loading_started", "Loading started."),
-			"invalidStatusError":        translationOrDefault(translations, "missing_invalid_status_error", "Invalid progress status."),
-			"progressDownloadedPrefix":  translationOrDefault(translations, "missing_progress_downloaded_prefix", "Downloaded"),
-			"fromWord":                  translationOrDefault(translations, "missing_progress_from_word", "from"),
-			"leftWord":                  translationOrDefault(translations, "missing_progress_left_word", "left"),
-			"doneOpenPage":              translationOrDefault(translations, "missing_done_open_editor", "Done. Opening page..."),
-			"downloadFailedRetry":       translationOrDefault(translations, "missing_download_failed_retry", "Download failed. Try again."),
-			"partialImportRetry":        translationOrDefault(translations, "missing_partial_import_retry", "Some resources failed. You can retry."),
-			"retryRemaining":            translationOrDefault(translations, "missing_retry_remaining", "Retry remaining"),
-			"retryNextIn":               translationOrDefault(translations, "site_copy_retry_next_in", "Next retry in"),
-			"retrySecondsSuffix":        translationOrDefault(translations, "site_copy_retry_seconds_suffix", "s"),
-			"finishImport":              translationOrDefault(translations, "site_copy_finish_import", "Finish import"),
-			"closeButton":               translationOrDefault(translations, "tree_close", "Close"),
-			"failedResourcesTitle":      translationOrDefault(translations, "site_copy_failed_resources_title", "Failed resources:"),
-			"failedResourceBadge":       translationOrDefault(translations, "site_copy_failed_resource_badge", "failed"),
-			"partialImportClose":        translationOrDefault(translations, "site_copy_partial_import_close", "Imported with missing resources. You can close and use what was imported."),
-			"connectStatusFailed":       translationOrDefault(translations, "missing_connect_status_failed", "Failed to connect to progress stream."),
-			"loadPageFailed":            translationOrDefault(translations, "missing_load_page_failed", "Load failed."),
-			"checkResourcesFailed":      translationOrDefault(translations, "missing_check_resources_failed", "Resource check failed."),
-			"quotaSummaryTitle":         translationOrDefault(translations, "missing_quota_summary_title", "Storage quota"),
-			"quotaCurrentUsed":          translationOrDefault(translations, "missing_quota_current_used", "Current usage"),
-			"quotaWillAdd":              translationOrDefault(translations, "missing_quota_will_add", "Will add"),
-			"quotaAfterImport":          translationOrDefault(translations, "missing_quota_after_import", "After import"),
-			"quotaAfterImportOf":        translationOrDefault(translations, "missing_quota_after_import_of", "of"),
-			"quotaWillRemain":           translationOrDefault(translations, "missing_quota_will_remain", "Will remain"),
-			"quotaFits":                 translationOrDefault(translations, "missing_quota_fits", "Enough storage is available."),
-			"quotaExceeded":             translationOrDefault(translations, "missing_quota_exceeded", "Storage limit exceeded."),
-		},
+		"path":  cleanPath(pagePath),
+		"texts": siteCopyMenuTexts(translations),
 	}
 	jsonBytes, err := json.Marshal(configuration)
 	if err != nil {
 		return `{"path":"/","texts":{}}`
 	}
 	return string(jsonBytes)
+}
+
+func siteCopyMenuTexts(translations map[string]string) map[string]string {
+	return map[string]string{
+		"title":                     translationOrDefault(translations, "menu_copy_site", "Copy site"),
+		"sourceURLPlaceholder":      translationOrDefault(translations, "missing_source_url_placeholder", "https://example.com/page"),
+		"sourceIPLabel":             translationOrDefault(translations, "missing_source_ip_label", "Source IP if DNS is not ready:"),
+		"sourceIPPlaceholder":       translationOrDefault(translations, "missing_source_ip_placeholder", "203.0.113.10"),
+		"sourceLanguageLabel":       translationOrDefault(translations, "missing_source_language_label", "Preferred language:"),
+		"sourceLanguageAuto":        translationOrDefault(translations, "missing_source_language_auto", "Auto"),
+		"copyButton":                translationOrDefault(translations, "missing_copy_button", "Copy"),
+		"copyWholeSite":             translationOrDefault(translations, "missing_copy_whole_site", "Copy entire website"),
+		"continueButton":            translationOrDefault(translations, "missing_continue", "Continue"),
+		"cancelButton":              translationOrDefault(translations, "edit_cancel", "Cancel"),
+		"sizeUnknown":               translationOrDefault(translations, "missing_size_unknown", "unknown"),
+		"previewResourcesText":      translationOrDefault(translations, "missing_preview_resources_text", "Checking resources before download..."),
+		"previewErrorDefault":       translationOrDefault(translations, "missing_preview_error_default", "Failed to check resources."),
+		"confirmDownloadTextPrefix": translationOrDefault(translations, "missing_confirm_download_text_prefix", "Resources to download:"),
+		"loadingStarted":            translationOrDefault(translations, "missing_loading_started", "Loading started."),
+		"invalidStatusError":        translationOrDefault(translations, "missing_invalid_status_error", "Invalid progress status."),
+		"progressDownloadedPrefix":  translationOrDefault(translations, "missing_progress_downloaded_prefix", "Downloaded"),
+		"fromWord":                  translationOrDefault(translations, "missing_progress_from_word", "from"),
+		"leftWord":                  translationOrDefault(translations, "missing_progress_left_word", "left"),
+		"doneOpenPage":              translationOrDefault(translations, "missing_done_open_editor", "Done. Opening page..."),
+		"downloadFailedRetry":       translationOrDefault(translations, "missing_download_failed_retry", "Download failed. Try again."),
+		"partialImportRetry":        translationOrDefault(translations, "missing_partial_import_retry", "Some resources failed. You can retry."),
+		"retryRemaining":            translationOrDefault(translations, "missing_retry_remaining", "Retry remaining"),
+		"retryNextIn":               translationOrDefault(translations, "site_copy_retry_next_in", "Next retry in"),
+		"retrySecondsSuffix":        translationOrDefault(translations, "site_copy_retry_seconds_suffix", "s"),
+		"finishImport":              translationOrDefault(translations, "site_copy_finish_import", "Finish import"),
+		"closeButton":               translationOrDefault(translations, "tree_close", "Close"),
+		"failedResourcesTitle":      translationOrDefault(translations, "site_copy_failed_resources_title", "Failed resources:"),
+		"failedResourceBadge":       translationOrDefault(translations, "site_copy_failed_resource_badge", "failed"),
+		"partialImportClose":        translationOrDefault(translations, "site_copy_partial_import_close", "Imported with missing resources. You can close and use what was imported."),
+		"connectStatusFailed":       translationOrDefault(translations, "missing_connect_status_failed", "Failed to connect to progress stream."),
+		"loadPageFailed":            translationOrDefault(translations, "missing_load_page_failed", "Load failed."),
+		"checkResourcesFailed":      translationOrDefault(translations, "missing_check_resources_failed", "Resource check failed."),
+		"quotaSummaryTitle":         translationOrDefault(translations, "missing_quota_summary_title", "Storage quota"),
+		"quotaCurrentUsed":          translationOrDefault(translations, "missing_quota_current_used", "Current usage"),
+		"quotaWillAdd":              translationOrDefault(translations, "missing_quota_will_add", "Will add"),
+		"quotaAfterImport":          translationOrDefault(translations, "missing_quota_after_import", "After import"),
+		"quotaAfterImportOf":        translationOrDefault(translations, "missing_quota_after_import_of", "of"),
+		"quotaWillRemain":           translationOrDefault(translations, "missing_quota_will_remain", "Will remain"),
+		"quotaFits":                 translationOrDefault(translations, "missing_quota_fits", "Enough storage is available."),
+		"quotaExceeded":             translationOrDefault(translations, "missing_quota_exceeded", "Storage limit exceeded."),
+		"singlePageRequired":        translationOrDefault(translations, "public_trial_single_page_required", "The website is larger than the free test-drive limit. Stop scanning the website and copy only its first page."),
+		"copyFirstPage":             translationOrDefault(translations, "public_trial_copy_first_page", "Copy first page"),
+	}
 }
 
 func buildContextMenuScript(isAdmin bool, isServerManager bool, isFrozen bool, pagePasswordProtected bool, showLogout bool, pagePath, domain string, revisionID int, revisionCount int, storageUsageLabel string, translations map[string]string) string {
@@ -24271,6 +24475,21 @@ type pageSpider struct {
 	failedTotal           int
 	failedResourceURLs    map[string]struct{}
 	failedResourceErrors  map[string]string
+	previewByteLimit      int64
+	previewBytes          int64
+	previewLimitReached   bool
+}
+
+func (spider *pageSpider) recordPreviewBytes(sizeBytes int64) bool {
+	if spider == nil || sizeBytes <= 0 || spider.previewLimitReached {
+		return spider == nil || !spider.previewLimitReached
+	}
+	spider.previewBytes += sizeBytes
+	if spider.previewByteLimit > 0 && spider.previewBytes > spider.previewByteLimit {
+		spider.previewLimitReached = true
+		return false
+	}
+	return true
 }
 
 type grabReferenceContext = crawler.ReferenceContext
@@ -25036,7 +25255,7 @@ func (spider *pageSpider) collectPreviewResourceReferenceForContext(rawRef strin
 }
 
 func (spider *pageSpider) collectPreviewResource(normalizedURL string, depth int) {
-	if depth > spider.maxDepth {
+	if depth > spider.maxDepth || spider.previewLimitReached {
 		return
 	}
 	if _, found := spider.resources[normalizedURL]; found {
@@ -25060,6 +25279,10 @@ func (spider *pageSpider) collectPreviewResource(normalizedURL string, depth int
 	if metadataErr != nil {
 		spider.failedTotal++
 		spider.recordFailedResource(normalizedURL, crawler.ErrorReason(metadataErr))
+	}
+	if contentLength > 0 && !spider.recordPreviewBytes(contentLength) {
+		spider.publishResourceProgress("partial", normalizedURL, 0, 0, contentLength)
+		return
 	}
 	if isImportedHTMLContentType(contentType) {
 		delete(spider.resources, normalizedURL)
@@ -25091,6 +25314,10 @@ func (spider *pageSpider) collectPreviewResource(normalizedURL string, depth int
 	}
 	if bodySizeBytes >= 0 {
 		resource.sizeBytes = bodySizeBytes
+	}
+	if contentLength <= 0 && !spider.recordPreviewBytes(int64(len(body))) {
+		spider.publishResourceProgress("partial", normalizedURL, 100, int64(len(body)), resource.sizeBytes)
+		return
 	}
 	resource.content = body
 	spider.downloadedTotal++
@@ -25500,15 +25727,13 @@ func (store *publicTrialPreviewStore) loop() {
 	for request := range store.requests {
 		now := time.Now()
 		for token, preview := range previewsByToken {
-			if preview.CreatedAt.IsZero() || now.Sub(preview.CreatedAt) > time.Hour {
+			job, hasJob := jobsByToken[token]
+			if (!hasJob || job.status.Status != "running") && (preview.CreatedAt.IsZero() || now.Sub(preview.CreatedAt) > time.Hour) {
 				delete(previewsByToken, token)
 			}
 		}
 		for token, job := range jobsByToken {
-			if job.status.UpdatedAt.IsZero() || now.Sub(job.status.UpdatedAt) > time.Hour {
-				if job.status.Status == "running" {
-					close(job.cancelSession)
-				}
+			if job.status.Status != "running" && (job.status.UpdatedAt.IsZero() || now.Sub(job.status.UpdatedAt) > time.Hour) {
 				delete(jobsByToken, token)
 			}
 		}

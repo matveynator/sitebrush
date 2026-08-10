@@ -46,6 +46,32 @@ func TestParserRewritesUppercaseScriptSource(t *testing.T) {
 	}
 }
 
+func TestParserDoesNotTreatNavigationOrEmbeddedDocumentsAsPageResources(t *testing.T) {
+	source := `<a href="/brochure.pdf">Download</a><form action="/search"><button>Search</button></form><iframe src="https://frames.example/widget.html"></iframe><img src="/hero.png">`
+	rewrittenResources := make([]string, 0, 1)
+	parser := Parser{
+		NormalizeURL: NormalizeURL,
+		RewriteResourceReference: func(rawRef string, baseURL *url.URL, _ int, referenceContext ReferenceContext) string {
+			normalizedURL, blocked := NormalizeURL(rawRef, baseURL, referenceContext)
+			if blocked {
+				return rawRef
+			}
+			rewrittenResources = append(rewrittenResources, normalizedURL)
+			return "/p/hero.png"
+		},
+	}
+
+	rewritten := parser.RewriteTextReferences(source, "https://source.example/page", 0)
+	if len(rewrittenResources) != 1 || rewrittenResources[0] != "https://source.example/hero.png" {
+		t.Fatalf("page resources = %#v, want only hero image", rewrittenResources)
+	}
+	for _, preservedReference := range []string{`href="/brochure.pdf"`, `action="/search"`, `src="https://frames.example/widget.html"`} {
+		if !strings.Contains(rewritten, preservedReference) {
+			t.Fatalf("navigation reference %q changed in %s", preservedReference, rewritten)
+		}
+	}
+}
+
 func TestParserRewritesDataManifestRelativeURLs(t *testing.T) {
 	baseURL, parseErr := url.Parse("https://karman.cafe/")
 	if parseErr != nil {

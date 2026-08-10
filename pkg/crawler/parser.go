@@ -79,12 +79,6 @@ func (parser Parser) RewriteTextReferences(source, baseRawURL string, depth int)
 	rewriteSingle := func(rawRef string) string {
 		return parser.rewriteResource(rawRef, baseURL, depth, ReferenceDocument)
 	}
-	rewriteDocumentReference := func(rawRef string) string {
-		if parser.RewriteDocumentResourceReference == nil {
-			return rewriteSingle(rawRef)
-		}
-		return parser.RewriteDocumentResourceReference(rawRef, baseURL, depth)
-	}
 	rewritten := htmlResourcePattern.ReplaceAllStringFunc(source, func(match string) string {
 		parts := htmlResourcePattern.FindStringSubmatch(match)
 		if len(parts) != 4 {
@@ -107,17 +101,25 @@ func (parser Parser) RewriteTextReferences(source, baseRawURL string, depth int)
 			}
 		}
 		normalizedURL, blocked := parser.normalize(parts[3], baseURL, ReferenceDocument)
-		if !blocked && parser.DocumentURLRewriter != nil && isWholeSiteDocumentAttribute(tagName, attributeName) && IsWholeSitePageURLString(normalizedURL) {
+		if isNavigationDocumentAttribute(tagName, attributeName) {
+			if blocked || parser.DocumentURLRewriter == nil || !IsWholeSitePageURLString(normalizedURL) {
+				return match
+			}
 			if rewrittenURL, ok := parser.DocumentURLRewriter(normalizedURL); ok {
 				return strings.Replace(match, parts[3], rewrittenURL, 1)
 			}
 			return match
 		}
-		if !blocked && parser.ShouldBlankEmbeddedDocumentReference != nil && parser.ShouldBlankEmbeddedDocumentReference(tagName, normalizedURL) {
-			return strings.Replace(match, parts[3], "about:blank", 1)
-		}
-		if isWholeSiteDocumentAttribute(tagName, attributeName) {
-			return strings.Replace(match, parts[3], rewriteDocumentReference(parts[3]), 1)
+		if isEmbeddedDocumentAttribute(tagName, attributeName) {
+			if !blocked && parser.DocumentURLRewriter != nil && IsWholeSitePageURLString(normalizedURL) {
+				if rewrittenURL, ok := parser.DocumentURLRewriter(normalizedURL); ok {
+					return strings.Replace(match, parts[3], rewrittenURL, 1)
+				}
+			}
+			if !blocked && parser.ShouldBlankEmbeddedDocumentReference != nil && parser.ShouldBlankEmbeddedDocumentReference(tagName, normalizedURL) {
+				return strings.Replace(match, parts[3], "about:blank", 1)
+			}
+			return match
 		}
 		return strings.Replace(match, parts[3], rewriteSingle(parts[3]), 1)
 	})
@@ -593,11 +595,22 @@ var KnownResourceKindsByExtension = map[string]string{
 }
 
 func isWholeSiteDocumentAttribute(tagName, attributeName string) bool {
+	return isNavigationDocumentAttribute(tagName, attributeName) || isEmbeddedDocumentAttribute(tagName, attributeName)
+}
+
+func isNavigationDocumentAttribute(tagName, attributeName string) bool {
 	switch strings.ToLower(strings.TrimSpace(tagName)) {
 	case "a", "area":
 		return attributeName == "href" || attributeName == "xlink:href"
 	case "form":
 		return attributeName == "action"
+	default:
+		return false
+	}
+}
+
+func isEmbeddedDocumentAttribute(tagName, attributeName string) bool {
+	switch strings.ToLower(strings.TrimSpace(tagName)) {
 	case "iframe", "embed":
 		return attributeName == "src"
 	case "object":
