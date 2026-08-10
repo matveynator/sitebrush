@@ -53,6 +53,25 @@ import (
 	"sitebrush/pkg/sitebrushtemplate"
 )
 
+func openServerControlDatabaseForTest(ctx context.Context, application *App) (*sql.DB, error) {
+	databasePath, err := application.writablePathInsideStorage(application.serverControlDBPath())
+	if err != nil {
+		return nil, err
+	}
+	if err := ensureParentDir(databasePath); err != nil {
+		return nil, err
+	}
+	database, err := openServerControlDatabaseHandle(databasePath, true)
+	if err != nil {
+		return nil, err
+	}
+	if err := hostingandsupport.Migrate(ctx, database); err != nil {
+		_ = database.Close()
+		return nil, err
+	}
+	return database, nil
+}
+
 type fakeGrabTransport struct {
 	responses map[string]fakeGrabResponse
 }
@@ -441,8 +460,7 @@ func TestPublishedStaticRejectsSymlinkToNeighborSite(t *testing.T) {
 
 func TestOpenServerControlDatabaseRejectsPathOutsideStorage(t *testing.T) {
 	application := &App{storagePath: t.TempDir(), dbPath: filepath.Join(t.TempDir(), "outside.db")}
-	if database, err := application.openServerControlDatabase(context.Background()); err == nil {
-		_ = database.Close()
+	if err := application.withServerControlDatabaseWrite(context.Background(), "test-outside-path", func(*sql.DB) error { return nil }); err == nil {
 		t.Fatalf("openServerControlDatabase accepted db path outside storage")
 	}
 }
@@ -454,92 +472,102 @@ func TestServerControlDatabaseDispatcherLimitsAccessAndCancelsReply(t *testing.T
 	}
 	defer dispatcher.Close()
 
-	firstWriter, err := dispatcher.acquire(context.Background(), serverControlDatabaseWrite)
-	if err != nil {
-		t.Fatal(err)
-	}
-	secondWriterResult := make(chan *serverControlDatabaseSession, 1)
+	firstWriterStarted := make(chan struct{})
+	releaseFirstWriter := make(chan struct{})
+	firstWriterResult := make(chan error, 1)
 	go func() {
-		session, acquireErr := dispatcher.acquire(context.Background(), serverControlDatabaseWrite)
-		if acquireErr == nil {
-			secondWriterResult <- session
-		}
+		firstWriterResult <- dispatcher.execute(context.Background(), serverControlDatabaseWrite, "first-writer", func(*sql.DB) error {
+			close(firstWriterStarted)
+			<-releaseFirstWriter
+			return nil
+		})
+	}()
+	<-firstWriterStarted
+	secondWriterRan := make(chan struct{})
+	secondWriterResult := make(chan error, 1)
+	go func() {
+		secondWriterResult <- dispatcher.execute(context.Background(), serverControlDatabaseWrite, "second-writer", func(*sql.DB) error {
+			close(secondWriterRan)
+			return nil
+		})
 	}()
 	select {
-	case session := <-secondWriterResult:
-		_ = session.Close()
+	case <-secondWriterRan:
 		t.Fatal("second writer ran while the first writer was active")
 	case <-time.After(50 * time.Millisecond):
 	}
-	_ = firstWriter.Close()
-	var secondWriter *serverControlDatabaseSession
+	close(releaseFirstWriter)
+	if err := <-firstWriterResult; err != nil {
+		t.Fatal(err)
+	}
 	select {
-	case secondWriter = <-secondWriterResult:
+	case err := <-secondWriterResult:
+		if err != nil {
+			t.Fatal(err)
+		}
 	case <-time.After(time.Second):
 		t.Fatal("second writer did not run after the first writer released access")
 	}
-	_ = secondWriter.Close()
 
-	readers := make([]*serverControlDatabaseSession, 0, serverControlDatabaseReaderCount)
+	releaseReaders := make(chan struct{})
+	readerResults := make(chan error, serverControlDatabaseReaderCount)
+	readerStarted := make(chan struct{}, serverControlDatabaseReaderCount)
 	for range serverControlDatabaseReaderCount {
-		reader, acquireErr := dispatcher.acquire(context.Background(), serverControlDatabaseRead)
-		if acquireErr != nil {
-			t.Fatal(acquireErr)
-		}
-		readers = append(readers, reader)
+		go func() {
+			readerResults <- dispatcher.execute(context.Background(), serverControlDatabaseRead, "held-reader", func(*sql.DB) error {
+				readerStarted <- struct{}{}
+				<-releaseReaders
+				return nil
+			})
+		}()
 	}
-	sixthReaderResult := make(chan *serverControlDatabaseSession, 1)
+	for range serverControlDatabaseReaderCount {
+		<-readerStarted
+	}
+	sixthReaderRan := make(chan struct{})
+	sixthReaderResult := make(chan error, 1)
 	go func() {
-		session, acquireErr := dispatcher.acquire(context.Background(), serverControlDatabaseRead)
-		if acquireErr == nil {
-			sixthReaderResult <- session
-		}
+		sixthReaderResult <- dispatcher.execute(context.Background(), serverControlDatabaseRead, "sixth-reader", func(*sql.DB) error {
+			close(sixthReaderRan)
+			return nil
+		})
 	}()
 	select {
-	case session := <-sixthReaderResult:
-		_ = session.Close()
+	case <-sixthReaderRan:
 		t.Fatal("sixth reader ran while five readers were active")
 	case <-time.After(50 * time.Millisecond):
 	}
-	_ = readers[0].Close()
+	close(releaseReaders)
 	select {
-	case sixthReader := <-sixthReaderResult:
-		_ = sixthReader.Close()
+	case err := <-sixthReaderResult:
+		if err != nil {
+			t.Fatal(err)
+		}
 	case <-time.After(time.Second):
 		t.Fatal("sixth reader did not run after one reader released access")
 	}
-	for _, reader := range readers[1:] {
-		_ = reader.Close()
+	for range serverControlDatabaseReaderCount {
+		if err := <-readerResults; err != nil {
+			t.Fatal(err)
+		}
 	}
 
-	blockingWriter, err := dispatcher.acquire(context.Background(), serverControlDatabaseWrite)
-	if err != nil {
-		t.Fatal(err)
-	}
+	blockingWriterStarted := make(chan struct{})
+	releaseBlockingWriter := make(chan struct{})
+	go func() {
+		_ = dispatcher.execute(context.Background(), serverControlDatabaseWrite, "blocking-writer", func(*sql.DB) error {
+			close(blockingWriterStarted)
+			<-releaseBlockingWriter
+			return nil
+		})
+	}()
+	<-blockingWriterStarted
 	timeoutContext, cancelTimeout := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancelTimeout()
-	if _, timeoutErr := dispatcher.acquire(timeoutContext, serverControlDatabaseWrite); !errors.Is(timeoutErr, context.DeadlineExceeded) {
+	if timeoutErr := dispatcher.execute(timeoutContext, serverControlDatabaseWrite, "timed-out-writer", func(*sql.DB) error { return nil }); !errors.Is(timeoutErr, context.DeadlineExceeded) {
 		t.Fatalf("timed out writer error = %v, want context deadline exceeded", timeoutErr)
 	}
-	cancel := make(chan struct{})
-	reply := make(chan serverControlDatabaseAccessResponse, 1)
-	request := serverControlDatabaseAccessRequest{
-		cancel:      cancel,
-		reply:       reply,
-		workerReply: make(chan serverControlDatabaseAccessResponse, 1),
-	}
-	go dispatcher.relayResponse(request)
-	dispatcher.writeRequests <- request
-	close(cancel)
-	select {
-	case _, open := <-reply:
-		if open {
-			t.Fatal("cancelled request returned a database session")
-		}
-	case <-time.After(time.Second):
-		t.Fatal("cancelled request reply channel was not closed")
-	}
-	_ = blockingWriter.Close()
+	close(releaseBlockingWriter)
 	dispatcher.Close()
 }
 
@@ -550,49 +578,53 @@ func TestServerControlDatabaseDispatcherSerializesWritesAndKeepsWALReadersAvaila
 	}
 	defer dispatcher.Close()
 
-	writer, err := dispatcher.acquire(context.Background(), serverControlDatabaseWrite)
-	if err != nil {
+	if err := dispatcher.execute(context.Background(), serverControlDatabaseWrite, "create-test-table", func(database *sql.DB) error {
+		_, err := database.ExecContext(context.Background(), `CREATE TABLE dispatcher_test(id INTEGER PRIMARY KEY,value TEXT)`)
+		return err
+	}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := writer.ExecContext(context.Background(), `CREATE TABLE dispatcher_test(id INTEGER PRIMARY KEY,value TEXT)`); err != nil {
-		t.Fatal(err)
-	}
-	transaction, err := writer.BeginTx(context.Background(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := transaction.ExecContext(context.Background(), `INSERT INTO dispatcher_test(value) VALUES('pending')`); err != nil {
-		t.Fatal(err)
-	}
-	reader, err := dispatcher.acquire(context.Background(), serverControlDatabaseRead)
-	if err != nil {
-		t.Fatal(err)
-	}
+	writerReady := make(chan struct{})
+	releaseWriter := make(chan struct{})
+	writerResult := make(chan error, 1)
+	go func() {
+		writerResult <- dispatcher.execute(context.Background(), serverControlDatabaseWrite, "uncommitted-writer", func(database *sql.DB) error {
+			transaction, err := database.BeginTx(context.Background(), nil)
+			if err != nil {
+				return err
+			}
+			if _, err := transaction.ExecContext(context.Background(), `INSERT INTO dispatcher_test(value) VALUES('pending')`); err != nil {
+				_ = transaction.Rollback()
+				return err
+			}
+			close(writerReady)
+			<-releaseWriter
+			return transaction.Rollback()
+		})
+	}()
+	<-writerReady
 	var visibleRows int
-	if err := reader.QueryRowContext(context.Background(), `SELECT COUNT(1) FROM dispatcher_test`).Scan(&visibleRows); err != nil {
+	if err := dispatcher.execute(context.Background(), serverControlDatabaseRead, "wal-reader", func(database *sql.DB) error {
+		return database.QueryRowContext(context.Background(), `SELECT COUNT(1) FROM dispatcher_test`).Scan(&visibleRows)
+	}); err != nil {
 		t.Fatal(err)
 	}
 	if visibleRows != 0 {
 		t.Fatalf("reader saw uncommitted writer rows = %d", visibleRows)
 	}
-	_ = reader.Close()
-	if err := transaction.Rollback(); err != nil {
+	close(releaseWriter)
+	if err := <-writerResult; err != nil {
 		t.Fatal(err)
 	}
-	_ = writer.Close()
 
 	const writeCount = 20
 	writeResults := make(chan error, writeCount)
 	for writeIndex := range writeCount {
 		go func(index int) {
-			session, acquireErr := dispatcher.acquire(context.Background(), serverControlDatabaseWrite)
-			if acquireErr != nil {
-				writeResults <- acquireErr
-				return
-			}
-			_, writeErr := session.ExecContext(context.Background(), `INSERT INTO dispatcher_test(value) VALUES(?)`, strconv.Itoa(index))
-			_ = session.Close()
-			writeResults <- writeErr
+			writeResults <- dispatcher.execute(context.Background(), serverControlDatabaseWrite, "serialized-write", func(database *sql.DB) error {
+				_, writeErr := database.ExecContext(context.Background(), `INSERT INTO dispatcher_test(value) VALUES(?)`, strconv.Itoa(index))
+				return writeErr
+			})
 		}(writeIndex)
 	}
 	for range writeCount {
@@ -600,16 +632,92 @@ func TestServerControlDatabaseDispatcherSerializesWritesAndKeepsWALReadersAvaila
 			t.Fatalf("serialized write failed: %v", writeErr)
 		}
 	}
-	reader, err = dispatcher.acquire(context.Background(), serverControlDatabaseRead)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer reader.Close()
-	if err := reader.QueryRowContext(context.Background(), `SELECT COUNT(1) FROM dispatcher_test`).Scan(&visibleRows); err != nil {
+	if err := dispatcher.execute(context.Background(), serverControlDatabaseRead, "count-serialized-writes", func(database *sql.DB) error {
+		return database.QueryRowContext(context.Background(), `SELECT COUNT(1) FROM dispatcher_test`).Scan(&visibleRows)
+	}); err != nil {
 		t.Fatal(err)
 	}
 	if visibleRows != writeCount {
 		t.Fatalf("visible rows = %d, want %d", visibleRows, writeCount)
+	}
+}
+
+func TestSlowPublicTrialDownloadDoesNotBlockDemoSessionWrite(t *testing.T) {
+	storagePath := t.TempDir()
+	databasePath := filepath.Join(storagePath, "storage", "db", "sitebrush.db")
+	if err := os.MkdirAll(filepath.Dir(databasePath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	dispatcher, err := startServerControlDatabaseDispatcher(databasePath, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dispatcher.Close()
+	application := &App{
+		storagePath:     storagePath,
+		dbPath:          databasePath,
+		controlDatabase: dispatcher,
+		grabTracker:     newGrabProgressTracker(),
+		trialPreviews:   newPublicTrialPreviewStore(),
+	}
+
+	requestStarted := make(chan struct{})
+	previousGrabHTTPClient := newGrabHTTPClient
+	newGrabHTTPClient = func() *http.Client {
+		return &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+			select {
+			case <-requestStarted:
+			default:
+				close(requestStarted)
+			}
+			<-request.Context().Done()
+			return nil, request.Context().Err()
+		})}
+	}
+	t.Cleanup(func() { newGrabHTTPClient = previousGrabHTTPClient })
+
+	cancelPreview := make(chan struct{})
+	previewDone := make(chan struct{})
+	go func() {
+		application.runPublicTrialSitePreview("slow-preview", "https://mitsue.it/", "", nil, cancelPreview, false, grabSourceOptions{})
+		close(previewDone)
+	}()
+	select {
+	case <-requestStarted:
+	case <-time.After(time.Second):
+		close(cancelPreview)
+		t.Fatal("public trial download did not start")
+	}
+
+	writeContext, cancelWrite := context.WithTimeout(context.Background(), time.Second)
+	defer cancelWrite()
+	event := demoSessionEvent{
+		kind:         "create",
+		domain:       "demo.sitebrush.com",
+		sessionToken: "slow-preview-session",
+		userEmail:    "demo@sitebrush.com",
+		resetAfter:   time.Now().Add(time.Hour),
+	}
+	if err := application.persistDemoSessionEvent(writeContext, event); err != nil {
+		close(cancelPreview)
+		t.Fatalf("demo session write was blocked by public trial download: %v", err)
+	}
+	var status string
+	if err := application.withServerControlDatabaseRead(writeContext, "verify-demo-session-write", func(database *sql.DB) error {
+		return database.QueryRowContext(writeContext, `SELECT status FROM demo_site_sessions WHERE session_token=?`, event.sessionToken).Scan(&status)
+	}); err != nil {
+		close(cancelPreview)
+		t.Fatal(err)
+	}
+	if status != "active" {
+		close(cancelPreview)
+		t.Fatalf("demo session status = %q, want active", status)
+	}
+	close(cancelPreview)
+	select {
+	case <-previewDone:
+	case <-time.After(time.Second):
+		t.Fatal("canceled public trial download did not stop")
 	}
 }
 
@@ -632,11 +740,17 @@ func TestGuestPublishedStaticRouteDoesNotWaitForControlDatabaseWriter(t *testing
 		dispatcher.Close()
 	})
 
-	writer, err := dispatcher.acquireForPurpose(context.Background(), serverControlDatabaseWrite, "test-blocking-writer")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer writer.Close()
+	writerStarted := make(chan struct{})
+	releaseWriter := make(chan struct{})
+	go func() {
+		_ = dispatcher.execute(context.Background(), serverControlDatabaseWrite, "test-blocking-writer", func(*sql.DB) error {
+			close(writerStarted)
+			<-releaseWriter
+			return nil
+		})
+	}()
+	<-writerStarted
+	defer close(releaseWriter)
 
 	request := httptest.NewRequest(http.MethodGet, "http://localhost/", nil)
 	request = request.WithContext(contextWithDomain(request.Context(), "localhost"))
@@ -660,7 +774,7 @@ func TestPreparedDemoSiteStartsAndLogsOutWhileControlDatabaseWriterIsBusy(t *tes
 	if err := (demo.Store{DB: controlDatabase}).SaveSettings(context.Background(), settings.Domain, "", false, true); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := application.ensureDemoSiteReady(context.Background(), controlDatabase, settings, false, ""); err != nil {
+	if _, _, err := application.ensureDemoSiteReady(context.Background(), settings, false, ""); err != nil {
 		t.Fatal(err)
 	}
 	if err := controlDatabase.Close(); err != nil {
@@ -681,10 +795,18 @@ func TestPreparedDemoSiteStartsAndLogsOutWhileControlDatabaseWriterIsBusy(t *tes
 	})
 	waitForDemoSiteRuntimeStatus(t, application, "ready")
 
-	writer, err := dispatcher.acquireForPurpose(context.Background(), serverControlDatabaseWrite, "test-blocking-demo-writer")
-	if err != nil {
-		t.Fatal(err)
-	}
+	writerStarted := make(chan struct{})
+	releaseWriter := make(chan struct{})
+	writerDone := make(chan struct{})
+	go func() {
+		_ = dispatcher.execute(context.Background(), serverControlDatabaseWrite, "test-blocking-demo-writer", func(*sql.DB) error {
+			close(writerStarted)
+			<-releaseWriter
+			return nil
+		})
+		close(writerDone)
+	}()
+	<-writerStarted
 	request := httptest.NewRequest(http.MethodGet, "https://demo-fast.example/", nil)
 	request = request.WithContext(contextWithDomain(request.Context(), settings.Domain))
 	response := httptest.NewRecorder()
@@ -706,15 +828,22 @@ func TestPreparedDemoSiteStartsAndLogsOutWhileControlDatabaseWriterIsBusy(t *tes
 	if sessionCookie == nil {
 		t.Fatal("prepared demo response did not set a session cookie")
 	}
-	if err := writer.Close(); err != nil {
-		t.Fatal(err)
-	}
+	close(releaseWriter)
+	<-writerDone
 	waitForDemoSessionStatus(t, application, sessionCookie.Value, "active")
 
-	writer, err = dispatcher.acquireForPurpose(context.Background(), serverControlDatabaseWrite, "test-blocking-demo-logout-writer")
-	if err != nil {
-		t.Fatal(err)
-	}
+	writerStarted = make(chan struct{})
+	releaseWriter = make(chan struct{})
+	writerDone = make(chan struct{})
+	go func() {
+		_ = dispatcher.execute(context.Background(), serverControlDatabaseWrite, "test-blocking-demo-logout-writer", func(*sql.DB) error {
+			close(writerStarted)
+			<-releaseWriter
+			return nil
+		})
+		close(writerDone)
+	}()
+	<-writerStarted
 	logoutRequest := httptest.NewRequest(http.MethodGet, "https://demo-fast.example/?logout", nil)
 	logoutRequest = logoutRequest.WithContext(contextWithDomain(logoutRequest.Context(), settings.Domain))
 	logoutRequest.AddCookie(sessionCookie)
@@ -727,9 +856,8 @@ func TestPreparedDemoSiteStartsAndLogsOutWhileControlDatabaseWriterIsBusy(t *tes
 	if logoutResponse.Code != http.StatusFound {
 		t.Fatalf("prepared demo logout status = %d, body=%q", logoutResponse.Code, logoutResponse.Body.String())
 	}
-	if err := writer.Close(); err != nil {
-		t.Fatal(err)
-	}
+	close(releaseWriter)
+	<-writerDone
 	waitForDemoSessionStatus(t, application, sessionCookie.Value, "deleting")
 }
 
@@ -752,13 +880,10 @@ func waitForDemoSessionStatus(t *testing.T, application *App, sessionToken, expe
 	t.Helper()
 	deadline := time.Now().Add(3 * time.Second)
 	for {
-		controlDatabase, err := application.openServerControlDatabaseRead(context.Background())
-		if err != nil {
-			t.Fatal(err)
-		}
 		var status string
-		queryErr := controlDatabase.QueryRowContext(context.Background(), `SELECT status FROM demo_site_sessions WHERE session_token=?`, sessionToken).Scan(&status)
-		_ = controlDatabase.Close()
+		queryErr := application.withServerControlDatabaseRead(context.Background(), "wait-demo-session-status", func(database *sql.DB) error {
+			return database.QueryRowContext(context.Background(), `SELECT status FROM demo_site_sessions WHERE session_token=?`, sessionToken).Scan(&status)
+		})
 		if queryErr == nil && status == expectedStatus {
 			return
 		}
@@ -1140,7 +1265,7 @@ func TestValidateServiceMailSecretRejectsArbitraryText(t *testing.T) {
 
 func TestServiceMailRateLimitedIncludesSourceSubnet(t *testing.T) {
 	application, _ := newTestApplication(t)
-	controlDatabase, err := application.openServerControlDatabase(context.Background())
+	controlDatabase, err := openServerControlDatabaseForTest(context.Background(), application)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1180,7 +1305,7 @@ func TestServiceMailRelayRejectsLoginCodeForUnverifiedRecipient(t *testing.T) {
 		CreatedAt:    time.Now().UTC().Format(time.RFC3339),
 	})
 	registerServiceMailInstallationForTest(t, application, request)
-	controlDatabase, err := application.openServerControlDatabase(context.Background())
+	controlDatabase, err := openServerControlDatabaseForTest(context.Background(), application)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1233,7 +1358,7 @@ func TestServiceMailRelayAllowsLoginCodeForVerifiedRecipient(t *testing.T) {
 		LanguageCode: "en",
 		CreatedAt:    time.Now().UTC().Format(time.RFC3339),
 	})
-	controlDatabase, err := application.openServerControlDatabase(context.Background())
+	controlDatabase, err := openServerControlDatabaseForTest(context.Background(), application)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1373,7 +1498,7 @@ func TestServiceMailRelayRegistrationStoresAttachedHostingSnapshot(t *testing.T)
 	if statusCode != http.StatusOK {
 		t.Fatalf("status = %d %q, want ok", statusCode, status)
 	}
-	controlDatabase, err := application.openServerControlDatabase(context.Background())
+	controlDatabase, err := openServerControlDatabaseForTest(context.Background(), application)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1431,7 +1556,7 @@ func TestHostingSnapshotEndpointAcceptsRegisteredSignedInstallation(t *testing.T
 	if err := application.signServiceMailRequest(context.Background(), &request); err != nil {
 		t.Fatal(err)
 	}
-	controlDatabase, err := application.openServerControlDatabase(context.Background())
+	controlDatabase, err := openServerControlDatabaseForTest(context.Background(), application)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1955,16 +2080,18 @@ func TestHostingAndSupportCentralServersRequireSitebrushComDNSAndKey(t *testing.
 		t.Fatal(err)
 	}
 	application := &App{}
-	if !application.hostingAndSupportCanShowCentralServers(context.Background(), store, hostingandsupport.SitebrushComKey{PublicKey: sitebrushComServiceMailRelayPublicKey}) {
+	if !application.hostingAndSupportCanShowCentralServers(context.Background(), "sitebrush.com", hostingandsupport.SitebrushComKey{PublicKey: sitebrushComServiceMailRelayPublicKey}) {
 		t.Fatal("sitebrush.com with matching DNS and public key was not accepted")
 	}
-	if application.hostingAndSupportCanShowCentralServers(context.Background(), store, hostingandsupport.SitebrushComKey{PublicKey: "wrong"}) {
+	if application.hostingAndSupportCanShowCentralServers(context.Background(), "sitebrush.com", hostingandsupport.SitebrushComKey{PublicKey: "wrong"}) {
 		t.Fatal("sitebrush.com with wrong public key was accepted")
 	}
 }
 
 func TestHostingSnapshotDiskThresholdSendsSingleOwnerEmail(t *testing.T) {
-	database, err := sql.Open("sqlite3", filepath.Join(t.TempDir(), "hostingandsupport.db"))
+	storagePath := t.TempDir()
+	databasePath := filepath.Join(storagePath, "hostingandsupport.db")
+	database, err := sql.Open("sqlite3", databasePath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1976,6 +2103,8 @@ func TestHostingSnapshotDiskThresholdSendsSingleOwnerEmail(t *testing.T) {
 	}
 	var messages []mailout.Message
 	application := &App{
+		storagePath: storagePath,
+		dbPath:      databasePath,
 		sendEmail: func(ctx context.Context, message mailout.Message) error {
 			messages = append(messages, message)
 			return nil
@@ -1989,8 +2118,8 @@ func TestHostingSnapshotDiskThresholdSendsSingleOwnerEmail(t *testing.T) {
 		DiskFreeBytes:  4,
 		DiskTotalBytes: 100,
 	}
-	application.notifyHostingSnapshotDiskThreshold(context.Background(), database, snapshot)
-	application.notifyHostingSnapshotDiskThreshold(context.Background(), database, snapshot)
+	application.notifyHostingSnapshotDiskThreshold(context.Background(), snapshot)
+	application.notifyHostingSnapshotDiskThreshold(context.Background(), snapshot)
 	if len(messages) != 1 {
 		t.Fatalf("messages = %d, want 1", len(messages))
 	}
@@ -2225,7 +2354,7 @@ func TestBillingDocumentTemplatesRender(t *testing.T) {
 
 func registerServiceMailInstallationForTest(t *testing.T, application *App, request serviceMailRequest) {
 	t.Helper()
-	controlDatabase, err := application.openServerControlDatabase(context.Background())
+	controlDatabase, err := openServerControlDatabaseForTest(context.Background(), application)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -4065,7 +4194,7 @@ func TestDemoSiteVisitorGetsEditorSessionAndCleanupDeletesSite(t *testing.T) {
 		t.Fatalf("save demo settings: %v", err)
 	}
 	demoSettings := demo.Settings{Domain: "demo.example", SourceURL: sourceURL, Enabled: true}
-	if _, _, err := application.ensureDemoSiteReady(context.Background(), controlDB, demoSettings, false, ""); err != nil {
+	if _, _, err := application.ensureDemoSiteReady(context.Background(), demoSettings, false, ""); err != nil {
 		t.Fatalf("prepare demo site: %v", err)
 	}
 
@@ -4081,7 +4210,7 @@ func TestDemoSiteVisitorGetsEditorSessionAndCleanupDeletesSite(t *testing.T) {
 	if err := application.createDemoSiteSnapshot(context.Background(), "demo.example"); err != nil {
 		t.Fatalf("create partial demo snapshot: %v", err)
 	}
-	if _, _, err := application.ensureDemoSiteReady(context.Background(), controlDB, demoSettings, false, ""); err != nil {
+	if _, _, err := application.ensureDemoSiteReady(context.Background(), demoSettings, false, ""); err != nil {
 		t.Fatalf("repair demo landing page: %v", err)
 	}
 	if !application.demoSiteHasLandingPage(context.Background(), "demo.example") {
@@ -4200,7 +4329,7 @@ func TestDemoSiteSourceImportFailureKeepsUsableWelcomePage(t *testing.T) {
 		t.Fatalf("save demo settings: %v", err)
 	}
 	demoSettings := demo.Settings{Domain: "demo-fail.example", SourceURL: sourceURL, Enabled: true}
-	if _, _, err := application.ensureDemoSiteReady(context.Background(), controlDB, demoSettings, false, ""); err == nil {
+	if _, _, err := application.ensureDemoSiteReady(context.Background(), demoSettings, false, ""); err == nil {
 		t.Fatal("demo preparation unexpectedly succeeded")
 	}
 
@@ -4449,7 +4578,7 @@ func TestActiveDemoSessionDoesNotBlockScheduledSiteRecreation(t *testing.T) {
 		t.Fatalf("save demo settings: %v", err)
 	}
 	demoSettings := demo.Settings{Domain: "demo-active.example", Enabled: true}
-	if _, _, err := application.ensureDemoSiteReady(context.Background(), controlDB, demoSettings, false, ""); err != nil {
+	if _, _, err := application.ensureDemoSiteReady(context.Background(), demoSettings, false, ""); err != nil {
 		t.Fatalf("prepare demo site: %v", err)
 	}
 
@@ -4520,7 +4649,7 @@ func newRouterTestApplication(t *testing.T) *App {
 
 func setupBillingOwnerForTest(t *testing.T, application *App, domain, email string, autoRegistrationEnabled bool) *sql.DB {
 	t.Helper()
-	controlDB, err := application.openServerControlDatabase(context.Background())
+	controlDB, err := openServerControlDatabaseForTest(context.Background(), application)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -4533,7 +4662,7 @@ func setupBillingOwnerForTest(t *testing.T, application *App, domain, email stri
 		_ = controlDB.Close()
 		t.Fatalf("save billing settings: %v", err)
 	}
-	return controlDB.DB
+	return controlDB
 }
 
 func TestRecoverPageShowsSPFSetupBeforeEmailForm(t *testing.T) {
@@ -6914,7 +7043,7 @@ func TestDemoRefreshFailureKeepsExistingLandingPage(t *testing.T) {
 	controlDB := setupBillingOwnerForTest(t, application, "owner.example", "owner@example.com", true)
 	defer controlDB.Close()
 	fallbackSettings := demo.Settings{Domain: "demo-preserve.example", Enabled: true}
-	adminEmail, _, fallbackErr := application.ensureDemoSiteReady(context.Background(), controlDB, fallbackSettings, false, "")
+	adminEmail, _, fallbackErr := application.ensureDemoSiteReady(context.Background(), fallbackSettings, false, "")
 	if fallbackErr != nil || adminEmail == "" {
 		t.Fatalf("create fallback demo: email=%q error=%v", adminEmail, fallbackErr)
 	}
@@ -6926,7 +7055,7 @@ func TestDemoRefreshFailureKeepsExistingLandingPage(t *testing.T) {
 
 	refreshSettings := fallbackSettings
 	refreshSettings.SourceURL = sourceURL
-	if _, _, refreshErr := application.ensureDemoSiteReady(context.Background(), controlDB, refreshSettings, true, ""); refreshErr == nil {
+	if _, _, refreshErr := application.ensureDemoSiteReady(context.Background(), refreshSettings, true, ""); refreshErr == nil {
 		t.Fatal("demo refresh unexpectedly succeeded")
 	}
 	var retainedHTML string
@@ -8519,7 +8648,10 @@ func TestPublicTrialFormUsesUnifiedCopyDialog(t *testing.T) {
 		"downloadQuery: 'trial_site_create'",
 		"eventsQuery: 'trial_site_events'",
 		"appendHiddenField(formElement, 'unified_copy', '1')",
-		"copyWholeSite: true",
+		"copyWholeSite: false",
+		"progressReadyFallbackTimer = window.setTimeout(startRequestOnce, 1000)",
+		"if (!readyCallbackWasCalled)",
+		"startRequestOnce()",
 		"if (previewPayload.single_page_required)",
 		"wholeSiteElement.checked = false",
 	} {
@@ -10979,7 +11111,7 @@ func TestBillingDeleteSiteCreatesVerifiedBackupBeforeRemovingData(t *testing.T) 
 	if err := os.WriteFile(filepath.Join(application.domainFilesDirForDomain(domain), "logo.png"), []byte("png"), 0o644); err != nil {
 		t.Fatalf("write file asset: %v", err)
 	}
-	controlDB, err := application.openServerControlDatabase(context.Background())
+	controlDB, err := openServerControlDatabaseForTest(context.Background(), application)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -11030,7 +11162,7 @@ func TestBillingDeleteSiteCreatesVerifiedBackupBeforeRemovingData(t *testing.T) 
 	if !strings.Contains(metadataBody, "admin@customer.example") || !strings.Contains(metadataBody, "owner@example.com") {
 		t.Fatalf("metadata missing owner contacts: %s", metadataBody)
 	}
-	controlDB, err = application.openServerControlDatabase(context.Background())
+	controlDB, err = openServerControlDatabaseForTest(context.Background(), application)
 	if err != nil {
 		t.Fatal(err)
 	}
