@@ -41,8 +41,9 @@ type buildTargetFilter struct {
 }
 
 type desktopBuildOptions struct {
-	rebuildDockerImages bool
-	targetFilter        buildTargetFilter
+	rebuildDockerImages    bool
+	installDockerEmulation bool
+	targetFilter           buildTargetFilter
 }
 
 type buildRequest struct {
@@ -83,14 +84,15 @@ func (flags *syncDestinationFlags) Set(value string) error {
 
 func main() {
 	var (
-		programName         = flag.String("program", "sitebrush", "program name used in binary names")
-		versionFlag         = flag.String("version", "", "version folder under binaries/; defaults to GITHUB_RUN_NUMBER, then git rev-list count, then git describe")
-		outputRoot          = flag.String("output-dir", "binaries", "root output directory for generated artifacts")
-		modeFlag            = flag.String("mode", string(modeAll), "build scope: all, server-app, or desktop-app")
-		targetOS            = flag.String("os", "", "optional GOOS target filter, for example linux")
-		targetArch          = flag.String("arch", "", "optional GOARCH target filter, for example amd64")
-		rebuildDockerImages = flag.Bool("rebuild-docker-images", false, "rebuild cached Docker builder images before Docker-based desktop builds")
-		syncTargets         syncDestinationFlags
+		programName            = flag.String("program", "sitebrush", "program name used in binary names")
+		versionFlag            = flag.String("version", "", "version folder under binaries/; defaults to GITHUB_RUN_NUMBER, then git rev-list count, then git describe")
+		outputRoot             = flag.String("output-dir", "binaries", "root output directory for generated artifacts")
+		modeFlag               = flag.String("mode", string(modeAll), "build scope: all, server-app, or desktop-app")
+		targetOS               = flag.String("os", "", "optional GOOS target filter, for example linux")
+		targetArch             = flag.String("arch", "", "optional GOARCH target filter, for example amd64")
+		rebuildDockerImages    = flag.Bool("rebuild-docker-images", false, "rebuild cached Docker builder images before Docker-based desktop builds")
+		installDockerEmulation = flag.Bool("install-docker-emulation", false, "register missing foreign-architecture Docker emulation on the host using a privileged binfmt container")
+		syncTargets            syncDestinationFlags
 	)
 	flag.Var(&syncTargets, "sync", "optional repeatable publication target in host=/remote/base format, for example root@sitebrush.com=/var/lib/sitebrush/storage/chroot/sitebrush.com/download")
 	flag.Parse()
@@ -149,8 +151,9 @@ func main() {
 
 	if mode == modeAll || mode == modeDesktopApp {
 		if err := buildDesktopAppArtifacts(repoRoot, outputDir, *programName, version, desktopBuildOptions{
-			rebuildDockerImages: *rebuildDockerImages,
-			targetFilter:        targetFilter,
+			rebuildDockerImages:    *rebuildDockerImages,
+			installDockerEmulation: *installDockerEmulation,
+			targetFilter:           targetFilter,
 		}); err != nil {
 			fatalf("desktop-app build: %v", err)
 		}
@@ -327,6 +330,14 @@ func buildLinuxDesktopArtifacts(repoRoot, desktopDir, programName, version strin
 	if !commandExists("docker") {
 		return false, fmt.Errorf("docker is required to build Linux desktop variants")
 	}
+	for _, goarch := range []string{"amd64", "arm64"} {
+		if !desktopTargetsIncludeArchitecture(matchingTargets, goarch) {
+			continue
+		}
+		if err := ensureDockerPlatformSupport(repoRoot, "linux/"+goarch, options.installDockerEmulation); err != nil {
+			return false, err
+		}
+	}
 
 	for _, target := range matchingTargets {
 		if err := buildLinuxDesktopArtifactInDocker(repoRoot, desktopDir, programName, version, target.goarch, target.variant, options); err != nil {
@@ -335,6 +346,18 @@ func buildLinuxDesktopArtifacts(repoRoot, desktopDir, programName, version strin
 	}
 
 	return true, nil
+}
+
+func desktopTargetsIncludeArchitecture(targets []struct {
+	goarch  string
+	variant string
+}, goarch string) bool {
+	for _, target := range targets {
+		if target.goarch == goarch {
+			return true
+		}
+	}
+	return false
 }
 
 func buildWindowsDesktopArtifacts(repoRoot, desktopDir, programName, version string, options desktopBuildOptions) (bool, error) {
@@ -946,6 +969,33 @@ func runDockerShellScript(repoRoot, platform, image, shellScript string, extraEn
 	}
 	args = append(args, image, "bash", "-lc", shellScript)
 	return runCommand(repoRoot, "docker", args...)
+}
+
+func ensureDockerPlatformSupport(repoRoot, platform string, installEmulation bool) error {
+	if dockerPlatformWorks(repoRoot, platform) {
+		return nil
+	}
+
+	goarch := strings.TrimPrefix(platform, "linux/")
+	if !installEmulation {
+		return fmt.Errorf("docker cannot run %s containers; rerun with -install-docker-emulation to register %s binfmt support using a privileged container", platform, goarch)
+	}
+	fmt.Printf("register docker emulation for %s\n", platform)
+	if err := runCommand(repoRoot, "docker", "run", "--privileged", "--rm", "tonistiigi/binfmt", "--install", goarch); err != nil {
+		return fmt.Errorf("register docker emulation for %s: %w", platform, err)
+	}
+	if !dockerPlatformWorks(repoRoot, platform) {
+		return fmt.Errorf("docker emulation registration completed, but %s containers still cannot run", platform)
+	}
+	return nil
+}
+
+func dockerPlatformWorks(repoRoot, platform string) bool {
+	cmd := exec.Command("docker", "run", "--rm", "--platform", platform, "ubuntu:22.04", "true")
+	cmd.Dir = repoRoot
+	cmd.Stdout = io.Discard
+	cmd.Stderr = io.Discard
+	return cmd.Run() == nil
 }
 
 func ensureDockerBuilderImage(repoRoot, platform, image, dockerfile string, rebuild bool) error {
