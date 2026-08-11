@@ -137,9 +137,12 @@ const backupImportTextEntryLimitBytes int64 = 16 * 1024 * 1024
 const backupImportFileEntryLimitBytes int64 = 128 * 1024 * 1024
 const backupImportUncompressedLimitBytes int64 = 1024 * 1024 * 1024
 const hostingSnapshotNetChanPort = "9876"
+const hostingSnapshotNetChanDeliveryTimeout = 5 * time.Second
 const hostingAndSupportPanelSnapshotVersion = 5
 const hostingAndSupportMetricsRefreshInterval = 30 * time.Second
 const hostingAndSupportFullRefreshInterval = 5 * time.Minute
+
+var errHostingSnapshotNetChanDeliveryCanceled = errors.New("netchan delivery canceled")
 
 var sitebrushComServiceMailRelayPublicKey = "axM/Ha8N6Ci/IiLs2SqULfu1DVlQKrkswNsOPgnx4kY="
 var sitebrushRuServiceMailRelayPublicKey = ""
@@ -175,6 +178,7 @@ type App struct {
 	emailDelivery             chan mailout.DeliveryJob
 	sendEmail                 mailout.Sender
 	hostingSnapshotReports    chan struct{}
+	hostingSnapshotDeliveries chan hostingSnapshotNetChanDeliveryTask
 	hostingAndSupportPanel    chan hostingAndSupportPanelRequest
 	billingInvoices           chan billingInvoiceProcessRequest
 	renderTemplates           chan renderTemplateRequest
@@ -188,6 +192,27 @@ type demoSiteRuntimeRequest struct {
 	kind  string
 	state demoSiteRuntimeState
 	reply chan demoSiteRuntimeState
+}
+
+type hostingSnapshotNetChanDeliveryTask struct {
+	address  string
+	payload  []byte
+	response chan hostingSnapshotNetChanDeliveryResponse
+}
+
+type hostingSnapshotNetChanDeliveryResponse struct {
+	canceled bool
+	err      error
+}
+
+type sitebrushNetChanRequest struct {
+	Payload  []byte
+	Response chan<- sitebrushNetChanResponse
+}
+
+type sitebrushNetChanResponse struct {
+	Status     string
+	StatusCode int
 }
 
 type demoSiteRuntimeState struct {
@@ -5125,6 +5150,7 @@ func runSitebrushServer(ctx context.Context, config serverRunConfig) error {
 	application.startServerOwnerRecoveryWorker(ctx)
 	application.startDemoSiteCleanupWorker(ctx)
 	application.startServiceMailKeyPairWorker(ctx)
+	application.hostingSnapshotDeliveries = startHostingSnapshotNetChanDeliveryWorker(ctx.Done())
 	application.hostingSnapshotReports = application.startHostingSnapshotReporter(ctx)
 	application.startHostingSnapshotMetricsMonitor(ctx)
 	application.startHostingSnapshotNetChanListener(ctx)
@@ -17136,24 +17162,78 @@ func (a *App) startHostingSnapshotNetChanListener(ctx context.Context) {
 		return
 	}
 	go func() {
-		send, receive, err := netchan.Listen(net.JoinHostPort("", hostingSnapshotNetChanPort))
+		listener, err := netchan.Listen[sitebrushNetChanRequest](net.JoinHostPort("", hostingSnapshotNetChanPort))
 		if err != nil {
 			log.Printf("hosting snapshot netchan listen failed: %v", err)
 			return
 		}
-		_ = send
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case payload, isOpen := <-receive:
-				if !isOpen {
-					return
-				}
-				a.handleHostingSnapshotNetChanPayload(ctx, payload)
-			}
-		}
+		a.serveHostingSnapshotNetChanListener(ctx.Done(), ctx, listener)
 	}()
+}
+
+func (a *App) serveHostingSnapshotNetChanListener(stop <-chan struct{}, legacyContext context.Context, listener *netchan.Listener[sitebrushNetChanRequest]) {
+	defer listener.Close()
+	errorsChannel := listener.Errors
+	for {
+		select {
+		case <-stop:
+			return
+		case connection, isOpen := <-listener.Channels:
+			if !isOpen {
+				return
+			}
+			go a.serveHostingSnapshotNetChanConnection(stop, legacyContext, connection)
+		case err, isOpen := <-errorsChannel:
+			if !isOpen {
+				errorsChannel = nil
+				continue
+			}
+			log.Printf("hosting snapshot netchan listener error: %v", err)
+		case <-listener.Done:
+			return
+		}
+	}
+}
+
+func (a *App) serveHostingSnapshotNetChanConnection(stop <-chan struct{}, legacyContext context.Context, connection *netchan.Channel[sitebrushNetChanRequest]) {
+	defer connection.Abort()
+	errorsChannel := connection.Errors
+	for {
+		select {
+		case <-stop:
+			return
+		case task, isOpen := <-connection.Receive:
+			if !isOpen {
+				return
+			}
+			select {
+			case <-stop:
+				return
+			case <-connection.Done:
+				return
+			default:
+			}
+			if task.Response == nil {
+				continue
+			}
+			response := a.handleSitebrushNetChanPayload(legacyContext, task.Payload)
+			select {
+			case <-stop:
+				return
+			case <-connection.Done:
+				return
+			case task.Response <- response:
+			}
+		case err, isOpen := <-errorsChannel:
+			if !isOpen {
+				errorsChannel = nil
+				continue
+			}
+			log.Printf("hosting snapshot netchan connection error: %v", err)
+		case <-connection.Done:
+			return
+		}
+	}
 }
 
 func (a *App) hostingSnapshotNetChanListenerEnabled(ctx context.Context) bool {
@@ -17166,30 +17246,34 @@ func (a *App) hostingSnapshotNetChanListenerEnabled(ctx context.Context) bool {
 	return enabled
 }
 
-func (a *App) handleHostingSnapshotNetChanPayload(ctx context.Context, payload any) {
-	var requestBytes []byte
-	switch typedPayload := payload.(type) {
-	case []byte:
-		requestBytes = typedPayload
-	case string:
-		requestBytes = []byte(typedPayload)
-	default:
-		log.Printf("hosting snapshot netchan unsupported payload type %T", payload)
-		return
-	}
-	if len(requestBytes) == 0 || int64(len(requestBytes)) > hostingSnapshotNetChanPayloadLimitBytes {
-		log.Printf("hosting snapshot netchan rejected oversized payload bytes=%d", len(requestBytes))
-		return
+func (a *App) handleSitebrushNetChanPayload(ctx context.Context, payload []byte) sitebrushNetChanResponse {
+	if len(payload) == 0 || int64(len(payload)) > hostingSnapshotNetChanPayloadLimitBytes {
+		log.Printf("hosting snapshot netchan rejected oversized payload bytes=%d", len(payload))
+		return sitebrushNetChanResponse{Status: "payload size is invalid", StatusCode: http.StatusRequestEntityTooLarge}
 	}
 	var request serviceMailRequest
-	if err := json.Unmarshal(requestBytes, &request); err != nil {
+	if err := json.Unmarshal(payload, &request); err != nil {
 		log.Printf("hosting snapshot netchan decode failed: %v", err)
-		return
+		return sitebrushNetChanResponse{Status: "payload is invalid", StatusCode: http.StatusBadRequest}
 	}
-	status, statusCode := a.handleHostingSnapshotRequest(ctx, request, "netchan")
+	var status string
+	var statusCode int
+	source := "netchan"
+	if request.HostingSnapshot != nil {
+		source = firstNonEmpty(request.HostingSnapshot.ServerIP, request.HostingSnapshot.ServerDomain, source)
+	}
+	switch strings.TrimSpace(request.CodeKind) {
+	case "installation_register":
+		status, statusCode = a.handleServiceMailRelayRequest(ctx, nil, request, source)
+	case "hosting_snapshot":
+		status, statusCode = a.handleHostingSnapshotRequest(ctx, request, source)
+	default:
+		status, statusCode = "unsupported netchan request kind", http.StatusBadRequest
+	}
 	if statusCode >= 400 {
 		log.Printf("hosting snapshot netchan rejected: %s", status)
 	}
+	return sitebrushNetChanResponse{Status: status, StatusCode: statusCode}
 }
 
 func (a *App) reportHostingSnapshotNetChan(ctx context.Context) error {
@@ -17197,23 +17281,13 @@ func (a *App) reportHostingSnapshotNetChan(ctx context.Context) error {
 	if len(addresses) == 0 {
 		return errors.New("hosting snapshot netchan address is not configured")
 	}
-	reachableAddresses := make([]string, 0, len(addresses))
-	for _, address := range addresses {
-		if err := probeHostingSnapshotNetChanAddress(ctx, address); err != nil {
-			continue
-		}
-		reachableAddresses = append(reachableAddresses, address)
-	}
-	if len(reachableAddresses) == 0 {
-		return errors.New("hosting snapshot netchan endpoint is unavailable")
-	}
 	snapshot, err := a.buildHostingSnapshot(ctx)
 	if err != nil {
 		return err
 	}
 	request := serviceMailRequest{
 		Version:         1,
-		CodeKind:        "hosting_snapshot",
+		CodeKind:        "installation_register",
 		HostingSnapshot: &snapshot,
 		LanguageCode:    "en",
 		CreatedAt:       time.Now().UTC().Format(time.RFC3339),
@@ -17227,8 +17301,12 @@ func (a *App) reportHostingSnapshotNetChan(ctx context.Context) error {
 		return err
 	}
 	var lastErr error
-	for _, address := range reachableAddresses {
-		if err := sendHostingSnapshotNetChanPayload(ctx, address, payload); err != nil {
+	deliveries := a.hostingSnapshotDeliveries
+	if deliveries == nil {
+		deliveries = startHostingSnapshotNetChanDeliveryWorker(ctx.Done())
+	}
+	for _, address := range addresses {
+		if err := sendHostingSnapshotNetChanPayload(ctx, deliveries, address, payload); err != nil {
 			lastErr = err
 			continue
 		}
@@ -17244,36 +17322,179 @@ func centralHostingSnapshotNetChanAddresses() []string {
 	return []string{net.JoinHostPort("sitebrush.com", hostingSnapshotNetChanPort)}
 }
 
-func probeHostingSnapshotNetChanAddress(ctx context.Context, address string) error {
-	address = strings.TrimSpace(address)
-	if address == "" {
-		return errors.New("netchan address is empty")
+func sendHostingSnapshotNetChanPayload(ctx context.Context, deliveries chan<- hostingSnapshotNetChanDeliveryTask, address string, payload []byte) error {
+	err := submitHostingSnapshotNetChanDelivery(ctx.Done(), deliveries, address, payload)
+	if errors.Is(err, errHostingSnapshotNetChanDeliveryCanceled) && ctx.Err() != nil {
+		return ctx.Err()
 	}
-	probeDialer := net.Dialer{Timeout: 2 * time.Second}
-	probeConnection, err := probeDialer.DialContext(ctx, "tcp", address)
-	if err != nil {
-		return err
-	}
-	_ = probeConnection.Close()
-	return nil
+	return err
 }
 
-func sendHostingSnapshotNetChanPayload(ctx context.Context, address string, payload []byte) error {
-	address = strings.TrimSpace(address)
-	if address == "" {
-		return errors.New("netchan address is empty")
-	}
-	send, _, err := netchan.Dial(address)
-	if err != nil {
-		return err
+func startHostingSnapshotNetChanDeliveryWorker(stop <-chan struct{}) chan hostingSnapshotNetChanDeliveryTask {
+	deliveries := make(chan hostingSnapshotNetChanDeliveryTask)
+	go func() {
+		for {
+			select {
+			case <-stop:
+				return
+			case task, isOpen := <-deliveries:
+				if !isOpen {
+					return
+				}
+				if hostingSnapshotNetChanDeliveryCanceled(task.response) {
+					continue
+				}
+				err, responseNeeded := performHostingSnapshotNetChanDelivery(stop, task)
+				if responseNeeded {
+					sendHostingSnapshotNetChanDeliveryResponse(task.response, err)
+				}
+			}
+		}
+	}()
+	return deliveries
+}
+
+func submitHostingSnapshotNetChanDelivery(stop <-chan struct{}, deliveries chan<- hostingSnapshotNetChanDeliveryTask, address string, payload []byte) error {
+	response := make(chan hostingSnapshotNetChanDeliveryResponse, 1)
+	return submitHostingSnapshotNetChanDeliveryWithResponse(stop, deliveries, response, address, payload)
+}
+
+func submitHostingSnapshotNetChanDeliveryWithResponse(stop <-chan struct{}, deliveries chan<- hostingSnapshotNetChanDeliveryTask, response chan hostingSnapshotNetChanDeliveryResponse, address string, payload []byte) error {
+	task := hostingSnapshotNetChanDeliveryTask{address: address, payload: payload, response: response}
+	select {
+	case <-stop:
+		return errHostingSnapshotNetChanDeliveryCanceled
+	case deliveries <- task:
 	}
 	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case send <- payload:
-		return nil
-	case <-time.After(5 * time.Second):
-		return errors.New("netchan send timed out")
+	case <-stop:
+		select {
+		case response <- hostingSnapshotNetChanDeliveryResponse{canceled: true}:
+		default:
+		}
+		return errHostingSnapshotNetChanDeliveryCanceled
+	case result, isOpen := <-response:
+		if !isOpen || result.canceled {
+			return errHostingSnapshotNetChanDeliveryCanceled
+		}
+		return result.err
+	}
+}
+
+func performHostingSnapshotNetChanDelivery(stop <-chan struct{}, task hostingSnapshotNetChanDeliveryTask) (error, bool) {
+	address := strings.TrimSpace(task.address)
+	if address == "" {
+		return errors.New("netchan address is empty"), true
+	}
+	if hostingSnapshotNetChanDeliveryCanceled(task.response) {
+		return errHostingSnapshotNetChanDeliveryCanceled, false
+	}
+	connection, err := netchan.Dial[sitebrushNetChanRequest](address)
+	if err != nil {
+		return err, true
+	}
+	if hostingSnapshotNetChanDeliveryCanceled(task.response) {
+		_ = connection.Abort()
+		return errHostingSnapshotNetChanDeliveryCanceled, false
+	}
+
+	networkResponse := make(chan sitebrushNetChanResponse, 1)
+	networkTask := sitebrushNetChanRequest{Payload: task.payload, Response: networkResponse}
+	deliveryFinished := make(chan error, 1)
+	go func() {
+		deliveryFinished <- connection.Deliver(networkTask)
+	}()
+
+	timer := time.NewTimer(hostingSnapshotNetChanDeliveryTimeout)
+	defer timer.Stop()
+	errorsChannel := connection.Errors
+	deliveryComplete := false
+	responseReceived := false
+	var closeFinished <-chan error
+	var responseError error
+	for {
+		select {
+		case <-stop:
+			_ = connection.Abort()
+			return errHostingSnapshotNetChanDeliveryCanceled, false
+		case response, isOpen := <-task.response:
+			if isOpen && !response.canceled {
+				continue
+			}
+			_ = connection.Abort()
+			return errHostingSnapshotNetChanDeliveryCanceled, false
+		case err := <-deliveryFinished:
+			if err != nil {
+				_ = connection.Abort()
+				return err, true
+			}
+			deliveryComplete = true
+			deliveryFinished = nil
+		case response := <-networkResponse:
+			responseReceived = true
+			networkResponse = nil
+			if response.StatusCode >= 400 {
+				responseError = fmt.Errorf("sitebrush netchan rejected request: %s", response.Status)
+			}
+		case err, isOpen := <-errorsChannel:
+			if !isOpen {
+				errorsChannel = nil
+				continue
+			}
+			log.Printf("hosting snapshot netchan delivery error address=%s: %v", address, err)
+		case err := <-closeFinished:
+			if err != nil {
+				return err, true
+			}
+			return responseError, true
+		case <-connection.Done:
+			// An application response proves that the remote worker received and
+			// handled the task even if transport shutdown wins the Deliver race.
+			if responseReceived {
+				return responseError, true
+			}
+			if !deliveryComplete {
+				return netchan.ErrChannelClosed, true
+			}
+			return errors.New("sitebrush netchan closed without a response"), true
+		case <-timer.C:
+			_ = connection.Abort()
+			return errors.New("netchan delivery timed out"), true
+		}
+		if deliveryComplete && responseReceived && closeFinished == nil {
+			finished := make(chan error, 1)
+			go func() {
+				finished <- connection.Close()
+			}()
+			closeFinished = finished
+			errorsChannel = nil
+		}
+	}
+}
+
+func hostingSnapshotNetChanDeliveryCanceled(response <-chan hostingSnapshotNetChanDeliveryResponse) bool {
+	select {
+	case state, isOpen := <-response:
+		return !isOpen || state.canceled
+	default:
+		return false
+	}
+}
+
+func sendHostingSnapshotNetChanDeliveryResponse(response chan hostingSnapshotNetChanDeliveryResponse, err error) (sent bool) {
+	defer func() {
+		if recover() != nil {
+			sent = false
+		}
+	}()
+	if hostingSnapshotNetChanDeliveryCanceled(response) {
+		return false
+	}
+	select {
+	case response <- hostingSnapshotNetChanDeliveryResponse{err: err}:
+		return true
+	default:
+		return false
 	}
 }
 
