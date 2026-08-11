@@ -27,6 +27,7 @@ const (
 	dockerBuilderImageVersion = "v1"
 	dockerGoVersion           = "1.26.5"
 	dockerWorkspaceRoot       = "/workspace"
+	windowsDesktopPlatform    = "linux/amd64"
 	llvmMingwVersion          = "20260505"
 )
 
@@ -327,6 +328,17 @@ func buildLinuxDesktopArtifacts(repoRoot, desktopDir, programName, version strin
 	if !commandExists("docker") {
 		return false, fmt.Errorf("docker is required to build Linux desktop variants")
 	}
+	checkedArchitecture := ""
+	for _, target := range matchingTargets {
+		if target.goarch == checkedArchitecture {
+			continue
+		}
+		builderImage := linuxDesktopDockerImage(target.goarch, target.variant)
+		if err := ensureDockerPlatformSupport(repoRoot, "linux/"+target.goarch, builderImage); err != nil {
+			return false, err
+		}
+		checkedArchitecture = target.goarch
+	}
 
 	for _, target := range matchingTargets {
 		if err := buildLinuxDesktopArtifactInDocker(repoRoot, desktopDir, programName, version, target.goarch, target.variant, options); err != nil {
@@ -354,6 +366,10 @@ func buildWindowsDesktopArtifacts(repoRoot, desktopDir, programName, version str
 	}
 	if !commandExists("docker") {
 		return false, fmt.Errorf("docker is required to build Windows desktop variants")
+	}
+	probeImage := windowsDesktopDockerImage(matchingArchitectures[0])
+	if err := ensureDockerPlatformSupport(repoRoot, windowsDesktopPlatform, probeImage); err != nil {
+		return false, err
 	}
 
 	for _, goarch := range matchingArchitectures {
@@ -392,12 +408,12 @@ func buildWindowsDesktopArtifactInDocker(repoRoot, desktopDir, programName, vers
 		return err
 	}
 	dockerImage := windowsDesktopDockerImage(goarch)
-	if err := ensureDockerBuilderImage(repoRoot, "linux/amd64", dockerImage, windowsDesktopDockerfile(goarch), options.rebuildDockerImages); err != nil {
+	if err := ensureDockerBuilderImage(repoRoot, windowsDesktopPlatform, dockerImage, windowsDesktopDockerfile(goarch), options.rebuildDockerImages); err != nil {
 		return err
 	}
 	dockerScript := windowsDesktopDockerScript(containerArtifactPath, artifactName, goarch, version)
 	fmt.Printf("build windows/%s -> %s\n", goarch, artifactPath)
-	if err := runDockerShellScript(repoRoot, "linux/amd64", dockerImage, dockerScript, nil); err != nil {
+	if err := runDockerShellScript(repoRoot, windowsDesktopPlatform, dockerImage, dockerScript, nil); err != nil {
 		return err
 	}
 	return verifyBuiltDesktopArtifact(artifactPath)
@@ -946,6 +962,70 @@ func runDockerShellScript(repoRoot, platform, image, shellScript string, extraEn
 	}
 	args = append(args, image, "bash", "-lc", shellScript)
 	return runCommand(repoRoot, "docker", args...)
+}
+
+func ensureDockerPlatformSupport(repoRoot, platform, builderImage string) error {
+	goarch := strings.TrimPrefix(platform, "linux/")
+	if dockerImageExists(repoRoot, builderImage) {
+		if dockerPlatformWorks(repoRoot, platform, builderImage) {
+			return nil
+		}
+		if err := installDockerPlatformEmulation(repoRoot, platform, goarch); err != nil {
+			return err
+		}
+		if !dockerPlatformWorks(repoRoot, platform, builderImage) {
+			return fmt.Errorf("docker emulation registration completed, but cached builder %s still cannot run as %s", builderImage, platform)
+		}
+		return nil
+	}
+
+	nativePlatform, err := dockerNativePlatform(repoRoot)
+	if err != nil {
+		return err
+	}
+	if nativePlatform == platform {
+		return nil
+	}
+	return installDockerPlatformEmulation(repoRoot, platform, goarch)
+}
+
+func installDockerPlatformEmulation(repoRoot, platform, goarch string) error {
+	fmt.Printf("register docker emulation for %s\n", platform)
+	if err := runCommand(repoRoot, "docker", "run", "--privileged", "--rm", "tonistiigi/binfmt", "--install", goarch); err != nil {
+		return fmt.Errorf("register docker emulation for %s: %w", platform, err)
+	}
+	return nil
+}
+
+func dockerPlatformWorks(repoRoot, platform, builderImage string) bool {
+	cmd := exec.Command("docker", dockerPlatformProbeArgs(platform, builderImage)...)
+	cmd.Dir = repoRoot
+	cmd.Stdout = io.Discard
+	cmd.Stderr = io.Discard
+	return cmd.Run() == nil
+}
+
+func dockerPlatformProbeArgs(platform, builderImage string) []string {
+	return []string{"run", "--rm", "--pull", "never", "--platform", platform, builderImage, "true"}
+}
+
+func dockerNativePlatform(repoRoot string) (string, error) {
+	architecture, err := runOutput(repoRoot, "docker", "info", "--format", "{{.Architecture}}")
+	if err != nil {
+		return "", fmt.Errorf("resolve Docker daemon architecture: %w", err)
+	}
+	return "linux/" + normalizeDockerArchitecture(strings.TrimSpace(architecture)), nil
+}
+
+func normalizeDockerArchitecture(architecture string) string {
+	switch architecture {
+	case "x86_64":
+		return "amd64"
+	case "aarch64":
+		return "arm64"
+	default:
+		return architecture
+	}
 }
 
 func ensureDockerBuilderImage(repoRoot, platform, image, dockerfile string, rebuild bool) error {

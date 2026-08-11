@@ -247,6 +247,35 @@ func TestDockerVolumeName(t *testing.T) {
 	}
 }
 
+func TestNormalizeDockerArchitecture(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		architecture string
+		want         string
+	}{
+		{architecture: "x86_64", want: "amd64"},
+		{architecture: "aarch64", want: "arm64"},
+		{architecture: "amd64", want: "amd64"},
+		{architecture: "arm64", want: "arm64"},
+	}
+	for _, testCase := range testCases {
+		if got := normalizeDockerArchitecture(testCase.architecture); got != testCase.want {
+			t.Fatalf("normalizeDockerArchitecture(%q) = %q, want %q", testCase.architecture, got, testCase.want)
+		}
+	}
+}
+
+func TestDockerPlatformProbeArgs(t *testing.T) {
+	t.Parallel()
+
+	got := strings.Join(dockerPlatformProbeArgs("linux/arm64", "sitebrush-crosscompile:linux-arm64-gtk40-go1.26.5-v1"), " ")
+	want := "run --rm --pull never --platform linux/arm64 sitebrush-crosscompile:linux-arm64-gtk40-go1.26.5-v1 true"
+	if got != want {
+		t.Fatalf("dockerPlatformProbeArgs() = %q, want %q", got, want)
+	}
+}
+
 func TestDockerWorkspacePath(t *testing.T) {
 	t.Parallel()
 
