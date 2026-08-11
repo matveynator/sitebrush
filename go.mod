@@ -8,7 +8,7 @@ require (
 	github.com/jackc/pgx/v5 v5.9.2
 	github.com/jchv/go-webview-selector v0.0.0-20250730141630-a5f64a01ba3a
 	github.com/mattn/go-sqlite3 v1.14.44
-	github.com/matveynator/netchan v0.0.0-20260730202529-f9eaab14ed9f
+	github.com/matveynator/netchan v0.0.0-20260802175005-7848addf9431
 	golang.org/x/crypto v0.54.0
 	golang.org/x/net v0.57.0
 	golang.org/x/sys v0.47.0

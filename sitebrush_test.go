@@ -38,6 +38,7 @@ import (
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
+	"github.com/matveynator/netchan"
 	"golang.org/x/net/dns/dnsmessage"
 	"golang.org/x/text/encoding/charmap"
 	"sitebrush/pkg/channelacme"
@@ -1517,6 +1518,47 @@ func TestServiceMailRelayRegistrationStoresAttachedHostingSnapshot(t *testing.T)
 	}
 	if len(hostings[0].Sites) != 1 || !hostings[0].Sites[0].OverLimit || hostings[0].Sites[0].PlanPaidStatus != "paid" {
 		t.Fatalf("hosting snapshot site was not stored: %#v", hostings[0].Sites)
+	}
+}
+
+func TestSitebrushNetChanRegistrationStoresInstalledServer(t *testing.T) {
+	application, _ := newTestApplication(t)
+	request := serviceMailRequest{
+		Version:      1,
+		CodeKind:     "installation_register",
+		LanguageCode: "en",
+		CreatedAt:    time.Now().UTC().Format(time.RFC3339),
+		HostingSnapshot: &hostingandsupport.HostingSnapshot{
+			Version:      4,
+			ServerIP:     "203.0.113.25",
+			ServerDomain: "installed.example.com",
+			CreatedAt:    time.Now().UTC().Format(time.RFC3339),
+		},
+	}
+	if err := application.signServiceMailRequest(context.Background(), &request); err != nil {
+		t.Fatal(err)
+	}
+	payload, err := json.Marshal(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	response := application.handleSitebrushNetChanPayload(context.Background(), payload)
+	if response.StatusCode != http.StatusOK || response.Status != "registered" {
+		t.Fatalf("response = %#v, want registered", response)
+	}
+
+	controlDatabase, err := openServerControlDatabaseForTest(context.Background(), application)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer controlDatabase.Close()
+	hostings := (hostingandsupport.Store{DB: controlDatabase}).ClientHostings(context.Background())
+	if len(hostings) != 1 {
+		t.Fatalf("hostings = %d, want 1", len(hostings))
+	}
+	if hostings[0].InstallationID != request.InstallationID || hostings[0].ServerIP != request.HostingSnapshot.ServerIP {
+		t.Fatalf("installed server was not stored from netchan registration: %#v", hostings[0])
 	}
 }
 
@@ -11514,4 +11556,205 @@ func readZipTextFile(t *testing.T, archiveFileByName map[string]*zip.File, fileN
 		t.Fatalf("read %s: %v", fileName, readErr)
 	}
 	return string(fileBytes)
+}
+
+func TestSendHostingSnapshotNetChanPayloadDeliversAndCloses(t *testing.T) {
+	listener, err := netchan.Listen[sitebrushNetChanRequest]("127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+
+	payload := []byte(`{"kind":"hosting_snapshot"}`)
+	receivedPayload := make(chan []byte, 1)
+	serverFinished := make(chan error, 1)
+	go func() {
+		connection, isOpen := <-listener.Channels
+		if !isOpen {
+			serverFinished <- errors.New("netchan listener closed before accepting a connection")
+			return
+		}
+		incomingTask, isOpen := <-connection.Receive
+		if !isOpen {
+			serverFinished <- errors.New("netchan connection closed before receiving payload")
+			return
+		}
+		receivedPayload <- append([]byte(nil), incomingTask.Payload...)
+		incomingTask.Response <- sitebrushNetChanResponse{Status: "stored", StatusCode: http.StatusOK}
+		<-connection.Done
+		serverFinished <- nil
+	}()
+
+	workerStop := make(chan struct{})
+	defer close(workerStop)
+	deliveries := startHostingSnapshotNetChanDeliveryWorker(workerStop)
+	consumerStop := make(chan struct{})
+	defer close(consumerStop)
+	if err := submitHostingSnapshotNetChanDelivery(consumerStop, deliveries, listener.Address, payload); err != nil {
+		t.Fatalf("send payload: %v", err)
+	}
+	if err := <-serverFinished; err != nil {
+		t.Fatalf("close server connection: %v", err)
+	}
+	if received := <-receivedPayload; !bytes.Equal(received, payload) {
+		t.Fatalf("received payload = %q, want %q", received, payload)
+	}
+}
+
+func TestSendHostingSnapshotNetChanPayloadCancelsUnreadDelivery(t *testing.T) {
+	listener, err := netchan.Listen[sitebrushNetChanRequest]("127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+
+	workerStop := make(chan struct{})
+	defer close(workerStop)
+	deliveries := startHostingSnapshotNetChanDeliveryWorker(workerStop)
+	consumerStop := make(chan struct{})
+	sendFinished := make(chan error, 1)
+	go func() {
+		sendFinished <- submitHostingSnapshotNetChanDelivery(consumerStop, deliveries, listener.Address, []byte("unread"))
+	}()
+
+	connection, isOpen := <-listener.Channels
+	if !isOpen {
+		t.Fatal("netchan listener closed before accepting a connection")
+	}
+	close(consumerStop)
+	select {
+	case err := <-sendFinished:
+		if !errors.Is(err, errHostingSnapshotNetChanDeliveryCanceled) {
+			t.Fatalf("send error = %v, want delivery canceled", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("canceled netchan delivery did not return")
+	}
+	if err := connection.Abort(); err != nil {
+		t.Fatalf("abort server connection: %v", err)
+	}
+}
+
+func TestHostingSnapshotNetChanConsumerReusesResponseChannel(t *testing.T) {
+	listener, err := netchan.Listen[sitebrushNetChanRequest]("127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+
+	serverFinished := make(chan error, 1)
+	go func() {
+		for taskIndex := 0; taskIndex < 2; taskIndex++ {
+			connection, isOpen := <-listener.Channels
+			if !isOpen {
+				serverFinished <- errors.New("netchan listener closed before accepting both tasks")
+				return
+			}
+			task, isOpen := <-connection.Receive
+			if !isOpen {
+				serverFinished <- errors.New("netchan connection closed before receiving task")
+				return
+			}
+			task.Response <- sitebrushNetChanResponse{Status: "stored", StatusCode: http.StatusOK}
+			<-connection.Done
+		}
+		serverFinished <- nil
+	}()
+
+	workerStop := make(chan struct{})
+	defer close(workerStop)
+	deliveries := startHostingSnapshotNetChanDeliveryWorker(workerStop)
+	consumerStop := make(chan struct{})
+	defer close(consumerStop)
+	response := make(chan hostingSnapshotNetChanDeliveryResponse, 1)
+	for taskIndex := 0; taskIndex < 2; taskIndex++ {
+		payload := []byte(strconv.Itoa(taskIndex))
+		if err := submitHostingSnapshotNetChanDeliveryWithResponse(consumerStop, deliveries, response, listener.Address, payload); err != nil {
+			t.Fatalf("send task %d: %v", taskIndex, err)
+		}
+	}
+	if err := <-serverFinished; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestHostingSnapshotNetChanListenerReceivesMalformedPayload(t *testing.T) {
+	listener, err := netchan.Listen[sitebrushNetChanRequest]("127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	listenerStop := make(chan struct{})
+	application := &App{}
+	go application.serveHostingSnapshotNetChanListener(listenerStop, context.Background(), listener)
+	workerStop := make(chan struct{})
+	defer close(workerStop)
+	deliveries := startHostingSnapshotNetChanDeliveryWorker(workerStop)
+	consumerStop := make(chan struct{})
+	defer close(consumerStop)
+	if err := submitHostingSnapshotNetChanDelivery(consumerStop, deliveries, listener.Address, []byte("{")); err == nil {
+		t.Fatal("malformed payload was accepted")
+	}
+	close(listenerStop)
+	select {
+	case <-listener.Done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("netchan listener did not stop after malformed payload")
+	}
+}
+
+func TestHostingSnapshotNetChanDeliverySkipsTaskWithClosedResponse(t *testing.T) {
+	listener, err := netchan.Listen[sitebrushNetChanRequest]("127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+
+	workerStop := make(chan struct{})
+	defer close(workerStop)
+	deliveries := startHostingSnapshotNetChanDeliveryWorker(workerStop)
+	response := make(chan hostingSnapshotNetChanDeliveryResponse)
+	close(response)
+	deliveries <- hostingSnapshotNetChanDeliveryTask{address: listener.Address, payload: []byte("unneeded"), response: response}
+
+	select {
+	case <-listener.Channels:
+		t.Fatal("worker started a task whose response channel was closed")
+	case <-time.After(200 * time.Millisecond):
+	}
+}
+
+func TestHostingSnapshotNetChanListenerStopsActiveConnections(t *testing.T) {
+	listener, err := netchan.Listen[sitebrushNetChanRequest]("127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	stop := make(chan struct{})
+	application := &App{}
+	go application.serveHostingSnapshotNetChanListener(stop, context.Background(), listener)
+	connection, err := netchan.Dial[sitebrushNetChanRequest](listener.Address)
+	if err != nil {
+		close(stop)
+		t.Fatal(err)
+	}
+	response := make(chan sitebrushNetChanResponse, 1)
+	if err := connection.Deliver(sitebrushNetChanRequest{Payload: []byte("{"), Response: response}); err != nil {
+		close(stop)
+		t.Fatalf("deliver payload before listener shutdown: %v", err)
+	}
+	if result := <-response; result.StatusCode != http.StatusBadRequest {
+		close(stop)
+		t.Fatalf("malformed payload status = %d, want %d", result.StatusCode, http.StatusBadRequest)
+	}
+	close(stop)
+
+	select {
+	case <-listener.Done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("netchan listener did not stop")
+	}
+	if err := connection.Abort(); err != nil {
+		t.Fatalf("abort client connection: %v", err)
+	}
 }
