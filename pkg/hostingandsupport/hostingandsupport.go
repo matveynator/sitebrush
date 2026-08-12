@@ -726,6 +726,7 @@ func Migrate(ctx context.Context, database *sql.DB) error {
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
 	_, _ = database.ExecContext(ctx, `INSERT OR IGNORE INTO server_settings(name,value,updated_at) VALUES('auto_registration_enabled','1',?)`, now)
+	_, _ = database.ExecContext(ctx, `INSERT OR IGNORE INTO server_settings(name,value,updated_at) VALUES('public_trial_enabled','0',?)`, now)
 	_, _ = database.ExecContext(ctx, `INSERT OR IGNORE INTO server_settings(name,value,updated_at) VALUES('deletion_backup_retention_days',?,?)`, strconv.Itoa(DefaultDeletionBackupRetentionDays), now)
 	_, _ = database.ExecContext(ctx, `INSERT OR IGNORE INTO server_settings(name,value,updated_at) VALUES('service_mail_relay_enabled','1',?)`, now)
 	_, _ = database.ExecContext(ctx, `INSERT OR IGNORE INTO server_settings(name,value,updated_at) VALUES('sitebrush_commission_bps','500',?)`, now)
@@ -988,12 +989,42 @@ func (store Store) AutomaticRegistrationAllowed(ctx context.Context) bool {
 }
 
 func (store Store) SaveSettings(ctx context.Context, autoRegistrationEnabled bool) error {
+	return saveBooleanSetting(ctx, store.DB, "auto_registration_enabled", autoRegistrationEnabled)
+}
+
+func (store Store) PublicTrialAllowed(ctx context.Context) bool {
+	return store.AutomaticRegistrationAllowed(ctx) && SettingBool(ctx, store.DB, "public_trial_enabled", false)
+}
+
+func (store Store) SaveRegistrationSettings(ctx context.Context, autoRegistrationEnabled, publicTrialEnabled bool) error {
+	if !autoRegistrationEnabled {
+		publicTrialEnabled = false
+	}
+	transaction, err := store.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	if err = saveBooleanSetting(ctx, transaction, "auto_registration_enabled", autoRegistrationEnabled); err == nil {
+		err = saveBooleanSetting(ctx, transaction, "public_trial_enabled", publicTrialEnabled)
+	}
+	if err != nil {
+		_ = transaction.Rollback()
+		return err
+	}
+	return transaction.Commit()
+}
+
+type settingExecer interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}
+
+func saveBooleanSetting(ctx context.Context, database settingExecer, name string, enabled bool) error {
 	settingValue := "0"
-	if autoRegistrationEnabled {
+	if enabled {
 		settingValue = "1"
 	}
-	_, err := store.DB.ExecContext(ctx, `INSERT INTO server_settings(name,value,updated_at) VALUES(?,?,?) ON CONFLICT(name) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at`,
-		"auto_registration_enabled", settingValue, time.Now().UTC().Format(time.RFC3339))
+	_, err := database.ExecContext(ctx, `INSERT INTO server_settings(name,value,updated_at) VALUES(?,?,?) ON CONFLICT(name) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at`,
+		name, settingValue, time.Now().UTC().Format(time.RFC3339))
 	return err
 }
 

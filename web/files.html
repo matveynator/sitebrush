@@ -11,9 +11,16 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{{index .T "file_manager"}}</title>
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+  <link href="/p/static/technical_pages.css" rel="stylesheet">
   <style>
     body { background:var(--bs-body-bg); color:var(--bs-body-color); }
     .manager-shell { max-width:1180px; }
+    .manager-header { display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:1rem; margin-bottom:1rem; }
+    .manager-heading { min-width:0; }
+    .manager-heading h1, .manager-current-path { overflow-wrap:anywhere; }
+    .upload-controls { display:flex; flex-wrap:wrap; gap:.5rem; }
+    .upload-controls .form-control { flex:1 1 360px; min-width:0; }
+    .file-sort-toolbar { display:flex; flex-wrap:wrap; align-items:center; gap:.5rem; margin-bottom:.5rem; }
     .section-icon { width:30px; height:30px; object-fit:contain; }
     .section-heading { display:flex; align-items:center; gap:10px; }
     .file-thumb { width:64px; height:64px; object-fit:cover; border-radius:8px; border:1px solid var(--bs-border-color); background:var(--bs-tertiary-bg); cursor:pointer; }
@@ -27,45 +34,115 @@
     .file-link-cell { min-width:clamp(360px, 46vw, 720px); }
     .access-cell { min-width:340px; }
     .access-grid { display:grid; grid-template-columns:minmax(105px,130px) minmax(140px,1fr) minmax(86px,110px) auto; gap:.5rem; align-items:center; }
+    .file-access-details > summary { display:none; }
+    .file-access-details > .file-access-body { display:block; }
     @media (max-width: 900px) {
-      .access-grid { grid-template-columns:1fr; }
-      .file-link-cell { min-width:calc(100vw - 56px); }
-      .access-cell { min-width:calc(100vw - 56px); }
-      .copy-link-group { width:calc(100vw - 72px); }
+      body { background:#f1f3f4; }
+      .manager-shell { width:100%; max-width:none; padding:12px !important; color:#293136; }
+      .manager-header { align-items:stretch; gap:.75rem; }
+      .manager-heading { flex:1 1 100%; }
+      .manager-heading h1 { font-size:1.2rem; line-height:1.3; }
+      .manager-heading h1 a { color:#33464f; }
+      .manager-current-path { font-size:.82rem; color:#68757c !important; }
+      .manager-current-path code { color:inherit; }
+      .manager-back-button { width:100%; min-height:42px; display:grid; place-items:center; border-color:#ccd3d6 !important; background:#f8f9f9 !important; color:#46545b !important; }
+      .upload-panel { padding:12px !important; margin-bottom:12px !important; border-color:#d9dfe1 !important; background:#f8f9f9 !important; color:#293136 !important; box-shadow:none !important; }
+      .upload-panel .section-heading { margin-bottom:10px; }
+      .upload-panel .section-icon { width:24px; height:24px; opacity:.72; }
+      .upload-controls { display:grid; grid-template-columns:minmax(0,1fr); }
+      .upload-controls .form-control, .upload-controls .btn { width:100%; min-height:44px; }
+      .upload-controls .form-control { border-color:#d5dbde !important; background:#fff !important; color:#293136 !important; }
+      .upload-controls .btn { border-color:#9cabb2 !important; background:#e3e8ea !important; color:#293136 !important; }
+      .file-sort-toolbar { flex-wrap:nowrap; overflow-x:auto; padding:2px 0 8px; scrollbar-width:none; }
+      .file-sort-toolbar::-webkit-scrollbar { display:none; }
+      .file-sort-toolbar > * { flex:0 0 auto; }
+      .file-sort-toolbar .btn { min-height:38px; padding-inline:13px; border-color:#d0d6d9 !important; border-radius:999px; background:#f8f9f9 !important; color:#59666c !important; box-shadow:none !important; }
+      .file-sort-toolbar .btn.active { border-color:#aebbc0 !important; background:#dfe5e7 !important; color:#293136 !important; }
+      .file-list-panel { overflow:visible !important; border:0 !important; background:transparent !important; }
+      .file-list-panel .table-responsive { overflow:visible; border:0 !important; background:transparent !important; box-shadow:none !important; }
+      .file-list-panel table, .file-list-panel tbody { display:block; width:100%; }
+      .file-list-panel thead { display:none; }
+      .file-list-panel tbody { display:grid; gap:10px; }
+      .file-list-panel tr[data-file-row] { display:grid; grid-template-columns:48px minmax(0,.7fr) minmax(0,1fr); grid-template-areas:"preview file file" "size size date" "access access access" "actions actions actions"; column-gap:11px; row-gap:8px; padding:12px; border:1px solid #dce1e3; border-radius:12px; background:#fafbfb; color:#293136; box-shadow:0 1px 4px rgba(30,42,48,.05); }
+      .file-list-panel tr[data-file-row] > td { display:block; min-width:0; padding:0; border:0; background:transparent; }
+      .file-list-panel tr[data-file-row] > td:nth-child(1) { grid-area:preview; }
+      .file-list-panel tr[data-file-row] > td:nth-child(2) { grid-area:file; align-self:center; }
+      .file-list-panel tr[data-file-row] > td:nth-child(3) { grid-area:size; }
+      .file-list-panel tr[data-file-row] > td:nth-child(4) { grid-area:date; text-align:right; }
+      .file-list-panel tr[data-file-row] > td:nth-child(5) { grid-area:access; margin-top:3px; padding-top:0; border-top:1px solid #e3e7e9; }
+      .file-list-panel tr[data-file-row] > td:nth-child(6) { grid-area:actions; }
+      .file-list-panel tr[data-file-row] > td:nth-child(3)::before,
+      .file-list-panel tr[data-file-row] > td:nth-child(4)::before,
+      .file-list-panel tr[data-file-row] > td:nth-child(5)::before { content:none; }
+      .file-list-panel tr[data-file-row] > td:nth-child(4)::before { text-align:right; }
+      .file-thumb, .file-icon, .file-preview-trigger { width:48px !important; height:48px !important; border-color:#d7dddf !important; border-radius:10px !important; background:#eef1f2 !important; color:#58676e !important; font-size:.7rem; }
+      .file-link-cell, .access-cell { min-width:0; }
+      .file-link-cell .fw-semibold { color:#263238; font-size:.96rem; line-height:1.25; }
+      .file-link-cell .text-muted, .file-list-panel td > .text-muted { color:#6c777c !important; }
+      .copy-link-group { width:100%; max-width:100%; }
+      .copy-link-group .copy-field { height:38px; border-color:#d9dfe1 !important; background:#f4f6f6 !important; color:#59666c !important; font-size:.7rem; }
+      .copy-link-group .btn { min-height:38px; padding-inline:10px; border-color:#d1d8da !important; background:#eceff0 !important; color:#46545b !important; }
+      .file-access-details > summary { display:flex; align-items:center; justify-content:space-between; gap:10px; min-height:43px; padding:8px 2px; color:#58666c; cursor:pointer; list-style:none; }
+      .file-access-details > summary::-webkit-details-marker { display:none; }
+      .file-access-details > summary::after { content:"⌄"; color:#7b878c; font-size:1.1rem; transition:transform .16s ease; }
+      .file-access-details[open] > summary::after { transform:rotate(180deg); }
+      .file-access-details > summary strong { color:#3f4d53; font-size:.82rem; font-weight:600; }
+      .file-access-details:not([open]) > .file-access-body { display:none; }
+      .file-access-body { padding:4px 0 8px; }
+      .access-grid { grid-template-columns:minmax(0,1fr); gap:8px; }
+      .access-grid .form-select, .access-grid > .form-control, .access-grid > .btn { min-height:42px; }
+      .access-grid .form-select, .access-grid > .form-control { border-color:#d5dcde !important; background:#fff !important; color:#293136 !important; }
+      .access-grid > .btn { width:100%; }
+      .file-delete-form .btn { width:100%; min-height:40px; border-color:#e2ced0 !important; background:#f7eeee !important; color:#805258 !important; box-shadow:none !important; }
+      .file-list-empty { display:block !important; border:1px solid #dce1e3; border-radius:12px; background:#fafbfb; }
+      .file-list-empty td { display:block; width:100%; }
+    }
+    @media (max-width: 900px) and (prefers-color-scheme: dark) {
+      body { background:#1d2022; }
+      .manager-shell { color:#d9dddf; }
+      .manager-heading h1 a { color:#c8d1d5; }
+      .manager-current-path { color:#9ca7ac !important; }
+      .manager-back-button, .upload-panel, .file-sort-toolbar .btn, .file-list-panel tr[data-file-row], .file-list-empty { border-color:#353b3e !important; background:#24282a !important; color:#d9dddf !important; }
+      .upload-controls .form-control, .access-grid .form-select, .access-grid > .form-control { border-color:#3b4245 !important; background:#2b3032 !important; color:#e1e4e5 !important; }
+      .upload-controls .btn, .file-sort-toolbar .btn.active, .copy-link-group .btn { border-color:#465055 !important; background:#353c3f !important; color:#e1e4e5 !important; }
+      .file-list-panel tr[data-file-row] > td:nth-child(5) { border-color:#343a3d; }
+      .file-thumb, .file-icon, .file-preview-trigger, .copy-link-group .copy-field { border-color:#394043 !important; background:#2c3133 !important; color:#adb7bb !important; }
+      .file-link-cell .fw-semibold, .file-access-details > summary strong { color:#e1e4e5; }
+      .file-link-cell .text-muted, .file-list-panel td > .text-muted, .file-access-details > summary { color:#a8b1b5 !important; }
+      .file-delete-form .btn { border-color:#563f42 !important; background:#33292b !important; color:#d5aeb2 !important; }
     }
     .preview-image { max-width:100%; max-height:72vh; object-fit:contain; }
     .uploaded-focus { outline:3px solid var(--bs-primary); outline-offset:-3px; animation:uploadedPulse 1.8s ease-in-out 2; }
     @keyframes uploadedPulse { 0%,100% { background:transparent; } 50% { background:rgba(var(--bs-primary-rgb), .14); } }
   </style>
-  <link href="/p/static/technical_pages.css" rel="stylesheet">
 </head>
 <body class="technical-page">
 <div class="container manager-shell py-4">
-  <div class="d-flex flex-wrap align-items-center justify-content-between gap-3 mb-3">
-    <div>
+  <div class="manager-header">
+    <div class="manager-heading">
       <h1 class="h3 mb-1"><a href="/">{{.Domain}}</a> <span class="text-muted">/ {{index .T "file_manager"}}</span></h1>
-      <div class="text-muted">{{index .T "files_current_uri"}} <code>{{.Path}}</code></div>
+      <div class="text-muted manager-current-path">{{index .T "files_current_uri"}} <code>{{.Path}}</code></div>
     </div>
-    <a class="btn btn-outline-secondary" href="{{.Path}}">{{index .T "back_to_uri"}}</a>
+    <a class="btn btn-outline-secondary manager-back-button" href="{{.Path}}">{{index .T "back_to_uri"}}</a>
   </div>
 
-  <form id="uploadForm" class="bg-body-tertiary border rounded-3 p-3 mb-3" method="post" action="{{.Path}}?files" enctype="multipart/form-data">
+  <form id="uploadForm" class="bg-body-tertiary border rounded-3 p-3 mb-3 upload-panel" method="post" action="{{.Path}}?files" enctype="multipart/form-data">
     <input type="hidden" name="action" value="upload">
     <label class="form-label fw-semibold section-heading" for="upload_files"><img src="/p/static/files.png" class="section-icon" alt="">{{index .T "files_upload_for_uri"}}</label>
-    <div class="d-flex flex-wrap gap-2">
+    <div class="upload-controls">
       <input id="upload_files" class="form-control" type="file" name="upload_files" multiple>
       <button class="btn btn-primary" type="submit">{{index .T "files_upload_button"}}</button>
     </div>
   </form>
 
-  <div class="d-flex flex-wrap align-items-center gap-2 mb-2">
+  <div class="file-sort-toolbar" role="group" aria-label="{{index .T "files_sort_label"}}">
     <span class="text-muted small">{{index .T "files_sort_label"}}</span>
-    <button class="btn btn-sm btn-outline-secondary" type="button" data-sort-files="date">{{index .T "files_sort_date"}}</button>
-    <button class="btn btn-sm btn-outline-secondary" type="button" data-sort-files="size">{{index .T "files_sort_size"}}</button>
-    <button class="btn btn-sm btn-outline-secondary" type="button" data-sort-files="name">{{index .T "files_sort_name"}}</button>
+    <button class="btn btn-sm btn-outline-secondary active" type="button" data-sort-files="date" aria-pressed="true">{{index .T "files_sort_date"}}</button>
+    <button class="btn btn-sm btn-outline-secondary" type="button" data-sort-files="size" aria-pressed="false">{{index .T "files_sort_size"}}</button>
+    <button class="btn btn-sm btn-outline-secondary" type="button" data-sort-files="name" aria-pressed="false">{{index .T "files_sort_name"}}</button>
   </div>
 
-  <div class="bg-body-tertiary border rounded-3 overflow-hidden technical-table-panel">
+  <div class="bg-body-tertiary border rounded-3 overflow-hidden technical-table-panel file-list-panel">
     <div class="table-responsive">
       <table class="table table-hover align-middle mb-0">
         <thead>
@@ -96,36 +173,41 @@
                 <button class="btn btn-outline-secondary" type="button" data-copy-target="full">{{index $.T "files_copy"}}</button>
               </div>
             </td>
-            <td><span class="text-muted">{{.SizeLabel}}</span></td>
-            <td><span class="text-muted">{{.CreatedAt}}</span></td>
-            <td class="access-cell">
-              <form method="post" action="{{$.Path}}?files" class="access-grid" data-access-form>
-                <input type="hidden" name="action" value="save_access">
-                <input type="hidden" name="name" value="{{.Name}}">
-                <select name="access_mode" class="form-select form-select-sm" data-access-mode>
-                  <option value="public" {{if eq .AccessMode "public"}}selected{{end}}>{{index $.T "files_access_public"}}</option>
-                  <option value="timer" {{if eq .AccessMode "timer"}}selected{{end}}>{{index $.T "files_access_timer"}}</option>
-                  <option value="token" {{if eq .AccessMode "token"}}selected{{end}}>{{index $.T "files_access_token"}}</option>
-                </select>
-                <input name="access_token" class="form-control form-control-sm copy-field" placeholder="{{index $.T "files_access_token_placeholder"}}" value="{{.Token}}" data-access-token data-token-control>
-                <input name="access_days" class="form-control form-control-sm" type="number" min="0" placeholder="{{index $.T "files_access_days_placeholder"}}" data-timer-control>
-                <button class="btn btn-sm btn-outline-primary d-none" type="submit" data-save-access>{{index $.T "files_access_save"}}</button>
-                <div class="input-group input-group-sm copy-link-group" data-token-link-row style="grid-column:1 / -1;">
-                  <input class="form-control copy-field" readonly data-token-link data-asset-path="{{.AssetPath}}">
-                  <button class="btn btn-outline-secondary" type="button" data-copy-target="token">{{index $.T "files_copy_token_link"}}</button>
+            <td data-label="{{index $.T "files_col_size"}}"><span class="text-muted">{{.SizeLabel}}</span></td>
+            <td data-label="{{index $.T "files_col_date"}}"><span class="text-muted">{{.CreatedAt}}</span></td>
+            <td class="access-cell" data-label="{{index $.T "files_col_access"}}">
+              <details class="file-access-details" data-file-access-details>
+                <summary><span>{{index $.T "files_col_access"}}</span><strong>{{if eq .AccessMode "timer"}}{{index $.T "files_access_timer"}}{{else if eq .AccessMode "token"}}{{index $.T "files_access_token"}}{{else}}{{index $.T "files_access_public"}}{{end}}</strong></summary>
+                <div class="file-access-body">
+                  <form method="post" action="{{$.Path}}?files" class="access-grid" data-access-form>
+                    <input type="hidden" name="action" value="save_access">
+                    <input type="hidden" name="name" value="{{.Name}}">
+                    <select name="access_mode" class="form-select form-select-sm" data-access-mode>
+                      <option value="public" {{if eq .AccessMode "public"}}selected{{end}}>{{index $.T "files_access_public"}}</option>
+                      <option value="timer" {{if eq .AccessMode "timer"}}selected{{end}}>{{index $.T "files_access_timer"}}</option>
+                      <option value="token" {{if eq .AccessMode "token"}}selected{{end}}>{{index $.T "files_access_token"}}</option>
+                    </select>
+                    <input name="access_token" class="form-control form-control-sm copy-field" placeholder="{{index $.T "files_access_token_placeholder"}}" value="{{.Token}}" data-access-token data-token-control>
+                    <input name="access_days" class="form-control form-control-sm" type="number" min="0" placeholder="{{index $.T "files_access_days_placeholder"}}" data-timer-control>
+                    <button class="btn btn-sm btn-outline-primary d-none" type="submit" data-save-access>{{index $.T "files_access_save"}}</button>
+                    <div class="input-group input-group-sm copy-link-group" data-token-link-row style="grid-column:1 / -1;">
+                      <input class="form-control copy-field" readonly data-token-link data-asset-path="{{.AssetPath}}">
+                      <button class="btn btn-outline-secondary" type="button" data-copy-target="token">{{index $.T "files_copy_token_link"}}</button>
+                    </div>
+                  </form>
+                  {{if .ExpiresAt}}<small class="text-muted">{{index $.T "files_expires"}} {{.ExpiresAt}}</small>{{end}}
                 </div>
-              </form>
-              {{if .ExpiresAt}}<small class="text-muted">{{index $.T "files_expires"}} {{.ExpiresAt}}</small>{{end}}
+              </details>
             </td>
             <td>
-              <form method="post" action="{{$.Path}}?files">
+              <form method="post" action="{{$.Path}}?files" class="file-delete-form">
                 <input type="hidden" name="name" value="{{.Name}}">
                 <button class="btn btn-outline-danger btn-sm" type="submit"><img src="/p/static/cross.png" width="14" alt=""> {{index $.T "files_delete"}}</button>
               </form>
             </td>
           </tr>
 {{else}}
-          <tr><td colspan="6" class="text-center text-muted py-5">{{index .T "files_empty"}}</td></tr>
+          <tr class="file-list-empty"><td colspan="6" class="text-center text-muted py-5">{{index .T "files_empty"}}</td></tr>
 {{end}}
         </tbody>
       </table>
@@ -177,8 +259,13 @@
   const imagePreviewFullElement = document.getElementById('imagePreviewFull');
   const imagePreviewTitleElement = document.getElementById('imagePreviewTitle');
   const imagePreviewModalController = imagePreviewModalElement && window.bootstrap ? new bootstrap.Modal(imagePreviewModalElement) : null;
+  const compactFileLayout = window.matchMedia && window.matchMedia('(max-width: 900px)').matches;
   let currentPreviewIndex = 0;
   let uploadInFlight = false;
+
+  for (const accessDetailsElement of document.querySelectorAll('[data-file-access-details]')) {
+    accessDetailsElement.open = !compactFileLayout;
+  }
 
   function absoluteURL(assetPath) {
     return new URL(assetPath, window.location.origin).href;
@@ -265,6 +352,10 @@
     const tokenControlElement = formElement.querySelector('[data-token-control]');
     const modeElement = formElement.querySelector('[data-access-mode]');
     if (!tokenInputElement || !tokenLinkElement || !modeElement) { return; }
+    const accessDetailsElement = formElement.closest('[data-file-access-details]');
+    const accessSummaryValueElement = accessDetailsElement ? accessDetailsElement.querySelector('summary strong') : null;
+    const selectedModeOption = modeElement.options[modeElement.selectedIndex];
+    if (accessSummaryValueElement && selectedModeOption) { accessSummaryValueElement.textContent = selectedModeOption.textContent; }
     const isTokenMode = modeElement.value === 'token';
     const isTimerMode = modeElement.value === 'timer';
     if (tokenControlElement) { tokenControlElement.classList.toggle('d-none', !isTokenMode); }
@@ -366,6 +457,11 @@
   for (const sortButtonElement of document.querySelectorAll('[data-sort-files]')) {
     sortButtonElement.addEventListener('click', function onSortClick() {
       sortRows(sortButtonElement.dataset.sortFiles || 'date');
+      for (const otherSortButtonElement of document.querySelectorAll('[data-sort-files]')) {
+        const selected = otherSortButtonElement === sortButtonElement;
+        otherSortButtonElement.classList.toggle('active', selected);
+        otherSortButtonElement.setAttribute('aria-pressed', selected ? 'true' : 'false');
+      }
     });
   }
 

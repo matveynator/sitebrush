@@ -53,22 +53,22 @@
   </section>
   {{else if .RegistrationDisabled}}
   <div class="site-request-shell">
-    <p class="text-muted">Самостоятельная регистрация новых сайтов отключена владельцем сервера. Отправьте заявку на подключение этого домена.</p>
+    <p class="text-muted">{{index .T "setup_request_intro"}}</p>
     {{if .Status}}<div class="alert alert-info" style="max-width:920px;">{{.Status}}</div>{{end}}
     <form class="card card-body site-request-form" method="post" action="?site_request">
       <input type="hidden" name="return_path" value="{{.ReturnPath}}">
       <div class="site-request-grid mb-3">
-        <label>Имя
+        <label>{{index .T "billing_plan_name"}}
           <input type="text" name="name" class="form-control" value="{{.RequestName}}" autocomplete="name" required>
         </label>
-        <label>Email
+        <label>{{index .T "profile_email"}}
           <input type="email" name="email" class="form-control" value="{{.RequestEmail}}" autocomplete="email" required>
         </label>
-        <label>Телефон
+        <label>{{index .T "setup_request_phone"}}
           <input type="tel" name="phone" class="form-control" value="{{.RequestPhone}}" autocomplete="tel" required>
         </label>
       </div>
-      <div class="mb-2 fw-semibold">Тарифный план</div>
+      <div class="mb-2 fw-semibold">{{index .T "billing_plan"}}</div>
       <div class="site-request-plan-list mb-3">
         {{range .Plans}}
         <label class="site-request-plan">
@@ -77,11 +77,11 @@
             <span>
               <span class="site-request-plan-title">{{.Name}}</span>
               <span class="site-request-plan-meta d-block">{{.QuotaLabel}} · {{.Price}} {{.Currency}}/{{.BillingPeriod}}</span>
-              {{if .IsDefault}}<span class="badge text-bg-primary mt-2">По умолчанию</span>{{end}}
+              {{if .IsDefault}}<span class="badge text-bg-primary mt-2">{{index $.T "billing_default_suffix"}}</span>{{end}}
             </span>
           </span>
           <span class="site-request-plan-actions">
-            <button type="button" class="btn btn-outline-primary btn-sm" data-bs-toggle="modal" data-bs-target="#siteRequestPlanModal{{.ID}}">Подробнее</button>
+            <button type="button" class="btn btn-outline-primary btn-sm" data-bs-toggle="modal" data-bs-target="#siteRequestPlanModal{{.ID}}">{{index $.T "setup_request_details"}}</button>
           </span>
         </label>
         <div class="modal fade" id="siteRequestPlanModal{{.ID}}" tabindex="-1" aria-hidden="true">
@@ -93,22 +93,22 @@
             <div class="modal-body">
               <p class="text-muted mb-3">{{.QuotaLabel}} · {{.Price}} {{.Currency}}/{{.BillingPeriod}}</p>
               <ul class="site-request-modal-list">
-                <li>Редактор страниц Sitebrush и публикация сайта.</li>
-                <li>Файлы, изображения и статические ресурсы в пределах квоты {{.QuotaLabel}}.</li>
-                <li>Резервные копии, настройки домена и управление HTTPS после активации.</li>
-                <li>Автоматический SSL будет доступен после корректной настройки DNS.</li>
+                <li>{{index $.T "billing_plan_feature_editor"}}</li>
+                <li>{{index $.T "billing_plan_feature_quota"}} {{.QuotaLabel}}.</li>
+                <li>{{index $.T "billing_plan_feature_backups"}}</li>
+                <li>{{index $.T "billing_plan_feature_ssl"}}</li>
               </ul>
             </div>
             <div class="modal-footer">
-              <button type="button" class="btn btn-primary" data-bs-dismiss="modal">Понятно</button>
+              <button type="button" class="btn btn-primary" data-bs-dismiss="modal">{{index $.T "setup_request_understood"}}</button>
             </div>
           </div></div>
         </div>
         {{else}}
-        <div class="alert alert-warning">Тарифные планы пока не настроены владельцем сервера.</div>
+        <div class="alert alert-warning">{{index .T "setup_request_no_plans"}}</div>
         {{end}}
       </div>
-      <div><button type="submit" class="btn btn-primary"><img src="/p/static/profile.png" alt="">Отправить заявку</button></div>
+      <div><button type="submit" class="btn btn-primary"><img src="/p/static/profile.png" alt="">{{index .T "setup_request_submit"}}</button></div>
     </form>
   </div>
   {{else}}

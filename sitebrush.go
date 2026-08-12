@@ -101,6 +101,8 @@ const wholeSiteImportMaxPages = 2048
 const wholeSitePreviewPageConcurrency = 8
 const publicTrialPreviewMaxDuration = 5 * time.Minute
 const publicTrialPreviewStallTimeout = 45 * time.Second
+const publicTrialAvailabilityCacheTTL = time.Minute
+const publicTrialWildcardProbeCount = 3
 const legacyPublicTrialWidgetAssetName = "c2e28115960ae946dd3b7bd3be07562715528484255f9a1e42e65f850e32f964.js"
 const defaultDomainStorageLimitBytes int64 = 10 * 1024 * 1024 * 1024
 const defaultAnalyticsMemoryLimitBytes int64 = 500 * 1024 * 1024
@@ -138,7 +140,7 @@ const backupImportFileEntryLimitBytes int64 = 128 * 1024 * 1024
 const backupImportUncompressedLimitBytes int64 = 1024 * 1024 * 1024
 const hostingSnapshotNetChanPort = "9876"
 const hostingSnapshotNetChanDeliveryTimeout = 5 * time.Second
-const hostingAndSupportPanelSnapshotVersion = 6
+const hostingAndSupportPanelSnapshotVersion = 7
 const hostingAndSupportMetricsRefreshInterval = 30 * time.Second
 const hostingAndSupportFullRefreshInterval = 5 * time.Minute
 
@@ -166,6 +168,7 @@ type App struct {
 	grabTracker                    *grabProgressTracker
 	grabCancels                    *grabCancelTracker
 	trialPreviews                  *publicTrialPreviewStore
+	publicTrialAvailability        chan publicTrialAvailabilityRequest
 	publishTracker                 *publishProgressTracker
 	analyticsEvents                chan siteAnalyticsEvent
 	analyticsMemoryLimit           int64
@@ -317,9 +320,35 @@ type hostingAndSupportPanelSnapshot struct {
 	Overview                hostingandsupport.OverviewView
 	DemoSettings            demo.Settings
 	AutoRegistrationEnabled bool
+	PublicTrialEnabled      bool
 	CommissionBPS           int
 	LocalCostPolicy         expenses.ServerPolicy
 	ShowCentralRegistry     bool
+}
+
+type publicTrialAvailability struct {
+	Enabled        bool
+	ReasonKey      string
+	WildcardDomain string
+	ExternalIP     string
+	CheckedAt      time.Time
+}
+
+type publicTrialAvailabilityRequest struct {
+	action      string
+	ownerDomain string
+	reply       chan publicTrialAvailability
+}
+
+type publicTrialAvailabilityCacheEntry struct {
+	availability publicTrialAvailability
+	expiresAt    time.Time
+}
+
+type publicTrialAvailabilityProbeResult struct {
+	ownerDomain  string
+	generation   uint64
+	availability publicTrialAvailability
 }
 
 type demoSiteStatusView struct {
@@ -5314,6 +5343,7 @@ func runSitebrushServer(ctx context.Context, config serverRunConfig) error {
 	application.guestStaticHTMLCache = startGuestStaticHTMLCacheWorker(ctx, defaultGuestStaticHTMLCacheLimitBytes)
 	application.authIPFailureCache = startAuthIPFailureCacheWorker(ctx)
 	application.registrationConfirmations = startEmailConfirmationMemoryWorker(ctx)
+	application.publicTrialAvailability = startPublicTrialAvailabilityWorker(ctx.Done())
 	application.mailRouting = application.startSystemMailRouteProcess(ctx.Done())
 	application.durableMailTasks = application.startDurableMailProcess(ctx.Done())
 	application.hostingSupportEvents = application.startHostingSupportEventWorker(ctx.Done())
@@ -9957,14 +9987,192 @@ func (a *App) publicTrialSiteWS(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) publicTrialAllowed(r *http.Request) bool {
-	allowed := false
+	availability := a.publicTrialAvailabilityForRequest(r.Context())
+	if !availability.Enabled {
+		return false
+	}
+	requestDomain := normalizeDomainName(a.siteDomain(r.Context(), r))
+	ownerDomain := ""
 	_ = a.withServerControlDatabaseRead(r.Context(), "public-trial-allowed", func(database *sql.DB) error {
-		store := hostingandsupport.Store{DB: database}
-		ownerDomain, found := store.OwnerDomain(r.Context())
-		allowed = store.AutomaticRegistrationAllowed(r.Context()) && found && normalizeDomainName(ownerDomain) == normalizeDomainName(a.siteDomain(r.Context(), r))
+		ownerDomain, _ = (hostingandsupport.Store{DB: database}).OwnerDomain(r.Context())
 		return nil
 	})
-	return allowed
+	return requestDomain != "" && requestDomain == normalizeDomainName(ownerDomain)
+}
+
+func (a *App) publicTrialAvailabilityForRequest(ctx context.Context) publicTrialAvailability {
+	ownerDomain := ""
+	automaticRegistrationEnabled := false
+	publicTrialEnabled := false
+	err := a.withServerControlDatabaseRead(ctx, "public-trial-availability", func(database *sql.DB) error {
+		store := hostingandsupport.Store{DB: database}
+		var found bool
+		ownerDomain, found = store.OwnerDomain(ctx)
+		if !found {
+			ownerDomain = ""
+			return nil
+		}
+		automaticRegistrationEnabled = store.AutomaticRegistrationAllowed(ctx)
+		publicTrialEnabled = store.PublicTrialAllowed(ctx)
+		return nil
+	})
+	if err != nil {
+		return publicTrialAvailability{ReasonKey: "public_trial_disabled_owner_domain"}
+	}
+	return a.publicTrialAvailabilityForSettings(ctx, ownerDomain, automaticRegistrationEnabled, publicTrialEnabled)
+}
+
+func (a *App) publicTrialAvailabilityForSettings(ctx context.Context, ownerDomain string, automaticRegistrationEnabled, publicTrialEnabled bool) publicTrialAvailability {
+	ownerDomain = normalizeDomainName(ownerDomain)
+	availability := publicTrialAvailability{ReasonKey: "public_trial_disabled_owner_domain"}
+	if ownerDomain == "" {
+		return availability
+	}
+	availability.WildcardDomain = "*." + ownerDomain
+	if !automaticRegistrationEnabled {
+		availability.ReasonKey = "public_trial_disabled_registration"
+		return availability
+	}
+	if !publicTrialEnabled {
+		availability.ReasonKey = "public_trial_disabled_permission"
+		return availability
+	}
+	if a.publicTrialAvailability == nil {
+		return checkPublicTrialWildcard(ownerDomain)
+	}
+	reply := make(chan publicTrialAvailability, 1)
+	request := publicTrialAvailabilityRequest{action: "check", ownerDomain: ownerDomain, reply: reply}
+	select {
+	case a.publicTrialAvailability <- request:
+	case <-ctx.Done():
+		availability.ReasonKey = "public_trial_disabled_external_ip"
+		return availability
+	}
+	select {
+	case checkedAvailability := <-reply:
+		return checkedAvailability
+	case <-ctx.Done():
+		availability.ReasonKey = "public_trial_disabled_external_ip"
+		return availability
+	}
+}
+
+func (a *App) invalidatePublicTrialAvailability() {
+	if a == nil || a.publicTrialAvailability == nil {
+		return
+	}
+	select {
+	case a.publicTrialAvailability <- publicTrialAvailabilityRequest{action: "invalidate"}:
+	default:
+	}
+}
+
+func startPublicTrialAvailabilityWorker(stop <-chan struct{}) chan publicTrialAvailabilityRequest {
+	requests := make(chan publicTrialAvailabilityRequest, 32)
+	results := make(chan publicTrialAvailabilityProbeResult, 8)
+	go func() {
+		cache := make(map[string]publicTrialAvailabilityCacheEntry)
+		generation := uint64(1)
+		inFlightGeneration := make(map[string]uint64)
+		waiters := make(map[string][]chan publicTrialAvailability)
+		for {
+			select {
+			case <-stop:
+				return
+			case request := <-requests:
+				if request.action == "invalidate" {
+					generation++
+					cache = make(map[string]publicTrialAvailabilityCacheEntry)
+					continue
+				}
+				ownerDomain := normalizeDomainName(request.ownerDomain)
+				if cached, found := cache[ownerDomain]; found && time.Now().Before(cached.expiresAt) {
+					request.reply <- cached.availability
+					continue
+				}
+				jobGeneration, running := inFlightGeneration[ownerDomain]
+				if !running || jobGeneration != generation {
+					jobGeneration = generation
+					inFlightGeneration[ownerDomain] = jobGeneration
+					go func(domain string, currentGeneration uint64) {
+						result := publicTrialAvailabilityProbeResult{ownerDomain: domain, generation: currentGeneration, availability: checkPublicTrialWildcard(domain)}
+						select {
+						case results <- result:
+						case <-stop:
+						}
+					}(ownerDomain, jobGeneration)
+				}
+				waiterKey := ownerDomain + "\x00" + strconv.FormatUint(jobGeneration, 10)
+				waiters[waiterKey] = append(waiters[waiterKey], request.reply)
+			case result := <-results:
+				waiterKey := result.ownerDomain + "\x00" + strconv.FormatUint(result.generation, 10)
+				for _, reply := range waiters[waiterKey] {
+					reply <- result.availability
+				}
+				delete(waiters, waiterKey)
+				if inFlightGeneration[result.ownerDomain] == result.generation {
+					delete(inFlightGeneration, result.ownerDomain)
+				}
+				if result.generation == generation {
+					cache[result.ownerDomain] = publicTrialAvailabilityCacheEntry{availability: result.availability, expiresAt: time.Now().Add(publicTrialAvailabilityCacheTTL)}
+				}
+			}
+		}
+	}()
+	return requests
+}
+
+func checkPublicTrialWildcard(ownerDomain string) publicTrialAvailability {
+	ownerDomain = normalizeDomainName(ownerDomain)
+	availability := publicTrialAvailability{ReasonKey: "public_trial_disabled_owner_domain", WildcardDomain: "*." + ownerDomain, CheckedAt: time.Now().UTC()}
+	if ownerDomain == "" {
+		return availability
+	}
+	probeContext, cancelProbe := context.WithTimeout(context.Background(), 10*time.Second)
+	externalIPText, err := lookupServerExternalIP(probeContext)
+	cancelProbe()
+	externalIP := net.ParseIP(strings.TrimSpace(externalIPText))
+	if err != nil || externalIP == nil || !externalIP.IsGlobalUnicast() || externalIP.IsPrivate() {
+		availability.ReasonKey = "public_trial_disabled_external_ip"
+		return availability
+	}
+	availability.ExternalIP = externalIP.String()
+	type lookupResult struct {
+		ipRecords []net.IP
+		err       error
+	}
+	lookupResults := make(chan lookupResult, publicTrialWildcardProbeCount)
+	for probeIndex := 0; probeIndex < publicTrialWildcardProbeCount; probeIndex++ {
+		probeDomain := publicTrialWildcardProbeDomain(ownerDomain)
+		go func(domain string) {
+			ipRecords, lookupErr := lookupIPRecords(domain)
+			lookupResults <- lookupResult{ipRecords: ipRecords, err: lookupErr}
+		}(probeDomain)
+	}
+	for probeIndex := 0; probeIndex < publicTrialWildcardProbeCount; probeIndex++ {
+		result := <-lookupResults
+		if result.err != nil || len(result.ipRecords) == 0 {
+			availability.ReasonKey = "public_trial_disabled_wildcard_missing"
+			return availability
+		}
+		for _, ipRecord := range result.ipRecords {
+			if ipRecord == nil || !ipRecord.Equal(externalIP) {
+				availability.ReasonKey = "public_trial_disabled_wildcard_mismatch"
+				return availability
+			}
+		}
+	}
+	availability.Enabled = true
+	availability.ReasonKey = ""
+	return availability
+}
+
+func publicTrialWildcardProbeDomain(ownerDomain string) string {
+	randomBytes := make([]byte, 12)
+	if _, err := rand.Read(randomBytes); err != nil {
+		return "sitebrush-trial-check-" + strconv.FormatInt(time.Now().UnixNano(), 36) + "." + ownerDomain
+	}
+	return "sitebrush-trial-check-" + hex.EncodeToString(randomBytes) + "." + ownerDomain
 }
 
 type publicTrialEndpoint uint8
@@ -13104,12 +13312,14 @@ func (a *App) collectHostingAndSupportPanelSnapshot(ctx context.Context, control
 	policyFound := false
 	commissionBPS := 0
 	autoRegistrationEnabled := true
+	publicTrialEnabled := false
 	if err := a.withServerControlDatabaseRead(ctx, "expenses-snapshot-billing-data", func(database *sql.DB) error {
 		store := hostingandsupport.Store{DB: database}
 		invoices = store.Invoices(ctx, 80)
 		localExpensePolicy, policyFound = store.ServerExpensePolicy(ctx, "local", int64(localDiskTotalBytes))
 		commissionBPS = store.SitebrushCommissionBPS(ctx)
 		autoRegistrationEnabled = store.AutomaticRegistrationAllowed(ctx)
+		publicTrialEnabled = store.PublicTrialAllowed(ctx)
 		return nil
 	}); err != nil {
 		return hostingAndSupportPanelSnapshot{}, err
@@ -13198,6 +13408,7 @@ func (a *App) collectHostingAndSupportPanelSnapshot(ctx context.Context, control
 		Overview:                overview,
 		DemoSettings:            demoSettings,
 		AutoRegistrationEnabled: autoRegistrationEnabled,
+		PublicTrialEnabled:      publicTrialEnabled,
 		CommissionBPS:           commissionBPS,
 		LocalCostPolicy:         localExpensePolicy,
 		ShowCentralRegistry:     showCentralRegistry,
@@ -13258,6 +13469,15 @@ func (a *App) applyHostingAndSupportPanelQuotaChange(snapshot hostingAndSupportP
 
 func (a *App) hostingAndSupportPanelView(r *http.Request, snapshot hostingAndSupportPanelSnapshot) map[string]any {
 	translations := translationsForRequest(r)
+	trialAvailability := a.publicTrialAvailabilityForSettings(r.Context(), snapshot.MainDomain, snapshot.AutoRegistrationEnabled, snapshot.PublicTrialEnabled)
+	trialUnavailableText := ""
+	if !trialAvailability.Enabled {
+		trialUnavailableText = translationOrDefault(translations, trialAvailability.ReasonKey, "Test drive is unavailable until automatic registration and wildcard DNS are configured.")
+	}
+	publicTrialEmbedHTML := ""
+	if trialAvailability.Enabled {
+		publicTrialEmbedHTML = publicTrialSignupEmbedHTML(r, translations)
+	}
 	expensesTitle := translationOrDefault(translations, "expenses_title", "Сервер и расходы")
 	if normalizeDomainName(snapshot.MainDomain) == "sitebrush.com" {
 		expensesTitle = translationOrDefault(translations, "expenses_central_title", "Серверы и расходы")
@@ -13295,26 +13515,31 @@ func (a *App) hostingAndSupportPanelView(r *http.Request, snapshot hostingAndSup
 			"RecipientHour":       serviceMailPerRecipientHourLimit,
 			"RecipientDomainHour": serviceMailPerRecipientDomainHourLimit,
 		},
-		"Backups":                  nil,
-		"DemoSettings":             snapshot.DemoSettings,
-		"DemoStatus":               a.demoSiteStatusView(r.Context(), snapshot.DemoSettings),
-		"DemoCopyScopeLabel":       translationOrDefault(translations, "billing_demo_copy_scope", "Content to download"),
-		"DemoCopyPageLabel":        translationOrDefault(translations, "billing_demo_copy_single_page", "Only the specified page"),
-		"DemoSnapshotLabel":        translationOrDefault(translations, "billing_demo_snapshot", "Current demo copy"),
-		"DemoSnapshotMissingLabel": translationOrDefault(translations, "billing_demo_snapshot_missing", "The copy has not been created yet"),
-		"DemoLastRestoredLabel":    translationOrDefault(translations, "billing_demo_last_restored", "Last content reset"),
-		"DemoNeverRestoredLabel":   translationOrDefault(translations, "billing_demo_never_restored", "No resets yet"),
-		"AutoRegistrationEnabled":  snapshot.AutoRegistrationEnabled,
-		"PublicTrialEmbedHTML":     publicTrialSignupEmbedHTML(r, translations),
-		"CurrentDomain":            domainFromRequest(r),
-		"PanelSnapshotBuiltAt":     snapshot.BuiltAt,
-		"CommissionBPS":            snapshot.CommissionBPS,
-		"CommissionPercent":        fmt.Sprintf("%.2f", float64(snapshot.CommissionBPS)/100),
-		"ShowCommissionSetting":    snapshot.ShowCentralRegistry,
-		"ShowCentralRegistry":      snapshot.ShowCentralRegistry,
-		"ShowDemo":                 snapshot.DemoSettings.Enabled && normalizeDomainName(snapshot.DemoSettings.Domain) != "",
-		"SimplifiedExpenses":       true,
-		"ExpenseServers":           simplifiedExpenseServerViews(snapshot.Servers, snapshot.Clients, snapshot.Invoices),
+		"Backups":                    nil,
+		"DemoSettings":               snapshot.DemoSettings,
+		"DemoStatus":                 a.demoSiteStatusView(r.Context(), snapshot.DemoSettings),
+		"DemoCopyScopeLabel":         translationOrDefault(translations, "billing_demo_copy_scope", "Content to download"),
+		"DemoCopyPageLabel":          translationOrDefault(translations, "billing_demo_copy_single_page", "Only the specified page"),
+		"DemoSnapshotLabel":          translationOrDefault(translations, "billing_demo_snapshot", "Current demo copy"),
+		"DemoSnapshotMissingLabel":   translationOrDefault(translations, "billing_demo_snapshot_missing", "The copy has not been created yet"),
+		"DemoLastRestoredLabel":      translationOrDefault(translations, "billing_demo_last_restored", "Last content reset"),
+		"DemoNeverRestoredLabel":     translationOrDefault(translations, "billing_demo_never_restored", "No resets yet"),
+		"AutoRegistrationEnabled":    snapshot.AutoRegistrationEnabled,
+		"PublicTrialEnabled":         snapshot.PublicTrialEnabled,
+		"PublicTrialAvailable":       trialAvailability.Enabled,
+		"PublicTrialUnavailableText": trialUnavailableText,
+		"PublicTrialWildcardDomain":  trialAvailability.WildcardDomain,
+		"PublicTrialExternalIP":      trialAvailability.ExternalIP,
+		"PublicTrialEmbedHTML":       publicTrialEmbedHTML,
+		"CurrentDomain":              domainFromRequest(r),
+		"PanelSnapshotBuiltAt":       snapshot.BuiltAt,
+		"CommissionBPS":              snapshot.CommissionBPS,
+		"CommissionPercent":          fmt.Sprintf("%.2f", float64(snapshot.CommissionBPS)/100),
+		"ShowCommissionSetting":      snapshot.ShowCentralRegistry,
+		"ShowCentralRegistry":        snapshot.ShowCentralRegistry,
+		"ShowDemo":                   snapshot.DemoSettings.Enabled && normalizeDomainName(snapshot.DemoSettings.Domain) != "",
+		"SimplifiedExpenses":         true,
+		"ExpenseServers":             simplifiedExpenseServerViews(snapshot.Servers, snapshot.Clients, snapshot.Invoices),
 	}
 }
 
@@ -14283,18 +14508,21 @@ func (a *App) hostingAndSupportSiteURL(domain string) string {
 func publicTrialSignupEmbedHTML(r *http.Request, translations map[string]string) string {
 	endpointURL := absoluteURLForPath(r, "/")
 	scriptURL := absoluteURLForPath(r, "/p/static/site_copy.js?v="+url.QueryEscape(publicTrialWidgetScriptVersion()))
-	config := map[string]any{"endpoint": endpointURL}
+	config := map[string]any{"endpoint": endpointURL, "texts": publicTrialWidgetTexts(translations)}
 	configJSON, err := json.Marshal(config)
 	if err != nil {
 		configJSON = []byte(`{"endpoint":` + strconv.Quote(endpointURL) + `}`)
 	}
+	formTitle := template.HTMLEscapeString(translationOrDefault(translations, "public_trial_form_title", "Enter the website where you want to launch SiteBrush:"))
+	fieldLabel := template.HTMLEscapeString(translationOrDefault(translations, "public_trial_field_label", "Website address"))
+	checkButton := template.HTMLEscapeString(translationOrDefault(translations, "public_trial_check_button", "Check website"))
 	return `<form class="SiteBrushPublicTrialForm sitebrush-public-trial-form" data-sitebrush-public-trial-form>
-  <p class="SiteBrushPublicTrialTitle sitebrush-public-trial-title" data-sitebrush-public-trial-title></p>
+  <p class="SiteBrushPublicTrialTitle sitebrush-public-trial-title" data-sitebrush-public-trial-title>` + formTitle + `</p>
   <label class="SiteBrushPublicTrialField sitebrush-public-trial-field">
-    <span class="SiteBrushPublicTrialLabel sitebrush-public-trial-label" data-sitebrush-public-trial-label></span>
+    <span class="SiteBrushPublicTrialLabel sitebrush-public-trial-label" data-sitebrush-public-trial-label>` + fieldLabel + `</span>
     <input class="SiteBrushPublicTrialInput sitebrush-public-trial-input" data-sitebrush-public-trial-input type="text" name="source_url" autocomplete="url" inputmode="url" required>
   </label>
-  <button class="SiteBrushPublicTrialButton sitebrush-public-trial-button" data-sitebrush-public-trial-submit type="submit"></button>
+  <button class="SiteBrushPublicTrialButton sitebrush-public-trial-button" data-sitebrush-public-trial-submit type="submit">` + checkButton + `</button>
 </form>
 <script src="` + template.HTMLEscapeString(scriptURL) + `" data-sitebrush-live-asset></script>
 <script>
@@ -14391,19 +14619,29 @@ func siteAdminEmailsFromDatabase(ctx context.Context, database *sql.DB, domain s
 
 func (a *App) saveHostingAndSupportSettingsFromForm(r *http.Request) string {
 	if err := a.withServerControlDatabaseWrite(r.Context(), "save-hosting-settings", func(database *sql.DB) error {
-		return (hostingandsupport.Store{DB: database}).SaveSettings(r.Context(), r.FormValue("auto_registration_enabled") == "1")
+		return (hostingandsupport.Store{DB: database}).SaveRegistrationSettings(
+			r.Context(),
+			r.FormValue("auto_registration_enabled") == "1",
+			r.FormValue("public_trial_enabled") == "1",
+		)
 	}); err != nil {
 		return err.Error()
 	}
+	a.invalidatePublicTrialAvailability()
 	return a.saveHostingAndSupportDemoSettings(r)
 }
 
 func (a *App) saveHostingAndSupportRegistrationSettingsFromForm(r *http.Request) string {
 	if err := a.withServerControlDatabaseWrite(r.Context(), "save-registration-settings", func(database *sql.DB) error {
-		return (hostingandsupport.Store{DB: database}).SaveSettings(r.Context(), r.FormValue("auto_registration_enabled") == "1")
+		return (hostingandsupport.Store{DB: database}).SaveRegistrationSettings(
+			r.Context(),
+			r.FormValue("auto_registration_enabled") == "1",
+			r.FormValue("public_trial_enabled") == "1",
+		)
 	}); err != nil {
 		return err.Error()
 	}
+	a.invalidatePublicTrialAvailability()
 	return translationOrDefault(translationsForRequest(r), "billing_status_settings_saved", "Billing settings saved.")
 }
 
@@ -22757,6 +22995,7 @@ func (a *App) promoteFirstServerOwner(ctx context.Context, domain, email string)
 		(hostingandsupport.Store{DB: database}).PromoteOwnerIfMissing(ctx, domain, email)
 		return nil
 	})
+	a.invalidatePublicTrialAvailability()
 	a.reportHostingSnapshotAsync(ctx)
 }
 
