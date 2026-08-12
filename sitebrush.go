@@ -450,6 +450,7 @@ type automaticSSLDomainResult struct {
 	retryAfter  time.Time
 	state       string
 	err         error
+	forced      bool
 }
 
 type automaticSSLIPResult struct {
@@ -7059,6 +7060,7 @@ func (a *App) certificateRenewalWebSocket(w http.ResponseWriter, r *http.Request
 		return
 	}
 	defer connection.Close()
+	defer connection.WriteClose()
 	queuedJSON, _ := json.Marshal(map[string]any{"domain": targetDomain, "state": "queued"})
 	if connection.WriteText(queuedJSON) != nil {
 		return
@@ -26431,6 +26433,10 @@ func upgradeToWebSocket(w http.ResponseWriter, r *http.Request) (*webSocketTextW
 }
 
 func (writer *webSocketTextWriter) Close() error { return writer.connection.Close() }
+func (writer *webSocketTextWriter) WriteClose() error {
+	_, err := writer.connection.Write([]byte{0x88, 0x00})
+	return err
+}
 func (writer *webSocketTextWriter) WriteText(payload []byte) error {
 	header := []byte{0x81}
 	payloadLength := len(payload)
@@ -28166,6 +28172,7 @@ func (a *App) runAutomaticSSLProcess(stop <-chan struct{}, certificateManager au
 	nextAttemptAt := make(map[string]time.Time)
 	inFlight := make(map[string]bool)
 	forceResponses := make(map[string][]chan automaticSSLDomainResult)
+	forcePending := make(map[string]bool)
 	serverIPs := make([]net.IP, 0)
 	serverIPsCheckedAt := time.Time{}
 	ipResult := make(chan automaticSSLIPResult, 1)
@@ -28203,9 +28210,11 @@ func (a *App) runAutomaticSSLProcess(stop <-chan struct{}, certificateManager au
 			return
 		}
 		inFlight[domain] = true
+		forceRenewal := forcePending[domain]
+		delete(forcePending, domain)
 		currentServerIPs := append([]net.IP(nil), serverIPs...)
 		go func() {
-			result := a.prepareAutomaticSSLDomain(certificateManager, domain, currentServerIPs)
+			result := a.prepareAutomaticSSLDomainWithPolicy(certificateManager, domain, currentServerIPs, forceRenewal)
 			<-preparationSlots
 			select {
 			case domainResults <- result:
@@ -28236,6 +28245,7 @@ func (a *App) runAutomaticSSLProcess(stop <-chan struct{}, certificateManager au
 				now := time.Now()
 				if request.action == "force" {
 					delete(nextAttemptAt, domain)
+					forcePending[domain] = true
 					if request.response != nil {
 						forceResponses[domain] = append(forceResponses[domain], request.response)
 					}
@@ -28275,13 +28285,18 @@ func (a *App) runAutomaticSSLProcess(stop <-chan struct{}, certificateManager au
 			if result.state == "certificate_error" && result.err != nil {
 				a.logDomainEvent(result.domain, "AUTOCERT background certificate request failed: %v", result.err)
 			}
-			for _, response := range forceResponses[result.domain] {
-				select {
-				case response <- result:
-				default:
-				}
+			if forcePending[result.domain] {
+				delete(nextAttemptAt, result.domain)
 			}
-			delete(forceResponses, result.domain)
+			if result.forced || !forcePending[result.domain] {
+				for _, response := range forceResponses[result.domain] {
+					select {
+					case response <- result:
+					default:
+					}
+				}
+				delete(forceResponses, result.domain)
+			}
 			startDomainPreparation(result.domain, time.Now())
 		case now := <-ticker.C:
 			for domain, lastObservedAt := range observedAt {
@@ -28433,8 +28448,12 @@ func detectExternalIPWithProbe(ctx context.Context, probe automaticSSLExternalIP
 }
 
 func (a *App) prepareAutomaticSSLDomain(certificateManager automaticSSLIssuer, domain string, serverIPs []net.IP) automaticSSLDomainResult {
+	return a.prepareAutomaticSSLDomainWithPolicy(certificateManager, domain, serverIPs, false)
+}
+
+func (a *App) prepareAutomaticSSLDomainWithPolicy(certificateManager automaticSSLIssuer, domain string, serverIPs []net.IP, forceRenewal bool) automaticSSLDomainResult {
 	certificateDomain := normalizeDomainName(domain)
-	result := automaticSSLDomainResult{domain: certificateDomain, retryAfter: time.Now().Add(automaticSSLRefreshInterval)}
+	result := automaticSSLDomainResult{domain: certificateDomain, retryAfter: time.Now().Add(automaticSSLRefreshInterval), forced: forceRenewal}
 	if certificateDomain == "" || autoCertDomainEligibilityError(certificateDomain) != nil {
 		result.state = "ignored"
 		result.retryAfter = time.Now().Add(automaticSSLRetryDelayEligibility)
@@ -28454,7 +28473,7 @@ func (a *App) prepareAutomaticSSLDomain(certificateManager automaticSSLIssuer, d
 	}
 	now := time.Now()
 	_, currentExpiresAt, _ := a.autoCertCachedCertificateFromMemory(certificateDomain, now, 0)
-	if certificate, expiresAt, ok := a.autoCertCachedCertificateFromMemory(certificateDomain, now, automaticSSLCertificateRenewBefore); ok {
+	if certificate, expiresAt, ok := a.autoCertCachedCertificateFromMemory(certificateDomain, now, automaticSSLCertificateRenewBefore); ok && !forceRenewal {
 		result.state = "ready"
 		result.certificate = certificate
 		result.expiresAt = expiresAt

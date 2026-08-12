@@ -9158,9 +9158,25 @@ func TestSimplifiedExpensesRestoresGeneralDemoAndTestDriveSettingsTabs(t *testin
 		`name="demo_site_enabled"`,
 		`id="publicTrialEmbedHTML"`,
 		`data-public-trial-disabled-section`,
+		`function selectSiteSettingsTab(tabName)`,
+		`selectSiteSettingsTab(tabButtonElement.dataset.siteSettingsTab)`,
 	} {
 		if !strings.Contains(body, expectedFragment) {
 			t.Fatalf("simplified settings missing %q", expectedFragment)
+		}
+	}
+}
+
+func TestRussianCertificateRenewalControlsAreTranslated(t *testing.T) {
+	translations := translationsForLanguageCode("ru")
+	for translationKey, expectedText := range map[string]string{
+		"domain_settings_ssl_renew_now":         "Продлить сертификат сейчас",
+		"domain_settings_ssl_renew_connecting":  "Запускаем продление сертификата...",
+		"domain_settings_ssl_renewed":           "Сертификат продлён.",
+		"domain_settings_ssl_connection_closed": "Соединение закрылось до завершения продления сертификата.",
+	} {
+		if translations[translationKey] != expectedText {
+			t.Fatalf("%s = %q, want %q", translationKey, translations[translationKey], expectedText)
 		}
 	}
 }
@@ -10663,6 +10679,47 @@ func TestPrepareAutomaticSSLDomainDoesNotIssueCertificateWhenDNSDiffersFromExter
 	result := application.prepareAutomaticSSLDomain(certificateManager, "customer.example.com", []net.IP{net.ParseIP("8.8.8.8")})
 	if result.state != "waiting_dns" || result.err == nil {
 		t.Fatalf("automatic SSL mismatch result = %+v, want waiting_dns with reason", result)
+	}
+}
+
+func TestForcedAutomaticSSLPreparationDoesNotReuseValidCachedCertificate(t *testing.T) {
+	application, rawDB := newTestApplication(t)
+	application.automaticSSLAvailable = true
+	certificateDomain := "renew.sitebrush.org"
+	if _, err := rawDB.Exec(`INSERT INTO pages(domain,path,title,html,published) VALUES(?,?,?,?,1)`, certificateDomain, "/", "Home", "<h1>Home</h1>"); err != nil {
+		t.Fatalf("insert managed page: %v", err)
+	}
+	application.setDomainAutomaticSSLManual(contextWithDomain(context.Background(), certificateDomain), certificateDomain, true)
+
+	writeCachedAutoCertForTest(t, application, certificateDomain, time.Now().Add(-time.Hour), time.Now().Add(88*24*time.Hour))
+	cacheContext, cancelCache := context.WithCancel(context.Background())
+	defer cancelCache()
+	application.autoCertCertificateCache = startAutoCertCertificateMemoryCache(cacheContext, filepath.Join(application.storageRootDir(), "letsencrypt"))
+
+	previousIPLookup := lookupIPRecords
+	defer func() { lookupIPRecords = previousIPLookup }()
+	serverIP := net.ParseIP("8.8.8.8")
+	lookupIPRecords = func(domain string) ([]net.IP, error) {
+		if domain != certificateDomain {
+			t.Fatalf("unexpected DNS lookup for %q", domain)
+		}
+		return []net.IP{serverIP}, nil
+	}
+
+	_, renewedCertificate, err := generateAutomaticSSLFallbackCertificate(time.Now().Add(time.Minute))
+	if err != nil {
+		t.Fatalf("generate renewed certificate: %v", err)
+	}
+	renewedExpiresAt := time.Now().Add(90 * 24 * time.Hour)
+	issueCount := 0
+	certificateManager := automaticSSLIssuerFunc(func(context.Context, string) channelacme.IssueResult {
+		issueCount++
+		return channelacme.IssueResult{Certificate: renewedCertificate, ExpiresAt: renewedExpiresAt}
+	})
+
+	result := application.prepareAutomaticSSLDomainWithPolicy(certificateManager, certificateDomain, []net.IP{serverIP}, true)
+	if issueCount != 1 || result.state != "ready" || !result.forced || result.certificate != renewedCertificate {
+		t.Fatalf("forced renewal result = %+v issue_count=%d", result, issueCount)
 	}
 }
 
