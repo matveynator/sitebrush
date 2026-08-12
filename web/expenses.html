@@ -225,13 +225,17 @@
       <nav class="hosting-installation-tabs mb-3" role="tablist" aria-label="{{index .T "domain_settings_title"}}" data-site-settings-tabs>
         <button type="button" class="hosting-installation-tab active" role="tab" aria-selected="true" data-site-settings-tab="general">{{index .T "billing_registration_title"}}</button>
         <button type="button" class="hosting-installation-tab" role="tab" aria-selected="false" data-site-settings-tab="demo">{{index .T "billing_demo_title"}}</button>
-        <button type="button" class="hosting-installation-tab" role="tab" aria-selected="false" data-site-settings-tab="test-drive">{{index .T "public_trial_embed_title"}}</button>
       </nav>
 
       <div data-site-settings-panel="general">
         <h2>{{index .T "billing_registration_title"}}</h2>
         <p class="text-muted">{{index .T "billing_registration_hint"}}</p>
         {{template "registration-settings-form" .}}
+        {{if .PublicTrialEnabled}}
+        <div class="mt-4">
+          {{template "public-trial-settings" .}}
+        </div>
+        {{end}}
       </div>
 
       <div data-site-settings-panel="demo" hidden>
@@ -240,9 +244,6 @@
         {{template "demo-settings-form" .}}
       </div>
 
-      <div data-site-settings-panel="test-drive" hidden>
-        {{template "public-trial-settings" .}}
-      </div>
     </section>
 
     {{template "public-trial-preview-modal" .}}
@@ -2437,21 +2438,6 @@
     statusElement.classList.toggle('billing-save-status-error', !successful);
   }
 
-  function updateBillingRegistrationDependentSections(formElement) {
-    const actionInputElement = formElement.querySelector('input[name="billing_action"]');
-    if (!actionInputElement || actionInputElement.value !== 'registration_settings') {
-      return;
-    }
-    const registrationCheckboxElement = formElement.querySelector('input[name="auto_registration_enabled"]');
-    const embedSectionElement = document.querySelector('[data-public-trial-embed-section]');
-    const disabledSectionElement = document.querySelector('[data-public-trial-disabled-section]');
-    if (!registrationCheckboxElement || !embedSectionElement || !disabledSectionElement) {
-      return;
-    }
-    embedSectionElement.classList.toggle('d-none', !registrationCheckboxElement.checked);
-    disabledSectionElement.classList.toggle('d-none', registrationCheckboxElement.checked);
-  }
-
   function readBillingSaveResponse(responseObject) {
     return responseObject.text().then(function parseBillingSaveResponse(responseText) {
       let responsePayload = {};
@@ -2478,7 +2464,10 @@
       headers: { 'Accept': 'application/json' }
     }).then(readBillingSaveResponse).then(function renderBillingSaveSuccess(responsePayload) {
       setBillingSaveStatus(statusElement, responsePayload.status || '', true);
-      updateBillingRegistrationDependentSections(formElement);
+      const actionInputElement = formElement.querySelector('input[name="billing_action"]');
+      if (actionInputElement && actionInputElement.value === 'registration_settings') {
+        window.location.reload();
+      }
     }).catch(function renderBillingSaveError(saveError) {
       setBillingSaveStatus(statusElement, saveError.message || String(saveError), false);
     }).finally(function enableBillingSaveButton() {
@@ -3110,11 +3099,35 @@
 <form method="post" action="?expenses" class="billing-registration-settings-form" data-billing-ajax-save>
   <input type="hidden" name="billing_action" value="registration_settings">
   <label class="checkbox-row">
-    <input type="checkbox" name="auto_registration_enabled" value="1" {{if .AutoRegistrationEnabled}}checked{{end}}>
+    <input type="checkbox" name="auto_registration_enabled" value="1" {{if .AutoRegistrationEnabled}}checked{{end}} data-auto-registration-toggle>
     <span>{{index .T "billing_registration_allow"}}</span>
+  </label>
+  <label class="checkbox-row {{if not .AutoRegistrationEnabled}}d-none{{end}}" data-public-trial-toggle-row>
+    <input type="checkbox" name="public_trial_enabled" value="1" {{if .PublicTrialEnabled}}checked{{end}} {{if not .AutoRegistrationEnabled}}disabled{{end}} data-public-trial-toggle>
+    <span>{{index .T "billing_registration_allow_test_drive"}}</span>
   </label>
   <button type="submit" class="btn btn-primary"><img src="/p/static/save-page.png" alt="">{{index .T "billing_save"}}</button>
 </form>
+<script>
+(function initializeRegistrationPermissionControls() {
+  const automaticRegistrationElement = document.querySelector('[data-auto-registration-toggle]');
+  const publicTrialRowElement = document.querySelector('[data-public-trial-toggle-row]');
+  const publicTrialElement = document.querySelector('[data-public-trial-toggle]');
+  if (!automaticRegistrationElement || !publicTrialRowElement || !publicTrialElement) {
+    return;
+  }
+  function renderRegistrationPermissionControls() {
+    const automaticRegistrationEnabled = automaticRegistrationElement.checked;
+    publicTrialRowElement.classList.toggle('d-none', !automaticRegistrationEnabled);
+    publicTrialElement.disabled = !automaticRegistrationEnabled;
+    if (!automaticRegistrationEnabled) {
+      publicTrialElement.checked = false;
+    }
+  }
+  automaticRegistrationElement.addEventListener('change', renderRegistrationPermissionControls);
+  renderRegistrationPermissionControls();
+})();
+</script>
 {{end}}
 
 {{define "demo-settings-form"}}
@@ -3141,24 +3154,30 @@
 {{end}}
 
 {{define "public-trial-settings"}}
-<h2>Test Drive</h2>
+<h2>{{index .T "public_trial_embed_title"}}</h2>
+{{if .PublicTrialAvailable}}
 <p class="text-muted">{{index .T "public_trial_embed_hint"}}</p>
-<div class="{{if not .AutoRegistrationEnabled}}d-none{{end}}" data-public-trial-embed-section>
+<div data-public-trial-embed-section>
   <div class="d-flex flex-wrap gap-2 mb-3">
     <button type="button" class="btn btn-outline-primary" data-public-trial-copy-html><img src="/p/static/copy.png" alt="">{{index .T "public_trial_copy_html"}}</button>
     <button type="button" class="btn btn-outline-primary" data-bs-toggle="modal" data-bs-target="#publicTrialPreviewModal" data-public-trial-preview><img src="/p/static/publish.png" alt="">{{index .T "public_trial_preview"}}</button>
   </div>
   <textarea id="publicTrialEmbedHTML" class="form-control" rows="10" readonly>{{.PublicTrialEmbedHTML}}</textarea>
 </div>
-<div class="{{if .AutoRegistrationEnabled}}d-none{{end}}" data-public-trial-disabled-section>
+{{else}}
+<p class="text-muted">{{index .T "public_trial_setup_hint"}}</p>
+<div data-public-trial-disabled-section>
   <div class="alert alert-warning mb-0" role="alert">
     <strong>{{index .T "public_trial_disabled_title"}}</strong>
-    <div>{{index .T "public_trial_disabled_text"}}</div>
+    <div>{{.PublicTrialUnavailableText}}</div>
+    {{if .PublicTrialWildcardDomain}}<div class="mt-2"><code>{{.PublicTrialWildcardDomain}}</code>{{if .PublicTrialExternalIP}} → <code>{{.PublicTrialExternalIP}}</code>{{end}}</div>{{end}}
   </div>
 </div>
 {{end}}
+{{end}}
 
 {{define "public-trial-preview-modal"}}
+{{if .PublicTrialAvailable}}
 <div class="modal fade" id="publicTrialPreviewModal" tabindex="-1" aria-hidden="true">
   <div class="modal-dialog modal-xl modal-dialog-centered"><div class="modal-content">
     <div class="modal-header">
@@ -3170,4 +3189,5 @@
     </div>
   </div></div>
 </div>
+{{end}}
 {{end}}

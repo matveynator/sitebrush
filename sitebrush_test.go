@@ -2054,8 +2054,8 @@ func TestExpensesTemplateShowsOnlyLocalServerAndEnabledDemoOutsideSitebrushCom(t
 		`data-hosting-installation-tab="settings"`,
 		`data-site-settings-tab="general"`,
 		`data-site-settings-tab="demo"`,
-		`data-site-settings-tab="test-drive"`,
 		`data-site-settings-panel="demo"`,
+		`name="public_trial_enabled"`,
 		`name="demo_site_enabled"`,
 	} {
 		if !strings.Contains(disabledDemoHTML, settingsFragment) {
@@ -9346,18 +9346,209 @@ func TestExternalSiteImportPrimaryActionsAreGreen(t *testing.T) {
 
 func TestPublicTrialEmbedKeepsWidgetLiveAndVersioned(t *testing.T) {
 	request := httptest.NewRequest(http.MethodGet, "https://sitebrush.example/?expenses", nil)
-	embedHTML := publicTrialSignupEmbedHTML(request, nil)
+	embedHTML := publicTrialSignupEmbedHTML(request, translationsForLanguageCode("ru"))
 	if !strings.Contains(embedHTML, `data-sitebrush-live-asset`) {
 		t.Fatalf("public trial embed does not preserve the live widget: %s", embedHTML)
 	}
 	if !strings.Contains(embedHTML, `src="https://sitebrush.example/p/static/site_copy.js?v=`+publicTrialWidgetScriptVersion()+`"`) {
 		t.Fatalf("public trial embed does not version the widget: %s", embedHTML)
 	}
+	for _, localizedText := range []string{"Введите сайт, на котором надо запустить SiteBrush:", "Адрес сайта", "Проверить сайт", `"texts"`} {
+		if !strings.Contains(embedHTML, localizedText) {
+			t.Fatalf("public trial embed does not contain localized fallback %q: %s", localizedText, embedHTML)
+		}
+	}
+}
+
+func TestPublicTrialInterfaceIsCompleteForEveryLanguage(t *testing.T) {
+	requiredKeys := []string{
+		"billing_registration_allow_test_drive",
+		"public_trial_embed_title",
+		"public_trial_embed_hint",
+		"public_trial_setup_hint",
+		"public_trial_form_title",
+		"public_trial_field_label",
+		"public_trial_check_button",
+		"public_trial_copy_first_page",
+		"public_trial_oversize_result",
+		"public_trial_partial_ready",
+		"public_trial_partial_timeout",
+		"public_trial_reconnecting",
+		"public_trial_single_page_required",
+		"public_trial_usable_while_checking",
+		"public_trial_disabled_owner_domain",
+		"public_trial_disabled_registration",
+		"public_trial_disabled_permission",
+		"public_trial_disabled_external_ip",
+		"public_trial_disabled_wildcard_missing",
+		"public_trial_disabled_wildcard_mismatch",
+	}
+	for languageCode, translations := range translationCatalog {
+		for _, translationKey := range requiredKeys {
+			if strings.TrimSpace(translations[translationKey]) == "" {
+				t.Fatalf("language %s is missing %s", languageCode, translationKey)
+			}
+		}
+	}
+}
+
+func TestSiteRequestInterfaceIsCompleteForEveryLanguage(t *testing.T) {
+	requiredKeys := []string{
+		"setup_request_intro",
+		"setup_request_phone",
+		"setup_request_details",
+		"setup_request_understood",
+		"setup_request_no_plans",
+		"setup_request_submit",
+	}
+	for languageCode, translations := range translationCatalog {
+		for _, translationKey := range requiredKeys {
+			if strings.TrimSpace(translations[translationKey]) == "" {
+				t.Fatalf("language %s is missing %s", languageCode, translationKey)
+			}
+		}
+	}
+}
+
+func TestProfileEmailDeliveryInterfaceIsCompleteForEveryLanguage(t *testing.T) {
+	requiredKeys := []string{
+		"profile_password_code_status_not_sent",
+		"profile_email_delivery_details_success",
+		"profile_email_delivery_details_error",
+		"profile_email_delivery_modal_code_label",
+		"profile_email_delivery_modal_close",
+		"profile_email_delivery_success_title",
+		"profile_email_delivery_success_summary",
+		"profile_email_delivery_success_code",
+		"profile_email_delivery_success_description",
+		"profile_email_delivery_success_next_title",
+		"profile_email_delivery_success_next_text",
+		"profile_email_delivery_error_title",
+		"profile_email_delivery_error_summary",
+		"profile_email_delivery_code_unknown",
+		"profile_email_delivery_generic_description",
+		"profile_email_delivery_fix_title",
+		"profile_email_delivery_generic_fix",
+	}
+	for languageCode, translations := range translationCatalog {
+		for _, translationKey := range requiredKeys {
+			if strings.TrimSpace(translations[translationKey]) == "" {
+				t.Fatalf("language %s is missing %s", languageCode, translationKey)
+			}
+		}
+	}
+}
+
+func TestPublicTrialWildcardRequiresThreeRandomDomainsOnExternalIP(t *testing.T) {
+	previousExternalIPLookup := lookupServerExternalIP
+	previousIPLookup := lookupIPRecords
+	t.Cleanup(func() {
+		lookupServerExternalIP = previousExternalIPLookup
+		lookupIPRecords = previousIPLookup
+	})
+
+	lookupServerExternalIP = func(context.Context) (string, error) { return "203.0.113.10", nil }
+	lookedUpDomains := make(chan string, publicTrialWildcardProbeCount)
+	lookupIPRecords = func(domain string) ([]net.IP, error) {
+		lookedUpDomains <- domain
+		return []net.IP{net.ParseIP("203.0.113.10")}, nil
+	}
+	availability := checkPublicTrialWildcard("example.com")
+	if !availability.Enabled || availability.ExternalIP != "203.0.113.10" || availability.WildcardDomain != "*.example.com" {
+		t.Fatalf("availability = %#v", availability)
+	}
+	domainSet := make(map[string]struct{}, publicTrialWildcardProbeCount)
+	for probeIndex := 0; probeIndex < publicTrialWildcardProbeCount; probeIndex++ {
+		probeDomain := <-lookedUpDomains
+		if !strings.HasPrefix(probeDomain, "sitebrush-trial-check-") || !strings.HasSuffix(probeDomain, ".example.com") {
+			t.Fatalf("unexpected wildcard probe domain %q", probeDomain)
+		}
+		domainSet[probeDomain] = struct{}{}
+	}
+	if len(domainSet) != publicTrialWildcardProbeCount {
+		t.Fatalf("wildcard probes are not unique: %#v", domainSet)
+	}
+
+	lookupResponses := make(chan []net.IP, publicTrialWildcardProbeCount)
+	lookupResponses <- []net.IP{net.ParseIP("203.0.113.10")}
+	lookupResponses <- []net.IP{net.ParseIP("203.0.113.10")}
+	lookupResponses <- []net.IP{net.ParseIP("198.51.100.20")}
+	lookupIPRecords = func(string) ([]net.IP, error) { return <-lookupResponses, nil }
+	availability = checkPublicTrialWildcard("example.com")
+	if availability.Enabled || availability.ReasonKey != "public_trial_disabled_wildcard_mismatch" {
+		t.Fatalf("mismatched wildcard availability = %#v", availability)
+	}
+
+	lookupServerExternalIP = func(context.Context) (string, error) { return "192.168.1.20", nil }
+	availability = checkPublicTrialWildcard("example.com")
+	if availability.Enabled || availability.ReasonKey != "public_trial_disabled_external_ip" {
+		t.Fatalf("private external IP availability = %#v", availability)
+	}
+}
+
+func TestPublicTrialAvailabilityWorkerCachesAndInvalidatesDNSChecks(t *testing.T) {
+	previousExternalIPLookup := lookupServerExternalIP
+	previousIPLookup := lookupIPRecords
+	t.Cleanup(func() {
+		lookupServerExternalIP = previousExternalIPLookup
+		lookupIPRecords = previousIPLookup
+	})
+
+	externalIPLookups := make(chan struct{}, 4)
+	domainLookups := make(chan string, publicTrialWildcardProbeCount*3)
+	lookupServerExternalIP = func(context.Context) (string, error) {
+		externalIPLookups <- struct{}{}
+		return "203.0.113.10", nil
+	}
+	lookupIPRecords = func(domain string) ([]net.IP, error) {
+		domainLookups <- domain
+		return []net.IP{net.ParseIP("203.0.113.10")}, nil
+	}
+
+	stop := make(chan struct{})
+	application := &App{publicTrialAvailability: startPublicTrialAvailabilityWorker(stop)}
+	t.Cleanup(func() { close(stop) })
+	disabledAvailability := application.publicTrialAvailabilityForSettings(context.Background(), "example.com", true, false)
+	if disabledAvailability.Enabled || disabledAvailability.ReasonKey != "public_trial_disabled_permission" {
+		t.Fatalf("availability without explicit permission = %#v", disabledAvailability)
+	}
+	if len(externalIPLookups) != 0 || len(domainLookups) != 0 {
+		t.Fatalf("test drive without explicit permission performed network checks")
+	}
+	for requestIndex := 0; requestIndex < 2; requestIndex++ {
+		availability := application.publicTrialAvailabilityForSettings(context.Background(), "example.com", true, true)
+		if !availability.Enabled {
+			t.Fatalf("cached availability %d = %#v", requestIndex, availability)
+		}
+	}
+	if len(externalIPLookups) != 1 || len(domainLookups) != publicTrialWildcardProbeCount {
+		t.Fatalf("cache did not coalesce probes: external=%d dns=%d", len(externalIPLookups), len(domainLookups))
+	}
+
+	application.invalidatePublicTrialAvailability()
+	availability := application.publicTrialAvailabilityForSettings(context.Background(), "example.com", true, true)
+	if !availability.Enabled {
+		t.Fatalf("availability after invalidation = %#v", availability)
+	}
+	if len(externalIPLookups) != 2 || len(domainLookups) != publicTrialWildcardProbeCount*2 {
+		t.Fatalf("invalidation did not refresh probes: external=%d dns=%d", len(externalIPLookups), len(domainLookups))
+	}
 }
 
 func TestPublicTrialEndpointsAllowCredentialFreeCrossOriginEmbedding(t *testing.T) {
+	previousExternalIPLookup := lookupServerExternalIP
+	previousIPLookup := lookupIPRecords
+	lookupServerExternalIP = func(context.Context) (string, error) { return "203.0.113.10", nil }
+	lookupIPRecords = func(string) ([]net.IP, error) { return []net.IP{net.ParseIP("203.0.113.10")}, nil }
+	t.Cleanup(func() {
+		lookupServerExternalIP = previousExternalIPLookup
+		lookupIPRecords = previousIPLookup
+	})
 	application := newRouterTestApplication(t)
 	controlDatabase := setupBillingOwnerForTest(t, application, "sitebrush.example", "owner@sitebrush.example", true)
+	if err := (hostingandsupport.Store{DB: controlDatabase}).SaveRegistrationSettings(context.Background(), true, true); err != nil {
+		t.Fatal(err)
+	}
 	if err := controlDatabase.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -9389,6 +9580,7 @@ func TestPublicTrialEndpointsAllowCredentialFreeCrossOriginEmbedding(t *testing.
 	}
 	getRequest := httptest.NewRequest(http.MethodGet, "https://sitebrush.example/?trial_site_texts", nil)
 	getRequest.Header.Set("Origin", "https://embedded.example")
+	getRequest.Header.Set("Accept-Language", "ru-RU,ru;q=0.9,en;q=0.8")
 	getRequest = getRequest.WithContext(contextWithDomain(getRequest.Context(), "sitebrush.example"))
 	getResponse := httptest.NewRecorder()
 	application.route(getResponse, getRequest)
@@ -9397,6 +9589,9 @@ func TestPublicTrialEndpointsAllowCredentialFreeCrossOriginEmbedding(t *testing.
 	}
 	if allowOrigin := getResponse.Header().Get("Access-Control-Allow-Origin"); allowOrigin != "*" {
 		t.Fatalf("cross-origin texts Access-Control-Allow-Origin = %q, want *", allowOrigin)
+	}
+	if !strings.Contains(getResponse.Body.String(), "Проверить сайт") {
+		t.Fatalf("cross-origin texts do not follow the visitor language: %s", getResponse.Body.String())
 	}
 
 	nonTrialRequest := httptest.NewRequest(http.MethodGet, "https://sitebrush.example/", nil)
@@ -9479,7 +9674,7 @@ func TestExpiredPublicTrialCleanupKeepsRegisteredSiteAndDeletesAnonymousSite(t *
 	}
 }
 
-func TestSimplifiedExpensesRestoresGeneralDemoAndTestDriveSettingsTabs(t *testing.T) {
+func TestSimplifiedExpensesShowsTestDriveUnderRegistrationAfterExplicitPermission(t *testing.T) {
 	templateBytes, err := fs.ReadFile(embeddedWebFiles, "web/expenses.html")
 	if err != nil {
 		t.Fatal(err)
@@ -9489,22 +9684,25 @@ func TestSimplifiedExpensesRestoresGeneralDemoAndTestDriveSettingsTabs(t *testin
 		t.Fatal(err)
 	}
 	view := map[string]any{
-		"Domain":                   "sitebrush.example",
-		"Title":                    "Server expenses",
-		"T":                        translationsForLanguageCode("en"),
-		"SimplifiedExpenses":       true,
-		"ExpenseServers":           []simplifiedExpenseServerView{},
-		"ShowCentralRegistry":      false,
-		"DemoSettings":             demo.Settings{},
-		"DemoStatus":               demoSiteStatusView{},
-		"DemoCopyScopeLabel":       "Content to download",
-		"DemoCopyPageLabel":        "Only the specified page",
-		"DemoSnapshotLabel":        "Current demo copy",
-		"DemoSnapshotMissingLabel": "The copy has not been created yet",
-		"DemoLastRestoredLabel":    "Last content reset",
-		"DemoNeverRestoredLabel":   "No resets yet",
-		"AutoRegistrationEnabled":  false,
-		"PublicTrialEmbedHTML":     "<form data-sitebrush-public-trial-form></form>",
+		"Domain":                     "sitebrush.example",
+		"Title":                      "Server expenses",
+		"T":                          translationsForLanguageCode("en"),
+		"SimplifiedExpenses":         true,
+		"ExpenseServers":             []simplifiedExpenseServerView{},
+		"ShowCentralRegistry":        false,
+		"DemoSettings":               demo.Settings{},
+		"DemoStatus":                 demoSiteStatusView{},
+		"DemoCopyScopeLabel":         "Content to download",
+		"DemoCopyPageLabel":          "Only the specified page",
+		"DemoSnapshotLabel":          "Current demo copy",
+		"DemoSnapshotMissingLabel":   "The copy has not been created yet",
+		"DemoLastRestoredLabel":      "Last content reset",
+		"DemoNeverRestoredLabel":     "No resets yet",
+		"AutoRegistrationEnabled":    false,
+		"PublicTrialEnabled":         false,
+		"PublicTrialAvailable":       false,
+		"PublicTrialUnavailableText": "Enable automatic registration and wildcard DNS.",
+		"PublicTrialEmbedHTML":       "<form data-sitebrush-public-trial-form></form>",
 	}
 	var rendered bytes.Buffer
 	if err := parsedTemplate.Execute(&rendered, view); err != nil {
@@ -9515,20 +9713,41 @@ func TestSimplifiedExpensesRestoresGeneralDemoAndTestDriveSettingsTabs(t *testin
 		`data-hosting-installation-tab="settings"`,
 		`data-site-settings-tab="general"`,
 		`data-site-settings-tab="demo"`,
-		`data-site-settings-tab="test-drive"`,
 		`data-site-settings-panel="general"`,
 		`data-site-settings-panel="demo"`,
-		`data-site-settings-panel="test-drive"`,
 		`name="auto_registration_enabled"`,
+		`name="public_trial_enabled"`,
 		`name="demo_site_enabled"`,
-		`id="publicTrialEmbedHTML"`,
-		`data-public-trial-disabled-section`,
 		`function selectSiteSettingsTab(tabName)`,
 		`selectSiteSettingsTab(tabButtonElement.dataset.siteSettingsTab)`,
 	} {
 		if !strings.Contains(body, expectedFragment) {
 			t.Fatalf("simplified settings missing %q", expectedFragment)
 		}
+	}
+	if strings.Contains(body, `data-public-trial-disabled-section`) || strings.Contains(body, `id="publicTrialEmbedHTML"`) || strings.Contains(body, `id="publicTrialPreviewModal"`) {
+		t.Fatalf("test drive without explicit permission rendered DNS instructions, form or preview: %s", body)
+	}
+
+	view["AutoRegistrationEnabled"] = true
+	view["PublicTrialEnabled"] = true
+	var unavailableRendered bytes.Buffer
+	if err := parsedTemplate.Execute(&unavailableRendered, view); err != nil {
+		t.Fatal(err)
+	}
+	unavailableBody := unavailableRendered.String()
+	if !strings.Contains(unavailableBody, `data-public-trial-disabled-section`) || strings.Contains(unavailableBody, `id="publicTrialEmbedHTML"`) {
+		t.Fatalf("permitted test drive without DNS did not render only its DNS instructions: %s", unavailableBody)
+	}
+
+	view["PublicTrialAvailable"] = true
+	var availableRendered bytes.Buffer
+	if err := parsedTemplate.Execute(&availableRendered, view); err != nil {
+		t.Fatal(err)
+	}
+	availableBody := availableRendered.String()
+	if !strings.Contains(availableBody, `id="publicTrialEmbedHTML"`) || !strings.Contains(availableBody, `id="publicTrialPreviewModal"`) || strings.Contains(availableBody, `data-public-trial-disabled-section`) {
+		t.Fatalf("enabled test drive did not render only its active controls: %s", availableBody)
 	}
 }
 
@@ -9872,6 +10091,31 @@ func TestFilesPageDoesNotAutoLoadImageAssets(t *testing.T) {
 	}
 	if strings.Contains(body, `files_download_count`) || strings.Contains(body, `Скачиваний:`) || strings.Contains(body, `Downloads:`) {
 		t.Fatalf("files page still renders download counters: %s", body)
+	}
+}
+
+func TestFileManagerMobileLayoutUsesCardsWithoutHorizontalScrolling(t *testing.T) {
+	templateBytes, err := fs.ReadFile(embeddedWebFiles, "web/files.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	templateText := string(templateBytes)
+	for _, expectedFragment := range []string{
+		`@media (max-width: 900px)`,
+		`.file-list-panel .table-responsive { overflow:visible;`,
+		`.file-list-panel tr[data-file-row] { display:grid;`,
+		`grid-template-areas:"preview file file" "size size date" "access access access" "actions actions actions"`,
+		`data-label="{{index $.T "files_col_size"}}"`,
+		`data-label="{{index $.T "files_col_access"}}"`,
+		`class="file-access-details" data-file-access-details`,
+		`accessDetailsElement.open = !compactFileLayout`,
+		`background:#fafbfb`,
+		`background:#24282a`,
+		`class="file-delete-form"`,
+	} {
+		if !strings.Contains(templateText, expectedFragment) {
+			t.Fatalf("mobile file manager layout is missing %q", expectedFragment)
+		}
 	}
 }
 
