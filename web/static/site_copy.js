@@ -33,6 +33,7 @@
       '.SiteBrushCopySiteProgress{height:22px;border-radius:999px;background:rgba(0,0,0,.38);overflow:hidden;margin-top:12px}',
       '.SiteBrushCopySiteProgressBar{height:100%;width:0%;background:#95e5ef;color:#252525;text-align:center;font-size:12px;font-weight:700;line-height:22px;transition:width .18s ease}',
       '.SiteBrushCopySiteStatus{margin:12px 0 0;color:#fff;font-size:14px;line-height:1.4;overflow-wrap:anywhere}',
+      '.SiteBrushCopySiteStatus.is-success{color:#8ee99b}.SiteBrushCopySiteStatus.is-warning{color:#ffbd66}.SiteBrushCopySiteStatus.is-error{color:#ff8f96}',
       '.SiteBrushCopySiteURL{margin-top:5px;color:#b7b7b7;font-size:12px;overflow-wrap:anywhere}',
       '.SiteBrushCopySiteQuota{display:grid;gap:4px;margin-top:12px;border:1px solid rgba(149,229,239,.28);border-radius:10px;padding:10px;font-size:13px}',
       '.SiteBrushCopySiteQuotaLine{display:flex;justify-content:space-between;gap:12px}',
@@ -50,8 +51,12 @@
       '@media (max-width:640px){.SiteBrushCopySiteDialog{padding:14px}.SiteBrushCopySitePrimaryRow,.SiteBrushCopySiteSecondaryGrid{grid-template-columns:1fr}.SiteBrushCopySiteActions{flex-direction:column}.SiteBrushCopySiteButton,.SiteBrushCopySiteSecondaryButton{width:100%}}',
       '.SiteBrushCopySiteButton:hover,.SiteBrushCopySiteSecondaryButton:hover,.SiteBrushPublicTrialForm button:hover{border-color:#95e5ef;background:rgba(149,229,239,.28)}',
       '.SiteBrushCopySiteContinueButton{border-color:#2fbf71!important;background:#198754!important;color:#fff!important;box-shadow:0 0 0 1px rgba(25,135,84,.22)}',
-      '.SiteBrushCopySiteContinueButton:hover{border-color:#48d589!important;background:#157347!important;color:#fff!important}'
+      '.SiteBrushCopySiteContinueButton:hover{border-color:#48d589!important;background:#157347!important;color:#fff!important}',
+      '@media (max-width:640px){.SiteBrushCopySiteOverlay{align-items:flex-start;padding:8px;background:linear-gradient(145deg,rgba(3,45,36,.86),rgba(8,122,85,.82));overflow:auto}.SiteBrushCopySiteDialog{width:100%;max-height:calc(100dvh - 16px);padding:18px;border:1px solid rgba(8,122,85,.25);border-top:5px solid #0c9564;border-radius:20px;background:#fbfffd;color:#12352d;box-shadow:0 18px 48px rgba(3,71,50,.28)}.SiteBrushCopySiteClose{color:#527168}.SiteBrushCopySiteField{color:#315e53}.SiteBrushCopySiteInput,.SiteBrushCopySiteSelect,.SiteBrushPublicTrialForm input{min-height:48px;border:2px solid #9ed8df;border-radius:12px;background:#e8f7fa;color:#12352d;font-size:16px}.SiteBrushCopySiteInput::placeholder,.SiteBrushPublicTrialForm input::placeholder{color:#64827a}.SiteBrushCopySiteInput:focus,.SiteBrushCopySiteSelect:focus,.SiteBrushPublicTrialForm input:focus{border-color:#087a55;outline:0;box-shadow:0 0 0 4px rgba(8,122,85,.2)}.SiteBrushCopySiteButton,.SiteBrushCopySiteContinueButton,.SiteBrushPublicTrialForm button{min-height:48px;border:2px solid #087a55!important;border-radius:12px;background:linear-gradient(135deg,#dff6fb,#bfeaf2)!important;color:#075d42!important;font-size:16px;box-shadow:0 9px 22px rgba(8,122,85,.2)}.SiteBrushCopySiteSecondaryButton{min-height:48px;border:1px solid #75bfcb;border-radius:12px;background:#e8f7fa;color:#076879;font-size:16px}.SiteBrushCopySiteButton:disabled{border-color:#b8cbc6!important;background:#e4ece9!important;color:#71847f!important;opacity:1;box-shadow:none}.SiteBrushCopySiteProgress{height:16px;background:#d9eeea}.SiteBrushCopySiteProgressBar{height:16px;background:linear-gradient(90deg,#087a55,#34c184);color:#fff;line-height:16px}.SiteBrushCopySiteStatus{color:#12352d}.SiteBrushCopySiteStatus.is-success{color:#087a55}.SiteBrushCopySiteStatus.is-warning{color:#a65200}.SiteBrushCopySiteStatus.is-error{color:#a92731}.SiteBrushCopySiteURL,.SiteBrushCopySiteResourceMeta{color:#527168}.SiteBrushCopySiteQuota,.SiteBrushCopySiteResources{border-color:rgba(8,122,85,.24);background:#fff}.SiteBrushCopySiteResource{border-color:rgba(8,122,85,.15)}.SiteBrushCopySiteResourceKind{background:#e8f7fa;color:#076879}.SiteBrushCopySiteResourceReason{color:#a92731}.SiteBrushCopySiteQuotaStatus.is-ok{color:#087a55}.SiteBrushCopySiteQuotaStatus.is-error{color:#a65200}.SiteBrushPublicTrialForm{border:1px solid rgba(8,122,85,.24);border-top:5px solid #0c9564;background:#fbfffd;color:#12352d;box-shadow:0 16px 42px rgba(3,71,50,.18)}.SiteBrushPublicTrialForm p{color:#0a4437}.SiteBrushPublicTrialForm label{color:#527168}}',
+      '@media (max-width:640px) and (prefers-color-scheme:dark){.SiteBrushCopySiteOverlay{background:linear-gradient(145deg,rgba(3,45,36,.94),rgba(7,83,61,.92))}.SiteBrushCopySiteDialog,.SiteBrushPublicTrialForm{border-color:rgba(140,232,241,.24);border-top-color:#78efae;background:#0b3b31;color:#f2fff9;box-shadow:0 20px 54px rgba(0,18,14,.52)}.SiteBrushCopySiteTitle,.SiteBrushPublicTrialForm p{color:#f2fff9}.SiteBrushCopySiteClose,.SiteBrushCopySiteField,.SiteBrushPublicTrialForm label,.SiteBrushCopySiteURL,.SiteBrushCopySiteResourceMeta{color:#b9d8cf}.SiteBrushCopySiteInput,.SiteBrushCopySiteSelect,.SiteBrushPublicTrialForm input{border-color:#4b9ead;background:#123f46;color:#f2fff9}.SiteBrushCopySiteInput::placeholder,.SiteBrushPublicTrialForm input::placeholder{color:#a7cbc3}.SiteBrushCopySiteInput:focus,.SiteBrushCopySiteSelect:focus,.SiteBrushPublicTrialForm input:focus{border-color:#78efae;background:#164b50;box-shadow:0 0 0 4px rgba(120,239,174,.2)}.SiteBrushCopySiteButton,.SiteBrushCopySiteContinueButton,.SiteBrushPublicTrialForm button{border-color:#78efae!important;background:linear-gradient(135deg,#bcecf4,#8fd9e6)!important;color:#043f2d!important}.SiteBrushCopySiteSecondaryButton{border-color:#4b9ead;background:#123f46;color:#b9f4fa}.SiteBrushCopySiteProgress{background:#173f37}.SiteBrushCopySiteQuota,.SiteBrushCopySiteResources{border-color:rgba(140,232,241,.24);background:#103f35}.SiteBrushCopySiteResource{border-color:rgba(140,232,241,.16)}.SiteBrushCopySiteResourceKind{background:#123f46;color:#b9f4fa}.SiteBrushCopySiteStatus{color:#f2fff9}.SiteBrushCopySiteStatus.is-success{color:#78efae}.SiteBrushCopySiteStatus.is-warning{color:#ffb65a}.SiteBrushCopySiteStatus.is-error,.SiteBrushCopySiteResourceReason{color:#ff8f96}.SiteBrushCopySiteQuotaStatus.is-ok{color:#78efae}.SiteBrushCopySiteQuotaStatus.is-error{color:#ffb65a}}',
+      '@media (max-width:640px){.SiteBrushCopySiteOverlay{background:#c7c8bf}.SiteBrushCopySiteDialog,.SiteBrushPublicTrialForm,.SiteBrushCopySiteQuota,.SiteBrushCopySiteResources{border-color:rgba(31,54,45,.24);border-top-color:#1f362d;background:#f9faf9;color:#12151d}.SiteBrushCopySiteTitle,.SiteBrushPublicTrialForm p{color:#bf3a20}.SiteBrushCopySiteClose,.SiteBrushCopySiteField,.SiteBrushPublicTrialForm label,.SiteBrushCopySiteURL,.SiteBrushCopySiteResourceMeta,.SiteBrushCopySiteStatus{color:#12151d}.SiteBrushCopySiteButton,.SiteBrushCopySiteContinueButton,.SiteBrushPublicTrialForm button{border-color:#1f362d!important;background:#1f362d!important;color:#fff!important;box-shadow:none}.SiteBrushCopySiteSecondaryButton{border-color:#9eb6e3;background:#9eb6e3;color:#fff}.SiteBrushCopySiteInput,.SiteBrushCopySiteSelect,.SiteBrushPublicTrialForm input{border-color:#9eb6e3;background:#9eb6e3;color:#12151d;box-shadow:none}.SiteBrushCopySiteInput::placeholder,.SiteBrushPublicTrialForm input::placeholder{color:#384252}.SiteBrushCopySiteInput:focus,.SiteBrushCopySiteSelect:focus,.SiteBrushPublicTrialForm input:focus{border-color:#1f362d;background:#9eb6e3;box-shadow:0 0 0 4px rgba(31,54,45,.22)}.SiteBrushCopySiteResourceKind{background:#1f362d;color:#dac0a1}}'
     ].join('');
+    styleElement.textContent += '@media (max-width:640px){.SiteBrushCopySiteOverlay{background:#1e362d}.SiteBrushCopySiteDialog,.SiteBrushPublicTrialForm,.SiteBrushCopySiteQuota,.SiteBrushCopySiteResources{border-color:rgba(200,67,35,.34);background:#f9faf9;color:#11141c}.SiteBrushCopySiteTitle,.SiteBrushPublicTrialForm p{color:#c84323}.SiteBrushCopySiteClose,.SiteBrushCopySiteField,.SiteBrushPublicTrialForm label,.SiteBrushCopySiteURL,.SiteBrushCopySiteResourceMeta,.SiteBrushCopySiteStatus{color:#11141c}.SiteBrushCopySiteInput,.SiteBrushCopySiteSelect,.SiteBrushPublicTrialForm input{border-color:#9eb6e3;background:#9eb6e3;color:#11141c}.SiteBrushCopySiteInput::placeholder,.SiteBrushPublicTrialForm input::placeholder{color:#fff}.SiteBrushCopySiteInput:focus,.SiteBrushCopySiteSelect:focus,.SiteBrushPublicTrialForm input:focus{border-color:#c84323;background:#9eb6e3;box-shadow:0 0 0 4px rgba(200,67,35,.2)}}';
     document.head.appendChild(styleElement);
   }
 
@@ -127,6 +132,13 @@
       createdElement.textContent = textContent;
     }
     return createdElement;
+  }
+
+  function setCopySiteStatus(statusElement, statusText, statusKind) {
+    statusElement.textContent = statusText;
+    statusElement.classList.toggle('is-success', statusKind === 'success');
+    statusElement.classList.toggle('is-warning', statusKind === 'warning');
+    statusElement.classList.toggle('is-error', statusKind === 'error');
   }
 
   function addOption(selectElement, optionValue, optionText) {
@@ -551,7 +563,7 @@
       }
       downloadCancelRequested = true;
       cancelButtonElement.disabled = true;
-      statusElement.textContent = textFromConfig(configuration, 'partialImportClose', 'Finishing import...');
+      setCopySiteStatus(statusElement, textFromConfig(configuration, 'partialImportClose', 'Finishing import...'), 'warning');
       const cancelRequestBody = new URLSearchParams();
       cancelRequestBody.append('progress_token', activeGrabToken);
       fetch(configuredEndpoint(configuration, cancelQuery), { method: 'POST', body: cancelRequestBody, headers: { Accept: 'application/json' } })
@@ -649,13 +661,13 @@
     function startRetryCountdown(progressPayload) {
       stopRetryCountdown();
       let secondsLeft = Math.max(0, Number(progressPayload.retry_delay_seconds) || 0);
-      statusElement.textContent = retryStatusText(progressPayload, secondsLeft);
+      setCopySiteStatus(statusElement, retryStatusText(progressPayload, secondsLeft), 'warning');
       if (secondsLeft <= 0) {
         return;
       }
       retryCountdownTimer = window.setInterval(function renderRetryCountdown() {
         secondsLeft -= 1;
-        statusElement.textContent = retryStatusText(progressPayload, Math.max(secondsLeft, 0));
+        setCopySiteStatus(statusElement, retryStatusText(progressPayload, Math.max(secondsLeft, 0)), 'warning');
         if (secondsLeft <= 0) {
           stopRetryCountdown();
         }
@@ -679,7 +691,7 @@
         return false;
       }
       downloadFinishedWithErrors = true;
-      statusElement.textContent = textFromConfig(configuration, retryWasAttempted ? 'partialImportClose' : 'partialImportRetry', 'Imported with errors.');
+      setCopySiteStatus(statusElement, textFromConfig(configuration, retryWasAttempted ? 'partialImportClose' : 'partialImportRetry', 'Imported with errors.'), 'error');
       setProgress(progressBarElement, 100);
       closeProgressWebSocket();
       renderFailedResources();
@@ -717,7 +729,7 @@
         try {
           progressPayload = JSON.parse(messageEvent.data);
         } catch (parseError) {
-          statusElement.textContent = textFromConfig(configuration, 'invalidStatusError', 'Invalid status.');
+          setCopySiteStatus(statusElement, textFromConfig(configuration, 'invalidStatusError', 'Invalid status.'), 'error');
           closeProgressWebSocket();
           return;
         }
@@ -741,7 +753,7 @@
           return;
         }
         if (progressPayload.stage === 'retrying') {
-          statusElement.textContent = retryStatusText(progressPayload, 0);
+          setCopySiteStatus(statusElement, retryStatusText(progressPayload, 0), 'warning');
           urlElement.textContent = progressPayload.current_url || '';
           return;
         }
@@ -762,24 +774,24 @@
         const foundTotal = progressSummary.foundTotal;
         const remainingTotal = Math.max(foundTotal - downloadedTotal, 0);
         const remainingPercent = Math.max(100 - completedPercent, 0);
-        statusElement.textContent = textFromConfig(configuration, 'progressDownloadedPrefix', 'Downloaded') + ' ' + downloadedTotal + ' ' + textFromConfig(configuration, 'fromWord', 'of') + ' ' + foundTotal + ' (' + completedPercent + '%). ' + textFromConfig(configuration, 'leftWord', 'Left') + ' ' + remainingTotal + ' (' + remainingPercent + '%).';
+        setCopySiteStatus(statusElement, textFromConfig(configuration, 'progressDownloadedPrefix', 'Downloaded') + ' ' + downloadedTotal + ' ' + textFromConfig(configuration, 'fromWord', 'of') + ' ' + foundTotal + ' (' + completedPercent + '%). ' + textFromConfig(configuration, 'leftWord', 'Left') + ' ' + remainingTotal + ' (' + remainingPercent + '%).', '');
         urlElement.textContent = progressPayload.current_url || '';
         if (progressPayload.stage === 'done') {
           stopRetryCountdown();
-          statusElement.textContent = forDownload ? textFromConfig(configuration, 'doneOpenPage', 'Done. Opening page...') : textFromConfig(configuration, 'previewResourcesText', 'Checking resources...');
+          setCopySiteStatus(statusElement, forDownload ? textFromConfig(configuration, 'doneOpenPage', 'Done. Opening page...') : textFromConfig(configuration, 'previewResourcesText', 'Checking resources...'), forDownload ? 'success' : '');
           setProgress(progressBarElement, 100);
           closeProgressWebSocket();
         }
         if (progressPayload.stage === 'partial') {
           stopRetryCountdown();
           downloadFinishedWithErrors = true;
-          statusElement.textContent = progressPayload.message || textFromConfig(configuration, retryWasAttempted ? 'partialImportClose' : 'partialImportRetry', 'Imported with errors.');
+          setCopySiteStatus(statusElement, progressPayload.message || textFromConfig(configuration, retryWasAttempted ? 'partialImportClose' : 'partialImportRetry', 'Imported with errors.'), 'error');
           setProgress(progressBarElement, 100);
           renderFailedResources();
           closeProgressWebSocket();
         }
         if (progressPayload.stage === 'error' && !progressPayload.current_url) {
-          statusElement.textContent = textFromConfig(configuration, 'downloadFailedRetry', 'Download failed.');
+          setCopySiteStatus(statusElement, textFromConfig(configuration, 'downloadFailedRetry', 'Download failed.'), 'error');
           closeProgressWebSocket();
         }
       };
@@ -790,12 +802,12 @@
         progressWebSocketFailureHandled = true;
         if (!readyCallbackWasCalled) {
           closeProgressWebSocket();
-          statusElement.textContent = textFromConfig(configuration, 'loadingStarted', 'Loading started...');
+          setCopySiteStatus(statusElement, textFromConfig(configuration, 'loadingStarted', 'Loading started...'), '');
           startRequestOnce();
           return;
         }
         if (requestIsRunning) {
-          statusElement.textContent = textFromConfig(configuration, 'connectionLostStatus', 'Connection lost. Waiting for the operation to finish...');
+          setCopySiteStatus(statusElement, textFromConfig(configuration, 'connectionLostStatus', 'Connection lost. Waiting for the operation to finish...'), 'warning');
         }
       }
       progressWebSocket.onerror = handleProgressConnectionFailure;
@@ -809,9 +821,9 @@
       const pageCount = wholeSiteElement.checked ? Math.max(1, Number(previewPayload.page_count) || 1) : 0;
       const targetCount = pageCount + resourceCount;
       const singlePageRequired = Boolean(previewPayload.single_page_required);
-      statusElement.textContent = singlePageRequired
+      setCopySiteStatus(statusElement, singlePageRequired
         ? (previewPayload.message || textFromConfig(configuration, 'singlePageRequired', 'The website is larger than the free test-drive limit. Stop scanning and copy only its first page.'))
-        : textFromConfig(configuration, 'confirmDownloadTextPrefix', 'Ready to download') + ' ' + targetCount + '.';
+        : textFromConfig(configuration, 'confirmDownloadTextPrefix', 'Ready to download') + ' ' + targetCount + '.', singlePageRequired ? 'warning' : 'success');
       urlElement.textContent = previewPayload.source_url || sourceUrlElement.value;
       setFinishImportButtonMode(false);
       partialImportCanRetry = false;
@@ -851,7 +863,7 @@
       resourcesElement.classList.add('SiteBrushCopySiteHidden');
       quotaElement.classList.add('SiteBrushCopySiteHidden');
       continueButtonElement.classList.add('SiteBrushCopySiteHidden');
-      statusElement.textContent = '';
+      setCopySiteStatus(statusElement, '', '');
       urlElement.textContent = '';
     }
 
@@ -878,7 +890,7 @@
       setContinueButtonPrimaryAction(true);
       setFinishImportButtonMode(false);
       progressElement.classList.add('SiteBrushCopySiteHidden');
-      statusElement.textContent = textFromConfig(configuration, 'previewResourcesText', 'Checking resources...');
+      setCopySiteStatus(statusElement, textFromConfig(configuration, 'previewResourcesText', 'Checking resources...'), '');
       urlElement.textContent = sourceUrlElement.value;
       submitButtonElement.disabled = true;
       connectProgressWebSocket(progressToken, function submitPreviewRequest() {
@@ -905,7 +917,7 @@
             activeGrabToken = '';
             submitButtonElement.disabled = false;
             closeProgressWebSocket();
-            statusElement.textContent = previewError.message || textFromConfig(configuration, 'previewErrorDefault', 'Preview failed.');
+            setCopySiteStatus(statusElement, previewError.message || textFromConfig(configuration, 'previewErrorDefault', 'Preview failed.'), 'error');
           });
       }, false);
     }
@@ -948,7 +960,7 @@
       cancelButtonElement.disabled = false;
       setFinishImportButtonMode(true);
       setProgress(progressBarElement, 0);
-      statusElement.textContent = textFromConfig(configuration, 'loadingStarted', 'Loading started...');
+      setCopySiteStatus(statusElement, textFromConfig(configuration, 'loadingStarted', 'Loading started...'), '');
       urlElement.textContent = '';
       connectProgressWebSocket(progressToken, function submitDownloadRequest() {
         requestIsRunning = true;
@@ -982,7 +994,7 @@
               return;
             }
             setProgress(progressBarElement, 100);
-            statusElement.textContent = textFromConfig(configuration, 'doneOpenPage', 'Done. Opening page...');
+            setCopySiteStatus(statusElement, textFromConfig(configuration, 'doneOpenPage', 'Done. Opening page...'), 'success');
             closeProgressWebSocket();
             window.location.href = redirectPath;
           })
@@ -993,7 +1005,7 @@
             cancelButtonElement.disabled = false;
             setFinishImportButtonMode(false);
             closeProgressWebSocket();
-            statusElement.textContent = downloadError.message || textFromConfig(configuration, 'loadPageFailed', 'Load failed.');
+            setCopySiteStatus(statusElement, downloadError.message || textFromConfig(configuration, 'loadPageFailed', 'Load failed.'), 'error');
           });
       }, true);
     }

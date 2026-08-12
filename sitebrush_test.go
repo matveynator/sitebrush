@@ -1525,6 +1525,170 @@ func TestServiceMailEncryptedRelayRequestRoundTrip(t *testing.T) {
 	}
 }
 
+func TestServiceMailNetChanV2UsesDurableIdempotentCentralOutbox(t *testing.T) {
+	application, _ := newTestApplication(t)
+	sentMessages := make(chan mailout.Message, 2)
+	application.sendEmail = func(ctx context.Context, message mailout.Message) error {
+		sentMessages <- message
+		return nil
+	}
+	request := signedServiceMailRequestForTest(t, application, serviceMailRequest{
+		Version:      2,
+		MessageID:    "stable-v2-message",
+		SourceDomain: "customer.example",
+		Recipient:    "customer@example.net",
+		CodeKind:     "invoice",
+		Subject:      "Invoice 42",
+		Body:         "Plain invoice",
+		HTMLBody:     "<strong>Invoice 42</strong>",
+		ExpiresAt:    time.Now().UTC().Add(time.Hour).Format(time.RFC3339Nano),
+		CreatedAt:    time.Now().UTC().Format(time.RFC3339),
+	})
+	registerServiceMailInstallationForTest(t, application, request)
+	stop := make(chan struct{})
+	application.durableMailTasks = application.startDurableMailProcess(stop)
+	t.Cleanup(func() { close(stop) })
+
+	status, statusCode := application.handleServiceMailRelayRequest(context.Background(), nil, request, "203.0.113.10")
+	if statusCode != http.StatusOK || status != mailout.StatusSent {
+		t.Fatalf("first status = %d %q", statusCode, status)
+	}
+	select {
+	case message := <-sentMessages:
+		if message.MessageID != request.MessageID || message.From != "SiteBrush <sitebrush@sitebrush.com>" || message.Subject != request.Subject || message.HTMLBody != request.HTMLBody {
+			t.Fatalf("central message = %#v", message)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("central outbox did not send the message")
+	}
+
+	status, statusCode = application.handleServiceMailRelayRequest(context.Background(), nil, request, "203.0.113.10")
+	if statusCode != http.StatusOK || status != mailout.StatusSent {
+		t.Fatalf("duplicate status = %d %q", statusCode, status)
+	}
+	select {
+	case duplicate := <-sentMessages:
+		t.Fatalf("duplicate request sent another message: %#v", duplicate)
+	case <-time.After(200 * time.Millisecond):
+	}
+}
+
+func TestServiceMailNetChanOldServerResponseIsRetryable(t *testing.T) {
+	err := serviceMailNetChanResponseError(sitebrushNetChanResponse{
+		StatusCode: http.StatusBadRequest,
+		Status:     "unsupported netchan request kind",
+	})
+	if err == nil {
+		t.Fatal("old central server response was accepted")
+	}
+	if mailout.IsPermanentFailure(err) {
+		t.Fatalf("old central server response is permanent: %v", err)
+	}
+
+	err = serviceMailNetChanResponseError(sitebrushNetChanResponse{
+		StatusCode: http.StatusBadRequest,
+		Status:     "mail recipient is invalid",
+	})
+	if !mailout.IsPermanentFailure(err) {
+		t.Fatalf("invalid mail request is retryable: %v", err)
+	}
+}
+
+func TestSitebrushNetChanHandlerDecryptsV2MailPayload(t *testing.T) {
+	relayPrivateKey, err := ecdh.X25519().GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("SITEBRUSH_SERVICE_MAIL_RELAY_PUBLIC_KEY_SITEBRUSH_COM", base64.StdEncoding.EncodeToString(relayPrivateKey.PublicKey().Bytes()))
+	t.Setenv("SITEBRUSH_SERVICE_MAIL_RELAY_PRIVATE_KEY_SITEBRUSH_COM", base64.StdEncoding.EncodeToString(relayPrivateKey.Bytes()))
+	application, _ := newTestApplication(t)
+	request := signedServiceMailRequestForTest(t, application, serviceMailRequest{
+		Version:      2,
+		MessageID:    "encrypted-v2-message",
+		SourceDomain: "customer.example",
+		Recipient:    "customer@example.net",
+		CodeKind:     "backup_notice",
+		Subject:      "Backup ready",
+		Body:         "Download the backup",
+		ExpiresAt:    time.Now().UTC().Add(time.Hour).Format(time.RFC3339Nano),
+		CreatedAt:    time.Now().UTC().Format(time.RFC3339),
+	})
+	registerServiceMailInstallationForTest(t, application, request)
+	sentMessages := make(chan mailout.Message, 1)
+	application.sendEmail = func(ctx context.Context, message mailout.Message) error {
+		sentMessages <- message
+		return nil
+	}
+	plainPayload, err := json.Marshal(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encryptedPayload, err := serviceMailEncryptPayloadForRelay("https://sitebrush.com/?service_mail_relay", plainPayload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := application.handleSitebrushNetChanPayload(context.Background(), encryptedPayload)
+	if response.StatusCode != http.StatusOK || response.Status != mailout.StatusSent {
+		t.Fatalf("response = %#v", response)
+	}
+	select {
+	case message := <-sentMessages:
+		if message.Kind != request.CodeKind || message.Subject != request.Subject {
+			t.Fatalf("message = %#v", message)
+		}
+	default:
+		t.Fatal("encrypted NetChan payload did not reach the mail sender")
+	}
+}
+
+func TestSystemMailRouteUsesLocalSMTPOnlyAfterAddressAndSPFAreReady(t *testing.T) {
+	application, _ := newTestApplication(t)
+	controlDatabase, err := openServerControlDatabaseForTest(context.Background(), application)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := (hostingandsupport.Store{DB: controlDatabase}).SetOwner(context.Background(), "mail.example", "owner@mail.example"); err != nil {
+		t.Fatal(err)
+	}
+	if err := controlDatabase.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	previousTXTLookup := lookupTXTRecords
+	previousIPLookup := lookupIPRecords
+	previousExternalIPLookup := lookupServerExternalIP
+	previousInterfaceLookup := lookupServerInterfaceIPs
+	t.Cleanup(func() {
+		lookupTXTRecords = previousTXTLookup
+		lookupIPRecords = previousIPLookup
+		lookupServerExternalIP = previousExternalIPLookup
+		lookupServerInterfaceIPs = previousInterfaceLookup
+	})
+	lookupServerExternalIP = func(context.Context) (string, error) { return "203.0.113.10", nil }
+	lookupServerInterfaceIPs = func() ([]net.IP, error) { return nil, nil }
+	lookupIPRecords = func(domain string) ([]net.IP, error) {
+		if domain != "mail.example" {
+			t.Fatalf("IP lookup domain = %q", domain)
+		}
+		return []net.IP{net.ParseIP("203.0.113.10")}, nil
+	}
+	lookupTXTRecords = func(domain string) ([]string, error) {
+		return []string{"v=spf1 ip4:203.0.113.10 ~all"}, nil
+	}
+
+	localRoute := application.inspectSystemMailRoute()
+	if localRoute.route != mailout.RouteLocal || localRoute.domain != "mail.example" || localRoute.from != "SiteBrush <sitebrush@mail.example>" {
+		t.Fatalf("local route = %#v", localRoute)
+	}
+	lookupTXTRecords = func(domain string) ([]string, error) {
+		return []string{"v=spf1 ip4:198.51.100.20 ~all"}, nil
+	}
+	relayRoute := application.inspectSystemMailRoute()
+	if relayRoute.route != mailout.RouteRelay || relayRoute.from != "SiteBrush <sitebrush@sitebrush.com>" {
+		t.Fatalf("relay route = %#v", relayRoute)
+	}
+}
+
 func TestServiceMailRelayRegistrationStoresAttachedHostingSnapshot(t *testing.T) {
 	application, _ := newTestApplication(t)
 	request := serviceMailRequest{
@@ -2157,6 +2321,76 @@ func TestRenderTemplateProcessUsesPreparedTemplate(t *testing.T) {
 	}
 	if !bytes.Contains(response.html, []byte("<html")) {
 		t.Fatalf("rendered template does not contain html: %q", response.html)
+	}
+}
+
+func TestMobileServicePageDesignCoversEverySharedTemplate(t *testing.T) {
+	expectedTemplates := []string{
+		"analytics.html",
+		"billing_invoice.html",
+		"billing_schedule.html",
+		"domain_settings.html",
+		"edit_mode.html",
+		"expenses.html",
+		"files.html",
+		"import.html",
+		"login.html",
+		"missing.html",
+		"profile.html",
+		"recover.html",
+		"revisions.html",
+		"setup.html",
+	}
+	coveredTemplates := make([]string, 0, len(expectedTemplates))
+	templatePaths, err := fs.Glob(embeddedWebFiles, "web/*.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, templatePath := range templatePaths {
+		templateBytes, readErr := fs.ReadFile(embeddedWebFiles, templatePath)
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		templateText := string(templateBytes)
+		if !strings.Contains(templateText, "technical_pages.css") {
+			continue
+		}
+		if _, parseErr := template.New(filepath.Base(templatePath)).Parse(templateText); parseErr != nil {
+			t.Errorf("parse %s: %v", templatePath, parseErr)
+		}
+		coveredTemplates = append(coveredTemplates, filepath.Base(templatePath))
+		for _, requiredFragment := range []string{`name="viewport"`, `lang="{{.LanguageCode}}"`, `dir="{{.TextDirection}}"`} {
+			if !strings.Contains(templateText, requiredFragment) {
+				t.Errorf("%s does not contain %q", templatePath, requiredFragment)
+			}
+		}
+	}
+	slices.Sort(coveredTemplates)
+	slices.Sort(expectedTemplates)
+	if !slices.Equal(coveredTemplates, expectedTemplates) {
+		t.Fatalf("shared service templates = %v, want %v", coveredTemplates, expectedTemplates)
+	}
+
+	technicalStyleBytes, err := fs.ReadFile(embeddedWebFiles, "web/static/technical_pages.css")
+	if err != nil {
+		t.Fatal(err)
+	}
+	directoryStyleBytes, err := fs.ReadFile(embeddedWebFiles, "web/static/directory_listing.css")
+	if err != nil {
+		t.Fatal(err)
+	}
+	combinedStyles := string(technicalStyleBytes) + string(directoryStyleBytes)
+	for _, requiredFragment := range []string{
+		"@media (max-width: 760px) and (prefers-color-scheme: dark)",
+		"background: #1e362d !important",
+		"background: #9eb6e3",
+		"color: #12151d",
+		".technical-page .alert-warning",
+		".technical-page .alert-danger",
+	} {
+		if !strings.Contains(combinedStyles, requiredFragment) {
+			t.Errorf("mobile service design does not contain %q", requiredFragment)
+		}
 	}
 }
 
@@ -3939,6 +4173,17 @@ func TestRegisterRequiresEmailConfirmationBeforeCreatingAdmin(t *testing.T) {
 	if response.Code != http.StatusOK {
 		t.Fatalf("status = %d, body=%q", response.Code, response.Body.String())
 	}
+	registrationBody := response.Body.String()
+	for _, expectedFragment := range []string{"Проверьте почту", "admin@example.com", "sitebrush@localhost"} {
+		if !strings.Contains(registrationBody, expectedFragment) {
+			t.Fatalf("confirmation page missing %q in %s", expectedFragment, registrationBody)
+		}
+	}
+	for _, forbiddenFragment := range []string{`name="email"`, `name="password"`, `action="?register"`} {
+		if strings.Contains(registrationBody, forbiddenFragment) {
+			t.Fatalf("confirmation page still contains registration form %q in %s", forbiddenFragment, registrationBody)
+		}
+	}
 	var pendingToken string
 	select {
 	case mailJob := <-application.emailDelivery:
@@ -3947,6 +4192,9 @@ func TestRegisterRequiresEmailConfirmationBeforeCreatingAdmin(t *testing.T) {
 		}
 		if !strings.Contains(mailJob.Message.Subject, "Подтвердите email") || !strings.Contains(mailJob.Message.Body, "Для подтверждения email") {
 			t.Fatalf("confirmation email is not Russian: %#v", mailJob.Message)
+		}
+		if !strings.Contains(mailJob.Message.HTMLBody, "Подтвердить email и войти") || !strings.Contains(mailJob.Message.HTMLBody, `href="http://localhost:8080/?email_confirm=`) {
+			t.Fatalf("confirmation email has no localized HTML action: %#v", mailJob.Message)
 		}
 		pendingToken = confirmationTokenFromBody(t, mailJob.Message.Body)
 	default:
@@ -3970,6 +4218,119 @@ func TestRegisterRequiresEmailConfirmationBeforeCreatingAdmin(t *testing.T) {
 	}
 	if len(confirmResponse.Result().Cookies()) == 0 {
 		t.Fatal("confirmation did not create session")
+	}
+}
+
+func TestSetupConfirmationOffersKnownWebmailWithoutRegistrationForm(t *testing.T) {
+	application := &App{}
+	request := httptest.NewRequest(http.MethodGet, "https://example.com/?register", nil)
+	request = request.WithContext(contextWithDomain(request.Context(), "example.com"))
+	request.Header.Set("Accept-Language", "ru")
+	response := httptest.NewRecorder()
+
+	application.renderSetupConfirmationPage(response, request, "example.com", "administrator@gmail.com")
+	body := response.Body.String()
+	for _, expectedFragment := range []string{
+		`lang="ru"`,
+		`href="https://mail.google.com/"`,
+		`administrator@gmail.com`,
+		`Открыть Gmail`,
+		`папки «Спам»`,
+	} {
+		if !strings.Contains(body, expectedFragment) {
+			t.Fatalf("confirmation page missing %q in %s", expectedFragment, body)
+		}
+	}
+	if strings.Contains(body, `name="password"`) || strings.Contains(body, `action="?register"`) {
+		t.Fatalf("confirmation page contains registration form: %s", body)
+	}
+}
+
+func TestWebmailProviderRecognition(t *testing.T) {
+	testCases := []struct {
+		address string
+		name    string
+		url     string
+	}{
+		{address: "person@gmail.com", name: "Gmail", url: "https://mail.google.com/"},
+		{address: "person@hotmail.com", name: "Outlook", url: "https://outlook.live.com/mail/"},
+		{address: "person@icloud.com", name: "iCloud Mail", url: "https://www.icloud.com/mail/"},
+		{address: "person@mail.ru", name: "Mail.ru", url: "https://e.mail.ru/inbox/"},
+		{address: "person@yandex.kz", name: "Yandex Mail", url: "https://mail.yandex.com/"},
+		{address: "person@proton.me", name: "Proton Mail", url: "https://mail.proton.me/"},
+		{address: "person@company.example", name: "", url: ""},
+	}
+	for _, testCase := range testCases {
+		provider := webmailProviderForAddress(testCase.address)
+		if provider.Name != testCase.name || provider.URL != testCase.url {
+			t.Errorf("provider for %s = %#v", testCase.address, provider)
+		}
+	}
+}
+
+func TestConfirmationHTMLMailIsLocalizedForEveryInterfaceLanguage(t *testing.T) {
+	for languageCode := range translationCatalog {
+		htmlBody := emailHTMLBodyForServiceMail(languageCode, "email_confirm", "example.com", "https://example.com/?email_confirm=secret")
+		if htmlBody == "" || !strings.Contains(htmlBody, `href="https://example.com/?email_confirm=secret"`) || !strings.Contains(htmlBody, confirmationEmailButtonLabel(languageCode)) {
+			t.Errorf("localized HTML confirmation is incomplete for %s: %s", languageCode, htmlBody)
+		}
+	}
+}
+
+func TestRegistrationConfirmationSurvivesProcessMemoryRestart(t *testing.T) {
+	storagePath := t.TempDir()
+	storageRealRoot, err := prepareStorageJailRoot(storagePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	databasePath := filepath.Join(storagePath, "storage", "db", "sitebrush.db")
+	if err := ensureParentDir(databasePath); err != nil {
+		t.Fatal(err)
+	}
+	dispatcher, err := startServerControlDatabaseDispatcher(databasePath, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(dispatcher.Close)
+
+	firstMemoryContext, stopFirstMemory := context.WithCancel(context.Background())
+	application := &App{
+		storagePath:               storagePath,
+		storageRealRoot:           storageRealRoot,
+		dbPath:                    databasePath,
+		controlDatabase:           dispatcher,
+		registrationConfirmations: startEmailConfirmationMemoryWorker(firstMemoryContext),
+	}
+	confirmation := EmailConfirmation{
+		Token:        "restart-safe-token",
+		Domain:       "example.com",
+		Action:       "register",
+		Email:        "admin@example.com",
+		Password:     "secret",
+		ReturnPath:   "/docs",
+		LanguageCode: "en",
+		ExpiresAt:    time.Now().UTC().Add(time.Hour).Format(time.RFC3339),
+	}
+	if err := application.saveRegistrationConfirmation(context.Background(), confirmation); err != nil {
+		t.Fatal(err)
+	}
+	stopFirstMemory()
+
+	secondMemoryContext, stopSecondMemory := context.WithCancel(context.Background())
+	t.Cleanup(stopSecondMemory)
+	application.registrationConfirmations = startEmailConfirmationMemoryWorker(secondMemoryContext)
+	restored, found := application.registrationConfirmationByToken(context.Background(), confirmation.Token)
+	if !found || restored != confirmation {
+		t.Fatalf("restored confirmation = %#v, found=%t", restored, found)
+	}
+	application.deleteRegistrationConfirmation(context.Background(), confirmation.Token)
+	stopSecondMemory()
+
+	thirdMemoryContext, stopThirdMemory := context.WithCancel(context.Background())
+	t.Cleanup(stopThirdMemory)
+	application.registrationConfirmations = startEmailConfirmationMemoryWorker(thirdMemoryContext)
+	if _, found := application.registrationConfirmationByToken(context.Background(), confirmation.Token); found {
+		t.Fatal("deleted confirmation was restored")
 	}
 }
 
@@ -8934,6 +9295,10 @@ func TestExternalSiteImportPrimaryActionsAreGreen(t *testing.T) {
 		"SiteBrushCopySiteButton SiteBrushCopySiteContinueButton SiteBrushCopySiteHidden",
 		".SiteBrushCopySiteContinueButton{border-color:#2fbf71!important;background:#198754!important",
 		".SiteBrushCopySiteContinueButton:hover{border-color:#48d589!important;background:#157347!important",
+		"@media (max-width:640px){.SiteBrushCopySiteOverlay",
+		"background:#1f362d!important;color:#fff!important",
+		"function setCopySiteStatus(statusElement, statusText, statusKind)",
+		"setCopySiteStatus(statusElement, previewError.message",
 		"cancelButtonElement.classList.toggle('SiteBrushCopySiteContinueButton', finishImportMode)",
 		"continueButtonElement.classList.toggle('SiteBrushCopySiteContinueButton', primaryAction)",
 		"continueButtonElement.textContent = textFromConfig(configuration, 'retryRemaining', 'Retry remaining');\n      setContinueButtonPrimaryAction(false)",
@@ -10055,6 +10420,14 @@ func TestPerSiteDBRouterSerializesConcurrentWritesToOneSiteDatabase(t *testing.T
 	}
 	if got := siteDatabase.rawDatabase.Stats().MaxOpenConnections; got != 1 {
 		t.Fatalf("site database max open connections = %d, want 1", got)
+	}
+	if got := len(siteDatabase.readDatabases); got != siteDatabaseReaderCount {
+		t.Fatalf("site database readers = %d, want %d", got, siteDatabaseReaderCount)
+	}
+	for readerIndex, readDatabase := range siteDatabase.readDatabases {
+		if got := readDatabase.Stats().MaxOpenConnections; got != 1 {
+			t.Fatalf("site database reader %d max open connections = %d, want 1", readerIndex, got)
+		}
 	}
 
 	writeCount := 96

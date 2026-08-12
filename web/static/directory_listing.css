@@ -215,18 +215,91 @@ h1 {
 }
 
 @media (max-width: 760px) {
+    :root {
+        color-scheme: light;
+        --bg: #087a55;
+        --panel: #ffffff;
+        --panel-soft: #e8f7fa;
+        --panel-strong: #d6f0f2;
+        --text: #12352d;
+        --muted: #527168;
+        --cyan: #087f92;
+        --orange: #b85c00;
+        --cream: #164f43;
+        --green: #087a55;
+        --border-cyan: rgba(8, 122, 85, 0.28);
+        --border-orange: rgba(219, 109, 0, 0.55);
+        --shadow: 0 18px 48px rgba(3, 71, 50, 0.22);
+    }
+
+    body {
+        background:
+            radial-gradient(circle at 12% 4%, rgba(180, 244, 230, 0.52), transparent 34%),
+            radial-gradient(circle at 92% 26%, rgba(177, 229, 245, 0.38), transparent 38%),
+            linear-gradient(145deg, #087a55 0%, #0c9564 52%, #12a66f 100%);
+        background-attachment: fixed;
+    }
+
     .page {
         width: min(100% - 20px, 1180px);
-        padding-top: 14px;
+        padding: 14px 0 36px;
     }
 
     .topbar {
         align-items: flex-start;
         flex-direction: column;
+        gap: 14px;
+        padding: 16px;
+        border-color: rgba(220, 255, 246, 0.72);
+        background: rgba(255, 255, 255, 0.90);
+        box-shadow: 0 14px 34px rgba(3, 71, 50, 0.18);
+        backdrop-filter: blur(14px);
+    }
+
+    .brand {
+        width: 100%;
+    }
+
+    .brand-logo {
+        width: 44px;
+        height: 44px;
+        box-shadow: 0 8px 20px rgba(8, 122, 85, 0.22);
+    }
+
+    .brand-name {
+        color: #075d42;
+        font-weight: 800;
+    }
+
+    .path-pill {
+        width: 100%;
+        border-color: #9ed8df;
+        background: #e8f7fa;
+        color: #076879;
+    }
+
+    .directory-panel {
+        border-color: rgba(220, 255, 246, 0.82);
+        border-radius: 22px;
+        background: #fbfffd;
+        box-shadow: var(--shadow);
     }
 
     .directory-header {
         padding: 26px 20px 20px;
+        border-bottom-color: rgba(8, 122, 85, 0.16);
+        background: linear-gradient(135deg, rgba(213, 248, 235, 0.82), rgba(224, 246, 252, 0.88));
+    }
+
+    .directory-header h1 {
+        color: #0a4437;
+        font-size: clamp(28px, 9vw, 42px);
+        overflow-wrap: anywhere;
+    }
+
+    .eyebrow {
+        color: #a64e00;
+        font-weight: 800;
     }
 
     .entry-list {
@@ -235,6 +308,27 @@ h1 {
 
     .entry {
         grid-template-columns: 48px minmax(0, 1fr);
+        border-color: rgba(8, 122, 85, 0.18);
+        background: #ffffff;
+        box-shadow: 0 7px 20px rgba(8, 80, 60, 0.08);
+    }
+
+    .entry:active,
+    .entry:hover {
+        border-color: #55bfa2;
+        background: #eafaf5;
+    }
+
+    .entry-icon {
+        border-color: #9ed8df;
+        background: #e8f7fa;
+        color: #b85c00;
+    }
+
+    .entry-folder .entry-icon {
+        border-color: #7fd2b4;
+        background: #def8ec;
+        color: #087a55;
     }
 
     .entry-kind,
@@ -243,4 +337,200 @@ h1 {
         grid-column: 2;
         white-space: normal;
     }
+}
+
+@media (max-width: 760px) {
+    :root {
+        --bg: #1e362d;
+        --panel: #f9faf9;
+        --text: #11141c;
+        --orange: #c84323;
+    }
+
+    body {
+        background: #1e362d;
+    }
+
+    .topbar,
+    .directory-panel,
+    .directory-header,
+    .entry {
+        background: #f9faf9;
+        color: #11141c;
+    }
+
+    .brand-name,
+    .directory-header h1,
+    .eyebrow {
+        color: #c84323;
+    }
+}
+
+/* The directory uses the same dark page and light content surfaces. */
+@media (max-width: 760px) {
+    :root {
+        --bg: #1e362d;
+        --panel: #f9faf9;
+        --text: #11141c;
+        --orange: #c84323;
+    }
+
+    body {
+        background: #1e362d;
+    }
+
+    .topbar,
+    .directory-panel,
+    .directory-header,
+    .entry {
+        background: #f9faf9;
+        color: #11141c;
+    }
+
+    .brand-name,
+    .directory-header h1,
+    .eyebrow {
+        color: #c84323;
+    }
+}
+
+@media (max-width: 760px) and (prefers-color-scheme: dark) {
+    :root {
+        color-scheme: dark;
+        --bg: #032d24;
+        --panel: #0b3b31;
+        --panel-soft: #123f46;
+        --panel-strong: #174f53;
+        --text: #f2fff9;
+        --muted: #b9d8cf;
+        --cyan: #8ce8f1;
+        --orange: #ffb65a;
+        --cream: #ddfff3;
+        --green: #78efae;
+        --border-cyan: rgba(140, 232, 241, 0.32);
+        --border-orange: rgba(255, 182, 90, 0.58);
+        --shadow: 0 20px 54px rgba(0, 18, 14, 0.48);
+    }
+
+    body {
+        background:
+            radial-gradient(circle at 12% 4%, rgba(31, 158, 111, 0.30), transparent 36%),
+            radial-gradient(circle at 92% 26%, rgba(42, 153, 174, 0.22), transparent 38%),
+            linear-gradient(145deg, #032d24 0%, #064735 55%, #07533d 100%);
+    }
+
+    .topbar {
+        border-color: rgba(140, 232, 241, 0.28);
+        background: rgba(8, 55, 45, 0.92);
+        box-shadow: var(--shadow);
+    }
+
+    .brand-name,
+    .directory-header h1 {
+        color: var(--text);
+    }
+
+    .path-pill,
+    .entry-icon {
+        border-color: rgba(140, 232, 241, 0.28);
+        background: #123f46;
+        color: #b9f4fa;
+    }
+
+    .directory-panel {
+        border-color: rgba(140, 232, 241, 0.24);
+        background: #0b3b31;
+    }
+
+    .directory-header {
+        border-bottom-color: rgba(140, 232, 241, 0.18);
+        background: linear-gradient(135deg, rgba(15, 92, 70, 0.88), rgba(16, 67, 73, 0.90));
+    }
+
+    .entry {
+        border-color: rgba(140, 232, 241, 0.18);
+        background: #0e4438;
+        box-shadow: 0 8px 22px rgba(0, 18, 14, 0.28);
+    }
+
+    .entry:active,
+    .entry:hover {
+        border-color: #70d9ba;
+        background: #125342;
+    }
+
+    .entry-folder .entry-icon {
+        border-color: rgba(120, 239, 174, 0.36);
+        background: #164f3d;
+        color: #92f5bd;
+    }
+}
+
+/* The mobile directory follows the same solid brand palette as service pages. */
+@media (max-width: 760px) {
+    :root {
+        color-scheme: light;
+        --bg: #c7c8bf;
+        --panel: #f9faf9;
+        --panel-soft: #f9faf9;
+        --panel-strong: #9eb6e3;
+        --text: #12151d;
+        --muted: #52645d;
+        --cyan: #ffffff;
+        --cream: #1f362d;
+        --green: #1f362d;
+        --border-cyan: rgba(31, 54, 45, 0.24);
+    }
+
+    body {
+        background: #c7c8bf;
+    }
+
+    .topbar,
+    .directory-panel,
+    .entry {
+        border-color: rgba(31, 54, 45, 0.24);
+        background: #f9faf9;
+        color: #12151d;
+    }
+
+    .directory-header {
+        border-bottom-color: rgba(31, 54, 45, 0.18);
+        background: #f9faf9;
+    }
+
+    .brand-name,
+    .directory-header h1 {
+        color: #bf3a20;
+    }
+
+    .eyebrow {
+        color: #bf3a20;
+    }
+
+    .brand-logo {
+        border-color: #1f362d;
+        background: #1f362d;
+        color: #dac0a1;
+    }
+
+    .path-pill,
+    .entry-icon {
+        border-color: #9eb6e3;
+        background: #9eb6e3;
+        color: #ffffff;
+    }
+
+    .entry-folder .entry-icon {
+        border-color: #1f362d;
+        background: #1f362d;
+        color: #ffffff;
+    }
+}
+
+@media (max-width: 760px) {
+    :root { --bg: #1e362d; --panel: #f9faf9; --text: #11141c; --orange: #c84323; }
+    body { background: #1e362d; }
+    .topbar, .directory-panel, .directory-header, .entry { background: #f9faf9; color: #11141c; }
+    .brand-name, .directory-header h1, .eyebrow { color: #c84323; }
 }

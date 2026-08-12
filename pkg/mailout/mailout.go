@@ -19,11 +19,13 @@ import (
 )
 
 type Message struct {
-	From     string
-	To       string
-	Subject  string
-	Body     string
-	HTMLBody string
+	MessageID string
+	Kind      string
+	From      string
+	To        string
+	Subject   string
+	Body      string
+	HTMLBody  string
 }
 
 const DeliveryQueueSize = 256
@@ -62,7 +64,7 @@ func (sender DirectSender) Send(ctx context.Context, message Message) error {
 	if err != nil {
 		return err
 	}
-	payload := buildMessagePayload(fromAddress, toAddress, message.Subject, message.Body, message.HTMLBody)
+	payload := buildMessagePayloadWithID(fromAddress, toAddress, message.Subject, message.Body, message.HTMLBody, message.MessageID)
 	var lastErr error
 	for _, targetHost := range targetHosts {
 		if err := sender.sendToHost(ctx, targetHost, fromAddress.Address, toAddress.Address, payload); err != nil {
@@ -197,18 +199,23 @@ func lookupMailHosts(ctx context.Context, domain string) ([]string, error) {
 }
 
 func buildMessagePayload(fromAddress, toAddress *mail.Address, subject, body string, htmlBody ...string) []byte {
+	selectedHTMLBody := ""
+	if len(htmlBody) > 0 {
+		selectedHTMLBody = htmlBody[0]
+	}
+	return buildMessagePayloadWithID(fromAddress, toAddress, subject, body, selectedHTMLBody, "")
+}
+
+func buildMessagePayloadWithID(fromAddress, toAddress *mail.Address, subject, body, htmlBody, stableMessageID string) []byte {
 	headers := []string{
 		"From: " + fromAddress.String(),
 		"To: " + toAddress.String(),
 		"Subject: " + mime.QEncoding.Encode("utf-8", strings.TrimSpace(subject)),
 		"Date: " + time.Now().Format(time.RFC1123Z),
-		"Message-ID: " + messageID(fromAddress),
+		"Message-ID: " + messageIDForDelivery(fromAddress, stableMessageID),
 		"MIME-Version: 1.0",
 	}
-	selectedHTMLBody := ""
-	if len(htmlBody) > 0 {
-		selectedHTMLBody = strings.TrimSpace(htmlBody[0])
-	}
+	selectedHTMLBody := strings.TrimSpace(htmlBody)
 	if selectedHTMLBody == "" {
 		headers = append(headers, "Content-Type: text/plain; charset=utf-8", "Content-Transfer-Encoding: 8bit")
 		return []byte(strings.Join(headers, "\r\n") + "\r\n\r\n" + strings.TrimRight(body, "\r\n") + "\r\n")
@@ -229,6 +236,19 @@ func messageID(fromAddress *mail.Address) string {
 		return fmt.Sprintf("<%d.%d@%s>", time.Now().UnixNano(), time.Now().Unix(), messageIDDomain(fromAddress))
 	}
 	return "<" + hex.EncodeToString(randomBytes[:]) + "@" + messageIDDomain(fromAddress) + ">"
+}
+
+func messageIDForDelivery(fromAddress *mail.Address, stableMessageID string) string {
+	stableMessageID = strings.TrimSpace(stableMessageID)
+	if stableMessageID == "" {
+		return messageID(fromAddress)
+	}
+	for _, character := range stableMessageID {
+		if (character < 'a' || character > 'z') && (character < 'A' || character > 'Z') && (character < '0' || character > '9') && character != '.' && character != '-' && character != '_' {
+			return messageID(fromAddress)
+		}
+	}
+	return "<" + stableMessageID + "@" + messageIDDomain(fromAddress) + ">"
 }
 
 func messageIDDomain(fromAddress *mail.Address) string {
