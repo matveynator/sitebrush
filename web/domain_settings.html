@@ -301,7 +301,8 @@
           if (certificateModel && certificateModel.busy) { updateCertificateModel(domain, 'certificate_error', {{printf "%q" (index .T "domain_settings_ssl_connection_closed")}}); }
         });
         certificateSocket.addEventListener('error', function failCertificateSocket() {
-          updateCertificateModel(domain, 'certificate_error', {{printf "%q" (index .T "domain_settings_ssl_connection_closed")}});
+          const certificateModel = certificateModelsByDomain[domain];
+          if (certificateModel && certificateModel.busy) { updateCertificateModel(domain, 'certificate_error', {{printf "%q" (index .T "domain_settings_ssl_connection_closed")}}); }
         });
       });
     });

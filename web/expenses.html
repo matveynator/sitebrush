@@ -223,9 +223,9 @@
     {{end}}
     <section data-hosting-installation-panel="settings" hidden>
       <nav class="hosting-installation-tabs mb-3" role="tablist" aria-label="{{index .T "domain_settings_title"}}" data-site-settings-tabs>
-        <button type="button" class="hosting-installation-tab active" role="tab" aria-selected="true" data-site-settings-tab="general">General</button>
+        <button type="button" class="hosting-installation-tab active" role="tab" aria-selected="true" data-site-settings-tab="general">{{index .T "billing_registration_title"}}</button>
         <button type="button" class="hosting-installation-tab" role="tab" aria-selected="false" data-site-settings-tab="demo">{{index .T "billing_demo_title"}}</button>
-        <button type="button" class="hosting-installation-tab" role="tab" aria-selected="false" data-site-settings-tab="test-drive">Test Drive</button>
+        <button type="button" class="hosting-installation-tab" role="tab" aria-selected="false" data-site-settings-tab="test-drive">{{index .T "public_trial_embed_title"}}</button>
       </nav>
 
       <div data-site-settings-panel="general">
@@ -3023,6 +3023,33 @@
 })();
 </script>
 <script>
+(function initializeSiteSettingsTabs() {
+  const tabContainerElement = document.querySelector('[data-site-settings-tabs]');
+  if (!tabContainerElement) {
+    return;
+  }
+  const tabButtonElements = Array.from(tabContainerElement.querySelectorAll('[data-site-settings-tab]'));
+  const panelElements = Array.from(document.querySelectorAll('[data-site-settings-panel]'));
+
+  function selectSiteSettingsTab(tabName) {
+    for (const tabButtonElement of tabButtonElements) {
+      const selected = tabButtonElement.dataset.siteSettingsTab === tabName;
+      tabButtonElement.classList.toggle('active', selected);
+      tabButtonElement.setAttribute('aria-selected', selected ? 'true' : 'false');
+    }
+    for (const panelElement of panelElements) {
+      panelElement.hidden = panelElement.dataset.siteSettingsPanel !== tabName;
+    }
+  }
+
+  for (const tabButtonElement of tabButtonElements) {
+    tabButtonElement.addEventListener('click', function handleSiteSettingsTabClick() {
+      selectSiteSettingsTab(tabButtonElement.dataset.siteSettingsTab);
+    });
+  }
+})();
+</script>
+<script>
 (function setupServerCertificateRenewalControls() {
   const renewalButtonElements = document.querySelectorAll('[data-certificate-renew]');
   if (!renewalButtonElements.length || !window.WebSocket) { return; }
@@ -3069,7 +3096,8 @@
         if (certificateModel && certificateModel.busy) { updateCertificateModel(domain, 'certificate_error', {{printf "%q" (index .T "domain_settings_ssl_connection_closed")}}); }
       });
       certificateSocket.addEventListener('error', function failCertificateRenewal() {
-        updateCertificateModel(domain, 'certificate_error', {{printf "%q" (index .T "domain_settings_ssl_connection_closed")}});
+        const certificateModel = certificateModelsByDomain[domain];
+        if (certificateModel && certificateModel.busy) { updateCertificateModel(domain, 'certificate_error', {{printf "%q" (index .T "domain_settings_ssl_connection_closed")}}); }
       });
     });
   }
