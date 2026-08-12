@@ -1,5 +1,5 @@
 <!doctype html>
-<html id="{{.Domain}}" lang="en">
+<html id="{{.Domain}}" lang="{{.LanguageCode}}" dir="{{.TextDirection}}">
 <head>
   <script>
   (function applySystemThemeMode() {
@@ -14,7 +14,7 @@
   <link href="/p/static/technical_pages.css" rel="stylesheet">
 </head>
 <body class="technical-page bg-body">
-<div class="container py-5">
+<div class="container py-5 authentication-shell">
   <div class="page-header mb-4"><h1 class="section-heading"><img src="/p/static/login.png" class="section-icon" alt=""><a href="/">{{.Domain}}</a> <small class="text-muted">| {{index .T "recover_header"}}</small></h1></div>
   {{with .DNSSetup}}<section class="card card-body mb-3" style="max-width:760px;">
     <h2 class="h4 mb-3">{{.Title}}</h2>
@@ -39,7 +39,7 @@
       <p class="mb-0 text-muted">{{.AfterText}}</p>
     </div>
   </section>{{end}}
-  {{if .ShowForm}}<form class="card card-body" method="post" action="?recover" style="max-width:560px;">
+  {{if .ShowForm}}<form class="card card-body authentication-card" method="post" action="?recover">
     <input type="hidden" name="return_path" value="{{.ReturnPath}}">
     <p><input type='text' class="form-control" name='email' placeholder="{{index .T "recover_email_placeholder"}}"></p>
     <p class="d-flex align-items-center gap-2"><input type="text" class="form-control" name="captcha" placeholder="{{index .T "recover_captcha_placeholder"}}" style="max-width:220px;"/>

@@ -52,6 +52,19 @@ Nothing is completely invulnerable, but a static public website exposes far fewe
 
 [Try SiteBrush with your own website](https://sitebrush.com/) without changing the live site, or [open the demo](https://demo.sitebrush.com/).
 
+## Reliable outgoing email
+
+SiteBrush stores every outgoing message in a durable SQL outbox before starting network delivery. The outbox survives process restarts, retries temporary DNS, network, and SMTP failures for up to seven days, and stops immediately after a permanent SMTP 5xx rejection. Short-lived login and confirmation messages expire with their code instead of being delivered after the code becomes unusable.
+
+The server owner domain is the single local mail domain. SiteBrush sends mail locally only when both conditions are true:
+
+- the domain A or AAAA record points to this server;
+- exactly one SPF TXT record explicitly permits this server IP.
+
+Until then, every SiteBrush email is encrypted, signed, and transferred through a TLS NetChan session to `sitebrush.com:9876`. The central installation sends it as `SiteBrush <sitebrush@sitebrush.com>`. There is no HTTPS or direct-SMTP fallback for a queued relay message. Open outbound TCP port `9876` on ordinary installations and inbound TCP port `9876` on the `sitebrush.com` relay.
+
+Delivery uses at-least-once semantics. A stable message ID prevents ordinary replay duplicates; a duplicate remains theoretically possible if the recipient MX accepts SMTP `DATA` immediately before the relay process crashes, because avoiding that duplicate would require accepting possible message loss.
+
 # Downloads
 
 The **server version is recommended** for a public website. Desktop builds are useful for local work with a graphical interface.

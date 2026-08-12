@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en">
+<html lang="{{.LanguageCode}}" dir="{{.TextDirection}}">
 <head>
   <script>
   (function applySystemThemeMode() {
@@ -40,17 +40,17 @@
     <div class="profile-send-countdown"><span data-profile-send-countdown>00:45</span></div>
   </div>
   {{if .EmailDelivery.Show}}
-  <div class="profile-delivery-modal" data-profile-delivery-modal aria-hidden="true">
+  <div class="profile-delivery-modal" data-profile-delivery-modal data-mail-delivery-id="{{.EmailDelivery.ID}}" aria-hidden="true">
     <div class="profile-delivery-backdrop" data-profile-delivery-close></div>
     <section class="profile-delivery-dialog profile-delivery-dialog-{{.EmailDelivery.Kind}}" role="dialog" aria-modal="true" aria-labelledby="ProfileDeliveryTitle" tabindex="-1">
       <div class="profile-delivery-header">
         <div>
-          <div class="profile-delivery-kicker">{{.EmailDelivery.CodeLabel}}: {{.EmailDelivery.Code}}</div>
-          <h2 id="ProfileDeliveryTitle">{{.EmailDelivery.Title}}</h2>
+          <div class="profile-delivery-kicker" data-mail-delivery-code>{{.EmailDelivery.CodeLabel}}: {{.EmailDelivery.Code}}</div>
+          <h2 id="ProfileDeliveryTitle" data-mail-delivery-title>{{.EmailDelivery.Title}}</h2>
         </div>
         <button class="profile-delivery-close" type="button" data-profile-delivery-close aria-label="{{.EmailDelivery.CloseLabel}}">&times;</button>
       </div>
-      <p class="profile-delivery-summary">{{.EmailDelivery.Summary}}</p>
+      <p class="profile-delivery-summary" data-mail-delivery-summary>{{.EmailDelivery.Summary}}</p>
       <div class="profile-delivery-grid">
         <div class="profile-delivery-panel">
           <h3>{{.EmailDelivery.FixTitle}}</h3>
@@ -341,6 +341,46 @@
       closeModal();
     }
   });
+})();
+
+(function followPendingMailDelivery() {
+  var modalElement = document.querySelector('[data-profile-delivery-modal]');
+  if (!modalElement || typeof WebSocket !== 'function') {
+    return;
+  }
+  var deliveryID = modalElement.getAttribute('data-mail-delivery-id') || '';
+  if (!deliveryID) {
+    return;
+  }
+  var protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+  var socketURL = protocol + '//' + window.location.host + window.location.pathname + '?mail_delivery_ws&id=' + encodeURIComponent(deliveryID);
+  var deliverySocket = new WebSocket(socketURL);
+  var codeElement = modalElement.querySelector('[data-mail-delivery-code]');
+  var titleElement = modalElement.querySelector('[data-mail-delivery-title]');
+  var summaryElement = modalElement.querySelector('[data-mail-delivery-summary]');
+
+  deliverySocket.onmessage = function updateMailDeliveryStatus(messageEvent) {
+    var deliveryStatus = null;
+    try {
+      deliveryStatus = JSON.parse(messageEvent.data);
+    } catch (parseError) {
+      deliverySocket.close();
+      return;
+    }
+    if (deliveryStatus.status === 'sent') {
+      if (codeElement) { codeElement.textContent = 'SMTP: Accepted'; }
+      if (titleElement) { titleElement.textContent = 'Email accepted'; }
+      if (summaryElement) { summaryElement.textContent = 'The recipient mail server accepted the message for delivery.'; }
+      deliverySocket.close();
+      return;
+    }
+    if (deliveryStatus.status === 'failed') {
+      if (codeElement) { codeElement.textContent = 'SMTP: Failed'; }
+      if (titleElement) { titleElement.textContent = 'Email was not sent'; }
+      if (summaryElement) { summaryElement.textContent = deliveryStatus.error || 'The recipient mail server rejected the message.'; }
+      deliverySocket.close();
+    }
+  };
 })();
 </script>
 </body>

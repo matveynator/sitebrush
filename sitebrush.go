@@ -177,17 +177,21 @@ type App struct {
 	autoCertGuard                  chan autoCertGuardRequest
 	authIPFailureCache             chan authIPFailureCacheRequest
 	registrationConfirmations      chan emailConfirmationMemoryRequest
-	emailDelivery                  chan mailout.DeliveryJob
-	sendEmail                      mailout.Sender
-	hostingSnapshotReports         chan struct{}
-	hostingSnapshotDeliveries      chan hostingSnapshotNetChanDeliveryTask
-	hostingAndSupportPanel         chan hostingAndSupportPanelRequest
-	billingInvoices                chan billingInvoiceProcessRequest
-	renderTemplates                chan renderTemplateRequest
-	controlDatabase                *serverControlDatabaseDispatcher
-	hostingSupportEvents           chan hostingandsupport.HostingSnapshotEvent
-	demoSiteRuntime                chan demoSiteRuntimeRequest
-	demoSessionEvents              chan demoSessionEvent
+	// emailDelivery keeps the legacy in-memory adapter available to isolated callers.
+	// Production transfers every message to durableMailTasks before network work starts.
+	emailDelivery             chan mailout.DeliveryJob
+	durableMailTasks          chan mailout.Task
+	mailRouting               chan systemMailRouteRequest
+	sendEmail                 mailout.Sender
+	hostingSnapshotReports    chan struct{}
+	hostingSnapshotDeliveries chan hostingSnapshotNetChanDeliveryTask
+	hostingAndSupportPanel    chan hostingAndSupportPanelRequest
+	billingInvoices           chan billingInvoiceProcessRequest
+	renderTemplates           chan renderTemplateRequest
+	controlDatabase           *serverControlDatabaseDispatcher
+	hostingSupportEvents      chan hostingandsupport.HostingSnapshotEvent
+	demoSiteRuntime           chan demoSiteRuntimeRequest
+	demoSessionEvents         chan demoSessionEvent
 }
 
 type demoSiteRuntimeRequest struct {
@@ -215,6 +219,30 @@ type sitebrushNetChanRequest struct {
 type sitebrushNetChanResponse struct {
 	Status     string
 	StatusCode int
+}
+
+type systemMailRouteRequest struct {
+	refresh bool
+	reply   chan systemMailRouteSnapshot
+}
+
+type systemMailRouteSnapshot struct {
+	route     string
+	domain    string
+	from      string
+	checkedAt time.Time
+	err       error
+}
+
+type mailDeliveryCompletion struct {
+	record mailout.Record
+	err    error
+}
+
+type mailDeliveryObserver struct {
+	id    string
+	reply chan mailout.Result
+	done  <-chan struct{}
 }
 
 type demoSiteRuntimeState struct {
@@ -303,12 +331,17 @@ type demoSiteStatusView struct {
 
 type serviceMailRequest struct {
 	Version         int                                `json:"version"`
+	MessageID       string                             `json:"message_id,omitempty"`
 	InstallationID  string                             `json:"installation_id"`
 	PublicKey       string                             `json:"public_key"`
 	SourceDomain    string                             `json:"source_domain"`
 	Recipient       string                             `json:"recipient"`
 	CodeKind        string                             `json:"code_kind"`
 	SecretValue     string                             `json:"secret_value"`
+	Subject         string                             `json:"subject,omitempty"`
+	Body            string                             `json:"body,omitempty"`
+	HTMLBody        string                             `json:"html_body,omitempty"`
+	ExpiresAt       string                             `json:"expires_at,omitempty"`
 	LanguageCode    string                             `json:"language_code"`
 	HostingSnapshot *hostingandsupport.HostingSnapshot `json:"hosting_snapshot,omitempty"`
 	CreatedAt       string                             `json:"created_at"`
@@ -332,6 +365,7 @@ type serviceMailRoute struct {
 
 type profileEmailDeliveryView struct {
 	Show        bool
+	ID          string
 	Kind        string
 	LinkText    string
 	Title       string
@@ -344,6 +378,11 @@ type profileEmailDeliveryView struct {
 	Log         string
 	CloseLabel  string
 	DNSHelp     profileEmailDeliveryDNSHelp
+}
+
+type webmailProvider struct {
+	Name string
+	URL  string
 }
 
 type profileEmailDeliveryDNSHelp struct {
@@ -360,6 +399,8 @@ type profileEmailDeliveryDNSHelp struct {
 
 type emailDeliveryResult struct {
 	Message mailout.Message
+	ID      string
+	Pending bool
 	Err     error
 	Warning string
 }
@@ -5171,7 +5212,8 @@ func runSitebrushServer(ctx context.Context, config serverRunConfig) error {
 	application.guestStaticHTMLCache = startGuestStaticHTMLCacheWorker(ctx, defaultGuestStaticHTMLCacheLimitBytes)
 	application.authIPFailureCache = startAuthIPFailureCacheWorker(ctx)
 	application.registrationConfirmations = startEmailConfirmationMemoryWorker(ctx)
-	application.emailDelivery = mailout.StartDeliveryWorker(ctx, application.defaultEmailSender())
+	application.mailRouting = application.startSystemMailRouteProcess(ctx.Done())
+	application.durableMailTasks = application.startDurableMailProcess(ctx.Done())
 	application.hostingSupportEvents = application.startHostingSupportEventWorker(ctx.Done())
 	application.geoIP = geoip.NewResolver(filepath.Join(application.storageRootDir(), "geoip"))
 	certificateCacheDir := filepath.Join(application.storageRootDir(), "letsencrypt")
@@ -6835,6 +6877,10 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 		a.certificateRenewalWebSocket(w, r)
 		return
 	}
+	if hasQueryFlag(r, "mail_delivery_ws") {
+		a.mailDeliveryWebSocket(w, r)
+		return
+	}
 	if hasQueryFlag(r, "settings") || hasQueryFlag(r, "properties") {
 		a.domainSettingsPage(w, r)
 		return
@@ -7090,6 +7136,78 @@ func (a *App) certificateRenewalWebSocket(w http.ResponseWriter, r *http.Request
 	}
 }
 
+func (a *App) mailDeliveryWebSocket(w http.ResponseWriter, r *http.Request) {
+	currentEmail, isAdmin := a.currentAdminEmail(r)
+	if !isAdmin {
+		http.Error(w, "mail delivery status is unavailable", http.StatusForbidden)
+		return
+	}
+	if originText := strings.TrimSpace(r.Header.Get("Origin")); originText != "" {
+		originURL, err := url.Parse(originText)
+		if err != nil || !strings.EqualFold(originURL.Host, r.Host) {
+			http.Error(w, "invalid websocket origin", http.StatusForbidden)
+			return
+		}
+	}
+	messageID := strings.TrimSpace(r.URL.Query().Get("id"))
+	var initialRecord mailout.Record
+	err := a.withServerControlDatabaseRead(r.Context(), "mail-delivery-websocket", func(database *sql.DB) error {
+		var found bool
+		var lookupErr error
+		initialRecord, found, lookupErr = mailout.ByID(r.Context(), database, messageID)
+		if lookupErr != nil {
+			return lookupErr
+		}
+		if !found || !strings.EqualFold(strings.TrimSpace(initialRecord.Message.To), strings.TrimSpace(currentEmail)) {
+			return sql.ErrNoRows
+		}
+		return nil
+	})
+	if err != nil {
+		http.Error(w, "mail delivery status is unavailable", http.StatusNotFound)
+		return
+	}
+	connection, err := upgradeToWebSocket(w, r)
+	if err != nil {
+		return
+	}
+	defer connection.Close()
+	defer connection.WriteClose()
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	record := initialRecord
+	for {
+		payload := map[string]any{"id": record.ID, "status": record.Status, "attempts": record.Attempts}
+		if !record.NextAttempt.IsZero() {
+			payload["next_attempt_at"] = record.NextAttempt.UTC().Format(time.RFC3339)
+		}
+		if record.Status == mailout.StatusFailed {
+			payload["error"] = record.LastError
+		}
+		payloadJSON, _ := json.Marshal(payload)
+		if connection.WriteText(payloadJSON) != nil || record.Status == mailout.StatusSent || record.Status == mailout.StatusFailed {
+			return
+		}
+		select {
+		case <-r.Context().Done():
+			return
+		case <-ticker.C:
+			lookupErr := a.withServerControlDatabaseRead(r.Context(), "mail-delivery-websocket-refresh", func(database *sql.DB) error {
+				var found bool
+				var err error
+				record, found, err = mailout.ByID(r.Context(), database, messageID)
+				if err == nil && !found {
+					err = sql.ErrNoRows
+				}
+				return err
+			})
+			if lookupErr != nil {
+				return
+			}
+		}
+	}
+}
+
 type billingInvoiceLineView struct {
 	Domain        string
 	Description   string
@@ -7257,7 +7375,7 @@ func (a *App) setupAdmin(w http.ResponseWriter, r *http.Request) {
 		a.renderSetupPage(w, r, domain, email, err.Error())
 		return
 	}
-	a.renderSetupPage(w, r, domain, email, translationOrDefault(translations, "email_confirmation_status_sent", "A confirmation link has been sent to the email address."))
+	a.renderSetupConfirmationPage(w, r, domain, email)
 }
 
 func (a *App) registerPage(w http.ResponseWriter, r *http.Request) {
@@ -7287,6 +7405,65 @@ func (a *App) registerPage(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) renderSetupPage(w http.ResponseWriter, r *http.Request, domain, email, status string) {
 	a.render(w, r, "setup.html", map[string]any{"Domain": domain, "Email": strings.TrimSpace(email), "Status": strings.TrimSpace(status), "ReturnPath": requestedReturnPath(r)})
+}
+
+func (a *App) renderSetupConfirmationPage(w http.ResponseWriter, r *http.Request, domain, recipient string) {
+	provider := webmailProviderForAddress(recipient)
+	a.render(w, r, "setup.html", map[string]any{
+		"Domain":              domain,
+		"ConfirmationPending": true,
+		"RecipientEmail":      strings.TrimSpace(recipient),
+		"SenderEmail":         a.registrationConfirmationSenderAddress(r.Context(), domain),
+		"WebmailName":         provider.Name,
+		"WebmailURL":          provider.URL,
+		"ReturnPath":          requestedReturnPath(r),
+	})
+}
+
+func (a *App) registrationConfirmationSenderAddress(ctx context.Context, domain string) string {
+	fromAddress := a.emailFromAddress(domain)
+	if a.durableMailTasks != nil {
+		fromAddress = a.currentSystemMailRoute(ctx).from
+	}
+	parsedAddress, err := stdmail.ParseAddress(fromAddress)
+	if err == nil && strings.TrimSpace(parsedAddress.Address) != "" {
+		return parsedAddress.Address
+	}
+	return strings.TrimSpace(fromAddress)
+}
+
+func webmailProviderForAddress(address string) webmailProvider {
+	domain := emailAddressDomain(address)
+	switch {
+	case domain == "gmail.com" || domain == "googlemail.com":
+		return webmailProvider{Name: "Gmail", URL: "https://mail.google.com/"}
+	case domain == "outlook.com" || domain == "hotmail.com" || domain == "live.com" || domain == "msn.com":
+		return webmailProvider{Name: "Outlook", URL: "https://outlook.live.com/mail/"}
+	case domain == "yahoo.com" || strings.HasPrefix(domain, "yahoo.") || domain == "ymail.com":
+		return webmailProvider{Name: "Yahoo Mail", URL: "https://mail.yahoo.com/"}
+	case domain == "icloud.com" || domain == "me.com" || domain == "mac.com":
+		return webmailProvider{Name: "iCloud Mail", URL: "https://www.icloud.com/mail/"}
+	case domain == "mail.ru" || domain == "inbox.ru" || domain == "list.ru" || domain == "bk.ru" || domain == "internet.ru":
+		return webmailProvider{Name: "Mail.ru", URL: "https://e.mail.ru/inbox/"}
+	case domain == "yandex.ru" || domain == "yandex.com" || domain == "ya.ru" || strings.HasPrefix(domain, "yandex."):
+		return webmailProvider{Name: "Yandex Mail", URL: "https://mail.yandex.com/"}
+	case domain == "proton.me" || domain == "protonmail.com" || domain == "pm.me":
+		return webmailProvider{Name: "Proton Mail", URL: "https://mail.proton.me/"}
+	case domain == "fastmail.com" || domain == "fastmail.fm":
+		return webmailProvider{Name: "Fastmail", URL: "https://app.fastmail.com/mail/"}
+	case domain == "gmx.com" || domain == "gmx.net" || strings.HasPrefix(domain, "gmx."):
+		return webmailProvider{Name: "GMX Mail", URL: "https://www.gmx.com/mail/"}
+	case domain == "zoho.com" || domain == "zohomail.com":
+		return webmailProvider{Name: "Zoho Mail", URL: "https://mail.zoho.com/"}
+	case domain == "rambler.ru" || domain == "lenta.ru" || domain == "autorambler.ru" || domain == "myrambler.ru" || domain == "ro.ru":
+		return webmailProvider{Name: "Рамблер/почта", URL: "https://mail.rambler.ru/"}
+	case domain == "qq.com":
+		return webmailProvider{Name: "QQ Mail", URL: "https://mail.qq.com/"}
+	case domain == "163.com" || domain == "126.com" || domain == "yeah.net":
+		return webmailProvider{Name: "NetEase Mail", URL: "https://mail.163.com/"}
+	default:
+		return webmailProvider{}
+	}
 }
 
 func (a *App) siteRequestPage(w http.ResponseWriter, r *http.Request) {
@@ -12386,7 +12563,11 @@ func (a *App) runAutomaticBillingOnce(ctx context.Context, store hostingandsuppo
 			_ = store.MarkInvoiceDelivery(ctx, createdInvoice.ID, "error", enqueueErr.Error())
 			continue
 		}
-		_ = store.MarkInvoiceDelivery(ctx, createdInvoice.ID, "sent", "")
+		deliveryStatus := mailout.StatusSent
+		if a.durableMailTasks != nil {
+			deliveryStatus = mailout.StatusPending
+		}
+		_ = store.MarkInvoiceDelivery(ctx, createdInvoice.ID, deliveryStatus, "")
 	}
 }
 
@@ -12412,7 +12593,7 @@ func billingInvoiceEmailMessage(fromAddress string, invoice hostingandsupport.In
 	amountLabel := hostingandsupport.MoneyLabel(invoice.AmountMinor, invoice.Currency)
 	textBody := "Invoice " + invoice.Number + "\n\nServer: " + invoice.ServerName + "\nPeriod: " + invoice.PeriodStart + " - " + invoice.PeriodEnd + "\nTotal: " + amountLabel + "\nDue: " + invoice.DueAt + "\n\nView and pay: " + invoiceURL + "\nBilling schedule: " + scheduleURL
 	htmlBody := `<!doctype html><html><body style="margin:0;background:#f4f7f8;color:#172126;font-family:Arial,sans-serif"><div style="max-width:680px;margin:0 auto;padding:32px 18px"><div style="background:#fff;border:1px solid #d9e2e5;border-radius:8px;padding:28px"><div style="font-size:22px;font-weight:700;color:#087f8c">SiteBrush</div><h1 style="font-size:26px;margin:24px 0 8px">Invoice ` + template.HTMLEscapeString(invoice.Number) + `</h1><p style="color:#607078">` + template.HTMLEscapeString(invoice.ServerName) + ` · ` + template.HTMLEscapeString(invoice.PeriodStart) + ` - ` + template.HTMLEscapeString(invoice.PeriodEnd) + `</p><div style="font-size:30px;font-weight:700;margin:24px 0">` + template.HTMLEscapeString(amountLabel) + `</div><p>Payment due: <strong>` + template.HTMLEscapeString(invoice.DueAt) + `</strong></p><p><a href="` + template.HTMLEscapeString(invoiceURL) + `" style="display:inline-block;background:#087f8c;color:white;text-decoration:none;padding:12px 18px;border-radius:6px">View invoice and pay</a></p><p style="margin-top:28px;font-size:13px;color:#607078"><a href="` + template.HTMLEscapeString(scheduleURL) + `">Choose invoice day and payment term</a></p></div></div></body></html>`
-	return mailout.Message{From: fromAddress, To: invoice.CustomerEmail, Subject: "SiteBrush invoice " + invoice.Number, Body: textBody, HTMLBody: htmlBody}
+	return mailout.Message{Kind: "invoice", From: fromAddress, To: invoice.CustomerEmail, Subject: "SiteBrush invoice " + invoice.Number, Body: textBody, HTMLBody: htmlBody}
 }
 
 func (a *App) refreshHostingAndSupportPanel() {
@@ -14554,7 +14735,7 @@ func (a *App) enqueueSiteRegistrationRequestOwnerEmails(ctx context.Context, r *
 	}, "\n")
 	fromAddress := a.emailFromAddress(a.siteDomain(r.Context(), r))
 	for _, ownerEmail := range ownerEmails {
-		if err := a.enqueueEmail(ctx, mailout.Message{From: fromAddress, To: ownerEmail, Subject: subject, Body: body}); err != nil {
+		if err := a.enqueueEmail(ctx, mailout.Message{Kind: "site_request", From: fromAddress, To: ownerEmail, Subject: subject, Body: body}); err != nil {
 			log.Printf("site request owner email enqueue failed domain=%s to=%s error=%v", domain, ownerEmail, err)
 		}
 	}
@@ -14582,6 +14763,7 @@ func (a *App) enqueueSiteRegistrationDecisionEmail(ctx context.Context, r *http.
 		lines = append(lines, "", "Сообщение владельца сервера:", ownerMessage)
 	}
 	return a.enqueueEmail(ctx, mailout.Message{
+		Kind:    "site_request_decision",
 		From:    a.emailFromAddress(siteRequest.Domain),
 		To:      siteRequest.Email,
 		Subject: subject,
@@ -15393,6 +15575,7 @@ func (a *App) enqueueManagedSiteDeletionBackupEmails(ctx context.Context, domain
 			continue
 		}
 		err := a.enqueueEmail(ctx, mailout.Message{
+			Kind:    "backup_notice",
 			From:    a.emailFromAddress(domain),
 			To:      strings.TrimSpace(email),
 			Subject: subject,
@@ -15893,8 +16076,13 @@ func (a *App) profilePage(w http.ResponseWriter, r *http.Request) {
 				break
 			}
 			a.clearFailedLoginAttempts(r.Context(), profilePasswordFailureDomain(domain, currentEmail), clientIPAddress(r))
-			status = translationOrDefault(translations, "profile_password_code_status_sent", "The code email was sent and accepted by the recipient mail server.")
-			statusClass = "success"
+			if deliveryResult.Pending {
+				status = translationOrDefault(translations, "profile_password_code_status_pending", "Email delivery is still in progress. SiteBrush will continue retrying safely.")
+				statusClass = "warning"
+			} else {
+				status = translationOrDefault(translations, "profile_password_code_status_sent", "The code email was sent and accepted by the recipient mail server.")
+				statusClass = "success"
+			}
 			emailDeliveryView = profileEmailDeliveryViewForResult(translations, deliveryResult, profileEmailDeliveryDNSHelp{})
 			showPasswordCodeForm = true
 			passwordConfirmationToken = token
@@ -15980,7 +16168,11 @@ func (a *App) recoverPage(w http.ResponseWriter, r *http.Request) {
 		a.render(w, r, "recover.html", map[string]any{"Status": translationOrDefault(translations, "recover_status_smtp_failed_prefix", "SMTP send failed: ") + mailError.Error(), "ShowForm": true, "ReturnPath": requestedReturnPath(r)})
 		return
 	}
-	a.logHostingSupportEvent(r.Context(), "code_requested", "sent", email, domain, "login_code")
+	queuedStatus := mailout.StatusSent
+	if a.durableMailTasks != nil {
+		queuedStatus = mailout.StatusPending
+	}
+	a.logHostingSupportEvent(r.Context(), "code_requested", queuedStatus, email, domain, "login_code")
 	a.clearFailedLoginAttempts(r.Context(), domain, clientIPAddress(r))
 	httpsecurity.RedirectLocal(w, r, requestedReturnPath(r), http.StatusFound)
 }
@@ -16021,7 +16213,11 @@ func (a *App) createAndSendProfileCode(r *http.Request, domain, currentEmail, ne
 		_, _ = a.db.ExecContext(r.Context(), `DELETE FROM email_confirmations WHERE token=?`, token)
 		return "", deliveryResult, dnsHelp, deliveryResult.Err
 	}
-	a.logHostingSupportEvent(r.Context(), "code_requested", "sent", currentEmail, domain, codeKind)
+	deliveryStatus := mailout.StatusSent
+	if deliveryResult.Pending {
+		deliveryStatus = mailout.StatusPending
+	}
+	a.logHostingSupportEvent(r.Context(), "code_requested", deliveryStatus, currentEmail, domain, codeKind)
 	return token, deliveryResult, profileEmailDeliveryDNSHelp{}, nil
 }
 
@@ -16320,10 +16516,15 @@ func (a *App) renderEmailConfirmationStatus(w http.ResponseWriter, r *http.Reque
 
 func (a *App) enqueueServiceEmail(ctx context.Context, r *http.Request, codeKind, domain, recipient, secretValue, languageCode string) error {
 	message := mailout.Message{
-		From:    a.emailFromAddress(domain),
-		To:      recipient,
-		Subject: emailSubjectForServiceMail(languageCode, codeKind, domain),
-		Body:    emailBodyForServiceMail(languageCode, codeKind, domain, secretValue),
+		Kind:     strings.TrimSpace(codeKind),
+		From:     a.emailFromAddress(domain),
+		To:       recipient,
+		Subject:  emailSubjectForServiceMail(languageCode, codeKind, domain),
+		Body:     emailBodyForServiceMail(languageCode, codeKind, domain, secretValue),
+		HTMLBody: emailHTMLBodyForServiceMail(languageCode, codeKind, domain, secretValue),
+	}
+	if a.durableMailTasks != nil {
+		return a.enqueueEmail(ctx, message)
 	}
 	route := a.serviceMailRoute(ctx, domain, languageCode)
 	if !route.UseRelay {
@@ -16360,10 +16561,15 @@ func (a *App) enqueueServiceEmail(ctx context.Context, r *http.Request, codeKind
 
 func (a *App) sendServiceEmailNow(ctx context.Context, r *http.Request, codeKind, domain, recipient, secretValue, languageCode string) emailDeliveryResult {
 	message := mailout.Message{
-		From:    a.emailFromAddress(domain),
-		To:      recipient,
-		Subject: emailSubjectForServiceMail(languageCode, codeKind, domain),
-		Body:    emailBodyForServiceMail(languageCode, codeKind, domain, secretValue),
+		Kind:     strings.TrimSpace(codeKind),
+		From:     a.emailFromAddress(domain),
+		To:       recipient,
+		Subject:  emailSubjectForServiceMail(languageCode, codeKind, domain),
+		Body:     emailBodyForServiceMail(languageCode, codeKind, domain, secretValue),
+		HTMLBody: emailHTMLBodyForServiceMail(languageCode, codeKind, domain, secretValue),
+	}
+	if a.durableMailTasks != nil {
+		return a.sendEmailNow(ctx, message)
 	}
 	route := a.serviceMailRoute(ctx, domain, languageCode)
 	if !route.UseRelay {
@@ -16455,6 +16661,12 @@ func emailConfirmationURL(r *http.Request, token string) string {
 }
 
 func (a *App) enqueueEmail(ctx context.Context, message mailout.Message) error {
+	if a.durableMailTasks != nil {
+		route := a.currentSystemMailRoute(ctx)
+		message.From = route.from
+		task := mailout.NewTask(message.Kind, route.route, message, mailExpirationForKind(message.Kind, time.Now().UTC()), nil)
+		return a.submitDurableMailTask(ctx.Done(), task)
+	}
 	if a.emailDelivery == nil {
 		a.emailDelivery = mailout.StartDeliveryWorker(context.Background(), a.defaultEmailSender())
 	}
@@ -16469,6 +16681,31 @@ func (a *App) enqueueEmail(ctx context.Context, message mailout.Message) error {
 }
 
 func (a *App) sendEmailNow(ctx context.Context, message mailout.Message) emailDeliveryResult {
+	if a.durableMailTasks != nil {
+		route := a.currentSystemMailRoute(ctx)
+		message.From = route.from
+		resultChannel := make(chan mailout.Result, 1)
+		observerDone := make(chan struct{})
+		defer close(observerDone)
+		task := mailout.NewTask(message.Kind, route.route, message, mailExpirationForKind(message.Kind, time.Now().UTC()), resultChannel)
+		task.Done = observerDone
+		if err := a.submitDurableMailTask(ctx.Done(), task); err != nil {
+			return emailDeliveryResult{ID: task.ID, Message: message, Err: err}
+		}
+		waitTimer := time.NewTimer(45 * time.Second)
+		defer waitTimer.Stop()
+		select {
+		case result := <-resultChannel:
+			if result.Status == mailout.StatusSent {
+				return emailDeliveryResult{ID: task.ID, Message: message}
+			}
+			return emailDeliveryResult{ID: task.ID, Message: message, Err: result.Err}
+		case <-ctx.Done():
+			return emailDeliveryResult{ID: task.ID, Message: message, Pending: true}
+		case <-waitTimer.C:
+			return emailDeliveryResult{ID: task.ID, Message: message, Pending: true}
+		}
+	}
 	sender := a.defaultEmailSender()
 	sendCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
 	defer cancel()
@@ -16480,6 +16717,308 @@ func (a *App) sendEmailNow(ctx context.Context, message mailout.Message) emailDe
 	}
 	log.Printf("email delivery accepted recipient_domain=%s", diagnosticlog.SafeLogValue(emailAddressDomain(message.To)))
 	return emailDeliveryResult{Message: message}
+}
+
+func (a *App) startDurableMailProcess(stop <-chan struct{}) chan mailout.Task {
+	tasks := make(chan mailout.Task, mailout.DeliveryQueueSize)
+	go a.runDurableMailProcess(stop, tasks)
+	return tasks
+}
+
+func (a *App) runDurableMailProcess(stop <-chan struct{}, tasks <-chan mailout.Task) {
+	const deliveryConcurrency = 4
+	ticker := time.NewTicker(time.Second)
+	cleanupTicker := time.NewTicker(24 * time.Hour)
+	defer ticker.Stop()
+	defer cleanupTicker.Stop()
+
+	recoverErr := a.withServerControlDatabaseWrite(context.Background(), "mail-outbox-recover", func(database *sql.DB) error {
+		return mailout.RecoverInterrupted(context.Background(), database, time.Now().UTC())
+	})
+	if recoverErr != nil {
+		log.Printf("MAIL outbox recovery failed error=%s", diagnosticlog.SafeLogValue(recoverErr.Error()))
+	}
+	log.Printf("MAIL outbox started concurrency=%d", deliveryConcurrency)
+
+	completions := make(chan mailDeliveryCompletion, deliveryConcurrency)
+	observers := make([]mailDeliveryObserver, 0, 8)
+	activeDeliveries := 0
+
+	startDueDeliveries := func() {
+		availableSlots := deliveryConcurrency - activeDeliveries
+		if availableSlots <= 0 {
+			return
+		}
+		var dueRecords []mailout.Record
+		readErr := a.withServerControlDatabaseRead(context.Background(), "mail-outbox-due", func(database *sql.DB) error {
+			var err error
+			dueRecords, err = mailout.Due(context.Background(), database, time.Now().UTC(), availableSlots)
+			return err
+		})
+		if readErr != nil {
+			log.Printf("mail outbox read failed: %v", readErr)
+			return
+		}
+		for _, dueRecord := range dueRecords {
+			claimed := false
+			claimErr := a.withServerControlDatabaseWrite(context.Background(), "mail-outbox-claim", func(database *sql.DB) error {
+				var err error
+				claimed, err = mailout.Claim(context.Background(), database, dueRecord.ID)
+				return err
+			})
+			if claimErr != nil || !claimed {
+				if claimErr != nil {
+					log.Printf("MAIL claim failed id=%s error=%s", diagnosticlog.SafeLogValue(dueRecord.ID), diagnosticlog.SafeLogValue(claimErr.Error()))
+				}
+				continue
+			}
+			log.Printf("MAIL attempt id=%s kind=%s route=%s attempt=%d recipient_domain=%s",
+				diagnosticlog.SafeLogValue(dueRecord.ID),
+				diagnosticlog.SafeLogValue(dueRecord.Kind),
+				diagnosticlog.SafeLogValue(dueRecord.Route),
+				dueRecord.Attempts+1,
+				diagnosticlog.SafeLogValue(emailAddressDomain(dueRecord.Message.To)))
+			activeDeliveries++
+			go func(record mailout.Record) {
+				completions <- mailDeliveryCompletion{record: record, err: a.deliverMailRecord(stop, record)}
+			}(dueRecord)
+		}
+	}
+
+	notifyTerminal := func(result mailout.Result) {
+		remainingObservers := observers[:0]
+		for _, observer := range observers {
+			if !mailDeliveryObserverAlive(observer) {
+				continue
+			}
+			if observer.id != result.ID {
+				remainingObservers = append(remainingObservers, observer)
+				continue
+			}
+			sendMailDeliveryResult(observer.reply, result)
+		}
+		observers = remainingObservers
+	}
+
+	for {
+		select {
+		case <-stop:
+			return
+		case task, isOpen := <-tasks:
+			if !isOpen {
+				return
+			}
+			normalizedTask, normalizeErr := mailout.NormalizeTask(task)
+			if normalizeErr != nil {
+				log.Printf("MAIL queue rejected id=%s error=%s", diagnosticlog.SafeLogValue(task.ID), diagnosticlog.SafeLogValue(normalizeErr.Error()))
+				sendMailTaskAccepted(task.Accepted, normalizeErr)
+				sendMailDeliveryResult(task.Reply, mailout.Result{ID: task.ID, Status: mailout.StatusFailed, Err: normalizeErr})
+				continue
+			}
+			inserted := false
+			insertErr := a.withServerControlDatabaseWrite(context.Background(), "mail-outbox-insert", func(database *sql.DB) error {
+				var err error
+				inserted, err = mailout.Insert(context.Background(), database, normalizedTask)
+				return err
+			})
+			sendMailTaskAccepted(task.Accepted, insertErr)
+			if insertErr != nil {
+				log.Printf("MAIL queue failed id=%s kind=%s route=%s recipient_domain=%s error=%s",
+					diagnosticlog.SafeLogValue(normalizedTask.ID),
+					diagnosticlog.SafeLogValue(normalizedTask.Kind),
+					diagnosticlog.SafeLogValue(normalizedTask.Route),
+					diagnosticlog.SafeLogValue(emailAddressDomain(normalizedTask.Message.To)),
+					diagnosticlog.SafeLogValue(insertErr.Error()))
+				sendMailDeliveryResult(task.Reply, mailout.Result{ID: normalizedTask.ID, Status: mailout.StatusFailed, Err: insertErr})
+				continue
+			}
+			log.Printf("MAIL queued id=%s kind=%s route=%s recipient_domain=%s expires_at=%s duplicate=%t",
+				diagnosticlog.SafeLogValue(normalizedTask.ID),
+				diagnosticlog.SafeLogValue(normalizedTask.Kind),
+				diagnosticlog.SafeLogValue(normalizedTask.Route),
+				diagnosticlog.SafeLogValue(emailAddressDomain(normalizedTask.Message.To)),
+				normalizedTask.ExpiresAt.Format(time.RFC3339),
+				!inserted)
+			var record mailout.Record
+			if !inserted {
+				_ = a.withServerControlDatabaseRead(context.Background(), "mail-outbox-existing", func(database *sql.DB) error {
+					var found bool
+					var err error
+					record, found, err = mailout.ByID(context.Background(), database, normalizedTask.ID)
+					if err == nil && !found {
+						err = errors.New("mail outbox record disappeared")
+					}
+					return err
+				})
+			}
+			if task.Reply != nil && mailTaskObserverAlive(task.Done) {
+				if !inserted && (record.Status == mailout.StatusSent || record.Status == mailout.StatusFailed) {
+					result := mailout.Result{ID: record.ID, Status: record.Status, Attempts: record.Attempts}
+					if record.Status == mailout.StatusFailed {
+						result.Err = errors.New(firstNonEmpty(record.LastError, "mail delivery failed"))
+					}
+					sendMailDeliveryResult(task.Reply, result)
+				} else {
+					observers = append(observers, mailDeliveryObserver{id: normalizedTask.ID, reply: task.Reply, done: task.Done})
+				}
+			}
+			startDueDeliveries()
+		case completion := <-completions:
+			activeDeliveries--
+			now := time.Now().UTC()
+			attempts := completion.record.Attempts + 1
+			result := mailout.Result{ID: completion.record.ID, Attempts: attempts}
+			terminal := false
+			writeErr := a.withServerControlDatabaseWrite(context.Background(), "mail-outbox-complete", func(database *sql.DB) error {
+				switch {
+				case completion.err == nil:
+					terminal = true
+					result.Status = mailout.StatusSent
+					return mailout.MarkSent(context.Background(), database, completion.record.ID, attempts, now)
+				case mailout.IsPermanentFailure(completion.err), !now.Before(completion.record.ExpiresAt):
+					terminal = true
+					result.Status = mailout.StatusFailed
+					result.Err = completion.err
+					return mailout.MarkFailed(context.Background(), database, completion.record.ID, attempts, completion.err)
+				default:
+					result.Status = mailout.StatusPending
+					result.NextAttempt = now.Add(mailout.RetryDelayWithJitter(attempts))
+					return mailout.MarkPending(context.Background(), database, completion.record.ID, attempts, result.NextAttempt, completion.err)
+				}
+			})
+			if writeErr != nil {
+				log.Printf("MAIL completion failed id=%s error=%s", diagnosticlog.SafeLogValue(completion.record.ID), diagnosticlog.SafeLogValue(writeErr.Error()))
+			} else if terminal {
+				if result.Status == mailout.StatusSent {
+					log.Printf("MAIL sent id=%s kind=%s route=%s attempts=%d recipient_domain=%s",
+						diagnosticlog.SafeLogValue(completion.record.ID),
+						diagnosticlog.SafeLogValue(completion.record.Kind),
+						diagnosticlog.SafeLogValue(completion.record.Route),
+						attempts,
+						diagnosticlog.SafeLogValue(emailAddressDomain(completion.record.Message.To)))
+				} else {
+					log.Printf("MAIL failed id=%s kind=%s route=%s attempts=%d recipient_domain=%s error=%s",
+						diagnosticlog.SafeLogValue(completion.record.ID),
+						diagnosticlog.SafeLogValue(completion.record.Kind),
+						diagnosticlog.SafeLogValue(completion.record.Route),
+						attempts,
+						diagnosticlog.SafeLogValue(emailAddressDomain(completion.record.Message.To)),
+						diagnosticlog.SafeLogValue(completion.err.Error()))
+				}
+				notifyTerminal(result)
+			} else {
+				log.Printf("MAIL retry scheduled id=%s kind=%s route=%s attempts=%d recipient_domain=%s next_attempt_at=%s error=%s",
+					diagnosticlog.SafeLogValue(completion.record.ID),
+					diagnosticlog.SafeLogValue(completion.record.Kind),
+					diagnosticlog.SafeLogValue(completion.record.Route),
+					attempts,
+					diagnosticlog.SafeLogValue(emailAddressDomain(completion.record.Message.To)),
+					result.NextAttempt.Format(time.RFC3339),
+					diagnosticlog.SafeLogValue(completion.err.Error()))
+			}
+			startDueDeliveries()
+		case <-ticker.C:
+			remainingObservers := observers[:0]
+			for _, observer := range observers {
+				if mailDeliveryObserverAlive(observer) {
+					remainingObservers = append(remainingObservers, observer)
+				}
+			}
+			observers = remainingObservers
+			startDueDeliveries()
+		case <-cleanupTicker.C:
+			_ = a.withServerControlDatabaseWrite(context.Background(), "mail-outbox-purge", func(database *sql.DB) error {
+				return mailout.PurgeTerminal(context.Background(), database, time.Now().UTC().Add(-mailout.TerminalRetention))
+			})
+		}
+	}
+}
+
+func (a *App) submitDurableMailTask(stop <-chan struct{}, task mailout.Task) error {
+	if a.durableMailTasks == nil {
+		return errors.New("durable mail process is not running")
+	}
+	accepted := make(chan error, 1)
+	task.Accepted = accepted
+	select {
+	case <-stop:
+		return errors.New("mail submission canceled")
+	case a.durableMailTasks <- task:
+	}
+	select {
+	case <-stop:
+		return errors.New("mail submission canceled")
+	case err := <-accepted:
+		return err
+	}
+}
+
+func (a *App) deliverMailRecord(stop <-chan struct{}, record mailout.Record) error {
+	if !time.Now().UTC().Before(record.ExpiresAt) {
+		return mailout.PermanentError{Err: errors.New("mail delivery expired")}
+	}
+	deliveryContext, cancel := context.WithTimeout(context.Background(), 50*time.Second)
+	defer cancel()
+	go func() {
+		select {
+		case <-stop:
+			cancel()
+		case <-deliveryContext.Done():
+		}
+	}()
+	if record.Route == mailout.RouteRelay {
+		return a.sendMailoutTaskThroughNetChan(deliveryContext, record)
+	}
+	return a.defaultEmailSender()(deliveryContext, record.Message)
+}
+
+func mailExpirationForKind(kind string, now time.Time) time.Time {
+	switch strings.TrimSpace(kind) {
+	case "password_change_code", "login_code":
+		return now.Add(profilePasswordCodeTTL)
+	case "email_confirm", "email_change", "owner_invite":
+		return now.Add(emailConfirmationTTL)
+	default:
+		return now.Add(mailout.DefaultRetention)
+	}
+}
+
+func mailTaskObserverAlive(done <-chan struct{}) bool {
+	if done == nil {
+		return true
+	}
+	select {
+	case <-done:
+		return false
+	default:
+		return true
+	}
+}
+
+func mailDeliveryObserverAlive(observer mailDeliveryObserver) bool {
+	return observer.reply != nil && mailTaskObserverAlive(observer.done)
+}
+
+func sendMailTaskAccepted(accepted chan error, err error) {
+	if accepted == nil {
+		return
+	}
+	defer func() { _ = recover() }()
+	select {
+	case accepted <- err:
+	default:
+	}
+}
+
+func sendMailDeliveryResult(reply chan mailout.Result, result mailout.Result) {
+	if reply == nil {
+		return
+	}
+	defer func() { _ = recover() }()
+	select {
+	case reply <- result:
+	default:
+	}
 }
 
 func (a *App) serviceMailRoute(ctx context.Context, domain, languageCode string) serviceMailRoute {
@@ -16501,6 +17040,117 @@ func (a *App) serviceMailRoute(ctx context.Context, domain, languageCode string)
 		relayURLs = append(relayURLs, "https://"+relayDomain+serviceMailRelayPath)
 	}
 	return serviceMailRoute{UseRelay: true, RelayURLs: relayURLs, Reason: "central service mail relay"}
+}
+
+func (a *App) startSystemMailRouteProcess(stop <-chan struct{}) chan systemMailRouteRequest {
+	requests := make(chan systemMailRouteRequest)
+	go func() {
+		refreshTicker := time.NewTicker(5 * time.Minute)
+		defer refreshTicker.Stop()
+		snapshot := a.inspectSystemMailRoute()
+		for {
+			select {
+			case <-stop:
+				return
+			case request, isOpen := <-requests:
+				if !isOpen {
+					return
+				}
+				if request.refresh || snapshot.checkedAt.IsZero() {
+					snapshot = a.inspectSystemMailRoute()
+				}
+				select {
+				case request.reply <- snapshot:
+				case <-stop:
+					return
+				}
+			case <-refreshTicker.C:
+				snapshot = a.inspectSystemMailRoute()
+			}
+		}
+	}()
+	return requests
+}
+
+func (a *App) currentSystemMailRoute(ctx context.Context) systemMailRouteSnapshot {
+	if a.mailRouting == nil {
+		return a.inspectSystemMailRoute()
+	}
+	reply := make(chan systemMailRouteSnapshot, 1)
+	request := systemMailRouteRequest{reply: reply}
+	select {
+	case a.mailRouting <- request:
+	case <-ctx.Done():
+		return systemMailRouteSnapshot{route: mailout.RouteRelay, domain: "sitebrush.com", from: serviceMailRelayFromAddress("sitebrush.com"), checkedAt: time.Now().UTC(), err: ctx.Err()}
+	}
+	select {
+	case snapshot := <-reply:
+		return snapshot
+	case <-ctx.Done():
+		return systemMailRouteSnapshot{route: mailout.RouteRelay, domain: "sitebrush.com", from: serviceMailRelayFromAddress("sitebrush.com"), checkedAt: time.Now().UTC(), err: ctx.Err()}
+	}
+}
+
+func (a *App) inspectSystemMailRoute() systemMailRouteSnapshot {
+	snapshot := systemMailRouteSnapshot{
+		route:     mailout.RouteRelay,
+		domain:    "sitebrush.com",
+		from:      serviceMailRelayFromAddress("sitebrush.com"),
+		checkedAt: time.Now().UTC(),
+	}
+	lookupContext, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	systemDomain := ""
+	if err := a.withServerControlDatabaseRead(lookupContext, "system-mail-domain", func(database *sql.DB) error {
+		var found bool
+		systemDomain, found = (hostingandsupport.Store{DB: database}).OwnerDomain(lookupContext)
+		if !found {
+			return errors.New("system mail domain is not configured")
+		}
+		return nil
+	}); err != nil {
+		snapshot.err = err
+		return snapshot
+	}
+	systemDomain = normalizeDomainName(systemDomain)
+	if systemDomain == "" || emailDomainCannotUseDNS(systemDomain) {
+		snapshot.err = errors.New("system mail domain cannot be checked in DNS")
+		return snapshot
+	}
+	snapshot.domain = systemDomain
+	serverIPs, _, err := detectServerIPCandidates(lookupContext)
+	if err != nil || len(serverIPs) == 0 {
+		snapshot.err = firstNonNilError(err, errors.New("server IP is unavailable"))
+		return snapshot
+	}
+	ipRecords, ipErr := lookupIPRecords(systemDomain)
+	txtRecords, txtErr := lookupTXTRecords(systemDomain)
+	if ipErr != nil || txtErr != nil || !ipRecordsAllowAnyServerIP(ipRecords, serverIPs) || !spfRecordsAllowAnyServerIP(txtRecords, serverIPs) {
+		snapshot.err = firstNonNilError(ipErr, txtErr, errors.New("system domain A/AAAA and SPF are not ready for local mail"))
+		return snapshot
+	}
+	snapshot.route = mailout.RouteLocal
+	snapshot.domain = systemDomain
+	snapshot.from = localSystemMailFromAddress(systemDomain)
+	return snapshot
+}
+
+func localSystemMailFromAddress(systemDomain string) string {
+	systemDomain = normalizeDomainName(systemDomain)
+	configuredFrom := strings.TrimSpace(os.Getenv("SITEBRUSH_SMTP_FROM"))
+	if configuredFrom != "" && emailAddressDomain(configuredFrom) == systemDomain {
+		return configuredFrom
+	}
+	return "SiteBrush <sitebrush@" + systemDomain + ">"
+}
+
+func firstNonNilError(errorsToCheck ...error) error {
+	for _, err := range errorsToCheck {
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (route serviceMailRoute) primaryRelayURL() string {
@@ -17339,8 +17989,15 @@ func (a *App) handleSitebrushNetChanPayload(ctx context.Context, payload []byte)
 		return sitebrushNetChanResponse{Status: "payload size is invalid", StatusCode: http.StatusRequestEntityTooLarge}
 	}
 	var request serviceMailRequest
-	if err := json.Unmarshal(payload, &request); err != nil {
-		log.Printf("hosting snapshot netchan decode failed: %v", err)
+	var encryptedEnvelope serviceMailEncryptedEnvelope
+	decodeErr := json.Unmarshal(payload, &encryptedEnvelope)
+	if decodeErr == nil && encryptedEnvelope.Encrypted {
+		request, decodeErr = a.decodeServiceMailRelayRequest(ctx, payload, "sitebrush.com")
+	} else {
+		decodeErr = json.Unmarshal(payload, &request)
+	}
+	if decodeErr != nil {
+		log.Printf("hosting snapshot netchan decode failed: %v", decodeErr)
 		return sitebrushNetChanResponse{Status: "payload is invalid", StatusCode: http.StatusBadRequest}
 	}
 	var status string
@@ -17355,7 +18012,7 @@ func (a *App) handleSitebrushNetChanPayload(ctx context.Context, payload []byte)
 	case "hosting_snapshot":
 		status, statusCode = a.handleHostingSnapshotRequest(ctx, request, source)
 	default:
-		status, statusCode = "unsupported netchan request kind", http.StatusBadRequest
+		status, statusCode = a.handleServiceMailRelayRequest(ctx, nil, request, source)
 	}
 	if statusCode >= 400 {
 		log.Printf("hosting snapshot netchan rejected: %s", status)
@@ -18373,6 +19030,136 @@ func (a *App) sendServiceMailThroughRelay(ctx context.Context, relayURL string, 
 	return postServiceMailRelayPayload(ctx, relayURL, requestPayload)
 }
 
+func (a *App) sendMailoutTaskThroughNetChan(ctx context.Context, record mailout.Record) error {
+	sourceDomain := a.systemMailOwnerDomain(ctx)
+	request := serviceMailRequest{
+		Version:      2,
+		MessageID:    record.ID,
+		SourceDomain: sourceDomain,
+		Recipient:    strings.TrimSpace(record.Message.To),
+		CodeKind:     strings.TrimSpace(record.Kind),
+		Subject:      strings.TrimSpace(record.Message.Subject),
+		Body:         record.Message.Body,
+		HTMLBody:     record.Message.HTMLBody,
+		ExpiresAt:    record.ExpiresAt.UTC().Format(time.RFC3339Nano),
+		LanguageCode: "en",
+		CreatedAt:    time.Now().UTC().Format(time.RFC3339),
+	}
+	response, err := a.sendServiceMailNetChanRequest(ctx, &request)
+	if err == nil {
+		err = serviceMailNetChanResponseError(response)
+	}
+	if err == nil || !strings.Contains(err.Error(), "installation is not registered") {
+		return err
+	}
+	registration := serviceMailRequest{
+		Version:      2,
+		CodeKind:     "installation_register",
+		SourceDomain: sourceDomain,
+		LanguageCode: "en",
+		CreatedAt:    time.Now().UTC().Format(time.RFC3339),
+	}
+	registrationResponse, registrationErr := a.sendServiceMailNetChanRequest(ctx, &registration)
+	if registrationErr != nil {
+		return registrationErr
+	}
+	if responseErr := serviceMailNetChanResponseError(registrationResponse); responseErr != nil {
+		return responseErr
+	}
+	response, err = a.sendServiceMailNetChanRequest(ctx, &request)
+	if err != nil {
+		return err
+	}
+	return serviceMailNetChanResponseError(response)
+}
+
+func (a *App) sendServiceMailNetChanRequest(ctx context.Context, request *serviceMailRequest) (sitebrushNetChanResponse, error) {
+	relayURL := "https://sitebrush.com" + serviceMailRelayPath
+	relayRequest := *request
+	if err := a.attachHostingSnapshotToServiceMailRequest(ctx, relayURL, &relayRequest); err != nil {
+		return sitebrushNetChanResponse{}, err
+	}
+	if err := a.signServiceMailRequest(ctx, &relayRequest); err != nil {
+		return sitebrushNetChanResponse{}, err
+	}
+	signedPayload, err := json.Marshal(relayRequest)
+	if err != nil {
+		return sitebrushNetChanResponse{}, err
+	}
+	payload, err := serviceMailEncryptPayloadForRelay(relayURL, signedPayload)
+	if err != nil {
+		return sitebrushNetChanResponse{}, err
+	}
+	if int64(len(payload)) > hostingSnapshotNetChanPayloadLimitBytes {
+		return sitebrushNetChanResponse{}, mailout.PermanentError{Err: errors.New("mail relay payload exceeds 256 KiB")}
+	}
+	address := strings.TrimSpace(os.Getenv("SITEBRUSH_SERVICE_MAIL_NETCHAN_ADDRESS"))
+	if address == "" {
+		address = net.JoinHostPort("sitebrush.com", hostingSnapshotNetChanPort)
+	}
+	connection, err := netchan.Dial[sitebrushNetChanRequest](address)
+	if err != nil {
+		return sitebrushNetChanResponse{}, err
+	}
+	defer connection.Abort()
+	responseChannel := make(chan sitebrushNetChanResponse, 1)
+	deliveryFinished := make(chan error, 1)
+	go func() {
+		deliveryFinished <- connection.Deliver(sitebrushNetChanRequest{Payload: payload, Response: responseChannel})
+	}()
+	deliveryAcknowledged := false
+	errorsChannel := connection.Errors
+	for {
+		select {
+		case <-ctx.Done():
+			return sitebrushNetChanResponse{}, ctx.Err()
+		case deliveryErr := <-deliveryFinished:
+			if deliveryErr != nil {
+				return sitebrushNetChanResponse{}, deliveryErr
+			}
+			deliveryAcknowledged = true
+			deliveryFinished = nil
+		case response := <-responseChannel:
+			return response, nil
+		case connectionErr, isOpen := <-errorsChannel:
+			if isOpen {
+				log.Printf("service mail netchan error address=%s: %v", diagnosticlog.SafeLogValue(address), connectionErr)
+			} else {
+				errorsChannel = nil
+			}
+		case <-connection.Done:
+			if deliveryAcknowledged {
+				return sitebrushNetChanResponse{}, errors.New("service mail netchan closed without final response")
+			}
+			return sitebrushNetChanResponse{}, netchan.ErrChannelClosed
+		}
+	}
+}
+
+func serviceMailNetChanResponseError(response sitebrushNetChanResponse) error {
+	if response.StatusCode >= 200 && response.StatusCode < 300 && response.StatusCode != http.StatusAccepted {
+		return nil
+	}
+	err := fmt.Errorf("sitebrush netchan mail status %d: %s", response.StatusCode, strings.TrimSpace(response.Status))
+	if response.StatusCode == http.StatusBadRequest && strings.Contains(strings.ToLower(response.Status), "unsupported netchan request kind") {
+		// An older central installation does not recognize mail requests yet; retry after its rolling upgrade.
+		return err
+	}
+	if response.StatusCode >= 400 && response.StatusCode < 500 && response.StatusCode != http.StatusTooManyRequests {
+		return mailout.PermanentError{Err: err}
+	}
+	return err
+}
+
+func (a *App) systemMailOwnerDomain(ctx context.Context) string {
+	domain := ""
+	_ = a.withServerControlDatabaseRead(ctx, "system-mail-owner-domain", func(database *sql.DB) error {
+		domain, _ = (hostingandsupport.Store{DB: database}).OwnerDomain(ctx)
+		return nil
+	})
+	return normalizeDomainName(domain)
+}
+
 func (a *App) attachHostingSnapshotToServiceMailRequest(ctx context.Context, relayURL string, request *serviceMailRequest) error {
 	if request.HostingSnapshot != nil {
 		if _, found := serviceMailRelayPublicKeyForURL(relayURL); !found {
@@ -18579,6 +19366,7 @@ func (a *App) notifyHostingSnapshotDiskThreshold(ctx context.Context, snapshot h
 		formatFileSize(snapshot.DiskFreeBytes),
 		formatFileSize(snapshot.DiskTotalBytes))
 	err := a.enqueueEmail(ctx, mailout.Message{
+		Kind:    "disk_alert",
 		From:    a.emailFromAddress("sitebrush.com"),
 		To:      ownerEmail,
 		Subject: "SiteBrush: на сервере заканчивается место",
@@ -18691,6 +19479,21 @@ func (a *App) handleServiceMailRelayRequest(ctx context.Context, r *http.Request
 			fail("blocked by rule "+reason, http.StatusForbidden)
 			return nil
 		}
+		if strings.TrimSpace(request.MessageID) != "" {
+			existingRecord, found, lookupErr := mailout.ByID(ctx, database, request.MessageID)
+			if lookupErr != nil {
+				fail(lookupErr.Error(), http.StatusInternalServerError)
+				return nil
+			}
+			if found {
+				if existingRecord.InstallationID != request.InstallationID || existingRecord.Kind != request.CodeKind || !strings.EqualFold(strings.TrimSpace(existingRecord.Message.To), strings.TrimSpace(request.Recipient)) {
+					fail("mail message id conflicts with an existing delivery", http.StatusConflict)
+					return nil
+				}
+				shouldSend = true
+				return nil
+			}
+		}
 		if serviceMailKindIsRecipientVerification(request.CodeKind) {
 			if err := store.UpsertServiceMailRecipient(ctx, request.InstallationID, request.Recipient, "verified", "confirmed"); err != nil {
 				fail(err.Error(), http.StatusBadRequest)
@@ -18705,7 +19508,7 @@ func (a *App) handleServiceMailRelayRequest(ctx context.Context, r *http.Request
 			fail("service mail kind is not allowed", http.StatusForbidden)
 			return nil
 		}
-		if err := validateServiceMailSecret(request.CodeKind, request.SecretValue); err != nil {
+		if err := validateServiceMailContent(request); err != nil {
 			fail(err.Error(), http.StatusBadRequest)
 			return nil
 		}
@@ -18728,12 +19531,50 @@ func (a *App) handleServiceMailRelayRequest(ctx context.Context, r *http.Request
 	if !shouldSend {
 		return responseMessage, responseStatus
 	}
-	relayDomain := a.siteDomain(ctx, r)
+	relayDomain := "sitebrush.com"
+	if r != nil {
+		relayDomain = a.siteDomain(ctx, r)
+	}
+	if normalizeDomainName(relayDomain) == "" {
+		relayDomain = "sitebrush.com"
+	}
 	message := mailout.Message{
+		Kind:    strings.TrimSpace(request.CodeKind),
 		From:    serviceMailRelayFromAddress(relayDomain),
 		To:      strings.TrimSpace(request.Recipient),
 		Subject: emailSubjectForServiceMail(request.LanguageCode, request.CodeKind, request.SourceDomain),
 		Body:    emailBodyForServiceMail(request.LanguageCode, request.CodeKind, request.SourceDomain, request.SecretValue),
+	}
+	if strings.TrimSpace(request.MessageID) != "" {
+		message.From = serviceMailRelayFromAddress("sitebrush.com")
+		message.Subject = request.Subject
+		message.Body = request.Body
+		message.HTMLBody = request.HTMLBody
+		result := a.deliverAcceptedServiceMail(ctx, request, message)
+		switch {
+		case result.Pending:
+			event.Status = mailout.StatusPending
+			_ = a.withServerControlDatabaseWrite(ctx, "log-service-mail-pending", func(database *sql.DB) error {
+				return (hostingandsupport.Store{DB: database}).LogServiceMailEvent(ctx, event)
+			})
+			return mailout.StatusPending, http.StatusAccepted
+		case result.Err != nil:
+			event.Status = mailout.StatusFailed
+			event.Error = result.Err.Error()
+			_ = a.withServerControlDatabaseWrite(ctx, "log-service-mail-error", func(database *sql.DB) error {
+				return (hostingandsupport.Store{DB: database}).LogServiceMailEvent(ctx, event)
+			})
+			if mailout.IsPermanentFailure(result.Err) {
+				return result.Err.Error(), http.StatusUnprocessableEntity
+			}
+			return result.Err.Error(), http.StatusBadGateway
+		default:
+			event.Status = mailout.StatusSent
+			_ = a.withServerControlDatabaseWrite(ctx, "log-service-mail-sent", func(database *sql.DB) error {
+				return (hostingandsupport.Store{DB: database}).LogServiceMailEvent(ctx, event)
+			})
+			return mailout.StatusSent, http.StatusOK
+		}
 	}
 	sendCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
 	defer cancel()
@@ -18750,6 +19591,49 @@ func (a *App) handleServiceMailRelayRequest(ctx context.Context, r *http.Request
 		return (hostingandsupport.Store{DB: database}).LogServiceMailEvent(ctx, event)
 	})
 	return "sent", http.StatusOK
+}
+
+func (a *App) deliverAcceptedServiceMail(ctx context.Context, request serviceMailRequest, message mailout.Message) emailDeliveryResult {
+	message.MessageID = strings.TrimSpace(request.MessageID)
+	if a.durableMailTasks == nil {
+		sendContext, cancel := context.WithTimeout(ctx, 45*time.Second)
+		defer cancel()
+		return emailDeliveryResult{ID: request.MessageID, Message: message, Err: a.defaultEmailSender()(sendContext, message)}
+	}
+	expiresAt, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(request.ExpiresAt))
+	if err != nil {
+		return emailDeliveryResult{ID: request.MessageID, Message: message, Err: mailout.PermanentError{Err: errors.New("mail expiration is invalid")}}
+	}
+	reply := make(chan mailout.Result, 1)
+	observerDone := make(chan struct{})
+	defer close(observerDone)
+	task := mailout.Task{
+		ID:             strings.TrimSpace(request.MessageID),
+		InstallationID: strings.TrimSpace(request.InstallationID),
+		Kind:           strings.TrimSpace(request.CodeKind),
+		Route:          mailout.RouteLocal,
+		Message:        message,
+		CreatedAt:      time.Now().UTC(),
+		ExpiresAt:      expiresAt.UTC(),
+		Reply:          reply,
+		Done:           observerDone,
+	}
+	if err := a.submitDurableMailTask(ctx.Done(), task); err != nil {
+		return emailDeliveryResult{ID: task.ID, Message: message, Err: err}
+	}
+	timer := time.NewTimer(45 * time.Second)
+	defer timer.Stop()
+	select {
+	case result := <-reply:
+		if result.Status == mailout.StatusSent {
+			return emailDeliveryResult{ID: task.ID, Message: message}
+		}
+		return emailDeliveryResult{ID: task.ID, Message: message, Err: result.Err}
+	case <-timer.C:
+		return emailDeliveryResult{ID: task.ID, Message: message, Pending: true}
+	case <-ctx.Done():
+		return emailDeliveryResult{ID: task.ID, Message: message, Pending: true}
+	}
 }
 
 func storeServiceMailRequestHostingSnapshot(ctx context.Context, store hostingandsupport.Store, request serviceMailRequest, sourceIP string) error {
@@ -18830,6 +19714,9 @@ func serviceMailRecipientAllowed(ctx context.Context, store hostingandsupport.St
 		}
 		return "", true
 	default:
+		if serviceMailKindIsTransactional(request.CodeKind) {
+			return "", true
+		}
 		return "service mail kind is not allowed", false
 	}
 }
@@ -18920,6 +19807,38 @@ func validateServiceMailSecret(codeKind, secretValue string) error {
 		}
 	default:
 		return errors.New("service mail kind is not allowed")
+	}
+	return nil
+}
+
+func validateServiceMailContent(request serviceMailRequest) error {
+	if strings.TrimSpace(request.MessageID) == "" {
+		return validateServiceMailSecret(request.CodeKind, request.SecretValue)
+	}
+	if len(request.MessageID) > 128 {
+		return errors.New("mail message id is invalid")
+	}
+	for _, character := range request.MessageID {
+		if (character < 'a' || character > 'z') && (character < 'A' || character > 'Z') && (character < '0' || character > '9') && character != '-' && character != '_' {
+			return errors.New("mail message id is invalid")
+		}
+	}
+	if !serviceMailKindAllowed(request.CodeKind) {
+		return errors.New("service mail kind is not allowed")
+	}
+	if strings.TrimSpace(request.Subject) == "" || len(request.Subject) > 998 || strings.ContainsAny(request.Subject, "\r\n") {
+		return errors.New("mail subject is invalid")
+	}
+	if request.Body == "" && request.HTMLBody == "" {
+		return errors.New("mail body is empty")
+	}
+	if len(request.Subject)+len(request.Body)+len(request.HTMLBody) > 220*1024 {
+		return errors.New("mail content is too large")
+	}
+	now := time.Now().UTC()
+	expiresAt, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(request.ExpiresAt))
+	if err != nil || !expiresAt.After(now) || expiresAt.After(now.Add(mailout.DefaultRetention+time.Hour)) {
+		return errors.New("mail expiration is invalid")
 	}
 	return nil
 }
@@ -19019,8 +19938,21 @@ func profileEmailDeliveryViewForResult(translations map[string]string, result em
 	}
 	view := profileEmailDeliveryView{
 		Show:       true,
+		ID:         strings.TrimSpace(result.ID),
 		CodeLabel:  translationOrDefault(translations, "profile_email_delivery_modal_code_label", "SMTP code"),
 		CloseLabel: translationOrDefault(translations, "profile_email_delivery_modal_close", "Close"),
+	}
+	if result.Pending {
+		view.Kind = "warning"
+		view.LinkText = translationOrDefault(translations, "profile_email_delivery_details_pending", "View delivery status")
+		view.Title = translationOrDefault(translations, "profile_email_delivery_pending_title", "Email delivery continues")
+		view.Summary = translationOrDefault(translations, "profile_email_delivery_pending_summary", "The mail server has not confirmed delivery yet. SiteBrush will keep retrying from the durable queue.")
+		view.Code = translationOrDefault(translations, "profile_email_delivery_pending_code", "Pending")
+		view.Description = translationOrDefault(translations, "profile_email_delivery_pending_description", "The message is stored safely and has not been reported as sent.")
+		view.FixTitle = translationOrDefault(translations, "profile_email_delivery_pending_next_title", "What happens next")
+		view.FixText = translationOrDefault(translations, "profile_email_delivery_pending_next_text", "Delivery continues automatically until the message is accepted, permanently rejected, or expires.")
+		view.Log = fmt.Sprintf("email delivery pending id=%s to=%s subject=%q", result.ID, result.Message.To, result.Message.Subject)
+		return view
 	}
 	if result.Err == nil {
 		view.Kind = "success"
@@ -19158,6 +20090,23 @@ func purgeExpiredEmailConfirmations(confirmationsByToken map[string]EmailConfirm
 }
 
 func (a *App) saveRegistrationConfirmation(ctx context.Context, confirmation EmailConfirmation) error {
+	if a.controlDatabase != nil {
+		now := time.Now().UTC().Format(time.RFC3339)
+		err := a.withServerControlDatabaseWrite(ctx, "save-registration-confirmation", func(database *sql.DB) error {
+			if _, deleteErr := database.ExecContext(ctx, `DELETE FROM registration_confirmations WHERE expires_at<>'' AND expires_at<?`, now); deleteErr != nil {
+				return deleteErr
+			}
+			if _, deleteErr := database.ExecContext(ctx, `DELETE FROM registration_confirmations WHERE token=?`, confirmation.Token); deleteErr != nil {
+				return deleteErr
+			}
+			_, insertErr := database.ExecContext(ctx, `INSERT INTO registration_confirmations(token,domain,action,email,password,current_email,return_path,language_code,created_at,expires_at) VALUES(?,?,?,?,?,?,?,?,?,?)`,
+				confirmation.Token, confirmation.Domain, confirmation.Action, confirmation.Email, confirmation.Password, confirmation.CurrentEmail, confirmation.ReturnPath, confirmation.LanguageCode, now, confirmation.ExpiresAt)
+			return insertErr
+		})
+		if err != nil {
+			return err
+		}
+	}
 	response := make(chan emailConfirmationMemoryResponse, 1)
 	request := emailConfirmationMemoryRequest{action: "save", confirmation: confirmation, response: response}
 	select {
@@ -19183,10 +20132,24 @@ func (a *App) registrationConfirmationByToken(ctx context.Context, token string)
 	}
 	select {
 	case result := <-response:
-		return result.confirmation, result.found
+		if result.found {
+			return result.confirmation, true
+		}
 	case <-ctx.Done():
 		return EmailConfirmation{}, false
 	}
+	if a.controlDatabase == nil {
+		return EmailConfirmation{}, false
+	}
+	var confirmation EmailConfirmation
+	err := a.withServerControlDatabaseRead(ctx, "read-registration-confirmation", func(database *sql.DB) error {
+		return database.QueryRowContext(ctx, `SELECT token,domain,action,email,password,current_email,return_path,language_code,expires_at FROM registration_confirmations WHERE token=?`, strings.TrimSpace(token)).Scan(
+			&confirmation.Token, &confirmation.Domain, &confirmation.Action, &confirmation.Email, &confirmation.Password, &confirmation.CurrentEmail, &confirmation.ReturnPath, &confirmation.LanguageCode, &confirmation.ExpiresAt)
+	})
+	if err != nil || confirmationExpired(confirmation.ExpiresAt, time.Now().UTC()) {
+		return EmailConfirmation{}, false
+	}
+	return confirmation, true
 }
 
 func (a *App) deleteRegistrationConfirmation(ctx context.Context, token string) {
@@ -19200,6 +20163,12 @@ func (a *App) deleteRegistrationConfirmation(ctx context.Context, token string) 
 	select {
 	case <-response:
 	case <-ctx.Done():
+	}
+	if a.controlDatabase != nil {
+		_ = a.withServerControlDatabaseWrite(ctx, "delete-registration-confirmation", func(database *sql.DB) error {
+			_, err := database.ExecContext(ctx, `DELETE FROM registration_confirmations WHERE token=?`, strings.TrimSpace(token))
+			return err
+		})
 	}
 }
 
@@ -19504,6 +20473,63 @@ func emailBodyForServiceMail(languageCode, codeKind, domain, secret string) stri
 	return emailBodyForLanguage(languageCode, serviceMailKindAction(codeKind), domain, secret)
 }
 
+func emailHTMLBodyForServiceMail(languageCode, codeKind, domain, secret string) string {
+	if serviceMailKindAction(codeKind) != "profile" {
+		return ""
+	}
+	bodyParts := strings.Split(confirmationEmailBodyForLanguage(languageCode, domain, secret), "\n\n")
+	if len(bodyParts) != 3 {
+		return ""
+	}
+	direction := "ltr"
+	if languageCode == "he" || languageCode == "fa" {
+		direction = "rtl"
+	}
+	subject := template.HTMLEscapeString(emailSubjectForServiceMail(languageCode, codeKind, domain))
+	introduction := template.HTMLEscapeString(bodyParts[0])
+	confirmationURL := template.HTMLEscapeString(secret)
+	ignoreText := template.HTMLEscapeString(bodyParts[2])
+	buttonLabel := template.HTMLEscapeString(confirmationEmailButtonLabel(languageCode))
+	return `<!doctype html><html lang="` + template.HTMLEscapeString(languageCode) + `" dir="` + direction + `"><body style="margin:0;background:#f4f7f8;color:#172126;font-family:Arial,sans-serif"><div style="max-width:640px;margin:0 auto;padding:32px 16px"><div style="background:#fff;border:1px solid #d9e2e5;border-radius:14px;padding:28px"><div style="font-size:22px;font-weight:700;color:#087f8c">SiteBrush</div><h1 style="font-size:25px;line-height:1.25;margin:24px 0 12px">` + subject + `</h1><p style="font-size:16px;line-height:1.6;margin:0 0 24px">` + introduction + `</p><p style="margin:0 0 24px"><a href="` + confirmationURL + `" style="display:inline-block;background:#087f8c;color:#fff;text-decoration:none;font-weight:700;padding:13px 20px;border-radius:9px">` + buttonLabel + `</a></p><p style="color:#607078;font-size:14px;line-height:1.5;margin:0">` + ignoreText + `</p></div></div></body></html>`
+}
+
+func confirmationEmailButtonLabel(languageCode string) string {
+	switch strings.ToLower(strings.TrimSpace(languageCode)) {
+	case "ru":
+		return "Подтвердить email и войти"
+	case "fr":
+		return "Confirmer l’e-mail et se connecter"
+	case "ja":
+		return "メールを確認してログイン"
+	case "it":
+		return "Conferma l’email e accedi"
+	case "sv":
+		return "Bekräfta e-post och logga in"
+	case "fi":
+		return "Vahvista sähköposti ja kirjaudu"
+	case "mn":
+		return "Имэйлээ баталгаажуулж нэвтрэх"
+	case "zh":
+		return "确认邮箱并登录"
+	case "he":
+		return "אימות האימייל וכניסה"
+	case "fa":
+		return "تأیید ایمیل و ورود"
+	case "de":
+		return "E-Mail bestätigen und anmelden"
+	case "tr":
+		return "E-postayı doğrula ve giriş yap"
+	case "kk":
+		return "Email растау және кіру"
+	case "es":
+		return "Confirmar correo e iniciar sesión"
+	case "pt":
+		return "Confirmar e-mail e entrar"
+	default:
+		return "Confirm email and sign in"
+	}
+}
+
 func serviceMailKindAction(codeKind string) string {
 	switch strings.TrimSpace(codeKind) {
 	case "password_change_code":
@@ -19519,7 +20545,17 @@ func serviceMailKindAction(codeKind string) string {
 
 func serviceMailKindAllowed(codeKind string) bool {
 	switch strings.TrimSpace(codeKind) {
-	case "email_confirm", "email_change", "password_change_code", "login_code", "owner_invite":
+	case "email_confirm", "email_change", "password_change_code", "login_code", "owner_invite",
+		"invoice", "site_request", "site_request_decision", "backup_notice", "disk_alert", "system":
+		return true
+	default:
+		return false
+	}
+}
+
+func serviceMailKindIsTransactional(codeKind string) bool {
+	switch strings.TrimSpace(codeKind) {
+	case "invoice", "site_request", "site_request_decision", "backup_notice", "disk_alert", "system":
 		return true
 	default:
 		return false
@@ -24564,6 +25600,11 @@ func (a *App) render(w http.ResponseWriter, r *http.Request, templateName string
 		if preparedDomain, prepared := templateMap["CurrentDomain"].(string); prepared {
 			domain = preparedDomain
 		}
+		if strings.TrimSpace(domain) == "" {
+			if preparedDomain, prepared := templateMap["Domain"].(string); prepared {
+				domain = preparedDomain
+			}
+		}
 	}
 	if translations == nil {
 		translations = translationsForRequest(r)
@@ -24571,7 +25612,12 @@ func (a *App) render(w http.ResponseWriter, r *http.Request, templateName string
 	if strings.TrimSpace(domain) == "" {
 		domain = a.siteDomain(r.Context(), r)
 	}
-	envelope := map[string]any{"Domain": domain, "T": translations, "CompileVersion": CompileVersion}
+	languageCode := preferredLanguageCode(r.Header.Get("Accept-Language"))
+	textDirection := "ltr"
+	if languageCode == "he" || languageCode == "fa" {
+		textDirection = "rtl"
+	}
+	envelope := map[string]any{"Domain": domain, "T": translations, "CompileVersion": CompileVersion, "LanguageCode": languageCode, "TextDirection": textDirection}
 	mergeTemplateData(envelope, templateData)
 	if a != nil && a.renderTemplates != nil {
 		reply := make(chan renderTemplateResponse, 1)

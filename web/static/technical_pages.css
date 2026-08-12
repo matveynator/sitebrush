@@ -187,6 +187,109 @@
     padding: 22px;
 }
 
+.technical-page .authentication-shell {
+    max-width: 920px;
+}
+
+.technical-page .authentication-card {
+    width: min(100%, 560px);
+}
+
+.technical-page .setup-admin-explanation {
+    display: grid;
+    width: min(100%, 560px);
+    margin: 0 0 16px;
+    padding: 16px 18px;
+    grid-template-columns: 34px minmax(0, 1fr);
+    gap: 12px;
+    align-items: start;
+    border: 1px solid var(--border-orange);
+    border-radius: 16px;
+    background: rgba(255, 165, 0, 0.12);
+    color: var(--text);
+    font-size: 16px;
+    line-height: 1.55;
+}
+
+.technical-page .setup-admin-explanation-icon {
+    display: grid;
+    width: 34px;
+    height: 34px;
+    place-items: center;
+    border-radius: 50%;
+    background: var(--orange);
+    color: #12151d;
+    font-size: 20px;
+    font-weight: 800;
+}
+
+.technical-page .setup-admin-explanation p {
+    margin: 3px 0 0;
+}
+
+.technical-page .confirmation-card {
+    gap: 4px;
+}
+
+.technical-page .confirmation-symbol {
+    display: grid;
+    width: 54px;
+    height: 54px;
+    margin-bottom: 12px;
+    place-items: center;
+    border: 2px solid #1f362d;
+    border-radius: 18px;
+    background: #1f362d;
+    color: #ffffff;
+    font-size: 28px;
+    font-weight: 700;
+}
+
+.technical-page .confirmation-addresses {
+    display: grid;
+    gap: 10px;
+    margin: 10px 0 18px;
+}
+
+.technical-page .confirmation-addresses > div {
+    display: grid;
+    grid-template-columns: minmax(110px, .45fr) minmax(0, 1fr);
+    gap: 12px;
+    padding: 10px 12px;
+    border: 1px solid rgba(149, 229, 239, 0.18);
+    border-radius: 10px;
+    background: rgba(0, 0, 0, 0.16);
+}
+
+.technical-page .confirmation-addresses dt {
+    color: var(--muted);
+    font-weight: 400;
+}
+
+.technical-page .confirmation-addresses dd {
+    min-width: 0;
+    margin: 0;
+    overflow-wrap: anywhere;
+    font-weight: 700;
+}
+
+.technical-page .confirmation-webmail-link {
+    align-self: flex-start;
+    margin-bottom: 14px;
+}
+
+.technical-page .confirmation-steps {
+    display: grid;
+    gap: 10px;
+    margin: 6px 0 18px;
+    padding-inline-start: 24px;
+}
+
+.technical-page .confirmation-retry {
+    color: var(--muted);
+    font-size: 14px;
+}
+
 .technical-page .table {
     --bs-table-bg: transparent;
     --bs-table-color: var(--text);
@@ -2398,7 +2501,28 @@
 
     .technical-page .page-header h1,
     .technical-page h1.section-heading {
-        font-size: 30px;
+        display: grid;
+        width: 100%;
+        grid-template-columns: auto minmax(0, 1fr);
+        gap: 4px 10px;
+        font-size: clamp(21px, 7vw, 28px);
+    }
+
+    .technical-page .page-header h1 > .section-icon,
+    .technical-page h1.section-heading > .section-icon {
+        grid-row: 1 / span 2;
+    }
+
+    .technical-page .page-header h1 > a,
+    .technical-page h1.section-heading > a {
+        min-width: 0;
+        overflow-wrap: anywhere;
+    }
+
+    .technical-page .page-header h1 > small,
+    .technical-page h1.section-heading > small {
+        grid-column: 2;
+        line-height: 1.3;
     }
 
     .technical-page .section-icon {
@@ -2410,6 +2534,23 @@
     .technical-page .dns-box,
     .technical-page .profile-form {
         padding: 18px;
+    }
+
+    .technical-page .authentication-card {
+        width: 100%;
+        border-radius: 18px !important;
+    }
+
+    .technical-page .authentication-card .btn,
+    .technical-page .authentication-card input[type="submit"],
+    .technical-page .confirmation-webmail-link {
+        width: 100%;
+        min-height: 44px;
+    }
+
+    .technical-page .confirmation-addresses > div {
+        grid-template-columns: 1fr;
+        gap: 2px;
     }
 
     .technical-page .profile-alert {
@@ -2542,4 +2683,929 @@
     .technical-page [data-demo-refresh-resource-list] {
         max-height: 34vh;
     }
+}
+
+/* Mobile service pages use color to make the next action and system state unmistakable. */
+@media (max-width: 760px) {
+    .technical-page {
+        --bs-body-bg: transparent;
+        --bs-body-color: #12352d;
+        --bs-secondary-color: #527168;
+        --bs-border-color: rgba(8, 122, 85, 0.24);
+        --bs-tertiary-bg: #edfafa;
+        min-height: 100vh;
+        background:
+            radial-gradient(circle at 10% 3%, rgba(190, 250, 232, 0.58), transparent 33%),
+            radial-gradient(circle at 94% 30%, rgba(184, 231, 249, 0.40), transparent 38%),
+            linear-gradient(145deg, #087a55 0%, #0c9564 52%, #12a66f 100%) !important;
+        background-attachment: fixed !important;
+        color: var(--text);
+    }
+
+    .technical-page .container,
+    .technical-page .manager-shell,
+    .technical-page .analytics-page-shell,
+    .technical-page .missing-page,
+    .technical-page .billing-page {
+        width: min(100% - 20px, 1180px);
+        padding-top: 14px !important;
+        padding-bottom: 38px;
+    }
+
+    .technical-page .page-header {
+        gap: 12px;
+        margin-bottom: 16px !important;
+        padding: 15px 16px;
+        border-color: rgba(220, 255, 246, 0.78);
+        border-radius: 18px;
+        background: rgba(255, 255, 255, 0.91);
+        box-shadow: 0 14px 34px rgba(3, 71, 50, 0.18);
+        backdrop-filter: blur(14px);
+    }
+
+    .technical-page .page-header h1,
+    .technical-page h1.section-heading {
+        color: #0a4437;
+        font-weight: 800;
+    }
+
+    .technical-page .page-header a,
+    .technical-page h1.section-heading a {
+        color: #075d42;
+    }
+
+    .technical-page .page-header small,
+    .technical-page .page-header .text-muted,
+    .technical-page h1.section-heading .text-muted {
+        color: #527168 !important;
+    }
+
+    .technical-page .section-icon {
+        border-color: #9ed8df;
+        background: #e8f7fa;
+        box-shadow: 0 7px 18px rgba(8, 122, 85, 0.14);
+    }
+
+    .technical-page .card,
+    .technical-page .bg-body-tertiary.border,
+    .technical-page .dns-box,
+    .technical-page .alias-row,
+    .technical-page .profile-form,
+    .technical-page .modal-content,
+    .technical-page .metric-card,
+    .technical-page .world-map-card,
+    .technical-page .report-grid > section.card {
+        border-color: rgba(8, 122, 85, 0.24) !important;
+        border-radius: 20px !important;
+        background: #fbfffd !important;
+        color: #12352d;
+        box-shadow: 0 16px 42px rgba(3, 71, 50, 0.18);
+    }
+
+    .technical-page .card::before,
+    .technical-page .profile-form::before {
+        content: "";
+        display: block;
+        height: 4px;
+        margin: -18px -18px 14px;
+        border-radius: 20px 20px 999px 999px;
+        background: linear-gradient(90deg, #0c9564, #66cfda);
+    }
+
+    .technical-page .card:not(.card-body)::before {
+        display: none;
+    }
+
+    .technical-page .text-muted,
+    .technical-page .form-text,
+    .technical-page .hint,
+    .technical-page .small {
+        color: #527168 !important;
+    }
+
+    .technical-page .form-control,
+    .technical-page .form-select,
+    .technical-page input[type="text"],
+    .technical-page input[type="email"],
+    .technical-page input[type="password"],
+    .technical-page input[type="number"],
+    .technical-page input[type="date"],
+    .technical-page input[type="url"],
+    .technical-page input[type="file"] {
+        min-height: 48px;
+        padding: 12px 14px;
+        border: 2px solid #9ed8df;
+        border-radius: 12px;
+        background: #e8f7fa;
+        color: #12352d;
+        font-size: 16px;
+        box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.74);
+    }
+
+    .technical-page .form-control::placeholder,
+    .technical-page input::placeholder {
+        color: #64827a;
+        opacity: 1;
+    }
+
+    .technical-page .form-control:focus,
+    .technical-page .form-select:focus,
+    .technical-page input:focus {
+        border-color: #087a55;
+        background: #f3fdff;
+        box-shadow: 0 0 0 4px rgba(8, 122, 85, 0.20);
+        outline: none;
+    }
+
+    .technical-page .form-select option {
+        background: #ffffff;
+        color: #12352d;
+    }
+
+    .technical-page .btn,
+    .technical-page button,
+    .technical-page input[type="submit"],
+    .technical-page .backup-download-link {
+        min-height: 48px;
+        padding: 11px 16px;
+        border-radius: 12px;
+        font-size: 16px;
+        font-weight: 750;
+        line-height: 1.25;
+        white-space: normal;
+        touch-action: manipulation;
+    }
+
+    .technical-page .btn-primary,
+    .technical-page .btn-success,
+    .technical-page button.primary,
+    .technical-page input[type="submit"].btn-primary,
+    .technical-page #grabProgressModal button.sitebrush-import-primary-action {
+        border: 2px solid #087a55 !important;
+        background: linear-gradient(135deg, #dff6fb, #bfeaf2) !important;
+        color: #075d42 !important;
+        box-shadow: 0 9px 22px rgba(8, 122, 85, 0.20), inset 0 1px 0 rgba(255, 255, 255, 0.80);
+    }
+
+    .technical-page .btn-primary:hover,
+    .technical-page .btn-primary:active,
+    .technical-page .btn-success:hover,
+    .technical-page .btn-success:active,
+    .technical-page button.primary:hover,
+    .technical-page button.primary:active {
+        border-color: #056445 !important;
+        background: linear-gradient(135deg, #c8eef6, #a9e0ea) !important;
+        color: #043f2d !important;
+    }
+
+    .technical-page .btn-primary:focus-visible,
+    .technical-page .btn-success:focus-visible,
+    .technical-page button.primary:focus-visible {
+        outline: 3px solid #ffffff;
+        box-shadow: 0 0 0 6px rgba(8, 122, 85, 0.62);
+    }
+
+    .technical-page .btn-outline-primary,
+    .technical-page .btn-outline-secondary,
+    .technical-page button:not(.primary):not(.danger),
+    .technical-page .backup-download-link {
+        border: 1px solid #75bfcb;
+        background: #e8f7fa;
+        color: #076879;
+        box-shadow: none;
+    }
+
+    .technical-page .btn-outline-danger,
+    .technical-page .btn-danger,
+    .technical-page button.danger {
+        border: 2px solid #c53b43;
+        background: #fff0f1;
+        color: #9e202a;
+    }
+
+    .technical-page .btn:disabled,
+    .technical-page button:disabled,
+    .technical-page input[type="submit"]:disabled {
+        border-color: #b8cbc6 !important;
+        background: #e4ece9 !important;
+        color: #71847f !important;
+        box-shadow: none !important;
+        opacity: 1;
+    }
+
+    .technical-page .alert,
+    .technical-page .profile-alert {
+        border-width: 2px;
+        border-radius: 14px;
+        background: #e8f7fa;
+        color: #07586a;
+        box-shadow: 0 8px 22px rgba(5, 78, 91, 0.10);
+    }
+
+    .technical-page .alert-info {
+        border-color: #75bfcb;
+        background: #e8f7fa;
+        color: #07586a;
+    }
+
+    .technical-page .alert-success,
+    .technical-page .profile-alert.alert-success {
+        border-color: #39a774;
+        background: #e5f8ee;
+        color: #075d42;
+    }
+
+    .technical-page .alert-warning {
+        border-color: #dc7a13;
+        background: #fff2de;
+        color: #874300;
+    }
+
+    .technical-page .alert-danger,
+    .technical-page .profile-alert.alert-danger {
+        border-color: #d14a52;
+        background: #fff0f1;
+        color: #98242d;
+    }
+
+    .technical-page .missing-page-copy-form {
+        border-top: 5px solid #119569 !important;
+    }
+
+    .technical-page .missing-page-backup-form {
+        border-top: 5px solid #65bfce !important;
+    }
+
+    .technical-page .missing-page-primary-row,
+    .technical-page .missing-page-secondary-grid,
+    .technical-page .edit-mode-grid,
+    .technical-page .profile-form-grid {
+        grid-template-columns: 1fr;
+    }
+
+    .technical-page .missing-page-submit,
+    .technical-page .missing-page-primary-row .btn,
+    .technical-page .edit-mode-actions .btn,
+    .technical-page .edit-mode-copy-form button,
+    .technical-page .authentication-card .btn,
+    .technical-page .authentication-card input[type="submit"],
+    .technical-page .profile-form button[type="submit"],
+    .technical-page .confirmation-webmail-link {
+        width: 100%;
+        justify-self: stretch;
+    }
+
+    .technical-page .progress {
+        height: 14px;
+        border-radius: 999px;
+        background: #d9eeea;
+    }
+
+    .technical-page .progress-bar {
+        background: linear-gradient(90deg, #087a55, #34c184);
+    }
+
+    .technical-page .modal-dialog {
+        max-width: calc(100vw - 16px);
+        margin: 8px auto;
+    }
+
+    .technical-page .modal-content {
+        max-height: calc(100dvh - 16px);
+        overflow: hidden;
+    }
+
+    .technical-page .modal-body {
+        overflow-y: auto;
+        overscroll-behavior: contain;
+    }
+
+    .technical-page .modal-footer {
+        display: grid;
+        grid-template-columns: 1fr;
+        gap: 8px;
+    }
+
+    .technical-page .modal-footer > * {
+        width: 100%;
+        margin: 0;
+    }
+
+    .technical-page .technical-table-panel,
+    .technical-page .table-responsive {
+        overflow-x: auto;
+        overscroll-behavior-inline: contain;
+        border-color: rgba(8, 122, 85, 0.24) !important;
+        background: #fbfffd !important;
+    }
+
+    .technical-page .table {
+        --bs-table-color: #12352d;
+        --bs-table-hover-color: #12352d;
+        --bs-table-hover-bg: #e8f7fa;
+    }
+
+    .technical-page .hosting-tabs,
+    .technical-page .hosting-installation-tabs {
+        overflow-x: auto;
+        flex-wrap: nowrap;
+        scrollbar-width: thin;
+    }
+
+    .technical-page .hosting-tab-button.active,
+    .technical-page .hosting-installation-tabs button.hosting-installation-tab.active {
+        border-color: #087a55;
+        background: #dff6fb;
+        color: #075d42;
+    }
+
+    .technical-page code,
+    .technical-page .copy-field {
+        border-color: #9ed8df;
+        background: #e8f7fa;
+        color: #075d42;
+        overflow-wrap: anywhere;
+    }
+
+    .technical-page .form-check-input {
+        width: 22px;
+        height: 22px;
+        border: 2px solid #62aa98;
+        background-color: #ffffff;
+    }
+
+    .technical-page .form-check-input:checked {
+        border-color: #087a55;
+        background-color: #087a55;
+    }
+}
+
+@media (max-width: 760px) and (prefers-color-scheme: dark) {
+    .technical-page {
+        --bs-body-color: #f2fff9;
+        --bs-secondary-color: #b9d8cf;
+        --bs-border-color: rgba(140, 232, 241, 0.26);
+        --bs-tertiary-bg: #123f46;
+        background:
+            radial-gradient(circle at 10% 3%, rgba(31, 158, 111, 0.32), transparent 35%),
+            radial-gradient(circle at 94% 30%, rgba(42, 153, 174, 0.23), transparent 38%),
+            linear-gradient(145deg, #032d24 0%, #064735 55%, #07533d 100%) !important;
+    }
+
+    .technical-page .page-header {
+        border-color: rgba(140, 232, 241, 0.28);
+        background: rgba(8, 55, 45, 0.92);
+        box-shadow: 0 16px 42px rgba(0, 18, 14, 0.42);
+    }
+
+    .technical-page .page-header h1,
+    .technical-page h1.section-heading,
+    .technical-page .page-header a,
+    .technical-page h1.section-heading a {
+        color: #f2fff9;
+    }
+
+    .technical-page .page-header small,
+    .technical-page .page-header .text-muted,
+    .technical-page h1.section-heading .text-muted,
+    .technical-page .text-muted,
+    .technical-page .form-text,
+    .technical-page .hint,
+    .technical-page .small {
+        color: #b9d8cf !important;
+    }
+
+    .technical-page .section-icon {
+        border-color: rgba(140, 232, 241, 0.30);
+        background: #123f46;
+    }
+
+    .technical-page .card,
+    .technical-page .bg-body-tertiary.border,
+    .technical-page .dns-box,
+    .technical-page .alias-row,
+    .technical-page .profile-form,
+    .technical-page .modal-content,
+    .technical-page .metric-card,
+    .technical-page .world-map-card,
+    .technical-page .report-grid > section.card,
+    .technical-page .technical-table-panel,
+    .technical-page .table-responsive {
+        border-color: rgba(140, 232, 241, 0.24) !important;
+        background: #0b3b31 !important;
+        color: #f2fff9;
+        box-shadow: 0 18px 48px rgba(0, 18, 14, 0.42);
+    }
+
+    .technical-page .form-control,
+    .technical-page .form-select,
+    .technical-page input[type="text"],
+    .technical-page input[type="email"],
+    .technical-page input[type="password"],
+    .technical-page input[type="number"],
+    .technical-page input[type="date"],
+    .technical-page input[type="url"],
+    .technical-page input[type="file"] {
+        border-color: #4b9ead;
+        background: #123f46;
+        color: #f2fff9;
+        box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
+    }
+
+    .technical-page .form-control::placeholder,
+    .technical-page input::placeholder {
+        color: #a7cbc3;
+    }
+
+    .technical-page .form-control:focus,
+    .technical-page .form-select:focus,
+    .technical-page input:focus {
+        border-color: #78efae;
+        background: #164b50;
+        box-shadow: 0 0 0 4px rgba(120, 239, 174, 0.20);
+    }
+
+    .technical-page .form-select option {
+        background: #123f46;
+        color: #f2fff9;
+    }
+
+    .technical-page .btn-primary,
+    .technical-page .btn-success,
+    .technical-page button.primary,
+    .technical-page input[type="submit"].btn-primary,
+    .technical-page #grabProgressModal button.sitebrush-import-primary-action {
+        border-color: #78efae !important;
+        background: linear-gradient(135deg, #bcecf4, #8fd9e6) !important;
+        color: #043f2d !important;
+        box-shadow: 0 10px 24px rgba(0, 19, 14, 0.34);
+    }
+
+    .technical-page .btn-outline-primary,
+    .technical-page .btn-outline-secondary,
+    .technical-page button:not(.primary):not(.danger),
+    .technical-page .backup-download-link {
+        border-color: #4b9ead;
+        background: #123f46;
+        color: #b9f4fa;
+    }
+
+    .technical-page .btn-outline-danger,
+    .technical-page .btn-danger,
+    .technical-page button.danger {
+        border-color: #ff7d84;
+        background: #55252a;
+        color: #ffd5d7;
+    }
+
+    .technical-page .alert-info,
+    .technical-page .alert,
+    .technical-page .profile-alert {
+        border-color: #4b9ead;
+        background: #123f46;
+        color: #d7f9ff;
+    }
+
+    .technical-page .alert-success,
+    .technical-page .profile-alert.alert-success {
+        border-color: #65d99b;
+        background: #104b37;
+        color: #d9ffea;
+    }
+
+    .technical-page .alert-warning {
+        border-color: #ffb65a;
+        background: #513815;
+        color: #ffe6bd;
+    }
+
+    .technical-page .alert-danger,
+    .technical-page .profile-alert.alert-danger {
+        border-color: #ff7d84;
+        background: #55252a;
+        color: #ffd5d7;
+    }
+
+    .technical-page .table {
+        --bs-table-color: #f2fff9;
+        --bs-table-hover-color: #f2fff9;
+        --bs-table-hover-bg: #123f46;
+    }
+
+    .technical-page code,
+    .technical-page .copy-field {
+        border-color: #4b9ead;
+        background: #123f46;
+        color: #92f5bd;
+    }
+
+    .technical-page .progress {
+        background: #173f37;
+    }
+
+    .technical-page .form-check-input {
+        border-color: #6db7aa;
+        background-color: #123f46;
+    }
+}
+
+@media (max-width: 760px) {
+    .technical-page {
+        background: #1e362d !important;
+    }
+
+    .technical-page .page-header,
+    .technical-page .card,
+    .technical-page form.card,
+    .technical-page .authentication-card,
+    .technical-page .profile-form,
+    .technical-page .modal-content,
+    .technical-page .bg-body-tertiary.border,
+    .technical-page .dns-box,
+    .technical-page .alias-row,
+    .technical-page .metric-card,
+    .technical-page .world-map-card,
+    .technical-page .report-grid > section.card,
+    .technical-page .technical-table-panel,
+    .technical-page .table-responsive {
+        border-color: rgba(200, 67, 35, 0.34) !important;
+        background: #f9faf9 !important;
+        color: #11141c;
+    }
+
+    .technical-page .form-control,
+    .technical-page .form-select,
+    .technical-page input[type="text"],
+    .technical-page input[type="email"],
+    .technical-page input[type="password"],
+    .technical-page input[type="number"],
+    .technical-page input[type="date"],
+    .technical-page input[type="url"],
+    .technical-page input[type="file"] {
+        border-color: #dbc3a2;
+        background: #f9faf9;
+        color: #11141c;
+        box-shadow: none;
+    }
+
+    .technical-page .form-control::placeholder,
+    .technical-page input::placeholder {
+        color: #c84323;
+        opacity: 1;
+    }
+
+    .technical-page .form-control:focus,
+    .technical-page .form-select:focus,
+    .technical-page input:focus {
+        border-color: #c84323;
+        background: #f9faf9;
+        color: #11141c;
+        box-shadow: 0 0 0 4px rgba(200, 67, 35, 0.20);
+    }
+
+    .technical-page .page-header h1,
+    .technical-page h1.section-heading,
+    .technical-page .page-header a,
+    .technical-page h1.section-heading a,
+    .technical-page .card-title,
+    .technical-page h2,
+    .technical-page h3,
+    .technical-page legend {
+        color: #c84323;
+    }
+
+    .technical-page .setup-admin-explanation {
+        border-color: #c84323;
+        background: #dbc3a2;
+        color: #11141c;
+    }
+
+    .technical-page .setup-admin-explanation-icon {
+        background: #c84323;
+        color: #ffffff;
+    }
+}
+
+/* Mobile surfaces keep a dark page around light forms and reserve red for guidance. */
+@media (max-width: 760px) {
+    .technical-page {
+        background: #1e362d !important;
+    }
+
+    .technical-page .page-header,
+    .technical-page .card,
+    .technical-page form.card,
+    .technical-page .authentication-card,
+    .technical-page .profile-form,
+    .technical-page .modal-content,
+    .technical-page .bg-body-tertiary.border,
+    .technical-page .dns-box,
+    .technical-page .alias-row,
+    .technical-page .metric-card,
+    .technical-page .world-map-card,
+    .technical-page .report-grid > section.card,
+    .technical-page .technical-table-panel,
+    .technical-page .table-responsive {
+        border-color: rgba(200, 67, 35, 0.34) !important;
+        background: #f9faf9 !important;
+        color: #11141c;
+    }
+
+    .technical-page .form-control,
+    .technical-page .form-select,
+    .technical-page input[type="text"],
+    .technical-page input[type="email"],
+    .technical-page input[type="password"],
+    .technical-page input[type="number"],
+    .technical-page input[type="date"],
+    .technical-page input[type="url"],
+    .technical-page input[type="file"] {
+        border-color: #dbc3a2;
+        background: #f9faf9;
+        color: #11141c;
+        box-shadow: none;
+    }
+
+    .technical-page .form-control::placeholder,
+    .technical-page input::placeholder {
+        color: #c84323;
+        opacity: 1;
+    }
+
+    .technical-page .form-control:focus,
+    .technical-page .form-select:focus,
+    .technical-page input:focus {
+        border-color: #c84323;
+        background: #f9faf9;
+        color: #11141c;
+        box-shadow: 0 0 0 4px rgba(200, 67, 35, 0.20);
+    }
+
+    .technical-page .page-header h1,
+    .technical-page h1.section-heading,
+    .technical-page .page-header a,
+    .technical-page h1.section-heading a,
+    .technical-page .card-title,
+    .technical-page h2,
+    .technical-page h3,
+    .technical-page legend {
+        color: #c84323;
+    }
+
+    .technical-page .setup-admin-explanation {
+        border-color: #c84323;
+        background: #dbc3a2;
+        color: #11141c;
+    }
+
+    .technical-page .setup-admin-explanation-icon {
+        background: #c84323;
+        color: #ffffff;
+    }
+}
+
+/* The mobile palette uses solid brand colors so every action has one clear meaning. */
+@media (max-width: 760px) {
+    .technical-page {
+        --bs-body-color: #12151d;
+        --bs-secondary-color: #52645d;
+        --bs-border-color: rgba(31, 54, 45, 0.24);
+        --bs-tertiary-bg: #f9faf9;
+        background: #c7c8bf !important;
+        color: #12151d;
+    }
+
+    .technical-page .page-header,
+    .technical-page .card,
+    .technical-page .bg-body-tertiary.border,
+    .technical-page .dns-box,
+    .technical-page .alias-row,
+    .technical-page .profile-form,
+    .technical-page .modal-content,
+    .technical-page .metric-card,
+    .technical-page .world-map-card,
+    .technical-page .report-grid > section.card,
+    .technical-page .technical-table-panel,
+    .technical-page .table-responsive {
+        border-color: rgba(31, 54, 45, 0.24) !important;
+        background: #f9faf9 !important;
+        color: #12151d;
+    }
+
+    .technical-page .page-header h1,
+    .technical-page h1.section-heading,
+    .technical-page .page-header a,
+    .technical-page h1.section-heading a {
+        color: #bf3a20;
+    }
+
+    .technical-page .page-header a:hover,
+    .technical-page h1.section-heading a:hover,
+    .technical-page .page-header a:focus-visible,
+    .technical-page h1.section-heading a:focus-visible {
+        color: #bf3a20;
+        text-decoration: underline;
+        text-decoration-thickness: 2px;
+        text-underline-offset: 4px;
+    }
+
+    .technical-page .form-control,
+    .technical-page .form-select,
+    .technical-page input[type="text"],
+    .technical-page input[type="email"],
+    .technical-page input[type="password"],
+    .technical-page input[type="number"],
+    .technical-page input[type="date"],
+    .technical-page input[type="url"],
+    .technical-page input[type="file"] {
+        border-color: #9eb6e3;
+        background: #9eb6e3;
+        color: #12151d;
+        box-shadow: none;
+    }
+
+    .technical-page .form-control::placeholder,
+    .technical-page input::placeholder {
+        color: #ffffff;
+        opacity: 1;
+    }
+
+    .technical-page .form-control:focus,
+    .technical-page .form-select:focus,
+    .technical-page input:focus {
+        border-color: #1f362d;
+        background: #9eb6e3;
+        color: #12151d;
+        box-shadow: 0 0 0 4px rgba(31, 54, 45, 0.22);
+    }
+
+    .technical-page .form-select option {
+        background: #f9faf9;
+        color: #12151d;
+    }
+
+    .technical-page .table {
+        color: #12151d;
+        --bs-table-color: #12151d;
+        --bs-table-hover-color: #12151d;
+    }
+
+    .technical-page .card-title,
+    .technical-page h2,
+    .technical-page h3,
+    .technical-page legend {
+        color: #bf3a20;
+    }
+
+    .technical-page .card::before,
+    .technical-page .card::after,
+    .technical-page .profile-form::before,
+    .technical-page .profile-form::after {
+        display: none !important;
+        content: none;
+    }
+
+    .technical-page .authentication-shell .page-header,
+    .technical-page .authentication-card {
+        background-image: none !important;
+        box-shadow: none !important;
+        backdrop-filter: none;
+    }
+
+    .technical-page .section-icon {
+        border-color: #1f362d;
+        background: #1f362d;
+        color: #dac0a1;
+    }
+
+    .technical-page .setup-admin-explanation {
+        width: 100%;
+        border: 2px solid #bf3a20;
+        background: #f9faf9;
+        color: #12151d;
+        box-shadow: none;
+    }
+
+    .technical-page .setup-admin-explanation-icon {
+        background: #bf3a20;
+        color: #ffffff;
+    }
+
+    .technical-page .btn-primary,
+    .technical-page .btn-success,
+    .technical-page button.primary,
+    .technical-page input[type="submit"].btn-primary,
+    .technical-page #grabProgressModal button.sitebrush-import-primary-action {
+        border-color: #1f362d !important;
+        background: #1f362d !important;
+        color: #ffffff !important;
+        box-shadow: none;
+    }
+
+    .technical-page .btn-primary:hover,
+    .technical-page .btn-primary:active,
+    .technical-page .btn-success:hover,
+    .technical-page .btn-success:active,
+    .technical-page button.primary:hover,
+    .technical-page button.primary:active,
+    .technical-page #grabProgressModal button.sitebrush-import-primary-action:hover,
+    .technical-page #grabProgressModal button.sitebrush-import-primary-action:active {
+        border-color: #1f362d !important;
+        background: #1f362d !important;
+        color: #ffffff !important;
+        filter: brightness(1.14);
+    }
+
+    .technical-page .btn-outline-primary,
+    .technical-page .btn-outline-secondary,
+    .technical-page button:not(.primary):not(.danger),
+    .technical-page .backup-download-link {
+        border-color: #9eb6e3;
+        background: #9eb6e3;
+        color: #ffffff;
+    }
+
+    .technical-page .btn-outline-primary:hover,
+    .technical-page .btn-outline-secondary:hover,
+    .technical-page button:not(.primary):not(.danger):hover,
+    .technical-page .backup-download-link:hover {
+        border-color: #9eb6e3;
+        background: #9eb6e3;
+        color: #ffffff;
+        filter: brightness(0.92);
+    }
+}
+
+@media (max-width: 760px) and (prefers-color-scheme: dark) {
+    .technical-page form.card,
+    .technical-page .authentication-card,
+    .technical-page .profile-form {
+        border-color: rgba(218, 192, 161, 0.34) !important;
+        background: #1e362d !important;
+        color: #dac0a1;
+    }
+
+    .technical-page form.card label,
+    .technical-page .authentication-card label,
+    .technical-page .profile-form label,
+    .technical-page form.card .form-text,
+    .technical-page .authentication-card .form-text,
+    .technical-page .profile-form .form-text {
+        color: #dac0a1 !important;
+    }
+}
+
+@media (max-width: 760px) {
+    .technical-page { background: #1e362d !important; }
+    .technical-page .page-header,
+    .technical-page .card,
+    .technical-page form.card,
+    .technical-page .authentication-card,
+    .technical-page .profile-form,
+    .technical-page .modal-content,
+    .technical-page .bg-body-tertiary.border,
+    .technical-page .dns-box,
+    .technical-page .alias-row {
+        border-color: rgba(200, 67, 35, 0.34) !important;
+        background: #f9faf9 !important;
+        color: #11141c;
+    }
+    .technical-page .form-control,
+    .technical-page .form-select,
+    .technical-page input[type="text"],
+    .technical-page input[type="email"],
+    .technical-page input[type="password"],
+    .technical-page input[type="number"],
+    .technical-page input[type="date"],
+    .technical-page input[type="url"],
+    .technical-page input[type="file"] {
+        border-color: #9eb6e3;
+        background: #9eb6e3;
+        color: #11141c;
+        box-shadow: none;
+    }
+    .technical-page .form-control::placeholder,
+    .technical-page input::placeholder { color: #ffffff; opacity: 1; }
+    .technical-page .form-control:focus,
+    .technical-page .form-select:focus,
+    .technical-page input:focus {
+        border-color: #c84323;
+        background: #9eb6e3;
+        color: #11141c;
+        box-shadow: 0 0 0 4px rgba(200, 67, 35, 0.20);
+    }
+    .technical-page .page-header h1,
+    .technical-page h1.section-heading,
+    .technical-page .page-header a,
+    .technical-page h1.section-heading a,
+    .technical-page .card-title,
+    .technical-page h2,
+    .technical-page h3,
+    .technical-page legend { color: #c84323; }
+    .technical-page .setup-admin-explanation {
+        border-color: #c84323;
+        background: #dbc3a2;
+        color: #11141c;
+    }
+    .technical-page .setup-admin-explanation-icon { background: #c84323; color: #ffffff; }
 }

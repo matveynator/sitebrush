@@ -17,11 +17,12 @@ import (
 
 	"sitebrush/pkg/demo"
 	"sitebrush/pkg/expenses"
+	"sitebrush/pkg/mailout"
 )
 
 const DefaultStorageLimitBytes int64 = 10 * 1024 * 1024 * 1024
 const DefaultDeletionBackupRetentionDays = 365
-const currentBillingSchemaVersion = 22
+const currentBillingSchemaVersion = 24
 
 const InstallationKindServer = "server"
 const InstallationKindDesktop = "desktop"
@@ -702,7 +703,9 @@ func Migrate(ctx context.Context, database *sql.DB) error {
 		`CREATE INDEX IF NOT EXISTS idx_registry_sync_events_installation_created ON registry_sync_events(installation_id,created_at);`,
 		`CREATE TABLE IF NOT EXISTS sitebrush_com_keys(domain TEXT PRIMARY KEY,public_key TEXT,private_key_path TEXT,fingerprint TEXT,created_at TEXT,updated_at TEXT);`,
 		`CREATE TABLE IF NOT EXISTS hosting_panel_snapshots(name TEXT PRIMARY KEY,version INTEGER NOT NULL,payload_json TEXT NOT NULL,built_at TEXT NOT NULL);`,
+		`CREATE TABLE IF NOT EXISTS registration_confirmations(token TEXT PRIMARY KEY,domain TEXT,action TEXT,email TEXT,password TEXT,current_email TEXT,return_path TEXT,language_code TEXT,created_at TEXT,expires_at TEXT);`,
 	}
+	queries = append(queries, mailout.SchemaQueries()...)
 	queries = append(queries, demo.SchemaQueries()...)
 	for queryIndex, query := range queries {
 		if _, err := database.ExecContext(ctx, query); err != nil {
@@ -757,7 +760,7 @@ func setSchemaMigrationVersion(ctx context.Context, database *sql.DB, component 
 }
 
 func hostingAndSupportSchemaComplete(ctx context.Context, database *sql.DB) (bool, error) {
-	tableNames := []string{"server_managers", "server_settings", "site_service_plans", "site_service_assignments", "payment_providers", "billing_invoices", "billing_customers", "billing_customer_emails", "billing_customer_profiles", "billing_customer_tokens", "billing_invoice_lines", "billing_invoice_cycles", "billing_payments", "billing_invoice_deliveries", "hosting_server_cost_policies", "server_expense_policies", "site_registration_requests", "site_deletion_backups", "service_mail_installations", "service_mail_events", "support_events", "service_mail_blocks", "service_mail_recipients", "client_hostings", "client_hosting_sites", "client_hosting_domain_checks", "server_resource_checks", "server_network_checks", "site_tls_checks", "registry_accounts", "registry_installation_roles", "registry_installation_plans", "registry_events", "registry_sync_events", "sitebrush_com_keys", "hosting_panel_snapshots"}
+	tableNames := []string{"server_managers", "server_settings", "site_service_plans", "site_service_assignments", "payment_providers", "billing_invoices", "billing_customers", "billing_customer_emails", "billing_customer_profiles", "billing_customer_tokens", "billing_invoice_lines", "billing_invoice_cycles", "billing_payments", "billing_invoice_deliveries", "hosting_server_cost_policies", "server_expense_policies", "site_registration_requests", "site_deletion_backups", "service_mail_installations", "service_mail_events", "support_events", "service_mail_blocks", "service_mail_recipients", "mail_outbox", "client_hostings", "client_hosting_sites", "client_hosting_domain_checks", "server_resource_checks", "server_network_checks", "site_tls_checks", "registry_accounts", "registry_installation_roles", "registry_installation_plans", "registry_events", "registry_sync_events", "sitebrush_com_keys", "hosting_panel_snapshots", "registration_confirmations"}
 	tableNames = append(tableNames, demo.TableNames()...)
 	for _, tableName := range tableNames {
 		found, err := tableExists(ctx, database, tableName)

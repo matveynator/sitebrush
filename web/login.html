@@ -1,5 +1,5 @@
 <!doctype html>
-<html id="SiteBrush" lang="en">
+<html id="SiteBrush" lang="{{.LanguageCode}}" dir="{{.TextDirection}}">
 <head>
   <script>
   (function applySystemThemeMode() {
@@ -14,12 +14,12 @@
   <link href="/p/static/technical_pages.css" rel="stylesheet">
 </head>
 <body class="technical-page bg-body">
-<div class="container py-5">
+<div class="container py-5 authentication-shell">
   <div class="page-header mb-4">
     <h1 class="section-heading"><img src="/p/static/login.png" class="section-icon" alt=""><a href="/">{{.Domain}}</a> <small class="text-muted">| {{index .T "login_header"}}</small></h1>
   </div>
   {{if .ShowForm}}
-  <form class="card card-body" method="post" action="?login" style="max-width:520px;">
+  <form class="card card-body authentication-card" method="post" action="?login">
     <input type="hidden" name="return_path" value="{{.ReturnPath}}">
     {{if .Status}}<div class="alert alert-{{if .StatusClass}}{{.StatusClass}}{{else}}warning{{end}}" role="alert">{{.Status}}</div>{{end}}
     <p><input type="email" name="email" class="form-control" placeholder="{{index .T "login_email_placeholder"}}" value="{{.Email}}"></p>
@@ -27,7 +27,7 @@
     <div><input type="submit" class="btn btn-primary" value="{{index .T "login_submit"}}"/></div>
   </form>
   {{else}}
-  <div class="card card-body" style="max-width:520px;">
+  <div class="card card-body authentication-card">
     {{if .Status}}<div class="alert alert-{{if .StatusClass}}{{.StatusClass}}{{else}}warning{{end}}" role="alert">{{.Status}}</div>{{end}}
     {{if .IsHardLocked}}
     <p class="mb-3">{{.RecoveryRequiredText}}</p>

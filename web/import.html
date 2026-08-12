@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en">
+<html lang="{{.LanguageCode}}" dir="{{.TextDirection}}">
 <head>
   <script>
   (function applySystemThemeMode() {
@@ -10,35 +10,18 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{{index .T "import_page_title"}}</title>
-  <style>
-    :root {
-      color-scheme: light dark;
-      --page-bg: #f4f8fc;
-      --text-main: #1b2a3d;
-      --panel-bg: #ffffff;
-      --panel-border: #d4ddea;
-    }
-    @media (prefers-color-scheme: dark) {
-      :root {
-        --page-bg: #0f1724;
-        --text-main: #dbe8ff;
-        --panel-bg: #172235;
-        --panel-border: #2f405d;
-      }
-    }
-    body { margin: 0; font-family: Arial, sans-serif; background: var(--page-bg); color: var(--text-main); }
-    .page { max-width: 640px; margin: 28px auto; padding: 16px; background: var(--panel-bg); border: 1px solid var(--panel-border); border-radius: 10px; }
-    .field { width: 100%; margin-bottom: 10px; padding: 8px 10px; box-sizing: border-box; }
-  </style>
+  <link rel="stylesheet" href="/p/static/technical_pages.css">
 </head>
-<body>
-<main class="page">
-  <h1>{{index .T "import_page_title"}}</h1>
-  <form method="post" action="?import">
-    <input class="field" name="url" placeholder="https://example.com"/>
-    <input class="field" name="source_ip" placeholder="{{index .T "import_source_ip_placeholder"}}"/>
-    <input class="field" name="path" placeholder="/imported"/>
-    <button>{{index .T "import_button"}}</button>
+<body class="technical-page bg-body">
+<main class="container authentication-shell import-page">
+  <header class="page-header">
+    <h1 class="section-heading"><img src="/p/static/copy.png" class="section-icon" alt=""><span>{{index .T "import_page_title"}}</span></h1>
+  </header>
+  <form class="card card-body authentication-card edit-mode-copy-form" method="post" action="?import">
+    <input class="form-control" type="url" inputmode="url" name="url" placeholder="https://example.com" required>
+    <input class="form-control" type="text" inputmode="numeric" name="source_ip" placeholder="{{index .T "import_source_ip_placeholder"}}">
+    <input class="form-control" type="text" name="path" placeholder="/imported">
+    <button class="btn btn-primary" type="submit"><img src="/p/static/copy.png" alt="">{{index .T "import_button"}}</button>
   </form>
 </main>
 </body>

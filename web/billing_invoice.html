@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en" id="SiteBrush">
+<html lang="{{.LanguageCode}}" dir="{{.TextDirection}}" id="SiteBrush">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -25,7 +25,66 @@
     .invoice-actions { display: flex; justify-content: flex-end; gap: 10px; border-top: 1px solid #e4eaec; }
     .invoice-button { border: 1px solid #087f8c; border-radius: 6px; padding: 11px 16px; background: #fff; color: #087f8c; text-decoration: none; cursor: pointer; }
     .invoice-button-primary { background: #087f8c; color: #fff; }
-    @media (max-width: 680px) { .invoice-head, .invoice-parties, .invoice-total { grid-template-columns: 1fr; } .invoice-number, .invoice-total-amount { text-align: left; } .invoice-lines { overflow-x: auto; padding: 18px; } }
+    @media (max-width: 680px) {
+      body {
+        min-height: 100vh;
+        background:
+          radial-gradient(circle at 10% 3%, rgba(190,250,232,.58), transparent 33%),
+          radial-gradient(circle at 94% 30%, rgba(184,231,249,.40), transparent 38%),
+          linear-gradient(145deg,#087a55 0%,#0c9564 52%,#12a66f 100%);
+        background-attachment: fixed;
+        color: #12352d;
+      }
+      .invoice-document { width: calc(100% - 20px); margin: 10px auto 30px; border: 1px solid rgba(8,122,85,.24); border-radius: 20px; overflow: hidden; box-shadow: 0 18px 48px rgba(3,71,50,.22); }
+      .invoice-head, .invoice-parties, .invoice-total { grid-template-columns: 1fr; gap: 16px; }
+      .invoice-head, .invoice-parties, .invoice-total, .invoice-actions { padding: 20px; }
+      .invoice-head { border-top: 5px solid #0c9564; background: linear-gradient(135deg,#fbfffd,#e8f7fa); }
+      .invoice-parties { border-color: rgba(8,122,85,.18); background: #edfafa; }
+      .invoice-number, .invoice-total-amount { text-align: left; }
+      .invoice-number h1 { overflow-wrap: anywhere; }
+      .invoice-lines { overflow-x: auto; padding: 14px; overscroll-behavior-inline: contain; }
+      .invoice-lines table { min-width: 680px; }
+      .invoice-label { color: #527168; font-weight: 700; }
+      .invoice-brand, .invoice-bonus { color: #087a55; }
+      .invoice-actions { display: grid; grid-template-columns: 1fr; gap: 10px; border-color: rgba(8,122,85,.18); background: #fbfffd; }
+      .invoice-button { min-height: 48px; box-sizing: border-box; display: inline-flex; align-items: center; justify-content: center; border: 1px solid #75bfcb; border-radius: 12px; padding: 11px 16px; background: #e8f7fa; color: #076879; font-size: 16px; font-weight: 700; }
+      .invoice-button-primary { border: 2px solid #087a55; background: linear-gradient(135deg,#dff6fb,#bfeaf2); color: #075d42; box-shadow: 0 9px 22px rgba(8,122,85,.20); }
+      .invoice-button:focus-visible { outline: 3px solid #fff; box-shadow: 0 0 0 6px rgba(8,122,85,.62); }
+    }
+    @media (max-width: 680px) {
+      body { background: #1e362d; color: #11141c; }
+      .invoice-document, .invoice-head, .invoice-lines, .invoice-total, .invoice-parties, .invoice-actions { border-color: rgba(200,67,35,.34); background: #f9faf9; color: #11141c; }
+      .invoice-head { border-top-color: #c84323; }
+      .invoice-brand, .invoice-bonus, .invoice-number h1 { color: #c84323; }
+    }
+    @media (max-width: 680px) and (prefers-color-scheme: dark) {
+      body {
+        background:
+          radial-gradient(circle at 10% 3%, rgba(31,158,111,.32), transparent 35%),
+          radial-gradient(circle at 94% 30%, rgba(42,153,174,.23), transparent 38%),
+          linear-gradient(145deg,#032d24 0%,#064735 55%,#07533d 100%);
+        color: #f2fff9;
+      }
+      .invoice-document { border-color: rgba(140,232,241,.24); background: #0b3b31; box-shadow: 0 20px 54px rgba(0,18,14,.48); }
+      .invoice-head { background: linear-gradient(135deg,#0b3b31,#123f46); }
+      .invoice-parties, .invoice-actions { border-color: rgba(140,232,241,.18); background: #103f35; }
+      .invoice-lines, .invoice-total { background: #0b3b31; }
+      .invoice-label { color: #b9d8cf; }
+      .invoice-brand, .invoice-bonus { color: #78efae; }
+      th, td { border-color: rgba(140,232,241,.16); }
+      .invoice-button { border-color: #4b9ead; background: #123f46; color: #b9f4fa; }
+      .invoice-button-primary { border-color: #78efae; background: linear-gradient(135deg,#bcecf4,#8fd9e6); color: #043f2d; }
+    }
+    @media (max-width: 680px) {
+      body { background: #c7c8bf; color: #12151d; }
+      .invoice-document, .invoice-head, .invoice-lines, .invoice-total, .invoice-parties, .invoice-actions { border-color: rgba(31,54,45,.24); background: #f9faf9; color: #12151d; }
+      .invoice-head { border-top-color: #1f362d; }
+      .invoice-label { color: #52645d; }
+      .invoice-brand, .invoice-bonus, .invoice-number h1 { color: #bf3a20; }
+      th, td { border-color: rgba(31,54,45,.16); }
+      .invoice-button { border-color: #9eb6e3; background: #9eb6e3; color: #ffffff; }
+      .invoice-button-primary { border-color: #1f362d; background: #1f362d; color: #ffffff; box-shadow: none; }
+    }
     @media print { body { background: #fff; } .invoice-document { width: 100%; margin: 0; border: 0; box-shadow: none; } .invoice-actions { display: none; } }
   </style>
 </head>
