@@ -2,6 +2,8 @@
 
 package cli
 
+import "os"
+
 func InstallFlagSupported() bool {
 	return true
 }
@@ -11,5 +13,5 @@ func DesktopModeFlagSupported() bool {
 }
 
 func LinuxServerStorageDefaultEnabled() bool {
-	return true
+	return os.Geteuid() == 0
 }

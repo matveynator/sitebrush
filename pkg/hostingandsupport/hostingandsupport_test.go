@@ -720,6 +720,34 @@ func TestServerViewsExcludeDemoSites(t *testing.T) {
 	}
 }
 
+func TestRemoteServerClientSiteIncludesObservedCertificate(t *testing.T) {
+	remoteServer := BuildRemoteServerView(ClientHosting{
+		InstallationID: "remote",
+		Sites: []ClientHostingSite{{
+			Domain:         "client.example.com",
+			OwnerEmail:     "client@example.com",
+			HTTPSAvailable: true,
+			CertExpiresAt:  "2026-09-01T12:00:00Z",
+			CertDaysLeft:   22,
+		}},
+	}, nil, "v1")
+
+	if len(remoteServer.Clients) != 1 || len(remoteServer.Clients[0].Sites) != 1 {
+		t.Fatalf("remote clients = %#v", remoteServer.Clients)
+	}
+	certificateDomains := remoteServer.Clients[0].Sites[0].CertificateDomains
+	if len(certificateDomains) != 1 {
+		t.Fatalf("certificate domains = %#v", certificateDomains)
+	}
+	certificate := certificateDomains[0]
+	if certificate.Domain != "client.example.com" || !certificate.Valid || certificate.ExpiresAt != "2026-09-01T12:00:00Z" || certificate.Remaining != "22 days" {
+		t.Fatalf("certificate = %#v", certificate)
+	}
+	if certificate.CanRenew {
+		t.Fatal("remote certificate must not offer local renewal")
+	}
+}
+
 func TestClientHostingsWithDemoDomainMarksDisabledConfiguredDemo(t *testing.T) {
 	hostings := []ClientHosting{{
 		InstallationID: "remote",
