@@ -328,6 +328,69 @@ func newPagePasswordTestCookie(rule PagePasswordRule, request *http.Request, iss
 	}
 }
 
+func TestStoragePathFallsBackToUserDirectoryWhenSystemDirectoryIsUnavailable(t *testing.T) {
+	temporaryRoot := t.TempDir()
+	unavailableSystemPath := filepath.Join(temporaryRoot, "system-storage")
+	if err := os.WriteFile(unavailableSystemPath, []byte("not a directory"), 0o600); err != nil {
+		t.Fatalf("create unavailable system path: %v", err)
+	}
+	userStoragePath := filepath.Join(temporaryRoot, "user", ".sitebrush")
+
+	preparedStoragePath, usedFallback, err := prepareStoragePathWithFallback(unavailableSystemPath, userStoragePath, true)
+	if err != nil {
+		t.Fatalf("prepare storage with fallback: %v", err)
+	}
+	if !usedFallback {
+		t.Fatal("user storage fallback was not used")
+	}
+	if !sameCleanPath(preparedStoragePath, userStoragePath) {
+		t.Fatalf("prepared storage path = %q, want %q", preparedStoragePath, userStoragePath)
+	}
+	if fileInfo, statErr := os.Stat(userStoragePath); statErr != nil || !fileInfo.IsDir() {
+		t.Fatalf("user storage directory was not created: info=%#v err=%v", fileInfo, statErr)
+	}
+}
+
+func TestExplicitStoragePathDoesNotFallBack(t *testing.T) {
+	temporaryRoot := t.TempDir()
+	unavailableStoragePath := filepath.Join(temporaryRoot, "configured-storage")
+	if err := os.WriteFile(unavailableStoragePath, []byte("not a directory"), 0o600); err != nil {
+		t.Fatalf("create unavailable configured path: %v", err)
+	}
+
+	_, usedFallback, err := prepareStoragePathWithFallback(unavailableStoragePath, filepath.Join(temporaryRoot, "fallback"), false)
+	if err == nil {
+		t.Fatal("unavailable explicit storage path was accepted")
+	}
+	if usedFallback {
+		t.Fatal("explicit storage path unexpectedly used fallback")
+	}
+}
+
+func TestUserStoragePathUsesHiddenDirectoryInHome(t *testing.T) {
+	homeDirectory, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(homeDirectory, ".sitebrush")
+	if got := userAppStoragePath(); !sameCleanPath(got, want) {
+		t.Fatalf("user storage path = %q, want %q", got, want)
+	}
+}
+
+func TestLinuxDefaultStorageUsesUserDirectoryWithoutAdministrativeRights(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("Linux-specific default storage policy")
+	}
+	got := defaultAppStoragePath()
+	if sameCleanPath(got, "/var/lib/sitebrush") {
+		t.Skip("process has administrative Linux storage privileges")
+	}
+	if want := userAppStoragePath(); !sameCleanPath(got, want) {
+		t.Fatalf("default storage path = %q, want user path %q", got, want)
+	}
+}
+
 func TestStorageJailResolvesSymlinkRootAndRejectsEscapes(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("symlink behavior differs on Windows")
@@ -1917,6 +1980,40 @@ func TestExpensesTitlesUseServerScopeInEveryLanguage(t *testing.T) {
 				t.Fatalf("title = %q, want %q", title, testCase.expected)
 			}
 		})
+	}
+}
+
+func TestGuestMenuInvitesEditingInEveryLanguage(t *testing.T) {
+	expectedLabels := map[string]string{
+		"de": "Zum Bearbeiten anmelden",
+		"en": "Sign in to edit",
+		"es": "Inicia sesión para editar",
+		"fa": "ورود برای ویرایش",
+		"fi": "Kirjaudu muokkaamaan",
+		"fr": "Se connecter pour modifier",
+		"he": "התחברות לעריכה",
+		"it": "Accedi per modificare",
+		"ja": "ログインして編集",
+		"kk": "Өңдеу үшін кіру",
+		"mn": "Засварлахын тулд нэвтрэх",
+		"pt": "Entrar para editar",
+		"ru": "Войти, чтобы редактировать",
+		"sv": "Logga in för att redigera",
+		"tr": "Düzenlemek için giriş yap",
+		"zh": "登录以编辑",
+	}
+	if len(translationCatalog) != len(expectedLabels) {
+		t.Fatalf("translation languages = %d, expected labels = %d", len(translationCatalog), len(expectedLabels))
+	}
+	for languageCode, expectedLabel := range expectedLabels {
+		translations := translationCatalog[languageCode]
+		if translations["menu_login"] != expectedLabel {
+			t.Fatalf("language %s menu_login = %q, want %q", languageCode, translations["menu_login"], expectedLabel)
+		}
+		menuScript := buildGuestContextMenuScriptForLanguage("/page", "example.com", languageCode)
+		if !strings.Contains(menuScript, expectedLabel) {
+			t.Fatalf("language %s guest menu does not contain %q", languageCode, expectedLabel)
+		}
 	}
 }
 
@@ -3743,6 +3840,34 @@ func TestLoginReturnPathDefaultsToCurrentPageWithoutAutoVisual(t *testing.T) {
 	request := httptest.NewRequest(http.MethodGet, "http://localhost:8080/docs?login", nil)
 	if returnPath := loginReturnPathOrDefault(request); returnPath != "/docs" {
 		t.Fatalf("return path = %q, want %q", returnPath, "/docs")
+	}
+}
+
+func TestRegistrationRedirectUsesSelfSignedTLSPort(t *testing.T) {
+	application := &App{selfSignedTLSPort: 9899}
+	request := httptest.NewRequest(http.MethodGet, "http://code.example:9898/?register", nil)
+	response := httptest.NewRecorder()
+
+	application.route(response, request)
+
+	if response.Code != http.StatusTemporaryRedirect {
+		t.Fatalf("status = %d, want %d", response.Code, http.StatusTemporaryRedirect)
+	}
+	if location := response.Header().Get("Location"); location != "https://code.example:9899/?register" {
+		t.Fatalf("location = %q", location)
+	}
+}
+
+func TestSelfSignedHTTPSRedirectPreservesIPv6Host(t *testing.T) {
+	application := &App{selfSignedTLSPort: 9900}
+	request := httptest.NewRequest(http.MethodGet, "http://[::1]:9898/?register", nil)
+	request.Host = "[2001:db8::1]:9898"
+	response := httptest.NewRecorder()
+
+	application.redirectHTTPS(response, request, http.StatusTemporaryRedirect)
+
+	if location := response.Header().Get("Location"); location != "https://[2001:db8::1]:9900/?register" {
+		t.Fatalf("location = %q", location)
 	}
 }
 
@@ -11038,6 +11163,22 @@ func TestParseListenPortsRejectsPartialTLSAndMultipleCustomPorts(t *testing.T) {
 	for _, rawPorts := range []string{"443", "80,444", "8080,9090", "abc"} {
 		if _, err := parseListenPorts(rawPorts); err == nil {
 			t.Fatalf("parseListenPorts(%q) succeeded, want error", rawPorts)
+		}
+	}
+}
+
+func TestAutomaticSSLUnavailableHintExplainsHowToFixLaunchMode(t *testing.T) {
+	if key := automaticSSLUnavailableHintKey(false); key != "domain_settings_ssl_unavailable_admin_hint" {
+		t.Fatalf("default-port fallback hint = %q", key)
+	}
+	if key := automaticSSLUnavailableHintKey(true); key != "domain_settings_ssl_unavailable_custom_ports_hint" {
+		t.Fatalf("custom-port hint = %q", key)
+	}
+	for languageCode, translations := range translationCatalog {
+		for _, translationKey := range []string{"domain_settings_ssl_unavailable_admin_hint", "domain_settings_ssl_unavailable_custom_ports_hint"} {
+			if strings.TrimSpace(translations[translationKey]) == "" {
+				t.Fatalf("language %s is missing %s", languageCode, translationKey)
+			}
 		}
 	}
 }

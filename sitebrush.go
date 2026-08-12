@@ -138,7 +138,7 @@ const backupImportFileEntryLimitBytes int64 = 128 * 1024 * 1024
 const backupImportUncompressedLimitBytes int64 = 1024 * 1024 * 1024
 const hostingSnapshotNetChanPort = "9876"
 const hostingSnapshotNetChanDeliveryTimeout = 5 * time.Second
-const hostingAndSupportPanelSnapshotVersion = 5
+const hostingAndSupportPanelSnapshotVersion = 6
 const hostingAndSupportMetricsRefreshInterval = 30 * time.Second
 const hostingAndSupportFullRefreshInterval = 5 * time.Minute
 
@@ -149,43 +149,45 @@ var sitebrushRuServiceMailRelayPublicKey = ""
 
 // App keeps only explicit dependencies to stay readable and easy to swap.
 type App struct {
-	db                        sqlExecutor
-	siteDatabaseRouter        *perSiteDBRouter
-	storagePath               string
-	storageRealRoot           string
-	dbPath                    string
-	debug                     bool
-	desktopMode               bool
-	nativeFileDialog          bool
-	automaticSSLAvailable     bool
-	embeddedStaticAssets      map[string]embeddedStaticAsset
-	autoCertCertificateCache  chan autoCertCertificateCacheRequest
-	automaticSSL              chan automaticSSLRequest
-	grabTracker               *grabProgressTracker
-	grabCancels               *grabCancelTracker
-	trialPreviews             *publicTrialPreviewStore
-	publishTracker            *publishProgressTracker
-	analyticsEvents           chan siteAnalyticsEvent
-	analyticsMemoryLimit      int64
-	guestStaticHTMLCache      chan guestStaticHTMLCacheRequest
-	geoIP                     *geoip.Resolver
-	domainLogEvents           chan domainLogEvent
-	tlsHandshakeNoiseEvents   chan tlsHandshakeNoiseEvent
-	tlsHandshakeNoiseOverflow chan struct{}
-	autoCertGuard             chan autoCertGuardRequest
-	authIPFailureCache        chan authIPFailureCacheRequest
-	registrationConfirmations chan emailConfirmationMemoryRequest
-	emailDelivery             chan mailout.DeliveryJob
-	sendEmail                 mailout.Sender
-	hostingSnapshotReports    chan struct{}
-	hostingSnapshotDeliveries chan hostingSnapshotNetChanDeliveryTask
-	hostingAndSupportPanel    chan hostingAndSupportPanelRequest
-	billingInvoices           chan billingInvoiceProcessRequest
-	renderTemplates           chan renderTemplateRequest
-	controlDatabase           *serverControlDatabaseDispatcher
-	hostingSupportEvents      chan hostingandsupport.HostingSnapshotEvent
-	demoSiteRuntime           chan demoSiteRuntimeRequest
-	demoSessionEvents         chan demoSessionEvent
+	db                             sqlExecutor
+	siteDatabaseRouter             *perSiteDBRouter
+	storagePath                    string
+	storageRealRoot                string
+	dbPath                         string
+	debug                          bool
+	desktopMode                    bool
+	nativeFileDialog               bool
+	automaticSSLAvailable          bool
+	selfSignedTLSPort              int
+	automaticSSLUnavailableHintKey string
+	embeddedStaticAssets           map[string]embeddedStaticAsset
+	autoCertCertificateCache       chan autoCertCertificateCacheRequest
+	automaticSSL                   chan automaticSSLRequest
+	grabTracker                    *grabProgressTracker
+	grabCancels                    *grabCancelTracker
+	trialPreviews                  *publicTrialPreviewStore
+	publishTracker                 *publishProgressTracker
+	analyticsEvents                chan siteAnalyticsEvent
+	analyticsMemoryLimit           int64
+	guestStaticHTMLCache           chan guestStaticHTMLCacheRequest
+	geoIP                          *geoip.Resolver
+	domainLogEvents                chan domainLogEvent
+	tlsHandshakeNoiseEvents        chan tlsHandshakeNoiseEvent
+	tlsHandshakeNoiseOverflow      chan struct{}
+	autoCertGuard                  chan autoCertGuardRequest
+	authIPFailureCache             chan authIPFailureCacheRequest
+	registrationConfirmations      chan emailConfirmationMemoryRequest
+	emailDelivery                  chan mailout.DeliveryJob
+	sendEmail                      mailout.Sender
+	hostingSnapshotReports         chan struct{}
+	hostingSnapshotDeliveries      chan hostingSnapshotNetChanDeliveryTask
+	hostingAndSupportPanel         chan hostingAndSupportPanelRequest
+	billingInvoices                chan billingInvoiceProcessRequest
+	renderTemplates                chan renderTemplateRequest
+	controlDatabase                *serverControlDatabaseDispatcher
+	hostingSupportEvents           chan hostingandsupport.HostingSnapshotEvent
+	demoSiteRuntime                chan demoSiteRuntimeRequest
+	demoSessionEvents              chan demoSessionEvent
 }
 
 type demoSiteRuntimeRequest struct {
@@ -4734,6 +4736,42 @@ func prepareStorageJailRoot(storagePath string) (string, error) {
 	return filepath.Clean(realStoragePath), nil
 }
 
+func prepareWritableStorageJailRoot(storagePath string) (string, error) {
+	realStoragePath, err := prepareStorageJailRoot(storagePath)
+	if err != nil {
+		return "", err
+	}
+	writeProbe, err := os.CreateTemp(realStoragePath, ".sitebrush-write-test-*")
+	if err != nil {
+		return "", err
+	}
+	writeProbePath := writeProbe.Name()
+	if closeErr := writeProbe.Close(); closeErr != nil {
+		_ = os.Remove(writeProbePath)
+		return "", closeErr
+	}
+	if removeErr := os.Remove(writeProbePath); removeErr != nil {
+		return "", removeErr
+	}
+	return filepath.Clean(realStoragePath), nil
+}
+
+func prepareStoragePathWithFallback(storagePath string, fallbackStoragePath string, allowFallback bool) (string, bool, error) {
+	preparedStoragePath, prepareErr := prepareWritableStorageJailRoot(storagePath)
+	if prepareErr == nil {
+		return preparedStoragePath, false, nil
+	}
+	cleanedFallbackPath := cleanStoragePath(fallbackStoragePath)
+	if !allowFallback || sameCleanPath(storagePath, cleanedFallbackPath) {
+		return "", false, prepareErr
+	}
+	preparedFallbackPath, fallbackErr := prepareWritableStorageJailRoot(cleanedFallbackPath)
+	if fallbackErr != nil {
+		return "", false, fmt.Errorf("system storage %s is unavailable: %v; user storage %s is unavailable: %w", cleanStoragePath(storagePath), prepareErr, cleanedFallbackPath, fallbackErr)
+	}
+	return preparedFallbackPath, true, nil
+}
+
 func cleanDBPath(dbPath string) string {
 	trimmedDBPath := strings.TrimSpace(dbPath)
 	if trimmedDBPath == "" {
@@ -4758,11 +4796,13 @@ type listenPorts struct {
 }
 
 type serverRunConfig struct {
-	ParsedPorts listenPorts
-	StoragePath string
-	DBPath      string
-	DesktopMode bool
-	Debug       bool
+	ParsedPorts          listenPorts
+	StoragePath          string
+	DBPath               string
+	AllowStorageFallback bool
+	PortWasProvided      bool
+	DesktopMode          bool
+	Debug                bool
 }
 
 func printSitebrushUsage(output io.Writer, flagSet *flag.FlagSet) {
@@ -4995,16 +5035,27 @@ func main() {
 		log.Fatalf("unsupported legacy -db-type %q, supported: sqlite", *legacyDBType)
 	}
 
+	storagePathWasProvided := flagWasProvided("path") || strings.TrimSpace(*legacyStoragePath) != ""
 	if !flagWasProvided("path") && strings.TrimSpace(*legacyStoragePath) != "" {
 		*storagePath = *legacyStoragePath
 	}
 	effectiveStoragePath := cleanStoragePath(*storagePath)
 	effectiveDBPath := filepath.Join(effectiveStoragePath, defaultDBPath)
-	if strings.TrimSpace(*legacyDBPath) != "" {
+	dbPathWasProvided := strings.TrimSpace(*legacyDBPath) != ""
+	if dbPathWasProvided {
 		effectiveDBPath = cleanDBPath(*legacyDBPath)
 	}
 	quotaCommandMode := *cliMode || *legacyListSitesMode || strings.TrimSpace(*legacyQuotaSite) != "" || flagWasProvided("quota")
 	if quotaCommandMode {
+		preparedStoragePath, usedFallback, prepareErr := prepareStoragePathWithFallback(effectiveStoragePath, userAppStoragePath(), !storagePathWasProvided && !dbPathWasProvided)
+		if prepareErr != nil {
+			log.Fatalf("prepare storage path: %v", prepareErr)
+		}
+		if usedFallback {
+			log.Printf("system storage %s is unavailable; using user storage %s", effectiveStoragePath, preparedStoragePath)
+			effectiveDBPath = filepath.Join(preparedStoragePath, defaultDBPath)
+		}
+		effectiveStoragePath = preparedStoragePath
 		if err := runSiteQuotaCommand(context.Background(), os.Stdout, os.Stdin, effectiveStoragePath, effectiveDBPath, *cliMode || *legacyListSitesMode, *legacyQuotaSite, *legacyQuotaValue); err != nil {
 			log.Fatal(err)
 		}
@@ -5026,7 +5077,11 @@ func main() {
 		}
 		return
 	}
-	serverConfig := serverRunConfig{ParsedPorts: parsedPorts, StoragePath: effectiveStoragePath, DBPath: effectiveDBPath, DesktopMode: desktopMode, Debug: *debugMode}
+	serverConfig := serverRunConfig{
+		ParsedPorts: parsedPorts, StoragePath: effectiveStoragePath, DBPath: effectiveDBPath,
+		AllowStorageFallback: !storagePathWasProvided && !dbPathWasProvided, PortWasProvided: flagWasProvided("port"),
+		DesktopMode: desktopMode, Debug: *debugMode,
+	}
 	if handled, err := winservice.RunIfNeeded("sitebrush", func(ctx context.Context) error {
 		return runSitebrushServer(ctx, serverConfig)
 	}); handled {
@@ -5079,9 +5134,12 @@ func runSitebrushServer(ctx context.Context, config serverRunConfig) error {
 	parsedPorts := config.ParsedPorts
 	effectiveDBPath := config.DBPath
 	effectiveStoragePath := config.StoragePath
-	storageRealRoot, err := prepareStorageJailRoot(effectiveStoragePath)
+	storageRealRoot, usedStorageFallback, err := prepareStoragePathWithFallback(effectiveStoragePath, userAppStoragePath(), config.AllowStorageFallback)
 	if err != nil {
 		return fmt.Errorf("prepare storage path: %w", err)
+	}
+	if usedStorageFallback {
+		log.Printf("system storage %s is unavailable; using user storage %s", effectiveStoragePath, storageRealRoot)
 	}
 	defaultConfiguredDBPath := filepath.Join(cleanStoragePath(effectiveStoragePath), defaultDBPath)
 	if sameCleanPath(effectiveDBPath, defaultConfiguredDBPath) {
@@ -5178,7 +5236,6 @@ func runSitebrushServer(ctx context.Context, config serverRunConfig) error {
 	defer listener.Close()
 
 	address := "localhost:" + strconv.Itoa(listenPort)
-	log.Printf("Sitebrush started on http://%s", address)
 
 	domainContextMiddleware := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requestDomain := domainFromRequest(r)
@@ -5187,8 +5244,25 @@ func runSitebrushServer(ctx context.Context, config serverRunConfig) error {
 	})
 	appHandler := application.analyticsMiddleware(application.accessLogMiddleware(application.authAbuseMiddleware(domainContextMiddleware)))
 	httpHandler := appHandler
-	if parsedPorts.TLSEnabled && listenPort != 80 {
-		application.logProblemEvent("AUTOCERT disabled: Let’s Encrypt HTTP-01 checks need public port 80; current HTTP port is %d", listenPort)
+	if listenPort != 80 {
+		application.automaticSSLUnavailableHintKey = automaticSSLUnavailableHintKey(config.PortWasProvided)
+		if config.PortWasProvided {
+			application.logProblemEvent("AUTOCERT disabled: custom HTTP port %d uses self-signed HTTPS; start without -port or use -port 80,443 for automatic valid SSL", listenPort)
+		} else {
+			application.logProblemEvent("AUTOCERT disabled: Sitebrush could not use ports 80 and 443; restart with sudo/root on Linux or Unix, or Run as administrator on Windows")
+		}
+		selfSignedTLSListener, selfSignedTLSPort, selfSignedTLSErr := listenOnAvailablePort(listenPort + 1)
+		if selfSignedTLSErr != nil {
+			application.logProblemEvent("self-signed HTTPS disabled: %v", selfSignedTLSErr)
+		} else if fallbackCertificate, fallbackCertificateErr := application.loadOrCreateAutomaticSSLFallbackCertificate(time.Now()); fallbackCertificateErr != nil {
+			_ = selfSignedTLSListener.Close()
+			application.logProblemEvent("self-signed HTTPS disabled: cannot prepare certificate: %v", fallbackCertificateErr)
+		} else {
+			defer selfSignedTLSListener.Close()
+			application.selfSignedTLSPort = selfSignedTLSPort
+			application.logProblemEvent("self-signed HTTPS enabled on port %d because public ports 80 and 443 are unavailable", selfSignedTLSPort)
+			go application.serveTLSWithAutoCert(ctx, selfSignedTLSListener, application.autoCertTLSConfig(fallbackCertificate), appHandler)
+		}
 	}
 	if application.autoCertCertificateCache == nil {
 		// The startup path already logged the filesystem problem. Leave HTTP available.
@@ -5235,6 +5309,10 @@ func runSitebrushServer(ctx context.Context, config serverRunConfig) error {
 	go func() {
 		serverErrors <- server.Serve(listener)
 	}()
+	log.Printf("Sitebrush started on http://%s", address)
+	if application.selfSignedTLSPort > 0 {
+		log.Printf("Sitebrush secure registration is available on https://localhost:%d with a self-signed certificate", application.selfSignedTLSPort)
+	}
 
 	if config.DesktopMode {
 		if err := desktop.RunWebviewWindow(address, CompileVersion); err != nil {
@@ -5740,6 +5818,13 @@ func parseListenPorts(rawPorts string) (listenPorts, error) {
 		return listenPorts{Raw: "80,443", HTTPPort: 80, TLSEnabled: true}, nil
 	}
 	return listenPorts{}, fmt.Errorf("-port must be 80,443 or one custom HTTP port")
+}
+
+func automaticSSLUnavailableHintKey(portWasProvided bool) string {
+	if portWasProvided {
+		return "domain_settings_ssl_unavailable_custom_ports_hint"
+	}
+	return "domain_settings_ssl_unavailable_admin_hint"
 }
 
 func listenOnAvailablePort(requestedPort int) (net.Listener, int, error) {
@@ -6611,7 +6696,7 @@ func (a *App) assignMissingDomainAliasTokens(ctx context.Context) {
 func (a *App) route(w http.ResponseWriter, r *http.Request) {
 	pagePath := cleanPath(r.URL.Path)
 	if requestWithSensitiveCookieRequiresHTTPS(r) {
-		httpsecurity.RedirectHTTPS(w, r, http.StatusTemporaryRedirect)
+		a.redirectHTTPS(w, r, http.StatusTemporaryRedirect)
 		return
 	}
 	publicTrialEndpoint := publicTrialEndpointFromRequest(r)
@@ -7402,7 +7487,7 @@ func (a *App) maybeStartDemoSite(w http.ResponseWriter, r *http.Request, request
 		return false
 	}
 	if !httpsecurity.IsLocalRequest(r) && !httpsecurity.UsesHTTPS(r) {
-		httpsecurity.RedirectHTTPS(w, r, http.StatusTemporaryRedirect)
+		a.redirectHTTPS(w, r, http.StatusTemporaryRedirect)
 		return true
 	}
 	if hasSitebrushSessionCookie(r) {
@@ -22341,6 +22426,24 @@ func requestScheme(r *http.Request) string {
 	return "http"
 }
 
+func (a *App) redirectHTTPS(w http.ResponseWriter, r *http.Request, statusCode int) {
+	if a == nil || a.selfSignedTLSPort == 0 {
+		httpsecurity.RedirectHTTPS(w, r, statusCode)
+		return
+	}
+	if r == nil || r.URL == nil || httpsecurity.IsLocalRequest(r) {
+		return
+	}
+	hostName := (&url.URL{Scheme: "http", Host: r.Host}).Hostname()
+	if hostName == "" {
+		return
+	}
+	target := *r.URL
+	target.Scheme = "https"
+	target.Host = net.JoinHostPort(hostName, strconv.Itoa(a.selfSignedTLSPort))
+	httpsecurity.RedirectExternal(w, r, &target, statusCode)
+}
+
 func absoluteURLForPath(r *http.Request, relativePath string) string {
 	host := strings.TrimSpace(r.Host)
 	if host == "" {
@@ -23041,7 +23144,7 @@ func buildContextMenuScript(isAdmin bool, isServerManager bool, isFrozen bool, p
 	hostingAndSupportLabel = template.JSEscapeString(hostingAndSupportLabel)
 	profileLabel := template.JSEscapeString(translationOrDefault(translations, "menu_profile", "Account"))
 	logoutLabel := template.JSEscapeString(translationOrDefault(translations, "menu_logout", "Sign out"))
-	loginLabel := template.JSEscapeString(translationOrDefault(translations, "menu_login", "Sign in"))
+	loginLabel := template.JSEscapeString(translationOrDefault(translations, "menu_login", "Sign in to edit"))
 	treeModalTitle := template.JSEscapeString(translationOrDefault(translations, "tree_modal_title", "Site tree"))
 	treeLoadingLabel := template.JSEscapeString(translationOrDefault(translations, "tree_loading", "Loading site tree..."))
 	treeLoadErrorLabel := template.JSEscapeString(translationOrDefault(translations, "tree_load_error", "Failed to load site tree."))
@@ -23577,7 +23680,7 @@ func buildGuestContextMenuScriptForLanguage(pagePath, domain, languageCode strin
 }
 
 func buildGuestContextMenuScriptTemplate(translations map[string]string) string {
-	loginLabel := template.JSEscapeString(translationOrDefault(translations, "menu_login", "Sign in"))
+	loginLabel := template.JSEscapeString(translationOrDefault(translations, "menu_login", "Sign in to edit"))
 	standardMenuHint := template.JSEscapeString(template.HTMLEscapeString(translationOrDefault(translations, "menu_standard_context_hint", "Browser standard menu: Ctrl + right mouse click.")))
 	compiledVersionLabel := template.JSEscapeString("v." + CompileVersion)
 	sitebrushHomeURL := "https://sitebrush.com"
@@ -24719,7 +24822,7 @@ func buildGuestContextMenuTemplates() map[string]string {
 		templates[languageCode] = buildGuestContextMenuScriptTemplate(translationsForLanguageCode(languageCode))
 	}
 	if strings.TrimSpace(templates["ru"]) == "" {
-		templates["ru"] = buildGuestContextMenuScriptTemplate(map[string]string{"menu_login": "Sign in"})
+		templates["ru"] = buildGuestContextMenuScriptTemplate(map[string]string{"menu_login": "Sign in to edit"})
 	}
 	return templates
 }
@@ -28963,23 +29066,24 @@ func (a *App) domainSettingsPage(w http.ResponseWriter, r *http.Request) {
 		externalIPError = externalIPErr.Error()
 	}
 	a.render(w, r, "domain_settings.html", map[string]any{
-		"Domain":             siteDomain,
-		"SelectedDomain":     selectedDomain,
-		"Aliases":            domainAliases,
-		"ChrootLocations":    chrootLocations,
-		"AliasCount":         len(domainAliases),
-		"CanAddAlias":        len(domainAliases) < 10,
-		"ReturnPath":         returnPath,
-		"ExternalIP":         externalIP,
-		"ExternalIPError":    externalIPError,
-		"ExternalIPs":        ipListForLog(serverIPs),
-		"AutomaticSSL":       automaticSSLSetting,
-		"AutomaticSSLStatus": automaticSSLStatus,
-		"AutomaticSSLDomain": automaticSSLSetting.Domain,
-		"AutomaticSSLReady":  automaticSSLSetting.Available && automaticSSLSetting.Domain != "",
-		"BackupDownloadURL":  backupDownloadURL,
-		"BackupDownloadPath": backupDownloadPath,
-		"NativeFileDialog":   a.nativeFileDialog,
+		"Domain":                         siteDomain,
+		"SelectedDomain":                 selectedDomain,
+		"Aliases":                        domainAliases,
+		"ChrootLocations":                chrootLocations,
+		"AliasCount":                     len(domainAliases),
+		"CanAddAlias":                    len(domainAliases) < 10,
+		"ReturnPath":                     returnPath,
+		"ExternalIP":                     externalIP,
+		"ExternalIPError":                externalIPError,
+		"ExternalIPs":                    ipListForLog(serverIPs),
+		"AutomaticSSL":                   automaticSSLSetting,
+		"AutomaticSSLStatus":             automaticSSLStatus,
+		"AutomaticSSLDomain":             automaticSSLSetting.Domain,
+		"AutomaticSSLReady":              automaticSSLSetting.Available && automaticSSLSetting.Domain != "",
+		"AutomaticSSLUnavailableHintKey": firstNonEmpty(a.automaticSSLUnavailableHintKey, "domain_settings_ssl_unavailable_hint"),
+		"BackupDownloadURL":              backupDownloadURL,
+		"BackupDownloadPath":             backupDownloadPath,
+		"NativeFileDialog":               a.nativeFileDialog,
 	})
 }
 
@@ -30523,17 +30627,18 @@ func defaultAppStoragePath() string {
 	if appcli.LinuxServerStorageDefaultEnabled() {
 		return "/var/lib/sitebrush"
 	}
-	basePath := defaultBaseAppDataPath()
-	return filepath.Join(basePath, storageAppName)
+	return userAppStoragePath()
+}
+
+func userAppStoragePath() string {
+	if homeDir, err := os.UserHomeDir(); err == nil && strings.TrimSpace(homeDir) != "" {
+		return filepath.Join(homeDir, ".sitebrush")
+	}
+	return filepath.Join(defaultBaseAppDataPath(), storageAppName)
 }
 
 func defaultBaseAppDataPath() string {
 	switch runtime.GOOS {
-	case "darwin":
-		homeDir, err := os.UserHomeDir()
-		if err == nil && strings.TrimSpace(homeDir) != "" {
-			return filepath.Join(homeDir, "Library", "Application Support")
-		}
 	case "windows":
 		localAppDataDir := strings.TrimSpace(os.Getenv("LOCALAPPDATA"))
 		if localAppDataDir != "" {
@@ -30542,15 +30647,6 @@ func defaultBaseAppDataPath() string {
 		roamingAppDataDir := strings.TrimSpace(os.Getenv("APPDATA"))
 		if roamingAppDataDir != "" {
 			return roamingAppDataDir
-		}
-	default:
-		homeDir, err := os.UserHomeDir()
-		if err == nil && strings.TrimSpace(homeDir) != "" {
-			return filepath.Join(homeDir, ".sitebrush")
-		}
-		xdgDataHomeDir := strings.TrimSpace(os.Getenv("XDG_DATA_HOME"))
-		if xdgDataHomeDir != "" {
-			return filepath.Join(xdgDataHomeDir, storageAppName)
 		}
 	}
 	if configDir, err := os.UserConfigDir(); err == nil && strings.TrimSpace(configDir) != "" {

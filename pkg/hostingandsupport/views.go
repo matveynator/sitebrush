@@ -318,6 +318,12 @@ func mergeLocalAndRemoteServerViews(localServer ServerView, remoteServer ServerV
 			merged.Sites[siteIndex].LimitLabel = localSite.LimitLabel
 			merged.Sites[siteIndex].QuotaInput = localSite.QuotaInput
 			merged.Sites[siteIndex].CanEditQuota = true
+			merged.Sites[siteIndex].CertificateValid = localSite.CertificateValid
+			merged.Sites[siteIndex].CertificateExpiresAt = localSite.CertificateExpiresAt
+			merged.Sites[siteIndex].CertificateRemaining = localSite.CertificateRemaining
+			merged.Sites[siteIndex].CertificateLastError = localSite.CertificateLastError
+			merged.Sites[siteIndex].CertificateCanRenew = localSite.CertificateCanRenew
+			merged.Sites[siteIndex].CertificateDomains = localSite.CertificateDomains
 		}
 		merged.Clients = serverClientViewsFromSites(merged.Sites)
 	}
@@ -471,25 +477,34 @@ func BuildRemoteServerView(clientHosting ClientHosting, invoices []Invoice, late
 			billingPrice.PriceLabel = MoneyLabel(0, expensePolicy.Currency)
 			billingPrice.StatusText = "бесплатно до " + FormatFileSize(expensePolicy.FreeSiteThresholdBytes)
 		}
+		certificateRemaining := remoteCertificateRemainingLabel(site)
 		server.Sites = append(server.Sites, ServerSiteView{
-			Domain:            site.Domain,
-			URL:               "http://" + site.Domain + "/",
-			OwnerEmail:        ownerEmail,
-			AdminEmails:       strings.Join(site.AdminEmails, ", "),
-			PlanName:          "Дисковое пространство",
-			PaidStatus:        billingPrice.StatusText,
-			UsedBytes:         site.UsedBytes,
-			UsedLabel:         site.UsedLabel,
-			LimitLabel:        site.LimitLabel,
-			OverLimit:         site.OverLimit,
-			InvoiceLabel:      InvoiceLabelForDomain(invoices, site.Domain),
-			BillingPriceLabel: billingPrice.PriceLabel,
-			BillingStatusText: billingPrice.StatusText,
-			BillingAmount:     billingPrice.Amount,
-			BillingCurrency:   billingPrice.Currency,
-			BillingBillable:   billingPrice.Billable,
-			IsDemo:            site.IsDemo,
-			BillingExcluded:   site.IsDemo,
+			Domain:               site.Domain,
+			URL:                  "http://" + site.Domain + "/",
+			OwnerEmail:           ownerEmail,
+			AdminEmails:          strings.Join(site.AdminEmails, ", "),
+			PlanName:             "Дисковое пространство",
+			PaidStatus:           billingPrice.StatusText,
+			UsedBytes:            site.UsedBytes,
+			UsedLabel:            site.UsedLabel,
+			LimitLabel:           site.LimitLabel,
+			OverLimit:            site.OverLimit,
+			InvoiceLabel:         InvoiceLabelForDomain(invoices, site.Domain),
+			BillingPriceLabel:    billingPrice.PriceLabel,
+			BillingStatusText:    billingPrice.StatusText,
+			BillingAmount:        billingPrice.Amount,
+			BillingCurrency:      billingPrice.Currency,
+			BillingBillable:      billingPrice.Billable,
+			IsDemo:               site.IsDemo,
+			BillingExcluded:      site.IsDemo,
+			CertificateValid:     site.HTTPSAvailable,
+			CertificateExpiresAt: site.CertExpiresAt,
+			CertificateRemaining: certificateRemaining,
+			CertificateLastError: site.TLSLastError,
+			CertificateDomains: []CertificateDomainView{{
+				Domain: site.Domain, Valid: site.HTTPSAvailable, ExpiresAt: site.CertExpiresAt,
+				Remaining: certificateRemaining, LastError: site.TLSLastError,
+			}},
 		})
 	}
 	server.SiteCount = len(server.Sites)
@@ -504,6 +519,19 @@ func BuildRemoteServerView(clientHosting ClientHosting, invoices []Invoice, late
 	applyServerInvoiceDefaults(&server)
 	ApplyServerCostView(&server, expensePolicy, invoices)
 	return server
+}
+
+func remoteCertificateRemainingLabel(site ClientHostingSite) string {
+	if strings.TrimSpace(site.CertExpiresAt) == "" {
+		return ""
+	}
+	if site.CertDaysLeft < 0 {
+		return "expired"
+	}
+	if site.CertDaysLeft == 0 {
+		return "<1 day"
+	}
+	return fmt.Sprintf("%d days", site.CertDaysLeft)
 }
 
 func ClientHostingsWithDemoDomain(clientHostings []ClientHosting, demoDomain string) []ClientHosting {

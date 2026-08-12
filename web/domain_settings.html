@@ -194,7 +194,7 @@
         <button type="submit">{{index .T "domain_settings_ssl_save"}}</button>
         {{if not .AutomaticSSL.ManuallyDisabled}}<button type="button" data-certificate-renew="{{.AutomaticSSLDomain}}">{{index .T "domain_settings_ssl_renew_now"}}</button><span class="hint" data-certificate-renew-status="{{.AutomaticSSLDomain}}" aria-live="polite"></span>{{end}}
       {{else}}
-        <p class="status-bad">{{index .T "domain_settings_ssl_unavailable_hint"}}</p>
+        <p class="status-bad">{{index .T .AutomaticSSLUnavailableHintKey}}</p>
       {{end}}
     </form>
   </section>

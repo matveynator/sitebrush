@@ -478,6 +478,7 @@ type ClientHostingSite struct {
 	CertExpiresAt         string
 	CertDaysLeft          int
 	TLSStatusClass        string
+	TLSLastError          string
 	DNSMatchesServer      bool
 	ReachableByServer     bool
 	ReachabilityScheme    string
@@ -2575,6 +2576,7 @@ func (store Store) ClientHostings(ctx context.Context) []ClientHosting {
 			hostings[hostingIndex].Sites[siteIndex].CertExpiresAt = check.CertExpiresAt
 			hostings[hostingIndex].Sites[siteIndex].CertDaysLeft = check.CertDaysLeft
 			hostings[hostingIndex].Sites[siteIndex].TLSStatusClass = check.StatusClass
+			hostings[hostingIndex].Sites[siteIndex].TLSLastError = check.Error
 			domainCheck := domainChecks[domain]
 			if strings.TrimSpace(domainCheck.ServerIP) == strings.TrimSpace(hostings[hostingIndex].ServerIP) {
 				hostings[hostingIndex].Sites[siteIndex].DNSMatchesServer = domainCheck.DNSMatches
