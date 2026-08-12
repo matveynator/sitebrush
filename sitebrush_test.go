@@ -10421,6 +10421,14 @@ func TestPerSiteDBRouterSerializesConcurrentWritesToOneSiteDatabase(t *testing.T
 	if got := siteDatabase.rawDatabase.Stats().MaxOpenConnections; got != 1 {
 		t.Fatalf("site database max open connections = %d, want 1", got)
 	}
+	if got := len(siteDatabase.readDatabases); got != siteDatabaseReaderCount {
+		t.Fatalf("site database readers = %d, want %d", got, siteDatabaseReaderCount)
+	}
+	for readerIndex, readDatabase := range siteDatabase.readDatabases {
+		if got := readDatabase.Stats().MaxOpenConnections; got != 1 {
+			t.Fatalf("site database reader %d max open connections = %d, want 1", readerIndex, got)
+		}
+	}
 
 	writeCount := 96
 	writeResults := make(chan error, writeCount)

@@ -908,23 +908,28 @@ func (dispatcher *serverControlDatabaseDispatcher) runCloser() {
 	}
 }
 
-// siteFileDatabase owns one file-backed database handle from one goroutine.
-// database/sql is still the portable execution layer, but all callers enter
-// through channel queues so SQLite-style files do not receive parallel writes.
+// siteFileDatabase owns one writer and a fixed set of readers. All callers
+// enter through channel queues: writes stay ordered while WAL readers proceed
+// independently without sharing the writer connection.
 type siteFileDatabase struct {
 	path          string
 	rawDatabase   *sql.DB
+	readDatabases []*sql.DB
 	debug         bool
 	generalQueue  chan siteDBOperation
 	readQueue     chan siteDBOperation
 	writeQueue    chan siteDBOperation
 	closeRequests chan chan error
+	readStop      chan struct{}
+	readersDone   chan struct{}
+	stopped       chan struct{}
 }
 
 const slowHTTPRequestLogAfter = 2 * time.Second
 const slowHTTPRequestRepeatAfter = 10 * time.Second
 const slowDatabaseOperationLogAfter = time.Second
 const slowDatabaseOperationRepeatAfter = 5 * time.Second
+const siteDatabaseReaderCount = 5
 
 func contextWithDomain(ctx context.Context, domain string) context.Context {
 	normalizedDomain := normalizeDomainName(domain)
@@ -964,32 +969,83 @@ func siteDatabaseCreationAllowed(ctx context.Context) bool {
 	return ok && allowed
 }
 
-func newSiteFileDatabase(databasePath string, rawDatabase *sql.DB, debug bool) *siteFileDatabase {
+func newSiteFileDatabase(databasePath string, rawDatabase *sql.DB, debug bool) (*siteFileDatabase, error) {
 	rawDatabase.SetMaxOpenConns(1)
 	rawDatabase.SetMaxIdleConns(1)
 	rawDatabase.SetConnMaxLifetime(0)
+	for _, pragma := range []string{
+		"PRAGMA journal_mode=WAL",
+		"PRAGMA busy_timeout=5000",
+		"PRAGMA foreign_keys=ON",
+		"PRAGMA synchronous=NORMAL",
+	} {
+		if _, err := rawDatabase.ExecContext(context.Background(), pragma); err != nil {
+			return nil, err
+		}
+	}
+
+	readDatabases := make([]*sql.DB, 0, siteDatabaseReaderCount)
+	for range siteDatabaseReaderCount {
+		readDatabase, err := openSiteDatabaseReadHandle(databasePath)
+		if err != nil {
+			for _, openedDatabase := range readDatabases {
+				_ = openedDatabase.Close()
+			}
+			return nil, err
+		}
+		readDatabases = append(readDatabases, readDatabase)
+	}
 
 	database := &siteFileDatabase{
 		path:          databasePath,
 		rawDatabase:   rawDatabase,
+		readDatabases: readDatabases,
 		debug:         debug,
 		generalQueue:  make(chan siteDBOperation, 64),
 		readQueue:     make(chan siteDBOperation, 256),
 		writeQueue:    make(chan siteDBOperation, 128),
 		closeRequests: make(chan chan error),
+		readStop:      make(chan struct{}),
+		readersDone:   make(chan struct{}, siteDatabaseReaderCount),
+		stopped:       make(chan struct{}),
+	}
+	for _, readDatabase := range readDatabases {
+		go database.runReader(readDatabase)
 	}
 	go database.run()
-	log.Printf("%sDB WORKER%s connected path=%s", terminalGreen(), terminalReset(), databasePath)
-	return database
+	log.Printf("%sDB WORKER%s connected path=%s readers=%d writers=1", terminalGreen(), terminalReset(), databasePath, len(readDatabases))
+	return database, nil
+}
+
+func openSiteDatabaseReadHandle(databasePath string) (*sql.DB, error) {
+	database, err := sql.Open("sqlite", "file:"+databasePath)
+	if err != nil {
+		return nil, err
+	}
+	database.SetMaxOpenConns(1)
+	database.SetMaxIdleConns(1)
+	database.SetConnMaxLifetime(0)
+	for _, pragma := range []string{"PRAGMA busy_timeout=5000", "PRAGMA foreign_keys=ON", "PRAGMA query_only=ON"} {
+		if _, err := database.ExecContext(context.Background(), pragma); err != nil {
+			_ = database.Close()
+			return nil, err
+		}
+	}
+	return database, nil
 }
 
 func (db *siteFileDatabase) run() {
-	queues := []chan siteDBOperation{db.writeQueue, db.readQueue, db.generalQueue}
+	queues := []chan siteDBOperation{db.writeQueue, db.generalQueue}
 	turn := 0
 
 	for {
 		select {
 		case response := <-db.closeRequests:
+			close(db.stopped)
+			close(db.readStop)
+			for range len(db.readDatabases) {
+				<-db.readersDone
+			}
 			finishedOperations := db.finishQueuedOperations()
 			response <- db.close(finishedOperations)
 			return
@@ -998,6 +1054,11 @@ func (db *siteFileDatabase) run() {
 
 		operation, closeResponse, closing := db.nextOperation(queues, &turn)
 		if closing {
+			close(db.stopped)
+			close(db.readStop)
+			for range len(db.readDatabases) {
+				<-db.readersDone
+			}
 			finishedOperations := db.finishQueuedOperations()
 			closeResponse <- db.close(finishedOperations)
 			return
@@ -1007,7 +1068,33 @@ func (db *siteFileDatabase) run() {
 	}
 }
 
+func (db *siteFileDatabase) runReader(database *sql.DB) {
+	defer func() {
+		_ = database.Close()
+		db.readersDone <- struct{}{}
+	}()
+	for {
+		select {
+		case operation := <-db.readQueue:
+			db.completeOperationWithDatabase(operation, database)
+		case <-db.readStop:
+			for {
+				select {
+				case operation := <-db.readQueue:
+					db.completeOperationWithDatabase(operation, database)
+				default:
+					return
+				}
+			}
+		}
+	}
+}
+
 func (db *siteFileDatabase) completeOperation(operation siteDBOperation) {
+	db.completeOperationWithDatabase(operation, db.rawDatabase)
+}
+
+func (db *siteFileDatabase) completeOperationWithDatabase(operation siteDBOperation, database *sql.DB) {
 	select {
 	case <-operation.ctx.Done():
 		if db.debug {
@@ -1019,7 +1106,7 @@ func (db *siteFileDatabase) completeOperation(operation siteDBOperation) {
 	}
 
 	startedAt := time.Now()
-	response := operation.run(operation.ctx, db.rawDatabase)
+	response := operation.run(operation.ctx, database)
 	duration := time.Since(startedAt)
 	if db.debug && (duration >= slowDatabaseOperationLogAfter || response.err != nil) {
 		db.logDatabaseOperationFinished(operation, duration, response.err)
@@ -1032,8 +1119,6 @@ func (db *siteFileDatabase) finishQueuedOperations() int {
 	for {
 		select {
 		case operation := <-db.writeQueue:
-			db.completeOperation(operation)
-		case operation := <-db.readQueue:
 			db.completeOperation(operation)
 		case operation := <-db.generalQueue:
 			db.completeOperation(operation)
@@ -1138,8 +1223,12 @@ func (db *siteFileDatabase) Migrate(ctx context.Context, domain string, migrate 
 
 func (db *siteFileDatabase) Close() error {
 	response := make(chan error, 1)
-	db.closeRequests <- response
-	return <-response
+	select {
+	case db.closeRequests <- response:
+		return <-response
+	case <-db.stopped:
+		return nil
+	}
 }
 
 func (db *siteFileDatabase) runOperation(ctx context.Context, operation siteDBOperation) siteDBOperationResponse {
@@ -1154,6 +1243,8 @@ func (db *siteFileDatabase) runOperation(ctx context.Context, operation siteDBOp
 		select {
 		case <-ctx.Done():
 			return siteDBOperationResponse{err: ctx.Err()}
+		case <-db.stopped:
+			return siteDBOperationResponse{err: errors.New("site database worker stopped")}
 		case queue <- operation:
 		}
 		select {
@@ -1161,6 +1252,8 @@ func (db *siteFileDatabase) runOperation(ctx context.Context, operation siteDBOp
 			return response
 		case <-ctx.Done():
 			return siteDBOperationResponse{err: ctx.Err()}
+		case <-db.stopped:
+			return siteDBOperationResponse{err: errors.New("site database worker stopped")}
 		}
 	}
 
@@ -1171,6 +1264,8 @@ func (db *siteFileDatabase) runOperation(ctx context.Context, operation siteDBOp
 		select {
 		case <-ctx.Done():
 			return siteDBOperationResponse{err: ctx.Err()}
+		case <-db.stopped:
+			return siteDBOperationResponse{err: errors.New("site database worker stopped")}
 		case queue <- operation:
 			queued = true
 		case <-queueTimer.C:
@@ -1193,6 +1288,8 @@ func (db *siteFileDatabase) runOperation(ctx context.Context, operation siteDBOp
 		case <-ctx.Done():
 			db.logDatabaseOperationWaiting("context-canceled", operation, time.Since(queueStartedAt))
 			return siteDBOperationResponse{err: ctx.Err()}
+		case <-db.stopped:
+			return siteDBOperationResponse{err: errors.New("site database worker stopped")}
 		case <-waitTimer.C:
 			db.logDatabaseOperationWaiting("response", operation, time.Since(runStartedAt))
 			waitTimer.Reset(slowDatabaseOperationRepeatAfter)
@@ -1614,7 +1711,12 @@ func (r *perSiteDBRouter) databaseForDomain(siteDatabaseRootDir string, database
 		log.Printf("%sDB MIGRATION%s failed path=%s domain=%s step=%s err=%v", terminalRed(), terminalReset(), databasePath, databaseDomain, "verify schema", schemaErr)
 		return nil, siteDatabaseDegradedError{domain: databaseDomain, err: schemaErr}
 	}
-	siteDatabase := newSiteFileDatabase(databasePath, nextDatabase, r.debug)
+	siteDatabase, openErr := newSiteFileDatabase(databasePath, nextDatabase, r.debug)
+	if openErr != nil {
+		_ = nextDatabase.Close()
+		degradedDomains[databaseDomain] = openErr
+		return nil, siteDatabaseDegradedError{domain: databaseDomain, err: openErr}
+	}
 	if !migratedDomains[databaseDomain] {
 		if currentVersion < currentSiteDatabaseSchemaVersion || !schemaComplete {
 			if migrateErr := siteDatabase.Migrate(context.Background(), databaseDomain, migrate); migrateErr != nil {
