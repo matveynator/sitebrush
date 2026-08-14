@@ -31,6 +31,8 @@ jobs:
           cache: true
       - name: Test packages
         run: go test -count=1 ./pkg/... ./scripts/...
+      - name: Enforce lock-free architecture
+        run: go test -count=1 ./scripts/architecture
       - name: Test security boundaries and demo
         run: >-
           go test -count=1 .
