@@ -25,7 +25,7 @@ const (
 
 const (
 	dockerBuilderImageVersion = "v1"
-	dockerGoVersion           = "1.26.5"
+	dockerGoVersion           = "1.26.6"
 	dockerWorkspaceRoot       = "/workspace"
 	windowsDesktopPlatform    = "linux/amd64"
 	llvmMingwVersion          = "20260505"
