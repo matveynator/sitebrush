@@ -18355,7 +18355,7 @@ func (a *App) handleSitebrushNetChanPayload(ctx context.Context, payload []byte)
 		status, statusCode = a.handleServiceMailRelayRequest(ctx, nil, request, source)
 	}
 	if statusCode >= 400 {
-		log.Printf("hosting snapshot netchan rejected: %s", status)
+		log.Printf("hosting snapshot netchan rejected: %s", diagnosticlog.SafeLogValue(status))
 	}
 	return sitebrushNetChanResponse{Status: status, StatusCode: statusCode}
 }
