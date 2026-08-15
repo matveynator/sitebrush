@@ -52,18 +52,29 @@ Nothing is completely invulnerable, but a static public website exposes far fewe
 
 [Try SiteBrush with your own website](https://sitebrush.com/) without changing the live site, or [open the demo](https://demo.sitebrush.com/).
 
-## Reliable outgoing email
+SiteBrush Templates
 
-SiteBrush stores every outgoing message in a durable SQL outbox before starting network delivery. The outbox survives process restarts, retries temporary DNS, network, and SMTP failures for up to seven days, and stops immediately after a permanent SMTP 5xx rejection. Short-lived login and confirmation messages expire with their code instead of being delivered after the code becomes unusable.
+Static sites are simple and fast, but repeated content can be annoying to maintain.
 
-The server owner domain is the single local mail domain. SiteBrush sends mail locally only when both conditions are true:
+Imagine you import a website with 200 pages, all with the same footer address. Just mark one of those elements as a template:
 
-- the domain A or AAAA record points to this server;
-- exactly one SPF TXT record explicitly permits this server IP.
+<div class="SiteBrush-Template FooterAddress">
+    123 Main Street, New York, NY 10001
+</div>
 
-Until then, every SiteBrush email is encrypted, signed, and transferred through a TLS NetChan session to `sitebrush.com:9876`. The central installation sends it as `SiteBrush <sitebrush@sitebrush.com>`. There is no HTTPS or direct-SMTP fallback for a queued relay message. Open outbound TCP port `9876` on ordinary installations and inbound TCP port `9876` on the `sitebrush.com` relay.
+SiteBrush will find the same matching elements on the other pages and assign the template to them too.
 
-Delivery uses at-least-once semantics. A stable message ID prevents ordinary replay duplicates; a duplicate remains theoretically possible if the recipient MX accepts SMTP `DATA` immediately before the relay process crashes, because avoiding that duplicate would require accepting possible message loss.
+From that point on, you can edit the element in one place, and SiteBrush keeps it the same across all pages.
+
+This works well for headers, footers, sidebars, menus, contact information, tables, shared <style> blocks and other repeated content.
+
+All changes are stored in revisions, so previous versions can be restored.
+
+Automatic Import
+
+When you import an existing site, SiteBrush also follows its references and automatically imports the files it uses — CSS, JavaScript, images and other assets.
+
+So you can take an existing static website, import it, and immediately start editing it almost like a dynamic CMS — while the result remains simple static HTML.
 
 # Downloads
 
