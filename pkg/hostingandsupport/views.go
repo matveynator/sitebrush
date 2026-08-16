@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"sitebrush/pkg/expenses"
+	"github.com/matveynator/sitebrush/v2/pkg/expenses"
 )
 
 var nonPublicHostingIPPrefixes = []netip.Prefix{

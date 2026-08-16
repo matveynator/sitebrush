@@ -9,7 +9,7 @@ import (
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
-	"sitebrush/pkg/expenses"
+	"github.com/matveynator/sitebrush/v2/pkg/expenses"
 )
 
 func TestServerExpensePolicyRoundTrip(t *testing.T) {

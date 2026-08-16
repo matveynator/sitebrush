@@ -15,9 +15,9 @@ import (
 	"strings"
 	"time"
 
-	"sitebrush/pkg/demo"
-	"sitebrush/pkg/expenses"
-	"sitebrush/pkg/mailout"
+	"github.com/matveynator/sitebrush/v2/pkg/demo"
+	"github.com/matveynator/sitebrush/v2/pkg/expenses"
+	"github.com/matveynator/sitebrush/v2/pkg/mailout"
 )
 
 const DefaultStorageLimitBytes int64 = 10 * 1024 * 1024 * 1024
