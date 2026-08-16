@@ -38,6 +38,10 @@ Visitors receive ordinary HTML, CSS, JavaScript, and images. The site owner can 
 
 **SiteBrush is not a WordPress clone. It is a WordPress retirement tool.**
 
+## Project history
+
+This repository contains SiteBrush v2, rewritten in Go. The original PHP implementation was developed publicly from 2021 and remains available in the [SiteBrush v1 repository](https://github.com/matveynator/sitebrush-v1) as the historical predecessor of the current project.
+
 ## Why SiteBrush?
 
 - Preserve the existing design instead of rebuilding the website.

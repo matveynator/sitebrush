@@ -1,6 +1,7 @@
 sitebrush
 storage
 binaries
+coverage*.out
 */*/*/.DS_Store
 */*/.DS_Store
 */.DS_Store
