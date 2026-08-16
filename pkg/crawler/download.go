@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"sitebrush/pkg/outboundhttp"
+	"github.com/matveynator/sitebrush/v2/pkg/outboundhttp"
 )
 
 const maxHTMLDownloadBytes int64 = 32 * 1024 * 1024

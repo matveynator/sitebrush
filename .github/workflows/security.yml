@@ -12,6 +12,7 @@ on:
 permissions:
   contents: read
   actions: read
+  id-token: write
   security-events: write
 
 env:
@@ -30,7 +31,13 @@ jobs:
           go-version: "1.26.6"
           cache: true
       - name: Test packages
-        run: go test -count=1 ./pkg/... ./scripts/...
+        run: go test -count=1 -coverprofile=coverage.out ./pkg/... ./scripts/...
+      - name: Upload coverage
+        uses: codecov/codecov-action@v6
+        with:
+          fail_ci_if_error: true
+          files: coverage.out
+          use_oidc: true
       - name: Enforce lock-free architecture
         run: go test -count=1 ./scripts/architecture
       - name: Test security boundaries and demo

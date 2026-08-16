@@ -8,7 +8,7 @@ import (
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
-	_ "sitebrush/pkg/database/drivers"
+	_ "github.com/matveynator/sitebrush/v2/pkg/database/drivers"
 )
 
 func newTestDatabase(t *testing.T) *Database {

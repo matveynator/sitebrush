@@ -1,4 +1,4 @@
-module sitebrush
+module github.com/matveynator/sitebrush/v2
 
 go 1.25.0
 

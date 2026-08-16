@@ -39,18 +39,18 @@ import (
 
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/matveynator/netchan"
+	"github.com/matveynator/sitebrush/v2/pkg/channelacme"
+	"github.com/matveynator/sitebrush/v2/pkg/crawler"
+	"github.com/matveynator/sitebrush/v2/pkg/demo"
+	"github.com/matveynator/sitebrush/v2/pkg/diagnosticlog"
+	"github.com/matveynator/sitebrush/v2/pkg/dirprotect"
+	"github.com/matveynator/sitebrush/v2/pkg/diskusage"
+	"github.com/matveynator/sitebrush/v2/pkg/expenses"
+	"github.com/matveynator/sitebrush/v2/pkg/hostingandsupport"
+	"github.com/matveynator/sitebrush/v2/pkg/mailout"
+	"github.com/matveynator/sitebrush/v2/pkg/sitebrushtemplate"
 	"golang.org/x/net/dns/dnsmessage"
 	"golang.org/x/text/encoding/charmap"
-	"sitebrush/pkg/channelacme"
-	"sitebrush/pkg/crawler"
-	"sitebrush/pkg/demo"
-	"sitebrush/pkg/diagnosticlog"
-	"sitebrush/pkg/dirprotect"
-	"sitebrush/pkg/diskusage"
-	"sitebrush/pkg/expenses"
-	"sitebrush/pkg/hostingandsupport"
-	"sitebrush/pkg/mailout"
-	"sitebrush/pkg/sitebrushtemplate"
 )
 
 type automaticSSLIssuerFunc func(context.Context, string) channelacme.IssueResult
