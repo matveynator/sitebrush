@@ -5665,9 +5665,12 @@ func (a *App) preloadPublishedStaticFiles(ctx context.Context) startupStaticPrel
 		if pathErr != nil || !isPathWithinRoot(realRootPath, realFilePath) {
 			return nil
 		}
+		staticContent, readErr := os.ReadFile(realFilePath)
+		if readErr != nil {
+			return nil
+		}
 		stats.files++
-		_, _ = os.ReadFile(realFilePath)
-		if pageContentKind(realFilePath, "") != "html" {
+		if pageContentKind(realFilePath, string(staticContent)) != "html" {
 			return nil
 		}
 		stats.htmlFiles++
@@ -5716,11 +5719,14 @@ func pagePathFromStaticRelativePath(relativePath string) string {
 	if strings.HasSuffix(relativePath, "/index.html") {
 		return "/" + strings.TrimSuffix(relativePath, "/index.html") + "/"
 	}
-	extension := path.Ext(relativePath)
+	extension := strings.ToLower(path.Ext(relativePath))
 	if extension == "" {
 		return cleanPath(relativePath)
 	}
-	return cleanPath(strings.TrimSuffix(relativePath, extension))
+	if extension == ".html" {
+		return cleanPath(strings.TrimSuffix(relativePath, extension))
+	}
+	return cleanPath(relativePath)
 }
 
 func startupPreloadLanguageCodes() []string {
@@ -24360,22 +24366,22 @@ func injectMenuScriptIntoHTML(html string, menuScript string) string {
 func pageContentKind(pagePath, content string) string {
 	extension := strings.ToLower(path.Ext(strings.TrimSpace(pagePath)))
 	switch extension {
-	case ".htm", ".html":
+	case ".htm", ".html", ".xhtml", ".php", ".asp", ".aspx", ".jsp", ".cgi":
 		return "html"
 	case ".txt", ".text", ".md", ".markdown", ".css", ".js", ".mjs", ".json", ".xml", ".csv", ".tsv", ".yml", ".yaml", ".toml", ".ini", ".svg":
 		return "text"
 	}
-	if extension != "" {
-		return "file"
-	}
 	trimmedContent := strings.TrimSpace(strings.ToLower(content))
-	if trimmedContent == "" {
-		return "html"
-	}
 	if strings.HasPrefix(trimmedContent, "<!doctype html") || strings.HasPrefix(trimmedContent, "<html") || strings.Contains(trimmedContent, "</body>") {
 		return "html"
 	}
 	if strings.Contains(trimmedContent, "<script") || strings.Contains(trimmedContent, "<style") || looksLikeHTMLFragment(trimmedContent) {
+		return "html"
+	}
+	if extension != "" {
+		return "file"
+	}
+	if trimmedContent == "" {
 		return "html"
 	}
 	return "text"
@@ -31712,7 +31718,11 @@ func (a *App) servePublishedStaticFileFromDisk(w http.ResponseWriter, r *http.Re
 	if statErr != nil || fileInfo.IsDir() {
 		return false
 	}
-	if pageContentKind(pagePath, "") != "html" {
+	staticContentKind, staticContent, kindErr := a.publishedStaticContentKind(staticFilePath, pagePath)
+	if kindErr != nil {
+		return false
+	}
+	if staticContentKind != "html" {
 		staticFile, openErr := a.openFileInsideStorage(staticFilePath)
 		if openErr != nil {
 			return false
@@ -31725,16 +31735,24 @@ func (a *App) servePublishedStaticFileFromDisk(w http.ResponseWriter, r *http.Re
 	a.logContentDelivery(w, "static-file")
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if injectPublicMenu {
-		staticContent, readErr := a.guestStaticHTML(staticFilePath, pagePath, domain, preferredLanguageCode(r.Header.Get("Accept-Language")), fileInfo)
+		var readErr error
+		if staticContent == nil {
+			staticContent, readErr = a.guestStaticHTML(staticFilePath, pagePath, domain, preferredLanguageCode(r.Header.Get("Accept-Language")), fileInfo)
+		} else {
+			staticContent, readErr = a.guestStaticHTMLFromContent(staticFilePath, staticContent, pagePath, domain, preferredLanguageCode(r.Header.Get("Accept-Language")), fileInfo)
+		}
 		if readErr != nil {
 			return false
 		}
 		_, _ = w.Write(staticContent)
 		return true
 	}
-	staticContent, readErr := a.readFileInsideStorage(staticFilePath)
-	if readErr != nil {
-		return false
+	if staticContent == nil {
+		var readErr error
+		staticContent, readErr = a.readFileInsideStorage(staticFilePath)
+		if readErr != nil {
+			return false
+		}
 	}
 	_, _ = w.Write(staticContent)
 	return true
@@ -31748,7 +31766,11 @@ func (a *App) servePublishedStaticFileForAdmin(w http.ResponseWriter, r *http.Re
 	if statErr != nil || fileInfo.IsDir() {
 		return false
 	}
-	if pageContentKind(pagePath, "") != "html" {
+	staticContentKind, staticContent, kindErr := a.publishedStaticContentKind(staticFilePath, pagePath)
+	if kindErr != nil {
+		return false
+	}
+	if staticContentKind != "html" {
 		staticFile, openErr := a.openFileInsideStorage(staticFilePath)
 		if openErr != nil {
 			return false
@@ -31758,9 +31780,12 @@ func (a *App) servePublishedStaticFileForAdmin(w http.ResponseWriter, r *http.Re
 		http.ServeContent(w, r, filepath.Base(staticFilePath), fileInfo.ModTime(), staticFile)
 		return true
 	}
-	staticContent, readErr := a.readFileInsideStorage(staticFilePath)
-	if readErr != nil {
-		return false
+	if staticContent == nil {
+		var readErr error
+		staticContent, readErr = a.readFileInsideStorage(staticFilePath)
+		if readErr != nil {
+			return false
+		}
 	}
 	revisionID := a.latestActiveRevisionID(r.Context(), domain, pagePath)
 	revisionCount := a.revisionCount(r.Context(), domain, pagePath)
@@ -31775,6 +31800,18 @@ func (a *App) servePublishedStaticFileForAdmin(w http.ResponseWriter, r *http.Re
 	return true
 }
 
+func (a *App) publishedStaticContentKind(staticFilePath, pagePath string) (string, []byte, error) {
+	contentKind := pageContentKind(pagePath, "")
+	if contentKind != "file" {
+		return contentKind, nil, nil
+	}
+	staticContent, readErr := a.readFileInsideStorage(staticFilePath)
+	if readErr != nil {
+		return "", nil, readErr
+	}
+	return pageContentKind(pagePath, string(staticContent)), staticContent, nil
+}
+
 func (a *App) publishedStaticPageExists(domain, pagePath string) bool {
 	staticRoot := a.domainStaticDir(domain)
 	staticFilePath := filepath.Join(staticRoot, staticRelativePathForPage(cleanPath(pagePath)))
@@ -31787,6 +31824,10 @@ func (a *App) guestStaticHTML(staticFilePath, pagePath, domain, languageCode str
 	if readErr != nil {
 		return nil, readErr
 	}
+	return a.guestStaticHTMLFromContent(staticFilePath, staticContent, pagePath, domain, languageCode, fileInfo)
+}
+
+func (a *App) guestStaticHTMLFromContent(staticFilePath string, staticContent []byte, pagePath, domain, languageCode string, fileInfo os.FileInfo) ([]byte, error) {
 	if a.guestStaticHTMLCache == nil {
 		return buildGuestStaticHTMLBody(staticContent, pagePath, domain, languageCode), nil
 	}

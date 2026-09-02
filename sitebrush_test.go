@@ -527,6 +527,103 @@ func TestPublishedStaticRejectsSymlinkToNeighborSite(t *testing.T) {
 	}
 }
 
+func TestPageContentKindRecognizesHTMLPagesWithServerAndUnknownExtensions(t *testing.T) {
+	testCases := []struct {
+		pagePath string
+		content  string
+	}{
+		{pagePath: "/page.xhtml", content: ""},
+		{pagePath: "/page.php", content: ""},
+		{pagePath: "/page.asp", content: ""},
+		{pagePath: "/page.aspx", content: ""},
+		{pagePath: "/page.jsp", content: ""},
+		{pagePath: "/page.cgi", content: ""},
+		{pagePath: "/page.custom", content: "<!doctype html><html><body>Custom page</body></html>"},
+	}
+	for _, testCase := range testCases {
+		if contentKind := pageContentKind(testCase.pagePath, testCase.content); contentKind != "html" {
+			t.Errorf("pageContentKind(%q) = %q, want html", testCase.pagePath, contentKind)
+		}
+	}
+	if contentKind := pageContentKind("/manual.download", "plain file body"); contentKind != "file" {
+		t.Fatalf("plain file content kind = %q, want file", contentKind)
+	}
+	if pagePath := pagePathFromStaticRelativePath("pohody_po_kavkazu.php"); pagePath != "/pohody_po_kavkazu.php" {
+		t.Fatalf("preloaded PHP page path = %q, want original extension", pagePath)
+	}
+}
+
+func TestPublishedStaticHTMLUsesBrowserContentTypeRegardlessOfPageExtension(t *testing.T) {
+	application := &App{storagePath: t.TempDir()}
+	html := "<!doctype html><html><body><h1>Imported page</h1></body></html>"
+	for _, pagePath := range []string{"/page.php", "/page.xhtml", "/page.asp", "/page.aspx", "/page.jsp", "/page.cgi", "/page.custom"} {
+		application.writePublishedStaticHTML("localhost", pagePath, html)
+		request := httptest.NewRequest(http.MethodGet, "http://localhost:8080"+pagePath, nil)
+		response := httptest.NewRecorder()
+		if !application.servePublishedStaticFileFromDisk(response, request, "localhost", pagePath, false) {
+			t.Fatalf("published page %q was not served", pagePath)
+		}
+		if contentType := response.Header().Get("Content-Type"); contentType != "text/html; charset=utf-8" {
+			t.Errorf("published page %q content type = %q, want HTML", pagePath, contentType)
+		}
+		if response.Body.String() != html {
+			t.Errorf("published page %q body = %q, want %q", pagePath, response.Body.String(), html)
+		}
+		if disposition := response.Header().Get("Content-Disposition"); disposition != "" {
+			t.Errorf("published page %q content disposition = %q, want empty", pagePath, disposition)
+		}
+	}
+	headRequest := httptest.NewRequest(http.MethodHead, "http://localhost:8080/page.php", nil)
+	headResponse := httptest.NewRecorder()
+	if !application.servePublishedStaticFileFromDisk(headResponse, headRequest, "localhost", "/page.php", false) {
+		t.Fatal("published PHP page HEAD request was not served")
+	}
+	if contentType := headResponse.Header().Get("Content-Type"); contentType != "text/html; charset=utf-8" {
+		t.Fatalf("published PHP page HEAD content type = %q, want HTML", contentType)
+	}
+	if disposition := headResponse.Header().Get("Content-Disposition"); disposition != "" {
+		t.Fatalf("published PHP page HEAD content disposition = %q, want empty", disposition)
+	}
+}
+
+func TestPublishedStaticPlainFileKeepsFileContentType(t *testing.T) {
+	application := &App{storagePath: t.TempDir()}
+	pagePath := "/manual.download"
+	application.writePublishedStaticHTML("localhost", pagePath, "plain file body")
+	request := httptest.NewRequest(http.MethodGet, "http://localhost:8080"+pagePath, nil)
+	response := httptest.NewRecorder()
+	if !application.servePublishedStaticFileFromDisk(response, request, "localhost", pagePath, false) {
+		t.Fatal("published plain file was not served")
+	}
+	if strings.HasPrefix(response.Header().Get("Content-Type"), "text/html") {
+		t.Fatalf("plain file content type = %q, want non-HTML", response.Header().Get("Content-Type"))
+	}
+	if response.Body.String() != "plain file body" {
+		t.Fatalf("plain file body = %q", response.Body.String())
+	}
+}
+
+func TestGuestRouteServesExistingPHPPageAsHTML(t *testing.T) {
+	application, _ := newTestApplication(t)
+	pagePath := "/pohody_po_kavkazu.php"
+	application.writePublishedStaticHTML("localhost", pagePath, "<!doctype html><html><body><h1>Imported PHP page</h1></body></html>")
+	request := httptest.NewRequest(http.MethodGet, "http://localhost:8080"+pagePath, nil)
+	response := httptest.NewRecorder()
+	application.route(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%q", response.Code, response.Body.String())
+	}
+	if contentType := response.Header().Get("Content-Type"); contentType != "text/html; charset=utf-8" {
+		t.Fatalf("content type = %q, want HTML", contentType)
+	}
+	if !strings.Contains(response.Body.String(), "Imported PHP page") || !strings.Contains(response.Body.String(), "initializeSitebrushContextMenuForGuests") {
+		t.Fatalf("guest PHP page did not contain page and menu: %s", response.Body.String())
+	}
+	if response.Header().Get("X-Sitebrush-Source") != "static" {
+		t.Fatalf("source header = %q, want static", response.Header().Get("X-Sitebrush-Source"))
+	}
+}
+
 func TestOpenServerControlDatabaseRejectsPathOutsideStorage(t *testing.T) {
 	application := &App{storagePath: t.TempDir(), dbPath: filepath.Join(t.TempDir(), "outside.db")}
 	if err := application.withServerControlDatabaseWrite(context.Background(), "test-outside-path", func(*sql.DB) error { return nil }); err == nil {
@@ -7198,6 +7295,62 @@ func TestAdminRequestUsesStaticPageWhenDomainIsNotFrozen(t *testing.T) {
 	}
 	if response.Header().Get("X-Sitebrush-Source") != "static" {
 		t.Fatalf("source header = %q, want static", response.Header().Get("X-Sitebrush-Source"))
+	}
+}
+
+func TestAdminRequestUsesStaticPHPPageAsHTML(t *testing.T) {
+	application, rawDB := newTestApplication(t)
+	_, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "admin@example.com", "old")
+	if err != nil {
+		t.Fatalf("insert user: %v", err)
+	}
+	pagePath := "/pohody_po_kavkazu.php"
+	application.writePublishedStaticHTML("localhost", pagePath, "<!doctype html><html><body><h1>Published PHP page</h1></body></html>")
+
+	request := httptest.NewRequest(http.MethodGet, "http://localhost:8080"+pagePath, nil)
+	request.AddCookie(newAdminSessionCookie(t, application, "admin@example.com"))
+	response := httptest.NewRecorder()
+	application.route(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%q", response.Code, response.Body.String())
+	}
+	if contentType := response.Header().Get("Content-Type"); contentType != "text/html; charset=utf-8" {
+		t.Fatalf("content type = %q, want HTML", contentType)
+	}
+	if !strings.Contains(response.Body.String(), "Published PHP page") || !strings.Contains(response.Body.String(), "initializeSitebrushContextMenuForAdmin") {
+		t.Fatalf("admin PHP page did not contain page and menu: %s", response.Body.String())
+	}
+}
+
+func TestFrozenAdminRequestUsesDatabasePHPPageAsHTML(t *testing.T) {
+	application, rawDB := newTestApplication(t)
+	_, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "admin@example.com", "old")
+	if err != nil {
+		t.Fatalf("insert user: %v", err)
+	}
+	pagePath := "/pohody_po_kavkazu.php"
+	pageHTML := "<!doctype html><html><body><h1>Draft PHP page</h1></body></html>"
+	_, err = rawDB.Exec(`INSERT INTO pages(domain,path,title,html,published) VALUES(?,?,?,?,1)`, "localhost", pagePath, "PHP page", pageHTML)
+	if err != nil {
+		t.Fatalf("insert page: %v", err)
+	}
+	application.setDomainFrozenState(context.Background(), "localhost", 1)
+
+	request := httptest.NewRequest(http.MethodGet, "http://localhost:8080"+pagePath, nil)
+	request.AddCookie(newAdminSessionCookie(t, application, "admin@example.com"))
+	response := httptest.NewRecorder()
+	application.route(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%q", response.Code, response.Body.String())
+	}
+	if contentType := response.Header().Get("Content-Type"); contentType != "text/html; charset=utf-8" {
+		t.Fatalf("content type = %q, want HTML", contentType)
+	}
+	if !strings.Contains(response.Body.String(), "Draft PHP page") || !strings.Contains(response.Body.String(), "initializeSitebrushContextMenuForAdmin") {
+		t.Fatalf("database PHP page did not contain page and menu: %s", response.Body.String())
+	}
+	if response.Header().Get("X-Sitebrush-Source") != "dynamic" {
+		t.Fatalf("source header = %q, want dynamic", response.Header().Get("X-Sitebrush-Source"))
 	}
 }
 
