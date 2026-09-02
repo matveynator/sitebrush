@@ -1427,6 +1427,15 @@ func TestValidateServiceMailSecretRejectsArbitraryText(t *testing.T) {
 	if err := validateServiceMailSecret("email_confirm", "custom text without link"); err == nil {
 		t.Fatal("arbitrary confirmation text was accepted")
 	}
+	validRecovery := serviceMailRequest{SourceDomain: "example.com", CodeKind: "login_code", SecretValue: "123456", ActionURL: "https://example.com/?recover=&recovery_token=token"}
+	if err := validateServiceMailContent(validRecovery); err != nil {
+		t.Fatalf("valid recovery link rejected: %v", err)
+	}
+	invalidRecovery := validRecovery
+	invalidRecovery.ActionURL = "https://attacker.example/?recover=&recovery_token=token"
+	if err := validateServiceMailContent(invalidRecovery); err == nil {
+		t.Fatal("cross-domain recovery link was accepted")
+	}
 }
 
 func TestServiceMailRateLimitedIncludesSourceSubnet(t *testing.T) {
@@ -5314,6 +5323,7 @@ func setupBillingOwnerForTest(t *testing.T, application *App, domain, email stri
 }
 
 func TestRecoverPageShowsSPFSetupBeforeEmailForm(t *testing.T) {
+	t.Setenv("SITEBRUSH_SERVICE_MAIL_MODE", "local")
 	t.Setenv("SITEBRUSH_SMTP_FROM", "SiteBrush <sitebrush@example.com>")
 	previousTXTLookup := lookupTXTRecords
 	previousIPLookup := lookupIPRecords
@@ -5394,6 +5404,7 @@ func TestRecoverPageShowsSPFSetupBeforeEmailForm(t *testing.T) {
 }
 
 func TestRecoverPageShowsEmailFormAfterSPFSetup(t *testing.T) {
+	t.Setenv("SITEBRUSH_SERVICE_MAIL_MODE", "local")
 	withEmailSPFAllowed(t)
 	application, _ := newTestApplication(t)
 	request := httptest.NewRequest(http.MethodGet, "http://localhost:8080/?recover", nil)
@@ -5412,6 +5423,154 @@ func TestRecoverPageShowsEmailFormAfterSPFSetup(t *testing.T) {
 	}
 	if strings.Contains(body, "Сначала настройте DNS") {
 		t.Fatalf("recover page showed SPF warning after valid SPF setup: %s", body)
+	}
+}
+
+func TestRecoverPageSkipsSiteDNSForRelayDelivery(t *testing.T) {
+	application, _ := newTestApplication(t)
+	request := httptest.NewRequest(http.MethodGet, "https://kavtrans.sitebrush.ru/?recover", nil)
+	request.Header.Set("Accept-Language", "ru")
+	response := httptest.NewRecorder()
+
+	application.route(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%q", response.Code, response.Body.String())
+	}
+	body := response.Body.String()
+	if strings.Contains(body, "Сначала настройте DNS") {
+		t.Fatalf("relay recovery page showed local DNS warning: %s", body)
+	}
+	if !strings.Contains(body, `name='email'`) || !strings.Contains(body, `name="captcha"`) {
+		t.Fatalf("relay recovery page did not show request form: %s", body)
+	}
+}
+
+func TestRecoverPasswordThroughEmailLink(t *testing.T) {
+	t.Setenv("SITEBRUSH_SERVICE_MAIL_MODE", "local")
+	withEmailSPFAllowed(t)
+	application, rawDB := newTestApplication(t)
+	if _, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "admin@example.com", "old-password"); err != nil {
+		t.Fatalf("insert user: %v", err)
+	}
+	if _, err := rawDB.Exec(`INSERT INTO sessions(token,user_email,created_at) VALUES(?,?,?)`, "old-session", "localhost|admin@example.com", time.Now().UTC().Format(time.RFC3339)); err != nil {
+		t.Fatalf("insert old session: %v", err)
+	}
+
+	requestForm := url.Values{}
+	requestForm.Set("recovery_action", "request")
+	requestForm.Set("email", "admin@example.com")
+	requestForm.Set("captcha", "1234")
+	request := httptest.NewRequest(http.MethodPost, "https://localhost/?recover", strings.NewReader(requestForm.Encode()))
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	request.Header.Set("Accept-Language", "ru")
+	request.AddCookie(&http.Cookie{Name: "sitebrush_captcha", Value: "1234"})
+	response := httptest.NewRecorder()
+	application.route(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("request status = %d, body=%q", response.Code, response.Body.String())
+	}
+	for _, expectedFragment := range []string{`name="recovery_code"`, `name="password"`, `name="password_confirm"`} {
+		if !strings.Contains(response.Body.String(), expectedFragment) {
+			t.Fatalf("manual recovery form missing %q in %s", expectedFragment, response.Body.String())
+		}
+	}
+
+	var message mailout.Message
+	select {
+	case mailJob := <-application.emailDelivery:
+		message = mailJob.Message
+	default:
+		t.Fatal("recovery email was not queued")
+	}
+	if !strings.Contains(message.Body, "Код восстановления SiteBrush") || !strings.Contains(message.Body, "https://localhost/?recover=") || !strings.Contains(message.HTMLBody, "Новый пароль") {
+		t.Fatalf("recovery email does not contain code and link: %#v", message)
+	}
+	var recoveryToken string
+	if err := rawDB.QueryRow(`SELECT token FROM email_confirmations WHERE domain=? AND action='recover' AND email=?`, "localhost", "admin@example.com").Scan(&recoveryToken); err != nil {
+		t.Fatalf("read recovery token: %v", err)
+	}
+	recoveryURL := "https://localhost/?recover=&recovery_token=" + url.QueryEscape(recoveryToken)
+	linkRequest := httptest.NewRequest(http.MethodGet, recoveryURL, nil)
+	linkResponse := httptest.NewRecorder()
+	application.route(linkResponse, linkRequest)
+	if linkResponse.Code != http.StatusOK {
+		t.Fatalf("link status = %d, body=%q", linkResponse.Code, linkResponse.Body.String())
+	}
+	linkBody := linkResponse.Body.String()
+	if !strings.Contains(linkBody, `name="recovery_token" value="`+recoveryToken+`"`) || strings.Contains(linkBody, `name="recovery_code"`) {
+		t.Fatalf("email link did not open direct password form: %s", linkBody)
+	}
+
+	passwordForm := url.Values{}
+	passwordForm.Set("recovery_action", "password")
+	passwordForm.Set("recovery_token", recoveryToken)
+	passwordForm.Set("password", "new-password")
+	passwordForm.Set("password_confirm", "new-password")
+	passwordForm.Set("return_path", "/")
+	passwordRequest := httptest.NewRequest(http.MethodPost, "https://localhost/?recover", strings.NewReader(passwordForm.Encode()))
+	passwordRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	passwordResponse := httptest.NewRecorder()
+	application.route(passwordResponse, passwordRequest)
+	if passwordResponse.Code != http.StatusFound || passwordResponse.Header().Get("Location") != "/" {
+		t.Fatalf("password status = %d, location=%q, body=%q", passwordResponse.Code, passwordResponse.Header().Get("Location"), passwordResponse.Body.String())
+	}
+	var password string
+	if err := rawDB.QueryRow(`SELECT password FROM users WHERE domain=? AND email=?`, "localhost", "admin@example.com").Scan(&password); err != nil || password != "new-password" {
+		t.Fatalf("password = %q, err=%v", password, err)
+	}
+	var oldSessionCount, recoveryCount int
+	_ = rawDB.QueryRow(`SELECT COUNT(1) FROM sessions WHERE token='old-session'`).Scan(&oldSessionCount)
+	_ = rawDB.QueryRow(`SELECT COUNT(1) FROM email_confirmations WHERE token=?`, recoveryToken).Scan(&recoveryCount)
+	if oldSessionCount != 0 || recoveryCount != 0 {
+		t.Fatalf("old sessions=%d, recovery records=%d", oldSessionCount, recoveryCount)
+	}
+	if len(passwordResponse.Result().Cookies()) == 0 {
+		t.Fatal("successful recovery did not create a session")
+	}
+
+	reusedRequest := httptest.NewRequest(http.MethodGet, recoveryURL, nil)
+	reusedResponse := httptest.NewRecorder()
+	application.route(reusedResponse, reusedRequest)
+	if reusedResponse.Code != http.StatusNotFound {
+		t.Fatalf("reused link status = %d, want %d", reusedResponse.Code, http.StatusNotFound)
+	}
+}
+
+func TestRecoverPasswordThroughManualCode(t *testing.T) {
+	t.Setenv("SITEBRUSH_SERVICE_MAIL_MODE", "local")
+	withEmailSPFAllowed(t)
+	application, rawDB := newTestApplication(t)
+	if _, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "admin@example.com", "old-password"); err != nil {
+		t.Fatalf("insert user: %v", err)
+	}
+
+	requestForm := url.Values{"recovery_action": {"request"}, "email": {"admin@example.com"}, "captcha": {"1234"}}
+	request := httptest.NewRequest(http.MethodPost, "https://localhost/?recover", strings.NewReader(requestForm.Encode()))
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	request.AddCookie(&http.Cookie{Name: "sitebrush_captcha", Value: "1234"})
+	application.route(httptest.NewRecorder(), request)
+	select {
+	case <-application.emailDelivery:
+	default:
+		t.Fatal("recovery email was not queued")
+	}
+	var code string
+	if err := rawDB.QueryRow(`SELECT verification_code FROM email_confirmations WHERE domain=? AND action='recover' AND email=?`, "localhost", "admin@example.com").Scan(&code); err != nil {
+		t.Fatalf("read recovery code: %v", err)
+	}
+
+	passwordForm := url.Values{"recovery_action": {"manual"}, "email": {"admin@example.com"}, "recovery_code": {code}, "password": {"manual-password"}, "password_confirm": {"manual-password"}, "return_path": {"/"}}
+	passwordRequest := httptest.NewRequest(http.MethodPost, "https://localhost/?recover", strings.NewReader(passwordForm.Encode()))
+	passwordRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	passwordResponse := httptest.NewRecorder()
+	application.route(passwordResponse, passwordRequest)
+	if passwordResponse.Code != http.StatusFound {
+		t.Fatalf("manual password status = %d, body=%q", passwordResponse.Code, passwordResponse.Body.String())
+	}
+	var password string
+	_ = rawDB.QueryRow(`SELECT password FROM users WHERE domain=? AND email=?`, "localhost", "admin@example.com").Scan(&password)
+	if password != "manual-password" {
+		t.Fatalf("password = %q, want manual-password", password)
 	}
 }
 

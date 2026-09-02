@@ -367,6 +367,7 @@ type serviceMailRequest struct {
 	Recipient       string                             `json:"recipient"`
 	CodeKind        string                             `json:"code_kind"`
 	SecretValue     string                             `json:"secret_value"`
+	ActionURL       string                             `json:"action_url,omitempty"`
 	Subject         string                             `json:"subject,omitempty"`
 	Body            string                             `json:"body,omitempty"`
 	HTMLBody        string                             `json:"html_body,omitempty"`
@@ -1207,6 +1208,24 @@ func (db *siteFileDatabase) ExecContext(ctx context.Context, query string, args 
 	return response.result, response.err
 }
 
+func (db *siteFileDatabase) WriteTransaction(ctx context.Context, write func(*sql.Tx) error) error {
+	operation := siteDBOperation{
+		kind: siteDBWorkloadWrite,
+		run: func(runCtx context.Context, rawDatabase *sql.DB) siteDBOperationResponse {
+			transaction, err := rawDatabase.BeginTx(runCtx, nil)
+			if err != nil {
+				return siteDBOperationResponse{err: err}
+			}
+			defer transaction.Rollback()
+			if err := write(transaction); err != nil {
+				return siteDBOperationResponse{err: err}
+			}
+			return siteDBOperationResponse{err: transaction.Commit()}
+		},
+	}
+	return db.runOperation(ctx, operation).err
+}
+
 func (db *siteFileDatabase) QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error) {
 	arguments := append([]any(nil), args...)
 	operation := siteDBOperation{
@@ -1940,6 +1959,14 @@ func (r *perSiteDBRouter) ExecContext(ctx context.Context, query string, args ..
 		return nil, err
 	}
 	return database.ExecContext(ctx, query, args...)
+}
+
+func (r *perSiteDBRouter) WriteTransaction(ctx context.Context, write func(*sql.Tx) error) error {
+	database, err := r.databaseForContext(ctx)
+	if err != nil {
+		return err
+	}
+	return database.WriteTransaction(ctx, write)
 }
 
 func (r *perSiteDBRouter) QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error) {
@@ -9004,7 +9031,7 @@ func requestWithSensitiveCookieRequiresHTTPS(r *http.Request) bool {
 	if hasSitebrushSessionCookie(r) {
 		return true
 	}
-	for _, queryFlag := range []string{"login", "logout", "register", "email_confirm", "captcha", "page_password", "page_password_unlock"} {
+	for _, queryFlag := range []string{"login", "logout", "register", "recover", "email_confirm", "captcha", "page_password", "page_password_unlock"} {
 		if hasQueryFlag(r, queryFlag) {
 			return true
 		}
@@ -16483,35 +16510,89 @@ func (a *App) renderProfilePage(w http.ResponseWriter, r *http.Request, email, s
 }
 
 func (a *App) recoverPage(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Referrer-Policy", "no-referrer")
 	translations := translationsForRequest(r)
 	domain := a.siteDomain(r.Context(), r)
 	languageCode := preferredLanguageCode(r.Header.Get("Accept-Language"))
-	fromAddress := a.emailFromAddress(domain)
-	dnsSetup, dnsSetupRequired := a.emailDNSSetupView(r.Context(), domain, fromAddress, languageCode)
+	dnsSetup, dnsSetupRequired := a.recoveryEmailDNSSetup(r.Context(), domain, languageCode)
 	var dnsSetupView any
 	if dnsSetupRequired {
 		dnsSetupView = &dnsSetup
 	}
 	if r.Method == http.MethodGet {
-		a.render(w, r, "recover.html", map[string]any{"DNSSetup": dnsSetupView, "ShowForm": true, "ReturnPath": requestedReturnPath(r)})
+		token := strings.TrimSpace(r.URL.Query().Get("recovery_token"))
+		if token != "" {
+			confirmation, found := a.emailConfirmationByToken(r.Context(), token)
+			if !found || confirmation.Action != "recover" || confirmation.Domain != domain {
+				w.WriteHeader(http.StatusNotFound)
+				a.renderRecoveryPage(w, r, map[string]any{"Status": translationOrDefault(translations, "profile_password_code_status_invalid", "The code is invalid or expired."), "StatusClass": "danger"})
+				return
+			}
+			if confirmationExpired(confirmation.ExpiresAt, time.Now().UTC()) {
+				_, _ = a.db.ExecContext(r.Context(), `DELETE FROM email_confirmations WHERE token=?`, token)
+				w.WriteHeader(http.StatusGone)
+				a.renderRecoveryPage(w, r, map[string]any{"Status": translationOrDefault(translationsForLanguageCode(confirmation.LanguageCode), "profile_password_code_status_invalid", "The code is invalid or expired."), "StatusClass": "danger"})
+				return
+			}
+			a.renderRecoveryPage(w, r, map[string]any{
+				"ShowPasswordForm": true,
+				"RecoveryToken":    confirmation.Token,
+				"ReturnPath":       safeConfirmationReturnPath(confirmation.ReturnPath),
+			})
+			return
+		}
+		a.renderRecoveryPage(w, r, map[string]any{"DNSSetup": dnsSetupView, "ShowForm": !dnsSetupRequired})
+		return
+	}
+
+	switch strings.TrimSpace(r.FormValue("recovery_action")) {
+	case "manual":
+		a.completeManualRecovery(w, r, domain)
+		return
+	case "password":
+		a.completeLinkedRecovery(w, r, domain)
+		return
+	}
+
+	if dnsSetupRequired {
+		a.renderRecoveryPage(w, r, map[string]any{"DNSSetup": dnsSetupView, "ShowForm": false})
 		return
 	}
 	email := strings.TrimSpace(r.FormValue("email"))
 	captchaValue := strings.TrimSpace(r.FormValue("captcha"))
 	captchaCookie, err := r.Cookie("sitebrush_captcha")
 	if err != nil || captchaCookie.Value == "" || captchaCookie.Value != captchaValue {
-		a.render(w, r, "recover.html", map[string]any{"Status": translationOrDefault(translations, "recover_status_captcha_invalid", "Captcha is invalid"), "ShowForm": true, "ReturnPath": requestedReturnPath(r)})
+		a.renderRecoveryPage(w, r, map[string]any{"Status": translationOrDefault(translations, "recover_status_captcha_invalid", "Captcha is invalid"), "StatusClass": "danger", "ShowForm": true})
 		return
 	}
 	var userCount int
 	_ = a.db.QueryRowContext(r.Context(), `SELECT COUNT(1) FROM users WHERE domain=? AND email=? AND is_admin=1`, domain, email).Scan(&userCount)
 	if userCount == 0 {
-		httpsecurity.RedirectLocal(w, r, requestedReturnPath(r), http.StatusFound)
+		a.renderRecoveryPage(w, r, map[string]any{
+			"Status":                 translationOrDefault(translations, "profile_password_code_status_sent", "A recovery message has been sent if the account exists."),
+			"StatusClass":            "success",
+			"ShowManualPasswordForm": true,
+			"RecoveryEmail":          email,
+		})
 		return
 	}
-	recoveryCode := fmt.Sprintf("%06d", time.Now().UnixNano()%1000000)
-	if mailError := a.enqueueServiceEmail(r.Context(), r, "login_code", domain, email, recoveryCode, languageCode); mailError != nil {
-		a.render(w, r, "recover.html", map[string]any{"Status": translationOrDefault(translations, "recover_status_smtp_failed_prefix", "SMTP send failed: ") + mailError.Error(), "ShowForm": true, "ReturnPath": requestedReturnPath(r)})
+	recoveryCode := randomSixDigitCode()
+	recoveryToken := randomAccessToken()
+	now := time.Now().UTC()
+	expiresAt := now.Add(profilePasswordCodeTTL)
+	_, _ = a.db.ExecContext(r.Context(), `DELETE FROM email_confirmations WHERE expires_at<>'' AND expires_at<?`, now.Format(time.RFC3339))
+	_, _ = a.db.ExecContext(r.Context(), `DELETE FROM email_confirmations WHERE domain=? AND action='recover' AND email=?`, domain, email)
+	_, err = a.db.ExecContext(r.Context(), `INSERT INTO email_confirmations(token,domain,action,email,password,verification_code,current_email,return_path,language_code,created_at,expires_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
+		recoveryToken, domain, "recover", email, "", recoveryCode, "", requestedReturnPath(r), languageCode, now.Format(time.RFC3339), expiresAt.Format(time.RFC3339))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	recoveryURL := recoveryConfirmationURL(r, recoveryToken)
+	if mailError := a.enqueueServiceEmailWithActionURL(r.Context(), r, "login_code", domain, email, recoveryCode, recoveryURL, languageCode); mailError != nil {
+		_, _ = a.db.ExecContext(r.Context(), `DELETE FROM email_confirmations WHERE token=?`, recoveryToken)
+		a.renderRecoveryPage(w, r, map[string]any{"Status": translationOrDefault(translations, "recover_status_smtp_failed_prefix", "SMTP send failed: ") + mailError.Error(), "StatusClass": "danger", "ShowForm": true})
 		return
 	}
 	queuedStatus := mailout.StatusSent
@@ -16519,8 +16600,171 @@ func (a *App) recoverPage(w http.ResponseWriter, r *http.Request) {
 		queuedStatus = mailout.StatusPending
 	}
 	a.logHostingSupportEvent(r.Context(), "code_requested", queuedStatus, email, domain, "login_code")
+	a.renderRecoveryPage(w, r, map[string]any{
+		"Status":                 translationOrDefault(translations, "profile_password_code_status_sent", "The recovery email was sent."),
+		"StatusClass":            "success",
+		"ShowManualPasswordForm": true,
+		"RecoveryEmail":          email,
+	})
+}
+
+func (a *App) recoveryEmailDNSSetup(ctx context.Context, domain, languageCode string) (EmailDNSSetupView, bool) {
+	if a.durableMailTasks != nil {
+		route := a.currentSystemMailRoute(ctx)
+		if route.route == mailout.RouteRelay {
+			return EmailDNSSetupView{}, false
+		}
+		return a.emailDNSSetupView(ctx, domain, route.from, languageCode)
+	}
+	if a.serviceMailRoute(ctx, domain, languageCode).UseRelay {
+		return EmailDNSSetupView{}, false
+	}
+	return a.emailDNSSetupView(ctx, domain, a.emailFromAddress(domain), languageCode)
+}
+
+func (a *App) renderRecoveryPage(w http.ResponseWriter, r *http.Request, view map[string]any) {
+	translations := translationsForRequest(r)
+	if _, found := view["ReturnPath"]; !found {
+		view["ReturnPath"] = requestedReturnPath(r)
+	}
+	view["PasswordLabel"] = translationOrDefault(translations, "profile_new_password", "New password")
+	view["PasswordConfirmLabel"] = translationOrDefault(translations, "profile_confirm_password", "Confirm password")
+	view["PasswordCodeLabel"] = translationOrDefault(translations, "profile_password_code", "6-digit code")
+	view["PasswordCodeHelp"] = translationOrDefault(translations, "profile_password_code_help", "Enter the code sent to your email address.")
+	view["PasswordSubmitLabel"] = translationOrDefault(translations, "profile_save", "Save")
+	a.render(w, r, "recover.html", view)
+}
+
+func (a *App) completeManualRecovery(w http.ResponseWriter, r *http.Request, domain string) {
+	email := strings.TrimSpace(r.FormValue("email"))
+	code := strings.TrimSpace(r.FormValue("recovery_code"))
+	failureDomain := recoveryPasswordFailureDomain(domain, email)
+	clientIP := clientIPAddress(r)
+	if blocked, _, blockedUntil := a.authIPIsBlocked(r.Context(), failureDomain, clientIP); blocked {
+		retryAfter := int(time.Until(blockedUntil).Seconds())
+		if retryAfter < 1 {
+			retryAfter = 1
+		}
+		w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
+		w.WriteHeader(http.StatusTooManyRequests)
+		a.renderRecoveryPage(w, r, map[string]any{"Status": translationOrDefault(translationsForRequest(r), "profile_password_code_status_rate_limited", "Too many failed code attempts. Please try again later."), "StatusClass": "danger", "ShowManualPasswordForm": true, "RecoveryEmail": email})
+		return
+	}
+	var token string
+	err := a.db.QueryRowContext(r.Context(), `SELECT token FROM email_confirmations WHERE domain=? AND action='recover' AND email=? AND verification_code=? AND expires_at>?`, domain, email, code, time.Now().UTC().Format(time.RFC3339)).Scan(&token)
+	if err != nil || !isSixDigitCode(code) {
+		_, _, _ = a.registerFailedLoginAttempt(r.Context(), failureDomain, clientIP)
+		w.WriteHeader(http.StatusUnauthorized)
+		a.renderRecoveryPage(w, r, map[string]any{"Status": translationOrDefault(translationsForRequest(r), "profile_password_code_status_invalid", "The code is invalid or expired."), "StatusClass": "danger", "ShowManualPasswordForm": true, "RecoveryEmail": email})
+		return
+	}
+	a.completeRecoveryPassword(w, r, domain, token, email, failureDomain)
+}
+
+func (a *App) completeLinkedRecovery(w http.ResponseWriter, r *http.Request, domain string) {
+	token := strings.TrimSpace(r.FormValue("recovery_token"))
+	confirmation, found := a.emailConfirmationByToken(r.Context(), token)
+	if !found || confirmation.Action != "recover" || confirmation.Domain != domain || confirmationExpired(confirmation.ExpiresAt, time.Now().UTC()) {
+		w.WriteHeader(http.StatusUnauthorized)
+		a.renderRecoveryPage(w, r, map[string]any{"Status": translationOrDefault(translationsForRequest(r), "profile_password_code_status_invalid", "The link is invalid or expired."), "StatusClass": "danger"})
+		return
+	}
+	a.completeRecoveryPassword(w, r, domain, token, confirmation.Email, recoveryPasswordFailureDomain(domain, confirmation.Email))
+}
+
+func (a *App) completeRecoveryPassword(w http.ResponseWriter, r *http.Request, domain, token, email, failureDomain string) {
+	translations := translationsForRequest(r)
+	password := strings.TrimSpace(r.FormValue("password"))
+	passwordConfirm := strings.TrimSpace(r.FormValue("password_confirm"))
+	linked := strings.TrimSpace(r.FormValue("recovery_action")) == "password"
+	view := map[string]any{"RecoveryEmail": email, "RecoveryToken": token, "ShowPasswordForm": linked, "ShowManualPasswordForm": !linked}
+	if password == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		view["Status"] = translationOrDefault(translations, "profile_status_password_required", "Password is required.")
+		view["StatusClass"] = "danger"
+		a.renderRecoveryPage(w, r, view)
+		return
+	}
+	if password != passwordConfirm {
+		w.WriteHeader(http.StatusBadRequest)
+		view["Status"] = translationOrDefault(translations, "profile_status_password_mismatch", "Password confirmation does not match.")
+		view["StatusClass"] = "danger"
+		a.renderRecoveryPage(w, r, view)
+		return
+	}
+	if err := a.applyRecoveredPassword(r.Context(), domain, token, email, password); errors.Is(err, errInvalidRecovery) {
+		w.WriteHeader(http.StatusUnauthorized)
+		view["Status"] = translationOrDefault(translations, "profile_password_code_status_invalid", "The link is invalid or expired.")
+		view["StatusClass"] = "danger"
+		a.renderRecoveryPage(w, r, view)
+		return
+	} else if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	a.clearFailedLoginAttempts(r.Context(), failureDomain, clientIPAddress(r))
 	a.clearFailedLoginAttempts(r.Context(), domain, clientIPAddress(r))
-	httpsecurity.RedirectLocal(w, r, requestedReturnPath(r), http.StatusFound)
+	a.markServiceMailRecipientVerified(r.Context(), domain, email, preferredLanguageCode(r.Header.Get("Accept-Language")))
+	a.logHostingSupportEvent(r.Context(), "password_changed", "success", email, domain, "password recovered")
+	a.createSessionForDomain(w, r, r.Context(), domain, email)
+	returnPath := strings.TrimSpace(r.FormValue("return_path"))
+	httpsecurity.RedirectLocal(w, r, safeConfirmationReturnPath(returnPath), http.StatusFound)
+}
+
+var errInvalidRecovery = errors.New("recovery request is invalid or expired")
+
+func (a *App) applyRecoveredPassword(ctx context.Context, domain, token, email, password string) error {
+	write := func(transaction *sql.Tx) error {
+		consumed, err := transaction.ExecContext(ctx, `DELETE FROM email_confirmations WHERE token=? AND domain=? AND action='recover' AND email=? AND expires_at>?`, token, domain, email, time.Now().UTC().Format(time.RFC3339))
+		if err != nil {
+			return err
+		}
+		consumedRows, err := consumed.RowsAffected()
+		if err != nil || consumedRows != 1 {
+			return errInvalidRecovery
+		}
+		result, err := transaction.ExecContext(ctx, `UPDATE users SET password=? WHERE domain=? AND email=? AND is_admin=1`, password, domain, email)
+		if err != nil {
+			return err
+		}
+		rowsAffected, err := result.RowsAffected()
+		if err != nil || rowsAffected != 1 {
+			return errInvalidRecovery
+		}
+		if _, err := transaction.ExecContext(ctx, `DELETE FROM email_confirmations WHERE domain=? AND action='recover' AND email=?`, domain, email); err != nil {
+			return err
+		}
+		sessionDomain := normalizeDomainName(domain)
+		if sessionDomain == "" {
+			sessionDomain = "localhost"
+		}
+		_, err = transaction.ExecContext(ctx, `DELETE FROM sessions WHERE user_email=?`, sessionDomain+"|"+email)
+		return err
+	}
+	if database, ok := a.db.(interface {
+		WriteTransaction(context.Context, func(*sql.Tx) error) error
+	}); ok {
+		return database.WriteTransaction(ctx, write)
+	}
+	database, ok := a.db.(interface {
+		BeginTx(context.Context, *sql.TxOptions) (*sql.Tx, error)
+	})
+	if !ok {
+		return errors.New("database does not support recovery transactions")
+	}
+	transaction, err := database.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer transaction.Rollback()
+	if err := write(transaction); err != nil {
+		return err
+	}
+	return transaction.Commit()
+}
+
+func recoveryPasswordFailureDomain(domain, email string) string {
+	return strings.TrimSpace(domain) + "|recover-password|" + strings.ToLower(strings.TrimSpace(email))
 }
 
 func (a *App) createAndSendProfileCode(r *http.Request, domain, currentEmail, nextEmail, password, codeKind string) (string, emailDeliveryResult, profileEmailDeliveryDNSHelp, error) {
@@ -16861,13 +17105,17 @@ func (a *App) renderEmailConfirmationStatus(w http.ResponseWriter, r *http.Reque
 }
 
 func (a *App) enqueueServiceEmail(ctx context.Context, r *http.Request, codeKind, domain, recipient, secretValue, languageCode string) error {
+	return a.enqueueServiceEmailWithActionURL(ctx, r, codeKind, domain, recipient, secretValue, "", languageCode)
+}
+
+func (a *App) enqueueServiceEmailWithActionURL(ctx context.Context, r *http.Request, codeKind, domain, recipient, secretValue, actionURL, languageCode string) error {
 	message := mailout.Message{
 		Kind:     strings.TrimSpace(codeKind),
 		From:     a.emailFromAddress(domain),
 		To:       recipient,
 		Subject:  emailSubjectForServiceMail(languageCode, codeKind, domain),
-		Body:     emailBodyForServiceMail(languageCode, codeKind, domain, secretValue),
-		HTMLBody: emailHTMLBodyForServiceMail(languageCode, codeKind, domain, secretValue),
+		Body:     emailBodyForServiceMailWithActionURL(languageCode, codeKind, domain, secretValue, actionURL),
+		HTMLBody: emailHTMLBodyForServiceMailWithActionURL(languageCode, codeKind, domain, secretValue, actionURL),
 	}
 	if a.durableMailTasks != nil {
 		return a.enqueueEmail(ctx, message)
@@ -16882,6 +17130,7 @@ func (a *App) enqueueServiceEmail(ctx context.Context, r *http.Request, codeKind
 		Recipient:    strings.TrimSpace(recipient),
 		CodeKind:     strings.TrimSpace(codeKind),
 		SecretValue:  strings.TrimSpace(secretValue),
+		ActionURL:    strings.TrimSpace(actionURL),
 		LanguageCode: strings.TrimSpace(languageCode),
 		CreatedAt:    time.Now().UTC().Format(time.RFC3339),
 	}
@@ -17004,6 +17253,19 @@ func emailConfirmationURL(r *http.Request, token string) string {
 	queryValues.Set("email_confirm", token)
 	confirmationURL.RawQuery = queryValues.Encode()
 	return confirmationURL.String()
+}
+
+func recoveryConfirmationURL(r *http.Request, token string) string {
+	recoveryURL, err := url.Parse(emailConfirmationURL(r, token))
+	if err != nil {
+		return ""
+	}
+	queryValues := recoveryURL.Query()
+	queryValues.Del("email_confirm")
+	queryValues.Set("recover", "")
+	queryValues.Set("recovery_token", token)
+	recoveryURL.RawQuery = queryValues.Encode()
+	return recoveryURL.String()
 }
 
 func (a *App) enqueueEmail(ctx context.Context, message mailout.Message) error {
@@ -19885,11 +20147,12 @@ func (a *App) handleServiceMailRelayRequest(ctx context.Context, r *http.Request
 		relayDomain = "sitebrush.com"
 	}
 	message := mailout.Message{
-		Kind:    strings.TrimSpace(request.CodeKind),
-		From:    serviceMailRelayFromAddress(relayDomain),
-		To:      strings.TrimSpace(request.Recipient),
-		Subject: emailSubjectForServiceMail(request.LanguageCode, request.CodeKind, request.SourceDomain),
-		Body:    emailBodyForServiceMail(request.LanguageCode, request.CodeKind, request.SourceDomain, request.SecretValue),
+		Kind:     strings.TrimSpace(request.CodeKind),
+		From:     serviceMailRelayFromAddress(relayDomain),
+		To:       strings.TrimSpace(request.Recipient),
+		Subject:  emailSubjectForServiceMail(request.LanguageCode, request.CodeKind, request.SourceDomain),
+		Body:     emailBodyForServiceMailWithActionURL(request.LanguageCode, request.CodeKind, request.SourceDomain, request.SecretValue, request.ActionURL),
+		HTMLBody: emailHTMLBodyForServiceMailWithActionURL(request.LanguageCode, request.CodeKind, request.SourceDomain, request.SecretValue, request.ActionURL),
 	}
 	if strings.TrimSpace(request.MessageID) != "" {
 		message.From = serviceMailRelayFromAddress("sitebrush.com")
@@ -20159,7 +20422,20 @@ func validateServiceMailSecret(codeKind, secretValue string) error {
 
 func validateServiceMailContent(request serviceMailRequest) error {
 	if strings.TrimSpace(request.MessageID) == "" {
-		return validateServiceMailSecret(request.CodeKind, request.SecretValue)
+		if err := validateServiceMailSecret(request.CodeKind, request.SecretValue); err != nil {
+			return err
+		}
+		if strings.TrimSpace(request.ActionURL) == "" {
+			return nil
+		}
+		actionURL, err := url.Parse(strings.TrimSpace(request.ActionURL))
+		if err != nil || actionURL == nil || actionURL.Host == "" || (actionURL.Scheme != "http" && actionURL.Scheme != "https") {
+			return errors.New("service mail action link is invalid")
+		}
+		if normalizeDomainName(actionURL.Hostname()) != normalizeDomainName(request.SourceDomain) {
+			return errors.New("service mail action link domain is invalid")
+		}
+		return nil
 	}
 	if len(request.MessageID) > 128 {
 		return errors.New("mail message id is invalid")
@@ -20816,10 +21092,24 @@ func emailSubjectForServiceMail(languageCode, codeKind, domain string) string {
 }
 
 func emailBodyForServiceMail(languageCode, codeKind, domain, secret string) string {
-	return emailBodyForLanguage(languageCode, serviceMailKindAction(codeKind), domain, secret)
+	return emailBodyForServiceMailWithActionURL(languageCode, codeKind, domain, secret, "")
 }
 
 func emailHTMLBodyForServiceMail(languageCode, codeKind, domain, secret string) string {
+	return emailHTMLBodyForServiceMailWithActionURL(languageCode, codeKind, domain, secret, "")
+}
+
+func emailBodyForServiceMailWithActionURL(languageCode, codeKind, domain, secret, actionURL string) string {
+	if serviceMailKindAction(codeKind) == "recover" && strings.TrimSpace(actionURL) != "" {
+		return recoveryEmailBodyWithLinkForLanguage(languageCode, domain, secret, actionURL)
+	}
+	return emailBodyForLanguage(languageCode, serviceMailKindAction(codeKind), domain, secret)
+}
+
+func emailHTMLBodyForServiceMailWithActionURL(languageCode, codeKind, domain, secret, actionURL string) string {
+	if serviceMailKindAction(codeKind) == "recover" && strings.TrimSpace(actionURL) != "" {
+		return recoveryEmailHTMLBodyForLanguage(languageCode, domain, secret, actionURL)
+	}
 	if serviceMailKindAction(codeKind) != "profile" {
 		return ""
 	}
@@ -20837,6 +21127,24 @@ func emailHTMLBodyForServiceMail(languageCode, codeKind, domain, secret string) 
 	ignoreText := template.HTMLEscapeString(bodyParts[2])
 	buttonLabel := template.HTMLEscapeString(confirmationEmailButtonLabel(languageCode))
 	return `<!doctype html><html lang="` + template.HTMLEscapeString(languageCode) + `" dir="` + direction + `"><body style="margin:0;background:#f4f7f8;color:#172126;font-family:Arial,sans-serif"><div style="max-width:640px;margin:0 auto;padding:32px 16px"><div style="background:#fff;border:1px solid #d9e2e5;border-radius:14px;padding:28px"><div style="font-size:22px;font-weight:700;color:#087f8c">SiteBrush</div><h1 style="font-size:25px;line-height:1.25;margin:24px 0 12px">` + subject + `</h1><p style="font-size:16px;line-height:1.6;margin:0 0 24px">` + introduction + `</p><p style="margin:0 0 24px"><a href="` + confirmationURL + `" style="display:inline-block;background:#087f8c;color:#fff;text-decoration:none;font-weight:700;padding:13px 20px;border-radius:9px">` + buttonLabel + `</a></p><p style="color:#607078;font-size:14px;line-height:1.5;margin:0">` + ignoreText + `</p></div></div></body></html>`
+}
+
+func recoveryEmailBodyWithLinkForLanguage(languageCode, domain, code, actionURL string) string {
+	body := recoveryEmailBodyForLanguage(languageCode, domain, code)
+	linkLabel := translationOrDefault(translationsForLanguageCode(languageCode), "profile_new_password", "New password")
+	return body + "\n\n" + linkLabel + ":\n" + actionURL
+}
+
+func recoveryEmailHTMLBodyForLanguage(languageCode, domain, code, actionURL string) string {
+	direction := "ltr"
+	if languageCode == "he" || languageCode == "fa" {
+		direction = "rtl"
+	}
+	buttonLabel := translationOrDefault(translationsForLanguageCode(languageCode), "profile_new_password", "Set new password")
+	subject := template.HTMLEscapeString(emailSubjectForLanguage(languageCode, "recover", domain))
+	body := template.HTMLEscapeString(recoveryEmailBodyForLanguage(languageCode, domain, code))
+	link := template.HTMLEscapeString(actionURL)
+	return `<!doctype html><html lang="` + template.HTMLEscapeString(languageCode) + `" dir="` + direction + `"><body style="margin:0;background:#f4f7f8;color:#172126;font-family:Arial,sans-serif"><div style="max-width:640px;margin:0 auto;padding:32px 16px"><div style="background:#fff;border:1px solid #d9e2e5;border-radius:14px;padding:28px"><div style="font-size:22px;font-weight:700;color:#087f8c">SiteBrush</div><h1 style="font-size:25px;line-height:1.25;margin:24px 0 12px">` + subject + `</h1><p style="font-size:16px;line-height:1.6;white-space:pre-line;margin:0 0 24px">` + body + `</p><p style="margin:0"><a href="` + link + `" style="display:inline-block;background:#087f8c;color:#fff;text-decoration:none;font-weight:700;padding:13px 20px;border-radius:9px">` + template.HTMLEscapeString(buttonLabel) + `</a></p></div></div></body></html>`
 }
 
 func confirmationEmailButtonLabel(languageCode string) string {
