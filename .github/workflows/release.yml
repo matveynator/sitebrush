@@ -101,7 +101,14 @@ jobs:
           set -euo pipefail
           (
             cd dist
-            md5sum * > MD5SUMS
+            if command -v md5sum >/dev/null 2>&1; then
+              md5sum * > MD5SUMS
+            else
+              # macOS provides md5 instead of the GNU md5sum utility.
+              for file_path in *; do
+                printf '%s  %s\n' "$(md5 -q "${file_path}")" "${file_path}"
+              done > MD5SUMS
+            fi
           )
       - name: Write portable md5 (Windows)
         if: runner.os == 'Windows'
@@ -450,7 +457,8 @@ jobs:
           set -euo pipefail
           (
             cd dist
-            md5sum sitebrush_darwin_universal_desktop.dmg > MD5SUMS-sitebrush_darwin_universal_desktop.dmg.txt
+            dmg_path=sitebrush_darwin_universal_desktop.dmg
+            printf '%s  %s\n' "$(md5 -q "${dmg_path}")" "${dmg_path}" > MD5SUMS-sitebrush_darwin_universal_desktop.dmg.txt
           )
       - name: Upload macOS universal desktop md5
         uses: actions/upload-artifact@v5
