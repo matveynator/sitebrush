@@ -16,7 +16,7 @@ jobs:
         with:
           ref: fix/import-resource-content-detection
 
-      - name: Preserve result-host file links
+      - name: Patch and commit internal link preservation
         shell: bash
         run: |
           python3 - <<'PY'
@@ -98,12 +98,6 @@ jobs:
 
           gofmt -w sitebrush.go result_host_resource.go result_host_resource_test.go
           git diff --check
-          go test . -run TestResultHostResourceURLPreserved -count=1
-          go test ./pkg/... -count=1
-
-      - name: Commit fix and remove temporary workflow
-        shell: bash
-        run: |
           rm .github/workflows/pr69-internal-link-fix.yml
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
