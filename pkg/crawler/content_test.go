@@ -77,6 +77,13 @@ func TestDownloadedResourceExtensionUsesDownloadedContentType(t *testing.T) {
 		{name: "generic response", resourceURL: "https://example.com/archive.zip", contentType: "application/octet-stream", expected: ".zip"},
 		{name: "plain text response", resourceURL: "https://example.com/readme.txt", contentType: "text/plain; charset=utf-8", expected: ".txt"},
 		{name: "unknown response", resourceURL: "https://example.com/file.custom", contentType: "application/x-unknown", expected: ".custom"},
+		{name: "docx zip container", resourceURL: "https://example.com/report.docx", contentType: "application/zip", expected: ".docx"},
+		{name: "xlsx zip container", resourceURL: "https://example.com/report.xlsx", contentType: "application/zip", expected: ".xlsx"},
+		{name: "pptx zip container", resourceURL: "https://example.com/slides.pptx", contentType: "application/zip", expected: ".pptx"},
+		{name: "epub zip container", resourceURL: "https://example.com/book.epub", contentType: "application/zip", expected: ".epub"},
+		{name: "jar zip container", resourceURL: "https://example.com/app.jar", contentType: "application/zip", expected: ".jar"},
+		{name: "apk zip container", resourceURL: "https://example.com/app.apk", contentType: "application/zip", expected: ".apk"},
+		{name: "true zip remains zip", resourceURL: "https://example.com/archive.zip", contentType: "application/zip", expected: ".zip"},
 	}
 
 	for _, testCase := range testCases {
