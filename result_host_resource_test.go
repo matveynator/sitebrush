@@ -1,30 +1,24 @@
 package main
 
-import (
-	"net/url"
-	"testing"
-)
+import "testing"
 
 func TestResultHostResourceURLPreserved(t *testing.T) {
-	resultURL, err := url.Parse("https://kavtrans.sitebrush.ru/")
-	if err != nil {
-		t.Fatal(err)
-	}
+	spider := &pageSpider{domain: "kavtrans.sitebrush.ru"}
 	for _, rawURL := range []string{
 		"https://kavtrans.sitebrush.ru/files/map.pdf",
 		"https://KAVTRANS.SITEBRUSH.RU/files/archive.zip",
 	} {
-		if !isResultHostResourceURL(rawURL, resultURL) {
+		if !spider.isResultHostResourceURL(rawURL) {
 			t.Fatalf("result-host resource was not preserved: %s", rawURL)
 		}
 	}
-	if isResultHostResourceURL("https://source.example/files/map.pdf", resultURL) {
+	if spider.isResultHostResourceURL("https://source.example/files/map.pdf") {
 		t.Fatal("external resource was incorrectly treated as a result-host resource")
 	}
-	if isResultHostResourceURL("://bad-url", resultURL) {
+	if spider.isResultHostResourceURL("://bad-url") {
 		t.Fatal("invalid URL was treated as a result-host resource")
 	}
-	if isResultHostResourceURL("https://kavtrans.sitebrush.ru/files/map.pdf", nil) {
-		t.Fatal("resource matched without a result URL")
+	if (&pageSpider{}).isResultHostResourceURL("https://kavtrans.sitebrush.ru/files/map.pdf") {
+		t.Fatal("resource matched without a result domain")
 	}
 }

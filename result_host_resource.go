@@ -1,17 +1,24 @@
 package main
 
-import "net/url"
+import (
+	"net/url"
+	"strings"
+)
 
-// isResultHostResourceURL identifies resources that already belong to
-// the destination site. Re-importing those resources would replace a
-// live internal URL with a hashed mirrored asset.
-func isResultHostResourceURL(rawURL string, resultURL *url.URL) bool {
-	if resultURL == nil {
+// isResultHostResourceURL reports whether a resource already belongs
+// to the imported site's destination domain. Such live internal links
+// must not be replaced with a hashed mirrored asset path.
+func (spider *pageSpider) isResultHostResourceURL(rawURL string) bool {
+	if spider == nil {
+		return false
+	}
+	resultHost := canonicalLocalDomain(spider.domain)
+	if resultHost == "" {
 		return false
 	}
 	linkedURL, err := url.Parse(rawURL)
 	if err != nil || linkedURL == nil {
 		return false
 	}
-	return sameHostname(linkedURL.Hostname(), resultURL.Hostname())
+	return strings.EqualFold(linkedURL.Hostname(), resultHost)
 }

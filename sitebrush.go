@@ -27502,7 +27502,7 @@ func (spider *pageSpider) rewriteDocumentResourceReference(rawRef string, baseUR
 	if spider.externalResourcesOnly {
 		return rawRef
 	}
-	if isResultHostResourceURL(normalizedURL, spider.resultURL) {
+	if spider.isResultHostResourceURL(normalizedURL) {
 		return rawRef
 	}
 	if spider.isSameHostWholeSitePageURL(normalizedURL) {
