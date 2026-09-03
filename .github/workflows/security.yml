@@ -93,12 +93,19 @@ jobs:
         run: exit 1
 
   codeql:
-    name: CodeQL
+    name: CodeQL (${{ matrix.language }})
     runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        language:
+          - go
+          - actions
     steps:
       - name: Checkout
         uses: actions/checkout@v6
       - name: Set up Go
+        if: matrix.language == 'go'
         uses: actions/setup-go@v6
         with:
           go-version: "1.26.6"
@@ -106,11 +113,12 @@ jobs:
       - name: Initialize CodeQL
         uses: github/codeql-action/init@v4
         with:
-          languages: go
+          languages: ${{ matrix.language }}
           queries: security-extended
-      - name: Build
+      - name: Build Go
+        if: matrix.language == 'go'
         run: go build ./...
       - name: Analyze
         uses: github/codeql-action/analyze@v4
         with:
-          category: /language:go
+          category: /language:${{ matrix.language }}
