@@ -64,6 +64,17 @@ func TestDetectedResourceContentTypeRecognizesSVGXML(t *testing.T) {
 	}
 }
 
+func TestDetectedResourceContentTypePreservesDeclaredXHTMLForGenericXML(t *testing.T) {
+	content := []byte(`<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml"><head><title>XHTML</title></head><body><p>Hello</p></body></html>`)
+
+	contentType := DetectedResourceContentType("https://example.test/index.xhtml", "application/xhtml+xml; charset=utf-8", content)
+	if contentType != "application/xhtml+xml" {
+		t.Fatalf("XHTML content type = %q, want %q", contentType, "application/xhtml+xml")
+	}
+}
+
 func TestDownloadedResourceExtensionUsesDownloadedContentType(t *testing.T) {
 	testCases := []struct {
 		name        string
