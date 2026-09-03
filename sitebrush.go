@@ -16526,13 +16526,13 @@ func (a *App) recoverPage(w http.ResponseWriter, r *http.Request) {
 			confirmation, found := a.emailConfirmationByToken(r.Context(), token)
 			if !found || confirmation.Action != "recover" || confirmation.Domain != domain {
 				w.WriteHeader(http.StatusNotFound)
-				a.renderRecoveryPage(w, r, map[string]any{"Status": translationOrDefault(translations, "profile_password_code_status_invalid", "The code is invalid or expired."), "StatusClass": "danger"})
+				a.renderRecoveryPage(w, r, map[string]any{"Status": translationOrDefault(translations, "recover_status_invalid", "The recovery link or code is invalid or expired."), "StatusClass": "danger"})
 				return
 			}
 			if confirmationExpired(confirmation.ExpiresAt, time.Now().UTC()) {
 				_, _ = a.db.ExecContext(r.Context(), `DELETE FROM email_confirmations WHERE token=?`, token)
 				w.WriteHeader(http.StatusGone)
-				a.renderRecoveryPage(w, r, map[string]any{"Status": translationOrDefault(translationsForLanguageCode(confirmation.LanguageCode), "profile_password_code_status_invalid", "The code is invalid or expired."), "StatusClass": "danger"})
+				a.renderRecoveryPage(w, r, map[string]any{"Status": translationOrDefault(translations, "recover_status_invalid", "The recovery link or code is invalid or expired."), "StatusClass": "danger"})
 				return
 			}
 			a.renderRecoveryPage(w, r, map[string]any{
@@ -16570,7 +16570,7 @@ func (a *App) recoverPage(w http.ResponseWriter, r *http.Request) {
 	_ = a.db.QueryRowContext(r.Context(), `SELECT COUNT(1) FROM users WHERE domain=? AND email=? AND is_admin=1`, domain, email).Scan(&userCount)
 	if userCount == 0 {
 		a.renderRecoveryPage(w, r, map[string]any{
-			"Status":                 translationOrDefault(translations, "profile_password_code_status_sent", "A recovery message has been sent if the account exists."),
+			"Status":                 translationOrDefault(translations, "recover_status_sent", "The recovery email was sent."),
 			"StatusClass":            "success",
 			"ShowManualPasswordForm": true,
 			"RecoveryEmail":          email,
@@ -16601,7 +16601,7 @@ func (a *App) recoverPage(w http.ResponseWriter, r *http.Request) {
 	}
 	a.logHostingSupportEvent(r.Context(), "code_requested", queuedStatus, email, domain, "login_code")
 	a.renderRecoveryPage(w, r, map[string]any{
-		"Status":                 translationOrDefault(translations, "profile_password_code_status_sent", "The recovery email was sent."),
+		"Status":                 translationOrDefault(translations, "recover_status_sent", "The recovery email was sent."),
 		"StatusClass":            "success",
 		"ShowManualPasswordForm": true,
 		"RecoveryEmail":          email,
@@ -16627,11 +16627,11 @@ func (a *App) renderRecoveryPage(w http.ResponseWriter, r *http.Request, view ma
 	if _, found := view["ReturnPath"]; !found {
 		view["ReturnPath"] = requestedReturnPath(r)
 	}
-	view["PasswordLabel"] = translationOrDefault(translations, "profile_new_password", "New password")
-	view["PasswordConfirmLabel"] = translationOrDefault(translations, "profile_confirm_password", "Confirm password")
-	view["PasswordCodeLabel"] = translationOrDefault(translations, "profile_password_code", "6-digit code")
-	view["PasswordCodeHelp"] = translationOrDefault(translations, "profile_password_code_help", "Enter the code sent to your email address.")
-	view["PasswordSubmitLabel"] = translationOrDefault(translations, "profile_save", "Save")
+	view["PasswordLabel"] = translationOrDefault(translations, "recover_new_password", "New password")
+	view["PasswordConfirmLabel"] = translationOrDefault(translations, "recover_confirm_password", "Confirm password")
+	view["PasswordCodeLabel"] = translationOrDefault(translations, "recover_code_label", "6-digit recovery code")
+	view["PasswordCodeHelp"] = translationOrDefault(translations, "recover_code_help", "Enter the code from the recovery email.")
+	view["PasswordSubmitLabel"] = translationOrDefault(translations, "recover_save_password", "Set new password")
 	a.render(w, r, "recover.html", view)
 }
 
@@ -16647,7 +16647,7 @@ func (a *App) completeManualRecovery(w http.ResponseWriter, r *http.Request, dom
 		}
 		w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
 		w.WriteHeader(http.StatusTooManyRequests)
-		a.renderRecoveryPage(w, r, map[string]any{"Status": translationOrDefault(translationsForRequest(r), "profile_password_code_status_rate_limited", "Too many failed code attempts. Please try again later."), "StatusClass": "danger", "ShowManualPasswordForm": true, "RecoveryEmail": email})
+		a.renderRecoveryPage(w, r, map[string]any{"Status": translationOrDefault(translationsForRequest(r), "recover_status_rate_limited", "Too many failed recovery attempts. Please try again later."), "StatusClass": "danger", "ShowManualPasswordForm": true, "RecoveryEmail": email})
 		return
 	}
 	var token string
@@ -16655,7 +16655,7 @@ func (a *App) completeManualRecovery(w http.ResponseWriter, r *http.Request, dom
 	if err != nil || !isSixDigitCode(code) {
 		_, _, _ = a.registerFailedLoginAttempt(r.Context(), failureDomain, clientIP)
 		w.WriteHeader(http.StatusUnauthorized)
-		a.renderRecoveryPage(w, r, map[string]any{"Status": translationOrDefault(translationsForRequest(r), "profile_password_code_status_invalid", "The code is invalid or expired."), "StatusClass": "danger", "ShowManualPasswordForm": true, "RecoveryEmail": email})
+		a.renderRecoveryPage(w, r, map[string]any{"Status": translationOrDefault(translationsForRequest(r), "recover_status_invalid", "The recovery link or code is invalid or expired."), "StatusClass": "danger", "ShowManualPasswordForm": true, "RecoveryEmail": email})
 		return
 	}
 	a.completeRecoveryPassword(w, r, domain, token, email, failureDomain)
@@ -16666,7 +16666,7 @@ func (a *App) completeLinkedRecovery(w http.ResponseWriter, r *http.Request, dom
 	confirmation, found := a.emailConfirmationByToken(r.Context(), token)
 	if !found || confirmation.Action != "recover" || confirmation.Domain != domain || confirmationExpired(confirmation.ExpiresAt, time.Now().UTC()) {
 		w.WriteHeader(http.StatusUnauthorized)
-		a.renderRecoveryPage(w, r, map[string]any{"Status": translationOrDefault(translationsForRequest(r), "profile_password_code_status_invalid", "The link is invalid or expired."), "StatusClass": "danger"})
+		a.renderRecoveryPage(w, r, map[string]any{"Status": translationOrDefault(translationsForRequest(r), "recover_status_invalid", "The recovery link or code is invalid or expired."), "StatusClass": "danger"})
 		return
 	}
 	a.completeRecoveryPassword(w, r, domain, token, confirmation.Email, recoveryPasswordFailureDomain(domain, confirmation.Email))
@@ -16680,21 +16680,21 @@ func (a *App) completeRecoveryPassword(w http.ResponseWriter, r *http.Request, d
 	view := map[string]any{"RecoveryEmail": email, "RecoveryToken": token, "ShowPasswordForm": linked, "ShowManualPasswordForm": !linked}
 	if password == "" {
 		w.WriteHeader(http.StatusBadRequest)
-		view["Status"] = translationOrDefault(translations, "profile_status_password_required", "Password is required.")
+		view["Status"] = translationOrDefault(translations, "recover_status_password_required", "Password is required.")
 		view["StatusClass"] = "danger"
 		a.renderRecoveryPage(w, r, view)
 		return
 	}
 	if password != passwordConfirm {
 		w.WriteHeader(http.StatusBadRequest)
-		view["Status"] = translationOrDefault(translations, "profile_status_password_mismatch", "Password confirmation does not match.")
+		view["Status"] = translationOrDefault(translations, "recover_status_password_mismatch", "Password confirmation does not match.")
 		view["StatusClass"] = "danger"
 		a.renderRecoveryPage(w, r, view)
 		return
 	}
 	if err := a.applyRecoveredPassword(r.Context(), domain, token, email, password); errors.Is(err, errInvalidRecovery) {
 		w.WriteHeader(http.StatusUnauthorized)
-		view["Status"] = translationOrDefault(translations, "profile_password_code_status_invalid", "The link is invalid or expired.")
+		view["Status"] = translationOrDefault(translations, "recover_status_invalid", "The recovery link or code is invalid or expired.")
 		view["StatusClass"] = "danger"
 		a.renderRecoveryPage(w, r, view)
 		return
@@ -21107,10 +21107,14 @@ func emailBodyForServiceMailWithActionURL(languageCode, codeKind, domain, secret
 }
 
 func emailHTMLBodyForServiceMailWithActionURL(languageCode, codeKind, domain, secret, actionURL string) string {
-	if serviceMailKindAction(codeKind) == "recover" && strings.TrimSpace(actionURL) != "" {
+	action := serviceMailKindAction(codeKind)
+	if action == "recover" && strings.TrimSpace(actionURL) != "" {
 		return recoveryEmailHTMLBodyForLanguage(languageCode, domain, secret, actionURL)
 	}
-	if serviceMailKindAction(codeKind) != "profile" {
+	if action == "profile_password" {
+		return serviceCodeEmailHTMLForLanguage(languageCode, codeKind, domain, secret)
+	}
+	if action != "profile" {
 		return ""
 	}
 	bodyParts := strings.Split(confirmationEmailBodyForLanguage(languageCode, domain, secret), "\n\n")
@@ -21129,9 +21133,19 @@ func emailHTMLBodyForServiceMailWithActionURL(languageCode, codeKind, domain, se
 	return `<!doctype html><html lang="` + template.HTMLEscapeString(languageCode) + `" dir="` + direction + `"><body style="margin:0;background:#f4f7f8;color:#172126;font-family:Arial,sans-serif"><div style="max-width:640px;margin:0 auto;padding:32px 16px"><div style="background:#fff;border:1px solid #d9e2e5;border-radius:14px;padding:28px"><div style="font-size:22px;font-weight:700;color:#087f8c">SiteBrush</div><h1 style="font-size:25px;line-height:1.25;margin:24px 0 12px">` + subject + `</h1><p style="font-size:16px;line-height:1.6;margin:0 0 24px">` + introduction + `</p><p style="margin:0 0 24px"><a href="` + confirmationURL + `" style="display:inline-block;background:#087f8c;color:#fff;text-decoration:none;font-weight:700;padding:13px 20px;border-radius:9px">` + buttonLabel + `</a></p><p style="color:#607078;font-size:14px;line-height:1.5;margin:0">` + ignoreText + `</p></div></div></body></html>`
 }
 
+func serviceCodeEmailHTMLForLanguage(languageCode, codeKind, domain, secret string) string {
+	direction := "ltr"
+	if languageCode == "he" || languageCode == "fa" {
+		direction = "rtl"
+	}
+	subject := template.HTMLEscapeString(emailSubjectForServiceMail(languageCode, codeKind, domain))
+	body := template.HTMLEscapeString(emailBodyForServiceMail(languageCode, codeKind, domain, secret))
+	return `<!doctype html><html lang="` + template.HTMLEscapeString(languageCode) + `" dir="` + direction + `"><body style="margin:0;background:#f4f7f8;color:#172126;font-family:Arial,sans-serif"><div style="max-width:640px;margin:0 auto;padding:32px 16px"><div style="background:#fff;border:1px solid #d9e2e5;border-radius:14px;padding:28px"><div style="font-size:22px;font-weight:700;color:#087f8c">SiteBrush</div><h1 style="font-size:25px;line-height:1.25;margin:24px 0 12px">` + subject + `</h1><p style="font-size:16px;line-height:1.6;white-space:pre-line;margin:0">` + body + `</p></div></div></body></html>`
+}
+
 func recoveryEmailBodyWithLinkForLanguage(languageCode, domain, code, actionURL string) string {
 	body := recoveryEmailBodyForLanguage(languageCode, domain, code)
-	linkLabel := translationOrDefault(translationsForLanguageCode(languageCode), "profile_new_password", "New password")
+	linkLabel := translationOrDefault(translationsForLanguageCode(languageCode), "recover_new_password", "New password")
 	return body + "\n\n" + linkLabel + ":\n" + actionURL
 }
 
@@ -21140,7 +21154,7 @@ func recoveryEmailHTMLBodyForLanguage(languageCode, domain, code, actionURL stri
 	if languageCode == "he" || languageCode == "fa" {
 		direction = "rtl"
 	}
-	buttonLabel := translationOrDefault(translationsForLanguageCode(languageCode), "profile_new_password", "Set new password")
+	buttonLabel := translationOrDefault(translationsForLanguageCode(languageCode), "recover_save_password", "Set new password")
 	subject := template.HTMLEscapeString(emailSubjectForLanguage(languageCode, "recover", domain))
 	body := template.HTMLEscapeString(recoveryEmailBodyForLanguage(languageCode, domain, code))
 	link := template.HTMLEscapeString(actionURL)
@@ -24820,6 +24834,7 @@ func buildContextMenuScript(isAdmin bool, isServerManager bool, isFrozen bool, p
 	editLabel := template.JSEscapeString(translationOrDefault(translations, "menu_edit", "Edit"))
 	textEditLabel := template.JSEscapeString(translationOrDefault(translations, "menu_text_edit", "Edit as text"))
 	copySiteLabel := template.JSEscapeString(translationOrDefault(translations, "menu_copy_site", "Copy site"))
+	standardMenuHint := template.JSEscapeString(template.HTMLEscapeString(translationOrDefault(translations, "menu_standard_context_hint", "Browser standard menu: Ctrl + right mouse click.")))
 	deleteLabel := template.JSEscapeString(translationOrDefault(translations, "menu_delete", "Delete"))
 	protectPasswordLabel := template.JSEscapeString(translationOrDefault(translations, "menu_protect_password", "Protect with password"))
 	removePasswordProtectionLabel := template.JSEscapeString(translationOrDefault(translations, "menu_remove_password_protection", "Remove password protection"))
@@ -25221,8 +25236,8 @@ func buildContextMenuScript(isAdmin bool, isServerManager bool, isFrozen bool, p
       actionFormElement.submit();
     }
   }, {capture: true});
-  function buildSitebrushAdminMenuEntries() {
-    return [
+  function buildSitebrushAdminMenuEntries(showStandardMenuHint) {
+    const menuEntries = [
       "<ul class='SiteBrushMenuList'>",
       "<li class='SiteBrushContextMenu SiteBrushDomainMenuItem'><a href='/' class='SiteBrushContextMenuLink'>" + currentDomainName + "</a></li>",
       "<li class='SiteBrushContextMenu'><a href='?visual' class='SiteBrushContextMenuLink'><img src='/p/static/pencil.png' class='SiteBrushMenuIcon' alt=''>" + "` + editLabel + `" + "</a></li>",
@@ -25242,6 +25257,13 @@ func buildContextMenuScript(isAdmin bool, isServerManager bool, isFrozen bool, p
       "` + copyrightMenuEntry + `",
       "</ul>"
     ];
+    if (showStandardMenuHint) {
+      menuEntries.splice(menuEntries.length - 2, 0, "<li class='SiteBrushContextMenu SiteBrushStandardMenuHint'>` + standardMenuHint + `</li>");
+    }
+    return menuEntries;
+  }
+  function sitebrushContextMenuWasOpenedByMouse(browserEvent) {
+    return typeof browserEvent.button === "number" && browserEvent.button === 2;
   }
   function onContextMenuOpen(browserEvent) {
     if (browserEvent.__sitebrushContextMenuHandled || browserEvent.ctrlKey) {
@@ -25257,12 +25279,12 @@ func buildContextMenuScript(isAdmin bool, isServerManager bool, isFrozen bool, p
     browserEvent.__sitebrushContextMenuHandled = true;
     browserEvent.preventDefault();
     browserEvent.stopPropagation();
-    showSitebrushMenu(browserEvent, buildSitebrushAdminMenuEntries(), currentPagePath, isDomainFrozen);
+    showSitebrushMenu(browserEvent, buildSitebrushAdminMenuEntries(sitebrushContextMenuWasOpenedByMouse(browserEvent)), currentPagePath, isDomainFrozen);
   }
   window.addEventListener("contextmenu", onContextMenuOpen, {capture: true, passive: false});
   document.addEventListener("contextmenu", onContextMenuOpen, {capture: true, passive: false});
   installSitebrushLongPressMenu(function openAdminMenuFromLongPress(menuPoint) {
-    showSitebrushMenu(menuPoint, buildSitebrushAdminMenuEntries(), currentPagePath, isDomainFrozen);
+    showSitebrushMenu(menuPoint, buildSitebrushAdminMenuEntries(false), currentPagePath, isDomainFrozen);
   });
   function openSiteTreeDialog() {
     closeSitebrushMenu();
@@ -25622,7 +25644,7 @@ function installSitebrushLongPressMenu(openMenuAtPoint) {
     if (!window.__sitebrushLongPressMenuUntil || Date.now() > window.__sitebrushLongPressMenuUntil) {
       return;
     }
-    if (closestSitebrushEventElement(browserEvent, "#SiteBrushMenuBox")) {
+    if (closestSitebrushEventElement(browserEvent, "[data-sitebrush-owned]")) {
       return;
     }
     browserEvent.preventDefault();
@@ -25726,6 +25748,7 @@ func contextMenuStylesAndHelpers() string {
 .SiteBrushContextMenuFooterLink,.SiteBrushContextMenuVersion{color:#5b6f8b;text-decoration:none;font-family:Arial,Helvetica,sans-serif;font-size:12px;cursor:pointer}
 .SiteBrushContextMenuFooterLink:link,.SiteBrushContextMenuFooterLink:visited,.SiteBrushContextMenuFooterLink:active,.SiteBrushContextMenuFooterLink:hover,.SiteBrushContextMenuVersion:link,.SiteBrushContextMenuVersion:visited,.SiteBrushContextMenuVersion:active,.SiteBrushContextMenuVersion:hover{color:#5b6f8b;text-decoration:none}
 .SiteBrushContextMenuVersion{font-weight:700}
+.SiteBrushStandardMenuHint{border-top:1px solid #c8d5e7;margin-top:2px;padding:5px 10px;color:#5b6f8b;font-family:Arial,Helvetica,sans-serif;font-size:10px;line-height:1.25}
 .SiteBrushMenuStorageUsage{color:#5b6f8b;font-family:Arial,Helvetica,sans-serif;font-size:9px;font-weight:400;font-variant-numeric:tabular-nums;white-space:nowrap}
 .SiteBrushConfirmOverlay{position:fixed;inset:0;background:rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center;z-index:2147483647}
 .SiteBrushConfirmModal{background:#fff;border:1px solid #8ea4c1;min-width:260px;max-width:340px;padding:16px;font-family:Arial,Helvetica,sans-serif}
@@ -25759,6 +25782,7 @@ func contextMenuStylesAndHelpers() string {
   .SiteBrushMenuIcon{width:16px;height:16px;flex-basis:16px}
   .SiteBrushContextMenuFooter{font-size:11px;flex-wrap:wrap;padding:6px 8px 7px 8px;gap:8px}
   .SiteBrushContextMenuFooterLink,.SiteBrushContextMenuVersion{font-size:11px}
+  .SiteBrushStandardMenuHint{font-size:9px;padding:5px 8px}
   .SiteBrushMenuStorageUsage{margin-left:0}
 }
 @media (prefers-color-scheme: dark){
@@ -25772,6 +25796,7 @@ func contextMenuStylesAndHelpers() string {
   .SiteBrushContextMenuFooter{color:#a7bbd8;border-top-color:#2f405d}
   .SiteBrushContextMenuFooterLink,.SiteBrushContextMenuVersion{color:#a7bbd8}
   .SiteBrushContextMenuFooterLink:link,.SiteBrushContextMenuFooterLink:visited,.SiteBrushContextMenuFooterLink:active,.SiteBrushContextMenuFooterLink:hover,.SiteBrushContextMenuVersion:link,.SiteBrushContextMenuVersion:visited,.SiteBrushContextMenuVersion:active,.SiteBrushContextMenuVersion:hover{color:#a7bbd8}
+  .SiteBrushStandardMenuHint{color:#a7bbd8;border-top-color:#2f405d}
   .SiteBrushMenuStorageUsage{color:#a7bbd8}
   .SiteBrushConfirmModal{background:#172235;border-color:#2f405d}
   .SiteBrushConfirmText,.SiteBrushPublishPreviewLink{color:#dbe8ff}
@@ -25936,7 +25961,7 @@ function installSitebrushLongPressMenu(openMenuAtPoint) {
     if (!window.__sitebrushLongPressMenuUntil || Date.now() > window.__sitebrushLongPressMenuUntil) {
       return;
     }
-    if (closestSitebrushEventElement(browserEvent, "#SiteBrushMenuBox")) {
+    if (closestSitebrushEventElement(browserEvent, "[data-sitebrush-owned]")) {
       return;
     }
     browserEvent.preventDefault();
