@@ -63,7 +63,7 @@ func DetectedResourceContentType(resourceURL, declaredContentType string, conten
 	if isSVGContent(contentSample) {
 		return "image/svg+xml"
 	}
-	if declaredContentType == "image/svg+xml" && isGenericXMLContentType(detectedContentType) {
+	if (declaredContentType == "image/svg+xml" || declaredContentType == "application/xhtml+xml") && isGenericXMLContentType(detectedContentType) {
 		return declaredContentType
 	}
 	if detectedContentType != "text/plain" && detectedContentType != "application/octet-stream" {
