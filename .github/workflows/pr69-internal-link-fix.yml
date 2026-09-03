@@ -24,11 +24,23 @@ jobs:
 
           path = Path("sitebrush.go")
           text = path.read_text()
-          old = '''\tif spider.externalResourcesOnly {\n\t\tlinkedURL, parseErr := url.Parse(normalizedURL)\n\t\tif parseErr == nil && linkedURL != nil && sameHostname(linkedURL.Hostname(), spider.resultURL.Hostname()) {\n\t\t\treturn rawRef\n\t\t}\n\t}\n'''
-          new = '''\tif isResultHostResourceURL(normalizedURL, spider.resultURL) {\n\t\treturn rawRef\n\t}\n'''
-          if old not in text:
-              raise SystemExit("expected rewriteDocumentResourceReference block not found")
-          path.write_text(text.replace(old, new, 1))
+          signature = "func (spider *pageSpider) rewriteDocumentResourceReference("
+          start = text.find(signature)
+          if start < 0:
+              raise SystemExit("rewriteDocumentResourceReference not found")
+          end = text.find("\nfunc ", start + len(signature))
+          if end < 0:
+              end = len(text)
+          function = text[start:end]
+          guard = "\tif isResultHostResourceURL(normalizedURL, spider.resultURL) {\n\t\treturn rawRef\n\t}\n"
+          if guard not in function:
+              anchor = "\tif spider.isSameHostWholeSitePageURL(normalizedURL) {"
+              pos = function.find(anchor)
+              if pos < 0:
+                  raise SystemExit("same-host page guard not found in rewriteDocumentResourceReference")
+              function = function[:pos] + guard + function[pos:]
+              text = text[:start] + function + text[end:]
+              path.write_text(text)
           PY
 
           cat > result_host_resource.go <<'EOF'
