@@ -1,0 +1,102 @@
+name: PR69 compile fix
+
+on:
+  push:
+    branches:
+      - fix/import-resource-content-detection
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: fix/import-resource-content-detection
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.26.6'
+
+      - name: Fix result-host link preservation and verify build
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('sitebrush.go')
+          text = path.read_text()
+          old = 'if isResultHostResourceURL(normalizedURL, spider.resultURL) {'
+          new = 'if spider.isResultHostResourceURL(normalizedURL) {'
+          if old not in text:
+              raise SystemExit('broken result-host guard not found')
+          path.write_text(text.replace(old, new, 1))
+          PY
+
+          cat > result_host_resource.go <<'EOF'
+          package main
+
+          import (
+          	"net/url"
+          	"strings"
+          )
+
+          // isResultHostResourceURL reports whether a resource already belongs
+          // to the imported site's destination domain. Such live internal links
+          // must not be replaced with a hashed mirrored asset path.
+          func (spider *pageSpider) isResultHostResourceURL(rawURL string) bool {
+          	if spider == nil {
+          		return false
+          	}
+          	resultHost := canonicalLocalDomain(spider.domain)
+          	if resultHost == "" {
+          		return false
+          	}
+          	linkedURL, err := url.Parse(rawURL)
+          	if err != nil || linkedURL == nil {
+          		return false
+          	}
+          	return strings.EqualFold(linkedURL.Hostname(), resultHost)
+          }
+          EOF
+
+          cat > result_host_resource_test.go <<'EOF'
+          package main
+
+          import "testing"
+
+          func TestResultHostResourceURLPreserved(t *testing.T) {
+          	spider := &pageSpider{domain: "kavtrans.sitebrush.ru"}
+          	for _, rawURL := range []string{
+          		"https://kavtrans.sitebrush.ru/files/map.pdf",
+          		"https://KAVTRANS.SITEBRUSH.RU/files/archive.zip",
+          	} {
+          		if !spider.isResultHostResourceURL(rawURL) {
+          			t.Fatalf("result-host resource was not preserved: %s", rawURL)
+          		}
+          	}
+          	if spider.isResultHostResourceURL("https://source.example/files/map.pdf") {
+          		t.Fatal("external resource was incorrectly treated as a result-host resource")
+          	}
+          	if spider.isResultHostResourceURL("://bad-url") {
+          		t.Fatal("invalid URL was treated as a result-host resource")
+          	}
+          	if (&pageSpider{}).isResultHostResourceURL("https://kavtrans.sitebrush.ru/files/map.pdf") {
+          		t.Fatal("resource matched without a result domain")
+          	}
+          }
+          EOF
+
+          gofmt -w sitebrush.go result_host_resource.go result_host_resource_test.go
+          git diff --check
+          go build ./...
+          go test -count=1 . -run TestResultHostResourceURLPreserved
+
+          rm .github/workflows/pr69-compile-fix.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add sitebrush.go result_host_resource.go result_host_resource_test.go .github/workflows/pr69-compile-fix.yml
+          git commit -m "Fix internal link preservation build"
+          git push origin HEAD:fix/import-resource-content-detection
