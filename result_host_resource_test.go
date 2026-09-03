@@ -7,6 +7,7 @@ func TestResultHostResourceURLPreserved(t *testing.T) {
 	for _, rawURL := range []string{
 		"https://kavtrans.sitebrush.ru/files/map.pdf",
 		"https://KAVTRANS.SITEBRUSH.RU/files/archive.zip",
+		"https://kavtrans.sitebrush.ru:443/files/manual.docx",
 	} {
 		if !spider.isResultHostResourceURL(rawURL) {
 			t.Fatalf("result-host resource was not preserved: %s", rawURL)
