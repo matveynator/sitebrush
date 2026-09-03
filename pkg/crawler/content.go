@@ -188,6 +188,10 @@ func DownloadedResourceExtension(resourceURL, contentType string) string {
 	switch normalizedContentType {
 	case "", "application/octet-stream", "binary/octet-stream", "text/plain":
 		return resourceExtension
+	case "application/zip":
+		if isZIPContainerExtension(resourceExtension) {
+			return resourceExtension
+		}
 	}
 
 	contentExtension := ResourceExtensionFromContentType(normalizedContentType)
@@ -195,6 +199,15 @@ func DownloadedResourceExtension(resourceURL, contentType string) string {
 		return contentExtension
 	}
 	return resourceExtension
+}
+
+func isZIPContainerExtension(extension string) bool {
+	switch strings.ToLower(strings.TrimSpace(extension)) {
+	case ".docx", ".dotx", ".xlsx", ".xlsm", ".pptx", ".ppsx", ".potx", ".epub", ".jar", ".war", ".ear", ".apk":
+		return true
+	default:
+		return false
+	}
 }
 
 func NormalizeMirroredAssetReference(assetPath string) string {
