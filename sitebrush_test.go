@@ -2923,14 +2923,32 @@ func TestContextMenuUsesDirectEditorProfileAndDeleteActions(t *testing.T) {
 	if strings.Contains(body, "href='?edit'") {
 		t.Fatalf("context menu still contains intermediate edit link: %s", body)
 	}
-	for _, expectedFragment := range []string{`window.location.href = targetHref;`, `closestSitebrushEventElement(browserEvent, "#SiteBrushMenuBox")`, `function closeSitebrushMenu()`, `z-index:2147483647`, `closeSitebrushMenu();`, `data-sitebrush-owned`, `sitebrushContextMenuShadowCSS`, `attachShadow({mode: "open"})`, `menuRoot.appendChild(menuStyleElement)`, `.SiteBrushContextMenuLink:link`, `.SiteBrushContextMenuLink:visited`, `window.addEventListener("contextmenu", onContextMenuOpen, {capture: true, passive: false})`, `installSitebrushLongPressMenu`, `document.addEventListener("pointerdown", startLongPress`, `document.addEventListener("touchstart"`, `positionSitebrushMenuBox(menuBoxElement, menuPoint)`, `max-height:calc(100vh - 16px)`, `@media (pointer: coarse), (max-width: 820px)`, `function openPasswordProtectionDialog`, `SiteBrushPasswordInput`} {
+	for _, expectedFragment := range []string{`window.location.href = targetHref;`, `closestSitebrushEventElement(browserEvent, "#SiteBrushMenuBox")`, `function closeSitebrushMenu()`, `z-index:2147483647`, `closeSitebrushMenu();`, `data-sitebrush-owned`, `sitebrushContextMenuShadowCSS`, `attachShadow({mode: "open"})`, `menuRoot.appendChild(menuStyleElement)`, `.SiteBrushContextMenuLink:link`, `.SiteBrushContextMenuLink:visited`, `window.addEventListener("contextmenu", onContextMenuOpen, {capture: true, passive: false})`, `installSitebrushLongPressMenu`, `document.addEventListener("pointerdown", startLongPress`, `document.addEventListener("touchstart"`, `positionSitebrushMenuBox(menuBoxElement, menuPoint)`, `max-height:calc(100vh - 16px)`, `@media (pointer: coarse), (max-width: 820px)`, `function openPasswordProtectionDialog`, `SiteBrushPasswordInput`, `buildSitebrushAdminMenuEntries(sitebrushContextMenuWasOpenedByMouse(browserEvent))`, `buildSitebrushAdminMenuEntries(false)`, `closestSitebrushEventElement(browserEvent, "[data-sitebrush-owned]")`} {
 		if !strings.Contains(body, expectedFragment) {
 			t.Fatalf("context menu missing navigation guard %q in %s", expectedFragment, body)
 		}
 	}
+	if !strings.Contains(body, "Browser standard menu: Ctrl + right mouse click.") {
+		t.Fatalf("admin context menu does not contain the translated browser-menu hint: %s", body)
+	}
 	for _, forbiddenFragment := range []string{`window.prompt`, `window.alert`} {
 		if strings.Contains(body, forbiddenFragment) {
 			t.Fatalf("desktop-safe context menu still contains %q in %s", forbiddenFragment, body)
+		}
+	}
+}
+
+func TestAdminContextMenuStandardMenuHintIsMouseOnlyAndTranslated(t *testing.T) {
+	for languageCode, translations := range translationCatalog {
+		translatedHint := strings.TrimSpace(translations["menu_standard_context_hint"])
+		if translatedHint == "" {
+			t.Fatalf("missing standard context-menu hint translation for %s", languageCode)
+		}
+		menuScript := buildContextMenuScript(true, false, false, false, true, "/", "example.com", 0, 0, "", translationsForLanguageCode(languageCode))
+		for _, expectedFragment := range []string{translatedHint, "buildSitebrushAdminMenuEntries(sitebrushContextMenuWasOpenedByMouse(browserEvent))", "buildSitebrushAdminMenuEntries(false)"} {
+			if !strings.Contains(menuScript, expectedFragment) {
+				t.Fatalf("admin context menu for %s is missing %q", languageCode, expectedFragment)
+			}
 		}
 	}
 }
@@ -5482,7 +5500,7 @@ func TestRecoverPasswordThroughEmailLink(t *testing.T) {
 	default:
 		t.Fatal("recovery email was not queued")
 	}
-	if !strings.Contains(message.Body, "Код восстановления SiteBrush") || !strings.Contains(message.Body, "https://localhost/?recover=") || !strings.Contains(message.HTMLBody, "Новый пароль") {
+	if !strings.Contains(message.Body, "Код восстановления SiteBrush") || !strings.Contains(message.Body, "https://localhost/?recover=") || !strings.Contains(message.HTMLBody, "Установить новый пароль") {
 		t.Fatalf("recovery email does not contain code and link: %#v", message)
 	}
 	var recoveryToken string
@@ -5491,13 +5509,14 @@ func TestRecoverPasswordThroughEmailLink(t *testing.T) {
 	}
 	recoveryURL := "https://localhost/?recover=&recovery_token=" + url.QueryEscape(recoveryToken)
 	linkRequest := httptest.NewRequest(http.MethodGet, recoveryURL, nil)
+	linkRequest.Header.Set("Accept-Language", "de")
 	linkResponse := httptest.NewRecorder()
 	application.route(linkResponse, linkRequest)
 	if linkResponse.Code != http.StatusOK {
 		t.Fatalf("link status = %d, body=%q", linkResponse.Code, linkResponse.Body.String())
 	}
 	linkBody := linkResponse.Body.String()
-	if !strings.Contains(linkBody, `name="recovery_token" value="`+recoveryToken+`"`) || strings.Contains(linkBody, `name="recovery_code"`) {
+	if !strings.Contains(linkBody, `name="recovery_token" value="`+recoveryToken+`"`) || !strings.Contains(linkBody, "Neues Passwort festlegen") || strings.Contains(linkBody, `name="recovery_code"`) {
 		t.Fatalf("email link did not open direct password form: %s", linkBody)
 	}
 
@@ -5571,6 +5590,97 @@ func TestRecoverPasswordThroughManualCode(t *testing.T) {
 	_ = rawDB.QueryRow(`SELECT password FROM users WHERE domain=? AND email=?`, "localhost", "admin@example.com").Scan(&password)
 	if password != "manual-password" {
 		t.Fatalf("password = %q, want manual-password", password)
+	}
+}
+
+func TestRecoveryUsesBrowserLanguageForInterfaceAndQueuedEmail(t *testing.T) {
+	t.Setenv("SITEBRUSH_SERVICE_MAIL_MODE", "local")
+	withEmailSPFAllowed(t)
+	application, rawDB := newTestApplication(t)
+	if _, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "admin@example.com", "old-password"); err != nil {
+		t.Fatalf("insert user: %v", err)
+	}
+
+	requestForm := url.Values{"recovery_action": {"request"}, "email": {"admin@example.com"}, "captcha": {"1234"}}
+	request := httptest.NewRequest(http.MethodPost, "https://localhost/?recover", strings.NewReader(requestForm.Encode()))
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	request.Header.Set("Accept-Language", "de-DE,de;q=0.9,en;q=0.8")
+	request.AddCookie(&http.Cookie{Name: "sitebrush_captcha", Value: "1234"})
+	response := httptest.NewRecorder()
+	application.route(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("request status = %d, body=%q", response.Code, response.Body.String())
+	}
+	for _, expectedFragment := range []string{"Die Wiederherstellungs-E-Mail wurde gesendet.", "6-stelliger Wiederherstellungscode", "Neues Passwort", "Neues Passwort festlegen"} {
+		if !strings.Contains(response.Body.String(), expectedFragment) {
+			t.Fatalf("German recovery interface is missing %q in %s", expectedFragment, response.Body.String())
+		}
+	}
+
+	var languageCode string
+	if err := rawDB.QueryRow(`SELECT language_code FROM email_confirmations WHERE domain=? AND action='recover' AND email=?`, "localhost", "admin@example.com").Scan(&languageCode); err != nil {
+		t.Fatalf("read recovery language: %v", err)
+	}
+	if languageCode != "de" {
+		t.Fatalf("recovery language = %q, want de", languageCode)
+	}
+	select {
+	case mailJob := <-application.emailDelivery:
+		if mailJob.Message.Subject != emailSubjectForLanguage("de", "recover", "localhost") || !strings.Contains(mailJob.Message.Body, "SiteBrush-Wiederherstellungscode") || !strings.Contains(mailJob.Message.HTMLBody, `lang="de"`) || !strings.Contains(mailJob.Message.HTMLBody, "Neues Passwort festlegen") {
+			t.Fatalf("German recovery email is not fully localized: %#v", mailJob.Message)
+		}
+	default:
+		t.Fatal("recovery email was not queued")
+	}
+}
+
+func TestPasswordRecoveryTranslationsAndEmailsCoverEveryLanguage(t *testing.T) {
+	requiredRecoveryKeys := []string{
+		"recover_new_password",
+		"recover_confirm_password",
+		"recover_code_label",
+		"recover_code_help",
+		"recover_save_password",
+		"recover_status_sent",
+		"recover_status_invalid",
+		"recover_status_rate_limited",
+		"recover_status_password_required",
+		"recover_status_password_mismatch",
+	}
+	englishRecoverySubject := emailSubjectForLanguage("en", "recover", "example.com")
+	englishRecoveryBody := recoveryEmailBodyForLanguage("en", "example.com", "123456")
+	englishPasswordSubject := emailSubjectForLanguage("en", "profile_password", "example.com")
+	englishPasswordBody := emailBodyForLanguage("en", "profile_password", "example.com", "123456")
+	for languageCode, translations := range translationCatalog {
+		for _, translationKey := range requiredRecoveryKeys {
+			if strings.TrimSpace(translations[translationKey]) == "" {
+				t.Fatalf("missing %s translation for %s", translationKey, languageCode)
+			}
+		}
+		recoverySubject := emailSubjectForLanguage(languageCode, "recover", "example.com")
+		recoveryBody := recoveryEmailBodyForLanguage(languageCode, "example.com", "123456")
+		recoveryHTML := recoveryEmailHTMLBodyForLanguage(languageCode, "example.com", "123456", "https://example.com/?recover=&recovery_token=token")
+		passwordSubject := emailSubjectForLanguage(languageCode, "profile_password", "example.com")
+		passwordBody := emailBodyForLanguage(languageCode, "profile_password", "example.com", "123456")
+		passwordHTML := emailHTMLBodyForServiceMail(languageCode, "password_change_code", "example.com", "123456")
+		for outputName, outputText := range map[string]string{
+			"recovery subject": recoverySubject,
+			"recovery body":    recoveryBody,
+			"recovery HTML":    recoveryHTML,
+			"password subject": passwordSubject,
+			"password body":    passwordBody,
+			"password HTML":    passwordHTML,
+		} {
+			if strings.TrimSpace(outputText) == "" {
+				t.Fatalf("empty %s for %s", outputName, languageCode)
+			}
+		}
+		if !strings.Contains(recoveryBody, "123456") || !strings.Contains(passwordBody, "123456") || !strings.Contains(recoveryHTML, `lang="`+languageCode+`"`) || !strings.Contains(passwordHTML, `lang="`+languageCode+`"`) || !strings.Contains(recoveryHTML, translations["recover_save_password"]) {
+			t.Fatalf("password email content is incomplete for %s", languageCode)
+		}
+		if languageCode != "en" && (recoverySubject == englishRecoverySubject || recoveryBody == englishRecoveryBody || passwordSubject == englishPasswordSubject || passwordBody == englishPasswordBody) {
+			t.Fatalf("password email fell back to English for %s", languageCode)
+		}
 	}
 }
 
@@ -9521,6 +9631,30 @@ func TestPublicTrialFormUsesUnifiedCopyDialog(t *testing.T) {
 		if !strings.Contains(script, expectedFragment) {
 			t.Fatalf("unified public trial script does not contain %q", expectedFragment)
 		}
+	}
+}
+
+func TestCopySiteDialogKeepsWholeSiteCheckboxInteractive(t *testing.T) {
+	scriptBytes, readErr := embeddedWebFiles.ReadFile("web/static/site_copy.js")
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	script := string(scriptBytes)
+	for _, expectedFragment := range []string{
+		`overlayElement.setAttribute('data-sitebrush-owned', 'true')`,
+		`.SiteBrushCopySiteCheckbox input[type="checkbox"]`,
+		`pointer-events:auto!important`,
+		`wholeSiteElement.checked = Boolean(configuration && configuration.copyWholeSite)`,
+		`wholeSiteElement.addEventListener('change', invalidatePreview)`,
+	} {
+		if !strings.Contains(script, expectedFragment) {
+			t.Fatalf("copy-site checkbox contract is missing %q", expectedFragment)
+		}
+	}
+
+	menuScript := buildContextMenuScript(true, false, false, false, true, "/", "example.com", 0, 0, "", translationsForLanguageCode("en"))
+	if strings.Contains(menuScript, `"copyWholeSite":true`) {
+		t.Fatal("right-menu copy dialog unexpectedly enables whole-site copying by default")
 	}
 }
 

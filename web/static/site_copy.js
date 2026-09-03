@@ -26,7 +26,8 @@
       '.SiteBrushCopySiteSecondaryGrid{display:grid;grid-template-columns:1fr 1fr;gap:10px}',
       '.SiteBrushCopySiteField{display:grid;gap:5px;font-size:13px;font-weight:700}',
       '.SiteBrushCopySiteInput,.SiteBrushCopySiteSelect{width:100%;box-sizing:border-box;border:1px solid rgba(149,229,239,.28);border-radius:10px;background:rgba(0,0,0,.22);color:#fff;font:inherit;font-weight:400;padding:9px 10px}',
-      '.SiteBrushCopySiteCheckbox{display:flex;align-items:center;gap:8px;font-size:14px;font-weight:700}',
+      '.SiteBrushCopySiteCheckbox{display:flex;align-items:center;gap:8px;font-size:14px;font-weight:700;cursor:pointer}',
+      '.SiteBrushCopySiteCheckbox input[type="checkbox"]{appearance:auto!important;display:inline-block!important;position:static!important;width:16px!important;height:16px!important;margin:0!important;opacity:1!important;pointer-events:auto!important;cursor:pointer!important}',
       '.SiteBrushCopySiteButton{display:inline-flex;align-items:center;justify-content:center;gap:7px;border:1px solid rgba(149,229,239,.62);border-radius:10px;background:rgba(149,229,239,.18);color:#fff;font:inherit;font-weight:700;padding:9px 12px;cursor:pointer;white-space:nowrap}',
       '.SiteBrushCopySiteButton img{width:18px;height:18px}',
       '.SiteBrushCopySiteButton:disabled{opacity:.58;cursor:not-allowed}',
@@ -399,6 +400,7 @@
     const webSocketQuery = String(configuration && configuration.webSocketQuery ? configuration.webSocketQuery : 'grab_ws');
     const publicTrialMode = Boolean(configuration && configuration.publicTrial);
     const overlayElement = createElement('div', 'SiteBrushCopySiteOverlay');
+    overlayElement.setAttribute('data-sitebrush-owned', 'true');
     const dialogElement = createElement('div', 'SiteBrushCopySiteDialog');
     const headerElement = createElement('div', 'SiteBrushCopySiteHeader');
     const titleElement = createElement('h2', 'SiteBrushCopySiteTitle');
