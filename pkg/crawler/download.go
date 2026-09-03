@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
-	"strings"
 	"time"
 
 	"github.com/matveynator/sitebrush/v2/pkg/outboundhttp"
@@ -83,13 +82,13 @@ func DownloadHTMLPageContext(ctx context.Context, client *http.Client, pageURL *
 	if response.StatusCode < 200 || response.StatusCode > 299 {
 		return result, fmt.Errorf("page download failed: %s", response.Status)
 	}
-	contentType := strings.ToLower(strings.TrimSpace(strings.Split(response.Header.Get("Content-Type"), ";")[0]))
-	if contentType != "" && contentType != "text/html" && contentType != "application/xhtml+xml" {
-		return result, nil
-	}
 	pageBytes, readErr := readHTMLBodyWithLimit(response.Body, maxHTMLDownloadBytes)
 	if readErr != nil {
 		return result, readErr
+	}
+	contentType := DetectedResourceContentType(pageURL.String(), response.Header.Get("Content-Type"), pageBytes)
+	if contentType != "text/html" && contentType != "application/xhtml+xml" {
+		return result, nil
 	}
 	decodedHTML := DecodeHTML(pageBytes, response.Header.Get("Content-Type"))
 	result.HTML = decodedHTML.Text

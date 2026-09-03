@@ -32,13 +32,14 @@ type Parser struct {
 	NormalizeURL                         func(rawRef string, baseURL *url.URL, referenceContext ReferenceContext) (string, bool)
 	RewriteResourceReference             func(rawRef string, baseURL *url.URL, depth int, referenceContext ReferenceContext) string
 	RewriteDocumentResourceReference     func(rawRef string, baseURL *url.URL, depth int) string
+	RewriteOpenGraphReference            func(propertyName, rawRef string, baseURL *url.URL, depth int) string
 	DocumentURLRewriter                  func(normalizedURL string) (string, bool)
 	ShouldBlankEmbeddedDocumentReference func(tagName, normalizedURL string) bool
 	ShouldRewriteImageAltResource        func(rawRef string, baseURL *url.URL) bool
 }
 
 var (
-	htmlResourcePattern            = regexp.MustCompile(`(?is)<(a|area|link|script|img|source|video|audio|iframe|embed|object|form)\b[^>]*?\s(href|xlink:href|src|poster|data|action)\s*=\s*["']([^"']+)["']`)
+	htmlResourcePattern            = regexp.MustCompile(`(?is)<(a|area|link|script|img|source|video|audio|iframe|embed|object|form)\b[^>]*?\s(href|xlink:href|src|poster|data|action)\s*=\s*["']([^"']+)["'][^>]*>`)
 	htmlTagPattern                 = regexp.MustCompile(`(?is)<[a-z][^>]*>`)
 	htmlLazyResourcePattern        = regexp.MustCompile(`(?is)\b(data-src|data-original|data-original-src|data-lazy-src|data-bg|data-background-image)\s*=\s*["']([^"']+)["']`)
 	htmlImageAltPattern            = regexp.MustCompile(`(?is)<img\b[^>]*\balt\s*=\s*["']([^"']+)["'][^>]*>`)
@@ -49,6 +50,9 @@ var (
 	cssImportPattern               = regexp.MustCompile(`(?is)@import\s+(?:url\(\s*)?['"]?([^'")\s;]+)['"]?`)
 	staticURLPattern               = regexp.MustCompile(`(?is)https?://[^\s"'<>\\)]+`)
 	linkManifestPattern            = regexp.MustCompile(`(?is)\brel\s*=\s*["'][^"']*\bmanifest\b[^"']*["']`)
+	htmlDownloadAttributePattern   = regexp.MustCompile(`(?is)\sdownload(?:\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+))?(?:\s|/?>)`)
+	htmlMetaTagPattern             = regexp.MustCompile(`(?is)<meta\b[^>]*>`)
+	htmlAttributePattern           = regexp.MustCompile(`(?is)\b([a-z_:][-a-z0-9_:.]*)\s*=\s*(?:"([^"]*)"|'([^']*)')`)
 	javascriptURLReferenceReplacer = strings.NewReplacer(
 		`\/`, `/`,
 		`\u002f`, `/`, `\u002F`, `/`, `\x2f`, `/`, `\x2F`, `/`,
@@ -61,7 +65,13 @@ var (
 
 func (parser Parser) RewriteTextReferences(source, baseRawURL string, depth int) string {
 	baseURL, _ := url.Parse(baseRawURL)
+	source = parser.rewriteOpenGraphReferences(source, baseURL, depth)
 	preservedReferences := make(map[string]string)
+	preserveReference := func(match, rawReference string) string {
+		placeholder := "sitebrush-preserved-reference:" + base64.RawURLEncoding.EncodeToString([]byte(rawReference)) + ":"
+		preservedReferences[placeholder] = rawReference
+		return strings.Replace(match, rawReference, placeholder, 1)
+	}
 	source = htmlTagPattern.ReplaceAllStringFunc(source, func(tag string) string {
 		if !strings.Contains(strings.ToLower(tag), "data-sitebrush-live-asset") {
 			return tag
@@ -71,7 +81,7 @@ func (parser Parser) RewriteTextReferences(source, baseRawURL string, depth int)
 			if len(parts) != 4 || !isLiveSiteBrushAssetReference(parts[3]) {
 				return match
 			}
-			placeholder := "sitebrush-live-asset:" + base64.RawURLEncoding.EncodeToString([]byte(parts[3]))
+			placeholder := "sitebrush-live-asset:" + base64.RawURLEncoding.EncodeToString([]byte(parts[3])) + ":"
 			preservedReferences[placeholder] = parts[3]
 			return strings.Replace(match, parts[3], placeholder, 1)
 		})
@@ -88,7 +98,7 @@ func (parser Parser) RewriteTextReferences(source, baseRawURL string, depth int)
 			return match
 		}
 		if strings.Contains(strings.ToLower(match), "data-sitebrush-live-asset") && isLiveSiteBrushAssetReference(parts[3]) {
-			placeholder := "sitebrush-live-asset:" + base64.RawURLEncoding.EncodeToString([]byte(parts[3]))
+			placeholder := "sitebrush-live-asset:" + base64.RawURLEncoding.EncodeToString([]byte(parts[3])) + ":"
 			preservedReferences[placeholder] = parts[3]
 			return strings.Replace(match, parts[3], placeholder, 1)
 		}
@@ -102,13 +112,23 @@ func (parser Parser) RewriteTextReferences(source, baseRawURL string, depth int)
 		}
 		normalizedURL, blocked := parser.normalize(parts[3], baseURL, ReferenceDocument)
 		if isNavigationDocumentAttribute(tagName, attributeName) {
-			if blocked || parser.DocumentURLRewriter == nil || !IsWholeSitePageURLString(normalizedURL) {
-				return match
+			if blocked {
+				return preserveReference(match, parts[3])
 			}
-			if rewrittenURL, ok := parser.DocumentURLRewriter(normalizedURL); ok {
-				return strings.Replace(match, parts[3], rewrittenURL, 1)
+			if IsWholeSitePageURLString(normalizedURL) {
+				if parser.DocumentURLRewriter != nil {
+					if rewrittenURL, ok := parser.DocumentURLRewriter(normalizedURL); ok {
+						return strings.Replace(match, parts[3], rewrittenURL, 1)
+					}
+				}
 			}
-			return match
+			if isLinkedResourceDocumentAttribute(tagName, attributeName, match, normalizedURL) && parser.RewriteDocumentResourceReference != nil {
+				rewrittenReference := parser.RewriteDocumentResourceReference(parts[3], baseURL, depth)
+				if rewrittenReference != parts[3] && !strings.HasPrefix(rewrittenReference, "http://") && !strings.HasPrefix(rewrittenReference, "https://") {
+					return strings.Replace(match, parts[3], rewrittenReference, 1)
+				}
+			}
+			return preserveReference(match, parts[3])
 		}
 		if isEmbeddedDocumentAttribute(tagName, attributeName) {
 			if !blocked && parser.DocumentURLRewriter != nil && IsWholeSitePageURLString(normalizedURL) {
@@ -221,7 +241,22 @@ func (parser Parser) rewriteInlineJavaScriptReferences(source, baseRawURL string
 }
 
 func (parser Parser) RewriteStaticURLTextReferences(source string, baseURL *url.URL, depth int) string {
-	return staticURLPattern.ReplaceAllStringFunc(source, func(rawURL string) string {
+	preservedHTMLReferences := make(map[string]string)
+	source = rewriteOpenGraphMetaReferences(source, func(_ string, rawReference string) string {
+		placeholder := "sitebrush-meta-reference:" + base64.RawURLEncoding.EncodeToString([]byte(rawReference)) + ":"
+		preservedHTMLReferences[placeholder] = rawReference
+		return placeholder
+	})
+	source = htmlResourcePattern.ReplaceAllStringFunc(source, func(match string) string {
+		parts := htmlResourcePattern.FindStringSubmatch(match)
+		if len(parts) != 4 {
+			return match
+		}
+		placeholder := "sitebrush-html-reference:" + base64.RawURLEncoding.EncodeToString([]byte(parts[3])) + ":"
+		preservedHTMLReferences[placeholder] = parts[3]
+		return strings.Replace(match, parts[3], placeholder, 1)
+	})
+	rewritten := staticURLPattern.ReplaceAllStringFunc(source, func(rawURL string) string {
 		resourceURL, trailingText := SplitStaticResourceURLTrailingText(rawURL)
 		if !HasAllowedResourceExtension(resourceURL) {
 			return rawURL
@@ -235,6 +270,55 @@ func (parser Parser) RewriteStaticURLTextReferences(source string, baseURL *url.
 			return rawURL
 		}
 		return rewrittenURL + trailingText
+	})
+	for placeholder, originalReference := range preservedHTMLReferences {
+		rewritten = strings.ReplaceAll(rewritten, placeholder, originalReference)
+	}
+	return rewritten
+}
+
+func (parser Parser) rewriteOpenGraphReferences(source string, baseURL *url.URL, depth int) string {
+	if parser.RewriteOpenGraphReference == nil {
+		return source
+	}
+	return rewriteOpenGraphMetaReferences(source, func(propertyName, rawReference string) string {
+		return parser.RewriteOpenGraphReference(propertyName, rawReference, baseURL, depth)
+	})
+}
+
+func rewriteOpenGraphMetaReferences(source string, rewriteReference func(propertyName, rawReference string) string) string {
+	return htmlMetaTagPattern.ReplaceAllStringFunc(source, func(metaTag string) string {
+		propertyName := ""
+		contentStart := -1
+		contentEnd := -1
+		for _, attributeIndexes := range htmlAttributePattern.FindAllStringSubmatchIndex(metaTag, -1) {
+			if len(attributeIndexes) != 8 {
+				continue
+			}
+			attributeName := strings.ToLower(metaTag[attributeIndexes[2]:attributeIndexes[3]])
+			valueStart, valueEnd := attributeIndexes[4], attributeIndexes[5]
+			if valueStart < 0 {
+				valueStart, valueEnd = attributeIndexes[6], attributeIndexes[7]
+			}
+			if valueStart < 0 {
+				continue
+			}
+			switch attributeName {
+			case "property":
+				propertyName = strings.ToLower(strings.TrimSpace(metaTag[valueStart:valueEnd]))
+			case "content":
+				contentStart, contentEnd = valueStart, valueEnd
+			}
+		}
+		if propertyName != "og:url" && propertyName != "og:image" {
+			return metaTag
+		}
+		if contentStart < 0 || contentEnd < contentStart {
+			return metaTag
+		}
+		rawReference := metaTag[contentStart:contentEnd]
+		rewrittenReference := rewriteReference(propertyName, rawReference)
+		return metaTag[:contentStart] + rewrittenReference + metaTag[contentEnd:]
 	})
 }
 
@@ -604,6 +688,18 @@ func isNavigationDocumentAttribute(tagName, attributeName string) bool {
 		return attributeName == "href" || attributeName == "xlink:href"
 	case "form":
 		return attributeName == "action"
+	default:
+		return false
+	}
+}
+
+func isLinkedResourceDocumentAttribute(tagName, attributeName, tag, normalizedURL string) bool {
+	switch strings.ToLower(strings.TrimSpace(tagName)) {
+	case "a", "area":
+		if attributeName != "href" && attributeName != "xlink:href" {
+			return false
+		}
+		return HasAllowedResourceExtension(normalizedURL) || htmlDownloadAttributePattern.MatchString(tag)
 	default:
 		return false
 	}

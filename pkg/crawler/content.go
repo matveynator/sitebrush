@@ -1,7 +1,10 @@
 package crawler
 
 import (
+	"bytes"
+	"encoding/xml"
 	"mime"
+	"net/http"
 	"sort"
 	"strings"
 )
@@ -44,6 +47,56 @@ func EffectiveResourceContentType(resourceURL, contentType string) string {
 		return "text/css"
 	default:
 		return contentType
+	}
+}
+
+func DetectedResourceContentType(resourceURL, declaredContentType string, contentSample []byte) string {
+	declaredContentType = EffectiveResourceContentType(resourceURL, declaredContentType)
+	if len(contentSample) == 0 {
+		return declaredContentType
+	}
+
+	detectedContentType := NormalizedResourceContentType(http.DetectContentType(contentSample))
+	if detectedContentType == "text/html" || detectedContentType == "application/xhtml+xml" {
+		return detectedContentType
+	}
+	if isSVGContent(contentSample) {
+		return "image/svg+xml"
+	}
+	if declaredContentType == "image/svg+xml" && isGenericXMLContentType(detectedContentType) {
+		return declaredContentType
+	}
+	if detectedContentType != "text/plain" && detectedContentType != "application/octet-stream" {
+		return detectedContentType
+	}
+	if declaredContentType != "" {
+		return declaredContentType
+	}
+	return detectedContentType
+}
+
+func isSVGContent(contentSample []byte) bool {
+	decoder := xml.NewDecoder(bytes.NewReader(contentSample))
+	decoder.Strict = false
+	for {
+		token, err := decoder.Token()
+		if err != nil {
+			return false
+		}
+		startElement, found := token.(xml.StartElement)
+		if !found {
+			continue
+		}
+		return strings.EqualFold(strings.TrimSpace(startElement.Name.Local), "svg")
+	}
+}
+
+func isGenericXMLContentType(contentType string) bool {
+	switch contentType {
+	case "text/xml", "application/xml", "text/plain", "application/octet-stream":
+		return true
+	default:
+		return false
 	}
 }
 
@@ -124,6 +177,37 @@ func ResourceExtensionFromContentType(contentType string) string {
 	}
 	sort.Strings(extensions)
 	return strings.ToLower(strings.TrimSpace(extensions[0]))
+}
+
+func DownloadedResourceExtension(resourceURL, contentType string) string {
+	resourceExtension := ResourceExtension(resourceURL)
+	normalizedContentType := NormalizedResourceContentType(contentType)
+
+	// Generic response types do not describe the downloaded format. In that
+	// case the source URL remains the best available naming hint.
+	switch normalizedContentType {
+	case "", "application/octet-stream", "binary/octet-stream", "text/plain":
+		return resourceExtension
+	case "application/zip":
+		if isZIPContainerExtension(resourceExtension) {
+			return resourceExtension
+		}
+	}
+
+	contentExtension := ResourceExtensionFromContentType(normalizedContentType)
+	if contentExtension != "" {
+		return contentExtension
+	}
+	return resourceExtension
+}
+
+func isZIPContainerExtension(extension string) bool {
+	switch strings.ToLower(strings.TrimSpace(extension)) {
+	case ".docx", ".dotx", ".xlsx", ".xlsm", ".pptx", ".ppsx", ".potx", ".epub", ".jar", ".war", ".ear", ".apk":
+		return true
+	default:
+		return false
+	}
 }
 
 func NormalizeMirroredAssetReference(assetPath string) string {

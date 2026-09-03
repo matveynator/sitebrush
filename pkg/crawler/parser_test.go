@@ -72,6 +72,136 @@ func TestParserDoesNotTreatNavigationOrEmbeddedDocumentsAsPageResources(t *testi
 	}
 }
 
+func TestParserRewritesLinkedFileAsDocumentResource(t *testing.T) {
+	source := `<a href="/maps/2018-2_map.jpg">Open map</a><a href="/download?id=manual" download>Manual</a><a href="/about.php">About</a><form action="/search"><button>Search</button></form>`
+	linkedResources := make([]string, 0, 2)
+	parser := Parser{
+		NormalizeURL: NormalizeURL,
+		RewriteDocumentResourceReference: func(rawRef string, baseURL *url.URL, _ int) string {
+			normalizedURL, blocked := NormalizeURL(rawRef, baseURL, ReferenceDocument)
+			if blocked {
+				return rawRef
+			}
+			linkedResources = append(linkedResources, normalizedURL)
+			return "/p/" + path.Base(normalizedURL)
+		},
+		DocumentURLRewriter: func(normalizedURL string) (string, bool) {
+			return "/local/about.php", strings.HasSuffix(normalizedURL, "/about.php")
+		},
+	}
+
+	rewritten := parser.RewriteTextReferences(source, "https://kavtrans.ru/", 0)
+	if !slices.Equal(linkedResources, []string{"https://kavtrans.ru/maps/2018-2_map.jpg", "https://kavtrans.ru/download?id=manual"}) {
+		t.Fatalf("linked resources = %#v", linkedResources)
+	}
+	for _, expectedReference := range []string{`href="/p/2018-2_map.jpg"`, `href="/p/download?id=manual"`, `href="/local/about.php"`, `action="/search"`} {
+		if !strings.Contains(rewritten, expectedReference) {
+			t.Fatalf("expected reference %q missing from %s", expectedReference, rewritten)
+		}
+	}
+}
+
+func TestParserDoesNotFetchExternalNavigationLinks(t *testing.T) {
+	externalLinks := []string{
+		"http://arhyz-resort.ru/",
+		"http://hotel.krutizna.ru",
+		"http://hotelcheget.ru",
+		"http://www.alexika.ru/catalog/palatki-tracking-freedom-2-new.html",
+		"http://www.dombayclub.ru/index.php?showuser=3737",
+		"http://www.gosuslugi.ru/43708",
+		"http://www.hotelscazka.ru/main.html",
+		"http://www.kogutai.ru",
+		"http://www.m-hotel.info",
+		"http://www.narodnakra.ru",
+		"http://www.pikevropy.ru",
+		"http://www.winterparadize.ru",
+		"https://binged.it/2iq7S0l",
+		"https://esbyt.elseti.ru/index.php/13-pyatigorsk/russkoe-geograficheskoe-obshchestvo/publikatsii/33-kali-050607",
+		"https://sakrusenergo.ge/ru/%D0%BA%D0%B0%D0%B2%D0%BA%D0%B0%D1%81%D0%B8%D0%BE%D0%BD%D0%B8-500kv/",
+		"https://t.me/kavtrans",
+		"https://t.me/kavtrans_ru",
+		"https://www.rgo.ru/ru/article/pervyy-v-gorah-kavkaza-otmechaem-yubiley-chlena-rgo-andreya-pastuhova",
+	}
+	var source strings.Builder
+	for _, externalLink := range externalLinks {
+		source.WriteString(`<a href="` + externalLink + `">External page</a>`)
+	}
+	parser := Parser{
+		NormalizeURL: NormalizeURL,
+		RewriteResourceReference: func(rawRef string, _ *url.URL, _ int, _ ReferenceContext) string {
+			t.Fatalf("external navigation link was processed as a static resource: %s", rawRef)
+			return rawRef
+		},
+		RewriteDocumentResourceReference: func(rawRef string, _ *url.URL, _ int) string {
+			t.Fatalf("external navigation link was treated as a resource: %s", rawRef)
+			return rawRef
+		},
+	}
+
+	rewritten := parser.RewriteTextReferences(source.String(), "https://kavtrans.ru/", 0)
+	if rewritten != source.String() {
+		t.Fatalf("external navigation links changed: %s", rewritten)
+	}
+}
+
+func TestParserStillFetchesImageResourcesWithFailedSourceURLs(t *testing.T) {
+	source := `<img src="http://kavtrans.ru/overlays/02.png"><img src="http://kavtrans.ru/timthumb.php?src=gallery/2018-2/07.jpg&amp;w=880&amp;zc=1&amp;q=75">`
+	rewrittenResources := make([]string, 0, 2)
+	parser := Parser{
+		NormalizeURL: NormalizeURL,
+		RewriteResourceReference: func(rawRef string, baseURL *url.URL, _ int, referenceContext ReferenceContext) string {
+			normalizedURL, blocked := NormalizeURL(rawRef, baseURL, referenceContext)
+			if blocked {
+				t.Fatalf("image resource was blocked: %s", rawRef)
+			}
+			rewrittenResources = append(rewrittenResources, normalizedURL)
+			return rawRef
+		},
+	}
+
+	parser.RewriteTextReferences(source, "http://kavtrans.ru/", 0)
+	if len(rewrittenResources) != 2 {
+		t.Fatalf("image resources = %#v, want both source URLs", rewrittenResources)
+	}
+}
+
+func TestParserRewritesOpenGraphURLAndImageMetadata(t *testing.T) {
+	source := `<head><META CONTENT="http://kavtrans.ru/Trip.php" PROPERTY="OG:URL"><meta property='og:image' content='/gallery/cover.jpg'><meta property="og:title" content="Trip"></head>`
+	metadataReferences := make([]string, 0, 2)
+	resourceReferences := make([]string, 0)
+	parser := Parser{
+		NormalizeURL: NormalizeURL,
+		RewriteOpenGraphReference: func(propertyName, rawRef string, _ *url.URL, _ int) string {
+			metadataReferences = append(metadataReferences, propertyName+"="+rawRef)
+			switch propertyName {
+			case "og:url":
+				return "https://copy.example/Trip.php"
+			case "og:image":
+				return "https://copy.example/p/cover.jpg"
+			default:
+				return rawRef
+			}
+		},
+		RewriteResourceReference: func(rawRef string, _ *url.URL, _ int, _ ReferenceContext) string {
+			resourceReferences = append(resourceReferences, rawRef)
+			return rawRef
+		},
+	}
+
+	rewritten := parser.RewriteTextReferences(source, "http://kavtrans.ru/", 0)
+	if !slices.Equal(metadataReferences, []string{"og:url=http://kavtrans.ru/Trip.php", "og:image=/gallery/cover.jpg"}) {
+		t.Fatalf("metadata references = %#v", metadataReferences)
+	}
+	if len(resourceReferences) != 0 {
+		t.Fatalf("rewritten Open Graph values entered generic resource handling: %#v", resourceReferences)
+	}
+	for _, expectedReference := range []string{`CONTENT="https://copy.example/Trip.php"`, `content='https://copy.example/p/cover.jpg'`} {
+		if !strings.Contains(rewritten, expectedReference) {
+			t.Fatalf("expected Open Graph reference %q missing from %s", expectedReference, rewritten)
+		}
+	}
+}
+
 func TestParserRewritesDataManifestRelativeURLs(t *testing.T) {
 	baseURL, parseErr := url.Parse("https://karman.cafe/")
 	if parseErr != nil {

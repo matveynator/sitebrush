@@ -7865,7 +7865,7 @@ func TestMirrorRemotePageResolvesRootAssetJSReferencesWithoutDuplicatingDirector
 	}
 }
 
-func TestPreviewGrabResourcesDoesNotDownloadBinaryBodies(t *testing.T) {
+func TestPreviewGrabResourcesReadsOnlyBinaryContentSample(t *testing.T) {
 	pageRawURL := "https://preview.example/"
 	sourceHTML := `<!doctype html><html><head><link rel="stylesheet" href="/app.css"></head><body><img src="/hero.png"></body></html>`
 	stylesheetBody := `body{background:url("/hero.png")}`
@@ -7900,8 +7900,8 @@ func TestPreviewGrabResourcesDoesNotDownloadBinaryBodies(t *testing.T) {
 		t.Fatal(parseErr)
 	}
 	previewResources := previewGrabResources(pageURL, sourceHTML, nil, "", grabSourceOptions{})
-	if imageGETCount != 0 {
-		t.Fatalf("preview downloaded binary image body %d times", imageGETCount)
+	if imageGETCount != 1 {
+		t.Fatalf("preview binary image sample requests = %d, want 1", imageGETCount)
 	}
 	foundImage := false
 	for _, previewResource := range previewResources {
@@ -7917,7 +7917,7 @@ func TestPreviewGrabResourcesDoesNotDownloadBinaryBodies(t *testing.T) {
 	}
 }
 
-func TestPreviewResourceMetadataFallsBackToRangeGET(t *testing.T) {
+func TestPreviewResourceMetadataReadsContentSampleWithRangeGET(t *testing.T) {
 	pageRawURL := "https://preview.example/"
 	imageURL := "https://assets.example/render?id=hero"
 	sourceHTML := `<img src="` + imageURL + `">`
@@ -7930,12 +7930,9 @@ func TestPreviewResourceMetadataFallsBackToRangeGET(t *testing.T) {
 			if request.URL.String() != imageURL {
 				return &http.Response{StatusCode: http.StatusNotFound, Status: "404 Not Found", Header: header, Body: io.NopCloser(strings.NewReader("")), Request: request}, nil
 			}
-			if request.Method == http.MethodHead {
-				return &http.Response{StatusCode: http.StatusMethodNotAllowed, Status: "405 Method Not Allowed", Header: header, Body: io.NopCloser(strings.NewReader("")), Request: request}, nil
-			}
 			rangeRequestHeaders <- request.Header.Get("Range")
 			header.Set("Content-Type", "image/jpeg")
-			header.Set("Content-Range", "bytes 0-0/12345")
+			header.Set("Content-Range", "bytes 0-511/12345")
 			return &http.Response{StatusCode: http.StatusPartialContent, Status: "206 Partial Content", Header: header, Body: io.NopCloser(strings.NewReader("x")), ContentLength: 1, Request: request}, nil
 		})}
 	}
@@ -7956,11 +7953,11 @@ func TestPreviewResourceMetadataFallsBackToRangeGET(t *testing.T) {
 	}
 	select {
 	case rangeHeader := <-rangeRequestHeaders:
-		if rangeHeader != "bytes=0-0" {
-			t.Fatalf("Range = %q, want bytes=0-0", rangeHeader)
+		if rangeHeader != "bytes=0-511" {
+			t.Fatalf("Range = %q, want bytes=0-511", rangeHeader)
 		}
 	default:
-		t.Fatal("metadata fallback did not send a range GET")
+		t.Fatal("metadata check did not send a range GET")
 	}
 }
 
@@ -8510,7 +8507,7 @@ func TestMirrorRemotePageImportsCrossDomainAssetsWithoutURLExtensions(t *testing
 func TestMirrorRemotePageImportsDocumentMediaAndArchiveLinks(t *testing.T) {
 	pageRawURL := "https://page.example/page"
 	sourceHTML := `<!doctype html><html><body>` +
-		`<a href="https://cdn.example/download?id=manual">Manual</a>` +
+		`<a href="https://cdn.example/download?id=manual" download>Manual</a>` +
 		`<a href="https://cdn.example/archive.zip">Archive</a>` +
 		`<a href="https://cdn.example/feed.json">Feed</a>` +
 		`<video controls src="https://cdn.example/media/intro.mp4"></video>` +
@@ -9099,6 +9096,321 @@ func TestGrabPageRewritesDynamicImageURLWithQueryAcrossWholeSiteImport(t *testin
 	}
 	if jpgCount != 1 {
 		t.Fatalf("stored jpg count = %d, want 1: %#v", jpgCount, storedFiles)
+	}
+}
+
+func TestGrabPageUsesImageExtensionForDynamicPHPResource(t *testing.T) {
+	application, rawDB := newTestApplication(t)
+	_, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "admin@example.com", "old")
+	if err != nil {
+		t.Fatalf("insert user: %v", err)
+	}
+
+	const sourceURL = "http://kavtrans.ru/"
+	const dynamicImageURL = "http://kavtrans.ru/timthumb.php?src=gallery/2018-2/05.jpg&w=550&zc=1&q=75"
+	const directImageURL = "http://kavtrans.ru/gallery/duplicate.jpg"
+	const imageBody = "\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01"
+	previousGrabHTTPClient := newGrabHTTPClient
+	newGrabHTTPClient = func() *http.Client {
+		return &http.Client{Transport: fakeGrabTransport{responses: map[string]fakeGrabResponse{
+			sourceURL:       {contentType: "text/html", body: `<!doctype html><html><body><img src="` + dynamicImageURL + `"><img src="` + directImageURL + `"></body></html>`},
+			dynamicImageURL: {contentType: "text/html; charset=utf-8", body: imageBody},
+			directImageURL:  {contentType: "image/jpeg", body: imageBody},
+		}}}
+	}
+	defer func() {
+		newGrabHTTPClient = previousGrabHTTPClient
+	}()
+
+	form := url.Values{}
+	form.Set("path", "/")
+	form.Set("source_url", sourceURL)
+	form.Set("copy_whole_site", "1")
+	form.Set("import_selection_confirmed", "1")
+	form.Add("import_resource_url", dynamicImageURL)
+	form.Add("import_resource_url", directImageURL)
+	request := httptest.NewRequest(http.MethodPost, "http://localhost:8080/?grab", strings.NewReader(form.Encode()))
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	request.Header.Set("Accept", "application/json")
+	request.AddCookie(newAdminSessionCookie(t, application, "admin@example.com"))
+	response := httptest.NewRecorder()
+	application.route(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("whole-site import status = %d, body=%q", response.Code, response.Body.String())
+	}
+
+	expectedFileName, hashErr := contentHashName([]byte(imageBody), ".jpg")
+	if hashErr != nil {
+		t.Fatal(hashErr)
+	}
+	expectedReference := "/p/" + expectedFileName
+	var pageHTML string
+	if err := rawDB.QueryRow(`SELECT html FROM pages WHERE domain=? AND path=?`, "localhost", "/").Scan(&pageHTML); err != nil {
+		t.Fatalf("read imported page: %v", err)
+	}
+	if strings.Count(pageHTML, expectedReference) != 2 {
+		t.Fatalf("dynamic image references were not deduplicated to %q: %s", expectedReference, pageHTML)
+	}
+	if strings.Contains(pageHTML, ".php") {
+		t.Fatalf("imported page kept PHP extension for JPEG resource: %s", pageHTML)
+	}
+
+	storedFiles, listErr := listStoredFiles(application.domainFilesDirForDomain("localhost"))
+	if listErr != nil {
+		t.Fatal(listErr)
+	}
+	if len(storedFiles) != 1 || filepath.Base(storedFiles[0]) != expectedFileName {
+		t.Fatalf("stored files = %#v, want one deduplicated JPEG named %q", storedFiles, expectedFileName)
+	}
+}
+
+func TestWholeSiteImportDetectsPHPPageAndRewritesOpenGraphMetadata(t *testing.T) {
+	application, rawDB := newTestApplication(t)
+	_, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "admin@example.com", "old")
+	if err != nil {
+		t.Fatalf("insert user: %v", err)
+	}
+
+	const sourceURL = "http://kavtrans.ru/"
+	const articleURL = "http://kavtrans.ru/Syut-Dzhol_Molochnyj_Put_2018.php"
+	const imageURL = "http://kavtrans.ru/timthumb.php?src=gallery/2018-2/05.jpg&w=550&zc=1&q=75"
+	const imageBody = "\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01"
+	rootHTML := `<!doctype html><html><head><meta property="og:url" content="` + sourceURL + `"><meta property="og:image" content="` + imageURL + `"></head><body><a href="` + articleURL + `">Trip</a><img src="` + imageURL + `"></body></html>`
+	articleHTML := `<!doctype html><html><head><META CONTENT='` + articleURL + `' PROPERTY='OG:URL'><meta content="` + imageURL + `" property="og:image"></head><body>Trip</body></html>`
+	previousGrabHTTPClient := newGrabHTTPClient
+	newGrabHTTPClient = func() *http.Client {
+		return &http.Client{Transport: fakeGrabTransport{responses: map[string]fakeGrabResponse{
+			sourceURL:  {contentType: "text/html", body: rootHTML},
+			articleURL: {contentType: "application/x-httpd-php", body: articleHTML},
+			imageURL:   {contentType: "text/html; charset=utf-8", body: imageBody},
+		}}}
+	}
+	defer func() {
+		newGrabHTTPClient = previousGrabHTTPClient
+	}()
+
+	form := url.Values{}
+	form.Set("path", "/URI")
+	form.Set("source_url", sourceURL)
+	form.Set("copy_whole_site", "1")
+	form.Set("import_selection_confirmed", "1")
+	form.Add("import_resource_url", imageURL)
+	request := httptest.NewRequest(http.MethodPost, "http://localhost:8080/URI?grab", strings.NewReader(form.Encode()))
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	request.Header.Set("Accept", "application/json")
+	request.AddCookie(newAdminSessionCookie(t, application, "admin@example.com"))
+	response := httptest.NewRecorder()
+	application.route(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("whole-site import status = %d, body=%q", response.Code, response.Body.String())
+	}
+	if strings.Contains(response.Body.String(), `"failed_total":`) && !strings.Contains(response.Body.String(), `"failed_total":0`) {
+		t.Fatalf("whole-site import reported failures: %s", response.Body.String())
+	}
+
+	expectedFileName, hashErr := contentHashName([]byte(imageBody), ".jpg")
+	if hashErr != nil {
+		t.Fatal(hashErr)
+	}
+	expectedImageURL := "https://localhost/URI/p/" + expectedFileName
+	expectedPageURLs := map[string]string{
+		"/URI":                                   "https://localhost/URI",
+		"/URI/Syut-Dzhol_Molochnyj_Put_2018.php": "https://localhost/URI/Syut-Dzhol_Molochnyj_Put_2018.php",
+	}
+	for pagePath, expectedPageURL := range expectedPageURLs {
+		var pageHTML string
+		if err := rawDB.QueryRow(`SELECT html FROM pages WHERE domain=? AND path=?`, "localhost", pagePath).Scan(&pageHTML); err != nil {
+			t.Fatalf("read imported page %s: %v", pagePath, err)
+		}
+		if !strings.Contains(pageHTML, expectedPageURL) {
+			t.Fatalf("page %s does not contain rewritten og:url %q: %s", pagePath, expectedPageURL, pageHTML)
+		}
+		if !strings.Contains(pageHTML, expectedImageURL) {
+			t.Fatalf("page %s does not contain rewritten og:image %q: %s", pagePath, expectedImageURL, pageHTML)
+		}
+	}
+
+	storedFiles, listErr := listStoredFiles(application.domainFilesDirForDomain("localhost"))
+	if listErr != nil {
+		t.Fatal(listErr)
+	}
+	if len(storedFiles) != 1 || filepath.Base(storedFiles[0]) != expectedFileName {
+		t.Fatalf("stored files = %#v, want one Open Graph JPEG named %q", storedFiles, expectedFileName)
+	}
+}
+
+func TestEstimateImportedFileDeltaCountsDeduplicatedAssetOnce(t *testing.T) {
+	application, _ := newTestApplication(t)
+	const assetPath = "/p/same-hash.jpg"
+	const imageBody = "same-jpeg-bytes"
+	spider := &pageSpider{resources: map[string]*mirroredResource{
+		"https://example.test/timthumb.php?id=1": {content: []byte(imageBody), assetPath: assetPath, persist: true},
+		"https://example.test/photo.jpg":         {content: []byte(imageBody), assetPath: assetPath, persist: true},
+	}}
+
+	fileDelta := application.estimateImportedFileDelta("localhost", spider)
+	if fileDelta != int64(len(imageBody)) {
+		t.Fatalf("deduplicated file delta = %d, want %d", fileDelta, len(imageBody))
+	}
+}
+
+func TestGrabPageImportsImageLinkedFromAnchor(t *testing.T) {
+	application, rawDB := newTestApplication(t)
+	_, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "admin@example.com", "old")
+	if err != nil {
+		t.Fatalf("insert user: %v", err)
+	}
+
+	const sourceURL = "http://kavtrans.ru/"
+	const mapURL = "http://kavtrans.ru/maps/2018-2_map.jpg"
+	const mapBody = "map-jpeg-bytes"
+	previousGrabHTTPClient := newGrabHTTPClient
+	newGrabHTTPClient = func() *http.Client {
+		return &http.Client{Transport: fakeGrabTransport{responses: map[string]fakeGrabResponse{
+			sourceURL: {contentType: "text/html", body: `<!doctype html><html><body><a href="` + mapURL + `">Open map</a></body></html>`},
+			mapURL:    {contentType: "image/jpeg", body: mapBody},
+		}}}
+	}
+	defer func() {
+		newGrabHTTPClient = previousGrabHTTPClient
+	}()
+
+	form := url.Values{}
+	form.Set("path", "/")
+	form.Set("source_url", sourceURL)
+	form.Set("copy_whole_site", "1")
+	form.Set("import_selection_confirmed", "1")
+	form.Add("import_resource_url", mapURL)
+	request := httptest.NewRequest(http.MethodPost, "http://localhost:8080/?grab", strings.NewReader(form.Encode()))
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	request.Header.Set("Accept", "application/json")
+	request.AddCookie(newAdminSessionCookie(t, application, "admin@example.com"))
+	response := httptest.NewRecorder()
+	application.route(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("whole-site import status = %d, body=%q", response.Code, response.Body.String())
+	}
+
+	expectedFileName, hashErr := contentHashName([]byte(mapBody), ".jpg")
+	if hashErr != nil {
+		t.Fatal(hashErr)
+	}
+	expectedReference := "/p/" + expectedFileName
+	var pageHTML string
+	if err := rawDB.QueryRow(`SELECT html FROM pages WHERE domain=? AND path=?`, "localhost", "/").Scan(&pageHTML); err != nil {
+		t.Fatalf("read imported page: %v", err)
+	}
+	if !strings.Contains(pageHTML, `href="`+expectedReference+`"`) {
+		t.Fatalf("linked map was not rewritten to %q: %s", expectedReference, pageHTML)
+	}
+	storedMapPath := filepath.Join(application.domainFilesDirForDomain("localhost"), expectedFileName)
+	storedMapBody, readErr := os.ReadFile(storedMapPath)
+	if readErr != nil {
+		t.Fatalf("read stored map: %v", readErr)
+	}
+	if string(storedMapBody) != mapBody {
+		t.Fatalf("stored map = %q, want %q", storedMapBody, mapBody)
+	}
+}
+
+func TestPreviewIgnoresLinkedImageURLContainingHTML(t *testing.T) {
+	const pageRawURL = "https://kavtrans.ru/"
+	const linkedPageURL = "https://external.example/not-an-image.jpg"
+	sourceHTML := `<a href="` + linkedPageURL + `">External page</a>`
+	previousGrabHTTPClient := newGrabHTTPClient
+	newGrabHTTPClient = func() *http.Client {
+		return &http.Client{Transport: fakeGrabTransport{responses: map[string]fakeGrabResponse{
+			linkedPageURL: {contentType: "image/jpeg", body: "<!doctype html><html><body>External page</body></html>"},
+		}}}
+	}
+	defer func() {
+		newGrabHTTPClient = previousGrabHTTPClient
+	}()
+
+	pageURL, parseErr := url.Parse(pageRawURL)
+	if parseErr != nil {
+		t.Fatal(parseErr)
+	}
+	preview := previewWholeRemoteSiteResources(context.Background(), pageURL, sourceHTML, "/", nil, "", grabSourceOptions{})
+	if len(preview.Resources) != 0 {
+		t.Fatalf("HTML response was treated as a linked file: %#v", preview.Resources)
+	}
+	if preview.Spider.unresolvedFailedTotal() != 0 {
+		t.Fatalf("linked HTML response was reported as a failed resource: %#v", preview.Spider.failedResourceReasonMap())
+	}
+}
+
+func TestPreviewAndImportAcceptSVGResourcesWithXMLPrologue(t *testing.T) {
+	application, rawDB := newTestApplication(t)
+	_, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "admin@example.com", "old")
+	if err != nil {
+		t.Fatalf("insert user: %v", err)
+	}
+
+	const sourceURL = "http://kavtrans.ru/"
+	const fontURL = "http://kavtrans.ru/fonts/jakobtt-bold-webfont.svg"
+	const imageURL = "http://kavtrans.ru/images/activity.svg"
+	const svgBody = `<?xml version="1.0" standalone="no"?><!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd"><svg xmlns="http://www.w3.org/2000/svg"><defs><font id="test"/></defs></svg>`
+	sourceHTML := `<!doctype html><html><head><style>@font-face{font-family:test;src:url("` + fontURL + `") format("svg")}</style></head><body><img src="` + imageURL + `"></body></html>`
+	previousGrabHTTPClient := newGrabHTTPClient
+	newGrabHTTPClient = func() *http.Client {
+		return &http.Client{Transport: fakeGrabTransport{responses: map[string]fakeGrabResponse{
+			sourceURL: {contentType: "text/html", body: sourceHTML},
+			fontURL:   {contentType: "image/svg+xml", body: svgBody},
+			imageURL:  {contentType: "image/svg+xml", body: svgBody},
+		}}}
+	}
+	defer func() {
+		newGrabHTTPClient = previousGrabHTTPClient
+	}()
+
+	parsedSourceURL, parseErr := url.Parse(sourceURL)
+	if parseErr != nil {
+		t.Fatal(parseErr)
+	}
+	preview := previewWholeRemoteSiteResources(context.Background(), parsedSourceURL, sourceHTML, "/", nil, "", grabSourceOptions{})
+	if preview.Spider.unresolvedFailedTotal() != 0 {
+		t.Fatalf("SVG preview failures = %#v", preview.Spider.failedResourceReasonMap())
+	}
+	if len(preview.Resources) != 2 {
+		t.Fatalf("SVG preview resources = %#v, want font and image", preview.Resources)
+	}
+
+	form := url.Values{}
+	form.Set("path", "/")
+	form.Set("source_url", sourceURL)
+	form.Set("copy_whole_site", "1")
+	form.Set("import_selection_confirmed", "1")
+	form.Add("import_resource_url", fontURL)
+	form.Add("import_resource_url", imageURL)
+	request := httptest.NewRequest(http.MethodPost, "http://localhost:8080/?grab", strings.NewReader(form.Encode()))
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	request.Header.Set("Accept", "application/json")
+	request.AddCookie(newAdminSessionCookie(t, application, "admin@example.com"))
+	response := httptest.NewRecorder()
+	application.route(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("SVG import status = %d, body=%q", response.Code, response.Body.String())
+	}
+
+	expectedFileName, hashErr := contentHashName([]byte(svgBody), ".svg")
+	if hashErr != nil {
+		t.Fatal(hashErr)
+	}
+	expectedReference := "/p/" + expectedFileName
+	var pageHTML string
+	if err := rawDB.QueryRow(`SELECT html FROM pages WHERE domain=? AND path=?`, "localhost", "/").Scan(&pageHTML); err != nil {
+		t.Fatalf("read imported page: %v", err)
+	}
+	if strings.Count(pageHTML, expectedReference) != 2 {
+		t.Fatalf("SVG references were not rewritten to %q: %s", expectedReference, pageHTML)
+	}
+	storedFiles, listErr := listStoredFiles(application.domainFilesDirForDomain("localhost"))
+	if listErr != nil {
+		t.Fatal(listErr)
+	}
+	if len(storedFiles) != 1 || filepath.Base(storedFiles[0]) != expectedFileName {
+		t.Fatalf("stored SVG files = %#v, want one deduplicated file %q", storedFiles, expectedFileName)
 	}
 }
 
