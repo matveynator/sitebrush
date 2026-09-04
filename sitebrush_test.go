@@ -1427,6 +1427,12 @@ func TestValidateServiceMailSecretRejectsArbitraryText(t *testing.T) {
 	if err := validateServiceMailSecret("email_change", "https://example.com/?email_confirm=token"); err == nil {
 		t.Fatal("email change link was accepted instead of a six-digit code")
 	}
+	if err := validateServiceMailSecret("email_change_confirm", "https://example.com/?email_confirm=token"); err != nil {
+		t.Fatalf("valid new-address confirmation link rejected: %v", err)
+	}
+	if err := validateServiceMailSecret("email_change_confirm", "654321"); err == nil {
+		t.Fatal("six-digit code was accepted as a new-address confirmation link")
+	}
 	if err := validateServiceMailSecret("email_confirm", "https://example.com/?email_confirm=token"); err != nil {
 		t.Fatalf("valid confirmation link rejected: %v", err)
 	}
@@ -1568,6 +1574,76 @@ func TestServiceMailRelayAllowsLoginCodeForVerifiedRecipient(t *testing.T) {
 	}
 	if sentMessage.From != "SiteBrush <sitebrush@sitebrush.com>" {
 		t.Fatalf("from = %q", sentMessage.From)
+	}
+}
+
+func TestServiceMailRelayVerifiesNewAddressBeforeRecoveryCode(t *testing.T) {
+	application, _ := newTestApplication(t)
+	confirmationRequest := signedServiceMailRequestForTest(t, application, serviceMailRequest{
+		Version:      1,
+		SourceDomain: "customer.example",
+		Recipient:    "new-owner@example.net",
+		CodeKind:     "email_change_confirm",
+		SecretValue:  "https://customer.example/?email_confirm=token",
+		LanguageCode: "en",
+		CreatedAt:    time.Now().UTC().Format(time.RFC3339),
+	})
+	registerServiceMailInstallationForTest(t, application, confirmationRequest)
+	controlDatabase, err := openServerControlDatabaseForTest(context.Background(), application)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := hostingandsupport.Store{DB: controlDatabase}
+	if err := store.UpsertServiceMailRecipient(context.Background(), confirmationRequest.InstallationID, "old-owner@example.net", "verified", "confirmed"); err != nil {
+		t.Fatal(err)
+	}
+	if err := controlDatabase.Close(); err != nil {
+		t.Fatal(err)
+	}
+	application.sendEmail = func(context.Context, mailout.Message) error { return nil }
+	httpRequest := httptest.NewRequest(http.MethodPost, "https://sitebrush.com/?service_mail_relay", nil)
+	status, statusCode := application.handleServiceMailRelayRequest(context.Background(), httpRequest, confirmationRequest, "203.0.113.10")
+	if statusCode != http.StatusOK {
+		t.Fatalf("confirmation status = %d %q, want ok", statusCode, status)
+	}
+
+	controlDatabase, err = openServerControlDatabaseForTest(context.Background(), application)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store = hostingandsupport.Store{DB: controlDatabase}
+	if store.ServiceMailRecipientVerified(context.Background(), confirmationRequest.InstallationID, confirmationRequest.Recipient) {
+		t.Fatal("new recipient was verified before opening the confirmation link")
+	}
+	if err := controlDatabase.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	verificationRequest := confirmationRequest
+	verificationRequest.CodeKind = "recipient_verified"
+	verificationRequest.SecretValue = "verified"
+	verificationRequest = signedServiceMailRequestForTest(t, application, verificationRequest)
+	status, statusCode = application.handleServiceMailRelayRequest(context.Background(), httpRequest, verificationRequest, "203.0.113.10")
+	if statusCode != http.StatusOK {
+		t.Fatalf("verification status = %d %q, want ok", statusCode, status)
+	}
+
+	recoveryRequest := confirmationRequest
+	recoveryRequest.CodeKind = "login_code"
+	recoveryRequest.SecretValue = "123456"
+	recoveryRequest = signedServiceMailRequestForTest(t, application, recoveryRequest)
+	status, statusCode = application.handleServiceMailRelayRequest(context.Background(), httpRequest, recoveryRequest, "203.0.113.10")
+	if statusCode != http.StatusOK {
+		t.Fatalf("recovery status = %d %q, want ok after verification", statusCode, status)
+	}
+	controlDatabase, err = openServerControlDatabaseForTest(context.Background(), application)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer controlDatabase.Close()
+	store = hostingandsupport.Store{DB: controlDatabase}
+	if !store.ServiceMailRecipientVerified(context.Background(), confirmationRequest.InstallationID, confirmationRequest.Recipient) {
+		t.Fatal("new recipient was not registered as verified")
 	}
 }
 
@@ -6671,6 +6747,35 @@ func TestProfilePageChangesAdminEmailThroughSixDigitCode(t *testing.T) {
 	if codeResponse.Code != http.StatusOK {
 		t.Fatalf("code status = %d, body=%q", codeResponse.Code, codeResponse.Body.String())
 	}
+	if !strings.Contains(codeResponse.Body.String(), "Текущий email подтверждён") {
+		t.Fatalf("code response did not explain the pending new-address confirmation: %s", codeResponse.Body.String())
+	}
+	select {
+	case mailJob := <-application.emailDelivery:
+		if mailJob.Message.To != "new@example.com" || mailJob.Message.Kind != "email_change_confirm" || !strings.Contains(mailJob.Message.Body, "email_confirm=") || !strings.Contains(mailJob.Message.HTMLBody, "href=") {
+			t.Fatalf("unexpected new-address confirmation: %#v", mailJob.Message)
+		}
+	default:
+		t.Fatal("profile update did not enqueue the new-address confirmation")
+	}
+	var unchangedEmail string
+	if err := rawDB.QueryRow(`SELECT email FROM users WHERE domain=?`, "localhost").Scan(&unchangedEmail); err != nil {
+		t.Fatalf("read unchanged user: %v", err)
+	}
+	if unchangedEmail != "admin@example.com" {
+		t.Fatalf("email changed before the new address was confirmed: %q", unchangedEmail)
+	}
+
+	var emailToken string
+	if err := rawDB.QueryRow(`SELECT token FROM email_confirmations WHERE domain=? AND action='profile' AND email=?`, "localhost", "new@example.com").Scan(&emailToken); err != nil {
+		t.Fatalf("read new-address confirmation: %v", err)
+	}
+	confirmRequest := httptest.NewRequest(http.MethodGet, "http://localhost:8080/?email_confirm="+url.QueryEscape(emailToken), nil)
+	confirmResponse := httptest.NewRecorder()
+	application.route(confirmResponse, confirmRequest)
+	if confirmResponse.Code != http.StatusFound {
+		t.Fatalf("confirm status = %d, body=%q", confirmResponse.Code, confirmResponse.Body.String())
+	}
 	var password string
 	if err := rawDB.QueryRow(`SELECT password FROM users WHERE domain=? AND email=?`, "localhost", "new@example.com").Scan(&password); err != nil {
 		t.Fatalf("read updated user: %v", err)
@@ -6678,7 +6783,7 @@ func TestProfilePageChangesAdminEmailThroughSixDigitCode(t *testing.T) {
 	if password != "old" {
 		t.Fatalf("password = %q, want old", password)
 	}
-	profileCookies := codeResponse.Result().Cookies()
+	profileCookies := confirmResponse.Result().Cookies()
 	if len(profileCookies) == 0 {
 		t.Fatal("profile update did not refresh the session cookie")
 	}
@@ -6689,7 +6794,46 @@ func TestProfilePageChangesAdminEmailThroughSixDigitCode(t *testing.T) {
 	}
 }
 
-func TestProfileChangeButtonsStartDisabledAndUnchangedEmailIsRejected(t *testing.T) {
+func TestProfileEmailConfirmationWaitsForRelayRecipientVerification(t *testing.T) {
+	t.Setenv("SITEBRUSH_SERVICE_MAIL_RELAY_URL", "https://relay.example/?service_mail_relay")
+	application, rawDB := newTestApplication(t)
+	if _, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "admin@example.com", "old"); err != nil {
+		t.Fatalf("insert user: %v", err)
+	}
+	expiresAt := time.Now().UTC().Add(emailConfirmationTTL).Format(time.RFC3339)
+	if _, err := rawDB.Exec(`INSERT INTO email_confirmations(token,domain,action,email,password,verification_code,current_email,return_path,language_code,created_at,expires_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
+		"new-email-token", "localhost", "profile", "new@example.com", "", "", "admin@example.com", "/", "en", time.Now().UTC().Format(time.RFC3339), expiresAt); err != nil {
+		t.Fatalf("insert confirmation: %v", err)
+	}
+	previousHTTPClient := http.DefaultClient
+	http.DefaultClient = &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		return fakeGrabResponse{statusCode: http.StatusBadGateway, body: "verification unavailable"}.httpResponse(request), nil
+	})}
+	t.Cleanup(func() { http.DefaultClient = previousHTTPClient })
+
+	request := httptest.NewRequest(http.MethodGet, "http://localhost:8080/?email_confirm=new-email-token", nil)
+	response := httptest.NewRecorder()
+	application.route(response, request)
+	if response.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want %d, body=%q", response.Code, http.StatusBadGateway, response.Body.String())
+	}
+	var email string
+	if err := rawDB.QueryRow(`SELECT email FROM users WHERE domain=?`, "localhost").Scan(&email); err != nil {
+		t.Fatalf("read user: %v", err)
+	}
+	if email != "admin@example.com" {
+		t.Fatalf("email changed before relay verification: %q", email)
+	}
+	var confirmationCount int
+	if err := rawDB.QueryRow(`SELECT COUNT(1) FROM email_confirmations WHERE token=?`, "new-email-token").Scan(&confirmationCount); err != nil {
+		t.Fatalf("count confirmation: %v", err)
+	}
+	if confirmationCount != 1 {
+		t.Fatalf("confirmation was consumed after relay failure: %d", confirmationCount)
+	}
+}
+
+func TestProfileChangeFormsWorkWithoutJavaScriptAndUnchangedEmailIsRejected(t *testing.T) {
 	application, rawDB := newTestApplication(t)
 	if _, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "admin@example.com", "old"); err != nil {
 		t.Fatalf("insert user: %v", err)
@@ -6705,13 +6849,18 @@ func TestProfileChangeButtonsStartDisabledAndUnchangedEmailIsRejected(t *testing
 	}
 	for _, expectedFragment := range []string{
 		`data-profile-email-form data-current-email="admin@example.com"`,
-		`type="submit" disabled data-profile-email-submit`,
-		`type="submit" disabled data-profile-password-submit`,
+		`type="submit" data-profile-email-submit`,
+		`type="submit" data-profile-password-submit`,
 		`submitButton.disabled = nextEmail === currentEmail || !emailInput.validity.valid`,
 		`submitButton.disabled = password === '' || password !== passwordConfirmation`,
 	} {
 		if !strings.Contains(getResponse.Body.String(), expectedFragment) {
 			t.Fatalf("profile page missing %q in %s", expectedFragment, getResponse.Body.String())
+		}
+	}
+	for _, unexpectedFragment := range []string{`type="submit" disabled data-profile-email-submit`, `type="submit" disabled data-profile-password-submit`} {
+		if strings.Contains(getResponse.Body.String(), unexpectedFragment) {
+			t.Fatalf("profile form must remain submittable without JavaScript: %s", unexpectedFragment)
 		}
 	}
 

@@ -98,7 +98,7 @@
         {{.EmailLabel}}
         <input type="email" name="email" value="{{.Email}}" autocomplete="email" required data-profile-email-input>
       </label>
-      <div><button type="submit" disabled data-profile-email-submit>{{.EmailSubmitLabel}}</button></div>
+      <div><button type="submit" data-profile-email-submit>{{.EmailSubmitLabel}}</button></div>
     </form>
     <form class="profile-form" method="post" action="?profile" data-profile-send-form data-profile-password-form>
       <input type="hidden" name="profile_action" value="password">
@@ -114,7 +114,7 @@
         {{.PasswordConfirmLabel}}
         <input type="password" name="password_confirm" autocomplete="new-password" required data-profile-password-confirm-input>
       </label>
-      <div><button type="submit" disabled data-profile-password-submit>{{.PasswordSubmitLabel}}</button></div>
+      <div><button type="submit" data-profile-password-submit>{{.PasswordSubmitLabel}}</button></div>
     </form>
   </div>
   {{else}}
@@ -190,6 +190,7 @@
     emailInput.addEventListener('input', updateEmailSubmitButton);
     emailInput.addEventListener('change', updateEmailSubmitButton);
     window.addEventListener('pageshow', updateEmailSubmitButton);
+    updateEmailSubmitButton();
     window.setTimeout(updateEmailSubmitButton, 0);
   }
 
@@ -213,6 +214,7 @@
     passwordInput.addEventListener('input', updatePasswordSubmitButton);
     passwordConfirmInput.addEventListener('input', updatePasswordSubmitButton);
     window.addEventListener('pageshow', updatePasswordSubmitButton);
+    updatePasswordSubmitButton();
     window.setTimeout(updatePasswordSubmitButton, 0);
   }
 
