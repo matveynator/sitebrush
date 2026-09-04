@@ -28,6 +28,11 @@
       '.SiteBrushCopySiteInput,.SiteBrushCopySiteSelect{width:100%;box-sizing:border-box;border:1px solid rgba(149,229,239,.28);border-radius:10px;background:rgba(0,0,0,.22);color:#fff;font:inherit;font-weight:400;padding:9px 10px}',
       '.SiteBrushCopySiteCheckbox{display:flex;align-items:center;gap:8px;font-size:14px;font-weight:700;cursor:pointer}',
       '.SiteBrushCopySiteCheckbox input[type="checkbox"]{appearance:auto!important;display:inline-block!important;position:static!important;width:16px!important;height:16px!important;margin:0!important;opacity:1!important;pointer-events:auto!important;cursor:pointer!important}',
+      '.SiteBrushCopySiteTemplateOption{display:grid;gap:6px;padding-inline-start:24px}',
+      '.SiteBrushCopySiteTemplateHelp summary{width:max-content;max-width:100%;color:#95e5ef;text-decoration:underline;text-underline-offset:3px;cursor:pointer;font-size:13px;font-weight:700}',
+      '.SiteBrushCopySiteTemplateHelp summary:hover,.SiteBrushCopySiteTemplateHelp summary:focus-visible{color:#fff;text-decoration-thickness:2px;outline:2px solid #95e5ef;outline-offset:3px}',
+      '.SiteBrushCopySiteTemplateHelpBody{margin-top:8px;border-inline-start:3px solid #95e5ef;padding:8px 10px;color:#e7e7e7;font-size:13px;line-height:1.5;white-space:pre-line}',
+      '.SiteBrushCopySiteTemplateHelpBody h3{margin:0 0 6px;font-size:15px;color:#fff}',
       '.SiteBrushCopySiteButton{display:inline-flex;align-items:center;justify-content:center;gap:7px;border:1px solid rgba(149,229,239,.62);border-radius:10px;background:rgba(149,229,239,.18);color:#fff;font:inherit;font-weight:700;padding:9px 12px;cursor:pointer;white-space:nowrap}',
       '.SiteBrushCopySiteButton img{width:18px;height:18px}',
       '.SiteBrushCopySiteButton:disabled{opacity:.58;cursor:not-allowed}',
@@ -470,6 +475,28 @@
     wholeSiteLabelElement.appendChild(wholeSiteElement);
     wholeSiteLabelElement.appendChild(createElement('span', '', textFromConfig(configuration, 'copyWholeSite', 'Copy entire website')));
 
+    const automaticTemplateOptionElement = createElement('div', 'SiteBrushCopySiteTemplateOption');
+    const automaticTemplateLabelElement = createElement('label', 'SiteBrushCopySiteCheckbox');
+    const automaticTemplateDisabledFieldElement = document.createElement('input');
+    automaticTemplateDisabledFieldElement.type = 'hidden';
+    automaticTemplateDisabledFieldElement.name = 'auto_detect_sitebrush_template';
+    automaticTemplateDisabledFieldElement.value = '0';
+    const automaticTemplateElement = document.createElement('input');
+    automaticTemplateElement.type = 'checkbox';
+    automaticTemplateElement.name = 'auto_detect_sitebrush_template';
+    automaticTemplateElement.value = '1';
+    automaticTemplateElement.checked = true;
+    automaticTemplateLabelElement.appendChild(automaticTemplateElement);
+    automaticTemplateLabelElement.appendChild(createElement('span', '', textFromConfig(configuration, 'templateLabel', 'Auto-detect SiteBrush-Template')));
+    const automaticTemplateHelpElement = createElement('details', 'SiteBrushCopySiteTemplateHelp');
+    automaticTemplateHelpElement.appendChild(createElement('summary', '', textFromConfig(configuration, 'templateHelpLink', 'What is SiteBrush-Template?')));
+    const automaticTemplateHelpBodyElement = createElement('div', 'SiteBrushCopySiteTemplateHelpBody');
+    automaticTemplateHelpBodyElement.appendChild(createElement('h3', '', textFromConfig(configuration, 'templateHelpTitle', 'What is SiteBrush-Template?')));
+    automaticTemplateHelpBodyElement.appendChild(createElement('div', '', textFromConfig(configuration, 'templateHelpBody', 'SiteBrush-Template links identical parts of different pages into a shared template.')));
+    automaticTemplateHelpElement.appendChild(automaticTemplateHelpBodyElement);
+    automaticTemplateOptionElement.appendChild(automaticTemplateLabelElement);
+    automaticTemplateOptionElement.appendChild(automaticTemplateHelpElement);
+
     const statusElement = createElement('p', 'SiteBrushCopySiteStatus', '');
     const urlElement = createElement('div', 'SiteBrushCopySiteURL', '');
     const progressElement = createElement('div', 'SiteBrushCopySiteProgress SiteBrushCopySiteHidden');
@@ -489,6 +516,8 @@
     formElement.appendChild(primaryRowElement);
     formElement.appendChild(secondaryGridElement);
     formElement.appendChild(wholeSiteLabelElement);
+    formElement.appendChild(automaticTemplateDisabledFieldElement);
+    formElement.appendChild(automaticTemplateOptionElement);
     dialogElement.appendChild(headerElement);
     dialogElement.appendChild(formElement);
     dialogElement.appendChild(statusElement);
@@ -517,6 +546,16 @@
     let activeDownloadEndpoint = '?grab';
     let activeGrabToken = '';
     let downloadCancelRequested = false;
+
+    function renderAutomaticTemplateOption() {
+      automaticTemplateOptionElement.classList.toggle('SiteBrushCopySiteHidden', !wholeSiteElement.checked);
+      automaticTemplateElement.disabled = !wholeSiteElement.checked;
+      if (!wholeSiteElement.checked) {
+        automaticTemplateHelpElement.open = false;
+      }
+    }
+
+    renderAutomaticTemplateOption();
 
     function setFinishImportButtonMode(finishImportMode) {
       cancelButtonElement.textContent = finishImportMode
@@ -741,6 +780,11 @@
         }
         if (progressPayload.stage !== 'retry_wait') {
           stopRetryCountdown();
+        }
+        if (progressPayload.stage === 'detect_templates') {
+          setCopySiteStatus(statusElement, textFromConfig(configuration, 'detectingTemplates', 'Detecting SiteBrush-Template...'), '');
+          urlElement.textContent = '';
+          return;
         }
         const progressSummary = summarizeDownloadProgress(downloadProgressModel, progressPayload);
         const completedPercent = progressPayload.stage === 'done' ? 100 : progressSummary.completedPercent;
@@ -1028,7 +1072,9 @@
     sourceUrlElement.addEventListener('input', invalidatePreview);
     sourceIPElement.addEventListener('input', invalidatePreview);
     sourceLanguageElement.addEventListener('change', invalidatePreview);
+    wholeSiteElement.addEventListener('change', renderAutomaticTemplateOption);
     wholeSiteElement.addEventListener('change', invalidatePreview);
+    automaticTemplateElement.addEventListener('change', invalidatePreview);
     formElement.addEventListener('submit', function onCopyFormSubmit(submitEvent) {
       submitEvent.preventDefault();
       clearSelectionFields(formElement);

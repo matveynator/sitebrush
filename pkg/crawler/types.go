@@ -24,6 +24,7 @@ type ImportRequest struct {
 	DownloadTotalBytes   int64
 	SelectedResourceURLs map[string]struct{}
 	SourceOptions        SourceOptions
+	AutoDetectTemplates  bool
 }
 
 // ImportResult is returned after the importer has persisted everything it could fetch.
