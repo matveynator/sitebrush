@@ -2277,23 +2277,24 @@ type publicTrialPlanView struct {
 }
 
 type publicTrialPreview struct {
-	Token              string
-	SourceURL          string
-	ImportedPages      []wholeSiteImportedPage
-	Resources          []grabResourcePreview
-	Spider             *pageSpider
-	PageCount          int
-	ResourceCount      int
-	ResourceCounts     publicTrialResourceCounts
-	TotalBytes         int64
-	RequiredBytes      int64
-	Plan               publicTrialPlanView
-	FreePlan           publicTrialPlanView
-	FitsFreePlan       bool
-	SinglePageRequired bool
-	CopyWholeSite      bool
-	SourceOptions      grabSourceOptions
-	CreatedAt          time.Time
+	Token               string
+	SourceURL           string
+	ImportedPages       []wholeSiteImportedPage
+	Resources           []grabResourcePreview
+	Spider              *pageSpider
+	PageCount           int
+	ResourceCount       int
+	ResourceCounts      publicTrialResourceCounts
+	TotalBytes          int64
+	RequiredBytes       int64
+	Plan                publicTrialPlanView
+	FreePlan            publicTrialPlanView
+	FitsFreePlan        bool
+	SinglePageRequired  bool
+	CopyWholeSite       bool
+	AutoDetectTemplates bool
+	SourceOptions       grabSourceOptions
+	CreatedAt           time.Time
 }
 
 type publicTrialPreviewResponse struct {
@@ -8288,7 +8289,7 @@ func (a *App) seedDemoSiteContent(ctx context.Context, domain string, settings d
 	}
 	domainContext := contextWithDomain(ctx, domain)
 	if settings.CopyWholeSite {
-		importResult, err := a.importWholeRemoteSite(domainContext, grabImportRequest{Domain: domain, PagePath: "/", SourceURL: resolvedSourceURL.String(), RemoteSourceURL: resolvedSourceURL, HTML: string(htmlBytes), ProgressToken: progressToken})
+		importResult, err := a.importWholeRemoteSite(domainContext, grabImportRequest{Domain: domain, PagePath: "/", SourceURL: resolvedSourceURL.String(), RemoteSourceURL: resolvedSourceURL, HTML: string(htmlBytes), ProgressToken: progressToken, AutoDetectTemplates: true})
 		failedTotal := importResult.FailedTotal
 		return failedTotal, err
 	}
@@ -9336,6 +9337,7 @@ func (a *App) grabPage(w http.ResponseWriter, r *http.Request) {
 		DownloadTotalBytes:   grabImportDownloadTotalBytes(r),
 		SourceOptions:        sourceOptions,
 		SelectedResourceURLs: selectedGrabResourceURLs(r),
+		AutoDetectTemplates:  grabAutoDetectSiteBrushTemplate(r),
 	}
 	if grabCopyWholeSite(r) {
 		importResult, importErr := a.importWholeRemoteSite(importContext, importRequest)
@@ -9494,13 +9496,14 @@ func (a *App) publicTrialSitePreview(w http.ResponseWriter, r *http.Request) {
 	previewURL := absoluteURLForPath(r, "/?trial_site_preview_frame&token="+url.QueryEscape(progressToken))
 	translations := translationsForRequest(r)
 	copyWholeSite := grabCopyWholeSite(r)
+	autoDetectTemplates := grabAutoDetectSiteBrushTemplate(r)
 	sourceOptions, sourceOptionsErr := parseGrabSourceOptions(r)
 	if sourceOptionsErr != nil {
 		a.activePublicTrialPreviewStore().Fail(progressToken, sourceOptionsErr.Error())
 		http.Error(w, sourceOptionsErr.Error(), http.StatusBadRequest)
 		return
 	}
-	go a.runPublicTrialSitePreview(progressToken, sourceURL, previewURL, translations, cancelSession, copyWholeSite, sourceOptions)
+	go a.runPublicTrialSitePreviewWithTemplateDetection(progressToken, sourceURL, previewURL, translations, cancelSession, copyWholeSite, autoDetectTemplates, sourceOptions)
 
 	w.Header().Set("Content-Type", "application/json")
 	if strings.TrimSpace(r.FormValue("unified_copy")) == "1" {
@@ -9580,6 +9583,10 @@ func (a *App) writeFirstUsablePublicTrialPreview(w http.ResponseWriter, r *http.
 }
 
 func (a *App) runPublicTrialSitePreview(progressToken, requestedSourceURL, previewURL string, translations map[string]string, cancelSession <-chan struct{}, copyWholeSite bool, sourceOptions grabSourceOptions) {
+	a.runPublicTrialSitePreviewWithTemplateDetection(progressToken, requestedSourceURL, previewURL, translations, cancelSession, copyWholeSite, true, sourceOptions)
+}
+
+func (a *App) runPublicTrialSitePreviewWithTemplateDetection(progressToken, requestedSourceURL, previewURL string, translations map[string]string, cancelSession <-chan struct{}, copyWholeSite, autoDetectTemplates bool, sourceOptions grabSourceOptions) {
 	previewContext, cancelPreview := context.WithTimeout(context.Background(), publicTrialPreviewMaxDuration)
 	defer cancelPreview()
 	watchdogDone := make(chan struct{})
@@ -9651,21 +9658,22 @@ func (a *App) runPublicTrialSitePreview(progressToken, requestedSourceURL, previ
 	initialBytes := int64(len(htmlBytes))
 	initialPlan, initialFreePlan, initialFitsFreePlan := a.smallestPublicTrialPlan(previewContext, initialBytes)
 	a.activePublicTrialPreviewStore().Save(publicTrialPreview{
-		Token:          progressToken,
-		SourceURL:      sourceURL,
-		ImportedPages:  initialImportedPages,
-		Resources:      initialResources,
-		Spider:         initialSpider,
-		PageCount:      1,
-		ResourceCount:  len(initialResources),
-		ResourceCounts: publicTrialResourceCountsFromResources(initialResources),
-		TotalBytes:     initialBytes,
-		RequiredBytes:  initialBytes,
-		Plan:           initialPlan,
-		FreePlan:       initialFreePlan,
-		FitsFreePlan:   initialFitsFreePlan,
-		CopyWholeSite:  copyWholeSite,
-		SourceOptions:  sourceOptions,
+		Token:               progressToken,
+		SourceURL:           sourceURL,
+		ImportedPages:       initialImportedPages,
+		Resources:           initialResources,
+		Spider:              initialSpider,
+		PageCount:           1,
+		ResourceCount:       len(initialResources),
+		ResourceCounts:      publicTrialResourceCountsFromResources(initialResources),
+		TotalBytes:          initialBytes,
+		RequiredBytes:       initialBytes,
+		Plan:                initialPlan,
+		FreePlan:            initialFreePlan,
+		FitsFreePlan:        initialFitsFreePlan,
+		CopyWholeSite:       copyWholeSite,
+		AutoDetectTemplates: autoDetectTemplates,
+		SourceOptions:       sourceOptions,
 	})
 	wholeSitePreview := wholeSitePreviewResult{PageCount: 1, ImportedPages: initialImportedPages, Spider: initialSpider}
 	if copyWholeSite {
@@ -9703,22 +9711,23 @@ func (a *App) runPublicTrialSitePreview(progressToken, requestedSourceURL, previ
 	plan, freePlan, fitsFreePlan := a.smallestPublicTrialPlan(previewContext, requiredBytes)
 	previewTimedOut := previewContext.Err() != nil
 	preview := publicTrialPreview{
-		Token:              progressToken,
-		SourceURL:          sourceURL,
-		ImportedPages:      importedPages,
-		Resources:          resources,
-		Spider:             previewSpider,
-		PageCount:          pageCount,
-		ResourceCount:      len(resources),
-		ResourceCounts:     publicTrialResourceCountsFromResources(resources),
-		TotalBytes:         requiredBytes,
-		RequiredBytes:      requiredBytes,
-		Plan:               plan,
-		FreePlan:           freePlan,
-		FitsFreePlan:       fitsFreePlan,
-		SinglePageRequired: copyWholeSite && (wholeSitePreview.LimitReached || previewTimedOut),
-		CopyWholeSite:      copyWholeSite,
-		SourceOptions:      sourceOptions,
+		Token:               progressToken,
+		SourceURL:           sourceURL,
+		ImportedPages:       importedPages,
+		Resources:           resources,
+		Spider:              previewSpider,
+		PageCount:           pageCount,
+		ResourceCount:       len(resources),
+		ResourceCounts:      publicTrialResourceCountsFromResources(resources),
+		TotalBytes:          requiredBytes,
+		RequiredBytes:       requiredBytes,
+		Plan:                plan,
+		FreePlan:            freePlan,
+		FitsFreePlan:        fitsFreePlan,
+		SinglePageRequired:  copyWholeSite && (wholeSitePreview.LimitReached || previewTimedOut),
+		CopyWholeSite:       copyWholeSite,
+		AutoDetectTemplates: autoDetectTemplates,
+		SourceOptions:       sourceOptions,
 	}
 	a.activePublicTrialPreviewStore().Save(preview)
 	status := "done"
@@ -10882,6 +10891,14 @@ func (a *App) persistPublicTrialPreview(ctx context.Context, domain string, prev
 	if preview.Spider != nil {
 		preview.Spider.domain = domain
 	}
+	var detectionErr error
+	if preview.CopyWholeSite && preview.AutoDetectTemplates && preview.Spider != nil {
+		preview.Spider.publishProgress("detect_templates", "", 100)
+	}
+	preview.ImportedPages, detectionErr = maybeDetectImportedPageTemplates(preview.ImportedPages, preview.CopyWholeSite && preview.AutoDetectTemplates)
+	if detectionErr != nil {
+		return detectionErr
+	}
 	pageDelta, publishedPageDelta, revisionDelta, publishedStaticDelta := a.estimateImportedPagesStorageDelta(ctx, domain, preview.ImportedPages)
 	fileDelta := a.estimateImportedFileDelta(domain, preview.Spider)
 	if storageErr := a.applyDomainStorageDelta(ctx, domain, pageDelta, publishedPageDelta, revisionDelta, fileDelta, publishedStaticDelta); storageErr != nil {
@@ -11546,6 +11563,21 @@ func grabCopyWholeSite(r *http.Request) bool {
 	return rawValue == "1" || rawValue == "on" || rawValue == "true" || rawValue == "yes"
 }
 
+func grabAutoDetectSiteBrushTemplate(r *http.Request) bool {
+	_ = r.ParseForm()
+	fieldValues, fieldPresent := r.Form["auto_detect_sitebrush_template"]
+	if !fieldPresent {
+		return true
+	}
+	for _, fieldValue := range fieldValues {
+		switch strings.ToLower(strings.TrimSpace(fieldValue)) {
+		case "1", "on", "true", "yes":
+			return true
+		}
+	}
+	return false
+}
+
 func sumGrabPreviewResourceBytes(resources []grabResourcePreview) int64 {
 	var totalBytes int64
 	for _, resource := range resources {
@@ -11779,6 +11811,13 @@ func (a *App) importWholeRemoteSite(ctx context.Context, importRequest grabImpor
 	if prepareErr != nil {
 		return grabImportResult{}, prepareErr
 	}
+	if importRequest.AutoDetectTemplates {
+		spider.publishProgress("detect_templates", "", 100)
+	}
+	importedPages, prepareErr = maybeDetectImportedPageTemplates(importedPages, importRequest.AutoDetectTemplates)
+	if prepareErr != nil {
+		return grabImportResult{}, prepareErr
+	}
 	pageDelta, publishedPageDelta, revisionDelta, publishedStaticDelta := a.estimateImportedPagesStorageDelta(ctx, importRequest.Domain, importedPages)
 	fileDelta := a.estimateImportedFileDelta(importRequest.Domain, spider)
 	if storageErr := a.applyDomainStorageDelta(ctx, importRequest.Domain, pageDelta, publishedPageDelta, revisionDelta, fileDelta, publishedStaticDelta); storageErr != nil {
@@ -11801,6 +11840,29 @@ func (a *App) importWholeRemoteSite(ctx context.Context, importRequest grabImpor
 		a.grabTracker.publish(spider.finalProgressEvent(importRequest.ProgressToken, stage))
 	}
 	return grabImportResult{RedirectPath: cleanPath(importRequest.PagePath), FailedTotal: spider.unresolvedFailedTotal(), FailedURLs: spider.failedResourceURLList(), FailedReasons: spider.failedResourceReasonMap()}, nil
+}
+
+func detectImportedPageTemplates(importedPages []wholeSiteImportedPage) ([]wholeSiteImportedPage, error) {
+	detectionPages := make([]sitebrushtemplate.DetectionPage, 0, len(importedPages))
+	for _, importedPage := range importedPages {
+		detectionPages = append(detectionPages, sitebrushtemplate.DetectionPage{Key: importedPage.LocalPath, HTML: importedPage.HTML})
+	}
+	detectedPages, err := sitebrushtemplate.DetectAutomaticTemplates(detectionPages)
+	if err != nil {
+		return nil, err
+	}
+	updatedPages := append([]wholeSiteImportedPage(nil), importedPages...)
+	for pageIndex := range updatedPages {
+		updatedPages[pageIndex].HTML = detectedPages[pageIndex].HTML
+	}
+	return updatedPages, nil
+}
+
+func maybeDetectImportedPageTemplates(importedPages []wholeSiteImportedPage, enabled bool) ([]wholeSiteImportedPage, error) {
+	if !enabled {
+		return importedPages, nil
+	}
+	return detectImportedPageTemplates(importedPages)
 }
 
 type wholeSitePreviewPageResult struct {
@@ -24839,6 +24901,11 @@ func siteCopyMenuTexts(translations map[string]string) map[string]string {
 		"sourceLanguageAuto":        translationOrDefault(translations, "missing_source_language_auto", "Auto"),
 		"copyButton":                translationOrDefault(translations, "missing_copy_button", "Copy"),
 		"copyWholeSite":             translationOrDefault(translations, "missing_copy_whole_site", "Copy entire website"),
+		"templateLabel":             translationOrDefault(translations, "site_copy_auto_detect_template", "Auto-detect SiteBrush-Template"),
+		"templateHelpLink":          translationOrDefault(translations, "site_copy_template_help_link", "What is SiteBrush-Template?"),
+		"templateHelpTitle":         translationOrDefault(translations, "site_copy_template_help_title", "What is SiteBrush-Template?"),
+		"templateHelpBody":          translationOrDefault(translations, "site_copy_template_help_body", "SiteBrush-Template links identical parts of different pages into a shared template."),
+		"detectingTemplates":        translationOrDefault(translations, "site_copy_detecting_templates", "Detecting SiteBrush-Template..."),
 		"continueButton":            translationOrDefault(translations, "missing_continue", "Continue"),
 		"cancelButton":              translationOrDefault(translations, "edit_cancel", "Cancel"),
 		"sizeUnknown":               translationOrDefault(translations, "missing_size_unknown", "unknown"),

@@ -27,6 +27,17 @@
             <input type="checkbox" name="copy_whole_site" value="1">
             <span>{{index .T "missing_copy_whole_site"}}</span>
           </label>
+          <input type="hidden" name="auto_detect_sitebrush_template" value="0">
+          <div class="edit-mode-template-option">
+            <label class="checkbox-row">
+              <input type="checkbox" name="auto_detect_sitebrush_template" value="1" checked>
+              <span>{{index .T "site_copy_auto_detect_template"}}</span>
+            </label>
+            <details class="sitebrush-template-help">
+              <summary>{{index .T "site_copy_template_help_link"}}</summary>
+              <div class="sitebrush-template-help-body"><h3>{{index .T "site_copy_template_help_title"}}</h3><div>{{index .T "site_copy_template_help_body"}}</div></div>
+            </details>
+          </div>
           <button type="submit" class="primary">{{index .T "missing_copy_button"}}</button>
         </form>
       </div>

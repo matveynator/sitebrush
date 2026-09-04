@@ -880,6 +880,43 @@
     margin: 3px 0 0;
 }
 
+.technical-page .missing-page-template-option,
+.technical-page .edit-mode-template-option {
+  display: grid;
+  gap: .4rem;
+  padding-inline-start: 1.5rem;
+}
+
+.technical-page .sitebrush-template-help summary {
+  width: fit-content;
+  color: var(--bs-link-color);
+  cursor: pointer;
+  font-weight: 600;
+  text-decoration: underline;
+  text-underline-offset: .2em;
+}
+
+.technical-page .sitebrush-template-help summary:hover,
+.technical-page .sitebrush-template-help summary:focus-visible {
+  color: var(--bs-link-hover-color);
+  text-decoration-thickness: 2px;
+  outline: 2px solid currentColor;
+  outline-offset: .2rem;
+}
+
+.technical-page .sitebrush-template-help-body {
+  margin-top: .5rem;
+  border-inline-start: 3px solid currentColor;
+  padding: .5rem .75rem;
+  line-height: 1.55;
+  white-space: pre-line;
+}
+
+.technical-page .sitebrush-template-help-body h3 {
+  margin: 0 0 .4rem;
+  font-size: 1rem;
+}
+
 .technical-page .missing-page-submit {
     justify-self: start;
 }

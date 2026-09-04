@@ -10169,6 +10169,96 @@ func TestCopySiteDialogKeepsWholeSiteCheckboxInteractive(t *testing.T) {
 	}
 }
 
+func TestWholeSiteImportAutoDetectsTemplatesByDefaultAndCanBeDisabled(t *testing.T) {
+	sharedHeader := `<header><div><span>Shared 1</span></div><div><span>Shared 2</span></div><div><span>Shared 3</span></div><div><span>Shared 4</span></div><div><span>Shared 5</span></div></header>`
+	importedPages := []wholeSiteImportedPage{
+		{SourceURL: "https://templates.example/", LocalPath: "/copy", HTML: `<html><body>` + sharedHeader + `<main>Home</main></body></html>`},
+		{SourceURL: "https://templates.example/about", LocalPath: "/copy/about", HTML: `<html><body>` + sharedHeader + `<main>About</main></body></html>`},
+	}
+
+	detectedPages, err := maybeDetectImportedPageTemplates(importedPages, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, importedPage := range detectedPages {
+		if !strings.Contains(importedPage.HTML, `class="SiteBrush-Template sitebrush-template-header-`) {
+			t.Fatalf("whole-site detection did not mark %s: %s", importedPage.LocalPath, importedPage.HTML)
+		}
+		if len(sitebrushtemplate.ExtractBlocks(importedPage.HTML)) != 1 {
+			t.Fatalf("existing SiteBrush-Template parser did not recognize detected header: %s", importedPage.HTML)
+		}
+	}
+	unchangedPages, err := maybeDetectImportedPageTemplates(importedPages, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for pageIndex := range unchangedPages {
+		if unchangedPages[pageIndex].HTML != importedPages[pageIndex].HTML {
+			t.Fatalf("disabled detection changed %s", importedPages[pageIndex].LocalPath)
+		}
+	}
+
+	for _, requestTest := range []struct {
+		formValues url.Values
+		expected   bool
+	}{
+		{formValues: url.Values{}, expected: true},
+		{formValues: url.Values{"auto_detect_sitebrush_template": {"0"}}, expected: false},
+		{formValues: url.Values{"auto_detect_sitebrush_template": {"0", "1"}}, expected: true},
+	} {
+		request := httptest.NewRequest(http.MethodPost, "http://localhost/import", strings.NewReader(requestTest.formValues.Encode()))
+		request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		if actual := grabAutoDetectSiteBrushTemplate(request); actual != requestTest.expected {
+			t.Fatalf("auto-detection request value = %t, want %t for %#v", actual, requestTest.expected, requestTest.formValues)
+		}
+	}
+}
+
+func TestSiteBrushTemplateImportControlsAreEnabledByDefaultAndLocalized(t *testing.T) {
+	missingTemplateBytes, err := embeddedWebFiles.ReadFile("web/missing.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	editTemplateBytes, err := embeddedWebFiles.ReadFile("web/edit_mode.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	copyScriptBytes, err := embeddedWebFiles.ReadFile("web/static/site_copy.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for fileName, source := range map[string]string{
+		"missing.html":   string(missingTemplateBytes),
+		"edit_mode.html": string(editTemplateBytes),
+		"site_copy.js":   string(copyScriptBytes),
+	} {
+		for _, expectedFragment := range []string{"auto_detect_sitebrush_template", "checked"} {
+			if !strings.Contains(source, expectedFragment) {
+				t.Fatalf("%s is missing %q", fileName, expectedFragment)
+			}
+		}
+	}
+	for _, templateSource := range []string{string(missingTemplateBytes), string(editTemplateBytes)} {
+		for _, translationKey := range []string{"site_copy_auto_detect_template", "site_copy_template_help_link", "site_copy_template_help_title", "site_copy_template_help_body"} {
+			if !strings.Contains(templateSource, translationKey) {
+				t.Fatalf("import template is missing translation key %q", translationKey)
+			}
+		}
+	}
+
+	for languageCode, translations := range translationCatalog {
+		for _, translationKey := range []string{"site_copy_auto_detect_template", "site_copy_detecting_templates", "site_copy_template_help_link", "site_copy_template_help_title", "site_copy_template_help_body"} {
+			translatedText := strings.TrimSpace(translations[translationKey])
+			if translatedText == "" {
+				t.Fatalf("locale %s is missing %s", languageCode, translationKey)
+			}
+			if !strings.Contains(translatedText, "SiteBrush-Template") {
+				t.Fatalf("locale %s translation %s changes the technology name: %q", languageCode, translationKey, translatedText)
+			}
+		}
+	}
+}
+
 func TestWholeSitePreviewStopsAtFreeByteLimitWithUsableFirstPage(t *testing.T) {
 	startHTML := `<!doctype html><html><body><a href="/next">Next</a><img src="/huge.png"></body></html>`
 	startURL, parseErr := url.Parse("https://limited.example/")

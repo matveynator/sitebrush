@@ -69,6 +69,17 @@
       <input id="copy_whole_site" name="copy_whole_site" type="checkbox" value="1" class="form-check-input">
       <span class="form-check-label">{{index .T "missing_copy_whole_site"}}</span>
     </label>
+    <input type="hidden" name="auto_detect_sitebrush_template" value="0">
+    <div class="missing-page-template-option">
+      <label class="form-check missing-page-checkbox" for="auto_detect_sitebrush_template">
+        <input id="auto_detect_sitebrush_template" name="auto_detect_sitebrush_template" type="checkbox" value="1" class="form-check-input" checked>
+        <span class="form-check-label">{{index .T "site_copy_auto_detect_template"}}</span>
+      </label>
+      <details class="sitebrush-template-help">
+        <summary>{{index .T "site_copy_template_help_link"}}</summary>
+        <div class="sitebrush-template-help-body"><h3>{{index .T "site_copy_template_help_title"}}</h3><div>{{index .T "site_copy_template_help_body"}}</div></div>
+      </details>
+    </div>
   </form>
 
   <form class="card card-body missing-page-form missing-page-backup-form" method="post" enctype="multipart/form-data" action="{{.Path}}?backup_import">
@@ -155,13 +166,16 @@
     quotaAfterImportOf: "{{index .T "missing_quota_after_import_of"}}",
     quotaWillRemain: "{{index .T "missing_quota_will_remain"}}",
     quotaFits: "{{index .T "missing_quota_fits"}}",
-    quotaExceeded: "{{index .T "missing_quota_exceeded"}}"
+    quotaExceeded: "{{index .T "missing_quota_exceeded"}}",
+    detectingTemplates: "{{index .T "site_copy_detecting_templates"}}"
   };
   const grabFormElement = document.querySelector('[data-grab-form]');
   if (!grabFormElement) { return; }
   const tokenFieldElement = document.getElementById('progress_token');
   const sourceUrlElement = document.getElementById('source_url');
   const copyWholeSiteElement = document.getElementById('copy_whole_site');
+  const automaticTemplateElement = document.getElementById('auto_detect_sitebrush_template');
+  const automaticTemplateOptionElement = document.querySelector('.missing-page-template-option');
   const submitButtonElement = grabFormElement.querySelector('button[type="submit"]');
   const modalTitleElement = document.getElementById('grab_modal_title');
   const progressTextElement = document.getElementById('grab_progress_text');
@@ -196,6 +210,19 @@
   let failedResourceReasons = new Map();
   let retryCountdownTimer = 0;
   let activeGrabEndpoint = '?grab';
+
+  function renderAutomaticTemplateOption() {
+    if (!automaticTemplateElement || !automaticTemplateOptionElement) { return; }
+    const wholeSiteSelected = Boolean(copyWholeSiteElement && copyWholeSiteElement.checked);
+    automaticTemplateOptionElement.classList.toggle('d-none', !wholeSiteSelected);
+    automaticTemplateElement.disabled = !wholeSiteSelected;
+    if (!wholeSiteSelected) {
+      const helpElement = automaticTemplateOptionElement.querySelector('details');
+      if (helpElement) { helpElement.open = false; }
+    }
+  }
+
+  renderAutomaticTemplateOption();
 
   function setFinishImportButtonMode(finishImportMode) {
     cancelButtonElement.textContent = finishImportMode ? uiText.finishImport : cancelButtonOriginalText;
@@ -901,6 +928,11 @@
       if (progressState.stage !== 'retry_wait') {
         stopRetryCountdown();
       }
+      if (progressState.stage === 'detect_templates') {
+        progressTextElement.textContent = uiText.detectingTemplates;
+        progressUrlElement.textContent = '';
+        return;
+      }
       if (progressState.stage === 'retry_wait') {
         renderFailedResourceList();
         startRetryCountdown(progressState);
@@ -1054,6 +1086,10 @@
   continueButtonElement.addEventListener('click', function onContinueClick() {
     startConfirmedDownload();
   });
+
+  if (copyWholeSiteElement) {
+    copyWholeSiteElement.addEventListener('change', renderAutomaticTemplateOption);
+  }
 
   function finishPartialImport() {
     closeProgressStream();
