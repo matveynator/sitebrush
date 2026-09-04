@@ -11320,8 +11320,12 @@ func shouldRetryGrabSourceHTMLDownload(result crawler.HTMLDownloadResult, downlo
 	if errors.As(downloadErr, &certificateInvalidError) || errors.As(downloadErr, &hostnameError) || errors.As(downloadErr, &unknownAuthorityError) {
 		return false
 	}
+	var dnsError *net.DNSError
+	if errors.As(downloadErr, &dnsError) {
+		return dnsError.IsTimeout || dnsError.IsTemporary
+	}
 	var networkError net.Error
-	return errors.As(downloadErr, &networkError) || errors.Is(downloadErr, io.EOF) || errors.Is(downloadErr, io.ErrUnexpectedEOF)
+	return (errors.As(downloadErr, &networkError) && networkError.Timeout()) || errors.Is(downloadErr, io.EOF) || errors.Is(downloadErr, io.ErrUnexpectedEOF)
 }
 
 func decodeImportedHTMLBytes(htmlBytes []byte, contentType string) string {

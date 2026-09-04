@@ -11473,6 +11473,9 @@ func TestGrabSourceRetryClassifierRejectsPermanentFailures(t *testing.T) {
 	if !shouldRetryGrabSourceHTMLDownload(crawler.HTMLDownloadResult{}, &net.DNSError{Err: "temporary failure", Name: "example.test", IsTemporary: true}) {
 		t.Fatal("temporary DNS failure was classified as permanent")
 	}
+	if shouldRetryGrabSourceHTMLDownload(crawler.HTMLDownloadResult{}, &net.DNSError{Err: "no such host", Name: "missing.example", IsNotFound: true}) {
+		t.Fatal("NXDOMAIN failure was classified as transient")
+	}
 	if shouldRetryGrabSourceHTMLDownload(crawler.HTMLDownloadResult{}, context.Canceled) {
 		t.Fatal("canceled request was classified as transient")
 	}
