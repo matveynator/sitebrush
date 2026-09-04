@@ -1421,6 +1421,12 @@ func TestValidateServiceMailSecretRejectsArbitraryText(t *testing.T) {
 	if err := validateServiceMailSecret("login_code", "please send anything"); err == nil {
 		t.Fatal("arbitrary login-code text was accepted")
 	}
+	if err := validateServiceMailSecret("email_change", "654321"); err != nil {
+		t.Fatalf("valid email change code rejected: %v", err)
+	}
+	if err := validateServiceMailSecret("email_change", "https://example.com/?email_confirm=token"); err == nil {
+		t.Fatal("email change link was accepted instead of a six-digit code")
+	}
 	if err := validateServiceMailSecret("email_confirm", "https://example.com/?email_confirm=token"); err != nil {
 		t.Fatalf("valid confirmation link rejected: %v", err)
 	}
@@ -5651,6 +5657,8 @@ func TestPasswordRecoveryTranslationsAndEmailsCoverEveryLanguage(t *testing.T) {
 	englishRecoveryBody := recoveryEmailBodyForLanguage("en", "example.com", "123456")
 	englishPasswordSubject := emailSubjectForLanguage("en", "profile_password", "example.com")
 	englishPasswordBody := emailBodyForLanguage("en", "profile_password", "example.com", "123456")
+	englishEmailChangeSubject := emailSubjectForServiceMail("en", "email_change", "example.com")
+	englishEmailChangeBody := emailBodyForServiceMail("en", "email_change", "example.com", "123456")
 	for languageCode, translations := range translationCatalog {
 		for _, translationKey := range requiredRecoveryKeys {
 			if strings.TrimSpace(translations[translationKey]) == "" {
@@ -5663,6 +5671,9 @@ func TestPasswordRecoveryTranslationsAndEmailsCoverEveryLanguage(t *testing.T) {
 		passwordSubject := emailSubjectForLanguage(languageCode, "profile_password", "example.com")
 		passwordBody := emailBodyForLanguage(languageCode, "profile_password", "example.com", "123456")
 		passwordHTML := emailHTMLBodyForServiceMail(languageCode, "password_change_code", "example.com", "123456")
+		emailChangeSubject := emailSubjectForServiceMail(languageCode, "email_change", "example.com")
+		emailChangeBody := emailBodyForServiceMail(languageCode, "email_change", "example.com", "123456")
+		emailChangeHTML := emailHTMLBodyForServiceMail(languageCode, "email_change", "example.com", "123456")
 		for outputName, outputText := range map[string]string{
 			"recovery subject": recoverySubject,
 			"recovery body":    recoveryBody,
@@ -5670,15 +5681,18 @@ func TestPasswordRecoveryTranslationsAndEmailsCoverEveryLanguage(t *testing.T) {
 			"password subject": passwordSubject,
 			"password body":    passwordBody,
 			"password HTML":    passwordHTML,
+			"email subject":    emailChangeSubject,
+			"email body":       emailChangeBody,
+			"email HTML":       emailChangeHTML,
 		} {
 			if strings.TrimSpace(outputText) == "" {
 				t.Fatalf("empty %s for %s", outputName, languageCode)
 			}
 		}
-		if !strings.Contains(recoveryBody, "123456") || !strings.Contains(passwordBody, "123456") || !strings.Contains(recoveryHTML, `lang="`+languageCode+`"`) || !strings.Contains(passwordHTML, `lang="`+languageCode+`"`) || !strings.Contains(recoveryHTML, translations["recover_save_password"]) {
+		if !strings.Contains(recoveryBody, "123456") || !strings.Contains(passwordBody, "123456") || !strings.Contains(emailChangeBody, "123456") || !strings.Contains(recoveryHTML, `lang="`+languageCode+`"`) || !strings.Contains(passwordHTML, `lang="`+languageCode+`"`) || !strings.Contains(emailChangeHTML, `lang="`+languageCode+`"`) || strings.Contains(emailChangeHTML, "href=") || !strings.Contains(recoveryHTML, translations["recover_save_password"]) {
 			t.Fatalf("password email content is incomplete for %s", languageCode)
 		}
-		if languageCode != "en" && (recoverySubject == englishRecoverySubject || recoveryBody == englishRecoveryBody || passwordSubject == englishPasswordSubject || passwordBody == englishPasswordBody) {
+		if languageCode != "en" && (recoverySubject == englishRecoverySubject || recoveryBody == englishRecoveryBody || passwordSubject == englishPasswordSubject || passwordBody == englishPasswordBody || emailChangeSubject == englishEmailChangeSubject || emailChangeBody == englishEmailChangeBody) {
 			t.Fatalf("password email fell back to English for %s", languageCode)
 		}
 	}
@@ -6599,8 +6613,9 @@ func TestRevisionsPageShowsPreviewButtonForEditableUser(t *testing.T) {
 	}
 }
 
-func TestProfilePageUpdatesAdminEmailAndPassword(t *testing.T) {
+func TestProfilePageChangesAdminEmailThroughSixDigitCode(t *testing.T) {
 	withEmailSPFAllowed(t)
+	t.Setenv("SITEBRUSH_SERVICE_MAIL_MODE", "local")
 	application, rawDB := newTestApplication(t)
 	captureImmediateProfileEmail(t, application)
 	_, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "admin@example.com", "old")
@@ -6608,36 +6623,41 @@ func TestProfilePageUpdatesAdminEmailAndPassword(t *testing.T) {
 		t.Fatalf("insert user: %v", err)
 	}
 	form := url.Values{}
+	form.Set("profile_action", "email")
 	form.Set("email", "new@example.com")
-	form.Set("password", "new-secret")
-	form.Set("password_confirm", "new-secret")
 	request := httptest.NewRequest(http.MethodPost, "http://localhost:8080/?profile", strings.NewReader(form.Encode()))
 	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	request.Header.Set("Accept-Language", "ru-RU,ru;q=0.9,en;q=0.8")
 	request.AddCookie(newAdminSessionCookie(t, application, "admin@example.com"))
 	response := httptest.NewRecorder()
 	application.route(response, request)
 	if response.Code != http.StatusOK {
 		t.Fatalf("status = %d, body=%q", response.Code, response.Body.String())
 	}
-	for _, expectedFragment := range []string{`name="password_confirmation_code"`, `maxlength="6"`, `class="profile-code-submit" type="submit" disabled`} {
+	for _, expectedFragment := range []string{`name="password_confirmation_code"`, `maxlength="6"`, `class="profile-code-submit" type="submit" disabled`, `Письмо с кодом отправлено`, `admin@example.com`} {
 		if !strings.Contains(response.Body.String(), expectedFragment) {
-			t.Fatalf("profile password code form missing %q in %s", expectedFragment, response.Body.String())
+			t.Fatalf("profile email code form missing %q in %s", expectedFragment, response.Body.String())
 		}
 	}
+	var sentCode string
 	select {
 	case mailJob := <-application.emailDelivery:
-		if mailJob.Message.To != "admin@example.com" || !strings.Contains(mailJob.Message.Body, "SiteBrush") {
-			t.Fatalf("unexpected password code email: %#v", mailJob.Message)
+		if mailJob.Message.To != "admin@example.com" || mailJob.Message.Kind != "email_change" {
+			t.Fatalf("unexpected email change code message: %#v", mailJob.Message)
 		}
+		if strings.Contains(mailJob.Message.HTMLBody, "href=") || !strings.Contains(mailJob.Message.HTMLBody, `lang="ru"`) {
+			t.Fatalf("email change message must contain a localized code without a link: %#v", mailJob.Message)
+		}
+		sentCode = strings.TrimSpace(strings.Split(strings.Split(mailJob.Message.Body, ":")[1], "\n")[0])
 	default:
-		t.Fatal("profile update did not enqueue password code email")
+		t.Fatal("profile update did not enqueue email change code")
 	}
 
 	var pendingToken, pendingCode string
-	if err := rawDB.QueryRow(`SELECT token,verification_code FROM email_confirmations WHERE domain=? AND action=? AND current_email=?`, "localhost", "profile_password", "admin@example.com").Scan(&pendingToken, &pendingCode); err != nil {
-		t.Fatalf("read password confirmation: %v", err)
+	if err := rawDB.QueryRow(`SELECT token,verification_code FROM email_confirmations WHERE domain=? AND action=? AND current_email=?`, "localhost", "profile_code", "admin@example.com").Scan(&pendingToken, &pendingCode); err != nil {
+		t.Fatalf("read email confirmation: %v", err)
 	}
-	if len(pendingCode) != 6 {
+	if len(pendingCode) != 6 || sentCode != pendingCode {
 		t.Fatalf("pending code = %q, want 6 digits", pendingCode)
 	}
 	codeForm := url.Values{}
@@ -6651,34 +6671,14 @@ func TestProfilePageUpdatesAdminEmailAndPassword(t *testing.T) {
 	if codeResponse.Code != http.StatusOK {
 		t.Fatalf("code status = %d, body=%q", codeResponse.Code, codeResponse.Body.String())
 	}
-	select {
-	case mailJob := <-application.emailDelivery:
-		if mailJob.Message.To != "new@example.com" || !strings.Contains(mailJob.Message.Body, "email_confirm=") {
-			t.Fatalf("unexpected email confirmation: %#v", mailJob.Message)
-		}
-	default:
-		t.Fatal("profile update did not enqueue email confirmation")
-	}
-
-	var emailToken string
-	if err := rawDB.QueryRow(`SELECT token FROM email_confirmations WHERE domain=? AND action=? AND email=?`, "localhost", "profile", "new@example.com").Scan(&emailToken); err != nil {
-		t.Fatalf("read email confirmation token: %v", err)
-	}
-	confirmRequest := httptest.NewRequest(http.MethodGet, "http://localhost:8080/?email_confirm="+url.QueryEscape(emailToken), nil)
-	confirmResponse := httptest.NewRecorder()
-	application.route(confirmResponse, confirmRequest)
-	if confirmResponse.Code != http.StatusFound {
-		t.Fatalf("confirm status = %d, body=%q", confirmResponse.Code, confirmResponse.Body.String())
-	}
-
 	var password string
 	if err := rawDB.QueryRow(`SELECT password FROM users WHERE domain=? AND email=?`, "localhost", "new@example.com").Scan(&password); err != nil {
 		t.Fatalf("read updated user: %v", err)
 	}
-	if password != "new-secret" {
-		t.Fatalf("password = %q, want new-secret", password)
+	if password != "old" {
+		t.Fatalf("password = %q, want old", password)
 	}
-	profileCookies := confirmResponse.Result().Cookies()
+	profileCookies := codeResponse.Result().Cookies()
 	if len(profileCookies) == 0 {
 		t.Fatal("profile update did not refresh the session cookie")
 	}
@@ -6686,6 +6686,56 @@ func TestProfilePageUpdatesAdminEmailAndPassword(t *testing.T) {
 	authenticatedRequest.AddCookie(profileCookies[0])
 	if !application.isAdminRequest(authenticatedRequest) {
 		t.Fatal("refreshed profile session is not authenticated")
+	}
+}
+
+func TestProfileChangeButtonsStartDisabledAndUnchangedEmailIsRejected(t *testing.T) {
+	application, rawDB := newTestApplication(t)
+	if _, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "admin@example.com", "old"); err != nil {
+		t.Fatalf("insert user: %v", err)
+	}
+	adminCookie := newAdminSessionCookie(t, application, "admin@example.com")
+
+	getRequest := httptest.NewRequest(http.MethodGet, "http://localhost:8080/?profile", nil)
+	getRequest.AddCookie(adminCookie)
+	getResponse := httptest.NewRecorder()
+	application.route(getResponse, getRequest)
+	if getResponse.Code != http.StatusOK {
+		t.Fatalf("get status = %d, body=%q", getResponse.Code, getResponse.Body.String())
+	}
+	for _, expectedFragment := range []string{
+		`data-profile-email-form data-current-email="admin@example.com"`,
+		`type="submit" disabled data-profile-email-submit`,
+		`type="submit" disabled data-profile-password-submit`,
+		`submitButton.disabled = nextEmail === currentEmail || !emailInput.validity.valid`,
+		`submitButton.disabled = password === '' || password !== passwordConfirmation`,
+	} {
+		if !strings.Contains(getResponse.Body.String(), expectedFragment) {
+			t.Fatalf("profile page missing %q in %s", expectedFragment, getResponse.Body.String())
+		}
+	}
+
+	form := url.Values{}
+	form.Set("profile_action", "email")
+	form.Set("email", "admin@example.com")
+	postRequest := httptest.NewRequest(http.MethodPost, "http://localhost:8080/?profile", strings.NewReader(form.Encode()))
+	postRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	postRequest.Header.Set("Accept-Language", "ru")
+	postRequest.AddCookie(adminCookie)
+	postResponse := httptest.NewRecorder()
+	application.route(postResponse, postRequest)
+	if postResponse.Code != http.StatusOK {
+		t.Fatalf("post status = %d, body=%q", postResponse.Code, postResponse.Body.String())
+	}
+	if !strings.Contains(postResponse.Body.String(), "Выберите, что нужно изменить.") || strings.Contains(postResponse.Body.String(), "Учетная запись обновлена.") {
+		t.Fatalf("unchanged email response reports the wrong status: %s", postResponse.Body.String())
+	}
+	var confirmationCount int
+	if err := rawDB.QueryRow(`SELECT COUNT(1) FROM email_confirmations WHERE domain=?`, "localhost").Scan(&confirmationCount); err != nil {
+		t.Fatalf("count confirmations: %v", err)
+	}
+	if confirmationCount != 0 {
+		t.Fatalf("unchanged email created %d confirmations", confirmationCount)
 	}
 }
 
