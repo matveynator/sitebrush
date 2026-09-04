@@ -14393,7 +14393,7 @@ func (a *App) hostingAndSupportClientIP(ctx context.Context, ip string) hostingA
 
 func serviceMailEventIsNewerIdentity(codeKind string) bool {
 	switch strings.TrimSpace(codeKind) {
-	case "recipient_verified", "email_change", "email_confirm":
+	case "recipient_verified", "email_change", "email_change_confirm", "email_confirm":
 		return true
 	default:
 		return false
@@ -16427,8 +16427,8 @@ func (a *App) profilePage(w http.ResponseWriter, r *http.Request) {
 			status = translationOrDefault(translations, "profile_status_email_required", "Email is required.")
 			statusClass = "warning"
 		case profileAction == "email" && nextEmail == currentEmail:
-			status = translationOrDefault(translations, "profile_status_updated", "Account updated.")
-			statusClass = "success"
+			status = translationOrDefault(translations, "profile_status_unknown_action", "Choose what to update.")
+			statusClass = "warning"
 		case (profileAction == "password" || profileAction == "both") && nextPassword == "":
 			status = translationOrDefault(translations, "profile_status_password_required", "Password is required.")
 			statusClass = "warning"
@@ -16475,6 +16475,9 @@ func (a *App) profilePage(w http.ResponseWriter, r *http.Request) {
 				statusClass = "warning"
 			} else {
 				status = translationOrDefault(translations, "profile_password_code_status_sent", "The code email was sent and accepted by the recipient mail server.")
+				if profileAction == "email" || profileAction == "both" {
+					status += " (" + currentEmail + ")"
+				}
 				statusClass = "success"
 			}
 			emailDeliveryView = profileEmailDeliveryViewForResult(translations, deliveryResult, profileEmailDeliveryDNSHelp{})
@@ -16881,13 +16884,28 @@ func (a *App) handleProfilePasswordCode(w http.ResponseWriter, r *http.Request, 
 		a.renderProfilePage(w, r, confirmation.Email, translationOrDefault(translations, "profile_password_code_status_invalid", "The code is invalid or expired."), "danger", true, token, time.Time{}, false, profileEmailDeliveryView{})
 		return
 	}
+	if strings.TrimSpace(confirmation.Email) != "" {
+		err := a.createAndSendEmailConfirmationForLanguage(r, "profile", domain, currentEmail, confirmation.Email, confirmation.Password, confirmation.ReturnPath, confirmation.LanguageCode)
+		if err != nil {
+			a.renderProfilePage(w, r, currentEmail, err.Error(), "danger", true, token, time.Time{}, false, profileEmailDeliveryView{})
+			return
+		}
+		_, _ = a.db.ExecContext(r.Context(), `DELETE FROM email_confirmations WHERE token=?`, token)
+		a.clearFailedLoginAttempts(r.Context(), failureDomain, clientIP)
+		a.renderProfilePage(w, r, currentEmail, translationOrDefault(translations, "profile_password_code_status_confirmed_email_pending", "Your current email is confirmed. Open the message sent to the new address to complete the change."), "success", false, "", time.Time{}, false, profileEmailDeliveryView{})
+		return
+	}
 	if err := a.applyProfileCodeConfirmation(r.Context(), confirmation); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	confirmedEmail := confirmedProfileEmail(currentEmail, confirmation)
+	if confirmedEmail != currentEmail {
+		a.createSessionForDomain(w, r, r.Context(), domain, confirmedEmail)
+	}
 	_, _ = a.db.ExecContext(r.Context(), `DELETE FROM email_confirmations WHERE token=?`, token)
 	a.clearFailedLoginAttempts(r.Context(), failureDomain, clientIP)
-	a.renderProfilePage(w, r, confirmedProfileEmail(currentEmail, confirmation), translationOrDefault(translations, "profile_status_updated", "Account updated."), "success", false, "", time.Time{}, false, profileEmailDeliveryView{})
+	a.renderProfilePage(w, r, confirmedEmail, translationOrDefault(translations, "profile_status_updated", "Account updated."), "success", false, "", time.Time{}, false, profileEmailDeliveryView{})
 }
 
 func profileCodeActionAllowed(action string) bool {
@@ -16969,6 +16987,10 @@ func isSixDigitCode(code string) bool {
 }
 
 func (a *App) createAndSendEmailConfirmation(r *http.Request, action, domain, currentEmail, email, password, returnPath string) error {
+	return a.createAndSendEmailConfirmationForLanguage(r, action, domain, currentEmail, email, password, returnPath, preferredLanguageCode(r.Header.Get("Accept-Language")))
+}
+
+func (a *App) createAndSendEmailConfirmationForLanguage(r *http.Request, action, domain, currentEmail, email, password, returnPath, languageCode string) error {
 	translations := translationsForRequest(r)
 	email = strings.TrimSpace(email)
 	if _, err := stdmail.ParseAddress(email); err != nil {
@@ -16978,7 +17000,6 @@ func (a *App) createAndSendEmailConfirmation(r *http.Request, action, domain, cu
 	if strings.TrimSpace(returnPath) == "" {
 		returnPath = requestedReturnPath(r)
 	}
-	languageCode := preferredLanguageCode(r.Header.Get("Accept-Language"))
 	token := randomAccessToken()
 	now := time.Now().UTC()
 	expiresAt := now.Add(emailConfirmationTTL)
@@ -17014,7 +17035,7 @@ func (a *App) createAndSendEmailConfirmation(r *http.Request, action, domain, cu
 	if err != nil {
 		return err
 	}
-	codeKind := "email_change"
+	codeKind := "email_change_confirm"
 	if strings.TrimSpace(action) == "register" {
 		codeKind = "email_confirm"
 	}
@@ -17070,12 +17091,15 @@ func (a *App) confirmEmailToken(w http.ResponseWriter, r *http.Request) {
 		a.createSessionForDomain(w, r, registerContext, confirmation.Domain, confirmation.Email)
 		httpsecurity.RedirectLocal(w, r, safeConfirmationReturnPath(confirmation.ReturnPath), http.StatusFound)
 	case "profile":
+		if err := a.verifyServiceMailRecipient(r.Context(), confirmation.Domain, confirmation.Email, confirmation.LanguageCode); err != nil {
+			a.renderEmailConfirmationStatus(w, r, http.StatusBadGateway, err.Error())
+			return
+		}
 		if err := a.applyProfileEmailConfirmation(r.Context(), confirmation); err != nil {
 			a.renderEmailConfirmationStatus(w, r, http.StatusBadRequest, err.Error())
 			return
 		}
 		_, _ = a.db.ExecContext(r.Context(), `DELETE FROM email_confirmations WHERE token=?`, token)
-		a.markServiceMailRecipientVerified(r.Context(), confirmation.Domain, confirmation.Email, confirmation.LanguageCode)
 		a.logHostingSupportEvent(r.Context(), "email_changed", "success", confirmation.Email, confirmation.Domain, "profile email confirmed")
 		a.createSessionForDomain(w, r, r.Context(), confirmation.Domain, confirmation.Email)
 		httpsecurity.RedirectLocal(w, r, safeConfirmationReturnPath(confirmation.ReturnPath), http.StatusFound)
@@ -17228,9 +17252,18 @@ func (a *App) sendServiceEmailNow(ctx context.Context, r *http.Request, codeKind
 }
 
 func (a *App) markServiceMailRecipientVerified(ctx context.Context, domain, recipient, languageCode string) {
+	if err := a.verifyServiceMailRecipient(ctx, domain, recipient, languageCode); err != nil {
+		route := a.serviceMailRoute(ctx, domain, languageCode)
+		log.Printf("service mail recipient verification failed domain=%s relay=%s recipient_domain=%s error=%s",
+			diagnosticlog.SafeLogValue(domain), diagnosticlog.SafeLogValue(route.primaryRelayURL()),
+			diagnosticlog.SafeLogValue(emailAddressDomain(recipient)), diagnosticlog.SafeLogValue(err.Error()))
+	}
+}
+
+func (a *App) verifyServiceMailRecipient(ctx context.Context, domain, recipient, languageCode string) error {
 	route := a.serviceMailRoute(ctx, domain, languageCode)
 	if !route.UseRelay {
-		return
+		return nil
 	}
 	request := serviceMailRequest{
 		Version:      1,
@@ -17241,11 +17274,8 @@ func (a *App) markServiceMailRecipientVerified(ctx context.Context, domain, reci
 		LanguageCode: strings.TrimSpace(languageCode),
 		CreatedAt:    time.Now().UTC().Format(time.RFC3339),
 	}
-	if _, err := a.sendServiceMailThroughRelayChain(ctx, route, &request); err != nil {
-		log.Printf("service mail recipient verification failed domain=%s relay=%s recipient_domain=%s error=%s",
-			diagnosticlog.SafeLogValue(domain), diagnosticlog.SafeLogValue(route.primaryRelayURL()),
-			diagnosticlog.SafeLogValue(emailAddressDomain(recipient)), diagnosticlog.SafeLogValue(err.Error()))
-	}
+	_, err := a.sendServiceMailThroughRelayChain(ctx, route, &request)
+	return err
 }
 
 func (a *App) serviceMailLocalFallbackAllowed(ctx context.Context, domain, languageCode string) bool {
@@ -17605,7 +17635,7 @@ func mailExpirationForKind(kind string, now time.Time) time.Time {
 	switch strings.TrimSpace(kind) {
 	case "password_change_code", "login_code":
 		return now.Add(profilePasswordCodeTTL)
-	case "email_confirm", "email_change", "owner_invite":
+	case "email_confirm", "email_change", "email_change_confirm", "owner_invite":
 		return now.Add(emailConfirmationTTL)
 	default:
 		return now.Add(mailout.DefaultRetention)
@@ -20329,7 +20359,12 @@ func serviceMailRecipientAllowed(ctx context.Context, store hostingandsupport.St
 			return "", true
 		}
 		return "owner recipient is not verified", false
-	case "email_change", "owner_invite":
+	case "email_change":
+		if store.ServiceMailRecipientVerified(ctx, request.InstallationID, request.Recipient) {
+			return "", true
+		}
+		return "installation owner recipient is not verified", false
+	case "email_change_confirm", "owner_invite":
 		if store.CountServiceMailVerifiedRecipients(ctx, request.InstallationID) == 0 {
 			return "installation owner recipient is not verified", false
 		}
@@ -20426,11 +20461,11 @@ func validateServiceMailSecret(codeKind, secretValue string) error {
 		return errors.New("service mail secret is invalid")
 	}
 	switch strings.TrimSpace(codeKind) {
-	case "password_change_code", "login_code":
+	case "password_change_code", "login_code", "email_change":
 		if !isSixDigitCode(secretValue) {
 			return errors.New("service mail code is invalid")
 		}
-	case "email_confirm", "email_change", "owner_invite":
+	case "email_confirm", "email_change_confirm", "owner_invite":
 		secretURL, err := url.Parse(secretValue)
 		if err != nil || secretURL == nil || secretURL.Host == "" || (secretURL.Scheme != "http" && secretURL.Scheme != "https") {
 			return errors.New("service mail link is invalid")
@@ -21132,7 +21167,7 @@ func emailHTMLBodyForServiceMailWithActionURL(languageCode, codeKind, domain, se
 	if action == "recover" && strings.TrimSpace(actionURL) != "" {
 		return recoveryEmailHTMLBodyForLanguage(languageCode, domain, secret, actionURL)
 	}
-	if action == "profile_password" {
+	if action == "profile_password" || action == "profile_email" {
 		return serviceCodeEmailHTMLForLanguage(languageCode, codeKind, domain, secret)
 	}
 	if action != "profile" {
@@ -21223,9 +21258,11 @@ func serviceMailKindAction(codeKind string) string {
 	switch strings.TrimSpace(codeKind) {
 	case "password_change_code":
 		return "profile_password"
+	case "email_change":
+		return "profile_email"
 	case "login_code":
 		return "recover"
-	case "email_confirm", "email_change", "owner_invite":
+	case "email_confirm", "email_change_confirm", "owner_invite":
 		return "profile"
 	default:
 		return ""
@@ -21234,7 +21271,7 @@ func serviceMailKindAction(codeKind string) string {
 
 func serviceMailKindAllowed(codeKind string) bool {
 	switch strings.TrimSpace(codeKind) {
-	case "email_confirm", "email_change", "password_change_code", "login_code", "owner_invite",
+	case "email_confirm", "email_change", "email_change_confirm", "password_change_code", "login_code", "owner_invite",
 		"invoice", "site_request", "site_request_decision", "backup_notice", "disk_alert", "system":
 		return true
 	default:
@@ -21253,6 +21290,10 @@ func serviceMailKindIsTransactional(codeKind string) bool {
 
 func emailSubjectForLanguage(languageCode, action, domain string) string {
 	domain = strings.TrimSpace(domain)
+	if action == "profile_email" {
+		translations := translationsForLanguageCode(languageCode)
+		return translationOrDefault(translations, "profile_email_form_title", "Change email") + " — SiteBrush " + domain
+	}
 	switch strings.ToLower(strings.TrimSpace(languageCode)) {
 	case "ru":
 		if action == "profile_password" {
@@ -21533,6 +21574,12 @@ func emailDNSSetupViewForLanguage(languageCode, domain, fromAddress, serverIP st
 func emailBodyForLanguage(languageCode, action, domain, secret string) string {
 	if action == "profile_password" {
 		return profilePasswordCodeEmailBodyForLanguage(languageCode, domain, secret)
+	}
+	if action == "profile_email" {
+		translations := translationsForLanguageCode(languageCode)
+		codeLabel := translationOrDefault(translations, "profile_password_code", "6-digit code")
+		codeHelp := translationOrDefault(translations, "profile_password_code_help", "Enter the code sent to your current email address to confirm the change.")
+		return fmt.Sprintf("%s: %s\n\n%s", codeLabel, secret, codeHelp)
 	}
 	if action == "recover" {
 		return recoveryEmailBodyForLanguage(languageCode, domain, secret)

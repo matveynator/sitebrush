@@ -88,7 +88,7 @@
   </form>
   {{else if .ShowPasswordForm}}
   <div class="profile-form-grid">
-    <form class="profile-form" method="post" action="?profile" data-profile-send-form>
+    <form class="profile-form" method="post" action="?profile" data-profile-send-form data-profile-email-form data-current-email="{{.Email}}">
       <input type="hidden" name="profile_action" value="email">
       <div class="profile-form-header">
         <h2>{{.EmailFormTitle}}</h2>
@@ -96,11 +96,11 @@
       </div>
       <label>
         {{.EmailLabel}}
-        <input type="email" name="email" value="{{.Email}}" autocomplete="email" required>
+        <input type="email" name="email" value="{{.Email}}" autocomplete="email" required data-profile-email-input>
       </label>
-      <div><button type="submit">{{.EmailSubmitLabel}}</button></div>
+      <div><button type="submit" data-profile-email-submit>{{.EmailSubmitLabel}}</button></div>
     </form>
-    <form class="profile-form" method="post" action="?profile" data-profile-send-form>
+    <form class="profile-form" method="post" action="?profile" data-profile-send-form data-profile-password-form>
       <input type="hidden" name="profile_action" value="password">
       <div class="profile-form-header">
         <h2>{{.PasswordFormTitle}}</h2>
@@ -108,13 +108,13 @@
       </div>
       <label>
         {{.PasswordLabel}}
-        <input type="password" name="password" autocomplete="new-password" required>
+        <input type="password" name="password" autocomplete="new-password" required data-profile-password-input>
       </label>
       <label>
         {{.PasswordConfirmLabel}}
-        <input type="password" name="password_confirm" autocomplete="new-password" required>
+        <input type="password" name="password_confirm" autocomplete="new-password" required data-profile-password-confirm-input>
       </label>
-      <div><button type="submit">{{.PasswordSubmitLabel}}</button></div>
+      <div><button type="submit" data-profile-password-submit>{{.PasswordSubmitLabel}}</button></div>
     </form>
   </div>
   {{else}}
@@ -165,6 +165,61 @@
     }
   });
   normalizeCodeInput();
+})();
+
+(function prepareProfileChangeForms() {
+  var emailForm = document.querySelector('[data-profile-email-form]');
+  var passwordForm = document.querySelector('[data-profile-password-form]');
+
+  function prepareEmailForm() {
+    if (!emailForm) {
+      return;
+    }
+    var emailInput = emailForm.querySelector('[data-profile-email-input]');
+    var submitButton = emailForm.querySelector('[data-profile-email-submit]');
+    var currentEmail = String(emailForm.getAttribute('data-current-email') || '').trim();
+    if (!emailInput || !submitButton) {
+      return;
+    }
+
+    function updateEmailSubmitButton() {
+      var nextEmail = String(emailInput.value || '').trim();
+      submitButton.disabled = nextEmail === currentEmail || !emailInput.validity.valid;
+    }
+
+    emailInput.addEventListener('input', updateEmailSubmitButton);
+    emailInput.addEventListener('change', updateEmailSubmitButton);
+    window.addEventListener('pageshow', updateEmailSubmitButton);
+    updateEmailSubmitButton();
+    window.setTimeout(updateEmailSubmitButton, 0);
+  }
+
+  function preparePasswordForm() {
+    if (!passwordForm) {
+      return;
+    }
+    var passwordInput = passwordForm.querySelector('[data-profile-password-input]');
+    var passwordConfirmInput = passwordForm.querySelector('[data-profile-password-confirm-input]');
+    var submitButton = passwordForm.querySelector('[data-profile-password-submit]');
+    if (!passwordInput || !passwordConfirmInput || !submitButton) {
+      return;
+    }
+
+    function updatePasswordSubmitButton() {
+      var password = String(passwordInput.value || '');
+      var passwordConfirmation = String(passwordConfirmInput.value || '');
+      submitButton.disabled = password === '' || password !== passwordConfirmation;
+    }
+
+    passwordInput.addEventListener('input', updatePasswordSubmitButton);
+    passwordConfirmInput.addEventListener('input', updatePasswordSubmitButton);
+    window.addEventListener('pageshow', updatePasswordSubmitButton);
+    updatePasswordSubmitButton();
+    window.setTimeout(updatePasswordSubmitButton, 0);
+  }
+
+  prepareEmailForm();
+  preparePasswordForm();
 })();
 
 (function prepareProfileSubmitProgress() {
