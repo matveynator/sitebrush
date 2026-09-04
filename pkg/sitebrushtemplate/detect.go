@@ -58,12 +58,19 @@ type selectedTemplateGroup struct {
 // DetectAutomaticTemplates adds ordinary SiteBrush-Template classes to useful
 // repeated subtrees. The returned pages remain in the same order as the input.
 func DetectAutomaticTemplates(pageList []DetectionPage) ([]DetectionPage, error) {
+	return DetectAutomaticTemplatesWithProgress(pageList, nil)
+}
+
+// DetectAutomaticTemplatesWithProgress reports the progress of the synchronous
+// detection pass without changing the detector's ownership model.
+func DetectAutomaticTemplatesWithProgress(pageList []DetectionPage, reportProgress func(int)) ([]DetectionPage, error) {
+	reportDetectionProgress(reportProgress, 0)
 	documentList := make([]detectionDocument, 0, len(pageList))
 	candidateByHash := make(map[[sha256.Size]byte][]*templateCandidate)
 	existingTemplateNodes := make(map[*html.Node]struct{})
 	usedTemplateIdentifiers := make(map[string]struct{})
 
-	for _, page := range pageList {
+	for pageIndex, page := range pageList {
 		root, err := html.Parse(strings.NewReader(page.HTML))
 		if err != nil {
 			return nil, fmt.Errorf("parse page %s for SiteBrush-Template detection: %w", page.Key, err)
@@ -71,9 +78,11 @@ func DetectAutomaticTemplates(pageList []DetectionPage) ([]DetectionPage, error)
 		documentList = append(documentList, detectionDocument{page: page, root: root})
 		collectExistingTemplateMarkup(root, existingTemplateNodes, usedTemplateIdentifiers)
 		fingerprintDOMSubtrees(root, page.Key, candidateByHash, existingTemplateNodes, explicitDocumentWrapperTags(page.HTML))
+		reportDetectionProgress(reportProgress, detectionPhasePercent(0, 70, pageIndex+1, len(pageList)))
 	}
 
 	groupList := matchingTemplateCandidateGroups(candidateByHash)
+	reportDetectionProgress(reportProgress, 70)
 	sort.Slice(groupList, func(leftIndex, rightIndex int) bool {
 		leftGroup := groupList[leftIndex]
 		rightGroup := groupList[rightIndex]
@@ -88,8 +97,9 @@ func DetectAutomaticTemplates(pageList []DetectionPage) ([]DetectionPage, error)
 		selectedNodes[node] = struct{}{}
 	}
 	selectedGroupList := make([]selectedTemplateGroup, 0, len(groupList))
-	for _, group := range groupList {
+	for groupIndex, group := range groupList {
 		if templateGroupHasSelectedAncestor(group, selectedNodes) {
+			reportDetectionProgress(reportProgress, detectionPhasePercent(70, 90, groupIndex+1, len(groupList)))
 			continue
 		}
 		identifierClass := automaticTemplateIdentifier(group, usedTemplateIdentifiers)
@@ -99,7 +109,9 @@ func DetectAutomaticTemplates(pageList []DetectionPage) ([]DetectionPage, error)
 			selectedNodes[occurrence.node] = struct{}{}
 		}
 		selectedGroupList = append(selectedGroupList, selectedTemplateGroup{group: group, identifierClass: identifierClass})
+		reportDetectionProgress(reportProgress, detectionPhasePercent(70, 90, groupIndex+1, len(groupList)))
 	}
+	reportDetectionProgress(reportProgress, 90)
 
 	changedNodes := make(map[*html.Node]struct{})
 	for _, selectedGroup := range selectedGroupList {
@@ -110,9 +122,10 @@ func DetectAutomaticTemplates(pageList []DetectionPage) ([]DetectionPage, error)
 	}
 
 	result := make([]DetectionPage, 0, len(documentList))
-	for _, document := range documentList {
+	for documentIndex, document := range documentList {
 		if !documentContainsChangedNode(document.root, changedNodes) {
 			result = append(result, document.page)
+			reportDetectionProgress(reportProgress, detectionPhasePercent(90, 100, documentIndex+1, len(documentList)))
 			continue
 		}
 		var renderedHTML bytes.Buffer
@@ -120,8 +133,23 @@ func DetectAutomaticTemplates(pageList []DetectionPage) ([]DetectionPage, error)
 			return nil, fmt.Errorf("render page %s after SiteBrush-Template detection: %w", document.page.Key, err)
 		}
 		result = append(result, DetectionPage{Key: document.page.Key, HTML: renderedHTML.String()})
+		reportDetectionProgress(reportProgress, detectionPhasePercent(90, 100, documentIndex+1, len(documentList)))
 	}
+	reportDetectionProgress(reportProgress, 100)
 	return result, nil
+}
+
+func detectionPhasePercent(startPercent, endPercent, completed, total int) int {
+	if total <= 0 {
+		return endPercent
+	}
+	return startPercent + (endPercent-startPercent)*completed/total
+}
+
+func reportDetectionProgress(reportProgress func(int), completedPercent int) {
+	if reportProgress != nil {
+		reportProgress(completedPercent)
+	}
 }
 
 func fingerprintDOMSubtrees(root *html.Node, pageKey string, candidateByHash map[[sha256.Size]byte][]*templateCandidate, existingTemplateNodes map[*html.Node]struct{}, explicitWrapperTags map[string]struct{}) subtreeFingerprint {

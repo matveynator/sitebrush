@@ -39,6 +39,27 @@ func TestDetectAutomaticTemplatesMatchesLargeHeaderAcrossFormattingAndTagCase(t 
 	}
 }
 
+func TestDetectAutomaticTemplatesReportsMonotonicProgress(t *testing.T) {
+	progressList := make([]int, 0)
+	_, err := DetectAutomaticTemplatesWithProgress([]DetectionPage{
+		{Key: "/", HTML: `<main><p>same</p></main>`},
+		{Key: "/two", HTML: `<main><p>same</p></main>`},
+	}, func(completedPercent int) {
+		progressList = append(progressList, completedPercent)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(progressList) < 2 || progressList[0] != 0 || progressList[len(progressList)-1] != 100 {
+		t.Fatalf("progress endpoints = %#v", progressList)
+	}
+	for progressIndex := 1; progressIndex < len(progressList); progressIndex++ {
+		if progressList[progressIndex] < progressList[progressIndex-1] {
+			t.Fatalf("progress is not monotonic: %#v", progressList)
+		}
+	}
+}
+
 func TestDetectAutomaticTemplatesDoesNotMergeDifferentContent(t *testing.T) {
 	pageList := make([]DetectionPage, 0, 100)
 	for pageIndex := 0; pageIndex < 100; pageIndex++ {

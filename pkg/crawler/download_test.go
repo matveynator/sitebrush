@@ -78,3 +78,45 @@ func TestReadHTMLBodyWithLimitRejectsOversizedBody(t *testing.T) {
 		t.Fatalf("html body = %q", string(body))
 	}
 }
+
+func TestDownloadHTMLPageRetriesOnlyWhenClassifierAllows(t *testing.T) {
+	pageURL, err := url.Parse("https://example.test/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	attempts := 0
+	client := &http.Client{Transport: htmlDownloadRoundTripper(func(request *http.Request) (*http.Response, error) {
+		attempts++
+		statusCode := http.StatusServiceUnavailable
+		body := "unavailable"
+		if attempts == 3 {
+			statusCode = http.StatusOK
+			body = "<html><body>ready</body></html>"
+		}
+		return &http.Response{StatusCode: statusCode, Status: http.StatusText(statusCode), Header: http.Header{"Content-Type": {"text/html"}}, Body: io.NopCloser(strings.NewReader(body)), Request: request}, nil
+	})}
+	result, err := DownloadHTMLPageWithRetriesContext(t.Context(), client, pageURL, nil, HTMLDownloadRetryOptions{
+		Attempts: 4,
+		ShouldRetry: func(result HTMLDownloadResult, downloadErr error) bool {
+			return result.StatusCode >= http.StatusInternalServerError
+		},
+	})
+	if err != nil || !result.IsHTML || attempts != 3 {
+		t.Fatalf("transient retry result=%#v err=%v attempts=%d", result, err, attempts)
+	}
+
+	attempts = 0
+	client.Transport = htmlDownloadRoundTripper(func(request *http.Request) (*http.Response, error) {
+		attempts++
+		return &http.Response{StatusCode: http.StatusNotFound, Status: "404 Not Found", Header: make(http.Header), Body: io.NopCloser(strings.NewReader("missing")), Request: request}, nil
+	})
+	_, _ = DownloadHTMLPageWithRetriesContext(t.Context(), client, pageURL, nil, HTMLDownloadRetryOptions{
+		Attempts: 4,
+		ShouldRetry: func(result HTMLDownloadResult, downloadErr error) bool {
+			return result.StatusCode >= http.StatusInternalServerError
+		},
+	})
+	if attempts != 1 {
+		t.Fatalf("permanent response attempts=%d, want 1", attempts)
+	}
+}

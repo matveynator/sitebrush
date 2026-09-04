@@ -321,10 +321,14 @@ function visualEditorFrameStyle() {
     'img,video,svg,canvas,iframe{max-width:100%;}',
     '@media (prefers-color-scheme: dark){:where(html:not([data-bs-theme]):not([data-theme]):not(.light)){background:#0f1724;color:#dbe8ff;}:where(body:not([style*="background"])){background:#0f1724;color:#dbe8ff;}}'
   ].join('\n');
+  const editorSafetyStyle = [
+    '*,*::before,*::after{animation:none!important;transition:none!important;scroll-behavior:auto!important;}',
+    '#loader,#loader-wrapper,[id*="loader" i],[class*="loader-wrapper" i],[class*="page-loader" i],[class*="preloader" i],[class*="loading-overlay" i],[class*="loading-screen" i]{display:none!important;}'
+  ].join('\n');
   if (!inlineSiteStyle) {
-    return fallbackStyle;
+    return fallbackStyle + '\n' + editorSafetyStyle;
   }
-  return fallbackStyle + '\n\n' + inlineSiteStyle;
+  return fallbackStyle + '\n\n' + inlineSiteStyle + '\n\n' + editorSafetyStyle;
 }
 
 function syncVisualEditorTheme(visualHtmlEditor) {
@@ -436,6 +440,26 @@ function syncVisualEditorFrameTheme(visualHtmlEditor, colorScheme) {
       frameDocument.body.classList.toggle('light', colorScheme !== 'dark');
     }
   }
+}
+
+function protectVisualEditorFrameNavigation(visualHtmlEditor) {
+  if (!visualHtmlEditor || !visualHtmlEditor.iframe || !visualHtmlEditor.iframe.contentDocument) {
+    return;
+  }
+  const frameDocument = visualHtmlEditor.iframe.contentDocument;
+  if (visualHtmlEditor.sitebrushProtectedFrameDocument === frameDocument) {
+    return;
+  }
+  visualHtmlEditor.sitebrushProtectedFrameDocument = frameDocument;
+  frameDocument.addEventListener('click', function preventVisualEditorLinkNavigation(pointerEvent) {
+    const clickedElement = pointerEvent.target;
+    if (clickedElement && typeof clickedElement.closest === 'function' && clickedElement.closest('a[href]')) {
+      pointerEvent.preventDefault();
+    }
+  }, true);
+  frameDocument.addEventListener('submit', function preventVisualEditorFormSubmission(submitEvent) {
+    submitEvent.preventDefault();
+  }, true);
 }
 
 function applyVisualEditorFrameAttributes(targetElement, attributeList, requiredClasses) {
@@ -912,6 +936,7 @@ function createVisualHtmlEditor() {
     maxHeight: 'none',
     theme: currentVisualEditorThemeName(),
     iframe: true,
+    iframeSandbox: 'allow-same-origin',
     iframeBaseUrl: visualEditorFrameBaseURL(),
     iframeCSSLinks: visualEditorStylesheetLinks(initialHtmlContent),
     iframeStyle: visualEditorFrameStyle(),
@@ -962,8 +987,10 @@ function connectSaveHotkey(visualHtmlEditor) {
 const visualHtmlEditor = createVisualHtmlEditor();
 visualHtmlEditor.sitebrushThemeName = currentVisualEditorThemeName();
 syncVisualEditorLayout(visualHtmlEditor);
+protectVisualEditorFrameNavigation(visualHtmlEditor);
 visualHtmlEditor.events.on('afterInit afterSetMode change resize', function onVisualEditorFrameRefresh() {
   scheduleVisualEditorLayout(visualHtmlEditor);
+  protectVisualEditorFrameNavigation(visualHtmlEditor);
 });
 window.addEventListener('resize', function onVisualEditorWindowResize() {
   scheduleVisualEditorLayout(visualHtmlEditor);

@@ -929,7 +929,9 @@
         stopRetryCountdown();
       }
       if (progressState.stage === 'detect_templates') {
-        progressTextElement.textContent = uiText.detectingTemplates;
+        const detectionPercent = Math.max(0, Math.min(100, Number(progressState.current_percent) || 0));
+        setProgressPercent(detectionPercent);
+        progressTextElement.textContent = uiText.detectingTemplates + ' ' + detectionPercent + '%';
         progressUrlElement.textContent = '';
         return;
       }

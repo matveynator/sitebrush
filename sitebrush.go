@@ -10892,10 +10892,11 @@ func (a *App) persistPublicTrialPreview(ctx context.Context, domain string, prev
 		preview.Spider.domain = domain
 	}
 	var detectionErr error
-	if preview.CopyWholeSite && preview.AutoDetectTemplates && preview.Spider != nil {
-		preview.Spider.publishProgress("detect_templates", "", 100)
-	}
-	preview.ImportedPages, detectionErr = maybeDetectImportedPageTemplates(preview.ImportedPages, preview.CopyWholeSite && preview.AutoDetectTemplates)
+	preview.ImportedPages, detectionErr = maybeDetectImportedPageTemplatesWithProgress(preview.ImportedPages, preview.CopyWholeSite && preview.AutoDetectTemplates, func(completedPercent int) {
+		if preview.Spider != nil {
+			preview.Spider.publishProgress("detect_templates", "", completedPercent)
+		}
+	})
 	if detectionErr != nil {
 		return detectionErr
 	}
@@ -10979,7 +10980,8 @@ func (a *App) grabPreview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sourceURL = remoteSourceURL.String()
-	htmlBytes, resolvedSourceURL, err := downloadGrabSourceHTMLWithResolvedURL(sourceURL, sourceOptions)
+	progressToken := strings.TrimSpace(r.FormValue("progress_token"))
+	htmlBytes, resolvedSourceURL, err := downloadGrabSourceHTMLWithResolvedURLContextAndProgress(r.Context(), sourceURL, sourceOptions, a.grabTracker, progressToken)
 	if err != nil {
 		a.logProblemEvent("grab preview failed source=%s error=%v duration=%s", sourceURL, err, time.Since(startedAt).String())
 		http.Error(w, err.Error(), http.StatusBadGateway)
@@ -10987,7 +10989,6 @@ func (a *App) grabPreview(w http.ResponseWriter, r *http.Request) {
 	}
 	remoteSourceURL = resolvedSourceURL
 	sourceURL = remoteSourceURL.String()
-	progressToken := strings.TrimSpace(r.FormValue("progress_token"))
 	domain := a.siteDomain(r.Context(), r)
 	pagePath := grabRequestTargetPath(r)
 	var resources []grabResourcePreview
@@ -11226,6 +11227,10 @@ func downloadGrabSourceHTMLWithResolvedURL(sourceURL string, sourceOptions grabS
 }
 
 func downloadGrabSourceHTMLWithResolvedURLContext(ctx context.Context, sourceURL string, sourceOptions grabSourceOptions) ([]byte, *url.URL, error) {
+	return downloadGrabSourceHTMLWithResolvedURLContextAndProgress(ctx, sourceURL, sourceOptions, nil, "")
+}
+
+func downloadGrabSourceHTMLWithResolvedURLContextAndProgress(ctx context.Context, sourceURL string, sourceOptions grabSourceOptions, tracker *grabProgressTracker, progressToken string) ([]byte, *url.URL, error) {
 	remoteSourceURL, err := url.Parse(sourceURL)
 	if err != nil {
 		return nil, nil, errors.New("source_url is invalid")
@@ -11238,10 +11243,7 @@ func downloadGrabSourceHTMLWithResolvedURLContext(ctx context.Context, sourceURL
 	downloadResult, err := crawler.DownloadHTMLPageWithRetriesContext(ctx, client, remoteSourceURL, func(request *http.Request) {
 		applyGrabRequestHeaders(request, sourceOptions)
 		applyGrabHTMLRequestHeaders(request)
-	}, crawler.HTMLDownloadRetryOptions{
-		Attempts: 2,
-		Delay:    1500 * time.Millisecond,
-	})
+	}, grabSourceHTMLRetryOptions(tracker, progressToken))
 	if err == nil && downloadResult.IsHTML {
 		logImportedHTMLDecodeDecision(remoteSourceURL, downloadResult)
 		downloadedHTML := rewriteImportedHTMLCharsetDeclaration(downloadResult.HTML)
@@ -11260,10 +11262,7 @@ func downloadGrabSourceHTMLWithResolvedURLContext(ctx context.Context, sourceURL
 		downloadResult, err = crawler.DownloadHTMLPageWithRetriesContext(ctx, client, fallbackURL, func(request *http.Request) {
 			applyGrabRequestHeaders(request, sourceOptions)
 			applyGrabHTMLRequestHeaders(request)
-		}, crawler.HTMLDownloadRetryOptions{
-			Attempts: 2,
-			Delay:    1500 * time.Millisecond,
-		})
+		}, grabSourceHTMLRetryOptions(tracker, progressToken))
 		if err == nil && downloadResult.IsHTML {
 			logImportedHTMLDecodeDecision(fallbackURL, downloadResult)
 			downloadedHTML := rewriteImportedHTMLCharsetDeclaration(downloadResult.HTML)
@@ -11280,9 +11279,53 @@ func downloadGrabSourceHTMLWithResolvedURLContext(ctx context.Context, sourceURL
 		return nil, nil, fmt.Errorf("source page returned %s", lastStatus)
 	}
 	if err != nil {
-		return nil, nil, errors.New("failed to download source page")
+		return nil, nil, fmt.Errorf("failed to download source page: %w", err)
 	}
 	return nil, nil, errors.New("source page did not return a public HTML page")
+}
+
+func grabSourceHTMLRetryOptions(tracker *grabProgressTracker, progressToken string) crawler.HTMLDownloadRetryOptions {
+	return crawler.HTMLDownloadRetryOptions{
+		Attempts:    grabImportFailedResourceRetryAttempts,
+		Delay:       grabImportFailedResourceRetryDelay,
+		ShouldRetry: shouldRetryGrabSourceHTMLDownload,
+		OnAttempt: func(attempt, total int, pageURL *url.URL) {
+			if tracker == nil || progressToken == "" || attempt <= 1 {
+				return
+			}
+			tracker.publish(grabProgressEvent{Token: progressToken, Stage: "retrying", RetryAttempt: attempt, RetryTotal: total, CurrentURL: pageURL.String()})
+		},
+		OnRetry: func(attempt, total int, pageURL *url.URL, retryErr error, delay time.Duration) {
+			if tracker == nil || progressToken == "" {
+				return
+			}
+			tracker.publish(grabProgressEvent{
+				Token: progressToken, Stage: "retry_wait", RetryAttempt: attempt, RetryTotal: total,
+				RetryDelaySeconds: int(delay.Seconds()), CurrentURL: pageURL.String(), CurrentError: retryErr.Error(),
+			})
+		},
+	}
+}
+
+func shouldRetryGrabSourceHTMLDownload(result crawler.HTMLDownloadResult, downloadErr error) bool {
+	if result.StatusCode != 0 {
+		return result.StatusCode == http.StatusRequestTimeout || result.StatusCode == http.StatusTooEarly || result.StatusCode == http.StatusTooManyRequests || result.StatusCode >= http.StatusInternalServerError
+	}
+	if downloadErr == nil || errors.Is(downloadErr, context.Canceled) {
+		return false
+	}
+	var certificateInvalidError x509.CertificateInvalidError
+	var hostnameError x509.HostnameError
+	var unknownAuthorityError x509.UnknownAuthorityError
+	if errors.As(downloadErr, &certificateInvalidError) || errors.As(downloadErr, &hostnameError) || errors.As(downloadErr, &unknownAuthorityError) {
+		return false
+	}
+	var dnsError *net.DNSError
+	if errors.As(downloadErr, &dnsError) {
+		return dnsError.IsTimeout || dnsError.IsTemporary
+	}
+	var networkError net.Error
+	return (errors.As(downloadErr, &networkError) && networkError.Timeout()) || errors.Is(downloadErr, io.EOF) || errors.Is(downloadErr, io.ErrUnexpectedEOF)
 }
 
 func decodeImportedHTMLBytes(htmlBytes []byte, contentType string) string {
@@ -11811,10 +11854,9 @@ func (a *App) importWholeRemoteSite(ctx context.Context, importRequest grabImpor
 	if prepareErr != nil {
 		return grabImportResult{}, prepareErr
 	}
-	if importRequest.AutoDetectTemplates {
-		spider.publishProgress("detect_templates", "", 100)
-	}
-	importedPages, prepareErr = maybeDetectImportedPageTemplates(importedPages, importRequest.AutoDetectTemplates)
+	importedPages, prepareErr = maybeDetectImportedPageTemplatesWithProgress(importedPages, importRequest.AutoDetectTemplates, func(completedPercent int) {
+		spider.publishProgress("detect_templates", "", completedPercent)
+	})
 	if prepareErr != nil {
 		return grabImportResult{}, prepareErr
 	}
@@ -11843,11 +11885,15 @@ func (a *App) importWholeRemoteSite(ctx context.Context, importRequest grabImpor
 }
 
 func detectImportedPageTemplates(importedPages []wholeSiteImportedPage) ([]wholeSiteImportedPage, error) {
+	return detectImportedPageTemplatesWithProgress(importedPages, nil)
+}
+
+func detectImportedPageTemplatesWithProgress(importedPages []wholeSiteImportedPage, reportProgress func(int)) ([]wholeSiteImportedPage, error) {
 	detectionPages := make([]sitebrushtemplate.DetectionPage, 0, len(importedPages))
 	for _, importedPage := range importedPages {
 		detectionPages = append(detectionPages, sitebrushtemplate.DetectionPage{Key: importedPage.LocalPath, HTML: importedPage.HTML})
 	}
-	detectedPages, err := sitebrushtemplate.DetectAutomaticTemplates(detectionPages)
+	detectedPages, err := sitebrushtemplate.DetectAutomaticTemplatesWithProgress(detectionPages, reportProgress)
 	if err != nil {
 		return nil, err
 	}
@@ -11859,10 +11905,14 @@ func detectImportedPageTemplates(importedPages []wholeSiteImportedPage) ([]whole
 }
 
 func maybeDetectImportedPageTemplates(importedPages []wholeSiteImportedPage, enabled bool) ([]wholeSiteImportedPage, error) {
+	return maybeDetectImportedPageTemplatesWithProgress(importedPages, enabled, nil)
+}
+
+func maybeDetectImportedPageTemplatesWithProgress(importedPages []wholeSiteImportedPage, enabled bool, reportProgress func(int)) ([]wholeSiteImportedPage, error) {
 	if !enabled {
 		return importedPages, nil
 	}
-	return detectImportedPageTemplates(importedPages)
+	return detectImportedPageTemplatesWithProgress(importedPages, reportProgress)
 }
 
 type wholeSitePreviewPageResult struct {
