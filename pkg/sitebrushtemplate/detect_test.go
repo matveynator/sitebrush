@@ -39,7 +39,7 @@ func TestDetectAutomaticTemplatesMatchesLargeHeaderAcrossFormattingAndTagCase(t 
 	}
 }
 
-func TestDetectAutomaticTemplatesDoesNotMergeDifferentContentOrSmallElements(t *testing.T) {
+func TestDetectAutomaticTemplatesDoesNotMergeDifferentContent(t *testing.T) {
 	pageList := make([]DetectionPage, 0, 100)
 	for pageIndex := 0; pageIndex < 100; pageIndex++ {
 		headerText := "Alpha"
@@ -48,7 +48,7 @@ func TestDetectAutomaticTemplatesDoesNotMergeDifferentContentOrSmallElements(t *
 		}
 		pageList = append(pageList, DetectionPage{
 			Key:  fmt.Sprintf("/%d", pageIndex),
-			HTML: "<html><body><header data-path=\"/CaseSensitive\">" + automaticTemplateTestElementList(headerText) + "</header><button>Repeat</button></body></html>",
+			HTML: "<html><body><header data-path=\"/CaseSensitive\">" + automaticTemplateTestElementList(headerText) + "</header></body></html>",
 		})
 	}
 
@@ -69,18 +69,108 @@ func TestDetectAutomaticTemplatesDoesNotMergeDifferentContentOrSmallElements(t *
 		t.Fatal(err)
 	}
 	for _, page := range attributePages {
-		if templateCount(page.HTML) != 0 {
-			t.Fatalf("case-sensitive attribute values must not be merged: %s", page.HTML)
+		if firstAutomaticTemplateIdentifier(t, page.HTML, "header") != "" {
+			t.Fatalf("headers with case-sensitive attribute differences must not be merged: %s", page.HTML)
 		}
 	}
 
-	detectedPages, err = DetectAutomaticTemplates(pageList)
+	javaScriptPages, err := DetectAutomaticTemplates([]DetectionPage{
+		{Key: "/script-1", HTML: `<html data-page="1"><head></head><body><script>window.mode = "one";</script></body></html>`},
+		{Key: "/script-2", HTML: `<html data-page="2"><head></head><body><script>window.mode = "two";</script></body></html>`},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, page := range detectedPages {
-		if firstAutomaticTemplateIdentifier(t, page.HTML, "button") != "" {
-			t.Fatalf("small repeated buttons must not become templates: %s", page.HTML)
+	for _, page := range javaScriptPages {
+		if firstAutomaticTemplateIdentifier(t, page.HTML, "script") != "" {
+			t.Fatalf("different JavaScript must not be merged: %s", page.HTML)
+		}
+	}
+}
+
+func TestDetectAutomaticTemplatesFindsAnyRepeatedElement(t *testing.T) {
+	testCases := []struct {
+		name       string
+		tagName    string
+		firstHTML  string
+		secondHTML string
+	}{
+		{name: "image", tagName: "img", firstHTML: `<body data-page="1"><img src="/logo.png" alt="Logo"></body>`, secondHTML: `<body data-page="2"><img src="/logo.png" alt="Logo"></body>`},
+		{name: "link", tagName: "a", firstHTML: `<body data-page="1"><a href="/help">Help</a></body>`, secondHTML: `<body data-page="2"><a href="/help">Help</a></body>`},
+		{name: "button", tagName: "button", firstHTML: `<body data-page="1"><button type="button">Open</button></body>`, secondHTML: `<body data-page="2"><button type="button">Open</button></body>`},
+		{name: "input", tagName: "input", firstHTML: `<body data-page="1"><input name="search" type="search"></body>`, secondHTML: `<body data-page="2"><input name="search" type="search"></body>`},
+		{name: "table row", tagName: "tr", firstHTML: `<body data-page="1"><table data-page="1"><tbody data-page="1"><tr><td>Shared</td></tr></tbody></table></body>`, secondHTML: `<body data-page="2"><table data-page="2"><tbody data-page="2"><tr><td>Shared</td></tr></tbody></table></body>`},
+		{name: "style", tagName: "style", firstHTML: `<head data-page="1"><style>.shared { color: red; }</style></head><body data-page="1"></body>`, secondHTML: `<head data-page="2"><style>.shared{color:red}</style></head><body data-page="2"></body>`},
+		{name: "inline JavaScript", tagName: "script", firstHTML: `<head data-page="1"><script>window.shared = true;</script></head><body data-page="1"></body>`, secondHTML: `<head data-page="2"><script>window.shared = true;</script></head><body data-page="2"></body>`},
+		{name: "external JavaScript", tagName: "script", firstHTML: `<head data-page="1"><script src="/shared.js"></script></head><body data-page="1"></body>`, secondHTML: `<head data-page="2"><script src="/shared.js"></script></head><body data-page="2"></body>`},
+		{name: "external CSS", tagName: "link", firstHTML: `<head data-page="1"><link rel="stylesheet" href="/shared.css"></head><body data-page="1"></body>`, secondHTML: `<head data-page="2"><link rel="stylesheet" href="/shared.css"></head><body data-page="2"></body>`},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			detectedPages, err := DetectAutomaticTemplates([]DetectionPage{
+				{Key: "/first", HTML: `<html data-page="1">` + testCase.firstHTML + `</html>`},
+				{Key: "/second", HTML: `<html data-page="2">` + testCase.secondHTML + `</html>`},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			firstIdentifier := firstAutomaticTemplateIdentifier(t, detectedPages[0].HTML, testCase.tagName)
+			secondIdentifier := firstAutomaticTemplateIdentifier(t, detectedPages[1].HTML, testCase.tagName)
+			if firstIdentifier == "" || firstIdentifier != secondIdentifier {
+				t.Fatalf("expected one shared %s identifier, got %q and %q", testCase.tagName, firstIdentifier, secondIdentifier)
+			}
+		})
+	}
+}
+
+func TestVoidTemplatesPropagateFromOrdinaryStartTags(t *testing.T) {
+	testCases := []struct {
+		name       string
+		sourceHTML string
+		targetHTML string
+		expected   string
+	}{
+		{name: "image", sourceHTML: `<img class="SiteBrush-Template sitebrush-template-shared" src="/updated.png">`, targetHTML: `<img class="SiteBrush-Template sitebrush-template-shared" src="/old.png">`, expected: `/updated.png`},
+		{name: "input", sourceHTML: `<input class="SiteBrush-Template sitebrush-template-shared" value="updated">`, targetHTML: `<input class="SiteBrush-Template sitebrush-template-shared" value="old">`, expected: `value="updated"`},
+		{name: "stylesheet", sourceHTML: `<link class="SiteBrush-Template sitebrush-template-shared" rel="stylesheet" href="/updated.css">`, targetHTML: `<link class="SiteBrush-Template sitebrush-template-shared" rel="stylesheet" href="/old.css">`, expected: `/updated.css`},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			updatedHTML, changed := ReplaceBlocks(testCase.targetHTML, ExtractBlocks(testCase.sourceHTML))
+			if !changed || !strings.Contains(updatedHTML, testCase.expected) {
+				t.Fatalf("ordinary void start tag was not propagated: %s", updatedHTML)
+			}
+		})
+	}
+}
+
+func TestDetectAutomaticTemplatesHandlesExplicitAndSyntheticDocumentWrappers(t *testing.T) {
+	explicitPages, err := DetectAutomaticTemplates([]DetectionPage{
+		{Key: "/first", HTML: `<html><head></head><body>Same</body></html>`},
+		{Key: "/second", HTML: `<html><head></head><body>Same</body></html>`},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if firstAutomaticTemplateIdentifier(t, explicitPages[0].HTML, "html") == "" {
+		t.Fatal("explicit repeated html element must be eligible")
+	}
+
+	syntheticPages, err := DetectAutomaticTemplates([]DetectionPage{
+		{Key: "/first", HTML: `<div data-page="1"><button>Shared</button></div>`},
+		{Key: "/second", HTML: `<div data-page="2"><button>Shared</button></div>`},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, page := range syntheticPages {
+		for _, tagName := range []string{"html", "head", "body"} {
+			if firstAutomaticTemplateIdentifier(t, page.HTML, tagName) != "" {
+				t.Fatalf("synthetic %s must not become a template: %s", tagName, page.HTML)
+			}
+		}
+		if firstAutomaticTemplateIdentifier(t, page.HTML, "button") == "" {
+			t.Fatalf("real repeated button was not detected: %s", page.HTML)
 		}
 	}
 }
@@ -89,9 +179,9 @@ func TestDetectAutomaticTemplatesRejectsNestedGroupWithStandaloneOccurrence(t *t
 	component := `<section class="feature">` + automaticTemplateTestElementList("Shared") + `</section>`
 	header := `<header><div class="brand">Brand</div>` + component + `<nav>` + automaticTemplateTestElementList("Nav") + `</nav></header>`
 	pageList := []DetectionPage{
-		{Key: "/", HTML: `<html><body>` + header + `</body></html>`},
-		{Key: "/about", HTML: `<html><body>` + header + `</body></html>`},
-		{Key: "/feature", HTML: `<html><body><main>` + component + `</main></body></html>`},
+		{Key: "/", HTML: `<html data-page="1"><body data-page="1">` + header + `</body></html>`},
+		{Key: "/about", HTML: `<html data-page="2"><body data-page="2">` + header + `</body></html>`},
+		{Key: "/feature", HTML: `<html data-page="3"><body data-page="3"><main>` + component + `</main></body></html>`},
 	}
 
 	detectedPages, err := DetectAutomaticTemplates(pageList)
@@ -157,9 +247,9 @@ func TestDetectAutomaticTemplatesPreservesSignificantTextWhitespace(t *testing.T
 func TestDetectAutomaticTemplatesNormalizesStyleWithoutMergingDifferentCSS(t *testing.T) {
 	padding := strings.Repeat(".shared-item { margin: 0; padding: 1px; }\n", 5)
 	pageList := []DetectionPage{
-		{Key: "/", HTML: `<html><head><style>body { color: red; } ` + padding + `</style></head><body>Home</body></html>`},
-		{Key: "/about", HTML: `<html><head><style>body{color:red}` + strings.ReplaceAll(padding, " ", "") + `</style></head><body>About</body></html>`},
-		{Key: "/other", HTML: `<html><head><style>body{color:blue}` + strings.ReplaceAll(padding, " ", "") + `</style></head><body>Other</body></html>`},
+		{Key: "/", HTML: `<html><head data-page="1"><style>body { color: red; } ` + padding + `</style></head><body>Home</body></html>`},
+		{Key: "/about", HTML: `<html><head data-page="2"><style>body{color:red}` + strings.ReplaceAll(padding, " ", "") + `</style></head><body>About</body></html>`},
+		{Key: "/other", HTML: `<html><head data-page="3"><style>body{color:blue}` + strings.ReplaceAll(padding, " ", "") + `</style></head><body>Other</body></html>`},
 	}
 
 	detectedPages, err := DetectAutomaticTemplates(pageList)
@@ -227,7 +317,7 @@ func TestDetectAutomaticTemplatesPreservesExistingMarkupAndAvoidsIdentifierColli
 
 func automaticTemplateTestElementList(text string) string {
 	var elements strings.Builder
-	for elementIndex := 0; elementIndex < AutomaticTemplateMinimumElementCount-1; elementIndex++ {
+	for elementIndex := 0; elementIndex < 9; elementIndex++ {
 		fmt.Fprintf(&elements, `<div data-index="%d"><span>%s %d</span></div>`, elementIndex, text, elementIndex)
 	}
 	return elements.String()

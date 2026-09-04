@@ -14,8 +14,8 @@ import (
 )
 
 const (
-	AutomaticTemplateMinimumElementCount   = 10
-	AutomaticTemplateMinimumCanonicalBytes = 160
+	AutomaticTemplateMinimumElementCount   = 1
+	AutomaticTemplateMinimumCanonicalBytes = 0
 )
 
 // DetectionPage keeps the page identity beside its HTML while a complete import is analyzed.
@@ -30,10 +30,11 @@ type detectionDocument struct {
 }
 
 type subtreeFingerprint struct {
-	hash           [sha256.Size]byte
-	elementCount   int
-	canonicalBytes int
-	empty          bool
+	hash                     [sha256.Size]byte
+	elementCount             int
+	canonicalBytes           int
+	containsExistingTemplate bool
+	empty                    bool
 }
 
 type templateCandidate struct {
@@ -47,6 +48,11 @@ type templateCandidateGroup struct {
 	hash         [sha256.Size]byte
 	elementCount int
 	occurrences  []*templateCandidate
+}
+
+type selectedTemplateGroup struct {
+	group           *templateCandidateGroup
+	identifierClass string
 }
 
 // DetectAutomaticTemplates adds ordinary SiteBrush-Template classes to useful
@@ -64,7 +70,7 @@ func DetectAutomaticTemplates(pageList []DetectionPage) ([]DetectionPage, error)
 		}
 		documentList = append(documentList, detectionDocument{page: page, root: root})
 		collectExistingTemplateMarkup(root, existingTemplateNodes, usedTemplateIdentifiers)
-		fingerprintDOMSubtrees(root, page.Key, candidateByHash)
+		fingerprintDOMSubtrees(root, page.Key, candidateByHash, existingTemplateNodes, explicitDocumentWrapperTags(page.HTML))
 	}
 
 	groupList := matchingTemplateCandidateGroups(candidateByHash)
@@ -81,7 +87,7 @@ func DetectAutomaticTemplates(pageList []DetectionPage) ([]DetectionPage, error)
 	for node := range existingTemplateNodes {
 		selectedNodes[node] = struct{}{}
 	}
-	changedNodes := make(map[*html.Node]struct{})
+	selectedGroupList := make([]selectedTemplateGroup, 0, len(groupList))
 	for _, group := range groupList {
 		if templateGroupHasSelectedAncestor(group, selectedNodes) {
 			continue
@@ -90,8 +96,15 @@ func DetectAutomaticTemplates(pageList []DetectionPage) ([]DetectionPage, error)
 		identifier := strings.TrimPrefix(identifierClass, "sitebrush-template-")
 		usedTemplateIdentifiers[strings.ToLower(identifier)] = struct{}{}
 		for _, occurrence := range group.occurrences {
-			addAutomaticTemplateClasses(occurrence.node, identifierClass)
 			selectedNodes[occurrence.node] = struct{}{}
+		}
+		selectedGroupList = append(selectedGroupList, selectedTemplateGroup{group: group, identifierClass: identifierClass})
+	}
+
+	changedNodes := make(map[*html.Node]struct{})
+	for _, selectedGroup := range selectedGroupList {
+		for _, occurrence := range selectedGroup.group.occurrences {
+			addAutomaticTemplateClasses(occurrence.node, selectedGroup.identifierClass)
 			changedNodes[occurrence.node] = struct{}{}
 		}
 	}
@@ -111,16 +124,25 @@ func DetectAutomaticTemplates(pageList []DetectionPage) ([]DetectionPage, error)
 	return result, nil
 }
 
-func fingerprintDOMSubtrees(root *html.Node, pageKey string, candidateByHash map[[sha256.Size]byte][]*templateCandidate) subtreeFingerprint {
+func fingerprintDOMSubtrees(root *html.Node, pageKey string, candidateByHash map[[sha256.Size]byte][]*templateCandidate, existingTemplateNodes map[*html.Node]struct{}, explicitWrapperTags map[string]struct{}) subtreeFingerprint {
 	if root == nil {
 		return subtreeFingerprint{}
 	}
 	childFingerprints := make([]subtreeFingerprint, 0)
 	for child := root.FirstChild; child != nil; child = child.NextSibling {
-		childFingerprints = append(childFingerprints, fingerprintDOMSubtrees(child, pageKey, candidateByHash))
+		childFingerprints = append(childFingerprints, fingerprintDOMSubtrees(child, pageKey, candidateByHash, existingTemplateNodes, explicitWrapperTags))
 	}
 	fingerprint := canonicalNodeFingerprint(root, childFingerprints)
-	if automaticTemplateCandidateAllowed(root, fingerprint) {
+	if _, existingTemplate := existingTemplateNodes[root]; existingTemplate {
+		fingerprint.containsExistingTemplate = true
+	}
+	for _, childFingerprint := range childFingerprints {
+		if childFingerprint.containsExistingTemplate {
+			fingerprint.containsExistingTemplate = true
+			break
+		}
+	}
+	if automaticTemplateCandidateAllowed(root, fingerprint, explicitWrapperTags) {
 		candidate := &templateCandidate{pageKey: pageKey, node: root, fingerprint: fingerprint}
 		candidateByHash[fingerprint.hash] = append(candidateByHash[fingerprint.hash], candidate)
 	}
@@ -268,17 +290,40 @@ func elementText(node *html.Node) string {
 	return text.String()
 }
 
-func automaticTemplateCandidateAllowed(node *html.Node, fingerprint subtreeFingerprint) bool {
-	if node == nil || node.Type != html.ElementNode || nodeHasSiteBrushTemplate(node) {
+func automaticTemplateCandidateAllowed(node *html.Node, fingerprint subtreeFingerprint, explicitWrapperTags map[string]struct{}) bool {
+	if node == nil || node.Type != html.ElementNode || fingerprint.containsExistingTemplate {
 		return false
 	}
-	switch strings.ToLower(node.Data) {
-	case "html", "head", "body", "script", "link", "meta", "title":
-		return false
-	case "style":
-		return fingerprint.canonicalBytes >= AutomaticTemplateMinimumCanonicalBytes
+	tagName := strings.ToLower(node.Data)
+	if documentWrapperTag(tagName) {
+		if _, explicit := explicitWrapperTags[tagName]; !explicit {
+			return false
+		}
 	}
 	return fingerprint.elementCount >= AutomaticTemplateMinimumElementCount && fingerprint.canonicalBytes >= AutomaticTemplateMinimumCanonicalBytes
+}
+
+func explicitDocumentWrapperTags(sourceHTML string) map[string]struct{} {
+	explicitTags := make(map[string]struct{}, 3)
+	tokenizer := html.NewTokenizer(strings.NewReader(sourceHTML))
+	for {
+		tokenType := tokenizer.Next()
+		if tokenType == html.ErrorToken {
+			return explicitTags
+		}
+		if tokenType != html.StartTagToken && tokenType != html.SelfClosingTagToken {
+			continue
+		}
+		tagName, _ := tokenizer.TagName()
+		normalizedTagName := strings.ToLower(string(tagName))
+		if documentWrapperTag(normalizedTagName) {
+			explicitTags[normalizedTagName] = struct{}{}
+		}
+	}
+}
+
+func documentWrapperTag(tagName string) bool {
+	return tagName == "html" || tagName == "head" || tagName == "body"
 }
 
 func matchingTemplateCandidateGroups(candidateByHash map[[sha256.Size]byte][]*templateCandidate) []*templateCandidateGroup {
