@@ -782,7 +782,9 @@
           stopRetryCountdown();
         }
         if (progressPayload.stage === 'detect_templates') {
-          setCopySiteStatus(statusElement, textFromConfig(configuration, 'detectingTemplates', 'Detecting SiteBrush-Template...'), '');
+          const detectionPercent = Math.max(0, Math.min(100, Number(progressPayload.current_percent) || 0));
+          setProgress(progressBarElement, detectionPercent);
+          setCopySiteStatus(statusElement, textFromConfig(configuration, 'detectingTemplates', 'Detecting SiteBrush-Template...') + ' ' + detectionPercent + '%', '');
           urlElement.textContent = '';
           return;
         }

@@ -29,10 +29,11 @@ type HTMLDownloadResult struct {
 }
 
 type HTMLDownloadRetryOptions struct {
-	Attempts  int
-	Delay     time.Duration
-	OnAttempt func(attempt, total int, pageURL *url.URL)
-	OnRetry   func(attempt, total int, pageURL *url.URL, err error, delay time.Duration)
+	Attempts    int
+	Delay       time.Duration
+	OnAttempt   func(attempt, total int, pageURL *url.URL)
+	OnRetry     func(attempt, total int, pageURL *url.URL, err error, delay time.Duration)
+	ShouldRetry func(result HTMLDownloadResult, err error) bool
 }
 
 func NewSessionClient(timeout time.Duration, transport http.RoundTripper) *http.Client {
@@ -125,6 +126,9 @@ func DownloadHTMLPageWithRetriesContext(ctx context.Context, client *http.Client
 			lastErr = errors.New("page did not return a public HTML page")
 		}
 		if attempt >= attempts {
+			break
+		}
+		if options.ShouldRetry != nil && !options.ShouldRetry(lastResult, lastErr) {
 			break
 		}
 		if options.OnRetry != nil {

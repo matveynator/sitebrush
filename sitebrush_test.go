@@ -10176,9 +10176,15 @@ func TestWholeSiteImportAutoDetectsTemplatesByDefaultAndCanBeDisabled(t *testing
 		{SourceURL: "https://templates.example/about", LocalPath: "/copy/about", HTML: `<html><body>` + sharedHeader + `<main>About</main></body></html>`},
 	}
 
-	detectedPages, err := maybeDetectImportedPageTemplates(importedPages, true)
+	detectionProgress := make([]int, 0)
+	detectedPages, err := maybeDetectImportedPageTemplatesWithProgress(importedPages, true, func(completedPercent int) {
+		detectionProgress = append(detectionProgress, completedPercent)
+	})
 	if err != nil {
 		t.Fatal(err)
+	}
+	if len(detectionProgress) == 0 || detectionProgress[0] != 0 || detectionProgress[len(detectionProgress)-1] != 100 {
+		t.Fatalf("whole-site detection progress = %#v", detectionProgress)
 	}
 	for _, importedPage := range detectedPages {
 		if !strings.Contains(importedPage.HTML, `class="SiteBrush-Template sitebrush-template-header-`) {
@@ -10188,7 +10194,10 @@ func TestWholeSiteImportAutoDetectsTemplatesByDefaultAndCanBeDisabled(t *testing
 			t.Fatalf("existing SiteBrush-Template parser did not recognize detected header: %s", importedPage.HTML)
 		}
 	}
-	unchangedPages, err := maybeDetectImportedPageTemplates(importedPages, false)
+	disabledProgressCalled := false
+	unchangedPages, err := maybeDetectImportedPageTemplatesWithProgress(importedPages, false, func(int) {
+		disabledProgressCalled = true
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -10196,6 +10205,9 @@ func TestWholeSiteImportAutoDetectsTemplatesByDefaultAndCanBeDisabled(t *testing
 		if unchangedPages[pageIndex].HTML != importedPages[pageIndex].HTML {
 			t.Fatalf("disabled detection changed %s", importedPages[pageIndex].LocalPath)
 		}
+	}
+	if disabledProgressCalled {
+		t.Fatal("disabled template detection reported progress")
 	}
 
 	for _, requestTest := range []struct {
@@ -10244,6 +10256,9 @@ func TestSiteBrushTemplateImportControlsAreEnabledByDefaultAndLocalized(t *testi
 				t.Fatalf("import template is missing translation key %q", translationKey)
 			}
 		}
+	}
+	if !strings.Contains(string(missingTemplateBytes), "setProgressPercent(detectionPercent)") || !strings.Contains(string(copyScriptBytes), "setProgress(progressBarElement, detectionPercent)") {
+		t.Fatal("full-site import interfaces do not render SiteBrush-Template detection progress")
 	}
 
 	for languageCode, translations := range translationCatalog {
@@ -11435,7 +11450,7 @@ func TestVisualEditorUsesLocalJoditAssetsAndServerImageUpload(t *testing.T) {
 		t.Fatalf("visual editor status = %d, body=%q", response.Code, response.Body.String())
 	}
 	body := response.Body.String()
-	for _, expectedFragment := range []string{`href="/p/static/jodit.min.css"`, `src="/p/static/jodit.min.js"`, "/p/static/files.png", "/p/static/save-page.png", "/p/static/exit-editor.png", "chooseAndUploadFiles", "document.body.appendChild(fileInputElement)", "fallbackHashFileName", "sitebrush.visualUploadResizeMode", `value="600"`, `value="800"`, `value="1200"`, `value="2000"`, "width=", "height=", "currentPagePath + '?files'", "currentPagePath + '?native_pick_files'", "window.location.href = currentPagePath", "parseVisualEditorDocument", "visualEditorStylesheetLinks", "syncVisualEditorTheme", "resizeVisualEditorWorkspace", "storedVisualEditorHTML", "iframe: true", "iframeCSSLinks: visualEditorStylesheetLinks(initialHtmlContent)"} {
+	for _, expectedFragment := range []string{`href="/p/static/jodit.min.css"`, `src="/p/static/jodit.min.js"`, "/p/static/files.png", "/p/static/save-page.png", "/p/static/exit-editor.png", "chooseAndUploadFiles", "document.body.appendChild(fileInputElement)", "fallbackHashFileName", "sitebrush.visualUploadResizeMode", `value="600"`, `value="800"`, `value="1200"`, `value="2000"`, "width=", "height=", "currentPagePath + '?files'", "currentPagePath + '?native_pick_files'", "window.location.href = currentPagePath", "parseVisualEditorDocument", "visualEditorStylesheetLinks", "syncVisualEditorTheme", "resizeVisualEditorWorkspace", "storedVisualEditorHTML", "iframe: true", "iframeSandbox: 'allow-same-origin'", "protectVisualEditorFrameNavigation", `[id*="loader" i]`, "iframeCSSLinks: visualEditorStylesheetLinks(initialHtmlContent)"} {
 		if !strings.Contains(body, expectedFragment) {
 			t.Fatalf("visual editor missing %q in %s", expectedFragment, body)
 		}
@@ -11445,6 +11460,21 @@ func TestVisualEditorUsesLocalJoditAssetsAndServerImageUpload(t *testing.T) {
 	}
 	if strings.Contains(body, "cdn.jsdelivr.net") {
 		t.Fatalf("visual editor still references CDN: %s", body)
+	}
+}
+
+func TestGrabSourceRetryClassifierRejectsPermanentFailures(t *testing.T) {
+	if shouldRetryGrabSourceHTMLDownload(crawler.HTMLDownloadResult{StatusCode: http.StatusNotFound}, errors.New("missing")) {
+		t.Fatal("404 response was classified as transient")
+	}
+	if !shouldRetryGrabSourceHTMLDownload(crawler.HTMLDownloadResult{StatusCode: http.StatusTooManyRequests}, errors.New("limited")) {
+		t.Fatal("429 response was classified as permanent")
+	}
+	if !shouldRetryGrabSourceHTMLDownload(crawler.HTMLDownloadResult{}, &net.DNSError{Err: "temporary failure", Name: "example.test", IsTemporary: true}) {
+		t.Fatal("temporary DNS failure was classified as permanent")
+	}
+	if shouldRetryGrabSourceHTMLDownload(crawler.HTMLDownloadResult{}, context.Canceled) {
+		t.Fatal("canceled request was classified as transient")
 	}
 }
 
