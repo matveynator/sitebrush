@@ -85,7 +85,7 @@ func TestDetectAutomaticTemplatesDoesNotMergeDifferentContentOrSmallElements(t *
 	}
 }
 
-func TestDetectAutomaticTemplatesSelectsIndependentLargeNestedComponent(t *testing.T) {
+func TestDetectAutomaticTemplatesRejectsNestedGroupWithStandaloneOccurrence(t *testing.T) {
 	component := `<section class="feature">` + automaticTemplateTestElementList("Shared") + `</section>`
 	header := `<header><div class="brand">Brand</div>` + component + `<nav>` + automaticTemplateTestElementList("Nav") + `</nav></header>`
 	pageList := []DetectionPage{
@@ -103,11 +103,54 @@ func TestDetectAutomaticTemplatesSelectsIndependentLargeNestedComponent(t *testi
 		t.Fatal("expected the largest common header to be selected")
 	}
 	componentIdentifier := firstAutomaticTemplateIdentifier(t, detectedPages[2].HTML, "section")
-	if componentIdentifier == "" {
-		t.Fatal("expected independently repeated child component to receive a template")
+	if componentIdentifier != "" {
+		t.Fatalf("nested component must not receive a propagation-incompatible template: %q", componentIdentifier)
 	}
-	if !strings.Contains(detectedPages[0].HTML, componentIdentifier) || !strings.Contains(detectedPages[1].HTML, componentIdentifier) {
-		t.Fatal("expected every instance of the independent component to share its identifier")
+	if templateCount(detectedPages[0].HTML) != 1 || templateCount(detectedPages[1].HTML) != 1 || templateCount(detectedPages[2].HTML) != 0 {
+		t.Fatalf("expected only the two outer headers to be marked: %#v", detectedPages)
+	}
+}
+
+func TestDetectAutomaticTemplatesRejectsDuplicateOccurrencesWithinPage(t *testing.T) {
+	component := `<section class="feature">` + automaticTemplateTestElementList("Repeated") + `</section>`
+	detectedPages, err := DetectAutomaticTemplates([]DetectionPage{
+		{Key: "/", HTML: `<html><body><main>` + component + component + `</main></body></html>`},
+		{Key: "/about", HTML: `<html><body><main>` + component + component + `</main></body></html>`},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, page := range detectedPages {
+		if firstAutomaticTemplateIdentifier(t, page.HTML, "section") != "" {
+			t.Fatalf("ambiguous same-page sections must not share an identifier: %s", page.HTML)
+		}
+	}
+}
+
+func TestDetectAutomaticTemplatesPreservesSignificantTextWhitespace(t *testing.T) {
+	testCases := []struct {
+		name       string
+		firstText  string
+		secondText string
+	}{
+		{name: "non-breaking space", firstText: "A B", secondText: "A&nbsp;B"},
+		{name: "repeated ordinary space", firstText: "A B", secondText: "A  B"},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			detectedPages, err := DetectAutomaticTemplates([]DetectionPage{
+				{Key: "/first", HTML: `<html><body><header>` + automaticTemplateTestElementList(testCase.firstText) + `</header></body></html>`},
+				{Key: "/second", HTML: `<html><body><header>` + automaticTemplateTestElementList(testCase.secondText) + `</header></body></html>`},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, page := range detectedPages {
+				if templateCount(page.HTML) != 0 {
+					t.Fatalf("significant text whitespace must prevent template matching: %s", page.HTML)
+				}
+			}
+		})
 	}
 }
 

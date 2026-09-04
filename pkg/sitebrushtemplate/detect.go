@@ -83,7 +83,7 @@ func DetectAutomaticTemplates(pageList []DetectionPage) ([]DetectionPage, error)
 	}
 	changedNodes := make(map[*html.Node]struct{})
 	for _, group := range groupList {
-		if templateGroupIsFullyNested(group, selectedNodes) {
+		if templateGroupHasSelectedAncestor(group, selectedNodes) {
 			continue
 		}
 		identifierClass := automaticTemplateIdentifier(group, usedTemplateIdentifiers)
@@ -252,7 +252,10 @@ func canonicalDetectionAttributes(attributeList []html.Attribute) []string {
 }
 
 func normalizedDetectionText(sourceText string) string {
-	return strings.Join(strings.Fields(sourceText), " ")
+	if strings.Trim(sourceText, " \t\r\n\f") == "" {
+		return ""
+	}
+	return sourceText
 }
 
 func elementText(node *html.Node) string {
@@ -287,11 +290,15 @@ func matchingTemplateCandidateGroups(candidateByHash map[[sha256.Size]byte][]*te
 			candidateByCanonical[canonical] = append(candidateByCanonical[canonical], candidate)
 		}
 		for canonical, canonicalCandidates := range candidateByCanonical {
-			pageKeys := make(map[string]struct{})
+			occurrencesByPage := make(map[string]int)
+			ambiguousWithinPage := false
 			for _, candidate := range canonicalCandidates {
-				pageKeys[candidate.pageKey] = struct{}{}
+				occurrencesByPage[candidate.pageKey]++
+				if occurrencesByPage[candidate.pageKey] > 1 {
+					ambiguousWithinPage = true
+				}
 			}
-			if len(pageKeys) < 2 {
+			if ambiguousWithinPage || len(occurrencesByPage) < 2 {
 				continue
 			}
 			groupList = append(groupList, &templateCandidateGroup{canonical: canonical, hash: hashValue, elementCount: canonicalCandidates[0].fingerprint.elementCount, occurrences: canonicalCandidates})
@@ -300,13 +307,13 @@ func matchingTemplateCandidateGroups(candidateByHash map[[sha256.Size]byte][]*te
 	return groupList
 }
 
-func templateGroupIsFullyNested(group *templateCandidateGroup, selectedNodes map[*html.Node]struct{}) bool {
+func templateGroupHasSelectedAncestor(group *templateCandidateGroup, selectedNodes map[*html.Node]struct{}) bool {
 	for _, occurrence := range group.occurrences {
-		if !nodeHasSelectedAncestor(occurrence.node, selectedNodes) {
-			return false
+		if nodeHasSelectedAncestor(occurrence.node, selectedNodes) {
+			return true
 		}
 	}
-	return true
+	return false
 }
 
 func nodeHasSelectedAncestor(node *html.Node, selectedNodes map[*html.Node]struct{}) bool {
