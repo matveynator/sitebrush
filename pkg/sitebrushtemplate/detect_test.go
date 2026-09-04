@@ -123,18 +123,24 @@ func TestDetectAutomaticTemplatesFindsAnyRepeatedElement(t *testing.T) {
 	}
 }
 
-func TestDetectAutomaticTemplatesPropagatesVoidElement(t *testing.T) {
-	detectedPages, err := DetectAutomaticTemplates([]DetectionPage{
-		{Key: "/first", HTML: `<html data-page="1"><body data-page="1"><img src="/logo.png" alt="Logo"></body></html>`},
-		{Key: "/second", HTML: `<html data-page="2"><body data-page="2"><img src="/logo.png" alt="Logo"></body></html>`},
-	})
-	if err != nil {
-		t.Fatal(err)
+func TestVoidTemplatesPropagateFromOrdinaryStartTags(t *testing.T) {
+	testCases := []struct {
+		name       string
+		sourceHTML string
+		targetHTML string
+		expected   string
+	}{
+		{name: "image", sourceHTML: `<img class="SiteBrush-Template sitebrush-template-shared" src="/updated.png">`, targetHTML: `<img class="SiteBrush-Template sitebrush-template-shared" src="/old.png">`, expected: `/updated.png`},
+		{name: "input", sourceHTML: `<input class="SiteBrush-Template sitebrush-template-shared" value="updated">`, targetHTML: `<input class="SiteBrush-Template sitebrush-template-shared" value="old">`, expected: `value="updated"`},
+		{name: "stylesheet", sourceHTML: `<link class="SiteBrush-Template sitebrush-template-shared" rel="stylesheet" href="/updated.css">`, targetHTML: `<link class="SiteBrush-Template sitebrush-template-shared" rel="stylesheet" href="/old.css">`, expected: `/updated.css`},
 	}
-	editedHTML := strings.Replace(detectedPages[0].HTML, `/logo.png`, `/updated.png`, 1)
-	updatedHTML, changed := ReplaceBlocks(detectedPages[1].HTML, ExtractBlocks(editedHTML))
-	if !changed || !strings.Contains(updatedHTML, `/updated.png`) {
-		t.Fatalf("void template was not propagated: %s", updatedHTML)
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			updatedHTML, changed := ReplaceBlocks(testCase.targetHTML, ExtractBlocks(testCase.sourceHTML))
+			if !changed || !strings.Contains(updatedHTML, testCase.expected) {
+				t.Fatalf("ordinary void start tag was not propagated: %s", updatedHTML)
+			}
+		})
 	}
 }
 

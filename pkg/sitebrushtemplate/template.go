@@ -759,10 +759,22 @@ func scanMatches(pageHTML string) []match {
 			return matchList
 		case html.StartTagToken:
 			token := tokenizer.Token()
+			templateID := templateIdentifierFromAttributes(token.Data, token.Attr)
+			if isHTMLVoidElement(token.Data) {
+				if templateID != "" {
+					matchList = append(matchList, match{
+						start: tokenStart,
+						end:   tokenEnd,
+						id:    templateID,
+						block: pageHTML[tokenStart:tokenEnd],
+					})
+				}
+				continue
+			}
 			openStack = append(openStack, openElement{
 				tagName:    token.Data,
 				start:      tokenStart,
-				templateID: templateIdentifierFromAttributes(token.Data, token.Attr),
+				templateID: templateID,
 			})
 		case html.SelfClosingTagToken:
 			token := tokenizer.Token()
