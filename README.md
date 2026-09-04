@@ -36,7 +36,7 @@ SiteBrush imports an existing website, preserves its pages and design, and repla
 
 Visitors receive ordinary HTML, CSS, JavaScript, and images. The site owner can still edit text, pictures, buttons, menus, and page blocks directly in the browser.
 
-**SiteBrush is not a WordPress clone. It is a WordPress retirement tool.**
+**SiteBrush is not a WordPress clone. It is a WordPress backup and retirement tool.**
 
 ## Project history
 
