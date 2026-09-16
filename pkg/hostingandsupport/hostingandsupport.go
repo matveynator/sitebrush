@@ -22,7 +22,7 @@ import (
 
 const DefaultStorageLimitBytes int64 = 10 * 1024 * 1024 * 1024
 const DefaultDeletionBackupRetentionDays = 365
-const currentBillingSchemaVersion = 25
+const currentBillingSchemaVersion = 26
 
 const InstallationKindServer = "server"
 const InstallationKindDesktop = "desktop"
@@ -35,6 +35,7 @@ type Store struct {
 const PublicTrialLifetime = 30 * time.Minute
 
 type PublicTrialSite struct {
+	ID          int64
 	Domain      string
 	SourceURL   string
 	Status      string
@@ -648,6 +649,9 @@ func Migrate(ctx context.Context, database *sql.DB) error {
 	if schemaVersion >= currentBillingSchemaVersion {
 		return nil
 	}
+	if err := migratePublicTrialSiteHistoryTable(ctx, database); err != nil {
+		return fmt.Errorf("migrate public trial site history: %w", err)
+	}
 	schemaComplete, err := hostingAndSupportSchemaComplete(ctx, database)
 	if err != nil {
 		return fmt.Errorf("verify billing schema: %w", err)
@@ -666,7 +670,8 @@ func Migrate(ctx context.Context, database *sql.DB) error {
 		`CREATE TABLE IF NOT EXISTS server_settings(name TEXT PRIMARY KEY,value TEXT,updated_at TEXT);`,
 		`CREATE TABLE IF NOT EXISTS site_service_plans(id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT UNIQUE,quota_bytes INTEGER,site_limit INTEGER DEFAULT 1,analytics_report_limit INTEGER DEFAULT 0,price TEXT,currency TEXT,billing_period TEXT,is_default INTEGER DEFAULT 0,created_at TEXT,updated_at TEXT);`,
 		`CREATE TABLE IF NOT EXISTS site_service_assignments(domain TEXT PRIMARY KEY,plan_id INTEGER DEFAULT 0,service_status TEXT,notes TEXT,updated_at TEXT);`,
-		`CREATE TABLE IF NOT EXISTS public_trial_sites(domain TEXT PRIMARY KEY,source_url TEXT,status TEXT,created_at TEXT,delete_after TEXT,deleted_at TEXT,last_error TEXT);`,
+		`CREATE TABLE IF NOT EXISTS public_trial_sites(id INTEGER PRIMARY KEY AUTOINCREMENT,domain TEXT,source_url TEXT,status TEXT,created_at TEXT,delete_after TEXT,deleted_at TEXT,last_error TEXT);`,
+		`CREATE INDEX IF NOT EXISTS idx_public_trial_sites_domain_status ON public_trial_sites(domain,status);`,
 		`CREATE TABLE IF NOT EXISTS payment_providers(provider TEXT PRIMARY KEY,enabled INTEGER DEFAULT 0,display_name TEXT,payment_url TEXT,instructions TEXT,updated_at TEXT);`,
 		`CREATE TABLE IF NOT EXISTS billing_invoices(id INTEGER PRIMARY KEY AUTOINCREMENT,invoice_number TEXT UNIQUE,customer_email TEXT,domain TEXT,plan_name TEXT,amount TEXT,currency TEXT,status TEXT,provider TEXT,payment_url TEXT,due_at TEXT,paid_at TEXT,notes TEXT,recurring_enabled INTEGER DEFAULT 0,recurring_period TEXT,created_at TEXT,updated_at TEXT);`,
 		`CREATE TABLE IF NOT EXISTS billing_customers(id TEXT PRIMARY KEY,primary_email TEXT UNIQUE,created_at TEXT,updated_at TEXT);`,
@@ -762,6 +767,35 @@ func Migrate(ctx context.Context, database *sql.DB) error {
 		return fmt.Errorf("write billing schema version: %w", err)
 	}
 	return nil
+}
+
+func migratePublicTrialSiteHistoryTable(ctx context.Context, database *sql.DB) error {
+	tableFound, err := tableExists(ctx, database, "public_trial_sites")
+	if err != nil || !tableFound {
+		return err
+	}
+	idFound, err := hostingAndSupportColumnExists(ctx, database, "public_trial_sites", "id")
+	if err != nil || idFound {
+		return err
+	}
+	transaction, err := database.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	queries := []string{
+		`CREATE TABLE public_trial_sites_history(id INTEGER PRIMARY KEY AUTOINCREMENT,domain TEXT,source_url TEXT,status TEXT,created_at TEXT,delete_after TEXT,deleted_at TEXT,last_error TEXT);`,
+		`INSERT INTO public_trial_sites_history(domain,source_url,status,created_at,delete_after,deleted_at,last_error) SELECT domain,source_url,status,created_at,delete_after,deleted_at,last_error FROM public_trial_sites;`,
+		`DROP TABLE public_trial_sites;`,
+		`ALTER TABLE public_trial_sites_history RENAME TO public_trial_sites;`,
+		`CREATE INDEX idx_public_trial_sites_domain_status ON public_trial_sites(domain,status);`,
+	}
+	for _, query := range queries {
+		if _, err := transaction.ExecContext(ctx, query); err != nil {
+			_ = transaction.Rollback()
+			return err
+		}
+	}
+	return transaction.Commit()
 }
 
 func schemaMigrationVersion(ctx context.Context, database *sql.DB, component string) (int, error) {
@@ -1077,13 +1111,13 @@ func (store Store) CreatePublicTrialSite(ctx context.Context, domain, sourceURL 
 		createdAt = time.Now()
 	}
 	createdAt = createdAt.UTC()
-	_, err := store.DB.ExecContext(ctx, `INSERT INTO public_trial_sites(domain,source_url,status,created_at,delete_after,deleted_at,last_error) VALUES(?,?,?,?,?,'','') ON CONFLICT(domain) DO UPDATE SET source_url=excluded.source_url,status='active',created_at=excluded.created_at,delete_after=excluded.delete_after,deleted_at='',last_error=''`,
+	_, err := store.DB.ExecContext(ctx, `INSERT INTO public_trial_sites(domain,source_url,status,created_at,delete_after,deleted_at,last_error) VALUES(?,?,?,?,?,'','')`,
 		domain, sourceURL, "active", createdAt.Format(time.RFC3339), createdAt.Add(PublicTrialLifetime).Format(time.RFC3339))
 	return err
 }
 
 func (store Store) PublicTrialSites(ctx context.Context) []PublicTrialSite {
-	rows, err := store.DB.QueryContext(ctx, `SELECT domain,source_url,status,created_at,delete_after,deleted_at,last_error FROM public_trial_sites ORDER BY created_at DESC,domain ASC`)
+	rows, err := store.DB.QueryContext(ctx, `SELECT id,domain,source_url,status,created_at,delete_after,deleted_at,last_error FROM public_trial_sites ORDER BY created_at DESC,id DESC`)
 	if err != nil {
 		return nil
 	}
@@ -1091,7 +1125,7 @@ func (store Store) PublicTrialSites(ctx context.Context) []PublicTrialSite {
 	sites := make([]PublicTrialSite, 0, 8)
 	for rows.Next() {
 		var site PublicTrialSite
-		if scanErr := rows.Scan(&site.Domain, &site.SourceURL, &site.Status, &site.CreatedAt, &site.DeleteAfter, &site.DeletedAt, &site.LastError); scanErr == nil {
+		if scanErr := rows.Scan(&site.ID, &site.Domain, &site.SourceURL, &site.Status, &site.CreatedAt, &site.DeleteAfter, &site.DeletedAt, &site.LastError); scanErr == nil {
 			sites = append(sites, site)
 		}
 	}
@@ -1099,7 +1133,7 @@ func (store Store) PublicTrialSites(ctx context.Context) []PublicTrialSite {
 }
 
 func (store Store) BackfillPublicTrialSites(ctx context.Context) error {
-	rows, err := store.DB.QueryContext(ctx, `SELECT assignments.domain,assignments.updated_at FROM site_service_assignments assignments LEFT JOIN public_trial_sites trials ON trials.domain=assignments.domain WHERE trials.domain IS NULL AND assignments.service_status IN ('trial','free')`)
+	rows, err := store.DB.QueryContext(ctx, `SELECT assignments.domain,assignments.updated_at FROM site_service_assignments assignments WHERE assignments.service_status IN ('trial','free') AND NOT EXISTS (SELECT 1 FROM public_trial_sites trials WHERE trials.domain=assignments.domain AND trials.status='active')`)
 	if err != nil {
 		return err
 	}
@@ -1120,7 +1154,7 @@ func (store Store) BackfillPublicTrialSites(ctx context.Context) error {
 		if parseErr != nil {
 			createdAt = time.Now().UTC().Add(-PublicTrialLifetime)
 		}
-		_, err = store.DB.ExecContext(ctx, `INSERT INTO public_trial_sites(domain,source_url,status,created_at,delete_after,deleted_at,last_error) VALUES(?,'','active',?,?,'','') ON CONFLICT(domain) DO NOTHING`,
+		_, err = store.DB.ExecContext(ctx, `INSERT INTO public_trial_sites(domain,source_url,status,created_at,delete_after,deleted_at,last_error) VALUES(?,'','active',?,?,'','')`,
 			strings.ToLower(strings.TrimSpace(legacySite.Domain)), createdAt.UTC().Format(time.RFC3339), createdAt.UTC().Add(PublicTrialLifetime).Format(time.RFC3339))
 		if err != nil {
 			return err
@@ -1129,25 +1163,25 @@ func (store Store) BackfillPublicTrialSites(ctx context.Context) error {
 	return nil
 }
 
-func (store Store) SavePublicTrialCleanupError(ctx context.Context, domain string, cleanupError error) {
+func (store Store) SavePublicTrialCleanupError(ctx context.Context, trialSiteID int64, cleanupError error) {
 	errorText := ""
 	if cleanupError != nil {
 		errorText = cleanupError.Error()
 	}
-	_, _ = store.DB.ExecContext(ctx, `UPDATE public_trial_sites SET last_error=? WHERE domain=? AND status='active'`, errorText, strings.ToLower(strings.TrimSpace(domain)))
+	_, _ = store.DB.ExecContext(ctx, `UPDATE public_trial_sites SET last_error=? WHERE id=? AND status='active'`, errorText, trialSiteID)
 }
 
-func (store Store) ArchivePublicTrialSite(ctx context.Context, domain string, deletedAt time.Time) error {
+func (store Store) ArchivePublicTrialSite(ctx context.Context, trialSiteID int64, deletedAt time.Time) error {
 	if deletedAt.IsZero() {
 		deletedAt = time.Now()
 	}
-	_, err := store.DB.ExecContext(ctx, `UPDATE public_trial_sites SET status='deleted',deleted_at=?,last_error='' WHERE domain=? AND status='active'`,
-		deletedAt.UTC().Format(time.RFC3339), strings.ToLower(strings.TrimSpace(domain)))
+	_, err := store.DB.ExecContext(ctx, `UPDATE public_trial_sites SET status='deleted',deleted_at=?,last_error='' WHERE id=? AND status='active'`,
+		deletedAt.UTC().Format(time.RFC3339), trialSiteID)
 	return err
 }
 
-func (store Store) RemovePublicTrialSite(ctx context.Context, domain string) {
-	_, _ = store.DB.ExecContext(ctx, `DELETE FROM public_trial_sites WHERE domain=?`, strings.ToLower(strings.TrimSpace(domain)))
+func (store Store) RemoveActivePublicTrialSites(ctx context.Context, domain string) {
+	_, _ = store.DB.ExecContext(ctx, `DELETE FROM public_trial_sites WHERE domain=? AND status='active'`, strings.ToLower(strings.TrimSpace(domain)))
 }
 
 func SettingText(ctx context.Context, database Database, name string) string {

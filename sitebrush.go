@@ -10315,7 +10315,7 @@ func (a *App) cleanupExpiredPublicTrialSite(ctx context.Context, trialSite hosti
 	}
 	if a.rawManagedSiteHasAdmin(ctx, domain) {
 		_ = a.withServerControlDatabaseWrite(ctx, "trial-cleanup-registered", func(database *sql.DB) error {
-			(hostingandsupport.Store{DB: database}).RemovePublicTrialSite(ctx, domain)
+			(hostingandsupport.Store{DB: database}).RemoveActivePublicTrialSites(ctx, domain)
 			return nil
 		})
 		return
@@ -10338,7 +10338,7 @@ func (a *App) cleanupExpiredPublicTrialSite(ctx context.Context, trialSite hosti
 	if found {
 		if deleteErr := a.deleteManagedSiteFiles(ctx, row); deleteErr != nil {
 			_ = a.withServerControlDatabaseWrite(ctx, "trial-cleanup-error", func(database *sql.DB) error {
-				(hostingandsupport.Store{DB: database}).SavePublicTrialCleanupError(ctx, domain, deleteErr)
+				(hostingandsupport.Store{DB: database}).SavePublicTrialCleanupError(ctx, trialSite.ID, deleteErr)
 				return nil
 			})
 			log.Printf("expired public trial cleanup failed domain=%s error=%v", domain, deleteErr)
@@ -10353,7 +10353,7 @@ func (a *App) cleanupExpiredPublicTrialSite(ctx context.Context, trialSite hosti
 		if _, deleteErr := database.ExecContext(ctx, `DELETE FROM server_managers WHERE domain=? AND role<>'owner'`, domain); deleteErr != nil {
 			return deleteErr
 		}
-		return store.ArchivePublicTrialSite(ctx, domain, now)
+		return store.ArchivePublicTrialSite(ctx, trialSite.ID, now)
 	}); err != nil {
 		log.Printf("expired public trial archive failed domain=%s error=%v", domain, err)
 		return
@@ -10391,7 +10391,7 @@ func (a *App) activatePublicTrialAfterAdminRegistration(ctx context.Context, dom
 	}
 	_ = a.withServerControlDatabaseWrite(ctx, "public-trial-activate", func(database *sql.DB) error {
 		store := hostingandsupport.Store{DB: database}
-		store.RemovePublicTrialSite(ctx, domain)
+		store.RemoveActivePublicTrialSites(ctx, domain)
 		assignment, found := store.ServiceAssignments(ctx)[domain]
 		if !found || strings.ToLower(strings.TrimSpace(assignment.ServiceStatus)) != "trial" {
 			return nil
