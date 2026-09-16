@@ -60,6 +60,7 @@
   <div class="expense-simple-page">
     <nav class="hosting-installation-tabs" role="tablist" aria-label="{{index .T "billing_installations"}}" data-hosting-installation-tabs>
       <button type="button" class="hosting-installation-tab active" role="tab" aria-selected="true" data-hosting-installation-tab="servers">{{index .T "billing_servers"}}</button>
+      <button type="button" class="hosting-installation-tab" role="tab" aria-selected="false" data-hosting-installation-tab="temporary-sites">{{index .T "billing_temporary_sites"}}</button>
       {{if .ShowCentralRegistry}}
       <button type="button" class="hosting-installation-tab" role="tab" aria-selected="false" data-hosting-installation-tab="desktop">{{index .T "billing_desktop_installations"}}</button>
       <button type="button" class="hosting-installation-tab" role="tab" aria-selected="false" data-hosting-installation-tab="archive">{{index .T "billing_archive"}}</button>
@@ -211,6 +212,15 @@
       {{else}}<div class="empty">{{index .T "expenses_servers_empty"}}</div>{{end}}
     </section>
 
+    <section data-hosting-installation-panel="temporary-sites" hidden>
+      <h2>{{index .T "billing_temporary_sites"}}</h2>
+      <p class="text-muted">{{index .T "billing_temporary_sites_description"}}</p>
+      <h3 class="h6">{{index .T "billing_temporary_sites_active"}}</h3>
+      <div class="billing-plan-list mb-4">{{range .ActivePublicTrialSites}}<div class="billing-plan-row"><span><strong><a href="https://{{.Domain}}/" target="_blank" rel="noopener noreferrer">{{.Domain}}</a></strong><br><small>{{index $.T "billing_temporary_sites_source"}}: {{if .SourceURL}}<a href="{{.SourceURL}}" target="_blank" rel="noopener noreferrer">{{.SourceURL}}</a>{{else}}{{index $.T "billing_temporary_sites_source_unknown"}}{{end}} · {{index $.T "billing_temporary_sites_created"}}: {{.CreatedAt}} · {{index $.T "billing_temporary_sites_delete_after"}}: {{.DeleteAfter}}{{if .LastError}}<br><span class="text-danger">{{.LastError}}</span>{{end}}</small></span></div>{{else}}<div class="empty">{{index .T "billing_temporary_sites_active_empty"}}</div>{{end}}</div>
+      <h3 class="h6">{{index .T "billing_temporary_sites_archive"}}</h3>
+      <div class="billing-plan-list">{{range .ArchivedPublicTrialSites}}<div class="billing-plan-row"><span><strong>{{.Domain}}</strong><br><small>{{index $.T "billing_temporary_sites_source"}}: {{if .SourceURL}}<a href="{{.SourceURL}}" target="_blank" rel="noopener noreferrer">{{.SourceURL}}</a>{{else}}{{index $.T "billing_temporary_sites_source_unknown"}}{{end}} · {{index $.T "billing_temporary_sites_created"}}: {{.CreatedAt}} · {{index $.T "billing_temporary_sites_deleted"}}: {{.DeletedAt}}</small></span></div>{{else}}<div class="empty">{{index .T "billing_temporary_sites_archive_empty"}}</div>{{end}}</div>
+    </section>
+
     {{if .ShowCentralRegistry}}
     <section data-hosting-installation-panel="desktop" hidden>
       <h2>{{index .T "billing_desktop_installations"}}</h2>
@@ -284,9 +294,9 @@
     </div>
   </section>
 
-  {{if or .ShowCentralRegistry .ShowDemo}}
   <nav class="hosting-installation-tabs" role="tablist" aria-label="{{index .T "billing_installations"}}" data-hosting-installation-tabs>
     <button type="button" class="hosting-installation-tab active" role="tab" aria-selected="true" data-hosting-installation-tab="servers">{{index .T "billing_servers"}}</button>
+    <button type="button" class="hosting-installation-tab" role="tab" aria-selected="false" data-hosting-installation-tab="temporary-sites">{{index .T "billing_temporary_sites"}}</button>
     {{if .ShowCentralRegistry}}
     <button type="button" class="hosting-installation-tab" role="tab" aria-selected="false" data-hosting-installation-tab="desktop">{{index .T "billing_desktop_installations"}}</button>
     <button type="button" class="hosting-installation-tab" role="tab" aria-selected="false" data-hosting-installation-tab="archive">{{index .T "billing_archive"}}</button>
@@ -295,7 +305,6 @@
     <button type="button" class="hosting-installation-tab" role="tab" aria-selected="false" data-hosting-installation-tab="demo">{{index .T "billing_demo_title"}}</button>
     {{end}}
   </nav>
-  {{end}}
 
   <section class="card billing-card" id="hostingServerList" data-hosting-installation-panel="servers">
     <div class="card-body">
@@ -1100,6 +1109,16 @@
         <div class="empty">Серверов пока нет.</div>
         {{end}}
       </div>
+    </div>
+  </section>
+
+  <section class="card billing-card" data-hosting-installation-panel="temporary-sites" hidden>
+    <div class="card-body">
+      <div class="billing-section-header"><div><h2>{{index .T "billing_temporary_sites"}}</h2><p class="text-muted">{{index .T "billing_temporary_sites_description"}}</p></div></div>
+      <h3 class="h6">{{index .T "billing_temporary_sites_active"}}</h3>
+      <div class="d-grid gap-2 mb-4">{{range .ActivePublicTrialSites}}<article class="border rounded p-3"><strong><a href="https://{{.Domain}}/" target="_blank" rel="noopener noreferrer">{{.Domain}}</a></strong><div class="small text-muted">{{index $.T "billing_temporary_sites_source"}}: {{if .SourceURL}}<a href="{{.SourceURL}}" target="_blank" rel="noopener noreferrer">{{.SourceURL}}</a>{{else}}{{index $.T "billing_temporary_sites_source_unknown"}}{{end}} · {{index $.T "billing_temporary_sites_created"}}: {{.CreatedAt}} · {{index $.T "billing_temporary_sites_delete_after"}}: {{.DeleteAfter}}</div>{{if .LastError}}<div class="small text-danger">{{.LastError}}</div>{{end}}</article>{{else}}<div class="empty">{{index .T "billing_temporary_sites_active_empty"}}</div>{{end}}</div>
+      <h3 class="h6">{{index .T "billing_temporary_sites_archive"}}</h3>
+      <div class="d-grid gap-2">{{range .ArchivedPublicTrialSites}}<article class="border rounded p-3"><strong>{{.Domain}}</strong><div class="small text-muted">{{index $.T "billing_temporary_sites_source"}}: {{if .SourceURL}}<a href="{{.SourceURL}}" target="_blank" rel="noopener noreferrer">{{.SourceURL}}</a>{{else}}{{index $.T "billing_temporary_sites_source_unknown"}}{{end}} · {{index $.T "billing_temporary_sites_created"}}: {{.CreatedAt}} · {{index $.T "billing_temporary_sites_deleted"}}: {{.DeletedAt}}</div></article>{{else}}<div class="empty">{{index .T "billing_temporary_sites_archive_empty"}}</div>{{end}}</div>
     </div>
   </section>
 

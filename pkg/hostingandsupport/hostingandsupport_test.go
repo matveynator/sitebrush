@@ -970,6 +970,44 @@ func TestClassifyClientHostingsKeepsUnqualifiedDesktopTemporaryAndArchivesOldDat
 	}
 }
 
+func TestPublicTrialSitesUseCreationDeadlineAndBackfillLegacyAssignments(t *testing.T) {
+	database, err := sql.Open("sqlite3", filepath.Join(t.TempDir(), "billing.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if err := Migrate(context.Background(), database); err != nil {
+		t.Fatal(err)
+	}
+	store := Store{DB: database}
+	createdAt := time.Date(2026, 9, 12, 10, 0, 0, 0, time.UTC)
+	if err := store.CreatePublicTrialSite(context.Background(), "new.example", "https://source.example/", createdAt); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AssignSite(context.Background(), "legacy.example", 0, "trial"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Exec(`UPDATE site_service_assignments SET updated_at=? WHERE domain='legacy.example'`, createdAt.Format(time.RFC3339)); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.BackfillPublicTrialSites(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	sites := store.PublicTrialSites(context.Background())
+	if len(sites) != 2 {
+		t.Fatalf("public trial sites = %#v", sites)
+	}
+	for _, site := range sites {
+		deleteAfter, parseErr := time.Parse(time.RFC3339, site.DeleteAfter)
+		if parseErr != nil || !deleteAfter.Equal(createdAt.Add(30*time.Minute)) {
+			t.Fatalf("delete after for %s = %q, err=%v", site.Domain, site.DeleteAfter, parseErr)
+		}
+		if site.Domain == "legacy.example" && site.SourceURL != "" {
+			t.Fatalf("legacy source URL = %q, want empty", site.SourceURL)
+		}
+	}
+}
+
 func TestAutomaticInvoiceStoresLinesAndIsIdempotentPerServerCycle(t *testing.T) {
 	database, err := sql.Open("sqlite3", filepath.Join(t.TempDir(), "billing.db"))
 	if err != nil {

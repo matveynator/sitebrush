@@ -22,7 +22,7 @@ import (
 
 const DefaultStorageLimitBytes int64 = 10 * 1024 * 1024 * 1024
 const DefaultDeletionBackupRetentionDays = 365
-const currentBillingSchemaVersion = 24
+const currentBillingSchemaVersion = 25
 
 const InstallationKindServer = "server"
 const InstallationKindDesktop = "desktop"
@@ -30,6 +30,18 @@ const DesktopPresenceInterval = 5 * time.Minute
 
 type Store struct {
 	DB Database
+}
+
+const PublicTrialLifetime = 30 * time.Minute
+
+type PublicTrialSite struct {
+	Domain      string
+	SourceURL   string
+	Status      string
+	CreatedAt   string
+	DeleteAfter string
+	DeletedAt   string
+	LastError   string
 }
 
 type Database interface {
@@ -641,6 +653,9 @@ func Migrate(ctx context.Context, database *sql.DB) error {
 		return fmt.Errorf("verify billing schema: %w", err)
 	}
 	if schemaComplete {
+		if err := (Store{DB: database}).BackfillPublicTrialSites(ctx); err != nil {
+			return fmt.Errorf("backfill public trial sites: %w", err)
+		}
 		if err := setSchemaMigrationVersion(ctx, database, "billing", currentBillingSchemaVersion); err != nil {
 			return fmt.Errorf("write billing schema version: %w", err)
 		}
@@ -651,6 +666,7 @@ func Migrate(ctx context.Context, database *sql.DB) error {
 		`CREATE TABLE IF NOT EXISTS server_settings(name TEXT PRIMARY KEY,value TEXT,updated_at TEXT);`,
 		`CREATE TABLE IF NOT EXISTS site_service_plans(id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT UNIQUE,quota_bytes INTEGER,site_limit INTEGER DEFAULT 1,analytics_report_limit INTEGER DEFAULT 0,price TEXT,currency TEXT,billing_period TEXT,is_default INTEGER DEFAULT 0,created_at TEXT,updated_at TEXT);`,
 		`CREATE TABLE IF NOT EXISTS site_service_assignments(domain TEXT PRIMARY KEY,plan_id INTEGER DEFAULT 0,service_status TEXT,notes TEXT,updated_at TEXT);`,
+		`CREATE TABLE IF NOT EXISTS public_trial_sites(domain TEXT PRIMARY KEY,source_url TEXT,status TEXT,created_at TEXT,delete_after TEXT,deleted_at TEXT,last_error TEXT);`,
 		`CREATE TABLE IF NOT EXISTS payment_providers(provider TEXT PRIMARY KEY,enabled INTEGER DEFAULT 0,display_name TEXT,payment_url TEXT,instructions TEXT,updated_at TEXT);`,
 		`CREATE TABLE IF NOT EXISTS billing_invoices(id INTEGER PRIMARY KEY AUTOINCREMENT,invoice_number TEXT UNIQUE,customer_email TEXT,domain TEXT,plan_name TEXT,amount TEXT,currency TEXT,status TEXT,provider TEXT,payment_url TEXT,due_at TEXT,paid_at TEXT,notes TEXT,recurring_enabled INTEGER DEFAULT 0,recurring_period TEXT,created_at TEXT,updated_at TEXT);`,
 		`CREATE TABLE IF NOT EXISTS billing_customers(id TEXT PRIMARY KEY,primary_email TEXT UNIQUE,created_at TEXT,updated_at TEXT);`,
@@ -739,6 +755,9 @@ func Migrate(ctx context.Context, database *sql.DB) error {
 		DefaultStorageLimitBytes, now, now)
 	_, _ = database.ExecContext(ctx, `INSERT OR IGNORE INTO server_expense_policies(installation_id,expense_mode,disk_rate_per_100_gb_minor,actual_monthly_expense_minor,currency,free_site_threshold_bytes,effective_at,created_at)
 		SELECT installation_id,'actual',1500,monthly_cost_minor,currency,100000000,effective_at,created_at FROM hosting_server_cost_policies WHERE monthly_cost_minor>0`)
+	if err := (Store{DB: database}).BackfillPublicTrialSites(ctx); err != nil {
+		return fmt.Errorf("backfill public trial sites: %w", err)
+	}
 	if err := setSchemaMigrationVersion(ctx, database, "billing", currentBillingSchemaVersion); err != nil {
 		return fmt.Errorf("write billing schema version: %w", err)
 	}
@@ -761,7 +780,7 @@ func setSchemaMigrationVersion(ctx context.Context, database *sql.DB, component 
 }
 
 func hostingAndSupportSchemaComplete(ctx context.Context, database *sql.DB) (bool, error) {
-	tableNames := []string{"server_managers", "server_settings", "site_service_plans", "site_service_assignments", "payment_providers", "billing_invoices", "billing_customers", "billing_customer_emails", "billing_customer_profiles", "billing_customer_tokens", "billing_invoice_lines", "billing_invoice_cycles", "billing_payments", "billing_invoice_deliveries", "hosting_server_cost_policies", "server_expense_policies", "site_registration_requests", "site_deletion_backups", "service_mail_installations", "service_mail_events", "support_events", "service_mail_blocks", "service_mail_recipients", "mail_outbox", "client_hostings", "client_hosting_sites", "client_hosting_domain_checks", "server_resource_checks", "server_network_checks", "site_tls_checks", "registry_accounts", "registry_installation_roles", "registry_installation_plans", "registry_events", "registry_sync_events", "sitebrush_com_keys", "hosting_panel_snapshots", "registration_confirmations"}
+	tableNames := []string{"server_managers", "server_settings", "site_service_plans", "site_service_assignments", "public_trial_sites", "payment_providers", "billing_invoices", "billing_customers", "billing_customer_emails", "billing_customer_profiles", "billing_customer_tokens", "billing_invoice_lines", "billing_invoice_cycles", "billing_payments", "billing_invoice_deliveries", "hosting_server_cost_policies", "server_expense_policies", "site_registration_requests", "site_deletion_backups", "service_mail_installations", "service_mail_events", "support_events", "service_mail_blocks", "service_mail_recipients", "mail_outbox", "client_hostings", "client_hosting_sites", "client_hosting_domain_checks", "server_resource_checks", "server_network_checks", "site_tls_checks", "registry_accounts", "registry_installation_roles", "registry_installation_plans", "registry_events", "registry_sync_events", "sitebrush_com_keys", "hosting_panel_snapshots", "registration_confirmations"}
 	tableNames = append(tableNames, demo.TableNames()...)
 	for _, tableName := range tableNames {
 		found, err := tableExists(ctx, database, tableName)
@@ -1046,6 +1065,89 @@ func (store Store) AssignSite(ctx context.Context, domain string, planID int, se
 	_, err := store.DB.ExecContext(ctx, `INSERT INTO site_service_assignments(domain,plan_id,service_status,notes,updated_at) VALUES(?,?,?,?,?) ON CONFLICT(domain) DO UPDATE SET plan_id=excluded.plan_id,service_status=excluded.service_status,updated_at=excluded.updated_at`,
 		strings.TrimSpace(domain), planID, strings.TrimSpace(serviceStatus), "", time.Now().UTC().Format(time.RFC3339))
 	return err
+}
+
+func (store Store) CreatePublicTrialSite(ctx context.Context, domain, sourceURL string, createdAt time.Time) error {
+	domain = strings.ToLower(strings.TrimSpace(domain))
+	sourceURL = strings.TrimSpace(sourceURL)
+	if domain == "" || sourceURL == "" {
+		return fmt.Errorf("public trial domain and source URL are required")
+	}
+	if createdAt.IsZero() {
+		createdAt = time.Now()
+	}
+	createdAt = createdAt.UTC()
+	_, err := store.DB.ExecContext(ctx, `INSERT INTO public_trial_sites(domain,source_url,status,created_at,delete_after,deleted_at,last_error) VALUES(?,?,?,?,?,'','') ON CONFLICT(domain) DO UPDATE SET source_url=excluded.source_url,status='active',created_at=excluded.created_at,delete_after=excluded.delete_after,deleted_at='',last_error=''`,
+		domain, sourceURL, "active", createdAt.Format(time.RFC3339), createdAt.Add(PublicTrialLifetime).Format(time.RFC3339))
+	return err
+}
+
+func (store Store) PublicTrialSites(ctx context.Context) []PublicTrialSite {
+	rows, err := store.DB.QueryContext(ctx, `SELECT domain,source_url,status,created_at,delete_after,deleted_at,last_error FROM public_trial_sites ORDER BY created_at DESC,domain ASC`)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	sites := make([]PublicTrialSite, 0, 8)
+	for rows.Next() {
+		var site PublicTrialSite
+		if scanErr := rows.Scan(&site.Domain, &site.SourceURL, &site.Status, &site.CreatedAt, &site.DeleteAfter, &site.DeletedAt, &site.LastError); scanErr == nil {
+			sites = append(sites, site)
+		}
+	}
+	return sites
+}
+
+func (store Store) BackfillPublicTrialSites(ctx context.Context) error {
+	rows, err := store.DB.QueryContext(ctx, `SELECT assignments.domain,assignments.updated_at FROM site_service_assignments assignments LEFT JOIN public_trial_sites trials ON trials.domain=assignments.domain WHERE trials.domain IS NULL AND assignments.service_status IN ('trial','free')`)
+	if err != nil {
+		return err
+	}
+	legacySites := make([]PublicTrialSite, 0, 4)
+	for rows.Next() {
+		var legacySite PublicTrialSite
+		if scanErr := rows.Scan(&legacySite.Domain, &legacySite.CreatedAt); scanErr == nil {
+			legacySites = append(legacySites, legacySite)
+		}
+	}
+	rowsErr := rows.Err()
+	_ = rows.Close()
+	if rowsErr != nil {
+		return rowsErr
+	}
+	for _, legacySite := range legacySites {
+		createdAt, parseErr := time.Parse(time.RFC3339, strings.TrimSpace(legacySite.CreatedAt))
+		if parseErr != nil {
+			createdAt = time.Now().UTC().Add(-PublicTrialLifetime)
+		}
+		_, err = store.DB.ExecContext(ctx, `INSERT INTO public_trial_sites(domain,source_url,status,created_at,delete_after,deleted_at,last_error) VALUES(?,'','active',?,?,'','') ON CONFLICT(domain) DO NOTHING`,
+			strings.ToLower(strings.TrimSpace(legacySite.Domain)), createdAt.UTC().Format(time.RFC3339), createdAt.UTC().Add(PublicTrialLifetime).Format(time.RFC3339))
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (store Store) SavePublicTrialCleanupError(ctx context.Context, domain string, cleanupError error) {
+	errorText := ""
+	if cleanupError != nil {
+		errorText = cleanupError.Error()
+	}
+	_, _ = store.DB.ExecContext(ctx, `UPDATE public_trial_sites SET last_error=? WHERE domain=? AND status='active'`, errorText, strings.ToLower(strings.TrimSpace(domain)))
+}
+
+func (store Store) ArchivePublicTrialSite(ctx context.Context, domain string, deletedAt time.Time) error {
+	if deletedAt.IsZero() {
+		deletedAt = time.Now()
+	}
+	_, err := store.DB.ExecContext(ctx, `UPDATE public_trial_sites SET status='deleted',deleted_at=?,last_error='' WHERE domain=? AND status='active'`,
+		deletedAt.UTC().Format(time.RFC3339), strings.ToLower(strings.TrimSpace(domain)))
+	return err
+}
+
+func (store Store) RemovePublicTrialSite(ctx context.Context, domain string) {
+	_, _ = store.DB.ExecContext(ctx, `DELETE FROM public_trial_sites WHERE domain=?`, strings.ToLower(strings.TrimSpace(domain)))
 }
 
 func SettingText(ctx context.Context, database Database, name string) string {

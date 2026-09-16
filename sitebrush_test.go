@@ -10678,7 +10678,7 @@ func TestExpiredPublicTrialCleanupKeepsRegisteredSiteAndDeletesAnonymousSite(t *
 		}
 		plan = plans[0]
 	}
-	oldTimestamp := time.Now().UTC().Add(-25 * time.Hour).Format(time.RFC3339)
+	createdAt := time.Now().UTC().Add(-31 * time.Minute)
 	for _, trialDomain := range []string{"anonymous.sitebrush.example", "registered.sitebrush.example"} {
 		if err := application.createManagedSiteWithoutAdmin(context.Background(), trialDomain, defaultDomainStorageLimitBytes); err != nil {
 			t.Fatalf("create %s: %v", trialDomain, err)
@@ -10686,8 +10686,8 @@ func TestExpiredPublicTrialCleanupKeepsRegisteredSiteAndDeletesAnonymousSite(t *
 		if err := store.AssignSite(context.Background(), trialDomain, plan.ID, "trial"); err != nil {
 			t.Fatalf("assign %s: %v", trialDomain, err)
 		}
-		if _, err := controlDatabase.ExecContext(context.Background(), `UPDATE site_service_assignments SET updated_at=? WHERE domain=?`, oldTimestamp, trialDomain); err != nil {
-			t.Fatalf("age %s: %v", trialDomain, err)
+		if err := store.CreatePublicTrialSite(context.Background(), trialDomain, "https://source.example/"+trialDomain, createdAt); err != nil {
+			t.Fatalf("track %s: %v", trialDomain, err)
 		}
 	}
 	if err := controlDatabase.Close(); err != nil {
@@ -10704,8 +10704,15 @@ func TestExpiredPublicTrialCleanupKeepsRegisteredSiteAndDeletesAnonymousSite(t *
 	if _, err := application.db.ExecContext(registeredContext, `INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "registered.sitebrush.example", "admin@example.com", "password"); err != nil {
 		t.Fatal(err)
 	}
-	application.cleanupExpiredPublicTrialSite(context.Background(), "anonymous.sitebrush.example")
-	application.cleanupExpiredPublicTrialSite(context.Background(), "registered.sitebrush.example")
+	certificateDirectory := filepath.Join(application.storageRootDir(), "letsencrypt")
+	if err := os.MkdirAll(certificateDirectory, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	certificatePath := filepath.Join(certificateDirectory, "anonymous.sitebrush.example")
+	if err := os.WriteFile(certificatePath, []byte("preserved certificate"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	application.cleanupExpiredPublicTrialSites(context.Background(), time.Now())
 
 	anonymousPath := filepath.Join(siteDatabaseRootPath(application.serverControlDBPath()), "anonymous.sitebrush.example.db")
 	if _, err := os.Stat(anonymousPath); !errors.Is(err, os.ErrNotExist) {
@@ -10714,6 +10721,9 @@ func TestExpiredPublicTrialCleanupKeepsRegisteredSiteAndDeletesAnonymousSite(t *
 	registeredPath := filepath.Join(siteDatabaseRootPath(application.serverControlDBPath()), "registered.sitebrush.example.db")
 	if _, err := os.Stat(registeredPath); err != nil {
 		t.Fatalf("registered trial was deleted: %v", err)
+	}
+	if certificateBytes, err := os.ReadFile(certificatePath); err != nil || string(certificateBytes) != "preserved certificate" {
+		t.Fatalf("trial certificate was not preserved: bytes=%q err=%v", certificateBytes, err)
 	}
 	if err := application.withServerControlDatabaseRead(context.Background(), "verify-trial-cleanup", func(database *sql.DB) error {
 		var anonymousCount int
@@ -10729,6 +10739,10 @@ func TestExpiredPublicTrialCleanupKeepsRegisteredSiteAndDeletesAnonymousSite(t *
 		}
 		if registeredCount != 1 {
 			return fmt.Errorf("registered assignment count = %d, want 1", registeredCount)
+		}
+		trialSites := (hostingandsupport.Store{DB: database}).PublicTrialSites(context.Background())
+		if len(trialSites) != 1 || trialSites[0].Domain != "anonymous.sitebrush.example" || trialSites[0].Status != "deleted" || trialSites[0].SourceURL != "https://source.example/anonymous.sitebrush.example" || trialSites[0].DeletedAt == "" {
+			return fmt.Errorf("public trial archive = %#v", trialSites)
 		}
 		return nil
 	}); err != nil {
@@ -10765,6 +10779,12 @@ func TestSimplifiedExpensesShowsTestDriveUnderRegistrationAfterExplicitPermissio
 		"PublicTrialAvailable":       false,
 		"PublicTrialUnavailableText": "Enable automatic registration and wildcard DNS.",
 		"PublicTrialEmbedHTML":       "<form data-sitebrush-public-trial-form></form>",
+		"ActivePublicTrialSites": []hostingandsupport.PublicTrialSite{{
+			Domain: "trial.sitebrush.example", SourceURL: "https://copied.example/", CreatedAt: "created", DeleteAfter: "delete-after",
+		}},
+		"ArchivedPublicTrialSites": []hostingandsupport.PublicTrialSite{{
+			Domain: "deleted.sitebrush.example", SourceURL: "https://old.example/", CreatedAt: "old-created", DeletedAt: "deleted-at",
+		}},
 	}
 	var rendered bytes.Buffer
 	if err := parsedTemplate.Execute(&rendered, view); err != nil {
@@ -10773,6 +10793,10 @@ func TestSimplifiedExpensesShowsTestDriveUnderRegistrationAfterExplicitPermissio
 	body := rendered.String()
 	for _, expectedFragment := range []string{
 		`data-hosting-installation-tab="settings"`,
+		`data-hosting-installation-tab="temporary-sites"`,
+		`trial.sitebrush.example`,
+		`https://copied.example/`,
+		`deleted.sitebrush.example`,
 		`data-site-settings-tab="general"`,
 		`data-site-settings-tab="demo"`,
 		`data-site-settings-panel="general"`,

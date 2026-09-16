@@ -140,7 +140,7 @@ const backupImportFileEntryLimitBytes int64 = 128 * 1024 * 1024
 const backupImportUncompressedLimitBytes int64 = 1024 * 1024 * 1024
 const hostingSnapshotNetChanPort = "9876"
 const hostingSnapshotNetChanDeliveryTimeout = 5 * time.Second
-const hostingAndSupportPanelSnapshotVersion = 7
+const hostingAndSupportPanelSnapshotVersion = 8
 const hostingAndSupportMetricsRefreshInterval = 30 * time.Second
 const hostingAndSupportFullRefreshInterval = 5 * time.Minute
 
@@ -299,31 +299,33 @@ type hostingAndSupportPanelBuildResult struct {
 }
 
 type hostingAndSupportPanelSnapshot struct {
-	Version                 int
-	BuiltAt                 string
-	MetricsBuiltAt          string
-	MainDomain              string
-	OwnerEmails             []string
-	Sites                   []hostingandsupport.Site
-	Plans                   []hostingandsupport.Plan
-	Invoices                []hostingandsupport.Invoice
-	Assignments             map[string]hostingandsupport.ServiceAssignment
-	SiteRequests            []hostingandsupport.SiteRequest
-	ClientHostings          []hostingandsupport.ClientHosting
-	DesktopHostingGroups    []hostingandsupport.DesktopHostingGroup
-	ArchivedHostings        []hostingandsupport.ClientHosting
-	Servers                 []hostingandsupport.ServerView
-	RegistrySyncEvents      []hostingandsupport.RegistrySyncEvent
-	SitebrushComKey         hostingandsupport.SitebrushComKey
-	Clients                 []hostingAndSupportClientView
-	ServiceMailRelayEnabled bool
-	Overview                hostingandsupport.OverviewView
-	DemoSettings            demo.Settings
-	AutoRegistrationEnabled bool
-	PublicTrialEnabled      bool
-	CommissionBPS           int
-	LocalCostPolicy         expenses.ServerPolicy
-	ShowCentralRegistry     bool
+	Version                  int
+	BuiltAt                  string
+	MetricsBuiltAt           string
+	MainDomain               string
+	OwnerEmails              []string
+	Sites                    []hostingandsupport.Site
+	Plans                    []hostingandsupport.Plan
+	Invoices                 []hostingandsupport.Invoice
+	Assignments              map[string]hostingandsupport.ServiceAssignment
+	SiteRequests             []hostingandsupport.SiteRequest
+	ClientHostings           []hostingandsupport.ClientHosting
+	DesktopHostingGroups     []hostingandsupport.DesktopHostingGroup
+	ArchivedHostings         []hostingandsupport.ClientHosting
+	ActivePublicTrialSites   []hostingandsupport.PublicTrialSite
+	ArchivedPublicTrialSites []hostingandsupport.PublicTrialSite
+	Servers                  []hostingandsupport.ServerView
+	RegistrySyncEvents       []hostingandsupport.RegistrySyncEvent
+	SitebrushComKey          hostingandsupport.SitebrushComKey
+	Clients                  []hostingAndSupportClientView
+	ServiceMailRelayEnabled  bool
+	Overview                 hostingandsupport.OverviewView
+	DemoSettings             demo.Settings
+	AutoRegistrationEnabled  bool
+	PublicTrialEnabled       bool
+	CommissionBPS            int
+	LocalCostPolicy          expenses.ServerPolicy
+	ShowCentralRegistry      bool
 }
 
 type publicTrialAvailability struct {
@@ -9961,15 +9963,19 @@ func (a *App) publicTrialSiteCreate(w http.ResponseWriter, r *http.Request) {
 	if preview.FitsFreePlan {
 		serviceStatus = "free"
 	}
-	if preview.Plan.ID > 0 {
-		if err := a.withServerControlDatabaseWrite(r.Context(), "public-trial-assign", func(database *sql.DB) error {
-			return (hostingandsupport.Store{DB: database}).AssignSite(r.Context(), trialDomain, preview.Plan.ID, serviceStatus)
-		}); err != nil {
-			_ = a.deleteDemoManagedSiteWithoutBackup(r.Context(), trialDomain)
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
+	// The control record owns the trial lifetime and remains after automatic deletion as its audit entry.
+	if err := a.withServerControlDatabaseWrite(r.Context(), "public-trial-assign", func(database *sql.DB) error {
+		store := hostingandsupport.Store{DB: database}
+		if err := store.AssignSite(r.Context(), trialDomain, preview.Plan.ID, serviceStatus); err != nil {
+			return err
 		}
+		return store.CreatePublicTrialSite(r.Context(), trialDomain, preview.SourceURL, time.Now())
+	}); err != nil {
+		_ = a.deleteDemoManagedSiteWithoutBackup(r.Context(), trialDomain)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
 	}
+	a.refreshHostingAndSupportPanel()
 	a.activePublicTrialPreviewStore().Delete(progressToken)
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{"redirect": requestScheme(r) + "://" + trialDomain + "/"})
@@ -10298,28 +10304,20 @@ func (a *App) servePublicTrialEndpoint(w http.ResponseWriter, r *http.Request, e
 	}
 }
 
-func (a *App) cleanupExpiredPublicTrialSite(ctx context.Context, domain string) {
-	domain = normalizeDomainName(domain)
+func (a *App) cleanupExpiredPublicTrialSite(ctx context.Context, trialSite hostingandsupport.PublicTrialSite, now time.Time) {
+	domain := normalizeDomainName(trialSite.Domain)
 	if domain == "" {
 		return
 	}
-	var serviceStatus string
-	var updatedAtText string
-	err := a.withServerControlDatabaseRead(ctx, "trial-cleanup-check", func(database *sql.DB) error {
-		return database.QueryRowContext(ctx, `SELECT service_status,updated_at FROM site_service_assignments WHERE domain=?`, domain).Scan(&serviceStatus, &updatedAtText)
-	})
-	if err != nil {
-		return
-	}
-	serviceStatus = strings.ToLower(strings.TrimSpace(serviceStatus))
-	if serviceStatus != "trial" && serviceStatus != "free" {
-		return
-	}
-	updatedAt, parseErr := time.Parse(time.RFC3339, strings.TrimSpace(updatedAtText))
-	if parseErr != nil || time.Since(updatedAt) <= 24*time.Hour {
+	deleteAfter, parseErr := time.Parse(time.RFC3339, strings.TrimSpace(trialSite.DeleteAfter))
+	if strings.ToLower(strings.TrimSpace(trialSite.Status)) != "active" || parseErr != nil || now.Before(deleteAfter) {
 		return
 	}
 	if a.rawManagedSiteHasAdmin(ctx, domain) {
+		_ = a.withServerControlDatabaseWrite(ctx, "trial-cleanup-registered", func(database *sql.DB) error {
+			(hostingandsupport.Store{DB: database}).RemovePublicTrialSite(ctx, domain)
+			return nil
+		})
 		return
 	}
 	row, found, rowErr := a.managedSiteQuotaRow(ctx, domain)
@@ -10337,65 +10335,51 @@ func (a *App) cleanupExpiredPublicTrialSite(ctx context.Context, domain string) 
 	if found && sameSiteQuotaPath(row.DatabasePath, a.serverControlDBPath()) {
 		return
 	}
-	deleted := false
-	_ = a.withServerControlDatabaseWrite(ctx, "trial-cleanup-delete", func(database *sql.DB) error {
-		if queryErr := database.QueryRowContext(ctx, `SELECT service_status,updated_at FROM site_service_assignments WHERE domain=?`, domain).Scan(&serviceStatus, &updatedAtText); queryErr != nil {
-			return queryErr
-		}
-		serviceStatus = strings.ToLower(strings.TrimSpace(serviceStatus))
-		updatedAt, parseErr = time.Parse(time.RFC3339, strings.TrimSpace(updatedAtText))
-		if (serviceStatus != "trial" && serviceStatus != "free") || parseErr != nil || time.Since(updatedAt) <= 24*time.Hour {
-			return nil
-		}
-		var ownerCount int
-		_ = database.QueryRowContext(ctx, `SELECT COUNT(1) FROM server_managers WHERE domain=? AND role='owner'`, domain).Scan(&ownerCount)
-		if ownerCount > 0 {
-			return nil
-		}
-		(hostingandsupport.Store{DB: database}).RemoveSiteAssignment(ctx, domain)
-		_, deleteErr := database.ExecContext(ctx, `DELETE FROM server_managers WHERE domain=? AND role<>'owner'`, domain)
-		deleted = deleteErr == nil
-		return deleteErr
-	})
-	if !deleted {
-		return
-	}
 	if found {
 		if deleteErr := a.deleteManagedSiteFiles(ctx, row); deleteErr != nil {
+			_ = a.withServerControlDatabaseWrite(ctx, "trial-cleanup-error", func(database *sql.DB) error {
+				(hostingandsupport.Store{DB: database}).SavePublicTrialCleanupError(ctx, domain, deleteErr)
+				return nil
+			})
 			log.Printf("expired public trial cleanup failed domain=%s error=%v", domain, deleteErr)
+			return
 		}
 	}
+	if err := a.withServerControlDatabaseWrite(ctx, "trial-cleanup-archive", func(database *sql.DB) error {
+		store := hostingandsupport.Store{DB: database}
+		if _, deleteErr := database.ExecContext(ctx, `DELETE FROM site_service_assignments WHERE domain=?`, domain); deleteErr != nil {
+			return deleteErr
+		}
+		if _, deleteErr := database.ExecContext(ctx, `DELETE FROM server_managers WHERE domain=? AND role<>'owner'`, domain); deleteErr != nil {
+			return deleteErr
+		}
+		return store.ArchivePublicTrialSite(ctx, domain, now)
+	}); err != nil {
+		log.Printf("expired public trial archive failed domain=%s error=%v", domain, err)
+		return
+	}
+	a.refreshHostingAndSupportPanel()
 }
 
 func (a *App) cleanupExpiredPublicTrialSites(ctx context.Context, now time.Time) {
-	expiredDomains := make([]string, 0)
+	expiredSites := make([]hostingandsupport.PublicTrialSite, 0)
 	if err := a.withServerControlDatabaseRead(ctx, "trial-cleanup-scan", func(database *sql.DB) error {
-		rows, queryErr := database.QueryContext(ctx, `SELECT domain,updated_at FROM site_service_assignments WHERE service_status IN ('trial','free')`)
-		if queryErr != nil {
-			return queryErr
-		}
-		defer rows.Close()
-		for rows.Next() {
-			var domain string
-			var updatedAtText string
-			if scanErr := rows.Scan(&domain, &updatedAtText); scanErr != nil {
-				continue
-			}
-			updatedAt, parseErr := time.Parse(time.RFC3339, strings.TrimSpace(updatedAtText))
-			if parseErr == nil && now.Sub(updatedAt) > 24*time.Hour {
-				expiredDomains = append(expiredDomains, domain)
+		for _, trialSite := range (hostingandsupport.Store{DB: database}).PublicTrialSites(ctx) {
+			deleteAfter, parseErr := time.Parse(time.RFC3339, strings.TrimSpace(trialSite.DeleteAfter))
+			if trialSite.Status == "active" && parseErr == nil && !now.Before(deleteAfter) {
+				expiredSites = append(expiredSites, trialSite)
 			}
 		}
-		return rows.Err()
+		return nil
 	}); err != nil {
 		return
 	}
-	for _, domain := range expiredDomains {
+	for _, trialSite := range expiredSites {
 		select {
 		case <-ctx.Done():
 			return
 		default:
-			a.cleanupExpiredPublicTrialSite(ctx, domain)
+			a.cleanupExpiredPublicTrialSite(ctx, trialSite, now)
 		}
 	}
 }
@@ -10407,12 +10391,14 @@ func (a *App) activatePublicTrialAfterAdminRegistration(ctx context.Context, dom
 	}
 	_ = a.withServerControlDatabaseWrite(ctx, "public-trial-activate", func(database *sql.DB) error {
 		store := hostingandsupport.Store{DB: database}
+		store.RemovePublicTrialSite(ctx, domain)
 		assignment, found := store.ServiceAssignments(ctx)[domain]
 		if !found || strings.ToLower(strings.TrimSpace(assignment.ServiceStatus)) != "trial" {
 			return nil
 		}
 		return store.AssignSite(ctx, domain, assignment.PlanID, "trial")
 	})
+	a.refreshHostingAndSupportPanel()
 }
 
 func (a *App) rawManagedSiteHasAdmin(ctx context.Context, domain string) bool {
@@ -13401,6 +13387,7 @@ func (a *App) collectHostingAndSupportPanelSnapshot(ctx context.Context, control
 	var allClientHostings []hostingandsupport.ClientHosting
 	var registrySyncEvents []hostingandsupport.RegistrySyncEvent
 	var demoSessions []demo.Session
+	var publicTrialSites []hostingandsupport.PublicTrialSite
 	var ownerEmails []string
 	var deletionBackupPathsByDomain map[string][]string
 	if err := a.withServerControlDatabaseRead(ctx, "expenses-snapshot-control-data", func(database *sql.DB) error {
@@ -13414,6 +13401,7 @@ func (a *App) collectHostingAndSupportPanelSnapshot(ctx context.Context, control
 		demoStore := demo.Store{DB: database}
 		demoSettings = demoStore.Settings(ctx)
 		demoSessions = demoStore.Sessions(ctx)
+		publicTrialSites = store.PublicTrialSites(ctx)
 		mainDomain, _ = store.OwnerDomain(ctx)
 		ownerEmails = store.OwnerEmails(ctx)
 		allClientHostings = store.ClientHostings(ctx)
@@ -13430,6 +13418,15 @@ func (a *App) collectHostingAndSupportPanelSnapshot(ctx context.Context, control
 		registrySyncEvents = nil
 	}
 	clientHostings, desktopHostingGroups, archivedHostings := hostingandsupport.ClassifyClientHostings(allClientHostings, time.Now().UTC())
+	activePublicTrialSites := make([]hostingandsupport.PublicTrialSite, 0, len(publicTrialSites))
+	archivedPublicTrialSites := make([]hostingandsupport.PublicTrialSite, 0, len(publicTrialSites))
+	for _, publicTrialSite := range publicTrialSites {
+		if strings.EqualFold(publicTrialSite.Status, "deleted") {
+			archivedPublicTrialSites = append(archivedPublicTrialSites, publicTrialSite)
+			continue
+		}
+		activePublicTrialSites = append(activePublicTrialSites, publicTrialSite)
+	}
 	hostingAndSupportDemoDomain := ""
 	if demoSettings.Enabled {
 		hostingAndSupportDemoDomain = demoSettings.Domain
@@ -13553,31 +13550,33 @@ func (a *App) collectHostingAndSupportPanelSnapshot(ctx context.Context, control
 	overview.ClientCount = len(clients)
 	now := time.Now().UTC().Format(time.RFC3339)
 	return hostingAndSupportPanelSnapshot{
-		Version:                 hostingAndSupportPanelSnapshotVersion,
-		BuiltAt:                 now,
-		MetricsBuiltAt:          now,
-		MainDomain:              mainDomain,
-		OwnerEmails:             ownerEmails,
-		Sites:                   siteRows,
-		Plans:                   plans,
-		Invoices:                invoices,
-		Assignments:             assignments,
-		SiteRequests:            pendingSiteRequests,
-		ClientHostings:          clientHostings,
-		DesktopHostingGroups:    desktopHostingGroups,
-		ArchivedHostings:        archivedHostings,
-		Servers:                 servers,
-		RegistrySyncEvents:      registrySyncEvents,
-		SitebrushComKey:         sitebrushComKey,
-		Clients:                 clients,
-		ServiceMailRelayEnabled: serviceMailRelayEnabled,
-		Overview:                overview,
-		DemoSettings:            demoSettings,
-		AutoRegistrationEnabled: autoRegistrationEnabled,
-		PublicTrialEnabled:      publicTrialEnabled,
-		CommissionBPS:           commissionBPS,
-		LocalCostPolicy:         localExpensePolicy,
-		ShowCentralRegistry:     showCentralRegistry,
+		Version:                  hostingAndSupportPanelSnapshotVersion,
+		BuiltAt:                  now,
+		MetricsBuiltAt:           now,
+		MainDomain:               mainDomain,
+		OwnerEmails:              ownerEmails,
+		Sites:                    siteRows,
+		Plans:                    plans,
+		Invoices:                 invoices,
+		Assignments:              assignments,
+		SiteRequests:             pendingSiteRequests,
+		ClientHostings:           clientHostings,
+		DesktopHostingGroups:     desktopHostingGroups,
+		ArchivedHostings:         archivedHostings,
+		ActivePublicTrialSites:   activePublicTrialSites,
+		ArchivedPublicTrialSites: archivedPublicTrialSites,
+		Servers:                  servers,
+		RegistrySyncEvents:       registrySyncEvents,
+		SitebrushComKey:          sitebrushComKey,
+		Clients:                  clients,
+		ServiceMailRelayEnabled:  serviceMailRelayEnabled,
+		Overview:                 overview,
+		DemoSettings:             demoSettings,
+		AutoRegistrationEnabled:  autoRegistrationEnabled,
+		PublicTrialEnabled:       publicTrialEnabled,
+		CommissionBPS:            commissionBPS,
+		LocalCostPolicy:          localExpensePolicy,
+		ShowCentralRegistry:      showCentralRegistry,
 	}, nil
 }
 
@@ -13661,6 +13660,8 @@ func (a *App) hostingAndSupportPanelView(r *http.Request, snapshot hostingAndSup
 		"ClientHostings":           snapshot.ClientHostings,
 		"DesktopHostingGroups":     snapshot.DesktopHostingGroups,
 		"ArchivedHostings":         snapshot.ArchivedHostings,
+		"ActivePublicTrialSites":   snapshot.ActivePublicTrialSites,
+		"ArchivedPublicTrialSites": snapshot.ArchivedPublicTrialSites,
 		"Servers":                  snapshot.Servers,
 		"RegistrySyncEvents":       snapshot.RegistrySyncEvents,
 		"SitebrushComKey":          snapshot.SitebrushComKey,
