@@ -970,6 +970,112 @@ func TestClassifyClientHostingsKeepsUnqualifiedDesktopTemporaryAndArchivesOldDat
 	}
 }
 
+func TestPublicTrialSitesUseCreationDeadlineAndBackfillLegacyAssignments(t *testing.T) {
+	database, err := sql.Open("sqlite3", filepath.Join(t.TempDir(), "billing.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if err := Migrate(context.Background(), database); err != nil {
+		t.Fatal(err)
+	}
+	store := Store{DB: database}
+	createdAt := time.Date(2026, 9, 12, 10, 0, 0, 0, time.UTC)
+	if err := store.CreatePublicTrialSite(context.Background(), "new.example", "https://source.example/", createdAt); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AssignSite(context.Background(), "legacy.example", 0, "trial"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Exec(`UPDATE site_service_assignments SET updated_at=? WHERE domain='legacy.example'`, createdAt.Format(time.RFC3339)); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.BackfillPublicTrialSites(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	sites := store.PublicTrialSites(context.Background())
+	if len(sites) != 2 {
+		t.Fatalf("public trial sites = %#v", sites)
+	}
+	for _, site := range sites {
+		deleteAfter, parseErr := time.Parse(time.RFC3339, site.DeleteAfter)
+		if parseErr != nil || !deleteAfter.Equal(createdAt.Add(30*time.Minute)) {
+			t.Fatalf("delete after for %s = %q, err=%v", site.Domain, site.DeleteAfter, parseErr)
+		}
+		if site.Domain == "legacy.example" && site.SourceURL != "" {
+			t.Fatalf("legacy source URL = %q, want empty", site.SourceURL)
+		}
+	}
+}
+
+func TestPublicTrialSiteReusePreservesArchivedRun(t *testing.T) {
+	database, err := sql.Open("sqlite3", filepath.Join(t.TempDir(), "billing.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if err := Migrate(context.Background(), database); err != nil {
+		t.Fatal(err)
+	}
+	store := Store{DB: database}
+	firstCreatedAt := time.Date(2026, 9, 12, 10, 0, 0, 0, time.UTC)
+	if err := store.CreatePublicTrialSite(context.Background(), "reused.example", "https://first-source.example/", firstCreatedAt); err != nil {
+		t.Fatal(err)
+	}
+	firstRun := store.PublicTrialSites(context.Background())
+	if len(firstRun) != 1 || firstRun[0].ID == 0 {
+		t.Fatalf("first trial run = %#v", firstRun)
+	}
+	deletedAt := firstCreatedAt.Add(PublicTrialLifetime)
+	if err := store.ArchivePublicTrialSite(context.Background(), firstRun[0].ID, deletedAt); err != nil {
+		t.Fatal(err)
+	}
+	secondCreatedAt := deletedAt.Add(time.Minute)
+	if err := store.CreatePublicTrialSite(context.Background(), "reused.example", "https://second-source.example/", secondCreatedAt); err != nil {
+		t.Fatal(err)
+	}
+	runs := store.PublicTrialSites(context.Background())
+	if len(runs) != 2 {
+		t.Fatalf("trial runs = %#v", runs)
+	}
+	if runs[0].Status != "active" || runs[0].SourceURL != "https://second-source.example/" || runs[0].DeletedAt != "" {
+		t.Fatalf("second trial run = %#v", runs[0])
+	}
+	if runs[1].Status != "deleted" || runs[1].SourceURL != "https://first-source.example/" || runs[1].DeletedAt != deletedAt.Format(time.RFC3339) {
+		t.Fatalf("archived first trial run = %#v", runs[1])
+	}
+	store.RemoveActivePublicTrialSites(context.Background(), "reused.example")
+	archivedRuns := store.PublicTrialSites(context.Background())
+	if len(archivedRuns) != 1 || archivedRuns[0].ID != firstRun[0].ID || archivedRuns[0].Status != "deleted" {
+		t.Fatalf("archive after registration = %#v", archivedRuns)
+	}
+}
+
+func TestBillingMigrationPreservesArchivedTrialHistory(t *testing.T) {
+	database, err := sql.Open("sqlite3", filepath.Join(t.TempDir(), "billing.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if _, err := database.Exec(`CREATE TABLE public_trial_sites(domain TEXT PRIMARY KEY,source_url TEXT,status TEXT,created_at TEXT,delete_after TEXT,deleted_at TEXT,last_error TEXT)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Exec(`INSERT INTO public_trial_sites(domain,source_url,status,created_at,delete_after,deleted_at,last_error) VALUES('reused.example','https://archived.example/','deleted','2026-09-12T10:00:00Z','2026-09-12T10:30:00Z','2026-09-12T10:30:00Z','')`); err != nil {
+		t.Fatal(err)
+	}
+	if err := Migrate(context.Background(), database); err != nil {
+		t.Fatal(err)
+	}
+	store := Store{DB: database}
+	if err := store.CreatePublicTrialSite(context.Background(), "reused.example", "https://new.example/", time.Date(2026, 9, 12, 11, 0, 0, 0, time.UTC)); err != nil {
+		t.Fatal(err)
+	}
+	runs := store.PublicTrialSites(context.Background())
+	if len(runs) != 2 || runs[0].Status != "active" || runs[1].Status != "deleted" || runs[1].SourceURL != "https://archived.example/" {
+		t.Fatalf("migrated trial history = %#v", runs)
+	}
+}
+
 func TestAutomaticInvoiceStoresLinesAndIsIdempotentPerServerCycle(t *testing.T) {
 	database, err := sql.Open("sqlite3", filepath.Join(t.TempDir(), "billing.db"))
 	if err != nil {
