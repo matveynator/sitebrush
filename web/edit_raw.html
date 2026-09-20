@@ -10,17 +10,18 @@
   <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{{index .T "edit_raw_title_prefix"}} {{.Path}}</title>
   <link rel="stylesheet" href="/p/static/codemirror/codemirror.min.css" />
+  <link rel="stylesheet" href="/p/static/admin_theme.css" />
   <style>
-    :root { color-scheme: light dark; --page-bg:#f4f8fc; --text-main:#1b2a3d; --panel:#ffffff; --panel-soft:#edf4fb; --field:#ffffff; --field-text:#12253f; --field-border:#b9c7db; --line:#d7e1ef; --link:#1a65d8; --disabled:#8b98aa; }
-    @media (prefers-color-scheme: dark) { :root { --page-bg:#0f1724; --text-main:#dbe8ff; --panel:#172235; --panel-soft:#0f1a2b; --field:#0f1a2b; --field-text:#dbe8ff; --field-border:#334868; --line:#263a57; --link:#9ec2ff; --disabled:#71819b; } }
+    :root { color-scheme: light dark; --page-bg:var(--theme-background); --text-main:var(--theme-foreground); --panel:var(--theme-card); --panel-soft:var(--theme-muted); --field:var(--theme-card); --field-text:var(--theme-foreground); --field-border:var(--theme-input); --line:var(--theme-border); --link:var(--theme-primary); --disabled:var(--theme-muted-foreground); }
+    @media (prefers-color-scheme: dark) { :root { --page-bg:var(--theme-background); --text-main:var(--theme-foreground); --panel:var(--theme-card); --panel-soft:var(--theme-muted); --field:var(--theme-card); --field-text:var(--theme-foreground); --field-border:var(--theme-input); --line:var(--theme-border); --link:var(--theme-primary); --disabled:var(--theme-muted-foreground); } }
     html, body { height:100%; margin:0; overflow:hidden; }
-    body { font-family: Arial, sans-serif; background: var(--page-bg); color: var(--text-main); }
+    body { font-family: var(--theme-font-sans); background: var(--page-bg); color: var(--text-main); }
     button, textarea { font:inherit; }
     .raw-page { height:100%; min-height:0; display:flex; flex-direction:column; box-sizing:border-box; }
     .raw-topbar { flex:0 0 auto; display:flex; align-items:center; justify-content:space-between; gap:12px; padding:10px 12px; background:var(--panel); border-bottom:1px solid var(--line); }
     .raw-tabs, .raw-actions, .raw-history { display:flex; align-items:center; gap:8px; }
     .raw-tab, .raw-history-button { border:1px solid var(--field-border); border-radius:6px; min-height:36px; padding:7px 11px; background:var(--panel-soft); color:var(--text-main); cursor:pointer; }
-    .raw-tab.is-active { background:var(--link); border-color:var(--link); color:#fff; }
+    .raw-tab.is-active { background:var(--link); border-color:var(--link); color:var(--theme-primary-foreground); }
     .raw-history-button { min-width:38px; padding:7px 10px; font-size:18px; line-height:1; }
     .raw-history-button[disabled] { color:var(--disabled); cursor:default; opacity:.65; }
     .raw-body { flex:1 1 auto; min-height:0; display:flex; flex-direction:column; padding:12px; box-sizing:border-box; overflow:hidden; }
@@ -48,13 +49,20 @@
     }
     .raw-preview-frame { width:100%; height:100%; border:1px solid var(--field-border); border-radius:6px; background:var(--field); box-sizing:border-box; }
     .action-bar { flex:0 0 auto; display:flex; justify-content:flex-end; gap:10px; padding:10px 12px; border-top:1px solid var(--line); background:var(--panel); }
-    .save-button { background:#1ea74f; color:#fff; border:0; padding:10px 18px; border-radius:6px; cursor:pointer; }
-    .cancel-button { background:#6c757d; color:#fff; text-decoration:none; padding:10px 18px; border-radius:6px; }
+    .save-button { background:var(--theme-primary); color:var(--theme-primary-foreground); border:0; padding:10px 18px; border-radius:6px; cursor:pointer; }
+    .cancel-button { background:var(--theme-secondary); color:var(--theme-primary-foreground); text-decoration:none; padding:10px 18px; border-radius:6px; }
     @media (max-width: 700px) {
       .raw-topbar { align-items:stretch; flex-direction:column; }
       .raw-tabs, .raw-actions { width:100%; }
       .raw-tab { flex:1 1 0; }
       .raw-history { margin-left:auto; }
+    }
+    @media (max-width: 900px), (hover: none) and (pointer: coarse) {
+      .raw-tab, .raw-history-button, .save-button, .cancel-button,
+      .SiteBrushUploadButton, .SiteBrushUploadClose { min-height:48px; min-width:48px; }
+      .SiteBrushUploadField input, .SiteBrushUploadField select { min-height:48px; font-size:16px; }
+      .raw-topbar, .action-bar { padding:12px; gap:12px; }
+      .SiteBrushUploadModal { border-radius:var(--theme-radius); }
     }
   </style>
 </head>

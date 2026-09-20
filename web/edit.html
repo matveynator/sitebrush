@@ -11,38 +11,39 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>{{index .T "edit_title_prefix"}} {{.Path}}</title>
   <link rel="stylesheet" href="/p/static/jodit.min.css" />
+  <link rel="stylesheet" href="/p/static/admin_theme.css" />
   <style>
     :root {
       color-scheme: light dark;
-      --page-bg:#f4f8fc;
-      --text-main:#1b2a3d;
-      --surface:#ffffff;
-      --surface-soft:#edf4fb;
-      --line:#d7e1ef;
-      --field-bg:#ffffff;
-      --field-text:#12253f;
-      --field-border:#b9c7db;
-      --link:#1a65d8;
-      --bad:#b3261e;
-      --hint:#4f5f79;
+      --page-bg:var(--theme-background);
+      --text-main:var(--theme-foreground);
+      --surface:var(--theme-card);
+      --surface-soft:var(--theme-muted);
+      --line:var(--theme-border);
+      --field-bg:var(--theme-card);
+      --field-text:var(--theme-foreground);
+      --field-border:var(--theme-input);
+      --link:var(--theme-primary);
+      --bad:var(--theme-destructive);
+      --hint:var(--theme-muted-foreground);
     }
     @media (prefers-color-scheme: dark) {
       :root {
-        --page-bg:#0f1724;
-        --text-main:#dbe8ff;
-        --surface:#121f32;
-        --surface-soft:#0d1727;
-        --line:#263a57;
-        --field-bg:#0f1a2b;
-        --field-text:#dbe8ff;
-        --field-border:#334868;
-        --link:#9ec2ff;
-        --bad:#ff9b93;
-        --hint:#9fb3cf;
+        --page-bg:var(--theme-background);
+        --text-main:var(--theme-foreground);
+        --surface:var(--theme-card);
+        --surface-soft:var(--theme-muted);
+        --line:var(--theme-border);
+        --field-bg:var(--theme-card);
+        --field-text:var(--theme-foreground);
+        --field-border:var(--theme-input);
+        --link:var(--theme-primary);
+        --bad:var(--theme-destructive);
+        --hint:var(--theme-muted-foreground);
       }
     }
     html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; }
-    body { background: var(--page-bg); color: var(--text-main); font-family: Arial, sans-serif; }
+    body { background: var(--page-bg); color: var(--text-main); font-family: var(--theme-font-sans); }
     input, select, button { font: inherit; }
     .editor-page { width: 100vw; height: 100vh; min-height: 0; display: flex; flex-direction: column; padding: 0; box-sizing: border-box; overflow: hidden; }
     .editor-host { flex: 1 1 auto; width: 100%; min-width: 0; min-height: 0; }
@@ -65,7 +66,7 @@
     .SiteBrushUploadPreview { max-width: 100%; max-height: 240px; object-fit: contain; background: var(--surface-soft); border: 1px solid var(--line); border-radius: 6px; justify-self: start; }
     .SiteBrushUploadActions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
     .SiteBrushUploadButton { border: 1px solid var(--field-border); border-radius: 6px; padding: 9px 12px; background: var(--surface); color: var(--text-main); cursor: pointer; }
-    .SiteBrushUploadButton.primary { background: var(--link); border-color: var(--link); color: #fff; }
+    .SiteBrushUploadButton.primary { background: var(--link); border-color: var(--link); color: var(--theme-primary-foreground); }
     .SiteBrushUploadButton[disabled] { opacity: .6; cursor: default; }
     .SiteBrushUploadClose { border: 0; background: transparent; color: var(--text-main); font-size: 24px; line-height: 1; cursor: pointer; }
     .SiteBrushUploadResizeGrid { display: grid; grid-template-columns: minmax(0, 1fr) 120px; gap: 8px; align-items: end; }
@@ -74,6 +75,13 @@
       .SiteBrushUploadResizeGrid { grid-template-columns: 1fr; }
       .SiteBrushUploadFooter { justify-content: stretch; }
       .SiteBrushUploadActions, .SiteBrushUploadButton { width: 100%; }
+    }
+    @media (max-width: 900px), (hover: none) and (pointer: coarse) {
+      .raw-tab, .raw-history-button, .save-button, .cancel-button,
+      .SiteBrushUploadButton, .SiteBrushUploadClose { min-height:48px; min-width:48px; }
+      .SiteBrushUploadField input, .SiteBrushUploadField select { min-height:48px; font-size:16px; }
+      .raw-topbar, .action-bar { padding:12px; gap:12px; }
+      .SiteBrushUploadModal { border-radius:var(--theme-radius); }
     }
   </style>
 </head>

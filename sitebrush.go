@@ -1001,13 +1001,40 @@ func siteDatabaseCreationAllowed(ctx context.Context) bool {
 	return ok && allowed
 }
 
+// isTransientSiteDatabaseLock distinguishes contention from persistent schema failures.
+// modernc SQLite exposes extended result codes; the low byte is the primary code.
+func isTransientSiteDatabaseLock(err error) bool {
+	var sqliteErr interface{ Code() int }
+	if !errors.As(err, &sqliteErr) {
+		return false
+	}
+	code := sqliteErr.Code() & 0xff
+	return code == 5 || code == 6 // SQLITE_BUSY or SQLITE_LOCKED
+}
+
+// openSiteDatabaseHandle installs the busy handler before any schema read or WAL setup.
+func openSiteDatabaseHandle(ctx context.Context, databasePath string) (*sql.DB, error) {
+	database, err := sql.Open("sqlite", "file:"+databasePath)
+	if err != nil {
+		return nil, err
+	}
+	database.SetMaxOpenConns(1)
+	database.SetMaxIdleConns(1)
+	database.SetConnMaxLifetime(0)
+	if _, err := database.ExecContext(ctx, "PRAGMA busy_timeout=5000"); err != nil {
+		_ = database.Close()
+		return nil, err
+	}
+	return database, nil
+}
+
 func newSiteFileDatabase(databasePath string, rawDatabase *sql.DB, debug bool) (*siteFileDatabase, error) {
 	rawDatabase.SetMaxOpenConns(1)
 	rawDatabase.SetMaxIdleConns(1)
 	rawDatabase.SetConnMaxLifetime(0)
 	for _, pragma := range []string{
-		"PRAGMA journal_mode=WAL",
 		"PRAGMA busy_timeout=5000",
+		"PRAGMA journal_mode=WAL",
 		"PRAGMA foreign_keys=ON",
 		"PRAGMA synchronous=NORMAL",
 	} {
@@ -1474,11 +1501,14 @@ func (r *perSiteDBRouter) run(siteDatabaseRootDir string, migrate siteDBMigrator
 				log.Printf("%sDB MIGRATION%s applied path=%s domain=%s from=%d to=%d", terminalGreen(), terminalReset(), event.path, event.domain, event.previousVersion, event.currentVersion)
 			case "skipped":
 				migratedDomains[event.domain] = true
+				delete(degradedDomains, event.domain)
 				if r.debug {
 					log.Printf("%sDB MIGRATION%s skipped path=%s domain=%s version=%d", terminalCyan(), terminalReset(), event.path, event.domain, event.currentVersion)
 				}
 			case "failed":
-				degradedDomains[event.domain] = event.err
+				if !isTransientSiteDatabaseLock(event.err) {
+					degradedDomains[event.domain] = event.err
+				}
 				log.Printf("%sDB MIGRATION%s failed path=%s domain=%s step=%s err=%v", terminalRed(), terminalReset(), event.path, event.domain, diagnosticlog.SafeLogValue(event.step), event.err)
 			case "ignored":
 				if r.debug {
@@ -1675,7 +1705,7 @@ func (r *perSiteDBRouter) scanStartupMigrations(ctx context.Context, siteDatabas
 func (r *perSiteDBRouter) migrateStartupDatabase(ctx context.Context, databasePath, databaseDomain string, migrate siteDBMigrator, results chan siteDBMigrationEvent) {
 	migrationCtx, cancel := context.WithTimeout(ctx, siteDatabaseStartupMigrationTimeout)
 	defer cancel()
-	database, err := sql.Open("sqlite", "file:"+databasePath)
+	database, err := openSiteDatabaseHandle(migrationCtx, databasePath)
 	if err != nil {
 		results <- siteDBMigrationEvent{kind: "failed", domain: databaseDomain, path: databasePath, step: "open database", err: err}
 		return
@@ -1743,34 +1773,42 @@ func (r *perSiteDBRouter) databaseForDomain(siteDatabaseRootDir string, database
 			return nil, statErr
 		}
 	}
-	nextDatabase, err := sql.Open("sqlite", "file:"+databasePath)
+	nextDatabase, err := openSiteDatabaseHandle(context.Background(), databasePath)
 	if err != nil {
 		return nil, err
 	}
 	currentVersion, versionErr := sqliteUserVersion(context.Background(), nextDatabase)
 	if versionErr != nil {
 		_ = nextDatabase.Close()
-		degradedDomains[databaseDomain] = versionErr
+		if !isTransientSiteDatabaseLock(versionErr) {
+			degradedDomains[databaseDomain] = versionErr
+		}
 		log.Printf("%sDB MIGRATION%s failed path=%s domain=%s step=%s err=%v", terminalRed(), terminalReset(), databasePath, databaseDomain, "read schema version", versionErr)
 		return nil, siteDatabaseDegradedError{domain: databaseDomain, err: versionErr}
 	}
 	schemaComplete, schemaErr := siteDatabaseSchemaComplete(context.Background(), nextDatabase)
 	if schemaErr != nil {
 		_ = nextDatabase.Close()
-		degradedDomains[databaseDomain] = schemaErr
+		if !isTransientSiteDatabaseLock(schemaErr) {
+			degradedDomains[databaseDomain] = schemaErr
+		}
 		log.Printf("%sDB MIGRATION%s failed path=%s domain=%s step=%s err=%v", terminalRed(), terminalReset(), databasePath, databaseDomain, "verify schema", schemaErr)
 		return nil, siteDatabaseDegradedError{domain: databaseDomain, err: schemaErr}
 	}
 	siteDatabase, openErr := newSiteFileDatabase(databasePath, nextDatabase, r.debug)
 	if openErr != nil {
 		_ = nextDatabase.Close()
-		degradedDomains[databaseDomain] = openErr
+		if !isTransientSiteDatabaseLock(openErr) {
+			degradedDomains[databaseDomain] = openErr
+		}
 		return nil, siteDatabaseDegradedError{domain: databaseDomain, err: openErr}
 	}
 	if !migratedDomains[databaseDomain] {
 		if currentVersion < currentSiteDatabaseSchemaVersion || !schemaComplete {
 			if migrateErr := siteDatabase.Migrate(context.Background(), databaseDomain, migrate); migrateErr != nil {
-				degradedDomains[databaseDomain] = migrateErr
+				if !isTransientSiteDatabaseLock(migrateErr) {
+					degradedDomains[databaseDomain] = migrateErr
+				}
 				log.Printf("%sDB MIGRATION%s failed path=%s domain=%s step=%s err=%v", terminalRed(), terminalReset(), databasePath, databaseDomain, siteMigrationFailureStep(migrateErr), migrateErr)
 				_ = siteDatabase.Close()
 				return nil, siteDatabaseDegradedError{domain: databaseDomain, err: migrateErr}
@@ -22038,60 +22076,49 @@ func (a *App) uploadFiles(w http.ResponseWriter, r *http.Request, currentPath st
 		if fileName == "" {
 			continue
 		}
-		reservedFileBytes := fileHeader.Size
-		if reservedFileBytes > 0 {
-			if storageErr := a.applyDomainStorageDelta(r.Context(), siteDomain, 0, 0, 0, reservedFileBytes, 0); storageErr != nil {
-				http.Error(w, storageErr.Error(), http.StatusInsufficientStorage)
-				return
-			}
-		}
 		sourceFile, openErr := fileHeader.Open()
 		if openErr != nil {
-			if reservedFileBytes > 0 {
-				_ = a.applyDomainStorageDelta(r.Context(), siteDomain, 0, 0, 0, -reservedFileBytes, 0)
-			}
 			continue
 		}
-
-		storedName := a.uniqueUploadedFileName(baseDir, fileName)
-		targetPath := filepath.Join(baseDir, storedName)
-		targetFile, createErr := a.createFileInsideStorage(targetPath)
-		if createErr != nil {
-			_ = sourceFile.Close()
-			if reservedFileBytes > 0 {
-				_ = a.applyDomainStorageDelta(r.Context(), siteDomain, 0, 0, 0, -reservedFileBytes, 0)
-			}
-			continue
-		}
-		writtenBytes, copyErr := io.Copy(targetFile, sourceFile)
-		closeErr := targetFile.Close()
+		fileBytes, readErr := io.ReadAll(sourceFile)
 		_ = sourceFile.Close()
-		if copyErr != nil || closeErr != nil {
-			_ = a.removeInsideStorage(targetPath)
-			if reservedFileBytes > 0 {
-				_ = a.applyDomainStorageDelta(r.Context(), siteDomain, 0, 0, 0, -reservedFileBytes, 0)
-			}
+		if readErr != nil {
 			continue
 		}
-		if reservedFileBytes <= 0 {
-			if storageErr := a.applyDomainStorageDelta(r.Context(), siteDomain, 0, 0, 0, writtenBytes, 0); storageErr != nil {
-				_ = a.removeInsideStorage(targetPath)
-				http.Error(w, storageErr.Error(), http.StatusInsufficientStorage)
-				return
-			}
-		}
-		if reservedFileBytes > 0 && writtenBytes != reservedFileBytes {
-			if storageErr := a.applyDomainStorageDelta(r.Context(), siteDomain, 0, 0, 0, writtenBytes-reservedFileBytes, 0); storageErr != nil {
-				_ = a.removeInsideStorage(targetPath)
-				_ = a.applyDomainStorageDelta(r.Context(), siteDomain, 0, 0, 0, -reservedFileBytes, 0)
-				http.Error(w, storageErr.Error(), http.StatusInsufficientStorage)
-				return
-			}
-		}
-
+		contentHash := sha256.Sum256(fileBytes)
+		storedName := hex.EncodeToString(contentHash[:]) + strings.ToLower(path.Ext(fileName))
+		targetPath := filepath.Join(baseDir, storedName)
 		mimeType := strings.TrimSpace(fileHeader.Header.Get("Content-Type"))
 		if mimeType == "" {
 			mimeType = mime.TypeByExtension(path.Ext(storedName))
+		}
+		writtenBytes := int64(len(fileBytes))
+		if existingFile, statErr := a.statInsideStorage(targetPath); statErr == nil && !existingFile.IsDir() {
+			a.upsertFileMetadata(r.Context(), domain, storedName, currentPath, existingFile.Size(), mimeType, "upload")
+			uploadedNames = append(uploadedNames, storedName)
+			continue
+		}
+		if writtenBytes > 0 {
+			if storageErr := a.applyDomainStorageDelta(r.Context(), siteDomain, 0, 0, 0, writtenBytes, 0); storageErr != nil {
+				http.Error(w, storageErr.Error(), http.StatusInsufficientStorage)
+				return
+			}
+		}
+		targetFile, createErr := a.createFileInsideStorage(targetPath)
+		if createErr != nil {
+			if writtenBytes > 0 {
+				_ = a.applyDomainStorageDelta(r.Context(), siteDomain, 0, 0, 0, -writtenBytes, 0)
+			}
+			continue
+		}
+		writtenByteCount, writeErr := targetFile.Write(fileBytes)
+		closeErr := targetFile.Close()
+		if writeErr != nil || closeErr != nil || int64(writtenByteCount) != writtenBytes {
+			_ = a.removeInsideStorage(targetPath)
+			if writtenBytes > 0 {
+				_ = a.applyDomainStorageDelta(r.Context(), siteDomain, 0, 0, 0, -writtenBytes, 0)
+			}
+			continue
 		}
 		a.upsertFileMetadata(r.Context(), domain, storedName, currentPath, writtenBytes, mimeType, "upload")
 		uploadedNames = append(uploadedNames, storedName)
@@ -27657,6 +27684,24 @@ func (spider *pageSpider) rewriteResourceReference(rawRef string, baseURL *url.U
 		return normalizedURL
 	}
 	return crawler.NormalizeMirroredAssetReference(dependency.assetPath)
+}
+
+// isResultHostResourceURL reports whether a resource already belongs
+// to the imported site's destination domain. Such live internal links
+// must not be replaced with a hashed mirrored asset path.
+func (spider *pageSpider) isResultHostResourceURL(rawURL string) bool {
+	if spider == nil {
+		return false
+	}
+	resultHost := canonicalLocalDomain(spider.domain)
+	if resultHost == "" {
+		return false
+	}
+	linkedURL, err := url.Parse(rawURL)
+	if err != nil || linkedURL == nil {
+		return false
+	}
+	return strings.EqualFold(linkedURL.Hostname(), resultHost)
 }
 
 func (spider *pageSpider) rewriteDocumentResourceReference(rawRef string, baseURL *url.URL, depth int) string {

@@ -2567,12 +2567,18 @@ func TestMobileServicePageDesignCoversEverySharedTemplate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	combinedStyles := string(technicalStyleBytes) + string(directoryStyleBytes)
+	themeStyleBytes, err := fs.ReadFile(embeddedWebFiles, "web/static/admin_theme.css")
+	if err != nil {
+		t.Fatal(err)
+	}
+	combinedStyles := string(technicalStyleBytes) + string(directoryStyleBytes) + string(themeStyleBytes)
 	for _, requiredFragment := range []string{
-		"@media (max-width: 760px) and (prefers-color-scheme: dark)",
-		"background: #1e362d !important",
-		"background: #9eb6e3",
-		"color: #12151d",
+		"@media (prefers-color-scheme: dark)",
+		"--theme-background: #eef0f3",
+		"--theme-background: #14171c",
+		"--theme-primary: #3b608f",
+		"--theme-primary: #6b8db8",
+		"background: var(--bg)",
 		".technical-page .alert-warning",
 		".technical-page .alert-danger",
 	} {
@@ -10390,15 +10396,15 @@ func TestExternalSiteImportPrimaryActionsAreGreen(t *testing.T) {
 		}
 	}
 
-	styleBytes, readErr := embeddedWebFiles.ReadFile("web/static/technical_pages.css")
+	styleBytes, readErr := embeddedWebFiles.ReadFile("web/static/admin_controls.css")
 	if readErr != nil {
 		t.Fatal(readErr)
 	}
 	style := string(styleBytes)
 	for _, expectedFragment := range []string{
-		".technical-page #grabProgressModal button.sitebrush-import-primary-action",
-		"background: #198754 !important",
-		"background: #157347 !important",
+		".sitebrush-import-primary-action",
+		"background: var(--theme-primary) !important",
+		"color: var(--theme-primary-foreground) !important",
 	} {
 		if !strings.Contains(style, expectedFragment) {
 			t.Fatalf("external site import stylesheet does not contain %q", expectedFragment)
@@ -11187,7 +11193,7 @@ func TestFileManagerMobileLayoutUsesCardsWithoutHorizontalScrolling(t *testing.T
 	}
 	templateText := string(templateBytes)
 	for _, expectedFragment := range []string{
-		`@media (max-width: 900px)`,
+		`@media (max-width: 900px), (hover: none) and (pointer: coarse)`,
 		`.file-list-panel .table-responsive { overflow:visible;`,
 		`.file-list-panel tr[data-file-row] { display:grid;`,
 		`grid-template-areas:"preview file file" "size size date" "access access access" "actions actions actions"`,
@@ -11195,8 +11201,8 @@ func TestFileManagerMobileLayoutUsesCardsWithoutHorizontalScrolling(t *testing.T
 		`data-label="{{index $.T "files_col_access"}}"`,
 		`class="file-access-details" data-file-access-details`,
 		`accessDetailsElement.open = !compactFileLayout`,
-		`background:#fafbfb`,
-		`background:#24282a`,
+		`background:var(--theme-card)`,
+		`color:var(--theme-destructive)`,
 		`class="file-delete-form"`,
 	} {
 		if !strings.Contains(templateText, expectedFragment) {

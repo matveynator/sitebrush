@@ -1,0 +1,186 @@
+@font-face {
+    font-family: "Geist";
+    font-style: normal;
+    font-weight: 400;
+    font-display: swap;
+    src: url("/p/static/fonts/geist-400.ttf") format("truetype");
+}
+@font-face {
+    font-family: "Geist";
+    font-style: normal;
+    font-weight: 500;
+    font-display: swap;
+    src: url("/p/static/fonts/geist-500.ttf") format("truetype");
+}
+@font-face {
+    font-family: "Geist";
+    font-style: normal;
+    font-weight: 600;
+    font-display: swap;
+    src: url("/p/static/fonts/geist-600.ttf") format("truetype");
+}
+@font-face {
+    font-family: "Geist";
+    font-style: normal;
+    font-weight: 700;
+    font-display: swap;
+    src: url("/p/static/fonts/geist-700.ttf") format("truetype");
+}
+@font-face {
+    font-family: "Geist";
+    font-style: normal;
+    font-weight: 800;
+    font-display: swap;
+    src: url("/p/static/fonts/geist-800.ttf") format("truetype");
+}
+@font-face {
+    font-family: "Outfit";
+    font-style: normal;
+    font-weight: 400;
+    font-display: swap;
+    src: url("/p/static/fonts/outfit-400.ttf") format("truetype");
+}
+@font-face {
+    font-family: "Outfit";
+    font-style: normal;
+    font-weight: 500;
+    font-display: swap;
+    src: url("/p/static/fonts/outfit-500.ttf") format("truetype");
+}
+@font-face {
+    font-family: "Outfit";
+    font-style: normal;
+    font-weight: 600;
+    font-display: swap;
+    src: url("/p/static/fonts/outfit-600.ttf") format("truetype");
+}
+@font-face {
+    font-family: "Outfit";
+    font-style: normal;
+    font-weight: 700;
+    font-display: swap;
+    src: url("/p/static/fonts/outfit-700.ttf") format("truetype");
+}
+@font-face {
+    font-family: "Outfit";
+    font-style: normal;
+    font-weight: 800;
+    font-display: swap;
+    src: url("/p/static/fonts/outfit-800.ttf") format("truetype");
+}
+
+/* Meridian by Sushmoy Roy — https://tweakcn.com/themes/cmojzn0oy000505ldam699poc */
+:root {
+    color-scheme: light;
+    --theme-background: #eef0f3;
+    --theme-foreground: #181b21;
+    --theme-card: #ffffff;
+    --theme-card-foreground: #181b21;
+    --theme-popover: #ffffff;
+    --theme-popover-foreground: #181b21;
+    --theme-primary: #3b608f;
+    --theme-primary-foreground: #ffffff;
+    --theme-secondary: #b8694a;
+    --theme-secondary-foreground: #ffffff;
+    --theme-muted: #e8eaee;
+    --theme-muted-foreground: #5a6072;
+    --theme-accent: #d8e2ee;
+    --theme-accent-foreground: #1f3a5c;
+    --theme-destructive: #b8332e;
+    --theme-destructive-foreground: #ffffff;
+    --theme-border: #c9cfd8;
+    --theme-input: #c9cfd8;
+    --theme-ring: #6b87b0;
+    --theme-chart-1: #3b608f;
+    --theme-chart-2: #b8694a;
+    --theme-chart-3: #5b8caf;
+    --theme-chart-4: #4a7c59;
+    --theme-chart-5: #c9a14a;
+    --theme-sidebar: #e2e5ea;
+    --theme-sidebar-foreground: #181b21;
+    --theme-sidebar-primary: #3b608f;
+    --theme-sidebar-primary-foreground: #ffffff;
+    --theme-sidebar-accent: #d8e2ee;
+    --theme-sidebar-accent-foreground: #1f3a5c;
+    --theme-sidebar-border: #d0d4db;
+    --theme-sidebar-ring: #6b87b0;
+    --theme-font-sans: Geist, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+    --theme-font-serif: 'Instrument Serif', ui-serif, Georgia, serif;
+    --theme-font-mono: 'Geist Mono', ui-monospace, 'SF Mono', Menlo, monospace;
+    --theme-radius: 0.625rem;
+    --theme-success: #357044;
+    --theme-warning: #896414;
+    --shadow: 0 1px 4px -1px rgb(24 27 33 / 8%);
+}
+@media (prefers-color-scheme: dark) {
+:root {
+    color-scheme: dark;
+    --theme-background: #14171c;
+    --theme-foreground: #e6e9ef;
+    --theme-card: #1c2027;
+    --theme-card-foreground: #e6e9ef;
+    --theme-popover: #232831;
+    --theme-popover-foreground: #e6e9ef;
+    --theme-primary: #6b8db8;
+    --theme-primary-foreground: #0f1216;
+    --theme-secondary: #d18866;
+    --theme-secondary-foreground: #1a0e08;
+    --theme-muted: #232831;
+    --theme-muted-foreground: #9097a6;
+    --theme-accent: #1f2d3d;
+    --theme-accent-foreground: #a8c2dd;
+    --theme-destructive: #d4524c;
+    --theme-destructive-foreground: #160807;
+    --theme-border: #353c48;
+    --theme-input: #353c48;
+    --theme-ring: #88a8c9;
+    --theme-chart-1: #6b8db8;
+    --theme-chart-2: #d18866;
+    --theme-chart-3: #88a8c9;
+    --theme-chart-4: #6b9b78;
+    --theme-chart-5: #dab86a;
+    --theme-sidebar: #0f1216;
+    --theme-sidebar-foreground: #e6e9ef;
+    --theme-sidebar-primary: #6b8db8;
+    --theme-sidebar-primary-foreground: #0f1216;
+    --theme-sidebar-accent: #1f2d3d;
+    --theme-sidebar-accent-foreground: #a8c2dd;
+    --theme-sidebar-border: #232831;
+    --theme-sidebar-ring: #88a8c9;
+    --theme-font-sans: Outfit, Geist, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+    --theme-font-serif: Merriweather, serif;
+    --theme-font-mono: Fira Code, monospace;
+    --theme-radius: 0.5rem;
+    --theme-success: #8ab997;
+    --theme-warning: #dab86a;
+    --shadow: 0 1px 4px -1px rgb(24 27 33 / 8%);
+}
+}
+
+:root {
+    --bg: var(--theme-background);
+    --panel: var(--theme-card);
+    --panel-soft: var(--theme-muted);
+    --panel-strong: var(--theme-accent);
+    --text: var(--theme-foreground);
+    --muted: var(--theme-muted-foreground);
+    --cyan: var(--theme-primary);
+    --orange: var(--theme-secondary);
+    --cream: var(--theme-foreground);
+    --green: var(--theme-success);
+    --border-cyan: var(--theme-border);
+    --border-orange: var(--theme-secondary);
+}
+
+/* Touch layouts change density, while retaining the Meridian palette and radii. */
+:root {
+    --admin-control-height: 38px;
+    --admin-field-background: var(--theme-card);
+    --admin-page-padding: 32px;
+}
+@media (max-width: 900px), (hover: none) and (pointer: coarse) {
+    :root {
+        --admin-control-height: 48px;
+        --admin-page-padding: 16px;
+    }
+}
