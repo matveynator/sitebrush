@@ -1,6 +1,16 @@
 @import url("/p/static/directory_listing.css");
 @import url("/p/static/admin_controls.css");
 
+.technical-page .authentication-card,
+.technical-page .modal-content {
+    border-radius: var(--theme-radius, 10px) !important;
+    overflow: hidden;
+}
+
+.technical-page .authentication-card {
+    padding: 24px !important;
+}
+
 .technical-page .container,
 .technical-page .manager-shell,
 .technical-page .analytics-page-shell {

@@ -26,9 +26,15 @@
     .upload-controls { display:flex; flex-wrap:wrap; gap:8px; }
     .upload-controls .form-control { flex:1 1 240px; min-width:0; }
     .file-sort-toolbar { display:flex; flex-wrap:wrap; align-items:center; gap:8px; margin-bottom:16px; }
-    .file-sort-toolbar [data-sort-files]::after { content:""; display:inline-block; width:1em; margin-inline-start:4px; text-align:center; }
-    .file-sort-toolbar [data-sort-direction="asc"]::after { content:"↑"; }
-    .file-sort-toolbar [data-sort-direction="desc"]::after { content:"↓"; }
+    body.file-manager-page .file-list-panel button[data-sort-files] { border:0 !important; padding:0 !important; min-height:32px !important; gap:0; background:transparent !important; box-shadow:none !important; color:inherit; font:inherit; text-align:inherit; cursor:pointer; }
+    [data-sort-files]::after { content:""; display:inline-block; width:1em; margin-inline-start:4px; text-align:center; }
+    [data-sort-direction="asc"]::after { content:"↑"; }
+    [data-sort-direction="desc"]::after { content:"↓"; }
+    .file-uri { display:block; max-width:100%; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; }
+    .file-manager-page input:is([data-select-file], #selectAllFiles) { flex:0 0 auto; width:16px; height:16px; margin:0; accent-color:var(--theme-primary); cursor:pointer; }
+    #deleteSelectedFiles { margin-bottom:12px; }
+    .file-manager-page [hidden] { display:none !important; }
+    .file-manager-page .file-list-panel th:nth-child(3) { width:120px; }
     .file-manager-page .file-list-panel { min-width:0; max-width:100%; overflow:visible !important; box-shadow:none; }
     .file-list-panel .table-responsive { overflow:visible; border:0; background:transparent; }
     .file-manager-page .file-list-panel table { width:100%; table-layout:fixed; }
@@ -36,10 +42,10 @@
     .file-link-cell, .access-cell { min-width:0; }
     .file-manager-page .file-list-panel th:nth-child(1) { width:96px; }
     .file-manager-page .file-list-panel th:nth-child(2) { width:26%; }
-    .file-manager-page .file-list-panel th:nth-child(3) { width:88px; }
-    .file-manager-page .file-list-panel th:nth-child(4) { width:132px; }
-    .file-manager-page .file-list-panel th:nth-child(5) { width:170px; }
-    .file-manager-page .file-list-panel th:nth-child(6) { width:56px; }
+    .file-manager-page .file-list-panel th:nth-child(4) { width:88px; }
+    .file-manager-page .file-list-panel th:nth-child(5) { width:132px; }
+    .file-manager-page .file-list-panel th:nth-child(6) { width:170px; }
+    .file-manager-page .file-list-panel th:nth-child(7) { width:56px; }
     .file-actions-heading { text-align:center; }
     .file-manager-page :is(.file-thumb, .file-icon, .file-preview-trigger) {
       width:72px; height:72px; min-height:72px; padding:0; display:grid; place-items:center;
@@ -92,7 +98,7 @@
     .preview-delete-form { margin-top:4px; }
     .preview-navigation { display:flex; gap:8px; }
     .preview-navigation .btn { width:40px; min-width:40px; padding:7px !important; font-size:20px !important; }
-    .delete-confirm-name { margin:0; overflow-wrap:anywhere; font-weight:600; }
+    .delete-confirm-name { margin:0; overflow-wrap:anywhere; white-space:pre-line; font-weight:600; }
     .file-manager-page .btn-close { display:grid; flex:0 0 auto; width:32px; height:32px; min-height:32px; padding:0; place-items:center; border:0; background:none !important; color:var(--theme-foreground); font-size:24px; font-weight:400; line-height:1; opacity:1; }
     .uploaded-focus { outline:2px solid var(--theme-ring); outline-offset:-2px; }
     @media (max-width: 900px), (hover: none) and (pointer: coarse) {
@@ -102,16 +108,19 @@
       .upload-controls { display:grid; grid-template-columns:minmax(0, 1fr); }
       .file-manager-page .file-list-panel { border:0 !important; background:transparent !important; overflow:visible !important; }
       .file-list-panel table, .file-list-panel tbody { display:block; width:100%; }
-      .file-list-panel thead { display:none; }
+      .file-list-panel thead, .file-list-panel thead tr { display:flex; flex-wrap:wrap; gap:8px; }
+      .file-manager-page .file-list-panel thead th { width:auto; padding:8px 0; }
+      .file-list-panel thead th:nth-child(1), .file-list-panel thead th:nth-child(6), .file-list-panel thead th:nth-child(7) { display:none; }
       .file-list-panel tbody { display:grid; gap:12px; }
-      .file-list-panel tr[data-file-row] { display:grid; width:100%; min-width:0; grid-template-columns:72px minmax(0,1fr); grid-template-areas:"preview file" "size date" "access access" "actions actions"; gap:12px; padding:16px; overflow:hidden; border:1px solid var(--theme-border); border-radius:var(--theme-radius); background:var(--theme-card); }
+      .file-list-panel tr[data-file-row] { display:grid; width:100%; min-width:0; grid-template-columns:72px minmax(0,1fr); grid-template-areas:"preview file" "size date" "uri uri" "access access" "actions actions"; gap:12px; padding:16px; overflow:hidden; border:1px solid var(--theme-border); border-radius:var(--theme-radius); background:var(--theme-card); }
       .file-manager-page .file-list-panel tr[data-file-row] > td { display:block; width:auto; min-width:0; max-width:100%; padding:0; overflow:hidden; border:0; background:transparent; }
       .file-list-panel tr[data-file-row] > td:nth-child(1) { grid-area:preview; }
       .file-list-panel tr[data-file-row] > td:nth-child(2) { grid-area:file; align-self:center; }
-      .file-list-panel tr[data-file-row] > td:nth-child(3) { grid-area:size; }
-      .file-list-panel tr[data-file-row] > td:nth-child(4) { grid-area:date; text-align:right; }
-      .file-list-panel tr[data-file-row] > td:nth-child(5) { grid-area:access; }
-      .file-list-panel tr[data-file-row] > td:nth-child(6) { grid-area:actions; }
+      .file-list-panel tr[data-file-row] > td:nth-child(3) { grid-area:uri; }
+      .file-list-panel tr[data-file-row] > td:nth-child(4) { grid-area:size; }
+      .file-list-panel tr[data-file-row] > td:nth-child(5) { grid-area:date; text-align:right; }
+      .file-list-panel tr[data-file-row] > td:nth-child(6) { grid-area:access; }
+      .file-list-panel tr[data-file-row] > td:nth-child(7) { grid-area:actions; }
       .file-manager-page .file-link-row { width:100%; min-width:0; }
       .file-manager-page .file-name-link { flex:1 1 auto; width:0; }
       .file-manager-page :is(.file-thumb, .file-icon, .file-preview-trigger) { max-width:72px; }
@@ -147,12 +156,10 @@
     </div>
   </form>
 
-  <div class="file-sort-toolbar" role="group" aria-label="{{index .T "files_sort_label"}}">
-    <span class="text-muted small">{{index .T "files_sort_label"}}</span>
-    <button class="btn btn-sm btn-outline-secondary active" type="button" data-sort-files="date" data-sort-direction="desc" aria-pressed="true">{{index .T "files_sort_date"}}</button>
-    <button class="btn btn-sm btn-outline-secondary" type="button" data-sort-files="size" aria-pressed="false">{{index .T "files_sort_size"}}</button>
-    <button class="btn btn-sm btn-outline-secondary" type="button" data-sort-files="name" aria-pressed="false">{{index .T "files_sort_name"}}</button>
-  </div>
+  <form id="selectedFilesForm" class="file-delete-form" method="post" action="{{.Path}}?files">
+    <input type="hidden" name="action" value="delete_selected">
+    <button class="btn btn-outline-danger" id="deleteSelectedFiles" type="submit" hidden>{{index .T "files_delete_selected"}}</button>
+  </form>
 
   <div class="bg-body-tertiary border rounded-3 overflow-hidden technical-table-panel file-list-panel">
     <div class="table-responsive">
@@ -160,16 +167,17 @@
         <thead>
           <tr>
             <th>{{index .T "files_col_preview"}}</th>
-            <th class="file-link-cell">{{index .T "files_col_file_link"}}</th>
-            <th>{{index .T "files_col_size"}}</th>
-            <th>{{index .T "files_col_date"}}</th>
+            <th class="file-link-cell"><div class="file-link-row"><input type="checkbox" id="selectAllFiles" title="{{index .T "files_select_all"}}" aria-label="{{index .T "files_select_all"}}"><button type="button" data-sort-files="name">{{index .T "files_col_file_link"}}</button></div></th>
+            <th><button type="button" data-sort-files="uri">URI</button></th>
+            <th><button type="button" data-sort-files="size">{{index .T "files_col_size"}}</button></th>
+            <th><button type="button" data-sort-files="date">{{index .T "files_col_date"}}</button></th>
             <th class="access-cell">{{index .T "files_col_access"}}</th>
             <th class="file-actions-heading" title="{{index .T "files_col_actions"}}"><span aria-hidden="true">•••</span><span class="visually-hidden">{{index .T "files_col_actions"}}</span></th>
           </tr>
         </thead>
         <tbody id="fileTableBody">
 {{range .Files}}
-          <tr data-file-row data-name="{{.Name}}" data-size="{{.Size}}" data-date="{{.CreatedUnix}}" id="file-{{printf "%x" .Name}}">
+          <tr data-file-row data-name="{{.Name}}" data-uri="{{.PagePath}}" data-size="{{.Size}}" data-date="{{.CreatedUnix}}" id="file-{{printf "%x" .Name}}">
             <td>
               {{if .IsImage}}
               <button class="file-preview-trigger" type="button" data-preview-image data-preview-src="{{.AssetPath}}" data-preview-name="{{.Name}}" data-preview-size="{{.SizeLabel}}" data-preview-date="{{.CreatedAt}}" data-preview-access="{{if eq .AccessMode "timer"}}{{index $.T "files_access_timer"}}{{else if eq .AccessMode "token"}}{{index $.T "files_access_token"}}{{else}}{{index $.T "files_access_public"}}{{end}}" data-preview-page-path="{{.PagePath}}" aria-label="{{index $.T "files_preview_title"}} {{.Name}}"><img class="file-thumb" src="{{.AssetPath}}" alt="" loading="lazy"></button>
@@ -179,11 +187,13 @@
             </td>
             <td class="file-link-cell">
               <div class="file-link-row">
+                <input type="checkbox" name="name" value="{{.Name}}" form="selectedFilesForm" data-select-file aria-label="{{.Name}}">
                 <a class="file-name-link" href="{{.AssetPath}}" title="{{.Name}}{{if .PagePath}} · {{index $.T "files_uri_label"}} {{.PagePath}}{{end}}">{{.Name}}</a>
                 <input type="hidden" data-full-link data-asset-path="{{.AssetPath}}">
                 <button class="btn btn-outline-secondary btn-sm file-icon-button" type="button" data-copy-target="full" title="{{index $.T "files_copy"}}" aria-label="{{index $.T "files_copy"}}"><img src="/p/static/copy.png" alt=""></button>
               </div>
             </td>
+            <td>{{if .PagePath}}<a class="file-uri" href="{{.PagePath}}" title="{{.PagePath}}">{{.PagePath}}</a>{{else}}—{{end}}</td>
             <td data-label="{{index $.T "files_col_size"}}"><span class="text-muted">{{.SizeLabel}}</span></td>
             <td data-label="{{index $.T "files_col_date"}}"><span class="text-muted">{{.CreatedAt}}</span></td>
             <td class="access-cell" data-label="{{index $.T "files_col_access"}}">
@@ -218,7 +228,7 @@
             </td>
           </tr>
 {{else}}
-          <tr class="file-list-empty"><td colspan="6" class="text-center text-muted py-5">{{index .T "files_empty"}}</td></tr>
+          <tr class="file-list-empty"><td colspan="7" class="text-center text-muted py-5">{{index .T "files_empty"}}</td></tr>
 {{end}}
         </tbody>
       </table>
@@ -316,6 +326,13 @@
   let currentPreviewIndex = 0;
   let previewHoverTimer = 0;
   let pendingDeleteForm = null;
+  let deleteConfirmationStep = 0;
+  let pendingDeleteDescription = '';
+  const selectedFileNames = new Set();
+  const selectedFilesFormElement = document.getElementById('selectedFilesForm');
+  const selectAllFilesElement = document.getElementById('selectAllFiles');
+  const deleteSelectedFilesElement = document.getElementById('deleteSelectedFiles');
+  let fileSortState = {kind: 'date', direction: 'desc'};
   let uploadInFlight = false;
 
   function absoluteURL(assetPath) {
@@ -526,6 +543,9 @@
       if (sortKind === 'date') {
         return directionFactor * (Number(leftRow.dataset.date || 0) - Number(rightRow.dataset.date || 0));
       }
+      if (sortKind === 'uri') {
+        return directionFactor * (leftRow.dataset.uri || '').localeCompare(rightRow.dataset.uri || '');
+      }
       return directionFactor * (leftRow.dataset.name || '').localeCompare(rightRow.dataset.name || '');
     });
     for (const rowElement of rows) {
@@ -533,26 +553,73 @@
     }
   }
 
+  function renderFileSort() {
+    sortRows(fileSortState.kind, fileSortState.direction);
+    for (const sortButtonElement of document.querySelectorAll('[data-sort-files]')) {
+      const selected = sortButtonElement.dataset.sortFiles === fileSortState.kind;
+      sortButtonElement.closest('th').setAttribute('aria-sort', selected ? (fileSortState.direction === 'asc' ? 'ascending' : 'descending') : 'none');
+      if (selected) {
+        sortButtonElement.dataset.sortDirection = fileSortState.direction;
+      } else {
+        delete sortButtonElement.dataset.sortDirection;
+      }
+    }
+  }
+
+  try {
+    const savedFileSort = JSON.parse(localStorage.getItem('sitebrush.files.sort.v1'));
+    if (savedFileSort && ['date', 'size', 'name', 'uri'].includes(savedFileSort.kind) && ['asc', 'desc'].includes(savedFileSort.direction)) {
+      fileSortState = savedFileSort;
+    }
+  } catch (storageError) {
+    console.warn('Cannot restore file sorting', storageError);
+  }
+  renderFileSort();
   for (const sortButtonElement of document.querySelectorAll('[data-sort-files]')) {
     sortButtonElement.addEventListener('click', function onSortClick() {
-      const sortKind = sortButtonElement.dataset.sortFiles || 'date';
-      const wasActive = sortButtonElement.classList.contains('active');
-      const currentDirection = sortButtonElement.dataset.sortDirection || '';
-      const defaultDirection = sortKind === 'name' ? 'asc' : 'desc';
-      const nextDirection = wasActive ? (currentDirection === 'asc' ? 'desc' : 'asc') : defaultDirection;
-      sortRows(sortKind, nextDirection);
-      for (const otherSortButtonElement of document.querySelectorAll('[data-sort-files]')) {
-        const selected = otherSortButtonElement === sortButtonElement;
-        otherSortButtonElement.classList.toggle('active', selected);
-        otherSortButtonElement.setAttribute('aria-pressed', selected ? 'true' : 'false');
-        if (selected) {
-          otherSortButtonElement.dataset.sortDirection = nextDirection;
-        } else {
-          delete otherSortButtonElement.dataset.sortDirection;
-        }
+      const sortKind = sortButtonElement.dataset.sortFiles;
+      fileSortState = {
+        kind: sortKind,
+        direction: fileSortState.kind === sortKind ? (fileSortState.direction === 'asc' ? 'desc' : 'asc') : (['name', 'uri'].includes(sortKind) ? 'asc' : 'desc')
+      };
+      renderFileSort();
+      try {
+        localStorage.setItem('sitebrush.files.sort.v1', JSON.stringify(fileSortState));
+      } catch (storageError) {
+        console.warn('Cannot save file sorting', storageError);
       }
     });
   }
+
+  function renderFileSelection() {
+    const fileCheckboxes = document.querySelectorAll('[data-select-file]');
+    for (const fileCheckboxElement of fileCheckboxes) {
+      fileCheckboxElement.checked = selectedFileNames.has(fileCheckboxElement.value);
+    }
+    deleteSelectedFilesElement.hidden = selectedFileNames.size < 2;
+    selectAllFilesElement.checked = fileCheckboxes.length > 0 && selectedFileNames.size === fileCheckboxes.length;
+    selectAllFilesElement.indeterminate = selectedFileNames.size > 0 && selectedFileNames.size < fileCheckboxes.length;
+  }
+  for (const fileCheckboxElement of document.querySelectorAll('[data-select-file]')) {
+    fileCheckboxElement.addEventListener('change', function onFileSelection() {
+      if (fileCheckboxElement.checked) {
+        selectedFileNames.add(fileCheckboxElement.value);
+      } else {
+        selectedFileNames.delete(fileCheckboxElement.value);
+      }
+      renderFileSelection();
+    });
+  }
+  selectAllFilesElement.addEventListener('change', function onSelectAllFiles() {
+    selectedFileNames.clear();
+    if (selectAllFilesElement.checked) {
+      for (const fileCheckboxElement of document.querySelectorAll('[data-select-file]')) {
+        selectedFileNames.add(fileCheckboxElement.value);
+      }
+    }
+    renderFileSelection();
+  });
+  renderFileSelection();
 
   function setUploadPercent(percentNumber) {
     const boundedPercent = Math.max(0, Math.min(100, Math.round(Number(percentNumber) || 0)));
@@ -746,9 +813,21 @@
     deleteFormElement.addEventListener('submit', function confirmFileDeletion(event) {
       if (deleteFormElement.dataset.deleteConfirmed === 'true') { return; }
       event.preventDefault();
+      if (deleteFormElement === selectedFilesFormElement && selectedFileNames.size < 2) { return; }
       pendingDeleteForm = deleteFormElement;
-      const nameInputElement = deleteFormElement.querySelector('input[name="name"]');
-      deleteConfirmNameElement.textContent = nameInputElement ? nameInputElement.value : '';
+      deleteConfirmationStep = 1;
+      const deleteFields = new FormData(deleteFormElement);
+      const deletionNames = deleteFields.getAll('name');
+      const deletionURI = deleteFields.get('page_uri');
+      if (deletionURI) {
+        const uriFileCount = Array.from(document.querySelectorAll('[data-file-row]')).filter(function matchesDeletionURI(fileRowElement) {
+          return fileRowElement.dataset.uri === deletionURI;
+        }).length;
+        pendingDeleteDescription = deletionURI + ' (' + uriFileCount + ')';
+      } else {
+        pendingDeleteDescription = deletionNames.slice(0, 5).join(', ') + (deletionNames.length > 5 ? '… (' + deletionNames.length + ')' : '');
+      }
+      deleteConfirmNameElement.textContent = pendingDeleteDescription + '\n\n' + {{index .T "files_delete_warning"}};
       if (imagePreviewModalElement.classList.contains('show') && imagePreviewModalController) {
         imagePreviewModalController.hide();
         window.setTimeout(showDeleteConfirmModal, 180);
@@ -759,6 +838,11 @@
   }
   deleteConfirmButtonElement.addEventListener('click', function deleteConfirmedFile() {
     if (!pendingDeleteForm) { return; }
+    if (deleteConfirmationStep === 1) {
+      deleteConfirmationStep = 2;
+      deleteConfirmNameElement.textContent = pendingDeleteDescription + '\n\n' + {{index .T "files_delete_warning_final"}};
+      return;
+    }
     pendingDeleteForm.dataset.deleteConfirmed = 'true';
     pendingDeleteForm.requestSubmit();
   });

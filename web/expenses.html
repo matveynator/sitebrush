@@ -59,13 +59,12 @@
 
   <div class="expense-simple-page">
     <nav class="hosting-installation-tabs" role="tablist" aria-label="{{index .T "billing_installations"}}" data-hosting-installation-tabs>
-      <button type="button" class="hosting-installation-tab active" role="tab" aria-selected="true" data-hosting-installation-tab="servers">{{index .T "billing_servers"}}</button>
-      <button type="button" class="hosting-installation-tab" role="tab" aria-selected="false" data-hosting-installation-tab="temporary-sites">{{index .T "billing_temporary_sites"}}</button>
+      {{if gt (len .Servers) 1}}<button type="button" class="hosting-installation-tab active" role="tab" aria-selected="true" data-hosting-installation-tab="servers">{{index .T "billing_servers"}}</button>{{end}}
+      {{if or .ActivePublicTrialSites .ArchivedPublicTrialSites}}<button type="button" class="hosting-installation-tab" role="tab" aria-selected="false" data-hosting-installation-tab="temporary-sites">{{index .T "billing_temporary_sites"}}</button>{{end}}
       {{if .ShowCentralRegistry}}
       <button type="button" class="hosting-installation-tab" role="tab" aria-selected="false" data-hosting-installation-tab="desktop">{{index .T "billing_desktop_installations"}}</button>
       <button type="button" class="hosting-installation-tab" role="tab" aria-selected="false" data-hosting-installation-tab="archive">{{index .T "billing_archive"}}</button>
       {{end}}
-      <button type="button" class="hosting-installation-tab" role="tab" aria-selected="false" data-hosting-installation-tab="settings">{{index .T "domain_settings_title"}}</button>
     </nav>
 
     <section data-hosting-installation-panel="servers">
@@ -128,6 +127,26 @@
           {{if $server.CapacityExceeded}}<div class="alert alert-danger mb-0">{{index $.T "expenses_capacity_exceeded"}}</div>{{end}}
           {{end}}
         </section>
+
+        {{if $server.Local}}
+        <section class="mt-4">
+          <div>
+            <h2>{{index $.T "billing_registration_title"}}</h2>
+            <p class="text-muted">{{index $.T "billing_registration_hint"}}</p>
+            {{template "registration-settings-form" $}}
+            {{if $.PublicTrialEnabled}}
+            <div class="mt-4">
+              {{template "public-trial-settings" $}}
+            </div>
+            {{end}}
+          </div>
+          <div class="mt-4">
+            <h2>{{index $.T "billing_demo_title"}}</h2>
+            <p class="text-muted">{{index $.T "billing_demo_exclusion_hint"}}</p>
+            {{template "demo-settings-form" $}}
+          </div>
+        </section>
+        {{end}}
 
         <section class="mt-4">
           <div class="billing-section-header">
@@ -231,30 +250,7 @@
       <div class="billing-plan-list">{{range .ArchivedHostings}}<div class="billing-plan-row"><span><strong>{{if .ServerDomain}}{{.ServerDomain}}{{else}}{{.InstallationID}}{{end}}</strong><br><small>{{.LastSeenAt}}</small></span></div>{{else}}<div class="empty">{{index .T "billing_archive_empty"}}</div>{{end}}</div>
     </section>
     {{end}}
-    <section data-hosting-installation-panel="settings" hidden>
-      <nav class="hosting-installation-tabs mb-3" role="tablist" aria-label="{{index .T "domain_settings_title"}}" data-site-settings-tabs>
-        <button type="button" class="hosting-installation-tab active" role="tab" aria-selected="true" data-site-settings-tab="general">{{index .T "billing_registration_title"}}</button>
-        <button type="button" class="hosting-installation-tab" role="tab" aria-selected="false" data-site-settings-tab="demo">{{index .T "billing_demo_title"}}</button>
-      </nav>
 
-      <div data-site-settings-panel="general">
-        <h2>{{index .T "billing_registration_title"}}</h2>
-        <p class="text-muted">{{index .T "billing_registration_hint"}}</p>
-        {{template "registration-settings-form" .}}
-        {{if .PublicTrialEnabled}}
-        <div class="mt-4">
-          {{template "public-trial-settings" .}}
-        </div>
-        {{end}}
-      </div>
-
-      <div data-site-settings-panel="demo" hidden>
-        <h2>{{index .T "billing_demo_title"}}</h2>
-        <p class="text-muted">{{index .T "billing_demo_exclusion_hint"}}</p>
-        {{template "demo-settings-form" .}}
-      </div>
-
-    </section>
 
     {{template "public-trial-preview-modal" .}}
   </div>
@@ -295,8 +291,8 @@
   </section>
 
   <nav class="hosting-installation-tabs" role="tablist" aria-label="{{index .T "billing_installations"}}" data-hosting-installation-tabs>
-    <button type="button" class="hosting-installation-tab active" role="tab" aria-selected="true" data-hosting-installation-tab="servers">{{index .T "billing_servers"}}</button>
-    <button type="button" class="hosting-installation-tab" role="tab" aria-selected="false" data-hosting-installation-tab="temporary-sites">{{index .T "billing_temporary_sites"}}</button>
+    {{if gt (len .Servers) 1}}<button type="button" class="hosting-installation-tab active" role="tab" aria-selected="true" data-hosting-installation-tab="servers">{{index .T "billing_servers"}}</button>{{end}}
+    {{if or .ActivePublicTrialSites .ArchivedPublicTrialSites}}<button type="button" class="hosting-installation-tab" role="tab" aria-selected="false" data-hosting-installation-tab="temporary-sites">{{index .T "billing_temporary_sites"}}</button>{{end}}
     {{if .ShowCentralRegistry}}
     <button type="button" class="hosting-installation-tab" role="tab" aria-selected="false" data-hosting-installation-tab="desktop">{{index .T "billing_desktop_installations"}}</button>
     <button type="button" class="hosting-installation-tab" role="tab" aria-selected="false" data-hosting-installation-tab="archive">{{index .T "billing_archive"}}</button>
@@ -3000,6 +2996,7 @@
   }
   const tabButtonElements = Array.from(tabContainerElement.querySelectorAll('[data-hosting-installation-tab]'));
   const panelElements = Array.from(document.querySelectorAll('[data-hosting-installation-panel]'));
+  tabContainerElement.hidden = tabButtonElements.length === 0;
 
   function selectInstallationTab(tabName) {
     for (const tabButtonElement of tabButtonElements) {
@@ -3008,7 +3005,8 @@
       tabButtonElement.setAttribute('aria-selected', selected ? 'true' : 'false');
     }
     for (const panelElement of panelElements) {
-      panelElement.hidden = panelElement.dataset.hostingInstallationPanel !== tabName;
+      const persistentServerPanel = panelElement.dataset.hostingInstallationPanel === "servers" && !tabButtonElements.some(function isServerTab(tabButtonElement) { return tabButtonElement.dataset.hostingInstallationTab === "servers"; });
+      panelElement.hidden = !persistentServerPanel && panelElement.dataset.hostingInstallationPanel !== tabName;
     }
   }
 

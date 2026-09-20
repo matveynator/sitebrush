@@ -1,5 +1,10 @@
 {
   "en": {
+    "files_select_all": "Select all",
+    "files_delete_selected": "Delete selected",
+    "files_delete_uri": "Delete all for URI",
+    "files_delete_warning": "Delete these files permanently? This cannot be undone. Restoring a page revision will not restore its images or files and the page may stop working correctly.",
+    "files_delete_warning_final": "Confirm permanent deletion again. Images and files will be lost forever, including for previous page revisions. Delete permanently?",
     "setup_no_admin": "no administrator yet",
     "setup_first_visitor": "This site does not have an administrator yet. To manage the site and edit its content, create an administrator account.",
     "setup_create_admin": "Create administrator",
@@ -1693,6 +1698,11 @@
     "profile_email_delivery_generic_fix": "Vérifiez l’adresse du destinataire, le DNS du domaine d’envoi et la réponse SMTP ci-dessous, puis renvoyez le code."
   },
   "ru": {
+    "files_select_all": "Выделить все",
+    "files_delete_selected": "Удалить выбранное",
+    "files_delete_uri": "Удалить все по URI",
+    "files_delete_warning": "Удалить эти файлы навсегда? Удаление необратимо. При восстановлении ревизии страницы её картинки и файлы не восстановятся, и страница может работать неправильно.",
+    "files_delete_warning_final": "Подтвердите удаление ещё раз. Картинки и файлы будут утеряны навсегда, в том числе для прежних ревизий страницы. Удалить безвозвратно?",
     "setup_no_admin": "пока нет администратора",
     "setup_first_visitor": "У этого сайта пока нет администратора. Чтобы управлять сайтом и редактировать его содержимое, создайте учётную запись администратора.",
     "setup_create_admin": "Создать администратора",

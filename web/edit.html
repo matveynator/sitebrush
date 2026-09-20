@@ -50,7 +50,7 @@
     .jodit-container:not(.jodit_inline) { flex: 1 1 auto; width: 100vw !important; height: 100vh !important; min-width: 0 !important; min-height: 0 !important; max-width: none !important; max-height: none !important; display: flex !important; flex-direction: column !important; border: 0 !important; border-radius: 0 !important; overflow: hidden !important; }
     .jodit-container:not(.jodit_inline) .jodit-toolbar__box { flex: 0 0 auto; width: 100% !important; max-width: none !important; }
     .jodit-container:not(.jodit_inline) .jodit-workplace { flex: 1 1 auto !important; width: 100% !important; max-width: none !important; min-width: 0 !important; min-height: 0 !important; max-height: none !important; overflow: hidden !important; }
-    .jodit-container:not(.jodit_inline) .jodit-wysiwyg_iframe { width: 100% !important; height: 100% !important; display: block !important; border: 0 !important; background: var(--page-bg); }
+    .jodit-container:not(.jodit_inline) .jodit-wysiwyg_iframe { width: 100% !important; height: 100% !important; border: 0 !important; background: var(--page-bg); }
     .jodit-status-bar { display: none; }
     .SiteBrushUploadOverlay { position: fixed; inset: 0; z-index: 2147483647; display: none; align-items: center; justify-content: center; padding: 20px; background: rgba(7, 15, 28, .55); }
     .SiteBrushUploadOverlay.is-open { display: flex; }
@@ -396,7 +396,6 @@ function resizeVisualEditorWorkspace(visualHtmlEditor) {
     setVisualEditorStyle(visualHtmlEditor.iframe, 'minHeight', workplaceHeight + 'px');
     setVisualEditorStyle(visualHtmlEditor.iframe, 'maxHeight', workplaceHeight + 'px');
     setVisualEditorStyle(visualHtmlEditor.iframe, 'maxWidth', 'none');
-    setVisualEditorStyle(visualHtmlEditor.iframe, 'display', 'block');
     setVisualEditorStyle(visualHtmlEditor.iframe, 'border', '0px');
   }
   if (visualHtmlEditor.editor) {
@@ -948,6 +947,7 @@ function createVisualHtmlEditor() {
     iframeBaseUrl: visualEditorFrameBaseURL(),
     iframeCSSLinks: visualEditorStylesheetLinks(initialHtmlContent),
     iframeStyle: visualEditorFrameStyle(),
+    sourceEditor: 'area',
     toolbarAdaptive: false,
     showCharsCounter: false,
     showWordsCounter: false,
