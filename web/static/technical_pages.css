@@ -1,4 +1,5 @@
 @import url("/p/static/directory_listing.css");
+@import url("/p/static/admin_controls.css");
 
 .technical-page .container,
 .technical-page .manager-shell,
@@ -21,8 +22,8 @@
     margin-bottom: 28px;
     padding: 14px 18px;
     border: 1px solid var(--border-cyan);
-    border-radius: 18px;
-    background: rgba(0, 0, 0, 0.18);
+    border-radius: var(--theme-radius);
+    background: var(--panel-soft);
     backdrop-filter: blur(8px);
 }
 
@@ -34,8 +35,8 @@
     min-width: 0;
     margin: 0;
     color: var(--text);
-    font-family: Arial, Helvetica, sans-serif;
-    font-size: clamp(28px, 4vw, 46px);
+    font-family: var(--theme-font-sans);
+    font-size: clamp(24px, 3vw, 32px);
     line-height: 1.08;
 }
 
@@ -55,7 +56,7 @@
 .technical-page h1.section-heading .text-muted {
     min-width: 0;
     color: var(--muted) !important;
-    font-family: Arial, Helvetica, sans-serif;
+    font-family: var(--theme-font-sans);
     font-size: 15px;
     font-weight: 400;
     overflow-wrap: anywhere;
@@ -65,9 +66,9 @@
     width: 42px;
     height: 42px;
     padding: 7px;
-    border: 1px solid rgba(149, 229, 239, 0.24);
-    border-radius: 14px;
-    background: rgba(0, 0, 0, 0.24);
+    border: 1px solid var(--border-cyan);
+    border-radius: var(--theme-radius);
+    background: var(--panel-soft);
     object-fit: contain;
 }
 
@@ -84,9 +85,9 @@
 
 .technical-page code,
 .technical-page .copy-field {
-    border: 1px solid rgba(149, 229, 239, 0.18);
+    border: 1px solid var(--border-cyan);
     border-radius: 8px;
-    background: rgba(0, 0, 0, 0.22);
+    background: var(--panel-soft);
     color: var(--green);
 }
 
@@ -101,7 +102,7 @@
     min-height: 38px;
     padding: 8px 12px;
     border: 1px solid transparent;
-    border-radius: 10px;
+    border-radius: var(--theme-radius);
     font: inherit;
     cursor: pointer;
     text-decoration: none;
@@ -110,8 +111,8 @@
 .technical-page .btn-primary,
 .technical-page button.primary,
 .technical-page input[type="submit"].btn-primary {
-    border-color: rgba(149, 229, 239, 0.62);
-    background: rgba(149, 229, 239, 0.18);
+    border-color: var(--border-cyan);
+    background: var(--border-cyan);
     color: var(--text);
 }
 
@@ -119,51 +120,38 @@
 .technical-page button.primary:hover,
 .technical-page input[type="submit"].btn-primary:hover {
     border-color: var(--cyan);
-    background: rgba(149, 229, 239, 0.28);
+    background: var(--border-cyan);
     color: var(--text);
 }
 
 .technical-page .btn-outline-secondary,
 .technical-page button:not(.primary):not(.danger),
 .technical-page .backup-download-link {
-    border-color: rgba(149, 229, 239, 0.28);
-    background: rgba(0, 0, 0, 0.16);
+    border-color: var(--border-cyan);
+    background: var(--panel-soft);
     color: var(--cream);
 }
 
 .technical-page .btn-outline-secondary:hover,
 .technical-page button:not(.primary):not(.danger):hover,
 .technical-page .backup-download-link:hover {
-    border-color: rgba(149, 229, 239, 0.56);
-    background: rgba(0, 0, 0, 0.30);
+    border-color: var(--border-cyan);
+    background: var(--panel-soft);
     color: var(--cyan);
 }
 
 .technical-page .btn-outline-danger,
 .technical-page .btn-danger,
 .technical-page button.danger {
-    border-color: rgba(255, 133, 133, 0.42);
-    background: rgba(117, 27, 27, 0.22);
-    color: #ffb5b5;
+    border-color: color-mix(in srgb, var(--theme-destructive) 12%, var(--panel));
+    background: color-mix(in srgb, var(--theme-destructive) 12%, var(--panel));
+    color: var(--theme-destructive);
 }
 
 .technical-page .btn-success {
-    border-color: rgba(142, 233, 155, 0.42);
-    background: rgba(28, 94, 45, 0.28);
+    border-color: color-mix(in srgb, var(--green) 15%, var(--panel));
+    background: color-mix(in srgb, var(--green) 15%, var(--panel));
     color: var(--green);
-}
-
-.technical-page #grabProgressModal button.sitebrush-import-primary-action {
-    border-color: #2fbf71 !important;
-    background: #198754 !important;
-    color: #ffffff !important;
-    box-shadow: 0 0 0 1px rgba(25, 135, 84, 0.22);
-}
-
-.technical-page #grabProgressModal button.sitebrush-import-primary-action:hover {
-    border-color: #48d589 !important;
-    background: #157347 !important;
-    color: #ffffff !important;
 }
 
 .technical-page .card,
@@ -172,11 +160,8 @@
 .technical-page .alias-row,
 .technical-page .profile-form {
     border: 1px solid var(--border-cyan) !important;
-    border-radius: 24px !important;
-    background:
-        radial-gradient(circle at top right, rgba(149, 229, 239, 0.10), transparent 34%),
-        radial-gradient(circle at bottom left, rgba(255, 165, 0, 0.08), transparent 30%),
-        rgba(0, 0, 0, 0.24) !important;
+    border-radius: var(--theme-radius) !important;
+    background: var(--panel);
     color: var(--text);
     box-shadow: var(--shadow);
 }
@@ -204,8 +189,8 @@
     gap: 12px;
     align-items: start;
     border: 1px solid var(--border-orange);
-    border-radius: 16px;
-    background: rgba(255, 165, 0, 0.12);
+    border-radius: var(--theme-radius);
+    background: color-mix(in srgb, var(--theme-destructive) 12%, var(--panel));
     color: var(--text);
     font-size: 16px;
     line-height: 1.55;
@@ -218,7 +203,7 @@
     place-items: center;
     border-radius: 50%;
     background: var(--orange);
-    color: #12151d;
+    color: var(--text);
     font-size: 20px;
     font-weight: 800;
 }
@@ -237,9 +222,9 @@
     height: 54px;
     margin-bottom: 12px;
     place-items: center;
-    border: 2px solid #1f362d;
-    border-radius: 18px;
-    background: #1f362d;
+    border: 2px solid var(--theme-primary);
+    border-radius: var(--theme-radius);
+    background: var(--theme-primary);
     color: #ffffff;
     font-size: 28px;
     font-weight: 700;
@@ -256,9 +241,9 @@
     grid-template-columns: minmax(110px, .45fr) minmax(0, 1fr);
     gap: 12px;
     padding: 10px 12px;
-    border: 1px solid rgba(149, 229, 239, 0.18);
-    border-radius: 10px;
-    background: rgba(0, 0, 0, 0.16);
+    border: 1px solid var(--border-cyan);
+    border-radius: var(--theme-radius);
+    background: var(--panel-soft);
 }
 
 .technical-page .confirmation-addresses dt {
@@ -293,20 +278,20 @@
 .technical-page .table {
     --bs-table-bg: transparent;
     --bs-table-color: var(--text);
-    --bs-table-hover-bg: rgba(149, 229, 239, 0.07);
+    --bs-table-hover-bg: var(--border-cyan);
     --bs-table-hover-color: var(--text);
     color: var(--text);
 }
 
 .technical-page .table thead th {
-    border-bottom-color: rgba(149, 229, 239, 0.28);
+    border-bottom-color: var(--border-cyan);
     color: var(--cyan);
     font-size: 13px;
     text-transform: uppercase;
 }
 
 .technical-page .table tbody td {
-    border-color: rgba(149, 229, 239, 0.14);
+    border-color: var(--border-cyan);
 }
 
 .technical-page .form-control,
@@ -321,9 +306,9 @@
     box-sizing: border-box;
     min-height: 48px;
     padding: 12px 14px;
-    border: 1px solid rgba(149, 229, 239, 0.28);
-    border-radius: 10px;
-    background: rgba(0, 0, 0, 0.20);
+    border: 1px solid var(--border-cyan);
+    border-radius: var(--theme-radius);
+    background: var(--panel-soft);
     color: var(--text);
 }
 
@@ -331,16 +316,16 @@
 .technical-page .form-select:focus,
 .technical-page input:focus {
     border-color: var(--cyan);
-    box-shadow: 0 0 0 0.2rem rgba(149, 229, 239, 0.16);
+    box-shadow: 0 0 0 0.2rem var(--border-cyan);
 }
 
 .technical-page .form-control::placeholder,
 .technical-page input::placeholder {
-    color: rgba(255, 255, 255, 0.48);
+    color: var(--muted);
 }
 
 .technical-page .form-select option {
-    background: #252525;
+    background: var(--panel);
     color: var(--text);
 }
 
@@ -383,7 +368,7 @@
 .technical-page .profile-form-header h2 {
     margin: 0;
     color: var(--text);
-    font-family: Arial, Helvetica, sans-serif;
+    font-family: var(--theme-font-sans);
     font-size: 24px;
     line-height: 1.18;
 }
@@ -423,15 +408,15 @@
 }
 
 .technical-page .profile-alert.alert-success {
-    border-color: rgba(142, 233, 155, 0.48);
-    background: rgba(28, 94, 45, 0.26);
+    border-color: color-mix(in srgb, var(--green) 15%, var(--panel));
+    background: color-mix(in srgb, var(--green) 15%, var(--panel));
     color: var(--green);
 }
 
 .technical-page .profile-alert.alert-danger {
-    border-color: rgba(255, 133, 133, 0.48);
-    background: rgba(117, 27, 27, 0.26);
-    color: #ffb5b5;
+    border-color: color-mix(in srgb, var(--theme-destructive) 12%, var(--panel));
+    background: color-mix(in srgb, var(--theme-destructive) 12%, var(--panel));
+    color: var(--theme-destructive);
 }
 
 .technical-page .profile-delivery-link {
@@ -439,7 +424,7 @@
     min-height: 32px;
     padding: 6px 10px;
     border-color: currentColor !important;
-    background: rgba(0, 0, 0, 0.20) !important;
+    background: var(--panel-soft) !important;
     color: inherit !important;
     font-size: 13px;
     font-weight: 700;
@@ -467,7 +452,7 @@
 .technical-page .profile-delivery-backdrop {
     position: absolute;
     inset: 0;
-    background: rgba(0, 0, 0, 0.66);
+    background: rgb(15 18 22 / 60%);
     backdrop-filter: blur(8px);
 }
 
@@ -478,14 +463,12 @@
     overflow: auto;
     padding: 22px;
     border: 1px solid var(--border-cyan);
-    border-radius: 18px;
-    background:
-        radial-gradient(circle at top right, rgba(149, 229, 239, 0.12), transparent 34%),
-        rgba(37, 37, 37, 0.98);
+    border-radius: var(--theme-radius);
+    background: var(--panel);
     color: var(--text);
     box-shadow: var(--shadow);
     outline: none;
-    scrollbar-color: rgba(149, 229, 239, 0.58) rgba(0, 0, 0, 0.22);
+    scrollbar-color: var(--border-cyan) var(--panel-soft);
     scrollbar-width: thin;
 }
 
@@ -498,27 +481,27 @@
 .technical-page .profile-delivery-dialog::-webkit-scrollbar-track,
 .technical-page .profile-delivery-log::-webkit-scrollbar-track {
     border-radius: 999px;
-    background: rgba(0, 0, 0, 0.22);
+    background: var(--panel-soft);
 }
 
 .technical-page .profile-delivery-dialog::-webkit-scrollbar-thumb,
 .technical-page .profile-delivery-log::-webkit-scrollbar-thumb {
-    border: 2px solid rgba(0, 0, 0, 0.22);
+    border: 2px solid var(--panel-soft);
     border-radius: 999px;
-    background: rgba(149, 229, 239, 0.58);
+    background: var(--border-cyan);
 }
 
 .technical-page .profile-delivery-dialog::-webkit-scrollbar-thumb:hover,
 .technical-page .profile-delivery-log::-webkit-scrollbar-thumb:hover {
-    background: rgba(142, 233, 155, 0.72);
+    background: color-mix(in srgb, var(--green) 15%, var(--panel));
 }
 
 .technical-page .profile-delivery-dialog-success {
-    border-color: rgba(142, 233, 155, 0.46);
+    border-color: color-mix(in srgb, var(--green) 15%, var(--panel));
 }
 
 .technical-page .profile-delivery-dialog-danger {
-    border-color: rgba(255, 133, 133, 0.46);
+    border-color: color-mix(in srgb, var(--theme-destructive) 12%, var(--panel));
 }
 
 .technical-page .profile-delivery-header {
@@ -539,7 +522,7 @@
 .technical-page .profile-delivery-header h2 {
     margin: 0;
     color: var(--text);
-    font-family: Arial, Helvetica, sans-serif;
+    font-family: var(--theme-font-sans);
     font-size: 26px;
     line-height: 1.15;
 }
@@ -550,7 +533,7 @@
     height: 36px;
     min-height: 36px;
     padding: 0;
-    border-radius: 10px;
+    border-radius: var(--theme-radius);
     font-size: 24px;
     line-height: 1;
 }
@@ -570,15 +553,15 @@
 
 .technical-page .profile-delivery-panel {
     padding: 14px;
-    border: 1px solid rgba(149, 229, 239, 0.16);
-    border-radius: 10px;
-    background: rgba(0, 0, 0, 0.18);
+    border: 1px solid var(--border-cyan);
+    border-radius: var(--theme-radius);
+    background: var(--panel-soft);
 }
 
 .technical-page .profile-delivery-panel h3 {
     margin: 0 0 8px;
     color: var(--cyan);
-    font-family: Arial, Helvetica, sans-serif;
+    font-family: var(--theme-font-sans);
     font-size: 15px;
 }
 
@@ -593,13 +576,13 @@
     margin: 0;
     padding: 14px;
     overflow: auto;
-    border: 1px solid rgba(149, 229, 239, 0.18);
-    border-radius: 10px;
-    background: rgba(0, 0, 0, 0.28);
+    border: 1px solid var(--border-cyan);
+    border-radius: var(--theme-radius);
+    background: var(--panel-soft);
     color: var(--cream);
     white-space: pre-wrap;
     overflow-wrap: anywhere;
-    scrollbar-color: rgba(149, 229, 239, 0.58) rgba(0, 0, 0, 0.22);
+    scrollbar-color: var(--border-cyan) var(--panel-soft);
     scrollbar-width: thin;
 }
 
@@ -608,15 +591,15 @@
     gap: 10px;
     margin-bottom: 14px;
     padding: 14px;
-    border: 1px solid rgba(149, 229, 239, 0.18);
-    border-radius: 10px;
-    background: rgba(0, 0, 0, 0.18);
+    border: 1px solid var(--border-cyan);
+    border-radius: var(--theme-radius);
+    background: var(--panel-soft);
 }
 
 .technical-page .profile-delivery-dns h3 {
     margin: 0;
     color: var(--cyan);
-    font-family: Arial, Helvetica, sans-serif;
+    font-family: var(--theme-font-sans);
     font-size: 15px;
 }
 
@@ -640,9 +623,9 @@
     gap: 4px;
     min-width: 0;
     padding: 9px 10px;
-    border: 1px solid rgba(149, 229, 239, 0.16);
+    border: 1px solid var(--border-cyan);
     border-radius: 8px;
-    background: rgba(0, 0, 0, 0.18);
+    background: var(--panel-soft);
 }
 
 .technical-page .profile-delivery-dns-type {
@@ -670,8 +653,8 @@
 }
 
 .technical-page .profile-send-progress {
-    border-color: rgba(149, 229, 239, 0.42);
-    background: rgba(149, 229, 239, 0.12);
+    border-color: var(--border-cyan);
+    background: var(--border-cyan);
 }
 
 .technical-page .profile-send-progress-copy {
@@ -693,9 +676,9 @@
 .technical-page .profile-send-countdown {
     flex: 0 0 auto;
     padding: 7px 10px;
-    border: 1px solid rgba(149, 229, 239, 0.28);
-    border-radius: 10px;
-    background: rgba(0, 0, 0, 0.20);
+    border: 1px solid var(--border-cyan);
+    border-radius: var(--theme-radius);
+    background: var(--panel-soft);
     color: var(--cyan);
     font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
     font-size: 13px;
@@ -739,15 +722,15 @@
 }
 
 .technical-page .profile-form button[type="submit"] {
-    border-color: rgba(149, 229, 239, 0.62);
-    background: rgba(149, 229, 239, 0.18);
+    border-color: var(--border-cyan);
+    background: var(--border-cyan);
     color: var(--text);
 }
 
 .technical-page .profile-code-submit:disabled {
-    border-color: rgba(149, 229, 239, 0.14);
-    background: rgba(0, 0, 0, 0.18);
-    color: rgba(255, 255, 255, 0.42);
+    border-color: var(--border-cyan);
+    background: var(--panel-soft);
+    color: var(--muted);
     cursor: not-allowed;
 }
 
@@ -796,6 +779,74 @@
     max-width: 760px;
 }
 
+.technical-page .missing-page-primary-card {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 24px;
+    align-items: center;
+    max-width: 760px;
+    margin-bottom: 32px;
+    padding: 28px;
+    border: 2px solid var(--theme-primary);
+    border-radius: var(--theme-radius);
+    background: var(--theme-card);
+    box-shadow: 0 12px 30px color-mix(in srgb, var(--theme-primary) 16%, transparent);
+}
+
+.technical-page .missing-page-primary-copy {
+    display: grid;
+    gap: 8px;
+    min-width: 0;
+}
+
+.technical-page .missing-page-error-code {
+    width: fit-content;
+    padding: 3px 8px;
+    border-radius: 999px;
+    background: var(--theme-accent);
+    color: var(--theme-accent-foreground);
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: .08em;
+}
+
+.technical-page .missing-page-primary-card h2 {
+    margin: 0;
+    color: var(--theme-foreground);
+    font-size: clamp(22px, 3vw, 30px);
+    font-weight: 650;
+    letter-spacing: -.025em;
+    line-height: 1.15;
+}
+
+.technical-page .missing-page-primary-card p {
+    margin: 0;
+    color: var(--theme-muted-foreground);
+    line-height: 1.5;
+}
+
+.technical-page .missing-page-primary-card p strong {
+    color: var(--theme-foreground);
+    overflow-wrap: anywhere;
+}
+
+.technical-page .missing-page-create-button {
+    min-height: 44px !important;
+    white-space: nowrap;
+    box-shadow: 0 4px 12px color-mix(in srgb, var(--theme-primary) 22%, transparent) !important;
+}
+
+.technical-page .missing-page-create-button span {
+    font-size: 20px;
+    line-height: 1;
+}
+
+.technical-page .missing-page-secondary-actions {
+    max-width: 760px;
+    padding-top: 24px;
+    border-top: 1px solid var(--theme-border);
+}
+
 .technical-page .missing-page-actions {
     display: grid;
     gap: 16px;
@@ -805,6 +856,12 @@
 .technical-page .missing-page-form {
     display: grid;
     gap: 16px;
+    background: color-mix(in srgb, var(--theme-card) 82%, var(--theme-muted)) !important;
+    box-shadow: none;
+}
+
+.technical-page .missing-page-secondary-actions .missing-page-form-title {
+    color: var(--theme-muted-foreground);
 }
 
 .technical-page .missing-page-form-title {
@@ -816,7 +873,7 @@
 .technical-page .missing-page-form-title .section-icon {
     width: 34px;
     height: 34px;
-    border-radius: 12px;
+    border-radius: var(--theme-radius);
 }
 
 .technical-page .missing-page-form-title .form-label {
@@ -921,15 +978,100 @@
     justify-self: start;
 }
 
+.technical-page #grabProgressModal .modal-dialog {
+    width: min(720px, calc(100% - 32px));
+    margin: 16px auto;
+}
+
+.technical-page #grabProgressModal .modal-content {
+    max-height: calc(100dvh - 32px);
+    overflow: hidden;
+    border: 1px solid var(--theme-border);
+    border-radius: var(--theme-radius);
+    background: var(--theme-card) !important;
+    box-shadow: 0 20px 50px rgb(15 18 22 / 24%);
+}
+
+.technical-page #grabProgressModal .modal-header,
+.technical-page #grabProgressModal .modal-footer {
+    gap: 12px;
+    padding: 16px 20px;
+    background: var(--theme-card);
+    border-color: var(--theme-border);
+}
+
+.technical-page #grabProgressModal .modal-body {
+    min-height: 0;
+    padding: 20px;
+    overflow: auto;
+    background: var(--theme-card);
+}
+
+.technical-page #grabProgressModal .btn-close {
+    display: grid;
+    width: 32px;
+    height: 32px;
+    min-height: 32px;
+    padding: 0 !important;
+    place-items: center;
+    border: 0 !important;
+    background: transparent !important;
+    color: var(--theme-foreground) !important;
+    font-size: 24px !important;
+    font-weight: 400 !important;
+    line-height: 1 !important;
+    opacity: 1;
+    box-shadow: none !important;
+}
+
+.technical-page #grabProgressModal .progress {
+    height: 10px;
+    border-radius: 999px;
+    background: var(--theme-muted);
+}
+
+.technical-page #grabProgressModal .progress-bar {
+    background: var(--theme-primary);
+    color: transparent;
+}
+
+.technical-page #grabProgressModal .list-group {
+    border: 1px solid var(--theme-border);
+    border-radius: var(--theme-radius);
+    overflow: auto;
+}
+
+@media (max-width: 760px), (hover: none) and (pointer: coarse) {
+    .technical-page .missing-page-primary-card {
+        grid-template-columns: minmax(0, 1fr);
+        gap: 20px;
+        padding: 20px;
+    }
+
+    .technical-page .missing-page-create-button {
+        width: 100%;
+        white-space: normal;
+    }
+
+    .technical-page #grabProgressModal .modal-dialog {
+        width: calc(100% - 24px);
+        margin: 12px auto;
+    }
+
+    .technical-page #grabProgressModal .modal-content {
+        max-height: calc(100dvh - 24px);
+    }
+}
+
 .technical-page .static-folder-form {
     grid-template-columns: minmax(0, 1fr) auto;
     align-items: center;
     margin-top: 14px;
     margin-bottom: 20px;
     padding: 16px;
-    border: 1px solid rgba(149, 229, 239, 0.18);
-    border-radius: 18px;
-    background: rgba(0, 0, 0, 0.16);
+    border: 1px solid var(--border-cyan);
+    border-radius: var(--theme-radius);
+    background: var(--panel-soft);
 }
 
 .technical-page .static-folder-field {
@@ -955,9 +1097,9 @@
     gap: 8px;
     margin: 0 0 12px;
     padding: 6px;
-    border: 1px solid rgba(149, 229, 239, 0.14);
-    border-radius: 10px;
-    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid var(--border-cyan);
+    border-radius: var(--theme-radius);
+    background: var(--panel-soft);
 }
 
 .technical-page .hosting-tab-button {
@@ -973,12 +1115,12 @@
 
 .technical-page .hosting-tab-button:hover,
 .technical-page .hosting-tab-button:focus {
-    background: rgba(149, 229, 239, 0.10);
+    background: var(--border-cyan);
     color: var(--text);
 }
 
 .technical-page .hosting-tab-button.active {
-    background: rgba(149, 229, 239, 0.18);
+    background: var(--border-cyan);
     color: var(--text);
 }
 
@@ -993,9 +1135,9 @@
     width: min(100%, 680px);
     margin: 0 0 12px;
     padding: 4px;
-    border: 1px solid rgba(149, 229, 239, 0.18);
+    border: 1px solid var(--border-cyan);
     border-radius: 8px;
-    background: rgba(0, 0, 0, 0.20);
+    background: var(--panel-soft);
 }
 
 .technical-page .hosting-installation-tabs button.hosting-installation-tab {
@@ -1013,16 +1155,16 @@
 
 .technical-page .hosting-installation-tabs button.hosting-installation-tab:hover,
 .technical-page .hosting-installation-tabs button.hosting-installation-tab:focus-visible {
-    border-color: rgba(149, 229, 239, 0.26);
-    background: rgba(149, 229, 239, 0.08);
+    border-color: var(--border-cyan);
+    background: var(--border-cyan);
     color: var(--text);
 }
 
 .technical-page .hosting-installation-tabs button.hosting-installation-tab.active {
-    border-color: rgba(149, 229, 239, 0.44);
-    background: rgba(149, 229, 239, 0.17);
+    border-color: var(--border-cyan);
+    background: var(--border-cyan);
     color: var(--text);
-    box-shadow: 0 1px 8px rgba(0, 0, 0, 0.18);
+    box-shadow: 0 1px 8px var(--panel-soft);
 }
 
 .technical-page .billing-demo-exclusion {
@@ -1030,7 +1172,7 @@
     gap: 3px;
     padding: 10px 12px;
     border-left: 3px solid var(--green);
-    background: rgba(142, 233, 155, 0.08);
+    background: color-mix(in srgb, var(--green) 15%, var(--panel));
     color: var(--text);
     font-size: 14px;
 }
@@ -1073,7 +1215,7 @@
     padding: 10px 12px;
     border: 1px solid var(--border);
     border-radius: 8px;
-    background: rgba(255, 255, 255, 0.03);
+    background: var(--panel-soft);
 }
 
 .technical-page .billing-demo-copy-status > div {
@@ -1104,17 +1246,17 @@
     gap: 14px;
     align-items: center;
     padding: 18px;
-    border-radius: 10px;
+    border-radius: var(--theme-radius);
 }
 
 .technical-page .hosting-overview-ok {
-    border: 1px solid rgba(77, 208, 162, 0.28);
-    background: rgba(77, 208, 162, 0.10);
+    border: 1px solid color-mix(in srgb, var(--green) 15%, var(--panel));
+    background: color-mix(in srgb, var(--green) 15%, var(--panel));
 }
 
 .technical-page .hosting-overview-warning {
-    border: 1px solid rgba(255, 193, 7, 0.32);
-    background: rgba(255, 193, 7, 0.10);
+    border: 1px solid color-mix(in srgb, var(--theme-destructive) 12%, var(--panel));
+    background: color-mix(in srgb, var(--theme-destructive) 12%, var(--panel));
 }
 
 .technical-page .hosting-overview-kicker {
@@ -1150,9 +1292,9 @@
     gap: 2px;
     min-height: 70px;
     padding: 12px;
-    border: 1px solid rgba(149, 229, 239, 0.16);
+    border: 1px solid var(--border-cyan);
     border-radius: 9px;
-    background: rgba(0, 0, 0, 0.12);
+    background: var(--panel-soft);
     color: var(--muted);
     text-align: left;
     text-decoration: none;
@@ -1176,17 +1318,17 @@
     gap: 10px;
     align-items: center;
     padding: 12px;
-    border: 1px solid rgba(149, 229, 239, 0.16);
+    border: 1px solid var(--border-cyan);
     border-radius: 9px;
-    background: rgba(0, 0, 0, 0.14);
+    background: var(--panel-soft);
 }
 
 .technical-page .hosting-overview-action-warning {
-    border-color: rgba(255, 193, 7, 0.30);
+    border-color: color-mix(in srgb, var(--theme-destructive) 12%, var(--panel));
 }
 
 .technical-page .hosting-overview-action-danger {
-    border-color: rgba(220, 53, 69, 0.34);
+    border-color: color-mix(in srgb, var(--theme-destructive) 12%, var(--panel));
 }
 
 .technical-page .hosting-overview-action h3 {
@@ -1205,9 +1347,9 @@
 
 .technical-page .billing-technical-details {
     padding: 10px;
-    border: 1px solid rgba(149, 229, 239, 0.14);
+    border: 1px solid var(--border-cyan);
     border-radius: 8px;
-    background: rgba(255, 255, 255, 0.035);
+    background: var(--panel-soft);
 }
 
 .technical-page .billing-technical-details > summary {
@@ -1223,7 +1365,7 @@
 .technical-page .billing-card h2 {
     margin: 0 0 4px;
     color: var(--text);
-    font-family: Arial, Helvetica, sans-serif;
+    font-family: var(--theme-font-sans);
     font-size: 20px;
 }
 
@@ -1323,9 +1465,9 @@
     gap: 12px;
     align-items: start;
     padding: 12px;
-    border: 1px solid rgba(149, 229, 239, 0.16);
+    border: 1px solid var(--border-cyan);
     border-radius: 8px;
-    background: rgba(0, 0, 0, 0.16);
+    background: var(--panel-soft);
 }
 
 .technical-page .billing-user-main,
@@ -1342,7 +1484,7 @@
     grid-template-columns: minmax(280px, 0.9fr) minmax(0, 1.1fr);
     gap: 12px;
     padding-top: 12px;
-    border-top: 1px dotted rgba(149, 229, 239, 0.22);
+    border-top: 1px dotted var(--border-cyan);
 }
 
 .technical-page .billing-user-activity {
@@ -1413,17 +1555,17 @@
 .technical-page .billing-sync-ok,
 .technical-page .billing-sync-stale {
     padding: 4px 7px;
-    border: 1px solid rgba(149, 229, 239, 0.18);
+    border: 1px solid var(--border-cyan);
     border-radius: 6px;
-    background: rgba(255, 255, 255, 0.04);
+    background: var(--panel-soft);
     color: var(--muted);
     font-size: 12px;
     overflow-wrap: anywhere;
 }
 
 .technical-page .billing-sync-stale {
-    border-color: rgba(255, 193, 7, 0.55);
-    color: #ffc107;
+    border-color: color-mix(in srgb, var(--theme-destructive) 12%, var(--panel));
+    color: var(--theme-warning);
 }
 
 .technical-page .billing-client-hosting-meta {
@@ -1437,9 +1579,9 @@
     gap: 3px;
     min-width: 0;
     padding: 8px;
-    border: 1px solid rgba(149, 229, 239, 0.12);
+    border: 1px solid var(--border-cyan);
     border-radius: 7px;
-    background: rgba(255, 255, 255, 0.03);
+    background: var(--panel-soft);
 }
 
 .technical-page .billing-client-hosting-meta strong,
@@ -1473,7 +1615,7 @@
     align-items: center;
     min-width: 0;
     padding: 8px 10px;
-    border: 1px solid rgba(149, 229, 239, 0.12);
+    border: 1px solid var(--border-cyan);
     border-radius: 7px;
     background: var(--bs-body-bg);
     font-size: 0.88rem;
@@ -1495,8 +1637,8 @@
 }
 
 .technical-page .billing-client-site-over-limit {
-    border-color: rgba(220, 53, 69, 0.55);
-    background: rgba(220, 53, 69, 0.08);
+    border-color: color-mix(in srgb, var(--theme-destructive) 12%, var(--panel));
+    background: color-mix(in srgb, var(--theme-destructive) 12%, var(--panel));
 }
 
 .technical-page .hosting-server-details {
@@ -1505,17 +1647,17 @@
     margin-top: -8px;
     margin-bottom: 8px;
     padding: 12px;
-    border: 1px solid rgba(149, 229, 239, 0.16);
+    border: 1px solid var(--border-cyan);
     border-top: 0;
     border-radius: 0 0 8px 8px;
-    background: rgba(0, 0, 0, 0.10);
+    background: var(--panel-soft);
 }
 
 .technical-page .hosting-server-details details {
     padding: 9px;
-    border: 1px solid rgba(149, 229, 239, 0.12);
+    border: 1px solid var(--border-cyan);
     border-radius: 7px;
-    background: rgba(255, 255, 255, 0.025);
+    background: var(--panel-soft);
 }
 
 .technical-page .hosting-server-details summary {
@@ -1572,9 +1714,9 @@
     display: grid;
     gap: 10px;
     padding: 14px;
-    border: 1px solid rgba(149, 229, 239, 0.18);
+    border: 1px solid var(--border-cyan);
     border-radius: 8px;
-    background: linear-gradient(180deg, rgba(255, 255, 255, 0.055), rgba(255, 255, 255, 0.025));
+    background: var(--panel);
 }
 
 .technical-page .billing-invoice-page-head {
@@ -1649,9 +1791,9 @@
     gap: 10px;
     align-items: start;
     padding: 12px;
-    border: 1px solid rgba(149, 229, 239, 0.16);
+    border: 1px solid var(--border-cyan);
     border-radius: 8px;
-    background: rgba(0, 0, 0, 0.16);
+    background: var(--panel-soft);
 }
 
 .technical-page .billing-sync-main {
@@ -1681,9 +1823,9 @@
 
 .technical-page .billing-sync-counts span {
     padding: 5px 7px;
-    border: 1px solid rgba(149, 229, 239, 0.14);
+    border: 1px solid var(--border-cyan);
     border-radius: 7px;
-    background: rgba(255, 255, 255, 0.04);
+    background: var(--panel-soft);
     color: var(--muted);
     font-size: 12px;
 }
@@ -1693,7 +1835,7 @@
     display: grid;
     gap: 10px;
     padding-top: 10px;
-    border-top: 1px solid rgba(149, 229, 239, 0.12);
+    border-top: 1px solid var(--border-cyan);
 }
 
 .technical-page .billing-client-pagination {
@@ -1723,9 +1865,9 @@
 .technical-page .billing-user-stats button,
 .technical-page .billing-user-tags span {
     padding: 4px 7px;
-    border: 1px solid rgba(149, 229, 239, 0.18);
+    border: 1px solid var(--border-cyan);
     border-radius: 6px;
-    background: rgba(255, 255, 255, 0.04);
+    background: var(--panel-soft);
     color: var(--muted);
     font-size: 12px;
 }
@@ -1737,7 +1879,7 @@
 
 .technical-page .billing-user-stats button:hover,
 .technical-page .billing-user-stats button:focus {
-    border-color: rgba(149, 229, 239, 0.44);
+    border-color: var(--border-cyan);
     color: var(--text);
 }
 
@@ -1751,9 +1893,9 @@
 .technical-page .billing-user-map {
     width: 100%;
     min-height: 170px;
-    border: 1px solid rgba(149, 229, 239, 0.18);
+    border: 1px solid var(--border-cyan);
     border-radius: 8px;
-    background: rgba(255, 255, 255, 0.05);
+    background: var(--panel-soft);
     color: var(--muted);
     overflow: hidden;
 }
@@ -1767,7 +1909,7 @@
 .technical-page .billing-user-activity-row {
     padding: 7px 8px;
     border-radius: 7px;
-    background: rgba(255, 255, 255, 0.04);
+    background: var(--panel-soft);
     color: var(--muted);
     font-size: 12px;
     line-height: 1.35;
@@ -1784,14 +1926,14 @@
     gap: 10px 14px;
     align-items: start;
     padding: 12px;
-    border: 1px solid rgba(149, 229, 239, 0.16);
+    border: 1px solid var(--border-cyan);
     border-radius: 8px;
-    background: rgba(0, 0, 0, 0.16);
+    background: var(--panel-soft);
 }
 
 .technical-page .billing-domain {
     color: var(--text);
-    font-family: Arial, Helvetica, sans-serif;
+    font-family: var(--theme-font-sans);
     font-size: 18px;
     font-weight: 700;
     overflow-wrap: anywhere;
@@ -1803,9 +1945,9 @@
     gap: 5px;
     margin-left: 6px;
     padding: 5px 8px;
-    border: 1px solid rgba(77, 208, 162, 0.45);
+    border: 1px solid color-mix(in srgb, var(--green) 15%, var(--panel));
     border-radius: 999px;
-    background: rgba(77, 208, 162, 0.16);
+    background: color-mix(in srgb, var(--green) 15%, var(--panel));
     color: var(--green);
     font-size: 12px;
     font-weight: 700;
@@ -1828,9 +1970,9 @@
     min-height: 26px;
     margin-left: 6px;
     padding: 4px 8px;
-    border: 1px solid rgba(149, 229, 239, 0.34);
+    border: 1px solid var(--border-cyan);
     border-radius: 999px;
-    background: rgba(149, 229, 239, 0.12);
+    background: var(--border-cyan);
     color: var(--cyan);
     font-size: 12px;
     font-weight: 700;
@@ -1859,24 +2001,24 @@
 .technical-page .billing-quota-bar {
     height: 9px;
     margin: 8px 0 5px;
-    border: 1px solid rgba(149, 229, 239, 0.20);
+    border: 1px solid var(--border-cyan);
     border-radius: 999px;
-    background: rgba(255, 255, 255, 0.05);
+    background: var(--panel-soft);
     overflow: hidden;
 }
 
 .technical-page .billing-quota-bar > div {
     height: 100%;
     max-width: 100%;
-    background: linear-gradient(90deg, var(--green), var(--cyan));
+    background: var(--panel);
 }
 
 .technical-page .billing-quota-bar.hosting-metric-warning > div {
-    background: #ffc107;
+    background: var(--theme-warning);
 }
 
 .technical-page .billing-quota-bar.hosting-metric-danger > div {
-    background: #dc3545;
+    background: var(--theme-destructive);
 }
 
 .technical-page .hosting-metric-ok {
@@ -1885,12 +2027,12 @@
 }
 
 .technical-page .hosting-metric-warning {
-    color: #ffc107;
+    color: var(--theme-warning);
     font-weight: 700;
 }
 
 .technical-page .hosting-metric-danger {
-    color: #ff6b6b;
+    color: var(--theme-destructive);
     font-weight: 700;
 }
 
@@ -1930,7 +2072,7 @@
 }
 
 .technical-page .billing-save-status-error {
-    color: #ff8f8f;
+    color: var(--theme-destructive);
 }
 
 .technical-page .billing-delete-form {
@@ -1948,9 +2090,9 @@
     gap: 8px;
     align-items: center;
     padding: 10px;
-    border: 1px solid rgba(149, 229, 239, 0.16);
+    border: 1px solid var(--border-cyan);
     border-radius: 8px;
-    background: rgba(0, 0, 0, 0.14);
+    background: var(--panel-soft);
 }
 
 .technical-page .billing-backup-row {
@@ -1959,9 +2101,9 @@
     gap: 10px;
     align-items: center;
     padding: 10px;
-    border: 1px solid rgba(149, 229, 239, 0.16);
+    border: 1px solid var(--border-cyan);
     border-radius: 8px;
-    background: rgba(0, 0, 0, 0.14);
+    background: var(--panel-soft);
 }
 
 .technical-page .billing-backup-meta {
@@ -2016,15 +2158,15 @@
     gap: 10px;
     align-items: center;
     padding: 8px 10px;
-    border: 1px solid rgba(149, 229, 239, 0.14);
+    border: 1px solid var(--border-cyan);
     border-radius: 8px;
-    background: rgba(0, 0, 0, 0.14);
+    background: var(--panel-soft);
 }
 
 .technical-page .billing-service-mail-log-row:has(input:checked),
 .technical-page .billing-service-mail-log-row.selected {
-    border-color: rgba(142, 233, 155, 0.48);
-    background: rgba(38, 96, 55, 0.16);
+    border-color: color-mix(in srgb, var(--green) 15%, var(--panel));
+    background: color-mix(in srgb, var(--green) 15%, var(--panel));
 }
 
 .technical-page .billing-service-mail-log-check {
@@ -2052,7 +2194,7 @@
 
 .technical-page .billing-service-mail-log-error {
     margin-top: 3px;
-    color: #ffb5b5;
+    color: var(--theme-destructive);
     font-size: 12px;
     overflow-wrap: anywhere;
 }
@@ -2077,32 +2219,32 @@
 
 .technical-page .revision-enable-button,
 .technical-page .btn-success.revision-enable-button {
-    border-color: rgba(78, 255, 125, 0.72);
-    background: rgba(34, 177, 76, 0.28);
-    color: #8eff9f;
-    box-shadow: inset 0 0 0 1px rgba(142, 233, 155, 0.18);
+    border-color: color-mix(in srgb, var(--green) 15%, var(--panel));
+    background: color-mix(in srgb, var(--green) 15%, var(--panel));
+    color: var(--green);
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--green) 15%, var(--panel));
 }
 
 .technical-page .revision-enable-button:hover,
 .technical-page .btn-success.revision-enable-button:hover {
-    border-color: #8eff9f;
-    background: rgba(34, 177, 76, 0.42);
-    color: #eaffee;
+    border-color: var(--green);
+    background: color-mix(in srgb, var(--green) 15%, var(--panel));
+    color: var(--green);
 }
 
 .technical-page .revision-disable-button,
 .technical-page .btn-danger.revision-disable-button {
-    border-color: rgba(255, 92, 92, 0.72);
-    background: rgba(181, 42, 42, 0.30);
-    color: #ffb5b5;
-    box-shadow: inset 0 0 0 1px rgba(255, 133, 133, 0.16);
+    border-color: color-mix(in srgb, var(--theme-destructive) 12%, var(--panel));
+    background: color-mix(in srgb, var(--theme-destructive) 12%, var(--panel));
+    color: var(--theme-destructive);
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--theme-destructive) 12%, var(--panel));
 }
 
 .technical-page .revision-disable-button:hover,
 .technical-page .btn-danger.revision-disable-button:hover {
-    border-color: #ff8f8f;
-    background: rgba(181, 42, 42, 0.46);
-    color: #fff1f1;
+    border-color: var(--theme-destructive);
+    background: color-mix(in srgb, var(--theme-destructive) 12%, var(--panel));
+    color: var(--theme-destructive);
 }
 
 .technical-page .access-grid,
@@ -2140,7 +2282,7 @@
 .technical-page .custom-domain-head h2 {
     margin: 0 0 8px;
     color: var(--text);
-    font-family: Arial, Helvetica, sans-serif;
+    font-family: var(--theme-font-sans);
     font-size: 28px;
     line-height: 1.12;
 }
@@ -2156,9 +2298,9 @@
 
 .technical-page .selected-domain-card,
 .technical-page .domain-setup-card {
-    border: 1px solid rgba(149, 229, 239, 0.18);
-    border-radius: 12px;
-    background: rgba(0, 0, 0, 0.18);
+    border: 1px solid var(--border-cyan);
+    border-radius: var(--theme-radius);
+    background: var(--panel-soft);
 }
 
 .technical-page .selected-domain-card {
@@ -2240,9 +2382,9 @@
     gap: 10px;
     align-items: center;
     padding: 12px;
-    border: 1px solid rgba(149, 229, 239, 0.16);
-    border-radius: 10px;
-    background: rgba(0, 0, 0, 0.16);
+    border: 1px solid var(--border-cyan);
+    border-radius: var(--theme-radius);
+    background: var(--panel-soft);
 }
 
 .technical-page .dns-record-type {
@@ -2250,7 +2392,7 @@
     align-items: center;
     justify-content: center;
     min-height: 34px;
-    border: 1px solid rgba(149, 229, 239, 0.26);
+    border: 1px solid var(--border-cyan);
     border-radius: 8px;
     color: var(--cyan);
     font-weight: 700;
@@ -2298,7 +2440,7 @@
 
 .technical-page .alias-domain {
     color: var(--text);
-    font-family: Arial, Helvetica, sans-serif;
+    font-family: var(--theme-font-sans);
     font-weight: 700;
     word-break: break-all;
 }
@@ -2343,7 +2485,7 @@
 }
 
 .technical-page .selected {
-    border-color: rgba(142, 233, 155, 0.56) !important;
+    border-color: color-mix(in srgb, var(--green) 15%, var(--panel)) !important;
 }
 
 .technical-page .status-ok {
@@ -2355,7 +2497,7 @@
 }
 
 .technical-page .status-bad {
-    color: #ffb5b5;
+    color: var(--theme-destructive);
 }
 
 .technical-page .empty {
@@ -2368,36 +2510,36 @@
 .technical-page .file-preview-trigger {
     width: 64px;
     height: 64px;
-    border: 1px solid rgba(149, 229, 239, 0.24);
-    border-radius: 16px;
-    background: rgba(0, 0, 0, 0.24);
+    border: 1px solid var(--border-cyan);
+    border-radius: var(--theme-radius);
+    background: var(--panel-soft);
     color: var(--orange);
 }
 
 .technical-page .modal-content {
     border: 1px solid var(--border-cyan);
-    border-radius: 22px;
-    background: #252525;
+    border-radius: var(--theme-radius);
+    background: var(--panel);
     color: var(--text);
 }
 
 .technical-page .modal-header,
 .technical-page .modal-footer {
-    border-color: rgba(149, 229, 239, 0.18);
+    border-color: var(--border-cyan);
 }
 
 .technical-page .progress {
-    background: rgba(0, 0, 0, 0.28);
+    background: var(--panel-soft);
 }
 
 .technical-page .progress-bar {
     background: var(--cyan);
-    color: #1e2729;
+    color: var(--theme-primary-foreground);
 }
 
 .technical-page .list-group-item {
-    border-color: rgba(149, 229, 239, 0.18);
-    background: rgba(0, 0, 0, 0.18);
+    border-color: var(--border-cyan);
+    background: var(--panel-soft);
     color: var(--text);
 }
 
@@ -2406,31 +2548,28 @@
 .technical-page .alert-info,
 .technical-page .alert-warning,
 .technical-page .alert-danger {
-    border: 1px solid rgba(149, 229, 239, 0.24);
-    border-radius: 16px;
-    background: rgba(0, 0, 0, 0.22);
+    border: 1px solid var(--border-cyan);
+    border-radius: var(--theme-radius);
+    background: var(--panel-soft);
     color: var(--text);
     padding: 14px 16px;
     line-height: 1.45;
 }
 
 .technical-page .alert-danger {
-    border-color: rgba(255, 133, 133, 0.42);
-    color: #ffb5b5;
+    border-color: color-mix(in srgb, var(--theme-destructive) 12%, var(--panel));
+    color: var(--theme-destructive);
 }
 
 .technical-page.analytics-page {
-    background:
-        radial-gradient(circle at top right, rgba(149, 229, 239, 0.10), transparent 32%),
-        radial-gradient(circle at bottom left, rgba(255, 165, 0, 0.10), transparent 30%),
-        #333;
+    background: var(--bg);
 }
 
 .technical-page.analytics-page .metric-card,
 .technical-page.analytics-page .world-map-card,
 .technical-page.analytics-page .report-grid > section.card {
     border-color: var(--border-cyan);
-    background: rgba(0, 0, 0, 0.24);
+    background: var(--panel-soft);
 }
 
 .technical-page .demo-refresh-modal-dialog {
@@ -2456,7 +2595,7 @@
     overflow-wrap: anywhere;
 }
 
-@media (max-width: 900px) {
+@media (max-width: 900px), (hover: none) and (pointer: coarse) {
     .technical-page .access-grid,
     .technical-page .add-form,
     .technical-page .edit-mode-grid,
@@ -2575,7 +2714,7 @@
 
     .technical-page .authentication-card {
         width: 100%;
-        border-radius: 18px !important;
+        border-radius: var(--theme-radius) !important;
     }
 
     .technical-page .authentication-card .btn,
@@ -2594,7 +2733,7 @@
         align-items: flex-start;
         flex-direction: column;
         padding: 14px 15px;
-        border-radius: 14px;
+        border-radius: var(--theme-radius);
     }
 
     .technical-page .profile-form-grid {
@@ -2623,7 +2762,7 @@
     .technical-page .profile-delivery-dialog {
         max-height: calc(100vh - 20px);
         padding: 18px;
-        border-radius: 14px;
+        border-radius: var(--theme-radius);
     }
 
     .technical-page .profile-delivery-grid {
@@ -2722,927 +2861,238 @@
     }
 }
 
-/* Mobile service pages use color to make the next action and system state unmistakable. */
-@media (max-width: 760px) {
-    .technical-page {
-        --bs-body-bg: transparent;
-        --bs-body-color: #12352d;
-        --bs-secondary-color: #527168;
-        --bs-border-color: rgba(8, 122, 85, 0.24);
-        --bs-tertiary-bg: #edfafa;
-        min-height: 100vh;
-        background:
-            radial-gradient(circle at 10% 3%, rgba(190, 250, 232, 0.58), transparent 33%),
-            radial-gradient(circle at 94% 30%, rgba(184, 231, 249, 0.40), transparent 38%),
-            linear-gradient(145deg, #087a55 0%, #0c9564 52%, #12a66f 100%) !important;
-        background-attachment: fixed !important;
-        color: var(--text);
-    }
+/* Shared Meridian controls; the palette follows the system on every screen size. */
+.technical-page {
+    --bs-body-bg: var(--bg);
+    --bs-body-font-family: var(--theme-font-sans);
+    font-family: var(--theme-font-sans);
+    --bs-body-color: var(--text);
+    --bs-secondary-color: var(--muted);
+    --bs-tertiary-bg: var(--panel-soft);
+    --bs-border-color: var(--border-cyan);
+    --bs-emphasis-color: var(--text);
+    background: var(--bg);
+    color: var(--text);
+}
 
+.technical-page .page-header,
+.technical-page .card,
+.technical-page .profile-form,
+.technical-page .modal-content,
+.technical-page .metric-card,
+.technical-page .world-map-card {
+    background: var(--panel) !important;
+    color: var(--text);
+    border-color: var(--border-cyan);
+    border-radius: var(--theme-radius) !important;
+    box-shadow: var(--shadow);
+    backdrop-filter: none;
+}
+
+.technical-page .form-control,
+.technical-page .form-select,
+.technical-page input:not([type="checkbox"]):not([type="radio"]):not([type="submit"]):not([type="hidden"]),
+.technical-page textarea {
+    background-color: var(--panel);
+    color: var(--text);
+    border-color: var(--theme-input);
+}
+
+.technical-page .btn-primary,
+.technical-page button.primary,
+.technical-page input[type="submit"].btn-primary,
+.technical-page .profile-form button[type="submit"] {
+    background: var(--theme-primary);
+    border-color: var(--theme-primary);
+    color: var(--theme-primary-foreground);
+    font-weight: 600;
+}
+
+.technical-page .btn-primary:hover,
+.technical-page button.primary:hover,
+.technical-page input[type="submit"].btn-primary:hover,
+.technical-page .profile-form button[type="submit"]:hover {
+    background: color-mix(in srgb, var(--theme-primary) 90%, var(--text));
+    border-color: var(--theme-primary);
+    color: var(--theme-primary-foreground);
+}
+
+.technical-page .btn-outline-secondary,
+.technical-page .btn-outline-primary,
+.technical-page .backup-download-link {
+    background: var(--panel);
+    border-color: var(--border-cyan);
+    color: var(--text);
+}
+
+.technical-page .btn-outline-secondary:hover,
+.technical-page .btn-outline-primary:hover,
+.technical-page .backup-download-link:hover {
+    background: var(--theme-accent);
+    color: var(--theme-accent-foreground);
+}
+
+.technical-page .alert-warning {
+    color: var(--theme-warning);
+    background: color-mix(in srgb, var(--theme-warning) 12%, var(--panel));
+    border-color: color-mix(in srgb, var(--theme-warning) 35%, var(--panel));
+}
+
+.technical-page .alert-danger {
+    color: var(--theme-destructive);
+    background: color-mix(in srgb, var(--theme-destructive) 12%, var(--panel));
+    border-color: color-mix(in srgb, var(--theme-destructive) 35%, var(--panel));
+}
+
+.technical-page .table {
+    --bs-table-hover-bg: var(--theme-accent);
+}
+
+.technical-page .table thead th {
+    background: var(--panel-soft);
+    color: var(--muted);
+    font-weight: 600;
+    text-transform: none;
+}
+
+.technical-page :is(a, button, input, select, textarea):focus-visible {
+    outline: 2px solid var(--theme-ring);
+    outline-offset: 3px;
+    box-shadow: none;
+}
+
+.technical-page :is(button, input, select, textarea):disabled {
+    opacity: .5;
+    cursor: not-allowed;
+}
+
+.technical-page .confirmation-symbol {
+    color: var(--theme-primary-foreground);
+}
+
+/* The touch theme is deliberately separate from desktop component styling. */
+@media (max-width: 900px), (hover: none) and (pointer: coarse) {
     .technical-page .container,
     .technical-page .manager-shell,
     .technical-page .analytics-page-shell,
-    .technical-page .missing-page,
-    .technical-page .billing-page {
-        width: min(100% - 20px, 1180px);
-        padding-top: 14px !important;
-        padding-bottom: 38px;
+    .technical-page .billing-page,
+    .technical-page .missing-page {
+        width: calc(100% - 24px);
+        padding-top: var(--admin-page-padding);
+        padding-bottom: max(32px, env(safe-area-inset-bottom));
     }
 
     .technical-page .page-header {
         gap: 12px;
-        margin-bottom: 16px !important;
-        padding: 15px 16px;
-        border-color: rgba(220, 255, 246, 0.78);
-        border-radius: 18px;
-        background: rgba(255, 255, 255, 0.91);
-        box-shadow: 0 14px 34px rgba(3, 71, 50, 0.18);
-        backdrop-filter: blur(14px);
+        margin-bottom: 16px;
+        padding: 16px;
+        flex-wrap: wrap;
     }
 
     .technical-page .page-header h1,
     .technical-page h1.section-heading {
-        color: #0a4437;
-        font-weight: 800;
+        font-size: clamp(22px, 3vw, 28px);
+        line-height: 1.25;
     }
 
-    .technical-page .page-header a,
-    .technical-page h1.section-heading a {
-        color: #075d42;
-    }
-
-    .technical-page .page-header small,
-    .technical-page .page-header .text-muted,
-    .technical-page h1.section-heading .text-muted {
-        color: #527168 !important;
-    }
-
-    .technical-page .section-icon {
-        border-color: #9ed8df;
-        background: #e8f7fa;
-        box-shadow: 0 7px 18px rgba(8, 122, 85, 0.14);
-    }
-
-    .technical-page .card,
-    .technical-page .bg-body-tertiary.border,
-    .technical-page .dns-box,
-    .technical-page .alias-row,
+    .technical-page .card-body,
     .technical-page .profile-form,
-    .technical-page .modal-content,
-    .technical-page .metric-card,
-    .technical-page .world-map-card,
-    .technical-page .report-grid > section.card {
-        border-color: rgba(8, 122, 85, 0.24) !important;
-        border-radius: 20px !important;
-        background: #fbfffd !important;
-        color: #12352d;
-        box-shadow: 0 16px 42px rgba(3, 71, 50, 0.18);
-    }
-
-    .technical-page .card::before,
-    .technical-page .profile-form::before {
-        content: "";
-        display: block;
-        height: 4px;
-        margin: -18px -18px 14px;
-        border-radius: 20px 20px 999px 999px;
-        background: linear-gradient(90deg, #0c9564, #66cfda);
-    }
-
-    .technical-page .card:not(.card-body)::before {
-        display: none;
-    }
-
-    .technical-page .text-muted,
-    .technical-page .form-text,
-    .technical-page .hint,
-    .technical-page .small {
-        color: #527168 !important;
-    }
-
-    .technical-page .form-control,
-    .technical-page .form-select,
-    .technical-page input[type="text"],
-    .technical-page input[type="email"],
-    .technical-page input[type="password"],
-    .technical-page input[type="number"],
-    .technical-page input[type="date"],
-    .technical-page input[type="url"],
-    .technical-page input[type="file"] {
-        min-height: 48px;
-        padding: 12px 14px;
-        border: 2px solid #9ed8df;
-        border-radius: 12px;
-        background: #e8f7fa;
-        color: #12352d;
-        font-size: 16px;
-        box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.74);
-    }
-
-    .technical-page .form-control::placeholder,
-    .technical-page input::placeholder {
-        color: #64827a;
-        opacity: 1;
-    }
-
-    .technical-page .form-control:focus,
-    .technical-page .form-select:focus,
-    .technical-page input:focus {
-        border-color: #087a55;
-        background: #f3fdff;
-        box-shadow: 0 0 0 4px rgba(8, 122, 85, 0.20);
-        outline: none;
-    }
-
-    .technical-page .form-select option {
-        background: #ffffff;
-        color: #12352d;
-    }
+    .technical-page .dns-box { padding: 18px; }
 
     .technical-page .btn,
     .technical-page button,
     .technical-page input[type="submit"],
     .technical-page .backup-download-link {
-        min-height: 48px;
-        padding: 11px 16px;
-        border-radius: 12px;
+        min-height: var(--admin-control-height);
+        padding: 11px 14px;
+        border-radius: var(--theme-radius);
         font-size: 16px;
-        font-weight: 750;
-        line-height: 1.25;
-        white-space: normal;
-        touch-action: manipulation;
-    }
-
-    .technical-page .btn-primary,
-    .technical-page .btn-success,
-    .technical-page button.primary,
-    .technical-page input[type="submit"].btn-primary,
-    .technical-page #grabProgressModal button.sitebrush-import-primary-action {
-        border: 2px solid #087a55 !important;
-        background: linear-gradient(135deg, #dff6fb, #bfeaf2) !important;
-        color: #075d42 !important;
-        box-shadow: 0 9px 22px rgba(8, 122, 85, 0.20), inset 0 1px 0 rgba(255, 255, 255, 0.80);
-    }
-
-    .technical-page .btn-primary:hover,
-    .technical-page .btn-primary:active,
-    .technical-page .btn-success:hover,
-    .technical-page .btn-success:active,
-    .technical-page button.primary:hover,
-    .technical-page button.primary:active {
-        border-color: #056445 !important;
-        background: linear-gradient(135deg, #c8eef6, #a9e0ea) !important;
-        color: #043f2d !important;
-    }
-
-    .technical-page .btn-primary:focus-visible,
-    .technical-page .btn-success:focus-visible,
-    .technical-page button.primary:focus-visible {
-        outline: 3px solid #ffffff;
-        box-shadow: 0 0 0 6px rgba(8, 122, 85, 0.62);
-    }
-
-    .technical-page .btn-outline-primary,
-    .technical-page .btn-outline-secondary,
-    .technical-page button:not(.primary):not(.danger),
-    .technical-page .backup-download-link {
-        border: 1px solid #75bfcb;
-        background: #e8f7fa;
-        color: #076879;
-        box-shadow: none;
-    }
-
-    .technical-page .btn-outline-danger,
-    .technical-page .btn-danger,
-    .technical-page button.danger {
-        border: 2px solid #c53b43;
-        background: #fff0f1;
-        color: #9e202a;
-    }
-
-    .technical-page .btn:disabled,
-    .technical-page button:disabled,
-    .technical-page input[type="submit"]:disabled {
-        border-color: #b8cbc6 !important;
-        background: #e4ece9 !important;
-        color: #71847f !important;
-        box-shadow: none !important;
-        opacity: 1;
-    }
-
-    .technical-page .alert,
-    .technical-page .profile-alert {
-        border-width: 2px;
-        border-radius: 14px;
-        background: #e8f7fa;
-        color: #07586a;
-        box-shadow: 0 8px 22px rgba(5, 78, 91, 0.10);
-    }
-
-    .technical-page .alert-info {
-        border-color: #75bfcb;
-        background: #e8f7fa;
-        color: #07586a;
-    }
-
-    .technical-page .alert-success,
-    .technical-page .profile-alert.alert-success {
-        border-color: #39a774;
-        background: #e5f8ee;
-        color: #075d42;
-    }
-
-    .technical-page .alert-warning {
-        border-color: #dc7a13;
-        background: #fff2de;
-        color: #874300;
-    }
-
-    .technical-page .alert-danger,
-    .technical-page .profile-alert.alert-danger {
-        border-color: #d14a52;
-        background: #fff0f1;
-        color: #98242d;
-    }
-
-    .technical-page .missing-page-copy-form {
-        border-top: 5px solid #119569 !important;
-    }
-
-    .technical-page .missing-page-backup-form {
-        border-top: 5px solid #65bfce !important;
-    }
-
-    .technical-page .missing-page-primary-row,
-    .technical-page .missing-page-secondary-grid,
-    .technical-page .edit-mode-grid,
-    .technical-page .profile-form-grid {
-        grid-template-columns: 1fr;
-    }
-
-    .technical-page .missing-page-submit,
-    .technical-page .missing-page-primary-row .btn,
-    .technical-page .edit-mode-actions .btn,
-    .technical-page .edit-mode-copy-form button,
-    .technical-page .authentication-card .btn,
-    .technical-page .authentication-card input[type="submit"],
-    .technical-page .profile-form button[type="submit"],
-    .technical-page .confirmation-webmail-link {
-        width: 100%;
-        justify-self: stretch;
-    }
-
-    .technical-page .progress {
-        height: 14px;
-        border-radius: 999px;
-        background: #d9eeea;
-    }
-
-    .technical-page .progress-bar {
-        background: linear-gradient(90deg, #087a55, #34c184);
-    }
-
-    .technical-page .modal-dialog {
-        max-width: calc(100vw - 16px);
-        margin: 8px auto;
-    }
-
-    .technical-page .modal-content {
-        max-height: calc(100dvh - 16px);
-        overflow: hidden;
-    }
-
-    .technical-page .modal-body {
-        overflow-y: auto;
-        overscroll-behavior: contain;
-    }
-
-    .technical-page .modal-footer {
-        display: grid;
-        grid-template-columns: 1fr;
-        gap: 8px;
-    }
-
-    .technical-page .modal-footer > * {
-        width: 100%;
-        margin: 0;
-    }
-
-    .technical-page .technical-table-panel,
-    .technical-page .table-responsive {
-        overflow-x: auto;
-        overscroll-behavior-inline: contain;
-        border-color: rgba(8, 122, 85, 0.24) !important;
-        background: #fbfffd !important;
-    }
-
-    .technical-page .table {
-        --bs-table-color: #12352d;
-        --bs-table-hover-color: #12352d;
-        --bs-table-hover-bg: #e8f7fa;
-    }
-
-    .technical-page .hosting-tabs,
-    .technical-page .hosting-installation-tabs {
-        overflow-x: auto;
-        flex-wrap: nowrap;
-        scrollbar-width: thin;
-    }
-
-    .technical-page .hosting-tab-button.active,
-    .technical-page .hosting-installation-tabs button.hosting-installation-tab.active {
-        border-color: #087a55;
-        background: #dff6fb;
-        color: #075d42;
-    }
-
-    .technical-page code,
-    .technical-page .copy-field {
-        border-color: #9ed8df;
-        background: #e8f7fa;
-        color: #075d42;
-        overflow-wrap: anywhere;
-    }
-
-    .technical-page .form-check-input {
-        width: 22px;
-        height: 22px;
-        border: 2px solid #62aa98;
-        background-color: #ffffff;
-    }
-
-    .technical-page .form-check-input:checked {
-        border-color: #087a55;
-        background-color: #087a55;
-    }
-}
-
-@media (max-width: 760px) and (prefers-color-scheme: dark) {
-    .technical-page {
-        --bs-body-color: #f2fff9;
-        --bs-secondary-color: #b9d8cf;
-        --bs-border-color: rgba(140, 232, 241, 0.26);
-        --bs-tertiary-bg: #123f46;
-        background:
-            radial-gradient(circle at 10% 3%, rgba(31, 158, 111, 0.32), transparent 35%),
-            radial-gradient(circle at 94% 30%, rgba(42, 153, 174, 0.23), transparent 38%),
-            linear-gradient(145deg, #032d24 0%, #064735 55%, #07533d 100%) !important;
-    }
-
-    .technical-page .page-header {
-        border-color: rgba(140, 232, 241, 0.28);
-        background: rgba(8, 55, 45, 0.92);
-        box-shadow: 0 16px 42px rgba(0, 18, 14, 0.42);
-    }
-
-    .technical-page .page-header h1,
-    .technical-page h1.section-heading,
-    .technical-page .page-header a,
-    .technical-page h1.section-heading a {
-        color: #f2fff9;
-    }
-
-    .technical-page .page-header small,
-    .technical-page .page-header .text-muted,
-    .technical-page h1.section-heading .text-muted,
-    .technical-page .text-muted,
-    .technical-page .form-text,
-    .technical-page .hint,
-    .technical-page .small {
-        color: #b9d8cf !important;
-    }
-
-    .technical-page .section-icon {
-        border-color: rgba(140, 232, 241, 0.30);
-        background: #123f46;
-    }
-
-    .technical-page .card,
-    .technical-page .bg-body-tertiary.border,
-    .technical-page .dns-box,
-    .technical-page .alias-row,
-    .technical-page .profile-form,
-    .technical-page .modal-content,
-    .technical-page .metric-card,
-    .technical-page .world-map-card,
-    .technical-page .report-grid > section.card,
-    .technical-page .technical-table-panel,
-    .technical-page .table-responsive {
-        border-color: rgba(140, 232, 241, 0.24) !important;
-        background: #0b3b31 !important;
-        color: #f2fff9;
-        box-shadow: 0 18px 48px rgba(0, 18, 14, 0.42);
+        line-height: 1.4;
     }
 
     .technical-page .form-control,
     .technical-page .form-select,
-    .technical-page input[type="text"],
-    .technical-page input[type="email"],
-    .technical-page input[type="password"],
-    .technical-page input[type="number"],
-    .technical-page input[type="date"],
-    .technical-page input[type="url"],
-    .technical-page input[type="file"] {
-        border-color: #4b9ead;
-        background: #123f46;
-        color: #f2fff9;
-        box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
+    .technical-page input:not([type="checkbox"]):not([type="radio"]):not([type="submit"]):not([type="hidden"]),
+    .technical-page textarea {
+        min-height: var(--admin-control-height);
+        padding: 12px 14px;
+        border-radius: var(--theme-radius);
+        background-color: var(--admin-field-background);
+        font-size: 16px;
     }
 
-    .technical-page .form-control::placeholder,
-    .technical-page input::placeholder {
-        color: #a7cbc3;
-    }
+    .technical-page input[type="checkbox"],
+    .technical-page input[type="radio"] { width: 22px; height: 22px; }
 
-    .technical-page .form-control:focus,
-    .technical-page .form-select:focus,
-    .technical-page input:focus {
-        border-color: #78efae;
-        background: #164b50;
-        box-shadow: 0 0 0 4px rgba(120, 239, 174, 0.20);
-    }
-
-    .technical-page .form-select option {
-        background: #123f46;
-        color: #f2fff9;
-    }
-
-    .technical-page .btn-primary,
-    .technical-page .btn-success,
-    .technical-page button.primary,
-    .technical-page input[type="submit"].btn-primary,
-    .technical-page #grabProgressModal button.sitebrush-import-primary-action {
-        border-color: #78efae !important;
-        background: linear-gradient(135deg, #bcecf4, #8fd9e6) !important;
-        color: #043f2d !important;
-        box-shadow: 0 10px 24px rgba(0, 19, 14, 0.34);
-    }
-
-    .technical-page .btn-outline-primary,
-    .technical-page .btn-outline-secondary,
-    .technical-page button:not(.primary):not(.danger),
-    .technical-page .backup-download-link {
-        border-color: #4b9ead;
-        background: #123f46;
-        color: #b9f4fa;
-    }
-
-    .technical-page .btn-outline-danger,
-    .technical-page .btn-danger,
-    .technical-page button.danger {
-        border-color: #ff7d84;
-        background: #55252a;
-        color: #ffd5d7;
-    }
-
-    .technical-page .alert-info,
-    .technical-page .alert,
-    .technical-page .profile-alert {
-        border-color: #4b9ead;
-        background: #123f46;
-        color: #d7f9ff;
-    }
-
-    .technical-page .alert-success,
-    .technical-page .profile-alert.alert-success {
-        border-color: #65d99b;
-        background: #104b37;
-        color: #d9ffea;
-    }
-
-    .technical-page .alert-warning {
-        border-color: #ffb65a;
-        background: #513815;
-        color: #ffe6bd;
-    }
-
-    .technical-page .alert-danger,
-    .technical-page .profile-alert.alert-danger {
-        border-color: #ff7d84;
-        background: #55252a;
-        color: #ffd5d7;
-    }
-
-    .technical-page .table {
-        --bs-table-color: #f2fff9;
-        --bs-table-hover-color: #f2fff9;
-        --bs-table-hover-bg: #123f46;
-    }
-
-    .technical-page code,
-    .technical-page .copy-field {
-        border-color: #4b9ead;
-        background: #123f46;
-        color: #92f5bd;
-    }
-
-    .technical-page .progress {
-        background: #173f37;
-    }
-
-    .technical-page .form-check-input {
-        border-color: #6db7aa;
-        background-color: #123f46;
-    }
+    .technical-page .table > :not(caption) > * > * { padding: 14px 12px; }
+    .technical-page .table-responsive { overscroll-behavior-x: contain; }
+    .technical-page .hosting-tabs { gap: 8px; padding: 8px; }
+    .technical-page .section-icon { background: var(--theme-accent); border-color: transparent; }
+    .technical-page .profile-form button[type="submit"] { width: 100%; }
+    .technical-page .profile-delivery-close { min-width: 48px; }
 }
 
-@media (max-width: 760px) {
-    .technical-page {
-        background: #1e362d !important;
-    }
-
-    .technical-page .page-header,
-    .technical-page .card,
-    .technical-page form.card,
-    .technical-page .authentication-card,
-    .technical-page .profile-form,
-    .technical-page .modal-content,
-    .technical-page .bg-body-tertiary.border,
-    .technical-page .dns-box,
-    .technical-page .alias-row,
-    .technical-page .metric-card,
-    .technical-page .world-map-card,
-    .technical-page .report-grid > section.card,
-    .technical-page .technical-table-panel,
-    .technical-page .table-responsive {
-        border-color: rgba(200, 67, 35, 0.34) !important;
-        background: #f9faf9 !important;
-        color: #11141c;
-    }
-
-    .technical-page .form-control,
-    .technical-page .form-select,
-    .technical-page input[type="text"],
-    .technical-page input[type="email"],
-    .technical-page input[type="password"],
-    .technical-page input[type="number"],
-    .technical-page input[type="date"],
-    .technical-page input[type="url"],
-    .technical-page input[type="file"] {
-        border-color: #dbc3a2;
-        background: #f9faf9;
-        color: #11141c;
-        box-shadow: none;
-    }
-
-    .technical-page .form-control::placeholder,
-    .technical-page input::placeholder {
-        color: #c84323;
-        opacity: 1;
-    }
-
-    .technical-page .form-control:focus,
-    .technical-page .form-select:focus,
-    .technical-page input:focus {
-        border-color: #c84323;
-        background: #f9faf9;
-        color: #11141c;
-        box-shadow: 0 0 0 4px rgba(200, 67, 35, 0.20);
-    }
-
-    .technical-page .page-header h1,
-    .technical-page h1.section-heading,
-    .technical-page .page-header a,
-    .technical-page h1.section-heading a,
-    .technical-page .card-title,
-    .technical-page h2,
-    .technical-page h3,
-    .technical-page legend {
-        color: #c84323;
-    }
-
-    .technical-page .setup-admin-explanation {
-        border-color: #c84323;
-        background: #dbc3a2;
-        color: #11141c;
-    }
-
-    .technical-page .setup-admin-explanation-icon {
-        background: #c84323;
-        color: #ffffff;
-    }
+body.technical-page,
+body.technical-page.bg-body,
+body.technical-page.analytics-page {
+    background: var(--theme-background) !important;
+    font-family: var(--theme-font-sans);
 }
 
-/* Mobile surfaces keep a dark page around light forms and reserve red for guidance. */
-@media (max-width: 760px) {
-    .technical-page {
-        background: #1e362d !important;
-    }
-
-    .technical-page .page-header,
-    .technical-page .card,
-    .technical-page form.card,
-    .technical-page .authentication-card,
-    .technical-page .profile-form,
-    .technical-page .modal-content,
-    .technical-page .bg-body-tertiary.border,
-    .technical-page .dns-box,
-    .technical-page .alias-row,
-    .technical-page .metric-card,
-    .technical-page .world-map-card,
-    .technical-page .report-grid > section.card,
-    .technical-page .technical-table-panel,
-    .technical-page .table-responsive {
-        border-color: rgba(200, 67, 35, 0.34) !important;
-        background: #f9faf9 !important;
-        color: #11141c;
-    }
-
-    .technical-page .form-control,
-    .technical-page .form-select,
-    .technical-page input[type="text"],
-    .technical-page input[type="email"],
-    .technical-page input[type="password"],
-    .technical-page input[type="number"],
-    .technical-page input[type="date"],
-    .technical-page input[type="url"],
-    .technical-page input[type="file"] {
-        border-color: #dbc3a2;
-        background: #f9faf9;
-        color: #11141c;
-        box-shadow: none;
-    }
-
-    .technical-page .form-control::placeholder,
-    .technical-page input::placeholder {
-        color: #c84323;
-        opacity: 1;
-    }
-
-    .technical-page .form-control:focus,
-    .technical-page .form-select:focus,
-    .technical-page input:focus {
-        border-color: #c84323;
-        background: #f9faf9;
-        color: #11141c;
-        box-shadow: 0 0 0 4px rgba(200, 67, 35, 0.20);
-    }
-
-    .technical-page .page-header h1,
-    .technical-page h1.section-heading,
-    .technical-page .page-header a,
-    .technical-page h1.section-heading a,
-    .technical-page .card-title,
-    .technical-page h2,
-    .technical-page h3,
-    .technical-page legend {
-        color: #c84323;
-    }
-
-    .technical-page .setup-admin-explanation {
-        border-color: #c84323;
-        background: #dbc3a2;
-        color: #11141c;
-    }
-
-    .technical-page .setup-admin-explanation-icon {
-        background: #c84323;
-        color: #ffffff;
-    }
+.technical-page .bg-body-tertiary.border,
+.technical-page .dns-box,
+.technical-page .alias-row,
+.technical-page.analytics-page .metric-card,
+.technical-page.analytics-page .world-map-card,
+.technical-page.analytics-page .report-grid > section.card {
+    background: var(--theme-card) !important;
+    border-radius: var(--theme-radius) !important;
 }
 
-/* The mobile palette uses solid brand colors so every action has one clear meaning. */
-@media (max-width: 760px) {
-    .technical-page {
-        --bs-body-color: #12151d;
-        --bs-secondary-color: #52645d;
-        --bs-border-color: rgba(31, 54, 45, 0.24);
-        --bs-tertiary-bg: #f9faf9;
-        background: #c7c8bf !important;
-        color: #12151d;
-    }
-
-    .technical-page .page-header,
-    .technical-page .card,
-    .technical-page .bg-body-tertiary.border,
-    .technical-page .dns-box,
-    .technical-page .alias-row,
-    .technical-page .profile-form,
-    .technical-page .modal-content,
-    .technical-page .metric-card,
-    .technical-page .world-map-card,
-    .technical-page .report-grid > section.card,
-    .technical-page .technical-table-panel,
-    .technical-page .table-responsive {
-        border-color: rgba(31, 54, 45, 0.24) !important;
-        background: #f9faf9 !important;
-        color: #12151d;
-    }
-
-    .technical-page .page-header h1,
-    .technical-page h1.section-heading,
-    .technical-page .page-header a,
-    .technical-page h1.section-heading a {
-        color: #bf3a20;
-    }
-
-    .technical-page .page-header a:hover,
-    .technical-page h1.section-heading a:hover,
-    .technical-page .page-header a:focus-visible,
-    .technical-page h1.section-heading a:focus-visible {
-        color: #bf3a20;
-        text-decoration: underline;
-        text-decoration-thickness: 2px;
-        text-underline-offset: 4px;
-    }
-
-    .technical-page .form-control,
-    .technical-page .form-select,
-    .technical-page input[type="text"],
-    .technical-page input[type="email"],
-    .technical-page input[type="password"],
-    .technical-page input[type="number"],
-    .technical-page input[type="date"],
-    .technical-page input[type="url"],
-    .technical-page input[type="file"] {
-        border-color: #9eb6e3;
-        background: #9eb6e3;
-        color: #12151d;
-        box-shadow: none;
-    }
-
-    .technical-page .form-control::placeholder,
-    .technical-page input::placeholder {
-        color: #ffffff;
-        opacity: 1;
-    }
-
-    .technical-page .form-control:focus,
-    .technical-page .form-select:focus,
-    .technical-page input:focus {
-        border-color: #1f362d;
-        background: #9eb6e3;
-        color: #12151d;
-        box-shadow: 0 0 0 4px rgba(31, 54, 45, 0.22);
-    }
-
-    .technical-page .form-select option {
-        background: #f9faf9;
-        color: #12151d;
-    }
-
-    .technical-page .table {
-        color: #12151d;
-        --bs-table-color: #12151d;
-        --bs-table-hover-color: #12151d;
-    }
-
-    .technical-page .card-title,
-    .technical-page h2,
-    .technical-page h3,
-    .technical-page legend {
-        color: #bf3a20;
-    }
-
-    .technical-page .card::before,
-    .technical-page .card::after,
-    .technical-page .profile-form::before,
-    .technical-page .profile-form::after {
-        display: none !important;
-        content: none;
-    }
-
-    .technical-page .authentication-shell .page-header,
-    .technical-page .authentication-card {
-        background-image: none !important;
-        box-shadow: none !important;
-        backdrop-filter: none;
-    }
-
-    .technical-page .section-icon {
-        border-color: #1f362d;
-        background: #1f362d;
-        color: #dac0a1;
-    }
-
-    .technical-page .setup-admin-explanation {
-        width: 100%;
-        border: 2px solid #bf3a20;
-        background: #f9faf9;
-        color: #12151d;
-        box-shadow: none;
-    }
-
-    .technical-page .setup-admin-explanation-icon {
-        background: #bf3a20;
-        color: #ffffff;
-    }
-
-    .technical-page .btn-primary,
-    .technical-page .btn-success,
-    .technical-page button.primary,
-    .technical-page input[type="submit"].btn-primary,
-    .technical-page #grabProgressModal button.sitebrush-import-primary-action {
-        border-color: #1f362d !important;
-        background: #1f362d !important;
-        color: #ffffff !important;
-        box-shadow: none;
-    }
-
-    .technical-page .btn-primary:hover,
-    .technical-page .btn-primary:active,
-    .technical-page .btn-success:hover,
-    .technical-page .btn-success:active,
-    .technical-page button.primary:hover,
-    .technical-page button.primary:active,
-    .technical-page #grabProgressModal button.sitebrush-import-primary-action:hover,
-    .technical-page #grabProgressModal button.sitebrush-import-primary-action:active {
-        border-color: #1f362d !important;
-        background: #1f362d !important;
-        color: #ffffff !important;
-        filter: brightness(1.14);
-    }
-
-    .technical-page .btn-outline-primary,
-    .technical-page .btn-outline-secondary,
-    .technical-page button:not(.primary):not(.danger),
-    .technical-page .backup-download-link {
-        border-color: #9eb6e3;
-        background: #9eb6e3;
-        color: #ffffff;
-    }
-
-    .technical-page .btn-outline-primary:hover,
-    .technical-page .btn-outline-secondary:hover,
-    .technical-page button:not(.primary):not(.danger):hover,
-    .technical-page .backup-download-link:hover {
-        border-color: #9eb6e3;
-        background: #9eb6e3;
-        color: #ffffff;
-        filter: brightness(0.92);
-    }
+/* Server expenses and the standalone copy form share the same surface hierarchy. */
+.technical-page.expenses-page { font-size: 14px; }
+.technical-page.expenses-page .expense-simple-summary {
+    padding: 24px;
+    background: var(--theme-card);
+    border: 1px solid var(--theme-border);
+    border-radius: var(--theme-radius);
+    box-shadow: var(--shadow);
 }
-
-@media (max-width: 760px) and (prefers-color-scheme: dark) {
-    .technical-page form.card,
-    .technical-page .authentication-card,
-    .technical-page .profile-form {
-        border-color: rgba(218, 192, 161, 0.34) !important;
-        background: #1e362d !important;
-        color: #dac0a1;
-    }
-
-    .technical-page form.card label,
-    .technical-page .authentication-card label,
-    .technical-page .profile-form label,
-    .technical-page form.card .form-text,
-    .technical-page .authentication-card .form-text,
-    .technical-page .profile-form .form-text {
-        color: #dac0a1 !important;
-    }
+.technical-page.expenses-page .expense-simple-summary-head h2 { margin: 0 0 6px; font-size: 20px; font-weight: 600; }
+.technical-page.expenses-page :is(.expense-simple-metrics, .expense-simple-server-monitoring, .expense-simple-sites) {
+    gap: 12px;
+    background: transparent;
+    border: 0;
+    min-width: 0;
 }
-
-@media (max-width: 760px) {
-    .technical-page { background: #1e362d !important; }
-    .technical-page .page-header,
-    .technical-page .card,
-    .technical-page form.card,
-    .technical-page .authentication-card,
-    .technical-page .profile-form,
-    .technical-page .modal-content,
-    .technical-page .bg-body-tertiary.border,
-    .technical-page .dns-box,
-    .technical-page .alias-row {
-        border-color: rgba(200, 67, 35, 0.34) !important;
-        background: #f9faf9 !important;
-        color: #11141c;
-    }
-    .technical-page .form-control,
-    .technical-page .form-select,
-    .technical-page input[type="text"],
-    .technical-page input[type="email"],
-    .technical-page input[type="password"],
-    .technical-page input[type="number"],
-    .technical-page input[type="date"],
-    .technical-page input[type="url"],
-    .technical-page input[type="file"] {
-        border-color: #9eb6e3;
-        background: #9eb6e3;
-        color: #11141c;
-        box-shadow: none;
-    }
-    .technical-page .form-control::placeholder,
-    .technical-page input::placeholder { color: #ffffff; opacity: 1; }
-    .technical-page .form-control:focus,
-    .technical-page .form-select:focus,
-    .technical-page input:focus {
-        border-color: #c84323;
-        background: #9eb6e3;
-        color: #11141c;
-        box-shadow: 0 0 0 4px rgba(200, 67, 35, 0.20);
-    }
-    .technical-page .page-header h1,
-    .technical-page h1.section-heading,
-    .technical-page .page-header a,
-    .technical-page h1.section-heading a,
-    .technical-page .card-title,
-    .technical-page h2,
-    .technical-page h3,
-    .technical-page legend { color: #c84323; }
-    .technical-page .setup-admin-explanation {
-        border-color: #c84323;
-        background: #dbc3a2;
-        color: #11141c;
-    }
-    .technical-page .setup-admin-explanation-icon { background: #c84323; color: #ffffff; }
+.technical-page.expenses-page :is(.expense-simple-metric, .expense-simple-server-metric, .expense-simple-site) {
+    padding: 16px;
+    border: 1px solid var(--theme-border);
+    border-radius: calc(var(--theme-radius) - 2px);
+    background: var(--theme-card);
+}
+.technical-page.expenses-page .expense-simple-metric strong { font-size: 24px; font-weight: 600; line-height: 1.25; }
+.technical-page.expenses-page .expense-simple-metric span { color: var(--theme-muted-foreground); }
+.technical-page.expenses-page .expense-simple-progress { border-radius: 999px; background: var(--theme-muted); }
+.technical-page.expenses-page .hosting-installation-tabs { display: flex; flex-wrap: wrap; width: fit-content; max-width: 100%; }
+.technical-page.expenses-page :is(.hosting-server-card, .hosting-server-details, .hosting-server-dialog) {
+    background: var(--theme-card);
+    border-color: var(--theme-border);
+    box-shadow: var(--shadow);
+}
+.technical-page.expenses-page .hosting-server-sparkline polyline { filter: none; }
+.technical-page.expenses-page .hosting-server-disk-chart { box-shadow: none; }
+.technical-page.expenses-page .modal-dialog { max-width: min(800px, calc(100% - 32px)); margin-inline: auto; }
+.technical-page.expenses-page .modal-content { max-height: calc(100dvh - 32px); }
+.technical-page.expenses-page .modal-body { min-height: 0; overflow: auto; }
+.technical-page.copy-import-page .edit-mode-copy-form { display: grid; gap: 16px; padding: 24px; box-sizing: border-box; }
+.technical-page.copy-import-page .edit-mode-copy-form > * { min-width: 0; max-width: 100%; }
+.technical-page.copy-import-page .btn img { width: 16px; height: 16px; }
+@media (max-width: 900px), (hover: none) and (pointer: coarse) {
+    .technical-page.expenses-page .expense-simple-summary,
+    .technical-page.copy-import-page .edit-mode-copy-form { padding: 16px; }
+    .technical-page.expenses-page .expense-simple-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .technical-page.expenses-page .expense-simple-client summary,
+    .technical-page.expenses-page .expense-simple-site { grid-template-columns: minmax(0, 1fr); }
+    .technical-page.expenses-page .expense-simple-client-body { padding-inline-start: 0; }
 }

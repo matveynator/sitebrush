@@ -13,111 +13,123 @@
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
   <link href="/p/static/technical_pages.css" rel="stylesheet">
   <style>
-    body { background:var(--bs-body-bg); color:var(--bs-body-color); }
-    .manager-shell { max-width:1180px; }
-    .manager-header { display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:1rem; margin-bottom:1rem; }
-    .manager-heading { min-width:0; }
+    .technical-page.file-manager-page { font-size:14px; }
+    .file-manager-page .manager-shell { width:min(1180px, calc(100% - 32px)); min-width:0; padding:24px 0; }
+    .manager-header { display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:16px; margin-bottom:24px; }
+    .manager-heading { min-width:0; flex:1 1 240px; }
     .manager-heading h1, .manager-current-path { overflow-wrap:anywhere; }
-    .upload-controls { display:flex; flex-wrap:wrap; gap:.5rem; }
-    .upload-controls .form-control { flex:1 1 360px; min-width:0; }
-    .file-sort-toolbar { display:flex; flex-wrap:wrap; align-items:center; gap:.5rem; margin-bottom:.5rem; }
-    .section-icon { width:30px; height:30px; object-fit:contain; }
-    .section-heading { display:flex; align-items:center; gap:10px; }
-    .file-thumb { width:64px; height:64px; object-fit:cover; border-radius:8px; border:1px solid var(--bs-border-color); background:var(--bs-tertiary-bg); cursor:pointer; }
-    .file-icon { width:64px; height:64px; border-radius:8px; display:grid; place-items:center; border:1px solid var(--bs-border-color); background:var(--bs-tertiary-bg); color:var(--bs-secondary-color); font-weight:700; }
-    .file-preview-trigger { width:64px; height:64px; border-radius:8px; display:grid; place-items:center; border:1px solid var(--bs-border-color); background:var(--bs-tertiary-bg); color:var(--bs-body-color); font-weight:700; cursor:pointer; padding:0; }
-    .copy-field { font-family:ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size:.82rem; }
-    .copy-link-group { width:clamp(280px, 42vw, 680px); max-width:calc(100vw - 48px); }
-    .copy-link-group .copy-field { min-width:0; height:24px; padding:.125rem .4rem; font-size:.72rem; line-height:1.15; }
-    .copy-link-group .btn { --bs-btn-padding-y:.125rem; --bs-btn-padding-x:.45rem; --bs-btn-font-size:.72rem; line-height:1.15; }
-    .table td { vertical-align:middle; }
-    .file-link-cell { min-width:clamp(360px, 46vw, 720px); }
-    .access-cell { min-width:340px; }
-    .access-grid { display:grid; grid-template-columns:minmax(105px,130px) minmax(140px,1fr) minmax(86px,110px) auto; gap:.5rem; align-items:center; }
-    .file-access-details > summary { display:none; }
-    .file-access-details > .file-access-body { display:block; }
-    @media (max-width: 900px) {
-      body { background:#f1f3f4; }
-      .manager-shell { width:100%; max-width:none; padding:12px !important; color:#293136; }
-      .manager-header { align-items:stretch; gap:.75rem; }
-      .manager-heading { flex:1 1 100%; }
-      .manager-heading h1 { font-size:1.2rem; line-height:1.3; }
-      .manager-heading h1 a { color:#33464f; }
-      .manager-current-path { font-size:.82rem; color:#68757c !important; }
-      .manager-current-path code { color:inherit; }
-      .manager-back-button { width:100%; min-height:42px; display:grid; place-items:center; border-color:#ccd3d6 !important; background:#f8f9f9 !important; color:#46545b !important; }
-      .upload-panel { padding:12px !important; margin-bottom:12px !important; border-color:#d9dfe1 !important; background:#f8f9f9 !important; color:#293136 !important; box-shadow:none !important; }
-      .upload-panel .section-heading { margin-bottom:10px; }
-      .upload-panel .section-icon { width:24px; height:24px; opacity:.72; }
-      .upload-controls { display:grid; grid-template-columns:minmax(0,1fr); }
-      .upload-controls .form-control, .upload-controls .btn { width:100%; min-height:44px; }
-      .upload-controls .form-control { border-color:#d5dbde !important; background:#fff !important; color:#293136 !important; }
-      .upload-controls .btn { border-color:#9cabb2 !important; background:#e3e8ea !important; color:#293136 !important; }
-      .file-sort-toolbar { flex-wrap:nowrap; overflow-x:auto; padding:2px 0 8px; scrollbar-width:none; }
-      .file-sort-toolbar::-webkit-scrollbar { display:none; }
-      .file-sort-toolbar > * { flex:0 0 auto; }
-      .file-sort-toolbar .btn { min-height:38px; padding-inline:13px; border-color:#d0d6d9 !important; border-radius:999px; background:#f8f9f9 !important; color:#59666c !important; box-shadow:none !important; }
-      .file-sort-toolbar .btn.active { border-color:#aebbc0 !important; background:#dfe5e7 !important; color:#293136 !important; }
-      .file-list-panel { overflow:visible !important; border:0 !important; background:transparent !important; }
-      .file-list-panel .table-responsive { overflow:visible; border:0 !important; background:transparent !important; box-shadow:none !important; }
+    .file-manager-page .manager-heading h1 { font-size:24px; line-height:1.3; font-weight:600; }
+    .manager-current-path { font-size:14px; }
+    .file-manager-page .upload-panel { padding:24px !important; }
+    .section-heading { display:flex; align-items:center; gap:8px; }
+    .file-manager-page .section-icon { width:32px; height:32px; padding:6px; }
+    .upload-controls { display:flex; flex-wrap:wrap; gap:8px; }
+    .upload-controls .form-control { flex:1 1 240px; min-width:0; }
+    .file-sort-toolbar { display:flex; flex-wrap:wrap; align-items:center; gap:8px; margin-bottom:16px; }
+    .file-sort-toolbar [data-sort-files]::after { content:""; display:inline-block; width:1em; margin-inline-start:4px; text-align:center; }
+    .file-sort-toolbar [data-sort-direction="asc"]::after { content:"↑"; }
+    .file-sort-toolbar [data-sort-direction="desc"]::after { content:"↓"; }
+    .file-manager-page .file-list-panel { min-width:0; max-width:100%; overflow:visible !important; box-shadow:none; }
+    .file-list-panel .table-responsive { overflow:visible; border:0; background:transparent; }
+    .file-manager-page .file-list-panel table { width:100%; table-layout:fixed; }
+    .file-manager-page .file-list-panel :is(th, td) { padding:12px; vertical-align:middle; overflow-wrap:anywhere; }
+    .file-link-cell, .access-cell { min-width:0; }
+    .file-manager-page .file-list-panel th:nth-child(1) { width:96px; }
+    .file-manager-page .file-list-panel th:nth-child(2) { width:26%; }
+    .file-manager-page .file-list-panel th:nth-child(3) { width:88px; }
+    .file-manager-page .file-list-panel th:nth-child(4) { width:132px; }
+    .file-manager-page .file-list-panel th:nth-child(5) { width:170px; }
+    .file-manager-page .file-list-panel th:nth-child(6) { width:56px; }
+    .file-actions-heading { text-align:center; }
+    .file-manager-page :is(.file-thumb, .file-icon, .file-preview-trigger) {
+      width:72px; height:72px; min-height:72px; padding:0; display:grid; place-items:center;
+      border:1px solid var(--theme-border); border-radius:calc(var(--theme-radius) - 2px);
+      background:var(--theme-muted); color:var(--theme-muted-foreground); font-size:11px;
+      overflow-wrap:anywhere; object-fit:cover;
+    }
+    .file-preview-trigger { cursor:pointer; }
+    .file-preview-trigger .file-thumb { width:100%; height:100%; border:0; border-radius:inherit; }
+    .file-link-row { display:flex; align-items:center; gap:8px; min-width:0; }
+    .file-name-link { min-width:0; overflow:hidden; color:var(--theme-foreground); font-weight:500; text-decoration:none; text-overflow:ellipsis; white-space:nowrap; }
+    .file-name-link:hover { color:var(--theme-primary); text-decoration:underline; text-underline-offset:3px; }
+    .file-icon-button { flex:0 0 auto; width:32px; min-width:32px !important; min-height:32px !important; padding:7px !important; }
+    .file-icon-button img { display:block; width:16px; height:16px; object-fit:contain; }
+    .file-manager-page .copy-link-group { display:flex; flex-wrap:wrap; gap:4px; width:100%; max-width:100%; min-width:0; }
+    .file-manager-page .copy-link-group .copy-field { flex:1 1 100px; width:0; min-width:0; max-width:100%; margin:0; }
+    .file-manager-page .copy-link-group .btn { flex:0 0 auto; margin:0; }
+    .file-manager-page .access-grid { display:grid; grid-template-columns:minmax(0, 1fr) 32px; gap:6px; align-items:center; }
+    .file-manager-page .access-grid > * { min-width:0; max-width:100%; }
+    .file-manager-page .access-grid [data-access-mode] { grid-column:1 / -1; }
+    .file-manager-page .access-grid [data-token-link-row] { grid-column:1 / -1 !important; }
+    .file-access-details { position:relative; min-width:0; }
+    .file-access-details > summary { display:flex; align-items:center; justify-content:space-between; gap:8px; min-height:32px; padding:5px 8px; border:1px solid var(--theme-border); border-radius:calc(var(--theme-radius) - 2px); color:var(--theme-muted-foreground); cursor:pointer; list-style:none; }
+    .file-access-details > summary::-webkit-details-marker { display:none; }
+    .file-access-details > summary::after { content:"⌄"; flex:0 0 auto; }
+    .file-access-details[open] > summary::after { transform:rotate(180deg); }
+    .file-access-details > summary span { position:absolute; width:1px; height:1px; overflow:hidden; clip-path:inset(50%); }
+    .file-access-details > summary strong { min-width:0; overflow:hidden; color:var(--theme-foreground); font-size:13px; font-weight:500; text-overflow:ellipsis; white-space:nowrap; }
+    .file-access-body { position:absolute; z-index:20; top:calc(100% + 6px); right:0; display:none; width:min(380px, calc(100vw - 32px)); max-height:min(420px, calc(100dvh - 80px)); min-width:0; padding:12px; overflow:auto; border:1px solid var(--theme-border); border-radius:var(--theme-radius); background:var(--theme-card); box-shadow:0 12px 32px rgb(24 27 33 / 16%); }
+    .file-access-details[open] > .file-access-body { display:block; }
+    .file-sort-toolbar .btn.active { background:var(--theme-accent); color:var(--theme-accent-foreground); border-color:var(--theme-border); }
+    .file-manager-page .file-delete-form { display:flex; justify-content:flex-start; margin:0; }
+    .file-manager-page .file-delete-form .btn { color:var(--theme-destructive); background:transparent; border-color:var(--theme-border); }
+    .file-manager-page .modal-dialog { width:calc(100% - 32px); max-width:960px; margin:16px auto; min-height:calc(100dvh - 32px); }
+    .file-manager-page #uploadProgressModal .modal-dialog { max-width:480px; min-height:0; }
+    .file-manager-page .modal-content { min-width:0; max-height:calc(100dvh - 32px); overflow:hidden; }
+    .file-manager-page .modal-header, .file-manager-page .modal-footer { flex:0 0 auto; padding:16px; gap:12px; }
+    .file-manager-page .modal-title { min-width:0; overflow-wrap:anywhere; font-size:18px; }
+    .file-manager-page .modal-body { min-height:0; overflow:auto; padding:16px; }
+    .file-manager-page #imagePreviewModal .modal-body { display:flex; justify-content:center; background:var(--theme-card) !important; }
+    .preview-layout { display:grid; width:100%; min-width:0; grid-template-columns:minmax(0, 1fr) minmax(240px, 300px); gap:16px; align-items:start; }
+    .preview-stage { display:grid; min-width:0; min-height:260px; place-items:center; border:1px solid var(--theme-border); border-radius:var(--theme-radius); background:var(--theme-muted); overflow:hidden; }
+    .preview-image { display:block; min-width:0; max-width:100%; max-height:calc(100dvh - 230px); object-fit:contain; }
+    .preview-file-details { display:grid; min-width:0; gap:12px; padding:16px; border:1px solid var(--theme-border); border-radius:var(--theme-radius); background:var(--theme-card); text-align:start; }
+    .preview-detail { display:grid; gap:3px; min-width:0; }
+    .preview-detail-label { color:var(--theme-muted-foreground); font-size:12px; font-weight:500; }
+    .preview-detail-value { min-width:0; overflow-wrap:anywhere; font-size:14px; }
+    .preview-link-row { display:flex; align-items:center; gap:8px; min-width:0; }
+    .preview-link-row a { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .preview-delete-form { margin-top:4px; }
+    .preview-navigation { display:flex; gap:8px; }
+    .preview-navigation .btn { width:40px; min-width:40px; padding:7px !important; font-size:20px !important; }
+    .delete-confirm-name { margin:0; overflow-wrap:anywhere; font-weight:600; }
+    .file-manager-page .btn-close { display:grid; flex:0 0 auto; width:32px; height:32px; min-height:32px; padding:0; place-items:center; border:0; background:none !important; color:var(--theme-foreground); font-size:24px; font-weight:400; line-height:1; opacity:1; }
+    .uploaded-focus { outline:2px solid var(--theme-ring); outline-offset:-2px; }
+    @media (max-width: 900px), (hover: none) and (pointer: coarse) {
+      .file-manager-page .manager-shell { width:calc(100% - 24px); padding:16px 0; }
+      .manager-header { gap:12px; margin-bottom:16px; }
+      .file-manager-page .upload-panel { padding:16px !important; }
+      .upload-controls { display:grid; grid-template-columns:minmax(0, 1fr); }
+      .file-manager-page .file-list-panel { border:0 !important; background:transparent !important; overflow:visible !important; }
       .file-list-panel table, .file-list-panel tbody { display:block; width:100%; }
       .file-list-panel thead { display:none; }
-      .file-list-panel tbody { display:grid; gap:10px; }
-      .file-list-panel tr[data-file-row] { display:grid; grid-template-columns:48px minmax(0,.7fr) minmax(0,1fr); grid-template-areas:"preview file file" "size size date" "access access access" "actions actions actions"; column-gap:11px; row-gap:8px; padding:12px; border:1px solid #dce1e3; border-radius:12px; background:#fafbfb; color:#293136; box-shadow:0 1px 4px rgba(30,42,48,.05); }
-      .file-list-panel tr[data-file-row] > td { display:block; min-width:0; padding:0; border:0; background:transparent; }
+      .file-list-panel tbody { display:grid; gap:12px; }
+      .file-list-panel tr[data-file-row] { display:grid; width:100%; min-width:0; grid-template-columns:72px minmax(0,1fr); grid-template-areas:"preview file" "size date" "access access" "actions actions"; gap:12px; padding:16px; overflow:hidden; border:1px solid var(--theme-border); border-radius:var(--theme-radius); background:var(--theme-card); }
+      .file-manager-page .file-list-panel tr[data-file-row] > td { display:block; width:auto; min-width:0; max-width:100%; padding:0; overflow:hidden; border:0; background:transparent; }
       .file-list-panel tr[data-file-row] > td:nth-child(1) { grid-area:preview; }
       .file-list-panel tr[data-file-row] > td:nth-child(2) { grid-area:file; align-self:center; }
       .file-list-panel tr[data-file-row] > td:nth-child(3) { grid-area:size; }
       .file-list-panel tr[data-file-row] > td:nth-child(4) { grid-area:date; text-align:right; }
-      .file-list-panel tr[data-file-row] > td:nth-child(5) { grid-area:access; margin-top:3px; padding-top:0; border-top:1px solid #e3e7e9; }
+      .file-list-panel tr[data-file-row] > td:nth-child(5) { grid-area:access; }
       .file-list-panel tr[data-file-row] > td:nth-child(6) { grid-area:actions; }
-      .file-list-panel tr[data-file-row] > td:nth-child(3)::before,
-      .file-list-panel tr[data-file-row] > td:nth-child(4)::before,
-      .file-list-panel tr[data-file-row] > td:nth-child(5)::before { content:none; }
-      .file-list-panel tr[data-file-row] > td:nth-child(4)::before { text-align:right; }
-      .file-thumb, .file-icon, .file-preview-trigger { width:48px !important; height:48px !important; border-color:#d7dddf !important; border-radius:10px !important; background:#eef1f2 !important; color:#58676e !important; font-size:.7rem; }
-      .file-link-cell, .access-cell { min-width:0; }
-      .file-link-cell .fw-semibold { color:#263238; font-size:.96rem; line-height:1.25; }
-      .file-link-cell .text-muted, .file-list-panel td > .text-muted { color:#6c777c !important; }
-      .copy-link-group { width:100%; max-width:100%; }
-      .copy-link-group .copy-field { height:38px; border-color:#d9dfe1 !important; background:#f4f6f6 !important; color:#59666c !important; font-size:.7rem; }
-      .copy-link-group .btn { min-height:38px; padding-inline:10px; border-color:#d1d8da !important; background:#eceff0 !important; color:#46545b !important; }
-      .file-access-details > summary { display:flex; align-items:center; justify-content:space-between; gap:10px; min-height:43px; padding:8px 2px; color:#58666c; cursor:pointer; list-style:none; }
-      .file-access-details > summary::-webkit-details-marker { display:none; }
-      .file-access-details > summary::after { content:"⌄"; color:#7b878c; font-size:1.1rem; transition:transform .16s ease; }
-      .file-access-details[open] > summary::after { transform:rotate(180deg); }
-      .file-access-details > summary strong { color:#3f4d53; font-size:.82rem; font-weight:600; }
-      .file-access-details:not([open]) > .file-access-body { display:none; }
-      .file-access-body { padding:4px 0 8px; }
-      .access-grid { grid-template-columns:minmax(0,1fr); gap:8px; }
-      .access-grid .form-select, .access-grid > .form-control, .access-grid > .btn { min-height:42px; }
-      .access-grid .form-select, .access-grid > .form-control { border-color:#d5dcde !important; background:#fff !important; color:#293136 !important; }
-      .access-grid > .btn { width:100%; }
-      .file-delete-form .btn { width:100%; min-height:40px; border-color:#e2ced0 !important; background:#f7eeee !important; color:#805258 !important; box-shadow:none !important; }
-      .file-list-empty { display:block !important; border:1px solid #dce1e3; border-radius:12px; background:#fafbfb; }
-      .file-list-empty td { display:block; width:100%; }
+      .file-manager-page .file-link-row { width:100%; min-width:0; }
+      .file-manager-page .file-name-link { flex:1 1 auto; width:0; }
+      .file-manager-page :is(.file-thumb, .file-icon, .file-preview-trigger) { max-width:72px; }
+      .file-access-details > summary { min-height:44px; }
+      .file-access-details > summary span { position:static; width:auto; height:auto; overflow:visible; clip-path:none; }
+      .file-access-details > summary strong { font-size:14px; }
+      .file-access-body { position:static; width:100%; max-height:none; margin-top:8px; box-shadow:none; }
+      .file-manager-page .access-grid { grid-template-columns:minmax(0, 1fr) 32px; }
+      .preview-layout { width:100%; grid-template-columns:minmax(0, 1fr); }
+      .preview-stage { width:100%; min-width:0; min-height:180px; }
+      .preview-image { width:auto; max-width:100%; max-height:46dvh; }
+      .preview-file-details { width:100%; min-width:0; }
+      .file-list-empty, .file-list-empty td { display:block; width:100%; }
     }
-    @media (max-width: 900px) and (prefers-color-scheme: dark) {
-      body { background:#1d2022; }
-      .manager-shell { color:#d9dddf; }
-      .manager-heading h1 a { color:#c8d1d5; }
-      .manager-current-path { color:#9ca7ac !important; }
-      .manager-back-button, .upload-panel, .file-sort-toolbar .btn, .file-list-panel tr[data-file-row], .file-list-empty { border-color:#353b3e !important; background:#24282a !important; color:#d9dddf !important; }
-      .upload-controls .form-control, .access-grid .form-select, .access-grid > .form-control { border-color:#3b4245 !important; background:#2b3032 !important; color:#e1e4e5 !important; }
-      .upload-controls .btn, .file-sort-toolbar .btn.active, .copy-link-group .btn { border-color:#465055 !important; background:#353c3f !important; color:#e1e4e5 !important; }
-      .file-list-panel tr[data-file-row] > td:nth-child(5) { border-color:#343a3d; }
-      .file-thumb, .file-icon, .file-preview-trigger, .copy-link-group .copy-field { border-color:#394043 !important; background:#2c3133 !important; color:#adb7bb !important; }
-      .file-link-cell .fw-semibold, .file-access-details > summary strong { color:#e1e4e5; }
-      .file-link-cell .text-muted, .file-list-panel td > .text-muted, .file-access-details > summary { color:#a8b1b5 !important; }
-      .file-delete-form .btn { border-color:#563f42 !important; background:#33292b !important; color:#d5aeb2 !important; }
-    }
-    .preview-image { max-width:100%; max-height:72vh; object-fit:contain; }
-    .uploaded-focus { outline:3px solid var(--bs-primary); outline-offset:-3px; animation:uploadedPulse 1.8s ease-in-out 2; }
-    @keyframes uploadedPulse { 0%,100% { background:transparent; } 50% { background:rgba(var(--bs-primary-rgb), .14); } }
   </style>
 </head>
-<body class="technical-page">
-<div class="container manager-shell py-4">
+<body class="technical-page file-manager-page">
+<div class="container manager-shell">
   <div class="manager-header">
     <div class="manager-heading">
       <h1 class="h3 mb-1"><a href="/">{{.Domain}}</a> <span class="text-muted">/ {{index .T "file_manager"}}</span></h1>
@@ -137,7 +149,7 @@
 
   <div class="file-sort-toolbar" role="group" aria-label="{{index .T "files_sort_label"}}">
     <span class="text-muted small">{{index .T "files_sort_label"}}</span>
-    <button class="btn btn-sm btn-outline-secondary active" type="button" data-sort-files="date" aria-pressed="true">{{index .T "files_sort_date"}}</button>
+    <button class="btn btn-sm btn-outline-secondary active" type="button" data-sort-files="date" data-sort-direction="desc" aria-pressed="true">{{index .T "files_sort_date"}}</button>
     <button class="btn btn-sm btn-outline-secondary" type="button" data-sort-files="size" aria-pressed="false">{{index .T "files_sort_size"}}</button>
     <button class="btn btn-sm btn-outline-secondary" type="button" data-sort-files="name" aria-pressed="false">{{index .T "files_sort_name"}}</button>
   </div>
@@ -147,12 +159,12 @@
       <table class="table table-hover align-middle mb-0">
         <thead>
           <tr>
-            <th style="width:86px;">{{index .T "files_col_preview"}}</th>
+            <th>{{index .T "files_col_preview"}}</th>
             <th class="file-link-cell">{{index .T "files_col_file_link"}}</th>
-            <th style="width:140px;">{{index .T "files_col_size"}}</th>
-            <th style="width:170px;">{{index .T "files_col_date"}}</th>
+            <th>{{index .T "files_col_size"}}</th>
+            <th>{{index .T "files_col_date"}}</th>
             <th class="access-cell">{{index .T "files_col_access"}}</th>
-            <th style="width:110px;">{{index .T "files_col_actions"}}</th>
+            <th class="file-actions-heading" title="{{index .T "files_col_actions"}}"><span aria-hidden="true">•••</span><span class="visually-hidden">{{index .T "files_col_actions"}}</span></th>
           </tr>
         </thead>
         <tbody id="fileTableBody">
@@ -160,17 +172,16 @@
           <tr data-file-row data-name="{{.Name}}" data-size="{{.Size}}" data-date="{{.CreatedUnix}}" id="file-{{printf "%x" .Name}}">
             <td>
               {{if .IsImage}}
-              <button class="file-preview-trigger" type="button" data-preview-image data-preview-src="{{.AssetPath}}" data-preview-name="{{.Name}}" aria-label="{{index $.T "files_preview_title"}} {{.Name}}">{{.Extension}}</button>
+              <button class="file-preview-trigger" type="button" data-preview-image data-preview-src="{{.AssetPath}}" data-preview-name="{{.Name}}" data-preview-size="{{.SizeLabel}}" data-preview-date="{{.CreatedAt}}" data-preview-access="{{if eq .AccessMode "timer"}}{{index $.T "files_access_timer"}}{{else if eq .AccessMode "token"}}{{index $.T "files_access_token"}}{{else}}{{index $.T "files_access_public"}}{{end}}" data-preview-page-path="{{.PagePath}}" aria-label="{{index $.T "files_preview_title"}} {{.Name}}"><img class="file-thumb" src="{{.AssetPath}}" alt="" loading="lazy"></button>
               {{else}}
               <div class="file-icon">{{.Extension}}</div>
               {{end}}
             </td>
             <td class="file-link-cell">
-              <div class="fw-semibold text-break">{{.Name}}</div>
-              {{if .PagePath}}<div class="small text-muted">{{index $.T "files_uri_label"}} <code>{{.PagePath}}</code></div>{{end}}
-              <div class="input-group input-group-sm copy-link-group mt-2">
-                <input class="form-control copy-field" readonly data-full-link data-asset-path="{{.AssetPath}}">
-                <button class="btn btn-outline-secondary" type="button" data-copy-target="full">{{index $.T "files_copy"}}</button>
+              <div class="file-link-row">
+                <a class="file-name-link" href="{{.AssetPath}}" title="{{.Name}}{{if .PagePath}} · {{index $.T "files_uri_label"}} {{.PagePath}}{{end}}">{{.Name}}</a>
+                <input type="hidden" data-full-link data-asset-path="{{.AssetPath}}">
+                <button class="btn btn-outline-secondary btn-sm file-icon-button" type="button" data-copy-target="full" title="{{index $.T "files_copy"}}" aria-label="{{index $.T "files_copy"}}"><img src="/p/static/copy.png" alt=""></button>
               </div>
             </td>
             <td data-label="{{index $.T "files_col_size"}}"><span class="text-muted">{{.SizeLabel}}</span></td>
@@ -189,10 +200,10 @@
                     </select>
                     <input name="access_token" class="form-control form-control-sm copy-field" placeholder="{{index $.T "files_access_token_placeholder"}}" value="{{.Token}}" data-access-token data-token-control>
                     <input name="access_days" class="form-control form-control-sm" type="number" min="0" placeholder="{{index $.T "files_access_days_placeholder"}}" data-timer-control>
-                    <button class="btn btn-sm btn-outline-primary d-none" type="submit" data-save-access>{{index $.T "files_access_save"}}</button>
+                    <button class="btn btn-sm btn-outline-primary file-icon-button d-none" type="submit" data-save-access title="{{index $.T "files_access_save"}}" aria-label="{{index $.T "files_access_save"}}"><img src="/p/static/save-page.png" alt=""></button>
                     <div class="input-group input-group-sm copy-link-group" data-token-link-row style="grid-column:1 / -1;">
                       <input class="form-control copy-field" readonly data-token-link data-asset-path="{{.AssetPath}}">
-                      <button class="btn btn-outline-secondary" type="button" data-copy-target="token">{{index $.T "files_copy_token_link"}}</button>
+                      <button class="btn btn-outline-secondary file-icon-button" type="button" data-copy-target="token" title="{{index $.T "files_copy_token_link"}}" aria-label="{{index $.T "files_copy_token_link"}}"><img src="/p/static/copy.png" alt=""></button>
                     </div>
                   </form>
                   {{if .ExpiresAt}}<small class="text-muted">{{index $.T "files_expires"}} {{.ExpiresAt}}</small>{{end}}
@@ -202,7 +213,7 @@
             <td>
               <form method="post" action="{{$.Path}}?files" class="file-delete-form">
                 <input type="hidden" name="name" value="{{.Name}}">
-                <button class="btn btn-outline-danger btn-sm" type="submit"><img src="/p/static/cross.png" width="14" alt=""> {{index $.T "files_delete"}}</button>
+                <button class="btn btn-outline-danger btn-sm file-icon-button" type="submit" title="{{index $.T "files_delete"}}" aria-label="{{index $.T "files_delete"}}"><img src="/p/static/cross.png" alt=""></button>
               </form>
             </td>
           </tr>
@@ -229,14 +240,44 @@
   <div class="modal-dialog modal-xl modal-dialog-centered"><div class="modal-content">
     <div class="modal-header">
       <h5 class="modal-title" id="imagePreviewTitle">{{index .T "files_preview_title"}}</h5>
-      <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="{{index .T "tree_close"}}"></button>
+      <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="{{index .T "tree_close"}}">&times;</button>
     </div>
-    <div class="modal-body text-center bg-body-tertiary">
-      <img id="imagePreviewFull" class="preview-image" alt="">
+    <div class="modal-body bg-body-tertiary">
+      <div class="preview-layout">
+        <div class="preview-stage"><img id="imagePreviewFull" class="preview-image" alt=""></div>
+        <aside class="preview-file-details">
+          <div class="preview-detail"><span class="preview-detail-label">{{index .T "files_col_file_link"}}</span><strong class="preview-detail-value" id="imagePreviewName"></strong></div>
+          <div class="preview-detail"><span class="preview-detail-label">{{index .T "files_col_file_link"}}</span><div class="preview-link-row"><a id="imagePreviewLink" href=""></a><button class="btn btn-outline-secondary btn-sm file-icon-button" type="button" id="imagePreviewCopy" title="{{index .T "files_copy"}}" aria-label="{{index .T "files_copy"}}"><img src="/p/static/copy.png" alt=""></button></div></div>
+          <div class="preview-detail"><span class="preview-detail-label">{{index .T "files_col_size"}}</span><span class="preview-detail-value" id="imagePreviewSize"></span></div>
+          <div class="preview-detail"><span class="preview-detail-label">{{index .T "files_col_date"}}</span><span class="preview-detail-value" id="imagePreviewDate"></span></div>
+          <div class="preview-detail"><span class="preview-detail-label">{{index .T "files_col_access"}}</span><span class="preview-detail-value" id="imagePreviewAccess"></span></div>
+          <div class="preview-detail" id="imagePreviewPathRow" hidden><span class="preview-detail-label">{{index .T "files_uri_label"}}</span><span class="preview-detail-value" id="imagePreviewPath"></span></div>
+          <form method="post" action="{{.Path}}?files" class="file-delete-form preview-delete-form" id="imagePreviewDeleteForm">
+            <input type="hidden" name="name" id="imagePreviewDeleteName">
+            <button class="btn btn-outline-danger" type="submit"><img src="/p/static/cross.png" width="16" height="16" alt=""> {{index .T "files_delete"}}</button>
+          </form>
+        </aside>
+      </div>
     </div>
     <div class="modal-footer justify-content-between">
-      <button type="button" class="btn btn-outline-secondary" id="imagePreviewPrev">{{index .T "files_prev"}}</button>
-      <button type="button" class="btn btn-outline-secondary" id="imagePreviewNext">{{index .T "files_next"}}</button>
+      <div class="preview-navigation">
+        <button type="button" class="btn btn-outline-secondary" id="imagePreviewPrev" title="{{index .T "files_prev"}}" aria-label="{{index .T "files_prev"}}">←</button>
+        <button type="button" class="btn btn-outline-secondary" id="imagePreviewNext" title="{{index .T "files_next"}}" aria-label="{{index .T "files_next"}}">→</button>
+      </div>
+    </div>
+  </div></div>
+</div>
+
+<div class="modal fade" id="fileDeleteConfirmModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-dialog-centered"><div class="modal-content">
+    <div class="modal-header">
+      <h5 class="modal-title">{{index .T "files_delete"}}</h5>
+      <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="{{index .T "tree_close"}}">&times;</button>
+    </div>
+    <div class="modal-body"><p class="delete-confirm-name" id="fileDeleteConfirmName"></p></div>
+    <div class="modal-footer">
+      <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">{{index .T "edit_cancel"}}</button>
+      <button type="button" class="btn btn-danger" id="fileDeleteConfirmButton">{{index .T "files_delete"}}</button>
     </div>
   </div></div>
 </div>
@@ -258,14 +299,24 @@
   const imagePreviewModalElement = document.getElementById('imagePreviewModal');
   const imagePreviewFullElement = document.getElementById('imagePreviewFull');
   const imagePreviewTitleElement = document.getElementById('imagePreviewTitle');
+  const imagePreviewNameElement = document.getElementById('imagePreviewName');
+  const imagePreviewLinkElement = document.getElementById('imagePreviewLink');
+  const imagePreviewSizeElement = document.getElementById('imagePreviewSize');
+  const imagePreviewDateElement = document.getElementById('imagePreviewDate');
+  const imagePreviewAccessElement = document.getElementById('imagePreviewAccess');
+  const imagePreviewPathElement = document.getElementById('imagePreviewPath');
+  const imagePreviewPathRowElement = document.getElementById('imagePreviewPathRow');
+  const imagePreviewDeleteNameElement = document.getElementById('imagePreviewDeleteName');
   const imagePreviewModalController = imagePreviewModalElement && window.bootstrap ? new bootstrap.Modal(imagePreviewModalElement) : null;
-  const compactFileLayout = window.matchMedia && window.matchMedia('(max-width: 900px)').matches;
+  const deleteConfirmModalElement = document.getElementById('fileDeleteConfirmModal');
+  const deleteConfirmNameElement = document.getElementById('fileDeleteConfirmName');
+  const deleteConfirmButtonElement = document.getElementById('fileDeleteConfirmButton');
+  const deleteConfirmModalController = deleteConfirmModalElement && window.bootstrap ? new bootstrap.Modal(deleteConfirmModalElement) : null;
+  const hoverPreviewMedia = window.matchMedia('(hover: hover) and (pointer: fine)');
   let currentPreviewIndex = 0;
+  let previewHoverTimer = 0;
+  let pendingDeleteForm = null;
   let uploadInFlight = false;
-
-  for (const accessDetailsElement of document.querySelectorAll('[data-file-access-details]')) {
-    accessDetailsElement.open = !compactFileLayout;
-  }
 
   function absoluteURL(assetPath) {
     return new URL(assetPath, window.location.origin).href;
@@ -318,6 +369,16 @@
     }
   }
 
+  function showDeleteConfirmModal() {
+    if (deleteConfirmModalController) {
+      deleteConfirmModalController.show();
+      return;
+    }
+    deleteConfirmModalElement.classList.add('show');
+    deleteConfirmModalElement.style.display = 'block';
+    deleteConfirmModalElement.removeAttribute('aria-hidden');
+  }
+
   function focusUploadedFiles() {
     const uploadedParam = new URLSearchParams(window.location.search).get('uploaded') || '';
     const uploadedNames = uploadedParam.split(',').map(function cleanName(uploadedName) { return uploadedName.trim(); }).filter(Boolean);
@@ -356,6 +417,9 @@
     const accessSummaryValueElement = accessDetailsElement ? accessDetailsElement.querySelector('summary strong') : null;
     const selectedModeOption = modeElement.options[modeElement.selectedIndex];
     if (accessSummaryValueElement && selectedModeOption) { accessSummaryValueElement.textContent = selectedModeOption.textContent; }
+    const fileRowElement = formElement.closest('[data-file-row]');
+    const previewTriggerElement = fileRowElement ? fileRowElement.querySelector('[data-preview-image]') : null;
+    if (previewTriggerElement && selectedModeOption) { previewTriggerElement.dataset.previewAccess = selectedModeOption.textContent; }
     const isTokenMode = modeElement.value === 'token';
     const isTimerMode = modeElement.value === 'timer';
     if (tokenControlElement) { tokenControlElement.classList.toggle('d-none', !isTokenMode); }
@@ -403,11 +467,25 @@
     const inputElement = holderElement.querySelector(targetSelector);
     if (!inputElement) { return; }
     copyText(inputElement.value).then(function markCopied() {
-      const previousText = copyButtonElement.textContent;
-      copyButtonElement.textContent = {{printf "%q" (index .T "files_copied")}};
-      window.setTimeout(function restoreText() { copyButtonElement.textContent = previousText; }, 1200);
+      const previousHTML = copyButtonElement.innerHTML;
+      const previousTitle = copyButtonElement.title;
+      copyButtonElement.textContent = '✓';
+      copyButtonElement.title = {{printf "%q" (index .T "files_copied")}};
+      window.setTimeout(function restoreCopyButton() {
+        copyButtonElement.innerHTML = previousHTML;
+        copyButtonElement.title = previousTitle;
+      }, 1200);
     });
   });
+
+  for (const accessDetailsElement of document.querySelectorAll('[data-file-access-details]')) {
+    accessDetailsElement.addEventListener('toggle', function closeOtherAccessPanels() {
+      if (!accessDetailsElement.open) { return; }
+      for (const otherDetailsElement of document.querySelectorAll('[data-file-access-details]')) {
+        if (otherDetailsElement !== accessDetailsElement) { otherDetailsElement.open = false; }
+      }
+    });
+  }
 
   for (const formElement of document.querySelectorAll('[data-access-form]')) {
     const modeElement = formElement.querySelector('[data-access-mode]');
@@ -438,16 +516,17 @@
     }
   }
 
-  function sortRows(sortKind) {
+  function sortRows(sortKind, sortDirection) {
     const rows = Array.from(document.querySelectorAll('[data-file-row]'));
+    const directionFactor = sortDirection === 'asc' ? 1 : -1;
     rows.sort(function compareRows(leftRow, rightRow) {
       if (sortKind === 'size') {
-        return Number(rightRow.dataset.size || 0) - Number(leftRow.dataset.size || 0);
+        return directionFactor * (Number(leftRow.dataset.size || 0) - Number(rightRow.dataset.size || 0));
       }
       if (sortKind === 'date') {
-        return Number(rightRow.dataset.date || 0) - Number(leftRow.dataset.date || 0);
+        return directionFactor * (Number(leftRow.dataset.date || 0) - Number(rightRow.dataset.date || 0));
       }
-      return (leftRow.dataset.name || '').localeCompare(rightRow.dataset.name || '');
+      return directionFactor * (leftRow.dataset.name || '').localeCompare(rightRow.dataset.name || '');
     });
     for (const rowElement of rows) {
       tableBodyElement.appendChild(rowElement);
@@ -456,11 +535,21 @@
 
   for (const sortButtonElement of document.querySelectorAll('[data-sort-files]')) {
     sortButtonElement.addEventListener('click', function onSortClick() {
-      sortRows(sortButtonElement.dataset.sortFiles || 'date');
+      const sortKind = sortButtonElement.dataset.sortFiles || 'date';
+      const wasActive = sortButtonElement.classList.contains('active');
+      const currentDirection = sortButtonElement.dataset.sortDirection || '';
+      const defaultDirection = sortKind === 'name' ? 'asc' : 'desc';
+      const nextDirection = wasActive ? (currentDirection === 'asc' ? 'desc' : 'asc') : defaultDirection;
+      sortRows(sortKind, nextDirection);
       for (const otherSortButtonElement of document.querySelectorAll('[data-sort-files]')) {
         const selected = otherSortButtonElement === sortButtonElement;
         otherSortButtonElement.classList.toggle('active', selected);
         otherSortButtonElement.setAttribute('aria-pressed', selected ? 'true' : 'false');
+        if (selected) {
+          otherSortButtonElement.dataset.sortDirection = nextDirection;
+        } else {
+          delete otherSortButtonElement.dataset.sortDirection;
+        }
       }
     });
   }
@@ -611,8 +700,21 @@
     if (previewImages.length === 0) { return; }
     currentPreviewIndex = (index + previewImages.length) % previewImages.length;
     const imageElement = previewImages[currentPreviewIndex];
-    imagePreviewFullElement.src = imageElement.dataset.previewSrc || '';
-    imagePreviewTitleElement.textContent = imageElement.dataset.previewName || {{printf "%q" (index .T "files_preview_title")}};
+    const previewPath = imageElement.dataset.previewSrc || '';
+    const previewName = imageElement.dataset.previewName || {{printf "%q" (index .T "files_preview_title")}};
+    const pagePath = imageElement.dataset.previewPagePath || '';
+    imagePreviewFullElement.src = previewPath;
+    imagePreviewFullElement.alt = previewName;
+    imagePreviewTitleElement.textContent = previewName;
+    imagePreviewNameElement.textContent = previewName;
+    imagePreviewLinkElement.href = previewPath;
+    imagePreviewLinkElement.textContent = absoluteURL(previewPath);
+    imagePreviewSizeElement.textContent = imageElement.dataset.previewSize || '';
+    imagePreviewDateElement.textContent = imageElement.dataset.previewDate || '';
+    imagePreviewAccessElement.textContent = imageElement.dataset.previewAccess || '';
+    imagePreviewPathElement.textContent = pagePath;
+    imagePreviewPathRowElement.hidden = pagePath === '';
+    imagePreviewDeleteNameElement.value = previewName;
     showImagePreviewModal();
   }
 
@@ -620,9 +722,46 @@
     previewTriggerElement.addEventListener('click', function onPreviewClick() {
       showPreview(index);
     });
+    previewTriggerElement.addEventListener('mouseenter', function onPreviewEnter() {
+      if (!hoverPreviewMedia.matches) { return; }
+      window.clearTimeout(previewHoverTimer);
+      previewHoverTimer = window.setTimeout(function showHoveredPreview() { showPreview(index); }, 300);
+    });
+    previewTriggerElement.addEventListener('mouseleave', function onPreviewLeave() {
+      window.clearTimeout(previewHoverTimer);
+    });
   });
   document.getElementById('imagePreviewPrev').addEventListener('click', function onPrevClick() { showPreview(currentPreviewIndex - 1); });
   document.getElementById('imagePreviewNext').addEventListener('click', function onNextClick() { showPreview(currentPreviewIndex + 1); });
+  document.getElementById('imagePreviewCopy').addEventListener('click', function copyPreviewLink() {
+    copyText(imagePreviewLinkElement.href);
+  });
+  document.addEventListener('keydown', function navigatePreviewWithKeyboard(event) {
+    if (!imagePreviewModalElement.classList.contains('show')) { return; }
+    if (event.key === 'ArrowLeft') { showPreview(currentPreviewIndex - 1); }
+    if (event.key === 'ArrowRight') { showPreview(currentPreviewIndex + 1); }
+  });
+
+  for (const deleteFormElement of document.querySelectorAll('.file-delete-form')) {
+    deleteFormElement.addEventListener('submit', function confirmFileDeletion(event) {
+      if (deleteFormElement.dataset.deleteConfirmed === 'true') { return; }
+      event.preventDefault();
+      pendingDeleteForm = deleteFormElement;
+      const nameInputElement = deleteFormElement.querySelector('input[name="name"]');
+      deleteConfirmNameElement.textContent = nameInputElement ? nameInputElement.value : '';
+      if (imagePreviewModalElement.classList.contains('show') && imagePreviewModalController) {
+        imagePreviewModalController.hide();
+        window.setTimeout(showDeleteConfirmModal, 180);
+      } else {
+        showDeleteConfirmModal();
+      }
+    });
+  }
+  deleteConfirmButtonElement.addEventListener('click', function deleteConfirmedFile() {
+    if (!pendingDeleteForm) { return; }
+    pendingDeleteForm.dataset.deleteConfirmed = 'true';
+    pendingDeleteForm.requestSubmit();
+  });
 
   writeCopyFields();
   focusUploadedFiles();

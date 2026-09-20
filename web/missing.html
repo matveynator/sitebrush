@@ -20,11 +20,17 @@
     <h1 class="section-heading"><img src="/p/static/sitebrush-app-icon.png" class="section-icon" alt=""><a href="/">{{.Domain}}</a> <small class="text-muted">| {{index .T "missing_title"}}</small></h1>
   </div>
 
-  <div class="alert missing-page-alert {{if .IsAdmin}}alert-success{{else}}alert-info{{end}}" role="alert">
-    {{index .T "missing_page_not_found_prefix"}} <strong>{{.Path}}</strong> {{index .T "missing_page_not_found_suffix"}} <a class="alert-link" href="{{if .EditLink}}{{.EditLink}}{{else}}{{.Path}}?visual{{end}}">{{index .T "missing_create_page"}}</a>.
-  </div>
+  <section class="missing-page-primary-card" aria-labelledby="missing-page-primary-title">
+    <div class="missing-page-primary-copy">
+      <span class="missing-page-error-code">404</span>
+      <h2 id="missing-page-primary-title">{{index .T "missing_title"}}</h2>
+      <p>{{index .T "missing_page_not_found_prefix"}} <strong>{{.Path}}</strong> {{index .T "missing_page_not_found_suffix"}}</p>
+    </div>
+    <a class="btn btn-primary btn-lg missing-page-create-button" href="{{if .EditLink}}{{.EditLink}}{{else}}{{.Path}}?visual{{end}}"><span aria-hidden="true">＋</span>{{index .T "missing_create_page"}}</a>
+  </section>
 
   {{if .IsAdmin}}
+  <section class="missing-page-secondary-actions">
   <div class="missing-page-actions">
   <form method="post" action="{{.Path}}?grab" data-grab-form class="card card-body missing-page-form missing-page-copy-form">
     <div class="missing-page-form-title">
@@ -98,11 +104,12 @@
     <button type="submit" class="btn btn-primary missing-page-submit"><img src="/p/static/backup.png" alt=""> {{index .T "missing_restore_backup_button"}}</button>
   </form>
   </div>
+  </section>
 
   <div class="modal fade" id="grabProgressModal" tabindex="-1" aria-hidden="true">
     <div class="modal-dialog modal-lg"><div class="modal-content"><div class="modal-header">
       <h5 class="modal-title" id="grab_modal_title">{{index .T "missing_modal_loading_title"}}</h5>
-      <button type="button" class="btn-close d-none" id="grab_modal_header_close" data-bs-dismiss="modal" aria-label="{{index .T "tree_close"}}"></button>
+      <button type="button" class="btn-close d-none" id="grab_modal_header_close" data-bs-dismiss="modal" aria-label="{{index .T "tree_close"}}">&times;</button>
     </div><div class="modal-body">
       <p id="grab_progress_text">{{index .T "files_preparing"}}</p>
       <div class="progress" id="grab_progress_holder"><div class="progress-bar" id="grab_progress_bar" role="progressbar" style="width:0%;">0%</div></div>

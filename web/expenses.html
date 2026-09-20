@@ -13,8 +13,8 @@
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
   <link href="/p/static/technical_pages.css" rel="stylesheet">
 </head>
-<body class="technical-page bg-body">
-<main class="container billing-page py-5">
+<body class="technical-page bg-body expenses-page">
+<main class="container billing-page">
   <header class="page-header mb-4">
     <h1 class="section-heading"><img src="/p/static/sitebrush-app-icon.png" class="section-icon" alt=""><a href="/">{{.Domain}}</a> <small class="text-muted">| {{.Title}}</small></h1>
   </header>
@@ -26,30 +26,30 @@
     .expense-simple-page { display: grid; gap: 16px; }
     .expense-simple-toolbar { display: flex; justify-content: space-between; gap: 12px; align-items: end; flex-wrap: wrap; }
     .expense-simple-toolbar label { min-width: min(100%, 320px); }
-    .expense-simple-summary { display: grid; gap: 16px; padding: 20px; border: 1px solid var(--bs-border-color); border-radius: 6px; background: var(--bs-body-bg); }
+    .expense-simple-summary { display: grid; gap: 16px; padding: 20px; border: 1px solid var(--theme-border); border-radius: var(--theme-radius); background: var(--theme-card); }
     .expense-simple-summary-head { display: flex; justify-content: space-between; align-items: start; gap: 12px; flex-wrap: wrap; }
     .expense-simple-summary-head h2, .expense-simple-client-head strong { overflow-wrap: anywhere; }
-    .expense-simple-server-description { display: grid; gap: 10px; padding: 12px 0; border-top: 1px solid var(--bs-border-color); border-bottom: 1px solid var(--bs-border-color); }
+    .expense-simple-server-description { display: grid; gap: 10px; padding: 12px 0; border-top: 1px solid var(--theme-border); border-bottom: 1px solid var(--theme-border); }
     .expense-simple-server-description-main { display: flex; gap: 8px 16px; align-items: baseline; flex-wrap: wrap; }
-    .expense-simple-server-monitoring { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 1px; background: var(--bs-border-color); border: 1px solid var(--bs-border-color); }
-    .expense-simple-server-metric { display: grid; gap: 2px; min-width: 0; padding: 9px 10px; background: var(--bs-body-bg); }
+    .expense-simple-server-monitoring { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 1px; background: var(--theme-border); border: 1px solid var(--theme-border); }
+    .expense-simple-server-metric { display: grid; gap: 2px; min-width: 0; padding: 9px 10px; background: var(--theme-card); }
     .expense-simple-server-metric strong, .expense-simple-server-metric span, .expense-simple-server-metric small { overflow-wrap: anywhere; }
-    .expense-simple-metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 1px; background: var(--bs-border-color); border: 1px solid var(--bs-border-color); }
-    .expense-simple-metric { display: grid; gap: 3px; min-width: 0; padding: 12px; background: var(--bs-body-bg); }
+    .expense-simple-metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 1px; background: var(--theme-border); border: 1px solid var(--theme-border); }
+    .expense-simple-metric { display: grid; gap: 3px; min-width: 0; padding: 12px; background: var(--theme-card); }
     .expense-simple-metric strong { font-size: 1.15rem; overflow-wrap: anywhere; }
     .expense-simple-capacity { display: grid; gap: 6px; }
-    .expense-simple-progress { height: 8px; overflow: hidden; background: var(--bs-secondary-bg); }
-    .expense-simple-progress span { display: block; height: 100%; background: var(--bs-primary); }
-    .expense-simple-progress.is-over span { background: var(--bs-danger); }
+    .expense-simple-progress { height: 8px; overflow: hidden; background: var(--theme-muted); }
+    .expense-simple-progress span { display: block; height: 100%; background: var(--theme-primary); }
+    .expense-simple-progress.is-over span { background: var(--theme-destructive); }
     .expense-simple-clients { display: grid; gap: 8px; }
-    .expense-simple-client { border-top: 1px solid var(--bs-border-color); }
+    .expense-simple-client { border-top: 1px solid var(--theme-border); }
     .expense-simple-client summary { display: grid; grid-template-columns: minmax(180px, 1fr) repeat(3, minmax(110px, auto)); gap: 12px; align-items: center; padding: 14px 2px; cursor: pointer; list-style-position: inside; }
     .expense-simple-client-head { display: grid; gap: 2px; }
     .expense-simple-client-body { display: grid; gap: 16px; padding: 4px 0 18px 24px; }
-    .expense-simple-sites { display: grid; gap: 1px; background: var(--bs-border-color); border: 1px solid var(--bs-border-color); }
-    .expense-simple-site { display: grid; grid-template-columns: minmax(170px, 1fr) auto auto; gap: 12px; align-items: center; padding: 10px 12px; background: var(--bs-body-bg); }
+    .expense-simple-sites { display: grid; gap: 1px; background: var(--theme-border); border: 1px solid var(--theme-border); }
+    .expense-simple-site { display: grid; grid-template-columns: minmax(170px, 1fr) auto auto; gap: 12px; align-items: center; padding: 10px 12px; background: var(--theme-card); }
     .expense-simple-invoices { display: grid; gap: 6px; }
-    .expense-simple-invoice { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 12px; padding: 9px 0; border-top: 1px solid var(--bs-border-color); }
+    .expense-simple-invoice { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 12px; padding: 9px 0; border-top: 1px solid var(--theme-border); }
     @media (max-width: 760px) {
       .expense-simple-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .expense-simple-client summary, .expense-simple-site { grid-template-columns: minmax(0, 1fr); gap: 5px; }
@@ -334,7 +334,7 @@
           display: grid;
           gap: 10px;
           padding-top: 12px;
-          border-top: 1px solid var(--bs-border-color);
+          border-top: 1px solid var(--theme-border);
           min-width: 0;
         }
 
@@ -367,9 +367,9 @@
           min-height: 22px;
           margin-left: 6px;
           padding: 3px 7px;
-          border: 1px solid rgba(149, 229, 239, 0.36);
+          border: 1px solid var(--theme-border);
           border-radius: 999px;
-          background: rgba(149, 229, 239, 0.12);
+          background: var(--theme-border);
           color: var(--cyan);
           font-size: 11px;
           font-weight: 700;
@@ -390,9 +390,9 @@
         .technical-page .hosting-server-machine div,
         .technical-page .hosting-server-disk,
         .technical-page .hosting-server-metric {
-          border: 1px solid rgba(149, 229, 239, 0.18);
-          border-radius: 8px;
-          background: linear-gradient(180deg, rgba(255, 255, 255, 0.055), rgba(255, 255, 255, 0.025)), rgba(0, 0, 0, 0.10);
+          border: 1px solid var(--theme-border);
+          border-radius: var(--theme-radius);
+          background: var(--theme-card);
         }
 
         .technical-page .hosting-server-status-line span {
@@ -415,7 +415,7 @@
         .technical-page .hosting-server-quota-button {
           border: 0;
           padding: 0;
-          color: var(--bs-link-color);
+          color: var(--theme-primary);
           background: transparent;
           font: inherit;
           text-decoration: underline;
@@ -478,15 +478,15 @@
           width: 68px;
           aspect-ratio: 1;
           border-radius: 50%;
-          background: radial-gradient(circle closest-side, rgba(0, 0, 0, 0.72) 64%, transparent 66%), conic-gradient(var(--metric-accent, var(--green)) var(--metric-percent), rgba(255, 255, 255, 0.12) 0);
-          box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.08), 0 0 18px var(--metric-glow, rgba(77, 208, 162, 0.16));
+          background: radial-gradient(circle closest-side, var(--theme-card) 64%, transparent 66%), conic-gradient(var(--metric-accent, var(--green)) var(--metric-percent), var(--theme-muted) 0);
+          box-shadow: inset 0 0 0 1px var(--theme-muted), 0 0 18px var(--metric-glow, rgba(77, 208, 162, 0.16));
         }
 
         .technical-page .hosting-server-disk-chart::after {
           content: "";
           position: absolute;
           inset: 7px;
-          border: 1px solid rgba(255, 255, 255, 0.08);
+          border: 1px solid var(--theme-muted);
           border-radius: inherit;
         }
 
@@ -580,7 +580,7 @@
 
         .technical-page .hosting-server-metric-button:hover,
         .technical-page .hosting-server-metric-button:focus {
-          border-color: #ff7b86;
+          border-color: var(--theme-destructive);
           color: var(--text);
           transform: translateY(-1px);
         }
@@ -596,9 +596,9 @@
         .technical-page .hosting-server-sparkline-frame {
           position: relative;
           min-height: 42px;
-          border: 1px solid rgba(149, 229, 239, 0.12);
-          border-radius: 7px;
-          background: linear-gradient(rgba(149, 229, 239, 0.08) 1px, transparent 1px), linear-gradient(90deg, rgba(149, 229, 239, 0.07) 1px, transparent 1px), rgba(0, 0, 0, 0.16);
+          border: 1px solid var(--theme-border);
+          border-radius: var(--theme-radius);
+          background: linear-gradient(var(--theme-border) 1px, transparent 1px), linear-gradient(90deg, var(--theme-border) 1px, transparent 1px), var(--theme-muted);
           background-size: 100% 14px, 25% 100%, auto;
           overflow: hidden;
         }
@@ -608,7 +608,7 @@
           position: absolute;
           inset: auto 0 0;
           height: 36%;
-          background: linear-gradient(180deg, transparent, rgba(149, 229, 239, 0.09));
+          background: linear-gradient(180deg, transparent, var(--theme-border));
           pointer-events: none;
         }
 
@@ -620,7 +620,7 @@
           left: 10px;
           height: 2px;
           border-radius: 999px;
-          background: rgba(149, 229, 239, 0.22);
+          background: var(--theme-border);
         }
 
         .technical-page .hosting-server-sparkline {
@@ -637,16 +637,16 @@
           stroke-linecap: round;
           stroke-linejoin: round;
           stroke-width: 2.8;
-          filter: drop-shadow(0 0 5px rgba(149, 229, 239, 0.35));
+          filter: drop-shadow(0 0 5px var(--theme-border));
           vector-effect: non-scaling-stroke;
         }
 
         /* server-header-percent: controls the percentage bar under percent-based metrics. */
         .technical-page .hosting-server-percent-bar {
           height: 7px;
-          border: 1px solid rgba(149, 229, 239, 0.18);
+          border: 1px solid var(--theme-border);
           border-radius: 999px;
-          background: rgba(255, 255, 255, 0.05);
+          background: var(--theme-muted);
           overflow: hidden;
         }
 
@@ -662,12 +662,12 @@
         /* server-header-state-colors: applies green, yellow, and red state colors to disk and metric cards. */
         .technical-page .hosting-server-disk.hosting-metric-warning .hosting-server-percent-bar span,
         .technical-page .hosting-server-metric.hosting-metric-warning .hosting-server-percent-bar span {
-          background: #ffc107;
+          background: var(--theme-warning);
         }
 
         .technical-page .hosting-server-disk.hosting-metric-danger .hosting-server-percent-bar span,
         .technical-page .hosting-server-metric.hosting-metric-danger .hosting-server-percent-bar span {
-          background: #dc3545;
+          background: var(--theme-destructive);
         }
 
         .technical-page .hosting-server-disk.hosting-metric-ok,
@@ -676,25 +676,25 @@
           --metric-accent-strong: var(--cyan);
           --metric-glow: rgba(77, 208, 162, 0.20);
           border-color: rgba(77, 208, 162, 0.38);
-          background: linear-gradient(180deg, rgba(77, 208, 162, 0.11), rgba(77, 208, 162, 0.035)), rgba(0, 0, 0, 0.10);
+          background: var(--theme-card);
         }
 
         .technical-page .hosting-server-disk.hosting-metric-warning,
         .technical-page .hosting-server-metric.hosting-metric-warning {
-          --metric-accent: #ffc107;
-          --metric-accent-strong: #ffd45c;
+          --metric-accent: var(--theme-warning);
+          --metric-accent-strong: var(--theme-warning);
           --metric-glow: rgba(255, 193, 7, 0.22);
           border-color: rgba(255, 193, 7, 0.52);
-          background: linear-gradient(180deg, rgba(255, 193, 7, 0.15), rgba(255, 193, 7, 0.045)), rgba(0, 0, 0, 0.10);
+          background: var(--theme-card);
         }
 
         .technical-page .hosting-server-disk.hosting-metric-danger,
         .technical-page .hosting-server-metric.hosting-metric-danger {
-          --metric-accent: #dc3545;
-          --metric-accent-strong: #ff7b86;
+          --metric-accent: var(--theme-destructive);
+          --metric-accent-strong: var(--theme-destructive);
           --metric-glow: rgba(220, 53, 69, 0.26);
           border-color: rgba(220, 53, 69, 0.62);
-          background: linear-gradient(180deg, rgba(220, 53, 69, 0.17), rgba(220, 53, 69, 0.055)), rgba(0, 0, 0, 0.10);
+          background: var(--theme-card);
         }
 
         .technical-page .hosting-server-metric.hosting-metric-ok .hosting-server-sparkline polyline {
@@ -702,23 +702,23 @@
         }
 
         .technical-page .hosting-server-metric.hosting-metric-warning .hosting-server-sparkline polyline {
-          stroke: #ffc107;
+          stroke: var(--theme-warning);
         }
 
         .technical-page .hosting-server-metric.hosting-metric-danger .hosting-server-sparkline polyline {
-          stroke: #dc3545;
+          stroke: var(--theme-destructive);
         }
 
         /* server-header-process-modal: styles the top 5 CPU process dialog opened from a red CPU card. */
         .technical-page .hosting-process-modal .modal-content {
-          border: 1px solid rgba(149, 229, 239, 0.24);
+          border: 1px solid var(--theme-border);
           border-radius: 12px;
-          background: #252525;
+          background: var(--theme-card);
           color: var(--text);
         }
 
         .technical-page .hosting-process-modal .modal-header {
-          border-bottom-color: rgba(149, 229, 239, 0.16);
+          border-bottom-color: var(--theme-border);
         }
 
         .technical-page .hosting-process-list {
@@ -732,9 +732,9 @@
           gap: 10px;
           align-items: center;
           padding: 10px;
-          border: 1px solid rgba(149, 229, 239, 0.14);
-          border-radius: 8px;
-          background: rgba(0, 0, 0, 0.18);
+          border: 1px solid var(--theme-border);
+          border-radius: var(--theme-radius);
+          background: var(--theme-muted);
         }
 
         .technical-page .hosting-process-row span {
@@ -745,7 +745,7 @@
         }
 
         .technical-page .hosting-process-row strong {
-          color: #ff7b86;
+          color: var(--theme-destructive);
           text-align: right;
         }
 
@@ -760,7 +760,7 @@
           }
         }
 
-        @media (max-width: 900px) {
+        @media (max-width: 900px), (hover: none) and (pointer: coarse) {
           .technical-page .hosting-server-card,
           .technical-page .hosting-server-head,
           .technical-page .hosting-server-topline {
@@ -867,7 +867,7 @@
   }
 }
 
-@media (max-width: 900px) {
+@media (max-width: 900px), (hover: none) and (pointer: coarse) {
   .technical-page .hosting-server-topline,
   .technical-page .hosting-server-topline-no-disk {
     grid-template-columns: 1fr;
