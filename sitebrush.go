@@ -21875,17 +21875,28 @@ func (a *App) filesPage(w http.ResponseWriter, r *http.Request) {
 		}
 		if action == "save_access" && fileName != "" {
 			a.saveFileAccessRule(r.Context(), r, fileName)
-		} else if fileName != "" {
-			rootPath := a.domainFilesDir(r)
-			filePath := filepath.Join(rootPath, filepath.FromSlash(fileName))
-			fileSize := int64(0)
-			if fileInfo, statErr := a.statInsideStorage(filePath); statErr == nil && !fileInfo.IsDir() {
-				fileSize = fileInfo.Size()
+		} else if action == "delete_selected" || action == "delete_uri" || fileName != "" {
+			fileList, listErr := a.listManagedFiles(r.Context(), r, currentPath)
+			if listErr != nil {
+				http.Error(w, listErr.Error(), http.StatusInternalServerError)
+				return
 			}
-			_ = a.applyDomainStorageDelta(r.Context(), a.siteDomain(r.Context(), r), 0, 0, 0, -fileSize, 0)
-			_ = a.removeInsideStorage(filePath)
-			_, _ = a.db.ExecContext(r.Context(), `DELETE FROM file_access_rules WHERE domain=? AND file_name=?`, domainStorageName(a.siteDomain(r.Context(), r)), fileName)
-			_, _ = a.db.ExecContext(r.Context(), `DELETE FROM file_metadata WHERE domain=? AND file_name=?`, domainStorageName(a.siteDomain(r.Context(), r)), fileName)
+			selectedNames := r.PostForm["name"]
+			sort.Strings(selectedNames)
+			for _, managedFile := range fileList {
+				selectedIndex := sort.SearchStrings(selectedNames, managedFile.Name)
+				selected := selectedIndex < len(selectedNames) && selectedNames[selectedIndex] == managedFile.Name
+				if action == "delete_uri" {
+					selected = managedFile.PagePath != "" && managedFile.PagePath == r.PostFormValue("page_uri")
+				}
+				if !selected {
+					continue
+				}
+				if deleteErr := a.deleteManagedFile(r, managedFile.Name); deleteErr != nil {
+					http.Error(w, deleteErr.Error(), http.StatusInternalServerError)
+					return
+				}
+			}
 		}
 		httpsecurity.RedirectLocal(w, r, currentPath+"?files", http.StatusFound)
 		return
@@ -21909,6 +21920,30 @@ func (a *App) filesPage(w http.ResponseWriter, r *http.Request) {
 		fileList[index].TokenUseCount = accessRule.TokenUseCount
 	}
 	a.render(w, r, "files.html", map[string]any{"Path": currentPath, "Files": fileList, "NativeFileDialog": a.nativeFileDialog})
+}
+
+// Deletion updates accounting only after the storage jail has removed the file.
+func (a *App) deleteManagedFile(r *http.Request, fileName string) error {
+	filePath := filepath.Join(a.domainFilesDir(r), filepath.FromSlash(fileName))
+	fileInfo, statErr := a.statInsideStorage(filePath)
+	if statErr != nil {
+		return statErr
+	}
+	if fileInfo.IsDir() {
+		return fmt.Errorf("cannot delete a directory as a managed file")
+	}
+	if removeErr := a.removeInsideStorage(filePath); removeErr != nil {
+		return removeErr
+	}
+	domain := a.siteDomain(r.Context(), r)
+	if quotaErr := a.applyDomainStorageDelta(r.Context(), domain, 0, 0, 0, -fileInfo.Size(), 0); quotaErr != nil {
+		return quotaErr
+	}
+	if _, ruleErr := a.db.ExecContext(r.Context(), `DELETE FROM file_access_rules WHERE domain=? AND file_name=?`, domainStorageName(domain), fileName); ruleErr != nil {
+		return ruleErr
+	}
+	_, metadataErr := a.db.ExecContext(r.Context(), `DELETE FROM file_metadata WHERE domain=? AND file_name=?`, domainStorageName(domain), fileName)
+	return metadataErr
 }
 
 func (a *App) nativePickedFilesJSON(w http.ResponseWriter, r *http.Request) {
@@ -25113,14 +25148,22 @@ func buildContextMenuScript(isAdmin bool, isServerManager bool, isFrozen bool, p
   const isDomainFrozen = ` + strconv.FormatBool(isFrozen) + `;
   const siteCopyConfig = ` + siteCopyMenuConfigJSON(pagePath, translations) + `;
   const actionConfigByName = {
-    delete: { path: "?delete=` + strconv.Itoa(revisionID) + `", message: "` + confirmDeletePrompt + `" },
-    freeze: { path: "?freeze", message: "` + confirmFreezePrompt + `" },
-    publish: { path: "?publish", message: "` + confirmPublishPrompt + `" },
-    remove_password_protection: { path: "?page_password=remove", message: "` + removePasswordProtectionPrompt + `" }
+    delete: { path: "?delete=` + strconv.Itoa(revisionID) + `", message: "` + confirmDeletePrompt + `", icon: "delete" },
+    freeze: { path: "?freeze", message: "` + confirmFreezePrompt + `", icon: "freeze" },
+    publish: { path: "?publish", message: "` + confirmPublishPrompt + `", icon: "publish" },
+    remove_password_protection: { path: "?page_password=remove", message: "` + removePasswordProtectionPrompt + `", icon: "unlock" }
   };
   const confirmYesLabel = "` + confirmYesLabel + `";
   const confirmNoLabel = "` + confirmNoLabel + `";
-  function openConfirmationDialog(confirmMessageText, onConfirm) {
+  function appendConfirmationIcon(modalElement, iconName) {
+    const cornerIconElement = document.createElement("img");
+    cornerIconElement.className = "SiteBrushConfirmCornerIcon";
+    cornerIconElement.src = "/p/static/" + iconName + ".png";
+    cornerIconElement.alt = "";
+    modalElement.classList.add("SiteBrushConfirmModalWithIcon");
+    modalElement.appendChild(cornerIconElement);
+  }
+  function openConfirmationDialog(confirmMessageText, onConfirm, iconName) {
     closeSitebrushMenu();
     const overlayElement = document.createElement("div");
     overlayElement.className = "SiteBrushConfirmOverlay";
@@ -25129,6 +25172,7 @@ func buildContextMenuScript(isAdmin bool, isServerManager bool, isFrozen bool, p
     const textElement = document.createElement("p");
     textElement.className = "SiteBrushConfirmText";
     textElement.textContent = confirmMessageText;
+    appendConfirmationIcon(modalElement, iconName);
     const actionRowElement = document.createElement("div");
     actionRowElement.className = "SiteBrushConfirmActions";
     const confirmButtonElement = document.createElement("button");
@@ -25199,6 +25243,7 @@ func buildContextMenuScript(isAdmin bool, isServerManager bool, isFrozen bool, p
     overlayElement.className = "SiteBrushConfirmOverlay";
     const modalElement = document.createElement("div");
     modalElement.className = "SiteBrushConfirmModal SiteBrushPasswordModal";
+    appendConfirmationIcon(modalElement, "lock");
     const textElement = document.createElement("p");
     textElement.className = "SiteBrushConfirmText";
     textElement.textContent = "` + protectPasswordPrompt + `";
@@ -25405,11 +25450,11 @@ func buildContextMenuScript(isAdmin bool, isServerManager bool, isFrozen bool, p
 		          openPublishConfirmationDialog(dialogMessage, previewPayload.paths || [], submitConfirmedAction);
 		        })
         .catch(function fallbackPublishConfirmation() {
-          openConfirmationDialog(selectedActionConfig.message + "\n\n" + "` + publishPreviewLoadingLabel + `", submitConfirmedAction);
+          openConfirmationDialog(selectedActionConfig.message + "\n\n" + "` + publishPreviewLoadingLabel + `", submitConfirmedAction, selectedActionConfig.icon);
         });
       return;
     }
-    openConfirmationDialog(selectedActionConfig.message, submitConfirmedAction);
+    openConfirmationDialog(selectedActionConfig.message, submitConfirmedAction, selectedActionConfig.icon);
     function submitConfirmedAction() {
       if (actionName === "publish") {
         const publishToken = randomSitebrushToken();
@@ -25708,6 +25753,7 @@ func guestContextMenuStylesAndHelpers() string {
   .SiteBrushContextMenuFooterLink,.SiteBrushContextMenuVersion{color:#a7bbd8}
   .SiteBrushContextMenuFooterLink:link,.SiteBrushContextMenuFooterLink:visited,.SiteBrushContextMenuFooterLink:active,.SiteBrushContextMenuFooterLink:hover,.SiteBrushContextMenuVersion:link,.SiteBrushContextMenuVersion:visited,.SiteBrushContextMenuVersion:active,.SiteBrushContextMenuVersion:hover{color:#a7bbd8}
 }
+` + sitebrushMenuMeridianStyles() + `
 </style>
 <script>
 const sitebrushContextMenuShadowCSS = document.currentScript && document.currentScript.previousElementSibling ? document.currentScript.previousElementSibling.textContent : "";
@@ -25944,6 +25990,32 @@ function showSitebrushMenu(browserEvent, menuHtmlEntries, currentPagePath, froze
 </script>`
 }
 
+// Keep guest and administrator menus at the same scale, including their shadow roots.
+func sitebrushMenuMeridianStyles() string {
+	return `
+.SiteBrushMenuBox{transform:scale(.75);transform-origin:top left;border-radius:13.333px;background:#fff;border-color:#c9cfd8;box-shadow:0 12px 36px rgba(0,0,0,.16);padding:6px}
+.SiteBrushContextMenuLink{border-radius:8px}
+.SiteBrushConfirmOverlay,.SiteBrushTreeOverlay{padding:16px!important;box-sizing:border-box!important}
+.SiteBrushConfirmModal,.SiteBrushTreeModal{box-sizing:border-box!important;min-width:0!important;width:min(100%,420px);max-width:100%!important;max-height:calc(100dvh - 32px)!important;overflow:auto!important;border:1px solid #c9cfd8!important;border-radius:10px!important;padding:24px!important;background:#fff!important;color:#181b21!important;box-shadow:0 20px 60px rgba(0,0,0,.2);font-family:Geist,ui-sans-serif,system-ui,sans-serif!important;font-size:14px!important;line-height:1.5!important}
+.SiteBrushTreeModal{width:min(100%,700px)}
+.SiteBrushConfirmText,.SiteBrushTreeTitle,.SiteBrushTreeContent,.SiteBrushTreeLink{color:inherit!important;font-family:inherit!important}
+.SiteBrushConfirmText{margin:0 0 24px!important}
+.SiteBrushConfirmModalWithIcon{position:relative!important}
+.SiteBrushConfirmCornerIcon{position:absolute!important;top:16px!important;right:16px!important;width:60px!important;height:60px!important;object-fit:contain!important;opacity:.95}
+.SiteBrushConfirmModalWithIcon .SiteBrushConfirmText{min-height:60px!important;padding-right:76px!important;box-sizing:border-box!important}
+.SiteBrushConfirmActions{gap:8px!important;flex-wrap:wrap}
+.SiteBrushConfirmButton,.SiteBrushCancelButton,.SiteBrushTreeCloseButton,.SiteBrushPasswordInput{box-sizing:border-box!important;border:1px solid #c9cfd8!important;border-radius:8px!important;padding:8px 16px!important;font:inherit!important;background:#e8eaee!important;color:#181b21!important}
+.SiteBrushPasswordInput{background:#fff!important;padding:10px 12px!important;margin-bottom:16px!important}
+.SiteBrushTreeCloseButton{margin:24px 0 0!important}
+@media(prefers-color-scheme:dark){
+ .SiteBrushMenuBox{background:#1c2027;border-color:#353c48}
+ .SiteBrushConfirmModal,.SiteBrushTreeModal{background:#1c2027!important;color:#e6e9ef!important;border-color:#353c48!important;border-radius:8px!important;font-family:Outfit,Geist,ui-sans-serif,system-ui,sans-serif!important}
+ .SiteBrushConfirmButton,.SiteBrushCancelButton,.SiteBrushTreeCloseButton,.SiteBrushPasswordInput{background:#232831!important;color:#e6e9ef!important;border-color:#353c48!important}
+}
+@media(max-width:600px){.SiteBrushConfirmModal,.SiteBrushTreeModal{padding:16px!important}}
+`
+}
+
 func contextMenuStylesAndHelpers() string {
 	return `<style>
 .SiteBrushMenuBox,.SiteBrushMenuBox *{all:initial;box-sizing:border-box}
@@ -26025,6 +26097,7 @@ func contextMenuStylesAndHelpers() string {
   .SiteBrushTreeTitle,.SiteBrushTreeContent,.SiteBrushTreeLink{color:#dbe8ff}
   .SiteBrushTreeLink:link,.SiteBrushTreeLink:visited,.SiteBrushTreeLink:active,.SiteBrushTreeLink:hover{color:#dbe8ff}
 }
+` + sitebrushMenuMeridianStyles() + `
 </style>
 <script>
 const sitebrushContextMenuShadowCSS = document.currentScript && document.currentScript.previousElementSibling ? document.currentScript.previousElementSibling.textContent : "";
