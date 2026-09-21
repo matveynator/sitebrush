@@ -325,6 +325,12 @@ After installation:
 https://your-domain.example
 ```
 
+## Visit analytics
+
+SiteBrush collects server counters through bounded, nonblocking channels and prepares reports in the background. An embedded script adds browser views, activity and return-visit patterns without making page rendering wait for analytics. The dashboard separates browser observations from HTTP requests and marks incomplete or delayed reports.
+
+Each site stores compact summaries in a separate, disposable analytics database (up to 16 MiB), with rotating gzip daily summaries (up to 32 MiB). Editing uses its own database. History covers up to 90 UTC days within bounded storage and memory limits. The default analytics memory budget is 64 MiB (`SITEBRUSH_ANALYTICS_MEMORY_MIB`). Under overload, serving the website takes priority over complete statistics.
+
 ## Best suited for
 
 - Business websites and landing pages

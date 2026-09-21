@@ -408,6 +408,45 @@
     </div>
   </div>
 
+  <nav class="d-flex flex-wrap gap-2 mb-3" aria-label="Analytics">
+    <a class="btn btn-outline-secondary" href="#browser-overview">{{index .T "analytics_browser_overview"}}</a>
+    <a class="btn btn-outline-secondary" href="#browser-returns">{{index .T "analytics_browser_returns"}}</a>
+    <a class="btn btn-outline-secondary" href="#browser-content">{{index .T "analytics_browser_content"}}</a>
+    <a class="btn btn-outline-secondary" href="#technical-analytics">{{index .T "analytics_browser_technical"}}</a>
+  </nav>
+  <section id="browser-overview" class="card mb-4"><div class="card-body">
+    <h2 class="h5">{{index .T "analytics_browser_overview"}}</h2>
+    <div class="d-flex flex-wrap gap-2 mb-3">
+      <a href="?analytics&amp;days=1">{{index .T "analytics_browser_today"}}</a>
+      <a href="?analytics&amp;days=7">7 {{index .T "analytics_browser_days"}}</a>
+      <a href="?analytics&amp;days=30">30 {{index .T "analytics_browser_days"}}</a>
+      <a href="?analytics&amp;days=90">90 {{index .T "analytics_browser_days"}}</a>
+    </div>
+    <p class="small">{{index .T "analytics_browser_scope"}}</p>
+    {{if .BrowserAnalytics.Available}}
+    <p>{{.BrowserAnalytics.Days}} {{index .T "analytics_browser_days"}} · {{.BrowserAnalytics.Age}}</p>
+    <p class="small">{{index .T "analytics_browser_queue"}}: {{.BrowserAnalytics.Report.QueuePercent}}% · {{index .T "analytics_browser_lag"}}: {{.BrowserAnalytics.Report.ProcessingLagMS}} ms · {{index .T "analytics_browser_memory"}}: {{.BrowserAnalytics.Report.EstimatedBytes}} B</p>
+    <p class="small">{{.BrowserAnalytics.Report.PeriodStart.Format "2006-01-02"}} — {{.BrowserAnalytics.Report.PeriodEnd.Format "2006-01-02"}} UTC</p>
+    {{if not .BrowserAnalytics.Report.ComparisonAvailable}}<p class="small">{{index .T "analytics_browser_comparison_pending"}}</p>{{end}}
+    {{if .BrowserAnalytics.Report.Incomplete}}<p role="status" class="alert alert-warning">{{index .T "analytics_browser_incomplete"}}</p>{{end}}
+    {{if .BrowserAnalytics.Report.HistoryLimited}}<p role="status">{{index .T "analytics_browser_limited"}}</p>{{end}}
+    <div class="metric-grid">
+      {{range .BrowserAnalytics.Cards}}<div class="card metric-card"><div class="card-body"><div>{{.Label}}</div><div class="metric-value">{{.Value}}</div><p class="small">{{.Hint}}</p></div></div>{{end}}
+    </div>
+    {{else}}<p>{{index .T "analytics_browser_pending"}}</p>{{end}}
+  </div></section>
+  <section id="browser-returns" class="card mb-4"><div class="card-body">
+    <h2 class="h5">{{index .T "analytics_browser_returns"}}</h2>
+    <p class="small">{{index .T "analytics_browser_retention_hint"}}</p>
+    <ul>{{range .BrowserAnalytics.Report.Retention}}<li>D{{.Day}}: {{.Returned}} / {{.Eligible}}</li>{{end}}</ul>
+    {{range .BrowserAnalytics.ReturnSections}}<h3 class="h6">{{.Title}}</h3><p class="small">{{.Description}}</p><ul>{{range .Rows}}<li>{{.Label}}: {{.Value}}</li>{{end}}</ul>{{end}}
+  </div></section>
+  <section id="browser-content" class="card mb-4"><div class="card-body">
+    <h2 class="h5">{{index .T "analytics_browser_content"}}</h2>
+    {{range .BrowserAnalytics.ContentSections}}<h3 class="h6">{{.Title}}</h3><p class="small">{{.Description}}</p><ul>{{range .Rows}}<li>{{.Label}}: {{.Value}}</li>{{end}}</ul>{{end}}
+  </div></section>
+  <h2 id="technical-analytics" class="h5">{{index .T "analytics_browser_technical"}}</h2>
+  <p class="small">{{index .T "analytics_browser_technical_hint"}}</p>
   <div class="alert alert-secondary">
     <div><strong>{{index .T "analytics_generated_at"}}:</strong> {{.Report.GeneratedAt}}</div>
     <div><strong>{{index .T "analytics_period"}}:</strong> {{.Report.Period}}</div>

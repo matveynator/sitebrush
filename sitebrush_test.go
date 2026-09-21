@@ -18,6 +18,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	browserstats "github.com/matveynator/sitebrush/v2/pkg/analytics"
 	"html/template"
 	"io"
 	"io/fs"
@@ -32,6 +33,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
@@ -50,6 +52,7 @@ import (
 	"github.com/matveynator/sitebrush/v2/pkg/mailout"
 	"github.com/matveynator/sitebrush/v2/pkg/sitebrushtemplate"
 	"golang.org/x/net/dns/dnsmessage"
+	"golang.org/x/net/websocket"
 	"golang.org/x/text/encoding/charmap"
 )
 
@@ -314,6 +317,9 @@ func newTestApplication(t *testing.T) (*App, *sql.DB) {
 		registrationConfirmations: startEmailConfirmationMemoryWorker(context.Background()),
 		emailDelivery:             make(chan mailout.DeliveryJob, mailout.DeliveryQueueSize),
 	}
+	store := browserstats.OpenStore(filepath.Join(storagePath, "analytics"))
+	application.analyticsStorage = store
+	t.Cleanup(store.Close)
 	if err := application.migrate(context.Background()); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
@@ -3295,8 +3301,8 @@ func TestAnalyticsAggregateStoresProcessedReportAndOverloadMarkers(t *testing.T)
 	overloadReport := overloadedState.reports(now.Add(time.Minute))["localhost"]
 	assertAnalyticsRow(t, overloadReport.SystemEvents, "analytics overload started", 1)
 	assertAnalyticsRow(t, overloadReport.SystemEvents, "analytics overload ended", 1)
-	if overloadReport.TotalRequests != 0 {
-		t.Fatalf("overloaded report total requests = %d, want cleared data", overloadReport.TotalRequests)
+	if overloadReport.TotalRequests != 1 {
+		t.Fatalf("overloaded report total requests = %d, want preserved data", overloadReport.TotalRequests)
 	}
 }
 
@@ -13681,5 +13687,628 @@ func TestHostingSnapshotNetChanListenerStopsActiveConnections(t *testing.T) {
 	}
 	if err := connection.Abort(); err != nil {
 		t.Fatalf("abort client connection: %v", err)
+	}
+}
+
+// Analytics integration tests and static response benchmarks.
+
+type stalledAnalyticsSQL struct {
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (database stalledAnalyticsSQL) ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error) {
+	select {
+	case database.entered <- struct{}{}:
+	default:
+	}
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-database.release:
+		return nil, errors.New("deliberate storage outage")
+	}
+}
+func (database stalledAnalyticsSQL) QueryContext(context.Context, string, ...any) (*sql.Rows, error) {
+	panic("unexpected SQL query")
+}
+func (database stalledAnalyticsSQL) QueryRowContext(context.Context, string, ...any) *sql.Row {
+	panic("unexpected SQL query")
+}
+
+func TestAnalyticsAdmissionWithStalledStorage(t *testing.T) {
+	database := stalledAnalyticsSQL{entered: make(chan struct{}, 1), release: make(chan struct{})}
+	app := &App{db: database, analyticsStorage: testAnalyticsRepository{database}, analyticsEvents: make(chan siteAnalyticsEvent, 1), analyticsLosses: make(chan string, 1)}
+	stop, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	state := newAnalyticsAggregateState(1 << 20)
+	state.record(siteAnalyticsEvent{Domain: "localhost", OccurredAt: time.Now(), Method: "GET", Path: "/"})
+	finished := make(chan struct{})
+	go func() { defer close(finished); app.flushAnalyticsAggregateState(stop, state) }()
+	<-database.entered
+	handler := app.analyticsMiddleware(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("X-Sitebrush-Source", "static")
+		_, _ = io.WriteString(writer, "static")
+	}))
+	completed := make(chan struct{})
+	go func() {
+		defer close(completed)
+		for index := 0; index < 100; index++ {
+			request := httptest.NewRequest("GET", "http://localhost/", nil)
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+			if response.Body.String() != "static" {
+				return
+			}
+		}
+	}()
+	select {
+	case <-completed:
+	case <-time.After(time.Second):
+		t.Fatal("HTTP response waited for analytics")
+	}
+	if len(app.analyticsLosses) == 0 {
+		t.Fatal("overflow was not signalled")
+	}
+	cancel()
+	close(database.release)
+	select {
+	case <-finished:
+	case <-time.After(time.Second):
+		t.Fatal("saver did not stop")
+	}
+}
+
+func TestBrowserAnalyticsRejectsForeignOriginAndOverload(t *testing.T) {
+	app := &App{browserAnalytics: make(chan browserAnalyticsEnvelope, 1), analyticsConnections: make(chan struct{}, 1)}
+	for _, origin := range []string{"", "https://evil.example", "http://localhost.evil.example"} {
+		request := httptest.NewRequest("GET", "http://localhost/_sitebrush/analytics", nil)
+		request.Header.Set("Origin", origin)
+		response := httptest.NewRecorder()
+		app.browserAnalyticsSocket(response, request)
+		if response.Code != http.StatusForbidden {
+			t.Fatalf("origin %q status=%d", origin, response.Code)
+		}
+	}
+	app.analyticsConnections <- struct{}{}
+	request := httptest.NewRequest("GET", "http://localhost/_sitebrush/analytics", nil)
+	request.Header.Set("Origin", "http://localhost")
+	response := httptest.NewRecorder()
+	app.browserAnalyticsSocket(response, request)
+	if response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status=%d", response.Code)
+	}
+}
+
+func TestBrowserAnalyticsSnapshotRetryIsIdempotent(t *testing.T) {
+	database, err := sql.Open("sqlite3", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	app := &App{db: database, analyticsStorage: testAnalyticsRepository{database}}
+	for _, statement := range []string{`CREATE TABLE analytics_browser_state(domain TEXT PRIMARY KEY,snapshot TEXT NOT NULL)`, `CREATE TABLE analytics_browser_reports(domain TEXT PRIMARY KEY,reports TEXT NOT NULL)`} {
+		if _, err := database.Exec(statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for index := 0; index < 2; index++ {
+		if err := app.saveBrowserAnalyticsSnapshot(context.Background(), "example.org", `{"Visitors":{}}`, `{"7":{"Views":3}}`); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var count int
+	if err := database.QueryRow(`SELECT COUNT(*) FROM analytics_browser_state`).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("rows=%d err=%v", count, err)
+	}
+	request := httptest.NewRequest("GET", "http://example.org/?analytics&days=7", nil)
+	dashboard := app.browserAnalyticsView(request, "example.org")
+	if !dashboard.Available || dashboard.Report.Views != 3 {
+		t.Fatalf("dashboard: %+v", dashboard)
+	}
+}
+
+func TestBrowserAnalyticsSources(t *testing.T) {
+	if browserAnalyticsSource("", "https://site.example/path", "site.example") != "direct" {
+		t.Fatal("internal referrer became acquisition source")
+	}
+	if browserAnalyticsSource("", "https://search.example/path?secret=x", "site.example") != "search.example" {
+		t.Fatal("referrer host extraction failed")
+	}
+	if !browserstats.Valid(browserstats.Event{Visitor: "1111111111111111", View: "2222222222222222", Sequence: 1, Path: "/"}) {
+		t.Fatal("valid event rejected")
+	}
+}
+
+type analyticsBenchmarkWriter struct{ headers http.Header }
+
+func (writer *analyticsBenchmarkWriter) Header() http.Header               { return writer.headers }
+func (writer *analyticsBenchmarkWriter) Write(payload []byte) (int, error) { return len(payload), nil }
+func (writer *analyticsBenchmarkWriter) WriteHeader(int)                   {}
+
+func BenchmarkAnalyticsStatic(b *testing.B) {
+	for _, cacheMode := range []string{"cold", "warm"} {
+		b.Run(cacheMode, func(b *testing.B) {
+			for _, mode := range []string{"disabled", "buffered", "saturated", "worker", "stalled"} {
+				b.Run(mode, func(b *testing.B) {
+					app := &App{storagePath: b.TempDir(), analyticsFlushInterval: 50 * time.Millisecond}
+					staticPath := filepath.Join(app.domainStaticDir("localhost"), "index.html")
+					if err := os.MkdirAll(filepath.Dir(staticPath), 0755); err != nil {
+						b.Fatal(err)
+					}
+					if err := os.WriteFile(staticPath, []byte("<!doctype html><html><body>Static benchmark</body></html>"), 0644); err != nil {
+						b.Fatal(err)
+					}
+					stop, cancel := context.WithCancel(context.Background())
+					app.analyticsShutdownRequested = stop.Done()
+					defer cancel()
+					if cacheMode == "warm" {
+						app.guestStaticHTMLCache = startGuestStaticHTMLCacheWorker(stop, 8<<20)
+					}
+					database := stalledAnalyticsSQL{entered: make(chan struct{}, 1), release: make(chan struct{})}
+					if mode == "worker" || mode == "stalled" {
+						app.db = database
+						app.analyticsStorage = testAnalyticsRepository{database}
+						if mode == "worker" {
+							store := browserstats.OpenStore(filepath.Join(app.storagePath, "analytics"))
+							defer store.Close()
+							app.analyticsStorage = store
+						}
+					}
+					if mode != "disabled" {
+						app.analyticsEvents = make(chan siteAnalyticsEvent, 1024)
+					}
+					if mode == "saturated" {
+						for index := 0; index < cap(app.analyticsEvents); index++ {
+							app.analyticsEvents <- siteAnalyticsEvent{}
+						}
+					}
+					finished := make(chan struct{})
+					if mode == "buffered" {
+						go func() {
+							defer close(finished)
+							for {
+								select {
+								case <-stop.Done():
+									return
+								case <-app.analyticsEvents:
+								}
+							}
+						}()
+					} else if mode == "worker" || mode == "stalled" {
+						go func() { defer close(finished); app.runAnalyticsEventWriter(stop) }()
+					} else {
+						close(finished)
+					}
+					handler := app.analyticsMiddleware(http.HandlerFunc(app.route))
+					handler.ServeHTTP(&analyticsBenchmarkWriter{headers: make(http.Header)}, httptest.NewRequest("GET", "http://localhost/", nil))
+					samples := make(chan []int64, 1024)
+					var before runtime.MemStats
+					runtime.ReadMemStats(&before)
+					b.ReportAllocs()
+					b.ResetTimer()
+					b.RunParallel(func(worker *testing.PB) {
+						request := httptest.NewRequest("GET", "http://localhost/", nil)
+						writer := &analyticsBenchmarkWriter{headers: make(http.Header)}
+						latencies := make([]int64, 0, 2048)
+						for worker.Next() {
+							started := time.Now()
+							handler.ServeHTTP(writer, request)
+							if len(latencies) < cap(latencies) {
+								latencies = append(latencies, time.Since(started).Nanoseconds())
+							}
+						}
+						samples <- latencies
+					})
+					b.StopTimer()
+					var after runtime.MemStats
+					runtime.ReadMemStats(&after)
+					close(samples)
+					latencies := []int64{}
+					for sample := range samples {
+						latencies = append(latencies, sample...)
+					}
+					sort.Slice(latencies, func(i, j int) bool { return latencies[i] < latencies[j] })
+					if len(latencies) > 0 {
+						for _, percentile := range []int{50, 95, 99} {
+							b.ReportMetric(float64(latencies[(len(latencies)-1)*percentile/100])/1000, fmt.Sprintf("p%d-us", percentile))
+						}
+					}
+					b.ReportMetric(float64(after.NumGC-before.NumGC), "GCs")
+					cancel()
+					close(database.release)
+					select {
+					case <-finished:
+					case <-time.After(time.Second):
+						b.Fatal("worker did not stop")
+					}
+				})
+			}
+		})
+	}
+}
+
+type analyticsPipeWriter struct {
+	connection net.Conn
+	buffered   *bufio.ReadWriter
+	headers    http.Header
+}
+
+func (writer *analyticsPipeWriter) Header() http.Header { return writer.headers }
+func (writer *analyticsPipeWriter) Write(payload []byte) (int, error) {
+	return writer.connection.Write(payload)
+}
+func (writer *analyticsPipeWriter) WriteHeader(status int) {}
+func (writer *analyticsPipeWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	return writer.connection, writer.buffered, nil
+}
+
+func TestBrowserAnalyticsWebSocketDelivery(t *testing.T) {
+	serverConnection, clientConnection := net.Pipe()
+	defer serverConnection.Close()
+	defer clientConnection.Close()
+	_ = clientConnection.SetDeadline(time.Now().Add(3 * time.Second))
+	app := &App{browserAnalytics: make(chan browserAnalyticsEnvelope, 1), analyticsConnections: make(chan struct{}, 1)}
+	finished := make(chan error, 1)
+	go func() {
+		buffered := bufio.NewReadWriter(bufio.NewReader(serverConnection), bufio.NewWriter(serverConnection))
+		request, err := http.ReadRequest(buffered.Reader)
+		if err != nil {
+			finished <- err
+			return
+		}
+		app.browserAnalyticsSocket(&analyticsPipeWriter{serverConnection, buffered, make(http.Header)}, request)
+		finished <- nil
+	}()
+	configuration, err := websocket.NewConfig("ws://example.org/_sitebrush/analytics", "http://example.org")
+	if err != nil {
+		t.Fatal(err)
+	}
+	connection, err := websocket.NewClient(configuration, clientConnection)
+	if err != nil {
+		t.Fatal(err)
+	}
+	observation := browserstats.Event{Visitor: "1111111111111111", View: "2222222222222222", Sequence: 1, Path: "/docs", Referrer: "https://search.example/private?query=x", Persistent: true}
+	encoded, err := json.Marshal(observation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := websocket.Message.Send(connection, string(encoded)); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case envelope := <-app.browserAnalytics:
+		if envelope.domain != "example.org" || envelope.event.Source != "search.example" || envelope.event.Referrer != "" || envelope.event.Path != "/docs" {
+			t.Fatalf("envelope: %+v", envelope)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("WebSocket observation was not admitted")
+	}
+	_ = connection.Close()
+	select {
+	case err := <-finished:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("WebSocket session leaked")
+	}
+	if len(app.analyticsConnections) != 0 {
+		t.Fatal("connection slot leaked")
+	}
+}
+
+type observedAnalyticsSQL struct {
+	*sql.DB
+	loaded chan struct{}
+}
+
+func (database observedAnalyticsSQL) QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row {
+	if strings.Contains(query, "LENGTH(snapshot)") {
+		select {
+		case database.loaded <- struct{}{}:
+		default:
+		}
+	}
+	return database.DB.QueryRowContext(ctx, query, args...)
+}
+
+func TestBrowserAnalyticsShutdownPersistsAndRestoresSession(t *testing.T) {
+	raw, err := sql.Open("sqlite3", filepath.Join(t.TempDir(), "browser.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+	for _, query := range []string{`CREATE TABLE analytics_browser_state(domain TEXT PRIMARY KEY,snapshot TEXT NOT NULL)`, `CREATE TABLE analytics_browser_reports(domain TEXT PRIMARY KEY,reports TEXT NOT NULL)`} {
+		if _, err := raw.Exec(query); err != nil {
+			t.Fatal(err)
+		}
+	}
+	database := observedAnalyticsSQL{raw, make(chan struct{}, 1)}
+	for index := 1; index <= 2; index++ {
+		app := &App{db: database, analyticsStorage: testAnalyticsRepository{database}, browserAnalytics: make(chan browserAnalyticsEnvelope, 16)}
+		stop := make(chan struct{})
+		done := make(chan struct{})
+		go func() { defer close(done); app.runBrowserAnalytics(stop) }()
+		app.browserAnalytics <- browserAnalyticsEnvelope{domain: "example.org", received: time.Now().UTC(), event: browserstats.Event{Visitor: "1111111111111111", View: fmt.Sprintf("%016x", index), Sequence: 1, Path: "/docs", Persistent: true}}
+		select {
+		case <-database.loaded:
+		case <-time.After(time.Second):
+			t.Fatal("history load not started")
+		}
+		close(stop)
+		select {
+		case <-done:
+		case <-time.After(3 * time.Second):
+			t.Fatal("shutdown did not persist accepted events")
+		}
+	}
+	var encoded string
+	if err := raw.QueryRow(`SELECT reports FROM analytics_browser_reports WHERE domain=?`, "example.org").Scan(&encoded); err != nil {
+		t.Fatal(err)
+	}
+	reports := map[string]browserstats.Report{}
+	if err := json.Unmarshal([]byte(encoded), &reports); err != nil {
+		t.Fatal(err)
+	}
+	if reports["7"].Views != 2 || reports["7"].Sessions != 1 {
+		t.Fatalf("restored metrics: %+v", reports["7"])
+	}
+}
+
+func TestBrowserAnalyticsDashboardRendersSavedHistory(t *testing.T) {
+	app, database := newTestApplication(t)
+	if _, err := database.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "admin@example.com", "old"); err != nil {
+		t.Fatal(err)
+	}
+	report := browserstats.Report{Generated: time.Now().UTC(), PeriodStart: time.Now().UTC(), PeriodEnd: time.Now().UTC(), Days: 7, Views: 42, Visitors: 7, Incomplete: true, Insights: []browserstats.Row{{Label: "<script>alert(1)</script>", Count: 1}}}
+	encoded, err := json.Marshal(map[string]browserstats.Report{"7": report})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := app.saveBrowserAnalyticsSnapshot(context.Background(), "localhost", `{}`, string(encoded)); err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest("GET", "http://localhost/?analytics&days=7", nil)
+	request.Header.Set("Accept-Language", "ru")
+	request.AddCookie(newAdminSessionCookie(t, app, "admin@example.com"))
+	response := httptest.NewRecorder()
+	app.analyticsPage(response, request)
+	for _, fragment := range []string{"Обзор браузерных посещений", "Неполные наблюдения", "42", "browser-returns"} {
+		if !strings.Contains(response.Body.String(), fragment) {
+			t.Fatalf("dashboard missing %q", fragment)
+		}
+	}
+	if strings.Contains(response.Body.String(), "<script>alert(1)</script>") {
+		t.Fatal("observation was not escaped")
+	}
+}
+
+func TestAnalyticsStaticInjectionAndDomainIsolation(t *testing.T) {
+	body := buildGuestStaticHTMLBody([]byte("<html><body>published</body></html>"), "/", "example.org", "en")
+	if strings.Count(string(body), `src="/p/static/analytics.js"`) != 1 {
+		t.Fatal("static HTML must include one deferred analytics script")
+	}
+	if _, err := embeddedWebFiles.ReadFile("web/static/analytics.js"); err != nil {
+		t.Fatal(err)
+	}
+	app := &App{analyticsEvents: make(chan siteAnalyticsEvent, 3), db: panicSQLExecutor{t: t}}
+	handler := app.analyticsMiddleware(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("X-Sitebrush-Source", "static")
+		_, _ = writer.Write([]byte("ok"))
+	}))
+	for _, host := range []string{"one.example", "two.example", "localhost:8080"} {
+		request := httptest.NewRequest("GET", "http://"+host+"/", nil)
+		request.AddCookie(&http.Cookie{Name: "sitebrush_session", Value: "no-analytics-auth-query"})
+		handler.ServeHTTP(httptest.NewRecorder(), request)
+		event := <-app.analyticsEvents
+		expected := host
+		if host == "localhost:8080" {
+			expected = "localhost"
+		}
+		if event.Domain != expected {
+			t.Fatalf("domain %q, want %q", event.Domain, expected)
+		}
+	}
+}
+
+func TestBrowserAnalyticsMigrationPreservesExistingSite(t *testing.T) {
+	app, database := newTestApplication(t)
+	if _, err := database.Exec(`INSERT INTO pages(domain,path,title,html,published) VALUES('localhost','/keep','Keep','<p>existing</p>',1)`); err != nil {
+		t.Fatal(err)
+	}
+	for _, statement := range []string{`PRAGMA user_version=1`} {
+		if _, err := database.Exec(statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := app.migrate(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	var html string
+	if err := database.QueryRow(`SELECT html FROM pages WHERE domain='localhost' AND path='/keep'`).Scan(&html); err != nil || html != "<p>existing</p>" {
+		t.Fatalf("existing page changed: %q %v", html, err)
+	}
+	if err := app.saveBrowserAnalyticsSnapshot(context.Background(), "localhost", `{}`, `{}`); err != nil {
+		t.Fatal(err)
+	}
+}
+
+type blockedBrowserAnalyticsSQL struct {
+	*sql.DB
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (database blockedBrowserAnalyticsSQL) ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error) {
+	select {
+	case database.entered <- struct{}{}:
+	default:
+	}
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-database.release:
+	}
+	return database.DB.ExecContext(ctx, query, args...)
+}
+
+func TestBrowserAnalyticsReturnsStateBeforeDatabaseWrite(t *testing.T) {
+	raw, err := sql.Open("sqlite3", filepath.Join(t.TempDir(), "browser.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+	for _, statement := range []string{`CREATE TABLE analytics_browser_state(domain TEXT PRIMARY KEY,snapshot TEXT NOT NULL)`, `CREATE TABLE analytics_browser_reports(domain TEXT PRIMARY KEY,reports TEXT NOT NULL)`} {
+		if _, err := raw.Exec(statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	database := blockedBrowserAnalyticsSQL{raw, make(chan struct{}, 1), make(chan struct{})}
+	app := &App{db: database, analyticsStorage: testAnalyticsRepository{database}}
+	jobs := make(chan browserAnalyticsStorageJob, 1)
+	results := make(chan browserAnalyticsStorageResult, 2)
+	stop := make(chan struct{})
+	finished := make(chan struct{})
+	defer close(stop)
+	go func() { defer close(finished); app.browserAnalyticsStorage(jobs, results, stop) }()
+	state := browserstats.New(time.Now().UTC())
+	first := browserstats.Event{Visitor: "1111111111111111", View: "2222222222222222", Sequence: 1, Path: "/", Persistent: true}
+	state.Record(first, time.Now().UTC(), 8<<20)
+	jobs <- browserAnalyticsStorageJob{domain: "example.org", state: state}
+	var prepared browserAnalyticsStorageResult
+	select {
+	case prepared = <-results:
+	case <-time.After(time.Second):
+		t.Fatal("snapshot not prepared")
+	}
+	if !prepared.prepared || prepared.state == nil {
+		t.Fatalf("prepared result: %+v", prepared)
+	}
+	select {
+	case <-database.entered:
+	case <-time.After(time.Second):
+		t.Fatal("write did not start")
+	}
+	second := first
+	second.View = "3333333333333333"
+	second.Path = "/next"
+	if !prepared.state.Record(second, time.Now().UTC(), 8<<20) {
+		t.Fatal("collector could not accept while storage was stalled")
+	}
+	close(database.release)
+	select {
+	case saved := <-results:
+		if !saved.saved || saved.err != nil || saved.state != nil {
+			t.Fatalf("saved result: %+v", saved)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("save did not finish")
+	}
+	var snapshot string
+	if err := raw.QueryRow(`SELECT snapshot FROM analytics_browser_state WHERE domain=?`, "example.org").Scan(&snapshot); err != nil {
+		t.Fatal(err)
+	}
+	persisted := browserstats.New(time.Now().UTC())
+	if err := json.Unmarshal([]byte(snapshot), persisted); err != nil {
+		t.Fatal(err)
+	}
+	if persisted.Report(time.Now().UTC(), 1).Views != 1 || prepared.state.Report(time.Now().UTC(), 1).Views != 2 {
+		t.Fatal("snapshot and live state were not isolated")
+	}
+	close(jobs)
+	select {
+	case <-finished:
+	case <-time.After(time.Second):
+		t.Fatal("storage worker leaked")
+	}
+}
+
+// This adapter exposes controlled SQL stalls without touching production storage.
+type testAnalyticsRepository struct{ database sqlExecutor }
+
+func (repository testAnalyticsRepository) Exchange(request browserstats.StorageRequest) browserstats.StorageResult {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		select {
+		case <-request.Stop:
+			cancel()
+		case <-done:
+		}
+	}()
+	table, column := "analytics_browser_state", "snapshot"
+	if request.Operation == browserstats.ReadBrowserReport {
+		table, column = "analytics_browser_reports", "reports"
+	}
+	if request.Operation == browserstats.ReadTechnicalReport {
+		table, column = "analytics_reports", "report_json"
+	}
+	if request.Operation == browserstats.LoadHistory {
+		var size int64
+		if err := repository.database.QueryRowContext(ctx, `SELECT LENGTH(snapshot) FROM analytics_browser_state WHERE domain=?`, request.Domain).Scan(&size); err != nil {
+			return browserstats.StorageResult{Err: err}
+		}
+	}
+	switch request.Operation {
+	case browserstats.LoadHistory, browserstats.ReadBrowserReport, browserstats.ReadTechnicalReport:
+		var body string
+		err := repository.database.QueryRowContext(ctx, "SELECT "+column+" FROM "+table+" WHERE domain=?", request.Domain).Scan(&body)
+		return browserstats.StorageResult{Text: body, Err: err}
+	case browserstats.SaveTechnical:
+		_, err := repository.database.ExecContext(ctx, `INSERT INTO analytics_reports(domain,report_json) VALUES(?,?) ON CONFLICT(domain) DO UPDATE SET report_json=excluded.report_json`, request.Domain, request.Report)
+		return browserstats.StorageResult{Err: err}
+	case browserstats.SaveBrowser:
+		for _, record := range []struct{ table, column, body string }{{"analytics_browser_state", "snapshot", request.State}, {"analytics_browser_reports", "reports", request.Report}} {
+			_, err := repository.database.ExecContext(ctx, "INSERT INTO "+record.table+"(domain,"+record.column+") VALUES(?,?) ON CONFLICT(domain) DO UPDATE SET "+record.column+"=excluded."+record.column, request.Domain, record.body)
+			if err != nil {
+				return browserstats.StorageResult{Err: err}
+			}
+		}
+	}
+	return browserstats.StorageResult{}
+}
+
+func TestAnalyticsStorageRejectsUnknownDomain(t *testing.T) {
+	root := t.TempDir()
+	store := browserstats.OpenStore(filepath.Join(root, "analytics"))
+	defer store.Close()
+	app := &App{storagePath: root, analyticsStorage: store, siteDatabaseRouter: &perSiteDBRouter{}}
+	request := browserstats.StorageRequest{Operation: browserstats.SaveTechnical, Domain: "unknown.example", Report: "{}"}
+	if result := app.analyticsStorageExchange(request); result.Err == nil {
+		t.Fatal("unknown host was allowed to create analytics storage")
+	}
+	if _, err := os.Stat(filepath.Join(root, "analytics")); !os.IsNotExist(err) {
+		t.Fatalf("rejected host touched analytics storage: %v", err)
+	}
+	if err := os.MkdirAll(app.domainStaticDir(request.Domain), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if result := app.analyticsStorageExchange(request); result.Err != nil {
+		t.Fatalf("published site rejected: %v", result.Err)
+	}
+}
+
+func TestResultHostResourceURLPreserved(t *testing.T) {
+	spider := &pageSpider{domain: "kavtrans.sitebrush.ru"}
+	for _, rawURL := range []string{
+		"https://kavtrans.sitebrush.ru/files/map.pdf",
+		"https://KAVTRANS.SITEBRUSH.RU/files/archive.zip",
+		"https://kavtrans.sitebrush.ru:443/files/manual.docx",
+	} {
+		if !spider.isResultHostResourceURL(rawURL) {
+			t.Fatalf("result-host resource was not preserved: %s", rawURL)
+		}
+	}
+	if spider.isResultHostResourceURL("https://source.example/files/map.pdf") {
+		t.Fatal("external resource was incorrectly treated as a result-host resource")
+	}
+	if spider.isResultHostResourceURL("://bad-url") {
+		t.Fatal("invalid URL was treated as a result-host resource")
+	}
+	if (&pageSpider{}).isResultHostResourceURL("https://kavtrans.sitebrush.ru/files/map.pdf") {
+		t.Fatal("resource matched without a result domain")
 	}
 }

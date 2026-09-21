@@ -52,6 +52,7 @@ import (
 	"strings"
 	"time"
 
+	browserstats "github.com/matveynator/sitebrush/v2/pkg/analytics"
 	"github.com/matveynator/sitebrush/v2/pkg/channelacme"
 	appcli "github.com/matveynator/sitebrush/v2/pkg/cli"
 	"github.com/matveynator/sitebrush/v2/pkg/crawler"
@@ -75,6 +76,7 @@ import (
 	"github.com/matveynator/sitebrush/v2/pkg/winservice"
 	"golang.org/x/net/dns/dnsmessage"
 	"golang.org/x/net/html"
+	"golang.org/x/net/websocket"
 	"golang.org/x/term"
 )
 
@@ -105,7 +107,7 @@ const publicTrialAvailabilityCacheTTL = time.Minute
 const publicTrialWildcardProbeCount = 3
 const legacyPublicTrialWidgetAssetName = "c2e28115960ae946dd3b7bd3be07562715528484255f9a1e42e65f850e32f964.js"
 const defaultDomainStorageLimitBytes int64 = 10 * 1024 * 1024 * 1024
-const defaultAnalyticsMemoryLimitBytes int64 = 500 * 1024 * 1024
+const defaultAnalyticsMemoryLimitBytes int64 = 64 * 1024 * 1024
 const defaultGuestStaticHTMLCacheLimitBytes int64 = 128 * 1024 * 1024
 const guestStaticHTMLCacheQueueSize = 4096
 const authIPFailureCacheQueueSize = 4096
@@ -151,6 +153,11 @@ var sitebrushRuServiceMailRelayPublicKey = ""
 
 // App keeps only explicit dependencies to stay readable and easy to swap.
 type App struct {
+	analyticsStorage               browserstats.Repository
+	analyticsShutdownRequested     <-chan struct{}
+	analyticsFlushInterval         time.Duration
+	analyticsFinished              chan struct{}
+	browserAnalyticsLosses         chan string
 	db                             sqlExecutor
 	siteDatabaseRouter             *perSiteDBRouter
 	storagePath                    string
@@ -172,6 +179,9 @@ type App struct {
 	publishTracker                 *publishProgressTracker
 	analyticsEvents                chan siteAnalyticsEvent
 	analyticsMemoryLimit           int64
+	analyticsLosses                chan string
+	browserAnalytics               chan browserAnalyticsEnvelope
+	analyticsConnections           chan struct{}
 	guestStaticHTMLCache           chan guestStaticHTMLCacheRequest
 	geoIP                          *geoip.Resolver
 	domainLogEvents                chan domainLogEvent
@@ -2139,6 +2149,8 @@ func routerCloseNoop(noopDatabase *sql.DB) error {
 }
 
 type siteAnalyticsEvent struct {
+	Forwarded      string
+	ForwardedFor   string
 	Domain         string
 	Path           string
 	Query          string
@@ -2164,49 +2176,51 @@ type siteAnalyticsEvent struct {
 }
 
 type analyticsPreparedReport struct {
-	GeneratedAt        string              `json:"generated_at"`
-	PeriodStart        string              `json:"period_start"`
-	PeriodEnd          string              `json:"period_end"`
-	TotalRequests      int                 `json:"total_requests"`
-	PageViews          int                 `json:"page_views"`
-	UniqueVisitors     int                 `json:"unique_visitors"`
-	HumanRequests      int                 `json:"human_requests"`
-	BotRequests        int                 `json:"bot_requests"`
-	ReturningVisitors  int                 `json:"returning_visitors"`
-	ReturnVisits       int                 `json:"return_visits"`
-	Sessions           int                 `json:"sessions"`
-	BounceRate         float64             `json:"bounce_rate"`
-	AverageDurationMS  int64               `json:"average_duration_ms"`
-	ErrorCount         int                 `json:"error_count"`
-	AdminRequests      int                 `json:"admin_requests"`
-	StaticRequests     int                 `json:"static_requests"`
-	TopPages           []analyticsCountRow `json:"top_pages"`
-	EntryPages         []analyticsCountRow `json:"entry_pages"`
-	ExitPages          []analyticsCountRow `json:"exit_pages"`
-	TrafficSources     []analyticsCountRow `json:"traffic_sources"`
-	Referrers          []analyticsCountRow `json:"referrers"`
-	ReturningSources   []analyticsCountRow `json:"returning_sources"`
-	ReturningReferrers []analyticsCountRow `json:"returning_referrers"`
-	Countries          []analyticsCountRow `json:"countries"`
-	Cities             []analyticsCountRow `json:"cities"`
-	EntryHours         []analyticsCountRow `json:"entry_hours"`
-	MapPoints          []analyticsMapPoint `json:"map_points"`
-	Devices            []analyticsCountRow `json:"devices"`
-	VisitorTypes       []analyticsCountRow `json:"visitor_types"`
-	BotCrawlers        []analyticsCountRow `json:"bot_crawlers"`
-	BotReturnSources   []analyticsCountRow `json:"bot_return_sources"`
-	BotReferrers       []analyticsCountRow `json:"bot_referrers"`
-	Browsers           []analyticsCountRow `json:"browsers"`
-	OperatingSystems   []analyticsCountRow `json:"operating_systems"`
-	Languages          []analyticsCountRow `json:"languages"`
-	StatusCodes        []analyticsCountRow `json:"status_codes"`
-	HourlyActivity     []analyticsCountRow `json:"hourly_activity"`
-	DailyActivity      []analyticsCountRow `json:"daily_activity"`
-	SlowPages          []analyticsCountRow `json:"slow_pages"`
-	TopAssets          []analyticsCountRow `json:"top_assets"`
-	ErrorPaths         []analyticsCountRow `json:"error_paths"`
-	ContentSources     []analyticsCountRow `json:"content_sources"`
-	SystemEvents       []analyticsCountRow `json:"system_events,omitempty"`
+	AdminUnclassified   bool                `json:"admin_unclassified,omitempty"`
+	ResponsePercentiles []analyticsCountRow `json:"response_percentiles,omitempty"`
+	GeneratedAt         string              `json:"generated_at"`
+	PeriodStart         string              `json:"period_start"`
+	PeriodEnd           string              `json:"period_end"`
+	TotalRequests       int                 `json:"total_requests"`
+	PageViews           int                 `json:"page_views"`
+	UniqueVisitors      int                 `json:"unique_visitors"`
+	HumanRequests       int                 `json:"human_requests"`
+	BotRequests         int                 `json:"bot_requests"`
+	ReturningVisitors   int                 `json:"returning_visitors"`
+	ReturnVisits        int                 `json:"return_visits"`
+	Sessions            int                 `json:"sessions"`
+	BounceRate          float64             `json:"bounce_rate"`
+	AverageDurationMS   int64               `json:"average_duration_ms"`
+	ErrorCount          int                 `json:"error_count"`
+	AdminRequests       int                 `json:"admin_requests"`
+	StaticRequests      int                 `json:"static_requests"`
+	TopPages            []analyticsCountRow `json:"top_pages"`
+	EntryPages          []analyticsCountRow `json:"entry_pages"`
+	ExitPages           []analyticsCountRow `json:"exit_pages"`
+	TrafficSources      []analyticsCountRow `json:"traffic_sources"`
+	Referrers           []analyticsCountRow `json:"referrers"`
+	ReturningSources    []analyticsCountRow `json:"returning_sources"`
+	ReturningReferrers  []analyticsCountRow `json:"returning_referrers"`
+	Countries           []analyticsCountRow `json:"countries"`
+	Cities              []analyticsCountRow `json:"cities"`
+	EntryHours          []analyticsCountRow `json:"entry_hours"`
+	MapPoints           []analyticsMapPoint `json:"map_points"`
+	Devices             []analyticsCountRow `json:"devices"`
+	VisitorTypes        []analyticsCountRow `json:"visitor_types"`
+	BotCrawlers         []analyticsCountRow `json:"bot_crawlers"`
+	BotReturnSources    []analyticsCountRow `json:"bot_return_sources"`
+	BotReferrers        []analyticsCountRow `json:"bot_referrers"`
+	Browsers            []analyticsCountRow `json:"browsers"`
+	OperatingSystems    []analyticsCountRow `json:"operating_systems"`
+	Languages           []analyticsCountRow `json:"languages"`
+	StatusCodes         []analyticsCountRow `json:"status_codes"`
+	HourlyActivity      []analyticsCountRow `json:"hourly_activity"`
+	DailyActivity       []analyticsCountRow `json:"daily_activity"`
+	SlowPages           []analyticsCountRow `json:"slow_pages"`
+	TopAssets           []analyticsCountRow `json:"top_assets"`
+	ErrorPaths          []analyticsCountRow `json:"error_paths"`
+	ContentSources      []analyticsCountRow `json:"content_sources"`
+	SystemEvents        []analyticsCountRow `json:"system_events,omitempty"`
 }
 
 type analyticsCountRow struct {
@@ -2650,6 +2664,16 @@ func (writer *statusCapturingResponseWriter) Hijack() (net.Conn, *bufio.ReadWrit
 		return nil, nil, errors.New("hijack is not supported")
 	}
 	return hijacker.Hijack()
+}
+
+func (writer *statusCapturingResponseWriter) Unwrap() http.ResponseWriter {
+	return writer.ResponseWriter
+}
+func (writer *statusCapturingResponseWriter) ReadFrom(reader io.Reader) (int64, error) {
+	if delegate, ok := writer.ResponseWriter.(io.ReaderFrom); ok {
+		return delegate.ReadFrom(reader)
+	}
+	return io.Copy(writer.ResponseWriter, reader)
 }
 
 func (writer *statusCapturingResponseWriter) Flush() {
@@ -3198,10 +3222,19 @@ func formatTLSHandshakeNoiseSummary(group tlsHandshakeNoiseGroup, intervalLabel 
 }
 
 func (a *App) analyticsMiddleware(next http.Handler) http.Handler {
+	if a.analyticsEvents == nil {
+		return next
+	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		startedAt := time.Now()
 		writer := &statusCapturingResponseWriter{ResponseWriter: w, statusCode: http.StatusOK}
 		next.ServeHTTP(writer, r)
+		if len(a.analyticsEvents) >= cap(a.analyticsEvents) {
+			if r.URL.Path != "/_sitebrush/analytics" {
+				a.markAnalyticsLoss(a.analyticsEventDomain(r, ""))
+			}
+			return
+		}
 		if !shouldRecordAnalyticsRequest(r) {
 			return
 		}
@@ -3213,34 +3246,37 @@ func (a *App) analyticsMiddleware(next http.Handler) http.Handler {
 			contentSource = "request"
 		}
 		event := siteAnalyticsEvent{
-			Domain:         a.analyticsEventDomain(r, contentSource),
-			Path:           cleanPath(r.URL.Path),
-			Query:          r.URL.RawQuery,
-			Method:         r.Method,
-			StatusCode:     writer.statusCode,
-			ContentSource:  contentSource,
-			OccurredAt:     startedAt.UTC(),
-			Duration:       time.Since(startedAt),
-			ClientIP:       clientIPAddress(r),
-			RemoteAddress:  r.RemoteAddr,
-			UserAgent:      r.UserAgent(),
-			Referer:        r.Referer(),
-			AcceptLanguage: r.Header.Get("Accept-Language"),
-			GeoCountryCode: analyticsGeoCountryCodeFromRequest(r),
-			GeoCity:        analyticsGeoCityFromRequest(r),
-			GeoSource:      analyticsGeoSourceFromRequest(r),
+			Domain:        a.analyticsEventDomain(r, contentSource),
+			Path:          analyticsBoundedString(r.URL.Path, 512),
+			Method:        r.Method,
+			StatusCode:    writer.statusCode,
+			ContentSource: contentSource,
+			OccurredAt:    startedAt.UTC(),
+			Duration:      time.Since(startedAt),
+			RemoteAddress: analyticsBoundedString(r.RemoteAddr, 64),
+			Forwarded:     analyticsBoundedString(r.Header.Get("Forwarded"), 256),
+			ForwardedFor:  analyticsBoundedString(r.Header.Get("X-Forwarded-For"), 256),
+
+			UserAgent:      analyticsBoundedString(r.UserAgent(), 256),
+			Referer:        analyticsBoundedString(r.Referer(), 512),
+			AcceptLanguage: analyticsBoundedString(r.Header.Get("Accept-Language"), 64),
+			GeoCountryCode: analyticsBoundedString(analyticsGeoCountryCodeFromRequest(r), 8),
+			GeoCity:        analyticsBoundedString(analyticsGeoCityFromRequest(r), 128),
+			GeoSource:      analyticsBoundedString(analyticsGeoSourceFromRequest(r), 64),
 			IsAdmin:        a.analyticsEventIsAdmin(r, contentSource),
 			IsAsset:        isLikelyStaticAssetPath(r.URL.Path),
-			IsController:   isSitebrushControllerQuery(r.URL.Query()),
+			IsController:   r.URL.RawQuery != "" && isSitebrushControllerQuery(r.URL.Query()),
 		}
-		event.VisitorID = analyticsVisitorID(event.ClientIP, event.UserAgent)
 		a.enqueueAnalyticsEvent(event)
 	})
 }
 
 func shouldRecordAnalyticsRequest(r *http.Request) bool {
-	if r == nil || r.URL == nil {
+	if r == nil || r.URL == nil || r.URL.Path == "/_sitebrush/analytics" || r.URL.Path == "/p/static/analytics.js" {
 		return false
+	}
+	if r.URL.RawQuery == "" {
+		return true
 	}
 	query := r.URL.Query()
 	for _, skippedFlag := range []string{"analytics", "expenses", "hosting_and_support", "billing", "grab_events", "grab_ws", "revision_preview", "publish_events", "captcha"} {
@@ -3280,6 +3316,7 @@ func (a *App) enqueueAnalyticsEvent(event siteAnalyticsEvent) {
 	select {
 	case a.analyticsEvents <- event:
 	default:
+		a.markAnalyticsLoss(event.Domain)
 	}
 }
 
@@ -3287,56 +3324,135 @@ func (a *App) analyticsEventDomain(r *http.Request, contentSource string) string
 	if r == nil {
 		return "localhost"
 	}
-	if contentSource == "static" && !hasSitebrushSessionCookie(r) {
-		return domainFromContext(r.Context())
+	if domain, exists := r.Context().Value(siteDomainContextKey{}).(string); exists && domain != "" {
+		return domain
 	}
-	return a.siteDomain(r.Context(), r)
+	return domainFromRequest(r)
 }
 
 func (a *App) analyticsEventIsAdmin(r *http.Request, contentSource string) bool {
-	if contentSource == "static" && !hasSitebrushSessionCookie(r) {
-		return false
-	}
-	return a.isAdminRequest(r)
+	// Analytics must never trigger a second authentication query.
+	return false
 }
 
 func (a *App) startAnalyticsWorkers(ctx context.Context) {
 	if a.analyticsEvents == nil {
 		return
 	}
-	go a.runAnalyticsEventWriter(ctx)
+	store := browserstats.OpenStore(filepath.Join(a.storageRootDir(), "analytics"))
+	a.analyticsStorage = store
+	a.analyticsShutdownRequested = ctx.Done()
+	a.analyticsFinished = make(chan struct{})
+	go func() {
+		defer close(a.analyticsFinished)
+		defer store.Close()
+		browserFinished := make(chan struct{})
+		go func() {
+			defer close(browserFinished)
+			if a.browserAnalytics != nil {
+				a.runBrowserAnalytics(ctx.Done())
+			}
+		}()
+		a.runAnalyticsEventWriter(ctx)
+		<-browserFinished
+	}()
 }
 
+// The receiver owns its aggregates; the saver owns detached batches. Neither
+// SQL nor geographic lookups can suspend the request admission channel.
 func (a *App) runAnalyticsEventWriter(ctx context.Context) {
-	memoryLimit := a.analyticsMemoryLimit
-	if memoryLimit <= 0 {
-		memoryLimit = defaultAnalyticsMemoryLimitBytes
+	limit := a.analyticsMemoryLimit
+	if limit <= 0 {
+		limit = defaultAnalyticsMemoryLimitBytes
 	}
-	state := newAnalyticsAggregateState(memoryLimit)
-	flushInterval := time.Minute
-	ticker := time.NewTicker(flushInterval)
+	batches := make(chan *analyticsAggregateState, 1)
+	finished := make(chan struct{})
+	persistenceContext, cancelPersistence := context.WithCancel(context.Background())
+	defer cancelPersistence()
+	go func() {
+		defer close(finished)
+		geoCache := make(map[string]analyticsGeoCacheEntry)
+		for state := range batches {
+			a.enrichAnalyticsBatch(ctx, state, geoCache)
+			a.flushAnalyticsAggregateState(persistenceContext, state)
+		}
+	}()
+	state := newAnalyticsAggregateState(limit / 8)
+	interval := a.analyticsFlushInterval
+	if interval <= 0 {
+		interval = time.Minute
+	}
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
+	processed := 0
+	pressureTicker := time.NewTicker(time.Second)
+	defer pressureTicker.Stop()
+	pressured := false
+	quietSince := time.Now()
 	for {
 		select {
 		case <-ctx.Done():
-			a.drainAnalyticsEvents(ctx, state)
-			shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			a.flushAnalyticsAggregateState(shutdownCtx, state)
-			cancel()
+			// Producers never wait for shutdown; accepted events have a bounded tail.
+			for len(a.analyticsEvents) > 0 {
+				state.record(<-a.analyticsEvents)
+			}
+			select {
+			case batches <- state:
+			default:
+			}
+			close(batches)
+			select {
+			case <-finished:
+			case <-time.After(10 * time.Second):
+			}
 			return
+		case domain := <-a.analyticsLosses:
+			if len(state.systemEvents) < 64 {
+				state.systemEvents[domain] = []analyticsCountRow{{Label: "Incomplete: analytics queue overflow", Count: 1}}
+			}
 		case event := <-a.analyticsEvents:
-			eventContext := contextWithDomain(ctx, event.Domain)
-			event = a.enrichAnalyticsEventGeo(eventContext, event)
+			if state.disabled {
+				continue
+			}
+			if aggregate := state.domains[event.Domain]; aggregate != nil && aggregate.limited {
+				continue
+			}
+			if event.ClientIP == "" {
+				event.ClientIP = clientIPAddress(&http.Request{RemoteAddr: event.RemoteAddress, Header: http.Header{"Forwarded": []string{event.Forwarded}, "X-Forwarded-For": []string{event.ForwardedFor}}})
+			}
+			event.VisitorID = analyticsVisitorID(event.ClientIP, event.UserAgent)
+			if event.GeoCountryCode == "" {
+				event.GeoSource = "unresolved"
+			}
 			state.record(event)
-		case <-ticker.C:
-			startedAt := time.Now()
-			a.flushAnalyticsAggregateState(ctx, state)
-			if time.Since(startedAt) > flushInterval && flushInterval < 30*time.Minute {
-				flushInterval *= 2
-				if flushInterval > 30*time.Minute {
-					flushInterval = 30 * time.Minute
+			processed++
+			if processed%128 == 0 {
+				select {
+				case <-ctx.Done():
+				case <-time.After(time.Millisecond):
 				}
-				ticker.Reset(flushInterval)
+			}
+		case now := <-pressureTicker.C:
+			if len(a.analyticsEvents) > cap(a.analyticsEvents)*3/4 {
+				pressured = true
+			}
+			if len(a.analyticsEvents) > cap(a.analyticsEvents)/4 {
+				quietSince = now
+			}
+			if now.Sub(quietSince) >= 5*time.Second {
+				pressured = false
+			}
+		case <-ticker.C:
+			if pressured {
+				continue
+			}
+			if len(a.analyticsEvents) > cap(a.analyticsEvents)/4 {
+				continue
+			}
+			select {
+			case batches <- state:
+				state = newAnalyticsAggregateState(limit / 8)
+			default:
 			}
 		}
 	}
@@ -3346,8 +3462,6 @@ func (a *App) drainAnalyticsEvents(ctx context.Context, state *analyticsAggregat
 	for {
 		select {
 		case event := <-a.analyticsEvents:
-			eventContext := contextWithDomain(ctx, event.Domain)
-			event = a.enrichAnalyticsEventGeo(eventContext, event)
 			state.record(event)
 		default:
 			return
@@ -3359,16 +3473,701 @@ func (a *App) flushAnalyticsAggregateState(ctx context.Context, state *analytics
 	if state == nil {
 		return
 	}
-	reports := state.reports(time.Now().UTC())
-	state.resetAfterFlush()
-	for domain, report := range reports {
-		if strings.TrimSpace(domain) == "" {
-			continue
+	for domain, aggregate := range state.domains {
+		report := aggregate.report(time.Now().UTC())
+		report.AdminUnclassified = true
+		report.SystemEvents = append(report.SystemEvents, state.systemEvents[domain]...)
+		if state.disabled {
+			report.SystemEvents = append(report.SystemEvents, analyticsCountRow{Label: "Incomplete: analytics memory limit", Count: 1})
 		}
-		reportContext := contextWithDomain(ctx, domain)
-		if saveErr := a.saveAnalyticsReport(reportContext, domain, report); saveErr != nil {
-			continue
+		a.retryAnalyticsReport(ctx, domain, report)
+	}
+	for domain, events := range state.systemEvents {
+		if _, found := state.domains[domain]; !found {
+			a.retryAnalyticsReport(ctx, domain, analyticsPreparedReport{GeneratedAt: time.Now().UTC().Format(time.RFC3339), SystemEvents: events})
 		}
+	}
+}
+
+// Browser analytics admission, persistence, and dashboard boundaries.
+
+func analyticsBoundedString(raw string, maximum int) string {
+	if len(raw) > maximum {
+		raw = raw[:maximum]
+	}
+	// Request backing storage must not remain retained by a small queued field.
+	return strings.Clone(raw)
+}
+
+func (a *App) markAnalyticsLoss(domain string) {
+	select {
+	case a.analyticsLosses <- domain:
+	default:
+	}
+	select {
+	case a.browserAnalyticsLosses <- domain:
+	default:
+	}
+}
+
+func (a *App) retryAnalyticsReport(stop context.Context, domain string, report analyticsPreparedReport) {
+	for attempt := 0; attempt < 3; attempt++ {
+		if attempt > 0 {
+			delay := 5 * time.Second
+			if attempt == 2 {
+				delay = 15 * time.Second
+			}
+			select {
+			case <-stop.Done():
+				return
+			case <-a.analyticsShutdownRequested:
+				return
+			case <-time.After(delay):
+			}
+		}
+		boundary, cancel := context.WithTimeout(contextWithDomain(stop, domain), 5*time.Second)
+		err := a.saveAnalyticsReport(boundary, domain, report)
+		cancel()
+		if err == nil {
+			return
+		}
+		log.Printf("analytics save failed domain=%q attempt=%d: %v", domain, attempt+1, err)
+	}
+	a.markAnalyticsLoss(domain)
+}
+
+type browserAnalyticsEnvelope struct {
+	domain   string
+	event    browserstats.Event
+	received time.Time
+}
+type browserAnalyticsStorageJob struct {
+	limit  int64
+	domain string
+	state  *browserstats.Site
+	load   bool
+}
+type browserAnalyticsStorageResult struct {
+	prepared bool
+	saved    bool
+	domain   string
+	state    *browserstats.Site
+	err      error
+}
+type browserAnalyticsSlot struct {
+	saving      bool
+	maintenance bool
+	state       *browserstats.Site
+	pending     []browserAnalyticsEnvelope
+	busy        bool
+	dirty       bool
+	lost        bool
+	lastSeen    time.Time
+}
+
+// Admission is bounded before upgrading. A browser connection owns its read loop
+// and session lifetime; slow or abusive clients cannot enter the SQL subsystem.
+func (a *App) browserAnalyticsSocket(w http.ResponseWriter, r *http.Request) {
+	origin, err := url.Parse(r.Header.Get("Origin"))
+	expectedScheme := "http"
+	if r.TLS != nil {
+		expectedScheme = "https"
+	}
+	if err != nil || origin.Host != r.Host || origin.Scheme != expectedScheme || origin.User != nil || origin.Path != "" {
+		http.Error(w, "invalid analytics origin", http.StatusForbidden)
+		return
+	}
+	if r.Method != http.MethodGet || a.browserAnalytics == nil || a.analyticsConnections == nil {
+		http.Error(w, "analytics unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	select {
+	case a.analyticsConnections <- struct{}{}:
+	default:
+		http.Error(w, "analytics busy", http.StatusServiceUnavailable)
+		return
+	}
+	defer func() { <-a.analyticsConnections }()
+	domain := a.analyticsEventDomain(r, "")
+	websocket.Server{Handshake: func(*websocket.Config, *http.Request) error { return nil }, Handler: func(connection *websocket.Conn) {
+		defer connection.Close()
+		connection.MaxPayloadBytes = 4096
+		var previous time.Time
+		messages := 0
+		for {
+			_ = connection.SetReadDeadline(time.Now().Add(75 * time.Second))
+			var payload string
+			if err := websocket.Message.Receive(connection, &payload); err != nil {
+				return
+			}
+			now := time.Now().UTC()
+			if messages > 0 && now.Sub(previous) < time.Second {
+				return
+			}
+			messages++
+			previous = now
+			var event browserstats.Event
+			if json.Unmarshal([]byte(payload), &event) != nil || !browserstats.Valid(event) {
+				return
+			}
+			event.Source = browserAnalyticsSource(event.Source, event.Referrer, r.Host)
+			event.Referrer = ""
+			select {
+			case a.browserAnalytics <- browserAnalyticsEnvelope{domain, event, now}:
+			default:
+				a.markAnalyticsLoss(domain)
+				return
+			}
+		}
+	}}.ServeHTTP(w, r)
+}
+
+func browserAnalyticsSource(campaign, referrer, host string) string {
+	if strings.HasPrefix(campaign, "utm:") {
+		return analyticsBoundedString(campaign, 128)
+	}
+	parsed, err := url.Parse(referrer)
+	if err != nil || parsed.Host == "" || strings.EqualFold(parsed.Host, host) {
+		return "direct"
+	}
+	return analyticsBoundedString(strings.ToLower(parsed.Hostname()), 128)
+}
+
+// Each site has at most one outstanding snapshot. Absolute snapshots make
+// uncertain SQL outcomes safe to retry without incrementing counters twice.
+func (a *App) browserAnalyticsStorage(jobs <-chan browserAnalyticsStorageJob, results chan<- browserAnalyticsStorageResult, stop <-chan struct{}) {
+	// Cancellation is translated to context only at the database library boundary.
+	storageContext, cancelStorage := context.WithCancel(context.Background())
+	storageFinished := make(chan struct{})
+	defer close(storageFinished)
+	defer cancelStorage()
+	go func() {
+		select {
+		case <-stop:
+			cancelStorage()
+		case <-storageFinished:
+		}
+	}()
+
+	for {
+		select {
+		case <-stop:
+			return
+		case job, open := <-jobs:
+			if !open {
+				return
+			}
+			var err error
+			if job.load {
+				job.state = browserstats.New(time.Now().UTC())
+				boundary, cancel := context.WithTimeout(contextWithDomain(storageContext, job.domain), 5*time.Second)
+				loaded := a.analyticsStorageExchange(browserstats.StorageRequest{Operation: browserstats.LoadHistory, Domain: job.domain, Limit: job.limit, Stop: boundary.Done()})
+				cancel()
+				err = loaded.Err
+				if errors.Is(err, sql.ErrNoRows) {
+					err = nil
+				} else if err == nil {
+					err = json.Unmarshal([]byte(loaded.Text), job.state)
+				}
+				job.state.Prune(time.Now().UTC())
+				if err == nil && job.state.Used > job.limit {
+					err = errors.New("restored browser history exceeds memory budget")
+				}
+			} else {
+				job.state.Prune(time.Now().UTC())
+				snapshot, marshalErr := json.Marshal(job.state)
+				reports := map[string]browserstats.Report{}
+				for _, days := range []int{1, 7, 30, 90} {
+					reports[strconv.Itoa(days)] = job.state.Report(time.Now().UTC(), days)
+				}
+				reportJSON, reportErr := json.Marshal(reports)
+				now := time.Now().UTC()
+				yesterday := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC).Add(-time.Nanosecond)
+				archiveJSON, archiveErr := json.Marshal(map[string]browserstats.Report{now.Format("2006-01-02"): job.state.Report(now, 1), yesterday.Format("2006-01-02"): job.state.Report(yesterday, 1)})
+				err = errors.Join(marshalErr, reportErr, archiveErr)
+				if err == nil {
+					// The state returns before SQL starts; subsequent observations never wait
+					// for database completion and cannot mutate the serialized snapshot.
+					select {
+					case results <- browserAnalyticsStorageResult{domain: job.domain, state: job.state, prepared: true}:
+					case <-stop:
+						return
+					}
+					job.state = nil
+				}
+				if err == nil {
+					for attempt := 0; attempt < 3; attempt++ {
+						if attempt > 0 {
+							delay := 5 * time.Second
+							if attempt == 2 {
+								delay = 15 * time.Second
+							}
+							select {
+							case <-stop:
+								return
+							case <-time.After(delay):
+							}
+						}
+						boundary, cancel := context.WithTimeout(contextWithDomain(storageContext, job.domain), 5*time.Second)
+						err = a.analyticsStorageExchange(browserstats.StorageRequest{Operation: browserstats.SaveBrowser, Domain: job.domain, State: string(snapshot), Report: string(reportJSON), Archive: string(archiveJSON), Stop: boundary.Done()}).Err
+						cancel()
+						if err == nil {
+							break
+						}
+					}
+				}
+			}
+			select {
+			case results <- browserAnalyticsStorageResult{domain: job.domain, state: job.state, err: err, saved: !job.load && job.state == nil}:
+			case <-stop:
+				return
+			}
+		}
+	}
+}
+
+// Filesystem admission happens only at the storage boundary, never while
+// serving pages. Unknown Host headers must not create analytics databases.
+func (a *App) analyticsStorageExchange(request browserstats.StorageRequest) browserstats.StorageResult {
+	if a.analyticsStorage == nil {
+		return browserstats.StorageResult{Err: errors.New("analytics storage unavailable")}
+	}
+	if a.siteDatabaseRouter != nil {
+		databasePath := filepath.Join(siteDatabaseRootPath(a.serverControlDBPath()), domainStorageName(request.Domain)+".db")
+		databaseInfo, databaseErr := os.Stat(databasePath)
+		staticInfo, staticErr := os.Stat(a.domainStaticDir(request.Domain))
+		if (databaseErr != nil || !databaseInfo.Mode().IsRegular()) && (staticErr != nil || !staticInfo.IsDir()) {
+			return browserstats.StorageResult{Err: errors.New("analytics site is not published or registered")}
+		}
+	}
+	return a.analyticsStorage.Exchange(request)
+}
+
+func (a *App) saveBrowserAnalyticsSnapshot(ctx context.Context, domain, snapshot, reports string) error {
+	return a.analyticsStorageExchange(browserstats.StorageRequest{Operation: browserstats.SaveBrowser, Domain: domain, State: snapshot, Report: reports, Stop: ctx.Done()}).Err
+}
+
+func (a *App) runBrowserAnalytics(stopRequested <-chan struct{}) {
+	jobs := make(chan browserAnalyticsStorageJob, 2)
+	results := make(chan browserAnalyticsStorageResult, 2)
+	stop := make(chan struct{})
+	defer close(stop)
+	go a.browserAnalyticsStorage(jobs, results, stop)
+	go a.browserAnalyticsStorage(jobs, results, stop)
+	slots := map[string]*browserAnalyticsSlot{}
+	lostDomains := map[string]bool{}
+	maintenanceLists := make(chan []string, 1)
+	go a.browserAnalyticsMaintenanceDomains(stopRequested, maintenanceLists)
+	var maintenance []string
+	lastMaintenance := time.Time{}
+	limit := a.analyticsMemoryLimit
+	if limit <= 0 {
+		limit = defaultAnalyticsMemoryLimitBytes
+	}
+	siteLimit := limit / 32
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	lastFlush := time.Now()
+	quietSince := time.Now()
+	pressured := false
+	processed := 0
+	record := func(slot *browserAnalyticsSlot, envelope browserAnalyticsEnvelope) {
+		slot.lastSeen = envelope.received
+		slot.dirty = true
+		if slot.busy || slot.state == nil {
+			if len(slot.pending) < 16 {
+				slot.pending = append(slot.pending, envelope)
+			} else {
+				slot.lost = true
+			}
+			return
+		}
+		slot.state.ProcessingLagMS = max(0, time.Since(envelope.received).Milliseconds())
+		slot.state.QueuePercent = len(a.browserAnalytics) * 100 / max(1, cap(a.browserAnalytics))
+		if !slot.state.Record(envelope.event, envelope.received, siteLimit) {
+			slot.lost = slot.lost || slot.state.Incomplete
+		}
+	}
+	applyResult := func(result browserAnalyticsStorageResult) {
+		slot := slots[result.domain]
+		if slot == nil {
+			return
+		}
+		if result.saved {
+			slot.saving = false
+			if result.err != nil {
+				log.Printf("browser analytics save failed domain=%q: %v", result.domain, result.err)
+				slot.lost = true
+				slot.dirty = true
+			}
+			return
+		}
+		slot.busy = false
+		if result.err != nil {
+			log.Printf("browser analytics snapshot failed domain=%q: %v", result.domain, result.err)
+			if slot.state == nil {
+				delete(slots, result.domain)
+				a.markAnalyticsLoss(result.domain)
+				return
+			}
+			result.state.Incomplete = true
+		}
+		slot.state = result.state
+		slot.saving = result.prepared
+		slot.dirty = result.err != nil || slot.maintenance
+		slot.maintenance = false
+		if slot.lost {
+			slot.state.Incomplete = true
+			slot.dirty = true
+			slot.lost = false
+		}
+		pending := slot.pending
+		slot.pending = nil
+		for _, envelope := range pending {
+			record(slot, envelope)
+		}
+	}
+
+	for {
+		select {
+		case <-stopRequested:
+			deadline := time.NewTimer(10 * time.Second)
+			defer deadline.Stop()
+			for len(a.browserAnalytics) > 0 {
+				envelope := <-a.browserAnalytics
+				if slot := slots[envelope.domain]; slot != nil {
+					record(slot, envelope)
+				}
+			}
+			for {
+				var outbound chan browserAnalyticsStorageJob
+				var next browserAnalyticsStorageJob
+				busy := false
+				for domain, slot := range slots {
+					if slot.busy || slot.saving {
+						busy = true
+						continue
+					}
+					if slot.dirty && slot.state != nil {
+						outbound = jobs
+						next = browserAnalyticsStorageJob{domain: domain, state: browserAnalyticsStateForSave(slot)}
+						break
+					}
+				}
+				if outbound == nil && !busy {
+					return
+				}
+				select {
+				case <-deadline.C:
+					return
+				case outbound <- next:
+					slots[next.domain].busy = true
+				case result := <-results:
+					applyResult(result)
+					if result.err != nil {
+						delete(slots, result.domain)
+					}
+				}
+			}
+		case domains := <-maintenanceLists:
+			maintenance = domains
+		case domain := <-a.browserAnalyticsLosses:
+			if slot := slots[domain]; slot != nil {
+				slot.lost = true
+				slot.dirty = true
+			} else if len(lostDomains) < 64 {
+				lostDomains[domain] = true
+			}
+		case envelope := <-a.browserAnalytics:
+			slot := slots[envelope.domain]
+			if slot == nil {
+				if len(slots) >= 8 {
+					for domain, candidate := range slots {
+						if !candidate.busy && !candidate.saving && !candidate.dirty {
+							delete(slots, domain)
+							break
+						}
+					}
+					if len(slots) >= 8 {
+						a.markAnalyticsLoss(envelope.domain)
+						continue
+					}
+				}
+				slot = &browserAnalyticsSlot{lost: lostDomains[envelope.domain]}
+				delete(lostDomains, envelope.domain)
+				select {
+				case jobs <- browserAnalyticsStorageJob{domain: envelope.domain, load: true, limit: siteLimit}:
+					slot.busy = true
+					slots[envelope.domain] = slot
+				default:
+					a.markAnalyticsLoss(envelope.domain)
+					continue
+				}
+			}
+			record(slot, envelope)
+			processed++
+			if processed%128 == 0 {
+				select {
+				case <-time.After(time.Millisecond):
+				case <-stopRequested:
+				}
+			}
+		case result := <-results:
+			applyResult(result)
+		case now := <-ticker.C:
+			occupied := len(a.browserAnalytics) > cap(a.browserAnalytics)*3/4 || len(a.analyticsEvents) > cap(a.analyticsEvents)*3/4
+			if occupied {
+				pressured = true
+				quietSince = now
+			}
+			if len(a.browserAnalytics) > cap(a.browserAnalytics)/4 || len(a.analyticsEvents) > cap(a.analyticsEvents)/4 {
+				quietSince = now
+			}
+			if pressured && now.Sub(quietSince) < 5*time.Second {
+				continue
+			}
+			pressured = false
+			if len(maintenance) > 0 && now.Sub(lastMaintenance) >= time.Minute {
+				domain := maintenance[0]
+				if slot := slots[domain]; slot != nil {
+					slot.dirty = true
+					maintenance = maintenance[1:]
+					lastMaintenance = now
+				} else {
+					if len(slots) >= 8 {
+						for candidateDomain, candidate := range slots {
+							if !candidate.busy && !candidate.saving && !candidate.dirty {
+								delete(slots, candidateDomain)
+								break
+							}
+						}
+					}
+					if len(slots) < 8 {
+						select {
+						case jobs <- browserAnalyticsStorageJob{domain: domain, load: true, limit: siteLimit}:
+							slots[domain] = &browserAnalyticsSlot{busy: true, maintenance: true}
+							maintenance = maintenance[1:]
+							lastMaintenance = now
+						default:
+						}
+					}
+				}
+			}
+			if now.Sub(lastFlush) < time.Minute {
+				continue
+			}
+			allScheduled := true
+			for domain, slot := range slots {
+				if slot.busy || slot.saving || !slot.dirty || slot.state == nil {
+					continue
+				}
+				select {
+				case jobs <- browserAnalyticsStorageJob{domain: domain, state: browserAnalyticsStateForSave(slot)}:
+					slot.busy = true
+				default:
+					allScheduled = false
+				}
+			}
+			if allScheduled {
+				lastFlush = now
+			}
+		}
+	}
+}
+
+type browserAnalyticsDashboard struct {
+	Report          browserstats.Report
+	Available       bool
+	Days            int
+	Age             string
+	Cards           []analyticsMetricCard
+	ReturnSections  []analyticsReportSection
+	ContentSections []analyticsReportSection
+}
+
+func (a *App) browserAnalyticsView(r *http.Request, domain string) browserAnalyticsDashboard {
+	days, _ := strconv.Atoi(r.URL.Query().Get("days"))
+	if days != 1 && days != 7 && days != 30 && days != 90 {
+		days = 7
+	}
+	dashboard := browserAnalyticsDashboard{Days: days}
+	result := a.analyticsStorageExchange(browserstats.StorageRequest{Operation: browserstats.ReadBrowserReport, Domain: domain, Stop: r.Context().Done()})
+	if result.Err != nil {
+		return dashboard
+	}
+	encoded := result.Text
+	reports := map[string]browserstats.Report{}
+	if json.Unmarshal([]byte(encoded), &reports) != nil {
+		return dashboard
+	}
+	dashboard.Report, dashboard.Available = reports[strconv.Itoa(days)]
+	dashboard.Cards, dashboard.ReturnSections, dashboard.ContentSections = browserAnalyticsSections(dashboard.Report, translationsForRequest(r))
+	dashboard.Age = fmt.Sprintf("%s UTC · %s", dashboard.Report.Generated.UTC().Format("2006-01-02 15:04:05"), time.Since(dashboard.Report.Generated).Round(time.Second))
+	return dashboard
+}
+
+func browserAnalyticsSections(report browserstats.Report, translations map[string]string) ([]analyticsMetricCard, []analyticsReportSection, []analyticsReportSection) {
+	label := func(key string) string { return translations["analytics_browser_"+key] }
+	cards := []analyticsMetricCard{}
+	for _, metric := range []struct {
+		key   string
+		count int
+	}{{"views", report.Views}, {"visitors", report.Visitors}, {"new", report.New}, {"returning", report.Returning}, {"continuing", report.Continuing}, {"resurrected", report.Resurrected}, {"dormant", report.Dormant}, {"sessions", report.Sessions}, {"single", report.SingleSessions}, {"temporary", report.Temporary}} {
+		metricText := strconv.Itoa(metric.count)
+		if !report.ComparisonAvailable && (metric.key == "continuing" || metric.key == "resurrected" || metric.key == "dormant") {
+			metricText = "—"
+		}
+		cards = append(cards, analyticsMetricCard{Label: label(metric.key), Value: metricText})
+	}
+	cards = append(cards, analyticsMetricCard{Label: label("active"), Value: formatDurationMS(report.ActiveMS), Hint: label("active_hint")})
+	cards = append(cards, analyticsMetricCard{Label: label("scroll"), Value: fmt.Sprintf("25%%: %d · 50%%: %d · 75%%: %d · 100%%: %d", report.Scroll[0], report.Scroll[1], report.Scroll[2], report.Scroll[3])})
+	section := func(key string, rows []browserstats.Row) analyticsReportSection {
+		result := analyticsReportSection{Title: label(key)}
+		for _, row := range rows {
+			rowLabel := row.Label
+			insightKeys := map[string]string{"Returned after 14 days": "pattern_pause", "External discovery to direct visits": "pattern_direct", "Explored a new observed page": "pattern_explore", "Possible continued reading": "pattern_reading", "Navigation loop": "pattern_loop", "Returning habit: 3 of 4 completed weeks": "pattern_habit"}
+			if key, found := insightKeys[rowLabel]; found {
+				rowLabel = label(key)
+			}
+			if strings.HasPrefix(rowLabel, "Anchor page: ") {
+				rowLabel = label("pattern_anchor") + ": " + strings.TrimPrefix(rowLabel, "Anchor page: ")
+			}
+			result.Rows = append(result.Rows, analyticsReportRow{Label: rowLabel, Value: strconv.Itoa(row.Count)})
+		}
+		return result
+	}
+	returns := []analyticsReportSection{section("insights", report.Insights), section("active_days", report.ActiveDays), section("intervals", report.ReturnIntervals), section("first_sources", report.FirstSources), section("return_sources", report.ReturnSources)}
+	returns[0].Description = label("interpretation_hint")
+	content := []analyticsReportSection{section("pages", report.Pages), section("sources", report.Sources), section("entries", report.Entries), section("exits", report.Exits), section("transitions", report.Transitions)}
+	return cards, returns, content
+}
+
+func analyticsDurationPercentiles(buckets [32]int, total int) []analyticsCountRow {
+	result := []analyticsCountRow{}
+	if total == 0 {
+		return result
+	}
+	for _, percentile := range []int{50, 95, 99} {
+		target := (total*percentile + 99) / 100
+		count := 0
+		for index, frequency := range buckets {
+			count += frequency
+			if count >= target {
+				result = append(result, analyticsCountRow{Label: fmt.Sprintf("p%d", percentile), Value: fmt.Sprintf("≤ %d µs", int64(1)<<(index+1)), Count: target})
+				break
+			}
+		}
+	}
+	return result
+}
+func analyticsPercentileRows(rows []analyticsCountRow) []analyticsReportRow {
+	result := []analyticsReportRow{}
+	for _, row := range rows {
+		result = append(result, analyticsReportRow{Label: row.Label, Value: row.Value})
+	}
+	return result
+}
+
+func analyticsConfiguredMemoryLimit() int64 {
+	raw := os.Getenv("SITEBRUSH_ANALYTICS_MEMORY_MIB")
+	if raw == "" {
+		return defaultAnalyticsMemoryLimitBytes
+	}
+	megabytes, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || megabytes < 16 || megabytes > 256 {
+		log.Printf("invalid SITEBRUSH_ANALYTICS_MEMORY_MIB; using 64 MiB")
+		return defaultAnalyticsMemoryLimitBytes
+	}
+	return megabytes * 1024 * 1024
+}
+func browserAnalyticsStateForSave(slot *browserAnalyticsSlot) *browserstats.Site {
+	if slot.lost {
+		slot.state.Incomplete = true
+		slot.lost = false
+	}
+	return slot.state
+}
+
+type analyticsGeoCacheEntry struct {
+	location geoip.Location
+	found    bool
+	expires  time.Time
+}
+
+func (a *App) enrichAnalyticsBatch(stop context.Context, state *analyticsAggregateState, cache map[string]analyticsGeoCacheEntry) {
+	if a.geoIP == nil || len(a.analyticsEvents) > cap(a.analyticsEvents)/4 {
+		return
+	}
+	for _, aggregate := range state.domains {
+		for address, count := range aggregate.geoCandidates {
+			select {
+			case <-stop.Done():
+				return
+			default:
+			}
+			entry, exists := cache[address]
+			if !exists || time.Now().After(entry.expires) {
+				boundary, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
+				location, found := a.geoIP.Lookup(boundary, address)
+				cancel()
+				entry = analyticsGeoCacheEntry{location: location, found: found, expires: time.Now().Add(time.Hour)}
+				if len(cache) >= 256 {
+					clear(cache)
+				}
+				cache[address] = entry
+			}
+			if !entry.found {
+				continue
+			}
+			event := siteAnalyticsEvent{GeoCountryCode: entry.location.CountryCode, GeoCity: entry.location.City, GeoLatitude: entry.location.Latitude, GeoLongitude: entry.location.Longitude, GeoSource: entry.location.Source}
+			location := analyticsLocationForEvent(event)
+			aggregate.countries[location.Country] += count
+			aggregate.cities[location.CityLabel] += count
+			// Unknown counts are replaced only for observations covered by this bounded lookup.
+			aggregate.countries["Unknown"] -= min(count, aggregate.countries["Unknown"])
+			aggregate.cities["Unknown city"] -= min(count, aggregate.cities["Unknown city"])
+			if location.hasCoordinates() {
+				addAnalyticsMapBucket(aggregate.mapBuckets, location)
+				label := location.Country
+				if location.City != "" {
+					label = location.City + ", " + location.Country
+				}
+				key := fmt.Sprintf("%.4f:%.4f:%s", location.Latitude, location.Longitude, label)
+				bucket := aggregate.mapBuckets[key]
+				bucket.Count += count - 1
+				aggregate.mapBuckets[key] = bucket
+			}
+		}
+	}
+}
+
+// Expiration uses the same bounded storage queue as regular snapshots. It never
+// creates a parallel scan of site databases while the public server is busy.
+func (a *App) browserAnalyticsMaintenanceDomains(stop <-chan struct{}, lists chan<- []string) {
+	if a.siteDatabaseRouter == nil {
+		return
+	}
+	timer := time.NewTimer(time.Minute)
+	defer timer.Stop()
+	for {
+		select {
+		case <-stop:
+			return
+		case <-timer.C:
+		}
+		boundary, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		domains := a.siteDatabaseRouter.Domains(boundary)
+		cancel()
+		// The router is an external database boundary; admission remains channel based.
+		if len(domains) > 4096 {
+			domains = domains[:4096]
+		}
+		select {
+		case lists <- domains:
+		case <-stop:
+			return
+		}
+		timer.Reset(24 * time.Hour)
 	}
 }
 
@@ -3382,6 +4181,10 @@ type analyticsAggregateState struct {
 }
 
 type siteAnalyticsAggregate struct {
+	accountedBytes        int64
+	limited               bool
+	durationBuckets       [32]int
+	geoCandidates         map[string]int
 	periodStart           time.Time
 	periodEnd             time.Time
 	totalRequests         int
@@ -3445,13 +4248,24 @@ func (state *analyticsAggregateState) record(event siteAnalyticsEvent) {
 	if state.disabled {
 		return
 	}
+	if _, exists := state.domains[domain]; !exists && len(state.domains) >= 64 {
+		state.disabled = true
+		return
+	}
 	aggregate := state.aggregateForDomain(domain)
+	if aggregate.limited || (state.memoryLimitBytes >= 1<<20 && aggregate.accountedBytes > state.memoryLimitBytes/4) {
+		aggregate.limited = true
+		state.systemEvents[domain] = []analyticsCountRow{{Label: "Incomplete: site analytics budget", Count: 1}}
+		return
+	}
 	aggregate.record(event)
-	state.usedBytes += estimateAnalyticsEventAggregateBytes(event)
+	if aggregate.totalRequests == 1 || aggregate.totalRequests%32 == 0 {
+		measured := aggregate.estimatedBytes() + int64(len(aggregate.geoCandidates))*256
+		state.usedBytes += measured - aggregate.accountedBytes
+		aggregate.accountedBytes = measured
+	}
 	if state.memoryLimitBytes > 0 && state.usedBytes > state.memoryLimitBytes {
 		state.recordSystemEvent(domain, "analytics overload started", time.Now().UTC())
-		state.domains = make(map[string]*siteAnalyticsAggregate)
-		state.usedBytes = 0
 		state.disabled = true
 		state.overloadDomain = domain
 	}
@@ -3459,6 +4273,7 @@ func (state *analyticsAggregateState) record(event siteAnalyticsEvent) {
 
 func estimateAnalyticsEventAggregateBytes(event siteAnalyticsEvent) int64 {
 	estimatedBytes := 512
+	estimatedBytes += len(event.RemoteAddress) + len(event.Forwarded) + len(event.ForwardedFor)
 	estimatedBytes += len(event.Path)
 	estimatedBytes += len(event.Query)
 	estimatedBytes += len(event.UserAgent)
@@ -3577,6 +4392,11 @@ func (aggregate *siteAnalyticsAggregate) record(event siteAnalyticsEvent) {
 		aggregate.periodEnd = event.OccurredAt
 	}
 	aggregate.totalRequests++
+	durationBucket := 0
+	for micros := event.Duration.Microseconds(); micros > 1 && durationBucket < 31; micros >>= 1 {
+		durationBucket++
+	}
+	aggregate.durationBuckets[durationBucket]++
 	aggregate.totalDurationMS += event.Duration.Milliseconds()
 	if _, found := aggregate.visitorSet[event.VisitorID]; !found && strings.TrimSpace(event.VisitorID) != "" {
 		aggregate.visitorSet[event.VisitorID] = struct{}{}
@@ -3605,6 +4425,15 @@ func (aggregate *siteAnalyticsAggregate) record(event siteAnalyticsEvent) {
 		return
 	}
 	aggregate.pageViews++
+	if event.GeoCountryCode == "" && event.ClientIP != "" {
+		if aggregate.geoCandidates == nil {
+			aggregate.geoCandidates = make(map[string]int)
+		}
+		if _, exists := aggregate.geoCandidates[event.ClientIP]; exists || len(aggregate.geoCandidates) < 16 {
+			aggregate.geoCandidates[event.ClientIP]++
+		}
+	}
+
 	incrementAnalyticsCounter(aggregate.topPages, event.Path)
 	incrementAnalyticsCounter(aggregate.trafficSources, classifyAnalyticsTrafficSource(event.Referer))
 	if host := analyticsRefererHost(event.Referer); host != "" {
@@ -3702,6 +4531,7 @@ func (aggregate *siteAnalyticsAggregate) report(generatedAt time.Time) analytics
 	report.Countries = sortedAnalyticsRows(aggregate.countries, 10, report.PageViews)
 	report.Cities = sortedAnalyticsRows(aggregate.cities, 10, report.PageViews)
 	report.EntryHours = sortedAnalyticsRows(sessionSummary.EntryHours, 24, sessionSummary.SessionCount)
+	report.ResponsePercentiles = analyticsDurationPercentiles(aggregate.durationBuckets, aggregate.totalRequests)
 	report.MapPoints = analyticsMapPoints(aggregate.mapBuckets, report.PageViews)
 	report.Devices = sortedAnalyticsRows(aggregate.devices, 10, report.PageViews)
 	report.VisitorTypes = sortedAnalyticsRows(aggregate.visitorTypes, 10, report.PageViews)
@@ -3804,7 +4634,9 @@ func (aggregate *siteAnalyticsAggregate) estimatedBytes() int64 {
 	total += estimateAnalyticsCounterBytes(aggregate.contentSources)
 	total += estimateAnalyticsDurationCounterBytes(aggregate.slowPageTotalDuration)
 	total += estimateAnalyticsCounterBytes(aggregate.slowPageCounts)
-	total += int64(len(aggregate.visitorSessions) * 512)
+	for _, session := range aggregate.visitorSessions {
+		total += int64(512) + estimateAnalyticsEventAggregateBytes(session.firstEvent) + estimateAnalyticsEventAggregateBytes(session.lastEvent)
+	}
 	total += estimateAnalyticsCounterBytes(aggregate.sessionSummary.EntryPages)
 	total += estimateAnalyticsCounterBytes(aggregate.sessionSummary.ExitPages)
 	total += estimateAnalyticsCounterBytes(aggregate.sessionSummary.EntryHours)
@@ -4212,19 +5044,16 @@ func (a *App) saveAnalyticsReport(ctx context.Context, domain string, report ana
 	if err != nil {
 		return err
 	}
-	_, err = a.db.ExecContext(ctx, `INSERT INTO analytics_reports(domain,generated_at,period_start,period_end,event_count,report_json) VALUES(?,?,?,?,?,?) ON CONFLICT(domain) DO UPDATE SET generated_at=excluded.generated_at,period_start=excluded.period_start,period_end=excluded.period_end,event_count=excluded.event_count,report_json=excluded.report_json`,
-		domain, report.GeneratedAt, report.PeriodStart, report.PeriodEnd, report.TotalRequests, string(reportBytes))
-	return err
+	return a.analyticsStorageExchange(browserstats.StorageRequest{Operation: browserstats.SaveTechnical, Domain: domain, Report: string(reportBytes), Stop: ctx.Done()}).Err
 }
 
 func (a *App) loadAnalyticsReport(ctx context.Context, domain string) (analyticsPreparedReport, bool) {
-	var reportJSON string
-	err := a.db.QueryRowContext(ctx, `SELECT report_json FROM analytics_reports WHERE domain=?`, domain).Scan(&reportJSON)
-	if err != nil || strings.TrimSpace(reportJSON) == "" {
+	result := a.analyticsStorageExchange(browserstats.StorageRequest{Operation: browserstats.ReadTechnicalReport, Domain: domain, Stop: ctx.Done()})
+	if result.Err != nil {
 		return analyticsPreparedReport{}, false
 	}
 	var report analyticsPreparedReport
-	if json.Unmarshal([]byte(reportJSON), &report) != nil {
+	if json.Unmarshal([]byte(result.Text), &report) != nil {
 		return analyticsPreparedReport{}, false
 	}
 	return report, true
@@ -4457,6 +5286,9 @@ var analyticsLanguageDefaultCountries = map[string]string{
 }
 
 func analyticsLocationForEvent(event siteAnalyticsEvent) analyticsLocation {
+	if event.GeoSource == "unresolved" {
+		return analyticsLocation{Country: "Unknown", CityLabel: "Unknown city", Detail: "unknown"}
+	}
 	countryCode := strings.ToUpper(strings.TrimSpace(event.GeoCountryCode))
 	sourceDetail := strings.TrimSpace(event.GeoSource)
 	if sourceDetail == "" && countryCode != "" {
@@ -4667,19 +5499,12 @@ func (a *App) analyticsPage(w http.ResponseWriter, r *http.Request) {
 	domain := a.siteDomain(r.Context(), r)
 	report, found := a.loadAnalyticsReport(r.Context(), domain)
 	if !found {
-		var err error
-		report, err = a.buildAnalyticsReport(r.Context(), domain)
-		if err == nil {
-			_ = a.saveAnalyticsReport(r.Context(), domain, report)
-			found = true
-		}
-	}
-	if !found {
 		report = analyticsPreparedReport{GeneratedAt: time.Now().UTC().Format(time.RFC3339)}
 	}
 	a.render(w, r, "analytics.html", map[string]any{
-		"ReturnPath": requestedReturnPath(r),
-		"Report":     analyticsReportView(report, translationsForRequest(r)),
+		"ReturnPath":       requestedReturnPath(r),
+		"Report":           analyticsReportView(report, translationsForRequest(r)),
+		"BrowserAnalytics": a.browserAnalyticsView(r, domain),
 	})
 }
 
@@ -4710,7 +5535,11 @@ func analyticsReportView(report analyticsPreparedReport, translations map[string
 		{Label: translationOrDefault(translations, "analytics_errors", "Errors"), Value: strconv.Itoa(report.ErrorCount), Hint: translationOrDefault(translations, "analytics_errors_hint", "Requests with HTTP status 400 or higher.")},
 		{Label: translationOrDefault(translations, "analytics_admin_traffic", "Admin traffic"), Value: strconv.Itoa(report.AdminRequests), Hint: translationOrDefault(translations, "analytics_admin_traffic_hint", "Requests made while logged in as an administrator.")},
 	}
+	if report.AdminUnclassified {
+		view.Cards = view.Cards[:len(view.Cards)-1]
+	}
 	view.Sections = []analyticsReportSection{
+		{Title: "Server response percentiles", Description: "Histogram upper bounds; not browser loading time.", Rows: analyticsPercentileRows(report.ResponsePercentiles)},
 		analyticsSectionView("analytics_section_top_pages", "analytics_section_top_pages_hint", report.TopPages, report.PageViews, "path", translations),
 		analyticsSectionView("analytics_section_entry_pages", "analytics_section_entry_pages_hint", report.EntryPages, report.Sessions, "path", translations),
 		analyticsSectionView("analytics_section_exit_pages", "analytics_section_exit_pages_hint", report.ExitPages, report.Sessions, "path", translations),
@@ -4900,7 +5729,7 @@ func clientIPStorageAliases(clientIP string) []string {
 }
 
 func analyticsGeoCountryCodeFromRequest(r *http.Request) string {
-	headerNames := []string{"CF-IPCountry", "CloudFront-Viewer-Country", "X-Vercel-IP-Country", "X-Appengine-Country", "X-Geo-Country"}
+	headerNames := []string{"Cf-Ipcountry", "CloudFront-Viewer-Country", "X-Vercel-Ip-Country", "X-Appengine-Country", "X-Geo-Country"}
 	for _, headerName := range headerNames {
 		countryCode := strings.ToUpper(strings.TrimSpace(r.Header.Get(headerName)))
 		if len(countryCode) == 2 && countryCode != "XX" {
@@ -4911,7 +5740,7 @@ func analyticsGeoCountryCodeFromRequest(r *http.Request) string {
 }
 
 func analyticsGeoCityFromRequest(r *http.Request) string {
-	headerNames := []string{"CF-IPCity", "X-Vercel-IP-City", "X-Appengine-City", "X-Geo-City"}
+	headerNames := []string{"Cf-Ipcity", "X-Vercel-Ip-City", "X-Appengine-City", "X-Geo-City"}
 	for _, headerName := range headerNames {
 		city := strings.TrimSpace(r.Header.Get(headerName))
 		if city != "" {
@@ -5396,7 +6225,8 @@ func runSitebrushServer(ctx context.Context, config serverRunConfig) error {
 	}
 
 	var siteDatabaseRouter *perSiteDBRouter
-	application := &App{storagePath: effectiveStoragePath, storageRealRoot: storageRealRoot, dbPath: effectiveDBPath, debug: config.Debug, desktopMode: config.DesktopMode, nativeFileDialog: desktop.NativeFileDialogSupported(), grabTracker: newGrabProgressTracker(), grabCancels: newGrabCancelTracker(), trialPreviews: newPublicTrialPreviewStore(), publishTracker: newPublishProgressTracker(), analyticsEvents: make(chan siteAnalyticsEvent, 65536), domainLogEvents: make(chan domainLogEvent, 1024)}
+	application := &App{storagePath: effectiveStoragePath, storageRealRoot: storageRealRoot, dbPath: effectiveDBPath, debug: config.Debug, desktopMode: config.DesktopMode, nativeFileDialog: desktop.NativeFileDialogSupported(), grabTracker: newGrabProgressTracker(), grabCancels: newGrabCancelTracker(), trialPreviews: newPublicTrialPreviewStore(), publishTracker: newPublishProgressTracker(), analyticsEvents: make(chan siteAnalyticsEvent, 1024), analyticsLosses: make(chan string, 64), browserAnalyticsLosses: make(chan string, 64), browserAnalytics: make(chan browserAnalyticsEnvelope, 512), analyticsConnections: make(chan struct{}, 128), domainLogEvents: make(chan domainLogEvent, 1024)}
+	application.analyticsMemoryLimit = analyticsConfiguredMemoryLimit()
 	controlDatabaseDispatcher, err := startServerControlDatabaseDispatcher(effectiveDBPath, config.Debug)
 	if err != nil {
 		return fmt.Errorf("start server control database dispatcher: %w", err)
@@ -5448,6 +6278,14 @@ func runSitebrushServer(ctx context.Context, config serverRunConfig) error {
 	application.billingInvoices = application.startBillingInvoiceProcess(ctx.Done())
 	application.startDomainLogWorker(ctx)
 	application.startAnalyticsWorkers(ctx)
+	defer func() {
+		if ctx.Err() != nil {
+			select {
+			case <-application.analyticsFinished:
+			case <-time.After(10 * time.Second):
+			}
+		}
+	}()
 	application.startServerOwnerRecoveryWorker(ctx)
 	application.startDemoSiteCleanupWorker(ctx)
 	application.startServiceMailKeyPairWorker(ctx)
@@ -6943,6 +7781,10 @@ func (a *App) assignMissingDomainAliasTokens(ctx context.Context) {
 }
 
 func (a *App) route(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path == "/_sitebrush/analytics" {
+		a.browserAnalyticsSocket(w, r)
+		return
+	}
 	pagePath := cleanPath(r.URL.Path)
 	if requestWithSensitiveCookieRequiresHTTPS(r) {
 		a.redirectHTTPS(w, r, http.StatusTemporaryRedirect)
@@ -32674,7 +33516,7 @@ func runGuestStaticHTMLCache(ctx context.Context, requests <-chan guestStaticHTM
 
 func buildGuestStaticHTMLBody(staticContent []byte, pagePath, domain, languageCode string) []byte {
 	html := rewriteLegacyPublicTrialWidgetReference(string(staticContent))
-	menuScript := buildGuestContextMenuScriptForLanguage(pagePath, domain, languageCode)
+	menuScript := buildGuestContextMenuScriptForLanguage(pagePath, domain, languageCode) + `<script defer src="/p/static/analytics.js" data-sitebrush-owned="true"></script>`
 	lowerHTML := strings.ToLower(html)
 	bodyCloseIndex := strings.LastIndex(lowerHTML, "</body>")
 	if bodyCloseIndex < 0 {
@@ -32694,7 +33536,7 @@ func rewriteLegacyPublicTrialWidgetReference(html string) string {
 
 func (a *App) injectPublicContextMenu(r *http.Request, pagePath, html string) string {
 	html = rewriteLegacyPublicTrialWidgetReference(html)
-	menuScript := buildGuestContextMenuScriptForLanguage(pagePath, domainFromContext(r.Context()), preferredLanguageCode(r.Header.Get("Accept-Language")))
+	menuScript := buildGuestContextMenuScriptForLanguage(pagePath, domainFromContext(r.Context()), preferredLanguageCode(r.Header.Get("Accept-Language"))) + `<script defer src="/p/static/analytics.js" data-sitebrush-owned="true"></script>`
 	lowerHTML := strings.ToLower(html)
 	bodyCloseIndex := strings.LastIndex(lowerHTML, "</body>")
 	if bodyCloseIndex < 0 {
