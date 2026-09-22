@@ -13944,6 +13944,12 @@ func (writer *analyticsPipeWriter) Hijack() (net.Conn, *bufio.ReadWriter, error)
 }
 
 func TestBrowserAnalyticsWebSocketDelivery(t *testing.T) {
+	for _, scheme := range []string{"http", "https"} {
+		t.Run(scheme, func(t *testing.T) { testBrowserAnalyticsWebSocketDelivery(t, scheme) })
+	}
+}
+
+func testBrowserAnalyticsWebSocketDelivery(t *testing.T, scheme string) {
 	serverConnection, clientConnection := net.Pipe()
 	defer serverConnection.Close()
 	defer clientConnection.Close()
@@ -13960,10 +13966,11 @@ func TestBrowserAnalyticsWebSocketDelivery(t *testing.T) {
 		app.browserAnalyticsSocket(&analyticsPipeWriter{serverConnection, buffered, make(http.Header)}, request)
 		finished <- nil
 	}()
-	configuration, err := websocket.NewConfig("ws://example.org/_sitebrush/analytics", "http://example.org")
+	configuration, err := websocket.NewConfig("ws://example.org/_sitebrush/analytics", scheme+"://example.org")
 	if err != nil {
 		t.Fatal(err)
 	}
+	configuration.Header.Set("X-Forwarded-Proto", scheme)
 	connection, err := websocket.NewClient(configuration, clientConnection)
 	if err != nil {
 		t.Fatal(err)
@@ -14310,5 +14317,169 @@ func TestResultHostResourceURLPreserved(t *testing.T) {
 	}
 	if (&pageSpider{}).isResultHostResourceURL("https://kavtrans.sitebrush.ru/files/map.pdf") {
 		t.Fatal("resource matched without a result domain")
+	}
+}
+
+func TestBrowserAnalyticsProxyRejectsMismatchedOrigin(t *testing.T) {
+	app := &App{}
+	for _, origin := range []string{"http://example.org", "https://evil.example"} {
+		request := httptest.NewRequest("GET", "http://example.org/_sitebrush/analytics", nil)
+		request.Header.Set("X-Forwarded-Proto", "https")
+		request.Header.Set("Origin", origin)
+		response := httptest.NewRecorder()
+		app.browserAnalyticsSocket(response, request)
+		if response.Code != http.StatusForbidden {
+			t.Fatalf("origin %q status=%d", origin, response.Code)
+		}
+	}
+}
+
+type analyticsObservedRepository struct {
+	browserstats.Repository
+	loaded chan string
+}
+
+func (repository analyticsObservedRepository) Exchange(request browserstats.StorageRequest) browserstats.StorageResult {
+	result := repository.Repository.Exchange(request)
+	if request.Operation == browserstats.LoadHistory {
+		repository.loaded <- request.Domain
+	}
+	return result
+}
+
+func TestAnalyticsVerifiedAliasSharesPrimaryReports(t *testing.T) {
+	root := t.TempDir()
+	dbPath := filepath.Join(root, defaultDBPath)
+	directory := siteDatabaseRootPath(dbPath)
+	if err := os.MkdirAll(directory, 0755); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := sql.Open("sqlite", filepath.Join(directory, "primary.example.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.Exec(`CREATE TABLE domain_aliases(primary_domain TEXT,alias_domain TEXT UNIQUE,is_verified INTEGER,dns_a_ok INTEGER); INSERT INTO domain_aliases VALUES('primary.example','alias.example',1,1)`); err != nil {
+		t.Fatal(err)
+	}
+	_ = raw.Close()
+	router := newPerSiteDBRouter(directory, "localhost", func(_ context.Context, _ *sql.DB, _ string) error { return nil }, false)
+	defer router.Close()
+	waitSiteDBRouterStartup(t, router)
+	store := browserstats.OpenStore(filepath.Join(root, "analytics"))
+	defer store.Close()
+	loaded := make(chan string, 4)
+	app := &App{db: router, dbPath: dbPath, storagePath: root, siteDatabaseRouter: router, analyticsStorage: analyticsObservedRepository{store, loaded}, analyticsEvents: make(chan siteAnalyticsEvent, 4), browserAnalytics: make(chan browserAnalyticsEnvelope, 4)}
+	boundary := contextWithDomain(context.Background(), "alias.example")
+	if primary := app.siteDomain(boundary, httptest.NewRequest("GET", "http://alias.example/", nil)); primary != "primary.example" {
+		t.Fatalf("site router returned %q", primary)
+	}
+	stop, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	technicalDone, browserDone := make(chan struct{}), make(chan struct{})
+	go func() { defer close(technicalDone); app.runAnalyticsEventWriter(stop) }()
+	go func() { defer close(browserDone); app.runBrowserAnalytics(stop.Done()) }()
+	for index, domain := range []string{"alias.example", "primary.example"} {
+		request := httptest.NewRequest("GET", "http://"+domain+"/docs", nil).WithContext(contextWithDomain(context.Background(), domain))
+		app.analyticsMiddleware(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })).ServeHTTP(httptest.NewRecorder(), request)
+		app.browserAnalytics <- browserAnalyticsEnvelope{domain: app.analyticsEventDomain(request, ""), received: time.Now().UTC(), event: browserstats.Event{Visitor: "1111111111111111", View: fmt.Sprintf("%016x", index+1), Sequence: 1, Path: "/docs", Persistent: true}}
+	}
+	select {
+	case domain := <-loaded:
+		if domain != "primary.example" {
+			t.Fatalf("loaded history for %q", domain)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("history load timed out")
+	}
+	cancel()
+	for _, done := range []chan struct{}{technicalDone, browserDone} {
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Fatal("collector shutdown timed out")
+		}
+	}
+	technical, available := app.loadAnalyticsReport(context.Background(), "primary.example")
+	if !available || technical.TotalRequests != 2 {
+		t.Fatalf("technical report: %+v, available=%v", technical, available)
+	}
+	result := store.Exchange(browserstats.StorageRequest{Operation: browserstats.ReadBrowserReport, Domain: "primary.example"})
+	reports := map[string]browserstats.Report{}
+	if result.Err != nil {
+		t.Fatal(result.Err)
+	}
+	if err := json.Unmarshal([]byte(result.Text), &reports); err != nil {
+		t.Fatal(err)
+	}
+	if reports["7"].Views != 2 || reports["7"].Sessions != 1 {
+		t.Fatalf("browser report: %+v", reports["7"])
+	}
+	if _, err := os.Stat(filepath.Join(root, "analytics", "site-alias.example")); !os.IsNotExist(err) {
+		t.Fatalf("alias created separate storage: %v", err)
+	}
+}
+
+func TestAnalyticsAliasResolutionPreservesRouterFailure(t *testing.T) {
+	directory := t.TempDir()
+	raw, err := sql.Open("sqlite", filepath.Join(directory, "primary.example.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+	if _, err := raw.Exec(`CREATE TABLE domain_aliases(primary_domain TEXT,alias_domain TEXT UNIQUE,is_verified INTEGER,dns_a_ok INTEGER); INSERT INTO domain_aliases VALUES('primary.example','alias.example',1,1); CREATE TABLE users(is_admin INTEGER); INSERT INTO users VALUES(1)`); err != nil {
+		t.Fatal(err)
+	}
+	entered, release := make(chan struct{}, 1), make(chan struct{})
+	router := newPerSiteDBRouter(directory, "localhost", func(context.Context, *sql.DB, string) error {
+		select {
+		case entered <- struct{}{}:
+		default:
+		}
+		<-release
+		return nil
+	}, false)
+	defer func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+		waitSiteDBRouterStartup(t, router)
+		_ = router.Close()
+	}()
+	select {
+	case <-entered:
+	case <-time.After(3 * time.Second):
+		t.Fatal("migration did not start")
+	}
+	app := &App{siteDatabaseRouter: router}
+	resolutions := make(map[string]analyticsDomainResolution)
+	if domain := app.resolveAnalyticsDomain("alias.example", resolutions); domain != "" {
+		t.Fatalf("routing failure resolved to %q", domain)
+	}
+	failed := resolutions["alias.example"]
+	if failed.domain != "" || time.Until(failed.expires) > time.Second {
+		t.Fatalf("routing failure cached as success: %+v", failed)
+	}
+	close(release)
+	waitSiteDBRouterStartup(t, router)
+	failed.expires = time.Now().Add(-time.Second)
+	resolutions["alias.example"] = failed
+	if domain := app.resolveAnalyticsDomain("alias.example", resolutions); domain != "primary.example" {
+		t.Fatalf("recovered alias resolved to %q", domain)
+	}
+	delete(resolutions, "primary.example")
+	if domain := app.resolveAnalyticsDomain("primary.example", resolutions); domain != "primary.example" {
+		t.Fatalf("non-alias resolved to %q", domain)
+	}
+	if _, err := raw.Exec(`DROP TABLE domain_aliases`); err != nil {
+		t.Fatal(err)
+	}
+	delete(resolutions, "primary.example")
+	if domain := app.resolveAnalyticsDomain("primary.example", resolutions); domain != "" {
+		t.Fatalf("SQL failure resolved to %q", domain)
+	}
+	if cached := resolutions["primary.example"]; cached.domain != "" || time.Until(cached.expires) > time.Second {
+		t.Fatalf("SQL failure cached as success: %+v", cached)
 	}
 }
