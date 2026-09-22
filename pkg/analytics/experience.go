@@ -32,6 +32,7 @@ type BrowserContext struct {
 	Language                 string   `json:"language"`
 	PageLanguage             string   `json:"page_language"`
 	Timezone                 string   `json:"timezone"`
+	URI                      string   `json:"uri"`
 	Offset                   *int     `json:"offset"`
 	Campaign                 Campaign `json:"campaign"`
 	Actions                  []Action `json:"actions"`
@@ -144,6 +145,38 @@ func SafePath(raw string) string {
 	}
 	return CleanText(strings.Join(parts, "/"), 256)
 }
+func SafeURI(raw string) string {
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Scheme != "" || parsed.Host != "" || parsed.User != nil {
+		return ""
+	}
+	pathname := SafePath(raw)
+	query := parsed.Query()
+	for key := range query {
+		lower := strings.ToLower(key)
+		for _, sensitive := range []string{"token", "secret", "password", "passwd", "auth", "authorization", "session", "key", "code"} {
+			if strings.Contains(lower, sensitive) {
+				query.Del(key)
+				break
+			}
+		}
+	}
+	result := pathname
+	if encoded := query.Encode(); encoded != "" {
+		result += "?" + encoded
+	}
+	if parsed.Fragment != "" {
+		fragment := CleanText(parsed.Fragment, 64)
+		if fragment == "" || strings.ContainsAny(fragment, "?#&=\\/\r\n\t ") {
+			return ""
+		}
+		result += "#" + fragment
+	}
+	if len(result) > 256 {
+		return ""
+	}
+	return result
+}
 func SafeTarget(raw string) string {
 	parsed, err := url.Parse(raw)
 	if err != nil {
@@ -200,15 +233,19 @@ func ValidateGoals(goals []Goal) error {
 		return fmt.Errorf("maximum 32 goals")
 	}
 	for _, goal := range goals {
-		if goal.Name == "" || len(goal.Name) > 64 || goal.Match == "" || len(goal.Match) > 256 || (goal.Kind != "action" && goal.Kind != "path") || (goal.Kind == "path" && SafePath(goal.Match) != goal.Match) {
+		if goal.Name == "" || len(goal.Name) > 64 || goal.Match == "" || len(goal.Match) > 256 || (goal.Kind != "action" && goal.Kind != "path" && goal.Kind != "uri") || ((goal.Kind == "path" || goal.Kind == "uri") && SafeURI(goal.Match) != goal.Match) {
 			return fmt.Errorf("invalid goal: %s", goal.Name)
 		}
 	}
 	return nil
 }
-func goalMatched(goals []Goal, path string, actions []Action) bool {
+func goalMatched(goals []Goal, path, uri string, actions []Action) bool {
+	location := SafeURI(uri)
+	if location == "" {
+		location = path
+	}
 	for _, goal := range goals {
-		if goal.Kind == "path" && goal.Match == path {
+		if (goal.Kind == "path" || goal.Kind == "uri") && goal.Match == location {
 			return true
 		}
 		for _, action := range actions {
@@ -397,7 +434,7 @@ func (site *Site) recordExperience(event Event, now time.Time, visitor *Visitor,
 		view.Actions[identity] = action.Count
 		appendStep(session, event.Tab, "→ "+action.Name+" "+action.Target)
 	}
-	if !session.Goal && goalMatched(site.Goals, event.Path, event.Actions) {
+	if !session.Goal && goalMatched(site.Goals, event.Path, event.URI, event.Actions) {
 		session.Goal = true
 		countedPages := map[string]bool{}
 		for _, outcome := range session.Outcomes {
