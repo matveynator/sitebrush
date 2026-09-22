@@ -22,7 +22,7 @@ import (
 
 const DefaultStorageLimitBytes int64 = 10 * 1024 * 1024 * 1024
 const DefaultDeletionBackupRetentionDays = 365
-const currentBillingSchemaVersion = 26
+const currentBillingSchemaVersion = 27
 
 const InstallationKindServer = "server"
 const InstallationKindDesktop = "desktop"
@@ -646,9 +646,9 @@ func Migrate(ctx context.Context, database *sql.DB) error {
 	if err != nil {
 		return fmt.Errorf("read billing schema version: %w", err)
 	}
-	if schemaVersion >= currentBillingSchemaVersion {
-		return nil
-	}
+	// Do not trust the recorded schema version alone. Older releases may have
+	// advanced it without adding every required table or column, so always
+	// verify the actual SQLite schema before taking the fast path.
 	if err := migratePublicTrialSiteHistoryTable(ctx, database); err != nil {
 		return fmt.Errorf("migrate public trial site history: %w", err)
 	}
@@ -657,11 +657,13 @@ func Migrate(ctx context.Context, database *sql.DB) error {
 		return fmt.Errorf("verify billing schema: %w", err)
 	}
 	if schemaComplete {
-		if err := (Store{DB: database}).BackfillPublicTrialSites(ctx); err != nil {
-			return fmt.Errorf("backfill public trial sites: %w", err)
-		}
-		if err := setSchemaMigrationVersion(ctx, database, "billing", currentBillingSchemaVersion); err != nil {
-			return fmt.Errorf("write billing schema version: %w", err)
+		if schemaVersion < currentBillingSchemaVersion {
+			if err := (Store{DB: database}).BackfillPublicTrialSites(ctx); err != nil {
+				return fmt.Errorf("backfill public trial sites: %w", err)
+			}
+			if err := setSchemaMigrationVersion(ctx, database, "billing", currentBillingSchemaVersion); err != nil {
+				return fmt.Errorf("write billing schema version: %w", err)
+			}
 		}
 		return nil
 	}
