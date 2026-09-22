@@ -96,7 +96,7 @@ Nothing connected to the Internet is completely invulnerable, but a static publi
 
 You do not need to rebuild your site to see whether SiteBrush works for it.
 
-**[Try SiteBrush with your own website](https://sitebrush.com/)**
+**[Try SiteBrush with your own website](https://sitebrush.com/#trial-form)** 
 
 SiteBrush creates a separate copy for testing. Your live website is not changed.
 
@@ -461,7 +461,7 @@ The original PHP implementation was developed publicly from 2021 and remains ava
 </p>
 
 <p align="center">
-  <a href="https://sitebrush.com/"><strong>Try SiteBrush on your website</strong></a>
+  <a href="https://sitebrush.com/#trial-form"><strong>Try SiteBrush on your website</strong></a>
   ·
   <a href="https://demo.sitebrush.com/"><strong>Live demo</strong></a>
 </p>
