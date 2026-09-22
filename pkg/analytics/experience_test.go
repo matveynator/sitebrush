@@ -29,6 +29,39 @@ func TestExperienceJourneyCountsSessionsAndRequiresKnownFirstSource(t *testing.T
 		}
 	}
 }
+
+func TestExperienceLegacyClientWithoutTabStillCounts(t *testing.T) {
+	now := time.Date(2026, 9, 22, 12, 0, 0, 0, time.UTC)
+	site := New(now)
+	event := Event{
+		Visitor:    "1111111111111111",
+		View:       "aaaaaaaaaaaaaaaa",
+		Sequence:   1,
+		Path:       "/",
+		Source:     "GitHub",
+		Persistent: true,
+		Attribution: Attribution{
+			Name:     "GitHub",
+			Kind:     "referral",
+			Evidence: "referrer",
+			Detail:   "github.com/matveynator/sitebrush",
+		},
+	}
+	if !site.Record(event, now, 8<<20) {
+		t.Fatal("legacy first view rejected")
+	}
+	report := site.ExperienceReport(now, 1, true).View(ExperienceFilter{})
+	if report.Views != 1 || report.Sessions != 1 {
+		t.Fatalf("legacy client disappeared from experience metrics: %+v", report.Measures)
+	}
+	if len(report.Sources) != 1 || report.Sources[0].Label != "GitHub" {
+		t.Fatalf("legacy referrer missing from sources: %+v", report.Sources)
+	}
+	if len(report.Recent) != 1 || len(report.Recent[0].Tabs["legacy"]) != 1 {
+		t.Fatalf("legacy session detail missing: %+v", report.Recent)
+	}
+}
+
 func TestExperienceActionsTabsGoalsAndCompletion(t *testing.T) {
 	now := time.Date(2026, 9, 22, 12, 0, 0, 0, time.UTC)
 	site := New(now)
