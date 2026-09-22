@@ -73,7 +73,9 @@
         parameters.sort();
         const query = parameters.toString();
         const fragment = /^#[A-Za-z0-9._~-]{1,64}$/.test(location.hash || '') ? location.hash : '';
-        return location.pathname.slice(0, 256) + (query ? '?' + query : '') + fragment;
+        const pathname = boundedText(location.pathname || '/', 256) || '/';
+        const result = pathname + (query ? '?' + query : '') + fragment;
+        return new TextEncoder().encode(result).length <= 256 ? result : pathname;
     }
 
     function cleanTarget(address) {
