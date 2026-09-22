@@ -3698,6 +3698,12 @@ func (a *App) browserAnalyticsSocket(w http.ResponseWriter, r *http.Request) {
 			if json.Unmarshal([]byte(payload), &event) != nil || !browserstats.Valid(event) {
 				return
 			}
+			if event.URI != "" {
+				event.URI = browserstats.SafeURI(event.URI)
+				if event.URI == "" {
+					return
+				}
+			}
 			event.Attribution = browserstats.SourceAttribution(event.Campaign, event.Referrer, r.Host)
 			if event.Tab != "" {
 				event.Path = browserstats.SafePath(event.Path)
