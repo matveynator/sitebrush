@@ -151,9 +151,57 @@ func TestExperienceSourceEvidenceAndCleaning(t *testing.T) {
 		t.Fatal(target)
 	}
 	if err := ValidateGoals([]Goal{{Name: "x", Kind: "path", Match: "/?token=x"}}); err == nil {
-		t.Fatal("query goal accepted")
+		t.Fatal("sensitive query goal accepted")
 	}
 }
+
+func TestURIGoalsQueryFragmentAndPathCompatibility(t *testing.T) {
+	if got := SafeURI("/?b=2&utm_source=github&a=1&token=secret#download"); got != "/?a=1&b=2#download" {
+		t.Fatalf("canonical URI = %q", got)
+	}
+	for _, goal := range []Goal{
+		{Name: "fragment", Kind: "uri", Match: "/#download"},
+		{Name: "query", Kind: "uri", Match: "/?mode=download"},
+		{Name: "legacy", Kind: "path", Match: "/docs/"},
+	} {
+		if err := ValidateGoals([]Goal{goal}); err != nil {
+			t.Fatalf("valid goal rejected: %+v: %v", goal, err)
+		}
+	}
+	if err := ValidateGoals([]Goal{{Name: "private", Kind: "uri", Match: "/?token=secret"}}); err == nil {
+		t.Fatal("sensitive query goal accepted")
+	}
+
+	now := time.Date(2026, 9, 22, 12, 0, 0, 0, time.UTC)
+	site := New(now)
+	site.Goals = []Goal{{Name: "Download section", Kind: "uri", Match: "/#download"}}
+	event := experienceEvent("dddddddddddddddd", "tab-a")
+	event.URI = "/"
+	if !site.Record(event, now, 8<<20) {
+		t.Fatal("initial URI view rejected")
+	}
+	event.Sequence = 2
+	event.URI = "/#download"
+	if !site.Record(event, now.Add(time.Second), 8<<20) {
+		t.Fatal("same-view fragment change rejected")
+	}
+	report := site.ExperienceReport(now.Add(time.Second), 1, true).View(ExperienceFilter{})
+	if report.GoalSessions != 1 {
+		t.Fatalf("fragment URI goal not counted: %+v", report.Measures)
+	}
+
+	querySite := New(now)
+	querySite.Goals = []Goal{{Name: "Query", Kind: "uri", Match: "/?mode=download"}}
+	queryEvent := experienceEvent("eeeeeeeeeeeeeeee", "tab-a")
+	queryEvent.URI = "/?mode=download"
+	if !querySite.Record(queryEvent, now, 8<<20) {
+		t.Fatal("query URI view rejected")
+	}
+	if got := querySite.ExperienceReport(now, 1, true).View(ExperienceFilter{}); got.GoalSessions != 1 {
+		t.Fatalf("query URI goal not counted: %+v", got.Measures)
+	}
+}
+
 func TestExperienceRetentionFiltersAndArchives(t *testing.T) {
 	now := time.Date(2026, 9, 22, 12, 0, 0, 0, time.UTC)
 	site := New(now)
