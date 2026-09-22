@@ -65,9 +65,10 @@
 
     function currentURI() {
         const parameters = new URLSearchParams(location.search);
-        const sensitive = new Set(['token', 'access_token', 'id_token', 'secret', 'password', 'passwd', 'auth', 'authorization', 'session', 'sessionid', 'session_id', 'api_key', 'apikey', 'key', 'code']);
+        const sensitive = new Set(['token', 'access_token', 'id_token', 'secret', 'password', 'passwd', 'auth', 'authorization', 'session', 'sessionid', 'session_id', 'api_key', 'apikey', 'key', 'code', 'gclid', 'yclid', 'fbclid']);
         for (const key of Array.from(parameters.keys())) {
-            if (sensitive.has(key.toLowerCase())) parameters.delete(key);
+            const lower = key.toLowerCase();
+            if (sensitive.has(lower) || lower.startsWith('utm_')) parameters.delete(key);
         }
         parameters.sort();
         const query = parameters.toString();
