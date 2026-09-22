@@ -29,6 +29,62 @@ func TestExperienceJourneyCountsSessionsAndRequiresKnownFirstSource(t *testing.T
 		}
 	}
 }
+
+func TestExperienceLegacyClientWithoutTabStillCounts(t *testing.T) {
+	now := time.Date(2026, 9, 22, 12, 0, 0, 0, time.UTC)
+	site := New(now)
+	event := Event{
+		Visitor:    "1111111111111111",
+		View:       "aaaaaaaaaaaaaaaa",
+		Sequence:   1,
+		Path:       "/",
+		Source:     "GitHub",
+		Persistent: true,
+		Attribution: Attribution{
+			Name:     "GitHub",
+			Kind:     "referral",
+			Evidence: "referrer",
+			Detail:   "github.com/matveynator/sitebrush",
+		},
+	}
+	if !site.Record(event, now, 8<<20) {
+		t.Fatal("legacy first view rejected")
+	}
+	report := site.ExperienceReport(now, 1, true).View(ExperienceFilter{})
+	if report.Views != 1 || report.Sessions != 1 {
+		t.Fatalf("legacy client disappeared from experience metrics: %+v", report.Measures)
+	}
+	if len(report.Sources) != 1 || report.Sources[0].Label != "GitHub" {
+		t.Fatalf("legacy referrer missing from sources: %+v", report.Sources)
+	}
+	if len(report.Recent) != 1 || len(report.Recent[0].Tabs["legacy"]) != 1 {
+		t.Fatalf("legacy session detail missing: %+v", report.Recent)
+	}
+}
+
+
+func TestTabAwareViewsStillPopulateLegacyTransitions(t *testing.T) {
+	now := time.Date(2026, 9, 22, 12, 0, 0, 0, time.UTC)
+	site := New(now)
+
+	first := experienceEvent("aaaaaaaaaaaaaaaa", "tab-a")
+	first.Path = "/"
+	if !site.Record(first, now, 8<<20) {
+		t.Fatal("first tab-aware view rejected")
+	}
+
+	second := experienceEvent("bbbbbbbbbbbbbbbb", "tab-a")
+	second.Path = "/docs/"
+	if !site.Record(second, now.Add(time.Second), 8<<20) {
+		t.Fatal("second tab-aware view rejected")
+	}
+
+	report := site.Report(now.Add(time.Second), 1)
+	if len(report.Transitions) != 1 || report.Transitions[0].Label != "/ → /docs/" || report.Transitions[0].Count != 1 {
+		t.Fatalf("tab-aware transition missing from aggregate report: %+v", report.Transitions)
+	}
+}
+
 func TestExperienceActionsTabsGoalsAndCompletion(t *testing.T) {
 	now := time.Date(2026, 9, 22, 12, 0, 0, 0, time.UTC)
 	site := New(now)

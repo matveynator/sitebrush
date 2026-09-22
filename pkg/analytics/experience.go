@@ -253,8 +253,12 @@ func (site *Site) recordExperience(event Event, now time.Time, visitor *Visitor,
 	if event.Limited {
 		site.Experience.Incomplete = true
 	}
-	if event.Tab == "" {
-		return
+	legacyClient := event.Tab == ""
+	if legacyClient {
+		// Clients that cached analytics.js before PR #84 do not send tab/session
+		// context. Keep them visible in the new Experience dashboard instead of
+		// silently dropping otherwise valid views and referrers.
+		event.Tab = "legacy"
 	}
 	if site.Experience.Version == 0 {
 		site.Experience.Version = 1
@@ -266,7 +270,7 @@ func (site *Site) recordExperience(event Event, now time.Time, visitor *Visitor,
 	key := fmt.Sprintf("%s:%d", event.Visitor, visitor.Session)
 	session := site.Experience.Recent[key]
 	if session == nil {
-		if !fresh || visitor.SessionViews > 1 {
+		if !fresh || (visitor.SessionViews > 1 && !legacyClient) {
 			site.Experience.Incomplete = true
 			return
 		}

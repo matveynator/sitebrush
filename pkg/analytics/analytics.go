@@ -395,7 +395,7 @@ func (site *Site) Record(event Event, now time.Time, limit int64) bool {
 				sessionDay.SingleSessions--
 			}
 		}
-		if visitor.SessionViews > 1 && event.Tab == "" {
+		if visitor.SessionViews > 1 {
 			increment(daily.Transitions, visitor.LastPath+" → "+event.Path)
 			if sessionDay := site.Days[visitor.LastPathDay]; sessionDay != nil && sessionDay.Exits[visitor.LastPath] > 0 {
 				sessionDay.Exits[visitor.LastPath]--
