@@ -7,7 +7,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"io"
 	"log"
 	"mime"
 	"net"
@@ -45,6 +44,7 @@ func StartDeliveryWorker(ctx context.Context, sender Sender) chan DeliveryJob {
 type DirectSender struct {
 	Hostname    string
 	DialTimeout time.Duration
+	dialContext func(context.Context, string, string) (net.Conn, error)
 }
 
 func (sender DirectSender) Send(ctx context.Context, message Message) error {
@@ -97,7 +97,47 @@ func runDeliveryWorker(ctx context.Context, jobs <-chan DeliveryJob, sender Send
 	}
 }
 
+type startTLSError struct{ cause error }
+
+func (err startTLSError) Error() string { return "starttls: " + err.cause.Error() }
+func (err startTLSError) Unwrap() error { return err.cause }
+
 func (sender DirectSender) sendToHost(ctx context.Context, targetHost, fromAddress, toAddress string, payload []byte) error {
+	return sender.sendToEndpoint(ctx, targetHost, net.JoinHostPort(targetHost, "25"), fromAddress, toAddress, payload)
+}
+
+func (sender DirectSender) sendToEndpoint(ctx context.Context, targetHost, endpoint, fromAddress, toAddress string, payload []byte) error {
+	// MX delivery is opportunistic: prefer authenticated encryption, then legacy
+	// encryption, then plaintext. Never retry a submitted message as a TLS fallback.
+	for _, mode := range []string{"verified", "legacy", "plaintext"} {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		err := sender.sendSMTP(ctx, targetHost, endpoint, fromAddress, toAddress, payload, mode)
+		var negotiationError startTLSError
+		if !errors.As(err, &negotiationError) || mode == "plaintext" {
+			return err
+		}
+		log.Printf("MAIL TLS negotiation failed host=%q mode=%s fallback=true error=%v", targetHost, mode, err)
+	}
+	return errors.New("SMTP transport attempts exhausted")
+}
+
+func legacySMTPConfig(targetHost string) *tls.Config {
+	// Compatibility applies only to unauthenticated outbound MX transport, never
+	// to HTTPS, SMTP AUTH, or the connection between SiteBrush and its relay.
+	config := &tls.Config{ServerName: targetHost, MinVersion: tls.VersionTLS10, InsecureSkipVerify: true}
+	for _, suite := range tls.CipherSuites() {
+		config.CipherSuites = append(config.CipherSuites, suite.ID)
+	}
+	config.CipherSuites = append(config.CipherSuites,
+		tls.TLS_RSA_WITH_AES_128_GCM_SHA256, tls.TLS_RSA_WITH_AES_256_GCM_SHA384,
+		tls.TLS_RSA_WITH_AES_128_CBC_SHA, tls.TLS_RSA_WITH_AES_256_CBC_SHA,
+		tls.TLS_RSA_WITH_3DES_EDE_CBC_SHA, tls.TLS_ECDHE_RSA_WITH_3DES_EDE_CBC_SHA)
+	return config
+}
+
+func (sender DirectSender) sendSMTP(ctx context.Context, targetHost, endpoint, fromAddress, toAddress string, payload []byte, mode string) error {
 	timeout := sender.DialTimeout
 	if timeout <= 0 {
 		timeout = 12 * time.Second
@@ -107,12 +147,29 @@ func (sender DirectSender) sendToHost(ctx context.Context, targetHost, fromAddre
 		hostName = "sitebrush.local"
 	}
 	dialer := &net.Dialer{Timeout: timeout}
-	connection, err := dialer.DialContext(ctx, "tcp", net.JoinHostPort(targetHost, "25"))
+	dial := sender.dialContext
+	if dial == nil {
+		dial = dialer.DialContext
+	}
+	connection, err := dial(ctx, "tcp", endpoint)
 	if err != nil {
 		return fmt.Errorf("%s: %w", targetHost, err)
 	}
 	defer connection.Close()
-	_ = connection.SetDeadline(time.Now().Add(timeout))
+	deadline := time.Now().Add(timeout)
+	if contextDeadline, ok := ctx.Deadline(); ok && contextDeadline.Before(deadline) {
+		deadline = contextDeadline
+	}
+	_ = connection.SetDeadline(deadline)
+	finished := make(chan struct{})
+	defer close(finished)
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = connection.Close()
+		case <-finished:
+		}
+	}()
 	client, err := smtp.NewClient(connection, targetHost)
 	if err != nil {
 		return fmt.Errorf("%s: %w", targetHost, err)
@@ -121,11 +178,19 @@ func (sender DirectSender) sendToHost(ctx context.Context, targetHost, fromAddre
 	if err := client.Hello(hostName); err != nil {
 		return fmt.Errorf("%s hello: %w", targetHost, err)
 	}
-	if ok, _ := client.Extension("STARTTLS"); ok {
+	if ok, _ := client.Extension("STARTTLS"); ok && mode != "plaintext" {
 		tlsConfig := &tls.Config{ServerName: targetHost, MinVersion: tls.VersionTLS12}
-		if err := client.StartTLS(tlsConfig); err != nil {
-			return fmt.Errorf("%s starttls: %w", targetHost, err)
+		if mode == "legacy" {
+			tlsConfig = legacySMTPConfig(targetHost)
 		}
+		if err := client.StartTLS(tlsConfig); err != nil {
+			return fmt.Errorf("%s: %w", targetHost, startTLSError{cause: err})
+		}
+	} else {
+		log.Printf("MAIL transport host=%q mode=plaintext encrypted=false", targetHost)
+	}
+	if state, encrypted := client.TLSConnectionState(); encrypted {
+		log.Printf("MAIL transport host=%q mode=%s tls_version=%x certificate_verified=%t", targetHost, mode, state.Version, len(state.VerifiedChains) > 0)
 	}
 	if err := client.Mail(fromAddress); err != nil {
 		return fmt.Errorf("%s mail from: %w", targetHost, err)
@@ -144,8 +209,9 @@ func (sender DirectSender) sendToHost(ctx context.Context, targetHost, fromAddre
 	if err := writer.Close(); err != nil {
 		return fmt.Errorf("%s close data: %w", targetHost, err)
 	}
-	if err := client.Quit(); err != nil && !errors.Is(err, io.EOF) {
-		return fmt.Errorf("%s quit: %w", targetHost, err)
+	// DATA acceptance is final; a broken goodbye must not queue a duplicate code.
+	if err := client.Quit(); err != nil {
+		log.Printf("MAIL accepted host=%q quit_error=%v", targetHost, err)
 	}
 	return nil
 }

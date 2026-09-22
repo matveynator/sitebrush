@@ -4378,7 +4378,11 @@ func TestLoginPostRedirectsBackToRequestedController(t *testing.T) {
 
 func TestRegisterRequiresEmailConfirmationBeforeCreatingAdmin(t *testing.T) {
 	withEmailSPFAllowed(t)
+	t.Setenv("SITEBRUSH_SERVICE_MAIL_MODE", "local")
 	application, rawDB := newTestApplication(t)
+	if _, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES('existing.example','owner@example.org','secret',1)`); err != nil {
+		t.Fatal(err)
+	}
 	form := url.Values{}
 	form.Set("email", "admin@example.com")
 	form.Set("password", "secret")
@@ -4392,15 +4396,18 @@ func TestRegisterRequiresEmailConfirmationBeforeCreatingAdmin(t *testing.T) {
 		t.Fatalf("status = %d, body=%q", response.Code, response.Body.String())
 	}
 	registrationBody := response.Body.String()
-	for _, expectedFragment := range []string{"Проверьте почту", "admin@example.com", "sitebrush@localhost"} {
+	for _, expectedFragment := range []string{"Проверьте почту", "admin@example.com", "sitebrush@example.com"} {
 		if !strings.Contains(registrationBody, expectedFragment) {
 			t.Fatalf("confirmation page missing %q in %s", expectedFragment, registrationBody)
 		}
 	}
-	for _, forbiddenFragment := range []string{`name="email"`, `name="password"`, `action="?register"`} {
+	for _, forbiddenFragment := range []string{`name="email"`, `name="password"`} {
 		if strings.Contains(registrationBody, forbiddenFragment) {
 			t.Fatalf("confirmation page still contains registration form %q in %s", forbiddenFragment, registrationBody)
 		}
+	}
+	if !strings.Contains(registrationBody, `autocomplete="one-time-code"`) {
+		t.Fatal("registration code autofill missing")
 	}
 	var pendingToken string
 	select {
@@ -4408,7 +4415,7 @@ func TestRegisterRequiresEmailConfirmationBeforeCreatingAdmin(t *testing.T) {
 		if mailJob.Message.To != "admin@example.com" {
 			t.Fatalf("confirmation recipient = %q", mailJob.Message.To)
 		}
-		if !strings.Contains(mailJob.Message.Subject, "Подтвердите email") || !strings.Contains(mailJob.Message.Body, "Для подтверждения email") {
+		if !strings.Contains(mailJob.Message.Subject, "Подтвердите email") || !strings.Contains(mailJob.Message.Body, "Для подтверждения регистрации") {
 			t.Fatalf("confirmation email is not Russian: %#v", mailJob.Message)
 		}
 		if !strings.Contains(mailJob.Message.HTMLBody, "Подтвердить email и войти") || !strings.Contains(mailJob.Message.HTMLBody, `href="http://localhost:8080/?email_confirm=`) {
@@ -4424,7 +4431,13 @@ func TestRegisterRequiresEmailConfirmationBeforeCreatingAdmin(t *testing.T) {
 		t.Fatalf("user count before confirmation = %d, want 0", userCount)
 	}
 
-	confirmRequest := httptest.NewRequest(http.MethodGet, "http://localhost:8080/?email_confirm="+url.QueryEscape(pendingToken), nil)
+	pending, found := application.registrationConfirmationByToken(context.Background(), pendingToken)
+	if !found || pending.FormToken == pendingToken || strings.Contains(registrationBody, pendingToken) {
+		t.Fatal("registration form exposes the confirmation bearer token")
+	}
+	codeForm := url.Values{"registration_form_token": {pending.FormToken}, "registration_code": {pending.Code}}
+	confirmRequest := httptest.NewRequest(http.MethodPost, "http://localhost:8080/?register", strings.NewReader(codeForm.Encode()))
+	confirmRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	confirmResponse := httptest.NewRecorder()
 	application.route(confirmResponse, confirmRequest)
 	if confirmResponse.Code != http.StatusFound {
@@ -4433,6 +4446,9 @@ func TestRegisterRequiresEmailConfirmationBeforeCreatingAdmin(t *testing.T) {
 	_ = rawDB.QueryRow(`SELECT COUNT(1) FROM users WHERE domain=? AND email=? AND password=? AND is_admin=1`, "localhost", "admin@example.com", "secret").Scan(&userCount)
 	if userCount != 1 {
 		t.Fatalf("confirmed admin count = %d, want 1", userCount)
+	}
+	if _, valid := application.registrationConfirmationForCode(context.Background(), "localhost", pending.FormToken, pending.Code); valid {
+		t.Fatal("registration code reused")
 	}
 	if len(confirmResponse.Result().Cookies()) == 0 {
 		t.Fatal("confirmation did not create session")
@@ -4521,6 +4537,8 @@ func TestRegistrationConfirmationSurvivesProcessMemoryRestart(t *testing.T) {
 	}
 	confirmation := EmailConfirmation{
 		Token:        "restart-safe-token",
+		FormToken:    "restart-safe-form",
+		Code:         "123456",
 		Domain:       "example.com",
 		Action:       "register",
 		Email:        "admin@example.com",
@@ -4540,6 +4558,14 @@ func TestRegistrationConfirmationSurvivesProcessMemoryRestart(t *testing.T) {
 	restored, found := application.registrationConfirmationByToken(context.Background(), confirmation.Token)
 	if !found || restored != confirmation {
 		t.Fatalf("restored confirmation = %#v, found=%t", restored, found)
+	}
+	for attempt := 0; attempt < 5; attempt++ {
+		if _, valid := application.registrationConfirmationForCode(context.Background(), confirmation.Domain, confirmation.FormToken, "000000"); valid {
+			t.Fatal("wrong code accepted")
+		}
+	}
+	if _, valid := application.registrationConfirmationForCode(context.Background(), confirmation.Domain, confirmation.FormToken, confirmation.Code); valid {
+		t.Fatal("durable attempt limit ignored")
 	}
 	application.deleteRegistrationConfirmation(context.Background(), confirmation.Token)
 	stopSecondMemory()
@@ -4601,6 +4627,7 @@ func TestRegisterRejectsUnverifiedDomainBeforeCreatingSiteDatabase(t *testing.T)
 }
 
 func TestRegisterCreatesSiteDatabaseOnlyAfterConfirmedVerifiedDomain(t *testing.T) {
+	t.Setenv("SITEBRUSH_SERVICE_MAIL_MODE", "local")
 	const domain = "verified.example"
 	withRegistrationDNS(t, domain, true)
 	storagePath := t.TempDir()
@@ -6706,54 +6733,71 @@ func TestProfilePageChangesAdminEmailThroughSixDigitCode(t *testing.T) {
 	t.Setenv("SITEBRUSH_SERVICE_MAIL_MODE", "local")
 	application, rawDB := newTestApplication(t)
 	captureImmediateProfileEmail(t, application)
-	_, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "admin@example.com", "old")
+	_, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "admin@gmail.com", "old")
 	if err != nil {
 		t.Fatalf("insert user: %v", err)
 	}
 	form := url.Values{}
 	form.Set("profile_action", "email")
-	form.Set("email", "new@example.com")
+	form.Set("email", "new@outlook.com")
 	request := httptest.NewRequest(http.MethodPost, "http://localhost:8080/?profile", strings.NewReader(form.Encode()))
 	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	request.Header.Set("Accept-Language", "ru-RU,ru;q=0.9,en;q=0.8")
-	request.AddCookie(newAdminSessionCookie(t, application, "admin@example.com"))
+	request.AddCookie(newAdminSessionCookie(t, application, "admin@gmail.com"))
 	response := httptest.NewRecorder()
 	application.route(response, request)
 	if response.Code != http.StatusOK {
 		t.Fatalf("status = %d, body=%q", response.Code, response.Body.String())
 	}
-	for _, expectedFragment := range []string{`name="password_confirmation_code"`, `maxlength="6"`, `class="profile-code-submit" type="submit" disabled`, `Письмо с кодом отправлено`, `admin@example.com`} {
+	for _, expectedFragment := range []string{`name="password_confirmation_code"`, `maxlength="6"`, `class="profile-code-submit" type="submit" disabled`, `Письмо с кодом отправлено`, `admin@gmail.com`} {
 		if !strings.Contains(response.Body.String(), expectedFragment) {
 			t.Fatalf("profile email code form missing %q in %s", expectedFragment, response.Body.String())
 		}
 	}
+	if !strings.Contains(response.Body.String(), `href="https://mail.google.com/"`) || strings.Contains(response.Body.String(), `href="https://outlook.live.com/mail/"`) {
+		t.Fatal("first step must offer only the current mailbox")
+	}
 	var sentCode string
 	select {
 	case mailJob := <-application.emailDelivery:
-		if mailJob.Message.To != "admin@example.com" || mailJob.Message.Kind != "email_change" {
+		if mailJob.Message.To != "admin@gmail.com" || mailJob.Message.Kind != "email_change" {
 			t.Fatalf("unexpected email change code message: %#v", mailJob.Message)
 		}
-		if strings.Contains(mailJob.Message.HTMLBody, "href=") || !strings.Contains(mailJob.Message.HTMLBody, `lang="ru"`) {
-			t.Fatalf("email change message must contain a localized code without a link: %#v", mailJob.Message)
+		if !strings.Contains(mailJob.Message.HTMLBody, "profile_resume=") || !strings.Contains(mailJob.Message.HTMLBody, `lang="ru"`) || !strings.Contains(mailJob.Message.HTMLBody, `font-weight:800`) || !strings.Contains(mailJob.Message.HTMLBody, `new@outlook.com</strong>`) {
+			t.Fatalf("email change message lacks context, code or resume link: %#v", mailJob.Message)
 		}
-		sentCode = strings.TrimSpace(strings.Split(strings.Split(mailJob.Message.Body, ":")[1], "\n")[0])
+		for _, line := range strings.Split(mailJob.Message.Body, "\n") {
+			if strings.HasPrefix(line, "6-значный код: ") {
+				sentCode = strings.TrimPrefix(line, "6-значный код: ")
+			}
+		}
 	default:
 		t.Fatal("profile update did not enqueue email change code")
 	}
 
 	var pendingToken, pendingCode string
-	if err := rawDB.QueryRow(`SELECT token,verification_code FROM email_confirmations WHERE domain=? AND action=? AND current_email=?`, "localhost", "profile_code", "admin@example.com").Scan(&pendingToken, &pendingCode); err != nil {
+	if err := rawDB.QueryRow(`SELECT token,verification_code FROM email_confirmations WHERE domain=? AND action=? AND current_email=?`, "localhost", "profile_code", "admin@gmail.com").Scan(&pendingToken, &pendingCode); err != nil {
 		t.Fatalf("read email confirmation: %v", err)
 	}
 	if len(pendingCode) != 6 || sentCode != pendingCode {
 		t.Fatalf("pending code = %q, want 6 digits", pendingCode)
 	}
+	resumeURL := "http://localhost:8080/?profile&profile_resume=" + url.QueryEscape(pendingToken)
+	resumeResponse := httptest.NewRecorder()
+	application.route(resumeResponse, httptest.NewRequest(http.MethodGet, resumeURL, nil))
+	if resumeResponse.Code != http.StatusOK || !strings.Contains(resumeResponse.Body.String(), `autocomplete="one-time-code"`) || !strings.Contains(resumeResponse.Body.String(), "profile_resume="+pendingToken) {
+		t.Fatal("resume link did not restore the code form without a login cookie")
+	}
+	var countBeforeCode int
+	_ = rawDB.QueryRow(`SELECT COUNT(*) FROM email_confirmations WHERE token=?`, pendingToken).Scan(&countBeforeCode)
+	if countBeforeCode != 1 {
+		t.Fatal("opening the resume link consumed the token")
+	}
 	codeForm := url.Values{}
 	codeForm.Set("password_confirmation_token", pendingToken)
 	codeForm.Set("password_confirmation_code", pendingCode)
-	codeRequest := httptest.NewRequest(http.MethodPost, "http://localhost:8080/?profile", strings.NewReader(codeForm.Encode()))
+	codeRequest := httptest.NewRequest(http.MethodPost, resumeURL, strings.NewReader(codeForm.Encode()))
 	codeRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	codeRequest.AddCookie(newAdminSessionCookie(t, application, "admin@example.com"))
 	codeResponse := httptest.NewRecorder()
 	application.route(codeResponse, codeRequest)
 	if codeResponse.Code != http.StatusOK {
@@ -6762,24 +6806,32 @@ func TestProfilePageChangesAdminEmailThroughSixDigitCode(t *testing.T) {
 	if !strings.Contains(codeResponse.Body.String(), "Текущий email подтверждён") {
 		t.Fatalf("code response did not explain the pending new-address confirmation: %s", codeResponse.Body.String())
 	}
+	if !strings.Contains(codeResponse.Body.String(), `href="https://outlook.live.com/mail/"`) || strings.Contains(codeResponse.Body.String(), `href="https://mail.google.com/"`) || strings.Contains(codeResponse.Body.String(), `data-profile-email-form data-current-email=`) || strings.Contains(codeResponse.Body.String(), `id="SiteBrushLoginCountdown"`) {
+		t.Fatal("second step must offer the new mailbox without restart or blocked forms")
+	}
 	select {
 	case mailJob := <-application.emailDelivery:
-		if mailJob.Message.To != "new@example.com" || mailJob.Message.Kind != "email_change_confirm" || !strings.Contains(mailJob.Message.Body, "email_confirm=") || !strings.Contains(mailJob.Message.HTMLBody, "href=") {
+		if mailJob.Message.To != "new@outlook.com" || mailJob.Message.Kind != "email_change_confirm" || !strings.Contains(mailJob.Message.Body, "email_confirm=") || !strings.Contains(mailJob.Message.HTMLBody, "href=") {
 			t.Fatalf("unexpected new-address confirmation: %#v", mailJob.Message)
 		}
 	default:
 		t.Fatal("profile update did not enqueue the new-address confirmation")
 	}
+	usedResume := httptest.NewRecorder()
+	application.route(usedResume, httptest.NewRequest(http.MethodGet, resumeURL, nil))
+	if usedResume.Code != http.StatusGone {
+		t.Fatal("used resume token remains available")
+	}
 	var unchangedEmail string
 	if err := rawDB.QueryRow(`SELECT email FROM users WHERE domain=?`, "localhost").Scan(&unchangedEmail); err != nil {
 		t.Fatalf("read unchanged user: %v", err)
 	}
-	if unchangedEmail != "admin@example.com" {
+	if unchangedEmail != "admin@gmail.com" {
 		t.Fatalf("email changed before the new address was confirmed: %q", unchangedEmail)
 	}
 
 	var emailToken string
-	if err := rawDB.QueryRow(`SELECT token FROM email_confirmations WHERE domain=? AND action='profile' AND email=?`, "localhost", "new@example.com").Scan(&emailToken); err != nil {
+	if err := rawDB.QueryRow(`SELECT token FROM email_confirmations WHERE domain=? AND action='profile' AND email=?`, "localhost", "new@outlook.com").Scan(&emailToken); err != nil {
 		t.Fatalf("read new-address confirmation: %v", err)
 	}
 	confirmRequest := httptest.NewRequest(http.MethodGet, "http://localhost:8080/?email_confirm="+url.QueryEscape(emailToken), nil)
@@ -6788,8 +6840,13 @@ func TestProfilePageChangesAdminEmailThroughSixDigitCode(t *testing.T) {
 	if confirmResponse.Code != http.StatusFound {
 		t.Fatalf("confirm status = %d, body=%q", confirmResponse.Code, confirmResponse.Body.String())
 	}
+	replayed := httptest.NewRecorder()
+	application.route(replayed, httptest.NewRequest(http.MethodGet, "http://localhost:8080/?email_confirm="+url.QueryEscape(emailToken), nil))
+	if replayed.Code == http.StatusFound {
+		t.Fatal("second confirmation token was reused")
+	}
 	var password string
-	if err := rawDB.QueryRow(`SELECT password FROM users WHERE domain=? AND email=?`, "localhost", "new@example.com").Scan(&password); err != nil {
+	if err := rawDB.QueryRow(`SELECT password FROM users WHERE domain=? AND email=?`, "localhost", "new@outlook.com").Scan(&password); err != nil {
 		t.Fatalf("read updated user: %v", err)
 	}
 	if password != "old" {
@@ -10486,6 +10543,13 @@ func TestSiteRequestInterfaceIsCompleteForEveryLanguage(t *testing.T) {
 
 func TestProfileEmailDeliveryInterfaceIsCompleteForEveryLanguage(t *testing.T) {
 	requiredKeys := []string{
+		"profile_email_change_steps",
+		"profile_email_release",
+		"profile_email_release_help",
+		"profile_email_accept",
+		"profile_email_accept_help",
+		"profile_email_accept_wait",
+		"profile_email_open_manually",
 		"profile_password_code_status_not_sent",
 		"profile_email_delivery_details_success",
 		"profile_email_delivery_details_error",
@@ -14575,5 +14639,67 @@ func TestAnalyticsSecurityQueueCannotBlockResponse(t *testing.T) {
 	}
 	if len(app.securityLosses) != 1 {
 		t.Fatal("overload was not signalled")
+	}
+}
+
+func TestEmailChangeMailTranslationsAndEscaping(t *testing.T) {
+	for language, translations := range translationCatalog {
+		for _, key := range []string{"mail_email_change_request", "mail_email_change_code", "mail_email_change_resume", "mail_email_change_accept", "mail_email_change_ignore"} {
+			if strings.TrimSpace(translations[key]) == "" {
+				t.Fatalf("%s missing %s", language, key)
+			}
+		}
+		for _, kind := range []string{"email_change", "email_change_confirm"} {
+			message := mailout.Message{Kind: kind}
+			change := emailChangeMail{Current: "old@example.org", Next: "new@example.org", URL: "https://example.org/?profile&profile_resume=unique"}
+			applyEmailChangeMail(&message, language, "example.org", "123456", change)
+			for _, address := range []string{change.Current, change.Next} {
+				if !strings.Contains(message.HTMLBody, address+"</strong>") || !strings.Contains(message.Body, address) {
+					t.Fatalf("%s %s missing emphasized address", language, kind)
+				}
+			}
+			if kind == "email_change" && !strings.Contains(message.HTMLBody, ">123456</strong>") {
+				t.Fatalf("%s missing code", language)
+			}
+			if !strings.Contains(message.HTMLBody, "profile&amp;profile_resume=") {
+				t.Fatal("action URL not escaped")
+			}
+		}
+	}
+	message := mailout.Message{Kind: "email_change"}
+	applyEmailChangeMail(&message, "en", "<script>", "123456", emailChangeMail{Next: "<img src=x>", URL: "https://example.org/"})
+	if strings.Contains(message.HTMLBody, "<script>") || strings.Contains(message.HTMLBody, "<img src=x>") {
+		t.Fatal("mail content is not escaped")
+	}
+}
+
+func TestRegistrationCodeLimitsAndTranslations(t *testing.T) {
+	application, _ := newTestApplication(t)
+	confirmation := EmailConfirmation{Token: "private-link", FormToken: "public-handle", Domain: "localhost", Action: "register", Email: "admin@example.org", Code: "123456", ExpiresAt: time.Now().Add(time.Hour).UTC().Format(time.RFC3339)}
+	if err := application.saveRegistrationConfirmation(context.Background(), confirmation); err != nil {
+		t.Fatal(err)
+	}
+	if _, valid := application.registrationConfirmationForCode(context.Background(), "other.example", confirmation.FormToken, confirmation.Code); valid {
+		t.Fatal("cross-site code accepted")
+	}
+	for attempt := 0; attempt < 5; attempt++ {
+		if _, valid := application.registrationConfirmationForCode(context.Background(), "localhost", confirmation.FormToken, "000000"); valid {
+			t.Fatal("wrong code accepted")
+		}
+	}
+	if _, valid := application.registrationConfirmationForCode(context.Background(), "localhost", confirmation.FormToken, confirmation.Code); valid {
+		t.Fatal("attempt limit ignored")
+	}
+	for language, translations := range translationCatalog {
+		for _, key := range []string{"mail_registration_request", "mail_registration_code", "mail_registration_ignore"} {
+			if translations[key] == "" {
+				t.Fatalf("missing %s in %s", key, language)
+			}
+		}
+		message := mailout.Message{Kind: "email_confirm", To: confirmation.Email}
+		applyRegistrationMail(&message, language, confirmation.Domain, "https://example.org/?email_confirm=secret", confirmation.Code)
+		if !strings.Contains(message.HTMLBody, ">123456</strong>") || !strings.Contains(message.HTMLBody, confirmation.Email+"</strong>") {
+			t.Fatalf("registration emphasis missing in %s", language)
+		}
 	}
 }

@@ -3106,3 +3106,17 @@ body.technical-page.analytics-page {
     .technical-page.expenses-page .expense-simple-site { grid-template-columns: minmax(0, 1fr); }
     .technical-page.expenses-page .expense-simple-client-body { padding-inline-start: 0; }
 }
+
+/* Email confirmation follows the same visual language as account forms. */
+.technical-page .profile-email-change { margin-block: 1.5rem; }
+.technical-page .profile-email-change h2 { font-size: 1.25rem; margin-block: 0 1rem; }
+.technical-page .profile-email-steps { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 280px), 1fr)); gap: 1rem; list-style: none; padding: 0; }
+.technical-page .profile-email-step { display: flex; align-items: flex-start; gap: .85rem; padding: 1.25rem; border: 1px solid var(--theme-border); border-radius: var(--theme-radius); background: var(--theme-card); min-width: 0; }
+.technical-page .profile-email-step.is-current { border-color: var(--theme-primary); box-shadow: 0 0 0 1px var(--theme-primary); }
+.technical-page .profile-email-step-number { display: grid; place-items: center; flex: 0 0 2rem; height: 2rem; border-radius: 50%; background: var(--theme-accent); color: var(--theme-foreground); font-weight: 700; }
+.technical-page .profile-email-step.is-complete .profile-email-step-number { color: var(--theme-success); }
+.technical-page .profile-email-step > div { min-width: 0; }
+.technical-page .profile-email-step h3 { font-size: 1rem; margin: 0 0 .5rem; }
+.technical-page .profile-email-address { display: block; overflow-wrap: anywhere; font-weight: 600; }
+.technical-page .profile-email-step p { margin-block: .75rem; color: var(--theme-muted-foreground); }
+.technical-page .profile-email-step .btn { white-space: normal; }
