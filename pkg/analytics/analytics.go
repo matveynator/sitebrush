@@ -645,7 +645,7 @@ func Valid(event Event) bool {
 			}
 		}
 	}
-	if len(event.Tab) > 64 || len(event.Session) > 64 || len(event.Actions) > 16 || len(event.Language) > 32 || len(event.PageLanguage) > 32 || len(event.Timezone) > 64 {
+	if len(event.Tab) > 64 || len(event.Session) > 64 || len(event.Actions) > 16 || len(event.Language) > 32 || len(event.PageLanguage) > 32 || len(event.Timezone) > 64 || len(event.URI) > 256 || (event.URI != "" && SafeURI(event.URI) != event.URI) {
 		return false
 	}
 	for _, action := range event.Actions {
