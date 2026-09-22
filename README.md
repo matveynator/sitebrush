@@ -7,14 +7,14 @@
 <h1 align="center">SiteBrush</h1>
 
 <p align="center">
-  <strong>Replace hacked WordPress with editable static HTML.</strong><br>
-  Keep the website and its design. Remove the fragile public CMS backend.
+  <strong>Keep the website. Retire WordPress.</strong><br>
+  Turn an existing website into editable static HTML without rebuilding its design.
 </p>
 
 <p align="center">
-  <a href="https://sitebrush.com/">Website</a> ·
+  <a href="https://sitebrush.com/"><strong>Try your website</strong></a> ·
   <a href="https://demo.sitebrush.com/">Live demo</a> ·
-  <a href="#downloads">Downloads</a> ·
+  <a href="#downloads">Download</a> ·
   <a href="#install-the-server-version">Install</a>
 </p>
 
@@ -32,41 +32,131 @@
 
 ---
 
-SiteBrush imports an existing website, preserves its pages and design, and replaces the risky public-facing CMS with fast static files.
+## What is SiteBrush?
 
-Visitors receive ordinary HTML, CSS, JavaScript, and images. The site owner can still edit text, pictures, buttons, menus, and page blocks directly in the browser.
+A lot of websites still run WordPress simply because somebody occasionally needs to change a phone number, image, paragraph, menu item, or address.
+
+SiteBrush takes a different approach.
+
+It imports the website you already have and preserves its:
+
+* pages
+* design
+* CSS
+* JavaScript
+* images
+* other referenced assets
+
+Visitors then receive ordinary static files.
+
+```text
+HTML
+CSS
+JavaScript
+images
+```
+
+The site owner can still edit the website directly in the browser.
 
 **SiteBrush is not a WordPress clone. It is a WordPress backup and retirement tool.**
 
-## Project history
+---
 
-This repository contains SiteBrush v2, rewritten in Go. The original PHP implementation was developed publicly from 2021 and remains available in the [SiteBrush v1 repository](https://github.com/matveynator/sitebrush-v1) as the historical predecessor of the current project.
+## Before and after
 
-## Why SiteBrush?
+### Before
 
-- Preserve the existing design instead of rebuilding the website.
-- Remove WordPress, public login forms, plugins, themes, PHP, and the database from the visitor-facing side.
-- Reduce the attack surface and ongoing maintenance burden.
-- Edit content directly on the page with a right-click or long-press.
-- Freeze the public version while preparing changes, then publish safely.
-- Run the server as one standalone binary without a separate dependency stack.
-- Import existing WordPress, Joomla, Wix, Readymag, and custom websites.
+```text
+WordPress
+├── PHP
+├── database
+├── plugins
+├── themes
+├── public login
+└── admin backend
+```
 
-Nothing is completely invulnerable, but a static public website exposes far fewer moving parts than a traditional WordPress installation.
+### After SiteBrush
+
+```text
+Website
+├── HTML
+├── CSS
+├── JavaScript
+└── images
+```
+
+**Same website. Same design. Still editable.**
+
+Nothing connected to the Internet is completely invulnerable, but a static public website exposes far fewer moving parts than a traditional dynamic CMS.
+
+---
+
+## Try it on your own website
+
+You do not need to rebuild your site to see whether SiteBrush works for it.
+
+**[Try SiteBrush with your own website](https://sitebrush.com/)**
+
+SiteBrush creates a separate copy for testing. Your live website is not changed.
+
+Or open the:
+
+**[Live demo](https://demo.sitebrush.com/)**
+
+---
 
 ## How it works
 
-1. **Import** — SiteBrush copies pages, media, styles, scripts, and other website files.
-2. **Edit** — open the site and use **right-click** on desktop or **long-press** on mobile.
-3. **Publish safely** — visitors keep seeing the stable version until your changes are ready.
+### 1. Import
 
-[Try SiteBrush with your own website](https://sitebrush.com/) without changing the live site, or [open the demo](https://demo.sitebrush.com/).
+Give SiteBrush an existing website.
+
+It follows the pages and referenced resources and imports the files the site needs.
+
+### 2. Edit
+
+Open the website normally.
+
+* **Desktop:** right-click an element
+* **Phone or tablet:** long-press
+
+Edit text, pictures, buttons, menus, page blocks, or HTML.
+
+### 3. Publish
+
+Prepare changes without disturbing the version visitors are currently seeing.
+
+Publish when everything is ready.
+
+Visitors continue receiving ordinary static files.
+
+---
+
+## Why SiteBrush?
+
+SiteBrush is useful when a website still needs editing but no longer needs a large dynamic CMS behind every page request.
+
+It can help you:
+
+* preserve an existing design instead of rebuilding the website
+* remove WordPress from the visitor-facing side
+* remove the public PHP/database/plugin stack
+* reduce ongoing maintenance
+* edit content directly on the page
+* prepare changes separately before publishing them
+* run the server as one standalone binary
+* import WordPress, Joomla, Wix, Readymag, custom sites, and ordinary static websites
+
+---
 
 ## SiteBrush Templates
 
-Static sites are simple and fast, but repeated content can be annoying to maintain.
+Static sites are simple, but repeated content can become annoying to maintain.
 
-Imagine you import a website with **200 pages**, all with the same footer address. Just mark one of those elements as a SiteBrush template:
+Imagine a website with **200 pages** that all contain the same address in the footer.
+
+Mark that element as a SiteBrush template:
 
 ```html
 <div class="SiteBrush-Template FooterAddress">
@@ -74,46 +164,74 @@ Imagine you import a website with **200 pages**, all with the same footer addres
 </div>
 ```
 
-SiteBrush will automatically find matching elements on the other pages and assign the same template to them.
+SiteBrush finds matching elements on the other pages and assigns the same template to them.
 
-From that point on, you can edit the element in **one place**, and SiteBrush keeps it synchronized across all pages.
+From then on:
 
-This works well for:
+**edit once → update everywhere**
 
-- headers
-- footers
-- sidebars
-- menus
-- contact information
-- tables
-- shared `<style>` blocks
-- other repeated content
+Templates are useful for:
 
-All changes are stored in **revisions**, so previous versions can always be restored.
+* headers
+* footers
+* menus
+* sidebars
+* contact information
+* tables
+* shared `<style>` blocks
+* other repeated elements
+
+Changes are stored in revisions, so previous versions can be restored.
+
+---
 
 ## Automatic Import
 
-When you import an existing site, SiteBrush follows its references and automatically imports the files it uses:
+When SiteBrush imports a website, it follows references and automatically imports the files the site uses:
 
-- CSS
-- JavaScript
-- images
-- other referenced assets
+* CSS
+* JavaScript
+* images
+* other referenced assets
 
-So you can take an existing static website, import it, and immediately start editing it almost like a dynamic CMS — while the result remains **simple static HTML**.
- 
+That means you can take an existing site and start editing it without first rebuilding it around SiteBrush.
+
+The result remains ordinary static HTML.
+
+---
+
+## Best suited for
+
+SiteBrush works especially well for:
+
+* old WordPress websites
+* business websites
+* landing pages
+* portfolios
+* agency client websites
+* documentation
+* knowledge bases
+* mostly static websites that still need simple browser editing
+
+
+SiteBrush is not trying to replace every CMS.
+
+It is for websites that no longer need one.
+
+---
+
 # Downloads
 
 The **server version is recommended** for a public website. Desktop builds are useful for local work with a graphical interface.
 
-| Platform | Desktop application | Server binary |
-|---|---|---|
-| <img src="https://img.shields.io/badge/Linux-111827?logo=linux&logoColor=white" alt="Linux"> | [amd64 GTK 4.1](https://sitebrush.com/download/latest/desktop-app/sitebrush_linux_amd64_desktop_gtk41.zip) · [GTK 4.0](https://sitebrush.com/download/latest/desktop-app/sitebrush_linux_amd64_desktop_gtk40.zip)<br>[arm64 GTK 4.1](https://sitebrush.com/download/latest/desktop-app/sitebrush_linux_arm64_desktop_gtk41.zip) · [GTK 4.0](https://sitebrush.com/download/latest/desktop-app/sitebrush_linux_arm64_desktop_gtk40.zip) | [amd64](https://sitebrush.com/download/latest/server-app/sitebrush_linux_amd64) · [arm64](https://sitebrush.com/download/latest/server-app/sitebrush_linux_arm64) |
-| <img src="https://img.shields.io/badge/macOS-111827?logo=apple&logoColor=white" alt="macOS"> | [Universal DMG](https://sitebrush.com/download/latest/desktop-app/sitebrush_darwin_universal_desktop.dmg) | [Intel amd64](https://sitebrush.com/download/latest/server-app/sitebrush_darwin_amd64) · [Apple Silicon arm64](https://sitebrush.com/download/latest/server-app/sitebrush_darwin_arm64) |
-| <img src="https://img.shields.io/badge/Windows-0078D4?logo=windows11&logoColor=white" alt="Windows"> | [amd64 ZIP](https://sitebrush.com/download/latest/desktop-app/sitebrush_windows_amd64_desktop.exe.zip) · [arm64 ZIP](https://sitebrush.com/download/latest/desktop-app/sitebrush_windows_arm64_desktop.exe.zip) | [amd64 EXE](https://sitebrush.com/download/latest/server-app/sitebrush_windows_amd64.exe) · [arm64 EXE](https://sitebrush.com/download/latest/server-app/sitebrush_windows_arm64.exe) |
-| <img src="https://img.shields.io/badge/FreeBSD-AB2B28?logo=freebsd&logoColor=white" alt="FreeBSD"> | — | [amd64](https://sitebrush.com/download/latest/server-app/sitebrush_freebsd_amd64) · [arm64](https://sitebrush.com/download/latest/server-app/sitebrush_freebsd_arm64) |
-| <img src="https://img.shields.io/badge/OpenBSD-F2CA30?logo=openbsd&logoColor=black" alt="OpenBSD"> | — | [amd64](https://sitebrush.com/download/latest/server-app/sitebrush_openbsd_amd64) · [arm64](https://sitebrush.com/download/latest/server-app/sitebrush_openbsd_arm64) |
-| <img src="https://img.shields.io/badge/NetBSD-F0544C?logo=netbsd&logoColor=white" alt="NetBSD"> | — | [amd64](https://sitebrush.com/download/latest/server-app/sitebrush_netbsd_amd64) · [arm64](https://sitebrush.com/download/latest/server-app/sitebrush_netbsd_arm64) |
+| Platform                                                                                             | Desktop application                                                                                                                                                                                                                                                                                                                                                                                                                    | Server binary                                                                                                                                                                           |
+| ---------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| <img src="https://img.shields.io/badge/Linux-111827?logo=linux&logoColor=white" alt="Linux">         | [amd64 GTK 4.1](https://sitebrush.com/download/latest/desktop-app/sitebrush_linux_amd64_desktop_gtk41.zip) · [GTK 4.0](https://sitebrush.com/download/latest/desktop-app/sitebrush_linux_amd64_desktop_gtk40.zip)<br>[arm64 GTK 4.1](https://sitebrush.com/download/latest/desktop-app/sitebrush_linux_arm64_desktop_gtk41.zip) · [GTK 4.0](https://sitebrush.com/download/latest/desktop-app/sitebrush_linux_arm64_desktop_gtk40.zip) | [amd64](https://sitebrush.com/download/latest/server-app/sitebrush_linux_amd64) · [arm64](https://sitebrush.com/download/latest/server-app/sitebrush_linux_arm64)                       |
+| <img src="https://img.shields.io/badge/macOS-111827?logo=apple&logoColor=white" alt="macOS">         | [Universal DMG](https://sitebrush.com/download/latest/desktop-app/sitebrush_darwin_universal_desktop.dmg)                                                                                                                                                                                                                                                                                                                              | [Intel amd64](https://sitebrush.com/download/latest/server-app/sitebrush_darwin_amd64) · [Apple Silicon arm64](https://sitebrush.com/download/latest/server-app/sitebrush_darwin_arm64) |
+| <img src="https://img.shields.io/badge/Windows-0078D4?logo=windows11&logoColor=white" alt="Windows"> | [amd64 ZIP](https://sitebrush.com/download/latest/desktop-app/sitebrush_windows_amd64_desktop.exe.zip) · [arm64 ZIP](https://sitebrush.com/download/latest/desktop-app/sitebrush_windows_arm64_desktop.exe.zip)                                                                                                                                                                                                                        | [amd64 EXE](https://sitebrush.com/download/latest/server-app/sitebrush_windows_amd64.exe) · [arm64 EXE](https://sitebrush.com/download/latest/server-app/sitebrush_windows_arm64.exe)   |
+| <img src="https://img.shields.io/badge/FreeBSD-AB2B28?logo=freebsd&logoColor=white" alt="FreeBSD">   | —                                                                                                                                                                                                                                                                                                                                                                                                                                      | [amd64](https://sitebrush.com/download/latest/server-app/sitebrush_freebsd_amd64) · [arm64](https://sitebrush.com/download/latest/server-app/sitebrush_freebsd_arm64)                   |
+| <img src="https://img.shields.io/badge/OpenBSD-F2CA30?logo=openbsd&logoColor=black" alt="OpenBSD">   | —                                                                                                                                                                                                                                                                                                                                                                                                                                      | [amd64](https://sitebrush.com/download/latest/server-app/sitebrush_openbsd_amd64) · [arm64](https://sitebrush.com/download/latest/server-app/sitebrush_openbsd_arm64)                   |
+| <img src="https://img.shields.io/badge/NetBSD-F0544C?logo=netbsd&logoColor=white" alt="NetBSD">      | —                                                                                                                                                                                                                                                                                                                                                                                                                                      | [amd64](https://sitebrush.com/download/latest/server-app/sitebrush_netbsd_amd64) · [arm64](https://sitebrush.com/download/latest/server-app/sitebrush_netbsd_arm64)                     |
 
 Linux desktop builds use **GTK 4.1** for newer distributions and **GTK 4.0** for older LTS distributions.
 
@@ -312,6 +430,8 @@ doas /usr/local/bin/sitebrush -uninstall
 
 </details>
 
+---
+
 # Start editing
 
 After installation:
@@ -322,30 +442,16 @@ After installation:
 4. Edit the content and save it.
 
 ```text
-https://your-domain.example
+http://your-domain.example
 ```
 
-## Visit analytics
+---
 
-SiteBrush collects server counters through bounded, nonblocking channels and prepares reports in the background. An embedded script adds browser views, activity and return-visit patterns without making page rendering wait for analytics. The dashboard separates browser observations from HTTP requests and marks incomplete or delayed reports.
+## Project history
 
-Each site stores compact summaries in a separate, disposable analytics database (up to 16 MiB), with rotating gzip daily summaries (up to 32 MiB). Editing uses its own database. History covers up to 90 UTC days within bounded storage and memory limits. The default analytics memory budget is 64 MiB (`SITEBRUSH_ANALYTICS_MEMORY_MIB`). Under overload, serving the website takes priority over complete statistics.
+SiteBrush v2 is written in Go.
 
-The dashboard follows sources → journeys → content → recent sessions → map → security, with technical counters folded below. Campaign/referrer evidence is not proof of identity, browser sessions are not added to HTTP requests, and a download click does not establish a completed download.
-
-Recent detail rotates at 500 sessions / seven days, with at most twelve journey steps and four tabs per session. Security stores at most 500 incidents / thirty days, with twenty cleaned examples each; full IP addresses appear only in incidents. Memory pressure may shorten these windows. Archives exclude session identities and incident IPs. Security is observational: no automatic blocking or canary routes, and a sensitive URL returning 200/206 is a reason to investigate, not proof of exposure.
-
-Site owners configure up to 32 goals using `Name | action | identifier` or `Name | path | /exact/path`. These settings belong to the editing database and survive deletion of analytics. Mark controls with `data-analytics-action="download"`; code can report a completed interaction through `window.SiteBrushAnalytics?.action('copy-command', location.pathname)`. Reporting is best effort and never delays navigation. New session context starts with this version; old statistics are not retroactively reconstructed.
-
-## Best suited for
-
-- Business websites and landing pages
-- Portfolios and agency websites
-- Documentation and knowledge bases
-- Old WordPress websites that keep breaking
-- Mostly static websites that still need easy browser editing
-
-Keep a traditional dynamic CMS when the project requires complex e-commerce, memberships, extensive server-side workflows, or custom plugin logic.
+The original PHP implementation was developed publicly from 2021 and remains available in the [SiteBrush v1 repository](https://github.com/matveynator/sitebrush-v1) as the historical predecessor of the current project.
 
 ---
 
@@ -355,9 +461,7 @@ Keep a traditional dynamic CMS when the project requires complex e-commerce, mem
 </p>
 
 <p align="center">
-  <a href="https://sitebrush.com/"><strong>sitebrush.com</strong></a>
+  <a href="https://sitebrush.com/"><strong>Try SiteBrush on your website</strong></a>
+  ·
+  <a href="https://demo.sitebrush.com/"><strong>Live demo</strong></a>
 </p>
-
-## SMTP compatibility
-
-Direct MX delivery prefers verified TLS, retries STARTTLS failures over a fresh connection with legacy TLS (TLS 1.0 or later, including untrusted certificates), then falls back to plaintext SMTP. Servers without STARTTLS are supported directly. This compatibility policy prioritizes delivery: plaintext exposes mail contents in transit, and unverified TLS does not authenticate the receiving server. Transport modes are logged without message contents. HTTPS and NetChan relay security are unchanged; relay deployments must also run the updated SMTP sender. SMTP recipient or message rejection does not trigger a TLS downgrade, and a failed QUIT after message acceptance does not resend the message.
