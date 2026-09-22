@@ -42,29 +42,35 @@
   {{if .ShowForm}}<form class="card card-body authentication-card" method="post" action="?recover">
     <input type="hidden" name="recovery_action" value="request">
     <input type="hidden" name="return_path" value="{{.ReturnPath}}">
-    <p><input type='text' class="form-control" name='email' placeholder="{{index .T "recover_email_placeholder"}}"></p>
+    <p><input type="email" class="form-control" name="email" value="{{.RecoveryEmail}}" placeholder="{{index .T "recover_email_placeholder"}}" autocomplete="email" required></p>
     <p class="d-flex align-items-center gap-2"><input type="text" class="form-control" name="captcha" placeholder="{{index .T "recover_captcha_placeholder"}}" style="max-width:220px;"/>
     <img src="?captcha" alt="{{index .T "recover_captcha_alt"}}" title="{{index .T "recover_captcha_placeholder"}}"></p>
     <input type="submit" class="btn btn-primary" value="{{index .T "recover_submit"}}"/>
   </form>{{end}}
-  {{if .ShowManualPasswordForm}}<form class="card card-body authentication-card recovery-password-form" method="post" action="?recover">
+  {{if .ShowManualPasswordForm}}<form class="profile-form recovery-password-form" method="post" action="?recover">
     <input type="hidden" name="recovery_action" value="manual">
     <input type="hidden" name="email" value="{{.RecoveryEmail}}">
     <input type="hidden" name="return_path" value="{{.ReturnPath}}">
-    <label class="form-label">
+    <div class="profile-form-header">
+      <h2>{{index .T "recover_title"}}</h2>
+      <p>{{.PasswordCodeHelp}}</p>
+    </div>
+    <label>
       {{.PasswordCodeLabel}}
-      <input class="form-control recovery-code-input" type="text" name="recovery_code" inputmode="numeric" pattern="[0-9]{6}" autocomplete="one-time-code" maxlength="6" required>
+      <input class="profile-code-input recovery-code-input" type="text" name="recovery_code" inputmode="numeric" pattern="[0-9]{6}" autocomplete="one-time-code" enterkeyhint="next" minlength="6" maxlength="6" required autofocus>
     </label>
-    <p class="text-muted">{{.PasswordCodeHelp}}</p>
-    <label class="form-label">
+    <label>
       {{.PasswordLabel}}
-      <input class="form-control" type="password" name="password" autocomplete="new-password" required>
+      <input type="password" name="password" autocomplete="new-password" required>
     </label>
-    <label class="form-label mt-3">
+    <label>
       {{.PasswordConfirmLabel}}
-      <input class="form-control" type="password" name="password_confirm" autocomplete="new-password" required>
+      <input type="password" name="password_confirm" autocomplete="new-password" required>
     </label>
-    <button class="btn btn-primary mt-3 recovery-password-submit" type="submit" disabled>{{.PasswordSubmitLabel}}</button>
+    <div class="profile-form-actions">
+      {{if .RecoveryWebmailProvider.URL}}<a class="btn btn-outline-primary" href="{{.RecoveryWebmailProvider.URL}}" target="_blank" rel="noopener noreferrer">{{index .T "setup_confirmation_open"}} {{.RecoveryWebmailProvider.Name}}</a>{{end}}
+      <button class="recovery-password-submit" type="submit" disabled>{{.PasswordSubmitLabel}}</button>
+    </div>
   </form>{{end}}
   {{if .ShowPasswordForm}}<form class="card card-body authentication-card" method="post" action="?recover">
     <input type="hidden" name="recovery_action" value="password">
@@ -80,7 +86,22 @@
     </label>
     <button class="btn btn-primary mt-3" type="submit">{{.PasswordSubmitLabel}}</button>
   </form>{{end}}
-  {{if .Status}}<div class="alert alert-{{if .StatusClass}}{{.StatusClass}}{{else}}info{{end}} mt-3" style="max-width:560px;">{{.Status}}</div>{{end}}
+  {{if .Status}}<div class="alert profile-alert alert-{{if .StatusClass}}{{.StatusClass}}{{else}}info{{end}} mt-3" style="max-width:560px;" role="alert">
+    <span>{{.Status}}</span>
+    {{if .EmailDelivery.Show}}<button class="profile-delivery-link" type="button" data-profile-delivery-open>{{.EmailDelivery.LinkText}}</button>{{end}}
+  </div>{{end}}
+  {{if .EmailDelivery.Show}}
+  <div class="profile-delivery-modal" data-profile-delivery-modal data-mail-delivery-id="{{.EmailDelivery.ID}}" aria-hidden="true">
+    <div class="profile-delivery-backdrop" data-profile-delivery-close></div>
+    <section class="profile-delivery-dialog profile-delivery-dialog-{{.EmailDelivery.Kind}}" role="dialog" aria-modal="true" aria-labelledby="RecoveryDeliveryTitle" tabindex="-1">
+      <div class="profile-delivery-header"><div><div class="profile-delivery-kicker">{{.EmailDelivery.CodeLabel}}: {{.EmailDelivery.Code}}</div><h2 id="RecoveryDeliveryTitle">{{.EmailDelivery.Title}}</h2></div><button class="profile-delivery-close" type="button" data-profile-delivery-close aria-label="{{.EmailDelivery.CloseLabel}}">&times;</button></div>
+      <p class="profile-delivery-summary">{{.EmailDelivery.Summary}}</p>
+      <div class="profile-delivery-grid"><div class="profile-delivery-panel"><h3>{{.EmailDelivery.FixTitle}}</h3><p>{{.EmailDelivery.FixText}}</p></div><div class="profile-delivery-panel"><h3>{{.EmailDelivery.CodeLabel}}</h3><p>{{.EmailDelivery.Description}}</p></div></div>
+      {{if .EmailDelivery.DNSHelp.Show}}<div class="profile-delivery-dns"><h3>{{.EmailDelivery.DNSHelp.Title}}</h3><p>{{.EmailDelivery.DNSHelp.Intro}}</p><div class="profile-delivery-dns-record"><span class="profile-delivery-dns-type">{{.EmailDelivery.DNSHelp.Type}}</span><span class="profile-delivery-dns-field"><span>{{.EmailDelivery.DNSHelp.HostLabel}}</span><code>{{.EmailDelivery.DNSHelp.Host}}</code></span><span class="profile-delivery-dns-field"><span>{{.EmailDelivery.DNSHelp.ValueLabel}}</span><code>{{.EmailDelivery.DNSHelp.Value}}</code></span></div></div>{{end}}
+      <pre class="profile-delivery-log"><code>{{.EmailDelivery.Log}}</code></pre>
+    </section>
+  </div>
+  {{end}}
   <p class="mt-3"><a href="{{.ReturnPath}}?login">{{index .T "recover_back"}}</a></p>
 </div>
 <script>
@@ -130,9 +151,36 @@
     if (codeInput.value.length !== 6) {
       event.preventDefault();
       codeInput.focus();
+      return;
     }
+    submitButton.disabled = true;
   });
   normalizeRecoveryCode();
+})();
+
+(function prepareRecoveryDeliveryModal() {
+  var modalElement = document.querySelector('[data-profile-delivery-modal]');
+  var openButtons = document.querySelectorAll('[data-profile-delivery-open]');
+  if (!modalElement || !openButtons.length) return;
+  var dialogElement = modalElement.querySelector('[role="dialog"]');
+  var closeElements = modalElement.querySelectorAll('[data-profile-delivery-close]');
+  var previousFocus = null;
+  function openModal() {
+    previousFocus = document.activeElement;
+    modalElement.setAttribute('aria-hidden', 'false');
+    document.body.classList.add('profile-delivery-modal-open');
+    if (dialogElement) dialogElement.focus();
+  }
+  function closeModal() {
+    modalElement.setAttribute('aria-hidden', 'true');
+    document.body.classList.remove('profile-delivery-modal-open');
+    if (previousFocus && previousFocus.focus) previousFocus.focus();
+  }
+  Array.prototype.forEach.call(openButtons, function(openButton) { openButton.addEventListener('click', openModal); });
+  Array.prototype.forEach.call(closeElements, function(closeElement) { closeElement.addEventListener('click', closeModal); });
+  document.addEventListener('keydown', function(event) {
+    if (event.key === 'Escape' && modalElement.getAttribute('aria-hidden') === 'false') closeModal();
+  });
 })();
 </script>
 </body>
