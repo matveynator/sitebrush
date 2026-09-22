@@ -3330,6 +3330,43 @@ func (a *App) analyticsEventDomain(r *http.Request, contentSource string) string
 	return domainFromRequest(r)
 }
 
+// Each collector owns this bounded cache. Alias lookups run only after admission,
+// so neither SQL nor the database router can delay the public response.
+type analyticsDomainResolution struct {
+	domain  string
+	expires time.Time
+}
+
+func (a *App) resolveAnalyticsDomain(domain string, resolutions map[string]analyticsDomainResolution) string {
+	if a.siteDatabaseRouter == nil {
+		return domain
+	}
+	now := time.Now()
+	if resolved, exists := resolutions[domain]; exists && now.Before(resolved.expires) {
+		return resolved.domain
+	}
+	boundary, cancel := context.WithTimeout(contextWithDomain(context.Background(), domain), 250*time.Millisecond)
+	defer cancel()
+	var primary string
+	err := a.siteDatabaseRouter.QueryRowContext(boundary, `SELECT primary_domain FROM domain_aliases WHERE alias_domain=? AND is_verified=1 AND dns_a_ok=1`, domain).Scan(&primary)
+	resolved := analyticsDomainResolution{domain: domain, expires: now.Add(time.Minute)}
+	if err == nil && strings.TrimSpace(primary) != "" {
+		resolved.domain = primary
+	} else if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		// Do not create an alias checkpoint on a transient lookup failure.
+		resolved.domain = ""
+		resolved.expires = now.Add(time.Second)
+	}
+	if len(resolutions) >= 4095 {
+		clear(resolutions)
+	}
+	resolutions[domain] = resolved
+	if resolved.domain != "" {
+		resolutions[resolved.domain] = analyticsDomainResolution{domain: resolved.domain, expires: resolved.expires}
+	}
+	return resolved.domain
+}
+
 func (a *App) analyticsEventIsAdmin(r *http.Request, contentSource string) bool {
 	// Analytics must never trigger a second authentication query.
 	return false
@@ -3378,6 +3415,7 @@ func (a *App) runAnalyticsEventWriter(ctx context.Context) {
 		}
 	}()
 	state := newAnalyticsAggregateState(limit / 8)
+	resolutions := make(map[string]analyticsDomainResolution)
 	interval := a.analyticsFlushInterval
 	if interval <= 0 {
 		interval = time.Minute
@@ -3394,7 +3432,14 @@ func (a *App) runAnalyticsEventWriter(ctx context.Context) {
 		case <-ctx.Done():
 			// Producers never wait for shutdown; accepted events have a bounded tail.
 			for len(a.analyticsEvents) > 0 {
-				state.record(<-a.analyticsEvents)
+				event := <-a.analyticsEvents
+				// Shutdown uses known routes only; fresh lookups must not extend its grace period.
+				if a.siteDatabaseRouter != nil {
+					event.Domain = resolutions[event.Domain].domain
+				}
+				if event.Domain != "" {
+					state.record(event)
+				}
 			}
 			select {
 			case batches <- state:
@@ -3407,10 +3452,18 @@ func (a *App) runAnalyticsEventWriter(ctx context.Context) {
 			}
 			return
 		case domain := <-a.analyticsLosses:
+			domain = a.resolveAnalyticsDomain(domain, resolutions)
+			if domain == "" {
+				continue
+			}
 			if len(state.systemEvents) < 64 {
 				state.systemEvents[domain] = []analyticsCountRow{{Label: "Incomplete: analytics queue overflow", Count: 1}}
 			}
 		case event := <-a.analyticsEvents:
+			event.Domain = a.resolveAnalyticsDomain(event.Domain, resolutions)
+			if event.Domain == "" {
+				continue
+			}
 			if state.disabled {
 				continue
 			}
@@ -3569,10 +3622,7 @@ type browserAnalyticsSlot struct {
 // and session lifetime; slow or abusive clients cannot enter the SQL subsystem.
 func (a *App) browserAnalyticsSocket(w http.ResponseWriter, r *http.Request) {
 	origin, err := url.Parse(r.Header.Get("Origin"))
-	expectedScheme := "http"
-	if r.TLS != nil {
-		expectedScheme = "https"
-	}
+	expectedScheme := requestScheme(r)
 	if err != nil || origin.Host != r.Host || origin.Scheme != expectedScheme || origin.User != nil || origin.Path != "" {
 		http.Error(w, "invalid analytics origin", http.StatusForbidden)
 		return
@@ -3755,6 +3805,7 @@ func (a *App) runBrowserAnalytics(stopRequested <-chan struct{}) {
 	go a.browserAnalyticsStorage(jobs, results, stop)
 	go a.browserAnalyticsStorage(jobs, results, stop)
 	slots := map[string]*browserAnalyticsSlot{}
+	resolutions := make(map[string]analyticsDomainResolution)
 	lostDomains := map[string]bool{}
 	maintenanceLists := make(chan []string, 1)
 	go a.browserAnalyticsMaintenanceDomains(stopRequested, maintenanceLists)
@@ -3835,6 +3886,9 @@ func (a *App) runBrowserAnalytics(stopRequested <-chan struct{}) {
 			defer deadline.Stop()
 			for len(a.browserAnalytics) > 0 {
 				envelope := <-a.browserAnalytics
+				if a.siteDatabaseRouter != nil {
+					envelope.domain = resolutions[envelope.domain].domain
+				}
 				if slot := slots[envelope.domain]; slot != nil {
 					record(slot, envelope)
 				}
@@ -3872,6 +3926,10 @@ func (a *App) runBrowserAnalytics(stopRequested <-chan struct{}) {
 		case domains := <-maintenanceLists:
 			maintenance = domains
 		case domain := <-a.browserAnalyticsLosses:
+			domain = a.resolveAnalyticsDomain(domain, resolutions)
+			if domain == "" {
+				continue
+			}
 			if slot := slots[domain]; slot != nil {
 				slot.lost = true
 				slot.dirty = true
@@ -3879,6 +3937,10 @@ func (a *App) runBrowserAnalytics(stopRequested <-chan struct{}) {
 				lostDomains[domain] = true
 			}
 		case envelope := <-a.browserAnalytics:
+			envelope.domain = a.resolveAnalyticsDomain(envelope.domain, resolutions)
+			if envelope.domain == "" {
+				continue
+			}
 			slot := slots[envelope.domain]
 			if slot == nil {
 				if len(slots) >= 8 {
