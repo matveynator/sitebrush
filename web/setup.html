@@ -38,6 +38,15 @@
     <div class="confirmation-symbol" aria-hidden="true">@</div>
     <h2 class="h3 mb-3">{{index .T "setup_confirmation_title"}}</h2>
     <p>{{index .T "setup_confirmation_delivering"}}</p>
+    {{if .Status}}<p class="alert alert-warning">{{.Status}}</p>{{end}}
+    {{if .RegistrationFormToken}}
+    <form method="post" action="?register" class="profile-form">
+      <input type="hidden" name="registration_form_token" value="{{.RegistrationFormToken}}">
+      <p>{{index .T "mail_registration_code"}}</p>
+      <label>{{index .T "profile_password_code"}}<input class="profile-code-input" type="text" name="registration_code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" minlength="6" maxlength="6" required></label>
+      <button type="submit">{{index .T "profile_password_code_submit"}}</button>
+    </form>
+    {{end}}
     <dl class="confirmation-addresses">
       <div><dt>{{index .T "setup_confirmation_recipient"}}</dt><dd>{{.RecipientEmail}}</dd></div>
       <div><dt>{{index .T "setup_confirmation_sender"}}</dt><dd>{{.SenderEmail}}</dd></div>

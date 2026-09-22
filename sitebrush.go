@@ -373,23 +373,25 @@ type demoSiteStatusView struct {
 }
 
 type serviceMailRequest struct {
-	Version         int                                `json:"version"`
-	MessageID       string                             `json:"message_id,omitempty"`
-	InstallationID  string                             `json:"installation_id"`
-	PublicKey       string                             `json:"public_key"`
-	SourceDomain    string                             `json:"source_domain"`
-	Recipient       string                             `json:"recipient"`
-	CodeKind        string                             `json:"code_kind"`
-	SecretValue     string                             `json:"secret_value"`
-	ActionURL       string                             `json:"action_url,omitempty"`
-	Subject         string                             `json:"subject,omitempty"`
-	Body            string                             `json:"body,omitempty"`
-	HTMLBody        string                             `json:"html_body,omitempty"`
-	ExpiresAt       string                             `json:"expires_at,omitempty"`
-	LanguageCode    string                             `json:"language_code"`
-	HostingSnapshot *hostingandsupport.HostingSnapshot `json:"hosting_snapshot,omitempty"`
-	CreatedAt       string                             `json:"created_at"`
-	Signature       string                             `json:"signature"`
+	RegistrationCode string                             `json:"registration_code,omitempty"`
+	EmailChange      *emailChangeMail                   `json:"email_change,omitempty"`
+	Version          int                                `json:"version"`
+	MessageID        string                             `json:"message_id,omitempty"`
+	InstallationID   string                             `json:"installation_id"`
+	PublicKey        string                             `json:"public_key"`
+	SourceDomain     string                             `json:"source_domain"`
+	Recipient        string                             `json:"recipient"`
+	CodeKind         string                             `json:"code_kind"`
+	SecretValue      string                             `json:"secret_value"`
+	ActionURL        string                             `json:"action_url,omitempty"`
+	Subject          string                             `json:"subject,omitempty"`
+	Body             string                             `json:"body,omitempty"`
+	HTMLBody         string                             `json:"html_body,omitempty"`
+	ExpiresAt        string                             `json:"expires_at,omitempty"`
+	LanguageCode     string                             `json:"language_code"`
+	HostingSnapshot  *hostingandsupport.HostingSnapshot `json:"hosting_snapshot,omitempty"`
+	CreatedAt        string                             `json:"created_at"`
+	Signature        string                             `json:"signature"`
 }
 
 type serviceMailEncryptedEnvelope struct {
@@ -422,6 +424,20 @@ type profileEmailDeliveryView struct {
 	Log         string
 	CloseLabel  string
 	DNSHelp     profileEmailDeliveryDNSHelp
+}
+
+type profileEmailChangeView struct {
+	Step                          int
+	CurrentEmail, NextEmail       string
+	CurrentProvider, NextProvider webmailProvider
+}
+
+func profileEmailChange(currentEmail, nextEmail string, step int) profileEmailChangeView {
+	if strings.TrimSpace(nextEmail) == "" {
+		return profileEmailChangeView{}
+	}
+	return profileEmailChangeView{Step: step, CurrentEmail: currentEmail, NextEmail: nextEmail,
+		CurrentProvider: webmailProviderForAddress(currentEmail), NextProvider: webmailProviderForAddress(nextEmail)}
 }
 
 type webmailProvider struct {
@@ -2540,6 +2556,8 @@ type ManagedFileAccess struct {
 }
 
 type EmailConfirmation struct {
+	FormToken    string
+	Attempts     int
 	Token        string
 	Domain       string
 	Action       string
@@ -8898,15 +8916,108 @@ func (a *App) setupAdmin(w http.ResponseWriter, r *http.Request) {
 		httpsecurity.RedirectLocal(w, r, safeConfirmationReturnPath(requestedReturnPath(r)), http.StatusFound)
 		return
 	}
-	if err := a.createAndSendEmailConfirmation(r, "register", domain, "", email, password, requestedReturnPath(r)); err != nil {
+	pending := EmailConfirmation{}
+	if err := a.createAndSendEmailConfirmationForLanguage(r, "register", domain, "", email, password, requestedReturnPath(r), preferredLanguageCode(r.Header.Get("Accept-Language")), &pending); err != nil {
 		w.WriteHeader(http.StatusBadRequest)
 		a.renderSetupPage(w, r, domain, email, err.Error())
 		return
 	}
-	a.renderSetupConfirmationPage(w, r, domain, email)
+	a.renderSetupConfirmationPage(w, r, domain, email, pending)
+}
+
+func (a *App) confirmRegistrationCode(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Referrer-Policy", "no-referrer")
+	domain := a.siteDomain(r.Context(), r)
+	formToken := strings.TrimSpace(r.FormValue("registration_form_token"))
+	code := strings.TrimSpace(r.FormValue("registration_code"))
+	confirmation, valid := a.registrationConfirmationForCode(r.Context(), domain, formToken, code)
+	if !valid {
+		w.WriteHeader(http.StatusUnauthorized)
+		if confirmation.FormToken != "" && confirmation.Attempts < 5 {
+			a.render(w, r, "setup.html", map[string]any{"Domain": domain, "ConfirmationPending": true, "RecipientEmail": confirmation.Email, "RegistrationFormToken": formToken, "Status": translationOrDefault(translationsForRequest(r), "profile_password_code_status_invalid", "The code is invalid or expired."), "WebmailURL": webmailProviderForAddress(confirmation.Email).URL, "WebmailName": webmailProviderForAddress(confirmation.Email).Name})
+		} else {
+			a.render(w, r, "recover.html", map[string]any{"ShowForm": false, "Status": translationOrDefault(translationsForRequest(r), "profile_password_code_status_invalid", "The code is invalid or expired.")})
+		}
+		return
+	}
+	// The form handle is distinct from the email's bearer link. Only a verified
+	// code may enter the existing registration completion path.
+	confirmationRequest := r.Clone(r.Context())
+	confirmationURL := *r.URL
+	query := confirmationURL.Query()
+	query.Set("email_confirm", confirmation.Token)
+	confirmationURL.RawQuery = query.Encode()
+	confirmationRequest.URL = &confirmationURL
+	a.confirmEmailToken(w, confirmationRequest)
+}
+
+func (a *App) registrationConfirmationForCode(ctx context.Context, domain, formToken, code string) (EmailConfirmation, bool) {
+	if formToken == "" || len(formToken) > 128 {
+		return EmailConfirmation{}, false
+	}
+	if a.controlDatabase != nil {
+		var token, expectedCode string
+		var claimed bool
+		err := a.withServerControlDatabaseWrite(ctx, "verify-registration-code", func(database *sql.DB) error {
+			if err := database.QueryRowContext(ctx, `SELECT token,verification_code FROM registration_confirmations WHERE form_token=? AND domain=? AND action='register' AND expires_at>? AND attempts<5`, formToken, domain, time.Now().UTC().Format(time.RFC3339)).Scan(&token, &expectedCode); err != nil {
+				return err
+			}
+			result, err := database.ExecContext(ctx, `UPDATE registration_confirmations SET attempts=attempts+1 WHERE token=? AND attempts<5`, token)
+			if err != nil {
+				return err
+			}
+			count, err := result.RowsAffected()
+			claimed = err == nil && count == 1
+			return err
+		})
+		if err != nil || !claimed {
+			return EmailConfirmation{}, false
+		}
+		confirmation, found := a.registrationConfirmationByToken(ctx, token)
+		// Read the durable attempt counter instead of a possibly older cached copy.
+		if found {
+			_ = a.withServerControlDatabaseRead(ctx, "registration-code-attempts", func(database *sql.DB) error {
+				return database.QueryRowContext(ctx, `SELECT attempts FROM registration_confirmations WHERE token=?`, token).Scan(&confirmation.Attempts)
+			})
+		}
+		return confirmation, found && isSixDigitCode(code) && code == expectedCode
+	}
+	reply := make(chan emailConfirmationMemoryResponse, 1)
+	request := emailConfirmationMemoryRequest{action: "verify-registration", token: formToken, confirmation: EmailConfirmation{Domain: domain, Code: code}, response: reply}
+	select {
+	case a.activeRegistrationConfirmations() <- request:
+	case <-ctx.Done():
+		return EmailConfirmation{}, false
+	}
+	select {
+	case result := <-reply:
+		return result.confirmation, result.found
+	case <-ctx.Done():
+		return EmailConfirmation{}, false
+	}
+}
+
+func applyRegistrationMail(message *mailout.Message, languageCode, domain, link, code string) {
+	translations := translationsForLanguageCode(languageCode)
+	intro := translations["mail_registration_request"]
+	help := translations["mail_registration_code"]
+	button := confirmationEmailButtonLabel(languageCode)
+	ignore := translations["mail_registration_ignore"]
+	message.Body = "SiteBrush — " + domain + "\n\n" + intro + "\n" + message.To + "\n\n" + help + "\n\n" + translations["profile_password_code"] + ": " + code + "\n\n" + button + ":\n" + link + "\n\n" + ignore
+	direction := "ltr"
+	if languageCode == "he" || languageCode == "fa" {
+		direction = "rtl"
+	}
+	escape := template.HTMLEscapeString
+	message.HTMLBody = `<!doctype html><html lang="` + escape(languageCode) + `" dir="` + direction + `"><body style="margin:0;background:#f4f7f8;font-family:Arial,sans-serif;color:#607078"><div style="max-width:600px;margin:0 auto;padding:28px 16px"><div style="background:#fff;border:1px solid #d9e2e5;border-radius:14px;padding:28px"><p style="margin:0;color:#087f8c;font-size:20px;font-weight:700">SiteBrush · ` + escape(domain) + `</p><h1 style="font-size:23px;color:#172126;line-height:1.3">` + escape(button) + `</h1><p style="line-height:1.6">` + escape(intro) + `</p><p style="overflow-wrap:anywhere"><strong dir="ltr" style="font-size:18px;font-weight:700;color:#172126">` + escape(message.To) + `</strong></p><p style="line-height:1.6">` + escape(help) + `</p><p style="margin:20px 0 6px">` + escape(translations["profile_password_code"]) + `</p><p style="margin:0 0 24px"><strong dir="ltr" style="font-size:36px;line-height:1.4;font-weight:800;letter-spacing:4px;color:#172126">` + escape(code) + `</strong></p><p style="margin:24px 0"><a href="` + escape(link) + `" style="display:inline-block;background:#087f8c;color:#fff;text-decoration:none;font-weight:700;padding:13px 20px;border-radius:9px">` + escape(button) + `</a></p><p style="font-size:13px;line-height:1.5">` + escape(ignore) + `</p></div></div></body></html>`
 }
 
 func (a *App) registerPage(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodPost && r.FormValue("registration_form_token") != "" {
+		a.confirmRegistrationCode(w, r)
+		return
+	}
 	if r.Method == http.MethodPost {
 		if a.serverOwnerExists(r.Context()) && !a.serverAutomaticRegistrationAllowed(r.Context()) && !a.hasAdmin(r.Context(), a.siteDomain(r.Context(), r)) {
 			a.siteRequestPage(w, r)
@@ -8935,16 +9046,23 @@ func (a *App) renderSetupPage(w http.ResponseWriter, r *http.Request, domain, em
 	a.render(w, r, "setup.html", map[string]any{"Domain": domain, "Email": strings.TrimSpace(email), "Status": strings.TrimSpace(status), "ReturnPath": requestedReturnPath(r)})
 }
 
-func (a *App) renderSetupConfirmationPage(w http.ResponseWriter, r *http.Request, domain, recipient string) {
+func (a *App) renderSetupConfirmationPage(w http.ResponseWriter, r *http.Request, domain, recipient string, pending ...EmailConfirmation) {
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Referrer-Policy", "no-referrer")
+	formToken := ""
+	if len(pending) > 0 {
+		formToken = pending[0].FormToken
+	}
 	provider := webmailProviderForAddress(recipient)
 	a.render(w, r, "setup.html", map[string]any{
-		"Domain":              domain,
-		"ConfirmationPending": true,
-		"RecipientEmail":      strings.TrimSpace(recipient),
-		"SenderEmail":         a.registrationConfirmationSenderAddress(r.Context(), domain),
-		"WebmailName":         provider.Name,
-		"WebmailURL":          provider.URL,
-		"ReturnPath":          requestedReturnPath(r),
+		"Domain":                domain,
+		"ConfirmationPending":   true,
+		"RegistrationFormToken": formToken,
+		"RecipientEmail":        strings.TrimSpace(recipient),
+		"SenderEmail":           a.registrationConfirmationSenderAddress(r.Context(), domain),
+		"WebmailName":           provider.Name,
+		"WebmailURL":            provider.URL,
+		"ReturnPath":            requestedReturnPath(r),
 	})
 }
 
@@ -17848,6 +17966,12 @@ func (a *App) toggleRevision(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) profilePage(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Referrer-Policy", "no-referrer")
+	if token := strings.TrimSpace(r.URL.Query().Get("profile_resume")); token != "" {
+		a.resumeProfileEmailChange(w, r, token)
+		return
+	}
 	if !a.isAdminRequest(r) {
 		if !a.hasAdmin(r.Context(), a.siteDomain(r.Context(), r)) {
 			httpsecurity.RedirectLocal(w, r, r.URL.Path+"?register", http.StatusFound)
@@ -17867,6 +17991,7 @@ func (a *App) profilePage(w http.ResponseWriter, r *http.Request) {
 	showPasswordCodeForm := false
 	passwordConfirmationToken := ""
 	pendingProfileEmail := currentEmail
+	emailChange := profileEmailChangeView{}
 	emailDeliveryView := profileEmailDeliveryView{}
 	if r.Method == http.MethodPost {
 		passwordConfirmationToken = strings.TrimSpace(r.FormValue("profile_confirmation_token"))
@@ -17956,22 +18081,42 @@ func (a *App) profilePage(w http.ResponseWriter, r *http.Request) {
 			emailDeliveryView = profileEmailDeliveryViewForResult(translations, deliveryResult, profileEmailDeliveryDNSHelp{})
 			showPasswordCodeForm = true
 			passwordConfirmationToken = token
+			emailChange = profileEmailChange(currentEmail, codeEmail, 1)
 			if profileAction == "email" {
 				pendingProfileEmail = nextEmail
 			}
 		}
 	}
-	a.renderProfilePage(w, r, pendingProfileEmail, status, statusClass, showPasswordCodeForm, passwordConfirmationToken, time.Time{}, false, emailDeliveryView)
+	a.renderProfilePage(w, r, pendingProfileEmail, status, statusClass, showPasswordCodeForm, passwordConfirmationToken, time.Time{}, false, emailDeliveryView, emailChange)
 }
 
-func (a *App) renderProfilePage(w http.ResponseWriter, r *http.Request, email, status, statusClass string, showPasswordCodeForm bool, passwordConfirmationToken string, blockedUntil time.Time, hardLocked bool, emailDeliveryView profileEmailDeliveryView) {
+func (a *App) resumeProfileEmailChange(w http.ResponseWriter, r *http.Request, token string) {
+	confirmation, found := a.emailConfirmationByToken(r.Context(), token)
+	if !found || confirmation.Action != "profile_code" || confirmation.Email == "" || confirmation.Domain != a.siteDomain(r.Context(), r) || confirmationExpired(confirmation.ExpiresAt, time.Now().UTC()) {
+		a.renderEmailConfirmationStatus(w, r, http.StatusGone, translationOrDefault(translationsForRequest(r), "email_confirmation_status_invalid", "Confirmation link is invalid."))
+		return
+	}
+	if r.Method == http.MethodPost {
+		a.handleProfilePasswordCode(w, r, confirmation.CurrentEmail, token, r.FormValue("password_confirmation_code"))
+		return
+	}
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	a.renderProfilePage(w, r, confirmation.CurrentEmail, "", "", true, token, time.Time{}, false, profileEmailDeliveryView{}, profileEmailChange(confirmation.CurrentEmail, confirmation.Email, 1))
+}
+
+func (a *App) renderProfilePage(w http.ResponseWriter, r *http.Request, email, status, statusClass string, showPasswordCodeForm bool, passwordConfirmationToken string, blockedUntil time.Time, hardLocked bool, emailDeliveryView profileEmailDeliveryView, emailChange profileEmailChangeView) {
 	translations := translationsForRequest(r)
 	a.render(w, r, "profile.html", map[string]any{
+		"EmailChange":                emailChange,
+		"ProfileCodeAction":          "?profile&profile_resume=" + url.QueryEscape(r.URL.Query().Get("profile_resume")),
 		"Email":                      strings.TrimSpace(email),
 		"Status":                     status,
 		"StatusClass":                statusClass,
 		"ShowPasswordCodeForm":       showPasswordCodeForm,
-		"ShowPasswordForm":           !showPasswordCodeForm && !hardLocked && blockedUntil.IsZero(),
+		"ShowPasswordForm":           emailChange.Step != 2 && !showPasswordCodeForm && !hardLocked && blockedUntil.IsZero(),
 		"PasswordConfirmationToken":  passwordConfirmationToken,
 		"BlockedUntilUnix":           blockedUntil.Unix(),
 		"BlockedUntilISO":            blockedUntil.UTC().Format(time.RFC3339),
@@ -18295,7 +18440,8 @@ func (a *App) createAndSendProfileCode(r *http.Request, domain, currentEmail, ne
 	if err != nil {
 		return "", emailDeliveryResult{}, dnsHelp, err
 	}
-	deliveryResult := a.sendServiceEmailNow(r.Context(), r, codeKind, domain, currentEmail, code, languageCode)
+	change := emailChangeMail{Current: currentEmail, Next: nextEmail, URL: requestScheme(r) + "://" + r.Host + "/?profile&profile_resume=" + url.QueryEscape(token)}
+	deliveryResult := a.sendServiceEmailNow(r.Context(), r, codeKind, domain, currentEmail, code, languageCode, change)
 	if deliveryResult.Err != nil {
 		_, _ = a.db.ExecContext(r.Context(), `DELETE FROM email_confirmations WHERE token=?`, token)
 		return "", deliveryResult, dnsHelp, deliveryResult.Err
@@ -18316,7 +18462,7 @@ func (a *App) handleProfilePasswordCode(w http.ResponseWriter, r *http.Request, 
 	blocked, hardLocked, blockedUntil := a.authIPIsBlocked(r.Context(), failureDomain, clientIP)
 	if hardLocked {
 		w.WriteHeader(http.StatusForbidden)
-		a.renderProfilePage(w, r, currentEmail, translationOrDefault(translations, "profile_password_code_status_hard_locked", "Too many failed code attempts from this IP. Account recovery is now required."), "danger", false, "", blockedUntil, true, profileEmailDeliveryView{})
+		a.renderProfilePage(w, r, currentEmail, translationOrDefault(translations, "profile_password_code_status_hard_locked", "Too many failed code attempts from this IP. Account recovery is now required."), "danger", false, "", blockedUntil, true, profileEmailDeliveryView{}, profileEmailChangeView{})
 		return
 	}
 	if blocked {
@@ -18326,21 +18472,22 @@ func (a *App) handleProfilePasswordCode(w http.ResponseWriter, r *http.Request, 
 		}
 		w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
 		w.WriteHeader(http.StatusTooManyRequests)
-		a.renderProfilePage(w, r, currentEmail, translationOrDefault(translations, "profile_password_code_status_rate_limited", "Too many failed code attempts from this IP. Please try again later."), "warning", false, "", blockedUntil, false, profileEmailDeliveryView{})
+		a.renderProfilePage(w, r, currentEmail, translationOrDefault(translations, "profile_password_code_status_rate_limited", "Too many failed code attempts from this IP. Please try again later."), "warning", false, "", blockedUntil, false, profileEmailDeliveryView{}, profileEmailChangeView{})
 		return
 	}
 	confirmation, found := a.emailConfirmationByToken(r.Context(), token)
 	if !found || !profileCodeActionAllowed(confirmation.Action) || confirmation.Domain != domain || confirmation.CurrentEmail != currentEmail || confirmationExpired(confirmation.ExpiresAt, time.Now().UTC()) {
 		_, _, _ = a.registerFailedLoginAttempt(r.Context(), failureDomain, clientIP)
 		w.WriteHeader(http.StatusUnauthorized)
-		a.renderProfilePage(w, r, currentEmail, translationOrDefault(translations, "profile_password_code_status_invalid", "The code is invalid or expired."), "danger", true, token, time.Time{}, false, profileEmailDeliveryView{})
+		a.renderProfilePage(w, r, currentEmail, translationOrDefault(translations, "profile_password_code_status_invalid", "The code is invalid or expired."), "danger", true, token, time.Time{}, false, profileEmailDeliveryView{}, profileEmailChangeView{})
 		return
 	}
+	emailChange := profileEmailChange(currentEmail, confirmation.Email, 1)
 	if !isSixDigitCode(code) || strings.TrimSpace(code) != strings.TrimSpace(confirmation.Code) {
 		_, blockedUntil, hardLocked := a.registerFailedLoginAttempt(r.Context(), failureDomain, clientIP)
 		if hardLocked {
 			w.WriteHeader(http.StatusForbidden)
-			a.renderProfilePage(w, r, currentEmail, translationOrDefault(translations, "profile_password_code_status_hard_locked", "Too many failed code attempts from this IP. Account recovery is now required."), "danger", false, "", blockedUntil, true, profileEmailDeliveryView{})
+			a.renderProfilePage(w, r, currentEmail, translationOrDefault(translations, "profile_password_code_status_hard_locked", "Too many failed code attempts from this IP. Account recovery is now required."), "danger", false, "", blockedUntil, true, profileEmailDeliveryView{}, profileEmailChangeView{})
 			return
 		}
 		if !blockedUntil.IsZero() {
@@ -18350,22 +18497,35 @@ func (a *App) handleProfilePasswordCode(w http.ResponseWriter, r *http.Request, 
 			}
 			w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
 			w.WriteHeader(http.StatusTooManyRequests)
-			a.renderProfilePage(w, r, currentEmail, translationOrDefault(translations, "profile_password_code_status_rate_limited", "Too many failed code attempts from this IP. Please try again later."), "warning", false, "", blockedUntil, false, profileEmailDeliveryView{})
+			a.renderProfilePage(w, r, currentEmail, translationOrDefault(translations, "profile_password_code_status_rate_limited", "Too many failed code attempts from this IP. Please try again later."), "warning", false, "", blockedUntil, false, profileEmailDeliveryView{}, profileEmailChangeView{})
 			return
 		}
 		w.WriteHeader(http.StatusUnauthorized)
-		a.renderProfilePage(w, r, confirmation.Email, translationOrDefault(translations, "profile_password_code_status_invalid", "The code is invalid or expired."), "danger", true, token, time.Time{}, false, profileEmailDeliveryView{})
+		a.renderProfilePage(w, r, confirmation.Email, translationOrDefault(translations, "profile_password_code_status_invalid", "The code is invalid or expired."), "danger", true, token, time.Time{}, false, profileEmailDeliveryView{}, emailChange)
 		return
 	}
 	if strings.TrimSpace(confirmation.Email) != "" {
+		// Claim the code before sending the second message so concurrent form
+		// submissions cannot create multiple acceptance tokens from one code.
+		claimed, claimErr := a.db.ExecContext(r.Context(), `UPDATE email_confirmations SET action='profile_code_sending' WHERE token=? AND domain=? AND action='profile_code'`, token, domain)
+		if claimErr != nil {
+			http.Error(w, claimErr.Error(), http.StatusInternalServerError)
+			return
+		}
+		claimedRows, claimErr := claimed.RowsAffected()
+		if claimErr != nil || claimedRows != 1 {
+			a.renderEmailConfirmationStatus(w, r, http.StatusGone, translationOrDefault(translations, "email_confirmation_status_invalid", "Confirmation link is invalid."))
+			return
+		}
 		err := a.createAndSendEmailConfirmationForLanguage(r, "profile", domain, currentEmail, confirmation.Email, confirmation.Password, confirmation.ReturnPath, confirmation.LanguageCode)
 		if err != nil {
-			a.renderProfilePage(w, r, currentEmail, err.Error(), "danger", true, token, time.Time{}, false, profileEmailDeliveryView{})
+			_, _ = a.db.ExecContext(r.Context(), `UPDATE email_confirmations SET action='profile_code' WHERE token=? AND action='profile_code_sending'`, token)
+			a.renderProfilePage(w, r, currentEmail, err.Error(), "danger", true, token, time.Time{}, false, profileEmailDeliveryView{}, emailChange)
 			return
 		}
 		_, _ = a.db.ExecContext(r.Context(), `DELETE FROM email_confirmations WHERE token=?`, token)
 		a.clearFailedLoginAttempts(r.Context(), failureDomain, clientIP)
-		a.renderProfilePage(w, r, currentEmail, translationOrDefault(translations, "profile_password_code_status_confirmed_email_pending", "Your current email is confirmed. Open the message sent to the new address to complete the change."), "success", false, "", time.Time{}, false, profileEmailDeliveryView{})
+		a.renderProfilePage(w, r, currentEmail, translationOrDefault(translations, "profile_password_code_status_confirmed_email_pending", "Your current email is confirmed. Open the message sent to the new address to complete the change."), "success", false, "", time.Time{}, false, profileEmailDeliveryView{}, profileEmailChange(currentEmail, confirmation.Email, 2))
 		return
 	}
 	if err := a.applyProfileCodeConfirmation(r.Context(), confirmation); err != nil {
@@ -18378,7 +18538,7 @@ func (a *App) handleProfilePasswordCode(w http.ResponseWriter, r *http.Request, 
 	}
 	_, _ = a.db.ExecContext(r.Context(), `DELETE FROM email_confirmations WHERE token=?`, token)
 	a.clearFailedLoginAttempts(r.Context(), failureDomain, clientIP)
-	a.renderProfilePage(w, r, confirmedEmail, translationOrDefault(translations, "profile_status_updated", "Account updated."), "success", false, "", time.Time{}, false, profileEmailDeliveryView{})
+	a.renderProfilePage(w, r, confirmedEmail, translationOrDefault(translations, "profile_status_updated", "Account updated."), "success", false, "", time.Time{}, false, profileEmailDeliveryView{}, profileEmailChangeView{})
 }
 
 func profileCodeActionAllowed(action string) bool {
@@ -18463,7 +18623,7 @@ func (a *App) createAndSendEmailConfirmation(r *http.Request, action, domain, cu
 	return a.createAndSendEmailConfirmationForLanguage(r, action, domain, currentEmail, email, password, returnPath, preferredLanguageCode(r.Header.Get("Accept-Language")))
 }
 
-func (a *App) createAndSendEmailConfirmationForLanguage(r *http.Request, action, domain, currentEmail, email, password, returnPath, languageCode string) error {
+func (a *App) createAndSendEmailConfirmationForLanguage(r *http.Request, action, domain, currentEmail, email, password, returnPath, languageCode string, pending ...*EmailConfirmation) error {
 	translations := translationsForRequest(r)
 	email = strings.TrimSpace(email)
 	if _, err := stdmail.ParseAddress(email); err != nil {
@@ -18489,15 +18649,20 @@ func (a *App) createAndSendEmailConfirmationForLanguage(r *http.Request, action,
 	}
 	confirmationURL := emailConfirmationURL(r, token)
 	if action == "register" {
+		confirmation.Code = randomSixDigitCode()
+		confirmation.FormToken = randomAccessToken()
 		if dnsSetup, dnsSetupRequired := a.registrationDomainAddressSetupView(databaseContext, domain, languageCode); dnsSetupRequired {
 			return errors.New(dnsSetup.PlainText)
 		}
 		if err := a.saveRegistrationConfirmation(databaseContext, confirmation); err != nil {
 			return err
 		}
-		if err := a.enqueueServiceEmail(databaseContext, r, "email_confirm", domain, email, confirmationURL, languageCode); err != nil {
+		if err := a.enqueueServiceEmailContent(databaseContext, r, "email_confirm", domain, email, confirmationURL, "", languageCode, confirmation.Code); err != nil {
 			a.deleteRegistrationConfirmation(databaseContext, token)
 			return err
+		}
+		if len(pending) > 0 {
+			*pending[0] = confirmation
 		}
 		a.logHostingSupportEvent(databaseContext, "code_requested", "sent", email, domain, "email_confirm")
 		return nil
@@ -18512,7 +18677,7 @@ func (a *App) createAndSendEmailConfirmationForLanguage(r *http.Request, action,
 	if strings.TrimSpace(action) == "register" {
 		codeKind = "email_confirm"
 	}
-	if err := a.enqueueServiceEmail(databaseContext, r, codeKind, domain, email, confirmationURL, languageCode); err != nil {
+	if err := a.enqueueServiceEmailWithActionURL(databaseContext, r, codeKind, domain, email, confirmationURL, confirmationURL, languageCode, emailChangeMail{Current: currentEmail, Next: email, URL: confirmationURL}); err != nil {
 		_, _ = a.db.ExecContext(databaseContext, `DELETE FROM email_confirmations WHERE token=?`, token)
 		return err
 	}
@@ -18626,7 +18791,11 @@ func (a *App) enqueueServiceEmail(ctx context.Context, r *http.Request, codeKind
 	return a.enqueueServiceEmailWithActionURL(ctx, r, codeKind, domain, recipient, secretValue, "", languageCode)
 }
 
-func (a *App) enqueueServiceEmailWithActionURL(ctx context.Context, r *http.Request, codeKind, domain, recipient, secretValue, actionURL, languageCode string) error {
+func (a *App) enqueueServiceEmailWithActionURL(ctx context.Context, r *http.Request, codeKind, domain, recipient, secretValue, actionURL, languageCode string, changes ...emailChangeMail) error {
+	return a.enqueueServiceEmailContent(ctx, r, codeKind, domain, recipient, secretValue, actionURL, languageCode, "", changes...)
+}
+
+func (a *App) enqueueServiceEmailContent(ctx context.Context, r *http.Request, codeKind, domain, recipient, secretValue, actionURL, languageCode, registrationCode string, changes ...emailChangeMail) error {
 	message := mailout.Message{
 		Kind:     strings.TrimSpace(codeKind),
 		From:     a.emailFromAddress(domain),
@@ -18634,6 +18803,14 @@ func (a *App) enqueueServiceEmailWithActionURL(ctx context.Context, r *http.Requ
 		Subject:  emailSubjectForServiceMail(languageCode, codeKind, domain),
 		Body:     emailBodyForServiceMailWithActionURL(languageCode, codeKind, domain, secretValue, actionURL),
 		HTMLBody: emailHTMLBodyForServiceMailWithActionURL(languageCode, codeKind, domain, secretValue, actionURL),
+	}
+	if registrationCode != "" {
+		applyRegistrationMail(&message, languageCode, domain, secretValue, registrationCode)
+	}
+	var change *emailChangeMail
+	if len(changes) > 0 && changes[0].Next != "" && (codeKind == "email_change" || codeKind == "email_change_confirm") {
+		change = &changes[0]
+		applyEmailChangeMail(&message, languageCode, domain, secretValue, *change)
 	}
 	if a.durableMailTasks != nil {
 		return a.enqueueEmail(ctx, message)
@@ -18643,14 +18820,16 @@ func (a *App) enqueueServiceEmailWithActionURL(ctx context.Context, r *http.Requ
 		return a.enqueueEmail(ctx, message)
 	}
 	request := serviceMailRequest{
-		Version:      1,
-		SourceDomain: normalizeDomainName(domain),
-		Recipient:    strings.TrimSpace(recipient),
-		CodeKind:     strings.TrimSpace(codeKind),
-		SecretValue:  strings.TrimSpace(secretValue),
-		ActionURL:    strings.TrimSpace(actionURL),
-		LanguageCode: strings.TrimSpace(languageCode),
-		CreatedAt:    time.Now().UTC().Format(time.RFC3339),
+		EmailChange:      change,
+		RegistrationCode: registrationCode,
+		Version:          1,
+		SourceDomain:     normalizeDomainName(domain),
+		Recipient:        strings.TrimSpace(recipient),
+		CodeKind:         strings.TrimSpace(codeKind),
+		SecretValue:      strings.TrimSpace(secretValue),
+		ActionURL:        strings.TrimSpace(actionURL),
+		LanguageCode:     strings.TrimSpace(languageCode),
+		CreatedAt:        time.Now().UTC().Format(time.RFC3339),
 	}
 	relayURL, err := a.sendServiceMailThroughRelayChain(ctx, route, &request)
 	if err != nil {
@@ -18672,7 +18851,7 @@ func (a *App) enqueueServiceEmailWithActionURL(ctx context.Context, r *http.Requ
 	return nil
 }
 
-func (a *App) sendServiceEmailNow(ctx context.Context, r *http.Request, codeKind, domain, recipient, secretValue, languageCode string) emailDeliveryResult {
+func (a *App) sendServiceEmailNow(ctx context.Context, r *http.Request, codeKind, domain, recipient, secretValue, languageCode string, changes ...emailChangeMail) emailDeliveryResult {
 	message := mailout.Message{
 		Kind:     strings.TrimSpace(codeKind),
 		From:     a.emailFromAddress(domain),
@@ -18680,6 +18859,11 @@ func (a *App) sendServiceEmailNow(ctx context.Context, r *http.Request, codeKind
 		Subject:  emailSubjectForServiceMail(languageCode, codeKind, domain),
 		Body:     emailBodyForServiceMail(languageCode, codeKind, domain, secretValue),
 		HTMLBody: emailHTMLBodyForServiceMail(languageCode, codeKind, domain, secretValue),
+	}
+	var change *emailChangeMail
+	if len(changes) > 0 && changes[0].Next != "" && (codeKind == "email_change" || codeKind == "email_change_confirm") {
+		change = &changes[0]
+		applyEmailChangeMail(&message, languageCode, domain, secretValue, *change)
 	}
 	if a.durableMailTasks != nil {
 		return a.sendEmailNow(ctx, message)
@@ -18691,6 +18875,7 @@ func (a *App) sendServiceEmailNow(ctx context.Context, r *http.Request, codeKind
 	sendCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
 	defer cancel()
 	request := serviceMailRequest{
+		EmailChange:  change,
 		Version:      1,
 		SourceDomain: normalizeDomainName(domain),
 		Recipient:    strings.TrimSpace(recipient),
@@ -18698,6 +18883,9 @@ func (a *App) sendServiceEmailNow(ctx context.Context, r *http.Request, codeKind
 		SecretValue:  strings.TrimSpace(secretValue),
 		LanguageCode: strings.TrimSpace(languageCode),
 		CreatedAt:    time.Now().UTC().Format(time.RFC3339),
+	}
+	if change != nil {
+		request.ActionURL = change.URL
 	}
 	relayURL, err := a.sendServiceMailThroughRelayChain(sendCtx, route, &request)
 	if err != nil {
@@ -21678,6 +21866,12 @@ func (a *App) handleServiceMailRelayRequest(ctx context.Context, r *http.Request
 		Body:     emailBodyForServiceMailWithActionURL(request.LanguageCode, request.CodeKind, request.SourceDomain, request.SecretValue, request.ActionURL),
 		HTMLBody: emailHTMLBodyForServiceMailWithActionURL(request.LanguageCode, request.CodeKind, request.SourceDomain, request.SecretValue, request.ActionURL),
 	}
+	if request.RegistrationCode != "" {
+		applyRegistrationMail(&message, request.LanguageCode, request.SourceDomain, request.SecretValue, request.RegistrationCode)
+	}
+	if request.EmailChange != nil {
+		applyEmailChangeMail(&message, request.LanguageCode, request.SourceDomain, request.SecretValue, *request.EmailChange)
+	}
 	if strings.TrimSpace(request.MessageID) != "" {
 		message.From = serviceMailRelayFromAddress("sitebrush.com")
 		message.Subject = request.Subject
@@ -21950,6 +22144,25 @@ func validateServiceMailSecret(codeKind, secretValue string) error {
 }
 
 func validateServiceMailContent(request serviceMailRequest) error {
+	if request.RegistrationCode != "" && (request.CodeKind != "email_confirm" || !isSixDigitCode(request.RegistrationCode)) {
+		return errors.New("invalid registration code context")
+	}
+	if request.EmailChange != nil {
+		change := request.EmailChange
+		if request.CodeKind != "email_change" && request.CodeKind != "email_change_confirm" {
+			return errors.New("email change context requires an email change message")
+		}
+		for _, address := range []string{change.Current, change.Next} {
+			parsed, err := stdmail.ParseAddress(address)
+			if err != nil || parsed.Address != address || len(address) > 254 {
+				return errors.New("invalid email change address")
+			}
+		}
+		if change.URL != request.ActionURL || (request.CodeKind == "email_change" && change.Current != request.Recipient) || (request.CodeKind == "email_change_confirm" && change.Next != request.Recipient) {
+			return errors.New("email change recipient or action mismatch")
+		}
+	}
+
 	if strings.TrimSpace(request.MessageID) == "" {
 		if err := validateServiceMailSecret(request.CodeKind, request.SecretValue); err != nil {
 			return err
@@ -22219,6 +22432,19 @@ func runEmailConfirmationMemoryWorker(ctx context.Context, requests <-chan email
 				}
 				confirmationsByToken[token] = request.confirmation
 				request.response <- emailConfirmationMemoryResponse{}
+			case "verify-registration":
+				result := emailConfirmationMemoryResponse{}
+				for token, confirmation := range confirmationsByToken {
+					if confirmation.FormToken != request.token || confirmation.Domain != request.confirmation.Domain || confirmation.Attempts >= 5 {
+						continue
+					}
+					confirmation.Attempts++
+					confirmationsByToken[token] = confirmation
+					result.confirmation = confirmation
+					result.found = isSixDigitCode(request.confirmation.Code) && confirmation.Code == request.confirmation.Code
+					break
+				}
+				request.response <- result
 			case "get":
 				confirmation, found := confirmationsByToken[strings.TrimSpace(request.token)]
 				request.response <- emailConfirmationMemoryResponse{confirmation: confirmation, found: found}
@@ -22250,8 +22476,8 @@ func (a *App) saveRegistrationConfirmation(ctx context.Context, confirmation Ema
 			if _, deleteErr := database.ExecContext(ctx, `DELETE FROM registration_confirmations WHERE token=?`, confirmation.Token); deleteErr != nil {
 				return deleteErr
 			}
-			_, insertErr := database.ExecContext(ctx, `INSERT INTO registration_confirmations(token,domain,action,email,password,current_email,return_path,language_code,created_at,expires_at) VALUES(?,?,?,?,?,?,?,?,?,?)`,
-				confirmation.Token, confirmation.Domain, confirmation.Action, confirmation.Email, confirmation.Password, confirmation.CurrentEmail, confirmation.ReturnPath, confirmation.LanguageCode, now, confirmation.ExpiresAt)
+			_, insertErr := database.ExecContext(ctx, `INSERT INTO registration_confirmations(token,domain,action,email,password,current_email,return_path,language_code,created_at,expires_at,form_token,verification_code,attempts) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+				confirmation.Token, confirmation.Domain, confirmation.Action, confirmation.Email, confirmation.Password, confirmation.CurrentEmail, confirmation.ReturnPath, confirmation.LanguageCode, now, confirmation.ExpiresAt, confirmation.FormToken, confirmation.Code, confirmation.Attempts)
 			return insertErr
 		})
 		if err != nil {
@@ -22294,8 +22520,8 @@ func (a *App) registrationConfirmationByToken(ctx context.Context, token string)
 	}
 	var confirmation EmailConfirmation
 	err := a.withServerControlDatabaseRead(ctx, "read-registration-confirmation", func(database *sql.DB) error {
-		return database.QueryRowContext(ctx, `SELECT token,domain,action,email,password,current_email,return_path,language_code,expires_at FROM registration_confirmations WHERE token=?`, strings.TrimSpace(token)).Scan(
-			&confirmation.Token, &confirmation.Domain, &confirmation.Action, &confirmation.Email, &confirmation.Password, &confirmation.CurrentEmail, &confirmation.ReturnPath, &confirmation.LanguageCode, &confirmation.ExpiresAt)
+		return database.QueryRowContext(ctx, `SELECT token,domain,action,email,password,current_email,return_path,language_code,expires_at,form_token,verification_code,attempts FROM registration_confirmations WHERE token=?`, strings.TrimSpace(token)).Scan(
+			&confirmation.Token, &confirmation.Domain, &confirmation.Action, &confirmation.Email, &confirmation.Password, &confirmation.CurrentEmail, &confirmation.ReturnPath, &confirmation.LanguageCode, &confirmation.ExpiresAt, &confirmation.FormToken, &confirmation.Code, &confirmation.Attempts)
 	})
 	if err != nil || confirmationExpired(confirmation.ExpiresAt, time.Now().UTC()) {
 		return EmailConfirmation{}, false
@@ -22616,6 +22842,35 @@ func spfIPMechanismMatches(rawMechanism string, serverIP net.IP) bool {
 	return parsedIP.Equal(serverIP)
 }
 
+type emailChangeMail struct {
+	Current string `json:"current"`
+	Next    string `json:"next"`
+	URL     string `json:"url"`
+}
+
+func applyEmailChangeMail(message *mailout.Message, languageCode, domain, secret string, change emailChangeMail) {
+	translations := translationsForLanguageCode(languageCode)
+	introduction := translations["mail_email_change_request"]
+	instructions := translations["mail_email_change_code"]
+	button := translations["mail_email_change_resume"]
+	codeText, codeHTML := "", ""
+	if message.Kind == "email_change" {
+		codeText = translations["profile_password_code"] + ": " + secret + "\n\n"
+		codeHTML = `<p style="margin:20px 0 6px;color:#607078">` + template.HTMLEscapeString(translations["profile_password_code"]) + `</p><p style="margin:0 0 24px"><strong dir="ltr" style="font-size:36px;line-height:1.4;font-weight:800;letter-spacing:4px;color:#172126">` + template.HTMLEscapeString(secret) + `</strong></p>`
+	} else {
+		instructions = translations["mail_email_change_accept"]
+		button = translations["profile_email_accept"]
+	}
+	ignore := translations["mail_email_change_ignore"]
+	message.Body = "SiteBrush — " + domain + "\n\n" + introduction + "\n" + change.Current + " → " + change.Next + "\n\n" + instructions + "\n\n" + codeText + button + ":\n" + change.URL + "\n\n" + ignore
+	direction := "ltr"
+	if languageCode == "he" || languageCode == "fa" {
+		direction = "rtl"
+	}
+	escape := template.HTMLEscapeString
+	message.HTMLBody = `<!doctype html><html lang="` + escape(languageCode) + `" dir="` + direction + `"><body style="margin:0;background:#f4f7f8;font-family:Arial,sans-serif;color:#607078"><div style="max-width:600px;margin:0 auto;padding:28px 16px"><div style="background:#fff;border:1px solid #d9e2e5;border-radius:14px;padding:28px"><p style="margin:0;color:#087f8c;font-size:20px;font-weight:700">SiteBrush · ` + escape(domain) + `</p><h1 style="font-size:23px;color:#172126;line-height:1.3">` + escape(translations["profile_email_form_title"]) + `</h1><p style="line-height:1.6">` + escape(introduction) + `</p><p dir="ltr" style="padding:16px;background:#f4f7f8;border-radius:9px;line-height:1.7;overflow-wrap:anywhere;color:#172126"><strong style="font-size:18px;font-weight:700">` + escape(change.Current) + `</strong><br>↓<br><strong style="font-size:18px;font-weight:700">` + escape(change.Next) + `</strong></p><p style="line-height:1.6">` + escape(instructions) + `</p>` + codeHTML + `<p style="margin:24px 0"><a href="` + escape(change.URL) + `" style="display:inline-block;background:#087f8c;color:#fff;text-decoration:none;font-weight:700;padding:13px 20px;border-radius:9px">` + escape(button) + `</a></p><p style="font-size:13px;line-height:1.5">` + escape(ignore) + `</p></div></div></body></html>`
+}
+
 func emailSubjectForServiceMail(languageCode, codeKind, domain string) string {
 	return emailSubjectForLanguage(languageCode, serviceMailKindAction(codeKind), domain)
 }
@@ -22669,6 +22924,9 @@ func serviceCodeEmailHTMLForLanguage(languageCode, codeKind, domain, secret stri
 	}
 	subject := template.HTMLEscapeString(emailSubjectForServiceMail(languageCode, codeKind, domain))
 	body := template.HTMLEscapeString(emailBodyForServiceMail(languageCode, codeKind, domain, secret))
+	if isSixDigitCode(secret) {
+		body = strings.Replace(body, secret, `<strong dir="ltr" style="display:block;font-size:32px;font-weight:800;color:#172126;letter-spacing:4px;margin:16px 0">`+secret+`</strong>`, 1)
+	}
 	return `<!doctype html><html lang="` + template.HTMLEscapeString(languageCode) + `" dir="` + direction + `"><body style="margin:0;background:#f4f7f8;color:#172126;font-family:Arial,sans-serif"><div style="max-width:640px;margin:0 auto;padding:32px 16px"><div style="background:#fff;border:1px solid #d9e2e5;border-radius:14px;padding:28px"><div style="font-size:22px;font-weight:700;color:#087f8c">SiteBrush</div><h1 style="font-size:25px;line-height:1.25;margin:24px 0 12px">` + subject + `</h1><p style="font-size:16px;line-height:1.6;white-space:pre-line;margin:0">` + body + `</p></div></div></body></html>`
 }
 

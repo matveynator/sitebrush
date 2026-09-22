@@ -357,3 +357,7 @@ Keep a traditional dynamic CMS when the project requires complex e-commerce, mem
 <p align="center">
   <a href="https://sitebrush.com/"><strong>sitebrush.com</strong></a>
 </p>
+
+## SMTP compatibility
+
+Direct MX delivery prefers verified TLS, retries STARTTLS failures over a fresh connection with legacy TLS (TLS 1.0 or later, including untrusted certificates), then falls back to plaintext SMTP. Servers without STARTTLS are supported directly. This compatibility policy prioritizes delivery: plaintext exposes mail contents in transit, and unverified TLS does not authenticate the receiving server. Transport modes are logged without message contents. HTTPS and NetChan relay security are unchanged; relay deployments must also run the updated SMTP sender. SMTP recipient or message rejection does not trigger a TLS downgrade, and a failed QUIT after message acceptance does not resend the message.

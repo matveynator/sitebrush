@@ -848,6 +848,9 @@ type hostingAndSupportColumn struct {
 
 func requiredHostingAndSupportColumns() []hostingAndSupportColumn {
 	return []hostingAndSupportColumn{
+		{"registration_confirmations", "form_token", "TEXT NOT NULL DEFAULT ''"},
+		{"registration_confirmations", "verification_code", "TEXT NOT NULL DEFAULT ''"},
+		{"registration_confirmations", "attempts", "INTEGER NOT NULL DEFAULT 0"},
 		{tableName: "site_service_plans", columnName: "site_limit", definition: "INTEGER DEFAULT 1"},
 		{tableName: "site_service_plans", columnName: "analytics_report_limit", definition: "INTEGER DEFAULT 0"},
 		{tableName: "payment_providers", columnName: "instructions", definition: "TEXT"},
