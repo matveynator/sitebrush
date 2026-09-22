@@ -42,7 +42,7 @@
   {{if .ShowForm}}<form class="card card-body authentication-card" method="post" action="?recover">
     <input type="hidden" name="recovery_action" value="request">
     <input type="hidden" name="return_path" value="{{.ReturnPath}}">
-    <p><input type='text' class="form-control" name='email' placeholder="{{index .T "recover_email_placeholder"}}"></p>
+    <p><input type="email" class="form-control" name="email" value="{{.RecoveryEmail}}" placeholder="{{index .T "recover_email_placeholder"}}" autocomplete="email" required></p>
     <p class="d-flex align-items-center gap-2"><input type="text" class="form-control" name="captcha" placeholder="{{index .T "recover_captcha_placeholder"}}" style="max-width:220px;"/>
     <img src="?captcha" alt="{{index .T "recover_captcha_alt"}}" title="{{index .T "recover_captcha_placeholder"}}"></p>
     <input type="submit" class="btn btn-primary" value="{{index .T "recover_submit"}}"/>
@@ -57,7 +57,7 @@
     </div>
     <label>
       {{.PasswordCodeLabel}}
-      <input class="profile-code-input recovery-code-input" type="text" name="recovery_code" inputmode="numeric" pattern="[0-9]{6}" autocomplete="one-time-code" maxlength="6" required>
+      <input class="profile-code-input recovery-code-input" type="text" name="recovery_code" inputmode="numeric" pattern="[0-9]{6}" autocomplete="one-time-code" enterkeyhint="next" minlength="6" maxlength="6" required autofocus>
     </label>
     <label>
       {{.PasswordLabel}}

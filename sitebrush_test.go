@@ -5699,7 +5699,7 @@ func TestRecoverPasswordThroughManualCode(t *testing.T) {
 		t.Fatalf("read recovery code: %v", err)
 	}
 
-	passwordForm := url.Values{"recovery_action": {"manual"}, "email": {"admin@example.com"}, "recovery_code": {code}, "password": {"manual-password"}, "password_confirm": {"manual-password"}, "return_path": {"/"}}
+	passwordForm := url.Values{"recovery_action": {"manual"}, "email": {"admin@example.com"}, "recovery_code": {code[:3] + " " + code[3:]}, "password": {"manual-password"}, "password_confirm": {"manual-password"}, "return_path": {"/"}}
 	passwordRequest := httptest.NewRequest(http.MethodPost, "https://localhost/?recover", strings.NewReader(passwordForm.Encode()))
 	passwordRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	passwordResponse := httptest.NewRecorder()
@@ -5711,6 +5711,34 @@ func TestRecoverPasswordThroughManualCode(t *testing.T) {
 	_ = rawDB.QueryRow(`SELECT password FROM users WHERE domain=? AND email=?`, "localhost", "admin@example.com").Scan(&password)
 	if password != "manual-password" {
 		t.Fatalf("password = %q, want manual-password", password)
+	}
+}
+
+func TestRecoveryInvalidCodeOffersFreshRequest(t *testing.T) {
+	t.Setenv("SITEBRUSH_SERVICE_MAIL_MODE", "local")
+	withEmailSPFAllowed(t)
+	application, rawDB := newTestApplication(t)
+	if _, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "admin@example.com", "old-password"); err != nil {
+		t.Fatal(err)
+	}
+	expiresAt := time.Now().UTC().Add(profilePasswordCodeTTL).Format(time.RFC3339)
+	if _, err := rawDB.Exec(`INSERT INTO email_confirmations(token,domain,action,email,password,verification_code,current_email,return_path,language_code,created_at,expires_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
+		"recovery-token", "localhost", "recover", "admin@example.com", "", "123456", "", "/", "en", time.Now().UTC().Format(time.RFC3339), expiresAt); err != nil {
+		t.Fatal(err)
+	}
+	form := url.Values{"recovery_action": {"manual"}, "email": {"admin@example.com"}, "recovery_code": {"654321"}, "password": {"new-password"}, "password_confirm": {"new-password"}}
+	request := httptest.NewRequest(http.MethodPost, "https://localhost/?recover", strings.NewReader(form.Encode()))
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	response := httptest.NewRecorder()
+	application.route(response, request)
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, body=%q", response.Code, response.Body.String())
+	}
+	body := response.Body.String()
+	for _, expected := range []string{`name="recovery_action" value="request"`, `value="admin@example.com"`, `autocomplete="one-time-code"`} {
+		if !strings.Contains(body, expected) {
+			t.Fatalf("retry UI missing %q in %s", expected, body)
+		}
 	}
 }
 
@@ -5829,7 +5857,7 @@ func TestPasswordRecoveryTranslationsAndEmailsCoverEveryLanguage(t *testing.T) {
 				t.Fatalf("empty %s for %s", outputName, languageCode)
 			}
 		}
-		if !strings.Contains(recoveryBody, "123456") || !strings.Contains(passwordBody, "123456") || !strings.Contains(emailChangeBody, "123456") || !strings.Contains(recoveryHTML, `lang="`+languageCode+`"`) || !strings.Contains(passwordHTML, `lang="`+languageCode+`"`) || !strings.Contains(emailChangeHTML, `lang="`+languageCode+`"`) || strings.Contains(emailChangeHTML, "href=") || !strings.Contains(recoveryHTML, translations["recover_save_password"]) || !strings.Contains(passwordHTML, "profile&amp;profile_resume=password-token") || !strings.Contains(passwordHTML, translations["profile_password_code_submit"]) {
+		if !strings.Contains(recoveryBody, "123456") || !strings.Contains(passwordBody, "123456") || !strings.Contains(emailChangeBody, "123456") || !strings.Contains(recoveryHTML, ">123456</strong>") || !strings.Contains(recoveryHTML, `lang="`+languageCode+`"`) || !strings.Contains(passwordHTML, `lang="`+languageCode+`"`) || !strings.Contains(emailChangeHTML, `lang="`+languageCode+`"`) || strings.Contains(emailChangeHTML, "href=") || !strings.Contains(recoveryHTML, translations["recover_save_password"]) || !strings.Contains(passwordHTML, "profile&amp;profile_resume=password-token") || !strings.Contains(passwordHTML, translations["profile_password_code_submit"]) {
 			t.Fatalf("password email content is incomplete for %s", languageCode)
 		}
 		if languageCode != "en" && (recoverySubject == englishRecoverySubject || recoveryBody == englishRecoveryBody || passwordSubject == englishPasswordSubject || passwordBody == englishPasswordBody || emailChangeSubject == englishEmailChangeSubject || emailChangeBody == englishEmailChangeBody) {

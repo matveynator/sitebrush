@@ -18205,13 +18205,13 @@ func (a *App) recoverPage(w http.ResponseWriter, r *http.Request) {
 			confirmation, found := a.emailConfirmationByToken(r.Context(), token)
 			if !found || confirmation.Action != "recover" || confirmation.Domain != domain {
 				w.WriteHeader(http.StatusNotFound)
-				a.renderRecoveryPage(w, r, map[string]any{"Status": translationOrDefault(translations, "recover_status_invalid", "The recovery link or code is invalid or expired."), "StatusClass": "danger"})
+				a.renderRecoveryPage(w, r, map[string]any{"Status": translationOrDefault(translations, "recover_status_invalid", "The recovery link or code is invalid or expired."), "StatusClass": "danger", "ShowForm": true})
 				return
 			}
 			if confirmationExpired(confirmation.ExpiresAt, time.Now().UTC()) {
 				_, _ = a.db.ExecContext(r.Context(), `DELETE FROM email_confirmations WHERE token=?`, token)
 				w.WriteHeader(http.StatusGone)
-				a.renderRecoveryPage(w, r, map[string]any{"Status": translationOrDefault(translations, "recover_status_invalid", "The recovery link or code is invalid or expired."), "StatusClass": "danger"})
+				a.renderRecoveryPage(w, r, map[string]any{"Status": translationOrDefault(translations, "recover_status_invalid", "The recovery link or code is invalid or expired."), "StatusClass": "danger", "ShowForm": true})
 				return
 			}
 			a.renderRecoveryPage(w, r, map[string]any{
@@ -18331,9 +18331,19 @@ func (a *App) renderRecoveryPage(w http.ResponseWriter, r *http.Request, view ma
 	a.render(w, r, "recover.html", view)
 }
 
+func normalizeRecoveryCodeInput(value string) string {
+	var code strings.Builder
+	for _, character := range strings.TrimSpace(value) {
+		if character >= '0' && character <= '9' {
+			code.WriteRune(character)
+		}
+	}
+	return code.String()
+}
+
 func (a *App) completeManualRecovery(w http.ResponseWriter, r *http.Request, domain string) {
 	email := strings.TrimSpace(r.FormValue("email"))
-	code := strings.TrimSpace(r.FormValue("recovery_code"))
+	code := normalizeRecoveryCodeInput(r.FormValue("recovery_code"))
 	failureDomain := recoveryPasswordFailureDomain(domain, email)
 	clientIP := clientIPAddress(r)
 	if blocked, _, blockedUntil := a.authIPIsBlocked(r.Context(), failureDomain, clientIP); blocked {
@@ -18346,12 +18356,18 @@ func (a *App) completeManualRecovery(w http.ResponseWriter, r *http.Request, dom
 		a.renderRecoveryPage(w, r, map[string]any{"Status": translationOrDefault(translationsForRequest(r), "recover_status_rate_limited", "Too many failed recovery attempts. Please try again later."), "StatusClass": "danger", "ShowManualPasswordForm": true, "RecoveryEmail": email})
 		return
 	}
-	var token string
-	err := a.db.QueryRowContext(r.Context(), `SELECT token FROM email_confirmations WHERE domain=? AND action='recover' AND email=? AND verification_code=? AND expires_at>?`, domain, email, code, time.Now().UTC().Format(time.RFC3339)).Scan(&token)
-	if err != nil || !isSixDigitCode(code) {
+	var token, expectedCode string
+	err := a.db.QueryRowContext(r.Context(), `SELECT token,verification_code FROM email_confirmations WHERE domain=? AND action='recover' AND email=? AND expires_at>?`, domain, email, time.Now().UTC().Format(time.RFC3339)).Scan(&token, &expectedCode)
+	if err != nil || !isSixDigitCode(code) || code != strings.TrimSpace(expectedCode) {
 		_, _, _ = a.registerFailedLoginAttempt(r.Context(), failureDomain, clientIP)
 		w.WriteHeader(http.StatusUnauthorized)
-		a.renderRecoveryPage(w, r, map[string]any{"Status": translationOrDefault(translationsForRequest(r), "recover_status_invalid", "The recovery link or code is invalid or expired."), "StatusClass": "danger", "ShowManualPasswordForm": true, "RecoveryEmail": email})
+		a.renderRecoveryPage(w, r, map[string]any{
+			"Status":                 translationOrDefault(translationsForRequest(r), "recover_status_invalid", "The recovery link or code is invalid or expired."),
+			"StatusClass":            "danger",
+			"ShowForm":               true,
+			"ShowManualPasswordForm": true,
+			"RecoveryEmail":          email,
+		})
 		return
 	}
 	a.completeRecoveryPassword(w, r, domain, token, email, failureDomain)
@@ -23075,11 +23091,17 @@ func recoveryEmailHTMLBodyForLanguage(languageCode, domain, code, actionURL stri
 	if languageCode == "he" || languageCode == "fa" {
 		direction = "rtl"
 	}
-	buttonLabel := translationOrDefault(translationsForLanguageCode(languageCode), "recover_save_password", "Set new password")
-	subject := template.HTMLEscapeString(emailSubjectForLanguage(languageCode, "recover", domain))
-	body := template.HTMLEscapeString(recoveryEmailBodyForLanguage(languageCode, domain, code))
-	link := template.HTMLEscapeString(actionURL)
-	return `<!doctype html><html lang="` + template.HTMLEscapeString(languageCode) + `" dir="` + direction + `"><body style="margin:0;background:#f4f7f8;color:#172126;font-family:Arial,sans-serif"><div style="max-width:640px;margin:0 auto;padding:32px 16px"><div style="background:#fff;border:1px solid #d9e2e5;border-radius:14px;padding:28px"><div style="font-size:22px;font-weight:700;color:#087f8c">SiteBrush</div><h1 style="font-size:25px;line-height:1.25;margin:24px 0 12px">` + subject + `</h1><p style="font-size:16px;line-height:1.6;white-space:pre-line;margin:0 0 24px">` + body + `</p><p style="margin:0"><a href="` + link + `" style="display:inline-block;background:#087f8c;color:#fff;text-decoration:none;font-weight:700;padding:13px 20px;border-radius:9px">` + template.HTMLEscapeString(buttonLabel) + `</a></p></div></div></body></html>`
+	translations := translationsForLanguageCode(languageCode)
+	escape := template.HTMLEscapeString
+	buttonLabel := translationOrDefault(translations, "recover_save_password", "Set new password")
+	subject := escape(emailSubjectForLanguage(languageCode, "recover", domain))
+	body := escape(recoveryEmailBodyForLanguage(languageCode, domain, code))
+	escapedCode := escape(code)
+	if isSixDigitCode(code) {
+		body = strings.Replace(body, escapedCode, `<strong dir="ltr" style="display:inline-block;font-size:36px;line-height:1.4;font-weight:800;letter-spacing:4px;color:#172126;margin:12px 0">`+escapedCode+`</strong>`, 1)
+	}
+	link := escape(actionURL)
+	return `<!doctype html><html lang="` + escape(languageCode) + `" dir="` + direction + `"><body style="margin:0;background:#f4f7f8;font-family:Arial,sans-serif;color:#607078"><div style="max-width:600px;margin:0 auto;padding:28px 16px"><div style="background:#fff;border:1px solid #d9e2e5;border-radius:14px;padding:28px"><p style="margin:0;color:#087f8c;font-size:20px;font-weight:700">SiteBrush · ` + escape(domain) + `</p><h1 style="font-size:23px;color:#172126;line-height:1.3;margin:24px 0 12px">` + subject + `</h1><p style="font-size:16px;line-height:1.6;white-space:pre-line;margin:0 0 24px;color:#607078">` + body + `</p><p style="margin:24px 0 0"><a href="` + link + `" style="display:inline-block;background:#087f8c;color:#fff;text-decoration:none;font-weight:700;padding:13px 20px;border-radius:9px">` + escape(buttonLabel) + `</a></p></div></div></body></html>`
 }
 
 func confirmationEmailButtonLabel(languageCode string) string {
