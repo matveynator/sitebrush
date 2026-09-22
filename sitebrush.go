@@ -33973,7 +33973,7 @@ func runGuestStaticHTMLCache(ctx context.Context, requests <-chan guestStaticHTM
 
 func buildGuestStaticHTMLBody(staticContent []byte, pagePath, domain, languageCode string) []byte {
 	html := rewriteLegacyPublicTrialWidgetReference(string(staticContent))
-	menuScript := buildGuestContextMenuScriptForLanguage(pagePath, domain, languageCode) + `<script defer src="/p/static/analytics.js" data-sitebrush-owned="true"></script>`
+	menuScript := buildGuestContextMenuScriptForLanguage(pagePath, domain, languageCode) + `<script defer src="/p/static/analytics.js?v=` + url.QueryEscape(CompileVersion) + `" data-sitebrush-owned="true"></script>`
 	lowerHTML := strings.ToLower(html)
 	bodyCloseIndex := strings.LastIndex(lowerHTML, "</body>")
 	if bodyCloseIndex < 0 {
@@ -33993,7 +33993,7 @@ func rewriteLegacyPublicTrialWidgetReference(html string) string {
 
 func (a *App) injectPublicContextMenu(r *http.Request, pagePath, html string) string {
 	html = rewriteLegacyPublicTrialWidgetReference(html)
-	menuScript := buildGuestContextMenuScriptForLanguage(pagePath, domainFromContext(r.Context()), preferredLanguageCode(r.Header.Get("Accept-Language"))) + `<script defer src="/p/static/analytics.js" data-sitebrush-owned="true"></script>`
+	menuScript := buildGuestContextMenuScriptForLanguage(pagePath, domainFromContext(r.Context()), preferredLanguageCode(r.Header.Get("Accept-Language"))) + `<script defer src="/p/static/analytics.js?v=` + url.QueryEscape(CompileVersion) + `" data-sitebrush-owned="true"></script>`
 	lowerHTML := strings.ToLower(html)
 	bodyCloseIndex := strings.LastIndex(lowerHTML, "</body>")
 	if bodyCloseIndex < 0 {
