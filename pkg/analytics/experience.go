@@ -154,11 +154,9 @@ func SafeURI(raw string) string {
 	query := parsed.Query()
 	for key := range query {
 		lower := strings.ToLower(key)
-		for _, sensitive := range []string{"token", "secret", "password", "passwd", "auth", "authorization", "session", "key", "code"} {
-			if strings.Contains(lower, sensitive) {
-				query.Del(key)
-				break
-			}
+		sensitive := map[string]bool{"token": true, "access_token": true, "id_token": true, "secret": true, "password": true, "passwd": true, "auth": true, "authorization": true, "session": true, "sessionid": true, "session_id": true, "api_key": true, "apikey": true, "key": true, "code": true}
+		if sensitive[lower] {
+			query.Del(key)
 		}
 	}
 	result := pathname
