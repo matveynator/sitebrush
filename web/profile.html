@@ -191,7 +191,9 @@
     if (codeInput.value.length !== 6) {
       event.preventDefault();
       codeInput.focus();
+      return;
     }
+    submitButton.disabled = true;
   });
   normalizeCodeInput();
 })();

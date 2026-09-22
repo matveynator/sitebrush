@@ -6870,6 +6870,34 @@ func TestProfilePageChangesAdminEmailThroughSixDigitCode(t *testing.T) {
 	}
 }
 
+func TestProfileEmailResumeTreatsClaimedCodeAsSecondStagePending(t *testing.T) {
+	application, rawDB := newTestApplication(t)
+	if _, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "admin@gmail.com", "old"); err != nil {
+		t.Fatal(err)
+	}
+	token := "claimed-profile-code"
+	expiresAt := time.Now().UTC().Add(profilePasswordCodeTTL).Format(time.RFC3339)
+	if _, err := rawDB.Exec(`INSERT INTO email_confirmations(token,domain,action,email,password,verification_code,current_email,return_path,language_code,created_at,expires_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
+		token, "localhost", "profile_code_sending", "new@outlook.com", "", "123456", "admin@gmail.com", "/", "en", time.Now().UTC().Format(time.RFC3339), expiresAt); err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodGet, "http://localhost:8080/?profile&profile_resume="+url.QueryEscape(token), nil)
+	response := httptest.NewRecorder()
+	application.route(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%q", response.Code, response.Body.String())
+	}
+	body := response.Body.String()
+	if strings.Contains(body, "Confirmation link is invalid.") {
+		t.Fatalf("claimed first-stage token was rendered as invalid: %s", body)
+	}
+	for _, expected := range []string{"new@outlook.com", "Email delivery is still in progress", "https://outlook.live.com/mail/"} {
+		if !strings.Contains(body, expected) {
+			t.Fatalf("claimed first-stage token missing %q in %s", expected, body)
+		}
+	}
+}
+
 func TestProfileEmailConfirmationWaitsForRelayRecipientVerification(t *testing.T) {
 	t.Setenv("SITEBRUSH_SERVICE_MAIL_RELAY_URL", "https://relay.example/?service_mail_relay")
 	application, rawDB := newTestApplication(t)

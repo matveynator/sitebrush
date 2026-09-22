@@ -18105,7 +18105,22 @@ func (a *App) profilePage(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) resumeProfileEmailChange(w http.ResponseWriter, r *http.Request, token string) {
 	confirmation, found := a.emailConfirmationByToken(r.Context(), token)
-	if !found || !profileCodeActionAllowed(confirmation.Action) || confirmation.Domain != a.siteDomain(r.Context(), r) || confirmationExpired(confirmation.ExpiresAt, time.Now().UTC()) {
+	if !found || confirmation.Domain != a.siteDomain(r.Context(), r) || confirmationExpired(confirmation.ExpiresAt, time.Now().UTC()) {
+		a.renderEmailConfirmationStatus(w, r, http.StatusGone, translationOrDefault(translationsForRequest(r), "email_confirmation_status_invalid", "Confirmation link is invalid."))
+		return
+	}
+	if confirmation.Action == "profile_code_sending" && strings.TrimSpace(confirmation.Email) != "" {
+		translations := translationsForRequest(r)
+		emailChange := profileEmailChange(confirmation.CurrentEmail, confirmation.Email, 2)
+		emailChange.CurrentDeliveryStatus = translationOrDefault(translations, "profile_password_code_status_confirmed_email_pending", "Your current email is confirmed. Open the message sent to the new address to complete the change.")
+		emailChange.CurrentDeliveryClass = "success"
+		emailChange.NextDeliveryStatus = translationOrDefault(translations, "profile_password_code_status_pending", "Email delivery is still in progress. SiteBrush will continue retrying safely.")
+		emailChange.NextDeliveryClass = "warning"
+		emailChange.DeliveryStage = 2
+		a.renderProfilePage(w, r, confirmation.CurrentEmail, emailChange.NextDeliveryStatus, "warning", false, "", time.Time{}, false, profileEmailDeliveryView{}, emailChange)
+		return
+	}
+	if !profileCodeActionAllowed(confirmation.Action) {
 		a.renderEmailConfirmationStatus(w, r, http.StatusGone, translationOrDefault(translationsForRequest(r), "email_confirmation_status_invalid", "Confirmation link is invalid."))
 		return
 	}
@@ -18570,7 +18585,22 @@ func (a *App) handleProfilePasswordCode(w http.ResponseWriter, r *http.Request, 
 			return
 		}
 		claimedRows, claimErr := claimed.RowsAffected()
-		if claimErr != nil || claimedRows != 1 {
+		if claimErr != nil {
+			http.Error(w, claimErr.Error(), http.StatusInternalServerError)
+			return
+		}
+		if claimedRows != 1 {
+			latestConfirmation, stillFound := a.emailConfirmationByToken(r.Context(), token)
+			if stillFound && latestConfirmation.Action == "profile_code_sending" && latestConfirmation.Domain == domain && latestConfirmation.CurrentEmail == currentEmail {
+				emailChange = profileEmailChange(currentEmail, latestConfirmation.Email, 2)
+				emailChange.CurrentDeliveryStatus = translationOrDefault(translations, "profile_password_code_status_confirmed_email_pending", "Your current email is confirmed. Open the message sent to the new address to complete the change.")
+				emailChange.CurrentDeliveryClass = "success"
+				emailChange.NextDeliveryStatus = translationOrDefault(translations, "profile_password_code_status_pending", "Email delivery is still in progress. SiteBrush will continue retrying safely.")
+				emailChange.NextDeliveryClass = "warning"
+				emailChange.DeliveryStage = 2
+				a.renderProfilePage(w, r, currentEmail, emailChange.NextDeliveryStatus, "warning", false, "", time.Time{}, false, profileEmailDeliveryView{}, emailChange)
+				return
+			}
 			a.renderEmailConfirmationStatus(w, r, http.StatusGone, translationOrDefault(translations, "email_confirmation_status_invalid", "Confirmation link is invalid."))
 			return
 		}
