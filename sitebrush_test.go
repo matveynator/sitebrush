@@ -5732,7 +5732,7 @@ func TestRecoveryUsesBrowserLanguageForInterfaceAndQueuedEmail(t *testing.T) {
 	if response.Code != http.StatusOK {
 		t.Fatalf("request status = %d, body=%q", response.Code, response.Body.String())
 	}
-	for _, expectedFragment := range []string{"Die Wiederherstellungs-E-Mail wurde gesendet.", "6-stelliger Wiederherstellungscode", "Neues Passwort", "Neues Passwort festlegen"} {
+	for _, expectedFragment := range []string{"Die Wiederherstellungs-E-Mail wurde gesendet.", "6-stelliger Wiederherstellungscode", "Neues Passwort", "Neues Passwort festlegen", "profile-delivery-link", "profile-delivery-modal"} {
 		if !strings.Contains(response.Body.String(), expectedFragment) {
 			t.Fatalf("German recovery interface is missing %q in %s", expectedFragment, response.Body.String())
 		}
@@ -5752,6 +5752,24 @@ func TestRecoveryUsesBrowserLanguageForInterfaceAndQueuedEmail(t *testing.T) {
 		}
 	default:
 		t.Fatal("recovery email was not queued")
+	}
+}
+
+func TestRecoveryShowsKnownWebmailProvider(t *testing.T) {
+	t.Setenv("SITEBRUSH_SERVICE_MAIL_MODE", "local")
+	withEmailSPFAllowed(t)
+	application, rawDB := newTestApplication(t)
+	if _, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "admin@gmail.com", "old-password"); err != nil { t.Fatal(err) }
+	form := url.Values{"recovery_action": {"request"}, "email": {"admin@gmail.com"}, "captcha": {"1234"}}
+	request := httptest.NewRequest(http.MethodPost, "https://localhost/?recover", strings.NewReader(form.Encode()))
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	request.AddCookie(&http.Cookie{Name: "sitebrush_captcha", Value: "1234"})
+	response := httptest.NewRecorder()
+	application.route(response, request)
+	if response.Code != http.StatusOK { t.Fatalf("status = %d, body=%q", response.Code, response.Body.String()) }
+	body := response.Body.String()
+	for _, expected := range []string{"https://mail.google.com/", "Open Gmail", "profile-delivery-link", "profile-delivery-modal"} {
+		if !strings.Contains(body, expected) { t.Fatalf("recovery page missing %q in %s", expected, body) }
 	}
 }
 

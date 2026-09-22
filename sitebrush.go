@@ -18269,21 +18269,35 @@ func (a *App) recoverPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	recoveryURL := recoveryConfirmationURL(r, recoveryToken)
-	if mailError := a.enqueueServiceEmailWithActionURL(r.Context(), r, "login_code", domain, email, recoveryCode, recoveryURL, languageCode); mailError != nil {
+	dnsHelp := a.profileEmailDeliveryDNSHelp(r.Context(), translations, domain, a.emailFromAddress(domain))
+	deliveryResult := a.sendServiceEmailNow(r.Context(), r, "login_code", domain, email, recoveryCode, languageCode, recoveryURL)
+	emailDeliveryView := profileEmailDeliveryViewForResult(translations, deliveryResult, dnsHelp)
+	if deliveryResult.Err != nil {
 		_, _ = a.db.ExecContext(r.Context(), `DELETE FROM email_confirmations WHERE token=?`, recoveryToken)
-		a.renderRecoveryPage(w, r, map[string]any{"Status": translationOrDefault(translations, "recover_status_smtp_failed_prefix", "SMTP send failed: ") + mailError.Error(), "StatusClass": "danger", "ShowForm": true})
+		a.renderRecoveryPage(w, r, map[string]any{
+			"Status":        translationOrDefault(translations, "recover_status_smtp_failed_prefix", "SMTP send failed: ") + deliveryResult.Err.Error(),
+			"StatusClass":   "danger",
+			"ShowForm":      true,
+			"RecoveryEmail": email,
+			"EmailDelivery": emailDeliveryView,
+		})
 		return
 	}
-	queuedStatus := mailout.StatusSent
-	if a.durableMailTasks != nil {
-		queuedStatus = mailout.StatusPending
+	deliveryStatus := mailout.StatusSent
+	status := translationOrDefault(translations, "recover_status_sent", "The recovery email was sent.")
+	statusClass := "success"
+	if deliveryResult.Pending {
+		deliveryStatus = mailout.StatusPending
+		status = translationOrDefault(translations, "profile_password_code_status_pending", "Email delivery is still in progress. SiteBrush will continue retrying safely.")
+		statusClass = "warning"
 	}
-	a.logHostingSupportEvent(r.Context(), "code_requested", queuedStatus, email, domain, "login_code")
+	a.logHostingSupportEvent(r.Context(), "code_requested", deliveryStatus, email, domain, "login_code")
 	a.renderRecoveryPage(w, r, map[string]any{
-		"Status":                 translationOrDefault(translations, "recover_status_sent", "The recovery email was sent."),
-		"StatusClass":            "success",
+		"Status":                 status,
+		"StatusClass":            statusClass,
 		"ShowManualPasswordForm": true,
 		"RecoveryEmail":          email,
+		"EmailDelivery":          emailDeliveryView,
 	})
 }
 
@@ -18305,6 +18319,9 @@ func (a *App) renderRecoveryPage(w http.ResponseWriter, r *http.Request, view ma
 	translations := translationsForRequest(r)
 	if _, found := view["ReturnPath"]; !found {
 		view["ReturnPath"] = requestedReturnPath(r)
+	}
+	if recoveryEmail, ok := view["RecoveryEmail"].(string); ok {
+		view["RecoveryWebmailProvider"] = webmailProviderForAddress(recoveryEmail)
 	}
 	view["PasswordLabel"] = translationOrDefault(translations, "recover_new_password", "New password")
 	view["PasswordConfirmLabel"] = translationOrDefault(translations, "recover_confirm_password", "Confirm password")
