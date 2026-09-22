@@ -5757,6 +5757,12 @@ func TestRecoveryUsesBrowserLanguageForInterfaceAndQueuedEmail(t *testing.T) {
 
 func TestPasswordRecoveryTranslationsAndEmailsCoverEveryLanguage(t *testing.T) {
 	requiredRecoveryKeys := []string{
+		"profile_password_form_title",
+		"profile_password_form_hint",
+		"profile_password_code",
+		"profile_password_code_help",
+		"profile_password_code_submit",
+		"setup_confirmation_open",
 		"recover_new_password",
 		"recover_confirm_password",
 		"recover_code_label",
@@ -5785,7 +5791,8 @@ func TestPasswordRecoveryTranslationsAndEmailsCoverEveryLanguage(t *testing.T) {
 		recoveryHTML := recoveryEmailHTMLBodyForLanguage(languageCode, "example.com", "123456", "https://example.com/?recover=&recovery_token=token")
 		passwordSubject := emailSubjectForLanguage(languageCode, "profile_password", "example.com")
 		passwordBody := emailBodyForLanguage(languageCode, "profile_password", "example.com", "123456")
-		passwordHTML := emailHTMLBodyForServiceMail(languageCode, "password_change_code", "example.com", "123456")
+		passwordActionURL := "https://example.com/?profile&profile_resume=password-token"
+		passwordHTML := emailHTMLBodyForServiceMailWithActionURL(languageCode, "password_change_code", "example.com", "123456", passwordActionURL)
 		emailChangeSubject := emailSubjectForServiceMail(languageCode, "email_change", "example.com")
 		emailChangeBody := emailBodyForServiceMail(languageCode, "email_change", "example.com", "123456")
 		emailChangeHTML := emailHTMLBodyForServiceMail(languageCode, "email_change", "example.com", "123456")
@@ -5804,7 +5811,7 @@ func TestPasswordRecoveryTranslationsAndEmailsCoverEveryLanguage(t *testing.T) {
 				t.Fatalf("empty %s for %s", outputName, languageCode)
 			}
 		}
-		if !strings.Contains(recoveryBody, "123456") || !strings.Contains(passwordBody, "123456") || !strings.Contains(emailChangeBody, "123456") || !strings.Contains(recoveryHTML, `lang="`+languageCode+`"`) || !strings.Contains(passwordHTML, `lang="`+languageCode+`"`) || !strings.Contains(emailChangeHTML, `lang="`+languageCode+`"`) || strings.Contains(emailChangeHTML, "href=") || !strings.Contains(recoveryHTML, translations["recover_save_password"]) {
+		if !strings.Contains(recoveryBody, "123456") || !strings.Contains(passwordBody, "123456") || !strings.Contains(emailChangeBody, "123456") || !strings.Contains(recoveryHTML, `lang="`+languageCode+`"`) || !strings.Contains(passwordHTML, `lang="`+languageCode+`"`) || !strings.Contains(emailChangeHTML, `lang="`+languageCode+`"`) || strings.Contains(emailChangeHTML, "href=") || !strings.Contains(recoveryHTML, translations["recover_save_password"]) || !strings.Contains(passwordHTML, "profile&amp;profile_resume=password-token") || !strings.Contains(passwordHTML, translations["profile_password_code_submit"]) {
 			t.Fatalf("password email content is incomplete for %s", languageCode)
 		}
 		if languageCode != "en" && (recoverySubject == englishRecoverySubject || recoveryBody == englishRecoveryBody || passwordSubject == englishPasswordSubject || passwordBody == englishPasswordBody || emailChangeSubject == englishEmailChangeSubject || emailChangeBody == englishEmailChangeBody) {

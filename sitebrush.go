@@ -18105,7 +18105,7 @@ func (a *App) profilePage(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) resumeProfileEmailChange(w http.ResponseWriter, r *http.Request, token string) {
 	confirmation, found := a.emailConfirmationByToken(r.Context(), token)
-	if !found || confirmation.Action != "profile_code" || confirmation.Email == "" || confirmation.Domain != a.siteDomain(r.Context(), r) || confirmationExpired(confirmation.ExpiresAt, time.Now().UTC()) {
+	if !found || !profileCodeActionAllowed(confirmation.Action) || confirmation.Domain != a.siteDomain(r.Context(), r) || confirmationExpired(confirmation.ExpiresAt, time.Now().UTC()) {
 		a.renderEmailConfirmationStatus(w, r, http.StatusGone, translationOrDefault(translationsForRequest(r), "email_confirmation_status_invalid", "Confirmation link is invalid."))
 		return
 	}
@@ -18463,7 +18463,8 @@ func (a *App) createAndSendProfileCode(r *http.Request, domain, currentEmail, ne
 		return "", emailDeliveryResult{}, dnsHelp, err
 	}
 	change := emailChangeMail{Current: currentEmail, Next: nextEmail, URL: requestScheme(r) + "://" + r.Host + "/?profile&profile_resume=" + url.QueryEscape(token)}
-	deliveryResult := a.sendServiceEmailNow(r.Context(), r, codeKind, domain, currentEmail, code, languageCode, change)
+	actionURL := requestScheme(r) + "://" + r.Host + "/?profile&profile_resume=" + url.QueryEscape(token)
+	deliveryResult := a.sendServiceEmailNow(r.Context(), r, codeKind, domain, currentEmail, code, languageCode, actionURL, change)
 	if deliveryResult.Err != nil {
 		_, _ = a.db.ExecContext(r.Context(), `DELETE FROM email_confirmations WHERE token=?`, token)
 		return "", deliveryResult, dnsHelp, deliveryResult.Err
@@ -18497,7 +18498,7 @@ func (a *App) createAndSendProfileEmailConfirmation(r *http.Request, domain, cur
 	}
 	change := emailChangeMail{Current: currentEmail, Next: email, URL: confirmationURL}
 	dnsHelp := a.profileEmailDeliveryDNSHelp(r.Context(), translations, domain, a.emailFromAddress(domain))
-	deliveryResult := a.sendServiceEmailNow(r.Context(), r, "email_change_confirm", domain, email, confirmationURL, languageCode, change)
+	deliveryResult := a.sendServiceEmailNow(r.Context(), r, "email_change_confirm", domain, email, confirmationURL, languageCode, confirmationURL, change)
 	if deliveryResult.Err != nil {
 		_, _ = a.db.ExecContext(r.Context(), `DELETE FROM email_confirmations WHERE token=?`, token)
 		return deliveryResult, dnsHelp, deliveryResult.Err
@@ -18922,14 +18923,14 @@ func (a *App) enqueueServiceEmailContent(ctx context.Context, r *http.Request, c
 	return nil
 }
 
-func (a *App) sendServiceEmailNow(ctx context.Context, r *http.Request, codeKind, domain, recipient, secretValue, languageCode string, changes ...emailChangeMail) emailDeliveryResult {
+func (a *App) sendServiceEmailNow(ctx context.Context, r *http.Request, codeKind, domain, recipient, secretValue, languageCode, actionURL string, changes ...emailChangeMail) emailDeliveryResult {
 	message := mailout.Message{
 		Kind:     strings.TrimSpace(codeKind),
 		From:     a.emailFromAddress(domain),
 		To:       recipient,
 		Subject:  emailSubjectForServiceMail(languageCode, codeKind, domain),
-		Body:     emailBodyForServiceMail(languageCode, codeKind, domain, secretValue),
-		HTMLBody: emailHTMLBodyForServiceMail(languageCode, codeKind, domain, secretValue),
+		Body:     emailBodyForServiceMailWithActionURL(languageCode, codeKind, domain, secretValue, actionURL),
+		HTMLBody: emailHTMLBodyForServiceMailWithActionURL(languageCode, codeKind, domain, secretValue, actionURL),
 	}
 	var change *emailChangeMail
 	if len(changes) > 0 && changes[0].Next != "" && (codeKind == "email_change" || codeKind == "email_change_confirm") {
@@ -18955,7 +18956,8 @@ func (a *App) sendServiceEmailNow(ctx context.Context, r *http.Request, codeKind
 		LanguageCode: strings.TrimSpace(languageCode),
 		CreatedAt:    time.Now().UTC().Format(time.RFC3339),
 	}
-	if change != nil {
+	request.ActionURL = strings.TrimSpace(actionURL)
+	if request.ActionURL == "" && change != nil {
 		request.ActionURL = change.URL
 	}
 	relayURL, err := a.sendServiceMailThroughRelayChain(sendCtx, route, &request)
@@ -22955,10 +22957,17 @@ func emailHTMLBodyForServiceMail(languageCode, codeKind, domain, secret string) 
 }
 
 func emailBodyForServiceMailWithActionURL(languageCode, codeKind, domain, secret, actionURL string) string {
-	if serviceMailKindAction(codeKind) == "recover" && strings.TrimSpace(actionURL) != "" {
+	action := serviceMailKindAction(codeKind)
+	if action == "recover" && strings.TrimSpace(actionURL) != "" {
 		return recoveryEmailBodyWithLinkForLanguage(languageCode, domain, secret, actionURL)
 	}
-	return emailBodyForLanguage(languageCode, serviceMailKindAction(codeKind), domain, secret)
+	body := emailBodyForLanguage(languageCode, action, domain, secret)
+	if action == "profile_password" && strings.TrimSpace(actionURL) != "" {
+		translations := translationsForLanguageCode(languageCode)
+		buttonLabel := translationOrDefault(translations, "profile_password_code_submit", "Confirm change")
+		body += "\n\n" + buttonLabel + ":\n" + strings.TrimSpace(actionURL)
+	}
+	return body
 }
 
 func emailHTMLBodyForServiceMailWithActionURL(languageCode, codeKind, domain, secret, actionURL string) string {
@@ -22967,7 +22976,7 @@ func emailHTMLBodyForServiceMailWithActionURL(languageCode, codeKind, domain, se
 		return recoveryEmailHTMLBodyForLanguage(languageCode, domain, secret, actionURL)
 	}
 	if action == "profile_password" || action == "profile_email" {
-		return serviceCodeEmailHTMLForLanguage(languageCode, codeKind, domain, secret)
+		return serviceCodeEmailHTMLForLanguage(languageCode, codeKind, domain, secret, actionURL)
 	}
 	if action != "profile" {
 		return ""
@@ -22988,17 +22997,24 @@ func emailHTMLBodyForServiceMailWithActionURL(languageCode, codeKind, domain, se
 	return `<!doctype html><html lang="` + template.HTMLEscapeString(languageCode) + `" dir="` + direction + `"><body style="margin:0;background:#f4f7f8;color:#172126;font-family:Arial,sans-serif"><div style="max-width:640px;margin:0 auto;padding:32px 16px"><div style="background:#fff;border:1px solid #d9e2e5;border-radius:14px;padding:28px"><div style="font-size:22px;font-weight:700;color:#087f8c">SiteBrush</div><h1 style="font-size:25px;line-height:1.25;margin:24px 0 12px">` + subject + `</h1><p style="font-size:16px;line-height:1.6;margin:0 0 24px">` + introduction + `</p><p style="margin:0 0 24px"><a href="` + confirmationURL + `" style="display:inline-block;background:#087f8c;color:#fff;text-decoration:none;font-weight:700;padding:13px 20px;border-radius:9px">` + buttonLabel + `</a></p><p style="color:#607078;font-size:14px;line-height:1.5;margin:0">` + ignoreText + `</p></div></div></body></html>`
 }
 
-func serviceCodeEmailHTMLForLanguage(languageCode, codeKind, domain, secret string) string {
+func serviceCodeEmailHTMLForLanguage(languageCode, codeKind, domain, secret, actionURL string) string {
 	direction := "ltr"
 	if languageCode == "he" || languageCode == "fa" {
 		direction = "rtl"
 	}
-	subject := template.HTMLEscapeString(emailSubjectForServiceMail(languageCode, codeKind, domain))
-	body := template.HTMLEscapeString(emailBodyForServiceMail(languageCode, codeKind, domain, secret))
+	translations := translationsForLanguageCode(languageCode)
+	escape := template.HTMLEscapeString
+	subject := escape(emailSubjectForServiceMail(languageCode, codeKind, domain))
+	body := escape(emailBodyForLanguage(languageCode, serviceMailKindAction(codeKind), domain, secret))
 	if isSixDigitCode(secret) {
-		body = strings.Replace(body, secret, `<strong dir="ltr" style="display:block;font-size:32px;font-weight:800;color:#172126;letter-spacing:4px;margin:16px 0">`+secret+`</strong>`, 1)
+		body = strings.Replace(body, escape(secret), `<strong dir="ltr" style="display:block;font-size:36px;line-height:1.4;font-weight:800;letter-spacing:4px;color:#172126;margin:20px 0 24px">`+escape(secret)+`</strong>`, 1)
 	}
-	return `<!doctype html><html lang="` + template.HTMLEscapeString(languageCode) + `" dir="` + direction + `"><body style="margin:0;background:#f4f7f8;color:#172126;font-family:Arial,sans-serif"><div style="max-width:640px;margin:0 auto;padding:32px 16px"><div style="background:#fff;border:1px solid #d9e2e5;border-radius:14px;padding:28px"><div style="font-size:22px;font-weight:700;color:#087f8c">SiteBrush</div><h1 style="font-size:25px;line-height:1.25;margin:24px 0 12px">` + subject + `</h1><p style="font-size:16px;line-height:1.6;white-space:pre-line;margin:0">` + body + `</p></div></div></body></html>`
+	actionHTML := ""
+	if serviceMailKindAction(codeKind) == "profile_password" && strings.TrimSpace(actionURL) != "" {
+		buttonLabel := escape(translationOrDefault(translations, "profile_password_code_submit", "Confirm change"))
+		actionHTML = `<p style="margin:24px 0"><a href="` + escape(strings.TrimSpace(actionURL)) + `" style="display:inline-block;background:#087f8c;color:#fff;text-decoration:none;font-weight:700;padding:13px 20px;border-radius:9px">` + buttonLabel + `</a></p>`
+	}
+	return `<!doctype html><html lang="` + escape(languageCode) + `" dir="` + direction + `"><body style="margin:0;background:#f4f7f8;font-family:Arial,sans-serif;color:#607078"><div style="max-width:600px;margin:0 auto;padding:28px 16px"><div style="background:#fff;border:1px solid #d9e2e5;border-radius:14px;padding:28px"><p style="margin:0;color:#087f8c;font-size:20px;font-weight:700">SiteBrush · ` + escape(domain) + `</p><h1 style="font-size:23px;color:#172126;line-height:1.3;margin:24px 0 12px">` + subject + `</h1><p style="font-size:16px;line-height:1.6;white-space:pre-line;margin:0;color:#607078">` + body + `</p>` + actionHTML + `</div></div></body></html>`
 }
 
 func recoveryEmailBodyWithLinkForLanguage(languageCode, domain, code, actionURL string) string {

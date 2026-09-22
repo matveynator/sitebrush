@@ -102,13 +102,18 @@
   {{if .ShowPasswordCodeForm}}
   <form class="profile-form profile-code-form" method="post" action="{{.ProfileCodeAction}}">
     <input type="hidden" name="password_confirmation_token" value="{{.PasswordConfirmationToken}}">
+    <div class="profile-form-header">
+      <h2>{{.PasswordFormTitle}}</h2>
+      <p>{{.PasswordCodeHelp}}</p>
+    </div>
     <label>
       {{.PasswordCodeLabel}}
       <input class="profile-code-input" type="text" name="password_confirmation_code" inputmode="numeric" pattern="[0-9]{6}" autocomplete="one-time-code" maxlength="6" required>
     </label>
-    <p class="hint">{{.PasswordCodeHelp}}</p>
-    {{if .PasswordWebmailProvider.URL}}<p><a class="btn btn-primary" href="{{.PasswordWebmailProvider.URL}}" target="_blank" rel="noopener noreferrer">{{index .T "setup_confirmation_open"}} {{.PasswordWebmailProvider.Name}}</a></p>{{end}}
-    <div><button class="profile-code-submit" type="submit" disabled>{{.PasswordCodeSubmit}}</button></div>
+    <div class="profile-form-actions">
+      {{if .PasswordWebmailProvider.URL}}<a class="btn btn-outline-primary" href="{{.PasswordWebmailProvider.URL}}" target="_blank" rel="noopener noreferrer">{{index .T "setup_confirmation_open"}} {{.PasswordWebmailProvider.Name}}</a>{{end}}
+      <button class="profile-code-submit" type="submit" disabled>{{.PasswordCodeSubmit}}</button>
+    </div>
   </form>
   {{else if .ShowPasswordForm}}
   <div class="profile-form-grid">
