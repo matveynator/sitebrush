@@ -704,6 +704,18 @@
     line-height: 1.45;
 }
 
+.technical-page .profile-form-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    align-items: center;
+}
+
+.technical-page .profile-form-actions .btn,
+.technical-page .profile-form-actions button {
+    white-space: normal;
+}
+
 .technical-page .profile-code-input {
     font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
     font-size: 22px;
