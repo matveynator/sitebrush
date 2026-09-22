@@ -118,7 +118,7 @@ const sitebrushHTTPWriteTimeout = 0
 const sitebrushHTTPIdleTimeout = 65 * time.Second
 const sitebrushHTTPReadHeaderTimeout = 5 * time.Second
 const sitebrushHTTP10KeepAliveBufferLimit = 1024 * 1024
-const currentSiteDatabaseSchemaVersion = 1
+const currentSiteDatabaseSchemaVersion = 2
 const siteDatabaseStartupMigrationTimeout = 30 * time.Second
 const pagePasswordSessionTTL = time.Hour
 const serviceMailRelayPath = "/?service_mail_relay"
@@ -154,6 +154,8 @@ var sitebrushRuServiceMailRelayPublicKey = ""
 // App keeps only explicit dependencies to stay readable and easy to swap.
 type App struct {
 	analyticsStorage               browserstats.Repository
+	securityAnalytics              chan siteAnalyticsEvent
+	securityLosses                 chan string
 	analyticsShutdownRequested     <-chan struct{}
 	analyticsFlushInterval         time.Duration
 	analyticsFinished              chan struct{}
@@ -2149,6 +2151,7 @@ func routerCloseNoop(noopDatabase *sql.DB) error {
 }
 
 type siteAnalyticsEvent struct {
+	Bytes          int64
 	Forwarded      string
 	ForwardedFor   string
 	Domain         string
@@ -2650,7 +2653,8 @@ type authIPFailure struct {
 
 type statusCapturingResponseWriter struct {
 	http.ResponseWriter
-	statusCode int
+	statusCode   int
+	bytesWritten int64
 }
 
 func (writer *statusCapturingResponseWriter) WriteHeader(statusCode int) {
@@ -2669,11 +2673,21 @@ func (writer *statusCapturingResponseWriter) Hijack() (net.Conn, *bufio.ReadWrit
 func (writer *statusCapturingResponseWriter) Unwrap() http.ResponseWriter {
 	return writer.ResponseWriter
 }
+func (writer *statusCapturingResponseWriter) Write(body []byte) (int, error) {
+	count, err := writer.ResponseWriter.Write(body)
+	writer.bytesWritten += int64(count)
+	return count, err
+}
 func (writer *statusCapturingResponseWriter) ReadFrom(reader io.Reader) (int64, error) {
+	var count int64
+	var err error
 	if delegate, ok := writer.ResponseWriter.(io.ReaderFrom); ok {
-		return delegate.ReadFrom(reader)
+		count, err = delegate.ReadFrom(reader)
+	} else {
+		count, err = io.Copy(writer.ResponseWriter, reader)
 	}
-	return io.Copy(writer.ResponseWriter, reader)
+	writer.bytesWritten += count
+	return count, err
 }
 
 func (writer *statusCapturingResponseWriter) Flush() {
@@ -3222,13 +3236,26 @@ func formatTLSHandshakeNoiseSummary(group tlsHandshakeNoiseGroup, intervalLabel 
 }
 
 func (a *App) analyticsMiddleware(next http.Handler) http.Handler {
-	if a.analyticsEvents == nil {
+	if a.analyticsEvents == nil && a.securityAnalytics == nil {
 		return next
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		startedAt := time.Now()
 		writer := &statusCapturingResponseWriter{ResponseWriter: w, statusCode: http.StatusOK}
 		next.ServeHTTP(writer, r)
+		if a.securityAnalytics != nil && len(a.securityAnalytics) >= cap(a.securityAnalytics) {
+			select {
+			case a.securityLosses <- a.analyticsEventDomain(r, ""):
+			default:
+			}
+		}
+		if a.securityAnalytics != nil && r.URL.Path != "/_sitebrush/analytics" && len(a.securityAnalytics) < cap(a.securityAnalytics) {
+			securityEvent := siteAnalyticsEvent{Bytes: writer.bytesWritten, Domain: a.analyticsEventDomain(r, ""), Path: analyticsBoundedString(r.URL.EscapedPath(), 512), Query: analyticsBoundedString(r.URL.RawQuery, 2048), Method: r.Method, StatusCode: writer.statusCode, OccurredAt: startedAt.UTC(), RemoteAddress: analyticsBoundedString(r.RemoteAddr, 64), Forwarded: analyticsBoundedString(r.Header.Get("Forwarded"), 256), ForwardedFor: analyticsBoundedString(r.Header.Get("X-Forwarded-For"), 256), UserAgent: analyticsBoundedString(r.UserAgent(), 256), AcceptLanguage: analyticsBoundedString(r.Header.Get("Accept-Language"), 64)}
+			select {
+			case a.securityAnalytics <- securityEvent:
+			default:
+			}
+		}
 		if len(a.analyticsEvents) >= cap(a.analyticsEvents) {
 			if r.URL.Path != "/_sitebrush/analytics" {
 				a.markAnalyticsLoss(a.analyticsEventDomain(r, ""))
@@ -3384,11 +3411,15 @@ func (a *App) startAnalyticsWorkers(ctx context.Context) {
 	}
 	store := browserstats.OpenStore(filepath.Join(a.storageRootDir(), "analytics"))
 	a.analyticsStorage = store
+	a.securityAnalytics = make(chan siteAnalyticsEvent, 1024)
+	a.securityLosses = make(chan string, 64)
 	a.analyticsShutdownRequested = ctx.Done()
 	a.analyticsFinished = make(chan struct{})
 	go func() {
 		defer close(a.analyticsFinished)
 		defer store.Close()
+		securityFinished := make(chan struct{})
+		go func() { defer close(securityFinished); a.runSecurityAnalytics(ctx.Done()) }()
 		browserFinished := make(chan struct{})
 		go func() {
 			defer close(browserFinished)
@@ -3398,6 +3429,7 @@ func (a *App) startAnalyticsWorkers(ctx context.Context) {
 		}()
 		a.runAnalyticsEventWriter(ctx)
 		<-browserFinished
+		<-securityFinished
 	}()
 }
 
@@ -3666,7 +3698,25 @@ func (a *App) browserAnalyticsSocket(w http.ResponseWriter, r *http.Request) {
 			if json.Unmarshal([]byte(payload), &event) != nil || !browserstats.Valid(event) {
 				return
 			}
+			event.Attribution = browserstats.SourceAttribution(event.Campaign, event.Referrer, r.Host)
+			if event.Tab != "" {
+				event.Path = browserstats.SafePath(event.Path)
+				event.Browser = analyticsBrowserName(r.UserAgent())
+				event.OS = analyticsOSName(r.UserAgent())
+				event.ClientClass = browserstats.ClientClass(r.UserAgent())
+				if event.ClientClass == "unknown" {
+					event.ClientClass = "human-likely"
+				}
+				event.Address = clientIPAddress(r)
+				for index := range event.Actions {
+					event.Actions[index].Target = browserstats.SafeTarget(event.Actions[index].Target)
+					event.Actions[index].Name = browserstats.CleanText(event.Actions[index].Name, 64)
+				}
+			}
 			event.Source = browserAnalyticsSource(event.Source, event.Referrer, r.Host)
+			if event.Tab != "" {
+				event.Source = event.Attribution.Name
+			}
 			event.Referrer = ""
 			select {
 			case a.browserAnalytics <- browserAnalyticsEnvelope{domain, event, now}:
@@ -3725,11 +3775,18 @@ func (a *App) browserAnalyticsStorage(jobs <-chan browserAnalyticsStorageJob, re
 				} else if err == nil {
 					err = json.Unmarshal([]byte(loaded.Text), job.state)
 				}
+				if goals, goalErr := a.readAnalyticsGoals(job.domain); goalErr == nil {
+					job.state.Goals = goals
+				}
 				job.state.Prune(time.Now().UTC())
 				if err == nil && job.state.Used > job.limit {
 					err = errors.New("restored browser history exceeds memory budget")
 				}
 			} else {
+				if goals, goalErr := a.readAnalyticsGoals(job.domain); goalErr == nil {
+					job.state.Goals = goals
+				}
+				a.enrichBrowserSessions(job.state, stop)
 				job.state.Prune(time.Now().UTC())
 				snapshot, marshalErr := json.Marshal(job.state)
 				reports := map[string]browserstats.Report{}
@@ -4025,6 +4082,16 @@ func (a *App) runBrowserAnalytics(stopRequested <-chan struct{}) {
 				continue
 			}
 			allScheduled := true
+			for _, slot := range slots {
+				if slot.state != nil && !slot.busy {
+					for _, session := range slot.state.Experience.Recent {
+						if !session.Complete && now.Sub(session.Last) > 30*time.Minute {
+							slot.dirty = true
+							break
+						}
+					}
+				}
+			}
 			for domain, slot := range slots {
 				if slot.busy || slot.saving || !slot.dirty || slot.state == nil {
 					continue
@@ -4043,6 +4110,279 @@ func (a *App) runBrowserAnalytics(stopRequested <-chan struct{}) {
 	}
 }
 
+// Security owns a separate queue and checkpoint; editor transactions never wait
+// for observations, enrichment, or incident persistence.
+func (a *App) runSecurityAnalytics(stop <-chan struct{}) {
+	states := map[string]*browserstats.SecurityState{}
+	dirty := map[string]bool{}
+	lost := map[string]bool{}
+	resolutions := map[string]analyticsDomainResolution{}
+	interval := a.analyticsFlushInterval
+	if interval <= 0 {
+		interval = time.Minute
+	}
+	ticker := time.NewTicker(interval)
+	maintenanceLists := make(chan []string, 1)
+	go a.browserAnalyticsMaintenanceDomains(stop, maintenanceLists)
+	var maintenance []string
+	pruned := map[string]string{}
+	defer ticker.Stop()
+	save := func(domain string, cancellation <-chan struct{}) bool {
+		state := states[domain]
+		state.Prune(time.Now().UTC())
+		a.enrichSecurityIncidents(state, cancellation)
+		encoded, err := json.Marshal(state)
+		for err == nil && len(encoded) > 2<<20 && len(state.Incidents) > 0 {
+			state.Incidents = state.Incidents[1:]
+			state.Incomplete = true
+			encoded, err = json.Marshal(state)
+		}
+		if err != nil {
+			return false
+		}
+		result := a.analyticsStorageExchange(browserstats.StorageRequest{Operation: browserstats.SaveSecurity, Domain: domain, State: string(encoded), Stop: cancellation})
+		if result.Err != nil {
+			return false
+		}
+		dirty[domain] = false
+		return true
+	}
+	load := func(domain string) *browserstats.SecurityState {
+		state := states[domain]
+		if state == nil {
+			if len(states) >= 8 {
+				for candidate := range states {
+					if !dirty[candidate] {
+						delete(states, candidate)
+						delete(dirty, candidate)
+						delete(pruned, candidate)
+						break
+					}
+				}
+				if len(states) >= 8 {
+					return nil
+				}
+			}
+			loaded := a.analyticsStorageExchange(browserstats.StorageRequest{Operation: browserstats.ReadSecurity, Domain: domain, Limit: 2 << 20, Stop: stop})
+			state = &browserstats.SecurityState{}
+			if loaded.Err != nil && !errors.Is(loaded.Err, sql.ErrNoRows) {
+				return nil
+			}
+			if loaded.Err == nil && json.Unmarshal([]byte(loaded.Text), state) != nil {
+				return nil
+			}
+			state.Incomplete = state.Incomplete || lost[domain]
+			delete(lost, domain)
+			states[domain] = state
+		}
+		return state
+	}
+
+	for {
+		select {
+		case <-stop:
+			grace := make(chan struct{})
+			timer := time.AfterFunc(10*time.Second, func() { close(grace) })
+			defer timer.Stop()
+			for domain := range states {
+				if dirty[domain] {
+					if len(a.securityAnalytics) > 0 {
+						states[domain].Incomplete = true
+					}
+					save(domain, grace)
+				}
+			}
+			return
+		case domains := <-maintenanceLists:
+			maintenance = domains
+		case domain := <-a.securityLosses:
+			domain = a.resolveAnalyticsDomain(domain, resolutions)
+			if state := states[domain]; state != nil {
+				state.Incomplete = true
+				dirty[domain] = true
+			} else if len(lost) < 64 {
+				lost[domain] = true
+			}
+		case event := <-a.securityAnalytics:
+			domain := a.resolveAnalyticsDomain(event.Domain, resolutions)
+			if domain == "" {
+				continue
+			}
+			state := load(domain)
+			if state == nil {
+				continue
+			}
+			address := clientIPAddress(&http.Request{RemoteAddr: event.RemoteAddress, Header: http.Header{"Forwarded": []string{event.Forwarded}, "X-Forwarded-For": []string{event.ForwardedFor}}})
+			state.Record(browserstats.RequestObservation{Time: event.OccurredAt, IP: address, Path: event.Path, Query: event.Query, Method: event.Method, Status: event.StatusCode, Bytes: event.Bytes, Agent: event.UserAgent, Language: analyticsLanguageLabel(event.AcceptLanguage)})
+			state.Limit(1 << 20)
+			dirty[domain] = true
+		case <-ticker.C:
+			if len(a.securityAnalytics) > cap(a.securityAnalytics)/4 {
+				continue
+			}
+			if len(maintenance) > 0 {
+				domain := maintenance[0]
+				maintenance = maintenance[1:]
+				if state := load(domain); state != nil {
+					state.Prune(time.Now().UTC())
+					dirty[domain] = true
+				}
+			}
+			today := time.Now().UTC().Format("2006-01-02")
+			for domain, state := range states {
+				if pruned[domain] != today {
+					state.Prune(time.Now().UTC())
+					dirty[domain] = true
+					pruned[domain] = today
+				}
+			}
+			for domain := range states {
+				if dirty[domain] {
+					save(domain, stop)
+					break
+				}
+			}
+		}
+	}
+}
+
+func (a *App) enrichBrowserSessions(state *browserstats.Site, stop <-chan struct{}) {
+	if a.geoIP == nil {
+		return
+	}
+	remaining := 16
+	for _, session := range state.Experience.Recent {
+		if remaining == 0 {
+			return
+		}
+		select {
+		case <-stop:
+			return
+		default:
+		}
+		if session.GeoKnown || session.Address == "" {
+			continue
+		}
+		boundary, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
+		location, found := a.geoIP.Lookup(boundary, session.Address)
+		cancel()
+		remaining--
+		session.Address = ""
+		if found {
+			session.GeoKnown = true
+			session.Country = location.CountryCode
+			session.City = location.City
+			session.Latitude = location.Latitude
+			session.Longitude = location.Longitude
+		}
+	}
+}
+
+func (a *App) loadAnalyticsGoals(domain string) []browserstats.Goal {
+	goals, _ := a.readAnalyticsGoals(domain)
+	return goals
+}
+func (a *App) readAnalyticsGoals(domain string) ([]browserstats.Goal, error) {
+	if a.db == nil {
+		return nil, nil
+	}
+	if a.siteDatabaseRouter == nil {
+		if _, ok := a.db.(*sql.DB); !ok {
+			return nil, nil
+		}
+	}
+	boundary, cancel := context.WithTimeout(contextWithDomain(context.Background(), domain), 250*time.Millisecond)
+	defer cancel()
+	rows, err := a.db.QueryContext(boundary, `SELECT goals FROM analytics_configuration WHERE domain=?`, domain)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var encoded string
+	if !rows.Next() {
+		return nil, rows.Err()
+	}
+	if err = rows.Scan(&encoded); err != nil {
+		return nil, err
+	}
+	var goals []browserstats.Goal
+	if err = json.Unmarshal([]byte(encoded), &goals); err != nil {
+		return nil, err
+	}
+	return goals, browserstats.ValidateGoals(goals)
+}
+
+func (a *App) saveAnalyticsGoals(w http.ResponseWriter, r *http.Request, domain string) bool {
+	origin, err := url.Parse(r.Header.Get("Origin"))
+	if err != nil || origin.Host != r.Host || origin.Scheme != requestScheme(r) {
+		http.Error(w, "invalid origin", http.StatusForbidden)
+		return false
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 16384)
+	if r.ParseForm() != nil {
+		http.Error(w, "invalid goals", http.StatusBadRequest)
+		return false
+	}
+	var goals []browserstats.Goal
+	for _, line := range strings.Split(r.Form.Get("goals"), "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		parts := strings.SplitN(line, "|", 3)
+		if len(parts) != 3 {
+			http.Error(w, "name | action/path | exact match", http.StatusBadRequest)
+			return false
+		}
+		goals = append(goals, browserstats.Goal{Name: strings.TrimSpace(parts[0]), Kind: strings.TrimSpace(parts[1]), Match: strings.TrimSpace(parts[2])})
+	}
+	if browserstats.ValidateGoals(goals) != nil {
+		http.Error(w, "invalid goals", http.StatusBadRequest)
+		return false
+	}
+	encoded, _ := json.Marshal(goals)
+	var exists int
+	err = a.db.QueryRowContext(r.Context(), `SELECT COUNT(*) FROM analytics_configuration WHERE domain=?`, domain).Scan(&exists)
+	if err == nil {
+		if exists == 0 {
+			_, err = a.db.ExecContext(r.Context(), `INSERT INTO analytics_configuration(domain,goals) VALUES(?,?)`, domain, string(encoded))
+		} else {
+			_, err = a.db.ExecContext(r.Context(), `UPDATE analytics_configuration SET goals=? WHERE domain=?`, string(encoded), domain)
+		}
+	}
+	if err != nil {
+		http.Error(w, "cannot save goals", http.StatusInternalServerError)
+		return false
+	}
+	http.Redirect(w, r, r.URL.Path+"?analytics", http.StatusSeeOther)
+	return true
+}
+
+func (a *App) enrichSecurityIncidents(state *browserstats.SecurityState, stop <-chan struct{}) {
+	if a.geoIP == nil {
+		return
+	}
+	remaining := 16
+	for index := len(state.Incidents) - 1; index >= 0 && remaining > 0; index-- {
+		select {
+		case <-stop:
+			return
+		default:
+		}
+		incident := &state.Incidents[index]
+		if incident.Country != "" || incident.IP == "" {
+			continue
+		}
+		boundary, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
+		location, found := a.geoIP.Lookup(boundary, incident.IP)
+		cancel()
+		remaining--
+		if found {
+			incident.Country = location.CountryCode
+			incident.City = location.City
+		}
+	}
+}
+
 type browserAnalyticsDashboard struct {
 	Report          browserstats.Report
 	Available       bool
@@ -4056,7 +4396,7 @@ type browserAnalyticsDashboard struct {
 func (a *App) browserAnalyticsView(r *http.Request, domain string) browserAnalyticsDashboard {
 	days, _ := strconv.Atoi(r.URL.Query().Get("days"))
 	if days != 1 && days != 7 && days != 30 && days != 90 {
-		days = 7
+		days = 1
 	}
 	dashboard := browserAnalyticsDashboard{Days: days}
 	result := a.analyticsStorageExchange(browserstats.StorageRequest{Operation: browserstats.ReadBrowserReport, Domain: domain, Stop: r.Context().Done()})
@@ -5269,10 +5609,10 @@ func analyticsOSName(userAgent string) string {
 	switch {
 	case strings.Contains(loweredAgent, "windows"):
 		return "Windows"
-	case strings.Contains(loweredAgent, "mac os") || strings.Contains(loweredAgent, "macintosh"):
-		return "macOS"
 	case strings.Contains(loweredAgent, "iphone") || strings.Contains(loweredAgent, "ipad") || strings.Contains(loweredAgent, "ios"):
 		return "iOS"
+	case strings.Contains(loweredAgent, "mac os") || strings.Contains(loweredAgent, "macintosh"):
+		return "macOS"
 	case strings.Contains(loweredAgent, "android"):
 		return "Android"
 	case strings.Contains(loweredAgent, "linux"):
@@ -5565,6 +5905,52 @@ func (a *App) analyticsPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	domain := a.siteDomain(r.Context(), r)
+	if r.Method == http.MethodPost {
+		a.saveAnalyticsGoals(w, r, domain)
+		return
+	}
+	browserDashboard := a.browserAnalyticsView(r, domain)
+	filter := browserstats.ExperienceFilter{Campaign: r.URL.Query().Get("campaign"), Source: r.URL.Query().Get("source"), Page: r.URL.Query().Get("page"), Language: r.URL.Query().Get("language"), Traffic: r.URL.Query().Get("traffic")}
+	if filter.Traffic != "all" && filter.Traffic != "bots" {
+		filter.Traffic = "human"
+	}
+	experience := browserDashboard.Report.Experience.View(filter)
+	goals := a.loadAnalyticsGoals(domain)
+	experience.GoalsConfigured = len(goals) > 0
+	if !experience.GoalsConfigured {
+		visibleInsights := experience.Insights[:0]
+		for _, insight := range experience.Insights {
+			if insight.Kind != "source-goal" && insight.Kind != "language-goal" {
+				visibleInsights = append(visibleInsights, insight)
+			}
+		}
+		experience.Insights = visibleInsights
+	}
+	goalLines := []string{}
+	for _, goal := range goals {
+		goalLines = append(goalLines, goal.Name+" | "+goal.Kind+" | "+goal.Match)
+	}
+	security := browserstats.SecurityReport{}
+	loadedSecurity := a.analyticsStorageExchange(browserstats.StorageRequest{Operation: browserstats.ReadSecurity, Domain: domain, Limit: 2 << 20, Stop: r.Context().Done()})
+	if loadedSecurity.Err == nil {
+		state := browserstats.SecurityState{}
+		if json.Unmarshal([]byte(loadedSecurity.Text), &state) == nil {
+			security = state.Report(time.Now().UTC(), browserDashboard.Days)
+		}
+	}
+	unknownGeo := 0
+	for _, session := range experience.Recent {
+		if !session.GeoKnown {
+			unknownGeo++
+		}
+	}
+	serverRequests := 0
+	for _, group := range security.Groups {
+		if filter.Traffic == "all" || (filter.Traffic == "bots" && group.Class != "unknown") {
+			serverRequests += group.Count
+		}
+	}
+	mapJSON, _ := json.Marshal(experience.Recent)
 	report, found := a.loadAnalyticsReport(r.Context(), domain)
 	if !found {
 		report = analyticsPreparedReport{GeneratedAt: time.Now().UTC().Format(time.RFC3339)}
@@ -5572,7 +5958,8 @@ func (a *App) analyticsPage(w http.ResponseWriter, r *http.Request) {
 	a.render(w, r, "analytics.html", map[string]any{
 		"ReturnPath":       requestedReturnPath(r),
 		"Report":           analyticsReportView(report, translationsForRequest(r)),
-		"BrowserAnalytics": a.browserAnalyticsView(r, domain),
+		"BrowserAnalytics": browserDashboard,
+		"Experience":       experience, "ExperienceFilter": filter, "Security": security, "GoalsText": strings.Join(goalLines, "\n"), "SessionMapJSON": template.JS(mapJSON), "PeriodOptions": []int{1, 7, 30, 90}, "UnknownGeo": unknownGeo, "ServerRequests": serverRequests,
 	})
 }
 
@@ -7272,6 +7659,7 @@ func (a *App) migrate(ctx context.Context) error {
 		`CREATE TABLE IF NOT EXISTS auth_ip_failures(domain TEXT,client_ip TEXT,failure_count INTEGER DEFAULT 0,blocked_until TEXT,hard_locked INTEGER DEFAULT 0,last_failed_at TEXT,last_attempt_at TEXT,PRIMARY KEY(domain,client_ip));`,
 		`CREATE TABLE IF NOT EXISTS revisions(id INTEGER PRIMARY KEY AUTOINCREMENT,domain TEXT,page_path TEXT,html TEXT,created_at TEXT,is_active INTEGER DEFAULT 1);`,
 		`CREATE TABLE IF NOT EXISTS domain_aliases(primary_domain TEXT,alias_domain TEXT UNIQUE,verification_token TEXT,is_verified INTEGER DEFAULT 0,dns_a_ok INTEGER DEFAULT 0,is_selected INTEGER DEFAULT 0,last_checked_at TEXT);`,
+		`CREATE TABLE IF NOT EXISTS analytics_configuration(domain TEXT PRIMARY KEY,goals TEXT NOT NULL);`,
 		`CREATE TABLE IF NOT EXISTS domain_states(domain TEXT PRIMARY KEY,is_frozen INTEGER DEFAULT 0);`,
 		`CREATE TABLE IF NOT EXISTS domain_ssl_settings(domain TEXT PRIMARY KEY,auto_ssl_enabled INTEGER DEFAULT 0,manually_disabled INTEGER DEFAULT 0,last_checked_at TEXT,last_failed_at TEXT,last_failure_reason TEXT,retry_after TEXT,certificate_expires_at TEXT,last_acme_attempt_at TEXT,last_acme_success_at TEXT,certificate_last_validated_at TEXT);`,
 		`CREATE TABLE IF NOT EXISTS page_password_rules(domain TEXT,path TEXT,password_hash TEXT,created_at TEXT,updated_at TEXT,PRIMARY KEY(domain,path));`,
@@ -7343,6 +7731,7 @@ type siteDatabaseColumnRequirement struct {
 
 func requiredSiteDatabaseColumns() []siteDatabaseColumnRequirement {
 	return []siteDatabaseColumnRequirement{
+		{tableName: "analytics_configuration", columnName: "goals", definition: "TEXT NOT NULL DEFAULT '[]'"},
 		{tableName: "users", columnName: "domain", definition: "TEXT"},
 		{tableName: "pages", columnName: "domain", definition: "TEXT"},
 		{tableName: "revisions", columnName: "domain", definition: "TEXT"},
