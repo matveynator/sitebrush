@@ -14104,7 +14104,7 @@ func TestBrowserAnalyticsDashboardRendersSavedHistory(t *testing.T) {
 
 func TestAnalyticsStaticInjectionAndDomainIsolation(t *testing.T) {
 	body := buildGuestStaticHTMLBody([]byte("<html><body>published</body></html>"), "/", "example.org", "en")
-	if strings.Count(string(body), `src="/p/static/analytics.js"`) != 1 {
+	if strings.Count(string(body), `src="/p/static/analytics.js?v=`) != 1 {
 		t.Fatal("static HTML must include one deferred analytics script")
 	}
 	if _, err := embeddedWebFiles.ReadFile("web/static/analytics.js"); err != nil {
