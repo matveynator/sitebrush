@@ -51,6 +51,7 @@ type View struct {
 	ActiveMS        int64
 	Scroll          int
 	Path            string
+	URI             string
 	Session         int
 	Seen            time.Time
 	PreviousScroll  int
@@ -325,7 +326,8 @@ func (site *Site) Record(event Event, now time.Time, limit int64) bool {
 				hasNewActions = true
 			}
 		}
-		if event.ActiveMS <= priorView.ActiveMS && event.Scroll <= priorView.Scroll && !hasNewActions {
+		locationChanged := event.URI != "" && event.URI != priorView.URI
+		if event.ActiveMS <= priorView.ActiveMS && event.Scroll <= priorView.Scroll && !hasNewActions && !locationChanged {
 			return false
 		}
 	} else {
@@ -452,7 +454,7 @@ func (site *Site) Record(event Event, now time.Time, limit int64) bool {
 			visitor.Trail = nil
 			visitor.TrailStart = now
 		}
-		priorView = &View{Started: now, PreviousScroll: page.Scroll, PreviousSession: page.LastSession, Sequence: event.Sequence, Path: event.Path, Session: visitor.Session, Seen: now}
+		priorView = &View{Started: now, PreviousScroll: page.Scroll, PreviousSession: page.LastSession, Sequence: event.Sequence, Path: event.Path, URI: event.URI, Session: visitor.Session, Seen: now}
 		visitor.Views[event.View] = priorView
 		site.Used += 768
 	}
@@ -493,6 +495,7 @@ func (site *Site) Record(event Event, now time.Time, limit int64) bool {
 	if event.Scroll > priorView.Scroll {
 		priorView.Scroll = event.Scroll
 	}
+	priorView.URI = event.URI
 	priorView.Seen = now
 	visitor.Last = now
 	site.LastEvent = now
@@ -645,7 +648,7 @@ func Valid(event Event) bool {
 			}
 		}
 	}
-	if len(event.Tab) > 64 || len(event.Session) > 64 || len(event.Actions) > 16 || len(event.Language) > 32 || len(event.PageLanguage) > 32 || len(event.Timezone) > 64 {
+	if len(event.Tab) > 64 || len(event.Session) > 64 || len(event.Actions) > 16 || len(event.Language) > 32 || len(event.PageLanguage) > 32 || len(event.Timezone) > 64 || len(event.URI) > 512 {
 		return false
 	}
 	for _, action := range event.Actions {

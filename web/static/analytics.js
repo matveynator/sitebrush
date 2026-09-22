@@ -6,7 +6,7 @@
     const storageKey = 'sitebrush.analytics.browser.v1';
     const lifetime = 90 * 86400000;
     const model = {
-        tab: '', session: '', actions: [], sentActions: '', visitor: '', persistent: false, view: '', sequence: 0,
+        tab: '', session: '', actions: [], sentActions: '', sentURI: '', visitor: '', persistent: false, view: '', sequence: 0,
         activeMilliseconds: 0, maximumScroll: 0, lastSample: 0,
         lastInteraction: 0, lastScrollSample: 0, connection: null,
         pendingTimer: null, deliveryAfter: 0, lastSent: 0, sentActive: 0, sentScroll: 0, firstSent: false, stopped: false, retryCount: 0
@@ -63,6 +63,21 @@
         }
     }
 
+    function currentURI() {
+        const parameters = new URLSearchParams(location.search);
+        const sensitive = new Set(['token', 'access_token', 'id_token', 'secret', 'password', 'passwd', 'auth', 'authorization', 'session', 'sessionid', 'session_id', 'api_key', 'apikey', 'key', 'code', 'gclid', 'yclid', 'fbclid']);
+        for (const key of Array.from(parameters.keys())) {
+            const lower = key.toLowerCase();
+            if (sensitive.has(lower) || lower.startsWith('utm_')) parameters.delete(key);
+        }
+        parameters.sort();
+        const query = parameters.toString();
+        const fragment = /^#[A-Za-z0-9._~-]{1,64}$/.test(location.hash || '') ? location.hash : '';
+        const pathname = boundedText(location.pathname || '/', 256) || '/';
+        const result = pathname + (query ? '?' + query : '') + fragment;
+        return new TextEncoder().encode(result).length <= 256 ? result : pathname;
+    }
+
     function cleanTarget(address) {
         try {
             const destination = new URL(address, location.href);
@@ -82,10 +97,10 @@
     }
 
     function clicked(clickEvent) {
-        const element = clickEvent.target.closest ? clickEvent.target.closest('[data-analytics-action],a[href]') : null;
+        const element = clickEvent.target.closest ? clickEvent.target.closest('[sitebrush-data-analytics-action],[data-analytics-action],a[href]') : null;
         if (!element) return;
         const address = element.getAttribute('href') || location.pathname;
-        let actionName = element.getAttribute('data-analytics-action');
+        let actionName = element.getAttribute('sitebrush-data-analytics-action') || element.getAttribute('data-analytics-action');
         if (!actionName) {
             if (element.hasAttribute('download')) actionName = 'download';
             else {
@@ -143,7 +158,7 @@
 
     function retainPendingAction() {
         if (!model.actions.length) return;
-        try { sessionStorage.setItem('sitebrush.analytics.pending', JSON.stringify({expires: Date.now() + 1800000, visitor: model.visitor, view: model.view, sequence: model.sequence + 1, path: location.pathname.slice(0, 512), tab: model.tab, session: model.session, persistent: model.persistent, actions: model.actions, active_ms: Math.floor(model.activeMilliseconds), scroll: model.maximumScroll, language: (navigator.language || '').slice(0,32), page_language: document.documentElement.lang.slice(0,32), source: sourceDescription(), referrer: referrerHost(), campaign: campaignFields()})); }
+        try { sessionStorage.setItem('sitebrush.analytics.pending', JSON.stringify({expires: Date.now() + 1800000, visitor: model.visitor, view: model.view, sequence: model.sequence + 1, path: location.pathname.slice(0, 512), uri: currentURI(), tab: model.tab, session: model.session, persistent: model.persistent, actions: model.actions, active_ms: Math.floor(model.activeMilliseconds), scroll: model.maximumScroll, language: (navigator.language || '').slice(0,32), page_language: document.documentElement.lang.slice(0,32), source: sourceDescription(), referrer: referrerHost(), campaign: campaignFields()})); }
         catch (pendingError) { console.debug('SiteBrush analytics: pending action unavailable', pendingError.name); }
     }
 
@@ -168,7 +183,8 @@
         updateScroll();
         const currentTime = performance.now();
         if (currentTime < model.deliveryAfter) { if (force) retainPendingAction(); return; }
-        if (model.firstSent && Math.floor(model.activeMilliseconds) === model.sentActive && model.maximumScroll === model.sentScroll && JSON.stringify(model.actions) === model.sentActions) return;
+        const uri = currentURI();
+        if (model.firstSent && Math.floor(model.activeMilliseconds) === model.sentActive && model.maximumScroll === model.sentScroll && JSON.stringify(model.actions) === model.sentActions && uri === model.sentURI) return;
         if (model.stopped || !model.connection || model.connection.readyState !== WebSocket.OPEN) { if (force) retainPendingAction(); return; }
         if (model.firstSent && currentTime - model.lastSent < (force ? 1100 : 30000)) {
             if (force && !model.pendingTimer) model.pendingTimer = window.setTimeout(function sendPendingAction() { model.pendingTimer = null; sendObservation(true); }, 1150 - (currentTime - model.lastSent));
@@ -188,7 +204,7 @@
             timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || '', offset: new Date().getTimezoneOffset(),
             campaign: campaignFields(),
             view: model.view, sequence: model.sequence,
-            path: location.pathname.slice(0, 512),
+            path: location.pathname.slice(0, 512), uri: uri,
             referrer: referrerHost(), source: sourceDescription(),
             active_ms: Math.floor(model.activeMilliseconds), scroll: model.maximumScroll
         };
@@ -203,6 +219,7 @@
             model.sentActive = observation.active_ms;
             model.sentScroll = observation.scroll;
             model.sentActions = JSON.stringify(model.actions);
+            model.sentURI = observation.uri;
             try { sessionStorage.removeItem('sitebrush.analytics.pending'); } catch (pendingError) { console.debug('SiteBrush analytics: pending cleanup unavailable', pendingError.name); }
             model.lastSent = currentTime;
         } catch (connectionError) {
@@ -228,7 +245,7 @@
 
     function startView() {
         restoreSession();
-        model.actions = []; model.sentActions = "";
+        model.actions = []; model.sentActions = ""; model.sentURI = "";
         model.view = createIdentity();
         model.sequence = 0;
         model.activeMilliseconds = 0;
@@ -250,6 +267,9 @@
         document.addEventListener('click', clicked, {capture: true, passive: true});
         for (const eventName of ['pointerdown', 'keydown', 'scroll']) {
             window.addEventListener(eventName, recordInteraction, { passive: true });
+        }
+        for (const eventName of ['hashchange', 'popstate']) {
+            window.addEventListener(eventName, function locationChanged() { recordInteraction(); sendObservation(true); }, { passive: true });
         }
         document.addEventListener('visibilitychange', function visibilityChanged() {
             if (document.visibilityState === 'hidden') {

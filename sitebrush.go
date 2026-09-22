@@ -3698,6 +3698,12 @@ func (a *App) browserAnalyticsSocket(w http.ResponseWriter, r *http.Request) {
 			if json.Unmarshal([]byte(payload), &event) != nil || !browserstats.Valid(event) {
 				return
 			}
+			if event.URI != "" {
+				event.URI = browserstats.SafeURI(event.URI)
+				if event.URI == "" {
+					return
+				}
+			}
 			event.Attribution = browserstats.SourceAttribution(event.Campaign, event.Referrer, r.Host)
 			if event.Tab != "" {
 				event.Path = browserstats.SafePath(event.Path)
@@ -4330,10 +4336,23 @@ func (a *App) saveAnalyticsGoals(w http.ResponseWriter, r *http.Request, domain 
 		}
 		parts := strings.SplitN(line, "|", 3)
 		if len(parts) != 3 {
-			http.Error(w, "name | action/path | exact match", http.StatusBadRequest)
+			http.Error(w, "name | action/uri | exact match", http.StatusBadRequest)
 			return false
 		}
-		goals = append(goals, browserstats.Goal{Name: strings.TrimSpace(parts[0]), Kind: strings.TrimSpace(parts[1]), Match: strings.TrimSpace(parts[2])})
+		name := strings.TrimSpace(parts[0])
+		kind := strings.ToLower(strings.TrimSpace(parts[1]))
+		match := strings.TrimSpace(parts[2])
+		if kind == "path" {
+			kind = "uri"
+		}
+		if kind == "uri" {
+			match = browserstats.SafeURI(match)
+			if match == "" {
+				http.Error(w, "invalid goals", http.StatusBadRequest)
+				return false
+			}
+		}
+		goals = append(goals, browserstats.Goal{Name: name, Kind: kind, Match: match})
 	}
 	if browserstats.ValidateGoals(goals) != nil {
 		http.Error(w, "invalid goals", http.StatusBadRequest)
@@ -5928,7 +5947,11 @@ func (a *App) analyticsPage(w http.ResponseWriter, r *http.Request) {
 	}
 	goalLines := []string{}
 	for _, goal := range goals {
-		goalLines = append(goalLines, goal.Name+" | "+goal.Kind+" | "+goal.Match)
+		kind := goal.Kind
+		if kind == "path" {
+			kind = "uri"
+		}
+		goalLines = append(goalLines, goal.Name+" | "+kind+" | "+goal.Match)
 	}
 	security := browserstats.SecurityReport{}
 	loadedSecurity := a.analyticsStorageExchange(browserstats.StorageRequest{Operation: browserstats.ReadSecurity, Domain: domain, Limit: 2 << 20, Stop: r.Context().Done()})

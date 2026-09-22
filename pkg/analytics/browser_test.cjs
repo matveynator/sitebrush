@@ -7,7 +7,7 @@ function storage() {
     const contents = new Map();
     return {getItem: key => contents.get(key) || null, setItem: (key, text) => contents.set(key, String(text)), removeItem: key => contents.delete(key)};
 }
-function browser(localStorage, sessionStorage, pathname) {
+function browser(localStorage, sessionStorage, pathname, search = '?utm_source=habr&utm_campaign=launch&token=private', hash = '') {
     let clock = 2000;
     let identity = 0;
     const timers = [];
@@ -30,10 +30,11 @@ function browser(localStorage, sessionStorage, pathname) {
         innerHeight: 600, scrollY: 0
     };
     const document = {readyState: 'complete', visibilityState: 'visible', referrer: 'https://habr.com/article?token=do-not-store', documentElement: {lang: 'ru', scrollHeight: 1200}, body: {scrollHeight: 1200}, addEventListener: (name, callback) => { documents[name] = callback; }};
-    const environment = {window, document, localStorage, sessionStorage, navigator: {language: 'ru-RU'}, location: {href: 'https://site.example' + pathname, pathname, search: '?utm_source=habr&utm_campaign=launch&token=private', origin: 'https://site.example', host: 'site.example', protocol: 'https:'}, URL, URLSearchParams, performance: {now: () => clock}, crypto: window.crypto, WebSocket: Socket, Uint8Array, TextEncoder, Intl, Date, console};
+    const location = {href: 'https://site.example' + pathname + search + hash, pathname, search, hash, origin: 'https://site.example', host: 'site.example', protocol: 'https:'};
+    const environment = {window, document, localStorage, sessionStorage, navigator: {language: 'ru-RU'}, location, URL, URLSearchParams, performance: {now: () => clock}, crypto: window.crypto, WebSocket: Socket, Uint8Array, TextEncoder, Intl, Date, console};
     vm.runInNewContext(source, environment);
     timers.shift().callback();
-    return {window, document, sockets, documents, windows, timers, advance: milliseconds => {clock += milliseconds;}};
+    return {window, document, location, sockets, documents, windows, timers, advance: milliseconds => {clock += milliseconds;}};
 }
 const local = storage(), session = storage();
 const first = browser(local, session, '/');
@@ -41,6 +42,7 @@ first.sockets[0].open();
 assert.equal(first.sockets[0].sent.length, 1);
 assert.equal(first.sockets[0].sent[0].campaign.Source, 'habr');
 assert.equal(first.sockets[0].sent[0].referrer, 'https://habr.com/article');
+assert.equal(first.sockets[0].sent[0].uri, '/');
 first.advance(100);
 first.window.SiteBrushAnalytics.action('download', '/download?secret=hidden');
 assert.ok(session.getItem('sitebrush.analytics.pending'));
@@ -62,4 +64,29 @@ second.advance(2000);
 second.window.SiteBrushAnalytics.action('copy-command', '/');
 assert.equal(second.sockets[0].sent.at(-1).actions.at(-1).name, 'copy-command');
 assert.equal(second.document.visibilityState, 'visible');
-console.log('browser analytics: bounded messages, source cleaning, action delivery and navigation replay passed');
+
+const uriSession = storage();
+const fragment = browser(storage(), uriSession, '/', '?mode=download&token=private&utm_source=test', '#download');
+fragment.sockets[0].open();
+assert.equal(fragment.sockets[0].sent[0].uri, '/?mode=download#download');
+fragment.advance(1200);
+const namespacedAction = {
+    closest() { return this; },
+    getAttribute(name) { return name === 'sitebrush-data-analytics-action' ? 'download' : name === 'href' ? '/package.zip' : null; },
+    hasAttribute() { return false; }
+};
+fragment.documents.click({target: namespacedAction});
+assert.equal(fragment.sockets[0].sent.at(-1).actions.at(-1).name, 'download');
+fragment.advance(1200);
+fragment.location.hash = '#other';
+fragment.windows.hashchange();
+assert.equal(fragment.sockets[0].sent.at(-1).uri, '/?mode=download#other');
+fragment.advance(1200);
+const legacyAction = {
+    closest() { return this; },
+    getAttribute(name) { return name === 'data-analytics-action' ? 'legacy-action' : name === 'href' ? '/' : null; },
+    hasAttribute() { return false; }
+};
+fragment.documents.click({target: legacyAction});
+assert.equal(fragment.sockets[0].sent.at(-1).actions.at(-1).name, 'legacy-action');
+console.log('browser analytics: bounded messages, URI cleaning, namespaced actions and compatibility passed');
