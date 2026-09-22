@@ -3348,11 +3348,17 @@ func (a *App) resolveAnalyticsDomain(domain string, resolutions map[string]analy
 	boundary, cancel := context.WithTimeout(contextWithDomain(context.Background(), domain), 250*time.Millisecond)
 	defer cancel()
 	var primary string
-	err := a.siteDatabaseRouter.QueryRowContext(boundary, `SELECT primary_domain FROM domain_aliases WHERE alias_domain=? AND is_verified=1 AND dns_a_ok=1`, domain).Scan(&primary)
+	rows, err := a.siteDatabaseRouter.QueryContext(boundary, `SELECT primary_domain FROM domain_aliases WHERE alias_domain=? AND is_verified=1 AND dns_a_ok=1`, domain)
+	if err == nil {
+		if rows.Next() {
+			err = rows.Scan(&primary)
+		}
+		err = errors.Join(err, rows.Err(), rows.Close())
+	}
 	resolved := analyticsDomainResolution{domain: domain, expires: now.Add(time.Minute)}
 	if err == nil && strings.TrimSpace(primary) != "" {
 		resolved.domain = primary
-	} else if err != nil && !errors.Is(err, sql.ErrNoRows) {
+	} else if err != nil {
 		// Do not create an alias checkpoint on a transient lookup failure.
 		resolved.domain = ""
 		resolved.expires = now.Add(time.Second)

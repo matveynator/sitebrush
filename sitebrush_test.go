@@ -14418,3 +14418,68 @@ func TestAnalyticsVerifiedAliasSharesPrimaryReports(t *testing.T) {
 		t.Fatalf("alias created separate storage: %v", err)
 	}
 }
+
+func TestAnalyticsAliasResolutionPreservesRouterFailure(t *testing.T) {
+	directory := t.TempDir()
+	raw, err := sql.Open("sqlite", filepath.Join(directory, "primary.example.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+	if _, err := raw.Exec(`CREATE TABLE domain_aliases(primary_domain TEXT,alias_domain TEXT UNIQUE,is_verified INTEGER,dns_a_ok INTEGER); INSERT INTO domain_aliases VALUES('primary.example','alias.example',1,1); CREATE TABLE users(is_admin INTEGER); INSERT INTO users VALUES(1)`); err != nil {
+		t.Fatal(err)
+	}
+	entered, release := make(chan struct{}, 1), make(chan struct{})
+	router := newPerSiteDBRouter(directory, "localhost", func(context.Context, *sql.DB, string) error {
+		select {
+		case entered <- struct{}{}:
+		default:
+		}
+		<-release
+		return nil
+	}, false)
+	defer func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+		waitSiteDBRouterStartup(t, router)
+		_ = router.Close()
+	}()
+	select {
+	case <-entered:
+	case <-time.After(3 * time.Second):
+		t.Fatal("migration did not start")
+	}
+	app := &App{siteDatabaseRouter: router}
+	resolutions := make(map[string]analyticsDomainResolution)
+	if domain := app.resolveAnalyticsDomain("alias.example", resolutions); domain != "" {
+		t.Fatalf("routing failure resolved to %q", domain)
+	}
+	failed := resolutions["alias.example"]
+	if failed.domain != "" || time.Until(failed.expires) > time.Second {
+		t.Fatalf("routing failure cached as success: %+v", failed)
+	}
+	close(release)
+	waitSiteDBRouterStartup(t, router)
+	failed.expires = time.Now().Add(-time.Second)
+	resolutions["alias.example"] = failed
+	if domain := app.resolveAnalyticsDomain("alias.example", resolutions); domain != "primary.example" {
+		t.Fatalf("recovered alias resolved to %q", domain)
+	}
+	delete(resolutions, "primary.example")
+	if domain := app.resolveAnalyticsDomain("primary.example", resolutions); domain != "primary.example" {
+		t.Fatalf("non-alias resolved to %q", domain)
+	}
+	if _, err := raw.Exec(`DROP TABLE domain_aliases`); err != nil {
+		t.Fatal(err)
+	}
+	delete(resolutions, "primary.example")
+	if domain := app.resolveAnalyticsDomain("primary.example", resolutions); domain != "" {
+		t.Fatalf("SQL failure resolved to %q", domain)
+	}
+	if cached := resolutions["primary.example"]; cached.domain != "" || time.Until(cached.expires) > time.Second {
+		t.Fatalf("SQL failure cached as success: %+v", cached)
+	}
+}
