@@ -25,6 +25,8 @@ const (
 	ReadTechnicalReport
 	SaveBrowser
 	SaveTechnical
+	ReadSecurity
+	SaveSecurity
 )
 
 type StorageRequest struct {
@@ -190,9 +192,11 @@ func (store *Store) execute(root string, request StorageRequest, archivedHour ma
 		kind = "browser-report"
 	case ReadTechnicalReport:
 		kind = "technical-report"
+	case ReadSecurity:
+		kind = "security-summary"
 	}
 	switch request.Operation {
-	case LoadHistory, ReadBrowserReport, ReadTechnicalReport:
+	case LoadHistory, ReadBrowserReport, ReadTechnicalReport, ReadSecurity:
 		var size int64
 		if err := database.QueryRowContext(boundary, `SELECT LENGTH(body) FROM checkpoints WHERE kind=?`, kind).Scan(&size); err != nil {
 			return StorageResult{Err: err}
@@ -207,13 +211,18 @@ func (store *Store) execute(root string, request StorageRequest, archivedHour ma
 		var body string
 		err := database.QueryRowContext(boundary, `SELECT body FROM checkpoints WHERE kind=?`, kind).Scan(&body)
 		return StorageResult{Text: body, Err: err}
+	case SaveSecurity:
+		if len(request.State) > 2<<20 {
+			return StorageResult{Err: errors.New("security summary exceeds storage budget")}
+		}
+		return StorageResult{Err: writeCheckpoint(boundary, database, "security-summary", request.State)}
 	case SaveTechnical:
-		if len(request.Report) > 4<<20 {
+		if len(request.Report) > 2<<20 {
 			return StorageResult{Err: errors.New("analytics report exceeds storage budget")}
 		}
 		return StorageResult{Err: writeCheckpoint(boundary, database, "technical-report", request.Report)}
 	case SaveBrowser:
-		if len(request.State) > 8<<20 || len(request.Report) > 4<<20 {
+		if len(request.State) > 6<<20 || len(request.Report) > 3<<20 {
 			return StorageResult{Err: errors.New("analytics snapshot exceeds storage budget")}
 		}
 		transaction, err := database.BeginTx(boundary, nil)
@@ -278,6 +287,7 @@ func writeDailyArchive(directory, encoded string, now time.Time) error {
 		return err
 	}
 	for date, report := range summaries {
+		report.Experience.Recent = nil
 		parsed, err := time.Parse("2006-01-02", date)
 		if err != nil || date != parsed.Format("2006-01-02") || parsed.After(now) || parsed.Before(dayStart(now).AddDate(0, 0, -archiveLimitDays+1)) {
 			continue

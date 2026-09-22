@@ -14,15 +14,17 @@ const MaximumPages = 64
 
 // Event carries cumulative engagement so retransmission cannot inflate totals.
 type Event struct {
-	Visitor    string `json:"visitor"`
-	View       string `json:"view"`
-	Sequence   int    `json:"sequence"`
-	Path       string `json:"path"`
-	Referrer   string `json:"referrer"`
-	Source     string `json:"source"`
-	ActiveMS   int64  `json:"active_ms"`
-	Scroll     int    `json:"scroll"`
-	Persistent bool   `json:"persistent"`
+	BrowserContext
+	Attribution Attribution `json:"-"`
+	Visitor     string      `json:"visitor"`
+	View        string      `json:"view"`
+	Sequence    int         `json:"sequence"`
+	Path        string      `json:"path"`
+	Referrer    string      `json:"referrer"`
+	Source      string      `json:"source"`
+	ActiveMS    int64       `json:"active_ms"`
+	Scroll      int         `json:"scroll"`
+	Persistent  bool        `json:"persistent"`
 }
 
 type Observation struct {
@@ -42,6 +44,9 @@ type Page struct {
 }
 
 type View struct {
+	Started         time.Time
+	Actions         map[string]int
+	Acted, Next     bool
 	Sequence        int
 	ActiveMS        int64
 	Scroll          int
@@ -90,6 +95,8 @@ type Day struct {
 }
 
 type Site struct {
+	Goals           []Goal
+	Experience      Experience
 	ProcessingLagMS int64
 	QueuePercent    int
 	Started         time.Time
@@ -111,6 +118,7 @@ type Retention struct {
 	Returned int
 }
 type Report struct {
+	Experience          ExperienceReport
 	ProcessingLagMS     int64
 	QueuePercent        int
 	EstimatedBytes      int64
@@ -159,7 +167,8 @@ func dayStart(now time.Time) time.Time {
 // Recount also discards stale state before a restored snapshot is admitted.
 func (site *Site) Prune(now time.Time) {
 	cutoff := dayKey(dayStart(now.UTC()).AddDate(0, 0, -RetentionDays+1))
-	site.Used = 1024
+	site.pruneExperience(now)
+	site.Used = 1024 + site.experienceBytes()
 	if site.Visitors == nil {
 		site.Visitors = make(map[string]*Visitor)
 	}
@@ -208,8 +217,21 @@ func (site *Site) Prune(now time.Time) {
 				delete(visitor.Views, identity)
 			}
 		}
-		site.Used += 4096 + int64(len(visitor.Pages))*768 + int64(len(visitor.Views))*768 + int64(len(visitor.Days))*128
+		for _, view := range visitor.Views {
+			site.Used += viewBytes(view)
+		}
+		site.Used += 4096 + int64(len(visitor.Pages))*768 + int64(len(visitor.Days))*128
 	}
+}
+
+func viewBytes(view *View) int64 {
+	total := int64(768)
+	if view != nil {
+		for key := range view.Actions {
+			total += int64(len(key) + 96)
+		}
+	}
+	return total
 }
 
 func dayBytes(day *Day) int64 {
@@ -239,6 +261,10 @@ func (site *Site) Record(event Event, now time.Time, limit int64) bool {
 		site.Prune(now)
 	}
 	if site.Used+16384 > limit {
+		for len(site.Experience.Recent) > 0 && site.Used+16384 > limit {
+			site.evictExperience()
+			site.Prune(now)
+		}
 		// Preserve aggregate traffic while rotating bounded visitor detail. A full
 		// history must not disable all collection until the retention window ends.
 		oldestID := ""
@@ -282,6 +308,7 @@ func (site *Site) Record(event Event, now time.Time, limit int64) bool {
 		site.Used += 128
 	}
 	priorView := visitor.Views[event.View]
+	fresh := priorView == nil
 	if priorView != nil {
 		if event.Sequence <= priorView.Sequence || event.Path != priorView.Path {
 			return false
@@ -292,7 +319,13 @@ func (site *Site) Record(event Event, now time.Time, limit int64) bool {
 			return false
 		}
 		priorView.Sequence = event.Sequence
-		if event.ActiveMS <= priorView.ActiveMS && event.Scroll <= priorView.Scroll {
+		hasNewActions := false
+		for _, action := range event.Actions {
+			if action.Count > priorView.Actions[action.Name+"\x1f"+action.Target] {
+				hasNewActions = true
+			}
+		}
+		if event.ActiveMS <= priorView.ActiveMS && event.Scroll <= priorView.Scroll && !hasNewActions {
 			return false
 		}
 	} else {
@@ -309,8 +342,8 @@ func (site *Site) Record(event Event, now time.Time, limit int64) bool {
 					oldestTime = view.Seen
 				}
 			}
+			site.Used -= viewBytes(visitor.Views[oldestID])
 			delete(visitor.Views, oldestID)
-			site.Used -= 768
 			visitor.Limited = true
 			site.HistoryLimited = true
 		}
@@ -362,7 +395,7 @@ func (site *Site) Record(event Event, now time.Time, limit int64) bool {
 				sessionDay.SingleSessions--
 			}
 		}
-		if visitor.SessionViews > 1 {
+		if visitor.SessionViews > 1 && event.Tab == "" {
 			increment(daily.Transitions, visitor.LastPath+" → "+event.Path)
 			if sessionDay := site.Days[visitor.LastPathDay]; sessionDay != nil && sessionDay.Exits[visitor.LastPath] > 0 {
 				sessionDay.Exits[visitor.LastPath]--
@@ -407,7 +440,9 @@ func (site *Site) Record(event Event, now time.Time, limit int64) bool {
 			increment(daily.Insights, "Anchor page: "+event.Path)
 		}
 		page.LastSeen = now
-		visitor.Trail = append(visitor.Trail, event.Path)
+		if event.Tab == "" {
+			visitor.Trail = append(visitor.Trail, event.Path)
+		}
 		if len(visitor.Trail) > 4 {
 			visitor.Trail = visitor.Trail[1:]
 			visitor.TrailStart = now
@@ -417,7 +452,7 @@ func (site *Site) Record(event Event, now time.Time, limit int64) bool {
 			visitor.Trail = nil
 			visitor.TrailStart = now
 		}
-		priorView = &View{PreviousScroll: page.Scroll, PreviousSession: page.LastSession, Sequence: event.Sequence, Path: event.Path, Session: visitor.Session, Seen: now}
+		priorView = &View{Started: now, PreviousScroll: page.Scroll, PreviousSession: page.LastSession, Sequence: event.Sequence, Path: event.Path, Session: visitor.Session, Seen: now}
 		visitor.Views[event.View] = priorView
 		site.Used += 768
 	}
@@ -432,6 +467,10 @@ func (site *Site) Record(event Event, now time.Time, limit int64) bool {
 	if delta > 31000 {
 		delta = 31000
 	}
+	viewBefore := viewBytes(priorView)
+	experienceBefore := site.experienceBytes()
+	site.recordExperience(event, now, visitor, priorView, fresh, delta, priorView.Scroll)
+	site.Used += site.experienceBytes() - experienceBefore + viewBytes(priorView) - viewBefore
 	daily.ActiveMS += delta
 	observation.ActiveMS += delta
 	priorView.ActiveMS = event.ActiveMS
@@ -581,6 +620,7 @@ func (site *Site) Report(now time.Time, days int) Report {
 		}
 		report.Retention = append(report.Retention, retention)
 	}
+	report.Experience = site.ExperienceReport(now, days, true)
 	report.Pages = rows(pages)
 	report.Sources = rows(sources)
 	report.FirstSources = rows(firstSources)
@@ -603,6 +643,19 @@ func Valid(event Event) bool {
 			if !strings.ContainsRune("0123456789abcdef-", character) {
 				return false
 			}
+		}
+	}
+	if len(event.Tab) > 64 || len(event.Session) > 64 || len(event.Actions) > 16 || len(event.Language) > 32 || len(event.PageLanguage) > 32 || len(event.Timezone) > 64 {
+		return false
+	}
+	for _, action := range event.Actions {
+		if action.Name == "" || len(action.Name) > 64 || len(action.Target) > 256 || action.Count < 0 || action.Count > 10000 {
+			return false
+		}
+	}
+	for _, field := range []string{event.Campaign.Source, event.Campaign.Medium, event.Campaign.Name, event.Campaign.Content, event.Campaign.Term} {
+		if len(field) > 64 {
+			return false
 		}
 	}
 	return strings.HasPrefix(event.Path, "/") && len(event.Path) <= 512 && !strings.ContainsAny(event.Path, "?#\r\n") && len(event.Source) <= 128 && len(event.Referrer) <= 256

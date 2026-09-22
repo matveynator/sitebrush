@@ -13857,10 +13857,15 @@ func BenchmarkAnalyticsStatic(b *testing.B) {
 					}
 					if mode != "disabled" {
 						app.analyticsEvents = make(chan siteAnalyticsEvent, 1024)
+						if mode != "buffered" {
+							app.securityAnalytics = make(chan siteAnalyticsEvent, 1024)
+							app.securityLosses = make(chan string, 64)
+						}
 					}
 					if mode == "saturated" {
 						for index := 0; index < cap(app.analyticsEvents); index++ {
 							app.analyticsEvents <- siteAnalyticsEvent{}
+							app.securityAnalytics <- siteAnalyticsEvent{}
 						}
 					}
 					finished := make(chan struct{})
@@ -13876,7 +13881,13 @@ func BenchmarkAnalyticsStatic(b *testing.B) {
 							}
 						}()
 					} else if mode == "worker" || mode == "stalled" {
-						go func() { defer close(finished); app.runAnalyticsEventWriter(stop) }()
+						go func() {
+							defer close(finished)
+							securityDone := make(chan struct{})
+							go func() { defer close(securityDone); app.runSecurityAnalytics(stop.Done()) }()
+							app.runAnalyticsEventWriter(stop)
+							<-securityDone
+						}()
 					} else {
 						close(finished)
 					}
@@ -14081,7 +14092,7 @@ func TestBrowserAnalyticsDashboardRendersSavedHistory(t *testing.T) {
 	request.AddCookie(newAdminSessionCookie(t, app, "admin@example.com"))
 	response := httptest.NewRecorder()
 	app.analyticsPage(response, request)
-	for _, fragment := range []string{"Обзор браузерных посещений", "Неполные наблюдения", "42", "browser-returns"} {
+	for _, fragment := range []string{"Что происходило с сайтом?", "Часть наблюдений", "browser-returns", "Техническое → Сервер"} {
 		if !strings.Contains(response.Body.String(), fragment) {
 			t.Fatalf("dashboard missing %q", fragment)
 		}
@@ -14264,6 +14275,11 @@ func (repository testAnalyticsRepository) Exchange(request browserstats.StorageR
 		var body string
 		err := repository.database.QueryRowContext(ctx, "SELECT "+column+" FROM "+table+" WHERE domain=?", request.Domain).Scan(&body)
 		return browserstats.StorageResult{Text: body, Err: err}
+	case browserstats.ReadSecurity:
+		return browserstats.StorageResult{Err: sql.ErrNoRows}
+	case browserstats.SaveSecurity:
+		_, err := repository.database.ExecContext(ctx, `INSERT INTO analytics_reports(domain,report_json) VALUES(?,?)`, request.Domain, request.State)
+		return browserstats.StorageResult{Err: err}
 	case browserstats.SaveTechnical:
 		_, err := repository.database.ExecContext(ctx, `INSERT INTO analytics_reports(domain,report_json) VALUES(?,?) ON CONFLICT(domain) DO UPDATE SET report_json=excluded.report_json`, request.Domain, request.Report)
 		return browserstats.StorageResult{Err: err}
@@ -14481,5 +14497,83 @@ func TestAnalyticsAliasResolutionPreservesRouterFailure(t *testing.T) {
 	}
 	if cached := resolutions["primary.example"]; cached.domain != "" || time.Until(cached.expires) > time.Second {
 		t.Fatalf("SQL failure cached as success: %+v", cached)
+	}
+}
+
+func TestAnalyticsGoalsRemainInSiteDatabase(t *testing.T) {
+	app, database := newTestApplication(t)
+	form := url.Values{"goals": {"Download | action | download\nDocs | path | /docs/"}}
+	request := httptest.NewRequest("POST", "http://localhost/?analytics", strings.NewReader(form.Encode()))
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	request.Header.Set("Origin", "http://localhost")
+	response := httptest.NewRecorder()
+	if !app.saveAnalyticsGoals(response, request, "localhost") || response.Code != http.StatusSeeOther {
+		t.Fatalf("save goals: %d %s", response.Code, response.Body.String())
+	}
+	goals, err := app.readAnalyticsGoals("localhost")
+	if err != nil || len(goals) != 2 || goals[0].Match != "download" {
+		t.Fatalf("goals %+v %v", goals, err)
+	}
+	var count int
+	if err := database.QueryRow(`SELECT COUNT(*) FROM analytics_configuration WHERE domain=?`, "localhost").Scan(&count); err != nil || count != 1 {
+		t.Fatal("configuration not in editing database", err)
+	}
+	foreign := httptest.NewRequest("POST", "http://localhost/?analytics", strings.NewReader(form.Encode()))
+	foreign.Header.Set("Origin", "https://attacker.example")
+	if app.saveAnalyticsGoals(httptest.NewRecorder(), foreign, "localhost") {
+		t.Fatal("cross-origin configuration accepted")
+	}
+}
+
+func TestAnalyticsSecurityObservesControllerAndPersistsSummary(t *testing.T) {
+	app, _ := newTestApplication(t)
+	app.securityAnalytics = make(chan siteAnalyticsEvent, 8)
+	app.securityLosses = make(chan string, 8)
+	app.analyticsFlushInterval = 10 * time.Millisecond
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() { defer close(done); app.runSecurityAnalytics(stop) }()
+	defer func() { close(stop); <-done }()
+	handler := app.analyticsMiddleware(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(401); _, _ = w.Write([]byte("denied")) }))
+	request := httptest.NewRequest("POST", "http://localhost/.env?login&password=never-store", nil)
+	request.RemoteAddr = "192.0.2.8:12345"
+	handler.ServeHTTP(httptest.NewRecorder(), request)
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		stored := app.analyticsStorageExchange(browserstats.StorageRequest{Operation: browserstats.ReadSecurity, Domain: "localhost"})
+		if stored.Err == nil {
+			var state browserstats.SecurityState
+			if err := json.Unmarshal([]byte(stored.Text), &state); err != nil {
+				t.Fatal(err)
+			}
+			if len(state.Incidents) == 1 {
+				if strings.Contains(stored.Text, "never-store") || state.Incidents[0].IP != "192.0.2.8" || state.Incidents[0].Examples[0].Bytes != 6 {
+					t.Fatalf("unsafe or incomplete incident: %s", stored.Text)
+				}
+				break
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("security summary was not persisted")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestAnalyticsSecurityQueueCannotBlockResponse(t *testing.T) {
+	app := &App{securityAnalytics: make(chan siteAnalyticsEvent, 1), securityLosses: make(chan string, 1)}
+	app.securityAnalytics <- siteAnalyticsEvent{}
+	finished := make(chan struct{})
+	go func() {
+		defer close(finished)
+		app.analyticsMiddleware(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })).ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", "http://localhost/", nil))
+	}()
+	select {
+	case <-finished:
+	case <-time.After(time.Second):
+		t.Fatal("security backpressure blocked response")
+	}
+	if len(app.securityLosses) != 1 {
+		t.Fatal("overload was not signalled")
 	}
 }

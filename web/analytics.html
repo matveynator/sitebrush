@@ -408,44 +408,58 @@
     </div>
   </div>
 
-  <nav class="d-flex flex-wrap gap-2 mb-3" aria-label="Analytics">
-    <a class="btn btn-outline-secondary" href="#browser-overview">{{index .T "analytics_browser_overview"}}</a>
-    <a class="btn btn-outline-secondary" href="#browser-returns">{{index .T "analytics_browser_returns"}}</a>
-    <a class="btn btn-outline-secondary" href="#browser-content">{{index .T "analytics_browser_content"}}</a>
-    <a class="btn btn-outline-secondary" href="#technical-analytics">{{index .T "analytics_browser_technical"}}</a>
-  </nav>
-  <section id="browser-overview" class="card mb-4"><div class="card-body">
-    <h2 class="h5">{{index .T "analytics_browser_overview"}}</h2>
-    <div class="d-flex flex-wrap gap-2 mb-3">
-      <a href="?analytics&amp;days=1">{{index .T "analytics_browser_today"}}</a>
-      <a href="?analytics&amp;days=7">7 {{index .T "analytics_browser_days"}}</a>
-      <a href="?analytics&amp;days=30">30 {{index .T "analytics_browser_days"}}</a>
-      <a href="?analytics&amp;days=90">90 {{index .T "analytics_browser_days"}}</a>
-    </div>
-    <p class="small">{{index .T "analytics_browser_scope"}}</p>
-    {{if .BrowserAnalytics.Available}}
-    <p>{{.BrowserAnalytics.Days}} {{index .T "analytics_browser_days"}} · {{.BrowserAnalytics.Age}}</p>
-    <p class="small">{{index .T "analytics_browser_queue"}}: {{.BrowserAnalytics.Report.QueuePercent}}% · {{index .T "analytics_browser_lag"}}: {{.BrowserAnalytics.Report.ProcessingLagMS}} ms · {{index .T "analytics_browser_memory"}}: {{.BrowserAnalytics.Report.EstimatedBytes}} B</p>
-    <p class="small">{{.BrowserAnalytics.Report.PeriodStart.Format "2006-01-02"}} — {{.BrowserAnalytics.Report.PeriodEnd.Format "2006-01-02"}} UTC</p>
-    {{if not .BrowserAnalytics.Report.ComparisonAvailable}}<p class="small">{{index .T "analytics_browser_comparison_pending"}}</p>{{end}}
-    {{if .BrowserAnalytics.Report.Incomplete}}<p role="status" class="alert alert-warning">{{index .T "analytics_browser_incomplete"}}</p>{{end}}
-    {{if .BrowserAnalytics.Report.HistoryLimited}}<p role="status">{{index .T "analytics_browser_limited"}}</p>{{end}}
+  <form method="get" class="d-flex flex-wrap gap-2 mb-3">
+    <input type="hidden" name="analytics" value="">
+    <select name="days" aria-label="{{index .T "analytics_period"}}" class="form-select w-auto">{{range $days := .PeriodOptions}}<option value="{{$days}}" {{if eq $.BrowserAnalytics.Days $days}}selected{{end}}>{{$days}} {{index $.T "ax_days"}}</option>{{end}}</select>
+    <select name="traffic" class="form-select w-auto" aria-label="{{index .T "ax_audience"}}"><option value="human" {{if eq .ExperienceFilter.Traffic "human"}}selected{{end}}>{{index .T "ax_humans"}}</option><option value="bots" {{if eq .ExperienceFilter.Traffic "bots"}}selected{{end}}>{{index .T "ax_bots"}}</option><option value="all" {{if eq .ExperienceFilter.Traffic "all"}}selected{{end}}>{{index .T "ax_all"}}</option></select>
+    <input class="form-control w-auto" name="source" placeholder="{{index .T "ax_source"}}" value="{{.ExperienceFilter.Source}}">
+    <input type="hidden" name="campaign" value="{{.ExperienceFilter.Campaign}}">
+    <input class="form-control w-auto" name="page" placeholder="{{index .T "ax_page"}}" value="{{.ExperienceFilter.Page}}">
+    <input class="form-control w-auto" name="language" placeholder="{{index .T "ax_language"}}" value="{{.ExperienceFilter.Language}}">
+    <button class="btn btn-outline-secondary">{{index .T "ax_filter"}}</button>
+  </form>
+  <nav class="d-flex flex-wrap gap-3 mb-4"><a href="#session-map">{{index .T "ax_map"}}</a><a href="#sources">{{index .T "ax_sources"}}</a><a href="#journeys">{{index .T "ax_journeys"}}</a><a href="#sessions">{{index .T "ax_sessions"}}</a><a href="#technical-analytics">{{index .T "ax_technical"}}</a><a href="#security">{{index .T "ax_security"}}</a></nav>
+  <section id="session-map" class="card mb-4"><div class="card-body"><h2 class="h5">{{index .T "ax_map"}}</h2><p class="small">{{index .T "ax_map_hint"}}</p><p class="small">{{index .T "ax_unknown_geo"}}: {{.UnknownGeo}}</p><div id="analytics-session-map" class="world-map-panel"></div></div></section>
+  <section id="sources" class="card mb-4"><div class="card-body">
+    <h2 class="h5">{{index .T "ax_sources"}}</h2><p class="small">{{index .T "ax_attribution_hint"}}</p>
+    <div class="table-responsive"><table class="table"><thead><tr><th>{{index .T "ax_source"}}</th><th>{{index .T "ax_sessions"}}</th><th>{{index .T "ax_views"}}</th><th>{{index .T "ax_actions"}}</th>{{if .Experience.GoalsConfigured}}<th>{{index .T "ax_meaningful"}}</th>{{end}}<th>{{index .T "ax_returns"}}</th></tr></thead><tbody>
+    {{range .Experience.Sources}}<tr><td><a href="?analytics&amp;days={{$.BrowserAnalytics.Days}}&amp;source={{urlquery .Source}}&amp;campaign={{urlquery .Campaign}}&amp;traffic={{urlquery $.ExperienceFilter.Traffic}}">{{if eq .Label "direct-hidden"}}{{index $.T "ax_hidden"}}{{else}}{{.Label}}{{end}}</a><small class="d-block">{{index $.T (print "ax_evidence_" .Evidence)}} · {{.Campaign}}</small></td><td>{{.Sessions}}</td><td>{{.Views}}</td><td>{{.Actions}}</td>{{if $.Experience.GoalsConfigured}}<td>{{.GoalRate}}</td>{{end}}<td>{{.Returning}}</td></tr>{{else}}<tr><td colspan="{{if .Experience.GoalsConfigured}}6{{else}}5{{end}}">{{index .T "analytics_no_data"}}</td></tr>{{end}}
+    </tbody></table></div>
+  </div></section>
+  <section id="browser-overview" class="mb-4">
+    <h2 class="h5">{{index .T "ax_overview"}}</h2>
+    <p class="small">{{index .T "ax_observation_hint"}}</p>
+    <p class="small">{{.BrowserAnalytics.Age}}</p>
+    {{if or .Experience.Incomplete .BrowserAnalytics.Report.Incomplete}}<p class="alert alert-warning">{{index .T "ax_incomplete"}}</p>{{end}}
+    {{if not .BrowserAnalytics.Report.Experience.Version}}<p>{{index .T "ax_new_history"}}</p>{{end}}
+    {{if ne .ExperienceFilter.Traffic "human"}}<p>{{index .T "ax_bot_overview"}}: {{.ServerRequests}} · {{index .T "ax_all_hint"}}</p>{{end}}
     <div class="metric-grid">
-      {{range .BrowserAnalytics.Cards}}<div class="card metric-card"><div class="card-body"><div>{{.Label}}</div><div class="metric-value">{{.Value}}</div><p class="small">{{.Hint}}</p></div></div>{{end}}
+      <div class="card metric-card"><div class="card-body">{{index .T "ax_sessions"}}<div class="metric-value">{{.Experience.Sessions}}</div></div></div>
+      <div class="card metric-card"><div class="card-body">{{index .T "ax_actions"}}<div class="metric-value">{{.Experience.Actions}}</div></div></div>
+      {{if .Experience.GoalsConfigured}}<div class="card metric-card"><div class="card-body">{{index .T "ax_meaningful"}}<div class="metric-value">{{.Experience.GoalRate}}</div></div></div>{{end}}
+
     </div>
-    {{else}}<p>{{index .T "analytics_browser_pending"}}</p>{{end}}
+    {{if .Experience.Insights}}<div class="mt-3"><h3 class="h6">{{index .T "ax_insights"}}</h3><p class="small">{{index .T "ax_insights_hint"}}</p><ul>{{range .Experience.Insights}}<li>{{index $.T (print "ax_insight_" .Kind)}} · {{.Label}}: {{.Numerator}} / {{.Denominator}}</li>{{end}}</ul></div>{{end}}
+  </section>
+
+  {{if .Experience.ActionRows}}<section class="card mb-4"><div class="card-body"><h2 class="h5">{{index .T "ax_actions"}}</h2><ul>{{range .Experience.ActionRows}}<li>{{.Label}} — {{.Count}}</li>{{end}}</ul></div></section>{{end}}
+  <section id="journeys" class="card mb-4"><div class="card-body"><h2 class="h5">{{index .T "ax_journeys"}}</h2><p class="small">{{index .T "ax_recent_hint"}}</p><ul>{{range .Experience.Journeys}}<li>{{.Label}} <strong>× {{.Sessions}}</strong></li>{{else}}<li>{{index .T "analytics_no_data"}}</li>{{end}}</ul></div></section>
+  <section id="browser-content" class="card mb-4"><div class="card-body"><h2 class="h5">{{index .T "ax_content"}}</h2><p class="small">{{index .T "ax_exit_hint"}}</p>
+    <div class="table-responsive"><table class="table"><thead><tr><th>{{index .T "ax_page"}}</th><th>{{index .T "ax_views"}}</th><th>{{index .T "ax_active"}}</th><th>50% ↓</th><th>{{index .T "ax_action_rate"}}</th><th>{{index .T "ax_next"}}</th><th>{{index .T "ax_end"}}</th></tr></thead><tbody>{{range .Experience.Pages}}<tr><td><a href="?analytics&amp;days={{$.BrowserAnalytics.Days}}&amp;page={{urlquery .Label}}&amp;traffic={{urlquery $.ExperienceFilter.Traffic}}">{{.Label}}</a></td><td>{{.Views}}</td><td>{{.AverageActive}}</td><td>{{.ScrollRate}}</td><td>{{.ActionRate}}</td><td>{{.NextRate}}</td><td>{{.EndRate}}</td></tr>{{end}}</tbody></table></div>
   </div></section>
-  <section id="browser-returns" class="card mb-4"><div class="card-body">
-    <h2 class="h5">{{index .T "analytics_browser_returns"}}</h2>
-    <p class="small">{{index .T "analytics_browser_retention_hint"}}</p>
-    <ul>{{range .BrowserAnalytics.Report.Retention}}<li>D{{.Day}}: {{.Returned}} / {{.Eligible}}</li>{{end}}</ul>
-    {{range .BrowserAnalytics.ReturnSections}}<h3 class="h6">{{.Title}}</h3><p class="small">{{.Description}}</p><ul>{{range .Rows}}<li>{{.Label}}: {{.Value}}</li>{{end}}</ul>{{end}}
+  <section id="sessions" class="card mb-4"><div class="card-body"><h2 class="h5">{{index .T "ax_sessions"}}</h2><p class="small">{{index .T "ax_recent_hint"}}</p>
+    {{range .Experience.Recent}}<details class="border-bottom py-2"><summary>{{.When}} · {{.Source.Name}} → {{.Landing}} · {{.Language}} · {{.Browser}} / {{.OS}} · {{.Active}}</summary>
+    <p class="small">{{index $.T "ax_first_source"}}: {{.FirstSource}} · {{index $.T "ax_local_time"}}: {{if .LocalTime}}{{.LocalTime}} {{.Timezone}}{{else}}—{{end}} · {{.Country}} {{.City}}</p>
+    {{range .Tabs}}<ol>{{range .}}<li>{{.}}</li>{{end}}</ol>{{end}}{{if .Limited}}<p>{{index $.T "ax_incomplete"}}</p>{{end}}</details>{{else}}<p>{{index .T "analytics_no_data"}}</p>{{end}}
   </div></section>
-  <section id="browser-content" class="card mb-4"><div class="card-body">
-    <h2 class="h5">{{index .T "analytics_browser_content"}}</h2>
-    {{range .BrowserAnalytics.ContentSections}}<h3 class="h6">{{.Title}}</h3><p class="small">{{.Description}}</p><ul>{{range .Rows}}<li>{{.Label}}: {{.Value}}</li>{{end}}</ul>{{end}}
-  </div></section>
-  <h2 id="technical-analytics" class="h5">{{index .T "analytics_browser_technical"}}</h2>
+
+  <section class="card mb-4"><div class="card-body"><h2 class="h5">{{index .T "ax_languages"}}</h2><div class="table-responsive"><table class="table"><thead><tr><th>{{index .T "ax_language"}}</th><th>{{index .T "ax_sessions"}}</th>{{if .Experience.GoalsConfigured}}<th>{{index .T "ax_meaningful"}}</th>{{end}}</tr></thead><tbody>{{range .Experience.Languages}}<tr><td>{{.Label}}</td><td>{{.Sessions}}</td>{{if $.Experience.GoalsConfigured}}<td>{{.GoalRate}}</td>{{end}}</tr>{{end}}</tbody></table></div><h3 class="h6">{{index .T "ax_local_time"}}</h3><div class="d-flex flex-wrap gap-3">{{range $hour,$count:=.Experience.LocalHours}}{{if $count}}<span>{{$hour}}:00 — {{$count}}</span>{{end}}{{end}}</div></div></section>
+  <details id="browser-returns" class="card mb-4"><summary class="card-body">{{index .T "ax_returns"}}</summary><div class="card-body"><p class="small">{{index .T "analytics_browser_retention_hint"}}</p>{{range .BrowserAnalytics.Report.Retention}}<span class="me-3">D{{.Day}}: {{.Returned}} / {{.Eligible}}</span>{{end}}{{range .BrowserAnalytics.ReturnSections}}<h3 class="h6">{{.Title}}</h3><ul>{{range .Rows}}<li>{{.Label}}: {{.Value}}</li>{{end}}</ul>{{end}}</div></details>
+  <details class="card mb-4"><summary class="card-body">{{index .T "ax_crawlers"}}</summary><div class="card-body"><p class="small">{{index .T "ax_bot_hint"}}</p><div class="table-responsive"><table class="table"><thead><tr><th>{{index .T "ax_audience"}}</th><th>User-Agent</th><th>{{index .T "ax_page"}}</th><th>{{index .T "ax_requests"}}</th></tr></thead><tbody>{{range .Security.Groups}}{{if ne .Class "unknown"}}<tr><td>{{index $.T (print "ax_class_" .Class)}}</td><td>{{.Agent}}</td><td>{{.Path}}</td><td>{{.Count}}</td></tr>{{end}}{{end}}</tbody></table></div></div></details>
+
+  <details class="card mb-4"><summary class="card-body">{{index .T "ax_goals"}}</summary><div class="card-body"><p>{{index .T "ax_goals_hint"}}</p><p>{{index .T "ax_goals_examples_hint"}}</p><pre class="border rounded p-3">{{index .T "ax_goals_examples"}}</pre><p class="small">{{index .T "ax_goals_action_example"}}</p><pre class="border rounded p-3"><code>&lt;a href="/download/" data-analytics-action="download"&gt;Download&lt;/a&gt;</code></pre><form method="post" action="?analytics"><textarea class="form-control" name="goals" rows="5" maxlength="12000" placeholder="Download | action | download">{{.GoalsText}}</textarea><button class="btn btn-outline-secondary mt-2">{{index .T "ax_save"}}</button></form></div></details>
+  <details id="technical-analytics" class="card"><summary class="card-body">{{index .T "ax_technical"}}</summary><div class="card-body">
+  <h2 class="h5">{{index .T "analytics_browser_technical"}}</h2>
   <p class="small">{{index .T "analytics_browser_technical_hint"}}</p>
   <div class="alert alert-secondary">
     <div><strong>{{index .T "analytics_generated_at"}}:</strong> {{.Report.GeneratedAt}}</div>
@@ -493,7 +507,7 @@
   </section>
 
   <div class="report-grid">
-    {{range .Report.Sections}}
+    {{range .Report.Sections}}{{if .Rows}}
     <section class="card">
       <div class="card-body">
         <h2 class="h5">{{.Title}}</h2>
@@ -529,8 +543,12 @@
         {{end}}
       </div>
     </section>
-    {{end}}
+    {{end}}{{end}}
   </div>
+</div></details>
+  <section id="security" class="card mb-4"><div class="card-body"><h2 class="h5">{{index .T "ax_security"}}</h2><p>{{.Security.Suspicious}} · {{index .T "ax_security_independent"}}</p><p class="small">{{index .T "ax_security_hint"}}</p>{{if .Security.Incomplete}}<p class="alert alert-warning">{{index .T "ax_incomplete"}}</p>{{end}}
+    {{range .Security.Incidents}}<details class="border-bottom py-2"><summary>{{if .PossibleExposure}}⚠ {{index $.T "ax_exposure"}} · {{end}}{{.IP}} · {{.Count}} · {{.Last.Format "2006-01-02 15:04 UTC"}}</summary><p>{{.Country}} {{.City}} · {{.Agent}}</p><ul>{{range $category,$count:=.Categories}}<li>{{index $.T (print "ax_risk_" $category)}} × {{$count}}</li>{{end}}</ul><table class="table"><tbody>{{range .Examples}}<tr><td>{{.First.Format "15:04:05"}} — {{.Last.Format "15:04:05"}}</td><td>{{.Method}} {{.Path}}</td><td>{{.Status}}</td><td>× {{.Count}}</td></tr>{{end}}</tbody></table></details>{{else}}<p>{{index .T "ax_no_incidents"}}</p>{{end}}
+  </div></section>
 </div>
 <script type="application/json" id="analytics-map-points">{{.Report.MapJSON}}</script>
 <script src="/p/static/leaflet.min.js"></script>
@@ -628,7 +646,7 @@
       }
     }
 
-    if (values.length > 0) {
+    if (values.length > 1) {
       const tableWrapper = analyticsCard.querySelector('.table-responsive');
       if (tableWrapper) {
         const chartContainer = document.createElement('div');
@@ -728,7 +746,9 @@
     const label = point.label || point.country || '';
     const count = Number(point.count || 0);
     const percent = point.percent || '';
-    return label + '<br><strong>' + count + ' · ' + percent + '</strong>';
+    const tooltip = document.createElement('span');
+    tooltip.textContent = label + ' · ' + count + ' · ' + percent;
+    return tooltip;
   }
 
   const markerBounds = [];
@@ -799,5 +819,42 @@
   returnLink.setAttribute('href', fallbackPath);
 })();
 </script>
+
+
+<script type="application/json" id="analytics-session-points">{{.SessionMapJSON}}</script>
+<script>
+(function sessionMap() {
+ const mapElement=document.getElementById('analytics-session-map');
+ if (!mapElement || !window.L) return;
+ const sessions=JSON.parse(document.getElementById('analytics-session-points').textContent || '[]');
+ const map=window.L.map(mapElement,{center:[20,0],zoom:2,scrollWheelZoom:false});
+ window.L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',{attribution:'© OpenStreetMap',maxZoom:18}).addTo(map);
+ const markers=window.L.layerGroup().addTo(map);
+ const sourceColors={Google:'#2563eb',ChatGPT:'#16a34a',Claude:'#b45309',Habr:'#f97316',Telegram:'#06b6d4'};
+ const sourceIcons={Google:'🔎',ChatGPT:'✦',Claude:'✦',Habr:'H',Telegram:'✈'};
+ function renderClusters() {
+  markers.clearLayers(); const clusters=new Map();
+  for (const session of sessions) {
+   if (!session.GeoKnown) continue;
+   const position=map.project([session.Latitude,session.Longitude],map.getZoom());
+   const key=Math.floor(position.x/40)+':'+Math.floor(position.y/40);
+   if (!clusters.has(key)) clusters.set(key,[]);
+   clusters.get(key).push(session);
+  }
+  for (const cluster of clusters.values()) {
+   const first=cluster[0]; const contents=document.createElement('div');
+   for (const session of cluster.slice(0,8)) {
+    const line=document.createElement('p');
+    line.textContent=(sourceIcons[session.Source.Name] || '↗')+' '+session.Source.Name+' · '+session.Country+' '+session.City+' · '+session.Language+' · '+session.Browser+' / '+session.OS+' · '+(session.LocalTime || '—')+' '+session.Timezone+' · '+session.Landing;
+    contents.appendChild(line);
+    for (const steps of Object.values(session.Tabs || {})) {const route=document.createElement('p');route.textContent=steps.join(' → ');contents.appendChild(route);}
+   }
+   window.L.circleMarker([first.Latitude,first.Longitude],{radius:Math.min(18,5+Math.sqrt(cluster.length)*2),color:sourceColors[first.Source.Name] || '#64748b',fillOpacity:0.7}).bindPopup(contents).bindTooltip(String(cluster.length)).addTo(markers);
+  }
+ }
+ map.on('zoomend',renderClusters);renderClusters();
+})();
+</script>
+
 </body>
 </html>

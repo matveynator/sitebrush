@@ -331,6 +331,12 @@ SiteBrush collects server counters through bounded, nonblocking channels and pre
 
 Each site stores compact summaries in a separate, disposable analytics database (up to 16 MiB), with rotating gzip daily summaries (up to 32 MiB). Editing uses its own database. History covers up to 90 UTC days within bounded storage and memory limits. The default analytics memory budget is 64 MiB (`SITEBRUSH_ANALYTICS_MEMORY_MIB`). Under overload, serving the website takes priority over complete statistics.
 
+The dashboard follows sources → journeys → content → recent sessions → map → security, with technical counters folded below. Campaign/referrer evidence is not proof of identity, browser sessions are not added to HTTP requests, and a download click does not establish a completed download.
+
+Recent detail rotates at 500 sessions / seven days, with at most twelve journey steps and four tabs per session. Security stores at most 500 incidents / thirty days, with twenty cleaned examples each; full IP addresses appear only in incidents. Memory pressure may shorten these windows. Archives exclude session identities and incident IPs. Security is observational: no automatic blocking or canary routes, and a sensitive URL returning 200/206 is a reason to investigate, not proof of exposure.
+
+Site owners configure up to 32 goals using `Name | action | identifier` or `Name | path | /exact/path`. These settings belong to the editing database and survive deletion of analytics. Mark controls with `data-analytics-action="download"`; code can report a completed interaction through `window.SiteBrushAnalytics?.action('copy-command', location.pathname)`. Reporting is best effort and never delays navigation. New session context starts with this version; old statistics are not retroactively reconstructed.
+
 ## Best suited for
 
 - Business websites and landing pages
