@@ -999,7 +999,7 @@
     "ax_exposure": "Possible sensitive response — investigate",
     "ax_no_incidents": "No incidents in saved observations. This is not proof of safety.",
     "ax_goals": "Useful actions: site goals",
-    "ax_goals_hint": "One goal per line: Name | action or path | exact identifier/path. Maximum 32. Changes apply to future observations after the next checkpoint; historical goals are not recalculated.",
+    "ax_goals_hint": "One goal per line: Name | action or uri | exact identifier/URI. Maximum 32. Changes apply to future observations after the next checkpoint; historical goals are not recalculated.",
     "ax_save": "Save goals",
     "ax_class_ai-crawler": "AI crawler (claimed)",
     "ax_class_search-crawler": "Search crawler (claimed)",
@@ -1032,8 +1032,8 @@
     "ax_insight_language-mismatch": "Browser language differs from page language",
     "ax_evidence_legacy": "Legacy source, limited context",
     "ax_goals_examples_hint": "Copy the examples you need into the field below and replace the paths with your own. Use one line per goal.",
-    "ax_goals_examples": "Download | action | download\nOpen documentation | path | /docs/\nContact page | path | /contact/\nCopy command | action | copy-command",
-    "ax_goals_action_example": "A path goal matches a view of that exact path. For an action goal, mark a link or button with its action name, such as download. For command copying, call SiteBrushAnalytics.action(\"copy-command\", location.pathname) after a successful copy. Examples are not enabled automatically."
+    "ax_goals_examples": "Download | action | download\nDownload section | uri | /#download\nOpen documentation | uri | /docs/\nQuery view | uri | /?mode=download\nCopy command | action | copy-command",
+    "ax_goals_action_example": "A URI goal matches an exact path, query and fragment after private/tracking parameters are removed. For an action goal, mark a link or button with its action name, such as download. For command copying, call SiteBrushAnalytics.action(\"copy-command\", location.pathname) after a successful copy. Examples are not enabled automatically."
   },
   "fr": {
     "expenses_title": "Serveur et dépenses",
@@ -1917,7 +1917,7 @@
     "ax_exposure": "Possible sensitive response — investigate",
     "ax_no_incidents": "No incidents in saved observations. This is not proof of safety.",
     "ax_goals": "Useful actions: site goals",
-    "ax_goals_hint": "One goal per line: Name | action or path | exact identifier/path. Maximum 32. Changes apply to future observations after the next checkpoint; historical goals are not recalculated.",
+    "ax_goals_hint": "One goal per line: Name | action or uri | exact identifier/URI. Maximum 32. Changes apply to future observations after the next checkpoint; historical goals are not recalculated.",
     "ax_save": "Save goals",
     "ax_class_ai-crawler": "AI crawler (claimed)",
     "ax_class_search-crawler": "Search crawler (claimed)",
@@ -1950,8 +1950,8 @@
     "ax_insight_language-mismatch": "Browser language differs from page language",
     "ax_evidence_legacy": "Legacy source, limited context",
     "ax_goals_examples_hint": "Copy the examples you need into the field below and replace the paths with your own. Use one line per goal.",
-    "ax_goals_examples": "Download | action | download\nOpen documentation | path | /docs/\nContact page | path | /contact/\nCopy command | action | copy-command",
-    "ax_goals_action_example": "A path goal matches a view of that exact path. For an action goal, mark a link or button with its action name, such as download. For command copying, call SiteBrushAnalytics.action(\"copy-command\", location.pathname) after a successful copy. Examples are not enabled automatically."
+    "ax_goals_examples": "Download | action | download\nDownload section | uri | /#download\nOpen documentation | uri | /docs/\nQuery view | uri | /?mode=download\nCopy command | action | copy-command",
+    "ax_goals_action_example": "A URI goal matches an exact path, query and fragment after private/tracking parameters are removed. For an action goal, mark a link or button with its action name, such as download. For command copying, call SiteBrushAnalytics.action(\"copy-command\", location.pathname) after a successful copy. Examples are not enabled automatically."
   },
   "ru": {
     "files_select_all": "Выделить все",
@@ -2953,7 +2953,7 @@
     "ax_exposure": "Возможна выдача чувствительных данных — проверить",
     "ax_no_incidents": "В сохранённых наблюдениях инцидентов нет. Это не доказательство безопасности.",
     "ax_goals": "Полезные действия: цели сайта",
-    "ax_goals_hint": "Одна цель в строке: Название | action или path | точный идентификатор/путь. До 32 целей. Изменения действуют для будущих наблюдений после следующего сохранения; история не пересчитывается.",
+    "ax_goals_hint": "Одна цель в строке: Название | action или uri | точный идентификатор/URI. До 32 целей. Изменения действуют для будущих наблюдений после следующего сохранения; история не пересчитывается.",
     "ax_save": "Сохранить цели",
     "ax_class_ai-crawler": "AI-робот (по подписи)",
     "ax_class_search-crawler": "Поисковый робот (по подписи)",
@@ -2986,8 +2986,8 @@
     "ax_insight_language-mismatch": "Язык браузера отличается от языка страницы",
     "ax_evidence_legacy": "Прежний источник, неполный контекст",
     "ax_goals_examples_hint": "Примеры — скопируйте нужные строки в поле ниже и замените пути на адреса вашего сайта. Каждая цель — отдельная строка.",
-    "ax_goals_examples": "Скачивание | action | download\nОткрытие документации | path | /docs/\nКонтакты | path | /contact/\nКопирование команды | action | copy-command",
-    "ax_goals_action_example": "Цель path срабатывает при просмотре указанного пути. Для action добавьте атрибут к ссылке или кнопке, например download. Для копирования команды вызывайте SiteBrushAnalytics.action(\"copy-command\", location.pathname) после успешного копирования. Примеры не включаются автоматически."
+    "ax_goals_examples": "Скачивание | action | download\nСекция скачивания | uri | /#download\nОткрытие документации | uri | /docs/\nURI с запросом | uri | /?mode=download\nКопирование команды | action | copy-command",
+    "ax_goals_action_example": "Цель uri срабатывает при точном URI с путём, query и fragment после удаления приватных и рекламных параметров. Для action добавьте атрибут к ссылке или кнопке, например download. Для копирования команды вызывайте SiteBrushAnalytics.action(\"copy-command\", location.pathname) после успешного копирования. Примеры не включаются автоматически."
   },
   "ja": {
     "expenses_title": "サーバーと費用",
@@ -3867,7 +3867,7 @@
     "ax_exposure": "Possible sensitive response — investigate",
     "ax_no_incidents": "No incidents in saved observations. This is not proof of safety.",
     "ax_goals": "Useful actions: site goals",
-    "ax_goals_hint": "One goal per line: Name | action or path | exact identifier/path. Maximum 32. Changes apply to future observations after the next checkpoint; historical goals are not recalculated.",
+    "ax_goals_hint": "One goal per line: Name | action or uri | exact identifier/URI. Maximum 32. Changes apply to future observations after the next checkpoint; historical goals are not recalculated.",
     "ax_save": "Save goals",
     "ax_class_ai-crawler": "AI crawler (claimed)",
     "ax_class_search-crawler": "Search crawler (claimed)",
@@ -3900,8 +3900,8 @@
     "ax_insight_language-mismatch": "Browser language differs from page language",
     "ax_evidence_legacy": "Legacy source, limited context",
     "ax_goals_examples_hint": "Copy the examples you need into the field below and replace the paths with your own. Use one line per goal.",
-    "ax_goals_examples": "Download | action | download\nOpen documentation | path | /docs/\nContact page | path | /contact/\nCopy command | action | copy-command",
-    "ax_goals_action_example": "A path goal matches a view of that exact path. For an action goal, mark a link or button with its action name, such as download. For command copying, call SiteBrushAnalytics.action(\"copy-command\", location.pathname) after a successful copy. Examples are not enabled automatically."
+    "ax_goals_examples": "Download | action | download\nDownload section | uri | /#download\nOpen documentation | uri | /docs/\nQuery view | uri | /?mode=download\nCopy command | action | copy-command",
+    "ax_goals_action_example": "A URI goal matches an exact path, query and fragment after private/tracking parameters are removed. For an action goal, mark a link or button with its action name, such as download. For command copying, call SiteBrushAnalytics.action(\"copy-command\", location.pathname) after a successful copy. Examples are not enabled automatically."
   },
   "it": {
     "expenses_title": "Server e spese",
@@ -4781,7 +4781,7 @@
     "ax_exposure": "Possible sensitive response — investigate",
     "ax_no_incidents": "No incidents in saved observations. This is not proof of safety.",
     "ax_goals": "Useful actions: site goals",
-    "ax_goals_hint": "One goal per line: Name | action or path | exact identifier/path. Maximum 32. Changes apply to future observations after the next checkpoint; historical goals are not recalculated.",
+    "ax_goals_hint": "One goal per line: Name | action or uri | exact identifier/URI. Maximum 32. Changes apply to future observations after the next checkpoint; historical goals are not recalculated.",
     "ax_save": "Save goals",
     "ax_class_ai-crawler": "AI crawler (claimed)",
     "ax_class_search-crawler": "Search crawler (claimed)",
@@ -4814,8 +4814,8 @@
     "ax_insight_language-mismatch": "Browser language differs from page language",
     "ax_evidence_legacy": "Legacy source, limited context",
     "ax_goals_examples_hint": "Copy the examples you need into the field below and replace the paths with your own. Use one line per goal.",
-    "ax_goals_examples": "Download | action | download\nOpen documentation | path | /docs/\nContact page | path | /contact/\nCopy command | action | copy-command",
-    "ax_goals_action_example": "A path goal matches a view of that exact path. For an action goal, mark a link or button with its action name, such as download. For command copying, call SiteBrushAnalytics.action(\"copy-command\", location.pathname) after a successful copy. Examples are not enabled automatically."
+    "ax_goals_examples": "Download | action | download\nDownload section | uri | /#download\nOpen documentation | uri | /docs/\nQuery view | uri | /?mode=download\nCopy command | action | copy-command",
+    "ax_goals_action_example": "A URI goal matches an exact path, query and fragment after private/tracking parameters are removed. For an action goal, mark a link or button with its action name, such as download. For command copying, call SiteBrushAnalytics.action(\"copy-command\", location.pathname) after a successful copy. Examples are not enabled automatically."
   },
   "sv": {
     "expenses_title": "Server och kostnader",
@@ -5695,7 +5695,7 @@
     "ax_exposure": "Possible sensitive response — investigate",
     "ax_no_incidents": "No incidents in saved observations. This is not proof of safety.",
     "ax_goals": "Useful actions: site goals",
-    "ax_goals_hint": "One goal per line: Name | action or path | exact identifier/path. Maximum 32. Changes apply to future observations after the next checkpoint; historical goals are not recalculated.",
+    "ax_goals_hint": "One goal per line: Name | action or uri | exact identifier/URI. Maximum 32. Changes apply to future observations after the next checkpoint; historical goals are not recalculated.",
     "ax_save": "Save goals",
     "ax_class_ai-crawler": "AI crawler (claimed)",
     "ax_class_search-crawler": "Search crawler (claimed)",
@@ -5728,8 +5728,8 @@
     "ax_insight_language-mismatch": "Browser language differs from page language",
     "ax_evidence_legacy": "Legacy source, limited context",
     "ax_goals_examples_hint": "Copy the examples you need into the field below and replace the paths with your own. Use one line per goal.",
-    "ax_goals_examples": "Download | action | download\nOpen documentation | path | /docs/\nContact page | path | /contact/\nCopy command | action | copy-command",
-    "ax_goals_action_example": "A path goal matches a view of that exact path. For an action goal, mark a link or button with its action name, such as download. For command copying, call SiteBrushAnalytics.action(\"copy-command\", location.pathname) after a successful copy. Examples are not enabled automatically."
+    "ax_goals_examples": "Download | action | download\nDownload section | uri | /#download\nOpen documentation | uri | /docs/\nQuery view | uri | /?mode=download\nCopy command | action | copy-command",
+    "ax_goals_action_example": "A URI goal matches an exact path, query and fragment after private/tracking parameters are removed. For an action goal, mark a link or button with its action name, such as download. For command copying, call SiteBrushAnalytics.action(\"copy-command\", location.pathname) after a successful copy. Examples are not enabled automatically."
   },
   "fi": {
     "expenses_title": "Palvelin ja kulut",
@@ -6609,7 +6609,7 @@
     "ax_exposure": "Possible sensitive response — investigate",
     "ax_no_incidents": "No incidents in saved observations. This is not proof of safety.",
     "ax_goals": "Useful actions: site goals",
-    "ax_goals_hint": "One goal per line: Name | action or path | exact identifier/path. Maximum 32. Changes apply to future observations after the next checkpoint; historical goals are not recalculated.",
+    "ax_goals_hint": "One goal per line: Name | action or uri | exact identifier/URI. Maximum 32. Changes apply to future observations after the next checkpoint; historical goals are not recalculated.",
     "ax_save": "Save goals",
     "ax_class_ai-crawler": "AI crawler (claimed)",
     "ax_class_search-crawler": "Search crawler (claimed)",
@@ -6642,8 +6642,8 @@
     "ax_insight_language-mismatch": "Browser language differs from page language",
     "ax_evidence_legacy": "Legacy source, limited context",
     "ax_goals_examples_hint": "Copy the examples you need into the field below and replace the paths with your own. Use one line per goal.",
-    "ax_goals_examples": "Download | action | download\nOpen documentation | path | /docs/\nContact page | path | /contact/\nCopy command | action | copy-command",
-    "ax_goals_action_example": "A path goal matches a view of that exact path. For an action goal, mark a link or button with its action name, such as download. For command copying, call SiteBrushAnalytics.action(\"copy-command\", location.pathname) after a successful copy. Examples are not enabled automatically."
+    "ax_goals_examples": "Download | action | download\nDownload section | uri | /#download\nOpen documentation | uri | /docs/\nQuery view | uri | /?mode=download\nCopy command | action | copy-command",
+    "ax_goals_action_example": "A URI goal matches an exact path, query and fragment after private/tracking parameters are removed. For an action goal, mark a link or button with its action name, such as download. For command copying, call SiteBrushAnalytics.action(\"copy-command\", location.pathname) after a successful copy. Examples are not enabled automatically."
   },
   "mn": {
     "expenses_title": "Сервер ба зардал",
@@ -7523,7 +7523,7 @@
     "ax_exposure": "Possible sensitive response — investigate",
     "ax_no_incidents": "No incidents in saved observations. This is not proof of safety.",
     "ax_goals": "Useful actions: site goals",
-    "ax_goals_hint": "One goal per line: Name | action or path | exact identifier/path. Maximum 32. Changes apply to future observations after the next checkpoint; historical goals are not recalculated.",
+    "ax_goals_hint": "One goal per line: Name | action or uri | exact identifier/URI. Maximum 32. Changes apply to future observations after the next checkpoint; historical goals are not recalculated.",
     "ax_save": "Save goals",
     "ax_class_ai-crawler": "AI crawler (claimed)",
     "ax_class_search-crawler": "Search crawler (claimed)",
@@ -7556,8 +7556,8 @@
     "ax_insight_language-mismatch": "Browser language differs from page language",
     "ax_evidence_legacy": "Legacy source, limited context",
     "ax_goals_examples_hint": "Copy the examples you need into the field below and replace the paths with your own. Use one line per goal.",
-    "ax_goals_examples": "Download | action | download\nOpen documentation | path | /docs/\nContact page | path | /contact/\nCopy command | action | copy-command",
-    "ax_goals_action_example": "A path goal matches a view of that exact path. For an action goal, mark a link or button with its action name, such as download. For command copying, call SiteBrushAnalytics.action(\"copy-command\", location.pathname) after a successful copy. Examples are not enabled automatically."
+    "ax_goals_examples": "Download | action | download\nDownload section | uri | /#download\nOpen documentation | uri | /docs/\nQuery view | uri | /?mode=download\nCopy command | action | copy-command",
+    "ax_goals_action_example": "A URI goal matches an exact path, query and fragment after private/tracking parameters are removed. For an action goal, mark a link or button with its action name, such as download. For command copying, call SiteBrushAnalytics.action(\"copy-command\", location.pathname) after a successful copy. Examples are not enabled automatically."
   },
   "zh": {
     "expenses_title": "服务器与费用",
@@ -8437,7 +8437,7 @@
     "ax_exposure": "Possible sensitive response — investigate",
     "ax_no_incidents": "No incidents in saved observations. This is not proof of safety.",
     "ax_goals": "Useful actions: site goals",
-    "ax_goals_hint": "One goal per line: Name | action or path | exact identifier/path. Maximum 32. Changes apply to future observations after the next checkpoint; historical goals are not recalculated.",
+    "ax_goals_hint": "One goal per line: Name | action or uri | exact identifier/URI. Maximum 32. Changes apply to future observations after the next checkpoint; historical goals are not recalculated.",
     "ax_save": "Save goals",
     "ax_class_ai-crawler": "AI crawler (claimed)",
     "ax_class_search-crawler": "Search crawler (claimed)",
@@ -8470,8 +8470,8 @@
     "ax_insight_language-mismatch": "Browser language differs from page language",
     "ax_evidence_legacy": "Legacy source, limited context",
     "ax_goals_examples_hint": "Copy the examples you need into the field below and replace the paths with your own. Use one line per goal.",
-    "ax_goals_examples": "Download | action | download\nOpen documentation | path | /docs/\nContact page | path | /contact/\nCopy command | action | copy-command",
-    "ax_goals_action_example": "A path goal matches a view of that exact path. For an action goal, mark a link or button with its action name, such as download. For command copying, call SiteBrushAnalytics.action(\"copy-command\", location.pathname) after a successful copy. Examples are not enabled automatically."
+    "ax_goals_examples": "Download | action | download\nDownload section | uri | /#download\nOpen documentation | uri | /docs/\nQuery view | uri | /?mode=download\nCopy command | action | copy-command",
+    "ax_goals_action_example": "A URI goal matches an exact path, query and fragment after private/tracking parameters are removed. For an action goal, mark a link or button with its action name, such as download. For command copying, call SiteBrushAnalytics.action(\"copy-command\", location.pathname) after a successful copy. Examples are not enabled automatically."
   },
   "he": {
     "expenses_title": "שרת והוצאות",
@@ -9351,7 +9351,7 @@
     "ax_exposure": "Possible sensitive response — investigate",
     "ax_no_incidents": "No incidents in saved observations. This is not proof of safety.",
     "ax_goals": "Useful actions: site goals",
-    "ax_goals_hint": "One goal per line: Name | action or path | exact identifier/path. Maximum 32. Changes apply to future observations after the next checkpoint; historical goals are not recalculated.",
+    "ax_goals_hint": "One goal per line: Name | action or uri | exact identifier/URI. Maximum 32. Changes apply to future observations after the next checkpoint; historical goals are not recalculated.",
     "ax_save": "Save goals",
     "ax_class_ai-crawler": "AI crawler (claimed)",
     "ax_class_search-crawler": "Search crawler (claimed)",
@@ -9384,8 +9384,8 @@
     "ax_insight_language-mismatch": "Browser language differs from page language",
     "ax_evidence_legacy": "Legacy source, limited context",
     "ax_goals_examples_hint": "Copy the examples you need into the field below and replace the paths with your own. Use one line per goal.",
-    "ax_goals_examples": "Download | action | download\nOpen documentation | path | /docs/\nContact page | path | /contact/\nCopy command | action | copy-command",
-    "ax_goals_action_example": "A path goal matches a view of that exact path. For an action goal, mark a link or button with its action name, such as download. For command copying, call SiteBrushAnalytics.action(\"copy-command\", location.pathname) after a successful copy. Examples are not enabled automatically."
+    "ax_goals_examples": "Download | action | download\nDownload section | uri | /#download\nOpen documentation | uri | /docs/\nQuery view | uri | /?mode=download\nCopy command | action | copy-command",
+    "ax_goals_action_example": "A URI goal matches an exact path, query and fragment after private/tracking parameters are removed. For an action goal, mark a link or button with its action name, such as download. For command copying, call SiteBrushAnalytics.action(\"copy-command\", location.pathname) after a successful copy. Examples are not enabled automatically."
   },
   "fa": {
     "expenses_title": "سرور و هزینه‌ها",
@@ -10265,7 +10265,7 @@
     "ax_exposure": "Possible sensitive response — investigate",
     "ax_no_incidents": "No incidents in saved observations. This is not proof of safety.",
     "ax_goals": "Useful actions: site goals",
-    "ax_goals_hint": "One goal per line: Name | action or path | exact identifier/path. Maximum 32. Changes apply to future observations after the next checkpoint; historical goals are not recalculated.",
+    "ax_goals_hint": "One goal per line: Name | action or uri | exact identifier/URI. Maximum 32. Changes apply to future observations after the next checkpoint; historical goals are not recalculated.",
     "ax_save": "Save goals",
     "ax_class_ai-crawler": "AI crawler (claimed)",
     "ax_class_search-crawler": "Search crawler (claimed)",
@@ -10298,8 +10298,8 @@
     "ax_insight_language-mismatch": "Browser language differs from page language",
     "ax_evidence_legacy": "Legacy source, limited context",
     "ax_goals_examples_hint": "Copy the examples you need into the field below and replace the paths with your own. Use one line per goal.",
-    "ax_goals_examples": "Download | action | download\nOpen documentation | path | /docs/\nContact page | path | /contact/\nCopy command | action | copy-command",
-    "ax_goals_action_example": "A path goal matches a view of that exact path. For an action goal, mark a link or button with its action name, such as download. For command copying, call SiteBrushAnalytics.action(\"copy-command\", location.pathname) after a successful copy. Examples are not enabled automatically."
+    "ax_goals_examples": "Download | action | download\nDownload section | uri | /#download\nOpen documentation | uri | /docs/\nQuery view | uri | /?mode=download\nCopy command | action | copy-command",
+    "ax_goals_action_example": "A URI goal matches an exact path, query and fragment after private/tracking parameters are removed. For an action goal, mark a link or button with its action name, such as download. For command copying, call SiteBrushAnalytics.action(\"copy-command\", location.pathname) after a successful copy. Examples are not enabled automatically."
   },
   "de": {
     "expenses_title": "Server und Kosten",
@@ -11179,7 +11179,7 @@
     "ax_exposure": "Possible sensitive response — investigate",
     "ax_no_incidents": "No incidents in saved observations. This is not proof of safety.",
     "ax_goals": "Useful actions: site goals",
-    "ax_goals_hint": "One goal per line: Name | action or path | exact identifier/path. Maximum 32. Changes apply to future observations after the next checkpoint; historical goals are not recalculated.",
+    "ax_goals_hint": "One goal per line: Name | action or uri | exact identifier/URI. Maximum 32. Changes apply to future observations after the next checkpoint; historical goals are not recalculated.",
     "ax_save": "Save goals",
     "ax_class_ai-crawler": "AI crawler (claimed)",
     "ax_class_search-crawler": "Search crawler (claimed)",
@@ -11212,8 +11212,8 @@
     "ax_insight_language-mismatch": "Browser language differs from page language",
     "ax_evidence_legacy": "Legacy source, limited context",
     "ax_goals_examples_hint": "Copy the examples you need into the field below and replace the paths with your own. Use one line per goal.",
-    "ax_goals_examples": "Download | action | download\nOpen documentation | path | /docs/\nContact page | path | /contact/\nCopy command | action | copy-command",
-    "ax_goals_action_example": "A path goal matches a view of that exact path. For an action goal, mark a link or button with its action name, such as download. For command copying, call SiteBrushAnalytics.action(\"copy-command\", location.pathname) after a successful copy. Examples are not enabled automatically."
+    "ax_goals_examples": "Download | action | download\nDownload section | uri | /#download\nOpen documentation | uri | /docs/\nQuery view | uri | /?mode=download\nCopy command | action | copy-command",
+    "ax_goals_action_example": "A URI goal matches an exact path, query and fragment after private/tracking parameters are removed. For an action goal, mark a link or button with its action name, such as download. For command copying, call SiteBrushAnalytics.action(\"copy-command\", location.pathname) after a successful copy. Examples are not enabled automatically."
   },
   "tr": {
     "expenses_title": "Sunucu ve giderler",
@@ -12093,7 +12093,7 @@
     "ax_exposure": "Possible sensitive response — investigate",
     "ax_no_incidents": "No incidents in saved observations. This is not proof of safety.",
     "ax_goals": "Useful actions: site goals",
-    "ax_goals_hint": "One goal per line: Name | action or path | exact identifier/path. Maximum 32. Changes apply to future observations after the next checkpoint; historical goals are not recalculated.",
+    "ax_goals_hint": "One goal per line: Name | action or uri | exact identifier/URI. Maximum 32. Changes apply to future observations after the next checkpoint; historical goals are not recalculated.",
     "ax_save": "Save goals",
     "ax_class_ai-crawler": "AI crawler (claimed)",
     "ax_class_search-crawler": "Search crawler (claimed)",
@@ -12126,8 +12126,8 @@
     "ax_insight_language-mismatch": "Browser language differs from page language",
     "ax_evidence_legacy": "Legacy source, limited context",
     "ax_goals_examples_hint": "Copy the examples you need into the field below and replace the paths with your own. Use one line per goal.",
-    "ax_goals_examples": "Download | action | download\nOpen documentation | path | /docs/\nContact page | path | /contact/\nCopy command | action | copy-command",
-    "ax_goals_action_example": "A path goal matches a view of that exact path. For an action goal, mark a link or button with its action name, such as download. For command copying, call SiteBrushAnalytics.action(\"copy-command\", location.pathname) after a successful copy. Examples are not enabled automatically."
+    "ax_goals_examples": "Download | action | download\nDownload section | uri | /#download\nOpen documentation | uri | /docs/\nQuery view | uri | /?mode=download\nCopy command | action | copy-command",
+    "ax_goals_action_example": "A URI goal matches an exact path, query and fragment after private/tracking parameters are removed. For an action goal, mark a link or button with its action name, such as download. For command copying, call SiteBrushAnalytics.action(\"copy-command\", location.pathname) after a successful copy. Examples are not enabled automatically."
   },
   "kk": {
     "expenses_title": "Сервер және шығындар",
@@ -13007,7 +13007,7 @@
     "ax_exposure": "Possible sensitive response — investigate",
     "ax_no_incidents": "No incidents in saved observations. This is not proof of safety.",
     "ax_goals": "Useful actions: site goals",
-    "ax_goals_hint": "One goal per line: Name | action or path | exact identifier/path. Maximum 32. Changes apply to future observations after the next checkpoint; historical goals are not recalculated.",
+    "ax_goals_hint": "One goal per line: Name | action or uri | exact identifier/URI. Maximum 32. Changes apply to future observations after the next checkpoint; historical goals are not recalculated.",
     "ax_save": "Save goals",
     "ax_class_ai-crawler": "AI crawler (claimed)",
     "ax_class_search-crawler": "Search crawler (claimed)",
@@ -13040,8 +13040,8 @@
     "ax_insight_language-mismatch": "Browser language differs from page language",
     "ax_evidence_legacy": "Legacy source, limited context",
     "ax_goals_examples_hint": "Copy the examples you need into the field below and replace the paths with your own. Use one line per goal.",
-    "ax_goals_examples": "Download | action | download\nOpen documentation | path | /docs/\nContact page | path | /contact/\nCopy command | action | copy-command",
-    "ax_goals_action_example": "A path goal matches a view of that exact path. For an action goal, mark a link or button with its action name, such as download. For command copying, call SiteBrushAnalytics.action(\"copy-command\", location.pathname) after a successful copy. Examples are not enabled automatically."
+    "ax_goals_examples": "Download | action | download\nDownload section | uri | /#download\nOpen documentation | uri | /docs/\nQuery view | uri | /?mode=download\nCopy command | action | copy-command",
+    "ax_goals_action_example": "A URI goal matches an exact path, query and fragment after private/tracking parameters are removed. For an action goal, mark a link or button with its action name, such as download. For command copying, call SiteBrushAnalytics.action(\"copy-command\", location.pathname) after a successful copy. Examples are not enabled automatically."
   },
   "es": {
     "expenses_title": "Servidor y gastos",
@@ -13921,7 +13921,7 @@
     "ax_exposure": "Possible sensitive response — investigate",
     "ax_no_incidents": "No incidents in saved observations. This is not proof of safety.",
     "ax_goals": "Useful actions: site goals",
-    "ax_goals_hint": "One goal per line: Name | action or path | exact identifier/path. Maximum 32. Changes apply to future observations after the next checkpoint; historical goals are not recalculated.",
+    "ax_goals_hint": "One goal per line: Name | action or uri | exact identifier/URI. Maximum 32. Changes apply to future observations after the next checkpoint; historical goals are not recalculated.",
     "ax_save": "Save goals",
     "ax_class_ai-crawler": "AI crawler (claimed)",
     "ax_class_search-crawler": "Search crawler (claimed)",
@@ -13954,8 +13954,8 @@
     "ax_insight_language-mismatch": "Browser language differs from page language",
     "ax_evidence_legacy": "Legacy source, limited context",
     "ax_goals_examples_hint": "Copy the examples you need into the field below and replace the paths with your own. Use one line per goal.",
-    "ax_goals_examples": "Download | action | download\nOpen documentation | path | /docs/\nContact page | path | /contact/\nCopy command | action | copy-command",
-    "ax_goals_action_example": "A path goal matches a view of that exact path. For an action goal, mark a link or button with its action name, such as download. For command copying, call SiteBrushAnalytics.action(\"copy-command\", location.pathname) after a successful copy. Examples are not enabled automatically."
+    "ax_goals_examples": "Download | action | download\nDownload section | uri | /#download\nOpen documentation | uri | /docs/\nQuery view | uri | /?mode=download\nCopy command | action | copy-command",
+    "ax_goals_action_example": "A URI goal matches an exact path, query and fragment after private/tracking parameters are removed. For an action goal, mark a link or button with its action name, such as download. For command copying, call SiteBrushAnalytics.action(\"copy-command\", location.pathname) after a successful copy. Examples are not enabled automatically."
   },
   "pt": {
     "expenses_title": "Servidor e despesas",
@@ -14835,7 +14835,7 @@
     "ax_exposure": "Possible sensitive response — investigate",
     "ax_no_incidents": "No incidents in saved observations. This is not proof of safety.",
     "ax_goals": "Useful actions: site goals",
-    "ax_goals_hint": "One goal per line: Name | action or path | exact identifier/path. Maximum 32. Changes apply to future observations after the next checkpoint; historical goals are not recalculated.",
+    "ax_goals_hint": "One goal per line: Name | action or uri | exact identifier/URI. Maximum 32. Changes apply to future observations after the next checkpoint; historical goals are not recalculated.",
     "ax_save": "Save goals",
     "ax_class_ai-crawler": "AI crawler (claimed)",
     "ax_class_search-crawler": "Search crawler (claimed)",
@@ -14868,7 +14868,7 @@
     "ax_insight_language-mismatch": "Browser language differs from page language",
     "ax_evidence_legacy": "Legacy source, limited context",
     "ax_goals_examples_hint": "Copy the examples you need into the field below and replace the paths with your own. Use one line per goal.",
-    "ax_goals_examples": "Download | action | download\nOpen documentation | path | /docs/\nContact page | path | /contact/\nCopy command | action | copy-command",
-    "ax_goals_action_example": "A path goal matches a view of that exact path. For an action goal, mark a link or button with its action name, such as download. For command copying, call SiteBrushAnalytics.action(\"copy-command\", location.pathname) after a successful copy. Examples are not enabled automatically."
+    "ax_goals_examples": "Download | action | download\nDownload section | uri | /#download\nOpen documentation | uri | /docs/\nQuery view | uri | /?mode=download\nCopy command | action | copy-command",
+    "ax_goals_action_example": "A URI goal matches an exact path, query and fragment after private/tracking parameters are removed. For an action goal, mark a link or button with its action name, such as download. For command copying, call SiteBrushAnalytics.action(\"copy-command\", location.pathname) after a successful copy. Examples are not enabled automatically."
   }
 }
