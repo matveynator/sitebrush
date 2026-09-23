@@ -6207,7 +6207,7 @@ func (a *App) analyticsPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	browserDashboard := a.browserAnalyticsView(r, domain)
-	filter := browserstats.ExperienceFilter{Campaign: r.URL.Query().Get("campaign"), Source: r.URL.Query().Get("source"), Page: r.URL.Query().Get("page"), Language: r.URL.Query().Get("language"), Traffic: r.URL.Query().Get("traffic")}
+	filter := browserstats.ExperienceFilter{Traffic: r.URL.Query().Get("traffic")}
 	if filter.Traffic != "all" && filter.Traffic != "bots" {
 		filter.Traffic = "human"
 	}
