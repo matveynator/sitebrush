@@ -3636,6 +3636,8 @@ func (a *App) flushAnalyticsAggregateState(ctx context.Context, state *analytics
 
 // Browser analytics admission, persistence, and dashboard boundaries.
 
+var errAnalyticsSiteUnavailable = errors.New("analytics site is not published or registered")
+
 func analyticsBoundedString(raw string, maximum int) string {
 	if len(raw) > maximum {
 		raw = raw[:maximum]
@@ -3673,7 +3675,7 @@ func (a *App) retryAnalyticsReport(stop context.Context, domain string, report a
 		boundary, cancel := context.WithTimeout(contextWithDomain(stop, domain), 5*time.Second)
 		err := a.saveAnalyticsReport(boundary, domain, report)
 		cancel()
-		if err == nil {
+		if err == nil || errors.Is(err, errAnalyticsSiteUnavailable) {
 			return
 		}
 		log.Printf("analytics save failed domain=%q attempt=%d: %v", domain, attempt+1, err)
@@ -3910,7 +3912,7 @@ func (a *App) analyticsStorageExchange(request browserstats.StorageRequest) brow
 		databaseInfo, databaseErr := os.Stat(databasePath)
 		staticInfo, staticErr := os.Stat(a.domainStaticDir(request.Domain))
 		if (databaseErr != nil || !databaseInfo.Mode().IsRegular()) && (staticErr != nil || !staticInfo.IsDir()) {
-			return browserstats.StorageResult{Err: errors.New("analytics site is not published or registered")}
+			return browserstats.StorageResult{Err: errAnalyticsSiteUnavailable}
 		}
 	}
 	return a.analyticsStorage.Exchange(request)
