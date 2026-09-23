@@ -698,7 +698,7 @@
                 <input class="form-control form-control-sm" name="description" value="{{.Description}}">
                 <button class="btn btn-outline-secondary btn-sm align-self-start">Update</button>
               </form>
-              {{if .ReasonLog}}<details class="mt-2"><summary class="small">Reason history (7 days)</summary><ul class="security-reason-log">{{range .ReasonLog}}<li>{{.At.Format "2006-01-02 15:04"}} · {{.Source}} · {{.Reason}}{{if .Description}} — {{.Description}}{{end}}</li>{{end}}</ul></details>{{end}}
+              {{if .ReasonLog}}<details class="mt-2"><summary class="small">Reason summary (7 days)</summary><ul class="security-reason-log">{{range .ReasonLog}}<li>{{if ne .First .At}}{{.First.Format "2006-01-02 15:04"}} — {{end}}{{.At.Format "2006-01-02 15:04"}} · {{.Source}} · {{.Reason}} × {{.Count}}{{if .Description}} — {{.Description}}{{end}}</li>{{end}}</ul></details>{{end}}
             </td>
             <td><span class="security-source-badge {{if eq .Source "manual"}}security-source-manual{{else}}security-source-local{{end}}">{{.Source}}</span></td>
             <td>{{.LastEvent.Format "2006-01-02 15:04 UTC"}}</td>
@@ -730,7 +730,7 @@
         {{range .SecurityGlobalBlocks}}
           <tr class="security-row-danger" data-security-global-row>
             <td><code>{{.IP}}</code><div class="small text-muted">{{.IncidentID}}</div></td>
-            <td>{{.Reason}}{{if .Description}}<div class="small">{{.Description}}</div>{{end}}{{if .ReasonLog}}<details><summary class="small">Reason history</summary><ul class="security-reason-log">{{range .ReasonLog}}<li>{{.At.Format "2006-01-02 15:04"}} · {{.Reason}}{{if .Description}} — {{.Description}}{{end}}</li>{{end}}</ul></details>{{end}}</td>
+            <td>{{.Reason}}{{if .Description}}<div class="small">{{.Description}}</div>{{end}}{{if .ReasonLog}}<details><summary class="small">Reason summary</summary><ul class="security-reason-log">{{range .ReasonLog}}<li>{{if ne .First .At}}{{.First.Format "2006-01-02 15:04"}} — {{end}}{{.At.Format "2006-01-02 15:04"}} · {{.Reason}} × {{.Count}}{{if .Description}} — {{.Description}}{{end}}</li>{{end}}</ul></details>{{end}}</td>
             <td><span class="security-source-badge security-source-global">global</span></td>
             <td>{{.LastEvent.Format "2006-01-02 15:04 UTC"}}</td>
             <td>{{.ExpiresAt.Format "2006-01-02 15:04 UTC"}}</td>
