@@ -18,7 +18,7 @@ func Render(content Content) (string, string, error) {
 		text += content.Previous + " → " + content.Email + "\n"
 	}
 	if content.Code != "" {
-		text += "\n" + content.CodeLabel + ": " + content.Code + "\n"
+		text += "\n" + content.CodeLabel + "\n\n" + content.Code + "\n"
 	}
 	if content.Link != "" {
 		text += "\n" + content.Expiry + "\n\n" + content.Button + ":\n" + content.Link + "\n"

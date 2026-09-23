@@ -5,6 +5,7 @@ go 1.25.0
 toolchain go1.26.6
 
 require (
+	github.com/go-webauthn/webauthn v0.17.4
 	github.com/jackc/pgx/v5 v5.9.2
 	github.com/jchv/go-webview-selector v0.0.0-20250730141630-a5f64a01ba3a
 	github.com/mattn/go-sqlite3 v1.14.44
@@ -18,6 +19,14 @@ require (
 )
 
 require (
+	github.com/fxamacker/cbor/v2 v2.9.2 // indirect
+	github.com/go-viper/mapstructure/v2 v2.5.0 // indirect
+	github.com/go-webauthn/x v0.2.6 // indirect
+	github.com/golang-jwt/jwt/v5 v5.3.1 // indirect
+	github.com/google/go-tpm v0.9.8 // indirect
+	github.com/philhofer/fwd v1.2.0 // indirect
+	github.com/tinylib/msgp v1.6.4 // indirect
+	github.com/x448/float16 v0.8.4 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/jackc/pgpassfile v1.0.0 // indirect
