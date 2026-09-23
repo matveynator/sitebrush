@@ -9873,6 +9873,13 @@ func accountPasskeyRP(r *http.Request) (string, string, bool) {
 	if rpID == "" {
 		return "", "", false
 	}
+	// WebAuthn requires an RP ID that is a DNS domain suffix of the current
+	// origin. Literal IPv4/IPv6 addresses are not valid RP IDs. Serving a LAN
+	// address with a self-signed HTTPS certificate therefore does not make
+	// passkeys valid for that IP; use a DNS hostname (or localhost locally).
+	if net.ParseIP(strings.Trim(rpID, "[]")) != nil {
+		return "", "", false
+	}
 	return rpID, originURL.Scheme + "://" + originURL.Host, true
 }
 

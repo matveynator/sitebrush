@@ -170,6 +170,32 @@ func TestDecodeImportedResourceBytesRewritesCSSCharset(t *testing.T) {
 	}
 }
 
+func TestAccountPasskeyRPRejectsLiteralIPAddresses(t *testing.T) {
+	for _, rawURL := range []string{
+		"https://192.168.1.27/?profile",
+		"https://[2001:db8::1]/?profile",
+	} {
+		request := httptest.NewRequest(http.MethodGet, rawURL, nil)
+		if rpID, origin, ok := accountPasskeyRP(request); ok || rpID != "" || origin != "" {
+			t.Fatalf("accountPasskeyRP(%q) = (%q, %q, %t), want unavailable", rawURL, rpID, origin, ok)
+		}
+	}
+}
+
+func TestAccountPasskeyRPAcceptsDNSHostname(t *testing.T) {
+	request := httptest.NewRequest(http.MethodGet, "https://sitebrush.example:8443/?profile", nil)
+	rpID, origin, ok := accountPasskeyRP(request)
+	if !ok {
+		t.Fatal("DNS hostname was rejected for passkeys")
+	}
+	if rpID != "sitebrush.example" {
+		t.Fatalf("rpID = %q", rpID)
+	}
+	if origin != "https://sitebrush.example:8443" {
+		t.Fatalf("origin = %q", origin)
+	}
+}
+
 func TestPublicOutboundIPAllowedRejectsPrivateNetworks(t *testing.T) {
 	blockedIPs := []string{
 		"127.0.0.1",
