@@ -187,9 +187,25 @@ func handleAttackGuardRequest(blocks map[string]SecurityBlock, windows map[strin
 		return attackGuardResult{Block: block, Blocked: blocked}
 
 	case attackGuardObserveFast:
+		if block, blocked := activeSecurityBlock(blocks, ip, now); blocked {
+			return attackGuardResult{Block: block, Blocked: true}
+		}
 		if request.Trusted {
-			block, blocked := activeSecurityBlock(blocks, ip, now)
-			return attackGuardResult{Block: block, Blocked: blocked}
+			if ip == "" {
+				return attackGuardResult{}
+			}
+			window := windows[ip]
+			if window == nil || now.Sub(window.Started) > 10*time.Second {
+				window = &attackWindow{Started: now, Distinct: map[string]struct{}{}}
+				windows[ip] = window
+			}
+			window.Count++
+			if window.Count >= 3000 {
+				block := blockSecurityIP(blocks, ip, "dos", "extreme request rate from attested SiteBrush peer", "local", now, defaultSecurityBlockTTL)
+				delete(windows, ip)
+				return attackGuardResult{Block: block, Blocked: true, Changed: true}
+			}
+			return attackGuardResult{}
 		}
 		if block, blocked := activeSecurityBlock(blocks, ip, now); blocked {
 			return attackGuardResult{Block: block, Blocked: true}
