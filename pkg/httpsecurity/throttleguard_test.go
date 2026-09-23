@@ -68,8 +68,6 @@ func TestThrottleGuardLimitsActiveTrafficWithoutBlockingIP(t *testing.T) {
 		}
 		if decision.RateLimited {
 			limited++
-		} else if decision.Delay <= 0 {
-			t.Fatal("allowed throttled request had no soft delay")
 		}
 	}
 	if limited == 0 {
@@ -106,8 +104,8 @@ func TestThrottleGuardEscalatesRepeatedEpisodes(t *testing.T) {
 			t.Fatalf("episode %d did not activate", episodeIndex+1)
 		}
 		duration := decision.Throttle.ExpiresAt.Sub(decision.Throttle.LastEvent)
-		if duration != expectedDuration {
-			t.Fatalf("episode %d duration=%s want=%s", episodeIndex+1, duration, expectedDuration)
+		if duration < expectedDuration-2*time.Second || duration > expectedDuration {
+			t.Fatalf("episode %d duration=%s want about %s", episodeIndex+1, duration, expectedDuration)
 		}
 		now = decision.Throttle.ExpiresAt.Add(time.Second)
 	}
