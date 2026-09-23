@@ -14387,6 +14387,49 @@ func (database blockedBrowserAnalyticsSQL) ExecContext(ctx context.Context, quer
 	return database.DB.ExecContext(ctx, query, args...)
 }
 
+type permanentBrowserAnalyticsRepository struct{}
+
+func (permanentBrowserAnalyticsRepository) Exchange(request browserstats.StorageRequest) browserstats.StorageResult {
+	if request.Operation == browserstats.SaveBrowser {
+		return browserstats.StorageResult{Err: errAnalyticsSiteUnavailable}
+	}
+	return browserstats.StorageResult{}
+}
+
+func TestBrowserAnalyticsPermanentSaveRejectionIsNotRetried(t *testing.T) {
+	app := &App{analyticsStorage: permanentBrowserAnalyticsRepository{}}
+	jobs := make(chan browserAnalyticsStorageJob, 1)
+	results := make(chan browserAnalyticsStorageResult, 2)
+	stop := make(chan struct{})
+	finished := make(chan struct{})
+	go func() {
+		defer close(finished)
+		app.browserAnalyticsStorage(jobs, results, stop)
+	}()
+
+	state := browserstats.New(time.Now().UTC())
+	state.Record(browserstats.Event{Visitor: "1111111111111111", View: "2222222222222222", Sequence: 1, Path: "/", Persistent: true}, time.Now().UTC(), 8<<20)
+	jobs <- browserAnalyticsStorageJob{domain: "removed.example", state: state}
+
+	prepared := <-results
+	if !prepared.prepared || prepared.err != nil {
+		close(stop)
+		t.Fatalf("unexpected prepared result: %+v", prepared)
+	}
+	saved := <-results
+	if !saved.saved || saved.err != nil {
+		close(stop)
+		t.Fatalf("permanent rejection remained retryable: %+v", saved)
+	}
+
+	close(stop)
+	select {
+	case <-finished:
+	case <-time.After(time.Second):
+		t.Fatal("storage worker leaked")
+	}
+}
+
 func TestBrowserAnalyticsReturnsStateBeforeDatabaseWrite(t *testing.T) {
 	raw, err := sql.Open("sqlite3", filepath.Join(t.TempDir(), "browser.db"))
 	if err != nil {
