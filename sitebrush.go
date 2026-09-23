@@ -6245,7 +6245,7 @@ func (a *App) authAbuseMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		now := time.Now().UTC()
 		clientIP := clientIPAddress(r)
-		trusted := httpsecurity.IsLocalRequest(r)
+		trusted := httpsecurity.IsLocalRequest(r) || sitebrushPeerRequestTrusted(r, now)
 		block, blocked := a.attackGuard.ObserveRequestFast(clientIP, r.URL.EscapedPath(), r.Method, trusted, now)
 		if !blocked {
 			next.ServeHTTP(w, r)
@@ -11176,6 +11176,7 @@ func (a *App) grabPage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	sourceOptions = a.withSitebrushPeerAttestation(r.Context(), sourceOptions)
 
 	remoteSourceURL, err := parseGrabSourceURLForServerIP(sourceURL, sourceOptions.IP)
 	if err != nil {
@@ -11274,6 +11275,7 @@ func (a *App) retryGrabFailedResources(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	sourceOptions = a.withSitebrushPeerAttestation(r.Context(), sourceOptions)
 	remoteSourceURL, err := parseGrabSourceURLForServerIP(sourceURL, sourceOptions.IP)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -11370,6 +11372,7 @@ func (a *App) publicTrialSitePreview(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, sourceOptionsErr.Error(), http.StatusBadRequest)
 		return
 	}
+	sourceOptions = a.withSitebrushPeerAttestation(r.Context(), sourceOptions)
 	go a.runPublicTrialSitePreviewWithTemplateDetection(progressToken, sourceURL, previewURL, translations, cancelSession, copyWholeSite, autoDetectTemplates, sourceOptions)
 
 	w.Header().Set("Content-Type", "application/json")
@@ -12825,6 +12828,7 @@ func (a *App) grabPreview(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	sourceOptions = a.withSitebrushPeerAttestation(r.Context(), sourceOptions)
 	remoteSourceURL, err := parseGrabSourceURLForServerIP(sourceURL, sourceOptions.IP)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -13369,6 +13373,9 @@ func doGrabGETContext(ctx context.Context, client *http.Client, rawURL string, s
 
 func applyGrabRequestHeaders(request *http.Request, sourceOptions grabSourceOptions) {
 	request.Header.Set("User-Agent", "Mozilla/5.0 (compatible; SiteBrush/1.0)")
+	if strings.TrimSpace(sourceOptions.PeerAttestation) != "" {
+		request.Header.Set("X-Sitebrush-Peer-Attestation", sourceOptions.PeerAttestation)
+	}
 	acceptLanguage := grabSourceAcceptLanguage(sourceOptions.LanguageCode)
 	if acceptLanguage != "" {
 		request.Header.Set("Accept-Language", acceptLanguage)
@@ -21104,6 +21111,8 @@ func (a *App) handleSitebrushNetChanPayload(ctx context.Context, payload []byte)
 		status, statusCode = a.handleSecuritySignalRequest(ctx, request)
 	case "security_reputation":
 		status, statusCode, responsePayload = a.handleSecurityReputationRequest(ctx, request)
+	case "security_attestation":
+		status, statusCode, responsePayload = a.handleSecurityAttestationRequest(ctx, request)
 	default:
 		status, statusCode = a.handleServiceMailRelayRequest(ctx, nil, request, source)
 	}
@@ -21271,6 +21280,56 @@ func (a *App) validateSecuritySyncInstallation(ctx context.Context, request serv
 		return err
 	}
 	return validationErr
+}
+
+func (a *App) withSitebrushPeerAttestation(ctx context.Context, sourceOptions grabSourceOptions) grabSourceOptions {
+	if strings.TrimSpace(sourceOptions.PeerAttestation) != "" {
+		return sourceOptions
+	}
+	request := serviceMailRequest{
+		Version:      1,
+		CodeKind:     "security_attestation",
+		LanguageCode: "en",
+		CreatedAt:    time.Now().UTC().Format(time.RFC3339),
+	}
+	response, err := a.sendSecurityNetChanRequestWithResponse(ctx, &request)
+	if err != nil || len(response.Payload) == 0 || len(response.Payload) > 4096 {
+		return sourceOptions
+	}
+	sourceOptions.PeerAttestation = string(response.Payload)
+	return sourceOptions
+}
+
+func sitebrushPeerRequestTrusted(r *http.Request, now time.Time) bool {
+	token := strings.TrimSpace(r.Header.Get("X-Sitebrush-Peer-Attestation"))
+	if token == "" || len(token) > 4096 {
+		return false
+	}
+	publicKeyBytes, err := base64.StdEncoding.DecodeString(strings.TrimSpace(sitebrushComServiceMailRelayPublicKey))
+	if err != nil || len(publicKeyBytes) != ed25519.PublicKeySize {
+		return false
+	}
+	_, err = securitysync.VerifyPeerAttestation(token, ed25519.PublicKey(publicKeyBytes), now)
+	return err == nil
+}
+
+func (a *App) handleSecurityAttestationRequest(ctx context.Context, request serviceMailRequest) (string, int, []byte) {
+	if err := a.validateSecuritySyncInstallation(ctx, request); err != nil {
+		return err.Error(), http.StatusForbidden, nil
+	}
+	_, centralPublicKey, centralPrivateKey, err := a.serviceMailLocalKeyPair(ctx)
+	if err != nil {
+		return err.Error(), http.StatusServiceUnavailable, nil
+	}
+	encodedCentralPublicKey := base64.StdEncoding.EncodeToString(centralPublicKey)
+	if strings.TrimSpace(encodedCentralPublicKey) != strings.TrimSpace(sitebrushComServiceMailRelayPublicKey) {
+		return "central attestation key mismatch", http.StatusServiceUnavailable, nil
+	}
+	token, err := securitysync.IssuePeerAttestation(centralPrivateKey, request.InstallationID, request.PublicKey, time.Now().UTC(), time.Hour)
+	if err != nil {
+		return err.Error(), http.StatusInternalServerError, nil
+	}
+	return "ok", http.StatusOK, []byte(token)
 }
 
 func (a *App) handleSecuritySignalRequest(ctx context.Context, request serviceMailRequest) (string, int) {
