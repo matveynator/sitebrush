@@ -6308,7 +6308,7 @@ func (a *App) analyticsPage(w http.ResponseWriter, r *http.Request) {
 		"AnalyticsTab":     selectedTab,
 		"Report":           analyticsReportView(report, translationsForRequest(r)),
 		"BrowserAnalytics": browserDashboard,
-		"Experience":       experience, "ExperienceFilter": filter, "Security": security, "SecurityBlocks": securityBlocks, "SecurityLocalBlocks": securityLocalBlocks, "SecurityGlobalBlocks": securityGlobalBlocks, "SecurityAllowlist": securityAllowlist, "SecurityThrottles": securityThrottles, "SecuritySettings": securitySettings, "GoalsText": strings.Join(goalLines, "\n"), "SessionMapJSON": template.JS(mapJSON), "PeriodOptions": []int{1, 7, 30, 90}, "UnknownGeo": unknownGeo, "ServerRequests": serverRequests, "ServerLocalHours": serverLocalHours, "LocalHoursJSON": template.JS(localHoursJSON), "ServerHoursJSON": template.JS(serverHoursJSON),
+		"Experience":       experience, "ExperienceFilter": filter, "Security": security, "SecurityBlocks": securityBlocks, "SecurityLocalBlocks": securityLocalBlocks, "SecurityGlobalBlocks": securityGlobalBlocks, "SecurityAllowlist": securityAllowlist, "SecurityThrottles": securityThrottles, "SecuritySettings": securitySettings, "GoalsText": strings.Join(goalLines, "\n"), "SessionMapJSON": template.JS(mapJSON), "PeriodOptions": []int{1, 7, 30, 90}, "UnknownGeo": unknownGeo, "ServerRequests": serverRequests, "ServerLocalHours": serverLocalHours, "LocalHoursJSON": template.JS(localHoursJSON), "ServerHoursJSON": template.JS(serverHoursJSON), "ServerTimezone": time.Local.String(),
 	})
 }
 
@@ -6328,14 +6328,9 @@ func analyticsReportView(report analyticsPreparedReport, translations map[string
 	view.Cards = []analyticsMetricCard{
 		{Label: translationOrDefault(translations, "analytics_total_requests", "Total requests"), Value: strconv.Itoa(report.TotalRequests), Hint: translationOrDefault(translations, "analytics_total_requests_hint", "All logged dynamic, static, and controller requests.")},
 		{Label: translationOrDefault(translations, "analytics_page_views", "Page views"), Value: strconv.Itoa(report.PageViews), Hint: translationOrDefault(translations, "analytics_page_views_hint", "GET page requests excluding assets and Sitebrush controllers.")},
-		{Label: translationOrDefault(translations, "analytics_unique_visitors", "Unique visitors"), Value: strconv.Itoa(report.UniqueVisitors), Hint: translationOrDefault(translations, "analytics_unique_visitors_hint", "Estimated from IP and browser signature.")},
 		{Label: translationOrDefault(translations, "analytics_human_requests", "People"), Value: strconv.Itoa(report.HumanRequests), Hint: translationOrDefault(translations, "analytics_human_requests_hint", "Requests that do not look like known bots or crawlers.")},
 		{Label: translationOrDefault(translations, "analytics_bot_requests", "Bots"), Value: strconv.Itoa(report.BotRequests), Hint: translationOrDefault(translations, "analytics_bot_requests_hint", "Requests from crawlers, bots, monitors, and automated clients.")},
-		{Label: translationOrDefault(translations, "analytics_returning_visitors", "Returning visitors"), Value: strconv.Itoa(report.ReturningVisitors), Hint: translationOrDefault(translations, "analytics_returning_visitors_hint", "Visitors with more than one visit in the report period.")},
-		{Label: translationOrDefault(translations, "analytics_return_visits", "Repeat visits"), Value: strconv.Itoa(report.ReturnVisits), Hint: translationOrDefault(translations, "analytics_return_visits_hint", "Visits after the first visit from the same visitor signature.")},
-		{Label: translationOrDefault(translations, "analytics_sessions", "Sessions"), Value: strconv.Itoa(report.Sessions), Hint: translationOrDefault(translations, "analytics_sessions_hint", "Visits split after 30 minutes of inactivity.")},
-		{Label: translationOrDefault(translations, "analytics_bounce_rate", "Bounce rate"), Value: fmt.Sprintf("%.1f%%", report.BounceRate), Hint: translationOrDefault(translations, "analytics_bounce_rate_hint", "Sessions with one page view.")},
-		{Label: translationOrDefault(translations, "analytics_avg_duration", "Average response time"), Value: formatDurationMS(report.AverageDurationMS), Hint: translationOrDefault(translations, "analytics_avg_duration_hint", "Average server response time across logged requests.")},
+		{Label: translationOrDefault(translations, "analytics_avg_duration", "Average response time"), Value: formatDurationMS(report.AverageDurationMS), Hint: translationOrDefault(translations, "analytics_avg_duration_hint", "Weighted average server response time across the selected period.")},
 		{Label: translationOrDefault(translations, "analytics_errors", "Errors"), Value: strconv.Itoa(report.ErrorCount), Hint: translationOrDefault(translations, "analytics_errors_hint", "Requests with HTTP status 400 or higher.")},
 		{Label: translationOrDefault(translations, "analytics_admin_traffic", "Admin traffic"), Value: strconv.Itoa(report.AdminRequests), Hint: translationOrDefault(translations, "analytics_admin_traffic_hint", "Requests made while logged in as an administrator.")},
 	}
@@ -6343,32 +6338,15 @@ func analyticsReportView(report analyticsPreparedReport, translations map[string
 		view.Cards = view.Cards[:len(view.Cards)-1]
 	}
 	view.Sections = []analyticsReportSection{
-		{Title: "Server response percentiles", Description: "Histogram upper bounds; not browser loading time.", Rows: analyticsPercentileRows(report.ResponsePercentiles)},
-		analyticsSectionView("analytics_section_top_pages", "analytics_section_top_pages_hint", report.TopPages, report.PageViews, "path", translations),
-		analyticsSectionView("analytics_section_entry_pages", "analytics_section_entry_pages_hint", report.EntryPages, report.Sessions, "path", translations),
-		analyticsSectionView("analytics_section_exit_pages", "analytics_section_exit_pages_hint", report.ExitPages, report.Sessions, "path", translations),
-		analyticsSectionView("analytics_section_traffic_sources", "analytics_section_traffic_sources_hint", report.TrafficSources, report.PageViews, "traffic", translations),
-		analyticsSectionView("analytics_section_referrers", "analytics_section_referrers_hint", report.Referrers, report.PageViews, "plain", translations),
-		analyticsSectionView("analytics_section_returning_sources", "analytics_section_returning_sources_hint", report.ReturningSources, report.ReturnVisits, "traffic", translations),
-		analyticsSectionView("analytics_section_returning_referrers", "analytics_section_returning_referrers_hint", report.ReturningReferrers, report.ReturnVisits, "plain", translations),
-		analyticsSectionView("analytics_section_countries", "analytics_section_countries_hint", report.Countries, report.PageViews, "plain", translations),
-		analyticsSectionView("analytics_section_cities", "analytics_section_cities_hint", report.Cities, report.PageViews, "plain", translations),
-		analyticsSectionView("analytics_section_entry_hours", "analytics_section_entry_hours_hint", report.EntryHours, report.Sessions, "plain", translations),
-		analyticsSectionView("analytics_section_visitor_types", "analytics_section_visitor_types_hint", report.VisitorTypes, report.PageViews, "visitor", translations),
-		analyticsSectionView("analytics_section_bot_crawlers", "analytics_section_bot_crawlers_hint", report.BotCrawlers, report.PageViews, "plain", translations),
-		analyticsSectionView("analytics_section_bot_return_sources", "analytics_section_bot_return_sources_hint", report.BotReturnSources, report.ReturnVisits, "traffic", translations),
-		analyticsSectionView("analytics_section_bot_referrers", "analytics_section_bot_referrers_hint", report.BotReferrers, report.PageViews, "plain", translations),
-		analyticsSectionView("analytics_section_devices", "analytics_section_devices_hint", report.Devices, report.PageViews, "device", translations),
-		analyticsSectionView("analytics_section_browsers", "analytics_section_browsers_hint", report.Browsers, report.PageViews, "plain", translations),
-		analyticsSectionView("analytics_section_os", "analytics_section_os_hint", report.OperatingSystems, report.PageViews, "plain", translations),
-		analyticsSectionView("analytics_section_languages", "analytics_section_languages_hint", report.Languages, report.PageViews, "language", translations),
 		analyticsSectionView("analytics_section_status_codes", "analytics_section_status_codes_hint", report.StatusCodes, report.TotalRequests, "plain", translations),
 		analyticsSectionView("analytics_section_hourly", "analytics_section_hourly_hint", report.HourlyActivity, report.TotalRequests, "plain", translations),
 		analyticsSectionView("analytics_section_daily", "analytics_section_daily_hint", report.DailyActivity, report.TotalRequests, "plain", translations),
-		analyticsSectionView("analytics_section_slow_pages", "analytics_section_slow_pages_hint", report.SlowPages, 0, "duration", translations),
+		analyticsSectionView("analytics_section_content_sources", "analytics_section_content_sources_hint", report.ContentSources, report.TotalRequests, "content", translations),
 		analyticsSectionView("analytics_section_assets", "analytics_section_assets_hint", report.TopAssets, report.StaticRequests, "path", translations),
 		analyticsSectionView("analytics_section_errors", "analytics_section_errors_hint", report.ErrorPaths, report.ErrorCount, "path", translations),
-		analyticsSectionView("analytics_section_content_sources", "analytics_section_content_sources_hint", report.ContentSources, report.TotalRequests, "content", translations),
+		analyticsSectionView("analytics_section_bot_crawlers", "analytics_section_bot_crawlers_hint", report.BotCrawlers, report.PageViews, "plain", translations),
+		analyticsSectionView("analytics_section_browsers", "analytics_section_browsers_hint", report.Browsers, report.PageViews, "plain", translations),
+		analyticsSectionView("analytics_section_os", "analytics_section_os_hint", report.OperatingSystems, report.PageViews, "plain", translations),
 		analyticsSectionView("analytics_section_system_events", "analytics_section_system_events_hint", report.SystemEvents, 0, "plain", translations),
 	}
 	return view
@@ -6498,7 +6476,7 @@ func (a *App) handleAnalyticsSecurityAction(w http.ResponseWriter, r *http.Reque
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	httpsecurity.RedirectLocal(w, r, r.URL.Path+"?analytics#security", http.StatusSeeOther)
+	httpsecurity.RedirectLocal(w, r, r.URL.Path+"?analytics&tab=security", http.StatusSeeOther)
 }
 
 // Security filtering is deliberately before routing and database access. The
