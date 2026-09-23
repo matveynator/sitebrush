@@ -5576,10 +5576,50 @@ func mergeAnalyticsCountRows(current, addition []analyticsCountRow, limit, total
 	return sortedAnalyticsRows(counts, limit, total)
 }
 
+func mergeAnalyticsMapPoints(current, addition []analyticsMapPoint) []analyticsMapPoint {
+	type mapPointKey struct {
+		Latitude, Longitude float64
+		Label               string
+	}
+	points := make(map[mapPointKey]analyticsMapPoint, len(current)+len(addition))
+	for _, collection := range [][]analyticsMapPoint{current, addition} {
+		for _, point := range collection {
+			key := mapPointKey{Latitude: point.Latitude, Longitude: point.Longitude, Label: point.Label}
+			merged := points[key]
+			if merged.Label == "" {
+				merged = point
+				merged.Count = 0
+			}
+			merged.Count += point.Count
+			points[key] = merged
+		}
+	}
+	result := make([]analyticsMapPoint, 0, len(points))
+	total := 0
+	for _, point := range points {
+		total += point.Count
+	}
+	for _, point := range points {
+		point.Percent = analyticsPercent(point.Count, total)
+		point.Heat = 0
+		point.Radius = 0
+		result = append(result, point)
+	}
+	sort.Slice(result, func(i, j int) bool {
+		if result[i].Count == result[j].Count {
+			return result[i].Label < result[j].Label
+		}
+		return result[i].Count > result[j].Count
+	})
+	if len(result) > 64 {
+		result = result[:64]
+	}
+	return result
+}
+
 func mergeTechnicalReports(current, addition analyticsPreparedReport) analyticsPreparedReport {
 	if current.GeneratedAt == "" {
 		current = addition
-		current.MapPoints = nil
 		return current
 	}
 	previousRequests := current.TotalRequests
@@ -5624,7 +5664,7 @@ func mergeTechnicalReports(current, addition analyticsPreparedReport) analyticsP
 	if len(current.SystemEvents) > 32 {
 		current.SystemEvents = current.SystemEvents[len(current.SystemEvents)-32:]
 	}
-	current.MapPoints = nil
+	current.MapPoints = mergeAnalyticsMapPoints(current.MapPoints, addition.MapPoints)
 	current.UniqueVisitors = 0
 	current.ReturningVisitors = 0
 	current.ReturnVisits = 0
@@ -6261,12 +6301,14 @@ func (a *App) analyticsPage(w http.ResponseWriter, r *http.Request) {
 			serverLocalHours[hour] = row.Count
 		}
 	}
+	localHoursJSON, _ := json.Marshal(experience.LocalHours)
+	serverHoursJSON, _ := json.Marshal(serverLocalHours)
 	a.render(w, r, "analytics.html", map[string]any{
 		"ReturnPath":       requestedReturnPath(r),
 		"AnalyticsTab":     selectedTab,
 		"Report":           analyticsReportView(report, translationsForRequest(r)),
 		"BrowserAnalytics": browserDashboard,
-		"Experience":       experience, "ExperienceFilter": filter, "Security": security, "SecurityBlocks": securityBlocks, "SecurityLocalBlocks": securityLocalBlocks, "SecurityGlobalBlocks": securityGlobalBlocks, "SecurityAllowlist": securityAllowlist, "SecurityThrottles": securityThrottles, "SecuritySettings": securitySettings, "GoalsText": strings.Join(goalLines, "\n"), "SessionMapJSON": template.JS(mapJSON), "PeriodOptions": []int{1, 7, 30, 90}, "UnknownGeo": unknownGeo, "ServerRequests": serverRequests, "ServerLocalHours": serverLocalHours,
+		"Experience":       experience, "ExperienceFilter": filter, "Security": security, "SecurityBlocks": securityBlocks, "SecurityLocalBlocks": securityLocalBlocks, "SecurityGlobalBlocks": securityGlobalBlocks, "SecurityAllowlist": securityAllowlist, "SecurityThrottles": securityThrottles, "SecuritySettings": securitySettings, "GoalsText": strings.Join(goalLines, "\n"), "SessionMapJSON": template.JS(mapJSON), "PeriodOptions": []int{1, 7, 30, 90}, "UnknownGeo": unknownGeo, "ServerRequests": serverRequests, "ServerLocalHours": serverLocalHours, "LocalHoursJSON": template.JS(localHoursJSON), "ServerHoursJSON": template.JS(serverHoursJSON),
 	})
 }
 
