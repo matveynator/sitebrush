@@ -158,6 +158,7 @@ var sitebrushRuServiceMailRelayPublicKey = ""
 type App struct {
 	analyticsStorage               browserstats.Repository
 	attackGuard                    *httpsecurity.AttackGuard
+	throttleGuard                  *httpsecurity.ThrottleGuard
 	securityAnalytics              chan siteAnalyticsEvent
 	securityLosses                 chan string
 	securityReputation             chan<- securitysync.Request
@@ -6023,10 +6024,14 @@ func (a *App) analyticsPage(w http.ResponseWriter, r *http.Request) {
 	}
 	security := browserstats.SecurityReport{}
 	securityBlocks := []httpsecurity.SecurityBlock{}
+	securityThrottles := []httpsecurity.SecurityThrottle{}
 	securitySettings := httpsecurity.SecuritySettings{}
 	if a.attackGuard != nil {
 		securityBlocks, _ = a.attackGuard.Snapshot(time.Now().UTC())
 		securitySettings, _ = a.attackGuard.Settings()
+	}
+	if a.throttleGuard != nil {
+		securityThrottles, _ = a.throttleGuard.Snapshot(time.Now().UTC())
 	}
 	loadedSecurity := a.analyticsStorageExchange(browserstats.StorageRequest{Operation: browserstats.ReadSecurity, Domain: domain, Limit: 2 << 20, Stop: r.Context().Done()})
 	if loadedSecurity.Err == nil {
@@ -6056,7 +6061,7 @@ func (a *App) analyticsPage(w http.ResponseWriter, r *http.Request) {
 		"ReturnPath":       requestedReturnPath(r),
 		"Report":           analyticsReportView(report, translationsForRequest(r)),
 		"BrowserAnalytics": browserDashboard,
-		"Experience":       experience, "ExperienceFilter": filter, "Security": security, "SecurityBlocks": securityBlocks, "SecuritySettings": securitySettings, "GoalsText": strings.Join(goalLines, "\n"), "SessionMapJSON": template.JS(mapJSON), "PeriodOptions": []int{1, 7, 30, 90}, "UnknownGeo": unknownGeo, "ServerRequests": serverRequests,
+		"Experience":       experience, "ExperienceFilter": filter, "Security": security, "SecurityBlocks": securityBlocks, "SecurityThrottles": securityThrottles, "SecuritySettings": securitySettings, "GoalsText": strings.Join(goalLines, "\n"), "SessionMapJSON": template.JS(mapJSON), "PeriodOptions": []int{1, 7, 30, 90}, "UnknownGeo": unknownGeo, "ServerRequests": serverRequests,
 	})
 }
 
@@ -6218,6 +6223,12 @@ func (a *App) handleAnalyticsSecurityAction(w http.ResponseWriter, r *http.Reque
 		_, err = a.attackGuard.Add(r.FormValue("ip"), r.FormValue("reason"), r.FormValue("description"), "manual", expiresAt, now)
 	case "remove":
 		err = a.attackGuard.Remove(r.FormValue("ip"))
+	case "unthrottle":
+		if a.throttleGuard == nil {
+			err = errors.New("throttle guard unavailable")
+		} else {
+			err = a.throttleGuard.Remove(r.FormValue("ip"))
+		}
 	case "update":
 		err = a.attackGuard.Update(r.FormValue("ip"), r.FormValue("reason"), r.FormValue("description"))
 	case "settings":
@@ -6240,28 +6251,55 @@ func (a *App) handleAnalyticsSecurityAction(w http.ResponseWriter, r *http.Reque
 // guard owns its mutable state in channel workers; overload therefore fails open
 // instead of turning the protection layer into a site-wide lock.
 func (a *App) authAbuseMiddleware(next http.Handler) http.Handler {
-	if a.attackGuard == nil {
+	if a.attackGuard == nil && a.throttleGuard == nil {
 		return next
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		now := time.Now().UTC()
 		clientIP := clientIPAddress(r)
 		trusted := httpsecurity.IsLocalRequest(r) || sitebrushPeerRequestTrusted(r, now)
-		block, blocked := a.attackGuard.ObserveRequestFast(clientIP, r.URL.EscapedPath(), r.Method, trusted, now)
-		if !blocked {
-			next.ServeHTTP(w, r)
-			return
+
+		if a.attackGuard != nil {
+			block, blocked := a.attackGuard.ObserveRequestFast(clientIP, r.URL.EscapedPath(), r.Method, trusted, now)
+			if blocked {
+				retryAfter := int(time.Until(block.ExpiresAt).Seconds())
+				if retryAfter < 1 {
+					retryAfter = 1
+				}
+				w.Header().Set("Content-Type", "text/html; charset=utf-8")
+				w.Header().Set("Cache-Control", "no-store")
+				w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
+				w.Header().Set("X-Sitebrush-Security-Incident", block.IncidentID)
+				w.WriteHeader(http.StatusTooManyRequests)
+				_, _ = io.WriteString(w, httpsecurity.BlockedHTML(preferredLanguageCode(r.Header.Get("Accept-Language")), block))
+				return
+			}
 		}
-		retryAfter := int(time.Until(block.ExpiresAt).Seconds())
-		if retryAfter < 1 {
-			retryAfter = 1
+
+		if a.throttleGuard != nil {
+			decision := a.throttleGuard.ObserveFast(clientIP, trusted, now)
+			if decision.RateLimited {
+				w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+				w.Header().Set("Cache-Control", "no-store")
+				w.Header().Set("Retry-After", "1")
+				w.Header().Set("X-Sitebrush-Security-Throttle", "active")
+				w.WriteHeader(http.StatusTooManyRequests)
+				_, _ = io.WriteString(w, "Request rate temporarily reduced. Retry shortly.\n")
+				return
+			}
+			if decision.Delay > 0 {
+				timer := time.NewTimer(decision.Delay)
+				defer timer.Stop()
+				select {
+				case <-r.Context().Done():
+					return
+				case <-timer.C:
+				}
+				w.Header().Set("X-Sitebrush-Security-Throttle", "active")
+			}
 		}
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.Header().Set("Cache-Control", "no-store")
-		w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
-		w.Header().Set("X-Sitebrush-Security-Incident", block.IncidentID)
-		w.WriteHeader(http.StatusTooManyRequests)
-		_, _ = io.WriteString(w, httpsecurity.BlockedHTML(preferredLanguageCode(r.Header.Get("Accept-Language")), block))
+
+		next.ServeHTTP(w, r)
 	})
 }
 
@@ -6853,6 +6891,13 @@ func runSitebrushServer(ctx context.Context, config serverRunConfig) error {
 	}
 	application.attackGuard = attackGuard
 	defer attackGuard.Close()
+	throttleGuardPath := filepath.Join(application.storageRootDir(), "security", "throttleguard.json")
+	throttleGuard, throttleGuardErr := httpsecurity.NewThrottleGuard(throttleGuardPath)
+	if throttleGuardErr != nil {
+		return fmt.Errorf("load security throttle guard: %w", throttleGuardErr)
+	}
+	application.throttleGuard = throttleGuard
+	defer throttleGuard.Close()
 	securityReputationPath := filepath.Join(application.storageRootDir(), "security", "reputation.json")
 	securityReputation, securityReputationErr := securitysync.Start(securityReputationPath, ctx.Done())
 	if securityReputationErr != nil {
