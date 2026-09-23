@@ -15149,11 +15149,18 @@ func TestDefaultCrawlerDiscoveryFilesExposePublishedContent(t *testing.T) {
 
 	robotsRequest := httptest.NewRequest(http.MethodGet, "https://example.com/robots.txt", nil)
 	robotsResponse := httptest.NewRecorder()
-	application.serveDefaultRobotsTXT(robotsResponse, robotsRequest)
+	application.serveDefaultRobotsTXT(robotsResponse, robotsRequest, "example.com")
 	if robotsResponse.Code != http.StatusOK {
 		t.Fatalf("robots status = %d", robotsResponse.Code)
 	}
-	for _, expected := range []string{"User-agent: *", "Allow: /", "Sitemap: https://example.com/sitemap.xml"} {
+	if _, err := rawDB.Exec(`INSERT INTO page_password_rules(domain,path,password_hash,created_at,updated_at) VALUES(?,?,?,?,?)`, "example.com", "/private/", "hash", time.Now().UTC().Format(time.RFC3339), time.Now().UTC().Format(time.RFC3339)); err != nil {
+		t.Fatal(err)
+	}
+	robotsRequest = httptest.NewRequest(http.MethodGet, "https://example.com/robots.txt", nil)
+	robotsResponse = httptest.NewRecorder()
+	application.serveDefaultRobotsTXT(robotsResponse, robotsRequest, "example.com")
+
+	for _, expected := range []string{"User-agent: *", "Allow: /", "Disallow: /private", "Sitemap: https://example.com/sitemap.xml"} {
 		if !strings.Contains(robotsResponse.Body.String(), expected) {
 			t.Fatalf("robots missing %q: %s", expected, robotsResponse.Body.String())
 		}
@@ -15191,5 +15198,16 @@ func TestDefaultCrawlerIndexOnlyHandlesReadOnlyDiscoveryPaths(t *testing.T) {
 		if application.serveDefaultCrawlerIndex(response, request, "example.com", request.URL.Path) {
 			t.Fatalf("unexpectedly handled %s %s", testCase.method, testCase.path)
 		}
+	}
+}
+
+
+func TestPasswordPromptPreventsIndexing(t *testing.T) {
+	application, _ := newTestApplication(t)
+	request := httptest.NewRequest(http.MethodGet, "https://example.com/private/", nil)
+	response := httptest.NewRecorder()
+	application.renderPagePasswordPrompt(response, request, "example.com", "/private/", "", http.StatusUnauthorized, time.Time{})
+	if got := response.Header().Get("X-Robots-Tag"); got != "noindex, nofollow, noarchive" {
+		t.Fatalf("X-Robots-Tag = %q", got)
 	}
 }

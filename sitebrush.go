@@ -28314,6 +28314,7 @@ func (a *App) renderPagePasswordPrompt(w http.ResponseWriter, r *http.Request, d
 	actionURL := template.HTMLEscapeString(cleanPath(pagePath) + "?page_password_unlock")
 	menuScript := buildGuestContextMenuScriptForLanguage(pagePath, domain, languageCode)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("X-Robots-Tag", "noindex, nofollow, noarchive")
 	w.WriteHeader(statusCode)
 	_, _ = w.Write([]byte(`<!doctype html>
 <html lang="` + template.HTMLEscapeString(languageCode) + `">
@@ -35982,7 +35983,7 @@ func (a *App) serveDefaultCrawlerIndex(w http.ResponseWriter, r *http.Request, d
 	}
 
 	if pagePath == "/robots.txt" {
-		a.serveDefaultRobotsTXT(w, r)
+		a.serveDefaultRobotsTXT(w, r, domain)
 		return true
 	}
 	a.serveDefaultSitemapXML(w, r, domain)
@@ -36004,15 +36005,43 @@ func publicCrawlerBaseURL(r *http.Request) string {
 	return scheme + "://" + host
 }
 
-func (a *App) serveDefaultRobotsTXT(w http.ResponseWriter, r *http.Request) {
+func (a *App) serveDefaultRobotsTXT(w http.ResponseWriter, r *http.Request, domain string) {
 	baseURL := publicCrawlerBaseURL(r)
 	if baseURL == "" {
 		http.Error(w, "invalid request host", http.StatusBadRequest)
 		return
 	}
+	rows, err := a.db.QueryContext(r.Context(), `SELECT path FROM page_password_rules WHERE domain=? ORDER BY path ASC`, domain)
+	if err != nil {
+		http.Error(w, "failed to read protected paths", http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+
+	protectedPaths := make([]string, 0, 8)
+	for rows.Next() {
+		var protectedPath string
+		if scanErr := rows.Scan(&protectedPath); scanErr != nil {
+			continue
+		}
+		protectedPath = cleanPath(protectedPath)
+		if protectedPath == "" {
+			continue
+		}
+		protectedPaths = append(protectedPaths, protectedPath)
+	}
+	if err := rows.Err(); err != nil {
+		http.Error(w, "failed to read protected paths", http.StatusInternalServerError)
+		return
+	}
+
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.Header().Set("Cache-Control", "public, max-age=3600")
-	_, _ = io.WriteString(w, "User-agent: *\nAllow: /\nSitemap: "+baseURL+"/sitemap.xml\n")
+	_, _ = io.WriteString(w, "User-agent: *\nAllow: /\n")
+	for _, protectedPath := range protectedPaths {
+		_, _ = io.WriteString(w, "Disallow: "+protectedPath+"\n")
+	}
+	_, _ = io.WriteString(w, "Sitemap: "+baseURL+"/sitemap.xml\n")
 }
 
 func (a *App) serveDefaultSitemapXML(w http.ResponseWriter, r *http.Request, domain string) {
