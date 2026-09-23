@@ -71,3 +71,49 @@
   const confirmationForm = document.querySelector('[data-account-auto-confirm]');
   if (confirmationForm) confirmationForm.requestSubmit();
 })();
+
+
+(function prepareAccountCopyButtons() {
+  'use strict';
+  const tools = document.querySelector('[data-account-code-tools]');
+  const copyLabel = tools ? tools.getAttribute('data-copy-label') || 'Copy' : 'Copy';
+  const copySuccess = tools ? tools.getAttribute('data-copy-success') || 'Copied' : 'Copied';
+  const copyError = tools ? tools.getAttribute('data-copy-error') || 'Copy failed' : 'Copy failed';
+
+  async function copyText(text) {
+    if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+      await navigator.clipboard.writeText(text);
+      return;
+    }
+    const temporary = document.createElement('textarea');
+    temporary.value = text;
+    temporary.setAttribute('readonly', '');
+    temporary.style.position = 'fixed';
+    temporary.style.opacity = '0';
+    document.body.appendChild(temporary);
+    temporary.select();
+    const copied = document.execCommand('copy');
+    temporary.remove();
+    if (!copied) throw new Error(copyError);
+  }
+
+  document.querySelectorAll('[data-copy-from]').forEach(function bindCopyButton(button) {
+    const selector = button.getAttribute('data-copy-from');
+    const source = selector ? document.querySelector(selector) : null;
+    if (!source) return;
+    button.addEventListener('click', async function copyAccountValue() {
+      const original = button.textContent || copyLabel;
+      button.disabled = true;
+      try {
+        await copyText(source.textContent || '');
+        button.textContent = copySuccess;
+      } catch (copyFailure) {
+        button.textContent = copyError;
+      }
+      window.setTimeout(function restoreCopyButton() {
+        button.textContent = original;
+        button.disabled = false;
+      }, 1400);
+    });
+  });
+})();
