@@ -509,11 +509,16 @@ func (guard *AttackGuard) ObserveFast(ip, path string, trusted bool, now time.Ti
 }
 
 func (guard *AttackGuard) ObserveRequestFast(ip, path, method string, trusted bool, now time.Time) (SecurityBlock, bool) {
+	block, blocked, _ := guard.ObserveRequestFastDisposition(ip, path, method, trusted, now)
+	return block, blocked
+}
+
+func (guard *AttackGuard) ObserveRequestFastDisposition(ip, path, method string, trusted bool, now time.Time) (SecurityBlock, bool, bool) {
 	result, ok := guard.exchangeFast(attackGuardRequest{Operation: attackGuardObserveFast, IP: ip, Path: path, Method: method, Trusted: trusted, Now: now})
 	if ok && result.Changed {
 		guard.signalSave()
 	}
-	return result.Block, ok && result.Blocked
+	return result.Block, ok && result.Blocked, ok && result.Allowed
 }
 
 func (guard *AttackGuard) ObserveIncident(ip, category, description string, now time.Time) (SecurityBlock, bool) {
