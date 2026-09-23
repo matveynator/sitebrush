@@ -369,8 +369,7 @@ func handleAttackGuardRequest(blocks map[string]SecurityBlock, allowlist map[str
 		cleanReason := cleanSecurityText(request.Reason, 96)
 		cleanDescription := cleanSecurityText(request.Description, 240)
 		reasonLog := append([]SecurityReasonEvent(nil), existing.ReasonLog...)
-		reasonLog = append(reasonLog, SecurityReasonEvent{At: request.Now, Reason: cleanReason, Description: cleanDescription, Source: "global"})
-		reasonLog = pruneSecurityReasonLog(reasonLog, now)
+		reasonLog = appendSecurityReasonEvent(reasonLog, SecurityReasonEvent{First: request.Now, At: request.Now, Reason: cleanReason, Description: cleanDescription, Source: "global", Count: 1}, now)
 		block := SecurityBlock{
 			IP:          ip,
 			Reason:      cleanReason,
@@ -477,20 +476,30 @@ func blockSecurityIP(blocks map[string]SecurityBlock, ip, reason, description, s
 
 func appendSecurityReasonEvent(events []SecurityReasonEvent, event SecurityReasonEvent, now time.Time) []SecurityReasonEvent {
 	events = pruneSecurityReasonLog(events, now)
+	cutoff := now.Add(-securityReasonHistoryTTL)
 	for index := len(events) - 1; index >= 0; index-- {
 		previous := &events[index]
 		if previous.Reason != event.Reason || previous.Description != event.Description || previous.Source != event.Source {
 			continue
 		}
-		if previous.Count < 1 {
-			previous.Count = 1
-		}
 		if previous.First.IsZero() {
 			previous.First = previous.At
+		}
+		if previous.First.Before(cutoff) {
+			break
+		}
+		if previous.Count < 1 {
+			previous.Count = 1
 		}
 		previous.At = event.At
 		previous.Count++
 		return events
+	}
+	if event.Count < 1 {
+		event.Count = 1
+	}
+	if event.First.IsZero() {
+		event.First = event.At
 	}
 	events = append(events, event)
 	if len(events) > securityReasonLogLimit {
