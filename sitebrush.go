@@ -9824,7 +9824,7 @@ func (a *App) login(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
 		a.renderAccountTOTP(w, r, totpChallenge, translationsForRequest(r)["auth_totp_invalid"])
 	case "limited":
-		w.Header().Set("Retry-After", "60")
+		w.Header().Set("Retry-After", strconv.Itoa(int(accountauth.CodeSendCooldown/time.Second)))
 		w.WriteHeader(http.StatusTooManyRequests)
 		a.renderLoginPage(w, r, "/", email, translationsForRequest(r)["auth_send_limited"], "warning", time.Time{}, false)
 	default:
