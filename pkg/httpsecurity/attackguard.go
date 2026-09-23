@@ -139,11 +139,13 @@ func NewAttackGuard(path string) (*AttackGuard, error) {
 	}
 	initialBlocks := make([][]SecurityBlock, attackGuardShardCount)
 	initialAllowlist := make([][]SecurityAllow, attackGuardShardCount)
+	now := time.Now().UTC()
 	for _, block := range state.Blocks {
 		block.IP = normalizeSecurityIP(block.IP)
 		if block.IP == "" {
 			continue
 		}
+		block.ReasonLog = pruneSecurityReasonLog(block.ReasonLog, now)
 		index := attackGuardShardIndex(block.IP)
 		initialBlocks[index] = append(initialBlocks[index], block)
 	}
