@@ -552,7 +552,7 @@
       <small class="text-muted">| {{index .T "analytics_title"}}</small>
     </h1>
     <div class="page-header-actions">
-      <span class="btn btn-outline-secondary disabled">Server <span id="analytics-server-clock" data-server-time="{{.ServerNowRFC3339}}">{{.ServerNowDisplay}}</span> · {{.ServerTimezone}}</span>
+      <span class="btn btn-outline-secondary disabled">Server <span id="analytics-server-clock" data-server-time="{{.ServerNowRFC3339}}" data-server-offset="{{.ServerTimezoneOffsetSeconds}}">{{.ServerNowDisplay}}</span> · {{.ServerTimezone}}</span>
       <a id="analytics-return-link" class="btn btn-outline-secondary analytics-back-link" href="{{.ReturnPath}}" data-fallback="{{.ReturnPath}}">{{index .T "back_to_uri"}}</a>
     </div>
   </div>
@@ -1321,11 +1321,12 @@
   const clock = document.getElementById('analytics-server-clock');
   if (!clock) return;
   const serverStart = Date.parse(clock.dataset.serverTime || '');
-  if (!Number.isFinite(serverStart)) return;
+  const serverOffsetMilliseconds = Number(clock.dataset.serverOffset || 0) * 1000;
+  if (!Number.isFinite(serverStart) || !Number.isFinite(serverOffsetMilliseconds)) return;
   const clientStart = Date.now();
   function renderServerClock() {
-    const currentServerTime = new Date(serverStart + Date.now() - clientStart);
-    clock.textContent = new Intl.DateTimeFormat(undefined, {year:'numeric',month:'short',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false}).format(currentServerTime);
+    const currentServerWallTime = new Date(serverStart + Date.now() - clientStart + serverOffsetMilliseconds);
+    clock.textContent = new Intl.DateTimeFormat(undefined, {timeZone:'UTC',year:'numeric',month:'short',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false}).format(currentServerWallTime);
   }
   renderServerClock();
   window.setInterval(renderServerClock, 1000);
