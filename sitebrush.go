@@ -21282,6 +21282,9 @@ func (a *App) pullSecurityReputationWithTimeout(stop <-chan struct{}) {
 	}
 	for _, entry := range entries {
 		description := fmt.Sprintf("confirmed by %d independent SiteBrush installations", entry.Confirmations)
+		if strings.TrimSpace(entry.Description) != "" {
+			description += ": " + strings.TrimSpace(entry.Description)
+		}
 		_ = a.attackGuard.ApplyGlobal(entry.IP, entry.Reason, description, entry.LastEvent, entry.ExpiresAt)
 	}
 }
