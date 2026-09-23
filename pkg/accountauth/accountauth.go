@@ -106,6 +106,18 @@ func Reserve(ctx context.Context, tx *sql.Tx, domain, email, ip string, now time
 	return err == nil, err
 }
 
+func Credentials(ctx context.Context, tx *sql.Tx, domain, email, password string) (bool, error) {
+	var stored string
+	err := tx.QueryRowContext(ctx, `SELECT password FROM users WHERE domain=? AND email=? AND is_admin=1`, domain, email).Scan(&stored)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return subtle.ConstantTimeCompare([]byte(password), []byte(stored)) == 1, nil
+}
+
 func Password(ctx context.Context, tx *sql.Tx, domain, email, password, ip, path, language string, now time.Time, allowLocalSession ...bool) (Outcome, error) {
 	var stored string
 	err := tx.QueryRowContext(ctx, `SELECT password FROM users WHERE domain=? AND email=? AND is_admin=1`, domain, email).Scan(&stored)
