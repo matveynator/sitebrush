@@ -207,9 +207,6 @@ func handleAttackGuardRequest(blocks map[string]SecurityBlock, windows map[strin
 			}
 			return attackGuardResult{}
 		}
-		if block, blocked := activeSecurityBlock(blocks, ip, now); blocked {
-			return attackGuardResult{Block: block, Blocked: true}
-		}
 		if !settings.AutoBlock || ip == "" {
 			return attackGuardResult{}
 		}
