@@ -14674,7 +14674,7 @@ func TestAnalyticsVerifiedAliasSharesPrimaryReports(t *testing.T) {
 			t.Fatal("collector shutdown timed out")
 		}
 	}
-	technical, available := app.loadAnalyticsReport(context.Background(), "primary.example")
+	technical, available := app.loadAnalyticsReport(context.Background(), "primary.example", 7)
 	if !available || technical.TotalRequests != 2 {
 		t.Fatalf("technical report: %+v, available=%v", technical, available)
 	}
