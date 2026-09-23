@@ -3210,3 +3210,147 @@ body.technical-page.analytics-page {
 .technical-page .profile-email-step .profile-step-status.text-danger {
     color: var(--bs-danger, #dc3545) !important;
 }
+
+
+/* Account security cards use the same compact Meridian layout as the rest of the admin UI. */
+.technical-page .profile-account-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 320px), 1fr));
+    gap: 16px;
+    width: min(100%, 1120px);
+    align-items: start;
+}
+.technical-page .profile-account-card {
+    width: 100%;
+    max-width: none;
+    min-width: 0;
+    box-sizing: border-box;
+    align-content: start;
+}
+.technical-page .profile-account-card-header {
+    display: grid;
+    gap: 6px;
+}
+.technical-page .profile-account-card-header h2,
+.technical-page .profile-authenticator-card h3 {
+    margin: 0;
+}
+.technical-page .profile-account-card-header p {
+    margin: 0;
+    color: var(--theme-muted-foreground);
+    line-height: 1.45;
+}
+.technical-page .profile-account-card-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    align-items: center;
+}
+.technical-page .profile-account-list {
+    display: grid;
+    gap: 10px;
+}
+.technical-page .profile-account-list .auth-trusted-row {
+    margin: 0;
+    padding: 12px;
+    border: 1px solid var(--theme-border);
+    border-radius: calc(var(--theme-radius) - 2px);
+    background: var(--panel-soft);
+}
+.technical-page .account-status,
+.technical-page .account-status-inline {
+    width: fit-content;
+    padding: 5px 9px;
+    border-radius: 999px;
+    font-size: 12px;
+    font-weight: 700;
+}
+.technical-page .account-status-success,
+.technical-page .account-status-inline {
+    background: color-mix(in srgb, var(--theme-success) 14%, var(--theme-card));
+    color: var(--theme-success);
+}
+.technical-page .authenticator-apps,
+.technical-page .authenticator-connect,
+.technical-page .authenticator-code-form {
+    display: grid;
+    gap: 10px;
+}
+.technical-page .authenticator-apps-label {
+    color: var(--theme-muted-foreground);
+    font-size: 13px;
+    font-weight: 600;
+}
+.technical-page .authenticator-app-buttons {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+.technical-page .authenticator-app-buttons .btn {
+    min-height: 34px;
+    padding: 7px 10px;
+    font-size: 13px;
+}
+.technical-page .authenticator-steps {
+    display: grid;
+    gap: 8px;
+    margin: 0;
+    padding-inline-start: 22px;
+    color: var(--theme-foreground);
+}
+.technical-page .authenticator-steps li::marker {
+    color: var(--theme-primary);
+    font-weight: 700;
+}
+.technical-page .authenticator-connect {
+    padding: 12px;
+    border: 1px solid var(--theme-border);
+    border-radius: calc(var(--theme-radius) - 2px);
+    background: var(--panel-soft);
+}
+.technical-page .authenticator-connect-or {
+    color: var(--theme-muted-foreground);
+    font-size: 12px;
+    font-weight: 600;
+}
+.technical-page .auth-copy-field {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 8px;
+    align-items: stretch;
+}
+.technical-page .auth-copy-field code {
+    display: flex;
+    align-items: center;
+    min-width: 0;
+    padding: 9px 10px;
+    overflow-wrap: anywhere;
+    word-break: break-all;
+}
+.technical-page .auth-copy-field .btn {
+    white-space: nowrap;
+}
+.technical-page .authenticator-code-form .hint {
+    display: block;
+    margin-top: 4px;
+    color: var(--theme-muted-foreground);
+    font-size: 13px;
+    font-weight: 400;
+    line-height: 1.4;
+}
+.technical-page .authenticator-code-form input[autocomplete="one-time-code"] {
+    width: min(100%, 14rem);
+    margin-top: 8px;
+}
+@media (max-width: 900px), (hover: none) and (pointer: coarse) {
+    .technical-page .profile-account-grid {
+        grid-template-columns: 1fr;
+    }
+    .technical-page .authenticator-app-buttons {
+        display: grid;
+        grid-template-columns: 1fr;
+    }
+    .technical-page .auth-copy-field {
+        grid-template-columns: 1fr;
+    }
+}
