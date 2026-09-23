@@ -9614,6 +9614,15 @@ func (a *App) login(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Referrer-Policy", "no-referrer")
 	domain := a.siteDomain(r.Context(), r)
+
+	if hasQueryFlag(r, "passkey_begin") {
+		a.beginAccountPasskeyLogin(w, r, domain)
+		return
+	}
+	if hasQueryFlag(r, "passkey_finish") {
+		a.finishAccountPasskeyLogin(w, r, domain)
+		return
+	}
 	if a.isAdminRequest(r) {
 		httpsecurity.RedirectLocal(w, r, loginReturnPathOrDefault(r), http.StatusFound)
 		return
@@ -9626,8 +9635,23 @@ func (a *App) login(w http.ResponseWriter, r *http.Request) {
 	if a.renderAccountLoginBlock(w, r, blocked, locked, until) {
 		return
 	}
+
 	if r.Method == http.MethodGet {
-		if token := r.URL.Query().Get("login_challenge"); token != "" {
+		if token := strings.TrimSpace(r.URL.Query().Get("login_challenge")); token != "" {
+			if hasQueryFlag(r, "login_link") {
+				outcome := accountauth.Outcome{}
+				err := a.accountTransaction(r.Context(), func(transaction *sql.Tx) error {
+					var transactionErr error
+					outcome, transactionErr = accountauth.VerifyLink(r.Context(), transaction, domain, token, accountClientIP(r), time.Now())
+					return transactionErr
+				})
+				if err == nil && outcome.Status == "session" {
+					a.completeAccountLogin(w, r, domain, outcome, true)
+					return
+				}
+				a.renderAccountCode(w, r, token, "", translationsForRequest(r)["auth_invalid"])
+				return
+			}
 			a.renderAccountCode(w, r, token, "", "")
 			return
 		}
@@ -9638,44 +9662,98 @@ func (a *App) login(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
+
 	ip := accountClientIP(r)
 	outcome := accountauth.Outcome{}
-	token := r.FormValue("login_challenge")
+	token := strings.TrimSpace(r.FormValue("login_challenge"))
+	totpChallenge := strings.TrimSpace(r.FormValue("totp_challenge"))
 	email := strings.TrimSpace(r.FormValue("email"))
+	pendingTOTPChallenge := ""
+
 	err := a.accountTransaction(r.Context(), func(transaction *sql.Tx) error {
 		var transactionErr error
-		if token != "" {
+		switch {
+		case token != "":
 			outcome, transactionErr = accountauth.Verify(r.Context(), transaction, domain, token, r.FormValue("login_code"), ip, time.Now())
-		} else {
-			outcome, transactionErr = accountauth.Password(r.Context(), transaction, domain, email, r.FormValue("password"), ip, httpsecurity.LocalRedirectTarget(r.FormValue("return_path"), "/"), preferredLanguageCode(r.Header.Get("Accept-Language")), time.Now(), localAccountRequest(r))
+			return transactionErr
+		case totpChallenge != "" && r.FormValue("totp_fallback") == "1":
+			var fallbackEmail, returnPath string
+			fallbackEmail, returnPath, transactionErr = accounttotp.ConsumeForFallback(r.Context(), transaction, domain, totpChallenge, ip, time.Now())
+			if transactionErr != nil {
+				return transactionErr
+			}
+			outcome, transactionErr = accountauth.Challenge(r.Context(), transaction, domain, fallbackEmail, ip, returnPath, preferredLanguageCode(r.Header.Get("Accept-Language")), time.Now())
+			return transactionErr
+		case totpChallenge != "":
+			var authenticatedEmail, returnPath string
+			authenticatedEmail, returnPath, transactionErr = accounttotp.VerifyLogin(r.Context(), transaction, domain, totpChallenge, ip, r.FormValue("totp_code"), time.Now())
+			if transactionErr != nil {
+				outcome.Status = "invalid_totp"
+				return nil
+			}
+			var sessionToken string
+			sessionToken, transactionErr = accountauth.Session(r.Context(), transaction, domain, authenticatedEmail, ip, time.Now())
+			if transactionErr != nil {
+				return transactionErr
+			}
+			if transactionErr = accountauth.RememberAddress(r.Context(), transaction, domain, authenticatedEmail, ip, time.Now()); transactionErr != nil {
+				return transactionErr
+			}
+			outcome = accountauth.Outcome{Status: "session", Token: sessionToken, Email: authenticatedEmail, Path: returnPath}
+			return nil
+		default:
+			returnPath := httpsecurity.LocalRedirectTarget(r.FormValue("return_path"), "/")
+			if !localAccountRequest(r) && accounttotp.Enabled(r.Context(), transaction, domain, email) {
+				var valid bool
+				valid, transactionErr = accountauth.Credentials(r.Context(), transaction, domain, email, r.FormValue("password"))
+				if transactionErr != nil {
+					return transactionErr
+				}
+				if !valid {
+					outcome.Status = "credentials"
+					return nil
+				}
+				pendingTOTPChallenge, transactionErr = accounttotp.BeginLogin(r.Context(), transaction, domain, email, ip, returnPath, time.Now())
+				return transactionErr
+			}
+			outcome, transactionErr = accountauth.Password(r.Context(), transaction, domain, email, r.FormValue("password"), ip, returnPath, preferredLanguageCode(r.Header.Get("Accept-Language")), time.Now(), localAccountRequest(r))
+			return transactionErr
 		}
-		return transactionErr
 	})
 	if err != nil {
 		http.Error(w, "authentication unavailable", http.StatusServiceUnavailable)
 		return
 	}
+	if pendingTOTPChallenge != "" {
+		a.renderAccountTOTP(w, r, pendingTOTPChallenge, "")
+		return
+	}
+
 	switch outcome.Status {
 	case "session":
-		a.clearFailedLoginAttempts(r.Context(), domain, clientIPAddress(r))
-		httpsecurity.SetSensitiveCookie(w, r, &http.Cookie{Name: "sitebrush_session", Value: outcome.Token})
-		a.logHostingSupportEvent(r.Context(), "client_login", "success", outcome.Email, domain, "client signed in")
-		httpsecurity.RedirectLocal(w, r, outcome.Path, http.StatusFound)
+		a.completeAccountLogin(w, r, domain, outcome, token != "")
 	case "code":
-		link := requestScheme(r) + "://" + r.Host + "/?login&login_challenge=" + url.QueryEscape(outcome.Token)
-		result := a.sendServiceEmailNow(r.Context(), r, "account_login_code", domain, email, outcome.Code, outcome.Language, link)
+		link := requestScheme(r) + "://" + r.Host + "/?login&login_challenge=" + url.QueryEscape(outcome.Token) + "&login_link=1"
+		recipient := outcome.Email
+		if recipient == "" {
+			recipient = email
+		}
+		result := a.sendServiceEmailNow(r.Context(), r, "account_login_code", domain, recipient, outcome.Code, outcome.Language, link)
 		status := translationsForRequest(r)["auth_code_sent"]
 		if result.Err != nil {
 			status = translationsForRequest(r)["auth_delivery_failed"]
 		}
-		a.renderAccountCode(w, r, outcome.Token, email, status, result)
+		a.renderAccountCode(w, r, outcome.Token, recipient, status, result)
+	case "invalid_totp":
+		w.WriteHeader(http.StatusUnauthorized)
+		a.renderAccountTOTP(w, r, totpChallenge, translationsForRequest(r)["auth_totp_invalid"])
 	case "limited":
 		w.Header().Set("Retry-After", "60")
 		w.WriteHeader(http.StatusTooManyRequests)
 		a.renderLoginPage(w, r, "/", email, translationsForRequest(r)["auth_send_limited"], "warning", time.Time{}, false)
 	default:
-		_, until, locked := a.registerFailedLoginAttempt(r.Context(), domain, clientIPAddress(r))
-		if a.renderAccountLoginBlock(w, r, !until.IsZero(), locked, until) {
+		_, blockedUntil, hardLocked := a.registerFailedLoginAttempt(r.Context(), domain, clientIPAddress(r))
+		if a.renderAccountLoginBlock(w, r, !blockedUntil.IsZero(), hardLocked, blockedUntil) {
 			return
 		}
 		w.WriteHeader(http.StatusUnauthorized)
@@ -9685,6 +9763,100 @@ func (a *App) login(w http.ResponseWriter, r *http.Request) {
 			a.renderLoginPage(w, r, "/", email, translationsForRequest(r)["login_status_invalid_credentials"], "danger", time.Time{}, false)
 		}
 	}
+}
+
+func (a *App) renderAccountTOTP(w http.ResponseWriter, r *http.Request, challenge, status string) {
+	a.render(w, r, "login.html", map[string]any{
+		"Domain":        a.siteDomain(r.Context(), r),
+		"ShowTOTPForm":  true,
+		"TOTPChallenge": challenge,
+		"Status":        status,
+	})
+}
+
+func (a *App) completeAccountLogin(w http.ResponseWriter, r *http.Request, domain string, outcome accountauth.Outcome, offerPasskey bool) {
+	a.clearFailedLoginAttempts(r.Context(), domain, clientIPAddress(r))
+	httpsecurity.SetSensitiveCookie(w, r, &http.Cookie{Name: "sitebrush_session", Value: outcome.Token})
+	a.logHostingSupportEvent(r.Context(), "client_login", "success", outcome.Email, domain, "client signed in")
+	redirectPath := outcome.Path
+	if offerPasskey && accountpasskey.UserCount(r.Context(), a.db, domain, outcome.Email) == 0 {
+		redirectPath = "/?profile&passkey_offer=1&return_path=" + url.QueryEscape(httpsecurity.LocalRedirectTarget(outcome.Path, "/"))
+	}
+	httpsecurity.RedirectLocal(w, r, redirectPath, http.StatusFound)
+}
+
+func accountPasskeyRP(r *http.Request) (string, string, bool) {
+	if r == nil {
+		return "", "", false
+	}
+	if requestScheme(r) != "https" && !httpsecurity.IsLocalRequest(r) {
+		return "", "", false
+	}
+	originURL := &url.URL{Scheme: requestScheme(r), Host: r.Host}
+	rpID := strings.ToLower(strings.TrimSpace(originURL.Hostname()))
+	if rpID == "" {
+		return "", "", false
+	}
+	return rpID, originURL.Scheme + "://" + originURL.Host, true
+}
+
+func (a *App) beginAccountPasskeyLogin(w http.ResponseWriter, r *http.Request, domain string) {
+	if r.Method != http.MethodGet || accountpasskey.Count(r.Context(), a.db, domain) == 0 {
+		http.NotFound(w, r)
+		return
+	}
+	rpID, origin, valid := accountPasskeyRP(r)
+	if !valid {
+		http.Error(w, translationsForRequest(r)["auth_passkey_unavailable"], http.StatusBadRequest)
+		return
+	}
+	var result accountpasskey.BeginResult
+	err := a.accountTransaction(r.Context(), func(transaction *sql.Tx) error {
+		var transactionErr error
+		result, transactionErr = accountpasskey.BeginLogin(r.Context(), transaction, domain, rpID, origin, accountClientIP(r), httpsecurity.LocalRedirectTarget(r.URL.Query().Get("return_path"), "/"), time.Now())
+		return transactionErr
+	})
+	if err != nil {
+		http.Error(w, translationsForRequest(r)["auth_passkey_failed"], http.StatusBadRequest)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	_ = json.NewEncoder(w).Encode(result)
+}
+
+func (a *App) finishAccountPasskeyLogin(w http.ResponseWriter, r *http.Request, domain string) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	rpID, origin, valid := accountPasskeyRP(r)
+	if !valid {
+		http.Error(w, translationsForRequest(r)["auth_passkey_unavailable"], http.StatusBadRequest)
+		return
+	}
+	var email, returnPath, sessionToken string
+	err := a.accountTransaction(r.Context(), func(transaction *sql.Tx) error {
+		var transactionErr error
+		email, returnPath, transactionErr = accountpasskey.FinishLogin(r.Context(), transaction, domain, rpID, origin, accountClientIP(r), r.URL.Query().Get("passkey_token"), r, time.Now())
+		if transactionErr != nil {
+			return transactionErr
+		}
+		sessionToken, transactionErr = accountauth.Session(r.Context(), transaction, domain, email, accountClientIP(r), time.Now())
+		if transactionErr != nil {
+			return transactionErr
+		}
+		return accountauth.RememberAddress(r.Context(), transaction, domain, email, accountClientIP(r), time.Now())
+	})
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": translationsForRequest(r)["auth_passkey_failed"]})
+		return
+	}
+	a.clearFailedLoginAttempts(r.Context(), domain, clientIPAddress(r))
+	httpsecurity.SetSensitiveCookie(w, r, &http.Cookie{Name: "sitebrush_session", Value: sessionToken})
+	a.logHostingSupportEvent(r.Context(), "client_login", "success", email, domain, "client signed in with passkey")
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	_ = json.NewEncoder(w).Encode(map[string]string{"redirect": httpsecurity.LocalRedirectTarget(returnPath, "/")})
 }
 
 func (a *App) renderAccountLoginBlock(w http.ResponseWriter, r *http.Request, blocked, locked bool, until time.Time) bool {
