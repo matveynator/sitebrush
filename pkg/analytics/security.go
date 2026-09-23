@@ -13,6 +13,7 @@ type RequestObservation struct {
 	IP, Path, Query, Method, Agent, Language, Country, City string
 	Status                                                  int
 	Bytes                                                   int64
+	Trusted                                                 bool
 }
 type Probe struct {
 	Path, Category, Method string
@@ -118,7 +119,7 @@ func ProbeCategory(pathname, query string) string {
 	}
 	return ""
 }
-func (state *SecurityState) Record(request RequestObservation) {
+func (state *SecurityState) Record(request RequestObservation) string {
 	now := request.Time
 	if state.Started.IsZero() {
 		state.Started = now
@@ -132,7 +133,10 @@ func (state *SecurityState) Record(request RequestObservation) {
 		state.Windows = map[string]*RequestWindow{}
 	}
 	class := ClientClass(request.Agent)
-	category := ProbeCategory(request.Path, request.Query)
+	category := ""
+	if !request.Trusted {
+		category = ProbeCategory(request.Path, request.Query)
+	}
 	window := state.Windows[request.IP]
 	if window == nil || now.Sub(window.First) > time.Minute {
 		if len(state.Windows) >= 64 {
@@ -150,17 +154,19 @@ func (state *SecurityState) Record(request RequestObservation) {
 	if request.Status == 401 || request.Status == 403 {
 		window.Failures++
 	}
-	if category == "" && len(window.Paths) >= 60 {
-		category = "enumeration"
-	}
-	if category == "" && window.Failures >= 10 {
-		category = "authentication-failures"
-	}
-	if category == "" && window.Count >= 180 {
-		category = "rapid-crawl"
-	}
-	if category == "" && class == "scanner" {
-		category = "scanner-client"
+	if !request.Trusted {
+		if category == "" && len(window.Paths) >= 60 {
+			category = "enumeration"
+		}
+		if category == "" && window.Failures >= 10 {
+			category = "authentication-failures"
+		}
+		if category == "" && window.Count >= 180 {
+			category = "rapid-crawl"
+		}
+		if category == "" && class == "scanner" {
+			category = "scanner-client"
+		}
 	}
 	if category != "" {
 		state.recordIncident(request, category, class)
@@ -200,6 +206,7 @@ func (state *SecurityState) Record(request RequestObservation) {
 	if now.Sub(previous) > time.Minute || previous.UTC().Minute() != now.UTC().Minute() {
 		state.Prune(now)
 	}
+	return category
 }
 func (state *SecurityState) recordIncident(request RequestObservation, category, class string) {
 	index := -1

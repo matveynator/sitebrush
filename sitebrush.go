@@ -70,6 +70,7 @@ import (
 	"github.com/matveynator/sitebrush/v2/pkg/httpsecurity"
 	"github.com/matveynator/sitebrush/v2/pkg/mailout"
 	"github.com/matveynator/sitebrush/v2/pkg/outboundhttp"
+	"github.com/matveynator/sitebrush/v2/pkg/securitysync"
 	"github.com/matveynator/sitebrush/v2/pkg/serviceinstall"
 	"github.com/matveynator/sitebrush/v2/pkg/shutdownsignals"
 	"github.com/matveynator/sitebrush/v2/pkg/sitebrushtemplate"
@@ -156,8 +157,11 @@ var sitebrushRuServiceMailRelayPublicKey = ""
 // App keeps only explicit dependencies to stay readable and easy to swap.
 type App struct {
 	analyticsStorage               browserstats.Repository
+	attackGuard                    *httpsecurity.AttackGuard
 	securityAnalytics              chan siteAnalyticsEvent
 	securityLosses                 chan string
+	securityReputation             chan<- securitysync.Request
+	securityGlobalSignals          chan securitysync.Signal
 	analyticsShutdownRequested     <-chan struct{}
 	analyticsFlushInterval         time.Duration
 	analyticsFinished              chan struct{}
@@ -236,6 +240,7 @@ type sitebrushNetChanRequest struct {
 type sitebrushNetChanResponse struct {
 	Status     string
 	StatusCode int
+	Payload    []byte
 }
 
 type systemMailRouteRequest struct {
@@ -394,7 +399,9 @@ type serviceMailRequest struct {
 	ExpiresAt        string                             `json:"expires_at,omitempty"`
 	LanguageCode     string                             `json:"language_code"`
 	HostingSnapshot  *hostingandsupport.HostingSnapshot `json:"hosting_snapshot,omitempty"`
-	CreatedAt        string                             `json:"created_at"`
+	SecuritySignal   *securitysync.Signal                `json:"security_signal,omitempty"`
+	SecurityQuery    bool                                `json:"security_query,omitempty"`
+	CreatedAt        string                              `json:"created_at"`
 	Signature        string                             `json:"signature"`
 }
 
@@ -2213,6 +2220,7 @@ type siteAnalyticsEvent struct {
 	GeoLongitude   float64
 	GeoSource      string
 	VisitorID      string
+	TrustedPeer    bool
 	IsAdmin        bool
 	IsAsset        bool
 	IsController   bool
@@ -3293,7 +3301,7 @@ func (a *App) analyticsMiddleware(next http.Handler) http.Handler {
 			}
 		}
 		if a.securityAnalytics != nil && r.URL.Path != "/_sitebrush/analytics" && len(a.securityAnalytics) < cap(a.securityAnalytics) {
-			securityEvent := siteAnalyticsEvent{Bytes: writer.bytesWritten, Domain: a.analyticsEventDomain(r, ""), Path: analyticsBoundedString(r.URL.EscapedPath(), 512), Query: analyticsBoundedString(r.URL.RawQuery, 2048), Method: r.Method, StatusCode: writer.statusCode, OccurredAt: startedAt.UTC(), RemoteAddress: analyticsBoundedString(r.RemoteAddr, 64), Forwarded: analyticsBoundedString(r.Header.Get("Forwarded"), 256), ForwardedFor: analyticsBoundedString(r.Header.Get("X-Forwarded-For"), 256), UserAgent: analyticsBoundedString(r.UserAgent(), 256), AcceptLanguage: analyticsBoundedString(r.Header.Get("Accept-Language"), 64)}
+			securityEvent := siteAnalyticsEvent{Bytes: writer.bytesWritten, Domain: a.analyticsEventDomain(r, ""), Path: analyticsBoundedString(r.URL.EscapedPath(), 512), Query: analyticsBoundedString(r.URL.RawQuery, 2048), Method: r.Method, StatusCode: writer.statusCode, OccurredAt: startedAt.UTC(), RemoteAddress: analyticsBoundedString(r.RemoteAddr, 64), Forwarded: analyticsBoundedString(r.Header.Get("Forwarded"), 256), ForwardedFor: analyticsBoundedString(r.Header.Get("X-Forwarded-For"), 256), UserAgent: analyticsBoundedString(r.UserAgent(), 256), AcceptLanguage: analyticsBoundedString(r.Header.Get("Accept-Language"), 64), TrustedPeer: sitebrushPeerRequestTrusted(r, startedAt.UTC())}
 			select {
 			case a.securityAnalytics <- securityEvent:
 			default:
@@ -4262,7 +4270,20 @@ func (a *App) runSecurityAnalytics(stop <-chan struct{}) {
 				continue
 			}
 			address := clientIPAddress(&http.Request{RemoteAddr: event.RemoteAddress, Header: http.Header{"Forwarded": []string{event.Forwarded}, "X-Forwarded-For": []string{event.ForwardedFor}}})
-			state.Record(browserstats.RequestObservation{Time: event.OccurredAt, IP: address, Path: event.Path, Query: event.Query, Method: event.Method, Status: event.StatusCode, Bytes: event.Bytes, Agent: event.UserAgent, Language: analyticsLanguageLabel(event.AcceptLanguage)})
+			category := state.Record(browserstats.RequestObservation{Time: event.OccurredAt, IP: address, Path: event.Path, Query: event.Query, Method: event.Method, Status: event.StatusCode, Bytes: event.Bytes, Agent: event.UserAgent, Language: analyticsLanguageLabel(event.AcceptLanguage), Trusted: event.TrustedPeer})
+			if category != "" && a.attackGuard != nil {
+				_, blocked := a.attackGuard.ObserveIncident(address, category, "security analytics detected "+category, event.OccurredAt)
+				if blocked && a.securityGlobalSignals != nil {
+					settings, settingsErr := a.attackGuard.Settings()
+					if settingsErr == nil && settings.GlobalSync {
+						signal := securitysync.Signal{IP: address, Category: category, Description: "security analytics detected " + category, ObservedAt: event.OccurredAt}
+						select {
+						case a.securityGlobalSignals <- signal:
+						default:
+						}
+					}
+				}
+			}
 			state.Limit(1 << 20)
 			dirty[domain] = true
 		case <-ticker.C:
@@ -5968,6 +5989,10 @@ func (a *App) analyticsPage(w http.ResponseWriter, r *http.Request) {
 	}
 	domain := a.siteDomain(r.Context(), r)
 	if r.Method == http.MethodPost {
+		if strings.TrimSpace(r.FormValue("security_action")) != "" {
+			a.handleAnalyticsSecurityAction(w, r)
+			return
+		}
 		a.saveAnalyticsGoals(w, r, domain)
 		return
 	}
@@ -5997,6 +6022,12 @@ func (a *App) analyticsPage(w http.ResponseWriter, r *http.Request) {
 		goalLines = append(goalLines, goal.Name+" | "+kind+" | "+goal.Match)
 	}
 	security := browserstats.SecurityReport{}
+	securityBlocks := []httpsecurity.SecurityBlock{}
+	securitySettings := httpsecurity.SecuritySettings{}
+	if a.attackGuard != nil {
+		securityBlocks, _ = a.attackGuard.Snapshot(time.Now().UTC())
+		securitySettings, _ = a.attackGuard.Settings()
+	}
 	loadedSecurity := a.analyticsStorageExchange(browserstats.StorageRequest{Operation: browserstats.ReadSecurity, Domain: domain, Limit: 2 << 20, Stop: r.Context().Done()})
 	if loadedSecurity.Err == nil {
 		state := browserstats.SecurityState{}
@@ -6025,7 +6056,7 @@ func (a *App) analyticsPage(w http.ResponseWriter, r *http.Request) {
 		"ReturnPath":       requestedReturnPath(r),
 		"Report":           analyticsReportView(report, translationsForRequest(r)),
 		"BrowserAnalytics": browserDashboard,
-		"Experience":       experience, "ExperienceFilter": filter, "Security": security, "GoalsText": strings.Join(goalLines, "\n"), "SessionMapJSON": template.JS(mapJSON), "PeriodOptions": []int{1, 7, 30, 90}, "UnknownGeo": unknownGeo, "ServerRequests": serverRequests,
+		"Experience":       experience, "ExperienceFilter": filter, "Security": security, "SecurityBlocks": securityBlocks, "SecuritySettings": securitySettings, "GoalsText": strings.Join(goalLines, "\n"), "SessionMapJSON": template.JS(mapJSON), "PeriodOptions": []int{1, 7, 30, 90}, "UnknownGeo": unknownGeo, "ServerRequests": serverRequests,
 	})
 }
 
@@ -6161,9 +6192,76 @@ func formatAnalyticsTime(rawTime string) string {
 	return parsedTime.Local().Format("2006-01-02 15:04:05")
 }
 
+func (a *App) handleAnalyticsSecurityAction(w http.ResponseWriter, r *http.Request) {
+	if a.attackGuard == nil {
+		http.Error(w, "security guard unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "invalid security form", http.StatusBadRequest)
+		return
+	}
+	action := strings.TrimSpace(r.FormValue("security_action"))
+	now := time.Now().UTC()
+	var err error
+	switch action {
+	case "add":
+		expiresAt := now.Add(7 * 24 * time.Hour)
+		if rawDays := strings.TrimSpace(r.FormValue("days")); rawDays != "" {
+			days, parseErr := strconv.Atoi(rawDays)
+			if parseErr != nil || days < 1 || days > 365 {
+				http.Error(w, "invalid block duration", http.StatusBadRequest)
+				return
+			}
+			expiresAt = now.Add(time.Duration(days) * 24 * time.Hour)
+		}
+		_, err = a.attackGuard.Add(r.FormValue("ip"), r.FormValue("reason"), r.FormValue("description"), "manual", expiresAt, now)
+	case "remove":
+		err = a.attackGuard.Remove(r.FormValue("ip"))
+	case "update":
+		err = a.attackGuard.Update(r.FormValue("ip"), r.FormValue("reason"), r.FormValue("description"))
+	case "settings":
+		err = a.attackGuard.SetSettings(httpsecurity.SecuritySettings{
+			AutoBlock:  r.FormValue("auto_block") == "on",
+			GlobalSync: r.FormValue("global_sync") == "on",
+		})
+	default:
+		http.Error(w, "unknown security action", http.StatusBadRequest)
+		return
+	}
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	httpsecurity.RedirectLocal(w, r, r.URL.Path+"?analytics#security", http.StatusSeeOther)
+}
+
+// Security filtering is deliberately before routing and database access. The
+// guard owns its mutable state in channel workers; overload therefore fails open
+// instead of turning the protection layer into a site-wide lock.
 func (a *App) authAbuseMiddleware(next http.Handler) http.Handler {
+	if a.attackGuard == nil {
+		return next
+	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		next.ServeHTTP(w, r)
+		now := time.Now().UTC()
+		clientIP := clientIPAddress(r)
+		trusted := httpsecurity.IsLocalRequest(r) || sitebrushPeerRequestTrusted(r, now)
+		block, blocked := a.attackGuard.ObserveRequestFast(clientIP, r.URL.EscapedPath(), r.Method, trusted, now)
+		if !blocked {
+			next.ServeHTTP(w, r)
+			return
+		}
+		retryAfter := int(time.Until(block.ExpiresAt).Seconds())
+		if retryAfter < 1 {
+			retryAfter = 1
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
+		w.Header().Set("X-Sitebrush-Security-Incident", block.IncidentID)
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = io.WriteString(w, httpsecurity.BlockedHTML(preferredLanguageCode(r.Header.Get("Accept-Language")), block))
 	})
 }
 
@@ -6748,6 +6846,20 @@ func runSitebrushServer(ctx context.Context, config serverRunConfig) error {
 	var siteDatabaseRouter *perSiteDBRouter
 	application := &App{storagePath: effectiveStoragePath, storageRealRoot: storageRealRoot, dbPath: effectiveDBPath, debug: config.Debug, desktopMode: config.DesktopMode, nativeFileDialog: desktop.NativeFileDialogSupported(), grabTracker: newGrabProgressTracker(), grabCancels: newGrabCancelTracker(), trialPreviews: newPublicTrialPreviewStore(), publishTracker: newPublishProgressTracker(), analyticsEvents: make(chan siteAnalyticsEvent, 1024), analyticsLosses: make(chan string, 64), browserAnalyticsLosses: make(chan string, 64), browserAnalytics: make(chan browserAnalyticsEnvelope, 512), analyticsConnections: make(chan struct{}, 128), domainLogEvents: make(chan domainLogEvent, 1024)}
 	application.analyticsMemoryLimit = analyticsConfiguredMemoryLimit()
+	attackGuardPath := filepath.Join(application.storageRootDir(), "security", "attackguard.json")
+	attackGuard, attackGuardErr := httpsecurity.NewAttackGuard(attackGuardPath)
+	if attackGuardErr != nil {
+		return fmt.Errorf("load security attack guard: %w", attackGuardErr)
+	}
+	application.attackGuard = attackGuard
+	defer attackGuard.Close()
+	securityReputationPath := filepath.Join(application.storageRootDir(), "security", "reputation.json")
+	securityReputation, securityReputationErr := securitysync.Start(securityReputationPath, ctx.Done())
+	if securityReputationErr != nil {
+		return fmt.Errorf("load security reputation: %w", securityReputationErr)
+	}
+	application.securityReputation = securityReputation
+	application.securityGlobalSignals = make(chan securitysync.Signal, 64)
 	controlDatabaseDispatcher, err := startServerControlDatabaseDispatcher(effectiveDBPath, config.Debug)
 	if err != nil {
 		return fmt.Errorf("start server control database dispatcher: %w", err)
@@ -6810,6 +6922,7 @@ func runSitebrushServer(ctx context.Context, config serverRunConfig) error {
 	application.startServerOwnerRecoveryWorker(ctx)
 	application.startDemoSiteCleanupWorker(ctx)
 	application.startServiceMailKeyPairWorker(ctx)
+	go application.runSecurityGlobalSync(ctx.Done())
 	application.hostingSnapshotDeliveries = startHostingSnapshotNetChanDeliveryWorker(ctx.Done())
 	application.hostingSnapshotReports = application.startHostingSnapshotReporter(ctx)
 	application.startHostingSnapshotMetricsMonitor(ctx)
@@ -11064,6 +11177,7 @@ func (a *App) grabPage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	sourceOptions = a.withSitebrushPeerAttestation(r.Context(), sourceOptions)
 
 	remoteSourceURL, err := parseGrabSourceURLForServerIP(sourceURL, sourceOptions.IP)
 	if err != nil {
@@ -11162,6 +11276,7 @@ func (a *App) retryGrabFailedResources(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	sourceOptions = a.withSitebrushPeerAttestation(r.Context(), sourceOptions)
 	remoteSourceURL, err := parseGrabSourceURLForServerIP(sourceURL, sourceOptions.IP)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -11258,6 +11373,7 @@ func (a *App) publicTrialSitePreview(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, sourceOptionsErr.Error(), http.StatusBadRequest)
 		return
 	}
+	sourceOptions = a.withSitebrushPeerAttestation(r.Context(), sourceOptions)
 	go a.runPublicTrialSitePreviewWithTemplateDetection(progressToken, sourceURL, previewURL, translations, cancelSession, copyWholeSite, autoDetectTemplates, sourceOptions)
 
 	w.Header().Set("Content-Type", "application/json")
@@ -12713,6 +12829,7 @@ func (a *App) grabPreview(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	sourceOptions = a.withSitebrushPeerAttestation(r.Context(), sourceOptions)
 	remoteSourceURL, err := parseGrabSourceURLForServerIP(sourceURL, sourceOptions.IP)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -13257,6 +13374,16 @@ func doGrabGETContext(ctx context.Context, client *http.Client, rawURL string, s
 
 func applyGrabRequestHeaders(request *http.Request, sourceOptions grabSourceOptions) {
 	request.Header.Set("User-Agent", "Mozilla/5.0 (compatible; SiteBrush/1.0)")
+	peerAttestation := strings.TrimSpace(sourceOptions.PeerAttestation)
+	if peerAttestation != "" {
+		timestamp := time.Now().UTC().Format(time.RFC3339Nano)
+		signaturePayload := sitebrushPeerRequestSignaturePayload(request, peerAttestation, timestamp)
+		privateKey := ed25519.PrivateKey(sourceOptions.PeerPrivateKey[:])
+		signature := ed25519.Sign(privateKey, []byte(signaturePayload))
+		request.Header.Set("X-Sitebrush-Peer-Attestation", peerAttestation)
+		request.Header.Set("X-Sitebrush-Peer-Time", timestamp)
+		request.Header.Set("X-Sitebrush-Peer-Signature", base64.RawURLEncoding.EncodeToString(signature))
+	}
 	acceptLanguage := grabSourceAcceptLanguage(sourceOptions.LanguageCode)
 	if acceptLanguage != "" {
 		request.Header.Set("Accept-Language", acceptLanguage)
@@ -20982,18 +21109,356 @@ func (a *App) handleSitebrushNetChanPayload(ctx context.Context, payload []byte)
 	if request.HostingSnapshot != nil {
 		source = firstNonEmpty(request.HostingSnapshot.ServerIP, request.HostingSnapshot.ServerDomain, source)
 	}
+	var responsePayload []byte
 	switch strings.TrimSpace(request.CodeKind) {
 	case "installation_register":
 		status, statusCode = a.handleServiceMailRelayRequest(ctx, nil, request, source)
 	case "hosting_snapshot":
 		status, statusCode = a.handleHostingSnapshotRequest(ctx, request, source)
+	case "security_signal":
+		status, statusCode = a.handleSecuritySignalRequest(ctx, request)
+	case "security_reputation":
+		status, statusCode, responsePayload = a.handleSecurityReputationRequest(ctx, request)
+	case "security_attestation":
+		status, statusCode, responsePayload = a.handleSecurityAttestationRequest(ctx, request)
 	default:
 		status, statusCode = a.handleServiceMailRelayRequest(ctx, nil, request, source)
 	}
 	if statusCode >= 400 {
 		log.Printf("hosting snapshot netchan rejected: %s", diagnosticlog.SafeLogValue(status))
 	}
-	return sitebrushNetChanResponse{Status: status, StatusCode: statusCode}
+	return sitebrushNetChanResponse{Status: status, StatusCode: statusCode, Payload: responsePayload}
+}
+
+func (a *App) runSecurityGlobalSync(stop <-chan struct{}) {
+	ticker := time.NewTicker(10 * time.Minute)
+	defer ticker.Stop()
+	lastSent := map[string]time.Time{}
+
+	for {
+		select {
+		case <-stop:
+			return
+		case signal := <-a.securityGlobalSignals:
+			if a.attackGuard == nil {
+				continue
+			}
+			settings, err := a.attackGuard.Settings()
+			if err != nil || !settings.GlobalSync {
+				continue
+			}
+			now := time.Now().UTC()
+			key := signal.IP + "\x1f" + signal.Category
+			if previous := lastSent[key]; !previous.IsZero() && now.Sub(previous) < time.Hour {
+				continue
+			}
+			lastSent[key] = now
+			a.sendSecuritySignalWithTimeout(stop, signal)
+			if len(lastSent) > 4096 {
+				for candidate, sentAt := range lastSent {
+					if now.Sub(sentAt) > 2*time.Hour {
+						delete(lastSent, candidate)
+					}
+				}
+			}
+		case <-ticker.C:
+			if a.attackGuard == nil {
+				continue
+			}
+			settings, err := a.attackGuard.Settings()
+			if err != nil || !settings.GlobalSync {
+				continue
+			}
+			a.pullSecurityReputationWithTimeout(stop)
+		}
+	}
+}
+
+func (a *App) sendSecuritySignalWithTimeout(stop <-chan struct{}, signal securitysync.Signal) {
+	select {
+	case <-stop:
+		return
+	default:
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	request := serviceMailRequest{
+		Version:        1,
+		CodeKind:       "security_signal",
+		SecuritySignal: &signal,
+		LanguageCode:   "en",
+		CreatedAt:      time.Now().UTC().Format(time.RFC3339),
+	}
+	if err := a.sendSecurityNetChanRequest(ctx, &request); err != nil {
+		log.Printf("security reputation signal skipped: %v", err)
+	}
+}
+
+func (a *App) pullSecurityReputationWithTimeout(stop <-chan struct{}) {
+	select {
+	case <-stop:
+		return
+	default:
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	request := serviceMailRequest{
+		Version:      1,
+		CodeKind:     "security_reputation",
+		SecurityQuery: true,
+		LanguageCode: "en",
+		CreatedAt:    time.Now().UTC().Format(time.RFC3339),
+	}
+	response, err := a.sendSecurityNetChanRequestWithResponse(ctx, &request)
+	if err != nil {
+		log.Printf("security reputation pull skipped: %v", err)
+		return
+	}
+	var entries []securitysync.Entry
+	if err := json.Unmarshal(response.Payload, &entries); err != nil {
+		log.Printf("security reputation decode skipped: %v", err)
+		return
+	}
+	for _, entry := range entries {
+		description := fmt.Sprintf("confirmed by %d independent SiteBrush installations", entry.Confirmations)
+		_ = a.attackGuard.ApplyGlobal(entry.IP, entry.Reason, description, entry.LastEvent, entry.ExpiresAt)
+	}
+}
+
+func (a *App) sendSecurityNetChanRequest(ctx context.Context, request *serviceMailRequest) error {
+	_, err := a.sendSecurityNetChanRequestWithResponse(ctx, request)
+	return err
+}
+
+func (a *App) sendSecurityNetChanRequestWithResponse(ctx context.Context, request *serviceMailRequest) (sitebrushNetChanResponse, error) {
+	response, err := a.sendServiceMailNetChanRequest(ctx, request)
+	if err != nil {
+		return sitebrushNetChanResponse{}, err
+	}
+	if responseErr := serviceMailNetChanResponseError(response); responseErr == nil {
+		return response, nil
+	} else if !strings.Contains(strings.ToLower(responseErr.Error()), "installation is not registered") {
+		return sitebrushNetChanResponse{}, responseErr
+	}
+	registration := serviceMailRequest{
+		Version:      1,
+		CodeKind:     "installation_register",
+		LanguageCode: "en",
+		CreatedAt:    time.Now().UTC().Format(time.RFC3339),
+	}
+	registrationResponse, registrationErr := a.sendServiceMailNetChanRequest(ctx, &registration)
+	if registrationErr != nil {
+		return sitebrushNetChanResponse{}, registrationErr
+	}
+	if responseErr := serviceMailNetChanResponseError(registrationResponse); responseErr != nil {
+		return sitebrushNetChanResponse{}, responseErr
+	}
+	response, err = a.sendServiceMailNetChanRequest(ctx, request)
+	if err != nil {
+		return sitebrushNetChanResponse{}, err
+	}
+	if responseErr := serviceMailNetChanResponseError(response); responseErr != nil {
+		return sitebrushNetChanResponse{}, responseErr
+	}
+	return response, nil
+}
+
+func (a *App) validateSecuritySyncInstallation(ctx context.Context, request serviceMailRequest) error {
+	if err := verifyServiceMailRequestSignature(request); err != nil {
+		return err
+	}
+	var validationErr error
+	err := a.withServerControlDatabaseRead(ctx, "security-sync-installation", func(database *sql.DB) error {
+		store := hostingandsupport.Store{DB: database}
+		knownPublicKey, found := store.ServiceMailInstallationPublicKey(ctx, request.InstallationID)
+		if !found {
+			validationErr = errors.New("installation is not registered")
+			return nil
+		}
+		if strings.TrimSpace(knownPublicKey) != strings.TrimSpace(request.PublicKey) {
+			validationErr = errors.New("installation public key changed")
+			return nil
+		}
+		if store.ServiceMailInstallationBlocked(ctx, request.InstallationID) {
+			validationErr = errors.New("installation is blocked")
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	return validationErr
+}
+
+func (a *App) withSitebrushPeerAttestation(ctx context.Context, sourceOptions grabSourceOptions) grabSourceOptions {
+	if strings.TrimSpace(sourceOptions.PeerAttestation) != "" {
+		return sourceOptions
+	}
+	request := serviceMailRequest{
+		Version:      1,
+		CodeKind:     "security_attestation",
+		LanguageCode: "en",
+		CreatedAt:    time.Now().UTC().Format(time.RFC3339),
+	}
+	response, err := a.sendSecurityNetChanRequestWithResponse(ctx, &request)
+	if err != nil || len(response.Payload) == 0 || len(response.Payload) > 4096 {
+		return sourceOptions
+	}
+	token := string(response.Payload)
+	centralPublicKeyBytes, err := base64.StdEncoding.DecodeString(strings.TrimSpace(sitebrushComServiceMailRelayPublicKey))
+	if err != nil || len(centralPublicKeyBytes) != ed25519.PublicKeySize {
+		return sourceOptions
+	}
+	attestation, err := securitysync.VerifyPeerAttestation(token, ed25519.PublicKey(centralPublicKeyBytes), time.Now().UTC())
+	if err != nil {
+		return sourceOptions
+	}
+	_, localPublicKey, localPrivateKey, err := a.serviceMailLocalKeyPair(ctx)
+	if err != nil || strings.TrimSpace(attestation.PublicKey) != base64.StdEncoding.EncodeToString(localPublicKey) || len(localPrivateKey) != ed25519.PrivateKeySize {
+		return sourceOptions
+	}
+	sourceOptions.PeerAttestation = token
+	copy(sourceOptions.PeerPrivateKey[:], localPrivateKey)
+	return sourceOptions
+}
+
+func sitebrushPeerRequestTrusted(r *http.Request, now time.Time) bool {
+	token := strings.TrimSpace(r.Header.Get("X-Sitebrush-Peer-Attestation"))
+	timestamp := strings.TrimSpace(r.Header.Get("X-Sitebrush-Peer-Time"))
+	signatureText := strings.TrimSpace(r.Header.Get("X-Sitebrush-Peer-Signature"))
+	if token == "" || len(token) > 4096 || timestamp == "" || len(timestamp) > 64 || signatureText == "" || len(signatureText) > 256 {
+		return false
+	}
+	centralPublicKeyBytes, err := base64.StdEncoding.DecodeString(strings.TrimSpace(sitebrushComServiceMailRelayPublicKey))
+	if err != nil || len(centralPublicKeyBytes) != ed25519.PublicKeySize {
+		return false
+	}
+	attestation, err := securitysync.VerifyPeerAttestation(token, ed25519.PublicKey(centralPublicKeyBytes), now)
+	if err != nil {
+		return false
+	}
+	signedAt, err := time.Parse(time.RFC3339Nano, timestamp)
+	if err != nil || now.Sub(signedAt) > 2*time.Minute || signedAt.Sub(now) > 2*time.Minute {
+		return false
+	}
+	peerPublicKeyBytes, err := base64.StdEncoding.DecodeString(strings.TrimSpace(attestation.PublicKey))
+	if err != nil || len(peerPublicKeyBytes) != ed25519.PublicKeySize {
+		return false
+	}
+	signature, err := base64.RawURLEncoding.DecodeString(signatureText)
+	if err != nil || len(signature) != ed25519.SignatureSize {
+		return false
+	}
+	payload := sitebrushPeerRequestSignaturePayload(r, token, timestamp)
+	return ed25519.Verify(ed25519.PublicKey(peerPublicKeyBytes), []byte(payload), signature)
+}
+
+func sitebrushPeerRequestSignaturePayload(r *http.Request, attestation, timestamp string) string {
+	host := strings.TrimSpace(r.Host)
+	if host == "" && r.URL != nil {
+		host = strings.TrimSpace(r.URL.Host)
+	}
+	pathname := "/"
+	rawQuery := ""
+	if r.URL != nil {
+		if escapedPath := r.URL.EscapedPath(); escapedPath != "" {
+			pathname = escapedPath
+		}
+		rawQuery = r.URL.RawQuery
+	}
+	attestationHash := sha256.Sum256([]byte(attestation))
+	return strings.Join([]string{
+		strings.ToUpper(strings.TrimSpace(r.Method)),
+		strings.ToLower(host),
+		pathname,
+		rawQuery,
+		timestamp,
+		hex.EncodeToString(attestationHash[:]),
+	}, "\n")
+}
+
+func (a *App) handleSecurityAttestationRequest(ctx context.Context, request serviceMailRequest) (string, int, []byte) {
+	if err := a.validateSecuritySyncInstallation(ctx, request); err != nil {
+		return err.Error(), http.StatusForbidden, nil
+	}
+	_, centralPublicKey, centralPrivateKey, err := a.serviceMailLocalKeyPair(ctx)
+	if err != nil {
+		return err.Error(), http.StatusServiceUnavailable, nil
+	}
+	encodedCentralPublicKey := base64.StdEncoding.EncodeToString(centralPublicKey)
+	if strings.TrimSpace(encodedCentralPublicKey) != strings.TrimSpace(sitebrushComServiceMailRelayPublicKey) {
+		return "central attestation key mismatch", http.StatusServiceUnavailable, nil
+	}
+	token, err := securitysync.IssuePeerAttestation(centralPrivateKey, request.InstallationID, request.PublicKey, time.Now().UTC(), time.Hour)
+	if err != nil {
+		return err.Error(), http.StatusInternalServerError, nil
+	}
+	return "ok", http.StatusOK, []byte(token)
+}
+
+func (a *App) handleSecuritySignalRequest(ctx context.Context, request serviceMailRequest) (string, int) {
+	if request.SecuritySignal == nil {
+		return "security signal is required", http.StatusBadRequest
+	}
+	if err := a.validateSecuritySyncInstallation(ctx, request); err != nil {
+		return err.Error(), http.StatusForbidden
+	}
+	if a.securityReputation == nil {
+		return "security reputation unavailable", http.StatusServiceUnavailable
+	}
+	signal := *request.SecuritySignal
+	signal.InstallationID = request.InstallationID
+	reply := make(chan securitysync.Result, 1)
+	job := securitysync.Request{Signal: &signal, Reply: reply}
+	select {
+	case <-ctx.Done():
+		return "security signal canceled", http.StatusRequestTimeout
+	case a.securityReputation <- job:
+	}
+	select {
+	case <-ctx.Done():
+		return "security signal canceled", http.StatusRequestTimeout
+	case result := <-reply:
+		if result.Err != nil {
+			return result.Err.Error(), http.StatusBadRequest
+		}
+		if !result.Accepted {
+			return "security signal rejected", http.StatusBadRequest
+		}
+		return "accepted", http.StatusOK
+	}
+}
+
+func (a *App) handleSecurityReputationRequest(ctx context.Context, request serviceMailRequest) (string, int, []byte) {
+	if !request.SecurityQuery {
+		return "security reputation query is required", http.StatusBadRequest, nil
+	}
+	if err := a.validateSecuritySyncInstallation(ctx, request); err != nil {
+		return err.Error(), http.StatusForbidden, nil
+	}
+	if a.securityReputation == nil {
+		return "security reputation unavailable", http.StatusServiceUnavailable, nil
+	}
+	reply := make(chan securitysync.Result, 1)
+	job := securitysync.Request{Query: true, Reply: reply}
+	select {
+	case <-ctx.Done():
+		return "security reputation canceled", http.StatusRequestTimeout, nil
+	case a.securityReputation <- job:
+	}
+	select {
+	case <-ctx.Done():
+		return "security reputation canceled", http.StatusRequestTimeout, nil
+	case result := <-reply:
+		if result.Err != nil {
+			return result.Err.Error(), http.StatusInternalServerError, nil
+		}
+		encoded, err := json.Marshal(result.Entries)
+		if err != nil {
+			return err.Error(), http.StatusInternalServerError, nil
+		}
+		return "ok", http.StatusOK, encoded
+	}
 }
 
 func (a *App) reportHostingSnapshotNetChan(ctx context.Context) error {
@@ -22052,8 +22517,10 @@ func (a *App) sendMailoutTaskThroughNetChan(ctx context.Context, record mailout.
 func (a *App) sendServiceMailNetChanRequest(ctx context.Context, request *serviceMailRequest) (sitebrushNetChanResponse, error) {
 	relayURL := "https://sitebrush.com" + serviceMailRelayPath
 	relayRequest := *request
-	if err := a.attachHostingSnapshotToServiceMailRequest(ctx, relayURL, &relayRequest); err != nil {
-		return sitebrushNetChanResponse{}, err
+	if !strings.HasPrefix(strings.TrimSpace(relayRequest.CodeKind), "security_") {
+		if err := a.attachHostingSnapshotToServiceMailRequest(ctx, relayURL, &relayRequest); err != nil {
+			return sitebrushNetChanResponse{}, err
+		}
 	}
 	if err := a.signServiceMailRequest(ctx, &relayRequest); err != nil {
 		return sitebrushNetChanResponse{}, err
