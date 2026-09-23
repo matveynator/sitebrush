@@ -6176,6 +6176,7 @@ func formatDurationMS(milliseconds int64) string {
 type analyticsSecurityBlockView struct {
 	httpsecurity.SecurityBlock
 	Country, City, ClientClass, Agent string
+	ObservedRequests                  []browserstats.Probe
 }
 
 func analyticsSelectedTab(r *http.Request) string {
@@ -6267,6 +6268,7 @@ func (a *App) analyticsPage(w http.ResponseWriter, r *http.Request) {
 			view.City = incident.City
 			view.ClientClass = incident.Class
 			view.Agent = incident.Agent
+			view.ObservedRequests = append([]browserstats.Probe(nil), incident.Examples...)
 		}
 		if securityBlock.Source == "global" {
 			securityGlobalBlocks = append(securityGlobalBlocks, view)
