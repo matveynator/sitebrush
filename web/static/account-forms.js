@@ -9,15 +9,26 @@
   if (!codeField) return;
   codeField.setAttribute('enterkeyhint', 'done');
   codeField.setAttribute('dir', 'ltr');
+  var submittedFullCode = false;
+
+  function normalizeAndSubmitFullCode() {
+    var normalizedCode = String(codeField.value || '').replace(/\D/g, '').slice(0, 6);
+    if (codeField.value !== normalizedCode) codeField.value = normalizedCode;
+    if (normalizedCode.length !== 6 || submittedFullCode || !codeField.form) return;
+    submittedFullCode = true;
+    codeField.form.requestSubmit();
+  }
+
+  codeField.addEventListener('input', normalizeAndSubmitFullCode);
   codeField.addEventListener('change', function reflectAutofill() {
     codeField.dispatchEvent(new Event('input', {bubbles: true}));
+  });
+  codeField.addEventListener('paste', function reflectPaste() {
+    window.setTimeout(normalizeAndSubmitFullCode, 0);
   });
   if (/^[0-9]{6}$/.test(mailedCode)) {
     codeField.value = mailedCode;
     codeField.dispatchEvent(new Event('input', {bubbles: true}));
-    if (codeField.name === 'login_code' && codeField.form) {
-      codeField.form.requestSubmit();
-    }
   }
 })();
 
