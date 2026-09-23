@@ -15137,3 +15137,59 @@ func TestAccountMailPrefillsCodeOnlyInFragment(t *testing.T) {
 		}
 	}
 }
+
+
+func TestDefaultCrawlerDiscoveryFilesExposePublishedContent(t *testing.T) {
+	application, rawDB := newTestApplication(t)
+	for _, pagePath := range []string{"/", "/docs/", "/about"} {
+		if _, err := rawDB.Exec(`INSERT INTO published_pages(domain,path,title,html) VALUES(?,?,?,?)`, "example.com", pagePath, pagePath, "<html></html>"); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	robotsRequest := httptest.NewRequest(http.MethodGet, "https://example.com/robots.txt", nil)
+	robotsResponse := httptest.NewRecorder()
+	application.serveDefaultRobotsTXT(robotsResponse, robotsRequest)
+	if robotsResponse.Code != http.StatusOK {
+		t.Fatalf("robots status = %d", robotsResponse.Code)
+	}
+	for _, expected := range []string{"User-agent: *", "Allow: /", "Sitemap: https://example.com/sitemap.xml"} {
+		if !strings.Contains(robotsResponse.Body.String(), expected) {
+			t.Fatalf("robots missing %q: %s", expected, robotsResponse.Body.String())
+		}
+	}
+
+	sitemapRequest := httptest.NewRequest(http.MethodGet, "https://example.com/sitemap.xml", nil)
+	sitemapResponse := httptest.NewRecorder()
+	application.serveDefaultSitemapXML(sitemapResponse, sitemapRequest, "example.com")
+	if sitemapResponse.Code != http.StatusOK {
+		t.Fatalf("sitemap status = %d: %s", sitemapResponse.Code, sitemapResponse.Body.String())
+	}
+	for _, expected := range []string{
+		"<loc>https://example.com/</loc>",
+		"<loc>https://example.com/docs/</loc>",
+		"<loc>https://example.com/about</loc>",
+	} {
+		if !strings.Contains(sitemapResponse.Body.String(), expected) {
+			t.Fatalf("sitemap missing %q: %s", expected, sitemapResponse.Body.String())
+		}
+	}
+}
+
+func TestDefaultCrawlerIndexOnlyHandlesReadOnlyDiscoveryPaths(t *testing.T) {
+	application, _ := newTestApplication(t)
+	for _, testCase := range []struct {
+		method string
+		path   string
+	}{
+		{method: http.MethodPost, path: "/robots.txt"},
+		{method: http.MethodGet, path: "/robots.txt?preview=1"},
+		{method: http.MethodGet, path: "/page"},
+	} {
+		request := httptest.NewRequest(testCase.method, "https://example.com"+testCase.path, nil)
+		response := httptest.NewRecorder()
+		if application.serveDefaultCrawlerIndex(response, request, "example.com", request.URL.Path) {
+			t.Fatalf("unexpectedly handled %s %s", testCase.method, testCase.path)
+		}
+	}
+}

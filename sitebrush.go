@@ -8822,6 +8822,9 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if a.serveDefaultCrawlerIndex(w, r, requestDomain, pagePath) {
+		return
+	}
 	if !a.dynamicDatabaseReady(w, r, requestDomain) {
 		return
 	}
@@ -35947,6 +35950,115 @@ func (a *App) findPublishedPage(ctx context.Context, domain, pagePath string) (P
 	var current Page
 	err := a.db.QueryRowContext(ctx, `SELECT domain,path,title,html FROM published_pages WHERE domain=? AND path=?`, domain, pagePath).Scan(&current.Domain, &current.Path, &current.Title, &current.HTML)
 	return current, err
+}
+
+// serveDefaultCrawlerIndex exposes discovery files only when the site has not
+// published its own version. Keeping this policy at the public HTTP boundary
+// leaves crawler access independent from the attack and throttle subsystems.
+func (a *App) serveDefaultCrawlerIndex(w http.ResponseWriter, r *http.Request, domain, pagePath string) bool {
+	if r == nil || r.URL == nil || r.URL.RawQuery != "" {
+		return false
+	}
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		return false
+	}
+	if pagePath != "/robots.txt" && pagePath != "/sitemap.xml" {
+		return false
+	}
+	if _, protected := a.pagePasswordRuleFromPrefixFile(domain, pagePath); protected {
+		return false
+	}
+	if a.servePublishedStaticFileFromDisk(w, r, domain, pagePath, false) {
+		return true
+	}
+	if !a.dynamicDatabaseReady(w, r, domain) {
+		return true
+	}
+	if _, err := a.findPublishedPage(r.Context(), domain, pagePath); err == nil {
+		return false
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		http.Error(w, "failed to read crawler discovery file", http.StatusInternalServerError)
+		return true
+	}
+
+	if pagePath == "/robots.txt" {
+		a.serveDefaultRobotsTXT(w, r)
+		return true
+	}
+	a.serveDefaultSitemapXML(w, r, domain)
+	return true
+}
+
+func publicCrawlerBaseURL(r *http.Request) string {
+	if r == nil {
+		return ""
+	}
+	host := strings.TrimSpace(r.Host)
+	if host == "" || strings.ContainsAny(host, "\r\n") {
+		return ""
+	}
+	scheme := "http"
+	if httpsecurity.UsesHTTPS(r) {
+		scheme = "https"
+	}
+	return scheme + "://" + host
+}
+
+func (a *App) serveDefaultRobotsTXT(w http.ResponseWriter, r *http.Request) {
+	baseURL := publicCrawlerBaseURL(r)
+	if baseURL == "" {
+		http.Error(w, "invalid request host", http.StatusBadRequest)
+		return
+	}
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set("Cache-Control", "public, max-age=3600")
+	_, _ = io.WriteString(w, "User-agent: *\nAllow: /\nSitemap: "+baseURL+"/sitemap.xml\n")
+}
+
+func (a *App) serveDefaultSitemapXML(w http.ResponseWriter, r *http.Request, domain string) {
+	baseURL := publicCrawlerBaseURL(r)
+	if baseURL == "" {
+		http.Error(w, "invalid request host", http.StatusBadRequest)
+		return
+	}
+	rows, err := a.db.QueryContext(r.Context(), `SELECT path FROM published_pages WHERE domain=? ORDER BY path ASC`, domain)
+	if err != nil {
+		http.Error(w, "failed to read published pages", http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+
+	const maximumSitemapURLs = 50000
+	pagePaths := make([]string, 0, 256)
+	for rows.Next() && len(pagePaths) < maximumSitemapURLs {
+		var publishedPath string
+		if scanErr := rows.Scan(&publishedPath); scanErr != nil {
+			continue
+		}
+		publishedPath = strings.TrimSpace(publishedPath)
+		if publishedPath == "" || len(publishedPath) > 2048 {
+			continue
+		}
+		publishedPath = cleanPath(publishedPath)
+		if _, protected := a.pagePasswordRuleFromPrefixFile(domain, publishedPath); protected {
+			continue
+		}
+		pagePaths = append(pagePaths, publishedPath)
+	}
+	if err := rows.Err(); err != nil {
+		http.Error(w, "failed to read published pages", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/xml; charset=utf-8")
+	w.Header().Set("Cache-Control", "public, max-age=3600")
+	_, _ = io.WriteString(w, "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<urlset xmlns=\"http://www.sitemaps.org/schemas/sitemap/0.9\">\n")
+	for _, publishedPath := range pagePaths {
+		escapedPath := (&url.URL{Path: publishedPath}).EscapedPath()
+		location := template.HTMLEscapeString(baseURL + escapedPath)
+		_, _ = io.WriteString(w, "  <url><loc>"+location+"</loc></url>\n")
+	}
+	_, _ = io.WriteString(w, "</urlset>\n")
 }
 
 func (a *App) siteTreeJSON(w http.ResponseWriter, r *http.Request) {
