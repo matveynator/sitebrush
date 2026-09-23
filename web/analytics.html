@@ -451,6 +451,73 @@
       border-bottom:1px solid var(--bs-border-color);
       position:relative;
     }
+    .security-chart-grid {
+      display:grid;
+      grid-template-columns:minmax(0, 1.35fr) minmax(280px, .65fr);
+      gap:16px;
+      margin-bottom:16px;
+    }
+    .security-chart-card {
+      border:1px solid var(--dashboard-border);
+      background:var(--dashboard-panel);
+      box-shadow:var(--dashboard-shadow);
+    }
+    .security-rank-chart {
+      display:flex;
+      flex-direction:column;
+      gap:8px;
+      min-height:180px;
+    }
+    .security-rank-row {
+      display:grid;
+      grid-template-columns:minmax(105px, 1fr) minmax(120px, 2.4fr) auto;
+      gap:10px;
+      align-items:center;
+      font-size:.82rem;
+    }
+    .security-rank-label {
+      overflow:hidden;
+      text-overflow:ellipsis;
+      white-space:nowrap;
+      color:var(--theme-foreground);
+    }
+    .security-rank-track {
+      height:12px;
+      border-radius:999px;
+      background:var(--dashboard-bar);
+      overflow:hidden;
+      border:1px solid rgba(148,171,214,.18);
+    }
+    .security-rank-fill {
+      height:100%;
+      min-width:2px;
+      border-radius:999px;
+      background:var(--theme-muted-foreground);
+    }
+    .security-rank-value {
+      min-width:42px;
+      text-align:right;
+      font-variant-numeric:tabular-nums;
+      color:var(--theme-foreground);
+      font-weight:600;
+    }
+    .security-type-help {
+      display:grid;
+      grid-template-columns:repeat(auto-fit,minmax(260px,1fr));
+      gap:10px;
+      margin-top:14px;
+    }
+    .security-type-help-item {
+      border:1px solid var(--dashboard-border);
+      border-radius:var(--theme-radius);
+      padding:10px 12px;
+      background:rgba(255,255,255,.02);
+    }
+    .security-type-help-item strong { display:block; margin-bottom:4px; }
+    .security-type-help-item p { margin:0; font-size:.82rem; color:var(--dashboard-muted); }
+    @media (max-width: 900px) {
+      .security-chart-grid { grid-template-columns:1fr; }
+    }
     .hourly-chart-bar {
       min-height:2px;
       border-radius:4px 4px 1px 1px;
@@ -557,17 +624,19 @@
     </div>
   </div>
 
+  {{if eq .AnalyticsTab "analytics"}}
   <form method="get" class="d-flex flex-wrap gap-2 mb-3">
     <input type="hidden" name="analytics" value="">
-    <input type="hidden" name="tab" value="{{.AnalyticsTab}}">
+    <input type="hidden" name="tab" value="analytics">
     <select name="days" aria-label="{{index .T "analytics_period"}}" class="form-select w-auto">{{range $days := .PeriodOptions}}<option value="{{$days}}" {{if eq $.BrowserAnalytics.Days $days}}selected{{end}}>{{$days}} {{index $.T "ax_days"}}</option>{{end}}</select>
     <select name="traffic" class="form-select w-auto" aria-label="{{index .T "ax_audience"}}"><option value="human" {{if eq .ExperienceFilter.Traffic "human"}}selected{{end}}>{{index .T "ax_humans"}}</option><option value="bots" {{if eq .ExperienceFilter.Traffic "bots"}}selected{{end}}>{{index .T "ax_bots"}}</option><option value="all" {{if eq .ExperienceFilter.Traffic "all"}}selected{{end}}>{{index .T "ax_all"}}</option></select>
     <input type="hidden" name="campaign" value="">
     <button class="btn btn-outline-secondary">{{index .T "ax_filter"}}</button>
   </form>
+  {{end}}
   <nav class="analytics-tabs" aria-label="Analytics sections">
     <a href="?analytics&amp;tab=analytics&amp;days={{.BrowserAnalytics.Days}}" class="{{if eq .AnalyticsTab "analytics"}}active{{end}}">{{index .T "analytics_title"}}</a>
-    <a href="?analytics&amp;tab=security&amp;days={{.BrowserAnalytics.Days}}" class="{{if eq .AnalyticsTab "security"}}active{{end}}">{{index .T "ax_security"}}</a>
+    <a href="?analytics&amp;tab=security" class="{{if eq .AnalyticsTab "security"}}active{{end}}">{{index .T "ax_security"}}</a>
   </nav>
 
   {{if eq .AnalyticsTab "analytics"}}
@@ -630,7 +699,7 @@
   </div></section>
   <section id="sessions" class="card mb-4"><div class="card-body"><h2 class="h5">{{index .T "ax_sessions"}}</h2><p class="small">{{index .T "ax_recent_hint"}}</p>
     {{range .Experience.Recent}}<details class="border-bottom py-2"><summary>{{if eq .Class "human-likely"}}👤{{else}}🤖{{end}} <time data-relative-time="{{.Started.Format "2006-01-02T15:04:05Z07:00"}}">{{.When}}</time> · {{.Source.Name}} → {{.Landing}} · {{.Language}} · {{.Browser}} / {{.OS}} · active {{.Active}}</summary>
-    <p class="small mb-1">{{if .Address}}IP: <code>{{.Address}}</code> · {{end}}{{index $.T "ax_first_source"}}: {{.FirstSource}} · {{index $.T "ax_local_time"}}: {{if .LocalTime}}{{.LocalTime}} {{.Timezone}}{{else}}—{{end}} · {{if .Country}}{{.Country}}{{if .City}}, {{.City}}{{end}}{{else}}unknown location{{end}}</p>
+    <p class="small mb-1">{{if .Address}}IP: <code class="analytics-session-ip" data-ip="{{.Address}}">{{.Address}}</code> · {{end}}{{index $.T "ax_first_source"}}: {{.FirstSource}} · {{index $.T "ax_local_time"}}: {{if .LocalTime}}{{.LocalTime}} {{.Timezone}}{{else}}—{{end}} · {{if .Country}}{{.Country}}{{if .City}}, {{.City}}{{end}}{{else}}unknown location{{end}}</p>
     {{if .Returning}}<p class="small mb-1">Returned after {{.ReturnAfter}} · {{.FirstSource}} → {{.Source.Name}} · {{if .Goal}}goal reached{{else}}no configured goal yet{{end}}</p>{{end}}
     {{range .Tabs}}<ol class="mb-1">{{range .}}<li>{{.}}</li>{{end}}</ol>{{end}}{{if .Limited}}<p>{{index $.T "ax_incomplete"}}</p>{{end}}</details>{{else}}<p>{{index .T "analytics_no_data"}}</p>{{end}}
   </div></section>
@@ -710,6 +779,42 @@
 </div></section>
   {{end}}
   {{if eq .AnalyticsTab "security"}}
+  <section id="security-activity" class="card security-chart-card mb-4"><div class="card-body">
+    <h2 class="h5">{{index .T "ax_security_activity"}}</h2>
+    <p class="small text-muted">{{index .T "ax_security_activity_hint"}}</p>
+    <div class="security-chart-grid">
+      <div>
+        <h3 class="h6">{{index .T "ax_security_by_hour"}}</h3>
+        <p class="small text-muted">{{index .T "ax_security_by_hour_hint"}} · {{.ServerTimezone}}</p>
+        <div id="security-hour-chart" class="hourly-chart" aria-label="{{index .T "ax_security_by_hour"}}"></div>
+      </div>
+      <div>
+        <h3 class="h6">{{index .T "ax_security_by_country"}}</h3>
+        <p class="small text-muted">{{index .T "ax_security_by_country_hint"}}</p>
+        <div id="security-country-chart" class="security-rank-chart"></div>
+      </div>
+    </div>
+    <div>
+      <h3 class="h6">{{index .T "ax_security_by_type"}}</h3>
+      <p class="small text-muted">{{index .T "ax_security_by_type_hint"}}</p>
+      <div id="security-type-chart" class="security-rank-chart"></div>
+      <div id="security-type-help" class="security-type-help">
+        {{range .Security.Types}}
+        <div class="security-type-help-item" data-security-type-help="{{.Label}}">
+          <strong>{{index $.T (print "ax_risk_" .Label)}}</strong>
+          <p>{{index $.T (print "ax_risk_desc_" .Label)}}</p>
+        </div>
+        {{end}}
+      </div>
+    </div>
+    <script type="application/json" id="security-hours-data">{{.SecurityHoursJSON}}</script>
+    <script type="application/json" id="security-countries-data">{{.SecurityCountriesJSON}}</script>
+    <script type="application/json" id="security-types-data">{{.SecurityTypesJSON}}</script>
+    <div id="security-type-labels" hidden>
+      {{range .Security.Types}}<span data-security-type="{{.Label}}" data-label="{{index $.T (print "ax_risk_" .Label)}}"></span>{{end}}
+    </div>
+  </div></section>
+
   <section id="security" class="card mb-4"><div class="card-body">
     <h2 class="h5">{{index .T "ax_security"}}</h2>
     <p>{{.Security.Suspicious}} · {{index .T "ax_security_independent"}}</p>
@@ -800,7 +905,7 @@
     </div>
 
     <h3 class="h6">Local and manual blocks</h3>
-    <p class="small">Reason history is retained for the block lifetime, up to the latest seven days.</p>
+    <p class="small">{{index .T "ax_security_block_log_help"}}</p>
     <div class="table-responsive mb-4">
       <table class="table table-sm align-middle">
         <thead><tr><th>IP / incident</th><th>Reason / activity</th><th>Source</th><th>Last event</th><th>Expires</th><th>Violations</th><th></th></tr></thead>
@@ -816,7 +921,8 @@
                 <input class="form-control form-control-sm" name="description" value="{{.Description}}">
                 <button class="btn btn-outline-secondary btn-sm align-self-start">Update</button>
               </form>
-              {{if .ReasonLog}}<details class="mt-2"><summary class="small">Reason summary (7 days)</summary><ul class="security-reason-log">{{range .ReasonLog}}<li>{{if ne .First .At}}{{.First.Format "2006-01-02 15:04"}} — {{end}}{{.At.Format "2006-01-02 15:04"}} · {{.Source}} · {{.Reason}} × {{.Count}}{{if .Description}} — {{.Description}}{{end}}</li>{{end}}</ul></details>{{end}}
+              {{if .ReasonLog}}<details class="mt-2"><summary class="small">{{index $.T "ax_security_block_history"}}</summary><ul class="security-reason-log">{{range .ReasonLog}}<li>{{if ne .First .At}}{{.First.Format "2006-01-02 15:04"}} — {{end}}{{.At.Format "2006-01-02 15:04"}} · {{.Source}} · {{.Reason}} × {{.Count}}{{if .Description}} — {{.Description}}{{end}}</li>{{end}}</ul></details>{{end}}
+              {{if .ObservedRequests}}<details class="mt-2" open><summary class="small">{{index $.T "ax_security_actual_requests"}}</summary><ul class="security-reason-log">{{range .ObservedRequests}}<li><code>{{.Method}} {{.Path}}</code> · HTTP {{.Status}} · × {{.Count}}{{if ne .First .Last}} · {{.First.Format "2006-01-02 15:04"}} — {{.Last.Format "2006-01-02 15:04"}}{{else}} · {{.Last.Format "2006-01-02 15:04"}}{{end}}</li>{{end}}</ul></details>{{end}}
             </td>
             <td><span class="security-source-badge {{if eq .Source "manual"}}security-source-manual{{else}}security-source-local{{end}}">{{.Source}}</span></td>
             <td><time data-relative-time="{{.LastEvent.Format "2006-01-02T15:04:05Z07:00"}}">{{.LastEvent.Format "02 Jan 2006 15:04"}}</time></td>
@@ -1011,6 +1117,87 @@
   }
 })();
 
+(function renderSecurityCharts() {
+  'use strict';
+
+  function parseJSON(elementID, fallback) {
+    const element = document.getElementById(elementID);
+    if (!element) return fallback;
+    try {
+      return JSON.parse(element.textContent || '') || fallback;
+    } catch (error) {
+      console.error('SiteBrush security: invalid chart data', error);
+      return fallback;
+    }
+  }
+
+  function renderHourlyChart(chartID, counts) {
+    const chart = document.getElementById(chartID);
+    if (!chart) return;
+    let maximum = 0;
+    for (const count of counts) maximum = Math.max(maximum, Number(count) || 0);
+    for (let hour = 0; hour < 24; hour += 1) {
+      const count = Number(counts[hour]) || 0;
+      const bar = document.createElement('div');
+      bar.className = 'hourly-chart-bar';
+      bar.style.height = (maximum > 0 ? Math.max(1, count * 100 / maximum) : 1) + '%';
+      bar.setAttribute('title', String(hour).padStart(2, '0') + ':00 · ' + count);
+      const value = document.createElement('span');
+      value.className = 'hourly-chart-value';
+      value.textContent = String(count);
+      const label = document.createElement('span');
+      label.className = 'hourly-chart-label';
+      label.textContent = hour % 3 === 0 ? String(hour).padStart(2, '0') : '';
+      bar.appendChild(value);
+      bar.appendChild(label);
+      chart.appendChild(bar);
+    }
+  }
+
+  function renderRankChart(chartID, rows, labelFor) {
+    const chart = document.getElementById(chartID);
+    if (!chart) return;
+    const visible = Array.isArray(rows) ? rows.slice(0, 12) : [];
+    let maximum = 0;
+    for (const row of visible) maximum = Math.max(maximum, Number(row.Count) || 0);
+    for (const row of visible) {
+      const count = Number(row.Count) || 0;
+      const wrapper = document.createElement('div');
+      wrapper.className = 'security-rank-row';
+      const label = document.createElement('span');
+      label.className = 'security-rank-label';
+      label.textContent = labelFor(row.Label);
+      label.title = label.textContent;
+      const track = document.createElement('span');
+      track.className = 'security-rank-track';
+      const fill = document.createElement('span');
+      fill.className = 'security-rank-fill';
+      fill.style.width = (maximum > 0 ? Math.max(1, count * 100 / maximum) : 0) + '%';
+      track.appendChild(fill);
+      const value = document.createElement('span');
+      value.className = 'security-rank-value';
+      value.textContent = String(count);
+      wrapper.appendChild(label);
+      wrapper.appendChild(track);
+      wrapper.appendChild(value);
+      chart.appendChild(wrapper);
+    }
+  }
+
+  const typeLabels = new Map();
+  for (const element of document.querySelectorAll('[data-security-type]')) {
+    typeLabels.set(element.dataset.securityType || '', element.dataset.label || element.dataset.securityType || '');
+  }
+
+  renderHourlyChart('security-hour-chart', parseJSON('security-hours-data', []));
+  renderRankChart('security-country-chart', parseJSON('security-countries-data', []), function countryLabel(label) {
+    return label === 'unknown' ? '—' : label;
+  });
+  renderRankChart('security-type-chart', parseJSON('security-types-data', []), function typeLabel(label) {
+    return typeLabels.get(label) || label;
+  });
+})();
+
 (function renderAnalyticsHourlyCharts() {
   function parseHours(elementID) {
     const element = document.getElementById(elementID);
@@ -1095,11 +1282,14 @@
           latitude: latitude, longitude: longitude,
           country: session.Country || '', city: session.City || '',
           count: 0, languages: new Map(), devices: new Map(),
-          classes: new Map(), localTimes: new Set(), sources: new Set()
+          classes: new Map(), localTimes: new Set(), sources: new Set(),
+          addresses: new Map()
         };
         groups.set(key, group);
       }
       group.count += 1;
+      const address = String(session.Address || '').trim();
+      if (address) group.addresses.set(address, (group.addresses.get(address) || 0) + 1);
       const language = languageCode(session.Language);
       const device = deviceKind(session);
       const clientClass = session.Class || 'unknown';
@@ -1112,6 +1302,18 @@
     return Array.from(groups.values()).sort(function sortGroups(left, right) {
       return right.count - left.count;
     });
+  }
+
+  function compactAddress(address) {
+    const text = String(address || '').trim();
+    if (!text) return '';
+    if (text.includes(':')) {
+      const parts = text.split(':').filter(Boolean);
+      return parts.slice(0, 3).join(':') + (parts.length > 3 ? ':…' : '');
+    }
+    const parts = text.split('.');
+    if (parts.length === 4) return parts.slice(0, 3).join('.') + '.…';
+    return text;
   }
 
   function sortedCounts(counts) {
@@ -1169,8 +1371,18 @@
     wrapper.appendChild(title);
 
     const sessionsLine = document.createElement('div');
-    sessionsLine.textContent = group.count + (group.count === 1 ? ' session' : ' sessions');
+    const uniqueAddresses = group.addresses.size;
+    sessionsLine.textContent = group.count + (group.count === 1 ? ' session' : ' sessions') +
+      (uniqueAddresses ? ' · ' + uniqueAddresses + (uniqueAddresses === 1 ? ' IP' : ' IPs') : '');
     wrapper.appendChild(sessionsLine);
+
+    if (uniqueAddresses) {
+      const addressLine = document.createElement('div');
+      addressLine.textContent = 'IP: ' + sortedCounts(group.addresses).slice(0, 4).map(function describeAddress(row) {
+        return compactAddress(row[0]) + (row[1] > 1 ? ' × ' + row[1] : '');
+      }).join(' · ');
+      wrapper.appendChild(addressLine);
+    }
 
     const languagesLine = document.createElement('div');
     languagesLine.textContent = 'Languages: ' + countsText(group.languages, {});
@@ -1200,7 +1412,10 @@
     const count = document.createElement('strong');
     count.textContent = String(group.count);
     const detail = document.createElement('small');
-    detail.textContent = countsText(group.languages, {}) + ' · ' + countsText(group.devices, {mobile:'📱 ',desktop:'💻 ',automation:'🤖 '});
+    const addressSummary = group.addresses.size
+      ? group.addresses.size + (group.addresses.size === 1 ? ' IP' : ' IPs') + ' · '
+      : '';
+    detail.textContent = addressSummary + countsText(group.languages, {}) + ' · ' + countsText(group.devices, {mobile:'📱 ',desktop:'💻 ',automation:'🤖 '});
     row.appendChild(label);
     row.appendChild(count);
     row.appendChild(detail);
@@ -1280,16 +1495,36 @@
 })();
 </script>
 <script>
+(function compactAnalyticsSessionIPs() {
+  'use strict';
+  for (const element of document.querySelectorAll('.analytics-session-ip')) {
+    const address = String(element.dataset.ip || '').trim();
+    if (!address) continue;
+    if (address.includes(':')) {
+      const parts = address.split(':').filter(Boolean);
+      element.textContent = parts.slice(0, 3).join(':') + (parts.length > 3 ? ':…' : '');
+      continue;
+    }
+    const parts = address.split('.');
+    if (parts.length === 4) element.textContent = parts.slice(0, 3).join('.') + '.…';
+  }
+})();
+
 (function renderAnalyticsTimes() {
   'use strict';
-  function relativeText(milliseconds) {
-    const absolute = Math.abs(milliseconds);
-    const units = [
-      [86400000, 'd'],
-      [3600000, 'h'],
-      [60000, 'm'],
-      [1000, 's']
-    ];
+  function relativeText(milliseconds, detailed) {
+    const absolute = Math.max(0, Math.abs(milliseconds));
+    if (detailed) {
+      const days = Math.floor(absolute / 86400000);
+      const hours = Math.floor((absolute % 86400000) / 3600000);
+      const minutes = Math.floor((absolute % 3600000) / 60000);
+      const parts = [];
+      if (days) parts.push(days + 'd');
+      if (hours || days) parts.push(hours + 'h');
+      parts.push(minutes + 'm');
+      return parts.join(' ');
+    }
+    const units = [[86400000, 'd'], [3600000, 'h'], [60000, 'm'], [1000, 's']];
     for (const unit of units) {
       if (absolute >= unit[0]) return Math.max(1, Math.floor(absolute / unit[0])) + unit[1];
     }
@@ -1306,7 +1541,7 @@
     if (Math.abs(difference) < 1000) relation = 'now';
     else if (difference > 0) relation = 'in ' + relativeText(difference);
     else relation = relativeText(difference) + ' ago';
-    if (timeElement.hasAttribute('data-countdown') && difference > 0) relation = relativeText(difference) + ' remaining';
+    if (timeElement.hasAttribute('data-countdown') && difference > 0) relation = relativeText(difference, true) + ' remaining until removal';
     timeElement.textContent = absoluteText + ' · ' + relation;
   }
   function renderAllTimes() {

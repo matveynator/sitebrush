@@ -13,7 +13,7 @@ type RequestObservation struct {
 	IP, Path, Query, Method, Agent, Language, Country, City string
 	Status                                                  int
 	Bytes                                                   int64
-	Trusted                                                 bool
+	Trusted, IndexingCrawler                                bool
 }
 type Probe struct {
 	Path, Category, Method string
@@ -37,8 +37,18 @@ type SecurityState struct {
 	Started, Updated time.Time
 	Incidents        []Incident
 	Groups           map[string]*RequestGroup
+	EventBuckets     map[string]*SecurityEventBucket
 	Windows          map[string]*RequestWindow `json:"-"`
 	Incomplete       bool
+}
+type SecurityEventBucket struct {
+	Date, Country, Category string
+	Hour                    int
+	Count                   int
+}
+type SecurityDimension struct {
+	Label string
+	Count int
 }
 type RequestWindow struct {
 	First, Last     time.Time
@@ -48,6 +58,8 @@ type RequestWindow struct {
 type SecurityReport struct {
 	Incidents                    []Incident
 	Groups                       []RequestGroup
+	EventHours                   [24]int
+	Countries, Types             []SecurityDimension
 	Requests, Errors, Suspicious int
 	Incomplete                   bool
 }
@@ -132,29 +144,32 @@ func (state *SecurityState) Record(request RequestObservation) string {
 	if state.Windows == nil {
 		state.Windows = map[string]*RequestWindow{}
 	}
+	if state.EventBuckets == nil {
+		state.EventBuckets = map[string]*SecurityEventBucket{}
+	}
 	class := ClientClass(request.Agent)
 	category := ""
 	if !request.Trusted {
 		category = ProbeCategory(request.Path, request.Query)
 	}
-	window := state.Windows[request.IP]
-	if window == nil || now.Sub(window.First) > time.Minute {
-		if len(state.Windows) >= 64 {
-			clear(state.Windows)
-			state.Incomplete = true
+	if !request.Trusted && !request.IndexingCrawler {
+		window := state.Windows[request.IP]
+		if window == nil || now.Sub(window.First) > time.Minute {
+			if len(state.Windows) >= 64 {
+				clear(state.Windows)
+				state.Incomplete = true
+			}
+			window = &RequestWindow{First: now, Paths: map[string]bool{}}
+			state.Windows[request.IP] = window
 		}
-		window = &RequestWindow{First: now, Paths: map[string]bool{}}
-		state.Windows[request.IP] = window
-	}
-	window.Last = now
-	window.Count++
-	if len(window.Paths) < 64 {
-		window.Paths[SafePath(request.Path)] = true
-	}
-	if request.Status == 401 || request.Status == 403 {
-		window.Failures++
-	}
-	if !request.Trusted {
+		window.Last = now
+		window.Count++
+		if len(window.Paths) < 64 {
+			window.Paths[SafePath(request.Path)] = true
+		}
+		if request.Status == 401 || request.Status == 403 {
+			window.Failures++
+		}
 		if category == "" && len(window.Paths) >= 60 {
 			category = "enumeration"
 		}
@@ -170,6 +185,7 @@ func (state *SecurityState) Record(request RequestObservation) string {
 	}
 	if category != "" {
 		state.recordIncident(request, category, class)
+		state.recordSecurityEvent(request, category)
 	}
 	agent := class
 	if class != "unknown" {
@@ -208,6 +224,26 @@ func (state *SecurityState) Record(request RequestObservation) string {
 	}
 	return category
 }
+func (state *SecurityState) recordSecurityEvent(request RequestObservation, category string) {
+	country := strings.ToUpper(CleanText(request.Country, 16))
+	if country == "" {
+		country = "unknown"
+	}
+	date := dayKey(request.Time)
+	hour := request.Time.Hour()
+	key := strings.Join([]string{date, fmt.Sprintf("%02d", hour), country, category}, "\x1f")
+	bucket := state.EventBuckets[key]
+	if bucket == nil {
+		if len(state.EventBuckets) >= 4096 {
+			state.Incomplete = true
+			return
+		}
+		bucket = &SecurityEventBucket{Date: date, Hour: hour, Country: country, Category: category}
+		state.EventBuckets[key] = bucket
+	}
+	bucket.Count++
+}
+
 func (state *SecurityState) recordIncident(request RequestObservation, category, class string) {
 	index := -1
 	for position := len(state.Incidents) - 1; position >= 0; position-- {
@@ -259,6 +295,12 @@ func (state *SecurityState) Prune(now time.Time) {
 			delete(state.Groups, key)
 		}
 	}
+	securityCutoff := dayKey(now.AddDate(0, 0, -29))
+	for key, bucket := range state.EventBuckets {
+		if bucket.Date < securityCutoff {
+			delete(state.EventBuckets, key)
+		}
+	}
 	for key, window := range state.Windows {
 		if now.Sub(window.Last) > time.Minute {
 			delete(state.Windows, key)
@@ -268,6 +310,19 @@ func (state *SecurityState) Prune(now time.Time) {
 func (state *SecurityState) Report(now time.Time, days int) SecurityReport {
 	result := SecurityReport{Incomplete: state.Incomplete}
 	cutoff := dayKey(now.AddDate(0, 0, -days+1))
+	securityCutoff := dayKey(now.AddDate(0, 0, -29))
+	countryCounts := map[string]int{}
+	typeCounts := map[string]int{}
+	for _, bucket := range state.EventBuckets {
+		if bucket.Date < securityCutoff || bucket.Date > dayKey(now) || bucket.Count <= 0 {
+			continue
+		}
+		if bucket.Hour >= 0 && bucket.Hour < len(result.EventHours) {
+			result.EventHours[bucket.Hour] += bucket.Count
+		}
+		countryCounts[bucket.Country] += bucket.Count
+		typeCounts[bucket.Category] += bucket.Count
+	}
 	for _, group := range state.Groups {
 		if group.Date >= cutoff && group.Date <= dayKey(now) {
 			result.Groups = append(result.Groups, *group)
@@ -281,6 +336,24 @@ func (state *SecurityState) Report(now time.Time, days int) SecurityReport {
 			result.Suspicious++
 		}
 	}
+	for label, count := range countryCounts {
+		result.Countries = append(result.Countries, SecurityDimension{Label: label, Count: count})
+	}
+	for label, count := range typeCounts {
+		result.Types = append(result.Types, SecurityDimension{Label: label, Count: count})
+	}
+	sort.Slice(result.Countries, func(i, j int) bool {
+		if result.Countries[i].Count == result.Countries[j].Count {
+			return result.Countries[i].Label < result.Countries[j].Label
+		}
+		return result.Countries[i].Count > result.Countries[j].Count
+	})
+	sort.Slice(result.Types, func(i, j int) bool {
+		if result.Types[i].Count == result.Types[j].Count {
+			return result.Types[i].Label < result.Types[j].Label
+		}
+		return result.Types[i].Count > result.Types[j].Count
+	})
 	sort.Slice(result.Groups, func(i, j int) bool { return result.Groups[i].Count > result.Groups[j].Count })
 	sort.Slice(result.Incidents, func(i, j int) bool {
 		left, right := result.Incidents[i], result.Incidents[j]

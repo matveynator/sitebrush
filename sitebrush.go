@@ -2223,7 +2223,7 @@ type siteAnalyticsEvent struct {
 	GeoLongitude   float64
 	GeoSource      string
 	VisitorID      string
-	TrustedPeer    bool
+	TrustedPeer, IndexingCrawler    bool
 	IsAdmin        bool
 	IsAsset        bool
 	IsController   bool
@@ -3308,7 +3308,7 @@ func (a *App) analyticsMiddleware(next http.Handler) http.Handler {
 			}
 		}
 		if a.securityAnalytics != nil && r.URL.Path != "/_sitebrush/analytics" && len(a.securityAnalytics) < cap(a.securityAnalytics) {
-			securityEvent := siteAnalyticsEvent{Bytes: writer.bytesWritten, Domain: a.analyticsEventDomain(r, ""), Path: analyticsBoundedString(r.URL.EscapedPath(), 512), Query: analyticsBoundedString(r.URL.RawQuery, 2048), Method: r.Method, StatusCode: writer.statusCode, OccurredAt: startedAt.UTC(), RemoteAddress: analyticsBoundedString(r.RemoteAddr, 64), Forwarded: analyticsBoundedString(r.Header.Get("Forwarded"), 256), ForwardedFor: analyticsBoundedString(r.Header.Get("X-Forwarded-For"), 256), UserAgent: analyticsBoundedString(r.UserAgent(), 256), AcceptLanguage: analyticsBoundedString(r.Header.Get("Accept-Language"), 64), TrustedPeer: sitebrushPeerRequestTrusted(r, startedAt.UTC())}
+			securityEvent := siteAnalyticsEvent{Bytes: writer.bytesWritten, Domain: a.analyticsEventDomain(r, ""), Path: analyticsBoundedString(r.URL.EscapedPath(), 512), Query: analyticsBoundedString(r.URL.RawQuery, 2048), Method: r.Method, StatusCode: writer.statusCode, OccurredAt: startedAt.UTC(), RemoteAddress: analyticsBoundedString(r.RemoteAddr, 64), Forwarded: analyticsBoundedString(r.Header.Get("Forwarded"), 256), ForwardedFor: analyticsBoundedString(r.Header.Get("X-Forwarded-For"), 256), UserAgent: analyticsBoundedString(r.UserAgent(), 256), AcceptLanguage: analyticsBoundedString(r.Header.Get("Accept-Language"), 64), TrustedPeer: sitebrushPeerRequestTrusted(r, startedAt.UTC()), IndexingCrawler: httpsecurity.IsIndexingCrawlerRequest(r)}
 			select {
 			case a.securityAnalytics <- securityEvent:
 			default:
@@ -4294,11 +4294,24 @@ func (a *App) runSecurityAnalytics(stop <-chan struct{}) {
 				continue
 			}
 			address := clientIPAddress(&http.Request{RemoteAddr: event.RemoteAddress, Header: http.Header{"Forwarded": []string{event.Forwarded}, "X-Forwarded-For": []string{event.ForwardedFor}}})
-			category := state.Record(browserstats.RequestObservation{Time: event.OccurredAt, IP: address, Path: event.Path, Query: event.Query, Method: event.Method, Status: event.StatusCode, Bytes: event.Bytes, Agent: event.UserAgent, Language: analyticsLanguageLabel(event.AcceptLanguage), Trusted: event.TrustedPeer})
+			country, city := "", ""
+			if a.geoIP != nil && address != "" {
+				boundary, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+				if location, found := a.geoIP.Lookup(boundary, address); found {
+					country = location.CountryCode
+					city = location.City
+				}
+				cancel()
+			}
+			category := state.Record(browserstats.RequestObservation{Time: event.OccurredAt, IP: address, Path: event.Path, Query: event.Query, Method: event.Method, Status: event.StatusCode, Bytes: event.Bytes, Agent: event.UserAgent, Language: analyticsLanguageLabel(event.AcceptLanguage), Country: country, City: city, Trusted: event.TrustedPeer, IndexingCrawler: event.IndexingCrawler})
 			if category != "" && a.attackGuard != nil {
-				description := "security analytics detected " + category
-				block, blocked := a.attackGuard.ObserveIncident(address, category, description, event.OccurredAt)
-				if blocked && a.securityGlobalSignals != nil && securityBlockReasonFirstObservation(block, category, description) {
+				description := securityIncidentDescription(category, event.Path, event.StatusCode)
+				block, alreadyBlocked := a.attackGuard.Check(address, event.OccurredAt)
+				blocked := alreadyBlocked
+				if !alreadyBlocked {
+					block, blocked = a.attackGuard.ObserveIncident(address, category, description, event.OccurredAt)
+				}
+				if blocked && !alreadyBlocked && a.securityGlobalSignals != nil && securityBlockReasonFirstObservation(block, category, description) {
 					settings, settingsErr := a.attackGuard.Settings()
 					if settingsErr == nil && settings.GlobalSync {
 						signal := securitysync.Signal{IP: address, Category: category, Description: description, ObservedAt: event.OccurredAt}
@@ -4341,6 +4354,43 @@ func (a *App) runSecurityAnalytics(stop <-chan struct{}) {
 	}
 }
 
+func securityIncidentDescription(category, requestPath string, statusCode int) string {
+	pathText := browserstats.SafePath(requestPath)
+	suffix := ""
+	if statusCode > 0 {
+		suffix = " (HTTP " + strconv.Itoa(statusCode) + ")"
+	}
+	switch category {
+	case "repository":
+		return "Tried to access repository metadata: " + pathText + suffix
+	case "secret":
+		return "Tried to access a sensitive file: " + pathText + suffix
+	case "source-backup":
+		return "Tried to download a backup or source file: " + pathText + suffix
+	case "traversal":
+		return "Path traversal attempt: " + pathText + suffix
+	case "injection":
+		return "Injection pattern detected in request to " + pathText + suffix
+	case "enumeration":
+		return "Scanned many distinct URLs; latest request: " + pathText + suffix
+	case "authentication-failures":
+		return "Repeated authentication failures; latest request: " + pathText + suffix
+	case "scanner-client":
+		return "Known security scanner requested " + pathText + suffix
+	default:
+		return "Suspicious request: " + pathText + suffix
+	}
+}
+
+func immediateSecurityCategory(category string) bool {
+	switch category {
+	case "repository", "secret", "source-backup", "traversal", "injection":
+		return true
+	default:
+		return false
+	}
+}
+
 func securityBlockReasonFirstObservation(block httpsecurity.SecurityBlock, reason, description string) bool {
 	for index := len(block.ReasonLog) - 1; index >= 0; index-- {
 		event := block.ReasonLog[index]
@@ -4372,7 +4422,6 @@ func (a *App) enrichBrowserSessions(state *browserstats.Site, stop <-chan struct
 		location, found := a.geoIP.Lookup(boundary, session.Address)
 		cancel()
 		remaining--
-		session.Address = ""
 		if found {
 			session.GeoKnown = true
 			session.Country = location.CountryCode
@@ -6177,6 +6226,7 @@ func formatDurationMS(milliseconds int64) string {
 type analyticsSecurityBlockView struct {
 	httpsecurity.SecurityBlock
 	Country, City, ClientClass, Agent string
+	ObservedRequests                  []browserstats.Probe
 }
 
 func analyticsSelectedTab(r *http.Request) string {
@@ -6251,7 +6301,7 @@ func (a *App) analyticsPage(w http.ResponseWriter, r *http.Request) {
 	if loadedSecurity.Err == nil {
 		state := browserstats.SecurityState{}
 		if json.Unmarshal([]byte(loadedSecurity.Text), &state) == nil {
-			security = state.Report(time.Now().UTC(), browserDashboard.Days)
+			security = state.Report(time.Now().UTC(), 90)
 		}
 	}
 	securityIncidents := make(map[string]browserstats.Incident, len(security.Incidents))
@@ -6268,6 +6318,7 @@ func (a *App) analyticsPage(w http.ResponseWriter, r *http.Request) {
 			view.City = incident.City
 			view.ClientClass = incident.Class
 			view.Agent = incident.Agent
+			view.ObservedRequests = append([]browserstats.Probe(nil), incident.Examples...)
 		}
 		if securityBlock.Source == "global" {
 			securityGlobalBlocks = append(securityGlobalBlocks, view)
@@ -6303,12 +6354,15 @@ func (a *App) analyticsPage(w http.ResponseWriter, r *http.Request) {
 	}
 	localHoursJSON, _ := json.Marshal(experience.LocalHours)
 	serverHoursJSON, _ := json.Marshal(serverLocalHours)
+	securityHoursJSON, _ := json.Marshal(security.EventHours)
+	securityCountriesJSON, _ := json.Marshal(security.Countries)
+	securityTypesJSON, _ := json.Marshal(security.Types)
 	a.render(w, r, "analytics.html", map[string]any{
 		"ReturnPath":       requestedReturnPath(r),
 		"AnalyticsTab":     selectedTab,
 		"Report":           analyticsReportView(report, translationsForRequest(r)),
 		"BrowserAnalytics": browserDashboard,
-		"Experience":       experience, "ExperienceFilter": filter, "Security": security, "SecurityBlocks": securityBlocks, "SecurityLocalBlocks": securityLocalBlocks, "SecurityGlobalBlocks": securityGlobalBlocks, "SecurityAllowlist": securityAllowlist, "SecurityThrottles": securityThrottles, "SecuritySettings": securitySettings, "GoalsText": strings.Join(goalLines, "\n"), "SessionMapJSON": template.JS(mapJSON), "PeriodOptions": []int{1, 7, 30, 90}, "UnknownGeo": unknownGeo, "ServerRequests": serverRequests, "ServerLocalHours": serverLocalHours, "LocalHoursJSON": template.JS(localHoursJSON), "ServerHoursJSON": template.JS(serverHoursJSON), "ServerTimezone": time.Local.String(), "ServerNowRFC3339": serverNow.Format(time.RFC3339), "ServerNowDisplay": serverNow.Format("02 Jan 2006 15:04:05"), "ServerTimezoneOffsetSeconds": serverTimezoneOffsetSeconds,
+		"Experience":       experience, "ExperienceFilter": filter, "Security": security, "SecurityBlocks": securityBlocks, "SecurityLocalBlocks": securityLocalBlocks, "SecurityGlobalBlocks": securityGlobalBlocks, "SecurityAllowlist": securityAllowlist, "SecurityThrottles": securityThrottles, "SecuritySettings": securitySettings, "GoalsText": strings.Join(goalLines, "\n"), "SessionMapJSON": template.JS(mapJSON), "PeriodOptions": []int{1, 7, 30, 90}, "UnknownGeo": unknownGeo, "ServerRequests": serverRequests, "ServerLocalHours": serverLocalHours, "LocalHoursJSON": template.JS(localHoursJSON), "ServerHoursJSON": template.JS(serverHoursJSON), "SecurityHoursJSON": template.JS(securityHoursJSON), "SecurityCountriesJSON": template.JS(securityCountriesJSON), "SecurityTypesJSON": template.JS(securityTypesJSON), "ServerTimezone": time.Local.String(), "ServerNowRFC3339": serverNow.Format(time.RFC3339), "ServerNowDisplay": serverNow.Format("02 Jan 2006 15:04:05"), "ServerTimezoneOffsetSeconds": serverTimezoneOffsetSeconds,
 	})
 }
 
@@ -6490,8 +6544,20 @@ func (a *App) authAbuseMiddleware(next http.Handler) http.Handler {
 		now := time.Now().UTC()
 		clientIP := clientIPAddress(r)
 		trusted := httpsecurity.IsLocalRequest(r) || sitebrushPeerRequestTrusted(r, now)
+		crawlerRead := httpsecurity.IsIndexingCrawlerRequest(r)
 		if a.attackGuard != nil {
-			block, blocked, allowed := a.attackGuard.ObserveRequestFastDisposition(clientIP, r.URL.EscapedPath(), r.Method, trusted, now)
+			var block httpsecurity.SecurityBlock
+			var blocked, allowed bool
+			category := ""
+			if !trusted {
+				category = browserstats.ProbeCategory(r.URL.EscapedPath(), r.URL.RawQuery)
+			}
+			if immediateSecurityCategory(category) {
+				description := securityIncidentDescription(category, r.URL.EscapedPath(), 0)
+				block, blocked = a.attackGuard.ObserveIncident(clientIP, category, description, now)
+			} else {
+				block, blocked, allowed = a.attackGuard.ObserveRequestFastDisposition(clientIP, r.URL.EscapedPath(), r.Method, trusted || crawlerRead, now)
+			}
 			if allowed {
 				next.ServeHTTP(w, r)
 				return
@@ -6512,7 +6578,12 @@ func (a *App) authAbuseMiddleware(next http.Handler) http.Handler {
 		}
 
 		if a.throttleGuard != nil {
-			decision := a.throttleGuard.ObserveFast(clientIP, trusted, now)
+			decision := httpsecurity.ThrottleDecision{}
+			if crawlerRead && !trusted {
+				decision = a.throttleGuard.ObserveFastExemptObservation(clientIP, false, now)
+			} else {
+				decision = a.throttleGuard.ObserveFast(clientIP, trusted, now)
+			}
 			if decision.RateLimited {
 				w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 				w.Header().Set("Cache-Control", "no-store")
@@ -8819,6 +8890,9 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 		if a.servePublishedStaticFileFromDisk(w, r, requestDomain, pagePath, true) {
 			return
 		}
+	}
+	if a.serveDefaultCrawlerIndex(w, r, requestDomain, pagePath) {
+		return
 	}
 	if !a.dynamicDatabaseReady(w, r, requestDomain) {
 		return
@@ -28309,6 +28383,7 @@ func (a *App) renderPagePasswordPrompt(w http.ResponseWriter, r *http.Request, d
 	actionURL := template.HTMLEscapeString(cleanPath(pagePath) + "?page_password_unlock")
 	menuScript := buildGuestContextMenuScriptForLanguage(pagePath, domain, languageCode)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("X-Robots-Tag", "noindex, nofollow, noarchive")
 	w.WriteHeader(statusCode)
 	_, _ = w.Write([]byte(`<!doctype html>
 <html lang="` + template.HTMLEscapeString(languageCode) + `">
@@ -35945,6 +36020,143 @@ func (a *App) findPublishedPage(ctx context.Context, domain, pagePath string) (P
 	var current Page
 	err := a.db.QueryRowContext(ctx, `SELECT domain,path,title,html FROM published_pages WHERE domain=? AND path=?`, domain, pagePath).Scan(&current.Domain, &current.Path, &current.Title, &current.HTML)
 	return current, err
+}
+
+// serveDefaultCrawlerIndex exposes discovery files only when the site has not
+// published its own version. Keeping this policy at the public HTTP boundary
+// leaves crawler access independent from the attack and throttle subsystems.
+func (a *App) serveDefaultCrawlerIndex(w http.ResponseWriter, r *http.Request, domain, pagePath string) bool {
+	if r == nil || r.URL == nil || r.URL.RawQuery != "" {
+		return false
+	}
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		return false
+	}
+	if pagePath != "/robots.txt" && pagePath != "/sitemap.xml" {
+		return false
+	}
+	if _, protected := a.pagePasswordRuleFromPrefixFile(domain, pagePath); protected {
+		return false
+	}
+	if a.servePublishedStaticFileFromDisk(w, r, domain, pagePath, false) {
+		return true
+	}
+	if !a.dynamicDatabaseReady(w, r, domain) {
+		return true
+	}
+	if _, err := a.findPublishedPage(r.Context(), domain, pagePath); err == nil {
+		return false
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		http.Error(w, "failed to read crawler discovery file", http.StatusInternalServerError)
+		return true
+	}
+
+	if pagePath == "/robots.txt" {
+		a.serveDefaultRobotsTXT(w, r, domain)
+		return true
+	}
+	a.serveDefaultSitemapXML(w, r, domain)
+	return true
+}
+
+func publicCrawlerBaseURL(r *http.Request) string {
+	if r == nil {
+		return ""
+	}
+	host := strings.TrimSpace(r.Host)
+	if host == "" || strings.ContainsAny(host, "\r\n") {
+		return ""
+	}
+	scheme := "http"
+	if httpsecurity.UsesHTTPS(r) {
+		scheme = "https"
+	}
+	return scheme + "://" + host
+}
+
+func (a *App) serveDefaultRobotsTXT(w http.ResponseWriter, r *http.Request, domain string) {
+	baseURL := publicCrawlerBaseURL(r)
+	if baseURL == "" {
+		http.Error(w, "invalid request host", http.StatusBadRequest)
+		return
+	}
+	rows, err := a.db.QueryContext(r.Context(), `SELECT path FROM page_password_rules WHERE domain=? ORDER BY path ASC`, domain)
+	if err != nil {
+		http.Error(w, "failed to read protected paths", http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+
+	protectedPaths := make([]string, 0, 8)
+	for rows.Next() {
+		var protectedPath string
+		if scanErr := rows.Scan(&protectedPath); scanErr != nil {
+			continue
+		}
+		protectedPath = cleanPath(protectedPath)
+		if protectedPath == "" {
+			continue
+		}
+		protectedPaths = append(protectedPaths, protectedPath)
+	}
+	if err := rows.Err(); err != nil {
+		http.Error(w, "failed to read protected paths", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set("Cache-Control", "public, max-age=3600")
+	_, _ = io.WriteString(w, "User-agent: *\nAllow: /\n")
+	for _, protectedPath := range protectedPaths {
+		_, _ = io.WriteString(w, "Disallow: "+protectedPath+"\n")
+	}
+	_, _ = io.WriteString(w, "Sitemap: "+baseURL+"/sitemap.xml\n")
+}
+
+func (a *App) serveDefaultSitemapXML(w http.ResponseWriter, r *http.Request, domain string) {
+	baseURL := publicCrawlerBaseURL(r)
+	if baseURL == "" {
+		http.Error(w, "invalid request host", http.StatusBadRequest)
+		return
+	}
+	rows, err := a.db.QueryContext(r.Context(), `SELECT path FROM published_pages WHERE domain=? ORDER BY path ASC`, domain)
+	if err != nil {
+		http.Error(w, "failed to read published pages", http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+
+	const maximumSitemapURLs = 50000
+	pagePaths := make([]string, 0, 256)
+	for rows.Next() && len(pagePaths) < maximumSitemapURLs {
+		var publishedPath string
+		if scanErr := rows.Scan(&publishedPath); scanErr != nil {
+			continue
+		}
+		publishedPath = strings.TrimSpace(publishedPath)
+		if publishedPath == "" || len(publishedPath) > 2048 {
+			continue
+		}
+		publishedPath = cleanPath(publishedPath)
+		if _, protected := a.pagePasswordRuleFromPrefixFile(domain, publishedPath); protected {
+			continue
+		}
+		pagePaths = append(pagePaths, publishedPath)
+	}
+	if err := rows.Err(); err != nil {
+		http.Error(w, "failed to read published pages", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/xml; charset=utf-8")
+	w.Header().Set("Cache-Control", "public, max-age=3600")
+	_, _ = io.WriteString(w, "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<urlset xmlns=\"http://www.sitemaps.org/schemas/sitemap/0.9\">\n")
+	for _, publishedPath := range pagePaths {
+		escapedPath := (&url.URL{Path: publishedPath}).EscapedPath()
+		location := template.HTMLEscapeString(baseURL + escapedPath)
+		_, _ = io.WriteString(w, "  <url><loc>"+location+"</loc></url>\n")
+	}
+	_, _ = io.WriteString(w, "</urlset>\n")
 }
 
 func (a *App) siteTreeJSON(w http.ResponseWriter, r *http.Request) {
