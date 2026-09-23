@@ -21094,18 +21094,248 @@ func (a *App) handleSitebrushNetChanPayload(ctx context.Context, payload []byte)
 	if request.HostingSnapshot != nil {
 		source = firstNonEmpty(request.HostingSnapshot.ServerIP, request.HostingSnapshot.ServerDomain, source)
 	}
+	var responsePayload []byte
 	switch strings.TrimSpace(request.CodeKind) {
 	case "installation_register":
 		status, statusCode = a.handleServiceMailRelayRequest(ctx, nil, request, source)
 	case "hosting_snapshot":
 		status, statusCode = a.handleHostingSnapshotRequest(ctx, request, source)
+	case "security_signal":
+		status, statusCode = a.handleSecuritySignalRequest(ctx, request)
+	case "security_reputation":
+		status, statusCode, responsePayload = a.handleSecurityReputationRequest(ctx, request)
 	default:
 		status, statusCode = a.handleServiceMailRelayRequest(ctx, nil, request, source)
 	}
 	if statusCode >= 400 {
 		log.Printf("hosting snapshot netchan rejected: %s", diagnosticlog.SafeLogValue(status))
 	}
-	return sitebrushNetChanResponse{Status: status, StatusCode: statusCode}
+	return sitebrushNetChanResponse{Status: status, StatusCode: statusCode, Payload: responsePayload}
+}
+
+func (a *App) runSecurityGlobalSync(stop <-chan struct{}) {
+	ticker := time.NewTicker(10 * time.Minute)
+	defer ticker.Stop()
+	lastSent := map[string]time.Time{}
+
+	for {
+		select {
+		case <-stop:
+			return
+		case signal := <-a.securityGlobalSignals:
+			if a.attackGuard == nil {
+				continue
+			}
+			settings, err := a.attackGuard.Settings()
+			if err != nil || !settings.GlobalSync {
+				continue
+			}
+			now := time.Now().UTC()
+			key := signal.IP + "\x1f" + signal.Category
+			if previous := lastSent[key]; !previous.IsZero() && now.Sub(previous) < time.Hour {
+				continue
+			}
+			lastSent[key] = now
+			a.sendSecuritySignalWithTimeout(stop, signal)
+			if len(lastSent) > 4096 {
+				for candidate, sentAt := range lastSent {
+					if now.Sub(sentAt) > 2*time.Hour {
+						delete(lastSent, candidate)
+					}
+				}
+			}
+		case <-ticker.C:
+			if a.attackGuard == nil {
+				continue
+			}
+			settings, err := a.attackGuard.Settings()
+			if err != nil || !settings.GlobalSync {
+				continue
+			}
+			a.pullSecurityReputationWithTimeout(stop)
+		}
+	}
+}
+
+func (a *App) sendSecuritySignalWithTimeout(stop <-chan struct{}, signal securitysync.Signal) {
+	select {
+	case <-stop:
+		return
+	default:
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	request := serviceMailRequest{
+		Version:        1,
+		CodeKind:       "security_signal",
+		SecuritySignal: &signal,
+		LanguageCode:   "en",
+		CreatedAt:      time.Now().UTC().Format(time.RFC3339),
+	}
+	if err := a.sendSecurityNetChanRequest(ctx, &request); err != nil {
+		log.Printf("security reputation signal skipped: %v", err)
+	}
+}
+
+func (a *App) pullSecurityReputationWithTimeout(stop <-chan struct{}) {
+	select {
+	case <-stop:
+		return
+	default:
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	request := serviceMailRequest{
+		Version:      1,
+		CodeKind:     "security_reputation",
+		SecurityQuery: true,
+		LanguageCode: "en",
+		CreatedAt:    time.Now().UTC().Format(time.RFC3339),
+	}
+	response, err := a.sendSecurityNetChanRequestWithResponse(ctx, &request)
+	if err != nil {
+		log.Printf("security reputation pull skipped: %v", err)
+		return
+	}
+	var entries []securitysync.Entry
+	if err := json.Unmarshal(response.Payload, &entries); err != nil {
+		log.Printf("security reputation decode skipped: %v", err)
+		return
+	}
+	for _, entry := range entries {
+		description := fmt.Sprintf("confirmed by %d independent SiteBrush installations", entry.Confirmations)
+		_ = a.attackGuard.ApplyGlobal(entry.IP, entry.Reason, description, entry.LastEvent, entry.ExpiresAt)
+	}
+}
+
+func (a *App) sendSecurityNetChanRequest(ctx context.Context, request *serviceMailRequest) error {
+	_, err := a.sendSecurityNetChanRequestWithResponse(ctx, request)
+	return err
+}
+
+func (a *App) sendSecurityNetChanRequestWithResponse(ctx context.Context, request *serviceMailRequest) (sitebrushNetChanResponse, error) {
+	response, err := a.sendServiceMailNetChanRequest(ctx, request)
+	if err != nil {
+		return sitebrushNetChanResponse{}, err
+	}
+	if responseErr := serviceMailNetChanResponseError(response); responseErr == nil {
+		return response, nil
+	} else if !strings.Contains(strings.ToLower(responseErr.Error()), "installation is not registered") {
+		return sitebrushNetChanResponse{}, responseErr
+	}
+	registration := serviceMailRequest{
+		Version:      1,
+		CodeKind:     "installation_register",
+		LanguageCode: "en",
+		CreatedAt:    time.Now().UTC().Format(time.RFC3339),
+	}
+	registrationResponse, registrationErr := a.sendServiceMailNetChanRequest(ctx, &registration)
+	if registrationErr != nil {
+		return sitebrushNetChanResponse{}, registrationErr
+	}
+	if responseErr := serviceMailNetChanResponseError(registrationResponse); responseErr != nil {
+		return sitebrushNetChanResponse{}, responseErr
+	}
+	response, err = a.sendServiceMailNetChanRequest(ctx, request)
+	if err != nil {
+		return sitebrushNetChanResponse{}, err
+	}
+	if responseErr := serviceMailNetChanResponseError(response); responseErr != nil {
+		return sitebrushNetChanResponse{}, responseErr
+	}
+	return response, nil
+}
+
+func (a *App) validateSecuritySyncInstallation(ctx context.Context, request serviceMailRequest) error {
+	if err := verifyServiceMailRequestSignature(request); err != nil {
+		return err
+	}
+	var validationErr error
+	err := a.withServerControlDatabaseRead(ctx, "security-sync-installation", func(database *sql.DB) error {
+		store := hostingandsupport.Store{DB: database}
+		knownPublicKey, found := store.ServiceMailInstallationPublicKey(ctx, request.InstallationID)
+		if !found {
+			validationErr = errors.New("installation is not registered")
+			return nil
+		}
+		if strings.TrimSpace(knownPublicKey) != strings.TrimSpace(request.PublicKey) {
+			validationErr = errors.New("installation public key changed")
+			return nil
+		}
+		if store.ServiceMailInstallationBlocked(ctx, request.InstallationID) {
+			validationErr = errors.New("installation is blocked")
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	return validationErr
+}
+
+func (a *App) handleSecuritySignalRequest(ctx context.Context, request serviceMailRequest) (string, int) {
+	if request.SecuritySignal == nil {
+		return "security signal is required", http.StatusBadRequest
+	}
+	if err := a.validateSecuritySyncInstallation(ctx, request); err != nil {
+		return err.Error(), http.StatusForbidden
+	}
+	if a.securityReputation == nil {
+		return "security reputation unavailable", http.StatusServiceUnavailable
+	}
+	signal := *request.SecuritySignal
+	signal.InstallationID = request.InstallationID
+	reply := make(chan securitysync.Result, 1)
+	job := securitysync.Request{Signal: &signal, Reply: reply}
+	select {
+	case <-ctx.Done():
+		return "security signal canceled", http.StatusRequestTimeout
+	case a.securityReputation <- job:
+	}
+	select {
+	case <-ctx.Done():
+		return "security signal canceled", http.StatusRequestTimeout
+	case result := <-reply:
+		if result.Err != nil {
+			return result.Err.Error(), http.StatusBadRequest
+		}
+		if !result.Accepted {
+			return "security signal rejected", http.StatusBadRequest
+		}
+		return "accepted", http.StatusOK
+	}
+}
+
+func (a *App) handleSecurityReputationRequest(ctx context.Context, request serviceMailRequest) (string, int, []byte) {
+	if !request.SecurityQuery {
+		return "security reputation query is required", http.StatusBadRequest, nil
+	}
+	if err := a.validateSecuritySyncInstallation(ctx, request); err != nil {
+		return err.Error(), http.StatusForbidden, nil
+	}
+	if a.securityReputation == nil {
+		return "security reputation unavailable", http.StatusServiceUnavailable, nil
+	}
+	reply := make(chan securitysync.Result, 1)
+	job := securitysync.Request{Query: true, Reply: reply}
+	select {
+	case <-ctx.Done():
+		return "security reputation canceled", http.StatusRequestTimeout, nil
+	case a.securityReputation <- job:
+	}
+	select {
+	case <-ctx.Done():
+		return "security reputation canceled", http.StatusRequestTimeout, nil
+	case result := <-reply:
+		if result.Err != nil {
+			return result.Err.Error(), http.StatusInternalServerError, nil
+		}
+		encoded, err := json.Marshal(result.Entries)
+		if err != nil {
+			return err.Error(), http.StatusInternalServerError, nil
+		}
+		return "ok", http.StatusOK, encoded
+	}
 }
 
 func (a *App) reportHostingSnapshotNetChan(ctx context.Context) error {
@@ -22164,8 +22394,10 @@ func (a *App) sendMailoutTaskThroughNetChan(ctx context.Context, record mailout.
 func (a *App) sendServiceMailNetChanRequest(ctx context.Context, request *serviceMailRequest) (sitebrushNetChanResponse, error) {
 	relayURL := "https://sitebrush.com" + serviceMailRelayPath
 	relayRequest := *request
-	if err := a.attachHostingSnapshotToServiceMailRequest(ctx, relayURL, &relayRequest); err != nil {
-		return sitebrushNetChanResponse{}, err
+	if !strings.HasPrefix(strings.TrimSpace(relayRequest.CodeKind), "security_") {
+		if err := a.attachHostingSnapshotToServiceMailRequest(ctx, relayURL, &relayRequest); err != nil {
+			return sitebrushNetChanResponse{}, err
+		}
 	}
 	if err := a.signServiceMailRequest(ctx, &relayRequest); err != nil {
 		return sitebrushNetChanResponse{}, err
