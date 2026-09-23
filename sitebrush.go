@@ -6287,14 +6287,7 @@ func (a *App) authAbuseMiddleware(next http.Handler) http.Handler {
 				_, _ = io.WriteString(w, "Request rate temporarily reduced. Retry shortly.\n")
 				return
 			}
-			if decision.Delay > 0 {
-				timer := time.NewTimer(decision.Delay)
-				defer timer.Stop()
-				select {
-				case <-r.Context().Done():
-					return
-				case <-timer.C:
-				}
+			if decision.Active {
 				w.Header().Set("X-Sitebrush-Security-Throttle", "active")
 			}
 		}
