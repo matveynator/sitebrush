@@ -92,8 +92,9 @@ func TestResendExpiryAndUnknownAddress(t *testing.T) {
 		})
 	}
 	first := request(now)
-	if request(now.Add(time.Second)).Status != "limited" {
-		t.Fatal("cooldown missing")
+	duplicate := request(now.Add(time.Second))
+	if duplicate.Status != "code_existing" || duplicate.Token != first.Token || duplicate.Code != "" {
+		t.Fatalf("duplicate request did not reuse pending challenge: %#v", duplicate)
 	}
 	second := request(now.Add(CodeSendCooldown))
 	verify := func(challenge Outcome, at time.Time) Outcome {
