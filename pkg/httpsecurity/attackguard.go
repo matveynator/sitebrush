@@ -17,6 +17,7 @@ import (
 const (
 	defaultSecurityBlockTTL = 7 * 24 * time.Hour
 	securityReasonHistoryTTL = 7 * 24 * time.Hour
+	securityReasonLogLimit   = 24
 	attackGuardShardCount    = 16
 	attackGuardQueueSize     = 256
 )
@@ -27,10 +28,12 @@ type SecuritySettings struct {
 }
 
 type SecurityReasonEvent struct {
+	First       time.Time `json:"first,omitempty"`
 	At          time.Time `json:"at"`
 	Reason      string    `json:"reason"`
 	Description string    `json:"description"`
 	Source      string    `json:"source"`
+	Count       int       `json:"count,omitempty"`
 }
 
 type SecurityBlock struct {
@@ -307,8 +310,7 @@ func handleAttackGuardRequest(blocks map[string]SecurityBlock, allowlist map[str
 		}
 		block.Reason = cleanSecurityText(request.Reason, 96)
 		block.Description = cleanSecurityText(request.Description, 240)
-		block.ReasonLog = append(block.ReasonLog, SecurityReasonEvent{At: now, Reason: block.Reason, Description: block.Description, Source: "manual-edit"})
-		block.ReasonLog = pruneSecurityReasonLog(block.ReasonLog, now)
+		block.ReasonLog = appendSecurityReasonEvent(block.ReasonLog, SecurityReasonEvent{First: now, At: now, Reason: block.Reason, Description: block.Description, Source: "manual-edit", Count: 1}, now)
 		blocks[ip] = block
 		return attackGuardResult{Block: block, Blocked: true, Changed: true}
 
@@ -455,8 +457,7 @@ func blockSecurityIP(blocks map[string]SecurityBlock, ip, reason, description, s
 	cleanDescription := cleanSecurityText(description, 240)
 	cleanSource := cleanSecurityText(source, 32)
 	reasonLog := append([]SecurityReasonEvent(nil), previous.ReasonLog...)
-	reasonLog = append(reasonLog, SecurityReasonEvent{At: now, Reason: cleanReason, Description: cleanDescription, Source: cleanSource})
-	reasonLog = pruneSecurityReasonLog(reasonLog, now)
+	reasonLog = appendSecurityReasonEvent(reasonLog, SecurityReasonEvent{First: now, At: now, Reason: cleanReason, Description: cleanDescription, Source: cleanSource, Count: 1}, now)
 	block := SecurityBlock{
 		IP:          ip,
 		Reason:      cleanReason,
@@ -472,13 +473,47 @@ func blockSecurityIP(blocks map[string]SecurityBlock, ip, reason, description, s
 	return block
 }
 
+func appendSecurityReasonEvent(events []SecurityReasonEvent, event SecurityReasonEvent, now time.Time) []SecurityReasonEvent {
+	events = pruneSecurityReasonLog(events, now)
+	for index := len(events) - 1; index >= 0; index-- {
+		previous := &events[index]
+		if previous.Reason != event.Reason || previous.Description != event.Description || previous.Source != event.Source {
+			continue
+		}
+		if previous.Count < 1 {
+			previous.Count = 1
+		}
+		if previous.First.IsZero() {
+			previous.First = previous.At
+		}
+		previous.At = event.At
+		previous.Count++
+		return events
+	}
+	events = append(events, event)
+	if len(events) > securityReasonLogLimit {
+		events = append([]SecurityReasonEvent(nil), events[len(events)-securityReasonLogLimit:]...)
+	}
+	return events
+}
+
 func pruneSecurityReasonLog(events []SecurityReasonEvent, now time.Time) []SecurityReasonEvent {
 	cutoff := now.Add(-securityReasonHistoryTTL)
 	kept := events[:0]
 	for _, event := range events {
-		if !event.At.Before(cutoff) {
-			kept = append(kept, event)
+		if event.At.Before(cutoff) {
+			continue
 		}
+		if event.Count < 1 {
+			event.Count = 1
+		}
+		if event.First.IsZero() {
+			event.First = event.At
+		}
+		kept = append(kept, event)
+	}
+	if len(kept) > securityReasonLogLimit {
+		kept = kept[len(kept)-securityReasonLogLimit:]
 	}
 	return kept
 }
