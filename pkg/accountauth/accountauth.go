@@ -156,7 +156,7 @@ func Challenge(ctx context.Context, tx *sql.Tx, domain, email, ip, path, languag
 		err = tx.QueryRowContext(ctx, `SELECT token,email,return_path,language,created_at FROM account_login_codes WHERE domain=? AND email=? AND client_ip=? AND created_at>? ORDER BY created_at DESC LIMIT 1`,
 			domain, email, ip, now.Add(-CodeSendCooldown).Unix()).Scan(&token, &existingEmail, &path, &language, &created)
 		if err == nil && now.Unix()-created < int64(CodeSendCooldown/time.Second) {
-			return Outcome{Status: "code", Token: token, Email: existingEmail, Path: path, Language: language}, nil
+			return Outcome{Status: "code_existing", Token: token, Email: existingEmail, Path: path, Language: language}, nil
 		}
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
 			return Outcome{}, err
