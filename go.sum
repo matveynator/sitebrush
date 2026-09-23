@@ -118,3 +118,5 @@ golang.org/x/crypto v0.52.0/go.mod h1:1QgfPxDqh0T2M/elOJtp9RvuR95kVjir0e6/BvEmGb
 golang.org/x/sys v0.45.0 h1:dO4czNzziLiiXplLQgBCEpCvXQ3dnkn0SdaZSYdQ+FY=
 golang.org/x/sys v0.45.0/go.mod h1:4GL1E5IUh+htKOUEOaiffhrAeqysfVGipDYzABqnCmw=
 gopkg.in/check.v1 v0.0.0-20161208181325-20d25e280405 h1:yhCVgyC4o1eVCa2tZl7eS0r+SDo693bJlVdllGtEeKM=
+github.com/go-webauthn/webauthn v0.17.4 h1:KFTSz3R2RYDiUn/0cDi3XTJgFenSG74eKTTHlqWhlxk=
+github.com/go-webauthn/webauthn v0.17.4/go.mod h1:pZk63EE/BdztlmyS4Yc+9H5g4a8blNlbtGmdHQHbZX8=
