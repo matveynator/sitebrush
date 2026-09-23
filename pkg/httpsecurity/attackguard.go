@@ -486,6 +486,7 @@ func appendSecurityReasonEvent(events []SecurityReasonEvent, event SecurityReaso
 			previous.First = previous.At
 		}
 		if previous.First.Before(cutoff) {
+			events = append(events[:index], events[index+1:]...)
 			break
 		}
 		if previous.Count < 1 {
