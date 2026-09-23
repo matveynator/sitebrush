@@ -277,7 +277,7 @@ func TestAttackGuardAggregatesRepeatedGlobalReasonHistory(t *testing.T) {
 func TestAttackGuardReasonAggregateResetsOutsideRetentionWindow(t *testing.T) {
 	start := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
 	events := []SecurityReasonEvent{}
-	for day := 0; day < 8; day++ {
+	for day := 0; day < 9; day++ {
 		observed := start.Add(time.Duration(day) * 24 * time.Hour)
 		events = appendSecurityReasonEvent(events, SecurityReasonEvent{
 			First: observed,
@@ -288,13 +288,13 @@ func TestAttackGuardReasonAggregateResetsOutsideRetentionWindow(t *testing.T) {
 			Count: 1,
 		}, observed)
 	}
-	if len(events) != 2 {
-		t.Fatalf("expected a new aggregate after retention cutoff, got %#v", events)
+	if len(events) != 1 {
+		t.Fatalf("expired aggregate remained visible: %#v", events)
 	}
-	if events[0].Count != 7 || events[1].Count != 1 {
-		t.Fatalf("unexpected windowed counts: %#v", events)
+	if events[0].Count != 1 {
+		t.Fatalf("expired observations remained in count: %#v", events)
 	}
-	if !events[1].First.Equal(start.Add(7 * 24 * time.Hour)) {
-		t.Fatalf("new aggregate kept stale first timestamp: %#v", events[1])
+	if !events[0].First.Equal(start.Add(8 * 24 * time.Hour)) {
+		t.Fatalf("new aggregate kept stale first timestamp: %#v", events[0])
 	}
 }
