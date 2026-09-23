@@ -206,3 +206,95 @@ func TestAttackGuardPersistsAllowlist(t *testing.T) {
 		t.Fatalf("unexpected persisted allowlist: %#v", entries)
 	}
 }
+
+
+func TestAttackGuardAggregatesRepeatedReasonHistory(t *testing.T) {
+	now := time.Date(2026, 9, 23, 12, 0, 0, 0, time.UTC)
+	guard, err := NewAttackGuard("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer guard.Close()
+
+	var block SecurityBlock
+	for index := 0; index < 50; index++ {
+		block, _ = guard.ObserveIncident("198.51.100.82", "secret", "sensitive file probe", now.Add(time.Duration(index)*time.Second))
+	}
+	if len(block.ReasonLog) != 1 {
+		t.Fatalf("repeated reason history was not aggregated: %#v", block.ReasonLog)
+	}
+	event := block.ReasonLog[0]
+	if event.Count != 50 || event.Reason != "secret" {
+		t.Fatalf("unexpected aggregated reason: %#v", event)
+	}
+	if event.First != now || !event.At.Equal(now.Add(49*time.Second)) {
+		t.Fatalf("unexpected aggregation window: %#v", event)
+	}
+}
+
+func TestAttackGuardReasonHistoryIsBounded(t *testing.T) {
+	now := time.Date(2026, 9, 23, 12, 0, 0, 0, time.UTC)
+	events := make([]SecurityReasonEvent, 0, securityReasonLogLimit+10)
+	for index := 0; index < securityReasonLogLimit+10; index++ {
+		eventTime := now.Add(time.Duration(index) * time.Minute)
+		events = appendSecurityReasonEvent(events, SecurityReasonEvent{
+			First: eventTime,
+			At: eventTime,
+			Reason: "reason-" + time.Duration(index).String(),
+			Source: "local",
+			Count: 1,
+		}, eventTime)
+	}
+	if len(events) != securityReasonLogLimit {
+		t.Fatalf("reason history size=%d", len(events))
+	}
+}
+
+
+func TestAttackGuardAggregatesRepeatedGlobalReasonHistory(t *testing.T) {
+	now := time.Date(2026, 9, 23, 12, 0, 0, 0, time.UTC)
+	guard, err := NewAttackGuard("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer guard.Close()
+
+	for index := 0; index < 6; index++ {
+		observed := now.Add(time.Duration(index) * 10 * time.Minute)
+		if err := guard.ApplyGlobal("198.51.100.90", "secret", "confirmed globally", observed, observed.Add(7*24*time.Hour)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	block, blocked := guard.Check("198.51.100.90", now.Add(time.Hour))
+	if !blocked {
+		t.Fatal("global block missing")
+	}
+	if len(block.ReasonLog) != 1 || block.ReasonLog[0].Count != 6 {
+		t.Fatalf("global reason history was not aggregated: %#v", block.ReasonLog)
+	}
+}
+
+func TestAttackGuardReasonAggregateResetsOutsideRetentionWindow(t *testing.T) {
+	start := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+	events := []SecurityReasonEvent{}
+	for day := 0; day < 9; day++ {
+		observed := start.Add(time.Duration(day) * 24 * time.Hour)
+		events = appendSecurityReasonEvent(events, SecurityReasonEvent{
+			First: observed,
+			At: observed,
+			Reason: "secret",
+			Description: "sensitive file probe",
+			Source: "local",
+			Count: 1,
+		}, observed)
+	}
+	if len(events) != 1 {
+		t.Fatalf("expired aggregate remained visible: %#v", events)
+	}
+	if events[0].Count != 1 {
+		t.Fatalf("expired observations remained in count: %#v", events)
+	}
+	if !events[0].First.Equal(start.Add(8 * 24 * time.Hour)) {
+		t.Fatalf("new aggregate kept stale first timestamp: %#v", events[0])
+	}
+}

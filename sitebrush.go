@@ -2277,6 +2277,10 @@ type analyticsPreparedReport struct {
 	SystemEvents        []analyticsCountRow `json:"system_events,omitempty"`
 }
 
+type analyticsTechnicalHistory struct {
+	Days map[string]analyticsPreparedReport `json:"days"`
+}
+
 type analyticsCountRow struct {
 	Label  string `json:"label"`
 	Count  int    `json:"count"`
@@ -3444,6 +3448,9 @@ func (a *App) resolveAnalyticsDomain(domain string, resolutions map[string]analy
 		resolved.domain = ""
 		resolved.expires = now.Add(time.Second)
 	}
+	if resolved.domain != "" && !a.analyticsSiteAvailable(resolved.domain) {
+		resolved.domain = ""
+	}
 	if len(resolutions) >= 4095 {
 		clear(resolutions)
 	}
@@ -3636,6 +3643,8 @@ func (a *App) flushAnalyticsAggregateState(ctx context.Context, state *analytics
 
 // Browser analytics admission, persistence, and dashboard boundaries.
 
+var errAnalyticsSiteUnavailable = errors.New("analytics site is not published or registered")
+
 func analyticsBoundedString(raw string, maximum int) string {
 	if len(raw) > maximum {
 		raw = raw[:maximum]
@@ -3673,7 +3682,7 @@ func (a *App) retryAnalyticsReport(stop context.Context, domain string, report a
 		boundary, cancel := context.WithTimeout(contextWithDomain(stop, domain), 5*time.Second)
 		err := a.saveAnalyticsReport(boundary, domain, report)
 		cancel()
-		if err == nil {
+		if err == nil || errors.Is(err, errAnalyticsSiteUnavailable) {
 			return
 		}
 		log.Printf("analytics save failed domain=%q attempt=%d: %v", domain, attempt+1, err)
@@ -3884,6 +3893,10 @@ func (a *App) browserAnalyticsStorage(jobs <-chan browserAnalyticsStorageJob, re
 						boundary, cancel := context.WithTimeout(contextWithDomain(storageContext, job.domain), 5*time.Second)
 						err = a.analyticsStorageExchange(browserstats.StorageRequest{Operation: browserstats.SaveBrowser, Domain: job.domain, State: string(snapshot), Report: string(reportJSON), Archive: string(archiveJSON), Stop: boundary.Done()}).Err
 						cancel()
+						if errors.Is(err, errAnalyticsSiteUnavailable) {
+							err = nil
+							break
+						}
 						if err == nil {
 							break
 						}
@@ -3901,17 +3914,25 @@ func (a *App) browserAnalyticsStorage(jobs <-chan browserAnalyticsStorageJob, re
 
 // Filesystem admission happens only at the storage boundary, never while
 // serving pages. Unknown Host headers must not create analytics databases.
+func (a *App) analyticsSiteAvailable(domain string) bool {
+	if a.siteDatabaseRouter == nil {
+		return true
+	}
+	databasePath := filepath.Join(siteDatabaseRootPath(a.serverControlDBPath()), domainStorageName(domain)+".db")
+	databaseInfo, databaseErr := os.Stat(databasePath)
+	if databaseErr == nil && databaseInfo.Mode().IsRegular() {
+		return true
+	}
+	staticInfo, staticErr := os.Stat(a.domainStaticDir(domain))
+	return staticErr == nil && staticInfo.IsDir()
+}
+
 func (a *App) analyticsStorageExchange(request browserstats.StorageRequest) browserstats.StorageResult {
 	if a.analyticsStorage == nil {
 		return browserstats.StorageResult{Err: errors.New("analytics storage unavailable")}
 	}
-	if a.siteDatabaseRouter != nil {
-		databasePath := filepath.Join(siteDatabaseRootPath(a.serverControlDBPath()), domainStorageName(request.Domain)+".db")
-		databaseInfo, databaseErr := os.Stat(databasePath)
-		staticInfo, staticErr := os.Stat(a.domainStaticDir(request.Domain))
-		if (databaseErr != nil || !databaseInfo.Mode().IsRegular()) && (staticErr != nil || !staticInfo.IsDir()) {
-			return browserstats.StorageResult{Err: errors.New("analytics site is not published or registered")}
-		}
+	if !a.analyticsSiteAvailable(request.Domain) {
+		return browserstats.StorageResult{Err: errAnalyticsSiteUnavailable}
 	}
 	return a.analyticsStorage.Exchange(request)
 }
@@ -4275,11 +4296,12 @@ func (a *App) runSecurityAnalytics(stop <-chan struct{}) {
 			address := clientIPAddress(&http.Request{RemoteAddr: event.RemoteAddress, Header: http.Header{"Forwarded": []string{event.Forwarded}, "X-Forwarded-For": []string{event.ForwardedFor}}})
 			category := state.Record(browserstats.RequestObservation{Time: event.OccurredAt, IP: address, Path: event.Path, Query: event.Query, Method: event.Method, Status: event.StatusCode, Bytes: event.Bytes, Agent: event.UserAgent, Language: analyticsLanguageLabel(event.AcceptLanguage), Trusted: event.TrustedPeer})
 			if category != "" && a.attackGuard != nil {
-				_, blocked := a.attackGuard.ObserveIncident(address, category, "security analytics detected "+category, event.OccurredAt)
-				if blocked && a.securityGlobalSignals != nil {
+				description := "security analytics detected " + category
+				block, blocked := a.attackGuard.ObserveIncident(address, category, description, event.OccurredAt)
+				if blocked && a.securityGlobalSignals != nil && securityBlockReasonFirstObservation(block, category, description) {
 					settings, settingsErr := a.attackGuard.Settings()
 					if settingsErr == nil && settings.GlobalSync {
-						signal := securitysync.Signal{IP: address, Category: category, Description: "security analytics detected " + category, ObservedAt: event.OccurredAt}
+						signal := securitysync.Signal{IP: address, Category: category, Description: description, ObservedAt: event.OccurredAt}
 						select {
 						case a.securityGlobalSignals <- signal:
 						default:
@@ -4317,6 +4339,16 @@ func (a *App) runSecurityAnalytics(stop <-chan struct{}) {
 			}
 		}
 	}
+}
+
+func securityBlockReasonFirstObservation(block httpsecurity.SecurityBlock, reason, description string) bool {
+	for index := len(block.ReasonLog) - 1; index >= 0; index-- {
+		event := block.ReasonLog[index]
+		if event.Reason == reason && event.Description == description && event.Source == "local" {
+			return event.Count <= 1
+		}
+	}
+	return false
 }
 
 func (a *App) enrichBrowserSessions(state *browserstats.Site, stop <-chan struct{}) {
@@ -4482,7 +4514,7 @@ type browserAnalyticsDashboard struct {
 func (a *App) browserAnalyticsView(r *http.Request, domain string) browserAnalyticsDashboard {
 	days, _ := strconv.Atoi(r.URL.Query().Get("days"))
 	if days != 1 && days != 7 && days != 30 && days != 90 {
-		days = 1
+		days = 7
 	}
 	dashboard := browserAnalyticsDashboard{Days: days}
 	result := a.analyticsStorageExchange(browserstats.StorageRequest{Operation: browserstats.ReadBrowserReport, Domain: domain, Stop: r.Context().Done()})
@@ -4902,7 +4934,7 @@ func (aggregate *siteAnalyticsAggregate) record(event siteAnalyticsEvent) {
 	}
 	incrementAnalyticsCounter(aggregate.contentSources, analyticsContentSourceLabel(event.ContentSource))
 	incrementAnalyticsCounter(aggregate.statusCodes, strconv.Itoa(event.StatusCode))
-	incrementAnalyticsCounter(aggregate.hourlyActivity, event.OccurredAt.Format("15:00"))
+	incrementAnalyticsCounter(aggregate.hourlyActivity, event.OccurredAt.In(time.Local).Format("15:00"))
 	incrementAnalyticsCounter(aggregate.dailyActivity, event.OccurredAt.Format("2006-01-02"))
 	if event.IsAdmin {
 		aggregate.adminRequests++
@@ -5340,7 +5372,7 @@ func buildAnalyticsReportFromEvents(events []siteAnalyticsEvent, generatedAt tim
 		}
 		contentSources[analyticsContentSourceLabel(event.ContentSource)]++
 		statusCodes[strconv.Itoa(event.StatusCode)]++
-		hourlyActivity[event.OccurredAt.Format("15:00")]++
+		hourlyActivity[event.OccurredAt.In(time.Local).Format("15:00")]++
 		dailyActivity[event.OccurredAt.Format("2006-01-02")]++
 		if event.IsAdmin {
 			report.AdminRequests++
@@ -5533,24 +5565,185 @@ func analyticsSlowPageRows(totalDuration map[string]int64, counts map[string]int
 	return rows
 }
 
+func mergeAnalyticsCountRows(current, addition []analyticsCountRow, limit, total int) []analyticsCountRow {
+	counts := make(map[string]int, len(current)+len(addition))
+	for _, row := range current {
+		counts[row.Label] += row.Count
+	}
+	for _, row := range addition {
+		counts[row.Label] += row.Count
+	}
+	return sortedAnalyticsRows(counts, limit, total)
+}
+
+func mergeAnalyticsMapPoints(current, addition []analyticsMapPoint) []analyticsMapPoint {
+	type mapPointKey struct {
+		Latitude, Longitude float64
+		Label               string
+	}
+	points := make(map[mapPointKey]analyticsMapPoint, len(current)+len(addition))
+	for _, collection := range [][]analyticsMapPoint{current, addition} {
+		for _, point := range collection {
+			key := mapPointKey{Latitude: point.Latitude, Longitude: point.Longitude, Label: point.Label}
+			merged := points[key]
+			if merged.Label == "" {
+				merged = point
+				merged.Count = 0
+			}
+			merged.Count += point.Count
+			points[key] = merged
+		}
+	}
+	result := make([]analyticsMapPoint, 0, len(points))
+	total := 0
+	for _, point := range points {
+		total += point.Count
+	}
+	for _, point := range points {
+		point.Percent = analyticsPercent(point.Count, total)
+		point.Heat = 0
+		point.Radius = 0
+		result = append(result, point)
+	}
+	sort.Slice(result, func(i, j int) bool {
+		if result[i].Count == result[j].Count {
+			return result[i].Label < result[j].Label
+		}
+		return result[i].Count > result[j].Count
+	})
+	if len(result) > 64 {
+		result = result[:64]
+	}
+	return result
+}
+
+func mergeTechnicalReports(current, addition analyticsPreparedReport) analyticsPreparedReport {
+	if current.GeneratedAt == "" {
+		current = addition
+		return current
+	}
+	previousRequests := current.TotalRequests
+	current.TotalRequests += addition.TotalRequests
+	current.PageViews += addition.PageViews
+	current.HumanRequests += addition.HumanRequests
+	current.BotRequests += addition.BotRequests
+	current.ErrorCount += addition.ErrorCount
+	current.AdminRequests += addition.AdminRequests
+	current.StaticRequests += addition.StaticRequests
+	if current.PeriodStart == "" || (addition.PeriodStart != "" && addition.PeriodStart < current.PeriodStart) {
+		current.PeriodStart = addition.PeriodStart
+	}
+	if addition.PeriodEnd > current.PeriodEnd {
+		current.PeriodEnd = addition.PeriodEnd
+	}
+	if addition.GeneratedAt > current.GeneratedAt {
+		current.GeneratedAt = addition.GeneratedAt
+	}
+	if current.TotalRequests > 0 {
+		current.AverageDurationMS = (current.AverageDurationMS*int64(previousRequests) + addition.AverageDurationMS*int64(addition.TotalRequests)) / int64(current.TotalRequests)
+	}
+	current.TopPages = mergeAnalyticsCountRows(current.TopPages, addition.TopPages, 24, current.PageViews)
+	current.TrafficSources = mergeAnalyticsCountRows(current.TrafficSources, addition.TrafficSources, 20, current.PageViews)
+	current.Referrers = mergeAnalyticsCountRows(current.Referrers, addition.Referrers, 20, current.PageViews)
+	current.Countries = mergeAnalyticsCountRows(current.Countries, addition.Countries, 20, current.PageViews)
+	current.Cities = mergeAnalyticsCountRows(current.Cities, addition.Cities, 20, current.PageViews)
+	current.Devices = mergeAnalyticsCountRows(current.Devices, addition.Devices, 10, current.PageViews)
+	current.VisitorTypes = mergeAnalyticsCountRows(current.VisitorTypes, addition.VisitorTypes, 10, current.PageViews)
+	current.BotCrawlers = mergeAnalyticsCountRows(current.BotCrawlers, addition.BotCrawlers, 20, current.PageViews)
+	current.BotReferrers = mergeAnalyticsCountRows(current.BotReferrers, addition.BotReferrers, 20, current.PageViews)
+	current.Browsers = mergeAnalyticsCountRows(current.Browsers, addition.Browsers, 10, current.PageViews)
+	current.OperatingSystems = mergeAnalyticsCountRows(current.OperatingSystems, addition.OperatingSystems, 10, current.PageViews)
+	current.Languages = mergeAnalyticsCountRows(current.Languages, addition.Languages, 20, current.PageViews)
+	current.StatusCodes = mergeAnalyticsCountRows(current.StatusCodes, addition.StatusCodes, 20, current.TotalRequests)
+	current.HourlyActivity = mergeAnalyticsCountRows(current.HourlyActivity, addition.HourlyActivity, 24, current.TotalRequests)
+	current.DailyActivity = mergeAnalyticsCountRows(current.DailyActivity, addition.DailyActivity, 90, current.TotalRequests)
+	current.TopAssets = mergeAnalyticsCountRows(current.TopAssets, addition.TopAssets, 20, current.StaticRequests)
+	current.ErrorPaths = mergeAnalyticsCountRows(current.ErrorPaths, addition.ErrorPaths, 20, current.ErrorCount)
+	current.ContentSources = mergeAnalyticsCountRows(current.ContentSources, addition.ContentSources, 10, current.TotalRequests)
+	current.SystemEvents = append(current.SystemEvents, addition.SystemEvents...)
+	if len(current.SystemEvents) > 32 {
+		current.SystemEvents = current.SystemEvents[len(current.SystemEvents)-32:]
+	}
+	current.MapPoints = mergeAnalyticsMapPoints(current.MapPoints, addition.MapPoints)
+	current.UniqueVisitors = 0
+	current.ReturningVisitors = 0
+	current.ReturnVisits = 0
+	current.Sessions = 0
+	current.BounceRate = 0
+	current.EntryPages = nil
+	current.ExitPages = nil
+	current.EntryHours = nil
+	current.ReturningSources = nil
+	current.ReturningReferrers = nil
+	current.BotReturnSources = nil
+	current.SlowPages = nil
+	current.ResponsePercentiles = nil
+	return current
+}
+
 func (a *App) saveAnalyticsReport(ctx context.Context, domain string, report analyticsPreparedReport) error {
-	reportBytes, err := json.Marshal(report)
+	history := analyticsTechnicalHistory{Days: make(map[string]analyticsPreparedReport)}
+	loaded := a.analyticsStorageExchange(browserstats.StorageRequest{Operation: browserstats.ReadTechnicalReport, Domain: domain, Stop: ctx.Done()})
+	if loaded.Err == nil {
+		if json.Unmarshal([]byte(loaded.Text), &history) != nil || history.Days == nil {
+			var legacy analyticsPreparedReport
+			if json.Unmarshal([]byte(loaded.Text), &legacy) == nil && legacy.GeneratedAt != "" {
+				history.Days = map[string]analyticsPreparedReport{technicalReportDay(legacy): legacy}
+			} else {
+				history.Days = make(map[string]analyticsPreparedReport)
+			}
+		}
+	}
+	day := technicalReportDay(report)
+	history.Days[day] = mergeTechnicalReports(history.Days[day], report)
+	cutoff := time.Now().UTC().AddDate(0, 0, -89).Format("2006-01-02")
+	for storedDay := range history.Days {
+		if storedDay < cutoff {
+			delete(history.Days, storedDay)
+		}
+	}
+	reportBytes, err := json.Marshal(history)
 	if err != nil {
 		return err
 	}
 	return a.analyticsStorageExchange(browserstats.StorageRequest{Operation: browserstats.SaveTechnical, Domain: domain, Report: string(reportBytes), Stop: ctx.Done()}).Err
 }
 
-func (a *App) loadAnalyticsReport(ctx context.Context, domain string) (analyticsPreparedReport, bool) {
+func technicalReportDay(report analyticsPreparedReport) string {
+	at := parseAnalyticsTime(report.PeriodEnd)
+	if at.IsZero() {
+		at = parseAnalyticsTime(report.GeneratedAt)
+	}
+	if at.IsZero() {
+		at = time.Now().UTC()
+	}
+	return at.UTC().Format("2006-01-02")
+}
+
+func (a *App) loadAnalyticsReport(ctx context.Context, domain string, days int) (analyticsPreparedReport, bool) {
 	result := a.analyticsStorageExchange(browserstats.StorageRequest{Operation: browserstats.ReadTechnicalReport, Domain: domain, Stop: ctx.Done()})
 	if result.Err != nil {
 		return analyticsPreparedReport{}, false
 	}
-	var report analyticsPreparedReport
-	if json.Unmarshal([]byte(result.Text), &report) != nil {
+	history := analyticsTechnicalHistory{}
+	if json.Unmarshal([]byte(result.Text), &history) == nil && len(history.Days) > 0 {
+		if days != 1 && days != 7 && days != 30 && days != 90 {
+			days = 7
+		}
+		cutoff := time.Now().UTC().AddDate(0, 0, -days+1).Format("2006-01-02")
+		report := analyticsPreparedReport{}
+		for day, daily := range history.Days {
+			if day >= cutoff {
+				report = mergeTechnicalReports(report, daily)
+			}
+		}
+		return report, report.GeneratedAt != ""
+	}
+	var legacy analyticsPreparedReport
+	if json.Unmarshal([]byte(result.Text), &legacy) != nil {
 		return analyticsPreparedReport{}, false
 	}
-	return report, true
+	return legacy, legacy.GeneratedAt != ""
 }
 
 func parseAnalyticsTime(rawTime string) time.Time {
@@ -5981,6 +6174,21 @@ func formatDurationMS(milliseconds int64) string {
 	return fmt.Sprintf("%.2f s", float64(milliseconds)/1000)
 }
 
+type analyticsSecurityBlockView struct {
+	httpsecurity.SecurityBlock
+	Country, City, ClientClass, Agent string
+}
+
+func analyticsSelectedTab(r *http.Request) string {
+	tab := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("tab")))
+	switch tab {
+	case "security", "technical":
+		return tab
+	default:
+		return "analytics"
+	}
+}
+
 func (a *App) analyticsPage(w http.ResponseWriter, r *http.Request) {
 	if !a.isAdminRequest(r) {
 		if !a.hasAdmin(r.Context(), a.siteDomain(r.Context(), r)) {
@@ -5991,6 +6199,7 @@ func (a *App) analyticsPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	domain := a.siteDomain(r.Context(), r)
+	selectedTab := analyticsSelectedTab(r)
 	if r.Method == http.MethodPost {
 		if strings.TrimSpace(r.FormValue("security_action")) != "" {
 			a.handleAnalyticsSecurityAction(w, r)
@@ -6026,8 +6235,8 @@ func (a *App) analyticsPage(w http.ResponseWriter, r *http.Request) {
 	}
 	security := browserstats.SecurityReport{}
 	securityBlocks := []httpsecurity.SecurityBlock{}
-	securityLocalBlocks := []httpsecurity.SecurityBlock{}
-	securityGlobalBlocks := []httpsecurity.SecurityBlock{}
+	securityLocalBlocks := []analyticsSecurityBlockView{}
+	securityGlobalBlocks := []analyticsSecurityBlockView{}
 	securityAllowlist := []httpsecurity.SecurityAllow{}
 	securityThrottles := []httpsecurity.SecurityThrottle{}
 	securitySettings := httpsecurity.SecuritySettings{}
@@ -6035,13 +6244,7 @@ func (a *App) analyticsPage(w http.ResponseWriter, r *http.Request) {
 		securityBlocks, _ = a.attackGuard.Snapshot(time.Now().UTC())
 		securityAllowlist, _ = a.attackGuard.Allowlist()
 		securitySettings, _ = a.attackGuard.Settings()
-		for _, securityBlock := range securityBlocks {
-			if securityBlock.Source == "global" {
-				securityGlobalBlocks = append(securityGlobalBlocks, securityBlock)
-				continue
-			}
-			securityLocalBlocks = append(securityLocalBlocks, securityBlock)
-		}
+
 	}
 	if a.throttleGuard != nil {
 		securityThrottles, _ = a.throttleGuard.Snapshot(time.Now().UTC())
@@ -6052,6 +6255,27 @@ func (a *App) analyticsPage(w http.ResponseWriter, r *http.Request) {
 		if json.Unmarshal([]byte(loadedSecurity.Text), &state) == nil {
 			security = state.Report(time.Now().UTC(), browserDashboard.Days)
 		}
+	}
+	securityIncidents := make(map[string]browserstats.Incident, len(security.Incidents))
+	for _, incident := range security.Incidents {
+		previous, found := securityIncidents[incident.IP]
+		if !found || incident.Last.After(previous.Last) {
+			securityIncidents[incident.IP] = incident
+		}
+	}
+	for _, securityBlock := range securityBlocks {
+		view := analyticsSecurityBlockView{SecurityBlock: securityBlock}
+		if incident, found := securityIncidents[securityBlock.IP]; found {
+			view.Country = incident.Country
+			view.City = incident.City
+			view.ClientClass = incident.Class
+			view.Agent = incident.Agent
+		}
+		if securityBlock.Source == "global" {
+			securityGlobalBlocks = append(securityGlobalBlocks, view)
+			continue
+		}
+		securityLocalBlocks = append(securityLocalBlocks, view)
 	}
 	unknownGeo := 0
 	for _, session := range experience.Recent {
@@ -6066,15 +6290,25 @@ func (a *App) analyticsPage(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	mapJSON, _ := json.Marshal(experience.Recent)
-	report, found := a.loadAnalyticsReport(r.Context(), domain)
+	report, found := a.loadAnalyticsReport(r.Context(), domain, browserDashboard.Days)
 	if !found {
 		report = analyticsPreparedReport{GeneratedAt: time.Now().UTC().Format(time.RFC3339)}
 	}
+	serverLocalHours := [24]int{}
+	for _, row := range report.HourlyActivity {
+		hour, hourErr := strconv.Atoi(strings.TrimSuffix(row.Label, ":00"))
+		if hourErr == nil && hour >= 0 && hour < len(serverLocalHours) {
+			serverLocalHours[hour] = row.Count
+		}
+	}
+	localHoursJSON, _ := json.Marshal(experience.LocalHours)
+	serverHoursJSON, _ := json.Marshal(serverLocalHours)
 	a.render(w, r, "analytics.html", map[string]any{
 		"ReturnPath":       requestedReturnPath(r),
+		"AnalyticsTab":     selectedTab,
 		"Report":           analyticsReportView(report, translationsForRequest(r)),
 		"BrowserAnalytics": browserDashboard,
-		"Experience":       experience, "ExperienceFilter": filter, "Security": security, "SecurityBlocks": securityBlocks, "SecurityLocalBlocks": securityLocalBlocks, "SecurityGlobalBlocks": securityGlobalBlocks, "SecurityAllowlist": securityAllowlist, "SecurityThrottles": securityThrottles, "SecuritySettings": securitySettings, "GoalsText": strings.Join(goalLines, "\n"), "SessionMapJSON": template.JS(mapJSON), "PeriodOptions": []int{1, 7, 30, 90}, "UnknownGeo": unknownGeo, "ServerRequests": serverRequests,
+		"Experience":       experience, "ExperienceFilter": filter, "Security": security, "SecurityBlocks": securityBlocks, "SecurityLocalBlocks": securityLocalBlocks, "SecurityGlobalBlocks": securityGlobalBlocks, "SecurityAllowlist": securityAllowlist, "SecurityThrottles": securityThrottles, "SecuritySettings": securitySettings, "GoalsText": strings.Join(goalLines, "\n"), "SessionMapJSON": template.JS(mapJSON), "PeriodOptions": []int{1, 7, 30, 90}, "UnknownGeo": unknownGeo, "ServerRequests": serverRequests, "ServerLocalHours": serverLocalHours, "LocalHoursJSON": template.JS(localHoursJSON), "ServerHoursJSON": template.JS(serverHoursJSON), "ServerTimezone": time.Local.String(),
 	})
 }
 
@@ -6094,14 +6328,9 @@ func analyticsReportView(report analyticsPreparedReport, translations map[string
 	view.Cards = []analyticsMetricCard{
 		{Label: translationOrDefault(translations, "analytics_total_requests", "Total requests"), Value: strconv.Itoa(report.TotalRequests), Hint: translationOrDefault(translations, "analytics_total_requests_hint", "All logged dynamic, static, and controller requests.")},
 		{Label: translationOrDefault(translations, "analytics_page_views", "Page views"), Value: strconv.Itoa(report.PageViews), Hint: translationOrDefault(translations, "analytics_page_views_hint", "GET page requests excluding assets and Sitebrush controllers.")},
-		{Label: translationOrDefault(translations, "analytics_unique_visitors", "Unique visitors"), Value: strconv.Itoa(report.UniqueVisitors), Hint: translationOrDefault(translations, "analytics_unique_visitors_hint", "Estimated from IP and browser signature.")},
 		{Label: translationOrDefault(translations, "analytics_human_requests", "People"), Value: strconv.Itoa(report.HumanRequests), Hint: translationOrDefault(translations, "analytics_human_requests_hint", "Requests that do not look like known bots or crawlers.")},
 		{Label: translationOrDefault(translations, "analytics_bot_requests", "Bots"), Value: strconv.Itoa(report.BotRequests), Hint: translationOrDefault(translations, "analytics_bot_requests_hint", "Requests from crawlers, bots, monitors, and automated clients.")},
-		{Label: translationOrDefault(translations, "analytics_returning_visitors", "Returning visitors"), Value: strconv.Itoa(report.ReturningVisitors), Hint: translationOrDefault(translations, "analytics_returning_visitors_hint", "Visitors with more than one visit in the report period.")},
-		{Label: translationOrDefault(translations, "analytics_return_visits", "Repeat visits"), Value: strconv.Itoa(report.ReturnVisits), Hint: translationOrDefault(translations, "analytics_return_visits_hint", "Visits after the first visit from the same visitor signature.")},
-		{Label: translationOrDefault(translations, "analytics_sessions", "Sessions"), Value: strconv.Itoa(report.Sessions), Hint: translationOrDefault(translations, "analytics_sessions_hint", "Visits split after 30 minutes of inactivity.")},
-		{Label: translationOrDefault(translations, "analytics_bounce_rate", "Bounce rate"), Value: fmt.Sprintf("%.1f%%", report.BounceRate), Hint: translationOrDefault(translations, "analytics_bounce_rate_hint", "Sessions with one page view.")},
-		{Label: translationOrDefault(translations, "analytics_avg_duration", "Average response time"), Value: formatDurationMS(report.AverageDurationMS), Hint: translationOrDefault(translations, "analytics_avg_duration_hint", "Average server response time across logged requests.")},
+		{Label: translationOrDefault(translations, "analytics_avg_duration", "Average response time"), Value: formatDurationMS(report.AverageDurationMS), Hint: translationOrDefault(translations, "analytics_avg_duration_hint", "Weighted average server response time across the selected period.")},
 		{Label: translationOrDefault(translations, "analytics_errors", "Errors"), Value: strconv.Itoa(report.ErrorCount), Hint: translationOrDefault(translations, "analytics_errors_hint", "Requests with HTTP status 400 or higher.")},
 		{Label: translationOrDefault(translations, "analytics_admin_traffic", "Admin traffic"), Value: strconv.Itoa(report.AdminRequests), Hint: translationOrDefault(translations, "analytics_admin_traffic_hint", "Requests made while logged in as an administrator.")},
 	}
@@ -6109,32 +6338,15 @@ func analyticsReportView(report analyticsPreparedReport, translations map[string
 		view.Cards = view.Cards[:len(view.Cards)-1]
 	}
 	view.Sections = []analyticsReportSection{
-		{Title: "Server response percentiles", Description: "Histogram upper bounds; not browser loading time.", Rows: analyticsPercentileRows(report.ResponsePercentiles)},
-		analyticsSectionView("analytics_section_top_pages", "analytics_section_top_pages_hint", report.TopPages, report.PageViews, "path", translations),
-		analyticsSectionView("analytics_section_entry_pages", "analytics_section_entry_pages_hint", report.EntryPages, report.Sessions, "path", translations),
-		analyticsSectionView("analytics_section_exit_pages", "analytics_section_exit_pages_hint", report.ExitPages, report.Sessions, "path", translations),
-		analyticsSectionView("analytics_section_traffic_sources", "analytics_section_traffic_sources_hint", report.TrafficSources, report.PageViews, "traffic", translations),
-		analyticsSectionView("analytics_section_referrers", "analytics_section_referrers_hint", report.Referrers, report.PageViews, "plain", translations),
-		analyticsSectionView("analytics_section_returning_sources", "analytics_section_returning_sources_hint", report.ReturningSources, report.ReturnVisits, "traffic", translations),
-		analyticsSectionView("analytics_section_returning_referrers", "analytics_section_returning_referrers_hint", report.ReturningReferrers, report.ReturnVisits, "plain", translations),
-		analyticsSectionView("analytics_section_countries", "analytics_section_countries_hint", report.Countries, report.PageViews, "plain", translations),
-		analyticsSectionView("analytics_section_cities", "analytics_section_cities_hint", report.Cities, report.PageViews, "plain", translations),
-		analyticsSectionView("analytics_section_entry_hours", "analytics_section_entry_hours_hint", report.EntryHours, report.Sessions, "plain", translations),
-		analyticsSectionView("analytics_section_visitor_types", "analytics_section_visitor_types_hint", report.VisitorTypes, report.PageViews, "visitor", translations),
-		analyticsSectionView("analytics_section_bot_crawlers", "analytics_section_bot_crawlers_hint", report.BotCrawlers, report.PageViews, "plain", translations),
-		analyticsSectionView("analytics_section_bot_return_sources", "analytics_section_bot_return_sources_hint", report.BotReturnSources, report.ReturnVisits, "traffic", translations),
-		analyticsSectionView("analytics_section_bot_referrers", "analytics_section_bot_referrers_hint", report.BotReferrers, report.PageViews, "plain", translations),
-		analyticsSectionView("analytics_section_devices", "analytics_section_devices_hint", report.Devices, report.PageViews, "device", translations),
-		analyticsSectionView("analytics_section_browsers", "analytics_section_browsers_hint", report.Browsers, report.PageViews, "plain", translations),
-		analyticsSectionView("analytics_section_os", "analytics_section_os_hint", report.OperatingSystems, report.PageViews, "plain", translations),
-		analyticsSectionView("analytics_section_languages", "analytics_section_languages_hint", report.Languages, report.PageViews, "language", translations),
 		analyticsSectionView("analytics_section_status_codes", "analytics_section_status_codes_hint", report.StatusCodes, report.TotalRequests, "plain", translations),
 		analyticsSectionView("analytics_section_hourly", "analytics_section_hourly_hint", report.HourlyActivity, report.TotalRequests, "plain", translations),
 		analyticsSectionView("analytics_section_daily", "analytics_section_daily_hint", report.DailyActivity, report.TotalRequests, "plain", translations),
-		analyticsSectionView("analytics_section_slow_pages", "analytics_section_slow_pages_hint", report.SlowPages, 0, "duration", translations),
+		analyticsSectionView("analytics_section_content_sources", "analytics_section_content_sources_hint", report.ContentSources, report.TotalRequests, "content", translations),
 		analyticsSectionView("analytics_section_assets", "analytics_section_assets_hint", report.TopAssets, report.StaticRequests, "path", translations),
 		analyticsSectionView("analytics_section_errors", "analytics_section_errors_hint", report.ErrorPaths, report.ErrorCount, "path", translations),
-		analyticsSectionView("analytics_section_content_sources", "analytics_section_content_sources_hint", report.ContentSources, report.TotalRequests, "content", translations),
+		analyticsSectionView("analytics_section_bot_crawlers", "analytics_section_bot_crawlers_hint", report.BotCrawlers, report.PageViews, "plain", translations),
+		analyticsSectionView("analytics_section_browsers", "analytics_section_browsers_hint", report.Browsers, report.PageViews, "plain", translations),
+		analyticsSectionView("analytics_section_os", "analytics_section_os_hint", report.OperatingSystems, report.PageViews, "plain", translations),
 		analyticsSectionView("analytics_section_system_events", "analytics_section_system_events_hint", report.SystemEvents, 0, "plain", translations),
 	}
 	return view
@@ -6264,7 +6476,7 @@ func (a *App) handleAnalyticsSecurityAction(w http.ResponseWriter, r *http.Reque
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	httpsecurity.RedirectLocal(w, r, r.URL.Path+"?analytics#security", http.StatusSeeOther)
+	httpsecurity.RedirectLocal(w, r, r.URL.Path+"?analytics&tab=security", http.StatusSeeOther)
 }
 
 // Security filtering is deliberately before routing and database access. The
