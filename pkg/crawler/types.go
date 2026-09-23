@@ -2,14 +2,16 @@ package crawler
 
 import (
 	"context"
+	"crypto/ed25519"
 	"net/url"
 )
 
 // SourceOptions carry transport-level source overrides shared by previews and imports.
 type SourceOptions struct {
-	IP              string
-	LanguageCode    string
-	PeerAttestation string
+	IP               string
+	LanguageCode     string
+	PeerAttestation  string
+	PeerPrivateKey   [ed25519.PrivateKeySize]byte
 }
 
 // ImportRequest is the application-facing input for single page and whole site imports.
