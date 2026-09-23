@@ -95,16 +95,16 @@ func TestResendExpiryAndUnknownAddress(t *testing.T) {
 	if request(now.Add(time.Second)).Status != "limited" {
 		t.Fatal("cooldown missing")
 	}
-	second := request(now.Add(time.Minute))
+	second := request(now.Add(CodeSendCooldown))
 	verify := func(challenge Outcome, at time.Time) Outcome {
 		return transact(t, db, func(tx *sql.Tx) (Outcome, error) {
 			return Verify(ctx, tx, "example.org", challenge.Token, challenge.Code, "", at)
 		})
 	}
-	if verify(first, now.Add(time.Minute)).Status != "invalid" {
+	if verify(first, now.Add(CodeSendCooldown)).Status != "invalid" {
 		t.Fatal("old code accepted")
 	}
-	if verify(second, now.Add(time.Minute)).Status != "session" {
+	if verify(second, now.Add(CodeSendCooldown)).Status != "session" {
 		t.Fatal("unknown IP could not sign in")
 	}
 	var count int
@@ -112,11 +112,17 @@ func TestResendExpiryAndUnknownAddress(t *testing.T) {
 	if count != 0 {
 		t.Fatal("unknown IP remembered")
 	}
-	third := request(now.Add(2 * time.Minute))
-	if request(now.Add(3*time.Minute)).Status != "limited" {
+	third := request(now.Add(2 * CodeSendCooldown))
+	for attempt := 3; attempt < CodeSendLimit; attempt++ {
+		at := now.Add(time.Duration(attempt) * CodeSendCooldown)
+		if request(at).Status != "code" {
+			t.Fatalf("send %d unexpectedly limited", attempt+1)
+		}
+	}
+	if request(now.Add(time.Duration(CodeSendLimit)*CodeSendCooldown)).Status != "limited" {
 		t.Fatal("send quota missing")
 	}
-	if verify(third, now.Add(17*time.Minute)).Status != "invalid" {
+	if verify(third, now.Add(CodeTTL+2*CodeSendCooldown)).Status != "invalid" {
 		t.Fatal("expired code accepted")
 	}
 }
