@@ -1117,7 +1117,16 @@
     "auth_https_self_signed_help": "SiteBrush can continue over HTTPS with its self-signed certificate. Your browser will show a certificate warning because no public certificate authority can verify this IP address.",
     "auth_https_self_signed_continue": "Continue with self-signed HTTPS",
     "auth_https_unavailable": "Secure HTTPS is not available for this IP address yet.",
-    "auth_https_unavailable_help": "Return to SiteBrush and restart it with HTTPS enabled. IP-based access uses a self-signed certificate instead of ACME."
+    "auth_https_unavailable_help": "Return to SiteBrush and restart it with HTTPS enabled. IP-based access uses a self-signed certificate instead of ACME.",
+    "auth_totp_explanation": "An authenticator app creates a temporary 6-digit sign-in code on your phone. The code changes every 30 seconds and is different from a code sent by email.",
+    "auth_totp_apps": "Choose an authenticator app:",
+    "auth_totp_step_install": "Install one of the authenticator apps below.",
+    "auth_totp_step_add": "Open the app and add SiteBrush using the button below, or copy the setup key manually.",
+    "auth_totp_step_enter": "The app will show a 6-digit code. Enter the current code here to finish setup.",
+    "auth_totp_open_app": "Open in authenticator app",
+    "auth_totp_or_manual": "Or add it manually with this setup key:",
+    "auth_totp_secret_help": "Keep this setup key private. It can be used to generate your authentication codes.",
+    "auth_totp_code_help": "Open your authenticator app and enter the current 6-digit code shown for SiteBrush. A new code appears every 30 seconds."
   },
   "fr": {
     "auth_email_changed_title": "Adresse e-mail modifiée",
@@ -2119,7 +2128,16 @@
     "auth_https_self_signed_help": "SiteBrush peut continuer en HTTPS avec son certificat auto-signé. Le navigateur affichera un avertissement car aucune autorité de certification publique ne peut valider cette adresse IP.",
     "auth_https_self_signed_continue": "Continuer avec HTTPS auto-signé",
     "auth_https_unavailable": "Le HTTPS sécurisé n’est pas encore disponible pour cette adresse IP.",
-    "auth_https_unavailable_help": "Revenez dans SiteBrush et redémarrez-le avec HTTPS activé. L’accès par IP utilise un certificat auto-signé au lieu d’ACME."
+    "auth_https_unavailable_help": "Revenez dans SiteBrush et redémarrez-le avec HTTPS activé. L’accès par IP utilise un certificat auto-signé au lieu d’ACME.",
+    "auth_totp_explanation": "An authenticator app creates a temporary 6-digit sign-in code on your phone. The code changes every 30 seconds and is different from a code sent by email.",
+    "auth_totp_apps": "Choose an authenticator app:",
+    "auth_totp_step_install": "Install one of the authenticator apps below.",
+    "auth_totp_step_add": "Open the app and add SiteBrush using the button below, or copy the setup key manually.",
+    "auth_totp_step_enter": "The app will show a 6-digit code. Enter the current code here to finish setup.",
+    "auth_totp_open_app": "Open in authenticator app",
+    "auth_totp_or_manual": "Or add it manually with this setup key:",
+    "auth_totp_secret_help": "Keep this setup key private. It can be used to generate your authentication codes.",
+    "auth_totp_code_help": "Open your authenticator app and enter the current 6-digit code shown for SiteBrush. A new code appears every 30 seconds."
   },
   "ru": {
     "auth_email_changed_title": "Адрес электронной почты изменён",
@@ -3239,7 +3257,16 @@
     "auth_https_self_signed_help": "SiteBrush может продолжить работу по HTTPS с самоподписанным сертификатом. Браузер покажет предупреждение о сертификате, потому что публичный центр сертификации не подтверждает этот IP-адрес.",
     "auth_https_self_signed_continue": "Продолжить с самоподписанным HTTPS",
     "auth_https_unavailable": "Защищённый HTTPS для этого IP-адреса пока недоступен.",
-    "auth_https_unavailable_help": "Вернитесь в SiteBrush и перезапустите его с включённым HTTPS. Для доступа по IP используется самоподписанный сертификат вместо ACME."
+    "auth_https_unavailable_help": "Вернитесь в SiteBrush и перезапустите его с включённым HTTPS. Для доступа по IP используется самоподписанный сертификат вместо ACME.",
+    "auth_totp_explanation": "Приложение-аутентификатор создаёт на телефоне временный 6-значный код для входа. Код меняется каждые 30 секунд и это не код из email.",
+    "auth_totp_apps": "Выберите приложение-аутентификатор:",
+    "auth_totp_step_install": "Установите одно из приложений-аутентификаторов ниже.",
+    "auth_totp_step_add": "Откройте приложение и добавьте SiteBrush кнопкой ниже или скопируйте ключ настройки вручную.",
+    "auth_totp_step_enter": "В приложении появится 6-значный код. Введите текущий код здесь, чтобы завершить настройку.",
+    "auth_totp_open_app": "Открыть в аутентификаторе",
+    "auth_totp_or_manual": "Или добавьте вручную с помощью ключа настройки:",
+    "auth_totp_secret_help": "Храните этот ключ в секрете. С его помощью можно генерировать ваши коды аутентификации.",
+    "auth_totp_code_help": "Откройте приложение-аутентификатор и введите текущий 6-значный код для SiteBrush. Новый код появляется каждые 30 секунд."
   },
   "ja": {
     "auth_email_changed_title": "メールアドレスが変更されました",
@@ -4237,7 +4264,16 @@
     "auth_https_self_signed_help": "SiteBrush は自己署名証明書を使って HTTPS を続行できます。公開認証局がこの IP アドレスを検証できないため、ブラウザーに証明書の警告が表示されます。",
     "auth_https_self_signed_continue": "自己署名 HTTPS で続行",
     "auth_https_unavailable": "この IP アドレスでは安全な HTTPS をまだ利用できません。",
-    "auth_https_unavailable_help": "SiteBrush に戻り、HTTPS を有効にして再起動してください。IP アクセスでは ACME の代わりに自己署名証明書を使用します。"
+    "auth_https_unavailable_help": "SiteBrush に戻り、HTTPS を有効にして再起動してください。IP アクセスでは ACME の代わりに自己署名証明書を使用します。",
+    "auth_totp_explanation": "An authenticator app creates a temporary 6-digit sign-in code on your phone. The code changes every 30 seconds and is different from a code sent by email.",
+    "auth_totp_apps": "Choose an authenticator app:",
+    "auth_totp_step_install": "Install one of the authenticator apps below.",
+    "auth_totp_step_add": "Open the app and add SiteBrush using the button below, or copy the setup key manually.",
+    "auth_totp_step_enter": "The app will show a 6-digit code. Enter the current code here to finish setup.",
+    "auth_totp_open_app": "Open in authenticator app",
+    "auth_totp_or_manual": "Or add it manually with this setup key:",
+    "auth_totp_secret_help": "Keep this setup key private. It can be used to generate your authentication codes.",
+    "auth_totp_code_help": "Open your authenticator app and enter the current 6-digit code shown for SiteBrush. A new code appears every 30 seconds."
   },
   "it": {
     "auth_email_changed_title": "Indirizzo email modificato",
@@ -5235,7 +5271,16 @@
     "auth_https_self_signed_help": "SiteBrush può continuare tramite HTTPS con il proprio certificato autofirmato. Il browser mostrerà un avviso perché nessuna autorità di certificazione pubblica può convalidare questo indirizzo IP.",
     "auth_https_self_signed_continue": "Continua con HTTPS autofirmato",
     "auth_https_unavailable": "HTTPS sicuro non è ancora disponibile per questo indirizzo IP.",
-    "auth_https_unavailable_help": "Torna a SiteBrush e riavvialo con HTTPS abilitato. L’accesso tramite IP usa un certificato autofirmato invece di ACME."
+    "auth_https_unavailable_help": "Torna a SiteBrush e riavvialo con HTTPS abilitato. L’accesso tramite IP usa un certificato autofirmato invece di ACME.",
+    "auth_totp_explanation": "An authenticator app creates a temporary 6-digit sign-in code on your phone. The code changes every 30 seconds and is different from a code sent by email.",
+    "auth_totp_apps": "Choose an authenticator app:",
+    "auth_totp_step_install": "Install one of the authenticator apps below.",
+    "auth_totp_step_add": "Open the app and add SiteBrush using the button below, or copy the setup key manually.",
+    "auth_totp_step_enter": "The app will show a 6-digit code. Enter the current code here to finish setup.",
+    "auth_totp_open_app": "Open in authenticator app",
+    "auth_totp_or_manual": "Or add it manually with this setup key:",
+    "auth_totp_secret_help": "Keep this setup key private. It can be used to generate your authentication codes.",
+    "auth_totp_code_help": "Open your authenticator app and enter the current 6-digit code shown for SiteBrush. A new code appears every 30 seconds."
   },
   "sv": {
     "auth_email_changed_title": "E-postadressen har ändrats",
@@ -6233,7 +6278,16 @@
     "auth_https_self_signed_help": "SiteBrush kan fortsätta via HTTPS med ett självsignerat certifikat. Webbläsaren visar en certifikatvarning eftersom ingen offentlig certifikatutfärdare kan verifiera IP-adressen.",
     "auth_https_self_signed_continue": "Fortsätt med självsignerad HTTPS",
     "auth_https_unavailable": "Säker HTTPS är ännu inte tillgänglig för den här IP-adressen.",
-    "auth_https_unavailable_help": "Gå tillbaka till SiteBrush och starta om med HTTPS aktiverat. IP-åtkomst använder ett självsignerat certifikat i stället för ACME."
+    "auth_https_unavailable_help": "Gå tillbaka till SiteBrush och starta om med HTTPS aktiverat. IP-åtkomst använder ett självsignerat certifikat i stället för ACME.",
+    "auth_totp_explanation": "An authenticator app creates a temporary 6-digit sign-in code on your phone. The code changes every 30 seconds and is different from a code sent by email.",
+    "auth_totp_apps": "Choose an authenticator app:",
+    "auth_totp_step_install": "Install one of the authenticator apps below.",
+    "auth_totp_step_add": "Open the app and add SiteBrush using the button below, or copy the setup key manually.",
+    "auth_totp_step_enter": "The app will show a 6-digit code. Enter the current code here to finish setup.",
+    "auth_totp_open_app": "Open in authenticator app",
+    "auth_totp_or_manual": "Or add it manually with this setup key:",
+    "auth_totp_secret_help": "Keep this setup key private. It can be used to generate your authentication codes.",
+    "auth_totp_code_help": "Open your authenticator app and enter the current 6-digit code shown for SiteBrush. A new code appears every 30 seconds."
   },
   "fi": {
     "auth_email_changed_title": "Sähköpostiosoite on vaihdettu",
@@ -7231,7 +7285,16 @@
     "auth_https_self_signed_help": "SiteBrush voi jatkaa HTTPS-yhteydellä itse allekirjoitetulla varmenteella. Selain näyttää varoituksen, koska julkinen varmentaja ei voi vahvistaa tätä IP-osoitetta.",
     "auth_https_self_signed_continue": "Jatka itse allekirjoitetulla HTTPS:llä",
     "auth_https_unavailable": "Suojattu HTTPS ei ole vielä käytettävissä tälle IP-osoitteelle.",
-    "auth_https_unavailable_help": "Palaa SiteBrushiin ja käynnistä se uudelleen HTTPS käytössä. IP-yhteys käyttää itse allekirjoitettua varmennetta ACME:n sijaan."
+    "auth_https_unavailable_help": "Palaa SiteBrushiin ja käynnistä se uudelleen HTTPS käytössä. IP-yhteys käyttää itse allekirjoitettua varmennetta ACME:n sijaan.",
+    "auth_totp_explanation": "An authenticator app creates a temporary 6-digit sign-in code on your phone. The code changes every 30 seconds and is different from a code sent by email.",
+    "auth_totp_apps": "Choose an authenticator app:",
+    "auth_totp_step_install": "Install one of the authenticator apps below.",
+    "auth_totp_step_add": "Open the app and add SiteBrush using the button below, or copy the setup key manually.",
+    "auth_totp_step_enter": "The app will show a 6-digit code. Enter the current code here to finish setup.",
+    "auth_totp_open_app": "Open in authenticator app",
+    "auth_totp_or_manual": "Or add it manually with this setup key:",
+    "auth_totp_secret_help": "Keep this setup key private. It can be used to generate your authentication codes.",
+    "auth_totp_code_help": "Open your authenticator app and enter the current 6-digit code shown for SiteBrush. A new code appears every 30 seconds."
   },
   "mn": {
     "auth_email_changed_title": "Имэйл хаяг өөрчлөгдлөө",
@@ -8229,7 +8292,16 @@
     "auth_https_self_signed_help": "SiteBrush өөрөө гарын үсэг зурсан сертификатаар HTTPS ашиглан үргэлжлүүлж болно. Нийтийн баталгаажуулалтын байгууллага энэ IP хаягийг баталгаажуулж чадахгүй тул хөтөч анхааруулга харуулна.",
     "auth_https_self_signed_continue": "Өөрөө гарын үсэг зурсан HTTPS-ээр үргэлжлүүлэх",
     "auth_https_unavailable": "Энэ IP хаягт аюулгүй HTTPS одоогоор боломжгүй.",
-    "auth_https_unavailable_help": "SiteBrush руу буцаж HTTPS идэвхтэйгээр дахин ажиллуулна уу. IP хандалт ACME-ийн оронд өөрөө гарын үсэг зурсан сертификат ашиглана."
+    "auth_https_unavailable_help": "SiteBrush руу буцаж HTTPS идэвхтэйгээр дахин ажиллуулна уу. IP хандалт ACME-ийн оронд өөрөө гарын үсэг зурсан сертификат ашиглана.",
+    "auth_totp_explanation": "An authenticator app creates a temporary 6-digit sign-in code on your phone. The code changes every 30 seconds and is different from a code sent by email.",
+    "auth_totp_apps": "Choose an authenticator app:",
+    "auth_totp_step_install": "Install one of the authenticator apps below.",
+    "auth_totp_step_add": "Open the app and add SiteBrush using the button below, or copy the setup key manually.",
+    "auth_totp_step_enter": "The app will show a 6-digit code. Enter the current code here to finish setup.",
+    "auth_totp_open_app": "Open in authenticator app",
+    "auth_totp_or_manual": "Or add it manually with this setup key:",
+    "auth_totp_secret_help": "Keep this setup key private. It can be used to generate your authentication codes.",
+    "auth_totp_code_help": "Open your authenticator app and enter the current 6-digit code shown for SiteBrush. A new code appears every 30 seconds."
   },
   "zh": {
     "auth_email_changed_title": "电子邮箱地址已更改",
@@ -9227,7 +9299,16 @@
     "auth_https_self_signed_help": "SiteBrush 可以使用自签名证书继续通过 HTTPS 工作。由于公共证书颁发机构无法验证此 IP 地址，浏览器会显示证书警告。",
     "auth_https_self_signed_continue": "使用自签名 HTTPS 继续",
     "auth_https_unavailable": "此 IP 地址暂时无法使用安全 HTTPS。",
-    "auth_https_unavailable_help": "返回 SiteBrush，并在启用 HTTPS 的情况下重新启动。通过 IP 访问时会使用自签名证书，而不是 ACME。"
+    "auth_https_unavailable_help": "返回 SiteBrush，并在启用 HTTPS 的情况下重新启动。通过 IP 访问时会使用自签名证书，而不是 ACME。",
+    "auth_totp_explanation": "An authenticator app creates a temporary 6-digit sign-in code on your phone. The code changes every 30 seconds and is different from a code sent by email.",
+    "auth_totp_apps": "Choose an authenticator app:",
+    "auth_totp_step_install": "Install one of the authenticator apps below.",
+    "auth_totp_step_add": "Open the app and add SiteBrush using the button below, or copy the setup key manually.",
+    "auth_totp_step_enter": "The app will show a 6-digit code. Enter the current code here to finish setup.",
+    "auth_totp_open_app": "Open in authenticator app",
+    "auth_totp_or_manual": "Or add it manually with this setup key:",
+    "auth_totp_secret_help": "Keep this setup key private. It can be used to generate your authentication codes.",
+    "auth_totp_code_help": "Open your authenticator app and enter the current 6-digit code shown for SiteBrush. A new code appears every 30 seconds."
   },
   "he": {
     "auth_email_changed_title": "כתובת האימייל שונתה",
@@ -10225,7 +10306,16 @@
     "auth_https_self_signed_help": "SiteBrush יכול להמשיך ב-HTTPS עם תעודה בחתימה עצמית. הדפדפן יציג אזהרה כי רשות אישורים ציבורית אינה יכולה לאמת את כתובת ה-IP הזו.",
     "auth_https_self_signed_continue": "המשך עם HTTPS בחתימה עצמית",
     "auth_https_unavailable": "HTTPS מאובטח עדיין אינו זמין עבור כתובת IP זו.",
-    "auth_https_unavailable_help": "חזור ל-SiteBrush והפעל אותו מחדש עם HTTPS פעיל. גישה לפי IP משתמשת בתעודה בחתימה עצמית במקום ACME."
+    "auth_https_unavailable_help": "חזור ל-SiteBrush והפעל אותו מחדש עם HTTPS פעיל. גישה לפי IP משתמשת בתעודה בחתימה עצמית במקום ACME.",
+    "auth_totp_explanation": "An authenticator app creates a temporary 6-digit sign-in code on your phone. The code changes every 30 seconds and is different from a code sent by email.",
+    "auth_totp_apps": "Choose an authenticator app:",
+    "auth_totp_step_install": "Install one of the authenticator apps below.",
+    "auth_totp_step_add": "Open the app and add SiteBrush using the button below, or copy the setup key manually.",
+    "auth_totp_step_enter": "The app will show a 6-digit code. Enter the current code here to finish setup.",
+    "auth_totp_open_app": "Open in authenticator app",
+    "auth_totp_or_manual": "Or add it manually with this setup key:",
+    "auth_totp_secret_help": "Keep this setup key private. It can be used to generate your authentication codes.",
+    "auth_totp_code_help": "Open your authenticator app and enter the current 6-digit code shown for SiteBrush. A new code appears every 30 seconds."
   },
   "fa": {
     "auth_email_changed_title": "نشانی ایمیل تغییر کرد",
@@ -11223,7 +11313,16 @@
     "auth_https_self_signed_help": "SiteBrush می‌تواند با یک گواهی خودامضا از طریق HTTPS ادامه دهد. مرورگر هشدار گواهی نشان می‌دهد چون مرجع صدور گواهی عمومی نمی‌تواند این آدرس IP را تأیید کند.",
     "auth_https_self_signed_continue": "ادامه با HTTPS خودامضا",
     "auth_https_unavailable": "HTTPS امن هنوز برای این آدرس IP در دسترس نیست.",
-    "auth_https_unavailable_help": "به SiteBrush برگردید و آن را با HTTPS فعال دوباره اجرا کنید. دسترسی با IP به‌جای ACME از گواهی خودامضا استفاده می‌کند."
+    "auth_https_unavailable_help": "به SiteBrush برگردید و آن را با HTTPS فعال دوباره اجرا کنید. دسترسی با IP به‌جای ACME از گواهی خودامضا استفاده می‌کند.",
+    "auth_totp_explanation": "An authenticator app creates a temporary 6-digit sign-in code on your phone. The code changes every 30 seconds and is different from a code sent by email.",
+    "auth_totp_apps": "Choose an authenticator app:",
+    "auth_totp_step_install": "Install one of the authenticator apps below.",
+    "auth_totp_step_add": "Open the app and add SiteBrush using the button below, or copy the setup key manually.",
+    "auth_totp_step_enter": "The app will show a 6-digit code. Enter the current code here to finish setup.",
+    "auth_totp_open_app": "Open in authenticator app",
+    "auth_totp_or_manual": "Or add it manually with this setup key:",
+    "auth_totp_secret_help": "Keep this setup key private. It can be used to generate your authentication codes.",
+    "auth_totp_code_help": "Open your authenticator app and enter the current 6-digit code shown for SiteBrush. A new code appears every 30 seconds."
   },
   "de": {
     "auth_email_changed_title": "E-Mail-Adresse geändert",
@@ -12221,7 +12320,16 @@
     "auth_https_self_signed_help": "SiteBrush kann mit einem selbstsignierten Zertifikat über HTTPS fortfahren. Der Browser zeigt eine Zertifikatswarnung, weil keine öffentliche Zertifizierungsstelle diese IP-Adresse bestätigt.",
     "auth_https_self_signed_continue": "Mit selbstsigniertem HTTPS fortfahren",
     "auth_https_unavailable": "Sicheres HTTPS ist für diese IP-Adresse noch nicht verfügbar.",
-    "auth_https_unavailable_help": "Kehren Sie zu SiteBrush zurück und starten Sie es mit aktiviertem HTTPS neu. Für den Zugriff per IP wird statt ACME ein selbstsigniertes Zertifikat verwendet."
+    "auth_https_unavailable_help": "Kehren Sie zu SiteBrush zurück und starten Sie es mit aktiviertem HTTPS neu. Für den Zugriff per IP wird statt ACME ein selbstsigniertes Zertifikat verwendet.",
+    "auth_totp_explanation": "Eine Authenticator-App erzeugt auf Ihrem Telefon einen temporären 6-stelligen Anmeldecode. Der Code ändert sich alle 30 Sekunden und ist nicht der Code aus einer E-Mail.",
+    "auth_totp_apps": "Authenticator-App auswählen:",
+    "auth_totp_step_install": "Installieren Sie eine der unten aufgeführten Authenticator-Apps.",
+    "auth_totp_step_add": "Öffnen Sie die App und fügen Sie SiteBrush über die Schaltfläche unten hinzu oder kopieren Sie den Einrichtungsschlüssel manuell.",
+    "auth_totp_step_enter": "Die App zeigt einen 6-stelligen Code an. Geben Sie den aktuellen Code hier ein, um die Einrichtung abzuschließen.",
+    "auth_totp_open_app": "In Authenticator-App öffnen",
+    "auth_totp_or_manual": "Oder manuell mit diesem Einrichtungsschlüssel hinzufügen:",
+    "auth_totp_secret_help": "Bewahren Sie diesen Einrichtungsschlüssel geheim auf. Mit ihm können Ihre Authentifizierungscodes erzeugt werden.",
+    "auth_totp_code_help": "Öffnen Sie Ihre Authenticator-App und geben Sie den aktuellen 6-stelligen Code für SiteBrush ein. Alle 30 Sekunden erscheint ein neuer Code."
   },
   "tr": {
     "auth_email_changed_title": "E-posta adresi değiştirildi",
@@ -13219,7 +13327,16 @@
     "auth_https_self_signed_help": "SiteBrush kendi imzalı sertifikasıyla HTTPS üzerinden devam edebilir. Herkese açık bir sertifika yetkilisi bu IP adresini doğrulayamadığı için tarayıcı sertifika uyarısı gösterecektir.",
     "auth_https_self_signed_continue": "Kendi imzalı HTTPS ile devam et",
     "auth_https_unavailable": "Bu IP adresi için güvenli HTTPS henüz kullanılamıyor.",
-    "auth_https_unavailable_help": "SiteBrush’a dönün ve HTTPS etkin şekilde yeniden başlatın. IP ile erişim ACME yerine kendi imzalı sertifika kullanır."
+    "auth_https_unavailable_help": "SiteBrush’a dönün ve HTTPS etkin şekilde yeniden başlatın. IP ile erişim ACME yerine kendi imzalı sertifika kullanır.",
+    "auth_totp_explanation": "An authenticator app creates a temporary 6-digit sign-in code on your phone. The code changes every 30 seconds and is different from a code sent by email.",
+    "auth_totp_apps": "Choose an authenticator app:",
+    "auth_totp_step_install": "Install one of the authenticator apps below.",
+    "auth_totp_step_add": "Open the app and add SiteBrush using the button below, or copy the setup key manually.",
+    "auth_totp_step_enter": "The app will show a 6-digit code. Enter the current code here to finish setup.",
+    "auth_totp_open_app": "Open in authenticator app",
+    "auth_totp_or_manual": "Or add it manually with this setup key:",
+    "auth_totp_secret_help": "Keep this setup key private. It can be used to generate your authentication codes.",
+    "auth_totp_code_help": "Open your authenticator app and enter the current 6-digit code shown for SiteBrush. A new code appears every 30 seconds."
   },
   "kk": {
     "auth_email_changed_title": "Электрондық пошта мекенжайы өзгертілді",
@@ -14217,7 +14334,16 @@
     "auth_https_self_signed_help": "SiteBrush өздігінен қол қойылған сертификатпен HTTPS арқылы жұмысын жалғастыра алады. Жалпы сертификаттау орталығы бұл IP-мекенжайды растай алмайтындықтан, браузер ескерту көрсетеді.",
     "auth_https_self_signed_continue": "Өздігінен қол қойылған HTTPS арқылы жалғастыру",
     "auth_https_unavailable": "Бұл IP-мекенжай үшін қауіпсіз HTTPS әзірге қолжетімсіз.",
-    "auth_https_unavailable_help": "SiteBrush-қа оралып, HTTPS қосылған күйде қайта іске қосыңыз. IP арқылы кіру ACME орнына өздігінен қол қойылған сертификатты пайдаланады."
+    "auth_https_unavailable_help": "SiteBrush-қа оралып, HTTPS қосылған күйде қайта іске қосыңыз. IP арқылы кіру ACME орнына өздігінен қол қойылған сертификатты пайдаланады.",
+    "auth_totp_explanation": "An authenticator app creates a temporary 6-digit sign-in code on your phone. The code changes every 30 seconds and is different from a code sent by email.",
+    "auth_totp_apps": "Choose an authenticator app:",
+    "auth_totp_step_install": "Install one of the authenticator apps below.",
+    "auth_totp_step_add": "Open the app and add SiteBrush using the button below, or copy the setup key manually.",
+    "auth_totp_step_enter": "The app will show a 6-digit code. Enter the current code here to finish setup.",
+    "auth_totp_open_app": "Open in authenticator app",
+    "auth_totp_or_manual": "Or add it manually with this setup key:",
+    "auth_totp_secret_help": "Keep this setup key private. It can be used to generate your authentication codes.",
+    "auth_totp_code_help": "Open your authenticator app and enter the current 6-digit code shown for SiteBrush. A new code appears every 30 seconds."
   },
   "es": {
     "auth_email_changed_title": "Dirección de correo cambiada",
@@ -15215,7 +15341,16 @@
     "auth_https_self_signed_help": "SiteBrush puede continuar por HTTPS con su certificado autofirmado. El navegador mostrará una advertencia porque ninguna autoridad de certificación pública puede validar esta dirección IP.",
     "auth_https_self_signed_continue": "Continuar con HTTPS autofirmado",
     "auth_https_unavailable": "HTTPS seguro todavía no está disponible para esta dirección IP.",
-    "auth_https_unavailable_help": "Vuelve a SiteBrush y reinícialo con HTTPS activado. El acceso por IP utiliza un certificado autofirmado en lugar de ACME."
+    "auth_https_unavailable_help": "Vuelve a SiteBrush y reinícialo con HTTPS activado. El acceso por IP utiliza un certificado autofirmado en lugar de ACME.",
+    "auth_totp_explanation": "An authenticator app creates a temporary 6-digit sign-in code on your phone. The code changes every 30 seconds and is different from a code sent by email.",
+    "auth_totp_apps": "Choose an authenticator app:",
+    "auth_totp_step_install": "Install one of the authenticator apps below.",
+    "auth_totp_step_add": "Open the app and add SiteBrush using the button below, or copy the setup key manually.",
+    "auth_totp_step_enter": "The app will show a 6-digit code. Enter the current code here to finish setup.",
+    "auth_totp_open_app": "Open in authenticator app",
+    "auth_totp_or_manual": "Or add it manually with this setup key:",
+    "auth_totp_secret_help": "Keep this setup key private. It can be used to generate your authentication codes.",
+    "auth_totp_code_help": "Open your authenticator app and enter the current 6-digit code shown for SiteBrush. A new code appears every 30 seconds."
   },
   "pt": {
     "auth_email_changed_title": "Endereço de e-mail alterado",
@@ -16213,6 +16348,15 @@
     "auth_https_self_signed_help": "O SiteBrush pode continuar por HTTPS com um certificado autoassinado. O navegador exibirá um aviso porque nenhuma autoridade certificadora pública pode validar este endereço IP.",
     "auth_https_self_signed_continue": "Continuar com HTTPS autoassinado",
     "auth_https_unavailable": "HTTPS seguro ainda não está disponível para este endereço IP.",
-    "auth_https_unavailable_help": "Volte ao SiteBrush e reinicie-o com HTTPS ativado. O acesso por IP usa um certificado autoassinado em vez de ACME."
+    "auth_https_unavailable_help": "Volte ao SiteBrush e reinicie-o com HTTPS ativado. O acesso por IP usa um certificado autoassinado em vez de ACME.",
+    "auth_totp_explanation": "An authenticator app creates a temporary 6-digit sign-in code on your phone. The code changes every 30 seconds and is different from a code sent by email.",
+    "auth_totp_apps": "Choose an authenticator app:",
+    "auth_totp_step_install": "Install one of the authenticator apps below.",
+    "auth_totp_step_add": "Open the app and add SiteBrush using the button below, or copy the setup key manually.",
+    "auth_totp_step_enter": "The app will show a 6-digit code. Enter the current code here to finish setup.",
+    "auth_totp_open_app": "Open in authenticator app",
+    "auth_totp_or_manual": "Or add it manually with this setup key:",
+    "auth_totp_secret_help": "Keep this setup key private. It can be used to generate your authentication codes.",
+    "auth_totp_code_help": "Open your authenticator app and enter the current 6-digit code shown for SiteBrush. A new code appears every 30 seconds."
   }
 }
