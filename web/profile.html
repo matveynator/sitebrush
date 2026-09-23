@@ -85,21 +85,6 @@
         <div><h3>{{index .T "profile_email_release"}}</h3><bdi class="profile-email-address">{{.EmailChange.CurrentEmail}}</bdi>
         {{if .EmailChange.CurrentDeliveryStatus}}<div class="alert profile-alert alert-{{if .EmailChange.CurrentDeliveryClass}}{{.EmailChange.CurrentDeliveryClass}}{{else}}info{{end}}" role="status"><span>{{.EmailChange.CurrentDeliveryStatus}}</span>{{if and (eq .EmailChange.DeliveryStage 1) .EmailDelivery.Show}}<button class="profile-delivery-link" type="button" data-profile-delivery-open>{{.EmailDelivery.LinkText}}</button>{{end}}</div>{{end}}
         {{if eq .EmailChange.Step 1}}<p>{{index .T "profile_email_release_help"}}</p>
-        {{if .EmailChange.CurrentProvider.URL}}<a class="btn btn-primary" href="{{.EmailChange.CurrentProvider.URL}}" target="_blank" rel="noopener noreferrer">{{index .T "setup_confirmation_open"}} {{.EmailChange.CurrentProvider.Name}}</a>{{else}}<p class="hint">{{index .T "profile_email_open_manually"}}</p>{{end}}
-        {{end}}</div>
-      </li>
-      <li class="profile-email-step {{if eq .EmailChange.Step 2}}is-current{{end}}" {{if eq .EmailChange.Step 2}}aria-current="step"{{end}}>
-        <span class="profile-email-step-number" aria-hidden="true">2</span>
-        <div><h3>{{index .T "profile_email_accept"}}</h3><bdi class="profile-email-address">{{.EmailChange.NextEmail}}</bdi>
-        {{if .EmailChange.NextDeliveryStatus}}<div class="alert profile-alert alert-{{if .EmailChange.NextDeliveryClass}}{{.EmailChange.NextDeliveryClass}}{{else}}info{{end}}" role="status"><span>{{.EmailChange.NextDeliveryStatus}}</span>{{if and (eq .EmailChange.DeliveryStage 2) .EmailDelivery.Show}}<button class="profile-delivery-link" type="button" data-profile-delivery-open>{{.EmailDelivery.LinkText}}</button>{{end}}</div>{{end}}
-        {{if eq .EmailChange.Step 2}}<p>{{index .T "profile_email_accept_help"}}</p>
-        {{if .EmailChange.NextProvider.URL}}<a class="btn btn-primary" href="{{.EmailChange.NextProvider.URL}}" target="_blank" rel="noopener noreferrer">{{index .T "setup_confirmation_open"}} {{.EmailChange.NextProvider.Name}}</a>{{else}}<p class="hint">{{index .T "profile_email_open_manually"}}</p>{{end}}
-        {{else}}<p>{{index .T "profile_email_accept_wait"}}</p>{{end}}</div>
-      </li>
-    </ol>
-  </section>
-  {{end}}
-  {{if .ShowPasswordCodeForm}}
   <form class="profile-form profile-code-form" method="post" action="{{.ProfileCodeAction}}">
     <input type="hidden" name="password_confirmation_token" value="{{.PasswordConfirmationToken}}">
     <div class="profile-form-header">
@@ -115,7 +100,37 @@
       <button class="profile-code-submit" type="submit">{{.PasswordCodeSubmit}}</button>{{if and (not .EmailChange.Step) .CodeWebmail.URL}}<a class="btn btn-outline-secondary" href="{{.CodeWebmail.URL}}" target="_blank" rel="noopener noreferrer">{{index .T "setup_confirmation_open"}} {{.CodeWebmail.Name}}</a>{{end}}
     </div>
   </form>
-  {{else if .ShowPasswordForm}}
+        {{if .EmailChange.CurrentProvider.URL}}<a class="btn btn-primary" href="{{.EmailChange.CurrentProvider.URL}}" target="_blank" rel="noopener noreferrer">{{index .T "setup_confirmation_open"}} {{.EmailChange.CurrentProvider.Name}}</a>{{else}}<p class="hint">{{index .T "profile_email_open_manually"}}</p>{{end}}
+        {{end}}</div>
+      </li>
+      <li class="profile-email-step {{if eq .EmailChange.Step 2}}is-current{{end}}" {{if eq .EmailChange.Step 2}}aria-current="step"{{end}}>
+        <span class="profile-email-step-number" aria-hidden="true">2</span>
+        <div><h3>{{index .T "profile_email_accept"}}</h3><bdi class="profile-email-address">{{.EmailChange.NextEmail}}</bdi>
+        {{if .EmailChange.NextDeliveryStatus}}<div class="alert profile-alert alert-{{if .EmailChange.NextDeliveryClass}}{{.EmailChange.NextDeliveryClass}}{{else}}info{{end}}" role="status"><span>{{.EmailChange.NextDeliveryStatus}}</span>{{if and (eq .EmailChange.DeliveryStage 2) .EmailDelivery.Show}}<button class="profile-delivery-link" type="button" data-profile-delivery-open>{{.EmailDelivery.LinkText}}</button>{{end}}</div>{{end}}
+        {{if eq .EmailChange.Step 2}}<p>{{index .T "profile_email_accept_help"}}</p>
+        {{if .EmailChange.NextProvider.URL}}<a class="btn btn-primary" href="{{.EmailChange.NextProvider.URL}}" target="_blank" rel="noopener noreferrer">{{index .T "setup_confirmation_open"}} {{.EmailChange.NextProvider.Name}}</a>{{else}}<p class="hint">{{index .T "profile_email_open_manually"}}</p>{{end}}
+        {{else}}<p>{{index .T "profile_email_accept_wait"}}</p>{{end}}</div>
+      </li>
+    </ol>
+  </section>
+  {{end}}
+  {{if and .ShowPasswordCodeForm (not .EmailChange.Step)}}
+  <form class="profile-form profile-code-form" method="post" action="{{.ProfileCodeAction}}">
+    <input type="hidden" name="password_confirmation_token" value="{{.PasswordConfirmationToken}}">
+    <div class="profile-form-header">
+      <h2>{{.PasswordFormTitle}}</h2>
+      <p>{{.PasswordCodeHelp}}</p>
+    </div>
+    <label>
+      {{.PasswordCodeLabel}}
+      <input class="profile-code-input" type="text" name="password_confirmation_code" inputmode="numeric" pattern="[0-9]{6}" autocomplete="one-time-code" maxlength="6" required>
+    </label>
+    <div class="profile-form-actions">
+      {{if .PasswordWebmailProvider.URL}}<a class="btn btn-outline-primary" href="{{.PasswordWebmailProvider.URL}}" target="_blank" rel="noopener noreferrer">{{index .T "setup_confirmation_open"}} {{.PasswordWebmailProvider.Name}}</a>{{end}}
+      <button class="profile-code-submit" type="submit">{{.PasswordCodeSubmit}}</button>{{if and (not .EmailChange.Step) .CodeWebmail.URL}}<a class="btn btn-outline-secondary" href="{{.CodeWebmail.URL}}" target="_blank" rel="noopener noreferrer">{{index .T "setup_confirmation_open"}} {{.CodeWebmail.Name}}</a>{{end}}
+    </div>
+  </form>
+  {{else if and .ShowPasswordForm (not .EmailChange.Step)}}
   <div class="profile-form-grid">
     <form class="profile-form" method="post" action="?profile" data-profile-send-form data-profile-email-form data-current-email="{{.Email}}">
       <input type="hidden" name="profile_action" value="email">
@@ -125,7 +140,7 @@
       </div>
       <label>
         {{.EmailLabel}}
-        <input type="email" name="email" value="{{.Email}}" autocomplete="email" required data-profile-email-input>
+        <input type="email" name="email" placeholder="{{.Email}}" autocomplete="email" required data-profile-email-input>
       </label>
       <div><button type="submit" data-profile-email-submit>{{.EmailSubmitLabel}}</button></div>
     </form>
@@ -219,7 +234,7 @@
 
     function updateEmailSubmitButton() {
       var nextEmail = String(emailInput.value || '').trim();
-      submitButton.disabled = nextEmail === currentEmail || !emailInput.validity.valid;
+      submitButton.disabled = nextEmail.toLowerCase() === currentEmail.toLowerCase() || !emailInput.validity.valid;
     }
 
     emailInput.addEventListener('input', updateEmailSubmitButton);

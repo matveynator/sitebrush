@@ -10,7 +10,9 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"golang.org/x/crypto/scrypt"
 	"math/big"
+	"strings"
 	"time"
 )
 
@@ -43,6 +45,32 @@ func digest(secret string) string {
 	hashed := sha256.Sum256([]byte(secret))
 	return hex.EncodeToString(hashed[:])
 }
+
+// A slow salted snapshot invalidates pending challenges after a password change.
+func passwordSnapshot(password, previous string) (string, error) {
+	salt := make([]byte, 16)
+	if previous == "" {
+		if _, err := rand.Read(salt); err != nil {
+			return "", err
+		}
+	} else {
+		parts := strings.Split(previous, ":")
+		if len(parts) != 2 {
+			return "", errors.New("obsolete password snapshot")
+		}
+		decoded, err := hex.DecodeString(parts[0])
+		if err != nil || len(decoded) != 16 {
+			return "", errors.New("invalid password salt")
+		}
+		copy(salt, decoded)
+	}
+	key, err := scrypt.Key([]byte(password), salt, 32768, 8, 1, 32)
+	if err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(salt) + ":" + hex.EncodeToString(key), nil
+}
+
 func Session(ctx context.Context, tx *sql.Tx, domain, email, ip string, now time.Time) (string, error) {
 	token, err := RandomToken()
 	if err != nil {
@@ -87,7 +115,7 @@ func Password(ctx context.Context, tx *sql.Tx, domain, email, password, ip, path
 	if err != nil {
 		return Outcome{}, err
 	}
-	if subtle.ConstantTimeCompare([]byte(digest(password)), []byte(digest(stored))) != 1 {
+	if subtle.ConstantTimeCompare([]byte(password), []byte(stored)) != 1 {
 		return Outcome{Status: "credentials"}, nil
 	}
 	if _, err = tx.ExecContext(ctx, `DELETE FROM account_trusted_ips WHERE last_login<=?`, now.Add(-TrustTTL).Unix()); err != nil {
@@ -112,7 +140,11 @@ func Password(ctx context.Context, tx *sql.Tx, domain, email, password, ip, path
 	if _, err = tx.ExecContext(ctx, `DELETE FROM account_login_codes WHERE created_at<? OR (domain=? AND email=? AND client_ip=?)`, now.Add(-CodeTTL).Unix(), domain, email, ip); err != nil {
 		return Outcome{}, err
 	}
-	_, err = tx.ExecContext(ctx, `INSERT INTO account_login_codes(token,domain,email,client_ip,code_hash,password_hash,created_at,attempts,return_path,language) VALUES(?,?,?,?,?,?,?,0,?,?)`, token, domain, email, ip, digest(token+code), digest(stored), now.Unix(), path, language)
+	snapshot, err := passwordSnapshot(stored, "")
+	if err != nil {
+		return Outcome{}, err
+	}
+	_, err = tx.ExecContext(ctx, `INSERT INTO account_login_codes(token,domain,email,client_ip,code_hash,password_hash,created_at,attempts,return_path,language) VALUES(?,?,?,?,?,?,?,0,?,?)`, token, domain, email, ip, digest(token+code), snapshot, now.Unix(), path, language)
 	return Outcome{Status: "code", Token: token, Code: code, Email: email, Path: path, Language: language}, err
 }
 
@@ -144,7 +176,8 @@ func Verify(ctx context.Context, tx *sql.Tx, domain, token, code, ip string, now
 	if err != nil {
 		return Outcome{}, err
 	}
-	if digest(currentPassword) != passwordHash {
+	snapshot, snapshotErr := passwordSnapshot(currentPassword, passwordHash)
+	if snapshotErr != nil || subtle.ConstantTimeCompare([]byte(snapshot), []byte(passwordHash)) != 1 {
 		return Outcome{Status: "invalid"}, nil
 	}
 	consumed, err := tx.ExecContext(ctx, `DELETE FROM account_login_codes WHERE token=? AND attempts<=5`, token)

@@ -1080,7 +1080,8 @@
     "auth_reason_login": "Sign in with your password and the code sent to your email. An active browser session stays signed in when your IP changes.",
     "auth_registration_secure": "First confirm your email. Set your password only after the secure HTTPS connection is ready.",
     "auth_https_wait": "Preparing a trusted HTTPS certificate. Checking again every 10 seconds. DNS or certificate issuance may take longer; you can reopen the email link later.",
-    "auth_https_retry": "Check again"
+    "auth_https_retry": "Check again",
+    "auth_open_with_code": "Open form with code"
   },
   "fr": {
     "expenses_title": "Serveur et dépenses",
@@ -2045,7 +2046,8 @@
     "auth_reason_login": "Connectez-vous avec votre mot de passe et le code reçu par e-mail. Une session active reste ouverte si votre IP change.",
     "auth_registration_secure": "Confirmez votre e-mail, puis définissez votre mot de passe une fois HTTPS prêt.",
     "auth_https_wait": "Préparation du certificat HTTPS de confiance. Vérification toutes les 10 secondes. Le DNS ou le certificat peut prendre du temps ; vous pouvez rouvrir le lien du message plus tard.",
-    "auth_https_retry": "Vérifier à nouveau"
+    "auth_https_retry": "Vérifier à nouveau",
+    "auth_open_with_code": "Ouvrir le formulaire avec le code"
   },
   "ru": {
     "files_select_all": "Выделить все",
@@ -3128,7 +3130,8 @@
     "auth_reason_login": "Войдите с паролем и кодом из письма. Действующая сессия браузера сохраняется при смене IP.",
     "auth_registration_secure": "Сначала подтвердите почту. Установите пароль, когда будет готово защищённое соединение HTTPS.",
     "auth_https_wait": "Готовим доверенный сертификат HTTPS. Проверяем каждые 10 секунд. DNS и выпуск сертификата могут потребовать времени; ссылку из письма можно открыть позже.",
-    "auth_https_retry": "Проверить снова"
+    "auth_https_retry": "Проверить снова",
+    "auth_open_with_code": "Открыть форму с заполненным кодом"
   },
   "ja": {
     "expenses_title": "サーバーと費用",
@@ -4089,7 +4092,8 @@
     "auth_reason_login": "パスワードとメールのコードでログインしてください。IPが変わっても有効なブラウザーセッションは維持されます。",
     "auth_registration_secure": "まずメールを確認してください。安全なHTTPS接続の準備後にパスワードを設定します。",
     "auth_https_wait": "信頼できるHTTPS証明書を準備しています。10秒ごとに確認します。DNSや発行には時間がかかる場合があります。後でメールのリンクを開き直せます。",
-    "auth_https_retry": "再確認"
+    "auth_https_retry": "再確認",
+    "auth_open_with_code": "コード入力済みのフォームを開く"
   },
   "it": {
     "expenses_title": "Server e spese",
@@ -5050,7 +5054,8 @@
     "auth_reason_login": "Accedi con password e codice ricevuto via email. Una sessione attiva resta aperta quando cambia IP.",
     "auth_registration_secure": "Conferma prima la tua email. Imposta la password solo quando HTTPS è pronto.",
     "auth_https_wait": "Preparazione di un certificato HTTPS attendibile. Controllo ogni 10 secondi. DNS ed emissione possono richiedere tempo; puoi riaprire il link email più tardi.",
-    "auth_https_retry": "Controlla di nuovo"
+    "auth_https_retry": "Controlla di nuovo",
+    "auth_open_with_code": "Apri il modulo con il codice"
   },
   "sv": {
     "expenses_title": "Server och kostnader",
@@ -6011,7 +6016,8 @@
     "auth_reason_login": "Logga in med lösenord och mejlkod. En aktiv webbläsarsession förblir inloggad när IP-adressen ändras.",
     "auth_registration_secure": "Bekräfta först din e-post. Ange lösenordet när HTTPS är klart.",
     "auth_https_wait": "Förbereder ett betrott HTTPS-certifikat. Kontrollerar var tionde sekund. DNS och utfärdande kan ta tid; öppna mejllänken igen senare.",
-    "auth_https_retry": "Kontrollera igen"
+    "auth_https_retry": "Kontrollera igen",
+    "auth_open_with_code": "Öppna formuläret med koden"
   },
   "fi": {
     "expenses_title": "Palvelin ja kulut",
@@ -6972,7 +6978,8 @@
     "auth_reason_login": "Kirjaudu salasanalla ja sähköpostikoodilla. Aktiivinen selainistunto säilyy IP-osoitteen vaihtuessa.",
     "auth_registration_secure": "Vahvista ensin sähköposti. Aseta salasana vasta kun HTTPS on valmis.",
     "auth_https_wait": "Luotettua HTTPS-varmennetta valmistellaan. Tarkistus 10 sekunnin välein. DNS ja myöntäminen voivat kestää; voit avata sähköpostilinkin myöhemmin uudelleen.",
-    "auth_https_retry": "Tarkista uudelleen"
+    "auth_https_retry": "Tarkista uudelleen",
+    "auth_open_with_code": "Avaa lomake täytetyllä koodilla"
   },
   "mn": {
     "expenses_title": "Сервер ба зардал",
@@ -7933,7 +7940,8 @@
     "auth_reason_login": "Нууц үг болон имэйлээр ирсэн кодоор нэвтэрнэ үү. IP өөрчлөгдсөн ч идэвхтэй хөтчийн сесс хадгалагдана.",
     "auth_registration_secure": "Эхлээд имэйлээ баталгаажуулна уу. HTTPS бэлэн болсны дараа нууц үгээ тохируулна уу.",
     "auth_https_wait": "Итгэмжлэгдсэн HTTPS гэрчилгээг бэлтгэж байна. 10 секунд тутам шалгана. DNS болон гэрчилгээ олголт удаж болно; имэйлийн холбоосыг дараа дахин нээж болно.",
-    "auth_https_retry": "Дахин шалгах"
+    "auth_https_retry": "Дахин шалгах",
+    "auth_open_with_code": "Код бөглөсөн маягтыг нээх"
   },
   "zh": {
     "expenses_title": "服务器与费用",
@@ -8894,7 +8902,8 @@
     "auth_reason_login": "使用密码和邮件验证码登录。IP更改时，有效的浏览器会话仍保持登录。",
     "auth_registration_secure": "请先验证邮箱。安全的HTTPS连接就绪后再设置密码。",
     "auth_https_wait": "正在准备可信HTTPS证书，每10秒检查一次。DNS或证书签发可能需要较长时间；您可以稍后重新打开邮件链接。",
-    "auth_https_retry": "重新检查"
+    "auth_https_retry": "重新检查",
+    "auth_open_with_code": "打开已填入验证码的表单"
   },
   "he": {
     "expenses_title": "שרת והוצאות",
@@ -9855,7 +9864,8 @@
     "auth_reason_login": "היכנסו עם הסיסמה והקוד מהדוא״ל. הפעלה פעילה בדפדפן נשמרת גם כשכתובת ה-IP משתנה.",
     "auth_registration_secure": "אשרו תחילה את הדוא״ל. הגדירו סיסמה רק לאחר שחיבור HTTPS מאובטח יהיה מוכן.",
     "auth_https_wait": "מכינים תעודת HTTPS מהימנה. בדיקה כל 10 שניות. DNS והנפקה עשויים להתעכב; ניתן לפתוח שוב את הקישור בדוא״ל מאוחר יותר.",
-    "auth_https_retry": "בדיקה חוזרת"
+    "auth_https_retry": "בדיקה חוזרת",
+    "auth_open_with_code": "פתיחת הטופס עם הקוד"
   },
   "fa": {
     "expenses_title": "سرور و هزینه‌ها",
@@ -10816,7 +10826,8 @@
     "auth_reason_login": "با گذرواژه و کد ایمیل وارد شوید. نشست فعال مرورگر با تغییر IP حفظ می‌شود.",
     "auth_registration_secure": "ابتدا ایمیل را تأیید کنید. فقط پس از آماده شدن HTTPS امن گذرواژه تعیین کنید.",
     "auth_https_wait": "در حال آماده‌سازی گواهی معتبر HTTPS. بررسی هر ۱۰ ثانیه. DNS یا صدور گواهی ممکن است طول بکشد؛ پیوند ایمیل را بعداً دوباره باز کنید.",
-    "auth_https_retry": "بررسی دوباره"
+    "auth_https_retry": "بررسی دوباره",
+    "auth_open_with_code": "باز کردن فرم با کد واردشده"
   },
   "de": {
     "expenses_title": "Server und Kosten",
@@ -11777,7 +11788,8 @@
     "auth_reason_login": "Melden Sie sich mit Passwort und E-Mail-Code an. Eine aktive Browsersitzung bleibt bei einem IP-Wechsel bestehen.",
     "auth_registration_secure": "Bestätigen Sie zuerst Ihre E-Mail. Legen Sie Ihr Passwort erst fest, wenn HTTPS bereit ist.",
     "auth_https_wait": "Ein vertrauenswürdiges HTTPS-Zertifikat wird vorbereitet. Prüfung alle 10 Sekunden. DNS und Ausstellung können dauern; öffnen Sie den E-Mail-Link später erneut.",
-    "auth_https_retry": "Erneut prüfen"
+    "auth_https_retry": "Erneut prüfen",
+    "auth_open_with_code": "Formular mit ausgefülltem Code öffnen"
   },
   "tr": {
     "expenses_title": "Sunucu ve giderler",
@@ -12738,7 +12750,8 @@
     "auth_reason_login": "Parolanız ve e-posta koduyla giriş yapın. IP değiştiğinde etkin tarayıcı oturumu açık kalır.",
     "auth_registration_secure": "Önce e-postanızı doğrulayın. Parolanızı yalnızca güvenli HTTPS hazır olduğunda belirleyin.",
     "auth_https_wait": "Güvenilir HTTPS sertifikası hazırlanıyor. Her 10 saniyede kontrol edilir. DNS ve sertifika işlemleri zaman alabilir; e-posta bağlantısını daha sonra yeniden açabilirsiniz.",
-    "auth_https_retry": "Yeniden kontrol et"
+    "auth_https_retry": "Yeniden kontrol et",
+    "auth_open_with_code": "Kodu doldurulmuş formu aç"
   },
   "kk": {
     "expenses_title": "Сервер және шығындар",
@@ -13699,7 +13712,8 @@
     "auth_reason_login": "Құпиясөз және поштадағы код арқылы кіріңіз. IP өзгерсе де белсенді браузер сеансы сақталады.",
     "auth_registration_secure": "Алдымен поштаңызды растаңыз. Қауіпсіз HTTPS дайын болғанда ғана құпиясөз орнатыңыз.",
     "auth_https_wait": "Сенімді HTTPS сертификаты дайындалуда. Әр 10 секунд сайын тексеріледі. DNS пен сертификат беру уақыт алуы мүмкін; хаттағы сілтемені кейін қайта ашуға болады.",
-    "auth_https_retry": "Қайта тексеру"
+    "auth_https_retry": "Қайта тексеру",
+    "auth_open_with_code": "Коды толтырылған пішінді ашу"
   },
   "es": {
     "expenses_title": "Servidor y gastos",
@@ -14660,7 +14674,8 @@
     "auth_reason_login": "Inicia sesión con tu contraseña y el código del correo. Una sesión activa se mantiene al cambiar de IP.",
     "auth_registration_secure": "Confirma primero tu correo. Establece la contraseña cuando HTTPS esté listo.",
     "auth_https_wait": "Preparando un certificado HTTPS de confianza. Comprobación cada 10 segundos. El DNS o la emisión pueden tardar; puedes volver a abrir el enlace del correo más tarde.",
-    "auth_https_retry": "Comprobar de nuevo"
+    "auth_https_retry": "Comprobar de nuevo",
+    "auth_open_with_code": "Abrir formulario con el código"
   },
   "pt": {
     "expenses_title": "Servidor e despesas",
@@ -15621,6 +15636,7 @@
     "auth_reason_login": "Entre com sua senha e o código do e-mail. Uma sessão ativa continua conectada quando o IP muda.",
     "auth_registration_secure": "Confirme seu e-mail primeiro. Defina a senha quando o HTTPS estiver pronto.",
     "auth_https_wait": "Preparando um certificado HTTPS confiável. Verificação a cada 10 segundos. O DNS ou a emissão podem demorar; reabra o link do e-mail mais tarde.",
-    "auth_https_retry": "Verificar novamente"
+    "auth_https_retry": "Verificar novamente",
+    "auth_open_with_code": "Abrir formulário com o código"
   }
 }

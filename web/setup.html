@@ -135,6 +135,7 @@
   {{end}}
 </div>
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+{{if .EmailDelivery.Show}}<details class="authentication-card" data-account-delivery-id="latest" data-registration-delivery-proof="{{.RegistrationFormToken}}" data-sent="{{index .T "profile_email_delivery_success_summary"}}" data-failed="{{index .T "profile_email_delivery_error_summary"}}" data-pending="{{index .T "profile_email_delivery_pending_summary"}}"><summary>{{.EmailDelivery.LinkText}}</summary><p role="status" data-account-delivery-status>{{.EmailDelivery.Summary}}</p><pre data-account-delivery-log>{{.EmailDelivery.Log}}</pre></details>{{end}}
 <span hidden data-account-code-tools data-copy-label="{{index .T "auth_copy"}}" data-copy-success="{{index .T "auth_copied"}}" data-copy-error="{{index .T "auth_copy_failed"}}"></span>
 <script src="/p/static/account-forms.js" defer></script>
 </body>

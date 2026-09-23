@@ -486,8 +486,9 @@ Codes expire after 15 minutes, allow five attempts, and resending replaces older
 codes. Requests have a 60-second cooldown and a maximum of three per 15-minute
 account/IP window. Account emails include the domain, purpose, original request
 IP/time, expiry, and a form link. Code fields support `autocomplete="one-time-code"`;
-autofill availability depends on the device/mail client. The website can copy an
-entered code; email codes remain selectable text without executable scripts.
+autofill availability depends on the device/mail client. Mail links to code forms prefill the code through a URL fragment, which is removed
+from browser history and is not sent in HTTP requests. Submitting the form still
+requires confirmation. Email codes remain selectable text.
 
 `SITEBRUSH_TRUSTED_PROXIES` accepts comma-separated IP addresses or CIDRs for
 account IP attribution. By default only loopback proxies are trusted. Forwarded
