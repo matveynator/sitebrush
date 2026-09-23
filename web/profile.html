@@ -148,6 +148,53 @@
   </div>
   {{end}}
 {{if .AccountCSRF}}
+<section class="authentication-card profile-form">
+  <h2>{{index .T "auth_passkey_title"}}</h2>
+  <p>{{index .T "auth_passkey_offer_text"}}</p>
+  <p id="SiteBrushPasskeyCreateStatus" class="text-danger" role="status"></p>
+  <button type="button" data-passkey-create data-account-csrf="{{.AccountCSRF}}" data-passkey-start="?profile&passkey_begin" data-passkey-finish="?profile&passkey_finish" data-passkey-status="#SiteBrushPasskeyCreateStatus" data-passkey-error="{{index .T "auth_passkey_failed"}}" data-passkey-unavailable="{{index .T "auth_passkey_unavailable"}}">{{index .T "auth_passkey_create"}}</button>
+  {{range .Passkeys}}
+  <form method="post" action="?profile" class="auth-trusted-row">
+    <input type="hidden" name="profile_action" value="passkey_delete">
+    <input type="hidden" name="passkey_id" value="{{.ID}}">
+    <input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
+    <strong>{{index $.T "auth_passkey_title"}}</strong>
+    <p>{{.CreatedAt.Format "2006-01-02 15:04 UTC"}}{{if not .LastUsed.IsZero}} · {{index $.T "auth_last_login"}}: {{.LastUsed.Format "2006-01-02 15:04 UTC"}}{{end}}</p>
+    <button type="submit">{{index $.T "auth_passkey_remove"}}</button>
+  </form>
+  {{end}}
+</section>
+
+<section class="authentication-card profile-form">
+  <h2>{{index .T "auth_totp_title"}}</h2>
+  {{if .TOTPEnabled}}
+    <p>{{index .T "auth_totp_enabled"}}</p>
+    <form method="post" action="?profile">
+      <input type="hidden" name="profile_action" value="totp_disable">
+      <input type="hidden" name="account_csrf" value="{{.AccountCSRF}}">
+      <button type="submit">{{index .T "auth_totp_disable"}}</button>
+    </form>
+  {{else if .TOTPSetupSecret}}
+    <h3>{{index .T "auth_totp_setup_title"}}</h3>
+    <p>{{index .T "auth_totp_setup_help"}}</p>
+    <p><strong>{{index .T "auth_totp_secret"}}:</strong> <code dir="ltr">{{.TOTPSetupSecret}}</code></p>
+    <p><a href="{{.TOTPSetupURI}}"><code dir="ltr">{{.TOTPSetupURI}}</code></a></p>
+    <form method="post" action="?profile">
+      <input type="hidden" name="profile_action" value="totp_enable">
+      <input type="hidden" name="account_csrf" value="{{.AccountCSRF}}">
+      <input type="hidden" name="totp_secret" value="{{.TOTPSetupSecret}}">
+      <label>{{index .T "auth_totp_code"}}<input class="profile-code-input" type="text" name="totp_code" autocomplete="one-time-code" inputmode="numeric" pattern="[0-9]{6}" minlength="6" maxlength="6" required></label>
+      <button type="submit">{{index .T "auth_totp_enable"}}</button>
+    </form>
+  {{else}}
+    <form method="post" action="?profile">
+      <input type="hidden" name="profile_action" value="totp_setup">
+      <input type="hidden" name="account_csrf" value="{{.AccountCSRF}}">
+      <button type="submit">{{index .T "auth_totp_setup_title"}}</button>
+    </form>
+  {{end}}
+</section>
+
 <section class="authentication-card profile-form"><h2>{{index .T "auth_trusted_ips"}}</h2><p>{{index .T "auth_trust_help"}}</p>
 {{range .TrustedIPs}}<form method="post" action="?profile" class="auth-trusted-row"><input type="hidden" name="profile_action" value="revoke_ip"><input type="hidden" name="trusted_ip" value="{{.IP}}"><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}"><strong dir="ltr">{{.IP}}{{if eq .IP "127.0.0.1"}} / localhost{{end}}</strong>{{if .Current}} <span>{{index $.T "auth_current"}}</span>{{end}}<p>{{index $.T "auth_confirmed"}}: {{.Confirmed.Format "2006-01-02 15:04 UTC"}}<br>{{index $.T "auth_last_login"}}: {{.LastLogin.Format "2006-01-02 15:04 UTC"}}<br>{{index $.T "auth_expires"}}: {{.Expires.Format "2006-01-02 15:04 UTC"}}</p><button type="submit">{{index $.T "auth_revoke"}}</button></form>{{else}}<p>{{index .T "auth_no_trusted"}}</p>{{end}}
 </section>{{end}}
@@ -478,5 +525,6 @@
 </script>
 <span hidden data-account-code-tools data-copy-label="{{index .T "auth_copy"}}" data-copy-success="{{index .T "auth_copied"}}" data-copy-error="{{index .T "auth_copy_failed"}}"></span>
 <script src="/p/static/account-forms.js" defer></script>
+<script src="/p/static/account-passkeys.js" defer></script>
 </body>
 </html>
