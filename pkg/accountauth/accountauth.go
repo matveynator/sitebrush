@@ -18,6 +18,8 @@ import (
 
 const CodeTTL = 15 * time.Minute
 const TrustTTL = 90 * 24 * time.Hour
+const CodeSendCooldown = 10 * time.Second
+const CodeSendLimit = 30
 
 func Schema() []string {
 	return []string{
@@ -92,7 +94,7 @@ func Reserve(ctx context.Context, tx *sql.Tx, domain, email, ip string, now time
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return false, err
 	}
-	if err == nil && (timestamp-last < 60 || (timestamp-window < int64(CodeTTL/time.Second) && count >= 3)) {
+	if err == nil && (timestamp-last < int64(CodeSendCooldown/time.Second) || (timestamp-window < int64(CodeTTL/time.Second) && count >= CodeSendLimit)) {
 		return false, nil
 	}
 	if timestamp-window >= int64(CodeTTL/time.Second) {
