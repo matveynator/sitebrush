@@ -818,7 +818,8 @@
                 <input class="form-control form-control-sm" name="description" value="{{.Description}}">
                 <button class="btn btn-outline-secondary btn-sm align-self-start">Update</button>
               </form>
-              {{if .ReasonLog}}<details class="mt-2"><summary class="small">Reason summary (7 days)</summary><ul class="security-reason-log">{{range .ReasonLog}}<li>{{if ne .First .At}}{{.First.Format "2006-01-02 15:04"}} — {{end}}{{.At.Format "2006-01-02 15:04"}} · {{.Source}} · {{.Reason}} × {{.Count}}{{if .Description}} — {{.Description}}{{end}}</li>{{end}}</ul></details>{{end}}
+              {{if .ReasonLog}}<details class="mt-2"><summary class="small">Block history (7 days)</summary><ul class="security-reason-log">{{range .ReasonLog}}<li>{{if ne .First .At}}{{.First.Format "2006-01-02 15:04"}} — {{end}}{{.At.Format "2006-01-02 15:04"}} · {{.Source}} · {{.Reason}} × {{.Count}}{{if .Description}} — {{.Description}}{{end}}</li>{{end}}</ul></details>{{end}}
+              {{if .ObservedRequests}}<details class="mt-2" open><summary class="small">What this IP actually requested</summary><ul class="security-reason-log">{{range .ObservedRequests}}<li><code>{{.Method}} {{.Path}}</code> · HTTP {{.Status}} · × {{.Count}}{{if ne .First .Last}} · {{.First.Format "2006-01-02 15:04"}} — {{.Last.Format "2006-01-02 15:04"}}{{else}} · {{.Last.Format "2006-01-02 15:04"}}{{end}}</li>{{end}}</ul></details>{{end}}
             </td>
             <td><span class="security-source-badge {{if eq .Source "manual"}}security-source-manual{{else}}security-source-local{{end}}">{{.Source}}</span></td>
             <td><time data-relative-time="{{.LastEvent.Format "2006-01-02T15:04:05Z07:00"}}">{{.LastEvent.Format "02 Jan 2006 15:04"}}</time></td>
@@ -1327,14 +1328,19 @@
 
 (function renderAnalyticsTimes() {
   'use strict';
-  function relativeText(milliseconds) {
-    const absolute = Math.abs(milliseconds);
-    const units = [
-      [86400000, 'd'],
-      [3600000, 'h'],
-      [60000, 'm'],
-      [1000, 's']
-    ];
+  function relativeText(milliseconds, detailed) {
+    const absolute = Math.max(0, Math.abs(milliseconds));
+    if (detailed) {
+      const days = Math.floor(absolute / 86400000);
+      const hours = Math.floor((absolute % 86400000) / 3600000);
+      const minutes = Math.floor((absolute % 3600000) / 60000);
+      const parts = [];
+      if (days) parts.push(days + 'd');
+      if (hours || days) parts.push(hours + 'h');
+      parts.push(minutes + 'm');
+      return parts.join(' ');
+    }
+    const units = [[86400000, 'd'], [3600000, 'h'], [60000, 'm'], [1000, 's']];
     for (const unit of units) {
       if (absolute >= unit[0]) return Math.max(1, Math.floor(absolute / unit[0])) + unit[1];
     }
@@ -1351,7 +1357,7 @@
     if (Math.abs(difference) < 1000) relation = 'now';
     else if (difference > 0) relation = 'in ' + relativeText(difference);
     else relation = relativeText(difference) + ' ago';
-    if (timeElement.hasAttribute('data-countdown') && difference > 0) relation = relativeText(difference) + ' remaining';
+    if (timeElement.hasAttribute('data-countdown') && difference > 0) relation = relativeText(difference, true) + ' remaining until removal';
     timeElement.textContent = absoluteText + ' · ' + relation;
   }
   function renderAllTimes() {
