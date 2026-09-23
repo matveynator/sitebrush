@@ -18619,6 +18619,52 @@ func accountCSRF(r *http.Request) string {
 	return fmt.Sprintf("%x", digest[:])
 }
 
+func (a *App) beginAccountPasskeyRegistration(w http.ResponseWriter, r *http.Request, domain, email string) {
+	if r.Method != http.MethodGet || r.Header.Get("X-SiteBrush-CSRF") != accountCSRF(r) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	rpID, origin, valid := accountPasskeyRP(r)
+	if !valid {
+		http.Error(w, translationsForRequest(r)["auth_passkey_unavailable"], http.StatusBadRequest)
+		return
+	}
+	var result accountpasskey.BeginResult
+	err := a.accountTransaction(r.Context(), func(transaction *sql.Tx) error {
+		var transactionErr error
+		result, transactionErr = accountpasskey.BeginRegistration(r.Context(), transaction, domain, rpID, origin, email, accountClientIP(r), time.Now())
+		return transactionErr
+	})
+	if err != nil {
+		http.Error(w, translationsForRequest(r)["auth_passkey_failed"], http.StatusBadRequest)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	_ = json.NewEncoder(w).Encode(result)
+}
+
+func (a *App) finishAccountPasskeyRegistration(w http.ResponseWriter, r *http.Request, domain, email string) {
+	if r.Method != http.MethodPost || r.Header.Get("X-SiteBrush-CSRF") != accountCSRF(r) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	rpID, origin, valid := accountPasskeyRP(r)
+	if !valid {
+		http.Error(w, translationsForRequest(r)["auth_passkey_unavailable"], http.StatusBadRequest)
+		return
+	}
+	err := a.accountTransaction(r.Context(), func(transaction *sql.Tx) error {
+		return accountpasskey.FinishRegistration(r.Context(), transaction, domain, rpID, origin, email, accountClientIP(r), r.URL.Query().Get("passkey_token"), r, time.Now())
+	})
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": translationsForRequest(r)["auth_passkey_failed"]})
+		return
+	}
+	_ = json.NewEncoder(w).Encode(map[string]bool{"ok": true})
+}
+
 func (a *App) profilePage(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Referrer-Policy", "no-referrer")
@@ -18637,6 +18683,15 @@ func (a *App) profilePage(w http.ResponseWriter, r *http.Request) {
 	currentEmail, found := a.currentAdminEmail(r)
 	if !found {
 		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	domain := a.siteDomain(r.Context(), r)
+	if hasQueryFlag(r, "passkey_begin") {
+		a.beginAccountPasskeyRegistration(w, r, domain, currentEmail)
+		return
+	}
+	if hasQueryFlag(r, "passkey_finish") {
+		a.finishAccountPasskeyRegistration(w, r, domain, currentEmail)
 		return
 	}
 	if r.Method == http.MethodPost && r.FormValue("profile_action") == "revoke_ip" {
@@ -18662,6 +18717,55 @@ func (a *App) profilePage(w http.ResponseWriter, r *http.Request) {
 	status := ""
 	statusClass := ""
 	showPasswordCodeForm := false
+	if r.Method == http.MethodPost {
+		profileAction := strings.TrimSpace(r.FormValue("profile_action"))
+		if profileAction == "passkey_delete" || profileAction == "totp_setup" || profileAction == "totp_enable" || profileAction == "totp_disable" {
+			if r.FormValue("account_csrf") == "" || r.FormValue("account_csrf") != accountCSRF(r) {
+				http.Error(w, "forbidden", http.StatusForbidden)
+				return
+			}
+			switch profileAction {
+			case "passkey_delete":
+				err := a.accountTransaction(r.Context(), func(transaction *sql.Tx) error {
+					return accountpasskey.Delete(r.Context(), transaction, domain, currentEmail, strings.TrimSpace(r.FormValue("passkey_id")))
+				})
+				if err != nil {
+					http.Error(w, "account update unavailable", http.StatusServiceUnavailable)
+					return
+				}
+				a.renderProfilePage(w, r, currentEmail, "", "", false, "", time.Time{}, false, profileEmailDeliveryView{}, profileEmailChangeView{})
+				return
+			case "totp_setup":
+				secret, err := accounttotp.GenerateSecret()
+				if err != nil {
+					http.Error(w, "account update unavailable", http.StatusServiceUnavailable)
+					return
+				}
+				a.renderProfilePage(w, r, currentEmail, "", "", false, "", time.Time{}, false, profileEmailDeliveryView{}, profileEmailChangeView{}, secret)
+				return
+			case "totp_enable":
+				err := a.accountTransaction(r.Context(), func(transaction *sql.Tx) error {
+					return accounttotp.Enable(r.Context(), transaction, domain, currentEmail, r.FormValue("totp_secret"), r.FormValue("totp_code"), time.Now())
+				})
+				if err != nil {
+					a.renderProfilePage(w, r, currentEmail, translations["auth_totp_invalid"], "danger", false, "", time.Time{}, false, profileEmailDeliveryView{}, profileEmailChangeView{}, r.FormValue("totp_secret"))
+					return
+				}
+				a.renderProfilePage(w, r, currentEmail, translations["auth_totp_enabled"], "success", false, "", time.Time{}, false, profileEmailDeliveryView{}, profileEmailChangeView{})
+				return
+			case "totp_disable":
+				err := a.accountTransaction(r.Context(), func(transaction *sql.Tx) error {
+					return accounttotp.Disable(r.Context(), transaction, domain, currentEmail)
+				})
+				if err != nil {
+					http.Error(w, "account update unavailable", http.StatusServiceUnavailable)
+					return
+				}
+				a.renderProfilePage(w, r, currentEmail, "", "", false, "", time.Time{}, false, profileEmailDeliveryView{}, profileEmailChangeView{})
+				return
+			}
+		}
+	}
 	passwordConfirmationToken := ""
 	pendingProfileEmail := currentEmail
 	emailChange := profileEmailChangeView{}
@@ -18683,7 +18787,6 @@ func (a *App) profilePage(w http.ResponseWriter, r *http.Request) {
 			a.handleProfilePasswordCode(w, r, currentEmail, passwordConfirmationToken, passwordConfirmationCode)
 			return
 		}
-		domain := a.siteDomain(r.Context(), r)
 		if profileAction == "" {
 			if nextPassword != "" && nextEmail != "" && nextEmail != currentEmail {
 				profileAction = "both"
@@ -18808,15 +18911,33 @@ func (a *App) resumeProfileEmailChange(w http.ResponseWriter, r *http.Request, t
 	a.renderProfilePage(w, r, confirmation.CurrentEmail, "", "", true, token, time.Time{}, false, profileEmailDeliveryView{}, emailChange)
 }
 
-func (a *App) renderProfilePage(w http.ResponseWriter, r *http.Request, email, status, statusClass string, showPasswordCodeForm bool, passwordConfirmationToken string, blockedUntil time.Time, hardLocked bool, emailDeliveryView profileEmailDeliveryView, emailChange profileEmailChangeView) {
+func (a *App) renderProfilePage(w http.ResponseWriter, r *http.Request, email, status, statusClass string, showPasswordCodeForm bool, passwordConfirmationToken string, blockedUntil time.Time, hardLocked bool, emailDeliveryView profileEmailDeliveryView, emailChange profileEmailChangeView, totpSetupSecrets ...string) {
 	translations := translationsForRequest(r)
+	domain := a.siteDomain(r.Context(), r)
+	accountEmail, authenticated := a.currentAdminEmail(r)
+	passkeys := []accountpasskey.CredentialInfo{}
+	totpEnabled := false
+	if authenticated {
+		passkeys, _ = accountpasskey.List(r.Context(), a.db, domain, accountEmail)
+		totpEnabled = accounttotp.Enabled(r.Context(), a.db, domain, accountEmail)
+	}
+	totpSetupSecret := ""
+	if len(totpSetupSecrets) > 0 {
+		totpSetupSecret = strings.TrimSpace(totpSetupSecrets[0])
+	}
+	totpSetupURI := ""
+	if totpSetupSecret != "" {
+		totpSetupURI = accounttotp.ProvisioningURI(domain, accountEmail, totpSetupSecret)
+	}
+	passkeyOffer := hasQueryFlag(r, "passkey_offer") && authenticated && len(passkeys) == 0
+	passkeyContinuePath := httpsecurity.LocalRedirectTarget(r.URL.Query().Get("return_path"), "/")
 	codeRecipient := strings.TrimSpace(email)
 	if showPasswordCodeForm && strings.TrimSpace(emailChange.CurrentEmail) != "" {
 		codeRecipient = strings.TrimSpace(emailChange.CurrentEmail)
 	}
 	passwordWebmailProvider := webmailProviderForAddress(codeRecipient)
 	trustedIPs := []accountauth.TrustedIP{}
-	if accountEmail, authenticated := a.currentAdminEmail(r); authenticated {
+	if authenticated {
 		rows, err := a.db.QueryContext(r.Context(), `SELECT client_ip,confirmed_at,last_login FROM account_trusted_ips WHERE domain=? AND email=? AND last_login>? ORDER BY last_login DESC`, a.siteDomain(r.Context(), r), accountEmail, time.Now().Add(-accountauth.TrustTTL).Unix())
 		if err == nil {
 			for rows.Next() {
@@ -18836,6 +18957,12 @@ func (a *App) renderProfilePage(w http.ResponseWriter, r *http.Request, email, s
 	}
 	a.render(w, r, "profile.html", map[string]any{
 		"TrustedIPs":                 trustedIPs,
+		"Passkeys":                   passkeys,
+		"PasskeyOffer":               passkeyOffer,
+		"PasskeyContinuePath":        passkeyContinuePath,
+		"TOTPEnabled":                totpEnabled,
+		"TOTPSetupSecret":            totpSetupSecret,
+		"TOTPSetupURI":               totpSetupURI,
 		"AccountCSRF":                accountCSRF(r),
 		"CodeWebmail":                webmailProviderForAddress(email),
 		"EmailChange":                emailChange,
