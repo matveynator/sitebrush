@@ -629,6 +629,13 @@ func (report ExperienceReport) View(filter ExperienceFilter) ExperienceView {
 	result.Languages = ordered(languages)
 	journeys := map[string]*ExperienceRow{}
 	loops, hiddenReturns := 0, 0
+	localHoursKnown := false
+	for _, count := range result.LocalHours {
+		if count > 0 {
+			localHoursKnown = true
+			break
+		}
+	}
 	for _, session := range report.Recent {
 		sessionPage := session.Landing
 		if filter.Page != "" {
@@ -644,13 +651,6 @@ func (report ExperienceReport) View(filter ExperienceFilter) ExperienceView {
 			continue
 		}
 		result.Recent = append(result.Recent, session)
-		localHoursKnown := false
-		for _, count := range result.LocalHours {
-			if count > 0 {
-				localHoursKnown = true
-				break
-			}
-		}
 		if !localHoursKnown && len(session.LocalTime) >= 2 {
 			hour := int(session.LocalTime[0]-'0')*10 + int(session.LocalTime[1]-'0')
 			if hour >= 0 && hour < len(result.LocalHours) {
