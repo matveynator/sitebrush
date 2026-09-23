@@ -63,11 +63,12 @@ const (
 )
 
 type throttleRequest struct {
-	Operation throttleOperation
-	IP        string
-	Trusted   bool
-	Now       time.Time
-	Reply     chan throttleResult
+	Operation         throttleOperation
+	IP                string
+	Trusted           bool
+	ExemptObservation bool
+	Now               time.Time
+	Reply             chan throttleResult
 }
 
 type throttleResult struct {
@@ -192,6 +193,9 @@ func handleThrottleRequest(observations map[string]throttleObservation, throttle
 			}
 			return throttleResult{Decision: decision}
 		}
+		if request.ExemptObservation {
+			return throttleResult{}
+		}
 
 		observation := observations[ip]
 		if observation.Started.IsZero() || now.Sub(observation.Last) > throttleContinuityGap {
@@ -308,7 +312,17 @@ func pruneThrottleState(observations map[string]throttleObservation, throttles m
 }
 
 func (guard *ThrottleGuard) ObserveFast(ip string, trusted bool, now time.Time) ThrottleDecision {
-	result, ok := guard.exchangeFast(throttleRequest{Operation: throttleObserve, IP: ip, Trusted: trusted, Now: now})
+	return guard.observeFast(ip, trusted, false, now)
+}
+
+// ObserveFastExemptObservation keeps an already active throttle enforceable while
+// excluding this request from the sustained-rate history that can create one.
+func (guard *ThrottleGuard) ObserveFastExemptObservation(ip string, trusted bool, now time.Time) ThrottleDecision {
+	return guard.observeFast(ip, trusted, true, now)
+}
+
+func (guard *ThrottleGuard) observeFast(ip string, trusted, exemptObservation bool, now time.Time) ThrottleDecision {
+	result, ok := guard.exchangeFast(throttleRequest{Operation: throttleObserve, IP: ip, Trusted: trusted, ExemptObservation: exemptObservation, Now: now})
 	if !ok {
 		return ThrottleDecision{}
 	}

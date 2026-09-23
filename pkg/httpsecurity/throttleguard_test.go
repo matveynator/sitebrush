@@ -159,3 +159,46 @@ func TestThrottleGuardDoesNotThrottleTrustedPeer(t *testing.T) {
 		}
 	}
 }
+
+
+func TestThrottleGuardCrawlerExemptionDoesNotBypassActiveThrottle(t *testing.T) {
+	guard, err := NewThrottleGuard("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer guard.Close()
+
+	ip := "203.0.113.44"
+	started := time.Date(2026, 9, 24, 10, 0, 0, 0, time.UTC)
+	for requestIndex := 0; requestIndex < 610; requestIndex++ {
+		guard.ObserveFast(ip, false, started.Add(time.Duration(requestIndex)*100*time.Millisecond))
+	}
+	activeAt := started.Add(61 * time.Second)
+	var limited bool
+	for requestIndex := 0; requestIndex < throttleAllowedRPS+2; requestIndex++ {
+		decision := guard.ObserveFastExemptObservation(ip, false, activeAt)
+		if !decision.Active {
+			t.Fatal("crawler-tagged read bypassed active throttle")
+		}
+		limited = limited || decision.RateLimited
+	}
+	if !limited {
+		t.Fatal("crawler-tagged reads were not rate limited by active throttle")
+	}
+}
+
+func TestThrottleGuardCrawlerExemptionDoesNotCreateThrottle(t *testing.T) {
+	guard, err := NewThrottleGuard("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer guard.Close()
+
+	started := time.Date(2026, 9, 24, 11, 0, 0, 0, time.UTC)
+	for requestIndex := 0; requestIndex < 2000; requestIndex++ {
+		decision := guard.ObserveFastExemptObservation("203.0.113.45", false, started.Add(time.Duration(requestIndex)*100*time.Millisecond))
+		if decision.Active || decision.RateLimited {
+			t.Fatalf("exempt crawler observation created throttle: %#v", decision)
+		}
+	}
+}

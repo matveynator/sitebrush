@@ -557,17 +557,19 @@
     </div>
   </div>
 
+  {{if eq .AnalyticsTab "analytics"}}
   <form method="get" class="d-flex flex-wrap gap-2 mb-3">
     <input type="hidden" name="analytics" value="">
-    <input type="hidden" name="tab" value="{{.AnalyticsTab}}">
+    <input type="hidden" name="tab" value="analytics">
     <select name="days" aria-label="{{index .T "analytics_period"}}" class="form-select w-auto">{{range $days := .PeriodOptions}}<option value="{{$days}}" {{if eq $.BrowserAnalytics.Days $days}}selected{{end}}>{{$days}} {{index $.T "ax_days"}}</option>{{end}}</select>
     <select name="traffic" class="form-select w-auto" aria-label="{{index .T "ax_audience"}}"><option value="human" {{if eq .ExperienceFilter.Traffic "human"}}selected{{end}}>{{index .T "ax_humans"}}</option><option value="bots" {{if eq .ExperienceFilter.Traffic "bots"}}selected{{end}}>{{index .T "ax_bots"}}</option><option value="all" {{if eq .ExperienceFilter.Traffic "all"}}selected{{end}}>{{index .T "ax_all"}}</option></select>
     <input type="hidden" name="campaign" value="">
     <button class="btn btn-outline-secondary">{{index .T "ax_filter"}}</button>
   </form>
+  {{end}}
   <nav class="analytics-tabs" aria-label="Analytics sections">
     <a href="?analytics&amp;tab=analytics&amp;days={{.BrowserAnalytics.Days}}" class="{{if eq .AnalyticsTab "analytics"}}active{{end}}">{{index .T "analytics_title"}}</a>
-    <a href="?analytics&amp;tab=security&amp;days={{.BrowserAnalytics.Days}}" class="{{if eq .AnalyticsTab "security"}}active{{end}}">{{index .T "ax_security"}}</a>
+    <a href="?analytics&amp;tab=security" class="{{if eq .AnalyticsTab "security"}}active{{end}}">{{index .T "ax_security"}}</a>
   </nav>
 
   {{if eq .AnalyticsTab "analytics"}}
@@ -630,7 +632,7 @@
   </div></section>
   <section id="sessions" class="card mb-4"><div class="card-body"><h2 class="h5">{{index .T "ax_sessions"}}</h2><p class="small">{{index .T "ax_recent_hint"}}</p>
     {{range .Experience.Recent}}<details class="border-bottom py-2"><summary>{{if eq .Class "human-likely"}}👤{{else}}🤖{{end}} <time data-relative-time="{{.Started.Format "2006-01-02T15:04:05Z07:00"}}">{{.When}}</time> · {{.Source.Name}} → {{.Landing}} · {{.Language}} · {{.Browser}} / {{.OS}} · active {{.Active}}</summary>
-    <p class="small mb-1">{{if .Address}}IP: <code>{{.Address}}</code> · {{end}}{{index $.T "ax_first_source"}}: {{.FirstSource}} · {{index $.T "ax_local_time"}}: {{if .LocalTime}}{{.LocalTime}} {{.Timezone}}{{else}}—{{end}} · {{if .Country}}{{.Country}}{{if .City}}, {{.City}}{{end}}{{else}}unknown location{{end}}</p>
+    <p class="small mb-1">{{if .Address}}IP: <code class="analytics-session-ip" data-ip="{{.Address}}">{{.Address}}</code> · {{end}}{{index $.T "ax_first_source"}}: {{.FirstSource}} · {{index $.T "ax_local_time"}}: {{if .LocalTime}}{{.LocalTime}} {{.Timezone}}{{else}}—{{end}} · {{if .Country}}{{.Country}}{{if .City}}, {{.City}}{{end}}{{else}}unknown location{{end}}</p>
     {{if .Returning}}<p class="small mb-1">Returned after {{.ReturnAfter}} · {{.FirstSource}} → {{.Source.Name}} · {{if .Goal}}goal reached{{else}}no configured goal yet{{end}}</p>{{end}}
     {{range .Tabs}}<ol class="mb-1">{{range .}}<li>{{.}}</li>{{end}}</ol>{{end}}{{if .Limited}}<p>{{index $.T "ax_incomplete"}}</p>{{end}}</details>{{else}}<p>{{index .T "analytics_no_data"}}</p>{{end}}
   </div></section>
@@ -1095,11 +1097,14 @@
           latitude: latitude, longitude: longitude,
           country: session.Country || '', city: session.City || '',
           count: 0, languages: new Map(), devices: new Map(),
-          classes: new Map(), localTimes: new Set(), sources: new Set()
+          classes: new Map(), localTimes: new Set(), sources: new Set(),
+          addresses: new Map()
         };
         groups.set(key, group);
       }
       group.count += 1;
+      const address = String(session.Address || '').trim();
+      if (address) group.addresses.set(address, (group.addresses.get(address) || 0) + 1);
       const language = languageCode(session.Language);
       const device = deviceKind(session);
       const clientClass = session.Class || 'unknown';
@@ -1112,6 +1117,18 @@
     return Array.from(groups.values()).sort(function sortGroups(left, right) {
       return right.count - left.count;
     });
+  }
+
+  function compactAddress(address) {
+    const text = String(address || '').trim();
+    if (!text) return '';
+    if (text.includes(':')) {
+      const parts = text.split(':').filter(Boolean);
+      return parts.slice(0, 3).join(':') + (parts.length > 3 ? ':…' : '');
+    }
+    const parts = text.split('.');
+    if (parts.length === 4) return parts.slice(0, 3).join('.') + '.…';
+    return text;
   }
 
   function sortedCounts(counts) {
@@ -1169,8 +1186,18 @@
     wrapper.appendChild(title);
 
     const sessionsLine = document.createElement('div');
-    sessionsLine.textContent = group.count + (group.count === 1 ? ' session' : ' sessions');
+    const uniqueAddresses = group.addresses.size;
+    sessionsLine.textContent = group.count + (group.count === 1 ? ' session' : ' sessions') +
+      (uniqueAddresses ? ' · ' + uniqueAddresses + (uniqueAddresses === 1 ? ' IP' : ' IPs') : '');
     wrapper.appendChild(sessionsLine);
+
+    if (uniqueAddresses) {
+      const addressLine = document.createElement('div');
+      addressLine.textContent = 'IP: ' + sortedCounts(group.addresses).slice(0, 4).map(function describeAddress(row) {
+        return compactAddress(row[0]) + (row[1] > 1 ? ' × ' + row[1] : '');
+      }).join(' · ');
+      wrapper.appendChild(addressLine);
+    }
 
     const languagesLine = document.createElement('div');
     languagesLine.textContent = 'Languages: ' + countsText(group.languages, {});
@@ -1200,7 +1227,10 @@
     const count = document.createElement('strong');
     count.textContent = String(group.count);
     const detail = document.createElement('small');
-    detail.textContent = countsText(group.languages, {}) + ' · ' + countsText(group.devices, {mobile:'📱 ',desktop:'💻 ',automation:'🤖 '});
+    const addressSummary = group.addresses.size
+      ? group.addresses.size + (group.addresses.size === 1 ? ' IP' : ' IPs') + ' · '
+      : '';
+    detail.textContent = addressSummary + countsText(group.languages, {}) + ' · ' + countsText(group.devices, {mobile:'📱 ',desktop:'💻 ',automation:'🤖 '});
     row.appendChild(label);
     row.appendChild(count);
     row.appendChild(detail);
@@ -1280,6 +1310,21 @@
 })();
 </script>
 <script>
+(function compactAnalyticsSessionIPs() {
+  'use strict';
+  for (const element of document.querySelectorAll('.analytics-session-ip')) {
+    const address = String(element.dataset.ip || '').trim();
+    if (!address) continue;
+    if (address.includes(':')) {
+      const parts = address.split(':').filter(Boolean);
+      element.textContent = parts.slice(0, 3).join(':') + (parts.length > 3 ? ':…' : '');
+      continue;
+    }
+    const parts = address.split('.');
+    if (parts.length === 4) element.textContent = parts.slice(0, 3).join('.') + '.…';
+  }
+})();
+
 (function renderAnalyticsTimes() {
   'use strict';
   function relativeText(milliseconds) {

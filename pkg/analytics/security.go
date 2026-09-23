@@ -137,24 +137,24 @@ func (state *SecurityState) Record(request RequestObservation) string {
 	if !request.Trusted {
 		category = ProbeCategory(request.Path, request.Query)
 	}
-	window := state.Windows[request.IP]
-	if window == nil || now.Sub(window.First) > time.Minute {
-		if len(state.Windows) >= 64 {
-			clear(state.Windows)
-			state.Incomplete = true
-		}
-		window = &RequestWindow{First: now, Paths: map[string]bool{}}
-		state.Windows[request.IP] = window
-	}
-	window.Last = now
-	window.Count++
-	if len(window.Paths) < 64 {
-		window.Paths[SafePath(request.Path)] = true
-	}
-	if request.Status == 401 || request.Status == 403 {
-		window.Failures++
-	}
 	if !request.Trusted && !request.IndexingCrawler {
+		window := state.Windows[request.IP]
+		if window == nil || now.Sub(window.First) > time.Minute {
+			if len(state.Windows) >= 64 {
+				clear(state.Windows)
+				state.Incomplete = true
+			}
+			window = &RequestWindow{First: now, Paths: map[string]bool{}}
+			state.Windows[request.IP] = window
+		}
+		window.Last = now
+		window.Count++
+		if len(window.Paths) < 64 {
+			window.Paths[SafePath(request.Path)] = true
+		}
+		if request.Status == 401 || request.Status == 403 {
+			window.Failures++
+		}
 		if category == "" && len(window.Paths) >= 60 {
 			category = "enumeration"
 		}

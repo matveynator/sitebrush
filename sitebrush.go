@@ -4372,7 +4372,6 @@ func (a *App) enrichBrowserSessions(state *browserstats.Site, stop <-chan struct
 		location, found := a.geoIP.Lookup(boundary, session.Address)
 		cancel()
 		remaining--
-		session.Address = ""
 		if found {
 			session.GeoKnown = true
 			session.Country = location.CountryCode
@@ -6251,7 +6250,7 @@ func (a *App) analyticsPage(w http.ResponseWriter, r *http.Request) {
 	if loadedSecurity.Err == nil {
 		state := browserstats.SecurityState{}
 		if json.Unmarshal([]byte(loadedSecurity.Text), &state) == nil {
-			security = state.Report(time.Now().UTC(), browserDashboard.Days)
+			security = state.Report(time.Now().UTC(), 90)
 		}
 	}
 	securityIncidents := make(map[string]browserstats.Incident, len(security.Incidents))
@@ -6514,7 +6513,10 @@ func (a *App) authAbuseMiddleware(next http.Handler) http.Handler {
 		}
 
 		if a.throttleGuard != nil {
-			decision := a.throttleGuard.ObserveFast(clientIP, rateTrusted, now)
+			decision := a.throttleGuard.ObserveFast(clientIP, trusted, now)
+			if crawlerRead && !trusted {
+				decision = a.throttleGuard.ObserveFastExemptObservation(clientIP, false, now)
+			}
 			if decision.RateLimited {
 				w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 				w.Header().Set("Cache-Control", "no-store")
