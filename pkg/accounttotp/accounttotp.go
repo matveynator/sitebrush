@@ -101,7 +101,10 @@ func Enable(ctx context.Context, transaction *sql.Tx, domain, email, secret, cod
 	if !Verify(secret, code, now) {
 		return errors.New("invalid TOTP code")
 	}
-	_, err := transaction.ExecContext(ctx, `INSERT INTO account_totp(domain,email,secret,enabled_at) VALUES(?,?,?,?) ON CONFLICT(domain,email) DO UPDATE SET secret=excluded.secret,enabled_at=excluded.enabled_at`,
+	if _, err := transaction.ExecContext(ctx, `DELETE FROM account_totp WHERE domain=? AND email=?`, domain, email); err != nil {
+		return err
+	}
+	_, err := transaction.ExecContext(ctx, `INSERT INTO account_totp(domain,email,secret,enabled_at) VALUES(?,?,?,?)`,
 		domain, email, strings.TrimSpace(secret), now.Unix())
 	return err
 }
