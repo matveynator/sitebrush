@@ -17,8 +17,7 @@ const (
 	throttleSustainedMinimum      = time.Minute
 	throttleSustainedMinimumCount = 600
 	throttleContinuityGap         = 5 * time.Second
-	throttleAllowedRPS            = 20
-	throttleSoftDelay             = 50 * time.Millisecond
+	throttleAllowedRPS            = 8
 	throttleHistoryTTL            = 30 * 24 * time.Hour
 )
 
@@ -36,7 +35,6 @@ type ThrottleDecision struct {
 	Throttle    SecurityThrottle
 	Active      bool
 	RateLimited bool
-	Delay       time.Duration
 	RetryAfter  time.Duration
 }
 
@@ -187,10 +185,9 @@ func handleThrottleRequest(observations map[string]throttleObservation, throttle
 			}
 			rate.Count++
 			rates[ip] = rate
-			decision := ThrottleDecision{Throttle: throttle, Active: true, Delay: throttleSoftDelay}
+			decision := ThrottleDecision{Throttle: throttle, Active: true}
 			if rate.Count > throttleAllowedRPS {
 				decision.RateLimited = true
-				decision.Delay = 0
 				decision.RetryAfter = time.Second
 			}
 			return throttleResult{Decision: decision}
@@ -213,7 +210,7 @@ func handleThrottleRequest(observations map[string]throttleObservation, throttle
 		delete(observations, ip)
 		rates[ip] = throttleRateWindow{Started: now, Count: 1}
 		return throttleResult{
-			Decision: ThrottleDecision{Throttle: throttle, Active: true, Delay: throttleSoftDelay},
+			Decision: ThrottleDecision{Throttle: throttle, Active: true},
 			Changed:  true,
 		}
 
