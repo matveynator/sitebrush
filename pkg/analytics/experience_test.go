@@ -338,7 +338,39 @@ func TestExperienceLocalHourFallbackAndReturnContext(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(encoded), "192.0.2.44") {
-		t.Fatal("session address must not be persisted")
+	if !strings.Contains(string(encoded), "192.0.2.44") {
+		t.Fatal("session address was not persisted in bounded detail")
+	}
+
+	site.Prune(now.AddDate(0, 0, 8))
+	expired := site.ExperienceReport(now.AddDate(0, 0, 8), 30, true)
+	if len(expired.Recent) != 0 {
+		t.Fatal("session IP detail survived seven-day retention")
+	}
+
+	archiveReport := site.Report(now.Add(time.Hour), 1)
+	archiveEncoded, err := json.Marshal(map[string]Report{dayKey(now): archiveReport})
+	if err != nil {
+		t.Fatal(err)
+	}
+	directory := t.TempDir()
+	if err := writeDailyArchive(directory, string(archiveEncoded), now.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	archivedFile, err := os.Open(filepath.Join(directory, "archives", dayKey(now)+".json.gz"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer archivedFile.Close()
+	archivedReport, err := DecodeArchive(archivedFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	archivedJSON, err := json.Marshal(archivedReport)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(archivedJSON), "192.0.2.44") {
+		t.Fatal("session IP leaked into long-term archive")
 	}
 }
