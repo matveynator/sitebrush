@@ -19897,11 +19897,23 @@ func (a *App) applyProfileEmailConfirmation(ctx context.Context, confirmation Em
 		if count != 1 {
 			return errors.New("account not found")
 		}
+		if _, err = transaction.ExecContext(ctx, `UPDATE account_passkeys SET email=? WHERE domain=? AND email=?`, confirmation.Email, confirmation.Domain, confirmation.CurrentEmail); err != nil {
+			return err
+		}
+		if _, err = transaction.ExecContext(ctx, `UPDATE account_totp SET email=? WHERE domain=? AND email=?`, confirmation.Email, confirmation.Domain, confirmation.CurrentEmail); err != nil {
+			return err
+		}
 		for _, email := range []string{confirmation.CurrentEmail, confirmation.Email} {
 			if _, err = transaction.ExecContext(ctx, `DELETE FROM account_trusted_ips WHERE domain=? AND email=?`, confirmation.Domain, email); err != nil {
 				return err
 			}
 			if _, err = transaction.ExecContext(ctx, `DELETE FROM account_login_codes WHERE domain=? AND email=?`, confirmation.Domain, email); err != nil {
+				return err
+			}
+			if _, err = transaction.ExecContext(ctx, `DELETE FROM account_totp_challenges WHERE domain=? AND email=?`, confirmation.Domain, email); err != nil {
+				return err
+			}
+			if _, err = transaction.ExecContext(ctx, `DELETE FROM account_webauthn_challenges WHERE domain=? AND email=?`, confirmation.Domain, email); err != nil {
 				return err
 			}
 			if _, err = transaction.ExecContext(ctx, `DELETE FROM sessions WHERE user_email=?`, confirmation.Domain+"|"+email); err != nil {
