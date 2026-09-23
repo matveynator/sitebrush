@@ -13374,8 +13374,15 @@ func doGrabGETContext(ctx context.Context, client *http.Client, rawURL string, s
 
 func applyGrabRequestHeaders(request *http.Request, sourceOptions grabSourceOptions) {
 	request.Header.Set("User-Agent", "Mozilla/5.0 (compatible; SiteBrush/1.0)")
-	if strings.TrimSpace(sourceOptions.PeerAttestation) != "" {
-		request.Header.Set("X-Sitebrush-Peer-Attestation", sourceOptions.PeerAttestation)
+	peerAttestation := strings.TrimSpace(sourceOptions.PeerAttestation)
+	if peerAttestation != "" {
+		timestamp := time.Now().UTC().Format(time.RFC3339Nano)
+		signaturePayload := sitebrushPeerRequestSignaturePayload(request, peerAttestation, timestamp)
+		privateKey := ed25519.PrivateKey(sourceOptions.PeerPrivateKey[:])
+		signature := ed25519.Sign(privateKey, []byte(signaturePayload))
+		request.Header.Set("X-Sitebrush-Peer-Attestation", peerAttestation)
+		request.Header.Set("X-Sitebrush-Peer-Time", timestamp)
+		request.Header.Set("X-Sitebrush-Peer-Signature", base64.RawURLEncoding.EncodeToString(signature))
 	}
 	acceptLanguage := grabSourceAcceptLanguage(sourceOptions.LanguageCode)
 	if acceptLanguage != "" {
@@ -21297,21 +21304,77 @@ func (a *App) withSitebrushPeerAttestation(ctx context.Context, sourceOptions gr
 	if err != nil || len(response.Payload) == 0 || len(response.Payload) > 4096 {
 		return sourceOptions
 	}
-	sourceOptions.PeerAttestation = string(response.Payload)
+	token := string(response.Payload)
+	centralPublicKeyBytes, err := base64.StdEncoding.DecodeString(strings.TrimSpace(sitebrushComServiceMailRelayPublicKey))
+	if err != nil || len(centralPublicKeyBytes) != ed25519.PublicKeySize {
+		return sourceOptions
+	}
+	attestation, err := securitysync.VerifyPeerAttestation(token, ed25519.PublicKey(centralPublicKeyBytes), time.Now().UTC())
+	if err != nil {
+		return sourceOptions
+	}
+	_, localPublicKey, localPrivateKey, err := a.serviceMailLocalKeyPair(ctx)
+	if err != nil || strings.TrimSpace(attestation.PublicKey) != base64.StdEncoding.EncodeToString(localPublicKey) || len(localPrivateKey) != ed25519.PrivateKeySize {
+		return sourceOptions
+	}
+	sourceOptions.PeerAttestation = token
+	copy(sourceOptions.PeerPrivateKey[:], localPrivateKey)
 	return sourceOptions
 }
 
 func sitebrushPeerRequestTrusted(r *http.Request, now time.Time) bool {
 	token := strings.TrimSpace(r.Header.Get("X-Sitebrush-Peer-Attestation"))
-	if token == "" || len(token) > 4096 {
+	timestamp := strings.TrimSpace(r.Header.Get("X-Sitebrush-Peer-Time"))
+	signatureText := strings.TrimSpace(r.Header.Get("X-Sitebrush-Peer-Signature"))
+	if token == "" || len(token) > 4096 || timestamp == "" || len(timestamp) > 64 || signatureText == "" || len(signatureText) > 256 {
 		return false
 	}
-	publicKeyBytes, err := base64.StdEncoding.DecodeString(strings.TrimSpace(sitebrushComServiceMailRelayPublicKey))
-	if err != nil || len(publicKeyBytes) != ed25519.PublicKeySize {
+	centralPublicKeyBytes, err := base64.StdEncoding.DecodeString(strings.TrimSpace(sitebrushComServiceMailRelayPublicKey))
+	if err != nil || len(centralPublicKeyBytes) != ed25519.PublicKeySize {
 		return false
 	}
-	_, err = securitysync.VerifyPeerAttestation(token, ed25519.PublicKey(publicKeyBytes), now)
-	return err == nil
+	attestation, err := securitysync.VerifyPeerAttestation(token, ed25519.PublicKey(centralPublicKeyBytes), now)
+	if err != nil {
+		return false
+	}
+	signedAt, err := time.Parse(time.RFC3339Nano, timestamp)
+	if err != nil || now.Sub(signedAt) > 2*time.Minute || signedAt.Sub(now) > 2*time.Minute {
+		return false
+	}
+	peerPublicKeyBytes, err := base64.StdEncoding.DecodeString(strings.TrimSpace(attestation.PublicKey))
+	if err != nil || len(peerPublicKeyBytes) != ed25519.PublicKeySize {
+		return false
+	}
+	signature, err := base64.RawURLEncoding.DecodeString(signatureText)
+	if err != nil || len(signature) != ed25519.SignatureSize {
+		return false
+	}
+	payload := sitebrushPeerRequestSignaturePayload(r, token, timestamp)
+	return ed25519.Verify(ed25519.PublicKey(peerPublicKeyBytes), []byte(payload), signature)
+}
+
+func sitebrushPeerRequestSignaturePayload(r *http.Request, attestation, timestamp string) string {
+	host := strings.TrimSpace(r.Host)
+	if host == "" && r.URL != nil {
+		host = strings.TrimSpace(r.URL.Host)
+	}
+	pathname := "/"
+	rawQuery := ""
+	if r.URL != nil {
+		if escapedPath := r.URL.EscapedPath(); escapedPath != "" {
+			pathname = escapedPath
+		}
+		rawQuery = r.URL.RawQuery
+	}
+	attestationHash := sha256.Sum256([]byte(attestation))
+	return strings.Join([]string{
+		strings.ToUpper(strings.TrimSpace(r.Method)),
+		strings.ToLower(host),
+		pathname,
+		rawQuery,
+		timestamp,
+		hex.EncodeToString(attestationHash[:]),
+	}, "\n")
 }
 
 func (a *App) handleSecurityAttestationRequest(ctx context.Context, request serviceMailRequest) (string, int, []byte) {
