@@ -118,7 +118,7 @@ func ProbeCategory(pathname, query string) string {
 	}
 	return ""
 }
-func (state *SecurityState) Record(request RequestObservation) {
+func (state *SecurityState) Record(request RequestObservation) string {
 	now := request.Time
 	if state.Started.IsZero() {
 		state.Started = now
@@ -200,6 +200,7 @@ func (state *SecurityState) Record(request RequestObservation) {
 	if now.Sub(previous) > time.Minute || previous.UTC().Minute() != now.UTC().Minute() {
 		state.Prune(now)
 	}
+	return category
 }
 func (state *SecurityState) recordIncident(request RequestObservation, category, class string) {
 	index := -1
