@@ -1,8 +1,22 @@
 (function prepareSiteBrushPasskeys() {
   'use strict';
 
+  function passkeyOriginSupported() {
+    var hostname = String(window.location.hostname || '').trim().toLowerCase();
+    if (!hostname) return false;
+
+    // WebAuthn RP IDs must be DNS names (localhost is explicitly supported by
+    // browsers for local development). A literal IPv4/IPv6 address cannot be
+    // used as an RP ID, even when SiteBrush serves it over HTTPS.
+    var unbracketedHostname = hostname.replace(/^\[|\]$/g, '');
+    var isIPv4 = /^(?:\d{1,3}\.){3}\d{1,3}$/.test(unbracketedHostname);
+    var isIPv6 = unbracketedHostname.indexOf(':') !== -1;
+    return !isIPv4 && !isIPv6;
+  }
+
   function passkeysSupported() {
-    return window.isSecureContext &&
+    return passkeyOriginSupported() &&
+      window.isSecureContext &&
       typeof window.PublicKeyCredential === 'function' &&
       navigator.credentials &&
       typeof navigator.credentials.create === 'function' &&
@@ -118,7 +132,11 @@
           var finishResult = await finishPasskey(finishURL, beginResult.token, credential);
           window.location.assign(finishResult.redirect || '/');
         } catch (passkeyError) {
-          showPasskeyStatus(loginButton, loginButton.getAttribute('data-passkey-error') || String(passkeyError));
+          var loginMessage = loginButton.getAttribute('data-passkey-error') || String(passkeyError);
+          if (passkeyError && passkeyError.name === 'SecurityError') {
+            loginMessage = loginButton.getAttribute('data-passkey-unavailable') || loginMessage;
+          }
+          showPasskeyStatus(loginButton, loginMessage);
           loginButton.disabled = false;
         }
       });
@@ -148,7 +166,11 @@
           }
           window.location.reload();
         } catch (passkeyError) {
-          showPasskeyStatus(createButton, createButton.getAttribute('data-passkey-error') || String(passkeyError));
+          var createMessage = createButton.getAttribute('data-passkey-error') || String(passkeyError);
+          if (passkeyError && passkeyError.name === 'SecurityError') {
+            createMessage = createButton.getAttribute('data-passkey-unavailable') || createMessage;
+          }
+          showPasskeyStatus(createButton, createMessage);
           createButton.disabled = false;
         }
       });

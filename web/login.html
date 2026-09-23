@@ -43,7 +43,7 @@
   <div class="card card-body authentication-card mb-3">
     <h2 class="h5">{{index .T "auth_passkey_title"}}</h2>
     <p id="SiteBrushPasskeyLoginStatus" class="text-danger" role="status"></p>
-    <button type="button" class="btn btn-primary" data-passkey-login data-passkey-start="{{.PasskeyStartURL}}" data-passkey-finish="?login&passkey_finish" data-passkey-status="#SiteBrushPasskeyLoginStatus" data-passkey-error="{{index .T "auth_passkey_failed"}}">{{index .T "auth_passkey_login"}}</button>
+    <button type="button" class="btn btn-primary" data-passkey-login data-passkey-start="{{.PasskeyStartURL}}" data-passkey-finish="?login&passkey_finish" data-passkey-status="#SiteBrushPasskeyLoginStatus" data-passkey-error="{{index .T "auth_passkey_failed"}}" data-passkey-unavailable="{{index .T "auth_passkey_unavailable"}}">{{index .T "auth_passkey_login"}}</button>
   </div>
   {{end}}
   <form class="card card-body authentication-card" method="post" action="?login">
