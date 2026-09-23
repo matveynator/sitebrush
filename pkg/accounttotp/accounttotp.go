@@ -164,6 +164,34 @@ func VerifyLogin(ctx context.Context, transaction *sql.Tx, domain, token, client
 	return email, returnPath, nil
 }
 
+
+func ConsumeForFallback(ctx context.Context, transaction *sql.Tx, domain, token, clientIP string, now time.Time) (email, returnPath string, err error) {
+	var createdAt int64
+	err = transaction.QueryRowContext(ctx, `SELECT email,return_path,created_at FROM account_totp_challenges WHERE token=? AND domain=? AND client_ip=?`,
+		token, domain, clientIP).Scan(&email, &returnPath, &createdAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", "", errors.New("invalid TOTP challenge")
+	}
+	if err != nil {
+		return "", "", err
+	}
+	if now.Unix()-createdAt >= int64(ChallengeTTL/time.Second) {
+		return "", "", errors.New("expired TOTP challenge")
+	}
+	result, err := transaction.ExecContext(ctx, `DELETE FROM account_totp_challenges WHERE token=? AND domain=? AND client_ip=?`, token, domain, clientIP)
+	if err != nil {
+		return "", "", err
+	}
+	consumed, err := result.RowsAffected()
+	if err != nil || consumed != 1 {
+		if err == nil {
+			err = errors.New("TOTP challenge already consumed")
+		}
+		return "", "", err
+	}
+	return email, returnPath, nil
+}
+
 func randomToken() (string, error) {
 	buffer := make([]byte, 32)
 	if _, err := rand.Read(buffer); err != nil {
