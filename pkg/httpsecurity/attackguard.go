@@ -37,9 +37,10 @@ type SecurityBlock struct {
 }
 
 type attackWindow struct {
-	Started  time.Time
-	Count    int
-	Distinct map[string]struct{}
+	Started   time.Time
+	Count     int
+	PostCount int
+	Distinct  map[string]struct{}
 }
 
 type attackGuardDiskState struct {
@@ -65,6 +66,7 @@ type attackGuardRequest struct {
 	Operation   attackGuardOperation
 	IP          string
 	Path        string
+	Method      string
 	Category    string
 	Reason      string
 	Description string
@@ -200,12 +202,20 @@ func handleAttackGuardRequest(blocks map[string]SecurityBlock, windows map[strin
 			windows[ip] = window
 		}
 		window.Count++
+		switch strings.ToUpper(strings.TrimSpace(request.Method)) {
+		case "POST", "PUT", "PATCH", "DELETE":
+			window.PostCount++
+		}
 		if len(window.Distinct) < 256 {
 			window.Distinct[boundedPath(request.Path)] = struct{}{}
 		}
-		if window.Count >= 600 || len(window.Distinct) >= 220 {
+		if window.Count >= 600 || window.PostCount >= 120 || len(window.Distinct) >= 220 {
 			reason := "dos"
 			description := "abnormally high request rate"
+			if window.PostCount >= 120 {
+				reason = "mass-write"
+				description = "abnormally high form, API, or page-generation rate"
+			}
 			if len(window.Distinct) >= 220 {
 				reason = "mass-enumeration"
 				description = "abnormally high number of distinct paths"
@@ -350,7 +360,11 @@ func (guard *AttackGuard) Check(ip string, now time.Time) (SecurityBlock, bool) 
 }
 
 func (guard *AttackGuard) ObserveFast(ip, path string, trusted bool, now time.Time) (SecurityBlock, bool) {
-	result, ok := guard.exchangeFast(attackGuardRequest{Operation: attackGuardObserveFast, IP: ip, Path: path, Trusted: trusted, Now: now})
+	return guard.ObserveRequestFast(ip, path, "GET", trusted, now)
+}
+
+func (guard *AttackGuard) ObserveRequestFast(ip, path, method string, trusted bool, now time.Time) (SecurityBlock, bool) {
+	result, ok := guard.exchangeFast(attackGuardRequest{Operation: attackGuardObserveFast, IP: ip, Path: path, Method: method, Trusted: trusted, Now: now})
 	if ok && result.Changed {
 		guard.signalSave()
 	}
