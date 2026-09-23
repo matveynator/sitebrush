@@ -689,7 +689,7 @@
         <tbody>
         {{range .SecurityLocalBlocks}}
           <tr class="security-row-danger">
-            <td><code>{{.IP}}</code><div class="small text-muted">{{.IncidentID}}</div></td>
+            <td><code>{{.IP}}</code><div class="small text-muted">{{.IncidentID}}</div>{{if or .Country .City .ClientClass}}<div class="small mt-1">{{if .Country}}{{.Country}}{{if .City}} · {{.City}}{{end}}{{end}}{{if .ClientClass}}{{if or .Country .City}} · {{end}}{{.ClientClass}}{{end}}</div>{{end}}{{if .Agent}}<div class="small text-muted text-break">{{.Agent}}</div>{{end}}</td>
             <td>
               <form method="post" action="?analytics#security" class="d-flex flex-column gap-1">
                 <input type="hidden" name="security_action" value="update">
