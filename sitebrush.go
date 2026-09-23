@@ -156,6 +156,7 @@ var sitebrushRuServiceMailRelayPublicKey = ""
 // App keeps only explicit dependencies to stay readable and easy to swap.
 type App struct {
 	analyticsStorage               browserstats.Repository
+	attackGuard                    *httpsecurity.AttackGuard
 	securityAnalytics              chan siteAnalyticsEvent
 	securityLosses                 chan string
 	analyticsShutdownRequested     <-chan struct{}
@@ -4262,7 +4263,10 @@ func (a *App) runSecurityAnalytics(stop <-chan struct{}) {
 				continue
 			}
 			address := clientIPAddress(&http.Request{RemoteAddr: event.RemoteAddress, Header: http.Header{"Forwarded": []string{event.Forwarded}, "X-Forwarded-For": []string{event.ForwardedFor}}})
-			state.Record(browserstats.RequestObservation{Time: event.OccurredAt, IP: address, Path: event.Path, Query: event.Query, Method: event.Method, Status: event.StatusCode, Bytes: event.Bytes, Agent: event.UserAgent, Language: analyticsLanguageLabel(event.AcceptLanguage)})
+			category := state.Record(browserstats.RequestObservation{Time: event.OccurredAt, IP: address, Path: event.Path, Query: event.Query, Method: event.Method, Status: event.StatusCode, Bytes: event.Bytes, Agent: event.UserAgent, Language: analyticsLanguageLabel(event.AcceptLanguage)})
+			if category != "" && a.attackGuard != nil {
+				a.attackGuard.ObserveIncident(address, category, "security analytics detected "+category, event.OccurredAt)
+			}
 			state.Limit(1 << 20)
 			dirty[domain] = true
 		case <-ticker.C:
@@ -5968,6 +5972,10 @@ func (a *App) analyticsPage(w http.ResponseWriter, r *http.Request) {
 	}
 	domain := a.siteDomain(r.Context(), r)
 	if r.Method == http.MethodPost {
+		if strings.TrimSpace(r.FormValue("security_action")) != "" {
+			a.handleAnalyticsSecurityAction(w, r)
+			return
+		}
 		a.saveAnalyticsGoals(w, r, domain)
 		return
 	}
@@ -5997,6 +6005,12 @@ func (a *App) analyticsPage(w http.ResponseWriter, r *http.Request) {
 		goalLines = append(goalLines, goal.Name+" | "+kind+" | "+goal.Match)
 	}
 	security := browserstats.SecurityReport{}
+	securityBlocks := []httpsecurity.SecurityBlock{}
+	securitySettings := httpsecurity.SecuritySettings{}
+	if a.attackGuard != nil {
+		securityBlocks, _ = a.attackGuard.Snapshot(time.Now().UTC())
+		securitySettings, _ = a.attackGuard.Settings()
+	}
 	loadedSecurity := a.analyticsStorageExchange(browserstats.StorageRequest{Operation: browserstats.ReadSecurity, Domain: domain, Limit: 2 << 20, Stop: r.Context().Done()})
 	if loadedSecurity.Err == nil {
 		state := browserstats.SecurityState{}
@@ -6025,7 +6039,7 @@ func (a *App) analyticsPage(w http.ResponseWriter, r *http.Request) {
 		"ReturnPath":       requestedReturnPath(r),
 		"Report":           analyticsReportView(report, translationsForRequest(r)),
 		"BrowserAnalytics": browserDashboard,
-		"Experience":       experience, "ExperienceFilter": filter, "Security": security, "GoalsText": strings.Join(goalLines, "\n"), "SessionMapJSON": template.JS(mapJSON), "PeriodOptions": []int{1, 7, 30, 90}, "UnknownGeo": unknownGeo, "ServerRequests": serverRequests,
+		"Experience":       experience, "ExperienceFilter": filter, "Security": security, "SecurityBlocks": securityBlocks, "SecuritySettings": securitySettings, "GoalsText": strings.Join(goalLines, "\n"), "SessionMapJSON": template.JS(mapJSON), "PeriodOptions": []int{1, 7, 30, 90}, "UnknownGeo": unknownGeo, "ServerRequests": serverRequests,
 	})
 }
 
@@ -6161,9 +6175,76 @@ func formatAnalyticsTime(rawTime string) string {
 	return parsedTime.Local().Format("2006-01-02 15:04:05")
 }
 
+func (a *App) handleAnalyticsSecurityAction(w http.ResponseWriter, r *http.Request) {
+	if a.attackGuard == nil {
+		http.Error(w, "security guard unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "invalid security form", http.StatusBadRequest)
+		return
+	}
+	action := strings.TrimSpace(r.FormValue("security_action"))
+	now := time.Now().UTC()
+	var err error
+	switch action {
+	case "add":
+		expiresAt := now.Add(7 * 24 * time.Hour)
+		if rawDays := strings.TrimSpace(r.FormValue("days")); rawDays != "" {
+			days, parseErr := strconv.Atoi(rawDays)
+			if parseErr != nil || days < 1 || days > 365 {
+				http.Error(w, "invalid block duration", http.StatusBadRequest)
+				return
+			}
+			expiresAt = now.Add(time.Duration(days) * 24 * time.Hour)
+		}
+		_, err = a.attackGuard.Add(r.FormValue("ip"), r.FormValue("reason"), r.FormValue("description"), "manual", expiresAt, now)
+	case "remove":
+		err = a.attackGuard.Remove(r.FormValue("ip"))
+	case "update":
+		err = a.attackGuard.Update(r.FormValue("ip"), r.FormValue("reason"), r.FormValue("description"))
+	case "settings":
+		err = a.attackGuard.SetSettings(httpsecurity.SecuritySettings{
+			AutoBlock:  r.FormValue("auto_block") == "on",
+			GlobalSync: r.FormValue("global_sync") == "on",
+		})
+	default:
+		http.Error(w, "unknown security action", http.StatusBadRequest)
+		return
+	}
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	httpsecurity.RedirectLocal(w, r, r.URL.Path+"?analytics#security", http.StatusSeeOther)
+}
+
+// Security filtering is deliberately before routing and database access. The
+// guard owns its mutable state in channel workers; overload therefore fails open
+// instead of turning the protection layer into a site-wide lock.
 func (a *App) authAbuseMiddleware(next http.Handler) http.Handler {
+	if a.attackGuard == nil {
+		return next
+	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		next.ServeHTTP(w, r)
+		now := time.Now().UTC()
+		clientIP := clientIPAddress(r)
+		trusted := httpsecurity.IsLocalRequest(r) || hasSitebrushSessionCookie(r)
+		block, blocked := a.attackGuard.ObserveFast(clientIP, r.URL.EscapedPath(), trusted, now)
+		if !blocked {
+			next.ServeHTTP(w, r)
+			return
+		}
+		retryAfter := int(time.Until(block.ExpiresAt).Seconds())
+		if retryAfter < 1 {
+			retryAfter = 1
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
+		w.Header().Set("X-Sitebrush-Security-Incident", block.IncidentID)
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = io.WriteString(w, httpsecurity.BlockedHTML(preferredLanguageCode(r.Header.Get("Accept-Language")), block))
 	})
 }
 
@@ -6748,6 +6829,13 @@ func runSitebrushServer(ctx context.Context, config serverRunConfig) error {
 	var siteDatabaseRouter *perSiteDBRouter
 	application := &App{storagePath: effectiveStoragePath, storageRealRoot: storageRealRoot, dbPath: effectiveDBPath, debug: config.Debug, desktopMode: config.DesktopMode, nativeFileDialog: desktop.NativeFileDialogSupported(), grabTracker: newGrabProgressTracker(), grabCancels: newGrabCancelTracker(), trialPreviews: newPublicTrialPreviewStore(), publishTracker: newPublishProgressTracker(), analyticsEvents: make(chan siteAnalyticsEvent, 1024), analyticsLosses: make(chan string, 64), browserAnalyticsLosses: make(chan string, 64), browserAnalytics: make(chan browserAnalyticsEnvelope, 512), analyticsConnections: make(chan struct{}, 128), domainLogEvents: make(chan domainLogEvent, 1024)}
 	application.analyticsMemoryLimit = analyticsConfiguredMemoryLimit()
+	attackGuardPath := filepath.Join(application.storageRootDir(), "security", "attackguard.json")
+	attackGuard, attackGuardErr := httpsecurity.NewAttackGuard(attackGuardPath)
+	if attackGuardErr != nil {
+		return fmt.Errorf("load security attack guard: %w", attackGuardErr)
+	}
+	application.attackGuard = attackGuard
+	defer attackGuard.Close()
 	controlDatabaseDispatcher, err := startServerControlDatabaseDispatcher(effectiveDBPath, config.Debug)
 	if err != nil {
 		return fmt.Errorf("start server control database dispatcher: %w", err)
