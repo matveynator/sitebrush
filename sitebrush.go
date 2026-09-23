@@ -6276,14 +6276,12 @@ func (a *App) authAbuseMiddleware(next http.Handler) http.Handler {
 		now := time.Now().UTC()
 		clientIP := clientIPAddress(r)
 		trusted := httpsecurity.IsLocalRequest(r) || sitebrushPeerRequestTrusted(r, now)
-		allowed := a.attackGuard != nil && a.attackGuard.IsAllowed(clientIP)
-		if allowed {
-			next.ServeHTTP(w, r)
-			return
-		}
-
 		if a.attackGuard != nil {
-			block, blocked := a.attackGuard.ObserveRequestFast(clientIP, r.URL.EscapedPath(), r.Method, trusted, now)
+			block, blocked, allowed := a.attackGuard.ObserveRequestFastDisposition(clientIP, r.URL.EscapedPath(), r.Method, trusted, now)
+			if allowed {
+				next.ServeHTTP(w, r)
+				return
+			}
 			if blocked {
 				retryAfter := int(time.Until(block.ExpiresAt).Seconds())
 				if retryAfter < 1 {
