@@ -16,6 +16,7 @@ import (
 
 const (
 	defaultSecurityBlockTTL = 7 * 24 * time.Hour
+	securityReasonHistoryTTL = 7 * 24 * time.Hour
 	attackGuardShardCount    = 16
 	attackGuardQueueSize     = 256
 )
@@ -25,15 +26,29 @@ type SecuritySettings struct {
 	GlobalSync bool `json:"global_sync"`
 }
 
-type SecurityBlock struct {
-	IP          string    `json:"ip"`
+type SecurityReasonEvent struct {
+	At          time.Time `json:"at"`
 	Reason      string    `json:"reason"`
 	Description string    `json:"description"`
-	LastEvent   time.Time `json:"last_event"`
 	Source      string    `json:"source"`
-	ExpiresAt   time.Time `json:"expires_at"`
-	Violations  int       `json:"violations"`
-	IncidentID  string    `json:"incident_id"`
+}
+
+type SecurityBlock struct {
+	IP          string                `json:"ip"`
+	Reason      string                `json:"reason"`
+	Description string                `json:"description"`
+	LastEvent   time.Time             `json:"last_event"`
+	Source      string                `json:"source"`
+	ExpiresAt   time.Time             `json:"expires_at"`
+	Violations  int                   `json:"violations"`
+	IncidentID  string                `json:"incident_id"`
+	ReasonLog   []SecurityReasonEvent `json:"reason_log,omitempty"`
+}
+
+type SecurityAllow struct {
+	IP      string    `json:"ip"`
+	Comment string    `json:"comment"`
+	AddedAt time.Time `json:"added_at"`
 }
 
 type attackWindow struct {
@@ -44,8 +59,10 @@ type attackWindow struct {
 }
 
 type attackGuardDiskState struct {
-	Settings SecuritySettings `json:"settings"`
-	Blocks   []SecurityBlock  `json:"blocks"`
+	Version   int               `json:"version"`
+	Settings  SecuritySettings  `json:"settings"`
+	Blocks    []SecurityBlock   `json:"blocks"`
+	Allowlist []SecurityAllow   `json:"allowlist,omitempty"`
 }
 
 type attackGuardOperation uint8
@@ -61,6 +78,10 @@ const (
 	attackGuardGetSettings
 	attackGuardSetSettings
 	attackGuardApplyGlobal
+	attackGuardAllowAdd
+	attackGuardAllowRemove
+	attackGuardAllowCheck
+	attackGuardAllowSnapshot
 )
 
 type attackGuardRequest struct {
@@ -76,14 +97,17 @@ type attackGuardRequest struct {
 	Now         time.Time
 	ExpiresAt   time.Time
 	Settings    SecuritySettings
+	Comment     string
 	Reply       chan attackGuardResult
 }
 
 type attackGuardResult struct {
-	Block    SecurityBlock
-	Blocked  bool
-	Blocks   []SecurityBlock
-	Settings SecuritySettings
+	Block     SecurityBlock
+	Blocked   bool
+	Blocks    []SecurityBlock
+	Allowed   bool
+	Allowlist []SecurityAllow
+	Settings  SecuritySettings
 	Changed  bool
 	Err      error
 }
@@ -111,6 +135,7 @@ func NewAttackGuard(path string) (*AttackGuard, error) {
 		path:     path,
 	}
 	initialBlocks := make([][]SecurityBlock, attackGuardShardCount)
+	initialAllowlist := make([][]SecurityAllow, attackGuardShardCount)
 	for _, block := range state.Blocks {
 		block.IP = normalizeSecurityIP(block.IP)
 		if block.IP == "" {
@@ -119,17 +144,25 @@ func NewAttackGuard(path string) (*AttackGuard, error) {
 		index := attackGuardShardIndex(block.IP)
 		initialBlocks[index] = append(initialBlocks[index], block)
 	}
+	for _, allowed := range state.Allowlist {
+		allowed.IP = normalizeSecurityIP(allowed.IP)
+		if allowed.IP == "" {
+			continue
+		}
+		index := attackGuardShardIndex(allowed.IP)
+		initialAllowlist[index] = append(initialAllowlist[index], allowed)
+	}
 	for index := range guard.shards {
 		requests := make(chan attackGuardRequest, attackGuardQueueSize)
 		guard.shards[index] = requests
-		go runAttackGuardShard(requests, guard.shutdown, state.Settings, initialBlocks[index])
+		go runAttackGuardShard(requests, guard.shutdown, state.Settings, initialBlocks[index], initialAllowlist[index])
 	}
 	go guard.runPersistence()
 	return guard, nil
 }
 
 func loadAttackGuardDiskState(path string) (attackGuardDiskState, error) {
-	state := attackGuardDiskState{Settings: SecuritySettings{AutoBlock: true}}
+	state := attackGuardDiskState{Version: 2, Settings: SecuritySettings{AutoBlock: true, GlobalSync: true}}
 	if strings.TrimSpace(path) == "" {
 		return state, nil
 	}
@@ -143,14 +176,22 @@ func loadAttackGuardDiskState(path string) (attackGuardDiskState, error) {
 	if err := json.Unmarshal(encoded, &state); err != nil {
 		return attackGuardDiskState{}, err
 	}
+	if state.Version < 2 {
+		state.Version = 2
+		state.Settings.GlobalSync = true
+	}
 	return state, nil
 }
 
-func runAttackGuardShard(requests <-chan attackGuardRequest, shutdown <-chan struct{}, settings SecuritySettings, initial []SecurityBlock) {
+func runAttackGuardShard(requests <-chan attackGuardRequest, shutdown <-chan struct{}, settings SecuritySettings, initial []SecurityBlock, initialAllowlist []SecurityAllow) {
 	blocks := make(map[string]SecurityBlock, len(initial))
+	allowlist := make(map[string]SecurityAllow, len(initialAllowlist))
 	windows := map[string]*attackWindow{}
 	for _, block := range initial {
 		blocks[block.IP] = block
+	}
+	for _, allowed := range initialAllowlist {
+		allowlist[allowed.IP] = allowed
 	}
 	pruneTicker := time.NewTicker(time.Minute)
 	defer pruneTicker.Stop()
@@ -162,7 +203,7 @@ func runAttackGuardShard(requests <-chan attackGuardRequest, shutdown <-chan str
 		case now := <-pruneTicker.C:
 			pruneAttackGuardState(blocks, windows, now.UTC())
 		case request := <-requests:
-			result := handleAttackGuardRequest(blocks, windows, &settings, request)
+			result := handleAttackGuardRequest(blocks, allowlist, windows, &settings, request)
 			if request.Reply != nil {
 				select {
 				case request.Reply <- result:
@@ -174,7 +215,7 @@ func runAttackGuardShard(requests <-chan attackGuardRequest, shutdown <-chan str
 	}
 }
 
-func handleAttackGuardRequest(blocks map[string]SecurityBlock, windows map[string]*attackWindow, settings *SecuritySettings, request attackGuardRequest) attackGuardResult {
+func handleAttackGuardRequest(blocks map[string]SecurityBlock, allowlist map[string]SecurityAllow, windows map[string]*attackWindow, settings *SecuritySettings, request attackGuardRequest) attackGuardResult {
 	now := request.Now
 	if now.IsZero() {
 		now = time.Now().UTC()
@@ -183,10 +224,16 @@ func handleAttackGuardRequest(blocks map[string]SecurityBlock, windows map[strin
 
 	switch request.Operation {
 	case attackGuardCheck:
+		if _, allowed := allowlist[ip]; allowed {
+			return attackGuardResult{Allowed: true}
+		}
 		block, blocked := activeSecurityBlock(blocks, ip, now)
 		return attackGuardResult{Block: block, Blocked: blocked}
 
 	case attackGuardObserveFast:
+		if _, allowed := allowlist[ip]; allowed {
+			return attackGuardResult{Allowed: true}
+		}
 		if block, blocked := activeSecurityBlock(blocks, ip, now); blocked {
 			return attackGuardResult{Block: block, Blocked: true}
 		}
@@ -226,6 +273,9 @@ func handleAttackGuardRequest(blocks map[string]SecurityBlock, windows map[strin
 		return attackGuardResult{}
 
 	case attackGuardObserveIncident:
+		if _, allowed := allowlist[ip]; allowed {
+			return attackGuardResult{Allowed: true}
+		}
 		if !settings.AutoBlock || ip == "" || !securityCategoryBlocks(request.Category) {
 			return attackGuardResult{}
 		}
@@ -235,6 +285,9 @@ func handleAttackGuardRequest(blocks map[string]SecurityBlock, windows map[strin
 	case attackGuardAdd:
 		if ip == "" {
 			return attackGuardResult{Err: errors.New("invalid IP address")}
+		}
+		if _, allowed := allowlist[ip]; allowed {
+			return attackGuardResult{Err: errors.New("IP is allowlisted")}
 		}
 		source := cleanSecurityText(request.Source, 32)
 		if source == "" {
@@ -254,6 +307,8 @@ func handleAttackGuardRequest(blocks map[string]SecurityBlock, windows map[strin
 		}
 		block.Reason = cleanSecurityText(request.Reason, 96)
 		block.Description = cleanSecurityText(request.Description, 240)
+		block.ReasonLog = append(block.ReasonLog, SecurityReasonEvent{At: now, Reason: block.Reason, Description: block.Description, Source: "manual-edit"})
+		block.ReasonLog = pruneSecurityReasonLog(block.ReasonLog, now)
 		blocks[ip] = block
 		return attackGuardResult{Block: block, Blocked: true, Changed: true}
 
@@ -283,6 +338,9 @@ func handleAttackGuardRequest(blocks map[string]SecurityBlock, windows map[strin
 		if ip == "" {
 			return attackGuardResult{Err: errors.New("invalid IP address")}
 		}
+		if _, allowed := allowlist[ip]; allowed {
+			return attackGuardResult{Allowed: true}
+		}
 		expiresAt := request.ExpiresAt
 		if expiresAt.IsZero() || !expiresAt.After(now) {
 			return attackGuardResult{}
@@ -304,18 +362,50 @@ func handleAttackGuardRequest(blocks map[string]SecurityBlock, windows map[strin
 		if violations < 1 {
 			violations = 1
 		}
+		cleanReason := cleanSecurityText(request.Reason, 96)
+		cleanDescription := cleanSecurityText(request.Description, 240)
+		reasonLog := append([]SecurityReasonEvent(nil), existing.ReasonLog...)
+		reasonLog = append(reasonLog, SecurityReasonEvent{At: request.Now, Reason: cleanReason, Description: cleanDescription, Source: "global"})
+		reasonLog = pruneSecurityReasonLog(reasonLog, now)
 		block := SecurityBlock{
 			IP:          ip,
-			Reason:      cleanSecurityText(request.Reason, 96),
-			Description: cleanSecurityText(request.Description, 240),
+			Reason:      cleanReason,
+			Description: cleanDescription,
 			LastEvent:   request.Now,
 			Source:      "global",
 			ExpiresAt:   expiresAt,
 			Violations:  violations,
 			IncidentID:  incidentID,
+			ReasonLog:   reasonLog,
 		}
 		blocks[ip] = block
 		return attackGuardResult{Block: block, Blocked: true, Changed: true}
+
+	case attackGuardAllowAdd:
+		if ip == "" {
+			return attackGuardResult{Err: errors.New("invalid IP address")}
+		}
+		allowed := SecurityAllow{IP: ip, Comment: cleanSecurityText(request.Comment, 240), AddedAt: now}
+		allowlist[ip] = allowed
+		delete(blocks, ip)
+		delete(windows, ip)
+		return attackGuardResult{Allowed: true, Changed: true}
+
+	case attackGuardAllowRemove:
+		_, found := allowlist[ip]
+		delete(allowlist, ip)
+		return attackGuardResult{Changed: found}
+
+	case attackGuardAllowCheck:
+		_, found := allowlist[ip]
+		return attackGuardResult{Allowed: found}
+
+	case attackGuardAllowSnapshot:
+		snapshot := make([]SecurityAllow, 0, len(allowlist))
+		for _, allowed := range allowlist {
+			snapshot = append(snapshot, allowed)
+		}
+		return attackGuardResult{Allowlist: snapshot}
 	}
 
 	return attackGuardResult{Err: errors.New("unknown attack guard operation")}
@@ -361,25 +451,46 @@ func blockSecurityIP(blocks map[string]SecurityBlock, ip, reason, description, s
 	if incidentID == "" {
 		incidentID = randomIncidentID()
 	}
+	cleanReason := cleanSecurityText(reason, 96)
+	cleanDescription := cleanSecurityText(description, 240)
+	cleanSource := cleanSecurityText(source, 32)
+	reasonLog := append([]SecurityReasonEvent(nil), previous.ReasonLog...)
+	reasonLog = append(reasonLog, SecurityReasonEvent{At: now, Reason: cleanReason, Description: cleanDescription, Source: cleanSource})
+	reasonLog = pruneSecurityReasonLog(reasonLog, now)
 	block := SecurityBlock{
 		IP:          ip,
-		Reason:      cleanSecurityText(reason, 96),
-		Description: cleanSecurityText(description, 240),
+		Reason:      cleanReason,
+		Description: cleanDescription,
 		LastEvent:   now,
-		Source:      cleanSecurityText(source, 32),
+		Source:      cleanSource,
 		ExpiresAt:   now.Add(ttl),
 		Violations:  violations,
 		IncidentID:  incidentID,
+		ReasonLog:   reasonLog,
 	}
 	blocks[ip] = block
 	return block
+}
+
+func pruneSecurityReasonLog(events []SecurityReasonEvent, now time.Time) []SecurityReasonEvent {
+	cutoff := now.Add(-securityReasonHistoryTTL)
+	kept := events[:0]
+	for _, event := range events {
+		if !event.At.Before(cutoff) {
+			kept = append(kept, event)
+		}
+	}
+	return kept
 }
 
 func pruneAttackGuardState(blocks map[string]SecurityBlock, windows map[string]*attackWindow, now time.Time) {
 	for ip, block := range blocks {
 		if !block.ExpiresAt.IsZero() && !now.Before(block.ExpiresAt) {
 			delete(blocks, ip)
+			continue
 		}
+		block.ReasonLog = pruneSecurityReasonLog(block.ReasonLog, now)
+		blocks[ip] = block
 	}
 	for ip, window := range windows {
 		if now.Sub(window.Started) > time.Minute {
@@ -462,6 +573,49 @@ func (guard *AttackGuard) ApplyGlobal(ip, reason, description string, lastEvent,
 		guard.signalSave()
 	}
 	return result.Err
+}
+
+func (guard *AttackGuard) IsAllowed(ip string) bool {
+	result, ok := guard.exchangeAdmin(attackGuardRequest{Operation: attackGuardAllowCheck, IP: ip, Now: time.Now().UTC()})
+	return ok && result.Allowed
+}
+
+func (guard *AttackGuard) Allow(ip, comment string) error {
+	result, ok := guard.exchangeAdmin(attackGuardRequest{Operation: attackGuardAllowAdd, IP: ip, Comment: comment, Now: time.Now().UTC()})
+	if !ok {
+		return errors.New("security guard is busy")
+	}
+	if result.Changed {
+		guard.signalSave()
+	}
+	return result.Err
+}
+
+func (guard *AttackGuard) Disallow(ip string) error {
+	result, ok := guard.exchangeAdmin(attackGuardRequest{Operation: attackGuardAllowRemove, IP: ip, Now: time.Now().UTC()})
+	if !ok {
+		return errors.New("security guard is busy")
+	}
+	if result.Changed {
+		guard.signalSave()
+	}
+	return result.Err
+}
+
+func (guard *AttackGuard) Allowlist() ([]SecurityAllow, error) {
+	entries := []SecurityAllow{}
+	for index := range guard.shards {
+		result, ok := guard.exchangeShardAdmin(index, attackGuardRequest{Operation: attackGuardAllowSnapshot, Now: time.Now().UTC()})
+		if !ok {
+			return nil, errors.New("security guard is busy")
+		}
+		if result.Err != nil {
+			return nil, result.Err
+		}
+		entries = append(entries, result.Allowlist...)
+	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].IP < entries[j].IP })
+	return entries, nil
 }
 
 func (guard *AttackGuard) Settings() (SecuritySettings, error) {
@@ -611,7 +765,11 @@ func (guard *AttackGuard) saveSnapshot() error {
 	if err != nil {
 		return err
 	}
-	state := attackGuardDiskState{Settings: settings, Blocks: blocks}
+	allowlist, err := guard.Allowlist()
+	if err != nil {
+		return err
+	}
+	state := attackGuardDiskState{Version: 2, Settings: settings, Blocks: blocks, Allowlist: allowlist}
 	encoded, err := json.MarshalIndent(state, "", "  ")
 	if err != nil {
 		return err
