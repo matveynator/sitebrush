@@ -9615,14 +9615,6 @@ func (a *App) login(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Referrer-Policy", "no-referrer")
 	domain := a.siteDomain(r.Context(), r)
 
-	if hasQueryFlag(r, "passkey_begin") {
-		a.beginAccountPasskeyLogin(w, r, domain)
-		return
-	}
-	if hasQueryFlag(r, "passkey_finish") {
-		a.finishAccountPasskeyLogin(w, r, domain)
-		return
-	}
 	if a.isAdminRequest(r) {
 		httpsecurity.RedirectLocal(w, r, loginReturnPathOrDefault(r), http.StatusFound)
 		return
@@ -9633,6 +9625,14 @@ func (a *App) login(w http.ResponseWriter, r *http.Request) {
 	}
 	blocked, locked, until := a.authIPIsBlocked(r.Context(), domain, clientIPAddress(r))
 	if a.renderAccountLoginBlock(w, r, blocked, locked, until) {
+		return
+	}
+	if hasQueryFlag(r, "passkey_begin") {
+		a.beginAccountPasskeyLogin(w, r, domain)
+		return
+	}
+	if hasQueryFlag(r, "passkey_finish") {
+		a.finishAccountPasskeyLogin(w, r, domain)
 		return
 	}
 
@@ -9907,9 +9907,13 @@ func (a *App) renderAccountCode(w http.ResponseWriter, r *http.Request, token, e
 
 func (a *App) renderLoginPage(w http.ResponseWriter, r *http.Request, returnPath, email, status, statusClass string, blockedUntil time.Time, hardLocked bool) {
 	translations := translationsForRequest(r)
+	domain := a.siteDomain(r.Context(), r)
+	passkeyStartURL := "?login&passkey_begin&return_path=" + url.QueryEscape(httpsecurity.LocalRedirectTarget(returnPath, "/"))
 	a.render(w, r, "login.html", map[string]any{
 		"ReturnPath":           returnPath,
-		"Domain":               a.siteDomain(r.Context(), r),
+		"Domain":               domain,
+		"HasPasskeys":          accountpasskey.Count(r.Context(), a.db, domain) > 0,
+		"PasskeyStartURL":      passkeyStartURL,
 		"Email":                strings.TrimSpace(email),
 		"Status":               strings.TrimSpace(status),
 		"StatusClass":          strings.TrimSpace(statusClass),
