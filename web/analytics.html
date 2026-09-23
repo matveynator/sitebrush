@@ -329,6 +329,39 @@
       color:var(--theme-success);
       text-decoration:underline;
     }
+    .session-map-marker {
+      width:46px;
+      height:46px;
+      border-radius:50%;
+      display:grid;
+      place-items:center;
+      border:2px solid rgba(255,255,255,.9);
+      box-shadow:0 6px 18px rgba(0,0,0,.34);
+    }
+    .session-map-marker-inner {
+      width:28px;
+      height:28px;
+      border-radius:50%;
+      display:grid;
+      place-items:center;
+      border:2px solid rgba(255,255,255,.72);
+      font-size:11px;
+      font-weight:700;
+      color:#fff;
+      text-shadow:0 1px 3px rgba(0,0,0,.8);
+    }
+    .session-map-div-icon {
+      background:transparent;
+      border:0;
+    }
+    .session-map-tooltip {
+      min-width:220px;
+      line-height:1.45;
+    }
+    .session-map-tooltip strong {
+      display:block;
+      margin-bottom:4px;
+    }
     .security-status-card {
       border:1px solid var(--dashboard-border);
       border-radius:var(--theme-radius);
@@ -545,18 +578,11 @@
       <p class="small">{{index .T "ax_map_hint"}}</p>
       <div class="world-map-layout">
         <div id="analytics-visitor-map" class="world-map-panel" aria-label="{{.Report.MapTitle}}">
-          {{if not .Report.MapPoints}}<div class="world-map-empty">{{index .T "analytics_no_data"}}</div>{{end}}
+          <div id="analytics-session-map-overlay" class="world-map-empty">{{index .T "analytics_no_data"}}</div>
         </div>
         <div>
-          {{if .Report.MapPoints}}
-          <ul class="world-map-list">
-            {{range .Report.MapPoints}}
-            <li><span><i class="world-map-list-color" style="color:{{.Color}}; background:{{.Color}};"></i>{{.Label}}</span><strong>{{.Count}}</strong><small>{{.Percent}} · {{.Detail}}</small></li>
-            {{end}}
-          </ul>
-          {{else}}
-          <p class="text-muted mb-0">{{index .T "analytics_no_data"}}</p>
-          {{end}}
+          <ul id="analytics-session-map-summary" class="world-map-list"></ul>
+          <p id="analytics-session-map-empty" class="text-muted mb-0">{{index .T "analytics_no_data"}}</p>
         </div>
       </div>
     </div>
@@ -835,7 +861,7 @@
   </div></section>
   {{end}}
 </div>
-<script type="application/json" id="analytics-map-points">{{.Report.MapJSON}}</script>
+<script type="application/json" id="analytics-map-points">{{.SessionMapJSON}}</script>
 <script type="application/json" id="analytics-local-hours">{{.LocalHoursJSON}}</script>
 <script type="application/json" id="analytics-server-hours">{{.ServerHoursJSON}}</script>
 <script src="/p/static/leaflet.min.js"></script>
@@ -1023,101 +1049,184 @@
 })();
 
 (function renderAnalyticsVisitorMap() {
+  'use strict';
   const mapElement = document.getElementById('analytics-visitor-map');
   const pointsElement = document.getElementById('analytics-map-points');
+  const summaryElement = document.getElementById('analytics-session-map-summary');
+  const emptyElement = document.getElementById('analytics-session-map-empty');
+  const overlayElement = document.getElementById('analytics-session-map-overlay');
   if (!mapElement || !pointsElement || !window.L) return;
 
-  let mapPoints = [];
+  let sessions = [];
   try {
-    mapPoints = JSON.parse(pointsElement.textContent || '[]');
-  } catch (error) {
-    mapPoints = [];
+    sessions = JSON.parse(pointsElement.textContent || '[]');
+  } catch (parseError) {
+    console.error('SiteBrush analytics: invalid session map data', parseError);
+    return;
+  }
+
+  function deviceKind(session) {
+    if ((session.Class || '') !== 'human-likely') return 'automation';
+    const client = ((session.OS || '') + ' ' + (session.Browser || '')).toLowerCase();
+    if (client.includes('android') || client.includes('iphone') || client.includes('ios') || client.includes('mobile')) return 'mobile';
+    return 'desktop';
+  }
+
+  function languageCode(language) {
+    const normalized = String(language || 'unknown').trim().toLowerCase();
+    return normalized ? normalized.split('-')[0] : 'unknown';
+  }
+
+  function aggregateSessions() {
+    const groups = new Map();
+    for (const session of sessions) {
+      const latitude = Number(session.Latitude);
+      const longitude = Number(session.Longitude);
+      if (!session.GeoKnown || !Number.isFinite(latitude) || !Number.isFinite(longitude)) continue;
+      const key = latitude.toFixed(3) + ',' + longitude.toFixed(3);
+      let group = groups.get(key);
+      if (!group) {
+        group = {
+          latitude: latitude, longitude: longitude,
+          country: session.Country || '', city: session.City || '',
+          count: 0, languages: new Map(), devices: new Map(),
+          classes: new Map(), localTimes: new Set(), sources: new Set()
+        };
+        groups.set(key, group);
+      }
+      group.count += 1;
+      const language = languageCode(session.Language);
+      const device = deviceKind(session);
+      const clientClass = session.Class || 'unknown';
+      group.languages.set(language, (group.languages.get(language) || 0) + 1);
+      group.devices.set(device, (group.devices.get(device) || 0) + 1);
+      group.classes.set(clientClass, (group.classes.get(clientClass) || 0) + 1);
+      if (session.LocalTime && group.localTimes.size < 4) group.localTimes.add(session.LocalTime);
+      if (session.Source && session.Source.Name && group.sources.size < 4) group.sources.add(session.Source.Name);
+    }
+    return Array.from(groups.values()).sort(function sortGroups(left, right) {
+      return right.count - left.count;
+    });
+  }
+
+  function sortedCounts(counts) {
+    return Array.from(counts.entries()).sort(function sortCounts(left, right) {
+      return right[1] - left[1] || left[0].localeCompare(right[0]);
+    });
+  }
+
+  function gradientFor(counts, palette) {
+    const rows = sortedCounts(counts);
+    const total = rows.reduce(function sumCounts(sum, row) { return sum + row[1]; }, 0);
+    if (!total) return palette[0];
+    let offset = 0;
+    const slices = [];
+    for (let index = 0; index < rows.length; index += 1) {
+      const start = offset * 100 / total;
+      offset += rows[index][1];
+      const end = offset * 100 / total;
+      const color = palette[index % palette.length];
+      slices.push(color + ' ' + start.toFixed(1) + '% ' + end.toFixed(1) + '%');
+    }
+    return 'conic-gradient(' + slices.join(',') + ')';
+  }
+
+  function markerIcon(group) {
+    const outerGradient = gradientFor(group.languages, ['#7c3aed','#06b6d4','#22c55e','#f59e0b','#ef4444','#ec4899']);
+    const innerGradient = gradientFor(group.devices, ['#2563eb','#16a34a','#9333ea']);
+    const marker = document.createElement('div');
+    marker.className = 'session-map-marker';
+    marker.style.background = outerGradient;
+    const inner = document.createElement('div');
+    inner.className = 'session-map-marker-inner';
+    inner.style.background = innerGradient;
+    inner.textContent = String(group.count);
+    marker.appendChild(inner);
+    return window.L.divIcon({
+      className: 'session-map-div-icon',
+      html: marker.outerHTML,
+      iconSize: [46, 46],
+      iconAnchor: [23, 23]
+    });
+  }
+
+  function countsText(counts, icons) {
+    return sortedCounts(counts).map(function describeCount(row) {
+      return (icons[row[0]] || '') + row[0] + ' ' + row[1];
+    }).join(' · ');
+  }
+
+  function tooltipNode(group) {
+    const wrapper = document.createElement('div');
+    wrapper.className = 'session-map-tooltip';
+    const title = document.createElement('strong');
+    title.textContent = [group.city, group.country].filter(Boolean).join(', ') || 'Unknown location';
+    wrapper.appendChild(title);
+
+    const sessionsLine = document.createElement('div');
+    sessionsLine.textContent = group.count + (group.count === 1 ? ' session' : ' sessions');
+    wrapper.appendChild(sessionsLine);
+
+    const languagesLine = document.createElement('div');
+    languagesLine.textContent = 'Languages: ' + countsText(group.languages, {});
+    wrapper.appendChild(languagesLine);
+
+    const devicesLine = document.createElement('div');
+    devicesLine.textContent = 'Devices: ' + countsText(group.devices, {mobile:'📱 ',desktop:'💻 ',automation:'🤖 '});
+    wrapper.appendChild(devicesLine);
+
+    if (group.sources.size) {
+      const sourceLine = document.createElement('div');
+      sourceLine.textContent = 'Sources: ' + Array.from(group.sources).join(', ');
+      wrapper.appendChild(sourceLine);
+    }
+    if (group.localTimes.size) {
+      const timeLine = document.createElement('div');
+      timeLine.textContent = 'Visitor local time: ' + Array.from(group.localTimes).join(', ');
+      wrapper.appendChild(timeLine);
+    }
+    return wrapper;
+  }
+
+  function summaryRow(group) {
+    const row = document.createElement('li');
+    const label = document.createElement('span');
+    label.textContent = ([group.city, group.country].filter(Boolean).join(', ') || 'Unknown location');
+    const count = document.createElement('strong');
+    count.textContent = String(group.count);
+    const detail = document.createElement('small');
+    detail.textContent = countsText(group.languages, {}) + ' · ' + countsText(group.devices, {mobile:'📱 ',desktop:'💻 ',automation:'🤖 '});
+    row.appendChild(label);
+    row.appendChild(count);
+    row.appendChild(detail);
+    return row;
   }
 
   const map = window.L.map(mapElement, {
-    center: [20, 0],
-    zoom: 2,
-    minZoom: 2,
-    maxZoom: 8,
-    scrollWheelZoom: false,
-    worldCopyJump: true
+    center: [20, 0], zoom: 2, minZoom: 2, maxZoom: 8,
+    scrollWheelZoom: false, worldCopyJump: true
   });
-
-  const dayLayer = window.L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+  const tileLayer = window.L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
     maxZoom: 19,
+    className: document.documentElement.getAttribute('data-bs-theme') === 'dark' ? 'osm-night-tiles' : '',
     attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
   });
-  const nightLayer = window.L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
-    maxZoom: 19,
-    className: 'osm-night-tiles',
-    attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
-  });
-  let activeTileLayer = null;
+  tileLayer.addTo(map);
 
-  function prefersNightMap() {
-    const theme = document.documentElement.getAttribute('data-bs-theme') || '';
-    if (theme === 'dark') return true;
-    if (theme === 'light') return false;
-    return window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
-  }
-
-  function applyTileLayer() {
-    const nextLayer = prefersNightMap() ? nightLayer : dayLayer;
-    if (activeTileLayer === nextLayer) return;
-    if (activeTileLayer) {
-      map.removeLayer(activeTileLayer);
-    }
-    nextLayer.addTo(map);
-    activeTileLayer = nextLayer;
-  }
-
-  function markerText(point) {
-    const label = point.label || point.country || '';
-    const count = Number(point.count || 0);
-    const percent = point.percent || '';
-    const tooltip = document.createElement('span');
-    tooltip.textContent = label + ' · ' + count + ' · ' + percent;
-    return tooltip;
-  }
-
-  const markerBounds = [];
-  for (const point of mapPoints) {
-    const latitude = Number(point.latitude);
-    const longitude = Number(point.longitude);
-    if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) continue;
-    const color = point.color || '#2ecc71';
-    const radius = Math.max(4, Math.min(12, Number(point.radius || 6)));
-    const marker = window.L.circleMarker([latitude, longitude], {
-      radius: radius,
-      color: color,
-      weight: 2,
-      fillColor: color,
-      fillOpacity: 0.78,
-      opacity: 0.95
-    });
-    marker.bindTooltip(markerText(point), {direction: 'top', opacity: 0.96});
+  const groups = aggregateSessions();
+  const bounds = [];
+  for (const group of groups) {
+    const marker = window.L.marker([group.latitude, group.longitude], {icon: markerIcon(group)});
+    marker.bindTooltip(tooltipNode(group), {direction:'top', opacity:.97});
     marker.addTo(map);
-    markerBounds.push([latitude, longitude]);
+    bounds.push([group.latitude, group.longitude]);
+    if (summaryElement && summaryElement.children.length < 12) summaryElement.appendChild(summaryRow(group));
   }
 
-  applyTileLayer();
-  if (markerBounds.length === 1) {
-    map.setView(markerBounds[0], 4);
-  } else if (markerBounds.length > 1) {
-    map.fitBounds(markerBounds, {padding: [28, 28], maxZoom: 5});
-  }
-
-  if (window.matchMedia) {
-    const mediaQuery = window.matchMedia('(prefers-color-scheme: dark)');
-    if (mediaQuery.addEventListener) {
-      mediaQuery.addEventListener('change', applyTileLayer);
-    } else if (mediaQuery.addListener) {
-      mediaQuery.addListener(applyTileLayer);
-    }
-  }
-  setTimeout(function refreshMapSize() {
-    map.invalidateSize();
-  }, 80);
+  if (overlayElement) overlayElement.hidden = groups.length > 0;
+  if (emptyElement) emptyElement.hidden = groups.length > 0;
+  if (bounds.length === 1) map.setView(bounds[0], 4);
+  if (bounds.length > 1) map.fitBounds(bounds, {padding:[28,28], maxZoom:5});
 })();
 
 (function setupReturnToPreviousURI() {
