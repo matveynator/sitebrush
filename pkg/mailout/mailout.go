@@ -90,7 +90,7 @@ func runDeliveryWorker(ctx context.Context, jobs <-chan DeliveryJob, sender Send
 		case job := <-jobs:
 			sendCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
 			if err := sender(sendCtx, job.Message); err != nil {
-				log.Printf("email delivery failed to=%s subject=%q error=%v", job.Message.To, job.Message.Subject, err)
+				log.Printf("email delivery failed error_type=%T", err)
 			}
 			cancel()
 		}
@@ -118,7 +118,7 @@ func (sender DirectSender) sendToEndpoint(ctx context.Context, targetHost, endpo
 		if !errors.As(err, &negotiationError) || mode == "plaintext" {
 			return err
 		}
-		log.Printf("MAIL TLS negotiation failed host=%q mode=%s fallback=true error=%v", targetHost, mode, err)
+		log.Printf("MAIL TLS negotiation failed host=%q mode=%s fallback=true error_type=%T", targetHost, mode, err)
 	}
 	return errors.New("SMTP transport attempts exhausted")
 }
@@ -211,7 +211,7 @@ func (sender DirectSender) sendSMTP(ctx context.Context, targetHost, endpoint, f
 	}
 	// DATA acceptance is final; a broken goodbye must not queue a duplicate code.
 	if err := client.Quit(); err != nil {
-		log.Printf("MAIL accepted host=%q quit_error=%v", targetHost, err)
+		log.Printf("MAIL accepted host=%q quit_error_type=%T", targetHost, err)
 	}
 	return nil
 }

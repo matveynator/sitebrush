@@ -1,45 +1,62 @@
 (function prepareAccountCodeFields() {
   'use strict';
-  const settings = document.querySelector('[data-account-code-tools]');
-  if (!settings) return;
-  const codeFields = document.querySelectorAll('input[autocomplete="one-time-code"]');
-  for (const codeField of codeFields) {
-    codeField.setAttribute('inputmode', 'numeric');
-    codeField.setAttribute('enterkeyhint', 'done');
-    codeField.setAttribute('dir', 'ltr');
-    codeField.setAttribute('spellcheck', 'false');
-    codeField.setAttribute('autocapitalize', 'off');
-    const controls = document.createElement('div');
-    controls.className = 'auth-code-tools';
-    const copyButton = document.createElement('button');
-    copyButton.type = 'button';
-    copyButton.className = 'btn btn-outline-secondary';
-    copyButton.textContent = settings.getAttribute('data-copy-label');
-    const copyStatus = document.createElement('span');
-    copyStatus.setAttribute('role', 'status');
-    copyStatus.setAttribute('aria-live', 'polite');
-    controls.append(copyButton, copyStatus);
-    const fieldLabel = codeField.closest('label');
-    (fieldLabel || codeField).insertAdjacentElement('afterend', controls);
-    function updateCodeControls() {
-      copyButton.disabled = !/^[0-9]{6}$/.test(codeField.value);
-      copyStatus.textContent = '';
-    }
-    codeField.addEventListener('input', updateCodeControls);
-    codeField.addEventListener('change', function reflectAutofill() {
-      codeField.dispatchEvent(new Event('input', {bubbles: true}));
-    });
-    copyButton.addEventListener('click', async function copyEnteredCode() {
-      try {
-        if (!navigator.clipboard || !window.isSecureContext) throw new Error('Clipboard unavailable');
-        await navigator.clipboard.writeText(codeField.value);
-        copyStatus.textContent = settings.getAttribute('data-copy-success');
-      } catch (copyError) {
-        codeField.focus();
-        codeField.select();
-        copyStatus.textContent = settings.getAttribute('data-copy-error');
-      }
-    });
-    updateCodeControls();
+  const fragment = new URLSearchParams(window.location.hash.slice(1));
+  const mailedCode = fragment.get('account-code') || '';
+  const codeField = document.querySelector('input[autocomplete="one-time-code"]');
+  if (fragment.has('account-code')) {
+    history.replaceState(null, '', window.location.pathname + window.location.search);
   }
+  if (!codeField) return;
+  codeField.setAttribute('enterkeyhint', 'done');
+  codeField.setAttribute('dir', 'ltr');
+  codeField.addEventListener('change', function reflectAutofill() {
+    codeField.dispatchEvent(new Event('input', {bubbles: true}));
+  });
+  if (/^[0-9]{6}$/.test(mailedCode)) {
+    codeField.value = mailedCode;
+    codeField.dispatchEvent(new Event('input', {bubbles: true}));
+    if (codeField.name === 'login_code' && codeField.form) {
+      codeField.form.requestSubmit();
+    }
+  }
+})();
+
+(function followAccountDelivery() {
+  'use strict';
+  const panel = document.querySelector('[data-account-delivery-id]');
+  if (!panel || !panel.dataset.accountDeliveryId || typeof WebSocket !== 'function') return;
+  const endpoint = new URL(window.location.pathname, window.location.href);
+  endpoint.protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const parameters = new URLSearchParams({mail_delivery_ws: '', id: panel.dataset.accountDeliveryId});
+  if (panel.dataset.accountDeliveryProof) parameters.set('login_challenge', panel.dataset.accountDeliveryProof);
+  if (panel.dataset.registrationDeliveryProof) parameters.set('registration_form_token', panel.dataset.registrationDeliveryProof);
+  endpoint.search = parameters;
+  const connection = new WebSocket(endpoint);
+  const statusText = panel.querySelector('[data-account-delivery-status]');
+  const deliveryLog = panel.querySelector('[data-account-delivery-log]');
+  connection.onmessage = function receiveDeliveryStatus(event) {
+    try {
+      const report = JSON.parse(event.data);
+      const terminal = report.status === 'sent' || report.status === 'failed';
+      panel.dataset.deliveryState = report.status === 'sent' ? 'success' : report.status === 'failed' ? 'danger' : 'warning';
+      statusText.textContent = report.status === 'sent' ? panel.dataset.sent : report.status === 'failed' ? panel.dataset.failed : panel.dataset.pending;
+      deliveryLog.textContent = 'status=' + String(report.status) + '\nattempts=' + Number(report.attempts || 0);
+      if (report.error) deliveryLog.textContent += '\n' + report.error;
+      if (terminal) connection.close();
+    } catch (parseError) {
+      panel.dataset.deliveryState = 'danger';
+      statusText.textContent = panel.dataset.failed;
+      connection.close();
+    }
+  };
+  connection.onerror = function reportConnectionFailure() {
+    panel.dataset.deliveryState = 'warning';
+    statusText.textContent = panel.dataset.pending;
+  };
+})();
+
+(function confirmAcceptedEmail() {
+  'use strict';
+  const confirmationForm = document.querySelector('[data-account-auto-confirm]');
+  if (confirmationForm) confirmationForm.requestSubmit();
 })();

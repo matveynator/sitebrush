@@ -129,12 +129,17 @@
   <form class="card card-body authentication-card" method="post" action="?register">
     <input type="hidden" name="return_path" value="{{.ReturnPath}}">
     <p><input type="email" autocomplete="username" name="email" class="form-control" placeholder="{{index .T "login_email_placeholder"}}" value="{{.Email}}" required></p>
-    <p class="hint">{{index .T "auth_registration_secure"}}</p>
+    {{if .LocalAccount}}
+    <p class="hint">{{index .T "auth_local_setup"}}</p>
+    <label>{{index .T "login_password_placeholder"}}<input type="password" name="password" autocomplete="new-password" required></label>
+    <label>{{index .T "profile_confirm_password"}}<input type="password" name="password_confirm" autocomplete="new-password" required></label>
+    {{else}}<p class="hint">{{index .T "auth_registration_secure"}}</p>{{end}}
     <div><button type="submit" class="btn btn-primary">{{index .T "setup_create_admin"}}</button></div>
   </form>
   {{end}}
 </div>
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+{{if .EmailDelivery.Show}}<details class="authentication-card" data-account-delivery-id="latest" data-registration-delivery-proof="{{.RegistrationFormToken}}" data-sent="{{index .T "profile_email_delivery_success_summary"}}" data-failed="{{index .T "profile_email_delivery_error_summary"}}" data-pending="{{index .T "profile_email_delivery_pending_summary"}}"><summary>{{.EmailDelivery.LinkText}}</summary><p role="status" data-account-delivery-status>{{.EmailDelivery.Summary}}</p><pre data-account-delivery-log>{{.EmailDelivery.Log}}</pre></details>{{end}}
 <span hidden data-account-code-tools data-copy-label="{{index .T "auth_copy"}}" data-copy-success="{{index .T "auth_copied"}}" data-copy-error="{{index .T "auth_copy_failed"}}"></span>
 <script src="/p/static/account-forms.js" defer></script>
 </body>

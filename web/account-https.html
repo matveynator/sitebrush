@@ -1,4 +1,23 @@
 <!doctype html>
 <html lang="{{.LanguageCode}}" dir="{{.TextDirection}}">
-<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="refresh" content="10;url={{.RefreshURL}}"><title>HTTPS · {{.Domain}}</title><link rel="stylesheet" href="/p/static/technical_pages.css"></head>
-<body class="technical-page"><main class="container authentication-shell"><section class="authentication-card"><h1>{{.Domain}}</h1><p role="status">{{index .T "auth_https_wait"}}</p><p><a class="btn btn-primary" href="{{.RefreshURL}}">{{index .T "auth_https_retry"}}</a></p></section></main></body></html>
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+{{if not .HTTPSReady}}<meta http-equiv="refresh" content="10;url={{.RefreshURL}}">{{end}}
+<title>HTTPS · {{.Domain}}</title>
+<link rel="stylesheet" href="/p/static/technical_pages.css">
+</head>
+<body class="technical-page">
+<main class="container authentication-shell account-https-shell">
+<section class="authentication-card profile-form">
+<h1>{{.Domain}}</h1>
+{{if .HTTPSReady}}
+<p class="account-certificate-ready" role="status">✓ {{index .T "auth_https_ready"}}</p>
+<p>{{index .T "auth_registration_secure"}}</p>
+<a class="btn btn-primary" href="{{.SecureURL}}">{{index .T "auth_https_continue"}}</a>
+{{else}}
+<p role="status">{{index .T "auth_https_wait"}}</p>
+<a class="btn btn-outline-secondary" href="{{.RefreshURL}}">{{index .T "auth_https_retry"}}</a>
+{{end}}
+</section>
+</main>
+</body></html>

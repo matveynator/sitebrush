@@ -472,7 +472,9 @@ Registration starts with an email address and a one-time email code; the initial
 form never accepts a password. Public HTTP confirmation waits for a trusted HTTPS
 certificate, checking every ten seconds. Only then does the confirmation form
 accept a new password and create the account/session. Opening an email link alone
-does not change an account. Localhost retains its local development exception.
+does not change an account. Direct loopback connections to localhost can set a password and sign in without
+email codes. Both a local host and a loopback transport peer are required; proxy
+headers disable this exception. Local sessions appear as 127.0.0.1 / localhost.
 Public test-drive links start on HTTP; no self-signed certificate is required.
 
 New browser sessions require both the password and an email code, even from a
@@ -486,8 +488,9 @@ Codes expire after 15 minutes, allow five attempts, and resending replaces older
 codes. Requests have a 60-second cooldown and a maximum of three per 15-minute
 account/IP window. Account emails include the domain, purpose, original request
 IP/time, expiry, and a form link. Code fields support `autocomplete="one-time-code"`;
-autofill availability depends on the device/mail client. The website can copy an
-entered code; email codes remain selectable text without executable scripts.
+autofill availability depends on the device/mail client. Mail links to code forms prefill the code through a URL fragment, which is removed
+from browser history and is not sent in HTTP requests. Login links submit their one-time code automatically. Account changes still
+require explicit confirmation. Email codes remain selectable text.
 
 `SITEBRUSH_TRUSTED_PROXIES` accepts comma-separated IP addresses or CIDRs for
 account IP attribution. By default only loopback proxies are trusted. Forwarded

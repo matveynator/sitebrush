@@ -166,3 +166,28 @@ func TestRevokeOnlySelectedAccountAddress(t *testing.T) {
 		}
 	}
 }
+
+func TestPasswordSnapshotUsesSaltAndRejectsChangedPassword(t *testing.T) {
+	first, err := passwordSnapshot("password", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := passwordSnapshot("password", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first == second {
+		t.Fatal("snapshot salt reused")
+	}
+	same, err := passwordSnapshot("password", first)
+	if err != nil || same != first {
+		t.Fatal("snapshot cannot be verified")
+	}
+	changed, err := passwordSnapshot("changed", first)
+	if err != nil || changed == first {
+		t.Fatal("password change undetected")
+	}
+	if _, err := passwordSnapshot("password", strings.Repeat("0", 64)); err == nil {
+		t.Fatal("obsolete fast snapshot accepted")
+	}
+}

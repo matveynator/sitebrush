@@ -2520,6 +2520,7 @@ func TestRenderTemplateProcessUsesPreparedTemplate(t *testing.T) {
 
 func TestMobileServicePageDesignCoversEverySharedTemplate(t *testing.T) {
 	expectedTemplates := []string{
+		"account-confirm.html", "account-https.html",
 		"analytics.html",
 		"billing_invoice.html",
 		"billing_schedule.html",
@@ -7045,7 +7046,7 @@ func TestProfileChangeFormsWorkWithoutJavaScriptAndUnchangedEmailIsRejected(t *t
 		`data-profile-email-form data-current-email="admin@example.com"`,
 		`type="submit" data-profile-email-submit`,
 		`type="submit" data-profile-password-submit`,
-		`submitButton.disabled = nextEmail === currentEmail || !emailInput.validity.valid`,
+		`submitButton.disabled = nextEmail.toLowerCase() === currentEmail.toLowerCase() || !emailInput.validity.valid`,
 		`submitButton.disabled = password === '' || password !== passwordConfirmation`,
 	} {
 		if !strings.Contains(getResponse.Body.String(), expectedFragment) {
@@ -7104,7 +7105,7 @@ func TestProfilePasswordCodeShowsSMTPFailureDetails(t *testing.T) {
 		t.Fatalf("status = %d, body=%q", response.Code, response.Body.String())
 	}
 	body := response.Body.String()
-	for _, expectedFragment := range []string{`alert-danger`, `Письмо не отправлено.`, `data-profile-delivery-modal`, `Код SMTP: 550`, `profile-delivery-dns`, `v=spf1 a mx ip4:203.0.113.10 ~all`, `SPF`, `DKIM`} {
+	for _, expectedFragment := range []string{`delivery-danger`, `Письмо не отправлено`, `data-profile-delivery-inline`, `Код SMTP: 550`, `profile-delivery-dns`, `v=spf1 a mx ip4:203.0.113.10 ~all`, `SPF`, `DKIM`} {
 		if !strings.Contains(body, expectedFragment) {
 			t.Fatalf("SMTP failure page missing %q in %s", expectedFragment, body)
 		}
@@ -14940,5 +14941,33 @@ func TestAccountLegacySessionsInvalidatedOnce(t *testing.T) {
 	database.QueryRow(`SELECT COUNT(*) FROM sessions`).Scan(&count)
 	if count != 1 {
 		t.Fatalf("sessions=%d", count)
+	}
+}
+
+func TestAccountDeliveryDiagnosticsExcludeMessageContent(t *testing.T) {
+	for _, result := range []emailDeliveryResult{
+		{Message: mailout.Message{To: "owner@example.org", Subject: "secret 123456"}},
+		{Message: mailout.Message{To: "owner@example.org", Subject: "secret 123456"}, Pending: true},
+		{Message: mailout.Message{To: "owner@example.org", Subject: "secret 123456"}, Err: errors.New("550 rejected subject secret 123456")},
+		{Message: mailout.Message{To: "owner@example.org", Subject: "secret 123456"}, Warning: "secret 123456"},
+	} {
+		view := profileEmailDeliveryViewForResult(translationsForLanguageCode("en"), result, profileEmailDeliveryDNSHelp{})
+		encoded, _ := json.Marshal(view)
+		if strings.Contains(string(encoded), "123456") || strings.Contains(string(encoded), "secret") {
+			t.Fatalf("message leaked: %s", encoded)
+		}
+	}
+}
+
+func TestAccountMailPrefillsCodeOnlyInFragment(t *testing.T) {
+	for language, translations := range translationCatalog {
+		message := mailout.Message{Kind: "account_login_code", To: "owner@example.org"}
+		formatAccountMail(&message, language, "example.org", "123456", "https://example.org/?login&login_challenge=handle", "", "192.0.2.1", "now", nil)
+		if !strings.Contains(message.Body, "#account-code=123456") || !strings.Contains(message.Body, translations["auth_login_automatically"]) {
+			t.Fatalf("missing code link in %s", language)
+		}
+		if strings.Contains(message.Subject, "123456") {
+			t.Fatal("code leaked in subject")
+		}
 	}
 }

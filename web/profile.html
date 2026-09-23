@@ -18,7 +18,7 @@
     <h1 class="section-heading"><img src="/p/static/profile.png" class="section-icon" alt=""><a href="/">{{.Domain}}</a> <small class="text-muted">| {{.Title}}</small></h1>
     <a class="btn btn-outline-secondary" href="/">{{index .T "back_to_uri"}}</a>
   </div>
-  {{if .Status}}<div class="alert profile-alert alert-{{if .StatusClass}}{{.StatusClass}}{{else}}warning{{end}}" role="alert">
+  {{if and .Status (not .EmailDelivery.Show) (not .EmailChange.Step)}}<div class="alert profile-alert alert-{{if .StatusClass}}{{.StatusClass}}{{else}}warning{{end}}" role="alert">
     <span>{{.Status}}</span>
     {{if .EmailDelivery.Show}}<button class="profile-delivery-link" type="button" data-profile-delivery-open>{{.EmailDelivery.LinkText}}</button>{{end}}
   </div>{{end}}
@@ -40,41 +40,15 @@
     <div class="profile-send-countdown"><span data-profile-send-countdown>00:45</span></div>
   </div>
   {{if .EmailDelivery.Show}}
-  <div class="profile-delivery-modal" data-profile-delivery-modal data-mail-delivery-id="{{.EmailDelivery.ID}}" aria-hidden="true">
-    <div class="profile-delivery-backdrop" data-profile-delivery-close></div>
-    <section class="profile-delivery-dialog profile-delivery-dialog-{{.EmailDelivery.Kind}}" role="dialog" aria-modal="true" aria-labelledby="ProfileDeliveryTitle" tabindex="-1">
-      <div class="profile-delivery-header">
-        <div>
-          <div class="profile-delivery-kicker" data-mail-delivery-code>{{.EmailDelivery.CodeLabel}}: {{.EmailDelivery.Code}}</div>
-          <h2 id="ProfileDeliveryTitle" data-mail-delivery-title>{{.EmailDelivery.Title}}</h2>
-        </div>
-        <button class="profile-delivery-close" type="button" data-profile-delivery-close aria-label="{{.EmailDelivery.CloseLabel}}">&times;</button>
-      </div>
-      <p class="profile-delivery-summary" data-mail-delivery-summary>{{.EmailDelivery.Summary}}</p>
-      <div class="profile-delivery-grid">
-        <div class="profile-delivery-panel">
-          <h3>{{.EmailDelivery.FixTitle}}</h3>
-          <p>{{.EmailDelivery.FixText}}</p>
-        </div>
-        <div class="profile-delivery-panel">
-          <h3>{{.EmailDelivery.CodeLabel}}</h3>
-          <p>{{.EmailDelivery.Description}}</p>
-        </div>
-      </div>
-      {{if .EmailDelivery.DNSHelp.Show}}
-      <div class="profile-delivery-dns">
-        <h3>{{.EmailDelivery.DNSHelp.Title}}</h3>
-        <p>{{.EmailDelivery.DNSHelp.Intro}}</p>
-        <div class="profile-delivery-dns-record">
-          <span class="profile-delivery-dns-type">{{.EmailDelivery.DNSHelp.Type}}</span>
-          <span class="profile-delivery-dns-field"><span>{{.EmailDelivery.DNSHelp.HostLabel}}</span><code>{{.EmailDelivery.DNSHelp.Host}}</code></span>
-          <span class="profile-delivery-dns-field"><span>{{.EmailDelivery.DNSHelp.ValueLabel}}</span><code>{{.EmailDelivery.DNSHelp.Value}}</code></span>
-        </div>
-      </div>
-      {{end}}
-      <pre class="profile-delivery-log"><code>{{.EmailDelivery.Log}}</code></pre>
-    </section>
-  </div>
+  <details class="profile-delivery-inline delivery-{{.EmailDelivery.Kind}}" data-profile-delivery-inline data-sent="{{index .T "profile_password_code_status_sent"}}" data-failed="{{index .T "profile_password_code_status_not_sent"}}" data-mail-delivery-id="{{.EmailDelivery.ID}}">
+    <summary><span data-mail-delivery-title>{{.EmailDelivery.Title}}</span> · {{.EmailDelivery.LinkText}}</summary>
+    <p data-mail-delivery-summary>{{.EmailDelivery.Summary}}</p>
+    <p data-mail-delivery-code>{{.EmailDelivery.CodeLabel}}: {{.EmailDelivery.Code}}</p>
+    <p>{{.EmailDelivery.Description}}</p>
+    {{if .EmailDelivery.FixText}}<p>{{.EmailDelivery.FixText}}</p>{{end}}
+    {{if .EmailDelivery.DNSHelp.Show}}<p class="profile-delivery-dns">{{.EmailDelivery.DNSHelp.Intro}}</p><code>{{.EmailDelivery.DNSHelp.Type}} {{.EmailDelivery.DNSHelp.Host}} {{.EmailDelivery.DNSHelp.Value}}</code>{{end}}
+    <pre class="profile-delivery-log">{{.EmailDelivery.Log}}</pre>
+  </details>
   {{end}}
   {{if .EmailChange.Step}}
   <section class="profile-email-change" aria-labelledby="ProfileEmailChangeTitle">
@@ -83,15 +57,28 @@
       <li class="profile-email-step {{if eq .EmailChange.Step 1}}is-current{{else}}is-complete{{end}}" {{if eq .EmailChange.Step 1}}aria-current="step"{{end}}>
         <span class="profile-email-step-number" aria-hidden="true">{{if eq .EmailChange.Step 2}}✓{{else}}1{{end}}</span>
         <div><h3>{{index .T "profile_email_release"}}</h3><bdi class="profile-email-address">{{.EmailChange.CurrentEmail}}</bdi>
-        {{if .EmailChange.CurrentDeliveryStatus}}<div class="alert profile-alert alert-{{if .EmailChange.CurrentDeliveryClass}}{{.EmailChange.CurrentDeliveryClass}}{{else}}info{{end}}" role="status"><span>{{.EmailChange.CurrentDeliveryStatus}}</span>{{if and (eq .EmailChange.DeliveryStage 1) .EmailDelivery.Show}}<button class="profile-delivery-link" type="button" data-profile-delivery-open>{{.EmailDelivery.LinkText}}</button>{{end}}</div>{{end}}
+        {{if .EmailChange.CurrentDeliveryStatus}}<div class="profile-step-status text-{{if .EmailChange.CurrentDeliveryClass}}{{.EmailChange.CurrentDeliveryClass}}{{else}}info{{end}}" role="status" {{if eq .EmailChange.DeliveryStage 1}}data-profile-active-delivery{{end}}><span>{{.EmailChange.CurrentDeliveryStatus}}</span></div>{{end}}
         {{if eq .EmailChange.Step 1}}<p>{{index .T "profile_email_release_help"}}</p>
         {{if .EmailChange.CurrentProvider.URL}}<a class="btn btn-primary" href="{{.EmailChange.CurrentProvider.URL}}" target="_blank" rel="noopener noreferrer">{{index .T "setup_confirmation_open"}} {{.EmailChange.CurrentProvider.Name}}</a>{{else}}<p class="hint">{{index .T "profile_email_open_manually"}}</p>{{end}}
+  {{if .ShowPasswordCodeForm}}
+  <form class="profile-form profile-code-form profile-email-release-form" method="post" action="{{.ProfileCodeAction}}">
+    <input type="hidden" name="password_confirmation_token" value="{{.PasswordConfirmationToken}}">
+    <label>
+      {{.PasswordCodeLabel}}
+      <input class="profile-code-input" type="text" name="password_confirmation_code" inputmode="numeric" pattern="[0-9]{6}" autocomplete="one-time-code" maxlength="6" required autofocus>
+    </label>
+    <div class="profile-form-actions">
+
+      <button class="profile-code-submit" type="submit">{{index .T "profile_email_release"}}</button>
+    </div>
+  </form>
+  {{end}}
         {{end}}</div>
       </li>
       <li class="profile-email-step {{if eq .EmailChange.Step 2}}is-current{{end}}" {{if eq .EmailChange.Step 2}}aria-current="step"{{end}}>
         <span class="profile-email-step-number" aria-hidden="true">2</span>
         <div><h3>{{index .T "profile_email_accept"}}</h3><bdi class="profile-email-address">{{.EmailChange.NextEmail}}</bdi>
-        {{if .EmailChange.NextDeliveryStatus}}<div class="alert profile-alert alert-{{if .EmailChange.NextDeliveryClass}}{{.EmailChange.NextDeliveryClass}}{{else}}info{{end}}" role="status"><span>{{.EmailChange.NextDeliveryStatus}}</span>{{if and (eq .EmailChange.DeliveryStage 2) .EmailDelivery.Show}}<button class="profile-delivery-link" type="button" data-profile-delivery-open>{{.EmailDelivery.LinkText}}</button>{{end}}</div>{{end}}
+        {{if .EmailChange.NextDeliveryStatus}}<div class="profile-step-status text-{{if .EmailChange.NextDeliveryClass}}{{.EmailChange.NextDeliveryClass}}{{else}}info{{end}}" role="status" {{if eq .EmailChange.DeliveryStage 2}}data-profile-active-delivery{{end}}><span>{{.EmailChange.NextDeliveryStatus}}</span></div>{{end}}
         {{if eq .EmailChange.Step 2}}<p>{{index .T "profile_email_accept_help"}}</p>
         {{if .EmailChange.NextProvider.URL}}<a class="btn btn-primary" href="{{.EmailChange.NextProvider.URL}}" target="_blank" rel="noopener noreferrer">{{index .T "setup_confirmation_open"}} {{.EmailChange.NextProvider.Name}}</a>{{else}}<p class="hint">{{index .T "profile_email_open_manually"}}</p>{{end}}
         {{else}}<p>{{index .T "profile_email_accept_wait"}}</p>{{end}}</div>
@@ -99,7 +86,7 @@
     </ol>
   </section>
   {{end}}
-  {{if .ShowPasswordCodeForm}}
+  {{if and .ShowPasswordCodeForm (not .EmailChange.Step)}}
   <form class="profile-form profile-code-form" method="post" action="{{.ProfileCodeAction}}">
     <input type="hidden" name="password_confirmation_token" value="{{.PasswordConfirmationToken}}">
     <div class="profile-form-header">
@@ -112,10 +99,10 @@
     </label>
     <div class="profile-form-actions">
       {{if .PasswordWebmailProvider.URL}}<a class="btn btn-outline-primary" href="{{.PasswordWebmailProvider.URL}}" target="_blank" rel="noopener noreferrer">{{index .T "setup_confirmation_open"}} {{.PasswordWebmailProvider.Name}}</a>{{end}}
-      <button class="profile-code-submit" type="submit">{{.PasswordCodeSubmit}}</button>{{if and (not .EmailChange.Step) .CodeWebmail.URL}}<a class="btn btn-outline-secondary" href="{{.CodeWebmail.URL}}" target="_blank" rel="noopener noreferrer">{{index .T "setup_confirmation_open"}} {{.CodeWebmail.Name}}</a>{{end}}
+      <button class="profile-code-submit" type="submit">{{.PasswordCodeSubmit}}</button>
     </div>
   </form>
-  {{else if .ShowPasswordForm}}
+  {{else if and .ShowPasswordForm (not .EmailChange.Step)}}
   <div class="profile-form-grid">
     <form class="profile-form" method="post" action="?profile" data-profile-send-form data-profile-email-form data-current-email="{{.Email}}">
       <input type="hidden" name="profile_action" value="email">
@@ -125,7 +112,7 @@
       </div>
       <label>
         {{.EmailLabel}}
-        <input type="email" name="email" value="{{.Email}}" autocomplete="email" required data-profile-email-input>
+        <input type="email" name="email" placeholder="{{.Email}}" autocomplete="email" required data-profile-email-input>
       </label>
       <div><button type="submit" data-profile-email-submit>{{.EmailSubmitLabel}}</button></div>
     </form>
@@ -146,7 +133,7 @@
       <div><button type="submit" data-profile-password-submit>{{.PasswordSubmitLabel}}</button></div>
     </form>
   </div>
-  {{else if ne .EmailChange.Step 2}}
+  {{else if or .IsHardLocked (gt .BlockedUntilUnix 0)}}
   <div class="card card-body profile-blocked-card">
     {{if .IsHardLocked}}
     <p class="mb-3">{{.RecoveryRequiredText}}</p>
@@ -162,7 +149,7 @@
   {{end}}
 {{if .AccountCSRF}}
 <section class="authentication-card profile-form"><h2>{{index .T "auth_trusted_ips"}}</h2><p>{{index .T "auth_trust_help"}}</p>
-{{range .TrustedIPs}}<form method="post" action="?profile" class="auth-trusted-row"><input type="hidden" name="profile_action" value="revoke_ip"><input type="hidden" name="trusted_ip" value="{{.IP}}"><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}"><strong dir="ltr">{{.IP}}</strong>{{if .Current}} <span>{{index $.T "auth_current"}}</span>{{end}}<p>{{index $.T "auth_confirmed"}}: {{.Confirmed.Format "2006-01-02 15:04 UTC"}}<br>{{index $.T "auth_last_login"}}: {{.LastLogin.Format "2006-01-02 15:04 UTC"}}<br>{{index $.T "auth_expires"}}: {{.Expires.Format "2006-01-02 15:04 UTC"}}</p><button type="submit">{{index $.T "auth_revoke"}}</button></form>{{else}}<p>{{index .T "auth_no_trusted"}}</p>{{end}}
+{{range .TrustedIPs}}<form method="post" action="?profile" class="auth-trusted-row"><input type="hidden" name="profile_action" value="revoke_ip"><input type="hidden" name="trusted_ip" value="{{.IP}}"><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}"><strong dir="ltr">{{.IP}}{{if eq .IP "127.0.0.1"}} / localhost{{end}}</strong>{{if .Current}} <span>{{index $.T "auth_current"}}</span>{{end}}<p>{{index $.T "auth_confirmed"}}: {{.Confirmed.Format "2006-01-02 15:04 UTC"}}<br>{{index $.T "auth_last_login"}}: {{.LastLogin.Format "2006-01-02 15:04 UTC"}}<br>{{index $.T "auth_expires"}}: {{.Expires.Format "2006-01-02 15:04 UTC"}}</p><button type="submit">{{index $.T "auth_revoke"}}</button></form>{{else}}<p>{{index .T "auth_no_trusted"}}</p>{{end}}
 </section>{{end}}
 </main>
 <script>
@@ -219,7 +206,7 @@
 
     function updateEmailSubmitButton() {
       var nextEmail = String(emailInput.value || '').trim();
-      submitButton.disabled = nextEmail === currentEmail || !emailInput.validity.valid;
+      submitButton.disabled = nextEmail.toLowerCase() === currentEmail.toLowerCase() || !emailInput.validity.valid;
     }
 
     emailInput.addEventListener('input', updateEmailSubmitButton);
@@ -436,7 +423,7 @@
 })();
 
 (function followPendingMailDelivery() {
-  var modalElement = document.querySelector('[data-profile-delivery-modal]');
+  var modalElement = document.querySelector('[data-profile-delivery-inline]');
   if (!modalElement || typeof WebSocket !== 'function') {
     return;
   }
@@ -451,6 +438,8 @@
   var titleElement = modalElement.querySelector('[data-mail-delivery-title]');
   var summaryElement = modalElement.querySelector('[data-mail-delivery-summary]');
 
+  var activeStepStatus = document.querySelector('[data-profile-active-delivery]');
+
   deliverySocket.onmessage = function updateMailDeliveryStatus(messageEvent) {
     var deliveryStatus = null;
     try {
@@ -458,6 +447,18 @@
     } catch (parseError) {
       deliverySocket.close();
       return;
+    }
+    if (deliveryStatus.status === 'sent' || deliveryStatus.status === 'failed') {
+      var deliverySucceeded = deliveryStatus.status === 'sent';
+      var statusMessage = modalElement.getAttribute(deliverySucceeded ? 'data-sent' : 'data-failed');
+      if (!deliverySucceeded && deliveryStatus.error) statusMessage += ' ' + deliveryStatus.error;
+      modalElement.classList.remove('delivery-warning', 'delivery-success', 'delivery-danger');
+      modalElement.classList.add(deliverySucceeded ? 'delivery-success' : 'delivery-danger');
+      if (activeStepStatus) {
+        activeStepStatus.classList.remove('text-warning', 'text-info', 'text-success', 'text-danger');
+        activeStepStatus.classList.add(deliverySucceeded ? 'text-success' : 'text-danger');
+        activeStepStatus.textContent = statusMessage;
+      }
     }
     if (deliveryStatus.status === 'sent') {
       if (codeElement) { codeElement.textContent = 'SMTP: Accepted'; }

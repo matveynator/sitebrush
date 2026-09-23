@@ -21,7 +21,8 @@
   {{if .ShowCodeForm}}
   <form class="authentication-card profile-form" method="post" action="?login">
     <h2>{{index .T "auth_login_title"}}</h2><p>{{index .T "auth_new_ip"}}</p>
-    {{if .Status}}<p role="status">{{.Status}}</p>{{end}}
+    {{if and .Status (not .EmailDelivery.Show)}}<p class="text-danger" role="status">{{.Status}}</p>{{end}}
+    {{if .EmailDelivery.Show}}<div class="account-delivery" data-delivery-state="{{.EmailDelivery.Kind}}" data-account-delivery-id="{{.EmailDelivery.ID}}" data-account-delivery-proof="{{.LoginChallenge}}" data-sent="{{index .T "profile_email_delivery_success_summary"}}" data-failed="{{index .T "profile_email_delivery_error_summary"}}" data-pending="{{index .T "profile_email_delivery_pending_summary"}}"><p role="status" data-account-delivery-status>{{.EmailDelivery.Summary}}</p><details><summary>{{.EmailDelivery.LinkText}}</summary><pre data-account-delivery-log>{{.EmailDelivery.Log}}</pre></details></div>{{end}}
     <input type="hidden" name="login_challenge" value="{{.LoginChallenge}}">
     <label>{{index .T "profile_password_code"}}<input class="profile-code-input" type="text" name="login_code" autocomplete="one-time-code" inputmode="numeric" pattern="[0-9]{6}" minlength="6" maxlength="6" required></label>
     <div class="auth-actions"><button type="submit">{{index .T "login_submit"}}</button>{{if .Webmail.URL}}<a class="btn btn-outline-secondary" href="{{.Webmail.URL}}" target="_blank" rel="noopener noreferrer">{{index .T "setup_confirmation_open"}} {{.Webmail.Name}}</a>{{end}}<a href="?login">{{index .T "auth_request_again"}}</a></div>
@@ -109,6 +110,7 @@
   renderCountdown();
 })();
 </script>
+
 <span hidden data-account-code-tools data-copy-label="{{index .T "auth_copy"}}" data-copy-success="{{index .T "auth_copied"}}" data-copy-error="{{index .T "auth_copy_failed"}}"></span>
 <script src="/p/static/account-forms.js" defer></script>
 </body>
