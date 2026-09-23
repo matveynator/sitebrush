@@ -599,11 +599,11 @@ func BlockedHTML(language string, block SecurityBlock) string {
 	if strings.HasPrefix(language, "ru") {
 		title = "Запрос заблокирован"
 		message = "SiteBrush временно заблокировал запросы с этого адреса."
-		support = "Обратитесь к администратору сайта и укажите идентификатор инцидента."
+		support = "Обратитесь к администратору сайта или support@sitebrush.com и укажите идентификатор инцидента."
 	} else if strings.HasPrefix(language, "de") {
 		title = "Anfrage blockiert"
 		message = "SiteBrush hat Anfragen von dieser Adresse vorübergehend blockiert."
-		support = "Kontaktieren Sie den Website-Administrator und nennen Sie die Vorfall-ID."
+		support = "Kontaktieren Sie den Website-Administrator oder support@sitebrush.com und nennen Sie die Vorfall-ID."
 	}
 	return "<!doctype html><meta charset=utf-8><meta name=viewport content=\"width=device-width\"><title>" + html.EscapeString(title) + "</title><main><h1>" + html.EscapeString(title) + "</h1><p>" + html.EscapeString(message) + "</p><p>" + html.EscapeString(block.Reason) + "</p><p>Incident: <code>" + html.EscapeString(block.IncidentID) + "</code></p><p>" + html.EscapeString(support) + "</p></main>"
 }
