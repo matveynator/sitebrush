@@ -4277,11 +4277,12 @@ func (a *App) runSecurityAnalytics(stop <-chan struct{}) {
 			address := clientIPAddress(&http.Request{RemoteAddr: event.RemoteAddress, Header: http.Header{"Forwarded": []string{event.Forwarded}, "X-Forwarded-For": []string{event.ForwardedFor}}})
 			category := state.Record(browserstats.RequestObservation{Time: event.OccurredAt, IP: address, Path: event.Path, Query: event.Query, Method: event.Method, Status: event.StatusCode, Bytes: event.Bytes, Agent: event.UserAgent, Language: analyticsLanguageLabel(event.AcceptLanguage), Trusted: event.TrustedPeer})
 			if category != "" && a.attackGuard != nil {
-				_, blocked := a.attackGuard.ObserveIncident(address, category, "security analytics detected "+category, event.OccurredAt)
-				if blocked && a.securityGlobalSignals != nil {
+				description := "security analytics detected " + category
+				block, blocked := a.attackGuard.ObserveIncident(address, category, description, event.OccurredAt)
+				if blocked && a.securityGlobalSignals != nil && securityBlockReasonFirstObservation(block, category, description) {
 					settings, settingsErr := a.attackGuard.Settings()
 					if settingsErr == nil && settings.GlobalSync {
-						signal := securitysync.Signal{IP: address, Category: category, Description: "security analytics detected " + category, ObservedAt: event.OccurredAt}
+						signal := securitysync.Signal{IP: address, Category: category, Description: description, ObservedAt: event.OccurredAt}
 						select {
 						case a.securityGlobalSignals <- signal:
 						default:
@@ -4319,6 +4320,16 @@ func (a *App) runSecurityAnalytics(stop <-chan struct{}) {
 			}
 		}
 	}
+}
+
+func securityBlockReasonFirstObservation(block httpsecurity.SecurityBlock, reason, description string) bool {
+	for index := len(block.ReasonLog) - 1; index >= 0; index-- {
+		event := block.ReasonLog[index]
+		if event.Reason == reason && event.Description == description && event.Source == "local" {
+			return event.Count <= 1
+		}
+	}
+	return false
 }
 
 func (a *App) enrichBrowserSessions(state *browserstats.Site, stop <-chan struct{}) {
