@@ -1,6 +1,8 @@
 package securitysync
 
 import (
+	"crypto/ed25519"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"net"
@@ -18,6 +20,76 @@ const (
 	maximumTrackedIPs    = 4096
 	maximumSourcesPerIP  = 16
 )
+
+
+type PeerAttestation struct {
+	InstallationID string `json:"installation_id"`
+	PublicKey      string `json:"public_key"`
+	ExpiresAt      string `json:"expires_at"`
+	Signature      string `json:"signature"`
+}
+
+func IssuePeerAttestation(privateKey ed25519.PrivateKey, installationID, publicKey string, now time.Time, ttl time.Duration) (string, error) {
+	if len(privateKey) != ed25519.PrivateKeySize {
+		return "", errors.New("attestation private key is invalid")
+	}
+	if strings.TrimSpace(installationID) == "" || strings.TrimSpace(publicKey) == "" {
+		return "", errors.New("attestation identity is invalid")
+	}
+	if ttl <= 0 || ttl > 24*time.Hour {
+		ttl = time.Hour
+	}
+	attestation := PeerAttestation{
+		InstallationID: strings.TrimSpace(installationID),
+		PublicKey:      strings.TrimSpace(publicKey),
+		ExpiresAt:      now.UTC().Add(ttl).Format(time.RFC3339),
+	}
+	unsigned, err := json.Marshal(attestation)
+	if err != nil {
+		return "", err
+	}
+	attestation.Signature = base64.RawURLEncoding.EncodeToString(ed25519.Sign(privateKey, unsigned))
+	encoded, err := json.Marshal(attestation)
+	if err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(encoded), nil
+}
+
+func VerifyPeerAttestation(token string, centralPublicKey ed25519.PublicKey, now time.Time) (PeerAttestation, error) {
+	if len(centralPublicKey) != ed25519.PublicKeySize {
+		return PeerAttestation{}, errors.New("attestation public key is invalid")
+	}
+	encoded, err := base64.RawURLEncoding.DecodeString(strings.TrimSpace(token))
+	if err != nil || len(encoded) > 4096 {
+		return PeerAttestation{}, errors.New("attestation token is invalid")
+	}
+	attestation := PeerAttestation{}
+	if err := json.Unmarshal(encoded, &attestation); err != nil {
+		return PeerAttestation{}, errors.New("attestation payload is invalid")
+	}
+	signature, err := base64.RawURLEncoding.DecodeString(strings.TrimSpace(attestation.Signature))
+	if err != nil || len(signature) != ed25519.SignatureSize {
+		return PeerAttestation{}, errors.New("attestation signature is invalid")
+	}
+	unsignedAttestation := attestation
+	unsignedAttestation.Signature = ""
+	unsigned, err := json.Marshal(unsignedAttestation)
+	if err != nil {
+		return PeerAttestation{}, err
+	}
+	if !ed25519.Verify(centralPublicKey, unsigned, signature) {
+		return PeerAttestation{}, errors.New("attestation signature verification failed")
+	}
+	expiresAt, err := time.Parse(time.RFC3339, strings.TrimSpace(attestation.ExpiresAt))
+	if err != nil || !now.Before(expiresAt) || expiresAt.Sub(now) > 24*time.Hour {
+		return PeerAttestation{}, errors.New("attestation expiry is invalid")
+	}
+	if strings.TrimSpace(attestation.InstallationID) == "" || strings.TrimSpace(attestation.PublicKey) == "" {
+		return PeerAttestation{}, errors.New("attestation identity is invalid")
+	}
+	return attestation, nil
+}
 
 type Signal struct {
 	IP             string    `json:"ip"`
