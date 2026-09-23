@@ -7750,7 +7750,26 @@ func (a *App) loadAutomaticSSLFallbackCertificate(certificatePath string, now ti
 	if expiresAt.Before(now.Add(automaticSSLFallbackRenewBefore)) {
 		return nil, errors.New("automatic SSL fallback certificate requires renewal")
 	}
+	if certificate.Leaf == nil && len(certificate.Certificate) > 0 {
+		certificate.Leaf, _ = x509.ParseCertificate(certificate.Certificate[0])
+	}
+	if certificate.Leaf == nil {
+		return nil, errors.New("automatic SSL fallback certificate has no leaf")
+	}
+	for _, requiredIP := range automaticSSLFallbackIPAddresses() {
+		if certificate.Leaf.VerifyHostname(requiredIP.String()) != nil {
+			return nil, fmt.Errorf("automatic SSL fallback certificate does not cover server IP %s", requiredIP.String())
+		}
+	}
 	return &certificate, nil
+}
+
+func automaticSSLFallbackIPAddresses() []net.IP {
+	ipAddresses := []net.IP{net.ParseIP("127.0.0.1"), net.ParseIP("::1")}
+	if interfaceIPs, err := lookupServerInterfaceIPs(); err == nil {
+		ipAddresses = append(ipAddresses, interfaceIPs...)
+	}
+	return dedupeIPRecords(ipAddresses)
 }
 
 func generateAutomaticSSLFallbackCertificate(now time.Time) ([]byte, *tls.Certificate, error) {
@@ -7775,7 +7794,7 @@ func generateAutomaticSSLFallbackCertificate(now time.Time) ([]byte, *tls.Certif
 		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 		BasicConstraintsValid: true,
 		DNSNames:              []string{"localhost"},
-		IPAddresses:           []net.IP{net.ParseIP("127.0.0.1"), net.ParseIP("::1")},
+		IPAddresses:           automaticSSLFallbackIPAddresses(),
 	}
 	certificateDER, err := x509.CreateCertificate(rand.Reader, &template, &template, &privateKey.PublicKey, privateKey)
 	if err != nil {
@@ -9391,10 +9410,67 @@ func (a *App) accountHTTPSReady(domain string) bool {
 	return err == nil
 }
 
+func requestHostIP(r *http.Request) net.IP {
+	if r == nil {
+		return nil
+	}
+	host := strings.TrimSpace(r.Host)
+	if parsedHost, _, err := net.SplitHostPort(host); err == nil {
+		host = parsedHost
+	}
+	host = strings.Trim(host, "[]")
+	return net.ParseIP(host)
+}
+
+func (a *App) selfSignedHTTPSURL(r *http.Request) string {
+	if r == nil {
+		return ""
+	}
+	secureURL := *r.URL
+	secureURL.Scheme = "https"
+	host := strings.TrimSpace(r.Host)
+	hostName := host
+	if parsedHost, _, err := net.SplitHostPort(host); err == nil {
+		hostName = parsedHost
+	}
+	hostName = strings.Trim(hostName, "[]")
+	if a.selfSignedTLSPort > 0 {
+		secureURL.Host = net.JoinHostPort(hostName, strconv.Itoa(a.selfSignedTLSPort))
+		return secureURL.String()
+	}
+	if hostName == "" {
+		return ""
+	}
+	secureURL.Host = hostName
+	if strings.Contains(hostName, ":") {
+		secureURL.Host = "[" + hostName + "]"
+	}
+	return secureURL.String()
+}
+
 func (a *App) awaitAccountHTTPS(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Referrer-Policy", "no-referrer")
-	domain := normalizeDomainName(r.Host)
+	requestDomain := domainFromRequest(r)
+	if requestHostIP(r) != nil {
+		secureURL := a.selfSignedHTTPSURL(r)
+		if secureURL != "" && (a.automaticSSLAvailable || a.selfSignedTLSPort > 0) {
+			a.render(w, r, "account-https.html", map[string]any{
+				"Domain":     requestDomain,
+				"SelfSigned": true,
+				"SecureURL":  secureURL,
+				"ReturnURL":  r.URL.String(),
+			})
+			return
+		}
+		a.render(w, r, "account-https.html", map[string]any{
+			"Domain":           requestDomain,
+			"HTTPSUnavailable": true,
+			"ReturnURL":        r.URL.String(),
+		})
+		return
+	}
+	domain := normalizeDomainName(requestDomain)
 	if a.accountHTTPSReady(domain) {
 		secureURL := *r.URL
 		secureURL.Scheme = "https"

@@ -1112,7 +1112,12 @@
     "auth_totp_enabled": "Authenticator app is enabled.",
     "auth_totp_disable": "Disable authenticator app",
     "auth_totp_invalid": "The authenticator code is invalid or expired.",
-    "auth_email_fallback": "Use email verification instead"
+    "auth_email_fallback": "Use email verification instead",
+    "auth_https_self_signed": "This address is an IP address, so a public certificate cannot be issued automatically.",
+    "auth_https_self_signed_help": "SiteBrush can continue over HTTPS with its self-signed certificate. Your browser will show a certificate warning because no public certificate authority can verify this IP address.",
+    "auth_https_self_signed_continue": "Continue with self-signed HTTPS",
+    "auth_https_unavailable": "Secure HTTPS is not available for this IP address yet.",
+    "auth_https_unavailable_help": "Return to SiteBrush and restart it with HTTPS enabled. IP-based access uses a self-signed certificate instead of ACME."
   },
   "fr": {
     "auth_email_changed_title": "Adresse e-mail modifiée",
@@ -2109,7 +2114,12 @@
     "auth_totp_enabled": "L’application d’authentification est activée.",
     "auth_totp_disable": "Désactiver l’application d’authentification",
     "auth_totp_invalid": "Le code d’authentification est invalide ou expiré.",
-    "auth_email_fallback": "Utiliser plutôt la vérification par e-mail"
+    "auth_email_fallback": "Utiliser plutôt la vérification par e-mail",
+    "auth_https_self_signed": "Cette adresse est une adresse IP ; un certificat public ne peut donc pas être émis automatiquement.",
+    "auth_https_self_signed_help": "SiteBrush peut continuer en HTTPS avec son certificat auto-signé. Le navigateur affichera un avertissement car aucune autorité de certification publique ne peut valider cette adresse IP.",
+    "auth_https_self_signed_continue": "Continuer avec HTTPS auto-signé",
+    "auth_https_unavailable": "Le HTTPS sécurisé n’est pas encore disponible pour cette adresse IP.",
+    "auth_https_unavailable_help": "Revenez dans SiteBrush et redémarrez-le avec HTTPS activé. L’accès par IP utilise un certificat auto-signé au lieu d’ACME."
   },
   "ru": {
     "auth_email_changed_title": "Адрес электронной почты изменён",
@@ -3224,7 +3234,12 @@
     "auth_totp_enabled": "Приложение-аутентификатор включено.",
     "auth_totp_disable": "Отключить приложение-аутентификатор",
     "auth_totp_invalid": "Код аутентификатора неверен или истёк.",
-    "auth_email_fallback": "Использовать подтверждение по email"
+    "auth_email_fallback": "Использовать подтверждение по email",
+    "auth_https_self_signed": "Этот адрес является IP-адресом, поэтому автоматически получить публичный сертификат для него нельзя.",
+    "auth_https_self_signed_help": "SiteBrush может продолжить работу по HTTPS с самоподписанным сертификатом. Браузер покажет предупреждение о сертификате, потому что публичный центр сертификации не подтверждает этот IP-адрес.",
+    "auth_https_self_signed_continue": "Продолжить с самоподписанным HTTPS",
+    "auth_https_unavailable": "Защищённый HTTPS для этого IP-адреса пока недоступен.",
+    "auth_https_unavailable_help": "Вернитесь в SiteBrush и перезапустите его с включённым HTTPS. Для доступа по IP используется самоподписанный сертификат вместо ACME."
   },
   "ja": {
     "auth_email_changed_title": "メールアドレスが変更されました",
@@ -4217,7 +4232,12 @@
     "auth_totp_enabled": "認証アプリは有効です。",
     "auth_totp_disable": "認証アプリを無効にする",
     "auth_totp_invalid": "認証コードが無効か期限切れです。",
-    "auth_email_fallback": "代わりにメール確認を使用"
+    "auth_email_fallback": "代わりにメール確認を使用",
+    "auth_https_self_signed": "このアドレスは IP アドレスのため、公開証明書を自動発行できません。",
+    "auth_https_self_signed_help": "SiteBrush は自己署名証明書を使って HTTPS を続行できます。公開認証局がこの IP アドレスを検証できないため、ブラウザーに証明書の警告が表示されます。",
+    "auth_https_self_signed_continue": "自己署名 HTTPS で続行",
+    "auth_https_unavailable": "この IP アドレスでは安全な HTTPS をまだ利用できません。",
+    "auth_https_unavailable_help": "SiteBrush に戻り、HTTPS を有効にして再起動してください。IP アクセスでは ACME の代わりに自己署名証明書を使用します。"
   },
   "it": {
     "auth_email_changed_title": "Indirizzo email modificato",
@@ -5210,7 +5230,12 @@
     "auth_totp_enabled": "L’app di autenticazione è attiva.",
     "auth_totp_disable": "Disattiva app di autenticazione",
     "auth_totp_invalid": "Il codice dell’autenticatore non è valido o è scaduto.",
-    "auth_email_fallback": "Usa invece la verifica via email"
+    "auth_email_fallback": "Usa invece la verifica via email",
+    "auth_https_self_signed": "Questo indirizzo è un indirizzo IP, quindi non è possibile emettere automaticamente un certificato pubblico.",
+    "auth_https_self_signed_help": "SiteBrush può continuare tramite HTTPS con il proprio certificato autofirmato. Il browser mostrerà un avviso perché nessuna autorità di certificazione pubblica può convalidare questo indirizzo IP.",
+    "auth_https_self_signed_continue": "Continua con HTTPS autofirmato",
+    "auth_https_unavailable": "HTTPS sicuro non è ancora disponibile per questo indirizzo IP.",
+    "auth_https_unavailable_help": "Torna a SiteBrush e riavvialo con HTTPS abilitato. L’accesso tramite IP usa un certificato autofirmato invece di ACME."
   },
   "sv": {
     "auth_email_changed_title": "E-postadressen har ändrats",
@@ -6203,7 +6228,12 @@
     "auth_totp_enabled": "Autentiseringsappen är aktiverad.",
     "auth_totp_disable": "Inaktivera autentiseringsapp",
     "auth_totp_invalid": "Autentiseringskoden är ogiltig eller har gått ut.",
-    "auth_email_fallback": "Använd e-postverifiering i stället"
+    "auth_email_fallback": "Använd e-postverifiering i stället",
+    "auth_https_self_signed": "Adressen är en IP-adress, så ett offentligt betrott certifikat kan inte utfärdas automatiskt.",
+    "auth_https_self_signed_help": "SiteBrush kan fortsätta via HTTPS med ett självsignerat certifikat. Webbläsaren visar en certifikatvarning eftersom ingen offentlig certifikatutfärdare kan verifiera IP-adressen.",
+    "auth_https_self_signed_continue": "Fortsätt med självsignerad HTTPS",
+    "auth_https_unavailable": "Säker HTTPS är ännu inte tillgänglig för den här IP-adressen.",
+    "auth_https_unavailable_help": "Gå tillbaka till SiteBrush och starta om med HTTPS aktiverat. IP-åtkomst använder ett självsignerat certifikat i stället för ACME."
   },
   "fi": {
     "auth_email_changed_title": "Sähköpostiosoite on vaihdettu",
@@ -7196,7 +7226,12 @@
     "auth_totp_enabled": "Todennussovellus on käytössä.",
     "auth_totp_disable": "Poista todennussovellus käytöstä",
     "auth_totp_invalid": "Todennuskoodi on virheellinen tai vanhentunut.",
-    "auth_email_fallback": "Käytä sen sijaan sähköpostivahvistusta"
+    "auth_email_fallback": "Käytä sen sijaan sähköpostivahvistusta",
+    "auth_https_self_signed": "Tämä osoite on IP-osoite, joten sille ei voida myöntää automaattisesti julkisesti luotettua varmennetta.",
+    "auth_https_self_signed_help": "SiteBrush voi jatkaa HTTPS-yhteydellä itse allekirjoitetulla varmenteella. Selain näyttää varoituksen, koska julkinen varmentaja ei voi vahvistaa tätä IP-osoitetta.",
+    "auth_https_self_signed_continue": "Jatka itse allekirjoitetulla HTTPS:llä",
+    "auth_https_unavailable": "Suojattu HTTPS ei ole vielä käytettävissä tälle IP-osoitteelle.",
+    "auth_https_unavailable_help": "Palaa SiteBrushiin ja käynnistä se uudelleen HTTPS käytössä. IP-yhteys käyttää itse allekirjoitettua varmennetta ACME:n sijaan."
   },
   "mn": {
     "auth_email_changed_title": "Имэйл хаяг өөрчлөгдлөө",
@@ -8189,7 +8224,12 @@
     "auth_totp_enabled": "Баталгаажуулагч апп идэвхтэй.",
     "auth_totp_disable": "Баталгаажуулагч апп идэвхгүй болгох",
     "auth_totp_invalid": "Баталгаажуулах код буруу эсвэл хугацаа дууссан.",
-    "auth_email_fallback": "Оронд нь email баталгаажуулалт ашиглах"
+    "auth_email_fallback": "Оронд нь email баталгаажуулалт ашиглах",
+    "auth_https_self_signed": "Энэ хаяг нь IP хаяг тул нийтэд итгэмжлэгдсэн сертификатыг автоматаар олгох боломжгүй.",
+    "auth_https_self_signed_help": "SiteBrush өөрөө гарын үсэг зурсан сертификатаар HTTPS ашиглан үргэлжлүүлж болно. Нийтийн баталгаажуулалтын байгууллага энэ IP хаягийг баталгаажуулж чадахгүй тул хөтөч анхааруулга харуулна.",
+    "auth_https_self_signed_continue": "Өөрөө гарын үсэг зурсан HTTPS-ээр үргэлжлүүлэх",
+    "auth_https_unavailable": "Энэ IP хаягт аюулгүй HTTPS одоогоор боломжгүй.",
+    "auth_https_unavailable_help": "SiteBrush руу буцаж HTTPS идэвхтэйгээр дахин ажиллуулна уу. IP хандалт ACME-ийн оронд өөрөө гарын үсэг зурсан сертификат ашиглана."
   },
   "zh": {
     "auth_email_changed_title": "电子邮箱地址已更改",
@@ -9182,7 +9222,12 @@
     "auth_totp_enabled": "身份验证器应用已启用。",
     "auth_totp_disable": "禁用身份验证器应用",
     "auth_totp_invalid": "身份验证码无效或已过期。",
-    "auth_email_fallback": "改用电子邮件验证"
+    "auth_email_fallback": "改用电子邮件验证",
+    "auth_https_self_signed": "此地址是 IP 地址，因此无法自动签发公开受信任的证书。",
+    "auth_https_self_signed_help": "SiteBrush 可以使用自签名证书继续通过 HTTPS 工作。由于公共证书颁发机构无法验证此 IP 地址，浏览器会显示证书警告。",
+    "auth_https_self_signed_continue": "使用自签名 HTTPS 继续",
+    "auth_https_unavailable": "此 IP 地址暂时无法使用安全 HTTPS。",
+    "auth_https_unavailable_help": "返回 SiteBrush，并在启用 HTTPS 的情况下重新启动。通过 IP 访问时会使用自签名证书，而不是 ACME。"
   },
   "he": {
     "auth_email_changed_title": "כתובת האימייל שונתה",
@@ -10175,7 +10220,12 @@
     "auth_totp_enabled": "אפליקציית האימות מופעלת.",
     "auth_totp_disable": "השבת אפליקציית אימות",
     "auth_totp_invalid": "קוד האימות שגוי או פג תוקף.",
-    "auth_email_fallback": "השתמש במקום זאת באימות בדוא״ל"
+    "auth_email_fallback": "השתמש במקום זאת באימות בדוא״ל",
+    "auth_https_self_signed": "הכתובת הזו היא כתובת IP, ולכן לא ניתן להנפיק עבורה אוטומטית תעודה ציבורית מהימנה.",
+    "auth_https_self_signed_help": "SiteBrush יכול להמשיך ב-HTTPS עם תעודה בחתימה עצמית. הדפדפן יציג אזהרה כי רשות אישורים ציבורית אינה יכולה לאמת את כתובת ה-IP הזו.",
+    "auth_https_self_signed_continue": "המשך עם HTTPS בחתימה עצמית",
+    "auth_https_unavailable": "HTTPS מאובטח עדיין אינו זמין עבור כתובת IP זו.",
+    "auth_https_unavailable_help": "חזור ל-SiteBrush והפעל אותו מחדש עם HTTPS פעיל. גישה לפי IP משתמשת בתעודה בחתימה עצמית במקום ACME."
   },
   "fa": {
     "auth_email_changed_title": "نشانی ایمیل تغییر کرد",
@@ -11168,7 +11218,12 @@
     "auth_totp_enabled": "برنامه احراز هویت فعال است.",
     "auth_totp_disable": "غیرفعال‌کردن برنامه احراز هویت",
     "auth_totp_invalid": "کد احراز هویت نامعتبر یا منقضی شده است.",
-    "auth_email_fallback": "استفاده از تأیید ایمیل"
+    "auth_email_fallback": "استفاده از تأیید ایمیل",
+    "auth_https_self_signed": "این نشانی یک آدرس IP است، بنابراین صدور خودکار گواهی عمومی معتبر برای آن ممکن نیست.",
+    "auth_https_self_signed_help": "SiteBrush می‌تواند با یک گواهی خودامضا از طریق HTTPS ادامه دهد. مرورگر هشدار گواهی نشان می‌دهد چون مرجع صدور گواهی عمومی نمی‌تواند این آدرس IP را تأیید کند.",
+    "auth_https_self_signed_continue": "ادامه با HTTPS خودامضا",
+    "auth_https_unavailable": "HTTPS امن هنوز برای این آدرس IP در دسترس نیست.",
+    "auth_https_unavailable_help": "به SiteBrush برگردید و آن را با HTTPS فعال دوباره اجرا کنید. دسترسی با IP به‌جای ACME از گواهی خودامضا استفاده می‌کند."
   },
   "de": {
     "auth_email_changed_title": "E-Mail-Adresse geändert",
@@ -12161,7 +12216,12 @@
     "auth_totp_enabled": "Authenticator-App ist aktiviert.",
     "auth_totp_disable": "Authenticator-App deaktivieren",
     "auth_totp_invalid": "Der Authenticator-Code ist ungültig oder abgelaufen.",
-    "auth_email_fallback": "Stattdessen E-Mail-Bestätigung verwenden"
+    "auth_email_fallback": "Stattdessen E-Mail-Bestätigung verwenden",
+    "auth_https_self_signed": "Diese Adresse ist eine IP-Adresse, daher kann dafür nicht automatisch ein öffentlich vertrauenswürdiges Zertifikat ausgestellt werden.",
+    "auth_https_self_signed_help": "SiteBrush kann mit einem selbstsignierten Zertifikat über HTTPS fortfahren. Der Browser zeigt eine Zertifikatswarnung, weil keine öffentliche Zertifizierungsstelle diese IP-Adresse bestätigt.",
+    "auth_https_self_signed_continue": "Mit selbstsigniertem HTTPS fortfahren",
+    "auth_https_unavailable": "Sicheres HTTPS ist für diese IP-Adresse noch nicht verfügbar.",
+    "auth_https_unavailable_help": "Kehren Sie zu SiteBrush zurück und starten Sie es mit aktiviertem HTTPS neu. Für den Zugriff per IP wird statt ACME ein selbstsigniertes Zertifikat verwendet."
   },
   "tr": {
     "auth_email_changed_title": "E-posta adresi değiştirildi",
@@ -13154,7 +13214,12 @@
     "auth_totp_enabled": "Kimlik doğrulama uygulaması etkin.",
     "auth_totp_disable": "Kimlik doğrulama uygulamasını devre dışı bırak",
     "auth_totp_invalid": "Kimlik doğrulama kodu geçersiz veya süresi dolmuş.",
-    "auth_email_fallback": "Bunun yerine e-posta doğrulamasını kullan"
+    "auth_email_fallback": "Bunun yerine e-posta doğrulamasını kullan",
+    "auth_https_self_signed": "Bu adres bir IP adresidir; bu nedenle otomatik olarak herkese açık güvenilir bir sertifika verilemez.",
+    "auth_https_self_signed_help": "SiteBrush kendi imzalı sertifikasıyla HTTPS üzerinden devam edebilir. Herkese açık bir sertifika yetkilisi bu IP adresini doğrulayamadığı için tarayıcı sertifika uyarısı gösterecektir.",
+    "auth_https_self_signed_continue": "Kendi imzalı HTTPS ile devam et",
+    "auth_https_unavailable": "Bu IP adresi için güvenli HTTPS henüz kullanılamıyor.",
+    "auth_https_unavailable_help": "SiteBrush’a dönün ve HTTPS etkin şekilde yeniden başlatın. IP ile erişim ACME yerine kendi imzalı sertifika kullanır."
   },
   "kk": {
     "auth_email_changed_title": "Электрондық пошта мекенжайы өзгертілді",
@@ -14147,7 +14212,12 @@
     "auth_totp_enabled": "Аутентификатор қолданбасы қосулы.",
     "auth_totp_disable": "Аутентификатор қолданбасын өшіру",
     "auth_totp_invalid": "Аутентификатор коды жарамсыз немесе мерзімі өткен.",
-    "auth_email_fallback": "Оның орнына email арқылы растауды пайдалану"
+    "auth_email_fallback": "Оның орнына email арқылы растауды пайдалану",
+    "auth_https_self_signed": "Бұл мекенжай IP-мекенжай болғандықтан, оған автоматты түрде жалпыға сенімді сертификат шығару мүмкін емес.",
+    "auth_https_self_signed_help": "SiteBrush өздігінен қол қойылған сертификатпен HTTPS арқылы жұмысын жалғастыра алады. Жалпы сертификаттау орталығы бұл IP-мекенжайды растай алмайтындықтан, браузер ескерту көрсетеді.",
+    "auth_https_self_signed_continue": "Өздігінен қол қойылған HTTPS арқылы жалғастыру",
+    "auth_https_unavailable": "Бұл IP-мекенжай үшін қауіпсіз HTTPS әзірге қолжетімсіз.",
+    "auth_https_unavailable_help": "SiteBrush-қа оралып, HTTPS қосылған күйде қайта іске қосыңыз. IP арқылы кіру ACME орнына өздігінен қол қойылған сертификатты пайдаланады."
   },
   "es": {
     "auth_email_changed_title": "Dirección de correo cambiada",
@@ -15140,7 +15210,12 @@
     "auth_totp_enabled": "La aplicación de autenticación está activada.",
     "auth_totp_disable": "Desactivar aplicación de autenticación",
     "auth_totp_invalid": "El código de autenticación no es válido o ha caducado.",
-    "auth_email_fallback": "Usar verificación por correo electrónico"
+    "auth_email_fallback": "Usar verificación por correo electrónico",
+    "auth_https_self_signed": "Esta dirección es una IP, por lo que no se puede emitir automáticamente un certificado público.",
+    "auth_https_self_signed_help": "SiteBrush puede continuar por HTTPS con su certificado autofirmado. El navegador mostrará una advertencia porque ninguna autoridad de certificación pública puede validar esta dirección IP.",
+    "auth_https_self_signed_continue": "Continuar con HTTPS autofirmado",
+    "auth_https_unavailable": "HTTPS seguro todavía no está disponible para esta dirección IP.",
+    "auth_https_unavailable_help": "Vuelve a SiteBrush y reinícialo con HTTPS activado. El acceso por IP utiliza un certificado autofirmado en lugar de ACME."
   },
   "pt": {
     "auth_email_changed_title": "Endereço de e-mail alterado",
@@ -16133,6 +16208,11 @@
     "auth_totp_enabled": "O aplicativo autenticador está ativado.",
     "auth_totp_disable": "Desativar aplicativo autenticador",
     "auth_totp_invalid": "O código do autenticador é inválido ou expirou.",
-    "auth_email_fallback": "Usar verificação por e-mail"
+    "auth_email_fallback": "Usar verificação por e-mail",
+    "auth_https_self_signed": "Este endereço é um IP, portanto não é possível emitir automaticamente um certificado público.",
+    "auth_https_self_signed_help": "O SiteBrush pode continuar por HTTPS com um certificado autoassinado. O navegador exibirá um aviso porque nenhuma autoridade certificadora pública pode validar este endereço IP.",
+    "auth_https_self_signed_continue": "Continuar com HTTPS autoassinado",
+    "auth_https_unavailable": "HTTPS seguro ainda não está disponível para este endereço IP.",
+    "auth_https_unavailable_help": "Volte ao SiteBrush e reinicie-o com HTTPS ativado. O acesso por IP usa um certificado autoassinado em vez de ACME."
   }
 }
