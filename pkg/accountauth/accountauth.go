@@ -125,7 +125,11 @@ func Password(ctx context.Context, tx *sql.Tx, domain, email, password, ip, path
 		token, err := Session(ctx, tx, domain, email, ip, now)
 		return Outcome{Status: "session", Token: token, Email: email, Path: path}, err
 	}
-	if _, err = tx.ExecContext(ctx, `DELETE FROM account_trusted_ips WHERE last_login<=?`, now.Add(-TrustTTL).Unix()); err != nil {
+	return Challenge(ctx, tx, domain, email, ip, path, language, now)
+}
+
+func Challenge(ctx context.Context, tx *sql.Tx, domain, email, ip, path, language string, now time.Time) (Outcome, error) {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM account_trusted_ips WHERE last_login<=?`, now.Add(-TrustTTL).Unix()); err != nil {
 		return Outcome{}, err
 	}
 	allowed, err := Reserve(ctx, tx, domain, email, ip, now)
@@ -134,6 +138,14 @@ func Password(ctx context.Context, tx *sql.Tx, domain, email, password, ip, path
 	}
 	if !allowed {
 		return Outcome{Status: "limited"}, nil
+	}
+	var stored string
+	err = tx.QueryRowContext(ctx, `SELECT password FROM users WHERE domain=? AND email=? AND is_admin=1`, domain, email).Scan(&stored)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Outcome{Status: "credentials"}, nil
+	}
+	if err != nil {
+		return Outcome{}, err
 	}
 	token, err := RandomToken()
 	if err != nil {
