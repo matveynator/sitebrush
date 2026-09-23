@@ -53,6 +53,8 @@ import (
 	"time"
 
 	"github.com/matveynator/sitebrush/v2/pkg/accountauth"
+	"github.com/matveynator/sitebrush/v2/pkg/accountpasskey"
+	"github.com/matveynator/sitebrush/v2/pkg/accounttotp"
 	browserstats "github.com/matveynator/sitebrush/v2/pkg/analytics"
 	"github.com/matveynator/sitebrush/v2/pkg/authmail"
 	"github.com/matveynator/sitebrush/v2/pkg/channelacme"
@@ -121,7 +123,7 @@ const sitebrushHTTPWriteTimeout = 0
 const sitebrushHTTPIdleTimeout = 65 * time.Second
 const sitebrushHTTPReadHeaderTimeout = 5 * time.Second
 const sitebrushHTTP10KeepAliveBufferLimit = 1024 * 1024
-const currentSiteDatabaseSchemaVersion = 4
+const currentSiteDatabaseSchemaVersion = 5
 const siteDatabaseStartupMigrationTimeout = 30 * time.Second
 const pagePasswordSessionTTL = time.Hour
 const serviceMailRelayPath = "/?service_mail_relay"
@@ -7913,6 +7915,8 @@ func (a *App) migrate(ctx context.Context) error {
 		`CREATE TABLE IF NOT EXISTS analytics_reports(domain TEXT PRIMARY KEY,generated_at TEXT,period_start TEXT,period_end TEXT,event_count INTEGER,report_json TEXT);`,
 	}
 	queries = append(queries, accountauth.Schema()...)
+	queries = append(queries, accountpasskey.Schema()...)
+	queries = append(queries, accounttotp.Schema()...)
 	for queryIndex, query := range queries {
 		if _, err := a.db.ExecContext(ctx, query); err != nil {
 			return siteMigrationStepError{step: "base schema statement " + strconv.Itoa(queryIndex+1), err: err}
@@ -7979,6 +7983,10 @@ func requiredSiteDatabaseColumns() []siteDatabaseColumnRequirement {
 		{"account_login_codes", "language", "TEXT NOT NULL DEFAULT 'en'"},
 		{"account_trusted_ips", "last_login", "INTEGER NOT NULL DEFAULT 0"},
 		{"account_code_rates", "sent_count", "INTEGER NOT NULL DEFAULT 0"},
+		{"account_passkeys", "domain", "TEXT"},
+		{"account_webauthn_challenges", "token", "TEXT"},
+		{"account_totp", "domain", "TEXT"},
+		{"account_totp_challenges", "token", "TEXT"},
 		{tableName: "analytics_configuration", columnName: "goals", definition: "TEXT NOT NULL DEFAULT '[]'"},
 		{tableName: "users", columnName: "domain", definition: "TEXT"},
 		{tableName: "pages", columnName: "domain", definition: "TEXT"},
@@ -24129,7 +24137,7 @@ func formatAccountMail(message *mailout.Message, language, domain, secret, link,
 	default:
 		return
 	}
-	content := authmail.Content{Language: language, Direction: "ltr", Domain: domain, Title: translations[titleKey], Reason: translations[reasonKey], Email: message.To, Link: link, Button: translations["auth_return_form"], CodeLabel: translations["profile_password_code"], IPLabel: translations["auth_request_ip"], IP: requestIP, TimeLabel: translations["auth_request_time"], Time: requestedAt, Expiry: translations["auth_expiry_hint"], Ignore: translations["auth_ignore"]}
+	content := authmail.Content{Language: language, Direction: "ltr", Domain: domain, Title: translations[titleKey], Reason: translations[reasonKey], Email: message.To, Link: link, Button: translations["auth_return_form"], CodeLabel: translations["auth_verification_code_label"], IPLabel: translations["auth_request_ip"], IP: requestIP, TimeLabel: translations["auth_request_time"], Time: requestedAt, Expiry: translations["auth_expiry_hint"], Ignore: translations["auth_ignore"]}
 	if language == "fa" || language == "he" {
 		content.Direction = "rtl"
 	}
@@ -24152,12 +24160,8 @@ func formatAccountMail(message *mailout.Message, language, domain, secret, link,
 			content.Link = change.URL
 		}
 	}
-	if content.Code != "" && content.Link != "" && (message.Kind == "account_login_code" || message.Kind == "email_change" || message.Kind == "password_change_code") {
-		if destination, err := url.Parse(content.Link); err == nil {
-			destination.Fragment = "account-code=" + content.Code
-			content.Link = destination.String()
-			content.Button = translations["auth_open_with_code"]
-		}
+	if content.Code != "" && content.Link != "" && message.Kind != "account_login_code" {
+		content.Button = translations["auth_return_form"]
 	}
 	if message.Kind == "account_login_code" {
 		content.Button = translations["auth_login_automatically"]
