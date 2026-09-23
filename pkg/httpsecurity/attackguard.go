@@ -261,12 +261,12 @@ func handleAttackGuardRequest(blocks map[string]SecurityBlock, allowlist map[str
 		if len(window.Distinct) < 256 {
 			window.Distinct[boundedPath(request.Path)] = struct{}{}
 		}
-		if window.PostCount >= 120 || len(window.Distinct) >= 220 {
+		if window.PostCount >= 40 || len(window.Distinct) >= 48 {
 			reason := "mass-write"
-			description := "abnormally high form, API, or page-generation rate"
-			if len(window.Distinct) >= 220 {
+			description := "sent at least 40 write requests within 10 seconds"
+			if len(window.Distinct) >= 48 {
 				reason = "mass-enumeration"
-				description = "abnormally high number of distinct paths"
+				description = "scanned at least 48 distinct paths within 10 seconds"
 			}
 			block := blockSecurityIP(blocks, ip, reason, description, "local", now, defaultSecurityBlockTTL)
 			delete(windows, ip)
