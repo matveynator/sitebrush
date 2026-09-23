@@ -2220,6 +2220,7 @@ type siteAnalyticsEvent struct {
 	GeoLongitude   float64
 	GeoSource      string
 	VisitorID      string
+	TrustedPeer    bool
 	IsAdmin        bool
 	IsAsset        bool
 	IsController   bool
@@ -3300,7 +3301,7 @@ func (a *App) analyticsMiddleware(next http.Handler) http.Handler {
 			}
 		}
 		if a.securityAnalytics != nil && r.URL.Path != "/_sitebrush/analytics" && len(a.securityAnalytics) < cap(a.securityAnalytics) {
-			securityEvent := siteAnalyticsEvent{Bytes: writer.bytesWritten, Domain: a.analyticsEventDomain(r, ""), Path: analyticsBoundedString(r.URL.EscapedPath(), 512), Query: analyticsBoundedString(r.URL.RawQuery, 2048), Method: r.Method, StatusCode: writer.statusCode, OccurredAt: startedAt.UTC(), RemoteAddress: analyticsBoundedString(r.RemoteAddr, 64), Forwarded: analyticsBoundedString(r.Header.Get("Forwarded"), 256), ForwardedFor: analyticsBoundedString(r.Header.Get("X-Forwarded-For"), 256), UserAgent: analyticsBoundedString(r.UserAgent(), 256), AcceptLanguage: analyticsBoundedString(r.Header.Get("Accept-Language"), 64)}
+			securityEvent := siteAnalyticsEvent{Bytes: writer.bytesWritten, Domain: a.analyticsEventDomain(r, ""), Path: analyticsBoundedString(r.URL.EscapedPath(), 512), Query: analyticsBoundedString(r.URL.RawQuery, 2048), Method: r.Method, StatusCode: writer.statusCode, OccurredAt: startedAt.UTC(), RemoteAddress: analyticsBoundedString(r.RemoteAddr, 64), Forwarded: analyticsBoundedString(r.Header.Get("Forwarded"), 256), ForwardedFor: analyticsBoundedString(r.Header.Get("X-Forwarded-For"), 256), UserAgent: analyticsBoundedString(r.UserAgent(), 256), AcceptLanguage: analyticsBoundedString(r.Header.Get("Accept-Language"), 64), TrustedPeer: sitebrushPeerRequestTrusted(r, startedAt.UTC())}
 			select {
 			case a.securityAnalytics <- securityEvent:
 			default:
@@ -4269,7 +4270,7 @@ func (a *App) runSecurityAnalytics(stop <-chan struct{}) {
 				continue
 			}
 			address := clientIPAddress(&http.Request{RemoteAddr: event.RemoteAddress, Header: http.Header{"Forwarded": []string{event.Forwarded}, "X-Forwarded-For": []string{event.ForwardedFor}}})
-			category := state.Record(browserstats.RequestObservation{Time: event.OccurredAt, IP: address, Path: event.Path, Query: event.Query, Method: event.Method, Status: event.StatusCode, Bytes: event.Bytes, Agent: event.UserAgent, Language: analyticsLanguageLabel(event.AcceptLanguage)})
+			category := state.Record(browserstats.RequestObservation{Time: event.OccurredAt, IP: address, Path: event.Path, Query: event.Query, Method: event.Method, Status: event.StatusCode, Bytes: event.Bytes, Agent: event.UserAgent, Language: analyticsLanguageLabel(event.AcceptLanguage), Trusted: event.TrustedPeer})
 			if category != "" && a.attackGuard != nil {
 				_, blocked := a.attackGuard.ObserveIncident(address, category, "security analytics detected "+category, event.OccurredAt)
 				if blocked && a.securityGlobalSignals != nil {
