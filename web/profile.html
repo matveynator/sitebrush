@@ -24,7 +24,7 @@
     <p>{{index .T "auth_passkey_offer_text"}}</p>
     <p id="SiteBrushPasskeyOfferStatus" class="text-danger" role="status"></p>
     <div class="auth-actions">
-      <button type="button" data-passkey-create data-account-csrf="{{.AccountCSRF}}" data-passkey-start="?profile&passkey_begin" data-passkey-finish="?profile&passkey_finish" data-passkey-status="#SiteBrushPasskeyOfferStatus" data-passkey-error="{{index .T "auth_passkey_failed"}}" data-passkey-unavailable="{{index .T "auth_passkey_unavailable"}}">{{index .T "auth_passkey_create"}}</button>
+      <button type="button" data-passkey-create data-account-csrf="{{.AccountCSRF}}" data-passkey-start="?profile&passkey_begin" data-passkey-finish="?profile&passkey_finish" data-passkey-status="#SiteBrushPasskeyOfferStatus" data-passkey-error="{{index .T "auth_passkey_failed"}}" data-passkey-unavailable="{{index .T "auth_passkey_unavailable"}}" data-passkey-success-redirect="{{.PasskeyContinuePath}}">{{index .T "auth_passkey_create"}}</button>
       <a class="btn btn-outline-secondary" href="{{.PasskeyContinuePath}}">{{index .T "auth_passkey_continue"}}</a>
     </div>
   </section>
