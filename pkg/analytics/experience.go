@@ -62,7 +62,7 @@ type SessionSummary struct {
 	Steps                                                                                                []string
 	Tabs                                                                                                 map[string][]string
 	LastViews                                                                                            map[string]string
-	Address                                                                                              string `json:"-"`
+	Address                                                                                              string `json:"address,omitempty"`
 }
 type Measures struct {
 	MismatchViews                                                                                       int
