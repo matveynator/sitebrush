@@ -244,6 +244,9 @@ func approved(records map[string]map[string]evidenceSource, now time.Time) []Ent
 		}
 		return entries[i].Confirmations > entries[j].Confirmations
 	})
+	if len(entries) > 512 {
+		entries = entries[:512]
+	}
 	return entries
 }
 
