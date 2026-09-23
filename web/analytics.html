@@ -379,6 +379,75 @@
       .report-grid { grid-template-columns:repeat(auto-fit, minmax(320px, 1fr)); }
       .world-map-layout { grid-template-columns:1fr; }
     }
+    .analytics-tabs {
+      display:flex;
+      gap:8px;
+      padding:4px;
+      margin-bottom:20px;
+      border:1px solid var(--bs-border-color);
+      border-radius:12px;
+      background:var(--bs-tertiary-bg);
+      width:max-content;
+      max-width:100%;
+    }
+    .analytics-tabs a {
+      padding:8px 14px;
+      border-radius:9px;
+      text-decoration:none;
+      color:var(--bs-body-color);
+      white-space:nowrap;
+    }
+    .analytics-tabs a.active {
+      background:var(--bs-body-bg);
+      box-shadow:0 1px 4px rgba(0,0,0,.08);
+      font-weight:600;
+    }
+    .hourly-chart-grid {
+      display:grid;
+      grid-template-columns:repeat(2,minmax(0,1fr));
+      gap:16px;
+      margin-bottom:24px;
+    }
+    .hourly-chart {
+      height:220px;
+      display:grid;
+      grid-template-columns:repeat(24,minmax(4px,1fr));
+      align-items:end;
+      gap:3px;
+      padding:12px 8px 28px;
+      border-bottom:1px solid var(--bs-border-color);
+      position:relative;
+    }
+    .hourly-chart-bar {
+      min-height:2px;
+      border-radius:4px 4px 1px 1px;
+      background:var(--theme-chart-1);
+      opacity:.86;
+      position:relative;
+    }
+    .hourly-chart-bar:hover { opacity:1; }
+    .hourly-chart-label {
+      position:absolute;
+      bottom:-22px;
+      left:50%;
+      transform:translateX(-50%);
+      font-size:9px;
+      color:var(--bs-secondary-color);
+    }
+    .hourly-chart-value {
+      position:absolute;
+      left:50%;
+      bottom:100%;
+      transform:translate(-50%,-3px);
+      font-size:9px;
+      color:var(--bs-secondary-color);
+      display:none;
+      white-space:nowrap;
+    }
+    .hourly-chart-bar:hover .hourly-chart-value { display:block; }
+    @media (max-width: 900px) {
+      .hourly-chart-grid { grid-template-columns:1fr; }
+    }
     @media (max-width: 992px) {
       .analytics-page-shell {
         width:min(100% - 20px, 100%);
@@ -464,8 +533,49 @@
     <input class="form-control w-auto" name="language" placeholder="{{index .T "ax_language"}}" value="{{.ExperienceFilter.Language}}">
     <button class="btn btn-outline-secondary">{{index .T "ax_filter"}}</button>
   </form>
-  <nav class="d-flex flex-wrap gap-3 mb-4"><a href="#session-map">{{index .T "ax_map"}}</a><a href="#sources">{{index .T "ax_sources"}}</a><a href="#journeys">{{index .T "ax_journeys"}}</a><a href="#sessions">{{index .T "ax_sessions"}}</a><a href="#technical-analytics">{{index .T "ax_technical"}}</a><a href="#security">{{index .T "ax_security"}}</a></nav>
-  <section id="session-map" class="card mb-4"><div class="card-body"><h2 class="h5">{{index .T "ax_map"}}</h2><p class="small">{{index .T "ax_map_hint"}}</p><p class="small">{{index .T "ax_unknown_geo"}}: {{.UnknownGeo}}</p><div id="analytics-session-map" class="world-map-panel"></div></div></section>
+  <nav class="analytics-tabs" aria-label="Analytics sections">
+    <a href="?analytics&amp;tab=analytics&amp;days={{.BrowserAnalytics.Days}}" class="{{if eq .AnalyticsTab "analytics"}}active{{end}}">{{index .T "analytics_title"}}</a>
+    <a href="?analytics&amp;tab=security&amp;days={{.BrowserAnalytics.Days}}" class="{{if eq .AnalyticsTab "security"}}active{{end}}">{{index .T "ax_security"}}</a>
+    <a href="?analytics&amp;tab=technical&amp;days={{.BrowserAnalytics.Days}}" class="{{if eq .AnalyticsTab "technical"}}active{{end}}">{{index .T "ax_technical"}}</a>
+  </nav>
+
+  {{if eq .AnalyticsTab "analytics"}}
+  <nav class="d-flex flex-wrap gap-3 mb-4"><a href="#session-map">{{index .T "ax_map"}}</a><a href="#sources">{{index .T "ax_sources"}}</a><a href="#journeys">{{index .T "ax_journeys"}}</a><a href="#sessions">{{index .T "ax_sessions"}}</a></nav>
+  <section id="session-map" class="card world-map-card mb-4">
+    <div class="card-body">
+      <h2 class="h5">{{index .T "ax_map"}}</h2>
+      <p class="small">{{index .T "ax_map_hint"}}</p>
+      <div class="world-map-layout">
+        <div id="analytics-visitor-map" class="world-map-panel" aria-label="{{.Report.MapTitle}}">
+          {{if not .Report.MapPoints}}<div class="world-map-empty">{{index .T "analytics_no_data"}}</div>{{end}}
+        </div>
+        <div>
+          {{if .Report.MapPoints}}
+          <ul class="world-map-list">
+            {{range .Report.MapPoints}}
+            <li><span><i class="world-map-list-color" style="color:{{.Color}}; background:{{.Color}};"></i>{{.Label}}</span><strong>{{.Count}}</strong><small>{{.Percent}} · {{.Detail}}</small></li>
+            {{end}}
+          </ul>
+          {{else}}
+          <p class="text-muted mb-0">{{index .T "analytics_no_data"}}</p>
+          {{end}}
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <div class="hourly-chart-grid">
+    <section class="card"><div class="card-body">
+      <h2 class="h5">Visits by visitors' local hour</h2>
+      <p class="small text-muted">Selected period · local clock time reported by each visitor's browser.</p>
+      <div id="analytics-local-hour-chart" class="hourly-chart" aria-label="Visits by visitors local hour"></div>
+    </div></section>
+    <section class="card"><div class="card-body">
+      <h2 class="h5">Requests by server local hour</h2>
+      <p class="small text-muted">Selected period · server local time. Use this to compare load and choose maintenance windows.</p>
+      <div id="analytics-server-hour-chart" class="hourly-chart" aria-label="Requests by server local hour"></div>
+    </div></section>
+  </div>
   <section id="sources" class="card mb-4"><div class="card-body">
     <h2 class="h5">{{index .T "ax_sources"}}</h2><p class="small">{{index .T "ax_attribution_hint"}}</p>
     <div class="table-responsive"><table class="table"><thead><tr><th>{{index .T "ax_source"}}</th><th>{{index .T "ax_sessions"}}</th><th>{{index .T "ax_views"}}</th><th>{{index .T "ax_actions"}}</th>{{if .Experience.GoalsConfigured}}<th>{{index .T "ax_meaningful"}}</th>{{end}}<th>{{index .T "ax_returns"}}</th></tr></thead><tbody>
@@ -504,7 +614,9 @@
   <details class="card mb-4"><summary class="card-body">{{index .T "ax_crawlers"}}</summary><div class="card-body"><p class="small">{{index .T "ax_bot_hint"}}</p><div class="table-responsive"><table class="table"><thead><tr><th>{{index .T "ax_audience"}}</th><th>User-Agent</th><th>{{index .T "ax_page"}}</th><th>{{index .T "ax_requests"}}</th></tr></thead><tbody>{{range .Security.Groups}}{{if ne .Class "unknown"}}<tr><td>{{index $.T (print "ax_class_" .Class)}}</td><td>{{.Agent}}</td><td>{{.Path}}</td><td>{{.Count}}</td></tr>{{end}}{{end}}</tbody></table></div></div></details>
 
   <details class="card mb-4"><summary class="card-body">{{index .T "ax_goals"}}</summary><div class="card-body"><p>{{index .T "ax_goals_hint"}}</p><p>{{index .T "ax_goals_examples_hint"}}</p><pre class="border rounded p-3">{{index .T "ax_goals_examples"}}</pre><p class="small">{{index .T "ax_goals_action_example"}}</p><pre class="border rounded p-3"><code>&lt;a href="/download/" sitebrush-data-analytics-action="download"&gt;Download&lt;/a&gt;</code></pre><form method="post" action="?analytics"><textarea class="form-control" name="goals" rows="5" maxlength="12000" placeholder="Download | action | download">{{.GoalsText}}</textarea><button class="btn btn-outline-secondary mt-2">{{index .T "ax_save"}}</button></form></div></details>
-  <details id="technical-analytics" class="card"><summary class="card-body">{{index .T "ax_technical"}}</summary><div class="card-body">
+  {{end}}
+  {{if eq .AnalyticsTab "technical"}}
+  <section id="technical-analytics" class="card"><div class="card-body">
   <h2 class="h5">{{index .T "analytics_browser_technical"}}</h2>
   <p class="small">{{index .T "analytics_browser_technical_hint"}}</p>
   <div class="alert alert-secondary">
@@ -525,32 +637,7 @@
     {{end}}
   </div>
 
-  <section class="card world-map-card mb-4">
-    <div class="card-body">
-      <h2 class="h5">{{.Report.MapTitle}}</h2>
-      <p class="text-muted small">{{.Report.MapHint}} <span class="world-map-attribution">{{.Report.MapAttribution}}</span></p>
-      <div class="world-map-layout">
-        <div id="analytics-visitor-map" class="world-map-panel" aria-label="{{.Report.MapTitle}}">
-          {{if not .Report.MapPoints}}<div class="world-map-empty">{{index .T "analytics_no_data"}}</div>{{end}}
-        </div>
-        <div>
-          {{if .Report.MapPoints}}
-          <ul class="world-map-list">
-            {{range .Report.MapPoints}}
-            <li>
-              <span><i class="world-map-list-color" style="color:{{.Color}}; background:{{.Color}};"></i>{{.Label}}</span>
-              <strong>{{.Count}}</strong>
-              <small>{{.Percent}} · {{.Detail}}</small>
-            </li>
-            {{end}}
-          </ul>
-          {{else}}
-          <p class="text-muted mb-0">{{index .T "analytics_no_data"}}</p>
-          {{end}}
-        </div>
-      </div>
-    </div>
-  </section>
+
 
   <div class="report-grid">
     {{range .Report.Sections}}{{if .Rows}}
@@ -591,7 +678,9 @@
     </section>
     {{end}}{{end}}
   </div>
-</div></details>
+</div></section>
+  {{end}}
+  {{if eq .AnalyticsTab "security"}}
   <section id="security" class="card mb-4"><div class="card-body">
     <h2 class="h5">{{index .T "ax_security"}}</h2>
     <p>{{.Security.Suspicious}} · {{index .T "ax_security_independent"}}</p>
@@ -604,14 +693,14 @@
       <div class="col-md-4"><div class="security-status-card security-danger"><strong>Blocked</strong><div class="small">Confirmed malicious activity is rejected before expensive processing.</div></div></div>
     </div>
 
-    <form method="post" action="?analytics#security" class="d-flex flex-wrap align-items-center gap-3 border rounded p-3 mb-3">
+    <form method="post" action="?analytics&amp;tab=security" class="d-flex flex-wrap align-items-center gap-3 border rounded p-3 mb-3">
       <input type="hidden" name="security_action" value="settings">
       <label class="form-check"><input class="form-check-input" type="checkbox" name="auto_block" {{if .SecuritySettings.AutoBlock}}checked{{end}}> <span class="form-check-label">Automatic blocking</span></label>
       <label class="form-check"><input class="form-check-input" type="checkbox" name="global_sync" {{if .SecuritySettings.GlobalSync}}checked{{end}}> <span class="form-check-label">Global reputation sync</span></label>
       <button class="btn btn-outline-secondary btn-sm">Save security settings</button>
     </form>
 
-    <form method="post" action="?analytics#security" class="row g-2 border rounded p-3 mb-3 security-status-card security-safe">
+    <form method="post" action="?analytics&amp;tab=security" class="row g-2 border rounded p-3 mb-3 security-status-card security-safe">
       <input type="hidden" name="security_action" value="allow">
       <div class="col-md-3"><input class="form-control" name="ip" placeholder="Trusted IP address" required></div>
       <div class="col-md-7"><input class="form-control" name="comment" placeholder="Why this IP must never be blocked"></div>
@@ -629,7 +718,7 @@
             <td>{{.Comment}}</td>
             <td>{{.AddedAt.Format "2006-01-02 15:04 UTC"}}</td>
             <td>
-              <form method="post" action="?analytics#security">
+              <form method="post" action="?analytics&amp;tab=security">
                 <input type="hidden" name="security_action" value="disallow">
                 <input type="hidden" name="ip" value="{{.IP}}">
                 <button class="btn btn-outline-secondary btn-sm">Remove</button>
@@ -643,7 +732,7 @@
       </table>
     </div>
 
-    <form method="post" action="?analytics#security" class="row g-2 border rounded p-3 mb-3">
+    <form method="post" action="?analytics&amp;tab=security" class="row g-2 border rounded p-3 mb-3">
       <input type="hidden" name="security_action" value="add">
       <div class="col-md-2"><input class="form-control" name="ip" placeholder="IP address" required></div>
       <div class="col-md-2"><input class="form-control" name="reason" placeholder="Reason" value="manual"></div>
@@ -667,7 +756,7 @@
             <td>{{.ExpiresAt.Format "2006-01-02 15:04 UTC"}}</td>
             <td>{{.Episodes}}</td>
             <td>
-              <form method="post" action="?analytics#security">
+              <form method="post" action="?analytics&amp;tab=security">
                 <input type="hidden" name="security_action" value="unthrottle">
                 <input type="hidden" name="ip" value="{{.IP}}">
                 <button class="btn btn-outline-secondary btn-sm">Stop throttle</button>
@@ -691,7 +780,7 @@
           <tr class="security-row-danger">
             <td><code>{{.IP}}</code><div class="small text-muted">{{.IncidentID}}</div>{{if or .Country .City .ClientClass}}<div class="small mt-1">{{if .Country}}{{.Country}}{{if .City}} · {{.City}}{{end}}{{end}}{{if .ClientClass}}{{if or .Country .City}} · {{end}}{{.ClientClass}}{{end}}</div>{{end}}{{if .Agent}}<div class="small text-muted text-break">{{.Agent}}</div>{{end}}</td>
             <td>
-              <form method="post" action="?analytics#security" class="d-flex flex-column gap-1">
+              <form method="post" action="?analytics&amp;tab=security" class="d-flex flex-column gap-1">
                 <input type="hidden" name="security_action" value="update">
                 <input type="hidden" name="ip" value="{{.IP}}">
                 <input class="form-control form-control-sm" name="reason" value="{{.Reason}}">
@@ -705,7 +794,7 @@
             <td>{{.ExpiresAt.Format "2006-01-02 15:04 UTC"}}</td>
             <td>{{.Violations}}</td>
             <td>
-              <form method="post" action="?analytics#security">
+              <form method="post" action="?analytics&amp;tab=security">
                 <input type="hidden" name="security_action" value="remove">
                 <input type="hidden" name="ip" value="{{.IP}}">
                 <button class="btn btn-outline-secondary btn-sm">Unblock</button>
@@ -746,8 +835,11 @@
     <h3 class="h6">Detected security incidents</h3>
     {{range .Security.Incidents}}<details class="border-bottom py-2"><summary>{{if .PossibleExposure}}⚠ {{index $.T "ax_exposure"}} · {{end}}{{.IP}} · {{.Count}} · {{.Last.Format "2006-01-02 15:04 UTC"}}</summary><p>{{.Country}} {{.City}} · {{.Agent}}</p><ul>{{range $category,$count:=.Categories}}<li>{{index $.T (print "ax_risk_" $category)}} × {{$count}}</li>{{end}}</ul><table class="table"><tbody>{{range .Examples}}<tr><td>{{.First.Format "15:04:05"}} — {{.Last.Format "15:04:05"}}</td><td>{{.Method}} {{.Path}}</td><td>{{.Status}}</td><td>× {{.Count}}</td></tr>{{end}}</tbody></table></details>{{else}}<p>{{index .T "ax_no_incidents"}}</p>{{end}}
   </div></section>
+  {{end}}
 </div>
 <script type="application/json" id="analytics-map-points">{{.Report.MapJSON}}</script>
+<script type="application/json" id="analytics-local-hours">{{.LocalHoursJSON}}</script>
+<script type="application/json" id="analytics-server-hours">{{.ServerHoursJSON}}</script>
 <script src="/p/static/leaflet.min.js"></script>
 <script>
 (function renderAnalyticsShareBars() {
@@ -888,6 +980,45 @@
       fillElement.style.width = normalizedShare + '%';
     }
   }
+})();
+
+(function renderAnalyticsHourlyCharts() {
+  function parseHours(elementID) {
+    const element = document.getElementById(elementID);
+    if (!element) return [];
+    try {
+      const values = JSON.parse(element.textContent || '[]');
+      return Array.isArray(values) ? values.slice(0, 24) : [];
+    } catch (error) {
+      return [];
+    }
+  }
+
+  function renderHours(chartID, counts) {
+    const chart = document.getElementById(chartID);
+    if (!chart) return;
+    let maximum = 0;
+    for (const count of counts) maximum = Math.max(maximum, Number(count) || 0);
+    for (let hour = 0; hour < 24; hour += 1) {
+      const count = Number(counts[hour]) || 0;
+      const bar = document.createElement('div');
+      bar.className = 'hourly-chart-bar';
+      bar.style.height = (maximum > 0 ? Math.max(1, count * 100 / maximum) : 1) + '%';
+      bar.setAttribute('title', String(hour).padStart(2, '0') + ':00 · ' + count);
+      const value = document.createElement('span');
+      value.className = 'hourly-chart-value';
+      value.textContent = String(count);
+      const label = document.createElement('span');
+      label.className = 'hourly-chart-label';
+      label.textContent = hour % 3 === 0 ? String(hour).padStart(2, '0') : '';
+      bar.appendChild(value);
+      bar.appendChild(label);
+      chart.appendChild(bar);
+    }
+  }
+
+  renderHours('analytics-local-hour-chart', parseHours('analytics-local-hours'));
+  renderHours('analytics-server-hour-chart', parseHours('analytics-server-hours'));
 })();
 
 (function renderAnalyticsVisitorMap() {
