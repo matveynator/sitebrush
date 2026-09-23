@@ -6024,11 +6024,22 @@ func (a *App) analyticsPage(w http.ResponseWriter, r *http.Request) {
 	}
 	security := browserstats.SecurityReport{}
 	securityBlocks := []httpsecurity.SecurityBlock{}
+	securityLocalBlocks := []httpsecurity.SecurityBlock{}
+	securityGlobalBlocks := []httpsecurity.SecurityBlock{}
+	securityAllowlist := []httpsecurity.SecurityAllow{}
 	securityThrottles := []httpsecurity.SecurityThrottle{}
 	securitySettings := httpsecurity.SecuritySettings{}
 	if a.attackGuard != nil {
 		securityBlocks, _ = a.attackGuard.Snapshot(time.Now().UTC())
+		securityAllowlist, _ = a.attackGuard.Allowlist()
 		securitySettings, _ = a.attackGuard.Settings()
+		for _, securityBlock := range securityBlocks {
+			if securityBlock.Source == "global" {
+				securityGlobalBlocks = append(securityGlobalBlocks, securityBlock)
+				continue
+			}
+			securityLocalBlocks = append(securityLocalBlocks, securityBlock)
+		}
 	}
 	if a.throttleGuard != nil {
 		securityThrottles, _ = a.throttleGuard.Snapshot(time.Now().UTC())
@@ -6061,7 +6072,7 @@ func (a *App) analyticsPage(w http.ResponseWriter, r *http.Request) {
 		"ReturnPath":       requestedReturnPath(r),
 		"Report":           analyticsReportView(report, translationsForRequest(r)),
 		"BrowserAnalytics": browserDashboard,
-		"Experience":       experience, "ExperienceFilter": filter, "Security": security, "SecurityBlocks": securityBlocks, "SecurityThrottles": securityThrottles, "SecuritySettings": securitySettings, "GoalsText": strings.Join(goalLines, "\n"), "SessionMapJSON": template.JS(mapJSON), "PeriodOptions": []int{1, 7, 30, 90}, "UnknownGeo": unknownGeo, "ServerRequests": serverRequests,
+		"Experience":       experience, "ExperienceFilter": filter, "Security": security, "SecurityBlocks": securityBlocks, "SecurityLocalBlocks": securityLocalBlocks, "SecurityGlobalBlocks": securityGlobalBlocks, "SecurityAllowlist": securityAllowlist, "SecurityThrottles": securityThrottles, "SecuritySettings": securitySettings, "GoalsText": strings.Join(goalLines, "\n"), "SessionMapJSON": template.JS(mapJSON), "PeriodOptions": []int{1, 7, 30, 90}, "UnknownGeo": unknownGeo, "ServerRequests": serverRequests,
 	})
 }
 
@@ -6229,6 +6240,13 @@ func (a *App) handleAnalyticsSecurityAction(w http.ResponseWriter, r *http.Reque
 		} else {
 			err = a.throttleGuard.Remove(r.FormValue("ip"))
 		}
+	case "allow":
+		err = a.attackGuard.Allow(r.FormValue("ip"), r.FormValue("comment"))
+		if err == nil && a.throttleGuard != nil {
+			_ = a.throttleGuard.Remove(r.FormValue("ip"))
+		}
+	case "disallow":
+		err = a.attackGuard.Disallow(r.FormValue("ip"))
 	case "update":
 		err = a.attackGuard.Update(r.FormValue("ip"), r.FormValue("reason"), r.FormValue("description"))
 	case "settings":
@@ -6258,6 +6276,11 @@ func (a *App) authAbuseMiddleware(next http.Handler) http.Handler {
 		now := time.Now().UTC()
 		clientIP := clientIPAddress(r)
 		trusted := httpsecurity.IsLocalRequest(r) || sitebrushPeerRequestTrusted(r, now)
+		allowed := a.attackGuard != nil && a.attackGuard.IsAllowed(clientIP)
+		if allowed {
+			next.ServeHTTP(w, r)
+			return
+		}
 
 		if a.attackGuard != nil {
 			block, blocked := a.attackGuard.ObserveRequestFast(clientIP, r.URL.EscapedPath(), r.Method, trusted, now)
