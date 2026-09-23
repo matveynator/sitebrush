@@ -18,6 +18,17 @@
     <h1 class="section-heading"><img src="/p/static/profile.png" class="section-icon" alt=""><a href="/">{{.Domain}}</a> <small class="text-muted">| {{.Title}}</small></h1>
     <a class="btn btn-outline-secondary" href="/">{{index .T "back_to_uri"}}</a>
   </div>
+  {{if .PasskeyOffer}}
+  <section class="authentication-card profile-form" aria-labelledby="SiteBrushPasskeyOfferTitle">
+    <h2 id="SiteBrushPasskeyOfferTitle">{{index .T "auth_passkey_offer_title"}}</h2>
+    <p>{{index .T "auth_passkey_offer_text"}}</p>
+    <p id="SiteBrushPasskeyOfferStatus" class="text-danger" role="status"></p>
+    <div class="auth-actions">
+      <button type="button" data-passkey-create data-account-csrf="{{.AccountCSRF}}" data-passkey-start="?profile&passkey_begin" data-passkey-finish="?profile&passkey_finish" data-passkey-status="#SiteBrushPasskeyOfferStatus" data-passkey-error="{{index .T "auth_passkey_failed"}}" data-passkey-unavailable="{{index .T "auth_passkey_unavailable"}}">{{index .T "auth_passkey_create"}}</button>
+      <a class="btn btn-outline-secondary" href="{{.PasskeyContinuePath}}">{{index .T "auth_passkey_continue"}}</a>
+    </div>
+  </section>
+  {{end}}
   {{if and .Status (not .EmailDelivery.Show) (not .EmailChange.Step)}}<div class="alert profile-alert alert-{{if .StatusClass}}{{.StatusClass}}{{else}}warning{{end}}" role="alert">
     <span>{{.Status}}</span>
     {{if .EmailDelivery.Show}}<button class="profile-delivery-link" type="button" data-profile-delivery-open>{{.EmailDelivery.LinkText}}</button>{{end}}
@@ -151,8 +162,8 @@
 <section class="authentication-card profile-form">
   <h2>{{index .T "auth_passkey_title"}}</h2>
   <p>{{index .T "auth_passkey_offer_text"}}</p>
-  <p id="SiteBrushPasskeyCreateStatus" class="text-danger" role="status"></p>
-  <button type="button" data-passkey-create data-account-csrf="{{.AccountCSRF}}" data-passkey-start="?profile&passkey_begin" data-passkey-finish="?profile&passkey_finish" data-passkey-status="#SiteBrushPasskeyCreateStatus" data-passkey-error="{{index .T "auth_passkey_failed"}}" data-passkey-unavailable="{{index .T "auth_passkey_unavailable"}}">{{index .T "auth_passkey_create"}}</button>
+  {{if not .PasskeyOffer}}<p id="SiteBrushPasskeyCreateStatus" class="text-danger" role="status"></p>
+  <button type="button" data-passkey-create data-account-csrf="{{.AccountCSRF}}" data-passkey-start="?profile&passkey_begin" data-passkey-finish="?profile&passkey_finish" data-passkey-status="#SiteBrushPasskeyCreateStatus" data-passkey-error="{{index .T "auth_passkey_failed"}}" data-passkey-unavailable="{{index .T "auth_passkey_unavailable"}}">{{index .T "auth_passkey_create"}}</button>{{end}}
   {{range .Passkeys}}
   <form method="post" action="?profile" class="auth-trusted-row">
     <input type="hidden" name="profile_action" value="passkey_delete">
