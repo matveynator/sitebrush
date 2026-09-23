@@ -519,6 +519,7 @@
       <small class="text-muted">| {{index .T "analytics_title"}}</small>
     </h1>
     <div class="page-header-actions">
+      <span class="btn btn-outline-secondary disabled">Server <span id="analytics-server-clock" data-server-time="{{.ServerNowRFC3339}}">{{.ServerNowDisplay}}</span> · {{.ServerTimezone}}</span>
       <a id="analytics-return-link" class="btn btn-outline-secondary analytics-back-link" href="{{.ReturnPath}}" data-fallback="{{.ReturnPath}}">{{index .T "back_to_uri"}}</a>
     </div>
   </div>
@@ -528,16 +529,12 @@
     <input type="hidden" name="tab" value="{{.AnalyticsTab}}">
     <select name="days" aria-label="{{index .T "analytics_period"}}" class="form-select w-auto">{{range $days := .PeriodOptions}}<option value="{{$days}}" {{if eq $.BrowserAnalytics.Days $days}}selected{{end}}>{{$days}} {{index $.T "ax_days"}}</option>{{end}}</select>
     <select name="traffic" class="form-select w-auto" aria-label="{{index .T "ax_audience"}}"><option value="human" {{if eq .ExperienceFilter.Traffic "human"}}selected{{end}}>{{index .T "ax_humans"}}</option><option value="bots" {{if eq .ExperienceFilter.Traffic "bots"}}selected{{end}}>{{index .T "ax_bots"}}</option><option value="all" {{if eq .ExperienceFilter.Traffic "all"}}selected{{end}}>{{index .T "ax_all"}}</option></select>
-    <input class="form-control w-auto" name="source" placeholder="{{index .T "ax_source"}}" value="{{.ExperienceFilter.Source}}">
-    <input type="hidden" name="campaign" value="{{.ExperienceFilter.Campaign}}">
-    <input class="form-control w-auto" name="page" placeholder="{{index .T "ax_page"}}" value="{{.ExperienceFilter.Page}}">
-    <input class="form-control w-auto" name="language" placeholder="{{index .T "ax_language"}}" value="{{.ExperienceFilter.Language}}">
+    <input type="hidden" name="campaign" value="">
     <button class="btn btn-outline-secondary">{{index .T "ax_filter"}}</button>
   </form>
   <nav class="analytics-tabs" aria-label="Analytics sections">
     <a href="?analytics&amp;tab=analytics&amp;days={{.BrowserAnalytics.Days}}" class="{{if eq .AnalyticsTab "analytics"}}active{{end}}">{{index .T "analytics_title"}}</a>
     <a href="?analytics&amp;tab=security&amp;days={{.BrowserAnalytics.Days}}" class="{{if eq .AnalyticsTab "security"}}active{{end}}">{{index .T "ax_security"}}</a>
-    <a href="?analytics&amp;tab=technical&amp;days={{.BrowserAnalytics.Days}}" class="{{if eq .AnalyticsTab "technical"}}active{{end}}">{{index .T "ax_technical"}}</a>
   </nav>
 
   {{if eq .AnalyticsTab "analytics"}}
@@ -577,6 +574,7 @@
       <div id="analytics-server-hour-chart" class="hourly-chart" aria-label="Requests by server local hour"></div>
     </div></section>
   </div>
+  <section id="analytics-goals" class="card mb-4"><div class="card-body"><h2 class="h5">{{index .T "ax_goals"}}</h2><p>{{index .T "ax_goals_hint"}}</p><p>{{index .T "ax_goals_examples_hint"}}</p><pre class="border rounded p-3">{{index .T "ax_goals_examples"}}</pre><p class="small">{{index .T "ax_goals_action_example"}}</p><pre class="border rounded p-3"><code>&lt;a href="/download/" sitebrush-data-analytics-action="download"&gt;Download&lt;/a&gt;</code></pre><form method="post" action="?analytics"><textarea class="form-control" name="goals" rows="5" maxlength="12000" placeholder="Download | action | download">{{.GoalsText}}</textarea><button class="btn btn-outline-secondary mt-2">{{index .T "ax_save"}}</button></form></div></section>
   <section id="sources" class="card mb-4"><div class="card-body">
     <h2 class="h5">{{index .T "ax_sources"}}</h2><p class="small">{{index .T "ax_attribution_hint"}}</p>
     <div class="table-responsive"><table class="table"><thead><tr><th>{{index .T "ax_source"}}</th><th>{{index .T "ax_sessions"}}</th><th>{{index .T "ax_views"}}</th><th>{{index .T "ax_actions"}}</th>{{if .Experience.GoalsConfigured}}<th>{{index .T "ax_meaningful"}}</th>{{end}}<th>{{index .T "ax_returns"}}</th></tr></thead><tbody>
@@ -614,10 +612,9 @@
   <details id="browser-returns" class="card mb-4"><summary class="card-body">{{index .T "ax_returns"}}</summary><div class="card-body"><p class="small">{{index .T "analytics_browser_retention_hint"}}</p>{{range .BrowserAnalytics.Report.Retention}}<span class="me-3">D{{.Day}}: {{.Returned}} / {{.Eligible}}</span>{{end}}{{range .BrowserAnalytics.ReturnSections}}<h3 class="h6">{{.Title}}</h3><ul>{{range .Rows}}<li>{{.Label}}: {{.Value}}</li>{{end}}</ul>{{end}}</div></details>
   <details class="card mb-4"><summary class="card-body">{{index .T "ax_crawlers"}}</summary><div class="card-body"><p class="small">{{index .T "ax_bot_hint"}}</p><div class="table-responsive"><table class="table"><thead><tr><th>{{index .T "ax_audience"}}</th><th>User-Agent</th><th>{{index .T "ax_page"}}</th><th>{{index .T "ax_requests"}}</th></tr></thead><tbody>{{range .Security.Groups}}{{if ne .Class "unknown"}}<tr><td>{{index $.T (print "ax_class_" .Class)}}</td><td>{{.Agent}}</td><td>{{.Path}}</td><td>{{.Count}}</td></tr>{{end}}{{end}}</tbody></table></div></div></details>
 
-  <details class="card mb-4"><summary class="card-body">{{index .T "ax_goals"}}</summary><div class="card-body"><p>{{index .T "ax_goals_hint"}}</p><p>{{index .T "ax_goals_examples_hint"}}</p><pre class="border rounded p-3">{{index .T "ax_goals_examples"}}</pre><p class="small">{{index .T "ax_goals_action_example"}}</p><pre class="border rounded p-3"><code>&lt;a href="/download/" sitebrush-data-analytics-action="download"&gt;Download&lt;/a&gt;</code></pre><form method="post" action="?analytics"><textarea class="form-control" name="goals" rows="5" maxlength="12000" placeholder="Download | action | download">{{.GoalsText}}</textarea><button class="btn btn-outline-secondary mt-2">{{index .T "ax_save"}}</button></form></div></details>
   {{end}}
-  {{if eq .AnalyticsTab "technical"}}
-  <section id="technical-analytics" class="card"><div class="card-body">
+  {{if eq .AnalyticsTab "analytics"}}
+  <section id="technical-analytics" class="card mt-4"><div class="card-body">
   <h2 class="h5">{{index .T "analytics_browser_technical"}}</h2>
   <p class="small">{{index .T "analytics_browser_technical_hint"}}</p>
   <div class="alert alert-secondary">
@@ -1166,6 +1163,22 @@
       row.hidden = query !== '' && !row.textContent.toLowerCase().includes(query);
     }
   });
+})();
+</script>
+<script>
+(function startAnalyticsServerClock() {
+  'use strict';
+  const clock = document.getElementById('analytics-server-clock');
+  if (!clock) return;
+  const serverStart = Date.parse(clock.dataset.serverTime || '');
+  if (!Number.isFinite(serverStart)) return;
+  const clientStart = Date.now();
+  function renderServerClock() {
+    const currentServerTime = new Date(serverStart + Date.now() - clientStart);
+    clock.textContent = new Intl.DateTimeFormat(undefined, {year:'numeric',month:'short',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false}).format(currentServerTime);
+  }
+  renderServerClock();
+  window.setInterval(renderServerClock, 1000);
 })();
 </script>
 </body>
