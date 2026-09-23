@@ -60,6 +60,7 @@ const (
 	attackGuardSnapshot
 	attackGuardGetSettings
 	attackGuardSetSettings
+	attackGuardApplyGlobal
 )
 
 type attackGuardRequest struct {
@@ -282,6 +283,44 @@ func handleAttackGuardRequest(blocks map[string]SecurityBlock, windows map[strin
 	case attackGuardSetSettings:
 		*settings = request.Settings
 		return attackGuardResult{Settings: *settings, Changed: true}
+
+	case attackGuardApplyGlobal:
+		if ip == "" {
+			return attackGuardResult{Err: errors.New("invalid IP address")}
+		}
+		expiresAt := request.ExpiresAt
+		if expiresAt.IsZero() || !expiresAt.After(now) {
+			return attackGuardResult{}
+		}
+		existing, found := blocks[ip]
+		if found && existing.Source != "global" {
+			if existing.ExpiresAt.Before(expiresAt) {
+				existing.ExpiresAt = expiresAt
+				blocks[ip] = existing
+				return attackGuardResult{Block: existing, Blocked: true, Changed: true}
+			}
+			return attackGuardResult{Block: existing, Blocked: true}
+		}
+		incidentID := existing.IncidentID
+		if incidentID == "" {
+			incidentID = randomIncidentID()
+		}
+		violations := existing.Violations
+		if violations < 1 {
+			violations = 1
+		}
+		block := SecurityBlock{
+			IP:          ip,
+			Reason:      cleanSecurityText(request.Reason, 96),
+			Description: cleanSecurityText(request.Description, 240),
+			LastEvent:   request.Now,
+			Source:      "global",
+			ExpiresAt:   expiresAt,
+			Violations:  violations,
+			IncidentID:  incidentID,
+		}
+		blocks[ip] = block
+		return attackGuardResult{Block: block, Blocked: true, Changed: true}
 	}
 
 	return attackGuardResult{Err: errors.New("unknown attack guard operation")}
@@ -403,6 +442,24 @@ func (guard *AttackGuard) Update(ip, reason, description string) error {
 
 func (guard *AttackGuard) Remove(ip string) error {
 	result, ok := guard.exchangeAdmin(attackGuardRequest{Operation: attackGuardRemove, IP: ip, Now: time.Now().UTC()})
+	if !ok {
+		return errors.New("security guard is busy")
+	}
+	if result.Changed {
+		guard.signalSave()
+	}
+	return result.Err
+}
+
+func (guard *AttackGuard) ApplyGlobal(ip, reason, description string, lastEvent, expiresAt time.Time) error {
+	result, ok := guard.exchangeAdmin(attackGuardRequest{
+		Operation:   attackGuardApplyGlobal,
+		IP:          ip,
+		Reason:      reason,
+		Description: description,
+		Now:         lastEvent,
+		ExpiresAt:   expiresAt,
+	})
 	if !ok {
 		return errors.New("security guard is busy")
 	}
