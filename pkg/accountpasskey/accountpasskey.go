@@ -132,7 +132,7 @@ func BeginRegistration(ctx context.Context, transaction *sql.Tx, domain, origin,
 	return storeChallenge(ctx, transaction, domain, email, "register", clientIP, "", options, session, now)
 }
 
-func FinishRegistration(ctx context.Context, database *sql.DB, domain, origin, email, clientIP, token string, request *http.Request, now time.Time) error {
+func FinishRegistration(ctx context.Context, database *sql.Tx, domain, origin, email, clientIP, token string, request *http.Request, now time.Time) error {
 	session, err := consumeChallenge(ctx, database, domain, email, "register", clientIP, token, now)
 	if err != nil {
 		return err
@@ -172,7 +172,7 @@ func BeginLogin(ctx context.Context, transaction *sql.Tx, domain, origin, client
 	return storeChallenge(ctx, transaction, domain, "", "login", clientIP, returnPath, options, session, now)
 }
 
-func FinishLogin(ctx context.Context, database *sql.DB, domain, origin, clientIP, token string, request *http.Request, now time.Time) (email, returnPath string, err error) {
+func FinishLogin(ctx context.Context, database *sql.Tx, domain, origin, clientIP, token string, request *http.Request, now time.Time) (email, returnPath string, err error) {
 	session, returnPath, err := consumeLoginChallenge(ctx, database, domain, clientIP, token, now)
 	if err != nil {
 		return "", "", err
@@ -287,7 +287,7 @@ func storeChallenge(ctx context.Context, transaction *sql.Tx, domain, email, kin
 	return BeginResult{Token: token, Options: options}, nil
 }
 
-func consumeChallenge(ctx context.Context, database *sql.DB, domain, email, kind, clientIP, token string, now time.Time) (webauthn.SessionData, error) {
+func consumeChallenge(ctx context.Context, database *sql.Tx, domain, email, kind, clientIP, token string, now time.Time) (webauthn.SessionData, error) {
 	var sessionJSON string
 	var createdAt int64
 	err := database.QueryRowContext(ctx, `SELECT session_json,created_at FROM account_webauthn_challenges WHERE token=? AND domain=? AND email=? AND kind=? AND client_ip=?`,
@@ -316,7 +316,7 @@ func consumeChallenge(ctx context.Context, database *sql.DB, domain, email, kind
 	return session, nil
 }
 
-func consumeLoginChallenge(ctx context.Context, database *sql.DB, domain, clientIP, token string, now time.Time) (webauthn.SessionData, string, error) {
+func consumeLoginChallenge(ctx context.Context, database *sql.Tx, domain, clientIP, token string, now time.Time) (webauthn.SessionData, string, error) {
 	var sessionJSON, returnPath string
 	var createdAt int64
 	err := database.QueryRowContext(ctx, `SELECT session_json,return_path,created_at FROM account_webauthn_challenges WHERE token=? AND domain=? AND kind='login' AND client_ip=?`,
