@@ -205,6 +205,51 @@ func Verify(ctx context.Context, tx *sql.Tx, domain, token, code, ip string, now
 	return Outcome{Status: "session", Token: session, Email: email, Path: path, Language: language}, err
 }
 
+
+func VerifyLink(ctx context.Context, tx *sql.Tx, domain, token, ip string, now time.Time) (Outcome, error) {
+	var email, passwordHash, path, language string
+	var attempts int
+	var created int64
+	err := tx.QueryRowContext(ctx, `SELECT email,password_hash,created_at,attempts,return_path,language FROM account_login_codes WHERE token=? AND domain=? AND client_ip=?`, token, domain, ip).Scan(&email, &passwordHash, &created, &attempts, &path, &language)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Outcome{Status: "invalid"}, nil
+	}
+	if err != nil {
+		return Outcome{}, err
+	}
+	if now.Unix()-created >= int64(CodeTTL/time.Second) || attempts >= 5 {
+		return Outcome{Status: "invalid"}, nil
+	}
+	var currentPassword string
+	err = tx.QueryRowContext(ctx, `SELECT password FROM users WHERE domain=? AND email=? AND is_admin=1`, domain, email).Scan(&currentPassword)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Outcome{Status: "invalid"}, nil
+	}
+	if err != nil {
+		return Outcome{}, err
+	}
+	snapshot, snapshotErr := passwordSnapshot(currentPassword, passwordHash)
+	if snapshotErr != nil || subtle.ConstantTimeCompare([]byte(snapshot), []byte(passwordHash)) != 1 {
+		return Outcome{Status: "invalid"}, nil
+	}
+	consumed, err := tx.ExecContext(ctx, `DELETE FROM account_login_codes WHERE token=? AND attempts<=5`, token)
+	if err != nil {
+		return Outcome{}, err
+	}
+	count, err := consumed.RowsAffected()
+	if err != nil || count != 1 {
+		if err == nil {
+			err = errors.New("login link already consumed")
+		}
+		return Outcome{Status: "invalid"}, err
+	}
+	if err = RememberAddress(ctx, tx, domain, email, ip, now); err != nil {
+		return Outcome{}, err
+	}
+	session, err := Session(ctx, tx, domain, email, ip, now)
+	return Outcome{Status: "session", Token: session, Email: email, Path: path, Language: language}, err
+}
+
 // Address history is descriptive; it never replaces a new session's mail challenge.
 func RememberAddress(ctx context.Context, tx *sql.Tx, domain, email, ip string, now time.Time) error {
 	if ip == "" {
