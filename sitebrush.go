@@ -3444,6 +3444,9 @@ func (a *App) resolveAnalyticsDomain(domain string, resolutions map[string]analy
 		resolved.domain = ""
 		resolved.expires = now.Add(time.Second)
 	}
+	if resolved.domain != "" && !a.analyticsSiteAvailable(resolved.domain) {
+		resolved.domain = ""
+	}
 	if len(resolutions) >= 4095 {
 		clear(resolutions)
 	}
@@ -3886,7 +3889,7 @@ func (a *App) browserAnalyticsStorage(jobs <-chan browserAnalyticsStorageJob, re
 						boundary, cancel := context.WithTimeout(contextWithDomain(storageContext, job.domain), 5*time.Second)
 						err = a.analyticsStorageExchange(browserstats.StorageRequest{Operation: browserstats.SaveBrowser, Domain: job.domain, State: string(snapshot), Report: string(reportJSON), Archive: string(archiveJSON), Stop: boundary.Done()}).Err
 						cancel()
-						if err == nil {
+						if err == nil || errors.Is(err, errAnalyticsSiteUnavailable) {
 							break
 						}
 					}
@@ -3903,17 +3906,25 @@ func (a *App) browserAnalyticsStorage(jobs <-chan browserAnalyticsStorageJob, re
 
 // Filesystem admission happens only at the storage boundary, never while
 // serving pages. Unknown Host headers must not create analytics databases.
+func (a *App) analyticsSiteAvailable(domain string) bool {
+	if a.siteDatabaseRouter == nil {
+		return true
+	}
+	databasePath := filepath.Join(siteDatabaseRootPath(a.serverControlDBPath()), domainStorageName(domain)+".db")
+	databaseInfo, databaseErr := os.Stat(databasePath)
+	if databaseErr == nil && databaseInfo.Mode().IsRegular() {
+		return true
+	}
+	staticInfo, staticErr := os.Stat(a.domainStaticDir(domain))
+	return staticErr == nil && staticInfo.IsDir()
+}
+
 func (a *App) analyticsStorageExchange(request browserstats.StorageRequest) browserstats.StorageResult {
 	if a.analyticsStorage == nil {
 		return browserstats.StorageResult{Err: errors.New("analytics storage unavailable")}
 	}
-	if a.siteDatabaseRouter != nil {
-		databasePath := filepath.Join(siteDatabaseRootPath(a.serverControlDBPath()), domainStorageName(request.Domain)+".db")
-		databaseInfo, databaseErr := os.Stat(databasePath)
-		staticInfo, staticErr := os.Stat(a.domainStaticDir(request.Domain))
-		if (databaseErr != nil || !databaseInfo.Mode().IsRegular()) && (staticErr != nil || !staticInfo.IsDir()) {
-			return browserstats.StorageResult{Err: errAnalyticsSiteUnavailable}
-		}
+	if !a.analyticsSiteAvailable(request.Domain) {
+		return browserstats.StorageResult{Err: errAnalyticsSiteUnavailable}
 	}
 	return a.analyticsStorage.Exchange(request)
 }
