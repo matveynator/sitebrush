@@ -141,6 +141,11 @@
           var beginResult = await beginPasskey(startURL, {credentials: 'same-origin', headers: headers});
           var credential = await navigator.credentials.create({publicKey: prepareCreationOptions(beginResult.options)});
           await finishPasskey(finishURL, beginResult.token, credential, {headers: headers});
+          var successRedirect = createButton.getAttribute('data-passkey-success-redirect') || '';
+          if (successRedirect) {
+            window.location.assign(successRedirect);
+            return;
+          }
           window.location.reload();
         } catch (passkeyError) {
           showPasskeyStatus(createButton, createButton.getAttribute('data-passkey-error') || String(passkeyError));
