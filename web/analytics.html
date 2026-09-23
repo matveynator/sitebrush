@@ -329,6 +329,52 @@
       color:var(--theme-success);
       text-decoration:underline;
     }
+    .security-status-card {
+      border:1px solid var(--dashboard-border);
+      border-radius:var(--theme-radius);
+      padding:14px;
+      background:rgba(255,255,255,0.02);
+    }
+    .security-status-card.security-safe {
+      border-color:rgba(25, 135, 84, 0.4);
+      background:rgba(25, 135, 84, 0.08);
+    }
+    .security-status-card.security-danger {
+      border-color:rgba(220, 53, 69, 0.35);
+      background:rgba(220, 53, 69, 0.07);
+    }
+    .security-status-card.security-throttle {
+      border-color:rgba(255, 193, 7, 0.35);
+      background:rgba(255, 193, 7, 0.07);
+    }
+    .security-row-safe td {
+      background:rgba(25, 135, 84, 0.06) !important;
+    }
+    .security-row-danger td {
+      background:rgba(220, 53, 69, 0.055) !important;
+    }
+    .security-row-throttle td {
+      background:rgba(255, 193, 7, 0.05) !important;
+    }
+    .security-source-badge {
+      display:inline-block;
+      padding:2px 8px;
+      border-radius:999px;
+      border:1px solid var(--dashboard-border);
+      font-size:0.78rem;
+      white-space:nowrap;
+    }
+    .security-source-local { border-color:rgba(220,53,69,.35); background:rgba(220,53,69,.07); }
+    .security-source-global { border-color:rgba(111,66,193,.38); background:rgba(111,66,193,.09); }
+    .security-source-manual { border-color:rgba(13,110,253,.35); background:rgba(13,110,253,.08); }
+    .security-reason-log {
+      margin:6px 0 0;
+      padding-left:18px;
+      font-size:0.8rem;
+      color:var(--dashboard-muted);
+    }
+    .security-registry-search { max-width:360px; }
+
     @media (max-width: 1200px) {
       .report-grid { grid-template-columns:repeat(auto-fit, minmax(320px, 1fr)); }
       .world-map-layout { grid-template-columns:1fr; }
@@ -552,12 +598,50 @@
     <p class="small">{{index .T "ax_security_hint"}}</p>
     {{if .Security.Incomplete}}<p class="alert alert-warning">{{index .T "ax_incomplete"}}</p>{{end}}
 
+    <div class="row g-3 mb-3">
+      <div class="col-md-4"><div class="security-status-card security-safe"><strong>Allowlist</strong><div class="small">Trusted IPs are never blocked or throttled.</div></div></div>
+      <div class="col-md-4"><div class="security-status-card security-throttle"><strong>Throttled</strong><div class="small">Sustained high-rate traffic is slowed, not fully blocked.</div></div></div>
+      <div class="col-md-4"><div class="security-status-card security-danger"><strong>Blocked</strong><div class="small">Confirmed malicious activity is rejected before expensive processing.</div></div></div>
+    </div>
+
     <form method="post" action="?analytics#security" class="d-flex flex-wrap align-items-center gap-3 border rounded p-3 mb-3">
       <input type="hidden" name="security_action" value="settings">
       <label class="form-check"><input class="form-check-input" type="checkbox" name="auto_block" {{if .SecuritySettings.AutoBlock}}checked{{end}}> <span class="form-check-label">Automatic blocking</span></label>
       <label class="form-check"><input class="form-check-input" type="checkbox" name="global_sync" {{if .SecuritySettings.GlobalSync}}checked{{end}}> <span class="form-check-label">Global reputation sync</span></label>
       <button class="btn btn-outline-secondary btn-sm">Save security settings</button>
     </form>
+
+    <form method="post" action="?analytics#security" class="row g-2 border rounded p-3 mb-3 security-status-card security-safe">
+      <input type="hidden" name="security_action" value="allow">
+      <div class="col-md-3"><input class="form-control" name="ip" placeholder="Trusted IP address" required></div>
+      <div class="col-md-7"><input class="form-control" name="comment" placeholder="Why this IP must never be blocked"></div>
+      <div class="col-md-2"><button class="btn btn-outline-secondary w-100">Add to allowlist</button></div>
+    </form>
+
+    <h3 class="h6">Allowlist</h3>
+    <div class="table-responsive mb-4">
+      <table class="table table-sm align-middle">
+        <thead><tr><th>IP</th><th>Comment</th><th>Added</th><th></th></tr></thead>
+        <tbody>
+        {{range .SecurityAllowlist}}
+          <tr class="security-row-safe">
+            <td><code>{{.IP}}</code><div class="small text-success">never block / never throttle</div></td>
+            <td>{{.Comment}}</td>
+            <td>{{.AddedAt.Format "2006-01-02 15:04 UTC"}}</td>
+            <td>
+              <form method="post" action="?analytics#security">
+                <input type="hidden" name="security_action" value="disallow">
+                <input type="hidden" name="ip" value="{{.IP}}">
+                <button class="btn btn-outline-secondary btn-sm">Remove</button>
+              </form>
+            </td>
+          </tr>
+        {{else}}
+          <tr><td colspan="4">Allowlist is empty.</td></tr>
+        {{end}}
+        </tbody>
+      </table>
+    </div>
 
     <form method="post" action="?analytics#security" class="row g-2 border rounded p-3 mb-3">
       <input type="hidden" name="security_action" value="add">
@@ -575,7 +659,7 @@
         <thead><tr><th>IP</th><th>Reason</th><th>Limit</th><th>Last event</th><th>Throttle until</th><th>Episodes</th><th></th></tr></thead>
         <tbody>
         {{range .SecurityThrottles}}
-          <tr>
+          <tr class="security-row-throttle">
             <td><code>{{.IP}}</code><div class="small text-muted">throttled, not blocked</div></td>
             <td>{{.Description}}</td>
             <td>~{{.LimitRPS}} req/s</td>
@@ -597,13 +681,14 @@
       </table>
     </div>
 
-    <h3 class="h6">Active blocks</h3>
+    <h3 class="h6">Local and manual blocks</h3>
+    <p class="small">Reason history is retained for the block lifetime, up to the latest seven days.</p>
     <div class="table-responsive mb-4">
       <table class="table table-sm align-middle">
-        <thead><tr><th>IP</th><th>Reason / activity</th><th>Source</th><th>Last event</th><th>Expires</th><th>Violations</th><th></th></tr></thead>
+        <thead><tr><th>IP / incident</th><th>Reason / activity</th><th>Source</th><th>Last event</th><th>Expires</th><th>Violations</th><th></th></tr></thead>
         <tbody>
-        {{range .SecurityBlocks}}
-          <tr>
+        {{range .SecurityLocalBlocks}}
+          <tr class="security-row-danger">
             <td><code>{{.IP}}</code><div class="small text-muted">{{.IncidentID}}</div></td>
             <td>
               <form method="post" action="?analytics#security" class="d-flex flex-column gap-1">
@@ -613,8 +698,9 @@
                 <input class="form-control form-control-sm" name="description" value="{{.Description}}">
                 <button class="btn btn-outline-secondary btn-sm align-self-start">Update</button>
               </form>
+              {{if .ReasonLog}}<details class="mt-2"><summary class="small">Reason history (7 days)</summary><ul class="security-reason-log">{{range .ReasonLog}}<li>{{.At.Format "2006-01-02 15:04"}} · {{.Source}} · {{.Reason}}{{if .Description}} — {{.Description}}{{end}}</li>{{end}}</ul></details>{{end}}
             </td>
-            <td>{{.Source}}</td>
+            <td><span class="security-source-badge {{if eq .Source "manual"}}security-source-manual{{else}}security-source-local{{end}}">{{.Source}}</span></td>
             <td>{{.LastEvent.Format "2006-01-02 15:04 UTC"}}</td>
             <td>{{.ExpiresAt.Format "2006-01-02 15:04 UTC"}}</td>
             <td>{{.Violations}}</td>
@@ -627,7 +713,31 @@
             </td>
           </tr>
         {{else}}
-          <tr><td colspan="7">{{index .T "ax_no_incidents"}}</td></tr>
+          <tr><td colspan="7">No local blocks.</td></tr>
+        {{end}}
+        </tbody>
+      </table>
+    </div>
+
+    <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-2">
+      <div><h3 class="h6 mb-0">Global reputation registry</h3><div class="small">Read-only entries confirmed by independent SiteBrush installations.</div></div>
+      <input id="security-global-search" class="form-control form-control-sm security-registry-search" type="search" placeholder="Search global IP or reason">
+    </div>
+    <div class="table-responsive mb-4">
+      <table class="table table-sm align-middle" id="security-global-table">
+        <thead><tr><th>IP / incident</th><th>Reason</th><th>Source</th><th>Last event</th><th>Expires</th><th>Evidence</th></tr></thead>
+        <tbody>
+        {{range .SecurityGlobalBlocks}}
+          <tr class="security-row-danger" data-security-global-row>
+            <td><code>{{.IP}}</code><div class="small text-muted">{{.IncidentID}}</div></td>
+            <td>{{.Reason}}{{if .Description}}<div class="small">{{.Description}}</div>{{end}}{{if .ReasonLog}}<details><summary class="small">Reason history</summary><ul class="security-reason-log">{{range .ReasonLog}}<li>{{.At.Format "2006-01-02 15:04"}} · {{.Reason}}{{if .Description}} — {{.Description}}{{end}}</li>{{end}}</ul></details>{{end}}</td>
+            <td><span class="security-source-badge security-source-global">global</span></td>
+            <td>{{.LastEvent.Format "2006-01-02 15:04 UTC"}}</td>
+            <td>{{.ExpiresAt.Format "2006-01-02 15:04 UTC"}}</td>
+            <td>{{.Violations}}</td>
+          </tr>
+        {{else}}
+          <tr><td colspan="6">No active global reputation entries.</td></tr>
         {{end}}
         </tbody>
       </table>
@@ -943,5 +1053,18 @@
 })();
 </script>
 
+<script>
+(function wireGlobalSecuritySearch() {
+  const searchInput = document.getElementById('security-global-search');
+  if (!searchInput) return;
+  const rows = Array.from(document.querySelectorAll('[data-security-global-row]'));
+  searchInput.addEventListener('input', function () {
+    const query = searchInput.value.trim().toLowerCase();
+    for (const row of rows) {
+      row.hidden = query !== '' && !row.textContent.toLowerCase().includes(query);
+    }
+  });
+})();
+</script>
 </body>
 </html>
