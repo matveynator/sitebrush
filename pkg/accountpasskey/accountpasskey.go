@@ -112,12 +112,12 @@ func Delete(ctx context.Context, transaction *sql.Tx, domain, email, credentialI
 	return err
 }
 
-func BeginRegistration(ctx context.Context, transaction *sql.Tx, domain, origin, email, clientIP string, now time.Time) (BeginResult, error) {
+func BeginRegistration(ctx context.Context, transaction *sql.Tx, domain, rpID, origin, email, clientIP string, now time.Time) (BeginResult, error) {
 	user, err := loadUser(ctx, transaction, domain, email)
 	if err != nil {
 		return BeginResult{}, err
 	}
-	service, err := service(domain, origin)
+	service, err := service(rpID, origin)
 	if err != nil {
 		return BeginResult{}, err
 	}
@@ -132,7 +132,7 @@ func BeginRegistration(ctx context.Context, transaction *sql.Tx, domain, origin,
 	return storeChallenge(ctx, transaction, domain, email, "register", clientIP, "", options, session, now)
 }
 
-func FinishRegistration(ctx context.Context, database *sql.Tx, domain, origin, email, clientIP, token string, request *http.Request, now time.Time) error {
+func FinishRegistration(ctx context.Context, database *sql.Tx, domain, rpID, origin, email, clientIP, token string, request *http.Request, now time.Time) error {
 	session, err := consumeChallenge(ctx, database, domain, email, "register", clientIP, token, now)
 	if err != nil {
 		return err
@@ -141,7 +141,7 @@ func FinishRegistration(ctx context.Context, database *sql.Tx, domain, origin, e
 	if err != nil {
 		return err
 	}
-	service, err := service(domain, origin)
+	service, err := service(rpID, origin)
 	if err != nil {
 		return err
 	}
@@ -160,8 +160,8 @@ func FinishRegistration(ctx context.Context, database *sql.Tx, domain, origin, e
 	return err
 }
 
-func BeginLogin(ctx context.Context, transaction *sql.Tx, domain, origin, clientIP, returnPath string, now time.Time) (BeginResult, error) {
-	service, err := service(domain, origin)
+func BeginLogin(ctx context.Context, transaction *sql.Tx, domain, rpID, origin, clientIP, returnPath string, now time.Time) (BeginResult, error) {
+	service, err := service(rpID, origin)
 	if err != nil {
 		return BeginResult{}, err
 	}
@@ -172,12 +172,12 @@ func BeginLogin(ctx context.Context, transaction *sql.Tx, domain, origin, client
 	return storeChallenge(ctx, transaction, domain, "", "login", clientIP, returnPath, options, session, now)
 }
 
-func FinishLogin(ctx context.Context, database *sql.Tx, domain, origin, clientIP, token string, request *http.Request, now time.Time) (email, returnPath string, err error) {
+func FinishLogin(ctx context.Context, database *sql.Tx, domain, rpID, origin, clientIP, token string, request *http.Request, now time.Time) (email, returnPath string, err error) {
 	session, returnPath, err := consumeLoginChallenge(ctx, database, domain, clientIP, token, now)
 	if err != nil {
 		return "", "", err
 	}
-	service, err := service(domain, origin)
+	service, err := service(rpID, origin)
 	if err != nil {
 		return "", "", err
 	}
