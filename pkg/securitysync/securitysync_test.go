@@ -1,6 +1,8 @@
 package securitysync
 
 import (
+	"crypto/ed25519"
+	"crypto/rand"
 	"path/filepath"
 	"testing"
 	"time"
@@ -97,5 +99,28 @@ func TestReputationPersistsEvidence(t *testing.T) {
 	entries := approved(loaded, now)
 	if len(entries) != 1 || entries[0].IP != "192.0.2.44" {
 		t.Fatalf("persisted reputation missing: %#v", entries)
+	}
+}
+
+
+func TestPeerAttestationRoundTripAndExpiry(t *testing.T) {
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Truncate(time.Second)
+	token, err := IssuePeerAttestation(privateKey, "installation-1", "client-public-key", now, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	attestation, err := VerifyPeerAttestation(token, publicKey, now.Add(time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if attestation.InstallationID != "installation-1" || attestation.PublicKey != "client-public-key" {
+		t.Fatalf("unexpected attestation: %#v", attestation)
+	}
+	if _, err := VerifyPeerAttestation(token, publicKey, now.Add(2*time.Hour)); err == nil {
+		t.Fatal("expired attestation was accepted")
 	}
 }
