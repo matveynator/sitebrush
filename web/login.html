@@ -18,7 +18,18 @@
   <div class="page-header mb-4">
     <h1 class="section-heading"><img src="/p/static/login.png" class="section-icon" alt=""><a href="/">{{.Domain}}</a> <small class="text-muted">| {{index .T "login_header"}}</small></h1>
   </div>
-  {{if .ShowCodeForm}}
+  {{if .ShowTOTPForm}}
+  <form class="authentication-card profile-form" method="post" action="?login">
+    <h2>{{index .T "auth_totp_title"}}</h2>
+    {{if .Status}}<p class="text-danger" role="status">{{.Status}}</p>{{end}}
+    <input type="hidden" name="totp_challenge" value="{{.TOTPChallenge}}">
+    <label>{{index .T "auth_totp_code"}}<input class="profile-code-input" type="text" name="totp_code" autocomplete="one-time-code" inputmode="numeric" pattern="[0-9]{6}" minlength="6" maxlength="6" required></label>
+    <div class="auth-actions">
+      <button type="submit">{{index .T "auth_totp_submit"}}</button>
+      <button type="submit" name="totp_fallback" value="1" formnovalidate class="btn btn-outline-secondary">{{index .T "auth_email_fallback"}}</button>
+    </div>
+  </form>
+  {{else if .ShowCodeForm}}
   <form class="authentication-card profile-form" method="post" action="?login">
     <h2>{{index .T "auth_login_title"}}</h2><p>{{index .T "auth_new_ip"}}</p>
     {{if and .Status (not .EmailDelivery.Show)}}<p class="text-danger" role="status">{{.Status}}</p>{{end}}
@@ -28,6 +39,13 @@
     <div class="auth-actions"><button type="submit">{{index .T "login_submit"}}</button>{{if .Webmail.URL}}<a class="btn btn-outline-secondary" href="{{.Webmail.URL}}" target="_blank" rel="noopener noreferrer">{{index .T "setup_confirmation_open"}} {{.Webmail.Name}}</a>{{end}}<a href="?login">{{index .T "auth_request_again"}}</a></div>
   </form>
   {{else if .ShowForm}}
+  {{if .HasPasskeys}}
+  <div class="card card-body authentication-card mb-3">
+    <h2 class="h5">{{index .T "auth_passkey_title"}}</h2>
+    <p id="SiteBrushPasskeyLoginStatus" class="text-danger" role="status"></p>
+    <button type="button" class="btn btn-primary" data-passkey-login data-passkey-start="?login&passkey_begin" data-passkey-finish="?login&passkey_finish" data-passkey-status="#SiteBrushPasskeyLoginStatus" data-passkey-error="{{index .T "auth_passkey_failed"}}">{{index .T "auth_passkey_login"}}</button>
+  </div>
+  {{end}}
   <form class="card card-body authentication-card" method="post" action="?login">
     <input type="hidden" name="return_path" value="{{.ReturnPath}}">
     {{if .Status}}<div class="alert alert-{{if .StatusClass}}{{.StatusClass}}{{else}}warning{{end}}" role="alert">{{.Status}}</div>{{end}}
@@ -113,5 +131,6 @@
 
 <span hidden data-account-code-tools data-copy-label="{{index .T "auth_copy"}}" data-copy-success="{{index .T "auth_copied"}}" data-copy-error="{{index .T "auth_copy_failed"}}"></span>
 <script src="/p/static/account-forms.js" defer></script>
+<script src="/p/static/account-passkeys.js" defer></script>
 </body>
 </html>
