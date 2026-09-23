@@ -14516,8 +14516,8 @@ func TestAnalyticsStorageRejectsUnknownDomain(t *testing.T) {
 	defer store.Close()
 	app := &App{storagePath: root, analyticsStorage: store, siteDatabaseRouter: &perSiteDBRouter{}}
 	request := browserstats.StorageRequest{Operation: browserstats.SaveTechnical, Domain: "unknown.example", Report: "{}"}
-	if result := app.analyticsStorageExchange(request); result.Err == nil {
-		t.Fatal("unknown host was allowed to create analytics storage")
+	if result := app.analyticsStorageExchange(request); !errors.Is(result.Err, errAnalyticsSiteUnavailable) {
+		t.Fatalf("unknown host error=%v", result.Err)
 	}
 	if _, err := os.Stat(filepath.Join(root, "analytics")); !os.IsNotExist(err) {
 		t.Fatalf("rejected host touched analytics storage: %v", err)
