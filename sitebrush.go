@@ -10106,6 +10106,8 @@ func (a *App) login(w http.ResponseWriter, r *http.Request) {
 			status = translationsForRequest(r)["auth_delivery_failed"]
 		}
 		a.renderAccountCode(w, r, outcome.Token, recipient, status, result)
+	case "code_existing":
+		a.renderAccountCode(w, r, outcome.Token, outcome.Email, translationsForRequest(r)["auth_code_sent"])
 	case "invalid_totp":
 		w.WriteHeader(http.StatusUnauthorized)
 		a.renderAccountTOTP(w, r, totpChallenge, translationsForRequest(r)["auth_totp_invalid"])
