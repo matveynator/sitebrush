@@ -23,10 +23,14 @@ const ChallengeTTL = 5 * time.Minute
 type User struct {
 	Domain      string
 	Email       string
+	Handle      []byte
 	Credentials []webauthn.Credential
 }
 
 func (user *User) WebAuthnID() []byte {
+	if len(user.Handle) != 0 {
+		return user.Handle
+	}
 	sum := sha256.Sum256([]byte(strings.ToLower(strings.TrimSpace(user.Domain)) + "\x00" + strings.ToLower(strings.TrimSpace(user.Email))))
 	return sum[:]
 }
@@ -235,18 +239,24 @@ func loadUser(ctx context.Context, database interface {
 	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
 }, domain, email string) (*User, error) {
 	user := &User{Domain: domain, Email: email}
-	rows, err := database.QueryContext(ctx, `SELECT credential_json FROM account_passkeys WHERE domain=? AND email=? ORDER BY created_at`, domain, email)
+	rows, err := database.QueryContext(ctx, `SELECT user_handle,credential_json FROM account_passkeys WHERE domain=? AND email=? ORDER BY created_at`, domain, email)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	for rows.Next() {
-		var encoded string
-		if err = rows.Scan(&encoded); err != nil {
+		var encodedHandle, encodedCredential string
+		if err = rows.Scan(&encodedHandle, &encodedCredential); err != nil {
 			return nil, err
 		}
+		if len(user.Handle) == 0 {
+			user.Handle, err = base64.RawURLEncoding.DecodeString(encodedHandle)
+			if err != nil {
+				return nil, err
+			}
+		}
 		var credential webauthn.Credential
-		if err = json.Unmarshal([]byte(encoded), &credential); err != nil {
+		if err = json.Unmarshal([]byte(encodedCredential), &credential); err != nil {
 			return nil, err
 		}
 		user.Credentials = append(user.Credentials, credential)
