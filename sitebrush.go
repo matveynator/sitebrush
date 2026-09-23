@@ -70,6 +70,7 @@ import (
 	"github.com/matveynator/sitebrush/v2/pkg/httpsecurity"
 	"github.com/matveynator/sitebrush/v2/pkg/mailout"
 	"github.com/matveynator/sitebrush/v2/pkg/outboundhttp"
+	"github.com/matveynator/sitebrush/v2/pkg/securitysync"
 	"github.com/matveynator/sitebrush/v2/pkg/serviceinstall"
 	"github.com/matveynator/sitebrush/v2/pkg/shutdownsignals"
 	"github.com/matveynator/sitebrush/v2/pkg/sitebrushtemplate"
@@ -159,6 +160,8 @@ type App struct {
 	attackGuard                    *httpsecurity.AttackGuard
 	securityAnalytics              chan siteAnalyticsEvent
 	securityLosses                 chan string
+	securityReputation             chan<- securitysync.Request
+	securityGlobalSignals          chan securitysync.Signal
 	analyticsShutdownRequested     <-chan struct{}
 	analyticsFlushInterval         time.Duration
 	analyticsFinished              chan struct{}
@@ -237,6 +240,7 @@ type sitebrushNetChanRequest struct {
 type sitebrushNetChanResponse struct {
 	Status     string
 	StatusCode int
+	Payload    []byte
 }
 
 type systemMailRouteRequest struct {
@@ -395,7 +399,9 @@ type serviceMailRequest struct {
 	ExpiresAt        string                             `json:"expires_at,omitempty"`
 	LanguageCode     string                             `json:"language_code"`
 	HostingSnapshot  *hostingandsupport.HostingSnapshot `json:"hosting_snapshot,omitempty"`
-	CreatedAt        string                             `json:"created_at"`
+	SecuritySignal   *securitysync.Signal                `json:"security_signal,omitempty"`
+	SecurityQuery    bool                                `json:"security_query,omitempty"`
+	CreatedAt        string                              `json:"created_at"`
 	Signature        string                             `json:"signature"`
 }
 
@@ -4265,7 +4271,17 @@ func (a *App) runSecurityAnalytics(stop <-chan struct{}) {
 			address := clientIPAddress(&http.Request{RemoteAddr: event.RemoteAddress, Header: http.Header{"Forwarded": []string{event.Forwarded}, "X-Forwarded-For": []string{event.ForwardedFor}}})
 			category := state.Record(browserstats.RequestObservation{Time: event.OccurredAt, IP: address, Path: event.Path, Query: event.Query, Method: event.Method, Status: event.StatusCode, Bytes: event.Bytes, Agent: event.UserAgent, Language: analyticsLanguageLabel(event.AcceptLanguage)})
 			if category != "" && a.attackGuard != nil {
-				a.attackGuard.ObserveIncident(address, category, "security analytics detected "+category, event.OccurredAt)
+				_, blocked := a.attackGuard.ObserveIncident(address, category, "security analytics detected "+category, event.OccurredAt)
+				if blocked && a.securityGlobalSignals != nil {
+					settings, settingsErr := a.attackGuard.Settings()
+					if settingsErr == nil && settings.GlobalSync {
+						signal := securitysync.Signal{IP: address, Category: category, Description: "security analytics detected " + category, ObservedAt: event.OccurredAt}
+						select {
+						case a.securityGlobalSignals <- signal:
+						default:
+						}
+					}
+				}
 			}
 			state.Limit(1 << 20)
 			dirty[domain] = true
@@ -6836,6 +6852,13 @@ func runSitebrushServer(ctx context.Context, config serverRunConfig) error {
 	}
 	application.attackGuard = attackGuard
 	defer attackGuard.Close()
+	securityReputationPath := filepath.Join(application.storageRootDir(), "security", "reputation.json")
+	securityReputation, securityReputationErr := securitysync.Start(securityReputationPath, ctx.Done())
+	if securityReputationErr != nil {
+		return fmt.Errorf("load security reputation: %w", securityReputationErr)
+	}
+	application.securityReputation = securityReputation
+	application.securityGlobalSignals = make(chan securitysync.Signal, 64)
 	controlDatabaseDispatcher, err := startServerControlDatabaseDispatcher(effectiveDBPath, config.Debug)
 	if err != nil {
 		return fmt.Errorf("start server control database dispatcher: %w", err)
@@ -6898,6 +6921,7 @@ func runSitebrushServer(ctx context.Context, config serverRunConfig) error {
 	application.startServerOwnerRecoveryWorker(ctx)
 	application.startDemoSiteCleanupWorker(ctx)
 	application.startServiceMailKeyPairWorker(ctx)
+	go application.runSecurityGlobalSync(ctx.Done())
 	application.hostingSnapshotDeliveries = startHostingSnapshotNetChanDeliveryWorker(ctx.Done())
 	application.hostingSnapshotReports = application.startHostingSnapshotReporter(ctx)
 	application.startHostingSnapshotMetricsMonitor(ctx)
