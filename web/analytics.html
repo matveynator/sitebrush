@@ -525,6 +525,7 @@
 
   <form method="get" class="d-flex flex-wrap gap-2 mb-3">
     <input type="hidden" name="analytics" value="">
+    <input type="hidden" name="tab" value="{{.AnalyticsTab}}">
     <select name="days" aria-label="{{index .T "analytics_period"}}" class="form-select w-auto">{{range $days := .PeriodOptions}}<option value="{{$days}}" {{if eq $.BrowserAnalytics.Days $days}}selected{{end}}>{{$days}} {{index $.T "ax_days"}}</option>{{end}}</select>
     <select name="traffic" class="form-select w-auto" aria-label="{{index .T "ax_audience"}}"><option value="human" {{if eq .ExperienceFilter.Traffic "human"}}selected{{end}}>{{index .T "ax_humans"}}</option><option value="bots" {{if eq .ExperienceFilter.Traffic "bots"}}selected{{end}}>{{index .T "ax_bots"}}</option><option value="all" {{if eq .ExperienceFilter.Traffic "all"}}selected{{end}}>{{index .T "ax_all"}}</option></select>
     <input class="form-control w-auto" name="source" placeholder="{{index .T "ax_source"}}" value="{{.ExperienceFilter.Source}}">
@@ -572,7 +573,7 @@
     </div></section>
     <section class="card"><div class="card-body">
       <h2 class="h5">Requests by server local hour</h2>
-      <p class="small text-muted">Selected period · server local time. Use this to compare load and choose maintenance windows.</p>
+      <p class="small text-muted">Selected period · server local time ({{.ServerTimezone}}). Use this to compare load and choose maintenance windows.</p>
       <div id="analytics-server-hour-chart" class="hourly-chart" aria-label="Requests by server local hour"></div>
     </div></section>
   </div>
@@ -994,11 +995,9 @@
     }
   }
 
-  function renderHours(chartID, counts) {
+  function renderHours(chartID, counts, maximum) {
     const chart = document.getElementById(chartID);
     if (!chart) return;
-    let maximum = 0;
-    for (const count of counts) maximum = Math.max(maximum, Number(count) || 0);
     for (let hour = 0; hour < 24; hour += 1) {
       const count = Number(counts[hour]) || 0;
       const bar = document.createElement('div');
@@ -1017,8 +1016,13 @@
     }
   }
 
-  renderHours('analytics-local-hour-chart', parseHours('analytics-local-hours'));
-  renderHours('analytics-server-hour-chart', parseHours('analytics-server-hours'));
+  const localHours = parseHours('analytics-local-hours');
+  const serverHours = parseHours('analytics-server-hours');
+  let sharedMaximum = 0;
+  for (const count of localHours) sharedMaximum = Math.max(sharedMaximum, Number(count) || 0);
+  for (const count of serverHours) sharedMaximum = Math.max(sharedMaximum, Number(count) || 0);
+  renderHours('analytics-local-hour-chart', localHours, sharedMaximum);
+  renderHours('analytics-server-hour-chart', serverHours, sharedMaximum);
 })();
 
 (function renderAnalyticsVisitorMap() {
@@ -1149,40 +1153,7 @@
 </script>
 
 
-<script type="application/json" id="analytics-session-points">{{.SessionMapJSON}}</script>
-<script>
-(function sessionMap() {
- const mapElement=document.getElementById('analytics-session-map');
- if (!mapElement || !window.L) return;
- const sessions=JSON.parse(document.getElementById('analytics-session-points').textContent || '[]');
- const map=window.L.map(mapElement,{center:[20,0],zoom:2,scrollWheelZoom:false});
- window.L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',{attribution:'© OpenStreetMap',maxZoom:18}).addTo(map);
- const markers=window.L.layerGroup().addTo(map);
- const sourceColors={Google:'#2563eb',ChatGPT:'#16a34a',Claude:'#b45309',Habr:'#f97316',Telegram:'#06b6d4'};
- const sourceIcons={Google:'🔎',ChatGPT:'✦',Claude:'✦',Habr:'H',Telegram:'✈'};
- function renderClusters() {
-  markers.clearLayers(); const clusters=new Map();
-  for (const session of sessions) {
-   if (!session.GeoKnown) continue;
-   const position=map.project([session.Latitude,session.Longitude],map.getZoom());
-   const key=Math.floor(position.x/40)+':'+Math.floor(position.y/40);
-   if (!clusters.has(key)) clusters.set(key,[]);
-   clusters.get(key).push(session);
-  }
-  for (const cluster of clusters.values()) {
-   const first=cluster[0]; const contents=document.createElement('div');
-   for (const session of cluster.slice(0,8)) {
-    const line=document.createElement('p');
-    line.textContent=(sourceIcons[session.Source.Name] || '↗')+' '+session.Source.Name+' · '+session.Country+' '+session.City+' · '+session.Language+' · '+session.Browser+' / '+session.OS+' · '+(session.LocalTime || '—')+' '+session.Timezone+' · '+session.Landing;
-    contents.appendChild(line);
-    for (const steps of Object.values(session.Tabs || {})) {const route=document.createElement('p');route.textContent=steps.join(' → ');contents.appendChild(route);}
-   }
-   window.L.circleMarker([first.Latitude,first.Longitude],{radius:Math.min(18,5+Math.sqrt(cluster.length)*2),color:sourceColors[first.Source.Name] || '#64748b',fillOpacity:0.7}).bindPopup(contents).bindTooltip(String(cluster.length)).addTo(markers);
-  }
- }
- map.on('zoomend',renderClusters);renderClusters();
-})();
-</script>
+
 
 <script>
 (function wireGlobalSecuritySearch() {
