@@ -15,6 +15,9 @@
   if (/^[0-9]{6}$/.test(mailedCode)) {
     codeField.value = mailedCode;
     codeField.dispatchEvent(new Event('input', {bubbles: true}));
+    if (codeField.name === 'login_code' && codeField.form) {
+      codeField.form.requestSubmit();
+    }
   }
 })();
 
@@ -35,16 +38,25 @@
     try {
       const report = JSON.parse(event.data);
       const terminal = report.status === 'sent' || report.status === 'failed';
+      panel.dataset.deliveryState = report.status === 'sent' ? 'success' : report.status === 'failed' ? 'danger' : 'warning';
       statusText.textContent = report.status === 'sent' ? panel.dataset.sent : report.status === 'failed' ? panel.dataset.failed : panel.dataset.pending;
       deliveryLog.textContent = 'status=' + String(report.status) + '\nattempts=' + Number(report.attempts || 0);
       if (report.error) deliveryLog.textContent += '\n' + report.error;
       if (terminal) connection.close();
     } catch (parseError) {
+      panel.dataset.deliveryState = 'danger';
       statusText.textContent = panel.dataset.failed;
       connection.close();
     }
   };
   connection.onerror = function reportConnectionFailure() {
+    panel.dataset.deliveryState = 'warning';
     statusText.textContent = panel.dataset.pending;
   };
+})();
+
+(function confirmAcceptedEmail() {
+  'use strict';
+  const confirmationForm = document.querySelector('[data-account-auto-confirm]');
+  if (confirmationForm) confirmationForm.requestSubmit();
 })();

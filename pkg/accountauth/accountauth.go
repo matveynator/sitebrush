@@ -106,7 +106,7 @@ func Reserve(ctx context.Context, tx *sql.Tx, domain, email, ip string, now time
 	return err == nil, err
 }
 
-func Password(ctx context.Context, tx *sql.Tx, domain, email, password, ip, path, language string, now time.Time) (Outcome, error) {
+func Password(ctx context.Context, tx *sql.Tx, domain, email, password, ip, path, language string, now time.Time, allowLocalSession ...bool) (Outcome, error) {
 	var stored string
 	err := tx.QueryRowContext(ctx, `SELECT password FROM users WHERE domain=? AND email=? AND is_admin=1`, domain, email).Scan(&stored)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -117,6 +117,13 @@ func Password(ctx context.Context, tx *sql.Tx, domain, email, password, ip, path
 	}
 	if subtle.ConstantTimeCompare([]byte(password), []byte(stored)) != 1 {
 		return Outcome{Status: "credentials"}, nil
+	}
+	if len(allowLocalSession) > 0 && allowLocalSession[0] {
+		if err := RememberAddress(ctx, tx, domain, email, ip, now); err != nil {
+			return Outcome{}, err
+		}
+		token, err := Session(ctx, tx, domain, email, ip, now)
+		return Outcome{Status: "session", Token: token, Email: email, Path: path}, err
 	}
 	if _, err = tx.ExecContext(ctx, `DELETE FROM account_trusted_ips WHERE last_login<=?`, now.Add(-TrustTTL).Unix()); err != nil {
 		return Outcome{}, err

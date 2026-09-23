@@ -3147,3 +3147,66 @@ body.technical-page.analytics-page {
 .technical-page .auth-trusted-row { border-block-start: 1px solid var(--theme-border); padding-block: 1rem; overflow-wrap: anywhere; }
 .technical-page .authentication-card :is(button,a,input):focus-visible,
 .technical-page .profile-form :is(button,a,input):focus-visible { outline: 2px solid var(--theme-primary); outline-offset: 3px; }
+
+.technical-page .profile-delivery-inline { margin: .75rem 0 1rem; font-size: .82rem; color: var(--theme-muted-foreground); }
+.technical-page .profile-delivery-inline summary { cursor: pointer; color: var(--theme-success); }
+.technical-page .profile-delivery-inline.delivery-warning summary { color: var(--theme-muted-foreground); }
+.technical-page .profile-delivery-inline.delivery-danger summary { color: var(--theme-destructive); }
+.technical-page .profile-delivery-inline p { margin: .5rem 0; }
+.technical-page .profile-delivery-inline .profile-delivery-log { max-height: 9rem; font-size: .75rem; padding: .75rem; }
+.technical-page .profile-email-step { box-shadow: none; padding: 1rem; }
+.technical-page .profile-email-step > div { flex: 1; }
+.technical-page .profile-email-step .profile-code-form { padding: 0; margin: 1rem 0; border: 0; background: transparent; box-shadow: none; }
+.technical-page .profile-email-step .profile-step-status { font-size: .8rem; margin-top: .5rem; line-height: 1.5; }
+.technical-page .profile-email-step .profile-email-address { overflow-wrap: anywhere; }
+.technical-page .profile-email-step .profile-form-actions { justify-content: flex-start; }
+
+.technical-page .account-delivery { margin: .5rem 0 1rem; font-size: .82rem; line-height: 1.5; color: var(--theme-muted-foreground); }
+.technical-page .account-delivery[data-delivery-state="success"] { color: var(--bs-success, #198754); }
+.technical-page .account-delivery[data-delivery-state="danger"] { color: var(--bs-danger, #dc3545); }
+.technical-page .account-delivery p { margin: 0 0 .35rem; color: inherit; }
+.technical-page .account-delivery summary { cursor: pointer; font-size: .78rem; }
+.technical-page .account-delivery pre { max-height: 9rem; overflow: auto; margin-top: .5rem; padding: .65rem; font-size: .75rem; color: var(--theme-muted-foreground); background: var(--theme-card); border: 1px solid var(--theme-border); border-radius: var(--theme-radius); }
+.technical-page .account-https-shell { max-width: 640px; margin: 3rem auto; padding: 0 1rem; }
+.technical-page .account-certificate-ready { color: var(--bs-success, #198754); font-weight: 600; }
+
+.technical-page .profile-email-step .profile-email-release-form {
+    width: 100%;
+    max-width: none;
+    border: 0 !important;
+    outline: 0;
+    box-shadow: none;
+    text-align: start;
+}
+.technical-page .profile-email-release-form label {
+    justify-items: start;
+    text-align: left;
+    margin: 0;
+    border: 0;
+    outline: none;
+    box-shadow: none;
+    background: transparent;
+}
+.technical-page .profile-email-step .profile-email-release-form input.profile-code-input:not([type=hidden]):not([type=submit]) {
+    margin: 0;
+    padding-inline: 0;
+    text-align: left;
+    border: 0;
+    outline: none;
+    box-shadow: none;
+    background: transparent;
+}
+.technical-page .profile-email-step .profile-email-release-form {
+    gap: 0;
+}
+.technical-page .profile-email-release-form .profile-form-actions {
+    justify-content: flex-start;
+    margin-top: 1lh;
+}
+
+.technical-page .profile-email-step .profile-step-status.text-success {
+    color: var(--bs-success, #198754) !important;
+}
+.technical-page .profile-email-step .profile-step-status.text-danger {
+    color: var(--bs-danger, #dc3545) !important;
+}

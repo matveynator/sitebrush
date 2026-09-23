@@ -20,7 +20,10 @@ func Render(content Content) (string, string, error) {
 	if content.Code != "" {
 		text += "\n" + content.CodeLabel + ": " + content.Code + "\n"
 	}
-	text += "\n" + content.Expiry + "\n\n" + content.Button + ":\n" + content.Link + "\n\n" + content.IPLabel + ": " + content.IP + "\n" + content.TimeLabel + ": " + content.Time + "\n\n" + content.Ignore
+	if content.Link != "" {
+		text += "\n" + content.Expiry + "\n\n" + content.Button + ":\n" + content.Link + "\n"
+	}
+	text += "\n" + content.IPLabel + ": " + content.IP + "\n" + content.TimeLabel + ": " + content.Time + "\n\n" + content.Ignore
 	layout, err := template.New("account-email").Parse(mailTemplate)
 	if err != nil {
 		return "", "", err

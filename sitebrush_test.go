@@ -7105,7 +7105,7 @@ func TestProfilePasswordCodeShowsSMTPFailureDetails(t *testing.T) {
 		t.Fatalf("status = %d, body=%q", response.Code, response.Body.String())
 	}
 	body := response.Body.String()
-	for _, expectedFragment := range []string{`alert-danger`, `Письмо не отправлено.`, `data-profile-delivery-modal`, `Код SMTP: 550`, `profile-delivery-dns`, `v=spf1 a mx ip4:203.0.113.10 ~all`, `SPF`, `DKIM`} {
+	for _, expectedFragment := range []string{`delivery-danger`, `Письмо не отправлено`, `data-profile-delivery-inline`, `Код SMTP: 550`, `profile-delivery-dns`, `v=spf1 a mx ip4:203.0.113.10 ~all`, `SPF`, `DKIM`} {
 		if !strings.Contains(body, expectedFragment) {
 			t.Fatalf("SMTP failure page missing %q in %s", expectedFragment, body)
 		}
@@ -14963,7 +14963,7 @@ func TestAccountMailPrefillsCodeOnlyInFragment(t *testing.T) {
 	for language, translations := range translationCatalog {
 		message := mailout.Message{Kind: "account_login_code", To: "owner@example.org"}
 		formatAccountMail(&message, language, "example.org", "123456", "https://example.org/?login&login_challenge=handle", "", "192.0.2.1", "now", nil)
-		if !strings.Contains(message.Body, "#account-code=123456") || !strings.Contains(message.Body, translations["auth_open_with_code"]) {
+		if !strings.Contains(message.Body, "#account-code=123456") || !strings.Contains(message.Body, translations["auth_login_automatically"]) {
 			t.Fatalf("missing code link in %s", language)
 		}
 		if strings.Contains(message.Subject, "123456") {

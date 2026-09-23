@@ -129,7 +129,11 @@
   <form class="card card-body authentication-card" method="post" action="?register">
     <input type="hidden" name="return_path" value="{{.ReturnPath}}">
     <p><input type="email" autocomplete="username" name="email" class="form-control" placeholder="{{index .T "login_email_placeholder"}}" value="{{.Email}}" required></p>
-    <p class="hint">{{index .T "auth_registration_secure"}}</p>
+    {{if .LocalAccount}}
+    <p class="hint">{{index .T "auth_local_setup"}}</p>
+    <label>{{index .T "login_password_placeholder"}}<input type="password" name="password" autocomplete="new-password" required></label>
+    <label>{{index .T "profile_confirm_password"}}<input type="password" name="password_confirm" autocomplete="new-password" required></label>
+    {{else}}<p class="hint">{{index .T "auth_registration_secure"}}</p>{{end}}
     <div><button type="submit" class="btn btn-primary">{{index .T "setup_create_admin"}}</button></div>
   </form>
   {{end}}
