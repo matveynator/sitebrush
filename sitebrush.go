@@ -6005,6 +6005,11 @@ func formatDurationMS(milliseconds int64) string {
 	return fmt.Sprintf("%.2f s", float64(milliseconds)/1000)
 }
 
+type analyticsSecurityBlockView struct {
+	httpsecurity.SecurityBlock
+	Country, City, ClientClass, Agent string
+}
+
 func (a *App) analyticsPage(w http.ResponseWriter, r *http.Request) {
 	if !a.isAdminRequest(r) {
 		if !a.hasAdmin(r.Context(), a.siteDomain(r.Context(), r)) {
@@ -6050,8 +6055,8 @@ func (a *App) analyticsPage(w http.ResponseWriter, r *http.Request) {
 	}
 	security := browserstats.SecurityReport{}
 	securityBlocks := []httpsecurity.SecurityBlock{}
-	securityLocalBlocks := []httpsecurity.SecurityBlock{}
-	securityGlobalBlocks := []httpsecurity.SecurityBlock{}
+	securityLocalBlocks := []analyticsSecurityBlockView{}
+	securityGlobalBlocks := []analyticsSecurityBlockView{}
 	securityAllowlist := []httpsecurity.SecurityAllow{}
 	securityThrottles := []httpsecurity.SecurityThrottle{}
 	securitySettings := httpsecurity.SecuritySettings{}
@@ -6059,13 +6064,7 @@ func (a *App) analyticsPage(w http.ResponseWriter, r *http.Request) {
 		securityBlocks, _ = a.attackGuard.Snapshot(time.Now().UTC())
 		securityAllowlist, _ = a.attackGuard.Allowlist()
 		securitySettings, _ = a.attackGuard.Settings()
-		for _, securityBlock := range securityBlocks {
-			if securityBlock.Source == "global" {
-				securityGlobalBlocks = append(securityGlobalBlocks, securityBlock)
-				continue
-			}
-			securityLocalBlocks = append(securityLocalBlocks, securityBlock)
-		}
+
 	}
 	if a.throttleGuard != nil {
 		securityThrottles, _ = a.throttleGuard.Snapshot(time.Now().UTC())
@@ -6076,6 +6075,27 @@ func (a *App) analyticsPage(w http.ResponseWriter, r *http.Request) {
 		if json.Unmarshal([]byte(loadedSecurity.Text), &state) == nil {
 			security = state.Report(time.Now().UTC(), browserDashboard.Days)
 		}
+	}
+	securityIncidents := make(map[string]browserstats.Incident, len(security.Incidents))
+	for _, incident := range security.Incidents {
+		previous, found := securityIncidents[incident.IP]
+		if !found || incident.Last.After(previous.Last) {
+			securityIncidents[incident.IP] = incident
+		}
+	}
+	for _, securityBlock := range securityBlocks {
+		view := analyticsSecurityBlockView{SecurityBlock: securityBlock}
+		if incident, found := securityIncidents[securityBlock.IP]; found {
+			view.Country = incident.Country
+			view.City = incident.City
+			view.ClientClass = incident.Class
+			view.Agent = incident.Agent
+		}
+		if securityBlock.Source == "global" {
+			securityGlobalBlocks = append(securityGlobalBlocks, view)
+			continue
+		}
+		securityLocalBlocks = append(securityLocalBlocks, view)
 	}
 	unknownGeo := 0
 	for _, session := range experience.Recent {
