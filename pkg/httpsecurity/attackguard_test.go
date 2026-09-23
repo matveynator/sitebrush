@@ -104,3 +104,105 @@ func TestBlockedHTMLIsSmallLocalizedAndEscaped(t *testing.T) {
 		t.Fatalf("unexpected blocked HTML: %s", body)
 	}
 }
+
+
+func TestAttackGuardGlobalSyncDefaultsOn(t *testing.T) {
+	guard, err := NewAttackGuard(filepath.Join(t.TempDir(), "security.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer guard.Close()
+	settings, err := guard.Settings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !settings.GlobalSync {
+		t.Fatal("global reputation sync must default to enabled")
+	}
+}
+
+func TestAttackGuardAllowlistOverridesLocalAndGlobalBlocks(t *testing.T) {
+	now := time.Now().UTC()
+	guard, err := NewAttackGuard("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer guard.Close()
+
+	if _, err := guard.Add("203.0.113.111", "manual", "temporary test", "manual", now.Add(time.Hour), now); err != nil {
+		t.Fatal(err)
+	}
+	if err := guard.Allow("203.0.113.111", "trusted proxy"); err != nil {
+		t.Fatal(err)
+	}
+	if !guard.IsAllowed("203.0.113.111") {
+		t.Fatal("allowlisted IP was not recognized")
+	}
+	if _, blocked := guard.Check("203.0.113.111", now); blocked {
+		t.Fatal("allowlisted IP remained blocked")
+	}
+	if err := guard.ApplyGlobal("203.0.113.111", "scanner-client", "confirmed globally", now, now.Add(7*24*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if _, blocked := guard.Check("203.0.113.111", now); blocked {
+		t.Fatal("global reputation bypassed allowlist")
+	}
+}
+
+func TestAttackGuardKeepsSevenDayReasonHistory(t *testing.T) {
+	now := time.Date(2026, 9, 23, 12, 0, 0, 0, time.UTC)
+	guard, err := NewAttackGuard("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer guard.Close()
+
+	first, blocked := guard.ObserveIncident("198.51.100.81", "injection", "first pattern", now.Add(-8*24*time.Hour))
+	if !blocked {
+		t.Fatal("first incident did not block")
+	}
+	if len(first.ReasonLog) != 1 {
+		t.Fatalf("first reason log=%d", len(first.ReasonLog))
+	}
+	second, blocked := guard.ObserveIncident("198.51.100.81", "traversal", "second pattern", now)
+	if !blocked {
+		t.Fatal("second incident did not block")
+	}
+	if len(second.ReasonLog) != 1 {
+		t.Fatalf("expired reason history was not pruned: %#v", second.ReasonLog)
+	}
+	if second.ReasonLog[0].Reason != "traversal" {
+		t.Fatalf("unexpected current reason history: %#v", second.ReasonLog)
+	}
+}
+
+func TestAttackGuardPersistsAllowlist(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "security.json")
+	guard, err := NewAttackGuard(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := guard.Allow("192.0.2.91", "office gateway"); err != nil {
+		t.Fatal(err)
+	}
+	if err := guard.saveSnapshot(); err != nil {
+		t.Fatal(err)
+	}
+	guard.Close()
+
+	loaded, err := NewAttackGuard(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer loaded.Close()
+	if !loaded.IsAllowed("192.0.2.91") {
+		t.Fatal("allowlist did not survive reload")
+	}
+	entries, err := loaded.Allowlist()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Comment != "office gateway" {
+		t.Fatalf("unexpected persisted allowlist: %#v", entries)
+	}
+}
