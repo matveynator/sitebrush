@@ -568,6 +568,35 @@
       <div class="col-md-2"><button class="btn btn-outline-secondary w-100">Block IP</button></div>
     </form>
 
+    <h3 class="h6">Throttled IPs</h3>
+    <p class="small">These addresses are not blocked. SiteBrush only slows sustained high-rate traffic; short bursts are left alone.</p>
+    <div class="table-responsive mb-4">
+      <table class="table table-sm align-middle">
+        <thead><tr><th>IP</th><th>Reason</th><th>Limit</th><th>Last event</th><th>Throttle until</th><th>Episodes</th><th></th></tr></thead>
+        <tbody>
+        {{range .SecurityThrottles}}
+          <tr>
+            <td><code>{{.IP}}</code><div class="small text-muted">throttled, not blocked</div></td>
+            <td>{{.Description}}</td>
+            <td>~{{.LimitRPS}} req/s</td>
+            <td>{{.LastEvent.Format "2006-01-02 15:04 UTC"}}</td>
+            <td>{{.ExpiresAt.Format "2006-01-02 15:04 UTC"}}</td>
+            <td>{{.Episodes}}</td>
+            <td>
+              <form method="post" action="?analytics#security">
+                <input type="hidden" name="security_action" value="unthrottle">
+                <input type="hidden" name="ip" value="{{.IP}}">
+                <button class="btn btn-outline-secondary btn-sm">Stop throttle</button>
+              </form>
+            </td>
+          </tr>
+        {{else}}
+          <tr><td colspan="7">No IPs are currently throttled.</td></tr>
+        {{end}}
+        </tbody>
+      </table>
+    </div>
+
     <h3 class="h6">Active blocks</h3>
     <div class="table-responsive mb-4">
       <table class="table table-sm align-middle">
