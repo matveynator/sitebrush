@@ -6513,9 +6513,11 @@ func (a *App) authAbuseMiddleware(next http.Handler) http.Handler {
 		}
 
 		if a.throttleGuard != nil {
-			decision := a.throttleGuard.ObserveFast(clientIP, trusted, now)
+			decision := httpsecurity.ThrottleDecision{}
 			if crawlerRead && !trusted {
 				decision = a.throttleGuard.ObserveFastExemptObservation(clientIP, false, now)
+			} else {
+				decision = a.throttleGuard.ObserveFast(clientIP, trusted, now)
 			}
 			if decision.RateLimited {
 				w.Header().Set("Content-Type", "text/plain; charset=utf-8")
