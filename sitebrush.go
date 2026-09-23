@@ -6229,8 +6229,8 @@ func (a *App) authAbuseMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		now := time.Now().UTC()
 		clientIP := clientIPAddress(r)
-		trusted := httpsecurity.IsLocalRequest(r) || hasSitebrushSessionCookie(r)
-		block, blocked := a.attackGuard.ObserveFast(clientIP, r.URL.EscapedPath(), trusted, now)
+		trusted := httpsecurity.IsLocalRequest(r)
+		block, blocked := a.attackGuard.ObserveRequestFast(clientIP, r.URL.EscapedPath(), r.Method, trusted, now)
 		if !blocked {
 			next.ServeHTTP(w, r)
 			return
