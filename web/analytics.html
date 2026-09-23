@@ -329,6 +329,39 @@
       color:var(--theme-success);
       text-decoration:underline;
     }
+    .session-map-marker {
+      width:46px;
+      height:46px;
+      border-radius:50%;
+      display:grid;
+      place-items:center;
+      border:2px solid rgba(255,255,255,.9);
+      box-shadow:0 6px 18px rgba(0,0,0,.34);
+    }
+    .session-map-marker-inner {
+      width:28px;
+      height:28px;
+      border-radius:50%;
+      display:grid;
+      place-items:center;
+      border:2px solid rgba(255,255,255,.72);
+      font-size:11px;
+      font-weight:700;
+      color:#fff;
+      text-shadow:0 1px 3px rgba(0,0,0,.8);
+    }
+    .session-map-div-icon {
+      background:transparent;
+      border:0;
+    }
+    .session-map-tooltip {
+      min-width:220px;
+      line-height:1.45;
+    }
+    .session-map-tooltip strong {
+      display:block;
+      margin-bottom:4px;
+    }
     .security-status-card {
       border:1px solid var(--dashboard-border);
       border-radius:var(--theme-radius);
@@ -519,6 +552,7 @@
       <small class="text-muted">| {{index .T "analytics_title"}}</small>
     </h1>
     <div class="page-header-actions">
+      <span class="btn btn-outline-secondary disabled">Server <span id="analytics-server-clock" data-server-time="{{.ServerNowRFC3339}}" data-server-timezone="{{.ServerTimezone}}" data-server-offset="{{.ServerTimezoneOffsetSeconds}}">{{.ServerNowDisplay}}</span> · {{.ServerTimezone}}</span>
       <a id="analytics-return-link" class="btn btn-outline-secondary analytics-back-link" href="{{.ReturnPath}}" data-fallback="{{.ReturnPath}}">{{index .T "back_to_uri"}}</a>
     </div>
   </div>
@@ -528,16 +562,12 @@
     <input type="hidden" name="tab" value="{{.AnalyticsTab}}">
     <select name="days" aria-label="{{index .T "analytics_period"}}" class="form-select w-auto">{{range $days := .PeriodOptions}}<option value="{{$days}}" {{if eq $.BrowserAnalytics.Days $days}}selected{{end}}>{{$days}} {{index $.T "ax_days"}}</option>{{end}}</select>
     <select name="traffic" class="form-select w-auto" aria-label="{{index .T "ax_audience"}}"><option value="human" {{if eq .ExperienceFilter.Traffic "human"}}selected{{end}}>{{index .T "ax_humans"}}</option><option value="bots" {{if eq .ExperienceFilter.Traffic "bots"}}selected{{end}}>{{index .T "ax_bots"}}</option><option value="all" {{if eq .ExperienceFilter.Traffic "all"}}selected{{end}}>{{index .T "ax_all"}}</option></select>
-    <input class="form-control w-auto" name="source" placeholder="{{index .T "ax_source"}}" value="{{.ExperienceFilter.Source}}">
-    <input type="hidden" name="campaign" value="{{.ExperienceFilter.Campaign}}">
-    <input class="form-control w-auto" name="page" placeholder="{{index .T "ax_page"}}" value="{{.ExperienceFilter.Page}}">
-    <input class="form-control w-auto" name="language" placeholder="{{index .T "ax_language"}}" value="{{.ExperienceFilter.Language}}">
+    <input type="hidden" name="campaign" value="">
     <button class="btn btn-outline-secondary">{{index .T "ax_filter"}}</button>
   </form>
   <nav class="analytics-tabs" aria-label="Analytics sections">
     <a href="?analytics&amp;tab=analytics&amp;days={{.BrowserAnalytics.Days}}" class="{{if eq .AnalyticsTab "analytics"}}active{{end}}">{{index .T "analytics_title"}}</a>
     <a href="?analytics&amp;tab=security&amp;days={{.BrowserAnalytics.Days}}" class="{{if eq .AnalyticsTab "security"}}active{{end}}">{{index .T "ax_security"}}</a>
-    <a href="?analytics&amp;tab=technical&amp;days={{.BrowserAnalytics.Days}}" class="{{if eq .AnalyticsTab "technical"}}active{{end}}">{{index .T "ax_technical"}}</a>
   </nav>
 
   {{if eq .AnalyticsTab "analytics"}}
@@ -548,18 +578,11 @@
       <p class="small">{{index .T "ax_map_hint"}}</p>
       <div class="world-map-layout">
         <div id="analytics-visitor-map" class="world-map-panel" aria-label="{{.Report.MapTitle}}">
-          {{if not .Report.MapPoints}}<div class="world-map-empty">{{index .T "analytics_no_data"}}</div>{{end}}
+          <div id="analytics-session-map-overlay" class="world-map-empty">{{index .T "analytics_no_data"}}</div>
         </div>
         <div>
-          {{if .Report.MapPoints}}
-          <ul class="world-map-list">
-            {{range .Report.MapPoints}}
-            <li><span><i class="world-map-list-color" style="color:{{.Color}}; background:{{.Color}};"></i>{{.Label}}</span><strong>{{.Count}}</strong><small>{{.Percent}} · {{.Detail}}</small></li>
-            {{end}}
-          </ul>
-          {{else}}
-          <p class="text-muted mb-0">{{index .T "analytics_no_data"}}</p>
-          {{end}}
+          <ul id="analytics-session-map-summary" class="world-map-list"></ul>
+          <p id="analytics-session-map-empty" class="text-muted mb-0">{{index .T "analytics_no_data"}}</p>
         </div>
       </div>
     </div>
@@ -577,10 +600,11 @@
       <div id="analytics-server-hour-chart" class="hourly-chart" aria-label="Requests by server local hour"></div>
     </div></section>
   </div>
+  <section id="analytics-goals" class="card mb-4"><div class="card-body"><h2 class="h5">{{index .T "ax_goals"}}</h2>{{if .Experience.GoalsConfigured}}<div class="metric-grid mb-3"><div class="card metric-card"><div class="card-body">{{index .T "ax_meaningful"}}<div class="metric-value">{{.Experience.GoalRate}}</div><div class="small text-muted">{{.Experience.GoalSessions}} / {{.Experience.Sessions}} sessions reached a configured goal</div></div></div></div>{{end}}<p>{{index .T "ax_goals_hint"}}</p><p>{{index .T "ax_goals_examples_hint"}}</p><pre class="border rounded p-3">{{index .T "ax_goals_examples"}}</pre><p class="small">{{index .T "ax_goals_action_example"}}</p><pre class="border rounded p-3"><code>&lt;a href="/download/" sitebrush-data-analytics-action="download"&gt;Download&lt;/a&gt;</code></pre><form method="post" action="?analytics"><textarea class="form-control" name="goals" rows="5" maxlength="12000" placeholder="Download | action | download">{{.GoalsText}}</textarea><button class="btn btn-outline-secondary mt-2">{{index .T "ax_save"}}</button></form></div></section>
   <section id="sources" class="card mb-4"><div class="card-body">
     <h2 class="h5">{{index .T "ax_sources"}}</h2><p class="small">{{index .T "ax_attribution_hint"}}</p>
     <div class="table-responsive"><table class="table"><thead><tr><th>{{index .T "ax_source"}}</th><th>{{index .T "ax_sessions"}}</th><th>{{index .T "ax_views"}}</th><th>{{index .T "ax_actions"}}</th>{{if .Experience.GoalsConfigured}}<th>{{index .T "ax_meaningful"}}</th>{{end}}<th>{{index .T "ax_returns"}}</th></tr></thead><tbody>
-    {{range .Experience.Sources}}<tr><td><a href="?analytics&amp;days={{$.BrowserAnalytics.Days}}&amp;source={{urlquery .Source}}&amp;campaign={{urlquery .Campaign}}&amp;traffic={{urlquery $.ExperienceFilter.Traffic}}">{{if eq .Label "direct-hidden"}}{{index $.T "ax_hidden"}}{{else}}{{.Label}}{{end}}</a><small class="d-block">{{index $.T (print "ax_evidence_" .Evidence)}} · {{.Campaign}}</small></td><td>{{.Sessions}}</td><td>{{.Views}}</td><td>{{.Actions}}</td>{{if $.Experience.GoalsConfigured}}<td>{{.GoalRate}}</td>{{end}}<td>{{.Returning}}</td></tr>{{else}}<tr><td colspan="{{if .Experience.GoalsConfigured}}6{{else}}5{{end}}">{{index .T "analytics_no_data"}}</td></tr>{{end}}
+    {{range .Experience.Sources}}<tr><td>{{if eq .Label "direct-hidden"}}{{index $.T "ax_hidden"}}{{else}}{{.Label}}{{end}}<small class="d-block">{{index $.T (print "ax_evidence_" .Evidence)}} · {{.Campaign}}</small></td><td>{{.Sessions}}</td><td>{{.Views}}</td><td>{{.Actions}}</td>{{if $.Experience.GoalsConfigured}}<td>{{.GoalRate}}</td>{{end}}<td>{{.Returning}}</td></tr>{{else}}<tr><td colspan="{{if .Experience.GoalsConfigured}}6{{else}}5{{end}}">{{index .T "analytics_no_data"}}</td></tr>{{end}}
     </tbody></table></div>
   </div></section>
   <section id="browser-overview" class="mb-4">
@@ -602,22 +626,26 @@
   {{if .Experience.ActionRows}}<section class="card mb-4"><div class="card-body"><h2 class="h5">{{index .T "ax_actions"}}</h2><ul>{{range .Experience.ActionRows}}<li>{{.Label}} — {{.Count}}</li>{{end}}</ul></div></section>{{end}}
   <section id="journeys" class="card mb-4"><div class="card-body"><h2 class="h5">{{index .T "ax_journeys"}}</h2><p class="small">{{index .T "ax_recent_hint"}}</p><ul>{{range .Experience.Journeys}}<li>{{.Label}} <strong>× {{.Sessions}}</strong></li>{{else}}<li>{{index .T "analytics_no_data"}}</li>{{end}}</ul></div></section>
   <section id="browser-content" class="card mb-4"><div class="card-body"><h2 class="h5">{{index .T "ax_content"}}</h2><p class="small">{{index .T "ax_exit_hint"}}</p>
-    <div class="table-responsive"><table class="table"><thead><tr><th>{{index .T "ax_page"}}</th><th>{{index .T "ax_views"}}</th><th>{{index .T "ax_active"}}</th><th>50% ↓</th><th>{{index .T "ax_action_rate"}}</th><th>{{index .T "ax_next"}}</th><th>{{index .T "ax_end"}}</th></tr></thead><tbody>{{range .Experience.Pages}}<tr><td><a href="?analytics&amp;days={{$.BrowserAnalytics.Days}}&amp;page={{urlquery .Label}}&amp;traffic={{urlquery $.ExperienceFilter.Traffic}}">{{.Label}}</a></td><td>{{.Views}}</td><td>{{.AverageActive}}</td><td>{{.ScrollRate}}</td><td>{{.ActionRate}}</td><td>{{.NextRate}}</td><td>{{.EndRate}}</td></tr>{{end}}</tbody></table></div>
+    <div class="table-responsive"><table class="table"><thead><tr><th>{{index .T "ax_page"}}</th><th>{{index .T "ax_views"}}</th><th>{{index .T "ax_active"}}</th><th>50% ↓</th><th>{{index .T "ax_action_rate"}}</th><th>{{index .T "ax_next"}}</th><th>{{index .T "ax_end"}}</th></tr></thead><tbody>{{range .Experience.Pages}}<tr><td>{{.Label}}</td><td>{{.Views}}</td><td>{{.AverageActive}}</td><td>{{.ScrollRate}}</td><td>{{.ActionRate}}</td><td>{{.NextRate}}</td><td>{{.EndRate}}</td></tr>{{end}}</tbody></table></div>
   </div></section>
   <section id="sessions" class="card mb-4"><div class="card-body"><h2 class="h5">{{index .T "ax_sessions"}}</h2><p class="small">{{index .T "ax_recent_hint"}}</p>
-    {{range .Experience.Recent}}<details class="border-bottom py-2"><summary>{{.When}} · {{.Source.Name}} → {{.Landing}} · {{.Language}} · {{.Browser}} / {{.OS}} · {{.Active}}</summary>
-    <p class="small">{{index $.T "ax_first_source"}}: {{.FirstSource}} · {{index $.T "ax_local_time"}}: {{if .LocalTime}}{{.LocalTime}} {{.Timezone}}{{else}}—{{end}} · {{.Country}} {{.City}}</p>
-    {{range .Tabs}}<ol>{{range .}}<li>{{.}}</li>{{end}}</ol>{{end}}{{if .Limited}}<p>{{index $.T "ax_incomplete"}}</p>{{end}}</details>{{else}}<p>{{index .T "analytics_no_data"}}</p>{{end}}
+    {{range .Experience.Recent}}<details class="border-bottom py-2"><summary>{{if eq .Class "human-likely"}}👤{{else}}🤖{{end}} <time data-relative-time="{{.Started.Format "2006-01-02T15:04:05Z07:00"}}">{{.When}}</time> · {{.Source.Name}} → {{.Landing}} · {{.Language}} · {{.Browser}} / {{.OS}} · active {{.Active}}</summary>
+    <p class="small mb-1">{{if .Address}}IP: <code>{{.Address}}</code> · {{end}}{{index $.T "ax_first_source"}}: {{.FirstSource}} · {{index $.T "ax_local_time"}}: {{if .LocalTime}}{{.LocalTime}} {{.Timezone}}{{else}}—{{end}} · {{if .Country}}{{.Country}}{{if .City}}, {{.City}}{{end}}{{else}}unknown location{{end}}</p>
+    {{if .Returning}}<p class="small mb-1">Returned after {{.ReturnAfter}} · {{.FirstSource}} → {{.Source.Name}} · {{if .Goal}}goal reached{{else}}no configured goal yet{{end}}</p>{{end}}
+    {{range .Tabs}}<ol class="mb-1">{{range .}}<li>{{.}}</li>{{end}}</ol>{{end}}{{if .Limited}}<p>{{index $.T "ax_incomplete"}}</p>{{end}}</details>{{else}}<p>{{index .T "analytics_no_data"}}</p>{{end}}
   </div></section>
 
   <section class="card mb-4"><div class="card-body"><h2 class="h5">{{index .T "ax_languages"}}</h2><div class="table-responsive"><table class="table"><thead><tr><th>{{index .T "ax_language"}}</th><th>{{index .T "ax_sessions"}}</th>{{if .Experience.GoalsConfigured}}<th>{{index .T "ax_meaningful"}}</th>{{end}}</tr></thead><tbody>{{range .Experience.Languages}}<tr><td>{{.Label}}</td><td>{{.Sessions}}</td>{{if $.Experience.GoalsConfigured}}<td>{{.GoalRate}}</td>{{end}}</tr>{{end}}</tbody></table></div><h3 class="h6">{{index .T "ax_local_time"}}</h3><div class="d-flex flex-wrap gap-3">{{range $hour,$count:=.Experience.LocalHours}}{{if $count}}<span>{{$hour}}:00 — {{$count}}</span>{{end}}{{end}}</div></div></section>
-  <details id="browser-returns" class="card mb-4"><summary class="card-body">{{index .T "ax_returns"}}</summary><div class="card-body"><p class="small">{{index .T "analytics_browser_retention_hint"}}</p>{{range .BrowserAnalytics.Report.Retention}}<span class="me-3">D{{.Day}}: {{.Returned}} / {{.Eligible}}</span>{{end}}{{range .BrowserAnalytics.ReturnSections}}<h3 class="h6">{{.Title}}</h3><ul>{{range .Rows}}<li>{{.Label}}: {{.Value}}</li>{{end}}</ul>{{end}}</div></details>
-  <details class="card mb-4"><summary class="card-body">{{index .T "ax_crawlers"}}</summary><div class="card-body"><p class="small">{{index .T "ax_bot_hint"}}</p><div class="table-responsive"><table class="table"><thead><tr><th>{{index .T "ax_audience"}}</th><th>User-Agent</th><th>{{index .T "ax_page"}}</th><th>{{index .T "ax_requests"}}</th></tr></thead><tbody>{{range .Security.Groups}}{{if ne .Class "unknown"}}<tr><td>{{index $.T (print "ax_class_" .Class)}}</td><td>{{.Agent}}</td><td>{{.Path}}</td><td>{{.Count}}</td></tr>{{end}}{{end}}</tbody></table></div></div></details>
+  <section id="browser-returns" class="card mb-4"><div class="card-body"><h2 class="h5">{{index .T "ax_returns"}}</h2><p class="small">{{index .T "analytics_browser_retention_hint"}}</p>
+    <div class="mb-3">{{range .BrowserAnalytics.Report.Retention}}<span class="me-3">D{{.Day}}: {{.Returned}} / {{.Eligible}}</span>{{end}}</div>
+    {{range .Experience.Recent}}{{if .Returning}}<div class="border-bottom py-2"><strong>Returned after {{.ReturnAfter}}</strong><div class="small">{{if .Address}}<code>{{.Address}}</code> · {{end}}{{.FirstSource}} → {{.Source.Name}} → {{.Landing}} · {{.Language}} · {{.Browser}} / {{.OS}} · {{if .Goal}}goal reached{{else}}no configured goal yet{{end}}</div></div>{{end}}{{end}}
+    {{range .BrowserAnalytics.ReturnSections}}<h3 class="h6 mt-3">{{.Title}}</h3><ul>{{range .Rows}}<li>{{.Label}}: {{.Value}}</li>{{end}}</ul>{{end}}
+  </div></section>
+  <details class="card mb-4"><summary class="card-body">{{index .T "ax_crawlers"}}</summary><div class="card-body"><p class="small">{{index .T "ax_bot_hint"}}</p><p class="small text-muted"><code>Go-http-client/1.1</code> is the standard Go HTTP client identity. SiteBrush classifies it as automation; it is not considered malicious unless its request behavior independently triggers a security rule.</p><div class="table-responsive"><table class="table"><thead><tr><th>{{index .T "ax_audience"}}</th><th>User-Agent</th><th>{{index .T "ax_page"}}</th><th>{{index .T "ax_requests"}}</th></tr></thead><tbody>{{range .Security.Groups}}{{if ne .Class "unknown"}}<tr><td>{{index $.T (print "ax_class_" .Class)}}</td><td>{{.Agent}}</td><td>{{.Path}}</td><td>{{.Count}}</td></tr>{{end}}{{end}}</tbody></table></div></div></details>
 
-  <details class="card mb-4"><summary class="card-body">{{index .T "ax_goals"}}</summary><div class="card-body"><p>{{index .T "ax_goals_hint"}}</p><p>{{index .T "ax_goals_examples_hint"}}</p><pre class="border rounded p-3">{{index .T "ax_goals_examples"}}</pre><p class="small">{{index .T "ax_goals_action_example"}}</p><pre class="border rounded p-3"><code>&lt;a href="/download/" sitebrush-data-analytics-action="download"&gt;Download&lt;/a&gt;</code></pre><form method="post" action="?analytics"><textarea class="form-control" name="goals" rows="5" maxlength="12000" placeholder="Download | action | download">{{.GoalsText}}</textarea><button class="btn btn-outline-secondary mt-2">{{index .T "ax_save"}}</button></form></div></details>
   {{end}}
-  {{if eq .AnalyticsTab "technical"}}
-  <section id="technical-analytics" class="card"><div class="card-body">
+  {{if eq .AnalyticsTab "analytics"}}
+  <section id="technical-analytics" class="card mt-4"><div class="card-body">
   <h2 class="h5">{{index .T "analytics_browser_technical"}}</h2>
   <p class="small">{{index .T "analytics_browser_technical_hint"}}</p>
   <div class="alert alert-secondary">
@@ -717,7 +745,7 @@
           <tr class="security-row-safe">
             <td><code>{{.IP}}</code><div class="small text-success">never block / never throttle</div></td>
             <td>{{.Comment}}</td>
-            <td>{{.AddedAt.Format "2006-01-02 15:04 UTC"}}</td>
+            <td><time data-relative-time="{{.AddedAt.Format "2006-01-02T15:04:05Z07:00"}}">{{.AddedAt.Format "02 Jan 2006 15:04"}}</time></td>
             <td>
               <form method="post" action="?analytics&amp;tab=security">
                 <input type="hidden" name="security_action" value="disallow">
@@ -753,8 +781,8 @@
             <td><code>{{.IP}}</code><div class="small text-muted">throttled, not blocked</div></td>
             <td>{{.Description}}</td>
             <td>~{{.LimitRPS}} req/s</td>
-            <td>{{.LastEvent.Format "2006-01-02 15:04 UTC"}}</td>
-            <td>{{.ExpiresAt.Format "2006-01-02 15:04 UTC"}}</td>
+            <td><time data-relative-time="{{.LastEvent.Format "2006-01-02T15:04:05Z07:00"}}">{{.LastEvent.Format "02 Jan 2006 15:04"}}</time></td>
+            <td><time data-relative-time="{{.ExpiresAt.Format "2006-01-02T15:04:05Z07:00"}}" data-countdown>{{.ExpiresAt.Format "02 Jan 2006 15:04"}}</time></td>
             <td>{{.Episodes}}</td>
             <td>
               <form method="post" action="?analytics&amp;tab=security">
@@ -791,8 +819,8 @@
               {{if .ReasonLog}}<details class="mt-2"><summary class="small">Reason summary (7 days)</summary><ul class="security-reason-log">{{range .ReasonLog}}<li>{{if ne .First .At}}{{.First.Format "2006-01-02 15:04"}} — {{end}}{{.At.Format "2006-01-02 15:04"}} · {{.Source}} · {{.Reason}} × {{.Count}}{{if .Description}} — {{.Description}}{{end}}</li>{{end}}</ul></details>{{end}}
             </td>
             <td><span class="security-source-badge {{if eq .Source "manual"}}security-source-manual{{else}}security-source-local{{end}}">{{.Source}}</span></td>
-            <td>{{.LastEvent.Format "2006-01-02 15:04 UTC"}}</td>
-            <td>{{.ExpiresAt.Format "2006-01-02 15:04 UTC"}}</td>
+            <td><time data-relative-time="{{.LastEvent.Format "2006-01-02T15:04:05Z07:00"}}">{{.LastEvent.Format "02 Jan 2006 15:04"}}</time></td>
+            <td><time data-relative-time="{{.ExpiresAt.Format "2006-01-02T15:04:05Z07:00"}}" data-countdown>{{.ExpiresAt.Format "02 Jan 2006 15:04"}}</time></td>
             <td>{{.Violations}}</td>
             <td>
               <form method="post" action="?analytics&amp;tab=security">
@@ -822,8 +850,8 @@
             <td><code>{{.IP}}</code><div class="small text-muted">{{.IncidentID}}</div></td>
             <td>{{.Reason}}{{if .Description}}<div class="small">{{.Description}}</div>{{end}}{{if .ReasonLog}}<details><summary class="small">Reason summary</summary><ul class="security-reason-log">{{range .ReasonLog}}<li>{{if ne .First .At}}{{.First.Format "2006-01-02 15:04"}} — {{end}}{{.At.Format "2006-01-02 15:04"}} · {{.Reason}} × {{.Count}}{{if .Description}} — {{.Description}}{{end}}</li>{{end}}</ul></details>{{end}}</td>
             <td><span class="security-source-badge security-source-global">global</span></td>
-            <td>{{.LastEvent.Format "2006-01-02 15:04 UTC"}}</td>
-            <td>{{.ExpiresAt.Format "2006-01-02 15:04 UTC"}}</td>
+            <td><time data-relative-time="{{.LastEvent.Format "2006-01-02T15:04:05Z07:00"}}">{{.LastEvent.Format "02 Jan 2006 15:04"}}</time></td>
+            <td><time data-relative-time="{{.ExpiresAt.Format "2006-01-02T15:04:05Z07:00"}}" data-countdown>{{.ExpiresAt.Format "02 Jan 2006 15:04"}}</time></td>
             <td>{{.Violations}}</td>
           </tr>
         {{else}}
@@ -834,11 +862,11 @@
     </div>
 
     <h3 class="h6">Detected security incidents</h3>
-    {{range .Security.Incidents}}<details class="border-bottom py-2"><summary>{{if .PossibleExposure}}⚠ {{index $.T "ax_exposure"}} · {{end}}{{.IP}} · {{.Count}} · {{.Last.Format "2006-01-02 15:04 UTC"}}</summary><p>{{.Country}} {{.City}} · {{.Agent}}</p><ul>{{range $category,$count:=.Categories}}<li>{{index $.T (print "ax_risk_" $category)}} × {{$count}}</li>{{end}}</ul><table class="table"><tbody>{{range .Examples}}<tr><td>{{.First.Format "15:04:05"}} — {{.Last.Format "15:04:05"}}</td><td>{{.Method}} {{.Path}}</td><td>{{.Status}}</td><td>× {{.Count}}</td></tr>{{end}}</tbody></table></details>{{else}}<p>{{index .T "ax_no_incidents"}}</p>{{end}}
+    {{range .Security.Incidents}}<details class="border-bottom py-2"><summary>{{if .PossibleExposure}}⚠ {{index $.T "ax_exposure"}} · {{end}}{{.IP}} · {{.Count}} · <time data-relative-time="{{.Last.Format "2006-01-02T15:04:05Z07:00"}}">{{.Last.Format "02 Jan 2006 15:04"}}</time></summary><p>{{.Country}} {{.City}} · {{.Agent}}</p><ul>{{range $category,$count:=.Categories}}<li>{{index $.T (print "ax_risk_" $category)}} × {{$count}}</li>{{end}}</ul><table class="table"><tbody>{{range .Examples}}<tr><td>{{.First.Format "15:04:05"}} — {{.Last.Format "15:04:05"}}</td><td>{{.Method}} {{.Path}}</td><td>{{.Status}}</td><td>× {{.Count}}</td></tr>{{end}}</tbody></table></details>{{else}}<p>{{index .T "ax_no_incidents"}}</p>{{end}}
   </div></section>
   {{end}}
 </div>
-<script type="application/json" id="analytics-map-points">{{.Report.MapJSON}}</script>
+<script type="application/json" id="analytics-map-points">{{.SessionMapJSON}}</script>
 <script type="application/json" id="analytics-local-hours">{{.LocalHoursJSON}}</script>
 <script type="application/json" id="analytics-server-hours">{{.ServerHoursJSON}}</script>
 <script src="/p/static/leaflet.min.js"></script>
@@ -1026,101 +1054,184 @@
 })();
 
 (function renderAnalyticsVisitorMap() {
+  'use strict';
   const mapElement = document.getElementById('analytics-visitor-map');
   const pointsElement = document.getElementById('analytics-map-points');
+  const summaryElement = document.getElementById('analytics-session-map-summary');
+  const emptyElement = document.getElementById('analytics-session-map-empty');
+  const overlayElement = document.getElementById('analytics-session-map-overlay');
   if (!mapElement || !pointsElement || !window.L) return;
 
-  let mapPoints = [];
+  let sessions = [];
   try {
-    mapPoints = JSON.parse(pointsElement.textContent || '[]');
-  } catch (error) {
-    mapPoints = [];
+    sessions = JSON.parse(pointsElement.textContent || '[]');
+  } catch (parseError) {
+    console.error('SiteBrush analytics: invalid session map data', parseError);
+    return;
+  }
+
+  function deviceKind(session) {
+    if ((session.Class || '') !== 'human-likely') return 'automation';
+    const client = ((session.OS || '') + ' ' + (session.Browser || '')).toLowerCase();
+    if (client.includes('android') || client.includes('iphone') || client.includes('ios') || client.includes('mobile')) return 'mobile';
+    return 'desktop';
+  }
+
+  function languageCode(language) {
+    const normalized = String(language || 'unknown').trim().toLowerCase();
+    return normalized ? normalized.split('-')[0] : 'unknown';
+  }
+
+  function aggregateSessions() {
+    const groups = new Map();
+    for (const session of sessions) {
+      const latitude = Number(session.Latitude);
+      const longitude = Number(session.Longitude);
+      if (!session.GeoKnown || !Number.isFinite(latitude) || !Number.isFinite(longitude)) continue;
+      const key = latitude.toFixed(3) + ',' + longitude.toFixed(3);
+      let group = groups.get(key);
+      if (!group) {
+        group = {
+          latitude: latitude, longitude: longitude,
+          country: session.Country || '', city: session.City || '',
+          count: 0, languages: new Map(), devices: new Map(),
+          classes: new Map(), localTimes: new Set(), sources: new Set()
+        };
+        groups.set(key, group);
+      }
+      group.count += 1;
+      const language = languageCode(session.Language);
+      const device = deviceKind(session);
+      const clientClass = session.Class || 'unknown';
+      group.languages.set(language, (group.languages.get(language) || 0) + 1);
+      group.devices.set(device, (group.devices.get(device) || 0) + 1);
+      group.classes.set(clientClass, (group.classes.get(clientClass) || 0) + 1);
+      if (session.LocalTime && group.localTimes.size < 4) group.localTimes.add(session.LocalTime);
+      if (session.Source && session.Source.Name && group.sources.size < 4) group.sources.add(session.Source.Name);
+    }
+    return Array.from(groups.values()).sort(function sortGroups(left, right) {
+      return right.count - left.count;
+    });
+  }
+
+  function sortedCounts(counts) {
+    return Array.from(counts.entries()).sort(function sortCounts(left, right) {
+      return right[1] - left[1] || left[0].localeCompare(right[0]);
+    });
+  }
+
+  function gradientFor(counts, palette) {
+    const rows = sortedCounts(counts);
+    const total = rows.reduce(function sumCounts(sum, row) { return sum + row[1]; }, 0);
+    if (!total) return palette[0];
+    let offset = 0;
+    const slices = [];
+    for (let index = 0; index < rows.length; index += 1) {
+      const start = offset * 100 / total;
+      offset += rows[index][1];
+      const end = offset * 100 / total;
+      const color = palette[index % palette.length];
+      slices.push(color + ' ' + start.toFixed(1) + '% ' + end.toFixed(1) + '%');
+    }
+    return 'conic-gradient(' + slices.join(',') + ')';
+  }
+
+  function markerIcon(group) {
+    const outerGradient = gradientFor(group.languages, ['#7c3aed','#06b6d4','#22c55e','#f59e0b','#ef4444','#ec4899']);
+    const innerGradient = gradientFor(group.devices, ['#2563eb','#16a34a','#9333ea']);
+    const marker = document.createElement('div');
+    marker.className = 'session-map-marker';
+    marker.style.background = outerGradient;
+    const inner = document.createElement('div');
+    inner.className = 'session-map-marker-inner';
+    inner.style.background = innerGradient;
+    inner.textContent = String(group.count);
+    marker.appendChild(inner);
+    return window.L.divIcon({
+      className: 'session-map-div-icon',
+      html: marker.outerHTML,
+      iconSize: [46, 46],
+      iconAnchor: [23, 23]
+    });
+  }
+
+  function countsText(counts, icons) {
+    return sortedCounts(counts).map(function describeCount(row) {
+      return (icons[row[0]] || '') + row[0] + ' ' + row[1];
+    }).join(' · ');
+  }
+
+  function tooltipNode(group) {
+    const wrapper = document.createElement('div');
+    wrapper.className = 'session-map-tooltip';
+    const title = document.createElement('strong');
+    title.textContent = [group.city, group.country].filter(Boolean).join(', ') || 'Unknown location';
+    wrapper.appendChild(title);
+
+    const sessionsLine = document.createElement('div');
+    sessionsLine.textContent = group.count + (group.count === 1 ? ' session' : ' sessions');
+    wrapper.appendChild(sessionsLine);
+
+    const languagesLine = document.createElement('div');
+    languagesLine.textContent = 'Languages: ' + countsText(group.languages, {});
+    wrapper.appendChild(languagesLine);
+
+    const devicesLine = document.createElement('div');
+    devicesLine.textContent = 'Devices: ' + countsText(group.devices, {mobile:'📱 ',desktop:'💻 ',automation:'🤖 '});
+    wrapper.appendChild(devicesLine);
+
+    if (group.sources.size) {
+      const sourceLine = document.createElement('div');
+      sourceLine.textContent = 'Sources: ' + Array.from(group.sources).join(', ');
+      wrapper.appendChild(sourceLine);
+    }
+    if (group.localTimes.size) {
+      const timeLine = document.createElement('div');
+      timeLine.textContent = 'Visitor local time: ' + Array.from(group.localTimes).join(', ');
+      wrapper.appendChild(timeLine);
+    }
+    return wrapper;
+  }
+
+  function summaryRow(group) {
+    const row = document.createElement('li');
+    const label = document.createElement('span');
+    label.textContent = ([group.city, group.country].filter(Boolean).join(', ') || 'Unknown location');
+    const count = document.createElement('strong');
+    count.textContent = String(group.count);
+    const detail = document.createElement('small');
+    detail.textContent = countsText(group.languages, {}) + ' · ' + countsText(group.devices, {mobile:'📱 ',desktop:'💻 ',automation:'🤖 '});
+    row.appendChild(label);
+    row.appendChild(count);
+    row.appendChild(detail);
+    return row;
   }
 
   const map = window.L.map(mapElement, {
-    center: [20, 0],
-    zoom: 2,
-    minZoom: 2,
-    maxZoom: 8,
-    scrollWheelZoom: false,
-    worldCopyJump: true
+    center: [20, 0], zoom: 2, minZoom: 2, maxZoom: 8,
+    scrollWheelZoom: false, worldCopyJump: true
   });
-
-  const dayLayer = window.L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+  const tileLayer = window.L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
     maxZoom: 19,
+    className: document.documentElement.getAttribute('data-bs-theme') === 'dark' ? 'osm-night-tiles' : '',
     attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
   });
-  const nightLayer = window.L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
-    maxZoom: 19,
-    className: 'osm-night-tiles',
-    attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
-  });
-  let activeTileLayer = null;
+  tileLayer.addTo(map);
 
-  function prefersNightMap() {
-    const theme = document.documentElement.getAttribute('data-bs-theme') || '';
-    if (theme === 'dark') return true;
-    if (theme === 'light') return false;
-    return window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
-  }
-
-  function applyTileLayer() {
-    const nextLayer = prefersNightMap() ? nightLayer : dayLayer;
-    if (activeTileLayer === nextLayer) return;
-    if (activeTileLayer) {
-      map.removeLayer(activeTileLayer);
-    }
-    nextLayer.addTo(map);
-    activeTileLayer = nextLayer;
-  }
-
-  function markerText(point) {
-    const label = point.label || point.country || '';
-    const count = Number(point.count || 0);
-    const percent = point.percent || '';
-    const tooltip = document.createElement('span');
-    tooltip.textContent = label + ' · ' + count + ' · ' + percent;
-    return tooltip;
-  }
-
-  const markerBounds = [];
-  for (const point of mapPoints) {
-    const latitude = Number(point.latitude);
-    const longitude = Number(point.longitude);
-    if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) continue;
-    const color = point.color || '#2ecc71';
-    const radius = Math.max(4, Math.min(12, Number(point.radius || 6)));
-    const marker = window.L.circleMarker([latitude, longitude], {
-      radius: radius,
-      color: color,
-      weight: 2,
-      fillColor: color,
-      fillOpacity: 0.78,
-      opacity: 0.95
-    });
-    marker.bindTooltip(markerText(point), {direction: 'top', opacity: 0.96});
+  const groups = aggregateSessions();
+  const bounds = [];
+  for (const group of groups) {
+    const marker = window.L.marker([group.latitude, group.longitude], {icon: markerIcon(group)});
+    marker.bindTooltip(tooltipNode(group), {direction:'top', opacity:.97});
     marker.addTo(map);
-    markerBounds.push([latitude, longitude]);
+    bounds.push([group.latitude, group.longitude]);
+    if (summaryElement && summaryElement.children.length < 12) summaryElement.appendChild(summaryRow(group));
   }
 
-  applyTileLayer();
-  if (markerBounds.length === 1) {
-    map.setView(markerBounds[0], 4);
-  } else if (markerBounds.length > 1) {
-    map.fitBounds(markerBounds, {padding: [28, 28], maxZoom: 5});
-  }
-
-  if (window.matchMedia) {
-    const mediaQuery = window.matchMedia('(prefers-color-scheme: dark)');
-    if (mediaQuery.addEventListener) {
-      mediaQuery.addEventListener('change', applyTileLayer);
-    } else if (mediaQuery.addListener) {
-      mediaQuery.addListener(applyTileLayer);
-    }
-  }
-  setTimeout(function refreshMapSize() {
-    map.invalidateSize();
-  }, 80);
+  if (overlayElement) overlayElement.hidden = groups.length > 0;
+  if (emptyElement) emptyElement.hidden = groups.length > 0;
+  if (bounds.length === 1) map.setView(bounds[0], 4);
+  if (bounds.length > 1) map.fitBounds(bounds, {padding:[28,28], maxZoom:5});
 })();
 
 (function setupReturnToPreviousURI() {
@@ -1166,6 +1277,94 @@
       row.hidden = query !== '' && !row.textContent.toLowerCase().includes(query);
     }
   });
+})();
+</script>
+<script>
+(function renderAnalyticsTimes() {
+  'use strict';
+  function relativeText(milliseconds) {
+    const absolute = Math.abs(milliseconds);
+    const units = [
+      [86400000, 'd'],
+      [3600000, 'h'],
+      [60000, 'm'],
+      [1000, 's']
+    ];
+    for (const unit of units) {
+      if (absolute >= unit[0]) return Math.max(1, Math.floor(absolute / unit[0])) + unit[1];
+    }
+    return 'now';
+  }
+  function renderTimeElement(timeElement) {
+    const timestamp = Date.parse(timeElement.dataset.relativeTime || '');
+    if (!Number.isFinite(timestamp)) return;
+    const difference = timestamp - Date.now();
+    const absoluteText = new Intl.DateTimeFormat(undefined, {
+      year:'numeric', month:'short', day:'2-digit', hour:'2-digit', minute:'2-digit', hour12:false
+    }).format(new Date(timestamp));
+    let relation = '';
+    if (Math.abs(difference) < 1000) relation = 'now';
+    else if (difference > 0) relation = 'in ' + relativeText(difference);
+    else relation = relativeText(difference) + ' ago';
+    if (timeElement.hasAttribute('data-countdown') && difference > 0) relation = relativeText(difference) + ' remaining';
+    timeElement.textContent = absoluteText + ' · ' + relation;
+  }
+  function renderAllTimes() {
+    document.querySelectorAll('time[data-relative-time]').forEach(renderTimeElement);
+  }
+  renderAllTimes();
+  window.setInterval(renderAllTimes, 30000);
+})();
+
+(function startAnalyticsServerClock() {
+  'use strict';
+  const clock = document.getElementById('analytics-server-clock');
+  if (!clock) return;
+  const serverStart = Date.parse(clock.dataset.serverTime || '');
+  const serverTimezone = String(clock.dataset.serverTimezone || '').trim();
+  const serverOffsetMilliseconds = Number(clock.dataset.serverOffset || 0) * 1000;
+  if (!Number.isFinite(serverStart) || !Number.isFinite(serverOffsetMilliseconds)) return;
+  const clientStart = Date.now();
+
+  function serverTimeFormatter() {
+    if (serverTimezone && serverTimezone !== 'Local') {
+      try {
+        return {
+          formatter: new Intl.DateTimeFormat(undefined, {
+            timeZone: serverTimezone,
+            year: 'numeric', month: 'short', day: '2-digit',
+            hour: '2-digit', minute: '2-digit', second: '2-digit',
+            hour12: false
+          }),
+          usesTimezone: true
+        };
+      } catch (invalidTimezone) {
+        console.warn('SiteBrush analytics: unsupported server timezone, using UTC offset fallback', invalidTimezone);
+      }
+    }
+    return {
+      formatter: new Intl.DateTimeFormat(undefined, {
+        timeZone: 'UTC',
+        year: 'numeric', month: 'short', day: '2-digit',
+        hour: '2-digit', minute: '2-digit', second: '2-digit',
+        hour12: false
+      }),
+      usesTimezone: false
+    };
+  }
+
+  const serverClockFormatter = serverTimeFormatter();
+
+  function renderServerClock() {
+    const elapsedMilliseconds = Date.now() - clientStart;
+    const absoluteServerTime = serverStart + elapsedMilliseconds;
+    const displayTime = serverClockFormatter.usesTimezone
+      ? new Date(absoluteServerTime)
+      : new Date(absoluteServerTime + serverOffsetMilliseconds);
+    clock.textContent = serverClockFormatter.formatter.format(displayTime);
+  }
+  renderServerClock();
+  window.setInterval(renderServerClock, 1000);
 })();
 </script>
 </body>

@@ -303,3 +303,74 @@ func TestArchiveExcludesSessionAndVisitorIdentities(t *testing.T) {
 		t.Fatal("visitor identity in archive")
 	}
 }
+
+
+func TestExperienceLocalHourFallbackAndReturnContext(t *testing.T) {
+	now := time.Date(2026, 9, 23, 12, 0, 0, 0, time.UTC)
+	report := ExperienceReport{Recent: []SessionSummary{
+		{Started: now, LocalTime: "14:10", Language: "en", Class: "human-likely", Landing: "/", Source: Attribution{Name: "direct-hidden"}},
+		{Started: now, LocalTime: "14:45", Language: "en", Class: "human-likely", Landing: "/docs/", Source: Attribution{Name: "GitHub"}},
+	}}
+	view := report.View(ExperienceFilter{})
+	if view.LocalHours[14] != 2 {
+		t.Fatalf("local-hour fallback = %v", view.LocalHours)
+	}
+
+	site := New(now)
+	first := experienceEvent("aaaaaaaaaaaaaaaa", "tab-a")
+	first.BrowserContext.Address = "192.0.2.44"
+	if !site.Record(first, now, 8<<20) {
+		t.Fatal("first session rejected")
+	}
+	second := experienceEvent("bbbbbbbbbbbbbbbb", "tab-a")
+	second.BrowserContext.Address = "192.0.2.44"
+	if !site.Record(second, now.Add(time.Hour), 8<<20) {
+		t.Fatal("return session rejected")
+	}
+	detail := site.ExperienceReport(now.Add(time.Hour), 1, true).View(ExperienceFilter{})
+	if len(detail.Recent) != 2 || !detail.Recent[0].Returning || detail.Recent[0].ReturnAfterMS <= 0 {
+		t.Fatalf("return context missing: %+v", detail.Recent)
+	}
+	if detail.Recent[0].Address != "192.0.2.44" {
+		t.Fatalf("in-memory address lost: %q", detail.Recent[0].Address)
+	}
+	encoded, err := json.Marshal(detail.Recent[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(encoded), "192.0.2.44") {
+		t.Fatal("session address was not persisted in bounded detail")
+	}
+
+	site.Prune(now.AddDate(0, 0, 8))
+	expired := site.ExperienceReport(now.AddDate(0, 0, 8), 30, true)
+	if len(expired.Recent) != 0 {
+		t.Fatal("session IP detail survived seven-day retention")
+	}
+
+	archiveReport := site.Report(now.Add(time.Hour), 1)
+	archiveEncoded, err := json.Marshal(map[string]Report{dayKey(now): archiveReport})
+	if err != nil {
+		t.Fatal(err)
+	}
+	directory := t.TempDir()
+	if err := writeDailyArchive(directory, string(archiveEncoded), now.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	archivedFile, err := os.Open(filepath.Join(directory, "archives", dayKey(now)+".json.gz"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer archivedFile.Close()
+	archivedReport, err := DecodeArchive(archivedFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	archivedJSON, err := json.Marshal(archivedReport)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(archivedJSON), "192.0.2.44") {
+		t.Fatal("session IP leaked into long-term archive")
+	}
+}

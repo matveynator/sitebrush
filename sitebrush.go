@@ -6181,12 +6181,10 @@ type analyticsSecurityBlockView struct {
 
 func analyticsSelectedTab(r *http.Request) string {
 	tab := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("tab")))
-	switch tab {
-	case "security", "technical":
+	if tab == "security" {
 		return tab
-	default:
-		return "analytics"
 	}
+	return "analytics"
 }
 
 func (a *App) analyticsPage(w http.ResponseWriter, r *http.Request) {
@@ -6209,7 +6207,7 @@ func (a *App) analyticsPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	browserDashboard := a.browserAnalyticsView(r, domain)
-	filter := browserstats.ExperienceFilter{Campaign: r.URL.Query().Get("campaign"), Source: r.URL.Query().Get("source"), Page: r.URL.Query().Get("page"), Language: r.URL.Query().Get("language"), Traffic: r.URL.Query().Get("traffic")}
+	filter := browserstats.ExperienceFilter{Traffic: r.URL.Query().Get("traffic")}
 	if filter.Traffic != "all" && filter.Traffic != "bots" {
 		filter.Traffic = "human"
 	}
@@ -6290,6 +6288,8 @@ func (a *App) analyticsPage(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	mapJSON, _ := json.Marshal(experience.Recent)
+	serverNow := time.Now()
+	_, serverTimezoneOffsetSeconds := serverNow.Zone()
 	report, found := a.loadAnalyticsReport(r.Context(), domain, browserDashboard.Days)
 	if !found {
 		report = analyticsPreparedReport{GeneratedAt: time.Now().UTC().Format(time.RFC3339)}
@@ -6308,7 +6308,7 @@ func (a *App) analyticsPage(w http.ResponseWriter, r *http.Request) {
 		"AnalyticsTab":     selectedTab,
 		"Report":           analyticsReportView(report, translationsForRequest(r)),
 		"BrowserAnalytics": browserDashboard,
-		"Experience":       experience, "ExperienceFilter": filter, "Security": security, "SecurityBlocks": securityBlocks, "SecurityLocalBlocks": securityLocalBlocks, "SecurityGlobalBlocks": securityGlobalBlocks, "SecurityAllowlist": securityAllowlist, "SecurityThrottles": securityThrottles, "SecuritySettings": securitySettings, "GoalsText": strings.Join(goalLines, "\n"), "SessionMapJSON": template.JS(mapJSON), "PeriodOptions": []int{1, 7, 30, 90}, "UnknownGeo": unknownGeo, "ServerRequests": serverRequests, "ServerLocalHours": serverLocalHours, "LocalHoursJSON": template.JS(localHoursJSON), "ServerHoursJSON": template.JS(serverHoursJSON), "ServerTimezone": time.Local.String(),
+		"Experience":       experience, "ExperienceFilter": filter, "Security": security, "SecurityBlocks": securityBlocks, "SecurityLocalBlocks": securityLocalBlocks, "SecurityGlobalBlocks": securityGlobalBlocks, "SecurityAllowlist": securityAllowlist, "SecurityThrottles": securityThrottles, "SecuritySettings": securitySettings, "GoalsText": strings.Join(goalLines, "\n"), "SessionMapJSON": template.JS(mapJSON), "PeriodOptions": []int{1, 7, 30, 90}, "UnknownGeo": unknownGeo, "ServerRequests": serverRequests, "ServerLocalHours": serverLocalHours, "LocalHoursJSON": template.JS(localHoursJSON), "ServerHoursJSON": template.JS(serverHoursJSON), "ServerTimezone": time.Local.String(), "ServerNowRFC3339": serverNow.Format(time.RFC3339), "ServerNowDisplay": serverNow.Format("02 Jan 2006 15:04:05"), "ServerTimezoneOffsetSeconds": serverTimezoneOffsetSeconds,
 	})
 }
 

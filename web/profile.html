@@ -159,9 +159,12 @@
   </div>
   {{end}}
 {{if .AccountCSRF}}
-<section class="authentication-card profile-form">
-  <h2>{{index .T "auth_passkey_title"}}</h2>
-  <p>{{index .T "auth_passkey_offer_text"}}</p>
+<div class="profile-account-grid">
+<section class="authentication-card profile-form profile-account-card">
+  <div class="profile-account-card-header">
+    <h2>{{index .T "auth_passkey_title"}}</h2>
+    <p>{{index .T "auth_passkey_offer_text"}}</p>
+  </div>
   {{if not .PasskeyOffer}}<p id="SiteBrushPasskeyCreateStatus" class="text-danger" role="status"></p>
   <button type="button" data-passkey-create data-account-csrf="{{.AccountCSRF}}" data-passkey-start="?profile&passkey_begin" data-passkey-finish="?profile&passkey_finish" data-passkey-status="#SiteBrushPasskeyCreateStatus" data-passkey-error="{{index .T "auth_passkey_failed"}}" data-passkey-unavailable="{{index .T "auth_passkey_unavailable"}}">{{index .T "auth_passkey_create"}}</button>{{end}}
   {{range .Passkeys}}
@@ -176,29 +179,61 @@
   {{end}}
 </section>
 
-<section class="authentication-card profile-form">
-  <h2>{{index .T "auth_totp_title"}}</h2>
+<section class="authentication-card profile-form profile-account-card profile-authenticator-card">
+  <div class="profile-account-card-header">
+    <h2>{{index .T "auth_totp_title"}}</h2>
+    <p>{{index .T "auth_totp_explanation"}}</p>
+  </div>
+
+  {{if not .TOTPEnabled}}
+  <div class="authenticator-apps">
+    <span class="authenticator-apps-label">{{index .T "auth_totp_apps"}}</span>
+    <div class="authenticator-app-buttons">
+      <a class="btn btn-outline-secondary" href="https://support.google.com/accounts/answer/1066447" target="_blank" rel="noopener noreferrer">Google Authenticator</a>
+      <a class="btn btn-outline-secondary" href="https://www.microsoft.com/security/mobile-authenticator-app" target="_blank" rel="noopener noreferrer">Microsoft Authenticator</a>
+      <a class="btn btn-outline-secondary" href="https://2fas.com/download/" target="_blank" rel="noopener noreferrer">2FAS</a>
+      <a class="btn btn-outline-secondary" href="https://getaegis.app/" target="_blank" rel="noopener noreferrer">Aegis · Android</a>
+    </div>
+  </div>
+  {{end}}
+
   {{if .TOTPEnabled}}
-    <p>{{index .T "auth_totp_enabled"}}</p>
-    <form method="post" action="?profile">
+    <div class="account-status account-status-success">{{index .T "auth_totp_enabled"}}</div>
+    <form method="post" action="?profile" class="profile-account-card-actions">
       <input type="hidden" name="profile_action" value="totp_disable">
       <input type="hidden" name="account_csrf" value="{{.AccountCSRF}}">
       <button type="submit">{{index .T "auth_totp_disable"}}</button>
     </form>
   {{else if .TOTPSetupSecret}}
-    <h3>{{index .T "auth_totp_setup_title"}}</h3>
-    <p>{{index .T "auth_totp_setup_help"}}</p>
-    <p><strong>{{index .T "auth_totp_secret"}}:</strong> <code dir="ltr">{{.TOTPSetupSecret}}</code></p>
-    <p><a href="{{.TOTPSetupURI}}"><code dir="ltr">{{.TOTPSetupURI}}</code></a></p>
-    <form method="post" action="?profile">
+    <ol class="authenticator-steps">
+      <li>{{index .T "auth_totp_step_install"}}</li>
+      <li>{{index .T "auth_totp_step_add"}}</li>
+      <li>{{index .T "auth_totp_step_enter"}}</li>
+    </ol>
+
+    <div class="authenticator-connect">
+      <a class="btn btn-primary" href="{{.TOTPSetupURI}}">{{index .T "auth_totp_open_app"}}</a>
+      <span class="authenticator-connect-or">{{index .T "auth_totp_or_manual"}}</span>
+      <div class="auth-copy-field">
+        <code id="SiteBrushTOTPSetupKey" dir="ltr" data-copy-source>{{.TOTPSetupSecret}}</code>
+        <button type="button" class="btn btn-outline-secondary" data-copy-from="#SiteBrushTOTPSetupKey">{{index .T "auth_copy"}}</button>
+      </div>
+      <p class="hint">{{index .T "auth_totp_secret_help"}}</p>
+    </div>
+
+    <form method="post" action="?profile" class="authenticator-code-form">
       <input type="hidden" name="profile_action" value="totp_enable">
       <input type="hidden" name="account_csrf" value="{{.AccountCSRF}}">
       <input type="hidden" name="totp_secret" value="{{.TOTPSetupSecret}}">
-      <label>{{index .T "auth_totp_code"}}<input class="profile-code-input" type="text" name="totp_code" autocomplete="one-time-code" inputmode="numeric" pattern="[0-9]{6}" minlength="6" maxlength="6" required></label>
+      <label>
+        {{index .T "auth_totp_code"}}
+        <span class="hint">{{index .T "auth_totp_code_help"}}</span>
+        <input class="profile-code-input" type="text" name="totp_code" autocomplete="one-time-code" inputmode="numeric" pattern="[0-9]{6}" minlength="6" maxlength="6" required>
+      </label>
       <button type="submit">{{index .T "auth_totp_enable"}}</button>
     </form>
   {{else}}
-    <form method="post" action="?profile">
+    <form method="post" action="?profile" class="profile-account-card-actions">
       <input type="hidden" name="profile_action" value="totp_setup">
       <input type="hidden" name="account_csrf" value="{{.AccountCSRF}}">
       <button type="submit">{{index .T "auth_totp_setup_title"}}</button>
@@ -206,9 +241,16 @@
   {{end}}
 </section>
 
-<section class="authentication-card profile-form"><h2>{{index .T "auth_trusted_ips"}}</h2><p>{{index .T "auth_trust_help"}}</p>
-{{range .TrustedIPs}}<form method="post" action="?profile" class="auth-trusted-row"><input type="hidden" name="profile_action" value="revoke_ip"><input type="hidden" name="trusted_ip" value="{{.IP}}"><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}"><strong dir="ltr">{{.IP}}{{if eq .IP "127.0.0.1"}} / localhost{{end}}</strong>{{if .Current}} <span>{{index $.T "auth_current"}}</span>{{end}}<p>{{index $.T "auth_confirmed"}}: {{.Confirmed.Format "2006-01-02 15:04 UTC"}}<br>{{index $.T "auth_last_login"}}: {{.LastLogin.Format "2006-01-02 15:04 UTC"}}<br>{{index $.T "auth_expires"}}: {{.Expires.Format "2006-01-02 15:04 UTC"}}</p><button type="submit">{{index $.T "auth_revoke"}}</button></form>{{else}}<p>{{index .T "auth_no_trusted"}}</p>{{end}}
-</section>{{end}}
+<section class="authentication-card profile-form profile-account-card">
+  <div class="profile-account-card-header">
+    <h2>{{index .T "auth_trusted_ips"}}</h2>
+    <p>{{index .T "auth_trust_help"}}</p>
+  </div>
+  <div class="profile-account-list">
+  {{range .TrustedIPs}}<form method="post" action="?profile" class="auth-trusted-row"><input type="hidden" name="profile_action" value="revoke_ip"><input type="hidden" name="trusted_ip" value="{{.IP}}"><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}"><strong dir="ltr">{{.IP}}{{if eq .IP "127.0.0.1"}} / localhost{{end}}</strong>{{if .Current}} <span class="account-status-inline">{{index $.T "auth_current"}}</span>{{end}}<p>{{index $.T "auth_confirmed"}}: {{.Confirmed.Format "2006-01-02 15:04 UTC"}}<br>{{index $.T "auth_last_login"}}: {{.LastLogin.Format "2006-01-02 15:04 UTC"}}<br>{{index $.T "auth_expires"}}: {{.Expires.Format "2006-01-02 15:04 UTC"}}</p><button type="submit">{{index $.T "auth_revoke"}}</button></form>{{else}}<p class="hint">{{index .T "auth_no_trusted"}}</p>{{end}}
+  </div>
+</section>
+</div>{{end}}
 </main>
 <script>
 (function prepareProfileCodeForm() {
