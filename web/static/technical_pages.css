@@ -3132,3 +3132,18 @@ body.technical-page.analytics-page {
 .technical-page .profile-email-address { display: block; overflow-wrap: anywhere; font-weight: 600; }
 .technical-page .profile-email-step p { margin-block: .75rem; color: var(--theme-muted-foreground); }
 .technical-page .profile-email-step .btn { white-space: normal; }
+
+/* Account forms share controls without placing decoration over one-time codes. */
+.technical-page .authentication-card,
+.technical-page .profile-form { background: var(--theme-card); color: var(--theme-foreground); border: 1px solid var(--theme-border); border-radius: var(--theme-radius); padding: clamp(16px, 4vw, 28px); }
+.technical-page .authentication-card label,
+.technical-page .profile-form label { display: block; margin-block: 0 1rem; }
+.technical-page .authentication-card input:not([type=hidden]):not([type=submit]),
+.technical-page .profile-form input:not([type=hidden]):not([type=submit]) { box-sizing: border-box; max-width: 100%; padding: .75rem; border: 1px solid var(--theme-border); border-radius: var(--theme-radius); background: var(--theme-background); color: var(--theme-foreground); }
+.technical-page input[autocomplete="one-time-code"] { display: block; width: min(100%, 16rem); font-family: monospace; font-size: 2rem; font-weight: 700; line-height: 1.5; letter-spacing: .12em; text-align: center; margin-block: .5rem; }
+.technical-page .auth-actions,
+.technical-page .auth-code-tools { display: flex; flex-wrap: wrap; align-items: center; gap: .75rem; margin-block: .75rem 1rem; }
+.technical-page .auth-code-tools span { color: var(--theme-muted-foreground); }
+.technical-page .auth-trusted-row { border-block-start: 1px solid var(--theme-border); padding-block: 1rem; overflow-wrap: anywhere; }
+.technical-page .authentication-card :is(button,a,input):focus-visible,
+.technical-page .profile-form :is(button,a,input):focus-visible { outline: 2px solid var(--theme-primary); outline-offset: 3px; }

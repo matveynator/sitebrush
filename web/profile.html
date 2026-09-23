@@ -112,7 +112,7 @@
     </label>
     <div class="profile-form-actions">
       {{if .PasswordWebmailProvider.URL}}<a class="btn btn-outline-primary" href="{{.PasswordWebmailProvider.URL}}" target="_blank" rel="noopener noreferrer">{{index .T "setup_confirmation_open"}} {{.PasswordWebmailProvider.Name}}</a>{{end}}
-      <button class="profile-code-submit" type="submit" disabled>{{.PasswordCodeSubmit}}</button>
+      <button class="profile-code-submit" type="submit">{{.PasswordCodeSubmit}}</button>{{if and (not .EmailChange.Step) .CodeWebmail.URL}}<a class="btn btn-outline-secondary" href="{{.CodeWebmail.URL}}" target="_blank" rel="noopener noreferrer">{{index .T "setup_confirmation_open"}} {{.CodeWebmail.Name}}</a>{{end}}
     </div>
   </form>
   {{else if .ShowPasswordForm}}
@@ -160,6 +160,10 @@
     {{end}}
   </div>
   {{end}}
+{{if .AccountCSRF}}
+<section class="authentication-card profile-form"><h2>{{index .T "auth_trusted_ips"}}</h2><p>{{index .T "auth_trust_help"}}</p>
+{{range .TrustedIPs}}<form method="post" action="?profile" class="auth-trusted-row"><input type="hidden" name="profile_action" value="revoke_ip"><input type="hidden" name="trusted_ip" value="{{.IP}}"><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}"><strong dir="ltr">{{.IP}}</strong>{{if .Current}} <span>{{index $.T "auth_current"}}</span>{{end}}<p>{{index $.T "auth_confirmed"}}: {{.Confirmed.Format "2006-01-02 15:04 UTC"}}<br>{{index $.T "auth_last_login"}}: {{.LastLogin.Format "2006-01-02 15:04 UTC"}}<br>{{index $.T "auth_expires"}}: {{.Expires.Format "2006-01-02 15:04 UTC"}}</p><button type="submit">{{index $.T "auth_revoke"}}</button></form>{{else}}<p>{{index .T "auth_no_trusted"}}</p>{{end}}
+</section>{{end}}
 </main>
 <script>
 (function prepareProfileCodeForm() {
@@ -471,5 +475,7 @@
   };
 })();
 </script>
+<span hidden data-account-code-tools data-copy-label="{{index .T "auth_copy"}}" data-copy-success="{{index .T "auth_copied"}}" data-copy-error="{{index .T "auth_copy_failed"}}"></span>
+<script src="/p/static/account-forms.js" defer></script>
 </body>
 </html>

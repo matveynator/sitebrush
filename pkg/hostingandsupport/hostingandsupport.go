@@ -726,6 +726,7 @@ func Migrate(ctx context.Context, database *sql.DB) error {
 		`CREATE INDEX IF NOT EXISTS idx_registry_sync_events_installation_created ON registry_sync_events(installation_id,created_at);`,
 		`CREATE TABLE IF NOT EXISTS sitebrush_com_keys(domain TEXT PRIMARY KEY,public_key TEXT,private_key_path TEXT,fingerprint TEXT,created_at TEXT,updated_at TEXT);`,
 		`CREATE TABLE IF NOT EXISTS hosting_panel_snapshots(name TEXT PRIMARY KEY,version INTEGER NOT NULL,payload_json TEXT NOT NULL,built_at TEXT NOT NULL);`,
+		`CREATE TABLE IF NOT EXISTS account_code_rates(domain TEXT,email TEXT,client_ip TEXT,window_start INTEGER,last_sent INTEGER,sent_count INTEGER,PRIMARY KEY(domain,email,client_ip));`,
 		`CREATE TABLE IF NOT EXISTS registration_confirmations(token TEXT PRIMARY KEY,domain TEXT,action TEXT,email TEXT,password TEXT,current_email TEXT,return_path TEXT,language_code TEXT,created_at TEXT,expires_at TEXT);`,
 	}
 	queries = append(queries, mailout.SchemaQueries()...)
@@ -850,6 +851,7 @@ type hostingAndSupportColumn struct {
 
 func requiredHostingAndSupportColumns() []hostingAndSupportColumn {
 	return []hostingAndSupportColumn{
+		{tableName: "account_code_rates", columnName: "sent_count", definition: "INTEGER NOT NULL DEFAULT 0"},
 		{"registration_confirmations", "form_token", "TEXT NOT NULL DEFAULT ''"},
 		{"registration_confirmations", "verification_code", "TEXT NOT NULL DEFAULT ''"},
 		{"registration_confirmations", "attempts", "INTEGER NOT NULL DEFAULT 0"},

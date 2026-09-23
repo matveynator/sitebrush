@@ -154,7 +154,7 @@ func SafeURI(raw string) string {
 	query := parsed.Query()
 	for key := range query {
 		lower := strings.ToLower(key)
-		sensitive := map[string]bool{"token": true, "access_token": true, "id_token": true, "secret": true, "password": true, "passwd": true, "auth": true, "authorization": true, "session": true, "sessionid": true, "session_id": true, "api_key": true, "apikey": true, "key": true, "code": true, "gclid": true, "yclid": true, "fbclid": true}
+		sensitive := map[string]bool{"login_challenge": true, "profile_resume": true, "recovery_token": true, "email_confirm": true, "registration_form_token": true, "recovery_code": true, "login_code": true, "password_confirmation_code": true, "token": true, "access_token": true, "id_token": true, "secret": true, "password": true, "passwd": true, "auth": true, "authorization": true, "session": true, "sessionid": true, "session_id": true, "api_key": true, "apikey": true, "key": true, "code": true, "gclid": true, "yclid": true, "fbclid": true}
 		if sensitive[lower] || strings.HasPrefix(lower, "utm_") {
 			query.Del(key)
 		}

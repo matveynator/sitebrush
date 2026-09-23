@@ -4295,18 +4295,14 @@ func TestLoginReturnPathDefaultsToCurrentPageWithoutAutoVisual(t *testing.T) {
 	}
 }
 
-func TestRegistrationRedirectUsesSelfSignedTLSPort(t *testing.T) {
-	application := &App{selfSignedTLSPort: 9899}
+func TestRegistrationDoesNotRedirectToSelfSignedTLS(t *testing.T) {
+	application, _ := newTestApplication(t)
+	application.selfSignedTLSPort = 9899
 	request := httptest.NewRequest(http.MethodGet, "http://code.example:9898/?register", nil)
 	response := httptest.NewRecorder()
-
 	application.route(response, request)
-
-	if response.Code != http.StatusTemporaryRedirect {
-		t.Fatalf("status = %d, want %d", response.Code, http.StatusTemporaryRedirect)
-	}
-	if location := response.Header().Get("Location"); location != "https://code.example:9899/?register" {
-		t.Fatalf("location = %q", location)
+	if response.Header().Get("Location") != "" || strings.Contains(response.Body.String(), `type="password"`) {
+		t.Fatal("registration must start without passwords or an untrusted HTTPS redirect")
 	}
 }
 
@@ -4354,6 +4350,8 @@ func TestProtectedControllerRedirectsToLoginAndPreservesController(t *testing.T)
 
 func TestLoginPostRedirectsBackToRequestedController(t *testing.T) {
 	application, rawDB := newTestApplication(t)
+	captureImmediateProfileEmail(t, application)
+	t.Setenv("SITEBRUSH_SERVICE_MAIL_MODE", "local")
 	_, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "admin@example.com", "old")
 	if err != nil {
 		t.Fatalf("insert user: %v", err)
@@ -4368,6 +4366,26 @@ func TestLoginPostRedirectsBackToRequestedController(t *testing.T) {
 	response := httptest.NewRecorder()
 
 	application.login(response, request)
+	if response.Code != http.StatusOK || len(response.Result().Cookies()) != 0 {
+		t.Fatal("password alone authenticated")
+	}
+	mail := <-application.emailDelivery
+	code := ""
+	for _, word := range strings.Fields(mail.Message.Body) {
+		if isSixDigitCode(word) {
+			code = word
+			break
+		}
+	}
+	var challenge string
+	if err := rawDB.QueryRow(`SELECT token FROM account_login_codes`).Scan(&challenge); err != nil {
+		t.Fatal(err)
+	}
+	verification := url.Values{"login_challenge": {challenge}, "login_code": {code}}
+	verifyRequest := httptest.NewRequest(http.MethodPost, "http://localhost:8080/?login", strings.NewReader(verification.Encode()))
+	verifyRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	response = httptest.NewRecorder()
+	application.login(response, verifyRequest)
 	if response.Code != http.StatusFound {
 		t.Fatalf("status = %d, body=%q", response.Code, response.Body.String())
 	}
@@ -4380,6 +4398,7 @@ func TestRegisterRequiresEmailConfirmationBeforeCreatingAdmin(t *testing.T) {
 	withEmailSPFAllowed(t)
 	t.Setenv("SITEBRUSH_SERVICE_MAIL_MODE", "local")
 	application, rawDB := newTestApplication(t)
+	application.hostingSnapshotReports = make(chan struct{}, 1)
 	if _, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES('existing.example','owner@example.org','secret',1)`); err != nil {
 		t.Fatal(err)
 	}
@@ -4415,10 +4434,10 @@ func TestRegisterRequiresEmailConfirmationBeforeCreatingAdmin(t *testing.T) {
 		if mailJob.Message.To != "admin@example.com" {
 			t.Fatalf("confirmation recipient = %q", mailJob.Message.To)
 		}
-		if !strings.Contains(mailJob.Message.Subject, "Подтвердите email") || !strings.Contains(mailJob.Message.Body, "Для подтверждения регистрации") {
+		if !strings.Contains(mailJob.Message.Subject, translationsForLanguageCode("ru")["auth_register_title"]) || !strings.Contains(mailJob.Message.Body, translationsForLanguageCode("ru")["mail_registration_code"]) {
 			t.Fatalf("confirmation email is not Russian: %#v", mailJob.Message)
 		}
-		if !strings.Contains(mailJob.Message.HTMLBody, "Подтвердить email и войти") || !strings.Contains(mailJob.Message.HTMLBody, `href="http://localhost:8080/?email_confirm=`) {
+		if !strings.Contains(mailJob.Message.HTMLBody, translationsForLanguageCode("ru")["auth_return_form"]) || !strings.Contains(mailJob.Message.HTMLBody, `href="http://localhost:8080/?email_confirm=`) {
 			t.Fatalf("confirmation email has no localized HTML action: %#v", mailJob.Message)
 		}
 		pendingToken = confirmationTokenFromBody(t, mailJob.Message.Body)
@@ -4440,6 +4459,14 @@ func TestRegisterRequiresEmailConfirmationBeforeCreatingAdmin(t *testing.T) {
 	confirmRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	confirmResponse := httptest.NewRecorder()
 	application.route(confirmResponse, confirmRequest)
+	if confirmResponse.Code != http.StatusOK || !strings.Contains(confirmResponse.Body.String(), `autocomplete="new-password"`) {
+		t.Fatal("verified email should open password setup")
+	}
+	passwordForm := url.Values{"password": {"secret"}, "password_confirm": {"secret"}}
+	passwordRequest := httptest.NewRequest(http.MethodPost, "https://localhost/?email_confirm="+url.QueryEscape(pendingToken), strings.NewReader(passwordForm.Encode()))
+	passwordRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	confirmResponse = httptest.NewRecorder()
+	application.route(confirmResponse, passwordRequest)
 	if confirmResponse.Code != http.StatusFound {
 		t.Fatalf("confirm status = %d, body=%q", confirmResponse.Code, confirmResponse.Body.String())
 	}
@@ -4652,6 +4679,7 @@ func TestRegisterCreatesSiteDatabaseOnlyAfterConfirmedVerifiedDomain(t *testing.
 		registrationConfirmations: startEmailConfirmationMemoryWorker(context.Background()),
 		emailDelivery:             make(chan mailout.DeliveryJob, 1),
 	}
+	application.hostingSnapshotReports = make(chan struct{}, 1)
 	form := url.Values{}
 	form.Set("email", "admin@verified.example")
 	form.Set("password", "secret")
@@ -4675,7 +4703,8 @@ func TestRegisterCreatesSiteDatabaseOnlyAfterConfirmedVerifiedDomain(t *testing.
 		t.Fatalf("site database before confirmation stat err = %v, want not exist", err)
 	}
 
-	confirmRequest := httptest.NewRequest(http.MethodGet, "https://"+domain+"/?email_confirm="+url.QueryEscape(pendingToken), nil)
+	confirmRequest := httptest.NewRequest(http.MethodPost, "https://"+domain+"/?email_confirm="+url.QueryEscape(pendingToken), strings.NewReader("password=secret&password_confirm=secret"))
+	confirmRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	confirmResponse := httptest.NewRecorder()
 	application.route(confirmResponse, confirmRequest)
 	if confirmResponse.Code != http.StatusFound {
@@ -5510,7 +5539,7 @@ func TestRecoverPageShowsSPFSetupBeforeEmailForm(t *testing.T) {
 			t.Fatalf("recover page missing %q in %s", expectedFragment, getBody)
 		}
 	}
-	for _, hiddenFragment := range []string{`name='email'`, `name="captcha"`, `?captcha`} {
+	for _, hiddenFragment := range []string{`name="email"`, `name="captcha"`, `?captcha`} {
 		if strings.Contains(getBody, hiddenFragment) {
 			t.Fatalf("recover page showed form fragment %q before SPF setup: %s", hiddenFragment, getBody)
 		}
@@ -5555,7 +5584,7 @@ func TestRecoverPageShowsEmailFormAfterSPFSetup(t *testing.T) {
 		t.Fatalf("status = %d, body=%q", response.Code, response.Body.String())
 	}
 	body := response.Body.String()
-	for _, expectedFragment := range []string{`name='email'`, `name="captcha"`, `?captcha`} {
+	for _, expectedFragment := range []string{`name="email"`, `name="captcha"`, `?captcha`} {
 		if !strings.Contains(body, expectedFragment) {
 			t.Fatalf("recover page missing form fragment %q in %s", expectedFragment, body)
 		}
@@ -5579,7 +5608,7 @@ func TestRecoverPageSkipsSiteDNSForRelayDelivery(t *testing.T) {
 	if strings.Contains(body, "Сначала настройте DNS") {
 		t.Fatalf("relay recovery page showed local DNS warning: %s", body)
 	}
-	if !strings.Contains(body, `name='email'`) || !strings.Contains(body, `name="captcha"`) {
+	if !strings.Contains(body, `name="email"`) || !strings.Contains(body, `name="captcha"`) {
 		t.Fatalf("relay recovery page did not show request form: %s", body)
 	}
 }
@@ -5588,6 +5617,8 @@ func TestRecoverPasswordThroughEmailLink(t *testing.T) {
 	t.Setenv("SITEBRUSH_SERVICE_MAIL_MODE", "local")
 	withEmailSPFAllowed(t)
 	application, rawDB := newTestApplication(t)
+	captureImmediateProfileEmail(t, application)
+	t.Setenv("SITEBRUSH_SERVICE_MAIL_MODE", "local")
 	if _, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "admin@example.com", "old-password"); err != nil {
 		t.Fatalf("insert user: %v", err)
 	}
@@ -5621,7 +5652,7 @@ func TestRecoverPasswordThroughEmailLink(t *testing.T) {
 	default:
 		t.Fatal("recovery email was not queued")
 	}
-	if !strings.Contains(message.Body, "Код восстановления SiteBrush") || !strings.Contains(message.Body, "https://localhost/?recover=") || !strings.Contains(message.HTMLBody, "Установить новый пароль") {
+	if !strings.Contains(message.Body, translationsForLanguageCode("ru")["auth_reason_recover"]) || !strings.Contains(message.Body, "https://localhost/?recover=") || !strings.Contains(message.HTMLBody, translationsForLanguageCode("ru")["auth_return_form"]) {
 		t.Fatalf("recovery email does not contain code and link: %#v", message)
 	}
 	var recoveryToken string
@@ -5680,6 +5711,8 @@ func TestRecoverPasswordThroughManualCode(t *testing.T) {
 	t.Setenv("SITEBRUSH_SERVICE_MAIL_MODE", "local")
 	withEmailSPFAllowed(t)
 	application, rawDB := newTestApplication(t)
+	captureImmediateProfileEmail(t, application)
+	t.Setenv("SITEBRUSH_SERVICE_MAIL_MODE", "local")
 	if _, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "admin@example.com", "old-password"); err != nil {
 		t.Fatalf("insert user: %v", err)
 	}
@@ -5746,6 +5779,8 @@ func TestRecoveryUsesBrowserLanguageForInterfaceAndQueuedEmail(t *testing.T) {
 	t.Setenv("SITEBRUSH_SERVICE_MAIL_MODE", "local")
 	withEmailSPFAllowed(t)
 	application, rawDB := newTestApplication(t)
+	captureImmediateProfileEmail(t, application)
+	t.Setenv("SITEBRUSH_SERVICE_MAIL_MODE", "local")
 	if _, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "admin@example.com", "old-password"); err != nil {
 		t.Fatalf("insert user: %v", err)
 	}
@@ -5775,7 +5810,7 @@ func TestRecoveryUsesBrowserLanguageForInterfaceAndQueuedEmail(t *testing.T) {
 	}
 	select {
 	case mailJob := <-application.emailDelivery:
-		if mailJob.Message.Subject != emailSubjectForLanguage("de", "recover", "localhost") || !strings.Contains(mailJob.Message.Body, "SiteBrush-Wiederherstellungscode") || !strings.Contains(mailJob.Message.HTMLBody, `lang="de"`) || !strings.Contains(mailJob.Message.HTMLBody, "Neues Passwort festlegen") {
+		if mailJob.Message.Subject != "[localhost] "+translationsForLanguageCode("de")["recover_title"] || !strings.Contains(mailJob.Message.Body, translationsForLanguageCode("de")["auth_reason_recover"]) || !strings.Contains(mailJob.Message.HTMLBody, `lang="de"`) || !strings.Contains(mailJob.Message.HTMLBody, translationsForLanguageCode("de")["auth_return_form"]) {
 			t.Fatalf("German recovery email is not fully localized: %#v", mailJob.Message)
 		}
 	default:
@@ -5787,17 +5822,26 @@ func TestRecoveryShowsKnownWebmailProvider(t *testing.T) {
 	t.Setenv("SITEBRUSH_SERVICE_MAIL_MODE", "local")
 	withEmailSPFAllowed(t)
 	application, rawDB := newTestApplication(t)
-	if _, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "admin@gmail.com", "old-password"); err != nil { t.Fatal(err) }
+	captureImmediateProfileEmail(t, application)
+	t.Setenv("SITEBRUSH_SERVICE_MAIL_MODE", "local")
+	if _, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "admin@gmail.com", "old-password"); err != nil {
+		t.Fatal(err)
+	}
 	form := url.Values{"recovery_action": {"request"}, "email": {"admin@gmail.com"}, "captcha": {"1234"}}
 	request := httptest.NewRequest(http.MethodPost, "https://localhost/?recover", strings.NewReader(form.Encode()))
 	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	request.Header.Set("Accept-Language", "en")
 	request.AddCookie(&http.Cookie{Name: "sitebrush_captcha", Value: "1234"})
 	response := httptest.NewRecorder()
 	application.route(response, request)
-	if response.Code != http.StatusOK { t.Fatalf("status = %d, body=%q", response.Code, response.Body.String()) }
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%q", response.Code, response.Body.String())
+	}
 	body := response.Body.String()
 	for _, expected := range []string{"https://mail.google.com/", "Open Gmail", "profile-delivery-link", "profile-delivery-modal"} {
-		if !strings.Contains(body, expected) { t.Fatalf("recovery page missing %q in %s", expected, body) }
+		if !strings.Contains(body, expected) {
+			t.Fatalf("recovery page missing %q in %s", expected, body)
+		}
 	}
 }
 
@@ -6488,7 +6532,7 @@ func TestFailedLoginRendersLoginFormWithLocalizedStatus(t *testing.T) {
 		t.Fatalf("status = %d, want %d, body=%q", response.Code, http.StatusUnauthorized, response.Body.String())
 	}
 	body := response.Body.String()
-	for _, expectedFragment := range []string{`<form class="card card-body" method="post" action="?login"`, "Неверный email или пароль.", `value="admin@example.com"`} {
+	for _, expectedFragment := range []string{`<form class="card card-body authentication-card" method="post" action="?login"`, "Неверный email или пароль.", `value="admin@example.com"`} {
 		if !strings.Contains(body, expectedFragment) {
 			t.Fatalf("login failure page missing %q in %s", expectedFragment, body)
 		}
@@ -6802,7 +6846,7 @@ func TestProfilePageChangesAdminEmailThroughSixDigitCode(t *testing.T) {
 	if response.Code != http.StatusOK {
 		t.Fatalf("status = %d, body=%q", response.Code, response.Body.String())
 	}
-	for _, expectedFragment := range []string{`name="password_confirmation_code"`, `maxlength="6"`, `class="profile-code-submit" type="submit" disabled`, `Письмо с кодом отправлено`, `admin@gmail.com`} {
+	for _, expectedFragment := range []string{`name="password_confirmation_code"`, `maxlength="6"`, `class="profile-code-submit" type="submit"`, `Письмо с кодом отправлено`, `admin@gmail.com`} {
 		if !strings.Contains(response.Body.String(), expectedFragment) {
 			t.Fatalf("profile email code form missing %q in %s", expectedFragment, response.Body.String())
 		}
@@ -6887,7 +6931,7 @@ func TestProfilePageChangesAdminEmailThroughSixDigitCode(t *testing.T) {
 	if err := rawDB.QueryRow(`SELECT token FROM email_confirmations WHERE domain=? AND action='profile' AND email=?`, "localhost", "new@outlook.com").Scan(&emailToken); err != nil {
 		t.Fatalf("read new-address confirmation: %v", err)
 	}
-	confirmRequest := httptest.NewRequest(http.MethodGet, "http://localhost:8080/?email_confirm="+url.QueryEscape(emailToken), nil)
+	confirmRequest := httptest.NewRequest(http.MethodPost, "http://localhost:8080/?email_confirm="+url.QueryEscape(emailToken), nil)
 	confirmResponse := httptest.NewRecorder()
 	application.route(confirmResponse, confirmRequest)
 	if confirmResponse.Code != http.StatusFound {
@@ -6961,7 +7005,7 @@ func TestProfileEmailConfirmationWaitsForRelayRecipientVerification(t *testing.T
 	})}
 	t.Cleanup(func() { http.DefaultClient = previousHTTPClient })
 
-	request := httptest.NewRequest(http.MethodGet, "http://localhost:8080/?email_confirm=new-email-token", nil)
+	request := httptest.NewRequest(http.MethodPost, "http://localhost:8080/?email_confirm=new-email-token", nil)
 	response := httptest.NewRecorder()
 	application.route(response, request)
 	if response.Code != http.StatusBadGateway {
@@ -14782,5 +14826,119 @@ func TestRegistrationCodeLimitsAndTranslations(t *testing.T) {
 		if !strings.Contains(message.HTMLBody, ">123456</strong>") || !strings.Contains(message.HTMLBody, confirmation.Email+"</strong>") {
 			t.Fatalf("registration emphasis missing in %s", language)
 		}
+	}
+}
+
+func TestAccountSessionSurvivesAddressChange(t *testing.T) {
+	application, database := newTestApplication(t)
+	for _, query := range []string{
+		`INSERT INTO users(domain,email,password,is_admin) VALUES('localhost','owner@example.org','secret',1)`,
+		`INSERT INTO sessions(token,user_email,created_at,client_ip,security_version) VALUES('active','localhost|owner@example.org','2026-09-23T00:00:00Z','192.0.2.1',1)`,
+	} {
+		if _, err := database.Exec(query); err != nil {
+			t.Fatal(err)
+		}
+	}
+	request := httptest.NewRequest(http.MethodGet, "http://localhost/?profile", nil)
+	request.RemoteAddr = "192.0.2.2:1234"
+	request.AddCookie(&http.Cookie{Name: "sitebrush_session", Value: "active"})
+	if email, valid := application.currentAdminEmail(request); !valid || email != "owner@example.org" {
+		t.Fatal("travel invalidated browser session")
+	}
+	var address string
+	if err := database.QueryRow(`SELECT client_ip FROM sessions WHERE token='active'`).Scan(&address); err != nil || address != "192.0.2.2" {
+		t.Fatalf("session address %q: %v", address, err)
+	}
+	if err := database.QueryRow(`SELECT client_ip FROM account_trusted_ips WHERE domain='localhost' AND email='owner@example.org'`).Scan(&address); err != nil || address != "192.0.2.2" {
+		t.Fatalf("trusted address %q: %v", address, err)
+	}
+}
+
+func TestAccountRegistrationWaitsForTrustedHTTPS(t *testing.T) {
+	application, _ := newTestApplication(t)
+	confirmation := EmailConfirmation{Token: "mail-secret", FormToken: "form-handle", Domain: "example.org", Action: "register", Email: "owner@example.org", Code: "123456", ExpiresAt: time.Now().Add(15 * time.Minute).UTC().Format(time.RFC3339)}
+	if err := application.saveRegistrationConfirmation(context.Background(), confirmation); err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodGet, "http://example.org/?email_confirm=mail-secret", nil)
+	response := httptest.NewRecorder()
+	application.confirmEmailToken(response, request)
+	if response.Code != http.StatusOK || response.Header().Get("Location") != "" {
+		t.Fatalf("untrusted HTTPS redirect: %d %s", response.Code, response.Header().Get("Location"))
+	}
+	if !strings.Contains(response.Body.String(), "http-equiv=\"refresh\"") || strings.Contains(response.Body.String(), "type=\"password\"") {
+		t.Fatal("HTTP confirmation did not wait safely")
+	}
+	if application.hasAdmin(context.Background(), "example.org") {
+		t.Fatal("HTTP link created administrator")
+	}
+	if _, found := application.emailConfirmationByToken(context.Background(), confirmation.Token); !found {
+		t.Fatal("preview consumed token")
+	}
+}
+
+func TestAccountRegistrationPasswordOnlyAfterSecureConfirmation(t *testing.T) {
+	application, database := newTestApplication(t)
+	confirmation := EmailConfirmation{Token: "mail-secret", FormToken: "form-handle", Domain: "localhost", Action: "register", Email: "owner@example.org", Code: "123456", ExpiresAt: time.Now().Add(15 * time.Minute).UTC().Format(time.RFC3339)}
+	if err := application.saveRegistrationConfirmation(context.Background(), confirmation); err != nil {
+		t.Fatal(err)
+	}
+	response := httptest.NewRecorder()
+	application.confirmEmailToken(response, httptest.NewRequest(http.MethodGet, "https://localhost/?email_confirm=mail-secret", nil))
+	if !strings.Contains(response.Body.String(), "autocomplete=\"new-password\"") {
+		t.Fatal("secure confirmation lacks password setup")
+	}
+	var count int
+	database.QueryRow(`SELECT COUNT(*) FROM users`).Scan(&count)
+	if count != 0 {
+		t.Fatal("GET mutated account")
+	}
+}
+
+func TestAccountTranslationsComplete(t *testing.T) {
+	for language, translations := range translationCatalog {
+		for _, key := range []string{"auth_new_ip", "auth_trust_help", "auth_https_wait", "auth_https_retry", "auth_registration_secure", "auth_copy", "auth_request_ip", "auth_request_time", "auth_ignore"} {
+			if translations[key] == "" {
+				t.Fatalf("%s missing %s", language, key)
+			}
+		}
+	}
+}
+
+func TestAccountHTTPSRejectsSelfSignedCertificate(t *testing.T) {
+	application, _ := newTestApplication(t)
+	writeCachedAutoCertForTest(t, application, "pending.example.org", time.Now().Add(-time.Hour), time.Now().Add(24*time.Hour))
+	if application.accountHTTPSReady("pending.example.org") {
+		t.Fatal("self-signed certificate allowed onboarding redirect")
+	}
+}
+
+func TestAccountLegacySessionsInvalidatedOnce(t *testing.T) {
+	application, database := newTestApplication(t)
+	for _, query := range []string{
+		`INSERT INTO sessions(token,user_email,created_at) VALUES('legacy','localhost|owner@example.org','2026-09-23T00:00:00Z')`,
+		`INSERT INTO sessions(token,user_email,created_at,client_ip,security_version) VALUES('current','localhost|owner@example.org','2026-09-23T00:00:00Z','192.0.2.1',1)`,
+	} {
+		if _, err := database.Exec(query); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := setSQLiteUserVersion(context.Background(), database, currentSiteDatabaseSchemaVersion-1); err != nil {
+		t.Fatal(err)
+	}
+	if err := application.migrate(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := application.migrate(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	var token string
+	if err := database.QueryRow(`SELECT token FROM sessions`).Scan(&token); err != nil || token != "current" {
+		t.Fatalf("migration session %q: %v", token, err)
+	}
+	var count int
+	database.QueryRow(`SELECT COUNT(*) FROM sessions`).Scan(&count)
+	if count != 1 {
+		t.Fatalf("sessions=%d", count)
 	}
 }
