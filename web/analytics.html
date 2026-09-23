@@ -600,11 +600,11 @@
       <div id="analytics-server-hour-chart" class="hourly-chart" aria-label="Requests by server local hour"></div>
     </div></section>
   </div>
-  <section id="analytics-goals" class="card mb-4"><div class="card-body"><h2 class="h5">{{index .T "ax_goals"}}</h2><p>{{index .T "ax_goals_hint"}}</p><p>{{index .T "ax_goals_examples_hint"}}</p><pre class="border rounded p-3">{{index .T "ax_goals_examples"}}</pre><p class="small">{{index .T "ax_goals_action_example"}}</p><pre class="border rounded p-3"><code>&lt;a href="/download/" sitebrush-data-analytics-action="download"&gt;Download&lt;/a&gt;</code></pre><form method="post" action="?analytics"><textarea class="form-control" name="goals" rows="5" maxlength="12000" placeholder="Download | action | download">{{.GoalsText}}</textarea><button class="btn btn-outline-secondary mt-2">{{index .T "ax_save"}}</button></form></div></section>
+  <section id="analytics-goals" class="card mb-4"><div class="card-body"><h2 class="h5">{{index .T "ax_goals"}}</h2>{{if .Experience.GoalsConfigured}}<div class="metric-grid mb-3"><div class="card metric-card"><div class="card-body">{{index .T "ax_meaningful"}}<div class="metric-value">{{.Experience.GoalRate}}</div><div class="small text-muted">{{.Experience.GoalSessions}} / {{.Experience.Sessions}} sessions reached a configured goal</div></div></div></div>{{end}}<p>{{index .T "ax_goals_hint"}}</p><p>{{index .T "ax_goals_examples_hint"}}</p><pre class="border rounded p-3">{{index .T "ax_goals_examples"}}</pre><p class="small">{{index .T "ax_goals_action_example"}}</p><pre class="border rounded p-3"><code>&lt;a href="/download/" sitebrush-data-analytics-action="download"&gt;Download&lt;/a&gt;</code></pre><form method="post" action="?analytics"><textarea class="form-control" name="goals" rows="5" maxlength="12000" placeholder="Download | action | download">{{.GoalsText}}</textarea><button class="btn btn-outline-secondary mt-2">{{index .T "ax_save"}}</button></form></div></section>
   <section id="sources" class="card mb-4"><div class="card-body">
     <h2 class="h5">{{index .T "ax_sources"}}</h2><p class="small">{{index .T "ax_attribution_hint"}}</p>
     <div class="table-responsive"><table class="table"><thead><tr><th>{{index .T "ax_source"}}</th><th>{{index .T "ax_sessions"}}</th><th>{{index .T "ax_views"}}</th><th>{{index .T "ax_actions"}}</th>{{if .Experience.GoalsConfigured}}<th>{{index .T "ax_meaningful"}}</th>{{end}}<th>{{index .T "ax_returns"}}</th></tr></thead><tbody>
-    {{range .Experience.Sources}}<tr><td><a href="?analytics&amp;days={{$.BrowserAnalytics.Days}}&amp;source={{urlquery .Source}}&amp;campaign={{urlquery .Campaign}}&amp;traffic={{urlquery $.ExperienceFilter.Traffic}}">{{if eq .Label "direct-hidden"}}{{index $.T "ax_hidden"}}{{else}}{{.Label}}{{end}}</a><small class="d-block">{{index $.T (print "ax_evidence_" .Evidence)}} · {{.Campaign}}</small></td><td>{{.Sessions}}</td><td>{{.Views}}</td><td>{{.Actions}}</td>{{if $.Experience.GoalsConfigured}}<td>{{.GoalRate}}</td>{{end}}<td>{{.Returning}}</td></tr>{{else}}<tr><td colspan="{{if .Experience.GoalsConfigured}}6{{else}}5{{end}}">{{index .T "analytics_no_data"}}</td></tr>{{end}}
+    {{range .Experience.Sources}}<tr><td>{{if eq .Label "direct-hidden"}}{{index $.T "ax_hidden"}}{{else}}{{.Label}}{{end}}<small class="d-block">{{index $.T (print "ax_evidence_" .Evidence)}} · {{.Campaign}}</small></td><td>{{.Sessions}}</td><td>{{.Views}}</td><td>{{.Actions}}</td>{{if $.Experience.GoalsConfigured}}<td>{{.GoalRate}}</td>{{end}}<td>{{.Returning}}</td></tr>{{else}}<tr><td colspan="{{if .Experience.GoalsConfigured}}6{{else}}5{{end}}">{{index .T "analytics_no_data"}}</td></tr>{{end}}
     </tbody></table></div>
   </div></section>
   <section id="browser-overview" class="mb-4">
@@ -626,16 +626,21 @@
   {{if .Experience.ActionRows}}<section class="card mb-4"><div class="card-body"><h2 class="h5">{{index .T "ax_actions"}}</h2><ul>{{range .Experience.ActionRows}}<li>{{.Label}} — {{.Count}}</li>{{end}}</ul></div></section>{{end}}
   <section id="journeys" class="card mb-4"><div class="card-body"><h2 class="h5">{{index .T "ax_journeys"}}</h2><p class="small">{{index .T "ax_recent_hint"}}</p><ul>{{range .Experience.Journeys}}<li>{{.Label}} <strong>× {{.Sessions}}</strong></li>{{else}}<li>{{index .T "analytics_no_data"}}</li>{{end}}</ul></div></section>
   <section id="browser-content" class="card mb-4"><div class="card-body"><h2 class="h5">{{index .T "ax_content"}}</h2><p class="small">{{index .T "ax_exit_hint"}}</p>
-    <div class="table-responsive"><table class="table"><thead><tr><th>{{index .T "ax_page"}}</th><th>{{index .T "ax_views"}}</th><th>{{index .T "ax_active"}}</th><th>50% ↓</th><th>{{index .T "ax_action_rate"}}</th><th>{{index .T "ax_next"}}</th><th>{{index .T "ax_end"}}</th></tr></thead><tbody>{{range .Experience.Pages}}<tr><td><a href="?analytics&amp;days={{$.BrowserAnalytics.Days}}&amp;page={{urlquery .Label}}&amp;traffic={{urlquery $.ExperienceFilter.Traffic}}">{{.Label}}</a></td><td>{{.Views}}</td><td>{{.AverageActive}}</td><td>{{.ScrollRate}}</td><td>{{.ActionRate}}</td><td>{{.NextRate}}</td><td>{{.EndRate}}</td></tr>{{end}}</tbody></table></div>
+    <div class="table-responsive"><table class="table"><thead><tr><th>{{index .T "ax_page"}}</th><th>{{index .T "ax_views"}}</th><th>{{index .T "ax_active"}}</th><th>50% ↓</th><th>{{index .T "ax_action_rate"}}</th><th>{{index .T "ax_next"}}</th><th>{{index .T "ax_end"}}</th></tr></thead><tbody>{{range .Experience.Pages}}<tr><td>{{.Label}}</td><td>{{.Views}}</td><td>{{.AverageActive}}</td><td>{{.ScrollRate}}</td><td>{{.ActionRate}}</td><td>{{.NextRate}}</td><td>{{.EndRate}}</td></tr>{{end}}</tbody></table></div>
   </div></section>
   <section id="sessions" class="card mb-4"><div class="card-body"><h2 class="h5">{{index .T "ax_sessions"}}</h2><p class="small">{{index .T "ax_recent_hint"}}</p>
-    {{range .Experience.Recent}}<details class="border-bottom py-2"><summary>{{.When}} · {{.Source.Name}} → {{.Landing}} · {{.Language}} · {{.Browser}} / {{.OS}} · {{.Active}}</summary>
-    <p class="small">{{index $.T "ax_first_source"}}: {{.FirstSource}} · {{index $.T "ax_local_time"}}: {{if .LocalTime}}{{.LocalTime}} {{.Timezone}}{{else}}—{{end}} · {{.Country}} {{.City}}</p>
-    {{range .Tabs}}<ol>{{range .}}<li>{{.}}</li>{{end}}</ol>{{end}}{{if .Limited}}<p>{{index $.T "ax_incomplete"}}</p>{{end}}</details>{{else}}<p>{{index .T "analytics_no_data"}}</p>{{end}}
+    {{range .Experience.Recent}}<details class="border-bottom py-2"><summary>{{if eq .Class "human-likely"}}👤{{else}}🤖{{end}} <time data-relative-time="{{.Started.Format "2006-01-02T15:04:05Z07:00"}}">{{.When}}</time> · {{.Source.Name}} → {{.Landing}} · {{.Language}} · {{.Browser}} / {{.OS}} · active {{.Active}}</summary>
+    <p class="small mb-1">{{index $.T "ax_first_source"}}: {{.FirstSource}} · {{index $.T "ax_local_time"}}: {{if .LocalTime}}{{.LocalTime}} {{.Timezone}}{{else}}—{{end}} · {{if .Country}}{{.Country}}{{if .City}}, {{.City}}{{end}}{{else}}unknown location{{end}}</p>
+    {{if .Returning}}<p class="small mb-1">Returned after {{.ReturnAfter}} · {{.FirstSource}} → {{.Source.Name}} · {{if .Goal}}goal reached{{else}}no configured goal yet{{end}}</p>{{end}}
+    {{range .Tabs}}<ol class="mb-1">{{range .}}<li>{{.}}</li>{{end}}</ol>{{end}}{{if .Limited}}<p>{{index $.T "ax_incomplete"}}</p>{{end}}</details>{{else}}<p>{{index .T "analytics_no_data"}}</p>{{end}}
   </div></section>
 
   <section class="card mb-4"><div class="card-body"><h2 class="h5">{{index .T "ax_languages"}}</h2><div class="table-responsive"><table class="table"><thead><tr><th>{{index .T "ax_language"}}</th><th>{{index .T "ax_sessions"}}</th>{{if .Experience.GoalsConfigured}}<th>{{index .T "ax_meaningful"}}</th>{{end}}</tr></thead><tbody>{{range .Experience.Languages}}<tr><td>{{.Label}}</td><td>{{.Sessions}}</td>{{if $.Experience.GoalsConfigured}}<td>{{.GoalRate}}</td>{{end}}</tr>{{end}}</tbody></table></div><h3 class="h6">{{index .T "ax_local_time"}}</h3><div class="d-flex flex-wrap gap-3">{{range $hour,$count:=.Experience.LocalHours}}{{if $count}}<span>{{$hour}}:00 — {{$count}}</span>{{end}}{{end}}</div></div></section>
-  <details id="browser-returns" class="card mb-4"><summary class="card-body">{{index .T "ax_returns"}}</summary><div class="card-body"><p class="small">{{index .T "analytics_browser_retention_hint"}}</p>{{range .BrowserAnalytics.Report.Retention}}<span class="me-3">D{{.Day}}: {{.Returned}} / {{.Eligible}}</span>{{end}}{{range .BrowserAnalytics.ReturnSections}}<h3 class="h6">{{.Title}}</h3><ul>{{range .Rows}}<li>{{.Label}}: {{.Value}}</li>{{end}}</ul>{{end}}</div></details>
+  <section id="browser-returns" class="card mb-4"><div class="card-body"><h2 class="h5">{{index .T "ax_returns"}}</h2><p class="small">{{index .T "analytics_browser_retention_hint"}}</p>
+    <div class="mb-3">{{range .BrowserAnalytics.Report.Retention}}<span class="me-3">D{{.Day}}: {{.Returned}} / {{.Eligible}}</span>{{end}}</div>
+    {{range .Experience.Recent}}{{if .Returning}}<div class="border-bottom py-2"><strong>Returned after {{.ReturnAfter}}</strong><div class="small">{{.FirstSource}} → {{.Source.Name}} → {{.Landing}} · {{.Language}} · {{.Browser}} / {{.OS}} · {{if .Goal}}goal reached{{else}}no configured goal yet{{end}}</div></div>{{end}}{{end}}
+    {{range .BrowserAnalytics.ReturnSections}}<h3 class="h6 mt-3">{{.Title}}</h3><ul>{{range .Rows}}<li>{{.Label}}: {{.Value}}</li>{{end}}</ul>{{end}}
+  </div></section>
   <details class="card mb-4"><summary class="card-body">{{index .T "ax_crawlers"}}</summary><div class="card-body"><p class="small">{{index .T "ax_bot_hint"}}</p><div class="table-responsive"><table class="table"><thead><tr><th>{{index .T "ax_audience"}}</th><th>User-Agent</th><th>{{index .T "ax_page"}}</th><th>{{index .T "ax_requests"}}</th></tr></thead><tbody>{{range .Security.Groups}}{{if ne .Class "unknown"}}<tr><td>{{index $.T (print "ax_class_" .Class)}}</td><td>{{.Agent}}</td><td>{{.Path}}</td><td>{{.Count}}</td></tr>{{end}}{{end}}</tbody></table></div></div></details>
 
   {{end}}
@@ -740,7 +745,7 @@
           <tr class="security-row-safe">
             <td><code>{{.IP}}</code><div class="small text-success">never block / never throttle</div></td>
             <td>{{.Comment}}</td>
-            <td>{{.AddedAt.Format "2006-01-02 15:04 UTC"}}</td>
+            <td><time data-relative-time="{{.AddedAt.Format "2006-01-02T15:04:05Z07:00"}}">{{.AddedAt.Format "02 Jan 2006 15:04"}}</time></td>
             <td>
               <form method="post" action="?analytics&amp;tab=security">
                 <input type="hidden" name="security_action" value="disallow">
@@ -776,8 +781,8 @@
             <td><code>{{.IP}}</code><div class="small text-muted">throttled, not blocked</div></td>
             <td>{{.Description}}</td>
             <td>~{{.LimitRPS}} req/s</td>
-            <td>{{.LastEvent.Format "2006-01-02 15:04 UTC"}}</td>
-            <td>{{.ExpiresAt.Format "2006-01-02 15:04 UTC"}}</td>
+            <td><time data-relative-time="{{.LastEvent.Format "2006-01-02T15:04:05Z07:00"}}">{{.LastEvent.Format "02 Jan 2006 15:04"}}</time></td>
+            <td><time data-relative-time="{{.ExpiresAt.Format "2006-01-02T15:04:05Z07:00"}}" data-countdown>{{.ExpiresAt.Format "02 Jan 2006 15:04"}}</time></td>
             <td>{{.Episodes}}</td>
             <td>
               <form method="post" action="?analytics&amp;tab=security">
@@ -814,8 +819,8 @@
               {{if .ReasonLog}}<details class="mt-2"><summary class="small">Reason summary (7 days)</summary><ul class="security-reason-log">{{range .ReasonLog}}<li>{{if ne .First .At}}{{.First.Format "2006-01-02 15:04"}} — {{end}}{{.At.Format "2006-01-02 15:04"}} · {{.Source}} · {{.Reason}} × {{.Count}}{{if .Description}} — {{.Description}}{{end}}</li>{{end}}</ul></details>{{end}}
             </td>
             <td><span class="security-source-badge {{if eq .Source "manual"}}security-source-manual{{else}}security-source-local{{end}}">{{.Source}}</span></td>
-            <td>{{.LastEvent.Format "2006-01-02 15:04 UTC"}}</td>
-            <td>{{.ExpiresAt.Format "2006-01-02 15:04 UTC"}}</td>
+            <td><time data-relative-time="{{.LastEvent.Format "2006-01-02T15:04:05Z07:00"}}">{{.LastEvent.Format "02 Jan 2006 15:04"}}</time></td>
+            <td><time data-relative-time="{{.ExpiresAt.Format "2006-01-02T15:04:05Z07:00"}}" data-countdown>{{.ExpiresAt.Format "02 Jan 2006 15:04"}}</time></td>
             <td>{{.Violations}}</td>
             <td>
               <form method="post" action="?analytics&amp;tab=security">
@@ -845,8 +850,8 @@
             <td><code>{{.IP}}</code><div class="small text-muted">{{.IncidentID}}</div></td>
             <td>{{.Reason}}{{if .Description}}<div class="small">{{.Description}}</div>{{end}}{{if .ReasonLog}}<details><summary class="small">Reason summary</summary><ul class="security-reason-log">{{range .ReasonLog}}<li>{{if ne .First .At}}{{.First.Format "2006-01-02 15:04"}} — {{end}}{{.At.Format "2006-01-02 15:04"}} · {{.Reason}} × {{.Count}}{{if .Description}} — {{.Description}}{{end}}</li>{{end}}</ul></details>{{end}}</td>
             <td><span class="security-source-badge security-source-global">global</span></td>
-            <td>{{.LastEvent.Format "2006-01-02 15:04 UTC"}}</td>
-            <td>{{.ExpiresAt.Format "2006-01-02 15:04 UTC"}}</td>
+            <td><time data-relative-time="{{.LastEvent.Format "2006-01-02T15:04:05Z07:00"}}">{{.LastEvent.Format "02 Jan 2006 15:04"}}</time></td>
+            <td><time data-relative-time="{{.ExpiresAt.Format "2006-01-02T15:04:05Z07:00"}}" data-countdown>{{.ExpiresAt.Format "02 Jan 2006 15:04"}}</time></td>
             <td>{{.Violations}}</td>
           </tr>
         {{else}}
@@ -857,7 +862,7 @@
     </div>
 
     <h3 class="h6">Detected security incidents</h3>
-    {{range .Security.Incidents}}<details class="border-bottom py-2"><summary>{{if .PossibleExposure}}⚠ {{index $.T "ax_exposure"}} · {{end}}{{.IP}} · {{.Count}} · {{.Last.Format "2006-01-02 15:04 UTC"}}</summary><p>{{.Country}} {{.City}} · {{.Agent}}</p><ul>{{range $category,$count:=.Categories}}<li>{{index $.T (print "ax_risk_" $category)}} × {{$count}}</li>{{end}}</ul><table class="table"><tbody>{{range .Examples}}<tr><td>{{.First.Format "15:04:05"}} — {{.Last.Format "15:04:05"}}</td><td>{{.Method}} {{.Path}}</td><td>{{.Status}}</td><td>× {{.Count}}</td></tr>{{end}}</tbody></table></details>{{else}}<p>{{index .T "ax_no_incidents"}}</p>{{end}}
+    {{range .Security.Incidents}}<details class="border-bottom py-2"><summary>{{if .PossibleExposure}}⚠ {{index $.T "ax_exposure"}} · {{end}}{{.IP}} · {{.Count}} · <time data-relative-time="{{.Last.Format "2006-01-02T15:04:05Z07:00"}}">{{.Last.Format "02 Jan 2006 15:04"}}</time></summary><p>{{.Country}} {{.City}} · {{.Agent}}</p><ul>{{range $category,$count:=.Categories}}<li>{{index $.T (print "ax_risk_" $category)}} × {{$count}}</li>{{end}}</ul><table class="table"><tbody>{{range .Examples}}<tr><td>{{.First.Format "15:04:05"}} — {{.Last.Format "15:04:05"}}</td><td>{{.Method}} {{.Path}}</td><td>{{.Status}}</td><td>× {{.Count}}</td></tr>{{end}}</tbody></table></details>{{else}}<p>{{index .T "ax_no_incidents"}}</p>{{end}}
   </div></section>
   {{end}}
 </div>
@@ -1275,6 +1280,42 @@
 })();
 </script>
 <script>
+(function renderAnalyticsTimes() {
+  'use strict';
+  function relativeText(milliseconds) {
+    const absolute = Math.abs(milliseconds);
+    const units = [
+      [86400000, 'd'],
+      [3600000, 'h'],
+      [60000, 'm'],
+      [1000, 's']
+    ];
+    for (const unit of units) {
+      if (absolute >= unit[0]) return Math.max(1, Math.floor(absolute / unit[0])) + unit[1];
+    }
+    return 'now';
+  }
+  function renderTimeElement(timeElement) {
+    const timestamp = Date.parse(timeElement.dataset.relativeTime || '');
+    if (!Number.isFinite(timestamp)) return;
+    const difference = timestamp - Date.now();
+    const absoluteText = new Intl.DateTimeFormat(undefined, {
+      year:'numeric', month:'short', day:'2-digit', hour:'2-digit', minute:'2-digit', hour12:false
+    }).format(new Date(timestamp));
+    let relation = '';
+    if (Math.abs(difference) < 1000) relation = 'now';
+    else if (difference > 0) relation = 'in ' + relativeText(difference);
+    else relation = relativeText(difference) + ' ago';
+    if (timeElement.hasAttribute('data-countdown') && difference > 0) relation = relativeText(difference) + ' remaining';
+    timeElement.textContent = absoluteText + ' · ' + relation;
+  }
+  function renderAllTimes() {
+    document.querySelectorAll('time[data-relative-time]').forEach(renderTimeElement);
+  }
+  renderAllTimes();
+  window.setInterval(renderAllTimes, 30000);
+})();
+
 (function startAnalyticsServerClock() {
   'use strict';
   const clock = document.getElementById('analytics-server-clock');
