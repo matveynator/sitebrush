@@ -191,20 +191,6 @@ func handleAttackGuardRequest(blocks map[string]SecurityBlock, windows map[strin
 			return attackGuardResult{Block: block, Blocked: true}
 		}
 		if request.Trusted {
-			if ip == "" {
-				return attackGuardResult{}
-			}
-			window := windows[ip]
-			if window == nil || now.Sub(window.Started) > 10*time.Second {
-				window = &attackWindow{Started: now, Distinct: map[string]struct{}{}}
-				windows[ip] = window
-			}
-			window.Count++
-			if window.Count >= 3000 {
-				block := blockSecurityIP(blocks, ip, "dos", "extreme request rate from attested SiteBrush peer", "local", now, defaultSecurityBlockTTL)
-				delete(windows, ip)
-				return attackGuardResult{Block: block, Blocked: true, Changed: true}
-			}
 			return attackGuardResult{}
 		}
 		if !settings.AutoBlock || ip == "" {
@@ -223,13 +209,9 @@ func handleAttackGuardRequest(blocks map[string]SecurityBlock, windows map[strin
 		if len(window.Distinct) < 256 {
 			window.Distinct[boundedPath(request.Path)] = struct{}{}
 		}
-		if window.Count >= 600 || window.PostCount >= 120 || len(window.Distinct) >= 220 {
-			reason := "dos"
-			description := "abnormally high request rate"
-			if window.PostCount >= 120 {
-				reason = "mass-write"
-				description = "abnormally high form, API, or page-generation rate"
-			}
+		if window.PostCount >= 120 || len(window.Distinct) >= 220 {
+			reason := "mass-write"
+			description := "abnormally high form, API, or page-generation rate"
 			if len(window.Distinct) >= 220 {
 				reason = "mass-enumeration"
 				description = "abnormally high number of distinct paths"
@@ -356,7 +338,7 @@ func activeSecurityBlock(blocks map[string]SecurityBlock, ip string, now time.Ti
 
 func securityCategoryBlocks(category string) bool {
 	switch category {
-	case "injection", "traversal", "repository", "secret", "source-backup", "scanner-client", "enumeration", "authentication-failures", "rapid-crawl":
+	case "injection", "traversal", "repository", "secret", "source-backup", "scanner-client", "enumeration", "authentication-failures":
 		return true
 	default:
 		return false
