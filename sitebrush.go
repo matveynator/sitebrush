@@ -3889,7 +3889,11 @@ func (a *App) browserAnalyticsStorage(jobs <-chan browserAnalyticsStorageJob, re
 						boundary, cancel := context.WithTimeout(contextWithDomain(storageContext, job.domain), 5*time.Second)
 						err = a.analyticsStorageExchange(browserstats.StorageRequest{Operation: browserstats.SaveBrowser, Domain: job.domain, State: string(snapshot), Report: string(reportJSON), Archive: string(archiveJSON), Stop: boundary.Done()}).Err
 						cancel()
-						if err == nil || errors.Is(err, errAnalyticsSiteUnavailable) {
+						if errors.Is(err, errAnalyticsSiteUnavailable) {
+							err = nil
+							break
+						}
+						if err == nil {
 							break
 						}
 					}
