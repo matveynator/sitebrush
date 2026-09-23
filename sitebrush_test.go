@@ -14898,10 +14898,107 @@ func TestAccountRegistrationPasswordOnlyAfterSecureConfirmation(t *testing.T) {
 
 func TestAccountTranslationsComplete(t *testing.T) {
 	for language, translations := range translationCatalog {
-		for _, key := range []string{"auth_new_ip", "auth_trust_help", "auth_https_wait", "auth_https_retry", "auth_registration_secure", "auth_copy", "auth_request_ip", "auth_request_time", "auth_ignore"} {
+		for _, key := range []string{
+			"auth_new_ip",
+			"auth_trust_help",
+			"auth_https_wait",
+			"auth_https_retry",
+			"auth_https_self_signed",
+			"auth_https_self_signed_help",
+			"auth_https_self_signed_continue",
+			"auth_https_unavailable",
+			"auth_https_unavailable_help",
+			"auth_registration_secure",
+			"auth_copy",
+			"auth_request_ip",
+			"auth_request_time",
+			"auth_ignore",
+		} {
 			if translations[key] == "" {
 				t.Fatalf("%s missing %s", language, key)
 			}
+		}
+	}
+}
+
+func TestAccountIPHTTPSUsesSelfSignedFallback(t *testing.T) {
+	application, _ := newTestApplication(t)
+	application.automaticSSLAvailable = true
+	request := httptest.NewRequest(http.MethodGet, "http://192.0.2.44/?email_confirm=test-token", nil)
+	response := httptest.NewRecorder()
+
+	application.awaitAccountHTTPS(response, request)
+
+	body := response.Body.String()
+	if strings.Contains(body, "http-equiv=\"refresh\"") {
+		t.Fatal("IP HTTPS fallback still waits for ACME")
+	}
+	if !strings.Contains(body, "https://192.0.2.44/?email_confirm=test-token") {
+		t.Fatalf("self-signed HTTPS URL missing from response: %s", body)
+	}
+	if !strings.Contains(body, translationsForLanguageCode("en")["auth_https_self_signed_continue"]) {
+		t.Fatal("self-signed HTTPS continuation is not shown")
+	}
+	select {
+	case request := <-application.automaticSSL:
+		t.Fatalf("IP HTTPS fallback unexpectedly requested ACME: %+v", request)
+	default:
+	}
+}
+
+func TestAccountIPHTTPSUsesDedicatedSelfSignedPort(t *testing.T) {
+	application, _ := newTestApplication(t)
+	application.selfSignedTLSPort = 8081
+	request := httptest.NewRequest(http.MethodGet, "http://192.0.2.44:8080/?login", nil)
+	response := httptest.NewRecorder()
+
+	application.awaitAccountHTTPS(response, request)
+
+	if !strings.Contains(response.Body.String(), "https://192.0.2.44:8081/?login") {
+		t.Fatalf("dedicated self-signed port missing from response: %s", response.Body.String())
+	}
+}
+
+func TestAccountDomainHTTPSStillWaitsForTrustedCertificate(t *testing.T) {
+	application, _ := newTestApplication(t)
+	application.automaticSSL = make(chan automaticSSLRequest, 1)
+	request := httptest.NewRequest(http.MethodGet, "http://example.org/?login", nil)
+	response := httptest.NewRecorder()
+
+	application.awaitAccountHTTPS(response, request)
+
+	if !strings.Contains(response.Body.String(), "http-equiv=\"refresh\"") {
+		t.Fatal("domain HTTPS flow stopped waiting for trusted certificate")
+	}
+	select {
+	case observed := <-application.automaticSSL:
+		if observed.action != "observe" || observed.domain != "example.org" {
+			t.Fatalf("unexpected ACME observation: %+v", observed)
+		}
+	default:
+		t.Fatal("domain HTTPS flow did not request ACME observation")
+	}
+}
+
+func TestAutomaticSSLFallbackCertificateIncludesServerInterfaceIPs(t *testing.T) {
+	previousLookup := lookupServerInterfaceIPs
+	defer func() {
+		lookupServerInterfaceIPs = previousLookup
+	}()
+	lookupServerInterfaceIPs = func() ([]net.IP, error) {
+		return []net.IP{net.ParseIP("192.0.2.44"), net.ParseIP("2001:db8::44")}, nil
+	}
+
+	_, certificate, err := generateAutomaticSSLFallbackCertificate(time.Now())
+	if err != nil {
+		t.Fatalf("generate fallback certificate: %v", err)
+	}
+	if certificate.Leaf == nil {
+		t.Fatal("fallback certificate has no parsed leaf")
+	}
+	for _, host := range []string{"127.0.0.1", "::1", "192.0.2.44", "2001:db8::44"} {
+		if err := certificate.Leaf.VerifyHostname(host); err != nil {
+			t.Fatalf("fallback certificate does not cover %s: %v", host, err)
 		}
 	}
 }
