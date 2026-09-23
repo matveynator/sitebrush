@@ -465,3 +465,31 @@ The original PHP implementation was developed publicly from 2021 and remains ava
   ·
   <a href="https://demo.sitebrush.com/"><strong>Live demo</strong></a>
 </p>
+
+### Account confirmation and secure registration
+
+Registration starts with an email address and a one-time email code; the initial
+form never accepts a password. Public HTTP confirmation waits for a trusted HTTPS
+certificate, checking every ten seconds. Only then does the confirmation form
+accept a new password and create the account/session. Opening an email link alone
+does not change an account. Localhost retains its local development exception.
+Public test-drive links start on HTTP; no self-signed certificate is required.
+
+New browser sessions require both the password and an email code, even from a
+previously recorded IP. Existing sessions survive VPN changes and travel, recording
+the new address. The profile lists addresses observed within 90 days and lets the
+owner remove an address and terminate sessions currently using it. Upgrading to
+this account schema invalidates legacy sessions once. Recovery and email changes
+revoke existing sessions and address history.
+
+Codes expire after 15 minutes, allow five attempts, and resending replaces older
+codes. Requests have a 60-second cooldown and a maximum of three per 15-minute
+account/IP window. Account emails include the domain, purpose, original request
+IP/time, expiry, and a form link. Code fields support `autocomplete="one-time-code"`;
+autofill availability depends on the device/mail client. The website can copy an
+entered code; email codes remain selectable text without executable scripts.
+
+`SITEBRUSH_TRUSTED_PROXIES` accepts comma-separated IP addresses or CIDRs for
+account IP attribution. By default only loopback proxies are trusted. Forwarded
+addresses from other peers are ignored; an unavailable client IP is never stored
+as a trusted address. Configure this list to match the actual reverse proxies.

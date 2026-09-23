@@ -69,7 +69,7 @@
     </label>
     <div class="profile-form-actions">
       {{if .RecoveryWebmailProvider.URL}}<a class="btn btn-outline-primary" href="{{.RecoveryWebmailProvider.URL}}" target="_blank" rel="noopener noreferrer">{{index .T "setup_confirmation_open"}} {{.RecoveryWebmailProvider.Name}}</a>{{end}}
-      <button class="recovery-password-submit" type="submit" disabled>{{.PasswordSubmitLabel}}</button>
+      <button class="recovery-password-submit" type="submit">{{.PasswordSubmitLabel}}</button>
     </div>
   </form>{{end}}
   {{if .ShowPasswordForm}}<form class="card card-body authentication-card" method="post" action="?recover">
@@ -183,5 +183,7 @@
   });
 })();
 </script>
+<span hidden data-account-code-tools data-copy-label="{{index .T "auth_copy"}}" data-copy-success="{{index .T "auth_copied"}}" data-copy-error="{{index .T "auth_copy_failed"}}"></span>
+<script src="/p/static/account-forms.js" defer></script>
 </body>
 </html>

@@ -52,7 +52,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/matveynator/sitebrush/v2/pkg/accountauth"
 	browserstats "github.com/matveynator/sitebrush/v2/pkg/analytics"
+	"github.com/matveynator/sitebrush/v2/pkg/authmail"
 	"github.com/matveynator/sitebrush/v2/pkg/channelacme"
 	appcli "github.com/matveynator/sitebrush/v2/pkg/cli"
 	"github.com/matveynator/sitebrush/v2/pkg/crawler"
@@ -111,14 +113,14 @@ const defaultAnalyticsMemoryLimitBytes int64 = 64 * 1024 * 1024
 const defaultGuestStaticHTMLCacheLimitBytes int64 = 128 * 1024 * 1024
 const guestStaticHTMLCacheQueueSize = 4096
 const authIPFailureCacheQueueSize = 4096
-const emailConfirmationTTL = 24 * time.Hour
+const emailConfirmationTTL = 15 * time.Minute
 const profilePasswordCodeTTL = 15 * time.Minute
 const sitebrushHTTPReadTimeout = 10 * time.Second
 const sitebrushHTTPWriteTimeout = 0
 const sitebrushHTTPIdleTimeout = 65 * time.Second
 const sitebrushHTTPReadHeaderTimeout = 5 * time.Second
 const sitebrushHTTP10KeepAliveBufferLimit = 1024 * 1024
-const currentSiteDatabaseSchemaVersion = 2
+const currentSiteDatabaseSchemaVersion = 3
 const siteDatabaseStartupMigrationTimeout = 30 * time.Second
 const pagePasswordSessionTTL = time.Hour
 const serviceMailRelayPath = "/?service_mail_relay"
@@ -373,6 +375,8 @@ type demoSiteStatusView struct {
 }
 
 type serviceMailRequest struct {
+	RequestIP        string                             `json:"request_ip,omitempty"`
+	RequestedAt      string                             `json:"requested_at,omitempty"`
 	RegistrationCode string                             `json:"registration_code,omitempty"`
 	EmailChange      *emailChangeMail                   `json:"email_change,omitempty"`
 	Version          int                                `json:"version"`
@@ -2791,7 +2795,7 @@ func (a *App) accessLogMiddleware(next http.Handler) http.Handler {
 		requestDomain := diagnosticlog.SafeLogValue(requestLogDomain(r))
 		requestMethod := diagnosticlog.SafeLogValue(r.Method)
 		requestPath := diagnosticlog.SafeLogValue(r.URL.Path)
-		requestQuery := diagnosticlog.SafeLogValue(r.URL.RawQuery)
+		requestQuery := diagnosticlog.SafeLogValue(accountauth.SafeQuery(r.URL.RawQuery))
 		requestRemoteAddress := diagnosticlog.SafeLogValue(r.RemoteAddr)
 		if a.debug {
 			requestFields := requestDiagnosticFields{
@@ -7718,12 +7722,16 @@ func (a *App) migrate(ctx context.Context) error {
 		`CREATE INDEX IF NOT EXISTS idx_analytics_events_visitor ON analytics_events(domain,visitor_id,occurred_at);`,
 		`CREATE TABLE IF NOT EXISTS analytics_reports(domain TEXT PRIMARY KEY,generated_at TEXT,period_start TEXT,period_end TEXT,event_count INTEGER,report_json TEXT);`,
 	}
+	queries = append(queries, accountauth.Schema()...)
 	for queryIndex, query := range queries {
 		if _, err := a.db.ExecContext(ctx, query); err != nil {
 			return siteMigrationStepError{step: "base schema statement " + strconv.Itoa(queryIndex+1), err: err}
 		}
 	}
 	if err := a.ensureSiteDatabaseSchemaColumns(ctx); err != nil {
+		return err
+	}
+	if _, err := a.db.ExecContext(ctx, `DELETE FROM sessions WHERE security_version<1`); err != nil {
 		return err
 	}
 	_, _ = a.db.ExecContext(ctx, `UPDATE users SET domain=? WHERE domain IS NULL OR TRIM(domain)=''`, legacyDomain)
@@ -7775,6 +7783,12 @@ type siteDatabaseColumnRequirement struct {
 
 func requiredSiteDatabaseColumns() []siteDatabaseColumnRequirement {
 	return []siteDatabaseColumnRequirement{
+		{"email_confirmations", "attempts", "INTEGER NOT NULL DEFAULT 0"},
+		{"sessions", "client_ip", "TEXT NOT NULL DEFAULT ''"},
+		{"sessions", "security_version", "INTEGER NOT NULL DEFAULT 0"},
+		{"account_login_codes", "language", "TEXT NOT NULL DEFAULT 'en'"},
+		{"account_trusted_ips", "last_login", "INTEGER NOT NULL DEFAULT 0"},
+		{"account_code_rates", "sent_count", "INTEGER NOT NULL DEFAULT 0"},
 		{tableName: "analytics_configuration", columnName: "goals", definition: "TEXT NOT NULL DEFAULT '[]'"},
 		{tableName: "users", columnName: "domain", definition: "TEXT"},
 		{tableName: "pages", columnName: "domain", definition: "TEXT"},
@@ -8288,7 +8302,16 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 	}
 	pagePath := cleanPath(r.URL.Path)
 	if requestWithSensitiveCookieRequiresHTTPS(r) {
-		a.redirectHTTPS(w, r, http.StatusTemporaryRedirect)
+		// Dispatch the password-free boundary explicitly so mixed query flags cannot bypass HTTPS.
+		if hasQueryFlag(r, "email_confirm") {
+			a.confirmEmailToken(w, r)
+			return
+		}
+		if hasQueryFlag(r, "register") {
+			a.registerPage(w, r)
+			return
+		}
+		a.awaitAccountHTTPS(w, r)
 		return
 	}
 	publicTrialEndpoint := publicTrialEndpointFromRequest(r)
@@ -8893,30 +8916,11 @@ func (a *App) setupAdmin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	email := strings.TrimSpace(r.FormValue("email"))
-	password := strings.TrimSpace(r.FormValue("password"))
-	if email == "" || password == "" {
+	// Registration never accepts a password before the mail and TLS handoff.
+	password := ""
+	if email == "" {
 		w.WriteHeader(http.StatusBadRequest)
-		a.renderSetupPage(w, r, domain, email, translationOrDefault(translations, "email_confirmation_status_required", "Email and password are required."))
-		return
-	}
-	if canonicalLocalDomain(domain) == "localhost" && !a.hasAnyAdmin(r.Context()) {
-		if _, err := stdmail.ParseAddress(email); err != nil {
-			w.WriteHeader(http.StatusBadRequest)
-			a.renderSetupPage(w, r, domain, email, translationOrDefault(translations, "email_confirmation_status_invalid_email", "Email address is invalid."))
-			return
-		}
-		registerContext := contextWithSiteDatabaseCreation(contextWithDomain(r.Context(), domain))
-		if _, err := a.db.ExecContext(registerContext, `INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, domain, email, password); err != nil {
-			w.WriteHeader(http.StatusBadRequest)
-			a.renderSetupPage(w, r, domain, email, err.Error())
-			return
-		}
-		a.activatePublicTrialAfterAdminRegistration(registerContext, domain)
-		a.promoteFirstServerOwner(registerContext, domain, email)
-		a.logHostingSupportEvent(registerContext, "client_registered", "success", email, domain, "local first administrator registered")
-		a.reportHostingSnapshotAsync(registerContext)
-		a.createSessionForDomain(w, r, registerContext, domain, email)
-		httpsecurity.RedirectLocal(w, r, safeConfirmationReturnPath(requestedReturnPath(r)), http.StatusFound)
+		a.renderSetupPage(w, r, domain, email, translations["email_confirmation_status_invalid_email"])
 		return
 	}
 	pending := EmailConfirmation{}
@@ -9014,6 +9018,50 @@ func applyRegistrationMail(message *mailout.Message, languageCode, domain, link,
 	}
 	escape := template.HTMLEscapeString
 	message.HTMLBody = `<!doctype html><html lang="` + escape(languageCode) + `" dir="` + direction + `"><body style="margin:0;background:#f4f7f8;font-family:Arial,sans-serif;color:#607078"><div style="max-width:600px;margin:0 auto;padding:28px 16px"><div style="background:#fff;border:1px solid #d9e2e5;border-radius:14px;padding:28px"><p style="margin:0;color:#087f8c;font-size:20px;font-weight:700">SiteBrush · ` + escape(domain) + `</p><h1 style="font-size:23px;color:#172126;line-height:1.3">` + escape(button) + `</h1><p style="line-height:1.6">` + escape(intro) + `</p><p style="overflow-wrap:anywhere"><strong dir="ltr" style="font-size:18px;font-weight:700;color:#172126">` + escape(message.To) + `</strong></p><p style="line-height:1.6">` + escape(help) + `</p><p style="margin:20px 0 6px">` + escape(translations["profile_password_code"]) + `</p><p style="margin:0 0 24px"><strong dir="ltr" style="font-size:36px;line-height:1.4;font-weight:800;letter-spacing:4px;color:#172126">` + escape(code) + `</strong></p><p style="margin:24px 0"><a href="` + escape(link) + `" style="display:inline-block;background:#087f8c;color:#fff;text-decoration:none;font-weight:700;padding:13px 20px;border-radius:9px">` + escape(button) + `</a></p><p style="font-size:13px;line-height:1.5">` + escape(ignore) + `</p></div></div></body></html>`
+}
+
+// Only a certificate trusted by the operating system permits the onboarding redirect.
+func (a *App) accountHTTPSReady(domain string) bool {
+	certificate, _, found := a.autoCertCachedCertificate(domain, time.Now(), 0)
+	if !found || certificate == nil || len(certificate.Certificate) == 0 {
+		return false
+	}
+	leaf, err := x509.ParseCertificate(certificate.Certificate[0])
+	if err != nil {
+		return false
+	}
+	intermediates := x509.NewCertPool()
+	for _, encoded := range certificate.Certificate[1:] {
+		if intermediate, parseErr := x509.ParseCertificate(encoded); parseErr == nil {
+			intermediates.AddCert(intermediate)
+		}
+	}
+	_, err = leaf.Verify(x509.VerifyOptions{DNSName: domain, Intermediates: intermediates})
+	return err == nil
+}
+
+func (a *App) awaitAccountHTTPS(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Referrer-Policy", "no-referrer")
+	domain := normalizeDomainName(r.Host)
+	if a.accountHTTPSReady(domain) {
+		// Never replay an HTTP POST containing credentials on the secure endpoint.
+		httpsecurity.RedirectHTTPS(w, r, http.StatusSeeOther)
+		return
+	}
+	if a.automaticSSL != nil {
+		select {
+		case a.automaticSSL <- automaticSSLRequest{action: "observe", domain: domain}:
+		default:
+		}
+	}
+	query := r.URL.Query()
+	query.Del("register")
+	if query.Get("email_confirm") == "" {
+		query.Set("login", "")
+	}
+	refreshURL := r.URL.Path + "?" + query.Encode()
+	a.render(w, r, "account-https.html", map[string]any{"Domain": domain, "RefreshURL": refreshURL})
 }
 
 func (a *App) registerPage(w http.ResponseWriter, r *http.Request) {
@@ -9206,83 +9254,122 @@ func (a *App) createSiteRegistrationRequestFromForm(r *http.Request, domain, nam
 }
 
 func (a *App) login(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Referrer-Policy", "no-referrer")
 	domain := a.siteDomain(r.Context(), r)
+	if a.isAdminRequest(r) {
+		httpsecurity.RedirectLocal(w, r, loginReturnPathOrDefault(r), http.StatusFound)
+		return
+	}
 	if !a.hasAdmin(r.Context(), domain) {
-		httpsecurity.RedirectLocal(w, r, r.URL.Path+"?register", http.StatusFound)
+		httpsecurity.RedirectLocal(w, r, "?register", http.StatusFound)
 		return
 	}
-	clientIP := clientIPAddress(r)
-	blocked, hardLocked, blockedUntil := a.authIPIsBlocked(r.Context(), domain, clientIP)
+	blocked, locked, until := a.authIPIsBlocked(r.Context(), domain, clientIPAddress(r))
+	if a.renderAccountLoginBlock(w, r, blocked, locked, until) {
+		return
+	}
 	if r.Method == http.MethodGet {
-		returnPath := loginReturnPathOrDefault(r)
-		if hardLocked {
-			w.WriteHeader(http.StatusForbidden)
-			a.renderLoginPage(w, r, returnPath, "", translationOrDefault(translationsForRequest(r), "login_status_hard_locked", "Too many failed attempts from this IP. Account recovery is now required."), "danger", blockedUntil, true)
+		if token := r.URL.Query().Get("login_challenge"); token != "" {
+			a.renderAccountCode(w, r, token, "", "")
 			return
 		}
-		if blocked {
-			retryAfter := int(time.Until(blockedUntil).Seconds())
-			if retryAfter < 1 {
-				retryAfter = 1
-			}
-			w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
-			w.WriteHeader(http.StatusTooManyRequests)
-			a.renderLoginPage(w, r, returnPath, "", translationOrDefault(translationsForRequest(r), "login_status_rate_limited", "Too many failed attempts from this IP. Please try again later."), "warning", blockedUntil, false)
-			return
-		}
-		a.renderLoginPage(w, r, returnPath, "", "", "", time.Time{}, false)
+		a.renderLoginPage(w, r, loginReturnPathOrDefault(r), "", "", "", time.Time{}, false)
 		return
 	}
-	email := r.FormValue("email")
-	password := r.FormValue("password")
-	returnPath := strings.TrimSpace(r.FormValue("return_path"))
-	if returnPath == "" {
-		returnPath = loginReturnPathOrDefault(r)
-	}
-	if hardLocked {
-		w.WriteHeader(http.StatusForbidden)
-		a.renderLoginPage(w, r, returnPath, email, translationOrDefault(translationsForRequest(r), "login_status_hard_locked", "Too many failed attempts from this IP. Account recovery is now required."), "danger", blockedUntil, true)
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
-	if blocked {
-		retryAfter := int(time.Until(blockedUntil).Seconds())
-		if retryAfter < 1 {
-			retryAfter = 1
+	ip := accountauth.ClientIP(r, os.Getenv("SITEBRUSH_TRUSTED_PROXIES"))
+	outcome := accountauth.Outcome{}
+	token := r.FormValue("login_challenge")
+	email := strings.TrimSpace(r.FormValue("email"))
+	err := a.accountTransaction(r.Context(), func(transaction *sql.Tx) error {
+		var transactionErr error
+		if token != "" {
+			outcome, transactionErr = accountauth.Verify(r.Context(), transaction, domain, token, r.FormValue("login_code"), ip, time.Now())
+		} else {
+			outcome, transactionErr = accountauth.Password(r.Context(), transaction, domain, email, r.FormValue("password"), ip, httpsecurity.LocalRedirectTarget(r.FormValue("return_path"), "/"), preferredLanguageCode(r.Header.Get("Accept-Language")), time.Now())
 		}
-		w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
+		return transactionErr
+	})
+	if err != nil {
+		http.Error(w, "authentication unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	switch outcome.Status {
+	case "session":
+		a.clearFailedLoginAttempts(r.Context(), domain, clientIPAddress(r))
+		httpsecurity.SetSensitiveCookie(w, r, &http.Cookie{Name: "sitebrush_session", Value: outcome.Token})
+		a.logHostingSupportEvent(r.Context(), "client_login", "success", outcome.Email, domain, "client signed in")
+		httpsecurity.RedirectLocal(w, r, outcome.Path, http.StatusFound)
+	case "code":
+		link := requestScheme(r) + "://" + r.Host + "/?login&login_challenge=" + url.QueryEscape(outcome.Token)
+		result := a.sendServiceEmailNow(r.Context(), r, "account_login_code", domain, email, outcome.Code, outcome.Language, link)
+		status := translationsForRequest(r)["auth_code_sent"]
+		if result.Err != nil {
+			status = translationsForRequest(r)["auth_delivery_failed"]
+		}
+		a.renderAccountCode(w, r, outcome.Token, email, status)
+	case "limited":
+		w.Header().Set("Retry-After", "60")
 		w.WriteHeader(http.StatusTooManyRequests)
-		a.renderLoginPage(w, r, returnPath, email, translationOrDefault(translationsForRequest(r), "login_status_rate_limited", "Too many failed attempts from this IP. Please try again later."), "warning", blockedUntil, false)
-		return
-	}
-	var matchedUsers int
-	_ = a.db.QueryRowContext(r.Context(), `SELECT COUNT(1) FROM users WHERE domain=? AND email=? AND password=?`, domain, email, password).Scan(&matchedUsers)
-	if matchedUsers == 0 {
-		failureCount, blockedUntil, hardLocked := a.registerFailedLoginAttempt(r.Context(), domain, clientIP)
-		translations := translationsForRequest(r)
-		if hardLocked {
-			w.WriteHeader(http.StatusForbidden)
-			a.renderLoginPage(w, r, returnPath, email, translationOrDefault(translations, "login_status_hard_locked", "Too many failed attempts from this IP. Account recovery is now required."), "danger", blockedUntil, true)
+		a.renderLoginPage(w, r, "/", email, translationsForRequest(r)["auth_send_limited"], "warning", time.Time{}, false)
+	default:
+		_, until, locked := a.registerFailedLoginAttempt(r.Context(), domain, clientIPAddress(r))
+		if a.renderAccountLoginBlock(w, r, !until.IsZero(), locked, until) {
 			return
 		}
-		if !blockedUntil.IsZero() {
-			retryAfter := int(time.Until(blockedUntil).Seconds())
-			if retryAfter < 1 {
-				retryAfter = 1
-			}
-			w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
-			w.WriteHeader(http.StatusTooManyRequests)
-			a.renderLoginPage(w, r, returnPath, email, translationOrDefault(translations, "login_status_rate_limited", "Too many failed attempts from this IP. Please try again later."), "warning", blockedUntil, false)
-			return
-		}
-		_ = failureCount
 		w.WriteHeader(http.StatusUnauthorized)
-		a.renderLoginPage(w, r, returnPath, email, translationOrDefault(translations, "login_status_invalid_credentials", "Incorrect email or password."), "danger", time.Time{}, false)
-		return
+		if token != "" {
+			a.renderAccountCode(w, r, token, "", translationsForRequest(r)["auth_invalid"])
+		} else {
+			a.renderLoginPage(w, r, "/", email, translationsForRequest(r)["login_status_invalid_credentials"], "danger", time.Time{}, false)
+		}
 	}
-	a.clearFailedLoginAttempts(r.Context(), domain, clientIP)
-	a.createSessionForDomain(w, r, r.Context(), domain, email)
-	a.logHostingSupportEvent(r.Context(), "client_login", "success", email, domain, "client signed in")
-	httpsecurity.RedirectLocal(w, r, returnPath, http.StatusFound)
+}
+
+func (a *App) renderAccountLoginBlock(w http.ResponseWriter, r *http.Request, blocked, locked bool, until time.Time) bool {
+	if !blocked && !locked {
+		return false
+	}
+	status, key := http.StatusTooManyRequests, "login_status_rate_limited"
+	if locked {
+		status, key = http.StatusForbidden, "login_status_hard_locked"
+	} else {
+		w.Header().Set("Retry-After", strconv.Itoa(max(1, int(time.Until(until).Seconds()))))
+	}
+	w.WriteHeader(status)
+	a.renderLoginPage(w, r, loginReturnPathOrDefault(r), "", translationsForRequest(r)[key], "warning", until, locked)
+	return true
+}
+
+func (a *App) accountTransaction(ctx context.Context, write func(*sql.Tx) error) error {
+	if database, ok := a.db.(interface {
+		WriteTransaction(context.Context, func(*sql.Tx) error) error
+	}); ok {
+		return database.WriteTransaction(ctx, write)
+	}
+	if database, ok := a.db.(*sql.DB); ok {
+		transaction, err := database.BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+		defer transaction.Rollback()
+		if err = write(transaction); err != nil {
+			return err
+		}
+		return transaction.Commit()
+	}
+	return errors.New("account transactions unavailable")
+}
+
+func (a *App) renderAccountCode(w http.ResponseWriter, r *http.Request, token, email, status string) {
+	if email == "" {
+		_ = a.db.QueryRowContext(r.Context(), `SELECT email FROM account_login_codes WHERE token=? AND domain=? AND client_ip=? AND created_at>? AND attempts<5`, token, a.siteDomain(r.Context(), r), accountauth.ClientIP(r, os.Getenv("SITEBRUSH_TRUSTED_PROXIES")), time.Now().Add(-accountauth.CodeTTL).Unix()).Scan(&email)
+	}
+	a.render(w, r, "login.html", map[string]any{"Domain": a.siteDomain(r.Context(), r), "ShowCodeForm": true, "LoginChallenge": token, "Email": email, "Status": status, "Webmail": webmailProviderForAddress(email)})
 }
 
 func (a *App) renderLoginPage(w http.ResponseWriter, r *http.Request, returnPath, email, status, statusClass string, blockedUntil time.Time, hardLocked bool) {
@@ -9315,8 +9402,12 @@ func (a *App) maybeStartDemoSite(w http.ResponseWriter, r *http.Request, request
 		return false
 	}
 	if !httpsecurity.IsLocalRequest(r) && !httpsecurity.UsesHTTPS(r) {
-		a.redirectHTTPS(w, r, http.StatusTemporaryRedirect)
-		return true
+		if a.accountHTTPSReady(requestDomain) {
+			httpsecurity.RedirectHTTPS(w, r, http.StatusSeeOther)
+			return true
+		}
+		// A public demo stays readable on HTTP until its trusted certificate is ready.
+		return false
 	}
 	if hasSitebrushSessionCookie(r) {
 		if _, isAdmin := a.currentAdminEmailForDomain(r, requestDomain); isAdmin {
@@ -11459,7 +11550,7 @@ func (a *App) publicTrialSiteCreate(w http.ResponseWriter, r *http.Request) {
 	a.refreshHostingAndSupportPanel()
 	a.activePublicTrialPreviewStore().Delete(progressToken)
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]any{"redirect": requestScheme(r) + "://" + trialDomain + "/"})
+	_ = json.NewEncoder(w).Encode(map[string]any{"redirect": "http://" + trialDomain + "/"})
 }
 
 func (a *App) publicTrialSiteWS(w http.ResponseWriter, r *http.Request) {
@@ -17968,6 +18059,15 @@ func (a *App) toggleRevision(w http.ResponseWriter, r *http.Request) {
 	httpsecurity.RedirectLocal(w, r, pagePath+"?revisions", http.StatusFound)
 }
 
+func accountCSRF(r *http.Request) string {
+	cookie, err := r.Cookie("sitebrush_session")
+	if err != nil || cookie.Value == "" {
+		return ""
+	}
+	digest := sha256.Sum256([]byte(cookie.Value + "|account-actions"))
+	return fmt.Sprintf("%x", digest[:])
+}
+
 func (a *App) profilePage(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Referrer-Policy", "no-referrer")
@@ -17986,6 +18086,25 @@ func (a *App) profilePage(w http.ResponseWriter, r *http.Request) {
 	currentEmail, found := a.currentAdminEmail(r)
 	if !found {
 		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	if r.Method == http.MethodPost && r.FormValue("profile_action") == "revoke_ip" {
+		if r.FormValue("account_csrf") == "" || r.FormValue("account_csrf") != accountCSRF(r) {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+		err := a.accountTransaction(r.Context(), func(transaction *sql.Tx) error {
+			return accountauth.Revoke(r.Context(), transaction, a.siteDomain(r.Context(), r), currentEmail, r.FormValue("trusted_ip"))
+		})
+		if err != nil {
+			http.Error(w, "account update unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		if !a.isAdminRequest(r) {
+			httpsecurity.RedirectLocal(w, r, "?login", http.StatusFound)
+		} else {
+			httpsecurity.RedirectLocal(w, r, "?profile", http.StatusFound)
+		}
 		return
 	}
 	translations := translationsForRequest(r)
@@ -18145,7 +18264,29 @@ func (a *App) renderProfilePage(w http.ResponseWriter, r *http.Request, email, s
 		codeRecipient = strings.TrimSpace(emailChange.CurrentEmail)
 	}
 	passwordWebmailProvider := webmailProviderForAddress(codeRecipient)
+	trustedIPs := []accountauth.TrustedIP{}
+	if accountEmail, authenticated := a.currentAdminEmail(r); authenticated {
+		rows, err := a.db.QueryContext(r.Context(), `SELECT client_ip,confirmed_at,last_login FROM account_trusted_ips WHERE domain=? AND email=? AND last_login>? ORDER BY last_login DESC`, a.siteDomain(r.Context(), r), accountEmail, time.Now().Add(-accountauth.TrustTTL).Unix())
+		if err == nil {
+			for rows.Next() {
+				var entry accountauth.TrustedIP
+				var confirmed, last int64
+				if rows.Scan(&entry.IP, &confirmed, &last) != nil {
+					continue
+				}
+				entry.Confirmed = time.Unix(confirmed, 0).UTC()
+				entry.LastLogin = time.Unix(last, 0).UTC()
+				entry.Expires = entry.LastLogin.Add(accountauth.TrustTTL)
+				entry.Current = entry.IP == accountauth.ClientIP(r, os.Getenv("SITEBRUSH_TRUSTED_PROXIES"))
+				trustedIPs = append(trustedIPs, entry)
+			}
+			rows.Close()
+		}
+	}
 	a.render(w, r, "profile.html", map[string]any{
+		"TrustedIPs":                 trustedIPs,
+		"AccountCSRF":                accountCSRF(r),
+		"CodeWebmail":                webmailProviderForAddress(email),
 		"EmailChange":                emailChange,
 		"ProfileCodeAction":          "?profile&profile_resume=" + url.QueryEscape(r.URL.Query().Get("profile_resume")),
 		"Email":                      strings.TrimSpace(email),
@@ -18256,6 +18397,10 @@ func (a *App) recoverPage(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+	if err := a.reserveAccountMail(r, domain, email); err != nil {
+		a.renderRecoveryPage(w, r, map[string]any{"Status": err.Error(), "ShowForm": true})
+		return
+	}
 	recoveryCode := randomSixDigitCode()
 	recoveryToken := randomAccessToken()
 	now := time.Now().UTC()
@@ -18356,6 +18501,15 @@ func (a *App) completeManualRecovery(w http.ResponseWriter, r *http.Request, dom
 		a.renderRecoveryPage(w, r, map[string]any{"Status": translationOrDefault(translationsForRequest(r), "recover_status_rate_limited", "Too many failed recovery attempts. Please try again later."), "StatusClass": "danger", "ShowManualPasswordForm": true, "RecoveryEmail": email})
 		return
 	}
+	attemptResult, attemptErr := a.db.ExecContext(r.Context(), `UPDATE email_confirmations SET attempts=attempts+1 WHERE domain=? AND action='recover' AND email=? AND expires_at>? AND attempts<5`, domain, email, time.Now().UTC().Format(time.RFC3339))
+	var attemptCount int64
+	if attemptErr == nil {
+		attemptCount, attemptErr = attemptResult.RowsAffected()
+	}
+	if attemptErr != nil || attemptCount != 1 {
+		a.renderEmailConfirmationStatus(w, r, http.StatusUnauthorized, translationsForRequest(r)["auth_invalid"])
+		return
+	}
 	var token, expectedCode string
 	err := a.db.QueryRowContext(r.Context(), `SELECT token,verification_code FROM email_confirmations WHERE domain=? AND action='recover' AND email=? AND expires_at>?`, domain, email, time.Now().UTC().Format(time.RFC3339)).Scan(&token, &expectedCode)
 	if err != nil || !isSixDigitCode(code) || code != strings.TrimSpace(expectedCode) {
@@ -18446,6 +18600,12 @@ func (a *App) applyRecoveredPassword(ctx context.Context, domain, token, email, 
 		if _, err := transaction.ExecContext(ctx, `DELETE FROM email_confirmations WHERE domain=? AND action='recover' AND email=?`, domain, email); err != nil {
 			return err
 		}
+		if _, err := transaction.ExecContext(ctx, `DELETE FROM account_trusted_ips WHERE domain=? AND email=?`, domain, email); err != nil {
+			return err
+		}
+		if _, err := transaction.ExecContext(ctx, `DELETE FROM account_login_codes WHERE domain=? AND email=?`, domain, email); err != nil {
+			return err
+		}
 		sessionDomain := normalizeDomainName(domain)
 		if sessionDomain == "" {
 			sessionDomain = "localhost"
@@ -18479,6 +18639,52 @@ func recoveryPasswordFailureDomain(domain, email string) string {
 	return strings.TrimSpace(domain) + "|recover-password|" + strings.ToLower(strings.TrimSpace(email))
 }
 
+func (a *App) reserveAccountMail(r *http.Request, domain, email string) error {
+	allowed := false
+	write := func(transaction *sql.Tx) error {
+		var err error
+		allowed, err = accountauth.Reserve(r.Context(), transaction, domain, email, accountauth.ClientIP(r, os.Getenv("SITEBRUSH_TRUSTED_PROXIES")), time.Now())
+		return err
+	}
+	var err error
+	if a.controlDatabase != nil {
+		err = a.withServerControlDatabaseWrite(r.Context(), "reserve-account-mail", func(database *sql.DB) error {
+			transaction, beginErr := database.BeginTx(r.Context(), nil)
+			if beginErr != nil {
+				return beginErr
+			}
+			defer transaction.Rollback()
+			if writeErr := write(transaction); writeErr != nil {
+				return writeErr
+			}
+			return transaction.Commit()
+		})
+	} else if _, direct := a.db.(*sql.DB); direct {
+		err = a.accountTransaction(r.Context(), write)
+	} else {
+		reply := make(chan emailConfirmationMemoryResponse, 1)
+		request := emailConfirmationMemoryRequest{action: "reserve-mail", token: domain + "|" + email + "|" + accountauth.ClientIP(r, os.Getenv("SITEBRUSH_TRUSTED_PROXIES")), response: reply}
+		select {
+		case a.activeRegistrationConfirmations() <- request:
+		case <-r.Context().Done():
+			return r.Context().Err()
+		}
+		select {
+		case result := <-reply:
+			allowed = result.found
+		case <-r.Context().Done():
+			return r.Context().Err()
+		}
+	}
+	if err != nil {
+		return err
+	}
+	if !allowed {
+		return errors.New(translationsForRequest(r)["auth_send_limited"])
+	}
+	return nil
+}
+
 func (a *App) createAndSendProfileCode(r *http.Request, domain, currentEmail, nextEmail, password, codeKind string) (string, emailDeliveryResult, profileEmailDeliveryDNSHelp, error) {
 	translations := translationsForRequest(r)
 	currentEmail = strings.TrimSpace(currentEmail)
@@ -18494,6 +18700,9 @@ func (a *App) createAndSendProfileCode(r *http.Request, domain, currentEmail, ne
 	languageCode := preferredLanguageCode(r.Header.Get("Accept-Language"))
 	fromAddress := a.emailFromAddress(domain)
 	dnsHelp := a.profileEmailDeliveryDNSHelp(r.Context(), translations, domain, fromAddress)
+	if err := a.reserveAccountMail(r, domain, currentEmail); err != nil {
+		return "", emailDeliveryResult{}, dnsHelp, err
+	}
 	code := randomSixDigitCode()
 	token := randomAccessToken()
 	now := time.Now().UTC()
@@ -18588,6 +18797,15 @@ func (a *App) handleProfilePasswordCode(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 	emailChange := profileEmailChange(currentEmail, confirmation.Email, 1)
+	attemptResult, attemptErr := a.db.ExecContext(r.Context(), `UPDATE email_confirmations SET attempts=attempts+1 WHERE token=? AND attempts<5`, token)
+	var attemptCount int64
+	if attemptErr == nil {
+		attemptCount, attemptErr = attemptResult.RowsAffected()
+	}
+	if attemptErr != nil || attemptCount != 1 {
+		a.renderEmailConfirmationStatus(w, r, http.StatusUnauthorized, translations["auth_invalid"])
+		return
+	}
 	if !isSixDigitCode(code) || strings.TrimSpace(code) != strings.TrimSpace(confirmation.Code) {
 		_, blockedUntil, hardLocked := a.registerFailedLoginAttempt(r.Context(), failureDomain, clientIP)
 		if hardLocked {
@@ -18705,12 +18923,33 @@ func (a *App) applyProfileCodeConfirmation(ctx context.Context, confirmation Ema
 	}
 	query += strings.Join(sets, ",") + ` WHERE domain=? AND email=?`
 	args = append(args, confirmation.Domain, currentEmail)
-	result, err := a.db.ExecContext(ctx, query, args...)
+	err := a.accountTransaction(ctx, func(transaction *sql.Tx) error {
+		consumed, err := transaction.ExecContext(ctx, `DELETE FROM email_confirmations WHERE token=? AND domain=? AND current_email=? AND action='profile_password' AND expires_at>?`, confirmation.Token, confirmation.Domain, currentEmail, time.Now().UTC().Format(time.RFC3339))
+		if err != nil {
+			return err
+		}
+		count, err := consumed.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if count != 1 {
+			return errors.New("confirmation already consumed")
+		}
+		result, err := transaction.ExecContext(ctx, query, args...)
+		if err != nil {
+			return err
+		}
+		count, err = result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if count != 1 {
+			return errors.New("account not found")
+		}
+		return nil
+	})
 	if err != nil {
 		return err
-	}
-	if rowsAffected, err := result.RowsAffected(); err == nil && rowsAffected == 0 {
-		return errors.New("account not found")
 	}
 	if nextEmail != "" {
 		a.logHostingSupportEvent(ctx, "email_changed", "success", nextEmail, confirmation.Domain, "profile email changed")
@@ -18784,6 +19023,10 @@ func (a *App) createAndSendEmailConfirmationForLanguage(r *http.Request, action,
 	}
 	confirmationURL := emailConfirmationURL(r, token)
 	if action == "register" {
+		if err := a.reserveAccountMail(r, domain, email); err != nil {
+			return err
+		}
+		confirmation.ExpiresAt = now.Add(profilePasswordCodeTTL).Format(time.RFC3339)
 		confirmation.Code = randomSixDigitCode()
 		confirmation.FormToken = randomAccessToken()
 		if dnsSetup, dnsSetupRequired := a.registrationDomainAddressSetupView(databaseContext, domain, languageCode); dnsSetupRequired {
@@ -18838,8 +19081,34 @@ func (a *App) confirmEmailToken(w http.ResponseWriter, r *http.Request) {
 		a.renderEmailConfirmationStatus(w, r, http.StatusGone, translationOrDefault(confirmationTranslations, "email_confirmation_status_expired", "Confirmation link has expired."))
 		return
 	}
+	if confirmation.Domain != a.siteDomain(r.Context(), r) {
+		a.renderEmailConfirmationStatus(w, r, http.StatusNotFound, translationOrDefault(translations, "email_confirmation_status_invalid", "Invalid link"))
+		return
+	}
+	if !httpsecurity.UsesHTTPS(r) && !httpsecurity.IsLocalRequest(r) {
+		a.awaitAccountHTTPS(w, r)
+		return
+	}
+	if r.Method == http.MethodGet {
+		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("Referrer-Policy", "no-referrer")
+		a.render(w, r, "account-confirm.html", map[string]any{"Domain": confirmation.Domain, "Email": confirmation.Email, "CurrentEmail": confirmation.CurrentEmail, "Token": token, "SetPassword": confirmation.Action == "register" && confirmation.Password == ""})
+		return
+	}
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
 	switch strings.TrimSpace(confirmation.Action) {
 	case "register":
+		if confirmation.Password == "" {
+			password := r.FormValue("password")
+			if password == "" || password != r.FormValue("password_confirm") {
+				a.render(w, r, "account-confirm.html", map[string]any{"Domain": confirmation.Domain, "Email": confirmation.Email, "Token": token, "SetPassword": true})
+				return
+			}
+			confirmation.Password = password
+		}
 		confirmationContext := contextWithDomain(r.Context(), confirmation.Domain)
 		if a.hasAdmin(confirmationContext, confirmation.Domain) {
 			a.deleteRegistrationConfirmation(r.Context(), token)
@@ -18895,14 +19164,42 @@ func (a *App) emailConfirmationByToken(ctx context.Context, token string) (Email
 }
 
 func (a *App) applyProfileEmailConfirmation(ctx context.Context, confirmation EmailConfirmation) error {
-	result, err := a.db.ExecContext(ctx, `UPDATE users SET email=? WHERE domain=? AND email=?`, confirmation.Email, confirmation.Domain, confirmation.CurrentEmail)
-	if err != nil {
-		return err
-	}
-	if rowsAffected, err := result.RowsAffected(); err == nil && rowsAffected == 0 {
-		return errors.New("account not found")
-	}
-	return nil
+	return a.accountTransaction(ctx, func(transaction *sql.Tx) error {
+		consumed, err := transaction.ExecContext(ctx, `DELETE FROM email_confirmations WHERE token=? AND domain=? AND current_email=? AND action='profile' AND expires_at>?`, confirmation.Token, confirmation.Domain, confirmation.CurrentEmail, time.Now().UTC().Format(time.RFC3339))
+		if err != nil {
+			return err
+		}
+		count, err := consumed.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if count != 1 {
+			return errors.New("confirmation is invalid or expired")
+		}
+		result, err := transaction.ExecContext(ctx, `UPDATE users SET email=? WHERE domain=? AND email=?`, confirmation.Email, confirmation.Domain, confirmation.CurrentEmail)
+		if err != nil {
+			return err
+		}
+		count, err = result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if count != 1 {
+			return errors.New("account not found")
+		}
+		for _, email := range []string{confirmation.CurrentEmail, confirmation.Email} {
+			if _, err = transaction.ExecContext(ctx, `DELETE FROM account_trusted_ips WHERE domain=? AND email=?`, confirmation.Domain, email); err != nil {
+				return err
+			}
+			if _, err = transaction.ExecContext(ctx, `DELETE FROM account_login_codes WHERE domain=? AND email=?`, confirmation.Domain, email); err != nil {
+				return err
+			}
+			if _, err = transaction.ExecContext(ctx, `DELETE FROM sessions WHERE user_email=?`, confirmation.Domain+"|"+email); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }
 
 func confirmationExpired(rawExpiresAt string, now time.Time) bool {
@@ -18947,6 +19244,9 @@ func (a *App) enqueueServiceEmailContent(ctx context.Context, r *http.Request, c
 		change = &changes[0]
 		applyEmailChangeMail(&message, languageCode, domain, secretValue, *change)
 	}
+	requestIP := accountauth.ClientIP(r, os.Getenv("SITEBRUSH_TRUSTED_PROXIES"))
+	requestedAt := time.Now().UTC().Format(time.RFC3339)
+	formatAccountMail(&message, languageCode, domain, secretValue, actionURL, registrationCode, requestIP, requestedAt, change)
 	if a.durableMailTasks != nil {
 		return a.enqueueEmail(ctx, message)
 	}
@@ -18955,6 +19255,8 @@ func (a *App) enqueueServiceEmailContent(ctx context.Context, r *http.Request, c
 		return a.enqueueEmail(ctx, message)
 	}
 	request := serviceMailRequest{
+		RequestIP:        requestIP,
+		RequestedAt:      requestedAt,
 		EmailChange:      change,
 		RegistrationCode: registrationCode,
 		Version:          1,
@@ -19000,6 +19302,9 @@ func (a *App) sendServiceEmailNow(ctx context.Context, r *http.Request, codeKind
 		change = &changes[0]
 		applyEmailChangeMail(&message, languageCode, domain, secretValue, *change)
 	}
+	requestIP := accountauth.ClientIP(r, os.Getenv("SITEBRUSH_TRUSTED_PROXIES"))
+	requestedAt := time.Now().UTC().Format(time.RFC3339)
+	formatAccountMail(&message, languageCode, domain, secretValue, actionURL, "", requestIP, requestedAt, change)
 	if a.durableMailTasks != nil {
 		return a.sendEmailNow(ctx, message)
 	}
@@ -19010,6 +19315,8 @@ func (a *App) sendServiceEmailNow(ctx context.Context, r *http.Request, codeKind
 	sendCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
 	defer cancel()
 	request := serviceMailRequest{
+		RequestIP:    requestIP,
+		RequestedAt:  requestedAt,
 		EmailChange:  change,
 		Version:      1,
 		SourceDomain: normalizeDomainName(domain),
@@ -19430,7 +19737,7 @@ func (a *App) deliverMailRecord(stop <-chan struct{}, record mailout.Record) err
 
 func mailExpirationForKind(kind string, now time.Time) time.Time {
 	switch strings.TrimSpace(kind) {
-	case "password_change_code", "login_code":
+	case "password_change_code", "login_code", "account_login_code":
 		return now.Add(profilePasswordCodeTTL)
 	case "email_confirm", "email_change", "email_change_confirm", "owner_invite":
 		return now.Add(emailConfirmationTTL)
@@ -22008,6 +22315,7 @@ func (a *App) handleServiceMailRelayRequest(ctx context.Context, r *http.Request
 	if request.EmailChange != nil {
 		applyEmailChangeMail(&message, request.LanguageCode, request.SourceDomain, request.SecretValue, *request.EmailChange)
 	}
+	formatAccountMail(&message, request.LanguageCode, request.SourceDomain, request.SecretValue, request.ActionURL, request.RegistrationCode, request.RequestIP, request.RequestedAt, request.EmailChange)
 	if strings.TrimSpace(request.MessageID) != "" {
 		message.From = serviceMailRelayFromAddress("sitebrush.com")
 		message.Subject = request.Subject
@@ -22122,7 +22430,7 @@ func serviceMailKindIsRecipientVerification(codeKind string) bool {
 
 func serviceMailRecipientAllowed(ctx context.Context, store hostingandsupport.Store, request serviceMailRequest) (string, bool) {
 	switch strings.TrimSpace(request.CodeKind) {
-	case "login_code":
+	case "login_code", "account_login_code":
 		if store.ServiceMailRecipientVerified(ctx, request.InstallationID, request.Recipient) {
 			return "", true
 		}
@@ -22264,7 +22572,7 @@ func validateServiceMailSecret(codeKind, secretValue string) error {
 		return errors.New("service mail secret is invalid")
 	}
 	switch strings.TrimSpace(codeKind) {
-	case "password_change_code", "login_code", "email_change":
+	case "password_change_code", "login_code", "email_change", "account_login_code":
 		if !isSixDigitCode(secretValue) {
 			return errors.New("service mail code is invalid")
 		}
@@ -22549,6 +22857,7 @@ func startEmailConfirmationMemoryWorker(ctx context.Context) chan emailConfirmat
 
 func runEmailConfirmationMemoryWorker(ctx context.Context, requests <-chan emailConfirmationMemoryRequest) {
 	confirmationsByToken := make(map[string]EmailConfirmation)
+	sendHistory := make(map[string][]time.Time)
 	for {
 		select {
 		case <-ctx.Done():
@@ -22560,11 +22869,40 @@ func runEmailConfirmationMemoryWorker(ctx context.Context, requests <-chan email
 			}
 			purgeExpiredEmailConfirmations(confirmationsByToken, now)
 			switch request.action {
+			case "reserve-mail":
+				for key, history := range sendHistory {
+					if len(history) == 0 || now.Sub(history[len(history)-1]) >= 15*time.Minute {
+						delete(sendHistory, key)
+					}
+				}
+				history := sendHistory[request.token]
+				for len(history) > 0 && now.Sub(history[0]) >= profilePasswordCodeTTL {
+					history = history[1:]
+				}
+				allowed := (len(history) == 0 || now.Sub(history[len(history)-1]) >= time.Minute) && len(history) < 3 && (len(history) > 0 || len(sendHistory) < 4096)
+				if allowed {
+					sendHistory[request.token] = append(history, now)
+				}
+				request.response <- emailConfirmationMemoryResponse{found: allowed}
+			case "domain":
+				found := false
+				for _, confirmation := range confirmationsByToken {
+					if confirmation.Domain == request.token && confirmation.Action == "register" && !confirmationExpired(confirmation.ExpiresAt, now) {
+						found = true
+						break
+					}
+				}
+				request.response <- emailConfirmationMemoryResponse{found: found}
 			case "save":
 				token := strings.TrimSpace(request.confirmation.Token)
 				if token == "" {
 					request.response <- emailConfirmationMemoryResponse{err: errors.New("confirmation token is required")}
 					continue
+				}
+				for previousToken, previous := range confirmationsByToken {
+					if previous.Domain == request.confirmation.Domain && previous.Email == request.confirmation.Email && previousToken != token {
+						delete(confirmationsByToken, previousToken)
+					}
 				}
 				confirmationsByToken[token] = request.confirmation
 				request.response <- emailConfirmationMemoryResponse{}
@@ -22609,7 +22947,7 @@ func (a *App) saveRegistrationConfirmation(ctx context.Context, confirmation Ema
 			if _, deleteErr := database.ExecContext(ctx, `DELETE FROM registration_confirmations WHERE expires_at<>'' AND expires_at<?`, now); deleteErr != nil {
 				return deleteErr
 			}
-			if _, deleteErr := database.ExecContext(ctx, `DELETE FROM registration_confirmations WHERE token=?`, confirmation.Token); deleteErr != nil {
+			if _, deleteErr := database.ExecContext(ctx, `DELETE FROM registration_confirmations WHERE token=? OR (domain=? AND email=?)`, confirmation.Token, confirmation.Domain, confirmation.Email); deleteErr != nil {
 				return deleteErr
 			}
 			_, insertErr := database.ExecContext(ctx, `INSERT INTO registration_confirmations(token,domain,action,email,password,current_email,return_path,language_code,created_at,expires_at,form_token,verification_code,attempts) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
@@ -23007,6 +23345,63 @@ func applyEmailChangeMail(message *mailout.Message, languageCode, domain, secret
 	message.HTMLBody = `<!doctype html><html lang="` + escape(languageCode) + `" dir="` + direction + `"><body style="margin:0;background:#f4f7f8;font-family:Arial,sans-serif;color:#607078"><div style="max-width:600px;margin:0 auto;padding:28px 16px"><div style="background:#fff;border:1px solid #d9e2e5;border-radius:14px;padding:28px"><p style="margin:0;color:#087f8c;font-size:20px;font-weight:700">SiteBrush · ` + escape(domain) + `</p><h1 style="font-size:23px;color:#172126;line-height:1.3">` + escape(translations["profile_email_form_title"]) + `</h1><p style="line-height:1.6">` + escape(introduction) + `</p><p dir="ltr" style="padding:16px;background:#f4f7f8;border-radius:9px;line-height:1.7;overflow-wrap:anywhere;color:#172126"><strong style="font-size:18px;font-weight:700">` + escape(change.Current) + `</strong><br>↓<br><strong style="font-size:18px;font-weight:700">` + escape(change.Next) + `</strong></p><p style="line-height:1.6">` + escape(instructions) + `</p>` + codeHTML + `<p style="margin:24px 0"><a href="` + escape(change.URL) + `" style="display:inline-block;background:#087f8c;color:#fff;text-decoration:none;font-weight:700;padding:13px 20px;border-radius:9px">` + escape(button) + `</a></p><p style="font-size:13px;line-height:1.5">` + escape(ignore) + `</p></div></div></body></html>`
 }
 
+func formatAccountMail(message *mailout.Message, language, domain, secret, link, registrationCode, requestIP, requestedAt string, change *emailChangeMail) {
+	translations := translationsForLanguageCode(language)
+	reasonKey, titleKey := "", ""
+	switch message.Kind {
+	case "account_login_code":
+		reasonKey = "auth_reason_login"
+		titleKey = "auth_login_title"
+	case "email_confirm":
+		reasonKey = "mail_registration_code"
+		titleKey = "auth_register_title"
+	case "login_code":
+		reasonKey = "auth_reason_recover"
+		titleKey = "recover_title"
+	case "email_change":
+		reasonKey = "mail_email_change_code"
+		titleKey = "profile_email_form_title"
+	case "email_change_confirm":
+		reasonKey = "mail_email_change_accept"
+		titleKey = "profile_email_form_title"
+	case "password_change_code":
+		reasonKey = "auth_reason_password"
+		titleKey = "profile_password_form_title"
+	default:
+		return
+	}
+	content := authmail.Content{Language: language, Direction: "ltr", Domain: domain, Title: translations[titleKey], Reason: translations[reasonKey], Email: message.To, Link: link, Button: translations["auth_return_form"], CodeLabel: translations["profile_password_code"], IPLabel: translations["auth_request_ip"], IP: requestIP, TimeLabel: translations["auth_request_time"], Time: requestedAt, Expiry: translations["auth_expiry_hint"], Ignore: translations["auth_ignore"]}
+	if language == "fa" || language == "he" {
+		content.Direction = "rtl"
+	}
+	if content.IP == "" {
+		content.IP = translations["auth_unknown_ip"]
+	}
+	if isSixDigitCode(secret) {
+		content.Code = secret
+	}
+	if registrationCode != "" {
+		content.Code = registrationCode
+	}
+	if message.Kind == "email_confirm" || message.Kind == "email_change_confirm" {
+		content.Link = secret
+	}
+	if change != nil {
+		content.Previous = change.Current
+		content.Email = change.Next
+		if content.Link == "" {
+			content.Link = change.URL
+		}
+	}
+	if body, htmlBody, err := authmail.Render(content); err == nil {
+		message.Subject = "[" + domain + "] " + content.Title
+		message.Body = body
+		message.HTMLBody = htmlBody
+	} else {
+		log.Printf("account email rendering failed: %v", err)
+	}
+}
+
 func emailSubjectForServiceMail(languageCode, codeKind, domain string) string {
 	return emailSubjectForLanguage(languageCode, serviceMailKindAction(codeKind), domain)
 }
@@ -23147,6 +23542,8 @@ func serviceMailKindAction(codeKind string) string {
 		return "profile_password"
 	case "email_change":
 		return "profile_email"
+	case "account_login_code":
+		return "account_login"
 	case "login_code":
 		return "recover"
 	case "email_confirm", "email_change_confirm", "owner_invite":
@@ -23158,7 +23555,7 @@ func serviceMailKindAction(codeKind string) string {
 
 func serviceMailKindAllowed(codeKind string) bool {
 	switch strings.TrimSpace(codeKind) {
-	case "email_confirm", "email_change", "email_change_confirm", "password_change_code", "login_code", "owner_invite",
+	case "email_confirm", "email_change", "email_change_confirm", "password_change_code", "login_code", "account_login_code", "owner_invite",
 		"invoice", "site_request", "site_request_decision", "backup_notice", "disk_alert", "system":
 		return true
 	default:
@@ -26147,8 +26544,19 @@ func (a *App) createSessionForDomain(w http.ResponseWriter, r *http.Request, ctx
 	if sessionDomain == "" {
 		sessionDomain = "localhost"
 	}
-	token := fmt.Sprintf("%x", sha256.Sum256([]byte(email+time.Now().String())))
-	_, _ = a.db.ExecContext(ctx, `INSERT OR REPLACE INTO sessions(token,user_email,created_at) VALUES(?,?,?)`, token, sessionDomain+"|"+email, time.Now().Format(time.RFC3339))
+	var token string
+	sessionErr := a.accountTransaction(ctx, func(transaction *sql.Tx) error {
+		ip := accountauth.ClientIP(r, os.Getenv("SITEBRUSH_TRUSTED_PROXIES"))
+		var err error
+		token, err = accountauth.Session(ctx, transaction, sessionDomain, email, ip, time.Now())
+		if err != nil {
+			return err
+		}
+		return accountauth.RememberAddress(ctx, transaction, sessionDomain, email, ip, time.Now())
+	})
+	if sessionErr != nil {
+		return ""
+	}
 	httpsecurity.SetSensitiveCookie(w, r, &http.Cookie{Name: "sitebrush_session", Value: token})
 	return token
 }
@@ -26171,10 +26579,27 @@ func (a *App) currentAdminEmailForDomain(r *http.Request, domain string) (string
 	if err != nil {
 		return "", false
 	}
-	var email string
-	err = a.db.QueryRowContext(r.Context(), `SELECT u.email FROM sessions s JOIN users u ON (u.domain||'|'||u.email)=s.user_email WHERE s.token=? AND u.domain=? AND u.is_admin=1 LIMIT 1`, cookie.Value, strings.TrimSpace(domain)).Scan(&email)
+	var email, sessionIP string
+	err = a.db.QueryRowContext(r.Context(), `SELECT u.email,s.client_ip FROM sessions s JOIN users u ON (u.domain||'|'||u.email)=s.user_email WHERE s.token=? AND u.domain=? AND u.is_admin=1 LIMIT 1`, cookie.Value, strings.TrimSpace(domain)).Scan(&email, &sessionIP)
 	if err != nil || strings.TrimSpace(email) == "" {
 		return "", false
+	}
+	// A valid browser session survives travel; only new sessions require a mail challenge.
+	ip := accountauth.ClientIP(r, os.Getenv("SITEBRUSH_TRUSTED_PROXIES"))
+	if ip != "" && ip != sessionIP {
+		if err := a.accountTransaction(r.Context(), func(transaction *sql.Tx) error {
+			result, updateErr := transaction.ExecContext(r.Context(), `UPDATE sessions SET client_ip=? WHERE token=? AND user_email=?`, ip, cookie.Value, strings.TrimSpace(domain)+"|"+email)
+			if updateErr != nil {
+				return updateErr
+			}
+			count, updateErr := result.RowsAffected()
+			if updateErr != nil || count == 0 {
+				return updateErr
+			}
+			return accountauth.RememberAddress(r.Context(), transaction, domain, email, ip, time.Now())
+		}); err != nil {
+			log.Printf("AUTH session address update failed: %v", err)
+		}
 	}
 	return email, true
 }
@@ -32403,7 +32828,8 @@ func (a *App) autoCertPreparedHostPolicy(ctx context.Context, host string) error
 	if !a.domainIsAutomaticSSLCandidate(domainContext, certificateDomain) {
 		return fmt.Errorf("automatic SSL domain %q is not managed by Sitebrush", certificateDomain)
 	}
-	if !setting.Enabled {
+	// The issuance worker has already checked DNS for pending registrations.
+	if !setting.Enabled && !a.pendingRegistrationDomain(ctx, certificateDomain) {
 		return fmt.Errorf("automatic SSL domain %q has not passed its background DNS check", certificateDomain)
 	}
 	return nil
@@ -32462,12 +32888,43 @@ UNION SELECT domain FROM domain_ssl_settings`
 	}
 }
 
+// Pending mail registrations can request a certificate before a site database exists.
+func (a *App) pendingRegistrationDomain(ctx context.Context, domain string) bool {
+	if a.registrationConfirmations != nil {
+		reply := make(chan emailConfirmationMemoryResponse, 1)
+		select {
+		case a.registrationConfirmations <- emailConfirmationMemoryRequest{action: "domain", token: domain, response: reply}:
+		case <-ctx.Done():
+			return false
+		}
+		select {
+		case result := <-reply:
+			if result.found {
+				return true
+			}
+		case <-ctx.Done():
+			return false
+		}
+	}
+	if a.controlDatabase == nil {
+		return false
+	}
+	var count int
+	err := a.withServerControlDatabaseRead(ctx, "pending-registration-domain", func(database *sql.DB) error {
+		return database.QueryRowContext(ctx, `SELECT COUNT(1) FROM registration_confirmations WHERE domain=? AND action='register' AND expires_at>?`, domain, time.Now().UTC().Format(time.RFC3339)).Scan(&count)
+	})
+	return err == nil && count > 0
+}
+
 func (a *App) domainIsAutomaticSSLCandidate(ctx context.Context, domain string) bool {
 	certificateDomain := normalizeDomainName(domain)
 	if certificateDomain == "" {
 		return false
 	}
 	if a.autoCertCachedCertificateValid(certificateDomain, time.Now()) {
+		return true
+	}
+	if a.pendingRegistrationDomain(ctx, certificateDomain) {
 		return true
 	}
 	query := `

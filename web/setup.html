@@ -71,7 +71,7 @@
           <input type="text" name="name" class="form-control" value="{{.RequestName}}" autocomplete="name" required>
         </label>
         <label>{{index .T "profile_email"}}
-          <input type="email" name="email" class="form-control" value="{{.RequestEmail}}" autocomplete="email" required>
+          <input type="email" autocomplete="username" name="email" class="form-control" value="{{.RequestEmail}}" required>
         </label>
         <label>{{index .T "setup_request_phone"}}
           <input type="tel" name="phone" class="form-control" value="{{.RequestPhone}}" autocomplete="tel" required>
@@ -128,12 +128,14 @@
   {{if .Status}}<div class="alert alert-info" style="max-width:520px;">{{.Status}}</div>{{end}}
   <form class="card card-body authentication-card" method="post" action="?register">
     <input type="hidden" name="return_path" value="{{.ReturnPath}}">
-    <p><input type="email" name="email" class="form-control" placeholder="{{index .T "login_email_placeholder"}}" value="{{.Email}}" required></p>
-    <p><input type="password" name="password" class="form-control" placeholder="{{index .T "login_password_placeholder"}}" required></p>
+    <p><input type="email" autocomplete="username" name="email" class="form-control" placeholder="{{index .T "login_email_placeholder"}}" value="{{.Email}}" required></p>
+    <p class="hint">{{index .T "auth_registration_secure"}}</p>
     <div><button type="submit" class="btn btn-primary">{{index .T "setup_create_admin"}}</button></div>
   </form>
   {{end}}
 </div>
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+<span hidden data-account-code-tools data-copy-label="{{index .T "auth_copy"}}" data-copy-success="{{index .T "auth_copied"}}" data-copy-error="{{index .T "auth_copy_failed"}}"></span>
+<script src="/p/static/account-forms.js" defer></script>
 </body>
 </html>

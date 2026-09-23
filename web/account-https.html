@@ -1,0 +1,4 @@
+<!doctype html>
+<html lang="{{.LanguageCode}}" dir="{{.TextDirection}}">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="refresh" content="10;url={{.RefreshURL}}"><title>HTTPS · {{.Domain}}</title><link rel="stylesheet" href="/p/static/technical_pages.css"></head>
+<body class="technical-page"><main class="container authentication-shell"><section class="authentication-card"><h1>{{.Domain}}</h1><p role="status">{{index .T "auth_https_wait"}}</p><p><a class="btn btn-primary" href="{{.RefreshURL}}">{{index .T "auth_https_retry"}}</a></p></section></main></body></html>
