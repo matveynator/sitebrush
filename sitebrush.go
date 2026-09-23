@@ -8819,8 +8819,31 @@ func (a *App) mailDeliveryWebSocket(w http.ResponseWriter, r *http.Request) {
 	var initialRecord mailout.Record
 	err := a.withServerControlDatabaseRead(r.Context(), "mail-delivery-websocket", func(database *sql.DB) error {
 		if messageID == "latest" && expectedKind == "email_confirm" && proof != "" {
-			if err := database.QueryRowContext(r.Context(), `SELECT message_id FROM mail_outbox WHERE recipient=? AND kind=? ORDER BY created_at DESC LIMIT 1`, currentEmail, expectedKind).Scan(&messageID); err != nil {
-				return err
+			rows, queryErr := database.QueryContext(r.Context(), `SELECT message_id FROM mail_outbox WHERE recipient=? AND kind=? ORDER BY created_at DESC`, currentEmail, expectedKind)
+			if queryErr != nil {
+				return queryErr
+			}
+			defer rows.Close()
+			messageID = ""
+			for rows.Next() {
+				var candidateID string
+				if scanErr := rows.Scan(&candidateID); scanErr != nil {
+					return scanErr
+				}
+				candidateRecord, found, lookupErr := mailout.ByID(r.Context(), database, candidateID)
+				if lookupErr != nil {
+					return lookupErr
+				}
+				if found && strings.Contains(candidateRecord.Message.Body, proof) {
+					messageID = candidateID
+					break
+				}
+			}
+			if rowsErr := rows.Err(); rowsErr != nil {
+				return rowsErr
+			}
+			if messageID == "" {
+				return sql.ErrNoRows
 			}
 		}
 		var found bool
