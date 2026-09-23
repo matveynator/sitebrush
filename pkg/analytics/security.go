@@ -13,7 +13,7 @@ type RequestObservation struct {
 	IP, Path, Query, Method, Agent, Language, Country, City string
 	Status                                                  int
 	Bytes                                                   int64
-	Trusted                                                 bool
+	Trusted, IndexingCrawler                                bool
 }
 type Probe struct {
 	Path, Category, Method string
@@ -154,7 +154,7 @@ func (state *SecurityState) Record(request RequestObservation) string {
 	if request.Status == 401 || request.Status == 403 {
 		window.Failures++
 	}
-	if !request.Trusted {
+	if !request.Trusted && !request.IndexingCrawler {
 		if category == "" && len(window.Paths) >= 60 {
 			category = "enumeration"
 		}

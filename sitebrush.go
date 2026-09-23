@@ -2223,7 +2223,7 @@ type siteAnalyticsEvent struct {
 	GeoLongitude   float64
 	GeoSource      string
 	VisitorID      string
-	TrustedPeer    bool
+	TrustedPeer, IndexingCrawler    bool
 	IsAdmin        bool
 	IsAsset        bool
 	IsController   bool
@@ -3308,7 +3308,7 @@ func (a *App) analyticsMiddleware(next http.Handler) http.Handler {
 			}
 		}
 		if a.securityAnalytics != nil && r.URL.Path != "/_sitebrush/analytics" && len(a.securityAnalytics) < cap(a.securityAnalytics) {
-			securityEvent := siteAnalyticsEvent{Bytes: writer.bytesWritten, Domain: a.analyticsEventDomain(r, ""), Path: analyticsBoundedString(r.URL.EscapedPath(), 512), Query: analyticsBoundedString(r.URL.RawQuery, 2048), Method: r.Method, StatusCode: writer.statusCode, OccurredAt: startedAt.UTC(), RemoteAddress: analyticsBoundedString(r.RemoteAddr, 64), Forwarded: analyticsBoundedString(r.Header.Get("Forwarded"), 256), ForwardedFor: analyticsBoundedString(r.Header.Get("X-Forwarded-For"), 256), UserAgent: analyticsBoundedString(r.UserAgent(), 256), AcceptLanguage: analyticsBoundedString(r.Header.Get("Accept-Language"), 64), TrustedPeer: sitebrushPeerRequestTrusted(r, startedAt.UTC())}
+			securityEvent := siteAnalyticsEvent{Bytes: writer.bytesWritten, Domain: a.analyticsEventDomain(r, ""), Path: analyticsBoundedString(r.URL.EscapedPath(), 512), Query: analyticsBoundedString(r.URL.RawQuery, 2048), Method: r.Method, StatusCode: writer.statusCode, OccurredAt: startedAt.UTC(), RemoteAddress: analyticsBoundedString(r.RemoteAddr, 64), Forwarded: analyticsBoundedString(r.Header.Get("Forwarded"), 256), ForwardedFor: analyticsBoundedString(r.Header.Get("X-Forwarded-For"), 256), UserAgent: analyticsBoundedString(r.UserAgent(), 256), AcceptLanguage: analyticsBoundedString(r.Header.Get("Accept-Language"), 64), TrustedPeer: sitebrushPeerRequestTrusted(r, startedAt.UTC()), IndexingCrawler: httpsecurity.IsIndexingCrawlerRequest(r)}
 			select {
 			case a.securityAnalytics <- securityEvent:
 			default:
@@ -4294,7 +4294,7 @@ func (a *App) runSecurityAnalytics(stop <-chan struct{}) {
 				continue
 			}
 			address := clientIPAddress(&http.Request{RemoteAddr: event.RemoteAddress, Header: http.Header{"Forwarded": []string{event.Forwarded}, "X-Forwarded-For": []string{event.ForwardedFor}}})
-			category := state.Record(browserstats.RequestObservation{Time: event.OccurredAt, IP: address, Path: event.Path, Query: event.Query, Method: event.Method, Status: event.StatusCode, Bytes: event.Bytes, Agent: event.UserAgent, Language: analyticsLanguageLabel(event.AcceptLanguage), Trusted: event.TrustedPeer})
+			category := state.Record(browserstats.RequestObservation{Time: event.OccurredAt, IP: address, Path: event.Path, Query: event.Query, Method: event.Method, Status: event.StatusCode, Bytes: event.Bytes, Agent: event.UserAgent, Language: analyticsLanguageLabel(event.AcceptLanguage), Trusted: event.TrustedPeer, IndexingCrawler: event.IndexingCrawler})
 			if category != "" && a.attackGuard != nil {
 				description := "security analytics detected " + category
 				block, blocked := a.attackGuard.ObserveIncident(address, category, description, event.OccurredAt)
@@ -6490,8 +6490,10 @@ func (a *App) authAbuseMiddleware(next http.Handler) http.Handler {
 		now := time.Now().UTC()
 		clientIP := clientIPAddress(r)
 		trusted := httpsecurity.IsLocalRequest(r) || sitebrushPeerRequestTrusted(r, now)
+		crawlerRead := httpsecurity.IsIndexingCrawlerRequest(r)
+		rateTrusted := trusted || crawlerRead
 		if a.attackGuard != nil {
-			block, blocked, allowed := a.attackGuard.ObserveRequestFastDisposition(clientIP, r.URL.EscapedPath(), r.Method, trusted, now)
+			block, blocked, allowed := a.attackGuard.ObserveRequestFastDisposition(clientIP, r.URL.EscapedPath(), r.Method, rateTrusted, now)
 			if allowed {
 				next.ServeHTTP(w, r)
 				return
@@ -6512,7 +6514,7 @@ func (a *App) authAbuseMiddleware(next http.Handler) http.Handler {
 		}
 
 		if a.throttleGuard != nil {
-			decision := a.throttleGuard.ObserveFast(clientIP, trusted, now)
+			decision := a.throttleGuard.ObserveFast(clientIP, rateTrusted, now)
 			if decision.RateLimited {
 				w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 				w.Header().Set("Cache-Control", "no-store")
