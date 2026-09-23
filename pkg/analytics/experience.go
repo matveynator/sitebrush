@@ -53,9 +53,9 @@ type SessionSummary struct {
 	FirstSource                                                                                          string
 	Source                                                                                               Attribution
 	Started, Last                                                                                        time.Time
-	ActiveMS                                                                                             int64
+	ActiveMS, ReturnAfterMS                                                                              int64
 	Scroll, Views, Actions                                                                               int
-	Goal                                                                                                 bool
+	Goal, Returning                                                                                      bool
 	Complete, Limited                                                                                    bool
 	Latitude, Longitude                                                                                  float64
 	GeoKnown                                                                                             bool
@@ -320,6 +320,12 @@ func (site *Site) recordExperience(event Event, now time.Time, visitor *Visitor,
 		if session.Language == "" {
 			session.Language = "unknown"
 		}
+		if visitor.Session > 1 {
+			session.Returning = true
+			if !visitor.Last.IsZero() && now.After(visitor.Last) {
+				session.ReturnAfterMS = now.Sub(visitor.Last).Milliseconds()
+			}
+		}
 		if event.Offset != nil && *event.Offset >= -840 && *event.Offset <= 840 {
 			local := now.UTC().Add(-time.Duration(*event.Offset) * time.Minute)
 			session.LocalTime = local.Format("15:04")
@@ -536,7 +542,6 @@ func (site *Site) ExperienceReport(now time.Time, days int, detail bool) Experie
 		for _, session := range site.Experience.Recent {
 			if dayKey(session.Started) >= first && !session.Started.After(now) {
 				copySession := *session
-				copySession.Address = ""
 				copySession.LastViews = nil
 				copySession.Outcomes = nil
 				report.Recent = append(report.Recent, copySession)
@@ -639,6 +644,19 @@ func (report ExperienceReport) View(filter ExperienceFilter) ExperienceView {
 			continue
 		}
 		result.Recent = append(result.Recent, session)
+		localHoursKnown := false
+		for _, count := range result.LocalHours {
+			if count > 0 {
+				localHoursKnown = true
+				break
+			}
+		}
+		if !localHoursKnown && len(session.LocalTime) >= 2 {
+			hour := int(session.LocalTime[0]-'0')*10 + int(session.LocalTime[1]-'0')
+			if hour >= 0 && hour < len(result.LocalHours) {
+				result.LocalHours[hour]++
+			}
+		}
 		if session.Source.Name == "direct-hidden" && session.FirstSource != "direct-hidden" && session.FirstSource != "direct" && session.FirstSource != "" {
 			hiddenReturns++
 		}
@@ -736,6 +754,19 @@ func (metrics Measures) AverageActive() string {
 }
 func (session SessionSummary) Active() string {
 	return fmt.Sprintf("%.1f s", float64(session.ActiveMS)/1000)
+}
+func (session SessionSummary) ReturnAfter() string {
+	if session.ReturnAfterMS <= 0 {
+		return "—"
+	}
+	duration := time.Duration(session.ReturnAfterMS) * time.Millisecond
+	if duration >= 24*time.Hour {
+		return fmt.Sprintf("%dd %dh", int(duration/(24*time.Hour)), int(duration% (24*time.Hour)/time.Hour))
+	}
+	if duration >= time.Hour {
+		return fmt.Sprintf("%dh %dm", int(duration/time.Hour), int(duration%time.Hour/time.Minute))
+	}
+	return fmt.Sprintf("%dm", max(1, int(duration/time.Minute)))
 }
 func (session SessionSummary) When() string {
 	return session.Started.UTC().Format("2006-01-02 15:04 UTC")
