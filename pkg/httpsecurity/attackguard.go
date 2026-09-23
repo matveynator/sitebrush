@@ -519,9 +519,6 @@ func (guard *AttackGuard) runPersistence() {
 	for {
 		select {
 		case <-guard.shutdown:
-			if pending {
-				_ = guard.saveSnapshot()
-			}
 			return
 		case <-guard.save:
 			if pending {
@@ -575,6 +572,7 @@ func (guard *AttackGuard) saveSnapshot() error {
 }
 
 func (guard *AttackGuard) Close() {
+	_ = guard.saveSnapshot()
 	close(guard.shutdown)
 	<-guard.done
 }
