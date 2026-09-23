@@ -314,6 +314,7 @@ func TestAttackGuardBlocksMassEnumerationEarly(t *testing.T) {
 		block, blocked = guard.ObserveRequestFast(
 			"203.0.113.84",
 			"/scan-"+time.Duration(requestIndex).String(),
+			"GET",
 			false,
 			now.Add(time.Duration(requestIndex)*time.Millisecond),
 		)
