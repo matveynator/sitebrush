@@ -161,7 +161,7 @@ func (state *SecurityState) Record(request RequestObservation) string {
 		if category == "" && window.Failures >= 10 {
 			category = "authentication-failures"
 		}
-		if category == "" && window.Count >= 180 {
+		if category == "" && window.Count >= 180 && now.Sub(window.First) >= 55*time.Second {
 			category = "rapid-crawl"
 		}
 		if category == "" && class == "scanner" {

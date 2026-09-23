@@ -102,6 +102,7 @@ type Signal struct {
 type Entry struct {
 	IP            string    `json:"ip"`
 	Reason        string    `json:"reason"`
+	Description   string    `json:"description,omitempty"`
 	LastEvent     time.Time `json:"last_event"`
 	ExpiresAt     time.Time `json:"expires_at"`
 	Confirmations int       `json:"confirmations"`
@@ -122,6 +123,7 @@ type Result struct {
 type evidenceSource struct {
 	InstallationID string    `json:"installation_id"`
 	Category       string    `json:"category"`
+	Description    string    `json:"description,omitempty"`
 	ObservedAt     time.Time `json:"observed_at"`
 }
 
@@ -210,6 +212,7 @@ func submit(records map[string]map[string]evidenceSource, signal Signal, now tim
 	sources[signal.InstallationID] = evidenceSource{
 		InstallationID: signal.InstallationID,
 		Category:       signal.Category,
+		Description:    cleanEvidenceDescription(signal.Description),
 		ObservedAt:     signal.ObservedAt.UTC(),
 	}
 	return true, nil
@@ -224,15 +227,18 @@ func approved(records map[string]map[string]evidenceSource, now time.Time) []Ent
 		}
 		lastEvent := time.Time{}
 		reason := ""
+		description := ""
 		for _, source := range sources {
 			if source.ObservedAt.After(lastEvent) {
 				lastEvent = source.ObservedAt
 				reason = source.Category
+				description = source.Description
 			}
 		}
 		entries = append(entries, Entry{
 			IP:            ip,
 			Reason:        reason,
+			Description:   description,
 			LastEvent:     lastEvent,
 			ExpiresAt:     lastEvent.Add(globalBlockTTL),
 			Confirmations: len(sources),
@@ -262,6 +268,19 @@ func prune(records map[string]map[string]evidenceSource, now time.Time) {
 			delete(records, ip)
 		}
 	}
+}
+
+func cleanEvidenceDescription(description string) string {
+	description = strings.TrimSpace(strings.Map(func(character rune) rune {
+		if character < ' ' {
+			return -1
+		}
+		return character
+	}, description))
+	if len(description) > 240 {
+		description = description[:240]
+	}
+	return description
 }
 
 func globalCategory(category string) bool {
