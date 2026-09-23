@@ -4296,9 +4296,13 @@ func (a *App) runSecurityAnalytics(stop <-chan struct{}) {
 			address := clientIPAddress(&http.Request{RemoteAddr: event.RemoteAddress, Header: http.Header{"Forwarded": []string{event.Forwarded}, "X-Forwarded-For": []string{event.ForwardedFor}}})
 			category := state.Record(browserstats.RequestObservation{Time: event.OccurredAt, IP: address, Path: event.Path, Query: event.Query, Method: event.Method, Status: event.StatusCode, Bytes: event.Bytes, Agent: event.UserAgent, Language: analyticsLanguageLabel(event.AcceptLanguage), Trusted: event.TrustedPeer, IndexingCrawler: event.IndexingCrawler})
 			if category != "" && a.attackGuard != nil {
-				description := "security analytics detected " + category
-				block, blocked := a.attackGuard.ObserveIncident(address, category, description, event.OccurredAt)
-				if blocked && a.securityGlobalSignals != nil && securityBlockReasonFirstObservation(block, category, description) {
+				description := securityIncidentDescription(category, event.Path, event.StatusCode)
+				block, alreadyBlocked := a.attackGuard.Check(address, event.OccurredAt)
+				blocked := alreadyBlocked
+				if !alreadyBlocked {
+					block, blocked = a.attackGuard.ObserveIncident(address, category, description, event.OccurredAt)
+				}
+				if blocked && !alreadyBlocked && a.securityGlobalSignals != nil && securityBlockReasonFirstObservation(block, category, description) {
 					settings, settingsErr := a.attackGuard.Settings()
 					if settingsErr == nil && settings.GlobalSync {
 						signal := securitysync.Signal{IP: address, Category: category, Description: description, ObservedAt: event.OccurredAt}
@@ -4338,6 +4342,43 @@ func (a *App) runSecurityAnalytics(stop <-chan struct{}) {
 				}
 			}
 		}
+	}
+}
+
+func securityIncidentDescription(category, requestPath string, statusCode int) string {
+	pathText := browserstats.SafePath(requestPath)
+	suffix := ""
+	if statusCode > 0 {
+		suffix = " (HTTP " + strconv.Itoa(statusCode) + ")"
+	}
+	switch category {
+	case "repository":
+		return "Tried to access repository metadata: " + pathText + suffix
+	case "secret":
+		return "Tried to access a sensitive file: " + pathText + suffix
+	case "source-backup":
+		return "Tried to download a backup or source file: " + pathText + suffix
+	case "traversal":
+		return "Path traversal attempt: " + pathText + suffix
+	case "injection":
+		return "Injection pattern detected in request to " + pathText + suffix
+	case "enumeration":
+		return "Scanned many distinct URLs; latest request: " + pathText + suffix
+	case "authentication-failures":
+		return "Repeated authentication failures; latest request: " + pathText + suffix
+	case "scanner-client":
+		return "Known security scanner requested " + pathText + suffix
+	default:
+		return "Suspicious request: " + pathText + suffix
+	}
+}
+
+func immediateSecurityCategory(category string) bool {
+	switch category {
+	case "repository", "secret", "source-backup", "traversal", "injection":
+		return true
+	default:
+		return false
 	}
 }
 
@@ -6492,9 +6533,19 @@ func (a *App) authAbuseMiddleware(next http.Handler) http.Handler {
 		clientIP := clientIPAddress(r)
 		trusted := httpsecurity.IsLocalRequest(r) || sitebrushPeerRequestTrusted(r, now)
 		crawlerRead := httpsecurity.IsIndexingCrawlerRequest(r)
-		rateTrusted := trusted || crawlerRead
 		if a.attackGuard != nil {
-			block, blocked, allowed := a.attackGuard.ObserveRequestFastDisposition(clientIP, r.URL.EscapedPath(), r.Method, rateTrusted, now)
+			var block httpsecurity.SecurityBlock
+			var blocked, allowed bool
+			category := ""
+			if !trusted {
+				category = browserstats.ProbeCategory(r.URL.EscapedPath(), r.URL.RawQuery)
+			}
+			if immediateSecurityCategory(category) {
+				description := securityIncidentDescription(category, r.URL.EscapedPath(), 0)
+				block, blocked = a.attackGuard.ObserveIncident(clientIP, category, description, now)
+			} else {
+				block, blocked, allowed = a.attackGuard.ObserveRequestFastDisposition(clientIP, r.URL.EscapedPath(), r.Method, trusted || crawlerRead, now)
+			}
 			if allowed {
 				next.ServeHTTP(w, r)
 				return
