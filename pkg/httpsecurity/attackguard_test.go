@@ -298,3 +298,30 @@ func TestAttackGuardReasonAggregateResetsOutsideRetentionWindow(t *testing.T) {
 		t.Fatalf("new aggregate kept stale first timestamp: %#v", events[0])
 	}
 }
+
+
+func TestAttackGuardBlocksMassEnumerationEarly(t *testing.T) {
+	now := time.Date(2026, 9, 24, 12, 0, 0, 0, time.UTC)
+	guard, err := NewAttackGuard("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer guard.Close()
+
+	var block SecurityBlock
+	var blocked bool
+	for requestIndex := 0; requestIndex < 48; requestIndex++ {
+		block, blocked = guard.ObserveRequestFast(
+			"203.0.113.84",
+			"/scan-"+time.Duration(requestIndex).String(),
+			false,
+			now.Add(time.Duration(requestIndex)*time.Millisecond),
+		)
+	}
+	if !blocked || block.Reason != "mass-enumeration" {
+		t.Fatalf("expected early mass-enumeration block, got blocked=%v reason=%q", blocked, block.Reason)
+	}
+	if !strings.Contains(block.Description, "48 distinct paths") {
+		t.Fatalf("description is not concrete: %q", block.Description)
+	}
+}
