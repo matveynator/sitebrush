@@ -180,7 +180,7 @@ func TestDatabaseMissingSchemaErrorBranches(t *testing.T) {
 		}
 
 		speedStream, speedErrs := db.StreamMarkersByTrackIDZoomBoundsSpeed(
-			ctx, "missing", 8, 55, 37, 56, 38, 10, 100,
+			ctx, "missing", 8, 55, 37, 56, 38,
 			[]SpeedRange{{Min: 0, Max: 10}, {Min: 20, Max: 30}}, "sqlite",
 		)
 		for range speedStream {
