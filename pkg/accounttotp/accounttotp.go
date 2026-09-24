@@ -46,7 +46,7 @@ func ProvisioningURI(domain, email, secret string) string {
 	query.Set("algorithm", "SHA1")
 	query.Set("digits", strconv.Itoa(CodeDigits))
 	query.Set("period", strconv.Itoa(int(Period/time.Second)))
-	return (&url.URL{Scheme: "otpauth", Host: "totp", Path: "/" + label, RawQuery: query.Encode()}).String()
+	return "otpauth://totp/" + url.PathEscape(label) + "?" + query.Encode()
 }
 
 func Code(secret string, at time.Time) (string, error) {
