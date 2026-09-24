@@ -135,27 +135,45 @@ func TestSecurityBoundaryLoginChallengeBindingExpiryAndReplay(t *testing.T) {
 	_ = tx.Rollback()
 }
 
-func TestSecurityBoundaryMalformedLoginSessionIsConsumedButNeverAccepted(t *testing.T) {
+func TestSecurityBoundaryMalformedLoginSessionRollsBackThroughFinishLogin(t *testing.T) {
 	database := securityPasskeyDatabase(t)
 	ctx := context.Background()
 	now := time.Unix(1_800_100_200, 0).UTC()
 	storeSecurityChallenge(t, database, "example.com", "", "login", "203.0.113.40", "malformed-login", "not-json", now)
 
-	tx := mustBeginPasskey(t, database)
-	if _, _, err := consumeLoginChallenge(ctx, tx, "example.com", "203.0.113.40", "malformed-login", now); err == nil {
-		_ = tx.Rollback()
-		t.Fatal("SECURITY: malformed WebAuthn login session was accepted")
-	}
-	if err := tx.Commit(); err != nil {
-		t.Fatal(err)
-	}
+	for attempt := 0; attempt < 2; attempt++ {
+		tx := mustBeginPasskey(t, database)
+		if _, _, err := FinishLogin(
+			ctx,
+			tx,
+			"example.com",
+			"example.com",
+			"https://example.com",
+			"203.0.113.40",
+			"malformed-login",
+			nil,
+			now,
+		); err == nil {
+			_ = tx.Rollback()
+			t.Fatal("SECURITY: malformed WebAuthn login session was accepted")
+		}
+		// Production accountTransaction rolls the transaction back when
+		// FinishLogin returns an error. The challenge delete must therefore
+		// roll back too rather than being tested under an artificial commit.
+		if err := tx.Rollback(); err != nil {
+			t.Fatal(err)
+		}
 
-	var count int
-	if err := database.QueryRow("SELECT COUNT(*) FROM account_webauthn_challenges WHERE token=?", "malformed-login").Scan(&count); err != nil {
-		t.Fatal(err)
-	}
-	if count != 0 {
-		t.Fatal("SECURITY: malformed challenge remained replayable after consumption attempt")
+		var count int
+		if err := database.QueryRow(
+			"SELECT COUNT(*) FROM account_webauthn_challenges WHERE token=?",
+			"malformed-login",
+		).Scan(&count); err != nil {
+			t.Fatal(err)
+		}
+		if count != 1 {
+			t.Fatalf("SECURITY: rollback changed malformed challenge count to %d, want 1", count)
+		}
 	}
 }
 
