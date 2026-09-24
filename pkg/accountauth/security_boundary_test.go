@@ -356,3 +356,103 @@ func TestSecurityBoundarySessionFailsClosedWithoutSessionStorage(t *testing.T) {
 	}
 	_ = tx.Rollback()
 }
+
+
+func TestSecurityBoundaryAuthenticationFailsClosedOnStorageErrors(t *testing.T) {
+	ctx := context.Background()
+	now := time.Unix(1_800_001_100, 0).UTC()
+
+	tests := []struct {
+		name string
+		drop string
+		run  func(*sql.Tx) error
+	}{
+		{
+			name: "reserve",
+			drop: "account_code_rates",
+			run: func(tx *sql.Tx) error {
+				_, err := Reserve(ctx, tx, "example.org", "owner@example.org", "192.0.2.110", now)
+				return err
+			},
+		},
+		{
+			name: "credentials",
+			drop: "users",
+			run: func(tx *sql.Tx) error {
+				_, err := Credentials(ctx, tx, "example.org", "owner@example.org", "password")
+				return err
+			},
+		},
+		{
+			name: "password",
+			drop: "users",
+			run: func(tx *sql.Tx) error {
+				_, err := Password(ctx, tx, "example.org", "owner@example.org", "password", "192.0.2.110", "/", "en", now)
+				return err
+			},
+		},
+		{
+			name: "challenge",
+			drop: "account_trusted_ips",
+			run: func(tx *sql.Tx) error {
+				_, err := Challenge(ctx, tx, "example.org", "owner@example.org", "192.0.2.110", "/", "en", now)
+				return err
+			},
+		},
+		{
+			name: "verify",
+			drop: "account_login_codes",
+			run: func(tx *sql.Tx) error {
+				_, err := Verify(ctx, tx, "example.org", "missing", "000000", "192.0.2.110", now)
+				return err
+			},
+		},
+		{
+			name: "verify link",
+			drop: "account_login_codes",
+			run: func(tx *sql.Tx) error {
+				_, err := VerifyLink(ctx, tx, "example.org", "missing", "192.0.2.110", now)
+				return err
+			},
+		},
+		{
+			name: "revoke",
+			drop: "account_trusted_ips",
+			run: func(tx *sql.Tx) error {
+				return Revoke(ctx, tx, "example.org", "owner@example.org", "192.0.2.110")
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			db := testDatabase(t)
+			if _, err := db.Exec("DROP TABLE " + tc.drop); err != nil {
+				t.Fatal(err)
+			}
+			tx, err := db.Begin()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := tc.run(tx); err == nil {
+				_ = tx.Rollback()
+				t.Fatalf("SECURITY: %s ignored storage failure", tc.name)
+			}
+			_ = tx.Rollback()
+		})
+	}
+}
+
+func TestSecurityBoundaryRandomTokensAreUniqueAndFixedSize(t *testing.T) {
+	first, err := RandomToken()
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := RandomToken()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(first) != 64 || len(second) != 64 || first == second {
+		t.Fatalf("unexpected authentication token shape first=%q second=%q", first, second)
+	}
+}
