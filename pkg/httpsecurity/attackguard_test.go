@@ -60,9 +60,12 @@ func TestAttackGuardBlocksSevereIncidentAndPersists(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer guard.Close()
-	block, blocked := guard.ObserveIncident("2001:db8::1", "injection", "SQL injection pattern", now)
+	if block, blocked := guard.ObserveIncident("2001:db8::1", "injection", "SQL injection pattern", now); blocked {
+		t.Fatalf("single injection heuristic unexpectedly blocked: %#v", block)
+	}
+	block, blocked := guard.ObserveIncident("2001:db8::1", "injection", "SQL injection pattern", now.Add(time.Second))
 	if !blocked || block.Source != "local" {
-		t.Fatalf("unexpected incident block: %#v", block)
+		t.Fatalf("repeated injection incident did not block: %#v", block)
 	}
 	if err := guard.saveSnapshot(); err != nil {
 		t.Fatal(err)
@@ -92,12 +95,15 @@ func TestAttackGuardManualAndEscalation(t *testing.T) {
 	if first.Violations != 1 {
 		t.Fatalf("violations=%d", first.Violations)
 	}
-	third := first
-	for i := 0; i < 2; i++ {
-		third, _ = guard.ObserveIncident("198.51.100.4", "injection", "repeat", now.Add(time.Duration(i+1)*time.Minute))
+	if block, blocked := guard.ObserveIncident("198.51.100.4", "injection", "repeat", now.Add(time.Second)); blocked {
+		t.Fatalf("single injection heuristic unexpectedly blocked: %#v", block)
 	}
-	if third.ExpiresAt.Sub(third.LastEvent) < 29*24*time.Hour {
-		t.Fatalf("repeat attacker was not escalated: %s", third.ExpiresAt.Sub(third.LastEvent))
+	third, blocked := guard.ObserveIncident("198.51.100.4", "injection", "repeat", now.Add(2*time.Second))
+	if !blocked {
+		t.Fatal("repeated injection heuristic did not block")
+	}
+	if got := third.ExpiresAt.Sub(third.LastEvent); got != 2*24*time.Hour {
+		t.Fatalf("repeat attacker ttl=%s want=48h", got)
 	}
 	if err := guard.Remove("198.51.100.4"); err != nil {
 		t.Fatal(err)
@@ -115,7 +121,7 @@ func TestBlockedHTMLIncludesDiagnosticsAndDeveloperGuidance(t *testing.T) {
 		ReasonLog: []SecurityReasonEvent{{First: now.Add(-2 * time.Minute), At: now, Reason: "authentication-failures", Description: "Repeated authentication failures; latest request: /?login (HTTP 401) <script>", Count: 3, Source: "global"}},
 	}
 	body := blockedHTMLAt("ru-RU", block, now)
-	for _, expected := range []string{"Запрос заблокирован", "203.0.113.17", "Источник блокировки", "global", "7 дн. 0 ч.", "2026-10-01T10:00:00Z", "2026-09-24T09:58:00Z", "Повторные ошибки аутентификации", "Отклонённая попытка входа; последний запрос: /?login", "×3", "localhost", "httptest", "Auto-block", "&lt;script&gt;"} {
+	for _, expected := range []string{"Запрос заблокирован", "203.0.113.17", "Источник блокировки", "Глобальная репутация", "7 дн. 0 ч.", "2026-10-01T10:00:00Z", "2026-09-24T09:58:00Z", "Повторные ошибки аутентификации", "Отклонённая попытка входа; последний запрос: /?login", "×3", "Отправить инцидент администратору", "Аналитика → Безопасность", "localhost", "httptest", "Auto-block", "&lt;script&gt;"} {
 		if !strings.Contains(body, expected) {
 			t.Errorf("blocked page missing %q", expected)
 		}
@@ -203,7 +209,7 @@ func TestAttackGuardKeepsSevenDayReasonHistory(t *testing.T) {
 	}
 	defer guard.Close()
 
-	first, blocked := guard.ObserveIncident("198.51.100.81", "injection", "first pattern", now.Add(-8*24*time.Hour))
+	first, blocked := guard.ObserveIncident("198.51.100.81", "repository", "first pattern", now.Add(-8*24*time.Hour))
 	if !blocked {
 		t.Fatal("first incident did not block")
 	}
@@ -458,5 +464,40 @@ func TestAttackGuardRequiresRepeatedHeuristicIncidents(t *testing.T) {
 		t.Fatal("third scanner-client signal did not block")
 	} else if block.ExpiresAt.Sub(block.LastEvent) != 24*time.Hour {
 		t.Fatalf("unexpected first automatic ttl: %s", block.ExpiresAt.Sub(block.LastEvent))
+	}
+}
+
+
+func TestAttackGuardIncidentReportIsOneShot(t *testing.T) {
+	now := time.Date(2026, 9, 24, 12, 0, 0, 0, time.UTC)
+	guard, err := NewAttackGuard("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer guard.Close()
+
+	block, blocked := guard.ObserveSiteIncident("example.com", "203.0.113.203", "repository", "requested /.git/config", now)
+	if !blocked {
+		t.Fatal("repository probe did not block")
+	}
+	if block.Domain != "example.com" {
+		t.Fatalf("block domain=%q", block.Domain)
+	}
+	claimed, allowed, err := guard.ClaimIncidentReport(block.IP, block.IncidentID, now.Add(time.Minute))
+	if err != nil || !allowed {
+		t.Fatalf("first report claim allowed=%v err=%v block=%#v", allowed, err, claimed)
+	}
+	if _, allowed, err := guard.ClaimIncidentReport(block.IP, block.IncidentID, now.Add(time.Minute)); err != nil || allowed {
+		t.Fatalf("second report claim allowed=%v err=%v", allowed, err)
+	}
+	reported, err := guard.FinishIncidentReport(block.IP, block.IncidentID, "shared VPN address", true, now.Add(2*time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reported.ReportedAt.IsZero() || reported.ReportMessage != "shared VPN address" {
+		t.Fatalf("report status not stored: %#v", reported)
+	}
+	if _, allowed, err := guard.ClaimIncidentReport(block.IP, block.IncidentID, now.Add(3*time.Minute)); err != nil || allowed {
+		t.Fatalf("reported incident became claimable again: allowed=%v err=%v", allowed, err)
 	}
 }
