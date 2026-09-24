@@ -247,13 +247,15 @@ func TestSerializedPipelineRunsExactlyOneWriterAtATime(t *testing.T) {
 func TestSQLiteRecoversAfterExternalWriteLockIsReleased(t *testing.T) {
 	db, databasePath := newSQLiteConcurrencyTestDatabase(t)
 
-	external, err := sql.Open("sqlite3", databasePath+"?_txlock=exclusive")
+	dsn := "file:" + databasePath
+	external, err := sql.Open("sqlite3", dsn+"?_txlock=exclusive&_busy_timeout=5000")
 	if err != nil {
 		t.Fatalf("open external sqlite connection: %v", err)
 	}
 	t.Cleanup(func() {
 		_ = external.Close()
 	})
+	external.SetMaxOpenConns(1)
 
 	tx, err := external.Begin()
 	if err != nil {
@@ -262,6 +264,22 @@ func TestSQLiteRecoversAfterExternalWriteLockIsReleased(t *testing.T) {
 	if _, err := tx.Exec("INSERT INTO maintenance_state(task,status,updated_at,message) VALUES(?,?,?,?)", "external-lock", "holding", 1, ""); err != nil {
 		_ = tx.Rollback()
 		t.Fatalf("acquire external sqlite write lock: %v", err)
+	}
+
+	// Prove that the test actually holds SQLite's writer lock before using it
+	// as a regression test. This prevents a false-positive test when DSN or
+	// driver locking semantics change.
+	probe, err := sql.Open("sqlite3", dsn+"?_busy_timeout=1")
+	if err != nil {
+		_ = tx.Rollback()
+		t.Fatalf("open sqlite lock probe: %v", err)
+	}
+	probe.SetMaxOpenConns(1)
+	_, probeErr := probe.Exec("INSERT INTO maintenance_state(task,status,updated_at,message) VALUES(?,?,?,?)", "lock-probe", "unexpected", 2, "")
+	_ = probe.Close()
+	if probeErr == nil {
+		_ = tx.Rollback()
+		t.Fatal("test setup failed: exclusive SQLite transaction did not block an independent writer")
 	}
 
 	writeDone := make(chan error, 1)
@@ -282,7 +300,7 @@ func TestSQLiteRecoversAfterExternalWriteLockIsReleased(t *testing.T) {
 	select {
 	case err := <-writeDone:
 		_ = tx.Rollback()
-		t.Fatalf("writer returned while external transaction still held the write lock: %v", err)
+		t.Fatalf("writer returned while verified external write lock was held: %v", err)
 	case <-time.After(150 * time.Millisecond):
 	}
 
