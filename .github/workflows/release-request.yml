@@ -1,0 +1,32 @@
+name: Release Request
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Check release keyword and dispatch
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          COMMIT_MESSAGES: ${{ join(github.event.commits.*.message, ' || ') }}
+          HEAD_COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
+        run: |
+          set -euo pipefail
+
+          if ! printf '%s\n%s\n' "${COMMIT_MESSAGES}" "${HEAD_COMMIT_MESSAGE}" | grep -qiF "stable release"; then
+            echo "No release keyword found; not dispatching release.yml."
+            exit 0
+          fi
+
+          echo "Release keyword found; dispatching release.yml on main."
+          gh workflow run release.yml --ref main

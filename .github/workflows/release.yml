@@ -1,9 +1,6 @@
 name: Stable Release
 
 on:
-  push:
-    branches:
-      - main
   workflow_dispatch:
 
 permissions:
@@ -14,34 +11,7 @@ env:
   GO_VERSION: '1.26.6'
 
 jobs:
-  trigger:
-    runs-on: ubuntu-22.04
-    outputs:
-      should_build: ${{ steps.check.outputs.should_build }}
-    steps:
-      - name: Check stable release trigger
-        id: check
-        shell: bash
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          COMMIT_MESSAGES: ${{ join(github.event.commits.*.message, ' || ') }}
-          HEAD_COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
-        run: |
-          set -euo pipefail
-          if [[ "${EVENT_NAME}" == "workflow_dispatch" ]]; then
-            echo "should_build=true" >> "${GITHUB_OUTPUT}"
-            exit 0
-          fi
-
-          if printf '%s\n%s\n' "${COMMIT_MESSAGES}" "${HEAD_COMMIT_MESSAGE}" | grep -qiF "stable release"; then
-            echo "should_build=true" >> "${GITHUB_OUTPUT}"
-          else
-            echo "should_build=false" >> "${GITHUB_OUTPUT}"
-          fi
-
   build_server_app:
-    needs: trigger
-    if: needs.trigger.outputs.should_build == 'true'
     runs-on: ubuntu-22.04
     steps:
       - name: Checkout
@@ -61,7 +31,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          go run ./scripts/crosscompile             -mode server-app             -version "${GITHUB_RUN_NUMBER}"             -output-dir binaries
+          go run ./scripts/crosscompile \
+            -mode server-app \
+            -version "${GITHUB_RUN_NUMBER}" \
+            -output-dir binaries
 
       - name: Upload server-app artifacts
         uses: actions/upload-artifact@v5
@@ -72,8 +45,6 @@ jobs:
           if-no-files-found: error
 
   build_desktop_docker:
-    needs: trigger
-    if: needs.trigger.outputs.should_build == 'true'
     runs-on: ubuntu-22.04
     strategy:
       fail-fast: false
@@ -101,7 +72,11 @@ jobs:
           DOCKER_BUILDKIT: '1'
         run: |
           set -euo pipefail
-          go run ./scripts/crosscompile             -mode desktop-app             -os "${{ matrix.target_os }}"             -version "${GITHUB_RUN_NUMBER}"             -output-dir binaries
+          go run ./scripts/crosscompile \
+            -mode desktop-app \
+            -os "${{ matrix.target_os }}" \
+            -version "${GITHUB_RUN_NUMBER}" \
+            -output-dir binaries
 
       - name: Upload desktop Docker artifacts
         uses: actions/upload-artifact@v5
@@ -113,8 +88,6 @@ jobs:
           if-no-files-found: error
 
   build_desktop_macos:
-    needs: trigger
-    if: needs.trigger.outputs.should_build == 'true'
     runs-on: macos-14
     steps:
       - name: Checkout
@@ -130,7 +103,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          go run ./scripts/crosscompile             -mode desktop-app             -os darwin             -arch universal             -version "${GITHUB_RUN_NUMBER}"             -output-dir binaries
+          go run ./scripts/crosscompile \
+            -mode desktop-app \
+            -os darwin \
+            -arch universal \
+            -version "${GITHUB_RUN_NUMBER}" \
+            -output-dir binaries
 
       - name: Upload macOS desktop artifact
         uses: actions/upload-artifact@v5
@@ -143,11 +121,9 @@ jobs:
 
   release:
     needs:
-      - trigger
       - build_server_app
       - build_desktop_docker
       - build_desktop_macos
-    if: needs.trigger.outputs.should_build == 'true'
     runs-on: ubuntu-22.04
     steps:
       - name: Checkout
@@ -164,7 +140,11 @@ jobs:
           set -euo pipefail
           mkdir -p dist-release
 
-          find dist-raw -type f \(             -name 'sitebrush_*' -o             -name '*.zip' -o             -name '*.dmg'           \) -exec cp {} dist-release/ \;
+          find dist-raw -type f \( \
+            -name 'sitebrush_*' -o \
+            -name '*.zip' -o \
+            -name '*.dmg' \
+          \) -exec cp {} dist-release/ \;
 
           if ! compgen -G 'dist-release/sitebrush_*' > /dev/null; then
             echo "No release artifacts were assembled" >&2
