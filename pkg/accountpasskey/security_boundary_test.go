@@ -350,3 +350,117 @@ func TestPasskeyStorageAndTokenHelperBranches(t *testing.T) {
 		t.Fatalf("random passkey token properties = %q %q", first, second)
 	}
 }
+
+
+func TestSecurityBoundaryFinishRegistrationFailsClosedAfterValidChallenge(t *testing.T) {
+	database := securityPasskeyDatabase(t)
+	ctx := context.Background()
+	now := time.Unix(1_800_100_600, 0).UTC()
+	sessionJSON, err := json.Marshal(&webauthn.SessionData{Challenge: "registration-challenge"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	storeSecurityChallenge(
+		t,
+		database,
+		"example.com",
+		"owner@example.com",
+		"register",
+		"192.0.2.100",
+		"registration-config-error",
+		string(sessionJSON),
+		now,
+	)
+	tx := mustBeginPasskey(t, database)
+	if err := FinishRegistration(
+		ctx,
+		tx,
+		"example.com",
+		" ",
+		"https://example.com",
+		"owner@example.com",
+		"192.0.2.100",
+		"registration-config-error",
+		nil,
+		now,
+	); err == nil {
+		_ = tx.Rollback()
+		t.Fatal("SECURITY: registration continued with an invalid relying party")
+	}
+	if err := tx.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+
+	storeSecurityChallenge(
+		t,
+		database,
+		"example.com",
+		"owner@example.com",
+		"register",
+		"192.0.2.101",
+		"registration-storage-error",
+		string(sessionJSON),
+		now,
+	)
+	if _, err := database.Exec("DROP TABLE account_passkeys"); err != nil {
+		t.Fatal(err)
+	}
+	tx = mustBeginPasskey(t, database)
+	if err := FinishRegistration(
+		ctx,
+		tx,
+		"example.com",
+		"example.com",
+		"https://example.com",
+		"owner@example.com",
+		"192.0.2.101",
+		"registration-storage-error",
+		nil,
+		now,
+	); err == nil {
+		_ = tx.Rollback()
+		t.Fatal("SECURITY: registration continued after passkey storage failure")
+	}
+	_ = tx.Rollback()
+}
+
+func TestSecurityBoundaryFinishLoginFailsClosedAfterValidChallenge(t *testing.T) {
+	database := securityPasskeyDatabase(t)
+	ctx := context.Background()
+	now := time.Unix(1_800_100_700, 0).UTC()
+	sessionJSON, err := json.Marshal(&webauthn.SessionData{Challenge: "login-challenge"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	storeSecurityChallenge(
+		t,
+		database,
+		"example.com",
+		"",
+		"login",
+		"198.51.100.100",
+		"login-config-error",
+		string(sessionJSON),
+		now,
+	)
+
+	tx := mustBeginPasskey(t, database)
+	if _, _, err := FinishLogin(
+		ctx,
+		tx,
+		"example.com",
+		" ",
+		"https://example.com",
+		"198.51.100.100",
+		"login-config-error",
+		nil,
+		now,
+	); err == nil {
+		_ = tx.Rollback()
+		t.Fatal("SECURITY: login continued with an invalid relying party")
+	}
+	if err := tx.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+}
