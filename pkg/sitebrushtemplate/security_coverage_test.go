@@ -125,3 +125,77 @@ func TestDetectionProgressAndCandidateBoundaryBranches(t *testing.T) {
 		t.Fatal("SECURITY: nested existing template was accepted as automatic candidate")
 	}
 }
+
+func TestTemplateRewriteAndMatchHelperBranches(t *testing.T) {
+	rewrite := classRewrite{classNames: []string{"shared", "theme"}}
+	tests := []struct {
+		input string
+		remove bool
+		want string
+	}{
+		{"<div>", false, "<div class=\"SiteBrush-Template shared theme\">"},
+		{"<img />", false, "<img class=\"SiteBrush-Template shared theme\"/>"},
+		{"<div class=\"plain\">", false, "<div class=\"SiteBrush-Template shared theme plain\">"},
+		{"<div class='SiteBrush-Template plain'>", true, "<div class=\"plain\">"},
+		{"<div class=\"SiteBrush-Template\">", true, "<div >"},
+		{"broken", false, "broken"},
+	}
+	for _, tc := range tests {
+		if got := rewriteClassStartTag(tc.input, rewrite, tc.remove); got != tc.want {
+			t.Fatalf("rewrite %q remove=%v = %q, want %q", tc.input, tc.remove, got, tc.want)
+		}
+	}
+
+	matches := []match{
+		{start: 5, end: 10, id: "later"},
+		{start: 0, end: 20, id: "outer"},
+		{start: 0, end: 5, id: "short"},
+		{start: 21, end: 30, id: "next"},
+	}
+	filtered := sortedNonOverlappingMatches(matches)
+	if len(filtered) != 2 || filtered[0].id != "outer" || filtered[1].id != "next" {
+		t.Fatalf("non-overlapping matches = %#v", filtered)
+	}
+	if got := sortedNonOverlappingMatches([]match{{start: 1, end: 2}}); len(got) != 1 {
+		t.Fatalf("single match changed: %#v", got)
+	}
+}
+
+func TestTemplateIdentifierAndNodeHelperBranches(t *testing.T) {
+	node := &html.Node{Type: html.ElementNode, Data: "div", Attr: []html.Attribute{{Key: "CLASS", Val: "plain SiteBrush-Template sitebrush-template-header-abc"}}}
+	if !nodeHasSiteBrushTemplate(node) || nodeClassValue(node) == "" {
+		t.Fatal("existing template node was not recognized")
+	}
+	if nodeHasSiteBrushTemplate(nil) || nodeClassValue(nil) != "" {
+		t.Fatal("nil node unexpectedly contains template metadata")
+	}
+
+	identifier := templateIdentifierFromAttributes("DIV", node.Attr)
+	if identifier != "div\x00header-abc" {
+		t.Fatalf("template identifier = %q", identifier)
+	}
+	if identifier := templateIdentifierFromAttributes("div", []html.Attribute{{Key: "id", Val: "x"}}); identifier != "" {
+		t.Fatalf("identifier without class = %q", identifier)
+	}
+
+	elements := []classElement{
+		{matchKey: "same", hasTemplate: false, classNames: []string{"plain"}},
+		{matchKey: "same", hasTemplate: true, classNames: []string{"SiteBrush-Template", "shared"}},
+	}
+	if got := strings.Join(templateClassNamesForKey("same", elements), " "); got != "SiteBrush-Template shared" {
+		t.Fatalf("template class names = %q", got)
+	}
+	if got := templateClassNamesForKey("missing", elements); len(got) != 1 || got[0] != "SiteBrush-Template" {
+		t.Fatalf("default template classes = %#v", got)
+	}
+
+	withoutClass := &html.Node{Type: html.ElementNode, Data: "footer"}
+	addAutomaticTemplateClasses(withoutClass, "sitebrush-template-footer-1")
+	if !nodeHasSiteBrushTemplate(withoutClass) {
+		t.Fatalf("automatic class was not added: %#v", withoutClass.Attr)
+	}
+	addAutomaticTemplateClasses(node, "sitebrush-template-new")
+	if !strings.Contains(nodeClassValue(node), "sitebrush-template-new") {
+		t.Fatalf("automatic class was not prepended: %q", nodeClassValue(node))
+	}
+}
