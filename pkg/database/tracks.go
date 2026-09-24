@@ -443,10 +443,12 @@ func (db *Database) UpdateTrackDeviceName(ctx context.Context, trackID, deviceNa
 	stmt := fmt.Sprintf(`UPDATE markers
 SET device_name = %s
 WHERE trackID = %s;`, ph, ph2)
-	if _, err := db.DB.ExecContext(ctx, stmt, deviceName, trackID); err != nil {
-		return fmt.Errorf("update track device name: %w", err)
-	}
-	return nil
+	return db.withSerializedConnectionFor(ctx, WorkloadUserUpload, func(runCtx context.Context, conn *sql.DB) error {
+		if _, err := conn.ExecContext(runCtx, stmt, deviceName, trackID); err != nil {
+			return fmt.Errorf("update track device name: %w", err)
+		}
+		return nil
+	})
 }
 
 // FillMissingTrackDeviceName updates only empty device_name values so existing labels remain unchanged.
@@ -468,10 +470,12 @@ func (db *Database) FillMissingTrackDeviceName(ctx context.Context, trackID, dev
 	stmt := fmt.Sprintf(`UPDATE markers
 SET device_name = %s
 WHERE trackID = %s AND (device_name IS NULL OR device_name = '');`, ph, ph2)
-	if _, err := db.DB.ExecContext(ctx, stmt, deviceName, trackID); err != nil {
-		return fmt.Errorf("fill track device name: %w", err)
-	}
-	return nil
+	return db.withSerializedConnectionFor(ctx, WorkloadUserUpload, func(runCtx context.Context, conn *sql.DB) error {
+		if _, err := conn.ExecContext(runCtx, stmt, deviceName, trackID); err != nil {
+			return fmt.Errorf("fill track device name: %w", err)
+		}
+		return nil
+	})
 }
 
 // AnnotateTrackRadiationWindow writes qualitative isotope composition into the
