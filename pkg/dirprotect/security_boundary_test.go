@@ -1,6 +1,7 @@
 package dirprotect
 
 import (
+	"crypto/hmac"
 	"strings"
 	"testing"
 	"time"
@@ -80,5 +81,31 @@ func TestSecurityBoundarySessionTokenRejectsReplayOutsideTimeWindow(t *testing.T
 	}
 	if BoundSessionTokenValid(rule, token, "198.51.100.8", "", issued.Add(2*time.Hour), time.Hour) {
 		t.Fatal("SECURITY: expired page-password token was replayed successfully")
+	}
+}
+
+
+func TestDirProtectNormalizationAndMalformedTokenBranches(t *testing.T) {
+	if CleanPath("") != "/" || CleanPath(" admin/../private ") != "/private" {
+		t.Fatal("path normalization failed")
+	}
+	if NormalizeDomain(" .EXAMPLE.COM. ") != "example.com" {
+		t.Fatal("domain normalization failed")
+	}
+	first := passwordPrehash("secret")
+	second := passwordPrehash("secret")
+	other := passwordPrehash("other")
+	if len(first) != 32 || !hmac.Equal(first, second) || hmac.Equal(first, other) {
+		t.Fatal("password prehash properties failed")
+	}
+	rule := Rule{Domain: "example.com", Path: "/private", PasswordHash: mustHashForTest(t, "secret")}
+	now := time.Unix(1_800_000_700, 0).UTC()
+	for _, token := range []string{"", "v1:1:bad", "v2:not-time:bad", "v2:1", "v2:1:bad:extra"} {
+		if BoundSessionTokenValid(rule, token, "203.0.113.1", "", now, time.Hour) {
+			t.Fatalf("SECURITY: malformed session token accepted: %q", token)
+		}
+	}
+	if BoundSessionTokenValid(rule, BoundSessionToken(rule, "203.0.113.1", "", now), "203.0.113.1", "", now, 0) {
+		t.Fatal("SECURITY: zero-TTL session token accepted")
 	}
 }
