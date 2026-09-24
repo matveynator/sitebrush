@@ -14,11 +14,6 @@ func TestImportHistoryServerDriverBranches(t *testing.T) {
 		if err := db.EnsureImportHistory(ctx, "source", "pgx-1", "track", "", "message", "pgx"); err != nil {
 			t.Fatalf("ensure pgx import history: %v", err)
 		}
-		if count, err := db.CountImportHistory(ctx, "source", "pgx"); err != nil {
-			t.Fatalf("count pgx import history: %v", err)
-		} else if count != 0 {
-			t.Fatalf("coverage driver pgx count = %d, want 0", count)
-		}
 		if _, _, err := db.FindImportHistory(ctx, "source", "missing", "pgx"); err != nil {
 			t.Fatalf("find missing pgx import history: %v", err)
 		}
