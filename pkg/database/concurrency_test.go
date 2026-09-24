@@ -206,12 +206,17 @@ func TestSQLiteRecoversAfterExternalWriteLockIsReleased(t *testing.T) {
 		_ = external.Close()
 	})
 
-	tx, err := external.Begin()
+	lockConn, err := external.Conn(context.Background())
 	if err != nil {
-		t.Fatalf("begin external transaction: %v", err)
+		t.Fatalf("open external sqlite connection: %v", err)
 	}
-	if _, err := tx.Exec("INSERT INTO maintenance_state(task,status,updated_at,message) VALUES(?,?,?,?)", "external-lock", "holding", 1, ""); err != nil {
-		_ = tx.Rollback()
+	defer lockConn.Close()
+
+	if _, err := lockConn.ExecContext(context.Background(), "BEGIN IMMEDIATE"); err != nil {
+		t.Fatalf("begin immediate external transaction: %v", err)
+	}
+	if _, err := lockConn.ExecContext(context.Background(), "INSERT INTO maintenance_state(task,status,updated_at,message) VALUES(?,?,?,?)", "external-lock", "holding", 1, ""); err != nil {
+		_, _ = lockConn.ExecContext(context.Background(), "ROLLBACK")
 		t.Fatalf("acquire external sqlite write lock: %v", err)
 	}
 
@@ -232,12 +237,12 @@ func TestSQLiteRecoversAfterExternalWriteLockIsReleased(t *testing.T) {
 
 	select {
 	case err := <-writeDone:
-		_ = tx.Rollback()
+		_, _ = lockConn.ExecContext(context.Background(), "ROLLBACK")
 		t.Fatalf("writer returned while external transaction still held the write lock: %v", err)
 	case <-time.After(150 * time.Millisecond):
 	}
 
-	if err := tx.Rollback(); err != nil {
+	if _, err := lockConn.ExecContext(context.Background(), "ROLLBACK"); err != nil {
 		t.Fatalf("release external sqlite write lock: %v", err)
 	}
 
