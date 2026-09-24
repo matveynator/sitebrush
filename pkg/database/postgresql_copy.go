@@ -9,12 +9,212 @@ import (
 	"github.com/jackc/pgx/v5/stdlib"
 )
 
+var postgresMarkerColumns = []string{
+	"doseRate", "date", "lon", "lat", "countRate", "zoom", "speed", "trackID",
+	"altitude", "detector", "radiation", "temperature", "humidity",
+}
+
+type postgresCopyConnection interface {
+	begin(context.Context) (postgresCopyTransaction, error)
+}
+
+type postgresCopyTransaction interface {
+	exec(context.Context, string, ...any) error
+	copyRows(context.Context, pgx.Identifier, []string, [][]interface{}) error
+	commit(context.Context) error
+	rollback(context.Context)
+}
+
+type pgxPostgresCopyConnection struct {
+	conn *pgx.Conn
+}
+
+func (c pgxPostgresCopyConnection) begin(ctx context.Context) (postgresCopyTransaction, error) {
+	tx, err := c.conn.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return nil, err
+	}
+	return pgxPostgresCopyTransaction{tx: tx}, nil
+}
+
+type pgxPostgresCopyTransaction struct {
+	tx pgx.Tx
+}
+
+func (t pgxPostgresCopyTransaction) exec(ctx context.Context, query string, args ...any) error {
+	_, err := t.tx.Exec(ctx, query, args...)
+	return err
+}
+
+func (t pgxPostgresCopyTransaction) copyRows(ctx context.Context, table pgx.Identifier, columns []string, rows [][]interface{}) error {
+	_, err := t.tx.CopyFrom(ctx, table, columns, pgx.CopyFromRows(rows))
+	return err
+}
+
+func (t pgxPostgresCopyTransaction) commit(ctx context.Context) error {
+	return t.tx.Commit(ctx)
+}
+
+func (t pgxPostgresCopyTransaction) rollback(ctx context.Context) {
+	_ = t.tx.Rollback(ctx)
+}
+
+func markerRowsForPostgreSQL(markers []Marker) [][]interface{} {
+	rows := make([][]interface{}, 0, len(markers))
+	for _, m := range markers {
+		rows = append(rows, []interface{}{
+			m.DoseRate, m.Date, m.Lon, m.Lat,
+			m.CountRate, m.Zoom, m.Speed, m.TrackID,
+			nullableFloat64(m.AltitudeValid, m.Altitude),
+			m.Detector, m.Radiation,
+			nullableFloat64(m.TemperatureValid, m.Temperature),
+			nullableFloat64(m.HumidityValid, m.Humidity),
+		})
+	}
+	return rows
+}
+
+func postgresTempTableSQL(tempTable string) string {
+	return fmt.Sprintf(`CREATE TEMP TABLE %s (
+ doseRate DOUBLE PRECISION,
+ date BIGINT,
+ lon DOUBLE PRECISION,
+ lat DOUBLE PRECISION,
+ countRate DOUBLE PRECISION,
+ zoom INT,
+ speed DOUBLE PRECISION,
+ trackID TEXT,
+ altitude DOUBLE PRECISION,
+ detector TEXT,
+ radiation TEXT,
+ temperature DOUBLE PRECISION,
+ humidity DOUBLE PRECISION
+ ) ON COMMIT DROP`, tempTable)
+}
+
+func postgresMergeTempSQL(tempTable string) string {
+	return fmt.Sprintf(`INSERT INTO markers
+ (doseRate,date,lon,lat,countRate,zoom,speed,trackID,altitude,detector,radiation,temperature,humidity)
+ SELECT doseRate,date,lon,lat,countRate,zoom,speed,trackID,altitude,detector,radiation,temperature,humidity FROM %s
+ ON CONFLICT ON CONSTRAINT markers_unique DO NOTHING`, tempTable)
+}
+
+func runPostgreSQLCopy(ctx context.Context, conn postgresCopyConnection, chunk []Marker) error {
+	tx, err := conn.begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin postgres transaction: %w", err)
+	}
+
+	committed := false
+	defer func() {
+		if !committed {
+			tx.rollback(ctx)
+		}
+	}()
+
+	tempTable := fmt.Sprintf("temp_markers_%d", time.Now().UnixNano())
+	if err := tx.exec(ctx, postgresTempTableSQL(tempTable)); err != nil {
+		return fmt.Errorf("create temp table: %w", err)
+	}
+
+	rows := markerRowsForPostgreSQL(chunk)
+	if err := tx.copyRows(ctx, pgx.Identifier{tempTable}, postgresMarkerColumns, rows); err != nil {
+		return fmt.Errorf("copy markers into temp table: %w", err)
+	}
+
+	if err := tx.exec(ctx, postgresMergeTempSQL(tempTable)); err != nil {
+		return fmt.Errorf("merge temp markers: %w", err)
+	}
+
+	if err := tx.commit(ctx); err != nil {
+		return fmt.Errorf("commit temp markers: %w", err)
+	}
+	committed = true
+	return nil
+}
+
+func runPostgreSQLCopyBatched(
+	ctx context.Context,
+	conn postgresCopyConnection,
+	markers []Marker,
+	batch int,
+	progress chan<- MarkerBatchProgress,
+) error {
+	if batch <= 0 {
+		batch = 500
+	}
+
+	tx, err := conn.begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin postgres transaction: %w", err)
+	}
+
+	committed := false
+	defer func() {
+		if !committed {
+			tx.rollback(ctx)
+		}
+	}()
+
+	tempTable := fmt.Sprintf("temp_markers_%d", time.Now().UnixNano())
+	if err := tx.exec(ctx, postgresTempTableSQL(tempTable)); err != nil {
+		return fmt.Errorf("create temp table: %w", err)
+	}
+
+	mergeSQL := postgresMergeTempSQL(tempTable)
+	truncateSQL := fmt.Sprintf("TRUNCATE %s", tempTable)
+	total := len(markers)
+	done := 0
+
+	for start := 0; start < len(markers); start += batch {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+
+		end := start + batch
+		if end > len(markers) {
+			end = len(markers)
+		}
+		chunk := markers[start:end]
+		rows := markerRowsForPostgreSQL(chunk)
+		if len(rows) == 0 {
+			continue
+		}
+
+		chunkStart := time.Now()
+		if err := tx.copyRows(ctx, pgx.Identifier{tempTable}, postgresMarkerColumns, rows); err != nil {
+			return fmt.Errorf("copy markers into temp table: %w", err)
+		}
+		if err := tx.exec(ctx, mergeSQL); err != nil {
+			return fmt.Errorf("merge temp markers: %w", err)
+		}
+		if err := tx.exec(ctx, truncateSQL); err != nil {
+			return fmt.Errorf("reset temp table: %w", err)
+		}
+
+		done += len(chunk)
+		if progress != nil {
+			select {
+			case progress <- MarkerBatchProgress{
+				Total: total, Done: done, Batch: len(chunk), Mode: "copy", Duration: time.Since(chunkStart),
+			}:
+			default:
+			}
+		}
+	}
+
+	if err := tx.commit(ctx); err != nil {
+		return fmt.Errorf("commit temp markers: %w", err)
+	}
+	committed = true
+	return nil
+}
+
 // insertMarkersPostgreSQLCopy streams a chunk of markers into PostgreSQL using COPY to
-// keep imports fast. We lean on a temporary table so we can still enforce the
-// ON CONFLICT policy from the main table without losing COPY's throughput.
-// The helper stays connection-local to avoid mutexes and follows "Don't
-// communicate by sharing memory; share memory by communicating" by letting the
-// database enforce ordering.
+// keep imports fast. The database/sql boundary is kept small so the COPY transaction
+// can be tested without requiring a live PostgreSQL server.
 func (db *Database) insertMarkersPostgreSQLCopy(ctx context.Context, chunk []Marker) error {
 	if len(chunk) == 0 {
 		return nil
@@ -32,100 +232,24 @@ func (db *Database) insertMarkersPostgreSQLCopy(ctx context.Context, chunk []Mar
 	}
 	defer conn.Close()
 
-	rows := make([][]interface{}, 0, len(chunk))
-	for _, m := range chunk {
-		rows = append(rows, []interface{}{
-			m.DoseRate, m.Date, m.Lon, m.Lat,
-			m.CountRate, m.Zoom, m.Speed, m.TrackID,
-			nullableFloat64(m.AltitudeValid, m.Altitude),
-			m.Detector, m.Radiation,
-			nullableFloat64(m.TemperatureValid, m.Temperature),
-			nullableFloat64(m.HumidityValid, m.Humidity),
-		})
-	}
-
-	copyErr := conn.Raw(func(driverConn any) error {
+	return conn.Raw(func(driverConn any) error {
 		direct, ok := driverConn.(*stdlib.Conn)
 		if !ok {
 			return fmt.Errorf("unexpected postgres driver %T", driverConn)
 		}
-
-		// Keep the temporary table alive during COPY by placing it inside a
-		// single transaction. ON COMMIT DROP handles cleanup even when the
-		// caller exits early, mirroring "Clear is better than clever" by
-		// letting PostgreSQL manage scope.
-		pgConn := direct.Conn()
-		tx, err := pgConn.BeginTx(ctx, pgx.TxOptions{})
-		if err != nil {
-			return fmt.Errorf("begin postgres transaction: %w", err)
-		}
-		committed := false
-		defer func() {
-			if !committed {
-				_ = tx.Rollback(ctx)
-			}
-		}()
-
-		// The timestamp-based suffix keeps names unique per call while staying
-		// predictable for debugging. Temporary scope avoids cross-connection
-		// contention and mirrors "A little copying is better than a little
-		// dependency" by keeping the helper self-contained.
-		tempTable := fmt.Sprintf("temp_markers_%d", time.Now().UnixNano())
-		createTemp := fmt.Sprintf(`CREATE TEMP TABLE %s (
- doseRate DOUBLE PRECISION,
- date BIGINT,
- lon DOUBLE PRECISION,
- lat DOUBLE PRECISION,
- countRate DOUBLE PRECISION,
- zoom INT,
- speed DOUBLE PRECISION,
- trackID TEXT,
- altitude DOUBLE PRECISION,
- detector TEXT,
- radiation TEXT,
- temperature DOUBLE PRECISION,
- humidity DOUBLE PRECISION
- ) ON COMMIT DROP`, tempTable)
-		if _, err := tx.Exec(ctx, createTemp); err != nil {
-			return fmt.Errorf("create temp table: %w", err)
-		}
-
-		if _, err := tx.CopyFrom(
-			ctx,
-			pgx.Identifier{tempTable},
-			[]string{"doseRate", "date", "lon", "lat", "countRate", "zoom", "speed", "trackID", "altitude", "detector", "radiation", "temperature", "humidity"},
-			pgx.CopyFromRows(rows),
-		); err != nil {
-			return fmt.Errorf("copy markers into temp table: %w", err)
-		}
-
-		insertFromTemp := fmt.Sprintf(`INSERT INTO markers
- (doseRate,date,lon,lat,countRate,zoom,speed,trackID,altitude,detector,radiation,temperature,humidity)
- SELECT doseRate,date,lon,lat,countRate,zoom,speed,trackID,altitude,detector,radiation,temperature,humidity FROM %s
- ON CONFLICT ON CONSTRAINT markers_unique DO NOTHING`, tempTable)
-		if _, err := tx.Exec(ctx, insertFromTemp); err != nil {
-			return fmt.Errorf("merge temp markers: %w", err)
-		}
-
-		if err := tx.Commit(ctx); err != nil {
-			return fmt.Errorf("commit temp markers: %w", err)
-		}
-		committed = true
-		return nil
+		return runPostgreSQLCopy(ctx, pgxPostgresCopyConnection{conn: direct.Conn()}, chunk)
 	})
-	if copyErr != nil {
-		return copyErr
-	}
-
-	return nil
 }
 
-// insertMarkersPostgreSQLCopyBatched streams all markers through a single COPY session
-// so PostgreSQL avoids repeatedly creating temporary tables. Holding one transaction
-// for the duration keeps the catalog calm and maintains near-linear throughput even on
-// very large databases. Progress updates still flow via the provided channel so callers
-// keep consistent logging behaviour.
-func (db *Database) insertMarkersPostgreSQLCopyBatched(ctx context.Context, markers []Marker, batch int, progress chan<- MarkerBatchProgress) error {
+// insertMarkersPostgreSQLCopyBatched streams all markers through one PostgreSQL COPY
+// transaction. The transaction logic lives behind a narrow adapter so failure and
+// progress paths remain testable without network infrastructure.
+func (db *Database) insertMarkersPostgreSQLCopyBatched(
+	ctx context.Context,
+	markers []Marker,
+	batch int,
+	progress chan<- MarkerBatchProgress,
+) error {
 	if len(markers) == 0 {
 		return nil
 	}
@@ -135,9 +259,6 @@ func (db *Database) insertMarkersPostgreSQLCopyBatched(ctx context.Context, mark
 	if db == nil || db.DB == nil {
 		return fmt.Errorf("database unavailable")
 	}
-	if batch <= 0 {
-		batch = 500
-	}
 
 	conn, err := db.DB.Conn(ctx)
 	if err != nil {
@@ -145,115 +266,11 @@ func (db *Database) insertMarkersPostgreSQLCopyBatched(ctx context.Context, mark
 	}
 	defer conn.Close()
 
-	total := len(markers)
-	copyErr := conn.Raw(func(driverConn any) error {
+	return conn.Raw(func(driverConn any) error {
 		direct, ok := driverConn.(*stdlib.Conn)
 		if !ok {
 			return fmt.Errorf("unexpected postgres driver %T", driverConn)
 		}
-
-		pgConn := direct.Conn()
-		tx, err := pgConn.BeginTx(ctx, pgx.TxOptions{})
-		if err != nil {
-			return fmt.Errorf("begin postgres transaction: %w", err)
-		}
-		committed := false
-		defer func() {
-			if !committed {
-				_ = tx.Rollback(ctx)
-			}
-		}()
-
-		tempTable := fmt.Sprintf("temp_markers_%d", time.Now().UnixNano())
-		createTemp := fmt.Sprintf(`CREATE TEMP TABLE %s (
- doseRate DOUBLE PRECISION,
- date BIGINT,
- lon DOUBLE PRECISION,
- lat DOUBLE PRECISION,
- countRate DOUBLE PRECISION,
- zoom INT,
- speed DOUBLE PRECISION,
- trackID TEXT,
- altitude DOUBLE PRECISION,
- detector TEXT,
- radiation TEXT,
- temperature DOUBLE PRECISION,
- humidity DOUBLE PRECISION
- ) ON COMMIT DROP`, tempTable)
-		if _, err := tx.Exec(ctx, createTemp); err != nil {
-			return fmt.Errorf("create temp table: %w", err)
-		}
-
-		insertFromTemp := fmt.Sprintf(`INSERT INTO markers
- (doseRate,date,lon,lat,countRate,zoom,speed,trackID,altitude,detector,radiation,temperature,humidity)
- SELECT doseRate,date,lon,lat,countRate,zoom,speed,trackID,altitude,detector,radiation,temperature,humidity FROM %s
- ON CONFLICT ON CONSTRAINT markers_unique DO NOTHING`, tempTable)
-		truncateTemp := fmt.Sprintf(`TRUNCATE %s`, tempTable)
-
-		done := 0
-		for start := 0; start < len(markers); start += batch {
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			default:
-			}
-
-			end := start + batch
-			if end > len(markers) {
-				end = len(markers)
-			}
-			chunk := markers[start:end]
-			rows := make([][]interface{}, 0, len(chunk))
-			for _, m := range chunk {
-				rows = append(rows, []interface{}{
-					m.DoseRate, m.Date, m.Lon, m.Lat,
-					m.CountRate, m.Zoom, m.Speed, m.TrackID,
-					nullableFloat64(m.AltitudeValid, m.Altitude),
-					m.Detector, m.Radiation,
-					nullableFloat64(m.TemperatureValid, m.Temperature),
-					nullableFloat64(m.HumidityValid, m.Humidity),
-				})
-			}
-			if len(rows) == 0 {
-				continue
-			}
-
-			chunkStart := time.Now()
-			if _, err := tx.CopyFrom(
-				ctx,
-				pgx.Identifier{tempTable},
-				[]string{"doseRate", "date", "lon", "lat", "countRate", "zoom", "speed", "trackID", "altitude", "detector", "radiation", "temperature", "humidity"},
-				pgx.CopyFromRows(rows),
-			); err != nil {
-				return fmt.Errorf("copy markers into temp table: %w", err)
-			}
-
-			if _, err := tx.Exec(ctx, insertFromTemp); err != nil {
-				return fmt.Errorf("merge temp markers: %w", err)
-			}
-
-			if _, err := tx.Exec(ctx, truncateTemp); err != nil {
-				return fmt.Errorf("reset temp table: %w", err)
-			}
-
-			done += len(chunk)
-			if progress != nil {
-				select {
-				case progress <- MarkerBatchProgress{Total: total, Done: done, Batch: len(chunk), Mode: "copy", Duration: time.Since(chunkStart)}:
-				default:
-				}
-			}
-		}
-
-		if err := tx.Commit(ctx); err != nil {
-			return fmt.Errorf("commit temp markers: %w", err)
-		}
-		committed = true
-		return nil
+		return runPostgreSQLCopyBatched(ctx, pgxPostgresCopyConnection{conn: direct.Conn()}, markers, batch, progress)
 	})
-	if copyErr != nil {
-		return copyErr
-	}
-
-	return nil
 }
