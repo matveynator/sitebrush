@@ -20,7 +20,7 @@ func TestAnalyticsQueryHelpers(t *testing.T) {
 			{"s1", "Alice", 100, "view", "/a"},
 			{"s1", "Alice", 110, "view", "/b"},
 			{"s2", "", 120, "click", "/a"},
-			{"s3", nil, 130, "view", nil},
+			{"s3", " ", 130, "view", nil},
 			{"s4", "Outside", 999, "view", "/outside"},
 		}
 		for _, row := range rows {
