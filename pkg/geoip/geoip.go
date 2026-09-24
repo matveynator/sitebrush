@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net"
 	"net/http"
 	"os"
@@ -385,7 +386,10 @@ func parseDBIPCSVRecord(record []string) (dbipCSVRow, bool) {
 	}
 	latitude, latErr := strconv.ParseFloat(strings.TrimSpace(record[6]), 64)
 	longitude, lonErr := strconv.ParseFloat(strings.TrimSpace(record[7]), 64)
-	if latErr != nil || lonErr != nil {
+	if latErr != nil || lonErr != nil || math.IsNaN(latitude) || math.IsNaN(longitude) || math.IsInf(latitude, 0) || math.IsInf(longitude, 0) {
+		return dbipCSVRow{}, false
+	}
+	if start > end || latitude < -90 || latitude > 90 || longitude < -180 || longitude > 180 {
 		return dbipCSVRow{}, false
 	}
 	countryCode := strings.ToUpper(strings.TrimSpace(record[3]))
