@@ -45,6 +45,7 @@ type DirectSender struct {
 	Hostname    string
 	DialTimeout time.Duration
 	dialContext func(context.Context, string, string) (net.Conn, error)
+	lookupHosts func(context.Context, string) ([]string, error)
 }
 
 func (sender DirectSender) Send(ctx context.Context, message Message) error {
@@ -60,7 +61,11 @@ func (sender DirectSender) Send(ctx context.Context, message Message) error {
 	if recipientDomain == "" {
 		return errors.New("recipient address has no domain")
 	}
-	targetHosts, err := lookupMailHosts(ctx, recipientDomain)
+	lookupHosts := sender.lookupHosts
+	if lookupHosts == nil {
+		lookupHosts = lookupMailHosts
+	}
+	targetHosts, err := lookupHosts(ctx, recipientDomain)
 	if err != nil {
 		return err
 	}

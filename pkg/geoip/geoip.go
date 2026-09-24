@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net"
 	"net/http"
 	"os"
@@ -38,8 +39,10 @@ type Location struct {
 }
 
 type Resolver struct {
-	cacheDir string
-	requests chan lookupRequest
+	cacheDir  string
+	requests  chan lookupRequest
+	shutdown  chan struct{}
+	done      chan struct{}
 }
 
 type lookupRequest struct {
@@ -61,6 +64,8 @@ func NewResolver(cacheDir string) *Resolver {
 	resolver := &Resolver{
 		cacheDir: strings.TrimSpace(cacheDir),
 		requests: make(chan lookupRequest),
+		shutdown: make(chan struct{}),
+		done:     make(chan struct{}),
 	}
 	go resolver.run()
 	return resolver
@@ -80,11 +85,15 @@ func (resolver *Resolver) Lookup(ctx context.Context, ip string) (Location, bool
 	response := make(chan lookupResponse, 1)
 	request := lookupRequest{ip: ip, response: response}
 	select {
+	case <-resolver.done:
+		return Location{}, false
 	case resolver.requests <- request:
 	case <-requestContext.Done():
 		return Location{}, false
 	}
 	select {
+	case <-resolver.done:
+		return Location{}, false
 	case result := <-response:
 		return result.location, result.found
 	case <-requestContext.Done():
@@ -92,7 +101,21 @@ func (resolver *Resolver) Lookup(ctx context.Context, ip string) (Location, bool
 	}
 }
 
+// Close stops the resolver owner goroutine through its lifecycle channel.
+func (resolver *Resolver) Close() {
+	if resolver == nil {
+		return
+	}
+	select {
+	case <-resolver.done:
+		return
+	case resolver.shutdown <- struct{}{}:
+	}
+	<-resolver.done
+}
+
 func (resolver *Resolver) run() {
+	defer close(resolver.done)
 	if resolver.cacheDir == "" {
 		resolver.cacheDir = filepath.Join(os.TempDir(), "sitebrush-geoip")
 	}
@@ -117,17 +140,19 @@ func (resolver *Resolver) run() {
 	if geoIPImportRequired(hasRanges, importedRelease, currentRelease) {
 		importInProgress = true
 		log.Printf("geoip database import started: ranges=%t release=%q current=%q", hasRanges, importedRelease, currentRelease)
-		go importLatest(databasePath, resolver.cacheDir, time.Now().UTC(), importResults)
+		go importLatest(databasePath, resolver.cacheDir, time.Now().UTC(), resolver.shutdown, importResults)
 	}
 
 	for {
 		select {
+		case <-resolver.shutdown:
+			return
 		case request := <-resolver.requests:
 			location, found := lookup(database, request.ip)
 			if !found && isPublicIPv4(request.ip) && geoIPImportRequired(hasRanges, importedRelease, currentRelease) && !importInProgress {
 				importInProgress = true
 				log.Printf("geoip database import started after lookup miss: ip=%s ranges=%t release=%q current=%q", request.ip, hasRanges, importedRelease, currentRelease)
-				go importLatest(databasePath, resolver.cacheDir, time.Now().UTC(), importResults)
+				go importLatest(databasePath, resolver.cacheDir, time.Now().UTC(), resolver.shutdown, importResults)
 			}
 			request.response <- lookupResponse{location: location, found: found}
 		case result := <-importResults:
@@ -148,8 +173,13 @@ func geoIPImportRequired(hasRanges bool, importedRelease string, currentRelease 
 }
 
 func (resolver *Resolver) drainWithoutDatabase() {
-	for request := range resolver.requests {
-		request.response <- lookupResponse{}
+	for {
+		select {
+		case <-resolver.shutdown:
+			return
+		case request := <-resolver.requests:
+			request.response <- lookupResponse{}
+		}
 	}
 }
 
@@ -207,9 +237,21 @@ func lookupRange(database *sql.DB, rawIP string, ipNumber uint32) (Location, boo
 	return location, true
 }
 
-func importLatest(databasePath, cacheDir string, now time.Time, results chan<- importResult) {
+func importLatest(databasePath, cacheDir string, now time.Time, stop <-chan struct{}, results chan<- importResult) {
 	ctx, cancel := context.WithTimeout(context.Background(), downloadTimeout)
-	defer cancel()
+	watcherDone := make(chan struct{})
+	go func() {
+		defer close(watcherDone)
+		select {
+		case <-stop:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+	defer func() {
+		cancel()
+		<-watcherDone
+	}()
 	release := releaseMonth(now)
 	archivePath, release, err := ensureArchive(ctx, cacheDir, now)
 	if err == nil {
@@ -385,7 +427,10 @@ func parseDBIPCSVRecord(record []string) (dbipCSVRow, bool) {
 	}
 	latitude, latErr := strconv.ParseFloat(strings.TrimSpace(record[6]), 64)
 	longitude, lonErr := strconv.ParseFloat(strings.TrimSpace(record[7]), 64)
-	if latErr != nil || lonErr != nil {
+	if latErr != nil || lonErr != nil || math.IsNaN(latitude) || math.IsNaN(longitude) || math.IsInf(latitude, 0) || math.IsInf(longitude, 0) {
+		return dbipCSVRow{}, false
+	}
+	if start > end || latitude < -90 || latitude > 90 || longitude < -180 || longitude > 180 {
 		return dbipCSVRow{}, false
 	}
 	countryCode := strings.ToUpper(strings.TrimSpace(record[3]))
@@ -447,7 +492,7 @@ func ipv4Number(rawIP string) (uint32, bool) {
 
 func isPublicIPv4(rawIP string) bool {
 	parsedIP := net.ParseIP(strings.TrimSpace(rawIP))
-	if parsedIP == nil || parsedIP.To4() == nil {
+	if parsedIP == nil || parsedIP.To4() == nil || !parsedIP.IsGlobalUnicast() {
 		return false
 	}
 	return !parsedIP.IsLoopback() && !parsedIP.IsPrivate() && !parsedIP.IsLinkLocalUnicast() && !parsedIP.IsMulticast() && !parsedIP.IsUnspecified()

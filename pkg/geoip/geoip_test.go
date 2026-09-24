@@ -188,7 +188,8 @@ func TestImportLatestUsesCachedArchiveAndReportsResult(t *testing.T) {
 		t.Fatal(err)
 	}
 	results := make(chan importResult, 1)
-	importLatest(filepath.Join(directory, geoIPDatabaseName), directory, time.Date(2026, time.September, 24, 0, 0, 0, 0, time.UTC), results)
+	stop := make(chan struct{})
+	importLatest(filepath.Join(directory, geoIPDatabaseName), directory, time.Date(2026, time.September, 24, 0, 0, 0, 0, time.UTC), stop, results)
 	result := <-results
 	if result.err != nil || result.release != release {
 		t.Fatalf("import result = %#v", result)

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"flag"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -647,5 +648,264 @@ func writeCommandStub(t *testing.T, directory, name, body string) {
 	path := filepath.Join(directory, name)
 	if err := os.WriteFile(path, []byte("#!/bin/sh\nset -eu\n"+body+"\n"), 0o755); err != nil {
 		t.Fatal(err)
+	}
+}
+
+
+func TestSecurityBoundaryReleaseSyncRejectsOptionAndPathInjection(t *testing.T) {
+	t.Parallel()
+
+	for _, raw := range []string{
+		"-oProxyCommand=owned=/srv/releases",
+		"root@host with-space=/srv/releases",
+		"root@host=/srv/releases\nowned",
+		"root@host=relative/path",
+		"root@host=",
+	} {
+		if _, err := parseSyncDestination(raw); err == nil {
+			t.Fatalf("SECURITY: unsafe release sync destination accepted: %q", raw)
+		}
+	}
+
+	for _, host := range []string{"root@sitebrush.com", "sitebrush.ru", "192.0.2.10"} {
+		if !validSyncHost(host) {
+			t.Fatalf("valid sync host rejected: %q", host)
+		}
+	}
+	for _, host := range []string{"-host", "host/name", "host:22", "host\nowned"} {
+		if validSyncHost(host) {
+			t.Fatalf("SECURITY: unsafe sync host accepted: %q", host)
+		}
+	}
+}
+
+func TestSecurityBoundaryLatestSymlinkRejectsTraversalTarget(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink test is skipped on Windows")
+	}
+
+	root := t.TempDir()
+	for _, version := range []string{"../owned", "../../tmp/owned", "/tmp/owned", "release/child", " "} {
+		if err := updateLatestSymlink(root, version); err == nil {
+			t.Fatalf("SECURITY: latest symlink accepted unsafe release target %q", version)
+		}
+	}
+	if _, err := os.Lstat(filepath.Join(root, "latest")); !os.IsNotExist(err) {
+		t.Fatalf("SECURITY: rejected version still created latest symlink: %v", err)
+	}
+}
+
+func TestSecurityBoundaryArtifactChecksumChangesAfterBinaryTampering(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	artifact := filepath.Join(dir, "sitebrush_linux_amd64")
+	if err := os.WriteFile(artifact, []byte("trusted-release"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeMD5SumsFile(dir); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(filepath.Join(dir, "MD5SUMS"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.WriteFile(artifact, []byte("tampered-release"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeMD5SumsFile(dir); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.ReadFile(filepath.Join(dir, "MD5SUMS"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(before) == string(after) {
+		t.Fatal("SECURITY: release checksum did not change after artifact tampering")
+	}
+}
+
+func TestDesktopBuildWrappersWithStubDocker(t *testing.T) {
+	commandDirectory := t.TempDir()
+	writeCommandStub(t, commandDirectory, "docker", "exit 0")
+	t.Setenv("PATH", commandDirectory)
+
+	repoRoot := t.TempDir()
+	desktopDir := filepath.Join(repoRoot, "desktop")
+	if err := os.MkdirAll(desktopDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, variant := range []string{"gtk40", "gtk41"} {
+		name := desktopArtifactName("sitebrush", "linux", "amd64", variant)
+		if err := os.WriteFile(filepath.Join(desktopDir, name+".zip"), []byte("linux archive"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	built, err := buildLinuxDesktopArtifacts(
+		repoRoot,
+		desktopDir,
+		"sitebrush",
+		"test",
+		desktopBuildOptions{targetFilter: buildTargetFilter{goos: "linux", goarch: "amd64"}},
+	)
+	if err != nil || !built {
+		t.Fatalf("linux wrapper built=%v err=%v", built, err)
+	}
+
+	windowsName := desktopArtifactName("sitebrush", "windows", "amd64", "")
+	if err := os.WriteFile(filepath.Join(desktopDir, windowsName+".zip"), []byte("windows archive"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	built, err = buildWindowsDesktopArtifacts(
+		repoRoot,
+		desktopDir,
+		"sitebrush",
+		"test",
+		desktopBuildOptions{targetFilter: buildTargetFilter{goos: "windows", goarch: "amd64"}},
+	)
+	if err != nil || !built {
+		t.Fatalf("windows wrapper built=%v err=%v", built, err)
+	}
+}
+
+func TestDesktopBuildOrchestratorWithStubDocker(t *testing.T) {
+	commandDirectory := t.TempDir()
+	writeCommandStub(t, commandDirectory, "docker", "exit 0")
+	t.Setenv("PATH", commandDirectory)
+
+	repoRoot := t.TempDir()
+	outputDir := filepath.Join(repoRoot, "output")
+	desktopDir := filepath.Join(outputDir, "desktop-app")
+	if err := os.MkdirAll(desktopDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, variant := range []string{"gtk40", "gtk41"} {
+		name := desktopArtifactName("sitebrush", "linux", "amd64", variant)
+		if err := os.WriteFile(filepath.Join(desktopDir, name+".zip"), []byte("archive"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	err := buildDesktopAppArtifacts(
+		repoRoot,
+		outputDir,
+		"sitebrush",
+		"test",
+		desktopBuildOptions{targetFilter: buildTargetFilter{goos: "linux", goarch: "amd64"}},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyNonEmptyFile(filepath.Join(desktopDir, "MD5SUMS")); err != nil {
+		t.Fatal(err)
+	}
+}
+
+
+func TestCrosscompileMainServerOnlyWithStubCompiler(t *testing.T) {
+	oldArgs := os.Args
+	oldFlags := flag.CommandLine
+	defer func() {
+		os.Args = oldArgs
+		flag.CommandLine = oldFlags
+	}()
+
+	repoRoot, err := findRepoRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	outputRoot, err := os.MkdirTemp(repoRoot, ".crosscompile-main-test-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(outputRoot)
+	relativeOutput, err := filepath.Rel(repoRoot, outputRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	commandDirectory := t.TempDir()
+	writeCommandStub(t, commandDirectory, "go", `last=""; previous=""; for argument in "$@"; do if [ "$previous" = "-o" ]; then last="$argument"; fi; previous="$argument"; done; if [ -n "$last" ]; then mkdir -p "$(dirname "$last")"; printf binary > "$last"; fi`)
+	originalPath := os.Getenv("PATH")
+	t.Setenv("PATH", commandDirectory+string(os.PathListSeparator)+originalPath)
+
+	flag.CommandLine = flag.NewFlagSet("crosscompile-test", flag.ContinueOnError)
+	os.Args = []string{
+		"crosscompile",
+		"-mode", "server-app",
+		"-os", "linux",
+		"-arch", "amd64",
+		"-version", "security-test",
+		"-output-dir", relativeOutput,
+	}
+	main()
+
+	artifact := filepath.Join(outputRoot, "security-test", "server-app", "sitebrush_linux_amd64")
+	if err := verifyNonEmptyFile(artifact); err != nil {
+		t.Fatalf("main did not produce server artifact: %v", err)
+	}
+	latest, err := os.Readlink(filepath.Join(outputRoot, "latest"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if latest != "security-test" {
+		t.Fatalf("latest target=%q", latest)
+	}
+}
+
+func TestSyncArtifactsUsesOnlyValidatedDestinationWithStubCommands(t *testing.T) {
+	repoRoot := t.TempDir()
+	outputRoot := filepath.Join(repoRoot, "binaries")
+	if err := os.MkdirAll(outputRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	commandDirectory := t.TempDir()
+	logPath := filepath.Join(commandDirectory, "commands.log")
+	stub := `printf '%s
+' "$0 $*" >> "$COMMAND_LOG"`
+	writeCommandStub(t, commandDirectory, "ssh", stub)
+	writeCommandStub(t, commandDirectory, "rsync", stub)
+	t.Setenv("PATH", commandDirectory)
+	t.Setenv("COMMAND_LOG", logPath)
+
+	destination, err := parseSyncDestination("root@sitebrush.com=/srv/sitebrush/releases/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := syncArtifacts(repoRoot, outputRoot, "123", destination.host, destination.base); err != nil {
+		t.Fatal(err)
+	}
+	logged, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(logged)
+	if !strings.Contains(text, "ssh root@sitebrush.com") || !strings.Contains(text, "rsync -avP") {
+		t.Fatalf("sync commands=%q", text)
+	}
+}
+
+func TestCrosscompileVersionAndPlatformHelperFallbacks(t *testing.T) {
+	commandDirectory := t.TempDir()
+	writeCommandStub(t, commandDirectory, "git", `if [ "$1" = "rev-list" ]; then exit 0; fi; if [ "$1" = "describe" ]; then printf 'release-test
+'; exit 0; fi; exit 1`)
+	t.Setenv("PATH", commandDirectory)
+	t.Setenv("GITHUB_RUN_NUMBER", "")
+	if got := defaultVersionLabel(t.TempDir()); got != "release-test" {
+		t.Fatalf("defaultVersionLabel fallback=%q", got)
+	}
+
+	writeCommandStub(t, commandDirectory, "pkg-config", `if [ "$2" = "webkit2gtk-4.0" ]; then exit 0; fi; exit 1`)
+	if variant, ok := linuxDesktopVariant(); !ok || variant != "gtk40" {
+		t.Fatalf("linux desktop variant=%q ok=%v", variant, ok)
+	}
+
+	writeCommandStub(t, commandDirectory, "docker", `if [ "$1" = "info" ]; then printf 'x86_64\n'; exit 0; fi; exit 1`)
+	platform, err := dockerNativePlatform(t.TempDir())
+	if err != nil || platform != "linux/amd64" {
+		t.Fatalf("docker native platform=%q err=%v", platform, err)
 	}
 }

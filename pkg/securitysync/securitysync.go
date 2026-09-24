@@ -158,7 +158,11 @@ func run(path string, stop <-chan struct{}, requests <-chan Request, records map
 			return
 		case now := <-pruneTicker.C:
 			prune(records, now.UTC())
-		case request := <-requests:
+		case request, ok := <-requests:
+			if !ok {
+				_ = save(path, records, time.Now().UTC())
+				return
+			}
 			now := time.Now().UTC()
 			result := Result{}
 			if request.Signal != nil {

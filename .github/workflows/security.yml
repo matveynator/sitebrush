@@ -52,6 +52,26 @@ jobs:
           coverage="$(go tool cover -func=database-coverage.out | awk '/^total:/ {gsub("%", "", $3); print $3}')"
           echo "pkg/database coverage: ${coverage}%"
           awk -v coverage="$coverage" 'BEGIN { if (coverage + 0 < 90) { printf "pkg/database coverage %.1f%% is below required 90%%\n", coverage; exit 1 } }'
+      - name: Report package coverage
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf package-coverage
+          mkdir package-coverage
+          while IFS= read -r package; do
+            safe_name="${package//\//_}"
+            profile="package-coverage/${safe_name}.out"
+            output="$(go test -count=1 -covermode=atomic -coverprofile="$profile" "$package" 2>&1)"
+            printf '%s\n' "$output"
+            if printf '%s\n' "$output" | grep -q '\[no statements\]'; then
+              continue
+            fi
+            coverage="$(go tool cover -func="$profile" | awk '/^total:/ {gsub("%", "", $3); print $3}')"
+            printf '%s coverage: %s%%\n' "$package" "$coverage"
+            if awk -v coverage="$coverage" 'BEGIN { exit !(coverage + 0 < 90) }'; then
+              go tool cover -func="$profile"
+            fi
+          done < <(go list ./pkg/... ./scripts/...)
       - name: Upload coverage
         uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v6
         with:

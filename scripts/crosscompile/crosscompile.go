@@ -829,6 +829,10 @@ func createMacOSIcon(resourcesDir string) (string, error) {
 }
 
 func updateLatestSymlink(binaryRoot, version string) error {
+	version = strings.TrimSpace(version)
+	if version == "" || sanitizePathSegment(version) != version {
+		return fmt.Errorf("invalid release version path %q", version)
+	}
 	if err := os.MkdirAll(binaryRoot, 0o755); err != nil {
 		return err
 	}
@@ -872,13 +876,41 @@ func parseSyncDestination(value string) (syncDestination, error) {
 	if !found {
 		return syncDestination{}, errors.New("expected host=/remote/base")
 	}
-	if host == "" {
-		return syncDestination{}, errors.New("sync target host is empty")
+	if !validSyncHost(host) {
+		return syncDestination{}, errors.New("sync target host is invalid")
 	}
-	if base == "" {
-		return syncDestination{}, errors.New("sync target remote base is empty")
+	if !validRemoteSyncBase(base) {
+		return syncDestination{}, errors.New("sync target remote base is invalid")
 	}
 	return syncDestination{host: host, base: base}, nil
+}
+
+func validSyncHost(host string) bool {
+	if host == "" || strings.HasPrefix(host, "-") || len(host) > 255 {
+		return false
+	}
+	for _, character := range host {
+		if character >= 'a' && character <= 'z' ||
+			character >= 'A' && character <= 'Z' ||
+			character >= '0' && character <= '9' ||
+			character == '.' || character == '-' || character == '_' || character == '@' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func validRemoteSyncBase(base string) bool {
+	if base == "" || !strings.HasPrefix(base, "/") || len(base) > 4096 {
+		return false
+	}
+	for _, character := range base {
+		if character < ' ' || character == 0x7f {
+			return false
+		}
+	}
+	return true
 }
 
 func flagWasSet(name string) bool {

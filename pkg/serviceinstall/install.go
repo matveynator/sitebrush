@@ -204,7 +204,19 @@ func Install(ctx context.Context, options Options) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
+	return installWithManager(ctx, options, probe, manager, prepareInstallFilesystem, writeServiceMetadata)
+}
+
+func installWithManager(
+	ctx context.Context,
+	options Options,
+	probe runtimeProbe,
+	manager serviceManager,
+	prepare func(installPlan) error,
+	writeMetadata func(string, installPlan, string) error,
+) (Result, error) {
 	if options.Input != nil {
+		var err error
 		options, err = runInteractiveWizard(ctx, options, probe, manager)
 		if err != nil {
 			return Result{}, err
@@ -214,7 +226,7 @@ func Install(ctx context.Context, options Options) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
-	if err := prepareInstallFilesystem(plan); err != nil {
+	if err := prepare(plan); err != nil {
 		return Result{}, err
 	}
 	result, err := manager.Install(ctx, probe, plan)
@@ -226,7 +238,7 @@ func Install(ctx context.Context, options Options) (Result, error) {
 	result.OSVersion = probe.osVersion
 	result.InitSystem = manager.Name
 	result.BinaryPath = plan.BinaryPath
-	if err := writeServiceMetadata(manager.Name, plan, options.Language); err != nil {
+	if err := writeMetadata(manager.Name, plan, options.Language); err != nil {
 		return Result{}, err
 	}
 	printResult(options.Output, result, options.Language)
@@ -242,8 +254,20 @@ func Uninstall(ctx context.Context, options Options) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
-	options = applyStoredServiceMetadata(options, manager.Name)
+	return uninstallWithManager(ctx, options, probe, manager, applyStoredServiceMetadata, removeServiceMetadata)
+}
+
+func uninstallWithManager(
+	ctx context.Context,
+	options Options,
+	probe runtimeProbe,
+	manager serviceManager,
+	applyMetadata func(Options, string) Options,
+	removeMetadata func(string, string) error,
+) (Result, error) {
+	options = applyMetadata(options, manager.Name)
 	if options.Input != nil {
+		var err error
 		options, err = runInteractiveUninstallWizard(ctx, options, probe, manager)
 		if err != nil {
 			return Result{}, err
@@ -262,7 +286,7 @@ func Uninstall(ctx context.Context, options Options) (Result, error) {
 	result.OSVersion = probe.osVersion
 	result.InitSystem = manager.Name
 	result.BinaryPath = plan.BinaryPath
-	if err := removeServiceMetadata(manager.Name, plan.ServiceName); err != nil {
+	if err := removeMetadata(manager.Name, plan.ServiceName); err != nil {
 		return Result{}, err
 	}
 	printUninstallResult(options.Output, result, options.Language)
@@ -1077,6 +1101,9 @@ func buildInstallPlan(options Options) (installPlan, error) {
 	if serviceName == "" {
 		serviceName = "sitebrush"
 	}
+	if !validServiceName(serviceName) {
+		return installPlan{}, fmt.Errorf("invalid service name %q", serviceName)
+	}
 	sourceBinary := strings.TrimSpace(options.BinaryPath)
 	if sourceBinary == "" {
 		exe, err := os.Executable()
@@ -1106,6 +1133,23 @@ func buildInstallPlan(options Options) (installPlan, error) {
 	}
 	execArgs := []string{installedBinary, "-port", port, "-path", storagePath}
 	return installPlan{Options: options, ServiceName: serviceName, BinaryPath: installedBinary, WorkingDir: workingDir, ExecArgs: execArgs}, nil
+}
+
+func validServiceName(serviceName string) bool {
+	serviceName = strings.TrimSpace(serviceName)
+	if serviceName == "" || serviceName == "." || serviceName == ".." || len(serviceName) > 128 {
+		return false
+	}
+	for _, character := range serviceName {
+		if character >= 'a' && character <= 'z' ||
+			character >= 'A' && character <= 'Z' ||
+			character >= '0' && character <= '9' ||
+			character == '-' || character == '_' || character == '.' {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func defaultInstalledBinaryPath(serviceName string) string {
@@ -1167,6 +1211,13 @@ func copyExecutable(sourcePath, destinationPath string) error {
 		return fmt.Errorf("open source binary: %w", err)
 	}
 	defer source.Close()
+	if destinationInfo, statErr := os.Lstat(destinationPath); statErr == nil {
+		if destinationInfo.Mode()&os.ModeSymlink != 0 {
+			return errors.New("installed binary destination must not be a symbolic link")
+		}
+	} else if !errors.Is(statErr, os.ErrNotExist) {
+		return fmt.Errorf("inspect installed binary destination: %w", statErr)
+	}
 	destination, err := os.OpenFile(destinationPath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o755)
 	if err != nil {
 		return fmt.Errorf("create installed binary: %w", err)

@@ -202,3 +202,174 @@ func TestServiceMetadataRoundTripAndResultOutput(t *testing.T) {
 	printResult(nil, result, "en")
 	printUninstallResult(nil, result, "en")
 }
+
+
+func TestServiceInstallOrchestrationWithInjectedBoundaries(t *testing.T) {
+	probe := runtimeProbe{goos: "linux", goarch: "amd64", osVersion: "test"}
+	manager := serviceManager{
+		Name: "test-manager",
+		Install: func(_ context.Context, _ runtimeProbe, plan installPlan) (Result, error) {
+			return Result{ServicePath: "/test/" + plan.ServiceName}, nil
+		},
+		Uninstall: func(_ context.Context, _ runtimeProbe, plan installPlan) (Result, error) {
+			return Result{ServicePath: "/test/" + plan.ServiceName}, nil
+		},
+	}
+	options := Options{
+		ServiceName: "sitebrush-test",
+		BinaryPath:  filepath.Join(t.TempDir(), "source"),
+		WorkingDir:  t.TempDir(),
+		Language:    "en",
+	}
+	var output strings.Builder
+	options.Output = &output
+
+	prepared := false
+	metadataWritten := false
+	result, err := installWithManager(
+		context.Background(),
+		options,
+		probe,
+		manager,
+		func(plan installPlan) error {
+			prepared = true
+			if plan.ServiceName != "sitebrush-test" {
+				t.Fatalf("install plan = %#v", plan)
+			}
+			return nil
+		},
+		func(managerName string, plan installPlan, language string) error {
+			metadataWritten = true
+			if managerName != "test-manager" || language != "en" || plan.ServiceName != "sitebrush-test" {
+				t.Fatalf("metadata arguments = %q %#v %q", managerName, plan, language)
+			}
+			return nil
+		},
+	)
+	if err != nil || !prepared || !metadataWritten {
+		t.Fatalf("install orchestration result=%#v prepared=%v metadata=%v err=%v", result, prepared, metadataWritten, err)
+	}
+	if result.OS != "linux" || result.Arch != "amd64" || result.OSVersion != "test" || result.InitSystem != "test-manager" {
+		t.Fatalf("install result metadata = %#v", result)
+	}
+	if !strings.Contains(output.String(), "test-manager") {
+		t.Fatalf("install output = %q", output.String())
+	}
+
+	output.Reset()
+	removedMetadata := false
+	result, err = uninstallWithManager(
+		context.Background(),
+		options,
+		probe,
+		manager,
+		func(input Options, managerName string) Options {
+			if managerName != "test-manager" {
+				t.Fatalf("metadata manager = %q", managerName)
+			}
+			return input
+		},
+		func(managerName, serviceName string) error {
+			removedMetadata = true
+			if managerName != "test-manager" || serviceName != "sitebrush-test" {
+				t.Fatalf("remove metadata args = %q %q", managerName, serviceName)
+			}
+			return nil
+		},
+	)
+	if err != nil || !removedMetadata {
+		t.Fatalf("uninstall orchestration result=%#v removed=%v err=%v", result, removedMetadata, err)
+	}
+	if !strings.Contains(output.String(), "test-manager") {
+		t.Fatalf("uninstall output = %q", output.String())
+	}
+}
+
+func TestServiceInstallOrchestrationFailureBranches(t *testing.T) {
+	probe := runtimeProbe{goos: "linux", goarch: "amd64", osVersion: "test"}
+	options := Options{ServiceName: "sitebrush-test", BinaryPath: "/source", WorkingDir: "/work"}
+	sentinel := errors.New("sentinel")
+
+	manager := serviceManager{
+		Name: "test-manager",
+		Install: func(context.Context, runtimeProbe, installPlan) (Result, error) {
+			return Result{}, sentinel
+		},
+		Uninstall: func(context.Context, runtimeProbe, installPlan) (Result, error) {
+			return Result{}, sentinel
+		},
+	}
+	if _, err := installWithManager(context.Background(), options, probe, manager, func(installPlan) error { return nil }, func(string, installPlan, string) error { return nil }); !errors.Is(err, sentinel) {
+		t.Fatalf("install manager error = %v", err)
+	}
+	if _, err := installWithManager(context.Background(), options, probe, manager, func(installPlan) error { return sentinel }, func(string, installPlan, string) error { return nil }); !errors.Is(err, sentinel) {
+		t.Fatalf("install prepare error = %v", err)
+	}
+
+	successManager := manager
+	successManager.Install = func(context.Context, runtimeProbe, installPlan) (Result, error) { return Result{}, nil }
+	if _, err := installWithManager(context.Background(), options, probe, successManager, func(installPlan) error { return nil }, func(string, installPlan, string) error { return sentinel }); !errors.Is(err, sentinel) {
+		t.Fatalf("install metadata error = %v", err)
+	}
+	if _, err := uninstallWithManager(context.Background(), options, probe, manager, func(input Options, _ string) Options { return input }, func(string, string) error { return nil }); !errors.Is(err, sentinel) {
+		t.Fatalf("uninstall manager error = %v", err)
+	}
+
+	successManager.Uninstall = func(context.Context, runtimeProbe, installPlan) (Result, error) { return Result{}, nil }
+	if _, err := uninstallWithManager(context.Background(), options, probe, successManager, func(input Options, _ string) Options { return input }, func(string, string) error { return sentinel }); !errors.Is(err, sentinel) {
+		t.Fatalf("uninstall metadata error = %v", err)
+	}
+}
+
+func TestServiceInstallCLIDefaultAndRCConfBranches(t *testing.T) {
+	text := fillCLITextDefaults(cliText{})
+	defaultText := cliTranslations["en"]
+	if text.LanguageTitle != defaultText.LanguageTitle || text.UninstallKeepOption == "" || text.DiskSpaceUnknown == "" {
+		t.Fatalf("CLI defaults = %#v", text)
+	}
+	partial := fillCLITextDefaults(cliText{LanguageTitle: "custom", UninstallKeepOption: "keep"})
+	if partial.LanguageTitle != "custom" || partial.UninstallRemoveOption == "" || partial.UninstallSelectHelp == "" {
+		t.Fatalf("partial CLI defaults = %#v", partial)
+	}
+
+	t.Setenv("NO_COLOR", "1")
+	if theme := resolveCLITheme(os.Stdout); theme.enabled {
+		t.Fatal("NO_COLOR did not disable service installer colors")
+	}
+	if got := (cliTheme{enabled: true}).color("31", "danger"); !strings.Contains(got, "\x1b[31m") {
+		t.Fatalf("colored value = %q", got)
+	}
+
+	configPath := filepath.Join(t.TempDir(), "rc.conf")
+	if err := os.WriteFile(configPath, []byte("sitebrush=\"YES\"\nsitebrush_enable=\"YES\"\nother=\"YES\""), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := removeRcConfLinesAt(configPath, "sitebrush"); err != nil {
+		t.Fatal(err)
+	}
+	content, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(content), "sitebrush") || !strings.Contains(string(content), "other") || !strings.HasSuffix(string(content), "\n") {
+		t.Fatalf("rc.conf removal result = %q", content)
+	}
+
+	if err := appendRcConfAt(configPath, "other=\"YES\"\n"); err != nil {
+		t.Fatal(err)
+	}
+	before, _ := os.ReadFile(configPath)
+	if err := appendRcConfAt(configPath, "other=\"YES\"\n"); err != nil {
+		t.Fatal(err)
+	}
+	after, _ := os.ReadFile(configPath)
+	if string(before) != string(after) {
+		t.Fatal("duplicate rc.conf setting was appended")
+	}
+
+	for _, size := range []uint64{0, 1023, 1024, 1 << 20, 1 << 30, 1 << 40, 1 << 50, 1 << 60} {
+		if formatBytes(size) == "" {
+			t.Fatalf("empty byte format for %d", size)
+		}
+	}
+}
