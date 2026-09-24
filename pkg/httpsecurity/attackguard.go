@@ -16,8 +16,9 @@ import (
 )
 
 const (
-	defaultSecurityBlockTTL  = 7 * 24 * time.Hour
-	securityReasonHistoryTTL = 7 * 24 * time.Hour
+	defaultSecurityBlockTTL     = 24 * time.Hour
+	securityReasonHistoryTTL    = 7 * 24 * time.Hour
+	securityEscalationHistoryTTL = 64 * 24 * time.Hour
 	trustedAdminIPCacheTTL   = 5 * time.Minute
 	securityReasonLogLimit   = 24
 	attackGuardShardCount    = 16
@@ -39,15 +40,18 @@ type SecurityReasonEvent struct {
 }
 
 type SecurityBlock struct {
-	IP          string                `json:"ip"`
-	Reason      string                `json:"reason"`
-	Description string                `json:"description"`
-	LastEvent   time.Time             `json:"last_event"`
-	Source      string                `json:"source"`
-	ExpiresAt   time.Time             `json:"expires_at"`
-	Violations  int                   `json:"violations"`
-	IncidentID  string                `json:"incident_id"`
-	ReasonLog   []SecurityReasonEvent `json:"reason_log,omitempty"`
+	IP            string                `json:"ip"`
+	Domain        string                `json:"domain,omitempty"`
+	Reason        string                `json:"reason"`
+	Description   string                `json:"description"`
+	LastEvent     time.Time             `json:"last_event"`
+	Source        string                `json:"source"`
+	ExpiresAt     time.Time             `json:"expires_at"`
+	Violations    int                   `json:"violations"`
+	IncidentID    string                `json:"incident_id"`
+	ReportedAt    time.Time             `json:"reported_at,omitempty"`
+	ReportMessage string                `json:"report_message,omitempty"`
+	ReasonLog     []SecurityReasonEvent `json:"reason_log,omitempty"`
 }
 
 type SecurityAllow struct {
@@ -61,6 +65,11 @@ type attackWindow struct {
 	Count     int
 	PostCount int
 	Distinct  map[string]struct{}
+}
+
+type incidentWindow struct {
+	Started time.Time
+	Counts  map[string]int
 }
 
 type attackGuardDiskState struct {
@@ -80,6 +89,7 @@ const (
 	attackGuardUpdate
 	attackGuardRemove
 	attackGuardSnapshot
+	attackGuardPersistenceSnapshot
 	attackGuardGetSettings
 	attackGuardSetSettings
 	attackGuardApplyGlobal
@@ -90,6 +100,8 @@ const (
 	attackGuardTrustAdminIP
 	attackGuardCheckAdminIP
 	attackGuardClaimAdminIPLookup
+	attackGuardClaimIncidentReport
+	attackGuardFinishIncidentReport
 )
 
 type attackGuardRequest struct {
@@ -107,6 +119,7 @@ type attackGuardRequest struct {
 	ExpiresAt   time.Time
 	Settings    SecuritySettings
 	Comment     string
+	Success     bool
 	Reply       chan attackGuardResult
 }
 
@@ -192,6 +205,14 @@ func loadAttackGuardDiskState(path string) (attackGuardDiskState, error) {
 		state.Version = 2
 		state.Settings.GlobalSync = true
 	}
+	keptBlocks := state.Blocks[:0]
+	for _, block := range state.Blocks {
+		if block.Reason == "authentication-failures" && block.Source != "manual" {
+			continue
+		}
+		keptBlocks = append(keptBlocks, block)
+	}
+	state.Blocks = keptBlocks
 	return state, nil
 }
 
@@ -201,6 +222,8 @@ func runAttackGuardShard(requests <-chan attackGuardRequest, shutdown <-chan str
 	trustedAdminIPs := make(map[string]time.Time)
 	adminIPLookups := make(map[string]time.Time)
 	windows := map[string]*attackWindow{}
+	incidents := map[string]*incidentWindow{}
+	reportClaims := map[string]bool{}
 	for _, block := range initial {
 		blocks[block.IP] = block
 	}
@@ -215,10 +238,10 @@ func runAttackGuardShard(requests <-chan attackGuardRequest, shutdown <-chan str
 		case <-shutdown:
 			return
 		case now := <-pruneTicker.C:
-			pruneAttackGuardState(blocks, windows, now.UTC())
+			pruneAttackGuardState(blocks, windows, incidents, now.UTC())
 			pruneAdminIPTrustState(trustedAdminIPs, adminIPLookups, now.UTC())
 		case request := <-requests:
-			result := handleAttackGuardRequest(blocks, allowlist, trustedAdminIPs, adminIPLookups, windows, &settings, request)
+			result := handleAttackGuardRequest(blocks, allowlist, trustedAdminIPs, adminIPLookups, windows, incidents, reportClaims, &settings, request)
 			if request.Reply != nil {
 				select {
 				case request.Reply <- result:
@@ -230,7 +253,7 @@ func runAttackGuardShard(requests <-chan attackGuardRequest, shutdown <-chan str
 	}
 }
 
-func handleAttackGuardRequest(blocks map[string]SecurityBlock, allowlist map[string]SecurityAllow, trustedAdminIPs, adminIPLookups map[string]time.Time, windows map[string]*attackWindow, settings *SecuritySettings, request attackGuardRequest) attackGuardResult {
+func handleAttackGuardRequest(blocks map[string]SecurityBlock, allowlist map[string]SecurityAllow, trustedAdminIPs, adminIPLookups map[string]time.Time, windows map[string]*attackWindow, incidents map[string]*incidentWindow, reportClaims map[string]bool, settings *SecuritySettings, request attackGuardRequest) attackGuardResult {
 	now := request.Now
 	if now.IsZero() {
 		now = time.Now().UTC()
@@ -287,12 +310,14 @@ func handleAttackGuardRequest(blocks map[string]SecurityBlock, allowlist map[str
 				reason = "mass-enumeration"
 				description = "scanned at least 48 distinct paths within 10 seconds"
 			}
-			block := blockSecurityIP(blocks, ip, reason, description, "local", now, defaultSecurityBlockTTL)
+			block := blockSecurityIP(blocks, ip, reason, description, "local", now, automaticSecurityBlockTTL(blocks[ip].Violations+1))
+			block.Domain = cleanSecurityText(request.Domain, 255)
+			blocks[ip] = block
 			delete(windows, ip)
 			return attackGuardResult{Block: block, Blocked: true, Changed: true}
 		}
 		if len(windows) > 1024 {
-			pruneAttackGuardState(blocks, windows, now)
+			pruneAttackGuardState(blocks, windows, incidents, now)
 		}
 		return attackGuardResult{}
 
@@ -303,7 +328,23 @@ func handleAttackGuardRequest(blocks map[string]SecurityBlock, allowlist map[str
 		if !settings.AutoBlock || ip == "" || !securityCategoryBlocks(request.Category) {
 			return attackGuardResult{}
 		}
-		block := blockSecurityIP(blocks, ip, request.Category, request.Description, "local", now, defaultSecurityBlockTTL)
+		threshold := securityCategoryThreshold(request.Category)
+		if threshold > 1 {
+			window := incidents[ip]
+			if window == nil || now.Sub(window.Started) > time.Minute {
+				window = &incidentWindow{Started: now, Counts: map[string]int{}}
+				incidents[ip] = window
+			}
+			window.Counts[request.Category]++
+			if window.Counts[request.Category] < threshold {
+				return attackGuardResult{}
+			}
+			delete(window.Counts, request.Category)
+		}
+		previous := blocks[ip]
+		block := blockSecurityIP(blocks, ip, request.Category, request.Description, "local", now, automaticSecurityBlockTTL(previous.Violations+1))
+		block.Domain = cleanSecurityText(request.Domain, 255)
+		blocks[ip] = block
 		return attackGuardResult{Block: block, Blocked: true, Changed: true}
 
 	case attackGuardAdd:
@@ -339,12 +380,22 @@ func handleAttackGuardRequest(blocks map[string]SecurityBlock, allowlist map[str
 		_, found := blocks[ip]
 		delete(blocks, ip)
 		delete(windows, ip)
+		delete(incidents, ip)
 		return attackGuardResult{Changed: found}
 
 	case attackGuardSnapshot:
 		snapshot := make([]SecurityBlock, 0, len(blocks))
 		for _, block := range blocks {
 			if block.ExpiresAt.IsZero() || now.Before(block.ExpiresAt) {
+				snapshot = append(snapshot, block)
+			}
+		}
+		return attackGuardResult{Blocks: snapshot}
+
+	case attackGuardPersistenceSnapshot:
+		snapshot := make([]SecurityBlock, 0, len(blocks))
+		for _, block := range blocks {
+			if block.LastEvent.IsZero() || now.Sub(block.LastEvent) <= securityEscalationHistoryTTL {
 				snapshot = append(snapshot, block)
 			}
 		}
@@ -369,7 +420,8 @@ func handleAttackGuardRequest(blocks map[string]SecurityBlock, allowlist map[str
 			return attackGuardResult{}
 		}
 		existing, found := blocks[ip]
-		if found && existing.Source != "global" {
+		existingActive := found && (existing.ExpiresAt.IsZero() || now.Before(existing.ExpiresAt))
+		if existingActive && existing.Source != "global" {
 			if existing.ExpiresAt.Before(expiresAt) {
 				existing.ExpiresAt = expiresAt
 				blocks[ip] = existing
@@ -411,6 +463,7 @@ func handleAttackGuardRequest(blocks map[string]SecurityBlock, allowlist map[str
 		allowlist[ip] = allowed
 		delete(blocks, ip)
 		delete(windows, ip)
+		delete(incidents, ip)
 		return attackGuardResult{Allowed: true, Changed: true}
 
 	case attackGuardAllowRemove:
@@ -454,6 +507,32 @@ func handleAttackGuardRequest(blocks map[string]SecurityBlock, allowlist map[str
 		}
 		adminIPLookups[key] = now
 		return attackGuardResult{Allowed: true}
+
+	case attackGuardClaimIncidentReport:
+		block, blocked := activeSecurityBlock(blocks, ip, now)
+		if !blocked || block.IncidentID == "" || block.IncidentID != cleanSecurityText(request.Reason, 64) {
+			return attackGuardResult{Err: errors.New("security incident not found")}
+		}
+		if !block.ReportedAt.IsZero() || reportClaims[block.IncidentID] {
+			return attackGuardResult{Block: block, Blocked: true}
+		}
+		reportClaims[block.IncidentID] = true
+		return attackGuardResult{Block: block, Blocked: true, Allowed: true}
+
+	case attackGuardFinishIncidentReport:
+		block, found := blocks[ip]
+		incidentID := cleanSecurityText(request.Reason, 64)
+		if !found || incidentID == "" || block.IncidentID != incidentID || !reportClaims[incidentID] {
+			return attackGuardResult{Err: errors.New("security incident report was not claimed")}
+		}
+		delete(reportClaims, incidentID)
+		if !request.Success {
+			return attackGuardResult{Block: block, Blocked: true}
+		}
+		block.ReportedAt = now
+		block.ReportMessage = cleanSecurityText(request.Description, 500)
+		blocks[ip] = block
+		return attackGuardResult{Block: block, Blocked: true, Changed: true}
 	}
 
 	return attackGuardResult{Err: errors.New("unknown attack guard operation")}
@@ -485,19 +564,39 @@ func activeSecurityBlock(blocks map[string]SecurityBlock, ip string, now time.Ti
 		return SecurityBlock{}, false
 	}
 	if !block.ExpiresAt.IsZero() && !now.Before(block.ExpiresAt) {
-		delete(blocks, ip)
 		return SecurityBlock{}, false
 	}
 	return block, true
 }
 
 func securityCategoryBlocks(category string) bool {
+	return securityCategoryThreshold(category) > 0
+}
+
+// High-confidence probes can block immediately. Heuristic categories need
+// repeated evidence inside one minute to avoid false positives from a single
+// malformed request, shared NAT/VPN address, or spoofed User-Agent.
+func securityCategoryThreshold(category string) int {
 	switch category {
-	case "injection", "traversal", "repository", "secret", "source-backup", "scanner-client", "enumeration", "authentication-failures":
-		return true
+	case "traversal", "repository", "secret", "enumeration":
+		return 1
+	case "injection":
+		return 2
+	case "source-backup", "scanner-client":
+		return 3
 	default:
-		return false
+		return 0
 	}
+}
+
+func automaticSecurityBlockTTL(violation int) time.Duration {
+	if violation < 1 {
+		violation = 1
+	}
+	if violation > 6 {
+		violation = 6
+	}
+	return time.Duration(1<<(violation-1)) * 24 * time.Hour
 }
 
 func blockSecurityIP(blocks map[string]SecurityBlock, ip, reason, description, source string, now time.Time, ttl time.Duration) SecurityBlock {
@@ -508,9 +607,6 @@ func blockSecurityIP(blocks map[string]SecurityBlock, ip, reason, description, s
 	}
 	if ttl < time.Minute {
 		ttl = defaultSecurityBlockTTL
-	}
-	if violations >= 3 && ttl < 30*24*time.Hour {
-		ttl = 30 * 24 * time.Hour
 	}
 	incidentID := previous.IncidentID
 	if incidentID == "" {
@@ -592,9 +688,9 @@ func pruneSecurityReasonLog(events []SecurityReasonEvent, now time.Time) []Secur
 	return kept
 }
 
-func pruneAttackGuardState(blocks map[string]SecurityBlock, windows map[string]*attackWindow, now time.Time) {
+func pruneAttackGuardState(blocks map[string]SecurityBlock, windows map[string]*attackWindow, incidents map[string]*incidentWindow, now time.Time) {
 	for ip, block := range blocks {
-		if !block.ExpiresAt.IsZero() && !now.Before(block.ExpiresAt) {
+		if !block.LastEvent.IsZero() && now.Sub(block.LastEvent) > securityEscalationHistoryTTL {
 			delete(blocks, ip)
 			continue
 		}
@@ -604,6 +700,11 @@ func pruneAttackGuardState(blocks map[string]SecurityBlock, windows map[string]*
 	for ip, window := range windows {
 		if now.Sub(window.Started) > time.Minute {
 			delete(windows, ip)
+		}
+	}
+	for ip, window := range incidents {
+		if now.Sub(window.Started) > time.Minute {
+			delete(incidents, ip)
 		}
 	}
 }
@@ -677,6 +778,32 @@ func (guard *AttackGuard) Remove(ip string) error {
 		guard.signalSave()
 	}
 	return result.Err
+}
+
+func (guard *AttackGuard) ClaimIncidentReport(ip, incidentID string, now time.Time) (SecurityBlock, bool, error) {
+	result, ok := guard.exchangeAdmin(attackGuardRequest{Operation: attackGuardClaimIncidentReport, IP: ip, Reason: incidentID, Now: now})
+	if !ok {
+		return SecurityBlock{}, false, errors.New("security guard is busy")
+	}
+	return result.Block, result.Allowed, result.Err
+}
+
+func (guard *AttackGuard) FinishIncidentReport(ip, incidentID, message string, success bool, now time.Time) (SecurityBlock, error) {
+	result, ok := guard.exchangeAdmin(attackGuardRequest{
+		Operation: attackGuardFinishIncidentReport,
+		IP: ip,
+		Reason: incidentID,
+		Description: message,
+		Success: success,
+		Now: now,
+	})
+	if !ok {
+		return SecurityBlock{}, errors.New("security guard is busy")
+	}
+	if result.Changed {
+		guard.signalSave()
+	}
+	return result.Block, result.Err
 }
 
 func (guard *AttackGuard) ApplyGlobal(ip, reason, description string, lastEvent, expiresAt time.Time) error {
@@ -827,6 +954,21 @@ func (guard *AttackGuard) Snapshot(now time.Time) ([]SecurityBlock, error) {
 	return blocks, nil
 }
 
+func (guard *AttackGuard) persistenceSnapshot(now time.Time) ([]SecurityBlock, error) {
+	blocks := []SecurityBlock{}
+	for index := range guard.shards {
+		result, ok := guard.exchangeShardAdmin(index, attackGuardRequest{Operation: attackGuardPersistenceSnapshot, Now: now})
+		if !ok {
+			return nil, errors.New("security guard is busy")
+		}
+		if result.Err != nil {
+			return nil, result.Err
+		}
+		blocks = append(blocks, result.Blocks...)
+	}
+	return blocks, nil
+}
+
 func (guard *AttackGuard) exchangeFast(request attackGuardRequest) (attackGuardResult, bool) {
 	ip := normalizeSecurityIP(request.IP)
 	if ip == "" {
@@ -927,7 +1069,7 @@ func (guard *AttackGuard) saveSnapshot() error {
 	if err != nil {
 		return err
 	}
-	blocks, err := guard.Snapshot(time.Now().UTC())
+	blocks, err := guard.persistenceSnapshot(time.Now().UTC())
 	if err != nil {
 		return err
 	}
@@ -974,38 +1116,56 @@ func BlockedHTML(language string, block SecurityBlock) string {
 func blockedHTMLAt(language string, block SecurityBlock, now time.Time) string {
 	title := "Request blocked"
 	message := "SiteBrush temporarily blocked requests from this address."
-	support := "Contact the site administrator and include the incident ID."
+	support := "You can find this incident by its ID in Analytics → Security."
 	ipLabel := "Client address"
+	causeLabel := "Reason for blocking"
 	sourceLabel := "Blocking source"
 	untilLabel := "Blocked until (UTC)"
 	durationLabel := "Block duration"
 	remainingLabel := "remaining"
 	eventsLabel := "Events that triggered the block"
+	reportLabel := "Think this block is a mistake?"
+	reportHelp := "Send this incident to the site administrator once. Add a short explanation if useful."
+	reportButton := "Send incident to administrator"
+	reportPlaceholder := "Short explanation (optional)"
+	reportSent := "This incident has already been sent to the site administrator."
 	developerLabel := "For developers testing locally"
 	developerHelp := "Run tests against httptest servers or mocked HTTP transports. A local go test should not send repeated authentication requests to sitebrush.com. When testing a local SiteBrush server, use localhost; in a local development installation, disable Auto-block and Global reputation sync in Analytics → Security, or ask an administrator to allowlist your client address. Do not disable protection on the public server."
 	language = strings.ToLower(language)
 	if strings.HasPrefix(language, "ru") {
 		title = "Запрос заблокирован"
 		message = "SiteBrush временно заблокировал запросы с этого адреса."
-		support = "Обратитесь к администратору сайта или support@sitebrush.com и укажите идентификатор инцидента."
+		support = "Администратор может найти этот инцидент по ID в разделе «Аналитика → Безопасность»."
 		ipLabel = "Заблокированный IP-адрес"
+		causeLabel = "Причина блокировки"
 		sourceLabel = "Источник блокировки"
 		untilLabel = "Блокировка действует до (UTC)"
 		durationLabel = "Срок блокировки"
 		remainingLabel = "осталось"
 		eventsLabel = "Действия, вызвавшие блокировку"
+		reportLabel = "Считаете блокировку ошибочной?"
+		reportHelp = "Один раз отправьте этот инцидент администратору сайта. При необходимости добавьте короткое пояснение."
+		reportButton = "Отправить инцидент администратору"
+		reportPlaceholder = "Короткое пояснение (необязательно)"
+		reportSent = "Информация об этом инциденте уже отправлена администратору сайта."
 		developerLabel = "Для разработчиков: безопасное тестирование"
 		developerHelp = "Запускайте тесты с httptest-серверами или подменёнными HTTP-транспортами. Локальный go test не должен отправлять повторные запросы аутентификации на sitebrush.com. Для проверки локального SiteBrush используйте localhost; в локальной среде разработки отключите Auto-block и Global reputation sync в разделе Analytics → Security либо попросите администратора добавить ваш адрес в список разрешённых. Не отключайте защиту на публичном сервере."
 	} else if strings.HasPrefix(language, "de") {
 		title = "Anfrage blockiert"
 		message = "SiteBrush hat Anfragen von dieser Adresse vorübergehend blockiert."
-		support = "Kontaktieren Sie den Website-Administrator oder support@sitebrush.com und nennen Sie die Vorfall-ID."
+		support = "Der Administrator kann diesen Vorfall über seine ID unter Analytics → Security finden."
 		ipLabel = "Gesperrte IP-Adresse"
+		causeLabel = "Grund der Sperre"
 		sourceLabel = "Sperrquelle"
 		untilLabel = "Gesperrt bis (UTC)"
 		durationLabel = "Sperrdauer"
 		remainingLabel = "verbleibend"
 		eventsLabel = "Ereignisse, die zur Sperre geführt haben"
+		reportLabel = "Halten Sie die Sperre für einen Fehler?"
+		reportHelp = "Senden Sie diesen Vorfall einmalig an den Administrator. Eine kurze Erklärung ist optional."
+		reportButton = "Vorfall an Administrator senden"
+		reportPlaceholder = "Kurze Erklärung (optional)"
+		reportSent = "Dieser Vorfall wurde bereits an den Administrator gesendet."
 		developerLabel = "Für Entwickler: sicher lokal testen"
 		developerHelp = "Tests sollten httptest-Server oder gemockte HTTP-Transporte verwenden. Ein lokales go test sollte keine wiederholten Authentifizierungsanfragen an sitebrush.com senden. Verwenden Sie localhost für lokale SiteBrush-Tests. Deaktivieren Sie Auto-block und Global reputation sync nur in einer lokalen Entwicklungsinstallation oder lassen Sie Ihre Adresse freischalten. Deaktivieren Sie den Schutz nicht auf einem öffentlichen Server."
 	}
@@ -1016,18 +1176,28 @@ func blockedHTMLAt(language string, block SecurityBlock, now time.Time) string {
 	body.WriteString(html.EscapeString(title))
 	body.WriteString("</h1><p>")
 	body.WriteString(html.EscapeString(message))
-	body.WriteString("</p><p>")
-	body.WriteString(html.EscapeString(securityReasonLabel(block.Reason, language)))
 	body.WriteString("</p><p>Incident: <code>")
 	body.WriteString(html.EscapeString(block.IncidentID))
-	body.WriteString("</code></p><dl><dt>")
+	body.WriteString("</code></p><p>")
+	body.WriteString(html.EscapeString(support))
+	body.WriteString("</p><dl><dt>")
+	body.WriteString(html.EscapeString(causeLabel))
+	body.WriteString("</dt><dd><strong>")
+	body.WriteString(html.EscapeString(securityReasonLabel(block.Reason, language)))
+	body.WriteString("</strong>")
+	if block.Description != "" {
+		body.WriteString("<div>")
+		body.WriteString(html.EscapeString(localizeSecurityDescription(block.Reason, block.Description, language)))
+		body.WriteString("</div>")
+	}
+	body.WriteString("</dd><dt>")
 	body.WriteString(html.EscapeString(ipLabel))
 	body.WriteString("</dt><dd><code>")
 	body.WriteString(html.EscapeString(block.IP))
 	body.WriteString("</code></dd><dt>")
 	body.WriteString(html.EscapeString(sourceLabel))
 	body.WriteString("</dt><dd>")
-	body.WriteString(html.EscapeString(block.Source))
+	body.WriteString(html.EscapeString(securitySourceLabel(block.Source, language)))
 	body.WriteString("</dd><dt>")
 	body.WriteString(html.EscapeString(durationLabel))
 	body.WriteString("</dt><dd>")
@@ -1079,15 +1249,31 @@ func blockedHTMLAt(language string, block SecurityBlock, now time.Time) string {
 			}
 			if event.Source != "" {
 				body.WriteString(" [")
-				body.WriteString(html.EscapeString(event.Source))
+				body.WriteString(html.EscapeString(securitySourceLabel(event.Source, language)))
 				body.WriteString("]")
 			}
 			body.WriteString("</li>")
 		}
 	}
-	body.WriteString("</ul><p>")
-	body.WriteString(html.EscapeString(support))
-	body.WriteString("</p><h2>")
+	body.WriteString("</ul><h2>")
+	body.WriteString(html.EscapeString(reportLabel))
+	body.WriteString("</h2>")
+	if !block.ReportedAt.IsZero() {
+		body.WriteString("<p>")
+		body.WriteString(html.EscapeString(reportSent))
+		body.WriteString("</p>")
+	} else {
+		body.WriteString("<p>")
+		body.WriteString(html.EscapeString(reportHelp))
+		body.WriteString("</p><form method=\"post\" action=\"?security_incident_report\"><input type=\"hidden\" name=\"incident_id\" value=\"")
+		body.WriteString(html.EscapeString(block.IncidentID))
+		body.WriteString("\"><textarea name=\"message\" maxlength=\"500\" rows=\"3\" placeholder=\"")
+		body.WriteString(html.EscapeString(reportPlaceholder))
+		body.WriteString("\"></textarea><br><button type=\"submit\">")
+		body.WriteString(html.EscapeString(reportButton))
+		body.WriteString("</button></form>")
+	}
+	body.WriteString("<h2>")
 	body.WriteString(html.EscapeString(developerLabel))
 	body.WriteString("</h2><p>")
 	body.WriteString(html.EscapeString(developerHelp))
@@ -1129,6 +1315,14 @@ func securityReasonLabel(reason, language string) string {
 		switch reason {
 		case "authentication-failures":
 			return "Повторные ошибки аутентификации"
+		case "repository":
+			return "Попытка доступа к служебным файлам репозитория"
+		case "secret":
+			return "Попытка доступа к секретному или конфигурационному файлу"
+		case "source-backup":
+			return "Попытка скачать резервную копию или исходный файл"
+		case "scanner-client":
+			return "Обнаружен клиент, похожий на сканер уязвимостей"
 		case "injection":
 			return "Обнаружен шаблон инъекции"
 		case "traversal":
@@ -1143,6 +1337,14 @@ func securityReasonLabel(reason, language string) string {
 		switch reason {
 		case "authentication-failures":
 			return "Wiederholte Authentifizierungsfehler"
+		case "repository":
+			return "Zugriff auf Repository-Metadaten"
+		case "secret":
+			return "Zugriff auf eine sensible Datei"
+		case "source-backup":
+			return "Versuch, Backup- oder Quelldatei herunterzuladen"
+		case "scanner-client":
+			return "Client ähnelt einem Schwachstellen-Scanner"
 		case "injection":
 			return "Einschleusungsmuster erkannt"
 		case "traversal":
@@ -1154,6 +1356,39 @@ func securityReasonLabel(reason, language string) string {
 		}
 	}
 	return reason
+}
+
+func securitySourceLabel(source, language string) string {
+	if strings.HasPrefix(language, "ru") {
+		switch source {
+		case "local":
+			return "Обнаружено этим сервером"
+		case "global":
+			return "Глобальная репутация: подтверждено несколькими серверами SiteBrush"
+		case "manual":
+			return "Добавлено администратором вручную"
+		}
+	}
+	if strings.HasPrefix(language, "de") {
+		switch source {
+		case "local":
+			return "Von diesem Server erkannt"
+		case "global":
+			return "Globale Reputation: von mehreren SiteBrush-Servern bestätigt"
+		case "manual":
+			return "Manuell vom Administrator hinzugefügt"
+		}
+	}
+	switch source {
+	case "local":
+		return "Detected by this server"
+	case "global":
+		return "Global reputation: confirmed by multiple SiteBrush servers"
+	case "manual":
+		return "Added manually by the administrator"
+	default:
+		return source
+	}
 }
 
 func localizeSecurityDescription(reason, description, language string) string {
