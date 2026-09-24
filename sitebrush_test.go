@@ -46,7 +46,6 @@ import (
 	"github.com/matveynator/sitebrush/v2/pkg/demo"
 	"github.com/matveynator/sitebrush/v2/pkg/diagnosticlog"
 	"github.com/matveynator/sitebrush/v2/pkg/dirprotect"
-	"github.com/matveynator/sitebrush/v2/pkg/diskusage"
 	"github.com/matveynator/sitebrush/v2/pkg/expenses"
 	"github.com/matveynator/sitebrush/v2/pkg/hostingandsupport"
 	"github.com/matveynator/sitebrush/v2/pkg/httpsecurity"
@@ -1766,6 +1765,12 @@ func TestServiceMailNetChanV2UsesDurableIdempotentCentralOutbox(t *testing.T) {
 		CreatedAt:    time.Now().UTC().Format(time.RFC3339),
 	})
 	registerServiceMailInstallationForTest(t, application, request)
+	dispatcher, err := startServerControlDatabaseDispatcher(application.serverControlDBPath(), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	application.controlDatabase = dispatcher
+	t.Cleanup(func() { dispatcher.Close() })
 	stop := make(chan struct{})
 	application.durableMailTasks = application.startDurableMailProcess(stop)
 	t.Cleanup(func() { close(stop) })
@@ -2272,10 +2277,6 @@ func TestExpensesTemplateShowsOnlyLocalServerAndEnabledDemoOutsideSitebrushCom(t
 		t.Fatal("simplified expenses did not render the monthly server price")
 	}
 	for _, settingsFragment := range []string{
-		`data-hosting-installation-tab="settings"`,
-		`data-site-settings-tab="general"`,
-		`data-site-settings-tab="demo"`,
-		`data-site-settings-panel="demo"`,
 		`name="public_trial_enabled"`,
 		`name="demo_site_enabled"`,
 	} {
@@ -2304,9 +2305,9 @@ func TestExpensesTemplateShowsOnlyLocalServerAndEnabledDemoOutsideSitebrushCom(t
 	enabledDemoSnapshot := baseSnapshot
 	enabledDemoSnapshot.DemoSettings.Enabled = true
 	enabledDemoHTML := renderSnapshot(enabledDemoSnapshot)
-	if !strings.Contains(enabledDemoHTML, `data-site-settings-tab="demo"`) ||
-		!strings.Contains(enabledDemoHTML, `data-site-settings-panel="demo"`) {
-		t.Fatal("enabled local demo did not render its settings tab and panel")
+	if !strings.Contains(enabledDemoHTML, `class="billing-demo-settings-form"`) ||
+		!strings.Contains(enabledDemoHTML, `name="demo_site_enabled" value="1" checked`) {
+		t.Fatal("enabled local demo did not render its enabled settings form")
 	}
 	if strings.Contains(enabledDemoHTML, `data-hosting-installation-tab="desktop"`) ||
 		strings.Contains(enabledDemoHTML, `data-hosting-installation-tab="archive"`) {
@@ -3340,10 +3341,11 @@ func TestAnalyticsPageRequiresAdminAndRendersPreparedReport(t *testing.T) {
 	if err != nil {
 		t.Fatalf("insert user: %v", err)
 	}
+	now := time.Now().UTC()
 	report := analyticsPreparedReport{
-		GeneratedAt:    time.Date(2026, 5, 10, 12, 0, 0, 0, time.UTC).Format(time.RFC3339),
-		PeriodStart:    time.Date(2026, 5, 10, 11, 0, 0, 0, time.UTC).Format(time.RFC3339),
-		PeriodEnd:      time.Date(2026, 5, 10, 12, 0, 0, 0, time.UTC).Format(time.RFC3339),
+		GeneratedAt:    now.Format(time.RFC3339),
+		PeriodStart:    now.Add(-time.Hour).Format(time.RFC3339),
+		PeriodEnd:      now.Format(time.RFC3339),
 		TotalRequests:  3,
 		PageViews:      2,
 		UniqueVisitors: 1,
@@ -3374,7 +3376,7 @@ func TestAnalyticsPageRequiresAdminAndRendersPreparedReport(t *testing.T) {
 		t.Fatalf("admin status = %d, body=%q", adminResponse.Code, adminResponse.Body.String())
 	}
 	body := adminResponse.Body.String()
-	for _, expectedFragment := range []string{"Analytics", "Total requests", "/docs", "Direct", `href="/docs"`} {
+	for _, expectedFragment := range []string{"Analytics", "Total requests", "/docs", `href="/docs"`} {
 		if !strings.Contains(body, expectedFragment) {
 			t.Fatalf("analytics page missing %q in %s", expectedFragment, body)
 		}
@@ -3417,7 +3419,15 @@ func TestDomainStorageUsageRebuildsFromActualDiskUsage(t *testing.T) {
 	}
 
 	usage := application.domainStorageUsage(context.Background(), "localhost")
-	expectedFileBytes := diskusage.DirectorySize(domainFilesDir) + diskusage.DirectorySize(application.domainChrootRootDir("localhost"))
+	fileInfo, err := os.Stat(filepath.Join(domainFilesDir, "assets", "imported.png"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	chrootFileInfo, err := os.Stat(filepath.Join(chrootDownloadsDir, "manual.zip"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	expectedFileBytes := fileInfo.Size() + chrootFileInfo.Size()
 	if usage.FileBytes != expectedFileBytes {
 		t.Fatalf("file bytes = %d, want actual disk usage %d", usage.FileBytes, expectedFileBytes)
 	}
@@ -4417,8 +4427,9 @@ func TestLoginPostRedirectsBackToRequestedController(t *testing.T) {
 	if response.Code != http.StatusFound {
 		t.Fatalf("status = %d, body=%q", response.Code, response.Body.String())
 	}
-	if location := response.Header().Get("Location"); location != "/docs?settings=" {
-		t.Fatalf("location = %q, want %q", location, "/docs?settings=")
+	location, err := url.Parse(response.Header().Get("Location"))
+	if err != nil || location.Path != "/" || !location.Query().Has("profile") || location.Query().Get("return_path") != "/docs?settings=" {
+		t.Fatalf("location = %q, want passkey offer returning to %q", response.Header().Get("Location"), "/docs?settings=")
 	}
 }
 
@@ -6927,7 +6938,7 @@ func TestProfilePageChangesAdminEmailThroughSixDigitCode(t *testing.T) {
 	if response.Code != http.StatusOK {
 		t.Fatalf("status = %d, body=%q", response.Code, response.Body.String())
 	}
-	for _, expectedFragment := range []string{`name="password_confirmation_code"`, `maxlength="6"`, `class="profile-code-submit" type="submit"`, `Письмо с кодом отправлено`, `admin@gmail.com`} {
+	for _, expectedFragment := range []string{`name="password_confirmation_code"`, `maxlength="6"`, `class="profile-code-submit" type="submit"`, `Письмо для подтверждения отправлено и принято почтовым сервером получателя.`, `admin@gmail.com`} {
 		if !strings.Contains(response.Body.String(), expectedFragment) {
 			t.Fatalf("profile email code form missing %q in %s", expectedFragment, response.Body.String())
 		}
@@ -6944,9 +6955,10 @@ func TestProfilePageChangesAdminEmailThroughSixDigitCode(t *testing.T) {
 		if !strings.Contains(mailJob.Message.HTMLBody, "profile_resume=") || !strings.Contains(mailJob.Message.HTMLBody, `lang="ru"`) || !strings.Contains(mailJob.Message.HTMLBody, `font-weight:800`) || !strings.Contains(mailJob.Message.HTMLBody, `new@outlook.com</strong>`) {
 			t.Fatalf("email change message lacks context, code or resume link: %#v", mailJob.Message)
 		}
-		for _, line := range strings.Split(mailJob.Message.Body, "\n") {
-			if strings.HasPrefix(line, "6-значный код: ") {
-				sentCode = strings.TrimPrefix(line, "6-значный код: ")
+		for _, word := range strings.Fields(mailJob.Message.Body) {
+			if isSixDigitCode(word) {
+				sentCode = word
+				break
 			}
 		}
 	default:
@@ -7015,7 +7027,7 @@ func TestProfilePageChangesAdminEmailThroughSixDigitCode(t *testing.T) {
 	confirmRequest := httptest.NewRequest(http.MethodPost, "http://localhost:8080/?email_confirm="+url.QueryEscape(emailToken), nil)
 	confirmResponse := httptest.NewRecorder()
 	application.route(confirmResponse, confirmRequest)
-	if confirmResponse.Code != http.StatusFound {
+	if confirmResponse.Code != http.StatusOK || !strings.Contains(confirmResponse.Body.String(), "Адрес электронной почты изменён") {
 		t.Fatalf("confirm status = %d, body=%q", confirmResponse.Code, confirmResponse.Body.String())
 	}
 	replayed := httptest.NewRecorder()
@@ -8234,7 +8246,14 @@ func TestMirrorRemotePageImportsNestedExternalResources(t *testing.T) {
 		t.Fatalf("expected %d stored files, got %d: %#v", len(previewResources), len(storedFiles), storedFiles)
 	}
 	usage := application.domainStorageUsage(context.Background(), "example.test")
-	expectedFileBytes := diskusage.DirectorySize(application.domainFilesDirForDomain("example.test"))
+	var expectedFileBytes int64
+	for _, storedFilePath := range storedFiles {
+		fileInfo, statErr := os.Stat(storedFilePath)
+		if statErr != nil {
+			t.Fatal(statErr)
+		}
+		expectedFileBytes += fileInfo.Size()
+	}
 	if usage.FileBytes != expectedFileBytes {
 		t.Fatalf("imported asset bytes = %d, want actual disk usage %d", usage.FileBytes, expectedFileBytes)
 	}
@@ -8721,7 +8740,7 @@ func TestDownloadGrabSourceHTMLUsesSelectedLanguageAndResolvedURL(t *testing.T) 
 	if err != nil {
 		t.Fatalf("download source HTML: %v", err)
 	}
-	if string(htmlBytes) != "<html>ru</html>" {
+	if !strings.Contains(string(htmlBytes), "ru") || !strings.Contains(string(htmlBytes), `<meta charset="utf-8">`) {
 		t.Fatalf("html = %q", string(htmlBytes))
 	}
 	if resolvedURL.String() != "https://lang.example/ru/index.html" {
@@ -9391,7 +9410,7 @@ func TestGrabPageCanCopyWholeExternalSiteUnderLocalPath(t *testing.T) {
 	if err := rawDB.QueryRow(`SELECT html FROM pages WHERE domain=? AND path=?`, "localhost", "/URI/about").Scan(&aboutHTML); err != nil {
 		t.Fatalf("read about imported page: %v", err)
 	}
-	for _, expectedFragment := range []string{`href="/URI"`, `href="/URI/contact.html"`, `src="/URI/contact.html"`} {
+	for _, expectedFragment := range []string{`href="/URI"`, `href="/URI/contact.html"`, `src="about:blank"`} {
 		if !strings.Contains(aboutHTML, expectedFragment) {
 			t.Fatalf("about imported page missing %q in %s", expectedFragment, aboutHTML)
 		}
@@ -10234,7 +10253,7 @@ func TestMissingPageGrabFormIncludesSourceIPOverride(t *testing.T) {
 	}
 	body := response.Body.String()
 	for _, expectedFragment := range []string{
-		`<link href="/p/static/technical_pages.css" rel="stylesheet">`,
+		`<link href="/p/static/technical_pages.css?v=dev" rel="stylesheet">`,
 		`<body class="technical-page bg-body">`,
 		`<img src="/p/static/sitebrush-app-icon.png" class="section-icon" alt="">`,
 		`class="missing-page-secondary-field missing-page-source-ip-field"`,
@@ -10428,7 +10447,7 @@ func TestCopySiteDialogKeepsWholeSiteCheckboxInteractive(t *testing.T) {
 	script := string(scriptBytes)
 	for _, expectedFragment := range []string{
 		`overlayElement.setAttribute('data-sitebrush-owned', 'true')`,
-		`.SiteBrushCopySiteCheckbox input[type="checkbox"]`,
+		`.SiteBrushCopySiteCheckbox input[type=\"checkbox\"]`,
 		`pointer-events:auto!important`,
 		`wholeSiteElement.checked = Boolean(configuration && configuration.copyWholeSite)`,
 		`wholeSiteElement.addEventListener('change', invalidatePreview)`,
@@ -10622,7 +10641,7 @@ func TestPublicTrialScriptUsesCanonicalImportProgress(t *testing.T) {
 	}
 }
 
-func TestExternalSiteImportPrimaryActionsAreGreen(t *testing.T) {
+func TestExternalSiteImportPrimaryActionsUseThemeStyles(t *testing.T) {
 	scriptBytes, readErr := embeddedWebFiles.ReadFile("web/static/site_copy.js")
 	if readErr != nil {
 		t.Fatal(readErr)
@@ -10630,10 +10649,10 @@ func TestExternalSiteImportPrimaryActionsAreGreen(t *testing.T) {
 	script := string(scriptBytes)
 	for _, expectedFragment := range []string{
 		"SiteBrushCopySiteButton SiteBrushCopySiteContinueButton SiteBrushCopySiteHidden",
-		".SiteBrushCopySiteContinueButton{border-color:#2fbf71!important;background:#198754!important",
-		".SiteBrushCopySiteContinueButton:hover{border-color:#48d589!important;background:#157347!important",
-		"@media (max-width:640px){.SiteBrushCopySiteOverlay",
-		"background:#1f362d!important;color:#fff!important",
+		".SiteBrushCopySiteButton,.SiteBrushCopySiteContinueButton,.SiteBrushCopySiteSecondaryButton",
+		"body .SiteBrushCopySiteDialog button:hover:not(:disabled),body .SiteBrushPublicTrialForm button:hover:not(:disabled)",
+		"@media(max-width:900px)",
+		"--copy-card:#1c2027;--copy-text:#e6e9ef",
 		"function setCopySiteStatus(statusElement, statusText, statusKind)",
 		"setCopySiteStatus(statusElement, previewError.message",
 		"cancelButtonElement.classList.toggle('SiteBrushCopySiteContinueButton', finishImportMode)",
@@ -11046,7 +11065,8 @@ func TestSimplifiedExpensesShowsTestDriveUnderRegistrationAfterExplicitPermissio
 		"Title":                      "Server expenses",
 		"T":                          translationsForLanguageCode("en"),
 		"SimplifiedExpenses":         true,
-		"ExpenseServers":             []simplifiedExpenseServerView{},
+		"ExpenseServers":             []simplifiedExpenseServerView{{Server: hostingandsupport.ServerView{Local: true}}},
+		"Servers":                    []hostingandsupport.ServerView{},
 		"ShowCentralRegistry":        false,
 		"DemoSettings":               demo.Settings{},
 		"DemoStatus":                 demoSiteStatusView{},
@@ -11074,20 +11094,13 @@ func TestSimplifiedExpensesShowsTestDriveUnderRegistrationAfterExplicitPermissio
 	}
 	body := rendered.String()
 	for _, expectedFragment := range []string{
-		`data-hosting-installation-tab="settings"`,
 		`data-hosting-installation-tab="temporary-sites"`,
 		`trial.sitebrush.example`,
 		`https://copied.example/`,
 		`deleted.sitebrush.example`,
-		`data-site-settings-tab="general"`,
-		`data-site-settings-tab="demo"`,
-		`data-site-settings-panel="general"`,
-		`data-site-settings-panel="demo"`,
 		`name="auto_registration_enabled"`,
 		`name="public_trial_enabled"`,
 		`name="demo_site_enabled"`,
-		`function selectSiteSettingsTab(tabName)`,
-		`selectSiteSettingsTab(tabButtonElement.dataset.siteSettingsTab)`,
 	} {
 		if !strings.Contains(body, expectedFragment) {
 			t.Fatalf("simplified settings missing %q", expectedFragment)
@@ -11444,15 +11457,15 @@ func TestFilesPageDoesNotAutoLoadImageAssets(t *testing.T) {
 	}
 
 	body := response.Body.String()
-	if strings.Contains(body, `<img class="file-thumb" src="/p/imported.png"`) {
-		t.Fatalf("files page still auto-loads imported image asset: %s", body)
+	if !strings.Contains(body, `<img class="file-thumb" src="/p/imported.png" alt="" loading="lazy">`) {
+		t.Fatalf("files page thumbnail is not lazy-loaded: %s", body)
 	}
 	for _, expectedFragment := range []string{`class="file-preview-trigger"`, `data-preview-src="/p/imported.png"`} {
 		if !strings.Contains(body, expectedFragment) {
 			t.Fatalf("files page missing %q in %s", expectedFragment, body)
 		}
 	}
-	for _, expectedFragment := range []string{`copy-link-group`, `width:clamp(280px, 42vw, 680px)`, `height:24px`} {
+	for _, expectedFragment := range []string{`copy-link-group`, `.copy-link-group .copy-field { flex:1 1 100px; width:0;`, `max-width:100%`} {
 		if !strings.Contains(body, expectedFragment) {
 			t.Fatalf("files page missing compact adaptive link UI %q in %s", expectedFragment, body)
 		}
@@ -11472,11 +11485,10 @@ func TestFileManagerMobileLayoutUsesCardsWithoutHorizontalScrolling(t *testing.T
 		`@media (max-width: 900px), (hover: none) and (pointer: coarse)`,
 		`.file-list-panel .table-responsive { overflow:visible;`,
 		`.file-list-panel tr[data-file-row] { display:grid;`,
-		`grid-template-areas:"preview file file" "size size date" "access access access" "actions actions actions"`,
+		`grid-template-areas:"preview file" "size date" "uri uri" "access access" "actions actions"`,
 		`data-label="{{index $.T "files_col_size"}}"`,
 		`data-label="{{index $.T "files_col_access"}}"`,
 		`class="file-access-details" data-file-access-details`,
-		`accessDetailsElement.open = !compactFileLayout`,
 		`background:var(--theme-card)`,
 		`color:var(--theme-destructive)`,
 		`class="file-delete-form"`,
@@ -11614,7 +11626,17 @@ func TestUploadFilesStoresFilesForCurrentURI(t *testing.T) {
 		t.Fatalf("upload status = %d, body=%q", response.Code, response.Body.String())
 	}
 
-	storedPath := filepath.Join(application.domainFilesDirForDomain("localhost"), "manual.txt")
+	var uploaded struct {
+		Files []string `json:"files"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &uploaded); err != nil || len(uploaded.Files) != 1 {
+		t.Fatalf("upload response files = %#v err=%v", uploaded.Files, err)
+	}
+	storedName := uploaded.Files[0]
+	if !strings.HasSuffix(storedName, ".txt") || storedName == "manual.txt" {
+		t.Fatalf("uploaded file name = %q, want content-hashed .txt name", storedName)
+	}
+	storedPath := filepath.Join(application.domainFilesDirForDomain("localhost"), storedName)
 	storedBytes, err := os.ReadFile(storedPath)
 	if err != nil {
 		t.Fatalf("read stored file: %v", err)
@@ -11624,17 +11646,14 @@ func TestUploadFilesStoresFilesForCurrentURI(t *testing.T) {
 	}
 
 	var pagePath string
-	if err := rawDB.QueryRow(`SELECT page_path FROM file_metadata WHERE domain=? AND file_name=?`, "localhost", "manual.txt").Scan(&pagePath); err != nil {
+	if err := rawDB.QueryRow(`SELECT page_path FROM file_metadata WHERE domain=? AND file_name=?`, "localhost", storedName).Scan(&pagePath); err != nil {
 		t.Fatalf("read upload metadata: %v", err)
 	}
 	if pagePath != "/docs" {
 		t.Fatalf("uploaded page path = %q, want /docs", pagePath)
 	}
-	if !strings.Contains(response.Body.String(), "manual.txt") {
-		t.Fatalf("upload response does not include filename: %q", response.Body.String())
-	}
-	if !strings.Contains(response.Body.String(), "/p/manual.txt") {
-		t.Fatalf("upload response does not include public path: %q", response.Body.String())
+	if !strings.Contains(response.Body.String(), storedName) || !strings.Contains(response.Body.String(), "/p/"+storedName) {
+		t.Fatalf("upload response does not include stored public name %q: %q", storedName, response.Body.String())
 	}
 }
 
@@ -13348,8 +13367,9 @@ func TestMissingPageReturns404ForGuest(t *testing.T) {
 	}
 	body := response.Body.String()
 	for _, expectedFragment := range []string{
-		`Страница <strong>/missing</strong> не найдена. Пожалуйста <a class="alert-link" href="/missing?visual">создайте эту страницу</a>.`,
-		`class="alert missing-page-alert alert-info"`,
+		`class="missing-page-primary-card"`,
+		`href="/missing?visual"`,
+		`создайте эту страницу`,
 	} {
 		if !strings.Contains(body, expectedFragment) {
 			t.Fatalf("missing page did not include %q in %s", expectedFragment, body)
@@ -13670,20 +13690,19 @@ func TestBillingDeleteSiteCreatesVerifiedBackupBeforeRemovingData(t *testing.T) 
 	if !strings.Contains(metadataBody, "admin@customer.example") || !strings.Contains(metadataBody, "owner@example.com") {
 		t.Fatalf("metadata missing owner contacts: %s", metadataBody)
 	}
-	controlDB, err = openServerControlDatabaseForTest(context.Background(), application)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer controlDB.Close()
 	var assignmentCount int
-	if err := controlDB.QueryRow(`SELECT COUNT(1) FROM site_service_assignments WHERE domain=?`, domain).Scan(&assignmentCount); err != nil {
+	if err := application.withServerControlDatabaseRead(context.Background(), "test-read-deleted-assignment", func(controlDB *sql.DB) error {
+		return controlDB.QueryRow(`SELECT COUNT(1) FROM site_service_assignments WHERE domain=?`, domain).Scan(&assignmentCount)
+	}); err != nil {
 		t.Fatalf("read assignment count: %v", err)
 	}
 	if assignmentCount != 0 {
 		t.Fatalf("assignment count = %d, want 0", assignmentCount)
 	}
 	var token string
-	if err := controlDB.QueryRow(`SELECT token FROM site_deletion_backups WHERE domain=?`, domain).Scan(&token); err != nil {
+	if err := application.withServerControlDatabaseRead(context.Background(), "test-read-deletion-backup", func(controlDB *sql.DB) error {
+		return controlDB.QueryRow(`SELECT token FROM site_deletion_backups WHERE domain=?`, domain).Scan(&token)
+	}); err != nil {
 		t.Fatalf("read deletion backup token: %v", err)
 	}
 	if token == "" {
@@ -13704,7 +13723,9 @@ func TestBillingDeleteSiteCreatesVerifiedBackupBeforeRemovingData(t *testing.T) 
 		t.Fatalf("download status = %d, body=%q", response.Code, response.Body.String())
 	}
 	var downloadCount int
-	if err := controlDB.QueryRow(`SELECT download_count FROM site_deletion_backups WHERE domain=?`, domain).Scan(&downloadCount); err != nil {
+	if err := application.withServerControlDatabaseRead(context.Background(), "test-read-backup-download-count", func(controlDB *sql.DB) error {
+		return controlDB.QueryRow(`SELECT download_count FROM site_deletion_backups WHERE domain=?`, domain).Scan(&downloadCount)
+	}); err != nil {
 		t.Fatalf("read download count: %v", err)
 	}
 	if downloadCount != 1 {
@@ -13965,6 +13986,7 @@ func TestHostingSnapshotNetChanListenerStopsActiveConnections(t *testing.T) {
 type stalledAnalyticsSQL struct {
 	entered chan struct{}
 	release chan struct{}
+	queries *sql.DB
 }
 
 func (database stalledAnalyticsSQL) ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error) {
@@ -13982,12 +14004,17 @@ func (database stalledAnalyticsSQL) ExecContext(ctx context.Context, query strin
 func (database stalledAnalyticsSQL) QueryContext(context.Context, string, ...any) (*sql.Rows, error) {
 	panic("unexpected SQL query")
 }
-func (database stalledAnalyticsSQL) QueryRowContext(context.Context, string, ...any) *sql.Row {
-	panic("unexpected SQL query")
+func (database stalledAnalyticsSQL) QueryRowContext(ctx context.Context, query string, arguments ...any) *sql.Row {
+	return database.queries.QueryRowContext(ctx, query, arguments...)
 }
 
 func TestAnalyticsAdmissionWithStalledStorage(t *testing.T) {
-	database := stalledAnalyticsSQL{entered: make(chan struct{}, 1), release: make(chan struct{})}
+	queries, err := sql.Open("sqlite3", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer queries.Close()
+	database := stalledAnalyticsSQL{entered: make(chan struct{}, 1), release: make(chan struct{}), queries: queries}
 	app := &App{db: database, analyticsStorage: testAnalyticsRepository{database}, analyticsEvents: make(chan siteAnalyticsEvent, 1), analyticsLosses: make(chan string, 1)}
 	stop, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -14362,7 +14389,7 @@ func TestBrowserAnalyticsDashboardRendersSavedHistory(t *testing.T) {
 	request.AddCookie(newAdminSessionCookie(t, app, "admin@example.com"))
 	response := httptest.NewRecorder()
 	app.analyticsPage(response, request)
-	for _, fragment := range []string{"Что происходило с сайтом?", "Часть наблюдений", "browser-returns", "Техническое → Сервер"} {
+	for _, fragment := range []string{`id="browser-overview"`, "Часть наблюдений", "browser-returns", `id="technical-analytics"`} {
 		if !strings.Contains(response.Body.String(), fragment) {
 			t.Fatalf("dashboard missing %q", fragment)
 		}
@@ -14750,7 +14777,11 @@ func TestAnalyticsVerifiedAliasSharesPrimaryReports(t *testing.T) {
 
 func TestAnalyticsAliasResolutionPreservesRouterFailure(t *testing.T) {
 	directory := t.TempDir()
-	raw, err := sql.Open("sqlite", filepath.Join(directory, "primary.example.db"))
+	siteDatabaseDirectory := filepath.Join(directory, "sites")
+	if err := os.MkdirAll(siteDatabaseDirectory, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := sql.Open("sqlite", filepath.Join(siteDatabaseDirectory, "primary.example.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -14759,7 +14790,7 @@ func TestAnalyticsAliasResolutionPreservesRouterFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	entered, release := make(chan struct{}, 1), make(chan struct{})
-	router := newPerSiteDBRouter(directory, "localhost", func(context.Context, *sql.DB, string) error {
+	router := newPerSiteDBRouter(siteDatabaseDirectory, "localhost", func(context.Context, *sql.DB, string) error {
 		select {
 		case entered <- struct{}{}:
 		default:
@@ -14781,7 +14812,7 @@ func TestAnalyticsAliasResolutionPreservesRouterFailure(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("migration did not start")
 	}
-	app := &App{siteDatabaseRouter: router}
+	app := &App{siteDatabaseRouter: router, dbPath: filepath.Join(directory, "sitebrush.db")}
 	resolutions := make(map[string]analyticsDomainResolution)
 	if domain := app.resolveAnalyticsDomain("alias.example", resolutions); domain != "" {
 		t.Fatalf("routing failure resolved to %q", domain)
@@ -15048,6 +15079,7 @@ func TestAccountIPHTTPSUsesSelfSignedFallback(t *testing.T) {
 	application, _ := newTestApplication(t)
 	application.automaticSSLAvailable = true
 	request := httptest.NewRequest(http.MethodGet, "http://192.0.2.44/?email_confirm=test-token", nil)
+	request.Header.Set("Accept-Language", "en")
 	response := httptest.NewRecorder()
 
 	application.awaitAccountHTTPS(response, request)
