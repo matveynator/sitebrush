@@ -10,7 +10,9 @@ import (
 func TestAttackGuardDoesNotBlockReadBurst(t *testing.T) {
 	now := time.Date(2026, 9, 23, 12, 0, 0, 0, time.UTC)
 	guard, err := NewAttackGuard("")
-	if err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer guard.Close()
 	for i := 0; i < 600; i++ {
 		if block, blocked := guard.ObserveFast("203.0.113.7", "/same", false, now.Add(time.Duration(i)*time.Millisecond)); blocked {
@@ -22,7 +24,9 @@ func TestAttackGuardDoesNotBlockReadBurst(t *testing.T) {
 func TestAttackGuardStillBlocksMassWrites(t *testing.T) {
 	now := time.Date(2026, 9, 23, 12, 0, 0, 0, time.UTC)
 	guard, err := NewAttackGuard("")
-	if err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer guard.Close()
 	var block SecurityBlock
 	var blocked bool
@@ -37,7 +41,9 @@ func TestAttackGuardStillBlocksMassWrites(t *testing.T) {
 func TestAttackGuardDoesNotRateBlockTrustedTraffic(t *testing.T) {
 	now := time.Now().UTC()
 	guard, err := NewAttackGuard("")
-	if err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer guard.Close()
 	for i := 0; i < 2000; i++ {
 		if _, blocked := guard.ObserveFast("203.0.113.8", "/import/page", true, now); blocked {
@@ -50,7 +56,9 @@ func TestAttackGuardBlocksSevereIncidentAndPersists(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "security.json")
 	now := time.Now().UTC()
 	guard, err := NewAttackGuard(path)
-	if err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer guard.Close()
 	block, blocked := guard.ObserveIncident("2001:db8::1", "injection", "SQL injection pattern", now)
 	if !blocked || block.Source != "local" {
@@ -73,7 +81,9 @@ func TestAttackGuardBlocksSevereIncidentAndPersists(t *testing.T) {
 func TestAttackGuardManualAndEscalation(t *testing.T) {
 	now := time.Now().UTC()
 	guard, err := NewAttackGuard("")
-	if err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer guard.Close()
 	first, err := guard.Add("198.51.100.4", "manual", "abuse report", "manual", time.Time{}, now)
 	if err != nil {
@@ -89,22 +99,34 @@ func TestAttackGuardManualAndEscalation(t *testing.T) {
 	if third.ExpiresAt.Sub(third.LastEvent) < 29*24*time.Hour {
 		t.Fatalf("repeat attacker was not escalated: %s", third.ExpiresAt.Sub(third.LastEvent))
 	}
-	if err := guard.Remove("198.51.100.4"); err != nil { t.Fatal(err) }
+	if err := guard.Remove("198.51.100.4"); err != nil {
+		t.Fatal(err)
+	}
 	if _, ok := guard.Check("198.51.100.4", now); ok {
 		t.Fatal("manual unblock failed")
 	}
 }
 
-func TestBlockedHTMLIsSmallLocalizedAndEscaped(t *testing.T) {
-	body := BlockedHTML("ru-RU", SecurityBlock{Reason: "<script>", IncidentID: "abc"})
-	if len(body) > 2048 {
-		t.Fatalf("blocked response too large: %d", len(body))
+func TestBlockedHTMLIncludesDiagnosticsAndDeveloperGuidance(t *testing.T) {
+	now := time.Date(2026, 9, 24, 10, 0, 0, 0, time.UTC)
+	block := SecurityBlock{
+		IP: "203.0.113.17", Reason: "authentication-failures", Description: "failed login at /?login",
+		LastEvent: now, ExpiresAt: now.Add(7 * 24 * time.Hour), IncidentID: "abc", Source: "global",
+		ReasonLog: []SecurityReasonEvent{{First: now.Add(-2 * time.Minute), At: now, Reason: "authentication-failures", Description: "Repeated authentication failures; latest request: /?login (HTTP 401) <script>", Count: 3, Source: "global"}},
 	}
-	if !strings.Contains(body, "Запрос заблокирован") || strings.Contains(body, "<script>") {
-		t.Fatalf("unexpected blocked HTML: %s", body)
+	body := blockedHTMLAt("ru-RU", block, now)
+	for _, expected := range []string{"Запрос заблокирован", "203.0.113.17", "Источник блокировки", "global", "7 дн. 0 ч.", "2026-10-01T10:00:00Z", "2026-09-24T09:58:00Z", "Повторные ошибки аутентификации", "Отклонённая попытка входа; последний запрос: /?login", "×3", "localhost", "httptest", "Auto-block", "&lt;script&gt;"} {
+		if !strings.Contains(body, expected) {
+			t.Errorf("blocked page missing %q", expected)
+		}
+	}
+	if strings.Contains(body, "<script>") {
+		t.Fatalf("unescaped block description in HTML: %s", body)
+	}
+	if len(body) > 5000 {
+		t.Fatalf("blocked response unexpectedly large: %d", len(body))
 	}
 }
-
 
 func TestAttackGuardGlobalSyncDefaultsOn(t *testing.T) {
 	guard, err := NewAttackGuard(filepath.Join(t.TempDir(), "security.json"))
@@ -146,6 +168,30 @@ func TestAttackGuardAllowlistOverridesLocalAndGlobalBlocks(t *testing.T) {
 	}
 	if _, blocked := guard.Check("203.0.113.111", now); blocked {
 		t.Fatal("global reputation bypassed allowlist")
+	}
+}
+
+func TestAttackGuardAdministratorTrustIsPerSiteAndExpires(t *testing.T) {
+	guard, err := NewAttackGuard("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer guard.Close()
+	now := time.Date(2026, 9, 24, 12, 0, 0, 0, time.UTC)
+	if err := guard.TrustAdminIP("Example.COM.", "203.0.113.45", now); err != nil {
+		t.Fatal(err)
+	}
+	if !guard.AdminIPTrusted("example.com", "203.0.113.45", now.Add(time.Minute)) {
+		t.Fatal("authenticated administrator address was not trusted for its site")
+	}
+	if guard.AdminIPTrusted("another.example", "203.0.113.45", now.Add(time.Minute)) {
+		t.Fatal("administrator address trust leaked to a different site")
+	}
+	if guard.AdminIPTrusted("example.com", "203.0.113.45", now.Add(trustedAdminIPCacheTTL+time.Second)) {
+		t.Fatal("expired administrator address remained trusted")
+	}
+	if !guard.ClaimAdminIPLookup("example.com", "203.0.113.45", now) || guard.ClaimAdminIPLookup("example.com", "203.0.113.45", now.Add(time.Second)) || !guard.ClaimAdminIPLookup("example.com", "203.0.113.45", now.Add(time.Minute)) {
+		t.Fatal("administrator trust database lookup was not rate bounded")
 	}
 }
 
@@ -207,7 +253,6 @@ func TestAttackGuardPersistsAllowlist(t *testing.T) {
 	}
 }
 
-
 func TestAttackGuardAggregatesRepeatedReasonHistory(t *testing.T) {
 	now := time.Date(2026, 9, 23, 12, 0, 0, 0, time.UTC)
 	guard, err := NewAttackGuard("")
@@ -238,18 +283,17 @@ func TestAttackGuardReasonHistoryIsBounded(t *testing.T) {
 	for index := 0; index < securityReasonLogLimit+10; index++ {
 		eventTime := now.Add(time.Duration(index) * time.Minute)
 		events = appendSecurityReasonEvent(events, SecurityReasonEvent{
-			First: eventTime,
-			At: eventTime,
+			First:  eventTime,
+			At:     eventTime,
 			Reason: "reason-" + time.Duration(index).String(),
 			Source: "local",
-			Count: 1,
+			Count:  1,
 		}, eventTime)
 	}
 	if len(events) != securityReasonLogLimit {
 		t.Fatalf("reason history size=%d", len(events))
 	}
 }
-
 
 func TestAttackGuardAggregatesRepeatedGlobalReasonHistory(t *testing.T) {
 	now := time.Date(2026, 9, 23, 12, 0, 0, 0, time.UTC)
@@ -280,12 +324,12 @@ func TestAttackGuardReasonAggregateResetsOutsideRetentionWindow(t *testing.T) {
 	for day := 0; day < 9; day++ {
 		observed := start.Add(time.Duration(day) * 24 * time.Hour)
 		events = appendSecurityReasonEvent(events, SecurityReasonEvent{
-			First: observed,
-			At: observed,
-			Reason: "secret",
+			First:       observed,
+			At:          observed,
+			Reason:      "secret",
 			Description: "sensitive file probe",
-			Source: "local",
-			Count: 1,
+			Source:      "local",
+			Count:       1,
 		}, observed)
 	}
 	if len(events) != 1 {
@@ -298,7 +342,6 @@ func TestAttackGuardReasonAggregateResetsOutsideRetentionWindow(t *testing.T) {
 		t.Fatalf("new aggregate kept stale first timestamp: %#v", events[0])
 	}
 }
-
 
 func TestAttackGuardBlocksMassEnumerationEarly(t *testing.T) {
 	now := time.Date(2026, 9, 24, 12, 0, 0, 0, time.UTC)
