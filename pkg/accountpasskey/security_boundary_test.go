@@ -3,7 +3,11 @@ package accountpasskey
 import (
 	"context"
 	"database/sql"
+	"encoding/base64"
+	"encoding/json"
+	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -189,5 +193,160 @@ func TestSecurityBoundaryRelyingPartyConfigurationRejectsInvalidValues(t *testin
 		if _, err := service(tc.domain, tc.origin); err == nil {
 			t.Fatalf("SECURITY: invalid WebAuthn relying party accepted domain=%q origin=%q", tc.domain, tc.origin)
 		}
+	}
+}
+
+
+func TestVerifiedPasskeyPersistenceHelpers(t *testing.T) {
+	database := securityPasskeyDatabase(t)
+	ctx := context.Background()
+	now := time.Unix(1_800_100_300, 0).UTC()
+	user := &User{Domain: "example.com", Email: "owner@example.com", Handle: []byte("handle")}
+	credential := &webauthn.Credential{ID: []byte("credential-id")}
+
+	if err := storeRegistrationCredential(ctx, database, "example.com", user.Email, user, credential, now); err != nil {
+		t.Fatalf("store verified registration credential: %v", err)
+	}
+	if Count(ctx, database, "example.com") != 1 {
+		t.Fatal("verified registration credential was not persisted")
+	}
+
+	email, path, err := finishLoginCredential(ctx, database, "example.com", user, user, credential, "/profile", now.Add(time.Minute))
+	if err != nil || email != user.Email || path != "/profile" {
+		t.Fatalf("finish verified login = %q %q %v", email, path, err)
+	}
+
+	other := &User{Domain: "example.com", Email: "other@example.com", Handle: []byte("other")}
+	if _, _, err := finishLoginCredential(ctx, database, "example.com", user, other, credential, "/", now); err == nil {
+		t.Fatal("SECURITY: passkey result was accepted for a different loaded account")
+	}
+	if _, _, err := finishLoginCredential(ctx, database, "example.com", user, nil, credential, "/", now); err == nil {
+		t.Fatal("SECURITY: passkey result was accepted without a loaded account")
+	}
+	if _, _, err := finishLoginCredential(ctx, database, "example.com", structUser{}, user, credential, "/", now); err == nil {
+		t.Fatal("SECURITY: foreign WebAuthn user implementation was accepted as SiteBrush account")
+	}
+
+	missingCredential := &webauthn.Credential{ID: []byte("missing-id")}
+	if _, _, err := finishLoginCredential(ctx, database, "example.com", user, user, missingCredential, "/", now); err == nil {
+		t.Fatal("SECURITY: login succeeded for credential absent from account storage")
+	}
+
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := storeRegistrationCredential(ctx, database, "example.com", user.Email, user, credential, now); err == nil {
+		t.Fatal("registration persistence hid closed database error")
+	}
+}
+
+type structUser struct{}
+
+func (structUser) WebAuthnID() []byte                         { return []byte("foreign") }
+func (structUser) WebAuthnName() string                       { return "foreign" }
+func (structUser) WebAuthnDisplayName() string                { return "foreign" }
+func (structUser) WebAuthnCredentials() []webauthn.Credential { return nil }
+
+func TestFinishPasskeyRejectsMalformedBrowserResponsesAndConsumesChallenges(t *testing.T) {
+	database := securityPasskeyDatabase(t)
+	ctx := context.Background()
+	now := time.Unix(1_800_100_400, 0).UTC()
+
+	registrationTx := mustBeginPasskey(t, database)
+	beginRegistration, err := BeginRegistration(ctx, registrationTx, "example.com", "example.com", "https://example.com", "owner@example.com", "192.0.2.90", now)
+	if err != nil {
+		_ = registrationTx.Rollback()
+		t.Fatal(err)
+	}
+	if err := registrationTx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+
+	request := httptest.NewRequest("POST", "https://example.com/register", strings.NewReader("{}"))
+	request.Header.Set("Content-Type", "application/json")
+	registrationTx = mustBeginPasskey(t, database)
+	if err := FinishRegistration(ctx, registrationTx, "example.com", "example.com", "https://example.com", "owner@example.com", "192.0.2.90", beginRegistration.Token, request, now); err == nil {
+		_ = registrationTx.Rollback()
+		t.Fatal("SECURITY: malformed passkey registration response was accepted")
+	}
+	if err := registrationTx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	var remaining int
+	if err := database.QueryRow("SELECT COUNT(*) FROM account_webauthn_challenges WHERE token=?", beginRegistration.Token).Scan(&remaining); err != nil {
+		t.Fatal(err)
+	}
+	if remaining != 0 {
+		t.Fatal("SECURITY: failed registration response left challenge replayable")
+	}
+
+	loginTx := mustBeginPasskey(t, database)
+	beginLogin, err := BeginLogin(ctx, loginTx, "example.com", "example.com", "https://example.com", "192.0.2.91", "/profile", now)
+	if err != nil {
+		_ = loginTx.Rollback()
+		t.Fatal(err)
+	}
+	if err := loginTx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	request = httptest.NewRequest("POST", "https://example.com/login", strings.NewReader("{}"))
+	request.Header.Set("Content-Type", "application/json")
+	loginTx = mustBeginPasskey(t, database)
+	if _, _, err := FinishLogin(ctx, loginTx, "example.com", "example.com", "https://example.com", "192.0.2.91", beginLogin.Token, request, now); err == nil {
+		_ = loginTx.Rollback()
+		t.Fatal("SECURITY: malformed passkey login response was accepted")
+	}
+	if err := loginTx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.QueryRow("SELECT COUNT(*) FROM account_webauthn_challenges WHERE token=?", beginLogin.Token).Scan(&remaining); err != nil {
+		t.Fatal(err)
+	}
+	if remaining != 0 {
+		t.Fatal("SECURITY: failed login response left challenge replayable")
+	}
+}
+
+func TestPasskeyStorageAndTokenHelperBranches(t *testing.T) {
+	database := securityPasskeyDatabase(t)
+	ctx := context.Background()
+	now := time.Unix(1_800_100_500, 0).UTC()
+	handle := base64.RawURLEncoding.EncodeToString([]byte("handle"))
+	credential := webauthn.Credential{ID: []byte("id")}
+	encodedCredential, err := json.Marshal(credential)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Exec(
+		"INSERT INTO account_passkeys(domain,email,user_handle,credential_id,credential_json,created_at,last_used_at) VALUES(?,?,?,?,?,?,?)",
+		"example.com", "owner@example.com", handle, base64.RawURLEncoding.EncodeToString(credential.ID), string(encodedCredential), now.Unix(), now.Unix(),
+	); err != nil {
+		t.Fatal(err)
+	}
+	list, err := List(ctx, database, "example.com", "owner@example.com")
+	if err != nil || len(list) != 1 || list[0].LastUsed.IsZero() {
+		t.Fatalf("passkey list = %#v, %v", list, err)
+	}
+
+	tx := mustBeginPasskey(t, database)
+	result, err := storeChallenge(ctx, tx, "example.com", "owner@example.com", "register", "203.0.113.90", "/", map[string]any{"ok": true}, &webauthn.SessionData{Challenge: "challenge"}, now)
+	if err != nil || result.Token == "" || result.Options == nil {
+		_ = tx.Rollback()
+		t.Fatalf("store challenge = %#v, %v", result, err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+
+	first, err := randomToken()
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := randomToken()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(first) != 64 || len(second) != 64 || first == second {
+		t.Fatalf("random passkey token properties = %q %q", first, second)
 	}
 }
