@@ -3994,18 +3994,33 @@ func (db *Database) StreamMarkersByZoomBoundsSpeedOrderedByTrackDate(
 			if err != nil {
 				return fmt.Errorf("query track order: %w", err)
 			}
-			defer orderRows.Close()
 
+			// Read and close the ordering result before issuing per-track queries.
+			// Single-writer engines use one database/sql connection; keeping Rows
+			// open here while starting another query would wait for the same
+			// connection forever.
+			var orderedTrackIDs []string
 			for orderRows.Next() {
 				var (
 					trackID   string
 					startDate int64
 				)
 				if err := orderRows.Scan(&trackID, &startDate); err != nil {
+					_ = orderRows.Close()
 					return fmt.Errorf("scan track order: %w", err)
 				}
 				_ = startDate
+				orderedTrackIDs = append(orderedTrackIDs, trackID)
+			}
+			if err := orderRows.Err(); err != nil {
+				_ = orderRows.Close()
+				return fmt.Errorf("iterate track order: %w", err)
+			}
+			if err := orderRows.Close(); err != nil {
+				return fmt.Errorf("close track order: %w", err)
+			}
 
+			for _, trackID := range orderedTrackIDs {
 				query := fmt.Sprintf(`SELECT id,doseRate,date,lon,lat,countRate,zoom,speed,trackID,
                                      COALESCE(altitude, 0) AS altitude,
                                      COALESCE(detector, '') AS detector,
@@ -4047,9 +4062,6 @@ func (db *Database) StreamMarkersByZoomBoundsSpeedOrderedByTrackDate(
 				if err := rows.Close(); err != nil {
 					return fmt.Errorf("close markers: %w", err)
 				}
-			}
-			if err := orderRows.Err(); err != nil {
-				return fmt.Errorf("iterate track order: %w", err)
 			}
 			return nil
 		})
