@@ -109,6 +109,22 @@ func TestTrackSummaryPaginationAndDateRange(t *testing.T) {
 			t.Fatalf("unexpected date-range summaries: %#v", got)
 		}
 	})
+
+	t.Run("unlimited page", func(t *testing.T) {
+		summaries, errs := db.StreamTrackSummaries(context.Background(), "", 0, "sqlite")
+		got := collectTrackSummaries(t, summaries, errs)
+		if len(got) != 3 {
+			t.Fatalf("unlimited page length = %d, want 3", len(got))
+		}
+	})
+
+	t.Run("empty page", func(t *testing.T) {
+		summaries, errs := db.StreamTrackSummaries(context.Background(), "zzzz", 0, "sqlite")
+		got := collectTrackSummaries(t, summaries, errs)
+		if len(got) != 0 {
+			t.Fatalf("empty page length = %d, want 0", len(got))
+		}
+	})
 }
 
 func TestTrackIndexHelpers(t *testing.T) {
