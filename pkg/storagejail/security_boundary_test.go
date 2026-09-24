@@ -101,3 +101,43 @@ func TestSecurityBoundaryRelativePathRejectsSiblingPrefixConfusion(t *testing.T)
 		t.Fatal("SECURITY: sibling path sharing the storage-root prefix was accepted")
 	}
 }
+
+
+func TestStorageJailUnavailableRootAndRootMutationBranches(t *testing.T) {
+	missing := Root{path: filepath.Join(t.TempDir(), "missing")}
+	if _, err := missing.Open("file"); err == nil {
+		t.Fatal("opening through unavailable storage root succeeded")
+	}
+	if _, err := missing.Create("file"); err == nil {
+		t.Fatal("creating through unavailable storage root succeeded")
+	}
+	if err := missing.MkdirAll("dir", 0o755); err == nil {
+		t.Fatal("mkdir through unavailable storage root succeeded")
+	}
+	if _, err := missing.ReadFile("file"); err == nil {
+		t.Fatal("read through unavailable storage root succeeded")
+	}
+	if _, err := missing.Stat("file"); err == nil {
+		t.Fatal("stat through unavailable storage root succeeded")
+	}
+	if err := missing.WriteFile("file", []byte("x"), 0o600); err == nil {
+		t.Fatal("write through unavailable storage root succeeded")
+	}
+
+	root, err := New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := root.Remove("."); err == nil {
+		t.Fatal("SECURITY: storage root removal was allowed")
+	}
+	if err := root.RemoveAll("."); err == nil {
+		t.Fatal("SECURITY: storage root recursive removal was allowed")
+	}
+	if err := root.Rename(".", "renamed"); err == nil {
+		t.Fatal("SECURITY: storage root rename was allowed")
+	}
+	if err := root.Rename("missing", "."); err == nil {
+		t.Fatal("SECURITY: rename onto storage root was allowed")
+	}
+}
