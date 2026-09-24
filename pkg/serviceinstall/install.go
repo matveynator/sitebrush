@@ -1211,6 +1211,13 @@ func copyExecutable(sourcePath, destinationPath string) error {
 		return fmt.Errorf("open source binary: %w", err)
 	}
 	defer source.Close()
+	if destinationInfo, statErr := os.Lstat(destinationPath); statErr == nil {
+		if destinationInfo.Mode()&os.ModeSymlink != 0 {
+			return errors.New("installed binary destination must not be a symbolic link")
+		}
+	} else if !errors.Is(statErr, os.ErrNotExist) {
+		return fmt.Errorf("inspect installed binary destination: %w", statErr)
+	}
 	destination, err := os.OpenFile(destinationPath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o755)
 	if err != nil {
 		return fmt.Errorf("create installed binary: %w", err)
