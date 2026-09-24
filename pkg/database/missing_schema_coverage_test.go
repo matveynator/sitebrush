@@ -162,6 +162,39 @@ func TestDatabaseMissingSchemaErrorBranches(t *testing.T) {
 		if orderedErr == nil {
 			t.Fatal("ordered marker stream did not report missing table")
 		}
+
+		trackStream, trackErrs := db.StreamMarkersByTrackIDZoomAndBounds(
+			ctx, "missing", 8, 55, 37, 56, 38, "sqlite",
+		)
+		for range trackStream {
+			t.Fatal("track marker stream returned data without table")
+		}
+		var trackErr error
+		for err := range trackErrs {
+			if err != nil {
+				trackErr = err
+			}
+		}
+		if trackErr == nil {
+			t.Fatal("track marker stream did not report missing table")
+		}
+
+		speedStream, speedErrs := db.StreamMarkersByTrackIDZoomBoundsSpeed(
+			ctx, "missing", 8, 55, 37, 56, 38, 10, 100,
+			[]SpeedRange{{Min: 0, Max: 10}, {Min: 20, Max: 30}}, "sqlite",
+		)
+		for range speedStream {
+			t.Fatal("track speed stream returned data without table")
+		}
+		var speedErr error
+		for err := range speedErrs {
+			if err != nil {
+				speedErr = err
+			}
+		}
+		if speedErr == nil {
+			t.Fatal("track speed stream did not report missing table")
+		}
 	})
 
 }
