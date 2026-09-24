@@ -47,6 +47,28 @@ func TestIndexCatalogAndBuilderEdgeBranches(t *testing.T) {
 	}
 }
 
+func TestIndexBuilderFallbackWithoutCatalog(t *testing.T) {
+	db, _ := newSQLiteConcurrencyTestDatabase(t)
+
+	done := db.EnsureIndexesAsync(context.Background(), Config{DBType: "unknown"}, func(string, ...any) {})
+	if done == nil {
+		t.Fatal("fallback index builder unexpectedly disabled")
+	}
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("fallback index builder did not finish")
+	}
+
+	exists, err := db.indexExistsPortable(context.Background(), "sqlite", "idx_markers_zoom_bounds")
+	if err != nil {
+		t.Fatalf("check fallback-created index: %v", err)
+	}
+	if !exists {
+		t.Fatal("fallback index builder did not create idx_markers_zoom_bounds")
+	}
+}
+
 func TestTrackBackfillEdgeBranches(t *testing.T) {
 	db, _ := newSQLiteConcurrencyTestDatabase(t)
 	ctx := context.Background()
