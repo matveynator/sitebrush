@@ -137,7 +137,7 @@ func TestTemplateRewriteAndMatchHelperBranches(t *testing.T) {
 		{"<img />", false, "<img  class=\"SiteBrush-Template shared theme\"/>"},
 		{"<div class=\"plain\">", false, "<div class=\"SiteBrush-Template shared theme plain\">"},
 		{"<div class='SiteBrush-Template plain'>", true, "<div class=\"plain\">"},
-		{"<div class=\"SiteBrush-Template\">", true, "<div >"},
+		{"<div class=\"SiteBrush-Template\">", true, "<div>"},
 		{"broken", false, "broken"},
 	}
 	for _, tc := range tests {
