@@ -493,7 +493,7 @@ func activeSecurityBlock(blocks map[string]SecurityBlock, ip string, now time.Ti
 
 func securityCategoryBlocks(category string) bool {
 	switch category {
-	case "injection", "traversal", "repository", "secret", "source-backup", "scanner-client", "enumeration", "authentication-failures":
+	case "injection", "traversal", "repository", "secret", "source-backup", "scanner-client", "enumeration":
 		return true
 	default:
 		return false
