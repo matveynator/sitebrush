@@ -49,7 +49,7 @@ func TestClickHouseConfigAndRequestEdgeBranches(t *testing.T) {
 	conn := &clickhouseConn{cfg: clickHouseConfig{
 		scheme: "https",
 		host: "example.com",
-		params: map[string][]string{"compress": {"1", "2"}},
+		params: map[string][]string{"compress": []string{"1", "2"}},
 	}}
 	request, err := conn.newRequest(context.Background(), "SELECT 1")
 	if err != nil {
@@ -100,8 +100,13 @@ func TestClickHouseRowsAndJSONEdgeBranches(t *testing.T) {
 	for _, malformed := range []string{
 		`{"names":["id"],"types":["UInt64"],"data":[[1,2]]}`,
 		`{"meta":[[]],"data":[]}`,
-		"["id"]\n["UInt64","String"]\n",
-		"["id"]\n["UInt64"]\n[1,2]\n",
+		`["id"]
+["UInt64","String"]
+`,
+		`["id"]
+["UInt64"]
+[1,2]
+`,
 	} {
 		if _, err := decodeJSONResult(strings.NewReader(malformed)); err == nil {
 			t.Fatalf("malformed ClickHouse JSON accepted: %q", malformed)
