@@ -16,8 +16,9 @@ import (
 )
 
 const (
-	defaultSecurityBlockTTL  = 7 * 24 * time.Hour
-	securityReasonHistoryTTL = 7 * 24 * time.Hour
+	defaultSecurityBlockTTL     = 24 * time.Hour
+	securityReasonHistoryTTL    = 7 * 24 * time.Hour
+	securityEscalationHistoryTTL = 64 * 24 * time.Hour
 	trustedAdminIPCacheTTL   = 5 * time.Minute
 	securityReasonLogLimit   = 24
 	attackGuardShardCount    = 16
@@ -63,6 +64,11 @@ type attackWindow struct {
 	Distinct  map[string]struct{}
 }
 
+type incidentWindow struct {
+	Started time.Time
+	Counts  map[string]int
+}
+
 type attackGuardDiskState struct {
 	Version   int              `json:"version"`
 	Settings  SecuritySettings `json:"settings"`
@@ -80,6 +86,7 @@ const (
 	attackGuardUpdate
 	attackGuardRemove
 	attackGuardSnapshot
+	attackGuardPersistenceSnapshot
 	attackGuardGetSettings
 	attackGuardSetSettings
 	attackGuardApplyGlobal
@@ -201,6 +208,7 @@ func runAttackGuardShard(requests <-chan attackGuardRequest, shutdown <-chan str
 	trustedAdminIPs := make(map[string]time.Time)
 	adminIPLookups := make(map[string]time.Time)
 	windows := map[string]*attackWindow{}
+	incidents := map[string]*incidentWindow{}
 	for _, block := range initial {
 		blocks[block.IP] = block
 	}
@@ -215,10 +223,10 @@ func runAttackGuardShard(requests <-chan attackGuardRequest, shutdown <-chan str
 		case <-shutdown:
 			return
 		case now := <-pruneTicker.C:
-			pruneAttackGuardState(blocks, windows, now.UTC())
+			pruneAttackGuardState(blocks, windows, incidents, now.UTC())
 			pruneAdminIPTrustState(trustedAdminIPs, adminIPLookups, now.UTC())
 		case request := <-requests:
-			result := handleAttackGuardRequest(blocks, allowlist, trustedAdminIPs, adminIPLookups, windows, &settings, request)
+			result := handleAttackGuardRequest(blocks, allowlist, trustedAdminIPs, adminIPLookups, windows, incidents, &settings, request)
 			if request.Reply != nil {
 				select {
 				case request.Reply <- result:
@@ -230,7 +238,7 @@ func runAttackGuardShard(requests <-chan attackGuardRequest, shutdown <-chan str
 	}
 }
 
-func handleAttackGuardRequest(blocks map[string]SecurityBlock, allowlist map[string]SecurityAllow, trustedAdminIPs, adminIPLookups map[string]time.Time, windows map[string]*attackWindow, settings *SecuritySettings, request attackGuardRequest) attackGuardResult {
+func handleAttackGuardRequest(blocks map[string]SecurityBlock, allowlist map[string]SecurityAllow, trustedAdminIPs, adminIPLookups map[string]time.Time, windows map[string]*attackWindow, incidents map[string]*incidentWindow, settings *SecuritySettings, request attackGuardRequest) attackGuardResult {
 	now := request.Now
 	if now.IsZero() {
 		now = time.Now().UTC()
@@ -287,12 +295,12 @@ func handleAttackGuardRequest(blocks map[string]SecurityBlock, allowlist map[str
 				reason = "mass-enumeration"
 				description = "scanned at least 48 distinct paths within 10 seconds"
 			}
-			block := blockSecurityIP(blocks, ip, reason, description, "local", now, defaultSecurityBlockTTL)
+			block := blockSecurityIP(blocks, ip, reason, description, "local", now, automaticSecurityBlockTTL(blocks[ip].Violations+1))
 			delete(windows, ip)
 			return attackGuardResult{Block: block, Blocked: true, Changed: true}
 		}
 		if len(windows) > 1024 {
-			pruneAttackGuardState(blocks, windows, now)
+			pruneAttackGuardState(blocks, windows, incidents, now)
 		}
 		return attackGuardResult{}
 
@@ -303,7 +311,21 @@ func handleAttackGuardRequest(blocks map[string]SecurityBlock, allowlist map[str
 		if !settings.AutoBlock || ip == "" || !securityCategoryBlocks(request.Category) {
 			return attackGuardResult{}
 		}
-		block := blockSecurityIP(blocks, ip, request.Category, request.Description, "local", now, defaultSecurityBlockTTL)
+		threshold := securityCategoryThreshold(request.Category)
+		if threshold > 1 {
+			window := incidents[ip]
+			if window == nil || now.Sub(window.Started) > time.Minute {
+				window = &incidentWindow{Started: now, Counts: map[string]int{}}
+				incidents[ip] = window
+			}
+			window.Counts[request.Category]++
+			if window.Counts[request.Category] < threshold {
+				return attackGuardResult{}
+			}
+			delete(window.Counts, request.Category)
+		}
+		previous := blocks[ip]
+		block := blockSecurityIP(blocks, ip, request.Category, request.Description, "local", now, automaticSecurityBlockTTL(previous.Violations+1))
 		return attackGuardResult{Block: block, Blocked: true, Changed: true}
 
 	case attackGuardAdd:
@@ -339,12 +361,22 @@ func handleAttackGuardRequest(blocks map[string]SecurityBlock, allowlist map[str
 		_, found := blocks[ip]
 		delete(blocks, ip)
 		delete(windows, ip)
+		delete(incidents, ip)
 		return attackGuardResult{Changed: found}
 
 	case attackGuardSnapshot:
 		snapshot := make([]SecurityBlock, 0, len(blocks))
 		for _, block := range blocks {
 			if block.ExpiresAt.IsZero() || now.Before(block.ExpiresAt) {
+				snapshot = append(snapshot, block)
+			}
+		}
+		return attackGuardResult{Blocks: snapshot}
+
+	case attackGuardPersistenceSnapshot:
+		snapshot := make([]SecurityBlock, 0, len(blocks))
+		for _, block := range blocks {
+			if block.LastEvent.IsZero() || now.Sub(block.LastEvent) <= securityEscalationHistoryTTL {
 				snapshot = append(snapshot, block)
 			}
 		}
@@ -411,6 +443,7 @@ func handleAttackGuardRequest(blocks map[string]SecurityBlock, allowlist map[str
 		allowlist[ip] = allowed
 		delete(blocks, ip)
 		delete(windows, ip)
+		delete(incidents, ip)
 		return attackGuardResult{Allowed: true, Changed: true}
 
 	case attackGuardAllowRemove:
@@ -485,19 +518,39 @@ func activeSecurityBlock(blocks map[string]SecurityBlock, ip string, now time.Ti
 		return SecurityBlock{}, false
 	}
 	if !block.ExpiresAt.IsZero() && !now.Before(block.ExpiresAt) {
-		delete(blocks, ip)
 		return SecurityBlock{}, false
 	}
 	return block, true
 }
 
 func securityCategoryBlocks(category string) bool {
+	return securityCategoryThreshold(category) > 0
+}
+
+// High-confidence probes can block immediately. Heuristic categories need
+// repeated evidence inside one minute to avoid false positives from a single
+// malformed request, shared NAT/VPN address, or spoofed User-Agent.
+func securityCategoryThreshold(category string) int {
 	switch category {
-	case "injection", "traversal", "repository", "secret", "source-backup", "scanner-client", "enumeration":
-		return true
+	case "traversal", "repository", "secret", "enumeration":
+		return 1
+	case "injection":
+		return 2
+	case "source-backup", "scanner-client":
+		return 3
 	default:
-		return false
+		return 0
 	}
+}
+
+func automaticSecurityBlockTTL(violation int) time.Duration {
+	if violation < 1 {
+		violation = 1
+	}
+	if violation > 6 {
+		violation = 6
+	}
+	return time.Duration(1<<(violation-1)) * 24 * time.Hour
 }
 
 func blockSecurityIP(blocks map[string]SecurityBlock, ip, reason, description, source string, now time.Time, ttl time.Duration) SecurityBlock {
@@ -508,9 +561,6 @@ func blockSecurityIP(blocks map[string]SecurityBlock, ip, reason, description, s
 	}
 	if ttl < time.Minute {
 		ttl = defaultSecurityBlockTTL
-	}
-	if violations >= 3 && ttl < 30*24*time.Hour {
-		ttl = 30 * 24 * time.Hour
 	}
 	incidentID := previous.IncidentID
 	if incidentID == "" {
@@ -592,9 +642,9 @@ func pruneSecurityReasonLog(events []SecurityReasonEvent, now time.Time) []Secur
 	return kept
 }
 
-func pruneAttackGuardState(blocks map[string]SecurityBlock, windows map[string]*attackWindow, now time.Time) {
+func pruneAttackGuardState(blocks map[string]SecurityBlock, windows map[string]*attackWindow, incidents map[string]*incidentWindow, now time.Time) {
 	for ip, block := range blocks {
-		if !block.ExpiresAt.IsZero() && !now.Before(block.ExpiresAt) {
+		if !block.LastEvent.IsZero() && now.Sub(block.LastEvent) > securityEscalationHistoryTTL {
 			delete(blocks, ip)
 			continue
 		}
@@ -604,6 +654,11 @@ func pruneAttackGuardState(blocks map[string]SecurityBlock, windows map[string]*
 	for ip, window := range windows {
 		if now.Sub(window.Started) > time.Minute {
 			delete(windows, ip)
+		}
+	}
+	for ip, window := range incidents {
+		if now.Sub(window.Started) > time.Minute {
+			delete(incidents, ip)
 		}
 	}
 }
@@ -827,6 +882,21 @@ func (guard *AttackGuard) Snapshot(now time.Time) ([]SecurityBlock, error) {
 	return blocks, nil
 }
 
+func (guard *AttackGuard) persistenceSnapshot(now time.Time) ([]SecurityBlock, error) {
+	blocks := []SecurityBlock{}
+	for index := range guard.shards {
+		result, ok := guard.exchangeShardAdmin(index, attackGuardRequest{Operation: attackGuardPersistenceSnapshot, Now: now})
+		if !ok {
+			return nil, errors.New("security guard is busy")
+		}
+		if result.Err != nil {
+			return nil, result.Err
+		}
+		blocks = append(blocks, result.Blocks...)
+	}
+	return blocks, nil
+}
+
 func (guard *AttackGuard) exchangeFast(request attackGuardRequest) (attackGuardResult, bool) {
 	ip := normalizeSecurityIP(request.IP)
 	if ip == "" {
@@ -927,7 +997,7 @@ func (guard *AttackGuard) saveSnapshot() error {
 	if err != nil {
 		return err
 	}
-	blocks, err := guard.Snapshot(time.Now().UTC())
+	blocks, err := guard.persistenceSnapshot(time.Now().UTC())
 	if err != nil {
 		return err
 	}
