@@ -312,6 +312,60 @@ func TestSQLiteRecoversAfterExternalWriteLockIsReleased(t *testing.T) {
 	}
 }
 
+func TestStreamTrackSummariesDoesNotDeadlockSingleConnection(t *testing.T) {
+	db, _ := newSQLiteConcurrencyTestDatabase(t)
+
+	if err := db.withSerializedConnectionFor(context.Background(), WorkloadUserUpload, func(ctx context.Context, conn *sql.DB) error {
+		for id := 1; id <= 4; id++ {
+			trackID := "track-a"
+			if id > 2 {
+				trackID = "track-b"
+			}
+			if _, err := conn.ExecContext(ctx, `INSERT INTO markers (
+id,doseRate,date,lon,lat,countRate,zoom,speed,trackID
+) VALUES (?,?,?,?,?,?,?,?,?)`, id, 0.1*float64(id), id, 37.6, 55.7, id, 8, 1, trackID); err != nil {
+				return err
+			}
+			if _, err := conn.ExecContext(ctx, "INSERT OR IGNORE INTO tracks(trackID) VALUES(?)", trackID); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("seed tracks: %v", err)
+	}
+
+	out, errs := db.StreamTrackSummaries(context.Background(), "", 10, "sqlite")
+	var summaries []TrackSummary
+	timeout := time.NewTimer(2 * time.Second)
+	defer timeout.Stop()
+
+	for out != nil || errs != nil {
+		select {
+		case summary, ok := <-out:
+			if !ok {
+				out = nil
+				continue
+			}
+			summaries = append(summaries, summary)
+		case err, ok := <-errs:
+			if !ok {
+				errs = nil
+				continue
+			}
+			if err != nil {
+				t.Fatalf("stream track summaries: %v", err)
+			}
+		case <-timeout.C:
+			t.Fatal("track summary stream deadlocked with one database connection")
+		}
+	}
+
+	if len(summaries) != 2 {
+		t.Fatalf("track summary count = %d, want 2", len(summaries))
+	}
+}
+
 func TestBackgroundIndexBuildAndRealtimeWritesDoNotDeadlock(t *testing.T) {
 	db, _ := newSQLiteConcurrencyTestDatabase(t)
 
