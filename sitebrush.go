@@ -22055,7 +22055,10 @@ func (a *App) runSecurityGlobalSync(stop <-chan struct{}) {
 		select {
 		case <-stop:
 			return
-		case signal := <-a.securityGlobalSignals:
+		case signal, open := <-a.securityGlobalSignals:
+			if !open {
+				return
+			}
 			if a.attackGuard == nil {
 				continue
 			}
