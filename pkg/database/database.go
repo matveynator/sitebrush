@@ -1367,11 +1367,17 @@ func desiredIndexesPortable(dbType string) []struct{ name, sql string } {
 // We keep it engine-specific but simple, and do this at app level (= not
 // relying on engine-specific CREATE options).
 func (db *Database) indexExistsPortable(ctx context.Context, dbType, indexName string) (bool, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	var (
+		query string
+		arg   any = indexName
+	)
 	switch strings.ToLower(dbType) {
 	case "pgx":
-		// Look for an index with this name in any schema on search_path.
-		// pg_class.relkind = 'i' means "index".
-		const q = `
+		query = `
 SELECT 1
 FROM pg_class c
 JOIN pg_namespace n ON n.oid = c.relnamespace
@@ -1379,38 +1385,45 @@ WHERE c.relkind = 'i'
   AND c.relname = $1
   AND n.nspname = ANY (current_schemas(true))
 LIMIT 1`
-		var one int
-		err := db.DB.QueryRowContext(ctx, q, indexName).Scan(&one)
-		if err == sql.ErrNoRows {
-			return false, nil
-		}
-		return err == nil, err
-
 	case "sqlite", "chai":
-		// Standard SQLite catalog
-		const q = `SELECT name FROM sqlite_master WHERE type='index' AND name=? LIMIT 1`
-		var name string
-		err := db.DB.QueryRowContext(ctx, q, indexName).Scan(&name)
-		if err == sql.ErrNoRows {
-			return false, nil
-		}
-		return err == nil, err
-
+		query = `SELECT name FROM sqlite_master WHERE type='index' AND name=? LIMIT 1`
 	case "duckdb":
-		// DuckDB exposes indexes in information_schema, which keeps the query portable.
-		const q = `SELECT 1 FROM information_schema.indexes WHERE index_name = ? LIMIT 1`
-		var one int
-		err := db.DB.QueryRowContext(ctx, q, indexName).Scan(&one)
-		if err == sql.ErrNoRows {
-			return false, nil
-		}
-		return err == nil, err
-
+		query = `SELECT 1 FROM information_schema.indexes WHERE index_name = ? LIMIT 1`
 	default:
-		// Unknown engine: assume not exists to try creation;
-		// caller will catch "already exists" text if any.
 		return false, nil
 	}
+
+	found := false
+	err := db.withSerializedConnectionFor(ctx, WorkloadGeneral, func(runCtx context.Context, conn *sql.DB) error {
+		switch strings.ToLower(dbType) {
+		case "sqlite", "chai":
+			var name string
+			err := conn.QueryRowContext(runCtx, query, arg).Scan(&name)
+			if err == sql.ErrNoRows {
+				return nil
+			}
+			if err != nil {
+				return err
+			}
+			found = true
+			return nil
+		default:
+			var one int
+			err := conn.QueryRowContext(runCtx, query, arg).Scan(&one)
+			if err == sql.ErrNoRows {
+				return nil
+			}
+			if err != nil {
+				return err
+			}
+			found = true
+			return nil
+		}
+	})
+	if err != nil {
+		return false, err
+	}
+	return found, nil
 }
 
 // InitSchema creates minimal required schema synchronously so that
@@ -4306,32 +4319,39 @@ func (db *Database) DetectExistingTrackID(
 
 		sb.WriteString(" GROUP BY trackID")
 
-		rows, err := db.DB.Query(sb.String(), args...)
+		var foundTrackID string
+		err := db.withSerializedConnectionFor(context.Background(), WorkloadWebRead, func(runCtx context.Context, conn *sql.DB) error {
+			rows, err := conn.QueryContext(runCtx, sb.String(), args...)
+			if err != nil {
+				return fmt.Errorf("DetectExistingTrackID bulk: %w", err)
+			}
+			defer rows.Close()
+
+			for rows.Next() {
+				var (
+					tid  string
+					hits int
+				)
+				if err := rows.Scan(&tid, &hits); err != nil {
+					return fmt.Errorf("DetectExistingTrackID scan: %w", err)
+				}
+				totals[tid] += hits
+				if totals[tid] >= threshold {
+					foundTrackID = tid
+					return nil
+				}
+			}
+			if err := rows.Err(); err != nil {
+				return fmt.Errorf("DetectExistingTrackID rows: %w", err)
+			}
+			return nil
+		})
 		if err != nil {
-			return "", fmt.Errorf("DetectExistingTrackID bulk: %w", err)
+			return "", err
 		}
-
-		for rows.Next() {
-			var (
-				tid  string
-				hits int
-			)
-			if err := rows.Scan(&tid, &hits); err != nil {
-				rows.Close()
-				return "", fmt.Errorf("DetectExistingTrackID scan: %w", err)
-			}
-			totals[tid] += hits
-			if totals[tid] >= threshold {
-				rows.Close()
-				return tid, nil // FOUND!
-			}
+		if foundTrackID != "" {
+			return foundTrackID, nil
 		}
-
-		if err := rows.Err(); err != nil {
-			rows.Close()
-			return "", fmt.Errorf("DetectExistingTrackID rows: %w", err)
-		}
-		rows.Close()
 	}
 
 	return "", nil // unique track — safe to create a new one
