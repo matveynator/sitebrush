@@ -565,6 +565,9 @@ func validateIssuedCertificate(certificate *tls.Certificate, domain string, now 
 	if certificate == nil || certificate.Leaf == nil {
 		return errors.New("issued certificate leaf is missing")
 	}
+	if len(certificate.Certificate) == 0 {
+		return errors.New("issued certificate DER is missing")
+	}
 	if now.Before(certificate.Leaf.NotBefore) || !now.Before(certificate.Leaf.NotAfter) {
 		return errors.New("issued certificate is outside its validity period")
 	}

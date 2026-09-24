@@ -71,3 +71,34 @@ func TestPaymentCommissionIsAddedOnTop(t *testing.T) {
 		t.Fatalf("commission = %d, want 50", commission)
 	}
 }
+
+func TestServerPolicyValidationAndNormalization(t *testing.T) {
+	valid := DefaultServerPolicy(" install-1 ", 1_000_000_000)
+	if err := valid.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	testCases := []struct {
+		name   string
+		policy ServerPolicy
+	}{
+		{"missing installation", ServerPolicy{Mode: ModeAutomatic, DiskRatePer100GBMinor: 1, Currency: "USD"}},
+		{"unsupported mode", ServerPolicy{InstallationID: "x", Mode: "other", DiskRatePer100GBMinor: 1, Currency: "USD"}},
+		{"invalid rate", ServerPolicy{InstallationID: "x", Mode: ModeAutomatic, Currency: "USD"}},
+		{"missing actual invoice", ServerPolicy{InstallationID: "x", Mode: ModeActual, DiskRatePer100GBMinor: 1, Currency: "USD"}},
+		{"bad currency", ServerPolicy{InstallationID: "x", Mode: ModeAutomatic, DiskRatePer100GBMinor: 1, Currency: "US1"}},
+		{"negative free threshold", ServerPolicy{InstallationID: "x", Mode: ModeAutomatic, DiskRatePer100GBMinor: 1, Currency: "USD", FreeSiteThresholdBytes: -1}},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			if err := testCase.policy.Validate(); err == nil {
+				t.Fatal("Validate unexpectedly succeeded")
+			}
+		})
+	}
+	if normalized := NormalizePolicy(ServerPolicy{InstallationID: " x ", Currency: " usd "}); normalized.Mode != ModeAutomatic || normalized.DiskRatePer100GBMinor != DefaultDiskRatePer100GBMinor || normalized.FreeSiteThresholdBytes != DefaultFreeSiteThresholdBytes || normalized.Currency != "USD" {
+		t.Fatalf("normalized defaults=%+v", normalized)
+	}
+	if normalized := NormalizePolicy(ServerPolicy{Mode: ModeActual, DiskRatePer100GBMinor: -1, FreeSiteThresholdBytes: -1, Currency: "U$D"}); normalized.FreeSiteThresholdBytes != DefaultFreeSiteThresholdBytes || normalized.Currency != "EUR" {
+		t.Fatalf("normalized invalid values=%+v", normalized)
+	}
+}

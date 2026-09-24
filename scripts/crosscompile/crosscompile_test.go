@@ -546,3 +546,106 @@ func TestFindRepoRoot(t *testing.T) {
 		t.Skip("symlink behavior is verified on POSIX systems only")
 	}
 }
+
+func TestBuildServerArtifactsWithStubCompiler(t *testing.T) {
+	binDir := t.TempDir()
+	stubGo := filepath.Join(binDir, "go")
+	if err := os.WriteFile(stubGo, []byte("#!/bin/sh\nwhile [ \"$#\" -gt 0 ]; do\n  if [ \"$1\" = \"-o\" ]; then shift; printf binary > \"$1\"; fi\n  shift\ndone\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir)
+	outputDir := t.TempDir()
+	if err := buildServerAppArtifacts(t.TempDir(), outputDir, "sitebrush", "test", buildTargetFilter{goos: "linux", goarch: "amd64"}); err != nil {
+		t.Fatal(err)
+	}
+	artifact := filepath.Join(outputDir, "server-app", "sitebrush_linux_amd64")
+	if err := verifyNonEmptyFile(artifact); err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyNonEmptyFile(filepath.Join(outputDir, "server-app", "MD5SUMS")); err != nil {
+		t.Fatal(err)
+	}
+	if err := buildServerAppArtifacts(t.TempDir(), t.TempDir(), "sitebrush", "test", buildTargetFilter{goos: "haiku"}); err == nil {
+		t.Fatal("empty target set succeeded")
+	}
+}
+
+func TestDesktopBuildTargetSelectionErrors(t *testing.T) {
+	filtered := buildTargetFilter{goos: "freebsd"}
+	if built, err := buildLinuxDesktopArtifacts(t.TempDir(), t.TempDir(), "sitebrush", "test", desktopBuildOptions{targetFilter: filtered}); err != nil || built {
+		t.Fatalf("non-Linux target = %v, %v", built, err)
+	}
+	if built, err := buildWindowsDesktopArtifacts(t.TempDir(), t.TempDir(), "sitebrush", "test", desktopBuildOptions{targetFilter: filtered}); err != nil || built {
+		t.Fatalf("non-Windows target = %v, %v", built, err)
+	}
+	if err := buildDesktopAppArtifacts(t.TempDir(), t.TempDir(), "sitebrush", "test", desktopBuildOptions{targetFilter: filtered}); err == nil {
+		t.Fatal("unsupported target set succeeded")
+	}
+	if matches := (buildTargetFilter{goos: "windows"}).matchesOS("linux"); matches {
+		t.Fatal("OS filter unexpectedly matched")
+	}
+	if got := (buildTargetFilter{goos: "windows", goarch: "arm64"}).label(); got != "os=windows arch=arm64" {
+		t.Fatalf("filter label=%q", got)
+	}
+	if got := (buildTargetFilter{}).label(); got != "all targets" {
+		t.Fatalf("empty filter label=%q", got)
+	}
+}
+
+func TestSyncDestinationFlagString(t *testing.T) {
+	var noTargets *syncDestinationFlags
+	if noTargets.String() != "" {
+		t.Fatal("nil sync target string should be empty")
+	}
+	targets := syncDestinationFlags{{host: "one", base: "/a"}, {host: "two", base: "/b"}}
+	if got := targets.String(); got != "one=/a,two=/b" {
+		t.Fatalf("sync target string=%q", got)
+	}
+}
+
+func TestDesktopArtifactBuildOrchestrationWithStubCommands(t *testing.T) {
+	commandDirectory := t.TempDir()
+	writeCommandStub(t, commandDirectory, "go", `last=""; previous=""; for argument in "$@"; do if [ "$previous" = "-o" ]; then last="$argument"; fi; previous="$argument"; done; printf binary > "$last"`)
+	writeCommandStub(t, commandDirectory, "docker", `exit 0`)
+	writeCommandStub(t, commandDirectory, "lipo", `last=""; previous=""; for argument in "$@"; do if [ "$previous" = "-output" ]; then last="$argument"; fi; previous="$argument"; done; if [ -n "$last" ]; then printf binary > "$last"; fi`)
+	writeCommandStub(t, commandDirectory, "cp", `if [ "$1" = "-R" ]; then exit 0; fi; last=""; for argument in "$@"; do last="$argument"; done; printf binary > "$last"`)
+	writeCommandStub(t, commandDirectory, "sips", `previous=""; for argument in "$@"; do if [ "$previous" = "--out" ]; then printf icon > "$argument"; fi; previous="$argument"; done`)
+	writeCommandStub(t, commandDirectory, "iconutil", `previous=""; for argument in "$@"; do if [ "$previous" = "-o" ]; then printf icon > "$argument"; fi; previous="$argument"; done`)
+	writeCommandStub(t, commandDirectory, "hdiutil", `for argument in "$@"; do last="$argument"; done; printf dmg > "$last"`)
+	writeCommandStub(t, commandDirectory, "ln", `exit 0`)
+	t.Setenv("PATH", commandDirectory)
+
+	root := t.TempDir()
+	desktopDir := filepath.Join(root, "desktop")
+	if err := os.MkdirAll(desktopDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := buildMacOSDesktopArtifacts(root, desktopDir, "sitebrush", "test"); err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyNonEmptyFile(filepath.Join(desktopDir, "sitebrush_darwin_universal_desktop.dmg")); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, target := range []struct{ os, arch, variant string }{{"linux", "amd64", "gtk40"}, {"windows", "arm64", ""}} {
+		name := desktopArtifactName("sitebrush", target.os, target.arch, target.variant)
+		if err := os.WriteFile(filepath.Join(desktopDir, name+".zip"), []byte("archive"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if target.os == "linux" {
+			if err := buildLinuxDesktopArtifactInDocker(root, desktopDir, "sitebrush", "test", target.arch, target.variant, desktopBuildOptions{}); err != nil {
+				t.Fatal(err)
+			}
+		} else if err := buildWindowsDesktopArtifactInDocker(root, desktopDir, "sitebrush", "test", target.arch, desktopBuildOptions{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func writeCommandStub(t *testing.T, directory, name, body string) {
+	t.Helper()
+	path := filepath.Join(directory, name)
+	if err := os.WriteFile(path, []byte("#!/bin/sh\nset -eu\n"+body+"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+}

@@ -49,6 +49,7 @@ import (
 	"github.com/matveynator/sitebrush/v2/pkg/diskusage"
 	"github.com/matveynator/sitebrush/v2/pkg/expenses"
 	"github.com/matveynator/sitebrush/v2/pkg/hostingandsupport"
+	"github.com/matveynator/sitebrush/v2/pkg/httpsecurity"
 	"github.com/matveynator/sitebrush/v2/pkg/mailout"
 	"github.com/matveynator/sitebrush/v2/pkg/sitebrushtemplate"
 	"golang.org/x/net/dns/dnsmessage"
@@ -5093,6 +5094,16 @@ func TestDemoSiteVisitorGetsEditorSessionAndCleanupDeletesSite(t *testing.T) {
 	if sessionCookie == nil || strings.TrimSpace(sessionCookie.Value) == "" {
 		t.Fatalf("demo session cookie missing in %#v", cookies)
 	}
+	var demoSessionTrust, visitorTrustCount int
+	if err := application.db.QueryRowContext(demoContext, `SELECT admin_ip_trust FROM sessions WHERE token=?`, sessionCookie.Value).Scan(&demoSessionTrust); err != nil {
+		t.Fatalf("read demo session IP trust setting: %v", err)
+	}
+	if err := application.db.QueryRowContext(demoContext, `SELECT COUNT(1) FROM account_trusted_ips WHERE domain=? AND email=?`, "demo.example", "demo@demo.example").Scan(&visitorTrustCount); err != nil {
+		t.Fatalf("read demo visitor trusted addresses: %v", err)
+	}
+	if demoSessionTrust != 0 || visitorTrustCount != 0 {
+		t.Fatalf("demo session trust = %d, trusted visitor addresses = %d; want both disabled", demoSessionTrust, visitorTrustCount)
+	}
 
 	landingRequest := httptest.NewRequest(http.MethodGet, "https://demo.example/", nil)
 	landingRequest = landingRequest.WithContext(contextWithDomain(landingRequest.Context(), "demo.example"))
@@ -6740,6 +6751,49 @@ func TestEmbeddedStaticAssetsServedFromMemory(t *testing.T) {
 	}
 	if !strings.Contains(codeMirrorResponse.Body.String(), "htmlmixed") {
 		t.Fatalf("codemirror asset body did not look like htmlmixed mode")
+	}
+}
+
+func TestAuthenticatedAdminIPBypassesSecurityOnlyForItsSite(t *testing.T) {
+	application, rawDB := newTestApplication(t)
+	attackGuard, err := httpsecurity.NewAttackGuard("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	application.attackGuard = attackGuard
+	t.Cleanup(attackGuard.Close)
+
+	clientIP := "198.51.100.77"
+	domain := "trusted.example"
+	if _, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, domain, "admin@trusted.example", "password"); err != nil {
+		t.Fatal(err)
+	}
+	lastLogin := time.Now().Add(-time.Minute).Unix()
+	if _, err := rawDB.Exec(`INSERT INTO account_trusted_ips(domain,email,client_ip,confirmed_at,last_login) VALUES(?,?,?,?,?)`, domain, "admin@trusted.example", clientIP, lastLogin, lastLogin); err != nil {
+		t.Fatal(err)
+	}
+	if _, blocked := attackGuard.ObserveIncident(clientIP, "injection", "test existing block", time.Now().UTC()); !blocked {
+		t.Fatal("failed to prepare the existing address block")
+	}
+
+	router := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
+	protected := application.authAbuseMiddleware(router)
+	requestFor := func(host, path string) *http.Request {
+		request := httptest.NewRequest(http.MethodGet, "http://"+host+path, nil)
+		request.RemoteAddr = clientIP + ":1234"
+		return request
+	}
+	trustedResponse := httptest.NewRecorder()
+	protected.ServeHTTP(trustedResponse, requestFor(domain, "/load-test"))
+	if trustedResponse.Code != http.StatusNoContent {
+		t.Fatalf("trusted site response = %d, want %d: %s", trustedResponse.Code, http.StatusNoContent, trustedResponse.Body.String())
+	}
+	otherSiteResponse := httptest.NewRecorder()
+	protected.ServeHTTP(otherSiteResponse, requestFor("other.example", "/load-test"))
+	if otherSiteResponse.Code != http.StatusTooManyRequests {
+		t.Fatalf("other site response = %d, want %d", otherSiteResponse.Code, http.StatusTooManyRequests)
 	}
 }
 
@@ -15138,7 +15192,6 @@ func TestAccountMailPrefillsCodeOnlyInFragment(t *testing.T) {
 	}
 }
 
-
 func TestDefaultCrawlerDiscoveryFilesExposePublishedContent(t *testing.T) {
 	application, rawDB := newTestApplication(t)
 	for _, pagePath := range []string{"/", "/docs/", "/about"} {
@@ -15200,7 +15253,6 @@ func TestDefaultCrawlerIndexOnlyHandlesReadOnlyDiscoveryPaths(t *testing.T) {
 		}
 	}
 }
-
 
 func TestPasswordPromptPreventsIndexing(t *testing.T) {
 	application, _ := newTestApplication(t)

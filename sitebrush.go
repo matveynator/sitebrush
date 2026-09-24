@@ -6543,6 +6543,7 @@ func (a *App) authAbuseMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		now := time.Now().UTC()
 		clientIP := clientIPAddress(r)
+		domain := normalizeDomainName(a.siteDomain(r.Context(), r))
 		trusted := httpsecurity.IsLocalRequest(r) || sitebrushPeerRequestTrusted(r, now)
 		crawlerRead := httpsecurity.IsIndexingCrawlerRequest(r)
 		if a.attackGuard != nil {
@@ -6554,15 +6555,19 @@ func (a *App) authAbuseMiddleware(next http.Handler) http.Handler {
 			}
 			if immediateSecurityCategory(category) {
 				description := securityIncidentDescription(category, r.URL.EscapedPath(), 0)
-				block, blocked = a.attackGuard.ObserveIncident(clientIP, category, description, now)
+				block, blocked = a.attackGuard.ObserveSiteIncident(domain, clientIP, category, description, now)
 			} else {
-				block, blocked, allowed = a.attackGuard.ObserveRequestFastDisposition(clientIP, r.URL.EscapedPath(), r.Method, trusted || crawlerRead, now)
+				block, blocked, allowed = a.attackGuard.ObserveSiteRequestFastDisposition(domain, clientIP, r.URL.EscapedPath(), r.Method, trusted || crawlerRead, now)
 			}
 			if allowed {
 				next.ServeHTTP(w, r)
 				return
 			}
 			if blocked {
+				if a.trustRecordedAdminIP(r, domain, clientIP, now) {
+					next.ServeHTTP(w, r)
+					return
+				}
 				retryAfter := int(time.Until(block.ExpiresAt).Seconds())
 				if retryAfter < 1 {
 					retryAfter = 1
@@ -6585,12 +6590,20 @@ func (a *App) authAbuseMiddleware(next http.Handler) http.Handler {
 				decision = a.throttleGuard.ObserveFast(clientIP, trusted, now)
 			}
 			if decision.RateLimited {
+				if a.trustRecordedAdminIP(r, domain, clientIP, now) {
+					next.ServeHTTP(w, r)
+					return
+				}
 				w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 				w.Header().Set("Cache-Control", "no-store")
 				w.Header().Set("Retry-After", "1")
 				w.Header().Set("X-Sitebrush-Security-Throttle", "active")
 				w.WriteHeader(http.StatusTooManyRequests)
 				_, _ = io.WriteString(w, "Request rate temporarily reduced. Retry shortly.\n")
+				return
+			}
+			if decision.Active && a.trustRecordedAdminIP(r, domain, clientIP, now) {
+				next.ServeHTTP(w, r)
 				return
 			}
 			if decision.Active {
@@ -6600,6 +6613,42 @@ func (a *App) authAbuseMiddleware(next http.Handler) http.Handler {
 
 		next.ServeHTTP(w, r)
 	})
+}
+
+func (a *App) trustRecordedAdminIP(r *http.Request, domain, clientIP string, now time.Time) bool {
+	if a.attackGuard == nil || a.db == nil || domain == "" || clientIP == "" {
+		return false
+	}
+	if !a.attackGuard.ClaimAdminIPLookup(domain, clientIP, now) {
+		return false
+	}
+	accountIP := accountClientIP(r)
+	if accountIP == "" || normalizeSecurityClientIP(accountIP) != clientIP {
+		return false
+	}
+	var trusted int
+	err := a.db.QueryRowContext(contextWithDomain(r.Context(), domain), `
+		SELECT 1
+		FROM account_trusted_ips trusted
+		JOIN users administrator ON administrator.domain=trusted.domain AND administrator.email=trusted.email
+		WHERE trusted.domain=? AND trusted.client_ip=? AND trusted.last_login>? AND administrator.is_admin=1
+		LIMIT 1`, domain, accountIP, now.Add(-accountauth.TrustTTL).Unix()).Scan(&trusted)
+	if err != nil || trusted != 1 {
+		return false
+	}
+	if err := a.attackGuard.TrustAdminIP(domain, clientIP, now); err != nil {
+		log.Printf("security administrator IP trust cache update failed: %v", err)
+		return false
+	}
+	return true
+}
+
+func normalizeSecurityClientIP(ip string) string {
+	parsed := net.ParseIP(strings.TrimSpace(ip))
+	if parsed == nil {
+		return ""
+	}
+	return parsed.String()
 }
 
 func isLikelyStaticAssetPath(requestPath string) bool {
@@ -8193,7 +8242,7 @@ func (a *App) migrate(ctx context.Context) error {
 	}
 	queries := []string{
 		`CREATE TABLE IF NOT EXISTS users(id INTEGER PRIMARY KEY AUTOINCREMENT,domain TEXT,email TEXT,password TEXT,is_admin INTEGER,UNIQUE(domain,email));`,
-		`CREATE TABLE IF NOT EXISTS sessions(token TEXT PRIMARY KEY,user_email TEXT,created_at TEXT);`,
+		`CREATE TABLE IF NOT EXISTS sessions(token TEXT PRIMARY KEY,user_email TEXT,created_at TEXT,admin_ip_trust INTEGER NOT NULL DEFAULT 1);`,
 		`CREATE TABLE IF NOT EXISTS pages(domain TEXT,path TEXT,title TEXT,html TEXT,published INTEGER,PRIMARY KEY(domain,path));`,
 		`CREATE TABLE IF NOT EXISTS published_pages(domain TEXT,path TEXT,title TEXT,html TEXT,PRIMARY KEY(domain,path));`,
 		`CREATE TABLE IF NOT EXISTS page_redirects(domain TEXT,old_path TEXT,new_path TEXT,created_at TEXT,PRIMARY KEY(domain,old_path));`,
@@ -8282,6 +8331,7 @@ func requiredSiteDatabaseColumns() []siteDatabaseColumnRequirement {
 		{"email_confirmations", "attempts", "INTEGER NOT NULL DEFAULT 0"},
 		{"sessions", "client_ip", "TEXT NOT NULL DEFAULT ''"},
 		{"sessions", "security_version", "INTEGER NOT NULL DEFAULT 0"},
+		{"sessions", "admin_ip_trust", "INTEGER NOT NULL DEFAULT 1"},
 		{"account_login_codes", "language", "TEXT NOT NULL DEFAULT 'en'"},
 		{"account_trusted_ips", "last_login", "INTEGER NOT NULL DEFAULT 0"},
 		{"account_code_rates", "sent_count", "INTEGER NOT NULL DEFAULT 0"},
@@ -10140,6 +10190,7 @@ func (a *App) renderAccountTOTP(w http.ResponseWriter, r *http.Request, challeng
 
 func (a *App) completeAccountLogin(w http.ResponseWriter, r *http.Request, domain string, outcome accountauth.Outcome, offerPasskey bool) {
 	a.clearFailedLoginAttempts(r.Context(), domain, clientIPAddress(r))
+	a.rememberAuthenticatedAdminIP(r, domain, time.Now().UTC())
 	httpsecurity.SetSensitiveCookie(w, r, &http.Cookie{Name: "sitebrush_session", Value: outcome.Token})
 	a.logHostingSupportEvent(r.Context(), "client_login", "success", outcome.Email, domain, "client signed in")
 	redirectPath := outcome.Path
@@ -10147,6 +10198,19 @@ func (a *App) completeAccountLogin(w http.ResponseWriter, r *http.Request, domai
 		redirectPath = "/?profile&passkey_offer=1&return_path=" + url.QueryEscape(httpsecurity.LocalRedirectTarget(outcome.Path, "/"))
 	}
 	httpsecurity.RedirectLocal(w, r, redirectPath, http.StatusFound)
+}
+
+func (a *App) rememberAuthenticatedAdminIP(r *http.Request, domain string, now time.Time) {
+	if a.attackGuard == nil {
+		return
+	}
+	clientIP := clientIPAddress(r)
+	if clientIP == "" || normalizeSecurityClientIP(accountClientIP(r)) != clientIP {
+		return
+	}
+	if err := a.attackGuard.TrustAdminIP(domain, clientIP, now); err != nil {
+		log.Printf("security administrator IP trust cache update failed: %v", err)
+	}
 }
 
 func accountPasskeyRP(r *http.Request) (string, string, bool) {
@@ -10224,6 +10288,7 @@ func (a *App) finishAccountPasskeyLogin(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 	a.clearFailedLoginAttempts(r.Context(), domain, clientIPAddress(r))
+	a.rememberAuthenticatedAdminIP(r, domain, time.Now().UTC())
 	httpsecurity.SetSensitiveCookie(w, r, &http.Cookie{Name: "sitebrush_session", Value: sessionToken})
 	a.logHostingSupportEvent(r.Context(), "client_login", "success", email, domain, "client signed in with passkey")
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
@@ -10540,7 +10605,7 @@ func (a *App) startDemoSiteSession(w http.ResponseWriter, r *http.Request, state
 	if !hasLandingPage {
 		return "", fmt.Errorf("demo site has no usable pages")
 	}
-	sessionToken := a.createSessionForDomain(w, r, r.Context(), domain, adminEmail)
+	sessionToken := a.createSessionForDomainWithIPTrust(w, r, r.Context(), domain, adminEmail, false)
 	if err := a.enqueueDemoSessionEvent(r.Context(), demoSessionEvent{
 		kind: "create", domain: domain, sessionToken: sessionToken, userEmail: adminEmail, resetAfter: time.Now().Add(demo.ResetDelay),
 	}); err != nil {
@@ -28005,6 +28070,10 @@ func (a *App) createSession(w http.ResponseWriter, r *http.Request, email string
 }
 
 func (a *App) createSessionForDomain(w http.ResponseWriter, r *http.Request, ctx context.Context, domain string, email string) string {
+	return a.createSessionForDomainWithIPTrust(w, r, ctx, domain, email, true)
+}
+
+func (a *App) createSessionForDomainWithIPTrust(w http.ResponseWriter, r *http.Request, ctx context.Context, domain string, email string, trustIP bool) string {
 	sessionDomain := normalizeDomainName(domain)
 	if sessionDomain == "" {
 		sessionDomain = "localhost"
@@ -28017,7 +28086,11 @@ func (a *App) createSessionForDomain(w http.ResponseWriter, r *http.Request, ctx
 		if err != nil {
 			return err
 		}
-		return accountauth.RememberAddress(ctx, transaction, sessionDomain, email, ip, time.Now())
+		if trustIP {
+			return accountauth.RememberAddress(ctx, transaction, sessionDomain, email, ip, time.Now())
+		}
+		_, err = transaction.ExecContext(ctx, `UPDATE sessions SET admin_ip_trust=0 WHERE token=?`, token)
+		return err
 	})
 	if sessionErr != nil {
 		return ""
@@ -28045,13 +28118,14 @@ func (a *App) currentAdminEmailForDomain(r *http.Request, domain string) (string
 		return "", false
 	}
 	var email, sessionIP string
-	err = a.db.QueryRowContext(r.Context(), `SELECT u.email,s.client_ip FROM sessions s JOIN users u ON (u.domain||'|'||u.email)=s.user_email WHERE s.token=? AND u.domain=? AND u.is_admin=1 LIMIT 1`, cookie.Value, strings.TrimSpace(domain)).Scan(&email, &sessionIP)
+	var adminIPTrust int
+	err = a.db.QueryRowContext(r.Context(), `SELECT u.email,s.client_ip,s.admin_ip_trust FROM sessions s JOIN users u ON (u.domain||'|'||u.email)=s.user_email WHERE s.token=? AND u.domain=? AND u.is_admin=1 LIMIT 1`, cookie.Value, strings.TrimSpace(domain)).Scan(&email, &sessionIP, &adminIPTrust)
 	if err != nil || strings.TrimSpace(email) == "" {
 		return "", false
 	}
 	// A valid browser session survives travel; only new sessions require a mail challenge.
 	ip := accountClientIP(r)
-	rememberAddress := ip != "" && ip != sessionIP
+	rememberAddress := adminIPTrust == 1 && ip != "" && ip != sessionIP
 	if ip != "" && localAccountRequest(r) && hasQueryFlag(r, "profile") && !rememberAddress {
 		var addressCount int
 		lookupErr := a.db.QueryRowContext(r.Context(), `SELECT COUNT(1) FROM account_trusted_ips WHERE domain=? AND email=? AND client_ip=? AND last_login>?`, domain, email, ip, time.Now().Add(-accountauth.TrustTTL).Unix()).Scan(&addressCount)
@@ -28066,6 +28140,9 @@ func (a *App) currentAdminEmailForDomain(r *http.Request, domain string) (string
 			count, updateErr := result.RowsAffected()
 			if updateErr != nil || count == 0 {
 				return updateErr
+			}
+			if adminIPTrust != 1 {
+				return nil
 			}
 			return accountauth.RememberAddress(r.Context(), transaction, domain, email, ip, time.Now())
 		}); err != nil {

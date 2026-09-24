@@ -1,6 +1,7 @@
 package systeminit
 
 import (
+	"context"
 	"strings"
 	"testing"
 )
@@ -58,5 +59,39 @@ func TestFormatStartupReportUsesRequiredEnglishLabels(t *testing.T) {
 		if !strings.Contains(body, expected) {
 			t.Fatalf("report missing %q in %q", expected, body)
 		}
+	}
+}
+
+func TestStartupStatusCountsAndSettingFormatting(t *testing.T) {
+	settings := []tuningSetting{
+		{Status: stateApplied},
+		{Status: stateSkipped},
+		{Status: stateUnsupported},
+		{Status: stateSupported},
+		{Status: "unknown"},
+	}
+	if applied, skipped, unsupported, supported := tuningSettingCounts(settings); applied != 1 || skipped != 1 || unsupported != 1 || supported != 1 {
+		t.Fatalf("setting counts = %d %d %d %d", applied, skipped, unsupported, supported)
+	}
+	if schedulerStatus(2, 4, 4) != stateApplied || schedulerStatus(4, 4, 4) != stateSkipped || schedulerStatus(2, 3, 4) != stateSkipped {
+		t.Fatal("scheduler status classification failed")
+	}
+	if startupStatus(platformResult{}) != startupStatusOK || startupStatus(platformResult{SocketOptionsPartial: true}) != startupStatusPartial || startupStatus(platformResult{CriticalErr: context.DeadlineExceeded}) != startupStatusFailed {
+		t.Fatal("platform startup status classification failed")
+	}
+	if !strings.Contains(colorStatus("applied", stateApplied, true), "\033[1;32m") || colorStatus("other", "unknown", true) != "other" || colorStatus("applied", stateApplied, false) != "applied" {
+		t.Fatal("status color formatting failed")
+	}
+	if padRight("long name", 5) != "long." || padRight("x", 1) != "x"[:1] || padRight("x", 3) != "x  " {
+		t.Fatal("table cell padding failed")
+	}
+	if got := unsupportedSetting("Feature", "target", "reason"); got.Status != stateUnsupported || got.Before != "-" || got.After != "-" {
+		t.Fatalf("unsupported setting = %#v", got)
+	}
+	if socketOptionsSetting(false).After != "reuseaddr, keepalive, nodelay" || !strings.Contains(socketOptionsSetting(true).After, "reuseport") {
+		t.Fatal("socket option report is incorrect")
+	}
+	if zeroCopySetting(stateSupported, "ready").After != "available" || zeroCopySetting(stateUnsupported, "missing").After != "not available" {
+		t.Fatal("zero-copy report is incorrect")
 	}
 }

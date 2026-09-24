@@ -3,6 +3,7 @@ package httpsecurity
 import (
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 )
@@ -53,4 +54,57 @@ func TestSetSensitiveCookieKeepsLocalHTTPCompatibility(t *testing.T) {
 	if !strings.Contains(setCookie, "HttpOnly") || !strings.Contains(setCookie, "SameSite=Lax") {
 		t.Fatalf("local cookie is missing security attributes: %q", setCookie)
 	}
+}
+
+func TestRedirectHelpersAndHTTPSDetection(t *testing.T) {
+	request := httptest.NewRequest(http.MethodGet, "http://example.com/start", nil)
+	response := httptest.NewRecorder()
+	RedirectLocal(response, request, "https://attacker.example", http.StatusFound)
+	if response.Header().Get("Location") != "/" {
+		t.Fatalf("unsafe local redirect=%q", response.Header().Get("Location"))
+	}
+	response = httptest.NewRecorder()
+	RedirectExternal(response, request, nil, http.StatusFound)
+	if response.Header().Get("Location") != "/" {
+		t.Fatalf("invalid external redirect=%q", response.Header().Get("Location"))
+	}
+	response = httptest.NewRecorder()
+	RedirectExternal(response, request, mustParseURL(t, "https://outside.example/path"), http.StatusFound)
+	if response.Header().Get("Location") != "https://outside.example/path" {
+		t.Fatalf("external redirect=%q", response.Header().Get("Location"))
+	}
+	if UsesHTTPS(nil) {
+		t.Fatal("nil request reported HTTPS")
+	}
+	request.Header.Set("X-Forwarded-Proto", "https, http")
+	if !UsesHTTPS(request) {
+		t.Fatal("forwarded HTTPS not recognized")
+	}
+	request.Header.Set("X-Forwarded-Proto", "http")
+	if UsesHTTPS(request) {
+		t.Fatal("forwarded HTTP reported HTTPS")
+	}
+	secureRequest := httptest.NewRequest(http.MethodGet, "https://example.com/", nil)
+	if !UsesHTTPS(secureRequest) {
+		t.Fatal("TLS request not recognized")
+	}
+	response = httptest.NewRecorder()
+	RedirectHTTPS(response, httptest.NewRequest(http.MethodGet, "http://localhost/path", nil), http.StatusPermanentRedirect)
+	if response.Header().Get("Location") != "" {
+		t.Fatalf("local HTTP request was redirected: %q", response.Header().Get("Location"))
+	}
+	response = httptest.NewRecorder()
+	RedirectHTTPS(response, request, http.StatusPermanentRedirect)
+	if response.Header().Get("Location") != "https://example.com/start" {
+		t.Fatalf("public HTTP redirect=%q", response.Header().Get("Location"))
+	}
+}
+
+func mustParseURL(t *testing.T, raw string) *url.URL {
+	t.Helper()
+	parsedURL, err := url.Parse(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return parsedURL
 }

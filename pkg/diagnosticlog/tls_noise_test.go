@@ -66,3 +66,23 @@ func TestTLSHandshakeNoiseIntervalUsesProgressiveBackoff(t *testing.T) {
 		}
 	}
 }
+
+func TestTLSHandshakeNoiseClassAndSourceGroups(t *testing.T) {
+	for _, testCase := range []struct{ reason, class string }{
+		{"i/o timeout", "timeout"},
+		{"client sent an http request to an https server", "invalid_tls"},
+		{"connection reset by peer", "connection_closed"},
+		{"unknown error", ""},
+	} {
+		class, ok := tlsHandshakeNoiseClass(testCase.reason)
+		if ok != (testCase.class != "") || class != testCase.class {
+			t.Errorf("classify %q = %q, %t", testCase.reason, class, ok)
+		}
+	}
+	if source, ok := tlsHandshakeSourceGroup("not-an-ip"); ok || source != "" {
+		t.Fatalf("invalid source group=%q, %t", source, ok)
+	}
+	if source, ok := tlsHandshakeSourceGroup("8.8.8.8"); !ok || source != "8.8.8.0/24" {
+		t.Fatalf("IPv4 source group=%q, %t", source, ok)
+	}
+}
