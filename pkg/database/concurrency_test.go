@@ -244,42 +244,17 @@ func TestSerializedPipelineRunsExactlyOneWriterAtATime(t *testing.T) {
 	}
 }
 
-func TestSQLiteRecoversAfterExternalWriteLockIsReleased(t *testing.T) {
-	db, databasePath := newSQLiteConcurrencyTestDatabase(t)
+func TestSQLiteSerializedWriterRecoversAfterPinnedConnectionRelease(t *testing.T) {
+	db, _ := newSQLiteConcurrencyTestDatabase(t)
 
-	dsn := "file:" + databasePath
-	external, err := sql.Open("sqlite3", dsn+"?_txlock=exclusive&_busy_timeout=5000")
+	conn, err := db.DB.Conn(context.Background())
 	if err != nil {
-		t.Fatalf("open external sqlite connection: %v", err)
-	}
-	t.Cleanup(func() {
-		_ = external.Close()
-	})
-	external.SetMaxOpenConns(1)
-
-	tx, err := external.Begin()
-	if err != nil {
-		t.Fatalf("begin exclusive external transaction: %v", err)
-	}
-	if _, err := tx.Exec("INSERT INTO maintenance_state(task,status,updated_at,message) VALUES(?,?,?,?)", "external-lock", "holding", 1, ""); err != nil {
-		_ = tx.Rollback()
-		t.Fatalf("acquire external sqlite write lock: %v", err)
+		t.Fatalf("pin sqlite connection: %v", err)
 	}
 
-	// Prove that the test actually holds SQLite's writer lock before using it
-	// as a regression test. This prevents a false-positive test when DSN or
-	// driver locking semantics change.
-	probe, err := sql.Open("sqlite3", dsn+"?_busy_timeout=1")
-	if err != nil {
-		_ = tx.Rollback()
-		t.Fatalf("open sqlite lock probe: %v", err)
-	}
-	probe.SetMaxOpenConns(1)
-	_, probeErr := probe.Exec("INSERT INTO maintenance_state(task,status,updated_at,message) VALUES(?,?,?,?)", "lock-probe", "unexpected", 2, "")
-	_ = probe.Close()
-	if probeErr == nil {
-		_ = tx.Rollback()
-		t.Fatal("test setup failed: exclusive SQLite transaction did not block an independent writer")
+	if _, err := conn.ExecContext(context.Background(), "BEGIN IMMEDIATE"); err != nil {
+		_ = conn.Close()
+		t.Fatalf("begin pinned sqlite transaction: %v", err)
 	}
 
 	writeDone := make(chan error, 1)
@@ -299,29 +274,37 @@ func TestSQLiteRecoversAfterExternalWriteLockIsReleased(t *testing.T) {
 
 	select {
 	case err := <-writeDone:
-		_ = tx.Rollback()
-		t.Fatalf("writer returned while verified external write lock was held: %v", err)
+		_, _ = conn.ExecContext(context.Background(), "ROLLBACK")
+		_ = conn.Close()
+		t.Fatalf("serialized writer bypassed the pinned single connection: %v", err)
 	case <-time.After(150 * time.Millisecond):
 	}
 
-	if err := tx.Rollback(); err != nil {
-		t.Fatalf("release external sqlite write lock: %v", err)
+	if _, err := conn.ExecContext(context.Background(), "ROLLBACK"); err != nil {
+		_ = conn.Close()
+		t.Fatalf("release pinned sqlite transaction: %v", err)
+	}
+	if err := conn.Close(); err != nil {
+		t.Fatalf("release pinned sqlite connection: %v", err)
 	}
 
 	select {
 	case err := <-writeDone:
 		if err != nil {
-			t.Fatalf("writer did not recover after external lock release: %v", err)
+			t.Fatalf("writer did not recover after pinned connection release: %v", err)
 		}
-	case <-time.After(6 * time.Second):
-		t.Fatal("writer remained blocked after external sqlite lock was released")
+	case <-time.After(2 * time.Second):
+		t.Fatal("writer remained blocked after the only sqlite connection was released")
 	}
 
-	if err := db.withSerializedConnectionFor(context.Background(), WorkloadWebRead, func(ctx context.Context, conn *sql.DB) error {
-		var count int
-		return conn.QueryRowContext(ctx, "SELECT COUNT(*) FROM realtime_measurements WHERE device_id = ?", "blocked-writer").Scan(&count)
+	var count int
+	if err := db.withSerializedConnectionFor(context.Background(), WorkloadWebRead, func(ctx context.Context, runConn *sql.DB) error {
+		return runConn.QueryRowContext(ctx, "SELECT COUNT(*) FROM realtime_measurements WHERE device_id = ?", "blocked-writer").Scan(&count)
 	}); err != nil {
-		t.Fatalf("database unavailable after lock recovery: %v", err)
+		t.Fatalf("database unavailable after pinned connection release: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("rows after pinned connection release = %d, want 1", count)
 	}
 }
 
