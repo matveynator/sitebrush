@@ -6783,7 +6783,11 @@ func TestAuthenticatedAdminIPBypassesSecurityOnlyForItsSite(t *testing.T) {
 	if _, err := rawDB.Exec(`INSERT INTO account_trusted_ips(domain,email,client_ip,confirmed_at,last_login) VALUES(?,?,?,?,?)`, domain, "admin@trusted.example", clientIP, lastLogin, lastLogin); err != nil {
 		t.Fatal(err)
 	}
-	if _, blocked := attackGuard.ObserveIncident(clientIP, "injection", "test existing block", time.Now().UTC()); !blocked {
+	firstObservationAt := time.Now().UTC()
+	if _, blocked := attackGuard.ObserveIncident(clientIP, "injection", "test existing block", firstObservationAt); blocked {
+		t.Fatal("injection block triggered before its evidence threshold")
+	}
+	if _, blocked := attackGuard.ObserveIncident(clientIP, "injection", "test existing block", firstObservationAt.Add(time.Second)); !blocked {
 		t.Fatal("failed to prepare the existing address block")
 	}
 
