@@ -34,9 +34,12 @@ func TestSingleWriterPackagesDoNotBypassSerializedPipeline(t *testing.T) {
 		"ensureMarkerMetadataColumns":       true,
 		"ensureRealtimeMetadataColumns":     true,
 		"ensureAnalyticsMetadataColumns":    true,
-		"ensureAnalyticsSessionColumns":     true,
-		"InsertMarkersBulk":                 true,
-		"insertMarkersPostgreSQLCopy":       true,
+		"ensureAnalyticsSessionColumns":      true,
+		"loadColumnPresence":                 true,
+		"InsertMarkersBulk":                  true,
+		"markerExistsClickHouse":             true,
+		"realtimeExistsClickHouse":           true,
+		"insertMarkersPostgreSQLCopy":        true,
 		"insertMarkersPostgreSQLCopyBatched": true,
 	}
 
