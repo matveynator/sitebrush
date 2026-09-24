@@ -40,15 +40,18 @@ type SecurityReasonEvent struct {
 }
 
 type SecurityBlock struct {
-	IP          string                `json:"ip"`
-	Reason      string                `json:"reason"`
-	Description string                `json:"description"`
-	LastEvent   time.Time             `json:"last_event"`
-	Source      string                `json:"source"`
-	ExpiresAt   time.Time             `json:"expires_at"`
-	Violations  int                   `json:"violations"`
-	IncidentID  string                `json:"incident_id"`
-	ReasonLog   []SecurityReasonEvent `json:"reason_log,omitempty"`
+	IP            string                `json:"ip"`
+	Domain        string                `json:"domain,omitempty"`
+	Reason        string                `json:"reason"`
+	Description   string                `json:"description"`
+	LastEvent     time.Time             `json:"last_event"`
+	Source        string                `json:"source"`
+	ExpiresAt     time.Time             `json:"expires_at"`
+	Violations    int                   `json:"violations"`
+	IncidentID    string                `json:"incident_id"`
+	ReportedAt    time.Time             `json:"reported_at,omitempty"`
+	ReportMessage string                `json:"report_message,omitempty"`
+	ReasonLog     []SecurityReasonEvent `json:"reason_log,omitempty"`
 }
 
 type SecurityAllow struct {
@@ -97,6 +100,8 @@ const (
 	attackGuardTrustAdminIP
 	attackGuardCheckAdminIP
 	attackGuardClaimAdminIPLookup
+	attackGuardClaimIncidentReport
+	attackGuardFinishIncidentReport
 )
 
 type attackGuardRequest struct {
@@ -114,6 +119,7 @@ type attackGuardRequest struct {
 	ExpiresAt   time.Time
 	Settings    SecuritySettings
 	Comment     string
+	Success     bool
 	Reply       chan attackGuardResult
 }
 
@@ -209,6 +215,7 @@ func runAttackGuardShard(requests <-chan attackGuardRequest, shutdown <-chan str
 	adminIPLookups := make(map[string]time.Time)
 	windows := map[string]*attackWindow{}
 	incidents := map[string]*incidentWindow{}
+	reportClaims := map[string]bool{}
 	for _, block := range initial {
 		blocks[block.IP] = block
 	}
@@ -226,7 +233,7 @@ func runAttackGuardShard(requests <-chan attackGuardRequest, shutdown <-chan str
 			pruneAttackGuardState(blocks, windows, incidents, now.UTC())
 			pruneAdminIPTrustState(trustedAdminIPs, adminIPLookups, now.UTC())
 		case request := <-requests:
-			result := handleAttackGuardRequest(blocks, allowlist, trustedAdminIPs, adminIPLookups, windows, incidents, &settings, request)
+			result := handleAttackGuardRequest(blocks, allowlist, trustedAdminIPs, adminIPLookups, windows, incidents, reportClaims, &settings, request)
 			if request.Reply != nil {
 				select {
 				case request.Reply <- result:
@@ -238,7 +245,7 @@ func runAttackGuardShard(requests <-chan attackGuardRequest, shutdown <-chan str
 	}
 }
 
-func handleAttackGuardRequest(blocks map[string]SecurityBlock, allowlist map[string]SecurityAllow, trustedAdminIPs, adminIPLookups map[string]time.Time, windows map[string]*attackWindow, incidents map[string]*incidentWindow, settings *SecuritySettings, request attackGuardRequest) attackGuardResult {
+func handleAttackGuardRequest(blocks map[string]SecurityBlock, allowlist map[string]SecurityAllow, trustedAdminIPs, adminIPLookups map[string]time.Time, windows map[string]*attackWindow, incidents map[string]*incidentWindow, reportClaims map[string]bool, settings *SecuritySettings, request attackGuardRequest) attackGuardResult {
 	now := request.Now
 	if now.IsZero() {
 		now = time.Now().UTC()
@@ -296,6 +303,8 @@ func handleAttackGuardRequest(blocks map[string]SecurityBlock, allowlist map[str
 				description = "scanned at least 48 distinct paths within 10 seconds"
 			}
 			block := blockSecurityIP(blocks, ip, reason, description, "local", now, automaticSecurityBlockTTL(blocks[ip].Violations+1))
+			block.Domain = cleanSecurityText(request.Domain, 255)
+			blocks[ip] = block
 			delete(windows, ip)
 			return attackGuardResult{Block: block, Blocked: true, Changed: true}
 		}
@@ -326,6 +335,8 @@ func handleAttackGuardRequest(blocks map[string]SecurityBlock, allowlist map[str
 		}
 		previous := blocks[ip]
 		block := blockSecurityIP(blocks, ip, request.Category, request.Description, "local", now, automaticSecurityBlockTTL(previous.Violations+1))
+		block.Domain = cleanSecurityText(request.Domain, 255)
+		blocks[ip] = block
 		return attackGuardResult{Block: block, Blocked: true, Changed: true}
 
 	case attackGuardAdd:
@@ -487,6 +498,32 @@ func handleAttackGuardRequest(blocks map[string]SecurityBlock, allowlist map[str
 		}
 		adminIPLookups[key] = now
 		return attackGuardResult{Allowed: true}
+
+	case attackGuardClaimIncidentReport:
+		block, blocked := activeSecurityBlock(blocks, ip, now)
+		if !blocked || block.IncidentID == "" || block.IncidentID != cleanSecurityText(request.Reason, 64) {
+			return attackGuardResult{Err: errors.New("security incident not found")}
+		}
+		if !block.ReportedAt.IsZero() || reportClaims[block.IncidentID] {
+			return attackGuardResult{Block: block, Blocked: true}
+		}
+		reportClaims[block.IncidentID] = true
+		return attackGuardResult{Block: block, Blocked: true, Allowed: true}
+
+	case attackGuardFinishIncidentReport:
+		block, found := blocks[ip]
+		incidentID := cleanSecurityText(request.Reason, 64)
+		if !found || incidentID == "" || block.IncidentID != incidentID || !reportClaims[incidentID] {
+			return attackGuardResult{Err: errors.New("security incident report was not claimed")}
+		}
+		delete(reportClaims, incidentID)
+		if !request.Success {
+			return attackGuardResult{Block: block, Blocked: true}
+		}
+		block.ReportedAt = now
+		block.ReportMessage = cleanSecurityText(request.Description, 500)
+		blocks[ip] = block
+		return attackGuardResult{Block: block, Blocked: true, Changed: true}
 	}
 
 	return attackGuardResult{Err: errors.New("unknown attack guard operation")}
@@ -732,6 +769,32 @@ func (guard *AttackGuard) Remove(ip string) error {
 		guard.signalSave()
 	}
 	return result.Err
+}
+
+func (guard *AttackGuard) ClaimIncidentReport(ip, incidentID string, now time.Time) (SecurityBlock, bool, error) {
+	result, ok := guard.exchangeAdmin(attackGuardRequest{Operation: attackGuardClaimIncidentReport, IP: ip, Reason: incidentID, Now: now})
+	if !ok {
+		return SecurityBlock{}, false, errors.New("security guard is busy")
+	}
+	return result.Block, result.Allowed, result.Err
+}
+
+func (guard *AttackGuard) FinishIncidentReport(ip, incidentID, message string, success bool, now time.Time) (SecurityBlock, error) {
+	result, ok := guard.exchangeAdmin(attackGuardRequest{
+		Operation: attackGuardFinishIncidentReport,
+		IP: ip,
+		Reason: incidentID,
+		Description: message,
+		Success: success,
+		Now: now,
+	})
+	if !ok {
+		return SecurityBlock{}, errors.New("security guard is busy")
+	}
+	if result.Changed {
+		guard.signalSave()
+	}
+	return result.Block, result.Err
 }
 
 func (guard *AttackGuard) ApplyGlobal(ip, reason, description string, lastEvent, expiresAt time.Time) error {
