@@ -30,10 +30,28 @@ jobs:
         with:
           go-version: "1.26.6"
           cache: true
+      - name: Database coverage details
+        run: |
+          set +e
+          go test -count=1 -covermode=atomic -coverprofile=database-coverage.out ./pkg/database
+          status=$?
+          if [ -f database-coverage.out ]; then
+            go tool cover -func=database-coverage.out
+          fi
+          echo "database test status: $status"
+          exit 0
       - name: Test packages
         run: go test -count=1 -covermode=atomic -coverprofile=coverage.out ./pkg/... ./scripts/...
       - name: Report coverage
         run: go tool cover -func=coverage.out | tail -n 1
+      - name: Report database coverage
+        run: go tool cover -func=coverage.out | grep '/pkg/database/' || true
+      - name: Enforce database coverage
+        run: |
+          go test -count=1 -covermode=atomic -coverprofile=database-coverage.out ./pkg/database
+          coverage="$(go tool cover -func=database-coverage.out | awk '/^total:/ {gsub("%", "", $3); print $3}')"
+          echo "pkg/database coverage: ${coverage}%"
+          awk -v coverage="$coverage" 'BEGIN { if (coverage + 0 < 90) { printf "pkg/database coverage %.1f%% is below required 90%%\n", coverage; exit 1 } }'
       - name: Upload coverage
         uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v6
         with:

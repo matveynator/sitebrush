@@ -29,6 +29,40 @@ func appendSpeedRangeClause(sb *strings.Builder, args *[]interface{}, speedRange
 	sb.WriteString(")")
 }
 
+
+func (db *Database) streamMarkerQuery(ctx context.Context, query string, args []any, out chan<- Marker) error {
+	return db.withSerializedConnectionFor(ctx, WorkloadWebRead, func(runCtx context.Context, conn *sql.DB) error {
+		rows, err := conn.QueryContext(runCtx, query, args...)
+		if err != nil {
+			return fmt.Errorf("query markers: %w", err)
+		}
+		defer rows.Close()
+
+		for rows.Next() {
+			var (
+				m         Marker
+				deviceRaw sql.NullString
+			)
+			if err := rows.Scan(&m.ID, &m.DoseRate, &m.Date, &m.Lon, &m.Lat, &m.CountRate, &m.Zoom, &m.Speed, &m.TrackID, &deviceRaw); err != nil {
+				return fmt.Errorf("scan marker: %w", err)
+			}
+			if deviceRaw.Valid {
+				m.DeviceName = deviceRaw.String
+			}
+			select {
+			case out <- m:
+			case <-runCtx.Done():
+				return runCtx.Err()
+			}
+		}
+
+		if err := rows.Err(); err != nil {
+			return fmt.Errorf("iterate markers: %w", err)
+		}
+		return nil
+	})
+}
+
 // StreamMarkersByZoomAndBounds streams markers row by row through a channel.
 // It avoids loading large result sets into memory and stops when the context is done.
 func (db *Database) StreamMarkersByZoomAndBounds(ctx context.Context, zoom int, minLat, minLon, maxLat, maxLon float64, dbType string) (<-chan Marker, <-chan error) {
@@ -60,35 +94,8 @@ func (db *Database) StreamMarkersByZoomAndBounds(ctx context.Context, zoom int, 
             `
 		}
 
-		rows, err := db.DB.QueryContext(ctx, query, zoom, minLat, maxLat, minLon, maxLon)
-		if err != nil {
-			errCh <- fmt.Errorf("query markers: %w", err)
-			return
-		}
-		defer rows.Close()
-
-		for rows.Next() {
-			var (
-				m         Marker
-				deviceRaw sql.NullString
-			)
-			if err := rows.Scan(&m.ID, &m.DoseRate, &m.Date, &m.Lon, &m.Lat, &m.CountRate, &m.Zoom, &m.Speed, &m.TrackID, &deviceRaw); err != nil {
-				errCh <- fmt.Errorf("scan marker: %w", err)
-				return
-			}
-			if deviceRaw.Valid {
-				m.DeviceName = deviceRaw.String
-			}
-			select {
-			case out <- m:
-			case <-ctx.Done():
-				errCh <- ctx.Err()
-				return
-			}
-		}
-
-		if err := rows.Err(); err != nil {
-			errCh <- fmt.Errorf("iterate markers: %w", err)
+		if err := db.streamMarkerQuery(ctx, query, []any{zoom, minLat, maxLat, minLon, maxLon}, out); err != nil {
+			errCh <- err
 		}
 	}()
 
@@ -126,35 +133,8 @@ func (db *Database) StreamMarkersByZoomBoundsSpeed(ctx context.Context, zoom int
                 ORDER BY date ASC;
             `, sb.String())
 
-		rows, err := db.DB.QueryContext(ctx, query, args...)
-		if err != nil {
-			errCh <- fmt.Errorf("query markers: %w", err)
-			return
-		}
-		defer rows.Close()
-
-		for rows.Next() {
-			var (
-				m         Marker
-				deviceRaw sql.NullString
-			)
-			if err := rows.Scan(&m.ID, &m.DoseRate, &m.Date, &m.Lon, &m.Lat, &m.CountRate, &m.Zoom, &m.Speed, &m.TrackID, &deviceRaw); err != nil {
-				errCh <- fmt.Errorf("scan marker: %w", err)
-				return
-			}
-			if deviceRaw.Valid {
-				m.DeviceName = deviceRaw.String
-			}
-			select {
-			case out <- m:
-			case <-ctx.Done():
-				errCh <- ctx.Err()
-				return
-			}
-		}
-
-		if err := rows.Err(); err != nil {
-			errCh <- fmt.Errorf("iterate markers: %w", err)
+		if err := db.streamMarkerQuery(ctx, query, args, out); err != nil {
+			errCh <- err
 		}
 	}()
 
@@ -192,35 +172,8 @@ func (db *Database) StreamMarkersByTrackIDZoomAndBounds(ctx context.Context, tra
             `
 		}
 
-		rows, err := db.DB.QueryContext(ctx, query, trackID, zoom, minLat, maxLat, minLon, maxLon)
-		if err != nil {
-			errCh <- fmt.Errorf("query markers: %w", err)
-			return
-		}
-		defer rows.Close()
-
-		for rows.Next() {
-			var (
-				m         Marker
-				deviceRaw sql.NullString
-			)
-			if err := rows.Scan(&m.ID, &m.DoseRate, &m.Date, &m.Lon, &m.Lat, &m.CountRate, &m.Zoom, &m.Speed, &m.TrackID, &deviceRaw); err != nil {
-				errCh <- fmt.Errorf("scan marker: %w", err)
-				return
-			}
-			if deviceRaw.Valid {
-				m.DeviceName = deviceRaw.String
-			}
-			select {
-			case out <- m:
-			case <-ctx.Done():
-				errCh <- ctx.Err()
-				return
-			}
-		}
-
-		if err := rows.Err(); err != nil {
-			errCh <- fmt.Errorf("iterate markers: %w", err)
+		if err := db.streamMarkerQuery(ctx, query, []any{trackID, zoom, minLat, maxLat, minLon, maxLon}, out); err != nil {
+			errCh <- err
 		}
 	}()
 
@@ -260,35 +213,8 @@ func (db *Database) StreamMarkersByTrackIDZoomBoundsSpeed(ctx context.Context, t
                 ORDER BY date ASC;
             `, sb.String())
 
-		rows, err := db.DB.QueryContext(ctx, query, args...)
-		if err != nil {
-			errCh <- fmt.Errorf("query markers: %w", err)
-			return
-		}
-		defer rows.Close()
-
-		for rows.Next() {
-			var (
-				m         Marker
-				deviceRaw sql.NullString
-			)
-			if err := rows.Scan(&m.ID, &m.DoseRate, &m.Date, &m.Lon, &m.Lat, &m.CountRate, &m.Zoom, &m.Speed, &m.TrackID, &deviceRaw); err != nil {
-				errCh <- fmt.Errorf("scan marker: %w", err)
-				return
-			}
-			if deviceRaw.Valid {
-				m.DeviceName = deviceRaw.String
-			}
-			select {
-			case out <- m:
-			case <-ctx.Done():
-				errCh <- ctx.Err()
-				return
-			}
-		}
-
-		if err := rows.Err(); err != nil {
-			errCh <- fmt.Errorf("iterate markers: %w", err)
+		if err := db.streamMarkerQuery(ctx, query, args, out); err != nil {
+			errCh <- err
 		}
 	}()
 

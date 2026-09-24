@@ -88,34 +88,36 @@ WHERE %s
 GROUP BY trackID
 ORDER BY trackID%s;`, strings.Join(conditions, " AND "), limitClause)
 
-		rows, err := db.DB.QueryContext(ctx, query, args...)
-		if err != nil {
-			errs <- fmt.Errorf("list tracks: %w", err)
-			return
-		}
-		defer rows.Close()
-
-		// We read the entire page before emitting results so we can compute the
-		// starting index once. This avoids hammering PostgreSQL with COUNT(DISTINCT)
-		// calls for every single track, which previously spiked CPU during archive
-		// creation. The buffered slice stays small because callers already cap
-		// page sizes.
+		// Read the page completely inside the serialized database owner. Releasing
+		// Rows before the follow-up count query is essential for single-connection
+		// engines; otherwise the next query can wait forever for the connection
+		// still held by this result set.
 		capHint := limit
 		if capHint <= 0 {
 			capHint = 1024
 		}
 		summaries := make([]TrackSummary, 0, capHint)
-		for rows.Next() {
-			var summary TrackSummary
-			if err := rows.Scan(&summary.TrackID, &summary.FirstID, &summary.LastID, &summary.MarkerCount); err != nil {
-				errs <- fmt.Errorf("scan track summary: %w", err)
-				return
+		readErr := db.withSerializedConnectionFor(ctx, WorkloadWebRead, func(runCtx context.Context, conn *sql.DB) error {
+			rows, err := conn.QueryContext(runCtx, query, args...)
+			if err != nil {
+				return fmt.Errorf("list tracks: %w", err)
 			}
-			summaries = append(summaries, summary)
-		}
+			defer rows.Close()
 
-		if err := rows.Err(); err != nil {
-			errs <- fmt.Errorf("iterate track summaries: %w", err)
+			for rows.Next() {
+				var summary TrackSummary
+				if err := rows.Scan(&summary.TrackID, &summary.FirstID, &summary.LastID, &summary.MarkerCount); err != nil {
+					return fmt.Errorf("scan track summary: %w", err)
+				}
+				summaries = append(summaries, summary)
+			}
+			if err := rows.Err(); err != nil {
+				return fmt.Errorf("iterate track summaries: %w", err)
+			}
+			return nil
+		})
+		if readErr != nil {
+			errs <- readErr
 			return
 		}
 
@@ -131,9 +133,9 @@ ORDER BY trackID%s;`, strings.Join(conditions, " AND "), limitClause)
 		if trimmed != "" {
 			// When resuming from a known track we only need its index once
 			// per page. Subsequent tracks increment locally without extra SQL.
-			var count int64
-			if count, err = db.CountTrackIDsUpTo(ctx, trimmed, dbType); err != nil {
-				errs <- fmt.Errorf("count track ids base: %w", err)
+			count, countErr := db.CountTrackIDsUpTo(ctx, trimmed, dbType)
+			if countErr != nil {
+				errs <- fmt.Errorf("count track ids base: %w", countErr)
 				return
 			}
 			baseIndex = count
@@ -144,9 +146,9 @@ ORDER BY trackID%s;`, strings.Join(conditions, " AND "), limitClause)
 			// For the very first page we derive the base from the first row.
 			// Using a second query here is still cheaper than doing it per track
 			// and the buffer keeps the connection free before the next query.
-			var firstCount int64
-			if firstCount, err = db.CountTrackIDsUpTo(ctx, summaries[0].TrackID, dbType); err != nil {
-				errs <- fmt.Errorf("count track ids first page: %w", err)
+			firstCount, countErr := db.CountTrackIDsUpTo(ctx, summaries[0].TrackID, dbType)
+			if countErr != nil {
+				errs <- fmt.Errorf("count track ids first page: %w", countErr)
 				return
 			}
 			baseIndex = firstCount - 1
@@ -185,14 +187,20 @@ func (db *Database) CountTracks(ctx context.Context) (int64, error) {
 	// preferring a portable query that still covers all ingestion paths.
 	// We also exclude realtime-only IDs to keep this count aligned with the
 	// archive and API summary streams.
-	row := db.DB.QueryRowContext(ctx, `SELECT COUNT(DISTINCT trackID)
+	var count sql.NullInt64
+	err := db.withSerializedConnectionFor(ctx, WorkloadWebRead, func(runCtx context.Context, conn *sql.DB) error {
+		row := conn.QueryRowContext(runCtx, `SELECT COUNT(DISTINCT trackID)
 FROM markers
 WHERE trackID IS NOT NULL
   AND trackID <> ''
   AND trackID NOT LIKE 'live:%'`)
-	var count sql.NullInt64
-	if err := row.Scan(&count); err != nil {
-		return 0, fmt.Errorf("count tracks: %w", err)
+		if err := row.Scan(&count); err != nil {
+			return fmt.Errorf("count tracks: %w", err)
+		}
+		return nil
+	})
+	if err != nil {
+		return 0, err
 	}
 	if !count.Valid {
 		return 0, nil
@@ -443,10 +451,12 @@ func (db *Database) UpdateTrackDeviceName(ctx context.Context, trackID, deviceNa
 	stmt := fmt.Sprintf(`UPDATE markers
 SET device_name = %s
 WHERE trackID = %s;`, ph, ph2)
-	if _, err := db.DB.ExecContext(ctx, stmt, deviceName, trackID); err != nil {
-		return fmt.Errorf("update track device name: %w", err)
-	}
-	return nil
+	return db.withSerializedConnectionFor(ctx, WorkloadUserUpload, func(runCtx context.Context, conn *sql.DB) error {
+		if _, err := conn.ExecContext(runCtx, stmt, deviceName, trackID); err != nil {
+			return fmt.Errorf("update track device name: %w", err)
+		}
+		return nil
+	})
 }
 
 // FillMissingTrackDeviceName updates only empty device_name values so existing labels remain unchanged.
@@ -468,10 +478,12 @@ func (db *Database) FillMissingTrackDeviceName(ctx context.Context, trackID, dev
 	stmt := fmt.Sprintf(`UPDATE markers
 SET device_name = %s
 WHERE trackID = %s AND (device_name IS NULL OR device_name = '');`, ph, ph2)
-	if _, err := db.DB.ExecContext(ctx, stmt, deviceName, trackID); err != nil {
-		return fmt.Errorf("fill track device name: %w", err)
-	}
-	return nil
+	return db.withSerializedConnectionFor(ctx, WorkloadUserUpload, func(runCtx context.Context, conn *sql.DB) error {
+		if _, err := conn.ExecContext(runCtx, stmt, deviceName, trackID); err != nil {
+			return fmt.Errorf("fill track device name: %w", err)
+		}
+		return nil
+	})
 }
 
 // AnnotateTrackRadiationWindow writes qualitative isotope composition into the
