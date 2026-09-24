@@ -451,7 +451,7 @@ func ipv4Number(rawIP string) (uint32, bool) {
 
 func isPublicIPv4(rawIP string) bool {
 	parsedIP := net.ParseIP(strings.TrimSpace(rawIP))
-	if parsedIP == nil || parsedIP.To4() == nil {
+	if parsedIP == nil || parsedIP.To4() == nil || !parsedIP.IsGlobalUnicast() {
 		return false
 	}
 	return !parsedIP.IsLoopback() && !parsedIP.IsPrivate() && !parsedIP.IsLinkLocalUnicast() && !parsedIP.IsMulticast() && !parsedIP.IsUnspecified()
