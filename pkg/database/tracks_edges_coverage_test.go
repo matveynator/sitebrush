@@ -2,6 +2,7 @@ package database
 
 import (
 	"context"
+	"database/sql"
 	"testing"
 )
 
@@ -110,6 +111,12 @@ func TestTrackDeviceNameAndRadiationBranches(t *testing.T) {
 		t.Fatalf("existing device name changed to %q, err=%v", name, err)
 	}
 
+	if err := db.withSerializedConnectionFor(ctx, WorkloadUserUpload, func(runCtx context.Context, conn *sql.DB) error {
+		_, err := conn.ExecContext(runCtx, "UPDATE markers SET device_name = NULL WHERE trackID = ?", "track-b")
+		return err
+	}); err != nil {
+		t.Fatalf("clear track-b device name: %v", err)
+	}
 	if err := db.FillMissingTrackDeviceName(ctx, "track-b", "filled", "sqlite"); err != nil {
 		t.Fatalf("fill missing device name: %v", err)
 	}
