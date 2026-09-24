@@ -118,4 +118,31 @@ func TestAnalyticsSummaryProgressiveSchemaErrors(t *testing.T) {
 			t.Fatal("summary without region did not fail")
 		}
 	})
+
+	t.Run("top dose classes", func(t *testing.T) {
+		db := newPartialSQLiteCoverageDatabase(t,
+			"CREATE TABLE analytics_events (occurred_at BIGINT, session_id TEXT, display_name TEXT, kind TEXT, region TEXT)",
+		)
+		if _, err := db.QueryAnalyticsSummary(ctx, 0, 100, 10, "sqlite"); err == nil {
+			t.Fatal("summary without dose_class did not fail")
+		}
+	})
+
+	t.Run("top track kinds", func(t *testing.T) {
+		db := newPartialSQLiteCoverageDatabase(t,
+			"CREATE TABLE analytics_events (occurred_at BIGINT, session_id TEXT, display_name TEXT, kind TEXT, region TEXT, dose_class TEXT)",
+		)
+		if _, err := db.QueryAnalyticsSummary(ctx, 0, 100, 10, "sqlite"); err == nil {
+			t.Fatal("summary without track_kind did not fail")
+		}
+	})
+
+	t.Run("top referrers", func(t *testing.T) {
+		db := newPartialSQLiteCoverageDatabase(t,
+			"CREATE TABLE analytics_events (occurred_at BIGINT, session_id TEXT, display_name TEXT, kind TEXT, region TEXT, dose_class TEXT, track_kind TEXT)",
+		)
+		if _, err := db.QueryAnalyticsSummary(ctx, 0, 100, 10, "sqlite"); err == nil {
+			t.Fatal("summary without referer did not fail")
+		}
+	})
 }
