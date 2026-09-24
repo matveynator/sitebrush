@@ -1,6 +1,7 @@
 package main
 
 import (
+	"flag"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -800,5 +801,108 @@ func TestDesktopBuildOrchestratorWithStubDocker(t *testing.T) {
 	}
 	if err := verifyNonEmptyFile(filepath.Join(desktopDir, "MD5SUMS")); err != nil {
 		t.Fatal(err)
+	}
+}
+
+
+func TestCrosscompileMainServerOnlyWithStubCompiler(t *testing.T) {
+	oldArgs := os.Args
+	oldFlags := flag.CommandLine
+	defer func() {
+		os.Args = oldArgs
+		flag.CommandLine = oldFlags
+	}()
+
+	repoRoot, err := findRepoRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	outputRoot, err := os.MkdirTemp(repoRoot, ".crosscompile-main-test-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(outputRoot)
+	relativeOutput, err := filepath.Rel(repoRoot, outputRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	commandDirectory := t.TempDir()
+	writeCommandStub(t, commandDirectory, "go", `last=""; previous=""; for argument in "$@"; do if [ "$previous" = "-o" ]; then last="$argument"; fi; previous="$argument"; done; if [ -n "$last" ]; then mkdir -p "$(dirname "$last")"; printf binary > "$last"; fi`)
+	t.Setenv("PATH", commandDirectory)
+
+	flag.CommandLine = flag.NewFlagSet("crosscompile-test", flag.ContinueOnError)
+	os.Args = []string{
+		"crosscompile",
+		"-mode", "server-app",
+		"-os", "linux",
+		"-arch", "amd64",
+		"-version", "security-test",
+		"-output-dir", relativeOutput,
+	}
+	main()
+
+	artifact := filepath.Join(outputRoot, "security-test", "server-app", "sitebrush_linux_amd64")
+	if err := verifyNonEmptyFile(artifact); err != nil {
+		t.Fatalf("main did not produce server artifact: %v", err)
+	}
+	latest, err := os.Readlink(filepath.Join(outputRoot, "latest"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if latest != "security-test" {
+		t.Fatalf("latest target=%q", latest)
+	}
+}
+
+func TestSyncArtifactsUsesOnlyValidatedDestinationWithStubCommands(t *testing.T) {
+	repoRoot := t.TempDir()
+	outputRoot := filepath.Join(repoRoot, "binaries")
+	if err := os.MkdirAll(outputRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	commandDirectory := t.TempDir()
+	logPath := filepath.Join(commandDirectory, "commands.log")
+	stub := `printf '%s
+' "$0 $*" >> "$COMMAND_LOG"`
+	writeCommandStub(t, commandDirectory, "ssh", stub)
+	writeCommandStub(t, commandDirectory, "rsync", stub)
+	t.Setenv("PATH", commandDirectory)
+	t.Setenv("COMMAND_LOG", logPath)
+
+	destination, err := parseSyncDestination("root@sitebrush.com=/srv/sitebrush/releases/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := syncArtifacts(repoRoot, outputRoot, "123", destination.host, destination.base); err != nil {
+		t.Fatal(err)
+	}
+	logged, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(logged)
+	if !strings.Contains(text, "ssh root@sitebrush.com") || !strings.Contains(text, "rsync -avP") {
+		t.Fatalf("sync commands=%q", text)
+	}
+}
+
+func TestCrosscompileVersionAndPlatformHelperFallbacks(t *testing.T) {
+	commandDirectory := t.TempDir()
+	writeCommandStub(t, commandDirectory, "git", `if [ "$1" = "rev-list" ]; then exit 0; fi; if [ "$1" = "describe" ]; then printf 'release-test
+'; exit 0; fi; exit 1`)
+	t.Setenv("PATH", commandDirectory)
+	t.Setenv("GITHUB_RUN_NUMBER", "")
+	if got := defaultVersionLabel(t.TempDir()); got != "release-test" {
+		t.Fatalf("defaultVersionLabel fallback=%q", got)
+	}
+
+	writeCommandStub(t, commandDirectory, "pkg-config", `if [ "$2" = "webkit2gtk-4.0" ]; then exit 0; fi; exit 1`)
+	if variant, ok := linuxDesktopVariant(); !ok || variant != "gtk40" {
+		t.Fatalf("linux desktop variant=%q ok=%v", variant, ok)
+	}
+
+	if dockerNativePlatform() == "" {
+		t.Fatal("docker native platform is empty")
 	}
 }
