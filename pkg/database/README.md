@@ -10,6 +10,10 @@ Application code must not call writable database methods directly through `db.DB
 
 - `Exec`
 - `ExecContext`
+- `Query`
+- `QueryContext`
+- `QueryRow`
+- `QueryRowContext`
 - `Begin`
 - `BeginTx`
 - `Conn`
