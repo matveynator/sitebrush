@@ -553,3 +553,118 @@ func TestAttackGuardDropsPersistedAuthenticationFailureBlocks(t *testing.T) {
 		t.Fatalf("manual administrator block was incorrectly removed: %#v", block)
 	}
 }
+
+
+func TestAttackGuardIncidentReportFailureReleasesClaim(t *testing.T) {
+	now := time.Date(2026, 9, 24, 12, 0, 0, 0, time.UTC)
+	guard, err := NewAttackGuard("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer guard.Close()
+
+	block, blocked := guard.ObserveSiteIncident("example.com", "203.0.113.204", "repository", "requested /.git/config", now)
+	if !blocked {
+		t.Fatal("repository probe did not block")
+	}
+	if _, allowed, err := guard.ClaimIncidentReport(block.IP, block.IncidentID, now.Add(time.Minute)); err != nil || !allowed {
+		t.Fatalf("initial report claim allowed=%v err=%v", allowed, err)
+	}
+	if _, err := guard.FinishIncidentReport(block.IP, block.IncidentID, "mail failed", false, now.Add(2*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if _, allowed, err := guard.ClaimIncidentReport(block.IP, block.IncidentID, now.Add(3*time.Minute)); err != nil || !allowed {
+		t.Fatalf("failed delivery did not release claim: allowed=%v err=%v", allowed, err)
+	}
+}
+
+func TestAttackGuardRejectsIncidentReportForWrongIncidentOrIP(t *testing.T) {
+	now := time.Date(2026, 9, 24, 12, 0, 0, 0, time.UTC)
+	guard, err := NewAttackGuard("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer guard.Close()
+
+	block, blocked := guard.ObserveSiteIncident("example.com", "203.0.113.205", "repository", "requested /.git/config", now)
+	if !blocked {
+		t.Fatal("repository probe did not block")
+	}
+	if _, allowed, err := guard.ClaimIncidentReport(block.IP, "wrong-incident", now.Add(time.Minute)); err == nil || allowed {
+		t.Fatalf("wrong incident unexpectedly claimable: allowed=%v err=%v", allowed, err)
+	}
+	if _, allowed, err := guard.ClaimIncidentReport("203.0.113.206", block.IncidentID, now.Add(time.Minute)); err == nil || allowed {
+		t.Fatalf("wrong IP unexpectedly claimable: allowed=%v err=%v", allowed, err)
+	}
+}
+
+func TestSecuritySourceLabels(t *testing.T) {
+	tests := []struct {
+		source   string
+		language string
+		want     string
+	}{
+		{"local", "ru", "Обнаружено этим сервером"},
+		{"global", "ru", "Глобальная репутация: подтверждено несколькими серверами SiteBrush"},
+		{"manual", "ru", "Добавлено администратором вручную"},
+		{"local", "de", "Von diesem Server erkannt"},
+		{"global", "de", "Globale Reputation: von mehreren SiteBrush-Servern bestätigt"},
+		{"manual", "de", "Manuell vom Administrator hinzugefügt"},
+		{"local", "en", "Detected by this server"},
+		{"global", "en", "Global reputation: confirmed by multiple SiteBrush servers"},
+		{"manual", "en", "Added manually by the administrator"},
+		{"custom", "en", "custom"},
+	}
+	for _, test := range tests {
+		if got := securitySourceLabel(test.source, test.language); got != test.want {
+			t.Fatalf("source=%q language=%q got=%q want=%q", test.source, test.language, got, test.want)
+		}
+	}
+}
+
+func TestSecurityCategoryThresholds(t *testing.T) {
+	tests := map[string]int{
+		"repository": 1,
+		"secret": 1,
+		"traversal": 1,
+		"enumeration": 1,
+		"injection": 2,
+		"source-backup": 3,
+		"scanner-client": 3,
+		"authentication-failures": 0,
+		"unknown": 0,
+	}
+	for category, want := range tests {
+		if got := securityCategoryThreshold(category); got != want {
+			t.Fatalf("category=%q threshold=%d want=%d", category, got, want)
+		}
+		if got := securityCategoryBlocks(category); got != (want > 0) {
+			t.Fatalf("category=%q blocks=%v want=%v", category, got, want > 0)
+		}
+	}
+}
+
+func TestAttackGuardPersistenceSnapshotKeepsExpiredEscalationHistory(t *testing.T) {
+	now := time.Date(2026, 9, 24, 12, 0, 0, 0, time.UTC)
+	guard, err := NewAttackGuard("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer guard.Close()
+
+	if _, blocked := guard.ObserveIncident("203.0.113.207", "repository", "requested /.git/config", now); !blocked {
+		t.Fatal("repository probe did not block")
+	}
+	if snapshot, err := guard.Snapshot(now.Add(25 * time.Hour)); err != nil {
+		t.Fatal(err)
+	} else if len(snapshot) != 0 {
+		t.Fatalf("expired block remained in active snapshot: %#v", snapshot)
+	}
+	history, err := guard.persistenceSnapshot(now.Add(25 * time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(history) != 1 || history[0].Violations != 1 {
+		t.Fatalf("expired escalation history missing: %#v", history)
+	}
+}
