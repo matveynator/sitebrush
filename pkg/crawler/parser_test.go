@@ -23,6 +23,25 @@ func TestParserResolvesRootAssetJavaScriptReferences(t *testing.T) {
 	}
 }
 
+func TestDocumentReferenceAndTrailingPunctuationHelpers(t *testing.T) {
+	rewritten := RewriteDocumentResourceReferences(`<a href="/page">go</a><img src="/image.png"><link rel="stylesheet" href="/site.css">`, func(reference string) string { return "/local" + reference })
+	for _, expected := range []string{`href="/local/page"`, `src="/local/image.png"`, `href="/local/site.css"`} {
+		if !strings.Contains(rewritten, expected) {
+			t.Errorf("rewritten document missing %q: %s", expected, rewritten)
+		}
+	}
+	resource, trailing := SplitStaticResourceURLTrailingText("/asset.js...")
+	if resource != "/asset.js" || trailing != "..." {
+		t.Fatalf("split resource=%q trailing=%q", resource, trailing)
+	}
+	if resource, trailing := SplitStaticResourceURLTrailingText("/asset.js"); resource != "/asset.js" || trailing != "" {
+		t.Fatalf("unchanged resource=%q trailing=%q", resource, trailing)
+	}
+	if !isWholeSiteDocumentAttribute(" A ", "href") || !isWholeSiteDocumentAttribute("iframe", "src") || isWholeSiteDocumentAttribute("img", "src") {
+		t.Fatal("whole-site document attribute classification failed")
+	}
+}
+
 func TestParserRewritesUppercaseScriptSource(t *testing.T) {
 	source := `<SCRIPT language="JavaScript" type="text/javascript" src="js/CurrentTime.js"></SCRIPT>`
 	var normalizedScriptURL string

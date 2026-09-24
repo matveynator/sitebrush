@@ -2,6 +2,7 @@ package outboundhttp
 
 import (
 	"context"
+	"errors"
 	"net"
 	"net/http"
 	"net/url"
@@ -14,6 +15,73 @@ type fixedResolver struct {
 
 func (resolver fixedResolver) LookupIPAddr(context.Context, string) ([]net.IPAddr, error) {
 	return resolver.addresses, nil
+}
+
+type failingResolver struct{}
+
+func (failingResolver) LookupIPAddr(context.Context, string) ([]net.IPAddr, error) {
+	return nil, errors.New("lookup failed")
+}
+
+func TestTransportDialRejectsInvalidAndUnusableSources(t *testing.T) {
+	transport, err := NewTransport(nil, TransportOptions{Resolver: fixedResolver{addresses: []net.IPAddr{{IP: net.ParseIP("8.8.8.8")}}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, address := range []string{"bad-address", "[fe80::1%en0]:80", "example.com:80"} {
+		_, err := transport.DialContext(context.Background(), "tcp", address)
+		if err == nil {
+			t.Errorf("DialContext(%q) succeeded", address)
+		}
+	}
+	transport, err = NewTransport(nil, TransportOptions{Resolver: fixedResolver{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := transport.DialContext(context.Background(), "tcp", "example.com:80"); err == nil {
+		t.Fatal("empty DNS answer accepted")
+	}
+	transport, err = NewTransport(nil, TransportOptions{Resolver: failingResolver{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := transport.DialContext(context.Background(), "tcp", "example.com:80"); err == nil || err.Error() != "lookup failed" {
+		t.Fatalf("resolver error=%v", err)
+	}
+}
+
+func TestTransportDialReturnsLastConnectionError(t *testing.T) {
+	transport, err := NewTransport(nil, TransportOptions{Resolver: fixedResolver{addresses: []net.IPAddr{
+		{IP: net.ParseIP("8.8.8.8")},
+		{IP: net.ParseIP("1.1.1.1")},
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := transport.DialContext(context.Background(), "unsupported-network", "example.com:80"); err == nil {
+		t.Fatal("connection errors were lost")
+	}
+}
+
+func TestTransportDialUsesPublicSourceOverride(t *testing.T) {
+	transport, err := NewTransport(nil, TransportOptions{SourceOverride: SourceOverride{
+		Host: " EXAMPLE.COM ", Address: net.ParseIP("8.8.8.8"), Port: "443",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := transport.DialContext(context.Background(), "unsupported-network", "example.com:80"); err == nil {
+		t.Fatal("unsupported network unexpectedly connected")
+	}
+}
+
+func TestIPAllowedRejectsInvalidAndAcceptsPublicAddress(t *testing.T) {
+	if IPAllowed(nil) || IPAllowed(net.IP{1, 2, 3}) {
+		t.Fatal("invalid IP address accepted")
+	}
+	if !IPAllowed(net.ParseIP("8.8.8.8")) {
+		t.Fatal("public IP address rejected")
+	}
 }
 
 func TestRequirePublicURLRejectsCredentialsAndPrivateAddresses(t *testing.T) {
@@ -29,6 +97,43 @@ func TestRequirePublicURLRejectsCredentialsAndPrivateAddresses(t *testing.T) {
 		if err := RequirePublicURL(targetURL); err == nil {
 			t.Fatalf("RequirePublicURL(%q) allowed an unsafe target", rawURL)
 		}
+	}
+}
+
+func TestRequirePublicURLRejectsMalformedAndLocalNames(t *testing.T) {
+	for _, rawURL := range []string{"http://", "http://localhost/", "https://api.localhost/", "http://[fe80::1%25en0]/"} {
+		targetURL, err := url.Parse(rawURL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := RequirePublicURL(targetURL); err == nil {
+			t.Errorf("RequirePublicURL(%q) unexpectedly succeeded", rawURL)
+		}
+	}
+	if err := RequirePublicURL(nil); err == nil {
+		t.Fatal("nil URL accepted")
+	}
+}
+
+func TestCheckRedirectValidatesRedirectTarget(t *testing.T) {
+	if err := CheckRedirect(nil, nil); err == nil {
+		t.Fatal("nil request accepted")
+	}
+	for _, rawURL := range []string{"http://127.0.0.1/path", "file:///tmp/sitebrush"} {
+		request, err := http.NewRequest(http.MethodGet, rawURL, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := CheckRedirect(request, nil); err == nil {
+			t.Fatalf("redirect to %q accepted", rawURL)
+		}
+	}
+	request, err := http.NewRequest(http.MethodGet, "https://example.com/next", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := CheckRedirect(request, nil); err != nil {
+		t.Fatalf("public redirect rejected: %v", err)
 	}
 }
 

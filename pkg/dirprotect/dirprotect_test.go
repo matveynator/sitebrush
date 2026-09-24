@@ -67,6 +67,39 @@ func TestBoundSessionTokenExpiresAfterTTL(t *testing.T) {
 	}
 }
 
+func TestBoundSessionTokenRejectsMalformedAndFutureTokens(t *testing.T) {
+	rule := Rule{Domain: "localhost", Path: "/passport", PasswordHash: "hash"}
+	now := time.Unix(1_700_000_000, 0).UTC()
+	for _, token := range []string{"", "v1:1:x", "v2:bad:x", "v2:1", "v2:1:x:y"} {
+		if BoundSessionTokenValid(rule, token, "127.0.0.1", "", now, time.Hour) {
+			t.Errorf("malformed token %q accepted", token)
+		}
+	}
+	validToken := BoundSessionToken(rule, "127.0.0.1", "", now.Add(6*time.Minute))
+	if BoundSessionTokenValid(rule, validToken, "127.0.0.1", "", now, time.Hour) {
+		t.Fatal("token issued too far in the future was accepted")
+	}
+	validToken = BoundSessionToken(rule, "127.0.0.1", "", now)
+	if BoundSessionTokenValid(rule, validToken, "127.0.0.1", "", now, 0) || BoundSessionTokenValid(rule, validToken, "127.0.0.1", "", now, -time.Second) {
+		t.Fatal("token accepted with a non-positive TTL")
+	}
+}
+
+func TestCookieAndFailureDomainKeysNormalizeInputs(t *testing.T) {
+	if CookieName("Example.COM.", "//secure/../passport") != CookieName("example.com", "/passport") {
+		t.Fatal("cookie name did not normalize domain and path")
+	}
+	if CookieName("example.com", "/one") == CookieName("example.com", "/two") {
+		t.Fatal("different protected paths share a cookie name")
+	}
+	if got := FailureDomain("Example.COM.", "//secure/../passport"); got != "example.com|page-password|/passport" {
+		t.Fatalf("failure domain = %q", got)
+	}
+	if got := FailureDomainPrefix(""); got != "localhost|page-password|" {
+		t.Fatalf("empty-domain prefix = %q", got)
+	}
+}
+
 func TestHashUsesPasswordHashingAlgorithm(t *testing.T) {
 	password := strings.Repeat("long password ", 20)
 	passwordHash := mustHashForTest(t, password)

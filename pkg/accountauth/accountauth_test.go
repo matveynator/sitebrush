@@ -82,6 +82,50 @@ func TestLoginAlwaysRequiresMailWithoutSession(t *testing.T) {
 		t.Fatal("attempt limit bypassed")
 	}
 }
+
+func TestCredentialsAndSingleUseLoginLink(t *testing.T) {
+	database := testDatabase(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	transaction, err := database.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if matched, err := Credentials(ctx, transaction, "example.org", "owner@example.org", "password"); err != nil || !matched {
+		t.Fatalf("valid credentials = %t, %v", matched, err)
+	}
+	if matched, err := Credentials(ctx, transaction, "example.org", "owner@example.org", "incorrect"); err != nil || matched {
+		t.Fatalf("invalid credentials = %t, %v", matched, err)
+	}
+	if matched, err := Credentials(ctx, transaction, "example.org", "missing@example.org", "password"); err != nil || matched {
+		t.Fatalf("unknown account credentials = %t, %v", matched, err)
+	}
+	if err := transaction.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	challenge := transact(t, database, func(tx *sql.Tx) (Outcome, error) {
+		return Challenge(ctx, tx, "example.org", "owner@example.org", "192.0.2.10", "/profile", "en", now)
+	})
+	if challenge.Status != "code" {
+		t.Fatalf("login challenge = %#v", challenge)
+	}
+	link := transact(t, database, func(tx *sql.Tx) (Outcome, error) {
+		return VerifyLink(ctx, tx, "example.org", challenge.Token, "192.0.2.10", now.Add(time.Second))
+	})
+	if link.Status != "session" || link.Email != "owner@example.org" || link.Path != "/profile" || link.Language != "en" || link.Token == "" {
+		t.Fatalf("verified login link = %#v", link)
+	}
+	if reused := transact(t, database, func(tx *sql.Tx) (Outcome, error) {
+		return VerifyLink(ctx, tx, "example.org", challenge.Token, "192.0.2.10", now.Add(2*time.Second))
+	}); reused.Status != "invalid" {
+		t.Fatalf("reused login link = %#v", reused)
+	}
+	if invalid := transact(t, database, func(tx *sql.Tx) (Outcome, error) {
+		return VerifyLink(ctx, tx, "example.org", challenge.Token, "192.0.2.11", now)
+	}); invalid.Status != "invalid" {
+		t.Fatalf("wrong address login link = %#v", invalid)
+	}
+}
 func TestResendExpiryAndUnknownAddress(t *testing.T) {
 	db := testDatabase(t)
 	ctx := context.Background()

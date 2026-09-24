@@ -34,6 +34,33 @@ func TestBuildMessagePayloadIncludesMessageID(t *testing.T) {
 	}
 }
 
+func TestDirectSenderValidatesAddressesBeforeDNSAndHonorsCancellation(t *testing.T) {
+	sender := DirectSender{}
+	if err := sender.Send(context.Background(), Message{From: "invalid", To: "recipient@example.com"}); err == nil {
+		t.Fatal("invalid sender address accepted")
+	}
+	if err := sender.Send(context.Background(), Message{From: "sender@example.com", To: "invalid"}); err == nil {
+		t.Fatal("invalid recipient address accepted")
+	}
+	fromAddress, err := parseSingleAddress(" Sender <sender@example.com> ")
+	if err != nil || addressDomain(fromAddress) != "example.com" {
+		t.Fatalf("parsed sender=%v err=%v", fromAddress, err)
+	}
+	if addressDomain(nil) != "" || addressDomain(&mail.Address{Address: "invalid"}) != "" {
+		t.Fatal("address without a domain was accepted")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := sender.sendToHost(ctx, "mx.example.com", "sender@example.com", "recipient@example.com", []byte("body")); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled send error=%v", err)
+	}
+	lookupContext, lookupCancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer lookupCancel()
+	if _, err := lookupMailHosts(lookupContext, "example.com"); err == nil {
+		t.Fatal("MX lookup ignored expired context")
+	}
+}
+
 func TestBuildMessagePayloadUsesMultipartAlternativeForHTML(t *testing.T) {
 	fromAddress, _ := mail.ParseAddress("SiteBrush <noreply@example.com>")
 	toAddress, _ := mail.ParseAddress("User <user@example.net>")
@@ -124,4 +151,109 @@ func TestRetryPolicyAndPermanentSMTPFailure(t *testing.T) {
 	if !IsPermanentFailure(PermanentError{Err: errors.New("policy rejected")}) {
 		t.Fatal("explicit permanent error was not classified as permanent")
 	}
+}
+
+func TestOutboxTaskValidationStateTransitionsAndRetention(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 9, 24, 0, 0, 0, 0, time.UTC)
+	database, err := sql.Open("sqlite", "file:"+t.TempDir()+"/outbox-coverage.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	for _, statement := range SchemaQueries() {
+		if _, err := database.Exec(statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(NewDeliveryID()) != 32 {
+		t.Fatal("delivery ID has an unexpected size")
+	}
+	defaultTask := NewTask(" invoice ", RouteLocal, Message{To: "user@example.com"}, time.Time{}, nil)
+	if defaultTask.Kind != "invoice" || defaultTask.Message.MessageID != defaultTask.ID || !defaultTask.ExpiresAt.After(defaultTask.CreatedAt) {
+		t.Fatalf("new task = %#v", defaultTask)
+	}
+	for _, task := range []Task{
+		{Route: "unknown", Message: Message{To: "user@example.com"}},
+		{Route: RouteLocal, Message: Message{}},
+		{ID: "bad-expiry", Route: RouteLocal, Message: Message{To: "user@example.com"}, CreatedAt: now, ExpiresAt: now},
+	} {
+		if _, err := NormalizeTask(task); err == nil {
+			t.Errorf("invalid task was normalized: %#v", task)
+		}
+	}
+	task, err := NormalizeTask(Task{ID: " stable ", InstallationID: " host ", Route: RouteRelay, Message: Message{To: " user@example.com "}, CreatedAt: now})
+	if err != nil || task.ID != "stable" || task.InstallationID != "host" || task.Message.MessageID != "stable" || task.Kind != "system" {
+		t.Fatalf("normalized task = %#v, %v", task, err)
+	}
+	inserted, err := Insert(ctx, database, Task{ID: "stable", InstallationID: "host", Kind: "system", Route: RouteLocal, Message: Message{From: "from@example.com", To: "user@example.com", Subject: "Hi", Body: "plain", HTMLBody: "<p>hi</p>"}, CreatedAt: now, ExpiresAt: now.Add(time.Hour)})
+	if err != nil || !inserted {
+		t.Fatalf("insert outbox task = %t, %v", inserted, err)
+	}
+	if inserted, err := Insert(ctx, database, Task{ID: "stable", Route: RouteLocal, Message: Message{To: "user@example.com"}}); err != nil || inserted {
+		t.Fatalf("duplicate outbox insert = %t, %v", inserted, err)
+	}
+	record, found, err := ByID(ctx, database, " stable ")
+	if err != nil || !found || record.Status != StatusPending || record.Message.Body != "plain" {
+		t.Fatalf("outbox record = %#v, %t, %v", record, found, err)
+	}
+	if _, found, err := ByID(ctx, database, "missing"); err != nil || found {
+		t.Fatalf("missing outbox record = %t, %v", found, err)
+	}
+	if err := MarkPending(ctx, database, "stable", 2, now.Add(time.Minute), errors.New("temporary")); err != nil {
+		t.Fatal(err)
+	}
+	due, err := Due(ctx, database, now.Add(2*time.Minute), 0)
+	if err != nil || len(due) != 1 || due[0].Attempts != 2 || due[0].LastError != "temporary" {
+		t.Fatalf("due records = %#v, %v", due, err)
+	}
+	claimed, err := Claim(ctx, database, "stable")
+	if err != nil || !claimed {
+		t.Fatalf("claim outbox task = %t, %v", claimed, err)
+	}
+	if err := MarkFailed(ctx, database, "stable", 3, nil); err != nil {
+		t.Fatal(err)
+	}
+	record, found, err = ByID(ctx, database, "stable")
+	if err != nil || !found || record.Status != StatusFailed || record.LastError != "delivery failed" || record.Message.Body != "" {
+		t.Fatalf("failed task = %#v, %t, %v", record, found, err)
+	}
+	if err := PurgeTerminal(ctx, database, now.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if _, found, err := ByID(ctx, database, "stable"); err != nil || found {
+		t.Fatalf("purged task remains: %t, %v", found, err)
+	}
+	for attempt := 0; attempt <= 6; attempt++ {
+		delay := RetryDelayWithJitter(attempt)
+		base := RetryDelay(attempt)
+		if delay < base*8/10 || delay > base*12/10 {
+			t.Fatalf("jitter delay %d = %s outside base %s", attempt, delay, base)
+		}
+	}
+	cause := errors.New("cause")
+	wrapped := PermanentError{Err: cause}
+	if (PermanentError{}).Error() != "permanent mail delivery failure" || wrapped.Error() != "cause" || wrapped.Unwrap() != cause {
+		t.Fatal("permanent mail error representation is invalid")
+	}
+}
+
+func TestDeliveryWorkerReturnsAndStopsOnSubscriberLifetime(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	completed := make(chan Message, 1)
+	jobs := StartDeliveryWorker(ctx, func(_ context.Context, message Message) error {
+		completed <- message
+		return nil
+	})
+	jobs <- DeliveryJob{Message: Message{MessageID: "worker-task", To: "user@example.com"}}
+	select {
+	case message := <-completed:
+		if message.MessageID != "worker-task" {
+			t.Fatalf("worker message = %#v", message)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("delivery worker did not process the task")
+	}
+	cancel()
 }

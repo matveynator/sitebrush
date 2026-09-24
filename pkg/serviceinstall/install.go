@@ -46,13 +46,21 @@ type Result struct {
 type commandRunner func(context.Context, string, ...string) (string, error)
 
 type runtimeProbe struct {
-	goos        string
-	goarch      string
-	osVersion   string
-	lookPath    func(string) (string, error)
-	fileExists  func(string) bool
-	dirExists   func(string) bool
-	commandRuns commandRunner
+	goos           string
+	goarch         string
+	osVersion      string
+	filesystemRoot string
+	lookPath       func(string) (string, error)
+	fileExists     func(string) bool
+	dirExists      func(string) bool
+	commandRuns    commandRunner
+}
+
+func (probe runtimeProbe) filesystemPath(absolutePath string) string {
+	if probe.filesystemRoot == "" {
+		return absolutePath
+	}
+	return filepath.Join(probe.filesystemRoot, strings.TrimLeft(filepath.Clean(absolutePath), string(filepath.Separator)))
 }
 
 type serviceManager struct {
@@ -1242,7 +1250,7 @@ func runServiceCommands(ctx context.Context, probe runtimeProbe, commands []serv
 
 func installSystemd(ctx context.Context, probe runtimeProbe, plan installPlan) (Result, error) {
 	unitName := plan.ServiceName + ".service"
-	unitPath := filepath.Join("/etc/systemd/system", unitName)
+	unitPath := probe.filesystemPath(filepath.Join("/etc/systemd/system", unitName))
 	content := fmt.Sprintf(`[Unit]
 Description=Sitebrush server
 After=network-online.target
@@ -1271,7 +1279,7 @@ WantedBy=multi-user.target
 
 func uninstallSystemd(ctx context.Context, probe runtimeProbe, plan installPlan) (Result, error) {
 	unitName := plan.ServiceName + ".service"
-	unitPath := filepath.Join("/etc/systemd/system", unitName)
+	unitPath := probe.filesystemPath(filepath.Join("/etc/systemd/system", unitName))
 	commands, err := runServiceCommands(ctx, probe, []serviceCommand{
 		{Args: []string{"systemctl", "disable", "--now", unitName}, AllowFailure: true},
 		{Args: []string{"systemctl", "daemon-reload"}},
@@ -1289,7 +1297,7 @@ func uninstallSystemd(ctx context.Context, probe runtimeProbe, plan installPlan)
 }
 
 func installOpenRC(ctx context.Context, probe runtimeProbe, plan installPlan) (Result, error) {
-	path := filepath.Join("/etc/init.d", plan.ServiceName)
+	path := probe.filesystemPath(filepath.Join("/etc/init.d", plan.ServiceName))
 	content := fmt.Sprintf(`#!/sbin/openrc-run
 name="Sitebrush"
 description="Sitebrush server"
@@ -1316,7 +1324,7 @@ depend() {
 }
 
 func uninstallOpenRC(ctx context.Context, probe runtimeProbe, plan installPlan) (Result, error) {
-	path := filepath.Join("/etc/init.d", plan.ServiceName)
+	path := probe.filesystemPath(filepath.Join("/etc/init.d", plan.ServiceName))
 	commands, err := runServiceCommands(ctx, probe, []serviceCommand{
 		{Args: []string{"rc-service", plan.ServiceName, "stop"}, AllowFailure: true},
 		{Args: []string{"rc-update", "del", plan.ServiceName, "default"}, AllowFailure: true},
@@ -1328,11 +1336,11 @@ func uninstallOpenRC(ctx context.Context, probe runtimeProbe, plan installPlan) 
 }
 
 func installRunit(ctx context.Context, probe runtimeProbe, plan installPlan) (Result, error) {
-	serviceRoot := "/etc/service"
-	if !probe.dirExists(serviceRoot) && probe.dirExists("/service") {
-		serviceRoot = "/service"
+	serviceRoot := probe.filesystemPath("/etc/service")
+	if !probe.dirExists(serviceRoot) && probe.dirExists(probe.filesystemPath("/service")) {
+		serviceRoot = probe.filesystemPath("/service")
 	}
-	sourceDir := filepath.Join("/etc/sv", plan.ServiceName)
+	sourceDir := probe.filesystemPath(filepath.Join("/etc/sv", plan.ServiceName))
 	runPath := filepath.Join(sourceDir, "run")
 	content := fmt.Sprintf(`#!/bin/sh
 cd %s || exit 1
@@ -1355,12 +1363,12 @@ exec %s 2>&1
 }
 
 func uninstallRunit(ctx context.Context, probe runtimeProbe, plan installPlan) (Result, error) {
-	serviceRoot := "/etc/service"
-	if !probe.dirExists(serviceRoot) && probe.dirExists("/service") {
-		serviceRoot = "/service"
+	serviceRoot := probe.filesystemPath("/etc/service")
+	if !probe.dirExists(serviceRoot) && probe.dirExists(probe.filesystemPath("/service")) {
+		serviceRoot = probe.filesystemPath("/service")
 	}
 	serviceLink := filepath.Join(serviceRoot, plan.ServiceName)
-	sourceDir := filepath.Join("/etc/sv", plan.ServiceName)
+	sourceDir := probe.filesystemPath(filepath.Join("/etc/sv", plan.ServiceName))
 	commands, err := runServiceCommands(ctx, probe, []serviceCommand{
 		{Args: []string{"sv", "down", serviceLink}, AllowFailure: true},
 	})
@@ -1374,7 +1382,7 @@ func uninstallRunit(ctx context.Context, probe runtimeProbe, plan installPlan) (
 }
 
 func installUpstart(ctx context.Context, probe runtimeProbe, plan installPlan) (Result, error) {
-	path := filepath.Join("/etc/init", plan.ServiceName+".conf")
+	path := probe.filesystemPath(filepath.Join("/etc/init", plan.ServiceName+".conf"))
 	content := fmt.Sprintf(`description "Sitebrush server"
 start on filesystem and net-device-up IFACE!=lo
 stop on runlevel [016]
@@ -1401,7 +1409,7 @@ exec %s
 }
 
 func uninstallUpstart(ctx context.Context, probe runtimeProbe, plan installPlan) (Result, error) {
-	path := filepath.Join("/etc/init", plan.ServiceName+".conf")
+	path := probe.filesystemPath(filepath.Join("/etc/init", plan.ServiceName+".conf"))
 	commands, err := runServiceCommands(ctx, probe, []serviceCommand{
 		{Args: []string{"initctl", "stop", plan.ServiceName}, AllowFailure: true},
 	})
@@ -1417,7 +1425,7 @@ func uninstallUpstart(ctx context.Context, probe runtimeProbe, plan installPlan)
 }
 
 func installSysVInit(ctx context.Context, probe runtimeProbe, plan installPlan) (Result, error) {
-	path := filepath.Join("/etc/init.d", plan.ServiceName)
+	path := probe.filesystemPath(filepath.Join("/etc/init.d", plan.ServiceName))
 	content := sysVRcScript(plan)
 	if err := writeFile(path, content, 0o755); err != nil {
 		return Result{}, err
@@ -1437,7 +1445,7 @@ func installSysVInit(ctx context.Context, probe runtimeProbe, plan installPlan) 
 }
 
 func uninstallSysVInit(ctx context.Context, probe runtimeProbe, plan installPlan) (Result, error) {
-	path := filepath.Join("/etc/init.d", plan.ServiceName)
+	path := probe.filesystemPath(filepath.Join("/etc/init.d", plan.ServiceName))
 	disableCommand := []string{"update-rc.d", "-f", plan.ServiceName, "remove"}
 	if commandExists(probe, "chkconfig") {
 		disableCommand = []string{"chkconfig", "--del", plan.ServiceName}
@@ -1492,7 +1500,7 @@ exit $?
 
 func installLaunchd(ctx context.Context, probe runtimeProbe, plan installPlan) (Result, error) {
 	label := "net.sitebrush." + plan.ServiceName
-	path := filepath.Join("/Library/LaunchDaemons", label+".plist")
+	path := probe.filesystemPath(filepath.Join("/Library/LaunchDaemons", label+".plist"))
 	content := launchdPlist(label, plan)
 	if err := writeFile(path, content, 0o644); err != nil {
 		return Result{}, err
@@ -1527,7 +1535,7 @@ func installLaunchd(ctx context.Context, probe runtimeProbe, plan installPlan) (
 
 func uninstallLaunchd(ctx context.Context, probe runtimeProbe, plan installPlan) (Result, error) {
 	label := "net.sitebrush." + plan.ServiceName
-	path := filepath.Join("/Library/LaunchDaemons", label+".plist")
+	path := probe.filesystemPath(filepath.Join("/Library/LaunchDaemons", label+".plist"))
 	commands, err := runServiceCommands(ctx, probe, []serviceCommand{
 		{Args: []string{"launchctl", "bootout", "system/" + label}, AllowFailure: true},
 		{Args: []string{"launchctl", "bootout", "system", path}, AllowFailure: true},
@@ -1611,7 +1619,7 @@ func uninstallWindowsService(ctx context.Context, probe runtimeProbe, plan insta
 }
 
 func installFreeBSDRcD(ctx context.Context, probe runtimeProbe, plan installPlan) (Result, error) {
-	path := filepath.Join("/usr/local/etc/rc.d", plan.ServiceName)
+	path := probe.filesystemPath(filepath.Join("/usr/local/etc/rc.d", plan.ServiceName))
 	if err := writeFile(path, freeBSDRcScript(plan), 0o755); err != nil {
 		return Result{}, err
 	}
@@ -1622,13 +1630,13 @@ func installFreeBSDRcD(ctx context.Context, probe runtimeProbe, plan installPlan
 }
 
 func uninstallFreeBSDRcD(ctx context.Context, probe runtimeProbe, plan installPlan) (Result, error) {
-	path := filepath.Join("/usr/local/etc/rc.d", plan.ServiceName)
+	path := probe.filesystemPath(filepath.Join("/usr/local/etc/rc.d", plan.ServiceName))
 	commands := []serviceCommand{
 		{Args: []string{"service", plan.ServiceName, "stop"}, AllowFailure: true},
 	}
 	if commandExists(probe, "sysrc") {
 		commands = append(commands, serviceCommand{Args: []string{"sysrc", "-x", plan.ServiceName + "_enable"}, AllowFailure: true})
-	} else if err := removeRcConfLines(plan.ServiceName + "_enable"); err != nil {
+	} else if err := removeRcConfLinesAt(probe.filesystemPath("/etc/rc.conf"), plan.ServiceName+"_enable"); err != nil {
 		return Result{}, err
 	}
 	executed, err := runServiceCommands(ctx, probe, commands)
@@ -1639,7 +1647,7 @@ func uninstallFreeBSDRcD(ctx context.Context, probe runtimeProbe, plan installPl
 }
 
 func installOpenBSDRcD(ctx context.Context, probe runtimeProbe, plan installPlan) (Result, error) {
-	path := filepath.Join("/etc/rc.d", plan.ServiceName)
+	path := probe.filesystemPath(filepath.Join("/etc/rc.d", plan.ServiceName))
 	if err := writeFile(path, openBSDRcScript(plan), 0o755); err != nil {
 		return Result{}, err
 	}
@@ -1652,7 +1660,7 @@ func installOpenBSDRcD(ctx context.Context, probe runtimeProbe, plan installPlan
 }
 
 func uninstallOpenBSDRcD(ctx context.Context, probe runtimeProbe, plan installPlan) (Result, error) {
-	path := filepath.Join("/etc/rc.d", plan.ServiceName)
+	path := probe.filesystemPath(filepath.Join("/etc/rc.d", plan.ServiceName))
 	commands, err := runServiceCommands(ctx, probe, []serviceCommand{
 		{Args: []string{"rcctl", "stop", plan.ServiceName}, AllowFailure: true},
 		{Args: []string{"rcctl", "disable", plan.ServiceName}, AllowFailure: true},
@@ -1664,26 +1672,26 @@ func uninstallOpenBSDRcD(ctx context.Context, probe runtimeProbe, plan installPl
 }
 
 func installNetBSDRcD(ctx context.Context, probe runtimeProbe, plan installPlan) (Result, error) {
-	path := filepath.Join("/etc/rc.d", plan.ServiceName)
+	path := probe.filesystemPath(filepath.Join("/etc/rc.d", plan.ServiceName))
 	if err := writeFile(path, netBSDRcScript(plan), 0o755); err != nil {
 		return Result{}, err
 	}
-	if err := appendRcConf(plan.ServiceName + "=YES\n"); err != nil {
+	if err := appendRcConfAt(probe.filesystemPath("/etc/rc.conf"), plan.ServiceName+"=YES\n"); err != nil {
 		return Result{}, err
 	}
 	commands, err := runInstallCommands(ctx, probe, [][]string{
-		{"/etc/rc.d/" + plan.ServiceName, "restart"},
-		{"/etc/rc.d/" + plan.ServiceName, "status"},
+		{probe.filesystemPath("/etc/rc.d/" + plan.ServiceName), "restart"},
+		{probe.filesystemPath("/etc/rc.d/" + plan.ServiceName), "status"},
 	})
 	return Result{ServicePath: path, Commands: commands}, err
 }
 
 func uninstallNetBSDRcD(ctx context.Context, probe runtimeProbe, plan installPlan) (Result, error) {
-	path := filepath.Join("/etc/rc.d", plan.ServiceName)
+	path := probe.filesystemPath(filepath.Join("/etc/rc.d", plan.ServiceName))
 	commands, err := runServiceCommands(ctx, probe, []serviceCommand{
 		{Args: []string{path, "stop"}, AllowFailure: true},
 	})
-	if removeErr := removeRcConfLines(plan.ServiceName); removeErr != nil && err == nil {
+	if removeErr := removeRcConfLinesAt(probe.filesystemPath("/etc/rc.conf"), plan.ServiceName); removeErr != nil && err == nil {
 		err = removeErr
 	}
 	if removeErr := removeFileIfExists(path); removeErr != nil && err == nil {
@@ -1696,18 +1704,22 @@ func bsdEnableCommands(probe runtimeProbe, serviceName, value string) [][]string
 	if commandExists(probe, "sysrc") {
 		return [][]string{{"sysrc", serviceName + "_enable=" + value}}
 	}
-	_ = appendRcConf(fmt.Sprintf("%s_enable=\"%s\"\n", serviceName, value))
+	_ = appendRcConfAt(probe.filesystemPath("/etc/rc.conf"), fmt.Sprintf("%s_enable=\"%s\"\n", serviceName, value))
 	return nil
 }
 
 func appendRcConf(line string) error {
-	content, _ := os.ReadFile("/etc/rc.conf")
+	return appendRcConfAt("/etc/rc.conf", line)
+}
+
+func appendRcConfAt(path, line string) error {
+	content, _ := os.ReadFile(path)
 	if strings.Contains(string(content), strings.TrimSpace(line)) {
 		return nil
 	}
-	file, err := os.OpenFile("/etc/rc.conf", os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
 	if err != nil {
-		return fmt.Errorf("update /etc/rc.conf: %w", err)
+		return fmt.Errorf("update %s: %w", path, err)
 	}
 	defer file.Close()
 	_, err = file.WriteString(line)
@@ -1715,12 +1727,16 @@ func appendRcConf(line string) error {
 }
 
 func removeRcConfLines(key string) error {
-	content, err := os.ReadFile("/etc/rc.conf")
+	return removeRcConfLinesAt("/etc/rc.conf", key)
+}
+
+func removeRcConfLinesAt(path, key string) error {
+	content, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
 	if err != nil {
-		return fmt.Errorf("read /etc/rc.conf: %w", err)
+		return fmt.Errorf("read %s: %w", path, err)
 	}
 	lines := strings.Split(string(content), "\n")
 	kept := make([]string, 0, len(lines))
@@ -1741,7 +1757,7 @@ func removeRcConfLines(key string) error {
 		output += "\n"
 	}
 	// #nosec G703 -- /etc/rc.conf is a fixed operating-system integration path.
-	if err := os.WriteFile("/etc/rc.conf", []byte(output), 0o644); err != nil {
+	if err := os.WriteFile(path, []byte(output), 0o644); err != nil {
 		return fmt.Errorf("write /etc/rc.conf: %w", err)
 	}
 	return nil

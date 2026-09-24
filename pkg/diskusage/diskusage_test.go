@@ -70,3 +70,10 @@ func TestDirectorySizeReturnsZeroForMissingPath(t *testing.T) {
 		t.Fatalf("DirectorySize(missing) = %d, want 0", actualBytes)
 	}
 }
+
+func TestDiskSpaceForExistingPath(t *testing.T) {
+	free, total, ok := DiskSpace(t.TempDir())
+	if !ok || total == 0 || free > total {
+		t.Fatalf("DiskSpace() = %d/%d, %t", free, total, ok)
+	}
+}

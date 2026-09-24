@@ -1,9 +1,11 @@
 package serviceinstall
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"io"
+	"os"
 	"strings"
 	"testing"
 )
@@ -31,6 +33,44 @@ func fakeProbe(goos string, commands map[string]bool, paths map[string]bool) run
 			}
 			return "", errors.New("command failed")
 		},
+	}
+}
+
+func TestTerminalKeyParsing(t *testing.T) {
+	testCases := []struct {
+		input string
+		want  string
+	}{
+		{"\n", "enter"}, {"\t", "tab"}, {" ", "space"}, {"Q", "q"}, {"1", "1"}, {"\x1b[C", "right"}, {"\x1b[D", "left"}, {"\x1b", "esc"},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.want, func(t *testing.T) {
+			reader, writer, err := os.Pipe()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := writer.Write([]byte(testCase.input)); err != nil {
+				t.Fatal(err)
+			}
+			_ = writer.Close()
+			defer reader.Close()
+			got, err := readTerminalKey(reader)
+			if err != nil || got != testCase.want {
+				t.Fatalf("readTerminalKey()=%q, %v; want %q", got, err, testCase.want)
+			}
+		})
+	}
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = writer.Close()
+	defer reader.Close()
+	if _, err := readTerminalKey(reader); err == nil {
+		t.Fatal("closed terminal input did not return an error")
+	}
+	if action, err := promptUninstallAction(context.Background(), strings.NewReader("remove\n"), bufio.NewReader(strings.NewReader("remove\n")), io.Discard, cliTextForLanguage("en"), cliTheme{}); err != nil || action != "remove" {
+		t.Fatalf("line uninstall action=%q err=%v", action, err)
 	}
 }
 
@@ -192,6 +232,21 @@ func TestInteractiveWizardEditsPlanBeforeApply(t *testing.T) {
 	}
 	if !strings.Contains(output.String(), "Sitebrush service install") || !strings.Contains(output.String(), "service system: systemd") || !strings.Contains(output.String(), "Disk space") {
 		t.Fatalf("wizard output did not explain detected service system:\n%s", output.String())
+	}
+}
+
+func TestInteractiveWizardEditsEveryInstallField(t *testing.T) {
+	options, err := runInteractiveWizard(
+		context.Background(),
+		Options{BinaryPath: "/tmp/sitebrush", Input: strings.NewReader("en\n1\ncustom-service\n2\n8081\n3\n/tmp/data\n4\n/tmp/data/db.sqlite\n5\n/tmp/custom-sitebrush\n6\n/tmp/work\ninvalid\ncontinue\n"), Output: io.Discard},
+		fakeProbe("linux", nil, nil),
+		serviceManager{Name: "systemd"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if options.ServiceName != "custom-service" || options.Port != "8081" || options.StoragePath != "/tmp/data" || options.DBPath != "/tmp/data/db.sqlite" || options.BinaryPath != "/tmp/custom-sitebrush" || options.WorkingDir != "/tmp/work" {
+		t.Fatalf("wizard options=%+v", options)
 	}
 }
 

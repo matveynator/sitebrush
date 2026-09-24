@@ -40,6 +40,41 @@ func TestDownloadHTMLPageDetectsHTMLBehindPHPContentType(t *testing.T) {
 	}
 }
 
+func TestDownloadHTMLCompatibilityWrappersAndSessionClient(t *testing.T) {
+	pageURL, err := url.Parse("https://example.test/page")
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := NewSessionClient(0, htmlDownloadRoundTripper(func(request *http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusOK, Status: "200 OK", Header: http.Header{"Content-Type": []string{"text/html"}}, Body: io.NopCloser(strings.NewReader("<html>ok</html>")), Request: request}, nil
+	}))
+	pageHTML, isHTML, err := DownloadHTML(client, pageURL, func(request *http.Request) { request.Header.Set("X-Test", "yes") })
+	if err != nil || !isHTML || !strings.Contains(pageHTML, "ok") {
+		t.Fatalf("DownloadHTML() = %q, %t, %v", pageHTML, isHTML, err)
+	}
+	pageHTML, isHTML, err = DownloadHTMLContext(t.Context(), client, pageURL, nil)
+	if err != nil || !isHTML || pageHTML == "" {
+		t.Fatalf("DownloadHTMLContext() = %q, %t, %v", pageHTML, isHTML, err)
+	}
+	for _, testCase := range []struct {
+		client *http.Client
+		url    *url.URL
+	}{{nil, pageURL}, {client, nil}, {client, mustCrawlerURL(t, "http://127.0.0.1/")}} {
+		if _, _, err := DownloadHTML(testCase.client, testCase.url, nil); err == nil {
+			t.Errorf("DownloadHTML accepted client=%v URL=%v", testCase.client != nil, testCase.url)
+		}
+	}
+}
+
+func mustCrawlerURL(t *testing.T, rawURL string) *url.URL {
+	t.Helper()
+	parsedURL, err := url.Parse(rawURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return parsedURL
+}
+
 func TestDownloadHTMLPageRejectsBinaryBehindPageExtension(t *testing.T) {
 	pageURL, err := url.Parse("https://example.test/download.php")
 	if err != nil {
