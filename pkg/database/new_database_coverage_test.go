@@ -1,6 +1,8 @@
 package database
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -50,6 +52,26 @@ func TestNewDatabaseEngineBranches(t *testing.T) {
 		})
 		if err == nil || !strings.Contains(err.Error(), "error connecting") {
 			t.Fatalf("pgx connection error = %v", err)
+		}
+	})
+
+	t.Run("clickhouse local server", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		}))
+		defer server.Close()
+
+		db, err := NewDatabase(Config{DBType: "clickhouse", DBConn: server.URL + "/coverage"})
+		if err != nil {
+			t.Fatalf("new clickhouse local database: %v", err)
+		}
+		t.Cleanup(func() { _ = db.DB.Close() })
+
+		if db.Driver != "clickhouse" || db.pipeline != nil {
+			t.Fatalf("clickhouse driver=%q pipeline=%v", db.Driver, db.pipeline != nil)
+		}
+		if got := db.DB.Stats().MaxOpenConnections; got != 8 {
+			t.Fatalf("clickhouse max open connections = %d, want 8", got)
 		}
 	})
 
