@@ -209,8 +209,8 @@ func TestAttackGuardDiskAndAdministrationFailureBranches(t *testing.T) {
 }
 
 func TestHTTPSSecurityTextAndCrawlerEdgeBranches(t *testing.T) {
-	if got := cleanSecurityText("<script>\x00attack\r\n", 6); strings.ContainsAny(got, "<>\x00\r\n") || len(got) > 6 {
-		t.Fatalf("security text was not bounded: %q", got)
+	if got := cleanSecurityText("attack\x00\r\nmore", 6); strings.ContainsAny(got, "\x00\r\n") || len(got) > 6 || got != "attack" {
+		t.Fatalf("security text was not bounded or controls were retained: %q", got)
 	}
 	for _, language := range []string{"ru", "de", "en", "unknown"} {
 		_ = localizeSecurityDescription("repository", "requested /.git/config", language)
