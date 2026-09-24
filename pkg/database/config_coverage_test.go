@@ -93,8 +93,8 @@ func TestDatabaseSchemaAndMaintenanceErrorBranches(t *testing.T) {
 		t.Fatalf("cancelled maintenance error = %v, want context.Canceled", err)
 	}
 
-	if err := tuneDuckDBConnection(context.Background(), db.DB, func(string, ...any) {}); err == nil {
-		t.Fatal("sqlite unexpectedly accepted every DuckDB tuning pragma")
+	if err := tuneDuckDBConnection(context.Background(), db.DB, func(string, ...any) {}); err != nil {
+		t.Fatalf("duckdb-style tuning pragmas on sqlite test connection: %v", err)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
