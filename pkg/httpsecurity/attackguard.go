@@ -1107,38 +1107,56 @@ func BlockedHTML(language string, block SecurityBlock) string {
 func blockedHTMLAt(language string, block SecurityBlock, now time.Time) string {
 	title := "Request blocked"
 	message := "SiteBrush temporarily blocked requests from this address."
-	support := "Contact the site administrator and include the incident ID."
+	support := "You can find this incident by its ID in Analytics → Security."
 	ipLabel := "Client address"
+	causeLabel := "Reason for blocking"
 	sourceLabel := "Blocking source"
 	untilLabel := "Blocked until (UTC)"
 	durationLabel := "Block duration"
 	remainingLabel := "remaining"
 	eventsLabel := "Events that triggered the block"
+	reportLabel := "Think this block is a mistake?"
+	reportHelp := "Send this incident to the site administrator once. Add a short explanation if useful."
+	reportButton := "Send incident to administrator"
+	reportPlaceholder := "Short explanation (optional)"
+	reportSent := "This incident has already been sent to the site administrator."
 	developerLabel := "For developers testing locally"
 	developerHelp := "Run tests against httptest servers or mocked HTTP transports. A local go test should not send repeated authentication requests to sitebrush.com. When testing a local SiteBrush server, use localhost; in a local development installation, disable Auto-block and Global reputation sync in Analytics → Security, or ask an administrator to allowlist your client address. Do not disable protection on the public server."
 	language = strings.ToLower(language)
 	if strings.HasPrefix(language, "ru") {
 		title = "Запрос заблокирован"
 		message = "SiteBrush временно заблокировал запросы с этого адреса."
-		support = "Обратитесь к администратору сайта или support@sitebrush.com и укажите идентификатор инцидента."
+		support = "Администратор может найти этот инцидент по ID в разделе «Аналитика → Безопасность»."
 		ipLabel = "Заблокированный IP-адрес"
+		causeLabel = "Причина блокировки"
 		sourceLabel = "Источник блокировки"
 		untilLabel = "Блокировка действует до (UTC)"
 		durationLabel = "Срок блокировки"
 		remainingLabel = "осталось"
 		eventsLabel = "Действия, вызвавшие блокировку"
+		reportLabel = "Считаете блокировку ошибочной?"
+		reportHelp = "Один раз отправьте этот инцидент администратору сайта. При необходимости добавьте короткое пояснение."
+		reportButton = "Отправить инцидент администратору"
+		reportPlaceholder = "Короткое пояснение (необязательно)"
+		reportSent = "Информация об этом инциденте уже отправлена администратору сайта."
 		developerLabel = "Для разработчиков: безопасное тестирование"
 		developerHelp = "Запускайте тесты с httptest-серверами или подменёнными HTTP-транспортами. Локальный go test не должен отправлять повторные запросы аутентификации на sitebrush.com. Для проверки локального SiteBrush используйте localhost; в локальной среде разработки отключите Auto-block и Global reputation sync в разделе Analytics → Security либо попросите администратора добавить ваш адрес в список разрешённых. Не отключайте защиту на публичном сервере."
 	} else if strings.HasPrefix(language, "de") {
 		title = "Anfrage blockiert"
 		message = "SiteBrush hat Anfragen von dieser Adresse vorübergehend blockiert."
-		support = "Kontaktieren Sie den Website-Administrator oder support@sitebrush.com und nennen Sie die Vorfall-ID."
+		support = "Der Administrator kann diesen Vorfall über seine ID unter Analytics → Security finden."
 		ipLabel = "Gesperrte IP-Adresse"
+		causeLabel = "Grund der Sperre"
 		sourceLabel = "Sperrquelle"
 		untilLabel = "Gesperrt bis (UTC)"
 		durationLabel = "Sperrdauer"
 		remainingLabel = "verbleibend"
 		eventsLabel = "Ereignisse, die zur Sperre geführt haben"
+		reportLabel = "Halten Sie die Sperre für einen Fehler?"
+		reportHelp = "Senden Sie diesen Vorfall einmalig an den Administrator. Eine kurze Erklärung ist optional."
+		reportButton = "Vorfall an Administrator senden"
+		reportPlaceholder = "Kurze Erklärung (optional)"
+		reportSent = "Dieser Vorfall wurde bereits an den Administrator gesendet."
 		developerLabel = "Für Entwickler: sicher lokal testen"
 		developerHelp = "Tests sollten httptest-Server oder gemockte HTTP-Transporte verwenden. Ein lokales go test sollte keine wiederholten Authentifizierungsanfragen an sitebrush.com senden. Verwenden Sie localhost für lokale SiteBrush-Tests. Deaktivieren Sie Auto-block und Global reputation sync nur in einer lokalen Entwicklungsinstallation oder lassen Sie Ihre Adresse freischalten. Deaktivieren Sie den Schutz nicht auf einem öffentlichen Server."
 	}
@@ -1149,18 +1167,28 @@ func blockedHTMLAt(language string, block SecurityBlock, now time.Time) string {
 	body.WriteString(html.EscapeString(title))
 	body.WriteString("</h1><p>")
 	body.WriteString(html.EscapeString(message))
-	body.WriteString("</p><p>")
-	body.WriteString(html.EscapeString(securityReasonLabel(block.Reason, language)))
 	body.WriteString("</p><p>Incident: <code>")
 	body.WriteString(html.EscapeString(block.IncidentID))
-	body.WriteString("</code></p><dl><dt>")
+	body.WriteString("</code></p><p>")
+	body.WriteString(html.EscapeString(support))
+	body.WriteString("</p><dl><dt>")
+	body.WriteString(html.EscapeString(causeLabel))
+	body.WriteString("</dt><dd><strong>")
+	body.WriteString(html.EscapeString(securityReasonLabel(block.Reason, language)))
+	body.WriteString("</strong>")
+	if block.Description != "" {
+		body.WriteString("<div>")
+		body.WriteString(html.EscapeString(localizeSecurityDescription(block.Reason, block.Description, language)))
+		body.WriteString("</div>")
+	}
+	body.WriteString("</dd><dt>")
 	body.WriteString(html.EscapeString(ipLabel))
 	body.WriteString("</dt><dd><code>")
 	body.WriteString(html.EscapeString(block.IP))
 	body.WriteString("</code></dd><dt>")
 	body.WriteString(html.EscapeString(sourceLabel))
 	body.WriteString("</dt><dd>")
-	body.WriteString(html.EscapeString(block.Source))
+	body.WriteString(html.EscapeString(securitySourceLabel(block.Source, language)))
 	body.WriteString("</dd><dt>")
 	body.WriteString(html.EscapeString(durationLabel))
 	body.WriteString("</dt><dd>")
@@ -1212,15 +1240,31 @@ func blockedHTMLAt(language string, block SecurityBlock, now time.Time) string {
 			}
 			if event.Source != "" {
 				body.WriteString(" [")
-				body.WriteString(html.EscapeString(event.Source))
+				body.WriteString(html.EscapeString(securitySourceLabel(event.Source, language)))
 				body.WriteString("]")
 			}
 			body.WriteString("</li>")
 		}
 	}
-	body.WriteString("</ul><p>")
-	body.WriteString(html.EscapeString(support))
-	body.WriteString("</p><h2>")
+	body.WriteString("</ul><h2>")
+	body.WriteString(html.EscapeString(reportLabel))
+	body.WriteString("</h2>")
+	if !block.ReportedAt.IsZero() {
+		body.WriteString("<p>")
+		body.WriteString(html.EscapeString(reportSent))
+		body.WriteString("</p>")
+	} else {
+		body.WriteString("<p>")
+		body.WriteString(html.EscapeString(reportHelp))
+		body.WriteString("</p><form method=\"post\" action=\"?security_incident_report\"><input type=\"hidden\" name=\"incident_id\" value=\"")
+		body.WriteString(html.EscapeString(block.IncidentID))
+		body.WriteString("\"><textarea name=\"message\" maxlength=\"500\" rows=\"3\" placeholder=\"")
+		body.WriteString(html.EscapeString(reportPlaceholder))
+		body.WriteString("\"></textarea><br><button type=\"submit\">")
+		body.WriteString(html.EscapeString(reportButton))
+		body.WriteString("</button></form>")
+	}
+	body.WriteString("<h2>")
 	body.WriteString(html.EscapeString(developerLabel))
 	body.WriteString("</h2><p>")
 	body.WriteString(html.EscapeString(developerHelp))
@@ -1262,6 +1306,14 @@ func securityReasonLabel(reason, language string) string {
 		switch reason {
 		case "authentication-failures":
 			return "Повторные ошибки аутентификации"
+		case "repository":
+			return "Попытка доступа к служебным файлам репозитория"
+		case "secret":
+			return "Попытка доступа к секретному или конфигурационному файлу"
+		case "source-backup":
+			return "Попытка скачать резервную копию или исходный файл"
+		case "scanner-client":
+			return "Обнаружен клиент, похожий на сканер уязвимостей"
 		case "injection":
 			return "Обнаружен шаблон инъекции"
 		case "traversal":
@@ -1276,6 +1328,14 @@ func securityReasonLabel(reason, language string) string {
 		switch reason {
 		case "authentication-failures":
 			return "Wiederholte Authentifizierungsfehler"
+		case "repository":
+			return "Zugriff auf Repository-Metadaten"
+		case "secret":
+			return "Zugriff auf eine sensible Datei"
+		case "source-backup":
+			return "Versuch, Backup- oder Quelldatei herunterzuladen"
+		case "scanner-client":
+			return "Client ähnelt einem Schwachstellen-Scanner"
 		case "injection":
 			return "Einschleusungsmuster erkannt"
 		case "traversal":
@@ -1287,6 +1347,39 @@ func securityReasonLabel(reason, language string) string {
 		}
 	}
 	return reason
+}
+
+func securitySourceLabel(source, language string) string {
+	if strings.HasPrefix(language, "ru") {
+		switch source {
+		case "local":
+			return "Обнаружено этим сервером"
+		case "global":
+			return "Глобальная репутация: подтверждено несколькими серверами SiteBrush"
+		case "manual":
+			return "Добавлено администратором вручную"
+		}
+	}
+	if strings.HasPrefix(language, "de") {
+		switch source {
+		case "local":
+			return "Von diesem Server erkannt"
+		case "global":
+			return "Globale Reputation: von mehreren SiteBrush-Servern bestätigt"
+		case "manual":
+			return "Manuell vom Administrator hinzugefügt"
+		}
+	}
+	switch source {
+	case "local":
+		return "Detected by this server"
+	case "global":
+		return "Global reputation: confirmed by multiple SiteBrush servers"
+	case "manual":
+		return "Added manually by the administrator"
+	default:
+		return source
+	}
 }
 
 func localizeSecurityDescription(reason, description, language string) string {
