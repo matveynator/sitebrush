@@ -29,11 +29,17 @@ func (db *Database) ResolveUserBySource(ctx context.Context, source, sourceUserI
 		userID string
 		name   sql.NullString
 	)
-	if err := db.DB.QueryRowContext(ctx, query, source, sourceUserID).Scan(&userID, &name); err != nil {
-		if err == sql.ErrNoRows {
-			return "", "", nil
+	err := db.withSerializedConnectionFor(ctx, WorkloadWebRead, func(runCtx context.Context, conn *sql.DB) error {
+		if err := conn.QueryRowContext(runCtx, query, source, sourceUserID).Scan(&userID, &name); err != nil {
+			if err == sql.ErrNoRows {
+				return nil
+			}
+			return fmt.Errorf("resolve user: %w", err)
 		}
-		return "", "", fmt.Errorf("resolve user: %w", err)
+		return nil
+	})
+	if err != nil {
+		return "", "", err
 	}
 	return userID, strings.TrimSpace(name.String), nil
 }
@@ -67,8 +73,13 @@ func (db *Database) EnsureUserBySource(ctx context.Context, source, sourceUserID
 
 	if strings.ToLower(dbType) == "clickhouse" {
 		stmt := "INSERT INTO users (user_id, source, source_user_id, name, created_at) VALUES (?, ?, ?, ?, ?)"
-		if _, err := db.DB.ExecContext(ctx, stmt, newID, source, sourceUserID, name, createdAt); err != nil {
-			return "", fmt.Errorf("insert user: %w", err)
+		if err := db.withSerializedConnectionFor(ctx, WorkloadUserUpload, func(runCtx context.Context, conn *sql.DB) error {
+			if _, err := conn.ExecContext(runCtx, stmt, newID, source, sourceUserID, name, createdAt); err != nil {
+				return fmt.Errorf("insert user: %w", err)
+			}
+			return nil
+		}); err != nil {
+			return "", err
 		}
 		return newID, nil
 	}
@@ -83,8 +94,13 @@ func (db *Database) EnsureUserBySource(ctx context.Context, source, sourceUserID
 	stmt := fmt.Sprintf(`INSERT INTO users (user_id, source, source_user_id, name, created_at)
 SELECT %s, %s, %s, %s, %s
 WHERE NOT EXISTS (SELECT 1 FROM users WHERE source = %s AND source_user_id = %s);`, insertID, insertSource, insertSourceID, insertName, insertCreated, existsSource, existsSourceID)
-	if _, err := db.DB.ExecContext(ctx, stmt, newID, source, sourceUserID, name, createdAt, source, sourceUserID); err != nil {
-		return "", fmt.Errorf("insert user: %w", err)
+	if err := db.withSerializedConnectionFor(ctx, WorkloadUserUpload, func(runCtx context.Context, conn *sql.DB) error {
+		if _, err := conn.ExecContext(runCtx, stmt, newID, source, sourceUserID, name, createdAt, source, sourceUserID); err != nil {
+			return fmt.Errorf("insert user: %w", err)
+		}
+		return nil
+	}); err != nil {
+		return "", err
 	}
 
 	if userID, _, err := db.ResolveUserBySource(ctx, source, sourceUserID, dbType); err != nil {
@@ -109,10 +125,12 @@ func (db *Database) UpdateUserNameIfEmpty(ctx context.Context, userID, name, dbT
 	phName := placeholder(dbType, 1)
 	phUser := placeholder(dbType, 2)
 	stmt := fmt.Sprintf(`UPDATE users SET name = %s WHERE user_id = %s AND (name IS NULL OR name = '')`, phName, phUser)
-	if _, err := db.DB.ExecContext(ctx, stmt, name, userID); err != nil {
-		return fmt.Errorf("update user name: %w", err)
-	}
-	return nil
+	return db.withSerializedConnectionFor(ctx, WorkloadUserUpload, func(runCtx context.Context, conn *sql.DB) error {
+		if _, err := conn.ExecContext(runCtx, stmt, name, userID); err != nil {
+			return fmt.Errorf("update user name: %w", err)
+		}
+		return nil
+	})
 }
 
 // EnsureTrackUser records that a track belongs to a user so future account
@@ -131,14 +149,16 @@ func (db *Database) EnsureTrackUser(ctx context.Context, trackID, userID, source
 	if strings.ToLower(dbType) == "clickhouse" {
 		existsStmt := "SELECT 1 FROM track_users WHERE track_id = ? AND user_id = ? LIMIT 1"
 		var exists int
-		if err := db.DB.QueryRowContext(ctx, existsStmt, trackID, userID).Scan(&exists); err == nil {
+		return db.withSerializedConnectionFor(ctx, WorkloadUserUpload, func(runCtx context.Context, conn *sql.DB) error {
+			if err := conn.QueryRowContext(runCtx, existsStmt, trackID, userID).Scan(&exists); err == nil {
+				return nil
+			}
+			insertStmt := "INSERT INTO track_users (track_id, user_id, source) VALUES (?, ?, ?)"
+			if _, err := conn.ExecContext(runCtx, insertStmt, trackID, userID, source); err != nil {
+				return fmt.Errorf("insert track user: %w", err)
+			}
 			return nil
-		}
-		insertStmt := "INSERT INTO track_users (track_id, user_id, source) VALUES (?, ?, ?)"
-		if _, err := db.DB.ExecContext(ctx, insertStmt, trackID, userID, source); err != nil {
-			return fmt.Errorf("insert track user: %w", err)
-		}
-		return nil
+		})
 	}
 
 	insertTrack := placeholder(dbType, 1)
@@ -149,10 +169,12 @@ func (db *Database) EnsureTrackUser(ctx context.Context, trackID, userID, source
 	stmt := fmt.Sprintf(`INSERT INTO track_users (track_id, user_id, source)
 SELECT %s, %s, %s
 WHERE NOT EXISTS (SELECT 1 FROM track_users WHERE track_id = %s AND user_id = %s);`, insertTrack, insertUser, insertSource, existsTrack, existsUser)
-	if _, err := db.DB.ExecContext(ctx, stmt, trackID, userID, source, trackID, userID); err != nil {
-		return fmt.Errorf("insert track user: %w", err)
-	}
-	return nil
+	return db.withSerializedConnectionFor(ctx, WorkloadUserUpload, func(runCtx context.Context, conn *sql.DB) error {
+		if _, err := conn.ExecContext(runCtx, stmt, trackID, userID, source, trackID, userID); err != nil {
+			return fmt.Errorf("insert track user: %w", err)
+		}
+		return nil
+	})
 }
 
 // newUserID generates a random identifier so we can reference users even before
