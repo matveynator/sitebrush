@@ -72,6 +72,37 @@ func TestTrackMetadataAndLookupBranches(t *testing.T) {
 	}
 }
 
+func TestTrackCountAndSummaryAdditionalBranches(t *testing.T) {
+	ctx := context.Background()
+
+	var nilDB *Database
+	if _, err := nilDB.CountTracks(ctx); err == nil {
+		t.Fatal("nil database track count did not fail")
+	}
+	if _, err := nilDB.GetTrackSummary(ctx, "missing", "sqlite"); err == nil {
+		t.Fatal("nil database track summary did not fail")
+	}
+
+	db, _ := newSQLiteConcurrencyTestDatabase(t)
+	seedTrackSummaryCoverageData(t, db)
+
+	count, err := db.CountTracks(nil)
+	if err != nil {
+		t.Fatalf("track count with nil context: %v", err)
+	}
+	if count != 3 {
+		t.Fatalf("track count = %d, want 3", count)
+	}
+
+	summary, err := db.GetTrackSummary(nil, "a", "pgx")
+	if err != nil {
+		t.Fatalf("pgx-placeholder track summary on sqlite: %v", err)
+	}
+	if summary.MarkerCount != 2 || summary.FirstID != 1 || summary.LastID != 2 {
+		t.Fatalf("pgx-placeholder track summary = %#v", summary)
+	}
+}
+
 func TestTrackDeviceNameAndRadiationBranches(t *testing.T) {
 	db, _ := newSQLiteConcurrencyTestDatabase(t)
 	seedSerializedStreamMarkers(t, db)
