@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"html"
 	"net"
 	"os"
@@ -15,8 +16,9 @@ import (
 )
 
 const (
-	defaultSecurityBlockTTL = 7 * 24 * time.Hour
+	defaultSecurityBlockTTL  = 7 * 24 * time.Hour
 	securityReasonHistoryTTL = 7 * 24 * time.Hour
+	trustedAdminIPCacheTTL   = 5 * time.Minute
 	securityReasonLogLimit   = 24
 	attackGuardShardCount    = 16
 	attackGuardQueueSize     = 256
@@ -62,10 +64,10 @@ type attackWindow struct {
 }
 
 type attackGuardDiskState struct {
-	Version   int               `json:"version"`
-	Settings  SecuritySettings  `json:"settings"`
-	Blocks    []SecurityBlock   `json:"blocks"`
-	Allowlist []SecurityAllow   `json:"allowlist,omitempty"`
+	Version   int              `json:"version"`
+	Settings  SecuritySettings `json:"settings"`
+	Blocks    []SecurityBlock  `json:"blocks"`
+	Allowlist []SecurityAllow  `json:"allowlist,omitempty"`
 }
 
 type attackGuardOperation uint8
@@ -85,11 +87,15 @@ const (
 	attackGuardAllowRemove
 	attackGuardAllowCheck
 	attackGuardAllowSnapshot
+	attackGuardTrustAdminIP
+	attackGuardCheckAdminIP
+	attackGuardClaimAdminIPLookup
 )
 
 type attackGuardRequest struct {
 	Operation   attackGuardOperation
 	IP          string
+	Domain      string
 	Path        string
 	Method      string
 	Category    string
@@ -105,14 +111,15 @@ type attackGuardRequest struct {
 }
 
 type attackGuardResult struct {
-	Block     SecurityBlock
-	Blocked   bool
-	Blocks    []SecurityBlock
-	Allowed   bool
-	Allowlist []SecurityAllow
-	Settings  SecuritySettings
-	Changed  bool
-	Err      error
+	Block        SecurityBlock
+	Blocked      bool
+	Blocks       []SecurityBlock
+	Allowed      bool
+	AdminTrusted bool
+	Allowlist    []SecurityAllow
+	Settings     SecuritySettings
+	Changed      bool
+	Err          error
 }
 
 type AttackGuard struct {
@@ -191,6 +198,8 @@ func loadAttackGuardDiskState(path string) (attackGuardDiskState, error) {
 func runAttackGuardShard(requests <-chan attackGuardRequest, shutdown <-chan struct{}, settings SecuritySettings, initial []SecurityBlock, initialAllowlist []SecurityAllow) {
 	blocks := make(map[string]SecurityBlock, len(initial))
 	allowlist := make(map[string]SecurityAllow, len(initialAllowlist))
+	trustedAdminIPs := make(map[string]time.Time)
+	adminIPLookups := make(map[string]time.Time)
 	windows := map[string]*attackWindow{}
 	for _, block := range initial {
 		blocks[block.IP] = block
@@ -207,8 +216,9 @@ func runAttackGuardShard(requests <-chan attackGuardRequest, shutdown <-chan str
 			return
 		case now := <-pruneTicker.C:
 			pruneAttackGuardState(blocks, windows, now.UTC())
+			pruneAdminIPTrustState(trustedAdminIPs, adminIPLookups, now.UTC())
 		case request := <-requests:
-			result := handleAttackGuardRequest(blocks, allowlist, windows, &settings, request)
+			result := handleAttackGuardRequest(blocks, allowlist, trustedAdminIPs, adminIPLookups, windows, &settings, request)
 			if request.Reply != nil {
 				select {
 				case request.Reply <- result:
@@ -220,12 +230,21 @@ func runAttackGuardShard(requests <-chan attackGuardRequest, shutdown <-chan str
 	}
 }
 
-func handleAttackGuardRequest(blocks map[string]SecurityBlock, allowlist map[string]SecurityAllow, windows map[string]*attackWindow, settings *SecuritySettings, request attackGuardRequest) attackGuardResult {
+func handleAttackGuardRequest(blocks map[string]SecurityBlock, allowlist map[string]SecurityAllow, trustedAdminIPs, adminIPLookups map[string]time.Time, windows map[string]*attackWindow, settings *SecuritySettings, request attackGuardRequest) attackGuardResult {
 	now := request.Now
 	if now.IsZero() {
 		now = time.Now().UTC()
 	}
 	ip := normalizeSecurityIP(request.IP)
+	if request.Domain != "" && (request.Operation == attackGuardObserveFast || request.Operation == attackGuardObserveIncident) {
+		trustedAt, trusted := trustedAdminIPs[adminIPTrustKey(request.Domain, ip)]
+		if trusted && now.Sub(trustedAt) <= trustedAdminIPCacheTTL {
+			return attackGuardResult{Allowed: true, AdminTrusted: true}
+		}
+		if trusted {
+			delete(trustedAdminIPs, adminIPTrustKey(request.Domain, ip))
+		}
+	}
 
 	switch request.Operation {
 	case attackGuardCheck:
@@ -409,9 +428,52 @@ func handleAttackGuardRequest(blocks map[string]SecurityBlock, allowlist map[str
 			snapshot = append(snapshot, allowed)
 		}
 		return attackGuardResult{Allowlist: snapshot}
+
+	case attackGuardTrustAdminIP:
+		if request.Domain == "" || ip == "" {
+			return attackGuardResult{Err: errors.New("domain and valid IP are required")}
+		}
+		trustedAdminIPs[adminIPTrustKey(request.Domain, ip)] = now
+		delete(adminIPLookups, adminIPTrustKey(request.Domain, ip))
+		return attackGuardResult{Allowed: true, Changed: true}
+
+	case attackGuardCheckAdminIP:
+		key := adminIPTrustKey(request.Domain, ip)
+		trustedAt, trusted := trustedAdminIPs[key]
+		if trusted && now.Sub(trustedAt) > trustedAdminIPCacheTTL {
+			delete(trustedAdminIPs, key)
+			trusted = false
+		}
+		return attackGuardResult{Allowed: trusted}
+
+	case attackGuardClaimAdminIPLookup:
+		key := adminIPTrustKey(request.Domain, ip)
+		previousLookup := adminIPLookups[key]
+		if !previousLookup.IsZero() && now.Sub(previousLookup) < time.Minute {
+			return attackGuardResult{}
+		}
+		adminIPLookups[key] = now
+		return attackGuardResult{Allowed: true}
 	}
 
 	return attackGuardResult{Err: errors.New("unknown attack guard operation")}
+}
+
+func adminIPTrustKey(domain, ip string) string {
+	return strings.ToLower(strings.TrimSpace(domain)) + "\n" + ip
+}
+
+func pruneAdminIPTrustState(trustedAdminIPs, adminIPLookups map[string]time.Time, now time.Time) {
+	for key, trustedAt := range trustedAdminIPs {
+		if now.Sub(trustedAt) > trustedAdminIPCacheTTL {
+			delete(trustedAdminIPs, key)
+		}
+	}
+	for key, checkedAt := range adminIPLookups {
+		if now.Sub(checkedAt) > time.Hour {
+			delete(adminIPLookups, key)
+		}
+	}
 }
 
 func activeSecurityBlock(blocks map[string]SecurityBlock, ip string, now time.Time) (SecurityBlock, bool) {
@@ -561,7 +623,11 @@ func (guard *AttackGuard) ObserveRequestFast(ip, path, method string, trusted bo
 }
 
 func (guard *AttackGuard) ObserveRequestFastDisposition(ip, path, method string, trusted bool, now time.Time) (SecurityBlock, bool, bool) {
-	result, ok := guard.exchangeFast(attackGuardRequest{Operation: attackGuardObserveFast, IP: ip, Path: path, Method: method, Trusted: trusted, Now: now})
+	return guard.ObserveSiteRequestFastDisposition("", ip, path, method, trusted, now)
+}
+
+func (guard *AttackGuard) ObserveSiteRequestFastDisposition(domain, ip, path, method string, trusted bool, now time.Time) (SecurityBlock, bool, bool) {
+	result, ok := guard.exchangeFast(attackGuardRequest{Operation: attackGuardObserveFast, Domain: normalizeSecurityDomain(domain), IP: ip, Path: path, Method: method, Trusted: trusted, Now: now})
 	if ok && result.Changed {
 		guard.signalSave()
 	}
@@ -569,7 +635,11 @@ func (guard *AttackGuard) ObserveRequestFastDisposition(ip, path, method string,
 }
 
 func (guard *AttackGuard) ObserveIncident(ip, category, description string, now time.Time) (SecurityBlock, bool) {
-	result, ok := guard.exchangeFast(attackGuardRequest{Operation: attackGuardObserveIncident, IP: ip, Category: category, Description: description, Now: now})
+	return guard.ObserveSiteIncident("", ip, category, description, now)
+}
+
+func (guard *AttackGuard) ObserveSiteIncident(domain, ip, category, description string, now time.Time) (SecurityBlock, bool) {
+	result, ok := guard.exchangeFast(attackGuardRequest{Operation: attackGuardObserveIncident, Domain: normalizeSecurityDomain(domain), IP: ip, Category: category, Description: description, Now: now})
 	if ok && result.Changed {
 		guard.signalSave()
 	}
@@ -652,6 +722,50 @@ func (guard *AttackGuard) Disallow(ip string) error {
 		guard.signalSave()
 	}
 	return result.Err
+}
+
+// TrustAdminIP applies a recently authenticated administrator address only to one site.
+func (guard *AttackGuard) TrustAdminIP(domain, ip string, now time.Time) error {
+	domain = normalizeSecurityDomain(domain)
+	ip = normalizeSecurityIP(ip)
+	if domain == "" || ip == "" {
+		return errors.New("domain and valid IP are required")
+	}
+	result, ok := guard.exchangeFast(attackGuardRequest{
+		Operation: attackGuardTrustAdminIP,
+		Domain:    domain,
+		IP:        ip,
+		Now:       now,
+	})
+	if !ok {
+		return errors.New("security guard is busy")
+	}
+	return result.Err
+}
+
+func (guard *AttackGuard) AdminIPTrusted(domain, ip string, now time.Time) bool {
+	result, ok := guard.exchangeFast(attackGuardRequest{
+		Operation: attackGuardCheckAdminIP,
+		Domain:    normalizeSecurityDomain(domain),
+		IP:        ip,
+		Now:       now,
+	})
+	return ok && result.Allowed
+}
+
+// ClaimAdminIPLookup bounds database checks for repeated blocked requests.
+func (guard *AttackGuard) ClaimAdminIPLookup(domain, ip string, now time.Time) bool {
+	result, ok := guard.exchangeFast(attackGuardRequest{
+		Operation: attackGuardClaimAdminIPLookup,
+		Domain:    normalizeSecurityDomain(domain),
+		IP:        ip,
+		Now:       now,
+	})
+	return ok && result.Allowed
+}
+
+func normalizeSecurityDomain(domain string) string {
+	return strings.TrimSuffix(strings.ToLower(strings.TrimSpace(domain)), ".")
 }
 
 func (guard *AttackGuard) Allowlist() ([]SecurityAllow, error) {
@@ -854,20 +968,210 @@ func (guard *AttackGuard) Close() {
 }
 
 func BlockedHTML(language string, block SecurityBlock) string {
+	return blockedHTMLAt(language, block, time.Now().UTC())
+}
+
+func blockedHTMLAt(language string, block SecurityBlock, now time.Time) string {
 	title := "Request blocked"
 	message := "SiteBrush temporarily blocked requests from this address."
 	support := "Contact the site administrator and include the incident ID."
+	ipLabel := "Client address"
+	sourceLabel := "Blocking source"
+	untilLabel := "Blocked until (UTC)"
+	durationLabel := "Block duration"
+	remainingLabel := "remaining"
+	eventsLabel := "Events that triggered the block"
+	developerLabel := "For developers testing locally"
+	developerHelp := "Run tests against httptest servers or mocked HTTP transports. A local go test should not send repeated authentication requests to sitebrush.com. When testing a local SiteBrush server, use localhost; in a local development installation, disable Auto-block and Global reputation sync in Analytics → Security, or ask an administrator to allowlist your client address. Do not disable protection on the public server."
 	language = strings.ToLower(language)
 	if strings.HasPrefix(language, "ru") {
 		title = "Запрос заблокирован"
 		message = "SiteBrush временно заблокировал запросы с этого адреса."
 		support = "Обратитесь к администратору сайта или support@sitebrush.com и укажите идентификатор инцидента."
+		ipLabel = "Заблокированный IP-адрес"
+		sourceLabel = "Источник блокировки"
+		untilLabel = "Блокировка действует до (UTC)"
+		durationLabel = "Срок блокировки"
+		remainingLabel = "осталось"
+		eventsLabel = "Действия, вызвавшие блокировку"
+		developerLabel = "Для разработчиков: безопасное тестирование"
+		developerHelp = "Запускайте тесты с httptest-серверами или подменёнными HTTP-транспортами. Локальный go test не должен отправлять повторные запросы аутентификации на sitebrush.com. Для проверки локального SiteBrush используйте localhost; в локальной среде разработки отключите Auto-block и Global reputation sync в разделе Analytics → Security либо попросите администратора добавить ваш адрес в список разрешённых. Не отключайте защиту на публичном сервере."
 	} else if strings.HasPrefix(language, "de") {
 		title = "Anfrage blockiert"
 		message = "SiteBrush hat Anfragen von dieser Adresse vorübergehend blockiert."
 		support = "Kontaktieren Sie den Website-Administrator oder support@sitebrush.com und nennen Sie die Vorfall-ID."
+		ipLabel = "Gesperrte IP-Adresse"
+		sourceLabel = "Sperrquelle"
+		untilLabel = "Gesperrt bis (UTC)"
+		durationLabel = "Sperrdauer"
+		remainingLabel = "verbleibend"
+		eventsLabel = "Ereignisse, die zur Sperre geführt haben"
+		developerLabel = "Für Entwickler: sicher lokal testen"
+		developerHelp = "Tests sollten httptest-Server oder gemockte HTTP-Transporte verwenden. Ein lokales go test sollte keine wiederholten Authentifizierungsanfragen an sitebrush.com senden. Verwenden Sie localhost für lokale SiteBrush-Tests. Deaktivieren Sie Auto-block und Global reputation sync nur in einer lokalen Entwicklungsinstallation oder lassen Sie Ihre Adresse freischalten. Deaktivieren Sie den Schutz nicht auf einem öffentlichen Server."
 	}
-	return "<!doctype html><meta charset=utf-8><meta name=viewport content=\"width=device-width\"><title>" + html.EscapeString(title) + "</title><main><h1>" + html.EscapeString(title) + "</h1><p>" + html.EscapeString(message) + "</p><p>" + html.EscapeString(block.Reason) + "</p><p>Incident: <code>" + html.EscapeString(block.IncidentID) + "</code></p><p>" + html.EscapeString(support) + "</p></main>"
+	var body strings.Builder
+	body.WriteString("<!doctype html><meta charset=utf-8><meta name=viewport content=\"width=device-width\"><title>")
+	body.WriteString(html.EscapeString(title))
+	body.WriteString("</title><main><h1>")
+	body.WriteString(html.EscapeString(title))
+	body.WriteString("</h1><p>")
+	body.WriteString(html.EscapeString(message))
+	body.WriteString("</p><p>")
+	body.WriteString(html.EscapeString(securityReasonLabel(block.Reason, language)))
+	body.WriteString("</p><p>Incident: <code>")
+	body.WriteString(html.EscapeString(block.IncidentID))
+	body.WriteString("</code></p><dl><dt>")
+	body.WriteString(html.EscapeString(ipLabel))
+	body.WriteString("</dt><dd><code>")
+	body.WriteString(html.EscapeString(block.IP))
+	body.WriteString("</code></dd><dt>")
+	body.WriteString(html.EscapeString(sourceLabel))
+	body.WriteString("</dt><dd>")
+	body.WriteString(html.EscapeString(block.Source))
+	body.WriteString("</dd><dt>")
+	body.WriteString(html.EscapeString(durationLabel))
+	body.WriteString("</dt><dd>")
+	if !block.LastEvent.IsZero() && !block.ExpiresAt.IsZero() {
+		body.WriteString(html.EscapeString(formatSecurityDuration(block.ExpiresAt.Sub(block.LastEvent), language)))
+	} else {
+		body.WriteString("—")
+	}
+	body.WriteString("</dd><dt>")
+	body.WriteString(html.EscapeString(untilLabel))
+	body.WriteString("</dt><dd>")
+	if !block.ExpiresAt.IsZero() {
+		body.WriteString(html.EscapeString(block.ExpiresAt.UTC().Format(time.RFC3339)))
+		body.WriteString(" (")
+		body.WriteString(html.EscapeString(formatSecurityDuration(block.ExpiresAt.Sub(now), language)))
+		body.WriteString(" ")
+		body.WriteString(html.EscapeString(remainingLabel))
+		body.WriteString(")")
+	} else {
+		body.WriteString("—")
+	}
+	body.WriteString("</dd></dl><h2>")
+	body.WriteString(html.EscapeString(eventsLabel))
+	body.WriteString("</h2><ul>")
+	if len(block.ReasonLog) == 0 {
+		body.WriteString("<li>")
+		body.WriteString(html.EscapeString(localizeSecurityDescription(block.Reason, block.Description, language)))
+		if !block.LastEvent.IsZero() {
+			body.WriteString(" — ")
+			body.WriteString(html.EscapeString(block.LastEvent.UTC().Format(time.RFC3339)))
+		}
+		body.WriteString("</li>")
+	} else {
+		for _, event := range block.ReasonLog {
+			body.WriteString("<li><time>")
+			if !event.First.IsZero() && !event.First.Equal(event.At) {
+				body.WriteString(html.EscapeString(event.First.UTC().Format(time.RFC3339)))
+				body.WriteString(" – ")
+			}
+			body.WriteString(html.EscapeString(event.At.UTC().Format(time.RFC3339)))
+			body.WriteString("</time> — <strong>")
+			body.WriteString(html.EscapeString(securityReasonLabel(event.Reason, language)))
+			body.WriteString("</strong>: ")
+			body.WriteString(html.EscapeString(localizeSecurityDescription(event.Reason, event.Description, language)))
+			if event.Count > 1 {
+				body.WriteString(" (×")
+				body.WriteString(fmt.Sprint(event.Count))
+				body.WriteString(")")
+			}
+			if event.Source != "" {
+				body.WriteString(" [")
+				body.WriteString(html.EscapeString(event.Source))
+				body.WriteString("]")
+			}
+			body.WriteString("</li>")
+		}
+	}
+	body.WriteString("</ul><p>")
+	body.WriteString(html.EscapeString(support))
+	body.WriteString("</p><h2>")
+	body.WriteString(html.EscapeString(developerLabel))
+	body.WriteString("</h2><p>")
+	body.WriteString(html.EscapeString(developerHelp))
+	body.WriteString("</p></main>")
+	return body.String()
+}
+
+func formatSecurityDuration(duration time.Duration, language string) string {
+	if duration < 0 {
+		duration = 0
+	}
+	minutes := int(duration / time.Minute)
+	if duration%time.Minute > 0 {
+		minutes++
+	}
+	days := minutes / (24 * 60)
+	hours := minutes % (24 * 60) / 60
+	remainingMinutes := minutes % 60
+	if strings.HasPrefix(language, "ru") {
+		if days > 0 {
+			return fmt.Sprintf("%d дн. %d ч.", days, hours)
+		}
+		if hours > 0 {
+			return fmt.Sprintf("%d ч. %d мин.", hours, remainingMinutes)
+		}
+		return fmt.Sprintf("%d мин.", remainingMinutes)
+	}
+	if days > 0 {
+		return fmt.Sprintf("%d d %d h", days, hours)
+	}
+	if hours > 0 {
+		return fmt.Sprintf("%d h %d min", hours, remainingMinutes)
+	}
+	return fmt.Sprintf("%d min", remainingMinutes)
+}
+
+func securityReasonLabel(reason, language string) string {
+	if strings.HasPrefix(language, "ru") {
+		switch reason {
+		case "authentication-failures":
+			return "Повторные ошибки аутентификации"
+		case "injection":
+			return "Обнаружен шаблон инъекции"
+		case "traversal":
+			return "Попытка обхода пути"
+		case "enumeration", "mass-enumeration":
+			return "Сканирование множества адресов"
+		case "mass-write":
+			return "Слишком много запросов на изменение"
+		}
+	}
+	if strings.HasPrefix(language, "de") {
+		switch reason {
+		case "authentication-failures":
+			return "Wiederholte Authentifizierungsfehler"
+		case "injection":
+			return "Einschleusungsmuster erkannt"
+		case "traversal":
+			return "Pfadumgehungsversuch"
+		case "enumeration", "mass-enumeration":
+			return "Scan vieler Adressen"
+		case "mass-write":
+			return "Zu viele Änderungsanfragen"
+		}
+	}
+	return reason
+}
+
+func localizeSecurityDescription(reason, description, language string) string {
+	if reason != "authentication-failures" {
+		return description
+	}
+	const prefix = "Repeated authentication failures; latest request: "
+	if !strings.HasPrefix(description, prefix) {
+		return description
+	}
+	request := strings.TrimPrefix(description, prefix)
+	if strings.HasPrefix(language, "ru") {
+		return "Отклонённая попытка входа; последний запрос: " + request
+	}
+	if strings.HasPrefix(language, "de") {
+		return "Abgewiesener Anmeldeversuch; letzte Anfrage: " + request
+	}
+	return description
 }
 
 func normalizeSecurityIP(value string) string {
