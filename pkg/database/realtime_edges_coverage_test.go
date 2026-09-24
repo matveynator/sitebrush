@@ -130,3 +130,49 @@ func TestPromoteStaleRealtimeSkipsStationaryAndUnconvertible(t *testing.T) {
 		t.Fatalf("unsupported-unit promoted markers = %d, want 0", promotedUnsupported)
 	}
 }
+
+
+func TestPromoteStaleRealtimePGXTransactionPath(t *testing.T) {
+	db, _ := newSQLiteConcurrencyTestDatabase(t)
+
+	SetRealtimeConverter(func(value float64, unit string) (float64, bool) {
+		if unit != "cpm" {
+			return 0, false
+		}
+		return value / 100, true
+	})
+	t.Cleanup(func() { SetRealtimeConverter(nil) })
+
+	rows := []RealtimeMeasurement{
+		{DeviceID: "pgx-moving", Transport: "walk", Value: 10, Unit: "cpm", Lat: 1, Lon: 1, MeasuredAt: 10, FetchedAt: 10},
+		{DeviceID: "pgx-moving", Transport: "walk", Value: 20, Unit: "cpm", Lat: 2, Lon: 2, MeasuredAt: 20, FetchedAt: 20},
+	}
+	for _, row := range rows {
+		if err := db.InsertRealtimeMeasurement(row, "sqlite"); err != nil {
+			t.Fatalf("insert pgx promotion fixture: %v", err)
+		}
+	}
+
+	// SQLite accepts numbered $1 placeholders, so it can exercise the PostgreSQL
+	// transaction branch without requiring a network database in unit tests.
+	db.Driver = "pgx"
+	if err := db.PromoteStaleRealtime(100, "pgx"); err != nil {
+		t.Fatalf("pgx-style realtime promotion: %v", err)
+	}
+
+	var markerCount int
+	if err := db.DB.QueryRow("SELECT COUNT(*) FROM markers WHERE trackID = $1", "live:pgx-moving").Scan(&markerCount); err != nil {
+		t.Fatalf("count pgx-style promoted markers: %v", err)
+	}
+	if markerCount != 2 {
+		t.Fatalf("pgx-style promoted marker count = %d, want 2", markerCount)
+	}
+
+	var realtimeCount int
+	if err := db.DB.QueryRow("SELECT COUNT(*) FROM realtime_measurements WHERE device_id = $1", "pgx-moving").Scan(&realtimeCount); err != nil {
+		t.Fatalf("count pgx-style realtime rows: %v", err)
+	}
+	if realtimeCount != 0 {
+		t.Fatalf("pgx-style realtime rows after promotion = %d, want 0", realtimeCount)
+	}
+}
