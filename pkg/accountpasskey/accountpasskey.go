@@ -153,15 +153,7 @@ func FinishRegistration(ctx context.Context, database *sql.Tx, domain, rpID, ori
 	if err != nil {
 		return err
 	}
-	credentialJSON, err := json.Marshal(credential)
-	if err != nil {
-		return err
-	}
-	credentialID := base64.RawURLEncoding.EncodeToString(credential.ID)
-	userHandle := base64.RawURLEncoding.EncodeToString(user.WebAuthnID())
-	_, err = database.ExecContext(ctx, `INSERT INTO account_passkeys(domain,email,user_handle,credential_id,credential_json,created_at,last_used_at) VALUES(?,?,?,?,?,?,0)`,
-		domain, email, userHandle, credentialID, string(credentialJSON), now.Unix())
-	return err
+	return storeRegistrationCredential(ctx, database, domain, email, user, credential, now)
 }
 
 func BeginLogin(ctx context.Context, transaction *sql.Tx, domain, rpID, origin, clientIP, returnPath string, now time.Time) (BeginResult, error) {
@@ -198,6 +190,28 @@ func FinishLogin(ctx context.Context, database *sql.Tx, domain, rpID, origin, cl
 	if err != nil {
 		return "", "", err
 	}
+	return finishLoginCredential(ctx, database, domain, validatedUser, loadedUser, credential, returnPath, now)
+}
+
+
+func storeRegistrationCredential(ctx context.Context, database interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}, domain, email string, user *User, credential *webauthn.Credential, now time.Time) error {
+	credentialJSON, err := json.Marshal(credential)
+	if err != nil {
+		return err
+	}
+	credentialID := base64.RawURLEncoding.EncodeToString(credential.ID)
+	userHandle := base64.RawURLEncoding.EncodeToString(user.WebAuthnID())
+	_, err = database.ExecContext(ctx, `INSERT INTO account_passkeys(domain,email,user_handle,credential_id,credential_json,created_at,last_used_at) VALUES(?,?,?,?,?,?,0)`,
+		domain, email, userHandle, credentialID, string(credentialJSON), now.Unix())
+	return err
+}
+
+
+func finishLoginCredential(ctx context.Context, database interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}, domain string, validatedUser webauthn.User, loadedUser *User, credential *webauthn.Credential, returnPath string, now time.Time) (string, string, error) {
 	user, ok := validatedUser.(*User)
 	if !ok || loadedUser == nil || !strings.EqualFold(user.Email, loadedUser.Email) {
 		return "", "", errors.New("invalid passkey account")
