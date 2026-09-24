@@ -19,14 +19,30 @@
 </p>
 
 <p align="center">
-  <a href="https://pkg.go.dev/github.com/matveynator/sitebrush/v2"><img src="https://pkg.go.dev/badge/github.com/matveynator/sitebrush/v2.svg" alt="Go Reference"></a>
-  <a href="https://goreportcard.com/report/github.com/matveynator/sitebrush"><img src="https://goreportcard.com/badge/github.com/matveynator/sitebrush" alt="Go Report Card"></a>
-  <a href="https://app.codecov.io/gh/matveynator/sitebrush"><img src="https://codecov.io/gh/matveynator/sitebrush/graph/badge.svg" alt="Code coverage"></a>
+  <a href="https://pkg.go.dev/github.com/matveynator/sitebrush/v2">
+    <img src="https://pkg.go.dev/badge/github.com/matveynator/sitebrush/v2.svg" alt="Go Reference">
+  </a>
+
+  <a href="https://github.com/matveynator/sitebrush/actions/workflows/security.yml">
+    <img src="https://github.com/matveynator/sitebrush/actions/workflows/security.yml/badge.svg?branch=main" alt="Security">
+  </a>
+
+  <a href="https://app.codecov.io/gh/matveynator/sitebrush">
+    <img src="https://codecov.io/gh/matveynator/sitebrush/graph/badge.svg" alt="Code coverage">
+  </a>
+
+  <a href="https://github.com/matveynator/sitebrush/blob/main/LICENSE">
+    <img src="https://img.shields.io/github/license/matveynator/sitebrush?color=brightgreen" alt="BSD-2-Clause License">
+  </a>
+
+  <a href="https://github.com/matveynator/sitebrush/actions/workflows/release.yml">
+    <img src="https://github.com/matveynator/sitebrush/actions/workflows/release.yml/badge.svg?branch=main" alt="Stable Release">
+  </a>
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/output-static_HTML-0ea5e9" alt="Static HTML">
-  <img src="https://img.shields.io/badge/deployment-one_binary-f97316" alt="One binary">
+  <img src="https://img.shields.io/badge/output-static_HTML-22c55e" alt="Static HTML">
+  <img src="https://img.shields.io/badge/deployment-one_binary-22c55e" alt="One binary">
   <img src="https://img.shields.io/badge/editing-right--click_or_long--press-22c55e" alt="Browser editing">
 </p>
 
