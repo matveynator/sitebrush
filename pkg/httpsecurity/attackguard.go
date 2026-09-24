@@ -205,6 +205,14 @@ func loadAttackGuardDiskState(path string) (attackGuardDiskState, error) {
 		state.Version = 2
 		state.Settings.GlobalSync = true
 	}
+	keptBlocks := state.Blocks[:0]
+	for _, block := range state.Blocks {
+		if block.Reason == "authentication-failures" && block.Source != "manual" {
+			continue
+		}
+		keptBlocks = append(keptBlocks, block)
+	}
+	state.Blocks = keptBlocks
 	return state, nil
 }
 
