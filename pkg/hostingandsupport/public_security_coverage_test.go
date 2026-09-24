@@ -77,7 +77,6 @@ func TestHostingDetailsLoadTLSNetworkAndDomainSecurityChecks(t *testing.T) {
 		ServerDomain:   "node.example.com",
 		ServerIP:       "8.8.8.8",
 		OwnerEmail:     "owner@example.com",
-		LastSeenAt:     now.Format(time.RFC3339),
 		Sites: []HostingSnapshotSite{{
 			Domain:      "site.example.com",
 			OwnerEmail:  "owner@example.com",
