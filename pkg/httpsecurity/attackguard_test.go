@@ -369,3 +369,29 @@ func TestAttackGuardBlocksMassEnumerationEarly(t *testing.T) {
 		t.Fatalf("description is not concrete: %q", block.Description)
 	}
 }
+
+
+func TestAttackGuardDoesNotBlockAuthenticationFailures(t *testing.T) {
+	now := time.Date(2026, 9, 24, 12, 0, 0, 0, time.UTC)
+	guard, err := NewAttackGuard("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer guard.Close()
+
+	for index := 0; index < 20; index++ {
+		block, blocked := guard.ObserveIncident(
+			"203.0.113.200",
+			"authentication-failures",
+			"repeated login failure",
+			now.Add(time.Duration(index)*time.Second),
+		)
+		if blocked {
+			t.Fatalf("authentication failures must not create an IP block: %#v", block)
+		}
+	}
+
+	if block, blocked := guard.Check("203.0.113.200", now.Add(time.Minute)); blocked {
+		t.Fatalf("authentication failure analytics leaked into IP blocking: %#v", block)
+	}
+}
