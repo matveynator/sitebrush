@@ -93,9 +93,9 @@ func TestTrackDeviceNameAndRadiationBranches(t *testing.T) {
 	if err := db.UpdateTrackDeviceName(nil, "track-a", "updated", "sqlite"); err != nil {
 		t.Fatalf("update device name: %v", err)
 	}
-	name, found, err := db.GetTrackDeviceName(ctx, "track-a", "sqlite")
-	if err != nil || !found || name != "updated" {
-		t.Fatalf("updated device name = %q found=%v err=%v", name, found, err)
+	name, err := db.GetTrackDeviceName(ctx, "track-a", "sqlite")
+	if err != nil || name != "updated" {
+		t.Fatalf("updated device name = %q err=%v", name, err)
 	}
 	has, err := db.TrackHasDeviceName(ctx, "track-a", "sqlite")
 	if err != nil || !has {
@@ -105,7 +105,7 @@ func TestTrackDeviceNameAndRadiationBranches(t *testing.T) {
 	if err := db.FillMissingTrackDeviceName(ctx, "track-a", "replacement", "sqlite"); err != nil {
 		t.Fatalf("fill existing device name: %v", err)
 	}
-	name, _, err = db.GetTrackDeviceName(ctx, "track-a", "sqlite")
+	name, err = db.GetTrackDeviceName(ctx, "track-a", "sqlite")
 	if err != nil || name != "updated" {
 		t.Fatalf("existing device name changed to %q, err=%v", name, err)
 	}
@@ -113,9 +113,9 @@ func TestTrackDeviceNameAndRadiationBranches(t *testing.T) {
 	if err := db.FillMissingTrackDeviceName(ctx, "track-b", "filled", "sqlite"); err != nil {
 		t.Fatalf("fill missing device name: %v", err)
 	}
-	name, found, err = db.GetTrackDeviceName(ctx, "track-b", "sqlite")
-	if err != nil || !found || name != "filled" {
-		t.Fatalf("filled device name = %q found=%v err=%v", name, found, err)
+	name, err = db.GetTrackDeviceName(ctx, "track-b", "sqlite")
+	if err != nil || name != "filled" {
+		t.Fatalf("filled device name = %q err=%v", name, err)
 	}
 
 	if err := db.AnnotateTrackRadiationWindow(ctx, "", 0, 10, "gamma", "sqlite"); err != nil {
