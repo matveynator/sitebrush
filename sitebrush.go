@@ -21490,7 +21490,6 @@ func (a *App) reportHostingSnapshotAsync(ctx context.Context) {
 		return
 	}
 	if a.hostingSnapshotReports == nil {
-		go a.reportHostingSnapshotWithTimeout(ctx)
 		return
 	}
 	select {
@@ -24922,6 +24921,12 @@ func formatAccountMail(message *mailout.Message, language, domain, secret, link,
 	}
 	if content.Code == "" {
 		content.Expiry = translations["auth_link_expiry"]
+	}
+	if message.Kind == "account_login_code" && content.Code != "" && content.Link != "" {
+		if loginURL, err := url.Parse(content.Link); err == nil {
+			loginURL.Fragment = "account-code=" + content.Code
+			content.Link = loginURL.String()
+		}
 	}
 	if body, htmlBody, err := authmail.Render(content); err == nil {
 		message.Subject = "[" + domain + "] " + content.Title
@@ -33046,6 +33051,12 @@ func isPathWithinRoot(rootPath string, candidatePath string) bool {
 func sameCleanPath(leftPath string, rightPath string) bool {
 	leftPath = filepath.Clean(leftPath)
 	rightPath = filepath.Clean(rightPath)
+	if resolvedPath, err := filepath.EvalSymlinks(leftPath); err == nil {
+		leftPath = filepath.Clean(resolvedPath)
+	}
+	if resolvedPath, err := filepath.EvalSymlinks(rightPath); err == nil {
+		rightPath = filepath.Clean(resolvedPath)
+	}
 	if runtime.GOOS == "windows" {
 		return strings.EqualFold(leftPath, rightPath)
 	}
@@ -36216,7 +36227,11 @@ func (a *App) serveDefaultSitemapXML(w http.ResponseWriter, r *http.Request, dom
 		if publishedPath == "" || len(publishedPath) > 2048 {
 			continue
 		}
+		keepTrailingSlash := strings.HasSuffix(publishedPath, "/")
 		publishedPath = cleanPath(publishedPath)
+		if keepTrailingSlash && publishedPath != "/" {
+			publishedPath += "/"
+		}
 		if _, protected := a.pagePasswordRuleFromPrefixFile(domain, publishedPath); protected {
 			continue
 		}

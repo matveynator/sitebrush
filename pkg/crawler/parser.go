@@ -111,7 +111,7 @@ func (parser Parser) RewriteTextReferences(source, baseRawURL string, depth int)
 			}
 		}
 		normalizedURL, blocked := parser.normalize(parts[3], baseURL, ReferenceDocument)
-		if isNavigationDocumentAttribute(tagName, attributeName) {
+		if isNavigationDocumentAttribute(tagName, attributeName) && !isEmbeddedDocumentAttribute(tagName, attributeName) {
 			if blocked {
 				return preserveReference(match, parts[3])
 			}
@@ -131,13 +131,13 @@ func (parser Parser) RewriteTextReferences(source, baseRawURL string, depth int)
 			return preserveReference(match, parts[3])
 		}
 		if isEmbeddedDocumentAttribute(tagName, attributeName) {
+			if !blocked && parser.ShouldBlankEmbeddedDocumentReference != nil && parser.ShouldBlankEmbeddedDocumentReference(tagName, normalizedURL) {
+				return strings.Replace(match, parts[3], "about:blank", 1)
+			}
 			if !blocked && parser.DocumentURLRewriter != nil && IsWholeSitePageURLString(normalizedURL) {
 				if rewrittenURL, ok := parser.DocumentURLRewriter(normalizedURL); ok {
 					return strings.Replace(match, parts[3], rewrittenURL, 1)
 				}
-			}
-			if !blocked && parser.ShouldBlankEmbeddedDocumentReference != nil && parser.ShouldBlankEmbeddedDocumentReference(tagName, normalizedURL) {
-				return strings.Replace(match, parts[3], "about:blank", 1)
 			}
 			return match
 		}
