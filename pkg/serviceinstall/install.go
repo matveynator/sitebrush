@@ -204,7 +204,19 @@ func Install(ctx context.Context, options Options) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
+	return installWithManager(ctx, options, probe, manager, prepareInstallFilesystem, writeServiceMetadata)
+}
+
+func installWithManager(
+	ctx context.Context,
+	options Options,
+	probe runtimeProbe,
+	manager serviceManager,
+	prepare func(installPlan) error,
+	writeMetadata func(string, installPlan, string) error,
+) (Result, error) {
 	if options.Input != nil {
+		var err error
 		options, err = runInteractiveWizard(ctx, options, probe, manager)
 		if err != nil {
 			return Result{}, err
@@ -214,7 +226,7 @@ func Install(ctx context.Context, options Options) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
-	if err := prepareInstallFilesystem(plan); err != nil {
+	if err := prepare(plan); err != nil {
 		return Result{}, err
 	}
 	result, err := manager.Install(ctx, probe, plan)
@@ -226,7 +238,7 @@ func Install(ctx context.Context, options Options) (Result, error) {
 	result.OSVersion = probe.osVersion
 	result.InitSystem = manager.Name
 	result.BinaryPath = plan.BinaryPath
-	if err := writeServiceMetadata(manager.Name, plan, options.Language); err != nil {
+	if err := writeMetadata(manager.Name, plan, options.Language); err != nil {
 		return Result{}, err
 	}
 	printResult(options.Output, result, options.Language)
@@ -242,8 +254,20 @@ func Uninstall(ctx context.Context, options Options) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
-	options = applyStoredServiceMetadata(options, manager.Name)
+	return uninstallWithManager(ctx, options, probe, manager, applyStoredServiceMetadata, removeServiceMetadata)
+}
+
+func uninstallWithManager(
+	ctx context.Context,
+	options Options,
+	probe runtimeProbe,
+	manager serviceManager,
+	applyMetadata func(Options, string) Options,
+	removeMetadata func(string, string) error,
+) (Result, error) {
+	options = applyMetadata(options, manager.Name)
 	if options.Input != nil {
+		var err error
 		options, err = runInteractiveUninstallWizard(ctx, options, probe, manager)
 		if err != nil {
 			return Result{}, err
@@ -262,7 +286,7 @@ func Uninstall(ctx context.Context, options Options) (Result, error) {
 	result.OSVersion = probe.osVersion
 	result.InitSystem = manager.Name
 	result.BinaryPath = plan.BinaryPath
-	if err := removeServiceMetadata(manager.Name, plan.ServiceName); err != nil {
+	if err := removeMetadata(manager.Name, plan.ServiceName); err != nil {
 		return Result{}, err
 	}
 	printUninstallResult(options.Output, result, options.Language)
