@@ -3,7 +3,6 @@ package analytics
 import (
 	"bytes"
 	"compress/gzip"
-	"context"
 	"encoding/json"
 	"errors"
 	"os"
@@ -123,7 +122,7 @@ func TestSecurityBoundaryAnalyticsStorageBudgetsFailClosed(t *testing.T) {
 		}
 	}
 
-	if result := store.Exchange(StorageRequest{Operation: StorageOperation(255), Domain: "example.org"}); result.Err == nil {
+	if result := store.Exchange(StorageRequest{Operation: Operation(255), Domain: "example.org"}); result.Err == nil {
 		t.Fatal("unknown analytics storage operation was accepted")
 	}
 }
@@ -213,5 +212,4 @@ func TestAnalyticsStoreContextCancellationBeforeQueue(t *testing.T) {
 	if result.Err == nil {
 		t.Fatal("cancelled analytics load unexpectedly succeeded")
 	}
-	_ = context.Canceled
 }
