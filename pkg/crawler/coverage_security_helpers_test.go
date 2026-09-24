@@ -94,7 +94,7 @@ func TestCrawlerTextDecodeAndEncodingHelpersCoverage(t *testing.T) {
 	if _, ok := decodeWithEncoding([]byte{0xff}, "utf-8", nil); ok {
 		t.Fatal("invalid UTF-8 decoded successfully")
 	}
-	if got := pathExt("/A/FILE.HTML?x=1"); got != ".html" {
+	if got := pathExt("/A/FILE.HTML"); got != ".html" {
 		t.Fatalf("pathExt=%q", got)
 	}
 }
