@@ -17,7 +17,7 @@ func TestSecurityBoundaryRedirectRejectsSchemeAndAuthoritySmuggling(t *testing.T
 		"/%2f%2fevil.example/",
 		"/%5c%5cevil.example/",
 		"/safe%0d%0aLocation:%20https://evil.example/",
-		"\\evil.example\share",
+		`\\evil.example\share`,
 	}
 	for _, input := range inputs {
 		if got := LocalRedirectTarget(input, "/safe"); got != "/safe" {
