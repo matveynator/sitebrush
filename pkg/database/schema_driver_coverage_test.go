@@ -77,6 +77,16 @@ func (r *schemaCoverageRows) Next(dest []driver.Value) error {
 
 func init() {
 	sql.Register("sitebrush-schema-coverage", schemaCoverageDriver{})
+	registered := false
+	for _, name := range sql.Drivers() {
+		if name == "duckdb" {
+			registered = true
+			break
+		}
+	}
+	if !registered {
+		sql.Register("duckdb", schemaCoverageDriver{})
+	}
 }
 
 func newSchemaCoverageDB(t *testing.T, driverName string) *Database {
