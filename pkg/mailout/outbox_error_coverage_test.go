@@ -182,3 +182,29 @@ func TestMailoutAddressDomainAndPermanentFailureEdges(t *testing.T) {
 		t.Fatal("PermanentError nil representation invalid")
 	}
 }
+
+func TestMailoutMessageIDDomainFallbackAndWorkerErrorPath(t *testing.T) {
+	if got := messageIDDomain(&mail.Address{Address: "sender@localhost"}); got != "sitebrush.local" {
+		t.Fatalf("localhost Message-ID domain=%q", got)
+	}
+	if got := messageIDDomain(&mail.Address{Address: "sender@example.org"}); got != "example.org" {
+		t.Fatalf("Message-ID domain=%q", got)
+	}
+	if got := messageIDDomain(nil); got != "sitebrush.local" {
+		t.Fatalf("nil Message-ID domain=%q", got)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	called := make(chan struct{}, 1)
+	jobs := StartDeliveryWorker(ctx, func(context.Context, Message) error {
+		called <- struct{}{}
+		return errors.New("delivery failed")
+	})
+	jobs <- DeliveryJob{Message: Message{To: "user@example.org"}}
+	select {
+	case <-called:
+	case <-time.After(time.Second):
+		t.Fatal("delivery worker did not execute error path")
+	}
+	cancel()
+}
