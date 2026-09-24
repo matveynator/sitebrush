@@ -140,7 +140,7 @@ func (resolver *Resolver) run() {
 	if geoIPImportRequired(hasRanges, importedRelease, currentRelease) {
 		importInProgress = true
 		log.Printf("geoip database import started: ranges=%t release=%q current=%q", hasRanges, importedRelease, currentRelease)
-		go importLatest(databasePath, resolver.cacheDir, time.Now().UTC(), importResults)
+		go importLatest(databasePath, resolver.cacheDir, time.Now().UTC(), resolver.shutdown, importResults)
 	}
 
 	for {
@@ -152,7 +152,7 @@ func (resolver *Resolver) run() {
 			if !found && isPublicIPv4(request.ip) && geoIPImportRequired(hasRanges, importedRelease, currentRelease) && !importInProgress {
 				importInProgress = true
 				log.Printf("geoip database import started after lookup miss: ip=%s ranges=%t release=%q current=%q", request.ip, hasRanges, importedRelease, currentRelease)
-				go importLatest(databasePath, resolver.cacheDir, time.Now().UTC(), importResults)
+				go importLatest(databasePath, resolver.cacheDir, time.Now().UTC(), resolver.shutdown, importResults)
 			}
 			request.response <- lookupResponse{location: location, found: found}
 		case result := <-importResults:
@@ -237,9 +237,21 @@ func lookupRange(database *sql.DB, rawIP string, ipNumber uint32) (Location, boo
 	return location, true
 }
 
-func importLatest(databasePath, cacheDir string, now time.Time, results chan<- importResult) {
+func importLatest(databasePath, cacheDir string, now time.Time, stop <-chan struct{}, results chan<- importResult) {
 	ctx, cancel := context.WithTimeout(context.Background(), downloadTimeout)
-	defer cancel()
+	watcherDone := make(chan struct{})
+	go func() {
+		defer close(watcherDone)
+		select {
+		case <-stop:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+	defer func() {
+		cancel()
+		<-watcherDone
+	}()
 	release := releaseMonth(now)
 	archivePath, release, err := ensureArchive(ctx, cacheDir, now)
 	if err == nil {
