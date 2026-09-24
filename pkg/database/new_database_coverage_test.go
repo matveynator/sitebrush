@@ -27,6 +27,21 @@ func TestNewDatabaseEngineBranches(t *testing.T) {
 		}
 	})
 
+	t.Run("duckdb test driver", func(t *testing.T) {
+		db, err := NewDatabase(Config{DBType: "duckdb", DBPath: filepath.Join(t.TempDir(), "sitebrush.duckdb")})
+		if err != nil {
+			t.Fatalf("new duckdb test database: %v", err)
+		}
+		t.Cleanup(func() { _ = db.DB.Close() })
+
+		if db.Driver != "duckdb" || db.pipeline == nil || db.upkeep == nil {
+			t.Fatalf("duckdb driver=%q pipeline=%v upkeep=%v", db.Driver, db.pipeline != nil, db.upkeep != nil)
+		}
+		if got := db.DB.Stats().MaxOpenConnections; got != 1 {
+			t.Fatalf("duckdb max open connections = %d, want 1", got)
+		}
+	})
+
 	t.Run("postgres connection failure", func(t *testing.T) {
 		_, err := NewDatabase(Config{
 			DBType:    "pgx",
