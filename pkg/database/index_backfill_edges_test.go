@@ -55,7 +55,7 @@ func TestTrackBackfillEdgeBranches(t *testing.T) {
 	if err != nil {
 		t.Fatalf("empty backfill check: %v", err)
 	}
-	if needed || reason != "" {
+	if needed || reason != "no marker tracks to backfill" {
 		t.Fatalf("empty database backfill needed=%v reason=%q", needed, reason)
 	}
 
