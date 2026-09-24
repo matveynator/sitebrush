@@ -6,7 +6,7 @@ import (
 	"testing"
 )
 
-func TestInsertMarkersSingleStatementDriverBranches(t *testing.T) {
+func TestInsertMarkersSingleStatementServerBranches(t *testing.T) {
 	db := &Database{idGenerator: startIDGenerator(700)}
 	markers := []Marker{
 		{
