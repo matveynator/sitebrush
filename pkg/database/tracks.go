@@ -187,14 +187,20 @@ func (db *Database) CountTracks(ctx context.Context) (int64, error) {
 	// preferring a portable query that still covers all ingestion paths.
 	// We also exclude realtime-only IDs to keep this count aligned with the
 	// archive and API summary streams.
-	row := db.DB.QueryRowContext(ctx, `SELECT COUNT(DISTINCT trackID)
+	var count sql.NullInt64
+	err := db.withSerializedConnectionFor(ctx, WorkloadWebRead, func(runCtx context.Context, conn *sql.DB) error {
+		row := conn.QueryRowContext(runCtx, `SELECT COUNT(DISTINCT trackID)
 FROM markers
 WHERE trackID IS NOT NULL
   AND trackID <> ''
   AND trackID NOT LIKE 'live:%'`)
-	var count sql.NullInt64
-	if err := row.Scan(&count); err != nil {
-		return 0, fmt.Errorf("count tracks: %w", err)
+		if err := row.Scan(&count); err != nil {
+			return fmt.Errorf("count tracks: %w", err)
+		}
+		return nil
+	})
+	if err != nil {
+		return 0, err
 	}
 	if !count.Valid {
 		return 0, nil
