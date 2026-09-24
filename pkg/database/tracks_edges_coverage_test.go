@@ -86,15 +86,15 @@ func TestTrackCountAndSummaryAdditionalBranches(t *testing.T) {
 	db, _ := newSQLiteConcurrencyTestDatabase(t)
 	seedTrackSummaryCoverageData(t, db)
 
-	count, err := db.CountTracks(nil)
+	count, err := db.CountTracks(ctx)
 	if err != nil {
-		t.Fatalf("track count with nil context: %v", err)
+		t.Fatalf("track count: %v", err)
 	}
 	if count != 3 {
 		t.Fatalf("track count = %d, want 3", count)
 	}
 
-	summary, err := db.GetTrackSummary(nil, "a", "pgx")
+	summary, err := db.GetTrackSummary(ctx, "a", "pgx")
 	if err != nil {
 		t.Fatalf("pgx-placeholder track summary on sqlite: %v", err)
 	}
