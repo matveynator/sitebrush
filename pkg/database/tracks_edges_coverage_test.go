@@ -144,6 +144,33 @@ func TestTrackDeviceNameAndRadiationBranches(t *testing.T) {
 	}
 }
 
+func TestTrackDeviceNameMissingBranches(t *testing.T) {
+	db, _ := newSQLiteConcurrencyTestDatabase(t)
+	ctx := context.Background()
+
+	var nilDB *Database
+	if has, err := nilDB.TrackHasDeviceName(ctx, "track", "sqlite"); err == nil || has {
+		t.Fatalf("nil database device-name check = %v, %v", has, err)
+	}
+	if name, err := nilDB.GetTrackDeviceName(ctx, "track", "sqlite"); err == nil || name != "" {
+		t.Fatalf("nil database device-name lookup = %q, %v", name, err)
+	}
+
+	if has, err := db.TrackHasDeviceName(ctx, " ", "sqlite"); err != nil || has {
+		t.Fatalf("blank track device-name check = %v, %v", has, err)
+	}
+	if name, err := db.GetTrackDeviceName(ctx, " ", "sqlite"); err != nil || name != "" {
+		t.Fatalf("blank track device-name lookup = %q, %v", name, err)
+	}
+
+	if has, err := db.TrackHasDeviceName(nil, "missing", "sqlite"); err != nil || has {
+		t.Fatalf("missing track device-name check = %v, %v", has, err)
+	}
+	if name, err := db.GetTrackDeviceName(nil, "missing", "sqlite"); err != nil || name != "" {
+		t.Fatalf("missing track device-name lookup = %q, %v", name, err)
+	}
+}
+
 func TestTrackRangeStreamBranches(t *testing.T) {
 	db, _ := newSQLiteConcurrencyTestDatabase(t)
 	seedSerializedStreamMarkers(t, db)
