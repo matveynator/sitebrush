@@ -133,9 +133,9 @@ ORDER BY trackID%s;`, strings.Join(conditions, " AND "), limitClause)
 		if trimmed != "" {
 			// When resuming from a known track we only need its index once
 			// per page. Subsequent tracks increment locally without extra SQL.
-			var count int64
-			if count, err = db.CountTrackIDsUpTo(ctx, trimmed, dbType); err != nil {
-				errs <- fmt.Errorf("count track ids base: %w", err)
+			count, countErr := db.CountTrackIDsUpTo(ctx, trimmed, dbType)
+			if countErr != nil {
+				errs <- fmt.Errorf("count track ids base: %w", countErr)
 				return
 			}
 			baseIndex = count
@@ -146,9 +146,9 @@ ORDER BY trackID%s;`, strings.Join(conditions, " AND "), limitClause)
 			// For the very first page we derive the base from the first row.
 			// Using a second query here is still cheaper than doing it per track
 			// and the buffer keeps the connection free before the next query.
-			var firstCount int64
-			if firstCount, err = db.CountTrackIDsUpTo(ctx, summaries[0].TrackID, dbType); err != nil {
-				errs <- fmt.Errorf("count track ids first page: %w", err)
+			firstCount, countErr := db.CountTrackIDsUpTo(ctx, summaries[0].TrackID, dbType)
+			if countErr != nil {
+				errs <- fmt.Errorf("count track ids first page: %w", countErr)
 				return
 			}
 			baseIndex = firstCount - 1
