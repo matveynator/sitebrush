@@ -99,7 +99,10 @@ func TestPageHistoryAndInputAreBounded(t *testing.T) {
 }
 
 func TestContinuedReadingAcrossSessions(t *testing.T) {
-	now := time.Now().UTC()
+	// Keep the whole scenario inside one UTC reporting day. Using time.Now()
+	// makes this test fail when CI runs late in the UTC day because Report(..., 1)
+	// then covers the following day and excludes the recorded insight.
+	now := time.Date(2026, 9, 20, 12, 0, 0, 0, time.UTC)
 	site := New(now)
 	first := observation(1, "/docs")
 	first.Scroll = 25
