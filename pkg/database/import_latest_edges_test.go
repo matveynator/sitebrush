@@ -3,7 +3,6 @@ package database
 import (
 	"context"
 	"testing"
-	"time"
 )
 
 func TestImportHistoryEdgeBranches(t *testing.T) {
@@ -118,5 +117,4 @@ func TestLatestMarkerStreamEdgeBranches(t *testing.T) {
 		t.Fatalf("clamp longitude low = %v", got)
 	}
 
-	_ = time.Now()
 }
