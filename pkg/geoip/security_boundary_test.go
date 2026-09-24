@@ -70,14 +70,12 @@ func TestSecurityBoundaryDBIPCSVRejectsInvalidNetworkAndCoordinates(t *testing.T
 		{"8.8.8.0", "8.8.8.255", "NA", "", "CA", "City", "1", "2"},
 		{"8.8.8.0", "8.8.8.255", "NA", "U", "CA", "City", "1", "2"},
 		{"8.8.8.0", "8.8.8.255", "NA", "US", "CA", "City", "NaN", "2"},
+		{"8.8.8.0", "8.8.8.255", "NA", "US", "CA", "City", "91", "2"},
+		{"8.8.8.0", "8.8.8.255", "NA", "US", "CA", "City", "1", "181"},
 	}
 	for _, record := range records {
-		row, ok := parseDBIPCSVRecord(record)
-		if ok && row.ipStart > row.ipEnd {
-			t.Fatalf("SECURITY: reversed IP range was accepted: %#v", row)
-		}
-		if ok && row.countryCode == "" {
-			t.Fatalf("SECURITY: empty country code was accepted: %#v", row)
+		if row, ok := parseDBIPCSVRecord(record); ok {
+			t.Fatalf("SECURITY: invalid GeoIP CSV row was accepted: %#v", row)
 		}
 	}
 }
