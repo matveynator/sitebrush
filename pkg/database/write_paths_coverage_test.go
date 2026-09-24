@@ -174,6 +174,89 @@ func TestInsertRealtimeMeasurementDriverBranchesOnSQLite(t *testing.T) {
 	})
 }
 
+func TestInsertRealtimeMeasurementFailureAndDuplicateBranches(t *testing.T) {
+	t.Run("duckdb conflict retries", func(t *testing.T) {
+		db, _ := newSQLiteConcurrencyTestDatabase(t)
+		if _, err := db.DB.Exec(`CREATE TRIGGER realtime_conflict BEFORE INSERT ON realtime_measurements
+BEGIN
+  SELECT RAISE(ABORT, 'Constraint Error: duplicate key');
+END;`); err != nil {
+			t.Fatalf("create realtime conflict trigger: %v", err)
+		}
+
+		err := db.InsertRealtimeMeasurement(RealtimeMeasurement{
+			DeviceID: "duck-conflict", Value: 1, Unit: "cpm", Lat: 1, Lon: 1,
+			MeasuredAt: 1, FetchedAt: 1,
+		}, "duckdb")
+		if err == nil || !strings.Contains(err.Error(), "conflict after retries") {
+			t.Fatalf("duckdb conflict retry error = %v", err)
+		}
+	})
+
+	t.Run("duckdb ordinary insert failure", func(t *testing.T) {
+		db, _ := newSQLiteConcurrencyTestDatabase(t)
+		if _, err := db.DB.Exec(`CREATE TRIGGER realtime_failure BEFORE INSERT ON realtime_measurements
+BEGIN
+  SELECT RAISE(ABORT, 'ordinary realtime failure');
+END;`); err != nil {
+			t.Fatalf("create realtime failure trigger: %v", err)
+		}
+
+		err := db.InsertRealtimeMeasurement(RealtimeMeasurement{
+			DeviceID: "duck-failure", Value: 1, Unit: "cpm", Lat: 1, Lon: 1,
+			MeasuredAt: 2, FetchedAt: 2,
+		}, "duckdb")
+		if err == nil || !strings.Contains(err.Error(), "duckdb insert realtime") {
+			t.Fatalf("duckdb ordinary failure = %v", err)
+		}
+	})
+
+	t.Run("duckdb delete failure", func(t *testing.T) {
+		db, _ := newSQLiteConcurrencyTestDatabase(t)
+		if _, err := db.DB.Exec("DROP TABLE realtime_measurements"); err != nil {
+			t.Fatalf("drop realtime table: %v", err)
+		}
+		err := db.InsertRealtimeMeasurement(RealtimeMeasurement{
+			DeviceID: "duck-delete-failure", MeasuredAt: 3,
+		}, "duckdb")
+		if err == nil || !strings.Contains(err.Error(), "duckdb delete realtime") {
+			t.Fatalf("duckdb delete failure = %v", err)
+		}
+	})
+
+	t.Run("sqlite insert failure", func(t *testing.T) {
+		db, _ := newSQLiteConcurrencyTestDatabase(t)
+		if _, err := db.DB.Exec("DROP TABLE realtime_measurements"); err != nil {
+			t.Fatalf("drop realtime table: %v", err)
+		}
+		if err := db.InsertRealtimeMeasurement(RealtimeMeasurement{DeviceID: "sqlite-failure"}, "sqlite"); err == nil {
+			t.Fatal("sqlite insert against missing table did not fail")
+		}
+	})
+
+	t.Run("clickhouse duplicate", func(t *testing.T) {
+		db, _ := newSQLiteConcurrencyTestDatabase(t)
+		measurement := RealtimeMeasurement{
+			DeviceID: "clickhouse-duplicate", Value: 2, Unit: "cpm", Lat: 1, Lon: 1,
+			MeasuredAt: 10, FetchedAt: 10,
+		}
+		if err := db.InsertRealtimeMeasurement(measurement, "clickhouse"); err != nil {
+			t.Fatalf("first clickhouse-style realtime insert: %v", err)
+		}
+		if err := db.InsertRealtimeMeasurement(measurement, "clickhouse"); err != nil {
+			t.Fatalf("duplicate clickhouse-style realtime insert: %v", err)
+		}
+
+		var count int
+		if err := db.DB.QueryRow("SELECT COUNT(*) FROM realtime_measurements WHERE device_id = ?", measurement.DeviceID).Scan(&count); err != nil {
+			t.Fatalf("count clickhouse-style realtime rows: %v", err)
+		}
+		if count != 1 {
+			t.Fatalf("clickhouse duplicate row count = %d, want 1", count)
+		}
+	})
+}
+
 func TestInsertMarkersBulkSQLiteBranches(t *testing.T) {
 	db, _ := newSQLiteConcurrencyTestDatabase(t)
 
