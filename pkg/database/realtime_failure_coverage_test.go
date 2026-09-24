@@ -34,10 +34,18 @@ func (c *realtimeFailureConn) BeginTx(context.Context, driver.TxOptions) (driver
 }
 
 func (c *realtimeFailureConn) ExecContext(_ context.Context, query string, _ []driver.NamedValue) (driver.Result, error) {
-	if c.mode == "default-insert-error" && strings.Contains(query, "INSERT INTO realtime_measurements") {
+	switch {
+	case c.mode == "default-insert-error" && strings.Contains(query, "INSERT INTO realtime_measurements"):
 		return nil, errors.New("default insert failure")
+	case c.mode == "delete-error" && strings.HasPrefix(strings.TrimSpace(query), "DELETE"):
+		return nil, errors.New("delete failure")
+	case c.mode == "insert-conflict" && strings.Contains(query, "INSERT INTO realtime_measurements"):
+		return nil, errors.New("Constraint Error: duplicate key")
+	case c.mode == "insert-error" && strings.Contains(query, "INSERT INTO realtime_measurements"):
+		return nil, errors.New("insert failure")
+	default:
+		return driver.RowsAffected(1), nil
 	}
-	return driver.RowsAffected(1), nil
 }
 
 func (c *realtimeFailureConn) QueryContext(_ context.Context, query string, _ []driver.NamedValue) (driver.Rows, error) {
