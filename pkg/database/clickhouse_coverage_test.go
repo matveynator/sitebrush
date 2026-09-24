@@ -62,6 +62,26 @@ func TestClickHouseMarkerDuplicateAndInsertPaths(t *testing.T) {
 	if err := model.insertMarkersSingleStatement(context.Background(), database, filtered, "unsupported"); err == nil {
 		t.Fatal("unsupported single-statement driver was accepted")
 	}
+	progress := make(chan MarkerBatchProgress, 4)
+	if err := model.InsertMarkersBulk(context.Background(), nil, []Marker{
+		{TrackID: "bulk-a", Date: 10, DoseRate: 0.2},
+		{TrackID: "bulk-b", Date: 11, DoseRate: 0.3},
+	}, "clickhouse", 1, progress, WorkloadUserUpload); err != nil {
+		t.Fatalf("multi-track ClickHouse bulk insert: %v", err)
+	}
+	if err := model.InsertMarkersBulk(context.Background(), nil, []Marker{
+		{TrackID: "bulk-fast", Date: 12, DoseRate: 0.4},
+		{TrackID: "bulk-fast", Date: 13, DoseRate: 0.5},
+	}, "clickhouse", 100, progress, WorkloadUserUpload); err != nil {
+		t.Fatalf("single-track ClickHouse fast insert: %v", err)
+	}
+	measurement := RealtimeMeasurement{DeviceID: "clickhouse-device", MeasuredAt: 20, Value: 1}
+	if err := model.InsertRealtimeMeasurement(measurement, "clickhouse"); err != nil {
+		t.Fatalf("ClickHouse realtime insert: %v", err)
+	}
+	if err := model.InsertRealtimeMeasurement(measurement, "clickhouse"); err != nil {
+		t.Fatalf("ClickHouse duplicate realtime insert: %v", err)
+	}
 	if _, err := model.markerExistsClickHouse(Marker{}); err != nil {
 		t.Fatalf("empty marker existence query: %v", err)
 	}
