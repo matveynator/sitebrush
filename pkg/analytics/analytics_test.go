@@ -126,7 +126,10 @@ func TestContinuedReadingAcrossSessions(t *testing.T) {
 }
 
 func TestIdleMessagesCannotExtendSession(t *testing.T) {
-	now := time.Now().UTC()
+	// Keep the whole scenario on one UTC calendar day. Using time.Now here made
+	// the one-day report flaky when CI crossed midnight during the 42-minute
+	// simulated session window.
+	now := time.Date(2026, 9, 20, 12, 0, 0, 0, time.UTC)
 	site := New(now)
 	event := observation(1, "/")
 	site.Record(event, now, 8<<20)
