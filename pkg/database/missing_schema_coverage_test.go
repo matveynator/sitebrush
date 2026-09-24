@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	_ "github.com/mattn/go-sqlite3"
 )
@@ -194,6 +195,23 @@ func TestDatabaseMissingSchemaErrorBranches(t *testing.T) {
 		}
 		if speedErr == nil {
 			t.Fatal("track speed stream did not report missing table")
+		}
+	})
+
+	t.Run("short link storage errors", func(t *testing.T) {
+		db := newEmptySQLiteCoverageDatabase(t)
+
+		if _, _, err := db.PreviewShortLink(ctx, "https://example.test/", 8); err == nil {
+			t.Fatal("short link preview without table did not fail")
+		}
+		if _, err := db.PersistShortLink(ctx, "https://example.test/", "", time.Unix(1, 0), 8); err == nil {
+			t.Fatal("short link persist without table did not fail")
+		}
+		if _, err := db.ResolveShortLink(ctx, "Missing1"); err == nil {
+			t.Fatal("short link resolve without table did not fail")
+		}
+		if _, err := db.randomUnusedCode(ctx, 8); err == nil {
+			t.Fatal("random short code lookup without table did not fail")
 		}
 	})
 
