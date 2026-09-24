@@ -412,7 +412,8 @@ func handleAttackGuardRequest(blocks map[string]SecurityBlock, allowlist map[str
 			return attackGuardResult{}
 		}
 		existing, found := blocks[ip]
-		if found && existing.Source != "global" {
+		existingActive := found && (existing.ExpiresAt.IsZero() || now.Before(existing.ExpiresAt))
+		if existingActive && existing.Source != "global" {
 			if existing.ExpiresAt.Before(expiresAt) {
 				existing.ExpiresAt = expiresAt
 				blocks[ip] = existing
