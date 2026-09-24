@@ -175,7 +175,7 @@ func TestSecurityBoundaryProvisioningURIEscapesAccountLabel(t *testing.T) {
 	if parsed.Scheme != "otpauth" || parsed.Host != "totp" {
 		t.Fatalf("unexpected provisioning URI: %q", uri)
 	}
-	if strings.Contains(parsed.Path, "../") || parsed.Query().Get("secret") != "ABC DEF" || parsed.Query().Get("issuer") != "SiteBrush" {
+	if strings.Contains(parsed.EscapedPath(), "/../") || !strings.Contains(parsed.EscapedPath(), "%2F") || parsed.Query().Get("secret") != "ABC DEF" || parsed.Query().Get("issuer") != "SiteBrush" {
 		t.Fatalf("SECURITY: provisioning URI escaped structured fields: %q", uri)
 	}
 }
