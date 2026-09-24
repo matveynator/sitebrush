@@ -8,7 +8,7 @@ import (
 	"testing"
 )
 
-func TestInsertMarkersSingleStatementDriverBranches(t *testing.T) {
+func TestInsertMarkersSingleStatementRuntimeBranches(t *testing.T) {
 	db := &Database{idGenerator: startIDGenerator(10)}
 
 	if err := db.insertMarkersSingleStatement(context.Background(), &recordingExecutor{}, nil, "duckdb"); err != nil {
