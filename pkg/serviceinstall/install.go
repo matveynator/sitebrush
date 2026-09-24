@@ -1101,6 +1101,9 @@ func buildInstallPlan(options Options) (installPlan, error) {
 	if serviceName == "" {
 		serviceName = "sitebrush"
 	}
+	if !validServiceName(serviceName) {
+		return installPlan{}, fmt.Errorf("invalid service name %q", serviceName)
+	}
 	sourceBinary := strings.TrimSpace(options.BinaryPath)
 	if sourceBinary == "" {
 		exe, err := os.Executable()
@@ -1130,6 +1133,23 @@ func buildInstallPlan(options Options) (installPlan, error) {
 	}
 	execArgs := []string{installedBinary, "-port", port, "-path", storagePath}
 	return installPlan{Options: options, ServiceName: serviceName, BinaryPath: installedBinary, WorkingDir: workingDir, ExecArgs: execArgs}, nil
+}
+
+func validServiceName(serviceName string) bool {
+	serviceName = strings.TrimSpace(serviceName)
+	if serviceName == "" || serviceName == "." || serviceName == ".." || len(serviceName) > 128 {
+		return false
+	}
+	for _, character := range serviceName {
+		if character >= 'a' && character <= 'z' ||
+			character >= 'A' && character <= 'Z' ||
+			character >= '0' && character <= '9' ||
+			character == '-' || character == '_' || character == '.' {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func defaultInstalledBinaryPath(serviceName string) string {
