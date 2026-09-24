@@ -501,3 +501,55 @@ func TestAttackGuardIncidentReportIsOneShot(t *testing.T) {
 		t.Fatalf("reported incident became claimable again: allowed=%v err=%v", allowed, err)
 	}
 }
+
+
+func TestAttackGuardDropsPersistedAuthenticationFailureBlocks(t *testing.T) {
+	now := time.Now().UTC()
+	path := filepath.Join(t.TempDir(), "security.json")
+	state := attackGuardDiskState{
+		Version: 2,
+		Settings: SecuritySettings{AutoBlock: true, GlobalSync: true},
+		Blocks: []SecurityBlock{
+			{
+				IP: "203.0.113.210",
+				Reason: "authentication-failures",
+				Description: "legacy automatic auth failure block",
+				Source: "local",
+				LastEvent: now,
+				ExpiresAt: now.Add(7 * 24 * time.Hour),
+				Violations: 1,
+				IncidentID: "legacy-auth",
+			},
+			{
+				IP: "203.0.113.211",
+				Reason: "authentication-failures",
+				Description: "administrator chose to block manually",
+				Source: "manual",
+				LastEvent: now,
+				ExpiresAt: now.Add(7 * 24 * time.Hour),
+				Violations: 1,
+				IncidentID: "manual-auth",
+			},
+		},
+	}
+	encoded, err := json.Marshal(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, encoded, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	guard, err := NewAttackGuard(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer guard.Close()
+
+	if block, blocked := guard.Check("203.0.113.210", now); blocked {
+		t.Fatalf("legacy automatic authentication block survived upgrade: %#v", block)
+	}
+	if block, blocked := guard.Check("203.0.113.211", now); !blocked || block.Source != "manual" {
+		t.Fatalf("manual administrator block was incorrectly removed: %#v", block)
+	}
+}
