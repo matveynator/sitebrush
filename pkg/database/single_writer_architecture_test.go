@@ -10,14 +10,34 @@ import (
 	"testing"
 )
 
+const singleWriterRule = `database single-writer rule violated
+
+Runtime code for single-writer engines (SQLite, Chai, DuckDB) must never access the writable *sql.DB directly.
+
+Do not call db.DB.Exec, db.DB.ExecContext, db.DB.Begin, db.DB.BeginTx, db.DB.Conn, db.DB.Prepare, or db.DB.PrepareContext from runtime application code.
+
+Required architecture:
+  consumer -> task + reply channel -> serialized database worker -> result through reply channel
+
+The database worker is the only runtime owner allowed to execute writes for single-writer engines.
+Submit work through withSerializedConnectionFor(...). The worker is channel-oriented and coordinates jobs through channels and select/case; do not add mutexes or shared mutable state to work around this rule.
+
+If an operation is long-lived, split it into bounded jobs so the worker can preserve fairness and backpressure. Cancellation/liveness should follow the request/reply channel lifecycle where application architecture permits it.
+
+Direct access is allowed only for explicit bootstrap/schema setup before concurrent runtime traffic, or for database-specific paths such as PostgreSQL COPY that are intentionally outside the single-writer engines.
+
+Rewrite the offending code to submit the database operation to the serialized worker instead of bypassing it.`
+
 func TestSingleWriterPackagesDoNotBypassSerializedPipeline(t *testing.T) {
 	allowedFunctions := map[string]bool{
-		"InitSchema":                     true,
-		"ensureMarkerMetadataColumns":    true,
-		"ensureRealtimeMetadataColumns":  true,
-		"ensureAnalyticsMetadataColumns": true,
-		"ensureAnalyticsSessionColumns":  true,
-		"InsertMarkersBulk":              true,
+		"InitSchema":                        true,
+		"ensureMarkerMetadataColumns":       true,
+		"ensureRealtimeMetadataColumns":     true,
+		"ensureAnalyticsMetadataColumns":    true,
+		"ensureAnalyticsSessionColumns":     true,
+		"InsertMarkersBulk":                 true,
+		"insertMarkersPostgreSQLCopy":       true,
+		"insertMarkersPostgreSQLCopyBatched": true,
 	}
 
 	entries, err := os.ReadDir(".")
@@ -53,7 +73,7 @@ func TestSingleWriterPackagesDoNotBypassSerializedPipeline(t *testing.T) {
 				}
 
 				selector, ok := call.Fun.(*ast.SelectorExpr)
-				if !ok || !isDatabaseWriteMethod(selector.Sel.Name) {
+				if !ok || !isForbiddenDirectDatabaseMethod(selector.Sel.Name) {
 					return true
 				}
 
@@ -68,16 +88,23 @@ func TestSingleWriterPackagesDoNotBypassSerializedPipeline(t *testing.T) {
 				}
 
 				position := fileSet.Position(call.Pos())
-				t.Errorf("%s:%d %s bypasses serialized database writer with db.DB.%s", path, position.Line, function.Name.Name, selector.Sel.Name)
+				t.Errorf(
+					"%s:%d: %s calls db.DB.%s directly\n\n%s",
+					path,
+					position.Line,
+					function.Name.Name,
+					selector.Sel.Name,
+					singleWriterRule,
+				)
 				return true
 			})
 		}
 	}
 }
 
-func isDatabaseWriteMethod(name string) bool {
+func isForbiddenDirectDatabaseMethod(name string) bool {
 	switch name {
-	case "Exec", "ExecContext", "Begin", "BeginTx":
+	case "Exec", "ExecContext", "Begin", "BeginTx", "Conn", "Prepare", "PrepareContext":
 		return true
 	default:
 		return false
