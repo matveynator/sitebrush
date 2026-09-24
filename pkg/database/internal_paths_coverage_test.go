@@ -147,9 +147,14 @@ func TestQueueFriendlyContextBranches(t *testing.T) {
 }
 
 func TestSerializedPipelineLaneFallback(t *testing.T) {
-	pipeline := &serializedPipeline{}
-	for i := range pipeline.lanes {
-		pipeline.lanes[i] = make(chan serializedJob, 1)
+	pipeline := &serializedPipeline{
+		lanes: []chan serializedJob{
+			make(chan serializedJob, 1),
+			make(chan serializedJob, 1),
+			make(chan serializedJob, 1),
+			make(chan serializedJob, 1),
+			make(chan serializedJob, 1),
+		},
 	}
 
 	if got := pipeline.laneFor(WorkloadWebRead); got != pipeline.lanes[WorkloadWebRead] {
