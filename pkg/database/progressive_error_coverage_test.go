@@ -69,13 +69,13 @@ func TestImportHistoryMissingSchemaErrorBranches(t *testing.T) {
 	if _, err := db.CountImportHistory(ctx, "source", "sqlite"); err == nil {
 		t.Fatal("count import history without table did not fail")
 	}
-	if _, err := db.ImportHistoryStats(ctx, "source", "sqlite"); err == nil {
+	if _, _, err := db.ImportHistoryStats(ctx, "source", "sqlite"); err == nil {
 		t.Fatal("import history stats without table did not fail")
 	}
-	if _, err := db.LatestImportHistory(ctx, "source", 10, "sqlite"); err == nil {
+	if _, _, err := db.LatestImportHistory(ctx, "source", "sqlite"); err == nil {
 		t.Fatal("latest import history without table did not fail")
 	}
-	if err := db.EnsureImportHistory(ctx, "source", "id", "track", "done", 1, "message", "sqlite"); err == nil {
+	if err := db.EnsureImportHistory(ctx, "source", "id", "track", "done", "message", "sqlite"); err == nil {
 		t.Fatal("ensure import history without table did not fail")
 	}
 }
