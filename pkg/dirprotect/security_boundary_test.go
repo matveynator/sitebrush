@@ -14,6 +14,12 @@ func TestSecurityBoundarySessionTokenRejectsTamperingAndRuleSubstitution(t *test
 		PasswordHash: mustHashForTest(t, "secret"),
 	}
 	token := BoundSessionToken(rule, "203.0.113.10", "browser", now)
+	tampered := []byte(token)
+	if tampered[len(tampered)-1] == '0' {
+		tampered[len(tampered)-1] = '1'
+	} else {
+		tampered[len(tampered)-1] = '0'
+	}
 
 	cases := []struct {
 		name string
@@ -21,7 +27,7 @@ func TestSecurityBoundarySessionTokenRejectsTamperingAndRuleSubstitution(t *test
 		ip   string
 		tok  string
 	}{
-		{name: "signature tamper", rule: rule, ip: "203.0.113.10", tok: token[:len(token)-1] + "0"},
+		{name: "signature tamper", rule: rule, ip: "203.0.113.10", tok: string(tampered)},
 		{name: "other ip", rule: rule, ip: "203.0.113.11", tok: token},
 		{name: "other domain", rule: Rule{Domain: "evil.example", Path: rule.Path, PasswordHash: rule.PasswordHash}, ip: "203.0.113.10", tok: token},
 		{name: "other path", rule: Rule{Domain: rule.Domain, Path: "/private-other", PasswordHash: rule.PasswordHash}, ip: "203.0.113.10", tok: token},
