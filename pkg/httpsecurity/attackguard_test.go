@@ -395,3 +395,68 @@ func TestAttackGuardDoesNotBlockAuthenticationFailures(t *testing.T) {
 		t.Fatalf("authentication failure analytics leaked into IP blocking: %#v", block)
 	}
 }
+
+
+func TestAutomaticSecurityBlockTTLProgression(t *testing.T) {
+	want := []time.Duration{
+		24 * time.Hour,
+		2 * 24 * time.Hour,
+		4 * 24 * time.Hour,
+		8 * 24 * time.Hour,
+		16 * 24 * time.Hour,
+		32 * 24 * time.Hour,
+		32 * 24 * time.Hour,
+	}
+	for i, expected := range want {
+		if got := automaticSecurityBlockTTL(i + 1); got != expected {
+			t.Fatalf("violation %d ttl=%s want=%s", i+1, got, expected)
+		}
+	}
+}
+
+func TestAttackGuardRetainsEscalationAfterBlockExpiry(t *testing.T) {
+	now := time.Date(2026, 9, 24, 12, 0, 0, 0, time.UTC)
+	guard, err := NewAttackGuard("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer guard.Close()
+
+	first, blocked := guard.ObserveIncident("203.0.113.201", "repository", "requested /.git/config", now)
+	if !blocked {
+		t.Fatal("first confirmed repository probe did not block")
+	}
+	if got := first.ExpiresAt.Sub(first.LastEvent); got != 24*time.Hour {
+		t.Fatalf("first block ttl=%s", got)
+	}
+	if _, blocked := guard.Check("203.0.113.201", now.Add(25*time.Hour)); blocked {
+		t.Fatal("expired first block remained active")
+	}
+	second, blocked := guard.ObserveIncident("203.0.113.201", "repository", "requested /.git/config again", now.Add(25*time.Hour))
+	if !blocked {
+		t.Fatal("repeat repository probe did not block")
+	}
+	if got := second.ExpiresAt.Sub(second.LastEvent); got != 2*24*time.Hour {
+		t.Fatalf("second block ttl=%s want=48h", got)
+	}
+}
+
+func TestAttackGuardRequiresRepeatedHeuristicIncidents(t *testing.T) {
+	now := time.Date(2026, 9, 24, 12, 0, 0, 0, time.UTC)
+	guard, err := NewAttackGuard("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer guard.Close()
+
+	for i := 1; i <= 2; i++ {
+		if block, blocked := guard.ObserveIncident("203.0.113.202", "scanner-client", "scanner-like user agent", now.Add(time.Duration(i)*time.Second)); blocked {
+			t.Fatalf("scanner-client blocked on signal %d: %#v", i, block)
+		}
+	}
+	if block, blocked := guard.ObserveIncident("203.0.113.202", "scanner-client", "scanner-like user agent", now.Add(3*time.Second)); !blocked {
+		t.Fatal("third scanner-client signal did not block")
+	} else if block.ExpiresAt.Sub(block.LastEvent) != 24*time.Hour {
+		t.Fatalf("unexpected first automatic ttl: %s", block.ExpiresAt.Sub(block.LastEvent))
+	}
+}
