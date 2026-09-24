@@ -66,11 +66,14 @@ func TestTrackBackfillEdgeBranches(t *testing.T) {
 	if err != nil {
 		t.Fatalf("registry-only backfill check: %v", err)
 	}
-	if needed || reason != "" {
+	if needed || reason != "tracks registry already populated" {
 		t.Fatalf("registry-only backfill needed=%v reason=%q", needed, reason)
 	}
 
 	if err := db.withSerializedConnectionFor(ctx, WorkloadUserUpload, func(runCtx context.Context, conn *sql.DB) error {
+		if _, err := conn.ExecContext(runCtx, "DELETE FROM tracks"); err != nil {
+			return err
+		}
 		_, err := conn.ExecContext(runCtx,
 			"INSERT INTO markers(id,doseRate,date,lon,lat,countRate,zoom,speed,trackID) VALUES(?,?,?,?,?,?,?,?,?)",
 			1, 0.1, 1, 1, 1, 1, 8, 1, "missing-track",
