@@ -2,6 +2,7 @@ package database
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -103,6 +104,40 @@ func TestDatabaseSchemaAndMaintenanceErrorBranches(t *testing.T) {
 	stop()
 	stop()
 	time.Sleep(10 * time.Millisecond)
+}
+
+func TestDuckDBStartupProgressExistingFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "progress.duckdb")
+	if err := os.WriteFile(path, make([]byte, 4096), 0o600); err != nil {
+		t.Fatalf("write progress fixture: %v", err)
+	}
+
+	logs := make(chan string, 4)
+	stop := startDuckDBStartupProgress(context.Background(), path+"?access_mode=read_only", func(format string, args ...any) {
+		logs <- format
+	})
+	defer stop()
+
+	select {
+	case first := <-logs:
+		if !strings.Contains(first, "DuckDB startup: monitoring") {
+			t.Fatalf("startup progress first log = %q", first)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("startup progress did not emit initial status")
+	}
+
+	select {
+	case periodic := <-logs:
+		if !strings.Contains(periodic, "approx") {
+			t.Fatalf("startup progress periodic log = %q", periodic)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("startup progress did not emit periodic status")
+	}
+
+	stop()
+	stop()
 }
 
 func TestDuckDBPathAndSizeBranches(t *testing.T) {
