@@ -195,6 +195,55 @@ func TestSerializedPipelineQueuesSecondWriterUntilFirstFinishes(t *testing.T) {
 	}
 }
 
+func TestSerializedPipelineRunsExactlyOneWriterAtATime(t *testing.T) {
+	db, _ := newSQLiteConcurrencyTestDatabase(t)
+
+	const writerCount = 16
+	entered := make(chan int, writerCount)
+	release := make([]chan struct{}, writerCount)
+	results := make(chan error, writerCount)
+
+	for writer := 0; writer < writerCount; writer++ {
+		release[writer] = make(chan struct{})
+		writer := writer
+		go func() {
+			results <- db.withSerializedConnectionFor(context.Background(), WorkloadUserUpload, func(ctx context.Context, conn *sql.DB) error {
+				entered <- writer
+				<-release[writer]
+				_, err := conn.ExecContext(ctx, "INSERT INTO maintenance_state(task,status,updated_at,message) VALUES(?,?,?,?)",
+					fmt.Sprintf("writer-%02d", writer), "done", writer, "")
+				return err
+			})
+		}()
+	}
+
+	for completed := 0; completed < writerCount; completed++ {
+		var activeWriter int
+		select {
+		case activeWriter = <-entered:
+		case <-time.After(2 * time.Second):
+			t.Fatal("no serialized writer entered the database")
+		}
+
+		select {
+		case secondWriter := <-entered:
+			t.Fatalf("writers %d and %d entered the database concurrently", activeWriter, secondWriter)
+		case <-time.After(50 * time.Millisecond):
+		}
+
+		close(release[activeWriter])
+
+		select {
+		case err := <-results:
+			if err != nil {
+				t.Fatalf("serialized writer failed: %v", err)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("serialized writer did not finish after release")
+		}
+	}
+}
+
 func TestSQLiteRecoversAfterExternalWriteLockIsReleased(t *testing.T) {
 	db, databasePath := newSQLiteConcurrencyTestDatabase(t)
 
