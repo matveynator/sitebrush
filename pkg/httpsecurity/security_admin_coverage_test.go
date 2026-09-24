@@ -154,7 +154,7 @@ func TestBlockedHTMLAndSecurityLabelsEscapeAttackerControlledContent(t *testing.
 			}
 		}
 	}
-	if got := cleanSecurityText("  hello\nworld\t "); got == "" || strings.ContainsAny(got, "\n\r\t") {
+	if got := cleanSecurityText("  hello\nworld\t ", 128); got == "" || strings.ContainsAny(got, "\n\r\t") {
 		t.Fatalf("unsafe cleaned security text: %q", got)
 	}
 	if got := boundedPath(strings.Repeat("x", 5000)); len(got) > 1024 {
