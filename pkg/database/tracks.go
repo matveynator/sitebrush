@@ -88,34 +88,36 @@ WHERE %s
 GROUP BY trackID
 ORDER BY trackID%s;`, strings.Join(conditions, " AND "), limitClause)
 
-		rows, err := db.DB.QueryContext(ctx, query, args...)
-		if err != nil {
-			errs <- fmt.Errorf("list tracks: %w", err)
-			return
-		}
-		defer rows.Close()
-
-		// We read the entire page before emitting results so we can compute the
-		// starting index once. This avoids hammering PostgreSQL with COUNT(DISTINCT)
-		// calls for every single track, which previously spiked CPU during archive
-		// creation. The buffered slice stays small because callers already cap
-		// page sizes.
+		// Read the page completely inside the serialized database owner. Releasing
+		// Rows before the follow-up count query is essential for single-connection
+		// engines; otherwise the next query can wait forever for the connection
+		// still held by this result set.
 		capHint := limit
 		if capHint <= 0 {
 			capHint = 1024
 		}
 		summaries := make([]TrackSummary, 0, capHint)
-		for rows.Next() {
-			var summary TrackSummary
-			if err := rows.Scan(&summary.TrackID, &summary.FirstID, &summary.LastID, &summary.MarkerCount); err != nil {
-				errs <- fmt.Errorf("scan track summary: %w", err)
-				return
+		readErr := db.withSerializedConnectionFor(ctx, WorkloadWebRead, func(runCtx context.Context, conn *sql.DB) error {
+			rows, err := conn.QueryContext(runCtx, query, args...)
+			if err != nil {
+				return fmt.Errorf("list tracks: %w", err)
 			}
-			summaries = append(summaries, summary)
-		}
+			defer rows.Close()
 
-		if err := rows.Err(); err != nil {
-			errs <- fmt.Errorf("iterate track summaries: %w", err)
+			for rows.Next() {
+				var summary TrackSummary
+				if err := rows.Scan(&summary.TrackID, &summary.FirstID, &summary.LastID, &summary.MarkerCount); err != nil {
+					return fmt.Errorf("scan track summary: %w", err)
+				}
+				summaries = append(summaries, summary)
+			}
+			if err := rows.Err(); err != nil {
+				return fmt.Errorf("iterate track summaries: %w", err)
+			}
+			return nil
+		})
+		if readErr != nil {
+			errs <- readErr
 			return
 		}
 
