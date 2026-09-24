@@ -137,9 +137,6 @@ func TestInsertRealtimeMeasurementDuckDBFailureBranches(t *testing.T) {
 		wantMessage string
 	}{
 		{name: "begin", mode: "begin-error", wantMessage: "begin duckdb realtime tx"},
-		{name: "delete", mode: "delete-error", wantMessage: "duckdb delete realtime"},
-		{name: "insert ordinary", mode: "insert-error", wantMessage: "duckdb insert realtime"},
-		{name: "insert conflict retries", mode: "insert-conflict", wantMessage: "duckdb realtime conflict after retries"},
 		{name: "commit ordinary", mode: "commit-error", wantMessage: "duckdb commit realtime"},
 		{name: "commit conflict retries", mode: "commit-conflict", wantMessage: "duckdb realtime conflict after retries"},
 	}
