@@ -226,6 +226,21 @@ func TestPostgreSQLCopyBatchedFailureBranches(t *testing.T) {
 	}
 }
 
+func TestPostgreSQLCopyWrappersRejectNonPostgresConnection(t *testing.T) {
+	db, _ := newSQLiteConcurrencyTestDatabase(t)
+	markers := postgresCopyTestMarkers()[:1]
+
+	err := db.insertMarkersPostgreSQLCopy(nil, markers)
+	if err == nil || !strings.Contains(err.Error(), "unexpected postgres driver") {
+		t.Fatalf("postgres copy sqlite boundary error = %v", err)
+	}
+
+	err = db.insertMarkersPostgreSQLCopyBatched(nil, markers, 1, nil)
+	if err == nil || !strings.Contains(err.Error(), "unexpected postgres driver") {
+		t.Fatalf("batched postgres copy sqlite boundary error = %v", err)
+	}
+}
+
 func TestPostgreSQLCopyWrappersInputGuards(t *testing.T) {
 	var nilDB *Database
 	if err := nilDB.insertMarkersPostgreSQLCopy(context.Background(), postgresCopyTestMarkers()[:1]); err == nil {
