@@ -162,7 +162,7 @@ func TestSyncPostgresSequenceBranches(t *testing.T) {
 
 func TestSQLiteTuningAgainstCoverageDriver(t *testing.T) {
 	db := newSchemaCoverageDB(t, "sqlite")
-	if err := tuneSQLiteLikeConnection(db.DB, func(string, ...any) {}); err != nil {
+	if err := tuneSQLiteLikeConnection(context.Background(), db.DB, func(string, ...any) {}); err != nil {
 		t.Fatalf("sqlite tuning coverage driver: %v", err)
 	}
 }
