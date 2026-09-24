@@ -1,6 +1,6 @@
 <p align="center">
   <a href="https://sitebrush.com/">
-    <img src="https://sitebrush.com/p/ad311fa907c60a01022a1f14a934f5ab.png" alt="SiteBrush logo" width="170">
+   <img width="300" alt="goopher sitebrush" src="https://github.com/user-attachments/assets/4e0ed480-6aa6-4e27-9474-4bc71822bef0" />
   </a>
 </p>
 
