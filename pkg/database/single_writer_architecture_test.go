@@ -16,6 +16,7 @@ func TestSingleWriterPackagesDoNotBypassSerializedPipeline(t *testing.T) {
 		"ensureMarkerMetadataColumns":    true,
 		"ensureRealtimeMetadataColumns":  true,
 		"ensureAnalyticsMetadataColumns": true,
+		"ensureAnalyticsSessionColumns":  true,
 		"InsertMarkersBulk":              true,
 	}
 
