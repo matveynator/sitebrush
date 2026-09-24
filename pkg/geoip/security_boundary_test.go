@@ -89,10 +89,12 @@ func TestGeoIPResolverHonorsCancelledLookup(t *testing.T) {
 	cancel()
 	started := time.Now()
 	if _, found := resolver.Lookup(ctx, "8.8.8.8"); found {
+		resolver.Close()
 		t.Fatal("cancelled GeoIP lookup returned a result")
 	}
+	resolver.Close()
 	if time.Since(started) > time.Second {
-		t.Fatal("cancelled GeoIP lookup did not stop promptly")
+		t.Fatal("cancelled GeoIP lookup or shutdown did not stop promptly")
 	}
 }
 
