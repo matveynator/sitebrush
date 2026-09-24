@@ -5,6 +5,7 @@ package systeminit
 import (
 	"errors"
 	"reflect"
+	"runtime"
 	"syscall"
 	"testing"
 )
@@ -59,5 +60,21 @@ func TestUnixResourceLimitHelperBranches(t *testing.T) {
 	before, target, after, status, partial := raiseResourceLimit(syscall.RLIMIT_NOFILE, 1)
 	if before == 0 || target == 0 || after == 0 || status != stateSkipped || partial {
 		t.Fatalf("already-satisfied limit = %d/%d/%d %q partial=%v", before, target, after, status, partial)
+	}
+}
+
+
+func TestLinuxInitEndToEnd(t *testing.T) {
+	before := runtime.GOMAXPROCS(0)
+	t.Cleanup(func() { runtime.GOMAXPROCS(before) })
+
+	if err := Init(); err != nil {
+		t.Fatalf("system initialization: %v", err)
+	}
+	if runtime.GOMAXPROCS(0) < 1 {
+		t.Fatal("system initialization left GOMAXPROCS invalid")
+	}
+	if !colorsEnabled() {
+		t.Fatal("unix startup report unexpectedly disabled colors")
 	}
 }
