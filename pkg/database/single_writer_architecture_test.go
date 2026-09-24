@@ -14,7 +14,7 @@ const singleWriterRule = `database single-writer rule violated
 
 Runtime code for single-writer engines (SQLite, Chai, DuckDB) must never access the writable *sql.DB directly.
 
-Do not call db.DB.Exec, db.DB.ExecContext, db.DB.Begin, db.DB.BeginTx, db.DB.Conn, db.DB.Prepare, or db.DB.PrepareContext from runtime application code.
+Do not call db.DB.Exec, db.DB.ExecContext, db.DB.Query, db.DB.QueryContext, db.DB.QueryRow, db.DB.QueryRowContext, db.DB.Begin, db.DB.BeginTx, db.DB.Conn, db.DB.Prepare, or db.DB.PrepareContext from runtime application code.
 
 Required architecture:
   consumer -> task + reply channel -> serialized database worker -> result through reply channel
@@ -104,7 +104,7 @@ func TestSingleWriterPackagesDoNotBypassSerializedPipeline(t *testing.T) {
 
 func isForbiddenDirectDatabaseMethod(name string) bool {
 	switch name {
-	case "Exec", "ExecContext", "Begin", "BeginTx", "Conn", "Prepare", "PrepareContext":
+	case "Exec", "ExecContext", "Query", "QueryContext", "QueryRow", "QueryRowContext", "Begin", "BeginTx", "Conn", "Prepare", "PrepareContext":
 		return true
 	default:
 		return false
