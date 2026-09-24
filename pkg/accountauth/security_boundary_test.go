@@ -308,3 +308,51 @@ func TestAccountRandomTokenAndDigestProperties(t *testing.T) {
 		t.Fatal("digest determinism/collision sanity check failed")
 	}
 }
+
+
+func TestSecurityBoundaryChallengeCooldownReusesExistingChallenge(t *testing.T) {
+	db := testDatabase(t)
+	ctx := context.Background()
+	now := time.Unix(1_800_001_000, 0).UTC()
+
+	first := transact(t, db, func(tx *sql.Tx) (Outcome, error) {
+		return Challenge(ctx, tx, "example.org", "owner@example.org", "192.0.2.90", "/first", "en", now)
+	})
+	if first.Status != "code" {
+		t.Fatalf("first challenge = %#v", first)
+	}
+
+	second := transact(t, db, func(tx *sql.Tx) (Outcome, error) {
+		return Challenge(ctx, tx, "example.org", "owner@example.org", "192.0.2.90", "/ignored", "de", now.Add(time.Second))
+	})
+	if second.Status != "code_existing" || second.Token != first.Token || second.Path != "/first" || second.Language != "en" {
+		t.Fatalf("SECURITY: cooldown created/rebound a second challenge: first=%#v second=%#v", first, second)
+	}
+
+	var count int
+	if err := db.QueryRow(
+		"SELECT COUNT(*) FROM account_login_codes WHERE domain=? AND email=? AND client_ip=?",
+		"example.org", "owner@example.org", "192.0.2.90",
+	).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("SECURITY: cooldown left %d active challenges, want 1", count)
+	}
+}
+
+func TestSecurityBoundarySessionFailsClosedWithoutSessionStorage(t *testing.T) {
+	db := testDatabase(t)
+	if _, err := db.Exec("DROP TABLE sessions"); err != nil {
+		t.Fatal(err)
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Session(context.Background(), tx, "example.org", "owner@example.org", "203.0.113.90", time.Now().UTC()); err == nil {
+		_ = tx.Rollback()
+		t.Fatal("SECURITY: account session succeeded after session storage disappeared")
+	}
+	_ = tx.Rollback()
+}
