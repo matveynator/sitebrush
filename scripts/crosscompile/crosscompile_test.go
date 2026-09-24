@@ -829,7 +829,8 @@ func TestCrosscompileMainServerOnlyWithStubCompiler(t *testing.T) {
 
 	commandDirectory := t.TempDir()
 	writeCommandStub(t, commandDirectory, "go", `last=""; previous=""; for argument in "$@"; do if [ "$previous" = "-o" ]; then last="$argument"; fi; previous="$argument"; done; if [ -n "$last" ]; then mkdir -p "$(dirname "$last")"; printf binary > "$last"; fi`)
-	t.Setenv("PATH", commandDirectory)
+	originalPath := os.Getenv("PATH")
+	t.Setenv("PATH", commandDirectory+string(os.PathListSeparator)+originalPath)
 
 	flag.CommandLine = flag.NewFlagSet("crosscompile-test", flag.ContinueOnError)
 	os.Args = []string{
