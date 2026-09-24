@@ -34,6 +34,8 @@ jobs:
         run: go test -count=1 -covermode=atomic -coverprofile=coverage.out ./pkg/... ./scripts/...
       - name: Report coverage
         run: go tool cover -func=coverage.out | tail -n 1
+      - name: Report database coverage
+        run: go tool cover -func=coverage.out | grep '/pkg/database/' || true
       - name: Upload coverage
         uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v6
         with:
