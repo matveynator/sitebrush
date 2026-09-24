@@ -1052,7 +1052,10 @@ func (db *Database) EnsureIndexesAsync(ctx context.Context, cfg Config, logf fun
 				default:
 				}
 
-				_, err := db.DB.ExecContext(ctx, it.sql)
+				err := db.withSerializedConnectionFor(ctx, WorkloadGeneral, func(jobCtx context.Context, conn *sql.DB) error {
+					_, execErr := conn.ExecContext(jobCtx, it.sql)
+					return execErr
+				})
 				if err == nil {
 					logf("✅ index %s ready in %s", it.name, time.Since(start).Truncate(time.Millisecond))
 					break
