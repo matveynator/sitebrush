@@ -6476,6 +6476,97 @@ func formatAnalyticsTime(rawTime string) string {
 	return parsedTime.Local().Format("2006-01-02 15:04:05")
 }
 
+func (a *App) securityIncidentReport(w http.ResponseWriter, r *http.Request) {
+	if a.attackGuard == nil {
+		http.Error(w, "security guard unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 4096)
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "invalid incident report", http.StatusBadRequest)
+		return
+	}
+	incidentID := strings.TrimSpace(r.FormValue("incident_id"))
+	message := strings.TrimSpace(r.FormValue("message"))
+	if len(message) > 500 {
+		message = message[:500]
+	}
+	now := time.Now().UTC()
+	clientIP := clientIPAddress(r)
+	block, claimed, err := a.attackGuard.ClaimIncidentReport(clientIP, incidentID, now)
+	if err != nil {
+		http.Error(w, "security incident not found", http.StatusNotFound)
+		return
+	}
+	if !claimed {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-store")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = io.WriteString(w, httpsecurity.BlockedHTML(preferredLanguageCode(r.Header.Get("Accept-Language")), block))
+		return
+	}
+
+	success := false
+	defer func() {
+		if !success {
+			_, _ = a.attackGuard.FinishIncidentReport(clientIP, incidentID, message, false, time.Now().UTC())
+		}
+	}()
+
+	domain := normalizeDomainName(block.Domain)
+	if domain == "" {
+		domain = normalizeDomainName(a.siteDomain(r.Context(), r))
+	}
+	var administratorEmail string
+	err = a.db.QueryRowContext(contextWithDomain(r.Context(), domain),
+		`SELECT email FROM users WHERE domain=? AND is_admin=1 AND TRIM(COALESCE(email,''))<>'' ORDER BY email LIMIT 1`,
+		domain).Scan(&administratorEmail)
+	if err != nil || strings.TrimSpace(administratorEmail) == "" {
+		http.Error(w, "site administrator email is unavailable", http.StatusServiceUnavailable)
+		return
+	}
+
+	body := strings.Builder{}
+	body.WriteString("SiteBrush security incident report\n\n")
+	body.WriteString("Incident: " + block.IncidentID + "\n")
+	body.WriteString("Domain: " + domain + "\n")
+	body.WriteString("Client IP: " + block.IP + "\n")
+	body.WriteString("Reason: " + block.Reason + "\n")
+	if block.Description != "" {
+		body.WriteString("Detected activity: " + block.Description + "\n")
+	}
+	body.WriteString("Last event: " + block.LastEvent.UTC().Format(time.RFC3339) + "\n")
+	body.WriteString("Blocked until: " + block.ExpiresAt.UTC().Format(time.RFC3339) + "\n")
+	body.WriteString(fmt.Sprintf("Confirmed block number: %d\n", block.Violations))
+	if message != "" {
+		body.WriteString("\nUser message:\n" + message + "\n")
+	}
+	body.WriteString("\nFind this incident in Analytics → Security by searching for Incident ID " + block.IncidentID + ".\n")
+
+	mail := mailout.Message{
+		Kind:    "security_incident_report",
+		From:    a.emailFromAddress(domain),
+		To:      strings.TrimSpace(administratorEmail),
+		Subject: "SiteBrush security incident " + block.IncidentID + " on " + domain,
+		Body:    body.String(),
+	}
+	if err = a.enqueueEmail(r.Context(), mail); err != nil {
+		http.Error(w, "could not send incident report", http.StatusServiceUnavailable)
+		return
+	}
+	if _, err = a.attackGuard.FinishIncidentReport(clientIP, incidentID, message, true, time.Now().UTC()); err != nil {
+		http.Error(w, "could not save incident report status", http.StatusServiceUnavailable)
+		return
+	}
+	success = true
+
+	httpsecurity.RedirectLocal(w, r, r.URL.Path, http.StatusSeeOther)
+}
+
 func (a *App) handleAnalyticsSecurityAction(w http.ResponseWriter, r *http.Request) {
 	if a.attackGuard == nil {
 		http.Error(w, "security guard unavailable", http.StatusServiceUnavailable)
@@ -6565,6 +6656,10 @@ func (a *App) authAbuseMiddleware(next http.Handler) http.Handler {
 			}
 			if blocked {
 				if a.trustRecordedAdminIP(r, domain, clientIP, now) {
+					next.ServeHTTP(w, r)
+					return
+				}
+				if r.Method == http.MethodPost && hasQueryFlag(r, "security_incident_report") {
 					next.ServeHTTP(w, r)
 					return
 				}
@@ -8945,6 +9040,10 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !a.dynamicDatabaseReady(w, r, requestDomain) {
+		return
+	}
+	if hasQueryFlag(r, "security_incident_report") {
+		a.securityIncidentReport(w, r)
 		return
 	}
 	if hasQueryFlag(r, "logout") {
