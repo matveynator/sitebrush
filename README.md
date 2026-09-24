@@ -12,7 +12,7 @@
 </p>
 
 <p align="center">
-  <a href="https://sitebrush.com/"><strong>Try your website</strong></a> ·
+  <a href="https://sitebrush.com/#trial-form"><strong>Try your website</strong></a> ·
   <a href="https://demo.sitebrush.com/">Live demo</a> ·
   <a href="#downloads">Download</a> ·
   <a href="#install-the-server-version">Install</a>
