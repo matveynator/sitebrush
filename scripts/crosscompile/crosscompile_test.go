@@ -649,3 +649,156 @@ func writeCommandStub(t *testing.T, directory, name, body string) {
 		t.Fatal(err)
 	}
 }
+
+
+func TestSecurityBoundaryReleaseSyncRejectsOptionAndPathInjection(t *testing.T) {
+	t.Parallel()
+
+	for _, raw := range []string{
+		"-oProxyCommand=owned=/srv/releases",
+		"root@host with-space=/srv/releases",
+		"root@host=/srv/releases\nowned",
+		"root@host=relative/path",
+		"root@host=",
+	} {
+		if _, err := parseSyncDestination(raw); err == nil {
+			t.Fatalf("SECURITY: unsafe release sync destination accepted: %q", raw)
+		}
+	}
+
+	for _, host := range []string{"root@sitebrush.com", "sitebrush.ru", "192.0.2.10"} {
+		if !validSyncHost(host) {
+			t.Fatalf("valid sync host rejected: %q", host)
+		}
+	}
+	for _, host := range []string{"-host", "host/name", "host:22", "host\nowned"} {
+		if validSyncHost(host) {
+			t.Fatalf("SECURITY: unsafe sync host accepted: %q", host)
+		}
+	}
+}
+
+func TestSecurityBoundaryLatestSymlinkRejectsTraversalTarget(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink test is skipped on Windows")
+	}
+
+	root := t.TempDir()
+	for _, version := range []string{"../owned", "../../tmp/owned", "/tmp/owned", "release/child", " "} {
+		if err := updateLatestSymlink(root, version); err == nil {
+			t.Fatalf("SECURITY: latest symlink accepted unsafe release target %q", version)
+		}
+	}
+	if _, err := os.Lstat(filepath.Join(root, "latest")); !os.IsNotExist(err) {
+		t.Fatalf("SECURITY: rejected version still created latest symlink: %v", err)
+	}
+}
+
+func TestSecurityBoundaryArtifactChecksumChangesAfterBinaryTampering(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	artifact := filepath.Join(dir, "sitebrush_linux_amd64")
+	if err := os.WriteFile(artifact, []byte("trusted-release"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeMD5SumsFile(dir); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(filepath.Join(dir, "MD5SUMS"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.WriteFile(artifact, []byte("tampered-release"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeMD5SumsFile(dir); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.ReadFile(filepath.Join(dir, "MD5SUMS"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(before) == string(after) {
+		t.Fatal("SECURITY: release checksum did not change after artifact tampering")
+	}
+}
+
+func TestDesktopBuildWrappersWithStubDocker(t *testing.T) {
+	commandDirectory := t.TempDir()
+	writeCommandStub(t, commandDirectory, "docker", "exit 0")
+	t.Setenv("PATH", commandDirectory)
+
+	repoRoot := t.TempDir()
+	desktopDir := filepath.Join(repoRoot, "desktop")
+	if err := os.MkdirAll(desktopDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, variant := range []string{"gtk40", "gtk41"} {
+		name := desktopArtifactName("sitebrush", "linux", "amd64", variant)
+		if err := os.WriteFile(filepath.Join(desktopDir, name+".zip"), []byte("linux archive"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	built, err := buildLinuxDesktopArtifacts(
+		repoRoot,
+		desktopDir,
+		"sitebrush",
+		"test",
+		desktopBuildOptions{targetFilter: buildTargetFilter{goos: "linux", goarch: "amd64"}},
+	)
+	if err != nil || !built {
+		t.Fatalf("linux wrapper built=%v err=%v", built, err)
+	}
+
+	windowsName := desktopArtifactName("sitebrush", "windows", "amd64", "")
+	if err := os.WriteFile(filepath.Join(desktopDir, windowsName+".zip"), []byte("windows archive"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	built, err = buildWindowsDesktopArtifacts(
+		repoRoot,
+		desktopDir,
+		"sitebrush",
+		"test",
+		desktopBuildOptions{targetFilter: buildTargetFilter{goos: "windows", goarch: "amd64"}},
+	)
+	if err != nil || !built {
+		t.Fatalf("windows wrapper built=%v err=%v", built, err)
+	}
+}
+
+func TestDesktopBuildOrchestratorWithStubDocker(t *testing.T) {
+	commandDirectory := t.TempDir()
+	writeCommandStub(t, commandDirectory, "docker", "exit 0")
+	t.Setenv("PATH", commandDirectory)
+
+	repoRoot := t.TempDir()
+	outputDir := filepath.Join(repoRoot, "output")
+	desktopDir := filepath.Join(outputDir, "desktop-app")
+	if err := os.MkdirAll(desktopDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, variant := range []string{"gtk40", "gtk41"} {
+		name := desktopArtifactName("sitebrush", "linux", "amd64", variant)
+		if err := os.WriteFile(filepath.Join(desktopDir, name+".zip"), []byte("archive"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	err := buildDesktopAppArtifacts(
+		repoRoot,
+		outputDir,
+		"sitebrush",
+		"test",
+		desktopBuildOptions{targetFilter: buildTargetFilter{goos: "linux", goarch: "amd64"}},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyNonEmptyFile(filepath.Join(desktopDir, "MD5SUMS")); err != nil {
+		t.Fatal(err)
+	}
+}
