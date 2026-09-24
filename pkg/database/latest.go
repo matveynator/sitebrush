@@ -106,76 +106,77 @@ LIMIT %s;`,
 			limitPlaceholder,
 		)
 
-		rows, err := db.DB.QueryContext(ctx, query, minLat, maxLat, minLon, maxLon, fetchLimit)
-		if err != nil {
-			errs <- fmt.Errorf("latest markers query: %w", err)
-			return
-		}
-		defer rows.Close()
-
 		sent := 0
-		for rows.Next() {
-			var marker Marker
-			var altitude sql.NullFloat64
-			var temperature sql.NullFloat64
-			var humidity sql.NullFloat64
+		readErr := db.withSerializedConnectionFor(ctx, WorkloadWebRead, func(runCtx context.Context, conn *sql.DB) error {
+			rows, err := conn.QueryContext(runCtx, query, minLat, maxLat, minLon, maxLon, fetchLimit)
+			if err != nil {
+				return fmt.Errorf("latest markers query: %w", err)
+			}
+			defer rows.Close()
 
-			if err := rows.Scan(
-				&marker.ID,
-				&marker.DoseRate,
-				&marker.Date,
-				&marker.Lon,
-				&marker.Lat,
-				&marker.CountRate,
-				&marker.Zoom,
-				&marker.Speed,
-				&marker.TrackID,
-				&altitude,
-				&marker.Detector,
-				&marker.Radiation,
-				&temperature,
-				&humidity,
-			); err != nil {
-				errs <- fmt.Errorf("scan latest marker: %w", err)
-				return
+			for rows.Next() {
+				var marker Marker
+				var altitude sql.NullFloat64
+				var temperature sql.NullFloat64
+				var humidity sql.NullFloat64
+
+				if err := rows.Scan(
+					&marker.ID,
+					&marker.DoseRate,
+					&marker.Date,
+					&marker.Lon,
+					&marker.Lat,
+					&marker.CountRate,
+					&marker.Zoom,
+					&marker.Speed,
+					&marker.TrackID,
+					&altitude,
+					&marker.Detector,
+					&marker.Radiation,
+					&temperature,
+					&humidity,
+				); err != nil {
+					return fmt.Errorf("scan latest marker: %w", err)
+				}
+
+				if altitude.Valid {
+					marker.Altitude = altitude.Float64
+					marker.AltitudeValid = true
+				}
+				if temperature.Valid {
+					marker.Temperature = temperature.Float64
+					marker.TemperatureValid = true
+				}
+				if humidity.Valid {
+					marker.Humidity = humidity.Float64
+					marker.HumidityValid = true
+				}
+
+				if distanceMeters(marker.Lat, marker.Lon, lat, lon) > radiusMeters {
+					continue
+				}
+
+				select {
+				case <-runCtx.Done():
+					return runCtx.Err()
+				case out <- marker:
+					sent++
+				}
+
+				if sent >= limit {
+					return nil
+				}
 			}
 
-			if altitude.Valid {
-				marker.Altitude = altitude.Float64
-				marker.AltitudeValid = true
+			if err := rows.Err(); err != nil {
+				return fmt.Errorf("iterate latest markers: %w", err)
 			}
-			if temperature.Valid {
-				marker.Temperature = temperature.Float64
-				marker.TemperatureValid = true
-			}
-			if humidity.Valid {
-				marker.Humidity = humidity.Float64
-				marker.HumidityValid = true
-			}
-
-			if distanceMeters(marker.Lat, marker.Lon, lat, lon) > radiusMeters {
-				continue
-			}
-
-			select {
-			case <-ctx.Done():
-				errs <- ctx.Err()
-				return
-			case out <- marker:
-				sent++
-			}
-
-			if sent >= limit {
-				errs <- nil
-				return
-			}
-		}
-
-		if err := rows.Err(); err != nil {
-			errs <- fmt.Errorf("iterate latest markers: %w", err)
+			return nil
+		})
+		if readErr != nil {
+			errs <- readErr
 			return
 		}
-
 		errs <- nil
 	}()
 
