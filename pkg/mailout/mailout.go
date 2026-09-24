@@ -92,7 +92,10 @@ func runDeliveryWorker(ctx context.Context, jobs <-chan DeliveryJob, sender Send
 		select {
 		case <-ctx.Done():
 			return
-		case job := <-jobs:
+		case job, open := <-jobs:
+			if !open {
+				return
+			}
 			sendCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
 			if err := sender(sendCtx, job.Message); err != nil {
 				log.Printf("email delivery failed error_type=%T", err)
