@@ -230,3 +230,31 @@ func TestTrackRangeStreamBranches(t *testing.T) {
 		}
 	}
 }
+
+
+func TestTrackUnavailableDatabaseBranches(t *testing.T) {
+	var db *Database
+	ctx := context.Background()
+
+	if _, err := db.CountTracks(ctx); err == nil {
+		t.Fatal("track count without database did not fail")
+	}
+	if exists, err := db.TrackExists(ctx, "track", "sqlite"); err == nil || exists {
+		t.Fatalf("track existence without database = %v, %v", exists, err)
+	}
+	if _, err := db.GetTrackSummary(ctx, "track", "sqlite"); err == nil {
+		t.Fatal("track summary without database did not fail")
+	}
+	if err := db.EnsureTrackPresence(ctx, "track", "sqlite"); err == nil {
+		t.Fatal("track presence without database did not fail")
+	}
+	if _, err := db.CountTrackIDsUpTo(ctx, "track", "sqlite"); err == nil {
+		t.Fatal("track id count without database did not fail")
+	}
+	if _, err := db.GetTrackIDByIndex(ctx, 1, "sqlite"); err == nil {
+		t.Fatal("track id lookup without database did not fail")
+	}
+	if _, err := db.CountTracksInRange(ctx, 1, 100, "sqlite"); err == nil {
+		t.Fatal("track range count without database did not fail")
+	}
+}
