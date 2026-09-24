@@ -39,8 +39,10 @@ type Location struct {
 }
 
 type Resolver struct {
-	cacheDir string
-	requests chan lookupRequest
+	cacheDir  string
+	requests  chan lookupRequest
+	shutdown  chan struct{}
+	done      chan struct{}
 }
 
 type lookupRequest struct {
@@ -62,6 +64,8 @@ func NewResolver(cacheDir string) *Resolver {
 	resolver := &Resolver{
 		cacheDir: strings.TrimSpace(cacheDir),
 		requests: make(chan lookupRequest),
+		shutdown: make(chan struct{}),
+		done:     make(chan struct{}),
 	}
 	go resolver.run()
 	return resolver
@@ -81,11 +85,15 @@ func (resolver *Resolver) Lookup(ctx context.Context, ip string) (Location, bool
 	response := make(chan lookupResponse, 1)
 	request := lookupRequest{ip: ip, response: response}
 	select {
+	case <-resolver.done:
+		return Location{}, false
 	case resolver.requests <- request:
 	case <-requestContext.Done():
 		return Location{}, false
 	}
 	select {
+	case <-resolver.done:
+		return Location{}, false
 	case result := <-response:
 		return result.location, result.found
 	case <-requestContext.Done():
@@ -93,7 +101,21 @@ func (resolver *Resolver) Lookup(ctx context.Context, ip string) (Location, bool
 	}
 }
 
+// Close stops the resolver owner goroutine through its lifecycle channel.
+func (resolver *Resolver) Close() {
+	if resolver == nil {
+		return
+	}
+	select {
+	case <-resolver.done:
+		return
+	case resolver.shutdown <- struct{}{}:
+	}
+	<-resolver.done
+}
+
 func (resolver *Resolver) run() {
+	defer close(resolver.done)
 	if resolver.cacheDir == "" {
 		resolver.cacheDir = filepath.Join(os.TempDir(), "sitebrush-geoip")
 	}
@@ -123,6 +145,8 @@ func (resolver *Resolver) run() {
 
 	for {
 		select {
+		case <-resolver.shutdown:
+			return
 		case request := <-resolver.requests:
 			location, found := lookup(database, request.ip)
 			if !found && isPublicIPv4(request.ip) && geoIPImportRequired(hasRanges, importedRelease, currentRelease) && !importInProgress {
@@ -149,8 +173,13 @@ func geoIPImportRequired(hasRanges bool, importedRelease string, currentRelease 
 }
 
 func (resolver *Resolver) drainWithoutDatabase() {
-	for request := range resolver.requests {
-		request.response <- lookupResponse{}
+	for {
+		select {
+		case <-resolver.shutdown:
+			return
+		case request := <-resolver.requests:
+			request.response <- lookupResponse{}
+		}
 	}
 }
 
