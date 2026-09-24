@@ -902,7 +902,9 @@ func TestCrosscompileVersionAndPlatformHelperFallbacks(t *testing.T) {
 		t.Fatalf("linux desktop variant=%q ok=%v", variant, ok)
 	}
 
-	if dockerNativePlatform() == "" {
-		t.Fatal("docker native platform is empty")
+	writeCommandStub(t, commandDirectory, "docker", `if [ "$1" = "info" ]; then printf 'x86_64\n'; exit 0; fi; exit 1`)
+	platform, err := dockerNativePlatform(t.TempDir())
+	if err != nil || platform != "linux/amd64" {
+		t.Fatalf("docker native platform=%q err=%v", platform, err)
 	}
 }
