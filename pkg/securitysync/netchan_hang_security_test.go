@@ -68,43 +68,38 @@ func TestSecurityBoundaryStopBeforeReplyDeliveryCancelsRequest(t *testing.T) {
 
 func TestSecurityBoundaryBoundedRequestQueueAppliesBackpressure(t *testing.T) {
 	stop := make(chan struct{})
-	requests, err := Start("", stop)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer close(stop)
+	requests := make(chan Request, 64)
+	done := make(chan struct{})
+	go func() {
+		run("", stop, requests, map[string]map[string]evidenceSource{})
+		close(done)
+	}()
 
-	// Fill the documented bounded queue while the worker is intentionally
-	// blocked delivering the first result.
+	// Block the worker on result delivery, then fill the bounded request queue.
 	blockedReply := make(chan Result)
 	requests <- Request{Query: true, Reply: blockedReply}
 
-	accepted := 0
-	for accepted < 64 {
+	deadline := time.After(time.Second)
+	for queued := 0; queued < cap(requests); {
 		select {
 		case requests <- Request{Query: true}:
-			accepted++
-		default:
-			// The worker may consume one queued request while scheduling; a
-			// bounded queue is the invariant, not an exact instantaneous count.
-			goto queueFull
+			queued++
+		case <-deadline:
+			t.Fatal("SECURITY: could not fill bounded securitysync request queue")
 		}
 	}
 
-queueFull:
 	select {
 	case requests <- Request{Query: true}:
-		// One slot may become available if scheduling let the worker progress,
-		// so do not fail solely on this race. The shutdown test below proves
-		// blocked work remains cancellable.
+		t.Fatal("SECURITY: securitysync request queue accepted work beyond its configured bound")
 	default:
 	}
 
 	close(stop)
 	select {
+	case <-done:
 	case <-time.After(time.Second):
 		t.Fatal("SECURITY: full securitysync request queue prevented shutdown")
-	default:
 	}
 }
 
