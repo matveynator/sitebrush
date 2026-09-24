@@ -33,9 +33,6 @@ func TestTOTPSecurityFailsClosedWhenStorageIsUnavailable(t *testing.T) {
 
 	t.Run("enable", func(t *testing.T) {
 		database := newBrokenTOTPDatabase(t)
-		if _, err := database.Exec("CREATE TABLE account_totp(domain TEXT,email TEXT,secret TEXT,enabled_at INTEGER)"); err != nil {
-			t.Fatal(err)
-		}
 		secret, _ := GenerateSecret()
 		code, _ := Code(secret, now)
 		tx := mustBeginTOTP(t, database)
