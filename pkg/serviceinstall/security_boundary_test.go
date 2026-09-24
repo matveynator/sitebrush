@@ -17,8 +17,7 @@ func TestSecurityBoundaryInstallRejectsForgedServiceNames(t *testing.T) {
 		"sitebrush\\..\\owned",
 		"sitebrush;touch-owned",
 		"sitebrush $(owned)",
-		"sitebrush
-owned",
+		"sitebrush\nowned",
 		strings.Repeat("a", 129),
 	} {
 		if validServiceName(serviceName) {
