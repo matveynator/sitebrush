@@ -83,7 +83,8 @@ func TestCrawlerPageAndHostClassificationCoverage(t *testing.T) {
 }
 
 func TestCrawlerTextDecodeAndEncodingHelpersCoverage(t *testing.T) {
-	utf8Result := DecodeText([]byte("ï»¿hello"), "text/plain; charset=utf-8")
+	bomText := append([]byte{0xEF, 0xBB, 0xBF}, []byte("hello")...)
+	utf8Result := DecodeText(bomText, "text/plain; charset=utf-8")
 	if utf8Result.Text != "hello" || utf8Result.Encoding != "utf-8" {
 		t.Fatalf("UTF-8 decode=%#v", utf8Result)
 	}
