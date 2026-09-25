@@ -74,7 +74,7 @@ func TestSecurityBoundaryBackupImportFailsClosedOnDatabaseWriteError(t *testing.
 	}
 	archive := backupZIPForSecurityTest(t, domainBackup{
 		Version: 1,
-		Pages: []domainBackupPage{{
+		Pages: []backupPage{{
 			Path:  "/restored",
 			Title: "Restored",
 			HTML:  "<h1>restored</h1>",
