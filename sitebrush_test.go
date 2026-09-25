@@ -13668,6 +13668,34 @@ func TestReplaceTemplateBlocksHandlesNestedTemplateMatches(t *testing.T) {
 	}
 }
 
+func TestTemplatePropagationDoesNotCrossSiteBoundaries(t *testing.T) {
+	application, rawDB := newTestApplication(t)
+	pageHTMLByDomain := map[string]string{
+		"first.example":  `<html><body><header class="SiteBrush-Template shared-header"><h1>First site old header</h1></header></body></html>`,
+		"second.example": `<html><body><header class="SiteBrush-Template shared-header"><h1>Second site header</h1></header></body></html>`,
+	}
+	for domainName, pageHTML := range pageHTMLByDomain {
+		if _, err := rawDB.Exec(`INSERT INTO pages(domain,path,title,html,published) VALUES(?,?,?,?,1)`, domainName, "/", domainName, pageHTML); err != nil {
+			t.Fatalf("insert page for %s: %v", domainName, err)
+		}
+	}
+
+	application.applyTemplatePropagation(context.Background(), "first.example", `<html><body><header class="SiteBrush-Template shared-header"><h1>First site updated header</h1></header></body></html>`, "")
+
+	for domainName, expectedHTML := range map[string]string{
+		"first.example":  `<html><body><header class="SiteBrush-Template shared-header"><h1>First site updated header</h1></header></body></html>`,
+		"second.example": pageHTMLByDomain["second.example"],
+	} {
+		var actualHTML string
+		if err := rawDB.QueryRow(`SELECT html FROM pages WHERE domain=? AND path=?`, domainName, "/").Scan(&actualHTML); err != nil {
+			t.Fatalf("read page for %s: %v", domainName, err)
+		}
+		if actualHTML != expectedHTML {
+			t.Errorf("page for %s changed across template propagation: got %q, want %q", domainName, actualHTML, expectedHTML)
+		}
+	}
+}
+
 func TestMovedPageRedirectsFromOldPathToNewPath(t *testing.T) {
 	application, rawDB := newTestApplication(t)
 	_, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "admin@example.com", "old")
