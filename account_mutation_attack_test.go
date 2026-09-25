@@ -74,6 +74,33 @@ func TestAuthAttackConcurrentPasswordChangeConfirmationAppliesOnce(t *testing.T)
 	}
 }
 
+func TestAuthAttackConcurrentPasswordRecoveryAppliesOnce(t *testing.T) {
+	application, database := newTestApplication(t)
+	now := time.Now().UTC()
+	const domain, email = "localhost", "owner@example.com"
+	if _, err := database.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, domain, email, "old-password"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Exec(`INSERT INTO email_confirmations(token,domain,action,email,password,verification_code,created_at,expires_at) VALUES(?,?,?,?,?,?,?,?)`,
+		"recovery-once", domain, "recover", email, "", "123456", now.Format(time.RFC3339), now.Add(time.Hour).Format(time.RFC3339)); err != nil {
+		t.Fatal(err)
+	}
+
+	successfulClaims := concurrentConfirmationClaims(t, func() error {
+		return application.applyRecoveredPassword(context.Background(), domain, "recovery-once", email, "recovered-password")
+	})
+	if successfulClaims != 1 {
+		t.Fatalf("SECURITY: concurrent password recovery succeeded %d times, want one", successfulClaims)
+	}
+	var updatedPassword string
+	if err := database.QueryRow(`SELECT password FROM users WHERE domain=? AND email=?`, domain, email).Scan(&updatedPassword); err != nil {
+		t.Fatal(err)
+	}
+	if updatedPassword != "recovered-password" {
+		t.Fatalf("recovered password = %q", updatedPassword)
+	}
+}
+
 func concurrentConfirmationClaims(t *testing.T, claim func() error) int {
 	t.Helper()
 	const attempts = 50
