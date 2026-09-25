@@ -67,7 +67,7 @@ func TestSecurityBoundaryFileUploadStreamsContentWithoutOriginalName(t *testing.
 
 	var body bytes.Buffer
 	writer := multipart.NewWriter(&body)
-	fileWriter, err := writer.CreateFormFile("upload_files", "folder/secret-name.txt")
+	fileWriter, err := writer.CreateFormFile("upload_files", "secret-name.txt")
 	if err != nil {
 		t.Fatal(err)
 	}
