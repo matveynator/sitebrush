@@ -313,18 +313,36 @@ func load(path string) (map[string]map[string]evidenceSource, error) {
 		return nil, err
 	}
 	for _, record := range state.Records {
+		if len(records) >= maximumTrackedIPs {
+			break
+		}
 		ip := net.ParseIP(strings.TrimSpace(record.IP))
-		if ip == nil {
+		if ip == nil || ip.IsLoopback() || ip.IsPrivate() || ip.IsUnspecified() || ip.IsMulticast() {
+			continue
+		}
+		normalizedIP := ip.String()
+		if _, exists := records[normalizedIP]; exists {
 			continue
 		}
 		sources := map[string]evidenceSource{}
 		for _, source := range record.Sources {
-			if source.InstallationID != "" {
-				sources[source.InstallationID] = source
+			if len(sources) >= maximumSourcesPerIP {
+				break
 			}
+			installationID := strings.TrimSpace(source.InstallationID)
+			if installationID == "" || len(installationID) > 128 || !globalCategory(source.Category) || source.ObservedAt.IsZero() {
+				continue
+			}
+			if _, exists := sources[installationID]; exists {
+				continue
+			}
+			source.InstallationID = installationID
+			source.Description = cleanEvidenceDescription(source.Description)
+			source.ObservedAt = source.ObservedAt.UTC()
+			sources[installationID] = source
 		}
 		if len(sources) > 0 {
-			records[ip.String()] = sources
+			records[normalizedIP] = sources
 		}
 	}
 	prune(records, time.Now().UTC())
