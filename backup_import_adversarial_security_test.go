@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 	"encoding/json"
+	"fmt"
 )
 
 func backupZIPForSecurityTest(t *testing.T, backup domainBackup) *zip.Reader {
@@ -57,11 +58,15 @@ func TestSecurityBoundaryBackupImportRejectsDeclaredUncompressedBomb(t *testing.
 }
 
 func TestSecurityBoundaryBackupImportRejectsAggregateUncompressedBomb(t *testing.T) {
-	partSize := uint64(backupImportUncompressedLimitBytes/2 + 1)
-	archive := &zip.Reader{File: []*zip.File{
-		{FileHeader: zip.FileHeader{Name: "files/a.bin", UncompressedSize64: partSize}},
-		{FileHeader: zip.FileHeader{Name: "files/b.bin", UncompressedSize64: partSize}},
-	}}
+	partSize := uint64(backupImportFileEntryLimitBytes - 1)
+	files := make([]*zip.File, 0, 9)
+	for index := 0; index < 9; index++ {
+		files = append(files, &zip.File{FileHeader: zip.FileHeader{
+			Name:               fmt.Sprintf("files/part-%d.bin", index),
+			UncompressedSize64: partSize,
+		}})
+	}
+	archive := &zip.Reader{File: files}
 	if _, err := (&App{}).importDomainBackupZIP(context.Background(), "localhost", "/", archive); err == nil || !strings.Contains(err.Error(), "uncompressed size") {
 		t.Fatalf("SECURITY: aggregate ZIP bomb was accepted: %v", err)
 	}
