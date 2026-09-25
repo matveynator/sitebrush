@@ -39,10 +39,11 @@ type Location struct {
 }
 
 type Resolver struct {
-	cacheDir  string
-	requests  chan lookupRequest
-	shutdown  chan struct{}
-	done      chan struct{}
+	cacheDir   string
+	requests   chan lookupRequest
+	shutdown   chan struct{}
+	importStop chan struct{}
+	done       chan struct{}
 }
 
 type lookupRequest struct {
@@ -62,10 +63,11 @@ type importResult struct {
 
 func NewResolver(cacheDir string) *Resolver {
 	resolver := &Resolver{
-		cacheDir: strings.TrimSpace(cacheDir),
-		requests: make(chan lookupRequest),
-		shutdown: make(chan struct{}),
-		done:     make(chan struct{}),
+		cacheDir:   strings.TrimSpace(cacheDir),
+		requests:   make(chan lookupRequest),
+		shutdown:   make(chan struct{}),
+		importStop: make(chan struct{}),
+		done:       make(chan struct{}),
 	}
 	go resolver.run()
 	return resolver
@@ -116,6 +118,7 @@ func (resolver *Resolver) Close() {
 
 func (resolver *Resolver) run() {
 	defer close(resolver.done)
+	defer close(resolver.importStop)
 	if resolver.cacheDir == "" {
 		resolver.cacheDir = filepath.Join(os.TempDir(), "sitebrush-geoip")
 	}
@@ -140,7 +143,7 @@ func (resolver *Resolver) run() {
 	if geoIPImportRequired(hasRanges, importedRelease, currentRelease) {
 		importInProgress = true
 		log.Printf("geoip database import started: ranges=%t release=%q current=%q", hasRanges, importedRelease, currentRelease)
-		go importLatest(databasePath, resolver.cacheDir, time.Now().UTC(), resolver.shutdown, importResults)
+		go importLatest(databasePath, resolver.cacheDir, time.Now().UTC(), resolver.importStop, importResults)
 	}
 
 	for {
@@ -152,7 +155,7 @@ func (resolver *Resolver) run() {
 			if !found && isPublicIPv4(request.ip) && geoIPImportRequired(hasRanges, importedRelease, currentRelease) && !importInProgress {
 				importInProgress = true
 				log.Printf("geoip database import started after lookup miss: ip=%s ranges=%t release=%q current=%q", request.ip, hasRanges, importedRelease, currentRelease)
-				go importLatest(databasePath, resolver.cacheDir, time.Now().UTC(), resolver.shutdown, importResults)
+				go importLatest(databasePath, resolver.cacheDir, time.Now().UTC(), resolver.importStop, importResults)
 			}
 			request.response <- lookupResponse{location: location, found: found}
 		case result := <-importResults:

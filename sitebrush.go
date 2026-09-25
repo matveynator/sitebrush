@@ -9430,6 +9430,7 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 // An IP restriction removes the session before normal routing, so public pages
 // remain available while every handler sees the request as unauthenticated.
 func (a *App) enforceAdminIPAllowlist(w http.ResponseWriter, r *http.Request, domain string) bool {
+	domain = a.siteDomain(r.Context(), r)
 	cookie, err := r.Cookie("sitebrush_session")
 	if err != nil || strings.TrimSpace(cookie.Value) == "" {
 		return true

@@ -1,11 +1,12 @@
 package geoip
 
 import (
-	"os"
-	"compress/gzip"
 	"bytes"
+	"compress/gzip"
 	"context"
 	"database/sql"
+	"net/http"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -98,6 +99,31 @@ func TestGeoIPResolverHonorsCancelledLookup(t *testing.T) {
 	}
 }
 
+func TestGeoIPResolverCloseBroadcastsToImportWorker(t *testing.T) {
+	importStarted := make(chan struct{}, 1)
+	withGeoIPHTTPClient(t, geoIPRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+		importStarted <- struct{}{}
+		<-request.Context().Done()
+		return nil, request.Context().Err()
+	}))
+	resolver := NewResolver(filepath.Join(t.TempDir(), "resolver"))
+	select {
+	case <-importStarted:
+	case <-time.After(time.Second):
+		resolver.Close()
+		t.Fatal("resolver did not start the expected GeoIP import")
+	}
+	closed := make(chan struct{})
+	go func() {
+		resolver.Close()
+		close(closed)
+	}()
+	select {
+	case <-closed:
+	case <-time.After(time.Second):
+		t.Fatal("resolver shutdown signal was consumed by the import worker")
+	}
+}
 
 func TestGeoIPResolverOwnerLoopAndChannelShutdown(t *testing.T) {
 	cacheDir := t.TempDir()

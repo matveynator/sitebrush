@@ -61,6 +61,34 @@ func TestAdminIPAllowlistBootstrapsOnceAndRejectsOtherAddresses(t *testing.T) {
 	}
 }
 
+func TestAdminIPAllowlistResolvesVerifiedAliasBeforeSessionLookup(t *testing.T) {
+	application, database := newTestApplication(t)
+	for _, statement := range []string{
+		`INSERT INTO users(domain,email,password,is_admin) VALUES('example.org','owner@example.org','secret',1)`,
+		`INSERT INTO sessions(token,user_email,created_at,client_ip,security_version) VALUES('active','example.org|owner@example.org','2026-09-25T00:00:00Z','192.0.2.1',1)`,
+		`INSERT INTO domain_aliases(primary_domain,alias_domain,verification_token,is_verified,dns_a_ok) VALUES('example.org','alias.example.org','verified',1,1)`,
+		`INSERT INTO admin_ip_policies(domain,email,enabled_at) VALUES('example.org','owner@example.org',1)`,
+		`INSERT INTO admin_allowed_ips(domain,email,client_ip,added_at) VALUES('example.org','owner@example.org','192.0.2.1',1)`,
+	} {
+		if _, err := database.Exec(statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	request := httptest.NewRequest(http.MethodGet, "https://alias.example.org/?profile", nil)
+	request.RemoteAddr = "192.0.2.2:1234"
+	request = request.WithContext(contextWithDomain(request.Context(), "alias.example.org"))
+	request.AddCookie(&http.Cookie{Name: "sitebrush_session", Value: "active"})
+	if !application.enforceAdminIPAllowlist(httptest.NewRecorder(), request, "alias.example.org") {
+		t.Fatal("unlisted alias request stopped instead of continuing as a guest")
+	}
+	if _, err := request.Cookie("sitebrush_session"); err == nil {
+		t.Fatal("unlisted IP retained the primary-domain administrator session through its alias")
+	}
+	if application.isAdminRequest(request) {
+		t.Fatal("unlisted alias IP retained administrator access")
+	}
+}
+
 func TestResetAdministratorIPAccessRevokesOnlySelectedAdministrator(t *testing.T) {
 	_, database := newTestApplication(t)
 	for _, statement := range []string{
