@@ -21627,6 +21627,7 @@ func (a *App) confirmEmailToken(w http.ResponseWriter, r *http.Request) {
 		a.logHostingSupportEvent(registerContext, "client_registered", "success", confirmation.Email, confirmation.Domain, "email confirmed")
 		a.reportHostingSnapshotAsync(registerContext)
 		a.createSessionForDomain(w, r, registerContext, confirmation.Domain, confirmation.Email)
+		a.observeAutomaticSSLRegistration(r, confirmation.Domain)
 		httpsecurity.RedirectLocal(w, r, safeConfirmationReturnPath(confirmation.ReturnPath), http.StatusFound)
 	case "profile":
 		if err := a.verifyServiceMailRecipient(r.Context(), confirmation.Domain, confirmation.Email, confirmation.LanguageCode); err != nil {
@@ -21646,6 +21647,16 @@ func (a *App) confirmEmailToken(w http.ResponseWriter, r *http.Request) {
 		a.render(w, r, "account-confirm.html", map[string]any{"Domain": confirmation.Domain, "Email": confirmation.Email, "CurrentEmail": confirmation.CurrentEmail, "Completed": true})
 	default:
 		a.renderEmailConfirmationStatus(w, r, http.StatusBadRequest, translationOrDefault(confirmationTranslations, "email_confirmation_status_invalid", "Confirmation link is invalid."))
+	}
+}
+
+func (a *App) observeAutomaticSSLRegistration(r *http.Request, domain string) {
+	if a.automaticSSL == nil || autoCertDomainEligibilityError(domain) != nil {
+		return
+	}
+	select {
+	case a.automaticSSL <- automaticSSLRequest{action: "registration_confirmed", domain: domain}:
+	case <-r.Context().Done():
 	}
 }
 
@@ -35509,6 +35520,7 @@ func (a *App) runAutomaticSSLProcess(stop <-chan struct{}, certificateManager au
 	inFlight := make(map[string]bool)
 	forceResponses := make(map[string][]chan automaticSSLDomainResult)
 	forcePending := make(map[string]bool)
+	retryPending := make(map[string]bool)
 	serverIPs := make([]net.IP, 0)
 	serverIPsCheckedAt := time.Time{}
 	ipResult := make(chan automaticSSLIPResult, 1)
@@ -35579,6 +35591,12 @@ func (a *App) runAutomaticSSLProcess(stop <-chan struct{}, certificateManager au
 			domain := normalizeDomainName(request.domain)
 			if domain != "" {
 				now := time.Now()
+				if request.action == "registration_confirmed" {
+					delete(nextAttemptAt, domain)
+					if inFlight[domain] {
+						retryPending[domain] = true
+					}
+				}
 				if request.action == "force" {
 					delete(nextAttemptAt, domain)
 					forcePending[domain] = true
@@ -35615,6 +35633,10 @@ func (a *App) runAutomaticSSLProcess(stop <-chan struct{}, certificateManager au
 		case result := <-domainResults:
 			delete(inFlight, result.domain)
 			nextAttemptAt[result.domain] = result.retryAfter
+			if retryPending[result.domain] {
+				delete(retryPending, result.domain)
+				delete(nextAttemptAt, result.domain)
+			}
 			if result.certificate != nil && !result.expiresAt.IsZero() {
 				a.rememberAutoCertCachedCertificate(result.domain, result.certificate, result.expiresAt)
 			}
