@@ -83,7 +83,7 @@ jobs:
       - name: Test security boundaries and demo
         run: >-
           go test -count=1 .
-          -run 'Test(StorageJail|PublishedStaticRejectsSymlink|PublicOutbound|RequirePublicOutboundURL|ParseGrabSourceURL|ParseOptionalGrabSourceIP|LogoutRedirectsToSameURI|AutoCertDiskCache|AutomaticSSLCertificateCacheName|SecurityBoundaryGlobalSyncStopsWhenSignalChannelCloses|SecurityBoundarySecuritySignalCannotForgeQuorumWithEmbeddedInstallationIDs|SecurityBoundaryBackupImport|SecurityBoundaryProfileSensitiveActionsRequireCSRF)'
+          -run 'Test(StorageJail|PublishedStaticRejectsSymlink|PublicOutbound|RequirePublicOutboundURL|ParseGrabSourceURL|ParseOptionalGrabSourceIP|LogoutRedirectsToSameURI|AutoCertDiskCache|AutomaticSSLCertificateCacheName|SecurityBoundaryGlobalSyncStopsWhenSignalChannelCloses|SecurityBoundarySecuritySignalCannotForgeQuorumWithEmbeddedInstallationIDs|SecurityBoundaryBackupImport|SecurityBoundaryProfileSensitiveActionsRequireCSRF|SecurityBoundaryFileUpload)'
       - name: Test demo landing
         run: go test -count=1 . -run '^TestDemoSiteVisitorGetsEditorSessionAndCleanupDeletesSite$'
 

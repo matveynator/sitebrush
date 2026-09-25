@@ -141,6 +141,8 @@ const serviceMailPerRecipientDomainHourLimit = 300
 const serviceMailNewRecipientDayLimit = 3
 const grabResourceBodyLimitBytes int64 = 64 * 1024 * 1024
 const backupImportUploadLimitBytes int64 = 512 * 1024 * 1024
+const fileUploadMultipartMemoryBytes int64 = 1 * 1024 * 1024
+const fileUploadMultipartOverheadBytes int64 = 16 * 1024 * 1024
 const backupImportJSONLimitBytes int64 = 4 * 1024 * 1024
 const backupImportTextEntryLimitBytes int64 = 16 * 1024 * 1024
 const backupImportFileEntryLimitBytes int64 = 128 * 1024 * 1024
@@ -25637,8 +25639,22 @@ func (a *App) filesPage(w http.ResponseWriter, r *http.Request) {
 	}
 	currentPath := currentFilesPath(r)
 	if r.Method == http.MethodPost {
-		fileName := safeRelativeAssetPath(r.FormValue("name"))
-		action := r.FormValue("action")
+		usage := a.domainStorageUsage(r.Context(), a.siteDomain(r.Context(), r))
+		freeBytes := usage.LimitBytes - usage.totalBytes()
+		if freeBytes < 0 {
+			freeBytes = 0
+		}
+		r.Body = http.MaxBytesReader(w, r.Body, freeBytes+fileUploadMultipartOverheadBytes)
+		if err := r.ParseMultipartForm(fileUploadMultipartMemoryBytes); err != nil {
+			if strings.Contains(strings.ToLower(err.Error()), "too large") {
+				http.Error(w, "uploaded files exceed available site storage", http.StatusRequestEntityTooLarge)
+				return
+			}
+			http.Error(w, "failed to parse uploaded files", http.StatusBadRequest)
+			return
+		}
+		fileName := safeRelativeAssetPath(r.PostFormValue("name"))
+		action := r.PostFormValue("action")
 		if action == "upload" {
 			a.uploadFiles(w, r, currentPath)
 			return
@@ -25858,9 +25874,11 @@ func (a *App) listManagedFiles(ctx context.Context, r *http.Request, currentPath
 }
 
 func (a *App) uploadFiles(w http.ResponseWriter, r *http.Request, currentPath string) {
-	if err := r.ParseMultipartForm(128 << 20); err != nil {
-		http.Error(w, "failed to parse uploaded files", http.StatusBadRequest)
-		return
+	if r.MultipartForm == nil {
+		if err := r.ParseMultipartForm(fileUploadMultipartMemoryBytes); err != nil {
+			http.Error(w, "failed to parse uploaded files", http.StatusBadRequest)
+			return
+		}
 	}
 	if r.MultipartForm == nil || len(r.MultipartForm.File["upload_files"]) == 0 {
 		http.Error(w, "no files selected", http.StatusBadRequest)
@@ -25885,40 +25903,48 @@ func (a *App) uploadFiles(w http.ResponseWriter, r *http.Request, currentPath st
 		if openErr != nil {
 			continue
 		}
-		fileBytes, readErr := io.ReadAll(sourceFile)
-		_ = sourceFile.Close()
+
+		contentHasher := sha256.New()
+		writtenBytes, readErr := io.Copy(contentHasher, sourceFile)
 		if readErr != nil {
+			_ = sourceFile.Close()
 			continue
 		}
-		contentHash := sha256.Sum256(fileBytes)
-		storedName := hex.EncodeToString(contentHash[:]) + strings.ToLower(path.Ext(fileName))
+		if _, seekErr := sourceFile.Seek(0, io.SeekStart); seekErr != nil {
+			_ = sourceFile.Close()
+			continue
+		}
+		storedName := hex.EncodeToString(contentHasher.Sum(nil)) + strings.ToLower(path.Ext(fileName))
 		targetPath := filepath.Join(baseDir, storedName)
 		mimeType := strings.TrimSpace(fileHeader.Header.Get("Content-Type"))
 		if mimeType == "" {
 			mimeType = mime.TypeByExtension(path.Ext(storedName))
 		}
-		writtenBytes := int64(len(fileBytes))
 		if existingFile, statErr := a.statInsideStorage(targetPath); statErr == nil && !existingFile.IsDir() {
+			_ = sourceFile.Close()
 			a.upsertFileMetadata(r.Context(), domain, storedName, currentPath, existingFile.Size(), mimeType, "upload")
 			uploadedNames = append(uploadedNames, storedName)
 			continue
 		}
 		if writtenBytes > 0 {
 			if storageErr := a.applyDomainStorageDelta(r.Context(), siteDomain, 0, 0, 0, writtenBytes, 0); storageErr != nil {
+				_ = sourceFile.Close()
 				http.Error(w, storageErr.Error(), http.StatusInsufficientStorage)
 				return
 			}
 		}
 		targetFile, createErr := a.createFileInsideStorage(targetPath)
 		if createErr != nil {
+			_ = sourceFile.Close()
 			if writtenBytes > 0 {
 				_ = a.applyDomainStorageDelta(r.Context(), siteDomain, 0, 0, 0, -writtenBytes, 0)
 			}
 			continue
 		}
-		writtenByteCount, writeErr := targetFile.Write(fileBytes)
+		copiedBytes, writeErr := io.Copy(targetFile, sourceFile)
 		closeErr := targetFile.Close()
-		if writeErr != nil || closeErr != nil || int64(writtenByteCount) != writtenBytes {
+		_ = sourceFile.Close()
+		if writeErr != nil || closeErr != nil || copiedBytes != writtenBytes {
 			_ = a.removeInsideStorage(targetPath)
 			if writtenBytes > 0 {
 				_ = a.applyDomainStorageDelta(r.Context(), siteDomain, 0, 0, 0, -writtenBytes, 0)
@@ -30718,7 +30744,7 @@ func preferredLanguageCode(acceptLanguageHeader string) string {
 }
 
 func safeFileName(rawName string) string {
-	if rawName == "" {
+	if rawName == "" || strings.ContainsAny(rawName, `/\\`) {
 		return ""
 	}
 	cleaned := path.Base(rawName)
