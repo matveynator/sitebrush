@@ -8998,6 +8998,11 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 		a.awaitAccountHTTPS(w, r)
 		return
 	}
+	if r.Method != http.MethodGet && r.Method != http.MethodHead && r.Method != http.MethodOptions &&
+		hasSitebrushSessionCookie(r) && !httpsecurity.SameOriginMutationAllowed(r) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
 	publicTrialEndpoint := publicTrialEndpointFromRequest(r)
 	if a.preparePublicTrialEndpoint(w, r, publicTrialEndpoint) {
 		return
@@ -19130,7 +19135,7 @@ func (a *App) deleteRevisionByQuery(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) toggleRevision(w http.ResponseWriter, r *http.Request) {
-	if !a.isAdminRequest(r) || r.Method != http.MethodPost {
+	if !a.isAdminRequest(r) || r.Method != http.MethodPost || !httpsecurity.SameOriginMutationAllowed(r) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
@@ -25639,6 +25644,10 @@ func (a *App) filesPage(w http.ResponseWriter, r *http.Request) {
 	}
 	currentPath := currentFilesPath(r)
 	if r.Method == http.MethodPost {
+		if !httpsecurity.SameOriginMutationAllowed(r) {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
 		usage := a.domainStorageUsage(r.Context(), a.siteDomain(r.Context(), r))
 		freeBytes := usage.LimitBytes - usage.totalBytes()
 		if freeBytes < 0 {
@@ -28286,7 +28295,7 @@ func (a *App) currentAdminEmailForDomain(r *http.Request, domain string) (string
 }
 
 func (a *App) pagePasswordAction(w http.ResponseWriter, r *http.Request) {
-	if !a.isAdminRequest(r) {
+	if !a.isAdminRequest(r) || !httpsecurity.SameOriginMutationAllowed(r) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
@@ -35027,6 +35036,10 @@ func (a *App) domainSettingsPage(w http.ResponseWriter, r *http.Request) {
 		returnPath = requestedReturnPath(r)
 	}
 	if r.Method == http.MethodPost {
+		if !httpsecurity.SameOriginMutationAllowed(r) {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
 		externalIP := ""
 		action := strings.TrimSpace(r.FormValue("action"))
 		if action == "add_alias" || action == "select_alias" || action == "check_alias" || action == "check_all" || action == "update_auto_ssl" {
@@ -35104,7 +35117,7 @@ func (a *App) freezeDomain(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if !a.isAdminRequest(r) {
+	if !a.isAdminRequest(r) || !httpsecurity.SameOriginMutationAllowed(r) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
@@ -35118,7 +35131,7 @@ func (a *App) publishDomain(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if !a.isAdminRequest(r) {
+	if !a.isAdminRequest(r) || !httpsecurity.SameOriginMutationAllowed(r) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
@@ -35385,7 +35398,7 @@ func backupFileName(domain string) string {
 }
 
 func (a *App) importBackup(w http.ResponseWriter, r *http.Request) {
-	if !a.isAdminRequest(r) {
+	if !a.isAdminRequest(r) || !httpsecurity.SameOriginMutationAllowed(r) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}

@@ -108,6 +108,34 @@ func IsLocalRequest(r *http.Request) bool {
 }
 
 // SetSensitiveCookie applies one policy to every authentication and challenge cookie.
+func SameOriginMutationAllowed(r *http.Request) bool {
+	if r == nil {
+		return false
+	}
+	requestHost := strings.TrimSpace(r.Host)
+	if requestHost == "" {
+		return false
+	}
+	validateSource := func(rawURL string) bool {
+		sourceURL, err := url.Parse(strings.TrimSpace(rawURL))
+		if err != nil || sourceURL == nil || sourceURL.Host == "" {
+			return false
+		}
+		return strings.EqualFold(sourceURL.Host, requestHost)
+	}
+	if origin := strings.TrimSpace(r.Header.Get("Origin")); origin != "" {
+		return validateSource(origin)
+	}
+	if referer := strings.TrimSpace(r.Header.Get("Referer")); referer != "" {
+		return validateSource(referer)
+	}
+	switch strings.ToLower(strings.TrimSpace(r.Header.Get("Sec-Fetch-Site"))) {
+	case "cross-site", "same-site":
+		return false
+	}
+	return true
+}
+
 func SetSensitiveCookie(w http.ResponseWriter, r *http.Request, cookie *http.Cookie) {
 	if cookie == nil {
 		return
