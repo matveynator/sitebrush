@@ -20,10 +20,14 @@ const CodeTTL = 15 * time.Minute
 const TrustTTL = 90 * 24 * time.Hour
 const CodeSendCooldown = 10 * time.Second
 const CodeSendLimit = 30
+const sessionIPCandidateLimit = 128
 
 func Schema() []string {
 	return []string{
 		`CREATE TABLE IF NOT EXISTS account_trusted_ips(domain TEXT,email TEXT,client_ip TEXT,confirmed_at INTEGER,last_login INTEGER,PRIMARY KEY(domain,email,client_ip))`,
+		`CREATE TABLE IF NOT EXISTS admin_allowed_ips(domain TEXT,email TEXT,client_ip TEXT,added_at INTEGER,PRIMARY KEY(domain,email,client_ip))`,
+		`CREATE TABLE IF NOT EXISTS admin_ip_policies(domain TEXT,email TEXT,enabled_at INTEGER,PRIMARY KEY(domain,email))`,
+		`CREATE TABLE IF NOT EXISTS account_session_ips(session_token TEXT,domain TEXT,email TEXT,client_ip TEXT,used_at INTEGER,PRIMARY KEY(domain,email,client_ip))`,
 		`CREATE TABLE IF NOT EXISTS account_login_codes(token TEXT PRIMARY KEY,domain TEXT,email TEXT,client_ip TEXT,code_hash TEXT,password_hash TEXT,created_at INTEGER,attempts INTEGER,return_path TEXT,language TEXT)`,
 		`CREATE TABLE IF NOT EXISTS account_code_rates(domain TEXT,email TEXT,client_ip TEXT,window_start INTEGER,last_sent INTEGER,sent_count INTEGER,PRIMARY KEY(domain,email,client_ip))`,
 	}
@@ -79,7 +83,50 @@ func Session(ctx context.Context, tx *sql.Tx, domain, email, ip string, now time
 		return "", err
 	}
 	_, err = tx.ExecContext(ctx, `INSERT INTO sessions(token,user_email,created_at,client_ip,security_version) VALUES(?,?,?,?,1)`, token, domain+"|"+email, now.UTC().Format(time.RFC3339), ip)
-	return token, err
+	if err != nil {
+		return token, err
+	}
+	if _, err = tx.ExecContext(ctx, `DELETE FROM account_session_ips WHERE domain=? AND email=? AND client_ip=?`, domain, email, ip); err != nil {
+		return token, err
+	}
+	if _, err = tx.ExecContext(ctx, `INSERT INTO account_session_ips(session_token,domain,email,client_ip,used_at) VALUES(?,?,?,?,?)`, token, domain, email, ip, now.Unix()); err != nil {
+		return token, err
+	}
+	if err = pruneSessionIPCandidates(ctx, tx, domain, email); err != nil {
+		return token, err
+	}
+	return token, nil
+}
+
+func pruneSessionIPCandidates(ctx context.Context, tx *sql.Tx, domain, email string) error {
+	rows, err := tx.QueryContext(ctx, `SELECT history.client_ip FROM account_session_ips history WHERE history.domain=? AND history.email=? AND NOT EXISTS(SELECT 1 FROM admin_allowed_ips allowed WHERE allowed.domain=history.domain AND allowed.email=history.email AND allowed.client_ip=history.client_ip) ORDER BY history.used_at DESC,history.client_ip`, domain, email)
+	if err != nil {
+		return err
+	}
+	staleIPs := make([]string, 0)
+	for candidateIndex := 0; rows.Next(); candidateIndex++ {
+		var candidateIP string
+		if err := rows.Scan(&candidateIP); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		if candidateIndex >= sessionIPCandidateLimit {
+			staleIPs = append(staleIPs, candidateIP)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return err
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	for _, staleIP := range staleIPs {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM account_session_ips WHERE domain=? AND email=? AND client_ip=?`, domain, email, staleIP); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // Sending limits and challenge replacement commit together, even when delivery is deferred.

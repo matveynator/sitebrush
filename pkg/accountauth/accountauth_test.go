@@ -3,6 +3,7 @@ package accountauth
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	_ "modernc.org/sqlite"
 	"net/http/httptest"
 	"path/filepath"
@@ -26,6 +27,32 @@ func testDatabase(t *testing.T) *sql.DB {
 	}
 	return db
 }
+
+func TestSessionIPCandidatesStayBounded(t *testing.T) {
+	database := testDatabase(t)
+	for candidateIndex := 1; candidateIndex <= sessionIPCandidateLimit+12; candidateIndex++ {
+		transaction, err := database.Begin()
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = Session(context.Background(), transaction, "example.org", "owner@example.org", fmt.Sprintf("10.0.0.%d", candidateIndex), time.Now().Add(time.Duration(candidateIndex)*time.Second))
+		if err != nil {
+			_ = transaction.Rollback()
+			t.Fatal(err)
+		}
+		if err := transaction.Commit(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var candidateCount int
+	if err := database.QueryRow(`SELECT COUNT(1) FROM account_session_ips`).Scan(&candidateCount); err != nil {
+		t.Fatal(err)
+	}
+	if candidateCount != sessionIPCandidateLimit {
+		t.Fatalf("stored %d session IP candidates, want %d", candidateCount, sessionIPCandidateLimit)
+	}
+}
+
 func transact(t *testing.T, db *sql.DB, call func(*sql.Tx) (Outcome, error)) Outcome {
 	t.Helper()
 	tx, err := db.Begin()

@@ -6059,6 +6059,14 @@ func TestPagePasswordProtectionAppliesToLoggedInAdmin(t *testing.T) {
 	if _, err := rawDB.Exec(`INSERT INTO pages(domain,path,title,html,published) VALUES(?,?,?,?,1)`, "localhost", "/admin-secret", "Admin Secret", "<html><body>admin draft secret</body></html>"); err != nil {
 		t.Fatalf("insert page: %v", err)
 	}
+	if _, err := rawDB.Exec(`INSERT INTO admin_ip_policies(domain,email,enabled_at) VALUES(?,?,?)`, "localhost", "admin@example.com", time.Now().Unix()); err != nil {
+		t.Fatalf("enable administrator IP policy: %v", err)
+	}
+	for _, allowedIP := range []string{"127.0.0.1", "198.51.100.42"} {
+		if _, err := rawDB.Exec(`INSERT INTO admin_allowed_ips(domain,email,client_ip,added_at) VALUES(?,?,?,?)`, "localhost", "admin@example.com", allowedIP, time.Now().Unix()); err != nil {
+			t.Fatalf("allow administrator IP %s: %v", allowedIP, err)
+		}
+	}
 	application.setPagePasswordRule(context.Background(), "localhost", "/admin-secret", "secret")
 
 	adminSessionCookie := newAdminSessionCookie(t, application, "admin@example.com")
@@ -7234,6 +7242,14 @@ func TestProfilePasswordCodeAttemptsEscalateToBlock(t *testing.T) {
 	_, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "admin@example.com", "old")
 	if err != nil {
 		t.Fatalf("insert user: %v", err)
+	}
+	if _, err := rawDB.Exec(`INSERT INTO admin_ip_policies(domain,email,enabled_at) VALUES(?,?,?)`, "localhost", "admin@example.com", time.Now().Unix()); err != nil {
+		t.Fatalf("enable administrator IP policy: %v", err)
+	}
+	for _, allowedIP := range []string{"192.0.2.1", "198.51.100.77"} {
+		if _, err := rawDB.Exec(`INSERT INTO admin_allowed_ips(domain,email,client_ip,added_at) VALUES(?,?,?,?)`, "localhost", "admin@example.com", allowedIP, time.Now().Unix()); err != nil {
+			t.Fatalf("allow administrator IP %s: %v", allowedIP, err)
+		}
 	}
 	form := url.Values{}
 	form.Set("email", "admin@example.com")
@@ -10657,7 +10673,7 @@ func TestPublicTrialFormUsesUnifiedCopyDialog(t *testing.T) {
 		"progressReadyFallbackTimer = window.setTimeout(startRequestOnce, 1000)",
 		"if (!readyCallbackWasCalled)",
 		"startRequestOnce()",
-		"if (previewPayload.single_page_required)",
+		"const singlePageRequired = Boolean(previewPayload.single_page_required)",
 		"wholeSiteElement.checked = false",
 	} {
 		if !strings.Contains(script, expectedFragment) {
@@ -10884,7 +10900,7 @@ func TestExternalSiteImportPrimaryActionsUseThemeStyles(t *testing.T) {
 		"setCopySiteStatus(statusElement, previewError.message",
 		"cancelButtonElement.classList.toggle('SiteBrushCopySiteContinueButton', finishImportMode)",
 		"continueButtonElement.classList.toggle('SiteBrushCopySiteContinueButton', primaryAction)",
-		"continueButtonElement.textContent = textFromConfig(configuration, 'retryRemaining', 'Retry remaining');\n      setContinueButtonPrimaryAction(false)",
+		"continueButtonElement.textContent = resumeImportID !== ''\n        ? textFromConfig(configuration, 'continueImportPages', 'Continue import')\n        : textFromConfig(configuration, 'retryRemaining', 'Retry remaining');\n      setContinueButtonPrimaryAction(false)",
 	} {
 		if !strings.Contains(script, expectedFragment) {
 			t.Fatalf("external site import script does not contain %q", expectedFragment)
