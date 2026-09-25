@@ -15542,7 +15542,7 @@ func TestPasswordPromptPreventsIndexing(t *testing.T) {
 }
 
 
-// sitebrush coverage
+// BEGIN sitebrush coverage tests.
 
 type sqliteCodedError int
 
@@ -15721,8 +15721,9 @@ func TestCoverageProfileCodeConfirmationTransaction(t *testing.T) {
 	}
 }
 
+// END sitebrush coverage tests.
 
-// account mutation attack
+// BEGIN account mutation attack tests.
 
 func TestAuthAttackConcurrentEmailChangeConfirmationAppliesOnce(t *testing.T) {
 	application, database := newTestApplication(t)
@@ -15857,8 +15858,9 @@ func TestAuthAttackConfirmationURLUsesRoutedHostAndTrustedProxyScheme(t *testing
 	}
 }
 
+// END account mutation attack tests.
 
-// admin ip allowlist
+// BEGIN admin ip allowlist tests.
 
 func TestAdminIPAllowlistBootstrapsOnceAndRejectsOtherAddresses(t *testing.T) {
 	application, database := newTestApplication(t)
@@ -16206,8 +16208,9 @@ func TestCanonicalAccountIPNormalizesMappedIPv4(t *testing.T) {
 	}
 }
 
+// END admin ip allowlist tests.
 
-// admin origin security
+// BEGIN admin origin security tests.
 
 func TestSecurityBoundaryAuthenticatedMutationsRejectHostileOrigin(t *testing.T) {
 	application, rawDB := newTestApplication(t)
@@ -16268,8 +16271,9 @@ func TestSecurityBoundaryAuthenticatedMutationAllowsSameOrigin(t *testing.T) {
 	}
 }
 
+// END admin origin security tests.
 
-// backup import adversarial security
+// BEGIN backup import adversarial security tests.
 
 func backupZIPForSecurityTest(t *testing.T, backup domainBackup) *zip.Reader {
 	t.Helper()
@@ -16387,8 +16391,9 @@ func TestSecurityBoundaryBackupImportFailsClosedOnAccessRuleWriteError(t *testin
 	}
 }
 
+// END backup import adversarial security tests.
 
-// channel lifecycle security
+// BEGIN channel lifecycle security tests.
 
 func TestSecurityBoundaryGlobalSyncStopsWhenSignalChannelCloses(t *testing.T) {
 	stop := make(chan struct{})
@@ -16411,8 +16416,9 @@ func TestSecurityBoundaryGlobalSyncStopsWhenSignalChannelCloses(t *testing.T) {
 	}
 }
 
+// END channel lifecycle security tests.
 
-// file upload security
+// BEGIN file upload security tests.
 
 func TestSecurityBoundaryFileUploadRejectsBodyLargerThanAvailableStorage(t *testing.T) {
 	application, rawDB := newTestApplication(t)
@@ -16500,8 +16506,9 @@ func TestSecurityBoundaryFileUploadStreamsContentWithoutOriginalName(t *testing.
 	}
 }
 
+// END file upload security tests.
 
-// profile csrf security
+// BEGIN profile csrf security tests.
 
 func TestSecurityBoundaryProfileSensitiveActionsRequireCSRF(t *testing.T) {
 	application, rawDB := newTestApplication(t)
@@ -16547,8 +16554,9 @@ func TestSecurityBoundaryProfileSensitiveActionsRequireCSRF(t *testing.T) {
 	}
 }
 
+// END profile csrf security tests.
 
-// security gap closure
+// BEGIN security gap closure tests.
 
 func TestSecurityBoundaryClientIPAddressIgnoresForwardingHeadersFromPublicPeer(t *testing.T) {
 	request := httptest.NewRequest(http.MethodGet, "http://example.com/", nil)
@@ -16654,8 +16662,9 @@ func TestSecurityBoundaryHostingSnapshotRejectsOversizedBody(t *testing.T) {
 	}
 }
 
+// END security gap closure tests.
 
-// securitysync ingress security
+// BEGIN securitysync ingress security tests.
 
 func TestSecurityBoundarySecuritySignalCannotForgeQuorumWithEmbeddedInstallationIDs(t *testing.T) {
 	application, _ := newTestApplication(t)
@@ -16714,8 +16723,9 @@ func TestSecurityBoundarySecuritySignalCannotForgeQuorumWithEmbeddedInstallation
 	}
 }
 
+// END securitysync ingress security tests.
 
-// template isolation attack
+// BEGIN template isolation attack tests.
 
 func TestAdminWebAttackTemplatePropagationStaysWithinSourceSite(t *testing.T) {
 	for _, synchronizeClasses := range []bool{false, true} {
@@ -16796,3 +16806,6 @@ func insertTemplateAttackPage(database *sql.DB, domain, path, title, html string
 		domain, len(html), len(html), 0, 0, len(html), 1<<30, time.Now().UTC().Format(time.RFC3339))
 	return err
 }
+
+// END template isolation attack tests.
+
