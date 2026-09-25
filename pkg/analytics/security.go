@@ -13,6 +13,7 @@ type RequestObservation struct {
 	IP, Path, Query, Method, Agent, Language, Country, City string
 	Status                                                  int
 	Bytes                                                   int64
+	Blocked, ServerLoadHigh                                 bool
 	Trusted, IndexingCrawler                                bool
 }
 type Probe struct {
@@ -38,6 +39,10 @@ type SecurityState struct {
 	Incidents        []Incident
 	Groups           map[string]*RequestGroup
 	EventBuckets     map[string]*SecurityEventBucket
+	ActivityHours    map[string]int
+	ActivityDays     map[string]int
+	ActivityTypes    map[string]map[string]int
+	ActivitySeverity map[string]int
 	Windows          map[string]*RequestWindow `json:"-"`
 	Incomplete       bool
 }
@@ -58,6 +63,10 @@ type RequestWindow struct {
 type SecurityReport struct {
 	Incidents                    []Incident
 	Groups                       []RequestGroup
+	ActivityHours                map[string]int
+	ActivityDays                 map[string]int
+	ActivityTypes                map[string]map[string]int
+	ActivitySeverity             map[string]int
 	EventHours                   [24]int
 	Countries, Types             []SecurityDimension
 	Requests, Errors, Suspicious int
@@ -100,6 +109,9 @@ func ProbeCategory(pathname, query string) string {
 	}
 	if strings.Contains(decoded, "../") || strings.Contains(decoded, "..\\") {
 		return "traversal"
+	}
+	if strings.HasPrefix(decoded, "/_sitebrush/") && decoded != "/_sitebrush/analytics" || strings.Contains(decoded, "sitebrush.db") || strings.HasPrefix(decoded, "/.sitebrush/") {
+		return "sitebrush-exploit"
 	}
 	for _, token := range []string{"/.git", "/.svn", "/.hg"} {
 		if decoded == token || strings.HasPrefix(decoded, token+"/") {
@@ -186,6 +198,8 @@ func (state *SecurityState) Record(request RequestObservation) string {
 	if category != "" {
 		state.recordIncident(request, category, class)
 		state.recordSecurityEvent(request, category)
+	} else {
+		state.recordSecurityActivity(request, "")
 	}
 	agent := class
 	if class != "unknown" {
@@ -229,8 +243,16 @@ func (state *SecurityState) recordSecurityEvent(request RequestObservation, cate
 	if country == "" {
 		country = "unknown"
 	}
-	date := dayKey(request.Time)
-	hour := request.Time.Hour()
+	date := request.Time.UTC().Format("2006-01-02")
+	hour := request.Time.UTC().Hour()
+	state.recordSecurityActivity(request, category)
+	if state.ActivityTypes == nil {
+		state.ActivityTypes = make(map[string]map[string]int)
+	}
+	if state.ActivityTypes[date] == nil {
+		state.ActivityTypes[date] = make(map[string]int)
+	}
+	state.ActivityTypes[date][category]++
 	key := strings.Join([]string{date, fmt.Sprintf("%02d", hour), country, category}, "\x1f")
 	bucket := state.EventBuckets[key]
 	if bucket == nil {
@@ -242,6 +264,36 @@ func (state *SecurityState) recordSecurityEvent(request RequestObservation, cate
 		state.EventBuckets[key] = bucket
 	}
 	bucket.Count++
+}
+
+func (state *SecurityState) recordSecurityActivity(request RequestObservation, category string) {
+	date := request.Time.UTC().Format("2006-01-02")
+	hour := request.Time.UTC().Hour()
+	if state.ActivityHours == nil {
+		state.ActivityHours = make(map[string]int)
+	}
+	if state.ActivityDays == nil {
+		state.ActivityDays = make(map[string]int)
+	}
+	state.ActivityHours[date+"T"+fmt.Sprintf("%02d", hour)]++
+	state.ActivityDays[date]++
+	if state.ActivitySeverity == nil {
+		state.ActivitySeverity = make(map[string]int)
+	}
+	severity := 1
+	blocked := request.Blocked || (request.Status >= 400 && request.Status < 500)
+	if category != "" && blocked {
+		severity = 2
+	}
+	if category != "" && !blocked {
+		severity = 3
+	}
+	if category != "" && request.ServerLoadHigh {
+		severity = 4
+	}
+	if previous, exists := state.ActivitySeverity[date]; !exists || severity > previous {
+		state.ActivitySeverity[date] = severity
+	}
 }
 
 func (state *SecurityState) recordIncident(request RequestObservation, category, class string) {
@@ -301,6 +353,27 @@ func (state *SecurityState) Prune(now time.Time) {
 			delete(state.EventBuckets, key)
 		}
 	}
+	activityCutoff := now.UTC().AddDate(0, 0, -364).Format("2006-01-02")
+	for date := range state.ActivityDays {
+		if date < activityCutoff {
+			delete(state.ActivityDays, date)
+		}
+	}
+	for hour := range state.ActivityHours {
+		if len(hour) < 10 || hour[:10] < activityCutoff {
+			delete(state.ActivityHours, hour)
+		}
+	}
+	for date := range state.ActivityTypes {
+		if date < activityCutoff {
+			delete(state.ActivityTypes, date)
+		}
+	}
+	for date := range state.ActivitySeverity {
+		if date < activityCutoff {
+			delete(state.ActivitySeverity, date)
+		}
+	}
 	for key, window := range state.Windows {
 		if now.Sub(window.Last) > time.Minute {
 			delete(state.Windows, key)
@@ -308,7 +381,18 @@ func (state *SecurityState) Prune(now time.Time) {
 	}
 }
 func (state *SecurityState) Report(now time.Time, days int) SecurityReport {
-	result := SecurityReport{Incomplete: state.Incomplete}
+	activitySeverity := make(map[string]int, len(state.ActivitySeverity)+len(state.ActivityDays))
+	for date, severity := range state.ActivitySeverity {
+		activitySeverity[date] = severity
+	}
+	for date, count := range state.ActivityDays {
+		if count > 0 {
+			if _, found := activitySeverity[date]; !found {
+				activitySeverity[date] = 2
+			}
+		}
+	}
+	result := SecurityReport{Incomplete: state.Incomplete, ActivityHours: state.ActivityHours, ActivityDays: state.ActivityDays, ActivityTypes: state.ActivityTypes, ActivitySeverity: activitySeverity}
 	cutoff := dayKey(now.AddDate(0, 0, -days+1))
 	securityCutoff := dayKey(now.AddDate(0, 0, -29))
 	countryCounts := map[string]int{}
@@ -349,6 +433,9 @@ func (state *SecurityState) Report(now time.Time, days int) SecurityReport {
 		return result.Countries[i].Count > result.Countries[j].Count
 	})
 	sort.Slice(result.Types, func(i, j int) bool {
+		if result.Types[i].Label == "sitebrush-exploit" || result.Types[j].Label == "sitebrush-exploit" {
+			return result.Types[i].Label == "sitebrush-exploit" && result.Types[j].Label != "sitebrush-exploit"
+		}
 		if result.Types[i].Count == result.Types[j].Count {
 			return result.Types[i].Label < result.Types[j].Label
 		}

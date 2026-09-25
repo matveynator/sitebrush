@@ -361,6 +361,7 @@
     grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: 16px;
     width: min(100%, 1120px);
+    margin-inline: auto;
 }
 
 .technical-page .profile-form-grid .profile-form {
@@ -3120,7 +3121,7 @@ body.technical-page.analytics-page {
 }
 
 /* Email confirmation follows the same visual language as account forms. */
-.technical-page .profile-email-change { margin-block: 1.5rem; }
+.technical-page .profile-email-change { width: min(100%, 1120px); margin: 1.5rem auto; }
 .technical-page .profile-email-change h2 { font-size: 1.25rem; margin-block: 0 1rem; }
 .technical-page .profile-email-steps { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 280px), 1fr)); gap: 1rem; list-style: none; padding: 0; }
 .technical-page .profile-email-step { display: flex; align-items: flex-start; gap: .85rem; padding: 1.25rem; border: 1px solid var(--theme-border); border-radius: var(--theme-radius); background: var(--theme-card); min-width: 0; }
@@ -3299,6 +3300,9 @@ body.technical-page.analytics-page {
     display: grid;
     gap: 10px;
 }
+.technical-page .profile-account-more { display: grid; gap: 10px; }
+.technical-page .profile-account-more > summary { width: fit-content; color: var(--theme-primary); cursor: pointer; }
+.technical-page .profile-account-more[open] > summary { margin-bottom: 2px; }
 .technical-page .profile-account-list .auth-trusted-row {
     margin: 0;
     padding: 12px;

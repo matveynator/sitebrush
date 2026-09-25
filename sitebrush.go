@@ -462,12 +462,11 @@ type adminAllowedIPView struct {
 	GeoIPAttribution template.HTML
 }
 
-type profileTrustedIPView struct {
-	IP                            string
-	Confirmed, LastLogin, Expires time.Time
-	Current                       bool
-	Location                      string
-	GeoIPAttribution              template.HTML
+type profileSessionView struct {
+	Token, IP, Location, Device, OperatingSystem, Browser, Language string
+	CreatedAt                                                       time.Time
+	Current                                                         bool
+	GeoIPAttribution                                                template.HTML
 }
 
 type profileIPGeographyView struct {
@@ -512,6 +511,51 @@ func (a *App) profileIPGeography(ctx context.Context, ipRule string, translation
 		Location:         strings.Join(locationParts, ", "),
 		GeoIPAttribution: template.HTML(geoip.AttributionHTML),
 	}
+}
+
+func describeProfileUserAgent(userAgent string, translations map[string]string) (string, string, string) {
+	userAgent = strings.ToLower(userAgent)
+	device := translations["auth_device_computer"]
+	if strings.Contains(userAgent, "ipad") || strings.Contains(userAgent, "tablet") || (strings.Contains(userAgent, "android") && !strings.Contains(userAgent, "mobile")) {
+		device = translations["auth_device_tablet"]
+	} else if strings.Contains(userAgent, "mobile") || strings.Contains(userAgent, "iphone") {
+		device = translations["auth_device_phone"]
+	}
+	operatingSystem := translations["auth_device_unknown_os"]
+	switch {
+	case strings.Contains(userAgent, "windows"):
+		operatingSystem = "Windows"
+	case strings.Contains(userAgent, "iphone") || strings.Contains(userAgent, "ipad") || strings.Contains(userAgent, "ios"):
+		operatingSystem = "iOS"
+	case strings.Contains(userAgent, "android"):
+		operatingSystem = "Android"
+	case strings.Contains(userAgent, "mac os") || strings.Contains(userAgent, "macintosh"):
+		operatingSystem = "macOS"
+	case strings.Contains(userAgent, "linux"):
+		operatingSystem = "Linux"
+	}
+	browser := translations["auth_device_unknown_browser"]
+	switch {
+	case strings.Contains(userAgent, "edg/"):
+		browser = "Microsoft Edge"
+	case strings.Contains(userAgent, "opr/") || strings.Contains(userAgent, "opera"):
+		browser = "Opera"
+	case strings.Contains(userAgent, "firefox") || strings.Contains(userAgent, "fxios"):
+		browser = "Firefox"
+	case strings.Contains(userAgent, "crios") || strings.Contains(userAgent, "chrome"):
+		browser = "Chrome"
+	case strings.Contains(userAgent, "safari"):
+		browser = "Safari"
+	}
+	return device, operatingSystem, browser
+}
+
+func profileSessionLanguage(languageCode string) string {
+	languageCode = strings.TrimSpace(strings.ToLower(languageCode))
+	if languageCode == "" {
+		return "Unknown"
+	}
+	return languageCode
 }
 
 func profileEmailChange(currentEmail, nextEmail string, step int) profileEmailChangeView {
@@ -2293,9 +2337,18 @@ type siteAnalyticsEvent struct {
 	GeoSource                    string
 	VisitorID                    string
 	TrustedPeer, IndexingCrawler bool
+	SecurityBlocked              bool
 	IsAdmin                      bool
 	IsAsset                      bool
 	IsController                 bool
+}
+
+type sitebrushSecurityHostLoad struct {
+	ObservedAt     time.Time
+	CPUPercent     float64
+	LoadPercent    float64
+	NetworkPercent float64
+	NetworkKnown   bool
 }
 
 type analyticsPreparedReport struct {
@@ -2383,6 +2436,17 @@ type analyticsPageData struct {
 	MapJSON        template.JS
 	MapAttribution template.HTML
 	Sections       []analyticsReportSection
+}
+
+type analyticsActivitySession struct {
+	HourKey                                         string
+	Started                                         time.Time
+	IP, Landing, Browser, OperatingSystem, Language string
+}
+
+type analyticsSecurityActivityIncident struct {
+	HourKey string
+	browserstats.Incident
 }
 
 type analyticsMetricCard struct {
@@ -3378,7 +3442,7 @@ func (a *App) analyticsMiddleware(next http.Handler) http.Handler {
 			}
 		}
 		if a.securityAnalytics != nil && r.URL.Path != "/_sitebrush/analytics" && len(a.securityAnalytics) < cap(a.securityAnalytics) {
-			securityEvent := siteAnalyticsEvent{Bytes: writer.bytesWritten, Domain: a.analyticsEventDomain(r, ""), Path: analyticsBoundedString(r.URL.EscapedPath(), 512), Query: analyticsBoundedString(r.URL.RawQuery, 2048), Method: r.Method, StatusCode: writer.statusCode, OccurredAt: startedAt.UTC(), RemoteAddress: analyticsBoundedString(r.RemoteAddr, 64), Forwarded: analyticsBoundedString(r.Header.Get("Forwarded"), 256), ForwardedFor: analyticsBoundedString(r.Header.Get("X-Forwarded-For"), 256), UserAgent: analyticsBoundedString(r.UserAgent(), 256), AcceptLanguage: analyticsBoundedString(r.Header.Get("Accept-Language"), 64), TrustedPeer: sitebrushPeerRequestTrusted(r, startedAt.UTC()), IndexingCrawler: httpsecurity.IsIndexingCrawlerRequest(r)}
+			securityEvent := siteAnalyticsEvent{Bytes: writer.bytesWritten, Domain: a.analyticsEventDomain(r, ""), Path: analyticsBoundedString(r.URL.EscapedPath(), 512), Query: analyticsBoundedString(r.URL.RawQuery, 2048), Method: r.Method, StatusCode: writer.statusCode, OccurredAt: startedAt.UTC(), RemoteAddress: analyticsBoundedString(r.RemoteAddr, 64), Forwarded: analyticsBoundedString(r.Header.Get("Forwarded"), 256), ForwardedFor: analyticsBoundedString(r.Header.Get("X-Forwarded-For"), 256), UserAgent: analyticsBoundedString(r.UserAgent(), 256), AcceptLanguage: analyticsBoundedString(r.Header.Get("Accept-Language"), 64), TrustedPeer: sitebrushPeerRequestTrusted(r, startedAt.UTC()), IndexingCrawler: httpsecurity.IsIndexingCrawlerRequest(r), SecurityBlocked: writer.Header().Get("X-Sitebrush-Security-Incident") != "" || writer.statusCode == http.StatusTooManyRequests || writer.statusCode == http.StatusForbidden}
 			select {
 			case a.securityAnalytics <- securityEvent:
 			default:
@@ -4277,6 +4341,9 @@ func (a *App) runSecurityAnalytics(stop <-chan struct{}) {
 	go a.browserAnalyticsMaintenanceDomains(stop, maintenanceLists)
 	var maintenance []string
 	pruned := map[string]string{}
+	hostLoadUpdates := make(chan sitebrushSecurityHostLoad, 1)
+	go runSitebrushSecurityHostLoadMonitor(stop, hostLoadUpdates)
+	hostLoadHistory := make([]sitebrushSecurityHostLoad, 0, 12)
 	defer ticker.Stop()
 	save := func(domain string, cancellation <-chan struct{}) bool {
 		state := states[domain]
@@ -4354,6 +4421,11 @@ func (a *App) runSecurityAnalytics(stop <-chan struct{}) {
 			} else if len(lost) < 64 {
 				lost[domain] = true
 			}
+		case hostLoad := <-hostLoadUpdates:
+			hostLoadHistory = append(hostLoadHistory, hostLoad)
+			if len(hostLoadHistory) > 12 {
+				hostLoadHistory = append([]sitebrushSecurityHostLoad(nil), hostLoadHistory[len(hostLoadHistory)-12:]...)
+			}
 		case event := <-a.securityAnalytics:
 			domain := a.resolveAnalyticsDomain(event.Domain, resolutions)
 			if domain == "" {
@@ -4373,7 +4445,7 @@ func (a *App) runSecurityAnalytics(stop <-chan struct{}) {
 				}
 				cancel()
 			}
-			category := state.Record(browserstats.RequestObservation{Time: event.OccurredAt, IP: address, Path: event.Path, Query: event.Query, Method: event.Method, Status: event.StatusCode, Bytes: event.Bytes, Agent: event.UserAgent, Language: analyticsLanguageLabel(event.AcceptLanguage), Country: country, City: city, Trusted: event.TrustedPeer, IndexingCrawler: event.IndexingCrawler})
+			category := state.Record(browserstats.RequestObservation{Time: event.OccurredAt, IP: address, Path: event.Path, Query: event.Query, Method: event.Method, Status: event.StatusCode, Bytes: event.Bytes, Agent: event.UserAgent, Language: analyticsLanguageLabel(event.AcceptLanguage), Country: country, City: city, Blocked: event.SecurityBlocked, ServerLoadHigh: sitebrushSecurityLoadWasHigh(hostLoadHistory, event.OccurredAt), Trusted: event.TrustedPeer, IndexingCrawler: event.IndexingCrawler})
 			if category != "" && a.attackGuard != nil {
 				description := securityIncidentDescription(category, event.Path, event.StatusCode)
 				block, alreadyBlocked := a.attackGuard.Check(address, event.OccurredAt)
@@ -4422,6 +4494,150 @@ func (a *App) runSecurityAnalytics(stop <-chan struct{}) {
 			}
 		}
 	}
+}
+
+type sitebrushNetworkCounters struct {
+	receivedBytes, sentBytes uint64
+	capacityBytesPerSecond   float64
+}
+
+func runSitebrushSecurityHostLoadMonitor(stop <-chan struct{}, updates chan sitebrushSecurityHostLoad) {
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+	previousCounters, previousKnown := readSitebrushNetworkCounters()
+	previousAt := time.Now().UTC()
+	for {
+		select {
+		case <-stop:
+			return
+		case <-ticker.C:
+			observedAt := time.Now().UTC()
+			cpuPercent, loadAverage := hostingSnapshotHourlySystemMetrics()
+			loadPercent := 0.0
+			if cores := runtime.NumCPU(); cores > 0 {
+				loadPercent = loadAverage / float64(cores) * 100
+			}
+			currentCounters, currentKnown := readSitebrushNetworkCounters()
+			sample := sitebrushSecurityHostLoad{ObservedAt: observedAt, CPUPercent: cpuPercent, LoadPercent: loadPercent}
+			if currentKnown && previousKnown && currentCounters.capacityBytesPerSecond > 0 {
+				elapsedSeconds := observedAt.Sub(previousAt).Seconds()
+				sample.NetworkPercent, sample.NetworkKnown = sitebrushNetworkLoadPercent(
+					previousCounters,
+					currentCounters,
+					elapsedSeconds,
+				)
+			}
+			previousCounters, previousKnown, previousAt = currentCounters, currentKnown, observedAt
+			select {
+			case updates <- sample:
+			default:
+				select {
+				case <-updates:
+				default:
+				}
+				select {
+				case updates <- sample:
+				default:
+				}
+			}
+		}
+	}
+}
+
+func sitebrushNetworkLoadPercent(previous, current sitebrushNetworkCounters, elapsedSeconds float64) (float64, bool) {
+	if elapsedSeconds <= 0 || current.capacityBytesPerSecond <= 0 || current.receivedBytes < previous.receivedBytes || current.sentBytes < previous.sentBytes {
+		return 0, false
+	}
+	receivedRate := float64(current.receivedBytes-previous.receivedBytes) / elapsedSeconds
+	sentRate := float64(current.sentBytes-previous.sentBytes) / elapsedSeconds
+	if sentRate > receivedRate {
+		receivedRate = sentRate
+	}
+	return receivedRate / current.capacityBytesPerSecond * 100, true
+}
+
+func readSitebrushNetworkCounters() (sitebrushNetworkCounters, bool) {
+	if runtime.GOOS != "linux" {
+		return sitebrushNetworkCounters{}, false
+	}
+	contents, err := os.ReadFile("/proc/net/dev")
+	if err != nil {
+		return sitebrushNetworkCounters{}, false
+	}
+	interfaceCounters := parseSitebrushNetworkInterfaceCounters(string(contents))
+	interfaces, err := os.ReadDir("/sys/class/net")
+	if err != nil {
+		return sitebrushNetworkCounters{}, false
+	}
+	counters := sitebrushNetworkCounters{}
+	knownInterfaces := 0
+	for _, networkInterface := range interfaces {
+		interfaceName := networkInterface.Name()
+		if interfaceName == "lo" {
+			continue
+		}
+		interfaceCountersForName, found := interfaceCounters[interfaceName]
+		if !found {
+			continue
+		}
+		speedText, speedErr := os.ReadFile(filepath.Join("/sys/class/net", interfaceName, "speed"))
+		if speedErr != nil {
+			continue
+		}
+		speedMbps, parseErr := strconv.ParseFloat(strings.TrimSpace(string(speedText)), 64)
+		if parseErr != nil || speedMbps <= 0 {
+			continue
+		}
+		counters.receivedBytes += interfaceCountersForName.receivedBytes
+		counters.sentBytes += interfaceCountersForName.sentBytes
+		counters.capacityBytesPerSecond += speedMbps * 1_000_000 / 8
+		knownInterfaces++
+	}
+	return counters, knownInterfaces > 0
+}
+
+type sitebrushNetworkInterfaceCounters struct {
+	receivedBytes uint64
+	sentBytes     uint64
+}
+
+func parseSitebrushNetworkInterfaceCounters(contents string) map[string]sitebrushNetworkInterfaceCounters {
+	interfaceCounters := make(map[string]sitebrushNetworkInterfaceCounters)
+	for _, line := range strings.Split(contents, "\n")[2:] {
+		parts := strings.SplitN(line, ":", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		interfaceName := strings.TrimSpace(parts[0])
+		fields := strings.Fields(parts[1])
+		if interfaceName == "" || len(fields) < 9 {
+			continue
+		}
+		receivedBytes, receiveErr := strconv.ParseUint(fields[0], 10, 64)
+		sentBytes, sendErr := strconv.ParseUint(fields[8], 10, 64)
+		if receiveErr != nil || sendErr != nil {
+			continue
+		}
+		interfaceCounters[interfaceName] = sitebrushNetworkInterfaceCounters{
+			receivedBytes: receivedBytes,
+			sentBytes:     sentBytes,
+		}
+	}
+	return interfaceCounters
+}
+
+func sitebrushSecurityLoadWasHigh(history []sitebrushSecurityHostLoad, eventAt time.Time) bool {
+	for index := len(history) - 1; index >= 0; index-- {
+		sample := history[index]
+		if sample.ObservedAt.After(eventAt) {
+			continue
+		}
+		if eventAt.Sub(sample.ObservedAt) > 15*time.Second {
+			return false
+		}
+		return sample.CPUPercent >= 95 || sample.LoadPercent >= 100 || sample.NetworkKnown && sample.NetworkPercent >= 90
+	}
+	return false
 }
 
 func securityIncidentDescription(category, requestPath string, statusCode int) string {
@@ -6307,6 +6523,23 @@ func analyticsSelectedTab(r *http.Request) string {
 	return "analytics"
 }
 
+func analyticsSecurityTypeAxes() []string {
+	return []string{
+		"rapid-crawl",
+		"enumeration",
+		"secret",
+		"cms",
+		"admin-discovery",
+		"authentication-failures",
+		"repository",
+		"source-backup",
+		"sitebrush-exploit",
+		"traversal",
+		"injection",
+		"scanner-client",
+	}
+}
+
 func (a *App) analyticsPage(w http.ResponseWriter, r *http.Request) {
 	if !a.isAdminRequest(r) {
 		if !a.hasAdmin(r.Context(), a.siteDomain(r.Context(), r)) {
@@ -6371,7 +6604,9 @@ func (a *App) analyticsPage(w http.ResponseWriter, r *http.Request) {
 	if loadedSecurity.Err == nil {
 		state := browserstats.SecurityState{}
 		if json.Unmarshal([]byte(loadedSecurity.Text), &state) == nil {
-			security = state.Report(time.Now().UTC(), 90)
+			securityNow := time.Now().UTC()
+			state.Prune(securityNow)
+			security = state.Report(securityNow, 365)
 		}
 	}
 	securityIncidents := make(map[string]browserstats.Incident, len(security.Incidents))
@@ -6422,17 +6657,32 @@ func (a *App) analyticsPage(w http.ResponseWriter, r *http.Request) {
 			serverLocalHours[hour] = row.Count
 		}
 	}
-	localHoursJSON, _ := json.Marshal(experience.LocalHours)
 	serverHoursJSON, _ := json.Marshal(serverLocalHours)
 	securityHoursJSON, _ := json.Marshal(security.EventHours)
 	securityCountriesJSON, _ := json.Marshal(security.Countries)
 	securityTypesJSON, _ := json.Marshal(security.Types)
+	activityDaysJSON, _ := json.Marshal(experience.ActivityDays)
+	activityHoursJSON, _ := json.Marshal(experience.ActivityHours)
+	securityActivityDaysJSON, _ := json.Marshal(security.ActivityDays)
+	securityActivityHoursJSON, _ := json.Marshal(security.ActivityHours)
+	securityActivityTypesJSON, _ := json.Marshal(security.ActivityTypes)
+	securityActivitySeverityJSON, _ := json.Marshal(security.ActivitySeverity)
+	activitySessions := make([]analyticsActivitySession, 0, len(experience.Recent))
+	for _, session := range experience.Recent {
+		activitySessions = append(activitySessions, analyticsActivitySession{HourKey: session.Started.UTC().Format("2006-01-02T15"), Started: session.Started, IP: session.Address, Landing: session.Landing, Browser: session.Browser, OperatingSystem: session.OS, Language: session.Language})
+	}
+	activitySessionsJSON, _ := json.Marshal(activitySessions)
+	securityActivityIncidents := make([]analyticsSecurityActivityIncident, 0, len(security.Incidents))
+	for _, incident := range security.Incidents {
+		securityActivityIncidents = append(securityActivityIncidents, analyticsSecurityActivityIncident{HourKey: incident.Last.UTC().Format("2006-01-02T15"), Incident: incident})
+	}
+	securityIncidentsJSON, _ := json.Marshal(securityActivityIncidents)
 	a.render(w, r, "analytics.html", map[string]any{
 		"ReturnPath":       requestedReturnPath(r),
 		"AnalyticsTab":     selectedTab,
 		"Report":           analyticsReportView(report, translationsForRequest(r)),
 		"BrowserAnalytics": browserDashboard,
-		"Experience":       experience, "ExperienceFilter": filter, "Security": security, "SecurityBlocks": securityBlocks, "SecurityLocalBlocks": securityLocalBlocks, "SecurityGlobalBlocks": securityGlobalBlocks, "SecurityAllowlist": securityAllowlist, "SecurityThrottles": securityThrottles, "SecuritySettings": securitySettings, "GoalsText": strings.Join(goalLines, "\n"), "SessionMapJSON": template.JS(mapJSON), "PeriodOptions": []int{1, 7, 30, 90}, "UnknownGeo": unknownGeo, "ServerRequests": serverRequests, "ServerLocalHours": serverLocalHours, "LocalHoursJSON": template.JS(localHoursJSON), "ServerHoursJSON": template.JS(serverHoursJSON), "SecurityHoursJSON": template.JS(securityHoursJSON), "SecurityCountriesJSON": template.JS(securityCountriesJSON), "SecurityTypesJSON": template.JS(securityTypesJSON), "ServerTimezone": time.Local.String(), "ServerNowRFC3339": serverNow.Format(time.RFC3339), "ServerNowDisplay": serverNow.Format("02 Jan 2006 15:04:05"), "ServerTimezoneOffsetSeconds": serverTimezoneOffsetSeconds,
+		"Experience":       experience, "ExperienceFilter": filter, "Security": security, "SecurityTypeAxes": analyticsSecurityTypeAxes(), "SecurityBlocks": securityBlocks, "SecurityLocalBlocks": securityLocalBlocks, "SecurityGlobalBlocks": securityGlobalBlocks, "SecurityAllowlist": securityAllowlist, "SecurityThrottles": securityThrottles, "SecuritySettings": securitySettings, "GoalsText": strings.Join(goalLines, "\n"), "SessionMapJSON": template.JS(mapJSON), "PeriodOptions": []int{1, 7, 30, 90}, "UnknownGeo": unknownGeo, "ServerRequests": serverRequests, "ServerLocalHours": serverLocalHours, "ServerHoursJSON": template.JS(serverHoursJSON), "SecurityHoursJSON": template.JS(securityHoursJSON), "SecurityCountriesJSON": template.JS(securityCountriesJSON), "SecurityTypesJSON": template.JS(securityTypesJSON), "ActivityDaysJSON": template.JS(activityDaysJSON), "ActivityHoursJSON": template.JS(activityHoursJSON), "SecurityActivityDaysJSON": template.JS(securityActivityDaysJSON), "SecurityActivityHoursJSON": template.JS(securityActivityHoursJSON), "SecurityActivityTypesJSON": template.JS(securityActivityTypesJSON), "SecurityActivitySeverityJSON": template.JS(securityActivitySeverityJSON), "ActivitySessionsJSON": template.JS(activitySessionsJSON), "SecurityIncidentsJSON": template.JS(securityIncidentsJSON), "ServerTimezone": time.Local.String(), "ServerNowRFC3339": serverNow.Format(time.RFC3339), "ServerNowDisplay": serverNow.Format("02 Jan 2006 15:04:05"), "ServerTimezoneOffsetSeconds": serverTimezoneOffsetSeconds,
 	})
 }
 
@@ -8558,6 +8808,8 @@ func requiredSiteDatabaseColumns() []siteDatabaseColumnRequirement {
 	return []siteDatabaseColumnRequirement{
 		{"email_confirmations", "attempts", "INTEGER NOT NULL DEFAULT 0"},
 		{"sessions", "client_ip", "TEXT NOT NULL DEFAULT ''"},
+		{"sessions", "user_agent", "TEXT NOT NULL DEFAULT ''"},
+		{"sessions", "language", "TEXT NOT NULL DEFAULT 'en'"},
 		{"sessions", "security_version", "INTEGER NOT NULL DEFAULT 0"},
 		{"sessions", "admin_ip_trust", "INTEGER NOT NULL DEFAULT 1"},
 		{"account_login_codes", "language", "TEXT NOT NULL DEFAULT 'en'"},
@@ -10654,6 +10906,7 @@ func (a *App) renderAccountTOTP(w http.ResponseWriter, r *http.Request, challeng
 }
 
 func (a *App) completeAccountLogin(w http.ResponseWriter, r *http.Request, domain string, outcome accountauth.Outcome, offerPasskey bool) {
+	a.storeProfileSessionDetails(r, outcome.Token)
 	a.clearFailedLoginAttempts(r.Context(), domain, clientIPAddress(r))
 	a.rememberAuthenticatedAdminIP(r, domain, time.Now().UTC())
 	httpsecurity.SetSensitiveCookie(w, r, &http.Cookie{Name: "sitebrush_session", Value: outcome.Token})
@@ -10663,6 +10916,16 @@ func (a *App) completeAccountLogin(w http.ResponseWriter, r *http.Request, domai
 		redirectPath = "/?profile&passkey_offer=1&return_path=" + url.QueryEscape(httpsecurity.LocalRedirectTarget(outcome.Path, "/"))
 	}
 	httpsecurity.RedirectLocal(w, r, redirectPath, http.StatusFound)
+}
+
+func (a *App) storeProfileSessionDetails(r *http.Request, token string) {
+	if token == "" {
+		return
+	}
+	_, err := a.db.ExecContext(r.Context(), `UPDATE sessions SET user_agent=?,language=? WHERE token=?`, analyticsBoundedString(r.UserAgent(), 512), preferredLanguageCode(r.Header.Get("Accept-Language")), token)
+	if err != nil {
+		log.Printf("AUTH session details update failed: %v", err)
+	}
 }
 
 func (a *App) rememberAuthenticatedAdminIP(r *http.Request, domain string, now time.Time) {
@@ -10752,6 +11015,7 @@ func (a *App) finishAccountPasskeyLogin(w http.ResponseWriter, r *http.Request, 
 		_ = json.NewEncoder(w).Encode(map[string]string{"error": translationsForRequest(r)["auth_passkey_failed"]})
 		return
 	}
+	a.storeProfileSessionDetails(r, sessionToken)
 	a.clearFailedLoginAttempts(r.Context(), domain, clientIPAddress(r))
 	a.rememberAuthenticatedAdminIP(r, domain, time.Now().UTC())
 	httpsecurity.SetSensitiveCookie(w, r, &http.Cookie{Name: "sitebrush_session", Value: sessionToken})
@@ -19912,6 +20176,33 @@ func (a *App) profilePage(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+	if r.Method == http.MethodPost && r.FormValue("profile_action") == "revoke_session" {
+		if r.FormValue("account_csrf") == "" || r.FormValue("account_csrf") != accountCSRF(r) {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+		token := strings.TrimSpace(r.FormValue("session_token"))
+		if token == "" {
+			http.Error(w, "invalid session", http.StatusBadRequest)
+			return
+		}
+		result, err := a.db.ExecContext(r.Context(), `DELETE FROM sessions WHERE token=? AND user_email=?`, token, domain+"|"+currentEmail)
+		if err != nil {
+			http.Error(w, "account update unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		if affected, _ := result.RowsAffected(); affected == 0 {
+			http.Error(w, "session not found", http.StatusNotFound)
+			return
+		}
+		if cookie, err := r.Cookie("sitebrush_session"); err == nil && cookie.Value == token {
+			httpsecurity.SetSensitiveCookie(w, r, &http.Cookie{Name: "sitebrush_session", Value: "", Expires: time.Unix(0, 0), MaxAge: -1})
+			httpsecurity.RedirectLocal(w, r, "?login", http.StatusFound)
+			return
+		}
+		httpsecurity.RedirectLocal(w, r, "?profile", http.StatusSeeOther)
+		return
+	}
 	if r.Method == http.MethodPost && (strings.HasPrefix(r.FormValue("profile_action"), "admin_ip_") || strings.HasPrefix(r.FormValue("profile_action"), "admin_stealth_")) {
 		if r.FormValue("account_csrf") == "" || r.FormValue("account_csrf") != accountCSRF(r) {
 			http.Error(w, "forbidden", http.StatusForbidden)
@@ -20253,12 +20544,16 @@ func (a *App) renderProfilePage(w http.ResponseWriter, r *http.Request, email, s
 		codeRecipient = strings.TrimSpace(emailChange.CurrentEmail)
 	}
 	passwordWebmailProvider := webmailProviderForAddress(codeRecipient)
-	trustedIPs := []profileTrustedIPView{}
+	profileSessions := []profileSessionView{}
 	adminIPRules := []string{}
 	adminAllowedIPs := []adminAllowedIPView{}
+	adminAllowedIPMore := []adminAllowedIPView{}
+	profileSessionsMore := []profileSessionView{}
 	adminIPCandidates := []string{}
 	adminIPProtectionEnabled := false
 	adminStealthEnabled := false
+	profileSessionCount := 0
+	adminAllowedIPCount := 0
 	geoIPContext, cancelGeoIPLookups := context.WithTimeout(r.Context(), 350*time.Millisecond)
 	defer cancelGeoIPLookups()
 	geographyByIP := map[string]profileIPGeographyView{}
@@ -20279,26 +20574,29 @@ func (a *App) renderProfilePage(w http.ResponseWriter, r *http.Request, email, s
 		if a.db.QueryRowContext(r.Context(), `SELECT COUNT(1) FROM admin_stealth_modes WHERE domain=? AND email=? AND enabled_at>0`, domain, accountEmail).Scan(&enabled) == nil {
 			adminStealthEnabled = enabled > 0
 		}
-		rows, err := a.db.QueryContext(r.Context(), `SELECT client_ip,confirmed_at,last_login FROM account_trusted_ips WHERE domain=? AND email=? AND last_login>? ORDER BY last_login DESC`, a.siteDomain(r.Context(), r), accountEmail, time.Now().Add(-accountauth.TrustTTL).Unix())
+		rows, err := a.db.QueryContext(r.Context(), `SELECT token,client_ip,created_at,user_agent,language FROM sessions WHERE user_email=? ORDER BY created_at DESC LIMIT 50`, domain+"|"+accountEmail)
 		if err == nil {
 			for rows.Next() {
-				entry := profileTrustedIPView{}
-				var confirmed, last int64
-				if rows.Scan(&entry.IP, &confirmed, &last) != nil {
+				entry := profileSessionView{}
+				var createdAt string
+				if rows.Scan(&entry.Token, &entry.IP, &createdAt, &entry.Browser, &entry.Language) != nil {
 					continue
 				}
-				entry.Confirmed = time.Unix(confirmed, 0).UTC()
-				entry.LastLogin = time.Unix(last, 0).UTC()
-				entry.Expires = entry.LastLogin.Add(accountauth.TrustTTL)
-				entry.Current = entry.IP == accountClientIP(r)
-				trustedIPs = append(trustedIPs, entry)
+				entry.CreatedAt, _ = time.Parse(time.RFC3339, createdAt)
+				entry.Current = false
+				if cookie, cookieErr := r.Cookie("sitebrush_session"); cookieErr == nil {
+					entry.Current = cookie.Value == entry.Token
+				}
+				entry.Device, entry.OperatingSystem, entry.Browser = describeProfileUserAgent(entry.Browser, translations)
+				entry.Language = profileSessionLanguage(entry.Language)
+				profileSessions = append(profileSessions, entry)
 			}
 			rows.Close()
 		}
-		for trustedIPIndex := range trustedIPs {
-			geography := geographyForIP(trustedIPs[trustedIPIndex].IP)
-			trustedIPs[trustedIPIndex].Location = geography.Location
-			trustedIPs[trustedIPIndex].GeoIPAttribution = geography.GeoIPAttribution
+		for sessionIndex := range profileSessions {
+			geography := geographyForIP(profileSessions[sessionIndex].IP)
+			profileSessions[sessionIndex].Location = geography.Location
+			profileSessions[sessionIndex].GeoIPAttribution = geography.GeoIPAttribution
 		}
 		allowedRows, allowedErr := a.db.QueryContext(r.Context(), `SELECT client_ip FROM admin_allowed_ips WHERE domain=? AND email=? ORDER BY added_at,client_ip`, domain, accountEmail)
 		if allowedErr == nil {
@@ -20320,6 +20618,17 @@ func (a *App) renderProfilePage(w http.ResponseWriter, r *http.Request, email, s
 				Location:         geography.Location,
 				GeoIPAttribution: geography.GeoIPAttribution,
 			})
+		}
+		profileSessionCount = len(profileSessions)
+		_ = a.db.QueryRowContext(r.Context(), `SELECT COUNT(1) FROM sessions WHERE user_email=?`, domain+"|"+accountEmail).Scan(&profileSessionCount)
+		adminAllowedIPCount = len(adminAllowedIPs)
+		if len(adminAllowedIPs) > 4 {
+			adminAllowedIPMore = append(adminAllowedIPMore, adminAllowedIPs[4:]...)
+			adminAllowedIPs = adminAllowedIPs[:4]
+		}
+		if len(profileSessions) > 4 {
+			profileSessionsMore = append(profileSessionsMore, profileSessions[4:]...)
+			profileSessions = profileSessions[:4]
 		}
 		candidateRows, candidateErr := a.db.QueryContext(r.Context(), `SELECT client_ip FROM account_session_ips WHERE domain=? AND email=? GROUP BY client_ip ORDER BY MAX(used_at) DESC`, domain, accountEmail)
 		if candidateErr == nil {
@@ -20345,8 +20654,12 @@ func (a *App) renderProfilePage(w http.ResponseWriter, r *http.Request, email, s
 		}
 	}
 	a.render(w, r, "profile.html", map[string]any{
-		"TrustedIPs":                 trustedIPs,
+		"ProfileSessions":            profileSessions,
+		"ProfileSessionsMore":        profileSessionsMore,
+		"ProfileSessionCount":        profileSessionCount,
 		"AdminAllowedIPs":            adminAllowedIPs,
+		"AdminAllowedIPMore":         adminAllowedIPMore,
+		"AdminAllowedIPCount":        adminAllowedIPCount,
 		"AdminIPCandidates":          adminIPCandidates,
 		"AdminIPProtectionEnabled":   adminIPProtectionEnabled,
 		"AdminStealthEnabled":        adminStealthEnabled,
@@ -29201,6 +29514,7 @@ func (a *App) createSessionForDomainWithIPTrust(w http.ResponseWriter, r *http.R
 	if sessionErr != nil {
 		return ""
 	}
+	a.storeProfileSessionDetails(r, token)
 	httpsecurity.SetSensitiveCookie(w, r, &http.Cookie{Name: "sitebrush_session", Value: token})
 	return token
 }
