@@ -257,3 +257,136 @@ func TestDeliveryWorkerReturnsAndStopsOnSubscriberLifetime(t *testing.T) {
 	}
 	cancel()
 }
+
+
+// BEGIN mail abuse and duplicate-delivery security tests.
+
+func TestDirectSenderRejectsAddressHeaderInjectionBeforeLookup(t *testing.T) {
+	lookupCalled := false
+	sender := DirectSender{
+		lookupHosts: func(context.Context, string) ([]string, error) {
+			lookupCalled = true
+			return []string{"mx.example.net"}, nil
+		},
+	}
+	for _, message := range []Message{
+		{From: "sender@example.com\r\nBcc: victim@example.net", To: "owner@example.net"},
+		{From: "sender@example.com", To: "owner@example.net\r\nCc: victim@example.net"},
+	} {
+		if err := sender.Send(context.Background(), message); err == nil {
+			t.Fatalf("header-injected address was accepted: %#v", message)
+		}
+	}
+	if lookupCalled {
+		t.Fatal("DNS lookup ran before rejecting a header-injected address")
+	}
+}
+
+func TestMessagePayloadDoesNotPermitHeaderInjection(t *testing.T) {
+	fromAddress, _ := mail.ParseAddress("SiteBrush <sitebrush@sitebrush.com>")
+	toAddress, _ := mail.ParseAddress("Owner <owner@example.net>")
+	payload := string(buildMessagePayloadWithID(
+		fromAddress,
+		toAddress,
+		"Security notice\r\nBcc: victim@example.net",
+		"Body",
+		"",
+		"stable\r\nX-Injected: yes",
+	))
+	if strings.Contains(payload, "\r\nBcc: victim@example.net\r\n") {
+		t.Fatalf("subject created an injected Bcc header: %s", payload)
+	}
+	if strings.Contains(payload, "\r\nX-Injected: yes\r\n") {
+		t.Fatalf("message ID created an injected header: %s", payload)
+	}
+	if strings.Contains(payload, "Message-ID: <stable\r\n") {
+		t.Fatalf("unsafe stable Message-ID was emitted verbatim: %s", payload)
+	}
+}
+
+func TestDeliveryWorkerDoesNotRetryOneFailedJob(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	attempts := make(chan string, 4)
+	jobs := StartDeliveryWorker(ctx, func(_ context.Context, message Message) error {
+		attempts <- message.MessageID
+		return errors.New("temporary SMTP failure")
+	})
+	jobs <- DeliveryJob{Message: Message{MessageID: "one-action-one-message", To: "owner@example.net"}}
+
+	select {
+	case messageID := <-attempts:
+		if messageID != "one-action-one-message" {
+			t.Fatalf("delivery attempt message ID=%q", messageID)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("delivery worker did not attempt the submitted message")
+	}
+	select {
+	case duplicate := <-attempts:
+		t.Fatalf("one delivery job was retried inside the worker: %q", duplicate)
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(jobs)
+}
+
+func TestOutboxConcurrentClaimHasOneOwner(t *testing.T) {
+	database, err := sql.Open("sqlite", "file:"+t.TempDir()+"/mail-claim-race.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	database.SetMaxOpenConns(1)
+	for _, statement := range SchemaQueries() {
+		if _, err := database.Exec(statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	now := time.Now().UTC()
+	inserted, err := Insert(context.Background(), database, Task{
+		ID:        "single-owner",
+		Route:     RouteLocal,
+		Message:   Message{To: "owner@example.net"},
+		CreatedAt: now,
+		ExpiresAt: now.Add(time.Hour),
+	})
+	if err != nil || !inserted {
+		t.Fatalf("inserted=%t err=%v", inserted, err)
+	}
+
+	const claimers = 32
+	results := make(chan bool, claimers)
+	errorsChannel := make(chan error, claimers)
+	start := make(chan struct{})
+	for claimerIndex := 0; claimerIndex < claimers; claimerIndex++ {
+		go func() {
+			<-start
+			claimed, claimErr := Claim(context.Background(), database, "single-owner")
+			if claimErr != nil {
+				errorsChannel <- claimErr
+				return
+			}
+			results <- claimed
+		}()
+	}
+	close(start)
+
+	owners := 0
+	for resultIndex := 0; resultIndex < claimers; resultIndex++ {
+		select {
+		case claimErr := <-errorsChannel:
+			t.Fatalf("concurrent outbox claim failed: %v", claimErr)
+		case claimed := <-results:
+			if claimed {
+				owners++
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("concurrent outbox claims did not finish")
+		}
+	}
+	if owners != 1 {
+		t.Fatalf("outbox owners=%d want=1", owners)
+	}
+}
+
+// END mail abuse and duplicate-delivery security tests.
