@@ -84,3 +84,39 @@ func TestSecurityBoundaryBackupImportFailsClosedOnDatabaseWriteError(t *testing.
 		t.Fatal("SECURITY: backup import reported success after the pages table write failed")
 	}
 }
+
+
+func TestSecurityBoundaryBackupImportFailsClosedOnRedirectWriteError(t *testing.T) {
+	application, rawDB := newTestApplication(t)
+	if _, err := rawDB.Exec("DROP TABLE page_redirects"); err != nil {
+		t.Fatal(err)
+	}
+	archive := backupZIPForSecurityTest(t, domainBackup{
+		Version: 1,
+		Redirects: []backupRedirect{{
+			OldPath: "/old",
+			NewPath: "/new",
+		}},
+	})
+	if _, err := application.importDomainBackupZIP(context.Background(), "localhost", "/", archive); err == nil {
+		t.Fatal("SECURITY: backup import reported success after redirect storage failed")
+	}
+}
+
+func TestSecurityBoundaryBackupImportFailsClosedOnAccessRuleWriteError(t *testing.T) {
+	application, rawDB := newTestApplication(t)
+	if _, err := rawDB.Exec("DROP TABLE file_access_rules"); err != nil {
+		t.Fatal(err)
+	}
+	archive := backupZIPForSecurityTest(t, domainBackup{
+		Version: 1,
+		FileAccessRules: []backupFileAccessRule{{
+			FileName:   "private/report.pdf",
+			AccessMode: "private",
+			Token:      "secret-token",
+		}},
+	})
+	if _, err := application.importDomainBackupZIP(context.Background(), "localhost", "/", archive); err == nil {
+		t.Fatal("SECURITY: backup import reported success after access-rule storage failed")
+	}
+}
