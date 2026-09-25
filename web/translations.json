@@ -1148,7 +1148,9 @@
     "ax_risk_desc_enumeration": "URL enumeration: the client rapidly requests many different paths to discover hidden files, endpoints, or software components.",
     "ax_risk_desc_authentication-failures": "Repeated authentication failures: many rejected login or protected-resource attempts from the same address.",
     "ax_risk_desc_rapid-crawl": "Rapid crawl: a non-approved automated client sends a sustained high number of requests across the site.",
-    "ax_risk_desc_scanner-client": "Known scanner client: the User-Agent identifies a security scanning tool; blocking requires scanner behavior rather than the name alone."
+    "ax_risk_desc_scanner-client": "Known scanner client: the User-Agent identifies a security scanning tool; blocking requires scanner behavior rather than the name alone.",
+    "site_copy_continue_import_pages": "Continue import",
+    "site_copy_import_pages_remain": "Pages remain in the saved import queue."
   },
   "fr": {
     "auth_email_changed_title": "Adresse e-mail modifiée",
@@ -2181,7 +2183,9 @@
     "ax_risk_desc_enumeration": "Énumération d’URL : le client demande rapidement de nombreux chemins différents pour découvrir des fichiers, endpoints ou composants cachés.",
     "ax_risk_desc_authentication-failures": "Échecs d’authentification répétés : de nombreuses tentatives refusées de connexion ou d’accès protégé depuis la même adresse.",
     "ax_risk_desc_rapid-crawl": "Exploration rapide : un client automatisé non approuvé envoie durablement un grand nombre de requêtes sur le site.",
-    "ax_risk_desc_scanner-client": "Scanner connu : le User-Agent identifie un outil de scan de sécurité ; le blocage dépend du comportement de scan, pas seulement du nom."
+    "ax_risk_desc_scanner-client": "Scanner connu : le User-Agent identifie un outil de scan de sécurité ; le blocage dépend du comportement de scan, pas seulement du nom.",
+    "site_copy_continue_import_pages": "Continuer l’importation",
+    "site_copy_import_pages_remain": "Des pages restent dans la file d’importation enregistrée."
   },
   "ru": {
     "auth_email_changed_title": "Адрес электронной почты изменён",
@@ -3332,7 +3336,9 @@
     "ax_risk_desc_enumeration": "Перебор URL: клиент быстро запрашивает множество разных путей, пытаясь найти скрытые файлы, endpoints или компоненты ПО.",
     "ax_risk_desc_authentication-failures": "Повторные ошибки аутентификации: много отклонённых попыток входа или доступа к защищённым ресурсам с одного адреса.",
     "ax_risk_desc_rapid-crawl": "Быстрый обход: неразрешённый автоматический клиент длительно отправляет большое количество запросов по сайту.",
-    "ax_risk_desc_scanner-client": "Известный сканер: User-Agent указывает на инструмент проверки безопасности; блокировка происходит по поведению сканера, а не только по имени."
+    "ax_risk_desc_scanner-client": "Известный сканер: User-Agent указывает на инструмент проверки безопасности; блокировка происходит по поведению сканера, а не только по имени.",
+    "site_copy_continue_import_pages": "Продолжить импорт",
+    "site_copy_import_pages_remain": "В сохранённой очереди импорта остались страницы."
   },
   "ja": {
     "auth_email_changed_title": "メールアドレスが変更されました",
@@ -4361,7 +4367,9 @@
     "ax_risk_desc_enumeration": "URL列挙: 多数の異なるパスを短時間に要求し、隠しファイル、エンドポイント、ソフトウェア構成を探します。",
     "ax_risk_desc_authentication-failures": "認証失敗の繰り返し: 同じアドレスから多数のログイン失敗や保護リソースへの拒否アクセスが発生しています。",
     "ax_risk_desc_rapid-crawl": "高速クロール: 許可されていない自動クライアントがサイト全体へ継続的に大量のリクエストを送ります。",
-    "ax_risk_desc_scanner-client": "既知のスキャナ: User-Agent がセキュリティスキャンツールを示します。名前だけでなくスキャン動作も確認してブロックします。"
+    "ax_risk_desc_scanner-client": "既知のスキャナ: User-Agent がセキュリティスキャンツールを示します。名前だけでなくスキャン動作も確認してブロックします。",
+    "site_copy_continue_import_pages": "インポートを続ける",
+    "site_copy_import_pages_remain": "保存されたインポートキューに未処理のページがあります。"
   },
   "it": {
     "auth_email_changed_title": "Indirizzo email modificato",
@@ -5390,7 +5398,9 @@
     "ax_risk_desc_enumeration": "Enumerazione URL: il client richiede rapidamente molti percorsi diversi per trovare file, endpoint o componenti nascosti.",
     "ax_risk_desc_authentication-failures": "Errori di autenticazione ripetuti: molti tentativi rifiutati di login o accesso protetto dallo stesso indirizzo.",
     "ax_risk_desc_rapid-crawl": "Crawl rapido: un client automatizzato non approvato invia in modo prolungato un elevato numero di richieste sul sito.",
-    "ax_risk_desc_scanner-client": "Scanner noto: lo User-Agent identifica uno strumento di scansione; il blocco dipende dal comportamento dello scanner e non solo dal nome."
+    "ax_risk_desc_scanner-client": "Scanner noto: lo User-Agent identifica uno strumento di scansione; il blocco dipende dal comportamento dello scanner e non solo dal nome.",
+    "site_copy_continue_import_pages": "Continua importazione",
+    "site_copy_import_pages_remain": "Restano pagine nella coda di importazione salvata."
   },
   "sv": {
     "auth_email_changed_title": "E-postadressen har ändrats",
@@ -6419,7 +6429,9 @@
     "ax_risk_desc_enumeration": "URL-enumerering: klienten begär snabbt många olika sökvägar för att hitta dolda filer, endpoints eller programkomponenter.",
     "ax_risk_desc_authentication-failures": "Upprepade autentiseringsfel: många avvisade inloggningar eller försök mot skyddade resurser från samma adress.",
     "ax_risk_desc_rapid-crawl": "Snabb crawl: en icke godkänd automatisk klient skickar ihållande ett stort antal förfrågningar över webbplatsen.",
-    "ax_risk_desc_scanner-client": "Känd skannerklient: User-Agent identifierar ett säkerhetsskanningsverktyg; blockering kräver skannerbeteende och bygger inte bara på namnet."
+    "ax_risk_desc_scanner-client": "Känd skannerklient: User-Agent identifierar ett säkerhetsskanningsverktyg; blockering kräver skannerbeteende och bygger inte bara på namnet.",
+    "site_copy_continue_import_pages": "Fortsätt importera",
+    "site_copy_import_pages_remain": "Det finns sidor kvar i den sparade importkön."
   },
   "fi": {
     "auth_email_changed_title": "Sähköpostiosoite on vaihdettu",
@@ -7448,7 +7460,9 @@
     "ax_risk_desc_enumeration": "URL-luettelointi: asiakas pyytää nopeasti monia eri polkuja löytääkseen piilotettuja tiedostoja, päätepisteitä tai ohjelmistokomponentteja.",
     "ax_risk_desc_authentication-failures": "Toistuvat todennusvirheet: samasta osoitteesta tulee paljon hylättyjä kirjautumis- tai suojatun sisällön pyyntöjä.",
     "ax_risk_desc_rapid-crawl": "Nopea indeksointi: hyväksymätön automaattinen asiakas lähettää jatkuvasti suuren määrän pyyntöjä sivustolle.",
-    "ax_risk_desc_scanner-client": "Tunnettu skanneri: User-Agent tunnistaa tietoturvaskannaustyökalun; esto perustuu skannaavaan käyttäytymiseen eikä pelkkään nimeen."
+    "ax_risk_desc_scanner-client": "Tunnettu skanneri: User-Agent tunnistaa tietoturvaskannaustyökalun; esto perustuu skannaavaan käyttäytymiseen eikä pelkkään nimeen.",
+    "site_copy_continue_import_pages": "Jatka tuontia",
+    "site_copy_import_pages_remain": "Tallennetussa tuontijonossa on vielä sivuja."
   },
   "mn": {
     "auth_email_changed_title": "Имэйл хаяг өөрчлөгдлөө",
@@ -8477,7 +8491,9 @@
     "ax_risk_desc_enumeration": "URL enumeration: клиент далд файл, endpoint эсвэл програмын бүрэлдэхүүн олохын тулд олон өөр замыг хурдан хүсдэг.",
     "ax_risk_desc_authentication-failures": "Давтагдсан authentication алдаа: нэг хаягаас олон удаагийн амжилтгүй login эсвэл хамгаалагдсан ресурс руу хандах оролдлого.",
     "ax_risk_desc_rapid-crawl": "Хурдан crawl: зөвшөөрөгдөөгүй автомат клиент сайт даяар тогтвортой их хэмжээний хүсэлт илгээдэг.",
-    "ax_risk_desc_scanner-client": "Танигдсан scanner: User-Agent нь security scan хэрэгслийг илэрхийлнэ; блок зөвхөн нэрээр биш, скан хийх зан төлөвөөр шийдэгдэнэ."
+    "ax_risk_desc_scanner-client": "Танигдсан scanner: User-Agent нь security scan хэрэгслийг илэрхийлнэ; блок зөвхөн нэрээр биш, скан хийх зан төлөвөөр шийдэгдэнэ.",
+    "site_copy_continue_import_pages": "Импортыг үргэлжлүүлэх",
+    "site_copy_import_pages_remain": "Хадгалсан импортын дараалалд хуудас үлдсэн байна."
   },
   "zh": {
     "auth_email_changed_title": "电子邮箱地址已更改",
@@ -9506,7 +9522,9 @@
     "ax_risk_desc_enumeration": "URL 枚举：客户端快速请求大量不同路径，试图发现隐藏文件、接口或软件组件。",
     "ax_risk_desc_authentication-failures": "重复认证失败：同一地址产生大量被拒绝的登录或受保护资源访问尝试。",
     "ax_risk_desc_rapid-crawl": "高速抓取：未经批准的自动客户端持续向网站发送大量请求。",
-    "ax_risk_desc_scanner-client": "已知扫描器：User-Agent 表明是安全扫描工具；封禁依据扫描行为，而不是仅凭名称。"
+    "ax_risk_desc_scanner-client": "已知扫描器：User-Agent 表明是安全扫描工具；封禁依据扫描行为，而不是仅凭名称。",
+    "site_copy_continue_import_pages": "继续导入",
+    "site_copy_import_pages_remain": "已保存的导入队列中还有未处理的页面。"
   },
   "he": {
     "auth_email_changed_title": "כתובת האימייל שונתה",
@@ -10535,7 +10553,9 @@
     "ax_risk_desc_enumeration": "מניית כתובות URL: הלקוח מבקש במהירות נתיבים רבים ושונים כדי לגלות קבצים, נקודות קצה או רכיבי תוכנה מוסתרים.",
     "ax_risk_desc_authentication-failures": "כשלי אימות חוזרים: ניסיונות רבים שנדחו לכניסה או לגישה למשאבים מוגנים מאותה כתובת.",
     "ax_risk_desc_rapid-crawl": "סריקה מהירה: לקוח אוטומטי שלא אושר שולח לאורך זמן מספר גדול של בקשות ברחבי האתר.",
-    "ax_risk_desc_scanner-client": "סורק מוכר: ה־User-Agent מזהה כלי סריקת אבטחה; החסימה מבוססת על התנהגות הסריקה ולא רק על השם."
+    "ax_risk_desc_scanner-client": "סורק מוכר: ה־User-Agent מזהה כלי סריקת אבטחה; החסימה מבוססת על התנהגות הסריקה ולא רק על השם.",
+    "site_copy_continue_import_pages": "המשך ייבוא",
+    "site_copy_import_pages_remain": "נותרו דפים בתור הייבוא השמור."
   },
   "fa": {
     "auth_email_changed_title": "نشانی ایمیل تغییر کرد",
@@ -11564,7 +11584,9 @@
     "ax_risk_desc_enumeration": "شمارش URL: کارخواه به‌سرعت مسیرهای متفاوت زیادی را درخواست می‌کند تا فایل‌ها، endpointها یا اجزای نرم‌افزار پنهان را پیدا کند.",
     "ax_risk_desc_authentication-failures": "خطاهای تکراری احراز هویت: تعداد زیادی تلاش ناموفق برای ورود یا دسترسی محافظت‌شده از یک نشانی.",
     "ax_risk_desc_rapid-crawl": "خزش سریع: یک کارخواه خودکار تأییدنشده به‌طور پیوسته تعداد زیادی درخواست در سایت ارسال می‌کند.",
-    "ax_risk_desc_scanner-client": "اسکنر شناخته‌شده: User-Agent ابزار اسکن امنیتی را معرفی می‌کند؛ مسدودسازی بر اساس رفتار اسکن است، نه فقط نام."
+    "ax_risk_desc_scanner-client": "اسکنر شناخته‌شده: User-Agent ابزار اسکن امنیتی را معرفی می‌کند؛ مسدودسازی بر اساس رفتار اسکن است، نه فقط نام.",
+    "site_copy_continue_import_pages": "ادامه درون‌ریزی",
+    "site_copy_import_pages_remain": "صف درون‌ریزی ذخیره‌شده هنوز صفحه‌های پردازش‌نشده دارد."
   },
   "de": {
     "auth_email_changed_title": "E-Mail-Adresse geändert",
@@ -12593,7 +12615,9 @@
     "ax_risk_desc_enumeration": "URL-Enumeration: Der Client fragt schnell viele verschiedene Pfade ab, um versteckte Dateien, Endpunkte oder Softwarekomponenten zu finden.",
     "ax_risk_desc_authentication-failures": "Wiederholte Authentifizierungsfehler: viele abgewiesene Login- oder geschützte Zugriffsversuche von derselben Adresse.",
     "ax_risk_desc_rapid-crawl": "Schneller Crawl: Ein nicht freigegebener automatisierter Client sendet dauerhaft sehr viele Anfragen über die Website.",
-    "ax_risk_desc_scanner-client": "Bekannter Scanner: Der User-Agent weist auf ein Sicherheitsscanner-Werkzeug hin; blockiert wird aufgrund des Scanner-Verhaltens, nicht nur wegen des Namens."
+    "ax_risk_desc_scanner-client": "Bekannter Scanner: Der User-Agent weist auf ein Sicherheitsscanner-Werkzeug hin; blockiert wird aufgrund des Scanner-Verhaltens, nicht nur wegen des Namens.",
+    "site_copy_continue_import_pages": "Import fortsetzen",
+    "site_copy_import_pages_remain": "In der gespeicherten Importwarteschlange sind noch Seiten vorhanden."
   },
   "tr": {
     "auth_email_changed_title": "E-posta adresi değiştirildi",
@@ -13622,7 +13646,9 @@
     "ax_risk_desc_enumeration": "URL numaralandırma: istemci gizli dosyaları, uçları veya yazılım bileşenlerini keşfetmek için çok sayıda farklı yolu hızla ister.",
     "ax_risk_desc_authentication-failures": "Tekrarlanan kimlik doğrulama hataları: aynı adresten çok sayıda reddedilen giriş veya korumalı kaynak erişim denemesi.",
     "ax_risk_desc_rapid-crawl": "Hızlı tarama: onaylanmamış otomatik istemci site genelinde sürekli yüksek sayıda istek gönderir.",
-    "ax_risk_desc_scanner-client": "Bilinen tarayıcı istemcisi: User-Agent bir güvenlik tarama aracını tanımlar; engelleme yalnızca ada değil tarama davranışına dayanır."
+    "ax_risk_desc_scanner-client": "Bilinen tarayıcı istemcisi: User-Agent bir güvenlik tarama aracını tanımlar; engelleme yalnızca ada değil tarama davranışına dayanır.",
+    "site_copy_continue_import_pages": "İçe aktarmaya devam et",
+    "site_copy_import_pages_remain": "Kaydedilen içe aktarma kuyruğunda işlenmemiş sayfalar var."
   },
   "kk": {
     "auth_email_changed_title": "Электрондық пошта мекенжайы өзгертілді",
@@ -14651,7 +14677,9 @@
     "ax_risk_desc_enumeration": "URL тізімдеу: клиент жасырын файлдарды, endpoint-терді немесе бағдарламалық компоненттерді табу үшін көптеген түрлі жолдарды жылдам сұрайды.",
     "ax_risk_desc_authentication-failures": "Қайталанған аутентификация қателері: бір мекенжайдан көптеген қабылданбаған кіру немесе қорғалған ресурсқа қол жеткізу әрекеттері.",
     "ax_risk_desc_rapid-crawl": "Жылдам crawl: рұқсат етілмеген автоматты клиент сайт бойынша үздіксіз көп сұрау жібереді.",
-    "ax_risk_desc_scanner-client": "Белгілі сканер: User-Agent қауіпсіздік сканерін көрсетеді; бұғаттау тек атауға емес, сканерлеу мінез-құлқына негізделеді."
+    "ax_risk_desc_scanner-client": "Белгілі сканер: User-Agent қауіпсіздік сканерін көрсетеді; бұғаттау тек атауға емес, сканерлеу мінез-құлқына негізделеді.",
+    "site_copy_continue_import_pages": "Импортты жалғастыру",
+    "site_copy_import_pages_remain": "Сақталған импорт кезегінде өңделмеген беттер бар."
   },
   "es": {
     "auth_email_changed_title": "Dirección de correo cambiada",
@@ -15680,7 +15708,9 @@
     "ax_risk_desc_enumeration": "Enumeración de URLs: el cliente solicita rápidamente muchas rutas distintas para descubrir archivos, endpoints o componentes ocultos.",
     "ax_risk_desc_authentication-failures": "Fallos repetidos de autenticación: muchos intentos rechazados de inicio de sesión o acceso protegido desde la misma dirección.",
     "ax_risk_desc_rapid-crawl": "Rastreo rápido: un cliente automatizado no aprobado mantiene un volumen alto de solicitudes por el sitio.",
-    "ax_risk_desc_scanner-client": "Escáner conocido: el User-Agent identifica una herramienta de seguridad; el bloqueo depende del comportamiento de escaneo y no solo del nombre."
+    "ax_risk_desc_scanner-client": "Escáner conocido: el User-Agent identifica una herramienta de seguridad; el bloqueo depende del comportamiento de escaneo y no solo del nombre.",
+    "site_copy_continue_import_pages": "Continuar importación",
+    "site_copy_import_pages_remain": "Quedan páginas en la cola de importación guardada."
   },
   "pt": {
     "auth_email_changed_title": "Endereço de e-mail alterado",
@@ -16709,6 +16739,8 @@
     "ax_risk_desc_enumeration": "Enumeração de URLs: o cliente solicita rapidamente muitos caminhos diferentes para descobrir ficheiros, endpoints ou componentes ocultos.",
     "ax_risk_desc_authentication-failures": "Falhas repetidas de autenticação: muitas tentativas rejeitadas de login ou acesso protegido a partir do mesmo endereço.",
     "ax_risk_desc_rapid-crawl": "Rastreamento rápido: um cliente automatizado não aprovado mantém um grande volume de pedidos pelo site.",
-    "ax_risk_desc_scanner-client": "Scanner conhecido: o User-Agent identifica uma ferramenta de segurança; o bloqueio depende do comportamento de varredura, não apenas do nome."
+    "ax_risk_desc_scanner-client": "Scanner conhecido: o User-Agent identifica uma ferramenta de segurança; o bloqueio depende do comportamento de varredura, não apenas do nome.",
+    "site_copy_continue_import_pages": "Continuar importação",
+    "site_copy_import_pages_remain": "Ainda há páginas na fila de importação salva."
   }
 }

@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -51,6 +52,31 @@ func TestResourceAttackPageLinkExtractionDeduplicatesAndStopsAtBound(t *testing.
 	pageURLs, truncated = ExtractPageLinksWithLimit(withoutOverflow, base, site, 3)
 	if len(pageURLs) != 3 || truncated {
 		t.Fatalf("exactly bounded page links = %d truncated=%t, want 3 and false", len(pageURLs), truncated)
+	}
+}
+
+func TestResourceAttackPageLinkOffsetsResumeWithoutLosingLinks(t *testing.T) {
+	base, _ := url.Parse("https://source.example/")
+	var source strings.Builder
+	for pageNumber := 0; pageNumber < 5; pageNumber++ {
+		source.WriteString(`<a href="/page-`)
+		source.WriteString(strconv.Itoa(pageNumber))
+		source.WriteString(`">page</a>`)
+	}
+	firstPageBatch, nextOffset, hasRemainingPages := ExtractPageLinksFromOffset(source.String(), base, base, 0, 2)
+	if len(firstPageBatch) != 2 || nextOffset != 2 || !hasRemainingPages {
+		t.Fatalf("first page-link batch = %d links, offset=%d remaining=%v", len(firstPageBatch), nextOffset, hasRemainingPages)
+	}
+	secondPageBatch, nextOffset, hasRemainingPages := ExtractPageLinksFromOffset(source.String(), base, base, nextOffset, 2)
+	if len(secondPageBatch) != 2 || nextOffset != 4 || !hasRemainingPages {
+		t.Fatalf("second page-link batch = %d links, offset=%d remaining=%v", len(secondPageBatch), nextOffset, hasRemainingPages)
+	}
+	lastPageBatch, nextOffset, hasRemainingPages := ExtractPageLinksFromOffset(source.String(), base, base, nextOffset, 2)
+	if len(lastPageBatch) != 1 || nextOffset != 5 || hasRemainingPages {
+		t.Fatalf("last page-link batch = %d links, offset=%d remaining=%v", len(lastPageBatch), nextOffset, hasRemainingPages)
+	}
+	if firstPageBatch[0].Path == secondPageBatch[0].Path || secondPageBatch[1].Path == lastPageBatch[0].Path {
+		t.Fatal("link continuation repeated or skipped a page")
 	}
 }
 

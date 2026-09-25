@@ -8,10 +8,10 @@ import (
 
 // SourceOptions carry transport-level source overrides shared by previews and imports.
 type SourceOptions struct {
-	IP               string
-	LanguageCode     string
-	PeerAttestation  string
-	PeerPrivateKey   [ed25519.PrivateKeySize]byte
+	IP              string
+	LanguageCode    string
+	PeerAttestation string
+	PeerPrivateKey  [ed25519.PrivateKeySize]byte
 }
 
 // ImportRequest is the application-facing input for single page and whole site imports.
@@ -28,14 +28,17 @@ type ImportRequest struct {
 	SelectedResourceURLs map[string]struct{}
 	SourceOptions        SourceOptions
 	AutoDetectTemplates  bool
+	ImportID             string
 }
 
 // ImportResult is returned after the importer has persisted everything it could fetch.
 type ImportResult struct {
-	RedirectPath  string
-	FailedTotal   int
-	FailedURLs    []string
-	FailedReasons map[string]string
+	RedirectPath   string            `json:"redirect"`
+	FailedTotal    int               `json:"failed_total"`
+	FailedURLs     []string          `json:"failed_urls,omitempty"`
+	FailedReasons  map[string]string `json:"failed_reasons,omitempty"`
+	ImportID       string            `json:"import_id,omitempty"`
+	RemainingPages int               `json:"remaining_pages,omitempty"`
 }
 
 // ResourcePreview describes one downloadable remote asset before import confirmation.
