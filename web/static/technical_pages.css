@@ -3220,6 +3220,7 @@ body.technical-page.analytics-page {
     gap: 20px;
     width: min(100%, 1120px);
     margin-inline: auto;
+    margin-block-start: 20px;
     align-items: stretch;
 }
 .technical-page .profile-account-card {

@@ -2610,6 +2610,15 @@ func TestMobileServicePageDesignCoversEverySharedTemplate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	technicalStyles := string(technicalStyleBytes)
+	profileAccountGridStart := strings.Index(technicalStyles, ".technical-page .profile-account-grid {")
+	if profileAccountGridStart < 0 {
+		t.Fatal("profile account grid styles are missing")
+	}
+	profileAccountGridEnd := strings.Index(technicalStyles[profileAccountGridStart:], "\n}")
+	if profileAccountGridEnd < 0 || !strings.Contains(technicalStyles[profileAccountGridStart:profileAccountGridStart+profileAccountGridEnd], "margin-block-start: 20px;") {
+		t.Fatal("profile security grid must have a row gap after the password forms")
+	}
 	directoryStyleBytes, err := fs.ReadFile(embeddedWebFiles, "web/static/directory_listing.css")
 	if err != nil {
 		t.Fatal(err)
