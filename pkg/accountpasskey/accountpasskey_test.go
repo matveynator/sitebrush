@@ -237,3 +237,93 @@ func mustBeginPasskey(t *testing.T, database *sql.DB) *sql.Tx {
 	}
 	return transaction
 }
+
+
+// BEGIN WebAuthn transaction rollback regression tests.
+
+func TestMalformedLoginChallengeRollbackPreservesChallenge(t *testing.T) {
+	ctx := context.Background()
+	now := time.Now().UTC()
+	database, err := sql.Open("sqlite", "file:"+filepath.Join(t.TempDir(), "passkey-rollback.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	for _, statement := range Schema() {
+		if _, err := database.Exec(statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := database.Exec(`INSERT INTO account_webauthn_challenges(token,domain,email,kind,session_json,client_ip,return_path,created_at) VALUES(?,?,?,?,?,?,?,?)`,
+		"malformed-login", "example.com", "owner@example.com", "login", "not-json", "192.0.2.80", "/profile", now.Unix()); err != nil {
+		t.Fatal(err)
+	}
+
+	transaction := mustBeginPasskey(t, database)
+	if _, _, err := consumeLoginChallenge(ctx, transaction, "example.com", "192.0.2.80", "malformed-login", now); err == nil {
+		t.Fatal("malformed login challenge was accepted")
+	}
+	if err := transaction.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+
+	var challengeCount int
+	if err := database.QueryRow(`SELECT COUNT(1) FROM account_webauthn_challenges WHERE token='malformed-login'`).Scan(&challengeCount); err != nil {
+		t.Fatal(err)
+	}
+	if challengeCount != 1 {
+		t.Fatalf("rollback left challenge count=%d want=1", challengeCount)
+	}
+}
+
+func TestPasskeyChallengeCannotCrossDomainClientOrKind(t *testing.T) {
+	ctx := context.Background()
+	now := time.Now().UTC()
+	database, err := sql.Open("sqlite", "file:"+filepath.Join(t.TempDir(), "passkey-boundary.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	for _, statement := range Schema() {
+		if _, err := database.Exec(statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	sessionJSON, err := json.Marshal(&webauthn.SessionData{Challenge: "challenge"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Exec(`INSERT INTO account_webauthn_challenges(token,domain,email,kind,session_json,client_ip,return_path,created_at) VALUES(?,?,?,?,?,?,?,?)`,
+		"bound-login", "example.com", "owner@example.com", "login", string(sessionJSON), "192.0.2.81", "/profile", now.Unix()); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, attempt := range []struct {
+		name     string
+		domain   string
+		clientIP string
+	}{
+		{name: "domain", domain: "other.example.com", clientIP: "192.0.2.81"},
+		{name: "client", domain: "example.com", clientIP: "192.0.2.82"},
+	} {
+		t.Run(attempt.name, func(t *testing.T) {
+			transaction := mustBeginPasskey(t, database)
+			if _, _, err := consumeLoginChallenge(ctx, transaction, attempt.domain, attempt.clientIP, "bound-login", now); err == nil {
+				t.Fatal("cross-boundary login challenge was accepted")
+			}
+			if err := transaction.Rollback(); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+
+	transaction := mustBeginPasskey(t, database)
+	if _, err := consumeChallenge(ctx, transaction, "example.com", "owner@example.com", "register", "192.0.2.81", "bound-login", now); err == nil {
+		t.Fatal("login challenge was consumed as a registration challenge")
+	}
+	if err := transaction.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// END WebAuthn transaction rollback regression tests.
