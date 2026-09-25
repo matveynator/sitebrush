@@ -16555,6 +16555,37 @@ func TestStealthModeIsOptionalAndLimitedToUnlistedAddresses(t *testing.T) {
 	}
 }
 
+func TestStealthModeRequiresActiveIPProtectionForStaleSettings(t *testing.T) {
+	application, database := newTestApplication(t)
+	if _, err := database.Exec(`INSERT INTO admin_stealth_modes(domain,email,enabled_at) VALUES('example.org','owner@example.org',1)`); err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodGet, "https://example.org/?login", nil)
+	request.RemoteAddr = "192.0.2.9:1234"
+	if application.serveStealthStaticForBlockedAdminIP(httptest.NewRecorder(), request, "example.org", "/") {
+		t.Fatal("stale stealth setting hid SiteBrush without administrator IP protection")
+	}
+	if enabled, err := application.adminStealthEnabled(context.Background(), "example.org", "owner@example.org"); err != nil || enabled {
+		t.Fatalf("stale stealth setting is enabled without IP protection: enabled=%t err=%v", enabled, err)
+	}
+
+	for _, statement := range []string{
+		`INSERT INTO users(domain,email,password,is_admin) VALUES('example.org','owner@example.org','secret',1)`,
+		`INSERT INTO admin_ip_policies(domain,email,enabled_at) VALUES('example.org','owner@example.org',1)`,
+		`INSERT INTO admin_allowed_ips(domain,email,client_ip,added_at) VALUES('example.org','owner@example.org','192.0.2.1',1)`,
+	} {
+		if _, err := database.Exec(statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if enabled, err := application.adminStealthEnabled(context.Background(), "example.org", "owner@example.org"); err != nil || !enabled {
+		t.Fatalf("stealth setting not enabled with IP protection: enabled=%t err=%v", enabled, err)
+	}
+	if !application.serveStealthStaticForBlockedAdminIP(httptest.NewRecorder(), request, "example.org", "/") {
+		t.Fatal("stealth did not hide SiteBrush after enabling administrator IP protection")
+	}
+}
+
 func TestTOTPSetupQRCodeIsLocalPNGData(t *testing.T) {
 	if qrData := totpSetupQRCodeDataURI(""); qrData != "" {
 		t.Fatalf("empty setup URI produced a QR code: %q", qrData)
