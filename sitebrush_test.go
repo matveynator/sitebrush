@@ -2619,6 +2619,20 @@ func TestMobileServicePageDesignCoversEverySharedTemplate(t *testing.T) {
 	if profileAccountGridEnd < 0 || !strings.Contains(technicalStyles[profileAccountGridStart:profileAccountGridStart+profileAccountGridEnd], "margin-block-start: 20px;") {
 		t.Fatal("profile security grid must have a row gap after the password forms")
 	}
+	profileAccountGridStyles := technicalStyles[profileAccountGridStart : profileAccountGridStart+profileAccountGridEnd]
+	if !strings.Contains(profileAccountGridStyles, "width: 100%;") {
+		t.Fatal("profile security grid must align with the full-width page header")
+	}
+	profileTemplateBytes, err := fs.ReadFile(embeddedWebFiles, "web/profile.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	profileTemplate := string(profileTemplateBytes)
+	profileSessionsPosition := strings.Index(profileTemplate, `{{index .T "auth_trusted_ips"}}`)
+	adminIPAllowlistPosition := strings.Index(profileTemplate, `{{index .T "admin_ip_allowlist_title"}}`)
+	if profileSessionsPosition < 0 || adminIPAllowlistPosition < 0 || adminIPAllowlistPosition < profileSessionsPosition {
+		t.Fatal("administrator IP access card must follow the authorized sessions card")
+	}
 	directoryStyleBytes, err := fs.ReadFile(embeddedWebFiles, "web/static/directory_listing.css")
 	if err != nil {
 		t.Fatal(err)
