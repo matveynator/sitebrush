@@ -275,14 +275,14 @@ func handleAttackGuardRequest(blocks map[string]SecurityBlock, allowlist map[str
 		if _, allowed := allowlist[ip]; allowed {
 			return attackGuardResult{Allowed: true}
 		}
-		block, blocked := activeSecurityBlock(blocks, ip, now)
+		block, blocked := activeSecurityBlock(blocks, ip, request.Domain, now)
 		return attackGuardResult{Block: block, Blocked: blocked}
 
 	case attackGuardObserveFast:
 		if _, allowed := allowlist[ip]; allowed {
 			return attackGuardResult{Allowed: true}
 		}
-		if block, blocked := activeSecurityBlock(blocks, ip, now); blocked {
+		if block, blocked := activeSecurityBlock(blocks, ip, request.Domain, now); blocked {
 			return attackGuardResult{Block: block, Blocked: true}
 		}
 		if request.Trusted {
@@ -302,10 +302,11 @@ func handleAttackGuardRequest(blocks map[string]SecurityBlock, allowlist map[str
 		if request.StatusCode != 0 && request.StatusCode != http.StatusNotFound {
 			return attackGuardResult{}
 		}
-		window := windows[ip]
+		windowKey := securityDomainIPKey(request.Domain, ip)
+		window := windows[windowKey]
 		if window == nil || now.Sub(window.Started) > 10*time.Second {
 			window = &attackWindow{Started: now, Distinct: map[string]struct{}{}}
-			windows[ip] = window
+			windows[windowKey] = window
 		}
 		if request.StatusCode == 0 {
 			if writeRequest {
@@ -322,10 +323,10 @@ func handleAttackGuardRequest(blocks map[string]SecurityBlock, allowlist map[str
 				reason = "mass-enumeration"
 				description = "scanned at least 48 distinct paths within 10 seconds"
 			}
-			block := blockSecurityIP(blocks, ip, reason, description, "local", now, automaticSecurityBlockTTL(blocks[ip].Violations+1))
+			block := blockLocalSecurityIP(blocks, ip, request.Domain, reason, description, now)
 			block.Domain = cleanSecurityText(request.Domain, 255)
 			blocks[ip] = block
-			delete(windows, ip)
+			delete(windows, windowKey)
 			return attackGuardResult{Block: block, Blocked: true, Changed: true}
 		}
 		if len(windows) > 1024 {
@@ -342,10 +343,11 @@ func handleAttackGuardRequest(blocks map[string]SecurityBlock, allowlist map[str
 		}
 		threshold := securityCategoryThreshold(request.Category)
 		if threshold > 1 {
-			window := incidents[ip]
+			windowKey := securityDomainIPKey(request.Domain, ip)
+			window := incidents[windowKey]
 			if window == nil || now.Sub(window.Started) > time.Minute {
 				window = &incidentWindow{Started: now, Counts: map[string]int{}}
-				incidents[ip] = window
+				incidents[windowKey] = window
 			}
 			window.Counts[request.Category]++
 			if window.Counts[request.Category] < threshold {
@@ -353,8 +355,7 @@ func handleAttackGuardRequest(blocks map[string]SecurityBlock, allowlist map[str
 			}
 			delete(window.Counts, request.Category)
 		}
-		previous := blocks[ip]
-		block := blockSecurityIP(blocks, ip, request.Category, request.Description, "local", now, automaticSecurityBlockTTL(previous.Violations+1))
+		block := blockLocalSecurityIP(blocks, ip, request.Domain, request.Category, request.Description, now)
 		block.Domain = cleanSecurityText(request.Domain, 255)
 		blocks[ip] = block
 		return attackGuardResult{Block: block, Blocked: true, Changed: true}
@@ -521,7 +522,7 @@ func handleAttackGuardRequest(blocks map[string]SecurityBlock, allowlist map[str
 		return attackGuardResult{Allowed: true}
 
 	case attackGuardClaimIncidentReport:
-		block, blocked := activeSecurityBlock(blocks, ip, now)
+		block, blocked := activeSecurityBlock(blocks, ip, request.Domain, now)
 		if !blocked || block.IncidentID == "" || block.IncidentID != cleanSecurityText(request.Reason, 64) {
 			return attackGuardResult{Err: errors.New("security incident not found")}
 		}
@@ -533,6 +534,9 @@ func handleAttackGuardRequest(blocks map[string]SecurityBlock, allowlist map[str
 
 	case attackGuardFinishIncidentReport:
 		block, found := blocks[ip]
+		if found && !securityBlockAppliesToDomain(block, request.Domain) {
+			found = false
+		}
 		incidentID := cleanSecurityText(request.Reason, 64)
 		if !found || incidentID == "" || block.IncidentID != incidentID || !reportClaims[incidentID] {
 			return attackGuardResult{Err: errors.New("security incident report was not claimed")}
@@ -567,7 +571,7 @@ func pruneAdminIPTrustState(trustedAdminIPs, adminIPLookups map[string]time.Time
 	}
 }
 
-func activeSecurityBlock(blocks map[string]SecurityBlock, ip string, now time.Time) (SecurityBlock, bool) {
+func activeSecurityBlock(blocks map[string]SecurityBlock, ip, domain string, now time.Time) (SecurityBlock, bool) {
 	if ip == "" {
 		return SecurityBlock{}, false
 	}
@@ -575,10 +579,36 @@ func activeSecurityBlock(blocks map[string]SecurityBlock, ip string, now time.Ti
 	if !found {
 		return SecurityBlock{}, false
 	}
+	if !securityBlockAppliesToDomain(block, domain) {
+		return SecurityBlock{}, false
+	}
 	if !block.ExpiresAt.IsZero() && !now.Before(block.ExpiresAt) {
 		return SecurityBlock{}, false
 	}
 	return block, true
+}
+
+func securityBlockAppliesToDomain(block SecurityBlock, domain string) bool {
+	if block.Source != "local" || block.Domain == "" || domain == "" {
+		return true
+	}
+	return normalizeSecurityDomain(block.Domain) == normalizeSecurityDomain(domain)
+}
+
+func securityDomainIPKey(domain, ip string) string {
+	return normalizeSecurityDomain(domain) + "\n" + ip
+}
+
+func blockLocalSecurityIP(blocks map[string]SecurityBlock, ip, domain, reason, description string, now time.Time) SecurityBlock {
+	previous := blocks[ip]
+	if previous.Source == "local" && previous.Domain != "" && normalizeSecurityDomain(previous.Domain) != normalizeSecurityDomain(domain) {
+		delete(blocks, ip)
+	}
+	previous = blocks[ip]
+	block := blockSecurityIP(blocks, ip, reason, description, "local", now, automaticSecurityBlockTTL(previous.Violations+1))
+	block.Domain = cleanSecurityText(domain, 255)
+	blocks[ip] = block
+	return block
 }
 
 func securityCategoryBlocks(category string) bool {
@@ -726,6 +756,11 @@ func (guard *AttackGuard) Check(ip string, now time.Time) (SecurityBlock, bool) 
 	return result.Block, ok && result.Blocked
 }
 
+func (guard *AttackGuard) CheckSite(domain, ip string, now time.Time) (SecurityBlock, bool) {
+	result, ok := guard.exchangeFast(attackGuardRequest{Operation: attackGuardCheck, Domain: normalizeSecurityDomain(domain), IP: ip, Now: now})
+	return result.Block, ok && result.Blocked
+}
+
 func (guard *AttackGuard) ObserveFast(ip, path string, trusted bool, now time.Time) (SecurityBlock, bool) {
 	return guard.ObserveRequestFast(ip, path, "GET", trusted, now)
 }
@@ -827,12 +862,12 @@ func (guard *AttackGuard) ClaimIncidentReport(ip, incidentID string, now time.Ti
 
 func (guard *AttackGuard) FinishIncidentReport(ip, incidentID, message string, success bool, now time.Time) (SecurityBlock, error) {
 	result, ok := guard.exchangeAdmin(attackGuardRequest{
-		Operation: attackGuardFinishIncidentReport,
-		IP: ip,
-		Reason: incidentID,
+		Operation:   attackGuardFinishIncidentReport,
+		IP:          ip,
+		Reason:      incidentID,
 		Description: message,
-		Success: success,
-		Now: now,
+		Success:     success,
+		Now:         now,
 	})
 	if !ok {
 		return SecurityBlock{}, errors.New("security guard is busy")

@@ -379,6 +379,50 @@ func TestAttackGuardBlocksMassEnumerationEarly(t *testing.T) {
 	}
 }
 
+func TestLocalAutomaticBlockAppliesOnlyToItsSite(t *testing.T) {
+	now := time.Now().UTC()
+	guard, err := NewAttackGuard("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer guard.Close()
+
+	const clientIP = "203.0.113.45"
+	for requestIndex := 0; requestIndex < 48; requestIndex++ {
+		guard.ObserveSiteNotFoundFastDisposition("a.sitebrush.com", clientIP, "/missing-"+strconv.Itoa(requestIndex), now)
+	}
+
+	block, blocked := guard.CheckSite("a.sitebrush.com", clientIP, now)
+	if !blocked || block.Source != "local" || block.Domain != "a.sitebrush.com" {
+		t.Fatalf("original site block = %#v, blocked=%t", block, blocked)
+	}
+	if block, blocked := guard.CheckSite("b.sitebrush.com", clientIP, now); blocked {
+		t.Fatalf("local block leaked to neighboring site: %#v", block)
+	}
+	if block, blocked := guard.Check(clientIP, now); !blocked || block.Domain != "a.sitebrush.com" {
+		t.Fatalf("instance security view lost the local block: %#v, blocked=%t", block, blocked)
+	}
+}
+
+func TestManualSecurityBlockAppliesAcrossSites(t *testing.T) {
+	now := time.Now().UTC()
+	guard, err := NewAttackGuard("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer guard.Close()
+
+	const clientIP = "203.0.113.46"
+	if _, err := guard.Add(clientIP, "manual", "administrator block", "manual", time.Time{}, now); err != nil {
+		t.Fatal(err)
+	}
+	for _, domain := range []string{"a.sitebrush.com", "b.sitebrush.com"} {
+		if block, blocked := guard.CheckSite(domain, clientIP, now); !blocked || block.Source != "manual" {
+			t.Fatalf("manual block on %s = %#v, blocked=%t", domain, block, blocked)
+		}
+	}
+}
+
 func TestAttackGuardCountsOnlyNotFoundPathsAsEnumeration(t *testing.T) {
 	now := time.Date(2026, 9, 24, 12, 0, 0, 0, time.UTC)
 	guard, err := NewAttackGuard("")
