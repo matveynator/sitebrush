@@ -85,6 +85,15 @@ type fakeGrabTransport struct {
 	responses map[string]fakeGrabResponse
 }
 
+type cancelingGrabTransport struct {
+	cancel context.CancelFunc
+}
+
+func (transport cancelingGrabTransport) RoundTrip(*http.Request) (*http.Response, error) {
+	transport.cancel()
+	return nil, errors.New("request canceled by test transport")
+}
+
 type fakeGrabResponse struct {
 	statusCode  int
 	location    string
@@ -9608,13 +9617,13 @@ func TestWholeSiteImportResumesSavedFrontierAfterQueueQuotaIncreases(t *testing.
 	const sourceURL = "http://resume.example/"
 	const firstChildURL = "http://resume.example/first"
 	const secondChildURL = "http://resume.example/second"
-	rootHTML := `<!doctype html><html><body><a href="/first">First</a><a href="/second">Second</a></body></html>`
+	rootHTML := `<!doctype html><html><body><header><nav>Shared navigation</nav></header><a href="/first">First</a><a href="/second">Second</a></body></html>`
 	previousGrabHTTPClient := newGrabHTTPClient
 	newGrabHTTPClient = func() *http.Client {
 		return &http.Client{Transport: fakeGrabTransport{responses: map[string]fakeGrabResponse{
 			sourceURL:      {contentType: "text/html", body: rootHTML},
-			firstChildURL:  {contentType: "text/html", body: `<!doctype html><html><body>First</body></html>`},
-			secondChildURL: {contentType: "text/html", body: `<!doctype html><html><body>Second</body></html>`},
+			firstChildURL:  {contentType: "text/html", body: `<!doctype html><html><body><header><nav>Shared navigation</nav></header>First</body></html>`},
+			secondChildURL: {contentType: "text/html", body: `<!doctype html><html><body><header><nav>Shared navigation</nav></header>Second</body></html>`},
 		}}}
 	}
 	defer func() { newGrabHTTPClient = previousGrabHTTPClient }()
@@ -9635,6 +9644,13 @@ func TestWholeSiteImportResumesSavedFrontierAfterQueueQuotaIncreases(t *testing.
 	}
 	if partialImport.ImportID == "" || partialImport.RemainingPages != 1 {
 		t.Fatalf("partial import did not preserve its remaining page: %+v", partialImport)
+	}
+	var firstBatchRootRevisionCount int
+	if err := rawDatabase.QueryRow(`SELECT COUNT(1) FROM revisions WHERE domain=? AND page_path=?`, "localhost", "/copy").Scan(&firstBatchRootRevisionCount); err != nil {
+		t.Fatal(err)
+	}
+	if firstBatchRootRevisionCount != 1 {
+		t.Fatalf("first batch created %d root revisions, want 1", firstBatchRootRevisionCount)
 	}
 	if _, err := crawler.FindImportFrontier(context.Background(), rawDatabase, partialImport.ImportID, "beta.example"); err == nil {
 		t.Fatal("another site could read this site's saved import frontier")
@@ -9686,8 +9702,120 @@ func TestWholeSiteImportResumesSavedFrontierAfterQueueQuotaIncreases(t *testing.
 	if err := rawDatabase.QueryRow(`SELECT COUNT(1) FROM revisions WHERE domain=? AND page_path=?`, "localhost", "/copy").Scan(&rootRevisionCount); err != nil {
 		t.Fatal(err)
 	}
-	if rootRevisionCount != 1 {
-		t.Fatalf("resuming an unchanged page created %d revisions, want 1", rootRevisionCount)
+	if rootRevisionCount != 2 {
+		t.Fatalf("final template detection created %d root revisions, want original plus template revision", rootRevisionCount)
+	}
+	for _, importedPath := range []string{"/copy", "/copy/first", "/copy/second"} {
+		var importedHTML string
+		if err := rawDatabase.QueryRow(`SELECT html FROM pages WHERE domain=? AND path=?`, "localhost", importedPath).Scan(&importedHTML); err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(importedHTML, "SiteBrush-Template") {
+			t.Fatalf("shared template was not detected across import batches for %s: %s", importedPath, importedHTML)
+		}
+	}
+}
+
+func TestStartupSkipRecoversInterruptedImportFrontier(t *testing.T) {
+	application, rawDatabase := newTestApplication(t)
+	application.ensureDomainStorageUsageRow(context.Background(), "localhost")
+	if _, err := rawDatabase.Exec(`UPDATE domain_storage_usage SET limit_bytes=100000 WHERE domain=?`, "localhost"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := rawDatabase.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "admin@example.com", "old"); err != nil {
+		t.Fatal(err)
+	}
+	importRun := crawler.ImportFrontierRun{ID: "interrupted-run", Domain: "localhost", PagePath: "/copy", SourceURL: "https://source.example/"}
+	if err := crawler.CreateImportFrontier(context.Background(), rawDatabase, importRun); err != nil {
+		t.Fatal(err)
+	}
+	importPage := crawler.ImportFrontierPage{Key: "https://source.example/", URL: "https://source.example/", LocalPath: "/copy"}
+	if _, err := crawler.AddImportFrontierPage(context.Background(), rawDatabase, importRun.ID, importRun.Domain, importPage, 1000); err != nil {
+		t.Fatal(err)
+	}
+	if err := crawler.SetImportFrontierPageState(context.Background(), rawDatabase, importRun.ID, importRun.Domain, importPage.Key, "processing"); err != nil {
+		t.Fatal(err)
+	}
+
+	startupResults := make(chan siteDBMigrationEvent, 1)
+	databasePath := filepath.Join(application.storagePath, "sitebrush.db")
+	(&perSiteDBRouter{}).migrateStartupDatabase(context.Background(), databasePath, "localhost", nil, startupResults)
+	startupResult := <-startupResults
+	if startupResult.kind != "skipped" {
+		t.Fatalf("startup migration result = %+v, want skipped", startupResult)
+	}
+	storedRun, err := crawler.FindImportFrontier(context.Background(), rawDatabase, importRun.ID, importRun.Domain)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if storedRun.ID == "" {
+		t.Fatal("startup recovery removed an interrupted import")
+	}
+	claimedPages, err := crawler.ClaimImportFrontierPages(context.Background(), rawDatabase, importRun.ID, importRun.Domain, 10)
+	if err != nil || len(claimedPages) != 1 {
+		t.Fatalf("recovered pages = %+v, err=%v; want one claimable page", claimedPages, err)
+	}
+}
+
+func TestCanceledWholeSiteImportReleasesClaimedFrontier(t *testing.T) {
+	application, rawDatabase := newTestApplication(t)
+	application.ensureDomainStorageUsageRow(context.Background(), "localhost")
+	if _, err := rawDatabase.Exec(`UPDATE domain_storage_usage SET limit_bytes=100000 WHERE domain=?`, "localhost"); err != nil {
+		t.Fatal(err)
+	}
+	importRun := crawler.ImportFrontierRun{ID: "canceled-run", Domain: "localhost", PagePath: "/copy", SourceURL: "http://cancel.example/"}
+	if err := crawler.CreateImportFrontier(context.Background(), rawDatabase, importRun); err != nil {
+		t.Fatal(err)
+	}
+	rootURL, err := url.Parse(importRun.SourceURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rootPage := crawler.ImportFrontierPage{Key: crawler.WholeSitePageKey(rootURL), URL: rootURL.String(), LocalPath: "/copy"}
+	if _, err := crawler.AddImportFrontierPage(context.Background(), rawDatabase, importRun.ID, importRun.Domain, rootPage, 1000); err != nil {
+		t.Fatal(err)
+	}
+	if err := crawler.SetImportFrontierRunState(context.Background(), rawDatabase, importRun.ID, importRun.Domain, "partial"); err != nil {
+		t.Fatal(err)
+	}
+	previousHTTPClientFactory := newGrabHTTPClient
+	requestContext, cancelRequest := context.WithCancel(context.Background())
+	newGrabHTTPClient = func() *http.Client {
+		return &http.Client{Transport: cancelingGrabTransport{cancel: cancelRequest}}
+	}
+	defer func() {
+		newGrabHTTPClient = previousHTTPClientFactory
+		cancelRequest()
+	}()
+
+	result, err := application.importWholeRemoteSite(requestContext, grabImportRequest{
+		Domain:          importRun.Domain,
+		PagePath:        importRun.PagePath,
+		SourceURL:       importRun.SourceURL,
+		RemoteSourceURL: rootURL,
+		HTML:            `<html><body><a href="/child">Child</a></body></html>`,
+		Context:         requestContext,
+		ImportID:        importRun.ID,
+	})
+	if err != nil {
+		t.Fatalf("canceled import returned an error: %v", err)
+	}
+	if result.ImportID != importRun.ID || result.RemainingPages == 0 {
+		t.Fatalf("canceled import response = %+v, want resumable frontier", result)
+	}
+	var runState string
+	if err := rawDatabase.QueryRow(`SELECT state FROM whole_site_imports WHERE import_id=?`, importRun.ID).Scan(&runState); err != nil {
+		t.Fatal(err)
+	}
+	if runState != "partial" {
+		t.Fatalf("canceled import state = %q, want partial", runState)
+	}
+	var processingPageCount int
+	if err := rawDatabase.QueryRow(`SELECT COUNT(1) FROM whole_site_import_pages WHERE import_id=? AND state='processing'`, importRun.ID).Scan(&processingPageCount); err != nil {
+		t.Fatal(err)
+	}
+	if processingPageCount != 0 {
+		t.Fatalf("canceled import left %d pages processing", processingPageCount)
 	}
 }
 
