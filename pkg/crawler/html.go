@@ -15,6 +15,8 @@ import (
 	"golang.org/x/text/encoding"
 )
 
+const MaximumPageLinks = 2048
+
 type DecodeResult struct {
 	Text           string
 	Encoding       string
@@ -107,7 +109,17 @@ func decodeText(textBytes []byte, contentType string, inspectHTMLMeta bool) Deco
 }
 
 func ExtractPageLinks(htmlSource string, baseURL, siteURL *url.URL) []*url.URL {
-	pageURLs := make([]*url.URL, 0, 16)
+	pageURLs, _ := ExtractPageLinksWithLimit(htmlSource, baseURL, siteURL, MaximumPageLinks)
+	return pageURLs
+}
+
+// ExtractPageLinksWithLimit bounds memory use while reporting incomplete scans.
+func ExtractPageLinksWithLimit(htmlSource string, baseURL, siteURL *url.URL, maximum int) ([]*url.URL, bool) {
+	if maximum < 1 {
+		maximum = MaximumPageLinks
+	}
+	pageURLs := make([]*url.URL, 0, min(maximum, 16))
+	seenURLs := make(map[string]struct{}, min(maximum, 16))
 	tokenizer := html.NewTokenizer(strings.NewReader(htmlSource))
 	for {
 		tokenType := tokenizer.Next()
@@ -132,10 +144,18 @@ func ExtractPageLinks(htmlSource string, baseURL, siteURL *url.URL) []*url.URL {
 			if parseErr != nil || !SameHost(siteURL, linkedPageURL) || !IsPageURL(linkedPageURL) {
 				continue
 			}
+			linkKey := linkedPageURL.String()
+			if _, seen := seenURLs[linkKey]; seen {
+				continue
+			}
+			if len(pageURLs) >= maximum {
+				return pageURLs, true
+			}
+			seenURLs[linkKey] = struct{}{}
 			pageURLs = append(pageURLs, linkedPageURL)
 		}
 	}
-	return pageURLs
+	return pageURLs, false
 }
 
 func SameHost(leftURL, rightURL *url.URL) bool {

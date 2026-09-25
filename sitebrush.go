@@ -14462,7 +14462,11 @@ func (a *App) prepareWholeRemoteSiteImport(importRequest grabImportRequest) (*pa
 			pageHTML = downloadedHTML
 		}
 
-		for _, linkedPageURL := range crawler.ExtractPageLinks(pageHTML, currentJob.URL, startURL) {
+		linkedPageURLs, linksTruncated := crawler.ExtractPageLinksWithLimit(pageHTML, currentJob.URL, startURL, wholeSiteImportMaxPages)
+		if linksTruncated {
+			spider.recordFailedResource(currentJob.URL.String(), "page link limit reached")
+		}
+		for _, linkedPageURL := range linkedPageURLs {
 			linkedPageKey := crawler.WholeSitePageKey(linkedPageURL)
 			if linkedPageKey == "" {
 				continue
@@ -14471,6 +14475,7 @@ func (a *App) prepareWholeRemoteSiteImport(importRequest grabImportRequest) (*pa
 				continue
 			}
 			if len(knownPagePathsByKey) >= wholeSiteImportMaxPages {
+				spider.recordFailedResource(startURL.String(), "whole-site page limit reached")
 				break
 			}
 			knownPagePathsByKey[linkedPageKey] = crawler.WholeSiteLocalPath(basePath, startURL, linkedPageURL)
@@ -14491,6 +14496,9 @@ func (a *App) prepareWholeRemoteSiteImport(importRequest grabImportRequest) (*pa
 		spider.downloadedTotal++
 		consecutiveFailures = 0
 		spider.publishResourceProgress("downloaded", currentJob.URL.String(), 100, int64(len(pageHTML)), int64(len(pageHTML)))
+	}
+	if len(pageQueue) > 0 {
+		spider.recordFailedResource(startURL.String(), "whole-site page limit reached")
 	}
 	if len(importedPages) == 0 {
 		return nil, nil, errors.New("no pages were imported")
@@ -14674,7 +14682,12 @@ func crawlWholeRemoteSite(ctx context.Context, startURL *url.URL, startHTML, pub
 				spider.publishResourceProgress("partial", currentJob.URL.String(), 100, int64(len(pageHTML)), int64(len(pageHTML)))
 				continue
 			}
-			for _, linkedPageURL := range crawler.ExtractPageLinks(pageHTML, currentJob.URL, startURL) {
+			linkedPageURLs, linksTruncated := crawler.ExtractPageLinksWithLimit(pageHTML, currentJob.URL, startURL, wholeSiteImportMaxPages)
+			if linksTruncated {
+				partial = true
+				spider.recordFailedResource(currentJob.URL.String(), "page link limit reached")
+			}
+			for _, linkedPageURL := range linkedPageURLs {
 				linkedPageKey := crawler.WholeSitePageKey(linkedPageURL)
 				if linkedPageKey == "" {
 					continue
@@ -14684,6 +14697,7 @@ func crawlWholeRemoteSite(ctx context.Context, startURL *url.URL, startHTML, pub
 				}
 				if len(knownPagePathsByKey) >= wholeSiteImportMaxPages {
 					partial = true
+					spider.recordFailedResource(startURL.String(), "whole-site page limit reached")
 					break
 				}
 				knownPagePathsByKey[linkedPageKey] = crawler.WholeSiteLocalPath(cleanPath(publicAssetBasePath), startURL, linkedPageURL)
@@ -14711,6 +14725,10 @@ func crawlWholeRemoteSite(ctx context.Context, startURL *url.URL, startHTML, pub
 		<-workerDone
 	}
 
+	if len(pageQueue) > 0 {
+		partial = true
+		spider.recordFailedResource(startURL.String(), "whole-site page limit reached")
+	}
 	if ctx.Err() != nil {
 		partial = true
 	}
