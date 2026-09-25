@@ -127,12 +127,19 @@ func ParsePrefixLine(domain, rawLine string) (Rule, bool) {
 }
 
 func FindBestRule(domain, pagePath string, rules []Rule) (Rule, bool) {
+	requestDomain := NormalizeDomain(domain)
+	if requestDomain == "" {
+		requestDomain = "localhost"
+	}
 	requestPath := CleanPath(pagePath)
 	var bestRule Rule
 	for _, candidateRule := range rules {
 		candidateRule.Domain = NormalizeDomain(candidateRule.Domain)
 		if candidateRule.Domain == "" {
-			candidateRule.Domain = NormalizeDomain(domain)
+			candidateRule.Domain = requestDomain
+		}
+		if candidateRule.Domain != requestDomain {
+			continue
 		}
 		candidateRule.Path = CleanPath(candidateRule.Path)
 		candidateRule.PasswordHash = strings.TrimSpace(candidateRule.PasswordHash)
