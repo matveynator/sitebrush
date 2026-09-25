@@ -4448,10 +4448,10 @@ func (a *App) runSecurityAnalytics(stop <-chan struct{}) {
 			category := state.Record(browserstats.RequestObservation{Time: event.OccurredAt, IP: address, Path: event.Path, Query: event.Query, Method: event.Method, Status: event.StatusCode, Bytes: event.Bytes, Agent: event.UserAgent, Language: analyticsLanguageLabel(event.AcceptLanguage), Country: country, City: city, Blocked: event.SecurityBlocked, ServerLoadHigh: sitebrushSecurityLoadWasHigh(hostLoadHistory, event.OccurredAt), Trusted: event.TrustedPeer, IndexingCrawler: event.IndexingCrawler})
 			if category != "" && a.attackGuard != nil {
 				description := securityIncidentDescription(category, event.Path, event.StatusCode)
-				block, alreadyBlocked := a.attackGuard.Check(address, event.OccurredAt)
+				block, alreadyBlocked := a.attackGuard.CheckSite(domain, address, event.OccurredAt)
 				blocked := alreadyBlocked
 				if !alreadyBlocked {
-					block, blocked = a.attackGuard.ObserveIncident(address, category, description, event.OccurredAt)
+					block, blocked = a.attackGuard.ObserveSiteIncident(domain, address, category, description, event.OccurredAt)
 				}
 				if blocked && !alreadyBlocked && a.securityGlobalSignals != nil && securityBlockReasonFirstObservation(block, category, description) {
 					settings, settingsErr := a.attackGuard.Settings()
