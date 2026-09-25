@@ -20055,7 +20055,7 @@ func (a *App) updateAdminIPAllowlist(r *http.Request, domain, email, action, raw
 				return errors.New("allow the current IP before enabling protection")
 			}
 			// END current address coverage check.
-			_, err := transaction.ExecContext(r.Context(), `INSERT INTO admin_ip_policies(domain,email,enabled_at) VALUES(?,?,?)`, domain, email, time.Now().Unix())
+			_, err = transaction.ExecContext(r.Context(), `INSERT INTO admin_ip_policies(domain,email,enabled_at) VALUES(?,?,?)`, domain, email, time.Now().Unix())
 			return err
 		})
 	}
