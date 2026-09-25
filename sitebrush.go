@@ -30744,7 +30744,7 @@ func preferredLanguageCode(acceptLanguageHeader string) string {
 }
 
 func safeFileName(rawName string) string {
-	if rawName == "" {
+	if rawName == "" || strings.ContainsAny(rawName, `/\\`) {
 		return ""
 	}
 	cleaned := path.Base(rawName)
