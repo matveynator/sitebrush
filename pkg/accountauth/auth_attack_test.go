@@ -133,3 +133,48 @@ func TestAuthAttackFutureTimestampCannotExtendLoginChallengeLifetime(t *testing.
 		})
 	}
 }
+
+func TestMailAbuseConcurrentSendReservationAllowsOnlyOneAction(t *testing.T) {
+	database := testDatabase(t)
+	ctx := context.Background()
+	now := time.Unix(1_800_800_600, 0).UTC()
+	const attempts = 50
+	start := make(chan struct{})
+	results := make(chan bool, attempts)
+	var workers sync.WaitGroup
+	for attempt := 0; attempt < attempts; attempt++ {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			<-start
+			transaction, err := database.BeginTx(ctx, nil)
+			if err != nil {
+				results <- false
+				return
+			}
+			allowed, reserveErr := Reserve(ctx, transaction, "example.org", "owner@example.org", "192.0.2.94", now)
+			if reserveErr != nil || transaction.Commit() != nil {
+				_ = transaction.Rollback()
+				results <- false
+				return
+			}
+			results <- allowed
+		}()
+	}
+	close(start)
+	workers.Wait()
+	close(results)
+	allowedActions := 0
+	for allowed := range results {
+		if allowed {
+			allowedActions++
+		}
+	}
+	var sentCount int
+	if err := database.QueryRow(`SELECT sent_count FROM account_code_rates WHERE domain=? AND email=? AND client_ip=?`, "example.org", "owner@example.org", "192.0.2.94").Scan(&sentCount); err != nil {
+		t.Fatal(err)
+	}
+	if allowedActions != 1 || sentCount != 1 {
+		t.Fatalf("SECURITY: concurrent email reservations allowed=%d recorded=%d, want exactly one", allowedActions, sentCount)
+	}
+}

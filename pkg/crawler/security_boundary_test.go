@@ -3,6 +3,7 @@ package crawler
 import (
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -31,6 +32,25 @@ func TestSecurityBoundaryExtractPageLinksStaysOnOriginalHost(t *testing.T) {
 		if !SameHost(site, link) {
 			t.Fatalf("SECURITY: cross-host link escaped crawler boundary: %s", link)
 		}
+	}
+}
+
+func TestResourceAttackPageLinkExtractionDeduplicatesAndStopsAtBound(t *testing.T) {
+	base, _ := url.Parse("https://example.com/index.html")
+	site, _ := url.Parse("https://example.com/")
+	duplicateLinks := strings.Repeat(`<a href="/same.html">same</a>`, 1000)
+	sourceHTML := duplicateLinks + `<a href="/one.html">one</a><a href="/two.html">two</a><a href="/three.html">three</a><a href="/four.html">four</a>`
+	pageURLs, truncated := ExtractPageLinksWithLimit(sourceHTML, base, site, 3)
+	if len(pageURLs) != 3 || !truncated {
+		t.Fatalf("bounded page links = %d truncated=%t, want 3 and true", len(pageURLs), truncated)
+	}
+	if pageURLs[0].Path != "/same.html" || pageURLs[1].Path != "/one.html" || pageURLs[2].Path != "/two.html" {
+		t.Fatalf("page links did not preserve first-seen order: %#v", pageURLs)
+	}
+	withoutOverflow := duplicateLinks + `<a href="/one.html">one</a><a href="/two.html">two</a>`
+	pageURLs, truncated = ExtractPageLinksWithLimit(withoutOverflow, base, site, 3)
+	if len(pageURLs) != 3 || truncated {
+		t.Fatalf("exactly bounded page links = %d truncated=%t, want 3 and false", len(pageURLs), truncated)
 	}
 }
 
@@ -68,6 +88,34 @@ func TestSecurityBoundaryCrawlerRejectsPrivateTargetsBeforeTransport(t *testing.
 	}
 }
 
+func TestSSRFAttackCrawlerClientStopsPublicToLoopbackRedirect(t *testing.T) {
+	transportCalls := 0
+	client := NewSessionClient(time.Second, securityRoundTripper(func(request *http.Request) (*http.Response, error) {
+		transportCalls++
+		if transportCalls == 1 {
+			return &http.Response{
+				StatusCode: http.StatusFound,
+				Header:     http.Header{"Location": []string{"http://127.0.0.1/private"}},
+				Body:       io.NopCloser(strings.NewReader("redirect")),
+				Request:    request,
+			}, nil
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"text/html"}},
+			Body:       io.NopCloser(strings.NewReader("<html>private data</html>")),
+			Request:    request,
+		}, nil
+	}))
+	publicURL, _ := url.Parse("https://public.example/import")
+	if _, err := DownloadHTMLPageContext(context.Background(), client, publicURL, nil); err == nil {
+		t.Fatal("SECURITY: crawler followed a public redirect to loopback")
+	}
+	if transportCalls != 1 {
+		t.Fatalf("SECURITY: crawler transport received %d requests, want only the initial public request", transportCalls)
+	}
+}
+
 func TestCrawlerRetryCancellationAndNoRetryBranches(t *testing.T) {
 	publicURL, _ := url.Parse("https://example.com/page")
 	client := NewSessionClient(time.Second, securityRoundTripper(func(*http.Request) (*http.Response, error) {
@@ -76,10 +124,10 @@ func TestCrawlerRetryCancellationAndNoRetryBranches(t *testing.T) {
 	attempts := 0
 	retries := 0
 	_, err := DownloadHTMLPageWithRetriesContext(context.Background(), client, publicURL, nil, HTMLDownloadRetryOptions{
-		Attempts: 3,
-		Delay: -time.Second,
-		OnAttempt: func(_, _ int, _ *url.URL) { attempts++ },
-		OnRetry: func(_, _ int, _ *url.URL, _ error, _ time.Duration) { retries++ },
+		Attempts:    3,
+		Delay:       -time.Second,
+		OnAttempt:   func(_, _ int, _ *url.URL) { attempts++ },
+		OnRetry:     func(_, _ int, _ *url.URL, _ error, _ time.Duration) { retries++ },
 		ShouldRetry: func(HTMLDownloadResult, error) bool { return false },
 	})
 	if err == nil || attempts != 1 || retries != 0 {

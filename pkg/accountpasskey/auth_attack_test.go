@@ -62,3 +62,29 @@ func TestAuthAttackFutureTimestampCannotKeepWebAuthnChallengeAlive(t *testing.T)
 	}
 	_ = transaction.Rollback()
 }
+
+func TestAuthAttackPasskeyDeleteCannotTargetAnotherUsersCredential(t *testing.T) {
+	database := securityPasskeyDatabase(t)
+	ctx := context.Background()
+	credentialJSON := `{"id":"credential"}`
+	if _, err := database.Exec(`INSERT INTO account_passkeys(domain,email,user_handle,credential_id,credential_json,created_at,last_used_at) VALUES(?,?,?,?,?,?,0)`,
+		"example.com", "owner@example.com", "owner-handle", "owner-credential", credentialJSON, 1); err != nil {
+		t.Fatal(err)
+	}
+	transaction := mustBeginPasskey(t, database)
+	if err := Delete(ctx, transaction, "example.com", "attacker@example.com", "owner-credential"); err != nil {
+		_ = transaction.Rollback()
+		t.Fatal(err)
+	}
+	if err := transaction.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	var remaining int
+	if err := database.QueryRow(`SELECT COUNT(1) FROM account_passkeys WHERE domain=? AND email=? AND credential_id=?`,
+		"example.com", "owner@example.com", "owner-credential").Scan(&remaining); err != nil {
+		t.Fatal(err)
+	}
+	if remaining != 1 {
+		t.Fatal("SECURITY: another account's passkey was deleted by an IDOR request")
+	}
+}

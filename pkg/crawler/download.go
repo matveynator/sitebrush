@@ -38,7 +38,7 @@ type HTMLDownloadRetryOptions struct {
 
 func NewSessionClient(timeout time.Duration, transport http.RoundTripper) *http.Client {
 	jar, _ := cookiejar.New(nil)
-	return &http.Client{Timeout: timeout, Transport: transport, Jar: jar}
+	return &http.Client{Timeout: timeout, Transport: transport, Jar: jar, CheckRedirect: outboundhttp.CheckRedirect}
 }
 
 func DownloadHTML(client *http.Client, pageURL *url.URL, applyHeaders func(*http.Request)) (string, bool, error) {
