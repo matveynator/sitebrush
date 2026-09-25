@@ -164,6 +164,18 @@
   <div class="profile-account-card-header">
     <h2>{{index .T "admin_ip_allowlist_title"}}</h2>
     <p>{{index .T "admin_ip_allowlist_help"}}</p>
+    <form method="post" action="?profile" class="auth-trusted-row">
+      <input type="hidden" name="account_csrf" value="{{.AccountCSRF}}">
+      {{if .AdminIPProtectionEnabled}}
+      <input type="hidden" name="profile_action" value="admin_ip_disable">
+      <p><strong>{{index .T "admin_ip_enabled"}}</strong></p>
+      <button type="submit">{{index .T "admin_ip_disable"}}</button>
+      {{else}}
+      <input type="hidden" name="profile_action" value="admin_ip_enable">
+      <label><input type="checkbox" name="static_ip_confirmation" value="yes" required> {{index .T "admin_ip_static_confirm"}}</label>
+      <button type="submit">{{index .T "admin_ip_enable"}}</button>
+      {{end}}
+    </form>
   </div>
   <div class="profile-account-list">
     {{range .AdminAllowedIPs}}<form method="post" action="?profile" class="auth-trusted-row">
@@ -186,8 +198,13 @@
 </section>
 <section class="authentication-card profile-form profile-account-card">
   <div class="profile-account-card-header">
-    <h2>{{index .T "auth_passkey_title"}}</h2>
-    <p>{{index .T "auth_passkey_offer_text"}}</p>
+    <div class="auth-method-heading">
+      <img class="auth-method-illustration" src="/p/static/sitebrush-goofer-key-small.png" alt="" width="112" height="102" loading="lazy">
+      <div class="auth-method-copy">
+        <h2>{{index .T "auth_passkey_title"}}</h2>
+        <p>{{index .T "auth_passkey_offer_text"}}</p>
+      </div>
+    </div>
   </div>
   {{if not .PasskeyOffer}}<p id="SiteBrushPasskeyCreateStatus" class="text-danger" role="status"></p>
   <button type="button" data-passkey-create data-account-csrf="{{.AccountCSRF}}" data-passkey-start="?profile&passkey_begin" data-passkey-finish="?profile&passkey_finish" data-passkey-status="#SiteBrushPasskeyCreateStatus" data-passkey-error="{{index .T "auth_passkey_failed"}}" data-passkey-unavailable="{{index .T "auth_passkey_unavailable"}}">{{index .T "auth_passkey_create"}}</button>{{end}}
@@ -205,8 +222,13 @@
 
 <section class="authentication-card profile-form profile-account-card profile-authenticator-card">
   <div class="profile-account-card-header">
-    <h2>{{index .T "auth_totp_title"}}</h2>
-    <p>{{index .T "auth_totp_explanation"}}</p>
+    <div class="auth-method-heading">
+      <img class="auth-method-illustration" src="/p/static/sitebrush-goofer-otp-small.png" alt="" width="112" height="102" loading="lazy">
+      <div class="auth-method-copy">
+        <h2>{{index .T "auth_totp_title"}}</h2>
+        <p>{{index .T "auth_totp_explanation"}}</p>
+      </div>
+    </div>
   </div>
 
   {{if not .TOTPEnabled}}
