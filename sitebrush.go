@@ -25874,6 +25874,12 @@ func (a *App) listManagedFiles(ctx context.Context, r *http.Request, currentPath
 }
 
 func (a *App) uploadFiles(w http.ResponseWriter, r *http.Request, currentPath string) {
+	if r.MultipartForm == nil {
+		if err := r.ParseMultipartForm(fileUploadMultipartMemoryBytes); err != nil {
+			http.Error(w, "failed to parse uploaded files", http.StatusBadRequest)
+			return
+		}
+	}
 	if r.MultipartForm == nil || len(r.MultipartForm.File["upload_files"]) == 0 {
 		http.Error(w, "no files selected", http.StatusBadRequest)
 		return
