@@ -13210,6 +13210,18 @@ func TestConfirmedRegistrationQueuesAutomaticSSLRecheck(t *testing.T) {
 	}
 }
 
+func TestConfirmedRegistrationBypassesAutomaticSSLObservationCap(t *testing.T) {
+	if automaticSSLObservationAdmitted("tls_observation", false, automaticSSLMaximumObservedDomains, automaticSSLMaximumObservedDomains) {
+		t.Fatal("untrusted TLS observation exceeded the automatic SSL domain cap")
+	}
+	if !automaticSSLObservationAdmitted("registration_confirmed", false, automaticSSLMaximumObservedDomains, automaticSSLMaximumObservedDomains) {
+		t.Fatal("confirmed registration was rejected at the automatic SSL domain cap")
+	}
+	if !automaticSSLObservationAdmitted("renewal_audit", false, automaticSSLMaximumObservedDomains, automaticSSLMaximumObservedDomains) {
+		t.Fatal("trusted renewal audit was rejected at the automatic SSL domain cap")
+	}
+}
+
 func TestConfirmedLocalRegistrationDoesNotQueueAutomaticSSL(t *testing.T) {
 	application := &App{automaticSSL: make(chan automaticSSLRequest, 1)}
 	request := httptest.NewRequest(http.MethodPost, "https://localhost/?email_confirm=token", nil)
