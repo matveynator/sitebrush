@@ -202,7 +202,7 @@ func Verify(ctx context.Context, tx *sql.Tx, domain, token, code, ip string, now
 	if err != nil {
 		return Outcome{}, err
 	}
-	if now.Unix()-created >= int64(CodeTTL/time.Second) || attempts >= 5 {
+	if created > now.Unix() || now.Unix()-created >= int64(CodeTTL/time.Second) || attempts >= 5 {
 		return Outcome{Status: "invalid"}, nil
 	}
 	if _, err = tx.ExecContext(ctx, `UPDATE account_login_codes SET attempts=attempts+1 WHERE token=?`, token); err != nil {
@@ -241,7 +241,6 @@ func Verify(ctx context.Context, tx *sql.Tx, domain, token, code, ip string, now
 	return Outcome{Status: "session", Token: session, Email: email, Path: path, Language: language}, err
 }
 
-
 func VerifyLink(ctx context.Context, tx *sql.Tx, domain, token, ip string, now time.Time) (Outcome, error) {
 	var email, passwordHash, path, language string
 	var attempts int
@@ -253,7 +252,7 @@ func VerifyLink(ctx context.Context, tx *sql.Tx, domain, token, ip string, now t
 	if err != nil {
 		return Outcome{}, err
 	}
-	if now.Unix()-created >= int64(CodeTTL/time.Second) || attempts >= 5 {
+	if created > now.Unix() || now.Unix()-created >= int64(CodeTTL/time.Second) || attempts >= 5 {
 		return Outcome{Status: "invalid"}, nil
 	}
 	var currentPassword string

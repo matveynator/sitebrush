@@ -20658,15 +20658,17 @@ func (a *App) serviceMailLocalFallbackAllowed(ctx context.Context, domain, langu
 
 func emailConfirmationURL(r *http.Request, token string) string {
 	scheme := "http"
-	if forwardedProto := strings.TrimSpace(strings.Split(r.Header.Get("X-Forwarded-Proto"), ",")[0]); forwardedProto == "http" || forwardedProto == "https" {
-		scheme = forwardedProto
-	} else if r.TLS != nil {
+	if r.TLS != nil {
 		scheme = "https"
 	}
-	host := strings.TrimSpace(strings.Split(r.Header.Get("X-Forwarded-Host"), ",")[0])
-	if host == "" {
-		host = r.Host
+	if trustedForwardingProxyIP(remoteIPAddress(r)) {
+		if forwardedProto := strings.ToLower(strings.TrimSpace(strings.Split(r.Header.Get("X-Forwarded-Proto"), ",")[0])); forwardedProto == "http" || forwardedProto == "https" {
+			scheme = forwardedProto
+		}
 	}
+	// Request Host is the domain SiteBrush routed and authorized; an untrusted
+	// forwarding header must not redirect one-time account links elsewhere.
+	host := strings.TrimSpace(r.Host)
 	confirmationURL := url.URL{Scheme: scheme, Host: host, Path: cleanPath(r.URL.Path)}
 	queryValues := confirmationURL.Query()
 	queryValues.Set("email_confirm", token)

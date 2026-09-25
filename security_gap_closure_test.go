@@ -39,6 +39,19 @@ func TestSecurityBoundaryClientIPAddressAcceptsForwardingOnlyFromTrustedBoundary
 	}
 }
 
+func TestSecurityBoundaryEmailConfirmationURLIgnoresForgedForwardedHost(t *testing.T) {
+	request := httptest.NewRequest(http.MethodGet, "https://example.com/?recover", nil)
+	request.Host = "example.com"
+	request.Header.Set("X-Forwarded-Host", "attacker.example")
+	request.RemoteAddr = "198.51.100.90:4567"
+	request.Header.Set("X-Forwarded-Proto", "http")
+
+	confirmationURL := emailConfirmationURL(request, "one-time-secret")
+	if !strings.HasPrefix(confirmationURL, "https://example.com/") || strings.Contains(confirmationURL, "attacker.example") {
+		t.Fatalf("SECURITY: account confirmation URL trusted forged forwarding host: %q", confirmationURL)
+	}
+}
+
 func TestSecurityBoundaryMissingPageEscapesReflectedPath(t *testing.T) {
 	application, _ := newTestApplication(t)
 	injectedPath := `/<img src=x onerror=alert(1)>`

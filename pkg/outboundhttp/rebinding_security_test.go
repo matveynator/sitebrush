@@ -60,3 +60,30 @@ func TestSecurityBoundaryRequirePublicURLRejectsMappedAndMetadataAddresses(t *te
 		}
 	}
 }
+
+func TestSSRFAttackNumericLoopbackHostFormsCannotReachDialer(t *testing.T) {
+	for _, hostName := range []string{"2130706433", "0x7f000001", "0177.0.0.1", "127.1"} {
+		transport, err := NewTransport(nil, TransportOptions{
+			Resolver: fixedResolver{addresses: []net.IPAddr{{IP: net.ParseIP("127.0.0.1")}}},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := transport.DialContext(context.Background(), "tcp", net.JoinHostPort(hostName, "80")); err == nil || !strings.Contains(err.Error(), "private network") {
+			t.Fatalf("SECURITY: private DNS answer for numeric host form %q was allowed: %v", hostName, err)
+		}
+	}
+}
+
+func TestSSRFAttackMixedIPv4AndIPv6DNSAnswerFailsClosed(t *testing.T) {
+	transport, err := NewTransport(nil, TransportOptions{Resolver: fixedResolver{addresses: []net.IPAddr{
+		{IP: net.ParseIP("8.8.8.8")},
+		{IP: net.ParseIP("fd00::1")},
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := transport.DialContext(context.Background(), "tcp", "mixed.example:80"); err == nil || !strings.Contains(err.Error(), "private network") {
+		t.Fatalf("SECURITY: mixed public/private A/AAAA answers were accepted: %v", err)
+	}
+}
