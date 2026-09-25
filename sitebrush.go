@@ -9843,13 +9843,13 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 
 // Blocked addresses see only published files; SiteBrush control requests look absent.
 func (a *App) serveStealthStaticForBlockedAdminIP(w http.ResponseWriter, r *http.Request, domain, pagePath string) bool {
-	var stealthEnabled int
-	if err := a.db.QueryRowContext(r.Context(), `SELECT COUNT(1) FROM admin_stealth_modes WHERE domain=? AND enabled_at>0`, domain).Scan(&stealthEnabled); err != nil {
+	stealthEnabled, err := a.adminStealthEnabled(r.Context(), domain, "")
+	if err != nil {
 		w.Header().Set("Cache-Control", "no-store")
 		http.Error(w, "site security settings temporarily unavailable", http.StatusServiceUnavailable)
 		return true
 	}
-	if stealthEnabled == 0 {
+	if !stealthEnabled {
 		return false
 	}
 	if !a.adminIPLoginBlocked(r.Context(), domain, accountClientIP(r), "") {
@@ -9884,6 +9884,16 @@ func (a *App) serveStealthStaticForBlockedAdminIP(w http.ResponseWriter, r *http
 	}
 	http.NotFound(w, r)
 	return true
+}
+
+func (a *App) adminStealthEnabled(ctx context.Context, domain, email string) (bool, error) {
+	var enabled int
+	err := a.db.QueryRowContext(ctx, `
+SELECT COUNT(1)
+FROM admin_stealth_modes stealth
+JOIN admin_ip_policies policy ON policy.domain=stealth.domain AND policy.email=stealth.email
+WHERE stealth.domain=? AND stealth.enabled_at>0 AND (?='' OR stealth.email=?)`, domain, email, email).Scan(&enabled)
+	return enabled > 0, err
 }
 
 // An IP restriction removes the session before normal routing, so public pages
@@ -20666,8 +20676,8 @@ func (a *App) renderProfilePage(w http.ResponseWriter, r *http.Request, email, s
 		if a.db.QueryRowContext(r.Context(), `SELECT COUNT(1) FROM admin_ip_policies WHERE domain=? AND email=?`, domain, accountEmail).Scan(&enabled) == nil {
 			adminIPProtectionEnabled = enabled > 0
 		}
-		if a.db.QueryRowContext(r.Context(), `SELECT COUNT(1) FROM admin_stealth_modes WHERE domain=? AND email=? AND enabled_at>0`, domain, accountEmail).Scan(&enabled) == nil {
-			adminStealthEnabled = enabled > 0
+		if enabled, queryErr := a.adminStealthEnabled(r.Context(), domain, accountEmail); queryErr == nil {
+			adminStealthEnabled = enabled
 		}
 		rows, err := a.db.QueryContext(r.Context(), `SELECT token,client_ip,created_at,user_agent,language FROM sessions WHERE user_email=? ORDER BY created_at DESC LIMIT 50`, domain+"|"+accountEmail)
 		if err == nil {
