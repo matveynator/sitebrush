@@ -2658,6 +2658,41 @@ func TestMobileServicePageDesignCoversEverySharedTemplate(t *testing.T) {
 	}
 }
 
+func TestSecurityAnalyticsChartsRenderDailyActivityAndVisibleCategoryBars(t *testing.T) {
+	analyticsTemplateBytes, err := fs.ReadFile(embeddedWebFiles, "web/analytics.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	analyticsTemplate := string(analyticsTemplateBytes)
+	for _, requiredFragment := range []string{
+		"function dailyActivityOpacity(count, averageDailyCount)",
+		"Math.min(0.9, Math.max(0.12, 0.9 * count / averageDailyCount))",
+		"renderHours(initialDay);",
+		"const intensity = count / dailyTotal;",
+		"marker.style.fill = securityTypeColor(category);",
+	} {
+		if !strings.Contains(analyticsTemplate, requiredFragment) {
+			t.Errorf("security analytics chart does not contain %q", requiredFragment)
+		}
+	}
+
+	for _, category := range []string{
+		"rapid-crawl", "enumeration", "secret", "cms", "admin-discovery",
+		"authentication-failures", "repository", "source-backup", "sitebrush-exploit",
+		"traversal", "injection", "scanner-client",
+	} {
+		quotedCategoryColor := "'" + category + "': '#"
+		plainCategoryColor := category + ": '#"
+		if !strings.Contains(analyticsTemplate, quotedCategoryColor) && !strings.Contains(analyticsTemplate, plainCategoryColor) {
+			t.Errorf("security issue category %q does not have a dedicated chart color", category)
+		}
+	}
+
+	if !strings.Contains(analyticsTemplate, ".security-rank-fill {\n      display:block;") {
+		t.Fatal("security country chart bar fill must be a visible block element")
+	}
+}
+
 func TestHostingAndSupportClientHostingViewMarksStaleSync(t *testing.T) {
 	now := time.Date(2026, 6, 18, 12, 0, 0, 0, time.UTC)
 	view := buildHostingAndSupportClientHostingView(hostingandsupport.ClientHosting{
@@ -3425,7 +3460,7 @@ func TestAnalyticsPageRequiresAdminAndRendersPreparedReport(t *testing.T) {
 	securityResponse := httptest.NewRecorder()
 	application.route(securityResponse, securityRequest)
 	securityBody := securityResponse.Body.String()
-	if securityResponse.Code != http.StatusOK || !strings.Contains(securityBody, `data-activity-calendar="security"`) || !strings.Contains(securityBody, `data-hour-title="Events by hour"`) || !strings.Contains(securityBody, `data-type-title="Events by problem type"`) || !strings.Contains(securityBody, `aria-label="Events by problem type"`) || strings.Contains(securityBody, `Типы атак`) || !strings.Contains(securityBody, `border:1px solid rgba(127,127,127,.18) !important`) || !strings.Contains(securityBody, `[data-bs-theme="dark"] .activity-calendar-security { --activity-level-0:#20252d; }`) || strings.Contains(securityBody, `border:1px solid #6e7681 !important`) || !strings.Contains(securityBody, `class="security-calendar-insights"`) || !strings.Contains(securityBody, `data-calendar-radar`) || !strings.Contains(securityBody, `data-calendar-types`) || !strings.Contains(securityBody, `data-security-type="rapid-crawl"`) || !strings.Contains(securityBody, `data-description="Rapid crawl: a non-approved automated client`) || !strings.Contains(securityBody, `slice(0, 8)`) || !strings.Contains(securityBody, `data-security-legend-description`) || !strings.Contains(securityBody, `data-security-legend-level="4"`) || !strings.Contains(securityBody, `data-level="4"][data-intensity="4"]`) || !strings.Contains(securityBody, `securityActivityColor(categoryLevel, intensityLevel)`) || !strings.Contains(securityBody, `#security-activity .activity-calendar-hour-chart .hourly-chart-bar[data-level="4"][data-intensity="4"]`) || !strings.Contains(securityBody, `bar.dataset.level`) || !strings.Contains(securityBody, `pointerenter`) || !strings.Contains(securityBody, `activity-calendar-legend`) {
+	if securityResponse.Code != http.StatusOK || !strings.Contains(securityBody, `data-activity-calendar="security"`) || !strings.Contains(securityBody, `data-hour-title="Events by hour"`) || !strings.Contains(securityBody, `data-type-title="Events by problem type"`) || !strings.Contains(securityBody, `aria-label="Events by problem type"`) || strings.Contains(securityBody, `Типы атак`) || !strings.Contains(securityBody, `border:1px solid rgba(127,127,127,.18) !important`) || !strings.Contains(securityBody, `[data-bs-theme="dark"] .activity-calendar-security { --activity-level-0:#20252d; }`) || strings.Contains(securityBody, `border:1px solid #6e7681 !important`) || !strings.Contains(securityBody, `class="security-calendar-insights"`) || !strings.Contains(securityBody, `data-calendar-radar`) || !strings.Contains(securityBody, `data-calendar-types`) || !strings.Contains(securityBody, `data-security-type="rapid-crawl"`) || !strings.Contains(securityBody, `data-description="Rapid crawl: a non-approved automated client`) || !strings.Contains(securityBody, `renderHours(initialDay);`) || !strings.Contains(securityBody, `const intensity = count / dailyTotal;`) || !strings.Contains(securityBody, `marker.style.fill = securityTypeColor(category);`) || !strings.Contains(securityBody, `data-security-legend-description`) || !strings.Contains(securityBody, `data-security-legend-level="4"`) || !strings.Contains(securityBody, `data-level="4"][data-intensity="4"]`) || !strings.Contains(securityBody, `#security-activity .activity-calendar-hour-chart .hourly-chart-bar[data-level="4"][data-intensity="4"]`) || !strings.Contains(securityBody, `bar.dataset.level`) || !strings.Contains(securityBody, `pointerenter`) || !strings.Contains(securityBody, `activity-calendar-legend`) {
 		t.Fatalf("security analytics heatmap status=%d body=%q", securityResponse.Code, securityResponse.Body.String())
 	}
 }
@@ -15479,6 +15514,9 @@ func TestAnalyticsSecurityObservesControllerAndPersistsSummary(t *testing.T) {
 	go func() { defer close(done); app.runSecurityAnalytics(stop) }()
 	defer func() { close(stop); <-done }()
 	handler := app.analyticsMiddleware(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(401); _, _ = w.Write([]byte("denied")) }))
+	normalRequest := httptest.NewRequest("GET", "http://localhost/", nil)
+	normalRequest.RemoteAddr = "192.0.2.8:12345"
+	handler.ServeHTTP(httptest.NewRecorder(), normalRequest)
 	request := httptest.NewRequest("POST", "http://localhost/.env?login&password=never-store", nil)
 	request.RemoteAddr = "192.0.2.8:12345"
 	handler.ServeHTTP(httptest.NewRecorder(), request)
@@ -15493,6 +15531,26 @@ func TestAnalyticsSecurityObservesControllerAndPersistsSummary(t *testing.T) {
 			if len(state.Incidents) == 1 {
 				if strings.Contains(stored.Text, "never-store") || state.Incidents[0].IP != "192.0.2.8" || state.Incidents[0].Examples[0].Bytes != 6 {
 					t.Fatalf("unsafe or incomplete incident: %s", stored.Text)
+				}
+				dailyActivity := 0
+				for _, count := range state.ActivityDays {
+					dailyActivity += count
+				}
+				hourlyActivity := 0
+				for _, count := range state.ActivityHours {
+					hourlyActivity += count
+				}
+				if dailyActivity != 2 || hourlyActivity != 2 {
+					t.Fatalf("activity calendar missed ordinary or suspicious traffic: daily=%d hourly=%d", dailyActivity, hourlyActivity)
+				}
+				incidentTypeCount := 0
+				for _, dailyCategories := range state.ActivityTypes {
+					for _, count := range dailyCategories {
+						incidentTypeCount += count
+					}
+				}
+				if incidentTypeCount != 1 {
+					t.Fatalf("daily problem type count = %d, want one incident", incidentTypeCount)
 				}
 				break
 			}

@@ -574,6 +574,7 @@
     .security-radar { display:block; width:min(100%,360px); height:auto; margin-inline:auto; overflow:visible; }
     .security-radar polygon { fill:rgba(224,90,42,.16); stroke:#e05a2a; stroke-width:2; }
     .security-radar .security-radar-axis { stroke:var(--bs-border-color); stroke-width:1; }
+    .security-radar .security-radar-ring-label { fill:var(--bs-secondary-color); font-size:8px; stroke:none; }
     .security-radar text { fill:currentColor; font-size:9px; }
     .security-radar-point { fill:#e05a2a; stroke:#ff2d2d; stroke-width:2; }
     .security-chart-grid {
@@ -614,6 +615,7 @@
       border:1px solid rgba(148,171,214,.18);
     }
     .security-rank-fill {
+      display:block;
       height:100%;
       min-width:2px;
       border-radius:999px;
@@ -1386,6 +1388,30 @@
     return colors[colorIndex];
   }
 
+  const securityTypeColors = {
+    'rapid-crawl': '#2563eb',
+    enumeration: '#0891b2',
+    secret: '#7c3aed',
+    cms: '#db2777',
+    'admin-discovery': '#d97706',
+    'authentication-failures': '#dc2626',
+    repository: '#0f766e',
+    'source-backup': '#4f46e5',
+    'sitebrush-exploit': '#b91c1c',
+    traversal: '#ea580c',
+    injection: '#c026d3',
+    'scanner-client': '#475569'
+  };
+
+  function securityTypeColor(category) {
+    return securityTypeColors[category] || '#64748b';
+  }
+
+  function dailyActivityOpacity(count, averageDailyCount) {
+    if (count <= 0 || averageDailyCount <= 0) return 1;
+    return Math.min(0.9, Math.max(0.12, 0.9 * count / averageDailyCount));
+  }
+
   function renderCalendar(calendar) {
     const dayCounts = readData(calendar, '[data-calendar-days]', {});
     const hourCounts = readData(calendar, '[data-calendar-hours]', {});
@@ -1409,7 +1435,7 @@
     if (!calendarGrid || !yearTabs || !hourChart) return;
 
     const yearKeys = new Set(Object.keys(dayCounts).map(function extractYear(dayKey) { return dayKey.slice(0, 4); }));
-    yearKeys.add(String(new Date().getFullYear()));
+    yearKeys.add(String(new Date().getUTCFullYear()));
     const years = Array.from(yearKeys).sort().reverse();
     let selectedYear = years[0];
     const typeLabels = new Map();
@@ -1442,32 +1468,16 @@
     function renderRadar(dayKey) {
       if (!radar) return;
       while (radar.firstChild) radar.removeChild(radar.firstChild);
-      const totals = {};
-      const yearlyCategoryLevels = {};
-      const selected = activityTypes[dayKey] || {};
-      const selectedCategoryLevels = {};
-      for (const [date, categoryCounts] of Object.entries(activityTypes)) {
-        if (!date.startsWith(selectedYear + '-')) continue;
-        const dayLevel = Number(severityLevels[date]) || 2;
-        for (const [category, count] of Object.entries(categoryCounts)) {
-          totals[category] = (totals[category] || 0) + Number(count || 0);
-          yearlyCategoryLevels[category] = Math.max(yearlyCategoryLevels[category] || 0, dayLevel);
-        }
-      }
-      const selectedLevel = Number(severityLevels[dayKey]) || 2;
-      for (const category of Object.keys(selected)) selectedCategoryLevels[category] = selectedLevel;
-      const availableCategories = new Set([...Object.keys(totals), ...Object.keys(selected)]);
-      const categories = Array.from(typeLabels.keys()).slice(0, 8);
-      for (const category of Array.from(availableCategories).sort()) {
-        if (!categories.includes(category)) categories.push(category);
-      }
-      const hasData = availableCategories.size > 0;
+      const selectedCategories = activityTypes[dayKey] || {};
+      const categories = Array.from(new Set([...typeLabels.keys(), ...Object.keys(selectedCategories)])).slice(0, 12);
+      const dailyTotal = Object.values(selectedCategories).reduce(function addDailyTotal(total, count) {
+        return total + Math.max(0, Number(count) || 0);
+      }, 0);
+      const hasData = dailyTotal > 0;
       radar.dataset.empty = hasData ? 'false' : 'true';
       const centerX = 180;
       const centerY = 150;
       const radius = 104;
-      let maximum = 1;
-      for (const category of categories) maximum = Math.max(maximum, totals[category] || 0, selected[category] || 0);
       function point(index, scale) {
         const angle = (Math.PI * 2 * index / categories.length) - Math.PI / 2;
         return [centerX + Math.cos(angle) * radius * scale, centerY + Math.sin(angle) * radius * scale];
@@ -1478,6 +1488,12 @@
         ring.setAttribute('fill', 'none');
         ring.setAttribute('points', categories.map(function ringPoint(_, index) { return point(index, ringScale).join(','); }).join(' '));
         radar.appendChild(ring);
+        const ringLabel = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+        ringLabel.setAttribute('class', 'security-radar-ring-label');
+        ringLabel.setAttribute('x', String(centerX + 4));
+        ringLabel.setAttribute('y', String(centerY - radius * ringScale - 3));
+        ringLabel.textContent = String(Math.round(ringScale * 100)) + '%';
+        radar.appendChild(ringLabel);
       }
       categories.forEach(function drawAxis(category, index) {
         const outer = point(index, 1);
@@ -1485,6 +1501,8 @@
         axis.setAttribute('class', 'security-radar-axis');
         axis.setAttribute('x1', String(centerX)); axis.setAttribute('y1', String(centerY));
         axis.setAttribute('x2', String(outer[0])); axis.setAttribute('y2', String(outer[1]));
+        axis.style.stroke = securityTypeColor(category);
+        axis.style.strokeOpacity = '0.55';
         radar.appendChild(axis);
         const labelPoint = point(index, 1.18);
         const label = document.createElementNS('http://www.w3.org/2000/svg', 'text');
@@ -1493,6 +1511,7 @@
         const fullLabel = typeLabels.get(category) || category;
         label.textContent = fullLabel.split(/\s+/).slice(0, category === 'sitebrush-exploit' ? 3 : 2).join(' ');
         const fullDescription = typeDescriptions.get(category) || fullLabel;
+        label.style.fill = securityTypeColor(category);
         label.setAttribute('tabindex', '0');
         label.setAttribute('role', 'button');
         label.setAttribute('aria-label', fullLabel + ': ' + fullDescription);
@@ -1518,46 +1537,44 @@
         label.addEventListener('blur', function hideFocusedAttackTypeDescription() {
           if (radarTooltip) radarTooltip.hidden = true;
         });
-        if (category === 'sitebrush-exploit') { label.setAttribute('fill', '#dc2626'); label.setAttribute('font-weight', '700'); }
+        if (category === 'sitebrush-exploit') label.setAttribute('font-weight', '700');
         radar.appendChild(label);
       });
-      const yearlyLevel = Math.max(0, ...Object.values(yearlyCategoryLevels));
-      const selectedSeriesLevel = Math.max(0, ...Object.values(selectedCategoryLevels));
-      for (const series of [
-        {counts: totals, categoryLevels: yearlyCategoryLevels, level: yearlyLevel},
-        {counts: selected, categoryLevels: selectedCategoryLevels, level: selectedSeriesLevel}
-      ]) {
+      if (hasData) {
+        const selectedLevel = Number(severityLevels[dayKey]) || 1;
         const polygon = document.createElementNS('http://www.w3.org/2000/svg', 'polygon');
-        polygon.setAttribute('points', categories.map(function categoryPoint(category, index) { return point(index, Number(series.counts[category] || 0) / maximum).join(','); }).join(' '));
-        polygon.setAttribute('fill', securityActivityColor(series.level, 4));
+        polygon.setAttribute('points', categories.map(function categoryPoint(category, index) {
+          return point(index, Math.max(0, Number(selectedCategories[category]) || 0) / dailyTotal).join(',');
+        }).join(' '));
+        polygon.setAttribute('fill', securityActivityColor(selectedLevel, 4));
         polygon.setAttribute('fill-opacity', '0.17');
-        polygon.setAttribute('stroke', securityActivityColor(series.level, 4));
+        polygon.setAttribute('stroke', securityActivityColor(selectedLevel, 4));
         polygon.setAttribute('stroke-width', '2');
         radar.appendChild(polygon);
         categories.forEach(function addPoint(category, index) {
-          const count = Number(series.counts[category] || 0);
+          const count = Math.max(0, Number(selectedCategories[category]) || 0);
           if (count <= 0) return;
-          const intensity = count / maximum;
+          const intensity = count / dailyTotal;
           const markerPosition = point(index, intensity);
           const marker = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
           marker.setAttribute('class', 'security-radar-point');
           marker.setAttribute('cx', String(markerPosition[0])); marker.setAttribute('cy', String(markerPosition[1]));
           marker.setAttribute('r', String(2 + intensity * 3));
-          const categoryLevel = series.categoryLevels[category] || series.level;
-          const intensityLevel = Math.max(1, Math.ceil(intensity * 4));
-          marker.dataset.level = String(categoryLevel);
-          marker.dataset.intensity = String(intensityLevel);
-          marker.setAttribute('fill', securityActivityColor(categoryLevel, intensityLevel));
-          marker.setAttribute('stroke', securityActivityColor(categoryLevel, 4));
-          marker.setAttribute('title', (typeLabels.get(category) || category) + ': ' + count);
+          marker.style.fill = securityTypeColor(category);
+          marker.style.stroke = securityTypeColor(category);
+          marker.setAttribute('title', (typeLabels.get(category) || category) + ': ' + count + ' (' + Math.round(intensity * 100) + '%)');
+          const markerTitle = document.createElementNS('http://www.w3.org/2000/svg', 'title');
+          markerTitle.textContent = (typeLabels.get(category) || category) + ': ' + count + ' (' + Math.round(intensity * 100) + '%)';
+          marker.appendChild(markerTitle);
           radar.appendChild(marker);
         });
       }
-      radarTitle.textContent = (calendar.dataset.typeTitle || '') + ' · ' + (dayKey || selectedYear);
-      radar.setAttribute('aria-label', (calendar.dataset.typeTitle || '') + ' · ' + (dayKey || selectedYear));
-      radarLegend.textContent = hasData ? (calendar.dataset.activityTitle || '') + ' · ' + selectedYear + (dayKey ? ' · ' + dayKey : '') : (calendar.dataset.emptyText || '');
+      const chartTitle = (calendar.dataset.typeTitle || '') + ' · ' + dayKey;
+      radarTitle.textContent = chartTitle;
+      radar.setAttribute('aria-label', chartTitle);
+      radarLegend.textContent = hasData ? dayKey + ' · ' + dailyTotal + ' · ' + (calendar.dataset.activityTitle || '') : (calendar.dataset.emptyText || '');
     }
-    function renderDay(dayKey, count, maximum, weekColumn, weekdayRow) {
+    function renderDay(dayKey, count, maximum, averageDailyCount, weekColumn, weekdayRow) {
       const dayButton = document.createElement('button');
       dayButton.type = 'button';
       dayButton.className = 'activity-calendar-day';
@@ -1566,6 +1583,9 @@
       const isSecurityCalendar = calendar.dataset.activityCalendar === 'security';
       dayButton.dataset.level = String(isSecurityCalendar ? Number(severityLevels[dayKey]) || 0 : intensity);
       dayButton.dataset.intensity = String(intensity);
+      if (isSecurityCalendar) {
+        dayButton.style.opacity = String(dailyActivityOpacity(count, averageDailyCount));
+      }
       dayButton.style.gridColumnStart = String(weekColumn);
       dayButton.style.gridRowStart = String(weekdayRow);
       dayButton.title = formatDate(dayKey) + ' · ' + count;
@@ -1668,9 +1688,18 @@
         yearTabs.appendChild(tab);
       }
       let maximum = 0;
+      let totalDailyActivity = 0;
+      let activeDayCount = 0;
       for (const dayKey of Object.keys(dayCounts)) {
-        if (dayKey.startsWith(year + '-')) maximum = Math.max(maximum, Number(dayCounts[dayKey]) || 0);
+        if (!dayKey.startsWith(year + '-')) continue;
+        const dailyCount = Number(dayCounts[dayKey]) || 0;
+        maximum = Math.max(maximum, dailyCount);
+        if (dailyCount > 0) {
+          totalDailyActivity += dailyCount;
+          activeDayCount += 1;
+        }
       }
+      const averageDailyCount = activeDayCount > 0 ? totalDailyActivity / activeDayCount : 0;
       const yearStart = new Date(Date.UTC(Number(year), 0, 1));
       const yearEnd = new Date(Date.UTC(Number(year) + 1, 0, 1));
       const shownMonthWeeks = new Set();
@@ -1687,9 +1716,15 @@
             shownMonthWeeks.add(day.getUTCMonth());
           }
         }
-        renderDay(dayKey, Number(dayCounts[dayKey]) || 0, maximum, weekColumn, day.getUTCDay() + 1);
+        renderDay(dayKey, Number(dayCounts[dayKey]) || 0, maximum, averageDailyCount, weekColumn, day.getUTCDay() + 1);
       }
-      if (calendar.dataset.activityCalendar === 'security') renderRadar('');
+      if (calendar.dataset.activityCalendar === 'security') {
+        const recentDays = Object.keys(dayCounts).filter(function matchYear(dayKey) {
+          return dayKey.startsWith(year + '-') && (Number(dayCounts[dayKey]) || 0) > 0;
+        }).sort();
+        const initialDay = recentDays.length > 0 ? recentDays[recentDays.length - 1] : new Date().toISOString().slice(0, 10);
+        renderHours(initialDay);
+      }
     }
 
     renderYear(selectedYear);
