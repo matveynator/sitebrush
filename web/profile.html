@@ -196,7 +196,7 @@
       <input type="hidden" name="profile_action" value="admin_ip_remove">
       <input type="hidden" name="admin_ip" value="{{.Rule}}">
       <input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
-      <div class="profile-ip-details"><strong dir="ltr">{{.Rule}}</strong>{{if .Current}} <span class="account-status-inline">{{index $.T "auth_current"}}</span>{{end}}<span class="profile-ip-location">{{.Location}}</span></div>
+      <div class="profile-ip-details"><strong dir="ltr">{{.Rule}}</strong>{{if .Current}} <span class="account-status-inline">{{index $.T "auth_current"}}</span>{{end}}<span class="profile-ip-location">{{.Location}}{{if .GeoIPAttribution}} · {{.GeoIPAttribution}}{{end}}</span></div>
       <button type="submit" {{if not .Removable}}disabled{{end}}>{{index $.T "admin_ip_remove"}}</button>
     </form>{{else}}<p class="hint">{{index .T "admin_ip_none"}}</p>{{end}}
   </div>
@@ -317,7 +317,7 @@
       <div class="profile-ip-details">
         <strong dir="ltr">{{.IP}}{{if eq .IP "127.0.0.1"}} / localhost{{end}}</strong>
         {{if .Current}}<span class="account-status-inline">{{index $.T "auth_current"}}</span>{{end}}
-        <span class="profile-ip-location">{{.Location}}</span>
+        <span class="profile-ip-location">{{.Location}}{{if .GeoIPAttribution}} · {{.GeoIPAttribution}}{{end}}</span>
         <p>{{index $.T "auth_confirmed"}}: {{.Confirmed.Format "2006-01-02 15:04 UTC"}}<br>
           {{index $.T "auth_last_login"}}: {{.LastLogin.Format "2006-01-02 15:04 UTC"}}<br>
           {{index $.T "auth_expires"}}: {{.Expires.Format "2006-01-02 15:04 UTC"}}</p>
