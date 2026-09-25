@@ -18,7 +18,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
-	browserstats "github.com/matveynator/sitebrush/v2/pkg/analytics"
+	stdhtml "html"
 	"html/template"
 	"io"
 	"io/fs"
@@ -42,6 +42,7 @@ import (
 
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/matveynator/netchan"
+	browserstats "github.com/matveynator/sitebrush/v2/pkg/analytics"
 	"github.com/matveynator/sitebrush/v2/pkg/channelacme"
 	"github.com/matveynator/sitebrush/v2/pkg/crawler"
 	"github.com/matveynator/sitebrush/v2/pkg/demo"
@@ -16219,15 +16220,51 @@ func TestTOTPSetupQRCodeIsLocalPNGData(t *testing.T) {
 		t.Fatalf("empty setup URI produced a QR code: %q", qrData)
 	}
 	qrData := totpSetupQRCodeDataURI("otpauth://totp/SiteBrush:owner@example.org?secret=ABC123&issuer=SiteBrush")
-	if !strings.HasPrefix(qrData, "data:image/png;base64,") {
+	qrDataString := string(qrData)
+	if !strings.HasPrefix(qrDataString, "data:image/png;base64,") {
 		t.Fatalf("setup QR code is not an embedded PNG: %q", qrData)
 	}
-	pngBytes, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(qrData, "data:image/png;base64,"))
+	pngBytes, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(qrDataString, "data:image/png;base64,"))
 	if err != nil {
 		t.Fatalf("decode embedded QR PNG: %v", err)
 	}
 	if len(pngBytes) < 8 || !bytes.Equal(pngBytes[:8], []byte{137, 80, 78, 71, 13, 10, 26, 10}) {
 		t.Fatal("embedded QR data is not a PNG image")
+	}
+	qrTemplate, err := template.New("qr").Parse(`<img src="{{.TOTPSetupQRCode}}">`)
+	if err != nil {
+		t.Fatalf("parse QR template: %v", err)
+	}
+	var renderedQR bytes.Buffer
+	if err := qrTemplate.Execute(&renderedQR, map[string]any{"TOTPSetupQRCode": qrData}); err != nil {
+		t.Fatalf("render trusted QR URL: %v", err)
+	}
+	if !strings.Contains(stdhtml.UnescapeString(renderedQR.String()), `src="`+qrDataString+`"`) || strings.Contains(renderedQR.String(), "ZgotmplZ") {
+		t.Fatalf("template rejected the generated QR URL: %s", renderedQR.String())
+	}
+}
+
+func TestStealthSettingLookupErrorReturnsUnavailable(t *testing.T) {
+	application, database := newTestApplication(t)
+	for _, statement := range []string{
+		`INSERT INTO admin_ip_policies(domain,email,enabled_at) VALUES('example.org','owner@example.org',1)`,
+		`INSERT INTO admin_allowed_ips(domain,email,client_ip,added_at) VALUES('example.org','owner@example.org','192.0.2.1',1)`,
+		`INSERT INTO admin_stealth_modes(domain,email,enabled_at) VALUES('example.org','owner@example.org',1)`,
+		`DROP TABLE admin_stealth_modes`,
+	} {
+		if _, err := database.Exec(statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	request := httptest.NewRequest(http.MethodGet, "https://example.org/?login", nil)
+	request.RemoteAddr = "192.0.2.9:1234"
+	response := httptest.NewRecorder()
+	application.route(response, request)
+	if response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("stealth lookup failure response status=%d body=%q", response.Code, response.Body.String())
+	}
+	if strings.Contains(response.Body.String(), "SiteBrush login") || strings.Contains(response.Body.String(), "login_password") {
+		t.Fatalf("normal SiteBrush route was rendered after stealth lookup failed: %q", response.Body.String())
 	}
 }
 

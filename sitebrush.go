@@ -9443,7 +9443,12 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 // Blocked addresses see only published files; SiteBrush control requests look absent.
 func (a *App) serveStealthStaticForBlockedAdminIP(w http.ResponseWriter, r *http.Request, domain, pagePath string) bool {
 	var stealthEnabled int
-	if err := a.db.QueryRowContext(r.Context(), `SELECT COUNT(1) FROM admin_stealth_modes WHERE domain=? AND enabled_at>0`, domain).Scan(&stealthEnabled); err != nil || stealthEnabled == 0 {
+	if err := a.db.QueryRowContext(r.Context(), `SELECT COUNT(1) FROM admin_stealth_modes WHERE domain=? AND enabled_at>0`, domain).Scan(&stealthEnabled); err != nil {
+		w.Header().Set("Cache-Control", "no-store")
+		http.Error(w, "site security settings temporarily unavailable", http.StatusServiceUnavailable)
+		return true
+	}
+	if stealthEnabled == 0 {
 		return false
 	}
 	if !a.adminIPLoginBlocked(r.Context(), domain, accountClientIP(r), "") {
@@ -20323,7 +20328,7 @@ func (a *App) renderProfilePage(w http.ResponseWriter, r *http.Request, email, s
 	})
 }
 
-func totpSetupQRCodeDataURI(provisioningURI string) string {
+func totpSetupQRCodeDataURI(provisioningURI string) template.URL {
 	if strings.TrimSpace(provisioningURI) == "" {
 		return ""
 	}
@@ -20331,7 +20336,7 @@ func totpSetupQRCodeDataURI(provisioningURI string) string {
 	if err != nil {
 		return ""
 	}
-	return "data:image/png;base64," + base64.StdEncoding.EncodeToString(qrImage)
+	return template.URL("data:image/png;base64," + base64.StdEncoding.EncodeToString(qrImage))
 }
 
 func (a *App) recoverPage(w http.ResponseWriter, r *http.Request) {
