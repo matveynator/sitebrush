@@ -125,7 +125,7 @@ const sitebrushHTTPWriteTimeout = 0
 const sitebrushHTTPIdleTimeout = 65 * time.Second
 const sitebrushHTTPReadHeaderTimeout = 5 * time.Second
 const sitebrushHTTP10KeepAliveBufferLimit = 1024 * 1024
-const currentSiteDatabaseSchemaVersion = 7
+const currentSiteDatabaseSchemaVersion = 8
 const siteDatabaseStartupMigrationTimeout = 30 * time.Second
 const pagePasswordSessionTTL = time.Hour
 const serviceMailRelayPath = "/?service_mail_relay"
@@ -8408,6 +8408,7 @@ func (a *App) migrate(ctx context.Context) error {
 		`CREATE INDEX IF NOT EXISTS idx_analytics_events_domain_time ON analytics_events(domain,occurred_at);`,
 		`CREATE INDEX IF NOT EXISTS idx_analytics_events_visitor ON analytics_events(domain,visitor_id,occurred_at);`,
 		`CREATE TABLE IF NOT EXISTS analytics_reports(domain TEXT PRIMARY KEY,generated_at TEXT,period_start TEXT,period_end TEXT,event_count INTEGER,report_json TEXT);`,
+		`CREATE TABLE IF NOT EXISTS sitebrush_migrations(name TEXT PRIMARY KEY,applied_at INTEGER NOT NULL);`,
 	}
 	queries = append(queries, crawler.ImportFrontierSchema()...)
 	queries = append(queries, accountauth.Schema()...)
@@ -8421,6 +8422,19 @@ func (a *App) migrate(ctx context.Context) error {
 	if err := a.ensureSiteDatabaseSchemaColumns(ctx); err != nil {
 		return err
 	}
+	// Existing installations had IP protection enabled implicitly; make it opt-in once.
+	var optionalIPPolicyMigration int
+	if err := a.db.QueryRowContext(ctx, `SELECT COUNT(1) FROM sitebrush_migrations WHERE name='admin-ip-protection-opt-in'`).Scan(&optionalIPPolicyMigration); err != nil {
+		return err
+	}
+	if optionalIPPolicyMigration == 0 {
+		if _, err := a.db.ExecContext(ctx, `DELETE FROM admin_ip_policies`); err != nil {
+			return err
+		}
+		if _, err := a.db.ExecContext(ctx, `INSERT INTO sitebrush_migrations(name,applied_at) VALUES('admin-ip-protection-opt-in',?)`, time.Now().Unix()); err != nil {
+			return err
+		}
+	}
 	// Preserve recent verified login addresses and active session candidates on upgrade.
 	if _, err := a.db.ExecContext(ctx, `INSERT INTO admin_allowed_ips(domain,email,client_ip,added_at) SELECT trusted.domain,trusted.email,trusted.client_ip,trusted.last_login FROM account_trusted_ips trusted WHERE trusted.last_login>? AND NOT EXISTS(SELECT 1 FROM admin_allowed_ips allowed WHERE allowed.domain=trusted.domain AND allowed.email=trusted.email AND allowed.client_ip=trusted.client_ip)`, time.Now().Add(-accountauth.TrustTTL).Unix()); err != nil {
 		return siteMigrationStepError{step: "seed administrator IP allowlist", err: err}
@@ -8430,9 +8444,6 @@ func (a *App) migrate(ctx context.Context) error {
 	}
 	if _, err := a.db.ExecContext(ctx, `INSERT INTO admin_allowed_ips(domain,email,client_ip,added_at) SELECT users.domain,users.email,sessions.client_ip,0 FROM sessions JOIN users ON (users.domain||'|'||users.email)=sessions.user_email WHERE users.is_admin=1 AND sessions.client_ip IS NOT NULL AND sessions.client_ip<>'' AND NOT EXISTS(SELECT 1 FROM admin_allowed_ips allowed WHERE allowed.domain=users.domain AND allowed.email=users.email AND allowed.client_ip=sessions.client_ip)`); err != nil {
 		return siteMigrationStepError{step: "preserve active administrator sessions", err: err}
-	}
-	if _, err := a.db.ExecContext(ctx, `INSERT INTO admin_ip_policies(domain,email,enabled_at) SELECT DISTINCT allowed.domain,allowed.email,? FROM admin_allowed_ips allowed WHERE NOT EXISTS(SELECT 1 FROM admin_ip_policies policy WHERE policy.domain=allowed.domain AND policy.email=allowed.email)`, time.Now().Unix()); err != nil {
-		return siteMigrationStepError{step: "enable administrator IP policies", err: err}
 	}
 	if err := crawler.RecoverImportFrontiers(ctx, a.db); err != nil {
 		return siteMigrationStepError{step: "finish interrupted import cleanup", err: err}
@@ -9020,11 +9031,15 @@ func (a *App) assignMissingDomainAliasTokens(ctx context.Context) {
 }
 
 func (a *App) route(w http.ResponseWriter, r *http.Request) {
+	pagePath := cleanPath(r.URL.Path)
+	requestDomain := a.siteDomain(r.Context(), r)
+	if a.serveStealthStaticForBlockedAdminIP(w, r, requestDomain, pagePath) {
+		return
+	}
 	if r.URL.Path == "/_sitebrush/analytics" {
 		a.browserAnalyticsSocket(w, r)
 		return
 	}
-	pagePath := cleanPath(r.URL.Path)
 	if hasQueryFlag(r, "login") && !hasQueryFlag(r, "register") && !hasQueryFlag(r, "email_confirm") {
 		// Resolve account availability before the HTTPS gate, including stale session cookies.
 		w.Header().Set("Cache-Control", "no-store")
@@ -9086,10 +9101,6 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 	if a.isDomainPrefixedPublicAssetPath(r) {
 		a.servePublicAsset(w, r)
 		return
-	}
-	requestDomain := domainFromContext(r.Context())
-	if strings.TrimSpace(requestDomain) == "" {
-		requestDomain = domainFromRequest(r)
 	}
 	if redirectTarget := a.canonicalTrailingSlashStaticRedirectTarget(r, requestDomain, pagePath); redirectTarget != "" {
 		httpsecurity.RedirectLocal(w, r, redirectTarget, http.StatusMovedPermanently)
@@ -9427,6 +9438,42 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 	a.renderMissingPage(w, r, pagePath, isAdmin)
 }
 
+// Blocked addresses see only published files; SiteBrush control requests look absent.
+func (a *App) serveStealthStaticForBlockedAdminIP(w http.ResponseWriter, r *http.Request, domain, pagePath string) bool {
+	if !a.adminIPLoginBlocked(r.Context(), domain, accountClientIP(r), "") {
+		return false
+	}
+
+	// BEGIN public protected-page unlock boundary.
+	if r.Method == http.MethodPost && hasQueryFlag(r, "page_password_unlock") {
+		a.pagePasswordUnlock(w, r, domain, pagePath)
+		return true
+	}
+	// END public protected-page unlock boundary.
+
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		http.NotFound(w, r)
+		return true
+	}
+	if rule, protected := a.pagePasswordRuleFromPrefixFile(domain, pagePath); protected {
+		failureDomainPrefix := pagePasswordFailureDomainPrefix(rule.Domain)
+		clientIP := clientIPAddress(r)
+		if blocked, hardLocked, blockedUntil := a.cachedAuthIPIsBlockedForDomainPrefix(failureDomainPrefix, clientIP); blocked {
+			a.renderBlockedPagePasswordPrompt(w, r, domain, pagePath, hardLocked, blockedUntil)
+			return true
+		}
+		if !a.pagePasswordSessionValid(r, rule) {
+			a.renderPagePasswordPrompt(w, r, domain, pagePath, "", http.StatusUnauthorized, time.Time{})
+			return true
+		}
+	}
+	if a.servePublishedStaticFileFromDisk(w, r, domain, pagePath, false) {
+		return true
+	}
+	http.NotFound(w, r)
+	return true
+}
+
 // An IP restriction removes the session before normal routing, so public pages
 // remain available while every handler sees the request as unauthenticated.
 func (a *App) enforceAdminIPAllowlist(w http.ResponseWriter, r *http.Request, domain string) bool {
@@ -9451,31 +9498,12 @@ func (a *App) enforceAdminIPAllowlist(w http.ResponseWriter, r *http.Request, do
 	}
 	var policyEnabled int
 	err = a.db.QueryRowContext(r.Context(), `SELECT COUNT(1) FROM admin_ip_policies WHERE domain=? AND email=?`, domain, email).Scan(&policyEnabled)
-	if err == nil && policyEnabled == 0 {
-		err = a.accountTransaction(r.Context(), func(transaction *sql.Tx) error {
-			if err := transaction.QueryRowContext(r.Context(), `SELECT COUNT(1) FROM admin_ip_policies WHERE domain=? AND email=?`, domain, email).Scan(&policyEnabled); err != nil {
-				return err
-			}
-			if policyEnabled != 0 {
-				return nil
-			}
-			var existingAddresses int
-			if err := transaction.QueryRowContext(r.Context(), `SELECT COUNT(1) FROM admin_allowed_ips WHERE domain=? AND email=?`, domain, email).Scan(&existingAddresses); err != nil {
-				return err
-			}
-			if _, err := transaction.ExecContext(r.Context(), `INSERT INTO admin_ip_policies(domain,email,enabled_at) VALUES(?,?,?)`, domain, email, time.Now().Unix()); err != nil {
-				return err
-			}
-			if existingAddresses != 0 {
-				return nil
-			}
-			_, err := transaction.ExecContext(r.Context(), `INSERT INTO admin_allowed_ips(domain,email,client_ip,added_at) VALUES(?,?,?,?)`, domain, email, ip, time.Now().Unix())
-			return err
-		})
-	}
 	if err != nil {
 		http.Error(w, "account access temporarily unavailable", http.StatusServiceUnavailable)
 		return false
+	}
+	if policyEnabled == 0 {
+		return true
 	}
 	allowedRows, err := a.db.QueryContext(r.Context(), `SELECT client_ip FROM admin_allowed_ips WHERE domain=? AND email=?`, domain, email)
 	if err != nil {
@@ -10365,6 +10393,12 @@ func (a *App) login(w http.ResponseWriter, r *http.Request) {
 		httpsecurity.RedirectLocal(w, r, "?register", http.StatusFound)
 		return
 	}
+	if a.adminIPLoginBlocked(r.Context(), domain, accountClientIP(r), strings.TrimSpace(r.FormValue("email"))) {
+		translations := translationsForRequest(r)
+		message := translationOrDefault(translations, "admin_ip_blocked", "Access from this IP is blocked by the trusted IP list. If your IP changes, ask the server administrator to restore access over SSH.")
+		a.render(w, r, "login.html", map[string]any{"Domain": domain, "Status": message, "StatusClass": "danger", "ShowForm": false})
+		return
+	}
 	blocked, locked, until := a.authIPIsBlocked(r.Context(), domain, clientIPAddress(r))
 	if a.renderAccountLoginBlock(w, r, blocked, locked, until) {
 		return
@@ -10507,6 +10541,42 @@ func (a *App) login(w http.ResponseWriter, r *http.Request) {
 			a.renderLoginPage(w, r, "/", email, translationsForRequest(r)["login_status_invalid_credentials"], "danger", time.Time{}, false)
 		}
 	}
+}
+
+// adminIPLoginBlocked runs before password and passkey authentication so a blocked visitor sees no credential controls.
+func (a *App) adminIPLoginBlocked(ctx context.Context, domain, rawIP, email string) bool {
+	ip := canonicalAccountIP(rawIP)
+	if ip == "" {
+		return true
+	}
+	query := `SELECT allowed.client_ip FROM admin_ip_policies policy LEFT JOIN admin_allowed_ips allowed ON allowed.domain=policy.domain AND allowed.email=policy.email WHERE policy.domain=?`
+	arguments := []any{domain}
+	if email != "" {
+		query += ` AND policy.email=?`
+		arguments = append(arguments, email)
+	}
+	rows, err := a.db.QueryContext(ctx, query, arguments...)
+	if err != nil {
+		return !errors.Is(err, errSiteDatabaseMissing)
+	}
+	defer rows.Close()
+	policyFound := false
+	for rows.Next() {
+		var rule string
+		var nullableRule sql.NullString
+		if rows.Scan(&nullableRule) != nil {
+			return true
+		}
+		policyFound = true
+		rule = nullableRule.String
+		if rule != "" && adminIPRuleContains(rule, ip) {
+			return false
+		}
+	}
+	if rows.Err() != nil {
+		return true
+	}
+	return policyFound
 }
 
 func (a *App) renderAccountTOTP(w http.ResponseWriter, r *http.Request, challenge, status string) {
@@ -19777,7 +19847,7 @@ func (a *App) profilePage(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	if r.Method == http.MethodPost && (r.FormValue("profile_action") == "admin_ip_add" || r.FormValue("profile_action") == "admin_ip_remove") {
+	if r.Method == http.MethodPost && strings.HasPrefix(r.FormValue("profile_action"), "admin_ip_") {
 		if r.FormValue("account_csrf") == "" || r.FormValue("account_csrf") != accountCSRF(r) {
 			http.Error(w, "forbidden", http.StatusForbidden)
 			return
@@ -19953,6 +20023,42 @@ func (a *App) profilePage(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) updateAdminIPAllowlist(r *http.Request, domain, email, action, rawIP string) error {
+	if action == "admin_ip_enable" || action == "admin_ip_disable" {
+		return a.accountTransaction(r.Context(), func(transaction *sql.Tx) error {
+			if action == "admin_ip_disable" {
+				_, err := transaction.ExecContext(r.Context(), `DELETE FROM admin_ip_policies WHERE domain=? AND email=?`, domain, email)
+				return err
+			}
+			if r.FormValue("static_ip_confirmation") != "yes" {
+				return errors.New("static IP confirmation is required")
+			}
+			// BEGIN current address coverage check.
+			currentIP := canonicalAccountIP(accountClientIP(r))
+			allowedRows, err := transaction.QueryContext(r.Context(), `SELECT client_ip FROM admin_allowed_ips WHERE domain=? AND email=?`, domain, email)
+			if err != nil {
+				return err
+			}
+			currentIPAllowed := false
+			for allowedRows.Next() {
+				var allowedRule string
+				if allowedRows.Scan(&allowedRule) == nil && adminIPRuleContains(allowedRule, currentIP) {
+					currentIPAllowed = true
+					break
+				}
+			}
+			rowsErr := allowedRows.Err()
+			_ = allowedRows.Close()
+			if rowsErr != nil {
+				return rowsErr
+			}
+			if !currentIPAllowed {
+				return errors.New("allow the current IP before enabling protection")
+			}
+			// END current address coverage check.
+			_, err = transaction.ExecContext(r.Context(), `INSERT INTO admin_ip_policies(domain,email,enabled_at) VALUES(?,?,?)`, domain, email, time.Now().Unix())
+			return err
+		})
+	}
 	ipRule, err := canonicalAdminIPRule(rawIP)
 	if err != nil {
 		return errors.New("invalid administrator IP or subnet")
@@ -20065,7 +20171,12 @@ func (a *App) renderProfilePage(w http.ResponseWriter, r *http.Request, email, s
 	adminIPRules := []string{}
 	adminAllowedIPs := []adminAllowedIPView{}
 	adminIPCandidates := []string{}
+	adminIPProtectionEnabled := false
 	if authenticated {
+		var enabled int
+		if a.db.QueryRowContext(r.Context(), `SELECT COUNT(1) FROM admin_ip_policies WHERE domain=? AND email=?`, domain, accountEmail).Scan(&enabled) == nil {
+			adminIPProtectionEnabled = enabled > 0
+		}
 		rows, err := a.db.QueryContext(r.Context(), `SELECT client_ip,confirmed_at,last_login FROM account_trusted_ips WHERE domain=? AND email=? AND last_login>? ORDER BY last_login DESC`, a.siteDomain(r.Context(), r), accountEmail, time.Now().Add(-accountauth.TrustTTL).Unix())
 		if err == nil {
 			for rows.Next() {
@@ -20127,6 +20238,7 @@ func (a *App) renderProfilePage(w http.ResponseWriter, r *http.Request, email, s
 		"TrustedIPs":                 trustedIPs,
 		"AdminAllowedIPs":            adminAllowedIPs,
 		"AdminIPCandidates":          adminIPCandidates,
+		"AdminIPProtectionEnabled":   adminIPProtectionEnabled,
 		"CurrentAdminIP":             canonicalAccountIP(accountClientIP(r)),
 		"Passkeys":                   passkeys,
 		"PasskeyOffer":               passkeyOffer,

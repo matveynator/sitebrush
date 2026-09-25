@@ -3231,6 +3231,36 @@ body.technical-page.analytics-page {
     display: grid;
     gap: 6px;
 }
+.technical-page .auth-method-heading {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    min-width: 0;
+}
+.technical-page .auth-method-illustration {
+    display: block;
+    flex: 0 0 112px;
+    width: 112px;
+    height: 102px;
+    object-fit: contain;
+}
+.technical-page .auth-method-copy {
+    display: grid;
+    min-width: 0;
+    gap: 6px;
+}
+.technical-page .auth-method-copy h2,
+.technical-page .auth-method-copy .h5 {
+    margin: 0;
+}
+.technical-page .auth-method-copy p {
+    margin: 0;
+    color: var(--theme-muted-foreground);
+    line-height: 1.45;
+}
+.technical-page .auth-method-heading-login {
+    margin-bottom: 12px;
+}
 .technical-page .profile-account-card-header h2,
 .technical-page .profile-authenticator-card h3 {
     margin: 0;
@@ -3239,6 +3269,16 @@ body.technical-page.analytics-page {
     margin: 0;
     color: var(--theme-muted-foreground);
     line-height: 1.45;
+}
+@media (max-width: 520px) {
+    .technical-page .auth-method-heading {
+        gap: 10px;
+    }
+    .technical-page .auth-method-illustration {
+        flex-basis: 82px;
+        width: 82px;
+        height: 76px;
+    }
 }
 .technical-page .profile-account-card-actions {
     display: flex;

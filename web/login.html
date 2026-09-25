@@ -20,7 +20,13 @@
   </div>
   {{if .ShowTOTPForm}}
   <form class="authentication-card profile-form" method="post" action="?login">
-    <h2>{{index .T "auth_totp_title"}}</h2>
+    <div class="auth-method-heading auth-method-heading-login">
+      <img class="auth-method-illustration" src="/p/static/sitebrush-goofer-otp-small.png" alt="" width="112" height="102">
+      <div class="auth-method-copy">
+        <h2>{{index .T "auth_totp_title"}}</h2>
+        <p>{{index .T "auth_totp_explanation"}}</p>
+      </div>
+    </div>
     {{if .Status}}<p class="text-danger" role="status">{{.Status}}</p>{{end}}
     <input type="hidden" name="totp_challenge" value="{{.TOTPChallenge}}">
     <label>{{index .T "auth_totp_code"}}<input class="profile-code-input" type="text" name="totp_code" autocomplete="one-time-code" inputmode="numeric" pattern="[0-9]{6}" minlength="6" maxlength="6" required></label>
@@ -41,7 +47,13 @@
   {{else if .ShowForm}}
   {{if .HasPasskeys}}
   <div class="card card-body authentication-card mb-3">
-    <h2 class="h5">{{index .T "auth_passkey_title"}}</h2>
+    <div class="auth-method-heading auth-method-heading-login">
+      <img class="auth-method-illustration" src="/p/static/sitebrush-goofer-key-small.png" alt="" width="112" height="102">
+      <div class="auth-method-copy">
+        <h2 class="h5">{{index .T "auth_passkey_title"}}</h2>
+        <p>{{index .T "auth_passkey_offer_text"}}</p>
+      </div>
+    </div>
     <p id="SiteBrushPasskeyLoginStatus" class="text-danger" role="status"></p>
     <button type="button" class="btn btn-primary" data-passkey-login data-passkey-start="{{.PasskeyStartURL}}" data-passkey-finish="?login&passkey_finish" data-passkey-status="#SiteBrushPasskeyLoginStatus" data-passkey-error="{{index .T "auth_passkey_failed"}}" data-passkey-unavailable="{{index .T "auth_passkey_unavailable"}}">{{index .T "auth_passkey_login"}}</button>
   </div>

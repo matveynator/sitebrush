@@ -15861,8 +15861,68 @@ func TestAuthAttackConfirmationURLUsesRoutedHostAndTrustedProxyScheme(t *testing
 // END account mutation attack tests.
 
 // BEGIN admin ip allowlist tests.
+// BEGIN administrator IP migration gate regression test.
 
-func TestAdminIPAllowlistBootstrapsOnceAndRejectsOtherAddresses(t *testing.T) {
+func TestAdminIPOptInMigrationRunsForPreviousSchemaVersion(t *testing.T) {
+	storagePath := t.TempDir()
+	databasePath := filepath.Join(storagePath, "example.org.db")
+	database, err := sql.Open("sqlite3", databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	application := &App{db: database, storagePath: storagePath}
+	if err := application.migrate(context.Background()); err != nil {
+		_ = database.Close()
+		t.Fatal(err)
+	}
+	for _, statement := range []string{
+		`INSERT INTO users(domain,email,password,is_admin) VALUES('example.org','owner@example.org','secret',1)`,
+		`INSERT INTO admin_ip_policies(domain,email,enabled_at) VALUES('example.org','owner@example.org',1)`,
+		`DROP TABLE sitebrush_migrations`,
+	} {
+		if _, err := database.Exec(statement); err != nil {
+			_ = database.Close()
+			t.Fatal(err)
+		}
+	}
+	if err := setSQLiteUserVersion(context.Background(), database, currentSiteDatabaseSchemaVersion-1); err != nil {
+		_ = database.Close()
+		t.Fatal(err)
+	}
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	results := make(chan siteDBMigrationEvent, 1)
+	router := &perSiteDBRouter{}
+	router.migrateStartupDatabase(context.Background(), databasePath, "example.org", func(ctx context.Context, migrationDB *sql.DB, domain string) error {
+		migrationApplication := &App{db: migrationDB, storagePath: storagePath}
+		return migrationApplication.migrate(contextWithDomain(ctx, domain))
+	}, results)
+	result := <-results
+	if result.kind != "applied" || result.previousVersion != currentSiteDatabaseSchemaVersion-1 || result.currentVersion != currentSiteDatabaseSchemaVersion {
+		t.Fatalf("migration result=%+v", result)
+	}
+
+	database, err = sql.Open("sqlite3", databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	var policyCount int
+	if err := database.QueryRow(`SELECT COUNT(1) FROM admin_ip_policies WHERE domain='example.org' AND email='owner@example.org'`).Scan(&policyCount); err != nil || policyCount != 0 {
+		t.Fatalf("implicit administrator IP policy count=%d err=%v", policyCount, err)
+	}
+	var migrationCount int
+	if err := database.QueryRow(`SELECT COUNT(1) FROM sitebrush_migrations WHERE name='admin-ip-protection-opt-in'`).Scan(&migrationCount); err != nil || migrationCount != 1 {
+		t.Fatalf("opt-in migration marker count=%d err=%v", migrationCount, err)
+	}
+}
+
+// END administrator IP migration gate regression test.
+
+
+func TestAdminIPAllowlistIsOptInAndRejectsOtherAddresses(t *testing.T) {
 	application, database := newTestApplication(t)
 	for _, statement := range []string{
 		`INSERT INTO users(domain,email,password,is_admin) VALUES('example.org','owner@example.org','secret',1)`,
@@ -15876,11 +15936,17 @@ func TestAdminIPAllowlistBootstrapsOnceAndRejectsOtherAddresses(t *testing.T) {
 	firstRequest.RemoteAddr = "192.0.2.1:1234"
 	firstRequest.AddCookie(&http.Cookie{Name: "sitebrush_session", Value: "active"})
 	if !application.enforceAdminIPAllowlist(httptest.NewRecorder(), firstRequest, "example.org") {
-		t.Fatal("bootstrap request stopped")
+		t.Fatal("unenabled policy stopped request")
 	}
-	var allowedIP string
-	if err := database.QueryRow(`SELECT client_ip FROM admin_allowed_ips WHERE domain='example.org' AND email='owner@example.org'`).Scan(&allowedIP); err != nil || allowedIP != "192.0.2.1" {
-		t.Fatalf("bootstrap IP %q: %v", allowedIP, err)
+	var allowCount int
+	if err := database.QueryRow(`SELECT COUNT(1) FROM admin_allowed_ips WHERE domain='example.org' AND email='owner@example.org'`).Scan(&allowCount); err != nil || allowCount != 0 {
+		t.Fatalf("default policy unexpectedly added an IP: count=%d err=%v", allowCount, err)
+	}
+	if _, err := database.Exec(`INSERT INTO admin_ip_policies(domain,email,enabled_at) VALUES('example.org','owner@example.org',1)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Exec(`INSERT INTO admin_allowed_ips(domain,email,client_ip,added_at) VALUES('example.org','owner@example.org','192.0.2.1',1)`); err != nil {
+		t.Fatal(err)
 	}
 	secondRequest := httptest.NewRequest(http.MethodGet, "https://example.org/?profile", nil)
 	secondRequest.RemoteAddr = "192.0.2.2:1234"
@@ -15911,6 +15977,184 @@ func TestAdminIPAllowlistBootstrapsOnceAndRejectsOtherAddresses(t *testing.T) {
 		t.Fatal("CIDR-allowed session was removed")
 	}
 }
+
+func TestAdminIPLoginBlockHidesAuthenticationOptions(t *testing.T) {
+	application, database := newTestApplication(t)
+	for _, statement := range []string{
+		`INSERT INTO users(domain,email,password,is_admin) VALUES('example.org','owner@example.org','secret',1)`,
+		`INSERT INTO admin_ip_policies(domain,email,enabled_at) VALUES('example.org','owner@example.org',1)`,
+		`INSERT INTO admin_allowed_ips(domain,email,client_ip,added_at) VALUES('example.org','owner@example.org','192.0.2.1',1)`,
+	} {
+		if _, err := database.Exec(statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	request := httptest.NewRequest(http.MethodPost, "https://example.org/?login", strings.NewReader("email=owner%40example.org&password=secret"))
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	request.RemoteAddr = "192.0.2.2:1234"
+	recorder := httptest.NewRecorder()
+	application.login(recorder, request)
+	if strings.Contains(recorder.Body.String(), `name="password"`) || strings.Contains(recorder.Body.String(), `data-passkey-login`) {
+		t.Fatal("blocked visitor received password or passkey controls")
+	}
+	if !strings.Contains(recorder.Body.String(), "заблокирован списком доверенных IP") {
+		t.Fatal("blocked visitor did not receive the trusted IP explanation")
+	}
+}
+
+func TestAdminIPProtectionRequiresExplicitStaticIPConfirmation(t *testing.T) {
+	application, database := newTestApplication(t)
+	if _, err := database.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES('example.org','owner@example.org','secret',1)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Exec(`INSERT INTO admin_allowed_ips(domain,email,client_ip,added_at) VALUES('example.org','owner@example.org','192.0.2.1',1)`); err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "https://example.org/?profile", strings.NewReader(""))
+	request.RemoteAddr = "192.0.2.1:1234"
+	if err := application.updateAdminIPAllowlist(request, "example.org", "owner@example.org", "admin_ip_enable", ""); err == nil {
+		t.Fatal("enabled IP protection without the static IP confirmation")
+	}
+	var enabled int
+	if err := database.QueryRow(`SELECT COUNT(1) FROM admin_ip_policies WHERE domain='example.org'`).Scan(&enabled); err != nil || enabled != 0 {
+		t.Fatalf("unconfirmed policy enabled=%d err=%v", enabled, err)
+	}
+	request.Form = map[string][]string{"static_ip_confirmation": {"yes"}}
+	if err := application.updateAdminIPAllowlist(request, "example.org", "owner@example.org", "admin_ip_enable", ""); err != nil {
+		t.Fatalf("enable confirmed policy: %v", err)
+	}
+	if !application.adminIPLoginBlocked(request.Context(), "example.org", "192.0.2.2", "owner@example.org") {
+		t.Fatal("enabled policy allowed an unlisted IP")
+	}
+	if application.adminIPLoginBlocked(request.Context(), "example.org", "192.0.2.1", "owner@example.org") {
+		t.Fatal("enabled policy blocked the explicitly allowed IP")
+	}
+}
+
+// BEGIN administrator CIDR enable regression test.
+
+func TestAdminIPProtectionEnableAcceptsCIDRCoveringCurrentAddress(t *testing.T) {
+	application, database := newTestApplication(t)
+	if _, err := database.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES('example.org','owner@example.org','secret',1)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Exec(`INSERT INTO admin_allowed_ips(domain,email,client_ip,added_at) VALUES('example.org','owner@example.org','192.0.2.0/24',1)`); err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "https://example.org/?profile", strings.NewReader("static_ip_confirmation=yes"))
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	request.RemoteAddr = "192.0.2.44:1234"
+	if err := request.ParseForm(); err != nil {
+		t.Fatal(err)
+	}
+	if err := application.updateAdminIPAllowlist(request, "example.org", "owner@example.org", "admin_ip_enable", ""); err != nil {
+		t.Fatalf("enable protection with covering CIDR: %v", err)
+	}
+	var enabled int
+	if err := database.QueryRow(`SELECT COUNT(1) FROM admin_ip_policies WHERE domain='example.org' AND email='owner@example.org'`).Scan(&enabled); err != nil || enabled != 1 {
+		t.Fatalf("CIDR-covered policy enabled=%d err=%v", enabled, err)
+	}
+}
+
+// END administrator CIDR enable regression test.
+
+func TestBlockedAdminIPSeesStaticSiteAndNoSiteBrushRoutes(t *testing.T) {
+	application, database := newTestApplication(t)
+	for _, statement := range []string{
+		`INSERT INTO users(domain,email,password,is_admin) VALUES('example.org','owner@example.org','secret',1)`,
+		`INSERT INTO admin_ip_policies(domain,email,enabled_at) VALUES('example.org','owner@example.org',1)`,
+		`INSERT INTO admin_allowed_ips(domain,email,client_ip,added_at) VALUES('example.org','owner@example.org','192.0.2.1',1)`,
+	} {
+		if _, err := database.Exec(statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	staticRoot := application.domainStaticDir("example.org")
+	if err := os.MkdirAll(staticRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(staticRoot, "index.html"), []byte("<main>public page</main>"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	pageRequest := httptest.NewRequest(http.MethodGet, "https://example.org/", nil)
+	pageRequest.RemoteAddr = "192.0.2.9:1234"
+	pageResponse := httptest.NewRecorder()
+	application.route(pageResponse, pageRequest)
+	if pageResponse.Code != http.StatusOK || !strings.Contains(pageResponse.Body.String(), "public page") || strings.Contains(pageResponse.Body.String(), "SiteBrushContextMenu") {
+		t.Fatalf("blocked address did not receive clean static page: status=%d body=%q", pageResponse.Code, pageResponse.Body.String())
+	}
+	trackingRequest := httptest.NewRequest(http.MethodGet, "https://example.org/?utm_source=campaign", nil)
+	trackingRequest.RemoteAddr = "192.0.2.9:1234"
+	trackingResponse := httptest.NewRecorder()
+	application.route(trackingResponse, trackingRequest)
+	if trackingResponse.Code != http.StatusOK || !strings.Contains(trackingResponse.Body.String(), "public page") {
+		t.Fatalf("blocked address could not view static page with tracking query: status=%d", trackingResponse.Code)
+	}
+	for _, target := range []string{"https://example.org/?login", "https://example.org/?publish", "https://example.org/?edit", "https://example.org/_sitebrush/analytics"} {
+		request := httptest.NewRequest(http.MethodGet, target, nil)
+		request.RemoteAddr = "192.0.2.9:1234"
+		response := httptest.NewRecorder()
+		application.route(response, request)
+		if strings.Contains(target, "_sitebrush") {
+			if response.Code != http.StatusNotFound {
+				t.Errorf("missing static path did not behave like a static server for %s: status=%d", target, response.Code)
+			}
+			continue
+		}
+		if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "public page") || strings.Contains(response.Body.String(), "SiteBrushContextMenu") {
+			t.Errorf("blocked address did not receive the same static page for %s: status=%d body=%q", target, response.Code, response.Body.String())
+		}
+	}
+}
+
+// BEGIN stealth protected-page unlock regression test.
+
+func TestBlockedAdminIPCanUnlockProtectedPublishedPage(t *testing.T) {
+	application, database := newTestApplication(t)
+	for _, statement := range []string{
+		`INSERT INTO users(domain,email,password,is_admin) VALUES('example.org','owner@example.org','secret',1)`,
+		`INSERT INTO admin_ip_policies(domain,email,enabled_at) VALUES('example.org','owner@example.org',1)`,
+		`INSERT INTO admin_allowed_ips(domain,email,client_ip,added_at) VALUES('example.org','owner@example.org','192.0.2.1',1)`,
+	} {
+		if _, err := database.Exec(statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	application.writePublishedStaticHTML("example.org", "/private", "<html><body>protected public content</body></html>")
+	if err := application.setPagePasswordRule(context.Background(), "example.org", "/private", "secret"); err != nil {
+		t.Fatal(err)
+	}
+
+	form := url.Values{}
+	form.Set("password", "secret")
+	unlockRequest := httptest.NewRequest(http.MethodPost, "https://example.org/private?page_password_unlock", strings.NewReader(form.Encode()))
+	unlockRequest.RemoteAddr = "198.51.100.9:1234"
+	unlockRequest.Header.Set("User-Agent", "SiteBrush Stealth Test")
+	unlockRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	unlockResponse := httptest.NewRecorder()
+	application.route(unlockResponse, unlockRequest)
+	if unlockResponse.Code != http.StatusFound {
+		t.Fatalf("stealth unlock status=%d body=%q", unlockResponse.Code, unlockResponse.Body.String())
+	}
+	cookies := unlockResponse.Result().Cookies()
+	if len(cookies) == 0 {
+		t.Fatal("stealth unlock did not issue page password cookie")
+	}
+
+	openedRequest := httptest.NewRequest(http.MethodGet, "https://example.org/private", nil)
+	openedRequest.RemoteAddr = "198.51.100.9:1234"
+	openedRequest.Header.Set("User-Agent", "SiteBrush Stealth Test")
+	for _, cookie := range cookies {
+		openedRequest.AddCookie(cookie)
+	}
+	openedResponse := httptest.NewRecorder()
+	application.route(openedResponse, openedRequest)
+	if openedResponse.Code != http.StatusOK || !strings.Contains(openedResponse.Body.String(), "protected public content") {
+		t.Fatalf("stealth protected page status=%d body=%q", openedResponse.Code, openedResponse.Body.String())
+	}
+}
+
+// END stealth protected-page unlock regression test.
 
 func TestAdminIPAllowlistResolvesVerifiedAliasBeforeSessionLookup(t *testing.T) {
 	application, database := newTestApplication(t)
@@ -16173,7 +16417,7 @@ func TestAdminIPAllowlistBlocksAccountPageForUnlistedSession(t *testing.T) {
 	request.AddCookie(&http.Cookie{Name: "sitebrush_session", Value: "active"})
 	response := httptest.NewRecorder()
 	application.route(response, request)
-	if response.Code != http.StatusFound || !strings.HasPrefix(response.Header().Get("Location"), "/?login") {
+	if response.Code != http.StatusNotFound {
 		t.Fatalf("unlisted account page response status=%d location=%q body=%q", response.Code, response.Header().Get("Location"), response.Body.String())
 	}
 	if strings.Contains(response.Body.String(), "Administrator access IPs") {
