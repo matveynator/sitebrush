@@ -35604,8 +35604,7 @@ func (a *App) runAutomaticSSLProcess(stop <-chan struct{}, certificateManager au
 						forceResponses[domain] = append(forceResponses[domain], request.response)
 					}
 				}
-				trustedAuditDomain := request.action == "renewal_audit"
-				if trustedAuditDomain || len(observedAt) < automaticSSLMaximumObservedDomains || !observedAt[domain].IsZero() {
+				if automaticSSLObservationAdmitted(request.action, !observedAt[domain].IsZero(), len(observedAt), automaticSSLMaximumObservedDomains) {
 					observedAt[domain] = now
 				}
 				if serverIPsCheckedAt.IsZero() || now.Sub(serverIPsCheckedAt) >= automaticSSLIPFreshForIssuance {
@@ -35672,6 +35671,13 @@ func (a *App) runAutomaticSSLProcess(stop <-chan struct{}, certificateManager au
 			}
 		}
 	}
+}
+
+func automaticSSLObservationAdmitted(action string, alreadyObserved bool, observedDomainCount, maximumObservedDomains int) bool {
+	if action == "renewal_audit" || action == "registration_confirmed" {
+		return true
+	}
+	return alreadyObserved || observedDomainCount < maximumObservedDomains
 }
 
 func (a *App) automaticSSLServerIPs(ctx context.Context) ([]net.IP, error) {
