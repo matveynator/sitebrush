@@ -921,7 +921,8 @@
 </div></section>
   {{end}}
   {{if eq .AnalyticsTab "security"}}
-  <section id="security-activity" class="card security-chart-card mb-4" data-activity-calendar="security"><div class="card-body">
+  <section id="security-activity" class="card security-chart-card mb-4" data-activity-calendar="security" data-hour-title="{{index .T "ax_security_by_hour"}}" data-type-title="{{index .T "ax_security_by_type"}}" data-activity-title="{{index .T "ax_security_activity"}}" data-empty-text="{{index .T "analytics_no_data"}}">
+  <div class="card-body">
     <h2 class="h5">{{index .T "ax_security_activity"}}</h2>
     <p class="small text-muted">{{index .T "ax_security_activity_hint"}}</p>
     <div class="activity-calendar-card activity-calendar-security" data-color="security">
@@ -942,8 +943,8 @@
     </div>
     <script type="application/json" data-calendar-days>{{.SecurityActivityDaysJSON}}</script><script type="application/json" data-calendar-hours>{{.SecurityActivityHoursJSON}}</script><script type="application/json" data-calendar-details-data>{{.SecurityIncidentsJSON}}</script><script type="application/json" data-calendar-types>{{.SecurityActivityTypesJSON}}</script><script type="application/json" data-calendar-severity>{{.SecurityActivitySeverityJSON}}</script>
     <div class="security-calendar-insights">
-      <section class="security-calendar-insight"><h3 class="h6" data-calendar-hour-title>Почасовая активность</h3><div class="hourly-chart activity-calendar-hour-chart" data-calendar-hour-chart></div><div class="activity-calendar-details" data-calendar-details></div></section>
-      <section class="security-calendar-insight security-radar-card"><h3 class="h6" data-calendar-radar-title>Типы атак</h3><svg class="security-radar" data-calendar-radar viewBox="0 0 360 320" role="img" aria-label="Типы атак по дням"></svg><div class="security-radar-tooltip" data-calendar-radar-tooltip role="tooltip" hidden><strong data-calendar-radar-tooltip-title></strong><span data-calendar-radar-tooltip-description></span></div><div class="small text-muted text-center" data-calendar-radar-legend></div></section>
+      <section class="security-calendar-insight"><h3 class="h6" data-calendar-hour-title>{{index .T "ax_security_by_hour"}}</h3><div class="hourly-chart activity-calendar-hour-chart" data-calendar-hour-chart></div><div class="activity-calendar-details" data-calendar-details></div></section>
+      <section class="security-calendar-insight security-radar-card"><h3 class="h6" data-calendar-radar-title>{{index .T "ax_security_by_type"}}</h3><svg class="security-radar" data-calendar-radar viewBox="0 0 360 320" role="img" aria-label="{{index .T "ax_security_by_type"}}"></svg><div class="security-radar-tooltip" data-calendar-radar-tooltip role="tooltip" hidden><strong data-calendar-radar-tooltip-title></strong><span data-calendar-radar-tooltip-description></span></div><div class="small text-muted text-center" data-calendar-radar-legend></div></section>
       <section class="security-calendar-insight"><h3 class="h6">{{index .T "ax_security_by_country"}}</h3><div id="security-country-chart" class="security-rank-chart"></div></section>
     </div>
     <div class="mt-3">
@@ -1553,8 +1554,9 @@
           radar.appendChild(marker);
         });
       }
-      radarTitle.textContent = dayKey ? 'Типы атак · ' + dayKey : 'Типы атак · ' + selectedYear;
-      radarLegend.textContent = hasData ? '● год · ● ' + (dayKey || 'выбранный день') : 'Нет данных о типах атак';
+      radarTitle.textContent = (calendar.dataset.typeTitle || '') + ' · ' + (dayKey || selectedYear);
+      radar.setAttribute('aria-label', (calendar.dataset.typeTitle || '') + ' · ' + (dayKey || selectedYear));
+      radarLegend.textContent = hasData ? (calendar.dataset.activityTitle || '') + ' · ' + selectedYear + (dayKey ? ' · ' + dayKey : '') : (calendar.dataset.emptyText || '');
     }
     function renderDay(dayKey, count, maximum, weekColumn, weekdayRow) {
       const dayButton = document.createElement('button');
@@ -1586,7 +1588,7 @@
       if (matchingDetails.length === 0) {
         const emptyMessage = document.createElement('p');
         emptyMessage.className = 'small text-muted';
-        emptyMessage.textContent = calendar.dataset.emptyText || 'No detailed events were retained for this hour.';
+        emptyMessage.textContent = calendar.dataset.emptyText || '';
         detailPanel.appendChild(emptyMessage);
         return;
       }
@@ -1619,7 +1621,7 @@
         counts.push(count);
         maximum = Math.max(maximum, count);
       }
-      hourTitle.textContent = dayKey;
+      hourTitle.textContent = calendar.dataset.activityCalendar === 'security' ? (calendar.dataset.hourTitle || '') + ' · ' + dayKey : dayKey;
       selection.textContent = dayKey + ' · ' + (Number(dayCounts[dayKey]) || 0);
       if (drill) drill.hidden = false;
       for (let hour = 0; hour < counts.length; hour += 1) {

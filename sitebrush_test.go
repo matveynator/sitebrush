@@ -3402,7 +3402,7 @@ func TestAnalyticsPageRequiresAdminAndRendersPreparedReport(t *testing.T) {
 	securityResponse := httptest.NewRecorder()
 	application.route(securityResponse, securityRequest)
 	securityBody := securityResponse.Body.String()
-	if securityResponse.Code != http.StatusOK || !strings.Contains(securityBody, `data-activity-calendar="security"`) || !strings.Contains(securityBody, `border:1px solid #6e7681 !important`) || !strings.Contains(securityBody, `class="security-calendar-insights"`) || !strings.Contains(securityBody, `data-calendar-radar`) || !strings.Contains(securityBody, `data-calendar-types`) || !strings.Contains(securityBody, `data-security-type="rapid-crawl"`) || !strings.Contains(securityBody, `data-description="Rapid crawl: a non-approved automated client`) || !strings.Contains(securityBody, `slice(0, 8)`) || !strings.Contains(securityBody, `data-security-legend-description`) || !strings.Contains(securityBody, `data-security-legend-level="4"`) || !strings.Contains(securityBody, `data-level="4"][data-intensity="4"]`) || !strings.Contains(securityBody, `securityActivityColor(categoryLevel, intensityLevel)`) || !strings.Contains(securityBody, `#security-activity .activity-calendar-hour-chart .hourly-chart-bar[data-level="4"][data-intensity="4"]`) || !strings.Contains(securityBody, `bar.dataset.level`) || !strings.Contains(securityBody, `pointerenter`) || !strings.Contains(securityBody, `activity-calendar-legend`) {
+	if securityResponse.Code != http.StatusOK || !strings.Contains(securityBody, `data-activity-calendar="security"`) || !strings.Contains(securityBody, `data-hour-title="Events by hour"`) || !strings.Contains(securityBody, `data-type-title="Events by problem type"`) || !strings.Contains(securityBody, `aria-label="Events by problem type"`) || strings.Contains(securityBody, `Типы атак`) || !strings.Contains(securityBody, `border:1px solid #6e7681 !important`) || !strings.Contains(securityBody, `class="security-calendar-insights"`) || !strings.Contains(securityBody, `data-calendar-radar`) || !strings.Contains(securityBody, `data-calendar-types`) || !strings.Contains(securityBody, `data-security-type="rapid-crawl"`) || !strings.Contains(securityBody, `data-description="Rapid crawl: a non-approved automated client`) || !strings.Contains(securityBody, `slice(0, 8)`) || !strings.Contains(securityBody, `data-security-legend-description`) || !strings.Contains(securityBody, `data-security-legend-level="4"`) || !strings.Contains(securityBody, `data-level="4"][data-intensity="4"]`) || !strings.Contains(securityBody, `securityActivityColor(categoryLevel, intensityLevel)`) || !strings.Contains(securityBody, `#security-activity .activity-calendar-hour-chart .hourly-chart-bar[data-level="4"][data-intensity="4"]`) || !strings.Contains(securityBody, `bar.dataset.level`) || !strings.Contains(securityBody, `pointerenter`) || !strings.Contains(securityBody, `activity-calendar-legend`) {
 		t.Fatalf("security analytics heatmap status=%d body=%q", securityResponse.Code, securityResponse.Body.String())
 	}
 }
@@ -7267,7 +7267,7 @@ func TestProfileShowsAndRevokesOwnedAuthorizedSessions(t *testing.T) {
 	targetResponse := httptest.NewRecorder()
 	application.createSession(targetResponse, targetRequest, "admin@example.com")
 	targetToken := targetResponse.Result().Cookies()[0].Value
-	for sessionNumber := 0; sessionNumber < 4; sessionNumber++ {
+	for sessionNumber := 0; sessionNumber < 60; sessionNumber++ {
 		additionalRequest := httptest.NewRequest(http.MethodGet, "http://localhost:8080/", nil)
 		additionalResponse := httptest.NewRecorder()
 		application.createSession(additionalResponse, additionalRequest, "admin@example.com")
@@ -7286,10 +7286,13 @@ func TestProfileShowsAndRevokesOwnedAuthorizedSessions(t *testing.T) {
 	if profileResponse.Code != http.StatusOK {
 		t.Fatalf("profile status = %d, body=%q", profileResponse.Code, profileResponse.Body.String())
 	}
-	for _, expected := range []string{"Авторизованные сессии · 6", "IP-адреса для доступа администратора · 6", "Microsoft Edge", "Windows", "Язык: ru", "пока вы не выйдете из аккаунта", "Показать ещё (2)"} {
+	for _, expected := range []string{"Авторизованные сессии · 62", "IP-адреса для доступа администратора · 6", "Microsoft Edge", "Windows", "Язык: ru", "пока вы не выйдете из аккаунта", "Показать ещё (46)"} {
 		if !strings.Contains(profileResponse.Body.String(), expected) {
 			t.Fatalf("profile session list missing %q", expected)
 		}
+	}
+	if renderedSessions := strings.Count(profileResponse.Body.String(), `name="session_token"`); renderedSessions != 50 {
+		t.Fatalf("rendered %d sessions, want the bounded page of 50", renderedSessions)
 	}
 
 	foreignRequest := httptest.NewRequest(http.MethodGet, "http://localhost:8080/", nil)

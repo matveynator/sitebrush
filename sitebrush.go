@@ -6604,7 +6604,9 @@ func (a *App) analyticsPage(w http.ResponseWriter, r *http.Request) {
 	if loadedSecurity.Err == nil {
 		state := browserstats.SecurityState{}
 		if json.Unmarshal([]byte(loadedSecurity.Text), &state) == nil {
-			security = state.Report(time.Now().UTC(), 365)
+			securityNow := time.Now().UTC()
+			state.Prune(securityNow)
+			security = state.Report(securityNow, 365)
 		}
 	}
 	securityIncidents := make(map[string]browserstats.Incident, len(security.Incidents))
@@ -20572,7 +20574,7 @@ func (a *App) renderProfilePage(w http.ResponseWriter, r *http.Request, email, s
 		if a.db.QueryRowContext(r.Context(), `SELECT COUNT(1) FROM admin_stealth_modes WHERE domain=? AND email=? AND enabled_at>0`, domain, accountEmail).Scan(&enabled) == nil {
 			adminStealthEnabled = enabled > 0
 		}
-		rows, err := a.db.QueryContext(r.Context(), `SELECT token,client_ip,created_at,user_agent,language FROM sessions WHERE user_email=? ORDER BY created_at DESC`, domain+"|"+accountEmail)
+		rows, err := a.db.QueryContext(r.Context(), `SELECT token,client_ip,created_at,user_agent,language FROM sessions WHERE user_email=? ORDER BY created_at DESC LIMIT 50`, domain+"|"+accountEmail)
 		if err == nil {
 			for rows.Next() {
 				entry := profileSessionView{}

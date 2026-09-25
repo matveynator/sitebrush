@@ -10,7 +10,7 @@ func TestSecurityActivityCalendarRetainsDailyAndHourlyTotalsForOneYear(t *testin
 	now := time.Date(2026, 9, 25, 12, 0, 0, 0, time.UTC)
 	state := SecurityState{
 		EventBuckets: map[string]*SecurityEventBucket{}, Groups: map[string]*RequestGroup{},
-		Incidents: []Incident{{IP: "203.0.113.10", Last: now.AddDate(0, 0, -300)}, {IP: "203.0.113.20", Last: now.AddDate(0, 0, -366)}},
+		Incidents: []Incident{{IP: "203.0.113.10", Last: now.AddDate(0, 0, -29)}, {IP: "203.0.113.20", Last: now.AddDate(0, 0, -31)}},
 	}
 	state.recordSecurityEvent(RequestObservation{Time: now, Country: "US"}, "scanner")
 	state.recordSecurityEvent(RequestObservation{Time: now, Country: "US"}, "scanner")
@@ -50,8 +50,12 @@ func TestSecurityActivityCalendarRetainsDailyAndHourlyTotalsForOneYear(t *testin
 	if len(state.Incidents) != 1 || state.Incidents[0].IP != "203.0.113.10" {
 		t.Fatalf("incident detail retention = %#v", state.Incidents)
 	}
-	if len(state.Report(now, 365).Incidents) != 1 {
-		t.Fatalf("retained incident is missing from the year report: %#v", state.Report(now, 365).Incidents)
+	state.Prune(now.AddDate(0, 0, 2))
+	if len(state.Incidents) != 0 {
+		t.Fatalf("identifiable incident detail survived 30 days: %#v", state.Incidents)
+	}
+	if state.ActivityDays["2026-09-25"] != 3 || state.ActivityTypes["2026-09-25"]["sitebrush-exploit"] != 1 {
+		t.Fatalf("aggregate activity was removed with incident detail: %#v / %#v", state.ActivityDays, state.ActivityTypes)
 	}
 }
 

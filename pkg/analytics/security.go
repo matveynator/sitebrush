@@ -333,7 +333,7 @@ func (state *SecurityState) recordIncident(request RequestObservation, category,
 func (state *SecurityState) Prune(now time.Time) {
 	retained := state.Incidents[:0]
 	for _, incident := range state.Incidents {
-		if now.Sub(incident.Last) <= 365*24*time.Hour {
+		if now.Sub(incident.Last) <= 30*24*time.Hour {
 			retained = append(retained, incident)
 		}
 	}
