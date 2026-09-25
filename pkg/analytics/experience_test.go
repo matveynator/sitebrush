@@ -62,6 +62,41 @@ func TestExperienceLegacyClientWithoutTabStillCounts(t *testing.T) {
 	}
 }
 
+func TestExperienceActivityCalendarCountsUsersAndRetainsOneYear(t *testing.T) {
+	now := time.Date(2026, 9, 25, 12, 0, 0, 0, time.UTC)
+	site := New(now)
+	human := experienceEvent("aaaaaaaaaaaaaaaa", "tab-human")
+	if !site.Record(human, now, 8<<20) {
+		t.Fatal("record human session")
+	}
+	bot := experienceEvent("bbbbbbbbbbbbbbbb", "tab-bot")
+	bot.Visitor = "2222222222222222"
+	bot.BrowserContext.ClientClass = "automation"
+	botAt := now.Add(-24 * time.Hour)
+	if !site.Record(bot, botAt, 8<<20) {
+		t.Fatal("record automated session")
+	}
+	report := site.ExperienceReport(now, 7, true)
+	humanActivity := report.View(ExperienceFilter{Traffic: "human"})
+	if humanActivity.ActivityDays["2026-09-25"] != 1 || humanActivity.ActivityDays["2026-09-24"] != 0 {
+		t.Fatalf("human activity days = %#v", humanActivity.ActivityDays)
+	}
+	allActivity := report.View(ExperienceFilter{Traffic: "all"})
+	if allActivity.ActivityDays["2026-09-24"] != 1 || allActivity.ActivityHours["2026-09-24T12"] != 1 {
+		t.Fatalf("combined day/hour activity = %#v / %#v", allActivity.ActivityDays, allActivity.ActivityHours)
+	}
+	oldDate := now.AddDate(0, 0, -365).Format("2006-01-02")
+	retainedDate := now.AddDate(0, 0, -364).Format("2006-01-02")
+	site.Experience.ActivityDays[oldDate+"\x1fhuman-likely"] = 1
+	site.Experience.ActivityDays[retainedDate+"\x1fhuman-likely"] = 1
+	site.pruneExperience(now)
+	if _, found := site.Experience.ActivityDays[oldDate+"\x1fhuman-likely"]; found {
+		t.Fatalf("activity older than one year was retained: %s", oldDate)
+	}
+	if site.Experience.ActivityDays[retainedDate+"\x1fhuman-likely"] != 1 {
+		t.Fatalf("last retained day was pruned: %s", retainedDate)
+	}
+}
 
 func TestTabAwareViewsStillPopulateLegacyTransitions(t *testing.T) {
 	now := time.Date(2026, 9, 22, 12, 0, 0, 0, time.UTC)
@@ -236,6 +271,15 @@ func TestSecuritySignalsRedactionAndBounds(t *testing.T) {
 	if ProbeCategory("/a/%252e%252e/etc/passwd", "") != "traversal" {
 		t.Fatal("encoded traversal missed")
 	}
+	if ProbeCategory("/_sitebrush/storage", "") != "sitebrush-exploit" {
+		t.Fatal("SiteBrush internal route probe missed")
+	}
+	if ProbeCategory("/sitebrush.db", "") != "sitebrush-exploit" {
+		t.Fatal("SiteBrush database probe missed")
+	}
+	if ProbeCategory("/_sitebrush/analytics", "") != "" || ProbeCategory("/articles/sitebrush", "") != "" {
+		t.Fatal("normal SiteBrush route was marked as an attack")
+	}
 	encoded, _ := json.Marshal(state)
 	if strings.Contains(string(encoded), "token=secret") {
 		t.Fatal("raw query retained")
@@ -303,7 +347,6 @@ func TestArchiveExcludesSessionAndVisitorIdentities(t *testing.T) {
 		t.Fatal("visitor identity in archive")
 	}
 }
-
 
 func TestExperienceLocalHourFallbackAndReturnContext(t *testing.T) {
 	now := time.Date(2026, 9, 23, 12, 0, 0, 0, time.UTC)

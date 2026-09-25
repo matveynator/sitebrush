@@ -3388,10 +3388,44 @@ func TestAnalyticsPageRequiresAdminAndRendersPreparedReport(t *testing.T) {
 		t.Fatalf("admin status = %d, body=%q", adminResponse.Code, adminResponse.Body.String())
 	}
 	body := adminResponse.Body.String()
-	for _, expectedFragment := range []string{"Analytics", "Total requests", "/docs", `href="/docs"`} {
+	for _, expectedFragment := range []string{"Analytics", "Total requests", "/docs", `href="/docs"`, `data-activity-calendar="visitors"`, "Activity by day (UTC)", `id="analytics-server-hour-chart"`, `<details id="analytics-goals"`, "Goals are not configured", "Edit goals"} {
 		if !strings.Contains(body, expectedFragment) {
 			t.Fatalf("analytics page missing %q in %s", expectedFragment, body)
 		}
+	}
+	if strings.Contains(body, "analytics-local-hour-chart") || strings.Contains(body, "Visitor local time") || strings.Contains(body, `id="analytics-goals" open`) {
+		t.Fatalf("analytics page still shows visitor local time or expands goal editor by default")
+	}
+	securityRequest := httptest.NewRequest(http.MethodGet, "http://localhost:8080/docs?analytics&tab=security", nil)
+	securityRequest.Header.Set("Accept-Language", "en")
+	securityRequest.AddCookie(newAdminSessionCookie(t, application, "admin@example.com"))
+	securityResponse := httptest.NewRecorder()
+	application.route(securityResponse, securityRequest)
+	securityBody := securityResponse.Body.String()
+	if securityResponse.Code != http.StatusOK || !strings.Contains(securityBody, `data-activity-calendar="security"`) || !strings.Contains(securityBody, `border:1px solid #6e7681 !important`) || !strings.Contains(securityBody, `class="security-calendar-insights"`) || !strings.Contains(securityBody, `data-calendar-radar`) || !strings.Contains(securityBody, `data-calendar-types`) || !strings.Contains(securityBody, `data-security-type="rapid-crawl"`) || !strings.Contains(securityBody, `data-description="Rapid crawl: a non-approved automated client`) || !strings.Contains(securityBody, `slice(0, 8)`) || !strings.Contains(securityBody, `data-security-legend-description`) || !strings.Contains(securityBody, `data-security-legend-level="4"`) || !strings.Contains(securityBody, `data-level="4"][data-intensity="4"]`) || !strings.Contains(securityBody, `securityActivityColor(categoryLevel, intensityLevel)`) || !strings.Contains(securityBody, `#security-activity .activity-calendar-hour-chart .hourly-chart-bar[data-level="4"][data-intensity="4"]`) || !strings.Contains(securityBody, `bar.dataset.level`) || !strings.Contains(securityBody, `pointerenter`) || !strings.Contains(securityBody, `activity-calendar-legend`) {
+		t.Fatalf("security analytics heatmap status=%d body=%q", securityResponse.Code, securityResponse.Body.String())
+	}
+}
+
+func TestSitebrushSecurityLoadPercentagesAndWindow(t *testing.T) {
+	previous := sitebrushNetworkCounters{receivedBytes: 1_000, sentBytes: 2_000, capacityBytesPerSecond: 50_000}
+	current := sitebrushNetworkCounters{receivedBytes: 46_000, sentBytes: 20_000, capacityBytesPerSecond: 50_000}
+	percent, known := sitebrushNetworkLoadPercent(previous, current, 1)
+	if !known || percent < 89.99 || percent > 90.01 {
+		t.Fatalf("network capacity used = %.2f%%, known=%t; want 90%%", percent, known)
+	}
+	if _, known := sitebrushNetworkLoadPercent(previous, current, 0); known {
+		t.Fatal("network utilization accepted a zero-length interval")
+	}
+	eventAt := time.Date(2026, 9, 25, 12, 0, 0, 0, time.UTC)
+	if !sitebrushSecurityLoadWasHigh([]sitebrushSecurityHostLoad{{ObservedAt: eventAt.Add(-5 * time.Second), CPUPercent: 95}}, eventAt) {
+		t.Fatal("high CPU was not treated as severe server load")
+	}
+	if !sitebrushSecurityLoadWasHigh([]sitebrushSecurityHostLoad{{ObservedAt: eventAt.Add(-5 * time.Second), NetworkPercent: 90, NetworkKnown: true}}, eventAt) {
+		t.Fatal("high network utilization was not treated as severe server load")
+	}
+	if sitebrushSecurityLoadWasHigh([]sitebrushSecurityHostLoad{{ObservedAt: eventAt.Add(-16 * time.Second), CPUPercent: 100}}, eventAt) {
+		t.Fatal("stale server metrics were used to classify an attack")
 	}
 }
 
@@ -7160,6 +7194,8 @@ func TestProfileChangeFormsWorkWithoutJavaScriptAndUnchangedEmailIsRejected(t *t
 	}
 	for _, expectedFragment := range []string{
 		`data-profile-email-form data-current-email="admin@example.com"`,
+		`class="authentication-card profile-form profile-account-card" method="post" action="?profile" data-profile-send-form data-profile-email-form`,
+		`class="authentication-card profile-form profile-account-card" method="post" action="?profile" data-profile-send-form data-profile-password-form`,
 		`type="submit" data-profile-email-submit`,
 		`type="submit" data-profile-password-submit`,
 		`submitButton.disabled = nextEmail.toLowerCase() === currentEmail.toLowerCase() || !emailInput.validity.valid`,
@@ -7196,6 +7232,85 @@ func TestProfileChangeFormsWorkWithoutJavaScriptAndUnchangedEmailIsRejected(t *t
 	}
 	if confirmationCount != 0 {
 		t.Fatalf("unchanged email created %d confirmations", confirmationCount)
+	}
+}
+
+func TestProfileShowsAndRevokesOwnedAuthorizedSessions(t *testing.T) {
+	application, rawDB := newTestApplication(t)
+	for _, email := range []string{"admin@example.com", "other@example.com"} {
+		if _, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", email, "old"); err != nil {
+			t.Fatalf("insert user %s: %v", email, err)
+		}
+	}
+	currentCookie := newAdminSessionCookie(t, application, "admin@example.com")
+	targetRequest := httptest.NewRequest(http.MethodGet, "http://localhost:8080/", nil)
+	targetRequest.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Edg/130.0")
+	targetRequest.Header.Set("Accept-Language", "ru-RU,ru;q=0.9,en;q=0.8")
+	targetResponse := httptest.NewRecorder()
+	application.createSession(targetResponse, targetRequest, "admin@example.com")
+	targetToken := targetResponse.Result().Cookies()[0].Value
+	for sessionNumber := 0; sessionNumber < 4; sessionNumber++ {
+		additionalRequest := httptest.NewRequest(http.MethodGet, "http://localhost:8080/", nil)
+		additionalResponse := httptest.NewRecorder()
+		application.createSession(additionalResponse, additionalRequest, "admin@example.com")
+	}
+	for ipNumber := 0; ipNumber < 6; ipNumber++ {
+		allowedIP := fmt.Sprintf("198.51.%d.0/24", ipNumber)
+		if _, err := rawDB.Exec(`INSERT INTO admin_allowed_ips(domain,email,client_ip,added_at) VALUES(?,?,?,?)`, "localhost", "admin@example.com", allowedIP, time.Now().Unix()); err != nil {
+			t.Fatalf("insert allowed IP %s: %v", allowedIP, err)
+		}
+	}
+
+	profileRequest := httptest.NewRequest(http.MethodGet, "http://localhost:8080/?profile", nil)
+	profileRequest.AddCookie(currentCookie)
+	profileResponse := httptest.NewRecorder()
+	application.route(profileResponse, profileRequest)
+	if profileResponse.Code != http.StatusOK {
+		t.Fatalf("profile status = %d, body=%q", profileResponse.Code, profileResponse.Body.String())
+	}
+	for _, expected := range []string{"Авторизованные сессии · 6", "IP-адреса для доступа администратора · 6", "Microsoft Edge", "Windows", "Язык: ru", "пока вы не выйдете из аккаунта", "Показать ещё (2)"} {
+		if !strings.Contains(profileResponse.Body.String(), expected) {
+			t.Fatalf("profile session list missing %q", expected)
+		}
+	}
+
+	foreignRequest := httptest.NewRequest(http.MethodGet, "http://localhost:8080/", nil)
+	foreignResponse := httptest.NewRecorder()
+	application.createSession(foreignResponse, foreignRequest, "other@example.com")
+	foreignToken := foreignResponse.Result().Cookies()[0].Value
+	postRevoke := func(token string) *httptest.ResponseRecorder {
+		form := url.Values{"profile_action": {"revoke_session"}, "session_token": {token}, "account_csrf": {accountCSRF(profileRequest)}}
+		request := httptest.NewRequest(http.MethodPost, "http://localhost:8080/?profile", strings.NewReader(form.Encode()))
+		request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		request.AddCookie(currentCookie)
+		response := httptest.NewRecorder()
+		application.route(response, request)
+		return response
+	}
+	if response := postRevoke(foreignToken); response.Code != http.StatusNotFound {
+		t.Fatalf("foreign session revoke status = %d, want 404", response.Code)
+	}
+	var sessionCount int
+	if err := rawDB.QueryRow(`SELECT COUNT(1) FROM sessions WHERE token=?`, foreignToken).Scan(&sessionCount); err != nil || sessionCount != 1 {
+		t.Fatalf("foreign session was affected: count=%d err=%v", sessionCount, err)
+	}
+	if response := postRevoke(targetToken); response.Code != http.StatusSeeOther {
+		t.Fatalf("owned session revoke status = %d, want 303", response.Code)
+	}
+	if err := rawDB.QueryRow(`SELECT COUNT(1) FROM sessions WHERE token=?`, targetToken).Scan(&sessionCount); err != nil || sessionCount != 0 {
+		t.Fatalf("owned session remains: count=%d err=%v", sessionCount, err)
+	}
+}
+
+func TestProfileUserAgentDescription(t *testing.T) {
+	translations := map[string]string{"auth_device_computer": "Computer", "auth_device_phone": "Phone", "auth_device_tablet": "Tablet", "auth_device_unknown_os": "Unknown OS", "auth_device_unknown_browser": "Unknown browser"}
+	device, operatingSystem, browser := describeProfileUserAgent("Mozilla/5.0 (Windows NT 10.0) Edg/130.0", translations)
+	if device != "Computer" || operatingSystem != "Windows" || browser != "Microsoft Edge" {
+		t.Fatalf("edge user agent = %q, %q, %q", device, operatingSystem, browser)
+	}
+	device, operatingSystem, browser = describeProfileUserAgent("Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) Mobile", translations)
+	if device != "Phone" || operatingSystem != "iOS" || browser != "Unknown browser" {
+		t.Fatalf("iphone user agent = %q, %q, %q", device, operatingSystem, browser)
 	}
 }
 

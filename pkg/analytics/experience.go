@@ -79,20 +79,24 @@ type Segment struct {
 	Measures
 }
 type Experience struct {
-	Version    int
-	Started    time.Time
-	Segments   map[string]*Segment
-	Recent     map[string]*SessionSummary
-	LocalHours [24]int
-	Languages  map[string]int
-	Incomplete bool
+	Version       int
+	Started       time.Time
+	Segments      map[string]*Segment
+	Recent        map[string]*SessionSummary
+	ActivityHours map[string]int
+	ActivityDays  map[string]int
+	LocalHours    [24]int
+	Languages     map[string]int
+	Incomplete    bool
 }
 type ExperienceReport struct {
-	Version    int
-	Segments   []Segment
-	Recent     []SessionSummary
-	LocalHours [24]int
-	Incomplete bool
+	Version       int
+	Segments      []Segment
+	Recent        []SessionSummary
+	ActivityHours map[string]int
+	ActivityDays  map[string]int
+	LocalHours    [24]int
+	Incomplete    bool
 }
 type ExperienceFilter struct{ Source, Campaign, Page, Language, Traffic string }
 type ExperienceRow struct {
@@ -111,6 +115,8 @@ type ExperienceView struct {
 	Recent                              []SessionSummary
 	Insights                            []Insight
 	LocalHours                          [24]int
+	ActivityHours                       map[string]int
+	ActivityDays                        map[string]int
 	Incomplete                          bool
 	GoalsConfigured                     bool
 }
@@ -332,6 +338,16 @@ func (site *Site) recordExperience(event Event, now time.Time, visitor *Visitor,
 			site.experienceSegment(now, session, session.Landing).LocalHours[local.Hour()]++
 		}
 		site.Experience.Recent[key] = session
+		activityDate := now.UTC().Format("2006-01-02")
+		if site.Experience.ActivityDays == nil {
+			site.Experience.ActivityDays = map[string]int{}
+		}
+		if site.Experience.ActivityHours == nil {
+			site.Experience.ActivityHours = map[string]int{}
+		}
+		activityKey := activityDate + "\x1f" + session.Class
+		site.Experience.ActivityDays[activityKey]++
+		site.Experience.ActivityHours[activityDate+"T"+now.UTC().Format("15")+"\x1f"+session.Class]++
 		first := site.experienceSegment(now, session, session.Landing)
 		first.Sessions++
 		if visitor.Session > 1 {
@@ -475,6 +491,17 @@ func appendStep(session *SessionSummary, tab, step string) {
 	session.Tabs[tab] = append(session.Tabs[tab], step)
 }
 func (site *Site) pruneExperience(now time.Time) {
+	activityCutoff := dayKey(now.UTC().AddDate(0, 0, -364))
+	for activityKey := range site.Experience.ActivityDays {
+		if len(activityKey) < 10 || activityKey[:10] < activityCutoff {
+			delete(site.Experience.ActivityDays, activityKey)
+		}
+	}
+	for activityKey := range site.Experience.ActivityHours {
+		if len(activityKey) < 10 || activityKey[:10] < activityCutoff {
+			delete(site.Experience.ActivityHours, activityKey)
+		}
+	}
 	for key, segment := range site.Experience.Segments {
 		if segment.Date < dayKey(now.AddDate(0, 0, -89)) {
 			delete(site.Experience.Segments, key)
@@ -517,6 +544,7 @@ func (site *Site) evictExperience() {
 }
 func (site *Site) experienceBytes() int64 {
 	total := int64(len(site.Experience.Recent)) * 12288
+	total += int64(len(site.Experience.ActivityDays))*48 + int64(len(site.Experience.ActivityHours))*56
 	for _, segment := range site.Experience.Segments {
 		total += 1536
 		for label := range segment.ActionCounts {
@@ -527,7 +555,13 @@ func (site *Site) experienceBytes() int64 {
 }
 
 func (site *Site) ExperienceReport(now time.Time, days int, detail bool) ExperienceReport {
-	report := ExperienceReport{Version: site.Experience.Version, Incomplete: site.Experience.Incomplete, LocalHours: site.Experience.LocalHours}
+	report := ExperienceReport{Version: site.Experience.Version, Incomplete: site.Experience.Incomplete, LocalHours: site.Experience.LocalHours, ActivityHours: make(map[string]int), ActivityDays: make(map[string]int)}
+	for activityKey, count := range site.Experience.ActivityHours {
+		report.ActivityHours[activityKey] = count
+	}
+	for activityKey, count := range site.Experience.ActivityDays {
+		report.ActivityDays[activityKey] = count
+	}
 	first := dayKey(now.AddDate(0, 0, -days+1))
 	for _, segment := range site.Experience.Segments {
 		if segment.Date >= first && segment.Date <= dayKey(now) {
@@ -573,7 +607,22 @@ func addMeasures(target *Measures, source Measures) {
 	target.Scroll100 += source.Scroll100
 }
 func (report ExperienceReport) View(filter ExperienceFilter) ExperienceView {
-	result := ExperienceView{Incomplete: report.Incomplete, LocalHours: [24]int{}}
+	result := ExperienceView{Incomplete: report.Incomplete, LocalHours: [24]int{}, ActivityHours: make(map[string]int), ActivityDays: make(map[string]int)}
+	acceptsTraffic := func(class string) bool {
+		return filter.Traffic == "all" || (filter.Traffic == "bots" && class != "human-likely") || (filter.Traffic != "bots" && class == "human-likely")
+	}
+	for activityKey, count := range report.ActivityDays {
+		date, class, found := strings.Cut(activityKey, "\x1f")
+		if found && acceptsTraffic(class) {
+			result.ActivityDays[date] += count
+		}
+	}
+	for activityKey, count := range report.ActivityHours {
+		hour, class, found := strings.Cut(activityKey, "\x1f")
+		if found && acceptsTraffic(class) {
+			result.ActivityHours[hour] += count
+		}
+	}
 	actionCounts := map[string]int{}
 	sources, pages, languages := map[string]*ExperienceRow{}, map[string]*ExperienceRow{}, map[string]*ExperienceRow{}
 	accepts := func(source, page, language, class string) bool {
@@ -761,7 +810,7 @@ func (session SessionSummary) ReturnAfter() string {
 	}
 	duration := time.Duration(session.ReturnAfterMS) * time.Millisecond
 	if duration >= 24*time.Hour {
-		return fmt.Sprintf("%dd %dh", int(duration/(24*time.Hour)), int(duration% (24*time.Hour)/time.Hour))
+		return fmt.Sprintf("%dd %dh", int(duration/(24*time.Hour)), int(duration%(24*time.Hour)/time.Hour))
 	}
 	if duration >= time.Hour {
 		return fmt.Sprintf("%dh %dm", int(duration/time.Hour), int(duration%time.Hour/time.Minute))

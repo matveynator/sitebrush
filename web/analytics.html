@@ -437,10 +437,11 @@
     }
     .hourly-chart-grid {
       display:grid;
-      grid-template-columns:repeat(2,minmax(0,1fr));
+      grid-template-columns:minmax(0,1fr);
       gap:16px;
       margin-bottom:24px;
     }
+    #analytics-goals > summary { cursor:pointer; list-style-position:inside; }
     .hourly-chart {
       height:220px;
       display:grid;
@@ -451,9 +452,134 @@
       border-bottom:1px solid var(--bs-border-color);
       position:relative;
     }
+    .activity-calendar-card {
+      width:100%;
+      max-width:100%;
+      min-width:0;
+      overflow:hidden;
+    }
+    .activity-calendar-scroll { overflow:hidden; padding:4px 0 12px; }
+    .activity-calendar-inner { width:100%; min-width:0; }
+    .activity-calendar-months {
+      display:grid;
+      grid-template-columns:repeat(54, minmax(0,1fr));
+      column-gap:clamp(1px, .3vw, 3px);
+      width:100%;
+      min-height:18px;
+      color:var(--bs-secondary-color);
+      font-size:10px;
+    }
+    .activity-calendar-months span { grid-row:1; white-space:nowrap; }
+    .activity-calendar-grid {
+      display:grid;
+      grid-template-columns:repeat(54, minmax(0,1fr));
+      grid-template-rows:repeat(7, minmax(0,1fr));
+      column-gap:clamp(1px, .3vw, 3px);
+      row-gap:clamp(1px, .3vw, 3px);
+      width:100%;
+      aspect-ratio:54 / 7;
+    }
+    .activity-calendar-grid .activity-calendar-day {
+      display:block !important;
+      appearance:none;
+      box-sizing:border-box !important;
+      flex:none !important;
+      width:100% !important;
+      height:100% !important;
+      min-width:0 !important;
+      min-height:0 !important;
+      max-width:none !important;
+      max-height:none !important;
+      aspect-ratio:1 / 1;
+      line-height:0 !important;
+      margin:0 !important;
+      padding:0 !important;
+      border:1px solid rgba(127,127,127,.18) !important;
+      border-radius:2px !important;
+      background:var(--activity-level-0, #ebedf0) !important;
+      box-shadow:none !important;
+      cursor:pointer;
+    }
+    .activity-calendar-grid .activity-calendar-day[data-level="1"] { background:var(--activity-level-1, #9be9a8) !important; }
+    .activity-calendar-grid .activity-calendar-day[data-level="2"] { background:var(--activity-level-2, #40c463) !important; }
+    .activity-calendar-grid .activity-calendar-day[data-level="3"] { background:var(--activity-level-3, #30a14e) !important; }
+    .activity-calendar-grid .activity-calendar-day[data-level="4"] { background:var(--activity-level-4, #216e39) !important; }
+    .activity-calendar-days .activity-calendar-day[data-level="0"] { background:#ebedf0 !important; border-color:#d1d5da !important; }
+    [data-bs-theme="dark"] .activity-calendar-days .activity-calendar-day[data-level="0"] { background:#20252d !important; border-color:#30363d !important; }
+    .activity-calendar-security .activity-calendar-grid .activity-calendar-day { border:1px solid #6e7681 !important; }
+    .activity-calendar-security .activity-calendar-grid .activity-calendar-day[data-level="0"] { background:#ebedf0 !important; }
+    .activity-calendar-legend .activity-calendar-day[data-level="0"] { background:var(--activity-level-0, #ebedf0) !important; }
+    .activity-calendar-legend .activity-calendar-day[data-level="1"] { background:var(--activity-level-1, #9be9a8) !important; }
+    .activity-calendar-legend .activity-calendar-day[data-level="2"] { background:var(--activity-level-2, #40c463) !important; }
+    .activity-calendar-legend .activity-calendar-day[data-level="3"] { background:var(--activity-level-3, #30a14e) !important; }
+    .activity-calendar-legend .activity-calendar-day[data-level="4"] { background:var(--activity-level-4, #216e39) !important; }
+    .activity-calendar-security .activity-calendar-legend .activity-calendar-day[data-level="1"] { background:#16a34a !important; }
+    .activity-calendar-security .activity-calendar-legend .activity-calendar-day[data-level="2"] { background:#eab308 !important; }
+    .activity-calendar-security .activity-calendar-legend .activity-calendar-day[data-level="3"] { background:#f97316 !important; }
+    .activity-calendar-security .activity-calendar-legend .activity-calendar-day[data-level="4"] { background:#dc2626 !important; }
+    .activity-calendar-days { --activity-level-0:#ebedf0; --activity-level-1:#9be9a8; --activity-level-2:#40c463; --activity-level-3:#30a14e; --activity-level-4:#216e39; }
+    .activity-calendar-security { --activity-level-0:#ebedf0; --activity-level-1:#166534; --activity-level-2:#a16207; --activity-level-3:#c2410c; --activity-level-4:#991b1b; }
+    .activity-calendar-security .activity-calendar-grid .activity-calendar-day[data-level="1"][data-intensity="1"] { background:#dcfce7 !important; }
+    .activity-calendar-security .activity-calendar-grid .activity-calendar-day[data-level="1"][data-intensity="2"] { background:#86efac !important; }
+    .activity-calendar-security .activity-calendar-grid .activity-calendar-day[data-level="1"][data-intensity="3"] { background:#4ade80 !important; }
+    .activity-calendar-security .activity-calendar-grid .activity-calendar-day[data-level="1"][data-intensity="4"] { background:#16a34a !important; }
+    .activity-calendar-security .activity-calendar-grid .activity-calendar-day[data-level="2"][data-intensity="1"] { background:#fef3c7 !important; }
+    .activity-calendar-security .activity-calendar-grid .activity-calendar-day[data-level="2"][data-intensity="2"] { background:#fcd34d !important; }
+    .activity-calendar-security .activity-calendar-grid .activity-calendar-day[data-level="2"][data-intensity="3"] { background:#fbbf24 !important; }
+    .activity-calendar-security .activity-calendar-grid .activity-calendar-day[data-level="2"][data-intensity="4"] { background:#eab308 !important; }
+    .activity-calendar-security .activity-calendar-grid .activity-calendar-day[data-level="3"][data-intensity="1"] { background:#ffedd5 !important; }
+    .activity-calendar-security .activity-calendar-grid .activity-calendar-day[data-level="3"][data-intensity="2"] { background:#fdba74 !important; }
+    .activity-calendar-security .activity-calendar-grid .activity-calendar-day[data-level="3"][data-intensity="3"] { background:#fb923c !important; }
+    .activity-calendar-security .activity-calendar-grid .activity-calendar-day[data-level="3"][data-intensity="4"] { background:#f97316 !important; }
+    .activity-calendar-security .activity-calendar-grid .activity-calendar-day[data-level="4"][data-intensity="1"] { background:#fecaca !important; }
+    .activity-calendar-security .activity-calendar-grid .activity-calendar-day[data-level="4"][data-intensity="2"] { background:#f87171 !important; }
+    .activity-calendar-security .activity-calendar-grid .activity-calendar-day[data-level="4"][data-intensity="3"] { background:#ef4444 !important; }
+    .activity-calendar-security .activity-calendar-grid .activity-calendar-day[data-level="4"][data-intensity="4"] { background:#b91c1c !important; }
+    [data-bs-theme="dark"] .activity-calendar-days { --activity-level-0:#20252d; --activity-level-1:#0e4429; --activity-level-2:#006d32; --activity-level-3:#26a641; --activity-level-4:#39d353; }
+    .activity-calendar-year-tabs { display:flex; flex-direction:row; flex-wrap:wrap; gap:6px; margin-block:8px 12px; }
+    .activity-calendar-card .activity-calendar-year-tabs button { display:block !important; min-height:26px !important; padding:3px 8px !important; border:1px solid var(--bs-border-color) !important; border-radius:4px !important; background:transparent !important; color:inherit !important; line-height:1.2 !important; }
+    .activity-calendar-card .activity-calendar-year-tabs button[aria-pressed="true"] { background:var(--bs-tertiary-bg) !important; font-weight:700; }
+    .activity-calendar-hour-chart { margin-top:12px; }
+    .activity-calendar-details { margin-top:12px; }
+    .activity-calendar-legend { display:flex; align-items:center; justify-content:flex-end; gap:4px; margin-top:8px; color:var(--bs-secondary-color); font-size:11px; }
+    .activity-calendar-legend .activity-calendar-day { display:inline-block; width:11px; height:11px; min-height:11px; padding:0; border-radius:2px; cursor:default; }
+    .security-activity-legend-layout { display:grid; grid-template-columns:auto minmax(180px,1fr); align-items:center; gap:14px; margin-top:8px; }
+    .security-activity-legend { justify-content:flex-start; margin-top:0; white-space:nowrap; }
+    .security-activity-legend .activity-calendar-day { cursor:help; outline-offset:2px; }
+    .security-activity-legend-description { min-height:1.4em; color:var(--bs-secondary-color); font-size:12px; }
+    @media (max-width:520px) { .security-activity-legend-layout { grid-template-columns:1fr; gap:4px; } }
+    #security-activity .activity-calendar-hour-chart .hourly-chart-bar[data-level="0"] { background:#ebedf0 !important; }
+    #security-activity .activity-calendar-hour-chart .hourly-chart-bar[data-level="1"][data-intensity="1"] { background:#dcfce7 !important; }
+    #security-activity .activity-calendar-hour-chart .hourly-chart-bar[data-level="1"][data-intensity="2"] { background:#86efac !important; }
+    #security-activity .activity-calendar-hour-chart .hourly-chart-bar[data-level="1"][data-intensity="3"] { background:#4ade80 !important; }
+    #security-activity .activity-calendar-hour-chart .hourly-chart-bar[data-level="1"][data-intensity="4"] { background:#16a34a !important; }
+    #security-activity .activity-calendar-hour-chart .hourly-chart-bar[data-level="2"][data-intensity="1"] { background:#fef3c7 !important; }
+    #security-activity .activity-calendar-hour-chart .hourly-chart-bar[data-level="2"][data-intensity="2"] { background:#fcd34d !important; }
+    #security-activity .activity-calendar-hour-chart .hourly-chart-bar[data-level="2"][data-intensity="3"] { background:#fbbf24 !important; }
+    #security-activity .activity-calendar-hour-chart .hourly-chart-bar[data-level="2"][data-intensity="4"] { background:#eab308 !important; }
+    #security-activity .activity-calendar-hour-chart .hourly-chart-bar[data-level="3"][data-intensity="1"] { background:#ffedd5 !important; }
+    #security-activity .activity-calendar-hour-chart .hourly-chart-bar[data-level="3"][data-intensity="2"] { background:#fdba74 !important; }
+    #security-activity .activity-calendar-hour-chart .hourly-chart-bar[data-level="3"][data-intensity="3"] { background:#fb923c !important; }
+    #security-activity .activity-calendar-hour-chart .hourly-chart-bar[data-level="3"][data-intensity="4"] { background:#f97316 !important; }
+    #security-activity .activity-calendar-hour-chart .hourly-chart-bar[data-level="4"][data-intensity="1"] { background:#fecaca !important; }
+    #security-activity .activity-calendar-hour-chart .hourly-chart-bar[data-level="4"][data-intensity="2"] { background:#f87171 !important; }
+    #security-activity .activity-calendar-hour-chart .hourly-chart-bar[data-level="4"][data-intensity="3"] { background:#ef4444 !important; }
+    #security-activity .activity-calendar-hour-chart .hourly-chart-bar[data-level="4"][data-intensity="4"] { background:#b91c1c !important; }
+    .security-calendar-insights { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:16px; margin-top:20px; }
+    #security-activity .security-calendar-insights { --activity-level-0:#ebedf0; }
+    .security-calendar-insight { min-width:0; padding:14px; border:1px solid var(--bs-border-color); border-radius:8px; }
+    .security-radar-card { position:relative; }
+    .security-radar-tooltip { position:absolute; z-index:5; inset-inline:10px; bottom:38px; padding:10px 12px; border:1px solid var(--bs-border-color); border-radius:6px; background:var(--bs-body-bg); box-shadow:0 4px 16px rgba(0,0,0,.2); font-size:12px; }
+    .security-radar-tooltip[hidden] { display:none; }
+    .security-radar-tooltip strong { display:block; margin-bottom:4px; }
+    .security-radar { display:block; width:min(100%,360px); height:auto; margin-inline:auto; overflow:visible; }
+    .security-radar polygon { fill:rgba(224,90,42,.16); stroke:#e05a2a; stroke-width:2; }
+    .security-radar .security-radar-axis { stroke:var(--bs-border-color); stroke-width:1; }
+    .security-radar text { fill:currentColor; font-size:9px; }
+    .security-radar-point { fill:#e05a2a; stroke:#ff2d2d; stroke-width:2; }
     .security-chart-grid {
       display:grid;
-      grid-template-columns:minmax(0, 1.35fr) minmax(280px, .65fr);
+      grid-template-columns:repeat(2,minmax(0,1fr));
       gap:16px;
       margin-bottom:16px;
     }
@@ -494,6 +620,8 @@
       border-radius:999px;
       background:var(--theme-muted-foreground);
     }
+    .security-rank-row[data-security-type="sitebrush-exploit"] .security-rank-fill { background:#dc2626; }
+    .security-rank-row[data-security-type="sitebrush-exploit"] .security-rank-label { color:#dc2626; font-weight:700; }
     .security-rank-value {
       min-width:42px;
       text-align:right;
@@ -517,8 +645,17 @@
     .security-type-help-item p { margin:0; font-size:.82rem; color:var(--dashboard-muted); }
     @media (max-width: 900px) {
       .security-chart-grid { grid-template-columns:1fr; }
+      .security-calendar-insights { grid-template-columns:repeat(3,minmax(0,1fr)); }
+    }
+    @media (max-width: 760px) {
+      .security-calendar-insights { grid-template-columns:1fr; }
     }
     .hourly-chart-bar {
+      display:block;
+      border:0;
+      padding:0;
+      width:100%;
+      cursor:pointer;
       min-height:2px;
       border-radius:4px 4px 1px 1px;
       background:var(--theme-chart-1);
@@ -657,19 +794,24 @@
     </div>
   </section>
 
+  <section class="card activity-calendar-card activity-calendar-days mb-4" data-activity-calendar="visitors" data-color="green">
+    <div class="card-body"><h2 class="h5">{{index .T "ax_activity_days"}}</h2><p class="small text-muted">{{index .T "ax_activity_heatmap_hint"}}</p>
+      <div class="activity-calendar-year-tabs" data-calendar-years></div><div class="activity-calendar-scroll"><div class="activity-calendar-inner"><div class="activity-calendar-months" data-calendar-months aria-hidden="true"></div><div class="activity-calendar-grid" data-calendar-grid aria-label="{{index .T "ax_activity_days"}}"></div></div></div>
+      <div class="activity-calendar-legend" aria-label="{{index .T "ax_activity_days"}}"><span>{{index .T "ax_activity_less"}}</span><i class="activity-calendar-day" data-level="0"></i><i class="activity-calendar-day" data-level="1"></i><i class="activity-calendar-day" data-level="2"></i><i class="activity-calendar-day" data-level="3"></i><i class="activity-calendar-day" data-level="4"></i><span>{{index .T "ax_activity_more"}}</span></div>
+      <div class="small text-muted" data-calendar-selection></div>
+      <div class="activity-calendar-drill" data-calendar-drill hidden><h3 class="h6" data-calendar-hour-title></h3><div class="hourly-chart activity-calendar-hour-chart" data-calendar-hour-chart></div><div class="activity-calendar-details" data-calendar-details></div></div>
+    </div>
+    <script type="application/json" data-calendar-days>{{.ActivityDaysJSON}}</script><script type="application/json" data-calendar-hours>{{.ActivityHoursJSON}}</script><script type="application/json" data-calendar-details-data>{{.ActivitySessionsJSON}}</script>
+  </section>
+
   <div class="hourly-chart-grid">
-    <section class="card"><div class="card-body">
-      <h2 class="h5">Visits by visitors' local hour</h2>
-      <p class="small text-muted">Selected period · local clock time reported by each visitor's browser.</p>
-      <div id="analytics-local-hour-chart" class="hourly-chart" aria-label="Visits by visitors local hour"></div>
-    </div></section>
     <section class="card"><div class="card-body">
       <h2 class="h5">Requests by server local hour</h2>
       <p class="small text-muted">Selected period · server local time ({{.ServerTimezone}}). Use this to compare load and choose maintenance windows.</p>
       <div id="analytics-server-hour-chart" class="hourly-chart" aria-label="Requests by server local hour"></div>
     </div></section>
   </div>
-  <section id="analytics-goals" class="card mb-4"><div class="card-body"><h2 class="h5">{{index .T "ax_goals"}}</h2>{{if .Experience.GoalsConfigured}}<div class="metric-grid mb-3"><div class="card metric-card"><div class="card-body">{{index .T "ax_meaningful"}}<div class="metric-value">{{.Experience.GoalRate}}</div><div class="small text-muted">{{.Experience.GoalSessions}} / {{.Experience.Sessions}} sessions reached a configured goal</div></div></div></div>{{end}}<p>{{index .T "ax_goals_hint"}}</p><p>{{index .T "ax_goals_examples_hint"}}</p><pre class="border rounded p-3">{{index .T "ax_goals_examples"}}</pre><p class="small">{{index .T "ax_goals_action_example"}}</p><pre class="border rounded p-3"><code>&lt;a href="/download/" sitebrush-data-analytics-action="download"&gt;Download&lt;/a&gt;</code></pre><form method="post" action="?analytics"><textarea class="form-control" name="goals" rows="5" maxlength="12000" placeholder="Download | action | download">{{.GoalsText}}</textarea><button class="btn btn-outline-secondary mt-2">{{index .T "ax_save"}}</button></form></div></section>
+  <details id="analytics-goals" class="card mb-4"><summary class="card-body d-flex align-items-center justify-content-between gap-3"><span><strong>{{index .T "ax_goals"}}</strong><span class="small text-muted d-block">{{if .Experience.GoalsConfigured}}{{index .T "ax_meaningful"}}: {{.Experience.GoalRate}} · {{.Experience.GoalSessions}} / {{.Experience.Sessions}}{{else}}{{index .T "ax_goals_not_configured"}}{{end}}</span></span><span class="small text-nowrap">{{index .T "ax_goals_edit"}}</span></summary><div class="card-body border-top"><p>{{index .T "ax_goals_hint"}}</p><p>{{index .T "ax_goals_examples_hint"}}</p><pre class="border rounded p-3">{{index .T "ax_goals_examples"}}</pre><p class="small">{{index .T "ax_goals_action_example"}}</p><pre class="border rounded p-3"><code>&lt;a href="/download/" sitebrush-data-analytics-action="download"&gt;Download&lt;/a&gt;</code></pre><form method="post" action="?analytics"><textarea class="form-control" name="goals" rows="5" maxlength="12000" placeholder="Download | action | download">{{.GoalsText}}</textarea><button class="btn btn-outline-secondary mt-2">{{index .T "ax_save"}}</button></form></div></details>
   <section id="sources" class="card mb-4"><div class="card-body">
     <h2 class="h5">{{index .T "ax_sources"}}</h2><p class="small">{{index .T "ax_attribution_hint"}}</p>
     <div class="table-responsive"><table class="table"><thead><tr><th>{{index .T "ax_source"}}</th><th>{{index .T "ax_sessions"}}</th><th>{{index .T "ax_views"}}</th><th>{{index .T "ax_actions"}}</th>{{if .Experience.GoalsConfigured}}<th>{{index .T "ax_meaningful"}}</th>{{end}}<th>{{index .T "ax_returns"}}</th></tr></thead><tbody>
@@ -699,12 +841,12 @@
   </div></section>
   <section id="sessions" class="card mb-4"><div class="card-body"><h2 class="h5">{{index .T "ax_sessions"}}</h2><p class="small">{{index .T "ax_recent_hint"}}</p>
     {{range .Experience.Recent}}<details class="border-bottom py-2"><summary>{{if eq .Class "human-likely"}}👤{{else}}🤖{{end}} <time data-relative-time="{{.Started.Format "2006-01-02T15:04:05Z07:00"}}">{{.When}}</time> · {{.Source.Name}} → {{.Landing}} · {{.Language}} · {{.Browser}} / {{.OS}} · active {{.Active}}</summary>
-    <p class="small mb-1">{{if .Address}}IP: <code class="analytics-session-ip" data-ip="{{.Address}}">{{.Address}}</code> · {{end}}{{index $.T "ax_first_source"}}: {{.FirstSource}} · {{index $.T "ax_local_time"}}: {{if .LocalTime}}{{.LocalTime}} {{.Timezone}}{{else}}—{{end}} · {{if .Country}}{{.Country}}{{if .City}}, {{.City}}{{end}}{{else}}unknown location{{end}}</p>
+    <p class="small mb-1">{{if .Address}}IP: <code class="analytics-session-ip" data-ip="{{.Address}}">{{.Address}}</code> · {{end}}{{index $.T "ax_first_source"}}: {{.FirstSource}} · {{if .Country}}{{.Country}}{{if .City}}, {{.City}}{{end}}{{else}}unknown location{{end}}</p>
     {{if .Returning}}<p class="small mb-1">Returned after {{.ReturnAfter}} · {{.FirstSource}} → {{.Source.Name}} · {{if .Goal}}goal reached{{else}}no configured goal yet{{end}}</p>{{end}}
     {{range .Tabs}}<ol class="mb-1">{{range .}}<li>{{.}}</li>{{end}}</ol>{{end}}{{if .Limited}}<p>{{index $.T "ax_incomplete"}}</p>{{end}}</details>{{else}}<p>{{index .T "analytics_no_data"}}</p>{{end}}
   </div></section>
 
-  <section class="card mb-4"><div class="card-body"><h2 class="h5">{{index .T "ax_languages"}}</h2><div class="table-responsive"><table class="table"><thead><tr><th>{{index .T "ax_language"}}</th><th>{{index .T "ax_sessions"}}</th>{{if .Experience.GoalsConfigured}}<th>{{index .T "ax_meaningful"}}</th>{{end}}</tr></thead><tbody>{{range .Experience.Languages}}<tr><td>{{.Label}}</td><td>{{.Sessions}}</td>{{if $.Experience.GoalsConfigured}}<td>{{.GoalRate}}</td>{{end}}</tr>{{end}}</tbody></table></div><h3 class="h6">{{index .T "ax_local_time"}}</h3><div class="d-flex flex-wrap gap-3">{{range $hour,$count:=.Experience.LocalHours}}{{if $count}}<span>{{$hour}}:00 — {{$count}}</span>{{end}}{{end}}</div></div></section>
+  <section class="card mb-4"><div class="card-body"><h2 class="h5">{{index .T "ax_languages"}}</h2><div class="table-responsive"><table class="table"><thead><tr><th>{{index .T "ax_language"}}</th><th>{{index .T "ax_sessions"}}</th>{{if .Experience.GoalsConfigured}}<th>{{index .T "ax_meaningful"}}</th>{{end}}</tr></thead><tbody>{{range .Experience.Languages}}<tr><td>{{.Label}}</td><td>{{.Sessions}}</td>{{if $.Experience.GoalsConfigured}}<td>{{.GoalRate}}</td>{{end}}</tr>{{end}}</tbody></table></div></div></section>
   <section id="browser-returns" class="card mb-4"><div class="card-body"><h2 class="h5">{{index .T "ax_returns"}}</h2><p class="small">{{index .T "analytics_browser_retention_hint"}}</p>
     <div class="mb-3">{{range .BrowserAnalytics.Report.Retention}}<span class="me-3">D{{.Day}}: {{.Returned}} / {{.Eligible}}</span>{{end}}</div>
     {{range .Experience.Recent}}{{if .Returning}}<div class="border-bottom py-2"><strong>Returned after {{.ReturnAfter}}</strong><div class="small">{{if .Address}}<code>{{.Address}}</code> · {{end}}{{.FirstSource}} → {{.Source.Name}} → {{.Landing}} · {{.Language}} · {{.Browser}} / {{.OS}} · {{if .Goal}}goal reached{{else}}no configured goal yet{{end}}</div></div>{{end}}{{end}}
@@ -779,30 +921,37 @@
 </div></section>
   {{end}}
   {{if eq .AnalyticsTab "security"}}
-  <section id="security-activity" class="card security-chart-card mb-4"><div class="card-body">
+  <section id="security-activity" class="card security-chart-card mb-4" data-activity-calendar="security"><div class="card-body">
     <h2 class="h5">{{index .T "ax_security_activity"}}</h2>
     <p class="small text-muted">{{index .T "ax_security_activity_hint"}}</p>
-    <div class="security-chart-grid">
-      <div>
-        <h3 class="h6">{{index .T "ax_security_by_hour"}}</h3>
-        <p class="small text-muted">{{index .T "ax_security_by_hour_hint"}} · {{.ServerTimezone}}</p>
-        <div id="security-hour-chart" class="hourly-chart" aria-label="{{index .T "ax_security_by_hour"}}"></div>
+    <div class="activity-calendar-card activity-calendar-security" data-color="security">
+      <div class="activity-calendar-year-tabs" data-calendar-years></div><div class="activity-calendar-scroll"><div class="activity-calendar-inner"><div class="activity-calendar-months" data-calendar-months aria-hidden="true"></div><div class="activity-calendar-grid" data-calendar-grid aria-label="{{index .T "ax_security_activity"}}"></div></div></div>
+      <div class="security-activity-legend-layout">
+        <div class="activity-calendar-legend security-activity-legend" aria-label="{{index .T "ax_security_activity"}}">
+          <span>{{index .T "ax_activity_less"}}</span>
+          <i class="activity-calendar-day" data-level="0" data-security-legend-level="0" tabindex="0" role="img" aria-label="{{index .T "ax_security_legend_empty"}}" title="{{index .T "ax_security_legend_empty"}}"></i>
+          <i class="activity-calendar-day" data-level="1" data-security-legend-level="1" tabindex="0" role="img" aria-label="{{index .T "ax_security_legend_traffic"}}" title="{{index .T "ax_security_legend_traffic"}}"></i>
+          <i class="activity-calendar-day" data-level="2" data-security-legend-level="2" tabindex="0" role="img" aria-label="{{index .T "ax_security_legend_blocked"}}" title="{{index .T "ax_security_legend_blocked"}}"></i>
+          <i class="activity-calendar-day" data-level="3" data-security-legend-level="3" tabindex="0" role="img" aria-label="{{index .T "ax_security_legend_new"}}" title="{{index .T "ax_security_legend_new"}}"></i>
+          <i class="activity-calendar-day" data-level="4" data-security-legend-level="4" tabindex="0" role="img" aria-label="{{index .T "ax_security_legend_load"}}" title="{{index .T "ax_security_legend_load"}}"></i>
+          <span>{{index .T "ax_activity_more"}}</span>
+        </div>
+        <div class="security-activity-legend-description" data-security-legend-description aria-live="polite">{{index .T "ax_security_legend_hover"}}</div>
       </div>
-      <div>
-        <h3 class="h6">{{index .T "ax_security_by_country"}}</h3>
-        <p class="small text-muted">{{index .T "ax_security_by_country_hint"}}</p>
-        <div id="security-country-chart" class="security-rank-chart"></div>
-      </div>
+      <div class="small text-muted" data-calendar-selection></div>
     </div>
-    <div>
-      <h3 class="h6">{{index .T "ax_security_by_type"}}</h3>
-      <p class="small text-muted">{{index .T "ax_security_by_type_hint"}}</p>
-      <div id="security-type-chart" class="security-rank-chart"></div>
+    <script type="application/json" data-calendar-days>{{.SecurityActivityDaysJSON}}</script><script type="application/json" data-calendar-hours>{{.SecurityActivityHoursJSON}}</script><script type="application/json" data-calendar-details-data>{{.SecurityIncidentsJSON}}</script><script type="application/json" data-calendar-types>{{.SecurityActivityTypesJSON}}</script><script type="application/json" data-calendar-severity>{{.SecurityActivitySeverityJSON}}</script>
+    <div class="security-calendar-insights">
+      <section class="security-calendar-insight"><h3 class="h6" data-calendar-hour-title>Почасовая активность</h3><div class="hourly-chart activity-calendar-hour-chart" data-calendar-hour-chart></div><div class="activity-calendar-details" data-calendar-details></div></section>
+      <section class="security-calendar-insight security-radar-card"><h3 class="h6" data-calendar-radar-title>Типы атак</h3><svg class="security-radar" data-calendar-radar viewBox="0 0 360 320" role="img" aria-label="Типы атак по дням"></svg><div class="security-radar-tooltip" data-calendar-radar-tooltip role="tooltip" hidden><strong data-calendar-radar-tooltip-title></strong><span data-calendar-radar-tooltip-description></span></div><div class="small text-muted text-center" data-calendar-radar-legend></div></section>
+      <section class="security-calendar-insight"><h3 class="h6">{{index .T "ax_security_by_country"}}</h3><div id="security-country-chart" class="security-rank-chart"></div></section>
+    </div>
+    <div class="mt-3">
       <div id="security-type-help" class="security-type-help">
-        {{range .Security.Types}}
-        <div class="security-type-help-item" data-security-type-help="{{.Label}}">
-          <strong>{{index $.T (print "ax_risk_" .Label)}}</strong>
-          <p>{{index $.T (print "ax_risk_desc_" .Label)}}</p>
+        {{range .SecurityTypeAxes}}
+        <div class="security-type-help-item" data-security-type-help="{{.}}">
+          <strong>{{index $.T (print "ax_risk_" .)}}</strong>
+          <p>{{index $.T (print "ax_risk_desc_" .)}}</p>
         </div>
         {{end}}
       </div>
@@ -811,7 +960,7 @@
     <script type="application/json" id="security-countries-data">{{.SecurityCountriesJSON}}</script>
     <script type="application/json" id="security-types-data">{{.SecurityTypesJSON}}</script>
     <div id="security-type-labels" hidden>
-      {{range .Security.Types}}<span data-security-type="{{.Label}}" data-label="{{index $.T (print "ax_risk_" .Label)}}"></span>{{end}}
+      {{range .SecurityTypeAxes}}<span data-security-type="{{.}}" data-label="{{index $.T (print "ax_risk_" .)}}" data-description="{{index $.T (print "ax_risk_desc_" .)}}"></span>{{end}}
     </div>
   </div></section>
 
@@ -975,7 +1124,6 @@
   {{end}}
 </div>
 <script type="application/json" id="analytics-map-points">{{.SessionMapJSON}}</script>
-<script type="application/json" id="analytics-local-hours">{{.LocalHoursJSON}}</script>
 <script type="application/json" id="analytics-server-hours">{{.ServerHoursJSON}}</script>
 <script src="/p/static/leaflet.min.js"></script>
 <script>
@@ -1166,6 +1314,7 @@
       const count = Number(row.Count) || 0;
       const wrapper = document.createElement('div');
       wrapper.className = 'security-rank-row';
+      if (chartID === 'security-type-chart') wrapper.dataset.securityType = row.Label || '';
       const label = document.createElement('span');
       label.className = 'security-rank-label';
       label.textContent = labelFor(row.Label);
@@ -1198,6 +1347,354 @@
   renderRankChart('security-type-chart', parseJSON('security-types-data', []), function typeLabel(label) {
     return typeLabels.get(label) || label;
   });
+})();
+
+(function renderActivityCalendars() {
+  'use strict';
+
+  function readData(calendar, selector, fallback) {
+    const element = calendar.querySelector(selector);
+    if (!element) return fallback;
+    try {
+      const parsed = JSON.parse(element.textContent || 'null');
+      return parsed || fallback;
+    } catch (error) {
+      console.error('SiteBrush activity calendar: invalid data', error);
+      return fallback;
+    }
+  }
+
+  function formatDate(dateKey) {
+    return dateKey;
+  }
+
+  function activityLevel(count, maximum) {
+    if (count <= 0 || maximum <= 0) return 0;
+    return Math.min(4, Math.max(1, Math.ceil(count * 4 / maximum)));
+  }
+
+  function securityActivityColor(level, intensity) {
+    const colorsByLevel = {
+      0: ['#ebedf0', '#ebedf0', '#ebedf0', '#ebedf0'],
+      1: ['#dcfce7', '#86efac', '#4ade80', '#16a34a'],
+      2: ['#fef3c7', '#fcd34d', '#fbbf24', '#eab308'],
+      3: ['#ffedd5', '#fdba74', '#fb923c', '#f97316'],
+      4: ['#fecaca', '#f87171', '#ef4444', '#b91c1c']
+    };
+    const colors = colorsByLevel[Math.max(0, Math.min(4, Number(level) || 0))];
+    const colorIndex = Math.max(0, Math.min(3, (Number(intensity) || 1) - 1));
+    return colors[colorIndex];
+  }
+
+  function renderCalendar(calendar) {
+    const dayCounts = readData(calendar, '[data-calendar-days]', {});
+    const hourCounts = readData(calendar, '[data-calendar-hours]', {});
+    const details = readData(calendar, '[data-calendar-details-data]', []);
+    const activityTypes = readData(calendar, '[data-calendar-types]', {});
+    const severityLevels = readData(calendar, '[data-calendar-severity]', {});
+    const calendarGrid = calendar.querySelector('[data-calendar-grid]');
+    const yearTabs = calendar.querySelector('[data-calendar-years]');
+    const monthLabels = calendar.querySelector('[data-calendar-months]');
+    const selection = calendar.querySelector('[data-calendar-selection]');
+    const drill = calendar.querySelector('[data-calendar-drill]');
+    const calendarSection = calendar.closest('#security-activity') || calendar;
+    const hourTitle = calendarSection.querySelector('[data-calendar-hour-title]');
+    const hourChart = calendarSection.querySelector('[data-calendar-hour-chart]');
+    const detailPanel = calendarSection.querySelector('[data-calendar-details]');
+    const radar = calendarSection.querySelector('[data-calendar-radar]');
+    const radarTitle = calendarSection.querySelector('[data-calendar-radar-title]');
+    const radarLegend = calendarSection.querySelector('[data-calendar-radar-legend]');
+    const radarTooltip = calendarSection.querySelector('[data-calendar-radar-tooltip]');
+    const securityLegendDescription = calendarSection.querySelector('[data-security-legend-description]');
+    if (!calendarGrid || !yearTabs || !hourChart) return;
+
+    const yearKeys = new Set(Object.keys(dayCounts).map(function extractYear(dayKey) { return dayKey.slice(0, 4); }));
+    yearKeys.add(String(new Date().getFullYear()));
+    const years = Array.from(yearKeys).sort().reverse();
+    let selectedYear = years[0];
+    const typeLabels = new Map();
+    const typeDescriptions = new Map();
+    const securityActivitySection = calendar.closest('#security-activity');
+    for (const labelElement of (securityActivitySection || calendar).querySelectorAll('[data-security-type]')) {
+      typeLabels.set(labelElement.dataset.securityType || '', labelElement.dataset.label || labelElement.dataset.securityType || '');
+      typeDescriptions.set(labelElement.dataset.securityType || '', labelElement.dataset.description || '');
+    }
+
+    if (securityLegendDescription) {
+      const legendHint = securityLegendDescription.textContent;
+      for (const legendCube of calendarSection.querySelectorAll('[data-security-legend-level]')) {
+        const description = legendCube.getAttribute('aria-label') || '';
+        legendCube.addEventListener('pointerenter', function showSecurityLegendDescription() {
+          securityLegendDescription.textContent = description;
+        });
+        legendCube.addEventListener('pointerleave', function resetSecurityLegendDescription() {
+          securityLegendDescription.textContent = legendHint;
+        });
+        legendCube.addEventListener('focus', function showFocusedSecurityLegendDescription() {
+          securityLegendDescription.textContent = description;
+        });
+        legendCube.addEventListener('blur', function resetFocusedSecurityLegendDescription() {
+          securityLegendDescription.textContent = legendHint;
+        });
+      }
+    }
+
+    function renderRadar(dayKey) {
+      if (!radar) return;
+      while (radar.firstChild) radar.removeChild(radar.firstChild);
+      const totals = {};
+      const yearlyCategoryLevels = {};
+      const selected = activityTypes[dayKey] || {};
+      const selectedCategoryLevels = {};
+      for (const [date, categoryCounts] of Object.entries(activityTypes)) {
+        if (!date.startsWith(selectedYear + '-')) continue;
+        const dayLevel = Number(severityLevels[date]) || 2;
+        for (const [category, count] of Object.entries(categoryCounts)) {
+          totals[category] = (totals[category] || 0) + Number(count || 0);
+          yearlyCategoryLevels[category] = Math.max(yearlyCategoryLevels[category] || 0, dayLevel);
+        }
+      }
+      const selectedLevel = Number(severityLevels[dayKey]) || 2;
+      for (const category of Object.keys(selected)) selectedCategoryLevels[category] = selectedLevel;
+      const availableCategories = new Set([...Object.keys(totals), ...Object.keys(selected)]);
+      const categories = Array.from(typeLabels.keys()).slice(0, 8);
+      for (const category of Array.from(availableCategories).sort()) {
+        if (!categories.includes(category)) categories.push(category);
+      }
+      const hasData = availableCategories.size > 0;
+      radar.dataset.empty = hasData ? 'false' : 'true';
+      const centerX = 180;
+      const centerY = 150;
+      const radius = 104;
+      let maximum = 1;
+      for (const category of categories) maximum = Math.max(maximum, totals[category] || 0, selected[category] || 0);
+      function point(index, scale) {
+        const angle = (Math.PI * 2 * index / categories.length) - Math.PI / 2;
+        return [centerX + Math.cos(angle) * radius * scale, centerY + Math.sin(angle) * radius * scale];
+      }
+      for (const ringScale of [0.25, 0.5, 0.75, 1]) {
+        const ring = document.createElementNS('http://www.w3.org/2000/svg', 'polygon');
+        ring.setAttribute('class', 'security-radar-axis');
+        ring.setAttribute('fill', 'none');
+        ring.setAttribute('points', categories.map(function ringPoint(_, index) { return point(index, ringScale).join(','); }).join(' '));
+        radar.appendChild(ring);
+      }
+      categories.forEach(function drawAxis(category, index) {
+        const outer = point(index, 1);
+        const axis = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+        axis.setAttribute('class', 'security-radar-axis');
+        axis.setAttribute('x1', String(centerX)); axis.setAttribute('y1', String(centerY));
+        axis.setAttribute('x2', String(outer[0])); axis.setAttribute('y2', String(outer[1]));
+        radar.appendChild(axis);
+        const labelPoint = point(index, 1.18);
+        const label = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+        label.setAttribute('x', String(labelPoint[0])); label.setAttribute('y', String(labelPoint[1]));
+        label.setAttribute('text-anchor', labelPoint[0] < centerX - 8 ? 'end' : (labelPoint[0] > centerX + 8 ? 'start' : 'middle'));
+        const fullLabel = typeLabels.get(category) || category;
+        label.textContent = fullLabel.split(/\s+/).slice(0, category === 'sitebrush-exploit' ? 3 : 2).join(' ');
+        const fullDescription = typeDescriptions.get(category) || fullLabel;
+        label.setAttribute('tabindex', '0');
+        label.setAttribute('role', 'button');
+        label.setAttribute('aria-label', fullLabel + ': ' + fullDescription);
+        label.style.cursor = 'help';
+        label.addEventListener('pointerenter', function showAttackTypeDescription() {
+          if (!radarTooltip) return;
+          radarTooltip.querySelector('[data-calendar-radar-tooltip-title]').textContent = fullLabel;
+          radarTooltip.querySelector('[data-calendar-radar-tooltip-description]').textContent = fullDescription;
+          radarTooltip.hidden = false;
+        });
+        label.addEventListener('pointerleave', function hideAttackTypeDescription() {
+          if (radarTooltip && !label.matches(':focus')) radarTooltip.hidden = true;
+        });
+        label.addEventListener('focus', function showFocusedAttackTypeDescription() {
+          if (!radarTooltip) return;
+          radarTooltip.querySelector('[data-calendar-radar-tooltip-title]').textContent = fullLabel;
+          radarTooltip.querySelector('[data-calendar-radar-tooltip-description]').textContent = fullDescription;
+          radarTooltip.hidden = false;
+        });
+        label.addEventListener('click', function showClickedAttackTypeDescription() {
+          label.focus();
+        });
+        label.addEventListener('blur', function hideFocusedAttackTypeDescription() {
+          if (radarTooltip) radarTooltip.hidden = true;
+        });
+        if (category === 'sitebrush-exploit') { label.setAttribute('fill', '#dc2626'); label.setAttribute('font-weight', '700'); }
+        radar.appendChild(label);
+      });
+      const yearlyLevel = Math.max(0, ...Object.values(yearlyCategoryLevels));
+      const selectedSeriesLevel = Math.max(0, ...Object.values(selectedCategoryLevels));
+      for (const series of [
+        {counts: totals, categoryLevels: yearlyCategoryLevels, level: yearlyLevel},
+        {counts: selected, categoryLevels: selectedCategoryLevels, level: selectedSeriesLevel}
+      ]) {
+        const polygon = document.createElementNS('http://www.w3.org/2000/svg', 'polygon');
+        polygon.setAttribute('points', categories.map(function categoryPoint(category, index) { return point(index, Number(series.counts[category] || 0) / maximum).join(','); }).join(' '));
+        polygon.setAttribute('fill', securityActivityColor(series.level, 4));
+        polygon.setAttribute('fill-opacity', '0.17');
+        polygon.setAttribute('stroke', securityActivityColor(series.level, 4));
+        polygon.setAttribute('stroke-width', '2');
+        radar.appendChild(polygon);
+        categories.forEach(function addPoint(category, index) {
+          const count = Number(series.counts[category] || 0);
+          if (count <= 0) return;
+          const intensity = count / maximum;
+          const markerPosition = point(index, intensity);
+          const marker = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+          marker.setAttribute('class', 'security-radar-point');
+          marker.setAttribute('cx', String(markerPosition[0])); marker.setAttribute('cy', String(markerPosition[1]));
+          marker.setAttribute('r', String(2 + intensity * 3));
+          const categoryLevel = series.categoryLevels[category] || series.level;
+          const intensityLevel = Math.max(1, Math.ceil(intensity * 4));
+          marker.dataset.level = String(categoryLevel);
+          marker.dataset.intensity = String(intensityLevel);
+          marker.setAttribute('fill', securityActivityColor(categoryLevel, intensityLevel));
+          marker.setAttribute('stroke', securityActivityColor(categoryLevel, 4));
+          marker.setAttribute('title', (typeLabels.get(category) || category) + ': ' + count);
+          radar.appendChild(marker);
+        });
+      }
+      radarTitle.textContent = dayKey ? 'Типы атак · ' + dayKey : 'Типы атак · ' + selectedYear;
+      radarLegend.textContent = hasData ? '● год · ● ' + (dayKey || 'выбранный день') : 'Нет данных о типах атак';
+    }
+    function renderDay(dayKey, count, maximum, weekColumn, weekdayRow) {
+      const dayButton = document.createElement('button');
+      dayButton.type = 'button';
+      dayButton.className = 'activity-calendar-day';
+      dayButton.dataset.date = dayKey;
+      const intensity = activityLevel(count, maximum);
+      const isSecurityCalendar = calendar.dataset.activityCalendar === 'security';
+      dayButton.dataset.level = String(isSecurityCalendar ? Number(severityLevels[dayKey]) || 0 : intensity);
+      dayButton.dataset.intensity = String(intensity);
+      dayButton.style.gridColumnStart = String(weekColumn);
+      dayButton.style.gridRowStart = String(weekdayRow);
+      dayButton.title = formatDate(dayKey) + ' · ' + count;
+      dayButton.setAttribute('aria-label', dayButton.title);
+      dayButton.addEventListener('click', function selectDay() {
+        renderHours(dayKey);
+      });
+      calendarGrid.appendChild(dayButton);
+    }
+
+    function showDetails(hourKey) {
+      while (detailPanel.firstChild) detailPanel.removeChild(detailPanel.firstChild);
+      const isSecurity = calendar.dataset.activityCalendar === 'security';
+      const matchingDetails = details.filter(function matchDetail(activityRecord) {
+        if (activityRecord.HourKey) return activityRecord.HourKey === hourKey;
+        const eventDate = new Date(isSecurity ? activityRecord.Last : activityRecord.Started);
+        return !Number.isNaN(eventDate.getTime()) && eventDate.toISOString().slice(0, 13) === hourKey;
+      });
+      if (matchingDetails.length === 0) {
+        const emptyMessage = document.createElement('p');
+        emptyMessage.className = 'small text-muted';
+        emptyMessage.textContent = calendar.dataset.emptyText || 'No detailed events were retained for this hour.';
+        detailPanel.appendChild(emptyMessage);
+        return;
+      }
+      for (const activityRecord of matchingDetails.slice(0, 100)) {
+        const eventRow = document.createElement('div');
+        eventRow.className = 'border-bottom py-2 small';
+        if (isSecurity) {
+          const categories = activityRecord.Categories && typeof activityRecord.Categories === 'object' ? Object.entries(activityRecord.Categories).map(function formatCategory(entry) { return entry[0] + ' × ' + entry[1]; }).join(', ') : '';
+          eventRow.textContent = (activityRecord.IP || 'Unknown IP') + ' · ' + (activityRecord.Count || 0) + ' events' + (categories ? ' · ' + categories : '');
+          for (const probe of (Array.isArray(activityRecord.Examples) ? activityRecord.Examples.slice(0, 5) : [])) {
+            const probeText = document.createElement('div');
+            probeText.className = 'text-muted';
+            probeText.textContent = (probe.Method || '') + ' ' + (probe.Path || '') + ' · HTTP ' + (probe.Status || 0) + ' · × ' + (probe.Count || 0);
+            eventRow.appendChild(probeText);
+          }
+        } else {
+          eventRow.textContent = (activityRecord.IP || 'IP unavailable') + ' · ' + (activityRecord.Browser || '') + ' / ' + (activityRecord.OperatingSystem || '') + ' · ' + (activityRecord.Language || '') + ' · ' + (activityRecord.Landing || '/');
+        }
+        detailPanel.appendChild(eventRow);
+      }
+    }
+
+    function renderHours(dayKey) {
+      while (hourChart.firstChild) hourChart.removeChild(hourChart.firstChild);
+      const counts = [];
+      let maximum = 0;
+      for (let hour = 0; hour < 24; hour += 1) {
+        const hourKey = dayKey + 'T' + String(hour).padStart(2, '0');
+        const count = Number(hourCounts[hourKey]) || 0;
+        counts.push(count);
+        maximum = Math.max(maximum, count);
+      }
+      hourTitle.textContent = dayKey;
+      selection.textContent = dayKey + ' · ' + (Number(dayCounts[dayKey]) || 0);
+      if (drill) drill.hidden = false;
+      for (let hour = 0; hour < counts.length; hour += 1) {
+        const count = counts[hour];
+        const hourKey = dayKey + 'T' + String(hour).padStart(2, '0');
+        const bar = document.createElement('button');
+        bar.type = 'button';
+        bar.className = 'hourly-chart-bar';
+        if (calendar.dataset.activityCalendar === 'security') {
+          bar.dataset.level = String(count > 0 ? Number(severityLevels[dayKey]) || 1 : 0);
+          bar.dataset.intensity = String(activityLevel(count, maximum));
+        }
+        bar.style.height = (maximum > 0 ? Math.max(1, count * 100 / maximum) : 1) + '%';
+        bar.title = String(hour).padStart(2, '0') + ':00 · ' + count;
+        bar.setAttribute('aria-label', bar.title);
+        bar.addEventListener('click', function selectHour() {
+          showDetails(hourKey);
+        });
+        const countLabel = document.createElement('span');
+        countLabel.className = 'hourly-chart-value';
+        countLabel.textContent = String(count);
+        const label = document.createElement('span');
+        label.className = 'hourly-chart-label';
+        label.textContent = hour % 3 === 0 ? String(hour).padStart(2, '0') : '';
+        bar.appendChild(countLabel);
+        bar.appendChild(label);
+        hourChart.appendChild(bar);
+      }
+      while (detailPanel.firstChild) detailPanel.removeChild(detailPanel.firstChild);
+      if (calendar.dataset.activityCalendar === 'security') renderRadar(dayKey);
+    }
+
+    function renderYear(year) {
+      selectedYear = year;
+      while (calendarGrid.firstChild) calendarGrid.removeChild(calendarGrid.firstChild);
+      while (monthLabels.firstChild) monthLabels.removeChild(monthLabels.firstChild);
+      while (yearTabs.firstChild) yearTabs.removeChild(yearTabs.firstChild);
+      if (drill) drill.hidden = true;
+      for (const availableYear of years) {
+        const tab = document.createElement('button');
+        tab.type = 'button';
+        tab.textContent = availableYear;
+        tab.setAttribute('aria-pressed', String(availableYear === selectedYear));
+        tab.addEventListener('click', function changeYear() { renderYear(availableYear); });
+        yearTabs.appendChild(tab);
+      }
+      let maximum = 0;
+      for (const dayKey of Object.keys(dayCounts)) {
+        if (dayKey.startsWith(year + '-')) maximum = Math.max(maximum, Number(dayCounts[dayKey]) || 0);
+      }
+      const yearStart = new Date(Date.UTC(Number(year), 0, 1));
+      const yearEnd = new Date(Date.UTC(Number(year) + 1, 0, 1));
+      const shownMonthWeeks = new Set();
+      for (let day = new Date(yearStart); day < yearEnd; day.setUTCDate(day.getUTCDate() + 1)) {
+        const dayKey = day.toISOString().slice(0, 10);
+        const dayOffset = Math.floor((day.getTime() - yearStart.getTime()) / 86400000);
+        const weekColumn = Math.floor((yearStart.getUTCDay() + dayOffset) / 7) + 1;
+        if (day.getUTCDate() === 1) {
+          if (!shownMonthWeeks.has(day.getUTCMonth())) {
+            const monthLabel = document.createElement('span');
+            monthLabel.textContent = new Intl.DateTimeFormat(document.documentElement.lang, {month: 'short', timeZone: 'UTC'}).format(day);
+            monthLabel.style.gridColumnStart = String(weekColumn);
+            monthLabels.appendChild(monthLabel);
+            shownMonthWeeks.add(day.getUTCMonth());
+          }
+        }
+        renderDay(dayKey, Number(dayCounts[dayKey]) || 0, maximum, weekColumn, day.getUTCDay() + 1);
+      }
+      if (calendar.dataset.activityCalendar === 'security') renderRadar('');
+    }
+
+    renderYear(selectedYear);
+  }
+
+  for (const calendar of document.querySelectorAll('[data-activity-calendar]')) renderCalendar(calendar);
 })();
 
 (function renderAnalyticsHourlyCharts() {
@@ -1233,12 +1730,9 @@
     }
   }
 
-  const localHours = parseHours('analytics-local-hours');
   const serverHours = parseHours('analytics-server-hours');
   let sharedMaximum = 0;
-  for (const count of localHours) sharedMaximum = Math.max(sharedMaximum, Number(count) || 0);
   for (const count of serverHours) sharedMaximum = Math.max(sharedMaximum, Number(count) || 0);
-  renderHours('analytics-local-hour-chart', localHours, sharedMaximum);
   renderHours('analytics-server-hour-chart', serverHours, sharedMaximum);
 })();
 
@@ -1284,7 +1778,7 @@
           latitude: latitude, longitude: longitude,
           country: session.Country || '', city: session.City || '',
           count: 0, languages: new Map(), devices: new Map(),
-          classes: new Map(), localTimes: new Set(), sources: new Set(),
+          classes: new Map(), sources: new Set(),
           addresses: new Map()
         };
         groups.set(key, group);
@@ -1298,7 +1792,6 @@
       group.languages.set(language, (group.languages.get(language) || 0) + 1);
       group.devices.set(device, (group.devices.get(device) || 0) + 1);
       group.classes.set(clientClass, (group.classes.get(clientClass) || 0) + 1);
-      if (session.LocalTime && group.localTimes.size < 4) group.localTimes.add(session.LocalTime);
       if (session.Source && session.Source.Name && group.sources.size < 4) group.sources.add(session.Source.Name);
     }
     return Array.from(groups.values()).sort(function sortGroups(left, right) {
@@ -1398,11 +1891,6 @@
       const sourceLine = document.createElement('div');
       sourceLine.textContent = 'Sources: ' + Array.from(group.sources).join(', ');
       wrapper.appendChild(sourceLine);
-    }
-    if (group.localTimes.size) {
-      const timeLine = document.createElement('div');
-      timeLine.textContent = 'Visitor local time: ' + Array.from(group.localTimes).join(', ');
-      wrapper.appendChild(timeLine);
     }
     return wrapper;
   }

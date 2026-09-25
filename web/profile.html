@@ -62,8 +62,8 @@
   </details>
   {{end}}
   {{if .EmailChange.Step}}
-  <section class="profile-email-change" aria-labelledby="ProfileEmailChangeTitle">
-    <h2 id="ProfileEmailChangeTitle">{{index .T "profile_email_change_steps"}}</h2>
+  <section class="authentication-card profile-form profile-account-card profile-email-change" aria-labelledby="ProfileEmailChangeTitle">
+    <div class="profile-account-card-header"><h2 id="ProfileEmailChangeTitle">{{index .T "profile_email_change_steps"}}</h2></div>
     <ol class="profile-email-steps">
       <li class="profile-email-step {{if eq .EmailChange.Step 1}}is-current{{else}}is-complete{{end}}" {{if eq .EmailChange.Step 1}}aria-current="step"{{end}}>
         <span class="profile-email-step-number" aria-hidden="true">{{if eq .EmailChange.Step 2}}✓{{else}}1{{end}}</span>
@@ -115,7 +115,7 @@
   </form>
   {{else if and .ShowPasswordForm (not .EmailChange.Step)}}
   <div class="profile-form-grid">
-    <form class="profile-form" method="post" action="?profile" data-profile-send-form data-profile-email-form data-current-email="{{.Email}}">
+    <form class="authentication-card profile-form profile-account-card" method="post" action="?profile" data-profile-send-form data-profile-email-form data-current-email="{{.Email}}">
       <input type="hidden" name="profile_action" value="email">
       <div class="profile-form-header">
         <h2>{{.EmailFormTitle}}</h2>
@@ -127,7 +127,7 @@
       </label>
       <div><button type="submit" data-profile-email-submit>{{.EmailSubmitLabel}}</button></div>
     </form>
-    <form class="profile-form" method="post" action="?profile" data-profile-send-form data-profile-password-form>
+    <form class="authentication-card profile-form profile-account-card" method="post" action="?profile" data-profile-send-form data-profile-password-form>
       <input type="hidden" name="profile_action" value="password">
       <div class="profile-form-header">
         <h2>{{.PasswordFormTitle}}</h2>
@@ -162,7 +162,7 @@
 <div class="profile-account-grid">
 <section class="authentication-card profile-form profile-account-card">
   <div class="profile-account-card-header">
-    <h2>{{index .T "admin_ip_allowlist_title"}}</h2>
+    <h2>{{index .T "admin_ip_allowlist_title"}} · {{.AdminAllowedIPCount}}</h2>
     <p>{{index .T "admin_ip_allowlist_help"}}</p>
   </div>
   <div class="profile-account-controls">
@@ -199,6 +199,10 @@
       <div class="profile-ip-details"><strong dir="ltr">{{.Rule}}</strong>{{if .Current}} <span class="account-status-inline">{{index $.T "auth_current"}}</span>{{end}}<span class="profile-ip-location">{{.Location}}{{if .GeoIPAttribution}} · {{.GeoIPAttribution}}{{end}}</span></div>
       <button type="submit" {{if not .Removable}}disabled{{end}}>{{index $.T "admin_ip_remove"}}</button>
     </form>{{else}}<p class="hint">{{index .T "admin_ip_none"}}</p>{{end}}
+    {{if .AdminAllowedIPMore}}<details class="profile-account-more"><summary>{{index .T "account_show_more"}} ({{len .AdminAllowedIPMore}})</summary>{{range .AdminAllowedIPMore}}<form method="post" action="?profile" class="auth-trusted-row profile-ip-row">
+      <input type="hidden" name="profile_action" value="admin_ip_remove"><input type="hidden" name="admin_ip" value="{{.Rule}}"><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
+      <div class="profile-ip-details"><strong dir="ltr">{{.Rule}}</strong>{{if .Current}} <span class="account-status-inline">{{index $.T "auth_current"}}</span>{{end}}<span class="profile-ip-location">{{.Location}}{{if .GeoIPAttribution}} · {{.GeoIPAttribution}}{{end}}</span></div><button type="submit" {{if not .Removable}}disabled{{end}}>{{index $.T "admin_ip_remove"}}</button>
+    </form>{{end}}</details>{{end}}
   </div>
   <form method="post" action="?profile" class="auth-trusted-row">
     <input type="hidden" name="profile_action" value="admin_ip_add">
@@ -305,28 +309,32 @@
 
 <section class="authentication-card profile-form profile-account-card">
   <div class="profile-account-card-header">
-    <h2>{{index .T "auth_trusted_ips"}}</h2>
+    <h2>{{index .T "auth_trusted_ips"}} · {{.ProfileSessionCount}}</h2>
     <p>{{index .T "auth_trust_help"}}</p>
   </div>
   <div class="profile-account-list">
-  {{range .TrustedIPs}}
+  {{range .ProfileSessions}}
     <form method="post" action="?profile" class="auth-trusted-row profile-ip-row">
-      <input type="hidden" name="profile_action" value="revoke_ip">
-      <input type="hidden" name="trusted_ip" value="{{.IP}}">
+      <input type="hidden" name="profile_action" value="revoke_session">
+      <input type="hidden" name="session_token" value="{{.Token}}">
       <input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
       <div class="profile-ip-details">
-        <strong dir="ltr">{{.IP}}{{if eq .IP "127.0.0.1"}} / localhost{{end}}</strong>
-        {{if .Current}}<span class="account-status-inline">{{index $.T "auth_current"}}</span>{{end}}
-        <span class="profile-ip-location">{{.Location}}{{if .GeoIPAttribution}} · {{.GeoIPAttribution}}{{end}}</span>
-        <p>{{index $.T "auth_confirmed"}}: {{.Confirmed.Format "2006-01-02 15:04 UTC"}}<br>
-          {{index $.T "auth_last_login"}}: {{.LastLogin.Format "2006-01-02 15:04 UTC"}}<br>
-          {{index $.T "auth_expires"}}: {{.Expires.Format "2006-01-02 15:04 UTC"}}</p>
+        <strong>{{.Device}} · {{.OperatingSystem}} · {{.Browser}}</strong>
+        {{if .Current}}<span class="account-status-inline">{{index $.T "auth_current_session"}}</span>{{end}}
+        <span class="profile-ip-location">{{.Location}}{{if .GeoIPAttribution}} · {{.GeoIPAttribution}}{{end}} · <bdi dir="ltr">{{.IP}}</bdi></span>
+        <p>{{index $.T "auth_session_language"}}: {{.Language}}<br>
+          {{index $.T "auth_session_started"}}: {{.CreatedAt.Format "2006-01-02 15:04 UTC"}}<br>
+          {{index $.T "auth_session_lifetime"}}</p>
       </div>
       <button type="submit">{{index $.T "auth_revoke"}}</button>
     </form>
   {{else}}
     <p class="hint">{{index .T "auth_no_trusted"}}</p>
   {{end}}
+  {{if .ProfileSessionsMore}}<details class="profile-account-more"><summary>{{index .T "account_show_more"}} ({{len .ProfileSessionsMore}})</summary>{{range .ProfileSessionsMore}}<form method="post" action="?profile" class="auth-trusted-row profile-ip-row">
+    <input type="hidden" name="profile_action" value="revoke_session"><input type="hidden" name="session_token" value="{{.Token}}"><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
+    <div class="profile-ip-details"><strong>{{.Device}} · {{.OperatingSystem}} · {{.Browser}}</strong>{{if .Current}}<span class="account-status-inline">{{index $.T "auth_current_session"}}</span>{{end}}<span class="profile-ip-location">{{.Location}}{{if .GeoIPAttribution}} · {{.GeoIPAttribution}}{{end}} · <bdi dir="ltr">{{.IP}}</bdi></span><p>{{index $.T "auth_session_language"}}: {{.Language}}<br>{{index $.T "auth_session_started"}}: {{.CreatedAt.Format "2006-01-02 15:04 UTC"}}<br>{{index $.T "auth_session_lifetime"}}</p></div><button type="submit">{{index $.T "auth_revoke"}}</button>
+  </form>{{end}}</details>{{end}}
   </div>
 </section>
 </div>{{end}}
