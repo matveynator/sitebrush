@@ -3215,12 +3215,16 @@ body.technical-page.analytics-page {
 /* Account security cards use the same compact Meridian layout as the rest of the admin UI. */
 .technical-page .profile-account-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(min(100%, 320px), 1fr));
-    gap: 16px;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 20px;
     width: min(100%, 1120px);
-    align-items: start;
+    margin-inline: auto;
+    align-items: stretch;
 }
 .technical-page .profile-account-card {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
     width: 100%;
     max-width: none;
     min-width: 0;
@@ -3229,8 +3233,13 @@ body.technical-page.analytics-page {
 }
 .technical-page .profile-account-card-header {
     display: grid;
+    align-content: start;
     gap: 6px;
+    min-height: 112px;
 }
+.technical-page .profile-account-controls { display: grid; gap: 8px; }
+.technical-page .profile-account-controls .auth-trusted-row { margin: 0; padding-block: 8px; }
+.technical-page .profile-account-controls p { margin: 0 0 8px; }
 .technical-page .auth-method-heading {
     display: flex;
     align-items: center;
@@ -3297,6 +3306,29 @@ body.technical-page.analytics-page {
     border-radius: calc(var(--theme-radius) - 2px);
     background: var(--panel-soft);
 }
+.technical-page .profile-account-list .profile-ip-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 10px 14px;
+}
+.technical-page .profile-ip-details {
+    display: grid;
+    min-width: 0;
+    gap: 5px;
+}
+.technical-page .profile-ip-location {
+    color: var(--theme-muted-foreground);
+    font-size: .84rem;
+    line-height: 1.4;
+}
+.technical-page .profile-ip-details p {
+    margin: 4px 0 0;
+    color: var(--theme-muted-foreground);
+    font-size: .82rem;
+    line-height: 1.55;
+}
+.technical-page .profile-account-list .profile-ip-row > button { grid-column: 2; grid-row: 1; }
 .technical-page .account-status,
 .technical-page .account-status-inline {
     width: fit-content;
@@ -3395,6 +3427,7 @@ body.technical-page.analytics-page {
     .technical-page .profile-account-grid {
         grid-template-columns: 1fr;
     }
+    .technical-page .profile-account-card-header { min-height: 0; }
     .technical-page .authenticator-app-buttons {
         display: grid;
         grid-template-columns: 1fr;
