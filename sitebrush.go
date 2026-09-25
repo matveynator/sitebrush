@@ -38,6 +38,7 @@ import (
 	"net"
 	"net/http"
 	stdmail "net/mail"
+	"net/netip"
 	"net/url"
 	"os"
 	"os/exec"
@@ -124,7 +125,7 @@ const sitebrushHTTPWriteTimeout = 0
 const sitebrushHTTPIdleTimeout = 65 * time.Second
 const sitebrushHTTPReadHeaderTimeout = 5 * time.Second
 const sitebrushHTTP10KeepAliveBufferLimit = 1024 * 1024
-const currentSiteDatabaseSchemaVersion = 6
+const currentSiteDatabaseSchemaVersion = 7
 const siteDatabaseStartupMigrationTimeout = 30 * time.Second
 const pagePasswordSessionTTL = time.Hour
 const serviceMailRelayPath = "/?service_mail_relay"
@@ -405,9 +406,9 @@ type serviceMailRequest struct {
 	ExpiresAt        string                             `json:"expires_at,omitempty"`
 	LanguageCode     string                             `json:"language_code"`
 	HostingSnapshot  *hostingandsupport.HostingSnapshot `json:"hosting_snapshot,omitempty"`
-	SecuritySignal   *securitysync.Signal                `json:"security_signal,omitempty"`
-	SecurityQuery    bool                                `json:"security_query,omitempty"`
-	CreatedAt        string                              `json:"created_at"`
+	SecuritySignal   *securitysync.Signal               `json:"security_signal,omitempty"`
+	SecurityQuery    bool                               `json:"security_query,omitempty"`
+	CreatedAt        string                             `json:"created_at"`
 	Signature        string                             `json:"signature"`
 }
 
@@ -450,6 +451,12 @@ type profileEmailChangeView struct {
 	CurrentDeliveryStatus, CurrentDeliveryClass string
 	NextDeliveryStatus, NextDeliveryClass       string
 	DeliveryStage                               int
+}
+
+type adminAllowedIPView struct {
+	Rule      string
+	Current   bool
+	Removable bool
 }
 
 func profileEmailChange(currentEmail, nextEmail string, step int) profileEmailChangeView {
@@ -2208,32 +2215,32 @@ func routerCloseNoop(noopDatabase *sql.DB) error {
 }
 
 type siteAnalyticsEvent struct {
-	Bytes          int64
-	Forwarded      string
-	ForwardedFor   string
-	Domain         string
-	Path           string
-	Query          string
-	Method         string
-	StatusCode     int
-	ContentSource  string
-	OccurredAt     time.Time
-	Duration       time.Duration
-	ClientIP       string
-	RemoteAddress  string
-	UserAgent      string
-	Referer        string
-	AcceptLanguage string
-	GeoCountryCode string
-	GeoCity        string
-	GeoLatitude    float64
-	GeoLongitude   float64
-	GeoSource      string
-	VisitorID      string
-	TrustedPeer, IndexingCrawler    bool
-	IsAdmin        bool
-	IsAsset        bool
-	IsController   bool
+	Bytes                        int64
+	Forwarded                    string
+	ForwardedFor                 string
+	Domain                       string
+	Path                         string
+	Query                        string
+	Method                       string
+	StatusCode                   int
+	ContentSource                string
+	OccurredAt                   time.Time
+	Duration                     time.Duration
+	ClientIP                     string
+	RemoteAddress                string
+	UserAgent                    string
+	Referer                      string
+	AcceptLanguage               string
+	GeoCountryCode               string
+	GeoCity                      string
+	GeoLatitude                  float64
+	GeoLongitude                 float64
+	GeoSource                    string
+	VisitorID                    string
+	TrustedPeer, IndexingCrawler bool
+	IsAdmin                      bool
+	IsAsset                      bool
+	IsController                 bool
 }
 
 type analyticsPreparedReport struct {
@@ -7043,6 +7050,12 @@ Common commands:
   %[1]s -cli
       Open the interactive server console for installed sites, users and quotas.
 
+  %[1]s -path /var/lib/sitebrush -reset-admin-ip -reset-admin-ip-domain example.org \\
+      -reset-admin-ip-email admin@example.org
+      Restore one administrator's access after connecting to the server over SSH.
+      Optionally set -reset-admin-ip-address to an IP or CIDR subnet; otherwise
+      the next successful sign-in sets the allowed IP.
+
   %[1]s -install 
       Install SiteBrush as a system service and enable automatic startup.
       Service startup targets are detected automatically on macOS, Linux,
@@ -7171,6 +7184,10 @@ func main() {
 	legacyListSitesMode := flag.Bool("list-sites", false, "")
 	legacyQuotaSite := flag.String("quota-site", "", "")
 	legacyQuotaValue := flag.String("quota", "", "")
+	resetAdminIP := flag.Bool("reset-admin-ip", false, "reset one administrator's IP allowlist and revoke their sessions")
+	resetAdminIPDomain := flag.String("reset-admin-ip-domain", "", "site domain for the administrator IP reset")
+	resetAdminIPEmail := flag.String("reset-admin-ip-email", "", "administrator email for the IP reset")
+	resetAdminIPAddress := flag.String("reset-admin-ip-address", "", "optional IP address or CIDR subnet to allow after the reset")
 	legacyVersionMode := flag.Bool("v", false, "")
 	var desktopModeFlag *bool
 	if appcli.DesktopModeFlagSupported() {
@@ -7222,6 +7239,27 @@ func main() {
 	dbPathWasProvided := strings.TrimSpace(*legacyDBPath) != ""
 	if dbPathWasProvided {
 		effectiveDBPath = cleanDBPath(*legacyDBPath)
+	}
+	adminIPResetArgumentsProvided := strings.TrimSpace(*resetAdminIPDomain) != "" || strings.TrimSpace(*resetAdminIPEmail) != "" || strings.TrimSpace(*resetAdminIPAddress) != ""
+	if *resetAdminIP || adminIPResetArgumentsProvided {
+		if !*resetAdminIP || strings.TrimSpace(*resetAdminIPDomain) == "" || strings.TrimSpace(*resetAdminIPEmail) == "" {
+			log.Fatal("use -reset-admin-ip with both -reset-admin-ip-domain and -reset-admin-ip-email")
+		}
+		if *cliMode || *legacyListSitesMode || strings.TrimSpace(*legacyQuotaSite) != "" || flagWasProvided("quota") || installMode || uninstallMode {
+			log.Fatal("administrator IP reset cannot be combined with another command")
+		}
+		preparedStoragePath, usedFallback, prepareErr := prepareStoragePathWithFallback(effectiveStoragePath, userAppStoragePath(), !storagePathWasProvided && !dbPathWasProvided)
+		if prepareErr != nil {
+			log.Fatalf("prepare storage path: %v", prepareErr)
+		}
+		if usedFallback {
+			log.Printf("system storage %s is unavailable; using user storage %s", effectiveStoragePath, preparedStoragePath)
+			effectiveDBPath = filepath.Join(preparedStoragePath, defaultDBPath)
+		}
+		if err := runAdminIPResetCommand(context.Background(), os.Stdout, preparedStoragePath, effectiveDBPath, *resetAdminIPDomain, *resetAdminIPEmail, *resetAdminIPAddress); err != nil {
+			log.Fatal(err)
+		}
+		return
 	}
 	quotaCommandMode := *cliMode || *legacyListSitesMode || strings.TrimSpace(*legacyQuotaSite) != "" || flagWasProvided("quota")
 	if quotaCommandMode {
@@ -8383,6 +8421,19 @@ func (a *App) migrate(ctx context.Context) error {
 	if err := a.ensureSiteDatabaseSchemaColumns(ctx); err != nil {
 		return err
 	}
+	// Preserve recent verified login addresses and active session candidates on upgrade.
+	if _, err := a.db.ExecContext(ctx, `INSERT INTO admin_allowed_ips(domain,email,client_ip,added_at) SELECT trusted.domain,trusted.email,trusted.client_ip,trusted.last_login FROM account_trusted_ips trusted WHERE trusted.last_login>? AND NOT EXISTS(SELECT 1 FROM admin_allowed_ips allowed WHERE allowed.domain=trusted.domain AND allowed.email=trusted.email AND allowed.client_ip=trusted.client_ip)`, time.Now().Add(-accountauth.TrustTTL).Unix()); err != nil {
+		return siteMigrationStepError{step: "seed administrator IP allowlist", err: err}
+	}
+	if _, err := a.db.ExecContext(ctx, `INSERT INTO account_session_ips(session_token,domain,email,client_ip,used_at) SELECT MIN(sessions.token),users.domain,users.email,sessions.client_ip,0 FROM sessions JOIN users ON (users.domain||'|'||users.email)=sessions.user_email WHERE users.is_admin=1 AND sessions.client_ip IS NOT NULL AND sessions.client_ip<>'' AND NOT EXISTS(SELECT 1 FROM account_session_ips history WHERE history.domain=users.domain AND history.email=users.email AND history.client_ip=sessions.client_ip) GROUP BY users.domain,users.email,sessions.client_ip`); err != nil {
+		return siteMigrationStepError{step: "backfill administrator session IP history", err: err}
+	}
+	if _, err := a.db.ExecContext(ctx, `INSERT INTO admin_allowed_ips(domain,email,client_ip,added_at) SELECT users.domain,users.email,sessions.client_ip,0 FROM sessions JOIN users ON (users.domain||'|'||users.email)=sessions.user_email WHERE users.is_admin=1 AND sessions.client_ip IS NOT NULL AND sessions.client_ip<>'' AND NOT EXISTS(SELECT 1 FROM admin_allowed_ips allowed WHERE allowed.domain=users.domain AND allowed.email=users.email AND allowed.client_ip=sessions.client_ip)`); err != nil {
+		return siteMigrationStepError{step: "preserve active administrator sessions", err: err}
+	}
+	if _, err := a.db.ExecContext(ctx, `INSERT INTO admin_ip_policies(domain,email,enabled_at) SELECT DISTINCT allowed.domain,allowed.email,? FROM admin_allowed_ips allowed WHERE NOT EXISTS(SELECT 1 FROM admin_ip_policies policy WHERE policy.domain=allowed.domain AND policy.email=allowed.email)`, time.Now().Unix()); err != nil {
+		return siteMigrationStepError{step: "enable administrator IP policies", err: err}
+	}
 	if err := crawler.RecoverImportFrontiers(ctx, a.db); err != nil {
 		return siteMigrationStepError{step: "finish interrupted import cleanup", err: err}
 	}
@@ -8444,6 +8495,9 @@ func requiredSiteDatabaseColumns() []siteDatabaseColumnRequirement {
 		{"sessions", "admin_ip_trust", "INTEGER NOT NULL DEFAULT 1"},
 		{"account_login_codes", "language", "TEXT NOT NULL DEFAULT 'en'"},
 		{"account_trusted_ips", "last_login", "INTEGER NOT NULL DEFAULT 0"},
+		{"admin_allowed_ips", "client_ip", "TEXT NOT NULL DEFAULT ''"},
+		{"admin_ip_policies", "enabled_at", "INTEGER NOT NULL DEFAULT 0"},
+		{"account_session_ips", "used_at", "INTEGER NOT NULL DEFAULT 0"},
 		{"account_code_rates", "sent_count", "INTEGER NOT NULL DEFAULT 0"},
 		{"account_passkeys", "domain", "TEXT"},
 		{"account_webauthn_challenges", "token", "TEXT"},
@@ -9071,6 +9125,9 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 	if !a.dynamicDatabaseReady(w, r, requestDomain) {
 		return
 	}
+	if !a.enforceAdminIPAllowlist(w, r, requestDomain) {
+		return
+	}
 	if hasQueryFlag(r, "security_incident_report") {
 		a.securityIncidentReport(w, r)
 		return
@@ -9368,6 +9425,151 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.renderMissingPage(w, r, pagePath, isAdmin)
+}
+
+// An IP restriction removes the session before normal routing, so public pages
+// remain available while every handler sees the request as unauthenticated.
+func (a *App) enforceAdminIPAllowlist(w http.ResponseWriter, r *http.Request, domain string) bool {
+	domain = a.siteDomain(r.Context(), r)
+	cookie, err := r.Cookie("sitebrush_session")
+	if err != nil || strings.TrimSpace(cookie.Value) == "" {
+		return true
+	}
+	var email string
+	err = a.db.QueryRowContext(r.Context(), `SELECT u.email FROM sessions s JOIN users u ON (u.domain||'|'||u.email)=s.user_email WHERE s.token=? AND u.domain=? AND u.is_admin=1 LIMIT 1`, cookie.Value, strings.TrimSpace(domain)).Scan(&email)
+	if errors.Is(err, sql.ErrNoRows) {
+		return true
+	}
+	if err != nil {
+		http.Error(w, "account access temporarily unavailable", http.StatusServiceUnavailable)
+		return false
+	}
+	ip := canonicalAccountIP(accountClientIP(r))
+	if ip == "" {
+		a.expireAdminSessionCookie(w, r)
+		return true
+	}
+	var policyEnabled int
+	err = a.db.QueryRowContext(r.Context(), `SELECT COUNT(1) FROM admin_ip_policies WHERE domain=? AND email=?`, domain, email).Scan(&policyEnabled)
+	if err == nil && policyEnabled == 0 {
+		err = a.accountTransaction(r.Context(), func(transaction *sql.Tx) error {
+			if err := transaction.QueryRowContext(r.Context(), `SELECT COUNT(1) FROM admin_ip_policies WHERE domain=? AND email=?`, domain, email).Scan(&policyEnabled); err != nil {
+				return err
+			}
+			if policyEnabled != 0 {
+				return nil
+			}
+			var existingAddresses int
+			if err := transaction.QueryRowContext(r.Context(), `SELECT COUNT(1) FROM admin_allowed_ips WHERE domain=? AND email=?`, domain, email).Scan(&existingAddresses); err != nil {
+				return err
+			}
+			if _, err := transaction.ExecContext(r.Context(), `INSERT INTO admin_ip_policies(domain,email,enabled_at) VALUES(?,?,?)`, domain, email, time.Now().Unix()); err != nil {
+				return err
+			}
+			if existingAddresses != 0 {
+				return nil
+			}
+			_, err := transaction.ExecContext(r.Context(), `INSERT INTO admin_allowed_ips(domain,email,client_ip,added_at) VALUES(?,?,?,?)`, domain, email, ip, time.Now().Unix())
+			return err
+		})
+	}
+	if err != nil {
+		http.Error(w, "account access temporarily unavailable", http.StatusServiceUnavailable)
+		return false
+	}
+	allowedRows, err := a.db.QueryContext(r.Context(), `SELECT client_ip FROM admin_allowed_ips WHERE domain=? AND email=?`, domain, email)
+	if err != nil {
+		http.Error(w, "account access temporarily unavailable", http.StatusServiceUnavailable)
+		return false
+	}
+	ipAllowed := false
+	for allowedRows.Next() {
+		var allowedRule string
+		if allowedRows.Scan(&allowedRule) == nil && adminIPRuleContains(allowedRule, ip) {
+			ipAllowed = true
+			break
+		}
+	}
+	rowsErr := allowedRows.Err()
+	_ = allowedRows.Close()
+	if rowsErr != nil {
+		http.Error(w, "account access temporarily unavailable", http.StatusServiceUnavailable)
+		return false
+	}
+	if !ipAllowed {
+		a.expireAdminSessionCookie(w, r)
+	}
+	return true
+}
+
+func canonicalAccountIP(rawIP string) string {
+	parsedIP, err := netip.ParseAddr(strings.TrimSpace(rawIP))
+	if err != nil || parsedIP.Zone() != "" {
+		return ""
+	}
+	return parsedIP.Unmap().String()
+}
+
+func canonicalAdminIPRule(rawRule string) (string, error) {
+	trimmedRule := strings.TrimSpace(rawRule)
+	if !strings.Contains(trimmedRule, "/") {
+		canonicalIP := canonicalAccountIP(trimmedRule)
+		if canonicalIP == "" {
+			return "", errors.New("invalid IP address")
+		}
+		return canonicalIP, nil
+	}
+	prefix, err := netip.ParsePrefix(trimmedRule)
+	if err != nil || prefix.Addr().Zone() != "" {
+		return "", errors.New("invalid IP subnet")
+	}
+	address := prefix.Addr()
+	if address.Is4In6() {
+		if prefix.Bits() < 96 {
+			return "", errors.New("IPv4-mapped subnet is too broad")
+		}
+		prefix = netip.PrefixFrom(address.Unmap(), prefix.Bits()-96)
+	}
+	minimumPrefixBits := 48
+	if prefix.Addr().Is4() {
+		minimumPrefixBits = 16
+	}
+	if prefix.Bits() < minimumPrefixBits {
+		return "", errors.New("IP subnet is too broad")
+	}
+	return prefix.Masked().String(), nil
+}
+
+func adminIPRuleContains(rawRule, rawIP string) bool {
+	rule, err := canonicalAdminIPRule(rawRule)
+	if err != nil {
+		return false
+	}
+	address, err := netip.ParseAddr(canonicalAccountIP(rawIP))
+	if err != nil {
+		return false
+	}
+	if strings.Contains(rule, "/") {
+		prefix, err := netip.ParsePrefix(rule)
+		return err == nil && prefix.Contains(address.Unmap())
+	}
+	ruleAddress, err := netip.ParseAddr(rule)
+	return err == nil && ruleAddress == address.Unmap()
+}
+
+func (a *App) expireAdminSessionCookie(w http.ResponseWriter, r *http.Request) {
+	httpsecurity.SetSensitiveCookie(w, r, &http.Cookie{Name: "sitebrush_session", MaxAge: -1})
+	remainingCookies := make([]string, 0, len(r.Cookies()))
+	for _, requestCookie := range r.Cookies() {
+		if requestCookie.Name != "sitebrush_session" {
+			remainingCookies = append(remainingCookies, requestCookie.String())
+		}
+	}
+	if len(remainingCookies) == 0 {
+		r.Header.Del("Cookie")
+		return
+	}
+	r.Header.Set("Cookie", strings.Join(remainingCookies, "; "))
 }
 
 func (a *App) certificateRenewalWebSocket(w http.ResponseWriter, r *http.Request) {
@@ -19575,6 +19777,18 @@ func (a *App) profilePage(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+	if r.Method == http.MethodPost && (r.FormValue("profile_action") == "admin_ip_add" || r.FormValue("profile_action") == "admin_ip_remove") {
+		if r.FormValue("account_csrf") == "" || r.FormValue("account_csrf") != accountCSRF(r) {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+		if err := a.updateAdminIPAllowlist(r, domain, currentEmail, r.FormValue("profile_action"), r.FormValue("admin_ip")); err != nil {
+			http.Error(w, "account update unavailable", http.StatusBadRequest)
+			return
+		}
+		httpsecurity.RedirectLocal(w, r, "?profile", http.StatusSeeOther)
+		return
+	}
 	translations := translationsForRequest(r)
 	status := ""
 	statusClass := ""
@@ -19738,6 +19952,55 @@ func (a *App) profilePage(w http.ResponseWriter, r *http.Request) {
 	a.renderProfilePage(w, r, pendingProfileEmail, status, statusClass, showPasswordCodeForm, passwordConfirmationToken, time.Time{}, false, emailDeliveryView, emailChange)
 }
 
+func (a *App) updateAdminIPAllowlist(r *http.Request, domain, email, action, rawIP string) error {
+	ipRule, err := canonicalAdminIPRule(rawIP)
+	if err != nil {
+		return errors.New("invalid administrator IP or subnet")
+	}
+	return a.accountTransaction(r.Context(), func(transaction *sql.Tx) error {
+		switch action {
+		case "admin_ip_add":
+			validSessionAddress := adminIPRuleContains(ipRule, accountClientIP(r))
+			candidateRows, err := transaction.QueryContext(r.Context(), `SELECT client_ip FROM account_session_ips WHERE domain=? AND email=?`, domain, email)
+			if err != nil {
+				return err
+			}
+			for candidateRows.Next() {
+				var candidateIP string
+				if candidateRows.Scan(&candidateIP) == nil && adminIPRuleContains(ipRule, candidateIP) {
+					validSessionAddress = true
+					break
+				}
+			}
+			rowsErr := candidateRows.Err()
+			_ = candidateRows.Close()
+			if rowsErr != nil {
+				return rowsErr
+			}
+			if !validSessionAddress {
+				return errors.New("IP address was not used in a valid account session")
+			}
+			_, err = transaction.ExecContext(r.Context(), `INSERT INTO admin_allowed_ips(domain,email,client_ip,added_at) VALUES(?,?,?,?)`, domain, email, ipRule, time.Now().Unix())
+			return err
+		case "admin_ip_remove":
+			if adminIPRuleContains(ipRule, accountClientIP(r)) {
+				return errors.New("cannot remove the current administrator IP")
+			}
+			result, err := transaction.ExecContext(r.Context(), `DELETE FROM admin_allowed_ips WHERE domain=? AND email=? AND client_ip=? AND (SELECT COUNT(1) FROM admin_allowed_ips WHERE domain=? AND email=?)>1`, domain, email, ipRule, domain, email)
+			if err != nil {
+				return err
+			}
+			rowsAffected, err := result.RowsAffected()
+			if err != nil || rowsAffected == 0 {
+				return errors.New("administrator IP was not found or is the last allowed address")
+			}
+			return nil
+		default:
+			return errors.New("invalid administrator IP action")
+		}
+	})
+}
+
 func (a *App) resumeProfileEmailChange(w http.ResponseWriter, r *http.Request, token string) {
 	confirmation, found := a.emailConfirmationByToken(r.Context(), token)
 	if !found || confirmation.Domain != a.siteDomain(r.Context(), r) || confirmationExpired(confirmation.ExpiresAt, time.Now().UTC()) {
@@ -19799,6 +20062,9 @@ func (a *App) renderProfilePage(w http.ResponseWriter, r *http.Request, email, s
 	}
 	passwordWebmailProvider := webmailProviderForAddress(codeRecipient)
 	trustedIPs := []accountauth.TrustedIP{}
+	adminIPRules := []string{}
+	adminAllowedIPs := []adminAllowedIPView{}
+	adminIPCandidates := []string{}
 	if authenticated {
 		rows, err := a.db.QueryContext(r.Context(), `SELECT client_ip,confirmed_at,last_login FROM account_trusted_ips WHERE domain=? AND email=? AND last_login>? ORDER BY last_login DESC`, a.siteDomain(r.Context(), r), accountEmail, time.Now().Add(-accountauth.TrustTTL).Unix())
 		if err == nil {
@@ -19816,9 +20082,52 @@ func (a *App) renderProfilePage(w http.ResponseWriter, r *http.Request, email, s
 			}
 			rows.Close()
 		}
+		allowedRows, allowedErr := a.db.QueryContext(r.Context(), `SELECT client_ip FROM admin_allowed_ips WHERE domain=? AND email=? ORDER BY added_at,client_ip`, domain, accountEmail)
+		if allowedErr == nil {
+			for allowedRows.Next() {
+				var allowedIP string
+				if allowedRows.Scan(&allowedIP) == nil {
+					adminIPRules = append(adminIPRules, allowedIP)
+				}
+			}
+			allowedRows.Close()
+		}
+		currentIP := canonicalAccountIP(accountClientIP(r))
+		for _, allowedRule := range adminIPRules {
+			adminAllowedIPs = append(adminAllowedIPs, adminAllowedIPView{
+				Rule:      allowedRule,
+				Current:   adminIPRuleContains(allowedRule, currentIP),
+				Removable: len(adminIPRules) > 1 && !adminIPRuleContains(allowedRule, currentIP),
+			})
+		}
+		candidateRows, candidateErr := a.db.QueryContext(r.Context(), `SELECT client_ip FROM account_session_ips WHERE domain=? AND email=? GROUP BY client_ip ORDER BY MAX(used_at) DESC`, domain, accountEmail)
+		if candidateErr == nil {
+			for candidateRows.Next() {
+				var candidateIP string
+				if candidateRows.Scan(&candidateIP) == nil && canonicalAccountIP(candidateIP) != "" {
+					adminIPCandidates = append(adminIPCandidates, canonicalAccountIP(candidateIP))
+				}
+			}
+			candidateRows.Close()
+		}
+		if currentIP != "" {
+			found := false
+			for _, candidateIP := range adminIPCandidates {
+				if candidateIP == currentIP {
+					found = true
+					break
+				}
+			}
+			if !found {
+				adminIPCandidates = append(adminIPCandidates, currentIP)
+			}
+		}
 	}
 	a.render(w, r, "profile.html", map[string]any{
 		"TrustedIPs":                 trustedIPs,
+		"AdminAllowedIPs":            adminAllowedIPs,
+		"AdminIPCandidates":          adminIPCandidates,
+		"CurrentAdminIP":             canonicalAccountIP(accountClientIP(r)),
 		"Passkeys":                   passkeys,
 		"PasskeyOffer":               passkeyOffer,
 		"PasskeyContinuePath":        passkeyContinuePath,
@@ -26952,6 +27261,102 @@ func setSiteQuotaHostingAndSupportMainSite(ctx context.Context, dbPath string, r
 		return "", err
 	}
 	return ownerEmail, nil
+}
+
+func runAdminIPResetCommand(ctx context.Context, output io.Writer, storagePath, dbPath, rawDomain, rawEmail, rawRule string) error {
+	domain := normalizeQuotaDomainName(rawDomain)
+	if domain == "" {
+		return errors.New("invalid administrator site domain")
+	}
+	email := strings.TrimSpace(rawEmail)
+	if email == "" || strings.ContainsAny(email, "\r\n\x00") {
+		return errors.New("invalid administrator email")
+	}
+	allowRule := ""
+	if strings.TrimSpace(rawRule) != "" {
+		var err error
+		allowRule, err = canonicalAdminIPRule(rawRule)
+		if err != nil {
+			return fmt.Errorf("invalid recovery IP or subnet: %w", err)
+		}
+	}
+	candidate, err := siteQuotaDatabaseCandidateForDomain(ctx, storagePath, dbPath, domain)
+	if err != nil {
+		return err
+	}
+	database, err := sql.Open("sqlite", "file:"+candidate.path)
+	if err != nil {
+		return fmt.Errorf("open site database: %w", err)
+	}
+	defer database.Close()
+	database.SetMaxOpenConns(1)
+	if _, err = database.ExecContext(ctx, `PRAGMA busy_timeout=5000`); err != nil {
+		return fmt.Errorf("configure site database: %w", err)
+	}
+	for _, statement := range append(append(accountauth.Schema(), accountpasskey.Schema()...), accounttotp.Schema()...) {
+		if _, err = database.ExecContext(ctx, statement); err != nil {
+			return fmt.Errorf("prepare account recovery schema: %w", err)
+		}
+	}
+	transaction, err := database.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin account recovery: %w", err)
+	}
+	if err = resetAdministratorIPAccess(ctx, transaction, domain, email, allowRule); err != nil {
+		_ = transaction.Rollback()
+		return err
+	}
+	if err = transaction.Commit(); err != nil {
+		return fmt.Errorf("commit account recovery: %w", err)
+	}
+	if allowRule == "" {
+		_, err = fmt.Fprintf(output, "Administrator IP access reset for %s on %s. Active sessions were revoked; the next successful sign-in will allow its IP.\n", email, domain)
+	} else {
+		_, err = fmt.Fprintf(output, "Administrator IP access reset for %s on %s. Active sessions were revoked; allowed address: %s.\n", email, domain, allowRule)
+	}
+	return err
+}
+
+func resetAdministratorIPAccess(ctx context.Context, transaction *sql.Tx, domain, email, allowRule string) error {
+	var isAdministrator int
+	if err := transaction.QueryRowContext(ctx, `SELECT is_admin FROM users WHERE domain=? AND email=?`, domain, email).Scan(&isAdministrator); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("administrator %s on %s was not found", email, domain)
+		}
+		return fmt.Errorf("find administrator: %w", err)
+	}
+	if isAdministrator != 1 {
+		return fmt.Errorf("account %s on %s is not an administrator", email, domain)
+	}
+	userEmail := domain + "|" + email
+	statements := []struct {
+		query string
+		args  []any
+	}{
+		{`DELETE FROM sessions WHERE user_email=?`, []any{userEmail}},
+		{`DELETE FROM account_login_codes WHERE domain=? AND email=?`, []any{domain, email}},
+		{`DELETE FROM account_totp_challenges WHERE domain=? AND email=?`, []any{domain, email}},
+		{`DELETE FROM account_webauthn_challenges WHERE domain=? AND email=?`, []any{domain, email}},
+		{`DELETE FROM email_confirmations WHERE domain=? AND (email=? OR current_email=?)`, []any{domain, email, email}},
+		{`DELETE FROM account_session_ips WHERE domain=? AND email=?`, []any{domain, email}},
+		{`DELETE FROM admin_allowed_ips WHERE domain=? AND email=?`, []any{domain, email}},
+		{`DELETE FROM admin_ip_policies WHERE domain=? AND email=?`, []any{domain, email}},
+	}
+	for _, statement := range statements {
+		if _, err := transaction.ExecContext(ctx, statement.query, statement.args...); err != nil {
+			return fmt.Errorf("reset administrator access: %w", err)
+		}
+	}
+	if allowRule == "" {
+		return nil
+	}
+	if _, err := transaction.ExecContext(ctx, `INSERT INTO admin_ip_policies(domain,email,enabled_at) VALUES(?,?,?)`, domain, email, time.Now().Unix()); err != nil {
+		return fmt.Errorf("enable administrator IP policy: %w", err)
+	}
+	if _, err := transaction.ExecContext(ctx, `INSERT INTO admin_allowed_ips(domain,email,client_ip,added_at) VALUES(?,?,?,?)`, domain, email, allowRule, time.Now().Unix()); err != nil {
+		return fmt.Errorf("set administrator recovery address: %w", err)
+	}
+	return nil
 }
 
 func siteQuotaDatabaseCandidateForDomain(ctx context.Context, storagePath, dbPath, domain string) (siteQuotaDatabaseCandidate, error) {
