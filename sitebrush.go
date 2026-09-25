@@ -1787,6 +1787,10 @@ func (r *perSiteDBRouter) migrateStartupDatabase(ctx context.Context, databasePa
 		return
 	}
 	if version >= currentSiteDatabaseSchemaVersion && schemaComplete {
+		if err := crawler.RecoverImportFrontiers(migrationCtx, database); err != nil {
+			results <- siteDBMigrationEvent{kind: "failed", domain: databaseDomain, path: databasePath, step: "recover interrupted whole-site imports", err: err}
+			return
+		}
 		results <- siteDBMigrationEvent{kind: "skipped", domain: databaseDomain, path: databasePath, previousVersion: version, currentVersion: version}
 		return
 	}
@@ -8332,13 +8336,7 @@ func (a *App) migrate(ctx context.Context) error {
 		return siteMigrationStepError{step: "verify schema", err: schemaErr}
 	}
 	if schemaVersion >= currentSiteDatabaseSchemaVersion && schemaComplete {
-		if _, err := a.db.ExecContext(ctx, `UPDATE whole_site_imports SET state='partial',updated_at=? WHERE state='running'`, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
-			return siteMigrationStepError{step: "recover interrupted whole-site imports", err: err}
-		}
-		if _, err := a.db.ExecContext(ctx, `UPDATE whole_site_import_pages SET state='pending' WHERE state='processing'`); err != nil {
-			return siteMigrationStepError{step: "recover interrupted whole-site import pages", err: err}
-		}
-		if err := crawler.CleanupDiscardedImportFrontiers(ctx, a.db); err != nil {
+		if err := crawler.RecoverImportFrontiers(ctx, a.db); err != nil {
 			return siteMigrationStepError{step: "finish interrupted import cleanup", err: err}
 		}
 		a.migrateLoopbackDomainsToLocalhost(ctx)
@@ -8385,13 +8383,7 @@ func (a *App) migrate(ctx context.Context) error {
 	if err := a.ensureSiteDatabaseSchemaColumns(ctx); err != nil {
 		return err
 	}
-	if _, err := a.db.ExecContext(ctx, `UPDATE whole_site_imports SET state='partial',updated_at=? WHERE state='running'`, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
-		return siteMigrationStepError{step: "recover interrupted whole-site imports", err: err}
-	}
-	if _, err := a.db.ExecContext(ctx, `UPDATE whole_site_import_pages SET state='pending' WHERE state='processing'`); err != nil {
-		return siteMigrationStepError{step: "recover interrupted whole-site import pages", err: err}
-	}
-	if err := crawler.CleanupDiscardedImportFrontiers(ctx, a.db); err != nil {
+	if err := crawler.RecoverImportFrontiers(ctx, a.db); err != nil {
 		return siteMigrationStepError{step: "finish interrupted import cleanup", err: err}
 	}
 	if _, err := a.db.ExecContext(ctx, `DELETE FROM sessions WHERE security_version<1`); err != nil {
@@ -14536,7 +14528,11 @@ func (a *App) prepareWholeRemoteSiteImport(importRequest grabImportRequest) (*pa
 	if claimErr != nil {
 		return spider, nil, nil, claimErr
 	}
-	defer crawler.ReleaseProcessingImportFrontierPages(spider.context(), a.db, importRequest.ImportID, importRequest.Domain)
+	defer func() {
+		cleanupContext, cancelCleanup := wholeSiteImportCleanupContext(spider.context())
+		defer cancelCleanup()
+		_ = crawler.ReleaseProcessingImportFrontierPages(cleanupContext, a.db, importRequest.ImportID, importRequest.Domain)
+	}()
 	importedPages := make([]wholeSiteImportedPage, 0, 32)
 	completedPageKeys := make([]string, 0, len(frontierPages))
 	consecutiveFailures := 0
@@ -14695,17 +14691,30 @@ func (a *App) importWholeRemoteSite(ctx context.Context, importRequest grabImpor
 	spider, importedPages, completedPageKeys, prepareErr := a.prepareWholeRemoteSiteImport(importRequest)
 	if prepareErr != nil {
 		if importRequest.ImportID != "" {
-			_ = crawler.SetImportFrontierRunState(ctx, a.db, importRequest.ImportID, importRequest.Domain, "partial")
+			cleanupContext, cancelCleanup := wholeSiteImportCleanupContext(ctx)
+			_ = crawler.SetImportFrontierRunState(cleanupContext, a.db, importRequest.ImportID, importRequest.Domain, "partial")
+			cancelCleanup()
 		}
 		return grabImportResult{}, prepareErr
 	}
-	importedPages, prepareErr = maybeDetectImportedPageTemplatesWithProgress(importedPages, importRequest.AutoDetectTemplates, func(completedPercent int) {
-		spider.publishProgress("detect_templates", "", completedPercent)
-	})
-	if prepareErr != nil {
-		_ = crawler.ReleaseProcessingImportFrontierPages(ctx, a.db, importRequest.ImportID, importRequest.Domain)
-		_ = crawler.SetImportFrontierRunState(ctx, a.db, importRequest.ImportID, importRequest.Domain, "partial")
-		return grabImportResult{}, prepareErr
+	if spider.contextCanceled() {
+		cleanupContext, cancelCleanup := wholeSiteImportCleanupContext(ctx)
+		defer cancelCleanup()
+		if stateErr := crawler.SetImportFrontierRunState(cleanupContext, a.db, importRequest.ImportID, importRequest.Domain, "partial"); stateErr != nil {
+			return grabImportResult{}, stateErr
+		}
+		frontierStats, statsErr := crawler.ImportFrontierStatsForRun(cleanupContext, a.db, importRequest.ImportID, importRequest.Domain)
+		if statsErr != nil {
+			return grabImportResult{}, statsErr
+		}
+		result := grabImportResult{RedirectPath: cleanPath(importRequest.PagePath), RemainingPages: frontierStats.PendingPages, FailedTotal: frontierStats.PendingPages}
+		if frontierStats.PendingPages > 0 {
+			result.ImportID = importRequest.ImportID
+		}
+		if a.grabTracker != nil {
+			a.grabTracker.publish(spider.finalProgressEvent(importRequest.ProgressToken, "partial"))
+		}
+		return result, nil
 	}
 	pageDelta, publishedPageDelta, revisionDelta, publishedStaticDelta := a.estimateImportedPagesStorageDelta(ctx, importRequest.Domain, importedPages)
 	fileDelta := a.estimateImportedFileDelta(importRequest.Domain, spider)
@@ -14735,6 +14744,30 @@ func (a *App) importWholeRemoteSite(ctx context.Context, importRequest grabImpor
 		return grabImportResult{}, statsErr
 	}
 	if frontierStats.PendingPages == 0 {
+		if importRequest.AutoDetectTemplates {
+			allImportedPages, loadErr := a.loadWholeSiteImportPagesForTemplateDetection(ctx, importRequest.Domain, importRequest.ImportID)
+			if loadErr != nil {
+				a.preserveWholeSiteImportForResume(ctx, importRequest.Domain, importRequest.ImportID, completedPageKeys)
+				return grabImportResult{}, loadErr
+			}
+			detectedPages, detectErr := maybeDetectImportedPageTemplatesWithProgress(allImportedPages, true, func(completedPercent int) {
+				spider.publishProgress("detect_templates", "", completedPercent)
+			})
+			if detectErr != nil {
+				a.preserveWholeSiteImportForResume(ctx, importRequest.Domain, importRequest.ImportID, completedPageKeys)
+				return grabImportResult{}, detectErr
+			}
+			templatePageDelta, templatePublishedPageDelta, templateRevisionDelta, templateStaticDelta := a.estimateImportedPagesStorageDelta(ctx, importRequest.Domain, detectedPages)
+			if storageErr := a.applyDomainStorageDelta(ctx, importRequest.Domain, templatePageDelta, templatePublishedPageDelta, templateRevisionDelta, 0, templateStaticDelta); storageErr != nil {
+				a.preserveWholeSiteImportForResume(ctx, importRequest.Domain, importRequest.ImportID, completedPageKeys)
+				return grabImportResult{}, storageErr
+			}
+			if storeErr := a.storeWholeSiteImportedPages(ctx, importRequest.Domain, detectedPages); storeErr != nil {
+				_ = a.applyDomainStorageDelta(ctx, importRequest.Domain, -templatePageDelta, -templatePublishedPageDelta, -templateRevisionDelta, 0, -templateStaticDelta)
+				a.preserveWholeSiteImportForResume(ctx, importRequest.Domain, importRequest.ImportID, completedPageKeys)
+				return grabImportResult{}, storeErr
+			}
+		}
 		if cleanupErr := crawler.FinishImportFrontier(ctx, a.db, importRequest.ImportID, importRequest.Domain); cleanupErr != nil {
 			return grabImportResult{}, cleanupErr
 		}
@@ -14765,6 +14798,38 @@ func (a *App) wholeSiteImportQueueBudget(ctx context.Context, domain string) int
 		return wholeSiteImportQueueMaximumBytes
 	}
 	return queueBudget
+}
+
+func wholeSiteImportCleanupContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithTimeout(context.WithoutCancel(ctx), siteDatabaseStartupMigrationTimeout)
+}
+
+func (a *App) preserveWholeSiteImportForResume(ctx context.Context, domain, importID string, completedPageKeys []string) {
+	cleanupContext, cancelCleanup := wholeSiteImportCleanupContext(ctx)
+	defer cancelCleanup()
+	if len(completedPageKeys) > 0 {
+		_ = crawler.UpdateImportFrontierPageCursor(cleanupContext, a.db, importID, domain, completedPageKeys[0], 0, "pending")
+	}
+	_ = crawler.SetImportFrontierRunState(cleanupContext, a.db, importID, domain, "partial")
+}
+
+func (a *App) loadWholeSiteImportPagesForTemplateDetection(ctx context.Context, domain, importID string) ([]wholeSiteImportedPage, error) {
+	frontierPages, err := crawler.ListImportFrontierPages(ctx, a.db, importID, domain)
+	if err != nil {
+		return nil, err
+	}
+	importedPages := make([]wholeSiteImportedPage, 0, len(frontierPages))
+	for _, frontierPage := range frontierPages {
+		var pageHTML string
+		if err := a.db.QueryRowContext(ctx, `SELECT html FROM pages WHERE domain=? AND path=?`, domain, cleanPath(frontierPage.LocalPath)).Scan(&pageHTML); err != nil {
+			return nil, fmt.Errorf("load imported page %s for template detection: %w", frontierPage.LocalPath, err)
+		}
+		importedPages = append(importedPages, wholeSiteImportedPage{SourceURL: frontierPage.URL, LocalPath: frontierPage.LocalPath, HTML: pageHTML})
+	}
+	return importedPages, nil
 }
 
 func sameWholeSiteImportOrigin(storedURL, requestedURL *url.URL) bool {

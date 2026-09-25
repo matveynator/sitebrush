@@ -49,6 +49,20 @@ func ImportFrontierSchema() []string {
 	}
 }
 
+// RecoverImportFrontiers returns interrupted work to claimable states at startup.
+func RecoverImportFrontiers(ctx context.Context, database importFrontierDatabase) error {
+	if _, err := database.ExecContext(ctx, `UPDATE whole_site_imports SET state='partial',updated_at=? WHERE state='running'`, frontierNow()); err != nil {
+		return fmt.Errorf("recover interrupted whole-site imports: %w", err)
+	}
+	if _, err := database.ExecContext(ctx, `UPDATE whole_site_import_pages SET state='pending' WHERE state='processing'`); err != nil {
+		return fmt.Errorf("recover interrupted whole-site import pages: %w", err)
+	}
+	if err := CleanupDiscardedImportFrontiers(ctx, database); err != nil {
+		return err
+	}
+	return nil
+}
+
 func CreateImportFrontier(ctx context.Context, database importFrontierDatabase, run ImportFrontierRun) error {
 	if database == nil || strings.TrimSpace(run.ID) == "" || strings.TrimSpace(run.Domain) == "" || strings.TrimSpace(run.SourceURL) == "" {
 		return errors.New("import frontier run identity is required")
@@ -180,6 +194,29 @@ func ClaimImportFrontierPages(ctx context.Context, database importFrontierDataba
 		}
 	}
 	return claimedPages, nil
+}
+
+func ListImportFrontierPages(ctx context.Context, database importFrontierDatabase, importID, domain string) ([]ImportFrontierPage, error) {
+	rows, err := database.QueryContext(ctx, `SELECT page_key,page_url,local_path,link_offset FROM whole_site_import_pages WHERE import_id=? AND domain=? ORDER BY created_at,page_key`, importID, domain)
+	if err != nil {
+		return nil, fmt.Errorf("list whole-site import pages: %w", err)
+	}
+	defer rows.Close()
+	pages := make([]ImportFrontierPage, 0)
+	for rows.Next() {
+		var page ImportFrontierPage
+		if err := rows.Scan(&page.Key, &page.URL, &page.LocalPath, &page.LinkOffset); err != nil {
+			return nil, fmt.Errorf("read whole-site import page: %w", err)
+		}
+		pages = append(pages, page)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("read whole-site import pages: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, fmt.Errorf("close whole-site import pages: %w", err)
+	}
+	return pages, nil
 }
 
 func SetImportFrontierPageState(ctx context.Context, database importFrontierDatabase, importID, domain, pageKey, state string) error {

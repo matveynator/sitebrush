@@ -80,6 +80,19 @@ func TestResourceAttackPageLinkOffsetsResumeWithoutLosingLinks(t *testing.T) {
 	}
 }
 
+func TestPageLinkOffsetsNormalizeInvalidInputsAndSkipNonPages(t *testing.T) {
+	base, _ := url.Parse("https://source.example/start")
+	source := `<a href="mailto:admin@example.com">mail</a><img src="/asset.png"><a href="/one">one</a>`
+	pageURLs, nextOffset, hasRemainingPages := ExtractPageLinksFromOffset(source, base, base, -4, 0)
+	if len(pageURLs) != 1 || pageURLs[0].Path != "/one" || nextOffset != 1 || hasRemainingPages {
+		t.Fatalf("normalized page-link scan = %+v offset=%d remaining=%v", pageURLs, nextOffset, hasRemainingPages)
+	}
+	pageURLs, nextOffset, hasRemainingPages = ExtractPageLinksFromOffset(source, base, base, 4, 1)
+	if len(pageURLs) != 0 || nextOffset != 4 || hasRemainingPages {
+		t.Fatalf("past-end page-link scan = %+v offset=%d remaining=%v", pageURLs, nextOffset, hasRemainingPages)
+	}
+}
+
 func TestSecurityBoundaryHTMLBodyLimitRejectsOversizedResponse(t *testing.T) {
 	payload := strings.Repeat("x", 65)
 	if _, err := readHTMLBodyWithLimit(strings.NewReader(payload), 64); err == nil {
