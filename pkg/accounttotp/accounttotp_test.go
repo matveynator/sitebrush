@@ -207,3 +207,146 @@ func mustBeginTOTP(t *testing.T, database *sql.DB) *sql.Tx {
 	}
 	return transaction
 }
+
+
+// BEGIN TOTP replay and race regression tests.
+
+func TestTOTPChallengeConcurrentConsumptionSucceedsOnce(t *testing.T) {
+	ctx := context.Background()
+	now := time.Now().UTC()
+	database, err := sql.Open("sqlite", "file:"+filepath.Join(t.TempDir(), "totp-race.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	database.SetMaxOpenConns(1)
+	for _, statement := range Schema() {
+		if _, err := database.Exec(statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	secret := "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ"
+	if _, err := database.Exec(`INSERT INTO account_totp(domain,email,secret,enabled_at) VALUES(?,?,?,?)`, "example.com", "owner@example.com", secret, now.Unix()); err != nil {
+		t.Fatal(err)
+	}
+	transaction := mustBeginTOTP(t, database)
+	token, err := BeginLogin(ctx, transaction, "example.com", "owner@example.com", "192.0.2.70", "/profile", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := transaction.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	code, err := Code(secret, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	const consumers = 32
+	results := make(chan bool, consumers)
+	start := make(chan struct{})
+	for consumerIndex := 0; consumerIndex < consumers; consumerIndex++ {
+		go func() {
+			<-start
+			transaction, err := database.Begin()
+			if err != nil {
+				results <- false
+				return
+			}
+			_, _, verifyErr := VerifyLogin(ctx, transaction, "example.com", token, "192.0.2.70", code, now)
+			if verifyErr != nil {
+				_ = transaction.Rollback()
+				results <- false
+				return
+			}
+			if err := transaction.Commit(); err != nil {
+				results <- false
+				return
+			}
+			results <- true
+		}()
+	}
+	close(start)
+
+	successes := 0
+	for resultIndex := 0; resultIndex < consumers; resultIndex++ {
+		select {
+		case success := <-results:
+			if success {
+				successes++
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("concurrent TOTP verification did not finish")
+		}
+	}
+	if successes != 1 {
+		t.Fatalf("successful TOTP consumptions=%d want=1", successes)
+	}
+}
+
+func TestTOTPFallbackConcurrentConsumptionSucceedsOnce(t *testing.T) {
+	ctx := context.Background()
+	now := time.Now().UTC()
+	database, err := sql.Open("sqlite", "file:"+filepath.Join(t.TempDir(), "totp-fallback-race.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	database.SetMaxOpenConns(1)
+	for _, statement := range Schema() {
+		if _, err := database.Exec(statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	transaction := mustBeginTOTP(t, database)
+	token, err := BeginLogin(ctx, transaction, "example.com", "owner@example.com", "192.0.2.71", "/profile", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := transaction.Commit(); err != nil {
+		t.Fatal(err)
+	}
+
+	const consumers = 32
+	results := make(chan bool, consumers)
+	start := make(chan struct{})
+	for consumerIndex := 0; consumerIndex < consumers; consumerIndex++ {
+		go func() {
+			<-start
+			transaction, err := database.Begin()
+			if err != nil {
+				results <- false
+				return
+			}
+			_, _, consumeErr := ConsumeForFallback(ctx, transaction, "example.com", token, "192.0.2.71", now)
+			if consumeErr != nil {
+				_ = transaction.Rollback()
+				results <- false
+				return
+			}
+			if err := transaction.Commit(); err != nil {
+				results <- false
+				return
+			}
+			results <- true
+		}()
+	}
+	close(start)
+
+	successes := 0
+	for resultIndex := 0; resultIndex < consumers; resultIndex++ {
+		select {
+		case success := <-results:
+			if success {
+				successes++
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("concurrent TOTP fallback consumption did not finish")
+		}
+	}
+	if successes != 1 {
+		t.Fatalf("successful fallback consumptions=%d want=1", successes)
+	}
+}
+
+// END TOTP replay and race regression tests.
