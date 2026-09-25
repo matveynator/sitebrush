@@ -7030,6 +7030,56 @@ func (a *App) authAbuseMiddleware(next http.Handler) http.Handler {
 	})
 }
 
+func (a *App) securityResponseHeadersMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		if !adminResponseIsolationRequired(r) {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		framePolicy := adminResponseFramePolicy(r)
+		w.Header().Set("X-Frame-Options", framePolicy.xFrameOptions)
+		w.Header().Set("Content-Security-Policy", framePolicy.contentSecurityPolicy)
+		w.Header().Set("Referrer-Policy", "no-referrer")
+		w.Header().Set("Cache-Control", "no-store")
+		next.ServeHTTP(w, r)
+	})
+}
+
+type adminResponseFramePolicyValues struct {
+	xFrameOptions         string
+	contentSecurityPolicy string
+}
+
+func adminResponseFramePolicy(r *http.Request) adminResponseFramePolicyValues {
+	if hasQueryFlag(r, "revision_preview") {
+		return adminResponseFramePolicyValues{
+			xFrameOptions:         "SAMEORIGIN",
+			contentSecurityPolicy: "frame-ancestors 'self'",
+		}
+	}
+	return adminResponseFramePolicyValues{
+		xFrameOptions:         "DENY",
+		contentSecurityPolicy: "frame-ancestors 'none'",
+	}
+}
+
+func adminResponseIsolationRequired(r *http.Request) bool {
+	if r == nil {
+		return false
+	}
+	if hasSitebrushSessionCookie(r) {
+		return true
+	}
+	for _, accountPageFlag := range []string{"login", "register", "recover", "email_confirm", "profile"} {
+		if hasQueryFlag(r, accountPageFlag) {
+			return true
+		}
+	}
+	return false
+}
+
 func (a *App) trustRecordedAdminIP(r *http.Request, domain, clientIP string, now time.Time) bool {
 	if a.attackGuard == nil || a.db == nil || domain == "" || clientIP == "" {
 		return false
@@ -7796,7 +7846,7 @@ func runSitebrushServer(ctx context.Context, config serverRunConfig) error {
 		nextRequest := r.WithContext(contextWithDomain(r.Context(), requestDomain))
 		router.ServeHTTP(w, nextRequest)
 	})
-	appHandler := application.analyticsMiddleware(application.accessLogMiddleware(application.authAbuseMiddleware(domainContextMiddleware)))
+	appHandler := application.securityResponseHeadersMiddleware(application.analyticsMiddleware(application.accessLogMiddleware(application.authAbuseMiddleware(domainContextMiddleware))))
 	httpHandler := appHandler
 	if listenPort != 80 {
 		application.automaticSSLUnavailableHintKey = automaticSSLUnavailableHintKey(config.PortWasProvided)
