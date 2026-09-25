@@ -34,7 +34,7 @@ func TestSecurityBoundaryRevokeParametersCannotDeleteOtherAccounts(t *testing.T)
 	now := time.Unix(1_800_400_000, 0).UTC()
 
 	if _, err := database.Exec(
-		"INSERT INTO account_trusted_ips(domain,email,client_ip,first_login,last_login) VALUES(?,?,?,?,?)",
+		"INSERT INTO account_trusted_ips(domain,email,client_ip,confirmed_at,last_login) VALUES(?,?,?,?,?)",
 		"example.org", "owner@example.org", "203.0.113.7", now.Unix(), now.Unix(),
 	); err != nil {
 		t.Fatal(err)
