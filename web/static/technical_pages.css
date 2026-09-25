@@ -3348,6 +3348,15 @@ body.technical-page.analytics-page {
     border-radius: calc(var(--theme-radius) - 2px);
     background: var(--panel-soft);
 }
+.technical-page .authenticator-qr-code {
+    width: min(256px, 100%);
+    height: auto;
+    justify-self: center;
+    border: 1px solid var(--theme-border);
+    border-radius: 8px;
+    background: #fff;
+    padding: 8px;
+}
 .technical-page .authenticator-connect-or {
     color: var(--theme-muted-foreground);
     font-size: 12px;

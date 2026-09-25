@@ -10,6 +10,7 @@ require (
 	github.com/jchv/go-webview-selector v0.0.0-20250730141630-a5f64a01ba3a
 	github.com/mattn/go-sqlite3 v1.14.44
 	github.com/matveynator/netchan v0.0.0-20260802175005-7848addf9431
+	github.com/skip2/go-qrcode v0.0.0-20200617195104-da1b6568686e
 	golang.org/x/crypto v0.54.0
 	golang.org/x/net v0.57.0
 	golang.org/x/sys v0.47.0

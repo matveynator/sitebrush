@@ -18,7 +18,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
-	browserstats "github.com/matveynator/sitebrush/v2/pkg/analytics"
+	stdhtml "html"
 	"html/template"
 	"io"
 	"io/fs"
@@ -42,6 +42,7 @@ import (
 
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/matveynator/netchan"
+	browserstats "github.com/matveynator/sitebrush/v2/pkg/analytics"
 	"github.com/matveynator/sitebrush/v2/pkg/channelacme"
 	"github.com/matveynator/sitebrush/v2/pkg/crawler"
 	"github.com/matveynator/sitebrush/v2/pkg/demo"
@@ -15541,7 +15542,6 @@ func TestPasswordPromptPreventsIndexing(t *testing.T) {
 	}
 }
 
-
 // BEGIN sitebrush coverage tests.
 
 type sqliteCodedError int
@@ -15921,7 +15921,6 @@ func TestAdminIPOptInMigrationRunsForPreviousSchemaVersion(t *testing.T) {
 
 // END administrator IP migration gate regression test.
 
-
 func TestAdminIPAllowlistIsOptInAndRejectsOtherAddresses(t *testing.T) {
 	application, database := newTestApplication(t)
 	for _, statement := range []string{
@@ -16064,6 +16063,7 @@ func TestBlockedAdminIPSeesStaticSiteAndNoSiteBrushRoutes(t *testing.T) {
 		`INSERT INTO users(domain,email,password,is_admin) VALUES('example.org','owner@example.org','secret',1)`,
 		`INSERT INTO admin_ip_policies(domain,email,enabled_at) VALUES('example.org','owner@example.org',1)`,
 		`INSERT INTO admin_allowed_ips(domain,email,client_ip,added_at) VALUES('example.org','owner@example.org','192.0.2.1',1)`,
+		`INSERT INTO admin_stealth_modes(domain,email,enabled_at) VALUES('example.org','owner@example.org',1)`,
 	} {
 		if _, err := database.Exec(statement); err != nil {
 			t.Fatal(err)
@@ -16115,6 +16115,7 @@ func TestBlockedAdminIPCanUnlockProtectedPublishedPage(t *testing.T) {
 		`INSERT INTO users(domain,email,password,is_admin) VALUES('example.org','owner@example.org','secret',1)`,
 		`INSERT INTO admin_ip_policies(domain,email,enabled_at) VALUES('example.org','owner@example.org',1)`,
 		`INSERT INTO admin_allowed_ips(domain,email,client_ip,added_at) VALUES('example.org','owner@example.org','192.0.2.1',1)`,
+		`INSERT INTO admin_stealth_modes(domain,email,enabled_at) VALUES('example.org','owner@example.org',1)`,
 	} {
 		if _, err := database.Exec(statement); err != nil {
 			t.Fatal(err)
@@ -16155,6 +16156,117 @@ func TestBlockedAdminIPCanUnlockProtectedPublishedPage(t *testing.T) {
 }
 
 // END stealth protected-page unlock regression test.
+
+func TestStealthModeRequiresIPProtectionAndDisablesWithIt(t *testing.T) {
+	application, database := newTestApplication(t)
+	if _, err := database.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES('example.org','owner@example.org','secret',1)`); err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "https://example.org/?profile", nil)
+	request.RemoteAddr = "192.0.2.1:1234"
+	if err := application.updateAdminIPAllowlist(request, "example.org", "owner@example.org", "admin_stealth_enable", ""); err == nil {
+		t.Fatal("enabled stealth without administrator IP protection")
+	}
+	for _, statement := range []string{
+		`INSERT INTO admin_ip_policies(domain,email,enabled_at) VALUES('example.org','owner@example.org',1)`,
+		`INSERT INTO admin_allowed_ips(domain,email,client_ip,added_at) VALUES('example.org','owner@example.org','192.0.2.1',1)`,
+	} {
+		if _, err := database.Exec(statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := application.updateAdminIPAllowlist(request, "example.org", "owner@example.org", "admin_stealth_enable", ""); err != nil {
+		t.Fatalf("enable stealth with IP protection: %v", err)
+	}
+	if err := application.updateAdminIPAllowlist(request, "example.org", "owner@example.org", "admin_ip_disable", ""); err != nil {
+		t.Fatalf("disable IP protection: %v", err)
+	}
+	var stealthCount int
+	if err := database.QueryRow(`SELECT COUNT(1) FROM admin_stealth_modes WHERE domain='example.org' AND email='owner@example.org'`).Scan(&stealthCount); err != nil || stealthCount != 0 {
+		t.Fatalf("stealth remains after IP protection was disabled: count=%d err=%v", stealthCount, err)
+	}
+}
+
+func TestStealthModeIsOptionalAndLimitedToUnlistedAddresses(t *testing.T) {
+	application, database := newTestApplication(t)
+	for _, statement := range []string{
+		`INSERT INTO admin_ip_policies(domain,email,enabled_at) VALUES('example.org','owner@example.org',1)`,
+		`INSERT INTO admin_allowed_ips(domain,email,client_ip,added_at) VALUES('example.org','owner@example.org','192.0.2.1',1)`,
+	} {
+		if _, err := database.Exec(statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	blockedRequest := httptest.NewRequest(http.MethodGet, "https://example.org/?login", nil)
+	blockedRequest.RemoteAddr = "192.0.2.9:1234"
+	if application.serveStealthStaticForBlockedAdminIP(httptest.NewRecorder(), blockedRequest, "example.org", "/") {
+		t.Fatal("stealth activated automatically with administrator IP protection")
+	}
+	if _, err := database.Exec(`INSERT INTO admin_stealth_modes(domain,email,enabled_at) VALUES('example.org','owner@example.org',1)`); err != nil {
+		t.Fatal(err)
+	}
+	if !application.serveStealthStaticForBlockedAdminIP(httptest.NewRecorder(), blockedRequest, "example.org", "/") {
+		t.Fatal("unlisted address did not enter static-only stealth mode")
+	}
+	allowedRequest := httptest.NewRequest(http.MethodGet, "https://example.org/?profile", nil)
+	allowedRequest.RemoteAddr = "192.0.2.1:1234"
+	if application.serveStealthStaticForBlockedAdminIP(httptest.NewRecorder(), allowedRequest, "example.org", "/") {
+		t.Fatal("allowlisted address was hidden by stealth mode")
+	}
+}
+
+func TestTOTPSetupQRCodeIsLocalPNGData(t *testing.T) {
+	if qrData := totpSetupQRCodeDataURI(""); qrData != "" {
+		t.Fatalf("empty setup URI produced a QR code: %q", qrData)
+	}
+	qrData := totpSetupQRCodeDataURI("otpauth://totp/SiteBrush:owner@example.org?secret=ABC123&issuer=SiteBrush")
+	qrDataString := string(qrData)
+	if !strings.HasPrefix(qrDataString, "data:image/png;base64,") {
+		t.Fatalf("setup QR code is not an embedded PNG: %q", qrData)
+	}
+	pngBytes, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(qrDataString, "data:image/png;base64,"))
+	if err != nil {
+		t.Fatalf("decode embedded QR PNG: %v", err)
+	}
+	if len(pngBytes) < 8 || !bytes.Equal(pngBytes[:8], []byte{137, 80, 78, 71, 13, 10, 26, 10}) {
+		t.Fatal("embedded QR data is not a PNG image")
+	}
+	qrTemplate, err := template.New("qr").Parse(`<img src="{{.TOTPSetupQRCode}}">`)
+	if err != nil {
+		t.Fatalf("parse QR template: %v", err)
+	}
+	var renderedQR bytes.Buffer
+	if err := qrTemplate.Execute(&renderedQR, map[string]any{"TOTPSetupQRCode": qrData}); err != nil {
+		t.Fatalf("render trusted QR URL: %v", err)
+	}
+	if !strings.Contains(stdhtml.UnescapeString(renderedQR.String()), `src="`+qrDataString+`"`) || strings.Contains(renderedQR.String(), "ZgotmplZ") {
+		t.Fatalf("template rejected the generated QR URL: %s", renderedQR.String())
+	}
+}
+
+func TestStealthSettingLookupErrorReturnsUnavailable(t *testing.T) {
+	application, database := newTestApplication(t)
+	for _, statement := range []string{
+		`INSERT INTO admin_ip_policies(domain,email,enabled_at) VALUES('example.org','owner@example.org',1)`,
+		`INSERT INTO admin_allowed_ips(domain,email,client_ip,added_at) VALUES('example.org','owner@example.org','192.0.2.1',1)`,
+		`INSERT INTO admin_stealth_modes(domain,email,enabled_at) VALUES('example.org','owner@example.org',1)`,
+		`DROP TABLE admin_stealth_modes`,
+	} {
+		if _, err := database.Exec(statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	request := httptest.NewRequest(http.MethodGet, "https://example.org/?login", nil)
+	request.RemoteAddr = "192.0.2.9:1234"
+	response := httptest.NewRecorder()
+	application.route(response, request)
+	if response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("stealth lookup failure response status=%d body=%q", response.Code, response.Body.String())
+	}
+	if strings.Contains(response.Body.String(), "SiteBrush login") || strings.Contains(response.Body.String(), "login_password") {
+		t.Fatalf("normal SiteBrush route was rendered after stealth lookup failed: %q", response.Body.String())
+	}
+}
 
 func TestAdminIPAllowlistResolvesVerifiedAliasBeforeSessionLookup(t *testing.T) {
 	application, database := newTestApplication(t)
@@ -16397,6 +16509,7 @@ func TestAdminIPAllowlistBlocksAccountPageForUnlistedSession(t *testing.T) {
 		`INSERT INTO sessions(token,user_email,created_at,client_ip,security_version) VALUES('active','example.org|owner@example.org','2026-09-25T00:00:00Z','192.0.2.1',1)`,
 		`INSERT INTO admin_ip_policies(domain,email,enabled_at) VALUES('example.org','owner@example.org',1)`,
 		`INSERT INTO admin_allowed_ips(domain,email,client_ip,added_at) VALUES('example.org','owner@example.org','192.0.2.1',1)`,
+		`INSERT INTO admin_stealth_modes(domain,email,enabled_at) VALUES('example.org','owner@example.org',1)`,
 	} {
 		if _, err := database.Exec(statement); err != nil {
 			t.Fatal(err)
@@ -16598,7 +16711,6 @@ func TestSecurityBoundaryBackupImportFailsClosedOnDatabaseWriteError(t *testing.
 		t.Fatal("SECURITY: backup import reported success after the pages table write failed")
 	}
 }
-
 
 func TestSecurityBoundaryBackupImportFailsClosedOnRedirectWriteError(t *testing.T) {
 	application, rawDB := newTestApplication(t)
@@ -17052,4 +17164,3 @@ func insertTemplateAttackPage(database *sql.DB, domain, path, title, html string
 }
 
 // END template isolation attack tests.
-

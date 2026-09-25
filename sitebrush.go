@@ -80,6 +80,7 @@ import (
 	"github.com/matveynator/sitebrush/v2/pkg/storagejail"
 	"github.com/matveynator/sitebrush/v2/pkg/systeminit"
 	"github.com/matveynator/sitebrush/v2/pkg/winservice"
+	"github.com/skip2/go-qrcode"
 	"golang.org/x/net/dns/dnsmessage"
 	"golang.org/x/net/html"
 	"golang.org/x/net/websocket"
@@ -125,7 +126,7 @@ const sitebrushHTTPWriteTimeout = 0
 const sitebrushHTTPIdleTimeout = 65 * time.Second
 const sitebrushHTTPReadHeaderTimeout = 5 * time.Second
 const sitebrushHTTP10KeepAliveBufferLimit = 1024 * 1024
-const currentSiteDatabaseSchemaVersion = 8
+const currentSiteDatabaseSchemaVersion = 9
 const siteDatabaseStartupMigrationTimeout = 30 * time.Second
 const pagePasswordSessionTTL = time.Hour
 const serviceMailRelayPath = "/?service_mail_relay"
@@ -8401,6 +8402,7 @@ func (a *App) migrate(ctx context.Context) error {
 		`CREATE TABLE IF NOT EXISTS page_password_sessions(token TEXT PRIMARY KEY,domain TEXT,path TEXT,created_at TEXT);`,
 		`CREATE TABLE IF NOT EXISTS domain_chroot_locations(domain TEXT,url_path TEXT,directory_path TEXT,updated_at TEXT,PRIMARY KEY(domain,url_path));`,
 		`CREATE TABLE IF NOT EXISTS domain_backup_tokens(domain TEXT PRIMARY KEY,token TEXT,updated_at TEXT);`,
+		`CREATE TABLE IF NOT EXISTS admin_stealth_modes(domain TEXT,email TEXT,enabled_at INTEGER NOT NULL,PRIMARY KEY(domain,email));`,
 		`CREATE TABLE IF NOT EXISTS file_access_rules(domain TEXT,file_name TEXT,access_mode TEXT,token TEXT,expires_at TEXT,single_use_left INTEGER DEFAULT 0,token_use_count INTEGER DEFAULT 0,PRIMARY KEY(domain,file_name));`,
 		`CREATE TABLE IF NOT EXISTS file_metadata(domain TEXT,file_name TEXT,page_path TEXT,size INTEGER,mime_type TEXT,created_at TEXT,updated_at TEXT,source TEXT,download_count INTEGER DEFAULT 0,PRIMARY KEY(domain,file_name));`,
 		`CREATE TABLE IF NOT EXISTS email_confirmations(token TEXT PRIMARY KEY,domain TEXT,action TEXT,email TEXT,password TEXT,verification_code TEXT,current_email TEXT,return_path TEXT,language_code TEXT,created_at TEXT,expires_at TEXT);`,
@@ -9440,6 +9442,15 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 
 // Blocked addresses see only published files; SiteBrush control requests look absent.
 func (a *App) serveStealthStaticForBlockedAdminIP(w http.ResponseWriter, r *http.Request, domain, pagePath string) bool {
+	var stealthEnabled int
+	if err := a.db.QueryRowContext(r.Context(), `SELECT COUNT(1) FROM admin_stealth_modes WHERE domain=? AND enabled_at>0`, domain).Scan(&stealthEnabled); err != nil {
+		w.Header().Set("Cache-Control", "no-store")
+		http.Error(w, "site security settings temporarily unavailable", http.StatusServiceUnavailable)
+		return true
+	}
+	if stealthEnabled == 0 {
+		return false
+	}
 	if !a.adminIPLoginBlocked(r.Context(), domain, accountClientIP(r), "") {
 		return false
 	}
@@ -19847,7 +19858,7 @@ func (a *App) profilePage(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	if r.Method == http.MethodPost && strings.HasPrefix(r.FormValue("profile_action"), "admin_ip_") {
+	if r.Method == http.MethodPost && (strings.HasPrefix(r.FormValue("profile_action"), "admin_ip_") || strings.HasPrefix(r.FormValue("profile_action"), "admin_stealth_")) {
 		if r.FormValue("account_csrf") == "" || r.FormValue("account_csrf") != accountCSRF(r) {
 			http.Error(w, "forbidden", http.StatusForbidden)
 			return
@@ -20023,10 +20034,30 @@ func (a *App) profilePage(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) updateAdminIPAllowlist(r *http.Request, domain, email, action, rawIP string) error {
+	if action == "admin_stealth_enable" || action == "admin_stealth_disable" {
+		return a.accountTransaction(r.Context(), func(transaction *sql.Tx) error {
+			if action == "admin_stealth_disable" {
+				_, err := transaction.ExecContext(r.Context(), `DELETE FROM admin_stealth_modes WHERE domain=? AND email=?`, domain, email)
+				return err
+			}
+			var protectionEnabled int
+			if err := transaction.QueryRowContext(r.Context(), `SELECT COUNT(1) FROM admin_ip_policies WHERE domain=? AND email=?`, domain, email).Scan(&protectionEnabled); err != nil {
+				return err
+			}
+			if protectionEnabled == 0 {
+				return errors.New("administrator IP protection must be enabled first")
+			}
+			_, err := transaction.ExecContext(r.Context(), `INSERT INTO admin_stealth_modes(domain,email,enabled_at) VALUES(?,?,?)`, domain, email, time.Now().Unix())
+			return err
+		})
+	}
 	if action == "admin_ip_enable" || action == "admin_ip_disable" {
 		return a.accountTransaction(r.Context(), func(transaction *sql.Tx) error {
 			if action == "admin_ip_disable" {
-				_, err := transaction.ExecContext(r.Context(), `DELETE FROM admin_ip_policies WHERE domain=? AND email=?`, domain, email)
+				if _, err := transaction.ExecContext(r.Context(), `DELETE FROM admin_ip_policies WHERE domain=? AND email=?`, domain, email); err != nil {
+					return err
+				}
+				_, err := transaction.ExecContext(r.Context(), `DELETE FROM admin_stealth_modes WHERE domain=? AND email=?`, domain, email)
 				return err
 			}
 			if r.FormValue("static_ip_confirmation") != "yes" {
@@ -20160,6 +20191,7 @@ func (a *App) renderProfilePage(w http.ResponseWriter, r *http.Request, email, s
 	if totpSetupSecret != "" {
 		totpSetupURI = accounttotp.ProvisioningURI(domain, accountEmail, totpSetupSecret)
 	}
+	totpSetupQRCode := totpSetupQRCodeDataURI(totpSetupURI)
 	passkeyOffer := hasQueryFlag(r, "passkey_offer") && authenticated && len(passkeys) == 0
 	passkeyContinuePath := httpsecurity.LocalRedirectTarget(r.URL.Query().Get("return_path"), "/")
 	codeRecipient := strings.TrimSpace(email)
@@ -20172,10 +20204,14 @@ func (a *App) renderProfilePage(w http.ResponseWriter, r *http.Request, email, s
 	adminAllowedIPs := []adminAllowedIPView{}
 	adminIPCandidates := []string{}
 	adminIPProtectionEnabled := false
+	adminStealthEnabled := false
 	if authenticated {
 		var enabled int
 		if a.db.QueryRowContext(r.Context(), `SELECT COUNT(1) FROM admin_ip_policies WHERE domain=? AND email=?`, domain, accountEmail).Scan(&enabled) == nil {
 			adminIPProtectionEnabled = enabled > 0
+		}
+		if a.db.QueryRowContext(r.Context(), `SELECT COUNT(1) FROM admin_stealth_modes WHERE domain=? AND email=? AND enabled_at>0`, domain, accountEmail).Scan(&enabled) == nil {
+			adminStealthEnabled = enabled > 0
 		}
 		rows, err := a.db.QueryContext(r.Context(), `SELECT client_ip,confirmed_at,last_login FROM account_trusted_ips WHERE domain=? AND email=? AND last_login>? ORDER BY last_login DESC`, a.siteDomain(r.Context(), r), accountEmail, time.Now().Add(-accountauth.TrustTTL).Unix())
 		if err == nil {
@@ -20239,6 +20275,7 @@ func (a *App) renderProfilePage(w http.ResponseWriter, r *http.Request, email, s
 		"AdminAllowedIPs":            adminAllowedIPs,
 		"AdminIPCandidates":          adminIPCandidates,
 		"AdminIPProtectionEnabled":   adminIPProtectionEnabled,
+		"AdminStealthEnabled":        adminStealthEnabled,
 		"CurrentAdminIP":             canonicalAccountIP(accountClientIP(r)),
 		"Passkeys":                   passkeys,
 		"PasskeyOffer":               passkeyOffer,
@@ -20246,6 +20283,7 @@ func (a *App) renderProfilePage(w http.ResponseWriter, r *http.Request, email, s
 		"TOTPEnabled":                totpEnabled,
 		"TOTPSetupSecret":            totpSetupSecret,
 		"TOTPSetupURI":               totpSetupURI,
+		"TOTPSetupQRCode":            totpSetupQRCode,
 		"AccountCSRF":                accountCSRF(r),
 		"CodeWebmail":                webmailProviderForAddress(email),
 		"EmailChange":                emailChange,
@@ -20288,6 +20326,17 @@ func (a *App) renderProfilePage(w http.ResponseWriter, r *http.Request, email, s
 		"EmailSendProgressTimeout":   translationOrDefault(translations, "profile_email_send_progress_timeout", "Still waiting for the mail server. The final result will appear here as soon as it responds."),
 		"EmailSendProgressPrefix":    translationOrDefault(translations, "profile_email_send_progress_prefix", "SMTP timeout countdown:"),
 	})
+}
+
+func totpSetupQRCodeDataURI(provisioningURI string) template.URL {
+	if strings.TrimSpace(provisioningURI) == "" {
+		return ""
+	}
+	qrImage, err := qrcode.Encode(provisioningURI, qrcode.Medium, 256)
+	if err != nil {
+		return ""
+	}
+	return template.URL("data:image/png;base64," + base64.StdEncoding.EncodeToString(qrImage))
 }
 
 func (a *App) recoverPage(w http.ResponseWriter, r *http.Request) {
