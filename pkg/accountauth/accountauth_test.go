@@ -403,3 +403,166 @@ func TestPasswordSnapshotUsesSaltAndRejectsChangedPassword(t *testing.T) {
 		t.Fatal("obsolete fast snapshot accepted")
 	}
 }
+
+
+// BEGIN authentication replay and race regression tests.
+
+func TestLoginCodeConcurrentConsumptionCreatesExactlyOneSession(t *testing.T) {
+	database := testDatabase(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	challenge := transact(t, database, func(transaction *sql.Tx) (Outcome, error) {
+		return Challenge(ctx, transaction, "example.org", "owner@example.org", "192.0.2.50", "/profile", "en", now)
+	})
+	if challenge.Status != "code" {
+		t.Fatalf("challenge = %#v", challenge)
+	}
+
+	const consumers = 32
+	results := make(chan Outcome, consumers)
+	errorsChannel := make(chan error, consumers)
+	start := make(chan struct{})
+	for consumerIndex := 0; consumerIndex < consumers; consumerIndex++ {
+		go func() {
+			<-start
+			transaction, err := database.Begin()
+			if err != nil {
+				errorsChannel <- err
+				return
+			}
+			outcome, err := Verify(ctx, transaction, "example.org", challenge.Token, challenge.Code, "192.0.2.50", now.Add(time.Second))
+			if err != nil {
+				_ = transaction.Rollback()
+				errorsChannel <- err
+				return
+			}
+			if err := transaction.Commit(); err != nil {
+				errorsChannel <- err
+				return
+			}
+			results <- outcome
+		}()
+	}
+	close(start)
+
+	successes := 0
+	for resultIndex := 0; resultIndex < consumers; resultIndex++ {
+		select {
+		case err := <-errorsChannel:
+			t.Fatalf("concurrent verification failed: %v", err)
+		case outcome := <-results:
+			if outcome.Status == "session" {
+				successes++
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("concurrent login-code verification did not finish")
+		}
+	}
+	if successes != 1 {
+		t.Fatalf("successful sessions=%d want=1", successes)
+	}
+	var sessionCount int
+	if err := database.QueryRow(`SELECT COUNT(1) FROM sessions`).Scan(&sessionCount); err != nil {
+		t.Fatal(err)
+	}
+	if sessionCount != 1 {
+		t.Fatalf("stored sessions=%d want=1", sessionCount)
+	}
+}
+
+func TestLoginLinkConcurrentConsumptionCreatesExactlyOneSession(t *testing.T) {
+	database := testDatabase(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	challenge := transact(t, database, func(transaction *sql.Tx) (Outcome, error) {
+		return Challenge(ctx, transaction, "example.org", "owner@example.org", "192.0.2.51", "/profile", "en", now)
+	})
+	if challenge.Status != "code" {
+		t.Fatalf("challenge = %#v", challenge)
+	}
+
+	const consumers = 32
+	results := make(chan Outcome, consumers)
+	errorsChannel := make(chan error, consumers)
+	start := make(chan struct{})
+	for consumerIndex := 0; consumerIndex < consumers; consumerIndex++ {
+		go func() {
+			<-start
+			transaction, err := database.Begin()
+			if err != nil {
+				errorsChannel <- err
+				return
+			}
+			outcome, err := VerifyLink(ctx, transaction, "example.org", challenge.Token, "192.0.2.51", now.Add(time.Second))
+			if err != nil && outcome.Status != "invalid" {
+				_ = transaction.Rollback()
+				errorsChannel <- err
+				return
+			}
+			if err := transaction.Commit(); err != nil {
+				errorsChannel <- err
+				return
+			}
+			results <- outcome
+		}()
+	}
+	close(start)
+
+	successes := 0
+	for resultIndex := 0; resultIndex < consumers; resultIndex++ {
+		select {
+		case err := <-errorsChannel:
+			t.Fatalf("concurrent link verification failed: %v", err)
+		case outcome := <-results:
+			if outcome.Status == "session" {
+				successes++
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("concurrent login-link verification did not finish")
+		}
+	}
+	if successes != 1 {
+		t.Fatalf("successful link sessions=%d want=1", successes)
+	}
+	var sessionCount int
+	if err := database.QueryRow(`SELECT COUNT(1) FROM sessions`).Scan(&sessionCount); err != nil {
+		t.Fatal(err)
+	}
+	if sessionCount != 1 {
+		t.Fatalf("stored sessions=%d want=1", sessionCount)
+	}
+}
+
+func TestLoginChallengeRejectsPasswordAndDomainChanges(t *testing.T) {
+	database := testDatabase(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	passwordChallenge := transact(t, database, func(transaction *sql.Tx) (Outcome, error) {
+		return Challenge(ctx, transaction, "example.org", "owner@example.org", "192.0.2.52", "/", "en", now)
+	})
+	if _, err := database.Exec(`UPDATE users SET password='changed' WHERE domain='example.org' AND email='owner@example.org'`); err != nil {
+		t.Fatal(err)
+	}
+	outcome := transact(t, database, func(transaction *sql.Tx) (Outcome, error) {
+		return Verify(ctx, transaction, "example.org", passwordChallenge.Token, passwordChallenge.Code, "192.0.2.52", now.Add(time.Second))
+	})
+	if outcome.Status != "invalid" {
+		t.Fatalf("challenge survived password change: %#v", outcome)
+	}
+
+	if _, err := database.Exec(`UPDATE users SET password='password' WHERE domain='example.org' AND email='owner@example.org'`); err != nil {
+		t.Fatal(err)
+	}
+	domainChallenge := transact(t, database, func(transaction *sql.Tx) (Outcome, error) {
+		return Challenge(ctx, transaction, "example.org", "owner@example.org", "192.0.2.53", "/", "en", now.Add(time.Minute))
+	})
+	outcome = transact(t, database, func(transaction *sql.Tx) (Outcome, error) {
+		return Verify(ctx, transaction, "other.example.org", domainChallenge.Token, domainChallenge.Code, "192.0.2.53", now.Add(time.Minute+time.Second))
+	})
+	if outcome.Status != "invalid" {
+		t.Fatalf("challenge crossed domain boundary: %#v", outcome)
+	}
+}
+
+// END authentication replay and race regression tests.
