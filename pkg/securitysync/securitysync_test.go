@@ -298,3 +298,157 @@ func signedTestAttestation(t *testing.T, privateKey ed25519.PrivateKey, attestat
 	}
 	return base64.RawURLEncoding.EncodeToString(encoded)
 }
+
+
+// BEGIN persisted reputation bounds security tests.
+
+func TestLoadBoundsPersistedReputationState(t *testing.T) {
+	now := time.Now().UTC()
+	state := diskState{}
+	for recordIndex := 0; recordIndex < maximumTrackedIPs+2; recordIndex++ {
+		record := evidenceRecord{
+			IP: fmt.Sprintf("198.18.%d.%d", recordIndex/256, recordIndex%256),
+		}
+		for sourceIndex := 0; sourceIndex < maximumSourcesPerIP+2; sourceIndex++ {
+			record.Sources = append(record.Sources, evidenceSource{
+				InstallationID: fmt.Sprintf("installation-%d", sourceIndex),
+				Category:       "injection",
+				Description:    strings.Repeat("x", 300),
+				ObservedAt:     now,
+			})
+		}
+		state.Records = append(state.Records, record)
+	}
+	encoded, err := json.Marshal(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	statePath := filepath.Join(t.TempDir(), "bounded-reputation.json")
+	if err := os.WriteFile(statePath, encoded, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	records, err := load(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(records) != maximumTrackedIPs {
+		t.Fatalf("loaded IP count=%d want=%d", len(records), maximumTrackedIPs)
+	}
+	for ip, sources := range records {
+		if len(sources) > maximumSourcesPerIP {
+			t.Fatalf("loaded source count for %s=%d want<=%d", ip, len(sources), maximumSourcesPerIP)
+		}
+		for _, source := range sources {
+			if len(source.Description) > 240 {
+				t.Fatalf("loaded description length=%d want<=240", len(source.Description))
+			}
+		}
+	}
+}
+
+func TestLoadRejectsPersistedUnsafeEvidence(t *testing.T) {
+	now := time.Now().UTC()
+	state := diskState{Records: []evidenceRecord{
+		{
+			IP: "127.0.0.1",
+			Sources: []evidenceSource{{InstallationID: "loopback", Category: "injection", ObservedAt: now}},
+		},
+		{
+			IP: "203.0.113.60",
+			Sources: []evidenceSource{
+				{InstallationID: "", Category: "injection", ObservedAt: now},
+				{InstallationID: strings.Repeat("x", 129), Category: "injection", ObservedAt: now},
+				{InstallationID: "weak-category", Category: "rapid-crawl", ObservedAt: now},
+				{InstallationID: "zero-time", Category: "injection"},
+				{InstallationID: "valid", Category: "repository", Description: "  /.git/config\n", ObservedAt: now},
+			},
+		},
+	}}
+	encoded, err := json.Marshal(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	statePath := filepath.Join(t.TempDir(), "unsafe-reputation.json")
+	if err := os.WriteFile(statePath, encoded, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	records, err := load(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := records["127.0.0.1"]; exists {
+		t.Fatal("persisted loopback evidence survived validation")
+	}
+	sources := records["203.0.113.60"]
+	if len(sources) != 1 {
+		t.Fatalf("validated source count=%d want=1", len(sources))
+	}
+	if source := sources["valid"]; source.Description != "/.git/config" {
+		t.Fatalf("persisted description=%q", source.Description)
+	}
+}
+
+// END persisted reputation bounds security tests.
+
+// BEGIN channel lifecycle regression tests.
+
+func TestRunStopsWhenReplyConsumerDisappears(t *testing.T) {
+	stop := make(chan struct{})
+	requests := make(chan Request)
+	done := make(chan struct{})
+	go func() {
+		run("", stop, requests, map[string]map[string]evidenceSource{})
+		close(done)
+	}()
+
+	requests <- Request{
+		Query: true,
+		Reply: make(chan Result),
+	}
+	close(stop)
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("securitysync worker remained blocked on an abandoned reply channel")
+	}
+}
+
+// END channel lifecycle regression tests.
+
+// BEGIN attestation tamper regression tests.
+
+func TestPeerAttestationRejectsIdentityTampering(t *testing.T) {
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Truncate(time.Second)
+	token, err := IssuePeerAttestation(privateKey, "installation-a", "peer-public-key", now, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	encoded, err := base64.RawURLEncoding.DecodeString(token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	attestation := PeerAttestation{}
+	if err := json.Unmarshal(encoded, &attestation); err != nil {
+		t.Fatal(err)
+	}
+	attestation.InstallationID = "installation-b"
+	tampered, err := json.Marshal(attestation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tamperedToken := base64.RawURLEncoding.EncodeToString(tampered)
+
+	if _, err := VerifyPeerAttestation(tamperedToken, publicKey, now); err == nil {
+		t.Fatal("attestation with a modified installation identity was accepted")
+	}
+}
+
+// END attestation tamper regression tests.
