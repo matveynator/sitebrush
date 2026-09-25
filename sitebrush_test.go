@@ -17156,13 +17156,16 @@ func TestSecurityBoundaryAdminResponsesCannotBeFramedOrCached(t *testing.T) {
 	}
 
 	for _, testCase := range []struct {
-		name   string
-		path   string
-		cookie bool
+		name        string
+		path        string
+		cookie      bool
+		frameHeader string
+		framePolicy string
 	}{
-		{name: "login", path: "/?login"},
-		{name: "account", path: "/?profile", cookie: true},
-		{name: "editor", path: "/?visual", cookie: true},
+		{name: "login", path: "/?login", frameHeader: "DENY", framePolicy: "frame-ancestors 'none'"},
+		{name: "account", path: "/?profile", cookie: true, frameHeader: "DENY", framePolicy: "frame-ancestors 'none'"},
+		{name: "editor", path: "/?visual", cookie: true, frameHeader: "DENY", framePolicy: "frame-ancestors 'none'"},
+		{name: "revision preview", path: "/?revision_preview&id=1", cookie: true, frameHeader: "SAMEORIGIN", framePolicy: "frame-ancestors 'self'"},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			request := httptest.NewRequest(http.MethodGet, "http://localhost:8080"+testCase.path, nil)
@@ -17174,8 +17177,8 @@ func TestSecurityBoundaryAdminResponsesCannotBeFramedOrCached(t *testing.T) {
 
 			for headerName, expected := range map[string]string{
 				"X-Content-Type-Options":  "nosniff",
-				"X-Frame-Options":         "DENY",
-				"Content-Security-Policy": "frame-ancestors 'none'",
+				"X-Frame-Options":         testCase.frameHeader,
+				"Content-Security-Policy": testCase.framePolicy,
 				"Referrer-Policy":         "no-referrer",
 			} {
 				if actual := response.Header().Get(headerName); actual != expected {

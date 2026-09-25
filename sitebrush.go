@@ -7038,12 +7038,31 @@ func (a *App) securityResponseHeadersMiddleware(next http.Handler) http.Handler 
 			return
 		}
 
-		w.Header().Set("X-Frame-Options", "DENY")
-		w.Header().Set("Content-Security-Policy", "frame-ancestors 'none'")
+		framePolicy := adminResponseFramePolicy(r)
+		w.Header().Set("X-Frame-Options", framePolicy.xFrameOptions)
+		w.Header().Set("Content-Security-Policy", framePolicy.contentSecurityPolicy)
 		w.Header().Set("Referrer-Policy", "no-referrer")
 		w.Header().Set("Cache-Control", "no-store")
 		next.ServeHTTP(w, r)
 	})
+}
+
+type adminResponseFramePolicyValues struct {
+	xFrameOptions         string
+	contentSecurityPolicy string
+}
+
+func adminResponseFramePolicy(r *http.Request) adminResponseFramePolicyValues {
+	if hasQueryFlag(r, "revision_preview") {
+		return adminResponseFramePolicyValues{
+			xFrameOptions:         "SAMEORIGIN",
+			contentSecurityPolicy: "frame-ancestors 'self'",
+		}
+	}
+	return adminResponseFramePolicyValues{
+		xFrameOptions:         "DENY",
+		contentSecurityPolicy: "frame-ancestors 'none'",
+	}
 }
 
 func adminResponseIsolationRequired(r *http.Request) bool {
