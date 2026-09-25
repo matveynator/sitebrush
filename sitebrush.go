@@ -35996,9 +35996,15 @@ func (a *App) importDomainBackupZIP(ctx context.Context, domain string, importBa
 			nextTitle = nextPagePath
 		}
 		a.clearPageRedirectSource(ctx, domain, nextPagePath)
-		_, _ = a.db.ExecContext(ctx, `INSERT OR REPLACE INTO pages(domain,path,title,html,published) VALUES(?,?,?,?,1)`, domain, nextPagePath, nextTitle, nextPageHTML)
-		_, _ = a.db.ExecContext(ctx, `INSERT OR REPLACE INTO published_pages(domain,path,title,html) VALUES(?,?,?,?)`, domain, nextPagePath, nextTitle, nextPageHTML)
-		_, _ = a.db.ExecContext(ctx, `INSERT INTO revisions(domain,page_path,html,created_at,is_active) VALUES(?,?,?,?,1)`, domain, nextPagePath, nextPageHTML, time.Now().UTC().Format(time.RFC3339))
+		if _, err := a.db.ExecContext(ctx, `INSERT OR REPLACE INTO pages(domain,path,title,html,published) VALUES(?,?,?,?,1)`, domain, nextPagePath, nextTitle, nextPageHTML); err != nil {
+			return rootRedirectPath, err
+		}
+		if _, err := a.db.ExecContext(ctx, `INSERT OR REPLACE INTO published_pages(domain,path,title,html) VALUES(?,?,?,?)`, domain, nextPagePath, nextTitle, nextPageHTML); err != nil {
+			return rootRedirectPath, err
+		}
+		if _, err := a.db.ExecContext(ctx, `INSERT INTO revisions(domain,page_path,html,created_at,is_active) VALUES(?,?,?,?,1)`, domain, nextPagePath, nextPageHTML, time.Now().UTC().Format(time.RFC3339)); err != nil {
+			return rootRedirectPath, err
+		}
 		a.writePublishedStaticHTML(domain, nextPagePath, nextPageHTML)
 	}
 
@@ -36009,7 +36015,9 @@ func (a *App) importDomainBackupZIP(ctx context.Context, domain string, importBa
 			continue
 		}
 		redirectCreatedAt := time.Now().UTC().Format(time.RFC3339)
-		_, _ = a.db.ExecContext(ctx, `INSERT INTO page_redirects(domain,old_path,new_path,created_at) VALUES(?,?,?,?) ON CONFLICT(domain,old_path) DO UPDATE SET new_path=excluded.new_path, created_at=excluded.created_at`, domain, oldPath, newPath, redirectCreatedAt)
+		if _, err := a.db.ExecContext(ctx, `INSERT INTO page_redirects(domain,old_path,new_path,created_at) VALUES(?,?,?,?) ON CONFLICT(domain,old_path) DO UPDATE SET new_path=excluded.new_path, created_at=excluded.created_at`, domain, oldPath, newPath, redirectCreatedAt); err != nil {
+			return rootRedirectPath, err
+		}
 	}
 
 	for sourceFileName, zipEntry := range filesByName {
@@ -36076,10 +36084,12 @@ func (a *App) importDomainBackupZIP(ctx context.Context, domain string, importBa
 		if nextAccessMode == "" {
 			nextAccessMode = "public"
 		}
-		_, _ = a.db.ExecContext(ctx, `INSERT INTO file_access_rules(domain,file_name,access_mode,token,expires_at,single_use_left,token_use_count)
+		if _, err := a.db.ExecContext(ctx, `INSERT INTO file_access_rules(domain,file_name,access_mode,token,expires_at,single_use_left,token_use_count)
 VALUES(?,?,?,?,?,?,?)
 ON CONFLICT(domain,file_name) DO UPDATE SET access_mode=excluded.access_mode,token=excluded.token,expires_at=excluded.expires_at,single_use_left=excluded.single_use_left,token_use_count=excluded.token_use_count`,
-			domainStorageName(domain), nextFileName, nextAccessMode, accessRule.Token, accessRule.ExpiresAt, accessRule.SingleUseLeft, accessRule.TokenUseCount)
+			domainStorageName(domain), nextFileName, nextAccessMode, accessRule.Token, accessRule.ExpiresAt, accessRule.SingleUseLeft, accessRule.TokenUseCount); err != nil {
+			return rootRedirectPath, err
+		}
 	}
 	a.rebuildDomainStorageUsage(ctx, domain)
 	return rootRedirectPath, nil
