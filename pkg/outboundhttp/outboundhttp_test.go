@@ -158,3 +158,103 @@ func TestNewTransportRejectsPrivateSourceOverride(t *testing.T) {
 		t.Fatal("private source override was allowed")
 	}
 }
+
+
+// BEGIN SSRF rebinding and address-confusion security tests.
+
+type sequenceResolver struct {
+	responses <-chan []net.IPAddr
+}
+
+func (resolver sequenceResolver) LookupIPAddr(ctx context.Context, _ string) ([]net.IPAddr, error) {
+	select {
+	case response, open := <-resolver.responses:
+		if !open {
+			return nil, errors.New("resolver sequence exhausted")
+		}
+		return response, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+func TestTransportRevalidatesDNSOnEveryDial(t *testing.T) {
+	responses := make(chan []net.IPAddr, 2)
+	responses <- []net.IPAddr{{IP: net.ParseIP("8.8.8.8")}}
+	responses <- []net.IPAddr{{IP: net.ParseIP("127.0.0.1")}}
+	close(responses)
+
+	transport, err := NewTransport(nil, TransportOptions{Resolver: sequenceResolver{responses: responses}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstErr := func() error {
+		_, dialErr := transport.DialContext(context.Background(), "unsupported-network", "rebinding.example:80")
+		return dialErr
+	}()
+	if firstErr == nil || firstErr.Error() == "private network addresses are not allowed" {
+		t.Fatalf("public first resolution did not reach the dial boundary: %v", firstErr)
+	}
+	secondErr := func() error {
+		_, dialErr := transport.DialContext(context.Background(), "unsupported-network", "rebinding.example:80")
+		return dialErr
+	}()
+	if secondErr == nil || secondErr.Error() != "private network addresses are not allowed" {
+		t.Fatalf("private rebound address was not rejected: %v", secondErr)
+	}
+}
+
+func TestTransportRejectsAddressConfusionBeforeDial(t *testing.T) {
+	privateAnswers := [][]net.IPAddr{
+		{{IP: net.ParseIP("169.254.169.254")}},
+		{{IP: net.ParseIP("::ffff:127.0.0.1")}},
+		{{IP: net.ParseIP("fd00:ec2::254")}},
+		{{IP: net.ParseIP("fe80::1")}},
+		{{IP: net.ParseIP("1.1.1.1")}, {IP: net.ParseIP("::1")}},
+	}
+	for testIndex, addresses := range privateAnswers {
+		transport, err := NewTransport(nil, TransportOptions{Resolver: fixedResolver{addresses: addresses}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := transport.DialContext(context.Background(), "unsupported-network", "target.example:80"); err == nil || err.Error() != "private network addresses are not allowed" {
+			t.Fatalf("case %d allowed unsafe DNS result: %v", testIndex, err)
+		}
+	}
+}
+
+func TestRequirePublicURLRejectsStealthSSRFURLForms(t *testing.T) {
+	for _, rawURL := range []string{
+		"http://localhost./admin",
+		"http://sub.localhost./admin",
+		"http://user@example.com/",
+		"http://user:password@example.com/",
+		"http://169.254.169.254/latest/meta-data/",
+		"http://[fd00:ec2::254]/",
+		"http://[::ffff:169.254.169.254]/",
+	} {
+		targetURL, err := url.Parse(rawURL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := RequirePublicURL(targetURL); err == nil {
+			t.Fatalf("unsafe URL form was accepted: %s", rawURL)
+		}
+	}
+}
+
+func TestRedirectCannotMovePublicRequestToPrivateTarget(t *testing.T) {
+	request, err := http.NewRequest(http.MethodGet, "http://169.254.169.254/latest/meta-data/", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	previous, err := http.NewRequest(http.MethodGet, "https://public.example/start", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := CheckRedirect(request, []*http.Request{previous}); err == nil {
+		t.Fatal("public request redirected to cloud metadata")
+	}
+}
+
+// END SSRF rebinding and address-confusion security tests.
