@@ -13194,6 +13194,35 @@ func TestPrepareAutomaticSSLDomainIgnoresUnmanagedSNIWithoutDNS(t *testing.T) {
 	}
 }
 
+func TestConfirmedRegistrationQueuesAutomaticSSLRecheck(t *testing.T) {
+	application := &App{automaticSSL: make(chan automaticSSLRequest, 1)}
+	request := httptest.NewRequest(http.MethodPost, "https://a.sitebrush.com/?email_confirm=token", nil)
+
+	application.observeAutomaticSSLRegistration(request, "a.sitebrush.com")
+
+	select {
+	case sslRequest := <-application.automaticSSL:
+		if sslRequest.action != "registration_confirmed" || sslRequest.domain != "a.sitebrush.com" {
+			t.Fatalf("automatic SSL request = %+v, want immediate recheck for confirmed domain", sslRequest)
+		}
+	default:
+		t.Fatal("confirmed registration did not queue an automatic SSL recheck")
+	}
+}
+
+func TestConfirmedLocalRegistrationDoesNotQueueAutomaticSSL(t *testing.T) {
+	application := &App{automaticSSL: make(chan automaticSSLRequest, 1)}
+	request := httptest.NewRequest(http.MethodPost, "https://localhost/?email_confirm=token", nil)
+
+	application.observeAutomaticSSLRegistration(request, "localhost")
+
+	select {
+	case sslRequest := <-application.automaticSSL:
+		t.Fatalf("local registration queued automatic SSL request: %+v", sslRequest)
+	default:
+	}
+}
+
 func TestPrepareAutomaticSSLDomainDoesNotIssueCertificateWhenDNSDiffersFromExternalIP(t *testing.T) {
 	application, rawDB := newTestApplication(t)
 	application.automaticSSLAvailable = true
