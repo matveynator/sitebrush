@@ -125,7 +125,7 @@ const sitebrushHTTPWriteTimeout = 0
 const sitebrushHTTPIdleTimeout = 65 * time.Second
 const sitebrushHTTPReadHeaderTimeout = 5 * time.Second
 const sitebrushHTTP10KeepAliveBufferLimit = 1024 * 1024
-const currentSiteDatabaseSchemaVersion = 7
+const currentSiteDatabaseSchemaVersion = 8
 const siteDatabaseStartupMigrationTimeout = 30 * time.Second
 const pagePasswordSessionTTL = time.Hour
 const serviceMailRelayPath = "/?service_mail_relay"
@@ -9443,6 +9443,14 @@ func (a *App) serveStealthStaticForBlockedAdminIP(w http.ResponseWriter, r *http
 	if !a.adminIPLoginBlocked(r.Context(), domain, accountClientIP(r), "") {
 		return false
 	}
+
+	// BEGIN public protected-page unlock boundary.
+	if r.Method == http.MethodPost && hasQueryFlag(r, "page_password_unlock") {
+		a.pagePasswordUnlock(w, r, domain, pagePath)
+		return true
+	}
+	// END public protected-page unlock boundary.
+
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		http.NotFound(w, r)
 		return true
@@ -20024,13 +20032,29 @@ func (a *App) updateAdminIPAllowlist(r *http.Request, domain, email, action, raw
 			if r.FormValue("static_ip_confirmation") != "yes" {
 				return errors.New("static IP confirmation is required")
 			}
-			var allowed int
-			if err := transaction.QueryRowContext(r.Context(), `SELECT COUNT(1) FROM admin_allowed_ips WHERE domain=? AND email=? AND client_ip=?`, domain, email, canonicalAccountIP(accountClientIP(r))).Scan(&allowed); err != nil {
+			// BEGIN current address coverage check.
+			currentIP := canonicalAccountIP(accountClientIP(r))
+			allowedRows, err := transaction.QueryContext(r.Context(), `SELECT client_ip FROM admin_allowed_ips WHERE domain=? AND email=?`, domain, email)
+			if err != nil {
 				return err
 			}
-			if allowed == 0 {
+			currentIPAllowed := false
+			for allowedRows.Next() {
+				var allowedRule string
+				if allowedRows.Scan(&allowedRule) == nil && adminIPRuleContains(allowedRule, currentIP) {
+					currentIPAllowed = true
+					break
+				}
+			}
+			rowsErr := allowedRows.Err()
+			_ = allowedRows.Close()
+			if rowsErr != nil {
+				return rowsErr
+			}
+			if !currentIPAllowed {
 				return errors.New("allow the current IP before enabling protection")
 			}
+			// END current address coverage check.
 			_, err := transaction.ExecContext(r.Context(), `INSERT INTO admin_ip_policies(domain,email,enabled_at) VALUES(?,?,?)`, domain, email, time.Now().Unix())
 			return err
 		})
