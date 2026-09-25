@@ -125,3 +125,41 @@ func mustHashForTest(t *testing.T, password string) string {
 	}
 	return passwordHash
 }
+
+
+// BEGIN protected-page stealth boundary tests.
+
+func TestBoundSessionTokenCannotCrossDomainOrProtectedPath(t *testing.T) {
+	issuedAt := time.Unix(1_700_000_000, 0).UTC()
+	originalRule := Rule{Domain: "example.org", Path: "/private", PasswordHash: mustHashForTest(t, "secret")}
+	token := BoundSessionToken(originalRule, "198.51.100.10", "Browser", issuedAt)
+
+	crossDomainRule := originalRule
+	crossDomainRule.Domain = "alias.example.org"
+	if BoundSessionTokenValid(crossDomainRule, token, "198.51.100.10", "Browser", issuedAt.Add(time.Minute), time.Hour) {
+		t.Fatal("protected-page token crossed to another domain")
+	}
+
+	crossPathRule := originalRule
+	crossPathRule.Path = "/another-private-area"
+	if BoundSessionTokenValid(crossPathRule, token, "198.51.100.10", "Browser", issuedAt.Add(time.Minute), time.Hour) {
+		t.Fatal("protected-page token crossed to another protected path")
+	}
+}
+
+func TestFindBestRuleDoesNotCrossDomain(t *testing.T) {
+	rules := []Rule{
+		{Domain: "example.org", Path: "/private", PasswordHash: mustHashForTest(t, "one")},
+		{Domain: "other.example.org", Path: "/private", PasswordHash: mustHashForTest(t, "two")},
+	}
+
+	rule, found := FindBestRule("example.org", "/private/page", rules)
+	if !found {
+		t.Fatal("expected protected rule was not found")
+	}
+	if rule.Domain != "example.org" || !Matches(rule.PasswordHash, "one") {
+		t.Fatalf("wrong domain rule selected: %#v", rule)
+	}
+}
+
+// END protected-page stealth boundary tests.
