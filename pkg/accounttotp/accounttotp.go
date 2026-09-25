@@ -144,7 +144,7 @@ func VerifyLogin(ctx context.Context, transaction *sql.Tx, domain, token, client
 	if err != nil {
 		return "", "", err
 	}
-	if now.Unix()-createdAt >= int64(ChallengeTTL/time.Second) || attempts >= 5 {
+	if createdAt > now.Unix() || now.Unix()-createdAt >= int64(ChallengeTTL/time.Second) || attempts >= 5 {
 		return "", "", errors.New("expired TOTP challenge")
 	}
 	if _, err = transaction.ExecContext(ctx, `UPDATE account_totp_challenges SET attempts=attempts+1 WHERE token=?`, token); err != nil {
@@ -167,7 +167,6 @@ func VerifyLogin(ctx context.Context, transaction *sql.Tx, domain, token, client
 	return email, returnPath, nil
 }
 
-
 func ConsumeForFallback(ctx context.Context, transaction *sql.Tx, domain, token, clientIP string, now time.Time) (email, returnPath string, err error) {
 	var createdAt int64
 	err = transaction.QueryRowContext(ctx, `SELECT email,return_path,created_at FROM account_totp_challenges WHERE token=? AND domain=? AND client_ip=?`,
@@ -178,7 +177,7 @@ func ConsumeForFallback(ctx context.Context, transaction *sql.Tx, domain, token,
 	if err != nil {
 		return "", "", err
 	}
-	if now.Unix()-createdAt >= int64(ChallengeTTL/time.Second) {
+	if createdAt > now.Unix() || now.Unix()-createdAt >= int64(ChallengeTTL/time.Second) {
 		return "", "", errors.New("expired TOTP challenge")
 	}
 	result, err := transaction.ExecContext(ctx, `DELETE FROM account_totp_challenges WHERE token=? AND domain=? AND client_ip=?`, token, domain, clientIP)

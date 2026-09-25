@@ -193,7 +193,6 @@ func FinishLogin(ctx context.Context, database *sql.Tx, domain, rpID, origin, cl
 	return finishLoginCredential(ctx, database, domain, validatedUser, loadedUser, credential, returnPath, now)
 }
 
-
 func storeRegistrationCredential(ctx context.Context, database interface {
 	ExecContext(context.Context, string, ...any) (sql.Result, error)
 }, domain, email string, user *User, credential *webauthn.Credential, now time.Time) error {
@@ -207,7 +206,6 @@ func storeRegistrationCredential(ctx context.Context, database interface {
 		domain, email, userHandle, credentialID, string(credentialJSON), now.Unix())
 	return err
 }
-
 
 func finishLoginCredential(ctx context.Context, database interface {
 	ExecContext(context.Context, string, ...any) (sql.Result, error)
@@ -319,7 +317,7 @@ func consumeChallenge(ctx context.Context, database *sql.Tx, domain, email, kind
 	if err != nil {
 		return webauthn.SessionData{}, err
 	}
-	if now.Unix()-createdAt >= int64(ChallengeTTL/time.Second) {
+	if createdAt > now.Unix() || now.Unix()-createdAt >= int64(ChallengeTTL/time.Second) {
 		return webauthn.SessionData{}, errors.New("expired WebAuthn challenge")
 	}
 	result, err := database.ExecContext(ctx, `DELETE FROM account_webauthn_challenges WHERE token=? AND domain=? AND kind=?`, token, domain, kind)
@@ -348,7 +346,7 @@ func consumeLoginChallenge(ctx context.Context, database *sql.Tx, domain, client
 	if err != nil {
 		return webauthn.SessionData{}, "", err
 	}
-	if now.Unix()-createdAt >= int64(ChallengeTTL/time.Second) {
+	if createdAt > now.Unix() || now.Unix()-createdAt >= int64(ChallengeTTL/time.Second) {
 		return webauthn.SessionData{}, "", errors.New("expired WebAuthn challenge")
 	}
 	result, err := database.ExecContext(ctx, `DELETE FROM account_webauthn_challenges WHERE token=? AND domain=? AND kind='login'`, token, domain)

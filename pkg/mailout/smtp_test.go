@@ -30,6 +30,7 @@ func TestSMTPCompatibility(t *testing.T) {
 	for _, scenario := range []struct {
 		name                                  string
 		advertise, rejectTLS, rejectRecipient bool
+		dropQuit                              bool
 		version                               uint16
 		attempts                              int
 	}{
@@ -38,6 +39,7 @@ func TestSMTPCompatibility(t *testing.T) {
 		{name: "untrusted certificate", advertise: true, version: tls.VersionTLS12, attempts: 2},
 		{name: "legacy TLS", advertise: true, version: tls.VersionTLS10, attempts: 2},
 		{name: "recipient rejected without retry", rejectRecipient: true, attempts: 1},
+		{name: "accepted DATA with lost QUIT response", dropQuit: true, attempts: 1},
 	} {
 		t.Run(scenario.name, func(t *testing.T) {
 			connections := make(chan net.Conn)
@@ -104,6 +106,9 @@ func TestSMTPCompatibility(t *testing.T) {
 								messages++
 								fmt.Fprint(connection, "250 queued\r\n")
 							case strings.HasPrefix(command, "QUIT"):
+								if scenario.dropQuit {
+									return
+								}
 								fmt.Fprint(connection, "221 bye\r\n")
 								return
 							default:
