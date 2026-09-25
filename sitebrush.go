@@ -7050,6 +7050,12 @@ Common commands:
   %[1]s -cli
       Open the interactive server console for installed sites, users and quotas.
 
+  %[1]s -path /var/lib/sitebrush -reset-admin-ip -reset-admin-ip-domain example.org \\
+      -reset-admin-ip-email admin@example.org
+      Restore one administrator's access after connecting to the server over SSH.
+      Optionally set -reset-admin-ip-address to an IP or CIDR subnet; otherwise
+      the next successful sign-in sets the allowed IP.
+
   %[1]s -install 
       Install SiteBrush as a system service and enable automatic startup.
       Service startup targets are detected automatically on macOS, Linux,
@@ -7178,6 +7184,10 @@ func main() {
 	legacyListSitesMode := flag.Bool("list-sites", false, "")
 	legacyQuotaSite := flag.String("quota-site", "", "")
 	legacyQuotaValue := flag.String("quota", "", "")
+	resetAdminIP := flag.Bool("reset-admin-ip", false, "reset one administrator's IP allowlist and revoke their sessions")
+	resetAdminIPDomain := flag.String("reset-admin-ip-domain", "", "site domain for the administrator IP reset")
+	resetAdminIPEmail := flag.String("reset-admin-ip-email", "", "administrator email for the IP reset")
+	resetAdminIPAddress := flag.String("reset-admin-ip-address", "", "optional IP address or CIDR subnet to allow after the reset")
 	legacyVersionMode := flag.Bool("v", false, "")
 	var desktopModeFlag *bool
 	if appcli.DesktopModeFlagSupported() {
@@ -7229,6 +7239,27 @@ func main() {
 	dbPathWasProvided := strings.TrimSpace(*legacyDBPath) != ""
 	if dbPathWasProvided {
 		effectiveDBPath = cleanDBPath(*legacyDBPath)
+	}
+	adminIPResetArgumentsProvided := strings.TrimSpace(*resetAdminIPDomain) != "" || strings.TrimSpace(*resetAdminIPEmail) != "" || strings.TrimSpace(*resetAdminIPAddress) != ""
+	if *resetAdminIP || adminIPResetArgumentsProvided {
+		if !*resetAdminIP || strings.TrimSpace(*resetAdminIPDomain) == "" || strings.TrimSpace(*resetAdminIPEmail) == "" {
+			log.Fatal("use -reset-admin-ip with both -reset-admin-ip-domain and -reset-admin-ip-email")
+		}
+		if *cliMode || *legacyListSitesMode || strings.TrimSpace(*legacyQuotaSite) != "" || flagWasProvided("quota") || installMode || uninstallMode {
+			log.Fatal("administrator IP reset cannot be combined with another command")
+		}
+		preparedStoragePath, usedFallback, prepareErr := prepareStoragePathWithFallback(effectiveStoragePath, userAppStoragePath(), !storagePathWasProvided && !dbPathWasProvided)
+		if prepareErr != nil {
+			log.Fatalf("prepare storage path: %v", prepareErr)
+		}
+		if usedFallback {
+			log.Printf("system storage %s is unavailable; using user storage %s", effectiveStoragePath, preparedStoragePath)
+			effectiveDBPath = filepath.Join(preparedStoragePath, defaultDBPath)
+		}
+		if err := runAdminIPResetCommand(context.Background(), os.Stdout, preparedStoragePath, effectiveDBPath, *resetAdminIPDomain, *resetAdminIPEmail, *resetAdminIPAddress); err != nil {
+			log.Fatal(err)
+		}
+		return
 	}
 	quotaCommandMode := *cliMode || *legacyListSitesMode || strings.TrimSpace(*legacyQuotaSite) != "" || flagWasProvided("quota")
 	if quotaCommandMode {
@@ -27229,6 +27260,102 @@ func setSiteQuotaHostingAndSupportMainSite(ctx context.Context, dbPath string, r
 		return "", err
 	}
 	return ownerEmail, nil
+}
+
+func runAdminIPResetCommand(ctx context.Context, output io.Writer, storagePath, dbPath, rawDomain, rawEmail, rawRule string) error {
+	domain := normalizeQuotaDomainName(rawDomain)
+	if domain == "" {
+		return errors.New("invalid administrator site domain")
+	}
+	email := strings.TrimSpace(rawEmail)
+	if email == "" || strings.ContainsAny(email, "\r\n\x00") {
+		return errors.New("invalid administrator email")
+	}
+	allowRule := ""
+	if strings.TrimSpace(rawRule) != "" {
+		var err error
+		allowRule, err = canonicalAdminIPRule(rawRule)
+		if err != nil {
+			return fmt.Errorf("invalid recovery IP or subnet: %w", err)
+		}
+	}
+	candidate, err := siteQuotaDatabaseCandidateForDomain(ctx, storagePath, dbPath, domain)
+	if err != nil {
+		return err
+	}
+	database, err := sql.Open("sqlite", "file:"+candidate.path)
+	if err != nil {
+		return fmt.Errorf("open site database: %w", err)
+	}
+	defer database.Close()
+	database.SetMaxOpenConns(1)
+	if _, err = database.ExecContext(ctx, `PRAGMA busy_timeout=5000`); err != nil {
+		return fmt.Errorf("configure site database: %w", err)
+	}
+	for _, statement := range append(append(accountauth.Schema(), accountpasskey.Schema()...), accounttotp.Schema()...) {
+		if _, err = database.ExecContext(ctx, statement); err != nil {
+			return fmt.Errorf("prepare account recovery schema: %w", err)
+		}
+	}
+	transaction, err := database.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin account recovery: %w", err)
+	}
+	if err = resetAdministratorIPAccess(ctx, transaction, domain, email, allowRule); err != nil {
+		_ = transaction.Rollback()
+		return err
+	}
+	if err = transaction.Commit(); err != nil {
+		return fmt.Errorf("commit account recovery: %w", err)
+	}
+	if allowRule == "" {
+		_, err = fmt.Fprintf(output, "Administrator IP access reset for %s on %s. Active sessions were revoked; the next successful sign-in will allow its IP.\n", email, domain)
+	} else {
+		_, err = fmt.Fprintf(output, "Administrator IP access reset for %s on %s. Active sessions were revoked; allowed address: %s.\n", email, domain, allowRule)
+	}
+	return err
+}
+
+func resetAdministratorIPAccess(ctx context.Context, transaction *sql.Tx, domain, email, allowRule string) error {
+	var isAdministrator int
+	if err := transaction.QueryRowContext(ctx, `SELECT is_admin FROM users WHERE domain=? AND email=?`, domain, email).Scan(&isAdministrator); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("administrator %s on %s was not found", email, domain)
+		}
+		return fmt.Errorf("find administrator: %w", err)
+	}
+	if isAdministrator != 1 {
+		return fmt.Errorf("account %s on %s is not an administrator", email, domain)
+	}
+	userEmail := domain + "|" + email
+	statements := []struct {
+		query string
+		args  []any
+	}{
+		{`DELETE FROM sessions WHERE user_email=?`, []any{userEmail}},
+		{`DELETE FROM account_login_codes WHERE domain=? AND email=?`, []any{domain, email}},
+		{`DELETE FROM account_totp_challenges WHERE domain=? AND email=?`, []any{domain, email}},
+		{`DELETE FROM account_webauthn_challenges WHERE domain=? AND email=?`, []any{domain, email}},
+		{`DELETE FROM email_confirmations WHERE domain=? AND (email=? OR current_email=?)`, []any{domain, email, email}},
+		{`DELETE FROM account_session_ips WHERE domain=? AND email=?`, []any{domain, email}},
+		{`DELETE FROM admin_allowed_ips WHERE domain=? AND email=?`, []any{domain, email}},
+		{`DELETE FROM admin_ip_policies WHERE domain=? AND email=?`, []any{domain, email}},
+	}
+	for _, statement := range statements {
+		if _, err := transaction.ExecContext(ctx, statement.query, statement.args...); err != nil {
+			return fmt.Errorf("reset administrator access: %w", err)
+		}
+	}
+	if allowRule == "" {
+		return nil
+	}
+	if _, err := transaction.ExecContext(ctx, `INSERT INTO admin_ip_policies(domain,email,enabled_at) VALUES(?,?,?)`, domain, email, time.Now().Unix()); err != nil {
+		return fmt.Errorf("enable administrator IP policy: %w", err)
+	}
+	if _, err := transaction.ExecContext(ctx, `INSERT INTO admin_allowed_ips(domain,email,client_ip,added_at) VALUES(?,?,?,?)`, domain, email, allowRule, time.Now().Unix()); err != nil {
+		return fmt.Errorf("set administrator recovery address: %w", err)
+	}
+	return nil
 }
 
 func siteQuotaDatabaseCandidateForDomain(ctx context.Context, storagePath, dbPath, domain string) (siteQuotaDatabaseCandidate, error) {
