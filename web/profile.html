@@ -162,60 +162,6 @@
 <div class="profile-account-grid">
 <section class="authentication-card profile-form profile-account-card">
   <div class="profile-account-card-header">
-    <h2>{{index .T "admin_ip_allowlist_title"}} · {{.AdminAllowedIPCount}}</h2>
-    <p>{{index .T "admin_ip_allowlist_help"}}</p>
-  </div>
-  <div class="profile-account-controls">
-    <form method="post" action="?profile" class="auth-trusted-row">
-      <input type="hidden" name="account_csrf" value="{{.AccountCSRF}}">
-      {{if .AdminIPProtectionEnabled}}
-      <input type="hidden" name="profile_action" value="admin_ip_disable">
-      <p><strong>{{index .T "admin_ip_enabled"}}</strong></p>
-      <button type="submit">{{index .T "admin_ip_disable"}}</button>
-      {{else}}
-      <input type="hidden" name="profile_action" value="admin_ip_enable">
-      <label><input type="checkbox" name="static_ip_confirmation" value="yes" required> {{index .T "admin_ip_static_confirm"}}</label>
-      <button type="submit">{{index .T "admin_ip_enable"}}</button>
-      {{end}}
-    </form>
-    <form method="post" action="?profile" class="auth-trusted-row">
-      <input type="hidden" name="account_csrf" value="{{.AccountCSRF}}">
-      {{if .AdminStealthEnabled}}
-      <input type="hidden" name="profile_action" value="admin_stealth_disable">
-      <p><strong>{{index .T "admin_stealth_enabled"}}</strong></p>
-      <button type="submit">{{index .T "admin_stealth_disable"}}</button>
-      {{else}}
-      <input type="hidden" name="profile_action" value="admin_stealth_enable">
-      <p class="hint">{{index .T "admin_stealth_help"}}</p>
-      <button type="submit" {{if not .AdminIPProtectionEnabled}}disabled aria-disabled="true"{{end}}>{{index .T "admin_stealth_enable"}}</button>
-      {{end}}
-    </form>
-  </div>
-  <div class="profile-account-list">
-    {{range .AdminAllowedIPs}}<form method="post" action="?profile" class="auth-trusted-row profile-ip-row">
-      <input type="hidden" name="profile_action" value="admin_ip_remove">
-      <input type="hidden" name="admin_ip" value="{{.Rule}}">
-      <input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
-      <div class="profile-ip-details"><strong dir="ltr">{{.Rule}}</strong>{{if .Current}} <span class="account-status-inline">{{index $.T "auth_current"}}</span>{{end}}<span class="profile-ip-location">{{.Location}}{{if .GeoIPAttribution}} · {{.GeoIPAttribution}}{{end}}</span></div>
-      <button type="submit" {{if not .Removable}}disabled{{end}}>{{index $.T "admin_ip_remove"}}</button>
-    </form>{{else}}<p class="hint">{{index .T "admin_ip_none"}}</p>{{end}}
-    {{if .AdminAllowedIPMore}}<details class="profile-account-more"><summary>{{index .T "account_show_more"}} ({{len .AdminAllowedIPMore}})</summary>{{range .AdminAllowedIPMore}}<form method="post" action="?profile" class="auth-trusted-row profile-ip-row">
-      <input type="hidden" name="profile_action" value="admin_ip_remove"><input type="hidden" name="admin_ip" value="{{.Rule}}"><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
-      <div class="profile-ip-details"><strong dir="ltr">{{.Rule}}</strong>{{if .Current}} <span class="account-status-inline">{{index $.T "auth_current"}}</span>{{end}}<span class="profile-ip-location">{{.Location}}{{if .GeoIPAttribution}} · {{.GeoIPAttribution}}{{end}}</span></div><button type="submit" {{if not .Removable}}disabled{{end}}>{{index $.T "admin_ip_remove"}}</button>
-    </form>{{end}}</details>{{end}}
-  </div>
-  <form method="post" action="?profile" class="auth-trusted-row">
-    <input type="hidden" name="profile_action" value="admin_ip_add">
-    <input type="hidden" name="account_csrf" value="{{.AccountCSRF}}">
-    <label>{{index .T "admin_ip_candidate"}}
-      <input type="text" name="admin_ip" list="AdminIPCandidateList" maxlength="64" autocomplete="off" placeholder="{{index .T "admin_ip_example"}}" required>
-      <datalist id="AdminIPCandidateList">{{range .AdminIPCandidates}}<option value="{{.}}">{{end}}</datalist>
-    </label>
-    <button type="submit">{{index .T "admin_ip_add"}}</button>
-  </form>
-</section>
-<section class="authentication-card profile-form profile-account-card">
-  <div class="profile-account-card-header">
     <div class="auth-method-heading">
       <img class="auth-method-illustration" src="/p/static/sitebrush-goofer-key-small.png" alt="" width="112" height="102" loading="lazy">
       <div class="auth-method-copy">
@@ -337,7 +283,62 @@
   </form>{{end}}</details>{{end}}
   </div>
 </section>
-</div>{{end}}
+</div>
+<section class="authentication-card profile-form profile-account-card profile-admin-ip-card">
+  <div class="profile-account-card-header">
+    <h2>{{index .T "admin_ip_allowlist_title"}} · {{.AdminAllowedIPCount}}</h2>
+    <p>{{index .T "admin_ip_allowlist_help"}}</p>
+  </div>
+  <div class="profile-account-controls">
+    <form method="post" action="?profile" class="auth-trusted-row">
+      <input type="hidden" name="account_csrf" value="{{.AccountCSRF}}">
+      {{if .AdminIPProtectionEnabled}}
+      <input type="hidden" name="profile_action" value="admin_ip_disable">
+      <p><strong>{{index .T "admin_ip_enabled"}}</strong></p>
+      <button type="submit">{{index .T "admin_ip_disable"}}</button>
+      {{else}}
+      <input type="hidden" name="profile_action" value="admin_ip_enable">
+      <label><input type="checkbox" name="static_ip_confirmation" value="yes" required> {{index .T "admin_ip_static_confirm"}}</label>
+      <button type="submit">{{index .T "admin_ip_enable"}}</button>
+      {{end}}
+    </form>
+    <form method="post" action="?profile" class="auth-trusted-row">
+      <input type="hidden" name="account_csrf" value="{{.AccountCSRF}}">
+      {{if .AdminStealthEnabled}}
+      <input type="hidden" name="profile_action" value="admin_stealth_disable">
+      <p><strong>{{index .T "admin_stealth_enabled"}}</strong></p>
+      <button type="submit">{{index .T "admin_stealth_disable"}}</button>
+      {{else}}
+      <input type="hidden" name="profile_action" value="admin_stealth_enable">
+      <p class="hint">{{index .T "admin_stealth_help"}}</p>
+      <button type="submit" {{if not .AdminIPProtectionEnabled}}disabled aria-disabled="true"{{end}}>{{index .T "admin_stealth_enable"}}</button>
+      {{end}}
+    </form>
+  </div>
+  <div class="profile-account-list">
+    {{range .AdminAllowedIPs}}<form method="post" action="?profile" class="auth-trusted-row profile-ip-row">
+      <input type="hidden" name="profile_action" value="admin_ip_remove">
+      <input type="hidden" name="admin_ip" value="{{.Rule}}">
+      <input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
+      <div class="profile-ip-details"><strong dir="ltr">{{.Rule}}</strong>{{if .Current}} <span class="account-status-inline">{{index $.T "auth_current"}}</span>{{end}}<span class="profile-ip-location">{{.Location}}{{if .GeoIPAttribution}} · {{.GeoIPAttribution}}{{end}}</span></div>
+      <button type="submit" {{if not .Removable}}disabled{{end}}>{{index $.T "admin_ip_remove"}}</button>
+    </form>{{else}}<p class="hint">{{index .T "admin_ip_none"}}</p>{{end}}
+    {{if .AdminAllowedIPMore}}<details class="profile-account-more"><summary>{{index .T "account_show_more"}} ({{len .AdminAllowedIPMore}})</summary>{{range .AdminAllowedIPMore}}<form method="post" action="?profile" class="auth-trusted-row profile-ip-row">
+      <input type="hidden" name="profile_action" value="admin_ip_remove"><input type="hidden" name="admin_ip" value="{{.Rule}}"><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
+      <div class="profile-ip-details"><strong dir="ltr">{{.Rule}}</strong>{{if .Current}} <span class="account-status-inline">{{index $.T "auth_current"}}</span>{{end}}<span class="profile-ip-location">{{.Location}}{{if .GeoIPAttribution}} · {{.GeoIPAttribution}}{{end}}</span></div><button type="submit" {{if not .Removable}}disabled{{end}}>{{index $.T "admin_ip_remove"}}</button>
+    </form>{{end}}</details>{{end}}
+  </div>
+  <form method="post" action="?profile" class="auth-trusted-row">
+    <input type="hidden" name="profile_action" value="admin_ip_add">
+    <input type="hidden" name="account_csrf" value="{{.AccountCSRF}}">
+    <label>{{index .T "admin_ip_candidate"}}
+      <input type="text" name="admin_ip" list="AdminIPCandidateList" maxlength="64" autocomplete="off" placeholder="{{index .T "admin_ip_example"}}" required>
+      <datalist id="AdminIPCandidateList">{{range .AdminIPCandidates}}<option value="{{.}}">{{end}}</datalist>
+    </label>
+    <button type="submit">{{index .T "admin_ip_add"}}</button>
+  </form>
+</section>
+{{end}}
 </main>
 <script>
 (function prepareProfileCodeForm() {
