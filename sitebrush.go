@@ -4564,15 +4564,20 @@ func readSitebrushNetworkCounters() (sitebrushNetworkCounters, bool) {
 	if err != nil {
 		return sitebrushNetworkCounters{}, false
 	}
+	interfaceCounters := parseSitebrushNetworkInterfaceCounters(string(contents))
+	interfaces, err := os.ReadDir("/sys/class/net")
+	if err != nil {
+		return sitebrushNetworkCounters{}, false
+	}
 	counters := sitebrushNetworkCounters{}
 	knownInterfaces := 0
-	for _, line := range strings.Split(string(contents), "\n")[2:] {
-		parts := strings.SplitN(line, ":", 2)
-		if len(parts) != 2 {
+	for _, networkInterface := range interfaces {
+		interfaceName := networkInterface.Name()
+		if interfaceName == "lo" {
 			continue
 		}
-		interfaceName := strings.TrimSpace(parts[0])
-		if interfaceName == "lo" {
+		interfaceCountersForName, found := interfaceCounters[interfaceName]
+		if !found {
 			continue
 		}
 		speedText, speedErr := os.ReadFile(filepath.Join("/sys/class/net", interfaceName, "speed"))
@@ -4583,21 +4588,42 @@ func readSitebrushNetworkCounters() (sitebrushNetworkCounters, bool) {
 		if parseErr != nil || speedMbps <= 0 {
 			continue
 		}
-		fields := strings.Fields(parts[1])
-		if len(fields) < 9 {
-			continue
-		}
-		received, receiveErr := strconv.ParseUint(fields[0], 10, 64)
-		sent, sendErr := strconv.ParseUint(fields[8], 10, 64)
-		if receiveErr != nil || sendErr != nil {
-			continue
-		}
-		counters.receivedBytes += received
-		counters.sentBytes += sent
+		counters.receivedBytes += interfaceCountersForName.receivedBytes
+		counters.sentBytes += interfaceCountersForName.sentBytes
 		counters.capacityBytesPerSecond += speedMbps * 1_000_000 / 8
 		knownInterfaces++
 	}
 	return counters, knownInterfaces > 0
+}
+
+type sitebrushNetworkInterfaceCounters struct {
+	receivedBytes uint64
+	sentBytes     uint64
+}
+
+func parseSitebrushNetworkInterfaceCounters(contents string) map[string]sitebrushNetworkInterfaceCounters {
+	interfaceCounters := make(map[string]sitebrushNetworkInterfaceCounters)
+	for _, line := range strings.Split(contents, "\n")[2:] {
+		parts := strings.SplitN(line, ":", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		interfaceName := strings.TrimSpace(parts[0])
+		fields := strings.Fields(parts[1])
+		if interfaceName == "" || len(fields) < 9 {
+			continue
+		}
+		receivedBytes, receiveErr := strconv.ParseUint(fields[0], 10, 64)
+		sentBytes, sendErr := strconv.ParseUint(fields[8], 10, 64)
+		if receiveErr != nil || sendErr != nil {
+			continue
+		}
+		interfaceCounters[interfaceName] = sitebrushNetworkInterfaceCounters{
+			receivedBytes: receivedBytes,
+			sentBytes:     sentBytes,
+		}
+	}
+	return interfaceCounters
 }
 
 func sitebrushSecurityLoadWasHigh(history []sitebrushSecurityHostLoad, eventAt time.Time) bool {

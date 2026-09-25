@@ -3429,6 +3429,24 @@ func TestSitebrushSecurityLoadPercentagesAndWindow(t *testing.T) {
 	}
 }
 
+func TestParseSitebrushNetworkInterfaceCounters(t *testing.T) {
+	contents := "Inter-| Receive | Transmit\n face |bytes packets errs drop fifo frame compressed multicast|bytes packets errs drop fifo colls carrier compressed\n" +
+		"  eth0: 100 2 0 0 0 0 0 0 250 3 0 0 0 0 0 0\n" +
+		"    lo: 999 2 0 0 0 0 0 0 888 3 0 0 0 0 0 0\n" +
+		" invalid: bad 2 0 0 0 0 0 0 250 3 0 0 0 0 0 0\n"
+
+	interfaceCounters := parseSitebrushNetworkInterfaceCounters(contents)
+	if len(interfaceCounters) != 2 {
+		t.Fatalf("parsed %d interfaces, want eth0 and lo", len(interfaceCounters))
+	}
+	if interfaceCounters["eth0"] != (sitebrushNetworkInterfaceCounters{receivedBytes: 100, sentBytes: 250}) {
+		t.Fatalf("eth0 counters = %#v", interfaceCounters["eth0"])
+	}
+	if interfaceCounters["lo"] != (sitebrushNetworkInterfaceCounters{receivedBytes: 999, sentBytes: 888}) {
+		t.Fatalf("lo counters = %#v", interfaceCounters["lo"])
+	}
+}
+
 func assertAnalyticsRow(t *testing.T, rows []analyticsCountRow, label string, count int) {
 	t.Helper()
 	for _, row := range rows {
