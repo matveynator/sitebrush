@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -375,6 +376,47 @@ func TestAttackGuardBlocksMassEnumerationEarly(t *testing.T) {
 	}
 	if !strings.Contains(block.Description, "48 distinct paths") {
 		t.Fatalf("description is not concrete: %q", block.Description)
+	}
+}
+
+func TestAttackGuardCountsOnlyNotFoundPathsAsEnumeration(t *testing.T) {
+	now := time.Date(2026, 9, 24, 12, 0, 0, 0, time.UTC)
+	guard, err := NewAttackGuard("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer guard.Close()
+
+	for requestIndex := 0; requestIndex < 64; requestIndex++ {
+		_, blocked, _ := guard.ObserveSiteRequestFastDisposition(
+			"example.org",
+			"203.0.113.85",
+			"/page-"+strconv.Itoa(requestIndex),
+			"GET",
+			false,
+			now.Add(time.Duration(requestIndex)*time.Millisecond),
+		)
+		if blocked {
+			t.Fatalf("valid page request %d was blocked", requestIndex+1)
+		}
+	}
+	if block, blocked := guard.Check("203.0.113.85", now.Add(time.Second)); blocked {
+		t.Fatalf("valid page traffic created an enumeration block: %#v", block)
+	}
+
+	for requestIndex := 0; requestIndex < 48; requestIndex++ {
+		block, blocked, _ := guard.ObserveSiteNotFoundFastDisposition(
+			"example.org",
+			"203.0.113.86",
+			"/missing-"+strconv.Itoa(requestIndex),
+			now.Add(time.Duration(requestIndex)*time.Millisecond),
+		)
+		if requestIndex < 47 && blocked {
+			t.Fatalf("not-found path %d triggered early block: %#v", requestIndex+1, block)
+		}
+		if requestIndex == 47 && (!blocked || block.Reason != "mass-enumeration") {
+			t.Fatalf("48th not-found path did not block enumeration: %#v", block)
+		}
 	}
 }
 

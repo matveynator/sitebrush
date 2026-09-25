@@ -6893,6 +6893,132 @@ func TestAuthenticatedAdminIPBypassesSecurityOnlyForItsSite(t *testing.T) {
 	}
 }
 
+func TestAdministratorAllowlistedIPDoesNotAccumulatePathScanEvidence(t *testing.T) {
+	application, rawDB := newTestApplication(t)
+	attackGuard, err := httpsecurity.NewAttackGuard("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	application.attackGuard = attackGuard
+	t.Cleanup(attackGuard.Close)
+
+	const domain = "trusted.example"
+	const email = "admin@trusted.example"
+	const clientIP = "198.51.100.78"
+	if _, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, domain, email, "password"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := rawDB.Exec(`INSERT INTO admin_allowed_ips(domain,email,client_ip,added_at) VALUES(?,?,?,?)`, domain, email, clientIP, time.Now().Unix()); err != nil {
+		t.Fatal(err)
+	}
+
+	protected := application.authAbuseMiddleware(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		http.NotFound(w, request)
+	}))
+	for requestIndex := 0; requestIndex < 64; requestIndex++ {
+		request := httptest.NewRequest(http.MethodGet, "http://"+domain+"/missing-"+strconv.Itoa(requestIndex), nil)
+		request.RemoteAddr = clientIP + ":1234"
+		response := httptest.NewRecorder()
+		protected.ServeHTTP(response, request)
+		if response.Code != http.StatusNotFound {
+			t.Fatalf("allowlisted admin request %d returned %d, want 404", requestIndex+1, response.Code)
+		}
+	}
+	if block, blocked := attackGuard.Check(clientIP, time.Now().UTC()); blocked {
+		t.Fatalf("administrator allowlisted IP accumulated an automatic block: %#v", block)
+	}
+}
+
+func TestSecurityMiddlewareCountsNotFoundScansButNotSuccessfulPages(t *testing.T) {
+	application, _ := newTestApplication(t)
+	attackGuard, err := httpsecurity.NewAttackGuard("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	application.attackGuard = attackGuard
+	t.Cleanup(attackGuard.Close)
+
+	requestHandler := application.authAbuseMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/missing-") {
+			http.NotFound(w, r)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	const domain = "camington.example"
+	for requestIndex := 0; requestIndex < 64; requestIndex++ {
+		request := httptest.NewRequest(http.MethodGet, "http://"+domain+"/page-"+strconv.Itoa(requestIndex), nil)
+		request.RemoteAddr = "198.51.100.80:1234"
+		response := httptest.NewRecorder()
+		requestHandler.ServeHTTP(response, request)
+		if response.Code != http.StatusOK {
+			t.Fatalf("successful page %d returned %d, want 200", requestIndex+1, response.Code)
+		}
+	}
+	if block, blocked := attackGuard.Check("198.51.100.80", time.Now().UTC()); blocked {
+		t.Fatalf("successful page requests created a path-scan block: %#v", block)
+	}
+
+	for requestIndex := 0; requestIndex < 48; requestIndex++ {
+		request := httptest.NewRequest(http.MethodGet, "http://"+domain+"/missing-"+strconv.Itoa(requestIndex), nil)
+		request.RemoteAddr = "198.51.100.81:1234"
+		response := httptest.NewRecorder()
+		requestHandler.ServeHTTP(response, request)
+		if response.Code != http.StatusNotFound {
+			t.Fatalf("missing page %d returned %d, want 404", requestIndex+1, response.Code)
+		}
+	}
+	block, blocked := attackGuard.Check("198.51.100.81", time.Now().UTC())
+	if !blocked || block.Reason != "mass-enumeration" {
+		t.Fatalf("48 missing pages did not create an enumeration block: %#v", block)
+	}
+}
+
+func TestSecurityIncidentReportBypassesUnavailableStealthSettings(t *testing.T) {
+	application, rawDB := newTestApplication(t)
+	attackGuard, err := httpsecurity.NewAttackGuard("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	application.attackGuard = attackGuard
+	t.Cleanup(attackGuard.Close)
+
+	const domain = "camington.example"
+	const clientIP = "198.51.100.79"
+	if _, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, domain, "admin@example.com", "password"); err != nil {
+		t.Fatal(err)
+	}
+	block, blocked := attackGuard.ObserveSiteIncident(domain, clientIP, "repository", "requested /.git/config", time.Now().UTC())
+	if !blocked {
+		t.Fatal("test incident did not create an active block")
+	}
+	if _, err := rawDB.Exec(`DROP TABLE admin_stealth_modes`); err != nil {
+		t.Fatal(err)
+	}
+
+	form := url.Values{"incident_id": {block.IncidentID}, "message": {"This is my administrator test address."}}
+	request := httptest.NewRequest(http.MethodPost, "http://camington.example/?security_incident_report", strings.NewReader(form.Encode()))
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	request.RemoteAddr = clientIP + ":1234"
+	response := httptest.NewRecorder()
+	application.authAbuseMiddleware(http.HandlerFunc(application.route)).ServeHTTP(response, request)
+	if response.Code != http.StatusSeeOther {
+		t.Fatalf("incident report status = %d, want %d; body=%q", response.Code, http.StatusSeeOther, response.Body.String())
+	}
+	select {
+	case delivery := <-application.emailDelivery:
+		if delivery.Message.Kind != "security_incident_report" {
+			t.Fatalf("queued email kind = %q, want security_incident_report", delivery.Message.Kind)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("incident report did not queue an administrator email")
+	}
+	reportedBlock, stillBlocked := attackGuard.Check(clientIP, time.Now().UTC())
+	if !stillBlocked || reportedBlock.ReportedAt.IsZero() {
+		t.Fatalf("successful report was not recorded: %#v", reportedBlock)
+	}
+}
+
 func TestBlockedLoginPageUsesSameTimerFromAnyURI(t *testing.T) {
 	application, rawDB := newTestApplication(t)
 	_, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "admin@example.com", "old")

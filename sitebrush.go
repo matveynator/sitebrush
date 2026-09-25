@@ -6957,6 +6957,20 @@ func (a *App) authAbuseMiddleware(next http.Handler) http.Handler {
 		domain := normalizeDomainName(a.siteDomain(r.Context(), r))
 		trusted := httpsecurity.IsLocalRequest(r) || sitebrushPeerRequestTrusted(r, now)
 		crawlerRead := httpsecurity.IsIndexingCrawlerRequest(r)
+		if !trusted && a.attackGuard != nil {
+			trusted = a.trustRecordedAdminIP(r, domain, clientIP, now)
+		}
+		serveNext := func() {
+			if a.attackGuard == nil || trusted || crawlerRead {
+				next.ServeHTTP(w, r)
+				return
+			}
+			responseWriter := &statusCapturingResponseWriter{ResponseWriter: w}
+			next.ServeHTTP(responseWriter, r)
+			if responseWriter.statusCode == http.StatusNotFound && (r.Method == http.MethodGet || r.Method == http.MethodHead) {
+				_, _, _ = a.attackGuard.ObserveSiteNotFoundFastDisposition(domain, clientIP, r.URL.EscapedPath(), now)
+			}
+		}
 		if a.attackGuard != nil {
 			var block httpsecurity.SecurityBlock
 			var blocked, allowed bool
@@ -6971,12 +6985,12 @@ func (a *App) authAbuseMiddleware(next http.Handler) http.Handler {
 				block, blocked, allowed = a.attackGuard.ObserveSiteRequestFastDisposition(domain, clientIP, r.URL.EscapedPath(), r.Method, trusted || crawlerRead, now)
 			}
 			if allowed {
-				next.ServeHTTP(w, r)
+				serveNext()
 				return
 			}
 			if blocked {
 				if a.trustRecordedAdminIP(r, domain, clientIP, now) {
-					next.ServeHTTP(w, r)
+					serveNext()
 					return
 				}
 				if r.Method == http.MethodPost && hasQueryFlag(r, "security_incident_report") {
@@ -7005,8 +7019,12 @@ func (a *App) authAbuseMiddleware(next http.Handler) http.Handler {
 				decision = a.throttleGuard.ObserveFast(clientIP, trusted, now)
 			}
 			if decision.RateLimited {
+				if r.Method == http.MethodPost && hasQueryFlag(r, "security_incident_report") {
+					serveNext()
+					return
+				}
 				if a.trustRecordedAdminIP(r, domain, clientIP, now) {
-					next.ServeHTTP(w, r)
+					serveNext()
 					return
 				}
 				w.Header().Set("Content-Type", "text/plain; charset=utf-8")
@@ -7018,7 +7036,7 @@ func (a *App) authAbuseMiddleware(next http.Handler) http.Handler {
 				return
 			}
 			if decision.Active && a.trustRecordedAdminIP(r, domain, clientIP, now) {
-				next.ServeHTTP(w, r)
+				serveNext()
 				return
 			}
 			if decision.Active {
@@ -7026,7 +7044,7 @@ func (a *App) authAbuseMiddleware(next http.Handler) http.Handler {
 			}
 		}
 
-		next.ServeHTTP(w, r)
+		serveNext()
 	})
 }
 
@@ -7098,8 +7116,30 @@ func (a *App) trustRecordedAdminIP(r *http.Request, domain, clientIP string, now
 		JOIN users administrator ON administrator.domain=trusted.domain AND administrator.email=trusted.email
 		WHERE trusted.domain=? AND trusted.client_ip=? AND trusted.last_login>? AND administrator.is_admin=1
 		LIMIT 1`, domain, accountIP, now.Add(-accountauth.TrustTTL).Unix()).Scan(&trusted)
-	if err != nil || trusted != 1 {
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return false
+	}
+	if trusted != 1 {
+		allowedRows, queryErr := a.db.QueryContext(contextWithDomain(r.Context(), domain), `
+			SELECT allowed.client_ip
+			FROM admin_allowed_ips allowed
+			JOIN users administrator ON administrator.domain=allowed.domain AND administrator.email=allowed.email
+			WHERE allowed.domain=? AND administrator.is_admin=1`, domain)
+		if queryErr != nil {
+			return false
+		}
+		for allowedRows.Next() {
+			var allowedRule string
+			if allowedRows.Scan(&allowedRule) == nil && adminIPRuleContains(allowedRule, accountIP) {
+				trusted = 1
+				break
+			}
+		}
+		rowsErr := allowedRows.Err()
+		_ = allowedRows.Close()
+		if rowsErr != nil || trusted != 1 {
+			return false
+		}
 	}
 	if err := a.attackGuard.TrustAdminIP(domain, clientIP, now); err != nil {
 		log.Printf("security administrator IP trust cache update failed: %v", err)
@@ -9391,6 +9431,15 @@ func (a *App) assignMissingDomainAliasTokens(ctx context.Context) {
 func (a *App) route(w http.ResponseWriter, r *http.Request) {
 	pagePath := cleanPath(r.URL.Path)
 	requestDomain := a.siteDomain(r.Context(), r)
+	if hasQueryFlag(r, "security_incident_report") {
+		if r.Method != http.MethodGet && r.Method != http.MethodHead && r.Method != http.MethodOptions &&
+			hasSitebrushSessionCookie(r) && !httpsecurity.SameOriginMutationAllowed(r) {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+		a.securityIncidentReport(w, r)
+		return
+	}
 	if a.serveStealthStaticForBlockedAdminIP(w, r, requestDomain, pagePath) {
 		return
 	}
@@ -9495,10 +9544,6 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !a.enforceAdminIPAllowlist(w, r, requestDomain) {
-		return
-	}
-	if hasQueryFlag(r, "security_incident_report") {
-		a.securityIncidentReport(w, r)
 		return
 	}
 	if hasQueryFlag(r, "logout") {

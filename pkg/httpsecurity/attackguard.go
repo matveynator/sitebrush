@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"html"
 	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
@@ -62,7 +63,6 @@ type SecurityAllow struct {
 
 type attackWindow struct {
 	Started   time.Time
-	Count     int
 	PostCount int
 	Distinct  map[string]struct{}
 }
@@ -110,6 +110,7 @@ type attackGuardRequest struct {
 	Domain      string
 	Path        string
 	Method      string
+	StatusCode  int
 	Category    string
 	Reason      string
 	Description string
@@ -290,17 +291,28 @@ func handleAttackGuardRequest(blocks map[string]SecurityBlock, allowlist map[str
 		if !settings.AutoBlock || ip == "" {
 			return attackGuardResult{}
 		}
+		writeRequest := false
+		switch strings.ToUpper(strings.TrimSpace(request.Method)) {
+		case "POST", "PUT", "PATCH", "DELETE":
+			writeRequest = true
+		}
+		if request.StatusCode == 0 && !writeRequest {
+			return attackGuardResult{}
+		}
+		if request.StatusCode != 0 && request.StatusCode != http.StatusNotFound {
+			return attackGuardResult{}
+		}
 		window := windows[ip]
 		if window == nil || now.Sub(window.Started) > 10*time.Second {
 			window = &attackWindow{Started: now, Distinct: map[string]struct{}{}}
 			windows[ip] = window
 		}
-		window.Count++
-		switch strings.ToUpper(strings.TrimSpace(request.Method)) {
-		case "POST", "PUT", "PATCH", "DELETE":
-			window.PostCount++
+		if request.StatusCode == 0 {
+			if writeRequest {
+				window.PostCount++
+			}
 		}
-		if len(window.Distinct) < 256 {
+		if request.StatusCode == http.StatusNotFound && len(window.Distinct) < 256 {
 			window.Distinct[boundedPath(request.Path)] = struct{}{}
 		}
 		if window.PostCount >= 40 || len(window.Distinct) >= 48 {
@@ -724,11 +736,36 @@ func (guard *AttackGuard) ObserveRequestFast(ip, path, method string, trusted bo
 }
 
 func (guard *AttackGuard) ObserveRequestFastDisposition(ip, path, method string, trusted bool, now time.Time) (SecurityBlock, bool, bool) {
-	return guard.ObserveSiteRequestFastDisposition("", ip, path, method, trusted, now)
+	block, blocked, allowed := guard.ObserveSiteRequestFastDisposition("", ip, path, method, trusted, now)
+	if blocked || allowed || trusted {
+		return block, blocked, allowed
+	}
+	if method == "GET" || method == "HEAD" {
+		return guard.ObserveSiteNotFoundFastDisposition("", ip, path, now)
+	}
+	return block, blocked, allowed
 }
 
 func (guard *AttackGuard) ObserveSiteRequestFastDisposition(domain, ip, path, method string, trusted bool, now time.Time) (SecurityBlock, bool, bool) {
 	result, ok := guard.exchangeFast(attackGuardRequest{Operation: attackGuardObserveFast, Domain: normalizeSecurityDomain(domain), IP: ip, Path: path, Method: method, Trusted: trusted, Now: now})
+	if ok && result.Changed {
+		guard.signalSave()
+	}
+	return result.Block, ok && result.Blocked, ok && result.Allowed
+}
+
+// ObserveSiteNotFoundFastDisposition counts only misses so normal page traffic
+// cannot be mistaken for a path scan merely because it uses many unique URLs.
+func (guard *AttackGuard) ObserveSiteNotFoundFastDisposition(domain, ip, path string, now time.Time) (SecurityBlock, bool, bool) {
+	result, ok := guard.exchangeFast(attackGuardRequest{
+		Operation:  attackGuardObserveFast,
+		Domain:     normalizeSecurityDomain(domain),
+		IP:         ip,
+		Path:       path,
+		Method:     "GET",
+		StatusCode: http.StatusNotFound,
+		Now:        now,
+	})
 	if ok && result.Changed {
 		guard.signalSave()
 	}
