@@ -105,6 +105,7 @@ const grabImportFailedResourceRetryAttempts = 4
 const grabImportFailedResourceRetryDelay = 2 * time.Second
 const wholeSiteImportConsecutiveFailureLimit = 25
 const wholeSiteImportMaxPages = 2048
+const wholeSiteImportQueueMaximumBytes = 64 << 20
 const wholeSitePreviewPageConcurrency = 8
 const publicTrialPreviewMaxDuration = 5 * time.Minute
 const publicTrialPreviewStallTimeout = 45 * time.Second
@@ -123,7 +124,7 @@ const sitebrushHTTPWriteTimeout = 0
 const sitebrushHTTPIdleTimeout = 65 * time.Second
 const sitebrushHTTPReadHeaderTimeout = 5 * time.Second
 const sitebrushHTTP10KeepAliveBufferLimit = 1024 * 1024
-const currentSiteDatabaseSchemaVersion = 5
+const currentSiteDatabaseSchemaVersion = 6
 const siteDatabaseStartupMigrationTimeout = 30 * time.Second
 const pagePasswordSessionTTL = time.Hour
 const serviceMailRelayPath = "/?service_mail_relay"
@@ -2702,6 +2703,7 @@ type domainStorageUsage struct {
 	RevisionBytes        int64
 	FileBytes            int64
 	PublishedStaticBytes int64
+	ImportQueueBytes     int64
 	LimitBytes           int64
 }
 
@@ -8330,6 +8332,15 @@ func (a *App) migrate(ctx context.Context) error {
 		return siteMigrationStepError{step: "verify schema", err: schemaErr}
 	}
 	if schemaVersion >= currentSiteDatabaseSchemaVersion && schemaComplete {
+		if _, err := a.db.ExecContext(ctx, `UPDATE whole_site_imports SET state='partial',updated_at=? WHERE state='running'`, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+			return siteMigrationStepError{step: "recover interrupted whole-site imports", err: err}
+		}
+		if _, err := a.db.ExecContext(ctx, `UPDATE whole_site_import_pages SET state='pending' WHERE state='processing'`); err != nil {
+			return siteMigrationStepError{step: "recover interrupted whole-site import pages", err: err}
+		}
+		if err := crawler.CleanupDiscardedImportFrontiers(ctx, a.db); err != nil {
+			return siteMigrationStepError{step: "finish interrupted import cleanup", err: err}
+		}
 		a.migrateLoopbackDomainsToLocalhost(ctx)
 		if a.debug {
 			log.Printf("%sDB MIGRATION%s skipped domain=%s version=%d",
@@ -8362,6 +8373,7 @@ func (a *App) migrate(ctx context.Context) error {
 		`CREATE INDEX IF NOT EXISTS idx_analytics_events_visitor ON analytics_events(domain,visitor_id,occurred_at);`,
 		`CREATE TABLE IF NOT EXISTS analytics_reports(domain TEXT PRIMARY KEY,generated_at TEXT,period_start TEXT,period_end TEXT,event_count INTEGER,report_json TEXT);`,
 	}
+	queries = append(queries, crawler.ImportFrontierSchema()...)
 	queries = append(queries, accountauth.Schema()...)
 	queries = append(queries, accountpasskey.Schema()...)
 	queries = append(queries, accounttotp.Schema()...)
@@ -8372,6 +8384,15 @@ func (a *App) migrate(ctx context.Context) error {
 	}
 	if err := a.ensureSiteDatabaseSchemaColumns(ctx); err != nil {
 		return err
+	}
+	if _, err := a.db.ExecContext(ctx, `UPDATE whole_site_imports SET state='partial',updated_at=? WHERE state='running'`, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+		return siteMigrationStepError{step: "recover interrupted whole-site imports", err: err}
+	}
+	if _, err := a.db.ExecContext(ctx, `UPDATE whole_site_import_pages SET state='pending' WHERE state='processing'`); err != nil {
+		return siteMigrationStepError{step: "recover interrupted whole-site import pages", err: err}
+	}
+	if err := crawler.CleanupDiscardedImportFrontiers(ctx, a.db); err != nil {
+		return siteMigrationStepError{step: "finish interrupted import cleanup", err: err}
 	}
 	if _, err := a.db.ExecContext(ctx, `DELETE FROM sessions WHERE security_version<1`); err != nil {
 		return err
@@ -8473,6 +8494,9 @@ func requiredSiteDatabaseColumns() []siteDatabaseColumnRequirement {
 		{tableName: "domain_storage_usage", columnName: "revision_bytes", definition: "INTEGER DEFAULT 0"},
 		{tableName: "domain_storage_usage", columnName: "file_bytes", definition: "INTEGER DEFAULT 0"},
 		{tableName: "domain_storage_usage", columnName: "published_static_bytes", definition: "INTEGER DEFAULT 0"},
+		{tableName: "domain_storage_usage", columnName: "import_queue_bytes", definition: "INTEGER DEFAULT 0"},
+		{tableName: "whole_site_import_pages", columnName: "link_offset", definition: "INTEGER NOT NULL DEFAULT 0"},
+		{tableName: "whole_site_import_pages", columnName: "storage_bytes", definition: "INTEGER NOT NULL DEFAULT 0"},
 		{tableName: "domain_storage_usage", columnName: "limit_bytes", definition: "INTEGER DEFAULT 10737418240"},
 		{tableName: "domain_storage_usage", columnName: "updated_at", definition: "TEXT"},
 		{tableName: "domain_backup_tokens", columnName: "token", definition: "TEXT"},
@@ -8550,9 +8574,13 @@ SELECT 'localhost',file_name,page_path,size,mime_type,created_at,updated_at,sour
 	pageRedirectsMergeQuery := `INSERT OR IGNORE INTO page_redirects(domain,old_path,new_path,created_at)
 SELECT 'localhost',old_path,new_path,created_at FROM page_redirects WHERE domain IN ` + placeholders
 	_, _ = a.db.ExecContext(ctx, pageRedirectsMergeQuery, sqlArguments...)
-	storageUsageMergeQuery := `INSERT OR IGNORE INTO domain_storage_usage(domain,page_bytes,published_page_bytes,revision_bytes,file_bytes,published_static_bytes,limit_bytes,updated_at)
-SELECT 'localhost',page_bytes,published_page_bytes,revision_bytes,file_bytes,published_static_bytes,limit_bytes,updated_at FROM domain_storage_usage WHERE domain IN ` + placeholders
+	storageUsageMergeQuery := `INSERT OR IGNORE INTO domain_storage_usage(domain,page_bytes,published_page_bytes,revision_bytes,file_bytes,published_static_bytes,import_queue_bytes,limit_bytes,updated_at)
+SELECT 'localhost',page_bytes,published_page_bytes,revision_bytes,file_bytes,published_static_bytes,import_queue_bytes,limit_bytes,updated_at FROM domain_storage_usage WHERE domain IN ` + placeholders
 	_, _ = a.db.ExecContext(ctx, storageUsageMergeQuery, sqlArguments...)
+	_, _ = a.db.ExecContext(ctx, `INSERT OR IGNORE INTO whole_site_imports(import_id,domain,page_path,source_url,auto_templates,state,created_at,updated_at)
+SELECT import_id,'localhost',page_path,source_url,auto_templates,state,created_at,updated_at FROM whole_site_imports WHERE domain IN `+placeholders, sqlArguments...)
+	_, _ = a.db.ExecContext(ctx, `INSERT OR IGNORE INTO whole_site_import_pages(import_id,domain,page_key,page_url,local_path,link_offset,storage_bytes,state,created_at)
+SELECT import_id,'localhost',page_key,page_url,local_path,link_offset,storage_bytes,state,created_at FROM whole_site_import_pages WHERE domain IN `+placeholders, sqlArguments...)
 	domainStatesMergeQuery := `INSERT OR IGNORE INTO domain_states(domain,is_frozen)
 SELECT 'localhost',is_frozen FROM domain_states WHERE domain IN ` + placeholders
 	_, _ = a.db.ExecContext(ctx, domainStatesMergeQuery, sqlArguments...)
@@ -8577,6 +8605,8 @@ SELECT token,'localhost',path,created_at FROM page_password_sessions WHERE domai
 	_, _ = a.db.ExecContext(ctx, `DELETE FROM file_access_rules WHERE domain IN `+placeholders, sqlArguments...)
 	_, _ = a.db.ExecContext(ctx, `DELETE FROM file_metadata WHERE domain IN `+placeholders, sqlArguments...)
 	_, _ = a.db.ExecContext(ctx, `DELETE FROM domain_storage_usage WHERE domain IN `+placeholders, sqlArguments...)
+	_, _ = a.db.ExecContext(ctx, `DELETE FROM whole_site_import_pages WHERE domain IN `+placeholders, sqlArguments...)
+	_, _ = a.db.ExecContext(ctx, `DELETE FROM whole_site_imports WHERE domain IN `+placeholders, sqlArguments...)
 	_, _ = a.db.ExecContext(ctx, `DELETE FROM domain_states WHERE domain IN `+placeholders, sqlArguments...)
 	_, _ = a.db.ExecContext(ctx, `DELETE FROM domain_ssl_settings WHERE domain IN `+placeholders, sqlArguments...)
 	_, _ = a.db.ExecContext(ctx, `DELETE FROM page_password_rules WHERE domain IN `+placeholders, sqlArguments...)
@@ -12005,7 +12035,7 @@ func (a *App) grabPage(w http.ResponseWriter, r *http.Request) {
 		}
 		if wantsJSONResponse(r) {
 			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(map[string]any{"redirect": httpsecurity.LocalRedirectTarget(importResult.RedirectPath, "/"), "failed_total": importResult.FailedTotal, "failed_urls": importResult.FailedURLs, "failed_reasons": importResult.FailedReasons})
+			_ = json.NewEncoder(w).Encode(grabImportResultResponse(importResult))
 			return
 		}
 		httpsecurity.RedirectLocal(w, r, importResult.RedirectPath, http.StatusFound)
@@ -12050,6 +12080,10 @@ func (a *App) retryGrabFailedResources(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
+	if strings.TrimSpace(r.FormValue("resume_import_id")) != "" {
+		a.resumeWholeSiteImport(w, r)
+		return
+	}
 
 	sourceURL := r.FormValue("source_url")
 	if sourceURL == "" {
@@ -12089,10 +12123,85 @@ func (a *App) retryGrabFailedResources(w http.ResponseWriter, r *http.Request) {
 	}
 	if wantsJSONResponse(r) {
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{"status": "ok", "redirect": httpsecurity.LocalRedirectTarget(importResult.RedirectPath, "/"), "failed_total": importResult.FailedTotal, "failed_urls": importResult.FailedURLs, "failed_reasons": importResult.FailedReasons})
+		response := grabImportResultResponse(importResult)
+		response["status"] = "ok"
+		_ = json.NewEncoder(w).Encode(response)
 		return
 	}
 	httpsecurity.RedirectLocal(w, r, pagePath, http.StatusFound)
+}
+
+func (a *App) resumeWholeSiteImport(w http.ResponseWriter, r *http.Request) {
+	domain := a.siteDomain(r.Context(), r)
+	importID := strings.TrimSpace(r.FormValue("resume_import_id"))
+	run, err := crawler.FindImportFrontier(r.Context(), a.db, importID, domain)
+	if err != nil {
+		http.Error(w, "whole-site import was not found for this site", http.StatusNotFound)
+		return
+	}
+	pagePath := grabRequestTargetPath(r)
+	if cleanPath(run.PagePath) != pagePath {
+		http.Error(w, "whole-site import does not match this target path", http.StatusBadRequest)
+		return
+	}
+	requestedSourceURL, err := parseGrabSourceURL(r.FormValue("source_url"))
+	storedSourceURL, storedSourceErr := url.Parse(run.SourceURL)
+	if err != nil || storedSourceErr != nil || !sameWholeSiteImportOrigin(storedSourceURL, requestedSourceURL) {
+		http.Error(w, "whole-site import does not match this source", http.StatusBadRequest)
+		return
+	}
+	sourceOptions, err := parseGrabSourceOptions(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	sourceOptions = a.withSitebrushPeerAttestation(r.Context(), sourceOptions)
+	remoteSourceURL, err := parseGrabSourceURL(run.SourceURL)
+	if err != nil {
+		http.Error(w, "stored whole-site import source is invalid", http.StatusBadRequest)
+		return
+	}
+	progressToken := strings.TrimSpace(r.FormValue("progress_token"))
+	downloadContext, finishDownloadContext := a.grabImportDownloadContext(r.Context(), progressToken)
+	defer finishDownloadContext()
+	importResult, err := a.importWholeRemoteSite(downloadContext, grabImportRequest{
+		Domain:              domain,
+		PagePath:            pagePath,
+		SourceURL:           run.SourceURL,
+		RemoteSourceURL:     remoteSourceURL,
+		Context:             downloadContext,
+		ProgressToken:       progressToken,
+		DownloadTotal:       grabImportDownloadTotal(r),
+		DownloadTotalBytes:  grabImportDownloadTotalBytes(r),
+		SourceOptions:       sourceOptions,
+		AutoDetectTemplates: run.AutoDetectTemplates,
+		ImportID:            importID,
+	})
+	if err != nil {
+		statusCode := http.StatusBadGateway
+		if strings.Contains(err.Error(), "storage limit reached:") {
+			statusCode = http.StatusInsufficientStorage
+		}
+		http.Error(w, err.Error(), statusCode)
+		return
+	}
+	if wantsJSONResponse(r) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(grabImportResultResponse(importResult))
+		return
+	}
+	httpsecurity.RedirectLocal(w, r, importResult.RedirectPath, http.StatusFound)
+}
+
+func grabImportResultResponse(importResult grabImportResult) map[string]any {
+	return map[string]any{
+		"redirect":        httpsecurity.LocalRedirectTarget(importResult.RedirectPath, "/"),
+		"failed_total":    importResult.FailedTotal,
+		"failed_urls":     importResult.FailedURLs,
+		"failed_reasons":  importResult.FailedReasons,
+		"import_id":       importResult.ImportID,
+		"remaining_pages": importResult.RemainingPages,
+	}
 }
 
 func (a *App) cancelGrabImport(w http.ResponseWriter, r *http.Request) {
@@ -14403,11 +14512,11 @@ func previewWholeRemoteSiteResourcesWithLimit(ctx context.Context, startURL *url
 	return wholeSitePreviewResult{PageCount: len(pageURLs), Resources: resources, ImportedPages: importedPages, Spider: spider, Partial: partial, LimitReached: spider.previewLimitReached}
 }
 
-func (a *App) prepareWholeRemoteSiteImport(importRequest grabImportRequest) (*pageSpider, []wholeSiteImportedPage, error) {
+func (a *App) prepareWholeRemoteSiteImport(importRequest grabImportRequest) (*pageSpider, []wholeSiteImportedPage, []string, error) {
 	basePath := cleanPath(importRequest.PagePath)
 	startURL := importRequest.RemoteSourceURL
 	if startURL == nil || startURL.Hostname() == "" {
-		return nil, nil, errors.New("source_url is invalid")
+		return nil, nil, nil, errors.New("source_url is invalid")
 	}
 	spider := newPageSpider(importRequest.Domain, startURL, grabResourceMaxDepth, a.grabTracker, importRequest.ProgressToken, importRequest.SourceOptions)
 	spider.setContext(importRequest.Context)
@@ -14423,124 +14532,246 @@ func (a *App) prepareWholeRemoteSiteImport(importRequest grabImportRequest) (*pa
 	}
 
 	pageClient := grabImportHTTPClient(newGrabHTTPClientForSourceOptions(startURL.Hostname(), importRequest.SourceOptions))
-	knownPagePathsByKey := map[string]string{crawler.WholeSitePageKey(startURL): basePath}
-	pageQueue := []wholeSitePageJob{{URL: crawler.CloneURL(startURL), HTML: importRequest.HTML}}
+	frontierPages, claimErr := crawler.ClaimImportFrontierPages(spider.context(), a.db, importRequest.ImportID, importRequest.Domain, wholeSiteImportMaxPages)
+	if claimErr != nil {
+		return spider, nil, nil, claimErr
+	}
+	defer crawler.ReleaseProcessingImportFrontierPages(spider.context(), a.db, importRequest.ImportID, importRequest.Domain)
 	importedPages := make([]wholeSiteImportedPage, 0, 32)
-	importedLocalPaths := make(map[string]struct{})
+	completedPageKeys := make([]string, 0, len(frontierPages))
 	consecutiveFailures := 0
-	spider.foundTotal++
-	spider.publishProgress("found", startURL.String(), 0)
-
-	for len(pageQueue) > 0 && len(importedPages) < wholeSiteImportMaxPages {
+	newLinksDiscovered := 0
+	frontierStorageBudget := a.wholeSiteImportQueueBudget(spider.context(), importRequest.Domain)
+	for frontierPageIndex := 0; frontierPageIndex < len(frontierPages); frontierPageIndex++ {
+		frontierPage := frontierPages[frontierPageIndex]
 		if spider.contextCanceled() {
-			spider.publishResourceProgress("partial", crawler.CurrentWholeSiteImportURL(pageQueue), 0, 0, -1)
+			_ = crawler.SetImportFrontierPageState(spider.context(), a.db, importRequest.ImportID, importRequest.Domain, frontierPage.Key, "pending")
+			spider.publishResourceProgress("partial", frontierPage.URL, 0, 0, -1)
 			break
 		}
 		if consecutiveFailures >= wholeSiteImportConsecutiveFailureLimit {
-			spider.publishResourceProgress("partial", crawler.CurrentWholeSiteImportURL(pageQueue), 0, 0, -1)
+			_ = crawler.SetImportFrontierPageState(spider.context(), a.db, importRequest.ImportID, importRequest.Domain, frontierPage.Key, "pending")
+			spider.publishResourceProgress("partial", frontierPage.URL, 0, 0, -1)
 			break
 		}
-		currentJob := pageQueue[0]
-		pageQueue = pageQueue[1:]
-		if currentJob.URL == nil {
+		currentURL, parseErr := url.Parse(frontierPage.URL)
+		if parseErr != nil || !crawler.SameHost(startURL, currentURL) || !crawler.IsPageURL(currentURL) {
+			_ = crawler.UpdateImportFrontierPageCursor(spider.context(), a.db, importRequest.ImportID, importRequest.Domain, frontierPage.Key, frontierPage.LinkOffset, "done")
 			continue
 		}
-		pageKey := crawler.WholeSitePageKey(currentJob.URL)
-		if pageKey == "" {
+		pageKey := crawler.WholeSitePageKey(currentURL)
+		if pageKey == "" || pageKey != frontierPage.Key {
+			_ = crawler.UpdateImportFrontierPageCursor(spider.context(), a.db, importRequest.ImportID, importRequest.Domain, frontierPage.Key, frontierPage.LinkOffset, "done")
 			continue
 		}
-		pageHTML := currentJob.HTML
+		spider.foundTotal++
+		spider.publishProgress("found", currentURL.String(), 0)
+		pageHTML := ""
+		if pageKey == crawler.WholeSitePageKey(startURL) && frontierPage.LinkOffset == 0 {
+			pageHTML = importRequest.HTML
+		}
 		if strings.TrimSpace(pageHTML) == "" {
-			downloadedHTML, downloaded, downloadErr := spider.downloadWholeSitePageHTMLWithRetries(pageClient, currentJob.URL, importRequest.SourceOptions, grabImportFailedResourceRetryAttempts)
+			downloadedHTML, downloaded, downloadErr := spider.downloadWholeSitePageHTMLWithRetries(pageClient, currentURL, importRequest.SourceOptions, grabImportFailedResourceRetryAttempts)
 			if downloadErr != nil || !downloaded {
 				spider.failedTotal++
 				consecutiveFailures++
-				spider.recordFailedResource(currentJob.URL.String(), crawler.ErrorReason(downloadErr))
-				spider.publishResourceProgress("error", currentJob.URL.String(), 0, 0, -1)
+				spider.recordFailedResource(currentURL.String(), crawler.ErrorReason(downloadErr))
+				spider.publishResourceProgress("error", currentURL.String(), 0, 0, -1)
+				_ = crawler.SetImportFrontierPageState(spider.context(), a.db, importRequest.ImportID, importRequest.Domain, pageKey, "pending")
 				continue
 			}
 			pageHTML = downloadedHTML
 		}
-
-		linkedPageURLs, linksTruncated := crawler.ExtractPageLinksWithLimit(pageHTML, currentJob.URL, startURL, wholeSiteImportMaxPages)
-		if linksTruncated {
-			spider.recordFailedResource(currentJob.URL.String(), "page link limit reached")
-		}
-		for _, linkedPageURL := range linkedPageURLs {
-			linkedPageKey := crawler.WholeSitePageKey(linkedPageURL)
-			if linkedPageKey == "" {
-				continue
-			}
-			if _, alreadyKnown := knownPagePathsByKey[linkedPageKey]; alreadyKnown {
-				continue
-			}
-			if len(knownPagePathsByKey) >= wholeSiteImportMaxPages {
-				spider.recordFailedResource(startURL.String(), "whole-site page limit reached")
+		consecutiveFailures = 0
+		linkURLs, nextLinkOffset, linksRemain := crawler.ExtractPageLinksFromOffset(pageHTML, currentURL, startURL, frontierPage.LinkOffset, wholeSiteImportMaxPages)
+		currentLinkOffset := frontierPage.LinkOffset
+		pausedForQuota := false
+		pausedForBatch := false
+		for linkIndex, linkedPageURL := range linkURLs {
+			if newLinksDiscovered >= wholeSiteImportMaxPages {
+				pausedForBatch = true
 				break
 			}
-			knownPagePathsByKey[linkedPageKey] = crawler.WholeSiteLocalPath(basePath, startURL, linkedPageURL)
-			pageQueue = append(pageQueue, wholeSitePageJob{URL: crawler.CloneURL(linkedPageURL)})
-			spider.foundTotal++
-			spider.publishProgress("found", linkedPageURL.String(), 0)
+			linkedPageKey := crawler.WholeSitePageKey(linkedPageURL)
+			if linkedPageKey != "" {
+				page := crawler.ImportFrontierPage{Key: linkedPageKey, URL: linkedPageURL.String(), LocalPath: crawler.WholeSiteLocalPath(basePath, startURL, linkedPageURL)}
+				added, enqueueErr := crawler.AddImportFrontierPage(spider.context(), a.db, importRequest.ImportID, importRequest.Domain, page, frontierStorageBudget)
+				if errors.Is(enqueueErr, crawler.ErrImportFrontierStorageLimit) {
+					pausedForQuota = true
+					break
+				}
+				if enqueueErr != nil {
+					return spider, importedPages, completedPageKeys, enqueueErr
+				}
+				if added {
+					newLinksDiscovered++
+					spider.publishProgress("found", linkedPageURL.String(), 0)
+					if len(frontierPages) < wholeSiteImportMaxPages {
+						if stateErr := crawler.SetImportFrontierPageState(spider.context(), a.db, importRequest.ImportID, importRequest.Domain, linkedPageKey, "processing"); stateErr != nil {
+							return spider, importedPages, completedPageKeys, stateErr
+						}
+						frontierPages = append(frontierPages, page)
+					}
+				}
+			}
+			currentLinkOffset = frontierPage.LinkOffset + linkIndex + 1
 		}
 
-		rootResource := &mirroredResource{url: currentJob.URL.String(), content: []byte(pageHTML)}
-		spider.resources[currentJob.URL.String()] = rootResource
-		spider.rewriteNestedResources(rootResource, 0, "text/html")
-		localPath := knownPagePathsByKey[pageKey]
-		if _, alreadyImported := importedLocalPaths[localPath]; alreadyImported {
-			continue
+		if frontierPage.LinkOffset == 0 {
+			rootResource := &mirroredResource{url: currentURL.String(), content: []byte(pageHTML)}
+			spider.resources[currentURL.String()] = rootResource
+			spider.rewriteNestedResources(rootResource, 0, "text/html")
+			importedPages = append(importedPages, wholeSiteImportedPage{SourceURL: currentURL.String(), LocalPath: frontierPage.LocalPath, HTML: string(rootResource.content)})
+			spider.downloadedTotal++
+			spider.publishResourceProgress("downloaded", currentURL.String(), 100, int64(len(pageHTML)), int64(len(pageHTML)))
 		}
-		importedLocalPaths[localPath] = struct{}{}
-		importedPages = append(importedPages, wholeSiteImportedPage{SourceURL: currentJob.URL.String(), LocalPath: localPath, HTML: string(rootResource.content)})
-		spider.downloadedTotal++
-		consecutiveFailures = 0
-		spider.publishResourceProgress("downloaded", currentJob.URL.String(), 100, int64(len(pageHTML)), int64(len(pageHTML)))
+		if pausedForQuota || pausedForBatch || linksRemain {
+			if linksRemain && !pausedForQuota && !pausedForBatch {
+				currentLinkOffset = nextLinkOffset
+			}
+			_ = crawler.UpdateImportFrontierPageCursor(spider.context(), a.db, importRequest.ImportID, importRequest.Domain, pageKey, currentLinkOffset, "pending")
+		} else {
+			completedPageKeys = append(completedPageKeys, pageKey)
+		}
 	}
-	if len(pageQueue) > 0 {
-		spider.recordFailedResource(startURL.String(), "whole-site page limit reached")
-	}
-	if len(importedPages) == 0 {
-		return nil, nil, errors.New("no pages were imported")
+	if len(importedPages) == 0 && len(frontierPages) == 0 {
+		return nil, nil, nil, errors.New("no pages remain in the whole-site import queue")
 	}
 	spider.retryFailedResources(startURL, grabImportFailedResourceRetryAttempts)
 	spider.rewriteImportedPagesStaticURLTextReferences(importedPages)
-	return spider, importedPages, nil
+	return spider, importedPages, completedPageKeys, nil
 }
 
 func (a *App) importWholeRemoteSite(ctx context.Context, importRequest grabImportRequest) (grabImportResult, error) {
-	spider, importedPages, prepareErr := a.prepareWholeRemoteSiteImport(importRequest)
+	importRequest.PagePath = cleanPath(importRequest.PagePath)
+	if importRequest.RemoteSourceURL == nil || importRequest.RemoteSourceURL.Hostname() == "" {
+		return grabImportResult{}, errors.New("source_url is invalid")
+	}
+	if importRequest.ImportID == "" {
+		activeRun, activeRunErr := crawler.FindActiveImportFrontier(ctx, a.db, importRequest.Domain, importRequest.PagePath, importRequest.RemoteSourceURL.String())
+		if activeRunErr == nil {
+			importRequest.ImportID = activeRun.ID
+			importRequest.AutoDetectTemplates = activeRun.AutoDetectTemplates
+			if claimErr := crawler.ClaimImportFrontier(ctx, a.db, importRequest.ImportID, importRequest.Domain); claimErr != nil {
+				return grabImportResult{}, claimErr
+			}
+		} else if !errors.Is(activeRunErr, sql.ErrNoRows) {
+			return grabImportResult{}, activeRunErr
+		} else {
+			if discardErr := crawler.DiscardPartialImportFrontiers(ctx, a.db, importRequest.Domain, importRequest.PagePath); discardErr != nil {
+				return grabImportResult{}, discardErr
+			}
+			importRequest.ImportID = randomAccessToken()
+			a.ensureDomainStorageUsageRow(ctx, importRequest.Domain)
+			run := crawler.ImportFrontierRun{ID: importRequest.ImportID, Domain: importRequest.Domain, PagePath: importRequest.PagePath, SourceURL: importRequest.RemoteSourceURL.String(), AutoDetectTemplates: importRequest.AutoDetectTemplates}
+			if createErr := crawler.CreateImportFrontier(ctx, a.db, run); createErr != nil {
+				return grabImportResult{}, createErr
+			}
+			rootPage := crawler.ImportFrontierPage{Key: crawler.WholeSitePageKey(importRequest.RemoteSourceURL), URL: importRequest.RemoteSourceURL.String(), LocalPath: importRequest.PagePath}
+			if _, enqueueErr := crawler.AddImportFrontierPage(ctx, a.db, importRequest.ImportID, importRequest.Domain, rootPage, a.wholeSiteImportQueueBudget(ctx, importRequest.Domain)); enqueueErr != nil {
+				_ = crawler.FinishImportFrontier(ctx, a.db, importRequest.ImportID, importRequest.Domain)
+				if errors.Is(enqueueErr, crawler.ErrImportFrontierStorageLimit) {
+					return grabImportResult{}, errors.New("storage limit reached before import queue could be saved")
+				}
+				return grabImportResult{}, enqueueErr
+			}
+		}
+	} else {
+		run, findErr := crawler.FindImportFrontier(ctx, a.db, importRequest.ImportID, importRequest.Domain)
+		if findErr != nil {
+			return grabImportResult{}, errors.New("whole-site import was not found for this site")
+		}
+		storedSourceURL, parseErr := url.Parse(run.SourceURL)
+		if parseErr != nil || !sameWholeSiteImportOrigin(storedSourceURL, importRequest.RemoteSourceURL) || run.PagePath != importRequest.PagePath {
+			return grabImportResult{}, errors.New("whole-site import does not match this source or target path")
+		}
+		importRequest.RemoteSourceURL = storedSourceURL
+		importRequest.SourceURL = storedSourceURL.String()
+		importRequest.AutoDetectTemplates = run.AutoDetectTemplates
+		if claimErr := crawler.ClaimImportFrontier(ctx, a.db, importRequest.ImportID, importRequest.Domain); claimErr != nil {
+			return grabImportResult{}, claimErr
+		}
+	}
+	spider, importedPages, completedPageKeys, prepareErr := a.prepareWholeRemoteSiteImport(importRequest)
 	if prepareErr != nil {
+		if importRequest.ImportID != "" {
+			_ = crawler.SetImportFrontierRunState(ctx, a.db, importRequest.ImportID, importRequest.Domain, "partial")
+		}
 		return grabImportResult{}, prepareErr
 	}
 	importedPages, prepareErr = maybeDetectImportedPageTemplatesWithProgress(importedPages, importRequest.AutoDetectTemplates, func(completedPercent int) {
 		spider.publishProgress("detect_templates", "", completedPercent)
 	})
 	if prepareErr != nil {
+		_ = crawler.ReleaseProcessingImportFrontierPages(ctx, a.db, importRequest.ImportID, importRequest.Domain)
+		_ = crawler.SetImportFrontierRunState(ctx, a.db, importRequest.ImportID, importRequest.Domain, "partial")
 		return grabImportResult{}, prepareErr
 	}
 	pageDelta, publishedPageDelta, revisionDelta, publishedStaticDelta := a.estimateImportedPagesStorageDelta(ctx, importRequest.Domain, importedPages)
 	fileDelta := a.estimateImportedFileDelta(importRequest.Domain, spider)
 	if storageErr := a.applyDomainStorageDelta(ctx, importRequest.Domain, pageDelta, publishedPageDelta, revisionDelta, fileDelta, publishedStaticDelta); storageErr != nil {
+		_ = crawler.SetImportFrontierRunState(ctx, a.db, importRequest.ImportID, importRequest.Domain, "partial")
 		return grabImportResult{FailedTotal: spider.unresolvedFailedTotal(), FailedURLs: spider.failedResourceURLList(), FailedReasons: spider.failedResourceReasonMap()}, storageErr
 	}
 	if persistErr := a.persistSpiderAssets(ctx, spider, importRequest.PagePath); persistErr != nil {
 		_ = a.applyDomainStorageDelta(ctx, importRequest.Domain, -pageDelta, -publishedPageDelta, -revisionDelta, -fileDelta, -publishedStaticDelta)
+		_ = crawler.SetImportFrontierRunState(ctx, a.db, importRequest.ImportID, importRequest.Domain, "partial")
 		return grabImportResult{FailedTotal: spider.unresolvedFailedTotal(), FailedURLs: spider.failedResourceURLList(), FailedReasons: spider.failedResourceReasonMap()}, persistErr
 	}
 	if storeErr := a.storeWholeSiteImportedPages(ctx, importRequest.Domain, importedPages); storeErr != nil {
 		_ = a.applyDomainStorageDelta(ctx, importRequest.Domain, -pageDelta, -publishedPageDelta, -revisionDelta, -fileDelta, -publishedStaticDelta)
+		_ = crawler.SetImportFrontierRunState(ctx, a.db, importRequest.ImportID, importRequest.Domain, "partial")
 		return grabImportResult{FailedTotal: spider.unresolvedFailedTotal(), FailedURLs: spider.failedResourceURLList(), FailedReasons: spider.failedResourceReasonMap()}, storeErr
+	}
+	for _, pageKey := range completedPageKeys {
+		if stateErr := crawler.UpdateImportFrontierPageCursor(ctx, a.db, importRequest.ImportID, importRequest.Domain, pageKey, 0, "done"); stateErr != nil {
+			_ = crawler.SetImportFrontierRunState(ctx, a.db, importRequest.ImportID, importRequest.Domain, "partial")
+			return grabImportResult{}, stateErr
+		}
+	}
+	frontierStats, statsErr := crawler.ImportFrontierStatsForRun(ctx, a.db, importRequest.ImportID, importRequest.Domain)
+	if statsErr != nil {
+		_ = crawler.SetImportFrontierRunState(ctx, a.db, importRequest.ImportID, importRequest.Domain, "partial")
+		return grabImportResult{}, statsErr
+	}
+	if frontierStats.PendingPages == 0 {
+		if cleanupErr := crawler.FinishImportFrontier(ctx, a.db, importRequest.ImportID, importRequest.Domain); cleanupErr != nil {
+			return grabImportResult{}, cleanupErr
+		}
+		a.rebuildDomainStorageUsage(ctx, importRequest.Domain)
+	} else {
+		_ = crawler.SetImportFrontierRunState(ctx, a.db, importRequest.ImportID, importRequest.Domain, "partial")
 	}
 	a.rebuildDomainStorageUsage(ctx, importRequest.Domain)
 	if a.grabTracker != nil {
 		stage := "done"
-		if spider.unresolvedFailedTotal() > 0 {
+		if spider.unresolvedFailedTotal() > 0 || frontierStats.PendingPages > 0 {
 			stage = "partial"
 		}
 		a.grabTracker.publish(spider.finalProgressEvent(importRequest.ProgressToken, stage))
 	}
-	return grabImportResult{RedirectPath: cleanPath(importRequest.PagePath), FailedTotal: spider.unresolvedFailedTotal(), FailedURLs: spider.failedResourceURLList(), FailedReasons: spider.failedResourceReasonMap()}, nil
+	result := grabImportResult{RedirectPath: cleanPath(importRequest.PagePath), FailedTotal: spider.unresolvedFailedTotal(), FailedURLs: spider.failedResourceURLList(), FailedReasons: spider.failedResourceReasonMap(), RemainingPages: frontierStats.PendingPages}
+	if frontierStats.PendingPages > 0 {
+		result.ImportID = importRequest.ImportID
+		result.FailedTotal += frontierStats.PendingPages
+	}
+	return result, nil
+}
+
+func (a *App) wholeSiteImportQueueBudget(ctx context.Context, domain string) int64 {
+	usage := a.storedDomainStorageUsage(ctx, domain)
+	queueBudget := usage.LimitBytes / 20
+	if queueBudget > wholeSiteImportQueueMaximumBytes {
+		return wholeSiteImportQueueMaximumBytes
+	}
+	return queueBudget
+}
+
+func sameWholeSiteImportOrigin(storedURL, requestedURL *url.URL) bool {
+	if storedURL == nil || requestedURL == nil {
+		return false
+	}
+	return strings.EqualFold(storedURL.Scheme, requestedURL.Scheme) && strings.EqualFold(storedURL.Host, requestedURL.Host)
 }
 
 func detectImportedPageTemplates(importedPages []wholeSiteImportedPage) ([]wholeSiteImportedPage, error) {
@@ -14774,6 +15005,8 @@ func (a *App) storeWholeSiteImportedPages(ctx context.Context, domain string, im
 	for _, importedPage := range importedPages {
 		pagePath := cleanPath(importedPage.LocalPath)
 		pageHTML := importedPage.HTML
+		var previousHTML string
+		_ = a.db.QueryRowContext(ctx, `SELECT html FROM pages WHERE domain=? AND path=?`, domain, pagePath).Scan(&previousHTML)
 		a.clearPageRedirectSource(ctx, domain, pagePath)
 		if _, err := a.db.ExecContext(ctx, `INSERT OR REPLACE INTO pages(domain,path,title,html,published) VALUES(?,?,?,?,1)`, domain, pagePath, pagePath, pageHTML); err != nil {
 			return fmt.Errorf("store imported page %s: %w", pagePath, err)
@@ -14784,8 +15017,10 @@ func (a *App) storeWholeSiteImportedPages(ctx context.Context, domain string, im
 			}
 			a.writePublishedStaticHTML(domain, pagePath, pageHTML)
 		}
-		if _, err := a.db.ExecContext(ctx, `INSERT INTO revisions(domain,page_path,html,created_at) VALUES(?,?,?,?)`, domain, pagePath, pageHTML, time.Now().Format(time.RFC3339)); err != nil {
-			return fmt.Errorf("store imported page revision %s: %w", pagePath, err)
+		if previousHTML != pageHTML {
+			if _, err := a.db.ExecContext(ctx, `INSERT INTO revisions(domain,page_path,html,created_at) VALUES(?,?,?,?)`, domain, pagePath, pageHTML, time.Now().Format(time.RFC3339)); err != nil {
+				return fmt.Errorf("store imported page revision %s: %w", pagePath, err)
+			}
 		}
 	}
 	return nil
@@ -14804,7 +15039,9 @@ func (a *App) estimateImportedPagesStorageDelta(ctx context.Context, domain stri
 		var previousStoredHTML string
 		_ = a.db.QueryRowContext(ctx, `SELECT html FROM pages WHERE domain=? AND path=?`, domain, pagePath).Scan(&previousStoredHTML)
 		pageDelta += newHTMLBytes - int64(len([]byte(previousStoredHTML)))
-		revisionDelta += newHTMLBytes
+		if previousStoredHTML != pageHTML {
+			revisionDelta += newHTMLBytes
+		}
 		if frozenDomain {
 			continue
 		}
@@ -22149,11 +22386,11 @@ func (a *App) pullSecurityReputationWithTimeout(stop <-chan struct{}) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	request := serviceMailRequest{
-		Version:      1,
-		CodeKind:     "security_reputation",
+		Version:       1,
+		CodeKind:      "security_reputation",
 		SecurityQuery: true,
-		LanguageCode: "en",
-		CreatedAt:    time.Now().UTC().Format(time.RFC3339),
+		LanguageCode:  "en",
+		CreatedAt:     time.Now().UTC().Format(time.RFC3339),
 	}
 	response, err := a.sendSecurityNetChanRequestWithResponse(ctx, &request)
 	if err != nil {
@@ -27239,7 +27476,7 @@ func terminalReset() string {
 }
 
 func (usage domainStorageUsage) totalBytes() int64 {
-	return usage.PageBytes + usage.PublishedPageBytes + usage.RevisionBytes + usage.FileBytes + usage.PublishedStaticBytes
+	return usage.PageBytes + usage.PublishedPageBytes + usage.RevisionBytes + usage.FileBytes + usage.PublishedStaticBytes + usage.ImportQueueBytes
 }
 
 func (a *App) serverControlDBPath() string {
@@ -27507,7 +27744,7 @@ func (a *App) domainStorageUsage(ctx context.Context, domain string) domainStora
 	a.rebuildDomainStorageUsage(ctx, domain)
 	a.ensureDomainStorageUsageRow(ctx, domain)
 	usage := domainStorageUsage{LimitBytes: defaultDomainStorageLimitBytes}
-	_ = a.db.QueryRowContext(ctx, `SELECT page_bytes,published_page_bytes,revision_bytes,file_bytes,published_static_bytes,limit_bytes FROM domain_storage_usage WHERE domain=?`, domain).Scan(&usage.PageBytes, &usage.PublishedPageBytes, &usage.RevisionBytes, &usage.FileBytes, &usage.PublishedStaticBytes, &usage.LimitBytes)
+	_ = a.db.QueryRowContext(ctx, `SELECT page_bytes,published_page_bytes,revision_bytes,file_bytes,published_static_bytes,COALESCE(import_queue_bytes,0),limit_bytes FROM domain_storage_usage WHERE domain=?`, domain).Scan(&usage.PageBytes, &usage.PublishedPageBytes, &usage.RevisionBytes, &usage.FileBytes, &usage.PublishedStaticBytes, &usage.ImportQueueBytes, &usage.LimitBytes)
 	if usage.LimitBytes <= 0 {
 		usage.LimitBytes = defaultDomainStorageLimitBytes
 	}
@@ -27516,7 +27753,7 @@ func (a *App) domainStorageUsage(ctx context.Context, domain string) domainStora
 
 func (a *App) storedDomainStorageUsage(ctx context.Context, domain string) domainStorageUsage {
 	usage := domainStorageUsage{LimitBytes: defaultDomainStorageLimitBytes}
-	_ = a.db.QueryRowContext(ctx, `SELECT page_bytes,published_page_bytes,revision_bytes,file_bytes,published_static_bytes,limit_bytes FROM domain_storage_usage WHERE domain=?`, domain).Scan(&usage.PageBytes, &usage.PublishedPageBytes, &usage.RevisionBytes, &usage.FileBytes, &usage.PublishedStaticBytes, &usage.LimitBytes)
+	_ = a.db.QueryRowContext(ctx, `SELECT page_bytes,published_page_bytes,revision_bytes,file_bytes,published_static_bytes,COALESCE(import_queue_bytes,0),limit_bytes FROM domain_storage_usage WHERE domain=?`, domain).Scan(&usage.PageBytes, &usage.PublishedPageBytes, &usage.RevisionBytes, &usage.FileBytes, &usage.PublishedStaticBytes, &usage.ImportQueueBytes, &usage.LimitBytes)
 	if usage.LimitBytes <= 0 {
 		usage.LimitBytes = defaultDomainStorageLimitBytes
 	}
@@ -27551,7 +27788,7 @@ WHERE domain=?
   AND revision_bytes+?>=0
   AND file_bytes+?>=0
   AND published_static_bytes+?>=0
-  AND page_bytes+published_page_bytes+revision_bytes+file_bytes+published_static_bytes+?<=limit_bytes`,
+  AND page_bytes+published_page_bytes+revision_bytes+file_bytes+published_static_bytes+COALESCE(import_queue_bytes,0)+?<=limit_bytes`,
 			pageDelta, publishedPageDelta, revisionDelta, fileDelta, publishedStaticDelta, now, domain,
 			pageDelta, publishedPageDelta, revisionDelta, fileDelta, publishedStaticDelta, totalDelta)
 		if err != nil {
@@ -27646,9 +27883,11 @@ func (a *App) rebuildDomainStorageUsage(ctx context.Context, domain string) {
 	revisionBytes := a.sumHTMLColumnBytes(ctx, `SELECT html FROM revisions WHERE domain=?`, domain)
 	fileBytes := a.directorySizeInsideStorage(a.domainFilesDirForDomain(domain)) + a.directorySizeInsideStorage(a.domainChrootRootDir(domain))
 	publishedStaticBytes := a.directorySizeInsideStorage(a.domainStaticDir(domain))
+	var importQueueBytes int64
+	_ = a.db.QueryRowContext(ctx, `SELECT COALESCE(SUM(storage_bytes),0) FROM whole_site_import_pages WHERE domain=?`, domain).Scan(&importQueueBytes)
 	a.ensureDomainStorageUsageRow(ctx, domain)
-	_, _ = a.db.ExecContext(ctx, `UPDATE domain_storage_usage SET page_bytes=?, published_page_bytes=?, revision_bytes=?, file_bytes=?, published_static_bytes=?, updated_at=?, limit_bytes=COALESCE(NULLIF(limit_bytes,0),?) WHERE domain=?`,
-		pageBytes, publishedPageBytes, revisionBytes, fileBytes, publishedStaticBytes, time.Now().UTC().Format(time.RFC3339), defaultDomainStorageLimitBytes, domain)
+	_, _ = a.db.ExecContext(ctx, `UPDATE domain_storage_usage SET page_bytes=?, published_page_bytes=?, revision_bytes=?, file_bytes=?, published_static_bytes=?, import_queue_bytes=?, updated_at=?, limit_bytes=COALESCE(NULLIF(limit_bytes,0),?) WHERE domain=?`,
+		pageBytes, publishedPageBytes, revisionBytes, fileBytes, publishedStaticBytes, importQueueBytes, time.Now().UTC().Format(time.RFC3339), defaultDomainStorageLimitBytes, domain)
 }
 
 func (a *App) sumHTMLColumnBytes(ctx context.Context, query string, domain string) int64 {
@@ -28906,6 +29145,8 @@ func siteCopyMenuTexts(translations map[string]string) map[string]string {
 		"downloadFailedRetry":       translationOrDefault(translations, "missing_download_failed_retry", "Download failed. Try again."),
 		"partialImportRetry":        translationOrDefault(translations, "missing_partial_import_retry", "Some resources failed. You can retry."),
 		"retryRemaining":            translationOrDefault(translations, "missing_retry_remaining", "Retry remaining"),
+		"continueImportPages":       translationOrDefault(translations, "site_copy_continue_import_pages", "Continue import"),
+		"importPagesRemain":         translationOrDefault(translations, "site_copy_import_pages_remain", "Pages remain in the saved import queue."),
 		"retryNextIn":               translationOrDefault(translations, "site_copy_retry_next_in", "Next retry in"),
 		"retrySecondsSuffix":        translationOrDefault(translations, "site_copy_retry_seconds_suffix", "s"),
 		"finishImport":              translationOrDefault(translations, "site_copy_finish_import", "Finish import"),

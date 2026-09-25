@@ -415,6 +415,10 @@
     previewTokenFieldElement.type = 'hidden';
     previewTokenFieldElement.name = 'preview_token';
     formElement.appendChild(previewTokenFieldElement);
+    const resumeImportFieldElement = document.createElement('input');
+    resumeImportFieldElement.type = 'hidden';
+    resumeImportFieldElement.name = 'resume_import_id';
+    formElement.appendChild(resumeImportFieldElement);
 
     const primaryRowElement = createElement('div', 'SiteBrushCopySitePrimaryRow');
     const sourceUrlElement = createElement('input', 'SiteBrushCopySiteInput');
@@ -521,6 +525,8 @@
     let downloadProgressModel = null;
     let retryWasAttempted = false;
     let partialImportCanRetry = false;
+    let resumeImportID = '';
+    let remainingImportPages = 0;
     let requestIsRunning = false;
     let progressWebSocketClosedIntentionally = false;
     let progressWebSocketFailureHandled = false;
@@ -529,6 +535,44 @@
     let activeDownloadEndpoint = '?grab';
     let activeGrabToken = '';
     let downloadCancelRequested = false;
+
+    function pendingImportStorageKey() {
+      return 'sitebrush.whole-site-import.' + window.location.host + '.' + targetPath;
+    }
+
+    function savePendingImport(importID, sourceURL, remainingPages) {
+      try {
+        if (!importID || Number(remainingPages) <= 0) {
+          window.localStorage.removeItem(pendingImportStorageKey());
+          return;
+        }
+        window.localStorage.setItem(pendingImportStorageKey(), JSON.stringify({ importID: importID, sourceURL: sourceURL, remainingPages: Number(remainingPages) }));
+      } catch (storageError) {
+        return;
+      }
+    }
+
+    function restorePendingImport() {
+      let savedImport = null;
+      try {
+        savedImport = JSON.parse(window.localStorage.getItem(pendingImportStorageKey()) || 'null');
+      } catch (storageError) {
+        return;
+      }
+      if (!savedImport || typeof savedImport.importID !== 'string' || savedImport.importID === '' || typeof savedImport.sourceURL !== 'string') {
+        return;
+      }
+      resumeImportID = savedImport.importID;
+      remainingImportPages = Math.max(0, Number(savedImport.remainingPages) || 0);
+      sourceUrlElement.value = savedImport.sourceURL;
+      wholeSiteElement.checked = true;
+      renderAutomaticTemplateOption();
+      resumeImportFieldElement.value = resumeImportID;
+      continueButtonElement.textContent = textFromConfig(configuration, 'continueImportPages', 'Continue import') + ' (' + remainingImportPages + ')';
+      continueButtonElement.classList.remove('SiteBrushCopySiteHidden');
+      setContinueButtonPrimaryAction(false);
+      setCopySiteStatus(statusElement, textFromConfig(configuration, 'importPagesRemain', 'Pages remain in the saved import queue:') + ' ' + remainingImportPages, 'warning');
+    }
 
     function renderAutomaticTemplateOption() {
       automaticTemplateOptionElement.classList.toggle('SiteBrushCopySiteHidden', !wholeSiteElement.checked);
@@ -632,7 +676,7 @@
       resourcesElement.replaceChildren();
       const sortedFailedResourceURLs = Array.from(failedResourceURLs).sort();
       setFinishImportButtonMode(true);
-      if (sortedFailedResourceURLs.length === 0) {
+      if (sortedFailedResourceURLs.length === 0 && remainingImportPages <= 0) {
         resourcesElement.classList.add('SiteBrushCopySiteHidden');
         continueButtonElement.classList.add('SiteBrushCopySiteHidden');
         partialImportCanRetry = false;
@@ -640,7 +684,7 @@
       }
       resourcesElement.classList.remove('SiteBrushCopySiteHidden');
       const titleElement = createElement('div', 'SiteBrushCopySiteResource');
-      titleElement.appendChild(createElement('span', 'SiteBrushCopySiteResourceKind', String(sortedFailedResourceURLs.length)));
+      titleElement.appendChild(createElement('span', 'SiteBrushCopySiteResourceKind', String(sortedFailedResourceURLs.length + remainingImportPages)));
       titleElement.appendChild(createElement('span', '', ''));
       titleElement.appendChild(createElement('div', 'SiteBrushCopySiteResourceURL', textFromConfig(configuration, 'failedResourcesTitle', 'Failed resources:')));
       resourcesElement.appendChild(titleElement);
@@ -659,7 +703,16 @@
         resourceRowElement.appendChild(detailsElement);
         resourcesElement.appendChild(resourceRowElement);
       }
-      continueButtonElement.textContent = textFromConfig(configuration, 'retryRemaining', 'Retry remaining');
+      if (remainingImportPages > 0) {
+        const pendingPagesElement = createElement('div', 'SiteBrushCopySiteResource');
+        pendingPagesElement.appendChild(createElement('span', 'SiteBrushCopySiteResourceKind', String(remainingImportPages)));
+        pendingPagesElement.appendChild(createElement('span', '', ''));
+        pendingPagesElement.appendChild(createElement('div', 'SiteBrushCopySiteResourceURL', textFromConfig(configuration, 'importPagesRemain', 'Pages remain in the saved import queue.')));
+        resourcesElement.appendChild(pendingPagesElement);
+      }
+      continueButtonElement.textContent = resumeImportID !== ''
+        ? textFromConfig(configuration, 'continueImportPages', 'Continue import')
+        : textFromConfig(configuration, 'retryRemaining', 'Retry remaining');
       setContinueButtonPrimaryAction(false);
       continueButtonElement.classList.remove('SiteBrushCopySiteHidden');
       partialImportCanRetry = true;
@@ -708,9 +761,15 @@
       }
       collectFailedURLs(downloadPayload);
       const failedTotal = Number(downloadPayload.failed_total) || 0;
-      if (failedTotal <= 0) {
+      resumeImportID = String(downloadPayload.import_id || '');
+      remainingImportPages = Math.max(0, Number(downloadPayload.remaining_pages) || 0);
+      resumeImportFieldElement.value = resumeImportID;
+      savePendingImport(resumeImportID, sourceUrlElement.value, remainingImportPages);
+      if (failedTotal <= 0 && remainingImportPages <= 0) {
         failedResourceURLs = new Set();
         failedResourceReasons = new Map();
+        resumeImportID = '';
+        resumeImportFieldElement.value = '';
         stopRetryCountdown();
         return false;
       }
@@ -903,6 +962,11 @@
         return;
       }
       const progressToken = randomProgressToken();
+      if (resumeImportID !== '') {
+        resumeImportID = '';
+        remainingImportPages = 0;
+        resumeImportFieldElement.value = '';
+      }
       tokenFieldElement.value = progressToken;
       previewTokenFieldElement.value = '';
       activeGrabToken = progressToken;
@@ -954,11 +1018,11 @@
     }
 
     function startDownload() {
-      if (!previewPayload) {
+      if (!previewPayload && resumeImportID === '') {
         requestPreview();
         return;
       }
-      if (previewPayload.single_page_required) {
+      if (previewPayload && previewPayload.single_page_required) {
         wholeSiteElement.checked = false;
         invalidatePreview();
         requestPreview();
@@ -969,8 +1033,16 @@
       activeGrabToken = progressToken;
       downloadCancelRequested = false;
       downloadFinishedWithErrors = false;
-      const retryOnlyFailedResources = partialImportCanRetry && failedResourceURLs.size > 0;
-      if (retryOnlyFailedResources) {
+      const continuingWholeSiteImport = resumeImportID !== '';
+      const retryOnlyFailedResources = !continuingWholeSiteImport && partialImportCanRetry && failedResourceURLs.size > 0;
+      if (continuingWholeSiteImport) {
+        retryWasAttempted = true;
+        partialImportCanRetry = false;
+        activeDownloadEndpoint = retryQuery;
+        clearSelectionFields(formElement);
+        resumeImportFieldElement.value = resumeImportID;
+        downloadProgressModel = buildRetryProgressModel(new Set());
+      } else if (retryOnlyFailedResources) {
         retryWasAttempted = true;
         partialImportCanRetry = false;
         activeDownloadEndpoint = retryQuery;
@@ -1054,7 +1126,14 @@
       closeModal();
     });
     continueButtonElement.addEventListener('click', startDownload);
-    sourceUrlElement.addEventListener('input', invalidatePreview);
+    sourceUrlElement.addEventListener('input', function onSourceURLChange() {
+      if (resumeImportID !== '') {
+        resumeImportID = '';
+        remainingImportPages = 0;
+        resumeImportFieldElement.value = '';
+      }
+      invalidatePreview();
+    });
     sourceIPElement.addEventListener('input', invalidatePreview);
     sourceLanguageElement.addEventListener('change', invalidatePreview);
     wholeSiteElement.addEventListener('change', renderAutomaticTemplateOption);
@@ -1065,6 +1144,7 @@
       clearSelectionFields(formElement);
       requestPreview();
     });
+    restorePendingImport();
     sourceUrlElement.focus();
     if (sourceUrlElement.value !== '') {
       sourceUrlElement.select();

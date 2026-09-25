@@ -9596,6 +9596,101 @@ func TestGrabPageRewritesDynamicImageURLWithQueryAcrossWholeSiteImport(t *testin
 	}
 }
 
+func TestWholeSiteImportResumesSavedFrontierAfterQueueQuotaIncreases(t *testing.T) {
+	application, rawDatabase := newTestApplication(t)
+	if _, err := rawDatabase.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "admin@example.com", "old"); err != nil {
+		t.Fatal(err)
+	}
+	application.ensureDomainStorageUsageRow(context.Background(), "localhost")
+	if _, err := rawDatabase.Exec(`UPDATE domain_storage_usage SET limit_bytes=? WHERE domain=?`, 15000, "localhost"); err != nil {
+		t.Fatal(err)
+	}
+	const sourceURL = "http://resume.example/"
+	const firstChildURL = "http://resume.example/first"
+	const secondChildURL = "http://resume.example/second"
+	rootHTML := `<!doctype html><html><body><a href="/first">First</a><a href="/second">Second</a></body></html>`
+	previousGrabHTTPClient := newGrabHTTPClient
+	newGrabHTTPClient = func() *http.Client {
+		return &http.Client{Transport: fakeGrabTransport{responses: map[string]fakeGrabResponse{
+			sourceURL:      {contentType: "text/html", body: rootHTML},
+			firstChildURL:  {contentType: "text/html", body: `<!doctype html><html><body>First</body></html>`},
+			secondChildURL: {contentType: "text/html", body: `<!doctype html><html><body>Second</body></html>`},
+		}}}
+	}
+	defer func() { newGrabHTTPClient = previousGrabHTTPClient }()
+	adminCookie := newAdminSessionCookie(t, application, "admin@example.com")
+	firstRequestBody := url.Values{"path": {"/copy"}, "source_url": {sourceURL}, "copy_whole_site": {"1"}}
+	firstRequest := httptest.NewRequest(http.MethodPost, "http://localhost:8080/copy?grab", strings.NewReader(firstRequestBody.Encode()))
+	firstRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	firstRequest.Header.Set("Accept", "application/json")
+	firstRequest.AddCookie(adminCookie)
+	firstResponse := httptest.NewRecorder()
+	application.route(firstResponse, firstRequest)
+	if firstResponse.Code != http.StatusOK {
+		t.Fatalf("first import status = %d, body=%q", firstResponse.Code, firstResponse.Body.String())
+	}
+	var partialImport grabImportResult
+	if err := json.Unmarshal(firstResponse.Body.Bytes(), &partialImport); err != nil {
+		t.Fatalf("decode partial import response: %v", err)
+	}
+	if partialImport.ImportID == "" || partialImport.RemainingPages != 1 {
+		t.Fatalf("partial import did not preserve its remaining page: %+v", partialImport)
+	}
+	if _, err := crawler.FindImportFrontier(context.Background(), rawDatabase, partialImport.ImportID, "beta.example"); err == nil {
+		t.Fatal("another site could read this site's saved import frontier")
+	}
+	wrongSourceBody := url.Values{"path": {"/copy"}, "source_url": {"http://attacker.example/"}, "resume_import_id": {partialImport.ImportID}}
+	wrongSourceRequest := httptest.NewRequest(http.MethodPost, "http://localhost:8080/copy?grab_retry", strings.NewReader(wrongSourceBody.Encode()))
+	wrongSourceRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	wrongSourceRequest.Header.Set("Accept", "application/json")
+	wrongSourceRequest.AddCookie(adminCookie)
+	wrongSourceResponse := httptest.NewRecorder()
+	application.route(wrongSourceResponse, wrongSourceRequest)
+	if wrongSourceResponse.Code != http.StatusBadRequest {
+		t.Fatalf("resume from another source status = %d, body=%q", wrongSourceResponse.Code, wrongSourceResponse.Body.String())
+	}
+	if _, err := rawDatabase.Exec(`UPDATE domain_storage_usage SET limit_bytes=? WHERE domain=?`, 100000, "localhost"); err != nil {
+		t.Fatal(err)
+	}
+	resumeRequestBody := url.Values{"path": {"/copy"}, "source_url": {sourceURL}, "resume_import_id": {partialImport.ImportID}}
+	resumeRequest := httptest.NewRequest(http.MethodPost, "http://localhost:8080/copy?grab_retry", strings.NewReader(resumeRequestBody.Encode()))
+	resumeRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	resumeRequest.Header.Set("Accept", "application/json")
+	resumeRequest.AddCookie(adminCookie)
+	resumeResponse := httptest.NewRecorder()
+	application.route(resumeResponse, resumeRequest)
+	if resumeResponse.Code != http.StatusOK {
+		t.Fatalf("resume import status = %d, body=%q", resumeResponse.Code, resumeResponse.Body.String())
+	}
+	var completedImport grabImportResult
+	if err := json.Unmarshal(resumeResponse.Body.Bytes(), &completedImport); err != nil {
+		t.Fatalf("decode resumed import response: %v", err)
+	}
+	if completedImport.ImportID != "" || completedImport.RemainingPages != 0 {
+		t.Fatalf("resumed import left pending pages: %+v", completedImport)
+	}
+	for _, importedPath := range []string{"/copy", "/copy/first", "/copy/second"} {
+		var importedHTML string
+		if err := rawDatabase.QueryRow(`SELECT html FROM pages WHERE domain=? AND path=?`, "localhost", importedPath).Scan(&importedHTML); err != nil {
+			t.Fatalf("read resumed page %s: %v", importedPath, err)
+		}
+	}
+	var reservedQueueBytes int64
+	if err := rawDatabase.QueryRow(`SELECT import_queue_bytes FROM domain_storage_usage WHERE domain=?`, "localhost").Scan(&reservedQueueBytes); err != nil {
+		t.Fatal(err)
+	}
+	if reservedQueueBytes != 0 {
+		t.Fatalf("completed import retained %d reserved queue bytes", reservedQueueBytes)
+	}
+	var rootRevisionCount int
+	if err := rawDatabase.QueryRow(`SELECT COUNT(1) FROM revisions WHERE domain=? AND page_path=?`, "localhost", "/copy").Scan(&rootRevisionCount); err != nil {
+		t.Fatal(err)
+	}
+	if rootRevisionCount != 1 {
+		t.Fatalf("resuming an unchanged page created %d revisions, want 1", rootRevisionCount)
+	}
+}
+
 func TestGrabPageUsesImageExtensionForDynamicPHPResource(t *testing.T) {
 	application, rawDB := newTestApplication(t)
 	_, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "admin@example.com", "old")

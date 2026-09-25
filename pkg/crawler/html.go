@@ -158,6 +158,56 @@ func ExtractPageLinksWithLimit(htmlSource string, baseURL, siteURL *url.URL, max
 	return pageURLs, false
 }
 
+// ExtractPageLinksFromOffset scans a bounded segment of a document's page links.
+func ExtractPageLinksFromOffset(htmlSource string, baseURL, siteURL *url.URL, offset, maximum int) ([]*url.URL, int, bool) {
+	if offset < 0 {
+		offset = 0
+	}
+	if maximum < 1 {
+		maximum = MaximumPageLinks
+	}
+	pageURLs := make([]*url.URL, 0, min(maximum, 16))
+	validLinkCount := 0
+	truncated := false
+	tokenizer := html.NewTokenizer(strings.NewReader(htmlSource))
+	for {
+		tokenType := tokenizer.Next()
+		if tokenType == html.ErrorToken {
+			break
+		}
+		if tokenType != html.StartTagToken && tokenType != html.SelfClosingTagToken {
+			continue
+		}
+		token := tokenizer.Token()
+		tagName := strings.ToLower(strings.TrimSpace(token.Data))
+		for _, attribute := range token.Attr {
+			attributeName := strings.ToLower(strings.TrimSpace(attribute.Key))
+			if !isDocumentAttribute(tagName, attributeName) {
+				continue
+			}
+			normalizedURL, blocked := NormalizeURL(attribute.Val, baseURL, ReferenceDocument)
+			if blocked || normalizedURL == "" {
+				continue
+			}
+			linkedPageURL, parseErr := url.Parse(normalizedURL)
+			if parseErr != nil || !SameHost(siteURL, linkedPageURL) || !IsPageURL(linkedPageURL) {
+				continue
+			}
+			if validLinkCount < offset {
+				validLinkCount++
+				continue
+			}
+			if validLinkCount-offset >= maximum {
+				truncated = true
+				return pageURLs, offset + maximum, truncated
+			}
+			validLinkCount++
+			pageURLs = append(pageURLs, linkedPageURL)
+		}
+	}
+	return pageURLs, offset + max(validLinkCount-offset, 0), false
+}
+
 func SameHost(leftURL, rightURL *url.URL) bool {
 	if leftURL == nil || rightURL == nil {
 		return false
