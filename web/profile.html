@@ -164,6 +164,8 @@
   <div class="profile-account-card-header">
     <h2>{{index .T "admin_ip_allowlist_title"}}</h2>
     <p>{{index .T "admin_ip_allowlist_help"}}</p>
+  </div>
+  <div class="profile-account-controls">
     <form method="post" action="?profile" class="auth-trusted-row">
       <input type="hidden" name="account_csrf" value="{{.AccountCSRF}}">
       {{if .AdminIPProtectionEnabled}}
@@ -190,11 +192,11 @@
     </form>
   </div>
   <div class="profile-account-list">
-    {{range .AdminAllowedIPs}}<form method="post" action="?profile" class="auth-trusted-row">
+    {{range .AdminAllowedIPs}}<form method="post" action="?profile" class="auth-trusted-row profile-ip-row">
       <input type="hidden" name="profile_action" value="admin_ip_remove">
       <input type="hidden" name="admin_ip" value="{{.Rule}}">
       <input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
-      <strong dir="ltr">{{.Rule}}</strong>{{if .Current}} <span class="account-status-inline">{{index $.T "auth_current"}}</span>{{end}}
+      <div class="profile-ip-details"><strong dir="ltr">{{.Rule}}</strong>{{if .Current}} <span class="account-status-inline">{{index $.T "auth_current"}}</span>{{end}}<span class="profile-ip-location">{{.Location}}</span></div>
       <button type="submit" {{if not .Removable}}disabled{{end}}>{{index $.T "admin_ip_remove"}}</button>
     </form>{{else}}<p class="hint">{{index .T "admin_ip_none"}}</p>{{end}}
   </div>
@@ -307,7 +309,24 @@
     <p>{{index .T "auth_trust_help"}}</p>
   </div>
   <div class="profile-account-list">
-  {{range .TrustedIPs}}<form method="post" action="?profile" class="auth-trusted-row"><input type="hidden" name="profile_action" value="revoke_ip"><input type="hidden" name="trusted_ip" value="{{.IP}}"><input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}"><strong dir="ltr">{{.IP}}{{if eq .IP "127.0.0.1"}} / localhost{{end}}</strong>{{if .Current}} <span class="account-status-inline">{{index $.T "auth_current"}}</span>{{end}}<p>{{index $.T "auth_confirmed"}}: {{.Confirmed.Format "2006-01-02 15:04 UTC"}}<br>{{index $.T "auth_last_login"}}: {{.LastLogin.Format "2006-01-02 15:04 UTC"}}<br>{{index $.T "auth_expires"}}: {{.Expires.Format "2006-01-02 15:04 UTC"}}</p><button type="submit">{{index $.T "auth_revoke"}}</button></form>{{else}}<p class="hint">{{index .T "auth_no_trusted"}}</p>{{end}}
+  {{range .TrustedIPs}}
+    <form method="post" action="?profile" class="auth-trusted-row profile-ip-row">
+      <input type="hidden" name="profile_action" value="revoke_ip">
+      <input type="hidden" name="trusted_ip" value="{{.IP}}">
+      <input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
+      <div class="profile-ip-details">
+        <strong dir="ltr">{{.IP}}{{if eq .IP "127.0.0.1"}} / localhost{{end}}</strong>
+        {{if .Current}}<span class="account-status-inline">{{index $.T "auth_current"}}</span>{{end}}
+        <span class="profile-ip-location">{{.Location}}</span>
+        <p>{{index $.T "auth_confirmed"}}: {{.Confirmed.Format "2006-01-02 15:04 UTC"}}<br>
+          {{index $.T "auth_last_login"}}: {{.LastLogin.Format "2006-01-02 15:04 UTC"}}<br>
+          {{index $.T "auth_expires"}}: {{.Expires.Format "2006-01-02 15:04 UTC"}}</p>
+      </div>
+      <button type="submit">{{index $.T "auth_revoke"}}</button>
+    </form>
+  {{else}}
+    <p class="hint">{{index .T "auth_no_trusted"}}</p>
+  {{end}}
   </div>
 </section>
 </div>{{end}}

@@ -458,6 +458,47 @@ type adminAllowedIPView struct {
 	Rule      string
 	Current   bool
 	Removable bool
+	Location  string
+}
+
+type profileTrustedIPView struct {
+	IP                            string
+	Confirmed, LastLogin, Expires time.Time
+	Current                       bool
+	Location                      string
+}
+
+func (a *App) profileIPGeography(ctx context.Context, ipRule string, translations map[string]string) string {
+	if _, err := netip.ParsePrefix(strings.TrimSpace(ipRule)); err == nil {
+		return translationOrDefault(translations, "profile_ip_subnet_location", "Location varies within this subnet")
+	}
+	address, err := netip.ParseAddr(strings.TrimSpace(ipRule))
+	if err != nil || a.geoIP == nil {
+		return translationOrDefault(translations, "profile_ip_location_unknown", "Geographic location unavailable")
+	}
+	location, found := a.geoIP.Lookup(ctx, address.String())
+	if !found {
+		return translationOrDefault(translations, "profile_ip_location_unknown", "Geographic location unavailable")
+	}
+	locationParts := []string{}
+	if city := strings.TrimSpace(location.City); city != "" {
+		locationParts = append(locationParts, city)
+	}
+	if region := strings.TrimSpace(location.Region); region != "" && region != strings.TrimSpace(location.City) {
+		locationParts = append(locationParts, region)
+	}
+	countryCode := strings.ToUpper(strings.TrimSpace(location.CountryCode))
+	if countryCode != "" {
+		if country, known := analyticsCountryLocations[countryCode]; known {
+			locationParts = append(locationParts, country.Name)
+		} else {
+			locationParts = append(locationParts, countryCode)
+		}
+	}
+	if len(locationParts) == 0 {
+		return translationOrDefault(translations, "profile_ip_location_unknown", "Geographic location unavailable")
+	}
+	return strings.Join(locationParts, ", ")
 }
 
 func profileEmailChange(currentEmail, nextEmail string, step int) profileEmailChangeView {
@@ -20199,12 +20240,24 @@ func (a *App) renderProfilePage(w http.ResponseWriter, r *http.Request, email, s
 		codeRecipient = strings.TrimSpace(emailChange.CurrentEmail)
 	}
 	passwordWebmailProvider := webmailProviderForAddress(codeRecipient)
-	trustedIPs := []accountauth.TrustedIP{}
+	trustedIPs := []profileTrustedIPView{}
 	adminIPRules := []string{}
 	adminAllowedIPs := []adminAllowedIPView{}
 	adminIPCandidates := []string{}
 	adminIPProtectionEnabled := false
 	adminStealthEnabled := false
+	geoIPContext, cancelGeoIPLookups := context.WithTimeout(r.Context(), 350*time.Millisecond)
+	defer cancelGeoIPLookups()
+	geographyByIP := map[string]string{}
+	geographyForIP := func(ipRule string) string {
+		cacheKey := strings.TrimSpace(ipRule)
+		if geography, found := geographyByIP[cacheKey]; found {
+			return geography
+		}
+		geography := a.profileIPGeography(geoIPContext, cacheKey, translations)
+		geographyByIP[cacheKey] = geography
+		return geography
+	}
 	if authenticated {
 		var enabled int
 		if a.db.QueryRowContext(r.Context(), `SELECT COUNT(1) FROM admin_ip_policies WHERE domain=? AND email=?`, domain, accountEmail).Scan(&enabled) == nil {
@@ -20216,7 +20269,7 @@ func (a *App) renderProfilePage(w http.ResponseWriter, r *http.Request, email, s
 		rows, err := a.db.QueryContext(r.Context(), `SELECT client_ip,confirmed_at,last_login FROM account_trusted_ips WHERE domain=? AND email=? AND last_login>? ORDER BY last_login DESC`, a.siteDomain(r.Context(), r), accountEmail, time.Now().Add(-accountauth.TrustTTL).Unix())
 		if err == nil {
 			for rows.Next() {
-				var entry accountauth.TrustedIP
+				entry := profileTrustedIPView{}
 				var confirmed, last int64
 				if rows.Scan(&entry.IP, &confirmed, &last) != nil {
 					continue
@@ -20228,6 +20281,9 @@ func (a *App) renderProfilePage(w http.ResponseWriter, r *http.Request, email, s
 				trustedIPs = append(trustedIPs, entry)
 			}
 			rows.Close()
+		}
+		for trustedIPIndex := range trustedIPs {
+			trustedIPs[trustedIPIndex].Location = geographyForIP(trustedIPs[trustedIPIndex].IP)
 		}
 		allowedRows, allowedErr := a.db.QueryContext(r.Context(), `SELECT client_ip FROM admin_allowed_ips WHERE domain=? AND email=? ORDER BY added_at,client_ip`, domain, accountEmail)
 		if allowedErr == nil {
@@ -20245,6 +20301,7 @@ func (a *App) renderProfilePage(w http.ResponseWriter, r *http.Request, email, s
 				Rule:      allowedRule,
 				Current:   adminIPRuleContains(allowedRule, currentIP),
 				Removable: len(adminIPRules) > 1 && !adminIPRuleContains(allowedRule, currentIP),
+				Location:  geographyForIP(allowedRule),
 			})
 		}
 		candidateRows, candidateErr := a.db.QueryContext(r.Context(), `SELECT client_ip FROM account_session_ips WHERE domain=? AND email=? GROUP BY client_ip ORDER BY MAX(used_at) DESC`, domain, accountEmail)
