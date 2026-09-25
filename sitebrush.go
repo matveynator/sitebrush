@@ -8998,6 +8998,11 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 		a.awaitAccountHTTPS(w, r)
 		return
 	}
+	if r.Method != http.MethodGet && r.Method != http.MethodHead && r.Method != http.MethodOptions &&
+		hasSitebrushSessionCookie(r) && !httpsecurity.SameOriginMutationAllowed(r) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
 	publicTrialEndpoint := publicTrialEndpointFromRequest(r)
 	if a.preparePublicTrialEndpoint(w, r, publicTrialEndpoint) {
 		return
