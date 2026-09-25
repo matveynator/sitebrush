@@ -17149,6 +17149,63 @@ func TestSecurityBoundaryMissingPageEscapesReflectedPath(t *testing.T) {
 	}
 }
 
+func TestSecurityBoundaryAdminResponsesCannotBeFramedOrCached(t *testing.T) {
+	application, rawDB := newTestApplication(t)
+	if _, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "admin@example.com", "password"); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, testCase := range []struct {
+		name   string
+		path   string
+		cookie bool
+	}{
+		{name: "login", path: "/?login"},
+		{name: "account", path: "/?profile", cookie: true},
+		{name: "editor", path: "/?visual", cookie: true},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodGet, "http://localhost:8080"+testCase.path, nil)
+			if testCase.cookie {
+				request.AddCookie(newAdminSessionCookie(t, application, "admin@example.com"))
+			}
+			response := httptest.NewRecorder()
+			application.securityResponseHeadersMiddleware(http.HandlerFunc(application.route)).ServeHTTP(response, request)
+
+			for headerName, expected := range map[string]string{
+				"X-Content-Type-Options":  "nosniff",
+				"X-Frame-Options":         "DENY",
+				"Content-Security-Policy": "frame-ancestors 'none'",
+				"Referrer-Policy":         "no-referrer",
+			} {
+				if actual := response.Header().Get(headerName); actual != expected {
+					t.Errorf("%s = %q, want %q", headerName, actual, expected)
+				}
+			}
+			if !strings.Contains(strings.ToLower(response.Header().Get("Cache-Control")), "no-store") {
+				t.Errorf("account/admin response is cacheable: Cache-Control=%q", response.Header().Get("Cache-Control"))
+			}
+		})
+	}
+}
+
+func TestSecurityBoundaryPublishedPagesKeepTheirOwnFramingPolicy(t *testing.T) {
+	application, _ := newTestApplication(t)
+	request := httptest.NewRequest(http.MethodGet, "http://localhost:8080/public-content", nil)
+	response := httptest.NewRecorder()
+	application.securityResponseHeadersMiddleware(http.HandlerFunc(application.route)).ServeHTTP(response, request)
+
+	if actual := response.Header().Get("X-Content-Type-Options"); actual != "nosniff" {
+		t.Fatalf("public response X-Content-Type-Options = %q, want nosniff", actual)
+	}
+	if actual := response.Header().Get("X-Frame-Options"); actual != "" {
+		t.Fatalf("public content framing policy was changed by admin isolation: %q", actual)
+	}
+	if actual := response.Header().Get("Content-Security-Policy"); actual != "" {
+		t.Fatalf("public content CSP was changed by admin isolation: %q", actual)
+	}
+}
+
 func TestSecurityBoundaryServiceEndpointsRejectMalformedJSON(t *testing.T) {
 	for _, endpoint := range []struct {
 		name string
