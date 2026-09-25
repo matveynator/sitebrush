@@ -15514,6 +15514,9 @@ func TestAnalyticsSecurityObservesControllerAndPersistsSummary(t *testing.T) {
 	go func() { defer close(done); app.runSecurityAnalytics(stop) }()
 	defer func() { close(stop); <-done }()
 	handler := app.analyticsMiddleware(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(401); _, _ = w.Write([]byte("denied")) }))
+	normalRequest := httptest.NewRequest("GET", "http://localhost/", nil)
+	normalRequest.RemoteAddr = "192.0.2.8:12345"
+	handler.ServeHTTP(httptest.NewRecorder(), normalRequest)
 	request := httptest.NewRequest("POST", "http://localhost/.env?login&password=never-store", nil)
 	request.RemoteAddr = "192.0.2.8:12345"
 	handler.ServeHTTP(httptest.NewRecorder(), request)
@@ -15528,6 +15531,26 @@ func TestAnalyticsSecurityObservesControllerAndPersistsSummary(t *testing.T) {
 			if len(state.Incidents) == 1 {
 				if strings.Contains(stored.Text, "never-store") || state.Incidents[0].IP != "192.0.2.8" || state.Incidents[0].Examples[0].Bytes != 6 {
 					t.Fatalf("unsafe or incomplete incident: %s", stored.Text)
+				}
+				dailyActivity := 0
+				for _, count := range state.ActivityDays {
+					dailyActivity += count
+				}
+				hourlyActivity := 0
+				for _, count := range state.ActivityHours {
+					hourlyActivity += count
+				}
+				if dailyActivity != 2 || hourlyActivity != 2 {
+					t.Fatalf("activity calendar missed ordinary or suspicious traffic: daily=%d hourly=%d", dailyActivity, hourlyActivity)
+				}
+				incidentTypeCount := 0
+				for _, dailyCategories := range state.ActivityTypes {
+					for _, count := range dailyCategories {
+						incidentTypeCount += count
+					}
+				}
+				if incidentTypeCount != 1 {
+					t.Fatalf("daily problem type count = %d, want one incident", incidentTypeCount)
 				}
 				break
 			}
