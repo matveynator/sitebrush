@@ -36,6 +36,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -50,6 +51,7 @@ import (
 	"github.com/matveynator/sitebrush/v2/pkg/hostingandsupport"
 	"github.com/matveynator/sitebrush/v2/pkg/httpsecurity"
 	"github.com/matveynator/sitebrush/v2/pkg/mailout"
+	"github.com/matveynator/sitebrush/v2/pkg/securitysync"
 	"github.com/matveynator/sitebrush/v2/pkg/sitebrushtemplate"
 	"golang.org/x/net/dns/dnsmessage"
 	"golang.org/x/net/websocket"
@@ -15538,3 +15540,1272 @@ func TestPasswordPromptPreventsIndexing(t *testing.T) {
 		t.Fatalf("X-Robots-Tag = %q", got)
 	}
 }
+
+
+// BEGIN sitebrush coverage tests.
+
+type sqliteCodedError int
+
+func (e sqliteCodedError) Error() string { return "sqlite failure" }
+func (e sqliteCodedError) Code() int     { return int(e) }
+
+func TestCoverageSiteBrushPagePathAndDefaults(t *testing.T) {
+	for _, test := range []struct{ path, want string }{
+		{"", ""}, {"/", ""}, {"/a/", "/a"}, {"/a/b", "/a"}, {"page", "/"},
+	} {
+		if got := parentPagePath(test.path); got != test.want {
+			t.Errorf("parentPagePath(%q) = %q, want %q", test.path, got, test.want)
+		}
+	}
+	application, database := newTestApplication(t)
+	if got := application.defaultHTMLForNewPage(context.Background(), "example.com", "/parent/child"); got != "<h1>New page</h1>" {
+		t.Fatalf("new page fallback = %q", got)
+	}
+	if _, err := database.Exec(`INSERT INTO pages(domain,path,title,html,published) VALUES(?,?,?,?,?)`, "example.com", "/parent", "parent", "<main>parent</main>", 0); err != nil {
+		t.Fatal(err)
+	}
+	if got := application.defaultHTMLForNewPage(context.Background(), "example.com", "/parent/child"); got != "<main>parent</main>" {
+		t.Fatalf("inherited page HTML = %q", got)
+	}
+}
+
+func TestCoverageSiteBrushStorageAndGrabHelpers(t *testing.T) {
+	for _, code := range []int{5, 6, 261, 262} {
+		if !isTransientSiteDatabaseLock(sqliteCodedError(code)) {
+			t.Errorf("sqlite code %d was not classified as a transient lock", code)
+		}
+	}
+	if isTransientSiteDatabaseLock(errors.New("locked")) || isTransientSiteDatabaseLock(nil) {
+		t.Fatal("non-SQLite lock error was classified as transient")
+	}
+	for _, test := range []struct {
+		kind siteDBWorkloadKind
+		want string
+	}{
+		{siteDBWorkloadRead, "read"}, {siteDBWorkloadWrite, "write"}, {siteDBWorkloadGeneral, "general"},
+	} {
+		if got := siteDBWorkloadName(test.kind); got != test.want {
+			t.Errorf("siteDBWorkloadName(%d) = %q, want %q", test.kind, got, test.want)
+		}
+	}
+	for _, test := range []struct{ source, ip, want string }{
+		{"localhost/page", "", "http"}, {"127.0.0.1", "", "http"}, {"example.com", "", "https"},
+		{"example.com", "8.8.8.8:80", "http"}, {"example.com", "8.8.8.8:443", "https"},
+	} {
+		if got := defaultGrabSchemeForServerIP(test.source, test.ip); got != test.want {
+			t.Errorf("defaultGrabSchemeForServerIP(%q, %q) = %q, want %q", test.source, test.ip, got, test.want)
+		}
+	}
+	if got := defaultGrabScheme("example.com/path"); got != "https" {
+		t.Errorf("defaultGrabScheme = %q", got)
+	}
+	if got := supportedGrabSourceLanguageCodes(); len(got) != 16 || got[0] != "en" {
+		t.Fatalf("supported source languages = %#v", got)
+	}
+	var output strings.Builder
+	if written, err := copyWithLimit(&output, strings.NewReader("abc"), 3); err != nil || written != 3 || output.String() != "abc" {
+		t.Fatalf("copy under limit = %d, %q, %v", written, output.String(), err)
+	}
+	output.Reset()
+	if written, err := copyWithLimit(&output, strings.NewReader("abcd"), 3); !errors.Is(err, errReadLimitExceeded) || written != 4 {
+		t.Fatalf("copy over limit = %d, %q, %v", written, output.String(), err)
+	}
+	output.Reset()
+	if written, err := copyWithLimit(&output, strings.NewReader("unlimited"), 0); err != nil || written != 9 {
+		t.Fatalf("unlimited copy = %d, %v", written, err)
+	}
+	if !isSuccessfulGrabResponse(&http.Response{StatusCode: http.StatusOK}) || isSuccessfulGrabResponse(&http.Response{StatusCode: http.StatusNotFound}) || isSuccessfulGrabResponse(nil) {
+		t.Fatal("grab response status classification failed")
+	}
+	request := httptest.NewRequest("GET", "/", nil)
+	request.Header.Set("Accept", "application/json; charset=utf-8")
+	if !wantsJSONResponse(request) {
+		t.Fatal("JSON Accept header was not recognized")
+	}
+}
+
+func TestCoverageEmailDNSSetupTranslations(t *testing.T) {
+	languages := []string{"ru", "fr", "ja", "it", "sv", "fi", "mn", "zh", "he", "fa", "de", "tr", "kk", "es", "pt", "en"}
+	for _, language := range languages {
+		view := emailDNSSetupViewForLanguage(language, "example.org", "mail@example.org", "2001:db8::1")
+		if view.Title == "" || view.Intro == "" || view.Explanation == "" || len(view.Records) != 2 {
+			t.Errorf("language %q has incomplete DNS setup view: %+v", language, view)
+		}
+		if !strings.Contains(view.Records[0].Value, "AAAA") || !strings.Contains(view.Records[1].Value, "ip6:") {
+			t.Errorf("language %q did not use IPv6 DNS records: %+v", language, view.Records)
+		}
+	}
+	defaultView := emailDNSSetupViewForLanguage("unknown", "", "", "")
+	if defaultView.Title == "" || !strings.Contains(defaultView.Records[0].Value, "example.com.") {
+		t.Fatalf("default DNS setup view = %+v", defaultView)
+	}
+}
+
+func TestCoverageAnalyticsTechnicalReportMerge(t *testing.T) {
+	addition := analyticsPreparedReport{GeneratedAt: "2026-09-24T12:00:00Z", PeriodEnd: "2026-09-25", TotalRequests: 2, PageViews: 2, AverageDurationMS: 300}
+	if got := mergeTechnicalReports(analyticsPreparedReport{}, addition); got.GeneratedAt != addition.GeneratedAt {
+		t.Fatalf("initial report merge = %+v", got)
+	}
+	current := analyticsPreparedReport{
+		GeneratedAt: "2026-09-24T11:00:00Z", PeriodStart: "2026-09-23", PeriodEnd: "2026-09-24",
+		TotalRequests: 2, PageViews: 1, AverageDurationMS: 100,
+		TopPages:     []analyticsCountRow{{Label: "/", Count: 1}},
+		SystemEvents: make([]analyticsCountRow, 32), UniqueVisitors: 9, Sessions: 7,
+		EntryPages: []analyticsCountRow{{Label: "/stale", Count: 1}},
+	}
+	addition.TopPages = []analyticsCountRow{{Label: "/", Count: 2}}
+	addition.SystemEvents = []analyticsCountRow{{Label: "latest", Count: 1}}
+	got := mergeTechnicalReports(current, addition)
+	if got.TotalRequests != 4 || got.PageViews != 3 || got.AverageDurationMS != 200 || got.TopPages[0].Count != 3 {
+		t.Fatalf("merged totals = %+v", got)
+	}
+	if got.PeriodStart != "2026-09-23" || got.PeriodEnd != addition.PeriodEnd || got.GeneratedAt != addition.GeneratedAt {
+		t.Fatalf("merged time range = %+v", got)
+	}
+	if len(got.SystemEvents) != 32 || got.SystemEvents[31].Label != "latest" || got.UniqueVisitors != 0 || got.Sessions != 0 || got.EntryPages != nil {
+		t.Fatalf("merged bounded report state = %+v", got)
+	}
+}
+
+func TestCoverageBackupReferenceRewriting(t *testing.T) {
+	for _, reference := range []string{"", "mailto:test@example.org", "TEL:123", "javascript:void(0)", "data:image/png,x", "blob:https://example.org/id", "//cdn.example.org/a.js", "https://example.org/a"} {
+		if got := rewriteBackupReference(reference, "/backup", "prefix-"); got != reference {
+			t.Errorf("blocked/external reference %q became %q", reference, got)
+		}
+	}
+	if got := rewriteBackupReference(" /images/a.png?size=1#top ", "/backup", ""); got != "/backup/images/a.png?size=1#top" {
+		t.Errorf("root relative reference = %q", got)
+	}
+	if got := rewriteBackupReference("/backup/images/a.png", "/backup", ""); got != "/backup/images/a.png" {
+		t.Errorf("already based reference = %q", got)
+	}
+	if got := rewriteBackupReference("/images/a.png", "/", ""); got != "/images/a.png" {
+		t.Errorf("root backup reference = %q", got)
+	}
+	if got := rewriteBackupReference("/p/images/a.png?x=1", "/backup", ""); got != "/p/images/a.png?x=1" {
+		t.Errorf("asset reference without prefix = %q", got)
+	}
+	if got := rewriteBackupReference("relative/page", "/backup", "prefix-"); got != "relative/page" {
+		t.Errorf("relative reference = %q", got)
+	}
+}
+
+func TestCoverageProfileCodeConfirmationTransaction(t *testing.T) {
+	application, database := newTestApplication(t)
+	ctx := context.Background()
+	if err := application.applyProfileCodeConfirmation(ctx, EmailConfirmation{}); err == nil {
+		t.Fatal("empty profile change confirmation was accepted")
+	}
+	confirmation := EmailConfirmation{Token: "missing", Domain: "example.org", CurrentEmail: "old@example.org", Email: "new@example.org"}
+	if err := application.applyProfileCodeConfirmation(ctx, confirmation); err == nil || !strings.Contains(err.Error(), "already consumed") {
+		t.Fatalf("missing confirmation error = %v", err)
+	}
+	if _, err := database.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,?)`, "example.org", "old@example.org", "old-hash", 1); err != nil {
+		t.Fatal(err)
+	}
+	confirmation.Token = "valid"
+	confirmation.Password = "new-hash"
+	confirmation.ExpiresAt = time.Now().Add(time.Hour).UTC().Format(time.RFC3339)
+	if _, err := database.Exec(`INSERT INTO email_confirmations(token,domain,action,email,password,current_email,expires_at) VALUES(?,?,?,?,?,?,?)`, confirmation.Token, confirmation.Domain, "profile_password", confirmation.Email, confirmation.Password, confirmation.CurrentEmail, confirmation.ExpiresAt); err != nil {
+		t.Fatal(err)
+	}
+	if err := application.applyProfileCodeConfirmation(ctx, confirmation); err != nil {
+		t.Fatalf("apply profile confirmation: %v", err)
+	}
+	var email, password string
+	if err := database.QueryRow(`SELECT email,password FROM users WHERE domain=?`, confirmation.Domain).Scan(&email, &password); err != nil {
+		t.Fatal(err)
+	}
+	if email != confirmation.Email || password != confirmation.Password {
+		t.Fatalf("updated account = %q %q", email, password)
+	}
+}
+
+// END sitebrush coverage tests.
+
+// BEGIN account mutation attack tests.
+
+func TestAuthAttackConcurrentEmailChangeConfirmationAppliesOnce(t *testing.T) {
+	application, database := newTestApplication(t)
+	now := time.Now().UTC()
+	const currentEmail = "owner@example.com"
+	confirmation := EmailConfirmation{
+		Token: "email-change-once", Domain: "localhost", Action: "profile",
+		Email: "owner-new@example.com", CurrentEmail: currentEmail,
+	}
+	if _, err := database.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, confirmation.Domain, currentEmail, "password"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Exec(`INSERT INTO email_confirmations(token,domain,action,email,current_email,created_at,expires_at) VALUES(?,?,?,?,?,?,?)`,
+		confirmation.Token, confirmation.Domain, confirmation.Action, confirmation.Email, confirmation.CurrentEmail,
+		now.Format(time.RFC3339), now.Add(time.Hour).Format(time.RFC3339)); err != nil {
+		t.Fatal(err)
+	}
+
+	successfulClaims := concurrentConfirmationClaims(t, func() error {
+		return application.applyProfileEmailConfirmation(context.Background(), confirmation)
+	})
+	if successfulClaims != 1 {
+		t.Fatalf("SECURITY: concurrent email-change confirmations succeeded %d times, want one", successfulClaims)
+	}
+	var updatedEmail string
+	if err := database.QueryRow(`SELECT email FROM users WHERE domain=?`, confirmation.Domain).Scan(&updatedEmail); err != nil {
+		t.Fatal(err)
+	}
+	if updatedEmail != confirmation.Email {
+		t.Fatalf("confirmed email = %q, want %q", updatedEmail, confirmation.Email)
+	}
+}
+
+func TestAuthAttackConcurrentPasswordChangeConfirmationAppliesOnce(t *testing.T) {
+	application, database := newTestApplication(t)
+	now := time.Now().UTC()
+	const currentEmail = "owner@example.com"
+	confirmation := EmailConfirmation{
+		Token: "password-change-once", Domain: "localhost", Action: "profile_password",
+		Password: "new-password", CurrentEmail: currentEmail,
+	}
+	if _, err := database.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, confirmation.Domain, currentEmail, "old-password"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Exec(`INSERT INTO email_confirmations(token,domain,action,password,current_email,created_at,expires_at) VALUES(?,?,?,?,?,?,?)`,
+		confirmation.Token, confirmation.Domain, confirmation.Action, confirmation.Password, confirmation.CurrentEmail,
+		now.Format(time.RFC3339), now.Add(time.Hour).Format(time.RFC3339)); err != nil {
+		t.Fatal(err)
+	}
+
+	successfulClaims := concurrentConfirmationClaims(t, func() error {
+		return application.applyProfileCodeConfirmation(context.Background(), confirmation)
+	})
+	if successfulClaims != 1 {
+		t.Fatalf("SECURITY: concurrent password-change confirmations succeeded %d times, want one", successfulClaims)
+	}
+	var updatedPassword string
+	if err := database.QueryRow(`SELECT password FROM users WHERE domain=? AND email=?`, confirmation.Domain, currentEmail).Scan(&updatedPassword); err != nil {
+		t.Fatal(err)
+	}
+	if updatedPassword != confirmation.Password {
+		t.Fatalf("confirmed password = %q, want %q", updatedPassword, confirmation.Password)
+	}
+}
+
+func TestAuthAttackConcurrentPasswordRecoveryAppliesOnce(t *testing.T) {
+	application, database := newTestApplication(t)
+	now := time.Now().UTC()
+	const domain, email = "localhost", "owner@example.com"
+	if _, err := database.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, domain, email, "old-password"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Exec(`INSERT INTO email_confirmations(token,domain,action,email,password,verification_code,created_at,expires_at) VALUES(?,?,?,?,?,?,?,?)`,
+		"recovery-once", domain, "recover", email, "", "123456", now.Format(time.RFC3339), now.Add(time.Hour).Format(time.RFC3339)); err != nil {
+		t.Fatal(err)
+	}
+
+	successfulClaims := concurrentConfirmationClaims(t, func() error {
+		return application.applyRecoveredPassword(context.Background(), domain, "recovery-once", email, "recovered-password")
+	})
+	if successfulClaims != 1 {
+		t.Fatalf("SECURITY: concurrent password recovery succeeded %d times, want one", successfulClaims)
+	}
+	var updatedPassword string
+	if err := database.QueryRow(`SELECT password FROM users WHERE domain=? AND email=?`, domain, email).Scan(&updatedPassword); err != nil {
+		t.Fatal(err)
+	}
+	if updatedPassword != "recovered-password" {
+		t.Fatalf("recovered password = %q", updatedPassword)
+	}
+}
+
+func concurrentConfirmationClaims(t *testing.T, claim func() error) int {
+	t.Helper()
+	const attempts = 50
+	start := make(chan struct{})
+	results := make(chan error, attempts)
+	var workers sync.WaitGroup
+	for attempt := 0; attempt < attempts; attempt++ {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			<-start
+			results <- claim()
+		}()
+	}
+	close(start)
+	workers.Wait()
+	close(results)
+	successes := 0
+	for err := range results {
+		if err == nil {
+			successes++
+		}
+	}
+	return successes
+}
+
+func TestAuthAttackConfirmationURLUsesRoutedHostAndTrustedProxyScheme(t *testing.T) {
+	request := httptest.NewRequest(http.MethodGet, "http://example.com/?recover", nil)
+	request.Host = "example.com"
+	request.RemoteAddr = "10.20.30.40:443"
+	request.Header.Set("X-Forwarded-Host", "attacker.example")
+	request.Header.Set("X-Forwarded-Proto", "https, http")
+
+	confirmationURL, err := url.Parse(emailConfirmationURL(request, "one-time-secret"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if confirmationURL.Scheme != "https" || confirmationURL.Host != "example.com" || confirmationURL.Query().Get("email_confirm") != "one-time-secret" {
+		t.Fatalf("forwarded confirmation URL = %q", confirmationURL)
+	}
+}
+
+// END account mutation attack tests.
+
+// BEGIN admin ip allowlist tests.
+
+func TestAdminIPAllowlistBootstrapsOnceAndRejectsOtherAddresses(t *testing.T) {
+	application, database := newTestApplication(t)
+	for _, statement := range []string{
+		`INSERT INTO users(domain,email,password,is_admin) VALUES('example.org','owner@example.org','secret',1)`,
+		`INSERT INTO sessions(token,user_email,created_at,client_ip,security_version) VALUES('active','example.org|owner@example.org','2026-09-25T00:00:00Z','192.0.2.1',1)`,
+	} {
+		if _, err := database.Exec(statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	firstRequest := httptest.NewRequest(http.MethodGet, "https://example.org/?profile", nil)
+	firstRequest.RemoteAddr = "192.0.2.1:1234"
+	firstRequest.AddCookie(&http.Cookie{Name: "sitebrush_session", Value: "active"})
+	if !application.enforceAdminIPAllowlist(httptest.NewRecorder(), firstRequest, "example.org") {
+		t.Fatal("bootstrap request stopped")
+	}
+	var allowedIP string
+	if err := database.QueryRow(`SELECT client_ip FROM admin_allowed_ips WHERE domain='example.org' AND email='owner@example.org'`).Scan(&allowedIP); err != nil || allowedIP != "192.0.2.1" {
+		t.Fatalf("bootstrap IP %q: %v", allowedIP, err)
+	}
+	secondRequest := httptest.NewRequest(http.MethodGet, "https://example.org/?profile", nil)
+	secondRequest.RemoteAddr = "192.0.2.2:1234"
+	secondRequest.AddCookie(&http.Cookie{Name: "sitebrush_session", Value: "active"})
+	if !application.enforceAdminIPAllowlist(httptest.NewRecorder(), secondRequest, "example.org") {
+		t.Fatal("guest request stopped")
+	}
+	if _, err := secondRequest.Cookie("sitebrush_session"); err == nil {
+		t.Fatal("unlisted IP retained administrator session")
+	}
+	if application.isAdminRequest(secondRequest) {
+		t.Fatal("unlisted IP kept administrator access")
+	}
+	var count int
+	if err := database.QueryRow(`SELECT COUNT(1) FROM admin_allowed_ips WHERE domain='example.org'`).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("unlisted request changed allowlist count=%d err=%v", count, err)
+	}
+	if err := application.updateAdminIPAllowlist(firstRequest, "example.org", "owner@example.org", "admin_ip_add", "192.0.2.0/24"); err != nil {
+		t.Fatalf("allow subnet containing the current valid session: %v", err)
+	}
+	subnetRequest := httptest.NewRequest(http.MethodGet, "https://example.org/?profile", nil)
+	subnetRequest.RemoteAddr = "192.0.2.88:1234"
+	subnetRequest.AddCookie(&http.Cookie{Name: "sitebrush_session", Value: "active"})
+	if !application.enforceAdminIPAllowlist(httptest.NewRecorder(), subnetRequest, "example.org") {
+		t.Fatal("subnet request stopped")
+	}
+	if _, err := subnetRequest.Cookie("sitebrush_session"); err != nil {
+		t.Fatal("CIDR-allowed session was removed")
+	}
+}
+
+func TestAdminIPAllowlistResolvesVerifiedAliasBeforeSessionLookup(t *testing.T) {
+	application, database := newTestApplication(t)
+	for _, statement := range []string{
+		`INSERT INTO users(domain,email,password,is_admin) VALUES('example.org','owner@example.org','secret',1)`,
+		`INSERT INTO sessions(token,user_email,created_at,client_ip,security_version) VALUES('active','example.org|owner@example.org','2026-09-25T00:00:00Z','192.0.2.1',1)`,
+		`INSERT INTO domain_aliases(primary_domain,alias_domain,verification_token,is_verified,dns_a_ok) VALUES('example.org','alias.example.org','verified',1,1)`,
+		`INSERT INTO admin_ip_policies(domain,email,enabled_at) VALUES('example.org','owner@example.org',1)`,
+		`INSERT INTO admin_allowed_ips(domain,email,client_ip,added_at) VALUES('example.org','owner@example.org','192.0.2.1',1)`,
+	} {
+		if _, err := database.Exec(statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	request := httptest.NewRequest(http.MethodGet, "https://alias.example.org/?profile", nil)
+	request.RemoteAddr = "192.0.2.2:1234"
+	request = request.WithContext(contextWithDomain(request.Context(), "alias.example.org"))
+	request.AddCookie(&http.Cookie{Name: "sitebrush_session", Value: "active"})
+	if !application.enforceAdminIPAllowlist(httptest.NewRecorder(), request, "alias.example.org") {
+		t.Fatal("unlisted alias request stopped instead of continuing as a guest")
+	}
+	if _, err := request.Cookie("sitebrush_session"); err == nil {
+		t.Fatal("unlisted IP retained the primary-domain administrator session through its alias")
+	}
+	if application.isAdminRequest(request) {
+		t.Fatal("unlisted alias IP retained administrator access")
+	}
+}
+
+func TestResetAdministratorIPAccessRevokesOnlySelectedAdministrator(t *testing.T) {
+	_, database := newTestApplication(t)
+	for _, statement := range []string{
+		`INSERT INTO users(domain,email,password,is_admin) VALUES('example.org','owner@example.org','secret',1)`,
+		`INSERT INTO users(domain,email,password,is_admin) VALUES('example.org','other@example.org','secret',1)`,
+		`INSERT INTO sessions(token,user_email,created_at) VALUES('owner-session','example.org|owner@example.org','now')`,
+		`INSERT INTO sessions(token,user_email,created_at) VALUES('other-session','example.org|other@example.org','now')`,
+		`INSERT INTO account_login_codes(token,domain,email) VALUES('owner-code','example.org','owner@example.org')`,
+		`INSERT INTO account_totp_challenges(token,domain,email) VALUES('owner-totp','example.org','owner@example.org')`,
+		`INSERT INTO account_webauthn_challenges(token,domain,email) VALUES('owner-passkey','example.org','owner@example.org')`,
+		`INSERT INTO email_confirmations(token,domain,email,current_email) VALUES('owner-confirmation','example.org','owner@example.org','owner@example.org')`,
+		`INSERT INTO account_session_ips(session_token,domain,email,client_ip,used_at) VALUES('owner-session','example.org','owner@example.org','192.0.2.1',1)`,
+		`INSERT INTO admin_ip_policies(domain,email,enabled_at) VALUES('example.org','owner@example.org',1)`,
+		`INSERT INTO admin_allowed_ips(domain,email,client_ip,added_at) VALUES('example.org','owner@example.org','192.0.2.1',1)`,
+		`INSERT INTO admin_ip_policies(domain,email,enabled_at) VALUES('example.org','other@example.org',1)`,
+		`INSERT INTO admin_allowed_ips(domain,email,client_ip,added_at) VALUES('example.org','other@example.org','198.51.100.1',1)`,
+	} {
+		if _, err := database.Exec(statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	transaction, err := database.BeginTx(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := resetAdministratorIPAccess(context.Background(), transaction, "example.org", "owner@example.org", ""); err != nil {
+		_ = transaction.Rollback()
+		t.Fatal(err)
+	}
+	if err := transaction.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	for table, expected := range map[string]int{
+		"sessions":                    1,
+		"account_login_codes":         0,
+		"account_totp_challenges":     0,
+		"account_webauthn_challenges": 0,
+		"email_confirmations":         0,
+		"account_session_ips":         0,
+		"admin_ip_policies":           1,
+		"admin_allowed_ips":           1,
+	} {
+		var actual int
+		query := `SELECT COUNT(1) FROM ` + table
+		if err := database.QueryRow(query).Scan(&actual); err != nil || actual != expected {
+			t.Errorf("%s count=%d, expected %d: %v", table, actual, expected, err)
+		}
+	}
+	var retainedSession string
+	if err := database.QueryRow(`SELECT token FROM sessions`).Scan(&retainedSession); err != nil || retainedSession != "other-session" {
+		t.Errorf("other administrator session=%q: %v", retainedSession, err)
+	}
+	var retainedRule string
+	if err := database.QueryRow(`SELECT client_ip FROM admin_allowed_ips`).Scan(&retainedRule); err != nil || retainedRule != "198.51.100.1" {
+		t.Errorf("other administrator rule=%q: %v", retainedRule, err)
+	}
+}
+
+func TestResetAdministratorIPAccessCanSetCIDRAndRejectsNonAdmin(t *testing.T) {
+	_, database := newTestApplication(t)
+	if _, err := database.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES('example.org','owner@example.org','secret',1),('example.org','member@example.org','secret',0)`); err != nil {
+		t.Fatal(err)
+	}
+	transaction, err := database.BeginTx(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := resetAdministratorIPAccess(context.Background(), transaction, "example.org", "owner@example.org", "192.0.2.0/24"); err != nil {
+		_ = transaction.Rollback()
+		t.Fatal(err)
+	}
+	if err := transaction.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	var rule string
+	if err := database.QueryRow(`SELECT client_ip FROM admin_allowed_ips WHERE domain='example.org' AND email='owner@example.org'`).Scan(&rule); err != nil || rule != "192.0.2.0/24" {
+		t.Fatalf("recovery rule=%q: %v", rule, err)
+	}
+	transaction, err = database.BeginTx(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := resetAdministratorIPAccess(context.Background(), transaction, "example.org", "member@example.org", ""); err == nil {
+		t.Fatal("allowed resetting access for a non-administrator")
+	}
+	_ = transaction.Rollback()
+	var policyCount int
+	if err := database.QueryRow(`SELECT COUNT(1) FROM admin_ip_policies`).Scan(&policyCount); err != nil || policyCount != 1 {
+		t.Fatalf("failed reset changed policy count=%d: %v", policyCount, err)
+	}
+}
+
+func TestRunAdminIPResetCommandPersistsCIDR(t *testing.T) {
+	storagePath := t.TempDir()
+	siteDirectory := filepath.Join(storagePath, "sites")
+	if err := os.MkdirAll(siteDirectory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	databasePath := filepath.Join(siteDirectory, "example.org.db")
+	database, err := sql.Open("sqlite3", databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	application := &App{db: database, storagePath: storagePath}
+	if err := application.migrate(context.Background()); err != nil {
+		_ = database.Close()
+		t.Fatal(err)
+	}
+	if _, err := database.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES('example.org','owner@example.org','secret',1)`); err != nil {
+		_ = database.Close()
+		t.Fatal(err)
+	}
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+	var output strings.Builder
+	if err := runAdminIPResetCommand(context.Background(), &output, storagePath, filepath.Join(storagePath, "sitebrush.db"), "example.org", "owner@example.org", "192.0.2.17/24"); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output.String(), "192.0.2.0/24") {
+		t.Fatalf("command output did not include normalized recovery CIDR: %q", output.String())
+	}
+	database, err = sql.Open("sqlite3", databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	var allowedRule string
+	if err := database.QueryRow(`SELECT client_ip FROM admin_allowed_ips WHERE domain='example.org' AND email='owner@example.org'`).Scan(&allowedRule); err != nil || allowedRule != "192.0.2.0/24" {
+		t.Fatalf("command did not persist the recovery CIDR %q: %v", allowedRule, err)
+	}
+}
+
+func TestAdminIPAllowlistChangesOnlyUseSessionCandidates(t *testing.T) {
+	application, database := newTestApplication(t)
+	if _, err := database.Exec(`INSERT INTO account_session_ips(session_token,domain,email,client_ip,used_at) VALUES('old','example.org','owner@example.org','192.0.2.2',1)`); err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "https://example.org/?profile", nil)
+	request.RemoteAddr = "192.0.2.1:1234"
+	if err := application.updateAdminIPAllowlist(request, "example.org", "owner@example.org", "admin_ip_add", "192.0.2.2"); err != nil {
+		t.Fatalf("add valid session candidate: %v", err)
+	}
+	if err := application.updateAdminIPAllowlist(request, "example.org", "owner@example.org", "admin_ip_add", "192.0.2.3"); err == nil {
+		t.Fatal("accepted IP that was never used by a valid session")
+	}
+	if err := application.updateAdminIPAllowlist(request, "example.org", "owner@example.org", "admin_ip_add", "198.51.100.0/24"); err == nil {
+		t.Fatal("accepted subnet that contains no valid session address")
+	}
+	if err := application.updateAdminIPAllowlist(request, "example.org", "owner@example.org", "admin_ip_add", "192.0.2.0/24"); err != nil {
+		t.Fatalf("add subnet containing a valid session address: %v", err)
+	}
+	if err := application.updateAdminIPAllowlist(request, "example.org", "owner@example.org", "admin_ip_remove", "192.0.2.2"); err != nil {
+		t.Fatalf("remove non-current address while subnet remains: %v", err)
+	}
+	if err := application.updateAdminIPAllowlist(request, "example.org", "owner@example.org", "admin_ip_add", "192.0.2.1"); err != nil {
+		t.Fatalf("add current IP: %v", err)
+	}
+	if err := application.updateAdminIPAllowlist(request, "example.org", "owner@example.org", "admin_ip_remove", "192.0.2.1"); err == nil {
+		t.Fatal("removed the current administrator IP")
+	}
+}
+
+func TestAdminIPAllowlistCannotRemoveLastNonCurrentAddress(t *testing.T) {
+	application, database := newTestApplication(t)
+	for _, allowedIP := range []string{"198.51.100.1", "203.0.113.1"} {
+		if _, err := database.Exec(`INSERT INTO admin_allowed_ips(domain,email,client_ip,added_at) VALUES('example.org','owner@example.org',?,1)`, allowedIP); err != nil {
+			t.Fatal(err)
+		}
+	}
+	request := httptest.NewRequest(http.MethodPost, "https://example.org/?profile", nil)
+	request.RemoteAddr = "192.0.2.1:1234"
+	if err := application.updateAdminIPAllowlist(request, "example.org", "owner@example.org", "admin_ip_remove", "198.51.100.1"); err != nil {
+		t.Fatalf("remove one of two non-current addresses: %v", err)
+	}
+	if err := application.updateAdminIPAllowlist(request, "example.org", "owner@example.org", "admin_ip_remove", "203.0.113.1"); err == nil {
+		t.Fatal("removed the final administrator IP")
+	}
+}
+
+func TestAdminIPAllowlistDoesNotRebootstrapAnEnabledEmptyPolicy(t *testing.T) {
+	application, database := newTestApplication(t)
+	for _, statement := range []string{
+		`INSERT INTO users(domain,email,password,is_admin) VALUES('example.org','owner@example.org','secret',1)`,
+		`INSERT INTO sessions(token,user_email,created_at,client_ip,security_version) VALUES('active','example.org|owner@example.org','2026-09-25T00:00:00Z','192.0.2.1',1)`,
+		`INSERT INTO admin_ip_policies(domain,email,enabled_at) VALUES('example.org','owner@example.org',1)`,
+	} {
+		if _, err := database.Exec(statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	request := httptest.NewRequest(http.MethodGet, "https://example.org/?profile", nil)
+	request.RemoteAddr = "192.0.2.1:1234"
+	request.AddCookie(&http.Cookie{Name: "sitebrush_session", Value: "active"})
+	if !application.enforceAdminIPAllowlist(httptest.NewRecorder(), request, "example.org") {
+		t.Fatal("request stopped instead of continuing as a guest")
+	}
+	if _, err := request.Cookie("sitebrush_session"); err == nil {
+		t.Fatal("empty enabled policy unexpectedly bootstrapped an administrator IP")
+	}
+	var allowedCount int
+	if err := database.QueryRow(`SELECT COUNT(1) FROM admin_allowed_ips WHERE domain='example.org'`).Scan(&allowedCount); err != nil || allowedCount != 0 {
+		t.Fatalf("unexpected allowlist count=%d err=%v", allowedCount, err)
+	}
+}
+
+func TestAdminIPAllowlistBlocksAccountPageForUnlistedSession(t *testing.T) {
+	application, database := newTestApplication(t)
+	for _, statement := range []string{
+		`INSERT INTO users(domain,email,password,is_admin) VALUES('example.org','owner@example.org','secret',1)`,
+		`INSERT INTO sessions(token,user_email,created_at,client_ip,security_version) VALUES('active','example.org|owner@example.org','2026-09-25T00:00:00Z','192.0.2.1',1)`,
+		`INSERT INTO admin_ip_policies(domain,email,enabled_at) VALUES('example.org','owner@example.org',1)`,
+		`INSERT INTO admin_allowed_ips(domain,email,client_ip,added_at) VALUES('example.org','owner@example.org','192.0.2.1',1)`,
+	} {
+		if _, err := database.Exec(statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	request := httptest.NewRequest(http.MethodGet, "https://example.org/?profile", nil)
+	request.RemoteAddr = "192.0.2.2:1234"
+	request.AddCookie(&http.Cookie{Name: "sitebrush_session", Value: "active"})
+	if !application.enforceAdminIPAllowlist(httptest.NewRecorder(), request, "example.org") {
+		t.Fatal("direct allowlist check stopped")
+	}
+	if _, err := request.Cookie("sitebrush_session"); err == nil {
+		t.Fatal("direct allowlist check retained the unlisted session")
+	}
+	request = httptest.NewRequest(http.MethodGet, "https://example.org/?profile", nil)
+	request.RemoteAddr = "192.0.2.2:1234"
+	request = request.WithContext(contextWithDomain(context.Background(), "example.org"))
+	request.AddCookie(&http.Cookie{Name: "sitebrush_session", Value: "active"})
+	response := httptest.NewRecorder()
+	application.route(response, request)
+	if response.Code != http.StatusFound || !strings.HasPrefix(response.Header().Get("Location"), "/?login") {
+		t.Fatalf("unlisted account page response status=%d location=%q body=%q", response.Code, response.Header().Get("Location"), response.Body.String())
+	}
+	if strings.Contains(response.Body.String(), "Administrator access IPs") {
+		t.Fatal("unlisted address received the account administration page")
+	}
+}
+
+func TestCanonicalAccountIPNormalizesMappedIPv4(t *testing.T) {
+	if actual := canonicalAccountIP("::ffff:192.0.2.9"); actual != "192.0.2.9" {
+		t.Fatalf("mapped IPv4 canonicalized to %q", actual)
+	}
+	if actual := canonicalAccountIP("invalid"); actual != "" {
+		t.Fatalf("invalid address canonicalized to %q", actual)
+	}
+	if actual, err := canonicalAdminIPRule("192.0.2.17/24"); err != nil || actual != "192.0.2.0/24" {
+		t.Fatalf("IPv4 subnet canonicalized to %q: %v", actual, err)
+	}
+	if !adminIPRuleContains("192.0.2.0/24", "192.0.2.250") || adminIPRuleContains("192.0.2.0/24", "192.0.3.1") {
+		t.Fatal("CIDR membership check accepted the wrong addresses")
+	}
+	if actual, err := canonicalAdminIPRule("::ffff:192.0.2.17/120"); err != nil || actual != "192.0.2.0/24" {
+		t.Fatalf("mapped IPv4 subnet canonicalized to %q: %v", actual, err)
+	}
+	if _, err := canonicalAdminIPRule("::ffff:0:0/80"); err == nil {
+		t.Fatal("accepted an ambiguous broad IPv4-mapped subnet")
+	}
+	if _, err := canonicalAdminIPRule("192.0.0.0/8"); err == nil {
+		t.Fatal("accepted an overly broad IPv4 subnet")
+	}
+	if _, err := canonicalAdminIPRule("2001:db8::/32"); err == nil {
+		t.Fatal("accepted an overly broad IPv6 subnet")
+	}
+}
+
+// END admin ip allowlist tests.
+
+// BEGIN admin origin security tests.
+
+func TestSecurityBoundaryAuthenticatedMutationsRejectHostileOrigin(t *testing.T) {
+	application, rawDB := newTestApplication(t)
+	if _, err := rawDB.Exec(
+		`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`,
+		"localhost", "admin@example.com", "password",
+	); err != nil {
+		t.Fatal(err)
+	}
+	adminCookie := newAdminSessionCookie(t, application, "admin@example.com")
+
+	for _, requestPath := range []string{
+		"/?freeze",
+		"/?publish",
+		"/?settings",
+		"/?files",
+		"/?backup_import",
+		"/docs?page_password=remove",
+		"/?revision_toggle",
+		"/?revision_restore",
+		"/?revision_delete",
+		"/?save",
+	} {
+		t.Run(requestPath, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodPost, "http://localhost:8080"+requestPath, strings.NewReader("action=test"))
+			request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			request.Header.Set("Origin", "https://attacker.example")
+			request.AddCookie(adminCookie)
+			response := httptest.NewRecorder()
+
+			application.route(response, request)
+
+			if response.Code != http.StatusForbidden {
+				t.Fatalf("SECURITY: hostile-origin mutation %s status=%d body=%q", requestPath, response.Code, response.Body.String())
+			}
+		})
+	}
+}
+
+func TestSecurityBoundaryAuthenticatedMutationAllowsSameOrigin(t *testing.T) {
+	application, rawDB := newTestApplication(t)
+	if _, err := rawDB.Exec(
+		`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`,
+		"localhost", "admin@example.com", "password",
+	); err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "http://localhost:8080/?freeze", strings.NewReader(""))
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	request.Header.Set("Origin", "http://localhost:8080")
+	request.AddCookie(newAdminSessionCookie(t, application, "admin@example.com"))
+	response := httptest.NewRecorder()
+
+	application.route(response, request)
+
+	if response.Code == http.StatusForbidden {
+		t.Fatalf("same-origin admin mutation was rejected: %q", response.Body.String())
+	}
+}
+
+// END admin origin security tests.
+
+// BEGIN backup import adversarial security tests.
+
+func backupZIPForSecurityTest(t *testing.T, backup domainBackup) *zip.Reader {
+	t.Helper()
+	var buffer bytes.Buffer
+	writer := zip.NewWriter(&buffer)
+	entry, err := writer.Create("backup.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := json.Marshal(backup)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := entry.Write(encoded); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reader, err := zip.NewReader(bytes.NewReader(buffer.Bytes()), int64(buffer.Len()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return reader
+}
+
+func TestSecurityBoundaryBackupImportRejectsTraversalVariants(t *testing.T) {
+	for _, entryName := range []string{
+		"../outside.txt",
+		"files/../../outside.txt",
+		"/absolute.txt",
+		"\\server\\share\\owned.txt",
+		"files\\..\\..\\outside.txt",
+	} {
+		if normalized, ok := safeBackupZIPEntryName(entryName); ok {
+			t.Fatalf("SECURITY: unsafe backup path %q normalized as %q", entryName, normalized)
+		}
+	}
+}
+
+func TestSecurityBoundaryBackupImportRejectsDeclaredUncompressedBomb(t *testing.T) {
+	entry := &zip.File{FileHeader: zip.FileHeader{Name: "files/bomb.bin", UncompressedSize64: uint64(backupImportUncompressedLimitBytes + 1)}}
+	archive := &zip.Reader{File: []*zip.File{entry}}
+	if _, err := (&App{}).importDomainBackupZIP(context.Background(), "localhost", "/", archive); err == nil || !strings.Contains(err.Error(), "uncompressed size") {
+		t.Fatalf("SECURITY: oversized declared archive was accepted: %v", err)
+	}
+}
+
+func TestSecurityBoundaryBackupImportRejectsAggregateUncompressedBomb(t *testing.T) {
+	partSize := uint64(backupImportFileEntryLimitBytes - 1)
+	files := make([]*zip.File, 0, 9)
+	for index := 0; index < 9; index++ {
+		files = append(files, &zip.File{FileHeader: zip.FileHeader{
+			Name:               fmt.Sprintf("files/part-%d.bin", index),
+			UncompressedSize64: partSize,
+		}})
+	}
+	archive := &zip.Reader{File: files}
+	if _, err := (&App{}).importDomainBackupZIP(context.Background(), "localhost", "/", archive); err == nil || !strings.Contains(err.Error(), "uncompressed size") {
+		t.Fatalf("SECURITY: aggregate ZIP bomb was accepted: %v", err)
+	}
+}
+
+func TestSecurityBoundaryBackupImportFailsClosedOnDatabaseWriteError(t *testing.T) {
+	application, rawDB := newTestApplication(t)
+	if _, err := rawDB.Exec("DROP TABLE pages"); err != nil {
+		t.Fatal(err)
+	}
+	archive := backupZIPForSecurityTest(t, domainBackup{
+		Version: 1,
+		Pages: []backupPage{{
+			Path:  "/restored",
+			Title: "Restored",
+			HTML:  "<h1>restored</h1>",
+		}},
+	})
+	if _, err := application.importDomainBackupZIP(context.Background(), "localhost", "/", archive); err == nil {
+		t.Fatal("SECURITY: backup import reported success after the pages table write failed")
+	}
+}
+
+
+func TestSecurityBoundaryBackupImportFailsClosedOnRedirectWriteError(t *testing.T) {
+	application, rawDB := newTestApplication(t)
+	if _, err := rawDB.Exec("DROP TABLE page_redirects"); err != nil {
+		t.Fatal(err)
+	}
+	archive := backupZIPForSecurityTest(t, domainBackup{
+		Version: 1,
+		Redirects: []backupRedirect{{
+			OldPath: "/old",
+			NewPath: "/new",
+		}},
+	})
+	if _, err := application.importDomainBackupZIP(context.Background(), "localhost", "/", archive); err == nil {
+		t.Fatal("SECURITY: backup import reported success after redirect storage failed")
+	}
+}
+
+func TestSecurityBoundaryBackupImportFailsClosedOnAccessRuleWriteError(t *testing.T) {
+	application, rawDB := newTestApplication(t)
+	if _, err := rawDB.Exec("DROP TABLE file_access_rules"); err != nil {
+		t.Fatal(err)
+	}
+	archive := backupZIPForSecurityTest(t, domainBackup{
+		Version: 1,
+		FileAccessRules: []backupFileAccessRule{{
+			FileName:   "private/report.pdf",
+			AccessMode: "private",
+			Token:      "secret-token",
+		}},
+	})
+	if _, err := application.importDomainBackupZIP(context.Background(), "localhost", "/", archive); err == nil {
+		t.Fatal("SECURITY: backup import reported success after access-rule storage failed")
+	}
+}
+
+// END backup import adversarial security tests.
+
+// BEGIN channel lifecycle security tests.
+
+func TestSecurityBoundaryGlobalSyncStopsWhenSignalChannelCloses(t *testing.T) {
+	stop := make(chan struct{})
+	signals := make(chan securitysync.Signal)
+	application := &App{securityGlobalSignals: signals}
+	done := make(chan struct{})
+
+	go func() {
+		application.runSecurityGlobalSync(stop)
+		close(done)
+	}()
+
+	close(signals)
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		close(stop)
+		t.Fatal("SECURITY: closed global security signal channel did not terminate its worker")
+	}
+}
+
+// END channel lifecycle security tests.
+
+// BEGIN file upload security tests.
+
+func TestSecurityBoundaryFileUploadRejectsBodyLargerThanAvailableStorage(t *testing.T) {
+	application, rawDB := newTestApplication(t)
+	if _, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`,
+		"localhost", "admin@example.com", "password"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := rawDB.Exec(`INSERT OR REPLACE INTO domain_storage_usage(domain,page_bytes,published_page_bytes,revision_bytes,file_bytes,published_static_bytes,limit_bytes,updated_at) VALUES(?,?,?,?,?,?,?,?)`,
+		"localhost", 0, 0, 0, 0, 0, 1, time.Now().UTC().Format(time.RFC3339)); err != nil {
+		t.Fatal(err)
+	}
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	fileWriter, err := writer.CreateFormFile("upload_files", "oversized.bin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fileWriter.Write(bytes.Repeat([]byte("A"), int(fileUploadMultipartOverheadBytes)+2)); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.WriteField("action", "upload"); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	request := httptest.NewRequest(http.MethodPost, "http://localhost:8080/?files", &body)
+	request.Header.Set("Content-Type", writer.FormDataContentType())
+	request.AddCookie(newAdminSessionCookie(t, application, "admin@example.com"))
+	response := httptest.NewRecorder()
+
+	application.route(response, request)
+
+	if response.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("SECURITY: oversized upload status=%d body=%q", response.Code, response.Body.String())
+	}
+}
+
+func TestSecurityBoundaryFileUploadFilenameTraversalIsNotAccepted(t *testing.T) {
+	for _, fileName := range []string{
+		"../outside.txt",
+		"..\\outside.txt",
+		"folder/../../outside.txt",
+		"folder\\..\\..\\outside.txt",
+	} {
+		if safeFileName(fileName) != "" {
+			t.Fatalf("SECURITY: traversal upload filename was accepted: %q", fileName)
+		}
+	}
+}
+
+func TestSecurityBoundaryFileUploadStreamsContentWithoutOriginalName(t *testing.T) {
+	application, _ := newTestApplication(t)
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	fileWriter, err := writer.CreateFormFile("upload_files", "secret-name.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fileWriter.Write([]byte("streamed upload")); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.WriteField("action", "upload"); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	request := httptest.NewRequest(http.MethodPost, "http://localhost:8080/docs?files", &body)
+	request.Header.Set("Content-Type", writer.FormDataContentType())
+	request.Header.Set("Accept", "application/json")
+	response := httptest.NewRecorder()
+
+	application.uploadFiles(response, request, "/docs")
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("upload status=%d body=%q", response.Code, response.Body.String())
+	}
+	if strings.Contains(response.Body.String(), "secret-name") {
+		t.Fatalf("SECURITY: original upload filename leaked into public stored name: %q", response.Body.String())
+	}
+}
+
+// END file upload security tests.
+
+// BEGIN profile csrf security tests.
+
+func TestSecurityBoundaryProfileSensitiveActionsRequireCSRF(t *testing.T) {
+	application, rawDB := newTestApplication(t)
+	if _, err := rawDB.Exec(
+		`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`,
+		"localhost", "admin@example.com", "password",
+	); err != nil {
+		t.Fatal(err)
+	}
+	adminCookie := newAdminSessionCookie(t, application, "admin@example.com")
+
+	testCases := []url.Values{
+		{"profile_action": {"revoke_ip"}, "trusted_ip": {"203.0.113.7"}},
+		{"profile_action": {"passkey_delete"}, "passkey_id": {"credential"}},
+		{"profile_action": {"totp_setup"}},
+		{"profile_action": {"totp_enable"}, "totp_secret": {"secret"}, "totp_code": {"123456"}},
+		{"profile_action": {"totp_disable"}},
+	}
+
+	for _, form := range testCases {
+		action := form.Get("profile_action")
+		t.Run(action, func(t *testing.T) {
+			for _, csrf := range []string{"", "attacker-controlled"} {
+				requestForm := url.Values{}
+				for key, values := range form {
+					requestForm[key] = append([]string(nil), values...)
+				}
+				if csrf != "" {
+					requestForm.Set("account_csrf", csrf)
+				}
+				request := httptest.NewRequest(http.MethodPost, "http://localhost:8080/?profile", strings.NewReader(requestForm.Encode()))
+				request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+				request.AddCookie(adminCookie)
+				response := httptest.NewRecorder()
+
+				application.route(response, request)
+
+				if response.Code != http.StatusForbidden {
+					t.Fatalf("SECURITY: profile action %q accepted CSRF=%q with status %d", action, csrf, response.Code)
+				}
+			}
+		})
+	}
+}
+
+// END profile csrf security tests.
+
+// BEGIN security gap closure tests.
+
+func TestSecurityBoundaryClientIPAddressIgnoresForwardingHeadersFromPublicPeer(t *testing.T) {
+	request := httptest.NewRequest(http.MethodGet, "http://example.com/", nil)
+	request.RemoteAddr = "198.51.100.44:4567"
+	request.Header.Set("Forwarded", "for=203.0.113.99")
+	request.Header.Set("X-Forwarded-For", "203.0.113.98")
+
+	if got := clientIPAddress(request); got != "198.51.100.44" {
+		t.Fatalf("SECURITY: public peer spoofed client IP through forwarding headers: %q", got)
+	}
+}
+
+func TestSecurityBoundaryClientIPAddressRejectsMalformedForwardingHeaders(t *testing.T) {
+	request := httptest.NewRequest(http.MethodGet, "http://localhost/", nil)
+	request.RemoteAddr = "127.0.0.1:4567"
+	request.Header.Set("Forwarded", "for=not-an-ip")
+	request.Header.Set("X-Forwarded-For", "also-not-an-ip")
+
+	if got := clientIPAddress(request); got != "localhost" {
+		t.Fatalf("SECURITY: malformed forwarding headers changed client identity: %q", got)
+	}
+}
+
+func TestSecurityBoundaryClientIPAddressAcceptsForwardingOnlyFromTrustedBoundary(t *testing.T) {
+	request := httptest.NewRequest(http.MethodGet, "http://localhost/", nil)
+	request.RemoteAddr = "127.0.0.1:4567"
+	request.Header.Set("Forwarded", `for="203.0.113.77"`)
+
+	if got := clientIPAddress(request); got != "203.0.113.77" {
+		t.Fatalf("trusted forwarding boundary resolved client IP as %q", got)
+	}
+}
+
+func TestSecurityBoundaryEmailConfirmationURLIgnoresForgedForwardedHost(t *testing.T) {
+	request := httptest.NewRequest(http.MethodGet, "https://example.com/?recover", nil)
+	request.Host = "example.com"
+	request.Header.Set("X-Forwarded-Host", "attacker.example")
+	request.RemoteAddr = "198.51.100.90:4567"
+	request.Header.Set("X-Forwarded-Proto", "http")
+
+	confirmationURL := emailConfirmationURL(request, "one-time-secret")
+	if !strings.HasPrefix(confirmationURL, "https://example.com/") || strings.Contains(confirmationURL, "attacker.example") {
+		t.Fatalf("SECURITY: account confirmation URL trusted forged forwarding host: %q", confirmationURL)
+	}
+}
+
+func TestSecurityBoundaryMissingPageEscapesReflectedPath(t *testing.T) {
+	application, _ := newTestApplication(t)
+	injectedPath := `/<img src=x onerror=alert(1)>`
+	request := httptest.NewRequest(http.MethodGet, "http://localhost:8080/missing", nil)
+	response := httptest.NewRecorder()
+
+	application.renderMissingPage(response, request, injectedPath, false)
+
+	body := response.Body.String()
+	if strings.Contains(body, injectedPath) || strings.Contains(body, "<img src=x onerror=alert(1)>") {
+		t.Fatalf("SECURITY: missing page reflected executable path markup: %s", body)
+	}
+	if !strings.Contains(body, "&lt;img") {
+		t.Fatalf("missing page did not visibly escape reflected path: %s", body)
+	}
+}
+
+func TestSecurityBoundaryServiceEndpointsRejectMalformedJSON(t *testing.T) {
+	for _, endpoint := range []struct {
+		name string
+		call func(*App, http.ResponseWriter, *http.Request)
+	}{
+		{name: "service mail", call: func(application *App, response http.ResponseWriter, request *http.Request) {
+			application.serviceMailRelayEndpoint(response, request)
+		}},
+		{name: "hosting snapshot", call: func(application *App, response http.ResponseWriter, request *http.Request) {
+			application.hostingSnapshotEndpoint(response, request)
+		}},
+	} {
+		t.Run(endpoint.name, func(t *testing.T) {
+			application, _ := newTestApplication(t)
+			request := httptest.NewRequest(http.MethodPost, "http://localhost/", strings.NewReader(`{"broken":`))
+			response := httptest.NewRecorder()
+
+			endpoint.call(application, response, request)
+
+			if response.Code != http.StatusBadRequest {
+				t.Fatalf("SECURITY: malformed JSON status=%d body=%q", response.Code, response.Body.String())
+			}
+		})
+	}
+}
+
+func TestSecurityBoundaryHostingSnapshotRejectsOversizedBody(t *testing.T) {
+	application := &App{}
+	request := httptest.NewRequest(
+		http.MethodPost,
+		"http://localhost/?hosting_snapshot",
+		strings.NewReader(strings.Repeat("x", int(serviceMailRelayBodyLimitBytes)+1)),
+	)
+	response := httptest.NewRecorder()
+
+	application.hostingSnapshotEndpoint(response, request)
+
+	if response.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("SECURITY: oversized hosting snapshot status=%d body=%q", response.Code, response.Body.String())
+	}
+}
+
+// END security gap closure tests.
+
+// BEGIN securitysync ingress security tests.
+
+func TestSecurityBoundarySecuritySignalCannotForgeQuorumWithEmbeddedInstallationIDs(t *testing.T) {
+	application, _ := newTestApplication(t)
+	stop := make(chan struct{})
+	defer close(stop)
+
+	reputation, err := securitysync.Start("", stop)
+	if err != nil {
+		t.Fatal(err)
+	}
+	application.securityReputation = reputation
+
+	baseRequest := signedServiceMailRequestForTest(t, application, serviceMailRequest{
+		Version:      1,
+		SourceDomain: "example.com",
+		CodeKind:     "security_signal",
+		LanguageCode: "en",
+		CreatedAt:    time.Now().UTC().Format(time.RFC3339),
+		SecuritySignal: &securitysync.Signal{
+			IP:         "8.8.8.8",
+			Category:   "injection",
+			ObservedAt: time.Now().UTC(),
+		},
+	})
+	registerServiceMailInstallationForTest(t, application, baseRequest)
+
+	for attempt := 0; attempt < 3; attempt++ {
+		request := signedServiceMailRequestForTest(t, application, serviceMailRequest{
+			Version:      1,
+			SourceDomain: "example.com",
+			CodeKind:     "security_signal",
+			LanguageCode: "en",
+			CreatedAt:    time.Now().UTC().Format(time.RFC3339),
+			SecuritySignal: &securitysync.Signal{
+				IP:             "8.8.8.8",
+				Category:       "injection",
+				Description:    "forged embedded installation identity",
+				InstallationID: fmt.Sprintf("forged-installation-%d", attempt),
+				ObservedAt:     time.Now().UTC(),
+			},
+		})
+		status, statusCode := application.handleSecuritySignalRequest(context.Background(), request)
+		if statusCode != http.StatusOK {
+			t.Fatalf("signal %d status=%d %q", attempt, statusCode, status)
+		}
+	}
+
+	reply := make(chan securitysync.Result, 1)
+	reputation <- securitysync.Request{Query: true, Reply: reply}
+	result := <-reply
+	if result.Err != nil {
+		t.Fatal(result.Err)
+	}
+	if len(result.Entries) != 0 {
+		t.Fatalf("SECURITY: one authenticated installation forged reputation quorum: %#v", result.Entries)
+	}
+}
+
+// END securitysync ingress security tests.
+
+// BEGIN template isolation attack tests.
+
+func TestAdminWebAttackTemplatePropagationStaysWithinSourceSite(t *testing.T) {
+	for _, synchronizeClasses := range []bool{false, true} {
+		name := "replace blocks"
+		if synchronizeClasses {
+			name = "synchronize classes"
+		}
+		t.Run(name, func(t *testing.T) {
+			application, database := newTestApplication(t)
+			const sourceDomain = "alpha.example"
+			const otherDomain = "beta.example"
+			const pagePath = "/index.html"
+			previousHeader := `<header>Shared old header</header>`
+			savedHeader := `<header class="SiteBrush-Template site-header">Shared replacement header</header>`
+			otherSiteHTML := `<html><body><header class="SiteBrush-Template site-header">Beta site header</header></body></html>`
+			if synchronizeClasses {
+				otherSiteHTML = `<html><body><header>Beta site header</header></body></html>`
+			}
+			alphaSiteHTML := savedHeader
+			if synchronizeClasses {
+				alphaSiteHTML = previousHeader
+			}
+			if err := insertTemplateAttackPage(database, sourceDomain, pagePath, "Alpha", alphaSiteHTML); err != nil {
+				t.Fatal(err)
+			}
+			if err := insertTemplateAttackPage(database, otherDomain, pagePath, "Beta", otherSiteHTML); err != nil {
+				t.Fatal(err)
+			}
+			if synchronizeClasses {
+				application.applyTemplateClassSynchronization(context.Background(), sourceDomain, previousHeader, savedHeader, "")
+			} else {
+				application.applyTemplatePropagation(context.Background(), sourceDomain, savedHeader, "")
+			}
+
+			var betaHTML string
+			if err := database.QueryRow(`SELECT html FROM pages WHERE domain=? AND path=?`, otherDomain, pagePath).Scan(&betaHTML); err != nil {
+				t.Fatal(err)
+			}
+			if betaHTML != otherSiteHTML {
+				t.Fatalf("SECURITY: source site's template changed another site's editable page: %s", betaHTML)
+			}
+			var betaPublishedHTML string
+			if err := database.QueryRow(`SELECT html FROM published_pages WHERE domain=? AND path=?`, otherDomain, pagePath).Scan(&betaPublishedHTML); err != nil {
+				t.Fatal(err)
+			}
+			if betaPublishedHTML != otherSiteHTML {
+				t.Fatalf("SECURITY: source site's template changed another site's published page: %s", betaPublishedHTML)
+			}
+			var betaRevisionCount int
+			if err := database.QueryRow(`SELECT COUNT(1) FROM revisions WHERE domain=? AND page_path=?`, otherDomain, pagePath).Scan(&betaRevisionCount); err != nil {
+				t.Fatal(err)
+			}
+			if betaRevisionCount != 0 {
+				t.Fatalf("SECURITY: propagation wrote %d revisions to the unrelated site", betaRevisionCount)
+			}
+			var alphaHTML string
+			if err := database.QueryRow(`SELECT html FROM pages WHERE domain=? AND path=?`, sourceDomain, pagePath).Scan(&alphaHTML); err != nil {
+				t.Fatal(err)
+			}
+			if synchronizeClasses && (!strings.Contains(alphaHTML, `class="SiteBrush-Template site-header"`) || alphaHTML == previousHeader) {
+				t.Fatalf("class synchronization did not update the source site's matching block: %s", alphaHTML)
+			}
+			if !synchronizeClasses && alphaHTML != savedHeader {
+				t.Fatalf("source site's template block was not applied: %s", alphaHTML)
+			}
+		})
+	}
+}
+
+func insertTemplateAttackPage(database *sql.DB, domain, path, title, html string) error {
+	if _, err := database.Exec(`INSERT INTO pages(domain,path,title,html,published) VALUES(?,?,?,?,1)`, domain, path, title, html); err != nil {
+		return err
+	}
+	if _, err := database.Exec(`INSERT INTO published_pages(domain,path,title,html) VALUES(?,?,?,?)`, domain, path, title, html); err != nil {
+		return err
+	}
+	_, err := database.Exec(`INSERT INTO domain_storage_usage(domain,page_bytes,published_page_bytes,revision_bytes,file_bytes,published_static_bytes,limit_bytes,updated_at) VALUES(?,?,?,?,?,?,?,?)`,
+		domain, len(html), len(html), 0, 0, len(html), 1<<30, time.Now().UTC().Format(time.RFC3339))
+	return err
+}
+
+// END template isolation attack tests.
+
