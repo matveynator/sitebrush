@@ -17909,3 +17909,37 @@ func insertTemplateAttackPage(database *sql.DB, domain, path, title, html string
 }
 
 // END template isolation attack tests.
+
+// BEGIN release workflow security tests.
+
+func TestReleaseWorkflowsDoNotExposeReleaseToUntrustedPullRequests(t *testing.T) {
+	releaseRequestWorkflow := readRepositoryTestFile(t, filepath.Join(".github", "workflows", "release-request.yml"))
+	stableReleaseWorkflow := readRepositoryTestFile(t, filepath.Join(".github", "workflows", "release.yml"))
+
+	if strings.Contains(releaseRequestWorkflow, "pull_request") || strings.Contains(stableReleaseWorkflow, "pull_request") {
+		t.Fatal("release workflows must not run from an untrusted pull request event")
+	}
+	if !strings.Contains(releaseRequestWorkflow, "branches:\n      - main") {
+		t.Fatal("release request workflow is not restricted to pushes on main")
+	}
+	if !strings.Contains(stableReleaseWorkflow, "workflow_dispatch:") {
+		t.Fatal("stable release workflow must require an explicit trusted dispatch")
+	}
+	if !strings.Contains(releaseRequestWorkflow, "printf '%s\\n%s\\n' \"${COMMIT_MESSAGES}\" \"${HEAD_COMMIT_MESSAGE}\"") {
+		t.Fatal("commit messages must be passed to shell commands as quoted data")
+	}
+	if !strings.Contains(releaseRequestWorkflow, "gh workflow run release.yml --ref main") {
+		t.Fatal("release request must dispatch the release workflow from main")
+	}
+}
+
+func readRepositoryTestFile(t *testing.T, path string) string {
+	t.Helper()
+	contents, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	return string(contents)
+}
+
+// END release workflow security tests.
