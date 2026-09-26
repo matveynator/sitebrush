@@ -179,3 +179,27 @@ func TestCrawlerRetryCancellationAndNoRetryBranches(t *testing.T) {
 		t.Fatal("cancelled crawler retry unexpectedly succeeded")
 	}
 }
+
+func TestSecurityBoundaryCrawlerTimeoutStopsSlowTransport(t *testing.T) {
+	transportReturned := make(chan struct{})
+	client := NewSessionClient(20*time.Millisecond, securityRoundTripper(func(request *http.Request) (*http.Response, error) {
+		<-request.Context().Done()
+		close(transportReturned)
+		return nil, request.Context().Err()
+	}))
+	pageURL, _ := url.Parse("https://example.com/slow")
+
+	startedAt := time.Now()
+	_, err := DownloadHTMLPageContext(context.Background(), client, pageURL, nil)
+	if err == nil {
+		t.Fatal("SECURITY: crawler accepted an unresponsive transport")
+	}
+	if elapsed := time.Since(startedAt); elapsed > time.Second {
+		t.Fatalf("crawler timeout took %s", elapsed)
+	}
+	select {
+	case <-transportReturned:
+	case <-time.After(time.Second):
+		t.Fatal("slow crawler transport did not observe request cancellation")
+	}
+}
