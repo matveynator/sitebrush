@@ -3,6 +3,7 @@ package accountauth
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -176,5 +177,52 @@ func TestMailAbuseConcurrentSendReservationAllowsOnlyOneAction(t *testing.T) {
 	}
 	if allowedActions != 1 || sentCount != 1 {
 		t.Fatalf("SECURITY: concurrent email reservations allowed=%d recorded=%d, want exactly one", allowedActions, sentCount)
+	}
+}
+
+func TestDatabaseAuthorizationStateStaysIsolatedForSameEmailAcrossDomains(t *testing.T) {
+	database := testDatabase(t)
+	ctx := context.Background()
+	const email = "owner@example.org"
+	if _, err := database.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "other.org", email, "password"); err != nil {
+		t.Fatal(err)
+	}
+
+	alphaToken, err := transactSession(t, database, "example.org", email, "192.0.2.10", time.Unix(1_800_801_000, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	betaToken, err := transactSession(t, database, "other.org", email, "192.0.2.20", time.Unix(1_800_801_001, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if alphaToken == betaToken {
+		t.Fatal("session tokens unexpectedly collided across domains")
+	}
+
+	for candidateIndex := 0; candidateIndex < sessionIPCandidateLimit+10; candidateIndex++ {
+		clientIP := fmt.Sprintf("198.51.100.%d", candidateIndex+1)
+		if _, err := transactSession(t, database, "example.org", email, clientIP, time.Unix(int64(candidateIndex+2_000), 0)); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var alphaCount, betaCount int
+	if err := database.QueryRowContext(ctx, `SELECT COUNT(1) FROM account_session_ips WHERE domain=? AND email=?`, "example.org", email).Scan(&alphaCount); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.QueryRowContext(ctx, `SELECT COUNT(1) FROM account_session_ips WHERE domain=? AND email=?`, "other.org", email).Scan(&betaCount); err != nil {
+		t.Fatal(err)
+	}
+	if alphaCount != sessionIPCandidateLimit || betaCount != 1 {
+		t.Fatalf("session IP state crossed domain boundary: alpha=%d beta=%d", alphaCount, betaCount)
+	}
+
+	var betaSessionCount int
+	if err := database.QueryRowContext(ctx, `SELECT COUNT(1) FROM sessions WHERE user_email=?`, "other.org|"+email).Scan(&betaSessionCount); err != nil {
+		t.Fatal(err)
+	}
+	if betaSessionCount != 1 {
+		t.Fatalf("same-email account session count for other domain=%d, want 1", betaSessionCount)
 	}
 }
