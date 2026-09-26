@@ -154,7 +154,13 @@ func TestRootRejectsSymlinkParentForEveryMutation(t *testing.T) {
 		t.Fatal("MkdirAll followed a symlinked parent outside storage")
 	}
 	if err := root.Rename("inside.txt", filepath.Join("escape", "renamed.txt")); err == nil {
-		t.Fatal("Rename moved a file through a symlinked parent outside storage")
+		t.Fatal("Rename moved a file through a symlinked destination outside storage")
+	}
+	if err := root.Rename(filepath.Join("escape", "existing.txt"), "renamed-from-outside.txt"); err == nil {
+		t.Fatal("Rename followed a symlinked source outside storage")
+	}
+	if _, err := root.Stat("renamed-from-outside.txt"); !os.IsNotExist(err) {
+		t.Fatalf("Rename created an in-root file from a symlinked source: %v", err)
 	}
 	if err := root.Remove(filepath.Join("escape", "existing.txt")); err == nil {
 		t.Fatal("Remove followed a symlinked parent outside storage")
@@ -177,6 +183,9 @@ func TestRootRejectsTraversalAndAbsoluteMutationPaths(t *testing.T) {
 	parentPath := t.TempDir()
 	rootPath := filepath.Join(parentPath, "storage")
 	outsidePath := filepath.Join(parentPath, "outside.txt")
+	if err := os.WriteFile(outsidePath, []byte("outside"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	root, err := New(rootPath)
 	if err != nil {
 		t.Fatal(err)
@@ -201,7 +210,13 @@ func TestRootRejectsTraversalAndAbsoluteMutationPaths(t *testing.T) {
 			t.Fatalf("MkdirAll accepted escape path %q", mutationPath)
 		}
 		if err := root.Rename("inside.txt", mutationPath); err == nil {
-			t.Fatalf("Rename accepted escape path %q", mutationPath)
+			t.Fatalf("Rename accepted escape destination %q", mutationPath)
+		}
+		if err := root.Rename(mutationPath, "renamed-from-outside.txt"); err == nil {
+			t.Fatalf("Rename accepted escape source %q", mutationPath)
+		}
+		if _, err := root.Stat("renamed-from-outside.txt"); !os.IsNotExist(err) {
+			t.Fatalf("Rename created an in-root file from escape source %q: %v", mutationPath, err)
 		}
 		if err := root.Remove(mutationPath); err == nil {
 			t.Fatalf("Remove accepted escape path %q", mutationPath)
@@ -210,8 +225,9 @@ func TestRootRejectsTraversalAndAbsoluteMutationPaths(t *testing.T) {
 			t.Fatalf("RemoveAll accepted escape path %q", mutationPath)
 		}
 	}
-	if _, err := os.Stat(outsidePath); !os.IsNotExist(err) {
-		t.Fatalf("outside path was created or modified: %v", err)
+	payload, err := os.ReadFile(outsidePath)
+	if err != nil || string(payload) != "outside" {
+		t.Fatalf("outside file changed: %q, %v", payload, err)
 	}
 }
 
