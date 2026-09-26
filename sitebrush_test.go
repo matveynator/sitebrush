@@ -17943,3 +17943,47 @@ func readRepositoryTestFile(t *testing.T, path string) string {
 }
 
 // END release workflow security tests.
+
+// BEGIN HTTP request parsing security tests.
+
+func TestHTTPServerRejectsConflictingContentLengthBeforeHandler(t *testing.T) {
+	handlerCalled := make(chan struct{}, 1)
+	server := newSitebrushHTTPServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		handlerCalled <- struct{}{}
+	}))
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen test server: %v", err)
+	}
+	defer listener.Close()
+	go func() { _ = server.Serve(listener) }()
+	defer server.Close()
+
+	rawRequest := "POST / HTTP/1.1\r\nHost: example.com\r\nContent-Length: 4\r\nContent-Length: 5\r\nConnection: close\r\n\r\n12345"
+	connection, err := net.DialTimeout("tcp", listener.Addr().String(), time.Second)
+	if err != nil {
+		t.Fatalf("dial test server: %v", err)
+	}
+	if _, err := io.WriteString(connection, rawRequest); err != nil {
+		connection.Close()
+		t.Fatalf("write ambiguous request: %v", err)
+	}
+	response, err := http.ReadResponse(bufio.NewReader(connection), nil)
+	connection.Close()
+	if err != nil {
+		t.Fatalf("read ambiguous request response: %v", err)
+	}
+	if response.StatusCode < http.StatusBadRequest || response.StatusCode >= http.StatusInternalServerError {
+		response.Body.Close()
+		t.Fatalf("ambiguous request status = %d, want 4xx", response.StatusCode)
+	}
+	response.Body.Close()
+
+	select {
+	case <-handlerCalled:
+		t.Fatal("SECURITY: handler received an ambiguously framed request")
+	default:
+	}
+}
+
+// END HTTP request parsing security tests.
