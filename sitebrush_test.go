@@ -16658,6 +16658,149 @@ func TestStealthModeRequiresActiveIPProtectionForStaleSettings(t *testing.T) {
 	}
 }
 
+// BEGIN stealth adversarial routing tests.
+
+func TestStealthSecurityRejectsNonPublicHTTPMethods(t *testing.T) {
+	application, database := newTestApplication(t)
+	for _, statement := range []string{
+		`INSERT INTO users(domain,email,password,is_admin) VALUES('example.org','owner@example.org','secret',1)`,
+		`INSERT INTO admin_ip_policies(domain,email,enabled_at) VALUES('example.org','owner@example.org',1)`,
+		`INSERT INTO admin_allowed_ips(domain,email,client_ip,added_at) VALUES('example.org','owner@example.org','192.0.2.1',1)`,
+		`INSERT INTO admin_stealth_modes(domain,email,enabled_at) VALUES('example.org','owner@example.org',1)`,
+	} {
+		if _, err := database.Exec(statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	staticRoot := application.domainStaticDir("example.org")
+	if err := os.MkdirAll(staticRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(staticRoot, "index.html"), []byte("<main>public page</main>"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, method := range []string{http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete, http.MethodOptions} {
+		request := httptest.NewRequest(method, "https://example.org/?profile", strings.NewReader("profile_action=admin_ip_disable"))
+		request.RemoteAddr = "198.51.100.9:1234"
+		request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		request.AddCookie(&http.Cookie{Name: "sitebrush_session", Value: "attacker-controlled-session"})
+		response := httptest.NewRecorder()
+		application.route(response, request)
+		if response.Code != http.StatusNotFound {
+			t.Errorf("stealth method %s status=%d body=%q", method, response.Code, response.Body.String())
+		}
+		if strings.Contains(response.Body.String(), "Administrator") {
+			t.Errorf("stealth method %s exposed an administrative response: %q", method, response.Body.String())
+		}
+	}
+}
+
+func TestStealthSecurityIgnoresUntrustedForwardedAdministratorIP(t *testing.T) {
+	application, database := newTestApplication(t)
+	for _, statement := range []string{
+		`INSERT INTO users(domain,email,password,is_admin) VALUES('example.org','owner@example.org','secret',1)`,
+		`INSERT INTO admin_ip_policies(domain,email,enabled_at) VALUES('example.org','owner@example.org',1)`,
+		`INSERT INTO admin_allowed_ips(domain,email,client_ip,added_at) VALUES('example.org','owner@example.org','192.0.2.1',1)`,
+		`INSERT INTO admin_stealth_modes(domain,email,enabled_at) VALUES('example.org','owner@example.org',1)`,
+	} {
+		if _, err := database.Exec(statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	staticRoot := application.domainStaticDir("example.org")
+	if err := os.MkdirAll(staticRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(staticRoot, "index.html"), []byte("<main>public page</main>"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	request := httptest.NewRequest(http.MethodGet, "https://example.org/?profile", nil)
+	request.RemoteAddr = "198.51.100.9:1234"
+	request.Header.Set("X-Forwarded-For", "192.0.2.1")
+	request.Header.Set("X-Real-IP", "192.0.2.1")
+	request.Header.Set("Forwarded", "for=192.0.2.1;proto=https;host=example.org")
+	response := httptest.NewRecorder()
+	application.route(response, request)
+
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "public page") {
+		t.Fatalf("spoofed proxy headers escaped stealth: status=%d body=%q", response.Code, response.Body.String())
+	}
+	if strings.Contains(response.Body.String(), "Administrator access IPs") || strings.Contains(response.Body.String(), "SiteBrushContextMenu") {
+		t.Fatalf("spoofed proxy headers exposed administrator UI: %q", response.Body.String())
+	}
+}
+
+func TestStealthSecurityQueryFlagsRemainStaticOnly(t *testing.T) {
+	application, database := newTestApplication(t)
+	for _, statement := range []string{
+		`INSERT INTO users(domain,email,password,is_admin) VALUES('example.org','owner@example.org','secret',1)`,
+		`INSERT INTO admin_ip_policies(domain,email,enabled_at) VALUES('example.org','owner@example.org',1)`,
+		`INSERT INTO admin_allowed_ips(domain,email,client_ip,added_at) VALUES('example.org','owner@example.org','192.0.2.1',1)`,
+		`INSERT INTO admin_stealth_modes(domain,email,enabled_at) VALUES('example.org','owner@example.org',1)`,
+	} {
+		if _, err := database.Exec(statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	staticRoot := application.domainStaticDir("example.org")
+	if err := os.MkdirAll(staticRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(staticRoot, "index.html"), []byte("<main>public page</main>"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, queryFlag := range []string{
+		"login", "register", "recover", "profile", "publish", "edit",
+		"files", "security", "passkey_login", "service_mail_relay",
+	} {
+		request := httptest.NewRequest(http.MethodGet, "https://example.org/?"+queryFlag, nil)
+		request.RemoteAddr = "198.51.100.9:1234"
+		response := httptest.NewRecorder()
+		application.route(response, request)
+		if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "public page") {
+			t.Errorf("query flag %q escaped static-only routing: status=%d body=%q", queryFlag, response.Code, response.Body.String())
+		}
+		if strings.Contains(response.Body.String(), "SiteBrushContextMenu") || strings.Contains(response.Body.String(), `name="password"`) {
+			t.Errorf("query flag %q exposed SiteBrush controls: %q", queryFlag, response.Body.String())
+		}
+	}
+}
+
+func TestStealthSecurityHEADUsesPublishedStaticBoundary(t *testing.T) {
+	application, database := newTestApplication(t)
+	for _, statement := range []string{
+		`INSERT INTO users(domain,email,password,is_admin) VALUES('example.org','owner@example.org','secret',1)`,
+		`INSERT INTO admin_ip_policies(domain,email,enabled_at) VALUES('example.org','owner@example.org',1)`,
+		`INSERT INTO admin_allowed_ips(domain,email,client_ip,added_at) VALUES('example.org','owner@example.org','192.0.2.1',1)`,
+		`INSERT INTO admin_stealth_modes(domain,email,enabled_at) VALUES('example.org','owner@example.org',1)`,
+	} {
+		if _, err := database.Exec(statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	staticRoot := application.domainStaticDir("example.org")
+	if err := os.MkdirAll(staticRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(staticRoot, "index.html"), []byte("<main>public page</main>"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	request := httptest.NewRequest(http.MethodHead, "https://example.org/?profile", nil)
+	request.RemoteAddr = "198.51.100.9:1234"
+	response := httptest.NewRecorder()
+	application.route(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("stealth HEAD status=%d body=%q", response.Code, response.Body.String())
+	}
+}
+
+// END stealth adversarial routing tests.
+
 func TestTOTPSetupQRCodeIsLocalPNGData(t *testing.T) {
 	if qrData := totpSetupQRCodeDataURI(""); qrData != "" {
 		t.Fatalf("empty setup URI produced a QR code: %q", qrData)
