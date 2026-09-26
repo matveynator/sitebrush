@@ -17562,6 +17562,68 @@ func TestSecurityBoundaryMissingPageEscapesReflectedPath(t *testing.T) {
 	}
 }
 
+// BEGIN stored security registry XSS regression test.
+
+func TestSecurityBoundaryAnalyticsSecurityRegistryEscapesStoredAttackText(t *testing.T) {
+	application, rawDB := newTestApplication(t)
+	if _, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "admin@example.com", "password"); err != nil {
+		t.Fatal(err)
+	}
+	attackGuard, err := httpsecurity.NewAttackGuard("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	application.attackGuard = attackGuard
+	t.Cleanup(attackGuard.Close)
+
+	now := time.Now().UTC()
+	localReason := `<img src=x onerror=alert("local-reason")>`
+	localDescription := `"><script>alert("local-description")</script>`
+	if _, err := attackGuard.Add("203.0.113.240", localReason, localDescription, "manual", now.Add(time.Hour), now); err != nil {
+		t.Fatal(err)
+	}
+	globalReason := `<svg onload=alert("global-reason")>`
+	globalDescription := `</textarea><script>alert("global-description")</script>`
+	if err := attackGuard.ApplyGlobal("203.0.113.241", globalReason, globalDescription, now, now.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	allowComment := `<img src=x onerror=alert("allow-comment")>`
+	if err := attackGuard.Allow("203.0.113.242", allowComment); err != nil {
+		t.Fatal(err)
+	}
+
+	request := httptest.NewRequest(http.MethodGet, "http://localhost:8080/?analytics&tab=security", nil)
+	request.Header.Set("Accept-Language", "en")
+	request.AddCookie(newAdminSessionCookie(t, application, "admin@example.com"))
+	response := httptest.NewRecorder()
+	application.route(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("security analytics status=%d body=%q", response.Code, response.Body.String())
+	}
+
+	body := response.Body.String()
+	for _, executable := range []string{
+		localReason,
+		localDescription,
+		globalReason,
+		globalDescription,
+		allowComment,
+		`<script>alert("local-description")</script>`,
+		`<script>alert("global-description")</script>`,
+	} {
+		if strings.Contains(body, executable) {
+			t.Fatalf("SECURITY: stored security text rendered as executable markup: %q", executable)
+		}
+	}
+	for _, escapedFragment := range []string{"&lt;img", "&lt;svg", "&lt;script"} {
+		if !strings.Contains(body, escapedFragment) {
+			t.Fatalf("security registry did not visibly escape %q in %q", escapedFragment, body)
+		}
+	}
+}
+
+// END stored security registry XSS regression test.
+
 func TestSecurityBoundaryAdminResponsesCannotBeFramedOrCached(t *testing.T) {
 	application, rawDB := newTestApplication(t)
 	if _, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "admin@example.com", "password"); err != nil {
