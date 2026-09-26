@@ -121,3 +121,144 @@ func TestRootFileLifecycleAndRejectedOperations(t *testing.T) {
 		t.Fatal("missing file opened")
 	}
 }
+
+
+// BEGIN storage capability escape regression tests.
+
+func TestRootRejectsSymlinkParentForEveryMutation(t *testing.T) {
+	parentPath := t.TempDir()
+	rootPath := filepath.Join(parentPath, "storage")
+	outsidePath := filepath.Join(parentPath, "outside")
+	if err := os.MkdirAll(outsidePath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(outsidePath, "existing.txt"), []byte("outside"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	root, err := New(rootPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outsidePath, filepath.Join(rootPath, "escape")); err != nil {
+		t.Skipf("symlinks are unavailable: %v", err)
+	}
+	if err := root.WriteFile("inside.txt", []byte("inside"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if file, err := root.Create(filepath.Join("escape", "created.txt")); err == nil {
+		_ = file.Close()
+		t.Fatal("Create followed a symlinked parent outside storage")
+	}
+	if err := root.MkdirAll(filepath.Join("escape", "nested"), 0o755); err == nil {
+		t.Fatal("MkdirAll followed a symlinked parent outside storage")
+	}
+	if err := root.Rename("inside.txt", filepath.Join("escape", "renamed.txt")); err == nil {
+		t.Fatal("Rename moved a file through a symlinked destination outside storage")
+	}
+	if err := root.Rename(filepath.Join("escape", "existing.txt"), "renamed-from-outside.txt"); err == nil {
+		t.Fatal("Rename followed a symlinked source outside storage")
+	}
+	if _, err := root.Stat("renamed-from-outside.txt"); !os.IsNotExist(err) {
+		t.Fatalf("Rename created an in-root file from a symlinked source: %v", err)
+	}
+	if err := root.Remove(filepath.Join("escape", "existing.txt")); err == nil {
+		t.Fatal("Remove followed a symlinked parent outside storage")
+	}
+	if err := root.RemoveAll(filepath.Join("escape", "nested")); err == nil {
+		t.Fatal("RemoveAll followed a symlinked parent outside storage")
+	}
+
+	if payload, err := os.ReadFile(filepath.Join(outsidePath, "existing.txt")); err != nil || string(payload) != "outside" {
+		t.Fatalf("outside file changed: %q, %v", payload, err)
+	}
+	for _, outsideName := range []string{"created.txt", "renamed.txt"} {
+		if _, err := os.Stat(filepath.Join(outsidePath, outsideName)); !os.IsNotExist(err) {
+			t.Fatalf("outside mutation %q occurred: %v", outsideName, err)
+		}
+	}
+}
+
+func TestRootRejectsTraversalAndAbsoluteMutationPaths(t *testing.T) {
+	parentPath := t.TempDir()
+	rootPath := filepath.Join(parentPath, "storage")
+	outsidePath := filepath.Join(parentPath, "outside.txt")
+	if err := os.WriteFile(outsidePath, []byte("outside"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	root, err := New(rootPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := root.WriteFile("inside.txt", []byte("inside"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	mutationPaths := []string{
+		filepath.Join("..", "outside.txt"),
+		outsidePath,
+	}
+	for _, mutationPath := range mutationPaths {
+		if err := root.WriteFile(mutationPath, []byte("escape"), 0o600); err == nil {
+			t.Fatalf("WriteFile accepted escape path %q", mutationPath)
+		}
+		if file, err := root.Create(mutationPath); err == nil {
+			_ = file.Close()
+			t.Fatalf("Create accepted escape path %q", mutationPath)
+		}
+		if err := root.MkdirAll(mutationPath, 0o755); err == nil {
+			t.Fatalf("MkdirAll accepted escape path %q", mutationPath)
+		}
+		if err := root.Rename("inside.txt", mutationPath); err == nil {
+			t.Fatalf("Rename accepted escape destination %q", mutationPath)
+		}
+		if err := root.Rename(mutationPath, "renamed-from-outside.txt"); err == nil {
+			t.Fatalf("Rename accepted escape source %q", mutationPath)
+		}
+		if _, err := root.Stat("renamed-from-outside.txt"); !os.IsNotExist(err) {
+			t.Fatalf("Rename created an in-root file from escape source %q: %v", mutationPath, err)
+		}
+		if err := root.Remove(mutationPath); err == nil {
+			t.Fatalf("Remove accepted escape path %q", mutationPath)
+		}
+		if err := root.RemoveAll(mutationPath); err == nil {
+			t.Fatalf("RemoveAll accepted escape path %q", mutationPath)
+		}
+	}
+	payload, err := os.ReadFile(outsidePath)
+	if err != nil || string(payload) != "outside" {
+		t.Fatalf("outside file changed: %q, %v", payload, err)
+	}
+}
+
+func TestRootRejectsSymlinkSwapBeforeWrite(t *testing.T) {
+	parentPath := t.TempDir()
+	rootPath := filepath.Join(parentPath, "storage")
+	outsidePath := filepath.Join(parentPath, "outside")
+	if err := os.MkdirAll(outsidePath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	root, err := New(rootPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	safeParent := filepath.Join(rootPath, "candidate")
+	if err := os.MkdirAll(safeParent, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(safeParent); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outsidePath, safeParent); err != nil {
+		t.Skipf("symlinks are unavailable: %v", err)
+	}
+
+	if err := root.WriteFile(filepath.Join("candidate", "swapped.txt"), []byte("escape"), 0o600); err == nil {
+		t.Fatal("write followed a parent replaced by a symlink")
+	}
+	if _, err := os.Stat(filepath.Join(outsidePath, "swapped.txt")); !os.IsNotExist(err) {
+		t.Fatalf("symlink swap created outside file: %v", err)
+	}
+}
+
+// END storage capability escape regression tests.
