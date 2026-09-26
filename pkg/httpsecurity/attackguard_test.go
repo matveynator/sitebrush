@@ -2,6 +2,7 @@ package httpsecurity
 
 import (
 	"encoding/json"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
