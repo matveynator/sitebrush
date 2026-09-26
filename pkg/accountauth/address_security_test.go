@@ -55,6 +55,16 @@ func TestSecurityBoundaryClientIPRejectsMalformedTrustedChain(t *testing.T) {
 	}
 }
 
+func TestSecurityBoundaryClientIPDoesNotTrustXRealIP(t *testing.T) {
+	request := httptest.NewRequest("GET", "https://example.com/", nil)
+	request.RemoteAddr = "127.0.0.1:4321"
+	request.Header.Set("X-Real-IP", "127.0.0.1")
+
+	if got := ClientIP(request, "127.0.0.1"); got != "" {
+		t.Fatalf("SECURITY: unsupported X-Real-IP header selected client IP %q", got)
+	}
+}
+
 func TestSecurityBoundarySafeQueryRedactsEveryCredentialLikeField(t *testing.T) {
 	raw := "page=2&Token=abc&auth_code=123&password=p&client_secret=s&challenge=c&resume=r&email_confirm=e&return_path=%2Fadmin&safe=value"
 	got := SafeQuery(raw)

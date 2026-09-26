@@ -124,3 +124,49 @@ func TestSecurityBoundaryOneInstallationCannotForgeReputationQuorumByReplay(t *t
 		t.Fatalf("SECURITY: one installation forged quorum by replaying signals: %#v", got)
 	}
 }
+
+func TestSecurityBoundaryOldSignalReplayCannotExtendConfirmedBlock(t *testing.T) {
+	originalObservedAt := time.Unix(1_800_200_500, 0).UTC()
+	records := map[string]map[string]evidenceSource{}
+	installationIDs := []string{"installation-a", "installation-b", "installation-c"}
+	for sourceIndex := 0; sourceIndex < requiredSources; sourceIndex++ {
+		accepted, err := submit(records, Signal{
+			IP:             "203.0.113.89",
+			Category:       "injection",
+			Description:    "original incident",
+			InstallationID: installationIDs[sourceIndex],
+			ObservedAt:     originalObservedAt,
+		}, originalObservedAt)
+		if err != nil || !accepted {
+			t.Fatalf("initial signal %d: accepted=%v err=%v", sourceIndex, accepted, err)
+		}
+	}
+
+	initialEntries := approved(records, originalObservedAt.Add(time.Minute))
+	if len(initialEntries) != 1 || initialEntries[0].Confirmations != requiredSources {
+		t.Fatalf("initial reputation entries = %#v", initialEntries)
+	}
+	initialExpiry := initialEntries[0].ExpiresAt
+
+	for replayIndex := 0; replayIndex < 10_000; replayIndex++ {
+		replayNow := originalObservedAt.Add(time.Minute + time.Duration(replayIndex)*time.Second)
+		accepted, err := submit(records, Signal{
+			IP:             "203.0.113.89",
+			Category:       "injection",
+			Description:    "replayed incident",
+			InstallationID: "installation-a",
+			ObservedAt:     originalObservedAt,
+		}, replayNow)
+		if err != nil || !accepted {
+			t.Fatalf("replay %d: accepted=%v err=%v", replayIndex, accepted, err)
+		}
+	}
+
+	finalEntries := approved(records, originalObservedAt.Add(2*time.Hour))
+	if len(finalEntries) != 1 {
+		t.Fatalf("replayed reputation entries = %#v", finalEntries)
+	}
+	if finalEntries[0].Confirmations != requiredSources || !finalEntries[0].ExpiresAt.Equal(initialExpiry) {
+		t.Fatalf("SECURITY: old signal replay changed confirmation/expiry: initial=%s final=%#v", initialExpiry, finalEntries[0])
+	}
+}
