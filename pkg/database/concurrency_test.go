@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	_ "github.com/mattn/go-sqlite3"
+	_ "modernc.org/sqlite"
 )
 
 func newSQLiteConcurrencyTestDatabase(t *testing.T) (*Database, string) {
@@ -37,7 +37,7 @@ func TestSQLiteConcurrentRealtimeWritersRemainAvailable(t *testing.T) {
 	db, _ := newSQLiteConcurrencyTestDatabase(t)
 
 	const (
-		writerCount    = 24
+		writerCount     = 24
 		writesPerWriter = 20
 	)
 

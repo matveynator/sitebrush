@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	_ "github.com/mattn/go-sqlite3"
+	_ "modernc.org/sqlite"
 )
 
 func TestHostingSecurityPublicServerClassificationBoundaries(t *testing.T) {
@@ -59,7 +59,7 @@ func TestHostingSecurityPublicServerClassificationBoundaries(t *testing.T) {
 }
 
 func TestHostingDetailsLoadTLSNetworkAndDomainSecurityChecks(t *testing.T) {
-	database, err := sql.Open("sqlite3", filepath.Join(t.TempDir(), "hosting-details.db"))
+	database, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "hosting-details.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -181,8 +181,8 @@ func TestHostingViewAndLocalDevelopmentEdgeBranches(t *testing.T) {
 	}
 
 	local := ServerView{
-		Name: "local.example.com",
-		Sites: []ServerSiteView{{Domain: "local.example.com"}},
+		Name:      "local.example.com",
+		Sites:     []ServerSiteView{{Domain: "local.example.com"}},
 		SiteCount: 1,
 	}
 	remote := ClientHosting{

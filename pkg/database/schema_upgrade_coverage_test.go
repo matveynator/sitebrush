@@ -6,13 +6,13 @@ import (
 	"path/filepath"
 	"testing"
 
-	_ "github.com/mattn/go-sqlite3"
+	_ "modernc.org/sqlite"
 )
 
 func newLegacySchemaDatabase(t *testing.T) *Database {
 	t.Helper()
 
-	raw, err := sql.Open("sqlite3", filepath.Join(t.TempDir(), "legacy.db"))
+	raw, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "legacy.db"))
 	if err != nil {
 		t.Fatalf("open legacy sqlite database: %v", err)
 	}

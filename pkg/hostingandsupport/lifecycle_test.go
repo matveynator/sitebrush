@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	_ "github.com/mattn/go-sqlite3"
+	_ "modernc.org/sqlite"
 )
 
 func TestOwnerPlanAndSiteRequestLifecycle(t *testing.T) {
@@ -222,7 +222,7 @@ func TestHostingAndSupportViewHelpers(t *testing.T) {
 
 func newLifecycleStore(t *testing.T) Store {
 	t.Helper()
-	database, err := sql.Open("sqlite3", filepath.Join(t.TempDir(), "hosting.db"))
+	database, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "hosting.db"))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -8,11 +8,11 @@ import (
 	"strings"
 	"testing"
 
-	_ "github.com/mattn/go-sqlite3"
+	_ "modernc.org/sqlite"
 )
 
 func TestInsertMarkersBulkDuckDBOrchestrationOnSQLite(t *testing.T) {
-	raw, err := sql.Open("sqlite3", filepath.Join(t.TempDir(), "duck-bulk.db"))
+	raw, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "duck-bulk.db"))
 	if err != nil {
 		t.Fatalf("open sqlite database: %v", err)
 	}
@@ -50,7 +50,7 @@ func TestInsertMarkersBulkDuckDBOrchestrationOnSQLite(t *testing.T) {
 }
 
 func TestInsertMarkersBulkDuckDBConflictFallback(t *testing.T) {
-	raw, err := sql.Open("sqlite3", filepath.Join(t.TempDir(), "duck-fallback.db"))
+	raw, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "duck-fallback.db"))
 	if err != nil {
 		t.Fatalf("open sqlite database: %v", err)
 	}
@@ -87,7 +87,7 @@ END;`); err != nil {
 }
 
 func TestInsertMarkersBulkDuckDBOrdinaryErrorRollsBack(t *testing.T) {
-	raw, err := sql.Open("sqlite3", filepath.Join(t.TempDir(), "duck-error.db"))
+	raw, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "duck-error.db"))
 	if err != nil {
 		t.Fatalf("open sqlite database: %v", err)
 	}

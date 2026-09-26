@@ -7,14 +7,14 @@ import (
 	"testing"
 	"time"
 
-	_ "github.com/mattn/go-sqlite3"
 	_ "github.com/matveynator/sitebrush/v2/pkg/database/drivers"
+	_ "modernc.org/sqlite"
 )
 
 func newTestDatabase(t *testing.T) *Database {
 	t.Helper()
 
-	raw, err := sql.Open("sqlite3", filepath.Join(t.TempDir(), "sitebrush-test.db"))
+	raw, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "sitebrush-test.db"))
 	if err != nil {
 		t.Fatal(err)
 	}

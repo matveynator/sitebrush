@@ -40,7 +40,6 @@ import (
 	"testing"
 	"time"
 
-	_ "github.com/mattn/go-sqlite3"
 	"github.com/matveynator/netchan"
 	browserstats "github.com/matveynator/sitebrush/v2/pkg/analytics"
 	"github.com/matveynator/sitebrush/v2/pkg/channelacme"
@@ -57,6 +56,7 @@ import (
 	"golang.org/x/net/dns/dnsmessage"
 	"golang.org/x/net/websocket"
 	"golang.org/x/text/encoding/charmap"
+	_ "modernc.org/sqlite"
 )
 
 type automaticSSLIssuerFunc func(context.Context, string) channelacme.IssueResult
@@ -335,7 +335,7 @@ func newTestApplication(t *testing.T) (*App, *sql.DB) {
 	if err != nil {
 		t.Fatalf("prepare storage root: %v", err)
 	}
-	rawDB, err := sql.Open("sqlite3", filepath.Join(storagePath, "sitebrush.db"))
+	rawDB, err := sql.Open("sqlite", filepath.Join(storagePath, "sitebrush.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1168,7 +1168,7 @@ func captureImmediateProfileEmail(t *testing.T, application *App) {
 
 func TestMigrateWithSingleSQLiteConnectionRebuildsPagePasswordPrefixFiles(t *testing.T) {
 	storagePath := t.TempDir()
-	rawDB, err := sql.Open("sqlite3", filepath.Join(storagePath, "sitebrush.db"))
+	rawDB, err := sql.Open("sqlite", filepath.Join(storagePath, "sitebrush.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2757,7 +2757,7 @@ func TestHostingAndSupportCentralServersRequireSitebrushComDNSAndKey(t *testing.
 	lookupServerExternalIP = func(context.Context) (string, error) {
 		return "203.0.113.10", nil
 	}
-	database, err := sql.Open("sqlite3", filepath.Join(t.TempDir(), "hostingandsupport.db"))
+	database, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "hostingandsupport.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2783,7 +2783,7 @@ func TestHostingAndSupportCentralServersRequireSitebrushComDNSAndKey(t *testing.
 func TestHostingSnapshotDiskThresholdSendsSingleOwnerEmail(t *testing.T) {
 	storagePath := t.TempDir()
 	databasePath := filepath.Join(storagePath, "hostingandsupport.db")
-	database, err := sql.Open("sqlite3", databasePath)
+	database, err := sql.Open("sqlite", databasePath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2821,7 +2821,7 @@ func TestHostingSnapshotDiskThresholdSendsSingleOwnerEmail(t *testing.T) {
 }
 
 func TestAutomaticBillingCreatesInvoicesForClientAndServerOwner(t *testing.T) {
-	database, err := sql.Open("sqlite3", filepath.Join(t.TempDir(), "billing.db"))
+	database, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "billing.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2922,7 +2922,7 @@ func TestSaveServerExpensePolicyUsesOnlyMonthlyServerPrice(t *testing.T) {
 }
 
 func TestAutomaticBillingDistributesServerCostByStorage(t *testing.T) {
-	database, err := sql.Open("sqlite3", filepath.Join(t.TempDir(), "billing.db"))
+	database, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "billing.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2971,7 +2971,7 @@ func TestAutomaticBillingDistributesServerCostByStorage(t *testing.T) {
 }
 
 func TestHostingAndSupportClientsExcludeDemoAndIncludeServerOwnerSites(t *testing.T) {
-	database, err := sql.Open("sqlite3", filepath.Join(t.TempDir(), "billing.db"))
+	database, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "billing.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -5051,7 +5051,7 @@ func TestBillingPlanCanBeEditedWithSiteAndAnalyticsLimits(t *testing.T) {
 
 func TestBillingMigrationAddsPlanLimitColumns(t *testing.T) {
 	databasePath := filepath.Join(t.TempDir(), "hostingandsupport.db")
-	controlDB, err := sql.Open("sqlite3", databasePath)
+	controlDB, err := sql.Open("sqlite", databasePath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -11799,7 +11799,7 @@ func TestStatusCapturingResponseWriterSupportsFlush(t *testing.T) {
 
 func TestPublicImportedAssetsServeFromCanonicalAndDomainPrefixedPaths(t *testing.T) {
 	storagePath := t.TempDir()
-	rawDB, err := sql.Open("sqlite3", filepath.Join(storagePath, "sitebrush.db"))
+	rawDB, err := sql.Open("sqlite", filepath.Join(storagePath, "sitebrush.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -11958,7 +11958,7 @@ func TestGuestStaticAnalyticsAvoidsDatabaseAndEnqueuesEvent(t *testing.T) {
 
 func TestFilesPageUsesPublicAssetPrefix(t *testing.T) {
 	storagePath := t.TempDir()
-	rawDB, err := sql.Open("sqlite3", filepath.Join(storagePath, "sitebrush.db"))
+	rawDB, err := sql.Open("sqlite", filepath.Join(storagePath, "sitebrush.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -11993,7 +11993,7 @@ func TestFilesPageUsesPublicAssetPrefix(t *testing.T) {
 
 func TestManagedFilesVisibleForCurrentURIAndDescendants(t *testing.T) {
 	storagePath := t.TempDir()
-	rawDB, err := sql.Open("sqlite3", filepath.Join(storagePath, "sitebrush.db"))
+	rawDB, err := sql.Open("sqlite", filepath.Join(storagePath, "sitebrush.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -12104,7 +12104,7 @@ func TestFileManagerMobileLayoutUsesCardsWithoutHorizontalScrolling(t *testing.T
 
 func TestAssetServingCountsDownloadsAndTokenUse(t *testing.T) {
 	storagePath := t.TempDir()
-	rawDB, err := sql.Open("sqlite3", filepath.Join(storagePath, "sitebrush.db"))
+	rawDB, err := sql.Open("sqlite", filepath.Join(storagePath, "sitebrush.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -12154,7 +12154,7 @@ func TestAssetServingCountsDownloadsAndTokenUse(t *testing.T) {
 
 func TestPublicAssetServingDoesNotWriteDownloadCountOnHotPath(t *testing.T) {
 	storagePath := t.TempDir()
-	rawDB, err := sql.Open("sqlite3", filepath.Join(storagePath, "sitebrush.db"))
+	rawDB, err := sql.Open("sqlite", filepath.Join(storagePath, "sitebrush.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -12192,7 +12192,7 @@ func TestPublicAssetServingDoesNotWriteDownloadCountOnHotPath(t *testing.T) {
 
 func TestUploadFilesStoresFilesForCurrentURI(t *testing.T) {
 	storagePath := t.TempDir()
-	rawDB, err := sql.Open("sqlite3", filepath.Join(storagePath, "sitebrush.db"))
+	rawDB, err := sql.Open("sqlite", filepath.Join(storagePath, "sitebrush.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -12529,7 +12529,7 @@ func TestMigrateMergesLegacyLoopbackDomainsIntoLocalhost(t *testing.T) {
 
 func TestDomainAliasesRequireDNSVerificationBeforeResolving(t *testing.T) {
 	storagePath := t.TempDir()
-	rawDB, err := sql.Open("sqlite3", filepath.Join(storagePath, "sitebrush.db"))
+	rawDB, err := sql.Open("sqlite", filepath.Join(storagePath, "sitebrush.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -12815,7 +12815,7 @@ func TestAuthoritativeDNSLookupFollowsDelegationWithoutRecursiveResolver(t *test
 
 func TestDomainAliasLimitIsTenDomains(t *testing.T) {
 	storagePath := t.TempDir()
-	rawDB, err := sql.Open("sqlite3", filepath.Join(storagePath, "sitebrush.db"))
+	rawDB, err := sql.Open("sqlite", filepath.Join(storagePath, "sitebrush.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -14681,7 +14681,7 @@ func (database stalledAnalyticsSQL) QueryRowContext(ctx context.Context, query s
 }
 
 func TestAnalyticsAdmissionWithStalledStorage(t *testing.T) {
-	queries, err := sql.Open("sqlite3", ":memory:")
+	queries, err := sql.Open("sqlite", ":memory:")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -14750,7 +14750,7 @@ func TestBrowserAnalyticsRejectsForeignOriginAndOverload(t *testing.T) {
 }
 
 func TestBrowserAnalyticsSnapshotRetryIsIdempotent(t *testing.T) {
-	database, err := sql.Open("sqlite3", ":memory:")
+	database, err := sql.Open("sqlite", ":memory:")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -15001,7 +15001,7 @@ func (database observedAnalyticsSQL) QueryRowContext(ctx context.Context, query 
 }
 
 func TestBrowserAnalyticsShutdownPersistsAndRestoresSession(t *testing.T) {
-	raw, err := sql.Open("sqlite3", filepath.Join(t.TempDir(), "browser.db"))
+	raw, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "browser.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -15184,7 +15184,7 @@ func TestBrowserAnalyticsPermanentSaveRejectionIsNotRetried(t *testing.T) {
 }
 
 func TestBrowserAnalyticsReturnsStateBeforeDatabaseWrite(t *testing.T) {
-	raw, err := sql.Open("sqlite3", filepath.Join(t.TempDir(), "browser.db"))
+	raw, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "browser.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -16315,7 +16315,7 @@ func TestAuthAttackConfirmationURLUsesRoutedHostAndTrustedProxyScheme(t *testing
 func TestAdminIPOptInMigrationRunsForPreviousSchemaVersion(t *testing.T) {
 	storagePath := t.TempDir()
 	databasePath := filepath.Join(storagePath, "example.org.db")
-	database, err := sql.Open("sqlite3", databasePath)
+	database, err := sql.Open("sqlite", databasePath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -16353,7 +16353,7 @@ func TestAdminIPOptInMigrationRunsForPreviousSchemaVersion(t *testing.T) {
 		t.Fatalf("migration result=%+v", result)
 	}
 
-	database, err = sql.Open("sqlite3", databasePath)
+	database, err = sql.Open("sqlite", databasePath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -17018,7 +17018,7 @@ func TestRunAdminIPResetCommandPersistsCIDR(t *testing.T) {
 		t.Fatal(err)
 	}
 	databasePath := filepath.Join(siteDirectory, "example.org.db")
-	database, err := sql.Open("sqlite3", databasePath)
+	database, err := sql.Open("sqlite", databasePath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -17041,7 +17041,7 @@ func TestRunAdminIPResetCommandPersistsCIDR(t *testing.T) {
 	if !strings.Contains(output.String(), "192.0.2.0/24") {
 		t.Fatalf("command output did not include normalized recovery CIDR: %q", output.String())
 	}
-	database, err = sql.Open("sqlite3", databasePath)
+	database, err = sql.Open("sqlite", databasePath)
 	if err != nil {
 		t.Fatal(err)
 	}
