@@ -203,3 +203,25 @@ func TestSecurityBoundaryCrawlerTimeoutStopsSlowTransport(t *testing.T) {
 		t.Fatal("slow crawler transport did not observe request cancellation")
 	}
 }
+
+func TestSecurityBoundaryCrawlerStopsInfiniteRedirectChain(t *testing.T) {
+	transportCalls := 0
+	client := &http.Client{Timeout: time.Second, Transport: securityRoundTripper(func(request *http.Request) (*http.Response, error) {
+		transportCalls++
+		return &http.Response{
+			StatusCode: http.StatusFound,
+			Header:     http.Header{"Location": []string{request.URL.String()}},
+			Body:       io.NopCloser(strings.NewReader("redirect")),
+			Request:    request,
+		}, nil
+	})}
+	pageURL, _ := url.Parse("https://example.com/loop")
+
+	_, err := DownloadHTMLPageContext(context.Background(), client, pageURL, nil)
+	if err == nil {
+		t.Fatal("SECURITY: crawler accepted an infinite redirect chain")
+	}
+	if transportCalls > 10 {
+		t.Fatalf("redirect chain made %d transport calls, want at most 10", transportCalls)
+	}
+}
