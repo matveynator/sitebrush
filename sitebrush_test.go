@@ -6183,6 +6183,7 @@ func TestPagePasswordProtectionRejectsTraversalAndEncodedRouteAliases(t *testing
 		"http://localhost:8080/%70assport/one",
 		"http://localhost:8080/pass%70ort/one",
 		"http://localhost:8080/passport%2Fone",
+		"http://localhost:8080/passport%5Cone",
 		"http://localhost:8080/%2e/passport/one",
 	}
 	for _, target := range targets {
