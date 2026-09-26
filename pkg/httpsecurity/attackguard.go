@@ -24,6 +24,7 @@ const (
 	securityReasonLogLimit   = 24
 	attackGuardShardCount    = 16
 	attackGuardQueueSize     = 256
+	attackGuardWindowLimit   = 1024
 )
 
 type SecuritySettings struct {
@@ -305,6 +306,9 @@ func handleAttackGuardRequest(blocks map[string]SecurityBlock, allowlist map[str
 		windowKey := securityDomainIPKey(request.Domain, ip)
 		window := windows[windowKey]
 		if window == nil || now.Sub(window.Started) > 10*time.Second {
+			if window == nil && len(windows) >= attackGuardWindowLimit {
+				evictOldestAttackWindow(windows)
+			}
 			window = &attackWindow{Started: now, Distinct: map[string]struct{}{}}
 			windows[windowKey] = window
 		}
@@ -329,9 +333,6 @@ func handleAttackGuardRequest(blocks map[string]SecurityBlock, allowlist map[str
 			delete(windows, windowKey)
 			return attackGuardResult{Block: block, Blocked: true, Changed: true}
 		}
-		if len(windows) > 1024 {
-			pruneAttackGuardState(blocks, windows, incidents, now)
-		}
 		return attackGuardResult{}
 
 	case attackGuardObserveIncident:
@@ -346,6 +347,9 @@ func handleAttackGuardRequest(blocks map[string]SecurityBlock, allowlist map[str
 			windowKey := securityDomainIPKey(request.Domain, ip)
 			window := incidents[windowKey]
 			if window == nil || now.Sub(window.Started) > time.Minute {
+				if window == nil && len(incidents) >= attackGuardWindowLimit {
+					evictOldestIncidentWindow(incidents)
+				}
 				window = &incidentWindow{Started: now, Counts: map[string]int{}}
 				incidents[windowKey] = window
 			}
@@ -728,6 +732,42 @@ func pruneSecurityReasonLog(events []SecurityReasonEvent, now time.Time) []Secur
 		kept = kept[len(kept)-securityReasonLogLimit:]
 	}
 	return kept
+}
+
+func evictOldestAttackWindow(windows map[string]*attackWindow) {
+	oldestKey := ""
+	oldestStarted := time.Time{}
+	for key, window := range windows {
+		if window == nil {
+			delete(windows, key)
+			return
+		}
+		if oldestKey == "" || window.Started.Before(oldestStarted) {
+			oldestKey = key
+			oldestStarted = window.Started
+		}
+	}
+	if oldestKey != "" {
+		delete(windows, oldestKey)
+	}
+}
+
+func evictOldestIncidentWindow(incidents map[string]*incidentWindow) {
+	oldestKey := ""
+	oldestStarted := time.Time{}
+	for key, window := range incidents {
+		if window == nil {
+			delete(incidents, key)
+			return
+		}
+		if oldestKey == "" || window.Started.Before(oldestStarted) {
+			oldestKey = key
+			oldestStarted = window.Started
+		}
+	}
+	if oldestKey != "" {
+		delete(incidents, oldestKey)
+	}
 }
 
 func pruneAttackGuardState(blocks map[string]SecurityBlock, windows map[string]*attackWindow, incidents map[string]*incidentWindow, now time.Time) {
