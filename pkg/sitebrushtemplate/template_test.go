@@ -101,3 +101,32 @@ func TestReplaceBlocksDoesNotCrossTagTypesWithSameTemplateClass(t *testing.T) {
 		t.Fatalf("updated html = %q, want %q", updatedHTML, targetHTML)
 	}
 }
+
+func TestReplaceBlocksDoesNotRewriteMarkupLikeTextInRawOrMalformedHTML(t *testing.T) {
+	sourceHTML := `<div class="SiteBrush-Template shared">new</div>`
+	targetHTML := `<html><body>
+<script>const markup = '<div class="SiteBrush-Template shared">script</div>';</script>
+<style>.preview::before { content: '<div class="SiteBrush-Template shared">style</div>'; }</style>
+<!-- <div class="SiteBrush-Template shared">comment</div> -->
+<div class="SiteBrush-Template shared">old</div>
+<div class="SiteBrush-Template shared">unfinished`
+
+	updatedHTML, changed := ReplaceBlocks(targetHTML, ExtractBlocks(sourceHTML))
+	if !changed {
+		t.Fatal("changed = false, want the complete HTML element to be replaced")
+	}
+
+	for _, untouchedFragment := range []string{
+		`<div class="SiteBrush-Template shared">script</div>`,
+		`<div class="SiteBrush-Template shared">style</div>`,
+		`<div class="SiteBrush-Template shared">comment</div>`,
+		`<div class="SiteBrush-Template shared">unfinished`,
+	} {
+		if !strings.Contains(updatedHTML, untouchedFragment) {
+			t.Fatalf("markup-like text was changed or removed: missing %q in %q", untouchedFragment, updatedHTML)
+		}
+	}
+	if strings.Count(updatedHTML, `<div class="SiteBrush-Template shared">new</div>`) != 1 {
+		t.Fatalf("replacement count = %d, want 1: %q", strings.Count(updatedHTML, `<div class="SiteBrush-Template shared">new</div>`), updatedHTML)
+	}
+}

@@ -7,13 +7,13 @@ import (
 	"testing"
 	"time"
 
-	_ "github.com/mattn/go-sqlite3"
+	_ "modernc.org/sqlite"
 )
 
 func newPartialSQLiteCoverageDatabase(t *testing.T, statements ...string) *Database {
 	t.Helper()
 
-	raw, err := sql.Open("sqlite3", filepath.Join(t.TempDir(), "partial.db"))
+	raw, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "partial.db"))
 	if err != nil {
 		t.Fatalf("open partial sqlite database: %v", err)
 	}

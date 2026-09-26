@@ -6,12 +6,12 @@ import (
 	"path/filepath"
 	"testing"
 
-	_ "github.com/mattn/go-sqlite3"
+	_ "modernc.org/sqlite"
 )
 
 func TestMigrateRepairsIncompleteSchemaAtCurrentVersion(t *testing.T) {
 	ctx := context.Background()
-	database, err := sql.Open("sqlite3", filepath.Join(t.TempDir(), "migration.db"))
+	database, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "migration.db"))
 	if err != nil {
 		t.Fatal(err)
 	}

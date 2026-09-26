@@ -8,13 +8,13 @@ import (
 	"testing"
 	"time"
 
-	_ "github.com/mattn/go-sqlite3"
+	_ "modernc.org/sqlite"
 )
 
 func newEmptySQLiteCoverageDatabase(t *testing.T) *Database {
 	t.Helper()
 
-	raw, err := sql.Open("sqlite3", filepath.Join(t.TempDir(), "empty.db"))
+	raw, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "empty.db"))
 	if err != nil {
 		t.Fatalf("open empty sqlite database: %v", err)
 	}

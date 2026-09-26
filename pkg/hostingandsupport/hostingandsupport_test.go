@@ -8,12 +8,12 @@ import (
 	"testing"
 	"time"
 
-	_ "github.com/mattn/go-sqlite3"
 	"github.com/matveynator/sitebrush/v2/pkg/expenses"
+	_ "modernc.org/sqlite"
 )
 
 func TestServerExpensePolicyRoundTrip(t *testing.T) {
-	database, err := sql.Open("sqlite3", filepath.Join(t.TempDir(), "expenses.db"))
+	database, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "expenses.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -197,7 +197,7 @@ func TestBillableSiteCountUsesBillingThreshold(t *testing.T) {
 }
 
 func TestServiceMailInstallationsDoesNotBlockSingleConnectionDatabase(t *testing.T) {
-	database, err := sql.Open("sqlite3", filepath.Join(t.TempDir(), "hostingandsupport.db"))
+	database, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "hostingandsupport.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -235,7 +235,7 @@ func TestServiceMailInstallationsDoesNotBlockSingleConnectionDatabase(t *testing
 }
 
 func TestServiceMailSettingsRoundTrip(t *testing.T) {
-	database, err := sql.Open("sqlite3", filepath.Join(t.TempDir(), "hostingandsupport.db"))
+	database, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "hostingandsupport.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -258,7 +258,7 @@ func TestServiceMailSettingsRoundTrip(t *testing.T) {
 }
 
 func TestPanelSnapshotRoundTrip(t *testing.T) {
-	database, err := sql.Open("sqlite3", filepath.Join(t.TempDir(), "hostingandsupport.db"))
+	database, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "hostingandsupport.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -288,7 +288,7 @@ func TestPanelSnapshotRoundTrip(t *testing.T) {
 }
 
 func TestDeleteServiceMailEventsDeletesOnlySelectedRows(t *testing.T) {
-	database, err := sql.Open("sqlite3", filepath.Join(t.TempDir(), "hostingandsupport.db"))
+	database, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "hostingandsupport.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -332,7 +332,7 @@ func TestDeleteServiceMailEventsDeletesOnlySelectedRows(t *testing.T) {
 }
 
 func TestSupportEventsRoundTrip(t *testing.T) {
-	database, err := sql.Open("sqlite3", filepath.Join(t.TempDir(), "hostingandsupport.db"))
+	database, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "hostingandsupport.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -369,7 +369,7 @@ func TestSupportEventsRoundTrip(t *testing.T) {
 }
 
 func TestPaymentProvidersAndInvoicesRoundTrip(t *testing.T) {
-	database, err := sql.Open("sqlite3", filepath.Join(t.TempDir(), "hostingandsupport.db"))
+	database, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "hostingandsupport.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -463,7 +463,7 @@ func TestPaymentProvidersAndInvoicesRoundTrip(t *testing.T) {
 }
 
 func TestHostingSnapshotRegistryRoundTrip(t *testing.T) {
-	database, err := sql.Open("sqlite3", filepath.Join(t.TempDir(), "hostingandsupport.db"))
+	database, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "hostingandsupport.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -582,7 +582,7 @@ func TestHostingSnapshotRegistryRoundTrip(t *testing.T) {
 }
 
 func TestRegistrySyncEventsReadsLegacyRowsWithoutSummary(t *testing.T) {
-	database, err := sql.Open("sqlite3", filepath.Join(t.TempDir(), "hostingandsupport.db"))
+	database, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "hostingandsupport.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -800,7 +800,7 @@ func TestServerSystemMetricViewsQueuePercentAndStatus(t *testing.T) {
 }
 
 func TestSaveHostingSnapshotReplacesCurrentRegistryState(t *testing.T) {
-	database, err := sql.Open("sqlite3", filepath.Join(t.TempDir(), "hostingandsupport.db"))
+	database, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "hostingandsupport.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -863,7 +863,7 @@ func TestSaveHostingSnapshotReplacesCurrentRegistryState(t *testing.T) {
 }
 
 func TestSaveHostingSnapshotTracksCentralPresenceBuckets(t *testing.T) {
-	database, err := sql.Open("sqlite3", filepath.Join(t.TempDir(), "hostingandsupport.db"))
+	database, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "hostingandsupport.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -971,7 +971,7 @@ func TestClassifyClientHostingsKeepsUnqualifiedDesktopTemporaryAndArchivesOldDat
 }
 
 func TestPublicTrialSitesUseCreationDeadlineAndBackfillLegacyAssignments(t *testing.T) {
-	database, err := sql.Open("sqlite3", filepath.Join(t.TempDir(), "billing.db"))
+	database, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "billing.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1009,7 +1009,7 @@ func TestPublicTrialSitesUseCreationDeadlineAndBackfillLegacyAssignments(t *test
 }
 
 func TestPublicTrialSiteReusePreservesArchivedRun(t *testing.T) {
-	database, err := sql.Open("sqlite3", filepath.Join(t.TempDir(), "billing.db"))
+	database, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "billing.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1052,7 +1052,7 @@ func TestPublicTrialSiteReusePreservesArchivedRun(t *testing.T) {
 }
 
 func TestBillingMigrationPreservesArchivedTrialHistory(t *testing.T) {
-	database, err := sql.Open("sqlite3", filepath.Join(t.TempDir(), "billing.db"))
+	database, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "billing.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1077,7 +1077,7 @@ func TestBillingMigrationPreservesArchivedTrialHistory(t *testing.T) {
 }
 
 func TestAutomaticInvoiceStoresLinesAndIsIdempotentPerServerCycle(t *testing.T) {
-	database, err := sql.Open("sqlite3", filepath.Join(t.TempDir(), "billing.db"))
+	database, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "billing.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1124,7 +1124,7 @@ func TestAutomaticInvoiceStoresLinesAndIsIdempotentPerServerCycle(t *testing.T) 
 }
 
 func TestBillingCustomerScheduleTokenAndStripeCommission(t *testing.T) {
-	database, err := sql.Open("sqlite3", filepath.Join(t.TempDir(), "billing.db"))
+	database, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "billing.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1175,7 +1175,7 @@ func TestBillingCustomerScheduleTokenAndStripeCommission(t *testing.T) {
 }
 
 func TestServerCostPolicyAndSnapshotDemoStateRoundTrip(t *testing.T) {
-	database, err := sql.Open("sqlite3", filepath.Join(t.TempDir(), "billing.db"))
+	database, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "billing.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1244,7 +1244,7 @@ func TestApplyServerCostViewUsesThirtyPercentBillingCapacity(t *testing.T) {
 }
 
 func TestPurgeDemoBillingRemovesDemoOnlyAndKeepsRealCustomer(t *testing.T) {
-	database, err := sql.Open("sqlite3", filepath.Join(t.TempDir(), "billing.db"))
+	database, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "billing.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
