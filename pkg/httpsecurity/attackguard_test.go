@@ -2,6 +2,7 @@ package httpsecurity
 
 import (
 	"encoding/json"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -756,3 +757,156 @@ func TestAttackGuardPersistenceSnapshotKeepsExpiredEscalationHistory(t *testing.
 		t.Fatalf("expired escalation history missing: %#v", history)
 	}
 }
+
+
+// BEGIN bounded security state and queue regression tests.
+
+func TestAttackGuardBoundsFreshEnumerationWindows(t *testing.T) {
+	blocks := map[string]SecurityBlock{}
+	allowlist := map[string]SecurityAllow{}
+	trustedAdminIPs := map[string]time.Time{}
+	adminIPLookups := map[string]time.Time{}
+	windows := map[string]*attackWindow{}
+	incidents := map[string]*incidentWindow{}
+	reportClaims := map[string]bool{}
+	settings := SecuritySettings{AutoBlock: true}
+	now := time.Date(2026, 9, 26, 12, 0, 0, 0, time.UTC)
+
+	for index := 0; index < attackGuardWindowLimit+512; index++ {
+		ip := "203.0." + strconv.Itoa(index/256) + "." + strconv.Itoa(index%256)
+		result := handleAttackGuardRequest(
+			blocks,
+			allowlist,
+			trustedAdminIPs,
+			adminIPLookups,
+			windows,
+			incidents,
+			reportClaims,
+			&settings,
+			attackGuardRequest{
+				Operation:  attackGuardObserveFast,
+				IP:         ip,
+				Path:       "/probe-" + strconv.Itoa(index),
+				Method:     http.MethodGet,
+				StatusCode: http.StatusNotFound,
+				Now:        now,
+			},
+		)
+		if result.Blocked {
+			t.Fatalf("single probe for %s unexpectedly blocked", ip)
+		}
+	}
+	if len(windows) != attackGuardWindowLimit {
+		t.Fatalf("fresh enumeration windows=%d want=%d", len(windows), attackGuardWindowLimit)
+	}
+}
+
+func TestAttackGuardBoundsFreshIncidentWindows(t *testing.T) {
+	blocks := map[string]SecurityBlock{}
+	allowlist := map[string]SecurityAllow{}
+	trustedAdminIPs := map[string]time.Time{}
+	adminIPLookups := map[string]time.Time{}
+	windows := map[string]*attackWindow{}
+	incidents := map[string]*incidentWindow{}
+	reportClaims := map[string]bool{}
+	settings := SecuritySettings{AutoBlock: true}
+	now := time.Date(2026, 9, 26, 12, 0, 0, 0, time.UTC)
+
+	for index := 0; index < attackGuardWindowLimit+512; index++ {
+		ip := "198.51." + strconv.Itoa(index/256) + "." + strconv.Itoa(index%256)
+		result := handleAttackGuardRequest(
+			blocks,
+			allowlist,
+			trustedAdminIPs,
+			adminIPLookups,
+			windows,
+			incidents,
+			reportClaims,
+			&settings,
+			attackGuardRequest{
+				Operation:   attackGuardObserveIncident,
+				IP:          ip,
+				Category:    "injection",
+				Description: "single suspicious request",
+				Now:         now,
+			},
+		)
+		if result.Blocked {
+			t.Fatalf("single injection signal for %s unexpectedly blocked", ip)
+		}
+	}
+	if len(incidents) != attackGuardWindowLimit {
+		t.Fatalf("fresh incident windows=%d want=%d", len(incidents), attackGuardWindowLimit)
+	}
+}
+
+func TestAttackGuardFullShardQueueReturnsBackpressureWithoutHanging(t *testing.T) {
+	guard, err := NewAttackGuard("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		close(guard.shutdown)
+		select {
+		case <-guard.done:
+		case <-time.After(time.Second):
+			t.Fatal("AttackGuard persistence goroutine did not stop")
+		}
+	})
+
+	const ip = "203.0.113.208"
+	shardIndex := attackGuardShardIndex(ip)
+	blockedReply := make(chan attackGuardResult)
+	guard.shards[shardIndex] <- attackGuardRequest{
+		Operation: attackGuardCheck,
+		IP:        ip,
+		Now:       time.Now().UTC(),
+		Reply:     blockedReply,
+	}
+
+	deadline := time.Now().Add(time.Second)
+	for len(guard.shards[shardIndex]) != 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("AttackGuard shard did not begin the blocking reply")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	for queued := 0; queued < cap(guard.shards[shardIndex]); queued++ {
+		guard.shards[shardIndex] <- attackGuardRequest{
+			Operation: attackGuardCheck,
+			IP:        ip,
+			Now:       time.Now().UTC(),
+		}
+	}
+
+	fastDone := make(chan bool, 1)
+	go func() {
+		_, blocked := guard.ObserveFast(ip, "/probe", false, time.Now().UTC())
+		fastDone <- blocked
+	}()
+	select {
+	case blocked := <-fastDone:
+		if blocked {
+			t.Fatal("queue backpressure was reported as a security block")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("AttackGuard fast path hung behind a full shard queue")
+	}
+
+	adminDone := make(chan error, 1)
+	go func() {
+		_, addErr := guard.Add(ip, "manual", "test", "manual", time.Now().Add(time.Hour), time.Now().UTC())
+		adminDone <- addErr
+	}()
+	select {
+	case addErr := <-adminDone:
+		if addErr == nil || !strings.Contains(addErr.Error(), "busy") {
+			t.Fatalf("full queue admin result=%v want busy error", addErr)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("AttackGuard admin path hung behind a full shard queue")
+	}
+}
+
+// END bounded security state and queue regression tests.
