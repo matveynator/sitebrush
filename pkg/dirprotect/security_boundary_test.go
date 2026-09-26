@@ -59,6 +59,22 @@ func TestSecurityBoundaryProtectedPrefixCannotMatchSiblingOrTraversalAlias(t *te
 	}
 }
 
+func TestSecurityBoundaryProtectedPrefixNormalizesWindowsSeparators(t *testing.T) {
+	protected := "/passport"
+	for _, candidate := range []string{
+		"/passport\\one",
+		"\\passport\\one",
+		"/public\\..\\passport\\one",
+	} {
+		if !HasProtectedPrefix(candidate, protected) {
+			t.Fatalf("SECURITY: Windows path alias %q escaped protected prefix %q", candidate, protected)
+		}
+	}
+	if got := CleanPath("/public\\..\\passport\\one"); got != "/passport/one" {
+		t.Fatalf("Windows path normalization = %q, want /passport/one", got)
+	}
+}
+
 func TestSecurityBoundaryPrefixParserDoesNotCreatePasswordlessProtection(t *testing.T) {
 	for _, raw := range []string{"", "   ", "/admin", "/admin\t   "} {
 		rule, ok := ParsePrefixLine("example.com", raw)

@@ -6164,6 +6164,43 @@ func TestPagePasswordProtectionAppliesToNestedPaths(t *testing.T) {
 	}
 }
 
+// BEGIN protected-page HTTP alias regression tests.
+
+func TestPagePasswordProtectionRejectsTraversalAndEncodedRouteAliases(t *testing.T) {
+	application, rawDB := newTestApplication(t)
+	if _, err := rawDB.Exec(`INSERT INTO published_pages(domain,path,title,html) VALUES(?,?,?,?)`, "localhost", "/passport/one", "Nested", "<html><body>database secret</body></html>"); err != nil {
+		t.Fatal(err)
+	}
+	application.writePublishedStaticHTML("localhost", "/passport/one", "<html><body>route alias secret</body></html>")
+	if err := application.setPagePasswordRule(context.Background(), "localhost", "/passport", "secret"); err != nil {
+		t.Fatal(err)
+	}
+
+	targets := []string{
+		"http://localhost:8080/passport/one",
+		"http://localhost:8080/passport/./one",
+		"http://localhost:8080/public/../passport/one",
+		"http://localhost:8080/%70assport/one",
+		"http://localhost:8080/pass%70ort/one",
+		"http://localhost:8080/passport%2Fone",
+		"http://localhost:8080/passport%5Cone",
+		"http://localhost:8080/%2e/passport/one",
+	}
+	for _, target := range targets {
+		request := httptest.NewRequest(http.MethodGet, target, nil)
+		response := httptest.NewRecorder()
+		application.route(response, request)
+		if response.Code != http.StatusUnauthorized {
+			t.Errorf("protected alias %q status=%d want=%d body=%q", target, response.Code, http.StatusUnauthorized, response.Body.String())
+		}
+		if strings.Contains(response.Body.String(), "route alias secret") || strings.Contains(response.Body.String(), "database secret") {
+			t.Errorf("SECURITY: protected alias %q leaked protected content: %q", target, response.Body.String())
+		}
+	}
+}
+
+// END protected-page HTTP alias regression tests.
+
 func TestPagePasswordProtectionAppliesToLoggedInAdmin(t *testing.T) {
 	application, rawDB := newTestApplication(t)
 	if _, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "admin@example.com", "old"); err != nil {

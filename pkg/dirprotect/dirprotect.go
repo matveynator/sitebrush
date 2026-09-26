@@ -20,7 +20,7 @@ type Rule struct {
 }
 
 func CleanPath(rawPath string) string {
-	trimmedPath := strings.TrimSpace(rawPath)
+	trimmedPath := strings.ReplaceAll(strings.TrimSpace(rawPath), "\\", "/")
 	if trimmedPath == "" {
 		return "/"
 	}
