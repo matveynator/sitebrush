@@ -43,6 +43,27 @@ func TestSecurityBoundaryInstallAcceptsOnlyPortableServiceNameAlphabet(t *testin
 	}
 }
 
+func TestSecurityBoundaryInstallKeepsArgumentsSeparateFromShellSyntax(t *testing.T) {
+	plan, err := buildInstallPlan(Options{
+		Port:        `8080;touch /tmp/owned $(command)`,
+		StoragePath: `/srv/site;touch /tmp/storage && echo owned`,
+		ServiceName: "sitebrush-security-test",
+	})
+	if err != nil {
+		t.Fatalf("buildInstallPlan() error = %v", err)
+	}
+
+	if len(plan.ExecArgs) != 5 {
+		t.Fatalf("exec argument count = %d, want 5: %#v", len(plan.ExecArgs), plan.ExecArgs)
+	}
+	if plan.ExecArgs[1] != "-port" || plan.ExecArgs[2] != `8080;touch /tmp/owned $(command)` {
+		t.Fatalf("port argument was split or rewritten: %#v", plan.ExecArgs)
+	}
+	if plan.ExecArgs[3] != "-path" || plan.ExecArgs[4] != `/srv/site;touch /tmp/storage && echo owned` {
+		t.Fatalf("storage argument was split or rewritten: %#v", plan.ExecArgs)
+	}
+}
+
 func TestSecurityBoundaryInstalledBinaryCopyDoesNotFollowDestinationSymlink(t *testing.T) {
 	root := t.TempDir()
 	source := filepath.Join(root, "source")
