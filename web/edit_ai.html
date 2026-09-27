@@ -39,6 +39,12 @@ const recordButton = document.getElementById('recordButton');
 const capabilityButton = document.getElementById('capabilityButton');
 const statusElement = document.getElementById('status');
 const capabilityOutputElement = document.getElementById('capabilityOutput');
+const savedAIEditorCommand = sessionStorage.getItem('sitebrush.aiEditorCommand');
+if (savedAIEditorCommand) {
+  commandElement.value = savedAIEditorCommand;
+  sessionStorage.removeItem('sitebrush.aiEditorCommand');
+  setStatus('Команда из меню редактора восстановлена. Добавьте файлы и продолжите работу.');
+}
 function setStatus(message) { statusElement.textContent = message; }
 if ('SpeechRecognition' in window || 'webkitSpeechRecognition' in window) {
   const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;

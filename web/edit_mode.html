@@ -7,6 +7,17 @@
   <title>{{index .T "edit_mode_title"}}</title>
   <link rel="stylesheet" href="/p/static/bootstrap.min.css">
   <link rel="stylesheet" href="/p/static/technical_pages.css">
+  <style>
+    .ai-editor-modal-backdrop { position:fixed; inset:0; z-index:1000; display:none; align-items:center; justify-content:center; padding:20px; background:rgba(0,0,0,.48); }
+    .ai-editor-modal-backdrop.is-open { display:flex; }
+    .ai-editor-modal { width:min(680px,100%); max-height:calc(100vh - 40px); overflow:auto; border:1px solid var(--bs-border-color); border-radius:var(--bs-border-radius-lg); background:var(--bs-body-bg); color:var(--bs-body-color); box-shadow:0 18px 60px rgba(0,0,0,.28); }
+    .ai-editor-modal-header, .ai-editor-modal-footer { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:14px 18px; border-bottom:1px solid var(--bs-border-color); }
+    .ai-editor-modal-footer { justify-content:flex-end; border-top:1px solid var(--bs-border-color); border-bottom:0; }
+    .ai-editor-modal-body { display:grid; gap:14px; padding:18px; }
+    .ai-editor-modal textarea { width:100%; min-height:110px; resize:vertical; }
+    .ai-editor-modal-close { border:0; background:transparent; font-size:24px; line-height:1; }
+    .ai-editor-modal-status { min-height:22px; white-space:pre-wrap; }
+  </style>
 </head>
 <body class="technical-page bg-body">
 <main class="container edit-mode-page">
@@ -49,11 +60,103 @@
         <div class="edit-mode-actions">
           {{if .IsHTML}}<a class="btn btn-primary" href="{{.Path}}?visual">{{index .T "edit_mode_open_visual"}}</a>{{end}}
           <a class="btn btn-outline-secondary" href="{{.Path}}?text">{{index .T "edit_mode_open_text"}}</a>
-          <a class="btn btn-outline-primary" href="{{.AIPath}}">AI voice editor</a>
+          <button class="btn btn-outline-primary" type="button" id="openAIEditorButton">Редактировать голосом</button>
         </div>
       </div>
     </section>
   </div>
 </main>
+<div class="ai-editor-modal-backdrop" id="aiEditorModalBackdrop" role="dialog" aria-modal="true" aria-labelledby="aiEditorModalTitle" hidden>
+  <section class="ai-editor-modal">
+    <header class="ai-editor-modal-header">
+      <h2 class="h5 mb-0" id="aiEditorModalTitle">Редактировать голосом</h2>
+      <button class="ai-editor-modal-close" type="button" id="closeAIEditorButton" aria-label="Закрыть">&times;</button>
+    </header>
+    <div class="ai-editor-modal-body">
+      <div>
+        <h3 class="h6">Сказать или написать задачу</h3>
+        <p class="small text-body-secondary">Опишите, что изменить на этой странице. Можно приложить фотографии и другие файлы.</p>
+      </div>
+      <textarea id="aiEditorCommand" placeholder="Например: сделай страницу новости о походе и добавь ссылку на неё на главную"></textarea>
+      <div class="d-flex flex-wrap gap-2">
+        <button class="btn btn-secondary" type="button" id="startAIEditorVoiceButton">Сказать голосом</button>
+        <label class="btn btn-secondary mb-0" for="aiEditorFiles">Загрузить файлы</label>
+        <input id="aiEditorFiles" type="file" multiple hidden>
+      </div>
+      <div class="small text-body-secondary" id="aiEditorFilesStatus"></div>
+      <div>
+        <h3 class="h6">Передать ссылку другой AI-системе</h3>
+        <p class="small text-body-secondary">Ссылка даст внешней AI-системе ограниченный доступ только к редактированию этого сайта. Её можно отозвать.</p>
+        <button class="btn btn-outline-primary" type="button" id="createAIEditorLinkButton">Создать ссылку</button>
+        <div class="ai-editor-modal-status mt-2" id="aiEditorLinkStatus" role="status"></div>
+      </div>
+    </div>
+    <footer class="ai-editor-modal-footer">
+      <button class="btn btn-primary" type="button" id="continueAIEditorButton">Открыть AI-редактор</button>
+    </footer>
+  </section>
+</div>
+<script>
+const aiEditorModalBackdrop = document.getElementById('aiEditorModalBackdrop');
+const aiEditorCommandElement = document.getElementById('aiEditorCommand');
+const aiEditorFilesElement = document.getElementById('aiEditorFiles');
+const aiEditorFilesStatusElement = document.getElementById('aiEditorFilesStatus');
+const aiEditorLinkStatusElement = document.getElementById('aiEditorLinkStatus');
+
+function setAIEditorModalOpen(isOpen) {
+  aiEditorModalBackdrop.hidden = !isOpen;
+  aiEditorModalBackdrop.classList.toggle('is-open', isOpen);
+  if (isOpen) aiEditorCommandElement.focus();
+}
+
+document.getElementById('openAIEditorButton').addEventListener('click', function openAIEditorModal() {
+  setAIEditorModalOpen(true);
+});
+document.getElementById('closeAIEditorButton').addEventListener('click', function closeAIEditorModal() {
+  setAIEditorModalOpen(false);
+});
+aiEditorModalBackdrop.addEventListener('click', function closeAIEditorModalFromBackdrop(event) {
+  if (event.target === aiEditorModalBackdrop) setAIEditorModalOpen(false);
+});
+aiEditorFilesElement.addEventListener('change', function showSelectedAIEditorFiles() {
+  aiEditorFilesStatusElement.textContent = aiEditorFilesElement.files.length + ' файл(ов) выбрано.';
+});
+document.getElementById('continueAIEditorButton').addEventListener('click', function continueToAIEditor() {
+  sessionStorage.setItem('sitebrush.aiEditorCommand', aiEditorCommandElement.value);
+  window.location.href = {{.AIPath}};
+});
+document.getElementById('createAIEditorLinkButton').addEventListener('click', async function createAIEditorLink() {
+  const createLinkButton = document.getElementById('createAIEditorLinkButton');
+  createLinkButton.disabled = true;
+  aiEditorLinkStatusElement.textContent = 'Создание ограниченной ссылки…';
+  try {
+    const capabilityResponse = await fetch('{{.Path}}?ai_capability_create', {method:'POST', credentials:'same-origin'});
+    const capabilityPayload = await capabilityResponse.json();
+    if (!capabilityResponse.ok) throw new Error(capabilityPayload.error || 'Не удалось создать ссылку');
+    aiEditorLinkStatusElement.textContent = capabilityPayload.url;
+    if (navigator.clipboard) await navigator.clipboard.writeText(capabilityPayload.url);
+  } catch (error) {
+    aiEditorLinkStatusElement.textContent = error.message;
+  }
+  createLinkButton.disabled = false;
+});
+document.getElementById('startAIEditorVoiceButton').addEventListener('click', function startAIEditorVoice() {
+  const SpeechRecognitionConstructor = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SpeechRecognitionConstructor) {
+    aiEditorFilesStatusElement.textContent = 'Голосовой ввод не поддерживается этим браузером.';
+    return;
+  }
+  const speechRecognition = new SpeechRecognitionConstructor();
+  speechRecognition.continuous = false;
+  speechRecognition.interimResults = false;
+  speechRecognition.onresult = function receiveAIEditorVoice(event) {
+    aiEditorCommandElement.value = event.results[0][0].transcript;
+  };
+  speechRecognition.onerror = function reportAIEditorVoiceError() {
+    aiEditorFilesStatusElement.textContent = 'Не удалось получить голосовую команду.';
+  };
+  speechRecognition.start();
+});
+</script>
 </body>
 </html>

@@ -11172,17 +11172,23 @@ func TestSiteBrushTemplateImportControlsAreEnabledByDefaultAndLocalized(t *testi
 }
 
 func TestEditorTemplatesExposeThreeModeNavigation(t *testing.T) {
-	for _, templateName := range []string{"edit.html", "edit_raw.html", "edit_mode.html"} {
+	templateBytes, err := embeddedWebFiles.ReadFile("web/edit_mode.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	templateSource := string(templateBytes)
+	for _, expectedFragment := range []string{"?visual", "?text", ".AIPath", "openAIEditorButton", "aiEditorModalBackdrop", "createAIEditorLinkButton", "startAIEditorVoiceButton"} {
+		if !strings.Contains(templateSource, expectedFragment) {
+			t.Fatalf("edit_mode.html does not expose %q", expectedFragment)
+		}
+	}
+	for _, templateName := range []string{"edit.html", "edit_raw.html"} {
 		templateBytes, err := embeddedWebFiles.ReadFile("web/" + templateName)
 		if err != nil {
 			t.Fatal(err)
 		}
-		templateSource := string(templateBytes)
-		if !strings.Contains(templateSource, "?visual") || !strings.Contains(templateSource, "?text") || (!strings.Contains(templateSource, "?ai") && !strings.Contains(templateSource, ".AIPath")) {
-			t.Fatalf("%s does not expose visual, code, and AI navigation", templateName)
-		}
-		if !strings.Contains(templateSource, "AI editor") && !strings.Contains(templateSource, "AI voice editor") {
-			t.Fatalf("%s does not label the AI editor entry", templateName)
+		if strings.Contains(string(templateBytes), "editor-mode-menu") {
+			t.Fatalf("%s unexpectedly owns the mode menu", templateName)
 		}
 	}
 }

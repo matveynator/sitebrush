@@ -73,9 +73,6 @@
   <input type="hidden" name="title" value="{{.Title}}" />
   <div class="raw-topbar">
     <div class="raw-tabs" role="tablist" aria-label="{{index .T "edit_view_tabs_label"}}">
-      <a class="raw-tab" href="{{.Path}}?visual">Visual</a>
-      <a class="raw-tab is-active" href="{{.Path}}?text">Code</a>
-      <a class="raw-tab" href="{{.Path}}?ai">AI editor</a>
       <button id="rawEditorEditTab" class="raw-tab is-active" type="button" role="tab" aria-selected="true" aria-controls="rawEditorPane">{{index .T "edit_view_editor"}}</button>
       <button id="rawEditorPreviewTab" class="raw-tab" type="button" role="tab" aria-selected="false" aria-controls="rawPreviewPane">{{index .T "edit_view_preview"}}</button>
     </div>
