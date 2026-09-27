@@ -4842,6 +4842,19 @@ func TestRegisterCreatesSiteDatabaseOnlyAfterConfirmedVerifiedDomain(t *testing.
 		automaticSSL:              make(chan automaticSSLRequest, 2),
 	}
 	application.hostingSnapshotReports = make(chan struct{}, 1)
+	domainContext := contextWithDomain(context.Background(), domain)
+	if _, err := application.adminStealthEnabled(domainContext, domain, ""); !errors.Is(err, errSiteDatabaseMissing) {
+		t.Fatalf("stealth lookup error = %v, want missing site database", err)
+	}
+	loginRequest := httptest.NewRequest(http.MethodGet, "https://"+domain+"/?login", nil)
+	loginResponse := httptest.NewRecorder()
+	application.route(loginResponse, loginRequest)
+	if loginResponse.Code != http.StatusServiceUnavailable {
+		t.Fatalf("login with missing site database status = %d, want %d; body=%q", loginResponse.Code, http.StatusServiceUnavailable, loginResponse.Body.String())
+	}
+	if strings.Contains(loginResponse.Header().Get("Location"), "register") {
+		t.Fatalf("login with missing site database redirected to registration: %q", loginResponse.Header().Get("Location"))
+	}
 	form := url.Values{}
 	form.Set("email", "admin@a.sitebrush.com")
 	form.Set("password", "secret")
