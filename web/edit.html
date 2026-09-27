@@ -46,6 +46,9 @@
     body { background: var(--page-bg); color: var(--text-main); font-family: var(--theme-font-sans); }
     input, select, button { font: inherit; }
     .editor-page { width: 100vw; height: 100vh; min-height: 0; display: flex; flex-direction: column; padding: 0; box-sizing: border-box; overflow: hidden; }
+    .editor-mode-menu { position: fixed; z-index: 10; top: 8px; left: 12px; display: flex; gap: 4px; padding: 4px; border: 1px solid var(--line); border-radius: 6px; background: color-mix(in srgb, var(--surface) 92%, transparent); box-shadow: 0 2px 8px rgba(0,0,0,.18); }
+    .editor-mode-menu-link { padding: 6px 10px; border-radius: 4px; color: var(--text-main); text-decoration: none; font-size: 13px; }
+    .editor-mode-menu-link:hover, .editor-mode-menu-link.is-active { background: var(--link); color: var(--theme-primary-foreground); }
     .editor-host { flex: 1 1 auto; width: 100%; min-width: 0; min-height: 0; }
     .jodit-container:not(.jodit_inline) { flex: 1 1 auto; width: 100vw !important; height: 100vh !important; min-width: 0 !important; min-height: 0 !important; max-width: none !important; max-height: none !important; display: flex !important; flex-direction: column !important; border: 0 !important; border-radius: 0 !important; overflow: hidden !important; }
     .jodit-container:not(.jodit_inline) .jodit-toolbar__box { flex: 0 0 auto; width: 100% !important; max-width: none !important; }
@@ -87,6 +90,11 @@
 </head>
 <body>
 <form id="visualEditorForm" method="post" action="{{.Path}}?save" class="editor-page">
+  <nav class="editor-mode-menu" aria-label="Editor modes">
+    <a class="editor-mode-menu-link is-active" href="{{.Path}}?visual">Visual</a>
+    <a class="editor-mode-menu-link" href="{{.Path}}?text">Code</a>
+    <a class="editor-mode-menu-link" href="{{.Path}}?ai">AI editor</a>
+  </nav>
   <input type="hidden" name="path" value="{{.Path}}" />
   <input type="hidden" name="previous_path" value="{{.Path}}" />
   <input type="hidden" name="title" value="{{.Title}}" />
