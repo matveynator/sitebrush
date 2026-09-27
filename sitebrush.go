@@ -9430,7 +9430,12 @@ func (a *App) assignMissingDomainAliasTokens(ctx context.Context) {
 
 func (a *App) route(w http.ResponseWriter, r *http.Request) {
 	pagePath := cleanPath(r.URL.Path)
-	requestDomain := a.siteDomain(r.Context(), r)
+	guestStaticRequest := isGuestStaticRequest(r)
+	requestDomain := domainFromRequest(r)
+	localGuestStaticRequest := guestStaticRequest && canonicalLocalDomain(requestDomain) == "localhost"
+	if !localGuestStaticRequest {
+		requestDomain = a.siteDomain(r.Context(), r)
+	}
 	if hasQueryFlag(r, "security_incident_report") {
 		if r.Method != http.MethodGet && r.Method != http.MethodHead && r.Method != http.MethodOptions &&
 			hasSitebrushSessionCookie(r) && !httpsecurity.SameOriginMutationAllowed(r) {
@@ -9440,7 +9445,8 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 		a.securityIncidentReport(w, r)
 		return
 	}
-	if a.serveStealthStaticForBlockedAdminIP(w, r, requestDomain, pagePath) {
+	publicTrialEndpoint := publicTrialEndpointFromRequest(r)
+	if !localGuestStaticRequest && publicTrialEndpoint == publicTrialEndpointNone && a.serveStealthStaticForBlockedAdminIP(w, r, requestDomain, pagePath) {
 		return
 	}
 	if r.URL.Path == "/_sitebrush/analytics" {
@@ -9501,7 +9507,6 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
-	publicTrialEndpoint := publicTrialEndpointFromRequest(r)
 	if a.preparePublicTrialEndpoint(w, r, publicTrialEndpoint) {
 		return
 	}
