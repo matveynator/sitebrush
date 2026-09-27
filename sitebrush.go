@@ -56,6 +56,9 @@ import (
 	"github.com/matveynator/sitebrush/v2/pkg/accountauth"
 	"github.com/matveynator/sitebrush/v2/pkg/accountpasskey"
 	"github.com/matveynator/sitebrush/v2/pkg/accounttotp"
+	"github.com/matveynator/sitebrush/v2/pkg/aicapability"
+	"github.com/matveynator/sitebrush/v2/pkg/aieditor"
+	"github.com/matveynator/sitebrush/v2/pkg/aiprovider"
 	browserstats "github.com/matveynator/sitebrush/v2/pkg/analytics"
 	"github.com/matveynator/sitebrush/v2/pkg/authmail"
 	"github.com/matveynator/sitebrush/v2/pkg/channelacme"
@@ -221,6 +224,8 @@ type App struct {
 	hostingSupportEvents      chan hostingandsupport.HostingSnapshotEvent
 	demoSiteRuntime           chan demoSiteRuntimeRequest
 	demoSessionEvents         chan demoSessionEvent
+	aiCapabilities            *aicapability.Manager
+	aiExecutor                *aieditor.Executor
 }
 
 type demoSiteRuntimeRequest struct {
@@ -2961,7 +2966,7 @@ func (a *App) accessLogMiddleware(next http.Handler) http.Handler {
 		startedAt := time.Now()
 		requestDomain := diagnosticlog.SafeLogValue(requestLogDomain(r))
 		requestMethod := diagnosticlog.SafeLogValue(r.Method)
-		requestPath := diagnosticlog.SafeLogValue(r.URL.Path)
+		requestPath := diagnosticlog.SafeLogValue(redactAICapabilityPath(r.URL.Path))
 		requestQuery := diagnosticlog.SafeLogValue(accountauth.SafeQuery(r.URL.RawQuery))
 		requestRemoteAddress := diagnosticlog.SafeLogValue(r.RemoteAddr)
 		if a.debug {
@@ -3466,7 +3471,7 @@ func (a *App) analyticsMiddleware(next http.Handler) http.Handler {
 		}
 		event := siteAnalyticsEvent{
 			Domain:        a.analyticsEventDomain(r, contentSource),
-			Path:          analyticsBoundedString(r.URL.Path, 512),
+			Path:          analyticsBoundedString(redactAICapabilityPath(r.URL.Path), 512),
 			Method:        r.Method,
 			StatusCode:    writer.statusCode,
 			ContentSource: contentSource,
@@ -3509,7 +3514,7 @@ func shouldRecordAnalyticsRequest(r *http.Request) bool {
 func isSitebrushControllerQuery(query url.Values) bool {
 	for _, controllerFlag := range []string{
 		"save", "template_events", "grab_preview", "grab_events", "grab_ws", "revision_preview", "revision_restore", "revision_delete", "revision_toggle",
-		"tree", "native_pick_files", "native_save_backup", "edit", "visual", "text", "editraw", "settings", "properties",
+		"tree", "native_pick_files", "native_save_backup", "edit", "ai", "ai_capability_create", "visual", "text", "editraw", "settings", "properties",
 		"backup_download", "hosting_and_support_backup_download", "billing_backup_download", "backup_import", "profile", "freeze", "publish", "publish_events", "publish_preview", "files",
 		"revisions", "login", "register", "email_confirm", "grab", "recover", "captcha", "analytics", "expenses", "hosting_and_support", "billing",
 	} {
@@ -7766,7 +7771,11 @@ func runSitebrushServer(ctx context.Context, config serverRunConfig) error {
 	}
 
 	var siteDatabaseRouter *perSiteDBRouter
-	application := &App{storagePath: effectiveStoragePath, storageRealRoot: storageRealRoot, dbPath: effectiveDBPath, debug: config.Debug, desktopMode: config.DesktopMode, nativeFileDialog: desktop.NativeFileDialogSupported(), grabTracker: newGrabProgressTracker(), grabCancels: newGrabCancelTracker(), trialPreviews: newPublicTrialPreviewStore(), publishTracker: newPublishProgressTracker(), analyticsEvents: make(chan siteAnalyticsEvent, 1024), analyticsLosses: make(chan string, 64), browserAnalyticsLosses: make(chan string, 64), browserAnalytics: make(chan browserAnalyticsEnvelope, 512), analyticsConnections: make(chan struct{}, 128), domainLogEvents: make(chan domainLogEvent, 1024)}
+	aiCapabilityStatePath := filepath.Join(storageRealRoot, "security", "ai-capabilities.json")
+	application := &App{storagePath: effectiveStoragePath, storageRealRoot: storageRealRoot, dbPath: effectiveDBPath, debug: config.Debug, desktopMode: config.DesktopMode, nativeFileDialog: desktop.NativeFileDialogSupported(), grabTracker: newGrabProgressTracker(), grabCancels: newGrabCancelTracker(), trialPreviews: newPublicTrialPreviewStore(), publishTracker: newPublishProgressTracker(), analyticsEvents: make(chan siteAnalyticsEvent, 1024), analyticsLosses: make(chan string, 64), browserAnalyticsLosses: make(chan string, 64), browserAnalytics: make(chan browserAnalyticsEnvelope, 512), analyticsConnections: make(chan struct{}, 128), domainLogEvents: make(chan domainLogEvent, 1024), aiCapabilities: aicapability.NewPersistentManager(aiCapabilityStatePath)}
+	defer application.aiCapabilities.Close()
+	application.aiExecutor = aieditor.NewExecutor(&appAIStore{application: application}, 32)
+	defer application.aiExecutor.Close()
 	application.analyticsMemoryLimit = analyticsConfiguredMemoryLimit()
 	attackGuardPath := filepath.Join(application.storageRootDir(), "security", "attackguard.json")
 	attackGuard, attackGuardErr := httpsecurity.NewAttackGuard(attackGuardPath)
@@ -9431,6 +9440,10 @@ func (a *App) assignMissingDomainAliasTokens(ctx context.Context) {
 func (a *App) route(w http.ResponseWriter, r *http.Request) {
 	pagePath := cleanPath(r.URL.Path)
 	requestDomain := a.siteDomain(r.Context(), r)
+	if strings.HasPrefix(r.URL.Path, "/.well-known/sitebrush-editor/") {
+		a.aiCapabilityEndpoint(w, r, requestDomain)
+		return
+	}
 	if hasQueryFlag(r, "security_incident_report") {
 		if r.Method != http.MethodGet && r.Method != http.MethodHead && r.Method != http.MethodOptions &&
 			hasSitebrushSessionCookie(r) && !httpsecurity.SameOriginMutationAllowed(r) {
@@ -9499,6 +9512,10 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet && r.Method != http.MethodHead && r.Method != http.MethodOptions &&
 		hasSitebrushSessionCookie(r) && !httpsecurity.SameOriginMutationAllowed(r) {
 		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	if hasQueryFlag(r, "ai_capability_create") {
+		a.issueAICapability(w, r)
 		return
 	}
 	publicTrialEndpoint := publicTrialEndpointFromRequest(r)
@@ -9620,6 +9637,10 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 	}
 	if hasQueryFlag(r, "edit") {
 		a.editModePage(w, r)
+		return
+	}
+	if hasQueryFlag(r, "ai") {
+		a.aiEditorPage(w, r)
 		return
 	}
 	if hasQueryFlag(r, "visual") {
@@ -9839,6 +9860,460 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.renderMissingPage(w, r, pagePath, isAdmin)
+}
+
+func redactAICapabilityPath(requestPath string) string {
+	const prefix = "/.well-known/sitebrush-editor/"
+	if !strings.HasPrefix(requestPath, prefix) {
+		return requestPath
+	}
+	suffix := strings.TrimPrefix(requestPath, prefix)
+	if suffix == "" {
+		return prefix + "[redacted]"
+	}
+	parts := strings.Split(suffix, "/")
+	parts[0] = "[redacted]"
+	return prefix + strings.Join(parts, "/")
+}
+
+type appAIStore struct{ application *App }
+
+func (store *appAIStore) Execute(request aieditor.Request) aieditor.Result {
+	if store == nil || store.application == nil {
+		return aieditor.Result{Operation: request.Operation, Err: errors.New("AI editor application is unavailable")}
+	}
+	domain := normalizeDomainName(request.Domain)
+	if domain == "" {
+		return aieditor.Result{Operation: request.Operation, Err: errors.New("AI editor domain is required")}
+	}
+	ctx := contextWithDomain(context.Background(), domain)
+	switch request.Operation {
+	case aieditor.OperationListPages:
+		pages, err := store.application.listAIPages(ctx, domain)
+		return aieditor.Result{Operation: request.Operation, Payload: pages, Err: err}
+	case aieditor.OperationReadPage:
+		page, err := store.application.findPage(ctx, domain, cleanPath(request.Path))
+		if err != nil {
+			return aieditor.Result{Operation: request.Operation, Path: cleanPath(request.Path), Err: err}
+		}
+		return aieditor.Result{Operation: request.Operation, Path: page.Path, Payload: page}
+	case aieditor.OperationCreatePage, aieditor.OperationUpdatePage:
+		page, err := store.application.saveAIPage(ctx, domain, request)
+		return aieditor.Result{Operation: request.Operation, Path: page.Path, Payload: page, Err: err}
+	case aieditor.OperationUploadFile:
+		fileName, err := store.application.saveAIFile(ctx, domain, request)
+		return aieditor.Result{Operation: request.Operation, Path: fileName, Payload: map[string]string{"file_name": fileName}, Err: err}
+	case aieditor.OperationPublish:
+		return aieditor.Result{Operation: request.Operation, Message: "published", Err: store.application.publishAI(ctx, domain)}
+	case aieditor.OperationRollback:
+		return aieditor.Result{Operation: request.Operation, Path: cleanPath(request.Path), Message: "rolled back", Err: store.application.rollbackAIPage(ctx, domain, request)}
+	default:
+		return aieditor.Result{Operation: request.Operation, Err: aieditor.ErrUnsupportedOperation}
+	}
+}
+
+func (a *App) listAIPages(ctx context.Context, domain string) ([]Page, error) {
+	rows, err := a.db.QueryContext(ctx, `SELECT domain,path,title,html,published FROM pages WHERE domain=? ORDER BY path ASC`, domain)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	pages := make([]Page, 0, 32)
+	for rows.Next() {
+		var page Page
+		if err := rows.Scan(&page.Domain, &page.Path, &page.Title, &page.HTML, &page.Published); err != nil {
+			return nil, err
+		}
+		page.HTML = ""
+		pages = append(pages, page)
+	}
+	return pages, rows.Err()
+}
+
+func (a *App) saveAIPage(ctx context.Context, domain string, request aieditor.Request) (Page, error) {
+	pagePath := cleanPath(request.Path)
+	if pagePath == "/" && strings.TrimSpace(request.Path) == "" {
+		return Page{}, errors.New("page path is required")
+	}
+	if strings.TrimSpace(request.ExpectedVersion) != "" {
+		expectedRevision, parseErr := strconv.Atoi(strings.TrimSpace(request.ExpectedVersion))
+		if parseErr != nil || expectedRevision <= 0 {
+			return Page{}, errors.New("expected revision is invalid")
+		}
+		var currentRevision int
+		if queryErr := a.db.QueryRowContext(ctx, `SELECT COALESCE(MAX(id),0) FROM revisions WHERE domain=? AND page_path=?`, domain, pagePath).Scan(&currentRevision); queryErr != nil {
+			return Page{}, queryErr
+		}
+		if currentRevision != expectedRevision {
+			return Page{}, fmt.Errorf("revision conflict: expected %d, current %d", expectedRevision, currentRevision)
+		}
+	}
+	title := strings.TrimSpace(request.Title)
+	if title == "" {
+		title = pagePath
+	}
+	var previousHTML string
+	_ = a.db.QueryRowContext(ctx, `SELECT html FROM pages WHERE domain=? AND path=?`, domain, pagePath).Scan(&previousHTML)
+	newHTMLBytes := int64(len([]byte(request.HTML)))
+	pageDelta := newHTMLBytes - int64(len([]byte(previousHTML)))
+	publishedPageDelta := int64(0)
+	previousPublishedHTML := ""
+	if !a.isDomainFrozen(ctx, domain) {
+		_ = a.db.QueryRowContext(ctx, `SELECT html FROM published_pages WHERE domain=? AND path=?`, domain, pagePath).Scan(&previousPublishedHTML)
+		if previousPublishedHTML != "" {
+			publishedPageDelta = newHTMLBytes - int64(len([]byte(previousPublishedHTML)))
+		} else {
+			publishedPageDelta = newHTMLBytes
+		}
+	}
+	staticPath := filepath.Join(a.domainStaticDir(domain), staticRelativePathForPage(pagePath))
+	staticDelta := int64(0)
+	if !a.isDomainFrozen(ctx, domain) {
+		staticDelta = newHTMLBytes - a.fileSizeInsideStorage(staticPath)
+	}
+	if err := a.applyDomainStorageDelta(ctx, domain, pageDelta, publishedPageDelta, newHTMLBytes, 0, staticDelta); err != nil {
+		return Page{}, err
+	}
+	if _, err := a.db.ExecContext(ctx, `INSERT OR REPLACE INTO pages(domain,path,title,html,published) VALUES(?,?,?,?,1)`, domain, pagePath, title, request.HTML); err != nil {
+		return Page{}, err
+	}
+	if !a.isDomainFrozen(ctx, domain) {
+		if _, err := a.db.ExecContext(ctx, `INSERT OR REPLACE INTO published_pages(domain,path,title,html) VALUES(?,?,?,?)`, domain, pagePath, title, request.HTML); err != nil {
+			return Page{}, err
+		}
+		a.writePublishedStaticHTML(domain, pagePath, request.HTML)
+	}
+	if _, err := a.db.ExecContext(ctx, `INSERT INTO revisions(domain,page_path,html,created_at) VALUES(?,?,?,?)`, domain, pagePath, request.HTML, time.Now().UTC().Format(time.RFC3339)); err != nil {
+		return Page{}, err
+	}
+	return Page{Domain: domain, Path: pagePath, Title: title, HTML: request.HTML, Published: 1}, nil
+}
+
+func (a *App) saveAIFile(ctx context.Context, domain string, request aieditor.Request) (string, error) {
+	fileName := safeRelativeAssetPath(request.FileName)
+	if fileName == "" || strings.Contains(fileName, "..") {
+		return "", errors.New("file name is invalid")
+	}
+	filePath := filepath.Join(a.domainFilesDirForDomain(domain), fileName)
+	if _, err := a.statInsideStorage(filePath); err == nil {
+		return "", errors.New("file already exists")
+	}
+	if err := a.writeFileInsideStorage(filePath, request.FileContent, 0o644); err != nil {
+		return "", err
+	}
+	if err := a.applyDomainStorageDelta(ctx, domain, 0, 0, 0, int64(len(request.FileContent)), 0); err != nil {
+		_ = a.removeInsideStorage(filePath)
+		return "", err
+	}
+	mimeType := mime.TypeByExtension(path.Ext(fileName))
+	if mimeType == "" {
+		mimeType = http.DetectContentType(request.FileContent)
+	}
+	a.upsertFileMetadata(ctx, domainStorageName(domain), fileName, request.Path, int64(len(request.FileContent)), mimeType, "ai")
+	a.rebuildDomainStorageUsage(ctx, domain)
+	return fileName, nil
+}
+
+func (a *App) publishAI(ctx context.Context, domain string) error {
+	pageList, err := a.collectPublishPageCandidates(ctx, domain)
+	if err != nil {
+		return err
+	}
+	for _, page := range pageList {
+		if !a.shouldUpdatePublishedPage(ctx, domain, page.Path, page.HTML) {
+			continue
+		}
+		publishedBytes := int64(len([]byte(page.HTML)))
+		var previous string
+		_ = a.db.QueryRowContext(ctx, `SELECT html FROM published_pages WHERE domain=? AND path=?`, domain, page.Path).Scan(&previous)
+		if err := a.applyDomainStorageDelta(ctx, domain, 0, publishedBytes-int64(len([]byte(previous))), 0, 0, publishedBytes-a.fileSizeInsideStorage(filepath.Join(a.domainStaticDir(domain), staticRelativePathForPage(page.Path)))); err != nil {
+			return err
+		}
+		if _, err := a.db.ExecContext(ctx, `INSERT OR REPLACE INTO published_pages(domain,path,title,html) VALUES(?,?,?,?)`, domain, page.Path, page.Title, page.HTML); err != nil {
+			return err
+		}
+		a.writePublishedStaticHTML(domain, page.Path, page.HTML)
+	}
+	return a.generateDomainPack(domain)
+}
+
+func (a *App) rollbackAIPage(ctx context.Context, domain string, request aieditor.Request) error {
+	revisionID, err := strconv.Atoi(strings.TrimSpace(request.ExpectedVersion))
+	if err != nil || revisionID <= 0 {
+		return errors.New("revision id is required")
+	}
+	var pagePath, html string
+	if err := a.db.QueryRowContext(ctx, `SELECT page_path,html FROM revisions WHERE id=? AND domain=?`, revisionID, domain).Scan(&pagePath, &html); err != nil {
+		return err
+	}
+	_, err = a.db.ExecContext(ctx, `UPDATE pages SET html=? WHERE domain=? AND path=?`, html, domain, pagePath)
+	if err != nil {
+		return err
+	}
+	_, err = a.db.ExecContext(ctx, `INSERT INTO revisions(domain,page_path,html,created_at) VALUES(?,?,?,?)`, domain, pagePath, html, time.Now().UTC().Format(time.RFC3339))
+	if err != nil {
+		return err
+	}
+	a.applyLatestActiveRevision(ctx, domain, pagePath)
+	return nil
+}
+
+func (a *App) executeAITask(request aieditor.Request, r *http.Request) (aieditor.Result, error) {
+	if a.aiExecutor == nil {
+		return aieditor.Result{}, errors.New("AI editor executor is unavailable")
+	}
+	request.Domain = a.siteDomain(r.Context(), r)
+	done := make(chan struct{})
+	finished := make(chan struct{})
+	defer close(finished)
+	go func() {
+		select {
+		case <-r.Context().Done():
+			close(done)
+		case <-finished:
+		}
+	}()
+	reply := make(chan aieditor.Result, 1)
+	if err := a.aiExecutor.Submit(aieditor.Task{Request: request, Done: done, Reply: reply}); err != nil {
+		return aieditor.Result{}, err
+	}
+	select {
+	case result := <-reply:
+		return result, result.Err
+	case <-r.Context().Done():
+		return aieditor.Result{}, r.Context().Err()
+	}
+}
+
+func (a *App) aiEditorPage(w http.ResponseWriter, r *http.Request) {
+	if !a.isAdminRequest(r) {
+		if !a.hasAdmin(r.Context(), a.siteDomain(r.Context(), r)) {
+			httpsecurity.RedirectLocal(w, r, r.URL.Path+"?register", http.StatusFound)
+			return
+		}
+		httpsecurity.RedirectLocal(w, r, loginURLForRequest(r), http.StatusFound)
+		return
+	}
+	a.render(w, r, "edit_ai.html", map[string]any{
+		"Path":         cleanPath(r.URL.Query().Get("path")),
+		"ProviderList": []string{aiprovider.ProviderOpenAICompatible, aiprovider.ProviderAnthropic, aiprovider.ProviderDeepSeek, aiprovider.ProviderQwen},
+	})
+}
+
+func (a *App) aiCapabilityEndpoint(w http.ResponseWriter, r *http.Request, domain string) {
+	const prefix = "/.well-known/sitebrush-editor/"
+	pathSuffix := strings.TrimPrefix(r.URL.Path, prefix)
+	pathSuffix = strings.Trim(pathSuffix, "/")
+	parts := strings.Split(pathSuffix, "/")
+	if len(parts) == 0 || strings.TrimSpace(parts[0]) == "" || a.aiCapabilities == nil {
+		http.NotFound(w, r)
+		return
+	}
+	token := parts[0]
+	if len(parts) > 1 && (parts[1] == "pages" || parts[1] == "page" || parts[1] == "file" || parts[1] == "publish" || parts[1] == "rollback") {
+		a.aiContentEndpoint(w, r, domain, token, parts[1])
+		return
+	}
+	if len(parts) > 1 && parts[1] == "revoke" {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if err := a.aiCapabilities.Revoke(token); err != nil {
+			http.Error(w, "capability is invalid", http.StatusUnauthorized)
+			return
+		}
+		w.Header().Set("Cache-Control", "no-store")
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	if len(parts) > 1 && parts[1] == "openapi.json" {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if _, err := a.aiCapabilities.ValidateCapability(token, domain); err != nil {
+			http.Error(w, "capability is invalid", http.StatusUnauthorized)
+			return
+		}
+		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"openapi": "3.0.3",
+			"info":    map[string]string{"title": "SiteBrush AI editor", "version": "1"},
+			"paths": map[string]any{
+				"/exchange": map[string]any{"post": map[string]string{"summary": "Exchange capability for a short-lived editor session"}},
+				"/pages":    map[string]any{"get": map[string]string{"summary": "List site pages"}},
+				"/page":     map[string]any{"get": map[string]string{"summary": "Read a page"}, "post": map[string]string{"summary": "Create or update a page"}},
+				"/file":     map[string]any{"post": map[string]string{"summary": "Upload a site file"}},
+				"/publish":  map[string]any{"post": map[string]string{"summary": "Publish site content"}},
+				"/rollback": map[string]any{"post": map[string]string{"summary": "Rollback a revision"}},
+			},
+		})
+		return
+	}
+	if len(parts) > 1 && parts[1] == "exchange" {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		session, err := a.aiCapabilities.Exchange(token, domain)
+		if err != nil {
+			http.Error(w, "capability is invalid", http.StatusUnauthorized)
+			return
+		}
+		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		_ = json.NewEncoder(w).Encode(session)
+		return
+	}
+	if r.Method != http.MethodGet || len(parts) != 1 {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if _, err := a.aiCapabilities.ValidateCapability(token, domain); err != nil {
+		http.Error(w, "capability is invalid", http.StatusUnauthorized)
+		return
+	}
+	baseURL := requestScheme(r) + "://" + r.Host + prefix + token
+	manifest := aicapability.Manifest{
+		Name:         "SiteBrush AI editor",
+		Protocol:     "sitebrush-ai-editor/v1",
+		APIBase:      baseURL,
+		OpenAPIURL:   baseURL + "/openapi.json",
+		Domain:       domain,
+		Scopes:       []string{aicapability.ScopeRead, aicapability.ScopeWrite, aicapability.ScopePublish},
+		Operations:   []string{"manifest", "exchange", "openapi", "list_pages", "read_page", "create_page", "update_page", "upload_file", "publish", "rollback"},
+		Limits:       map[string]int64{"max_file_bytes": 128 << 20, "max_request_bytes": 16 << 20},
+		Instructions: "Use POST " + baseURL + "/exchange to obtain a short-lived scoped session. Send it as Authorization: Bearer for content operations. Only site content is available; never request account, security, server, database, or shell access.",
+	}
+	aicapability.ManifestResponse(w, r, manifest)
+}
+
+func (a *App) issueAICapability(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost || !a.isAdminRequest(r) || !httpsecurity.SameOriginMutationAllowed(r) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	domain := a.siteDomain(r.Context(), r)
+	token, capability, err := a.aiCapabilities.Issue(domain, []string{aicapability.ScopeRead, aicapability.ScopeWrite, aicapability.ScopePublish})
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusServiceUnavailable)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	_ = json.NewEncoder(w).Encode(map[string]string{"token": token, "capability_id": capability.ID, "url": requestScheme(r) + "://" + r.Host + "/.well-known/sitebrush-editor/" + token})
+}
+
+func (a *App) aiContentEndpoint(w http.ResponseWriter, r *http.Request, domain, capabilityToken, operation string) {
+	sessionToken := strings.TrimSpace(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "))
+	session, err := a.aiCapabilities.ValidateSession(sessionToken, capabilityToken, domain)
+	if err != nil {
+		http.Error(w, "editor session is invalid", http.StatusUnauthorized)
+		return
+	}
+	if operation == "publish" && !containsAIScope(session.Scopes, aicapability.ScopePublish) {
+		http.Error(w, "publish scope is required", http.StatusForbidden)
+		return
+	}
+	writeRequired := operation != "pages" && !(operation == "page" && r.Method == http.MethodGet)
+	if writeRequired && !containsAIScope(session.Scopes, aicapability.ScopeWrite) {
+		http.Error(w, "write scope is required", http.StatusForbidden)
+		return
+	}
+	if operation == "pages" {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		result, resultErr := a.executeAITask(aieditor.Request{Operation: aieditor.OperationListPages}, r)
+		writeAIResult(w, result, resultErr)
+		return
+	}
+	if operation == "page" {
+		if r.Method == http.MethodGet {
+			result, resultErr := a.executeAITask(aieditor.Request{Operation: aieditor.OperationReadPage, Path: r.URL.Query().Get("path")}, r)
+			writeAIResult(w, result, resultErr)
+			return
+		}
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var request aieditor.Request
+		if err := decodeAIRequest(w, r, &request); err != nil {
+			return
+		}
+		if request.Operation == "" {
+			request.Operation = aieditor.OperationUpdatePage
+		}
+		if request.Operation != aieditor.OperationCreatePage && request.Operation != aieditor.OperationUpdatePage {
+			http.Error(w, "page operation is invalid", http.StatusBadRequest)
+			return
+		}
+		result, resultErr := a.executeAITask(request, r)
+		writeAIResult(w, result, resultErr)
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var request aieditor.Request
+	if err := decodeAIRequest(w, r, &request); err != nil {
+		return
+	}
+	switch operation {
+	case "file":
+		if request.Operation == "" {
+			request.Operation = aieditor.OperationUploadFile
+		}
+	case "publish":
+		request.Operation = aieditor.OperationPublish
+	case "rollback":
+		request.Operation = aieditor.OperationRollback
+	default:
+		http.NotFound(w, r)
+		return
+	}
+	result, resultErr := a.executeAITask(request, r)
+	writeAIResult(w, result, resultErr)
+}
+
+func containsAIScope(scopes []string, expected string) bool {
+	for _, scope := range scopes {
+		if scope == expected {
+			return true
+		}
+	}
+	return false
+}
+
+func decodeAIRequest(w http.ResponseWriter, r *http.Request, request *aieditor.Request) error {
+	r.Body = http.MaxBytesReader(w, r.Body, 16<<20)
+	if err := json.NewDecoder(r.Body).Decode(request); err != nil {
+		http.Error(w, "invalid AI request", http.StatusBadRequest)
+		return err
+	}
+	return nil
+}
+
+func writeAIResult(w http.ResponseWriter, result aieditor.Result, resultErr error) {
+	if resultErr != nil {
+		status := http.StatusBadRequest
+		if errors.Is(resultErr, aieditor.ErrTaskCanceled) {
+			status = http.StatusRequestTimeout
+		}
+		if strings.Contains(strings.ToLower(resultErr.Error()), "not found") {
+			status = http.StatusNotFound
+		}
+		http.Error(w, resultErr.Error(), status)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	_ = json.NewEncoder(w).Encode(result)
 }
 
 // Blocked addresses see only published files; SiteBrush control requests look absent.
@@ -12235,7 +12710,7 @@ func (a *App) editModePage(w http.ResponseWriter, r *http.Request) {
 	if record.Path != "" {
 		contentKind = pageContentKind(record.Path, record.HTML)
 	}
-	a.render(w, r, "edit_mode.html", map[string]any{"Path": pagePath, "ContentKind": contentKindLabel(contentKind), "IsHTML": contentKind == "html"})
+	a.render(w, r, "edit_mode.html", map[string]any{"Path": pagePath, "ContentKind": contentKindLabel(contentKind), "IsHTML": contentKind == "html", "AIPath": pagePath + "?ai"})
 }
 
 func (a *App) editRawPage(w http.ResponseWriter, r *http.Request) {

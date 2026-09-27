@@ -1,0 +1,225 @@
+// Package aiprovider contains small, native-Go adapters for AI HTTP APIs.
+package aiprovider
+
+import (
+	"bytes"
+	"context"
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/rand"
+	"encoding/base64"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"strings"
+	"time"
+
+	"github.com/matveynator/sitebrush/v2/pkg/outboundhttp"
+)
+
+const (
+	ProviderOpenAICompatible = "openai-compatible"
+	ProviderAnthropic        = "anthropic"
+	ProviderDeepSeek         = "deepseek"
+	ProviderQwen             = "qwen"
+	ProviderOllama           = "ollama"
+	DefaultMaxResponseBytes  = 8 << 20
+)
+
+var (
+	ErrProviderUnsupported  = errors.New("AI provider is unsupported")
+	ErrInvalidConfiguration = errors.New("AI provider configuration is invalid")
+)
+
+type Config struct {
+	Provider         string
+	BaseURL          string
+	Model            string
+	APIKey           string
+	MaxResponseBytes int64
+	Timeout          time.Duration
+}
+
+type Message struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
+}
+
+type Request struct {
+	Messages []Message `json:"messages"`
+	Stream   bool      `json:"stream,omitempty"`
+}
+
+type Response struct {
+	Text string
+}
+
+type Client struct {
+	configuration Config
+	httpClient    *http.Client
+}
+
+func NewClient(configuration Config, httpClient *http.Client) (*Client, error) {
+	configuration.Provider = strings.ToLower(strings.TrimSpace(configuration.Provider))
+	if configuration.Provider == "" || strings.TrimSpace(configuration.Model) == "" || strings.TrimSpace(configuration.APIKey) == "" {
+		return nil, ErrInvalidConfiguration
+	}
+	switch configuration.Provider {
+	case ProviderOpenAICompatible, ProviderAnthropic, ProviderDeepSeek, ProviderQwen, ProviderOllama:
+	default:
+		return nil, fmt.Errorf("%w: %s", ErrProviderUnsupported, configuration.Provider)
+	}
+	if configuration.BaseURL == "" {
+		configuration.BaseURL = defaultBaseURL(configuration.Provider)
+	}
+	parsedURL, err := url.Parse(configuration.BaseURL)
+	if err != nil || parsedURL.Scheme != "https" || parsedURL.Host == "" {
+		return nil, fmt.Errorf("%w: HTTPS base URL is required", ErrInvalidConfiguration)
+	}
+	if err := outboundhttp.RequirePublicURL(parsedURL); err != nil {
+		return nil, fmt.Errorf("%w: provider endpoint is not public", ErrInvalidConfiguration)
+	}
+	if configuration.MaxResponseBytes <= 0 {
+		configuration.MaxResponseBytes = DefaultMaxResponseBytes
+	}
+	if configuration.Timeout <= 0 {
+		configuration.Timeout = 30 * time.Second
+	}
+	if httpClient == nil {
+		transport, transportErr := outboundhttp.NewTransport(nil, outboundhttp.TransportOptions{})
+		if transportErr != nil {
+			return nil, transportErr
+		}
+		httpClient = &http.Client{Transport: transport, Timeout: configuration.Timeout, CheckRedirect: outboundhttp.CheckRedirect}
+	}
+	return &Client{configuration: configuration, httpClient: httpClient}, nil
+}
+
+func defaultBaseURL(provider string) string {
+	switch provider {
+	case ProviderAnthropic:
+		return "https://api.anthropic.com/v1"
+	case ProviderDeepSeek:
+		return "https://api.deepseek.com/v1"
+	case ProviderQwen:
+		return "https://dashscope.aliyuncs.com/compatible-mode/v1"
+	case ProviderOllama:
+		return "https://localhost/v1"
+	default:
+		return "https://api.openai.com/v1"
+	}
+}
+
+func (client *Client) Complete(ctx context.Context, request Request) (Response, error) {
+	if client == nil || len(request.Messages) == 0 {
+		return Response{}, ErrInvalidConfiguration
+	}
+	endpoint := strings.TrimRight(client.configuration.BaseURL, "/") + "/chat/completions"
+	payload, err := json.Marshal(struct {
+		Model    string    `json:"model"`
+		Messages []Message `json:"messages"`
+		Stream   bool      `json:"stream,omitempty"`
+	}{client.configuration.Model, request.Messages, request.Stream})
+	if err != nil {
+		return Response{}, err
+	}
+	httpRequest, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(payload))
+	if err != nil {
+		return Response{}, err
+	}
+	httpRequest.Header.Set("Content-Type", "application/json")
+	httpRequest.Header.Set("Authorization", "Bearer "+client.configuration.APIKey)
+	if client.configuration.Provider == ProviderAnthropic {
+		httpRequest.Header.Set("x-api-key", client.configuration.APIKey)
+		httpRequest.Header.Del("Authorization")
+		httpRequest.Header.Set("anthropic-version", "2023-06-01")
+	}
+	response, err := client.httpClient.Do(httpRequest)
+	if err != nil {
+		return Response{}, err
+	}
+	defer response.Body.Close()
+	limitedBody := io.LimitReader(response.Body, client.configuration.MaxResponseBytes+1)
+	body, err := io.ReadAll(limitedBody)
+	if err != nil {
+		return Response{}, err
+	}
+	if int64(len(body)) > client.configuration.MaxResponseBytes {
+		return Response{}, errors.New("AI provider response is too large")
+	}
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return Response{}, fmt.Errorf("AI provider returned HTTP %d", response.StatusCode)
+	}
+	if client.configuration.Provider == ProviderAnthropic {
+		var anthropicResponse struct {
+			Content []struct {
+				Text string `json:"text"`
+			} `json:"content"`
+		}
+		if err := json.Unmarshal(body, &anthropicResponse); err != nil {
+			return Response{}, err
+		}
+		if len(anthropicResponse.Content) == 0 {
+			return Response{}, errors.New("AI provider response has no content")
+		}
+		return Response{Text: anthropicResponse.Content[0].Text}, nil
+	}
+	var compatibleResponse struct {
+		Choices []struct {
+			Message Message `json:"message"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal(body, &compatibleResponse); err != nil {
+		return Response{}, err
+	}
+	if len(compatibleResponse.Choices) == 0 {
+		return Response{}, errors.New("AI provider response has no choices")
+	}
+	return Response{Text: compatibleResponse.Choices[0].Message.Content}, nil
+}
+
+func EncryptSecret(key []byte, secret string) (string, error) {
+	if len(key) != 32 || secret == "" {
+		return "", errors.New("AES-256 key and secret are required")
+	}
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return "", err
+	}
+	aead, err := cipher.NewGCM(block)
+	if err != nil {
+		return "", err
+	}
+	nonce := make([]byte, aead.NonceSize())
+	if _, err := rand.Read(nonce); err != nil {
+		return "", err
+	}
+	ciphertext := aead.Seal(nonce, nonce, []byte(secret), nil)
+	return base64.RawURLEncoding.EncodeToString(ciphertext), nil
+}
+
+func DecryptSecret(key []byte, encoded string) (string, error) {
+	if len(key) != 32 || encoded == "" {
+		return "", errors.New("AES-256 key and ciphertext are required")
+	}
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return "", err
+	}
+	aead, err := cipher.NewGCM(block)
+	if err != nil {
+		return "", err
+	}
+	ciphertext, err := base64.RawURLEncoding.DecodeString(encoded)
+	if err != nil || len(ciphertext) < aead.NonceSize() {
+		return "", errors.New("invalid encrypted secret")
+	}
+	plaintext, err := aead.Open(nil, ciphertext[:aead.NonceSize()], ciphertext[aead.NonceSize():], nil)
+	if err != nil {
+		return "", errors.New("invalid encrypted secret")
+	}
+	return string(plaintext), nil
+}

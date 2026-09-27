@@ -115,6 +115,33 @@ func TestAccountKeyIsPersistedWithPrivatePermissions(t *testing.T) {
 	}
 }
 
+func TestAccountKeyAndCertificateCacheRejectCorruptOrOlderState(t *testing.T) {
+	cacheDir := t.TempDir()
+	keyPath := filepath.Join(cacheDir, "acme_account+key")
+	if err := os.WriteFile(keyPath, []byte("not a PEM key"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadOrCreateAccountKey(cacheDir); err != nil {
+		t.Fatalf("corrupt account key was not replaced: %v", err)
+	}
+	certificatePath := filepath.Join(cacheDir, "example.com")
+	if err := os.WriteFile(certificatePath, []byte("broken cache"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := storeCertificate(cacheDir, "example.com", []byte("new certificate"), time.Now()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestIssueRejectsUnsafeDomainBeforeNetworkAccess(t *testing.T) {
+	state := clientState{}
+	for _, domain := range []string{"", "../example.com", `a\\b.example.com`} {
+		if _, _, err := state.issue(context.Background(), domain); err == nil {
+			t.Fatalf("unsafe domain accepted: %q", domain)
+		}
+	}
+}
+
 func TestIssueHonorsCancelledSubscriber(t *testing.T) {
 	manager, err := Start(Config{CacheDir: t.TempDir()})
 	if err != nil {

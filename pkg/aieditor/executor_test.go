@@ -1,0 +1,127 @@
+package aieditor
+
+import (
+	"strings"
+	"testing"
+)
+
+type testStore struct{ requests chan Request }
+
+func (store *testStore) Execute(request Request) Result {
+	store.requests <- request
+	return Result{Operation: request.Operation, Path: request.Path, Message: "accepted"}
+}
+
+func TestValidateRejectsTraversalAndUnknownOperations(t *testing.T) {
+	if err := Validate(Request{Operation: OperationReadPage, Path: "/../secret"}); err == nil {
+		t.Fatal("page traversal accepted")
+	}
+	if err := Validate(Request{Operation: OperationUploadFile, FileName: "../secret", FileContent: []byte("x")}); err == nil {
+		t.Fatal("file traversal accepted")
+	}
+	if err := Validate(Request{Operation: Operation("shell")}); err != ErrUnsupportedOperation {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestExecutorUsesChannelsAndCancelsBeforeStore(t *testing.T) {
+	store := &testStore{requests: make(chan Request, 1)}
+	executor := NewExecutor(store, 1)
+	defer executor.Close()
+	done := make(chan struct{})
+	close(done)
+	reply := make(chan Result, 1)
+	if err := executor.Submit(Task{Request: Request{Operation: OperationReadPage, Path: "/index.html"}, Done: done, Reply: reply}); err != nil {
+		t.Fatal(err)
+	}
+	result := <-reply
+	if result.Err != ErrTaskCanceled {
+		t.Fatalf("err=%v", result.Err)
+	}
+	select {
+	case <-store.requests:
+		t.Fatal("canceled task reached store")
+	default:
+	}
+}
+
+func TestExecutorPassesOnlyValidatedRequestToStore(t *testing.T) {
+	store := &testStore{requests: make(chan Request, 1)}
+	executor := NewExecutor(store, 1)
+	defer executor.Close()
+	done := make(chan struct{})
+	reply := make(chan Result, 1)
+	if err := executor.Submit(Task{Request: Request{Operation: OperationUpdatePage, Path: "/about", HTML: strings.Repeat("x", 12)}, Done: done, Reply: reply}); err != nil {
+		t.Fatal(err)
+	}
+	if result := <-reply; result.Err != nil {
+		t.Fatal(result.Err)
+	}
+	if request := <-store.requests; request.Path != "/about" {
+		t.Fatalf("request=%+v", request)
+	}
+}
+
+func TestValidateAcceptsSupportedOperationsAndEnforcesLimits(t *testing.T) {
+	requests := []Request{
+		{Operation: OperationListPages},
+		{Operation: OperationReadPage, Path: "/index.html"},
+		{Operation: OperationCreatePage, Path: "/new"},
+		{Operation: OperationUpdatePage, Path: "/new"},
+		{Operation: OperationUploadFile, FileName: "images/photo.jpg", FileContent: []byte("x")},
+		{Operation: OperationPublish},
+		{Operation: OperationRollback, Path: "/new"},
+	}
+	for _, request := range requests {
+		if err := Validate(request); err != nil {
+			t.Fatalf("request=%+v err=%v", request, err)
+		}
+	}
+	if err := Validate(Request{Operation: OperationUpdatePage, Path: "/new", HTML: strings.Repeat("x", 32<<20+1)}); err == nil {
+		t.Fatal("oversized HTML accepted")
+	}
+	if err := Validate(Request{Operation: OperationUploadFile, FileName: "photo.jpg", FileContent: make([]byte, 128<<20+1)}); err == nil {
+		t.Fatal("oversized file accepted")
+	}
+	for _, fileName := range []string{"", "a\\b", "a\x00b", "../a"} {
+		if err := Validate(Request{Operation: OperationUploadFile, FileName: fileName, FileContent: []byte("x")}); err == nil {
+			t.Fatalf("invalid file name accepted: %q", fileName)
+		}
+	}
+}
+
+func TestExecutorRejectsMissingStoreAndClosedExecutor(t *testing.T) {
+	executor := NewExecutor(nil, 1)
+	done := make(chan struct{})
+	reply := make(chan Result, 1)
+	if err := executor.Submit(Task{Request: Request{Operation: OperationReadPage, Path: "/index"}, Done: done, Reply: reply}); err != nil {
+		t.Fatal(err)
+	}
+	if result := <-reply; result.Err == nil {
+		t.Fatal("missing store did not fail")
+	}
+	executor.Close()
+	if err := executor.Submit(Task{Request: Request{Operation: OperationReadPage, Path: "/index"}, Done: done, Reply: reply}); err == nil {
+		t.Fatal("closed executor accepted task")
+	}
+}
+
+func TestExecutorValidatesTaskChannelsAndNormalizesPaths(t *testing.T) {
+	executor := NewExecutor(nil, 0)
+	if err := executor.Submit(Task{Request: Request{Operation: OperationReadPage, Path: "/x"}}); err == nil {
+		t.Fatal("task without reply or done accepted")
+	}
+	done := make(chan struct{})
+	if err := executor.Submit(Task{Request: Request{Operation: OperationReadPage, Path: "/x"}, Done: done}); err == nil {
+		t.Fatal("task without reply accepted")
+	}
+	if err := executor.Submit(Task{Request: Request{Operation: OperationReadPage, Path: "/x"}, Reply: make(chan Result, 1)}); err == nil {
+		t.Fatal("task without done accepted")
+	}
+	executor.Close()
+	for _, request := range []Request{{Operation: OperationReadPage, Path: "about"}, {Operation: OperationReadPage, Path: "/"}, {Operation: OperationUploadFile, FileName: "photo.jpg", FileContent: []byte("x")}} {
+		if err := Validate(request); err != nil {
+			t.Fatalf("valid request rejected: %+v: %v", request, err)
+		}
+	}
+}

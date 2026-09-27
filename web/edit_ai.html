@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="{{.LanguageCode}}" dir="{{.TextDirection}}">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>AI voice editor</title>
+  <link rel="stylesheet" href="/p/static/admin_theme.css">
+  <style>
+    body { margin:0; min-height:100vh; background:var(--theme-background); color:var(--theme-foreground); font-family:var(--theme-font-sans); }
+    main { max-width:860px; margin:0 auto; padding:32px 20px; }
+    .panel { background:var(--theme-card); border:1px solid var(--theme-border); border-radius:var(--theme-radius); padding:24px; display:grid; gap:18px; }
+    textarea { width:100%; min-height:130px; box-sizing:border-box; resize:vertical; }
+    .actions { display:flex; flex-wrap:wrap; gap:10px; }
+    .status { min-height:24px; white-space:pre-wrap; }
+    pre { overflow-wrap:anywhere; white-space:pre-wrap; }
+  </style>
+</head>
+<body>
+<main>
+  <section class="panel">
+    <h1>AI voice editor</h1>
+    <p>Describe the change, attach material, and let SiteBrush prepare or publish content for this site. The AI connection is limited to site content and never receives account or server access.</p>
+    <label for="aiCommand">Voice command or text</label>
+    <textarea id="aiCommand" placeholder="For example: create a page about my hike and add a news link to the home page"></textarea>
+    <div class="actions">
+      <button id="recordButton" type="button">Start voice input</button>
+      <button id="capabilityButton" type="button">Create external AI link</button>
+      <a class="btn btn-secondary" href="{{.Path}}">Back</a>
+    </div>
+    <input id="fileInput" type="file" multiple accept="image/*,.css,.html,.txt">
+    <div id="status" class="status" role="status"></div>
+    <pre id="capabilityOutput" hidden></pre>
+  </section>
+</main>
+<script>
+const commandElement = document.getElementById('aiCommand');
+const recordButton = document.getElementById('recordButton');
+const capabilityButton = document.getElementById('capabilityButton');
+const statusElement = document.getElementById('status');
+const capabilityOutputElement = document.getElementById('capabilityOutput');
+function setStatus(message) { statusElement.textContent = message; }
+if ('SpeechRecognition' in window || 'webkitSpeechRecognition' in window) {
+  const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+  const speechRecognition = new Recognition();
+  speechRecognition.continuous = false;
+  speechRecognition.interimResults = false;
+  speechRecognition.onresult = function onSpeechResult(event) {
+    commandElement.value = event.results[0][0].transcript;
+    setStatus('Voice command captured.');
+  };
+  speechRecognition.onerror = function onSpeechError() { setStatus('Voice input failed. You can enter the command as text.'); };
+  recordButton.addEventListener('click', function startVoiceInput() { speechRecognition.start(); setStatus('Listening…'); });
+} else {
+  recordButton.disabled = true;
+  setStatus('This browser does not provide speech recognition. Text input remains available.');
+}
+capabilityButton.addEventListener('click', async function createCapabilityLink() {
+  capabilityButton.disabled = true;
+  setStatus('Creating a revocable external AI link…');
+  try {
+    const response = await fetch('{{.Path}}?ai_capability_create', {method:'POST'});
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.error || 'Capability creation failed');
+    capabilityOutputElement.hidden = false;
+    capabilityOutputElement.textContent = payload.url;
+    setStatus('Copy this link into an AI system. Revoke it when it is no longer needed.');
+  } catch (error) { setStatus(error.message); }
+  capabilityButton.disabled = false;
+});
+</script>
+</body>
+</html>
