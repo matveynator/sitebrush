@@ -76,3 +76,51 @@ The `.deb` files produced here are upstream binary packages for the SiteBrush
 repository. Admission to the official Debian archive is a separate process and
 requires a Debian source package that Debian can rebuild from source according
 to Debian policy.
+
+## Build the signed APT repository
+
+Install the archive tools on a Debian or Ubuntu build host:
+
+```sh
+sudo apt install apt-utils dpkg-dev gnupg
+```
+
+Generate the repository from the release packages:
+
+```sh
+bash scripts/package-deb/build-repository.sh \
+  public-apt \
+  SITEBRUSH_SIGNING_KEY_FINGERPRINT \
+  dist/sitebrush_VERSION_amd64.deb \
+  dist/sitebrush_VERSION_arm64.deb
+```
+
+Then publish the complete `public-apt/` directory at:
+
+```text
+https://sitebrush.com/apt/
+```
+
+The generated root contains the ASCII-armored public key
+`sitebrush-archive-keyring.asc` and signed `InRelease` metadata.
+
+A client can then configure the repository without `apt-key`:
+
+```sh
+sudo install -d -m 0755 /etc/apt/keyrings
+curl -fsSL https://sitebrush.com/apt/sitebrush-archive-keyring.asc \
+  | sudo tee /etc/apt/keyrings/sitebrush.asc >/dev/null
+
+cat <<'EOF' | sudo tee /etc/apt/sources.list.d/sitebrush.sources
+Types: deb
+URIs: https://sitebrush.com/apt/
+Suites: stable
+Components: main
+Architectures: amd64 arm64
+Signed-By: /etc/apt/keyrings/sitebrush.asc
+EOF
+
+sudo apt update
+sudo apt install sitebrush
+```
+
