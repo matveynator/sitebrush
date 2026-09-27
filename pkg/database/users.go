@@ -71,19 +71,6 @@ func (db *Database) EnsureUserBySource(ctx context.Context, source, sourceUserID
 	}
 	createdAt := time.Now().Unix()
 
-	if strings.ToLower(dbType) == "clickhouse" {
-		stmt := "INSERT INTO users (user_id, source, source_user_id, name, created_at) VALUES (?, ?, ?, ?, ?)"
-		if err := db.withSerializedConnectionFor(ctx, WorkloadUserUpload, func(runCtx context.Context, conn *sql.DB) error {
-			if _, err := conn.ExecContext(runCtx, stmt, newID, source, sourceUserID, name, createdAt); err != nil {
-				return fmt.Errorf("insert user: %w", err)
-			}
-			return nil
-		}); err != nil {
-			return "", err
-		}
-		return newID, nil
-	}
-
 	insertID := placeholder(dbType, 1)
 	insertSource := placeholder(dbType, 2)
 	insertSourceID := placeholder(dbType, 3)
@@ -119,9 +106,6 @@ func (db *Database) UpdateUserNameIfEmpty(ctx context.Context, userID, name, dbT
 	if userID == "" || name == "" {
 		return nil
 	}
-	if strings.ToLower(dbType) == "clickhouse" {
-		return nil
-	}
 	phName := placeholder(dbType, 1)
 	phUser := placeholder(dbType, 2)
 	stmt := fmt.Sprintf(`UPDATE users SET name = %s WHERE user_id = %s AND (name IS NULL OR name = '')`, phName, phUser)
@@ -144,21 +128,6 @@ func (db *Database) EnsureTrackUser(ctx context.Context, trackID, userID, source
 	}
 	if source == "" {
 		source = "external"
-	}
-
-	if strings.ToLower(dbType) == "clickhouse" {
-		existsStmt := "SELECT 1 FROM track_users WHERE track_id = ? AND user_id = ? LIMIT 1"
-		var exists int
-		return db.withSerializedConnectionFor(ctx, WorkloadUserUpload, func(runCtx context.Context, conn *sql.DB) error {
-			if err := conn.QueryRowContext(runCtx, existsStmt, trackID, userID).Scan(&exists); err == nil {
-				return nil
-			}
-			insertStmt := "INSERT INTO track_users (track_id, user_id, source) VALUES (?, ?, ?)"
-			if _, err := conn.ExecContext(runCtx, insertStmt, trackID, userID, source); err != nil {
-				return fmt.Errorf("insert track user: %w", err)
-			}
-			return nil
-		})
 	}
 
 	insertTrack := placeholder(dbType, 1)

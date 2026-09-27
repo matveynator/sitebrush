@@ -119,34 +119,6 @@ func (db *Database) UpsertAnalyticsSession(ctx context.Context, session Analytic
 			session.CreatedAt = now
 		}
 
-		if strings.EqualFold(dbType, "clickhouse") {
-			insert := fmt.Sprintf(`INSERT INTO analytics_sessions (session_id, display_name, visitor_number, fingerprint, created_at, last_seen_at, visit_count, ip, user_agent, referer)
-VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)`,
-				placeholder(dbType, 1),
-				placeholder(dbType, 2),
-				placeholder(dbType, 3),
-				placeholder(dbType, 4),
-				placeholder(dbType, 5),
-				placeholder(dbType, 6),
-				placeholder(dbType, 7),
-				placeholder(dbType, 8),
-				placeholder(dbType, 9),
-				placeholder(dbType, 10))
-			_, execErr := conn.ExecContext(ctx, insert,
-				session.SessionID,
-				name,
-				number,
-				session.Fingerprint,
-				session.CreatedAt,
-				now,
-				visits,
-				session.IP,
-				session.UserAgent,
-				session.Referer,
-			)
-			return execErr
-		}
-
 		if err == sql.ErrNoRows {
 			insert := fmt.Sprintf(`INSERT INTO analytics_sessions (session_id, display_name, visitor_number, fingerprint, created_at, last_seen_at, visit_count, ip, user_agent, referer)
 VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)`,

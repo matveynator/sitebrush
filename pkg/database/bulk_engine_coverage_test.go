@@ -120,36 +120,6 @@ END;`); err != nil {
 	}
 }
 
-func TestInsertMarkersBulkClickHousePathOnSQLite(t *testing.T) {
-	db, _ := newSQLiteConcurrencyTestDatabase(t)
-
-	markers := []Marker{
-		{ID: 100, DoseRate: 0.1, Date: 1, Lon: 1, Lat: 1, CountRate: 1, Zoom: 8, Speed: 1, TrackID: "single"},
-		{ID: 101, DoseRate: 0.2, Date: 2, Lon: 2, Lat: 2, CountRate: 2, Zoom: 8, Speed: 2, TrackID: "single"},
-		{ID: 101, DoseRate: 0.2, Date: 2, Lon: 2, Lat: 2, CountRate: 2, Zoom: 8, Speed: 2, TrackID: "single"},
-	}
-	progress := make(chan MarkerBatchProgress, 2)
-	if err := db.InsertMarkersBulk(context.Background(), nil, markers, "clickhouse", 100, progress, WorkloadArchive); err != nil {
-		t.Fatalf("clickhouse-style fast bulk insert: %v", err)
-	}
-	if len(progress) != 1 {
-		t.Fatalf("clickhouse fast progress messages = %d, want 1", len(progress))
-	}
-
-	var count int
-	if err := db.DB.QueryRow("SELECT COUNT(*) FROM markers WHERE trackID = ?", "single").Scan(&count); err != nil {
-		t.Fatalf("count clickhouse-style markers: %v", err)
-	}
-	if count != 2 {
-		t.Fatalf("clickhouse-style marker count = %d, want 2", count)
-	}
-
-	// Repeating the same payload exercises the all-existing fast-path.
-	if err := db.InsertMarkersBulk(context.Background(), nil, markers, "clickhouse", 100, nil, WorkloadArchive); err != nil {
-		t.Fatalf("repeat clickhouse-style bulk insert: %v", err)
-	}
-}
-
 func TestInsertMarkersBulkPGXBuildsFallbackStatement(t *testing.T) {
 	db, _ := newSQLiteConcurrencyTestDatabase(t)
 

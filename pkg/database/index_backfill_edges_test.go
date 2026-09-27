@@ -30,10 +30,6 @@ func TestIndexCatalogAndBuilderEdgeBranches(t *testing.T) {
 		t.Fatal("sqlite database unexpectedly satisfied duckdb index catalog query")
 	}
 
-	if done := db.EnsureIndexesAsync(context.Background(), Config{DBType: "clickhouse"}, func(string, ...any) {}); done != nil {
-		t.Fatal("clickhouse index builder should be disabled")
-	}
-
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	done := db.EnsureIndexesAsync(ctx, Config{DBType: "sqlite"}, func(string, ...any) {})

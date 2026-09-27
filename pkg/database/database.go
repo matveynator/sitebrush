@@ -5,12 +5,9 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log"
 	"math"
-	"net"
-	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -437,61 +434,16 @@ func maxInt64OrZero(v sql.NullInt64) int64 {
 
 // Config holds the configuration details for initializing the database.
 type Config struct {
-	DBType      string // The type of the database driver (e.g., "sqlite", "chai", or "pgx" (PostgreSQL))
-	DBPath      string // The file path to the database file (for file-based databases)
-	DBConn      string // Raw DSN for network drivers (pgx or clickhouse)
-	DBHost      string // The host for PostgreSQL
-	DBPort      int    // The port for PostgreSQL
-	DBUser      string // The user for PostgreSQL
-	DBPass      string // The password for PostgreSQL
-	DBName      string // The name of the PostgreSQL database
-	PGSSLMode   string // The SSL mode for PostgreSQL
-	ClickSecure bool   // Enable TLS when connecting to ClickHouse over HTTP transport
-	Port        int    // The port number (used in database file naming if needed)
-}
-
-// ClickHouseDSNFromConfig assembles a DSN understood by the lightweight HTTP driver.
-// We parse host/port carefully so IPv6 literals keep their brackets intact.
-func ClickHouseDSNFromConfig(cfg Config) string {
-	if trimmed := strings.TrimSpace(cfg.DBConn); trimmed != "" {
-		return trimmed
-	}
-
-	host := strings.TrimSpace(cfg.DBHost)
-	if host == "" {
-		host = "127.0.0.1"
-	}
-
-	if _, _, err := net.SplitHostPort(host); err != nil {
-		port := cfg.DBPort
-		if port <= 0 {
-			port = 9000
-		}
-		host = net.JoinHostPort(host, strconv.Itoa(port))
-	}
-
-	user := strings.TrimSpace(cfg.DBUser)
-	pass := cfg.DBPass
-	name := strings.Trim(strings.TrimSpace(cfg.DBName), "/")
-
-	dsn := url.URL{Scheme: "clickhouse", Host: host}
-	if user != "" {
-		if strings.TrimSpace(pass) != "" {
-			dsn.User = url.UserPassword(user, pass)
-		} else {
-			dsn.User = url.User(user)
-		}
-	}
-	if name != "" {
-		dsn.Path = "/" + name
-	}
-
-	params := url.Values{}
-	if cfg.ClickSecure {
-		params.Set("secure", "true")
-	}
-	dsn.RawQuery = params.Encode()
-	return dsn.String()
+	DBType    string // The type of the database driver (e.g., "sqlite", "chai", or "pgx" (PostgreSQL))
+	DBPath    string // The file path to the database file (for file-based databases)
+	DBConn    string // Raw DSN for the PostgreSQL driver
+	DBHost    string // The host for PostgreSQL
+	DBPort    int    // The port for PostgreSQL
+	DBUser    string // The user for PostgreSQL
+	DBPass    string // The password for PostgreSQL
+	DBName    string // The name of the PostgreSQL database
+	PGSSLMode string // The SSL mode for PostgreSQL
+	Port      int    // The port number (used in database file naming if needed)
 }
 
 // NewDatabase opens DB and configures connection pooling.
@@ -532,8 +484,6 @@ func NewDatabase(config Config) (*Database, error) {
 			dsn = fmt.Sprintf("postgres://%s:%s@%s:%d/%s?sslmode=%s",
 				config.DBUser, config.DBPass, config.DBHost, config.DBPort, config.DBName, config.PGSSLMode)
 		}
-	case "clickhouse":
-		dsn = ClickHouseDSNFromConfig(config)
 	default:
 		return nil, fmt.Errorf("unsupported database type: %s", config.DBType)
 	}
@@ -597,12 +547,6 @@ func NewDatabase(config Config) (*Database, error) {
 			log.Printf("duckdb tuning skipped: %v", err)
 		}
 		cancel()
-	case "clickhouse":
-		// ClickHouse benefits from a few parallel connections while remaining lightweight.
-		db.SetMaxOpenConns(8)
-		db.SetMaxIdleConns(8)
-		db.SetConnMaxLifetime(5 * time.Minute)
-		db.SetConnMaxIdleTime(2 * time.Minute)
 	}
 
 	// Cheap liveness probe with timeout so we don't hang at startup
@@ -1312,10 +1256,6 @@ func desiredIndexesPortable(dbType string) []struct{ name, sql string } {
 				`CREATE INDEX IF NOT EXISTS idx_realtime_bounds ON realtime_measurements (lat, lon, fetched_at)`},
 		}
 
-	case "clickhouse":
-		// MergeTree handles ordering internally; explicit secondary indexes are unnecessary here.
-		return nil
-
 	default:
 		// Fallback: behave like SQLite/Chai (portable everywhere that supports IF NOT EXISTS).
 		return []struct{ name, sql string }{
@@ -1870,126 +1810,6 @@ CREATE INDEX IF NOT EXISTS idx_analytics_events_kind
   ON analytics_events (kind);
 `
 
-	case "clickhouse":
-		statements = []string{
-			`CREATE TABLE IF NOT EXISTS markers (
-  id          UInt64,
-  doseRate    Float64,
-  date        Int64,
-  lon         Float64,
-  lat         Float64,
-  countRate   Float64,
-  zoom        Int32,
-  speed       Float64,
-  trackID     String,
-  altitude    Float64,
-  detector    String,
-  radiation   String,
-  temperature Float64,
-  humidity    Float64,
-  device_id   String,
-  transport   String,
-  device_name String,
-  tube        String,
-  country     String
-) ENGINE = MergeTree()
-ORDER BY (trackID, date, id);`,
-			`CREATE TABLE IF NOT EXISTS tracks (
-  trackID     String
-) ENGINE = ReplacingMergeTree()
-ORDER BY (trackID);`,
-			`CREATE TABLE IF NOT EXISTS import_history (
-  source      String,
-  source_id   String,
-  track_id    String,
-  status      String,
-  imported_at Int64,
-  message     String
-) ENGINE = MergeTree()
-ORDER BY (source, source_id);`,
-			`CREATE TABLE IF NOT EXISTS users (
-  user_id        String,
-  source         String,
-  source_user_id String,
-  name           String,
-  created_at     Int64
-) ENGINE = MergeTree()
-ORDER BY (source, source_user_id);`,
-			`CREATE TABLE IF NOT EXISTS track_users (
-  track_id String,
-  user_id  String,
-  source   String
-) ENGINE = MergeTree()
-ORDER BY (user_id, track_id);`,
-			`CREATE TABLE IF NOT EXISTS realtime_measurements (
-  id          UInt64,
-  device_id   String,
-  transport   String,
-  device_name String,
-  tube        String,
-  country     String,
-  value       Float64,
-  unit        String,
-  lat         Float64,
-  lon         Float64,
-  measured_at Int64,
-  fetched_at  Int64,
-  extra       String
-) ENGINE = MergeTree()
-ORDER BY (device_id, measured_at);`,
-			`CREATE TABLE IF NOT EXISTS short_links (
-  id         UInt64,
-  code       String,
-  target     String,
-  created_at DateTime DEFAULT now()
-) ENGINE = MergeTree()
-ORDER BY (code);`,
-			`CREATE TABLE IF NOT EXISTS maintenance_state (
-  task       String,
-  status     String,
-  updated_at Int64,
-  message    String
-) ENGINE = MergeTree()
-ORDER BY (task);`,
-			`CREATE TABLE IF NOT EXISTS analytics_sessions (
-  session_id   String,
-  display_name String,
-  visitor_number Int64,
-  fingerprint String,
-  created_at   Int64,
-  last_seen_at Int64,
-  visit_count  Int64,
-  ip           String,
-  user_agent   String,
-  referer      String
-) ENGINE = ReplacingMergeTree()
-ORDER BY (session_id);`,
-			`CREATE TABLE IF NOT EXISTS analytics_events (
-  id             UInt64 DEFAULT 0,
-  session_id     String,
-  display_name   String,
-  occurred_at    Int64,
-  kind           String,
-  path           String,
-  ip             String,
-  referer        String,
-  user_agent     String,
-  region         String,
-  map_theme      String,
-  map_layer      String,
-  map_zoom       Int32,
-  map_speed      String,
-  map_center_lat Float64,
-  map_center_lon Float64,
-  dose_class     String,
-  track_kind     String,
-  track_id       String,
-  detector       String,
-  detail         String
-) ENGINE = MergeTree()
-ORDER BY (occurred_at, session_id);`,
-		}
-
 	default:
 		return fmt.Errorf("unsupported database type: %s", cfg.DBType)
 	}
@@ -2018,9 +1838,8 @@ ORDER BY (occurred_at, session_id);`,
 	return nil
 }
 
-// execStatements executes a slice of DDL statements sequentially so engines that
-// do not support multi-statement Exec calls (e.g. ClickHouse HTTP) still boot
-// correctly. We trim whitespace to stay tolerant of blank entries.
+// execStatements executes DDL statements sequentially so each supported engine
+// receives one portable statement at a time. Blank entries are ignored.
 func execStatements(db *sql.DB, stmts []string) error {
 	for _, raw := range stmts {
 		stmt := strings.TrimSpace(raw)
@@ -2035,8 +1854,8 @@ func execStatements(db *sql.DB, stmts []string) error {
 }
 
 // ---- Schema upgrade helpers -------------------------------------------------
-// We keep column checks in one place so the ALTER TABLE flow stays readable and
-// we can log exactly which columns are created or skipped.
+// Column checks stay in one place so the ALTER TABLE flow remains readable and
+// each migration decision can be logged consistently.
 
 // ensureRealtimeMetadataColumns upgrades realtime_measurements with optional metadata columns.
 // Each column is added lazily so existing installations keep their history without manual SQL.
@@ -2086,10 +1905,6 @@ func (db *Database) ensureMarkerMetadataColumns(dbType string, logf func(string,
 				return err
 			}
 		}
-		return nil
-
-	case "clickhouse":
-		// ClickHouse schema already ships with the extended columns, so no ALTER needed.
 		return nil
 
 	default:
@@ -2178,10 +1993,6 @@ func (db *Database) ensureRealtimeMetadataColumns(dbType string, logf func(strin
 		}
 		return nil
 
-	case "clickhouse":
-		// Tables created for ClickHouse already contain the optional metadata columns.
-		return nil
-
 	default:
 		// SQLite-style engines require manual detection before issuing ALTER TABLE statements.
 		rows, err := db.DB.Query(`PRAGMA table_info(realtime_measurements);`)
@@ -2255,25 +2066,6 @@ func (db *Database) ensureAnalyticsSessionColumns(dbType string, logf func(strin
 				logf("⏭️  analytics_sessions.%s already exists; skipping.", col.name)
 				continue
 			}
-			stmt := fmt.Sprintf("ALTER TABLE analytics_sessions ADD COLUMN %s", col.def)
-			logf("🧩 adding analytics_sessions.%s", col.name)
-			if _, err := db.DB.Exec(stmt); err != nil {
-				if isSchemaAlreadyExistsError(err) {
-					logf("⏭️  analytics_sessions.%s already exists; skipping.", col.name)
-					continue
-				}
-				return err
-			}
-		}
-		return nil
-
-	case "clickhouse":
-		required = []column{
-			{name: "visitor_number", def: "visitor_number Int64"},
-			{name: "fingerprint", def: "fingerprint String"},
-		}
-		// ClickHouse needs explicit schema upgrades, so we issue the ALTER directly.
-		for _, col := range required {
 			stmt := fmt.Sprintf("ALTER TABLE analytics_sessions ADD COLUMN %s", col.def)
 			logf("🧩 adding analytics_sessions.%s", col.name)
 			if _, err := db.DB.Exec(stmt); err != nil {
@@ -2560,10 +2352,6 @@ func (db *Database) InsertMarkersBulk(ctx context.Context, tx *sql.Tx, markers [
 		// instead of thrashing it. We also collapse duplicates while the slice is ordered so
 		// ON CONFLICT rarely triggers and each chunk stays as small as possible.
 		markers = orderDuckDBMarkers(markers)
-	} else if driver == "clickhouse" {
-		// ClickHouse benefits from early duplicate trimming to keep the later existence
-		// probes small and deterministic even when archives contain overlapping segments.
-		markers = deduplicateMarkers(markers)
 	}
 
 	if driver == "duckdb" {
@@ -2623,33 +2411,6 @@ func (db *Database) InsertMarkersBulk(ctx context.Context, tx *sql.Tx, markers [
 			return fmt.Sprintf("$%d", n)
 		}
 		return "?"
-	}
-
-	// Fast-path: when importing a single track into ClickHouse we can assemble one INSERT for
-	// the whole payload. DuckDB struggled with giant VALUES blocks and stalled when tgz imports
-	// fanned out tens of thousands of placeholders, so we keep it on the chunked path to
-	// respect context timeouts. ClickHouse benefits from the one-shot INSERT because it avoids
-	// repeating duplicate probes and keeps the HTTP round-trips low.
-	if trackID, ok := singleTrack(markers); ok && driver == "clickhouse" {
-		fastStart := time.Now()
-		fastMarkers := markers
-		usable, filterErr := db.filterClickHouseNewMarkers(markers)
-		if filterErr != nil {
-			return fmt.Errorf("clickhouse marker exists check: %w", filterErr)
-		}
-		if len(usable) == 0 {
-			return nil
-		}
-		fastMarkers = usable
-		if err := db.insertMarkersSingleStatement(ctx, exec, fastMarkers, driver); err == nil {
-			if progress != nil {
-				select {
-				case progress <- MarkerBatchProgress{Total: len(fastMarkers), Done: len(fastMarkers), Batch: len(fastMarkers), Mode: fmt.Sprintf("track:%s", trackID), Duration: time.Since(fastStart)}:
-				default:
-				}
-			}
-			return nil
-		}
 	}
 
 	// PostgreSQL imports suffer when each chunk creates and drops a fresh temporary
@@ -2720,43 +2481,6 @@ func (db *Database) InsertMarkersBulk(ctx context.Context, tx *sql.Tx, markers [
 				)
 			}
 			sb.WriteString(" ON CONFLICT ON CONSTRAINT markers_unique DO NOTHING")
-
-		case "clickhouse":
-			usable, err := db.filterClickHouseNewMarkers(chunk)
-			if err != nil {
-				return fmt.Errorf("clickhouse marker exists check: %w", err)
-			}
-			if len(usable) == 0 {
-				i = end
-				continue
-			}
-
-			sb.WriteString("INSERT INTO markers (id,doseRate,date,lon,lat,countRate,zoom,speed,trackID,altitude,detector,radiation,temperature,humidity,device_id,transport,device_name,tube,country) VALUES ")
-			argn := 0
-			const cols = 19
-			for j, m := range usable {
-				if j > 0 {
-					sb.WriteString(",")
-				}
-				sb.WriteString("(")
-				for k := 0; k < cols; k++ {
-					if k > 0 {
-						sb.WriteString(",")
-					}
-					argn++
-					sb.WriteString(ph(argn))
-				}
-				sb.WriteString(")")
-				args = append(args,
-					m.ID, m.DoseRate, m.Date, m.Lon, m.Lat,
-					m.CountRate, m.Zoom, m.Speed, m.TrackID,
-					nullableFloat64(m.AltitudeValid, m.Altitude),
-					m.Detector, m.Radiation,
-					nullableFloat64(m.TemperatureValid, m.Temperature),
-					nullableFloat64(m.HumidityValid, m.Humidity),
-					m.DeviceID, m.Transport, m.DeviceName, m.Tube, m.Country,
-				)
-			}
 
 		default:
 			// SQLite / Chai: keep explicit ids to avoid PRIMARY KEY clashes when aggregating zooms.
@@ -2989,8 +2713,8 @@ func singleTrack(markers []Marker) (string, bool) {
 }
 
 // insertMarkersSingleStatement assembles one INSERT with all provided markers. We only
-// use it for engines that do not explode with thousands of placeholders per statement
-// (DuckDB and ClickHouse) and when the caller already filtered duplicates. The helper
+// use it for DuckDB, which avoids oversized statements by keeping the regular path
+// chunked and uses this helper only when the caller has already selected one track.
 // keeps the bulk path deterministic: either the single shot succeeds, or the caller
 // falls back to the chunked variant without sharing mutable state.
 func (db *Database) insertMarkersSingleStatement(ctx context.Context, exec sqlExecutor, markers []Marker, driver string) error {
@@ -3038,34 +2762,6 @@ func (db *Database) insertMarkersSingleStatement(ctx context.Context, exec sqlEx
 			)
 		}
 		sb.WriteString(" ON CONFLICT DO NOTHING")
-	case "clickhouse":
-		sb.WriteString("INSERT INTO markers (id,doseRate,date,lon,lat,countRate,zoom,speed,trackID,altitude,detector,radiation,temperature,humidity,device_id,transport,device_name,tube,country) VALUES ")
-		for i, m := range markers {
-			if i > 0 {
-				sb.WriteString(",")
-			}
-			if m.ID == 0 {
-				m.ID = <-db.idGenerator
-				markers[i].ID = m.ID
-			}
-			sb.WriteString("(")
-			for k := 0; k < 19; k++ {
-				if k > 0 {
-					sb.WriteString(",")
-				}
-				sb.WriteString(ph(len(args) + k + 1))
-			}
-			sb.WriteString(")")
-			args = append(args,
-				m.ID, m.DoseRate, m.Date, m.Lon, m.Lat,
-				m.CountRate, m.Zoom, m.Speed, m.TrackID,
-				nullableFloat64(m.AltitudeValid, m.Altitude),
-				m.Detector, m.Radiation,
-				nullableFloat64(m.TemperatureValid, m.Temperature),
-				nullableFloat64(m.HumidityValid, m.Humidity),
-				m.DeviceID, m.Transport, m.DeviceName, m.Tube, m.Country,
-			)
-		}
 	default:
 		return fmt.Errorf("single-statement bulk unsupported for driver %s", driver)
 	}
@@ -3079,106 +2775,6 @@ func (db *Database) insertMarkersSingleStatement(ctx context.Context, exec sqlEx
 		return err
 	}
 	return nil
-}
-
-// filterClickHouseNewMarkers weeds out duplicates already persisted in ClickHouse using a pool of
-// goroutines. ClickHouse lacks portable ON CONFLICT semantics, so we probe for existing rows in
-// parallel and only return markers that still need insertion. Channels replace mutexes to keep the
-// synchronization simple and follow "Don't communicate by sharing memory; share memory by
-// communicating".
-func (db *Database) filterClickHouseNewMarkers(chunk []Marker) ([]Marker, error) {
-	if len(chunk) == 0 {
-		return nil, nil
-	}
-
-	unique := deduplicateMarkers(chunk)
-	workers := runtime.NumCPU()
-	if workers < 2 {
-		workers = 2
-	}
-	if workers > 8 {
-		workers = 8
-	}
-	if workers > len(unique) {
-		workers = len(unique)
-	}
-
-	type result struct {
-		marker Marker
-		err    error
-		ok     bool
-	}
-
-	jobs := make(chan Marker)
-	out := make(chan result)
-	stop := make(chan struct{})
-	done := make(chan struct{}, workers)
-
-	worker := func() {
-		defer func() { done <- struct{}{} }()
-		for m := range jobs {
-			select {
-			case <-stop:
-				return
-			default:
-			}
-
-			exists, err := db.markerExistsClickHouse(m)
-			if err != nil {
-				select {
-				case out <- result{err: err}:
-				case <-stop:
-				}
-				return
-			}
-			if exists {
-				continue
-			}
-			if m.ID == 0 {
-				m.ID = <-db.idGenerator
-			}
-			select {
-			case out <- result{marker: m, ok: true}:
-			case <-stop:
-				return
-			}
-		}
-	}
-
-	for i := 0; i < workers; i++ {
-		go worker()
-	}
-
-	go func() {
-		defer close(jobs)
-		for _, m := range unique {
-			select {
-			case <-stop:
-				return
-			case jobs <- m:
-			}
-		}
-	}()
-
-	go func() {
-		for i := 0; i < workers; i++ {
-			<-done
-		}
-		close(out)
-	}()
-
-	usable := make([]Marker, 0, len(unique))
-	for res := range out {
-		if res.err != nil {
-			close(stop)
-			return nil, res.err
-		}
-		if res.ok {
-			usable = append(usable, res.marker)
-		}
-	}
-
-	return usable, nil
 }
 
 // SaveMarkerAtomic inserts a marker and silently ignores duplicates.
@@ -3208,30 +2804,6 @@ INSERT INTO markers
 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
 ON CONFLICT ON CONSTRAINT markers_unique DO NOTHING`,
 			m.DoseRate, m.Date, m.Lon, m.Lat,
-			m.CountRate, m.Zoom, m.Speed, m.TrackID,
-			nullableFloat64(m.AltitudeValid, m.Altitude),
-			m.Detector, m.Radiation,
-			nullableFloat64(m.TemperatureValid, m.Temperature),
-			nullableFloat64(m.HumidityValid, m.Humidity),
-			m.DeviceID, m.Transport, m.DeviceName, m.Tube, m.Country)
-		return err
-
-	case "clickhouse":
-		exists, err := db.markerExistsClickHouse(m)
-		if err != nil {
-			return err
-		}
-		if exists {
-			return nil
-		}
-		if m.ID == 0 {
-			m.ID = <-db.idGenerator
-		}
-		_, err = exec.ExecContext(ctx, `
-INSERT INTO markers
-      (id,doseRate,date,lon,lat,countRate,zoom,speed,trackID,altitude,detector,radiation,temperature,humidity,device_id,transport,device_name,tube,country)
-VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-			m.ID, m.DoseRate, m.Date, m.Lon, m.Lat,
 			m.CountRate, m.Zoom, m.Speed, m.TrackID,
 			nullableFloat64(m.AltitudeValid, m.Altitude),
 			m.Detector, m.Radiation,
@@ -3274,44 +2846,6 @@ func nullableFloat64(valid bool, value float64) any {
 		return nil
 	}
 	return value
-}
-
-// markerExistsClickHouse checks for duplicates because MergeTree tables do not enforce unique keys.
-// We rely on the same composite uniqueness used for SQLite to keep behaviour consistent.
-func (db *Database) markerExistsClickHouse(m Marker) (bool, error) {
-	if db == nil || db.DB == nil {
-		return false, fmt.Errorf("database unavailable")
-	}
-	const q = `SELECT 1 FROM markers WHERE doseRate = ? AND date = ? AND lon = ? AND lat = ? AND countRate = ? AND zoom = ? AND speed = ? AND trackID = ? LIMIT 1`
-	var one int
-	err := db.DB.QueryRow(q,
-		m.DoseRate, m.Date, m.Lon, m.Lat,
-		m.CountRate, m.Zoom, m.Speed, m.TrackID,
-	).Scan(&one)
-	if errors.Is(err, sql.ErrNoRows) {
-		return false, nil
-	}
-	if err != nil {
-		return false, err
-	}
-	return true, nil
-}
-
-// realtimeExistsClickHouse prevents duplicate realtime rows without relying on UNIQUE constraints.
-func (db *Database) realtimeExistsClickHouse(deviceID string, measuredAt int64) (bool, error) {
-	if db == nil || db.DB == nil {
-		return false, fmt.Errorf("database unavailable")
-	}
-	const q = `SELECT 1 FROM realtime_measurements WHERE device_id = ? AND measured_at = ? LIMIT 1`
-	var one int
-	err := db.DB.QueryRow(q, deviceID, measuredAt).Scan(&one)
-	if errors.Is(err, sql.ErrNoRows) {
-		return false, nil
-	}
-	if err != nil {
-		return false, err
-	}
-	return true, nil
 }
 
 // duckDBIsConflict detects duplicate-key errors reported by DuckDB so callers can retry safely.
@@ -3393,25 +2927,6 @@ VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
 				return fmt.Errorf("duckdb realtime conflict after retries: %w", lastConflict)
 			}
 			return fmt.Errorf("duckdb realtime conflict without error context")
-
-		case "clickhouse":
-			exists, err := db.realtimeExistsClickHouse(m.DeviceID, m.MeasuredAt)
-			if err != nil {
-				return err
-			}
-			if exists {
-				return nil
-			}
-			if m.ID == 0 {
-				m.ID = <-db.idGenerator
-			}
-			_, err = conn.ExecContext(ctx, `
-INSERT INTO realtime_measurements
-      (id,device_id,transport,device_name,tube,country,value,unit,lat,lon,measured_at,fetched_at,extra)
-VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-				m.ID, m.DeviceID, m.Transport, m.DeviceName, m.Tube, m.Country,
-				m.Value, m.Unit, m.Lat, m.Lon, m.MeasuredAt, m.FetchedAt, m.Extra)
-			return err
 
 		default:
 			if m.ID == 0 {

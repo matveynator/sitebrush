@@ -186,24 +186,11 @@ func TestDatabasePureHelpers(t *testing.T) {
 		" PostgreSQL ":  "pgx",
 		"postgres+psql": "pgx",
 		"sqlite":        "sqlite",
-		"CLICKHOUSE":    "clickhouse",
 	}
 	for input, expected := range normalized {
 		if got := normalizeDBType(input); got != expected {
 			t.Fatalf("normalizeDBType(%q) = %q, want %q", input, got, expected)
 		}
-	}
-
-	dsn := ClickHouseDSNFromConfig(Config{
-		DBHost:      "db.example.com",
-		DBPort:      9440,
-		DBUser:      "alice",
-		DBPass:      "secret",
-		DBName:      "/radiation/",
-		ClickSecure: true,
-	})
-	if dsn != "clickhouse://alice:secret@db.example.com:9440/radiation?secure=true" {
-		t.Fatalf("clickhouse DSN = %q", dsn)
 	}
 
 	if placeholder("pgx", 3) != "$3" {

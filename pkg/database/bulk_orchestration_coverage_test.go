@@ -52,30 +52,3 @@ func TestInsertMarkersBulkCallerTransaction(t *testing.T) {
 		t.Fatalf("caller transaction progress messages = %d, want 2", len(progress))
 	}
 }
-
-func TestInsertMarkersBulkClickHouseMultiTrackChunkPath(t *testing.T) {
-	db, _ := newSQLiteConcurrencyTestDatabase(t)
-
-	markers := []Marker{
-		{ID: 201, DoseRate: 0.1, Date: 1, Lon: 1, Lat: 1, CountRate: 1, Zoom: 8, Speed: 1, TrackID: "multi-a"},
-		{ID: 202, DoseRate: 0.2, Date: 2, Lon: 2, Lat: 2, CountRate: 2, Zoom: 8, Speed: 2, TrackID: "multi-b"},
-		{ID: 203, DoseRate: 0.3, Date: 3, Lon: 3, Lat: 3, CountRate: 3, Zoom: 8, Speed: 3, TrackID: "multi-c"},
-	}
-	progress := make(chan MarkerBatchProgress, 4)
-	if err := db.InsertMarkersBulk(context.Background(), nil, markers, "clickhouse", 2, progress, WorkloadArchive); err != nil {
-		t.Fatalf("clickhouse-style multi-track bulk: %v", err)
-	}
-
-	var count int
-	if err := db.withSerializedConnectionFor(context.Background(), WorkloadWebRead, func(ctx context.Context, conn *sql.DB) error {
-		return conn.QueryRowContext(ctx, "SELECT COUNT(*) FROM markers WHERE trackID LIKE 'multi-%'").Scan(&count)
-	}); err != nil {
-		t.Fatalf("count multi-track markers: %v", err)
-	}
-	if count != 3 {
-		t.Fatalf("multi-track marker count = %d, want 3", count)
-	}
-	if len(progress) != 2 {
-		t.Fatalf("multi-track progress messages = %d, want 2", len(progress))
-	}
-}
