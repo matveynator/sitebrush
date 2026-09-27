@@ -151,6 +151,27 @@ jobs:
             exit 1
           fi
 
+          PACKAGE_VERSION="2.0.${GITHUB_RUN_NUMBER}"
+          AMD64_BINARY="$(find dist-raw -type f -name sitebrush_linux_amd64 -print -quit)"
+          ARM64_BINARY="$(find dist-raw -type f -name sitebrush_linux_arm64 -print -quit)"
+
+          if [ -z "$AMD64_BINARY" ] || [ -z "$ARM64_BINARY" ]; then
+            echo "Linux server binaries required for Debian packages were not found" >&2
+            exit 1
+          fi
+
+          bash scripts/package-deb/build.sh \
+            "$AMD64_BINARY" \
+            amd64 \
+            "$PACKAGE_VERSION" \
+            dist-release
+
+          bash scripts/package-deb/build.sh \
+            "$ARM64_BINARY" \
+            arm64 \
+            "$PACKAGE_VERSION" \
+            dist-release
+
           (
             cd dist-release
             md5sum sitebrush_* > MD5SUMS
