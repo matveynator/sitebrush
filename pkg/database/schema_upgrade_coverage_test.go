@@ -44,7 +44,6 @@ func newLegacySchemaDatabase(t *testing.T) *Database {
 func TestLegacySQLiteMetadataColumnsAreUpgraded(t *testing.T) {
 	db := newLegacySchemaDatabase(t)
 	logf := func(string, ...any) {}
-
 	if err := db.ensureMarkerMetadataColumns("sqlite", logf); err != nil {
 		t.Fatalf("upgrade marker metadata: %v", err)
 	}
@@ -101,17 +100,6 @@ func TestLegacySQLiteMetadataColumnsAreUpgraded(t *testing.T) {
 
 func TestMetadataUpgradeEngineBranches(t *testing.T) {
 	db := newLegacySchemaDatabase(t)
-	logf := func(string, ...any) {}
-
-	if err := db.ensureMarkerMetadataColumns("clickhouse", logf); err != nil {
-		t.Fatalf("clickhouse marker metadata branch: %v", err)
-	}
-	if err := db.ensureRealtimeMetadataColumns("clickhouse", logf); err != nil {
-		t.Fatalf("clickhouse realtime metadata branch: %v", err)
-	}
-	if err := db.ensureAnalyticsSessionColumns("clickhouse", logf); err != nil {
-		t.Fatalf("clickhouse analytics metadata branch: %v", err)
-	}
 
 	if _, err := db.loadColumnPresence(context.Background(), "pgx", "markers"); err == nil {
 		t.Fatal("sqlite test database unexpectedly satisfied PostgreSQL information_schema query")

@@ -181,19 +181,6 @@ func (db *Database) EnsureImportHistory(ctx context.Context, source, sourceID, t
 	defer cancel()
 
 	return db.withSerializedConnectionFor(ctx, WorkloadArchive, func(runCtx context.Context, conn *sql.DB) error {
-		if strings.ToLower(dbType) == "clickhouse" {
-			existsStmt := "SELECT 1 FROM import_history WHERE source = ? AND source_id = ? LIMIT 1"
-			var exists int
-			if err := conn.QueryRowContext(runCtx, existsStmt, source, sourceID).Scan(&exists); err == nil {
-				return nil
-			}
-			stmt := "INSERT INTO import_history (source, source_id, track_id, status, imported_at, message) VALUES (?, ?, ?, ?, ?, ?)"
-			if _, err := conn.ExecContext(runCtx, stmt, source, sourceID, trackID, status, importedAt, message); err != nil {
-				return fmt.Errorf("insert import history: %w", err)
-			}
-			return nil
-		}
-
 		insertSource := placeholder(dbType, 1)
 		insertSourceID := placeholder(dbType, 2)
 		insertTrackID := placeholder(dbType, 3)

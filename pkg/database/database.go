@@ -9,8 +9,6 @@ import (
 	"fmt"
 	"log"
 	"math"
-	"net"
-	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -437,61 +435,16 @@ func maxInt64OrZero(v sql.NullInt64) int64 {
 
 // Config holds the configuration details for initializing the database.
 type Config struct {
-	DBType      string // The type of the database driver (e.g., "sqlite", "chai", or "pgx" (PostgreSQL))
-	DBPath      string // The file path to the database file (for file-based databases)
-	DBConn      string // Raw DSN for network drivers (pgx or clickhouse)
-	DBHost      string // The host for PostgreSQL
-	DBPort      int    // The port for PostgreSQL
-	DBUser      string // The user for PostgreSQL
-	DBPass      string // The password for PostgreSQL
-	DBName      string // The name of the PostgreSQL database
-	PGSSLMode   string // The SSL mode for PostgreSQL
-	ClickSecure bool   // Enable TLS when connecting to ClickHouse over HTTP transport
-	Port        int    // The port number (used in database file naming if needed)
-}
-
-// ClickHouseDSNFromConfig assembles a DSN understood by the lightweight HTTP driver.
-// We parse host/port carefully so IPv6 literals keep their brackets intact.
-func ClickHouseDSNFromConfig(cfg Config) string {
-	if trimmed := strings.TrimSpace(cfg.DBConn); trimmed != "" {
-		return trimmed
-	}
-
-	host := strings.TrimSpace(cfg.DBHost)
-	if host == "" {
-		host = "127.0.0.1"
-	}
-
-	if _, _, err := net.SplitHostPort(host); err != nil {
-		port := cfg.DBPort
-		if port <= 0 {
-			port = 9000
-		}
-		host = net.JoinHostPort(host, strconv.Itoa(port))
-	}
-
-	user := strings.TrimSpace(cfg.DBUser)
-	pass := cfg.DBPass
-	name := strings.Trim(strings.TrimSpace(cfg.DBName), "/")
-
-	dsn := url.URL{Scheme: "clickhouse", Host: host}
-	if user != "" {
-		if strings.TrimSpace(pass) != "" {
-			dsn.User = url.UserPassword(user, pass)
-		} else {
-			dsn.User = url.User(user)
-		}
-	}
-	if name != "" {
-		dsn.Path = "/" + name
-	}
-
-	params := url.Values{}
-	if cfg.ClickSecure {
-		params.Set("secure", "true")
-	}
-	dsn.RawQuery = params.Encode()
-	return dsn.String()
+	DBType    string // The type of the database driver (e.g., "sqlite", "chai", or "pgx" (PostgreSQL))
+	DBPath    string // The file path to the database file (for file-based databases)
+	DBConn    string // Raw DSN for the PostgreSQL driver
+	DBHost    string // The host for PostgreSQL
+	DBPort    int    // The port for PostgreSQL
+	DBUser    string // The user for PostgreSQL
+	DBPass    string // The password for PostgreSQL
+	DBName    string // The name of the PostgreSQL database
+	PGSSLMode string // The SSL mode for PostgreSQL
+	Port      int    // The port number (used in database file naming if needed)
 }
 
 // NewDatabase opens DB and configures connection pooling.
@@ -532,8 +485,6 @@ func NewDatabase(config Config) (*Database, error) {
 			dsn = fmt.Sprintf("postgres://%s:%s@%s:%d/%s?sslmode=%s",
 				config.DBUser, config.DBPass, config.DBHost, config.DBPort, config.DBName, config.PGSSLMode)
 		}
-	case "clickhouse":
-		dsn = ClickHouseDSNFromConfig(config)
 	default:
 		return nil, fmt.Errorf("unsupported database type: %s", config.DBType)
 	}
@@ -597,12 +548,6 @@ func NewDatabase(config Config) (*Database, error) {
 			log.Printf("duckdb tuning skipped: %v", err)
 		}
 		cancel()
-	case "clickhouse":
-		// ClickHouse benefits from a few parallel connections while remaining lightweight.
-		db.SetMaxOpenConns(8)
-		db.SetMaxIdleConns(8)
-		db.SetConnMaxLifetime(5 * time.Minute)
-		db.SetConnMaxIdleTime(2 * time.Minute)
 	}
 
 	// Cheap liveness probe with timeout so we don't hang at startup
@@ -1430,6 +1375,9 @@ LIMIT 1`
 // the app can accept traffic immediately. Heavy indexes are built later
 // by EnsureIndexesAsync in background.
 func (db *Database) InitSchema(cfg Config, logf func(string, ...any)) error {
+	if strings.EqualFold(strings.TrimSpace(cfg.DBType), "clickhouse") {
+		return fmt.Errorf("unsupported database type: %s", cfg.DBType)
+	}
 	var (
 		schema     string
 		statements []string
@@ -2044,6 +1992,9 @@ func execStatements(db *sql.DB, stmts []string) error {
 // We add altitude, detector type, radiation channel, temperature, humidity, and live metadata
 // lazily so historical databases built before this format continue working without manual SQL.
 func (db *Database) ensureMarkerMetadataColumns(dbType string, logf func(string, ...any)) error {
+	if strings.EqualFold(strings.TrimSpace(dbType), "clickhouse") {
+		return fmt.Errorf("unsupported database type: %s", dbType)
+	}
 	type column struct {
 		name string
 		def  string
@@ -2138,6 +2089,9 @@ func (db *Database) ensureMarkerMetadataColumns(dbType string, logf func(string,
 }
 
 func (db *Database) ensureRealtimeMetadataColumns(dbType string, logf func(string, ...any)) error {
+	if strings.EqualFold(strings.TrimSpace(dbType), "clickhouse") {
+		return fmt.Errorf("unsupported database type: %s", dbType)
+	}
 	type column struct {
 		name string
 		def  string
@@ -2231,6 +2185,9 @@ func (db *Database) ensureRealtimeMetadataColumns(dbType string, logf func(strin
 // ensureAnalyticsSessionColumns upgrades analytics_sessions with optional columns
 // so sequential visitor numbering works on older databases without manual SQL.
 func (db *Database) ensureAnalyticsSessionColumns(dbType string, logf func(string, ...any)) error {
+	if strings.EqualFold(strings.TrimSpace(dbType), "clickhouse") {
+		return fmt.Errorf("unsupported database type: %s", dbType)
+	}
 	type column struct {
 		name string
 		def  string

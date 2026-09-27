@@ -106,7 +106,7 @@ func newSchemaCoverageDB(t *testing.T, driverName string) *Database {
 }
 
 func TestInitSchemaEngineSwitchBranches(t *testing.T) {
-	for _, dbType := range []string{"pgx", "duckdb", "clickhouse"} {
+	for _, dbType := range []string{"pgx", "duckdb"} {
 		t.Run(dbType, func(t *testing.T) {
 			db := newSchemaCoverageDB(t, dbType)
 			if err := db.InitSchema(Config{DBType: dbType}, func(string, ...any) {}); err != nil {
@@ -140,10 +140,6 @@ func TestMetadataUpgradeServerEngineBranches(t *testing.T) {
 		})
 	}
 
-	db := newSchemaCoverageDB(t, "clickhouse")
-	if err := db.ensureAnalyticsSessionColumns("clickhouse", nil); err != nil {
-		t.Fatalf("clickhouse analytics session metadata: %v", err)
-	}
 }
 
 func TestSyncPostgresSequenceBranches(t *testing.T) {

@@ -47,15 +47,6 @@ func TestDatabaseCoverageBoundaryBranches(t *testing.T) {
 			t.Errorf("%s analytics migration unexpectedly worked against SQLite", dbType)
 		}
 	}
-	if err := database.ensureMarkerMetadataColumns("clickhouse", nil); err != nil {
-		t.Fatalf("ClickHouse marker migration no-op: %v", err)
-	}
-	if err := database.ensureRealtimeMetadataColumns("clickhouse", nil); err != nil {
-		t.Fatalf("ClickHouse realtime migration no-op: %v", err)
-	}
-	if err := database.ensureAnalyticsSessionColumns("clickhouse", nil); err != nil {
-		t.Fatalf("ClickHouse analytics migration through SQLite fixture: %v", err)
-	}
 	marker := Marker{DoseRate: 1, Date: 10, Lon: 20, Lat: 30, CountRate: 4, Zoom: 5, Speed: 6, TrackID: "coverage-track"}
 	if err := database.SaveMarkerAtomic(ctx, database.DB, marker, "sqlite"); err != nil {
 		t.Fatal(err)

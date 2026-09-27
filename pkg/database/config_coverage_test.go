@@ -10,32 +10,11 @@ import (
 )
 
 func TestDatabaseConfigAndIndexBranches(t *testing.T) {
-	t.Run("clickhouse dsn", func(t *testing.T) {
-		if got := ClickHouseDSNFromConfig(Config{DBConn: "  clickhouse://custom:9000/db  "}); got != "clickhouse://custom:9000/db" {
-			t.Fatalf("explicit clickhouse dsn = %q", got)
-		}
-
-		got := ClickHouseDSNFromConfig(Config{
-			DBHost:      "",
-			DBPort:      0,
-			DBUser:      "user",
-			DBPass:      "pass",
-			DBName:      "/metrics/",
-			ClickSecure: true,
-		})
-		if !strings.Contains(got, "127.0.0.1:9000") || !strings.Contains(got, "user:pass") || !strings.Contains(got, "/metrics") || !strings.Contains(got, "secure=true") {
-			t.Fatalf("assembled clickhouse dsn = %q", got)
-		}
-
-		got = ClickHouseDSNFromConfig(Config{DBHost: "localhost:9440", DBUser: "user"})
-		if !strings.Contains(got, "localhost:9440") || !strings.Contains(got, "user@") {
-			t.Fatalf("host:port clickhouse dsn = %q", got)
-		}
-	})
-
 	t.Run("unsupported database", func(t *testing.T) {
-		if _, err := NewDatabase(Config{DBType: "unsupported"}); err == nil {
-			t.Fatal("unsupported database type did not fail")
+		for _, dbType := range []string{"unsupported", "clickhouse"} {
+			if _, err := NewDatabase(Config{DBType: dbType}); err == nil {
+				t.Fatalf("unsupported database type %q did not fail", dbType)
+			}
 		}
 	})
 
@@ -50,9 +29,6 @@ func TestDatabaseConfigAndIndexBranches(t *testing.T) {
 					t.Fatalf("%s invalid index: %#v", dbType, index)
 				}
 			}
-		}
-		if indexes := desiredIndexesPortable("clickhouse"); indexes != nil {
-			t.Fatalf("clickhouse indexes = %#v, want nil", indexes)
 		}
 	})
 
