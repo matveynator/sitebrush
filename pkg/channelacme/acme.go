@@ -206,6 +206,9 @@ func (state *clientState) issue(ctx context.Context, domain string) (*tls.Certif
 	if domain == "" {
 		return nil, time.Time{}, errors.New("ACME domain is required")
 	}
+	if filepath.Base(domain) != domain || strings.ContainsAny(domain, `/\\`) {
+		return nil, time.Time{}, errors.New("ACME domain contains an unsafe path separator")
+	}
 	if err := state.prepareAccount(ctx); err != nil {
 		return nil, time.Time{}, err
 	}
