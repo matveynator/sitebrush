@@ -15995,6 +15995,44 @@ func TestDefaultCrawlerDiscoveryFilesExposePublishedContent(t *testing.T) {
 	}
 }
 
+func TestRouteResolvesVerifiedAliasBeforeDefaultCrawlerIndex(t *testing.T) {
+	application, database := newTestApplication(t)
+	for _, statement := range []string{
+		`INSERT INTO domain_aliases(primary_domain,alias_domain,verification_token,is_verified,dns_a_ok) VALUES('primary.example','alias.example','verified',1,1)`,
+		`INSERT INTO published_pages(domain,path,title,html) VALUES('primary.example','/','Home','<html></html>')`,
+		`INSERT INTO published_pages(domain,path,title,html) VALUES('primary.example','/about','About','<html></html>')`,
+		`INSERT INTO page_password_rules(domain,path,password_hash,created_at,updated_at) VALUES('primary.example','/private/','hash','now','now')`,
+	} {
+		if _, err := database.Exec(statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	robotsRequest := httptest.NewRequest(http.MethodGet, "https://alias.example/robots.txt", nil)
+	robotsResponse := httptest.NewRecorder()
+	application.route(robotsResponse, robotsRequest)
+	if robotsResponse.Code != http.StatusOK {
+		t.Fatalf("alias robots status = %d body=%q", robotsResponse.Code, robotsResponse.Body.String())
+	}
+	for _, expected := range []string{"Disallow: /private", "Sitemap: https://alias.example/sitemap.xml"} {
+		if !strings.Contains(robotsResponse.Body.String(), expected) {
+			t.Fatalf("alias robots missing %q: %s", expected, robotsResponse.Body.String())
+		}
+	}
+
+	sitemapRequest := httptest.NewRequest(http.MethodGet, "https://alias.example/sitemap.xml", nil)
+	sitemapResponse := httptest.NewRecorder()
+	application.route(sitemapResponse, sitemapRequest)
+	if sitemapResponse.Code != http.StatusOK {
+		t.Fatalf("alias sitemap status = %d body=%q", sitemapResponse.Code, sitemapResponse.Body.String())
+	}
+	for _, expected := range []string{"https://alias.example/", "https://alias.example/about"} {
+		if !strings.Contains(sitemapResponse.Body.String(), expected) {
+			t.Fatalf("alias sitemap missing %q: %s", expected, sitemapResponse.Body.String())
+		}
+	}
+}
+
 func TestDefaultCrawlerIndexOnlyHandlesReadOnlyDiscoveryPaths(t *testing.T) {
 	application, _ := newTestApplication(t)
 	for _, testCase := range []struct {
