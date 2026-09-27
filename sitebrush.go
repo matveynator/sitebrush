@@ -9893,6 +9893,9 @@ SELECT COUNT(1)
 FROM admin_stealth_modes stealth
 JOIN admin_ip_policies policy ON policy.domain=stealth.domain AND policy.email=stealth.email
 WHERE stealth.domain=? AND stealth.enabled_at>0 AND (?='' OR stealth.email=?)`, domain, email, email).Scan(&enabled)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
 	return enabled > 0, err
 }
 
@@ -21598,6 +21601,9 @@ func (a *App) confirmEmailToken(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet {
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("Referrer-Policy", "no-referrer")
+		if confirmation.Action == "register" {
+			a.observeAutomaticSSLRegistration(r, confirmation.Domain)
+		}
 		a.render(w, r, "account-confirm.html", map[string]any{"Domain": confirmation.Domain, "Email": confirmation.Email, "CurrentEmail": confirmation.CurrentEmail, "Token": token, "AcceptEmail": confirmation.Action == "profile", "SetPassword": confirmation.Action == "register" && confirmation.Password == ""})
 		return
 	}
