@@ -11,10 +11,8 @@ import (
 
 func TestDatabaseConfigAndIndexBranches(t *testing.T) {
 	t.Run("unsupported database", func(t *testing.T) {
-		for _, dbType := range []string{"unsupported", "clickhouse"} {
-			if _, err := NewDatabase(Config{DBType: dbType}); err == nil {
-				t.Fatalf("unsupported database type %q did not fail", dbType)
-			}
+		if _, err := NewDatabase(Config{DBType: "unsupported"}); err == nil {
+			t.Fatal("unsupported database type did not fail")
 		}
 	})
 

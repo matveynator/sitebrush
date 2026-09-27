@@ -27,7 +27,7 @@ func TestDatabaseCoverageBoundaryBranches(t *testing.T) {
 	if got := newPlaceholderGenerator("sqlite")(); got != "?" {
 		t.Fatalf("SQLite placeholder = %q", got)
 	}
-	if len(desiredIndexesPortable("clickhouse")) != 0 || len(desiredIndexesPortable("sqlite")) == 0 {
+	if len(desiredIndexesPortable("sqlite")) == 0 {
 		t.Fatal("portable index selection failed")
 	}
 

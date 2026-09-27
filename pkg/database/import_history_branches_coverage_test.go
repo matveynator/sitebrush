@@ -19,28 +19,6 @@ func TestImportHistoryServerDriverBranches(t *testing.T) {
 		}
 	})
 
-	t.Run("clickhouse insert and existing", func(t *testing.T) {
-		db, _ := newSQLiteConcurrencyTestDatabase(t)
-		if err := db.EnsureImportHistory(ctx, "click", "id-1", "track", "", "message", "clickhouse"); err != nil {
-			t.Fatalf("insert clickhouse-style import history: %v", err)
-		}
-		if err := db.EnsureImportHistory(ctx, "click", "id-1", "other", "failed", "other", "clickhouse"); err != nil {
-			t.Fatalf("repeat clickhouse-style import history: %v", err)
-		}
-		var count int
-		if err := db.withSerializedConnectionFor(ctx, WorkloadWebRead, func(runCtx context.Context, conn *sql.DB) error {
-			return conn.QueryRowContext(runCtx,
-				"SELECT COUNT(*) FROM import_history WHERE source = ? AND source_id = ?",
-				"click",
-				"id-1",
-			).Scan(&count)
-		}); err != nil {
-			t.Fatalf("count clickhouse-style import history: %v", err)
-		}
-		if count != 1 {
-			t.Fatalf("clickhouse-style import count = %d, want 1", count)
-		}
-	})
 }
 
 func TestImportHistoryQueryErrors(t *testing.T) {

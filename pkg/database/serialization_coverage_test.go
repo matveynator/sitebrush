@@ -90,13 +90,6 @@ func TestInsertRealtimeMeasurementDriverBranches(t *testing.T) {
 	if err := db.InsertRealtimeMeasurement(measurement, "sqlite"); err != nil {
 		t.Fatalf("sqlite duplicate insert: %v", err)
 	}
-	measurement.DeviceID = "device-clickhouse"
-	if err := db.InsertRealtimeMeasurement(measurement, "clickhouse"); err != nil {
-		t.Fatalf("clickhouse insert path on compatible SQLite fixture: %v", err)
-	}
-	if err := db.InsertRealtimeMeasurement(measurement, "clickhouse"); err != nil {
-		t.Fatalf("clickhouse duplicate path: %v", err)
-	}
 	if err := db.InsertRealtimeMeasurement(measurement, "pgx"); err == nil {
 		t.Fatal("PostgreSQL-only SQL unexpectedly succeeded on SQLite")
 	}

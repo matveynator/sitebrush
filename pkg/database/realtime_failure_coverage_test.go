@@ -49,12 +49,6 @@ func (c *realtimeFailureConn) ExecContext(_ context.Context, query string, _ []d
 }
 
 func (c *realtimeFailureConn) QueryContext(_ context.Context, query string, _ []driver.NamedValue) (driver.Rows, error) {
-	if c.mode == "clickhouse-query-error" && strings.Contains(query, "realtime_measurements") {
-		return nil, errors.New("clickhouse lookup failure")
-	}
-	if c.mode == "clickhouse-existing" && strings.Contains(query, "realtime_measurements") {
-		return &realtimeFailureRows{values: [][]driver.Value{{int64(1)}}}, nil
-	}
 	return &realtimeFailureRows{}, nil
 }
 
@@ -160,18 +154,4 @@ func TestInsertRealtimeMeasurementOtherFailureBranches(t *testing.T) {
 		}
 	})
 
-	t.Run("clickhouse existing", func(t *testing.T) {
-		db := newRealtimeFailureDatabase(t, "clickhouse-existing", "clickhouse")
-		if err := db.InsertRealtimeMeasurement(realtimeFailureMeasurement(), "clickhouse"); err != nil {
-			t.Fatalf("existing clickhouse realtime should be skipped: %v", err)
-		}
-	})
-
-	t.Run("clickhouse lookup error", func(t *testing.T) {
-		db := newRealtimeFailureDatabase(t, "clickhouse-query-error", "clickhouse")
-		err := db.InsertRealtimeMeasurement(realtimeFailureMeasurement(), "clickhouse")
-		if err == nil || !strings.Contains(err.Error(), "clickhouse lookup failure") {
-			t.Fatalf("clickhouse lookup error = %v", err)
-		}
-	})
 }

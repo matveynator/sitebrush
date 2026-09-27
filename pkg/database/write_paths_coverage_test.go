@@ -234,27 +234,6 @@ END;`); err != nil {
 		}
 	})
 
-	t.Run("clickhouse duplicate", func(t *testing.T) {
-		db, _ := newSQLiteConcurrencyTestDatabase(t)
-		measurement := RealtimeMeasurement{
-			DeviceID: "clickhouse-duplicate", Value: 2, Unit: "cpm", Lat: 1, Lon: 1,
-			MeasuredAt: 10, FetchedAt: 10,
-		}
-		if err := db.InsertRealtimeMeasurement(measurement, "clickhouse"); err != nil {
-			t.Fatalf("first clickhouse-style realtime insert: %v", err)
-		}
-		if err := db.InsertRealtimeMeasurement(measurement, "clickhouse"); err != nil {
-			t.Fatalf("duplicate clickhouse-style realtime insert: %v", err)
-		}
-
-		var count int
-		if err := db.DB.QueryRow("SELECT COUNT(*) FROM realtime_measurements WHERE device_id = ?", measurement.DeviceID).Scan(&count); err != nil {
-			t.Fatalf("count clickhouse-style realtime rows: %v", err)
-		}
-		if count != 1 {
-			t.Fatalf("clickhouse duplicate row count = %d, want 1", count)
-		}
-	})
 }
 
 func TestInsertMarkersBulkSQLiteBranches(t *testing.T) {

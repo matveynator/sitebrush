@@ -30,15 +30,13 @@ Rewrite the offending code to submit the database operation to the serialized wo
 
 func TestSingleWriterPackagesDoNotBypassSerializedPipeline(t *testing.T) {
 	allowedFunctions := map[string]bool{
-		"InitSchema":                        true,
-		"ensureMarkerMetadataColumns":       true,
-		"ensureRealtimeMetadataColumns":     true,
-		"ensureAnalyticsMetadataColumns":    true,
+		"InitSchema":                         true,
+		"ensureMarkerMetadataColumns":        true,
+		"ensureRealtimeMetadataColumns":      true,
+		"ensureAnalyticsMetadataColumns":     true,
 		"ensureAnalyticsSessionColumns":      true,
 		"loadColumnPresence":                 true,
 		"InsertMarkersBulk":                  true,
-		"markerExistsClickHouse":             true,
-		"realtimeExistsClickHouse":           true,
 		"insertMarkersPostgreSQLCopy":        true,
 		"insertMarkersPostgreSQLCopyBatched": true,
 	}

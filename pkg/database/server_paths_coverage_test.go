@@ -54,21 +54,4 @@ func TestUserServerDriverBranches(t *testing.T) {
 		}
 	})
 
-	t.Run("clickhouse ensure user", func(t *testing.T) {
-		db := newSchemaCoverageDB(t, "clickhouse")
-		id, err := db.EnsureUserBySource(context.Background(), "provider", "external-clickhouse", "Bob", "clickhouse")
-		if err != nil {
-			t.Fatalf("clickhouse ensure user: %v", err)
-		}
-		if id == "" {
-			t.Fatal("clickhouse ensure user returned empty id")
-		}
-
-		if err := db.UpdateUserNameIfEmpty(context.Background(), id, "ignored", "clickhouse"); err != nil {
-			t.Fatalf("clickhouse name update: %v", err)
-		}
-		if err := db.EnsureTrackUser(context.Background(), "track-clickhouse", id, "import", "clickhouse"); err != nil {
-			t.Fatalf("clickhouse ensure track user: %v", err)
-		}
-	})
 }
