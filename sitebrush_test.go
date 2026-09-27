@@ -16310,6 +16310,8 @@ func TestAuthAttackConcurrentPasswordChangeConfirmationAppliesOnce(t *testing.T)
 
 func TestAuthAttackConcurrentPasswordRecoveryAppliesOnce(t *testing.T) {
 	application, database := newTestApplication(t)
+	// The production site DB serializes writes through its dedicated worker.
+	database.SetMaxOpenConns(1)
 	now := time.Now().UTC()
 	const domain, email = "localhost", "owner@example.com"
 	if _, err := database.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, domain, email, "old-password"); err != nil {
