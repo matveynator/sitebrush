@@ -4816,7 +4816,7 @@ func TestRegisterRejectsUnverifiedDomainBeforeCreatingSiteDatabase(t *testing.T)
 
 func TestRegisterCreatesSiteDatabaseOnlyAfterConfirmedVerifiedDomain(t *testing.T) {
 	t.Setenv("SITEBRUSH_SERVICE_MAIL_MODE", "local")
-	const domain = "verified.example"
+	const domain = "a.sitebrush.com"
 	withRegistrationDNS(t, domain, true)
 	storagePath := t.TempDir()
 	dbPath := filepath.Join(storagePath, defaultDBPath)
@@ -4839,10 +4839,24 @@ func TestRegisterCreatesSiteDatabaseOnlyAfterConfirmedVerifiedDomain(t *testing.
 		grabTracker:               newGrabProgressTracker(),
 		registrationConfirmations: startEmailConfirmationMemoryWorker(context.Background()),
 		emailDelivery:             make(chan mailout.DeliveryJob, 1),
+		automaticSSL:              make(chan automaticSSLRequest, 2),
 	}
 	application.hostingSnapshotReports = make(chan struct{}, 1)
+	domainContext := contextWithDomain(context.Background(), domain)
+	if _, err := application.adminStealthEnabled(domainContext, domain, ""); !errors.Is(err, errSiteDatabaseMissing) {
+		t.Fatalf("stealth lookup error = %v, want missing site database", err)
+	}
+	loginRequest := httptest.NewRequest(http.MethodGet, "https://"+domain+"/?login", nil)
+	loginResponse := httptest.NewRecorder()
+	application.route(loginResponse, loginRequest)
+	if loginResponse.Code != http.StatusServiceUnavailable {
+		t.Fatalf("login with missing site database status = %d, want %d; body=%q", loginResponse.Code, http.StatusServiceUnavailable, loginResponse.Body.String())
+	}
+	if strings.Contains(loginResponse.Header().Get("Location"), "register") {
+		t.Fatalf("login with missing site database redirected to registration: %q", loginResponse.Header().Get("Location"))
+	}
 	form := url.Values{}
-	form.Set("email", "admin@verified.example")
+	form.Set("email", "admin@a.sitebrush.com")
 	form.Set("password", "secret")
 	request := httptest.NewRequest(http.MethodPost, "https://"+domain+"/?register", strings.NewReader(form.Encode()))
 	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
@@ -4864,6 +4878,24 @@ func TestRegisterCreatesSiteDatabaseOnlyAfterConfirmedVerifiedDomain(t *testing.
 		t.Fatalf("site database before confirmation stat err = %v, want not exist", err)
 	}
 
+	confirmationPageRequest := httptest.NewRequest(http.MethodGet, "https://"+domain+"/?email_confirm="+url.QueryEscape(pendingToken), nil)
+	confirmationPageResponse := httptest.NewRecorder()
+	application.route(confirmationPageResponse, confirmationPageRequest)
+	if confirmationPageResponse.Code != http.StatusOK {
+		t.Fatalf("confirmation page status = %d, body=%q", confirmationPageResponse.Code, confirmationPageResponse.Body.String())
+	}
+	select {
+	case sslRequest := <-application.automaticSSL:
+		if sslRequest.action != "registration_confirmed" || sslRequest.domain != domain {
+			t.Fatalf("automatic SSL request = %+v, want confirmed registration for %s", sslRequest, domain)
+		}
+	default:
+		t.Fatal("email confirmation did not start automatic SSL before account setup continued")
+	}
+	if _, err := os.Stat(siteDatabasePath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("confirmation page created site database before account setup: %v", err)
+	}
+
 	confirmRequest := httptest.NewRequest(http.MethodPost, "https://"+domain+"/?email_confirm="+url.QueryEscape(pendingToken), strings.NewReader("password=secret&password_confirm=secret"))
 	confirmRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	confirmResponse := httptest.NewRecorder()
@@ -4875,7 +4907,7 @@ func TestRegisterCreatesSiteDatabaseOnlyAfterConfirmedVerifiedDomain(t *testing.
 		t.Fatalf("site database after confirmation stat err = %v", err)
 	}
 	var userCount int
-	if err := router.QueryRowContext(contextWithDomain(context.Background(), domain), `SELECT COUNT(1) FROM users WHERE domain=? AND email=? AND is_admin=1`, domain, "admin@verified.example").Scan(&userCount); err != nil {
+	if err := router.QueryRowContext(contextWithDomain(context.Background(), domain), `SELECT COUNT(1) FROM users WHERE domain=? AND email=? AND is_admin=1`, domain, "admin@a.sitebrush.com").Scan(&userCount); err != nil {
 		t.Fatalf("read confirmed admin: %v", err)
 	}
 	if userCount != 1 {
