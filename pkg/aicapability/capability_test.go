@@ -50,9 +50,12 @@ func TestCapabilityIsScopedAndRevocable(t *testing.T) {
 }
 
 func TestManifestJSONIsMachineReadable(t *testing.T) {
-	manifest, err := ManifestJSON(Manifest{Protocol: "sitebrush-ai-editor/v1", Domain: "example.org", Operations: []string{"list_pages", "publish"}})
+	manifest, err := ManifestJSON(Manifest{Protocol: "sitebrush-ai-editor/v1", Domain: "example.org", DocumentationURL: "https://example.org/ai-docs?ai_token=secret", Operations: []string{"list_pages", "publish"}})
 	if err != nil || len(manifest) == 0 {
 		t.Fatalf("manifest=%q err=%v", manifest, err)
+	}
+	if !strings.Contains(string(manifest), "\"documentation_url\"") || !strings.Contains(string(manifest), "ai_token") {
+		t.Fatalf("documentation URL missing from manifest: %s", manifest)
 	}
 }
 
@@ -62,7 +65,7 @@ func TestManifestResponseSupportsPlainTextAndNoStore(t *testing.T) {
 	request.Header.Set("Accept", "text/plain")
 	response := httptest.NewRecorder()
 	ManifestResponse(response, request, manifest)
-	if response.Header().Get("Cache-Control") != "no-store" || response.Body.String() != manifest.Instructions {
+	if response.Header().Get("Cache-Control") != "no-store" || response.Header().Get("Referrer-Policy") != "no-referrer" || response.Body.String() != manifest.Instructions {
 		t.Fatalf("headers=%v body=%q", response.Header(), response.Body.String())
 	}
 	jsonRequest := httptest.NewRequest("GET", "https://example.org", nil)
