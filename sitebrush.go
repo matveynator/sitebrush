@@ -9521,6 +9521,10 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 		a.awaitAccountHTTPS(w, r)
 		return
 	}
+	if strings.TrimSpace(r.URL.Query().Get("delete")) != "" {
+		a.deleteRevisionByQuery(w, r)
+		return
+	}
 	if r.Method != http.MethodGet && r.Method != http.MethodHead && r.Method != http.MethodOptions &&
 		hasSitebrushSessionCookie(r) && !httpsecurity.SameOriginMutationAllowed(r) {
 		http.Error(w, "forbidden", http.StatusForbidden)
@@ -9628,10 +9632,6 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 	}
 	if hasQueryFlag(r, "revision_delete") {
 		a.deleteRevision(w, r)
-		return
-	}
-	if strings.TrimSpace(r.URL.Query().Get("delete")) != "" {
-		a.deleteRevisionByQuery(w, r)
 		return
 	}
 	if hasQueryFlag(r, "revision_toggle") {
@@ -21095,9 +21095,22 @@ func (a *App) deleteRevision(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) deleteRevisionByQuery(w http.ResponseWriter, r *http.Request) {
-	if !a.isAdminRequest(r) || r.Method != http.MethodPost {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !a.isAdminRequest(r) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
+	}
+	if !httpsecurity.SameOriginMutationAllowed(r) {
+		r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
+		providedCSRF := strings.TrimSpace(r.FormValue("account_csrf"))
+		expectedCSRF := accountCSRF(r)
+		if providedCSRF == "" || expectedCSRF == "" || subtle.ConstantTimeCompare([]byte(providedCSRF), []byte(expectedCSRF)) != 1 {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
 	}
 	revisionID, _ := strconv.Atoi(strings.TrimSpace(r.URL.Query().Get("delete")))
 	if revisionID <= 0 {
@@ -31168,7 +31181,7 @@ func (a *App) injectContextMenuForRequest(r *http.Request, domain, pagePath, htm
 	if isAdmin && strings.TrimSpace(adminEmail) != "" {
 		isServerManager = a.isServerManagerEmail(r.Context(), domain, adminEmail)
 	}
-	menuScript := buildContextMenuScript(isAdmin, isServerManager, domainFrozen, pagePasswordProtected, showLogout, pagePath, domain, revisionID, revisionCount, storageUsageLabel, translationsForRequest(r))
+	menuScript := buildContextMenuScript(isAdmin, isServerManager, domainFrozen, pagePasswordProtected, showLogout, pagePath, domain, revisionID, revisionCount, storageUsageLabel, accountCSRF(r), translationsForRequest(r))
 	return injectMenuScriptIntoHTML(html, menuScript)
 }
 
@@ -31311,12 +31324,13 @@ func siteCopyMenuTexts(translations map[string]string) map[string]string {
 	}
 }
 
-func buildContextMenuScript(isAdmin bool, isServerManager bool, isFrozen bool, pagePasswordProtected bool, showLogout bool, pagePath, domain string, revisionID int, revisionCount int, storageUsageLabel string, translations map[string]string) string {
+func buildContextMenuScript(isAdmin bool, isServerManager bool, isFrozen bool, pagePasswordProtected bool, showLogout bool, pagePath, domain string, revisionID int, revisionCount int, storageUsageLabel, mutationCSRFToken string, translations map[string]string) string {
 	if !isAdmin {
 		return buildGuestContextMenuScript(pagePath, domain, translations)
 	}
 	escapedPath := template.JSEscapeString(pagePath)
 	escapedDomain := template.JSEscapeString(domain)
+	escapedMutationCSRFToken := template.JSEscapeString(mutationCSRFToken)
 	confirmFreezePrompt := template.JSEscapeString(translationOrDefault(translations, "confirm_freeze_prompt", "Freeze domain now?"))
 	confirmPublishPrompt := template.JSEscapeString(translationOrDefault(translations, "confirm_publish_prompt", "Publish website changes now?"))
 	confirmDeletePrompt := template.JSEscapeString(translationOrDefault(translations, "confirm_delete_revision_prompt", "Delete this revision?"))
@@ -31401,6 +31415,7 @@ func buildContextMenuScript(isAdmin bool, isServerManager bool, isFrozen bool, p
   const currentPagePath = "` + escapedPath + `";
   const currentDomainName = "` + escapedDomain + `";
   const isDomainFrozen = ` + strconv.FormatBool(isFrozen) + `;
+  const mutationCSRFToken = "` + escapedMutationCSRFToken + `";
   const siteCopyConfig = ` + siteCopyMenuConfigJSON(pagePath, translations) + `;
   const actionConfigByName = {
     delete: { path: "?delete=` + strconv.Itoa(revisionID) + `", message: "` + confirmDeletePrompt + `", icon: "delete" },
@@ -31835,6 +31850,13 @@ func buildContextMenuScript(isAdmin bool, isServerManager bool, isFrozen bool, p
       actionFormElement.setAttribute("data-sitebrush-owned", "true");
       actionFormElement.method = "POST";
       actionFormElement.action = selectedActionConfig.path;
+      if (actionName === "delete" && mutationCSRFToken !== "") {
+        const csrfInputElement = document.createElement("input");
+        csrfInputElement.type = "hidden";
+        csrfInputElement.name = "account_csrf";
+        csrfInputElement.value = mutationCSRFToken;
+        actionFormElement.appendChild(csrfInputElement);
+      }
       if (publishToken !== "") {
         const tokenInputElement = document.createElement("input");
         tokenInputElement.type = "hidden";
@@ -39090,7 +39112,7 @@ func (a *App) servePublishedStaticFileForAdmin(w http.ResponseWriter, r *http.Re
 	isServerManager := a.isServerManagerEmail(r.Context(), domain, adminEmail)
 	storageUsage := a.storedDomainStorageUsage(r.Context(), domain)
 	storageUsageLabel := formatFileSize(storageUsage.totalBytes()) + " / " + formatFileSize(storageUsage.LimitBytes)
-	menuScript := buildContextMenuScript(true, isServerManager, false, pagePasswordProtected, !a.isDemoSiteDomain(r.Context(), domain), pagePath, domain, revisionID, revisionCount, storageUsageLabel, translationsForRequest(r))
+	menuScript := buildContextMenuScript(true, isServerManager, false, pagePasswordProtected, !a.isDemoSiteDomain(r.Context(), domain), pagePath, domain, revisionID, revisionCount, storageUsageLabel, accountCSRF(r), translationsForRequest(r))
 	a.logContentDelivery(w, "static-file")
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_, _ = w.Write([]byte(injectMenuScriptIntoHTML(string(staticContent), menuScript)))

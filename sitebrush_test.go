@@ -4368,14 +4368,14 @@ func TestServerManagerEmailTreatsLoopbackAsLocalhost(t *testing.T) {
 	if application.isServerManagerEmail(context.Background(), "example.com", "other@example.com") {
 		t.Fatal("non-owner admin was accepted for effective localhost")
 	}
-	menuScript := buildContextMenuScript(true, true, false, false, true, "/", "example.com", 0, 0, "", translationsForLanguageCode("ru"))
+	menuScript := buildContextMenuScript(true, true, false, false, true, "/", "example.com", 0, 0, "", "", translationsForLanguageCode("ru"))
 	if !strings.Contains(menuScript, "?expenses") {
 		t.Fatal("server manager menu does not contain expenses link")
 	}
 	if !strings.Contains(menuScript, "Сервер и расходы") {
 		t.Fatal("regular server menu does not use the singular expenses title")
 	}
-	centralMenuScript := buildContextMenuScript(true, true, false, false, true, "/", "sitebrush.com", 0, 0, "", translationsForLanguageCode("ru"))
+	centralMenuScript := buildContextMenuScript(true, true, false, false, true, "/", "sitebrush.com", 0, 0, "", "", translationsForLanguageCode("ru"))
 	if !strings.Contains(centralMenuScript, "Серверы и расходы") {
 		t.Fatal("sitebrush.com menu does not use the plural expenses title")
 	}
@@ -11082,6 +11082,15 @@ func TestPublicTrialFormUsesUnifiedCopyDialog(t *testing.T) {
 	}
 }
 
+func TestContextMenuDeleteCarriesSessionCSRF(t *testing.T) {
+	script := buildContextMenuScript(true, false, false, false, true, "/", "example.com", 7, 1, "", "csrf-marker", translationsForLanguageCode("en"))
+	for _, fragment := range []string{"?delete=7", "account_csrf", "csrf-marker", `actionFormElement.method = "POST"`} {
+		if !strings.Contains(script, fragment) {
+			t.Fatalf("delete menu is missing %q", fragment)
+		}
+	}
+}
+
 func TestCopySiteDialogKeepsWholeSiteCheckboxInteractive(t *testing.T) {
 	scriptBytes, readErr := embeddedWebFiles.ReadFile("web/static/site_copy.js")
 	if readErr != nil {
@@ -11100,7 +11109,7 @@ func TestCopySiteDialogKeepsWholeSiteCheckboxInteractive(t *testing.T) {
 		}
 	}
 
-	menuScript := buildContextMenuScript(true, false, false, false, true, "/", "example.com", 0, 0, "", translationsForLanguageCode("en"))
+	menuScript := buildContextMenuScript(true, false, false, false, true, "/", "example.com", 0, 0, "", "", translationsForLanguageCode("en"))
 	if strings.Contains(menuScript, `"copyWholeSite":true`) {
 		t.Fatal("right-menu copy dialog unexpectedly enables whole-site copying by default")
 	}
@@ -17405,6 +17414,86 @@ func TestSecurityBoundaryAuthenticatedMutationsRejectHostileOrigin(t *testing.T)
 				t.Fatalf("SECURITY: hostile-origin mutation %s status=%d body=%q", requestPath, response.Code, response.Body.String())
 			}
 		})
+	}
+}
+
+func TestDeleteRevisionAllowsSessionCSRFWhenBrowserOriginIsOpaque(t *testing.T) {
+	application, rawDB := newTestApplication(t)
+	if _, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "admin@example.com", "password"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := rawDB.Exec(`INSERT INTO pages(domain,path,title,html,published) VALUES(?,?,?,?,1)`, "localhost", "/", "Home", "<p>current</p>"); err != nil {
+		t.Fatal(err)
+	}
+	result, err := rawDB.Exec(`INSERT INTO revisions(domain,page_path,html,created_at,is_active) VALUES(?,?,?,?,1)`, "localhost", "/", "<p>revision</p>", time.Now().UTC().Format(time.RFC3339))
+	if err != nil {
+		t.Fatal(err)
+	}
+	revisionID, err := result.LastInsertId()
+	if err != nil {
+		t.Fatal(err)
+	}
+	adminCookie := newAdminSessionCookie(t, application, "admin@example.com")
+	csrfRequest := httptest.NewRequest(http.MethodGet, "http://localhost:8080/", nil)
+	csrfRequest.AddCookie(adminCookie)
+	csrfToken := accountCSRF(csrfRequest)
+
+	form := url.Values{"account_csrf": {csrfToken}}
+	request := httptest.NewRequest(http.MethodPost, fmt.Sprintf("http://localhost:8080/?delete=%d", revisionID), strings.NewReader(form.Encode()))
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	request.Header.Set("Origin", "null")
+	request.AddCookie(adminCookie)
+	response := httptest.NewRecorder()
+	application.route(response, request)
+
+	if response.Code != http.StatusFound {
+		t.Fatalf("opaque-origin delete status=%d body=%q", response.Code, response.Body.String())
+	}
+	var active int
+	if err := rawDB.QueryRow(`SELECT is_active FROM revisions WHERE id=?`, revisionID).Scan(&active); err != nil {
+		t.Fatal(err)
+	}
+	if active != 0 {
+		t.Fatalf("revision remained active after authenticated delete: %d", active)
+	}
+}
+
+func TestDeleteRevisionRejectsCrossOriginWithoutSessionCSRFAndGET(t *testing.T) {
+	application, rawDB := newTestApplication(t)
+	if _, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "admin@example.com", "password"); err != nil {
+		t.Fatal(err)
+	}
+	result, err := rawDB.Exec(`INSERT INTO revisions(domain,page_path,html,created_at,is_active) VALUES(?,?,?,?,1)`, "localhost", "/", "<p>revision</p>", time.Now().UTC().Format(time.RFC3339))
+	if err != nil {
+		t.Fatal(err)
+	}
+	revisionID, _ := result.LastInsertId()
+	adminCookie := newAdminSessionCookie(t, application, "admin@example.com")
+
+	crossOrigin := httptest.NewRequest(http.MethodPost, fmt.Sprintf("http://localhost:8080/?delete=%d", revisionID), strings.NewReader(""))
+	crossOrigin.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	crossOrigin.Header.Set("Origin", "https://attacker.example")
+	crossOrigin.AddCookie(adminCookie)
+	crossOriginResponse := httptest.NewRecorder()
+	application.route(crossOriginResponse, crossOrigin)
+	if crossOriginResponse.Code != http.StatusForbidden {
+		t.Fatalf("cross-origin delete without CSRF status=%d", crossOriginResponse.Code)
+	}
+
+	getRequest := httptest.NewRequest(http.MethodGet, fmt.Sprintf("http://localhost:8080/?delete=%d", revisionID), nil)
+	getRequest.AddCookie(adminCookie)
+	getResponse := httptest.NewRecorder()
+	application.route(getResponse, getRequest)
+	if getResponse.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("GET delete status=%d body=%q", getResponse.Code, getResponse.Body.String())
+	}
+
+	var active int
+	if err := rawDB.QueryRow(`SELECT is_active FROM revisions WHERE id=?`, revisionID).Scan(&active); err != nil {
+		t.Fatal(err)
+	}
+	if active != 1 {
+		t.Fatal("rejected delete mutated the revision")
 	}
 }
 
