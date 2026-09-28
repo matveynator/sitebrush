@@ -245,12 +245,17 @@ function updateProviderUI() {
   providerKeyLink.href = help.url;
   providerKeyHelp.textContent = help.text;
   const saved = credentialStatus[provider];
-  if (saved && saved.saved) {
-    providerKeyStatus.textContent = '✓ Token проверен и сохранён';
+  if (saved && saved.saved && saved.unlocked) {
+    providerKeyStatus.textContent = '✓ Token проверен, сохранён и доступен в этом браузере';
     deleteProviderTokenButton.hidden = false;
     apiKeyElement.value = '';
     apiKeyElement.placeholder = 'Token уже сохранён — вставьте новый только для замены';
     loadModelsForSavedProvider(provider);
+  } else if (saved && saved.saved) {
+    providerKeyStatus.textContent = 'Token зашифрован в вашей БД, но этот браузер не имеет ключа. Вставьте token ещё раз.';
+    deleteProviderTokenButton.hidden = false;
+    apiKeyElement.placeholder = 'Повторно вставьте API token для этого браузера';
+    modelBlock.hidden = true;
   } else {
     providerKeyStatus.textContent = 'Token не сохранён';
     deleteProviderTokenButton.hidden = true;
@@ -297,6 +302,7 @@ async function saveProviderToken() {
     credentialStatus[providerElement.value] = {
       provider:providerElement.value,
       saved:true,
+      unlocked:true,
       model:payload.model || '',
       updated_at:new Date().toISOString()
     };
@@ -356,7 +362,7 @@ async function executeTask() {
     commandElement.focus();
     return;
   }
-  if (!saved || !saved.saved) {
+  if (!saved || !saved.saved || !saved.unlocked) {
     setStatus('Сначала проверьте и сохраните API token.');
     providerSettings.open = true;
     apiKeyElement.focus();

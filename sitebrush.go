@@ -129,7 +129,7 @@ const sitebrushHTTPWriteTimeout = 0
 const sitebrushHTTPIdleTimeout = 65 * time.Second
 const sitebrushHTTPReadHeaderTimeout = 5 * time.Second
 const sitebrushHTTP10KeepAliveBufferLimit = 1024 * 1024
-const currentSiteDatabaseSchemaVersion = 10
+const currentSiteDatabaseSchemaVersion = 11
 const siteDatabaseStartupMigrationTimeout = 30 * time.Second
 const pagePasswordSessionTTL = time.Hour
 const serviceMailRelayPath = "/?service_mail_relay"
@@ -8773,6 +8773,7 @@ func (a *App) finishAutoCertIssuance(domain string) {
 }
 
 func (a *App) migrate(ctx context.Context) error {
+	a.removeLegacyAIProviderMasterKeyFile()
 	const legacyDomain = "localhost"
 	schemaVersion, versionErr := sqliteUserVersion(ctx, a.db)
 	if versionErr != nil {
@@ -8810,7 +8811,7 @@ func (a *App) migrate(ctx context.Context) error {
 		`CREATE TABLE IF NOT EXISTS page_password_sessions(token TEXT PRIMARY KEY,domain TEXT,path TEXT,created_at TEXT);`,
 		`CREATE TABLE IF NOT EXISTS domain_chroot_locations(domain TEXT,url_path TEXT,directory_path TEXT,updated_at TEXT,PRIMARY KEY(domain,url_path));`,
 		`CREATE TABLE IF NOT EXISTS domain_backup_tokens(domain TEXT PRIMARY KEY,token TEXT,updated_at TEXT);`,
-		`CREATE TABLE IF NOT EXISTS ai_provider_credentials(domain TEXT,provider TEXT,encrypted_api_key TEXT,model TEXT,updated_at TEXT,PRIMARY KEY(domain,provider));`,
+		`CREATE TABLE IF NOT EXISTS ai_provider_user_credentials(domain TEXT,email TEXT,provider TEXT,encrypted_api_key TEXT,model TEXT,updated_at TEXT,PRIMARY KEY(domain,email,provider));`,
 		`CREATE TABLE IF NOT EXISTS admin_stealth_modes(domain TEXT,email TEXT,enabled_at INTEGER NOT NULL,PRIMARY KEY(domain,email));`,
 		`CREATE TABLE IF NOT EXISTS file_access_rules(domain TEXT,file_name TEXT,access_mode TEXT,token TEXT,expires_at TEXT,single_use_left INTEGER DEFAULT 0,token_use_count INTEGER DEFAULT 0,PRIMARY KEY(domain,file_name));`,
 		`CREATE TABLE IF NOT EXISTS file_metadata(domain TEXT,file_name TEXT,page_path TEXT,size INTEGER,mime_type TEXT,created_at TEXT,updated_at TEXT,source TEXT,download_count INTEGER DEFAULT 0,PRIMARY KEY(domain,file_name));`,
@@ -8832,6 +8833,9 @@ func (a *App) migrate(ctx context.Context) error {
 	}
 	if err := a.ensureSiteDatabaseSchemaColumns(ctx); err != nil {
 		return err
+	}
+	if _, err := a.db.ExecContext(ctx, `DROP TABLE IF EXISTS ai_provider_credentials`); err != nil {
+		return siteMigrationStepError{step: "remove legacy AI provider credential storage", err: err}
 	}
 	// Existing installations had IP protection enabled implicitly; make it opt-in once.
 	var optionalIPPolicyMigration int
@@ -8971,11 +8975,17 @@ func requiredSiteDatabaseColumns() []siteDatabaseColumnRequirement {
 		{tableName: "domain_storage_usage", columnName: "updated_at", definition: "TEXT"},
 		{tableName: "domain_backup_tokens", columnName: "token", definition: "TEXT"},
 		{tableName: "domain_backup_tokens", columnName: "updated_at", definition: "TEXT"},
-		{tableName: "ai_provider_credentials", columnName: "domain", definition: "TEXT"},
-		{tableName: "ai_provider_credentials", columnName: "provider", definition: "TEXT"},
-		{tableName: "ai_provider_credentials", columnName: "encrypted_api_key", definition: "TEXT"},
-		{tableName: "ai_provider_credentials", columnName: "model", definition: "TEXT"},
-		{tableName: "ai_provider_credentials", columnName: "updated_at", definition: "TEXT"},
+		{tableName: "ai_provider_user_credentials", columnName: "domain", definition: "TEXT"},
+		{tableName: "ai_provider_user_credentials", columnName: "email", definition: "TEXT"},
+		{tableName: "ai_provider_user_credentials", columnName: "provider", definition: "TEXT"},
+		{tableName: "ai_provider_user_credentials", columnName: "encrypted_api_key", definition: "TEXT"},
+		{tableName: "ai_provider_user_credentials", columnName: "model", definition: "TEXT"},
+		{tableName: "ai_provider_user_credentials", columnName: "updated_at", definition: "TEXT"},
+		
+		
+		
+		
+		
 		{tableName: "email_confirmations", columnName: "token", definition: "TEXT"},
 		{tableName: "email_confirmations", columnName: "domain", definition: "TEXT"},
 		{tableName: "email_confirmations", columnName: "action", definition: "TEXT"},
@@ -9056,8 +9066,8 @@ SELECT 'localhost',page_bytes,published_page_bytes,revision_bytes,file_bytes,pub
 SELECT import_id,'localhost',page_path,source_url,auto_templates,state,created_at,updated_at FROM whole_site_imports WHERE domain IN `+placeholders, sqlArguments...)
 	_, _ = a.db.ExecContext(ctx, `INSERT OR IGNORE INTO whole_site_import_pages(import_id,domain,page_key,page_url,local_path,link_offset,storage_bytes,state,created_at)
 SELECT import_id,'localhost',page_key,page_url,local_path,link_offset,storage_bytes,state,created_at FROM whole_site_import_pages WHERE domain IN `+placeholders, sqlArguments...)
-	_, _ = a.db.ExecContext(ctx, `INSERT OR IGNORE INTO ai_provider_credentials(domain,provider,encrypted_api_key,model,updated_at)
-SELECT 'localhost',provider,encrypted_api_key,model,updated_at FROM ai_provider_credentials WHERE domain IN `+placeholders, sqlArguments...)
+	_, _ = a.db.ExecContext(ctx, `INSERT OR IGNORE INTO ai_provider_user_credentials(domain,email,provider,encrypted_api_key,model,updated_at)
+SELECT 'localhost',email,provider,encrypted_api_key,model,updated_at FROM ai_provider_user_credentials WHERE domain IN `+placeholders, sqlArguments...)
 	domainStatesMergeQuery := `INSERT OR IGNORE INTO domain_states(domain,is_frozen)
 SELECT 'localhost',is_frozen FROM domain_states WHERE domain IN ` + placeholders
 	_, _ = a.db.ExecContext(ctx, domainStatesMergeQuery, sqlArguments...)
@@ -9082,7 +9092,7 @@ SELECT token,'localhost',path,created_at FROM page_password_sessions WHERE domai
 	_, _ = a.db.ExecContext(ctx, `DELETE FROM file_access_rules WHERE domain IN `+placeholders, sqlArguments...)
 	_, _ = a.db.ExecContext(ctx, `DELETE FROM file_metadata WHERE domain IN `+placeholders, sqlArguments...)
 	_, _ = a.db.ExecContext(ctx, `DELETE FROM domain_storage_usage WHERE domain IN `+placeholders, sqlArguments...)
-	_, _ = a.db.ExecContext(ctx, `DELETE FROM ai_provider_credentials WHERE domain IN `+placeholders, sqlArguments...)
+	_, _ = a.db.ExecContext(ctx, `DELETE FROM ai_provider_user_credentials WHERE domain IN `+placeholders, sqlArguments...)
 	_, _ = a.db.ExecContext(ctx, `DELETE FROM whole_site_import_pages WHERE domain IN `+placeholders, sqlArguments...)
 	_, _ = a.db.ExecContext(ctx, `DELETE FROM whole_site_imports WHERE domain IN `+placeholders, sqlArguments...)
 	_, _ = a.db.ExecContext(ctx, `DELETE FROM domain_states WHERE domain IN `+placeholders, sqlArguments...)
@@ -10124,6 +10134,9 @@ func (a *App) executeAITask(request aieditor.Request, r *http.Request) (aieditor
 	}
 }
 
+const aiProviderVaultCookieName = "sitebrush_ai_vault"
+const aiProviderVaultCookieTTL = 365 * 24 * time.Hour
+
 type aiProviderCredential struct {
 	Provider  string
 	Model     string
@@ -10135,6 +10148,7 @@ type aiProviderCredentialStatus struct {
 	Provider  string `json:"provider"`
 	Model     string `json:"model,omitempty"`
 	Saved     bool   `json:"saved"`
+	Unlocked  bool   `json:"unlocked"`
 	UpdatedAt string `json:"updated_at,omitempty"`
 }
 
@@ -10147,121 +10161,105 @@ func supportedAIProvider(provider string) bool {
 	}
 }
 
-func (a *App) aiProviderMasterKeyPath() string {
-	storagePath := ""
-	if a != nil {
-		storagePath = strings.TrimSpace(a.storagePath)
-	}
+func (a *App) removeLegacyAIProviderMasterKeyFile() {
+	storagePath := strings.TrimSpace(a.storagePath)
 	if storagePath == "" {
 		storagePath = defaultAppStoragePath()
 	}
-	return filepath.Join(storagePath, "secrets", "ai-provider.key")
+	_ = os.Remove(filepath.Join(storagePath, "secrets", "ai-provider.key"))
 }
 
-func (a *App) aiProviderMasterKey() ([]byte, error) {
-	keyPath := a.aiProviderMasterKeyPath()
-	readExistingKey := func() ([]byte, error) {
-		key, err := a.readFileInsideStorage(keyPath)
-		if err != nil {
-			return nil, err
-		}
-		if len(key) != 32 {
-			return nil, errors.New("AI provider master key has invalid length")
-		}
-		if realKeyPath, pathErr := a.existingPathInsideStorage(keyPath); pathErr == nil {
-			_ = os.Chmod(realKeyPath, 0o600)
-		}
-		return key, nil
+func aiProviderVaultKey(r *http.Request) ([]byte, bool) {
+	if r == nil {
+		return nil, false
 	}
-	if key, err := readExistingKey(); err == nil {
-		return key, nil
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return nil, err
+	cookie, err := r.Cookie(aiProviderVaultCookieName)
+	if err != nil || cookie == nil {
+		return nil, false
 	}
-	if err := a.mkdirAllInsideStorage(filepath.Dir(keyPath), 0o700); err != nil {
-		return nil, err
+	key, err := base64.RawURLEncoding.DecodeString(strings.TrimSpace(cookie.Value))
+	if err != nil || len(key) != 32 {
+		return nil, false
+	}
+	return key, true
+}
+
+func ensureAIProviderVaultKey(w http.ResponseWriter, r *http.Request) ([]byte, error) {
+	if key, ok := aiProviderVaultKey(r); ok {
+		return key, nil
 	}
 	key := make([]byte, 32)
 	if _, err := rand.Read(key); err != nil {
 		return nil, err
 	}
-	realKeyPath, err := a.writablePathInsideStorage(keyPath)
-	if err != nil {
-		return nil, err
-	}
-	keyFile, err := os.OpenFile(realKeyPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-	if err != nil {
-		if errors.Is(err, fs.ErrExist) {
-			return readExistingKey()
-		}
-		return nil, err
-	}
-	writeErr := func() error {
-		if _, err := keyFile.Write(key); err != nil {
-			return err
-		}
-		return keyFile.Sync()
-	}()
-	closeErr := keyFile.Close()
-	if writeErr != nil || closeErr != nil {
-		_ = os.Remove(realKeyPath)
-		if writeErr != nil {
-			return nil, writeErr
-		}
-		return nil, closeErr
-	}
+	httpsecurity.SetSensitiveCookie(w, r, &http.Cookie{
+		Name:     aiProviderVaultCookieName,
+		Value:    base64.RawURLEncoding.EncodeToString(key),
+		MaxAge:   int(aiProviderVaultCookieTTL / time.Second),
+		Expires:  time.Now().UTC().Add(aiProviderVaultCookieTTL),
+		SameSite: http.SameSiteStrictMode,
+	})
 	return key, nil
 }
 
-func (a *App) saveAIProviderCredential(ctx context.Context, domain, provider, model, apiKey string) error {
+func clearAIProviderVaultCookie(w http.ResponseWriter, r *http.Request) {
+	httpsecurity.SetSensitiveCookie(w, r, &http.Cookie{
+		Name:     aiProviderVaultCookieName,
+		Value:    "",
+		MaxAge:   -1,
+		Expires:  time.Unix(1, 0).UTC(),
+		SameSite: http.SameSiteStrictMode,
+	})
+}
+
+func (a *App) saveAIProviderCredential(ctx context.Context, domain, email, provider, model, apiKey string, vaultKey []byte) error {
+	domain = strings.TrimSpace(domain)
+	email = strings.ToLower(strings.TrimSpace(email))
 	provider = strings.ToLower(strings.TrimSpace(provider))
 	model = strings.TrimSpace(model)
 	apiKey = strings.TrimSpace(apiKey)
-	if !supportedAIProvider(provider) || model == "" || apiKey == "" {
-		return errors.New("AI provider, model, and API key are required")
+	if domain == "" || email == "" || !supportedAIProvider(provider) || model == "" || apiKey == "" || len(vaultKey) != 32 {
+		return errors.New("AI provider owner, model, API key, and vault key are required")
 	}
-	masterKey, err := a.aiProviderMasterKey()
+	encryptedAPIKey, err := aiprovider.EncryptSecret(vaultKey, apiKey)
 	if err != nil {
 		return err
 	}
-	encryptedAPIKey, err := aiprovider.EncryptSecret(masterKey, apiKey)
-	if err != nil {
-		return err
-	}
-	_, err = a.db.ExecContext(ctx, `INSERT OR REPLACE INTO ai_provider_credentials(domain,provider,encrypted_api_key,model,updated_at) VALUES(?,?,?,?,?)`,
-		domain, provider, encryptedAPIKey, model, time.Now().UTC().Format(time.RFC3339))
+	_, err = a.db.ExecContext(ctx, `INSERT OR REPLACE INTO ai_provider_user_credentials(domain,email,provider,encrypted_api_key,model,updated_at) VALUES(?,?,?,?,?,?)`,
+		domain, email, provider, encryptedAPIKey, model, time.Now().UTC().Format(time.RFC3339))
 	return err
 }
 
-func (a *App) loadAIProviderCredential(ctx context.Context, domain, provider string) (aiProviderCredential, bool, error) {
+func (a *App) loadAIProviderCredential(ctx context.Context, domain, email, provider string, vaultKey []byte) (aiProviderCredential, bool, error) {
+	email = strings.ToLower(strings.TrimSpace(email))
 	provider = strings.ToLower(strings.TrimSpace(provider))
-	if !supportedAIProvider(provider) {
-		return aiProviderCredential{}, false, errors.New("unsupported AI provider")
+	if email == "" || !supportedAIProvider(provider) || len(vaultKey) != 32 {
+		return aiProviderCredential{}, false, errors.New("AI provider credential vault is locked")
 	}
 	var encryptedAPIKey, model, updatedAt string
-	err := a.db.QueryRowContext(ctx, `SELECT encrypted_api_key,model,updated_at FROM ai_provider_credentials WHERE domain=? AND provider=?`, domain, provider).Scan(&encryptedAPIKey, &model, &updatedAt)
+	err := a.db.QueryRowContext(ctx, `SELECT encrypted_api_key,model,updated_at FROM ai_provider_user_credentials WHERE domain=? AND email=? AND provider=?`, domain, email, provider).Scan(&encryptedAPIKey, &model, &updatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return aiProviderCredential{}, false, nil
 	}
 	if err != nil {
 		return aiProviderCredential{}, false, err
 	}
-	masterKey, err := a.aiProviderMasterKey()
+	apiKey, err := aiprovider.DecryptSecret(vaultKey, encryptedAPIKey)
 	if err != nil {
-		return aiProviderCredential{}, false, err
-	}
-	apiKey, err := aiprovider.DecryptSecret(masterKey, encryptedAPIKey)
-	if err != nil {
-		return aiProviderCredential{}, false, err
+		return aiProviderCredential{}, false, errors.New("AI provider credential vault is locked")
 	}
 	return aiProviderCredential{Provider: provider, Model: strings.TrimSpace(model), APIKey: apiKey, UpdatedAt: updatedAt}, true, nil
 }
 
-func (a *App) aiProviderCredentialStatuses(ctx context.Context, domain string) ([]aiProviderCredentialStatus, error) {
+func (a *App) aiProviderCredentialStatuses(ctx context.Context, domain, email string, unlocked bool) ([]aiProviderCredentialStatus, error) {
+	email = strings.ToLower(strings.TrimSpace(email))
+	if email == "" {
+		return nil, errors.New("AI provider credential owner is required")
+	}
 	statuses := make([]aiProviderCredentialStatus, 0, 4)
 	for _, provider := range []string{aiprovider.ProviderOpenAICompatible, aiprovider.ProviderAnthropic, aiprovider.ProviderDeepSeek, aiprovider.ProviderQwen} {
 		var model, updatedAt string
-		err := a.db.QueryRowContext(ctx, `SELECT model,updated_at FROM ai_provider_credentials WHERE domain=? AND provider=?`, domain, provider).Scan(&model, &updatedAt)
+		err := a.db.QueryRowContext(ctx, `SELECT model,updated_at FROM ai_provider_user_credentials WHERE domain=? AND email=? AND provider=?`, domain, email, provider).Scan(&model, &updatedAt)
 		if errors.Is(err, sql.ErrNoRows) {
 			statuses = append(statuses, aiProviderCredentialStatus{Provider: provider})
 			continue
@@ -10269,7 +10267,7 @@ func (a *App) aiProviderCredentialStatuses(ctx context.Context, domain string) (
 		if err != nil {
 			return nil, err
 		}
-		statuses = append(statuses, aiProviderCredentialStatus{Provider: provider, Model: strings.TrimSpace(model), Saved: true, UpdatedAt: updatedAt})
+		statuses = append(statuses, aiProviderCredentialStatus{Provider: provider, Model: strings.TrimSpace(model), Saved: true, Unlocked: unlocked, UpdatedAt: updatedAt})
 	}
 	return statuses, nil
 }
@@ -10279,7 +10277,14 @@ func (a *App) aiProviderCredentialStatusEndpoint(w http.ResponseWriter, r *http.
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
-	statuses, err := a.aiProviderCredentialStatuses(r.Context(), a.siteDomain(r.Context(), r))
+	domain := a.siteDomain(r.Context(), r)
+	email, found := a.currentAdminEmailForDomain(r, domain)
+	if !found {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	_, unlocked := aiProviderVaultKey(r)
+	statuses, err := a.aiProviderCredentialStatuses(r.Context(), domain, email, unlocked)
 	if err != nil {
 		http.Error(w, "AI provider credential status is unavailable", http.StatusServiceUnavailable)
 		return
@@ -10408,6 +10413,12 @@ func (a *App) saveAIProviderCredentialEndpoint(w http.ResponseWriter, r *http.Re
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
+	domain := a.siteDomain(r.Context(), r)
+	email, found := a.currentAdminEmailForDomain(r, domain)
+	if !found {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
 	provider := strings.ToLower(strings.TrimSpace(r.FormValue("provider")))
 	apiKey := strings.TrimSpace(r.FormValue("api_key"))
 	models, model, err := a.validateAIProviderToken(r.Context(), provider, apiKey)
@@ -10418,13 +10429,18 @@ func (a *App) saveAIProviderCredentialEndpoint(w http.ResponseWriter, r *http.Re
 		_ = json.NewEncoder(w).Encode(map[string]string{"error": "API token rejected by the selected AI provider"})
 		return
 	}
-	if err := a.saveAIProviderCredential(r.Context(), a.siteDomain(r.Context(), r), provider, model, apiKey); err != nil {
+	vaultKey, err := ensureAIProviderVaultKey(w, r)
+	if err != nil {
+		http.Error(w, "AI provider vault could not be created", http.StatusServiceUnavailable)
+		return
+	}
+	if err := a.saveAIProviderCredential(r.Context(), domain, email, provider, model, apiKey, vaultKey); err != nil {
 		http.Error(w, "AI provider token could not be stored", http.StatusServiceUnavailable)
 		return
 	}
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	_ = json.NewEncoder(w).Encode(map[string]any{"saved": true, "provider": provider, "model": model, "models": models})
+	_ = json.NewEncoder(w).Encode(map[string]any{"saved": true, "unlocked": true, "provider": provider, "model": model, "models": models})
 }
 
 func (a *App) aiProviderModelsEndpoint(w http.ResponseWriter, r *http.Request) {
@@ -10432,8 +10448,19 @@ func (a *App) aiProviderModelsEndpoint(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
+	domain := a.siteDomain(r.Context(), r)
+	email, found := a.currentAdminEmailForDomain(r, domain)
+	if !found {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	vaultKey, unlocked := aiProviderVaultKey(r)
+	if !unlocked {
+		http.Error(w, "AI provider vault is locked; re-enter the API token on this browser", http.StatusUnauthorized)
+		return
+	}
 	provider := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("provider")))
-	credential, found, err := a.loadAIProviderCredential(r.Context(), a.siteDomain(r.Context(), r), provider)
+	credential, found, err := a.loadAIProviderCredential(r.Context(), domain, email, provider, vaultKey)
 	if err != nil || !found {
 		http.Error(w, "saved AI provider token is unavailable", http.StatusBadRequest)
 		return
@@ -10462,54 +10489,49 @@ func (a *App) deleteAIProviderCredentialEndpoint(w http.ResponseWriter, r *http.
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
+	domain := a.siteDomain(r.Context(), r)
+	email, found := a.currentAdminEmailForDomain(r, domain)
+	if !found {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
 	provider := strings.ToLower(strings.TrimSpace(r.FormValue("provider")))
 	if !supportedAIProvider(provider) {
 		http.Error(w, "unsupported AI provider", http.StatusBadRequest)
 		return
 	}
-	if _, err := a.db.ExecContext(r.Context(), `DELETE FROM ai_provider_credentials WHERE domain=? AND provider=?`, a.siteDomain(r.Context(), r), provider); err != nil {
+	if _, err := a.db.ExecContext(r.Context(), `DELETE FROM ai_provider_user_credentials WHERE domain=? AND email=? AND provider=?`, domain, strings.ToLower(strings.TrimSpace(email)), provider); err != nil {
 		http.Error(w, "AI provider credential could not be removed", http.StatusServiceUnavailable)
 		return
+	}
+	var remaining int
+	if err := a.db.QueryRowContext(r.Context(), `SELECT COUNT(1) FROM ai_provider_user_credentials WHERE domain=? AND email=?`, domain, strings.ToLower(strings.TrimSpace(email))).Scan(&remaining); err == nil && remaining == 0 {
+		clearAIProviderVaultCookie(w, r)
 	}
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	_ = json.NewEncoder(w).Encode(map[string]bool{"ok": true})
 }
 
-func (a *App) resolveAIProviderCredential(ctx context.Context, domain string, request *aiEditorExecutionRequest) error {
-	if request == nil {
+func (a *App) resolveAIProviderCredential(r *http.Request, domain string, request *aiEditorExecutionRequest) error {
+	if r == nil || request == nil {
 		return errors.New("AI editor request is required")
 	}
 	request.Provider = strings.ToLower(strings.TrimSpace(request.Provider))
 	request.Model = strings.TrimSpace(request.Model)
-	request.APIKey = strings.TrimSpace(request.APIKey)
+	request.APIKey = ""
 	if !supportedAIProvider(request.Provider) {
 		return errors.New("unsupported AI provider")
 	}
-
-	if request.APIKey != "" {
-		models, recommendedModel, err := a.validateAIProviderToken(ctx, request.Provider, request.APIKey)
-		if err != nil {
-			return err
-		}
-		if request.Model == "" {
-			request.Model = recommendedModel
-		} else {
-			available := false
-			for _, model := range models {
-				if model == request.Model {
-					available = true
-					break
-				}
-			}
-			if !available {
-				return errors.New("selected AI model is unavailable")
-			}
-		}
-		return a.saveAIProviderCredential(ctx, domain, request.Provider, request.Model, request.APIKey)
+	email, found := a.currentAdminEmailForDomain(r, domain)
+	if !found {
+		return errors.New("AI provider credential owner is unavailable")
 	}
-
-	storedCredential, found, err := a.loadAIProviderCredential(ctx, domain, request.Provider)
+	vaultKey, unlocked := aiProviderVaultKey(r)
+	if !unlocked {
+		return errors.New("AI provider vault is locked; re-enter the API token on this browser")
+	}
+	storedCredential, found, err := a.loadAIProviderCredential(r.Context(), domain, email, request.Provider, vaultKey)
 	if err != nil {
 		return err
 	}
@@ -10555,7 +10577,7 @@ type aiEditorExecutionRequest struct {
 	Provider string                 `json:"provider"`
 	BaseURL  string                 `json:"base_url"`
 	Model    string                 `json:"model"`
-	APIKey   string                 `json:"api_key"`
+	APIKey   string                 `json:"-"`
 	PagePath string                 `json:"page_path"`
 	Scope    string                 `json:"scope"`
 	Task     string                 `json:"task"`
@@ -10602,7 +10624,7 @@ func (a *App) executeAIEditorRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	domain := a.siteDomain(r.Context(), r)
-	if err := a.resolveAIProviderCredential(r.Context(), domain, &request); err != nil {
+	if err := a.resolveAIProviderCredential(r, domain, &request); err != nil {
 		http.Error(w, "AI provider token or model is unavailable", http.StatusBadRequest)
 		return
 	}

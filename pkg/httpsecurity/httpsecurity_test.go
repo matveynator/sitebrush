@@ -108,3 +108,16 @@ func mustParseURL(t *testing.T, raw string) *url.URL {
 	}
 	return parsedURL
 }
+
+
+func TestSetSensitiveCookiePreservesStrictSameSite(t *testing.T) {
+	request := httptest.NewRequest(http.MethodGet, "https://public.example/", nil)
+	response := httptest.NewRecorder()
+	SetSensitiveCookie(response, request, &http.Cookie{Name: "vault", Value: "secret", SameSite: http.SameSiteStrictMode})
+	setCookie := response.Header().Get("Set-Cookie")
+	for _, attribute := range []string{"Path=/", "HttpOnly", "Secure", "SameSite=Strict"} {
+		if !strings.Contains(setCookie, attribute) {
+			t.Fatalf("strict sensitive cookie %q does not contain %q", setCookie, attribute)
+		}
+	}
+}

@@ -31,6 +31,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"slices"
 	"sort"
@@ -11220,80 +11221,171 @@ func TestSiteBrushTemplateImportControlsAreEnabledByDefaultAndLocalized(t *testi
 		}
 	}
 }
-func TestAIProviderCredentialIsEncryptedAtRestAndReusable(t *testing.T) {
+func TestAIProviderCredentialIsOwnerScopedEncryptedAndNeverWrittenOutsideDatabase(t *testing.T) {
 	application, rawDB := newTestApplication(t)
-	const providerToken = "secret-provider-token"
-	if err := application.saveAIProviderCredential(context.Background(), "localhost", aiprovider.ProviderDeepSeek, "deepseek-chat", providerToken); err != nil {
+	const ownerEmail = "admin@example.com"
+	const providerToken = "provider-token-plaintext-marker-93c2a18f"
+	vaultKey := bytes.Repeat([]byte{0x5a}, 32)
+	if _, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", ownerEmail, "password"); err != nil {
 		t.Fatal(err)
 	}
-	var encryptedValue, storedModel string
-	if err := rawDB.QueryRow(`SELECT encrypted_api_key,model FROM ai_provider_credentials WHERE domain=? AND provider=?`, "localhost", aiprovider.ProviderDeepSeek).Scan(&encryptedValue, &storedModel); err != nil {
+	if err := application.saveAIProviderCredential(context.Background(), "localhost", ownerEmail, aiprovider.ProviderDeepSeek, "deepseek-chat", providerToken, vaultKey); err != nil {
+		t.Fatal(err)
+	}
+
+	var encryptedValue, storedModel, storedEmail string
+	if err := rawDB.QueryRow(`SELECT encrypted_api_key,model,email FROM ai_provider_user_credentials WHERE domain=? AND email=? AND provider=?`, "localhost", ownerEmail, aiprovider.ProviderDeepSeek).Scan(&encryptedValue, &storedModel, &storedEmail); err != nil {
 		t.Fatal(err)
 	}
 	if encryptedValue == providerToken || strings.Contains(encryptedValue, providerToken) {
-		t.Fatal("AI provider token was stored in plaintext")
+		t.Fatal("SECURITY: AI provider token was stored in plaintext")
 	}
-	if storedModel != "deepseek-chat" {
-		t.Fatalf("stored model=%q", storedModel)
+	if storedModel != "deepseek-chat" || storedEmail != ownerEmail {
+		t.Fatalf("stored credential model=%q email=%q", storedModel, storedEmail)
 	}
-	credential, found, err := application.loadAIProviderCredential(context.Background(), "localhost", aiprovider.ProviderDeepSeek)
+	credential, found, err := application.loadAIProviderCredential(context.Background(), "localhost", ownerEmail, aiprovider.ProviderDeepSeek, vaultKey)
 	if err != nil || !found || credential.APIKey != providerToken {
 		t.Fatalf("loaded credential=%+v found=%v err=%v", credential, found, err)
 	}
-	request := aiEditorExecutionRequest{Provider: aiprovider.ProviderDeepSeek}
-	if err := application.resolveAIProviderCredential(context.Background(), "localhost", &request); err != nil {
-		t.Fatal(err)
+	if _, found, err := application.loadAIProviderCredential(context.Background(), "localhost", "other@example.com", aiprovider.ProviderDeepSeek, vaultKey); err != nil || found {
+		t.Fatalf("SECURITY: another account could load owner's credential: found=%v err=%v", found, err)
 	}
-	if request.APIKey != providerToken || request.Model != "deepseek-chat" {
-		t.Fatalf("saved credential was not reused: %+v", request)
+	wrongKey := bytes.Repeat([]byte{0x33}, 32)
+	if _, _, err := application.loadAIProviderCredential(context.Background(), "localhost", ownerEmail, aiprovider.ProviderDeepSeek, wrongKey); err == nil {
+		t.Fatal("SECURITY: credential decrypted without the browser vault key")
 	}
-	keyPath := application.aiProviderMasterKeyPath()
-	keyBytes, err := os.ReadFile(keyPath)
-	if err != nil || len(keyBytes) != 32 {
-		t.Fatalf("master key path=%q length=%d err=%v", keyPath, len(keyBytes), err)
+
+	encodedVaultKey := base64.RawURLEncoding.EncodeToString(vaultKey)
+	walkErr := filepath.WalkDir(application.storagePath, func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil || entry.IsDir() {
+			return walkErr
+		}
+		fileBytes, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return readErr
+		}
+		if bytes.Contains(fileBytes, []byte(providerToken)) {
+			t.Fatalf("SECURITY: plaintext AI provider token leaked to file %s", path)
+		}
+		if bytes.Contains(fileBytes, []byte(encodedVaultKey)) || bytes.Contains(fileBytes, vaultKey) {
+			t.Fatalf("SECURITY: browser vault key leaked to server file %s", path)
+		}
+		return nil
+	})
+	if walkErr != nil {
+		t.Fatal(walkErr)
 	}
-	if runtime.GOOS != "windows" {
-		info, err := os.Stat(keyPath)
-		if err != nil {
+}
+
+func TestAIProviderVaultCookieIsHttpOnlyStrictAndNotServerPersisted(t *testing.T) {
+	application, _ := newTestApplication(t)
+	request := httptest.NewRequest(http.MethodPost, "https://localhost/?ai_provider_save", nil)
+	response := httptest.NewRecorder()
+	key, err := ensureAIProviderVaultKey(response, request)
+	if err != nil || len(key) != 32 {
+		t.Fatalf("vault key length=%d err=%v", len(key), err)
+	}
+	setCookie := response.Header().Get("Set-Cookie")
+	for _, attribute := range []string{aiProviderVaultCookieName + "=", "HttpOnly", "SameSite=Strict"} {
+		if !strings.Contains(setCookie, attribute) {
+			t.Fatalf("SECURITY: vault cookie %q missing %q", setCookie, attribute)
+		}
+	}
+	encodedKey := base64.RawURLEncoding.EncodeToString(key)
+	walkErr := filepath.WalkDir(application.storagePath, func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil || entry.IsDir() {
+			return walkErr
+		}
+		fileBytes, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return readErr
+		}
+		if bytes.Contains(fileBytes, []byte(encodedKey)) || bytes.Contains(fileBytes, key) {
+			t.Fatalf("SECURITY: vault key persisted on server at %s", path)
+		}
+		return nil
+	})
+	if walkErr != nil {
+		t.Fatal(walkErr)
+	}
+}
+
+func TestAIProviderCredentialStatusIsOwnerBoundAndNeverReturnsSecret(t *testing.T) {
+	application, rawDB := newTestApplication(t)
+	const ownerEmail = "admin@example.com"
+	const otherEmail = "server-owner@example.com"
+	const providerToken = "never-return-this-provider-secret"
+	vaultKey := bytes.Repeat([]byte{0x6b}, 32)
+	for _, email := range []string{ownerEmail, otherEmail} {
+		if _, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", email, "password"); err != nil {
 			t.Fatal(err)
 		}
-		if info.Mode().Perm()&0o077 != 0 {
-			t.Fatalf("AI provider master key permissions are too broad: %o", info.Mode().Perm())
-		}
+	}
+	if err := application.saveAIProviderCredential(context.Background(), "localhost", ownerEmail, aiprovider.ProviderAnthropic, "claude-model", providerToken, vaultKey); err != nil {
+		t.Fatal(err)
+	}
+
+	ownerRequest := httptest.NewRequest(http.MethodGet, "http://localhost:8080/?ai_provider_status", nil)
+	ownerRequest.AddCookie(newAdminSessionCookie(t, application, ownerEmail))
+	ownerRequest.AddCookie(&http.Cookie{Name: aiProviderVaultCookieName, Value: base64.RawURLEncoding.EncodeToString(vaultKey)})
+	ownerResponse := httptest.NewRecorder()
+	application.route(ownerResponse, ownerRequest)
+	if ownerResponse.Code != http.StatusOK {
+		t.Fatalf("owner credential status=%d body=%q", ownerResponse.Code, ownerResponse.Body.String())
+	}
+	if strings.Contains(ownerResponse.Body.String(), providerToken) || strings.Contains(ownerResponse.Body.String(), "encrypted_api_key") {
+		t.Fatalf("SECURITY: credential status disclosed secret material: %q", ownerResponse.Body.String())
+	}
+	if !strings.Contains(ownerResponse.Body.String(), `"saved":true`) || !strings.Contains(ownerResponse.Body.String(), `"unlocked":true`) {
+		t.Fatalf("owner credential status omitted safe state: %q", ownerResponse.Body.String())
+	}
+
+	otherRequest := httptest.NewRequest(http.MethodGet, "http://localhost:8080/?ai_provider_status", nil)
+	otherRequest.AddCookie(newAdminSessionCookie(t, application, otherEmail))
+	otherRequest.AddCookie(&http.Cookie{Name: aiProviderVaultCookieName, Value: base64.RawURLEncoding.EncodeToString(vaultKey)})
+	otherResponse := httptest.NewRecorder()
+	application.route(otherResponse, otherRequest)
+	if otherResponse.Code != http.StatusOK {
+		t.Fatalf("other administrator status=%d body=%q", otherResponse.Code, otherResponse.Body.String())
+	}
+	if strings.Contains(otherResponse.Body.String(), `"saved":true`) || strings.Contains(otherResponse.Body.String(), providerToken) {
+		t.Fatalf("SECURITY: another administrator discovered owner's provider credential: %q", otherResponse.Body.String())
 	}
 }
 
-func TestAIProviderCredentialStatusNeverReturnsSecret(t *testing.T) {
+func TestAIProviderCredentialRequiresBrowserVaultForReuse(t *testing.T) {
 	application, rawDB := newTestApplication(t)
-	if _, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "admin@example.com", "password"); err != nil {
+	const ownerEmail = "admin@example.com"
+	const providerToken = "provider-reuse-secret"
+	vaultKey := bytes.Repeat([]byte{0x7c}, 32)
+	if _, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", ownerEmail, "password"); err != nil {
 		t.Fatal(err)
 	}
-	const providerToken = "never-return-this-secret"
-	if err := application.saveAIProviderCredential(context.Background(), "localhost", aiprovider.ProviderAnthropic, "claude-model", providerToken); err != nil {
+	if err := application.saveAIProviderCredential(context.Background(), "localhost", ownerEmail, aiprovider.ProviderDeepSeek, "deepseek-chat", providerToken, vaultKey); err != nil {
 		t.Fatal(err)
 	}
-	request := httptest.NewRequest(http.MethodGet, "http://localhost:8080/?ai_provider_status", nil)
-	request.AddCookie(newAdminSessionCookie(t, application, "admin@example.com"))
-	response := httptest.NewRecorder()
-	application.route(response, request)
-	if response.Code != http.StatusOK {
-		t.Fatalf("credential status=%d body=%q", response.Code, response.Body.String())
+	request := httptest.NewRequest(http.MethodPost, "http://localhost:8080/?ai_execute", nil)
+	request.AddCookie(newAdminSessionCookie(t, application, ownerEmail))
+	aiRequest := aiEditorExecutionRequest{Provider: aiprovider.ProviderDeepSeek}
+	if err := application.resolveAIProviderCredential(request, "localhost", &aiRequest); err == nil {
+		t.Fatal("SECURITY: provider credential reused without browser vault cookie")
 	}
-	if strings.Contains(response.Body.String(), providerToken) || strings.Contains(response.Body.String(), "encrypted_api_key") {
-		t.Fatalf("credential status disclosed secret material: %q", response.Body.String())
+	request.AddCookie(&http.Cookie{Name: aiProviderVaultCookieName, Value: base64.RawURLEncoding.EncodeToString(vaultKey)})
+	if err := application.resolveAIProviderCredential(request, "localhost", &aiRequest); err != nil {
+		t.Fatal(err)
 	}
-	if !strings.Contains(response.Body.String(), `"saved":true`) || !strings.Contains(response.Body.String(), "claude-model") {
-		t.Fatalf("credential status omitted safe metadata: %q", response.Body.String())
+	if aiRequest.APIKey != providerToken || aiRequest.Model != "deepseek-chat" {
+		t.Fatalf("saved credential was not reused: %+v", aiRequest)
 	}
 }
 
-func TestAIProviderCredentialSchemaIsPartOfCompletenessGate(t *testing.T) {
+func TestAIProviderCredentialSchemaIsOwnerScopedCompletenessGate(t *testing.T) {
 	application, rawDB := newTestApplication(t)
 	complete, err := siteDatabaseSchemaComplete(context.Background(), rawDB)
 	if err != nil || !complete {
 		t.Fatalf("schema complete=%v err=%v", complete, err)
 	}
-	if _, err := rawDB.Exec(`DROP TABLE ai_provider_credentials`); err != nil {
+	if _, err := rawDB.Exec(`DROP TABLE ai_provider_user_credentials`); err != nil {
 		t.Fatal(err)
 	}
 	complete, err = siteDatabaseSchemaComplete(context.Background(), rawDB)
@@ -11301,9 +11393,64 @@ func TestAIProviderCredentialSchemaIsPartOfCompletenessGate(t *testing.T) {
 		t.Fatal(err)
 	}
 	if complete {
-		t.Fatal("schema gate ignored missing AI provider credentials table")
+		t.Fatal("schema gate ignored missing owner-scoped AI provider credentials table")
 	}
 	_ = application
+}
+
+func TestAIProviderLegacyServerKeyFileIsRemoved(t *testing.T) {
+	application, _ := newTestApplication(t)
+	legacyDirectory := filepath.Join(application.storagePath, "secrets")
+	if err := os.MkdirAll(legacyDirectory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	legacyPath := filepath.Join(legacyDirectory, "ai-provider.key")
+	if err := os.WriteFile(legacyPath, bytes.Repeat([]byte{0x41}, 32), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := application.migrate(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(legacyPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("SECURITY: legacy server-side AI provider key file still exists: %v", err)
+	}
+}
+
+func TestRepositoryDoesNotContainLikelyLiveAIProviderTokens(t *testing.T) {
+	pattern := regexp.MustCompile("s" + "k-(?:proj-|ant-)?[A-Za-z0-9_-]{24,}")
+	extensions := map[string]bool{
+		".go": true, ".html": true, ".js": true, ".json": true, ".md": true,
+		".yml": true, ".yaml": true, ".sh": true, ".css": true, ".toml": true,
+	}
+	root := "."
+	walkErr := filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() {
+			switch entry.Name() {
+			case ".git", "node_modules", "vendor":
+				if path != "." {
+					return filepath.SkipDir
+				}
+			}
+			return nil
+		}
+		if !extensions[strings.ToLower(filepath.Ext(path))] {
+			return nil
+		}
+		fileBytes, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return readErr
+		}
+		if match := pattern.Find(fileBytes); len(match) != 0 {
+			t.Fatalf("SECURITY: likely live AI provider token is tracked in %s", path)
+		}
+		return nil
+	})
+	if walkErr != nil {
+		t.Fatal(walkErr)
+	}
 }
 
 func TestAIProviderTokenLinksAreExposedWithoutEmbeddingTokens(t *testing.T) {
