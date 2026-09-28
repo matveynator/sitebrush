@@ -125,3 +125,63 @@ func TestExecutorValidatesTaskChannelsAndNormalizesPaths(t *testing.T) {
 		}
 	}
 }
+
+
+func TestExecutorHandlesMalformedInternalTaskAndLateCancellation(t *testing.T) {
+	storeStarted := make(chan struct{}, 1)
+	releaseStore := make(chan struct{})
+	store := &blockingTestStore{started: storeStarted, release: releaseStore}
+	executor := NewExecutor(store, 1)
+	defer executor.Close()
+
+	// The worker must tolerate a malformed task even if an internal caller bypasses Submit.
+	executor.requests <- Task{Request: Request{Operation: OperationReadPage, Path: "/ignored"}}
+
+	done := make(chan struct{})
+	reply := make(chan Result, 1)
+	if err := executor.Submit(Task{Request: Request{Operation: OperationReadPage, Path: "/index"}, Done: done, Reply: reply}); err != nil {
+		t.Fatal(err)
+	}
+	<-storeStarted
+	close(done)
+	close(releaseStore)
+
+	select {
+	case <-reply:
+		t.Fatal("late-canceled task returned a result")
+	default:
+	}
+}
+
+type blockingTestStore struct {
+	started chan struct{}
+	release chan struct{}
+}
+
+func (store *blockingTestStore) Execute(request Request) Result {
+	store.started <- struct{}{}
+	<-store.release
+	return Result{Operation: request.Operation, Path: request.Path}
+}
+
+func TestValidateRejectsMalformedPathsAndEmptyUploads(t *testing.T) {
+	for _, pagePath := range []string{"", "a\\b", "a\x00b", "a/../b"} {
+		if err := Validate(Request{Operation: OperationReadPage, Path: pagePath}); err == nil {
+			t.Fatalf("malformed page path accepted: %q", pagePath)
+		}
+	}
+	if err := Validate(Request{Operation: OperationListPages, Path: "a/../b"}); err == nil {
+		t.Fatal("invalid optional list path accepted")
+	}
+	if err := Validate(Request{Operation: OperationUploadFile, FileName: "photo.jpg"}); err == nil {
+		t.Fatal("empty upload content accepted")
+	}
+}
+
+func TestNilExecutorIsSafe(t *testing.T) {
+	var executor *Executor
+	if err := executor.Submit(Task{}); err != ErrInvalidRequest {
+		t.Fatalf("nil executor error=%v", err)
+	}
+	executor.Close()
+}
