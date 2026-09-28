@@ -34,7 +34,8 @@
     <label for="model">Model</label>
     <input id="model" type="text" autocomplete="off" placeholder="Model name">
     <label for="apiKey">Your AI API token</label>
-    <input id="apiKey" type="password" autocomplete="off" placeholder="Stored only in this request">
+    <input id="apiKey" type="password" autocomplete="new-password" placeholder="Enter once; SiteBrush stores it encrypted">
+    <div><a id="providerKeyLink" href="https://platform.openai.com/api-keys" target="_blank" rel="noopener noreferrer">Get API token ↗</a> <span id="providerKeyStatus"></span></div>
     <button id="executeButton" type="button">Execute task on this page</button>
     <div id="status" class="status" role="status"></div>
     <pre id="capabilityOutput" hidden></pre>
@@ -47,6 +48,18 @@ const capabilityButton = document.getElementById('capabilityButton');
 const statusElement = document.getElementById('status');
 const capabilityOutputElement = document.getElementById('capabilityOutput');
 const executeButton = document.getElementById('executeButton');
+const providerElement = document.getElementById('provider');
+const modelElement = document.getElementById('model');
+const apiKeyElement = document.getElementById('apiKey');
+const providerKeyLink = document.getElementById('providerKeyLink');
+const providerKeyStatus = document.getElementById('providerKeyStatus');
+const providerLinks = {
+  'openai-compatible':'https://platform.openai.com/api-keys',
+  'anthropic':'https://console.anthropic.com/settings/keys',
+  'deepseek':'https://platform.deepseek.com/api_keys',
+  'qwen':'https://modelstudio.console.alibabacloud.com/model/settings/api-key'
+};
+const credentialStatus = Object.create(null);
 const savedAIEditorCommand = sessionStorage.getItem('sitebrush.aiEditorCommand');
 if (savedAIEditorCommand) {
   commandElement.value = savedAIEditorCommand;
@@ -54,6 +67,24 @@ if (savedAIEditorCommand) {
   setStatus('Команда из меню редактора восстановлена. Добавьте файлы и продолжите работу.');
 }
 function setStatus(message) { statusElement.textContent = message; }
+function updateProviderCredentialUI() {
+  providerKeyLink.href = providerLinks[providerElement.value] || providerLinks['openai-compatible'];
+  const saved = credentialStatus[providerElement.value];
+  providerKeyStatus.textContent = saved && saved.saved ? 'Token saved' : 'Token not saved yet';
+  if (saved && saved.model && !modelElement.value.trim()) modelElement.value = saved.model;
+  apiKeyElement.placeholder = saved && saved.saved ? 'Leave blank to reuse the saved token' : 'Enter once; SiteBrush stores it encrypted';
+}
+async function loadCredentialStatus() {
+  try {
+    const response = await fetch('{{.Path}}?ai_provider_status', {credentials:'same-origin'});
+    const payload = await response.json();
+    if (!response.ok) throw new Error('status unavailable');
+    for (const item of (payload.providers || [])) credentialStatus[item.provider] = item;
+    updateProviderCredentialUI();
+  } catch (_) {}
+}
+providerElement.addEventListener('change', updateProviderCredentialUI);
+loadCredentialStatus();
 if ('SpeechRecognition' in window || 'webkitSpeechRecognition' in window) {
   const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
   const speechRecognition = new Recognition();
@@ -94,9 +125,11 @@ executeButton.addEventListener('click', async function executeTaskOnCurrentPage(
         reader.readAsDataURL(file);
       });
     }));
-    const response = await fetch('{{.Path}}?ai_execute', {method:'POST', credentials:'same-origin', headers:{'Content-Type':'application/json'}, body:JSON.stringify({provider:document.getElementById('provider').value, model:document.getElementById('model').value, api_key:document.getElementById('apiKey').value, page_path:'{{.Path}}', task:commandElement.value, files:files})});
+    const response = await fetch('{{.Path}}?ai_execute', {method:'POST', credentials:'same-origin', headers:{'Content-Type':'application/json'}, body:JSON.stringify({provider:providerElement.value, model:modelElement.value, api_key:apiKeyElement.value, page_path:'{{.Path}}', task:commandElement.value, files:files})});
     const payload = await response.json();
     if (!response.ok) throw new Error(payload.error || 'AI task failed');
+    apiKeyElement.value = '';
+    await loadCredentialStatus();
     setStatus('The AI updated ' + payload.path + (payload.published ? ' and published it.' : '.'));
   } catch (error) { setStatus(error.message); }
   executeButton.disabled = false;

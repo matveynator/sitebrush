@@ -36,6 +36,9 @@
     .ai-editor-settings-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;padding:0 0 14px}
     .ai-editor-settings-grid label{display:grid;gap:5px;font-size:12px;color:var(--bs-secondary-color)}
     .ai-editor-settings-grid .wide{grid-column:1/-1}
+    .ai-editor-key-help{display:flex;align-items:center;gap:10px;flex-wrap:wrap;font-size:12px}
+    .ai-editor-key-status{font-weight:600}
+    .ai-editor-key-delete{padding:4px 8px;font-size:12px}
     .ai-editor-invite{display:grid;gap:8px;padding-top:4px}
     .ai-editor-invite-row{display:flex;gap:8px;align-items:center}
     .ai-editor-invite-row input{min-width:0;flex:1}
@@ -137,7 +140,14 @@
             <input class="form-control" id="aiEditorModel" type="text" autocomplete="off" placeholder="Название модели">
           </label>
           <label class="wide">API token провайдера
-            <input class="form-control" id="aiEditorAPIKey" type="password" autocomplete="off" placeholder="Используется только для этого запроса">
+            <input class="form-control" id="aiEditorAPIKey" type="password" autocomplete="new-password" placeholder="Введите один раз — SiteBrush сохранит токен зашифрованно">
+            <span class="ai-editor-key-help">
+              <a id="aiEditorAPIKeyHelpLink" href="https://platform.openai.com/api-keys" target="_blank" rel="noopener noreferrer">Получить API token ↗</a>
+              <span id="aiEditorAPIKeyHelpText">OpenAI: создайте secret API key и скопируйте его в это поле.</span>
+              <span class="ai-editor-key-status" id="aiEditorAPIKeyStatus"></span>
+              <button class="btn btn-outline-danger ai-editor-key-delete" type="button" id="deleteAIEditorAPIKeyButton" hidden>Удалить сохранённый токен</button>
+            </span>
+            <span>Сохранённый токен обратно в браузер не показывается. Он расшифровывается только на сервере непосредственно перед запросом к выбранному AI-провайдеру.</span>
           </label>
         </div>
       </details>
@@ -169,12 +179,56 @@ const aiEditorSendButton = document.getElementById('sendAIEditorButton');
 const aiEditorInviteRow = document.getElementById('aiEditorInviteRow');
 const aiEditorInviteLink = document.getElementById('aiEditorInviteLink');
 const aiEditorLinkStatusElement = document.getElementById('aiEditorLinkStatus');
+const aiEditorProviderElement = document.getElementById('aiEditorProvider');
+const aiEditorModelElement = document.getElementById('aiEditorModel');
+const aiEditorAPIKeyElement = document.getElementById('aiEditorAPIKey');
+const aiEditorAPIKeyHelpLink = document.getElementById('aiEditorAPIKeyHelpLink');
+const aiEditorAPIKeyHelpText = document.getElementById('aiEditorAPIKeyHelpText');
+const aiEditorAPIKeyStatus = document.getElementById('aiEditorAPIKeyStatus');
+const deleteAIEditorAPIKeyButton = document.getElementById('deleteAIEditorAPIKeyButton');
+const aiEditorAccountCSRF = {{printf "%q" .AccountCSRF}};
+const aiEditorCredentialStatus = Object.create(null);
+const aiEditorProviderHelp = {
+  'openai-compatible': {url:'https://platform.openai.com/api-keys', text:'OpenAI: откройте API Keys, создайте новый secret key и скопируйте его один раз.'},
+  'anthropic': {url:'https://console.anthropic.com/settings/keys', text:'Anthropic: откройте Console → API Keys → Create Key и скопируйте ключ.'},
+  'deepseek': {url:'https://platform.deepseek.com/api_keys', text:'DeepSeek: войдите в Platform → API Keys → Create new API key.'},
+  'qwen': {url:'https://modelstudio.console.alibabacloud.com/model/settings/api-key', text:'Qwen / Alibaba Model Studio: откройте API Key → Create API key. Ключи зависят от региона.'}
+};
 let aiEditorSpeechRecognition = null;
 let aiEditorIsRecording = false;
 const savedAIEditorCommand = sessionStorage.getItem('sitebrush.aiEditorCommand');
 if (savedAIEditorCommand) {
   aiEditorCommandElement.value = savedAIEditorCommand;
   sessionStorage.removeItem('sitebrush.aiEditorCommand');
+}
+
+function updateAIEditorProviderHelp() {
+  const provider = aiEditorProviderElement.value;
+  const help = aiEditorProviderHelp[provider] || aiEditorProviderHelp['openai-compatible'];
+  aiEditorAPIKeyHelpLink.href = help.url;
+  aiEditorAPIKeyHelpText.textContent = help.text;
+  const status = aiEditorCredentialStatus[provider];
+  if (status && status.saved) {
+    aiEditorAPIKeyStatus.textContent = 'Токен сохранён' + (status.updated_at ? ' · ' + status.updated_at : '');
+    deleteAIEditorAPIKeyButton.hidden = false;
+    if (!aiEditorModelElement.value.trim() && status.model) aiEditorModelElement.value = status.model;
+    aiEditorAPIKeyElement.placeholder = 'Токен уже сохранён — оставьте поле пустым для повторного использования';
+  } else {
+    aiEditorAPIKeyStatus.textContent = 'Токен ещё не сохранён';
+    deleteAIEditorAPIKeyButton.hidden = true;
+    aiEditorAPIKeyElement.placeholder = 'Введите один раз — SiteBrush сохранит токен зашифрованно';
+  }
+}
+
+async function loadAIEditorCredentialStatus() {
+  try {
+    const response = await fetch('{{.Path}}?ai_provider_status', {credentials:'same-origin', headers:{'Accept':'application/json'}});
+    const payload = await parseAIEditorResponse(response);
+    for (const providerStatus of (payload.providers || [])) aiEditorCredentialStatus[providerStatus.provider] = providerStatus;
+    updateAIEditorProviderHelp();
+  } catch (_) {
+    aiEditorAPIKeyStatus.textContent = 'Не удалось проверить сохранённый токен';
+  }
 }
 
 function selectedAIEditorScope() {
@@ -235,15 +289,17 @@ async function parseAIEditorResponse(response) {
 
 async function executeAIEditorTask() {
   const task = aiEditorCommandElement.value.trim();
-  const apiKey = document.getElementById('aiEditorAPIKey').value.trim();
-  const model = document.getElementById('aiEditorModel').value.trim();
+  const apiKey = aiEditorAPIKeyElement.value.trim();
+  const model = aiEditorModelElement.value.trim();
   if (!task) {
     setAIEditorStatus('Сначала напишите или скажите, что нужно изменить.');
     aiEditorCommandElement.focus();
     return;
   }
-  if (!apiKey || !model) {
-    setAIEditorStatus('Укажите модель и API token в настройках AI-провайдера.');
+  const savedProviderStatus = aiEditorCredentialStatus[aiEditorProviderElement.value];
+  const effectiveModel = model || (savedProviderStatus && savedProviderStatus.model) || '';
+  if (!effectiveModel || (!apiKey && !(savedProviderStatus && savedProviderStatus.saved))) {
+    setAIEditorStatus('Укажите модель и API token. После первого успешного сохранения токен можно больше не вводить.');
     document.querySelector('.ai-editor-settings').open = true;
     return;
   }
@@ -257,8 +313,8 @@ async function executeAIEditorTask() {
       credentials:'same-origin',
       headers:{'Content-Type':'application/json'},
       body:JSON.stringify({
-        provider:document.getElementById('aiEditorProvider').value,
-        model:model,
+        provider:aiEditorProviderElement.value,
+        model:effectiveModel,
         api_key:apiKey,
         page_path:'{{.Path}}',
         scope:selectedAIEditorScope(),
@@ -268,6 +324,8 @@ async function executeAIEditorTask() {
     });
     const payload = await parseAIEditorResponse(response);
     const changed = Array.isArray(payload.paths) ? payload.paths.join(', ') : (payload.path || '{{.Path}}');
+    aiEditorAPIKeyElement.value = '';
+    await loadAIEditorCredentialStatus();
     setAIEditorStatus('Готово. Изменено: ' + changed + (payload.published ? ' · опубликовано' : '') + '. Изменения сохранены в ревизиях.');
   } catch (error) {
     setAIEditorStatus(error.message);
@@ -341,6 +399,29 @@ aiEditorVoiceButton.addEventListener('click', function toggleAIEditorVoice() {
   recognition.start();
 });
 aiEditorSendButton.addEventListener('click', executeAIEditorTask);
+aiEditorProviderElement.addEventListener('change', updateAIEditorProviderHelp);
+deleteAIEditorAPIKeyButton.addEventListener('click', async function deleteSavedAIProviderToken() {
+  if (!window.confirm('Удалить сохранённый API token этого AI-провайдера?')) return;
+  deleteAIEditorAPIKeyButton.disabled = true;
+  try {
+    const body = new URLSearchParams({provider:aiEditorProviderElement.value});
+    const response = await fetch('{{.Path}}?ai_provider_delete', {
+      method:'POST',
+      credentials:'same-origin',
+      headers:{'Content-Type':'application/x-www-form-urlencoded;charset=UTF-8','X-SiteBrush-CSRF':aiEditorAccountCSRF},
+      body:body.toString()
+    });
+    await parseAIEditorResponse(response);
+    delete aiEditorCredentialStatus[aiEditorProviderElement.value];
+    updateAIEditorProviderHelp();
+    setAIEditorStatus('Сохранённый API token удалён.');
+  } catch (error) {
+    setAIEditorStatus(error.message);
+  } finally {
+    deleteAIEditorAPIKeyButton.disabled = false;
+  }
+});
+loadAIEditorCredentialStatus();
 
 document.getElementById('createAIEditorLinkButton').addEventListener('click', async function createAIEditorLink() {
   const button = document.getElementById('createAIEditorLinkButton');

@@ -129,7 +129,7 @@ const sitebrushHTTPWriteTimeout = 0
 const sitebrushHTTPIdleTimeout = 65 * time.Second
 const sitebrushHTTPReadHeaderTimeout = 5 * time.Second
 const sitebrushHTTP10KeepAliveBufferLimit = 1024 * 1024
-const currentSiteDatabaseSchemaVersion = 9
+const currentSiteDatabaseSchemaVersion = 10
 const siteDatabaseStartupMigrationTimeout = 30 * time.Second
 const pagePasswordSessionTTL = time.Hour
 const serviceMailRelayPath = "/?service_mail_relay"
@@ -8810,6 +8810,7 @@ func (a *App) migrate(ctx context.Context) error {
 		`CREATE TABLE IF NOT EXISTS page_password_sessions(token TEXT PRIMARY KEY,domain TEXT,path TEXT,created_at TEXT);`,
 		`CREATE TABLE IF NOT EXISTS domain_chroot_locations(domain TEXT,url_path TEXT,directory_path TEXT,updated_at TEXT,PRIMARY KEY(domain,url_path));`,
 		`CREATE TABLE IF NOT EXISTS domain_backup_tokens(domain TEXT PRIMARY KEY,token TEXT,updated_at TEXT);`,
+		`CREATE TABLE IF NOT EXISTS ai_provider_credentials(domain TEXT,provider TEXT,encrypted_api_key TEXT,model TEXT,updated_at TEXT,PRIMARY KEY(domain,provider));`,
 		`CREATE TABLE IF NOT EXISTS admin_stealth_modes(domain TEXT,email TEXT,enabled_at INTEGER NOT NULL,PRIMARY KEY(domain,email));`,
 		`CREATE TABLE IF NOT EXISTS file_access_rules(domain TEXT,file_name TEXT,access_mode TEXT,token TEXT,expires_at TEXT,single_use_left INTEGER DEFAULT 0,token_use_count INTEGER DEFAULT 0,PRIMARY KEY(domain,file_name));`,
 		`CREATE TABLE IF NOT EXISTS file_metadata(domain TEXT,file_name TEXT,page_path TEXT,size INTEGER,mime_type TEXT,created_at TEXT,updated_at TEXT,source TEXT,download_count INTEGER DEFAULT 0,PRIMARY KEY(domain,file_name));`,
@@ -8970,6 +8971,11 @@ func requiredSiteDatabaseColumns() []siteDatabaseColumnRequirement {
 		{tableName: "domain_storage_usage", columnName: "updated_at", definition: "TEXT"},
 		{tableName: "domain_backup_tokens", columnName: "token", definition: "TEXT"},
 		{tableName: "domain_backup_tokens", columnName: "updated_at", definition: "TEXT"},
+		{tableName: "ai_provider_credentials", columnName: "domain", definition: "TEXT"},
+		{tableName: "ai_provider_credentials", columnName: "provider", definition: "TEXT"},
+		{tableName: "ai_provider_credentials", columnName: "encrypted_api_key", definition: "TEXT"},
+		{tableName: "ai_provider_credentials", columnName: "model", definition: "TEXT"},
+		{tableName: "ai_provider_credentials", columnName: "updated_at", definition: "TEXT"},
 		{tableName: "email_confirmations", columnName: "token", definition: "TEXT"},
 		{tableName: "email_confirmations", columnName: "domain", definition: "TEXT"},
 		{tableName: "email_confirmations", columnName: "action", definition: "TEXT"},
@@ -9050,6 +9056,8 @@ SELECT 'localhost',page_bytes,published_page_bytes,revision_bytes,file_bytes,pub
 SELECT import_id,'localhost',page_path,source_url,auto_templates,state,created_at,updated_at FROM whole_site_imports WHERE domain IN `+placeholders, sqlArguments...)
 	_, _ = a.db.ExecContext(ctx, `INSERT OR IGNORE INTO whole_site_import_pages(import_id,domain,page_key,page_url,local_path,link_offset,storage_bytes,state,created_at)
 SELECT import_id,'localhost',page_key,page_url,local_path,link_offset,storage_bytes,state,created_at FROM whole_site_import_pages WHERE domain IN `+placeholders, sqlArguments...)
+	_, _ = a.db.ExecContext(ctx, `INSERT OR IGNORE INTO ai_provider_credentials(domain,provider,encrypted_api_key,model,updated_at)
+SELECT 'localhost',provider,encrypted_api_key,model,updated_at FROM ai_provider_credentials WHERE domain IN `+placeholders, sqlArguments...)
 	domainStatesMergeQuery := `INSERT OR IGNORE INTO domain_states(domain,is_frozen)
 SELECT 'localhost',is_frozen FROM domain_states WHERE domain IN ` + placeholders
 	_, _ = a.db.ExecContext(ctx, domainStatesMergeQuery, sqlArguments...)
@@ -9074,6 +9082,7 @@ SELECT token,'localhost',path,created_at FROM page_password_sessions WHERE domai
 	_, _ = a.db.ExecContext(ctx, `DELETE FROM file_access_rules WHERE domain IN `+placeholders, sqlArguments...)
 	_, _ = a.db.ExecContext(ctx, `DELETE FROM file_metadata WHERE domain IN `+placeholders, sqlArguments...)
 	_, _ = a.db.ExecContext(ctx, `DELETE FROM domain_storage_usage WHERE domain IN `+placeholders, sqlArguments...)
+	_, _ = a.db.ExecContext(ctx, `DELETE FROM ai_provider_credentials WHERE domain IN `+placeholders, sqlArguments...)
 	_, _ = a.db.ExecContext(ctx, `DELETE FROM whole_site_import_pages WHERE domain IN `+placeholders, sqlArguments...)
 	_, _ = a.db.ExecContext(ctx, `DELETE FROM whole_site_imports WHERE domain IN `+placeholders, sqlArguments...)
 	_, _ = a.db.ExecContext(ctx, `DELETE FROM domain_states WHERE domain IN `+placeholders, sqlArguments...)
@@ -9525,6 +9534,10 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 		a.savePage(w, r)
 		return
 	}
+	if hasQueryFlag(r, "ai_provider_delete") {
+		a.deleteAIProviderCredentialEndpoint(w, r)
+		return
+	}
 	if strings.TrimSpace(r.URL.Query().Get("delete")) != "" {
 		a.deleteRevisionByQuery(w, r)
 		return
@@ -9532,6 +9545,10 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet && r.Method != http.MethodHead && r.Method != http.MethodOptions &&
 		hasSitebrushSessionCookie(r) && !httpsecurity.SameOriginMutationAllowed(r) {
 		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	if hasQueryFlag(r, "ai_provider_status") {
+		a.aiProviderCredentialStatusEndpoint(w, r)
 		return
 	}
 	if hasQueryFlag(r, "ai_capability_create") {
@@ -10107,6 +10124,237 @@ func (a *App) executeAITask(request aieditor.Request, r *http.Request) (aieditor
 	}
 }
 
+type aiProviderCredential struct {
+	Provider  string
+	Model     string
+	APIKey    string
+	UpdatedAt string
+}
+
+type aiProviderCredentialStatus struct {
+	Provider  string `json:"provider"`
+	Model     string `json:"model,omitempty"`
+	Saved     bool   `json:"saved"`
+	UpdatedAt string `json:"updated_at,omitempty"`
+}
+
+func supportedAIProvider(provider string) bool {
+	switch strings.ToLower(strings.TrimSpace(provider)) {
+	case aiprovider.ProviderOpenAICompatible, aiprovider.ProviderAnthropic, aiprovider.ProviderDeepSeek, aiprovider.ProviderQwen:
+		return true
+	default:
+		return false
+	}
+}
+
+func (a *App) aiProviderMasterKeyPath() string {
+	storagePath := ""
+	if a != nil {
+		storagePath = strings.TrimSpace(a.storagePath)
+	}
+	if storagePath == "" {
+		storagePath = defaultAppStoragePath()
+	}
+	return filepath.Join(storagePath, "secrets", "ai-provider.key")
+}
+
+func (a *App) aiProviderMasterKey() ([]byte, error) {
+	keyPath := a.aiProviderMasterKeyPath()
+	readExistingKey := func() ([]byte, error) {
+		key, err := a.readFileInsideStorage(keyPath)
+		if err != nil {
+			return nil, err
+		}
+		if len(key) != 32 {
+			return nil, errors.New("AI provider master key has invalid length")
+		}
+		if realKeyPath, pathErr := a.existingPathInsideStorage(keyPath); pathErr == nil {
+			_ = os.Chmod(realKeyPath, 0o600)
+		}
+		return key, nil
+	}
+	if key, err := readExistingKey(); err == nil {
+		return key, nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return nil, err
+	}
+	if err := a.mkdirAllInsideStorage(filepath.Dir(keyPath), 0o700); err != nil {
+		return nil, err
+	}
+	key := make([]byte, 32)
+	if _, err := rand.Read(key); err != nil {
+		return nil, err
+	}
+	realKeyPath, err := a.writablePathInsideStorage(keyPath)
+	if err != nil {
+		return nil, err
+	}
+	keyFile, err := os.OpenFile(realKeyPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		if errors.Is(err, fs.ErrExist) {
+			return readExistingKey()
+		}
+		return nil, err
+	}
+	writeErr := func() error {
+		if _, err := keyFile.Write(key); err != nil {
+			return err
+		}
+		return keyFile.Sync()
+	}()
+	closeErr := keyFile.Close()
+	if writeErr != nil || closeErr != nil {
+		_ = os.Remove(realKeyPath)
+		if writeErr != nil {
+			return nil, writeErr
+		}
+		return nil, closeErr
+	}
+	return key, nil
+}
+
+func (a *App) saveAIProviderCredential(ctx context.Context, domain, provider, model, apiKey string) error {
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	model = strings.TrimSpace(model)
+	apiKey = strings.TrimSpace(apiKey)
+	if !supportedAIProvider(provider) || model == "" || apiKey == "" {
+		return errors.New("AI provider, model, and API key are required")
+	}
+	masterKey, err := a.aiProviderMasterKey()
+	if err != nil {
+		return err
+	}
+	encryptedAPIKey, err := aiprovider.EncryptSecret(masterKey, apiKey)
+	if err != nil {
+		return err
+	}
+	_, err = a.db.ExecContext(ctx, `INSERT OR REPLACE INTO ai_provider_credentials(domain,provider,encrypted_api_key,model,updated_at) VALUES(?,?,?,?,?)`,
+		domain, provider, encryptedAPIKey, model, time.Now().UTC().Format(time.RFC3339))
+	return err
+}
+
+func (a *App) loadAIProviderCredential(ctx context.Context, domain, provider string) (aiProviderCredential, bool, error) {
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	if !supportedAIProvider(provider) {
+		return aiProviderCredential{}, false, errors.New("unsupported AI provider")
+	}
+	var encryptedAPIKey, model, updatedAt string
+	err := a.db.QueryRowContext(ctx, `SELECT encrypted_api_key,model,updated_at FROM ai_provider_credentials WHERE domain=? AND provider=?`, domain, provider).Scan(&encryptedAPIKey, &model, &updatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return aiProviderCredential{}, false, nil
+	}
+	if err != nil {
+		return aiProviderCredential{}, false, err
+	}
+	masterKey, err := a.aiProviderMasterKey()
+	if err != nil {
+		return aiProviderCredential{}, false, err
+	}
+	apiKey, err := aiprovider.DecryptSecret(masterKey, encryptedAPIKey)
+	if err != nil {
+		return aiProviderCredential{}, false, err
+	}
+	return aiProviderCredential{Provider: provider, Model: strings.TrimSpace(model), APIKey: apiKey, UpdatedAt: updatedAt}, true, nil
+}
+
+func (a *App) aiProviderCredentialStatuses(ctx context.Context, domain string) ([]aiProviderCredentialStatus, error) {
+	statuses := make([]aiProviderCredentialStatus, 0, 4)
+	for _, provider := range []string{aiprovider.ProviderOpenAICompatible, aiprovider.ProviderAnthropic, aiprovider.ProviderDeepSeek, aiprovider.ProviderQwen} {
+		var model, updatedAt string
+		err := a.db.QueryRowContext(ctx, `SELECT model,updated_at FROM ai_provider_credentials WHERE domain=? AND provider=?`, domain, provider).Scan(&model, &updatedAt)
+		if errors.Is(err, sql.ErrNoRows) {
+			statuses = append(statuses, aiProviderCredentialStatus{Provider: provider})
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		statuses = append(statuses, aiProviderCredentialStatus{Provider: provider, Model: strings.TrimSpace(model), Saved: true, UpdatedAt: updatedAt})
+	}
+	return statuses, nil
+}
+
+func (a *App) aiProviderCredentialStatusEndpoint(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet || !a.isAdminRequest(r) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	statuses, err := a.aiProviderCredentialStatuses(r.Context(), a.siteDomain(r.Context(), r))
+	if err != nil {
+		http.Error(w, "AI provider credential status is unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	_ = json.NewEncoder(w).Encode(map[string]any{"providers": statuses})
+}
+
+func (a *App) deleteAIProviderCredentialEndpoint(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !a.isAdminRequest(r) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	if !httpsecurity.SameOriginMutationAllowed(r) {
+		providedCSRF := strings.TrimSpace(r.Header.Get("X-SiteBrush-CSRF"))
+		expectedCSRF := accountCSRF(r)
+		if providedCSRF == "" || expectedCSRF == "" || subtle.ConstantTimeCompare([]byte(providedCSRF), []byte(expectedCSRF)) != 1 {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+	}
+	provider := strings.ToLower(strings.TrimSpace(r.FormValue("provider")))
+	if !supportedAIProvider(provider) {
+		http.Error(w, "unsupported AI provider", http.StatusBadRequest)
+		return
+	}
+	if _, err := a.db.ExecContext(r.Context(), `DELETE FROM ai_provider_credentials WHERE domain=? AND provider=?`, a.siteDomain(r.Context(), r), provider); err != nil {
+		http.Error(w, "AI provider credential could not be removed", http.StatusServiceUnavailable)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	_ = json.NewEncoder(w).Encode(map[string]bool{"ok": true})
+}
+
+func (a *App) resolveAIProviderCredential(ctx context.Context, domain string, request *aiEditorExecutionRequest) error {
+	if request == nil {
+		return errors.New("AI editor request is required")
+	}
+	request.Provider = strings.ToLower(strings.TrimSpace(request.Provider))
+	request.Model = strings.TrimSpace(request.Model)
+	request.APIKey = strings.TrimSpace(request.APIKey)
+	if !supportedAIProvider(request.Provider) {
+		return errors.New("unsupported AI provider")
+	}
+	storedCredential, found, err := a.loadAIProviderCredential(ctx, domain, request.Provider)
+	if err != nil {
+		return err
+	}
+	if request.APIKey == "" {
+		if !found || storedCredential.APIKey == "" {
+			return errors.New("AI API key is required")
+		}
+		request.APIKey = storedCredential.APIKey
+		if request.Model == "" {
+			request.Model = storedCredential.Model
+		}
+	}
+	if request.Model == "" {
+		return errors.New("AI model is required")
+	}
+	if strings.TrimSpace(request.APIKey) == "" {
+		return errors.New("AI API key is required")
+	}
+	if found && request.APIKey == storedCredential.APIKey && request.Model == storedCredential.Model {
+		return nil
+	}
+	return a.saveAIProviderCredential(ctx, domain, request.Provider, request.Model, request.APIKey)
+}
+
 func (a *App) aiEditorPage(w http.ResponseWriter, r *http.Request) {
 	if !a.isAdminRequest(r) {
 		if !a.hasAdmin(r.Context(), a.siteDomain(r.Context(), r)) {
@@ -10185,8 +10433,13 @@ func (a *App) executeAIEditorRequest(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "page path is required", http.StatusBadRequest)
 		return
 	}
-	if strings.TrimSpace(request.Task) == "" || strings.TrimSpace(request.APIKey) == "" || strings.TrimSpace(request.Model) == "" {
-		http.Error(w, "task, model, and AI API key are required", http.StatusBadRequest)
+	if strings.TrimSpace(request.Task) == "" {
+		http.Error(w, "task is required", http.StatusBadRequest)
+		return
+	}
+	domain := a.siteDomain(r.Context(), r)
+	if err := a.resolveAIProviderCredential(r.Context(), domain, &request); err != nil {
+		http.Error(w, "AI provider token or model is unavailable", http.StatusBadRequest)
 		return
 	}
 

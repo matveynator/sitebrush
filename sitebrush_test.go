@@ -11220,6 +11220,112 @@ func TestSiteBrushTemplateImportControlsAreEnabledByDefaultAndLocalized(t *testi
 	}
 }
 
+func TestAIProviderCredentialIsEncryptedAtRestAndReusable(t *testing.T) {
+	application, rawDB := newTestApplication(t)
+	const providerToken = "secret-provider-token"
+	if err := application.saveAIProviderCredential(context.Background(), "localhost", aiprovider.ProviderDeepSeek, "deepseek-chat", providerToken); err != nil {
+		t.Fatal(err)
+	}
+	var encryptedValue, storedModel string
+	if err := rawDB.QueryRow(`SELECT encrypted_api_key,model FROM ai_provider_credentials WHERE domain=? AND provider=?`, "localhost", aiprovider.ProviderDeepSeek).Scan(&encryptedValue, &storedModel); err != nil {
+		t.Fatal(err)
+	}
+	if encryptedValue == providerToken || strings.Contains(encryptedValue, providerToken) {
+		t.Fatal("AI provider token was stored in plaintext")
+	}
+	if storedModel != "deepseek-chat" {
+		t.Fatalf("stored model=%q", storedModel)
+	}
+	credential, found, err := application.loadAIProviderCredential(context.Background(), "localhost", aiprovider.ProviderDeepSeek)
+	if err != nil || !found || credential.APIKey != providerToken {
+		t.Fatalf("loaded credential=%+v found=%v err=%v", credential, found, err)
+	}
+	request := aiEditorExecutionRequest{Provider: aiprovider.ProviderDeepSeek}
+	if err := application.resolveAIProviderCredential(context.Background(), "localhost", &request); err != nil {
+		t.Fatal(err)
+	}
+	if request.APIKey != providerToken || request.Model != "deepseek-chat" {
+		t.Fatalf("saved credential was not reused: %+v", request)
+	}
+	keyPath := application.aiProviderMasterKeyPath()
+	keyBytes, err := os.ReadFile(keyPath)
+	if err != nil || len(keyBytes) != 32 {
+		t.Fatalf("master key path=%q length=%d err=%v", keyPath, len(keyBytes), err)
+	}
+	if runtime.GOOS != "windows" {
+		info, err := os.Stat(keyPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.Mode().Perm()&0o077 != 0 {
+			t.Fatalf("AI provider master key permissions are too broad: %o", info.Mode().Perm())
+		}
+	}
+}
+
+func TestAIProviderCredentialStatusNeverReturnsSecret(t *testing.T) {
+	application, rawDB := newTestApplication(t)
+	if _, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "admin@example.com", "password"); err != nil {
+		t.Fatal(err)
+	}
+	const providerToken = "never-return-this-secret"
+	if err := application.saveAIProviderCredential(context.Background(), "localhost", aiprovider.ProviderAnthropic, "claude-model", providerToken); err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodGet, "http://localhost:8080/?ai_provider_status", nil)
+	request.AddCookie(newAdminSessionCookie(t, application, "admin@example.com"))
+	response := httptest.NewRecorder()
+	application.route(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("credential status=%d body=%q", response.Code, response.Body.String())
+	}
+	if strings.Contains(response.Body.String(), providerToken) || strings.Contains(response.Body.String(), "encrypted_api_key") {
+		t.Fatalf("credential status disclosed secret material: %q", response.Body.String())
+	}
+	if !strings.Contains(response.Body.String(), `"saved":true`) || !strings.Contains(response.Body.String(), "claude-model") {
+		t.Fatalf("credential status omitted safe metadata: %q", response.Body.String())
+	}
+}
+
+func TestAIProviderCredentialSchemaIsPartOfCompletenessGate(t *testing.T) {
+	application, rawDB := newTestApplication(t)
+	complete, err := siteDatabaseSchemaComplete(context.Background(), rawDB)
+	if err != nil || !complete {
+		t.Fatalf("schema complete=%v err=%v", complete, err)
+	}
+	if _, err := rawDB.Exec(`DROP TABLE ai_provider_credentials`); err != nil {
+		t.Fatal(err)
+	}
+	complete, err = siteDatabaseSchemaComplete(context.Background(), rawDB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if complete {
+		t.Fatal("schema gate ignored missing AI provider credentials table")
+	}
+	_ = application
+}
+
+func TestAIProviderTokenLinksAreExposedWithoutEmbeddingTokens(t *testing.T) {
+	for _, templateName := range []string{"edit_mode.html", "edit_ai.html"} {
+		templateBytes, err := embeddedWebFiles.ReadFile("web/" + templateName)
+		if err != nil {
+			t.Fatal(err)
+		}
+		templateSource := string(templateBytes)
+		for _, expectedURL := range []string{
+			"https://platform.openai.com/api-keys",
+			"https://console.anthropic.com/settings/keys",
+			"https://platform.deepseek.com/api_keys",
+			"https://modelstudio.console.alibabacloud.com/model/settings/api-key",
+		} {
+			if !strings.Contains(templateSource, expectedURL) {
+				t.Fatalf("%s is missing provider key URL %q", templateName, expectedURL)
+			}
+		}
+	}
+}
+
 func TestEditorTemplatesExposeThreeModeNavigation(t *testing.T) {
 	templateBytes, err := embeddedWebFiles.ReadFile("web/edit_mode.html")
 	if err != nil {
