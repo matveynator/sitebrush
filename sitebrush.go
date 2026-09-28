@@ -10221,7 +10221,8 @@ func (a *App) saveAIProviderCredential(ctx context.Context, domain, email, provi
 	if domain == "" || email == "" || !supportedAIProvider(provider) || model == "" || apiKey == "" || len(vaultKey) != 32 {
 		return errors.New("AI provider owner, model, API key, and vault key are required")
 	}
-	encryptedAPIKey, err := aiprovider.EncryptSecret(vaultKey, apiKey)
+	credentialContext := strings.ToLower(strings.TrimSpace(domain)) + "\n" + email + "\n" + provider
+	encryptedAPIKey, err := aiprovider.EncryptSecretWithContext(vaultKey, apiKey, credentialContext)
 	if err != nil {
 		return err
 	}
@@ -10244,7 +10245,8 @@ func (a *App) loadAIProviderCredential(ctx context.Context, domain, email, provi
 	if err != nil {
 		return aiProviderCredential{}, false, err
 	}
-	apiKey, err := aiprovider.DecryptSecret(vaultKey, encryptedAPIKey)
+	credentialContext := strings.ToLower(strings.TrimSpace(domain)) + "\n" + email + "\n" + provider
+	apiKey, err := aiprovider.DecryptSecretWithContext(vaultKey, encryptedAPIKey, credentialContext)
 	if err != nil {
 		return aiProviderCredential{}, false, errors.New("AI provider credential vault is locked")
 	}

@@ -351,3 +351,25 @@ func TestListModelsRejectsMissingConfigurationAndEmptyModelList(t *testing.T) {
 		t.Fatal("empty model list was accepted")
 	}
 }
+
+
+func TestSecretEncryptionContextPreventsCredentialRebinding(t *testing.T) {
+	key := []byte(strings.Repeat("k", 32))
+	ciphertext, err := EncryptSecretWithContext(key, "PROVIDER_SECRET", "example.org\nowner@example.org\nopenai-compatible")
+	if err != nil {
+		t.Fatal(err)
+	}
+	plaintext, err := DecryptSecretWithContext(key, ciphertext, "example.org\nowner@example.org\nopenai-compatible")
+	if err != nil || plaintext != "PROVIDER_SECRET" {
+		t.Fatalf("plaintext=%q err=%v", plaintext, err)
+	}
+	for _, wrongContext := range []string{
+		"example.org\nowner@example.org\ndeepseek",
+		"example.org\nother@example.org\nopenai-compatible",
+		"other.example\nowner@example.org\nopenai-compatible",
+	} {
+		if _, err := DecryptSecretWithContext(key, ciphertext, wrongContext); err == nil {
+			t.Fatalf("SECURITY: encrypted provider credential accepted rebound context %q", wrongContext)
+		}
+	}
+}

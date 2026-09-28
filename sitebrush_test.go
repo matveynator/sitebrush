@@ -11277,6 +11277,56 @@ func TestAIProviderCredentialIsOwnerScopedEncryptedAndNeverWrittenOutsideDatabas
 	}
 }
 
+func TestAIProviderCredentialCiphertextCannotBeReboundToAnotherProvider(t *testing.T) {
+	application, rawDB := newTestApplication(t)
+	const ownerEmail = "admin@example.com"
+	vaultKey := bytes.Repeat([]byte{0x42}, 32)
+	if _, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", ownerEmail, "password"); err != nil {
+		t.Fatal(err)
+	}
+	if err := application.saveAIProviderCredential(context.Background(), "localhost", ownerEmail, aiprovider.ProviderOpenAICompatible, "gpt-model", "owner-openai-token", vaultKey); err != nil {
+		t.Fatal(err)
+	}
+	var ciphertext string
+	if err := rawDB.QueryRow(`SELECT encrypted_api_key FROM ai_provider_user_credentials WHERE domain=? AND email=? AND provider=?`, "localhost", ownerEmail, aiprovider.ProviderOpenAICompatible).Scan(&ciphertext); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := rawDB.Exec(`INSERT OR REPLACE INTO ai_provider_user_credentials(domain,email,provider,encrypted_api_key,model,updated_at) VALUES(?,?,?,?,?,?)`,
+		"localhost", ownerEmail, aiprovider.ProviderDeepSeek, ciphertext, "deepseek-chat", time.Now().UTC().Format(time.RFC3339)); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := application.loadAIProviderCredential(context.Background(), "localhost", ownerEmail, aiprovider.ProviderDeepSeek, vaultKey); err == nil {
+		t.Fatal("SECURITY: OpenAI credential ciphertext was rebound and decrypted as a DeepSeek credential")
+	}
+}
+
+func TestAIProviderCredentialsAreExcludedFromSiteBackup(t *testing.T) {
+	application, rawDB := newTestApplication(t)
+	const ownerEmail = "admin@example.com"
+	const providerToken = "backup-exclusion-provider-token-marker"
+	vaultKey := bytes.Repeat([]byte{0x24}, 32)
+	if _, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", ownerEmail, "password"); err != nil {
+		t.Fatal(err)
+	}
+	if err := application.saveAIProviderCredential(context.Background(), "localhost", ownerEmail, aiprovider.ProviderDeepSeek, "deepseek-chat", providerToken, vaultKey); err != nil {
+		t.Fatal(err)
+	}
+	var ciphertext string
+	if err := rawDB.QueryRow(`SELECT encrypted_api_key FROM ai_provider_user_credentials WHERE domain=? AND email=? AND provider=?`, "localhost", ownerEmail, aiprovider.ProviderDeepSeek).Scan(&ciphertext); err != nil {
+		t.Fatal(err)
+	}
+	var archive bytes.Buffer
+	if err := application.writeDomainBackupZIP(context.Background(), "localhost", &archive); err != nil {
+		t.Fatal(err)
+	}
+	archiveBytes := archive.Bytes()
+	for _, forbidden := range []string{providerToken, ciphertext, "ai_provider_user_credentials"} {
+		if bytes.Contains(archiveBytes, []byte(forbidden)) {
+			t.Fatalf("SECURITY: site backup contains AI provider credential material %q", forbidden)
+		}
+	}
+}
+
 func TestAIProviderVaultCookieIsHttpOnlyStrictAndNotServerPersisted(t *testing.T) {
 	application, _ := newTestApplication(t)
 	request := httptest.NewRequest(http.MethodPost, "https://localhost/?ai_provider_save", nil)

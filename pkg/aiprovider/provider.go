@@ -344,3 +344,47 @@ func DecryptSecret(key []byte, encoded string) (string, error) {
 	}
 	return string(plaintext), nil
 }
+
+func EncryptSecretWithContext(key []byte, secret, secretContext string) (string, error) {
+	if len(key) != 32 || secret == "" || strings.TrimSpace(secretContext) == "" {
+		return "", errors.New("AES-256 key, secret, and context are required")
+	}
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return "", err
+	}
+	aead, err := cipher.NewGCM(block)
+	if err != nil {
+		return "", err
+	}
+	nonce := make([]byte, aead.NonceSize())
+	if _, err := rand.Read(nonce); err != nil {
+		return "", err
+	}
+	ciphertext := aead.Seal(nonce, nonce, []byte(secret), []byte(secretContext))
+	return base64.RawURLEncoding.EncodeToString(ciphertext), nil
+}
+
+func DecryptSecretWithContext(key []byte, encoded, secretContext string) (string, error) {
+	if len(key) != 32 || encoded == "" || strings.TrimSpace(secretContext) == "" {
+		return "", errors.New("AES-256 key, ciphertext, and context are required")
+	}
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return "", err
+	}
+	aead, err := cipher.NewGCM(block)
+	if err != nil {
+		return "", err
+	}
+	ciphertext, err := base64.RawURLEncoding.DecodeString(encoded)
+	if err != nil || len(ciphertext) < aead.NonceSize() {
+		return "", errors.New("invalid encrypted secret")
+	}
+	plaintext, err := aead.Open(nil, ciphertext[:aead.NonceSize()], ciphertext[aead.NonceSize():], []byte(secretContext))
+	if err != nil {
+		return "", errors.New("invalid encrypted secret")
+	}
+	return string(plaintext), nil
+}
+
