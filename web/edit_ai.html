@@ -1,139 +1,507 @@
 <!doctype html>
 <html lang="{{.LanguageCode}}" dir="{{.TextDirection}}">
 <head>
+  <script>(function applySystemThemeMode(){const prefersDarkMode=window.matchMedia&&window.matchMedia('(prefers-color-scheme: dark)').matches;document.documentElement.setAttribute('data-bs-theme',prefersDarkMode?'dark':'light');})();</script>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="referrer" content="no-referrer">
-  <title>AI voice editor</title>
-  <link rel="stylesheet" href="/p/static/admin_theme.css">
+  <title>Редактирование голосом</title>
+  <link rel="stylesheet" href="/p/static/bootstrap.min.css">
+  <link rel="stylesheet" href="/p/static/technical_pages.css">
   <style>
-    body { margin:0; min-height:100vh; background:var(--theme-background); color:var(--theme-foreground); font-family:var(--theme-font-sans); }
-    main { max-width:860px; margin:0 auto; padding:32px 20px; }
-    .panel { background:var(--theme-card); border:1px solid var(--theme-border); border-radius:var(--theme-radius); padding:24px; display:grid; gap:18px; }
-    textarea { width:100%; min-height:130px; box-sizing:border-box; resize:vertical; }
-    .actions { display:flex; flex-wrap:wrap; gap:10px; }
-    .status { min-height:24px; white-space:pre-wrap; }
-    pre { overflow-wrap:anywhere; white-space:pre-wrap; }
+    body{min-height:100vh;background:rgba(0,0,0,.18)}
+    .ai-page{min-height:100vh;display:grid;place-items:center;padding:20px}
+    .ai-card{width:min(780px,100%);max-height:calc(100vh - 40px);overflow:auto;border:1px solid var(--bs-border-color);border-radius:22px;background:var(--bs-body-bg);box-shadow:0 22px 70px rgba(0,0,0,.28)}
+    .ai-header{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:18px 20px 10px}
+    .ai-close{display:grid;place-items:center;width:36px;height:36px;border:0;border-radius:50%;background:transparent;color:inherit;font-size:25px;text-decoration:none}
+    .ai-close:hover{background:var(--bs-tertiary-bg)}
+    .ai-tabs{display:flex;gap:6px;padding:0 20px 12px;border-bottom:1px solid var(--bs-border-color)}
+    .ai-tab{border:0;border-radius:10px;padding:8px 12px;background:transparent;color:inherit;font-size:14px}
+    .ai-tab.is-active{background:var(--bs-primary);color:#fff}
+    .ai-body{display:grid;gap:14px;padding:16px 20px 20px}
+    .ai-panel[hidden]{display:none!important}
+    .ai-composer{border:1px solid var(--bs-border-color);border-radius:22px;background:var(--bs-tertiary-bg);padding:12px}
+    .ai-composer textarea{display:block;width:100%;min-height:120px;max-height:300px;border:0;outline:0;resize:vertical;background:transparent;color:inherit;font:inherit;padding:4px 4px 8px}
+    .ai-composer-bar{display:flex;align-items:center;justify-content:space-between;gap:8px}
+    .ai-left,.ai-right,.ai-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+    .ai-round{display:grid;place-items:center;width:38px;height:38px;padding:0;border:1px solid var(--bs-border-color);border-radius:50%;background:var(--bs-body-bg);color:inherit;font-size:18px;line-height:1}
+    .ai-send{border-color:var(--bs-body-color);background:var(--bs-body-color);color:var(--bs-body-bg);font-size:22px;font-weight:700}
+    .ai-recording{background:var(--bs-danger);border-color:var(--bs-danger);color:#fff}
+    .ai-files{font-size:13px;color:var(--bs-secondary-color);overflow-wrap:anywhere}
+    .ai-status{min-height:22px;font-size:14px;white-space:pre-wrap}
+    .ai-settings{border:1px solid var(--bs-border-color);border-radius:14px;padding:0 14px}
+    .ai-settings summary{cursor:pointer;padding:11px 0;font-size:14px}
+    .ai-settings-grid{display:grid;grid-template-columns:1fr;gap:10px;padding:0 0 14px}
+    .ai-settings-grid label{display:grid;gap:5px;font-size:12px;color:var(--bs-secondary-color)}
+    .ai-token-actions{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+    .ai-token-status{font-size:13px;font-weight:600}
+    .ai-model-block{display:grid;gap:5px;padding-top:4px}
+    .ai-model-help{font-size:12px;color:var(--bs-secondary-color)}
+    .external-box{display:grid;gap:12px}
+    .external-link-row{display:flex;gap:8px;align-items:center}
+    .external-link-row input{min-width:0;flex:1}
+    .external-actions{display:flex;gap:8px;flex-wrap:wrap}
+    .external-note{font-size:13px;color:var(--bs-secondary-color)}
+    @media(max-width:640px){.ai-page{padding:8px}.ai-card{max-height:calc(100vh - 16px);border-radius:18px}.external-link-row{flex-direction:column;align-items:stretch}}
   </style>
 </head>
 <body>
-<main>
-  <section class="panel">
-    <h1>AI voice editor</h1>
-    <p>Describe the change, attach material, and let SiteBrush prepare or publish content for this site. The AI connection is limited to site content and never receives account or server access.</p>
-    <label for="aiCommand">Voice command or text</label>
-    <textarea id="aiCommand" placeholder="For example: create a page about my hike and add a news link to the home page"></textarea>
-    <div class="actions">
-      <button id="recordButton" type="button">Start voice input</button>
-      <button id="capabilityButton" type="button">Invite your AI assistant - create invite link</button>
-      <a class="btn btn-secondary" href="{{.Path}}">Back</a>
+<div class="ai-page">
+  <section class="ai-card" role="dialog" aria-modal="true" aria-labelledby="aiTitle">
+    <header class="ai-header">
+      <div>
+        <h1 class="h5 mb-1" id="aiTitle">Редактирование голосом</h1>
+        <div class="small text-body-secondary">Редактируется текущая страница <code>{{.Path}}</code></div>
+      </div>
+      <a class="ai-close" href="{{.Path}}" aria-label="Закрыть">×</a>
+    </header>
+
+    <div class="ai-tabs" role="tablist">
+      <button class="ai-tab is-active" type="button" id="pageTabButton" role="tab" aria-selected="true">Редактировать страницу</button>
+      <button class="ai-tab" type="button" id="externalTabButton" role="tab" aria-selected="false">Внешний AI</button>
     </div>
-    <input id="fileInput" type="file" multiple accept="image/*,.css,.html,.txt">
-    <label for="provider">AI provider</label>
-    <select id="provider"><option value="openai-compatible">OpenAI-compatible</option><option value="anthropic">Anthropic</option><option value="deepseek">DeepSeek</option><option value="qwen">Qwen</option></select>
-    <label for="model">Model</label>
-    <input id="model" type="text" autocomplete="off" placeholder="Model name">
-    <label for="apiKey">Your AI API token</label>
-    <input id="apiKey" type="password" autocomplete="new-password" placeholder="Enter once; SiteBrush stores it encrypted">
-    <div><a id="providerKeyLink" href="https://platform.openai.com/api-keys" target="_blank" rel="noopener noreferrer">Get API token ↗</a> <span id="providerKeyStatus"></span></div>
-    <button id="executeButton" type="button">Execute task on this page</button>
-    <div id="status" class="status" role="status"></div>
-    <pre id="capabilityOutput" hidden></pre>
+
+    <div class="ai-body">
+      <section class="ai-panel" id="pagePanel" role="tabpanel">
+        <div class="ai-composer">
+          <textarea id="aiCommand" placeholder="Например: сделай заголовок короче и добавь под ним кнопку. Можно написать задачу или нажать микрофон."></textarea>
+          <div class="ai-composer-bar">
+            <div class="ai-left">
+              <button class="ai-round" type="button" id="fileButton" aria-label="Добавить файлы" title="Добавить файлы">＋</button>
+              <input id="fileInput" type="file" multiple hidden accept="image/*,.css,.html,.txt">
+              <div class="ai-files" id="fileStatus"></div>
+            </div>
+            <div class="ai-right">
+              <button class="ai-round" type="button" id="recordButton" aria-label="Говорить" title="Говорить">🎙</button>
+              <button class="ai-round ai-send" type="button" id="executeButton" aria-label="Отправить" title="Отправить">↑</button>
+            </div>
+          </div>
+        </div>
+
+        <div id="status" class="ai-status" role="status"></div>
+
+        <details class="ai-settings" id="providerSettings">
+          <summary>Настройки AI-провайдера</summary>
+          <div class="ai-settings-grid">
+            <label>Провайдер
+              <select class="form-select" id="provider">
+                <option value="openai-compatible">OpenAI / ChatGPT API</option>
+                <option value="anthropic">Anthropic / Claude API</option>
+                <option value="deepseek">DeepSeek</option>
+                <option value="qwen">Qwen / Alibaba Model Studio</option>
+              </select>
+            </label>
+
+            <label>API token
+              <input class="form-control" id="apiKey" type="password" autocomplete="new-password" placeholder="Вставьте API token">
+            </label>
+            <div class="ai-token-actions">
+              <a id="providerKeyLink" class="btn btn-outline-secondary btn-sm" href="https://platform.openai.com/api-keys" target="_blank" rel="noopener noreferrer">Получить token ↗</a>
+              <button id="saveProviderTokenButton" class="btn btn-primary btn-sm" type="button">Проверить и сохранить</button>
+              <button id="deleteProviderTokenButton" class="btn btn-outline-danger btn-sm" type="button" hidden>Удалить token</button>
+              <span class="ai-token-status" id="providerKeyStatus"></span>
+            </div>
+            <div class="small text-body-secondary" id="providerKeyHelp">OpenAI: создайте secret API key и вставьте его сюда. SiteBrush проверит ключ у OpenAI и сохранит его зашифрованно.</div>
+
+            <div class="ai-model-block" id="modelBlock" hidden>
+              <label>Модель <span class="text-body-secondary">(необязательно)</span>
+                <select class="form-select" id="model">
+                  <option value="">Автоматически — сбалансированная модель</option>
+                </select>
+              </label>
+              <div class="ai-model-help">Выбор модели появляется только после успешной проверки token. Если ничего не выбирать, SiteBrush использует рекомендуемую сбалансированную модель.</div>
+            </div>
+          </div>
+        </details>
+      </section>
+
+      <section class="ai-panel external-box" id="externalPanel" role="tabpanel" hidden>
+        <div>
+          <strong>Редактирование через ChatGPT, Claude или другую AI-систему</strong>
+          <div class="external-note">SiteBrush создаст отзывную ссылку доступа. Скопируйте её вместе с заданием в выбранную AI-систему.</div>
+        </div>
+        <div class="external-link-row">
+          <input class="form-control" id="externalAILink" type="text" readonly placeholder="Создаю ссылку…">
+          <button class="btn btn-outline-secondary" type="button" id="copyExternalAILinkButton">Копировать</button>
+        </div>
+        <div class="external-actions">
+          <button class="btn btn-primary" type="button" id="openChatGPTButton">Скопировать и открыть ChatGPT</button>
+          <button class="btn btn-outline-primary" type="button" id="openClaudeButton">Скопировать и открыть Claude</button>
+          <button class="btn btn-outline-secondary" type="button" id="renewExternalAILinkButton">Создать новую ссылку</button>
+        </div>
+        <div class="ai-status" id="externalStatus" role="status"></div>
+      </section>
+    </div>
   </section>
-</main>
+</div>
+
 <script>
+const accountCSRF = {{printf "%q" .AccountCSRF}};
 const commandElement = document.getElementById('aiCommand');
 const recordButton = document.getElementById('recordButton');
-const capabilityButton = document.getElementById('capabilityButton');
-const statusElement = document.getElementById('status');
-const capabilityOutputElement = document.getElementById('capabilityOutput');
 const executeButton = document.getElementById('executeButton');
+const fileInput = document.getElementById('fileInput');
+const fileStatus = document.getElementById('fileStatus');
 const providerElement = document.getElementById('provider');
 const modelElement = document.getElementById('model');
+const modelBlock = document.getElementById('modelBlock');
 const apiKeyElement = document.getElementById('apiKey');
 const providerKeyLink = document.getElementById('providerKeyLink');
 const providerKeyStatus = document.getElementById('providerKeyStatus');
-const providerLinks = {
-  'openai-compatible':'https://platform.openai.com/api-keys',
-  'anthropic':'https://console.anthropic.com/settings/keys',
-  'deepseek':'https://platform.deepseek.com/api_keys',
-  'qwen':'https://modelstudio.console.alibabacloud.com/model/settings/api-key'
-};
+const providerKeyHelp = document.getElementById('providerKeyHelp');
+const saveProviderTokenButton = document.getElementById('saveProviderTokenButton');
+const deleteProviderTokenButton = document.getElementById('deleteProviderTokenButton');
+const providerSettings = document.getElementById('providerSettings');
+const statusElement = document.getElementById('status');
+const pageTabButton = document.getElementById('pageTabButton');
+const externalTabButton = document.getElementById('externalTabButton');
+const pagePanel = document.getElementById('pagePanel');
+const externalPanel = document.getElementById('externalPanel');
+const externalAILink = document.getElementById('externalAILink');
+const externalStatus = document.getElementById('externalStatus');
 const credentialStatus = Object.create(null);
-const savedAIEditorCommand = sessionStorage.getItem('sitebrush.aiEditorCommand');
-if (savedAIEditorCommand) {
-  commandElement.value = savedAIEditorCommand;
-  sessionStorage.removeItem('sitebrush.aiEditorCommand');
-  setStatus('Команда из меню редактора восстановлена. Добавьте файлы и продолжите работу.');
+const modelCache = Object.create(null);
+const providerHelp = {
+  'openai-compatible': {
+    url:'https://platform.openai.com/api-keys',
+    text:'OpenAI: создайте secret API key и вставьте его сюда. SiteBrush проверит ключ у OpenAI и сохранит его зашифрованно.'
+  },
+  'anthropic': {
+    url:'https://console.anthropic.com/settings/keys',
+    text:'Anthropic: откройте Console → API Keys → Create Key, скопируйте ключ и вставьте его сюда.'
+  },
+  'deepseek': {
+    url:'https://platform.deepseek.com/api_keys',
+    text:'DeepSeek: откройте Platform → API Keys → Create new API key и вставьте ключ сюда.'
+  },
+  'qwen': {
+    url:'https://modelstudio.console.alibabacloud.com/model/settings/api-key',
+    text:'Qwen: откройте Alibaba Model Studio → API Key → Create API key и вставьте ключ сюда.'
+  }
+};
+let speechRecognition = null;
+let externalLinkPromise = null;
+
+function setStatus(message) { statusElement.textContent = message || ''; }
+function setExternalStatus(message) { externalStatus.textContent = message || ''; }
+
+async function parseResponse(response) {
+  const text = await response.text();
+  let payload = {};
+  try { payload = text ? JSON.parse(text) : {}; } catch (_) {}
+  if (!response.ok) throw new Error(payload.error || text || 'Запрос не выполнен');
+  return payload;
 }
-function setStatus(message) { statusElement.textContent = message; }
-function updateProviderCredentialUI() {
-  providerKeyLink.href = providerLinks[providerElement.value] || providerLinks['openai-compatible'];
-  const saved = credentialStatus[providerElement.value];
-  providerKeyStatus.textContent = saved && saved.saved ? 'Token saved' : 'Token not saved yet';
-  if (saved && saved.model && !modelElement.value.trim()) modelElement.value = saved.model;
-  apiKeyElement.placeholder = saved && saved.saved ? 'Leave blank to reuse the saved token' : 'Enter once; SiteBrush stores it encrypted';
+
+function setTab(external) {
+  pageTabButton.classList.toggle('is-active', !external);
+  externalTabButton.classList.toggle('is-active', external);
+  pageTabButton.setAttribute('aria-selected', external ? 'false' : 'true');
+  externalTabButton.setAttribute('aria-selected', external ? 'true' : 'false');
+  pagePanel.hidden = external;
+  externalPanel.hidden = !external;
+  if (external) ensureExternalAILink();
+  else commandElement.focus();
 }
+
+function fillModels(provider, models, selectedModel) {
+  modelCache[provider] = Array.isArray(models) ? models.slice() : [];
+  modelElement.innerHTML = '';
+  const automatic = document.createElement('option');
+  automatic.value = '';
+  automatic.textContent = selectedModel ? 'Автоматически — ' + selectedModel : 'Автоматически — сбалансированная модель';
+  modelElement.appendChild(automatic);
+  for (const model of modelCache[provider]) {
+    const option = document.createElement('option');
+    option.value = model;
+    option.textContent = model;
+    modelElement.appendChild(option);
+  }
+  modelElement.value = '';
+  modelBlock.hidden = false;
+}
+
+async function loadModelsForSavedProvider(provider) {
+  if (!credentialStatus[provider] || !credentialStatus[provider].saved) {
+    modelBlock.hidden = true;
+    return;
+  }
+  try {
+    const response = await fetch('{{.Path}}?ai_provider_models&provider=' + encodeURIComponent(provider), {
+      credentials:'same-origin',
+      headers:{'Accept':'application/json'}
+    });
+    const payload = await parseResponse(response);
+    fillModels(provider, payload.models || [], payload.model || credentialStatus[provider].model || '');
+  } catch (_) {
+    modelBlock.hidden = false;
+    modelElement.innerHTML = '<option value="">Автоматически — сохранённая модель</option>';
+  }
+}
+
+function updateProviderUI() {
+  const provider = providerElement.value;
+  const help = providerHelp[provider] || providerHelp['openai-compatible'];
+  providerKeyLink.href = help.url;
+  providerKeyHelp.textContent = help.text;
+  const saved = credentialStatus[provider];
+  if (saved && saved.saved) {
+    providerKeyStatus.textContent = '✓ Token проверен и сохранён';
+    deleteProviderTokenButton.hidden = false;
+    apiKeyElement.value = '';
+    apiKeyElement.placeholder = 'Token уже сохранён — вставьте новый только для замены';
+    loadModelsForSavedProvider(provider);
+  } else {
+    providerKeyStatus.textContent = 'Token не сохранён';
+    deleteProviderTokenButton.hidden = true;
+    apiKeyElement.placeholder = 'Вставьте API token';
+    modelBlock.hidden = true;
+  }
+}
+
 async function loadCredentialStatus() {
   try {
-    const response = await fetch('{{.Path}}?ai_provider_status', {credentials:'same-origin'});
-    const payload = await response.json();
-    if (!response.ok) throw new Error('status unavailable');
+    const response = await fetch('{{.Path}}?ai_provider_status', {
+      credentials:'same-origin',
+      headers:{'Accept':'application/json'}
+    });
+    const payload = await parseResponse(response);
     for (const item of (payload.providers || [])) credentialStatus[item.provider] = item;
-    updateProviderCredentialUI();
-  } catch (_) {}
+    updateProviderUI();
+  } catch (_) {
+    providerKeyStatus.textContent = 'Не удалось проверить сохранённый token';
+  }
 }
-providerElement.addEventListener('change', updateProviderCredentialUI);
-loadCredentialStatus();
-if ('SpeechRecognition' in window || 'webkitSpeechRecognition' in window) {
-  const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-  const speechRecognition = new Recognition();
-  speechRecognition.continuous = false;
-  speechRecognition.interimResults = false;
-  speechRecognition.onresult = function onSpeechResult(event) {
-    commandElement.value = event.results[0][0].transcript;
-    setStatus('Voice command captured.');
-  };
-  speechRecognition.onerror = function onSpeechError() { setStatus('Voice input failed. You can enter the command as text.'); };
-  recordButton.addEventListener('click', function startVoiceInput() { speechRecognition.start(); setStatus('Listening…'); });
-} else {
-  recordButton.disabled = true;
-  setStatus('This browser does not provide speech recognition. Text input remains available.');
-}
-capabilityButton.addEventListener('click', async function createCapabilityLink() {
-  capabilityButton.disabled = true;
-  setStatus('Creating a revocable external AI link…');
+
+async function saveProviderToken() {
+  const apiKey = apiKeyElement.value.trim();
+  if (!apiKey) {
+    providerKeyStatus.textContent = 'Сначала вставьте API token';
+    apiKeyElement.focus();
+    return;
+  }
+  saveProviderTokenButton.disabled = true;
+  providerKeyStatus.textContent = 'Проверяю token у провайдера…';
   try {
-    const response = await fetch('{{.Path}}?ai_capability_create', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({page_path:'{{.Path}}', task:document.getElementById('aiCommand').value})});
-    const payload = await response.json();
-    if (!response.ok) throw new Error(payload.error || 'Capability creation failed');
-    capabilityOutputElement.hidden = false;
-    capabilityOutputElement.textContent = payload.url;
-    setStatus('Copy this link into an AI system. Revoke it when it is no longer needed.');
-  } catch (error) { setStatus(error.message); }
-  capabilityButton.disabled = false;
-});
-executeButton.addEventListener('click', async function executeTaskOnCurrentPage() {
-  executeButton.disabled = true;
-  setStatus('Sending the current page and task to the AI provider…');
-  try {
-    const files = await Promise.all(Array.from(document.getElementById('fileInput').files || []).map(function readFile(file) {
-      return new Promise(function resolveFile(resolve, reject) {
-        const reader = new FileReader();
-        reader.onload = function fileReadCompleted() { resolve({name:file.name, content:String(reader.result).split(',')[1] || ''}); };
-        reader.onerror = reject;
-        reader.readAsDataURL(file);
-      });
-    }));
-    const response = await fetch('{{.Path}}?ai_execute', {method:'POST', credentials:'same-origin', headers:{'Content-Type':'application/json'}, body:JSON.stringify({provider:providerElement.value, model:modelElement.value, api_key:apiKeyElement.value, page_path:'{{.Path}}', task:commandElement.value, files:files})});
-    const payload = await response.json();
-    if (!response.ok) throw new Error(payload.error || 'AI task failed');
+    const body = new URLSearchParams({provider:providerElement.value, api_key:apiKey});
+    const response = await fetch('{{.Path}}?ai_provider_save', {
+      method:'POST',
+      credentials:'same-origin',
+      headers:{
+        'Content-Type':'application/x-www-form-urlencoded;charset=UTF-8',
+        'X-SiteBrush-CSRF':accountCSRF
+      },
+      body:body.toString()
+    });
+    const payload = await parseResponse(response);
+    credentialStatus[providerElement.value] = {
+      provider:providerElement.value,
+      saved:true,
+      model:payload.model || '',
+      updated_at:new Date().toISOString()
+    };
     apiKeyElement.value = '';
-    await loadCredentialStatus();
-    setStatus('The AI updated ' + payload.path + (payload.published ? ' and published it.' : '.'));
-  } catch (error) { setStatus(error.message); }
-  executeButton.disabled = false;
+    providerKeyStatus.textContent = '✓ Token работает и сохранён';
+    deleteProviderTokenButton.hidden = false;
+    fillModels(providerElement.value, payload.models || [], payload.model || '');
+  } catch (error) {
+    providerKeyStatus.textContent = 'Token не сохранён: ' + error.message;
+    modelBlock.hidden = true;
+  } finally {
+    saveProviderTokenButton.disabled = false;
+  }
+}
+
+async function deleteProviderToken() {
+  if (!window.confirm('Удалить сохранённый API token этого провайдера?')) return;
+  deleteProviderTokenButton.disabled = true;
+  try {
+    const body = new URLSearchParams({provider:providerElement.value});
+    const response = await fetch('{{.Path}}?ai_provider_delete', {
+      method:'POST',
+      credentials:'same-origin',
+      headers:{
+        'Content-Type':'application/x-www-form-urlencoded;charset=UTF-8',
+        'X-SiteBrush-CSRF':accountCSRF
+      },
+      body:body.toString()
+    });
+    await parseResponse(response);
+    delete credentialStatus[providerElement.value];
+    delete modelCache[providerElement.value];
+    providerKeyStatus.textContent = 'Token удалён';
+    modelBlock.hidden = true;
+    deleteProviderTokenButton.hidden = true;
+  } catch (error) {
+    providerKeyStatus.textContent = error.message;
+  } finally {
+    deleteProviderTokenButton.disabled = false;
+  }
+}
+
+function fileToBase64(file) {
+  return new Promise(function(resolve, reject) {
+    const reader = new FileReader();
+    reader.onload = function() { resolve({name:file.name, content:String(reader.result || '').split(',')[1] || ''}); };
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+
+async function executeTask() {
+  const task = commandElement.value.trim();
+  const saved = credentialStatus[providerElement.value];
+  if (!task) {
+    setStatus('Сначала напишите или скажите, что нужно изменить.');
+    commandElement.focus();
+    return;
+  }
+  if (!saved || !saved.saved) {
+    setStatus('Сначала проверьте и сохраните API token.');
+    providerSettings.open = true;
+    apiKeyElement.focus();
+    return;
+  }
+  executeButton.disabled = true;
+  setStatus('AI анализирует текущую страницу…');
+  try {
+    const files = await Promise.all(Array.from(fileInput.files || []).map(fileToBase64));
+    const response = await fetch('{{.Path}}?ai_execute', {
+      method:'POST',
+      credentials:'same-origin',
+      headers:{'Content-Type':'application/json','X-SiteBrush-CSRF':accountCSRF},
+      body:JSON.stringify({
+        provider:providerElement.value,
+        model:modelElement.value,
+        page_path:'{{.Path}}',
+        task:task,
+        files:files
+      })
+    });
+    const payload = await parseResponse(response);
+    setStatus('Готово. Страница ' + (payload.path || '{{.Path}}') + ' изменена. Изменения сохранены в ревизиях.');
+  } catch (error) {
+    setStatus(error.message);
+  } finally {
+    executeButton.disabled = false;
+  }
+}
+
+function setRecording(recording) {
+  recordButton.classList.toggle('ai-recording', recording);
+  recordButton.textContent = recording ? '■' : '🎙';
+  recordButton.setAttribute('aria-label', recording ? 'Остановить запись' : 'Говорить');
+  recordButton.title = recording ? 'Остановить запись' : 'Говорить';
+}
+
+function toggleVoice() {
+  if (speechRecognition) {
+    try { speechRecognition.stop(); } catch (_) {}
+    return;
+  }
+  const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!Recognition) {
+    setStatus('Голосовой ввод не поддерживается этим браузером. Можно ввести команду текстом.');
+    return;
+  }
+  const recognition = new Recognition();
+  speechRecognition = recognition;
+  recognition.continuous = false;
+  recognition.interimResults = true;
+  recognition.onstart = function() { setRecording(true); setStatus('Слушаю…'); };
+  recognition.onresult = function(event) {
+    let transcript = '';
+    for (let index = event.resultIndex; index < event.results.length; index++) transcript += event.results[index][0].transcript;
+    if (transcript.trim()) commandElement.value = transcript.trim();
+  };
+  recognition.onerror = function() { setStatus('Не удалось получить голосовую команду. Можно продолжить текстом.'); };
+  recognition.onend = function() {
+    speechRecognition = null;
+    setRecording(false);
+    if (commandElement.value.trim()) setStatus('Команда распознана. Нажмите ↑, чтобы отправить.');
+  };
+  recognition.start();
+}
+
+async function createExternalAILink() {
+  setExternalStatus('Создаю отзывную ссылку…');
+  externalAILink.value = '';
+  try {
+    const response = await fetch('{{.Path}}?ai_capability_create', {
+      method:'POST',
+      credentials:'same-origin',
+      headers:{'Content-Type':'application/json','X-SiteBrush-CSRF':accountCSRF},
+      body:JSON.stringify({page_path:'{{.Path}}', task:commandElement.value.trim()})
+    });
+    const payload = await parseResponse(response);
+    externalAILink.value = payload.url || '';
+    setExternalStatus('Ссылка готова. Её можно отозвать из управления AI-сессиями.');
+    return externalAILink.value;
+  } catch (error) {
+    setExternalStatus(error.message);
+    throw error;
+  } finally {
+    externalLinkPromise = null;
+  }
+}
+
+function ensureExternalAILink() {
+  if (externalAILink.value) return Promise.resolve(externalAILink.value);
+  if (!externalLinkPromise) externalLinkPromise = createExternalAILink();
+  return externalLinkPromise;
+}
+
+async function copyExternalAILink() {
+  const link = await ensureExternalAILink();
+  if (navigator.clipboard) {
+    await navigator.clipboard.writeText(link);
+  } else {
+    externalAILink.select();
+    document.execCommand('copy');
+  }
+  setExternalStatus('Ссылка скопирована.');
+  return link;
+}
+
+function copyAndOpenExternalAI(targetURL, name) {
+  const popup = window.open(targetURL, '_blank', 'noopener,noreferrer');
+  copyExternalAILink().then(function() {
+    setExternalStatus('Ссылка скопирована. Вставьте её в ' + name + ' вместе с заданием.');
+  }).catch(function(error) {
+    setExternalStatus(error.message);
+    if (popup) popup.close();
+  });
+}
+
+document.getElementById('fileButton').addEventListener('click', function() { fileInput.click(); });
+fileInput.addEventListener('change', function() {
+  fileStatus.textContent = Array.from(fileInput.files || []).map(function(file) { return file.name; }).join(', ');
 });
+recordButton.addEventListener('click', toggleVoice);
+executeButton.addEventListener('click', executeTask);
+providerElement.addEventListener('change', updateProviderUI);
+saveProviderTokenButton.addEventListener('click', saveProviderToken);
+deleteProviderTokenButton.addEventListener('click', deleteProviderToken);
+pageTabButton.addEventListener('click', function() { setTab(false); });
+externalTabButton.addEventListener('click', function() { setTab(true); });
+document.getElementById('copyExternalAILinkButton').addEventListener('click', function() { copyExternalAILink().catch(function(error){ setExternalStatus(error.message); }); });
+document.getElementById('renewExternalAILinkButton').addEventListener('click', function() { createExternalAILink().catch(function(){}); });
+document.getElementById('openChatGPTButton').addEventListener('click', function() { copyAndOpenExternalAI('https://chatgpt.com/', 'ChatGPT'); });
+document.getElementById('openClaudeButton').addEventListener('click', function() { copyAndOpenExternalAI('https://claude.ai/new', 'Claude'); });
+document.addEventListener('keydown', function(event) {
+  if ((event.ctrlKey || event.metaKey) && event.key === 'Enter' && !pagePanel.hidden) {
+    event.preventDefault();
+    executeTask();
+  }
+});
+
+const savedCommand = sessionStorage.getItem('sitebrush.aiEditorCommand');
+if (savedCommand) {
+  commandElement.value = savedCommand;
+  sessionStorage.removeItem('sitebrush.aiEditorCommand');
+}
+loadCredentialStatus();
+commandElement.focus();
 </script>
 </body>
 </html>
