@@ -89,6 +89,9 @@
                 <option value="anthropic">Anthropic / Claude API</option>
                 <option value="deepseek">DeepSeek</option>
                 <option value="qwen">Qwen / Alibaba Model Studio</option>
+                <option value="gemini">Google Gemini API — есть Free Tier</option>
+                <option value="groq">Groq — есть Free Plan</option>
+                <option value="mistral">Mistral — есть Free mode</option>
               </select>
             </label>
 
@@ -164,7 +167,7 @@ const modelCache = Object.create(null);
 const providerHelp = {
   'openai-compatible': {
     url:'https://platform.openai.com/api-keys',
-    text:'OpenAI: создайте secret API key и вставьте его сюда. SiteBrush проверит ключ у OpenAI и сохранит его зашифрованно.'
+    text:'OpenAI: создайте API key на platform.openai.com. Подписка ChatGPT Plus/Pro не включает API-баланс — API billing у OpenAI отдельный. SiteBrush проверяет сам ключ без платного inference-запроса.'
   },
   'anthropic': {
     url:'https://console.anthropic.com/settings/keys',
@@ -177,6 +180,18 @@ const providerHelp = {
   'qwen': {
     url:'https://modelstudio.console.alibabacloud.com/model/settings/api-key',
     text:'Qwen: откройте Alibaba Model Studio → API Key → Create API key и вставьте ключ сюда.'
+  },
+  'gemini': {
+    url:'https://aistudio.google.com/app/apikey',
+    text:'Gemini: создайте новый Auth API key в Google AI Studio. У Gemini API есть Free Tier для поддерживаемых моделей.'
+  },
+  'groq': {
+    url:'https://console.groq.com/keys',
+    text:'Groq: создайте API key в Groq Console. Free Plan позволяет тестировать модели в пределах rate limits.'
+  },
+  'mistral': {
+    url:'https://console.mistral.ai/api-keys',
+    text:'Mistral: включите Free mode в La Plateforme и создайте API key для бесплатного ограниченного использования.'
   }
 };
 let speechRecognition = null;
@@ -307,7 +322,7 @@ async function saveProviderToken() {
       updated_at:new Date().toISOString()
     };
     apiKeyElement.value = '';
-    providerKeyStatus.textContent = '✓ Token работает и сохранён';
+    providerKeyStatus.textContent = '✓ API token подтверждён и сохранён';
     deleteProviderTokenButton.hidden = false;
     fillModels(providerElement.value, payload.models || [], payload.model || '');
   } catch (error) {
