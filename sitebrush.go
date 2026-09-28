@@ -10356,8 +10356,8 @@ func recommendedAIEditorModel(provider string, models []string) string {
 		preferredExact = []string{"qwen-plus"}
 		preferredContains = []string{"qwen-plus", "qwen3"}
 	default:
-		preferredExact = []string{"gpt-6-sol", "gpt-5.4", "gpt-5", "gpt-4.1"}
-		preferredContains = []string{"sol"}
+		preferredExact = []string{"gpt-5.6-terra", "gpt-6-sol", "gpt-5.6-sol", "gpt-5.4", "gpt-5", "gpt-4.1"}
+		preferredContains = []string{"terra", "sol"}
 	}
 	for _, preferred := range preferredExact {
 		for _, model := range available {
@@ -10403,7 +10403,36 @@ func (a *App) validateAIProviderToken(ctx context.Context, provider, apiKey stri
 	if model == "" {
 		return nil, "", errors.New("AI provider has no compatible text models")
 	}
+	client, err := aiprovider.NewClient(aiprovider.Config{Provider: provider, Model: model, APIKey: apiKey, Timeout: 20 * time.Second}, nil)
+	if err != nil {
+		return nil, "", err
+	}
+	if _, err := client.Complete(ctx, aiprovider.Request{Messages: []aiprovider.Message{{Role: "user", Content: "Reply with OK."}}}); err != nil {
+		return nil, "", err
+	}
 	return models, model, nil
+}
+
+func safeAIProviderErrorMessage(err error) string {
+	var providerError *aiprovider.HTTPError
+	if errors.As(err, &providerError) {
+		switch providerError.StatusCode {
+		case http.StatusUnauthorized:
+			return "API token отклонён провайдером. Проверьте, что ключ скопирован полностью."
+		case http.StatusForbidden:
+			return "API token принят, но у него нет доступа к выбранной AI-модели."
+		case http.StatusTooManyRequests:
+			return "AI-провайдер отклонил запрос из-за quota, billing или rate limit."
+		case http.StatusBadRequest:
+			return "AI-провайдер отклонил тестовый запрос. Доступная модель или параметры аккаунта не подходят."
+		default:
+			return fmt.Sprintf("AI-провайдер вернул HTTP %d.", providerError.StatusCode)
+		}
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "AI-провайдер не ответил вовремя."
+	}
+	return "Не удалось связаться с AI-провайдером."
 }
 
 func (a *App) saveAIProviderCredentialEndpoint(w http.ResponseWriter, r *http.Request) {
@@ -10428,7 +10457,7 @@ func (a *App) saveAIProviderCredentialEndpoint(w http.ResponseWriter, r *http.Re
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		w.WriteHeader(http.StatusBadRequest)
-		_ = json.NewEncoder(w).Encode(map[string]string{"error": "API token rejected by the selected AI provider"})
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": safeAIProviderErrorMessage(err)})
 		return
 	}
 	vaultKey, err := ensureAIProviderVaultKey(w, r)
@@ -10714,7 +10743,7 @@ func (a *App) executeAIEditorPageRequest(w http.ResponseWriter, r *http.Request,
 		},
 	}})
 	if err != nil {
-		http.Error(w, "AI provider request failed", http.StatusBadGateway)
+		http.Error(w, safeAIProviderErrorMessage(err), http.StatusBadGateway)
 		return
 	}
 	modelResult, err := parseAIEditorModelResult(modelResponse.Text)
@@ -10800,7 +10829,7 @@ func (a *App) executeAIEditorSiteRequest(w http.ResponseWriter, r *http.Request,
 		{Role: "user", Content: siteContext.String()},
 	}})
 	if err != nil {
-		http.Error(w, "AI provider request failed", http.StatusBadGateway)
+		http.Error(w, safeAIProviderErrorMessage(err), http.StatusBadGateway)
 		return
 	}
 	modelResult, err := parseAIEditorModelResult(modelResponse.Text)

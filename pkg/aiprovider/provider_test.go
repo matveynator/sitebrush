@@ -148,8 +148,13 @@ func TestOllamaIsRejectedByBuiltInPublicProviderAdapter(t *testing.T) {
 
 func TestDefaultProviderURLsAndOpenAIResponse(t *testing.T) {
 	for _, provider := range []string{ProviderOpenAICompatible, ProviderAnthropic, ProviderDeepSeek, ProviderQwen} {
-		client, err := NewClient(Config{Provider: provider, Model: "model", APIKey: "key"}, &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
-			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"choices":[{"message":{"content":"ok"}}]}`)), Header: make(http.Header)}, nil
+		currentProvider := provider
+		client, err := NewClient(Config{Provider: currentProvider, Model: "model", APIKey: "key"}, &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+			body := `{"choices":[{"message":{"content":"ok"}}]}`
+			if currentProvider == ProviderOpenAICompatible {
+				body = `{"output":[{"type":"message","content":[{"type":"output_text","text":"ok"}]}]}`
+			}
+			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header)}, nil
 		})})
 		if err != nil {
 			t.Fatalf("provider=%s err=%v", provider, err)
@@ -371,5 +376,57 @@ func TestSecretEncryptionContextPreventsCredentialRebinding(t *testing.T) {
 		if _, err := DecryptSecretWithContext(key, ciphertext, wrongContext); err == nil {
 			t.Fatalf("SECURITY: encrypted provider credential accepted rebound context %q", wrongContext)
 		}
+	}
+}
+
+
+func TestOpenAICompatibleUsesResponsesAPI(t *testing.T) {
+	client, err := NewClient(Config{Provider: ProviderOpenAICompatible, Model: "gpt-5.6-terra", APIKey: "secret"}, &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		if request.URL.String() != "https://api.openai.com/v1/responses" {
+			return nil, errors.New("unexpected OpenAI Responses endpoint")
+		}
+		body, err := io.ReadAll(request.Body)
+		if err != nil {
+			return nil, err
+		}
+		if !strings.Contains(string(body), `"instructions":"system instructions"`) || !strings.Contains(string(body), `"input":[{"role":"user","content":"hello"}]`) {
+			return nil, errors.New("unexpected OpenAI Responses payload")
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body: io.NopCloser(strings.NewReader(`{"output":[{"type":"message","content":[{"type":"output_text","text":"ok"}]}]}`)),
+			Header: make(http.Header),
+		}, nil
+	})})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := client.Complete(context.Background(), Request{Messages: []Message{
+		{Role: "system", Content: "system instructions"},
+		{Role: "user", Content: "hello"},
+	}})
+	if err != nil || result.Text != "ok" {
+		t.Fatalf("result=%q err=%v", result.Text, err)
+	}
+}
+
+func TestProviderHTTPErrorDoesNotEchoResponseBody(t *testing.T) {
+	client, err := NewClient(Config{Provider: ProviderDeepSeek, Model: "deepseek-chat", APIKey: "secret"}, &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusTooManyRequests,
+			Body: io.NopCloser(strings.NewReader(`{"error":"PRIVATE_PROVIDER_DETAILS"}`)),
+			Header: make(http.Header),
+		}, nil
+	})})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = client.Complete(context.Background(), Request{Messages: []Message{{Role: "user", Content: "x"}}})
+	var providerErr *HTTPError
+	if !errors.As(err, &providerErr) || providerErr.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("error=%T %v", err, err)
+	}
+	if strings.Contains(err.Error(), "PRIVATE_PROVIDER_DETAILS") {
+		t.Fatal("provider response body leaked through error")
 	}
 }

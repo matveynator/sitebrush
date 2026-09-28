@@ -34,6 +34,17 @@ var (
 	ErrInvalidConfiguration = errors.New("AI provider configuration is invalid")
 )
 
+type HTTPError struct {
+	StatusCode int
+}
+
+func (err *HTTPError) Error() string {
+	if err == nil {
+		return "AI provider request failed"
+	}
+	return fmt.Sprintf("AI provider returned HTTP %d", err.StatusCode)
+}
+
 type Config struct {
 	Provider         string
 	BaseURL          string
@@ -209,7 +220,31 @@ func (client *Client) Complete(ctx context.Context, request Request) (Response, 
 	endpoint := client.baseURL + "/chat/completions"
 	var payload []byte
 	var err error
-	if client.configuration.Provider == ProviderAnthropic {
+	switch client.configuration.Provider {
+	case ProviderOpenAICompatible:
+		endpoint = client.baseURL + "/responses"
+		systemParts := make([]string, 0, 2)
+		conversation := make([]Message, 0, len(request.Messages))
+		for _, message := range request.Messages {
+			if strings.EqualFold(strings.TrimSpace(message.Role), "system") {
+				systemParts = append(systemParts, message.Content)
+				continue
+			}
+			conversation = append(conversation, message)
+		}
+		if len(conversation) == 0 {
+			return Response{}, ErrInvalidConfiguration
+		}
+		payload, err = json.Marshal(struct {
+			Model        string    `json:"model"`
+			Instructions string    `json:"instructions,omitempty"`
+			Input        []Message `json:"input"`
+		}{
+			Model:        client.configuration.Model,
+			Instructions: strings.Join(systemParts, "\n\n"),
+			Input:        conversation,
+		})
+	case ProviderAnthropic:
 		endpoint = client.baseURL + "/messages"
 		systemParts := make([]string, 0, 2)
 		conversation := make([]Message, 0, len(request.Messages))
@@ -236,7 +271,7 @@ func (client *Client) Complete(ctx context.Context, request Request) (Response, 
 			Messages: conversation,
 			Stream: request.Stream,
 		})
-	} else {
+	default:
 		payload, err = json.Marshal(struct {
 			Model    string    `json:"model"`
 			Messages []Message `json:"messages"`
@@ -272,7 +307,36 @@ func (client *Client) Complete(ctx context.Context, request Request) (Response, 
 		return Response{}, errors.New("AI provider response is too large")
 	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return Response{}, fmt.Errorf("AI provider returned HTTP %d", response.StatusCode)
+		return Response{}, &HTTPError{StatusCode: response.StatusCode}
+	}
+	if client.configuration.Provider == ProviderOpenAICompatible {
+		var openAIResponse struct {
+			Output []struct {
+				Type    string `json:"type"`
+				Content []struct {
+					Type string `json:"type"`
+					Text string `json:"text"`
+				} `json:"content"`
+			} `json:"output"`
+		}
+		if err := json.Unmarshal(body, &openAIResponse); err != nil {
+			return Response{}, err
+		}
+		var textParts []string
+		for _, output := range openAIResponse.Output {
+			if output.Type != "" && output.Type != "message" {
+				continue
+			}
+			for _, content := range output.Content {
+				if content.Type == "output_text" && strings.TrimSpace(content.Text) != "" {
+					textParts = append(textParts, content.Text)
+				}
+			}
+		}
+		if len(textParts) == 0 {
+			return Response{}, errors.New("AI provider response has no output text")
+		}
+		return Response{Text: strings.Join(textParts, "")}, nil
 	}
 	if client.configuration.Provider == ProviderAnthropic {
 		var anthropicResponse struct {

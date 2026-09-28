@@ -11561,7 +11561,7 @@ func TestRecommendedAIEditorModelPrefersBalancedOptions(t *testing.T) {
 		models   []string
 		want     string
 	}{
-		{aiprovider.ProviderOpenAICompatible, []string{"gpt-6-luna", "gpt-6-sol", "gpt-6-pro"}, "gpt-6-sol"},
+		{aiprovider.ProviderOpenAICompatible, []string{"gpt-6-luna", "gpt-5.6-terra", "gpt-6-sol", "gpt-6-pro"}, "gpt-5.6-terra"},
 		{aiprovider.ProviderAnthropic, []string{"claude-haiku-5", "claude-sonnet-5", "claude-opus-5"}, "claude-sonnet-5"},
 		{aiprovider.ProviderDeepSeek, []string{"deepseek-reasoner", "deepseek-chat"}, "deepseek-chat"},
 		{aiprovider.ProviderQwen, []string{"qwen-turbo", "qwen-plus", "qwen-max"}, "qwen-plus"},
