@@ -69,7 +69,6 @@ jobs:
               if aiCapabilityRequest {
                   a.aiCapabilityQueryEndpoint(w, r, requestDomain)
                   return
-              }
           """
               elif 'hasQueryFlag(r, "ai_capability_create")' in ours and not theirs.strip():
                   replacement = ours.replace('\tpublicTrialEndpoint := publicTrialEndpointFromRequest(r)\n', '')
