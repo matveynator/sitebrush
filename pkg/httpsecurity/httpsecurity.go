@@ -142,7 +142,7 @@ func SetSensitiveCookie(w http.ResponseWriter, r *http.Request, cookie *http.Coo
 	}
 	cookie.Path = "/"
 	cookie.HttpOnly = true
-	if cookie.SameSite == http.SameSiteDefaultMode {
+	if cookie.SameSite == 0 || cookie.SameSite == http.SameSiteDefaultMode {
 		cookie.SameSite = http.SameSiteLaxMode
 	}
 	cookie.Secure = !IsLocalRequest(r)
