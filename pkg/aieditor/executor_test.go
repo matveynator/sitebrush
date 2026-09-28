@@ -93,7 +93,7 @@ func TestValidateAcceptsSupportedOperationsAndEnforcesLimits(t *testing.T) {
 func TestExecutorRejectsMissingStoreAndClosedExecutor(t *testing.T) {
 	executor := NewExecutor(nil, 1)
 	done := make(chan struct{})
-	reply := make(chan Result, 1)
+	reply := make(chan Result)
 	if err := executor.Submit(Task{Request: Request{Operation: OperationReadPage, Path: "/index"}, Done: done, Reply: reply}); err != nil {
 		t.Fatal(err)
 	}
