@@ -35,7 +35,10 @@
     .ai-settings-grid label{display:grid;gap:5px;font-size:12px;color:var(--bs-secondary-color)}
     .ai-token-actions{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
     .ai-token-status{font-size:13px;font-weight:600}
-    .ai-model-block{display:grid;gap:5px;padding-top:4px}
+    .ai-provider-step{display:grid;gap:8px;padding:10px 0}
+    .ai-provider-step-title{font-size:13px;font-weight:700;color:var(--bs-body-color)}
+    .ai-provider-step-note{font-size:12px;color:var(--bs-secondary-color)}
+    .ai-model-block{display:grid;gap:5px;padding-top:10px;border-top:1px solid var(--bs-border-color)}
     .ai-model-help{font-size:12px;color:var(--bs-secondary-color)}
     .external-box{display:grid;gap:12px}
     .external-link-row{display:flex;gap:8px;align-items:center}
@@ -73,16 +76,20 @@
             </div>
             <div class="ai-right">
               <button class="ai-round" type="button" id="recordButton" aria-label="Говорить" title="Говорить">🎙</button>
-              <button class="ai-round ai-send" type="button" id="executeButton" aria-label="Отправить" title="Отправить">↑</button>
+              <button class="ai-round ai-send" type="button" id="executeButton" aria-label="Отправить" title="Сначала подтвердите API key" disabled>↑</button>
             </div>
           </div>
         </div>
 
         <div id="status" class="ai-status" role="status"></div>
 
-        <details class="ai-settings" id="providerSettings">
+        <details class="ai-settings" id="providerSettings" open>
           <summary>Настройки AI-провайдера</summary>
           <div class="ai-settings-grid">
+            <div class="ai-provider-step">
+              <div class="ai-provider-step-title">1. Подключите AI-провайдера</div>
+              <div class="ai-provider-step-note">Сначала выберите провайдера, вставьте API key и нажмите «Проверить ключ и сохранить». Пока ключ не подтверждён, отправка команды отключена.</div>
+            </div>
             <label>Провайдер
               <select class="form-select" id="provider">
                 <option value="openai-compatible">OpenAI / ChatGPT API</option>
@@ -100,19 +107,20 @@
             </label>
             <div class="ai-token-actions">
               <a id="providerKeyLink" class="btn btn-outline-secondary btn-sm" href="https://platform.openai.com/api-keys" target="_blank" rel="noopener noreferrer">Получить token ↗</a>
-              <button id="saveProviderTokenButton" class="btn btn-primary btn-sm" type="button">Проверить и сохранить</button>
+              <button id="saveProviderTokenButton" class="btn btn-primary btn-sm" type="button">Проверить ключ и сохранить</button>
               <button id="deleteProviderTokenButton" class="btn btn-outline-danger btn-sm" type="button" hidden>Удалить token</button>
               <span class="ai-token-status" id="providerKeyStatus"></span>
             </div>
             <div class="small text-body-secondary" id="providerKeyHelp">OpenAI: создайте secret API key и вставьте его сюда. SiteBrush проверит ключ у OpenAI и сохранит его зашифрованно.</div>
 
             <div class="ai-model-block" id="modelBlock" hidden>
-              <label>Модель <span class="text-body-secondary">(необязательно)</span>
+              <div class="ai-provider-step-title">2. Модель — необязательно</div>
+              <label>Модель <span class="text-body-secondary">(можно не выбирать)</span>
                 <select class="form-select" id="model">
                   <option value="">Автоматически — сбалансированная модель</option>
                 </select>
               </label>
-              <div class="ai-model-help">Выбор модели появляется только после успешной проверки token. Если ничего не выбирать, SiteBrush использует рекомендуемую сбалансированную модель.</div>
+              <div class="ai-model-help">Этот выбор появляется только после успешной проверки ключа. Если ничего не менять, SiteBrush автоматически использует рекомендуемую сбалансированную модель.</div>
             </div>
           </div>
         </details>
@@ -224,7 +232,7 @@ function fillModels(provider, models, selectedModel) {
   modelElement.innerHTML = '';
   const automatic = document.createElement('option');
   automatic.value = '';
-  automatic.textContent = selectedModel ? 'Автоматически — ' + selectedModel : 'Автоматически — сбалансированная модель';
+  automatic.textContent = selectedModel ? 'Автоматически — рекомендуемая: ' + selectedModel : 'Автоматически — рекомендуемая сбалансированная модель';
   modelElement.appendChild(automatic);
   for (const model of modelCache[provider]) {
     const option = document.createElement('option');
@@ -261,21 +269,29 @@ function updateProviderUI() {
   providerKeyHelp.textContent = help.text;
   const saved = credentialStatus[provider];
   if (saved && saved.saved && saved.unlocked) {
-    providerKeyStatus.textContent = '✓ Token проверен, сохранён и доступен в этом браузере';
+    providerKeyStatus.textContent = '✓ API key работает и сохранён';
     deleteProviderTokenButton.hidden = false;
     apiKeyElement.value = '';
-    apiKeyElement.placeholder = 'Token уже сохранён — вставьте новый только для замены';
+    apiKeyElement.placeholder = 'Ключ уже сохранён — вставьте новый только для замены';
+    executeButton.disabled = false;
+    executeButton.title = 'Отправить';
     loadModelsForSavedProvider(provider);
   } else if (saved && saved.saved) {
-    providerKeyStatus.textContent = 'Token зашифрован в вашей БД, но этот браузер не имеет ключа. Вставьте token ещё раз.';
+    providerKeyStatus.textContent = 'Ключ сохранён, но этот браузер не может его открыть. Вставьте API key ещё раз.';
     deleteProviderTokenButton.hidden = false;
-    apiKeyElement.placeholder = 'Повторно вставьте API token для этого браузера';
+    apiKeyElement.placeholder = 'Повторно вставьте API key для этого браузера';
     modelBlock.hidden = true;
+    executeButton.disabled = true;
+    executeButton.title = 'Сначала подтвердите API key';
+    providerSettings.open = true;
   } else {
-    providerKeyStatus.textContent = 'Token не сохранён';
+    providerKeyStatus.textContent = 'API key ещё не подтверждён';
     deleteProviderTokenButton.hidden = true;
-    apiKeyElement.placeholder = 'Вставьте API token';
+    apiKeyElement.placeholder = 'Вставьте API key';
     modelBlock.hidden = true;
+    executeButton.disabled = true;
+    executeButton.title = 'Сначала подтвердите API key';
+    providerSettings.open = true;
   }
 }
 
@@ -289,7 +305,10 @@ async function loadCredentialStatus() {
     for (const item of (payload.providers || [])) credentialStatus[item.provider] = item;
     updateProviderUI();
   } catch (_) {
-    providerKeyStatus.textContent = 'Не удалось проверить сохранённый token';
+    providerKeyStatus.textContent = 'Не удалось проверить сохранённый API key';
+    executeButton.disabled = true;
+    executeButton.title = 'Сначала подтвердите API key';
+    providerSettings.open = true;
   }
 }
 
@@ -301,7 +320,9 @@ async function saveProviderToken() {
     return;
   }
   saveProviderTokenButton.disabled = true;
-  providerKeyStatus.textContent = 'Проверяю token у провайдера…';
+  executeButton.disabled = true;
+  modelBlock.hidden = true;
+  providerKeyStatus.textContent = 'Проверяю API key у провайдера…';
   try {
     const body = new URLSearchParams({provider:providerElement.value, api_key:apiKey});
     const response = await fetch('{{.Path}}?ai_provider_save', {
@@ -322,12 +343,18 @@ async function saveProviderToken() {
       updated_at:new Date().toISOString()
     };
     apiKeyElement.value = '';
-    providerKeyStatus.textContent = '✓ API token подтверждён и сохранён';
+    providerKeyStatus.textContent = '✓ API key работает и сохранён';
     deleteProviderTokenButton.hidden = false;
+    executeButton.disabled = false;
+    executeButton.title = 'Отправить';
     fillModels(providerElement.value, payload.models || [], payload.model || '');
+    setStatus('AI-провайдер подключён. Можно отправлять команду. Модель выбрана автоматически; менять её необязательно.');
   } catch (error) {
-    providerKeyStatus.textContent = 'Token не сохранён: ' + error.message;
+    providerKeyStatus.textContent = 'Ключ не сохранён: ' + error.message;
     modelBlock.hidden = true;
+    executeButton.disabled = true;
+    executeButton.title = 'Сначала подтвердите API key';
+    providerSettings.open = true;
   } finally {
     saveProviderTokenButton.disabled = false;
   }
@@ -350,9 +377,12 @@ async function deleteProviderToken() {
     await parseResponse(response);
     delete credentialStatus[providerElement.value];
     delete modelCache[providerElement.value];
-    providerKeyStatus.textContent = 'Token удалён';
+    providerKeyStatus.textContent = 'API key удалён';
     modelBlock.hidden = true;
     deleteProviderTokenButton.hidden = true;
+    executeButton.disabled = true;
+    executeButton.title = 'Сначала подтвердите API key';
+    providerSettings.open = true;
   } catch (error) {
     providerKeyStatus.textContent = error.message;
   } finally {
