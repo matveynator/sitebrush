@@ -43,6 +43,7 @@ import (
 	"github.com/matveynator/netchan"
 	"github.com/matveynator/sitebrush/v2/pkg/accountauth"
 	"github.com/matveynator/sitebrush/v2/pkg/aieditor"
+	"github.com/matveynator/sitebrush/v2/pkg/aiprovider"
 	browserstats "github.com/matveynator/sitebrush/v2/pkg/analytics"
 	"github.com/matveynator/sitebrush/v2/pkg/channelacme"
 	"github.com/matveynator/sitebrush/v2/pkg/crawler"
