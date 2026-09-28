@@ -466,3 +466,42 @@ func TestFreeTierProviderEndpointsUseBearerAuthentication(t *testing.T) {
 		})
 	}
 }
+
+
+func TestListModelsSupportsDirectArrayResponses(t *testing.T) {
+	client := &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		if request.URL.String() != "https://api.mistral.ai/v1/models" {
+			return nil, errors.New("unexpected Mistral models endpoint")
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body: io.NopCloser(strings.NewReader(`[{"id":"mistral-small-latest"},{"id":"mistral-large-latest"}]`)),
+			Header: make(http.Header),
+		}, nil
+	})}
+	models, err := ListModels(context.Background(), Config{Provider: ProviderMistral, APIKey: "secret"}, client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(models) != 2 || models[0] != "mistral-large-latest" || models[1] != "mistral-small-latest" {
+		t.Fatalf("models=%v", models)
+	}
+}
+
+func TestListModelsReturnsTypedHTTPError(t *testing.T) {
+	client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusUnauthorized,
+			Body: io.NopCloser(strings.NewReader(`{"error":"secret details"}`)),
+			Header: make(http.Header),
+		}, nil
+	})}
+	_, err := ListModels(context.Background(), Config{Provider: ProviderGemini, APIKey: "bad-key"}, client)
+	var providerErr *HTTPError
+	if !errors.As(err, &providerErr) || providerErr.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("error=%T %v", err, err)
+	}
+	if strings.Contains(err.Error(), "secret details") {
+		t.Fatal("provider error body leaked")
+	}
+}
