@@ -25,6 +25,9 @@ const (
 	ProviderAnthropic        = "anthropic"
 	ProviderDeepSeek         = "deepseek"
 	ProviderQwen             = "qwen"
+	ProviderGemini           = "gemini"
+	ProviderGroq             = "groq"
+	ProviderMistral          = "mistral"
 	ProviderOllama           = "ollama"
 	DefaultMaxResponseBytes  = 8 << 20
 )
@@ -80,7 +83,7 @@ func NewClient(configuration Config, httpClient *http.Client) (*Client, error) {
 		return nil, ErrInvalidConfiguration
 	}
 	switch configuration.Provider {
-	case ProviderOpenAICompatible, ProviderAnthropic, ProviderDeepSeek, ProviderQwen, ProviderOllama:
+	case ProviderOpenAICompatible, ProviderAnthropic, ProviderDeepSeek, ProviderQwen, ProviderGemini, ProviderGroq, ProviderMistral, ProviderOllama:
 	default:
 		return nil, fmt.Errorf("%w: %s", ErrProviderUnsupported, configuration.Provider)
 	}
@@ -124,6 +127,12 @@ func defaultBaseURL(provider string) string {
 		return "https://api.deepseek.com/v1"
 	case ProviderQwen:
 		return "https://dashscope.aliyuncs.com/compatible-mode/v1"
+	case ProviderGemini:
+		return "https://generativelanguage.googleapis.com/v1beta/openai"
+	case ProviderGroq:
+		return "https://api.groq.com/openai/v1"
+	case ProviderMistral:
+		return "https://api.mistral.ai/v1"
 	default:
 		return "https://api.openai.com/v1"
 	}
@@ -136,7 +145,7 @@ func ListModels(ctx context.Context, configuration Config, httpClient *http.Clie
 		return nil, ErrInvalidConfiguration
 	}
 	switch configuration.Provider {
-	case ProviderOpenAICompatible, ProviderAnthropic, ProviderDeepSeek, ProviderQwen:
+	case ProviderOpenAICompatible, ProviderAnthropic, ProviderDeepSeek, ProviderQwen, ProviderGemini, ProviderGroq, ProviderMistral:
 	default:
 		return nil, fmt.Errorf("%w: %s", ErrProviderUnsupported, configuration.Provider)
 	}
