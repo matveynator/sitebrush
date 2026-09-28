@@ -17692,6 +17692,66 @@ func TestSecurityBoundaryAuthenticatedMutationDeleteRejectsCrossOriginWithoutSes
 	}
 }
 
+func TestSecurityBoundaryAuthenticatedMutationEditorActionsStillEnforceIPAllowlist(t *testing.T) {
+	application, rawDB := newTestApplication(t)
+	for _, statement := range []string{
+		`INSERT INTO users(domain,email,password,is_admin) VALUES('localhost','admin@example.com','password',1)`,
+		`INSERT INTO admin_ip_policies(domain,email,enabled_at) VALUES('localhost','admin@example.com',1)`,
+		`INSERT INTO admin_allowed_ips(domain,email,client_ip,added_at) VALUES('localhost','admin@example.com','192.0.2.1',1)`,
+		`INSERT INTO pages(domain,path,title,html,published) VALUES('localhost','/','Home','<p>old</p>',1)`,
+	} {
+		if _, err := rawDB.Exec(statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	revisionResult, err := rawDB.Exec(`INSERT INTO revisions(domain,page_path,html,created_at,is_active) VALUES(?,?,?,?,1)`, "localhost", "/", "<p>revision</p>", time.Now().UTC().Format(time.RFC3339))
+	if err != nil {
+		t.Fatal(err)
+	}
+	revisionID, _ := revisionResult.LastInsertId()
+	adminCookie := newAdminSessionCookie(t, application, "admin@example.com")
+	csrfRequest := httptest.NewRequest(http.MethodGet, "http://localhost:8080/", nil)
+	csrfRequest.AddCookie(adminCookie)
+	csrfToken := accountCSRF(csrfRequest)
+
+	for _, testCase := range []struct {
+		name string
+		url  string
+		form url.Values
+	}{
+		{name: "save", url: "http://localhost:8080/?save", form: url.Values{"path": {"/"}, "title": {"Home"}, "html": {"<p>new</p>"}, "account_csrf": {csrfToken}}},
+		{name: "delete", url: fmt.Sprintf("http://localhost:8080/?delete=%d", revisionID), form: url.Values{"account_csrf": {csrfToken}}},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodPost, testCase.url, strings.NewReader(testCase.form.Encode()))
+			request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			request.Header.Set("Origin", "null")
+			request.RemoteAddr = "192.0.2.2:1234"
+			request.AddCookie(adminCookie)
+			response := httptest.NewRecorder()
+			application.route(response, request)
+			if response.Code != http.StatusForbidden {
+				t.Fatalf("unlisted IP editor mutation status=%d body=%q", response.Code, response.Body.String())
+			}
+		})
+	}
+
+	var pageHTML string
+	if err := rawDB.QueryRow(`SELECT html FROM pages WHERE domain='localhost' AND path='/'`).Scan(&pageHTML); err != nil {
+		t.Fatal(err)
+	}
+	if pageHTML != "<p>old</p>" {
+		t.Fatalf("IP-blocked save changed page HTML=%q", pageHTML)
+	}
+	var active int
+	if err := rawDB.QueryRow(`SELECT is_active FROM revisions WHERE id=?`, revisionID).Scan(&active); err != nil {
+		t.Fatal(err)
+	}
+	if active != 1 {
+		t.Fatal("IP-blocked delete changed revision state")
+	}
+}
+
 func TestSecurityBoundaryAuthenticatedMutationAllowsSameOrigin(t *testing.T) {
 	application, rawDB := newTestApplication(t)
 	if _, err := rawDB.Exec(
