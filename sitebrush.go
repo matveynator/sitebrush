@@ -10107,7 +10107,7 @@ func (a *App) aiEditorPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.render(w, r, "edit_ai.html", map[string]any{
-		"Path":         cleanPath(r.URL.Query().Get("path")),
+		"Path":         cleanPath(firstNonEmpty(r.URL.Query().Get("path"), r.URL.Path)),
 		"ProviderList": []string{aiprovider.ProviderOpenAICompatible, aiprovider.ProviderAnthropic, aiprovider.ProviderDeepSeek, aiprovider.ProviderQwen},
 	})
 }
@@ -31200,7 +31200,7 @@ func buildContextMenuScript(isAdmin bool, isServerManager bool, isFrozen bool, p
     executeButtonElement.addEventListener("click", function executeAIEditorTask() {
       sessionStorage.setItem("sitebrush.aiEditorCommand", commandElement.value);
       sessionStorage.setItem("sitebrush.aiEditorFileNames", JSON.stringify(Array.from(fileInputElement.files || []).map(function fileName(file) { return file.name; })));
-      window.location.href = currentPagePath + "?ai";
+      window.location.href = currentPagePath + "?ai&path=" + encodeURIComponent(currentPagePath);
     });
     linkButtonElement.addEventListener("click", async function createAIEditorCapabilityLink() {
       linkButtonElement.disabled = true;

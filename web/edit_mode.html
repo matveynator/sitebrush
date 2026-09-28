@@ -92,7 +92,7 @@
       </div>
     </div>
     <footer class="ai-editor-modal-footer">
-      <button class="btn btn-primary" type="button" id="continueAIEditorButton">Открыть AI-редактор</button>
+      <button class="btn btn-primary" type="button" id="continueAIEditorButton">Выполнить задачу на текущей странице</button>
     </footer>
   </section>
 </div>
@@ -123,7 +123,8 @@ aiEditorFilesElement.addEventListener('change', function showSelectedAIEditorFil
 });
 document.getElementById('continueAIEditorButton').addEventListener('click', function continueToAIEditor() {
   sessionStorage.setItem('sitebrush.aiEditorCommand', aiEditorCommandElement.value);
-  window.location.href = {{.AIPath}};
+  sessionStorage.setItem('sitebrush.aiEditorFileNames', JSON.stringify(Array.from(aiEditorFilesElement.files || []).map(function fileName(file) { return file.name; })));
+  window.location.href = {{.AIPath}} + '&path=' + encodeURIComponent(window.location.pathname);
 });
 document.getElementById('createAIEditorLinkButton').addEventListener('click', async function createAIEditorLink() {
   const createLinkButton = document.getElementById('createAIEditorLinkButton');
