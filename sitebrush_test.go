@@ -11308,36 +11308,59 @@ func TestAIProviderCredentialSchemaIsPartOfCompletenessGate(t *testing.T) {
 }
 
 func TestAIProviderTokenLinksAreExposedWithoutEmbeddingTokens(t *testing.T) {
-	for _, templateName := range []string{"edit_mode.html", "edit_ai.html"} {
-		templateBytes, err := embeddedWebFiles.ReadFile("web/" + templateName)
-		if err != nil {
-			t.Fatal(err)
+	templateBytes, err := embeddedWebFiles.ReadFile("web/edit_ai.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	templateSource := string(templateBytes)
+	for _, expectedURL := range []string{
+		"https://platform.openai.com/api-keys",
+		"https://console.anthropic.com/settings/keys",
+		"https://platform.deepseek.com/api_keys",
+		"https://modelstudio.console.alibabacloud.com/model/settings/api-key",
+	} {
+		if !strings.Contains(templateSource, expectedURL) {
+			t.Fatalf("edit_ai.html is missing provider key URL %q", expectedURL)
 		}
-		templateSource := string(templateBytes)
-		for _, expectedURL := range []string{
-			"https://platform.openai.com/api-keys",
-			"https://console.anthropic.com/settings/keys",
-			"https://platform.deepseek.com/api_keys",
-			"https://modelstudio.console.alibabacloud.com/model/settings/api-key",
-		} {
-			if !strings.Contains(templateSource, expectedURL) {
-				t.Fatalf("%s is missing provider key URL %q", templateName, expectedURL)
-			}
+	}
+	for _, forbidden := range []string{"sk-", "secret-provider-token", "encrypted_api_key"} {
+		if strings.Contains(templateSource, forbidden) {
+			t.Fatalf("edit_ai.html embeds secret-like material %q", forbidden)
 		}
 	}
 }
 
 func TestEditorTemplatesExposeThreeModeNavigation(t *testing.T) {
-	templateBytes, err := embeddedWebFiles.ReadFile("web/edit_mode.html")
+	modeTemplateBytes, err := embeddedWebFiles.ReadFile("web/edit_mode.html")
 	if err != nil {
 		t.Fatal(err)
 	}
-	templateSource := string(templateBytes)
-	for _, expectedFragment := range []string{"?visual", "?text", "openAIEditorButton", "aiEditorModalBackdrop", "createAIEditorLinkButton", "startAIEditorVoiceButton", "sendAIEditorButton", "aiEditorScope", "?ai_execute"} {
-		if !strings.Contains(templateSource, expectedFragment) {
+	modeTemplate := string(modeTemplateBytes)
+	for _, expectedFragment := range []string{"?visual", "?text", "?ai", "Редактирование голосом"} {
+		if !strings.Contains(modeTemplate, expectedFragment) {
 			t.Fatalf("edit_mode.html does not expose %q", expectedFragment)
 		}
 	}
+	for _, forbiddenFragment := range []string{"aiEditorModalBackdrop", "openAIEditorButton", "aiEditorScope"} {
+		if strings.Contains(modeTemplate, forbiddenFragment) {
+			t.Fatalf("edit_mode.html still embeds duplicate AI UI %q", forbiddenFragment)
+		}
+	}
+
+	aiTemplateBytes, err := embeddedWebFiles.ReadFile("web/edit_ai.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	aiTemplate := string(aiTemplateBytes)
+	for _, expectedFragment := range []string{"pageTabButton", "externalTabButton", "saveProviderTokenButton", "?ai_provider_save", "?ai_execute", "openChatGPTButton", "openClaudeButton"} {
+		if !strings.Contains(aiTemplate, expectedFragment) {
+			t.Fatalf("edit_ai.html does not expose %q", expectedFragment)
+		}
+	}
+	if strings.Contains(aiTemplate, "aiEditorScope") || strings.Contains(aiTemplate, "Весь сайт") {
+		t.Fatal("edit_ai.html still exposes an internal site/page scope selector")
+	}
+
 	for _, templateName := range []string{"edit.html", "edit_raw.html"} {
 		templateBytes, err := embeddedWebFiles.ReadFile("web/" + templateName)
 		if err != nil {
@@ -11346,6 +11369,31 @@ func TestEditorTemplatesExposeThreeModeNavigation(t *testing.T) {
 		if strings.Contains(string(templateBytes), "editor-mode-menu") {
 			t.Fatalf("%s unexpectedly owns the mode menu", templateName)
 		}
+	}
+}
+
+func TestRecommendedAIEditorModelPrefersBalancedOptions(t *testing.T) {
+	cases := []struct {
+		provider string
+		models   []string
+		want     string
+	}{
+		{aiprovider.ProviderOpenAICompatible, []string{"gpt-6-luna", "gpt-6-sol", "gpt-6-pro"}, "gpt-6-sol"},
+		{aiprovider.ProviderAnthropic, []string{"claude-haiku-5", "claude-sonnet-5", "claude-opus-5"}, "claude-sonnet-5"},
+		{aiprovider.ProviderDeepSeek, []string{"deepseek-reasoner", "deepseek-chat"}, "deepseek-chat"},
+		{aiprovider.ProviderQwen, []string{"qwen-turbo", "qwen-plus", "qwen-max"}, "qwen-plus"},
+	}
+	for _, testCase := range cases {
+		if got := recommendedAIEditorModel(testCase.provider, testCase.models); got != testCase.want {
+			t.Fatalf("provider=%s model=%q want=%q", testCase.provider, got, testCase.want)
+		}
+	}
+}
+
+func TestAIEditorModelsExcludeNonTextModels(t *testing.T) {
+	models := aiEditorModels(aiprovider.ProviderOpenAICompatible, []string{"text-embedding-3-large", "gpt-6-sol", "gpt-image-1", "whisper-1"})
+	if len(models) != 1 || models[0] != "gpt-6-sol" {
+		t.Fatalf("filtered models=%v", models)
 	}
 }
 
