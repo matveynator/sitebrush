@@ -191,19 +191,30 @@ func ListModels(ctx context.Context, configuration Config, httpClient *http.Clie
 		return nil, errors.New("AI provider model response is too large")
 	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return nil, fmt.Errorf("AI provider token validation returned HTTP %d", response.StatusCode)
+		return nil, &HTTPError{StatusCode: response.StatusCode}
+	}
+	type modelRecord struct {
+		ID string `json:"id"`
 	}
 	var payload struct {
-		Data []struct {
-			ID string `json:"id"`
-		} `json:"data"`
+		Data []modelRecord `json:"data"`
 	}
-	if err := json.Unmarshal(body, &payload); err != nil {
-		return nil, err
+	modelRecords := []modelRecord(nil)
+	if err := json.Unmarshal(body, &payload); err == nil && len(payload.Data) != 0 {
+		modelRecords = payload.Data
+	} else {
+		var directModels []modelRecord
+		if directErr := json.Unmarshal(body, &directModels); directErr != nil {
+			if err != nil {
+				return nil, err
+			}
+			return nil, directErr
+		}
+		modelRecords = directModels
 	}
-	models := make([]string, 0, len(payload.Data))
-	seen := make(map[string]struct{}, len(payload.Data))
-	for _, model := range payload.Data {
+	models := make([]string, 0, len(modelRecords))
+	seen := make(map[string]struct{}, len(modelRecords))
+	for _, model := range modelRecords {
 		modelID := strings.TrimSpace(model.ID)
 		if modelID == "" {
 			continue
