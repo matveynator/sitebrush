@@ -9539,6 +9539,10 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 		a.aiProviderCredentialStatusEndpoint(w, r)
 		return
 	}
+	if hasQueryFlag(r, "ai_provider_models") {
+		a.aiProviderModelsEndpoint(w, r)
+		return
+	}
 	if hasQueryFlag(r, "ai_capability_create") {
 		a.issueAICapability(w, r)
 		return
@@ -9593,6 +9597,10 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 	}
 	if hasQueryFlag(r, "save") {
 		a.savePage(w, r)
+		return
+	}
+	if hasQueryFlag(r, "ai_provider_save") {
+		a.saveAIProviderCredentialEndpoint(w, r)
 		return
 	}
 	if hasQueryFlag(r, "ai_provider_delete") {
@@ -10289,22 +10297,178 @@ func (a *App) aiProviderCredentialStatusEndpoint(w http.ResponseWriter, r *http.
 	_ = json.NewEncoder(w).Encode(map[string]any{"providers": statuses})
 }
 
+func aiEditorModelAllowed(provider, model string) bool {
+	model = strings.ToLower(strings.TrimSpace(model))
+	if model == "" {
+		return false
+	}
+	for _, excluded := range []string{"embedding", "moderation", "whisper", "transcrib", "speech", "tts", "audio", "image", "dall-e", "realtime", "rerank"} {
+		if strings.Contains(model, excluded) {
+			return false
+		}
+	}
+	switch provider {
+	case aiprovider.ProviderAnthropic:
+		return strings.Contains(model, "claude")
+	case aiprovider.ProviderDeepSeek:
+		return strings.Contains(model, "deepseek")
+	case aiprovider.ProviderQwen:
+		return strings.Contains(model, "qwen")
+	default:
+		return strings.Contains(model, "gpt")
+	}
+}
+
+func aiEditorModels(provider string, models []string) []string {
+	filtered := make([]string, 0, len(models))
+	for _, model := range models {
+		model = strings.TrimSpace(model)
+		if !aiEditorModelAllowed(provider, model) {
+			continue
+		}
+		filtered = append(filtered, model)
+		if len(filtered) >= 100 {
+			break
+		}
+	}
+	if len(filtered) != 0 {
+		return filtered
+	}
+	if len(models) > 100 {
+		return append([]string(nil), models[:100]...)
+	}
+	return append([]string(nil), models...)
+}
+
+func recommendedAIEditorModel(provider string, models []string) string {
+	available := aiEditorModels(provider, models)
+	if len(available) == 0 {
+		return ""
+	}
+	preferredExact := []string{}
+	preferredContains := []string{}
+	switch provider {
+	case aiprovider.ProviderAnthropic:
+		preferredContains = []string{"sonnet"}
+	case aiprovider.ProviderDeepSeek:
+		preferredExact = []string{"deepseek-chat"}
+		preferredContains = []string{"chat"}
+	case aiprovider.ProviderQwen:
+		preferredExact = []string{"qwen-plus"}
+		preferredContains = []string{"qwen-plus", "qwen3"}
+	default:
+		preferredExact = []string{"gpt-6-sol", "gpt-5.4", "gpt-5", "gpt-4.1"}
+		preferredContains = []string{"sol"}
+	}
+	for _, preferred := range preferredExact {
+		for _, model := range available {
+			if strings.EqualFold(model, preferred) {
+				return model
+			}
+		}
+	}
+	for _, preferred := range preferredContains {
+		for modelIndex := len(available) - 1; modelIndex >= 0; modelIndex-- {
+			lowerModel := strings.ToLower(available[modelIndex])
+			if strings.Contains(lowerModel, preferred) &&
+				!strings.Contains(lowerModel, "mini") && !strings.Contains(lowerModel, "nano") &&
+				!strings.Contains(lowerModel, "pro") && !strings.Contains(lowerModel, "max") &&
+				!strings.Contains(lowerModel, "opus") && !strings.Contains(lowerModel, "haiku") {
+				return available[modelIndex]
+			}
+		}
+	}
+	for modelIndex := len(available) - 1; modelIndex >= 0; modelIndex-- {
+		lowerModel := strings.ToLower(available[modelIndex])
+		if !strings.Contains(lowerModel, "mini") && !strings.Contains(lowerModel, "nano") &&
+			!strings.Contains(lowerModel, "pro") && !strings.Contains(lowerModel, "max") &&
+			!strings.Contains(lowerModel, "opus") && !strings.Contains(lowerModel, "haiku") {
+			return available[modelIndex]
+		}
+	}
+	return available[len(available)-1]
+}
+
+func (a *App) validateAIProviderToken(ctx context.Context, provider, apiKey string) ([]string, string, error) {
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	apiKey = strings.TrimSpace(apiKey)
+	if !supportedAIProvider(provider) || apiKey == "" {
+		return nil, "", errors.New("AI provider and API key are required")
+	}
+	models, err := aiprovider.ListModels(ctx, aiprovider.Config{Provider: provider, APIKey: apiKey}, nil)
+	if err != nil {
+		return nil, "", err
+	}
+	models = aiEditorModels(provider, models)
+	model := recommendedAIEditorModel(provider, models)
+	if model == "" {
+		return nil, "", errors.New("AI provider has no compatible text models")
+	}
+	return models, model, nil
+}
+
+func (a *App) saveAIProviderCredentialEndpoint(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !a.isAdminRequest(r) || (!httpsecurity.SameOriginMutationAllowed(r) && !sessionCSRFMutationAllowed(r)) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	provider := strings.ToLower(strings.TrimSpace(r.FormValue("provider")))
+	apiKey := strings.TrimSpace(r.FormValue("api_key"))
+	models, model, err := a.validateAIProviderToken(r.Context(), provider, apiKey)
+	if err != nil {
+		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "API token rejected by the selected AI provider"})
+		return
+	}
+	if err := a.saveAIProviderCredential(r.Context(), a.siteDomain(r.Context(), r), provider, model, apiKey); err != nil {
+		http.Error(w, "AI provider token could not be stored", http.StatusServiceUnavailable)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	_ = json.NewEncoder(w).Encode(map[string]any{"saved": true, "provider": provider, "model": model, "models": models})
+}
+
+func (a *App) aiProviderModelsEndpoint(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet || !a.isAdminRequest(r) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	provider := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("provider")))
+	credential, found, err := a.loadAIProviderCredential(r.Context(), a.siteDomain(r.Context(), r), provider)
+	if err != nil || !found {
+		http.Error(w, "saved AI provider token is unavailable", http.StatusBadRequest)
+		return
+	}
+	models, err := aiprovider.ListModels(r.Context(), aiprovider.Config{Provider: provider, APIKey: credential.APIKey}, nil)
+	if err != nil {
+		http.Error(w, "AI provider models are unavailable", http.StatusBadGateway)
+		return
+	}
+	models = aiEditorModels(provider, models)
+	selectedModel := credential.Model
+	if selectedModel == "" {
+		selectedModel = recommendedAIEditorModel(provider, models)
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	_ = json.NewEncoder(w).Encode(map[string]any{"provider": provider, "model": selectedModel, "models": models})
+}
+
 func (a *App) deleteAIProviderCredentialEndpoint(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if !a.isAdminRequest(r) {
+	if !a.isAdminRequest(r) || (!httpsecurity.SameOriginMutationAllowed(r) && !sessionCSRFMutationAllowed(r)) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
-	}
-	if !httpsecurity.SameOriginMutationAllowed(r) {
-		providedCSRF := strings.TrimSpace(r.Header.Get("X-SiteBrush-CSRF"))
-		expectedCSRF := accountCSRF(r)
-		if providedCSRF == "" || expectedCSRF == "" || subtle.ConstantTimeCompare([]byte(providedCSRF), []byte(expectedCSRF)) != 1 {
-			http.Error(w, "forbidden", http.StatusForbidden)
-			return
-		}
 	}
 	provider := strings.ToLower(strings.TrimSpace(r.FormValue("provider")))
 	if !supportedAIProvider(provider) {
@@ -10331,16 +10495,24 @@ func (a *App) resolveAIProviderCredential(ctx context.Context, domain string, re
 		return errors.New("unsupported AI provider")
 	}
 
-	// A newly supplied secret must be able to replace an unreadable old credential.
-	// This makes master-key recovery explicit instead of trapping the administrator.
 	if request.APIKey != "" {
-		if request.Model == "" {
-			var storedModel string
-			_ = a.db.QueryRowContext(ctx, `SELECT model FROM ai_provider_credentials WHERE domain=? AND provider=?`, domain, request.Provider).Scan(&storedModel)
-			request.Model = strings.TrimSpace(storedModel)
+		models, recommendedModel, err := a.validateAIProviderToken(ctx, request.Provider, request.APIKey)
+		if err != nil {
+			return err
 		}
 		if request.Model == "" {
-			return errors.New("AI model is required")
+			request.Model = recommendedModel
+		} else {
+			available := false
+			for _, model := range models {
+				if model == request.Model {
+					available = true
+					break
+				}
+			}
+			if !available {
+				return errors.New("selected AI model is unavailable")
+			}
 		}
 		return a.saveAIProviderCredential(ctx, domain, request.Provider, request.Model, request.APIKey)
 	}
@@ -10416,7 +10588,7 @@ type aiEditorModelResult struct {
 // Internal editing is authorized by the administrator session. ai_token is reserved
 // for external AI capability links and is deliberately not accepted here.
 func (a *App) executeAIEditorRequest(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost || !a.isAdminRequest(r) || !httpsecurity.SameOriginMutationAllowed(r) {
+	if r.Method != http.MethodPost || !a.isAdminRequest(r) || (!httpsecurity.SameOriginMutationAllowed(r) && !sessionCSRFMutationAllowed(r)) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
@@ -10428,15 +10600,8 @@ func (a *App) executeAIEditorRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	request.PagePath = cleanPath(request.PagePath)
-	request.Scope = strings.ToLower(strings.TrimSpace(request.Scope))
-	if request.Scope == "" {
-		request.Scope = "page"
-	}
-	if request.Scope != "page" && request.Scope != "site" {
-		http.Error(w, "AI editor scope must be page or site", http.StatusBadRequest)
-		return
-	}
-	if request.Scope == "page" && request.PagePath == "" {
+	request.Scope = "page"
+	if request.PagePath == "" {
 		http.Error(w, "page path is required", http.StatusBadRequest)
 		return
 	}
@@ -10466,10 +10631,6 @@ func (a *App) executeAIEditorRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if request.Scope == "site" {
-		a.executeAIEditorSiteRequest(w, r, client, request, decodedFiles, fileNames)
-		return
-	}
 	a.executeAIEditorPageRequest(w, r, client, request, decodedFiles, fileNames)
 }
 
