@@ -13,7 +13,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"strings"
 	"time"
 
@@ -59,6 +58,7 @@ type Response struct {
 
 type Client struct {
 	configuration Config
+	baseURL       string
 	httpClient    *http.Client
 }
 
@@ -72,18 +72,9 @@ func NewClient(configuration Config, httpClient *http.Client) (*Client, error) {
 	default:
 		return nil, fmt.Errorf("%w: %s", ErrProviderUnsupported, configuration.Provider)
 	}
-	if configuration.BaseURL == "" {
-		if configuration.Provider == ProviderOllama {
-			return nil, fmt.Errorf("%w: Ollama requires an explicit public HTTPS base URL", ErrInvalidConfiguration)
-		}
-		configuration.BaseURL = defaultBaseURL(configuration.Provider)
-	}
-	parsedURL, err := url.Parse(configuration.BaseURL)
-	if err != nil || parsedURL.Scheme != "https" || parsedURL.Host == "" {
-		return nil, fmt.Errorf("%w: HTTPS base URL is required", ErrInvalidConfiguration)
-	}
-	if err := outboundhttp.RequirePublicURL(parsedURL); err != nil {
-		return nil, fmt.Errorf("%w: provider endpoint is not public", ErrInvalidConfiguration)
+	baseURL, err := providerBaseURL(configuration.Provider, configuration.BaseURL)
+	if err != nil {
+		return nil, err
 	}
 	if configuration.MaxResponseBytes <= 0 {
 		configuration.MaxResponseBytes = DefaultMaxResponseBytes
@@ -98,7 +89,19 @@ func NewClient(configuration Config, httpClient *http.Client) (*Client, error) {
 		}
 		httpClient = &http.Client{Transport: transport, Timeout: configuration.Timeout, CheckRedirect: outboundhttp.CheckRedirect}
 	}
-	return &Client{configuration: configuration, httpClient: httpClient}, nil
+	return &Client{configuration: configuration, baseURL: baseURL, httpClient: httpClient}, nil
+}
+
+func providerBaseURL(provider, requestedBaseURL string) (string, error) {
+	if provider == ProviderOllama {
+		return "", fmt.Errorf("%w: Ollama is not available through the built-in public provider adapter", ErrInvalidConfiguration)
+	}
+	expectedBaseURL := defaultBaseURL(provider)
+	requestedBaseURL = strings.TrimRight(strings.TrimSpace(requestedBaseURL), "/")
+	if requestedBaseURL != "" && requestedBaseURL != expectedBaseURL {
+		return "", fmt.Errorf("%w: custom AI provider endpoints are not allowed", ErrInvalidConfiguration)
+	}
+	return expectedBaseURL, nil
 }
 
 func defaultBaseURL(provider string) string {
@@ -118,7 +121,7 @@ func (client *Client) Complete(ctx context.Context, request Request) (Response, 
 	if client == nil || len(request.Messages) == 0 {
 		return Response{}, ErrInvalidConfiguration
 	}
-	endpoint := strings.TrimRight(client.configuration.BaseURL, "/") + "/chat/completions"
+	endpoint := client.baseURL + "/chat/completions"
 	payload, err := json.Marshal(struct {
 		Model    string    `json:"model"`
 		Messages []Message `json:"messages"`
