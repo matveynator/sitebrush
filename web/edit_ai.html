@@ -65,7 +65,7 @@ capabilityButton.addEventListener('click', async function createCapabilityLink()
   capabilityButton.disabled = true;
   setStatus('Creating a revocable external AI link…');
   try {
-    const response = await fetch('{{.Path}}?ai_capability_create', {method:'POST'});
+    const response = await fetch('{{.Path}}?ai_capability_create', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({page_path:'{{.Path}}', task:document.getElementById('aiCommand').value})});
     const payload = await response.json();
     if (!response.ok) throw new Error(payload.error || 'Capability creation failed');
     capabilityOutputElement.hidden = false;

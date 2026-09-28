@@ -161,3 +161,19 @@ func TestOwnedSessionsCanBeRestrictedExtendedAndRevoked(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestCapabilityKeepsPageAndTaskContextOutOfTheURL(t *testing.T) {
+	manager := NewManager()
+	defer manager.Close()
+	token, capability, err := manager.IssueForTask("example.org", "owner@example.org", []string{ScopeRead}, "/hike", "Create a photo story")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if capability.PagePath != "/hike" || capability.Task != "Create a photo story" || strings.Contains(token, "hike") || strings.Contains(token, "photo") {
+		t.Fatalf("unsafe capability context: %+v token=%q", capability, token)
+	}
+	validated, err := manager.ValidateCapability(token, "example.org")
+	if err != nil || validated.PagePath != "/hike" || validated.Task != "Create a photo story" {
+		t.Fatalf("context was not retained: %+v err=%v", validated, err)
+	}
+}

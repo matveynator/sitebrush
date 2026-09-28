@@ -27,18 +27,22 @@ type Manifest struct {
 	OpenAPIURL   string           `json:"openapi_url"`
 	APIBase      string           `json:"api_base"`
 	Domain       string           `json:"domain"`
+	PagePath     string           `json:"page_path,omitempty"`
+	Task         string           `json:"task,omitempty"`
 	Scopes       []string         `json:"scopes"`
 	Limits       map[string]int64 `json:"limits"`
 	Operations   []string         `json:"operations"`
 }
 
 type Capability struct {
-	ID      string    `json:"id"`
-	Domain  string    `json:"domain"`
-	Owner   string    `json:"owner,omitempty"`
-	Scopes  []string  `json:"scopes"`
-	Revoked bool      `json:"revoked"`
-	Created time.Time `json:"created"`
+	ID       string    `json:"id"`
+	Domain   string    `json:"domain"`
+	Owner    string    `json:"owner,omitempty"`
+	Scopes   []string  `json:"scopes"`
+	Revoked  bool      `json:"revoked"`
+	Created  time.Time `json:"created"`
+	PagePath string    `json:"page_path,omitempty"`
+	Task     string    `json:"task,omitempty"`
 }
 
 type Session struct {
@@ -72,6 +76,8 @@ type managerRequest struct {
 	sessionID  string
 	duration   time.Duration
 	newScopes  []string
+	pagePath   string
+	task       string
 	sessions   []SessionInfo
 	reply      chan managerResponse
 }
@@ -124,7 +130,7 @@ func (manager *Manager) run() {
 					request.reply <- managerResponse{err: err}
 					continue
 				}
-				capability := Capability{ID: tokenHash(token), Domain: request.domain, Owner: request.owner, Scopes: append([]string(nil), request.scopes...), Created: time.Now().UTC()}
+				capability := Capability{ID: tokenHash(token), Domain: request.domain, Owner: request.owner, Scopes: append([]string(nil), request.scopes...), Created: time.Now().UTC(), PagePath: request.pagePath, Task: request.task}
 				capabilities[capability.ID] = capability
 				if err := manager.saveCapabilities(capabilities); err != nil {
 					delete(capabilities, capability.ID)
@@ -305,7 +311,11 @@ func (manager *Manager) Issue(domain string, scopes []string) (string, Capabilit
 }
 
 func (manager *Manager) IssueFor(domain, owner string, scopes []string) (string, Capability, error) {
-	response := manager.request(managerRequest{kind: "issue", domain: normalizeDomain(domain), owner: strings.ToLower(strings.TrimSpace(owner)), scopes: scopes, reply: make(chan managerResponse, 1)})
+	return manager.IssueForTask(domain, owner, scopes, "", "")
+}
+
+func (manager *Manager) IssueForTask(domain, owner string, scopes []string, pagePath, task string) (string, Capability, error) {
+	response := manager.request(managerRequest{kind: "issue", domain: normalizeDomain(domain), owner: strings.ToLower(strings.TrimSpace(owner)), scopes: scopes, pagePath: strings.TrimSpace(pagePath), task: strings.TrimSpace(task), reply: make(chan managerResponse, 1)})
 	return response.session.Token, response.capability, response.err
 }
 

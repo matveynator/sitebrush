@@ -130,7 +130,7 @@ document.getElementById('createAIEditorLinkButton').addEventListener('click', as
   createLinkButton.disabled = true;
   aiEditorLinkStatusElement.textContent = 'Создание ограниченной ссылки…';
   try {
-    const capabilityResponse = await fetch('{{.Path}}?ai_capability_create', {method:'POST', credentials:'same-origin'});
+    const capabilityResponse = await fetch('{{.Path}}?ai_capability_create', {method:'POST', credentials:'same-origin', headers:{'Content-Type':'application/json'}, body:JSON.stringify({page_path:'{{.Path}}'})});
     const capabilityPayload = await capabilityResponse.json();
     if (!capabilityResponse.ok) throw new Error(capabilityPayload.error || 'Не удалось создать ссылку');
     aiEditorLinkStatusElement.textContent = capabilityPayload.url;

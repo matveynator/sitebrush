@@ -10192,6 +10192,7 @@ func (a *App) aiCapabilityRequest(w http.ResponseWriter, r *http.Request, domain
 		http.Error(w, "capability is invalid", http.StatusUnauthorized)
 		return
 	}
+	capability, _ := a.aiCapabilities.ValidateCapability(token, domain)
 	baseURL := requestScheme(r) + "://" + r.Host + aiCapabilityURL(token)
 	manifest := aicapability.Manifest{
 		Name:         "SiteBrush AI editor",
@@ -10199,6 +10200,8 @@ func (a *App) aiCapabilityRequest(w http.ResponseWriter, r *http.Request, domain
 		APIBase:      baseURL,
 		OpenAPIURL:   aiCapabilityOperationURL(r, token, "openapi.json"),
 		Domain:       domain,
+		PagePath:     capability.PagePath,
+		Task:         capability.Task,
 		Scopes:       []string{aicapability.ScopeRead, aicapability.ScopeWrite, aicapability.ScopePublish},
 		Operations:   []string{"manifest", "exchange", "openapi", "list_pages", "read_page", "create_page", "update_page", "upload_file", "publish", "rollback"},
 		Limits:       map[string]int64{"max_file_bytes": 128 << 20, "max_request_bytes": 16 << 20},
@@ -10213,8 +10216,19 @@ func (a *App) issueAICapability(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	domain := a.siteDomain(r.Context(), r)
+	var invite struct {
+		PagePath string `json:"page_path"`
+		Task     string `json:"task"`
+	}
+	if r.Body != nil {
+		r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
+		if err := json.NewDecoder(r.Body).Decode(&invite); err != nil && !errors.Is(err, io.EOF) {
+			http.Error(w, "invalid invite context", http.StatusBadRequest)
+			return
+		}
+	}
 	ownerEmail, _ := a.currentAdminEmailForDomain(r, domain)
-	token, capability, err := a.aiCapabilities.IssueFor(domain, ownerEmail, []string{aicapability.ScopeRead, aicapability.ScopeWrite, aicapability.ScopePublish})
+	token, capability, err := a.aiCapabilities.IssueForTask(domain, ownerEmail, []string{aicapability.ScopeRead, aicapability.ScopeWrite, aicapability.ScopePublish}, cleanPath(invite.PagePath), invite.Task)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusServiceUnavailable)
 		return
@@ -31138,6 +31152,17 @@ func buildContextMenuScript(isAdmin bool, isServerManager bool, isFrozen bool, p
     fileInputElement.className = "SiteBrushAIEditorFiles";
     const statusElement = document.createElement("div");
     statusElement.className = "SiteBrushAIEditorStatus";
+    const inviteElement = document.createElement("div");
+    inviteElement.className = "SiteBrushAIEditorInvite";
+    inviteElement.hidden = true;
+    const inviteLabelElement = document.createElement("label");
+    inviteLabelElement.textContent = "Invite your AI assistant - create invite link";
+    const inviteLinkElement = document.createElement("input");
+    inviteLinkElement.type = "text";
+    inviteLinkElement.readOnly = true;
+    inviteLinkElement.className = "SiteBrushAIEditorInviteLink";
+    inviteLabelElement.appendChild(inviteLinkElement);
+    inviteElement.appendChild(inviteLabelElement);
     const actionRowElement = document.createElement("div");
     actionRowElement.className = "SiteBrushAIEditorActions";
     const voiceButtonElement = document.createElement("button");
@@ -31181,10 +31206,12 @@ func buildContextMenuScript(isAdmin bool, isServerManager bool, isFrozen bool, p
       linkButtonElement.disabled = true;
       statusElement.textContent = "Creating a revocable link...";
       try {
-        const capabilityResponse = await fetch(currentPagePath + "?ai_capability_create", { method: "POST", credentials: "same-origin" });
+        const capabilityResponse = await fetch(currentPagePath + "?ai_capability_create", { method: "POST", credentials: "same-origin", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ page_path: currentPagePath, task: commandElement.value }) });
         const capabilityPayload = await capabilityResponse.json();
         if (!capabilityResponse.ok) { throw new Error(capabilityPayload.error || "Failed to create AI link"); }
-        statusElement.textContent = capabilityPayload.url;
+        inviteLinkElement.value = capabilityPayload.url;
+        inviteElement.hidden = false;
+        statusElement.textContent = "Invite link copied to clipboard.";
         if (navigator.clipboard) { await navigator.clipboard.writeText(capabilityPayload.url); }
       } catch (error) {
         statusElement.textContent = error.message;
@@ -31205,6 +31232,7 @@ func buildContextMenuScript(isAdmin bool, isServerManager bool, isFrozen bool, p
     modalElement.appendChild(fileInputElement);
     modalElement.appendChild(statusElement);
     modalElement.appendChild(actionRowElement);
+    modalElement.appendChild(inviteElement);
     overlayElement.appendChild(modalElement);
     document.body.appendChild(overlayElement);
     commandElement.focus();
@@ -31952,7 +31980,7 @@ func contextMenuStylesAndHelpers() string {
 .SiteBrushAIEditorTitle{margin:0 0 8px;font-size:20px}.SiteBrushAIEditorInstruction{margin:0 0 14px;font-size:14px}
 .SiteBrushAIEditorCommand{display:block;width:100%;min-height:120px;margin:0 0 12px;padding:10px;border:1px solid #aebbd0;border-radius:6px;box-sizing:border-box;resize:vertical;font:inherit}
 .SiteBrushAIEditorFiles{display:block;width:100%;margin:0 0 14px;font:inherit}.SiteBrushAIEditorStatus{min-height:24px;margin-bottom:10px;overflow-wrap:anywhere;font-size:13px}
-.SiteBrushAIEditorActions{display:flex;flex-wrap:wrap;justify-content:flex-end;gap:8px}.SiteBrushAIEditorButton{min-height:36px;padding:8px 13px;border:1px solid #aebbd0;border-radius:6px;background:#f1f4f8;color:#1e2a3a;font:inherit;cursor:pointer}.SiteBrushAIEditorPrimaryButton{border-color:#2b69b1;background:#2b69b1;color:#fff}.SiteBrushAIEditorButton:disabled{opacity:.6;cursor:default}
+.SiteBrushAIEditorActions{display:flex;flex-wrap:wrap;justify-content:flex-end;gap:8px}.SiteBrushAIEditorButton{min-height:36px;padding:8px 13px;border:1px solid #aebbd0;border-radius:6px;background:#f1f4f8;color:#1e2a3a;font:inherit;cursor:pointer}.SiteBrushAIEditorPrimaryButton{border-color:#2b69b1;background:#2b69b1;color:#fff}.SiteBrushAIEditorButton:disabled{opacity:.6;cursor:default}.SiteBrushAIEditorInvite{margin-top:14px;padding-top:12px;border-top:1px solid #d7dee8}.SiteBrushAIEditorInvite label{display:block;font-size:13px;font-weight:600}.SiteBrushAIEditorInviteLink{display:block;width:100%;margin-top:6px;padding:8px;border:1px solid #aebbd0;border-radius:6px;box-sizing:border-box;background:#f7f9fc;color:inherit;font:inherit}
 @media (pointer: coarse), (max-width: 820px){
   .SiteBrushMenuBox{right:auto;min-width:min(220px,calc(100vw - 12px));max-width:calc(100vw - 12px);max-height:calc(100vh - 12px);border-radius:7px;padding:1px;-webkit-overflow-scrolling:touch}
   .SiteBrushContextMenuLink{min-height:34px;padding:7px 9px;font-size:13px;gap:7px}
@@ -31992,6 +32020,7 @@ func contextMenuStylesAndHelpers() string {
   .SiteBrushAIEditorCommand{background:#0f1724;color:#dbe8ff;border-color:#405674}
   .SiteBrushAIEditorButton{background:#22324a;color:#dbe8ff;border-color:#405674}
   .SiteBrushAIEditorPrimaryButton{background:#4f8bd8;color:#fff;border-color:#4f8bd8}
+  .SiteBrushAIEditorInvite{border-color:#405674}.SiteBrushAIEditorInviteLink{background:#0f1724;color:#dbe8ff;border-color:#405674}
 }
 ` + sitebrushMenuMeridianStyles() + `
 </style>
