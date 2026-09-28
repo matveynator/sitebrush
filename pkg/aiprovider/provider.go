@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -115,6 +116,89 @@ func defaultBaseURL(provider string) string {
 	default:
 		return "https://api.openai.com/v1"
 	}
+}
+
+func ListModels(ctx context.Context, configuration Config, httpClient *http.Client) ([]string, error) {
+	configuration.Provider = strings.ToLower(strings.TrimSpace(configuration.Provider))
+	configuration.APIKey = strings.TrimSpace(configuration.APIKey)
+	if configuration.Provider == "" || configuration.APIKey == "" {
+		return nil, ErrInvalidConfiguration
+	}
+	switch configuration.Provider {
+	case ProviderOpenAICompatible, ProviderAnthropic, ProviderDeepSeek, ProviderQwen:
+	default:
+		return nil, fmt.Errorf("%w: %s", ErrProviderUnsupported, configuration.Provider)
+	}
+	baseURL, err := providerBaseURL(configuration.Provider, configuration.BaseURL)
+	if err != nil {
+		return nil, err
+	}
+	if configuration.MaxResponseBytes <= 0 {
+		configuration.MaxResponseBytes = 2 << 20
+	}
+	if configuration.Timeout <= 0 {
+		configuration.Timeout = 15 * time.Second
+	}
+	if httpClient == nil {
+		transport, transportErr := outboundhttp.NewTransport(nil, outboundhttp.TransportOptions{})
+		if transportErr != nil {
+			return nil, transportErr
+		}
+		httpClient = &http.Client{Transport: transport, Timeout: configuration.Timeout, CheckRedirect: outboundhttp.CheckRedirect}
+	}
+
+	httpRequest, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/models", nil)
+	if err != nil {
+		return nil, err
+	}
+	httpRequest.Header.Set("Accept", "application/json")
+	httpRequest.Header.Set("Authorization", "Bearer "+configuration.APIKey)
+	if configuration.Provider == ProviderAnthropic {
+		httpRequest.Header.Set("x-api-key", configuration.APIKey)
+		httpRequest.Header.Del("Authorization")
+		httpRequest.Header.Set("anthropic-version", "2023-06-01")
+	}
+	response, err := httpClient.Do(httpRequest)
+	if err != nil {
+		return nil, err
+	}
+	defer response.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(response.Body, configuration.MaxResponseBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(body)) > configuration.MaxResponseBytes {
+		return nil, errors.New("AI provider model response is too large")
+	}
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return nil, fmt.Errorf("AI provider token validation returned HTTP %d", response.StatusCode)
+	}
+	var payload struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return nil, err
+	}
+	models := make([]string, 0, len(payload.Data))
+	seen := make(map[string]struct{}, len(payload.Data))
+	for _, model := range payload.Data {
+		modelID := strings.TrimSpace(model.ID)
+		if modelID == "" {
+			continue
+		}
+		if _, exists := seen[modelID]; exists {
+			continue
+		}
+		seen[modelID] = struct{}{}
+		models = append(models, modelID)
+	}
+	if len(models) == 0 {
+		return nil, errors.New("AI provider returned no available models")
+	}
+	sort.Strings(models)
+	return models, nil
 }
 
 func (client *Client) Complete(ctx context.Context, request Request) (Response, error) {
