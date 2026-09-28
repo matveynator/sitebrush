@@ -423,14 +423,14 @@ old_rollback = r'''func (a *App) rollbackAIPage(ctx context.Context, domain stri
 		return errors.New("revision id is required")
 	}
 	var pagePath, html string
-	if err := a.db.QueryRowContext(ctx, \`SELECT page_path,html FROM revisions WHERE id=? AND domain=?\`, revisionID, domain).Scan(&pagePath, &html); err != nil {
+	if err := a.db.QueryRowContext(ctx, `SELECT page_path,html FROM revisions WHERE id=? AND domain=?`, revisionID, domain).Scan(&pagePath, &html); err != nil {
 		return err
 	}
-	_, err = a.db.ExecContext(ctx, \`UPDATE pages SET html=? WHERE domain=? AND path=?\`, html, domain, pagePath)
+	_, err = a.db.ExecContext(ctx, `UPDATE pages SET html=? WHERE domain=? AND path=?`, html, domain, pagePath)
 	if err != nil {
 		return err
 	}
-	_, err = a.db.ExecContext(ctx, \`INSERT INTO revisions(domain,page_path,html,created_at) VALUES(?,?,?,?)\`, domain, pagePath, html, time.Now().UTC().Format(time.RFC3339))
+	_, err = a.db.ExecContext(ctx, `INSERT INTO revisions(domain,page_path,html,created_at) VALUES(?,?,?,?)`, domain, pagePath, html, time.Now().UTC().Format(time.RFC3339))
 	if err != nil {
 		return err
 	}
@@ -448,14 +448,14 @@ new_rollback = r'''func (a *App) rollbackAIPage(ctx context.Context, domain stri
 		return errors.New("page path is required")
 	}
 	var html string
-	if err := a.db.QueryRowContext(ctx, \`SELECT html FROM revisions WHERE id=? AND domain=? AND page_path=?\`, revisionID, domain, pagePath).Scan(&html); err != nil {
+	if err := a.db.QueryRowContext(ctx, `SELECT html FROM revisions WHERE id=? AND domain=? AND page_path=?`, revisionID, domain, pagePath).Scan(&html); err != nil {
 		return err
 	}
 	revisionBytes := int64(len([]byte(html)))
 	if err := a.applyDomainStorageDelta(ctx, domain, 0, 0, revisionBytes, 0, 0); err != nil {
 		return err
 	}
-	if _, err := a.db.ExecContext(ctx, \`INSERT INTO revisions(domain,page_path,html,created_at) VALUES(?,?,?,?)\`, domain, pagePath, html, time.Now().UTC().Format(time.RFC3339)); err != nil {
+	if _, err := a.db.ExecContext(ctx, `INSERT INTO revisions(domain,page_path,html,created_at) VALUES(?,?,?,?)`, domain, pagePath, html, time.Now().UTC().Format(time.RFC3339)); err != nil {
 		_ = a.applyDomainStorageDelta(ctx, domain, 0, 0, -revisionBytes, 0, 0)
 		return err
 	}
@@ -571,10 +571,10 @@ rollback_test = r'''func TestAIRollbackIsPageBoundAndChargesRevisionStorage(t *t
 	application, database := newTestApplication(t)
 	ctx := context.Background()
 	domain := "ai-rollback.example"
-	if _, err := database.ExecContext(ctx, \`INSERT INTO pages(domain,path,title,html,published) VALUES(?,?,?,?,1)\`, domain, "/one", "One", "<p>current</p>"); err != nil {
+	if _, err := database.ExecContext(ctx, `INSERT INTO pages(domain,path,title,html,published) VALUES(?,?,?,?,1)`, domain, "/one", "One", "<p>current</p>"); err != nil {
 		t.Fatal(err)
 	}
-	firstRevision, err := database.ExecContext(ctx, \`INSERT INTO revisions(domain,page_path,html,created_at) VALUES(?,?,?,?)\`, domain, "/one", "<p>old</p>", time.Now().UTC().Format(time.RFC3339))
+	firstRevision, err := database.ExecContext(ctx, `INSERT INTO revisions(domain,page_path,html,created_at) VALUES(?,?,?,?)`, domain, "/one", "<p>old</p>", time.Now().UTC().Format(time.RFC3339))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -582,7 +582,7 @@ rollback_test = r'''func TestAIRollbackIsPageBoundAndChargesRevisionStorage(t *t
 	if err != nil {
 		t.Fatal(err)
 	}
-	secondRevision, err := database.ExecContext(ctx, \`INSERT INTO revisions(domain,page_path,html,created_at) VALUES(?,?,?,?)\`, domain, "/two", "<p>other</p>", time.Now().UTC().Format(time.RFC3339))
+	secondRevision, err := database.ExecContext(ctx, `INSERT INTO revisions(domain,page_path,html,created_at) VALUES(?,?,?,?)`, domain, "/two", "<p>other</p>", time.Now().UTC().Format(time.RFC3339))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -592,7 +592,7 @@ rollback_test = r'''func TestAIRollbackIsPageBoundAndChargesRevisionStorage(t *t
 	}
 	application.rebuildDomainStorageUsage(ctx, domain)
 	var beforeRevisionBytes int64
-	if err := database.QueryRowContext(ctx, \`SELECT revision_bytes FROM domain_storage_usage WHERE domain=?\`, domain).Scan(&beforeRevisionBytes); err != nil {
+	if err := database.QueryRowContext(ctx, `SELECT revision_bytes FROM domain_storage_usage WHERE domain=?`, domain).Scan(&beforeRevisionBytes); err != nil {
 		t.Fatal(err)
 	}
 
@@ -600,7 +600,7 @@ rollback_test = r'''func TestAIRollbackIsPageBoundAndChargesRevisionStorage(t *t
 		t.Fatal("AI rollback accepted a revision from another page")
 	}
 	var revisionCountAfterMismatch int
-	if err := database.QueryRowContext(ctx, \`SELECT COUNT(*) FROM revisions WHERE domain=?\`, domain).Scan(&revisionCountAfterMismatch); err != nil {
+	if err := database.QueryRowContext(ctx, `SELECT COUNT(*) FROM revisions WHERE domain=?`, domain).Scan(&revisionCountAfterMismatch); err != nil {
 		t.Fatal(err)
 	}
 	if revisionCountAfterMismatch != 2 {
@@ -611,14 +611,14 @@ rollback_test = r'''func TestAIRollbackIsPageBoundAndChargesRevisionStorage(t *t
 		t.Fatalf("valid AI rollback failed: %v", err)
 	}
 	var pageHTML string
-	if err := database.QueryRowContext(ctx, \`SELECT html FROM pages WHERE domain=? AND path=?\`, domain, "/one").Scan(&pageHTML); err != nil {
+	if err := database.QueryRowContext(ctx, `SELECT html FROM pages WHERE domain=? AND path=?`, domain, "/one").Scan(&pageHTML); err != nil {
 		t.Fatal(err)
 	}
 	if pageHTML != "<p>old</p>" {
 		t.Fatalf("page HTML=%q after rollback", pageHTML)
 	}
 	var afterRevisionBytes int64
-	if err := database.QueryRowContext(ctx, \`SELECT revision_bytes FROM domain_storage_usage WHERE domain=?\`, domain).Scan(&afterRevisionBytes); err != nil {
+	if err := database.QueryRowContext(ctx, `SELECT revision_bytes FROM domain_storage_usage WHERE domain=?`, domain).Scan(&afterRevisionBytes); err != nil {
 		t.Fatal(err)
 	}
 	if got, want := afterRevisionBytes-beforeRevisionBytes, int64(len([]byte("<p>old</p>"))); got != want {
