@@ -416,9 +416,149 @@ site = site.replace(
     'window.location.href = currentPagePath + "?edit&ai_open=1";',
 )
 
+# Address the original capability review findings before committing the branch.
+old_rollback = r'''func (a *App) rollbackAIPage(ctx context.Context, domain string, request aieditor.Request) error {
+	revisionID, err := strconv.Atoi(strings.TrimSpace(request.ExpectedVersion))
+	if err != nil || revisionID <= 0 {
+		return errors.New("revision id is required")
+	}
+	var pagePath, html string
+	if err := a.db.QueryRowContext(ctx, \`SELECT page_path,html FROM revisions WHERE id=? AND domain=?\`, revisionID, domain).Scan(&pagePath, &html); err != nil {
+		return err
+	}
+	_, err = a.db.ExecContext(ctx, \`UPDATE pages SET html=? WHERE domain=? AND path=?\`, html, domain, pagePath)
+	if err != nil {
+		return err
+	}
+	_, err = a.db.ExecContext(ctx, \`INSERT INTO revisions(domain,page_path,html,created_at) VALUES(?,?,?,?)\`, domain, pagePath, html, time.Now().UTC().Format(time.RFC3339))
+	if err != nil {
+		return err
+	}
+	a.applyLatestActiveRevision(ctx, domain, pagePath)
+	return nil
+}
+'''
+new_rollback = r'''func (a *App) rollbackAIPage(ctx context.Context, domain string, request aieditor.Request) error {
+	revisionID, err := strconv.Atoi(strings.TrimSpace(request.ExpectedVersion))
+	if err != nil || revisionID <= 0 {
+		return errors.New("revision id is required")
+	}
+	pagePath := cleanPath(request.Path)
+	if strings.TrimSpace(request.Path) == "" || pagePath == "" {
+		return errors.New("page path is required")
+	}
+	var html string
+	if err := a.db.QueryRowContext(ctx, \`SELECT html FROM revisions WHERE id=? AND domain=? AND page_path=?\`, revisionID, domain, pagePath).Scan(&html); err != nil {
+		return err
+	}
+	revisionBytes := int64(len([]byte(html)))
+	if err := a.applyDomainStorageDelta(ctx, domain, 0, 0, revisionBytes, 0, 0); err != nil {
+		return err
+	}
+	if _, err := a.db.ExecContext(ctx, \`INSERT INTO revisions(domain,page_path,html,created_at) VALUES(?,?,?,?)\`, domain, pagePath, html, time.Now().UTC().Format(time.RFC3339)); err != nil {
+		_ = a.applyDomainStorageDelta(ctx, domain, 0, 0, -revisionBytes, 0, 0)
+		return err
+	}
+	a.applyLatestActiveRevision(ctx, domain, pagePath)
+	return nil
+}
+'''
+site = replace_once(site, old_rollback, new_rollback, "AI rollback page binding and storage accounting")
+
+# Base64 JSON needs headroom above the advertised 128 MiB decoded file size.
+site = replace_once(
+    site,
+    'r.Body = http.MaxBytesReader(w, r.Body, 16<<20)',
+    'r.Body = http.MaxBytesReader(w, r.Body, 176<<20)',
+    "external AI request body limit",
+)
+site = replace_once(
+    site,
+    'map[string]int64{"max_file_bytes": 128 << 20, "max_request_bytes": 16 << 20}',
+    'map[string]int64{"max_file_bytes": 128 << 20, "max_request_bytes": 176 << 20}',
+    "manifest request limit",
+)
+
+# Publish a valid OpenAPI 3.0 document with explicit host, auth, and responses.
+openapi_index = site.index('if operation == "openapi.json"')
+encode_start = site.index('\t\t_ = json.NewEncoder(w).Encode(map[string]any{', openapi_index)
+encode_end = site.index('\n\t\treturn', encode_start)
+openapi_document = r'''\t\t_ = json.NewEncoder(w).Encode(map[string]any{
+			"openapi": "3.0.3",
+			"info":    map[string]string{"title": "SiteBrush AI editor", "version": "1"},
+			"servers": []map[string]string{{"url": requestScheme(r) + "://" + r.Host}},
+			"components": map[string]any{
+				"securitySchemes": map[string]any{
+					"AICapability": map[string]string{"type": "apiKey", "in": "query", "name": "ai_token"},
+					"AISession":    map[string]string{"type": "http", "scheme": "bearer"},
+				},
+			},
+			"paths": map[string]any{
+				"/documentation": map[string]any{
+					"get": map[string]any{
+						"summary": "Read AI editor documentation",
+						"security": []map[string][]string{{"AICapability": []string{}}},
+						"responses": map[string]any{"200": map[string]string{"description": "Documentation"}},
+					},
+				},
+				"/exchange": map[string]any{
+					"post": map[string]any{
+						"summary": "Exchange capability for a short-lived editor session",
+						"security": []map[string][]string{{"AICapability": []string{}}},
+						"responses": map[string]any{"200": map[string]string{"description": "Editor session"}, "401": map[string]string{"description": "Invalid capability"}},
+					},
+				},
+				"/pages": map[string]any{
+					"get": map[string]any{
+						"summary": "List site pages",
+						"security": []map[string][]string{{"AICapability": []string{}, "AISession": []string{}}},
+						"responses": map[string]any{"200": map[string]string{"description": "Page list"}, "401": map[string]string{"description": "Invalid editor session"}},
+					},
+				},
+				"/page": map[string]any{
+					"get": map[string]any{
+						"summary": "Read a page",
+						"security": []map[string][]string{{"AICapability": []string{}, "AISession": []string{}}},
+						"responses": map[string]any{"200": map[string]string{"description": "Page"}, "401": map[string]string{"description": "Invalid editor session"}},
+					},
+					"post": map[string]any{
+						"summary": "Create or update a page",
+						"security": []map[string][]string{{"AICapability": []string{}, "AISession": []string{}}},
+						"responses": map[string]any{"200": map[string]string{"description": "Updated page"}, "400": map[string]string{"description": "Invalid page request"}, "401": map[string]string{"description": "Invalid editor session"}},
+					},
+				},
+				"/file": map[string]any{
+					"post": map[string]any{
+						"summary": "Upload a site file",
+						"security": []map[string][]string{{"AICapability": []string{}, "AISession": []string{}}},
+						"responses": map[string]any{"200": map[string]string{"description": "Uploaded file"}, "400": map[string]string{"description": "Invalid file request"}, "401": map[string]string{"description": "Invalid editor session"}},
+					},
+				},
+				"/publish": map[string]any{
+					"post": map[string]any{
+						"summary": "Publish site content",
+						"security": []map[string][]string{{"AICapability": []string{}, "AISession": []string{}}},
+						"responses": map[string]any{"200": map[string]string{"description": "Published"}, "401": map[string]string{"description": "Invalid editor session"}, "403": map[string]string{"description": "Publish scope required"}},
+					},
+				},
+				"/rollback": map[string]any{
+					"post": map[string]any{
+						"summary": "Rollback a page revision",
+						"security": []map[string][]string{{"AICapability": []string{}, "AISession": []string{}}},
+						"responses": map[string]any{"200": map[string]string{"description": "Rolled back"}, "400": map[string]string{"description": "Invalid rollback request"}, "401": map[string]string{"description": "Invalid editor session"}},
+					},
+				},
+			},
+		})'''
+site = site[:encode_start] + openapi_document + site[encode_end:]
+
 site_path.write_text(site)
 
 # Keep the main-package security expectations aligned with the public token name.
 test_path = Path("sitebrush_test.go")
 test_text = test_path.read_text().replace("editor_token", "ai_token")
+test_text = test_text.replace(
+    '[]string{"?visual", "?text", ".AIPath", "openAIEditorButton", "aiEditorModalBackdrop", "createAIEditorLinkButton", "startAIEditorVoiceButton", "Invite your AI assistant - create invite link"}',
+    '[]string{"?visual", "?text", "openAIEditorButton", "aiEditorModalBackdrop", "createAIEditorLinkButton", "startAIEditorVoiceButton", "sendAIEditorButton", "aiEditorScope", "?ai_execute"}',
+)
 test_path.write_text(test_text)
