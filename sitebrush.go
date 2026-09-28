@@ -9444,8 +9444,14 @@ func (a *App) assignMissingDomainAliasTokens(ctx context.Context) {
 
 func (a *App) route(w http.ResponseWriter, r *http.Request) {
 	pagePath := cleanPath(r.URL.Path)
-	requestDomain := a.siteDomain(r.Context(), r)
-	if strings.TrimSpace(r.URL.Query().Get("ai_token")) != "" {
+	guestStaticRequest := isGuestStaticRequest(r)
+	requestDomain := domainFromRequest(r)
+	localGuestStaticRequest := guestStaticRequest && canonicalLocalDomain(requestDomain) == "localhost"
+	aiCapabilityRequest := strings.TrimSpace(r.URL.Query().Get("ai_token")) != ""
+	if !localGuestStaticRequest || aiCapabilityRequest {
+		requestDomain = a.siteDomain(r.Context(), r)
+	}
+	if aiCapabilityRequest {
 		a.aiCapabilityQueryEndpoint(w, r, requestDomain)
 		return
 	}
@@ -9458,7 +9464,8 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 		a.securityIncidentReport(w, r)
 		return
 	}
-	if a.serveStealthStaticForBlockedAdminIP(w, r, requestDomain, pagePath) {
+	publicTrialEndpoint := publicTrialEndpointFromRequest(r)
+	if !localGuestStaticRequest && publicTrialEndpoint == publicTrialEndpointNone && a.serveStealthStaticForBlockedAdminIP(w, r, requestDomain, pagePath) {
 		return
 	}
 	if r.URL.Path == "/_sitebrush/analytics" {
@@ -9527,7 +9534,6 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 		a.executeAIEditorRequest(w, r)
 		return
 	}
-	publicTrialEndpoint := publicTrialEndpointFromRequest(r)
 	if a.preparePublicTrialEndpoint(w, r, publicTrialEndpoint) {
 		return
 	}
@@ -10761,6 +10767,9 @@ func writeAIResult(w http.ResponseWriter, result aieditor.Result, resultErr erro
 func (a *App) serveStealthStaticForBlockedAdminIP(w http.ResponseWriter, r *http.Request, domain, pagePath string) bool {
 	stealthEnabled, err := a.adminStealthEnabled(r.Context(), domain, "")
 	if err != nil {
+		if errors.Is(err, errSiteDatabaseMissing) && a.isRegistrationOnboardingRequest(r, domain) {
+			return false
+		}
 		w.Header().Set("Cache-Control", "no-store")
 		http.Error(w, "site security settings temporarily unavailable", http.StatusServiceUnavailable)
 		return true
@@ -10804,12 +10813,43 @@ func (a *App) serveStealthStaticForBlockedAdminIP(w http.ResponseWriter, r *http
 
 func (a *App) adminStealthEnabled(ctx context.Context, domain, email string) (bool, error) {
 	var enabled int
-	err := a.db.QueryRowContext(ctx, `
+	rows, err := a.db.QueryContext(ctx, `
 SELECT COUNT(1)
 FROM admin_stealth_modes stealth
 JOIN admin_ip_policies policy ON policy.domain=stealth.domain AND policy.email=stealth.email
-WHERE stealth.domain=? AND stealth.enabled_at>0 AND (?='' OR stealth.email=?)`, domain, email, email).Scan(&enabled)
-	return enabled > 0, err
+WHERE stealth.domain=? AND stealth.enabled_at>0 AND (?='' OR stealth.email=?)`, domain, email, email)
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	if !rows.Next() {
+		if err := rows.Err(); err != nil {
+			return false, err
+		}
+		return false, sql.ErrNoRows
+	}
+	if err := rows.Scan(&enabled); err != nil {
+		return false, err
+	}
+	if err := rows.Err(); err != nil {
+		return false, err
+	}
+	return enabled > 0, nil
+}
+
+// Registration handlers validate DNS and email ownership before bootstrapping
+// a site; confirmation routes must carry a live registration confirmation.
+func (a *App) isRegistrationOnboardingRequest(r *http.Request, domain string) bool {
+	domain = normalizeDomainName(domain)
+	if token := strings.TrimSpace(r.URL.Query().Get("email_confirm")); token != "" {
+		confirmation, found := a.registrationConfirmationByToken(r.Context(), token)
+		return found && confirmation.Action == "register" && normalizeDomainName(confirmation.Domain) == domain
+	}
+	if handle := strings.TrimSpace(r.FormValue("registration_form_token")); handle != "" {
+		confirmation, found := a.registrationForDelivery(r, handle)
+		return found && confirmation.Action == "register" && normalizeDomainName(confirmation.Domain) == domain
+	}
+	return hasQueryFlag(r, "register")
 }
 
 // An IP restriction removes the session before normal routing, so public pages
@@ -22561,6 +22601,9 @@ func (a *App) confirmEmailToken(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet {
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("Referrer-Policy", "no-referrer")
+		if confirmation.Action == "register" {
+			a.observeAutomaticSSLRegistration(r, confirmation.Domain)
+		}
 		a.render(w, r, "account-confirm.html", map[string]any{"Domain": confirmation.Domain, "Email": confirmation.Email, "CurrentEmail": confirmation.CurrentEmail, "Token": token, "AcceptEmail": confirmation.Action == "profile", "SetPassword": confirmation.Action == "register" && confirmation.Password == ""})
 		return
 	}

@@ -4824,7 +4824,7 @@ func TestRegisterRejectsUnverifiedDomainBeforeCreatingSiteDatabase(t *testing.T)
 
 func TestRegisterCreatesSiteDatabaseOnlyAfterConfirmedVerifiedDomain(t *testing.T) {
 	t.Setenv("SITEBRUSH_SERVICE_MAIL_MODE", "local")
-	const domain = "verified.example"
+	const domain = "a.sitebrush.com"
 	withRegistrationDNS(t, domain, true)
 	storagePath := t.TempDir()
 	dbPath := filepath.Join(storagePath, defaultDBPath)
@@ -4847,10 +4847,24 @@ func TestRegisterCreatesSiteDatabaseOnlyAfterConfirmedVerifiedDomain(t *testing.
 		grabTracker:               newGrabProgressTracker(),
 		registrationConfirmations: startEmailConfirmationMemoryWorker(context.Background()),
 		emailDelivery:             make(chan mailout.DeliveryJob, 1),
+		automaticSSL:              make(chan automaticSSLRequest, 2),
 	}
 	application.hostingSnapshotReports = make(chan struct{}, 1)
+	domainContext := contextWithDomain(context.Background(), domain)
+	if _, err := application.adminStealthEnabled(domainContext, domain, ""); !errors.Is(err, errSiteDatabaseMissing) {
+		t.Fatalf("stealth lookup error = %v, want missing site database", err)
+	}
+	loginRequest := httptest.NewRequest(http.MethodGet, "https://"+domain+"/?login", nil)
+	loginResponse := httptest.NewRecorder()
+	application.route(loginResponse, loginRequest)
+	if loginResponse.Code != http.StatusServiceUnavailable {
+		t.Fatalf("login with missing site database status = %d, want %d; body=%q", loginResponse.Code, http.StatusServiceUnavailable, loginResponse.Body.String())
+	}
+	if strings.Contains(loginResponse.Header().Get("Location"), "register") {
+		t.Fatalf("login with missing site database redirected to registration: %q", loginResponse.Header().Get("Location"))
+	}
 	form := url.Values{}
-	form.Set("email", "admin@verified.example")
+	form.Set("email", "admin@a.sitebrush.com")
 	form.Set("password", "secret")
 	request := httptest.NewRequest(http.MethodPost, "https://"+domain+"/?register", strings.NewReader(form.Encode()))
 	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
@@ -4872,6 +4886,24 @@ func TestRegisterCreatesSiteDatabaseOnlyAfterConfirmedVerifiedDomain(t *testing.
 		t.Fatalf("site database before confirmation stat err = %v, want not exist", err)
 	}
 
+	confirmationPageRequest := httptest.NewRequest(http.MethodGet, "https://"+domain+"/?email_confirm="+url.QueryEscape(pendingToken), nil)
+	confirmationPageResponse := httptest.NewRecorder()
+	application.route(confirmationPageResponse, confirmationPageRequest)
+	if confirmationPageResponse.Code != http.StatusOK {
+		t.Fatalf("confirmation page status = %d, body=%q", confirmationPageResponse.Code, confirmationPageResponse.Body.String())
+	}
+	select {
+	case sslRequest := <-application.automaticSSL:
+		if sslRequest.action != "registration_confirmed" || sslRequest.domain != domain {
+			t.Fatalf("automatic SSL request = %+v, want confirmed registration for %s", sslRequest, domain)
+		}
+	default:
+		t.Fatal("email confirmation did not start automatic SSL before account setup continued")
+	}
+	if _, err := os.Stat(siteDatabasePath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("confirmation page created site database before account setup: %v", err)
+	}
+
 	confirmRequest := httptest.NewRequest(http.MethodPost, "https://"+domain+"/?email_confirm="+url.QueryEscape(pendingToken), strings.NewReader("password=secret&password_confirm=secret"))
 	confirmRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	confirmResponse := httptest.NewRecorder()
@@ -4883,7 +4915,7 @@ func TestRegisterCreatesSiteDatabaseOnlyAfterConfirmedVerifiedDomain(t *testing.
 		t.Fatalf("site database after confirmation stat err = %v", err)
 	}
 	var userCount int
-	if err := router.QueryRowContext(contextWithDomain(context.Background(), domain), `SELECT COUNT(1) FROM users WHERE domain=? AND email=? AND is_admin=1`, domain, "admin@verified.example").Scan(&userCount); err != nil {
+	if err := router.QueryRowContext(contextWithDomain(context.Background(), domain), `SELECT COUNT(1) FROM users WHERE domain=? AND email=? AND is_admin=1`, domain, "admin@a.sitebrush.com").Scan(&userCount); err != nil {
 		t.Fatalf("read confirmed admin: %v", err)
 	}
 	if userCount != 1 {
@@ -16069,6 +16101,44 @@ func TestDefaultCrawlerDiscoveryFilesExposePublishedContent(t *testing.T) {
 	}
 }
 
+func TestRouteResolvesVerifiedAliasBeforeDefaultCrawlerIndex(t *testing.T) {
+	application, database := newTestApplication(t)
+	for _, statement := range []string{
+		`INSERT INTO domain_aliases(primary_domain,alias_domain,verification_token,is_verified,dns_a_ok) VALUES('primary.example','alias.example','verified',1,1)`,
+		`INSERT INTO published_pages(domain,path,title,html) VALUES('primary.example','/','Home','<html></html>')`,
+		`INSERT INTO published_pages(domain,path,title,html) VALUES('primary.example','/about','About','<html></html>')`,
+		`INSERT INTO page_password_rules(domain,path,password_hash,created_at,updated_at) VALUES('primary.example','/private/','hash','now','now')`,
+	} {
+		if _, err := database.Exec(statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	robotsRequest := httptest.NewRequest(http.MethodGet, "https://alias.example/robots.txt", nil)
+	robotsResponse := httptest.NewRecorder()
+	application.route(robotsResponse, robotsRequest)
+	if robotsResponse.Code != http.StatusOK {
+		t.Fatalf("alias robots status = %d body=%q", robotsResponse.Code, robotsResponse.Body.String())
+	}
+	for _, expected := range []string{"Disallow: /private", "Sitemap: https://alias.example/sitemap.xml"} {
+		if !strings.Contains(robotsResponse.Body.String(), expected) {
+			t.Fatalf("alias robots missing %q: %s", expected, robotsResponse.Body.String())
+		}
+	}
+
+	sitemapRequest := httptest.NewRequest(http.MethodGet, "https://alias.example/sitemap.xml", nil)
+	sitemapResponse := httptest.NewRecorder()
+	application.route(sitemapResponse, sitemapRequest)
+	if sitemapResponse.Code != http.StatusOK {
+		t.Fatalf("alias sitemap status = %d body=%q", sitemapResponse.Code, sitemapResponse.Body.String())
+	}
+	for _, expected := range []string{"https://alias.example/", "https://alias.example/about"} {
+		if !strings.Contains(sitemapResponse.Body.String(), expected) {
+			t.Fatalf("alias sitemap missing %q: %s", expected, sitemapResponse.Body.String())
+		}
+	}
+}
+
 func TestDefaultCrawlerIndexOnlyHandlesReadOnlyDiscoveryPaths(t *testing.T) {
 	application, _ := newTestApplication(t)
 	for _, testCase := range []struct {
@@ -16346,6 +16416,8 @@ func TestAuthAttackConcurrentPasswordChangeConfirmationAppliesOnce(t *testing.T)
 
 func TestAuthAttackConcurrentPasswordRecoveryAppliesOnce(t *testing.T) {
 	application, database := newTestApplication(t)
+	// The production site DB serializes writes through its dedicated worker.
+	database.SetMaxOpenConns(1)
 	now := time.Now().UTC()
 	const domain, email = "localhost", "owner@example.com"
 	if _, err := database.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, domain, email, "old-password"); err != nil {
