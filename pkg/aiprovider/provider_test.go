@@ -112,15 +112,11 @@ func TestProviderConfigurationAndDecryptionErrors(t *testing.T) {
 	}
 }
 
-func TestOllamaRequiresExplicitSafeEndpoint(t *testing.T) {
-	if _, err := NewClient(Config{Provider: ProviderOllama, Model: "model", APIKey: "key"}, nil); err == nil {
-		t.Fatal("Ollama without an explicit endpoint was accepted")
-	}
-	client, err := NewClient(Config{Provider: ProviderOllama, Model: "model", APIKey: "key"}, &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
-		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"choices":[{"message":{"content":"ok"}}]}`)), Header: make(http.Header)}, nil
-	})})
-	if err != nil || client == nil {
-		t.Fatalf("explicit Ollama endpoint rejected: %v", err)
+func TestOllamaIsRejectedByBuiltInPublicProviderAdapter(t *testing.T) {
+	for _, baseURL := range []string{"", "https://provider.invalid/v1"} {
+		if _, err := NewClient(Config{Provider: ProviderOllama, BaseURL: baseURL, Model: "model", APIKey: "key"}, nil); err == nil {
+			t.Fatalf("Ollama endpoint %q was accepted by the built-in public provider adapter", baseURL)
+		}
 	}
 }
 
