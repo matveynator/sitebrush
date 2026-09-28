@@ -558,7 +558,76 @@ site_path.write_text(site)
 test_path = Path("sitebrush_test.go")
 test_text = test_path.read_text().replace("editor_token", "ai_token")
 test_text = test_text.replace(
+    '"github.com/matveynator/sitebrush/v2/pkg/accountauth"\n',
+    '"github.com/matveynator/sitebrush/v2/pkg/accountauth"\n\t"github.com/matveynator/sitebrush/v2/pkg/aieditor"\n',
+    1,
+)
+test_text = test_text.replace(
     '[]string{"?visual", "?text", ".AIPath", "openAIEditorButton", "aiEditorModalBackdrop", "createAIEditorLinkButton", "startAIEditorVoiceButton", "Invite your AI assistant - create invite link"}',
     '[]string{"?visual", "?text", "openAIEditorButton", "aiEditorModalBackdrop", "createAIEditorLinkButton", "startAIEditorVoiceButton", "sendAIEditorButton", "aiEditorScope", "?ai_execute"}',
 )
+rollback_test_marker = "func TestWholeSitePreviewStopsAtFreeByteLimitWithUsableFirstPage(t *testing.T) {"
+rollback_test = r'''func TestAIRollbackIsPageBoundAndChargesRevisionStorage(t *testing.T) {
+	application, database := newTestApplication(t)
+	ctx := context.Background()
+	domain := "ai-rollback.example"
+	if _, err := database.ExecContext(ctx, \`INSERT INTO pages(domain,path,title,html,published) VALUES(?,?,?,?,1)\`, domain, "/one", "One", "<p>current</p>"); err != nil {
+		t.Fatal(err)
+	}
+	firstRevision, err := database.ExecContext(ctx, \`INSERT INTO revisions(domain,page_path,html,created_at) VALUES(?,?,?,?)\`, domain, "/one", "<p>old</p>", time.Now().UTC().Format(time.RFC3339))
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstRevisionID, err := firstRevision.LastInsertId()
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondRevision, err := database.ExecContext(ctx, \`INSERT INTO revisions(domain,page_path,html,created_at) VALUES(?,?,?,?)\`, domain, "/two", "<p>other</p>", time.Now().UTC().Format(time.RFC3339))
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondRevisionID, err := secondRevision.LastInsertId()
+	if err != nil {
+		t.Fatal(err)
+	}
+	application.rebuildDomainStorageUsage(ctx, domain)
+	var beforeRevisionBytes int64
+	if err := database.QueryRowContext(ctx, \`SELECT revision_bytes FROM domain_storage_usage WHERE domain=?\`, domain).Scan(&beforeRevisionBytes); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := application.rollbackAIPage(ctx, domain, aieditor.Request{Operation: aieditor.OperationRollback, Path: "/one", ExpectedVersion: strconv.FormatInt(secondRevisionID, 10)}); err == nil {
+		t.Fatal("AI rollback accepted a revision from another page")
+	}
+	var revisionCountAfterMismatch int
+	if err := database.QueryRowContext(ctx, \`SELECT COUNT(*) FROM revisions WHERE domain=?\`, domain).Scan(&revisionCountAfterMismatch); err != nil {
+		t.Fatal(err)
+	}
+	if revisionCountAfterMismatch != 2 {
+		t.Fatalf("mismatched rollback created a revision: count=%d", revisionCountAfterMismatch)
+	}
+
+	if err := application.rollbackAIPage(ctx, domain, aieditor.Request{Operation: aieditor.OperationRollback, Path: "/one", ExpectedVersion: strconv.FormatInt(firstRevisionID, 10)}); err != nil {
+		t.Fatalf("valid AI rollback failed: %v", err)
+	}
+	var pageHTML string
+	if err := database.QueryRowContext(ctx, \`SELECT html FROM pages WHERE domain=? AND path=?\`, domain, "/one").Scan(&pageHTML); err != nil {
+		t.Fatal(err)
+	}
+	if pageHTML != "<p>old</p>" {
+		t.Fatalf("page HTML=%q after rollback", pageHTML)
+	}
+	var afterRevisionBytes int64
+	if err := database.QueryRowContext(ctx, \`SELECT revision_bytes FROM domain_storage_usage WHERE domain=?\`, domain).Scan(&afterRevisionBytes); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := afterRevisionBytes-beforeRevisionBytes, int64(len([]byte("<p>old</p>"))); got != want {
+		t.Fatalf("revision quota delta=%d, want %d", got, want)
+	}
+}
+
+'''
+if rollback_test_marker not in test_text:
+    raise SystemExit("missing rollback test insertion marker")
+test_text = test_text.replace(rollback_test_marker, rollback_test + rollback_test_marker, 1)
 test_path.write_text(test_text)
