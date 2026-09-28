@@ -483,7 +483,7 @@ site = replace_once(
 openapi_index = site.index('if operation == "openapi.json"')
 encode_start = site.index('\t\t_ = json.NewEncoder(w).Encode(map[string]any{', openapi_index)
 encode_end = site.index('\n\t\treturn', encode_start)
-openapi_document = r'''\t\t_ = json.NewEncoder(w).Encode(map[string]any{
+openapi_document = '''\t\t_ = json.NewEncoder(w).Encode(map[string]any{
 			"openapi": "3.0.3",
 			"info":    map[string]string{"title": "SiteBrush AI editor", "version": "1"},
 			"servers": []map[string]string{{"url": requestScheme(r) + "://" + r.Host}},
