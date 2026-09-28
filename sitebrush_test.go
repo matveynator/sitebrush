@@ -2568,7 +2568,7 @@ func TestMobileServicePageDesignCoversEverySharedTemplate(t *testing.T) {
 		"billing_invoice.html",
 		"billing_schedule.html",
 		"domain_settings.html",
-		"edit_mode.html",
+		"edit_ai.html",
 		"expenses.html",
 		"files.html",
 		"import.html",
@@ -3106,14 +3106,14 @@ func TestContextMenuUsesDirectEditorProfileAndDeleteActions(t *testing.T) {
 		t.Fatalf("status = %d, body=%q", response.Code, response.Body.String())
 	}
 	body := response.Body.String()
-	for _, expectedFragment := range []string{"href='?visual'", "href='?text'", "data-sitebrush-action='ai_editor'", "data-sitebrush-action='delete'", "?delete=" + strconv.FormatInt(revisionID, 10), "data-sitebrush-action='protect_password'", "/p/static/lock.png", "Protect with password", "href='?profile'", "href='?analytics'", "/p/static/analytics.svg", "SiteBrushAIEditorInvite", "Invite your AI assistant - create invite link"} {
+	for _, expectedFragment := range []string{"href='?visual'", "href='?text'", "href='?ai'", "data-sitebrush-action='delete'", "?delete=" + strconv.FormatInt(revisionID, 10), "data-sitebrush-action='protect_password'", "/p/static/lock.png", "Protect with password", "href='?profile'", "href='?analytics'", "/p/static/analytics.svg"} {
 		if !strings.Contains(body, expectedFragment) {
 			t.Fatalf("context menu missing %q in %s", expectedFragment, body)
 		}
 	}
 	visualIndex := strings.Index(body, "href='?visual'")
 	textIndex := strings.Index(body, "href='?text'")
-	aiIndex := strings.Index(body, "data-sitebrush-action='ai_editor'")
+	aiIndex := strings.Index(body, "href='?ai'")
 	if visualIndex < 0 || textIndex <= visualIndex || aiIndex <= textIndex {
 		t.Fatalf("editor menu order is not visual, text, AI: visual=%d text=%d ai=%d", visualIndex, textIndex, aiIndex)
 	}
@@ -3122,8 +3122,15 @@ func TestContextMenuUsesDirectEditorProfileAndDeleteActions(t *testing.T) {
 			t.Fatalf("context menu missing storage/version fragment %q in %s", expectedFragment, body)
 		}
 	}
-	if strings.Contains(body, "href='?edit'") {
-		t.Fatalf("context menu still contains intermediate edit link: %s", body)
+	for _, obsoleteEditorPath := range []string{"?edit", "?editraw"} {
+		if strings.Contains(body, obsoleteEditorPath) {
+			t.Fatalf("context menu still contains obsolete editor path %q: %s", obsoleteEditorPath, body)
+		}
+	}
+	for _, obsoleteAIFragment := range []string{"data-sitebrush-action='ai_editor'", "SiteBrushAIEditor"} {
+		if strings.Contains(body, obsoleteAIFragment) {
+			t.Fatalf("context menu still contains obsolete AI dialog fragment %q: %s", obsoleteAIFragment, body)
+		}
 	}
 	for _, expectedFragment := range []string{`window.location.href = targetHref;`, `closestSitebrushEventElement(browserEvent, "#SiteBrushMenuBox")`, `function closeSitebrushMenu()`, `z-index:2147483647`, `closeSitebrushMenu();`, `data-sitebrush-owned`, `sitebrushContextMenuShadowCSS`, `attachShadow({mode: "open"})`, `menuRoot.appendChild(menuStyleElement)`, `.SiteBrushContextMenuLink:link`, `.SiteBrushContextMenuLink:visited`, `window.addEventListener("contextmenu", onContextMenuOpen, {capture: true, passive: false})`, `installSitebrushLongPressMenu`, `document.addEventListener("pointerdown", startLongPress`, `document.addEventListener("touchstart"`, `positionSitebrushMenuBox(menuBoxElement, menuPoint)`, `max-height:calc(100vh - 16px)`, `@media (pointer: coarse), (max-width: 820px)`, `function openPasswordProtectionDialog`, `SiteBrushPasswordInput`, `buildSitebrushAdminMenuEntries(sitebrushContextMenuWasOpenedByMouse(browserEvent))`, `buildSitebrushAdminMenuEntries(false)`, `closestSitebrushEventElement(browserEvent, "[data-sitebrush-owned]")`} {
 		if !strings.Contains(body, expectedFragment) {
@@ -11178,18 +11185,13 @@ func TestSiteBrushTemplateImportControlsAreEnabledByDefaultAndLocalized(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	editTemplateBytes, err := embeddedWebFiles.ReadFile("web/edit_mode.html")
-	if err != nil {
-		t.Fatal(err)
-	}
 	copyScriptBytes, err := embeddedWebFiles.ReadFile("web/static/site_copy.js")
 	if err != nil {
 		t.Fatal(err)
 	}
 	for fileName, source := range map[string]string{
-		"missing.html":   string(missingTemplateBytes),
-		"edit_mode.html": string(editTemplateBytes),
-		"site_copy.js":   string(copyScriptBytes),
+		"missing.html": string(missingTemplateBytes),
+		"site_copy.js": string(copyScriptBytes),
 	} {
 		for _, expectedFragment := range []string{"auto_detect_sitebrush_template", "checked"} {
 			if !strings.Contains(source, expectedFragment) {
@@ -11197,11 +11199,9 @@ func TestSiteBrushTemplateImportControlsAreEnabledByDefaultAndLocalized(t *testi
 			}
 		}
 	}
-	for _, templateSource := range []string{string(missingTemplateBytes), string(editTemplateBytes)} {
-		for _, translationKey := range []string{"site_copy_auto_detect_template", "site_copy_template_help_link", "site_copy_template_help_title", "site_copy_template_help_body"} {
-			if !strings.Contains(templateSource, translationKey) {
-				t.Fatalf("import template is missing translation key %q", translationKey)
-			}
+	for _, translationKey := range []string{"site_copy_auto_detect_template", "site_copy_template_help_link", "site_copy_template_help_title", "site_copy_template_help_body"} {
+		if !strings.Contains(string(missingTemplateBytes), translationKey) {
+			t.Fatalf("import template is missing translation key %q", translationKey)
 		}
 	}
 	if !strings.Contains(string(missingTemplateBytes), "setProgressPercent(detectionPercent)") || !strings.Contains(string(copyScriptBytes), "setProgress(progressBarElement, detectionPercent)") {
@@ -11220,7 +11220,6 @@ func TestSiteBrushTemplateImportControlsAreEnabledByDefaultAndLocalized(t *testi
 		}
 	}
 }
-
 func TestAIProviderCredentialIsEncryptedAtRestAndReusable(t *testing.T) {
 	application, rawDB := newTestApplication(t)
 	const providerToken = "secret-provider-token"
@@ -11330,23 +11329,7 @@ func TestAIProviderTokenLinksAreExposedWithoutEmbeddingTokens(t *testing.T) {
 	}
 }
 
-func TestEditorTemplatesExposeThreeModeNavigation(t *testing.T) {
-	modeTemplateBytes, err := embeddedWebFiles.ReadFile("web/edit_mode.html")
-	if err != nil {
-		t.Fatal(err)
-	}
-	modeTemplate := string(modeTemplateBytes)
-	for _, expectedFragment := range []string{"?visual", "?text", "?ai", "Редактирование голосом"} {
-		if !strings.Contains(modeTemplate, expectedFragment) {
-			t.Fatalf("edit_mode.html does not expose %q", expectedFragment)
-		}
-	}
-	for _, forbiddenFragment := range []string{"aiEditorModalBackdrop", "openAIEditorButton", "aiEditorScope"} {
-		if strings.Contains(modeTemplate, forbiddenFragment) {
-			t.Fatalf("edit_mode.html still embeds duplicate AI UI %q", forbiddenFragment)
-		}
-	}
-
+func TestEditorExposesOnlyVisualTextAndAIRoutes(t *testing.T) {
 	aiTemplateBytes, err := embeddedWebFiles.ReadFile("web/edit_ai.html")
 	if err != nil {
 		t.Fatal(err)
@@ -11357,21 +11340,24 @@ func TestEditorTemplatesExposeThreeModeNavigation(t *testing.T) {
 			t.Fatalf("edit_ai.html does not expose %q", expectedFragment)
 		}
 	}
-	if strings.Contains(aiTemplate, "aiEditorScope") || strings.Contains(aiTemplate, "Весь сайт") {
-		t.Fatal("edit_ai.html still exposes an internal site/page scope selector")
+	for _, forbiddenFragment := range []string{"aiEditorScope", "Весь сайт", "?edit", "?editraw"} {
+		if strings.Contains(aiTemplate, forbiddenFragment) {
+			t.Fatalf("edit_ai.html still exposes obsolete editor fragment %q", forbiddenFragment)
+		}
 	}
 
-	for _, templateName := range []string{"edit.html", "edit_raw.html"} {
-		templateBytes, err := embeddedWebFiles.ReadFile("web/" + templateName)
-		if err != nil {
-			t.Fatal(err)
+	menuScript := buildContextMenuScript(true, false, false, false, true, "/", "example.com", 0, 0, "", "", translationsForLanguageCode("en"))
+	for _, expectedPath := range []string{"href='?visual'", "href='?text'", "href='?ai'"} {
+		if !strings.Contains(menuScript, expectedPath) {
+			t.Fatalf("context menu does not expose %q", expectedPath)
 		}
-		if strings.Contains(string(templateBytes), "editor-mode-menu") {
-			t.Fatalf("%s unexpectedly owns the mode menu", templateName)
+	}
+	for _, obsoleteFragment := range []string{"?edit", "?editraw", "data-sitebrush-action='ai_editor'", "SiteBrushAIEditor"} {
+		if strings.Contains(menuScript, obsoleteFragment) {
+			t.Fatalf("context menu still exposes obsolete editor fragment %q", obsoleteFragment)
 		}
 	}
 }
-
 func TestRecommendedAIEditorModelPrefersBalancedOptions(t *testing.T) {
 	cases := []struct {
 		provider string
