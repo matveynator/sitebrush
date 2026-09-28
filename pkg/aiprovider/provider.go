@@ -205,15 +205,48 @@ func (client *Client) Complete(ctx context.Context, request Request) (Response, 
 	if client == nil || len(request.Messages) == 0 {
 		return Response{}, ErrInvalidConfiguration
 	}
+
 	endpoint := client.baseURL + "/chat/completions"
-	payload, err := json.Marshal(struct {
-		Model    string    `json:"model"`
-		Messages []Message `json:"messages"`
-		Stream   bool      `json:"stream,omitempty"`
-	}{client.configuration.Model, request.Messages, request.Stream})
+	var payload []byte
+	var err error
+	if client.configuration.Provider == ProviderAnthropic {
+		endpoint = client.baseURL + "/messages"
+		systemParts := make([]string, 0, 2)
+		conversation := make([]Message, 0, len(request.Messages))
+		for _, message := range request.Messages {
+			if strings.EqualFold(strings.TrimSpace(message.Role), "system") {
+				systemParts = append(systemParts, message.Content)
+				continue
+			}
+			conversation = append(conversation, message)
+		}
+		if len(conversation) == 0 {
+			return Response{}, ErrInvalidConfiguration
+		}
+		payload, err = json.Marshal(struct {
+			Model     string    `json:"model"`
+			MaxTokens int       `json:"max_tokens"`
+			System    string    `json:"system,omitempty"`
+			Messages  []Message `json:"messages"`
+			Stream    bool      `json:"stream,omitempty"`
+		}{
+			Model: client.configuration.Model,
+			MaxTokens: 8192,
+			System: strings.Join(systemParts, "\n\n"),
+			Messages: conversation,
+			Stream: request.Stream,
+		})
+	} else {
+		payload, err = json.Marshal(struct {
+			Model    string    `json:"model"`
+			Messages []Message `json:"messages"`
+			Stream   bool      `json:"stream,omitempty"`
+		}{client.configuration.Model, request.Messages, request.Stream})
+	}
 	if err != nil {
 		return Response{}, err
 	}
+
 	httpRequest, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(payload))
 	if err != nil {
 		return Response{}, err
