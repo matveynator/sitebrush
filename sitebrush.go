@@ -8981,11 +8981,7 @@ func requiredSiteDatabaseColumns() []siteDatabaseColumnRequirement {
 		{tableName: "ai_provider_user_credentials", columnName: "encrypted_api_key", definition: "TEXT"},
 		{tableName: "ai_provider_user_credentials", columnName: "model", definition: "TEXT"},
 		{tableName: "ai_provider_user_credentials", columnName: "updated_at", definition: "TEXT"},
-		
-		
-		
-		
-		
+
 		{tableName: "email_confirmations", columnName: "token", definition: "TEXT"},
 		{tableName: "email_confirmations", columnName: "domain", definition: "TEXT"},
 		{tableName: "email_confirmations", columnName: "action", definition: "TEXT"},
@@ -9918,7 +9914,9 @@ func aiCapabilityURL(token string) string {
 }
 
 func aiCapabilityOperationURL(request *http.Request, token, operation string) string {
-	return requestScheme(request) + "://" + request.Host + "/" + strings.Trim(operation, "/") + "?ai_token=" + url.QueryEscape(token)
+	// The URL is embedded in Markdown and can also be requested as plain text, so encode for both URL and HTML contexts.
+	escapedToken := template.HTMLEscapeString(url.QueryEscape(token))
+	return requestScheme(request) + "://" + request.Host + "/" + strings.Trim(operation, "/") + "?ai_token=" + escapedToken
 }
 
 type appAIStore struct{ application *App }
