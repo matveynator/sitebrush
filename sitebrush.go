@@ -9872,8 +9872,25 @@ func redactAICapabilityPath(requestPath string) string {
 		return prefix + "[redacted]"
 	}
 	parts := strings.Split(suffix, "/")
-	parts[0] = "[redacted]"
+	if len(parts) > 1 && !isAICapabilityOperation(parts[1]) {
+		parts[1] = "[redacted]"
+	} else {
+		parts[0] = "[redacted]"
+	}
 	return prefix + strings.Join(parts, "/")
+}
+
+func isAICapabilityOperation(operation string) bool {
+	switch operation {
+	case "pages", "page", "file", "publish", "rollback", "revoke", "openapi.json", "exchange":
+		return true
+	default:
+		return false
+	}
+}
+
+func aiCapabilityPath(domain, token string) string {
+	return "/.well-known/sitebrush-editor/" + url.PathEscape(normalizeDomainName(domain)) + "/" + token
 }
 
 type appAIStore struct{ application *App }
@@ -10109,12 +10126,21 @@ func (a *App) aiCapabilityEndpoint(w http.ResponseWriter, r *http.Request, domai
 		http.NotFound(w, r)
 		return
 	}
-	token := parts[0]
-	if len(parts) > 1 && (parts[1] == "pages" || parts[1] == "page" || parts[1] == "file" || parts[1] == "publish" || parts[1] == "rollback") {
-		a.aiContentEndpoint(w, r, domain, token, parts[1])
+	tokenIndex := 0
+	if len(parts) > 1 && normalizeDomainName(parts[0]) == normalizeDomainName(domain) {
+		tokenIndex = 1
+	}
+	if tokenIndex >= len(parts) || strings.TrimSpace(parts[tokenIndex]) == "" {
+		http.NotFound(w, r)
 		return
 	}
-	if len(parts) > 1 && parts[1] == "revoke" {
+	token := parts[tokenIndex]
+	operationIndex := tokenIndex + 1
+	if operationIndex < len(parts) && (parts[operationIndex] == "pages" || parts[operationIndex] == "page" || parts[operationIndex] == "file" || parts[operationIndex] == "publish" || parts[operationIndex] == "rollback") {
+		a.aiContentEndpoint(w, r, domain, token, parts[operationIndex])
+		return
+	}
+	if operationIndex < len(parts) && parts[operationIndex] == "revoke" {
 		if r.Method != http.MethodPost {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
@@ -10127,7 +10153,7 @@ func (a *App) aiCapabilityEndpoint(w http.ResponseWriter, r *http.Request, domai
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
-	if len(parts) > 1 && parts[1] == "openapi.json" {
+	if operationIndex < len(parts) && parts[operationIndex] == "openapi.json" {
 		if r.Method != http.MethodGet {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
@@ -10152,7 +10178,7 @@ func (a *App) aiCapabilityEndpoint(w http.ResponseWriter, r *http.Request, domai
 		})
 		return
 	}
-	if len(parts) > 1 && parts[1] == "exchange" {
+	if operationIndex < len(parts) && parts[operationIndex] == "exchange" {
 		if r.Method != http.MethodPost {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
@@ -10167,7 +10193,7 @@ func (a *App) aiCapabilityEndpoint(w http.ResponseWriter, r *http.Request, domai
 		_ = json.NewEncoder(w).Encode(session)
 		return
 	}
-	if r.Method != http.MethodGet || len(parts) != 1 {
+	if r.Method != http.MethodGet || operationIndex != len(parts) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
@@ -10175,7 +10201,7 @@ func (a *App) aiCapabilityEndpoint(w http.ResponseWriter, r *http.Request, domai
 		http.Error(w, "capability is invalid", http.StatusUnauthorized)
 		return
 	}
-	baseURL := requestScheme(r) + "://" + r.Host + prefix + token
+	baseURL := requestScheme(r) + "://" + r.Host + aiCapabilityPath(domain, token)
 	manifest := aicapability.Manifest{
 		Name:         "SiteBrush AI editor",
 		Protocol:     "sitebrush-ai-editor/v1",
@@ -10203,7 +10229,7 @@ func (a *App) issueAICapability(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	_ = json.NewEncoder(w).Encode(map[string]string{"token": token, "capability_id": capability.ID, "url": requestScheme(r) + "://" + r.Host + "/.well-known/sitebrush-editor/" + token})
+	_ = json.NewEncoder(w).Encode(map[string]string{"token": token, "capability_id": capability.ID, "url": requestScheme(r) + "://" + r.Host + aiCapabilityPath(domain, token)})
 }
 
 func (a *App) aiContentEndpoint(w http.ResponseWriter, r *http.Request, domain, capabilityToken, operation string) {
@@ -31052,6 +31078,98 @@ func buildContextMenuScript(isAdmin bool, isServerManager bool, isFrozen bool, p
       }
     });
   }
+  function openAIEditorDialog() {
+    closeSitebrushMenu();
+    const overlayElement = document.createElement("div");
+    overlayElement.className = "SiteBrushAIEditorOverlay";
+    const modalElement = document.createElement("div");
+    modalElement.className = "SiteBrushAIEditorModal";
+    const titleElement = document.createElement("h3");
+    titleElement.className = "SiteBrushAIEditorTitle";
+    titleElement.textContent = "` + voiceEditLabel + `";
+    const instructionElement = document.createElement("p");
+    instructionElement.className = "SiteBrushAIEditorInstruction";
+    instructionElement.textContent = "Describe the change by voice or text, attach files, or give this page to another AI system.";
+    const commandElement = document.createElement("textarea");
+    commandElement.className = "SiteBrushAIEditorCommand";
+    commandElement.placeholder = "For example: create a news page from these photos and add a link on the home page.";
+    const fileInputElement = document.createElement("input");
+    fileInputElement.type = "file";
+    fileInputElement.multiple = true;
+    fileInputElement.className = "SiteBrushAIEditorFiles";
+    const statusElement = document.createElement("div");
+    statusElement.className = "SiteBrushAIEditorStatus";
+    const actionRowElement = document.createElement("div");
+    actionRowElement.className = "SiteBrushAIEditorActions";
+    const voiceButtonElement = document.createElement("button");
+    voiceButtonElement.type = "button";
+    voiceButtonElement.className = "SiteBrushAIEditorButton";
+    voiceButtonElement.textContent = "Speak";
+    const executeButtonElement = document.createElement("button");
+    executeButtonElement.type = "button";
+    executeButtonElement.className = "SiteBrushAIEditorButton SiteBrushAIEditorPrimaryButton";
+    executeButtonElement.textContent = "Execute task";
+    const linkButtonElement = document.createElement("button");
+    linkButtonElement.type = "button";
+    linkButtonElement.className = "SiteBrushAIEditorButton";
+    linkButtonElement.textContent = "Create AI link";
+    const closeButtonElement = document.createElement("button");
+    closeButtonElement.type = "button";
+    closeButtonElement.className = "SiteBrushAIEditorButton";
+    closeButtonElement.textContent = "Close";
+    function closeAIEditorDialog() { overlayElement.remove(); }
+    voiceButtonElement.addEventListener("click", function startAIEditorVoiceInput() {
+      const SpeechRecognitionConstructor = window.SpeechRecognition || window.webkitSpeechRecognition;
+      if (!SpeechRecognitionConstructor) {
+        statusElement.textContent = "Voice input is not supported by this browser.";
+        return;
+      }
+      const speechRecognition = new SpeechRecognitionConstructor();
+      speechRecognition.onresult = function receiveAIEditorVoiceInput(speechEvent) {
+        commandElement.value = speechEvent.results[0][0].transcript;
+      };
+      speechRecognition.onerror = function reportAIEditorVoiceInputError() {
+        statusElement.textContent = "Voice input failed.";
+      };
+      speechRecognition.start();
+    });
+    executeButtonElement.addEventListener("click", function executeAIEditorTask() {
+      sessionStorage.setItem("sitebrush.aiEditorCommand", commandElement.value);
+      sessionStorage.setItem("sitebrush.aiEditorFileNames", JSON.stringify(Array.from(fileInputElement.files || []).map(function fileName(file) { return file.name; })));
+      window.location.href = currentPagePath + "?ai";
+    });
+    linkButtonElement.addEventListener("click", async function createAIEditorCapabilityLink() {
+      linkButtonElement.disabled = true;
+      statusElement.textContent = "Creating a revocable link...";
+      try {
+        const capabilityResponse = await fetch(currentPagePath + "?ai_capability_create", { method: "POST", credentials: "same-origin" });
+        const capabilityPayload = await capabilityResponse.json();
+        if (!capabilityResponse.ok) { throw new Error(capabilityPayload.error || "Failed to create AI link"); }
+        statusElement.textContent = capabilityPayload.url;
+        if (navigator.clipboard) { await navigator.clipboard.writeText(capabilityPayload.url); }
+      } catch (error) {
+        statusElement.textContent = error.message;
+      }
+      linkButtonElement.disabled = false;
+    });
+    closeButtonElement.addEventListener("click", closeAIEditorDialog);
+    overlayElement.addEventListener("click", function closeAIEditorDialogOnOverlay(browserEvent) {
+      if (browserEvent.target === overlayElement) { closeAIEditorDialog(); }
+    });
+    actionRowElement.appendChild(voiceButtonElement);
+    actionRowElement.appendChild(executeButtonElement);
+    actionRowElement.appendChild(linkButtonElement);
+    actionRowElement.appendChild(closeButtonElement);
+    modalElement.appendChild(titleElement);
+    modalElement.appendChild(instructionElement);
+    modalElement.appendChild(commandElement);
+    modalElement.appendChild(fileInputElement);
+    modalElement.appendChild(statusElement);
+    modalElement.appendChild(actionRowElement);
+    overlayElement.appendChild(modalElement);
+    document.body.appendChild(overlayElement);
+    commandElement.focus();
+  }
   function labelForPublishStage(stageName) {
     if (stageName === "preparing") { return "` + publishProgressPreparingLabel + `"; }
     if (stageName === "pages") { return "` + publishProgressPagesLabel + `"; }
@@ -31147,6 +31265,10 @@ func buildContextMenuScript(isAdmin bool, isServerManager bool, isFrozen bool, p
       openCopySiteDialog();
       return;
     }
+    if (actionName === "ai_editor") {
+      openAIEditorDialog();
+      return;
+    }
     if (actionName === "protect_password") {
       openPasswordProtectionDialog(function submitProtectedPagePassword(passwordText) {
         submitPasswordActionForm("?page_password=protect", passwordText);
@@ -31224,7 +31346,7 @@ func buildContextMenuScript(isAdmin bool, isServerManager bool, isFrozen bool, p
       "<li class='SiteBrushContextMenu SiteBrushDomainMenuItem'><a href='/' class='SiteBrushContextMenuLink'>" + currentDomainName + "</a></li>",
       "<li class='SiteBrushContextMenu'><a href='?visual' class='SiteBrushContextMenuLink'><img src='/p/static/pencil.png' class='SiteBrushMenuIcon' alt=''>" + "` + editLabel + `" + "</a></li>",
       "<li class='SiteBrushContextMenu'><a href='?text' class='SiteBrushContextMenuLink'><img src='/p/static/pencil-text.png' class='SiteBrushMenuIcon' alt=''>" + "` + textEditLabel + `" + "</a></li>",
-      "<li class='SiteBrushContextMenu'><a href='?ai' class='SiteBrushContextMenuLink'><img src='/p/static/pencil.png' class='SiteBrushMenuIcon' alt=''>" + "` + voiceEditLabel + `" + "</a></li>",
+      "<li class='SiteBrushContextMenu'><button type='button' data-sitebrush-action='ai_editor' class='SiteBrushContextMenuLink SiteBrushContextMenuButton'><img src='/p/static/pencil.png' class='SiteBrushMenuIcon' alt=''>" + "` + voiceEditLabel + `" + "</button></li>",
       "<li class='SiteBrushContextMenu'><button type='button' data-sitebrush-action='copy_site' class='SiteBrushContextMenuLink SiteBrushContextMenuButton'><img src='/p/static/copy.png' class='SiteBrushMenuIcon' alt=''>" + "` + copySiteLabel + `" + "</button></li>",
       "` + deleteActionEntry + `",
       "<li class='SiteBrushContextMenu'><a href='?revisions' class='SiteBrushContextMenuLink'><img src='/p/static/revisions.png' class='SiteBrushMenuIcon' alt=''>" + "` + revisionsLabel + `" + "</a></li>",
@@ -31786,6 +31908,12 @@ func contextMenuStylesAndHelpers() string {
 .SiteBrushTreeLink{color:#1f3f6f;text-decoration:none;font-size:14px;line-height:1.6}
 .SiteBrushTreeLink:link,.SiteBrushTreeLink:visited,.SiteBrushTreeLink:active,.SiteBrushTreeLink:hover{color:#1f3f6f;text-decoration:none}
 .SiteBrushTreeCurrent{font-weight:700;text-decoration:underline}
+.SiteBrushAIEditorOverlay{position:fixed;inset:0;background:rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center;z-index:2147483647;padding:16px;box-sizing:border-box}
+.SiteBrushAIEditorModal{width:min(680px,100%);max-height:calc(100vh - 32px);overflow:auto;padding:20px;border:1px solid #c9d1df;border-radius:8px;background:#fff;color:#1e2a3a;box-shadow:0 12px 40px rgba(0,0,0,.25);box-sizing:border-box}
+.SiteBrushAIEditorTitle{margin:0 0 8px;font-size:20px}.SiteBrushAIEditorInstruction{margin:0 0 14px;font-size:14px}
+.SiteBrushAIEditorCommand{display:block;width:100%;min-height:120px;margin:0 0 12px;padding:10px;border:1px solid #aebbd0;border-radius:6px;box-sizing:border-box;resize:vertical;font:inherit}
+.SiteBrushAIEditorFiles{display:block;width:100%;margin:0 0 14px;font:inherit}.SiteBrushAIEditorStatus{min-height:24px;margin-bottom:10px;overflow-wrap:anywhere;font-size:13px}
+.SiteBrushAIEditorActions{display:flex;flex-wrap:wrap;justify-content:flex-end;gap:8px}.SiteBrushAIEditorButton{min-height:36px;padding:8px 13px;border:1px solid #aebbd0;border-radius:6px;background:#f1f4f8;color:#1e2a3a;font:inherit;cursor:pointer}.SiteBrushAIEditorPrimaryButton{border-color:#2b69b1;background:#2b69b1;color:#fff}.SiteBrushAIEditorButton:disabled{opacity:.6;cursor:default}
 @media (pointer: coarse), (max-width: 820px){
   .SiteBrushMenuBox{right:auto;min-width:min(220px,calc(100vw - 12px));max-width:calc(100vw - 12px);max-height:calc(100vh - 12px);border-radius:7px;padding:1px;-webkit-overflow-scrolling:touch}
   .SiteBrushContextMenuLink{min-height:34px;padding:7px 9px;font-size:13px;gap:7px}
@@ -31821,6 +31949,10 @@ func contextMenuStylesAndHelpers() string {
   .SiteBrushTreeCloseButton{background:#22324a;color:#dbe8ff;border-color:#405674}
   .SiteBrushTreeTitle,.SiteBrushTreeContent,.SiteBrushTreeLink{color:#dbe8ff}
   .SiteBrushTreeLink:link,.SiteBrushTreeLink:visited,.SiteBrushTreeLink:active,.SiteBrushTreeLink:hover{color:#dbe8ff}
+  .SiteBrushAIEditorModal{background:#172235;border-color:#2f405d;color:#dbe8ff}
+  .SiteBrushAIEditorCommand{background:#0f1724;color:#dbe8ff;border-color:#405674}
+  .SiteBrushAIEditorButton{background:#22324a;color:#dbe8ff;border-color:#405674}
+  .SiteBrushAIEditorPrimaryButton{background:#4f8bd8;color:#fff;border-color:#4f8bd8}
 }
 ` + sitebrushMenuMeridianStyles() + `
 </style>

@@ -3103,14 +3103,14 @@ func TestContextMenuUsesDirectEditorProfileAndDeleteActions(t *testing.T) {
 		t.Fatalf("status = %d, body=%q", response.Code, response.Body.String())
 	}
 	body := response.Body.String()
-	for _, expectedFragment := range []string{"href='?visual'", "href='?text'", "href='?ai'", "data-sitebrush-action='delete'", "?delete=" + strconv.FormatInt(revisionID, 10), "data-sitebrush-action='protect_password'", "/p/static/lock.png", "Protect with password", "href='?profile'", "href='?analytics'", "/p/static/analytics.svg"} {
+	for _, expectedFragment := range []string{"href='?visual'", "href='?text'", "data-sitebrush-action='ai_editor'", "data-sitebrush-action='delete'", "?delete=" + strconv.FormatInt(revisionID, 10), "data-sitebrush-action='protect_password'", "/p/static/lock.png", "Protect with password", "href='?profile'", "href='?analytics'", "/p/static/analytics.svg"} {
 		if !strings.Contains(body, expectedFragment) {
 			t.Fatalf("context menu missing %q in %s", expectedFragment, body)
 		}
 	}
 	visualIndex := strings.Index(body, "href='?visual'")
 	textIndex := strings.Index(body, "href='?text'")
-	aiIndex := strings.Index(body, "href='?ai'")
+	aiIndex := strings.Index(body, "data-sitebrush-action='ai_editor'")
 	if visualIndex < 0 || textIndex <= visualIndex || aiIndex <= textIndex {
 		t.Fatalf("editor menu order is not visual, text, AI: visual=%d text=%d ai=%d", visualIndex, textIndex, aiIndex)
 	}
@@ -11195,6 +11195,19 @@ func TestEditorTemplatesExposeThreeModeNavigation(t *testing.T) {
 		}
 		if strings.Contains(string(templateBytes), "editor-mode-menu") {
 			t.Fatalf("%s unexpectedly owns the mode menu", templateName)
+		}
+	}
+}
+
+func TestAICapabilityPathIsReadableButRedactsSecretToken(t *testing.T) {
+	capabilityPath := aiCapabilityPath("Example.org.", "random-secret-token")
+	if capabilityPath != "/.well-known/sitebrush-editor/example.org/random-secret-token" {
+		t.Fatalf("capability path=%q", capabilityPath)
+	}
+	for _, requestPath := range []string{capabilityPath, capabilityPath + "/exchange", capabilityPath + "/pages"} {
+		redactedPath := redactAICapabilityPath(requestPath)
+		if strings.Contains(redactedPath, "random-secret-token") || !strings.Contains(redactedPath, "example.org") {
+			t.Fatalf("capability token leaked in %q -> %q", requestPath, redactedPath)
 		}
 	}
 }
