@@ -22,21 +22,92 @@ jobs:
           ref: security-tests/database-domain-isolation
           fetch-depth: 0
 
-      - name: Merge current main
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: "1.26.6"
+          cache: true
+
+      - name: Merge current main and resolve routing overlap
         run: |
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git fetch origin main
+
           if ! git merge --no-commit --no-ff origin/main; then
-            echo "::group::Merge conflicts"
-            git status --short
-            git diff --name-only --diff-filter=U
-            git diff --cc
-            echo "::endgroup::"
-            exit 1
+            unmerged="$(git diff --name-only --diff-filter=U)"
+            if [ "$unmerged" != "sitebrush.go" ]; then
+              echo "Unexpected merge conflicts:"
+              printf '%s\n' "$unmerged"
+              git diff --cc
+              exit 1
+            fi
+
+            python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("sitebrush.go")
+          text = path.read_text()
+          resolved = 0
+
+          while "<<<<<<< HEAD\n" in text:
+              start = text.index("<<<<<<< HEAD\n")
+              middle = text.index("=======\n", start)
+              end = text.index(">>>>>>> origin/main\n", middle)
+              ours = text[start + len("<<<<<<< HEAD\n"):middle]
+              theirs = text[middle + len("=======\n"):end]
+
+              if 'r.URL.Query().Get("ai_token")' in ours and "guestStaticRequest := isGuestStaticRequest(r)" in theirs:
+                  replacement = """guestStaticRequest := isGuestStaticRequest(r)
+              requestDomain := domainFromRequest(r)
+              localGuestStaticRequest := guestStaticRequest && canonicalLocalDomain(requestDomain) == "localhost"
+              aiCapabilityRequest := strings.TrimSpace(r.URL.Query().Get("ai_token")) != ""
+              if !localGuestStaticRequest || aiCapabilityRequest {
+                  requestDomain = a.siteDomain(r.Context(), r)
+              }
+              if aiCapabilityRequest {
+                  a.aiCapabilityQueryEndpoint(w, r, requestDomain)
+                  return
+              }
+          """
+              elif 'hasQueryFlag(r, "ai_capability_create")' in ours and not theirs.strip():
+                  replacement = ours.replace('\tpublicTrialEndpoint := publicTrialEndpointFromRequest(r)\n', '')
+              else:
+                  raise SystemExit("Unexpected sitebrush.go conflict:\nOURS:\n" + ours + "\nTHEIRS:\n" + theirs)
+
+              text = text[:start] + replacement + text[end + len(">>>>>>> origin/main\n"):]
+              resolved += 1
+
+          if resolved != 2:
+              raise SystemExit(f"resolved {resolved} conflicts, want 2")
+          path.write_text(text)
+          PY
+
+            gofmt -w sitebrush.go
+            git add sitebrush.go
+            if git diff --name-only --diff-filter=U | grep -q .; then
+              echo "Unresolved conflicts remain"
+              git diff --cc
+              exit 1
+            fi
           fi
+
           rm -f .github/workflows/sync-ai-pr.yml
           git add -A
+
+      - name: Validate merged AI editor
+        env:
+          CGO_ENABLED: "0"
+        run: |
+          set -euo pipefail
+          go test -run '^$' .
+          go test -count=1 . -run '^(TestEditorTemplatesExposeThreeModeNavigation|TestAICapabilityPathIsReadableButRedactsSecretToken|TestAIRollbackIsPageBoundAndChargesRevisionStorage|TestGuestStaticRequestBypassesPerSiteDatabaseOpen)$'
+          go test -count=1 ./pkg/aicapability ./pkg/aieditor ./pkg/aiprovider
+          go test -count=1 ./pkg/... ./scripts/...
+
+      - name: Commit merged branch
+        run: |
+          set -euo pipefail
           git commit -m "Merge main into AI editor branch"
           git push origin HEAD:security-tests/database-domain-isolation
