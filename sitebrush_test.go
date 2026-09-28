@@ -42,6 +42,7 @@ import (
 
 	"github.com/matveynator/netchan"
 	"github.com/matveynator/sitebrush/v2/pkg/accountauth"
+	"github.com/matveynator/sitebrush/v2/pkg/aieditor"
 	browserstats "github.com/matveynator/sitebrush/v2/pkg/analytics"
 	"github.com/matveynator/sitebrush/v2/pkg/channelacme"
 	"github.com/matveynator/sitebrush/v2/pkg/crawler"
@@ -11184,7 +11185,7 @@ func TestEditorTemplatesExposeThreeModeNavigation(t *testing.T) {
 		t.Fatal(err)
 	}
 	templateSource := string(templateBytes)
-	for _, expectedFragment := range []string{"?visual", "?text", ".AIPath", "openAIEditorButton", "aiEditorModalBackdrop", "createAIEditorLinkButton", "startAIEditorVoiceButton", "Invite your AI assistant - create invite link"} {
+	for _, expectedFragment := range []string{"?visual", "?text", "openAIEditorButton", "aiEditorModalBackdrop", "createAIEditorLinkButton", "startAIEditorVoiceButton", "sendAIEditorButton", "aiEditorScope", "?ai_execute"} {
 		if !strings.Contains(templateSource, expectedFragment) {
 			t.Fatalf("edit_mode.html does not expose %q", expectedFragment)
 		}
@@ -11202,10 +11203,10 @@ func TestEditorTemplatesExposeThreeModeNavigation(t *testing.T) {
 
 func TestAICapabilityPathIsReadableButRedactsSecretToken(t *testing.T) {
 	capabilityPath := aiCapabilityURL("random-secret-token")
-	if capabilityPath != "/?editor_token=random-secret-token" {
+	if capabilityPath != "/?ai_token=random-secret-token" {
 		t.Fatalf("capability URL=%q", capabilityPath)
 	}
-	for _, requestPath := range []string{"/?editor_token=random-secret-token", "/exchange?editor_token=random-secret-token", "/pages?editor_token=random-secret-token"} {
+	for _, requestPath := range []string{"/?ai_token=random-secret-token", "/exchange?ai_token=random-secret-token", "/pages?ai_token=random-secret-token"} {
 		parsedRequestURL, err := url.Parse(requestPath)
 		if err != nil {
 			t.Fatal(err)
@@ -11214,6 +11215,65 @@ func TestAICapabilityPathIsReadableButRedactsSecretToken(t *testing.T) {
 		if strings.Contains(redactedQuery, "random-secret-token") {
 			t.Fatalf("capability token leaked in %q -> %q", requestPath, redactedQuery)
 		}
+	}
+}
+
+func TestAIRollbackIsPageBoundAndChargesRevisionStorage(t *testing.T) {
+	application, database := newTestApplication(t)
+	ctx := context.Background()
+	domain := "ai-rollback.example"
+	if _, err := database.ExecContext(ctx, `INSERT INTO pages(domain,path,title,html,published) VALUES(?,?,?,?,1)`, domain, "/one", "One", "<p>current</p>"); err != nil {
+		t.Fatal(err)
+	}
+	firstRevision, err := database.ExecContext(ctx, `INSERT INTO revisions(domain,page_path,html,created_at) VALUES(?,?,?,?)`, domain, "/one", "<p>old</p>", time.Now().UTC().Format(time.RFC3339))
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstRevisionID, err := firstRevision.LastInsertId()
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondRevision, err := database.ExecContext(ctx, `INSERT INTO revisions(domain,page_path,html,created_at) VALUES(?,?,?,?)`, domain, "/two", "<p>other</p>", time.Now().UTC().Format(time.RFC3339))
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondRevisionID, err := secondRevision.LastInsertId()
+	if err != nil {
+		t.Fatal(err)
+	}
+	application.rebuildDomainStorageUsage(ctx, domain)
+	var beforeRevisionBytes int64
+	if err := database.QueryRowContext(ctx, `SELECT revision_bytes FROM domain_storage_usage WHERE domain=?`, domain).Scan(&beforeRevisionBytes); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := application.rollbackAIPage(ctx, domain, aieditor.Request{Operation: aieditor.OperationRollback, Path: "/one", ExpectedVersion: strconv.FormatInt(secondRevisionID, 10)}); err == nil {
+		t.Fatal("AI rollback accepted a revision from another page")
+	}
+	var revisionCountAfterMismatch int
+	if err := database.QueryRowContext(ctx, `SELECT COUNT(*) FROM revisions WHERE domain=?`, domain).Scan(&revisionCountAfterMismatch); err != nil {
+		t.Fatal(err)
+	}
+	if revisionCountAfterMismatch != 2 {
+		t.Fatalf("mismatched rollback created a revision: count=%d", revisionCountAfterMismatch)
+	}
+
+	if err := application.rollbackAIPage(ctx, domain, aieditor.Request{Operation: aieditor.OperationRollback, Path: "/one", ExpectedVersion: strconv.FormatInt(firstRevisionID, 10)}); err != nil {
+		t.Fatalf("valid AI rollback failed: %v", err)
+	}
+	var pageHTML string
+	if err := database.QueryRowContext(ctx, `SELECT html FROM pages WHERE domain=? AND path=?`, domain, "/one").Scan(&pageHTML); err != nil {
+		t.Fatal(err)
+	}
+	if pageHTML != "<p>old</p>" {
+		t.Fatalf("page HTML=%q after rollback", pageHTML)
+	}
+	var afterRevisionBytes int64
+	if err := database.QueryRowContext(ctx, `SELECT revision_bytes FROM domain_storage_usage WHERE domain=?`, domain).Scan(&afterRevisionBytes); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := afterRevisionBytes-beforeRevisionBytes, int64(len([]byte("<p>old</p>"))); got != want {
+		t.Fatalf("revision quota delta=%d, want %d", got, want)
 	}
 }
 

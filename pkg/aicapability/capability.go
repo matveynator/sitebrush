@@ -21,18 +21,18 @@ const (
 )
 
 type Manifest struct {
-	Name         string           `json:"name"`
-	Protocol     string           `json:"protocol"`
-	Instructions string           `json:"instructions"`
+	Name             string           `json:"name"`
+	Protocol         string           `json:"protocol"`
+	Instructions     string           `json:"instructions"`
 	OpenAPIURL       string           `json:"openapi_url"`
 	DocumentationURL string           `json:"documentation_url"`
 	APIBase          string           `json:"api_base"`
-	Domain       string           `json:"domain"`
-	PagePath     string           `json:"page_path,omitempty"`
-	Task         string           `json:"task,omitempty"`
-	Scopes       []string         `json:"scopes"`
-	Limits       map[string]int64 `json:"limits"`
-	Operations   []string         `json:"operations"`
+	Domain           string           `json:"domain"`
+	PagePath         string           `json:"page_path,omitempty"`
+	Task             string           `json:"task,omitempty"`
+	Scopes           []string         `json:"scopes"`
+	Limits           map[string]int64 `json:"limits"`
+	Operations       []string         `json:"operations"`
 }
 
 type Capability struct {
