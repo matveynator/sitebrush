@@ -10154,7 +10154,7 @@ type aiProviderCredentialStatus struct {
 
 func supportedAIProvider(provider string) bool {
 	switch strings.ToLower(strings.TrimSpace(provider)) {
-	case aiprovider.ProviderOpenAICompatible, aiprovider.ProviderAnthropic, aiprovider.ProviderDeepSeek, aiprovider.ProviderQwen:
+	case aiprovider.ProviderOpenAICompatible, aiprovider.ProviderAnthropic, aiprovider.ProviderDeepSeek, aiprovider.ProviderQwen, aiprovider.ProviderGemini, aiprovider.ProviderGroq, aiprovider.ProviderMistral:
 		return true
 	default:
 		return false
@@ -10313,6 +10313,12 @@ func aiEditorModelAllowed(provider, model string) bool {
 		return strings.Contains(model, "deepseek")
 	case aiprovider.ProviderQwen:
 		return strings.Contains(model, "qwen")
+	case aiprovider.ProviderGemini:
+		return strings.Contains(model, "gemini")
+	case aiprovider.ProviderGroq:
+		return strings.Contains(model, "gpt-oss") || strings.Contains(model, "llama") || strings.Contains(model, "qwen")
+	case aiprovider.ProviderMistral:
+		return strings.Contains(model, "mistral") || strings.Contains(model, "ministral") || strings.Contains(model, "codestral")
 	default:
 		return strings.Contains(model, "gpt")
 	}
@@ -10355,6 +10361,15 @@ func recommendedAIEditorModel(provider string, models []string) string {
 	case aiprovider.ProviderQwen:
 		preferredExact = []string{"qwen-plus"}
 		preferredContains = []string{"qwen-plus", "qwen3"}
+	case aiprovider.ProviderGemini:
+		preferredExact = []string{"gemini-3.8-flash", "gemini-3-flash"}
+		preferredContains = []string{"flash"}
+	case aiprovider.ProviderGroq:
+		preferredExact = []string{"openai/gpt-oss-20b"}
+		preferredContains = []string{"gpt-oss-20b", "llama"}
+	case aiprovider.ProviderMistral:
+		preferredExact = []string{"mistral-small-latest"}
+		preferredContains = []string{"mistral-small", "ministral"}
 	default:
 		preferredExact = []string{"gpt-5.6-terra", "gpt-6-sol", "gpt-5.6-sol", "gpt-5.4", "gpt-5", "gpt-4.1"}
 		preferredContains = []string{"terra", "sol"}
@@ -10394,6 +10409,10 @@ func (a *App) validateAIProviderToken(ctx context.Context, provider, apiKey stri
 	if !supportedAIProvider(provider) || apiKey == "" {
 		return nil, "", errors.New("AI provider and API key are required")
 	}
+
+	// Validate authentication without spending inference quota. A provider key can
+	// be valid even when paid quota is not enabled yet, so an actual generation
+	// request belongs to the editor action rather than credential setup.
 	models, err := aiprovider.ListModels(ctx, aiprovider.Config{Provider: provider, APIKey: apiKey}, nil)
 	if err != nil {
 		return nil, "", err
@@ -10402,13 +10421,6 @@ func (a *App) validateAIProviderToken(ctx context.Context, provider, apiKey stri
 	model := recommendedAIEditorModel(provider, models)
 	if model == "" {
 		return nil, "", errors.New("AI provider has no compatible text models")
-	}
-	client, err := aiprovider.NewClient(aiprovider.Config{Provider: provider, Model: model, APIKey: apiKey, Timeout: 20 * time.Second}, nil)
-	if err != nil {
-		return nil, "", err
-	}
-	if _, err := client.Complete(ctx, aiprovider.Request{Messages: []aiprovider.Message{{Role: "user", Content: "Reply with OK."}}}); err != nil {
-		return nil, "", err
 	}
 	return models, model, nil
 }
@@ -10421,8 +10433,10 @@ func safeAIProviderErrorMessage(err error) string {
 			return "API token отклонён провайдером. Проверьте, что ключ скопирован полностью."
 		case http.StatusForbidden:
 			return "API token принят, но у него нет доступа к выбранной AI-модели."
+		case http.StatusPaymentRequired:
+			return "API token действителен, но провайдер требует включить API billing или пополнить баланс."
 		case http.StatusTooManyRequests:
-			return "AI-провайдер отклонил запрос из-за quota, billing или rate limit."
+			return "API token действителен, но сейчас нет доступной quota: проверьте API billing, баланс или rate limit."
 		case http.StatusBadRequest:
 			return "AI-провайдер отклонил тестовый запрос. Доступная модель или параметры аккаунта не подходят."
 		default:
@@ -10590,7 +10604,7 @@ func (a *App) aiEditorPage(w http.ResponseWriter, r *http.Request) {
 	}
 	a.render(w, r, "edit_ai.html", map[string]any{
 		"Path":         cleanPath(firstNonEmpty(r.URL.Query().Get("path"), r.URL.Path)),
-		"ProviderList": []string{aiprovider.ProviderOpenAICompatible, aiprovider.ProviderAnthropic, aiprovider.ProviderDeepSeek, aiprovider.ProviderQwen},
+		"ProviderList": []string{aiprovider.ProviderOpenAICompatible, aiprovider.ProviderAnthropic, aiprovider.ProviderDeepSeek, aiprovider.ProviderQwen, aiprovider.ProviderGemini, aiprovider.ProviderGroq, aiprovider.ProviderMistral},
 	})
 }
 
