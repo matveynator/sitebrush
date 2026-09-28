@@ -15,9 +15,35 @@ func (function roundTripFunc) RoundTrip(request *http.Request) (*http.Response, 
 	return function(request)
 }
 
+func TestAnthropicCompleteSeparatesSystemPrompt(t *testing.T) {
+	client, err := NewClient(Config{Provider: ProviderAnthropic, Model: "claude-sonnet-5", APIKey: "secret"}, &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		body, readErr := io.ReadAll(request.Body)
+		if readErr != nil {
+			return nil, readErr
+		}
+		if request.URL.String() != "https://api.anthropic.com/v1/messages" {
+			return nil, errors.New("unexpected Anthropic endpoint")
+		}
+		if !strings.Contains(string(body), `"system":"system instructions"`) || strings.Contains(string(body), `"role":"system"`) {
+			return nil, errors.New("Anthropic system prompt was not separated")
+		}
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"content":[{"text":"ok"}]}`)), Header: make(http.Header)}, nil
+	})})
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := client.Complete(context.Background(), Request{Messages: []Message{
+		{Role: "system", Content: "system instructions"},
+		{Role: "user", Content: "hello"},
+	}})
+	if err != nil || response.Text != "ok" {
+		t.Fatalf("response=%+v err=%v", response, err)
+	}
+}
+
 func TestClientUsesProviderEndpointAndNeverSendsWrongAuthorization(t *testing.T) {
 	client, err := NewClient(Config{Provider: ProviderAnthropic, Model: "claude", APIKey: "secret"}, &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
-		if request.URL.String() != "https://api.anthropic.com/v1/chat/completions" {
+		if request.URL.String() != "https://api.anthropic.com/v1/messages" {
 			return nil, errors.New("unexpected Anthropic endpoint")
 		}
 		if request.Header.Get("x-api-key") != "secret" || request.Header.Get("Authorization") != "" {
