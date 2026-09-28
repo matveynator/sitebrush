@@ -95,6 +95,18 @@ func TestProviderConfigurationAndDecryptionErrors(t *testing.T) {
 	}
 }
 
+func TestOllamaRequiresExplicitSafeEndpoint(t *testing.T) {
+	if _, err := NewClient(Config{Provider: ProviderOllama, Model: "model", APIKey: "key"}, nil); err == nil {
+		t.Fatal("Ollama without an explicit endpoint was accepted")
+	}
+	client, err := NewClient(Config{Provider: ProviderOllama, BaseURL: "https://provider.invalid/v1", Model: "model", APIKey: "key"}, &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"choices":[{"message":{"content":"ok"}}]}`)), Header: make(http.Header)}, nil
+	})})
+	if err != nil || client == nil {
+		t.Fatalf("explicit Ollama endpoint rejected: %v", err)
+	}
+}
+
 func TestDefaultProviderURLsAndOpenAIResponse(t *testing.T) {
 	for _, provider := range []string{ProviderOpenAICompatible, ProviderAnthropic, ProviderDeepSeek, ProviderQwen} {
 		client, err := NewClient(Config{Provider: provider, Model: "model", APIKey: "key"}, &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
