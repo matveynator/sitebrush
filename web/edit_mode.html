@@ -8,15 +8,38 @@
   <link rel="stylesheet" href="/p/static/bootstrap.min.css">
   <link rel="stylesheet" href="/p/static/technical_pages.css">
   <style>
-    .ai-editor-modal-backdrop { position:fixed; inset:0; z-index:1000; display:none; align-items:center; justify-content:center; padding:20px; background:rgba(0,0,0,.48); }
-    .ai-editor-modal-backdrop.is-open { display:flex; }
-    .ai-editor-modal { width:min(680px,100%); max-height:calc(100vh - 40px); overflow:auto; border:1px solid var(--bs-border-color); border-radius:var(--bs-border-radius-lg); background:var(--bs-body-bg); color:var(--bs-body-color); box-shadow:0 18px 60px rgba(0,0,0,.28); }
-    .ai-editor-modal-header, .ai-editor-modal-footer { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:14px 18px; border-bottom:1px solid var(--bs-border-color); }
-    .ai-editor-modal-footer { justify-content:flex-end; border-top:1px solid var(--bs-border-color); border-bottom:0; }
-    .ai-editor-modal-body { display:grid; gap:14px; padding:18px; }
-    .ai-editor-modal textarea { width:100%; min-height:110px; resize:vertical; }
-    .ai-editor-modal-close { border:0; background:transparent; font-size:24px; line-height:1; }
-    .ai-editor-modal-status { min-height:22px; white-space:pre-wrap; }
+    .ai-editor-modal-backdrop{position:fixed;inset:0;z-index:1000;display:none;align-items:center;justify-content:center;padding:20px;background:rgba(0,0,0,.48)}
+    .ai-editor-modal-backdrop.is-open{display:flex}
+    .ai-editor-modal{width:min(760px,100%);max-height:calc(100vh - 40px);overflow:auto;border:1px solid var(--bs-border-color);border-radius:22px;background:var(--bs-body-bg);color:var(--bs-body-color);box-shadow:0 22px 70px rgba(0,0,0,.3)}
+    .ai-editor-modal-header{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:18px 20px 8px}
+    .ai-editor-modal-close{display:grid;place-items:center;width:36px;height:36px;border:0;border-radius:50%;background:transparent;color:inherit;font-size:25px;line-height:1}
+    .ai-editor-modal-close:hover{background:var(--bs-tertiary-bg)}
+    .ai-editor-modal-body{display:grid;gap:14px;padding:10px 20px 20px}
+    .ai-editor-scope{display:flex;gap:6px;padding:4px;border:1px solid var(--bs-border-color);border-radius:12px;width:max-content;max-width:100%}
+    .ai-editor-scope label{margin:0;cursor:pointer}
+    .ai-editor-scope input{position:absolute;opacity:0;pointer-events:none}
+    .ai-editor-scope span{display:block;padding:7px 12px;border-radius:9px;font-size:13px}
+    .ai-editor-scope input:checked+span{background:var(--bs-primary);color:#fff}
+    .ai-editor-composer{border:1px solid var(--bs-border-color);border-radius:22px;background:var(--bs-tertiary-bg);padding:12px}
+    .ai-editor-composer textarea{display:block;width:100%;min-height:108px;max-height:300px;border:0;outline:0;resize:vertical;background:transparent;color:inherit;font:inherit;padding:4px 4px 8px}
+    .ai-editor-composer-bar{display:flex;align-items:center;justify-content:space-between;gap:8px}
+    .ai-editor-composer-left,.ai-editor-composer-right{display:flex;align-items:center;gap:8px}
+    .ai-editor-round-button{display:grid;place-items:center;width:38px;height:38px;padding:0;border:1px solid var(--bs-border-color);border-radius:50%;background:var(--bs-body-bg);color:inherit;font-size:18px;line-height:1}
+    .ai-editor-round-button:hover{background:var(--bs-secondary-bg)}
+    .ai-editor-send{border-color:var(--bs-body-color);background:var(--bs-body-color);color:var(--bs-body-bg);font-size:22px;font-weight:700}
+    .ai-editor-send:disabled{opacity:.45}
+    .ai-editor-recording{background:var(--bs-danger);border-color:var(--bs-danger);color:#fff}
+    .ai-editor-files{font-size:13px;color:var(--bs-secondary-color);overflow-wrap:anywhere}
+    .ai-editor-status{min-height:22px;font-size:14px;white-space:pre-wrap}
+    .ai-editor-settings{border:1px solid var(--bs-border-color);border-radius:14px;padding:0 14px}
+    .ai-editor-settings summary{cursor:pointer;padding:11px 0;font-size:14px}
+    .ai-editor-settings-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;padding:0 0 14px}
+    .ai-editor-settings-grid label{display:grid;gap:5px;font-size:12px;color:var(--bs-secondary-color)}
+    .ai-editor-settings-grid .wide{grid-column:1/-1}
+    .ai-editor-invite{display:grid;gap:8px;padding-top:4px}
+    .ai-editor-invite-row{display:flex;gap:8px;align-items:center}
+    .ai-editor-invite-row input{min-width:0;flex:1}
+    @media(max-width:640px){.ai-editor-modal-backdrop{padding:8px}.ai-editor-modal{max-height:calc(100vh - 16px);border-radius:18px}.ai-editor-settings-grid{grid-template-columns:1fr}.ai-editor-settings-grid .wide{grid-column:auto}.ai-editor-invite-row{align-items:stretch;flex-direction:column}}
   </style>
 </head>
 <body class="technical-page bg-body">
@@ -60,53 +83,192 @@
         <div class="edit-mode-actions">
           {{if .IsHTML}}<a class="btn btn-primary" href="{{.Path}}?visual">{{index .T "edit_mode_open_visual"}}</a>{{end}}
           <a class="btn btn-outline-secondary" href="{{.Path}}?text">{{index .T "edit_mode_open_text"}}</a>
-          <button class="btn btn-outline-primary" type="button" id="openAIEditorButton">Редактировать голосом</button>
+          <button class="btn btn-outline-primary" type="button" id="openAIEditorButton">Редактировать с AI / голосом</button>
         </div>
       </div>
     </section>
   </div>
 </main>
+
 <div class="ai-editor-modal-backdrop" id="aiEditorModalBackdrop" role="dialog" aria-modal="true" aria-labelledby="aiEditorModalTitle" hidden>
   <section class="ai-editor-modal">
     <header class="ai-editor-modal-header">
-      <h2 class="h5 mb-0" id="aiEditorModalTitle">Редактировать голосом</h2>
-      <button class="ai-editor-modal-close" type="button" id="closeAIEditorButton" aria-label="Закрыть">&times;</button>
+      <div>
+        <h2 class="h5 mb-1" id="aiEditorModalTitle">Редактирование с AI</h2>
+        <div class="small text-body-secondary">Скажите или напишите, что нужно изменить.</div>
+      </div>
+      <button class="ai-editor-modal-close" type="button" id="closeAIEditorButton" aria-label="Закрыть">×</button>
     </header>
     <div class="ai-editor-modal-body">
-      <div>
-        <h3 class="h6">Сказать или написать задачу</h3>
-        <p class="small text-body-secondary">Опишите, что изменить на этой странице. Можно приложить фотографии и другие файлы.</p>
+      <div class="ai-editor-scope" aria-label="Область редактирования">
+        <label><input type="radio" name="aiEditorScope" value="page" checked><span>Эта страница</span></label>
+        <label><input type="radio" name="aiEditorScope" value="site"><span>Весь сайт</span></label>
       </div>
-      <textarea id="aiEditorCommand" placeholder="Например: сделай страницу новости о походе и добавь ссылку на неё на главную"></textarea>
-      <div class="d-flex flex-wrap gap-2">
-        <button class="btn btn-secondary" type="button" id="startAIEditorVoiceButton">Сказать голосом</button>
-        <label class="btn btn-secondary mb-0" for="aiEditorFiles">Загрузить файлы</label>
-        <input id="aiEditorFiles" type="file" multiple hidden>
+
+      <div class="ai-editor-composer">
+        <textarea id="aiEditorCommand" placeholder="Например: сделай заголовок короче и добавь под ним кнопку. Можно написать задачу или нажать микрофон."></textarea>
+        <div class="ai-editor-composer-bar">
+          <div class="ai-editor-composer-left">
+            <button class="ai-editor-round-button" type="button" id="aiEditorFileButton" aria-label="Добавить файлы" title="Добавить файлы">＋</button>
+            <input id="aiEditorFiles" type="file" multiple hidden accept="image/*,.css,.html,.txt">
+            <div class="ai-editor-files" id="aiEditorFilesStatus"></div>
+          </div>
+          <div class="ai-editor-composer-right">
+            <button class="ai-editor-round-button" type="button" id="startAIEditorVoiceButton" aria-label="Говорить" title="Говорить">🎙</button>
+            <button class="ai-editor-round-button ai-editor-send" type="button" id="sendAIEditorButton" aria-label="Отправить" title="Отправить">↑</button>
+          </div>
+        </div>
       </div>
-      <div class="small text-body-secondary" id="aiEditorFilesStatus"></div>
-      <div>
-        <h3 class="h6">Передать ссылку другой AI-системе</h3>
-        <p class="small text-body-secondary">Ссылка даст внешней AI-системе ограниченный доступ только к редактированию этого сайта. Её можно отозвать.</p>
-        <button class="btn btn-outline-primary" type="button" id="createAIEditorLinkButton">Invite your AI assistant - create invite link</button>
-        <div class="ai-editor-modal-status mt-2" id="aiEditorLinkStatus" role="status"></div>
+
+      <div class="ai-editor-status" id="aiEditorStatus" role="status"></div>
+
+      <details class="ai-editor-settings">
+        <summary>Настройки AI-провайдера</summary>
+        <div class="ai-editor-settings-grid">
+          <label>Провайдер
+            <select class="form-select" id="aiEditorProvider">
+              <option value="openai-compatible">OpenAI-compatible</option>
+              <option value="anthropic">Anthropic</option>
+              <option value="deepseek">DeepSeek</option>
+              <option value="qwen">Qwen</option>
+            </select>
+          </label>
+          <label>Модель
+            <input class="form-control" id="aiEditorModel" type="text" autocomplete="off" placeholder="Название модели">
+          </label>
+          <label class="wide">API token провайдера
+            <input class="form-control" id="aiEditorAPIKey" type="password" autocomplete="off" placeholder="Используется только для этого запроса">
+          </label>
+        </div>
+      </details>
+
+      <div class="ai-editor-invite">
+        <div>
+          <strong>Редактирование из другой AI-системы</strong>
+          <div class="small text-body-secondary">Создайте отзывную ссылку и отправьте её ChatGPT, Claude или другой AI вместе с заданием. Ссылка содержит только scoped AI-доступ к сайту и документации.</div>
+        </div>
+        <button class="btn btn-outline-primary align-self-start" type="button" id="createAIEditorLinkButton">Создать ссылку для AI</button>
+        <div class="ai-editor-invite-row" id="aiEditorInviteRow" hidden>
+          <input class="form-control" id="aiEditorInviteLink" type="text" readonly aria-label="Ссылка для внешнего AI">
+          <button class="btn btn-outline-secondary" type="button" id="copyAIEditorLinkButton">Копировать</button>
+        </div>
+        <div class="small text-body-secondary" id="aiEditorLinkStatus" role="status"></div>
       </div>
     </div>
-    <footer class="ai-editor-modal-footer">
-      <button class="btn btn-primary" type="button" id="continueAIEditorButton">Выполнить задачу на текущей странице</button>
-    </footer>
   </section>
 </div>
+
 <script>
 const aiEditorModalBackdrop = document.getElementById('aiEditorModalBackdrop');
 const aiEditorCommandElement = document.getElementById('aiEditorCommand');
 const aiEditorFilesElement = document.getElementById('aiEditorFiles');
 const aiEditorFilesStatusElement = document.getElementById('aiEditorFilesStatus');
+const aiEditorStatusElement = document.getElementById('aiEditorStatus');
+const aiEditorVoiceButton = document.getElementById('startAIEditorVoiceButton');
+const aiEditorSendButton = document.getElementById('sendAIEditorButton');
+const aiEditorInviteRow = document.getElementById('aiEditorInviteRow');
+const aiEditorInviteLink = document.getElementById('aiEditorInviteLink');
 const aiEditorLinkStatusElement = document.getElementById('aiEditorLinkStatus');
+let aiEditorSpeechRecognition = null;
+let aiEditorIsRecording = false;
+
+function selectedAIEditorScope() {
+  const selected = document.querySelector('input[name="aiEditorScope"]:checked');
+  return selected ? selected.value : 'page';
+}
+
+function setAIEditorStatus(message) {
+  aiEditorStatusElement.textContent = message || '';
+}
+
+function setAIEditorRecording(recording) {
+  aiEditorIsRecording = recording;
+  aiEditorVoiceButton.classList.toggle('ai-editor-recording', recording);
+  aiEditorVoiceButton.textContent = recording ? '■' : '🎙';
+  aiEditorVoiceButton.setAttribute('aria-label', recording ? 'Остановить запись' : 'Говорить');
+  aiEditorVoiceButton.title = recording ? 'Остановить запись' : 'Говорить';
+}
+
+function stopAIEditorRecording(abortRecording) {
+  if (!aiEditorSpeechRecognition) {
+    setAIEditorRecording(false);
+    return;
+  }
+  try {
+    if (abortRecording) aiEditorSpeechRecognition.abort();
+    else aiEditorSpeechRecognition.stop();
+  } catch (_) {}
+  aiEditorSpeechRecognition = null;
+  setAIEditorRecording(false);
+}
 
 function setAIEditorModalOpen(isOpen) {
+  if (!isOpen) stopAIEditorRecording(true);
   aiEditorModalBackdrop.hidden = !isOpen;
   aiEditorModalBackdrop.classList.toggle('is-open', isOpen);
   if (isOpen) aiEditorCommandElement.focus();
+}
+
+function fileToBase64(file) {
+  return new Promise(function readAIEditorFile(resolve, reject) {
+    const reader = new FileReader();
+    reader.onload = function aiEditorFileRead() {
+      resolve({name:file.name, content:String(reader.result || '').split(',')[1] || ''});
+    };
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+
+async function parseAIEditorResponse(response) {
+  const responseText = await response.text();
+  let payload = {};
+  try { payload = responseText ? JSON.parse(responseText) : {}; } catch (_) {}
+  if (!response.ok) throw new Error(payload.error || responseText || 'AI-запрос не выполнен');
+  return payload;
+}
+
+async function executeAIEditorTask() {
+  const task = aiEditorCommandElement.value.trim();
+  const apiKey = document.getElementById('aiEditorAPIKey').value.trim();
+  const model = document.getElementById('aiEditorModel').value.trim();
+  if (!task) {
+    setAIEditorStatus('Сначала напишите или скажите, что нужно изменить.');
+    aiEditorCommandElement.focus();
+    return;
+  }
+  if (!apiKey || !model) {
+    setAIEditorStatus('Укажите модель и API token в настройках AI-провайдера.');
+    document.querySelector('.ai-editor-settings').open = true;
+    return;
+  }
+  stopAIEditorRecording(false);
+  aiEditorSendButton.disabled = true;
+  setAIEditorStatus(selectedAIEditorScope() === 'site' ? 'AI анализирует сайт…' : 'AI анализирует страницу…');
+  try {
+    const files = await Promise.all(Array.from(aiEditorFilesElement.files || []).map(fileToBase64));
+    const response = await fetch('{{.Path}}?ai_execute', {
+      method:'POST',
+      credentials:'same-origin',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({
+        provider:document.getElementById('aiEditorProvider').value,
+        model:model,
+        api_key:apiKey,
+        page_path:'{{.Path}}',
+        scope:selectedAIEditorScope(),
+        task:task,
+        files:files
+      })
+    });
+    const payload = await parseAIEditorResponse(response);
+    const changed = Array.isArray(payload.paths) ? payload.paths.join(', ') : (payload.path || '{{.Path}}');
+    setAIEditorStatus('Готово. Изменено: ' + changed + (payload.published ? ' · опубликовано' : '') + '. Изменения сохранены в ревизиях.');
+  } catch (error) {
+    setAIEditorStatus(error.message);
+  } finally {
+    aiEditorSendButton.disabled = false;
+  }
 }
 
 document.getElementById('openAIEditorButton').addEventListener('click', function openAIEditorModal() {
@@ -118,45 +280,94 @@ document.getElementById('closeAIEditorButton').addEventListener('click', functio
 aiEditorModalBackdrop.addEventListener('click', function closeAIEditorModalFromBackdrop(event) {
   if (event.target === aiEditorModalBackdrop) setAIEditorModalOpen(false);
 });
-aiEditorFilesElement.addEventListener('change', function showSelectedAIEditorFiles() {
-  aiEditorFilesStatusElement.textContent = aiEditorFilesElement.files.length + ' файл(ов) выбрано.';
-});
-document.getElementById('continueAIEditorButton').addEventListener('click', function continueToAIEditor() {
-  sessionStorage.setItem('sitebrush.aiEditorCommand', aiEditorCommandElement.value);
-  sessionStorage.setItem('sitebrush.aiEditorFileNames', JSON.stringify(Array.from(aiEditorFilesElement.files || []).map(function fileName(file) { return file.name; })));
-  window.location.href = {{.AIPath}} + '&path=' + encodeURIComponent(window.location.pathname);
-});
-document.getElementById('createAIEditorLinkButton').addEventListener('click', async function createAIEditorLink() {
-  const createLinkButton = document.getElementById('createAIEditorLinkButton');
-  createLinkButton.disabled = true;
-  aiEditorLinkStatusElement.textContent = 'Создание ограниченной ссылки…';
-  try {
-    const capabilityResponse = await fetch('{{.Path}}?ai_capability_create', {method:'POST', credentials:'same-origin', headers:{'Content-Type':'application/json'}, body:JSON.stringify({page_path:'{{.Path}}'})});
-    const capabilityPayload = await capabilityResponse.json();
-    if (!capabilityResponse.ok) throw new Error(capabilityPayload.error || 'Не удалось создать ссылку');
-    aiEditorLinkStatusElement.textContent = capabilityPayload.url;
-    if (navigator.clipboard) await navigator.clipboard.writeText(capabilityPayload.url);
-  } catch (error) {
-    aiEditorLinkStatusElement.textContent = error.message;
-  }
-  createLinkButton.disabled = false;
-});
-document.getElementById('startAIEditorVoiceButton').addEventListener('click', function startAIEditorVoice() {
-  const SpeechRecognitionConstructor = window.SpeechRecognition || window.webkitSpeechRecognition;
-  if (!SpeechRecognitionConstructor) {
-    aiEditorFilesStatusElement.textContent = 'Голосовой ввод не поддерживается этим браузером.';
+document.addEventListener('keydown', function handleAIEditorKeys(event) {
+  if (aiEditorModalBackdrop.hidden) return;
+  if (event.key === 'Escape') {
+    event.preventDefault();
+    setAIEditorModalOpen(false);
     return;
   }
-  const speechRecognition = new SpeechRecognitionConstructor();
-  speechRecognition.continuous = false;
-  speechRecognition.interimResults = false;
-  speechRecognition.onresult = function receiveAIEditorVoice(event) {
-    aiEditorCommandElement.value = event.results[0][0].transcript;
+  if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') {
+    event.preventDefault();
+    executeAIEditorTask();
+  }
+});
+document.getElementById('aiEditorFileButton').addEventListener('click', function chooseAIEditorFiles() {
+  aiEditorFilesElement.click();
+});
+aiEditorFilesElement.addEventListener('change', function showSelectedAIEditorFiles() {
+  const names = Array.from(aiEditorFilesElement.files || []).map(function fileName(file) { return file.name; });
+  aiEditorFilesStatusElement.textContent = names.length ? names.join(', ') : '';
+});
+aiEditorVoiceButton.addEventListener('click', function toggleAIEditorVoice() {
+  if (aiEditorIsRecording) {
+    stopAIEditorRecording(false);
+    return;
+  }
+  const SpeechRecognitionConstructor = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SpeechRecognitionConstructor) {
+    setAIEditorStatus('Голосовой ввод не поддерживается этим браузером. Можно ввести команду текстом.');
+    return;
+  }
+  const recognition = new SpeechRecognitionConstructor();
+  aiEditorSpeechRecognition = recognition;
+  recognition.continuous = false;
+  recognition.interimResults = true;
+  recognition.onstart = function aiEditorVoiceStarted() {
+    setAIEditorRecording(true);
+    setAIEditorStatus('Слушаю… Нажмите ■, чтобы остановить.');
   };
-  speechRecognition.onerror = function reportAIEditorVoiceError() {
-    aiEditorFilesStatusElement.textContent = 'Не удалось получить голосовую команду.';
+  recognition.onresult = function receiveAIEditorVoice(event) {
+    let transcript = '';
+    for (let resultIndex = event.resultIndex; resultIndex < event.results.length; resultIndex++) {
+      transcript += event.results[resultIndex][0].transcript;
+    }
+    if (transcript.trim()) aiEditorCommandElement.value = transcript.trim();
   };
-  speechRecognition.start();
+  recognition.onerror = function reportAIEditorVoiceError() {
+    setAIEditorStatus('Не удалось получить голосовую команду. Можно продолжить текстом.');
+    setAIEditorRecording(false);
+  };
+  recognition.onend = function aiEditorVoiceEnded() {
+    aiEditorSpeechRecognition = null;
+    setAIEditorRecording(false);
+    if (aiEditorCommandElement.value.trim()) setAIEditorStatus('Команда распознана. Нажмите ↑, чтобы отправить.');
+  };
+  recognition.start();
+});
+aiEditorSendButton.addEventListener('click', executeAIEditorTask);
+
+document.getElementById('createAIEditorLinkButton').addEventListener('click', async function createAIEditorLink() {
+  const button = document.getElementById('createAIEditorLinkButton');
+  button.disabled = true;
+  aiEditorLinkStatusElement.textContent = 'Создаю отзывную AI-ссылку…';
+  try {
+    const response = await fetch('{{.Path}}?ai_capability_create', {
+      method:'POST',
+      credentials:'same-origin',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({page_path:'{{.Path}}', task:aiEditorCommandElement.value.trim()})
+    });
+    const payload = await parseAIEditorResponse(response);
+    aiEditorInviteLink.value = payload.url;
+    aiEditorInviteRow.hidden = false;
+    aiEditorLinkStatusElement.textContent = 'Внешний AI по этой ссылке получит манифест, документацию и только разрешённые операции SiteBrush.';
+    if (navigator.clipboard) {
+      try { await navigator.clipboard.writeText(payload.url); aiEditorLinkStatusElement.textContent += ' Ссылка скопирована.'; } catch (_) {}
+    }
+  } catch (error) {
+    aiEditorLinkStatusElement.textContent = error.message;
+  } finally {
+    button.disabled = false;
+  }
+});
+document.getElementById('copyAIEditorLinkButton').addEventListener('click', async function copyAIEditorLink() {
+  aiEditorInviteLink.select();
+  if (navigator.clipboard) {
+    try { await navigator.clipboard.writeText(aiEditorInviteLink.value); aiEditorLinkStatusElement.textContent = 'Ссылка скопирована.'; return; } catch (_) {}
+  }
+  document.execCommand('copy');
+  aiEditorLinkStatusElement.textContent = 'Ссылка скопирована.';
 });
 </script>
 </body>
