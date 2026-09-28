@@ -10258,8 +10258,16 @@ func (a *App) aiProviderCredentialStatuses(ctx context.Context, domain, email st
 	if email == "" {
 		return nil, errors.New("AI provider credential owner is required")
 	}
-	statuses := make([]aiProviderCredentialStatus, 0, 4)
-	for _, provider := range []string{aiprovider.ProviderOpenAICompatible, aiprovider.ProviderAnthropic, aiprovider.ProviderDeepSeek, aiprovider.ProviderQwen} {
+	statuses := make([]aiProviderCredentialStatus, 0, 7)
+	for _, provider := range []string{
+		aiprovider.ProviderOpenAICompatible,
+		aiprovider.ProviderAnthropic,
+		aiprovider.ProviderDeepSeek,
+		aiprovider.ProviderQwen,
+		aiprovider.ProviderGemini,
+		aiprovider.ProviderGroq,
+		aiprovider.ProviderMistral,
+	} {
 		var model, updatedAt string
 		err := a.db.QueryRowContext(ctx, `SELECT model,updated_at FROM ai_provider_user_credentials WHERE domain=? AND email=? AND provider=?`, domain, email, provider).Scan(&model, &updatedAt)
 		if errors.Is(err, sql.ErrNoRows) {
