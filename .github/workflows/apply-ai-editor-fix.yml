@@ -1,9 +1,6 @@
 name: Apply AI editor branch fix
 
 on:
-  push:
-    branches:
-      - security-tests/database-domain-isolation
   workflow_dispatch:
 
 permissions:
