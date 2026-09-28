@@ -73,6 +73,9 @@ func NewClient(configuration Config, httpClient *http.Client) (*Client, error) {
 		return nil, fmt.Errorf("%w: %s", ErrProviderUnsupported, configuration.Provider)
 	}
 	if configuration.BaseURL == "" {
+		if configuration.Provider == ProviderOllama {
+			return nil, fmt.Errorf("%w: Ollama requires an explicit public HTTPS base URL", ErrInvalidConfiguration)
+		}
 		configuration.BaseURL = defaultBaseURL(configuration.Provider)
 	}
 	parsedURL, err := url.Parse(configuration.BaseURL)
@@ -106,8 +109,6 @@ func defaultBaseURL(provider string) string {
 		return "https://api.deepseek.com/v1"
 	case ProviderQwen:
 		return "https://dashscope.aliyuncs.com/compatible-mode/v1"
-	case ProviderOllama:
-		return "https://localhost/v1"
 	default:
 		return "https://api.openai.com/v1"
 	}
