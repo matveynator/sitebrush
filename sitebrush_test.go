@@ -17524,7 +17524,7 @@ func TestSecurityBoundaryAuthenticatedMutationsRejectHostileOrigin(t *testing.T)
 	}
 }
 
-func TestSavePageAllowsSessionCSRFWhenBrowserOriginIsOpaque(t *testing.T) {
+func TestSecurityBoundaryAuthenticatedMutationSaveAllowsSessionCSRFWhenBrowserOriginIsOpaque(t *testing.T) {
 	application, rawDB := newTestApplication(t)
 	if _, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "admin@example.com", "password"); err != nil {
 		t.Fatal(err)
@@ -17562,7 +17562,7 @@ func TestSavePageAllowsSessionCSRFWhenBrowserOriginIsOpaque(t *testing.T) {
 	}
 }
 
-func TestSavePageRejectsCrossOriginWithoutSessionCSRFAndGET(t *testing.T) {
+func TestSecurityBoundaryAuthenticatedMutationSaveRejectsCrossOriginWithoutSessionCSRFAndGET(t *testing.T) {
 	application, rawDB := newTestApplication(t)
 	if _, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "admin@example.com", "password"); err != nil {
 		t.Fatal(err)
@@ -17612,7 +17612,7 @@ func TestEditorSaveFormsCarrySessionCSRF(t *testing.T) {
 	}
 }
 
-func TestDeleteRevisionAllowsSessionCSRFWhenBrowserOriginIsOpaque(t *testing.T) {
+func TestSecurityBoundaryAuthenticatedMutationDeleteAllowsSessionCSRFWhenBrowserOriginIsOpaque(t *testing.T) {
 	application, rawDB := newTestApplication(t)
 	if _, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "admin@example.com", "password"); err != nil {
 		t.Fatal(err)
@@ -17653,7 +17653,7 @@ func TestDeleteRevisionAllowsSessionCSRFWhenBrowserOriginIsOpaque(t *testing.T) 
 	}
 }
 
-func TestDeleteRevisionRejectsCrossOriginWithoutSessionCSRFAndGET(t *testing.T) {
+func TestSecurityBoundaryAuthenticatedMutationDeleteRejectsCrossOriginWithoutSessionCSRFAndGET(t *testing.T) {
 	application, rawDB := newTestApplication(t)
 	if _, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "admin@example.com", "password"); err != nil {
 		t.Fatal(err)
