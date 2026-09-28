@@ -15,8 +15,11 @@ func (function roundTripFunc) RoundTrip(request *http.Request) (*http.Response, 
 	return function(request)
 }
 
-func TestClientUsesConfiguredEndpointAndNeverSendsWrongAuthorization(t *testing.T) {
-	client, err := NewClient(Config{Provider: ProviderAnthropic, BaseURL: "https://provider.invalid/v1", Model: "claude", APIKey: "secret"}, &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+func TestClientUsesProviderEndpointAndNeverSendsWrongAuthorization(t *testing.T) {
+	client, err := NewClient(Config{Provider: ProviderAnthropic, Model: "claude", APIKey: "secret"}, &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		if request.URL.String() != "https://api.anthropic.com/v1/chat/completions" {
+			return nil, errors.New("unexpected Anthropic endpoint")
+		}
 		if request.Header.Get("x-api-key") != "secret" || request.Header.Get("Authorization") != "" {
 			return nil, errors.New("unexpected Anthropic headers")
 		}
@@ -31,9 +34,23 @@ func TestClientUsesConfiguredEndpointAndNeverSendsWrongAuthorization(t *testing.
 	}
 }
 
-func TestClientRejectsPlaintextEndpoint(t *testing.T) {
-	if _, err := NewClient(Config{Provider: ProviderDeepSeek, BaseURL: "http://127.0.0.1", Model: "deepseek", APIKey: "secret"}, nil); err == nil {
-		t.Fatal("plaintext provider endpoint was accepted")
+func TestClientRejectsCustomProviderEndpoint(t *testing.T) {
+	for _, baseURL := range []string{"http://127.0.0.1", "https://provider.invalid/v1", "https://api.deepseek.com/v1/other"} {
+		if _, err := NewClient(Config{Provider: ProviderDeepSeek, BaseURL: baseURL, Model: "deepseek", APIKey: "secret"}, nil); err == nil {
+			t.Fatalf("custom provider endpoint %q was accepted", baseURL)
+		}
+	}
+	client, err := NewClient(Config{Provider: ProviderDeepSeek, BaseURL: "https://api.deepseek.com/v1/", Model: "deepseek", APIKey: "secret"}, &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		if request.URL.String() != "https://api.deepseek.com/v1/chat/completions" {
+			return nil, errors.New("unexpected DeepSeek endpoint")
+		}
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"choices":[{"message":{"content":"ok"}}]}`)), Header: make(http.Header)}, nil
+	})})
+	if err != nil {
+		t.Fatalf("official provider endpoint rejected: %v", err)
+	}
+	if _, err := client.Complete(context.Background(), Request{Messages: []Message{{Role: "user", Content: "x"}}}); err != nil {
+		t.Fatalf("official provider request failed: %v", err)
 	}
 }
 
@@ -53,7 +70,7 @@ func TestSecretEncryptionRoundTripAndTamperRejection(t *testing.T) {
 }
 
 func TestOpenAICompatibleResponseErrorsAndLimits(t *testing.T) {
-	client, err := NewClient(Config{Provider: ProviderDeepSeek, BaseURL: "https://provider.invalid/v1", Model: "deepseek", APIKey: "secret", MaxResponseBytes: 8}, &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+	client, err := NewClient(Config{Provider: ProviderDeepSeek, Model: "deepseek", APIKey: "secret", MaxResponseBytes: 8}, &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
 		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"choices":[{"message":{"content":"too long"}}]}`)), Header: make(http.Header)}, nil
 	})})
 	if err != nil {
@@ -62,7 +79,7 @@ func TestOpenAICompatibleResponseErrorsAndLimits(t *testing.T) {
 	if _, err := client.Complete(context.Background(), Request{Messages: []Message{{Role: "user", Content: "x"}}}); err == nil {
 		t.Fatal("oversized response accepted")
 	}
-	client, err = NewClient(Config{Provider: ProviderOpenAICompatible, BaseURL: "https://provider.invalid/v1", Model: "model", APIKey: "secret"}, &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+	client, err = NewClient(Config{Provider: ProviderOpenAICompatible, Model: "model", APIKey: "secret"}, &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
 		return &http.Response{StatusCode: http.StatusBadGateway, Body: io.NopCloser(strings.NewReader("failure")), Header: make(http.Header)}, nil
 	})})
 	if err != nil {
@@ -99,7 +116,7 @@ func TestOllamaRequiresExplicitSafeEndpoint(t *testing.T) {
 	if _, err := NewClient(Config{Provider: ProviderOllama, Model: "model", APIKey: "key"}, nil); err == nil {
 		t.Fatal("Ollama without an explicit endpoint was accepted")
 	}
-	client, err := NewClient(Config{Provider: ProviderOllama, BaseURL: "https://provider.invalid/v1", Model: "model", APIKey: "key"}, &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+	client, err := NewClient(Config{Provider: ProviderOllama, Model: "model", APIKey: "key"}, &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
 		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"choices":[{"message":{"content":"ok"}}]}`)), Header: make(http.Header)}, nil
 	})})
 	if err != nil || client == nil {
@@ -135,7 +152,7 @@ func TestProviderResponseValidationAndTransportErrors(t *testing.T) {
 	}
 	for _, testCase := range cases {
 		t.Run(testCase.name, func(t *testing.T) {
-			client, err := NewClient(Config{Provider: ProviderDeepSeek, BaseURL: "https://provider.invalid/v1", Model: "model", APIKey: "key"}, &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			client, err := NewClient(Config{Provider: ProviderDeepSeek, Model: "model", APIKey: "key"}, &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
 				return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(testCase.body)), Header: make(http.Header)}, nil
 			})})
 			if err != nil {
@@ -146,7 +163,7 @@ func TestProviderResponseValidationAndTransportErrors(t *testing.T) {
 			}
 		})
 	}
-	anthropic, err := NewClient(Config{Provider: ProviderAnthropic, BaseURL: "https://provider.invalid/v1", Model: "model", APIKey: "key"}, &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+	anthropic, err := NewClient(Config{Provider: ProviderAnthropic, Model: "model", APIKey: "key"}, &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
 		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{}`)), Header: make(http.Header)}, nil
 	})})
 	if err != nil {
