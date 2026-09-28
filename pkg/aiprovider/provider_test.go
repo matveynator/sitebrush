@@ -273,6 +273,9 @@ func TestProviderDefaultURLs(t *testing.T) {
 		ProviderAnthropic:        "https://api.anthropic.com/v1",
 		ProviderDeepSeek:         "https://api.deepseek.com/v1",
 		ProviderQwen:             "https://dashscope.aliyuncs.com/compatible-mode/v1",
+		ProviderGemini:           "https://generativelanguage.googleapis.com/v1beta/openai",
+		ProviderGroq:             "https://api.groq.com/openai/v1",
+		ProviderMistral:          "https://api.mistral.ai/v1",
 	}
 	for provider, expectedURL := range expected {
 		if actual := defaultBaseURL(provider); actual != expectedURL {
@@ -428,5 +431,38 @@ func TestProviderHTTPErrorDoesNotEchoResponseBody(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), "PRIVATE_PROVIDER_DETAILS") {
 		t.Fatal("provider response body leaked through error")
+	}
+}
+
+
+func TestFreeTierProviderEndpointsUseBearerAuthentication(t *testing.T) {
+	expected := map[string]string{
+		ProviderGemini:  "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+		ProviderGroq:    "https://api.groq.com/openai/v1/chat/completions",
+		ProviderMistral: "https://api.mistral.ai/v1/chat/completions",
+	}
+	for provider, endpoint := range expected {
+		t.Run(provider, func(t *testing.T) {
+			client, err := NewClient(Config{Provider: provider, Model: "test-model", APIKey: "secret"}, &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+				if request.URL.String() != endpoint {
+					return nil, errors.New("unexpected provider endpoint")
+				}
+				if request.Header.Get("Authorization") != "Bearer secret" {
+					return nil, errors.New("missing bearer token")
+				}
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body: io.NopCloser(strings.NewReader(`{"choices":[{"message":{"content":"ok"}}]}`)),
+					Header: make(http.Header),
+				}, nil
+			})})
+			if err != nil {
+				t.Fatal(err)
+			}
+			result, err := client.Complete(context.Background(), Request{Messages: []Message{{Role: "user", Content: "hello"}}})
+			if err != nil || result.Text != "ok" {
+				t.Fatalf("result=%q err=%v", result.Text, err)
+			}
+		})
 	}
 }
