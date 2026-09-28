@@ -9530,20 +9530,8 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 		a.awaitAccountHTTPS(w, r)
 		return
 	}
-	if hasQueryFlag(r, "save") {
-		a.savePage(w, r)
-		return
-	}
-	if hasQueryFlag(r, "ai_provider_delete") {
-		a.deleteAIProviderCredentialEndpoint(w, r)
-		return
-	}
-	if strings.TrimSpace(r.URL.Query().Get("delete")) != "" {
-		a.deleteRevisionByQuery(w, r)
-		return
-	}
 	if r.Method != http.MethodGet && r.Method != http.MethodHead && r.Method != http.MethodOptions &&
-		hasSitebrushSessionCookie(r) && !httpsecurity.SameOriginMutationAllowed(r) {
+		hasSitebrushSessionCookie(r) && !httpsecurity.SameOriginMutationAllowed(r) && !sessionCSRFMutationAllowed(r) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
@@ -9601,6 +9589,18 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !a.enforceAdminIPAllowlist(w, r, requestDomain) {
+		return
+	}
+	if hasQueryFlag(r, "save") {
+		a.savePage(w, r)
+		return
+	}
+	if hasQueryFlag(r, "ai_provider_delete") {
+		a.deleteAIProviderCredentialEndpoint(w, r)
+		return
+	}
+	if strings.TrimSpace(r.URL.Query().Get("delete")) != "" {
+		a.deleteRevisionByQuery(w, r)
 		return
 	}
 	if hasQueryFlag(r, "logout") {
@@ -13616,6 +13616,24 @@ func hasQueryFlag(r *http.Request, flagName string) bool {
 	}
 	_, hasFlag := r.URL.Query()[flagName]
 	return hasFlag
+}
+
+func sessionCSRFMutationAllowed(r *http.Request) bool {
+	if r == nil || !hasSitebrushSessionCookie(r) {
+		return false
+	}
+	expectedCSRF := accountCSRF(r)
+	if expectedCSRF == "" {
+		return false
+	}
+	providedCSRF := strings.TrimSpace(r.Header.Get("X-SiteBrush-CSRF"))
+	if providedCSRF == "" && (hasQueryFlag(r, "save") || strings.TrimSpace(r.URL.Query().Get("delete")) != "") {
+		providedCSRF = strings.TrimSpace(r.FormValue("account_csrf"))
+	}
+	if providedCSRF == "" {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(providedCSRF), []byte(expectedCSRF)) == 1
 }
 
 func requestWithSensitiveCookieRequiresHTTPS(r *http.Request) bool {
