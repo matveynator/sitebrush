@@ -1,0 +1,59 @@
+name: Apply AI editor branch fix
+
+on:
+  push:
+    branches:
+      - security-tests/database-domain-isolation
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+jobs:
+  apply:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout branch
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: security-tests/database-domain-isolation
+          fetch-depth: 0
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: "1.26.6"
+          cache: true
+      - name: Apply AI editor integration
+        run: |
+          set -euo pipefail
+          python3 scripts/apply_ai_editor_branch_fix.py
+          gofmt -w sitebrush.go sitebrush_test.go pkg/aicapability/capability.go pkg/aicapability/capability_test.go
+      - name: Test AI packages
+        env:
+          CGO_ENABLED: "0"
+        run: go test -count=1 ./pkg/aicapability ./pkg/aieditor ./pkg/aiprovider
+      - name: Test main package
+        env:
+          CGO_ENABLED: "0"
+        run: go test -count=1 .
+      - name: Test packages and scripts
+        env:
+          CGO_ENABLED: "0"
+        run: go test -count=1 ./pkg/... ./scripts/...
+      - name: Commit tested changes
+        run: |
+          set -euo pipefail
+          rm -f scripts/apply_ai_editor_branch_fix.py .github/workflows/apply-ai-editor-fix.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "No changes to commit"
+            exit 0
+          fi
+          git commit -m "Finish scoped AI voice editing"
+          git push origin HEAD:security-tests/database-domain-isolation
