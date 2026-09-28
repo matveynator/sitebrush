@@ -1,0 +1,42 @@
+name: Sync AI editor PR with main
+
+on:
+  push:
+    branches:
+      - security-tests/database-domain-isolation
+
+permissions:
+  contents: write
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+jobs:
+  sync:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout branch
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: security-tests/database-domain-isolation
+          fetch-depth: 0
+
+      - name: Merge current main
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          if ! git merge --no-commit --no-ff origin/main; then
+            echo "::group::Merge conflicts"
+            git status --short
+            git diff --name-only --diff-filter=U
+            git diff --cc
+            echo "::endgroup::"
+            exit 1
+          fi
+          rm -f .github/workflows/sync-ai-pr.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "Merge main into AI editor branch"
+          git push origin HEAD:security-tests/database-domain-isolation
