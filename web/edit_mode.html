@@ -145,7 +145,7 @@
       <div class="ai-editor-invite">
         <div>
           <strong>Редактирование из другой AI-системы</strong>
-          <div class="small text-body-secondary">Создайте отзывную ссылку и отправьте её ChatGPT, Claude или другой AI вместе с заданием. Ссылка содержит только scoped AI-доступ к сайту и документации.</div>
+          <div class="small text-body-secondary">Создайте отзывную ссылку вида <code>?ai_token=…</code> и отправьте её ChatGPT, Claude или другой AI вместе с заданием. Она даёт только scoped AI-доступ к сайту и документации.</div>
         </div>
         <button class="btn btn-outline-primary align-self-start" type="button" id="createAIEditorLinkButton">Создать ссылку для AI</button>
         <div class="ai-editor-invite-row" id="aiEditorInviteRow" hidden>
@@ -356,7 +356,7 @@ document.getElementById('createAIEditorLinkButton').addEventListener('click', as
     const payload = await parseAIEditorResponse(response);
     aiEditorInviteLink.value = payload.url;
     aiEditorInviteRow.hidden = false;
-    aiEditorLinkStatusElement.textContent = 'Внешний AI по этой ссылке получит манифест, документацию и только разрешённые операции SiteBrush.';
+    aiEditorLinkStatusElement.textContent = 'Внешний AI по ссылке с ?ai_token= получит манифест, документацию и только разрешённые операции SiteBrush.';
     if (navigator.clipboard) {
       try { await navigator.clipboard.writeText(payload.url); aiEditorLinkStatusElement.textContent += ' Ссылка скопирована.'; } catch (_) {}
     }
