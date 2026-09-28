@@ -1,6 +1,7 @@
 package aicapability
 
 import (
+	"encoding/json"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -178,5 +179,144 @@ func TestCapabilityKeepsPageAndTaskContextOutOfTheURL(t *testing.T) {
 	validated, err := manager.ValidateCapability(token, "example.org")
 	if err != nil || validated.PagePath != "/hike" || validated.Task != "Create a photo story" {
 		t.Fatalf("context was not retained: %+v err=%v", validated, err)
+	}
+}
+
+
+func TestCapabilityManagerRejectsInvalidSessionAdministration(t *testing.T) {
+	manager := NewManager()
+	defer manager.Close()
+
+	token, capability, err := manager.IssueFor("example.org", "owner@example.org", []string{ScopeRead, ScopeWrite})
+	if err != nil {
+		t.Fatal(err)
+	}
+	session, err := manager.Exchange(token, "example.org")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessions, err := manager.List("owner@example.org", "example.org")
+	if err != nil || len(sessions) != 1 {
+		t.Fatalf("sessions=%+v err=%v", sessions, err)
+	}
+	sessionID := sessions[0].ID
+
+	if other, err := manager.List("other@example.org", "example.org"); err != nil || len(other) != 0 {
+		t.Fatalf("other owner sessions=%+v err=%v", other, err)
+	}
+	if otherDomain, err := manager.List("owner@example.org", "other.example"); err != nil || len(otherDomain) != 0 {
+		t.Fatalf("other domain sessions=%+v err=%v", otherDomain, err)
+	}
+	for _, duration := range []time.Duration{0, -time.Second, 25 * time.Hour} {
+		if err := manager.ExtendSession(sessionID, "owner@example.org", "example.org", duration); err == nil {
+			t.Fatalf("invalid extension %v accepted", duration)
+		}
+	}
+	if err := manager.RestrictSession(sessionID, "owner@example.org", "example.org", []string{ScopeRead, ScopePublish}); err == nil {
+		t.Fatal("session scopes were expanded")
+	}
+	if err := manager.RevokeSession("missing", "owner@example.org", "example.org"); err == nil {
+		t.Fatal("missing session was revoked")
+	}
+	if err := manager.RevokeCapabilityID(capability.ID, "other@example.org", "example.org"); err == nil {
+		t.Fatal("another owner revoked capability")
+	}
+	if _, err := manager.ValidateSession(session.Token, "", "example.org"); err == nil {
+		t.Fatal("session accepted without capability binding")
+	}
+}
+
+func TestCapabilityPersistenceFailsClosed(t *testing.T) {
+	parentFile := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(parentFile, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	manager := NewPersistentManager(filepath.Join(parentFile, "capabilities.json"))
+	defer manager.Close()
+	if token, capability, err := manager.Issue("example.org", []string{ScopeRead}); err == nil || token != "" || capability.ID != "" {
+		t.Fatalf("persistent issue unexpectedly succeeded: token=%q capability=%+v err=%v", token, capability, err)
+	}
+}
+
+func TestCapabilityRevokeRestoresStateWhenPersistenceFails(t *testing.T) {
+	root := t.TempDir()
+	statePath := filepath.Join(root, "state", "capabilities.json")
+	manager := NewPersistentManager(statePath)
+	defer manager.Close()
+
+	token, capability, err := manager.IssueFor("example.org", "owner@example.org", []string{ScopeRead})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(filepath.Dir(statePath), filepath.Join(root, "state-old")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Dir(statePath), []byte("block directory recreation"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := manager.Revoke(token); err == nil {
+		t.Fatal("revoke succeeded even though capability state could not be persisted")
+	}
+	if _, err := manager.ValidateCapability(token, "example.org"); err != nil {
+		t.Fatalf("failed revoke did not restore in-memory capability: %v", err)
+	}
+	if err := manager.RevokeCapabilityID(capability.ID, "owner@example.org", "example.org"); err == nil {
+		t.Fatal("capability-id revoke succeeded even though state could not be persisted")
+	}
+	if _, err := manager.ValidateCapability(token, "example.org"); err != nil {
+		t.Fatalf("failed capability-id revoke did not restore state: %v", err)
+	}
+}
+
+func TestCapabilityHelpersAndNilManagerAreSafe(t *testing.T) {
+	if normalizeDomain(" Example.ORG. ") != "example.org" {
+		t.Fatal("domain normalization failed")
+	}
+	if !scopesAreSubset([]string{ScopeRead}, []string{ScopeRead, ScopeWrite}) {
+		t.Fatal("valid scope subset rejected")
+	}
+	if scopesAreSubset([]string{ScopePublish}, []string{ScopeRead, ScopeWrite}) {
+		t.Fatal("scope expansion accepted")
+	}
+
+	sessions := map[string]Session{
+		"abcdef-one": {Domain: "example.org"},
+		"abcdef-two": {Domain: "example.org"},
+	}
+	if _, _, found := findSession(sessions, "abcdef"); found {
+		t.Fatal("ambiguous session prefix was accepted")
+	}
+	if _, _, found := findSession(sessions, ""); found {
+		t.Fatal("empty session id was accepted")
+	}
+	if key, _, found := findSession(sessions, "abcdef-one"); !found || key != "abcdef-one" {
+		t.Fatalf("exact session id was not found: key=%q found=%v", key, found)
+	}
+
+	var manager *Manager
+	manager.Close()
+	if _, _, err := manager.Issue("example.org", []string{ScopeRead}); err == nil {
+		t.Fatal("nil manager issued capability")
+	}
+}
+
+func TestPersistentManagerSkipsRevokedCapabilities(t *testing.T) {
+	statePath := filepath.Join(t.TempDir(), "capabilities.json")
+	token := "revoked-secret"
+	stored := map[string]Capability{
+		tokenHash(token): {ID: tokenHash(token), Domain: "example.org", Scopes: []string{ScopeRead}, Revoked: true, Created: time.Now().UTC()},
+	}
+	data, err := json.Marshal(stored)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(statePath, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	manager := NewPersistentManager(statePath)
+	defer manager.Close()
+	if _, err := manager.Exchange(token, "example.org"); err == nil {
+		t.Fatal("revoked persisted capability was restored")
 	}
 }
