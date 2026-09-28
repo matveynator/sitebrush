@@ -261,3 +261,67 @@ func TestSecretDecryptionRejectsInvalidKeyAndEmptyCiphertext(t *testing.T) {
 		t.Fatal("empty ciphertext accepted")
 	}
 }
+
+
+func TestListModelsValidatesProviderTokenAndReturnsUniqueModels(t *testing.T) {
+	client := &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		if request.Method != http.MethodGet || request.URL.String() != "https://api.openai.com/v1/models" {
+			return nil, errors.New("unexpected models request")
+		}
+		if request.Header.Get("Authorization") != "Bearer secret" {
+			return nil, errors.New("missing bearer token")
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body: io.NopCloser(strings.NewReader(`{"data":[{"id":"gpt-6-sol"},{"id":"gpt-6-luna"},{"id":"gpt-6-sol"}]}`)),
+			Header: make(http.Header),
+		}, nil
+	})}
+	models, err := ListModels(context.Background(), Config{Provider: ProviderOpenAICompatible, APIKey: "secret"}, client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(models) != 2 || models[0] != "gpt-6-luna" || models[1] != "gpt-6-sol" {
+		t.Fatalf("models=%v", models)
+	}
+}
+
+func TestListModelsUsesAnthropicHeadersAndRejectsInvalidToken(t *testing.T) {
+	var requests int
+	client := &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		requests++
+		if request.URL.String() != "https://api.anthropic.com/v1/models" {
+			return nil, errors.New("unexpected Anthropic models endpoint")
+		}
+		if request.Header.Get("x-api-key") != "secret" || request.Header.Get("Authorization") != "" {
+			return nil, errors.New("unexpected Anthropic auth headers")
+		}
+		return &http.Response{
+			StatusCode: http.StatusUnauthorized,
+			Body: io.NopCloser(strings.NewReader(`{"error":"invalid"}`)),
+			Header: make(http.Header),
+		}, nil
+	})}
+	if _, err := ListModels(context.Background(), Config{Provider: ProviderAnthropic, APIKey: "secret"}, client); err == nil || !strings.Contains(err.Error(), "401") {
+		t.Fatalf("invalid token error=%v", err)
+	}
+	if requests != 1 {
+		t.Fatalf("requests=%d", requests)
+	}
+}
+
+func TestListModelsRejectsMissingConfigurationAndEmptyModelList(t *testing.T) {
+	if _, err := ListModels(context.Background(), Config{}, nil); !errors.Is(err, ErrInvalidConfiguration) {
+		t.Fatalf("missing configuration error=%v", err)
+	}
+	client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body: io.NopCloser(strings.NewReader(`{"data":[]}`)),
+			Header: make(http.Header),
+		}, nil
+	})}
+	if _, err := ListModels(context.Background(), Config{Provider: ProviderDeepSeek, APIKey: "secret"}, client); err == nil {
+		t.Fatal("empty model list was accepted")
+	}
+}
