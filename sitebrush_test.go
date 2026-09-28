@@ -11514,6 +11514,9 @@ func TestAIProviderTokenLinksAreExposedWithoutEmbeddingTokens(t *testing.T) {
 		"https://console.anthropic.com/settings/keys",
 		"https://platform.deepseek.com/api_keys",
 		"https://modelstudio.console.alibabacloud.com/model/settings/api-key",
+		"https://aistudio.google.com/app/apikey",
+		"https://console.groq.com/keys",
+		"https://console.mistral.ai/api-keys",
 	} {
 		if !strings.Contains(templateSource, expectedURL) {
 			t.Fatalf("edit_ai.html is missing provider key URL %q", expectedURL)
@@ -11522,6 +11525,26 @@ func TestAIProviderTokenLinksAreExposedWithoutEmbeddingTokens(t *testing.T) {
 	for _, forbidden := range []string{"sk-", "secret-provider-token", "encrypted_api_key"} {
 		if strings.Contains(templateSource, forbidden) {
 			t.Fatalf("edit_ai.html embeds secret-like material %q", forbidden)
+		}
+	}
+}
+
+func TestAIEditorTemplateExposesFreeTierProviders(t *testing.T) {
+	templateBytes, err := embeddedWebFiles.ReadFile("web/edit_ai.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	templateSource := string(templateBytes)
+	for _, fragment := range []string{
+		`value="gemini"`,
+		`value="groq"`,
+		`value="mistral"`,
+		"Free Tier",
+		"Free Plan",
+		"Free mode",
+	} {
+		if !strings.Contains(templateSource, fragment) {
+			t.Fatalf("edit_ai.html missing %q", fragment)
 		}
 	}
 }
@@ -11565,6 +11588,9 @@ func TestRecommendedAIEditorModelPrefersBalancedOptions(t *testing.T) {
 		{aiprovider.ProviderAnthropic, []string{"claude-haiku-5", "claude-sonnet-5", "claude-opus-5"}, "claude-sonnet-5"},
 		{aiprovider.ProviderDeepSeek, []string{"deepseek-reasoner", "deepseek-chat"}, "deepseek-chat"},
 		{aiprovider.ProviderQwen, []string{"qwen-turbo", "qwen-plus", "qwen-max"}, "qwen-plus"},
+		{aiprovider.ProviderGemini, []string{"gemini-3.8-pro", "gemini-3.8-flash", "gemini-3.8-flash-lite"}, "gemini-3.8-flash"},
+		{aiprovider.ProviderGroq, []string{"openai/gpt-oss-120b", "openai/gpt-oss-20b"}, "openai/gpt-oss-20b"},
+		{aiprovider.ProviderMistral, []string{"mistral-large-latest", "mistral-small-latest"}, "mistral-small-latest"},
 	}
 	for _, testCase := range cases {
 		if got := recommendedAIEditorModel(testCase.provider, testCase.models); got != testCase.want {
