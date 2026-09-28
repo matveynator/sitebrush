@@ -9521,6 +9521,10 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 		a.awaitAccountHTTPS(w, r)
 		return
 	}
+	if hasQueryFlag(r, "save") {
+		a.savePage(w, r)
+		return
+	}
 	if strings.TrimSpace(r.URL.Query().Get("delete")) != "" {
 		a.deleteRevisionByQuery(w, r)
 		return
@@ -9584,14 +9588,6 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 	}
 	if hasQueryFlag(r, "logout") {
 		a.logout(w, r)
-		return
-	}
-	if hasQueryFlag(r, "save") {
-		if r.Method != http.MethodPost {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-		a.savePage(w, r)
 		return
 	}
 	if hasQueryFlag(r, "grab_preview") {
@@ -13555,9 +13551,21 @@ func (a *App) saveEndpoint(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) savePage(w http.ResponseWriter, r *http.Request) {
 	allowLongStreamingResponse(w)
-	if !a.isAdminRequest(r) || r.Method != http.MethodPost {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !a.isAdminRequest(r) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
+	}
+	if !httpsecurity.SameOriginMutationAllowed(r) {
+		providedCSRF := strings.TrimSpace(r.FormValue("account_csrf"))
+		expectedCSRF := accountCSRF(r)
+		if providedCSRF == "" || expectedCSRF == "" || subtle.ConstantTimeCompare([]byte(providedCSRF), []byte(expectedCSRF)) != 1 {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
 	}
 	pagePath := cleanPath(r.FormValue("path"))
 	previousPath := pagePath
@@ -32982,7 +32990,7 @@ func (a *App) render(w http.ResponseWriter, r *http.Request, templateName string
 	if languageCode == "he" || languageCode == "fa" {
 		textDirection = "rtl"
 	}
-	envelope := map[string]any{"Domain": domain, "T": translations, "CompileVersion": CompileVersion, "LanguageCode": languageCode, "TextDirection": textDirection}
+	envelope := map[string]any{"Domain": domain, "T": translations, "CompileVersion": CompileVersion, "LanguageCode": languageCode, "TextDirection": textDirection, "AccountCSRF": accountCSRF(r)}
 	mergeTemplateData(envelope, templateData)
 	if a != nil && a.renderTemplates != nil {
 		reply := make(chan renderTemplateResponse, 1)

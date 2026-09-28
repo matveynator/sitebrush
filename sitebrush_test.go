@@ -17417,6 +17417,94 @@ func TestSecurityBoundaryAuthenticatedMutationsRejectHostileOrigin(t *testing.T)
 	}
 }
 
+func TestSavePageAllowsSessionCSRFWhenBrowserOriginIsOpaque(t *testing.T) {
+	application, rawDB := newTestApplication(t)
+	if _, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "admin@example.com", "password"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := rawDB.Exec(`INSERT INTO pages(domain,path,title,html,published) VALUES(?,?,?,?,1)`, "localhost", "/", "Home", "<p>old</p>"); err != nil {
+		t.Fatal(err)
+	}
+	adminCookie := newAdminSessionCookie(t, application, "admin@example.com")
+	csrfRequest := httptest.NewRequest(http.MethodGet, "http://localhost:8080/", nil)
+	csrfRequest.AddCookie(adminCookie)
+	csrfToken := accountCSRF(csrfRequest)
+
+	form := url.Values{
+		"path": {"/"},
+		"title": {"Home"},
+		"html": {"<p>saved</p>"},
+		"account_csrf": {csrfToken},
+	}
+	request := httptest.NewRequest(http.MethodPost, "http://localhost:8080/?save", strings.NewReader(form.Encode()))
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	request.Header.Set("Origin", "null")
+	request.AddCookie(adminCookie)
+	response := httptest.NewRecorder()
+	application.route(response, request)
+
+	if response.Code != http.StatusFound {
+		t.Fatalf("opaque-origin save status=%d body=%q", response.Code, response.Body.String())
+	}
+	var savedHTML string
+	if err := rawDB.QueryRow(`SELECT html FROM pages WHERE domain=? AND path=?`, "localhost", "/").Scan(&savedHTML); err != nil {
+		t.Fatal(err)
+	}
+	if savedHTML != "<p>saved</p>" {
+		t.Fatalf("saved HTML=%q", savedHTML)
+	}
+}
+
+func TestSavePageRejectsCrossOriginWithoutSessionCSRFAndGET(t *testing.T) {
+	application, rawDB := newTestApplication(t)
+	if _, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "admin@example.com", "password"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := rawDB.Exec(`INSERT INTO pages(domain,path,title,html,published) VALUES(?,?,?,?,1)`, "localhost", "/", "Home", "<p>old</p>"); err != nil {
+		t.Fatal(err)
+	}
+	adminCookie := newAdminSessionCookie(t, application, "admin@example.com")
+
+	form := url.Values{"path": {"/"}, "title": {"Home"}, "html": {"<p>attacker</p>"}}
+	crossOrigin := httptest.NewRequest(http.MethodPost, "http://localhost:8080/?save", strings.NewReader(form.Encode()))
+	crossOrigin.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	crossOrigin.Header.Set("Origin", "https://attacker.example")
+	crossOrigin.AddCookie(adminCookie)
+	crossOriginResponse := httptest.NewRecorder()
+	application.route(crossOriginResponse, crossOrigin)
+	if crossOriginResponse.Code != http.StatusForbidden {
+		t.Fatalf("cross-origin save without CSRF status=%d body=%q", crossOriginResponse.Code, crossOriginResponse.Body.String())
+	}
+
+	getRequest := httptest.NewRequest(http.MethodGet, "http://localhost:8080/?save", nil)
+	getRequest.AddCookie(adminCookie)
+	getResponse := httptest.NewRecorder()
+	application.route(getResponse, getRequest)
+	if getResponse.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("GET save status=%d body=%q", getResponse.Code, getResponse.Body.String())
+	}
+
+	var savedHTML string
+	if err := rawDB.QueryRow(`SELECT html FROM pages WHERE domain=? AND path=?`, "localhost", "/").Scan(&savedHTML); err != nil {
+		t.Fatal(err)
+	}
+	if savedHTML != "<p>old</p>" {
+		t.Fatalf("rejected save mutated page HTML=%q", savedHTML)
+	}
+}
+
+func TestEditorSaveFormsCarrySessionCSRF(t *testing.T) {
+	for _, templateName := range []string{"edit.html", "edit_raw.html"} {
+		templateBytes, err := embeddedWebFiles.ReadFile("web/" + templateName)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(templateBytes), `name="account_csrf" value="{{.AccountCSRF}}"`) {
+			t.Fatalf("%s does not carry the session-bound save CSRF token", templateName)
+		}
+	}
+}
+
 func TestDeleteRevisionAllowsSessionCSRFWhenBrowserOriginIsOpaque(t *testing.T) {
 	application, rawDB := newTestApplication(t)
 	if _, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "admin@example.com", "password"); err != nil {
