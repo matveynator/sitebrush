@@ -83,7 +83,7 @@
         <div class="edit-mode-actions">
           {{if .IsHTML}}<a class="btn btn-primary" href="{{.Path}}?visual">{{index .T "edit_mode_open_visual"}}</a>{{end}}
           <a class="btn btn-outline-secondary" href="{{.Path}}?text">{{index .T "edit_mode_open_text"}}</a>
-          <button class="btn btn-outline-primary" type="button" id="openAIEditorButton">Редактировать с AI / голосом</button>
+          <button class="btn btn-outline-primary" type="button" id="openAIEditorButton">Редактирование голосом</button>
         </div>
       </div>
     </section>
@@ -94,8 +94,8 @@
   <section class="ai-editor-modal">
     <header class="ai-editor-modal-header">
       <div>
-        <h2 class="h5 mb-1" id="aiEditorModalTitle">Редактирование с AI</h2>
-        <div class="small text-body-secondary">Скажите или напишите, что нужно изменить.</div>
+        <h2 class="h5 mb-1" id="aiEditorModalTitle">Редактирование голосом</h2>
+        <div class="small text-body-secondary">Скажите голосом или напишите, что нужно изменить на странице или на всём сайте.</div>
       </div>
       <button class="ai-editor-modal-close" type="button" id="closeAIEditorButton" aria-label="Закрыть">×</button>
     </header>
