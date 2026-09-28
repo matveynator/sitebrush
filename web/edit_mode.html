@@ -171,6 +171,11 @@ const aiEditorInviteLink = document.getElementById('aiEditorInviteLink');
 const aiEditorLinkStatusElement = document.getElementById('aiEditorLinkStatus');
 let aiEditorSpeechRecognition = null;
 let aiEditorIsRecording = false;
+const savedAIEditorCommand = sessionStorage.getItem('sitebrush.aiEditorCommand');
+if (savedAIEditorCommand) {
+  aiEditorCommandElement.value = savedAIEditorCommand;
+  sessionStorage.removeItem('sitebrush.aiEditorCommand');
+}
 
 function selectedAIEditorScope() {
   const selected = document.querySelector('input[name="aiEditorScope"]:checked');
@@ -361,6 +366,10 @@ document.getElementById('createAIEditorLinkButton').addEventListener('click', as
     button.disabled = false;
   }
 });
+if (new URLSearchParams(window.location.search).has('ai_open')) {
+  setAIEditorModalOpen(true);
+}
+
 document.getElementById('copyAIEditorLinkButton').addEventListener('click', async function copyAIEditorLink() {
   aiEditorInviteLink.select();
   if (navigator.clipboard) {
