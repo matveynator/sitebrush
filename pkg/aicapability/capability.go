@@ -24,8 +24,9 @@ type Manifest struct {
 	Name         string           `json:"name"`
 	Protocol     string           `json:"protocol"`
 	Instructions string           `json:"instructions"`
-	OpenAPIURL   string           `json:"openapi_url"`
-	APIBase      string           `json:"api_base"`
+	OpenAPIURL       string           `json:"openapi_url"`
+	DocumentationURL string           `json:"documentation_url"`
+	APIBase          string           `json:"api_base"`
 	Domain       string           `json:"domain"`
 	PagePath     string           `json:"page_path,omitempty"`
 	Task         string           `json:"task,omitempty"`
@@ -394,6 +395,7 @@ func ManifestJSON(manifest Manifest) ([]byte, error) { return json.Marshal(manif
 func ManifestResponse(response http.ResponseWriter, request *http.Request, manifest Manifest) {
 	response.Header().Set("Cache-Control", "no-store")
 	response.Header().Set("X-Content-Type-Options", "nosniff")
+	response.Header().Set("Referrer-Policy", "no-referrer")
 	if strings.Contains(request.Header.Get("Accept"), "text/plain") {
 		response.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		_, _ = response.Write([]byte(manifest.Instructions))
