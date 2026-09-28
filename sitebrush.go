@@ -10330,29 +10330,36 @@ func (a *App) resolveAIProviderCredential(ctx context.Context, domain string, re
 	if !supportedAIProvider(request.Provider) {
 		return errors.New("unsupported AI provider")
 	}
+
+	// A newly supplied secret must be able to replace an unreadable old credential.
+	// This makes master-key recovery explicit instead of trapping the administrator.
+	if request.APIKey != "" {
+		if request.Model == "" {
+			var storedModel string
+			_ = a.db.QueryRowContext(ctx, `SELECT model FROM ai_provider_credentials WHERE domain=? AND provider=?`, domain, request.Provider).Scan(&storedModel)
+			request.Model = strings.TrimSpace(storedModel)
+		}
+		if request.Model == "" {
+			return errors.New("AI model is required")
+		}
+		return a.saveAIProviderCredential(ctx, domain, request.Provider, request.Model, request.APIKey)
+	}
+
 	storedCredential, found, err := a.loadAIProviderCredential(ctx, domain, request.Provider)
 	if err != nil {
 		return err
 	}
-	if request.APIKey == "" {
-		if !found || storedCredential.APIKey == "" {
-			return errors.New("AI API key is required")
-		}
-		request.APIKey = storedCredential.APIKey
-		if request.Model == "" {
-			request.Model = storedCredential.Model
-		}
+	if !found || storedCredential.APIKey == "" {
+		return errors.New("AI API key is required")
+	}
+	request.APIKey = storedCredential.APIKey
+	if request.Model == "" {
+		request.Model = storedCredential.Model
 	}
 	if request.Model == "" {
 		return errors.New("AI model is required")
 	}
-	if strings.TrimSpace(request.APIKey) == "" {
-		return errors.New("AI API key is required")
-	}
-	if found && request.APIKey == storedCredential.APIKey && request.Model == storedCredential.Model {
-		return nil
-	}
-	return a.saveAIProviderCredential(ctx, domain, request.Provider, request.Model, request.APIKey)
+	return nil
 }
 
 func (a *App) aiEditorPage(w http.ResponseWriter, r *http.Request) {
