@@ -172,3 +172,92 @@ func TestProviderResponseValidationAndTransportErrors(t *testing.T) {
 		t.Fatalf("nil client error=%v", err)
 	}
 }
+
+
+type failingReadCloser struct{}
+
+func (failingReadCloser) Read([]byte) (int, error) { return 0, errors.New("read failed") }
+func (failingReadCloser) Close() error              { return nil }
+
+func TestProviderRejectsIncompleteConfiguration(t *testing.T) {
+	for _, configuration := range []Config{
+		{},
+		{Provider: ProviderDeepSeek, APIKey: "key"},
+		{Provider: ProviderDeepSeek, Model: "model"},
+		{Provider: "  ", Model: "model", APIKey: "key"},
+	} {
+		if _, err := NewClient(configuration, nil); !errors.Is(err, ErrInvalidConfiguration) {
+			t.Fatalf("configuration=%+v error=%v", configuration, err)
+		}
+	}
+}
+
+func TestProviderTransportAndBodyReadErrorsAreReturned(t *testing.T) {
+	transportErr := errors.New("transport failed")
+	client, err := NewClient(Config{Provider: ProviderDeepSeek, Model: "model", APIKey: "key"}, &http.Client{
+		Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			return nil, transportErr
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.Complete(context.Background(), Request{Messages: []Message{{Role: "user", Content: "x"}}}); !errors.Is(err, transportErr) {
+		t.Fatalf("transport error=%v", err)
+	}
+
+	client, err = NewClient(Config{Provider: ProviderDeepSeek, Model: "model", APIKey: "key"}, &http.Client{
+		Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			return &http.Response{StatusCode: http.StatusOK, Body: failingReadCloser{}, Header: make(http.Header)}, nil
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.Complete(context.Background(), Request{Messages: []Message{{Role: "user", Content: "x"}}}); err == nil || !strings.Contains(err.Error(), "read failed") {
+		t.Fatalf("body read error=%v", err)
+	}
+}
+
+func TestProviderRejectsEmptyRequestAndMalformedAnthropicJSON(t *testing.T) {
+	client, err := NewClient(Config{Provider: ProviderAnthropic, Model: "model", APIKey: "key"}, &http.Client{
+		Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader("{")), Header: make(http.Header)}, nil
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.Complete(context.Background(), Request{}); !errors.Is(err, ErrInvalidConfiguration) {
+		t.Fatalf("empty request error=%v", err)
+	}
+	if _, err := client.Complete(context.Background(), Request{Messages: []Message{{Role: "user", Content: "x"}}}); err == nil {
+		t.Fatal("malformed Anthropic JSON accepted")
+	}
+}
+
+func TestProviderDefaultURLs(t *testing.T) {
+	expected := map[string]string{
+		ProviderOpenAICompatible: "https://api.openai.com/v1",
+		ProviderAnthropic:        "https://api.anthropic.com/v1",
+		ProviderDeepSeek:         "https://api.deepseek.com/v1",
+		ProviderQwen:             "https://dashscope.aliyuncs.com/compatible-mode/v1",
+	}
+	for provider, expectedURL := range expected {
+		if actual := defaultBaseURL(provider); actual != expectedURL {
+			t.Fatalf("provider=%s URL=%q want=%q", provider, actual, expectedURL)
+		}
+		if actual, err := providerBaseURL(provider, expectedURL+"/"); err != nil || actual != expectedURL {
+			t.Fatalf("provider=%s explicit official URL=%q err=%v", provider, actual, err)
+		}
+	}
+}
+
+func TestSecretDecryptionRejectsInvalidKeyAndEmptyCiphertext(t *testing.T) {
+	if _, err := DecryptSecret([]byte("short"), "value"); err == nil {
+		t.Fatal("short decryption key accepted")
+	}
+	if _, err := DecryptSecret([]byte(strings.Repeat("k", 32)), ""); err == nil {
+		t.Fatal("empty ciphertext accepted")
+	}
+}
