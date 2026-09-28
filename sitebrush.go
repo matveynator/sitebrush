@@ -3519,7 +3519,7 @@ func shouldRecordAnalyticsRequest(r *http.Request) bool {
 func isSitebrushControllerQuery(query url.Values) bool {
 	for _, controllerFlag := range []string{
 		"save", "template_events", "grab_preview", "grab_events", "grab_ws", "revision_preview", "revision_restore", "revision_delete", "revision_toggle",
-		"tree", "native_pick_files", "native_save_backup", "edit", "ai", "ai_capability_create", "visual", "text", "editraw", "settings", "properties",
+		"tree", "native_pick_files", "native_save_backup", "edit", "ai", "ai_capability_create", "ai_execute", "visual", "text", "editraw", "settings", "properties",
 		"backup_download", "hosting_and_support_backup_download", "billing_backup_download", "backup_import", "profile", "freeze", "publish", "publish_events", "publish_preview", "files",
 		"revisions", "login", "register", "email_confirm", "grab", "recover", "captcha", "analytics", "expenses", "hosting_and_support", "billing",
 	} {
@@ -9523,6 +9523,10 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 		a.issueAICapability(w, r)
 		return
 	}
+	if hasQueryFlag(r, "ai_execute") {
+		a.executeAIEditorRequest(w, r)
+		return
+	}
 	publicTrialEndpoint := publicTrialEndpointFromRequest(r)
 	if a.preparePublicTrialEndpoint(w, r, publicTrialEndpoint) {
 		return
@@ -10110,6 +10114,105 @@ func (a *App) aiEditorPage(w http.ResponseWriter, r *http.Request) {
 		"Path":         cleanPath(firstNonEmpty(r.URL.Query().Get("path"), r.URL.Path)),
 		"ProviderList": []string{aiprovider.ProviderOpenAICompatible, aiprovider.ProviderAnthropic, aiprovider.ProviderDeepSeek, aiprovider.ProviderQwen},
 	})
+}
+
+type aiEditorUploadedFile struct {
+	Name    string `json:"name"`
+	Content string `json:"content"`
+}
+
+type aiEditorExecutionRequest struct {
+	Provider string                 `json:"provider"`
+	BaseURL  string                 `json:"base_url"`
+	Model    string                 `json:"model"`
+	APIKey   string                 `json:"api_key"`
+	PagePath string                 `json:"page_path"`
+	Task     string                 `json:"task"`
+	Files    []aiEditorUploadedFile `json:"files"`
+}
+
+type aiEditorModelResult struct {
+	Title   string `json:"title"`
+	HTML    string `json:"html"`
+	Publish bool   `json:"publish"`
+}
+
+func (a *App) executeAIEditorRequest(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost || !a.isAdminRequest(r) || !httpsecurity.SameOriginMutationAllowed(r) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	var request aiEditorExecutionRequest
+	r.Body = http.MaxBytesReader(w, r.Body, 32<<20)
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		http.Error(w, "invalid AI editor request", http.StatusBadRequest)
+		return
+	}
+	request.PagePath = cleanPath(request.PagePath)
+	if request.PagePath == "" || strings.TrimSpace(request.Task) == "" || strings.TrimSpace(request.APIKey) == "" {
+		http.Error(w, "page, task, and AI API key are required", http.StatusBadRequest)
+		return
+	}
+	domain := a.siteDomain(r.Context(), r)
+	page, err := a.findPage(r.Context(), domain, request.PagePath)
+	if err != nil {
+		http.Error(w, "target page was not found", http.StatusNotFound)
+		return
+	}
+	client, err := aiprovider.NewClient(aiprovider.Config{Provider: request.Provider, BaseURL: request.BaseURL, Model: request.Model, APIKey: request.APIKey}, nil)
+	if err != nil {
+		http.Error(w, "AI provider configuration is invalid", http.StatusBadRequest)
+		return
+	}
+	fileSummary := make([]string, 0, len(request.Files))
+	decodedFiles := make([]aiEditorUploadedFile, 0, len(request.Files))
+	for _, uploadedFile := range request.Files {
+		fileBytes, decodeErr := base64.StdEncoding.DecodeString(uploadedFile.Content)
+		if decodeErr != nil || len(fileBytes) == 0 || len(fileBytes) > 128<<20 {
+			http.Error(w, "AI attachment is invalid", http.StatusBadRequest)
+			return
+		}
+		decodedFiles = append(decodedFiles, aiEditorUploadedFile{Name: uploadedFile.Name, Content: base64.RawStdEncoding.EncodeToString(fileBytes)})
+		fileSummary = append(fileSummary, uploadedFile.Name)
+	}
+	modelResponse, err := client.Complete(r.Context(), aiprovider.Request{Messages: []aiprovider.Message{
+		{Role: "system", Content: "You edit one SiteBrush web page. Return only JSON with fields title, html, publish. Keep the requested page path unchanged. Use uploaded file names as /files/ references when useful. Do not include markdown fences."},
+		{Role: "user", Content: "Page path: " + request.PagePath + "\nTask: " + request.Task + "\nUploaded files: " + strings.Join(fileSummary, ", ") + "\nCurrent title: " + page.Title + "\nCurrent HTML:\n" + page.HTML},
+	}})
+	if err != nil {
+		http.Error(w, "AI provider request failed", http.StatusBadGateway)
+		return
+	}
+	var modelResult aiEditorModelResult
+	modelJSON := strings.TrimSpace(modelResponse.Text)
+	modelJSON = strings.TrimPrefix(modelJSON, "```json")
+	modelJSON = strings.TrimPrefix(modelJSON, "```")
+	modelJSON = strings.TrimSuffix(modelJSON, "```")
+	if err := json.Unmarshal([]byte(strings.TrimSpace(modelJSON)), &modelResult); err != nil || strings.TrimSpace(modelResult.HTML) == "" {
+		http.Error(w, "AI provider returned invalid page JSON", http.StatusBadGateway)
+		return
+	}
+	for _, uploadedFile := range decodedFiles {
+		fileBytes, _ := base64.RawStdEncoding.DecodeString(uploadedFile.Content)
+		if _, executeErr := a.executeAITask(aieditor.Request{Operation: aieditor.OperationUploadFile, FileName: uploadedFile.Name, FileContent: fileBytes, Path: request.PagePath}, r); executeErr != nil {
+			http.Error(w, "AI attachment could not be stored", http.StatusBadRequest)
+			return
+		}
+	}
+	result, err := a.executeAITask(aieditor.Request{Operation: aieditor.OperationUpdatePage, Path: request.PagePath, Title: modelResult.Title, HTML: modelResult.HTML}, r)
+	if err != nil {
+		http.Error(w, "AI page update failed", http.StatusBadRequest)
+		return
+	}
+	if modelResult.Publish {
+		if _, err := a.executeAITask(aieditor.Request{Operation: aieditor.OperationPublish}, r); err != nil {
+			http.Error(w, "AI page publish failed", http.StatusBadRequest)
+			return
+		}
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	_ = json.NewEncoder(w).Encode(map[string]any{"path": result.Path, "published": modelResult.Publish})
 }
 
 func (a *App) aiCapabilityQueryEndpoint(w http.ResponseWriter, r *http.Request, domain string) {

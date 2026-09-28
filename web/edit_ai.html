@@ -29,6 +29,13 @@
       <a class="btn btn-secondary" href="{{.Path}}">Back</a>
     </div>
     <input id="fileInput" type="file" multiple accept="image/*,.css,.html,.txt">
+    <label for="provider">AI provider</label>
+    <select id="provider"><option value="openai-compatible">OpenAI-compatible</option><option value="anthropic">Anthropic</option><option value="deepseek">DeepSeek</option><option value="qwen">Qwen</option></select>
+    <label for="model">Model</label>
+    <input id="model" type="text" autocomplete="off" placeholder="Model name">
+    <label for="apiKey">Your AI API token</label>
+    <input id="apiKey" type="password" autocomplete="off" placeholder="Stored only in this request">
+    <button id="executeButton" type="button">Execute task on this page</button>
     <div id="status" class="status" role="status"></div>
     <pre id="capabilityOutput" hidden></pre>
   </section>
@@ -39,6 +46,7 @@ const recordButton = document.getElementById('recordButton');
 const capabilityButton = document.getElementById('capabilityButton');
 const statusElement = document.getElementById('status');
 const capabilityOutputElement = document.getElementById('capabilityOutput');
+const executeButton = document.getElementById('executeButton');
 const savedAIEditorCommand = sessionStorage.getItem('sitebrush.aiEditorCommand');
 if (savedAIEditorCommand) {
   commandElement.value = savedAIEditorCommand;
@@ -73,6 +81,25 @@ capabilityButton.addEventListener('click', async function createCapabilityLink()
     setStatus('Copy this link into an AI system. Revoke it when it is no longer needed.');
   } catch (error) { setStatus(error.message); }
   capabilityButton.disabled = false;
+});
+executeButton.addEventListener('click', async function executeTaskOnCurrentPage() {
+  executeButton.disabled = true;
+  setStatus('Sending the current page and task to the AI provider…');
+  try {
+    const files = await Promise.all(Array.from(document.getElementById('fileInput').files || []).map(function readFile(file) {
+      return new Promise(function resolveFile(resolve, reject) {
+        const reader = new FileReader();
+        reader.onload = function fileReadCompleted() { resolve({name:file.name, content:String(reader.result).split(',')[1] || ''}); };
+        reader.onerror = reject;
+        reader.readAsDataURL(file);
+      });
+    }));
+    const response = await fetch('{{.Path}}?ai_execute', {method:'POST', credentials:'same-origin', headers:{'Content-Type':'application/json'}, body:JSON.stringify({provider:document.getElementById('provider').value, model:document.getElementById('model').value, api_key:document.getElementById('apiKey').value, page_path:'{{.Path}}', task:commandElement.value, files:files})});
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.error || 'AI task failed');
+    setStatus('The AI updated ' + payload.path + (payload.published ? ' and published it.' : '.'));
+  } catch (error) { setStatus(error.message); }
+  executeButton.disabled = false;
 });
 </script>
 </body>
