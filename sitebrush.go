@@ -474,6 +474,11 @@ type profileSessionView struct {
 	GeoIPAttribution                                                template.HTML
 }
 
+type profileAIEditorSessionView struct {
+	ID, CapabilityID, Domain, Scopes string
+	Created, Expires                 time.Time
+}
+
 type profileIPGeographyView struct {
 	Location         string
 	GeoIPAttribution template.HTML
@@ -9440,8 +9445,8 @@ func (a *App) assignMissingDomainAliasTokens(ctx context.Context) {
 func (a *App) route(w http.ResponseWriter, r *http.Request) {
 	pagePath := cleanPath(r.URL.Path)
 	requestDomain := a.siteDomain(r.Context(), r)
-	if strings.HasPrefix(r.URL.Path, "/.well-known/sitebrush-editor/") {
-		a.aiCapabilityEndpoint(w, r, requestDomain)
+	if strings.TrimSpace(r.URL.Query().Get("editor_token")) != "" {
+		a.aiCapabilityQueryEndpoint(w, r, requestDomain)
 		return
 	}
 	if hasQueryFlag(r, "security_incident_report") {
@@ -9863,21 +9868,7 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) {
 }
 
 func redactAICapabilityPath(requestPath string) string {
-	const prefix = "/.well-known/sitebrush-editor/"
-	if !strings.HasPrefix(requestPath, prefix) {
-		return requestPath
-	}
-	suffix := strings.TrimPrefix(requestPath, prefix)
-	if suffix == "" {
-		return prefix + "[redacted]"
-	}
-	parts := strings.Split(suffix, "/")
-	if len(parts) > 1 && !isAICapabilityOperation(parts[1]) {
-		parts[1] = "[redacted]"
-	} else {
-		parts[0] = "[redacted]"
-	}
-	return prefix + strings.Join(parts, "/")
+	return requestPath
 }
 
 func isAICapabilityOperation(operation string) bool {
@@ -9889,8 +9880,12 @@ func isAICapabilityOperation(operation string) bool {
 	}
 }
 
-func aiCapabilityPath(domain, token string) string {
-	return "/.well-known/sitebrush-editor/" + url.PathEscape(normalizeDomainName(domain)) + "/" + token
+func aiCapabilityURL(token string) string {
+	return "/?editor_token=" + url.QueryEscape(token)
+}
+
+func aiCapabilityOperationURL(request *http.Request, token, operation string) string {
+	return requestScheme(request) + "://" + request.Host + "/" + strings.Trim(operation, "/") + "?editor_token=" + url.QueryEscape(token)
 }
 
 type appAIStore struct{ application *App }
@@ -10117,30 +10112,26 @@ func (a *App) aiEditorPage(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (a *App) aiCapabilityEndpoint(w http.ResponseWriter, r *http.Request, domain string) {
-	const prefix = "/.well-known/sitebrush-editor/"
-	pathSuffix := strings.TrimPrefix(r.URL.Path, prefix)
-	pathSuffix = strings.Trim(pathSuffix, "/")
-	parts := strings.Split(pathSuffix, "/")
-	if len(parts) == 0 || strings.TrimSpace(parts[0]) == "" || a.aiCapabilities == nil {
+func (a *App) aiCapabilityQueryEndpoint(w http.ResponseWriter, r *http.Request, domain string) {
+	token := strings.TrimSpace(r.URL.Query().Get("editor_token"))
+	if token == "" {
 		http.NotFound(w, r)
 		return
 	}
-	tokenIndex := 0
-	if len(parts) > 1 && normalizeDomainName(parts[0]) == normalizeDomainName(domain) {
-		tokenIndex = 1
-	}
-	if tokenIndex >= len(parts) || strings.TrimSpace(parts[tokenIndex]) == "" {
+	operation := strings.Trim(strings.TrimSpace(r.URL.Path), "/")
+	a.aiCapabilityRequest(w, r, domain, token, operation)
+}
+
+func (a *App) aiCapabilityRequest(w http.ResponseWriter, r *http.Request, domain, token, operation string) {
+	if strings.TrimSpace(token) == "" || a.aiCapabilities == nil {
 		http.NotFound(w, r)
 		return
 	}
-	token := parts[tokenIndex]
-	operationIndex := tokenIndex + 1
-	if operationIndex < len(parts) && (parts[operationIndex] == "pages" || parts[operationIndex] == "page" || parts[operationIndex] == "file" || parts[operationIndex] == "publish" || parts[operationIndex] == "rollback") {
-		a.aiContentEndpoint(w, r, domain, token, parts[operationIndex])
+	if operation == "pages" || operation == "page" || operation == "file" || operation == "publish" || operation == "rollback" {
+		a.aiContentEndpoint(w, r, domain, token, operation)
 		return
 	}
-	if operationIndex < len(parts) && parts[operationIndex] == "revoke" {
+	if operation == "revoke" {
 		if r.Method != http.MethodPost {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
@@ -10153,7 +10144,7 @@ func (a *App) aiCapabilityEndpoint(w http.ResponseWriter, r *http.Request, domai
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
-	if operationIndex < len(parts) && parts[operationIndex] == "openapi.json" {
+	if operation == "openapi.json" {
 		if r.Method != http.MethodGet {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
@@ -10178,7 +10169,7 @@ func (a *App) aiCapabilityEndpoint(w http.ResponseWriter, r *http.Request, domai
 		})
 		return
 	}
-	if operationIndex < len(parts) && parts[operationIndex] == "exchange" {
+	if operation == "exchange" {
 		if r.Method != http.MethodPost {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
@@ -10193,7 +10184,7 @@ func (a *App) aiCapabilityEndpoint(w http.ResponseWriter, r *http.Request, domai
 		_ = json.NewEncoder(w).Encode(session)
 		return
 	}
-	if r.Method != http.MethodGet || operationIndex != len(parts) {
+	if r.Method != http.MethodGet || operation != "" {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
@@ -10201,17 +10192,17 @@ func (a *App) aiCapabilityEndpoint(w http.ResponseWriter, r *http.Request, domai
 		http.Error(w, "capability is invalid", http.StatusUnauthorized)
 		return
 	}
-	baseURL := requestScheme(r) + "://" + r.Host + aiCapabilityPath(domain, token)
+	baseURL := requestScheme(r) + "://" + r.Host + aiCapabilityURL(token)
 	manifest := aicapability.Manifest{
 		Name:         "SiteBrush AI editor",
 		Protocol:     "sitebrush-ai-editor/v1",
 		APIBase:      baseURL,
-		OpenAPIURL:   baseURL + "/openapi.json",
+		OpenAPIURL:   aiCapabilityOperationURL(r, token, "openapi.json"),
 		Domain:       domain,
 		Scopes:       []string{aicapability.ScopeRead, aicapability.ScopeWrite, aicapability.ScopePublish},
 		Operations:   []string{"manifest", "exchange", "openapi", "list_pages", "read_page", "create_page", "update_page", "upload_file", "publish", "rollback"},
 		Limits:       map[string]int64{"max_file_bytes": 128 << 20, "max_request_bytes": 16 << 20},
-		Instructions: "Use POST " + baseURL + "/exchange to obtain a short-lived scoped session. Send it as Authorization: Bearer for content operations. Only site content is available; never request account, security, server, database, or shell access.",
+		Instructions: "Use POST " + aiCapabilityOperationURL(r, token, "exchange") + " to obtain a short-lived scoped session. For content operations use the same editor_token query parameter and send the session as Authorization: Bearer. Only site content is available; never request account, security, server, database, or shell access.",
 	}
 	aicapability.ManifestResponse(w, r, manifest)
 }
@@ -10222,14 +10213,15 @@ func (a *App) issueAICapability(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	domain := a.siteDomain(r.Context(), r)
-	token, capability, err := a.aiCapabilities.Issue(domain, []string{aicapability.ScopeRead, aicapability.ScopeWrite, aicapability.ScopePublish})
+	ownerEmail, _ := a.currentAdminEmailForDomain(r, domain)
+	token, capability, err := a.aiCapabilities.IssueFor(domain, ownerEmail, []string{aicapability.ScopeRead, aicapability.ScopeWrite, aicapability.ScopePublish})
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusServiceUnavailable)
 		return
 	}
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	_ = json.NewEncoder(w).Encode(map[string]string{"token": token, "capability_id": capability.ID, "url": requestScheme(r) + "://" + r.Host + aiCapabilityPath(domain, token)})
+	_ = json.NewEncoder(w).Encode(map[string]string{"token": token, "capability_id": capability.ID, "url": requestScheme(r) + "://" + r.Host + aiCapabilityURL(token)})
 }
 
 func (a *App) aiContentEndpoint(w http.ResponseWriter, r *http.Request, domain, capabilityToken, operation string) {
@@ -20821,6 +20813,41 @@ func (a *App) profilePage(w http.ResponseWriter, r *http.Request) {
 		httpsecurity.RedirectLocal(w, r, "?profile", http.StatusSeeOther)
 		return
 	}
+	if r.Method == http.MethodPost && strings.HasPrefix(r.FormValue("profile_action"), "ai_session_") {
+		if r.FormValue("account_csrf") == "" || r.FormValue("account_csrf") != accountCSRF(r) {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+		sessionID := strings.TrimSpace(r.FormValue("ai_session_id"))
+		var sessionErr error
+		switch r.FormValue("profile_action") {
+		case "ai_session_revoke":
+			sessionErr = a.aiCapabilities.RevokeSession(sessionID, currentEmail, domain)
+		case "ai_session_extend":
+			duration, parseErr := time.ParseDuration(strings.TrimSpace(r.FormValue("ai_session_duration")))
+			if parseErr != nil {
+				sessionErr = errors.New("invalid AI session duration")
+			} else {
+				sessionErr = a.aiCapabilities.ExtendSession(sessionID, currentEmail, domain, duration)
+			}
+		case "ai_session_restrict":
+			scopes := make([]string, 0, 3)
+			for _, scope := range []string{aicapability.ScopeRead, aicapability.ScopeWrite, aicapability.ScopePublish} {
+				if r.FormValue("ai_scope_"+scope) == "on" {
+					scopes = append(scopes, scope)
+				}
+			}
+			sessionErr = a.aiCapabilities.RestrictSession(sessionID, currentEmail, domain, scopes)
+		default:
+			sessionErr = errors.New("invalid AI session action")
+		}
+		if sessionErr != nil {
+			http.Error(w, "AI editor session update unavailable", http.StatusBadRequest)
+			return
+		}
+		httpsecurity.RedirectLocal(w, r, "?profile", http.StatusSeeOther)
+		return
+	}
 	translations := translationsForRequest(r)
 	status := ""
 	statusClass := ""
@@ -21159,6 +21186,17 @@ func (a *App) renderProfilePage(w http.ResponseWriter, r *http.Request, email, s
 	adminIPProtectionEnabled := false
 	adminStealthEnabled := false
 	profileSessionCount := 0
+	aiEditorSessions := []profileAIEditorSessionView{}
+	if authenticated && a.aiCapabilities != nil {
+		if sessions, listErr := a.aiCapabilities.List(accountEmail, domain); listErr == nil {
+			for _, session := range sessions {
+				aiEditorSessions = append(aiEditorSessions, profileAIEditorSessionView{
+					ID: session.ID, CapabilityID: session.CapabilityID, Domain: session.Domain,
+					Scopes: strings.Join(session.Scopes, ", "), Created: session.Created, Expires: session.Expires,
+				})
+			}
+		}
+	}
 	adminAllowedIPCount := 0
 	geoIPContext, cancelGeoIPLookups := context.WithTimeout(r.Context(), 350*time.Millisecond)
 	defer cancelGeoIPLookups()
@@ -21263,6 +21301,7 @@ func (a *App) renderProfilePage(w http.ResponseWriter, r *http.Request, email, s
 		"ProfileSessions":            profileSessions,
 		"ProfileSessionsMore":        profileSessionsMore,
 		"ProfileSessionCount":        profileSessionCount,
+		"AIEditorSessions":           aiEditorSessions,
 		"AdminAllowedIPs":            adminAllowedIPs,
 		"AdminAllowedIPMore":         adminAllowedIPMore,
 		"AdminAllowedIPCount":        adminAllowedIPCount,
@@ -31112,7 +31151,7 @@ func buildContextMenuScript(isAdmin bool, isServerManager bool, isFrozen bool, p
     const linkButtonElement = document.createElement("button");
     linkButtonElement.type = "button";
     linkButtonElement.className = "SiteBrushAIEditorButton";
-    linkButtonElement.textContent = "Create AI link";
+    linkButtonElement.textContent = "Invite your AI assistant - create invite link";
     const closeButtonElement = document.createElement("button");
     closeButtonElement.type = "button";
     closeButtonElement.className = "SiteBrushAIEditorButton";

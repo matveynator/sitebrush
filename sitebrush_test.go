@@ -41,6 +41,7 @@ import (
 	"time"
 
 	"github.com/matveynator/netchan"
+	"github.com/matveynator/sitebrush/v2/pkg/accountauth"
 	browserstats "github.com/matveynator/sitebrush/v2/pkg/analytics"
 	"github.com/matveynator/sitebrush/v2/pkg/channelacme"
 	"github.com/matveynator/sitebrush/v2/pkg/crawler"
@@ -11183,7 +11184,7 @@ func TestEditorTemplatesExposeThreeModeNavigation(t *testing.T) {
 		t.Fatal(err)
 	}
 	templateSource := string(templateBytes)
-	for _, expectedFragment := range []string{"?visual", "?text", ".AIPath", "openAIEditorButton", "aiEditorModalBackdrop", "createAIEditorLinkButton", "startAIEditorVoiceButton"} {
+	for _, expectedFragment := range []string{"?visual", "?text", ".AIPath", "openAIEditorButton", "aiEditorModalBackdrop", "createAIEditorLinkButton", "startAIEditorVoiceButton", "Invite your AI assistant - create invite link"} {
 		if !strings.Contains(templateSource, expectedFragment) {
 			t.Fatalf("edit_mode.html does not expose %q", expectedFragment)
 		}
@@ -11200,14 +11201,18 @@ func TestEditorTemplatesExposeThreeModeNavigation(t *testing.T) {
 }
 
 func TestAICapabilityPathIsReadableButRedactsSecretToken(t *testing.T) {
-	capabilityPath := aiCapabilityPath("Example.org.", "random-secret-token")
-	if capabilityPath != "/.well-known/sitebrush-editor/example.org/random-secret-token" {
-		t.Fatalf("capability path=%q", capabilityPath)
+	capabilityPath := aiCapabilityURL("random-secret-token")
+	if capabilityPath != "/?editor_token=random-secret-token" {
+		t.Fatalf("capability URL=%q", capabilityPath)
 	}
-	for _, requestPath := range []string{capabilityPath, capabilityPath + "/exchange", capabilityPath + "/pages"} {
-		redactedPath := redactAICapabilityPath(requestPath)
-		if strings.Contains(redactedPath, "random-secret-token") || !strings.Contains(redactedPath, "example.org") {
-			t.Fatalf("capability token leaked in %q -> %q", requestPath, redactedPath)
+	for _, requestPath := range []string{"/?editor_token=random-secret-token", "/exchange?editor_token=random-secret-token", "/pages?editor_token=random-secret-token"} {
+		parsedRequestURL, err := url.Parse(requestPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		redactedQuery := accountauth.SafeQuery(parsedRequestURL.RawQuery)
+		if strings.Contains(redactedQuery, "random-secret-token") {
+			t.Fatalf("capability token leaked in %q -> %q", requestPath, redactedQuery)
 		}
 	}
 }

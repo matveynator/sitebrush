@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestCapabilityIsScopedAndRevocable(t *testing.T) {
@@ -118,5 +119,45 @@ func TestPersistentManagerKeepsRevocableCapabilityHash(t *testing.T) {
 	}
 	if strings.Contains(string(data), token) {
 		t.Fatal("plaintext capability token was persisted")
+	}
+}
+
+func TestOwnedSessionsCanBeRestrictedExtendedAndRevoked(t *testing.T) {
+	manager := NewManager()
+	defer manager.Close()
+	token, capability, err := manager.IssueFor("example.org", "owner@example.org", []string{ScopeRead, ScopeWrite, ScopePublish})
+	if err != nil {
+		t.Fatal(err)
+	}
+	session, err := manager.Exchange(token, "example.org")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessions, err := manager.List("owner@example.org", "example.org")
+	if err != nil || len(sessions) != 1 || sessions[0].CapabilityID != capability.ID {
+		t.Fatalf("sessions=%+v err=%v", sessions, err)
+	}
+	sessionID := sessions[0].ID
+	if err := manager.RestrictSession(sessionID, "owner@example.org", "example.org", []string{ScopeRead}); err != nil {
+		t.Fatal(err)
+	}
+	validated, err := manager.ValidateSession(session.Token, token, "example.org")
+	if err != nil || len(validated.Scopes) != 1 || validated.Scopes[0] != ScopeRead {
+		t.Fatalf("restricted session=%+v err=%v", validated, err)
+	}
+	if err := manager.RestrictSession(sessionID, "other@example.org", "example.org", nil); err == nil {
+		t.Fatal("another owner restricted the session")
+	}
+	if err := manager.ExtendSession(sessionID, "owner@example.org", "example.org", time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.RevokeSession(sessionID, "owner@example.org", "example.org"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.Lookup(session.Token, "example.org"); err == nil {
+		t.Fatal("revoked session remained active")
+	}
+	if err := manager.RevokeCapabilityID(capability.ID, "owner@example.org", "example.org"); err != nil {
+		t.Fatal(err)
 	}
 }

@@ -35,6 +35,7 @@ type Manifest struct {
 type Capability struct {
 	ID      string    `json:"id"`
 	Domain  string    `json:"domain"`
+	Owner   string    `json:"owner,omitempty"`
 	Scopes  []string  `json:"scopes"`
 	Revoked bool      `json:"revoked"`
 	Created time.Time `json:"created"`
@@ -44,23 +45,41 @@ type Session struct {
 	Token        string    `json:"token"`
 	CapabilityID string    `json:"capability_id"`
 	Domain       string    `json:"domain"`
+	Owner        string    `json:"owner,omitempty"`
 	Scopes       []string  `json:"scopes"`
+	Created      time.Time `json:"created"`
+	Expires      time.Time `json:"expires"`
+}
+
+type SessionInfo struct {
+	ID           string    `json:"id"`
+	CapabilityID string    `json:"capability_id"`
+	Domain       string    `json:"domain"`
+	Owner        string    `json:"owner,omitempty"`
+	Scopes       []string  `json:"scopes"`
+	Created      time.Time `json:"created"`
 	Expires      time.Time `json:"expires"`
 }
 
 type managerRequest struct {
 	kind       string
 	domain     string
+	owner      string
 	scopes     []string
 	token      string
 	capability Capability
 	session    Session
+	sessionID  string
+	duration   time.Duration
+	newScopes  []string
+	sessions   []SessionInfo
 	reply      chan managerResponse
 }
 
 type managerResponse struct {
 	capability Capability
 	session    Session
+	sessions   []SessionInfo
 	ok         bool
 	err        error
 }
@@ -105,7 +124,7 @@ func (manager *Manager) run() {
 					request.reply <- managerResponse{err: err}
 					continue
 				}
-				capability := Capability{ID: tokenHash(token), Domain: request.domain, Scopes: append([]string(nil), request.scopes...), Created: time.Now().UTC()}
+				capability := Capability{ID: tokenHash(token), Domain: request.domain, Owner: request.owner, Scopes: append([]string(nil), request.scopes...), Created: time.Now().UTC()}
 				capabilities[capability.ID] = capability
 				if err := manager.saveCapabilities(capabilities); err != nil {
 					delete(capabilities, capability.ID)
@@ -124,7 +143,7 @@ func (manager *Manager) run() {
 					request.reply <- managerResponse{err: err}
 					continue
 				}
-				session := Session{Token: sessionToken, CapabilityID: capability.ID, Domain: capability.Domain, Scopes: append([]string(nil), capability.Scopes...), Expires: time.Now().UTC().Add(15 * time.Minute)}
+				session := Session{Token: sessionToken, CapabilityID: capability.ID, Domain: capability.Domain, Owner: capability.Owner, Scopes: append([]string(nil), capability.Scopes...), Created: time.Now().UTC(), Expires: time.Now().UTC().Add(15 * time.Minute)}
 				sessions[tokenHash(sessionToken)] = session
 				request.reply <- managerResponse{session: session}
 			case "lookup":
@@ -133,6 +152,49 @@ func (manager *Manager) run() {
 					request.reply <- managerResponse{err: errors.New("editor session is invalid")}
 					continue
 				}
+				request.reply <- managerResponse{session: session}
+			case "list":
+				result := make([]SessionInfo, 0, len(sessions))
+				now := time.Now().UTC()
+				for sessionKey, session := range sessions {
+					if session.Expires.Before(now) || session.Domain != request.domain || session.Owner != request.owner {
+						if session.Expires.Before(now) {
+							delete(sessions, sessionKey)
+						}
+						continue
+					}
+					result = append(result, SessionInfo{ID: sessionKey[:12], CapabilityID: session.CapabilityID, Domain: session.Domain, Owner: session.Owner, Scopes: append([]string(nil), session.Scopes...), Created: session.Created, Expires: session.Expires})
+				}
+				request.reply <- managerResponse{sessions: result}
+			case "revoke-session":
+				sessionKey, session, found := findSession(sessions, request.sessionID)
+				if !found || session.Domain != request.domain || session.Owner != request.owner {
+					request.reply <- managerResponse{err: errors.New("editor session is invalid")}
+					continue
+				}
+				delete(sessions, sessionKey)
+				request.reply <- managerResponse{ok: true}
+			case "extend-session":
+				sessionKey, session, found := findSession(sessions, request.sessionID)
+				if !found || session.Domain != request.domain || session.Owner != request.owner {
+					request.reply <- managerResponse{err: errors.New("editor session is invalid")}
+					continue
+				}
+				if request.duration <= 0 || request.duration > 24*time.Hour {
+					request.reply <- managerResponse{err: errors.New("session extension is invalid")}
+					continue
+				}
+				session.Expires = time.Now().UTC().Add(request.duration)
+				sessions[sessionKey] = session
+				request.reply <- managerResponse{session: session}
+			case "restrict-session":
+				sessionKey, session, found := findSession(sessions, request.sessionID)
+				if !found || session.Domain != request.domain || session.Owner != request.owner || !scopesAreSubset(request.newScopes, session.Scopes) {
+					request.reply <- managerResponse{err: errors.New("session restriction is invalid")}
+					continue
+				}
+				session.Scopes = append([]string(nil), request.newScopes...)
+				sessions[sessionKey] = session
 				request.reply <- managerResponse{session: session}
 			case "validate-capability":
 				capability, found := capabilities[tokenHash(request.token)]
@@ -144,6 +206,26 @@ func (manager *Manager) run() {
 			case "revoke":
 				capability, found := capabilities[tokenHash(request.token)]
 				if !found {
+					request.reply <- managerResponse{err: errors.New("capability is invalid")}
+					continue
+				}
+				capability.Revoked = true
+				capabilities[capability.ID] = capability
+				if err := manager.saveCapabilities(capabilities); err != nil {
+					capability.Revoked = false
+					capabilities[capability.ID] = capability
+					request.reply <- managerResponse{err: err}
+					continue
+				}
+				for sessionKey, session := range sessions {
+					if session.CapabilityID == capability.ID {
+						delete(sessions, sessionKey)
+					}
+				}
+				request.reply <- managerResponse{ok: true}
+			case "revoke-id":
+				capability, found := capabilities[request.sessionID]
+				if !found || capability.Domain != request.domain || capability.Owner != request.owner {
 					request.reply <- managerResponse{err: errors.New("capability is invalid")}
 					continue
 				}
@@ -219,7 +301,11 @@ func (manager *Manager) request(request managerRequest) managerResponse {
 }
 
 func (manager *Manager) Issue(domain string, scopes []string) (string, Capability, error) {
-	response := manager.request(managerRequest{kind: "issue", domain: normalizeDomain(domain), scopes: scopes, reply: make(chan managerResponse, 1)})
+	return manager.IssueFor(domain, "", scopes)
+}
+
+func (manager *Manager) IssueFor(domain, owner string, scopes []string) (string, Capability, error) {
+	response := manager.request(managerRequest{kind: "issue", domain: normalizeDomain(domain), owner: strings.ToLower(strings.TrimSpace(owner)), scopes: scopes, reply: make(chan managerResponse, 1)})
 	return response.session.Token, response.capability, response.err
 }
 
@@ -253,6 +339,31 @@ func (manager *Manager) ValidateSession(sessionToken, capabilityToken, domain st
 
 func (manager *Manager) Revoke(token string) error {
 	response := manager.request(managerRequest{kind: "revoke", token: token, reply: make(chan managerResponse, 1)})
+	return response.err
+}
+
+func (manager *Manager) List(owner, domain string) ([]SessionInfo, error) {
+	response := manager.request(managerRequest{kind: "list", owner: strings.ToLower(strings.TrimSpace(owner)), domain: normalizeDomain(domain), reply: make(chan managerResponse, 1)})
+	return response.sessions, response.err
+}
+
+func (manager *Manager) RevokeSession(sessionToken, owner, domain string) error {
+	response := manager.request(managerRequest{kind: "revoke-session", sessionID: sessionToken, owner: strings.ToLower(strings.TrimSpace(owner)), domain: normalizeDomain(domain), reply: make(chan managerResponse, 1)})
+	return response.err
+}
+
+func (manager *Manager) ExtendSession(sessionToken, owner, domain string, duration time.Duration) error {
+	response := manager.request(managerRequest{kind: "extend-session", sessionID: sessionToken, owner: strings.ToLower(strings.TrimSpace(owner)), domain: normalizeDomain(domain), duration: duration, reply: make(chan managerResponse, 1)})
+	return response.err
+}
+
+func (manager *Manager) RestrictSession(sessionToken, owner, domain string, scopes []string) error {
+	response := manager.request(managerRequest{kind: "restrict-session", sessionID: sessionToken, owner: strings.ToLower(strings.TrimSpace(owner)), domain: normalizeDomain(domain), newScopes: scopes, reply: make(chan managerResponse, 1)})
+	return response.err
+}
+
+func (manager *Manager) RevokeCapabilityID(capabilityID, owner, domain string) error {
+	response := manager.request(managerRequest{kind: "revoke-id", sessionID: strings.TrimSpace(capabilityID), owner: strings.ToLower(strings.TrimSpace(owner)), domain: normalizeDomain(domain), reply: make(chan managerResponse, 1)})
 	return response.err
 }
 
@@ -295,4 +406,40 @@ func randomToken() (string, error) {
 }
 func normalizeDomain(domain string) string {
 	return strings.ToLower(strings.TrimSuffix(strings.TrimSpace(domain), "."))
+}
+
+func scopesAreSubset(candidate, current []string) bool {
+	for _, requestedScope := range candidate {
+		found := false
+		for _, currentScope := range current {
+			if requestedScope == currentScope {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+	return true
+}
+
+func findSession(sessions map[string]Session, sessionID string) (string, Session, bool) {
+	trimmedID := strings.TrimSpace(sessionID)
+	if trimmedID == "" {
+		return "", Session{}, false
+	}
+	var foundKey string
+	var foundSession Session
+	for sessionKey, session := range sessions {
+		if !strings.HasPrefix(sessionKey, trimmedID) {
+			continue
+		}
+		if foundKey != "" {
+			return "", Session{}, false
+		}
+		foundKey = sessionKey
+		foundSession = session
+	}
+	return foundKey, foundSession, foundKey != ""
 }

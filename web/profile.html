@@ -284,6 +284,47 @@
   </div>
 </section>
 </div>
+<section class="authentication-card profile-form profile-account-card">
+  <div class="profile-account-card-header">
+    <h2>AI editor sessions</h2>
+    <p>Sessions created through your editor links. The bearer tokens are never shown here.</p>
+  </div>
+  <div class="profile-account-list">
+  {{range .AIEditorSessions}}
+    <div class="auth-trusted-row profile-ip-row">
+      <div class="profile-ip-details">
+        <strong>Session {{.ID}}</strong>
+        <span class="profile-ip-location">Capability {{.CapabilityID}}</span>
+        <p>Scopes: {{.Scopes}}<br>Created: {{.Created.Format "2006-01-02 15:04 UTC"}}<br>Expires: {{.Expires.Format "2006-01-02 15:04 UTC"}}</p>
+      </div>
+      <div class="profile-account-controls">
+        <form method="post" action="?profile">
+          <input type="hidden" name="profile_action" value="ai_session_extend">
+          <input type="hidden" name="ai_session_id" value="{{.ID}}">
+          <input type="hidden" name="ai_session_duration" value="1h">
+          <input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
+          <button type="submit">Extend 1 hour</button>
+        </form>
+        <form method="post" action="?profile">
+          <input type="hidden" name="profile_action" value="ai_session_restrict">
+          <input type="hidden" name="ai_session_id" value="{{.ID}}">
+          <input type="hidden" name="ai_scope_read" value="on">
+          <input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
+          <button type="submit">Restrict to read</button>
+        </form>
+        <form method="post" action="?profile">
+          <input type="hidden" name="profile_action" value="ai_session_revoke">
+          <input type="hidden" name="ai_session_id" value="{{.ID}}">
+          <input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
+          <button type="submit">Delete session</button>
+        </form>
+      </div>
+    </div>
+  {{else}}
+    <p class="hint">No active AI editor sessions.</p>
+  {{end}}
+  </div>
+</section>
 <section class="authentication-card profile-form profile-account-card profile-admin-ip-card">
   <div class="profile-account-card-header">
     <h2>{{index .T "admin_ip_allowlist_title"}} · {{.AdminAllowedIPCount}}</h2>
