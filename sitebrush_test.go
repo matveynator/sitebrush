@@ -3146,7 +3146,7 @@ func TestAdminContextMenuStandardMenuHintIsMouseOnlyAndTranslated(t *testing.T) 
 		if translatedHint == "" {
 			t.Fatalf("missing standard context-menu hint translation for %s", languageCode)
 		}
-		menuScript := buildContextMenuScript(true, false, false, false, true, "/", "example.com", 0, 0, "", translationsForLanguageCode(languageCode))
+		menuScript := buildContextMenuScript(true, false, false, false, true, "/", "example.com", 0, 0, "", "", translationsForLanguageCode(languageCode))
 		for _, expectedFragment := range []string{translatedHint, "buildSitebrushAdminMenuEntries(sitebrushContextMenuWasOpenedByMouse(browserEvent))", "buildSitebrushAdminMenuEntries(false)"} {
 			if !strings.Contains(menuScript, expectedFragment) {
 				t.Fatalf("admin context menu for %s is missing %q", languageCode, expectedFragment)
