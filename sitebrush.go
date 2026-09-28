@@ -30804,6 +30804,7 @@ func buildContextMenuScript(isAdmin bool, isServerManager bool, isFrozen bool, p
 	confirmNoLabel := template.JSEscapeString(translationOrDefault(translations, "confirm_no", "No"))
 	editLabel := template.JSEscapeString(translationOrDefault(translations, "menu_edit", "Edit"))
 	textEditLabel := template.JSEscapeString(translationOrDefault(translations, "menu_text_edit", "Edit as text"))
+	voiceEditLabel := template.JSEscapeString(translationOrDefault(translations, "menu_voice_edit", "Edit with voice"))
 	copySiteLabel := template.JSEscapeString(translationOrDefault(translations, "menu_copy_site", "Copy site"))
 	standardMenuHint := template.JSEscapeString(template.HTMLEscapeString(translationOrDefault(translations, "menu_standard_context_hint", "Browser standard menu: Ctrl + right mouse click.")))
 	deleteLabel := template.JSEscapeString(translationOrDefault(translations, "menu_delete", "Delete"))
@@ -31223,6 +31224,7 @@ func buildContextMenuScript(isAdmin bool, isServerManager bool, isFrozen bool, p
       "<li class='SiteBrushContextMenu SiteBrushDomainMenuItem'><a href='/' class='SiteBrushContextMenuLink'>" + currentDomainName + "</a></li>",
       "<li class='SiteBrushContextMenu'><a href='?visual' class='SiteBrushContextMenuLink'><img src='/p/static/pencil.png' class='SiteBrushMenuIcon' alt=''>" + "` + editLabel + `" + "</a></li>",
       "<li class='SiteBrushContextMenu'><a href='?text' class='SiteBrushContextMenuLink'><img src='/p/static/pencil-text.png' class='SiteBrushMenuIcon' alt=''>" + "` + textEditLabel + `" + "</a></li>",
+      "<li class='SiteBrushContextMenu'><a href='?ai' class='SiteBrushContextMenuLink'><img src='/p/static/pencil.png' class='SiteBrushMenuIcon' alt=''>" + "` + voiceEditLabel + `" + "</a></li>",
       "<li class='SiteBrushContextMenu'><button type='button' data-sitebrush-action='copy_site' class='SiteBrushContextMenuLink SiteBrushContextMenuButton'><img src='/p/static/copy.png' class='SiteBrushMenuIcon' alt=''>" + "` + copySiteLabel + `" + "</button></li>",
       "` + deleteActionEntry + `",
       "<li class='SiteBrushContextMenu'><a href='?revisions' class='SiteBrushContextMenuLink'><img src='/p/static/revisions.png' class='SiteBrushMenuIcon' alt=''>" + "` + revisionsLabel + `" + "</a></li>",

@@ -3103,10 +3103,16 @@ func TestContextMenuUsesDirectEditorProfileAndDeleteActions(t *testing.T) {
 		t.Fatalf("status = %d, body=%q", response.Code, response.Body.String())
 	}
 	body := response.Body.String()
-	for _, expectedFragment := range []string{"href='?visual'", "href='?text'", "data-sitebrush-action='delete'", "?delete=" + strconv.FormatInt(revisionID, 10), "data-sitebrush-action='protect_password'", "/p/static/lock.png", "Protect with password", "href='?profile'", "href='?analytics'", "/p/static/analytics.svg"} {
+	for _, expectedFragment := range []string{"href='?visual'", "href='?text'", "href='?ai'", "data-sitebrush-action='delete'", "?delete=" + strconv.FormatInt(revisionID, 10), "data-sitebrush-action='protect_password'", "/p/static/lock.png", "Protect with password", "href='?profile'", "href='?analytics'", "/p/static/analytics.svg"} {
 		if !strings.Contains(body, expectedFragment) {
 			t.Fatalf("context menu missing %q in %s", expectedFragment, body)
 		}
+	}
+	visualIndex := strings.Index(body, "href='?visual'")
+	textIndex := strings.Index(body, "href='?text'")
+	aiIndex := strings.Index(body, "href='?ai'")
+	if visualIndex < 0 || textIndex <= visualIndex || aiIndex <= textIndex {
+		t.Fatalf("editor menu order is not visual, text, AI: visual=%d text=%d ai=%d", visualIndex, textIndex, aiIndex)
 	}
 	for _, expectedFragment := range []string{"href='https://sitebrush.com'", "class='SiteBrushContextMenuVersion' download>v.", "href='" + latestServerBinaryDownloadURL(runtime.GOOS, runtime.GOARCH) + "'", "SiteBrushMenuStorageUsage", "10.0 GB"} {
 		if !strings.Contains(body, expectedFragment) {
