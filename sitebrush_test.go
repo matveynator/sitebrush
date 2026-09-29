@@ -11606,6 +11606,70 @@ func TestAIEditorModelsExcludeNonTextModels(t *testing.T) {
 	}
 }
 
+type capturingAIEditorStore struct {
+	requests chan aieditor.Request
+}
+
+func (store *capturingAIEditorStore) Execute(request aieditor.Request, done <-chan struct{}) aieditor.Result {
+	select {
+	case <-done:
+		return aieditor.Result{Operation: request.Operation, Err: aieditor.ErrTaskCanceled}
+	case store.requests <- request:
+		return aieditor.Result{Operation: request.Operation, Path: request.Path}
+	}
+}
+
+func TestAIFileEndpointCannotSmugglePublishOperation(t *testing.T) {
+	application, _ := newTestApplication(t)
+	application.aiCapabilities = aicapability.NewManager()
+	t.Cleanup(application.aiCapabilities.Close)
+
+	store := &capturingAIEditorStore{requests: make(chan aieditor.Request, 1)}
+	application.aiExecutor = aieditor.NewExecutor(store, 4)
+	t.Cleanup(application.aiExecutor.Close)
+
+	capabilityToken, _, err := application.aiCapabilities.IssueFor("localhost", "owner@example.org", []string{aicapability.ScopeRead, aicapability.ScopeWrite})
+	if err != nil {
+		t.Fatal(err)
+	}
+	session, err := application.aiCapabilities.Exchange(capabilityToken, "localhost")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	request := httptest.NewRequest(http.MethodPost, "http://localhost/file?ai_token="+url.QueryEscape(capabilityToken),
+		strings.NewReader(`{"operation":"publish","file_name":"proof.txt","file_content":"eA=="}`))
+	request.Header.Set("Authorization", "Bearer "+session.Token)
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+
+	application.aiContentEndpoint(response, request, "localhost", capabilityToken, "file")
+	if response.Code != http.StatusOK {
+		t.Fatalf("file endpoint status=%d body=%q", response.Code, response.Body.String())
+	}
+
+	select {
+	case captured := <-store.requests:
+		if captured.Operation != aieditor.OperationUploadFile {
+			t.Fatalf("file endpoint executed %q instead of upload", captured.Operation)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("file endpoint did not submit an AI editor task")
+	}
+}
+
+func TestAppAIStoreStopsAlreadyCanceledTaskBeforeDatabaseAccess(t *testing.T) {
+	application, _ := newTestApplication(t)
+	store := &appAIStore{application: application}
+	done := make(chan struct{})
+	close(done)
+
+	result := store.Execute(aieditor.Request{Domain: "localhost", Operation: aieditor.OperationListPages}, done)
+	if !errors.Is(result.Err, aieditor.ErrTaskCanceled) {
+		t.Fatalf("canceled store task error=%v", result.Err)
+	}
+}
+
 func TestAICapabilityPathIsReadableButRedactsSecretToken(t *testing.T) {
 	capabilityPath := aiCapabilityURL("random-secret-token")
 	if capabilityPath != "/?ai_token=random-secret-token" {
@@ -11640,11 +11704,7 @@ func TestAIPageSaveFailureRollsBackContentAndStorageQuota(t *testing.T) {
 	if err := database.QueryRowContext(ctx, `SELECT revision_bytes FROM domain_storage_usage WHERE domain=?`, domain).Scan(&beforeRevisionBytes); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := database.ExecContext(ctx, `CREATE TRIGGER fail_ai_revision BEFORE INSERT ON revisions
-WHEN NEW.domain = 'ai-atomic.example'
-BEGIN
-	SELECT RAISE(ABORT, 'forced AI revision failure');
-END`); err != nil {
+	if _, err := database.ExecContext(ctx, `DROP TABLE revisions`); err != nil {
 		t.Fatal(err)
 	}
 
