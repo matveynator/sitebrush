@@ -11700,7 +11700,7 @@ func TestAIEditorTemplateUsesCurrentPageOverlayStreamingAndPreviewControls(t *te
 		`ai-provider-ready-chip`,
 		`requestVoiceStop`,
 		`recognition.onspeechend`,
-		`mime:file.type`,
+		`mime:selectedFile.type`,
 		`--ai-editor-surface:#fff`,
 		`background:var(--ai-editor-surface);opacity:1`,
 	} {
@@ -11838,8 +11838,8 @@ func TestAIEditorAttachmentMetadataDescribesSiteFileURL(t *testing.T) {
 	if len(names) != 1 || names[0] != "photo.jpg" {
 		t.Fatalf("names=%v", names)
 	}
-	description := aiEditorAttachmentDescriptions(decodedFiles)
-	if !strings.Contains(description, "image/jpeg") || !strings.Contains(description, "/files/photo.jpg") {
+	description := aiEditorAttachmentDescriptions(aiEditorFileReferences(decodedFiles))
+	if !strings.Contains(description, "image/jpeg") || !strings.Contains(description, "/p/photo.jpg") {
 		t.Fatalf("description=%q", description)
 	}
 }
@@ -19167,3 +19167,119 @@ func TestHTTPServerRejectsConflictingContentLengthBeforeHandler(t *testing.T) {
 }
 
 // END HTTP request parsing security tests.
+
+
+func TestAIEditorUploadsFilesBeforeInferenceAndKeepsStoredReferences(t *testing.T) {
+	templateBytes, err := embeddedWebFiles.ReadFile("web/edit_ai.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	templateSource := string(templateBytes)
+	for _, required := range []string{
+		"?files",
+		"upload_files",
+		"uploadedEditorFiles",
+		"url:uploadedFile.url",
+		"сразу загружаются в SiteBrush Files",
+		"остаются в Files",
+		".ai-send:not(:disabled)",
+		" — доступен",
+	} {
+		if !strings.Contains(templateSource, required) {
+			t.Fatalf("AI editor immediate-file flow missing %q", required)
+		}
+	}
+	for _, forbidden := range []string{
+		"fileToBase64",
+		"currentDraftFiles",
+		"будут загружены в Files только когда",
+		"providerSettingsStatus.textContent = '✓ готов'",
+	} {
+		if strings.Contains(templateSource, forbidden) {
+			t.Fatalf("AI editor retained obsolete file/provider flow %q", forbidden)
+		}
+	}
+}
+
+func TestAIEditorAttachmentPromptUsesStoredPublicPaths(t *testing.T) {
+	files := []aiEditorFileReference{{Name: "asset.jpg", MIME: "image/jpeg", URL: "/p/asset.jpg"}}
+	description := aiEditorAttachmentDescriptions(files)
+	if !strings.Contains(description, "URL /p/asset.jpg") {
+		t.Fatalf("description=%q", description)
+	}
+	messages := aiEditorPageMessages(aiEditorExecutionRequest{PagePath: "/", Task: "use photo"}, Page{Title: "Home", HTML: "<html><body></body></html>"}, files)
+	if len(messages) != 2 || !strings.Contains(messages[0].Content, "already stored SiteBrush assets") || !strings.Contains(messages[1].Content, "/p/asset.jpg") {
+		t.Fatalf("messages=%+v", messages)
+	}
+	if strings.Contains(messages[0].Content, "when the administrator presses Save") || strings.Contains(messages[1].Content, "base64") {
+		t.Fatalf("prompt still describes deferred/base64 attachments: %+v", messages)
+	}
+}
+
+func TestAIPageScopedCapabilityDocumentsFilesRevisionsAndRollbackWithoutPlugins(t *testing.T) {
+	application, _ := newTestApplication(t)
+	request := httptest.NewRequest(http.MethodGet, "https://example.com/documentation?ai_token=token", nil)
+	response := httptest.NewRecorder()
+	capability := aicapability.Capability{Domain: "example.com", PagePath: "/", Scopes: []string{aicapability.ScopeRead, aicapability.ScopeWrite}}
+	application.writeAICapabilityDocumentation(response, request, "example.com", "token", capability)
+	body := response.Body.String()
+	for _, required := range []string{
+		"No SiteBrush plugin",
+		"/files?ai_token=",
+		"/revisions?ai_token=",
+		"/rollback?ai_token=",
+		"/p/<stored-name>",
+		"Human SiteBrush Files UI",
+	} {
+		if !strings.Contains(body, required) {
+			t.Fatalf("capability documentation missing %q: %s", required, body)
+		}
+	}
+}
+
+func TestAIPageScopedCapabilityCanListRevisionsAndForceRollbackPath(t *testing.T) {
+	application, database := newTestApplication(t)
+	application.aiCapabilities = aicapability.NewManager()
+	t.Cleanup(application.aiCapabilities.Close)
+	if _, err := database.Exec(`INSERT INTO revisions(domain,page_path,html,created_at,is_active) VALUES(?,?,?,?,?)`,
+		"localhost", "/", "<html><body>old</body></html>", "2026-09-29T00:00:00Z", 1); err != nil {
+		t.Fatal(err)
+	}
+	capabilityToken, _, err := application.aiCapabilities.IssueForTask("localhost", "owner@example.org", []string{aicapability.ScopeRead, aicapability.ScopeWrite}, "/", "edit")
+	if err != nil {
+		t.Fatal(err)
+	}
+	session, err := application.aiCapabilities.Exchange(capabilityToken, "localhost")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	revisionsRequest := httptest.NewRequest(http.MethodGet, "http://localhost/revisions?ai_token="+url.QueryEscape(capabilityToken), nil)
+	revisionsRequest.Header.Set("Authorization", "Bearer "+session.Token)
+	revisionsResponse := httptest.NewRecorder()
+	application.aiContentEndpoint(revisionsResponse, revisionsRequest, "localhost", capabilityToken, "revisions")
+	if revisionsResponse.Code != http.StatusOK || !strings.Contains(revisionsResponse.Body.String(), "<html><body>old</body></html>") {
+		t.Fatalf("revisions status=%d body=%q", revisionsResponse.Code, revisionsResponse.Body.String())
+	}
+
+	store := &capturingAIEditorStore{requests: make(chan aieditor.Request, 1)}
+	application.aiExecutor = aieditor.NewExecutor(store, 4)
+	t.Cleanup(application.aiExecutor.Close)
+	rollbackRequest := httptest.NewRequest(http.MethodPost, "http://localhost/rollback?ai_token="+url.QueryEscape(capabilityToken),
+		strings.NewReader(`{"path":"/attacker","expected_version":"1"}`))
+	rollbackRequest.Header.Set("Authorization", "Bearer "+session.Token)
+	rollbackRequest.Header.Set("Content-Type", "application/json")
+	rollbackResponse := httptest.NewRecorder()
+	application.aiContentEndpoint(rollbackResponse, rollbackRequest, "localhost", capabilityToken, "rollback")
+	if rollbackResponse.Code != http.StatusOK {
+		t.Fatalf("rollback status=%d body=%q", rollbackResponse.Code, rollbackResponse.Body.String())
+	}
+	select {
+	case captured := <-store.requests:
+		if captured.Operation != aieditor.OperationRollback || captured.Path != "/" {
+			t.Fatalf("scoped rollback request=%+v", captured)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("scoped rollback did not reach executor")
+	}
+}
