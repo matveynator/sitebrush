@@ -138,10 +138,26 @@ func TestProviderConfigurationAndDecryptionErrors(t *testing.T) {
 	}
 }
 
-func TestOllamaIsRejectedByBuiltInPublicProviderAdapter(t *testing.T) {
-	for _, baseURL := range []string{"", "https://provider.invalid/v1"} {
-		if _, err := NewClient(Config{Provider: ProviderOllama, BaseURL: baseURL, Model: "model", APIKey: "key"}, nil); err == nil {
-			t.Fatalf("Ollama endpoint %q was accepted by the built-in public provider adapter", baseURL)
+func TestOllamaUsesFixedLoopbackEndpointWithoutAPIKey(t *testing.T) {
+	client, err := NewClient(Config{Provider: ProviderOllama, Model: "qwen3"}, &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		if request.URL.String() != "http://127.0.0.1:11434/v1/chat/completions" {
+			return nil, errors.New("unexpected Ollama endpoint")
+		}
+		if request.Header.Get("Authorization") != "" {
+			return nil, errors.New("Ollama request unexpectedly carried authorization")
+		}
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"choices":[{"message":{"content":"ok"}}]}`)), Header: make(http.Header)}, nil
+	})})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := client.Complete(context.Background(), Request{Messages: []Message{{Role: "user", Content: "hello"}}})
+	if err != nil || result.Text != "ok" {
+		t.Fatalf("result=%q err=%v", result.Text, err)
+	}
+	for _, baseURL := range []string{"http://localhost:11434/v1", "http://127.0.0.1:11435/v1", "https://provider.invalid/v1"} {
+		if _, err := NewClient(Config{Provider: ProviderOllama, BaseURL: baseURL, Model: "qwen3"}, nil); err == nil {
+			t.Fatalf("custom Ollama endpoint %q was accepted", baseURL)
 		}
 	}
 }
@@ -276,6 +292,7 @@ func TestProviderDefaultURLs(t *testing.T) {
 		ProviderGemini:           "https://generativelanguage.googleapis.com/v1beta/openai",
 		ProviderGroq:             "https://api.groq.com/openai/v1",
 		ProviderMistral:          "https://api.mistral.ai/v1",
+		ProviderOllama:           "http://127.0.0.1:11434/v1",
 	}
 	for provider, expectedURL := range expected {
 		if actual := defaultBaseURL(provider); actual != expectedURL {
@@ -503,5 +520,29 @@ func TestListModelsReturnsTypedHTTPError(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), "secret details") {
 		t.Fatal("provider error body leaked")
+	}
+}
+
+
+func TestListModelsSupportsLocalOllamaWithoutAuthorization(t *testing.T) {
+	client := &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		if request.URL.String() != "http://127.0.0.1:11434/v1/models" {
+			return nil, errors.New("unexpected Ollama models endpoint")
+		}
+		if request.Header.Get("Authorization") != "" {
+			return nil, errors.New("Ollama models request unexpectedly carried authorization")
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body: io.NopCloser(strings.NewReader(`{"data":[{"id":"qwen3:8b"},{"id":"llama3.2:latest"}]}`)),
+			Header: make(http.Header),
+		}, nil
+	})}
+	models, err := ListModels(context.Background(), Config{Provider: ProviderOllama}, client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(models) != 2 || models[0] != "llama3.2:latest" || models[1] != "qwen3:8b" {
+		t.Fatalf("models=%v", models)
 	}
 }
