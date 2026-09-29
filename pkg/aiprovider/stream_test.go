@@ -163,3 +163,28 @@ func TestStreamStopsWhenConsumerClosesDone(t *testing.T) {
 		t.Fatalf("err=%v", err)
 	}
 }
+
+
+func TestStreamPreservesProvider413Details(t *testing.T) {
+	httpClient := &http.Client{Transport: streamRoundTripper(func(request *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusRequestEntityTooLarge,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(`{"error":{"message":"request body exceeds provider limit"}}`)),
+		}, nil
+	})}
+	client, err := NewClient(Config{Provider: ProviderGroq, Model: "llama-test", APIKey: "test-key"}, httpClient)
+	if err != nil {
+		t.Fatal(err)
+	}
+	output := make(chan StreamChunk, 1)
+	done := make(chan struct{})
+	_, err = client.Stream(context.Background(), Request{Messages: []Message{{Role: "user", Content: "edit"}}}, output, done)
+	var httpError *HTTPError
+	if !errors.As(err, &httpError) {
+		t.Fatalf("error=%v", err)
+	}
+	if httpError.StatusCode != http.StatusRequestEntityTooLarge || !strings.Contains(httpError.Error(), "request body exceeds provider limit") {
+		t.Fatalf("HTTP error=%+v", httpError)
+	}
+}
