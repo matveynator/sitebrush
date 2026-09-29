@@ -53,39 +53,35 @@ func (err *HTTPError) Error() string {
 }
 
 func newHTTPError(statusCode int, body []byte) *HTTPError {
-	return &HTTPError{StatusCode: statusCode, Message: providerHTTPErrorMessage(body)}
+	httpError := &HTTPError{StatusCode: statusCode}
+	if statusCode == http.StatusRequestEntityTooLarge {
+		httpError.Message = providerHTTPErrorMessage(body)
+	}
+	return httpError
 }
 
 func providerHTTPErrorMessage(body []byte) string {
-	trimmedBody := strings.TrimSpace(string(body))
-	if trimmedBody == "" {
-		return ""
-	}
 	var objectError struct {
 		Error struct {
 			Message string `json:"message"`
 		} `json:"error"`
 		Message string `json:"message"`
 	}
-	if json.Unmarshal(body, &objectError) == nil {
-		if strings.TrimSpace(objectError.Error.Message) != "" {
-			trimmedBody = objectError.Error.Message
-		} else if strings.TrimSpace(objectError.Message) != "" {
-			trimmedBody = objectError.Message
-		}
-	} else {
-		var stringError struct {
-			Error string `json:"error"`
-		}
-		if json.Unmarshal(body, &stringError) == nil && strings.TrimSpace(stringError.Error) != "" {
-			trimmedBody = stringError.Error
-		}
+	if json.Unmarshal(body, &objectError) != nil {
+		return ""
 	}
-	trimmedBody = strings.Join(strings.Fields(trimmedBody), " ")
-	if len(trimmedBody) > 512 {
-		trimmedBody = trimmedBody[:512] + "…"
+	message := strings.TrimSpace(objectError.Error.Message)
+	if message == "" {
+		message = strings.TrimSpace(objectError.Message)
 	}
-	return trimmedBody
+	if message == "" {
+		return ""
+	}
+	message = strings.Join(strings.Fields(message), " ")
+	if len(message) > 512 {
+		message = message[:512] + "…"
+	}
+	return message
 }
 
 type Config struct {
