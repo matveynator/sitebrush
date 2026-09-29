@@ -286,10 +286,30 @@
 </div>
 <section class="authentication-card profile-form profile-account-card">
   <div class="profile-account-card-header">
-    <h2>AI editor sessions</h2>
-    <p>Sessions created through your editor links. The bearer tokens are never shown here.</p>
+    <h2>AI editor access</h2>
+    <p>Capability links can be revoked even before an external AI creates its first session. Bearer tokens are never shown here.</p>
   </div>
   <div class="profile-account-list">
+  <h3>Revocable links</h3>
+  {{range .AIEditorCapabilities}}
+    <div class="auth-trusted-row profile-ip-row">
+      <div class="profile-ip-details">
+        <strong>Capability {{.ID}}</strong>
+        <p>Scopes: {{.Scopes}}<br>Created: {{.Created.Format "2006-01-02 15:04 UTC"}}</p>
+      </div>
+      <div class="profile-account-controls">
+        <form method="post" action="?profile">
+          <input type="hidden" name="profile_action" value="ai_capability_revoke">
+          <input type="hidden" name="ai_capability_id" value="{{.ID}}">
+          <input type="hidden" name="account_csrf" value="{{$.AccountCSRF}}">
+          <button type="submit">Revoke link</button>
+        </form>
+      </div>
+    </div>
+  {{else}}
+    <p class="hint">No active AI editor links.</p>
+  {{end}}
+  <h3>Active sessions</h3>
   {{range .AIEditorSessions}}
     <div class="auth-trusted-row profile-ip-row">
       <div class="profile-ip-details">
