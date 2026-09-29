@@ -11623,6 +11623,61 @@ func TestAICapabilityPathIsReadableButRedactsSecretToken(t *testing.T) {
 	}
 }
 
+func TestAIPageSaveFailureRollsBackContentAndStorageQuota(t *testing.T) {
+	application, database := newTestApplication(t)
+	ctx := context.Background()
+	domain := "ai-atomic.example"
+
+	if _, err := database.ExecContext(ctx, `INSERT INTO pages(domain,path,title,html,published) VALUES(?,?,?,?,1)`, domain, "/one", "One", "<p>old</p>"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.ExecContext(ctx, `INSERT INTO published_pages(domain,path,title,html) VALUES(?,?,?,?)`, domain, "/one", "One", "<p>old</p>"); err != nil {
+		t.Fatal(err)
+	}
+	application.rebuildDomainStorageUsage(ctx, domain)
+
+	var beforeRevisionBytes int64
+	if err := database.QueryRowContext(ctx, `SELECT revision_bytes FROM domain_storage_usage WHERE domain=?`, domain).Scan(&beforeRevisionBytes); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.ExecContext(ctx, `CREATE TRIGGER fail_ai_revision BEFORE INSERT ON revisions
+WHEN NEW.domain = 'ai-atomic.example'
+BEGIN
+	SELECT RAISE(ABORT, 'forced AI revision failure');
+END`); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := application.saveAIPage(ctx, domain, aieditor.Request{
+		Operation: aieditor.OperationUpdatePage,
+		Path:      "/one",
+		Title:     "One",
+		HTML:      "<p>new content</p>",
+	})
+	if err == nil {
+		t.Fatal("AI page save unexpectedly succeeded after forced revision failure")
+	}
+
+	for _, tableName := range []string{"pages", "published_pages"} {
+		var html string
+		query := `SELECT html FROM ` + tableName + ` WHERE domain=? AND path=?`
+		if err := database.QueryRowContext(ctx, query, domain, "/one").Scan(&html); err != nil {
+			t.Fatal(err)
+		}
+		if html != "<p>old</p>" {
+			t.Fatalf("%s HTML changed after failed AI save: %q", tableName, html)
+		}
+	}
+
+	var afterRevisionBytes int64
+	if err := database.QueryRowContext(ctx, `SELECT revision_bytes FROM domain_storage_usage WHERE domain=?`, domain).Scan(&afterRevisionBytes); err != nil {
+		t.Fatal(err)
+	}
+	if afterRevisionBytes != beforeRevisionBytes {
+		t.Fatalf("failed AI save changed revision quota: before=%d after=%d", beforeRevisionBytes, afterRevisionBytes)
+	}
+}
+
 func TestAIRollbackIsPageBoundAndChargesRevisionStorage(t *testing.T) {
 	application, database := newTestApplication(t)
 	ctx := context.Background()
