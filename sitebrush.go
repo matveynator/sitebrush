@@ -9991,17 +9991,20 @@ func (a *App) saveAIPage(ctx context.Context, domain string, request aieditor.Re
 			return Page{}, fmt.Errorf("revision conflict: expected %d, current %d", expectedRevision, currentRevision)
 		}
 	}
+
 	title := strings.TrimSpace(request.Title)
 	if title == "" {
 		title = pagePath
 	}
 	var previousHTML string
 	_ = a.db.QueryRowContext(ctx, `SELECT html FROM pages WHERE domain=? AND path=?`, domain, pagePath).Scan(&previousHTML)
+
 	newHTMLBytes := int64(len([]byte(request.HTML)))
 	pageDelta := newHTMLBytes - int64(len([]byte(previousHTML)))
 	publishedPageDelta := int64(0)
 	previousPublishedHTML := ""
-	if !a.isDomainFrozen(ctx, domain) {
+	domainFrozen := a.isDomainFrozen(ctx, domain)
+	if !domainFrozen {
 		_ = a.db.QueryRowContext(ctx, `SELECT html FROM published_pages WHERE domain=? AND path=?`, domain, pagePath).Scan(&previousPublishedHTML)
 		if previousPublishedHTML != "" {
 			publishedPageDelta = newHTMLBytes - int64(len([]byte(previousPublishedHTML)))
@@ -10009,25 +10012,58 @@ func (a *App) saveAIPage(ctx context.Context, domain string, request aieditor.Re
 			publishedPageDelta = newHTMLBytes
 		}
 	}
+
 	staticPath := filepath.Join(a.domainStaticDir(domain), staticRelativePathForPage(pagePath))
 	staticDelta := int64(0)
-	if !a.isDomainFrozen(ctx, domain) {
+	if !domainFrozen {
 		staticDelta = newHTMLBytes - a.fileSizeInsideStorage(staticPath)
 	}
+
+	// Reserve quota before mutating content. Every failed database path releases
+	// the reservation so rejected AI edits cannot consume storage permanently.
 	if err := a.applyDomainStorageDelta(ctx, domain, pageDelta, publishedPageDelta, newHTMLBytes, 0, staticDelta); err != nil {
 		return Page{}, err
 	}
-	if _, err := a.db.ExecContext(ctx, `INSERT OR REPLACE INTO pages(domain,path,title,html,published) VALUES(?,?,?,?,1)`, domain, pagePath, title, request.HTML); err != nil {
+	releaseStorageReservation := func() {
+		_ = a.applyDomainStorageDelta(ctx, domain, -pageDelta, -publishedPageDelta, -newHTMLBytes, 0, -staticDelta)
+	}
+
+	// These rows represent one logical edit and must move together. A transaction
+	// prevents a failed revision or publish write from leaving a partially changed page.
+	transaction, err := a.db.BeginTx(ctx, nil)
+	if err != nil {
+		releaseStorageReservation()
 		return Page{}, err
 	}
-	if !a.isDomainFrozen(ctx, domain) {
-		if _, err := a.db.ExecContext(ctx, `INSERT OR REPLACE INTO published_pages(domain,path,title,html) VALUES(?,?,?,?)`, domain, pagePath, title, request.HTML); err != nil {
+	committed := false
+	defer func() {
+		if !committed {
+			_ = transaction.Rollback()
+		}
+	}()
+
+	if _, err := transaction.ExecContext(ctx, `INSERT OR REPLACE INTO pages(domain,path,title,html,published) VALUES(?,?,?,?,1)`, domain, pagePath, title, request.HTML); err != nil {
+		releaseStorageReservation()
+		return Page{}, err
+	}
+	if !domainFrozen {
+		if _, err := transaction.ExecContext(ctx, `INSERT OR REPLACE INTO published_pages(domain,path,title,html) VALUES(?,?,?,?)`, domain, pagePath, title, request.HTML); err != nil {
+			releaseStorageReservation()
 			return Page{}, err
 		}
-		a.writePublishedStaticHTML(domain, pagePath, request.HTML)
 	}
-	if _, err := a.db.ExecContext(ctx, `INSERT INTO revisions(domain,page_path,html,created_at) VALUES(?,?,?,?)`, domain, pagePath, request.HTML, time.Now().UTC().Format(time.RFC3339)); err != nil {
+	if _, err := transaction.ExecContext(ctx, `INSERT INTO revisions(domain,page_path,html,created_at) VALUES(?,?,?,?)`, domain, pagePath, request.HTML, time.Now().UTC().Format(time.RFC3339)); err != nil {
+		releaseStorageReservation()
 		return Page{}, err
+	}
+	if err := transaction.Commit(); err != nil {
+		releaseStorageReservation()
+		return Page{}, err
+	}
+	committed = true
+
+	if !domainFrozen {
+		a.writePublishedStaticHTML(domain, pagePath, request.HTML)
 	}
 	return Page{Domain: domain, Path: pagePath, Title: title, HTML: request.HTML, Published: 1}, nil
 }
@@ -10066,13 +10102,18 @@ func (a *App) publishAI(ctx context.Context, domain string) error {
 		if !a.shouldUpdatePublishedPage(ctx, domain, page.Path, page.HTML) {
 			continue
 		}
+
 		publishedBytes := int64(len([]byte(page.HTML)))
 		var previous string
 		_ = a.db.QueryRowContext(ctx, `SELECT html FROM published_pages WHERE domain=? AND path=?`, domain, page.Path).Scan(&previous)
-		if err := a.applyDomainStorageDelta(ctx, domain, 0, publishedBytes-int64(len([]byte(previous))), 0, 0, publishedBytes-a.fileSizeInsideStorage(filepath.Join(a.domainStaticDir(domain), staticRelativePathForPage(page.Path)))); err != nil {
+		publishedDelta := publishedBytes - int64(len([]byte(previous)))
+		staticDelta := publishedBytes - a.fileSizeInsideStorage(filepath.Join(a.domainStaticDir(domain), staticRelativePathForPage(page.Path)))
+
+		if err := a.applyDomainStorageDelta(ctx, domain, 0, publishedDelta, 0, 0, staticDelta); err != nil {
 			return err
 		}
 		if _, err := a.db.ExecContext(ctx, `INSERT OR REPLACE INTO published_pages(domain,path,title,html) VALUES(?,?,?,?)`, domain, page.Path, page.Title, page.HTML); err != nil {
+			_ = a.applyDomainStorageDelta(ctx, domain, 0, -publishedDelta, 0, 0, -staticDelta)
 			return err
 		}
 		a.writePublishedStaticHTML(domain, page.Path, page.HTML)
