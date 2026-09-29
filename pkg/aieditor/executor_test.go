@@ -3,6 +3,7 @@ package aieditor
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 type testStore struct{ requests chan Request }
@@ -25,23 +26,41 @@ func TestValidateRejectsTraversalAndUnknownOperations(t *testing.T) {
 }
 
 func TestExecutorUsesChannelsAndCancelsBeforeStore(t *testing.T) {
-	store := &testStore{requests: make(chan Request, 1)}
-	executor := NewExecutor(store, 1)
+	store := &testStore{requests: make(chan Request, 2)}
+	executor := NewExecutor(store, 2)
 	defer executor.Close()
-	done := make(chan struct{})
-	close(done)
-	reply := make(chan Result, 1)
-	if err := executor.Submit(Task{Request: Request{Operation: OperationReadPage, Path: "/index.html"}, Done: done, Reply: reply}); err != nil {
+
+	canceled := make(chan struct{})
+	close(canceled)
+	canceledReply := make(chan Result)
+	if err := executor.Submit(Task{Request: Request{Operation: OperationReadPage, Path: "/canceled.html"}, Done: canceled, Reply: canceledReply}); err != nil {
 		t.Fatal(err)
 	}
-	result := <-reply
-	if result.Err != ErrTaskCanceled {
-		t.Fatalf("err=%v", result.Err)
+
+	active := make(chan struct{})
+	activeReply := make(chan Result, 1)
+	if err := executor.Submit(Task{Request: Request{Operation: OperationReadPage, Path: "/index.html"}, Done: active, Reply: activeReply}); err != nil {
+		t.Fatal(err)
 	}
+
+	timer := time.NewTimer(time.Second)
+	defer timer.Stop()
 	select {
-	case <-store.requests:
-		t.Fatal("canceled task reached store")
+	case result := <-activeReply:
+		if result.Err != nil {
+			t.Fatal(result.Err)
+		}
+	case <-timer.C:
+		t.Fatal("canceled task blocked the executor")
+	}
+
+	select {
+	case result := <-canceledReply:
+		t.Fatalf("canceled task unexpectedly returned a result: %+v", result)
 	default:
+	}
+	if request := <-store.requests; request.Path != "/index.html" {
+		t.Fatalf("canceled task reached store: %+v", request)
 	}
 }
 
@@ -87,6 +106,18 @@ func TestValidateAcceptsSupportedOperationsAndEnforcesLimits(t *testing.T) {
 		if err := Validate(Request{Operation: OperationUploadFile, FileName: fileName, FileContent: []byte("x")}); err == nil {
 			t.Fatalf("invalid file name accepted: %q", fileName)
 		}
+	}
+}
+
+func TestExecutorCloseIsIdempotent(t *testing.T) {
+	executor := NewExecutor(nil, 1)
+	executor.Close()
+	executor.Close()
+
+	done := make(chan struct{})
+	reply := make(chan Result, 1)
+	if err := executor.Submit(Task{Request: Request{Operation: OperationReadPage, Path: "/index"}, Done: done, Reply: reply}); err == nil {
+		t.Fatal("closed executor accepted task")
 	}
 }
 
