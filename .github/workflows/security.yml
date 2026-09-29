@@ -5,6 +5,7 @@ on:
   push:
     branches:
       - main
+      - fix/codeql-main-baseline
   schedule:
     - cron: "23 4 * * 1"
   workflow_dispatch:
