@@ -37,8 +37,8 @@ func TestExecutorUsesChannelsAndCancelsBeforeStore(t *testing.T) {
 	canceled := make(chan struct{})
 	close(canceled)
 	canceledReply := make(chan Result)
-	if err := executor.Submit(Task{Request: Request{Operation: OperationReadPage, Path: "/canceled.html"}, Done: canceled, Reply: canceledReply}); err != nil {
-		t.Fatal(err)
+	if err := executor.Submit(Task{Request: Request{Operation: OperationReadPage, Path: "/canceled.html"}, Done: canceled, Reply: canceledReply}); err != ErrTaskCanceled {
+		t.Fatalf("canceled task error=%v", err)
 	}
 
 	active := make(chan struct{})
