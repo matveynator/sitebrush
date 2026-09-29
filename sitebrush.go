@@ -10000,6 +10000,58 @@ func (a *App) listAIPages(ctx context.Context, domain string) ([]Page, error) {
 	return pages, rows.Err()
 }
 
+func updateOrInsertAIPage(ctx context.Context, database sqlExecutor, domain, pagePath, title, html string) error {
+	result, err := database.ExecContext(ctx, `UPDATE pages SET title=?,html=?,published=1 WHERE domain=? AND path=?`, title, html, domain, pagePath)
+	if err != nil {
+		return err
+	}
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rowsAffected != 0 {
+		return nil
+	}
+	_, err = database.ExecContext(ctx, `INSERT INTO pages(domain,path,title,html,published) VALUES(?,?,?,?,1)`, domain, pagePath, title, html)
+	return err
+}
+
+func updateOrInsertAIPublishedPage(ctx context.Context, database sqlExecutor, domain, pagePath, title, html string) error {
+	result, err := database.ExecContext(ctx, `UPDATE published_pages SET title=?,html=? WHERE domain=? AND path=?`, title, html, domain, pagePath)
+	if err != nil {
+		return err
+	}
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rowsAffected != 0 {
+		return nil
+	}
+	_, err = database.ExecContext(ctx, `INSERT INTO published_pages(domain,path,title,html) VALUES(?,?,?,?)`, domain, pagePath, title, html)
+	return err
+}
+
+func updateOrInsertAIProviderCredential(ctx context.Context, database sqlExecutor, domain, email, provider, encryptedAPIKey, model, updatedAt string) error {
+	result, err := database.ExecContext(ctx, `UPDATE ai_provider_user_credentials SET encrypted_api_key=?,model=?,updated_at=? WHERE domain=? AND email=? AND provider=?`,
+		encryptedAPIKey, model, updatedAt, domain, email, provider)
+	if err != nil {
+		return err
+	}
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rowsAffected != 0 {
+		return nil
+	}
+	_, err = database.ExecContext(ctx, `INSERT INTO ai_provider_user_credentials(domain,email,provider,encrypted_api_key,model,updated_at) VALUES(?,?,?,?,?,?)`,
+		domain, email, provider, encryptedAPIKey, model, updatedAt)
+	return err
+}
+
+// Portable AI writes keep engine-specific upsert syntax out of application SQL.
+// Production writes still run through the site database's channel-owned writer.
 func (a *App) aiWriteTransaction(ctx context.Context, write func(*sql.Tx) error) error {
 	if write == nil {
 		return errors.New("AI database transaction is unavailable")
@@ -10088,11 +10140,11 @@ func (a *App) saveAIPage(ctx context.Context, domain string, request aieditor.Re
 	// site databases execute this transaction inside their channel-owned writer;
 	// the direct BeginTx fallback exists only for simple database/sql adapters.
 	err := a.aiWriteTransaction(ctx, func(transaction *sql.Tx) error {
-		if _, err := transaction.ExecContext(ctx, `INSERT OR REPLACE INTO pages(domain,path,title,html,published) VALUES(?,?,?,?,1)`, domain, pagePath, title, request.HTML); err != nil {
+		if err := updateOrInsertAIPage(ctx, transaction, domain, pagePath, title, request.HTML); err != nil {
 			return err
 		}
 		if !domainFrozen {
-			if _, err := transaction.ExecContext(ctx, `INSERT OR REPLACE INTO published_pages(domain,path,title,html) VALUES(?,?,?,?)`, domain, pagePath, title, request.HTML); err != nil {
+			if err := updateOrInsertAIPublishedPage(ctx, transaction, domain, pagePath, title, request.HTML); err != nil {
 				return err
 			}
 		}
@@ -10156,7 +10208,7 @@ func (a *App) publishAI(ctx context.Context, domain string) error {
 		if err := a.applyDomainStorageDelta(ctx, domain, 0, publishedDelta, 0, 0, staticDelta); err != nil {
 			return err
 		}
-		if _, err := a.db.ExecContext(ctx, `INSERT OR REPLACE INTO published_pages(domain,path,title,html) VALUES(?,?,?,?)`, domain, page.Path, page.Title, page.HTML); err != nil {
+		if err := updateOrInsertAIPublishedPage(ctx, a.db, domain, page.Path, page.Title, page.HTML); err != nil {
 			_ = a.applyDomainStorageDelta(ctx, domain, 0, -publishedDelta, 0, 0, -staticDelta)
 			return err
 		}
@@ -10309,9 +10361,10 @@ func (a *App) saveAIProviderCredential(ctx context.Context, domain, email, provi
 	if err != nil {
 		return err
 	}
-	_, err = a.db.ExecContext(ctx, `INSERT OR REPLACE INTO ai_provider_user_credentials(domain,email,provider,encrypted_api_key,model,updated_at) VALUES(?,?,?,?,?,?)`,
-		domain, email, provider, encryptedAPIKey, model, time.Now().UTC().Format(time.RFC3339))
-	return err
+	updatedAt := time.Now().UTC().Format(time.RFC3339)
+	return a.aiWriteTransaction(ctx, func(transaction *sql.Tx) error {
+		return updateOrInsertAIProviderCredential(ctx, transaction, domain, email, provider, encryptedAPIKey, model, updatedAt)
+	})
 }
 
 func (a *App) loadAIProviderCredential(ctx context.Context, domain, email, provider string, vaultKey []byte) (aiProviderCredential, bool, error) {
