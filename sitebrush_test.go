@@ -11530,6 +11530,27 @@ func TestAIProviderTokenLinksAreExposedWithoutEmbeddingTokens(t *testing.T) {
 	}
 }
 
+func TestAIEditorDefaultsToLocalOllamaAndRequiresExplicitDraftSave(t *testing.T) {
+	templateBytes, err := embeddedWebFiles.ReadFile("web/edit_ai.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	templateSource := string(templateBytes)
+	ollamaOption := `<option value="ollama" selected>`
+	openAIOption := `<option value="openai-compatible">`
+	if !strings.Contains(templateSource, ollamaOption) {
+		t.Fatal("AI editor does not default to local Ollama")
+	}
+	if strings.Index(templateSource, ollamaOption) > strings.Index(templateSource, openAIOption) {
+		t.Fatal("local Ollama is not the first provider")
+	}
+	for _, required := range []string{"previewPanel", "previewFrame", "saveDraftButton", "?ai_apply", "draft_html", "Страница ещё не сохранена"} {
+		if !strings.Contains(templateSource, required) {
+			t.Fatalf("AI draft preview flow missing %q", required)
+		}
+	}
+}
+
 func TestAIEditorTemplateExposesFreeTierProviders(t *testing.T) {
 	templateBytes, err := embeddedWebFiles.ReadFile("web/edit_ai.html")
 	if err != nil {
@@ -11556,7 +11577,7 @@ func TestEditorExposesOnlyVisualTextAndAIRoutes(t *testing.T) {
 		t.Fatal(err)
 	}
 	aiTemplate := string(aiTemplateBytes)
-	for _, expectedFragment := range []string{"pageTabButton", "externalTabButton", "saveProviderTokenButton", "?ai_provider_save", "?ai_execute", "openChatGPTButton", "openClaudeButton"} {
+	for _, expectedFragment := range []string{"pageTabButton", "externalTabButton", "saveProviderTokenButton", "?ai_provider_save", "?ai_execute", "?ai_apply", "previewPanel", "saveDraftButton", "openChatGPTButton", "openClaudeButton"} {
 		if !strings.Contains(aiTemplate, expectedFragment) {
 			t.Fatalf("edit_ai.html does not expose %q", expectedFragment)
 		}
