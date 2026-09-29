@@ -11210,6 +11210,14 @@ func parseAIEditorModelResult(responseText string) (aiEditorModelResult, error) 
 		htmlText = strings.TrimSpace(strings.TrimSuffix(htmlText, "```"))
 		lowerHTMLText = strings.ToLower(htmlText)
 	}
+
+	// Providers sometimes append conversational commentary after the document.
+	// Browser HTML parsing moves text after </html> back into the body, so keep
+	// only the complete document before previewing or saving it.
+	if closingHTMLIndex := strings.Index(lowerHTMLText, "</html>"); closingHTMLIndex >= 0 {
+		htmlText = strings.TrimSpace(htmlText[:closingHTMLIndex+len("</html>")])
+		lowerHTMLText = strings.ToLower(htmlText)
+	}
 	if !strings.Contains(lowerHTMLText, "<html") && !strings.Contains(lowerHTMLText, "<body") && !strings.HasPrefix(lowerHTMLText, "<!doctype") {
 		return aiEditorModelResult{}, errors.New("AI provider did not return an HTML page")
 	}
