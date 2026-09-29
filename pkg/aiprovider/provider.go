@@ -79,7 +79,10 @@ type Client struct {
 
 func NewClient(configuration Config, httpClient *http.Client) (*Client, error) {
 	configuration.Provider = strings.ToLower(strings.TrimSpace(configuration.Provider))
-	if configuration.Provider == "" || strings.TrimSpace(configuration.Model) == "" || strings.TrimSpace(configuration.APIKey) == "" {
+	if configuration.Provider == "" || strings.TrimSpace(configuration.Model) == "" {
+		return nil, ErrInvalidConfiguration
+	}
+	if configuration.Provider != ProviderOllama && strings.TrimSpace(configuration.APIKey) == "" {
 		return nil, ErrInvalidConfiguration
 	}
 	switch configuration.Provider {
@@ -98,19 +101,20 @@ func NewClient(configuration Config, httpClient *http.Client) (*Client, error) {
 		configuration.Timeout = 30 * time.Second
 	}
 	if httpClient == nil {
-		transport, transportErr := outboundhttp.NewTransport(nil, outboundhttp.TransportOptions{})
-		if transportErr != nil {
-			return nil, transportErr
+		if configuration.Provider == ProviderOllama {
+			httpClient = newOllamaHTTPClient(configuration.Timeout)
+		} else {
+			transport, transportErr := outboundhttp.NewTransport(nil, outboundhttp.TransportOptions{})
+			if transportErr != nil {
+				return nil, transportErr
+			}
+			httpClient = &http.Client{Transport: transport, Timeout: configuration.Timeout, CheckRedirect: outboundhttp.CheckRedirect}
 		}
-		httpClient = &http.Client{Transport: transport, Timeout: configuration.Timeout, CheckRedirect: outboundhttp.CheckRedirect}
 	}
 	return &Client{configuration: configuration, baseURL: baseURL, httpClient: httpClient}, nil
 }
 
 func providerBaseURL(provider, requestedBaseURL string) (string, error) {
-	if provider == ProviderOllama {
-		return "", fmt.Errorf("%w: Ollama is not available through the built-in public provider adapter", ErrInvalidConfiguration)
-	}
 	expectedBaseURL := defaultBaseURL(provider)
 	requestedBaseURL = strings.TrimRight(strings.TrimSpace(requestedBaseURL), "/")
 	if requestedBaseURL != "" && requestedBaseURL != expectedBaseURL {
@@ -133,19 +137,36 @@ func defaultBaseURL(provider string) string {
 		return "https://api.groq.com/openai/v1"
 	case ProviderMistral:
 		return "https://api.mistral.ai/v1"
+	case ProviderOllama:
+		return "http://127.0.0.1:11434/v1"
 	default:
 		return "https://api.openai.com/v1"
+	}
+}
+
+func newOllamaHTTPClient(timeout time.Duration) *http.Client {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.Proxy = nil
+	return &http.Client{
+		Transport: transport,
+		Timeout:   timeout,
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return errors.New("Ollama redirects are not allowed")
+		},
 	}
 }
 
 func ListModels(ctx context.Context, configuration Config, httpClient *http.Client) ([]string, error) {
 	configuration.Provider = strings.ToLower(strings.TrimSpace(configuration.Provider))
 	configuration.APIKey = strings.TrimSpace(configuration.APIKey)
-	if configuration.Provider == "" || configuration.APIKey == "" {
+	if configuration.Provider == "" {
+		return nil, ErrInvalidConfiguration
+	}
+	if configuration.Provider != ProviderOllama && configuration.APIKey == "" {
 		return nil, ErrInvalidConfiguration
 	}
 	switch configuration.Provider {
-	case ProviderOpenAICompatible, ProviderAnthropic, ProviderDeepSeek, ProviderQwen, ProviderGemini, ProviderGroq, ProviderMistral:
+	case ProviderOpenAICompatible, ProviderAnthropic, ProviderDeepSeek, ProviderQwen, ProviderGemini, ProviderGroq, ProviderMistral, ProviderOllama:
 	default:
 		return nil, fmt.Errorf("%w: %s", ErrProviderUnsupported, configuration.Provider)
 	}
@@ -160,11 +181,15 @@ func ListModels(ctx context.Context, configuration Config, httpClient *http.Clie
 		configuration.Timeout = 15 * time.Second
 	}
 	if httpClient == nil {
-		transport, transportErr := outboundhttp.NewTransport(nil, outboundhttp.TransportOptions{})
-		if transportErr != nil {
-			return nil, transportErr
+		if configuration.Provider == ProviderOllama {
+			httpClient = newOllamaHTTPClient(configuration.Timeout)
+		} else {
+			transport, transportErr := outboundhttp.NewTransport(nil, outboundhttp.TransportOptions{})
+			if transportErr != nil {
+				return nil, transportErr
+			}
+			httpClient = &http.Client{Transport: transport, Timeout: configuration.Timeout, CheckRedirect: outboundhttp.CheckRedirect}
 		}
-		httpClient = &http.Client{Transport: transport, Timeout: configuration.Timeout, CheckRedirect: outboundhttp.CheckRedirect}
 	}
 
 	httpRequest, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/models", nil)
@@ -172,7 +197,9 @@ func ListModels(ctx context.Context, configuration Config, httpClient *http.Clie
 		return nil, err
 	}
 	httpRequest.Header.Set("Accept", "application/json")
-	httpRequest.Header.Set("Authorization", "Bearer "+configuration.APIKey)
+	if configuration.Provider != ProviderOllama {
+		httpRequest.Header.Set("Authorization", "Bearer "+configuration.APIKey)
+	}
 	if configuration.Provider == ProviderAnthropic {
 		httpRequest.Header.Set("x-api-key", configuration.APIKey)
 		httpRequest.Header.Del("Authorization")
@@ -307,7 +334,9 @@ func (client *Client) Complete(ctx context.Context, request Request) (Response, 
 		return Response{}, err
 	}
 	httpRequest.Header.Set("Content-Type", "application/json")
-	httpRequest.Header.Set("Authorization", "Bearer "+client.configuration.APIKey)
+	if client.configuration.Provider != ProviderOllama {
+		httpRequest.Header.Set("Authorization", "Bearer "+client.configuration.APIKey)
+	}
 	if client.configuration.Provider == ProviderAnthropic {
 		httpRequest.Header.Set("x-api-key", client.configuration.APIKey)
 		httpRequest.Header.Del("Authorization")
