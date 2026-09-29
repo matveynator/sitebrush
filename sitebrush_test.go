@@ -19283,3 +19283,12 @@ func TestAIPageScopedCapabilityCanListRevisionsAndForceRollbackPath(t *testing.T
 		t.Fatal("scoped rollback did not reach executor")
 	}
 }
+
+
+func TestSafeAIProviderErrorMessageIncludes413Reason(t *testing.T) {
+	err := &aiprovider.HTTPError{StatusCode: http.StatusRequestEntityTooLarge, Message: "request body exceeds provider limit"}
+	message := safeAIProviderErrorMessage(err)
+	if !strings.Contains(message, "слишком большой запрос") || !strings.Contains(message, "request body exceeds provider limit") {
+		t.Fatalf("message=%q", message)
+	}
+}
