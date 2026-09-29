@@ -11729,7 +11729,11 @@ func (a *App) issueAICapability(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	ownerEmail, _ := a.currentAdminEmailForDomain(r, domain)
-	token, capability, err := a.aiCapabilities.IssueForTask(domain, ownerEmail, []string{aicapability.ScopeRead, aicapability.ScopeWrite}, cleanPath(invite.PagePath), invite.Task)
+	pagePath := ""
+	if strings.TrimSpace(invite.PagePath) != "" {
+		pagePath = cleanPath(invite.PagePath)
+	}
+	token, capability, err := a.aiCapabilities.IssueForTask(domain, ownerEmail, []string{aicapability.ScopeRead, aicapability.ScopeWrite}, pagePath, invite.Task)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusServiceUnavailable)
 		return
@@ -11751,7 +11755,10 @@ func (a *App) aiContentEndpoint(w http.ResponseWriter, r *http.Request, domain, 
 		http.Error(w, "editor session is invalid", http.StatusUnauthorized)
 		return
 	}
-	scopedPagePath := cleanPath(capability.PagePath)
+	scopedPagePath := ""
+	if strings.TrimSpace(capability.PagePath) != "" {
+		scopedPagePath = cleanPath(capability.PagePath)
+	}
 	if scopedPagePath != "" && operation != "page" && operation != "file" {
 		http.Error(w, "this AI link can edit only its current page", http.StatusForbidden)
 		return
