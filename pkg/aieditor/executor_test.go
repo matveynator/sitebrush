@@ -8,9 +8,13 @@ import (
 
 type testStore struct{ requests chan Request }
 
-func (store *testStore) Execute(request Request) Result {
-	store.requests <- request
-	return Result{Operation: request.Operation, Path: request.Path, Message: "accepted"}
+func (store *testStore) Execute(request Request, done <-chan struct{}) Result {
+	select {
+	case <-done:
+		return Result{Operation: request.Operation, Path: request.Path, Err: ErrTaskCanceled}
+	case store.requests <- request:
+		return Result{Operation: request.Operation, Path: request.Path, Message: "accepted"}
+	}
 }
 
 func TestValidateRejectsTraversalAndUnknownOperations(t *testing.T) {
@@ -109,6 +113,55 @@ func TestValidateAcceptsSupportedOperationsAndEnforcesLimits(t *testing.T) {
 	}
 }
 
+func TestExecutorConcurrentCloseAndSubmitDoNotHang(t *testing.T) {
+	storeStarted := make(chan struct{}, 1)
+	releaseStore := make(chan struct{})
+	store := &blockingTestStore{started: storeStarted, release: releaseStore}
+	executor := NewExecutor(store, 4)
+
+	done := make(chan struct{})
+	reply := make(chan Result, 1)
+	if err := executor.Submit(Task{Request: Request{Operation: OperationReadPage, Path: "/first"}, Done: done, Reply: reply}); err != nil {
+		t.Fatal(err)
+	}
+	<-storeStarted
+
+	closed := make(chan struct{}, 2)
+	go func() {
+		executor.Close()
+		closed <- struct{}{}
+	}()
+	go func() {
+		executor.Close()
+		closed <- struct{}{}
+	}()
+
+	lateDone := make(chan struct{})
+	lateReply := make(chan Result, 1)
+	lateResult := make(chan error, 1)
+	go func() {
+		lateResult <- executor.Submit(Task{Request: Request{Operation: OperationReadPage, Path: "/late"}, Done: lateDone, Reply: lateReply})
+	}()
+
+	close(releaseStore)
+	for completed := 0; completed < 2; completed++ {
+		select {
+		case <-closed:
+		case <-time.After(time.Second):
+			t.Fatal("concurrent executor Close blocked")
+		}
+	}
+
+	select {
+	case err := <-lateResult:
+		if err == nil {
+			t.Fatal("task queued behind shutdown was reported as accepted")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Submit racing shutdown blocked")
+	}
+}
+
 func TestExecutorCloseIsIdempotent(t *testing.T) {
 	executor := NewExecutor(nil, 1)
 	executor.Close()
@@ -189,10 +242,14 @@ type blockingTestStore struct {
 	release chan struct{}
 }
 
-func (store *blockingTestStore) Execute(request Request) Result {
+func (store *blockingTestStore) Execute(request Request, done <-chan struct{}) Result {
 	store.started <- struct{}{}
-	<-store.release
-	return Result{Operation: request.Operation, Path: request.Path}
+	select {
+	case <-done:
+		return Result{Operation: request.Operation, Path: request.Path, Err: ErrTaskCanceled}
+	case <-store.release:
+		return Result{Operation: request.Operation, Path: request.Path}
+	}
 }
 
 func TestValidateRejectsMalformedPathsAndEmptyUploads(t *testing.T) {
