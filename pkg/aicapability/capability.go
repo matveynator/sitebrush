@@ -84,12 +84,12 @@ type managerRequest struct {
 }
 
 type managerResponse struct {
-	capability  Capability
+	capability   Capability
 	capabilities []Capability
-	session     Session
-	sessions    []SessionInfo
-	ok          bool
-	err         error
+	session      Session
+	sessions     []SessionInfo
+	ok           bool
+	err          error
 }
 
 type Manager struct {
