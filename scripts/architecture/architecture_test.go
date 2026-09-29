@@ -1,6 +1,7 @@
 package architecture
 
 import (
+	"encoding/hex"
 	"fmt"
 	"go/ast"
 	"go/parser"
@@ -12,6 +13,53 @@ import (
 	"strings"
 	"testing"
 )
+
+func TestGitHubActionsUseImmutableCommitReferences(t *testing.T) {
+	moduleRoot, err := findModuleRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	violations, err := findUnpinnedActionReferences(filepath.Join(moduleRoot, ".github", "workflows"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, violation := range violations {
+		t.Error(violation)
+	}
+}
+
+func TestActionPinCheckRejectsMutableTagsAndBranches(t *testing.T) {
+	directory := t.TempDir()
+	workflow := "steps:\n  - uses: actions/checkout@v6\n  - uses: owner/action@main\n  - uses: ./local-action\n  - uses: docker://alpine:3.22\n"
+	if err := os.WriteFile(filepath.Join(directory, "test.yml"), []byte(workflow), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	violations, err := findUnpinnedActionReferences(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(violations) != 2 {
+		t.Fatalf("found %d violations, want 2: %v", len(violations), violations)
+	}
+}
+
+func TestActionPinCheckAcceptsCommitSHA(t *testing.T) {
+	directory := t.TempDir()
+	workflow := "steps:\n  - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6\n"
+	if err := os.WriteFile(filepath.Join(directory, "test.yaml"), []byte(workflow), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	violations, err := findUnpinnedActionReferences(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(violations) != 0 {
+		t.Fatalf("found unexpected violations: %v", violations)
+	}
+}
 
 func TestFirstPartyCodeDoesNotUseLockPrimitives(t *testing.T) {
 	moduleRoot, err := findModuleRoot()
@@ -115,6 +163,56 @@ func findModuleRoot() (string, error) {
 		}
 		currentDirectory = parentDirectory
 	}
+}
+
+func findUnpinnedActionReferences(workflowDirectory string) ([]string, error) {
+	violations := make([]string, 0)
+	err := filepath.WalkDir(workflowDirectory, func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() {
+			return nil
+		}
+		extension := strings.ToLower(filepath.Ext(path))
+		if extension != ".yml" && extension != ".yaml" {
+			return nil
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		for lineNumber, line := range strings.Split(string(data), "\n") {
+			trimmedLine := strings.TrimSpace(line)
+			if !strings.HasPrefix(trimmedLine, "uses:") {
+				continue
+			}
+			reference := strings.TrimSpace(strings.TrimPrefix(trimmedLine, "uses:"))
+			if commentIndex := strings.Index(reference, " #"); commentIndex >= 0 {
+				reference = strings.TrimSpace(reference[:commentIndex])
+			}
+			if strings.HasPrefix(reference, "./") || strings.HasPrefix(reference, "docker://") {
+				continue
+			}
+			atIndex := strings.LastIndex(reference, "@")
+			if atIndex <= 0 || !isCommitSHA(reference[atIndex+1:]) {
+				violations = append(violations, fmt.Sprintf("%s:%d uses mutable action reference %q", filepath.Base(path), lineNumber+1, reference))
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("scan GitHub Actions workflows: %w", err)
+	}
+	return violations, nil
+}
+
+func isCommitSHA(reference string) bool {
+	if len(reference) != 40 {
+		return false
+	}
+	_, err := hex.DecodeString(reference)
+	return err == nil
 }
 
 func findLockPrimitiveViolations(moduleRoot string) ([]string, error) {
