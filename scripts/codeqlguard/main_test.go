@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -69,6 +70,50 @@ func TestScanDirectoryFailsClosedForMalformedSARIF(t *testing.T) {
 
 	if _, err := scanDirectory(directory); err == nil {
 		t.Fatal("malformed SARIF must fail closed")
+	}
+}
+
+// --- Workflow integration enforcement ---
+
+func TestSecurityWorkflowRequiresCleanCodeQLResult(t *testing.T) {
+	root := repositoryRoot(t)
+	workflowPath := filepath.Join(root, ".github", "workflows", "security.yml")
+	data, err := os.ReadFile(workflowPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workflow := string(data)
+
+	outputMarker := "output: codeql-results"
+	gateMarker := "run: go run ./scripts/codeqlguard"
+	outputIndex := strings.Index(workflow, outputMarker)
+	gateIndex := strings.Index(workflow, gateMarker)
+	if outputIndex < 0 {
+		t.Fatalf("security workflow must persist CodeQL SARIF with %q", outputMarker)
+	}
+	if gateIndex < 0 {
+		t.Fatalf("security workflow must enforce CodeQL results with %q", gateMarker)
+	}
+	if gateIndex < outputIndex {
+		t.Fatal("CodeQL gate must run after SARIF output is produced")
+	}
+}
+
+func repositoryRoot(t *testing.T) string {
+	t.Helper()
+	directory, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for {
+		if _, err := os.Stat(filepath.Join(directory, "go.mod")); err == nil {
+			return directory
+		}
+		parent := filepath.Dir(directory)
+		if parent == directory {
+			t.Fatal("repository root containing go.mod was not found")
+		}
+		directory = parent
 	}
 }
 
