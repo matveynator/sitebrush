@@ -94,7 +94,7 @@
   </style>
 </head>
 <body>
-<iframe class="ai-page-background" id="pageBackgroundFrame" src="{{.Path}}?ai_background" aria-hidden="true" tabindex="-1"></iframe>
+<iframe class="ai-page-background" id="pageBackgroundFrame" src="{{.Path}}?ai_background" sandbox="" aria-hidden="true" tabindex="-1"></iframe>
 <div class="ai-backdrop" id="editorBackdrop" aria-hidden="true"></div>
 
 <div class="ai-page" id="editorPage">
@@ -857,7 +857,7 @@ async function executeTask() {
     if (payload.type === 'draft') {
       terminalEventReceived = true;
       showDraft(payload, files);
-      setStatus('Черновик готов. Проверьте страницу во фрейме и нажмите «Сохранить страницу», если всё устраивает.');
+      setStatus('Черновик готов и показан на фоне. Можно свернуть редактор кнопкой —, проверить страницу, вернуть окно для дополнительных правок и затем сохранить или отменить.');
       refreshExecuteButtonState();
       socket.close();
       return;
