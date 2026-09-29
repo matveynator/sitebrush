@@ -225,12 +225,35 @@ func (manager *Manager) run() {
 				request.reply <- managerResponse{session: session}
 			case "restrict-session":
 				sessionKey, session, found := findSession(sessions, request.sessionID)
-				if !found || session.Domain != request.domain || session.Owner != request.owner || !scopesAreSubset(request.newScopes, session.Scopes) {
+				capability, capabilityFound := capabilities[session.CapabilityID]
+				if !found || !capabilityFound || session.Domain != request.domain || session.Owner != request.owner ||
+					capability.Domain != request.domain || capability.Owner != request.owner ||
+					!scopesAreSubset(request.newScopes, session.Scopes) || !scopesAreSubset(request.newScopes, capability.Scopes) {
 					request.reply <- managerResponse{err: errors.New("session restriction is invalid")}
 					continue
 				}
-				session.Scopes = append([]string(nil), request.newScopes...)
-				sessions[sessionKey] = session
+
+				// The capability token is reusable, so a session-only restriction is
+				// not a security boundary. Persist the narrower capability first so
+				// every future exchange inherits the administrator's restriction.
+				previousScopes := append([]string(nil), capability.Scopes...)
+				capability.Scopes = append([]string(nil), request.newScopes...)
+				capabilities[capability.ID] = capability
+				if err := manager.saveCapabilities(capabilities); err != nil {
+					capability.Scopes = previousScopes
+					capabilities[capability.ID] = capability
+					request.reply <- managerResponse{err: err}
+					continue
+				}
+
+				for activeSessionKey, activeSession := range sessions {
+					if activeSession.CapabilityID != capability.ID {
+						continue
+					}
+					activeSession.Scopes = intersectScopes(activeSession.Scopes, capability.Scopes)
+					sessions[activeSessionKey] = activeSession
+				}
+				session = sessions[sessionKey]
 				request.reply <- managerResponse{session: session}
 			case "validate-capability":
 				capability, found := capabilities[tokenHash(request.token)]
@@ -452,6 +475,19 @@ func randomToken() (string, error) {
 }
 func normalizeDomain(domain string) string {
 	return strings.ToLower(strings.TrimSuffix(strings.TrimSpace(domain), "."))
+}
+
+func intersectScopes(current, allowed []string) []string {
+	result := make([]string, 0, len(current))
+	for _, currentScope := range current {
+		for _, allowedScope := range allowed {
+			if currentScope == allowedScope {
+				result = append(result, currentScope)
+				break
+			}
+		}
+	}
+	return result
 }
 
 func scopesAreSubset(candidate, current []string) bool {
