@@ -2,6 +2,7 @@ package aiprovider
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
