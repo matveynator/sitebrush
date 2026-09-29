@@ -45,8 +45,10 @@
     .ai-left,.ai-right,.ai-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
     .ai-round{display:grid;place-items:center;width:38px;height:38px;padding:0;border:1px solid var(--bs-border-color);border-radius:10px;background:var(--ai-editor-surface);color:inherit;font-size:18px;line-height:1}
     .ai-round:hover:not(:disabled){background:var(--ai-editor-surface-muted)}
-    .ai-send{border-color:var(--bs-primary);background:var(--bs-primary);color:#fff;font-size:20px;font-weight:700}
-    .ai-send:hover:not(:disabled){background:var(--bs-primary);filter:brightness(.93)}
+    .ai-send{border-color:var(--bs-primary);background:var(--bs-primary);color:#fff;font-size:20px;font-weight:700;transition:filter .12s ease,box-shadow .12s ease,transform .12s ease}
+    .ai-send:not(:disabled){box-shadow:0 0 0 3px color-mix(in srgb,var(--bs-primary) 18%,transparent),0 4px 14px color-mix(in srgb,var(--bs-primary) 34%,transparent)}
+    .ai-send:hover:not(:disabled){background:var(--bs-primary);filter:brightness(1.08);transform:translateY(-1px)}
+    .ai-send:disabled{opacity:.38;filter:grayscale(.35);cursor:not-allowed}
     .ai-recording{background:var(--bs-danger)!important;border-color:var(--bs-danger)!important;color:#fff}
     .ai-file-area{display:grid;gap:6px}
     .ai-files{display:flex;align-items:center;gap:6px;flex-wrap:wrap;min-height:0}
@@ -131,7 +133,7 @@
                 <button class="ai-round ai-send" type="button" id="executeButton" aria-label="Отправить задание" title="Проверяю AI-провайдера" disabled>↑</button>
               </div>
             </div>
-            <div class="ai-file-note">Прикреплённые фотографии и файлы считаются материалами этой страницы и будут загружены в Files только когда вы нажмёте «Сохранить страницу».</div>
+            <div class="ai-file-note">Выбранные фотографии и файлы сразу загружаются в SiteBrush Files и передаются AI как постоянные ссылки. Они остаются в Files, даже если вы отмените черновик страницы.</div>
           </div>
         </div>
 
@@ -305,9 +307,9 @@ let speechHardStopTimer = 0;
 let speechInitialText = '';
 let externalLinkPromise = null;
 let currentDraft = null;
-let currentDraftFiles = [];
+let uploadedEditorFiles = [];
+let uploadingEditorFiles = false;
 let activeEditorSocket = null;
-let selectedFileObjectURLs = [];
 let streamedProviderText = '';
 let streamRenderScheduled = false;
 let backgroundPreviewRenderScheduled = false;
@@ -352,9 +354,11 @@ function refreshExecuteButtonState() {
   const providerIsReady = providerReady(providerElement.value);
   const taskIsReady = Boolean(commandElement.value.trim());
   const requestIsRunning = Boolean(activeEditorSocket);
-  executeButton.disabled = requestIsRunning || !providerIsReady || !taskIsReady;
+  executeButton.disabled = requestIsRunning || uploadingEditorFiles || !providerIsReady || !taskIsReady;
   if (requestIsRunning) {
     executeButton.title = 'AI выполняет задание';
+  } else if (uploadingEditorFiles) {
+    executeButton.title = 'Сначала дождитесь загрузки файлов';
   } else if (!providerIsReady) {
     executeButton.title = 'Сначала настройте AI-провайдера';
   } else if (!taskIsReady) {
@@ -392,10 +396,10 @@ function renderProviderReadiness() {
   const selectedProvider = providerElement.value;
   providerSettingsStatus.classList.remove('is-ready', 'is-error');
   if (providerReady(selectedProvider)) {
-    providerSettingsStatus.textContent = '✓ готов';
+    providerSettingsStatus.textContent = providerDisplayName(selectedProvider) + ' — доступен';
     providerSettingsStatus.classList.add('is-ready');
   } else {
-    providerSettingsStatus.textContent = 'нужна настройка';
+    providerSettingsStatus.textContent = providerDisplayName(selectedProvider) + ' — недоступен';
   }
 }
 
@@ -596,7 +600,7 @@ async function saveProviderToken() {
     refreshExecuteButtonState();
     providerSettings.open = false;
     renderProviderReadiness();
-    setStatus('AI-провайдер готов. Опишите изменение текущей страницы.');
+    setStatus(providerDisplayName(provider) + ' доступен. Опишите изменение текущей страницы.');
   } catch (error) {
     const previousState = credentialStatus[provider] || {provider:provider};
     credentialStatus[provider] = Object.assign({}, previousState, {available:false});
@@ -646,56 +650,80 @@ async function deleteProviderToken() {
   }
 }
 
-function revokeSelectedFileObjectURLs() {
-  for (const objectURL of selectedFileObjectURLs) {
-    URL.revokeObjectURL(objectURL);
-  }
-  selectedFileObjectURLs = [];
-}
-
-function renderSelectedFiles() {
-  revokeSelectedFileObjectURLs();
+function renderUploadedFiles() {
   fileStatus.replaceChildren();
-  for (const selectedFile of Array.from(fileInput.files || [])) {
+  for (const uploadedFile of uploadedEditorFiles) {
     const chipElement = document.createElement('span');
     chipElement.className = 'ai-file-chip';
-    if (selectedFile.type && selectedFile.type.indexOf('image/') === 0) {
+    if (uploadedFile.mime && uploadedFile.mime.indexOf('image/') === 0) {
       const imageElement = document.createElement('img');
-      const objectURL = URL.createObjectURL(selectedFile);
-      selectedFileObjectURLs.push(objectURL);
-      imageElement.src = objectURL;
+      imageElement.src = uploadedFile.url;
       imageElement.alt = '';
       chipElement.appendChild(imageElement);
     }
     const nameElement = document.createElement('span');
-    nameElement.textContent = selectedFile.name;
+    nameElement.textContent = (uploadedFile.original_name || uploadedFile.name) + ' → ' + uploadedFile.url;
     chipElement.appendChild(nameElement);
     fileStatus.appendChild(chipElement);
   }
 }
 
-function fileToBase64(file) {
-  return new Promise(function(resolve, reject) {
-    const reader = new FileReader();
-    reader.onload = function() {
-      resolve({
-        name:file.name,
-        mime:file.type || 'application/octet-stream',
-        content:String(reader.result || '').split(',')[1] || ''
-      });
-    };
-    reader.onerror = reject;
-    reader.readAsDataURL(file);
+async function uploadEditorFile(selectedFile) {
+  const uploadForm = new FormData();
+  uploadForm.append('action', 'upload');
+  uploadForm.append('upload_files', selectedFile, selectedFile.name);
+  const response = await fetch('{{.Path}}?files', {
+    method:'POST',
+    credentials:'same-origin',
+    headers:{'Accept':'application/json','X-SiteBrush-CSRF':accountCSRF},
+    body:uploadForm
   });
+  const payload = await parseResponse(response);
+  if (!Array.isArray(payload.files) || payload.files.length !== 1) {
+    throw new Error('SiteBrush не вернул адрес загруженного файла');
+  }
+  const storedName = payload.files[0];
+  const storedURL = Array.isArray(payload.paths) && payload.paths[0] ? payload.paths[0] : '/p/' + storedName;
+  return {
+    name:storedName,
+    mime:selectedFile.type || 'application/octet-stream',
+    url:storedURL,
+    original_name:selectedFile.name
+  };
 }
 
-function showDraft(payload, files) {
+async function uploadSelectedFiles() {
+  const selectedFiles = Array.from(fileInput.files || []);
+  if (selectedFiles.length === 0) {
+    return;
+  }
+  uploadingEditorFiles = true;
+  refreshExecuteButtonState();
+  setStatus('Загружаю выбранные файлы в SiteBrush Files…');
+  try {
+    for (const selectedFile of selectedFiles) {
+      const uploadedFile = await uploadEditorFile(selectedFile);
+      if (!uploadedEditorFiles.some(function hasUploadedFile(existingFile) { return existingFile.url === uploadedFile.url; })) {
+        uploadedEditorFiles.push(uploadedFile);
+      }
+      renderUploadedFiles();
+    }
+    setStatus('Файлы загружены. AI получит их постоянные ссылки вместе с заданием.');
+  } catch (error) {
+    setStatus('Ошибка загрузки файла: ' + error.message);
+  } finally {
+    uploadingEditorFiles = false;
+    fileInput.value = '';
+    refreshExecuteButtonState();
+  }
+}
+
+function showDraft(payload) {
   currentDraft = {
     path:payload.path || '{{.Path}}',
     title:payload.title || '',
     html:payload.html || ''
   };
-  currentDraftFiles = files.slice();
   previewFrame.srcdoc = currentDraft.html;
   pageBackgroundFrame.srcdoc = currentDraft.html;
   previewPanel.hidden = false;
@@ -710,7 +738,6 @@ function setPreviewExpanded(expanded) {
 
 function clearDraft(restoreBackground) {
   currentDraft = null;
-  currentDraftFiles = [];
   previewFrame.srcdoc = '';
   previewPanel.hidden = true;
   setPreviewExpanded(false);
@@ -813,14 +840,9 @@ async function executeTask() {
   streamDetails.open = true;
   setStatus(currentDraft ? 'AI продолжает редактировать ваш черновик…' : 'AI редактирует текущую страницу…');
 
-  let files;
-  try {
-    files = await Promise.all(Array.from(fileInput.files || []).map(fileToBase64));
-  } catch (error) {
-    refreshExecuteButtonState();
-    setStatus('Не удалось прочитать прикреплённый файл.');
-    return;
-  }
+  const files = uploadedEditorFiles.map(function providerFileReference(uploadedFile) {
+    return {name:uploadedFile.name, mime:uploadedFile.mime, url:uploadedFile.url};
+  });
 
   const socket = new WebSocket(editorWebSocketURL());
   activeEditorSocket = socket;
@@ -856,7 +878,7 @@ async function executeTask() {
     }
     if (payload.type === 'draft') {
       terminalEventReceived = true;
-      showDraft(payload, files);
+      showDraft(payload);
       setStatus('Черновик готов и показан на фоне. Можно свернуть редактор кнопкой —, проверить страницу, вернуть окно для дополнительных правок и затем сохранить или отменить.');
       refreshExecuteButtonState();
       socket.close();
@@ -864,6 +886,10 @@ async function executeTask() {
     }
     if (payload.type === 'error') {
       terminalEventReceived = true;
+      if (activeEditorSocket === socket) {
+        activeEditorSocket = null;
+      }
+      refreshExecuteButtonState();
       setStatus('Ошибка AI: ' + (payload.error || 'неизвестная ошибка'));
       if (backgroundBeforeRequest) {
         pageBackgroundFrame.srcdoc = backgroundBeforeRequest;
@@ -875,10 +901,13 @@ async function executeTask() {
   };
 
   socket.onerror = function onEditorSocketError() {
+    if (activeEditorSocket === socket) {
+      activeEditorSocket = null;
+    }
     if (!terminalEventReceived) {
       setStatus('Соединение с AI-провайдером прервалось.');
-      refreshExecuteButtonState();
     }
+    refreshExecuteButtonState();
   };
 
   socket.onclose = function onEditorSocketClose() {
@@ -902,7 +931,7 @@ async function saveDraft() {
     return;
   }
   saveDraftButton.disabled = true;
-  setStatus('Сохраняю страницу и прикреплённые файлы в SiteBrush…');
+  setStatus('Сохраняю страницу в SiteBrush…');
   try {
     const response = await fetch('{{.Path}}?ai_apply', {
       method:'POST',
@@ -911,8 +940,7 @@ async function saveDraft() {
       body:JSON.stringify({
         page_path:currentDraft.path,
         title:currentDraft.title,
-        html:currentDraft.html,
-        files:currentDraftFiles
+        html:currentDraft.html
       })
     });
     const payload = await parseResponse(response);
@@ -1087,7 +1115,13 @@ function copyAndOpenExternalAI(targetURL, name) {
 document.getElementById('fileButton').addEventListener('click', function onFileButtonClick() {
   fileInput.click();
 });
-fileInput.addEventListener('change', renderSelectedFiles);
+fileInput.addEventListener('change', function onFileSelectionChange() {
+  uploadSelectedFiles().catch(function onFileUploadError(error) {
+    uploadingEditorFiles = false;
+    refreshExecuteButtonState();
+    setStatus('Ошибка загрузки файла: ' + error.message);
+  });
+});
 recordButton.addEventListener('click', toggleVoice);
 executeButton.addEventListener('click', executeTask);
 commandElement.addEventListener('input', refreshExecuteButtonState);
@@ -1139,7 +1173,6 @@ document.addEventListener('keydown', function onEditorKeydown(event) {
 });
 window.addEventListener('beforeunload', function onEditorUnload() {
   requestVoiceStop(true);
-  revokeSelectedFileObjectURLs();
   if (activeEditorSocket) {
     activeEditorSocket.close();
   }
