@@ -11652,6 +11652,12 @@ func (a *App) aiCapabilityRequest(w http.ResponseWriter, r *http.Request, domain
 	}
 	capability, _ := a.aiCapabilities.ValidateCapability(token, domain)
 	baseURL := requestScheme(r) + "://" + r.Host + aiCapabilityURL(token)
+	operations := []string{"manifest", "documentation", "exchange", "openapi", "list_pages", "read_page", "create_page", "update_page", "upload_file", "publish", "rollback"}
+	instructions := "Read " + aiCapabilityOperationURL(r, token, "documentation") + " first. Then use POST " + aiCapabilityOperationURL(r, token, "exchange") + " to obtain a short-lived scoped session. For content operations use the same ai_token query parameter and send the session as Authorization: Bearer. Only site content is available; never request account, security, server, database, or shell access."
+	if strings.TrimSpace(capability.PagePath) != "" {
+		operations = []string{"manifest", "documentation", "exchange", "openapi", "read_page", "update_page", "upload_file"}
+		instructions = "This capability is restricted to the current page " + capability.PagePath + ". Read the documentation, exchange the capability for a short-lived session, then read/update only that page or upload files for it. Do not list, create, publish, roll back, or access any other page."
+	}
 	manifest := aicapability.Manifest{
 		Name:             "SiteBrush AI editor",
 		Protocol:         "sitebrush-ai-editor/v1",
@@ -11661,10 +11667,10 @@ func (a *App) aiCapabilityRequest(w http.ResponseWriter, r *http.Request, domain
 		Domain:           domain,
 		PagePath:         capability.PagePath,
 		Task:             capability.Task,
-		Scopes:           []string{aicapability.ScopeRead, aicapability.ScopeWrite, aicapability.ScopePublish},
-		Operations:       []string{"manifest", "documentation", "exchange", "openapi", "list_pages", "read_page", "create_page", "update_page", "upload_file", "publish", "rollback"},
+		Scopes:           append([]string(nil), capability.Scopes...),
+		Operations:       operations,
 		Limits:           map[string]int64{"max_file_bytes": 128 << 20, "max_request_bytes": 176 << 20},
-		Instructions:     "Read " + aiCapabilityOperationURL(r, token, "documentation") + " first. Then use POST " + aiCapabilityOperationURL(r, token, "exchange") + " to obtain a short-lived scoped session. For content operations use the same ai_token query parameter and send the session as Authorization: Bearer. Only site content is available; never request account, security, server, database, or shell access.",
+		Instructions:     instructions,
 	}
 	aicapability.ManifestResponse(w, r, manifest)
 }
@@ -11690,12 +11696,18 @@ func (a *App) writeAICapabilityDocumentation(w http.ResponseWriter, r *http.Requ
 	fmt.Fprintf(w, "The capability can be revoked by the SiteBrush administrator at any time. Do not copy it to another site or expose it in logs, prompts unrelated to this task, or third-party URLs.\n\n")
 
 	fmt.Fprintf(w, "## Operations\n\n")
-	fmt.Fprintf(w, "- List pages: `GET %s`\n", aiCapabilityOperationURL(r, token, "pages"))
-	fmt.Fprintf(w, "- Read a page: `GET %s&path=/page`\n", aiCapabilityOperationURL(r, token, "page"))
-	fmt.Fprintf(w, "- Create/update a page: `POST %s` with JSON fields `operation`, `path`, `title`, `html`, and optional `expected_version`.\n", aiCapabilityOperationURL(r, token, "page"))
-	fmt.Fprintf(w, "- Upload a file: `POST %s` with `file_name`, base64 `file_content`, and optional page `path`.\n", aiCapabilityOperationURL(r, token, "file"))
-	fmt.Fprintf(w, "- Publish: `POST %s`.\n", aiCapabilityOperationURL(r, token, "publish"))
-	fmt.Fprintf(w, "- Roll back: `POST %s` with page `path` and revision id in `expected_version`.\n\n", aiCapabilityOperationURL(r, token, "rollback"))
+	if strings.TrimSpace(capability.PagePath) != "" {
+		fmt.Fprintf(w, "- Read the current page: `GET %s&path=%s`\n", aiCapabilityOperationURL(r, token, "page"), url.QueryEscape(capability.PagePath))
+		fmt.Fprintf(w, "- Update the current page: `POST %s` with `operation=update_page`, `path=%s`, `title`, and `html`.\n", aiCapabilityOperationURL(r, token, "page"), capability.PagePath)
+		fmt.Fprintf(w, "- Upload a file for this page: `POST %s` with `file_name` and base64 `file_content`.\n\n", aiCapabilityOperationURL(r, token, "file"))
+	} else {
+		fmt.Fprintf(w, "- List pages: `GET %s`\n", aiCapabilityOperationURL(r, token, "pages"))
+		fmt.Fprintf(w, "- Read a page: `GET %s&path=/page`\n", aiCapabilityOperationURL(r, token, "page"))
+		fmt.Fprintf(w, "- Create/update a page: `POST %s` with JSON fields `operation`, `path`, `title`, `html`, and optional `expected_version`.\n", aiCapabilityOperationURL(r, token, "page"))
+		fmt.Fprintf(w, "- Upload a file: `POST %s` with `file_name`, base64 `file_content`, and optional page `path`.\n", aiCapabilityOperationURL(r, token, "file"))
+		fmt.Fprintf(w, "- Publish: `POST %s`.\n", aiCapabilityOperationURL(r, token, "publish"))
+		fmt.Fprintf(w, "- Roll back: `POST %s` with page `path` and revision id in `expected_version`.\n\n", aiCapabilityOperationURL(r, token, "rollback"))
+	}
 	fmt.Fprintf(w, "OpenAPI description: `%s`\n", aiCapabilityOperationURL(r, token, "openapi.json"))
 }
 
@@ -11717,7 +11729,7 @@ func (a *App) issueAICapability(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	ownerEmail, _ := a.currentAdminEmailForDomain(r, domain)
-	token, capability, err := a.aiCapabilities.IssueForTask(domain, ownerEmail, []string{aicapability.ScopeRead, aicapability.ScopeWrite, aicapability.ScopePublish}, cleanPath(invite.PagePath), invite.Task)
+	token, capability, err := a.aiCapabilities.IssueForTask(domain, ownerEmail, []string{aicapability.ScopeRead, aicapability.ScopeWrite}, cleanPath(invite.PagePath), invite.Task)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusServiceUnavailable)
 		return
@@ -11728,10 +11740,20 @@ func (a *App) issueAICapability(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) aiContentEndpoint(w http.ResponseWriter, r *http.Request, domain, capabilityToken, operation string) {
+	capability, err := a.aiCapabilities.ValidateCapability(capabilityToken, domain)
+	if err != nil {
+		http.Error(w, "capability is invalid", http.StatusUnauthorized)
+		return
+	}
 	sessionToken := strings.TrimSpace(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "))
 	session, err := a.aiCapabilities.ValidateSession(sessionToken, capabilityToken, domain)
 	if err != nil {
 		http.Error(w, "editor session is invalid", http.StatusUnauthorized)
+		return
+	}
+	scopedPagePath := cleanPath(capability.PagePath)
+	if scopedPagePath != "" && operation != "page" && operation != "file" {
+		http.Error(w, "this AI link can edit only its current page", http.StatusForbidden)
 		return
 	}
 	if operation == "publish" && !containsAIScope(session.Scopes, aicapability.ScopePublish) {
@@ -11744,6 +11766,10 @@ func (a *App) aiContentEndpoint(w http.ResponseWriter, r *http.Request, domain, 
 		return
 	}
 	if operation == "pages" {
+		if scopedPagePath != "" {
+			http.Error(w, "this AI link can edit only its current page", http.StatusForbidden)
+			return
+		}
 		if r.Method != http.MethodGet {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
@@ -11754,7 +11780,17 @@ func (a *App) aiContentEndpoint(w http.ResponseWriter, r *http.Request, domain, 
 	}
 	if operation == "page" {
 		if r.Method == http.MethodGet {
-			result, resultErr := a.executeAITask(aieditor.Request{Operation: aieditor.OperationReadPage, Path: r.URL.Query().Get("path")}, r)
+			requestedPath := cleanPath(r.URL.Query().Get("path"))
+			if scopedPagePath != "" {
+				if requestedPath == "/" && strings.TrimSpace(r.URL.Query().Get("path")) == "" {
+					requestedPath = scopedPagePath
+				}
+				if requestedPath != scopedPagePath {
+					http.Error(w, "this AI link can read only its current page", http.StatusForbidden)
+					return
+				}
+			}
+			result, resultErr := a.executeAITask(aieditor.Request{Operation: aieditor.OperationReadPage, Path: requestedPath}, r)
 			writeAIResult(w, result, resultErr)
 			return
 		}
@@ -11773,6 +11809,13 @@ func (a *App) aiContentEndpoint(w http.ResponseWriter, r *http.Request, domain, 
 			http.Error(w, "page operation is invalid", http.StatusBadRequest)
 			return
 		}
+		if scopedPagePath != "" {
+			if cleanPath(request.Path) != scopedPagePath || request.Operation == aieditor.OperationCreatePage {
+				http.Error(w, "this AI link can update only its current page", http.StatusForbidden)
+				return
+			}
+			request.Path = scopedPagePath
+		}
 		result, resultErr := a.executeAITask(request, r)
 		writeAIResult(w, result, resultErr)
 		return
@@ -11790,6 +11833,9 @@ func (a *App) aiContentEndpoint(w http.ResponseWriter, r *http.Request, domain, 
 		// Route identity is authoritative. Never let a caller smuggle a publish
 		// operation through the write-scoped file endpoint.
 		request.Operation = aieditor.OperationUploadFile
+		if scopedPagePath != "" {
+			request.Path = scopedPagePath
+		}
 	case "publish":
 		request.Operation = aieditor.OperationPublish
 	case "rollback":
