@@ -184,6 +184,7 @@ func findUnpinnedActionReferences(workflowDirectory string) ([]string, error) {
 		}
 		for lineNumber, line := range strings.Split(string(data), "\n") {
 			trimmedLine := strings.TrimSpace(line)
+			trimmedLine = strings.TrimSpace(strings.TrimPrefix(trimmedLine, "-"))
 			if !strings.HasPrefix(trimmedLine, "uses:") {
 				continue
 			}
