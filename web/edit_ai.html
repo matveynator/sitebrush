@@ -285,10 +285,17 @@ async function loadModelsForSavedProvider(provider) {
       headers:{'Accept':'application/json'}
     });
     const payload = await parseResponse(response);
-    fillModels(provider, payload.models || [], payload.model || credentialStatus[provider].model || '');
-  } catch (_) {
+    const savedModel = credentialStatus[provider] ? credentialStatus[provider].model : '';
+    fillModels(provider, payload.models || [], payload.model || savedModel || '');
+    if (provider === 'ollama') providerKeyStatus.textContent = '✓ Локальная Ollama доступна';
+  } catch (error) {
     modelBlock.hidden = false;
-    modelElement.innerHTML = '<option value="">Автоматически — сохранённая модель</option>';
+    modelElement.innerHTML = '<option value="">Автоматически — модель недоступна</option>';
+    if (provider === 'ollama') {
+      providerKeyStatus.textContent = 'Ollama недоступна: ' + error.message;
+      executeButton.disabled = true;
+      executeButton.title = 'Сначала запустите локальную Ollama';
+    }
   }
 }
 
