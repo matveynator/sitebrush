@@ -174,12 +174,30 @@ func (manager *Manager) run() {
 				}
 				request.reply <- managerResponse{sessions: result}
 			case "revoke-session":
-				sessionKey, session, found := findSession(sessions, request.sessionID)
-				if !found || session.Domain != request.domain || session.Owner != request.owner {
+				_, session, found := findSession(sessions, request.sessionID)
+				capability, capabilityFound := capabilities[session.CapabilityID]
+				if !found || !capabilityFound || session.Domain != request.domain || session.Owner != request.owner ||
+					capability.Domain != request.domain || capability.Owner != request.owner {
 					request.reply <- managerResponse{err: errors.New("editor session is invalid")}
 					continue
 				}
-				delete(sessions, sessionKey)
+
+				// A session is minted from a persistent capability link. Revoking only
+				// one bearer session would leave that link able to mint a replacement,
+				// so the administrator action revokes the capability and all its sessions.
+				capability.Revoked = true
+				capabilities[capability.ID] = capability
+				if err := manager.saveCapabilities(capabilities); err != nil {
+					capability.Revoked = false
+					capabilities[capability.ID] = capability
+					request.reply <- managerResponse{err: err}
+					continue
+				}
+				for sessionKey, activeSession := range sessions {
+					if activeSession.CapabilityID == capability.ID {
+						delete(sessions, sessionKey)
+					}
+				}
 				request.reply <- managerResponse{ok: true}
 			case "extend-session":
 				sessionKey, session, found := findSession(sessions, request.sessionID)
