@@ -11769,6 +11769,7 @@ func TestAIEditorStreamsDraftIntoBackgroundAndCanMinimize(t *testing.T) {
 		"scheduleBackgroundPreviewRender",
 		"pageBackgroundFrame.srcdoc = previewHTML",
 		"pageBackgroundFrame.srcdoc = currentDraft.html",
+		`id="pageBackgroundFrame" src="{{.Path}}?ai_background" sandbox=""`,
 		"setEditorMinimized",
 		"is-minimized",
 		"is-previewing",
