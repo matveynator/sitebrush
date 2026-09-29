@@ -10891,7 +10891,6 @@ type aiEditorExecutionRequest struct {
 	BaseURL    string                 `json:"base_url"`
 	Model      string                 `json:"model"`
 	APIKey     string                 `json:"-"`
-	CSRF       string                 `json:"csrf,omitempty"`
 	PagePath   string                 `json:"page_path"`
 	Scope      string                 `json:"scope"`
 	Task       string                 `json:"task"`
@@ -10994,17 +10993,30 @@ type aiEditorProviderStreamResult struct {
 	err      error
 }
 
-func (a *App) executeAIEditorWebSocket(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet || !a.isAdminRequest(r) {
-		http.Error(w, "forbidden", http.StatusForbidden)
-		return
+func aiEditorWebSocketRequestAllowed(r *http.Request, authenticated bool) error {
+	if r == nil || r.Method != http.MethodGet {
+		return errors.New("AI editor websocket requires GET")
+	}
+	if !authenticated {
+		return errors.New("AI editor websocket requires an administrator session")
 	}
 	if originText := strings.TrimSpace(r.Header.Get("Origin")); originText != "" {
 		originURL, err := url.Parse(originText)
 		if err != nil || !strings.EqualFold(originURL.Host, r.Host) {
-			http.Error(w, "invalid websocket origin", http.StatusForbidden)
-			return
+			return errors.New("AI editor websocket origin is invalid")
 		}
+	}
+	return nil
+}
+
+func (a *App) executeAIEditorWebSocket(w http.ResponseWriter, r *http.Request) {
+	if err := aiEditorWebSocketRequestAllowed(r, a.isAdminRequest(r)); err != nil {
+		log.Printf("AI EDITOR websocket rejected host=%q origin=%q reason=%s",
+			diagnosticlog.SafeLogValue(r.Host),
+			diagnosticlog.SafeLogValue(r.Header.Get("Origin")),
+			diagnosticlog.SafeLogValue(err.Error()))
+		http.Error(w, err.Error(), http.StatusForbidden)
+		return
 	}
 
 	websocket.Server{
@@ -11021,19 +11033,6 @@ func (a *App) executeAIEditorWebSocket(w http.ResponseWriter, r *http.Request) {
 			var request aiEditorExecutionRequest
 			if json.Unmarshal([]byte(requestText), &request) != nil {
 				_ = websocket.JSON.Send(connection, aiEditorWebSocketEvent{Type: "error", Error: "invalid AI editor request"})
-				return
-			}
-			providedCSRF := strings.TrimSpace(request.CSRF)
-			expectedCSRF := accountCSRF(r)
-			if providedCSRF == "" || expectedCSRF == "" || subtle.ConstantTimeCompare([]byte(providedCSRF), []byte(expectedCSRF)) != 1 {
-				_, sessionCookieErr := r.Cookie("sitebrush_session")
-				log.Printf("AI EDITOR websocket session verification failed host=%q origin=%q has_session_cookie=%t provided_csrf=%t expected_csrf=%t",
-					diagnosticlog.SafeLogValue(r.Host),
-					diagnosticlog.SafeLogValue(r.Header.Get("Origin")),
-					sessionCookieErr == nil,
-					providedCSRF != "",
-					expectedCSRF != "")
-				_ = websocket.JSON.Send(connection, aiEditorWebSocketEvent{Type: "error", Error: "AI editor session verification failed"})
 				return
 			}
 			request.PagePath = cleanPath(request.PagePath)
