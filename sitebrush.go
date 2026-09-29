@@ -10071,6 +10071,15 @@ func updateOrInsertAIProviderCredential(ctx context.Context, database sqlExecuto
 	return err
 }
 
+func (a *App) compensateAIStorageDelta(domain string, pageBytes, publishedPageBytes, revisionBytes, fileBytes, publishedStaticBytes int64) {
+	cleanupContext, cancelCleanup := context.WithTimeout(contextWithDomain(context.Background(), domain), 5*time.Second)
+	defer cancelCleanup()
+	if err := a.applyDomainStorageDelta(cleanupContext, domain, pageBytes, publishedPageBytes, revisionBytes, fileBytes, publishedStaticBytes); err != nil {
+		log.Printf("AI storage compensation failed domain=%s error=%s",
+			diagnosticlog.SafeLogValue(domain), diagnosticlog.SafeLogValue(err.Error()))
+	}
+}
+
 // Portable AI writes keep engine-specific upsert syntax out of application SQL.
 // Production writes still run through the site database's channel-owned writer.
 func (a *App) aiWriteTransaction(ctx context.Context, write func(*sql.Tx) error) error {
@@ -10154,7 +10163,7 @@ func (a *App) saveAIPage(ctx context.Context, domain string, request aieditor.Re
 		return Page{}, err
 	}
 	releaseStorageReservation := func() {
-		_ = a.applyDomainStorageDelta(ctx, domain, -pageDelta, -publishedPageDelta, -newHTMLBytes, 0, -staticDelta)
+		a.compensateAIStorageDelta(domain, -pageDelta, -publishedPageDelta, -newHTMLBytes, 0, -staticDelta)
 	}
 
 	// These rows represent one logical edit and must move together. Production
@@ -10230,12 +10239,12 @@ func (a *App) publishAI(ctx context.Context, domain string) error {
 			return err
 		}
 		if err := updateOrInsertAIPublishedPage(ctx, a.db, domain, page.Path, page.Title, page.HTML); err != nil {
-			_ = a.applyDomainStorageDelta(ctx, domain, 0, -publishedDelta, 0, 0, -staticDelta)
+			a.compensateAIStorageDelta(domain, 0, -publishedDelta, 0, 0, -staticDelta)
 			return err
 		}
 		a.writePublishedStaticHTML(domain, page.Path, page.HTML)
 	}
-	return a.generateDomainPack(domain)
+	return a.generateDomainPack(ctx, domain)
 }
 
 func (a *App) rollbackAIPage(ctx context.Context, domain string, request aieditor.Request) error {
@@ -10247,19 +10256,52 @@ func (a *App) rollbackAIPage(ctx context.Context, domain string, request aiedito
 	if strings.TrimSpace(request.Path) == "" || pagePath == "" {
 		return errors.New("page path is required")
 	}
-	var html string
-	if err := a.db.QueryRowContext(ctx, `SELECT html FROM revisions WHERE id=? AND domain=? AND page_path=?`, revisionID, domain, pagePath).Scan(&html); err != nil {
+
+	var revisionHTML string
+	if err := a.db.QueryRowContext(ctx, `SELECT html FROM revisions WHERE id=? AND domain=? AND page_path=?`, revisionID, domain, pagePath).Scan(&revisionHTML); err != nil {
 		return err
 	}
-	revisionBytes := int64(len([]byte(html)))
-	if err := a.applyDomainStorageDelta(ctx, domain, 0, 0, revisionBytes, 0, 0); err != nil {
+
+	pageTitle := pagePath
+	_ = a.db.QueryRowContext(ctx, `SELECT title FROM pages WHERE domain=? AND path=?`, domain, pagePath).Scan(&pageTitle)
+	var previousPageHTML string
+	_ = a.db.QueryRowContext(ctx, `SELECT html FROM pages WHERE domain=? AND path=?`, domain, pagePath).Scan(&previousPageHTML)
+
+	revisionBytes := int64(len([]byte(revisionHTML)))
+	pageDelta := revisionBytes - int64(len([]byte(previousPageHTML)))
+	publishedDelta := int64(0)
+	staticDelta := int64(0)
+	domainFrozen := a.isDomainFrozen(ctx, domain)
+	if !domainFrozen {
+		var previousPublishedHTML string
+		_ = a.db.QueryRowContext(ctx, `SELECT html FROM published_pages WHERE domain=? AND path=?`, domain, pagePath).Scan(&previousPublishedHTML)
+		publishedDelta = revisionBytes - int64(len([]byte(previousPublishedHTML)))
+		staticDelta = revisionBytes - a.fileSizeInsideStorage(filepath.Join(a.domainStaticDir(domain), staticRelativePathForPage(pagePath)))
+	}
+
+	if err := a.applyDomainStorageDelta(ctx, domain, pageDelta, publishedDelta, revisionBytes, 0, staticDelta); err != nil {
 		return err
 	}
-	if _, err := a.db.ExecContext(ctx, `INSERT INTO revisions(domain,page_path,html,created_at) VALUES(?,?,?,?)`, domain, pagePath, html, time.Now().UTC().Format(time.RFC3339)); err != nil {
-		_ = a.applyDomainStorageDelta(ctx, domain, 0, 0, -revisionBytes, 0, 0)
+
+	err = a.aiWriteTransaction(ctx, func(transaction *sql.Tx) error {
+		if err := updateOrInsertAIPage(ctx, transaction, domain, pagePath, pageTitle, revisionHTML); err != nil {
+			return err
+		}
+		if !domainFrozen {
+			if err := updateOrInsertAIPublishedPage(ctx, transaction, domain, pagePath, pageTitle, revisionHTML); err != nil {
+				return err
+			}
+		}
+		_, err := transaction.ExecContext(ctx, `INSERT INTO revisions(domain,page_path,html,created_at) VALUES(?,?,?,?)`, domain, pagePath, revisionHTML, time.Now().UTC().Format(time.RFC3339))
+		return err
+	})
+	if err != nil {
+		a.compensateAIStorageDelta(domain, -pageDelta, -publishedDelta, -revisionBytes, 0, -staticDelta)
 		return err
 	}
-	a.applyLatestActiveRevision(ctx, domain, pagePath)
+	if !domainFrozen {
+		a.writePublishedStaticHTML(domain, pagePath, revisionHTML)
+	}
 	return nil
 }
 
@@ -10310,7 +10352,7 @@ type aiProviderCredentialStatus struct {
 
 func supportedAIProvider(provider string) bool {
 	switch strings.ToLower(strings.TrimSpace(provider)) {
-	case aiprovider.ProviderOpenAICompatible, aiprovider.ProviderAnthropic, aiprovider.ProviderDeepSeek, aiprovider.ProviderQwen, aiprovider.ProviderGemini, aiprovider.ProviderGroq, aiprovider.ProviderMistral:
+	case aiprovider.ProviderOpenAICompatible, aiprovider.ProviderAnthropic, aiprovider.ProviderDeepSeek, aiprovider.ProviderQwen, aiprovider.ProviderGemini, aiprovider.ProviderGroq, aiprovider.ProviderMistral, aiprovider.ProviderOllama:
 		return true
 	default:
 		return false
@@ -10415,7 +10457,7 @@ func (a *App) aiProviderCredentialStatuses(ctx context.Context, domain, email st
 	if email == "" {
 		return nil, errors.New("AI provider credential owner is required")
 	}
-	statuses := make([]aiProviderCredentialStatus, 0, 7)
+	statuses := make([]aiProviderCredentialStatus, 0, 8)
 	for _, provider := range []string{
 		aiprovider.ProviderOpenAICompatible,
 		aiprovider.ProviderAnthropic,
@@ -10424,7 +10466,12 @@ func (a *App) aiProviderCredentialStatuses(ctx context.Context, domain, email st
 		aiprovider.ProviderGemini,
 		aiprovider.ProviderGroq,
 		aiprovider.ProviderMistral,
+		aiprovider.ProviderOllama,
 	} {
+		if provider == aiprovider.ProviderOllama {
+			statuses = append(statuses, aiProviderCredentialStatus{Provider: provider, Saved: true, Unlocked: true})
+			continue
+		}
 		var model, updatedAt string
 		err := a.db.QueryRowContext(ctx, `SELECT model,updated_at FROM ai_provider_user_credentials WHERE domain=? AND email=? AND provider=?`, domain, email, provider).Scan(&model, &updatedAt)
 		if errors.Is(err, sql.ErrNoRows) {
@@ -10484,6 +10531,8 @@ func aiEditorModelAllowed(provider, model string) bool {
 		return strings.Contains(model, "gpt-oss") || strings.Contains(model, "llama") || strings.Contains(model, "qwen")
 	case aiprovider.ProviderMistral:
 		return strings.Contains(model, "mistral") || strings.Contains(model, "ministral") || strings.Contains(model, "codestral")
+	case aiprovider.ProviderOllama:
+		return true
 	default:
 		return strings.Contains(model, "gpt")
 	}
@@ -10535,6 +10584,8 @@ func recommendedAIEditorModel(provider string, models []string) string {
 	case aiprovider.ProviderMistral:
 		preferredExact = []string{"mistral-small-latest"}
 		preferredContains = []string{"mistral-small", "ministral"}
+	case aiprovider.ProviderOllama:
+		preferredContains = []string{"qwen", "llama", "gemma", "mistral"}
 	default:
 		preferredExact = []string{"gpt-5.6-terra", "gpt-6-sol", "gpt-5.6-sol", "gpt-5.4", "gpt-5", "gpt-4.1"}
 		preferredContains = []string{"terra", "sol"}
@@ -10571,7 +10622,10 @@ func recommendedAIEditorModel(provider string, models []string) string {
 func (a *App) validateAIProviderToken(ctx context.Context, provider, apiKey string) ([]string, string, error) {
 	provider = strings.ToLower(strings.TrimSpace(provider))
 	apiKey = strings.TrimSpace(apiKey)
-	if !supportedAIProvider(provider) || apiKey == "" {
+	if !supportedAIProvider(provider) {
+		return nil, "", errors.New("AI provider is required")
+	}
+	if provider != aiprovider.ProviderOllama && apiKey == "" {
 		return nil, "", errors.New("AI provider and API key are required")
 	}
 
@@ -10639,6 +10693,12 @@ func (a *App) saveAIProviderCredentialEndpoint(w http.ResponseWriter, r *http.Re
 		_ = json.NewEncoder(w).Encode(map[string]string{"error": safeAIProviderErrorMessage(err)})
 		return
 	}
+	if provider == aiprovider.ProviderOllama {
+		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		_ = json.NewEncoder(w).Encode(map[string]any{"saved": true, "unlocked": true, "provider": provider, "model": model, "models": models})
+		return
+	}
 	vaultKey, err := ensureAIProviderVaultKey(w, r)
 	if err != nil {
 		http.Error(w, "AI provider vault could not be created", http.StatusServiceUnavailable)
@@ -10658,6 +10718,25 @@ func (a *App) aiProviderModelsEndpoint(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
+	provider := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("provider")))
+	if !supportedAIProvider(provider) {
+		http.Error(w, "unsupported AI provider", http.StatusBadRequest)
+		return
+	}
+	if provider == aiprovider.ProviderOllama {
+		models, err := aiprovider.ListModels(r.Context(), aiprovider.Config{Provider: provider}, nil)
+		if err != nil {
+			http.Error(w, "local Ollama is unavailable", http.StatusBadGateway)
+			return
+		}
+		models = aiEditorModels(provider, models)
+		selectedModel := recommendedAIEditorModel(provider, models)
+		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		_ = json.NewEncoder(w).Encode(map[string]any{"provider": provider, "model": selectedModel, "models": models})
+		return
+	}
+
 	domain := a.siteDomain(r.Context(), r)
 	email, found := a.currentAdminEmailForDomain(r, domain)
 	if !found {
@@ -10669,7 +10748,6 @@ func (a *App) aiProviderModelsEndpoint(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "AI provider vault is locked; re-enter the API token on this browser", http.StatusUnauthorized)
 		return
 	}
-	provider := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("provider")))
 	credential, found, err := a.loadAIProviderCredential(r.Context(), domain, email, provider, vaultKey)
 	if err != nil || !found {
 		http.Error(w, "saved AI provider token is unavailable", http.StatusBadRequest)
@@ -10733,6 +10811,19 @@ func (a *App) resolveAIProviderCredential(r *http.Request, domain string, reques
 	if !supportedAIProvider(request.Provider) {
 		return errors.New("unsupported AI provider")
 	}
+	if request.Provider == aiprovider.ProviderOllama {
+		if request.Model == "" {
+			models, err := aiprovider.ListModels(r.Context(), aiprovider.Config{Provider: request.Provider}, nil)
+			if err != nil {
+				return err
+			}
+			request.Model = recommendedAIEditorModel(request.Provider, models)
+		}
+		if request.Model == "" {
+			return errors.New("local Ollama has no compatible text model")
+		}
+		return nil
+	}
 	email, found := a.currentAdminEmailForDomain(r, domain)
 	if !found {
 		return errors.New("AI provider credential owner is unavailable")
@@ -10769,7 +10860,7 @@ func (a *App) aiEditorPage(w http.ResponseWriter, r *http.Request) {
 	}
 	a.render(w, r, "edit_ai.html", map[string]any{
 		"Path":         cleanPath(firstNonEmpty(r.URL.Query().Get("path"), r.URL.Path)),
-		"ProviderList": []string{aiprovider.ProviderOpenAICompatible, aiprovider.ProviderAnthropic, aiprovider.ProviderDeepSeek, aiprovider.ProviderQwen, aiprovider.ProviderGemini, aiprovider.ProviderGroq, aiprovider.ProviderMistral},
+		"ProviderList": []string{aiprovider.ProviderOpenAICompatible, aiprovider.ProviderAnthropic, aiprovider.ProviderDeepSeek, aiprovider.ProviderQwen, aiprovider.ProviderGemini, aiprovider.ProviderGroq, aiprovider.ProviderMistral, aiprovider.ProviderOllama},
 	})
 }
 
@@ -38301,7 +38392,7 @@ func (a *App) publishDomain(w http.ResponseWriter, r *http.Request) {
 	}
 	log.Printf("publish pages processed domain=%s updated=%d unchanged=%d", domain, updatedPagesCount, skippedPagesCount)
 	publishProgress("pack", "", len(pageList)+1, totalSteps, "pack")
-	if packErr := a.generateDomainPack(domain); packErr != nil {
+	if packErr := a.generateDomainPack(r.Context(), domain); packErr != nil {
 		log.Printf("publish pack failed domain=%s error=%v", domain, packErr)
 	} else {
 		log.Printf("publish pack updated domain=%s", domain)
@@ -38571,7 +38662,7 @@ func (a *App) importBackup(w http.ResponseWriter, r *http.Request) {
 	httpsecurity.RedirectLocal(w, r, redirectPath+"?visual", http.StatusFound)
 }
 
-func (a *App) generateDomainPack(domain string) error {
+func (a *App) generateDomainPack(ctx context.Context, domain string) error {
 	domainDirName := domainStorageName(domain)
 	packsDirPath := a.packsDir()
 	if makeErr := a.mkdirAllInsideStorage(packsDirPath, 0o755); makeErr != nil {
@@ -38583,7 +38674,7 @@ func (a *App) generateDomainPack(domain string) error {
 		return createErr
 	}
 	defer packFile.Close()
-	return a.writeDomainBackupZIP(context.Background(), domain, packFile)
+	return a.writeDomainBackupZIP(ctx, domain, packFile)
 }
 
 func (a *App) writeDomainBackupZIP(ctx context.Context, domain string, writer io.Writer) error {
