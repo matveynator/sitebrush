@@ -474,6 +474,11 @@ type profileSessionView struct {
 	GeoIPAttribution                                                template.HTML
 }
 
+type profileAIEditorCapabilityView struct {
+	ID, Domain, Scopes string
+	Created            time.Time
+}
+
 type profileAIEditorSessionView struct {
 	ID, CapabilityID, Domain, Scopes string
 	Created, Expires                 time.Time
@@ -21853,36 +21858,42 @@ func (a *App) profilePage(w http.ResponseWriter, r *http.Request) {
 		httpsecurity.RedirectLocal(w, r, "?profile", http.StatusSeeOther)
 		return
 	}
-	if r.Method == http.MethodPost && strings.HasPrefix(r.FormValue("profile_action"), "ai_session_") {
+	profileAIAction := strings.TrimSpace(r.FormValue("profile_action"))
+	if r.Method == http.MethodPost && (strings.HasPrefix(profileAIAction, "ai_session_") || profileAIAction == "ai_capability_revoke") {
 		if r.FormValue("account_csrf") == "" || r.FormValue("account_csrf") != accountCSRF(r) {
 			http.Error(w, "forbidden", http.StatusForbidden)
 			return
 		}
-		sessionID := strings.TrimSpace(r.FormValue("ai_session_id"))
-		var sessionErr error
-		switch r.FormValue("profile_action") {
+		var accessErr error
+		switch profileAIAction {
+		case "ai_capability_revoke":
+			capabilityID := strings.TrimSpace(r.FormValue("ai_capability_id"))
+			accessErr = a.aiCapabilities.RevokeCapabilityID(capabilityID, currentEmail, domain)
 		case "ai_session_revoke":
-			sessionErr = a.aiCapabilities.RevokeSession(sessionID, currentEmail, domain)
+			sessionID := strings.TrimSpace(r.FormValue("ai_session_id"))
+			accessErr = a.aiCapabilities.RevokeSession(sessionID, currentEmail, domain)
 		case "ai_session_extend":
+			sessionID := strings.TrimSpace(r.FormValue("ai_session_id"))
 			duration, parseErr := time.ParseDuration(strings.TrimSpace(r.FormValue("ai_session_duration")))
 			if parseErr != nil {
-				sessionErr = errors.New("invalid AI session duration")
+				accessErr = errors.New("invalid AI session duration")
 			} else {
-				sessionErr = a.aiCapabilities.ExtendSession(sessionID, currentEmail, domain, duration)
+				accessErr = a.aiCapabilities.ExtendSession(sessionID, currentEmail, domain, duration)
 			}
 		case "ai_session_restrict":
+			sessionID := strings.TrimSpace(r.FormValue("ai_session_id"))
 			scopes := make([]string, 0, 3)
 			for _, scope := range []string{aicapability.ScopeRead, aicapability.ScopeWrite, aicapability.ScopePublish} {
 				if r.FormValue("ai_scope_"+scope) == "on" {
 					scopes = append(scopes, scope)
 				}
 			}
-			sessionErr = a.aiCapabilities.RestrictSession(sessionID, currentEmail, domain, scopes)
+			accessErr = a.aiCapabilities.RestrictSession(sessionID, currentEmail, domain, scopes)
 		default:
-			sessionErr = errors.New("invalid AI session action")
+			accessErr = errors.New("invalid AI access action")
 		}
-		if sessionErr != nil {
-			http.Error(w, "AI editor session update unavailable", http.StatusBadRequest)
+		if accessErr != nil {
+			http.Error(w, "AI editor access update unavailable", http.StatusBadRequest)
 			return
 		}
 		httpsecurity.RedirectLocal(w, r, "?profile", http.StatusSeeOther)
@@ -22226,8 +22237,17 @@ func (a *App) renderProfilePage(w http.ResponseWriter, r *http.Request, email, s
 	adminIPProtectionEnabled := false
 	adminStealthEnabled := false
 	profileSessionCount := 0
+	aiEditorCapabilities := []profileAIEditorCapabilityView{}
 	aiEditorSessions := []profileAIEditorSessionView{}
 	if authenticated && a.aiCapabilities != nil {
+		if capabilities, listErr := a.aiCapabilities.ListCapabilities(accountEmail, domain); listErr == nil {
+			for _, capability := range capabilities {
+				aiEditorCapabilities = append(aiEditorCapabilities, profileAIEditorCapabilityView{
+					ID: capability.ID, Domain: capability.Domain,
+					Scopes: strings.Join(capability.Scopes, ", "), Created: capability.Created,
+				})
+			}
+		}
 		if sessions, listErr := a.aiCapabilities.List(accountEmail, domain); listErr == nil {
 			for _, session := range sessions {
 				aiEditorSessions = append(aiEditorSessions, profileAIEditorSessionView{
@@ -22341,6 +22361,7 @@ func (a *App) renderProfilePage(w http.ResponseWriter, r *http.Request, email, s
 		"ProfileSessions":            profileSessions,
 		"ProfileSessionsMore":        profileSessionsMore,
 		"ProfileSessionCount":        profileSessionCount,
+		"AIEditorCapabilities":       aiEditorCapabilities,
 		"AIEditorSessions":           aiEditorSessions,
 		"AdminAllowedIPs":            adminAllowedIPs,
 		"AdminAllowedIPMore":         adminAllowedIPMore,
