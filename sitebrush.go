@@ -10035,32 +10035,40 @@ func (a *App) saveAIPage(ctx context.Context, domain string, request aieditor.Re
 		releaseStorageReservation()
 		return Page{}, err
 	}
-	committed := false
+	transactionFinished := false
 	defer func() {
-		if !committed {
+		if !transactionFinished {
 			_ = transaction.Rollback()
 		}
 	}()
+	rollbackEdit := func() {
+		if !transactionFinished {
+			_ = transaction.Rollback()
+			transactionFinished = true
+		}
+		releaseStorageReservation()
+	}
 
 	if _, err := transaction.ExecContext(ctx, `INSERT OR REPLACE INTO pages(domain,path,title,html,published) VALUES(?,?,?,?,1)`, domain, pagePath, title, request.HTML); err != nil {
-		releaseStorageReservation()
+		rollbackEdit()
 		return Page{}, err
 	}
 	if !domainFrozen {
 		if _, err := transaction.ExecContext(ctx, `INSERT OR REPLACE INTO published_pages(domain,path,title,html) VALUES(?,?,?,?)`, domain, pagePath, title, request.HTML); err != nil {
-			releaseStorageReservation()
+			rollbackEdit()
 			return Page{}, err
 		}
 	}
 	if _, err := transaction.ExecContext(ctx, `INSERT INTO revisions(domain,page_path,html,created_at) VALUES(?,?,?,?)`, domain, pagePath, request.HTML, time.Now().UTC().Format(time.RFC3339)); err != nil {
-		releaseStorageReservation()
+		rollbackEdit()
 		return Page{}, err
 	}
 	if err := transaction.Commit(); err != nil {
+		transactionFinished = true
 		releaseStorageReservation()
 		return Page{}, err
 	}
-	committed = true
+	transactionFinished = true
 
 	if !domainFrozen {
 		a.writePublishedStaticHTML(domain, pagePath, request.HTML)
