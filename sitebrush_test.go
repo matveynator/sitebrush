@@ -11636,7 +11636,7 @@ func TestAIEditorParsesHTMLProviderResponsesWithoutJSON(t *testing.T) {
 		},
 		{
 			name:     "markdown fenced html",
-			response: "Here is the updated page:\n\n\`\`\`html\n<html><head><title>Fenced</title></head><body>ok</body></html>\n\`\`\`",
+			response: "Here is the updated page:\n\n```html\n<html><head><title>Fenced</title></head><body>ok</body></html>\n```",
 			title:    "Fenced",
 			contains: "<body>ok</body>",
 		},
