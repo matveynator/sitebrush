@@ -13,15 +13,25 @@
     [data-bs-theme="dark"]{--ai-editor-surface:#212529;--ai-editor-surface-muted:#2b3035}
     html,body{width:100%;height:100%;margin:0;overflow:hidden}
     body{background:var(--ai-editor-surface);color:var(--bs-body-color)}
-    .ai-page-background{position:fixed;inset:0;width:100%;height:100%;border:0;background:#fff}
+    .ai-page-background{position:fixed;inset:0;width:100%;height:100%;border:0;background:#fff;pointer-events:none}
+    .ai-page-background.is-interactive{pointer-events:auto}
     .ai-backdrop{position:fixed;inset:0;background:rgba(8,12,20,.62);z-index:10}
+    .ai-backdrop.is-previewing{background:transparent;pointer-events:none}
     .ai-page{position:fixed;inset:0;z-index:11;display:grid;place-items:center;padding:18px;pointer-events:none}
     .ai-card{pointer-events:auto;width:min(980px,calc(100vw - 36px));max-height:calc(100vh - 36px);overflow:auto;border:1px solid var(--bs-border-color);border-radius:18px;background:var(--ai-editor-surface);opacity:1;box-shadow:0 28px 90px rgba(0,0,0,.42)}
+    .ai-page.is-minimized{place-items:end;padding:18px}
+    .ai-page.is-minimized .ai-card{width:min(430px,calc(100vw - 36px));max-height:none;border-radius:14px}
+    .ai-page.is-minimized .ai-tabs,.ai-page.is-minimized .ai-body,.ai-page.is-minimized .ai-subtitle{display:none}
+    .ai-page.is-minimized .ai-header{align-items:center;padding:12px 14px}
+    .ai-page.is-minimized .ai-title{font-size:1rem}
     .ai-header{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;padding:20px 22px 12px}
     .ai-title{margin:0;font-size:1.25rem;font-weight:700;letter-spacing:-.01em}
     .ai-subtitle{margin-top:4px;color:var(--bs-secondary-color);font-size:.86rem}
-    .ai-close{display:grid;place-items:center;flex:0 0 auto;width:36px;height:36px;border:0;border-radius:9px;background:transparent;color:inherit;font-size:25px;line-height:1;text-decoration:none}
-    .ai-close:hover{background:var(--ai-editor-surface-muted);color:inherit}
+    .ai-header-actions{display:flex;align-items:center;gap:4px}
+    .ai-close,.ai-minimize{display:grid;place-items:center;flex:0 0 auto;width:36px;height:36px;border:0;border-radius:9px;background:transparent;color:inherit;line-height:1;text-decoration:none}
+    .ai-close{font-size:25px}
+    .ai-minimize{font-size:20px}
+    .ai-close:hover,.ai-minimize:hover{background:var(--ai-editor-surface-muted);color:inherit}
     .ai-tabs{display:flex;gap:6px;padding:0 22px 12px;border-bottom:1px solid var(--bs-border-color)}
     .ai-tab{border:1px solid transparent;border-radius:9px;padding:7px 11px;background:transparent;color:var(--bs-secondary-color);font-size:13px;font-weight:600}
     .ai-tab:hover{background:var(--ai-editor-surface-muted);color:var(--bs-body-color)}
@@ -85,16 +95,19 @@
 </head>
 <body>
 <iframe class="ai-page-background" id="pageBackgroundFrame" src="{{.Path}}?ai_background" aria-hidden="true" tabindex="-1"></iframe>
-<div class="ai-backdrop" aria-hidden="true"></div>
+<div class="ai-backdrop" id="editorBackdrop" aria-hidden="true"></div>
 
-<div class="ai-page">
+<div class="ai-page" id="editorPage">
   <section class="ai-card" role="dialog" aria-modal="true" aria-labelledby="aiTitle">
     <header class="ai-header">
       <div>
         <h1 class="ai-title" id="aiTitle">AI-редактирование страницы</h1>
         <div class="ai-subtitle">AI работает только с текущей страницей <code>{{.Path}}</code>. Изменения сохраняются только после вашего подтверждения.</div>
       </div>
-      <a class="ai-close" href="{{.Path}}" aria-label="Закрыть">×</a>
+      <div class="ai-header-actions">
+        <button class="ai-minimize" id="minimizeEditorButton" type="button" aria-label="Свернуть редактор" title="Свернуть редактор">—</button>
+        <a class="ai-close" href="{{.Path}}" aria-label="Закрыть">×</a>
+      </div>
     </header>
 
     <div class="ai-tabs" role="tablist">
@@ -137,6 +150,7 @@
             </div>
             <div class="ai-preview-actions">
               <button class="btn btn-outline-secondary btn-sm" id="expandPreviewButton" type="button">Почти на весь экран</button>
+              <a class="btn btn-outline-secondary btn-sm" id="revisionHistoryLink" href="{{.Path}}?revisions">Ревизии / откат</a>
               <button class="btn btn-outline-secondary btn-sm" id="discardDraftButton" type="button">Отменить</button>
               <button class="btn btn-primary btn-sm" id="saveDraftButton" type="button">Сохранить страницу</button>
             </div>
@@ -240,6 +254,9 @@ const expandPreviewButton = document.getElementById('expandPreviewButton');
 const saveDraftButton = document.getElementById('saveDraftButton');
 const discardDraftButton = document.getElementById('discardDraftButton');
 const pageBackgroundFrame = document.getElementById('pageBackgroundFrame');
+const editorPage = document.getElementById('editorPage');
+const editorBackdrop = document.getElementById('editorBackdrop');
+const minimizeEditorButton = document.getElementById('minimizeEditorButton');
 const pageTabButton = document.getElementById('pageTabButton');
 const externalTabButton = document.getElementById('externalTabButton');
 const pagePanel = document.getElementById('pagePanel');
@@ -293,6 +310,8 @@ let activeEditorSocket = null;
 let selectedFileObjectURLs = [];
 let streamedProviderText = '';
 let streamRenderScheduled = false;
+let backgroundPreviewRenderScheduled = false;
+let editorMinimized = false;
 
 function setStatus(message) {
   statusElement.textContent = message || '';
@@ -326,7 +345,23 @@ function providerReady(provider) {
   if (provider === 'ollama') {
     return Boolean(state && state.available);
   }
-  return Boolean(state && state.saved && state.unlocked);
+  return Boolean(state && state.saved && state.unlocked && state.available !== false);
+}
+
+function refreshExecuteButtonState() {
+  const providerIsReady = providerReady(providerElement.value);
+  const taskIsReady = Boolean(commandElement.value.trim());
+  const requestIsRunning = Boolean(activeEditorSocket);
+  executeButton.disabled = requestIsRunning || !providerIsReady || !taskIsReady;
+  if (requestIsRunning) {
+    executeButton.title = 'AI выполняет задание';
+  } else if (!providerIsReady) {
+    executeButton.title = 'Сначала настройте AI-провайдера';
+  } else if (!taskIsReady) {
+    executeButton.title = 'Напишите задание';
+  } else {
+    executeButton.title = 'Отправить задание';
+  }
 }
 
 function renderProviderReadiness() {
@@ -431,10 +466,10 @@ async function loadModelsForSavedProvider(provider) {
     } else {
       setProviderKeyStatus('✓ API key сохранён, провайдер отвечает', 'is-ready');
     }
-    executeButton.disabled = false;
-    executeButton.title = 'Отправить задание';
+    refreshExecuteButtonState();
     providerSettings.open = false;
     renderProviderReadiness();
+    refreshExecuteButtonState();
   } catch (error) {
     const previousState = credentialStatus[provider] || {provider:provider};
     credentialStatus[provider] = Object.assign({}, previousState, {available:false});
@@ -558,8 +593,7 @@ async function saveProviderToken() {
       deleteProviderTokenButton.hidden = false;
     }
     fillModels(provider, payload.models || [], payload.model || '');
-    executeButton.disabled = false;
-    executeButton.title = 'Отправить задание';
+    refreshExecuteButtonState();
     providerSettings.open = false;
     renderProviderReadiness();
     setStatus('AI-провайдер готов. Опишите изменение текущей страницы.');
@@ -571,6 +605,7 @@ async function saveProviderToken() {
     executeButton.title = 'Сначала настройте AI-провайдера';
     providerSettings.open = true;
     renderProviderReadiness();
+    refreshExecuteButtonState();
   } finally {
     saveProviderTokenButton.disabled = false;
   }
@@ -603,6 +638,7 @@ async function deleteProviderToken() {
     setProviderKeyStatus('API key удалён', '');
     providerSettings.open = true;
     renderProviderReadiness();
+    refreshExecuteButtonState();
   } catch (error) {
     setProviderKeyStatus(error.message, 'is-error');
   } finally {
@@ -661,6 +697,7 @@ function showDraft(payload, files) {
   };
   currentDraftFiles = files.slice();
   previewFrame.srcdoc = currentDraft.html;
+  pageBackgroundFrame.srcdoc = currentDraft.html;
   previewPanel.hidden = false;
   providerSettings.open = false;
   streamDetails.open = false;
@@ -671,12 +708,15 @@ function setPreviewExpanded(expanded) {
   expandPreviewButton.textContent = expanded ? 'Вернуть в окно' : 'Почти на весь экран';
 }
 
-function clearDraft() {
+function clearDraft(restoreBackground) {
   currentDraft = null;
   currentDraftFiles = [];
   previewFrame.srcdoc = '';
   previewPanel.hidden = true;
   setPreviewExpanded(false);
+  if (restoreBackground !== false) {
+    restoreBackgroundPage();
+  }
 }
 
 function editorWebSocketURL() {
@@ -685,6 +725,33 @@ function editorWebSocketURL() {
   socketURL.searchParams.set('ai_execute_ws', '');
   socketURL.protocol = socketURL.protocol === 'https:' ? 'wss:' : 'ws:';
   return socketURL.toString();
+}
+
+function streamingHTMLForBackground(text) {
+  const lowerText = text.toLowerCase();
+  const doctypeIndex = lowerText.indexOf('<!doctype');
+  const htmlIndex = lowerText.indexOf('<html');
+  let startIndex = -1;
+  if (doctypeIndex >= 0 && htmlIndex >= 0) {
+    startIndex = Math.min(doctypeIndex, htmlIndex);
+  } else {
+    startIndex = Math.max(doctypeIndex, htmlIndex);
+  }
+  return startIndex >= 0 ? text.slice(startIndex) : '';
+}
+
+function scheduleBackgroundPreviewRender() {
+  if (backgroundPreviewRenderScheduled) {
+    return;
+  }
+  backgroundPreviewRenderScheduled = true;
+  window.requestAnimationFrame(function renderBackgroundPreview() {
+    backgroundPreviewRenderScheduled = false;
+    const previewHTML = streamingHTMLForBackground(streamedProviderText);
+    if (previewHTML) {
+      pageBackgroundFrame.srcdoc = previewHTML;
+    }
+  });
 }
 
 function scheduleStreamRender() {
@@ -698,6 +765,22 @@ function scheduleStreamRender() {
     streamOutput.textContent = visibleText;
     streamOutput.scrollTop = streamOutput.scrollHeight;
   });
+  scheduleBackgroundPreviewRender();
+}
+
+function setEditorMinimized(minimized) {
+  editorMinimized = minimized;
+  editorPage.classList.toggle('is-minimized', minimized);
+  editorBackdrop.classList.toggle('is-previewing', minimized);
+  pageBackgroundFrame.classList.toggle('is-interactive', minimized);
+  minimizeEditorButton.textContent = minimized ? '↗' : '—';
+  minimizeEditorButton.setAttribute('aria-label', minimized ? 'Вернуть редактор' : 'Свернуть редактор');
+  minimizeEditorButton.title = minimized ? 'Вернуть редактор' : 'Свернуть редактор';
+}
+
+function restoreBackgroundPage() {
+  pageBackgroundFrame.srcdoc = '';
+  pageBackgroundFrame.src = backgroundPageURL();
 }
 
 async function executeTask() {
@@ -722,6 +805,7 @@ async function executeTask() {
     activeEditorSocket = null;
   }
 
+  const backgroundBeforeRequest = currentDraft ? currentDraft.html : '';
   executeButton.disabled = true;
   streamedProviderText = '';
   streamOutput.textContent = '';
@@ -733,7 +817,7 @@ async function executeTask() {
   try {
     files = await Promise.all(Array.from(fileInput.files || []).map(fileToBase64));
   } catch (error) {
-    executeButton.disabled = false;
+    refreshExecuteButtonState();
     setStatus('Не удалось прочитать прикреплённый файл.');
     return;
   }
@@ -744,7 +828,6 @@ async function executeTask() {
 
   socket.onopen = function onEditorSocketOpen() {
     socket.send(JSON.stringify({
-      csrf:accountCSRF,
       provider:provider,
       model:modelElement.value,
       page_path:'{{.Path}}',
@@ -775,15 +858,18 @@ async function executeTask() {
       terminalEventReceived = true;
       showDraft(payload, files);
       setStatus('Черновик готов. Проверьте страницу во фрейме и нажмите «Сохранить страницу», если всё устраивает.');
-      executeButton.disabled = false;
-      executeButton.title = 'Отправить следующее задание';
+      refreshExecuteButtonState();
       socket.close();
       return;
     }
     if (payload.type === 'error') {
       terminalEventReceived = true;
       setStatus('Ошибка AI: ' + (payload.error || 'неизвестная ошибка'));
-      executeButton.disabled = false;
+      if (backgroundBeforeRequest) {
+        pageBackgroundFrame.srcdoc = backgroundBeforeRequest;
+      } else {
+        restoreBackgroundPage();
+      }
       socket.close();
     }
   };
@@ -791,7 +877,7 @@ async function executeTask() {
   socket.onerror = function onEditorSocketError() {
     if (!terminalEventReceived) {
       setStatus('Соединение с AI-провайдером прервалось.');
-      executeButton.disabled = false;
+      refreshExecuteButtonState();
     }
   };
 
@@ -799,9 +885,7 @@ async function executeTask() {
     if (activeEditorSocket === socket) {
       activeEditorSocket = null;
     }
-    if (!terminalEventReceived) {
-      executeButton.disabled = false;
-    }
+    refreshExecuteButtonState();
   };
 }
 
@@ -832,9 +916,9 @@ async function saveDraft() {
       })
     });
     const payload = await parseResponse(response);
-    clearDraft();
-    pageBackgroundFrame.src = backgroundPageURL();
-    setStatus('Сохранено. Страница ' + (payload.path || '{{.Path}}') + ' обновлена и добавлена в ревизии.');
+    clearDraft(false);
+    restoreBackgroundPage();
+    setStatus('Сохранено. Страница ' + (payload.path || '{{.Path}}') + ' обновлена и добавлена в ревизии. При необходимости откройте «Ревизии / откат».');
   } catch (error) {
     setStatus('Ошибка сохранения: ' + error.message);
   } finally {
@@ -916,6 +1000,7 @@ function toggleVoice() {
     }
     transcript = transcript.trim();
     commandElement.value = [speechInitialText, transcript].filter(Boolean).join(speechInitialText && transcript ? ' ' : '');
+    refreshExecuteButtonState();
     if (hasFinalResult) {
       requestVoiceStop(false);
     } else {
@@ -1005,15 +1090,22 @@ document.getElementById('fileButton').addEventListener('click', function onFileB
 fileInput.addEventListener('change', renderSelectedFiles);
 recordButton.addEventListener('click', toggleVoice);
 executeButton.addEventListener('click', executeTask);
+commandElement.addEventListener('input', refreshExecuteButtonState);
+minimizeEditorButton.addEventListener('click', function onMinimizeEditorClick() {
+  setEditorMinimized(!editorMinimized);
+});
 saveDraftButton.addEventListener('click', saveDraft);
 expandPreviewButton.addEventListener('click', function onExpandPreviewClick() {
   setPreviewExpanded(!previewPanel.classList.contains('is-expanded'));
 });
 discardDraftButton.addEventListener('click', function onDiscardDraftClick() {
-  clearDraft();
-  setStatus('Черновик отменён. Исходная страница не изменена.');
+  clearDraft(true);
+  setStatus('Черновик отменён. Исходная страница восстановлена в предпросмотре и не изменена.');
 });
-providerElement.addEventListener('change', updateProviderUI);
+providerElement.addEventListener('change', function onProviderChange() {
+  updateProviderUI();
+  refreshExecuteButtonState();
+});
 saveProviderTokenButton.addEventListener('click', saveProviderToken);
 deleteProviderTokenButton.addEventListener('click', deleteProviderToken);
 pageTabButton.addEventListener('click', function onPageTabClick() {
@@ -1059,6 +1151,7 @@ if (savedCommand) {
   sessionStorage.removeItem('sitebrush.aiEditorCommand');
 }
 renderProviderReadiness();
+refreshExecuteButtonState();
 loadCredentialStatus();
 commandElement.focus();
 </script>
