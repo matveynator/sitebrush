@@ -11701,10 +11701,37 @@ func TestAIEditorTemplateUsesCurrentPageOverlayStreamingAndPreviewControls(t *te
 		`requestVoiceStop`,
 		`recognition.onspeechend`,
 		`mime:file.type`,
+		`--ai-editor-surface:#fff`,
+		`background:var(--ai-editor-surface);opacity:1`,
 	} {
 		if !strings.Contains(templateSource, expectedFragment) {
 			t.Fatalf("AI editor template missing %q", expectedFragment)
 		}
+	}
+}
+
+func TestAIEditorPageEmbedsSessionCSRFForWebSocket(t *testing.T) {
+	application, database := newTestApplication(t)
+	if _, err := database.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "admin@example.com", "password"); err != nil {
+		t.Fatal(err)
+	}
+
+	adminCookie := newAdminSessionCookie(t, application, "admin@example.com")
+	request := httptest.NewRequest(http.MethodGet, "http://localhost:8080/?ai", nil)
+	request.AddCookie(adminCookie)
+	expectedCSRF := accountCSRF(request)
+	if expectedCSRF == "" {
+		t.Fatal("test administrator session did not produce a CSRF token")
+	}
+
+	response := httptest.NewRecorder()
+	application.aiEditorPage(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("AI editor page status=%d body=%q", response.Code, response.Body.String())
+	}
+	expectedScript := `const accountCSRF = "` + expectedCSRF + `";`
+	if !strings.Contains(response.Body.String(), expectedScript) {
+		t.Fatalf("AI editor page did not embed the session CSRF token used by its WebSocket")
 	}
 }
 
