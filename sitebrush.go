@@ -10664,6 +10664,11 @@ func safeAIProviderErrorMessage(err error) string {
 			return "API token действителен, но провайдер требует включить API billing или пополнить баланс."
 		case http.StatusTooManyRequests:
 			return "API token действителен, но сейчас нет доступной quota: проверьте API billing, баланс или rate limit."
+		case http.StatusRequestEntityTooLarge:
+			if strings.TrimSpace(providerError.Message) != "" {
+				return "AI-провайдер отклонил слишком большой запрос: " + providerError.Message
+			}
+			return "AI-провайдер отклонил слишком большой запрос (HTTP 413)."
 		case http.StatusBadRequest:
 			return "AI-провайдер отклонил тестовый запрос. Доступная модель или параметры аккаунта не подходят."
 		default:
