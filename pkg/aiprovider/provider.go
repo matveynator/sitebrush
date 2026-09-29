@@ -39,13 +39,49 @@ var (
 
 type HTTPError struct {
 	StatusCode int
+	Message    string
 }
 
 func (err *HTTPError) Error() string {
 	if err == nil {
 		return "AI provider request failed"
 	}
-	return fmt.Sprintf("AI provider returned HTTP %d", err.StatusCode)
+	if strings.TrimSpace(err.Message) == "" {
+		return fmt.Sprintf("AI provider returned HTTP %d", err.StatusCode)
+	}
+	return fmt.Sprintf("AI provider returned HTTP %d: %s", err.StatusCode, err.Message)
+}
+
+func newHTTPError(statusCode int, body []byte) *HTTPError {
+	httpError := &HTTPError{StatusCode: statusCode}
+	if statusCode == http.StatusRequestEntityTooLarge {
+		httpError.Message = providerHTTPErrorMessage(body)
+	}
+	return httpError
+}
+
+func providerHTTPErrorMessage(body []byte) string {
+	var objectError struct {
+		Error struct {
+			Message string `json:"message"`
+		} `json:"error"`
+		Message string `json:"message"`
+	}
+	if json.Unmarshal(body, &objectError) != nil {
+		return ""
+	}
+	message := strings.TrimSpace(objectError.Error.Message)
+	if message == "" {
+		message = strings.TrimSpace(objectError.Message)
+	}
+	if message == "" {
+		return ""
+	}
+	message = strings.Join(strings.Fields(message), " ")
+	if len(message) > 512 {
+		message = message[:512] + "…"
+	}
+	return message
 }
 
 type Config struct {
@@ -225,7 +261,7 @@ func ListModels(ctx context.Context, configuration Config, httpClient *http.Clie
 		return nil, errors.New("AI provider model response is too large")
 	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return nil, &HTTPError{StatusCode: response.StatusCode}
+		return nil, newHTTPError(response.StatusCode, body)
 	}
 	type modelRecord struct {
 		ID string `json:"id"`
@@ -363,7 +399,7 @@ func (client *Client) Complete(ctx context.Context, request Request) (Response, 
 		return Response{}, errors.New("AI provider response is too large")
 	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return Response{}, &HTTPError{StatusCode: response.StatusCode}
+		return Response{}, newHTTPError(response.StatusCode, body)
 	}
 	if client.configuration.Provider == ProviderOpenAICompatible {
 		var openAIResponse struct {

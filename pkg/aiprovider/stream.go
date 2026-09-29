@@ -44,8 +44,8 @@ func (client *Client) Stream(ctx context.Context, request Request, output chan<-
 	}
 	defer response.Body.Close()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 64<<10))
-		return Response{}, &HTTPError{StatusCode: response.StatusCode}
+		errorBody, _ := io.ReadAll(io.LimitReader(response.Body, 16<<10))
+		return Response{}, newHTTPError(response.StatusCode, errorBody)
 	}
 
 	if !strings.Contains(strings.ToLower(response.Header.Get("Content-Type")), "text/event-stream") {
