@@ -9995,6 +9995,35 @@ func (a *App) listAIPages(ctx context.Context, domain string) ([]Page, error) {
 	return pages, rows.Err()
 }
 
+func (a *App) aiWriteTransaction(ctx context.Context, write func(*sql.Tx) error) error {
+	if write == nil {
+		return errors.New("AI database transaction is unavailable")
+	}
+	if database, ok := a.db.(interface {
+		WriteTransaction(context.Context, func(*sql.Tx) error) error
+	}); ok {
+		return database.WriteTransaction(ctx, write)
+	}
+
+	// Tests and boundary adapters may expose a plain database/sql transaction.
+	// Production per-site databases take the channel-owned WriteTransaction path above.
+	database, ok := a.db.(interface {
+		BeginTx(context.Context, *sql.TxOptions) (*sql.Tx, error)
+	})
+	if !ok {
+		return errors.New("database does not support AI write transactions")
+	}
+	transaction, err := database.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer transaction.Rollback()
+	if err := write(transaction); err != nil {
+		return err
+	}
+	return transaction.Commit()
+}
+
 func (a *App) saveAIPage(ctx context.Context, domain string, request aieditor.Request) (Page, error) {
 	pagePath := cleanPath(request.Path)
 	if pagePath == "/" && strings.TrimSpace(request.Path) == "" {
@@ -10050,47 +10079,27 @@ func (a *App) saveAIPage(ctx context.Context, domain string, request aieditor.Re
 		_ = a.applyDomainStorageDelta(ctx, domain, -pageDelta, -publishedPageDelta, -newHTMLBytes, 0, -staticDelta)
 	}
 
-	// These rows represent one logical edit and must move together. A transaction
-	// prevents a failed revision or publish write from leaving a partially changed page.
-	transaction, err := a.db.BeginTx(ctx, nil)
+	// These rows represent one logical edit and must move together. Production
+	// site databases execute this transaction inside their channel-owned writer;
+	// the direct BeginTx fallback exists only for simple database/sql adapters.
+	err := a.aiWriteTransaction(ctx, func(transaction *sql.Tx) error {
+		if _, err := transaction.ExecContext(ctx, `INSERT OR REPLACE INTO pages(domain,path,title,html,published) VALUES(?,?,?,?,1)`, domain, pagePath, title, request.HTML); err != nil {
+			return err
+		}
+		if !domainFrozen {
+			if _, err := transaction.ExecContext(ctx, `INSERT OR REPLACE INTO published_pages(domain,path,title,html) VALUES(?,?,?,?)`, domain, pagePath, title, request.HTML); err != nil {
+				return err
+			}
+		}
+		if _, err := transaction.ExecContext(ctx, `INSERT INTO revisions(domain,page_path,html,created_at) VALUES(?,?,?,?)`, domain, pagePath, request.HTML, time.Now().UTC().Format(time.RFC3339)); err != nil {
+			return err
+		}
+		return nil
+	})
 	if err != nil {
 		releaseStorageReservation()
 		return Page{}, err
 	}
-	transactionFinished := false
-	defer func() {
-		if !transactionFinished {
-			_ = transaction.Rollback()
-		}
-	}()
-	rollbackEdit := func() {
-		if !transactionFinished {
-			_ = transaction.Rollback()
-			transactionFinished = true
-		}
-		releaseStorageReservation()
-	}
-
-	if _, err := transaction.ExecContext(ctx, `INSERT OR REPLACE INTO pages(domain,path,title,html,published) VALUES(?,?,?,?,1)`, domain, pagePath, title, request.HTML); err != nil {
-		rollbackEdit()
-		return Page{}, err
-	}
-	if !domainFrozen {
-		if _, err := transaction.ExecContext(ctx, `INSERT OR REPLACE INTO published_pages(domain,path,title,html) VALUES(?,?,?,?)`, domain, pagePath, title, request.HTML); err != nil {
-			rollbackEdit()
-			return Page{}, err
-		}
-	}
-	if _, err := transaction.ExecContext(ctx, `INSERT INTO revisions(domain,page_path,html,created_at) VALUES(?,?,?,?)`, domain, pagePath, request.HTML, time.Now().UTC().Format(time.RFC3339)); err != nil {
-		rollbackEdit()
-		return Page{}, err
-	}
-	if err := transaction.Commit(); err != nil {
-		transactionFinished = true
-		releaseStorageReservation()
-		return Page{}, err
-	}
-	transactionFinished = true
 
 	if !domainFrozen {
 		a.writePublishedStaticHTML(domain, pagePath, request.HTML)
