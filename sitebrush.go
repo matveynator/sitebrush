@@ -10469,7 +10469,7 @@ func (a *App) aiProviderCredentialStatuses(ctx context.Context, domain, email st
 		aiprovider.ProviderOllama,
 	} {
 		if provider == aiprovider.ProviderOllama {
-			statuses = append(statuses, aiProviderCredentialStatus{Provider: provider, Saved: true, Unlocked: true})
+			statuses = append(statuses, aiProviderCredentialStatus{Provider: provider})
 			continue
 		}
 		var model, updatedAt string
