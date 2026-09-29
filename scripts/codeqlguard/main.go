@@ -16,7 +16,8 @@ const codeQLResultsDirectory = "codeql-results"
 // SARIF parsing is intentionally minimal: the gate only needs security result rule IDs
 // and suppression metadata, while GitHub remains the canonical viewer for locations.
 type sarifLog struct {
-	Runs []sarifRun `json:"runs"`
+	Version string     `json:"version"`
+	Runs    []sarifRun `json:"runs"`
 }
 
 type sarifRun struct {
@@ -81,6 +82,12 @@ func scanFile(path string) (findingSummary, error) {
 	var log sarifLog
 	if err := json.Unmarshal(data, &log); err != nil {
 		return findingSummary{}, fmt.Errorf("decode SARIF: %w", err)
+	}
+	if log.Version != "2.1.0" {
+		return findingSummary{}, fmt.Errorf("invalid SARIF version %q", log.Version)
+	}
+	if len(log.Runs) == 0 {
+		return findingSummary{}, errors.New("SARIF contains no runs")
 	}
 
 	summary := findingSummary{ByRule: map[string]int{}}
