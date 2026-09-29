@@ -99,6 +99,7 @@
                 <option value="gemini">Google Gemini API — есть Free Tier</option>
                 <option value="groq">Groq — есть Free Plan</option>
                 <option value="mistral">Mistral — есть Free mode</option>
+                <option value="ollama">Ollama — локально на этом компьютере</option>
               </select>
             </label>
 
@@ -200,6 +201,10 @@ const providerHelp = {
   'mistral': {
     url:'https://console.mistral.ai/api-keys',
     text:'Mistral: включите Free mode в La Plateforme и создайте API key для бесплатного ограниченного использования.'
+  },
+  'ollama': {
+    url:'https://ollama.com/download',
+    text:'Ollama работает локально. SiteBrush подключается только к 127.0.0.1:11434; API key не нужен. Установите Ollama и загрузите хотя бы одну текстовую модель.'
   }
 };
 let speechRecognition = null;
@@ -268,9 +273,25 @@ function updateProviderUI() {
   providerKeyLink.href = help.url;
   providerKeyHelp.textContent = help.text;
   const saved = credentialStatus[provider];
+  if (provider === 'ollama') {
+    apiKeyElement.value = '';
+    apiKeyElement.disabled = true;
+    apiKeyElement.placeholder = 'Для локальной Ollama API key не нужен';
+    saveProviderTokenButton.textContent = 'Проверить локальную Ollama';
+    providerKeyLink.textContent = 'Установить Ollama ↗';
+    providerKeyStatus.textContent = 'Локальная Ollama — API key не нужен';
+    deleteProviderTokenButton.hidden = true;
+    executeButton.disabled = false;
+    executeButton.title = 'Отправить';
+    loadModelsForSavedProvider(provider);
+    return;
+  }
+  apiKeyElement.disabled = false;
+  saveProviderTokenButton.textContent = 'Проверить ключ и сохранить';
+  providerKeyLink.textContent = 'Получить token ↗';
   if (saved && saved.saved && saved.unlocked) {
-    providerKeyStatus.textContent = '✓ API key работает и сохранён';
-    deleteProviderTokenButton.hidden = false;
+    providerKeyStatus.textContent = provider === 'ollama' ? '✓ Локальная Ollama доступна' : '✓ API key работает и сохранён';
+    deleteProviderTokenButton.hidden = provider === 'ollama';
     apiKeyElement.value = '';
     apiKeyElement.placeholder = 'Ключ уже сохранён — вставьте новый только для замены';
     executeButton.disabled = false;
@@ -313,8 +334,9 @@ async function loadCredentialStatus() {
 }
 
 async function saveProviderToken() {
+  const provider = providerElement.value;
   const apiKey = apiKeyElement.value.trim();
-  if (!apiKey) {
+  if (provider !== 'ollama' && !apiKey) {
     providerKeyStatus.textContent = 'Сначала вставьте API token';
     apiKeyElement.focus();
     return;
@@ -324,7 +346,7 @@ async function saveProviderToken() {
   modelBlock.hidden = true;
   providerKeyStatus.textContent = 'Проверяю API key у провайдера…';
   try {
-    const body = new URLSearchParams({provider:providerElement.value, api_key:apiKey});
+    const body = new URLSearchParams({provider:provider, api_key:apiKey});
     const response = await fetch('{{.Path}}?ai_provider_save', {
       method:'POST',
       credentials:'same-origin',
@@ -335,8 +357,8 @@ async function saveProviderToken() {
       body:body.toString()
     });
     const payload = await parseResponse(response);
-    credentialStatus[providerElement.value] = {
-      provider:providerElement.value,
+    credentialStatus[provider] = {
+      provider:provider,
       saved:true,
       unlocked:true,
       model:payload.model || '',
@@ -347,7 +369,7 @@ async function saveProviderToken() {
     deleteProviderTokenButton.hidden = false;
     executeButton.disabled = false;
     executeButton.title = 'Отправить';
-    fillModels(providerElement.value, payload.models || [], payload.model || '');
+    fillModels(provider, payload.models || [], payload.model || '');
     setStatus('AI-провайдер подключён. Можно отправлять команду. Модель выбрана автоматически; менять её необязательно.');
   } catch (error) {
     providerKeyStatus.textContent = 'Ключ не сохранён: ' + error.message;
