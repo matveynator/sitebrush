@@ -11577,7 +11577,7 @@ func TestEditorExposesOnlyVisualTextAndAIRoutes(t *testing.T) {
 		t.Fatal(err)
 	}
 	aiTemplate := string(aiTemplateBytes)
-	for _, expectedFragment := range []string{"pageTabButton", "externalTabButton", "saveProviderTokenButton", "?ai_provider_save", "?ai_execute", "?ai_apply", "previewPanel", "saveDraftButton", "openChatGPTButton", "openClaudeButton"} {
+	for _, expectedFragment := range []string{"pageTabButton", "externalTabButton", "saveProviderTokenButton", "?ai_provider_save", "ai_execute_ws", "?ai_apply", "previewPanel", "saveDraftButton", "openChatGPTButton", "openClaudeButton"} {
 		if !strings.Contains(aiTemplate, expectedFragment) {
 			t.Fatalf("edit_ai.html does not expose %q", expectedFragment)
 		}
@@ -11618,6 +11618,229 @@ func TestRecommendedAIEditorModelPrefersBalancedOptions(t *testing.T) {
 		if got := recommendedAIEditorModel(testCase.provider, testCase.models); got != testCase.want {
 			t.Fatalf("provider=%s model=%q want=%q", testCase.provider, got, testCase.want)
 		}
+	}
+}
+
+func TestAIEditorParsesHTMLProviderResponsesWithoutJSON(t *testing.T) {
+	cases := []struct {
+		name     string
+		response string
+		title    string
+		contains string
+	}{
+		{
+			name:     "plain complete html",
+			response: "<!doctype html><html><head><title>AI TEST SITE</title></head><body><h1>Updated</h1></body></html>",
+			title:    "AI TEST SITE",
+			contains: "<h1>Updated</h1>",
+		},
+		{
+			name:     "markdown fenced html",
+			response: "Here is the updated page:\n\n```html\n<html><head><title>Fenced</title></head><body>ok</body></html>\n```",
+			title:    "Fenced",
+			contains: "<body>ok</body>",
+		},
+		{
+			name:     "legacy json remains accepted",
+			response: "{\"title\":\"Legacy\",\"html\":\"<html><body>legacy</body></html>\"}",
+			title:    "Legacy",
+			contains: "legacy",
+		},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			result, err := parseAIEditorModelResult(testCase.response)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.Title != testCase.title || !strings.Contains(result.HTML, testCase.contains) {
+				t.Fatalf("result=%+v", result)
+			}
+		})
+	}
+}
+
+func TestAIEditorRejectsConversationInsteadOfHTML(t *testing.T) {
+	if _, err := parseAIEditorModelResult("Sure, I can help you edit the page."); err == nil {
+		t.Fatal("AI editor accepted conversational text as a page")
+	}
+}
+
+func TestAIEditorTrimsProviderCommentaryAfterClosingHTML(t *testing.T) {
+	response := "<!doctype html><html><head><title>Clean</title></head><body><p>Page</p></body></html> Hope this helps."
+	result, err := parseAIEditorModelResult(response)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "<!doctype html><html><head><title>Clean</title></head><body><p>Page</p></body></html>"
+	if result.HTML != want {
+		t.Fatalf("HTML = %q, want %q", result.HTML, want)
+	}
+	if strings.Contains(result.HTML, "Hope this helps") {
+		t.Fatal("provider commentary leaked into the HTML draft")
+	}
+}
+
+func TestAIEditorTemplateUsesCurrentPageOverlayStreamingAndPreviewControls(t *testing.T) {
+	templateBytes, err := embeddedWebFiles.ReadFile("web/edit_ai.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	templateSource := string(templateBytes)
+	for _, expectedFragment := range []string{
+		`id="pageBackgroundFrame"`,
+		`?ai_background`,
+		`ai-backdrop`,
+		`id="aiCommand"`,
+		`ai_execute_ws`,
+		`streamOutput`,
+		`expandPreviewButton`,
+		`Сохранить страницу`,
+		`configuredProviders`,
+		`ai-provider-ready-chip`,
+		`requestVoiceStop`,
+		`recognition.onspeechend`,
+		`mime:file.type`,
+		`--ai-editor-surface:#fff`,
+		`background:var(--ai-editor-surface);opacity:1`,
+	} {
+		if !strings.Contains(templateSource, expectedFragment) {
+			t.Fatalf("AI editor template missing %q", expectedFragment)
+		}
+	}
+}
+
+func TestAIEditorPageEmbedsSessionCSRFForWebSocket(t *testing.T) {
+	application, database := newTestApplication(t)
+	if _, err := database.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "admin@example.com", "password"); err != nil {
+		t.Fatal(err)
+	}
+
+	adminCookie := newAdminSessionCookie(t, application, "admin@example.com")
+	request := httptest.NewRequest(http.MethodGet, "http://localhost:8080/?ai", nil)
+	request.AddCookie(adminCookie)
+	expectedCSRF := accountCSRF(request)
+	if expectedCSRF == "" {
+		t.Fatal("test administrator session did not produce a CSRF token")
+	}
+
+	response := httptest.NewRecorder()
+	application.aiEditorPage(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("AI editor page status=%d body=%q", response.Code, response.Body.String())
+	}
+	expectedScript := `const accountCSRF = "` + expectedCSRF + `";`
+	if !strings.Contains(response.Body.String(), expectedScript) {
+		t.Fatalf("AI editor page did not embed the session CSRF token used by its WebSocket")
+	}
+}
+
+func TestAIEditorWebSocketUsesAuthenticatedSameOriginSessionWithoutSecondCSRF(t *testing.T) {
+	request := httptest.NewRequest(http.MethodGet, "http://localhost:8080/?ai_execute_ws", nil)
+	request.Host = "localhost:8080"
+	request.Header.Set("Origin", "http://localhost:8080")
+	if err := aiEditorWebSocketRequestAllowed(request, true); err != nil {
+		t.Fatalf("authenticated same-origin websocket rejected: %v", err)
+	}
+
+	crossOrigin := httptest.NewRequest(http.MethodGet, "http://localhost:8080/?ai_execute_ws", nil)
+	crossOrigin.Host = "localhost:8080"
+	crossOrigin.Header.Set("Origin", "https://attacker.example")
+	if err := aiEditorWebSocketRequestAllowed(crossOrigin, true); err == nil {
+		t.Fatal("cross-origin websocket was accepted")
+	}
+
+	unauthenticated := httptest.NewRequest(http.MethodGet, "http://localhost:8080/?ai_execute_ws", nil)
+	unauthenticated.Host = "localhost:8080"
+	unauthenticated.Header.Set("Origin", "http://localhost:8080")
+	if err := aiEditorWebSocketRequestAllowed(unauthenticated, false); err == nil {
+		t.Fatal("unauthenticated websocket was accepted")
+	}
+}
+
+func TestAIEditorStreamsDraftIntoBackgroundAndCanMinimize(t *testing.T) {
+	templateBytes, err := embeddedWebFiles.ReadFile("web/edit_ai.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	templateSource := string(templateBytes)
+	for _, required := range []string{
+		"streamingHTMLForBackground",
+		"scheduleBackgroundPreviewRender",
+		"pageBackgroundFrame.srcdoc = previewHTML",
+		"pageBackgroundFrame.srcdoc = currentDraft.html",
+		`id="pageBackgroundFrame" src="{{.Path}}?ai_background" sandbox=""`,
+		"setEditorMinimized",
+		"is-minimized",
+		"is-previewing",
+		"is-interactive",
+		"minimizeEditorButton",
+		"restoreBackgroundPage",
+		"revisionHistoryLink",
+		"?revisions",
+		"refreshExecuteButtonState",
+		"commandElement.addEventListener('input', refreshExecuteButtonState)",
+	} {
+		if !strings.Contains(templateSource, required) {
+			t.Fatalf("AI editor live preview/minimize flow missing %q", required)
+		}
+	}
+	if strings.Contains(templateSource, "csrf:accountCSRF") {
+		t.Fatal("AI editor still sends a redundant WebSocket CSRF token")
+	}
+}
+
+func TestAIEditorCancelRestoresOriginalPreviewAndSaveKeepsRevisionRollback(t *testing.T) {
+	templateBytes, err := embeddedWebFiles.ReadFile("web/edit_ai.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	templateSource := string(templateBytes)
+	for _, required := range []string{
+		"clearDraft(true)",
+		"clearDraft(false)",
+		"restoreBackgroundPage()",
+		"Сохранить страницу",
+		"Ревизии / откат",
+		"добавлена в ревизии",
+	} {
+		if !strings.Contains(templateSource, required) {
+			t.Fatalf("AI editor revision-safe draft flow missing %q", required)
+		}
+	}
+}
+
+func TestAIEditorBackgroundFrameIsSameOriginOnly(t *testing.T) {
+	request := httptest.NewRequest(http.MethodGet, "https://example.com/page?ai_background", nil)
+	request.AddCookie(&http.Cookie{Name: "sitebrush_session", Value: "test-session"})
+	policy := adminResponseFramePolicy(request)
+	if policy.xFrameOptions != "SAMEORIGIN" || policy.contentSecurityPolicy != "frame-ancestors 'self'" {
+		t.Fatalf("AI background policy=%+v", policy)
+	}
+
+	ordinaryRequest := httptest.NewRequest(http.MethodGet, "https://example.com/page?ai", nil)
+	ordinaryRequest.AddCookie(&http.Cookie{Name: "sitebrush_session", Value: "test-session"})
+	ordinaryPolicy := adminResponseFramePolicy(ordinaryRequest)
+	if ordinaryPolicy.xFrameOptions != "DENY" || ordinaryPolicy.contentSecurityPolicy != "frame-ancestors 'none'" {
+		t.Fatalf("ordinary admin policy=%+v", ordinaryPolicy)
+	}
+}
+
+func TestAIEditorAttachmentMetadataDescribesSiteFileURL(t *testing.T) {
+	decodedFiles, names, err := decodeAIEditorFiles([]aiEditorUploadedFile{{
+		Name:    "photo.jpg",
+		MIME:    "image/jpeg",
+		Content: base64.StdEncoding.EncodeToString([]byte("photo")),
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(names) != 1 || names[0] != "photo.jpg" {
+		t.Fatalf("names=%v", names)
+	}
+	description := aiEditorAttachmentDescriptions(decodedFiles)
+	if !strings.Contains(description, "image/jpeg") || !strings.Contains(description, "/files/photo.jpg") {
+		t.Fatalf("description=%q", description)
 	}
 }
 
@@ -11679,6 +11902,47 @@ func TestAIFileEndpointCannotSmugglePublishOperation(t *testing.T) {
 		t.Fatal("file endpoint did not submit an AI editor task")
 	}
 }
+
+func TestAIUnscopedCapabilityKeepsFullSiteAccess(t *testing.T) {
+	application, _ := newTestApplication(t)
+	application.aiCapabilities = aicapability.NewManager()
+	t.Cleanup(application.aiCapabilities.Close)
+
+	store := &capturingAIEditorStore{requests: make(chan aieditor.Request, 1)}
+	application.aiExecutor = aieditor.NewExecutor(store, 4)
+	t.Cleanup(application.aiExecutor.Close)
+
+	capabilityToken, capability, err := application.aiCapabilities.IssueFor("localhost", "owner@example.org", []string{aicapability.ScopeRead, aicapability.ScopeWrite})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if capability.PagePath != "" {
+		t.Fatalf("unscoped capability PagePath = %q", capability.PagePath)
+	}
+	session, err := application.aiCapabilities.Exchange(capabilityToken, "localhost")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	request := httptest.NewRequest(http.MethodGet, "http://localhost/pages?ai_token="+url.QueryEscape(capabilityToken), nil)
+	request.Header.Set("Authorization", "Bearer "+session.Token)
+	response := httptest.NewRecorder()
+
+	application.aiContentEndpoint(response, request, "localhost", capabilityToken, "pages")
+	if response.Code != http.StatusOK {
+		t.Fatalf("unscoped pages status=%d body=%q", response.Code, response.Body.String())
+	}
+
+	select {
+	case captured := <-store.requests:
+		if captured.Operation != aieditor.OperationListPages {
+			t.Fatalf("unscoped capability submitted %q instead of list_pages", captured.Operation)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("unscoped capability did not submit list_pages")
+	}
+}
+
 
 func TestAppAIStoreStopsAlreadyCanceledTaskBeforeDatabaseAccess(t *testing.T) {
 	application, _ := newTestApplication(t)

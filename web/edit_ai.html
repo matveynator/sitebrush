@@ -5,44 +5,84 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="referrer" content="no-referrer">
-  <title>Редактирование голосом</title>
+  <title>AI-редактирование страницы</title>
   <link rel="stylesheet" href="/p/static/bootstrap.min.css">
   <link rel="stylesheet" href="/p/static/technical_pages.css">
   <style>
-    body{min-height:100vh;background:rgba(0,0,0,.18)}
-    .ai-page{min-height:100vh;display:grid;place-items:center;padding:20px}
-    .ai-card{width:min(780px,100%);max-height:calc(100vh - 40px);overflow:auto;border:1px solid var(--bs-border-color);border-radius:22px;background:var(--bs-body-bg);box-shadow:0 22px 70px rgba(0,0,0,.28)}
-    .ai-header{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:18px 20px 10px}
-    .ai-close{display:grid;place-items:center;width:36px;height:36px;border:0;border-radius:50%;background:transparent;color:inherit;font-size:25px;text-decoration:none}
-    .ai-close:hover{background:var(--bs-tertiary-bg)}
-    .ai-tabs{display:flex;gap:6px;padding:0 20px 12px;border-bottom:1px solid var(--bs-border-color)}
-    .ai-tab{border:0;border-radius:10px;padding:8px 12px;background:transparent;color:inherit;font-size:14px}
-    .ai-tab.is-active{background:var(--bs-primary);color:#fff}
-    .ai-body{display:grid;gap:14px;padding:16px 20px 20px}
+    :root{--ai-editor-surface:#fff;--ai-editor-surface-muted:#f8f9fa}
+    [data-bs-theme="dark"]{--ai-editor-surface:#212529;--ai-editor-surface-muted:#2b3035}
+    html,body{width:100%;height:100%;margin:0;overflow:hidden}
+    body{background:var(--ai-editor-surface);color:var(--bs-body-color)}
+    .ai-page-background{position:fixed;inset:0;width:100%;height:100%;border:0;background:#fff;pointer-events:none}
+    .ai-page-background.is-interactive{pointer-events:auto}
+    .ai-backdrop{position:fixed;inset:0;background:rgba(8,12,20,.62);z-index:10}
+    .ai-backdrop.is-previewing{background:transparent;pointer-events:none}
+    .ai-page{position:fixed;inset:0;z-index:11;display:grid;place-items:center;padding:18px;pointer-events:none}
+    .ai-card{pointer-events:auto;width:min(980px,calc(100vw - 36px));max-height:calc(100vh - 36px);overflow:auto;border:1px solid var(--bs-border-color);border-radius:18px;background:var(--ai-editor-surface);opacity:1;box-shadow:0 28px 90px rgba(0,0,0,.42)}
+    .ai-page.is-minimized{place-items:end;padding:18px}
+    .ai-page.is-minimized .ai-card{width:min(430px,calc(100vw - 36px));max-height:none;border-radius:14px}
+    .ai-page.is-minimized .ai-tabs,.ai-page.is-minimized .ai-body,.ai-page.is-minimized .ai-subtitle{display:none}
+    .ai-page.is-minimized .ai-header{align-items:center;padding:12px 14px}
+    .ai-page.is-minimized .ai-title{font-size:1rem}
+    .ai-header{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;padding:20px 22px 12px}
+    .ai-title{margin:0;font-size:1.25rem;font-weight:700;letter-spacing:-.01em}
+    .ai-subtitle{margin-top:4px;color:var(--bs-secondary-color);font-size:.86rem}
+    .ai-header-actions{display:flex;align-items:center;gap:4px}
+    .ai-close,.ai-minimize{display:grid;place-items:center;flex:0 0 auto;width:36px;height:36px;border:0;border-radius:9px;background:transparent;color:inherit;line-height:1;text-decoration:none}
+    .ai-close{font-size:25px}
+    .ai-minimize{font-size:20px}
+    .ai-close:hover,.ai-minimize:hover{background:var(--ai-editor-surface-muted);color:inherit}
+    .ai-tabs{display:flex;gap:6px;padding:0 22px 12px;border-bottom:1px solid var(--bs-border-color)}
+    .ai-tab{border:1px solid transparent;border-radius:9px;padding:7px 11px;background:transparent;color:var(--bs-secondary-color);font-size:13px;font-weight:600}
+    .ai-tab:hover{background:var(--ai-editor-surface-muted);color:var(--bs-body-color)}
+    .ai-tab.is-active{border-color:var(--bs-border-color);background:var(--ai-editor-surface-muted);color:var(--bs-body-color)}
+    .ai-body{display:grid;gap:14px;padding:16px 22px 22px}
     .ai-panel[hidden]{display:none!important}
-    .ai-composer{border:1px solid var(--bs-border-color);border-radius:22px;background:var(--bs-tertiary-bg);padding:12px}
-    .ai-composer textarea{display:block;width:100%;min-height:120px;max-height:300px;border:0;outline:0;resize:vertical;background:transparent;color:inherit;font:inherit;padding:4px 4px 8px}
-    .ai-composer-bar{display:flex;align-items:center;justify-content:space-between;gap:8px}
+    .ai-composer{display:grid;gap:10px;border:1px solid var(--bs-border-color);border-radius:14px;background:var(--ai-editor-surface);padding:12px;box-shadow:0 1px 2px rgba(0,0,0,.04)}
+    .ai-composer textarea{display:block;width:100%;min-height:120px;max-height:300px;border:1px solid var(--bs-border-color);border-radius:10px;outline:0;resize:vertical;background:var(--ai-editor-surface);color:var(--bs-body-color);font:inherit;line-height:1.45;padding:11px 12px}
+    .ai-composer textarea:focus{border-color:var(--bs-primary);box-shadow:0 0 0 3px color-mix(in srgb,var(--bs-primary) 18%,transparent)}
+    .ai-composer-bar{display:flex;align-items:center;justify-content:space-between;gap:10px}
     .ai-left,.ai-right,.ai-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
-    .ai-round{display:grid;place-items:center;width:38px;height:38px;padding:0;border:1px solid var(--bs-border-color);border-radius:50%;background:var(--bs-body-bg);color:inherit;font-size:18px;line-height:1}
-    .ai-send{border-color:var(--bs-body-color);background:var(--bs-body-color);color:var(--bs-body-bg);font-size:22px;font-weight:700}
-    .ai-recording{background:var(--bs-danger);border-color:var(--bs-danger);color:#fff}
-    .ai-files{font-size:13px;color:var(--bs-secondary-color);overflow-wrap:anywhere}
+    .ai-round{display:grid;place-items:center;width:38px;height:38px;padding:0;border:1px solid var(--bs-border-color);border-radius:10px;background:var(--ai-editor-surface);color:inherit;font-size:18px;line-height:1}
+    .ai-round:hover:not(:disabled){background:var(--ai-editor-surface-muted)}
+    .ai-send{border-color:var(--bs-primary);background:var(--bs-primary);color:#fff;font-size:20px;font-weight:700}
+    .ai-send:hover:not(:disabled){background:var(--bs-primary);filter:brightness(.93)}
+    .ai-recording{background:var(--bs-danger)!important;border-color:var(--bs-danger)!important;color:#fff}
+    .ai-file-area{display:grid;gap:6px}
+    .ai-files{display:flex;align-items:center;gap:6px;flex-wrap:wrap;min-height:0}
+    .ai-file-chip{display:inline-flex;align-items:center;gap:6px;max-width:260px;border:1px solid var(--bs-border-color);border-radius:9px;background:var(--ai-editor-surface-muted);padding:4px 7px;font-size:12px}
+    .ai-file-chip img{width:28px;height:28px;border-radius:6px;object-fit:cover;background:var(--ai-editor-surface)}
+    .ai-file-chip span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+    .ai-file-note{font-size:12px;color:var(--bs-secondary-color)}
     .ai-status{min-height:22px;font-size:14px;white-space:pre-wrap}
-    .ai-preview{display:grid;gap:10px;border:1px solid var(--bs-border-color);border-radius:14px;padding:12px;background:var(--bs-body-bg)}
+    .ai-stream{border:1px solid var(--bs-border-color);border-radius:10px;background:var(--ai-editor-surface-muted)}
+    .ai-stream[hidden]{display:none!important}
+    .ai-stream summary{cursor:pointer;padding:8px 10px;font-size:12px;font-weight:600;color:var(--bs-secondary-color)}
+    .ai-stream pre{margin:0;max-height:150px;overflow:auto;border-top:1px solid var(--bs-border-color);padding:9px 10px;background:transparent;color:var(--bs-secondary-color);font-size:11px;line-height:1.35;white-space:pre-wrap;overflow-wrap:anywhere}
+    .ai-preview{display:grid;gap:10px;border:1px solid var(--bs-border-color);border-radius:14px;padding:12px;background:var(--ai-editor-surface)}
     .ai-preview[hidden]{display:none!important}
     .ai-preview-header{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap}
     .ai-preview-actions{display:flex;gap:8px;flex-wrap:wrap}
-    .ai-preview-frame{width:100%;height:min(52vh,520px);border:1px solid var(--bs-border-color);border-radius:10px;background:#fff}
-    .ai-settings{border:1px solid var(--bs-border-color);border-radius:14px;padding:0 14px}
-    .ai-settings summary{cursor:pointer;padding:11px 0;font-size:14px}
+    .ai-preview-frame{width:100%;height:min(52vh,560px);border:1px solid var(--bs-border-color);border-radius:10px;background:#fff}
+    .ai-preview.is-expanded{position:fixed;inset:12px;z-index:40;max-width:none;margin:0;border-radius:14px;box-shadow:0 24px 90px rgba(0,0,0,.55)}
+    .ai-preview.is-expanded .ai-preview-frame{height:calc(100vh - 105px)}
+    .ai-settings{border:1px solid var(--bs-border-color);border-radius:12px;background:var(--ai-editor-surface);padding:0 14px}
+    .ai-settings summary{display:flex;align-items:center;justify-content:space-between;gap:10px;cursor:pointer;padding:11px 0;font-size:13px;font-weight:600}
+    .ai-settings-summary-status{font-weight:600;color:var(--bs-secondary-color)}
+    .ai-settings-summary-status.is-ready{color:var(--bs-success)}
+    .ai-settings-summary-status.is-error{color:var(--bs-danger)}
     .ai-settings-grid{display:grid;grid-template-columns:1fr;gap:10px;padding:0 0 14px}
     .ai-settings-grid label{display:grid;gap:5px;font-size:12px;color:var(--bs-secondary-color)}
     .ai-token-actions{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
     .ai-token-status{font-size:13px;font-weight:600}
-    .ai-provider-step{display:grid;gap:8px;padding:10px 0}
+    .ai-token-status.is-ready{color:var(--bs-success)}
+    .ai-token-status.is-error{color:var(--bs-danger)}
+    .ai-provider-step{display:grid;gap:6px;padding:4px 0}
     .ai-provider-step-title{font-size:13px;font-weight:700;color:var(--bs-body-color)}
     .ai-provider-step-note{font-size:12px;color:var(--bs-secondary-color)}
+    .ai-provider-ready-list{display:flex;gap:6px;flex-wrap:wrap}
+    .ai-provider-ready-chip{display:inline-flex;align-items:center;gap:4px;border:1px solid color-mix(in srgb,var(--bs-success) 40%,var(--bs-border-color));border-radius:999px;background:color-mix(in srgb,var(--bs-success) 9%,transparent);padding:3px 8px;color:var(--bs-success);font-size:12px;font-weight:600}
+    .ai-provider-empty{font-size:12px;color:var(--bs-secondary-color)}
     .ai-model-block{display:grid;gap:5px;padding-top:10px;border-top:1px solid var(--bs-border-color)}
     .ai-model-help{font-size:12px;color:var(--bs-secondary-color)}
     .external-box{display:grid;gap:12px}
@@ -50,18 +90,24 @@
     .external-link-row input{min-width:0;flex:1}
     .external-actions{display:flex;gap:8px;flex-wrap:wrap}
     .external-note{font-size:13px;color:var(--bs-secondary-color)}
-    @media(max-width:640px){.ai-page{padding:8px}.ai-card{max-height:calc(100vh - 16px);border-radius:18px}.external-link-row{flex-direction:column;align-items:stretch}}
+    @media(max-width:700px){.ai-page{padding:7px}.ai-card{width:calc(100vw - 14px);max-height:calc(100vh - 14px);border-radius:13px}.ai-header{padding:15px 15px 10px}.ai-tabs{padding:0 15px 10px}.ai-body{padding:12px 15px 15px}.external-link-row{flex-direction:column;align-items:stretch}.ai-preview.is-expanded{inset:5px}.ai-preview.is-expanded .ai-preview-frame{height:calc(100vh - 105px)}}
   </style>
 </head>
 <body>
-<div class="ai-page">
+<iframe class="ai-page-background" id="pageBackgroundFrame" src="{{.Path}}?ai_background" sandbox="" aria-hidden="true" tabindex="-1"></iframe>
+<div class="ai-backdrop" id="editorBackdrop" aria-hidden="true"></div>
+
+<div class="ai-page" id="editorPage">
   <section class="ai-card" role="dialog" aria-modal="true" aria-labelledby="aiTitle">
     <header class="ai-header">
       <div>
-        <h1 class="h5 mb-1" id="aiTitle">Редактирование голосом</h1>
-        <div class="small text-body-secondary">Редактируется текущая страница <code>{{.Path}}</code></div>
+        <h1 class="ai-title" id="aiTitle">AI-редактирование страницы</h1>
+        <div class="ai-subtitle">AI работает только с текущей страницей <code>{{.Path}}</code>. Изменения сохраняются только после вашего подтверждения.</div>
       </div>
-      <a class="ai-close" href="{{.Path}}" aria-label="Закрыть">×</a>
+      <div class="ai-header-actions">
+        <button class="ai-minimize" id="minimizeEditorButton" type="button" aria-label="Свернуть редактор" title="Свернуть редактор">—</button>
+        <a class="ai-close" href="{{.Path}}" aria-label="Закрыть">×</a>
+      </div>
     </header>
 
     <div class="ai-tabs" role="tablist">
@@ -72,43 +118,58 @@
     <div class="ai-body">
       <section class="ai-panel" id="pagePanel" role="tabpanel">
         <div class="ai-composer">
-          <textarea id="aiCommand" placeholder="Например: сделай заголовок короче и добавь под ним кнопку. Можно написать задачу или нажать микрофон."></textarea>
-          <div class="ai-composer-bar">
-            <div class="ai-left">
-              <button class="ai-round" type="button" id="fileButton" aria-label="Добавить файлы" title="Добавить файлы">＋</button>
-              <input id="fileInput" type="file" multiple hidden accept="image/*,.css,.html,.txt">
-              <div class="ai-files" id="fileStatus"></div>
+          <textarea id="aiCommand" aria-label="Что изменить на текущей странице" placeholder="Например: замени главный заголовок, сделай кнопку заметнее и добавь прикреплённую фотографию справа от текста."></textarea>
+          <div class="ai-file-area">
+            <div class="ai-composer-bar">
+              <div class="ai-left">
+                <button class="ai-round" type="button" id="fileButton" aria-label="Добавить фотографии или файлы" title="Добавить фотографии или файлы">＋</button>
+                <input id="fileInput" type="file" multiple hidden accept="image/*,.css,.html,.txt">
+                <div class="ai-files" id="fileStatus"></div>
+              </div>
+              <div class="ai-right">
+                <button class="ai-round" type="button" id="recordButton" aria-label="Говорить" title="Говорить">🎙</button>
+                <button class="ai-round ai-send" type="button" id="executeButton" aria-label="Отправить задание" title="Проверяю AI-провайдера" disabled>↑</button>
+              </div>
             </div>
-            <div class="ai-right">
-              <button class="ai-round" type="button" id="recordButton" aria-label="Говорить" title="Говорить">🎙</button>
-              <button class="ai-round ai-send" type="button" id="executeButton" aria-label="Отправить" title="Сначала подтвердите API key" disabled>↑</button>
-            </div>
+            <div class="ai-file-note">Прикреплённые фотографии и файлы считаются материалами этой страницы и будут загружены в Files только когда вы нажмёте «Сохранить страницу».</div>
           </div>
         </div>
 
         <div id="status" class="ai-status" role="status"></div>
 
+        <details class="ai-stream" id="streamDetails" hidden>
+          <summary>Ответ AI в реальном времени</summary>
+          <pre id="streamOutput"></pre>
+        </details>
+
         <section class="ai-preview" id="previewPanel" hidden>
           <div class="ai-preview-header">
             <div>
-              <strong>Предпросмотр AI-версии</strong>
-              <div class="small text-body-secondary">Страница ещё не сохранена в SiteBrush.</div>
+              <strong>Предпросмотр отредактированной страницы</strong>
+              <div class="small text-body-secondary">Страница ещё не сохранена. Исходная версия остаётся без изменений.</div>
             </div>
             <div class="ai-preview-actions">
-              <button class="btn btn-primary btn-sm" id="saveDraftButton" type="button">Сохранить в SiteBrush</button>
-              <button class="btn btn-outline-secondary btn-sm" id="discardDraftButton" type="button">Отменить черновик</button>
+              <button class="btn btn-outline-secondary btn-sm" id="expandPreviewButton" type="button">Почти на весь экран</button>
+              <a class="btn btn-outline-secondary btn-sm" id="revisionHistoryLink" href="{{.Path}}?revisions">Ревизии / откат</a>
+              <button class="btn btn-outline-secondary btn-sm" id="discardDraftButton" type="button">Отменить</button>
+              <button class="btn btn-primary btn-sm" id="saveDraftButton" type="button">Сохранить страницу</button>
             </div>
           </div>
-          <iframe class="ai-preview-frame" id="previewFrame" sandbox="" title="Предпросмотр AI-страницы"></iframe>
+          <iframe class="ai-preview-frame" id="previewFrame" sandbox="" title="Предпросмотр AI-версии страницы"></iframe>
         </section>
 
-        <details class="ai-settings" id="providerSettings" open>
-          <summary>Настройки AI-провайдера</summary>
+        <details class="ai-settings" id="providerSettings">
+          <summary>
+            <span>AI-провайдер</span>
+            <span class="ai-settings-summary-status" id="providerSettingsStatus">проверяю…</span>
+          </summary>
           <div class="ai-settings-grid">
             <div class="ai-provider-step">
-              <div class="ai-provider-step-title">1. Подключите AI-провайдера</div>
-              <div class="ai-provider-step-note">Сначала выберите провайдера, вставьте API key и нажмите «Проверить ключ и сохранить». Пока ключ не подтверждён, отправка команды отключена.</div>
+              <div class="ai-provider-step-title">Настроенные и доступные провайдеры</div>
+              <div class="ai-provider-ready-list" id="configuredProviders"><span class="ai-provider-empty">Проверяю…</span></div>
+              <div class="ai-provider-step-note">Зелёная галочка означает: для облачного провайдера ключ сохранён и доступен этому браузеру; для Ollama локальная программа сейчас отвечает.</div>
             </div>
+
             <label>Провайдер
               <select class="form-select" id="provider">
                 <option value="ollama" selected>Ollama — локально на этом компьютере</option>
@@ -131,16 +192,15 @@
               <button id="deleteProviderTokenButton" class="btn btn-outline-danger btn-sm" type="button" hidden>Удалить token</button>
               <span class="ai-token-status" id="providerKeyStatus"></span>
             </div>
-            <div class="small text-body-secondary" id="providerKeyHelp">OpenAI: создайте secret API key и вставьте его сюда. SiteBrush проверит ключ у OpenAI и сохранит его зашифрованно.</div>
+            <div class="small text-body-secondary" id="providerKeyHelp"></div>
 
             <div class="ai-model-block" id="modelBlock" hidden>
-              <div class="ai-provider-step-title">2. Модель — необязательно</div>
-              <label>Модель <span class="text-body-secondary">(можно не выбирать)</span>
+              <label>Модель <span class="text-body-secondary">(необязательно)</span>
                 <select class="form-select" id="model">
                   <option value="">Автоматически — сбалансированная модель</option>
                 </select>
               </label>
-              <div class="ai-model-help">Этот выбор появляется только после успешной проверки ключа. Если ничего не менять, SiteBrush автоматически использует рекомендуемую сбалансированную модель.</div>
+              <div class="ai-model-help">Если модель не выбирать, SiteBrush использует рекомендуемую модель для редактирования HTML.</div>
             </div>
           </div>
         </details>
@@ -148,8 +208,8 @@
 
       <section class="ai-panel external-box" id="externalPanel" role="tabpanel" hidden>
         <div>
-          <strong>Редактирование через ChatGPT, Claude или другую AI-систему</strong>
-          <div class="external-note">SiteBrush создаст отзывную ссылку доступа. Скопируйте её вместе с заданием в выбранную AI-систему.</div>
+          <strong>Редактирование текущей страницы через внешний AI</strong>
+          <div class="external-note">SiteBrush создаст отзывную ссылку с контекстом этой страницы. Скопируйте её вместе с заданием в ChatGPT, Claude или другую AI-систему.</div>
         </div>
         <div class="external-link-row">
           <input class="form-control" id="externalAILink" type="text" readonly placeholder="Создаю ссылку…">
@@ -183,11 +243,20 @@ const providerKeyHelp = document.getElementById('providerKeyHelp');
 const saveProviderTokenButton = document.getElementById('saveProviderTokenButton');
 const deleteProviderTokenButton = document.getElementById('deleteProviderTokenButton');
 const providerSettings = document.getElementById('providerSettings');
+const providerSettingsStatus = document.getElementById('providerSettingsStatus');
+const configuredProviders = document.getElementById('configuredProviders');
 const statusElement = document.getElementById('status');
+const streamDetails = document.getElementById('streamDetails');
+const streamOutput = document.getElementById('streamOutput');
 const previewPanel = document.getElementById('previewPanel');
 const previewFrame = document.getElementById('previewFrame');
+const expandPreviewButton = document.getElementById('expandPreviewButton');
 const saveDraftButton = document.getElementById('saveDraftButton');
 const discardDraftButton = document.getElementById('discardDraftButton');
+const pageBackgroundFrame = document.getElementById('pageBackgroundFrame');
+const editorPage = document.getElementById('editorPage');
+const editorBackdrop = document.getElementById('editorBackdrop');
+const minimizeEditorButton = document.getElementById('minimizeEditorButton');
 const pageTabButton = document.getElementById('pageTabButton');
 const externalTabButton = document.getElementById('externalTabButton');
 const pagePanel = document.getElementById('pagePanel');
@@ -199,51 +268,143 @@ const modelCache = Object.create(null);
 const providerHelp = {
   'openai-compatible': {
     url:'https://platform.openai.com/api-keys',
-    text:'OpenAI: создайте API key на platform.openai.com. Подписка ChatGPT Plus/Pro не включает API-баланс — API billing у OpenAI отдельный. SiteBrush проверяет сам ключ без платного inference-запроса.'
+    text:'OpenAI: создайте secret API key. Подписка ChatGPT Plus/Pro и API billing — разные продукты. SiteBrush хранит проверенный ключ зашифрованно.'
   },
   'anthropic': {
     url:'https://console.anthropic.com/settings/keys',
-    text:'Anthropic: откройте Console → API Keys → Create Key, скопируйте ключ и вставьте его сюда.'
+    text:'Anthropic: Console → API Keys → Create Key.'
   },
   'deepseek': {
     url:'https://platform.deepseek.com/api_keys',
-    text:'DeepSeek: откройте Platform → API Keys → Create new API key и вставьте ключ сюда.'
+    text:'DeepSeek: Platform → API Keys → Create new API key.'
   },
   'qwen': {
     url:'https://modelstudio.console.alibabacloud.com/model/settings/api-key',
-    text:'Qwen: откройте Alibaba Model Studio → API Key → Create API key и вставьте ключ сюда.'
+    text:'Qwen: Alibaba Model Studio → API Key → Create API key.'
   },
   'gemini': {
     url:'https://aistudio.google.com/app/apikey',
-    text:'Gemini: создайте новый Auth API key в Google AI Studio. У Gemini API есть Free Tier для поддерживаемых моделей.'
+    text:'Gemini: создайте API key в Google AI Studio. Для части моделей доступен Free Tier.'
   },
   'groq': {
     url:'https://console.groq.com/keys',
-    text:'Groq: создайте API key в Groq Console. Free Plan позволяет тестировать модели в пределах rate limits.'
+    text:'Groq: создайте API key в Groq Console. Free Plan ограничен rate limits.'
   },
   'mistral': {
     url:'https://console.mistral.ai/api-keys',
-    text:'Mistral: включите Free mode в La Plateforme и создайте API key для бесплатного ограниченного использования.'
+    text:'Mistral: включите Free mode в La Plateforme и создайте API key.'
   },
   'ollama': {
     url:'https://ollama.com/download',
-    text:'Ollama работает локально. SiteBrush подключается только к 127.0.0.1:11434; API key не нужен. Установите Ollama и загрузите хотя бы одну текстовую модель.'
+    text:'Ollama работает локально через 127.0.0.1:11434. API token не нужен. SiteBrush ждёт медленные локальные модели и показывает их ответ в реальном времени.'
   }
 };
 let speechRecognition = null;
+let speechSilenceTimer = 0;
+let speechHardStopTimer = 0;
+let speechInitialText = '';
 let externalLinkPromise = null;
 let currentDraft = null;
 let currentDraftFiles = [];
+let activeEditorSocket = null;
+let selectedFileObjectURLs = [];
+let streamedProviderText = '';
+let streamRenderScheduled = false;
+let backgroundPreviewRenderScheduled = false;
+let editorMinimized = false;
 
-function setStatus(message) { statusElement.textContent = message || ''; }
-function setExternalStatus(message) { externalStatus.textContent = message || ''; }
+function setStatus(message) {
+  statusElement.textContent = message || '';
+}
+
+function setExternalStatus(message) {
+  externalStatus.textContent = message || '';
+}
 
 async function parseResponse(response) {
   const text = await response.text();
   let payload = {};
-  try { payload = text ? JSON.parse(text) : {}; } catch (_) {}
-  if (!response.ok) throw new Error(payload.error || text || 'Запрос не выполнен');
+  try {
+    payload = text ? JSON.parse(text) : {};
+  } catch (parseError) {
+    payload = {};
+  }
+  if (!response.ok) {
+    throw new Error(payload.error || text || 'Запрос не выполнен');
+  }
   return payload;
+}
+
+function providerDisplayName(provider) {
+  const option = providerElement.querySelector('option[value="' + provider + '"]');
+  return option ? option.dataset.label || option.textContent : provider;
+}
+
+function providerReady(provider) {
+  const state = credentialStatus[provider];
+  if (provider === 'ollama') {
+    return Boolean(state && state.available);
+  }
+  return Boolean(state && state.saved && state.unlocked && state.available !== false);
+}
+
+function refreshExecuteButtonState() {
+  const providerIsReady = providerReady(providerElement.value);
+  const taskIsReady = Boolean(commandElement.value.trim());
+  const requestIsRunning = Boolean(activeEditorSocket);
+  executeButton.disabled = requestIsRunning || !providerIsReady || !taskIsReady;
+  if (requestIsRunning) {
+    executeButton.title = 'AI выполняет задание';
+  } else if (!providerIsReady) {
+    executeButton.title = 'Сначала настройте AI-провайдера';
+  } else if (!taskIsReady) {
+    executeButton.title = 'Напишите задание';
+  } else {
+    executeButton.title = 'Отправить задание';
+  }
+}
+
+function renderProviderReadiness() {
+  for (const option of providerElement.options) {
+    const baseLabel = option.dataset.label || option.textContent.replace(/^✓\s*/, '');
+    option.dataset.label = baseLabel;
+    option.textContent = (providerReady(option.value) ? '✓ ' : '') + baseLabel;
+  }
+
+  configuredProviders.replaceChildren();
+  const readyProviders = Array.from(providerElement.options).map(function(option) {
+    return option.value;
+  }).filter(providerReady);
+  if (readyProviders.length === 0) {
+    const emptyElement = document.createElement('span');
+    emptyElement.className = 'ai-provider-empty';
+    emptyElement.textContent = 'Пока нет подтверждённых провайдеров';
+    configuredProviders.appendChild(emptyElement);
+  } else {
+    for (const provider of readyProviders) {
+      const chipElement = document.createElement('span');
+      chipElement.className = 'ai-provider-ready-chip';
+      chipElement.textContent = '✓ ' + providerDisplayName(provider);
+      configuredProviders.appendChild(chipElement);
+    }
+  }
+
+  const selectedProvider = providerElement.value;
+  providerSettingsStatus.classList.remove('is-ready', 'is-error');
+  if (providerReady(selectedProvider)) {
+    providerSettingsStatus.textContent = '✓ готов';
+    providerSettingsStatus.classList.add('is-ready');
+  } else {
+    providerSettingsStatus.textContent = 'нужна настройка';
+  }
+}
+
+function setProviderKeyStatus(message, stateClass) {
+  providerKeyStatus.textContent = message || '';
+  providerKeyStatus.classList.remove('is-ready', 'is-error');
+  if (stateClass) {
+    providerKeyStatus.classList.add(stateClass);
+  }
 }
 
 function setTab(external) {
@@ -253,17 +414,20 @@ function setTab(external) {
   externalTabButton.setAttribute('aria-selected', external ? 'true' : 'false');
   pagePanel.hidden = external;
   externalPanel.hidden = !external;
-  if (external) ensureExternalAILink();
-  else commandElement.focus();
+  if (external) {
+    ensureExternalAILink();
+  } else {
+    commandElement.focus();
+  }
 }
 
 function fillModels(provider, models, selectedModel) {
   modelCache[provider] = Array.isArray(models) ? models.slice() : [];
-  modelElement.innerHTML = '';
-  const automatic = document.createElement('option');
-  automatic.value = '';
-  automatic.textContent = selectedModel ? 'Автоматически — рекомендуемая: ' + selectedModel : 'Автоматически — рекомендуемая сбалансированная модель';
-  modelElement.appendChild(automatic);
+  modelElement.replaceChildren();
+  const automaticOption = document.createElement('option');
+  automaticOption.value = '';
+  automaticOption.textContent = selectedModel ? 'Автоматически — рекомендуемая: ' + selectedModel : 'Автоматически — рекомендуемая сбалансированная модель';
+  modelElement.appendChild(automaticOption);
   for (const model of modelCache[provider]) {
     const option = document.createElement('option');
     option.value = model;
@@ -275,27 +439,49 @@ function fillModels(provider, models, selectedModel) {
 }
 
 async function loadModelsForSavedProvider(provider) {
-  if (provider !== 'ollama' && (!credentialStatus[provider] || !credentialStatus[provider].saved)) {
+  if (provider !== 'ollama' && (!credentialStatus[provider] || !credentialStatus[provider].saved || !credentialStatus[provider].unlocked)) {
     modelBlock.hidden = true;
+    executeButton.disabled = true;
     return;
   }
+  executeButton.disabled = true;
+  executeButton.title = 'Проверяю AI-провайдера';
   try {
     const response = await fetch('{{.Path}}?ai_provider_models&provider=' + encodeURIComponent(provider), {
       credentials:'same-origin',
       headers:{'Accept':'application/json'}
     });
     const payload = await parseResponse(response);
-    const savedModel = credentialStatus[provider] ? credentialStatus[provider].model : '';
-    fillModels(provider, payload.models || [], payload.model || savedModel || '');
-    if (provider === 'ollama') providerKeyStatus.textContent = '✓ Локальная Ollama доступна';
-  } catch (error) {
-    modelBlock.hidden = false;
-    modelElement.innerHTML = '<option value="">Автоматически — модель недоступна</option>';
+    const previousState = credentialStatus[provider] || {provider:provider};
+    credentialStatus[provider] = Object.assign({}, previousState, {
+      provider:provider,
+      saved:provider === 'ollama' ? true : Boolean(previousState.saved),
+      unlocked:true,
+      available:true,
+      model:payload.model || previousState.model || ''
+    });
+    fillModels(provider, payload.models || [], payload.model || credentialStatus[provider].model || '');
     if (provider === 'ollama') {
-      providerKeyStatus.textContent = 'Ollama недоступна: ' + error.message;
-      executeButton.disabled = true;
-      executeButton.title = 'Сначала запустите локальную Ollama';
+      setProviderKeyStatus('✓ Локальная Ollama отвечает', 'is-ready');
+    } else {
+      setProviderKeyStatus('✓ API key сохранён, провайдер отвечает', 'is-ready');
     }
+    refreshExecuteButtonState();
+    providerSettings.open = false;
+    renderProviderReadiness();
+    refreshExecuteButtonState();
+  } catch (error) {
+    const previousState = credentialStatus[provider] || {provider:provider};
+    credentialStatus[provider] = Object.assign({}, previousState, {available:false});
+    modelBlock.hidden = true;
+    executeButton.disabled = true;
+    executeButton.title = 'AI-провайдер недоступен';
+    setProviderKeyStatus((provider === 'ollama' ? 'Ollama недоступна: ' : 'Провайдер недоступен: ') + error.message, 'is-error');
+    providerSettingsStatus.textContent = 'ошибка подключения';
+    providerSettingsStatus.classList.remove('is-ready');
+    providerSettingsStatus.classList.add('is-error');
+    providerSettings.open = true;
+    renderProviderReadiness();
   }
 }
 
@@ -304,48 +490,47 @@ function updateProviderUI() {
   const help = providerHelp[provider] || providerHelp['openai-compatible'];
   providerKeyLink.href = help.url;
   providerKeyHelp.textContent = help.text;
-  const saved = credentialStatus[provider];
+  modelBlock.hidden = true;
+
   if (provider === 'ollama') {
     apiKeyElement.value = '';
     apiKeyElement.disabled = true;
-    apiKeyElement.placeholder = 'Для локальной Ollama API key не нужен';
+    apiKeyElement.placeholder = 'Для локальной Ollama API token не нужен';
     saveProviderTokenButton.textContent = 'Проверить локальную Ollama';
     providerKeyLink.textContent = 'Установить Ollama ↗';
-    providerKeyStatus.textContent = 'Локальная Ollama — API key не нужен';
     deleteProviderTokenButton.hidden = true;
-    executeButton.disabled = false;
-    executeButton.title = 'Отправить';
+    setProviderKeyStatus('Проверяю локальную Ollama…', '');
     loadModelsForSavedProvider(provider);
+    renderProviderReadiness();
     return;
   }
+
   apiKeyElement.disabled = false;
   saveProviderTokenButton.textContent = 'Проверить ключ и сохранить';
   providerKeyLink.textContent = 'Получить token ↗';
+  const saved = credentialStatus[provider];
   if (saved && saved.saved && saved.unlocked) {
-    providerKeyStatus.textContent = provider === 'ollama' ? '✓ Локальная Ollama доступна' : '✓ API key работает и сохранён';
-    deleteProviderTokenButton.hidden = provider === 'ollama';
     apiKeyElement.value = '';
-    apiKeyElement.placeholder = 'Ключ уже сохранён — вставьте новый только для замены';
-    executeButton.disabled = false;
-    executeButton.title = 'Отправить';
+    apiKeyElement.placeholder = 'Ключ сохранён — вставьте новый только для замены';
+    deleteProviderTokenButton.hidden = false;
+    setProviderKeyStatus('✓ API key сохранён', 'is-ready');
     loadModelsForSavedProvider(provider);
   } else if (saved && saved.saved) {
-    providerKeyStatus.textContent = 'Ключ сохранён, но этот браузер не может его открыть. Вставьте API key ещё раз.';
-    deleteProviderTokenButton.hidden = false;
     apiKeyElement.placeholder = 'Повторно вставьте API key для этого браузера';
-    modelBlock.hidden = true;
+    deleteProviderTokenButton.hidden = false;
     executeButton.disabled = true;
     executeButton.title = 'Сначала подтвердите API key';
+    setProviderKeyStatus('Ключ сохранён, но этот браузер не может его открыть. Вставьте API key ещё раз.', 'is-error');
     providerSettings.open = true;
   } else {
-    providerKeyStatus.textContent = 'API key ещё не подтверждён';
-    deleteProviderTokenButton.hidden = true;
     apiKeyElement.placeholder = 'Вставьте API key';
-    modelBlock.hidden = true;
+    deleteProviderTokenButton.hidden = true;
     executeButton.disabled = true;
     executeButton.title = 'Сначала подтвердите API key';
+    setProviderKeyStatus('API key ещё не подтверждён', '');
     providerSettings.open = true;
   }
+  renderProviderReadiness();
 }
 
 async function loadCredentialStatus() {
@@ -355,12 +540,14 @@ async function loadCredentialStatus() {
       headers:{'Accept':'application/json'}
     });
     const payload = await parseResponse(response);
-    for (const item of (payload.providers || [])) credentialStatus[item.provider] = item;
+    for (const providerState of (payload.providers || [])) {
+      credentialStatus[providerState.provider] = providerState;
+    }
+    renderProviderReadiness();
     updateProviderUI();
-  } catch (_) {
-    providerKeyStatus.textContent = 'Не удалось проверить сохранённый API key';
+  } catch (error) {
+    setProviderKeyStatus('Не удалось проверить сохранённые AI-провайдеры', 'is-error');
     executeButton.disabled = true;
-    executeButton.title = 'Сначала подтвердите API key';
     providerSettings.open = true;
   }
 }
@@ -369,14 +556,14 @@ async function saveProviderToken() {
   const provider = providerElement.value;
   const apiKey = apiKeyElement.value.trim();
   if (provider !== 'ollama' && !apiKey) {
-    providerKeyStatus.textContent = 'Сначала вставьте API token';
+    setProviderKeyStatus('Сначала вставьте API token', 'is-error');
     apiKeyElement.focus();
     return;
   }
   saveProviderTokenButton.disabled = true;
   executeButton.disabled = true;
   modelBlock.hidden = true;
-  providerKeyStatus.textContent = 'Проверяю API key у провайдера…';
+  setProviderKeyStatus(provider === 'ollama' ? 'Проверяю Ollama…' : 'Проверяю API key у провайдера…', '');
   try {
     const body = new URLSearchParams({provider:provider, api_key:apiKey});
     const response = await fetch('{{.Path}}?ai_provider_save', {
@@ -393,32 +580,45 @@ async function saveProviderToken() {
       provider:provider,
       saved:true,
       unlocked:true,
+      available:true,
       model:payload.model || '',
       updated_at:new Date().toISOString()
     };
     apiKeyElement.value = '';
-    providerKeyStatus.textContent = '✓ API key работает и сохранён';
-    deleteProviderTokenButton.hidden = false;
-    executeButton.disabled = false;
-    executeButton.title = 'Отправить';
+    if (provider === 'ollama') {
+      setProviderKeyStatus('✓ Локальная Ollama отвечает', 'is-ready');
+      deleteProviderTokenButton.hidden = true;
+    } else {
+      setProviderKeyStatus('✓ API key работает и сохранён', 'is-ready');
+      deleteProviderTokenButton.hidden = false;
+    }
     fillModels(provider, payload.models || [], payload.model || '');
-    setStatus('AI-провайдер подключён. Можно отправлять команду. Модель выбрана автоматически; менять её необязательно.');
+    refreshExecuteButtonState();
+    providerSettings.open = false;
+    renderProviderReadiness();
+    setStatus('AI-провайдер готов. Опишите изменение текущей страницы.');
   } catch (error) {
-    providerKeyStatus.textContent = 'Ключ не сохранён: ' + error.message;
-    modelBlock.hidden = true;
+    const previousState = credentialStatus[provider] || {provider:provider};
+    credentialStatus[provider] = Object.assign({}, previousState, {available:false});
+    setProviderKeyStatus('Провайдер не готов: ' + error.message, 'is-error');
     executeButton.disabled = true;
-    executeButton.title = 'Сначала подтвердите API key';
+    executeButton.title = 'Сначала настройте AI-провайдера';
     providerSettings.open = true;
+    renderProviderReadiness();
+    refreshExecuteButtonState();
   } finally {
     saveProviderTokenButton.disabled = false;
   }
 }
 
 async function deleteProviderToken() {
-  if (!window.confirm('Удалить сохранённый API token этого провайдера?')) return;
+  if (!window.confirm('Удалить сохранённый API token этого провайдера?')) {
+    return;
+  }
   deleteProviderTokenButton.disabled = true;
   try {
-    const body = new URLSearchParams({provider:providerElement.value});
+    const provider = providerElement.value;
+    const body = new URLSearchParams({provider:provider});
     const response = await fetch('{{.Path}}?ai_provider_delete', {
       method:'POST',
       credentials:'same-origin',
@@ -429,25 +629,61 @@ async function deleteProviderToken() {
       body:body.toString()
     });
     await parseResponse(response);
-    delete credentialStatus[providerElement.value];
-    delete modelCache[providerElement.value];
-    providerKeyStatus.textContent = 'API key удалён';
+    delete credentialStatus[provider];
+    delete modelCache[provider];
     modelBlock.hidden = true;
     deleteProviderTokenButton.hidden = true;
     executeButton.disabled = true;
     executeButton.title = 'Сначала подтвердите API key';
+    setProviderKeyStatus('API key удалён', '');
     providerSettings.open = true;
+    renderProviderReadiness();
+    refreshExecuteButtonState();
   } catch (error) {
-    providerKeyStatus.textContent = error.message;
+    setProviderKeyStatus(error.message, 'is-error');
   } finally {
     deleteProviderTokenButton.disabled = false;
+  }
+}
+
+function revokeSelectedFileObjectURLs() {
+  for (const objectURL of selectedFileObjectURLs) {
+    URL.revokeObjectURL(objectURL);
+  }
+  selectedFileObjectURLs = [];
+}
+
+function renderSelectedFiles() {
+  revokeSelectedFileObjectURLs();
+  fileStatus.replaceChildren();
+  for (const selectedFile of Array.from(fileInput.files || [])) {
+    const chipElement = document.createElement('span');
+    chipElement.className = 'ai-file-chip';
+    if (selectedFile.type && selectedFile.type.indexOf('image/') === 0) {
+      const imageElement = document.createElement('img');
+      const objectURL = URL.createObjectURL(selectedFile);
+      selectedFileObjectURLs.push(objectURL);
+      imageElement.src = objectURL;
+      imageElement.alt = '';
+      chipElement.appendChild(imageElement);
+    }
+    const nameElement = document.createElement('span');
+    nameElement.textContent = selectedFile.name;
+    chipElement.appendChild(nameElement);
+    fileStatus.appendChild(chipElement);
   }
 }
 
 function fileToBase64(file) {
   return new Promise(function(resolve, reject) {
     const reader = new FileReader();
-    reader.onload = function() { resolve({name:file.name, content:String(reader.result || '').split(',')[1] || ''}); };
+    reader.onload = function() {
+      resolve({
+        name:file.name,
+        mime:file.type || 'application/octet-stream',
+        content:String(reader.result || '').split(',')[1] || ''
+      });
+    };
     reader.onerror = reject;
     reader.readAsDataURL(file);
   });
@@ -455,63 +691,209 @@ function fileToBase64(file) {
 
 function showDraft(payload, files) {
   currentDraft = {
-    path: payload.path || '{{.Path}}',
-    title: payload.title || '',
-    html: payload.html || ''
+    path:payload.path || '{{.Path}}',
+    title:payload.title || '',
+    html:payload.html || ''
   };
   currentDraftFiles = files.slice();
   previewFrame.srcdoc = currentDraft.html;
+  pageBackgroundFrame.srcdoc = currentDraft.html;
   previewPanel.hidden = false;
   providerSettings.open = false;
+  streamDetails.open = false;
 }
 
-function clearDraft() {
+function setPreviewExpanded(expanded) {
+  previewPanel.classList.toggle('is-expanded', expanded);
+  expandPreviewButton.textContent = expanded ? 'Вернуть в окно' : 'Почти на весь экран';
+}
+
+function clearDraft(restoreBackground) {
   currentDraft = null;
   currentDraftFiles = [];
   previewFrame.srcdoc = '';
   previewPanel.hidden = true;
+  setPreviewExpanded(false);
+  if (restoreBackground !== false) {
+    restoreBackgroundPage();
+  }
+}
+
+function editorWebSocketURL() {
+  const socketURL = new URL(window.location.href);
+  socketURL.search = '';
+  socketURL.searchParams.set('ai_execute_ws', '');
+  socketURL.protocol = socketURL.protocol === 'https:' ? 'wss:' : 'ws:';
+  return socketURL.toString();
+}
+
+function streamingHTMLForBackground(text) {
+  const lowerText = text.toLowerCase();
+  const doctypeIndex = lowerText.indexOf('<!doctype');
+  const htmlIndex = lowerText.indexOf('<html');
+  let startIndex = -1;
+  if (doctypeIndex >= 0 && htmlIndex >= 0) {
+    startIndex = Math.min(doctypeIndex, htmlIndex);
+  } else {
+    startIndex = Math.max(doctypeIndex, htmlIndex);
+  }
+  return startIndex >= 0 ? text.slice(startIndex) : '';
+}
+
+function scheduleBackgroundPreviewRender() {
+  if (backgroundPreviewRenderScheduled) {
+    return;
+  }
+  backgroundPreviewRenderScheduled = true;
+  window.requestAnimationFrame(function renderBackgroundPreview() {
+    backgroundPreviewRenderScheduled = false;
+    const previewHTML = streamingHTMLForBackground(streamedProviderText);
+    if (previewHTML) {
+      pageBackgroundFrame.srcdoc = previewHTML;
+    }
+  });
+}
+
+function scheduleStreamRender() {
+  if (streamRenderScheduled) {
+    return;
+  }
+  streamRenderScheduled = true;
+  window.requestAnimationFrame(function renderStreamText() {
+    streamRenderScheduled = false;
+    const visibleText = streamedProviderText.length > 50000 ? '…\n' + streamedProviderText.slice(-50000) : streamedProviderText;
+    streamOutput.textContent = visibleText;
+    streamOutput.scrollTop = streamOutput.scrollHeight;
+  });
+  scheduleBackgroundPreviewRender();
+}
+
+function setEditorMinimized(minimized) {
+  editorMinimized = minimized;
+  editorPage.classList.toggle('is-minimized', minimized);
+  editorBackdrop.classList.toggle('is-previewing', minimized);
+  pageBackgroundFrame.classList.toggle('is-interactive', minimized);
+  minimizeEditorButton.textContent = minimized ? '↗' : '—';
+  minimizeEditorButton.setAttribute('aria-label', minimized ? 'Вернуть редактор' : 'Свернуть редактор');
+  minimizeEditorButton.title = minimized ? 'Вернуть редактор' : 'Свернуть редактор';
+}
+
+function restoreBackgroundPage() {
+  pageBackgroundFrame.srcdoc = '';
+  pageBackgroundFrame.src = backgroundPageURL();
 }
 
 async function executeTask() {
   const task = commandElement.value.trim();
-  const saved = credentialStatus[providerElement.value];
+  const provider = providerElement.value;
   if (!task) {
-    setStatus('Сначала напишите или скажите, что нужно изменить.');
+    setStatus('Сначала напишите или скажите, что нужно изменить на текущей странице.');
     commandElement.focus();
     return;
   }
-  if (providerElement.value !== 'ollama' && (!saved || !saved.saved || !saved.unlocked)) {
-    setStatus('Сначала проверьте и сохраните API token.');
+  if (!providerReady(provider)) {
+    setStatus('Сначала настройте и проверьте AI-провайдера.');
     providerSettings.open = true;
-    apiKeyElement.focus();
     return;
   }
-  executeButton.disabled = true;
-  setStatus(currentDraft ? 'AI продолжает изменения черновика…' : 'AI создаёт черновик страницы…');
-  try {
-    const files = await Promise.all(Array.from(fileInput.files || []).map(fileToBase64));
-    const response = await fetch('{{.Path}}?ai_execute', {
-      method:'POST',
-      credentials:'same-origin',
-      headers:{'Content-Type':'application/json','X-SiteBrush-CSRF':accountCSRF},
-      body:JSON.stringify({
-        provider:providerElement.value,
-        model:modelElement.value,
-        page_path:'{{.Path}}',
-        task:task,
-        draft_title:currentDraft ? currentDraft.title : '',
-        draft_html:currentDraft ? currentDraft.html : '',
-        files:files
-      })
-    });
-    const payload = await parseResponse(response);
-    showDraft(payload, files);
-    setStatus('Черновик готов. Проверьте предпросмотр, затем сохраните его или напишите следующую команду для продолжения изменений.');
-  } catch (error) {
-    setStatus('Ошибка AI: ' + error.message);
-  } finally {
-    executeButton.disabled = false;
+
+  if (activeEditorSocket) {
+    try {
+      activeEditorSocket.close();
+    } catch (closeError) {
+    }
+    activeEditorSocket = null;
   }
+
+  const backgroundBeforeRequest = currentDraft ? currentDraft.html : '';
+  executeButton.disabled = true;
+  streamedProviderText = '';
+  streamOutput.textContent = '';
+  streamDetails.hidden = false;
+  streamDetails.open = true;
+  setStatus(currentDraft ? 'AI продолжает редактировать ваш черновик…' : 'AI редактирует текущую страницу…');
+
+  let files;
+  try {
+    files = await Promise.all(Array.from(fileInput.files || []).map(fileToBase64));
+  } catch (error) {
+    refreshExecuteButtonState();
+    setStatus('Не удалось прочитать прикреплённый файл.');
+    return;
+  }
+
+  const socket = new WebSocket(editorWebSocketURL());
+  activeEditorSocket = socket;
+  let terminalEventReceived = false;
+
+  socket.onopen = function onEditorSocketOpen() {
+    socket.send(JSON.stringify({
+      provider:provider,
+      model:modelElement.value,
+      page_path:'{{.Path}}',
+      task:task,
+      draft_title:currentDraft ? currentDraft.title : '',
+      draft_html:currentDraft ? currentDraft.html : '',
+      files:files
+    }));
+  };
+
+  socket.onmessage = function onEditorSocketMessage(messageEvent) {
+    let payload;
+    try {
+      payload = JSON.parse(messageEvent.data || '{}');
+    } catch (parseError) {
+      return;
+    }
+    if (payload.type === 'status') {
+      setStatus(payload.text || 'AI работает…');
+      return;
+    }
+    if (payload.type === 'delta') {
+      streamedProviderText += payload.text || '';
+      scheduleStreamRender();
+      return;
+    }
+    if (payload.type === 'draft') {
+      terminalEventReceived = true;
+      showDraft(payload, files);
+      setStatus('Черновик готов и показан на фоне. Можно свернуть редактор кнопкой —, проверить страницу, вернуть окно для дополнительных правок и затем сохранить или отменить.');
+      refreshExecuteButtonState();
+      socket.close();
+      return;
+    }
+    if (payload.type === 'error') {
+      terminalEventReceived = true;
+      setStatus('Ошибка AI: ' + (payload.error || 'неизвестная ошибка'));
+      if (backgroundBeforeRequest) {
+        pageBackgroundFrame.srcdoc = backgroundBeforeRequest;
+      } else {
+        restoreBackgroundPage();
+      }
+      socket.close();
+    }
+  };
+
+  socket.onerror = function onEditorSocketError() {
+    if (!terminalEventReceived) {
+      setStatus('Соединение с AI-провайдером прервалось.');
+      refreshExecuteButtonState();
+    }
+  };
+
+  socket.onclose = function onEditorSocketClose() {
+    if (activeEditorSocket === socket) {
+      activeEditorSocket = null;
+    }
+    refreshExecuteButtonState();
+  };
+}
+
+function backgroundPageURL() {
+  const pageURL = new URL('{{.Path}}', window.location.origin);
+  pageURL.searchParams.set('ai_background', '');
+  pageURL.searchParams.set('_', String(Date.now()));
+  return pageURL.toString();
 }
 
 async function saveDraft() {
@@ -520,7 +902,7 @@ async function saveDraft() {
     return;
   }
   saveDraftButton.disabled = true;
-  setStatus('Сохраняю проверенный черновик в SiteBrush…');
+  setStatus('Сохраняю страницу и прикреплённые файлы в SiteBrush…');
   try {
     const response = await fetch('{{.Path}}?ai_apply', {
       method:'POST',
@@ -534,13 +916,21 @@ async function saveDraft() {
       })
     });
     const payload = await parseResponse(response);
-    setStatus('Готово. Страница ' + (payload.path || currentDraft.path) + ' сохранена в SiteBrush и добавлена в ревизии.');
-    clearDraft();
+    clearDraft(false);
+    restoreBackgroundPage();
+    setStatus('Сохранено. Страница ' + (payload.path || '{{.Path}}') + ' обновлена и добавлена в ревизии. При необходимости откройте «Ревизии / откат».');
   } catch (error) {
     setStatus('Ошибка сохранения: ' + error.message);
   } finally {
     saveDraftButton.disabled = false;
   }
+}
+
+function clearVoiceTimers() {
+  window.clearTimeout(speechSilenceTimer);
+  window.clearTimeout(speechHardStopTimer);
+  speechSilenceTimer = 0;
+  speechHardStopTimer = 0;
 }
 
 function setRecording(recording) {
@@ -550,37 +940,96 @@ function setRecording(recording) {
   recordButton.title = recording ? 'Остановить запись' : 'Говорить';
 }
 
+function requestVoiceStop(abortImmediately) {
+  const recognition = speechRecognition;
+  if (!recognition) {
+    return;
+  }
+  clearVoiceTimers();
+  try {
+    if (abortImmediately) {
+      recognition.abort();
+    } else {
+      recognition.stop();
+    }
+  } catch (stopError) {
+  }
+}
+
+function scheduleVoiceSilenceStop() {
+  window.clearTimeout(speechSilenceTimer);
+  speechSilenceTimer = window.setTimeout(function stopAfterSilence() {
+    requestVoiceStop(false);
+  }, 1400);
+}
+
 function toggleVoice() {
   if (speechRecognition) {
-    try { speechRecognition.stop(); } catch (_) {}
+    requestVoiceStop(true);
     return;
   }
   const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
   if (!Recognition) {
-    setStatus('Голосовой ввод не поддерживается этим браузером. Можно ввести команду текстом.');
+    setStatus('Голосовой ввод не поддерживается этим браузером. Можно ввести задание текстом.');
     return;
   }
+
   const recognition = new Recognition();
   speechRecognition = recognition;
+  speechInitialText = commandElement.value.trim();
   recognition.continuous = false;
   recognition.interimResults = true;
-  recognition.onstart = function() { setRecording(true); setStatus('Слушаю…'); };
-  recognition.onresult = function(event) {
-    let transcript = '';
-    for (let index = event.resultIndex; index < event.results.length; index++) transcript += event.results[index][0].transcript;
-    if (transcript.trim()) commandElement.value = transcript.trim();
+  recognition.lang = document.documentElement.lang || 'ru-RU';
+
+  recognition.onstart = function onVoiceStart() {
+    setRecording(true);
+    setStatus('Слушаю… Нажмите ■ для немедленной остановки.');
+    speechHardStopTimer = window.setTimeout(function hardVoiceStop() {
+      requestVoiceStop(true);
+    }, 25000);
   };
-  recognition.onerror = function() { setStatus('Не удалось получить голосовую команду. Можно продолжить текстом.'); };
-  recognition.onend = function() {
+
+  recognition.onresult = function onVoiceResult(event) {
+    let transcript = '';
+    let hasFinalResult = false;
+    for (let resultIndex = 0; resultIndex < event.results.length; resultIndex += 1) {
+      transcript += event.results[resultIndex][0].transcript;
+      if (event.results[resultIndex].isFinal) {
+        hasFinalResult = true;
+      }
+    }
+    transcript = transcript.trim();
+    commandElement.value = [speechInitialText, transcript].filter(Boolean).join(speechInitialText && transcript ? ' ' : '');
+    refreshExecuteButtonState();
+    if (hasFinalResult) {
+      requestVoiceStop(false);
+    } else {
+      scheduleVoiceSilenceStop();
+    }
+  };
+
+  recognition.onspeechend = function onVoiceSpeechEnd() {
+    requestVoiceStop(false);
+  };
+
+  recognition.onerror = function onVoiceError() {
+    setStatus('Голосовой ввод остановлен. Можно продолжить редактирование текстом.');
+  };
+
+  recognition.onend = function onVoiceEnd() {
+    clearVoiceTimers();
     speechRecognition = null;
     setRecording(false);
-    if (commandElement.value.trim()) setStatus('Команда распознана. Нажмите ↑, чтобы отправить.');
+    if (commandElement.value.trim()) {
+      setStatus('Голосовое задание готово. Нажмите ↑, чтобы отправить его на редактирование страницы.');
+    }
   };
+
   recognition.start();
 }
 
 async function createExternalAILink() {
-  setExternalStatus('Создаю отзывную ссылку…');
+  setExternalStatus('Создаю отзывную ссылку для текущей страницы…');
   externalAILink.value = '';
   try {
     const response = await fetch('{{.Path}}?ai_capability_create', {
@@ -602,8 +1051,12 @@ async function createExternalAILink() {
 }
 
 function ensureExternalAILink() {
-  if (externalAILink.value) return Promise.resolve(externalAILink.value);
-  if (!externalLinkPromise) externalLinkPromise = createExternalAILink();
+  if (externalAILink.value) {
+    return Promise.resolve(externalAILink.value);
+  }
+  if (!externalLinkPromise) {
+    externalLinkPromise = createExternalAILink();
+  }
   return externalLinkPromise;
 }
 
@@ -621,38 +1074,74 @@ async function copyExternalAILink() {
 
 function copyAndOpenExternalAI(targetURL, name) {
   const popup = window.open(targetURL, '_blank', 'noopener,noreferrer');
-  copyExternalAILink().then(function() {
-    setExternalStatus('Ссылка скопирована. Вставьте её в ' + name + ' вместе с заданием.');
-  }).catch(function(error) {
+  copyExternalAILink().then(function onExternalLinkCopied() {
+    setExternalStatus('Ссылка скопирована. Вставьте её в ' + name + ' вместе с заданием по текущей странице.');
+  }).catch(function onExternalLinkError(error) {
     setExternalStatus(error.message);
-    if (popup) popup.close();
+    if (popup) {
+      popup.close();
+    }
   });
 }
 
-document.getElementById('fileButton').addEventListener('click', function() { fileInput.click(); });
-fileInput.addEventListener('change', function() {
-  fileStatus.textContent = Array.from(fileInput.files || []).map(function(file) { return file.name; }).join(', ');
+document.getElementById('fileButton').addEventListener('click', function onFileButtonClick() {
+  fileInput.click();
 });
+fileInput.addEventListener('change', renderSelectedFiles);
 recordButton.addEventListener('click', toggleVoice);
 executeButton.addEventListener('click', executeTask);
-saveDraftButton.addEventListener('click', saveDraft);
-discardDraftButton.addEventListener('click', function() {
-  clearDraft();
-  setStatus('Черновик отменён. Исходная страница не изменена.');
+commandElement.addEventListener('input', refreshExecuteButtonState);
+minimizeEditorButton.addEventListener('click', function onMinimizeEditorClick() {
+  setEditorMinimized(!editorMinimized);
 });
-providerElement.addEventListener('change', updateProviderUI);
+saveDraftButton.addEventListener('click', saveDraft);
+expandPreviewButton.addEventListener('click', function onExpandPreviewClick() {
+  setPreviewExpanded(!previewPanel.classList.contains('is-expanded'));
+});
+discardDraftButton.addEventListener('click', function onDiscardDraftClick() {
+  clearDraft(true);
+  setStatus('Черновик отменён. Исходная страница восстановлена в предпросмотре и не изменена.');
+});
+providerElement.addEventListener('change', function onProviderChange() {
+  updateProviderUI();
+  refreshExecuteButtonState();
+});
 saveProviderTokenButton.addEventListener('click', saveProviderToken);
 deleteProviderTokenButton.addEventListener('click', deleteProviderToken);
-pageTabButton.addEventListener('click', function() { setTab(false); });
-externalTabButton.addEventListener('click', function() { setTab(true); });
-document.getElementById('copyExternalAILinkButton').addEventListener('click', function() { copyExternalAILink().catch(function(error){ setExternalStatus(error.message); }); });
-document.getElementById('renewExternalAILinkButton').addEventListener('click', function() { createExternalAILink().catch(function(){}); });
-document.getElementById('openChatGPTButton').addEventListener('click', function() { copyAndOpenExternalAI('https://chatgpt.com/', 'ChatGPT'); });
-document.getElementById('openClaudeButton').addEventListener('click', function() { copyAndOpenExternalAI('https://claude.ai/new', 'Claude'); });
-document.addEventListener('keydown', function(event) {
+pageTabButton.addEventListener('click', function onPageTabClick() {
+  setTab(false);
+});
+externalTabButton.addEventListener('click', function onExternalTabClick() {
+  setTab(true);
+});
+document.getElementById('copyExternalAILinkButton').addEventListener('click', function onCopyExternalClick() {
+  copyExternalAILink().catch(function onCopyError(error) {
+    setExternalStatus(error.message);
+  });
+});
+document.getElementById('renewExternalAILinkButton').addEventListener('click', function onRenewExternalClick() {
+  createExternalAILink().catch(function ignoreRenewError() {});
+});
+document.getElementById('openChatGPTButton').addEventListener('click', function onOpenChatGPTClick() {
+  copyAndOpenExternalAI('https://chatgpt.com/', 'ChatGPT');
+});
+document.getElementById('openClaudeButton').addEventListener('click', function onOpenClaudeClick() {
+  copyAndOpenExternalAI('https://claude.ai/new', 'Claude');
+});
+document.addEventListener('keydown', function onEditorKeydown(event) {
   if ((event.ctrlKey || event.metaKey) && event.key === 'Enter' && !pagePanel.hidden) {
     event.preventDefault();
     executeTask();
+  }
+  if (event.key === 'Escape' && previewPanel.classList.contains('is-expanded')) {
+    setPreviewExpanded(false);
+  }
+});
+window.addEventListener('beforeunload', function onEditorUnload() {
+  requestVoiceStop(true);
+  revokeSelectedFileObjectURLs();
+  if (activeEditorSocket) {
+    activeEditorSocket.close();
   }
 });
 
@@ -661,6 +1150,8 @@ if (savedCommand) {
   commandElement.value = savedCommand;
   sessionStorage.removeItem('sitebrush.aiEditorCommand');
 }
+renderProviderReadiness();
+refreshExecuteButtonState();
 loadCredentialStatus();
 commandElement.focus();
 </script>

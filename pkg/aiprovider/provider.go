@@ -98,7 +98,14 @@ func NewClient(configuration Config, httpClient *http.Client) (*Client, error) {
 		configuration.MaxResponseBytes = DefaultMaxResponseBytes
 	}
 	if configuration.Timeout <= 0 {
-		configuration.Timeout = 30 * time.Second
+		if configuration.Provider == ProviderOllama {
+			// Local models may need minutes to load weights and produce the first
+			// token. Keep that latency at the provider boundary instead of turning
+			// a slow but healthy Ollama instance into a false editor failure.
+			configuration.Timeout = 15 * time.Minute
+		} else {
+			configuration.Timeout = 2 * time.Minute
+		}
 	}
 	if httpClient == nil {
 		if configuration.Provider == ProviderOllama {
