@@ -11577,7 +11577,7 @@ func TestEditorExposesOnlyVisualTextAndAIRoutes(t *testing.T) {
 		t.Fatal(err)
 	}
 	aiTemplate := string(aiTemplateBytes)
-	for _, expectedFragment := range []string{"pageTabButton", "externalTabButton", "saveProviderTokenButton", "?ai_provider_save", "?ai_execute", "?ai_apply", "previewPanel", "saveDraftButton", "openChatGPTButton", "openClaudeButton"} {
+	for _, expectedFragment := range []string{"pageTabButton", "externalTabButton", "saveProviderTokenButton", "?ai_provider_save", "ai_execute_ws", "?ai_apply", "previewPanel", "saveDraftButton", "openChatGPTButton", "openClaudeButton"} {
 		if !strings.Contains(aiTemplate, expectedFragment) {
 			t.Fatalf("edit_ai.html does not expose %q", expectedFragment)
 		}
