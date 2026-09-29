@@ -133,6 +133,10 @@ func TestOwnedSessionsCanBeRestrictedExtendedAndRevoked(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	capabilities, err := manager.ListCapabilities("owner@example.org", "example.org")
+	if err != nil || len(capabilities) != 1 || capabilities[0].ID != capability.ID {
+		t.Fatalf("unexchanged capabilities=%+v err=%v", capabilities, err)
+	}
 	session, err := manager.Exchange(token, "example.org")
 	if err != nil {
 		t.Fatal(err)
@@ -163,6 +167,10 @@ func TestOwnedSessionsCanBeRestrictedExtendedAndRevoked(t *testing.T) {
 	}
 	if _, err := manager.Exchange(token, "example.org"); err == nil {
 		t.Fatal("revoked session left its capability able to mint a replacement")
+	}
+	capabilities, err = manager.ListCapabilities("owner@example.org", "example.org")
+	if err != nil || len(capabilities) != 0 {
+		t.Fatalf("revoked capability remained manageable as active: %+v err=%v", capabilities, err)
 	}
 	if err := manager.RevokeCapabilityID(capability.ID, "owner@example.org", "example.org"); err != nil {
 		t.Fatal(err)
