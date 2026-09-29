@@ -2,6 +2,7 @@ package mailout
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"net"
 	"net/mail"
@@ -113,6 +114,19 @@ func TestDirectSenderSendValidationLookupAndFailoverBranches(t *testing.T) {
 	err := sender.Send(ctx, Message{From: "from@example.com", To: "to@example.net", Subject: "subject", Body: "body"})
 	if err == nil || len(endpoints) != 2 {
 		t.Fatalf("MX failover attempts = %#v err=%v", endpoints, err)
+	}
+}
+
+func TestSecurityBoundaryLegacySMTPKeepsCertificateVerification(t *testing.T) {
+	config := legacySMTPConfig("mx.example.net")
+	if config.InsecureSkipVerify {
+		t.Fatal("SECURITY: legacy SMTP compatibility disabled certificate verification")
+	}
+	if config.ServerName != "mx.example.net" {
+		t.Fatalf("legacy SMTP ServerName=%q", config.ServerName)
+	}
+	if config.MinVersion != tls.VersionTLS10 {
+		t.Fatalf("legacy SMTP minimum TLS version=%x", config.MinVersion)
 	}
 }
 

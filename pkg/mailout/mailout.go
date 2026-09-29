@@ -134,7 +134,7 @@ func (sender DirectSender) sendToEndpoint(ctx context.Context, targetHost, endpo
 func legacySMTPConfig(targetHost string) *tls.Config {
 	// Compatibility applies only to unauthenticated outbound MX transport, never
 	// to HTTPS, SMTP AUTH, or the connection between SiteBrush and its relay.
-	config := &tls.Config{ServerName: targetHost, MinVersion: tls.VersionTLS10, InsecureSkipVerify: true}
+	config := &tls.Config{ServerName: targetHost, MinVersion: tls.VersionTLS10}
 	for _, suite := range tls.CipherSuites() {
 		config.CipherSuites = append(config.CipherSuites, suite.ID)
 	}
