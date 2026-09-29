@@ -11621,6 +11621,112 @@ func TestRecommendedAIEditorModelPrefersBalancedOptions(t *testing.T) {
 	}
 }
 
+func TestAIEditorParsesHTMLProviderResponsesWithoutJSON(t *testing.T) {
+	cases := []struct {
+		name     string
+		response string
+		title    string
+		contains string
+	}{
+		{
+			name:     "plain complete html",
+			response: "<!doctype html><html><head><title>AI TEST SITE</title></head><body><h1>Updated</h1></body></html>",
+			title:    "AI TEST SITE",
+			contains: "<h1>Updated</h1>",
+		},
+		{
+			name:     "markdown fenced html",
+			response: "Here is the updated page:\n\n\`\`\`html\n<html><head><title>Fenced</title></head><body>ok</body></html>\n\`\`\`",
+			title:    "Fenced",
+			contains: "<body>ok</body>",
+		},
+		{
+			name:     "legacy json remains accepted",
+			response: "{\"title\":\"Legacy\",\"html\":\"<html><body>legacy</body></html>\"}",
+			title:    "Legacy",
+			contains: "legacy",
+		},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			result, err := parseAIEditorModelResult(testCase.response)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.Title != testCase.title || !strings.Contains(result.HTML, testCase.contains) {
+				t.Fatalf("result=%+v", result)
+			}
+		})
+	}
+}
+
+func TestAIEditorRejectsConversationInsteadOfHTML(t *testing.T) {
+	if _, err := parseAIEditorModelResult("Sure, I can help you edit the page."); err == nil {
+		t.Fatal("AI editor accepted conversational text as a page")
+	}
+}
+
+func TestAIEditorTemplateUsesCurrentPageOverlayStreamingAndPreviewControls(t *testing.T) {
+	templateBytes, err := embeddedWebFiles.ReadFile("web/edit_ai.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	templateSource := string(templateBytes)
+	for _, expectedFragment := range []string{
+		`id="pageBackgroundFrame"`,
+		`?ai_background`,
+		`ai-backdrop`,
+		`id="aiCommand"`,
+		`ai_execute_ws`,
+		`streamOutput`,
+		`expandPreviewButton`,
+		`Сохранить страницу`,
+		`configuredProviders`,
+		`ai-provider-ready-chip`,
+		`requestVoiceStop`,
+		`recognition.onspeechend`,
+		`mime:file.type`,
+	} {
+		if !strings.Contains(templateSource, expectedFragment) {
+			t.Fatalf("AI editor template missing %q", expectedFragment)
+		}
+	}
+}
+
+func TestAIEditorBackgroundFrameIsSameOriginOnly(t *testing.T) {
+	request := httptest.NewRequest(http.MethodGet, "https://example.com/page?ai_background", nil)
+	request.AddCookie(&http.Cookie{Name: "sitebrush_session", Value: "test-session"})
+	policy := adminResponseFramePolicy(request)
+	if policy.xFrameOptions != "SAMEORIGIN" || policy.contentSecurityPolicy != "frame-ancestors 'self'" {
+		t.Fatalf("AI background policy=%+v", policy)
+	}
+
+	ordinaryRequest := httptest.NewRequest(http.MethodGet, "https://example.com/page?ai", nil)
+	ordinaryRequest.AddCookie(&http.Cookie{Name: "sitebrush_session", Value: "test-session"})
+	ordinaryPolicy := adminResponseFramePolicy(ordinaryRequest)
+	if ordinaryPolicy.xFrameOptions != "DENY" || ordinaryPolicy.contentSecurityPolicy != "frame-ancestors 'none'" {
+		t.Fatalf("ordinary admin policy=%+v", ordinaryPolicy)
+	}
+}
+
+func TestAIEditorAttachmentMetadataDescribesSiteFileURL(t *testing.T) {
+	decodedFiles, names, err := decodeAIEditorFiles([]aiEditorUploadedFile{{
+		Name:    "photo.jpg",
+		MIME:    "image/jpeg",
+		Content: base64.StdEncoding.EncodeToString([]byte("photo")),
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(names) != 1 || names[0] != "photo.jpg" {
+		t.Fatalf("names=%v", names)
+	}
+	description := aiEditorAttachmentDescriptions(decodedFiles)
+	if !strings.Contains(description, "image/jpeg") || !strings.Contains(description, "/files/photo.jpg") {
+		t.Fatalf("description=%q", description)
+	}
+}
+
 func TestAIEditorModelsExcludeNonTextModels(t *testing.T) {
 	models := aiEditorModels(aiprovider.ProviderOpenAICompatible, []string{"text-embedding-3-large", "gpt-6-sol", "gpt-image-1", "whisper-1"})
 	if len(models) != 1 || models[0] != "gpt-6-sol" {
