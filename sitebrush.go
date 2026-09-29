@@ -10882,12 +10882,14 @@ type aiEditorDecodedFile struct {
 type aiEditorExecutionRequest struct {
 	Provider string                 `json:"provider"`
 	BaseURL  string                 `json:"base_url"`
-	Model    string                 `json:"model"`
-	APIKey   string                 `json:"-"`
-	PagePath string                 `json:"page_path"`
-	Scope    string                 `json:"scope"`
-	Task     string                 `json:"task"`
-	Files    []aiEditorUploadedFile `json:"files"`
+	Model      string                 `json:"model"`
+	APIKey     string                 `json:"-"`
+	PagePath   string                 `json:"page_path"`
+	Scope      string                 `json:"scope"`
+	Task       string                 `json:"task"`
+	DraftTitle string                 `json:"draft_title,omitempty"`
+	DraftHTML  string                 `json:"draft_html,omitempty"`
+	Files      []aiEditorUploadedFile `json:"files"`
 }
 
 type aiEditorApplyRequest struct {
@@ -11016,6 +11018,12 @@ func (a *App) executeAIEditorPageRequest(w http.ResponseWriter, r *http.Request,
 		log.Printf("AI EDITOR page read failed domain=%q path=%q err=%v", domain, request.PagePath, err)
 		http.Error(w, "target page was not found", http.StatusNotFound)
 		return
+	}
+	if strings.TrimSpace(request.DraftHTML) != "" {
+		page.HTML = request.DraftHTML
+		if strings.TrimSpace(request.DraftTitle) != "" {
+			page.Title = strings.TrimSpace(request.DraftTitle)
+		}
 	}
 
 	modelResponse, err := client.Complete(r.Context(), aiprovider.Request{Messages: []aiprovider.Message{
