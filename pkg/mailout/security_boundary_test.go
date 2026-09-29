@@ -2,11 +2,11 @@ package mailout
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"net"
 	"net/mail"
 	"strings"
-	"crypto/tls"
 	"testing"
 	"time"
 )
