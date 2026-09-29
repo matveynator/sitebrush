@@ -161,6 +161,9 @@ func TestOwnedSessionsCanBeRestrictedExtendedAndRevoked(t *testing.T) {
 	if _, err := manager.Lookup(session.Token, "example.org"); err == nil {
 		t.Fatal("revoked session remained active")
 	}
+	if _, err := manager.Exchange(token, "example.org"); err == nil {
+		t.Fatal("revoked session left its capability able to mint a replacement")
+	}
 	if err := manager.RevokeCapabilityID(capability.ID, "owner@example.org", "example.org"); err != nil {
 		t.Fatal(err)
 	}
