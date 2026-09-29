@@ -9929,6 +9929,12 @@ func (store *appAIStore) Execute(request aieditor.Request, done <-chan struct{})
 	if domain == "" {
 		return aieditor.Result{Operation: request.Operation, Err: errors.New("AI editor domain is required")}
 	}
+	select {
+	case <-done:
+		return aieditor.Result{Operation: request.Operation, Err: aieditor.ErrTaskCanceled}
+	default:
+	}
+
 	// Task cancellation remains channel-owned inside SiteBrush. This small bridge
 	// exists only because database/sql and the existing storage helpers require a
 	// context at their boundary; closing Done cancels those boundary operations.
