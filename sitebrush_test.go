@@ -19184,6 +19184,8 @@ func TestAIEditorUploadsFilesBeforeInferenceAndKeepsStoredReferences(t *testing.
 		"остаются в Files",
 		".ai-send:not(:disabled)",
 		" — доступен",
+		"executeButton.disabled = requestIsRunning || uploadingEditorFiles || !taskIsReady;",
+		"if (!providerReady(provider)) {",
 	} {
 		if !strings.Contains(templateSource, required) {
 			t.Fatalf("AI editor immediate-file flow missing %q", required)
@@ -19194,6 +19196,7 @@ func TestAIEditorUploadsFilesBeforeInferenceAndKeepsStoredReferences(t *testing.
 		"currentDraftFiles",
 		"будут загружены в Files только когда",
 		"providerSettingsStatus.textContent = '✓ готов'",
+		"executeButton.disabled = requestIsRunning || uploadingEditorFiles || !providerIsReady || !taskIsReady;",
 	} {
 		if strings.Contains(templateSource, forbidden) {
 			t.Fatalf("AI editor retained obsolete file/provider flow %q", forbidden)
