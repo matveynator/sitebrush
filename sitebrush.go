@@ -10012,6 +10012,13 @@ func updateOrInsertAIPage(ctx context.Context, database sqlExecutor, domain, pag
 	if rowsAffected != 0 {
 		return nil
 	}
+	var existingRows int
+	if err := database.QueryRowContext(ctx, `SELECT COUNT(1) FROM pages WHERE domain=? AND path=?`, domain, pagePath).Scan(&existingRows); err != nil {
+		return err
+	}
+	if existingRows != 0 {
+		return nil
+	}
 	_, err = database.ExecContext(ctx, `INSERT INTO pages(domain,path,title,html,published) VALUES(?,?,?,?,1)`, domain, pagePath, title, html)
 	return err
 }
@@ -10026,6 +10033,13 @@ func updateOrInsertAIPublishedPage(ctx context.Context, database sqlExecutor, do
 		return err
 	}
 	if rowsAffected != 0 {
+		return nil
+	}
+	var existingRows int
+	if err := database.QueryRowContext(ctx, `SELECT COUNT(1) FROM published_pages WHERE domain=? AND path=?`, domain, pagePath).Scan(&existingRows); err != nil {
+		return err
+	}
+	if existingRows != 0 {
 		return nil
 	}
 	_, err = database.ExecContext(ctx, `INSERT INTO published_pages(domain,path,title,html) VALUES(?,?,?,?)`, domain, pagePath, title, html)
@@ -10043,6 +10057,13 @@ func updateOrInsertAIProviderCredential(ctx context.Context, database sqlExecuto
 		return err
 	}
 	if rowsAffected != 0 {
+		return nil
+	}
+	var existingRows int
+	if err := database.QueryRowContext(ctx, `SELECT COUNT(1) FROM ai_provider_user_credentials WHERE domain=? AND email=? AND provider=?`, domain, email, provider).Scan(&existingRows); err != nil {
+		return err
+	}
+	if existingRows != 0 {
 		return nil
 	}
 	_, err = database.ExecContext(ctx, `INSERT INTO ai_provider_user_credentials(domain,email,provider,encrypted_api_key,model,updated_at) VALUES(?,?,?,?,?,?)`,
