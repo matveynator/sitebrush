@@ -84,11 +84,12 @@ type managerRequest struct {
 }
 
 type managerResponse struct {
-	capability Capability
-	session    Session
-	sessions   []SessionInfo
-	ok         bool
-	err        error
+	capability  Capability
+	capabilities []Capability
+	session     Session
+	sessions    []SessionInfo
+	ok          bool
+	err         error
 }
 
 type Manager struct {
@@ -160,6 +161,16 @@ func (manager *Manager) run() {
 					continue
 				}
 				request.reply <- managerResponse{session: session}
+			case "list-capabilities":
+				result := make([]Capability, 0, len(capabilities))
+				for _, capability := range capabilities {
+					if capability.Revoked || capability.Domain != request.domain || capability.Owner != request.owner {
+						continue
+					}
+					capability.Scopes = append([]string(nil), capability.Scopes...)
+					result = append(result, capability)
+				}
+				request.reply <- managerResponse{capabilities: result}
 			case "list":
 				result := make([]SessionInfo, 0, len(sessions))
 				now := time.Now().UTC()
@@ -369,6 +380,11 @@ func (manager *Manager) ValidateSession(sessionToken, capabilityToken, domain st
 func (manager *Manager) Revoke(token string) error {
 	response := manager.request(managerRequest{kind: "revoke", token: token, reply: make(chan managerResponse, 1)})
 	return response.err
+}
+
+func (manager *Manager) ListCapabilities(owner, domain string) ([]Capability, error) {
+	response := manager.request(managerRequest{kind: "list-capabilities", owner: strings.ToLower(strings.TrimSpace(owner)), domain: normalizeDomain(domain), reply: make(chan managerResponse, 1)})
+	return response.capabilities, response.err
 }
 
 func (manager *Manager) List(owner, domain string) ([]SessionInfo, error) {
