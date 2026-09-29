@@ -10880,8 +10880,8 @@ type aiEditorDecodedFile struct {
 }
 
 type aiEditorExecutionRequest struct {
-	Provider string                 `json:"provider"`
-	BaseURL  string                 `json:"base_url"`
+	Provider   string                 `json:"provider"`
+	BaseURL    string                 `json:"base_url"`
 	Model      string                 `json:"model"`
 	APIKey     string                 `json:"-"`
 	PagePath   string                 `json:"page_path"`
@@ -10940,7 +10940,10 @@ func (a *App) executeAIEditorRequest(w http.ResponseWriter, r *http.Request) {
 	}
 	domain := a.siteDomain(r.Context(), r)
 	if err := a.resolveAIProviderCredential(r, domain, &request); err != nil {
-		log.Printf("AI EDITOR provider resolve failed domain=%q path=%q provider=%q model=%q err=%v", domain, request.PagePath, request.Provider, request.Model, err)
+		log.Printf("AI EDITOR provider resolve failed domain=%q path=%q provider=%q model=%q err=%s",
+			diagnosticlog.SafeLogValue(domain), diagnosticlog.SafeLogValue(request.PagePath),
+			diagnosticlog.SafeLogValue(request.Provider), diagnosticlog.SafeLogValue(request.Model),
+			diagnosticlog.SafeLogValue(err.Error()))
 		http.Error(w, "AI provider token or model is unavailable: "+safeAIProviderErrorMessage(err), http.StatusBadRequest)
 		return
 	}
@@ -10957,7 +10960,10 @@ func (a *App) executeAIEditorRequest(w http.ResponseWriter, r *http.Request) {
 		APIKey:   request.APIKey,
 	}, nil)
 	if err != nil {
-		log.Printf("AI EDITOR provider configuration failed domain=%q path=%q provider=%q model=%q err=%v", domain, request.PagePath, request.Provider, request.Model, err)
+		log.Printf("AI EDITOR provider configuration failed domain=%q path=%q provider=%q model=%q err=%s",
+			diagnosticlog.SafeLogValue(domain), diagnosticlog.SafeLogValue(request.PagePath),
+			diagnosticlog.SafeLogValue(request.Provider), diagnosticlog.SafeLogValue(request.Model),
+			diagnosticlog.SafeLogValue(err.Error()))
 		http.Error(w, "AI provider configuration is invalid", http.StatusBadRequest)
 		return
 	}
@@ -11015,7 +11021,8 @@ func (a *App) executeAIEditorPageRequest(w http.ResponseWriter, r *http.Request,
 	domain := a.siteDomain(r.Context(), r)
 	page, err := a.findPage(r.Context(), domain, request.PagePath)
 	if err != nil {
-		log.Printf("AI EDITOR page read failed domain=%q path=%q err=%v", domain, request.PagePath, err)
+		log.Printf("AI EDITOR page read failed domain=%q path=%q err=%s",
+			diagnosticlog.SafeLogValue(domain), diagnosticlog.SafeLogValue(request.PagePath), diagnosticlog.SafeLogValue(err.Error()))
 		http.Error(w, "target page was not found", http.StatusNotFound)
 		return
 	}
@@ -11037,13 +11044,22 @@ func (a *App) executeAIEditorPageRequest(w http.ResponseWriter, r *http.Request,
 		},
 	}})
 	if err != nil {
-		log.Printf("AI EDITOR inference failed domain=%q path=%q provider=%q model=%q err=%v", domain, request.PagePath, request.Provider, request.Model, err)
+		log.Printf("AI EDITOR inference failed domain=%q path=%q provider=%q model=%q err=%s",
+			diagnosticlog.SafeLogValue(domain), diagnosticlog.SafeLogValue(request.PagePath),
+			diagnosticlog.SafeLogValue(request.Provider), diagnosticlog.SafeLogValue(request.Model),
+			diagnosticlog.SafeLogValue(err.Error()))
 		http.Error(w, safeAIProviderErrorMessage(err), http.StatusBadGateway)
 		return
 	}
 	modelResult, err := parseAIEditorModelResult(modelResponse.Text)
 	if err != nil || strings.TrimSpace(modelResult.HTML) == "" {
-		log.Printf("AI EDITOR invalid model result domain=%q path=%q provider=%q model=%q parse_err=%v response_bytes=%d", domain, request.PagePath, request.Provider, request.Model, err, len(modelResponse.Text))
+		parseError := "-"
+		if err != nil {
+			parseError = diagnosticlog.SafeLogValue(err.Error())
+		}
+		log.Printf("AI EDITOR invalid model result domain=%q path=%q provider=%q model=%q parse_err=%s response_bytes=%d",
+			diagnosticlog.SafeLogValue(domain), diagnosticlog.SafeLogValue(request.PagePath),
+			diagnosticlog.SafeLogValue(request.Provider), diagnosticlog.SafeLogValue(request.Model), parseError, len(modelResponse.Text))
 		http.Error(w, "AI provider returned invalid page JSON", http.StatusBadGateway)
 		return
 	}
@@ -11089,7 +11105,8 @@ func (a *App) applyAIEditorDraft(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := a.storeAIEditorFiles(r, request.PagePath, decodedFiles); err != nil {
-		log.Printf("AI EDITOR attachment save failed domain=%q path=%q err=%v", a.siteDomain(r.Context(), r), request.PagePath, err)
+		log.Printf("AI EDITOR attachment save failed domain=%q path=%q err=%s",
+			diagnosticlog.SafeLogValue(a.siteDomain(r.Context(), r)), diagnosticlog.SafeLogValue(request.PagePath), diagnosticlog.SafeLogValue(err.Error()))
 		http.Error(w, "AI attachment could not be stored", http.StatusBadRequest)
 		return
 	}
@@ -11101,7 +11118,8 @@ func (a *App) applyAIEditorDraft(w http.ResponseWriter, r *http.Request) {
 		HTML:      request.HTML,
 	}, r)
 	if err != nil {
-		log.Printf("AI EDITOR draft apply failed domain=%q path=%q err=%v", a.siteDomain(r.Context(), r), request.PagePath, err)
+		log.Printf("AI EDITOR draft apply failed domain=%q path=%q err=%s",
+			diagnosticlog.SafeLogValue(a.siteDomain(r.Context(), r)), diagnosticlog.SafeLogValue(request.PagePath), diagnosticlog.SafeLogValue(err.Error()))
 		http.Error(w, "AI page update failed; see server log for details", http.StatusBadRequest)
 		return
 	}
