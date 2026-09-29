@@ -250,7 +250,7 @@ function fillModels(provider, models, selectedModel) {
 }
 
 async function loadModelsForSavedProvider(provider) {
-  if (!credentialStatus[provider] || !credentialStatus[provider].saved) {
+  if (provider !== 'ollama' && (!credentialStatus[provider] || !credentialStatus[provider].saved)) {
     modelBlock.hidden = true;
     return;
   }
@@ -429,7 +429,7 @@ async function executeTask() {
     commandElement.focus();
     return;
   }
-  if (!saved || !saved.saved || !saved.unlocked) {
+  if (providerElement.value !== 'ollama' && (!saved || !saved.saved || !saved.unlocked)) {
     setStatus('Сначала проверьте и сохраните API token.');
     providerSettings.open = true;
     apiKeyElement.focus();
