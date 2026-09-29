@@ -126,6 +126,10 @@ func TestExecutorConcurrentCloseAndSubmitDoNotHang(t *testing.T) {
 	}
 	<-storeStarted
 
+	// Queue one shutdown marker while the worker is busy so every later task is
+	// deterministically behind shutdown, then add concurrent Close callers.
+	executor.requests <- Task{closeRequest: true}
+
 	closed := make(chan struct{}, 2)
 	go func() {
 		executor.Close()
