@@ -1,0 +1,668 @@
+<!doctype html>
+<html lang="{{.LanguageCode}}" dir="{{.TextDirection}}">
+<head>
+  <script>(function applySystemThemeMode(){const prefersDarkMode=window.matchMedia&&window.matchMedia('(prefers-color-scheme: dark)').matches;document.documentElement.setAttribute('data-bs-theme',prefersDarkMode?'dark':'light');})();</script>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>Редактирование голосом</title>
+  <link rel="stylesheet" href="/p/static/bootstrap.min.css">
+  <link rel="stylesheet" href="/p/static/technical_pages.css">
+  <style>
+    body{min-height:100vh;background:rgba(0,0,0,.18)}
+    .ai-page{min-height:100vh;display:grid;place-items:center;padding:20px}
+    .ai-card{width:min(780px,100%);max-height:calc(100vh - 40px);overflow:auto;border:1px solid var(--bs-border-color);border-radius:22px;background:var(--bs-body-bg);box-shadow:0 22px 70px rgba(0,0,0,.28)}
+    .ai-header{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:18px 20px 10px}
+    .ai-close{display:grid;place-items:center;width:36px;height:36px;border:0;border-radius:50%;background:transparent;color:inherit;font-size:25px;text-decoration:none}
+    .ai-close:hover{background:var(--bs-tertiary-bg)}
+    .ai-tabs{display:flex;gap:6px;padding:0 20px 12px;border-bottom:1px solid var(--bs-border-color)}
+    .ai-tab{border:0;border-radius:10px;padding:8px 12px;background:transparent;color:inherit;font-size:14px}
+    .ai-tab.is-active{background:var(--bs-primary);color:#fff}
+    .ai-body{display:grid;gap:14px;padding:16px 20px 20px}
+    .ai-panel[hidden]{display:none!important}
+    .ai-composer{border:1px solid var(--bs-border-color);border-radius:22px;background:var(--bs-tertiary-bg);padding:12px}
+    .ai-composer textarea{display:block;width:100%;min-height:120px;max-height:300px;border:0;outline:0;resize:vertical;background:transparent;color:inherit;font:inherit;padding:4px 4px 8px}
+    .ai-composer-bar{display:flex;align-items:center;justify-content:space-between;gap:8px}
+    .ai-left,.ai-right,.ai-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+    .ai-round{display:grid;place-items:center;width:38px;height:38px;padding:0;border:1px solid var(--bs-border-color);border-radius:50%;background:var(--bs-body-bg);color:inherit;font-size:18px;line-height:1}
+    .ai-send{border-color:var(--bs-body-color);background:var(--bs-body-color);color:var(--bs-body-bg);font-size:22px;font-weight:700}
+    .ai-recording{background:var(--bs-danger);border-color:var(--bs-danger);color:#fff}
+    .ai-files{font-size:13px;color:var(--bs-secondary-color);overflow-wrap:anywhere}
+    .ai-status{min-height:22px;font-size:14px;white-space:pre-wrap}
+    .ai-preview{display:grid;gap:10px;border:1px solid var(--bs-border-color);border-radius:14px;padding:12px;background:var(--bs-body-bg)}
+    .ai-preview[hidden]{display:none!important}
+    .ai-preview-header{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap}
+    .ai-preview-actions{display:flex;gap:8px;flex-wrap:wrap}
+    .ai-preview-frame{width:100%;height:min(52vh,520px);border:1px solid var(--bs-border-color);border-radius:10px;background:#fff}
+    .ai-settings{border:1px solid var(--bs-border-color);border-radius:14px;padding:0 14px}
+    .ai-settings summary{cursor:pointer;padding:11px 0;font-size:14px}
+    .ai-settings-grid{display:grid;grid-template-columns:1fr;gap:10px;padding:0 0 14px}
+    .ai-settings-grid label{display:grid;gap:5px;font-size:12px;color:var(--bs-secondary-color)}
+    .ai-token-actions{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+    .ai-token-status{font-size:13px;font-weight:600}
+    .ai-provider-step{display:grid;gap:8px;padding:10px 0}
+    .ai-provider-step-title{font-size:13px;font-weight:700;color:var(--bs-body-color)}
+    .ai-provider-step-note{font-size:12px;color:var(--bs-secondary-color)}
+    .ai-model-block{display:grid;gap:5px;padding-top:10px;border-top:1px solid var(--bs-border-color)}
+    .ai-model-help{font-size:12px;color:var(--bs-secondary-color)}
+    .external-box{display:grid;gap:12px}
+    .external-link-row{display:flex;gap:8px;align-items:center}
+    .external-link-row input{min-width:0;flex:1}
+    .external-actions{display:flex;gap:8px;flex-wrap:wrap}
+    .external-note{font-size:13px;color:var(--bs-secondary-color)}
+    @media(max-width:640px){.ai-page{padding:8px}.ai-card{max-height:calc(100vh - 16px);border-radius:18px}.external-link-row{flex-direction:column;align-items:stretch}}
+  </style>
+</head>
+<body>
+<div class="ai-page">
+  <section class="ai-card" role="dialog" aria-modal="true" aria-labelledby="aiTitle">
+    <header class="ai-header">
+      <div>
+        <h1 class="h5 mb-1" id="aiTitle">Редактирование голосом</h1>
+        <div class="small text-body-secondary">Редактируется текущая страница <code>{{.Path}}</code></div>
+      </div>
+      <a class="ai-close" href="{{.Path}}" aria-label="Закрыть">×</a>
+    </header>
+
+    <div class="ai-tabs" role="tablist">
+      <button class="ai-tab is-active" type="button" id="pageTabButton" role="tab" aria-selected="true">Редактировать страницу</button>
+      <button class="ai-tab" type="button" id="externalTabButton" role="tab" aria-selected="false">Внешний AI</button>
+    </div>
+
+    <div class="ai-body">
+      <section class="ai-panel" id="pagePanel" role="tabpanel">
+        <div class="ai-composer">
+          <textarea id="aiCommand" placeholder="Например: сделай заголовок короче и добавь под ним кнопку. Можно написать задачу или нажать микрофон."></textarea>
+          <div class="ai-composer-bar">
+            <div class="ai-left">
+              <button class="ai-round" type="button" id="fileButton" aria-label="Добавить файлы" title="Добавить файлы">＋</button>
+              <input id="fileInput" type="file" multiple hidden accept="image/*,.css,.html,.txt">
+              <div class="ai-files" id="fileStatus"></div>
+            </div>
+            <div class="ai-right">
+              <button class="ai-round" type="button" id="recordButton" aria-label="Говорить" title="Говорить">🎙</button>
+              <button class="ai-round ai-send" type="button" id="executeButton" aria-label="Отправить" title="Сначала подтвердите API key" disabled>↑</button>
+            </div>
+          </div>
+        </div>
+
+        <div id="status" class="ai-status" role="status"></div>
+
+        <section class="ai-preview" id="previewPanel" hidden>
+          <div class="ai-preview-header">
+            <div>
+              <strong>Предпросмотр AI-версии</strong>
+              <div class="small text-body-secondary">Страница ещё не сохранена в SiteBrush.</div>
+            </div>
+            <div class="ai-preview-actions">
+              <button class="btn btn-primary btn-sm" id="saveDraftButton" type="button">Сохранить в SiteBrush</button>
+              <button class="btn btn-outline-secondary btn-sm" id="discardDraftButton" type="button">Отменить черновик</button>
+            </div>
+          </div>
+          <iframe class="ai-preview-frame" id="previewFrame" sandbox="" title="Предпросмотр AI-страницы"></iframe>
+        </section>
+
+        <details class="ai-settings" id="providerSettings" open>
+          <summary>Настройки AI-провайдера</summary>
+          <div class="ai-settings-grid">
+            <div class="ai-provider-step">
+              <div class="ai-provider-step-title">1. Подключите AI-провайдера</div>
+              <div class="ai-provider-step-note">Сначала выберите провайдера, вставьте API key и нажмите «Проверить ключ и сохранить». Пока ключ не подтверждён, отправка команды отключена.</div>
+            </div>
+            <label>Провайдер
+              <select class="form-select" id="provider">
+                <option value="ollama" selected>Ollama — локально на этом компьютере</option>
+                <option value="openai-compatible">OpenAI / ChatGPT API</option>
+                <option value="anthropic">Anthropic / Claude API</option>
+                <option value="deepseek">DeepSeek</option>
+                <option value="qwen">Qwen / Alibaba Model Studio</option>
+                <option value="gemini">Google Gemini API — есть Free Tier</option>
+                <option value="groq">Groq — есть Free Plan</option>
+                <option value="mistral">Mistral — есть Free mode</option>
+              </select>
+            </label>
+
+            <label>API token
+              <input class="form-control" id="apiKey" type="password" autocomplete="new-password" placeholder="Вставьте API token">
+            </label>
+            <div class="ai-token-actions">
+              <a id="providerKeyLink" class="btn btn-outline-secondary btn-sm" href="https://platform.openai.com/api-keys" target="_blank" rel="noopener noreferrer">Получить token ↗</a>
+              <button id="saveProviderTokenButton" class="btn btn-primary btn-sm" type="button">Проверить ключ и сохранить</button>
+              <button id="deleteProviderTokenButton" class="btn btn-outline-danger btn-sm" type="button" hidden>Удалить token</button>
+              <span class="ai-token-status" id="providerKeyStatus"></span>
+            </div>
+            <div class="small text-body-secondary" id="providerKeyHelp">OpenAI: создайте secret API key и вставьте его сюда. SiteBrush проверит ключ у OpenAI и сохранит его зашифрованно.</div>
+
+            <div class="ai-model-block" id="modelBlock" hidden>
+              <div class="ai-provider-step-title">2. Модель — необязательно</div>
+              <label>Модель <span class="text-body-secondary">(можно не выбирать)</span>
+                <select class="form-select" id="model">
+                  <option value="">Автоматически — сбалансированная модель</option>
+                </select>
+              </label>
+              <div class="ai-model-help">Этот выбор появляется только после успешной проверки ключа. Если ничего не менять, SiteBrush автоматически использует рекомендуемую сбалансированную модель.</div>
+            </div>
+          </div>
+        </details>
+      </section>
+
+      <section class="ai-panel external-box" id="externalPanel" role="tabpanel" hidden>
+        <div>
+          <strong>Редактирование через ChatGPT, Claude или другую AI-систему</strong>
+          <div class="external-note">SiteBrush создаст отзывную ссылку доступа. Скопируйте её вместе с заданием в выбранную AI-систему.</div>
+        </div>
+        <div class="external-link-row">
+          <input class="form-control" id="externalAILink" type="text" readonly placeholder="Создаю ссылку…">
+          <button class="btn btn-outline-secondary" type="button" id="copyExternalAILinkButton">Копировать</button>
+        </div>
+        <div class="external-actions">
+          <button class="btn btn-primary" type="button" id="openChatGPTButton">Скопировать и открыть ChatGPT</button>
+          <button class="btn btn-outline-primary" type="button" id="openClaudeButton">Скопировать и открыть Claude</button>
+          <button class="btn btn-outline-secondary" type="button" id="renewExternalAILinkButton">Создать новую ссылку</button>
+        </div>
+        <div class="ai-status" id="externalStatus" role="status"></div>
+      </section>
+    </div>
+  </section>
+</div>
+
+<script>
+const accountCSRF = {{printf "%q" .AccountCSRF}};
+const commandElement = document.getElementById('aiCommand');
+const recordButton = document.getElementById('recordButton');
+const executeButton = document.getElementById('executeButton');
+const fileInput = document.getElementById('fileInput');
+const fileStatus = document.getElementById('fileStatus');
+const providerElement = document.getElementById('provider');
+const modelElement = document.getElementById('model');
+const modelBlock = document.getElementById('modelBlock');
+const apiKeyElement = document.getElementById('apiKey');
+const providerKeyLink = document.getElementById('providerKeyLink');
+const providerKeyStatus = document.getElementById('providerKeyStatus');
+const providerKeyHelp = document.getElementById('providerKeyHelp');
+const saveProviderTokenButton = document.getElementById('saveProviderTokenButton');
+const deleteProviderTokenButton = document.getElementById('deleteProviderTokenButton');
+const providerSettings = document.getElementById('providerSettings');
+const statusElement = document.getElementById('status');
+const previewPanel = document.getElementById('previewPanel');
+const previewFrame = document.getElementById('previewFrame');
+const saveDraftButton = document.getElementById('saveDraftButton');
+const discardDraftButton = document.getElementById('discardDraftButton');
+const pageTabButton = document.getElementById('pageTabButton');
+const externalTabButton = document.getElementById('externalTabButton');
+const pagePanel = document.getElementById('pagePanel');
+const externalPanel = document.getElementById('externalPanel');
+const externalAILink = document.getElementById('externalAILink');
+const externalStatus = document.getElementById('externalStatus');
+const credentialStatus = Object.create(null);
+const modelCache = Object.create(null);
+const providerHelp = {
+  'openai-compatible': {
+    url:'https://platform.openai.com/api-keys',
+    text:'OpenAI: создайте API key на platform.openai.com. Подписка ChatGPT Plus/Pro не включает API-баланс — API billing у OpenAI отдельный. SiteBrush проверяет сам ключ без платного inference-запроса.'
+  },
+  'anthropic': {
+    url:'https://console.anthropic.com/settings/keys',
+    text:'Anthropic: откройте Console → API Keys → Create Key, скопируйте ключ и вставьте его сюда.'
+  },
+  'deepseek': {
+    url:'https://platform.deepseek.com/api_keys',
+    text:'DeepSeek: откройте Platform → API Keys → Create new API key и вставьте ключ сюда.'
+  },
+  'qwen': {
+    url:'https://modelstudio.console.alibabacloud.com/model/settings/api-key',
+    text:'Qwen: откройте Alibaba Model Studio → API Key → Create API key и вставьте ключ сюда.'
+  },
+  'gemini': {
+    url:'https://aistudio.google.com/app/apikey',
+    text:'Gemini: создайте новый Auth API key в Google AI Studio. У Gemini API есть Free Tier для поддерживаемых моделей.'
+  },
+  'groq': {
+    url:'https://console.groq.com/keys',
+    text:'Groq: создайте API key в Groq Console. Free Plan позволяет тестировать модели в пределах rate limits.'
+  },
+  'mistral': {
+    url:'https://console.mistral.ai/api-keys',
+    text:'Mistral: включите Free mode в La Plateforme и создайте API key для бесплатного ограниченного использования.'
+  },
+  'ollama': {
+    url:'https://ollama.com/download',
+    text:'Ollama работает локально. SiteBrush подключается только к 127.0.0.1:11434; API key не нужен. Установите Ollama и загрузите хотя бы одну текстовую модель.'
+  }
+};
+let speechRecognition = null;
+let externalLinkPromise = null;
+let currentDraft = null;
+let currentDraftFiles = [];
+
+function setStatus(message) { statusElement.textContent = message || ''; }
+function setExternalStatus(message) { externalStatus.textContent = message || ''; }
+
+async function parseResponse(response) {
+  const text = await response.text();
+  let payload = {};
+  try { payload = text ? JSON.parse(text) : {}; } catch (_) {}
+  if (!response.ok) throw new Error(payload.error || text || 'Запрос не выполнен');
+  return payload;
+}
+
+function setTab(external) {
+  pageTabButton.classList.toggle('is-active', !external);
+  externalTabButton.classList.toggle('is-active', external);
+  pageTabButton.setAttribute('aria-selected', external ? 'false' : 'true');
+  externalTabButton.setAttribute('aria-selected', external ? 'true' : 'false');
+  pagePanel.hidden = external;
+  externalPanel.hidden = !external;
+  if (external) ensureExternalAILink();
+  else commandElement.focus();
+}
+
+function fillModels(provider, models, selectedModel) {
+  modelCache[provider] = Array.isArray(models) ? models.slice() : [];
+  modelElement.innerHTML = '';
+  const automatic = document.createElement('option');
+  automatic.value = '';
+  automatic.textContent = selectedModel ? 'Автоматически — рекомендуемая: ' + selectedModel : 'Автоматически — рекомендуемая сбалансированная модель';
+  modelElement.appendChild(automatic);
+  for (const model of modelCache[provider]) {
+    const option = document.createElement('option');
+    option.value = model;
+    option.textContent = model;
+    modelElement.appendChild(option);
+  }
+  modelElement.value = '';
+  modelBlock.hidden = false;
+}
+
+async function loadModelsForSavedProvider(provider) {
+  if (provider !== 'ollama' && (!credentialStatus[provider] || !credentialStatus[provider].saved)) {
+    modelBlock.hidden = true;
+    return;
+  }
+  try {
+    const response = await fetch('{{.Path}}?ai_provider_models&provider=' + encodeURIComponent(provider), {
+      credentials:'same-origin',
+      headers:{'Accept':'application/json'}
+    });
+    const payload = await parseResponse(response);
+    const savedModel = credentialStatus[provider] ? credentialStatus[provider].model : '';
+    fillModels(provider, payload.models || [], payload.model || savedModel || '');
+    if (provider === 'ollama') providerKeyStatus.textContent = '✓ Локальная Ollama доступна';
+  } catch (error) {
+    modelBlock.hidden = false;
+    modelElement.innerHTML = '<option value="">Автоматически — модель недоступна</option>';
+    if (provider === 'ollama') {
+      providerKeyStatus.textContent = 'Ollama недоступна: ' + error.message;
+      executeButton.disabled = true;
+      executeButton.title = 'Сначала запустите локальную Ollama';
+    }
+  }
+}
+
+function updateProviderUI() {
+  const provider = providerElement.value;
+  const help = providerHelp[provider] || providerHelp['openai-compatible'];
+  providerKeyLink.href = help.url;
+  providerKeyHelp.textContent = help.text;
+  const saved = credentialStatus[provider];
+  if (provider === 'ollama') {
+    apiKeyElement.value = '';
+    apiKeyElement.disabled = true;
+    apiKeyElement.placeholder = 'Для локальной Ollama API key не нужен';
+    saveProviderTokenButton.textContent = 'Проверить локальную Ollama';
+    providerKeyLink.textContent = 'Установить Ollama ↗';
+    providerKeyStatus.textContent = 'Локальная Ollama — API key не нужен';
+    deleteProviderTokenButton.hidden = true;
+    executeButton.disabled = false;
+    executeButton.title = 'Отправить';
+    loadModelsForSavedProvider(provider);
+    return;
+  }
+  apiKeyElement.disabled = false;
+  saveProviderTokenButton.textContent = 'Проверить ключ и сохранить';
+  providerKeyLink.textContent = 'Получить token ↗';
+  if (saved && saved.saved && saved.unlocked) {
+    providerKeyStatus.textContent = provider === 'ollama' ? '✓ Локальная Ollama доступна' : '✓ API key работает и сохранён';
+    deleteProviderTokenButton.hidden = provider === 'ollama';
+    apiKeyElement.value = '';
+    apiKeyElement.placeholder = 'Ключ уже сохранён — вставьте новый только для замены';
+    executeButton.disabled = false;
+    executeButton.title = 'Отправить';
+    loadModelsForSavedProvider(provider);
+  } else if (saved && saved.saved) {
+    providerKeyStatus.textContent = 'Ключ сохранён, но этот браузер не может его открыть. Вставьте API key ещё раз.';
+    deleteProviderTokenButton.hidden = false;
+    apiKeyElement.placeholder = 'Повторно вставьте API key для этого браузера';
+    modelBlock.hidden = true;
+    executeButton.disabled = true;
+    executeButton.title = 'Сначала подтвердите API key';
+    providerSettings.open = true;
+  } else {
+    providerKeyStatus.textContent = 'API key ещё не подтверждён';
+    deleteProviderTokenButton.hidden = true;
+    apiKeyElement.placeholder = 'Вставьте API key';
+    modelBlock.hidden = true;
+    executeButton.disabled = true;
+    executeButton.title = 'Сначала подтвердите API key';
+    providerSettings.open = true;
+  }
+}
+
+async function loadCredentialStatus() {
+  try {
+    const response = await fetch('{{.Path}}?ai_provider_status', {
+      credentials:'same-origin',
+      headers:{'Accept':'application/json'}
+    });
+    const payload = await parseResponse(response);
+    for (const item of (payload.providers || [])) credentialStatus[item.provider] = item;
+    updateProviderUI();
+  } catch (_) {
+    providerKeyStatus.textContent = 'Не удалось проверить сохранённый API key';
+    executeButton.disabled = true;
+    executeButton.title = 'Сначала подтвердите API key';
+    providerSettings.open = true;
+  }
+}
+
+async function saveProviderToken() {
+  const provider = providerElement.value;
+  const apiKey = apiKeyElement.value.trim();
+  if (provider !== 'ollama' && !apiKey) {
+    providerKeyStatus.textContent = 'Сначала вставьте API token';
+    apiKeyElement.focus();
+    return;
+  }
+  saveProviderTokenButton.disabled = true;
+  executeButton.disabled = true;
+  modelBlock.hidden = true;
+  providerKeyStatus.textContent = 'Проверяю API key у провайдера…';
+  try {
+    const body = new URLSearchParams({provider:provider, api_key:apiKey});
+    const response = await fetch('{{.Path}}?ai_provider_save', {
+      method:'POST',
+      credentials:'same-origin',
+      headers:{
+        'Content-Type':'application/x-www-form-urlencoded;charset=UTF-8',
+        'X-SiteBrush-CSRF':accountCSRF
+      },
+      body:body.toString()
+    });
+    const payload = await parseResponse(response);
+    credentialStatus[provider] = {
+      provider:provider,
+      saved:true,
+      unlocked:true,
+      model:payload.model || '',
+      updated_at:new Date().toISOString()
+    };
+    apiKeyElement.value = '';
+    providerKeyStatus.textContent = '✓ API key работает и сохранён';
+    deleteProviderTokenButton.hidden = false;
+    executeButton.disabled = false;
+    executeButton.title = 'Отправить';
+    fillModels(provider, payload.models || [], payload.model || '');
+    setStatus('AI-провайдер подключён. Можно отправлять команду. Модель выбрана автоматически; менять её необязательно.');
+  } catch (error) {
+    providerKeyStatus.textContent = 'Ключ не сохранён: ' + error.message;
+    modelBlock.hidden = true;
+    executeButton.disabled = true;
+    executeButton.title = 'Сначала подтвердите API key';
+    providerSettings.open = true;
+  } finally {
+    saveProviderTokenButton.disabled = false;
+  }
+}
+
+async function deleteProviderToken() {
+  if (!window.confirm('Удалить сохранённый API token этого провайдера?')) return;
+  deleteProviderTokenButton.disabled = true;
+  try {
+    const body = new URLSearchParams({provider:providerElement.value});
+    const response = await fetch('{{.Path}}?ai_provider_delete', {
+      method:'POST',
+      credentials:'same-origin',
+      headers:{
+        'Content-Type':'application/x-www-form-urlencoded;charset=UTF-8',
+        'X-SiteBrush-CSRF':accountCSRF
+      },
+      body:body.toString()
+    });
+    await parseResponse(response);
+    delete credentialStatus[providerElement.value];
+    delete modelCache[providerElement.value];
+    providerKeyStatus.textContent = 'API key удалён';
+    modelBlock.hidden = true;
+    deleteProviderTokenButton.hidden = true;
+    executeButton.disabled = true;
+    executeButton.title = 'Сначала подтвердите API key';
+    providerSettings.open = true;
+  } catch (error) {
+    providerKeyStatus.textContent = error.message;
+  } finally {
+    deleteProviderTokenButton.disabled = false;
+  }
+}
+
+function fileToBase64(file) {
+  return new Promise(function(resolve, reject) {
+    const reader = new FileReader();
+    reader.onload = function() { resolve({name:file.name, content:String(reader.result || '').split(',')[1] || ''}); };
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+
+function showDraft(payload, files) {
+  currentDraft = {
+    path: payload.path || '{{.Path}}',
+    title: payload.title || '',
+    html: payload.html || ''
+  };
+  currentDraftFiles = files.slice();
+  previewFrame.srcdoc = currentDraft.html;
+  previewPanel.hidden = false;
+  providerSettings.open = false;
+}
+
+function clearDraft() {
+  currentDraft = null;
+  currentDraftFiles = [];
+  previewFrame.srcdoc = '';
+  previewPanel.hidden = true;
+}
+
+async function executeTask() {
+  const task = commandElement.value.trim();
+  const saved = credentialStatus[providerElement.value];
+  if (!task) {
+    setStatus('Сначала напишите или скажите, что нужно изменить.');
+    commandElement.focus();
+    return;
+  }
+  if (providerElement.value !== 'ollama' && (!saved || !saved.saved || !saved.unlocked)) {
+    setStatus('Сначала проверьте и сохраните API token.');
+    providerSettings.open = true;
+    apiKeyElement.focus();
+    return;
+  }
+  executeButton.disabled = true;
+  setStatus(currentDraft ? 'AI продолжает изменения черновика…' : 'AI создаёт черновик страницы…');
+  try {
+    const files = await Promise.all(Array.from(fileInput.files || []).map(fileToBase64));
+    const response = await fetch('{{.Path}}?ai_execute', {
+      method:'POST',
+      credentials:'same-origin',
+      headers:{'Content-Type':'application/json','X-SiteBrush-CSRF':accountCSRF},
+      body:JSON.stringify({
+        provider:providerElement.value,
+        model:modelElement.value,
+        page_path:'{{.Path}}',
+        task:task,
+        draft_title:currentDraft ? currentDraft.title : '',
+        draft_html:currentDraft ? currentDraft.html : '',
+        files:files
+      })
+    });
+    const payload = await parseResponse(response);
+    showDraft(payload, files);
+    setStatus('Черновик готов. Проверьте предпросмотр, затем сохраните его или напишите следующую команду для продолжения изменений.');
+  } catch (error) {
+    setStatus('Ошибка AI: ' + error.message);
+  } finally {
+    executeButton.disabled = false;
+  }
+}
+
+async function saveDraft() {
+  if (!currentDraft) {
+    setStatus('Сначала создайте AI-черновик.');
+    return;
+  }
+  saveDraftButton.disabled = true;
+  setStatus('Сохраняю проверенный черновик в SiteBrush…');
+  try {
+    const response = await fetch('{{.Path}}?ai_apply', {
+      method:'POST',
+      credentials:'same-origin',
+      headers:{'Content-Type':'application/json','X-SiteBrush-CSRF':accountCSRF},
+      body:JSON.stringify({
+        page_path:currentDraft.path,
+        title:currentDraft.title,
+        html:currentDraft.html,
+        files:currentDraftFiles
+      })
+    });
+    const payload = await parseResponse(response);
+    setStatus('Готово. Страница ' + (payload.path || currentDraft.path) + ' сохранена в SiteBrush и добавлена в ревизии.');
+    clearDraft();
+  } catch (error) {
+    setStatus('Ошибка сохранения: ' + error.message);
+  } finally {
+    saveDraftButton.disabled = false;
+  }
+}
+
+function setRecording(recording) {
+  recordButton.classList.toggle('ai-recording', recording);
+  recordButton.textContent = recording ? '■' : '🎙';
+  recordButton.setAttribute('aria-label', recording ? 'Остановить запись' : 'Говорить');
+  recordButton.title = recording ? 'Остановить запись' : 'Говорить';
+}
+
+function toggleVoice() {
+  if (speechRecognition) {
+    try { speechRecognition.stop(); } catch (_) {}
+    return;
+  }
+  const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!Recognition) {
+    setStatus('Голосовой ввод не поддерживается этим браузером. Можно ввести команду текстом.');
+    return;
+  }
+  const recognition = new Recognition();
+  speechRecognition = recognition;
+  recognition.continuous = false;
+  recognition.interimResults = true;
+  recognition.onstart = function() { setRecording(true); setStatus('Слушаю…'); };
+  recognition.onresult = function(event) {
+    let transcript = '';
+    for (let index = event.resultIndex; index < event.results.length; index++) transcript += event.results[index][0].transcript;
+    if (transcript.trim()) commandElement.value = transcript.trim();
+  };
+  recognition.onerror = function() { setStatus('Не удалось получить голосовую команду. Можно продолжить текстом.'); };
+  recognition.onend = function() {
+    speechRecognition = null;
+    setRecording(false);
+    if (commandElement.value.trim()) setStatus('Команда распознана. Нажмите ↑, чтобы отправить.');
+  };
+  recognition.start();
+}
+
+async function createExternalAILink() {
+  setExternalStatus('Создаю отзывную ссылку…');
+  externalAILink.value = '';
+  try {
+    const response = await fetch('{{.Path}}?ai_capability_create', {
+      method:'POST',
+      credentials:'same-origin',
+      headers:{'Content-Type':'application/json','X-SiteBrush-CSRF':accountCSRF},
+      body:JSON.stringify({page_path:'{{.Path}}', task:commandElement.value.trim()})
+    });
+    const payload = await parseResponse(response);
+    externalAILink.value = payload.url || '';
+    setExternalStatus('Ссылка готова. Её можно отозвать из управления AI-сессиями.');
+    return externalAILink.value;
+  } catch (error) {
+    setExternalStatus(error.message);
+    throw error;
+  } finally {
+    externalLinkPromise = null;
+  }
+}
+
+function ensureExternalAILink() {
+  if (externalAILink.value) return Promise.resolve(externalAILink.value);
+  if (!externalLinkPromise) externalLinkPromise = createExternalAILink();
+  return externalLinkPromise;
+}
+
+async function copyExternalAILink() {
+  const link = await ensureExternalAILink();
+  if (navigator.clipboard) {
+    await navigator.clipboard.writeText(link);
+  } else {
+    externalAILink.select();
+    document.execCommand('copy');
+  }
+  setExternalStatus('Ссылка скопирована.');
+  return link;
+}
+
+function copyAndOpenExternalAI(targetURL, name) {
+  const popup = window.open(targetURL, '_blank', 'noopener,noreferrer');
+  copyExternalAILink().then(function() {
+    setExternalStatus('Ссылка скопирована. Вставьте её в ' + name + ' вместе с заданием.');
+  }).catch(function(error) {
+    setExternalStatus(error.message);
+    if (popup) popup.close();
+  });
+}
+
+document.getElementById('fileButton').addEventListener('click', function() { fileInput.click(); });
+fileInput.addEventListener('change', function() {
+  fileStatus.textContent = Array.from(fileInput.files || []).map(function(file) { return file.name; }).join(', ');
+});
+recordButton.addEventListener('click', toggleVoice);
+executeButton.addEventListener('click', executeTask);
+saveDraftButton.addEventListener('click', saveDraft);
+discardDraftButton.addEventListener('click', function() {
+  clearDraft();
+  setStatus('Черновик отменён. Исходная страница не изменена.');
+});
+providerElement.addEventListener('change', updateProviderUI);
+saveProviderTokenButton.addEventListener('click', saveProviderToken);
+deleteProviderTokenButton.addEventListener('click', deleteProviderToken);
+pageTabButton.addEventListener('click', function() { setTab(false); });
+externalTabButton.addEventListener('click', function() { setTab(true); });
+document.getElementById('copyExternalAILinkButton').addEventListener('click', function() { copyExternalAILink().catch(function(error){ setExternalStatus(error.message); }); });
+document.getElementById('renewExternalAILinkButton').addEventListener('click', function() { createExternalAILink().catch(function(){}); });
+document.getElementById('openChatGPTButton').addEventListener('click', function() { copyAndOpenExternalAI('https://chatgpt.com/', 'ChatGPT'); });
+document.getElementById('openClaudeButton').addEventListener('click', function() { copyAndOpenExternalAI('https://claude.ai/new', 'Claude'); });
+document.addEventListener('keydown', function(event) {
+  if ((event.ctrlKey || event.metaKey) && event.key === 'Enter' && !pagePanel.hidden) {
+    event.preventDefault();
+    executeTask();
+  }
+});
+
+const savedCommand = sessionStorage.getItem('sitebrush.aiEditorCommand');
+if (savedCommand) {
+  commandElement.value = savedCommand;
+  sessionStorage.removeItem('sitebrush.aiEditorCommand');
+}
+loadCredentialStatus();
+commandElement.focus();
+</script>
+</body>
+</html>

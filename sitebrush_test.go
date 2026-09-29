@@ -31,6 +31,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"slices"
 	"sort"
@@ -41,6 +42,10 @@ import (
 	"time"
 
 	"github.com/matveynator/netchan"
+	"github.com/matveynator/sitebrush/v2/pkg/accountauth"
+	"github.com/matveynator/sitebrush/v2/pkg/aicapability"
+	"github.com/matveynator/sitebrush/v2/pkg/aieditor"
+	"github.com/matveynator/sitebrush/v2/pkg/aiprovider"
 	browserstats "github.com/matveynator/sitebrush/v2/pkg/analytics"
 	"github.com/matveynator/sitebrush/v2/pkg/channelacme"
 	"github.com/matveynator/sitebrush/v2/pkg/crawler"
@@ -2565,7 +2570,7 @@ func TestMobileServicePageDesignCoversEverySharedTemplate(t *testing.T) {
 		"billing_invoice.html",
 		"billing_schedule.html",
 		"domain_settings.html",
-		"edit_mode.html",
+		"edit_ai.html",
 		"expenses.html",
 		"files.html",
 		"import.html",
@@ -3103,18 +3108,31 @@ func TestContextMenuUsesDirectEditorProfileAndDeleteActions(t *testing.T) {
 		t.Fatalf("status = %d, body=%q", response.Code, response.Body.String())
 	}
 	body := response.Body.String()
-	for _, expectedFragment := range []string{"href='?visual'", "href='?text'", "data-sitebrush-action='delete'", "?delete=" + strconv.FormatInt(revisionID, 10), "data-sitebrush-action='protect_password'", "/p/static/lock.png", "Protect with password", "href='?profile'", "href='?analytics'", "/p/static/analytics.svg"} {
+	for _, expectedFragment := range []string{"href='?visual'", "href='?text'", "href='?ai'", "data-sitebrush-action='delete'", "?delete=" + strconv.FormatInt(revisionID, 10), "data-sitebrush-action='protect_password'", "/p/static/lock.png", "Protect with password", "href='?profile'", "href='?analytics'", "/p/static/analytics.svg"} {
 		if !strings.Contains(body, expectedFragment) {
 			t.Fatalf("context menu missing %q in %s", expectedFragment, body)
 		}
+	}
+	visualIndex := strings.Index(body, "href='?visual'")
+	textIndex := strings.Index(body, "href='?text'")
+	aiIndex := strings.Index(body, "href='?ai'")
+	if visualIndex < 0 || textIndex <= visualIndex || aiIndex <= textIndex {
+		t.Fatalf("editor menu order is not visual, text, AI: visual=%d text=%d ai=%d", visualIndex, textIndex, aiIndex)
 	}
 	for _, expectedFragment := range []string{"href='https://sitebrush.com'", "class='SiteBrushContextMenuVersion' download>v.", "href='" + latestServerBinaryDownloadURL(runtime.GOOS, runtime.GOARCH) + "'", "SiteBrushMenuStorageUsage", "10.0 GB"} {
 		if !strings.Contains(body, expectedFragment) {
 			t.Fatalf("context menu missing storage/version fragment %q in %s", expectedFragment, body)
 		}
 	}
-	if strings.Contains(body, "href='?edit'") {
-		t.Fatalf("context menu still contains intermediate edit link: %s", body)
+	for _, obsoleteEditorPath := range []string{"?edit", "?editraw"} {
+		if strings.Contains(body, obsoleteEditorPath) {
+			t.Fatalf("context menu still contains obsolete editor path %q: %s", obsoleteEditorPath, body)
+		}
+	}
+	for _, obsoleteAIFragment := range []string{"data-sitebrush-action='ai_editor'", "SiteBrushAIEditor"} {
+		if strings.Contains(body, obsoleteAIFragment) {
+			t.Fatalf("context menu still contains obsolete AI dialog fragment %q: %s", obsoleteAIFragment, body)
+		}
 	}
 	for _, expectedFragment := range []string{`window.location.href = targetHref;`, `closestSitebrushEventElement(browserEvent, "#SiteBrushMenuBox")`, `function closeSitebrushMenu()`, `z-index:2147483647`, `closeSitebrushMenu();`, `data-sitebrush-owned`, `sitebrushContextMenuShadowCSS`, `attachShadow({mode: "open"})`, `menuRoot.appendChild(menuStyleElement)`, `.SiteBrushContextMenuLink:link`, `.SiteBrushContextMenuLink:visited`, `window.addEventListener("contextmenu", onContextMenuOpen, {capture: true, passive: false})`, `installSitebrushLongPressMenu`, `document.addEventListener("pointerdown", startLongPress`, `document.addEventListener("touchstart"`, `positionSitebrushMenuBox(menuBoxElement, menuPoint)`, `max-height:calc(100vh - 16px)`, `@media (pointer: coarse), (max-width: 820px)`, `function openPasswordProtectionDialog`, `SiteBrushPasswordInput`, `buildSitebrushAdminMenuEntries(sitebrushContextMenuWasOpenedByMouse(browserEvent))`, `buildSitebrushAdminMenuEntries(false)`, `closestSitebrushEventElement(browserEvent, "[data-sitebrush-owned]")`} {
 		if !strings.Contains(body, expectedFragment) {
@@ -3137,7 +3155,7 @@ func TestAdminContextMenuStandardMenuHintIsMouseOnlyAndTranslated(t *testing.T) 
 		if translatedHint == "" {
 			t.Fatalf("missing standard context-menu hint translation for %s", languageCode)
 		}
-		menuScript := buildContextMenuScript(true, false, false, false, true, "/", "example.com", 0, 0, "", translationsForLanguageCode(languageCode))
+		menuScript := buildContextMenuScript(true, false, false, false, true, "/", "example.com", 0, 0, "", "", translationsForLanguageCode(languageCode))
 		for _, expectedFragment := range []string{translatedHint, "buildSitebrushAdminMenuEntries(sitebrushContextMenuWasOpenedByMouse(browserEvent))", "buildSitebrushAdminMenuEntries(false)"} {
 			if !strings.Contains(menuScript, expectedFragment) {
 				t.Fatalf("admin context menu for %s is missing %q", languageCode, expectedFragment)
@@ -4360,14 +4378,14 @@ func TestServerManagerEmailTreatsLoopbackAsLocalhost(t *testing.T) {
 	if application.isServerManagerEmail(context.Background(), "example.com", "other@example.com") {
 		t.Fatal("non-owner admin was accepted for effective localhost")
 	}
-	menuScript := buildContextMenuScript(true, true, false, false, true, "/", "example.com", 0, 0, "", translationsForLanguageCode("ru"))
+	menuScript := buildContextMenuScript(true, true, false, false, true, "/", "example.com", 0, 0, "", "", translationsForLanguageCode("ru"))
 	if !strings.Contains(menuScript, "?expenses") {
 		t.Fatal("server manager menu does not contain expenses link")
 	}
 	if !strings.Contains(menuScript, "Сервер и расходы") {
 		t.Fatal("regular server menu does not use the singular expenses title")
 	}
-	centralMenuScript := buildContextMenuScript(true, true, false, false, true, "/", "sitebrush.com", 0, 0, "", translationsForLanguageCode("ru"))
+	centralMenuScript := buildContextMenuScript(true, true, false, false, true, "/", "sitebrush.com", 0, 0, "", "", translationsForLanguageCode("ru"))
 	if !strings.Contains(centralMenuScript, "Серверы и расходы") {
 		t.Fatal("sitebrush.com menu does not use the plural expenses title")
 	}
@@ -11074,6 +11092,15 @@ func TestPublicTrialFormUsesUnifiedCopyDialog(t *testing.T) {
 	}
 }
 
+func TestContextMenuDeleteCarriesSessionCSRF(t *testing.T) {
+	script := buildContextMenuScript(true, false, false, false, true, "/", "example.com", 7, 1, "", "csrf-marker", translationsForLanguageCode("en"))
+	for _, fragment := range []string{"?delete=7", "account_csrf", "csrf-marker", `actionFormElement.method = "POST"`} {
+		if !strings.Contains(script, fragment) {
+			t.Fatalf("delete menu is missing %q", fragment)
+		}
+	}
+}
+
 func TestCopySiteDialogKeepsWholeSiteCheckboxInteractive(t *testing.T) {
 	scriptBytes, readErr := embeddedWebFiles.ReadFile("web/static/site_copy.js")
 	if readErr != nil {
@@ -11092,7 +11119,7 @@ func TestCopySiteDialogKeepsWholeSiteCheckboxInteractive(t *testing.T) {
 		}
 	}
 
-	menuScript := buildContextMenuScript(true, false, false, false, true, "/", "example.com", 0, 0, "", translationsForLanguageCode("en"))
+	menuScript := buildContextMenuScript(true, false, false, false, true, "/", "example.com", 0, 0, "", "", translationsForLanguageCode("en"))
 	if strings.Contains(menuScript, `"copyWholeSite":true`) {
 		t.Fatal("right-menu copy dialog unexpectedly enables whole-site copying by default")
 	}
@@ -11160,18 +11187,13 @@ func TestSiteBrushTemplateImportControlsAreEnabledByDefaultAndLocalized(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	editTemplateBytes, err := embeddedWebFiles.ReadFile("web/edit_mode.html")
-	if err != nil {
-		t.Fatal(err)
-	}
 	copyScriptBytes, err := embeddedWebFiles.ReadFile("web/static/site_copy.js")
 	if err != nil {
 		t.Fatal(err)
 	}
 	for fileName, source := range map[string]string{
-		"missing.html":   string(missingTemplateBytes),
-		"edit_mode.html": string(editTemplateBytes),
-		"site_copy.js":   string(copyScriptBytes),
+		"missing.html": string(missingTemplateBytes),
+		"site_copy.js": string(copyScriptBytes),
 	} {
 		for _, expectedFragment := range []string{"auto_detect_sitebrush_template", "checked"} {
 			if !strings.Contains(source, expectedFragment) {
@@ -11179,11 +11201,9 @@ func TestSiteBrushTemplateImportControlsAreEnabledByDefaultAndLocalized(t *testi
 			}
 		}
 	}
-	for _, templateSource := range []string{string(missingTemplateBytes), string(editTemplateBytes)} {
-		for _, translationKey := range []string{"site_copy_auto_detect_template", "site_copy_template_help_link", "site_copy_template_help_title", "site_copy_template_help_body"} {
-			if !strings.Contains(templateSource, translationKey) {
-				t.Fatalf("import template is missing translation key %q", translationKey)
-			}
+	for _, translationKey := range []string{"site_copy_auto_detect_template", "site_copy_template_help_link", "site_copy_template_help_title", "site_copy_template_help_body"} {
+		if !strings.Contains(string(missingTemplateBytes), translationKey) {
+			t.Fatalf("import template is missing translation key %q", translationKey)
 		}
 	}
 	if !strings.Contains(string(missingTemplateBytes), "setProgressPercent(detectionPercent)") || !strings.Contains(string(copyScriptBytes), "setProgress(progressBarElement, detectionPercent)") {
@@ -11200,6 +11220,602 @@ func TestSiteBrushTemplateImportControlsAreEnabledByDefaultAndLocalized(t *testi
 				t.Fatalf("locale %s translation %s changes the technology name: %q", languageCode, translationKey, translatedText)
 			}
 		}
+	}
+}
+func TestAIProviderCredentialIsOwnerScopedEncryptedAndNeverWrittenOutsideDatabase(t *testing.T) {
+	application, rawDB := newTestApplication(t)
+	const ownerEmail = "admin@example.com"
+	const providerToken = "provider-token-plaintext-marker-93c2a18f"
+	vaultKey := bytes.Repeat([]byte{0x5a}, 32)
+	if _, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", ownerEmail, "password"); err != nil {
+		t.Fatal(err)
+	}
+	if err := application.saveAIProviderCredential(context.Background(), "localhost", ownerEmail, aiprovider.ProviderDeepSeek, "deepseek-chat", providerToken, vaultKey); err != nil {
+		t.Fatal(err)
+	}
+
+	var encryptedValue, storedModel, storedEmail string
+	if err := rawDB.QueryRow(`SELECT encrypted_api_key,model,email FROM ai_provider_user_credentials WHERE domain=? AND email=? AND provider=?`, "localhost", ownerEmail, aiprovider.ProviderDeepSeek).Scan(&encryptedValue, &storedModel, &storedEmail); err != nil {
+		t.Fatal(err)
+	}
+	if encryptedValue == providerToken || strings.Contains(encryptedValue, providerToken) {
+		t.Fatal("SECURITY: AI provider token was stored in plaintext")
+	}
+	if storedModel != "deepseek-chat" || storedEmail != ownerEmail {
+		t.Fatalf("stored credential model=%q email=%q", storedModel, storedEmail)
+	}
+	credential, found, err := application.loadAIProviderCredential(context.Background(), "localhost", ownerEmail, aiprovider.ProviderDeepSeek, vaultKey)
+	if err != nil || !found || credential.APIKey != providerToken {
+		t.Fatalf("loaded credential=%+v found=%v err=%v", credential, found, err)
+	}
+	if _, found, err := application.loadAIProviderCredential(context.Background(), "localhost", "other@example.com", aiprovider.ProviderDeepSeek, vaultKey); err != nil || found {
+		t.Fatalf("SECURITY: another account could load owner's credential: found=%v err=%v", found, err)
+	}
+	wrongKey := bytes.Repeat([]byte{0x33}, 32)
+	if _, _, err := application.loadAIProviderCredential(context.Background(), "localhost", ownerEmail, aiprovider.ProviderDeepSeek, wrongKey); err == nil {
+		t.Fatal("SECURITY: credential decrypted without the browser vault key")
+	}
+
+	encodedVaultKey := base64.RawURLEncoding.EncodeToString(vaultKey)
+	walkErr := filepath.WalkDir(application.storagePath, func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil || entry.IsDir() {
+			return walkErr
+		}
+		fileBytes, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return readErr
+		}
+		if bytes.Contains(fileBytes, []byte(providerToken)) {
+			t.Fatalf("SECURITY: plaintext AI provider token leaked to file %s", path)
+		}
+		if bytes.Contains(fileBytes, []byte(encodedVaultKey)) || bytes.Contains(fileBytes, vaultKey) {
+			t.Fatalf("SECURITY: browser vault key leaked to server file %s", path)
+		}
+		return nil
+	})
+	if walkErr != nil {
+		t.Fatal(walkErr)
+	}
+}
+
+func TestAIProviderCredentialCiphertextCannotBeReboundToAnotherProvider(t *testing.T) {
+	application, rawDB := newTestApplication(t)
+	const ownerEmail = "admin@example.com"
+	vaultKey := bytes.Repeat([]byte{0x42}, 32)
+	if _, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", ownerEmail, "password"); err != nil {
+		t.Fatal(err)
+	}
+	if err := application.saveAIProviderCredential(context.Background(), "localhost", ownerEmail, aiprovider.ProviderOpenAICompatible, "gpt-model", "owner-openai-token", vaultKey); err != nil {
+		t.Fatal(err)
+	}
+	var ciphertext string
+	if err := rawDB.QueryRow(`SELECT encrypted_api_key FROM ai_provider_user_credentials WHERE domain=? AND email=? AND provider=?`, "localhost", ownerEmail, aiprovider.ProviderOpenAICompatible).Scan(&ciphertext); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := rawDB.Exec(`INSERT OR REPLACE INTO ai_provider_user_credentials(domain,email,provider,encrypted_api_key,model,updated_at) VALUES(?,?,?,?,?,?)`,
+		"localhost", ownerEmail, aiprovider.ProviderDeepSeek, ciphertext, "deepseek-chat", time.Now().UTC().Format(time.RFC3339)); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := application.loadAIProviderCredential(context.Background(), "localhost", ownerEmail, aiprovider.ProviderDeepSeek, vaultKey); err == nil {
+		t.Fatal("SECURITY: OpenAI credential ciphertext was rebound and decrypted as a DeepSeek credential")
+	}
+}
+
+func TestAIProviderCredentialsAreExcludedFromSiteBackup(t *testing.T) {
+	application, rawDB := newTestApplication(t)
+	const ownerEmail = "admin@example.com"
+	const providerToken = "backup-exclusion-provider-token-marker"
+	vaultKey := bytes.Repeat([]byte{0x24}, 32)
+	if _, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", ownerEmail, "password"); err != nil {
+		t.Fatal(err)
+	}
+	if err := application.saveAIProviderCredential(context.Background(), "localhost", ownerEmail, aiprovider.ProviderDeepSeek, "deepseek-chat", providerToken, vaultKey); err != nil {
+		t.Fatal(err)
+	}
+	var ciphertext string
+	if err := rawDB.QueryRow(`SELECT encrypted_api_key FROM ai_provider_user_credentials WHERE domain=? AND email=? AND provider=?`, "localhost", ownerEmail, aiprovider.ProviderDeepSeek).Scan(&ciphertext); err != nil {
+		t.Fatal(err)
+	}
+	var archive bytes.Buffer
+	if err := application.writeDomainBackupZIP(context.Background(), "localhost", &archive); err != nil {
+		t.Fatal(err)
+	}
+	archiveBytes := archive.Bytes()
+	for _, forbidden := range []string{providerToken, ciphertext, "ai_provider_user_credentials"} {
+		if bytes.Contains(archiveBytes, []byte(forbidden)) {
+			t.Fatalf("SECURITY: site backup contains AI provider credential material %q", forbidden)
+		}
+	}
+}
+
+func TestAIProviderVaultCookieIsHttpOnlyStrictAndNotServerPersisted(t *testing.T) {
+	application, _ := newTestApplication(t)
+	request := httptest.NewRequest(http.MethodPost, "https://localhost/?ai_provider_save", nil)
+	response := httptest.NewRecorder()
+	key, err := ensureAIProviderVaultKey(response, request)
+	if err != nil || len(key) != 32 {
+		t.Fatalf("vault key length=%d err=%v", len(key), err)
+	}
+	setCookie := response.Header().Get("Set-Cookie")
+	for _, attribute := range []string{aiProviderVaultCookieName + "=", "HttpOnly", "SameSite=Strict"} {
+		if !strings.Contains(setCookie, attribute) {
+			t.Fatalf("SECURITY: vault cookie %q missing %q", setCookie, attribute)
+		}
+	}
+	encodedKey := base64.RawURLEncoding.EncodeToString(key)
+	walkErr := filepath.WalkDir(application.storagePath, func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil || entry.IsDir() {
+			return walkErr
+		}
+		fileBytes, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return readErr
+		}
+		if bytes.Contains(fileBytes, []byte(encodedKey)) || bytes.Contains(fileBytes, key) {
+			t.Fatalf("SECURITY: vault key persisted on server at %s", path)
+		}
+		return nil
+	})
+	if walkErr != nil {
+		t.Fatal(walkErr)
+	}
+}
+
+func TestAIProviderCredentialStatusIsOwnerBoundAndNeverReturnsSecret(t *testing.T) {
+	application, rawDB := newTestApplication(t)
+	const ownerEmail = "admin@example.com"
+	const otherEmail = "server-owner@example.com"
+	const providerToken = "never-return-this-provider-secret"
+	vaultKey := bytes.Repeat([]byte{0x6b}, 32)
+	for _, email := range []string{ownerEmail, otherEmail} {
+		if _, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", email, "password"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := application.saveAIProviderCredential(context.Background(), "localhost", ownerEmail, aiprovider.ProviderAnthropic, "claude-model", providerToken, vaultKey); err != nil {
+		t.Fatal(err)
+	}
+
+	ownerRequest := httptest.NewRequest(http.MethodGet, "http://localhost:8080/?ai_provider_status", nil)
+	ownerRequest.AddCookie(newAdminSessionCookie(t, application, ownerEmail))
+	ownerRequest.AddCookie(&http.Cookie{Name: aiProviderVaultCookieName, Value: base64.RawURLEncoding.EncodeToString(vaultKey)})
+	ownerResponse := httptest.NewRecorder()
+	application.route(ownerResponse, ownerRequest)
+	if ownerResponse.Code != http.StatusOK {
+		t.Fatalf("owner credential status=%d body=%q", ownerResponse.Code, ownerResponse.Body.String())
+	}
+	if strings.Contains(ownerResponse.Body.String(), providerToken) || strings.Contains(ownerResponse.Body.String(), "encrypted_api_key") {
+		t.Fatalf("SECURITY: credential status disclosed secret material: %q", ownerResponse.Body.String())
+	}
+	if !strings.Contains(ownerResponse.Body.String(), `"saved":true`) || !strings.Contains(ownerResponse.Body.String(), `"unlocked":true`) {
+		t.Fatalf("owner credential status omitted safe state: %q", ownerResponse.Body.String())
+	}
+
+	otherRequest := httptest.NewRequest(http.MethodGet, "http://localhost:8080/?ai_provider_status", nil)
+	otherRequest.AddCookie(newAdminSessionCookie(t, application, otherEmail))
+	otherRequest.AddCookie(&http.Cookie{Name: aiProviderVaultCookieName, Value: base64.RawURLEncoding.EncodeToString(vaultKey)})
+	otherResponse := httptest.NewRecorder()
+	application.route(otherResponse, otherRequest)
+	if otherResponse.Code != http.StatusOK {
+		t.Fatalf("other administrator status=%d body=%q", otherResponse.Code, otherResponse.Body.String())
+	}
+	if strings.Contains(otherResponse.Body.String(), `"saved":true`) || strings.Contains(otherResponse.Body.String(), providerToken) {
+		t.Fatalf("SECURITY: another administrator discovered owner's provider credential: %q", otherResponse.Body.String())
+	}
+}
+
+func TestAIProviderCredentialRequiresBrowserVaultForReuse(t *testing.T) {
+	application, rawDB := newTestApplication(t)
+	const ownerEmail = "admin@example.com"
+	const providerToken = "provider-reuse-secret"
+	vaultKey := bytes.Repeat([]byte{0x7c}, 32)
+	if _, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", ownerEmail, "password"); err != nil {
+		t.Fatal(err)
+	}
+	if err := application.saveAIProviderCredential(context.Background(), "localhost", ownerEmail, aiprovider.ProviderDeepSeek, "deepseek-chat", providerToken, vaultKey); err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "http://localhost:8080/?ai_execute", nil)
+	request.AddCookie(newAdminSessionCookie(t, application, ownerEmail))
+	aiRequest := aiEditorExecutionRequest{Provider: aiprovider.ProviderDeepSeek}
+	if err := application.resolveAIProviderCredential(request, "localhost", &aiRequest); err == nil {
+		t.Fatal("SECURITY: provider credential reused without browser vault cookie")
+	}
+	request.AddCookie(&http.Cookie{Name: aiProviderVaultCookieName, Value: base64.RawURLEncoding.EncodeToString(vaultKey)})
+	if err := application.resolveAIProviderCredential(request, "localhost", &aiRequest); err != nil {
+		t.Fatal(err)
+	}
+	if aiRequest.APIKey != providerToken || aiRequest.Model != "deepseek-chat" {
+		t.Fatalf("saved credential was not reused: %+v", aiRequest)
+	}
+}
+
+func TestAIProviderCredentialSchemaIsOwnerScopedCompletenessGate(t *testing.T) {
+	application, rawDB := newTestApplication(t)
+	complete, err := siteDatabaseSchemaComplete(context.Background(), rawDB)
+	if err != nil || !complete {
+		t.Fatalf("schema complete=%v err=%v", complete, err)
+	}
+	if _, err := rawDB.Exec(`DROP TABLE ai_provider_user_credentials`); err != nil {
+		t.Fatal(err)
+	}
+	complete, err = siteDatabaseSchemaComplete(context.Background(), rawDB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if complete {
+		t.Fatal("schema gate ignored missing owner-scoped AI provider credentials table")
+	}
+	_ = application
+}
+
+func TestAIProviderLegacyServerKeyFileIsRemoved(t *testing.T) {
+	application, _ := newTestApplication(t)
+	legacyDirectory := filepath.Join(application.storagePath, "secrets")
+	if err := os.MkdirAll(legacyDirectory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	legacyPath := filepath.Join(legacyDirectory, "ai-provider.key")
+	if err := os.WriteFile(legacyPath, bytes.Repeat([]byte{0x41}, 32), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := application.migrate(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(legacyPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("SECURITY: legacy server-side AI provider key file still exists: %v", err)
+	}
+}
+
+func TestRepositoryDoesNotContainLikelyLiveAIProviderTokens(t *testing.T) {
+	pattern := regexp.MustCompile("s" + "k-(?:proj-|ant-)?[A-Za-z0-9_-]{24,}")
+	extensions := map[string]bool{
+		".go": true, ".html": true, ".js": true, ".json": true, ".md": true,
+		".yml": true, ".yaml": true, ".sh": true, ".css": true, ".toml": true,
+	}
+	root := "."
+	walkErr := filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() {
+			switch entry.Name() {
+			case ".git", "node_modules", "vendor":
+				if path != "." {
+					return filepath.SkipDir
+				}
+			}
+			return nil
+		}
+		if !extensions[strings.ToLower(filepath.Ext(path))] {
+			return nil
+		}
+		fileBytes, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return readErr
+		}
+		if match := pattern.Find(fileBytes); len(match) != 0 {
+			t.Fatalf("SECURITY: likely live AI provider token is tracked in %s", path)
+		}
+		return nil
+	})
+	if walkErr != nil {
+		t.Fatal(walkErr)
+	}
+}
+
+func TestAIProviderTokenLinksAreExposedWithoutEmbeddingTokens(t *testing.T) {
+	templateBytes, err := embeddedWebFiles.ReadFile("web/edit_ai.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	templateSource := string(templateBytes)
+	for _, expectedURL := range []string{
+		"https://platform.openai.com/api-keys",
+		"https://console.anthropic.com/settings/keys",
+		"https://platform.deepseek.com/api_keys",
+		"https://modelstudio.console.alibabacloud.com/model/settings/api-key",
+		"https://aistudio.google.com/app/apikey",
+		"https://console.groq.com/keys",
+		"https://console.mistral.ai/api-keys",
+	} {
+		if !strings.Contains(templateSource, expectedURL) {
+			t.Fatalf("edit_ai.html is missing provider key URL %q", expectedURL)
+		}
+	}
+	for _, forbidden := range []string{"sk-", "secret-provider-token", "encrypted_api_key"} {
+		if strings.Contains(templateSource, forbidden) {
+			t.Fatalf("edit_ai.html embeds secret-like material %q", forbidden)
+		}
+	}
+}
+
+func TestAIEditorDefaultsToLocalOllamaAndRequiresExplicitDraftSave(t *testing.T) {
+	templateBytes, err := embeddedWebFiles.ReadFile("web/edit_ai.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	templateSource := string(templateBytes)
+	ollamaOption := `<option value="ollama" selected>`
+	openAIOption := `<option value="openai-compatible">`
+	if !strings.Contains(templateSource, ollamaOption) {
+		t.Fatal("AI editor does not default to local Ollama")
+	}
+	if strings.Index(templateSource, ollamaOption) > strings.Index(templateSource, openAIOption) {
+		t.Fatal("local Ollama is not the first provider")
+	}
+	for _, required := range []string{"previewPanel", "previewFrame", "saveDraftButton", "?ai_apply", "draft_html", "Страница ещё не сохранена"} {
+		if !strings.Contains(templateSource, required) {
+			t.Fatalf("AI draft preview flow missing %q", required)
+		}
+	}
+}
+
+func TestAIEditorTemplateExposesFreeTierProviders(t *testing.T) {
+	templateBytes, err := embeddedWebFiles.ReadFile("web/edit_ai.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	templateSource := string(templateBytes)
+	for _, fragment := range []string{
+		`value="gemini"`,
+		`value="groq"`,
+		`value="mistral"`,
+		"Free Tier",
+		"Free Plan",
+		"Free mode",
+	} {
+		if !strings.Contains(templateSource, fragment) {
+			t.Fatalf("edit_ai.html missing %q", fragment)
+		}
+	}
+}
+
+func TestEditorExposesOnlyVisualTextAndAIRoutes(t *testing.T) {
+	aiTemplateBytes, err := embeddedWebFiles.ReadFile("web/edit_ai.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	aiTemplate := string(aiTemplateBytes)
+	for _, expectedFragment := range []string{"pageTabButton", "externalTabButton", "saveProviderTokenButton", "?ai_provider_save", "?ai_execute", "?ai_apply", "previewPanel", "saveDraftButton", "openChatGPTButton", "openClaudeButton"} {
+		if !strings.Contains(aiTemplate, expectedFragment) {
+			t.Fatalf("edit_ai.html does not expose %q", expectedFragment)
+		}
+	}
+	for _, forbiddenFragment := range []string{"aiEditorScope", "Весь сайт", "?edit", "?editraw"} {
+		if strings.Contains(aiTemplate, forbiddenFragment) {
+			t.Fatalf("edit_ai.html still exposes obsolete editor fragment %q", forbiddenFragment)
+		}
+	}
+
+	menuScript := buildContextMenuScript(true, false, false, false, true, "/", "example.com", 0, 0, "", "", translationsForLanguageCode("en"))
+	for _, expectedPath := range []string{"href='?visual'", "href='?text'", "href='?ai'"} {
+		if !strings.Contains(menuScript, expectedPath) {
+			t.Fatalf("context menu does not expose %q", expectedPath)
+		}
+	}
+	for _, obsoleteFragment := range []string{"?edit", "?editraw", "data-sitebrush-action='ai_editor'", "SiteBrushAIEditor"} {
+		if strings.Contains(menuScript, obsoleteFragment) {
+			t.Fatalf("context menu still exposes obsolete editor fragment %q", obsoleteFragment)
+		}
+	}
+}
+func TestRecommendedAIEditorModelPrefersBalancedOptions(t *testing.T) {
+	cases := []struct {
+		provider string
+		models   []string
+		want     string
+	}{
+		{aiprovider.ProviderOpenAICompatible, []string{"gpt-6-luna", "gpt-5.6-terra", "gpt-6-sol", "gpt-6-pro"}, "gpt-5.6-terra"},
+		{aiprovider.ProviderAnthropic, []string{"claude-haiku-5", "claude-sonnet-5", "claude-opus-5"}, "claude-sonnet-5"},
+		{aiprovider.ProviderDeepSeek, []string{"deepseek-reasoner", "deepseek-chat"}, "deepseek-chat"},
+		{aiprovider.ProviderQwen, []string{"qwen-turbo", "qwen-plus", "qwen-max"}, "qwen-plus"},
+		{aiprovider.ProviderGemini, []string{"gemini-3.8-pro", "gemini-3.8-flash", "gemini-3.8-flash-lite"}, "gemini-3.8-flash"},
+		{aiprovider.ProviderGroq, []string{"openai/gpt-oss-120b", "openai/gpt-oss-20b"}, "openai/gpt-oss-20b"},
+		{aiprovider.ProviderMistral, []string{"mistral-large-latest", "mistral-small-latest"}, "mistral-small-latest"},
+	}
+	for _, testCase := range cases {
+		if got := recommendedAIEditorModel(testCase.provider, testCase.models); got != testCase.want {
+			t.Fatalf("provider=%s model=%q want=%q", testCase.provider, got, testCase.want)
+		}
+	}
+}
+
+func TestAIEditorModelsExcludeNonTextModels(t *testing.T) {
+	models := aiEditorModels(aiprovider.ProviderOpenAICompatible, []string{"text-embedding-3-large", "gpt-6-sol", "gpt-image-1", "whisper-1"})
+	if len(models) != 1 || models[0] != "gpt-6-sol" {
+		t.Fatalf("filtered models=%v", models)
+	}
+}
+
+type capturingAIEditorStore struct {
+	requests chan aieditor.Request
+}
+
+func (store *capturingAIEditorStore) Execute(request aieditor.Request, done <-chan struct{}) aieditor.Result {
+	select {
+	case <-done:
+		return aieditor.Result{Operation: request.Operation, Err: aieditor.ErrTaskCanceled}
+	case store.requests <- request:
+		return aieditor.Result{Operation: request.Operation, Path: request.Path}
+	}
+}
+
+func TestAIFileEndpointCannotSmugglePublishOperation(t *testing.T) {
+	application, _ := newTestApplication(t)
+	application.aiCapabilities = aicapability.NewManager()
+	t.Cleanup(application.aiCapabilities.Close)
+
+	store := &capturingAIEditorStore{requests: make(chan aieditor.Request, 1)}
+	application.aiExecutor = aieditor.NewExecutor(store, 4)
+	t.Cleanup(application.aiExecutor.Close)
+
+	capabilityToken, _, err := application.aiCapabilities.IssueFor("localhost", "owner@example.org", []string{aicapability.ScopeRead, aicapability.ScopeWrite})
+	if err != nil {
+		t.Fatal(err)
+	}
+	session, err := application.aiCapabilities.Exchange(capabilityToken, "localhost")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	request := httptest.NewRequest(http.MethodPost, "http://localhost/file?ai_token="+url.QueryEscape(capabilityToken),
+		strings.NewReader(`{"operation":"publish","file_name":"proof.txt","file_content":"eA=="}`))
+	request.Header.Set("Authorization", "Bearer "+session.Token)
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+
+	application.aiContentEndpoint(response, request, "localhost", capabilityToken, "file")
+	if response.Code != http.StatusOK {
+		t.Fatalf("file endpoint status=%d body=%q", response.Code, response.Body.String())
+	}
+
+	select {
+	case captured := <-store.requests:
+		if captured.Operation != aieditor.OperationUploadFile {
+			t.Fatalf("file endpoint executed %q instead of upload", captured.Operation)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("file endpoint did not submit an AI editor task")
+	}
+}
+
+func TestAppAIStoreStopsAlreadyCanceledTaskBeforeDatabaseAccess(t *testing.T) {
+	application, _ := newTestApplication(t)
+	store := &appAIStore{application: application}
+	done := make(chan struct{})
+	close(done)
+
+	result := store.Execute(aieditor.Request{Domain: "localhost", Operation: aieditor.OperationListPages}, done)
+	if !errors.Is(result.Err, aieditor.ErrTaskCanceled) {
+		t.Fatalf("canceled store task error=%v", result.Err)
+	}
+}
+
+func TestAICapabilityPathIsReadableButRedactsSecretToken(t *testing.T) {
+	capabilityPath := aiCapabilityURL("random-secret-token")
+	if capabilityPath != "/?ai_token=random-secret-token" {
+		t.Fatalf("capability URL=%q", capabilityPath)
+	}
+	for _, requestPath := range []string{"/?ai_token=random-secret-token", "/exchange?ai_token=random-secret-token", "/pages?ai_token=random-secret-token"} {
+		parsedRequestURL, err := url.Parse(requestPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		redactedQuery := accountauth.SafeQuery(parsedRequestURL.RawQuery)
+		if strings.Contains(redactedQuery, "random-secret-token") {
+			t.Fatalf("capability token leaked in %q -> %q", requestPath, redactedQuery)
+		}
+	}
+}
+
+func TestAIPageSaveFailureRollsBackContentAndStorageQuota(t *testing.T) {
+	application, database := newTestApplication(t)
+	ctx := context.Background()
+	domain := "ai-atomic.example"
+
+	if _, err := database.ExecContext(ctx, `INSERT INTO pages(domain,path,title,html,published) VALUES(?,?,?,?,1)`, domain, "/one", "One", "<p>old</p>"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.ExecContext(ctx, `INSERT INTO published_pages(domain,path,title,html) VALUES(?,?,?,?)`, domain, "/one", "One", "<p>old</p>"); err != nil {
+		t.Fatal(err)
+	}
+	application.rebuildDomainStorageUsage(ctx, domain)
+
+	var beforeRevisionBytes int64
+	if err := database.QueryRowContext(ctx, `SELECT revision_bytes FROM domain_storage_usage WHERE domain=?`, domain).Scan(&beforeRevisionBytes); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.ExecContext(ctx, `DROP TABLE revisions`); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := application.saveAIPage(ctx, domain, aieditor.Request{
+		Operation: aieditor.OperationUpdatePage,
+		Path:      "/one",
+		Title:     "One",
+		HTML:      "<p>new content</p>",
+	})
+	if err == nil {
+		t.Fatal("AI page save unexpectedly succeeded after forced revision failure")
+	}
+
+	for _, tableName := range []string{"pages", "published_pages"} {
+		var html string
+		query := `SELECT html FROM ` + tableName + ` WHERE domain=? AND path=?`
+		if err := database.QueryRowContext(ctx, query, domain, "/one").Scan(&html); err != nil {
+			t.Fatal(err)
+		}
+		if html != "<p>old</p>" {
+			t.Fatalf("%s HTML changed after failed AI save: %q", tableName, html)
+		}
+	}
+
+	var afterRevisionBytes int64
+	if err := database.QueryRowContext(ctx, `SELECT revision_bytes FROM domain_storage_usage WHERE domain=?`, domain).Scan(&afterRevisionBytes); err != nil {
+		t.Fatal(err)
+	}
+	if afterRevisionBytes != beforeRevisionBytes {
+		t.Fatalf("failed AI save changed revision quota: before=%d after=%d", beforeRevisionBytes, afterRevisionBytes)
+	}
+}
+
+func TestAIRollbackIsPageBoundAndChargesRevisionStorage(t *testing.T) {
+	application, database := newTestApplication(t)
+	ctx := context.Background()
+	domain := "ai-rollback.example"
+	if _, err := database.ExecContext(ctx, `INSERT INTO pages(domain,path,title,html,published) VALUES(?,?,?,?,1)`, domain, "/one", "One", "<p>current</p>"); err != nil {
+		t.Fatal(err)
+	}
+	firstRevision, err := database.ExecContext(ctx, `INSERT INTO revisions(domain,page_path,html,created_at) VALUES(?,?,?,?)`, domain, "/one", "<p>old</p>", time.Now().UTC().Format(time.RFC3339))
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstRevisionID, err := firstRevision.LastInsertId()
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondRevision, err := database.ExecContext(ctx, `INSERT INTO revisions(domain,page_path,html,created_at) VALUES(?,?,?,?)`, domain, "/two", "<p>other</p>", time.Now().UTC().Format(time.RFC3339))
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondRevisionID, err := secondRevision.LastInsertId()
+	if err != nil {
+		t.Fatal(err)
+	}
+	application.rebuildDomainStorageUsage(ctx, domain)
+	var beforeRevisionBytes int64
+	if err := database.QueryRowContext(ctx, `SELECT revision_bytes FROM domain_storage_usage WHERE domain=?`, domain).Scan(&beforeRevisionBytes); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := application.rollbackAIPage(ctx, domain, aieditor.Request{Operation: aieditor.OperationRollback, Path: "/one", ExpectedVersion: strconv.FormatInt(secondRevisionID, 10)}); err == nil {
+		t.Fatal("AI rollback accepted a revision from another page")
+	}
+	var revisionCountAfterMismatch int
+	if err := database.QueryRowContext(ctx, `SELECT COUNT(*) FROM revisions WHERE domain=?`, domain).Scan(&revisionCountAfterMismatch); err != nil {
+		t.Fatal(err)
+	}
+	if revisionCountAfterMismatch != 2 {
+		t.Fatalf("mismatched rollback created a revision: count=%d", revisionCountAfterMismatch)
+	}
+
+	if err := application.rollbackAIPage(ctx, domain, aieditor.Request{Operation: aieditor.OperationRollback, Path: "/one", ExpectedVersion: strconv.FormatInt(firstRevisionID, 10)}); err != nil {
+		t.Fatalf("valid AI rollback failed: %v", err)
+	}
+	var pageHTML string
+	if err := database.QueryRowContext(ctx, `SELECT html FROM pages WHERE domain=? AND path=?`, domain, "/one").Scan(&pageHTML); err != nil {
+		t.Fatal(err)
+	}
+	if pageHTML != "<p>old</p>" {
+		t.Fatalf("page HTML=%q after rollback", pageHTML)
+	}
+	var afterRevisionBytes int64
+	if err := database.QueryRowContext(ctx, `SELECT revision_bytes FROM domain_storage_usage WHERE domain=?`, domain).Scan(&afterRevisionBytes); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := afterRevisionBytes-beforeRevisionBytes, int64(len([]byte("<p>old</p>"))); got != want {
+		t.Fatalf("revision quota delta=%d, want %d", got, want)
 	}
 }
 
@@ -17299,6 +17915,234 @@ func TestSecurityBoundaryAuthenticatedMutationsRejectHostileOrigin(t *testing.T)
 				t.Fatalf("SECURITY: hostile-origin mutation %s status=%d body=%q", requestPath, response.Code, response.Body.String())
 			}
 		})
+	}
+}
+
+func TestSecurityBoundaryAuthenticatedMutationSaveAllowsSessionCSRFWhenBrowserOriginIsOpaque(t *testing.T) {
+	application, rawDB := newTestApplication(t)
+	if _, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "admin@example.com", "password"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := rawDB.Exec(`INSERT INTO pages(domain,path,title,html,published) VALUES(?,?,?,?,1)`, "localhost", "/", "Home", "<p>old</p>"); err != nil {
+		t.Fatal(err)
+	}
+	adminCookie := newAdminSessionCookie(t, application, "admin@example.com")
+	csrfRequest := httptest.NewRequest(http.MethodGet, "http://localhost:8080/", nil)
+	csrfRequest.AddCookie(adminCookie)
+	csrfToken := accountCSRF(csrfRequest)
+
+	form := url.Values{
+		"path": {"/"},
+		"title": {"Home"},
+		"html": {"<p>saved</p>"},
+		"account_csrf": {csrfToken},
+	}
+	request := httptest.NewRequest(http.MethodPost, "http://localhost:8080/?save", strings.NewReader(form.Encode()))
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	request.Header.Set("Origin", "null")
+	request.AddCookie(adminCookie)
+	response := httptest.NewRecorder()
+	application.route(response, request)
+
+	if response.Code != http.StatusFound {
+		t.Fatalf("opaque-origin save status=%d body=%q", response.Code, response.Body.String())
+	}
+	var savedHTML string
+	if err := rawDB.QueryRow(`SELECT html FROM pages WHERE domain=? AND path=?`, "localhost", "/").Scan(&savedHTML); err != nil {
+		t.Fatal(err)
+	}
+	if savedHTML != "<p>saved</p>" {
+		t.Fatalf("saved HTML=%q", savedHTML)
+	}
+}
+
+func TestSecurityBoundaryAuthenticatedMutationSaveRejectsCrossOriginWithoutSessionCSRFAndGET(t *testing.T) {
+	application, rawDB := newTestApplication(t)
+	if _, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "admin@example.com", "password"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := rawDB.Exec(`INSERT INTO pages(domain,path,title,html,published) VALUES(?,?,?,?,1)`, "localhost", "/", "Home", "<p>old</p>"); err != nil {
+		t.Fatal(err)
+	}
+	adminCookie := newAdminSessionCookie(t, application, "admin@example.com")
+
+	form := url.Values{"path": {"/"}, "title": {"Home"}, "html": {"<p>attacker</p>"}}
+	crossOrigin := httptest.NewRequest(http.MethodPost, "http://localhost:8080/?save", strings.NewReader(form.Encode()))
+	crossOrigin.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	crossOrigin.Header.Set("Origin", "https://attacker.example")
+	crossOrigin.AddCookie(adminCookie)
+	crossOriginResponse := httptest.NewRecorder()
+	application.route(crossOriginResponse, crossOrigin)
+	if crossOriginResponse.Code != http.StatusForbidden {
+		t.Fatalf("cross-origin save without CSRF status=%d body=%q", crossOriginResponse.Code, crossOriginResponse.Body.String())
+	}
+
+	getRequest := httptest.NewRequest(http.MethodGet, "http://localhost:8080/?save", nil)
+	getRequest.AddCookie(adminCookie)
+	getResponse := httptest.NewRecorder()
+	application.route(getResponse, getRequest)
+	if getResponse.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("GET save status=%d body=%q", getResponse.Code, getResponse.Body.String())
+	}
+
+	var savedHTML string
+	if err := rawDB.QueryRow(`SELECT html FROM pages WHERE domain=? AND path=?`, "localhost", "/").Scan(&savedHTML); err != nil {
+		t.Fatal(err)
+	}
+	if savedHTML != "<p>old</p>" {
+		t.Fatalf("rejected save mutated page HTML=%q", savedHTML)
+	}
+}
+
+func TestEditorSaveFormsCarrySessionCSRF(t *testing.T) {
+	for _, templateName := range []string{"edit.html", "edit_raw.html"} {
+		templateBytes, err := embeddedWebFiles.ReadFile("web/" + templateName)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(templateBytes), `name="account_csrf" value="{{.AccountCSRF}}"`) {
+			t.Fatalf("%s does not carry the session-bound save CSRF token", templateName)
+		}
+	}
+}
+
+func TestSecurityBoundaryAuthenticatedMutationDeleteAllowsSessionCSRFWhenBrowserOriginIsOpaque(t *testing.T) {
+	application, rawDB := newTestApplication(t)
+	if _, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "admin@example.com", "password"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := rawDB.Exec(`INSERT INTO pages(domain,path,title,html,published) VALUES(?,?,?,?,1)`, "localhost", "/", "Home", "<p>current</p>"); err != nil {
+		t.Fatal(err)
+	}
+	result, err := rawDB.Exec(`INSERT INTO revisions(domain,page_path,html,created_at,is_active) VALUES(?,?,?,?,1)`, "localhost", "/", "<p>revision</p>", time.Now().UTC().Format(time.RFC3339))
+	if err != nil {
+		t.Fatal(err)
+	}
+	revisionID, err := result.LastInsertId()
+	if err != nil {
+		t.Fatal(err)
+	}
+	adminCookie := newAdminSessionCookie(t, application, "admin@example.com")
+	csrfRequest := httptest.NewRequest(http.MethodGet, "http://localhost:8080/", nil)
+	csrfRequest.AddCookie(adminCookie)
+	csrfToken := accountCSRF(csrfRequest)
+
+	form := url.Values{"account_csrf": {csrfToken}}
+	request := httptest.NewRequest(http.MethodPost, fmt.Sprintf("http://localhost:8080/?delete=%d", revisionID), strings.NewReader(form.Encode()))
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	request.Header.Set("Origin", "null")
+	request.AddCookie(adminCookie)
+	response := httptest.NewRecorder()
+	application.route(response, request)
+
+	if response.Code != http.StatusFound {
+		t.Fatalf("opaque-origin delete status=%d body=%q", response.Code, response.Body.String())
+	}
+	var active int
+	if err := rawDB.QueryRow(`SELECT is_active FROM revisions WHERE id=?`, revisionID).Scan(&active); err != nil {
+		t.Fatal(err)
+	}
+	if active != 0 {
+		t.Fatalf("revision remained active after authenticated delete: %d", active)
+	}
+}
+
+func TestSecurityBoundaryAuthenticatedMutationDeleteRejectsCrossOriginWithoutSessionCSRFAndGET(t *testing.T) {
+	application, rawDB := newTestApplication(t)
+	if _, err := rawDB.Exec(`INSERT INTO users(domain,email,password,is_admin) VALUES(?,?,?,1)`, "localhost", "admin@example.com", "password"); err != nil {
+		t.Fatal(err)
+	}
+	result, err := rawDB.Exec(`INSERT INTO revisions(domain,page_path,html,created_at,is_active) VALUES(?,?,?,?,1)`, "localhost", "/", "<p>revision</p>", time.Now().UTC().Format(time.RFC3339))
+	if err != nil {
+		t.Fatal(err)
+	}
+	revisionID, _ := result.LastInsertId()
+	adminCookie := newAdminSessionCookie(t, application, "admin@example.com")
+
+	crossOrigin := httptest.NewRequest(http.MethodPost, fmt.Sprintf("http://localhost:8080/?delete=%d", revisionID), strings.NewReader(""))
+	crossOrigin.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	crossOrigin.Header.Set("Origin", "https://attacker.example")
+	crossOrigin.AddCookie(adminCookie)
+	crossOriginResponse := httptest.NewRecorder()
+	application.route(crossOriginResponse, crossOrigin)
+	if crossOriginResponse.Code != http.StatusForbidden {
+		t.Fatalf("cross-origin delete without CSRF status=%d", crossOriginResponse.Code)
+	}
+
+	getRequest := httptest.NewRequest(http.MethodGet, fmt.Sprintf("http://localhost:8080/?delete=%d", revisionID), nil)
+	getRequest.AddCookie(adminCookie)
+	getResponse := httptest.NewRecorder()
+	application.route(getResponse, getRequest)
+	if getResponse.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("GET delete status=%d body=%q", getResponse.Code, getResponse.Body.String())
+	}
+
+	var active int
+	if err := rawDB.QueryRow(`SELECT is_active FROM revisions WHERE id=?`, revisionID).Scan(&active); err != nil {
+		t.Fatal(err)
+	}
+	if active != 1 {
+		t.Fatal("rejected delete mutated the revision")
+	}
+}
+
+func TestSecurityBoundaryAuthenticatedMutationEditorActionsStillEnforceIPAllowlist(t *testing.T) {
+	application, rawDB := newTestApplication(t)
+	for _, statement := range []string{
+		`INSERT INTO users(domain,email,password,is_admin) VALUES('localhost','admin@example.com','password',1)`,
+		`INSERT INTO admin_ip_policies(domain,email,enabled_at) VALUES('localhost','admin@example.com',1)`,
+		`INSERT INTO admin_allowed_ips(domain,email,client_ip,added_at) VALUES('localhost','admin@example.com','192.0.2.1',1)`,
+		`INSERT INTO pages(domain,path,title,html,published) VALUES('localhost','/','Home','<p>old</p>',1)`,
+	} {
+		if _, err := rawDB.Exec(statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	revisionResult, err := rawDB.Exec(`INSERT INTO revisions(domain,page_path,html,created_at,is_active) VALUES(?,?,?,?,1)`, "localhost", "/", "<p>revision</p>", time.Now().UTC().Format(time.RFC3339))
+	if err != nil {
+		t.Fatal(err)
+	}
+	revisionID, _ := revisionResult.LastInsertId()
+	adminCookie := newAdminSessionCookie(t, application, "admin@example.com")
+	csrfRequest := httptest.NewRequest(http.MethodGet, "http://localhost:8080/", nil)
+	csrfRequest.AddCookie(adminCookie)
+	csrfToken := accountCSRF(csrfRequest)
+
+	for _, testCase := range []struct {
+		name string
+		url  string
+		form url.Values
+	}{
+		{name: "save", url: "http://localhost:8080/?save", form: url.Values{"path": {"/"}, "title": {"Home"}, "html": {"<p>new</p>"}, "account_csrf": {csrfToken}}},
+		{name: "delete", url: fmt.Sprintf("http://localhost:8080/?delete=%d", revisionID), form: url.Values{"account_csrf": {csrfToken}}},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodPost, testCase.url, strings.NewReader(testCase.form.Encode()))
+			request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			request.Header.Set("Origin", "null")
+			request.RemoteAddr = "192.0.2.2:1234"
+			request.AddCookie(adminCookie)
+			response := httptest.NewRecorder()
+			application.route(response, request)
+			if response.Code != http.StatusForbidden {
+				t.Fatalf("unlisted IP editor mutation status=%d body=%q", response.Code, response.Body.String())
+			}
+		})
+	}
+
+	var pageHTML string
+	if err := rawDB.QueryRow(`SELECT html FROM pages WHERE domain='localhost' AND path='/'`).Scan(&pageHTML); err != nil {
+		t.Fatal(err)
+	}
+	if pageHTML != "<p>old</p>" {
+		t.Fatalf("IP-blocked save changed page HTML=%q", pageHTML)
+	}
+	var active int
+	if err := rawDB.QueryRow(`SELECT is_active FROM revisions WHERE id=?`, revisionID).Scan(&active); err != nil {
+		t.Fatal(err)
+	}
+	if active != 1 {
+		t.Fatal("IP-blocked delete changed revision state")
 	}
 }
 
