@@ -129,12 +129,16 @@ func (executor *Executor) Submit(task Task) error {
 	task.accepted = make(chan struct{})
 	select {
 	case executor.requests <- task:
+	case <-task.Done:
+		return ErrTaskCanceled
 	case <-executor.stop:
 		return errors.New("AI editor executor is stopped")
 	}
 	select {
 	case <-task.accepted:
 		return nil
+	case <-task.Done:
+		return ErrTaskCanceled
 	case <-executor.stop:
 		return errors.New("AI editor executor is stopped")
 	}
