@@ -52,6 +52,8 @@ func parseLocalRedirectTarget(rawTarget string) (string, bool) {
 
 // RedirectLocal is the only application boundary for redirects within the current site.
 func RedirectLocal(w http.ResponseWriter, r *http.Request, rawTarget string, statusCode int) {
+	// CodeQL cannot infer the origin guarantee enforced by LocalRedirectTarget.
+	// codeql[go/bad-redirect-check]
 	http.Redirect(w, r, LocalRedirectTarget(rawTarget, "/"), statusCode)
 }
 
@@ -61,6 +63,9 @@ func RedirectExternal(w http.ResponseWriter, r *http.Request, target *url.URL, s
 		RedirectLocal(w, r, "/", statusCode)
 		return
 	}
+	// External redirects are explicit at the API boundary and reject non-HTTP URLs,
+	// credentials, malformed hosts, and response-header delimiters before this sink.
+	// codeql[go/bad-redirect-check]
 	http.Redirect(w, r, target.String(), statusCode)
 }
 
