@@ -45,7 +45,7 @@ type Result struct {
 }
 
 type Store interface {
-	Execute(Request) Result
+	Execute(Request, <-chan struct{}) Result
 }
 
 // Task keeps cancellation explicit at the channel boundary. Done is owned by the
@@ -57,7 +57,8 @@ type Task struct {
 	Done    <-chan struct{}
 	Reply   chan<- Result
 
-	closeReply chan struct{}
+	accepted     chan struct{}
+	closeRequest bool
 }
 
 // Executor owns its lifecycle in the same goroutine that owns the request queue.
@@ -82,10 +83,12 @@ func (executor *Executor) run(store Store) {
 		case <-executor.stop:
 			return
 		case task := <-executor.requests:
-			if task.closeReply != nil {
+			if task.closeRequest {
 				close(executor.stop)
-				close(task.closeReply)
 				return
+			}
+			if task.accepted != nil {
+				close(task.accepted)
 			}
 			if task.Reply == nil || task.Done == nil {
 				continue
@@ -104,7 +107,7 @@ func (executor *Executor) run(store Store) {
 				if store == nil {
 					result.Err = errors.New("AI editor store is unavailable")
 				} else {
-					result = store.Execute(task.Request)
+					result = store.Execute(task.Request, task.Done)
 				}
 			}
 			select {
@@ -119,13 +122,18 @@ func (executor *Executor) Submit(task Task) error {
 	if executor == nil || task.Reply == nil || task.Done == nil {
 		return ErrInvalidRequest
 	}
-	select {
-	case <-executor.stop:
-		return errors.New("AI editor executor is stopped")
-	default:
-	}
+
+	// A buffered queue can contain a shutdown marker. Submit therefore waits for
+	// the worker to acknowledge receipt before reporting success. If shutdown is
+	// reached first, the caller learns that its task was never accepted.
+	task.accepted = make(chan struct{})
 	select {
 	case executor.requests <- task:
+	case <-executor.stop:
+		return errors.New("AI editor executor is stopped")
+	}
+	select {
+	case <-task.accepted:
 		return nil
 	case <-executor.stop:
 		return errors.New("AI editor executor is stopped")
@@ -136,12 +144,16 @@ func (executor *Executor) Close() {
 	if executor == nil {
 		return
 	}
-	closeReply := make(chan struct{})
+
+	// The worker is the only goroutine allowed to close stop. Every concurrent
+	// closer waits on that same completion channel, so duplicate close requests
+	// cannot strand a caller on a private acknowledgement channel.
 	select {
-	case executor.requests <- Task{closeReply: closeReply}:
-		<-closeReply
+	case executor.requests <- Task{closeRequest: true}:
 	case <-executor.stop:
+		return
 	}
+	<-executor.stop
 }
 
 func Validate(request Request) error {
