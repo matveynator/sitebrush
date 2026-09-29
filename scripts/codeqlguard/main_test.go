@@ -12,7 +12,7 @@ import (
 
 func TestScanDirectoryAcceptsCleanSARIF(t *testing.T) {
 	directory := t.TempDir()
-	writeSARIF(t, directory, "clean.sarif", `{"runs":[{"results":[]}]}`)
+	writeSARIF(t, directory, "clean.sarif", `{"version":"2.1.0","runs":[{"results":[]}]}`)
 
 	summary, err := scanDirectory(directory)
 	if err != nil {
@@ -25,8 +25,8 @@ func TestScanDirectoryAcceptsCleanSARIF(t *testing.T) {
 
 func TestScanDirectoryRejectsUnsuppressedFindingsAcrossFiles(t *testing.T) {
 	directory := t.TempDir()
-	writeSARIF(t, directory, "go.sarif", `{"runs":[{"results":[{"ruleId":"go/log-injection"},{"ruleId":"go/log-injection"}]}]}`)
-	writeSARIF(t, directory, "actions.sarif", `{"runs":[{"results":[{"ruleId":"actions/code-injection/critical"}]}]}`)
+	writeSARIF(t, directory, "go.sarif", `{"version":"2.1.0","runs":[{"results":[{"ruleId":"go/log-injection"},{"ruleId":"go/log-injection"}]}]}`)
+	writeSARIF(t, directory, "actions.sarif", `{"version":"2.1.0","runs":[{"results":[{"ruleId":"actions/code-injection/critical"}]}]}`)
 
 	summary, err := scanDirectory(directory)
 	if err != nil {
@@ -43,7 +43,7 @@ func TestScanDirectoryRejectsUnsuppressedFindingsAcrossFiles(t *testing.T) {
 
 func TestScanDirectoryIgnoresAcceptedSuppressions(t *testing.T) {
 	directory := t.TempDir()
-	writeSARIF(t, directory, "suppressed.sarif", `{"runs":[{"results":[
+	writeSARIF(t, directory, "suppressed.sarif", `{"version":"2.1.0","runs":[{"results":[
 		{"ruleId":"go/log-injection","suppressions":[{"status":"accepted"}]},
 		{"ruleId":"go/request-forgery","suppressions":[{"status":"under-review"}]}
 	]}]}`)
@@ -70,6 +70,24 @@ func TestScanDirectoryFailsClosedForMalformedSARIF(t *testing.T) {
 
 	if _, err := scanDirectory(directory); err == nil {
 		t.Fatal("malformed SARIF must fail closed")
+	}
+}
+
+func TestScanDirectoryFailsClosedForStructurallyInvalidSARIF(t *testing.T) {
+	for name, content := range map[string]string{
+		"empty-object":  `{}`,
+		"null":          `null`,
+		"missing-runs":  `{"version":"2.1.0"}`,
+		"empty-runs":    `{"version":"2.1.0","runs":[]}`,
+		"wrong-version": `{"version":"2.0.0","runs":[{"results":[]}]}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			directory := t.TempDir()
+			writeSARIF(t, directory, "invalid.sarif", content)
+			if _, err := scanDirectory(directory); err == nil {
+				t.Fatalf("structurally invalid SARIF %s must fail closed", content)
+			}
+		})
 	}
 }
 
