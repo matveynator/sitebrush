@@ -29,6 +29,11 @@
     .ai-recording{background:var(--bs-danger);border-color:var(--bs-danger);color:#fff}
     .ai-files{font-size:13px;color:var(--bs-secondary-color);overflow-wrap:anywhere}
     .ai-status{min-height:22px;font-size:14px;white-space:pre-wrap}
+    .ai-preview{display:grid;gap:10px;border:1px solid var(--bs-border-color);border-radius:14px;padding:12px;background:var(--bs-body-bg)}
+    .ai-preview[hidden]{display:none!important}
+    .ai-preview-header{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap}
+    .ai-preview-actions{display:flex;gap:8px;flex-wrap:wrap}
+    .ai-preview-frame{width:100%;height:min(52vh,520px);border:1px solid var(--bs-border-color);border-radius:10px;background:#fff}
     .ai-settings{border:1px solid var(--bs-border-color);border-radius:14px;padding:0 14px}
     .ai-settings summary{cursor:pointer;padding:11px 0;font-size:14px}
     .ai-settings-grid{display:grid;grid-template-columns:1fr;gap:10px;padding:0 0 14px}
@@ -83,6 +88,20 @@
 
         <div id="status" class="ai-status" role="status"></div>
 
+        <section class="ai-preview" id="previewPanel" hidden>
+          <div class="ai-preview-header">
+            <div>
+              <strong>Предпросмотр AI-версии</strong>
+              <div class="small text-body-secondary">Страница ещё не сохранена в SiteBrush.</div>
+            </div>
+            <div class="ai-preview-actions">
+              <button class="btn btn-primary btn-sm" id="saveDraftButton" type="button">Сохранить в SiteBrush</button>
+              <button class="btn btn-outline-secondary btn-sm" id="discardDraftButton" type="button">Отменить черновик</button>
+            </div>
+          </div>
+          <iframe class="ai-preview-frame" id="previewFrame" sandbox="" title="Предпросмотр AI-страницы"></iframe>
+        </section>
+
         <details class="ai-settings" id="providerSettings" open>
           <summary>Настройки AI-провайдера</summary>
           <div class="ai-settings-grid">
@@ -92,6 +111,7 @@
             </div>
             <label>Провайдер
               <select class="form-select" id="provider">
+                <option value="ollama" selected>Ollama — локально на этом компьютере</option>
                 <option value="openai-compatible">OpenAI / ChatGPT API</option>
                 <option value="anthropic">Anthropic / Claude API</option>
                 <option value="deepseek">DeepSeek</option>
@@ -99,7 +119,6 @@
                 <option value="gemini">Google Gemini API — есть Free Tier</option>
                 <option value="groq">Groq — есть Free Plan</option>
                 <option value="mistral">Mistral — есть Free mode</option>
-                <option value="ollama">Ollama — локально на этом компьютере</option>
               </select>
             </label>
 
@@ -165,6 +184,10 @@ const saveProviderTokenButton = document.getElementById('saveProviderTokenButton
 const deleteProviderTokenButton = document.getElementById('deleteProviderTokenButton');
 const providerSettings = document.getElementById('providerSettings');
 const statusElement = document.getElementById('status');
+const previewPanel = document.getElementById('previewPanel');
+const previewFrame = document.getElementById('previewFrame');
+const saveDraftButton = document.getElementById('saveDraftButton');
+const discardDraftButton = document.getElementById('discardDraftButton');
 const pageTabButton = document.getElementById('pageTabButton');
 const externalTabButton = document.getElementById('externalTabButton');
 const pagePanel = document.getElementById('pagePanel');
@@ -209,6 +232,8 @@ const providerHelp = {
 };
 let speechRecognition = null;
 let externalLinkPromise = null;
+let currentDraft = null;
+let currentDraftFiles = [];
 
 function setStatus(message) { statusElement.textContent = message || ''; }
 function setExternalStatus(message) { externalStatus.textContent = message || ''; }
@@ -421,6 +446,25 @@ function fileToBase64(file) {
   });
 }
 
+function showDraft(payload, files) {
+  currentDraft = {
+    path: payload.path || '{{.Path}}',
+    title: payload.title || '',
+    html: payload.html || ''
+  };
+  currentDraftFiles = files.slice();
+  previewFrame.srcdoc = currentDraft.html;
+  previewPanel.hidden = false;
+  providerSettings.open = false;
+}
+
+function clearDraft() {
+  currentDraft = null;
+  currentDraftFiles = [];
+  previewFrame.srcdoc = '';
+  previewPanel.hidden = true;
+}
+
 async function executeTask() {
   const task = commandElement.value.trim();
   const saved = credentialStatus[providerElement.value];
@@ -436,7 +480,7 @@ async function executeTask() {
     return;
   }
   executeButton.disabled = true;
-  setStatus('AI анализирует текущую страницу…');
+  setStatus(currentDraft ? 'AI продолжает изменения черновика…' : 'AI создаёт черновик страницы…');
   try {
     const files = await Promise.all(Array.from(fileInput.files || []).map(fileToBase64));
     const response = await fetch('{{.Path}}?ai_execute', {
@@ -448,15 +492,47 @@ async function executeTask() {
         model:modelElement.value,
         page_path:'{{.Path}}',
         task:task,
+        draft_title:currentDraft ? currentDraft.title : '',
+        draft_html:currentDraft ? currentDraft.html : '',
         files:files
       })
     });
     const payload = await parseResponse(response);
-    setStatus('Готово. Страница ' + (payload.path || '{{.Path}}') + ' изменена. Изменения сохранены в ревизиях.');
+    showDraft(payload, files);
+    setStatus('Черновик готов. Проверьте предпросмотр, затем сохраните его или напишите следующую команду для продолжения изменений.');
   } catch (error) {
-    setStatus(error.message);
+    setStatus('Ошибка AI: ' + error.message);
   } finally {
     executeButton.disabled = false;
+  }
+}
+
+async function saveDraft() {
+  if (!currentDraft) {
+    setStatus('Сначала создайте AI-черновик.');
+    return;
+  }
+  saveDraftButton.disabled = true;
+  setStatus('Сохраняю проверенный черновик в SiteBrush…');
+  try {
+    const response = await fetch('{{.Path}}?ai_apply', {
+      method:'POST',
+      credentials:'same-origin',
+      headers:{'Content-Type':'application/json','X-SiteBrush-CSRF':accountCSRF},
+      body:JSON.stringify({
+        page_path:currentDraft.path,
+        title:currentDraft.title,
+        html:currentDraft.html,
+        files:currentDraftFiles
+      })
+    });
+    const payload = await parseResponse(response);
+    setStatus('Готово. Страница ' + (payload.path || currentDraft.path) + ' сохранена в SiteBrush и добавлена в ревизии.');
+    clearDraft();
+  } catch (error) {
+    setStatus('Ошибка сохранения: ' + error.message);
+  } finally {
+    saveDraftButton.disabled = false;
   }
 }
 
@@ -552,6 +628,11 @@ fileInput.addEventListener('change', function() {
 });
 recordButton.addEventListener('click', toggleVoice);
 executeButton.addEventListener('click', executeTask);
+saveDraftButton.addEventListener('click', saveDraft);
+discardDraftButton.addEventListener('click', function() {
+  clearDraft();
+  setStatus('Черновик отменён. Исходная страница не изменена.');
+});
 providerElement.addEventListener('change', updateProviderUI);
 saveProviderTokenButton.addEventListener('click', saveProviderToken);
 deleteProviderTokenButton.addEventListener('click', deleteProviderToken);
