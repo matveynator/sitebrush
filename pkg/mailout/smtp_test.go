@@ -36,8 +36,8 @@ func TestSMTPCompatibility(t *testing.T) {
 	}{
 		{name: "no TLS", attempts: 1},
 		{name: "broken STARTTLS", advertise: true, rejectTLS: true, attempts: 3},
-		{name: "untrusted certificate", advertise: true, version: tls.VersionTLS12, attempts: 2},
-		{name: "legacy TLS", advertise: true, version: tls.VersionTLS10, attempts: 2},
+		{name: "untrusted certificate", advertise: true, version: tls.VersionTLS12, attempts: 3},
+		{name: "legacy TLS", advertise: true, version: tls.VersionTLS10, attempts: 3},
 		{name: "recipient rejected without retry", rejectRecipient: true, attempts: 1},
 		{name: "accepted DATA with lost QUIT response", dropQuit: true, attempts: 1},
 	} {
