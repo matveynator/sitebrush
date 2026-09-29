@@ -354,15 +354,15 @@ function refreshExecuteButtonState() {
   const providerIsReady = providerReady(providerElement.value);
   const taskIsReady = Boolean(commandElement.value.trim());
   const requestIsRunning = Boolean(activeEditorSocket);
-  executeButton.disabled = requestIsRunning || uploadingEditorFiles || !providerIsReady || !taskIsReady;
+  executeButton.disabled = requestIsRunning || uploadingEditorFiles || !taskIsReady;
   if (requestIsRunning) {
     executeButton.title = 'AI выполняет задание';
   } else if (uploadingEditorFiles) {
     executeButton.title = 'Сначала дождитесь загрузки файлов';
-  } else if (!providerIsReady) {
-    executeButton.title = 'Сначала настройте AI-провайдера';
   } else if (!taskIsReady) {
     executeButton.title = 'Напишите задание';
+  } else if (!providerIsReady) {
+    executeButton.title = 'Отправить задание — при необходимости откроются настройки AI-провайдера';
   } else {
     executeButton.title = 'Отправить задание';
   }
@@ -445,7 +445,7 @@ function fillModels(provider, models, selectedModel) {
 async function loadModelsForSavedProvider(provider) {
   if (provider !== 'ollama' && (!credentialStatus[provider] || !credentialStatus[provider].saved || !credentialStatus[provider].unlocked)) {
     modelBlock.hidden = true;
-    executeButton.disabled = true;
+    refreshExecuteButtonState();
     return;
   }
   executeButton.disabled = true;
@@ -478,14 +478,13 @@ async function loadModelsForSavedProvider(provider) {
     const previousState = credentialStatus[provider] || {provider:provider};
     credentialStatus[provider] = Object.assign({}, previousState, {available:false});
     modelBlock.hidden = true;
-    executeButton.disabled = true;
-    executeButton.title = 'AI-провайдер недоступен';
     setProviderKeyStatus((provider === 'ollama' ? 'Ollama недоступна: ' : 'Провайдер недоступен: ') + error.message, 'is-error');
     providerSettingsStatus.textContent = 'ошибка подключения';
     providerSettingsStatus.classList.remove('is-ready');
     providerSettingsStatus.classList.add('is-error');
     providerSettings.open = true;
     renderProviderReadiness();
+    refreshExecuteButtonState();
   }
 }
 
@@ -522,19 +521,16 @@ function updateProviderUI() {
   } else if (saved && saved.saved) {
     apiKeyElement.placeholder = 'Повторно вставьте API key для этого браузера';
     deleteProviderTokenButton.hidden = false;
-    executeButton.disabled = true;
-    executeButton.title = 'Сначала подтвердите API key';
     setProviderKeyStatus('Ключ сохранён, но этот браузер не может его открыть. Вставьте API key ещё раз.', 'is-error');
     providerSettings.open = true;
   } else {
     apiKeyElement.placeholder = 'Вставьте API key';
     deleteProviderTokenButton.hidden = true;
-    executeButton.disabled = true;
-    executeButton.title = 'Сначала подтвердите API key';
     setProviderKeyStatus('API key ещё не подтверждён', '');
     providerSettings.open = true;
   }
   renderProviderReadiness();
+  refreshExecuteButtonState();
 }
 
 async function loadCredentialStatus() {
@@ -551,8 +547,8 @@ async function loadCredentialStatus() {
     updateProviderUI();
   } catch (error) {
     setProviderKeyStatus('Не удалось проверить сохранённые AI-провайдеры', 'is-error');
-    executeButton.disabled = true;
     providerSettings.open = true;
+    refreshExecuteButtonState();
   }
 }
 
