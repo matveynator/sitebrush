@@ -48,12 +48,20 @@ type Store interface {
 	Execute(Request) Result
 }
 
+// Task keeps cancellation explicit at the channel boundary. Done is owned by the
+// consumer and closes when the result is no longer needed; Reply carries only
+// completed results. Keeping both signals visible avoids propagating context
+// through application code while still letting the worker stop before expensive work.
 type Task struct {
 	Request Request
 	Done    <-chan struct{}
 	Reply   chan<- Result
+
+	closeReply chan struct{}
 }
 
+// Executor owns its lifecycle in the same goroutine that owns the request queue.
+// Close is therefore a protocol message rather than an external close on shared state.
 type Executor struct {
 	requests chan Task
 	stop     chan struct{}
@@ -74,12 +82,19 @@ func (executor *Executor) run(store Store) {
 		case <-executor.stop:
 			return
 		case task := <-executor.requests:
+			if task.closeReply != nil {
+				close(executor.stop)
+				close(task.closeReply)
+				return
+			}
 			if task.Reply == nil || task.Done == nil {
 				continue
 			}
 			select {
 			case <-task.Done:
-				task.Reply <- Result{Operation: task.Request.Operation, Err: ErrTaskCanceled}
+				// The consumer is gone. Do not send a cancellation result to a
+				// channel that may have no receiver; dropping the task is the
+				// cancellation protocol and keeps the worker available.
 				continue
 			default:
 			}
@@ -118,8 +133,14 @@ func (executor *Executor) Submit(task Task) error {
 }
 
 func (executor *Executor) Close() {
-	if executor != nil {
-		close(executor.stop)
+	if executor == nil {
+		return
+	}
+	closeReply := make(chan struct{})
+	select {
+	case executor.requests <- Task{closeReply: closeReply}:
+		<-closeReply
+	case <-executor.stop:
 	}
 }
 
