@@ -11735,6 +11735,80 @@ func TestAIEditorPageEmbedsSessionCSRFForWebSocket(t *testing.T) {
 	}
 }
 
+func TestAIEditorWebSocketUsesAuthenticatedSameOriginSessionWithoutSecondCSRF(t *testing.T) {
+	request := httptest.NewRequest(http.MethodGet, "http://localhost:8080/?ai_execute_ws", nil)
+	request.Host = "localhost:8080"
+	request.Header.Set("Origin", "http://localhost:8080")
+	if err := aiEditorWebSocketRequestAllowed(request, true); err != nil {
+		t.Fatalf("authenticated same-origin websocket rejected: %v", err)
+	}
+
+	crossOrigin := httptest.NewRequest(http.MethodGet, "http://localhost:8080/?ai_execute_ws", nil)
+	crossOrigin.Host = "localhost:8080"
+	crossOrigin.Header.Set("Origin", "https://attacker.example")
+	if err := aiEditorWebSocketRequestAllowed(crossOrigin, true); err == nil {
+		t.Fatal("cross-origin websocket was accepted")
+	}
+
+	unauthenticated := httptest.NewRequest(http.MethodGet, "http://localhost:8080/?ai_execute_ws", nil)
+	unauthenticated.Host = "localhost:8080"
+	unauthenticated.Header.Set("Origin", "http://localhost:8080")
+	if err := aiEditorWebSocketRequestAllowed(unauthenticated, false); err == nil {
+		t.Fatal("unauthenticated websocket was accepted")
+	}
+}
+
+func TestAIEditorStreamsDraftIntoBackgroundAndCanMinimize(t *testing.T) {
+	templateBytes, err := embeddedWebFiles.ReadFile("web/edit_ai.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	templateSource := string(templateBytes)
+	for _, required := range []string{
+		"streamingHTMLForBackground",
+		"scheduleBackgroundPreviewRender",
+		"pageBackgroundFrame.srcdoc = previewHTML",
+		"pageBackgroundFrame.srcdoc = currentDraft.html",
+		"setEditorMinimized",
+		"is-minimized",
+		"is-previewing",
+		"is-interactive",
+		"minimizeEditorButton",
+		"restoreBackgroundPage",
+		"revisionHistoryLink",
+		"?revisions",
+		"refreshExecuteButtonState",
+		"commandElement.addEventListener('input', refreshExecuteButtonState)",
+	} {
+		if !strings.Contains(templateSource, required) {
+			t.Fatalf("AI editor live preview/minimize flow missing %q", required)
+		}
+	}
+	if strings.Contains(templateSource, "csrf:accountCSRF") {
+		t.Fatal("AI editor still sends a redundant WebSocket CSRF token")
+	}
+}
+
+func TestAIEditorCancelRestoresOriginalPreviewAndSaveKeepsRevisionRollback(t *testing.T) {
+	templateBytes, err := embeddedWebFiles.ReadFile("web/edit_ai.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	templateSource := string(templateBytes)
+	for _, required := range []string{
+		"clearDraft(true)",
+		"clearDraft(false)",
+		"restoreBackgroundPage()",
+		"Сохранить страницу",
+		"Ревизии / откат",
+		"добавлена в ревизии",
+	} {
+		if !strings.Contains(templateSource, required) {
+			t.Fatalf("AI editor revision-safe draft flow missing %q", required)
+		}
+	}
+}
+
 func TestAIEditorBackgroundFrameIsSameOriginOnly(t *testing.T) {
 	request := httptest.NewRequest(http.MethodGet, "https://example.com/page?ai_background", nil)
 	request.AddCookie(&http.Cookie{Name: "sitebrush_session", Value: "test-session"})
