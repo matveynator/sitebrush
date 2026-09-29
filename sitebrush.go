@@ -10870,6 +10870,7 @@ func (a *App) aiEditorPage(w http.ResponseWriter, r *http.Request) {
 	a.render(w, r, "edit_ai.html", map[string]any{
 		"Path":         cleanPath(firstNonEmpty(r.URL.Query().Get("path"), r.URL.Path)),
 		"ProviderList": []string{aiprovider.ProviderOllama, aiprovider.ProviderOpenAICompatible, aiprovider.ProviderAnthropic, aiprovider.ProviderDeepSeek, aiprovider.ProviderQwen, aiprovider.ProviderGemini, aiprovider.ProviderGroq, aiprovider.ProviderMistral},
+		"AccountCSRF":  accountCSRF(r),
 	})
 }
 
@@ -11022,7 +11023,16 @@ func (a *App) executeAIEditorWebSocket(w http.ResponseWriter, r *http.Request) {
 				_ = websocket.JSON.Send(connection, aiEditorWebSocketEvent{Type: "error", Error: "invalid AI editor request"})
 				return
 			}
-			if subtle.ConstantTimeCompare([]byte(strings.TrimSpace(request.CSRF)), []byte(accountCSRF(r))) != 1 {
+			providedCSRF := strings.TrimSpace(request.CSRF)
+			expectedCSRF := accountCSRF(r)
+			if providedCSRF == "" || expectedCSRF == "" || subtle.ConstantTimeCompare([]byte(providedCSRF), []byte(expectedCSRF)) != 1 {
+				_, sessionCookieErr := r.Cookie("sitebrush_session")
+				log.Printf("AI EDITOR websocket session verification failed host=%q origin=%q has_session_cookie=%t provided_csrf=%t expected_csrf=%t",
+					diagnosticlog.SafeLogValue(r.Host),
+					diagnosticlog.SafeLogValue(r.Header.Get("Origin")),
+					sessionCookieErr == nil,
+					providedCSRF != "",
+					expectedCSRF != "")
 				_ = websocket.JSON.Send(connection, aiEditorWebSocketEvent{Type: "error", Error: "AI editor session verification failed"})
 				return
 			}
