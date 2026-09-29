@@ -9921,7 +9921,7 @@ func aiCapabilityOperationURL(request *http.Request, token, operation string) st
 
 type appAIStore struct{ application *App }
 
-func (store *appAIStore) Execute(request aieditor.Request) aieditor.Result {
+func (store *appAIStore) Execute(request aieditor.Request, done <-chan struct{}) aieditor.Result {
 	if store == nil || store.application == nil {
 		return aieditor.Result{Operation: request.Operation, Err: errors.New("AI editor application is unavailable")}
 	}
@@ -9929,7 +9929,23 @@ func (store *appAIStore) Execute(request aieditor.Request) aieditor.Result {
 	if domain == "" {
 		return aieditor.Result{Operation: request.Operation, Err: errors.New("AI editor domain is required")}
 	}
-	ctx := contextWithDomain(context.Background(), domain)
+	// Task cancellation remains channel-owned inside SiteBrush. This small bridge
+	// exists only because database/sql and the existing storage helpers require a
+	// context at their boundary; closing Done cancels those boundary operations.
+	ctx, cancel := context.WithCancel(contextWithDomain(context.Background(), domain))
+	cancellationBridgeDone := make(chan struct{})
+	go func() {
+		select {
+		case <-done:
+			cancel()
+		case <-cancellationBridgeDone:
+		}
+	}()
+	defer func() {
+		close(cancellationBridgeDone)
+		cancel()
+	}()
+
 	switch request.Operation {
 	case aieditor.OperationListPages:
 		pages, err := store.application.listAIPages(ctx, domain)
@@ -11244,9 +11260,9 @@ func (a *App) aiContentEndpoint(w http.ResponseWriter, r *http.Request, domain, 
 	}
 	switch operation {
 	case "file":
-		if request.Operation == "" {
-			request.Operation = aieditor.OperationUploadFile
-		}
+		// Route identity is authoritative. Never let a caller smuggle a publish
+		// operation through the write-scoped file endpoint.
+		request.Operation = aieditor.OperationUploadFile
 	case "publish":
 		request.Operation = aieditor.OperationPublish
 	case "rollback":
