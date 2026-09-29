@@ -11666,6 +11666,21 @@ func TestAIEditorRejectsConversationInsteadOfHTML(t *testing.T) {
 	}
 }
 
+func TestAIEditorTrimsProviderCommentaryAfterClosingHTML(t *testing.T) {
+	response := "<!doctype html><html><head><title>Clean</title></head><body><p>Page</p></body></html> Hope this helps."
+	result, err := parseAIEditorModelResult(response)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "<!doctype html><html><head><title>Clean</title></head><body><p>Page</p></body></html>"
+	if result.HTML != want {
+		t.Fatalf("HTML = %q, want %q", result.HTML, want)
+	}
+	if strings.Contains(result.HTML, "Hope this helps") {
+		t.Fatal("provider commentary leaked into the HTML draft")
+	}
+}
+
 func TestAIEditorTemplateUsesCurrentPageOverlayStreamingAndPreviewControls(t *testing.T) {
 	templateBytes, err := embeddedWebFiles.ReadFile("web/edit_ai.html")
 	if err != nil {
@@ -11785,6 +11800,47 @@ func TestAIFileEndpointCannotSmugglePublishOperation(t *testing.T) {
 		t.Fatal("file endpoint did not submit an AI editor task")
 	}
 }
+
+func TestAIUnscopedCapabilityKeepsFullSiteAccess(t *testing.T) {
+	application, _ := newTestApplication(t)
+	application.aiCapabilities = aicapability.NewManager()
+	t.Cleanup(application.aiCapabilities.Close)
+
+	store := &capturingAIEditorStore{requests: make(chan aieditor.Request, 1)}
+	application.aiExecutor = aieditor.NewExecutor(store, 4)
+	t.Cleanup(application.aiExecutor.Close)
+
+	capabilityToken, capability, err := application.aiCapabilities.IssueFor("localhost", "owner@example.org", []string{aicapability.ScopeRead, aicapability.ScopeWrite})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if capability.PagePath != "" {
+		t.Fatalf("unscoped capability PagePath = %q", capability.PagePath)
+	}
+	session, err := application.aiCapabilities.Exchange(capabilityToken, "localhost")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	request := httptest.NewRequest(http.MethodGet, "http://localhost/pages?ai_token="+url.QueryEscape(capabilityToken), nil)
+	request.Header.Set("Authorization", "Bearer "+session.Token)
+	response := httptest.NewRecorder()
+
+	application.aiContentEndpoint(response, request, "localhost", capabilityToken, "pages")
+	if response.Code != http.StatusOK {
+		t.Fatalf("unscoped pages status=%d body=%q", response.Code, response.Body.String())
+	}
+
+	select {
+	case captured := <-store.requests:
+		if captured.Operation != aieditor.OperationListPages {
+			t.Fatalf("unscoped capability submitted %q instead of list_pages", captured.Operation)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("unscoped capability did not submit list_pages")
+	}
+}
+
 
 func TestAppAIStoreStopsAlreadyCanceledTaskBeforeDatabaseAccess(t *testing.T) {
 	application, _ := newTestApplication(t)
