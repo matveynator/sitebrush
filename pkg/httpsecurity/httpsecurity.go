@@ -36,7 +36,13 @@ func parseLocalRedirectTarget(rawTarget string) (string, bool) {
 		return "", false
 	}
 	decodedPath, err := url.PathUnescape(parsedTarget.EscapedPath())
-	if err != nil || decodedPath == "" || decodedPath[0] != '/' || (len(decodedPath) > 1 && decodedPath[1] == '/') || strings.ContainsAny(decodedPath, "\r\n\\") {
+	if err != nil || decodedPath == "" || decodedPath[0] != '/' {
+		return "", false
+	}
+	if len(decodedPath) > 1 && (decodedPath[1] == '/' || decodedPath[1] == '\\') {
+		return "", false
+	}
+	if strings.ContainsAny(decodedPath, "\r\n\\") {
 		return "", false
 	}
 	cleanedPath := path.Clean(decodedPath)

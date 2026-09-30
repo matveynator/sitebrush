@@ -94,7 +94,15 @@ func CleanPath(rawPath string) string {
 	if trimmedPath == "" {
 		return "/"
 	}
-	if !strings.HasPrefix(trimmedPath, "/") {
+	// Imported paths are local URL paths, never network-path references.
+	if strings.Contains(trimmedPath, "\\") {
+		return "/"
+	}
+	if trimmedPath[0] == '/' {
+		if len(trimmedPath) > 1 && trimmedPath[1] == '/' {
+			return "/"
+		}
+	} else {
 		trimmedPath = "/" + trimmedPath
 	}
 	cleanedPath := path.Clean(trimmedPath)

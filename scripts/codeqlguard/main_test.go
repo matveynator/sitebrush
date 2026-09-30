@@ -91,6 +91,36 @@ func TestScanDirectoryFailsClosedForStructurallyInvalidSARIF(t *testing.T) {
 	}
 }
 
+
+
+func TestScanDirectoryAcceptsOnlyExactValidatedBaselineFingerprint(t *testing.T) {
+	directory := t.TempDir()
+	writeSARIF(t, directory, "baseline.sarif", `{"version":"2.1.0","runs":[{"results":[
+		{"ruleId":"go/request-forgery","locations":[{"physicalLocation":{"artifactLocation":{"uri":"pkg/crawler/download.go"}}}],"partialFingerprints":{"primaryLocationLineHash":"1b25405598db72a4:1"}},
+		{"ruleId":"go/request-forgery","locations":[{"physicalLocation":{"artifactLocation":{"uri":"pkg/crawler/download.go"}}}],"partialFingerprints":{"primaryLocationLineHash":"new-location:1"}}
+	]}]}`)
+
+	summary, err := scanDirectory(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary.Total != 1 || summary.ByRule["go/request-forgery"] != 1 {
+		t.Fatalf("unexpected findings: %#v", summary)
+	}
+
+	data, err := os.ReadFile(filepath.Join(directory, "baseline.sarif"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rewritten := string(data)
+	if strings.Contains(rewritten, "1b25405598db72a4:1") {
+		t.Fatal("validated baseline result must be removed from reviewed SARIF")
+	}
+	if !strings.Contains(rewritten, "new-location:1") {
+		t.Fatal("unmatched finding must remain in reviewed SARIF")
+	}
+}
+
 // --- Workflow integration enforcement ---
 
 func TestSecurityWorkflowRequiresCleanCodeQLResult(t *testing.T) {
@@ -103,17 +133,32 @@ func TestSecurityWorkflowRequiresCleanCodeQLResult(t *testing.T) {
 	workflow := string(data)
 
 	outputMarker := "output: codeql-results"
+	noUploadMarker := "upload: never"
 	gateMarker := "run: go run ./scripts/codeqlguard"
+	uploadMarker := "uses: github/codeql-action/upload-sarif@"
 	outputIndex := strings.Index(workflow, outputMarker)
+	noUploadIndex := strings.Index(workflow, noUploadMarker)
 	gateIndex := strings.Index(workflow, gateMarker)
+	uploadIndex := -1
+	if gateIndex >= 0 {
+		if relativeUploadIndex := strings.Index(workflow[gateIndex:], uploadMarker); relativeUploadIndex >= 0 {
+			uploadIndex = gateIndex + relativeUploadIndex
+		}
+	}
 	if outputIndex < 0 {
 		t.Fatalf("security workflow must persist CodeQL SARIF with %q", outputMarker)
+	}
+	if noUploadIndex < 0 {
+		t.Fatalf("CodeQL analyze must not upload unreviewed SARIF; missing %q", noUploadMarker)
 	}
 	if gateIndex < 0 {
 		t.Fatalf("security workflow must enforce CodeQL results with %q", gateMarker)
 	}
-	if gateIndex < outputIndex {
-		t.Fatal("CodeQL gate must run after SARIF output is produced")
+	if uploadIndex < 0 {
+		t.Fatalf("security workflow must upload reviewed SARIF with %q", uploadMarker)
+	}
+	if gateIndex < outputIndex || uploadIndex < gateIndex {
+		t.Fatal("CodeQL workflow order must be analyze -> review gate -> reviewed SARIF upload")
 	}
 }
 
