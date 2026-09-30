@@ -93,13 +93,31 @@ func TestStreamGroqOpenAICompatibleChat(t *testing.T) {
 	}
 }
 
-func TestStreamOllamaAcceptsNewlineDelimitedOpenAICompatibleJSON(t *testing.T) {
+func TestStreamOllamaUsesNativeChatNDJSON(t *testing.T) {
 	httpClient := &http.Client{Transport: streamRoundTripper(func(request *http.Request) (*http.Response, error) {
-		body := "{\"choices\":[{\"delta\":{\"content\":\"<html>\"}}]}\n" +
-			"{\"choices\":[{\"delta\":{\"content\":\"local</html>\"}}]}\n"
+		if request.URL.String() != "http://127.0.0.1:11434/api/chat" {
+			t.Fatalf("endpoint=%q", request.URL.String())
+		}
+		bodyBytes, err := io.ReadAll(request.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		bodyText := string(bodyBytes)
+		for _, required := range []string{
+			`"model":"qwen-test"`,
+			`"stream":true`,
+			`"think":false`,
+			`"content":"edit"`,
+		} {
+			if !strings.Contains(bodyText, required) {
+				t.Fatalf("Ollama stream payload missing %q: %s", required, bodyText)
+			}
+		}
+		body := "{\"message\":{\"role\":\"assistant\",\"content\":\"SITEBRUSH_EDIT\\n<html>\"},\"done\":false}\n" +
+			"{\"message\":{\"role\":\"assistant\",\"content\":\"local</html>\"},\"done\":true}\n"
 		return &http.Response{
 			StatusCode: http.StatusOK,
-			Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+			Header:     http.Header{"Content-Type": []string{"application/x-ndjson"}},
 			Body:       io.NopCloser(strings.NewReader(body)),
 		}, nil
 	})}
@@ -113,7 +131,7 @@ func TestStreamOllamaAcceptsNewlineDelimitedOpenAICompatibleJSON(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if response.Text != "<html>local</html>" {
+	if response.Text != "SITEBRUSH_EDIT\n<html>local</html>" {
 		t.Fatalf("response=%q", response.Text)
 	}
 }
