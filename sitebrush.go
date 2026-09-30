@@ -14534,10 +14534,14 @@ func cleanPath(rawPath string) string {
 	}
 	// URL paths are always local to the current site. Reject network-path and
 	// backslash forms before normalization so they cannot acquire URL authority semantics.
-	if strings.HasPrefix(trimmedPath, "//") || strings.Contains(trimmedPath, "\\") {
+	if strings.Contains(trimmedPath, "\\") {
 		return "/"
 	}
-	if trimmedPath[0] != '/' {
+	if trimmedPath[0] == '/' {
+		if len(trimmedPath) > 1 && trimmedPath[1] == '/' {
+			return "/"
+		}
+	} else {
 		trimmedPath = "/" + trimmedPath
 	}
 	normalizedPath := path.Clean(trimmedPath)
@@ -32597,11 +32601,15 @@ func siteCopyMenuConfigJSON(pagePath string, translations map[string]string) str
 	return string(jsonBytes)
 }
 
-func siteCopyMenuConfigJSONStringLiteral(pagePath string, translations map[string]string) string {
-	// Encoding the JSON document as a second JSON string keeps user-controlled
-	// translations out of executable JavaScript syntax. The browser parses only data.
-	jsonBytes, _ := json.Marshal(siteCopyMenuConfigJSON(pagePath, translations))
-	return string(jsonBytes)
+func siteCopyMenuConfigByteList(pagePath string, translations map[string]string) string {
+	// Decimal byte literals contain only digits and commas, so translated text can
+	// never cross the JavaScript syntax boundary. The browser decodes the bytes as UTF-8 JSON.
+	jsonBytes := []byte(siteCopyMenuConfigJSON(pagePath, translations))
+	byteValues := make([]string, 0, len(jsonBytes))
+	for _, value := range jsonBytes {
+		byteValues = append(byteValues, strconv.Itoa(int(value)))
+	}
+	return strings.Join(byteValues, ",")
 }
 
 func siteCopyMenuTexts(translations map[string]string) map[string]string {
@@ -32751,7 +32759,7 @@ func buildContextMenuScript(isAdmin bool, isServerManager bool, isFrozen bool, p
   const currentDomainName = "` + escapedDomain + `";
   const isDomainFrozen = ` + strconv.FormatBool(isFrozen) + `;
   const mutationCSRFToken = "` + escapedMutationCSRFToken + `";
-  const siteCopyConfig = JSON.parse(` + siteCopyMenuConfigJSONStringLiteral(pagePath, translations) + `);
+  const siteCopyConfig = JSON.parse(new TextDecoder().decode(Uint8Array.from([` + siteCopyMenuConfigByteList(pagePath, translations) + `])));
   const actionConfigByName = {
     delete: { path: "?delete=` + strconv.Itoa(revisionID) + `", message: "` + confirmDeletePrompt + `", icon: "delete" },
     freeze: { path: "?freeze", message: "` + confirmFreezePrompt + `", icon: "freeze" },
