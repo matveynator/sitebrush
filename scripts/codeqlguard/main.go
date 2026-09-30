@@ -37,13 +37,16 @@ type findingSummary struct {
 }
 
 type validatedFinding struct {
-	RuleID      string
-	URI         string
-	LineHash    string
+	RuleID        string
+	URI           string
+	LineHash      string
+	StartLine     int
 	Justification string
 }
 
 var validatedBaseline = []validatedFinding{
+	{RuleID: "go/bad-redirect-check", URI: "pkg/crawler/whole_site.go", StartLine: 101, Justification: "Crawler paths are local-only and pass through LocalRedirectTarget, which rejects network-path, host, credential, backslash, and control-character forms."},
+	{RuleID: "go/bad-redirect-check", URI: "sitebrush.go", StartLine: 14540, Justification: "Application paths are local-only and pass through LocalRedirectTarget, which independently enforces same-origin redirect syntax."},
 	{RuleID: "go/path-injection", URI: "sitebrush.go", LineHash: "a2e340fc87446ad4:1", Justification: "Path starts under the site storage root and is revalidated after symlink resolution."},
 	{RuleID: "go/path-injection", URI: "sitebrush.go", LineHash: "d47546112b0da682:1", Justification: "The existing parent is derived only by walking parents of a storage-root-derived candidate."},
 	{RuleID: "go/path-injection", URI: "sitebrush.go", LineHash: "b38a944104bd3220:1", Justification: "writablePathInsideStorageSubtree constrains the directory to the domain storage root before creation."},
@@ -116,7 +119,8 @@ func applyValidatedBaseline(path string) error {
 			ruleID, _ := result["ruleId"].(string)
 			uri := primaryResultURI(result)
 			lineHash := primaryLineHash(result)
-			justification, matched := baselineJustification(ruleID, uri, lineHash)
+			startLine := primaryStartLine(result)
+			justification, matched := baselineJustification(ruleID, uri, lineHash, startLine)
 			if !matched {
 				continue
 			}
@@ -150,15 +154,33 @@ func primaryResultURI(result map[string]any) string {
 	return uri
 }
 
+func primaryStartLine(result map[string]any) int {
+	locations, _ := result["locations"].([]any)
+	if len(locations) == 0 {
+		return 0
+	}
+	location, _ := locations[0].(map[string]any)
+	physical, _ := location["physicalLocation"].(map[string]any)
+	region, _ := physical["region"].(map[string]any)
+	startLine, _ := region["startLine"].(float64)
+	return int(startLine)
+}
+
 func primaryLineHash(result map[string]any) string {
 	fingerprints, _ := result["partialFingerprints"].(map[string]any)
 	lineHash, _ := fingerprints["primaryLocationLineHash"].(string)
 	return lineHash
 }
 
-func baselineJustification(ruleID, uri, lineHash string) (string, bool) {
+func baselineJustification(ruleID, uri, lineHash string, startLine int) (string, bool) {
 	for _, finding := range validatedBaseline {
-		if finding.RuleID == ruleID && finding.URI == uri && finding.LineHash == lineHash {
+		if finding.RuleID != ruleID || finding.URI != uri {
+			continue
+		}
+		if finding.LineHash != "" && finding.LineHash == lineHash {
+			return finding.Justification, true
+		}
+		if finding.LineHash == "" && finding.StartLine > 0 && finding.StartLine == startLine {
 			return finding.Justification, true
 		}
 	}
