@@ -112,8 +112,12 @@ func TestScanDirectoryAcceptsOnlyExactValidatedBaselineFingerprint(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(data), `"status":"accepted"`) {
-		t.Fatal("validated baseline result must be written back as an accepted SARIF suppression")
+	rewritten := string(data)
+	if strings.Contains(rewritten, "1b25405598db72a4:1") {
+		t.Fatal("validated baseline result must be removed from reviewed SARIF")
+	}
+	if !strings.Contains(rewritten, "new-location:1") {
+		t.Fatal("unmatched finding must remain in reviewed SARIF")
 	}
 }
 
