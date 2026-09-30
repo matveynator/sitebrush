@@ -464,18 +464,11 @@ func (client *Client) Complete(ctx context.Context, request Request) (Response, 
 		}
 		return Response{Text: anthropicResponse.Content[0].Text}, nil
 	}
-	var compatibleResponse struct {
-		Choices []struct {
-			Message Message `json:"message"`
-		} `json:"choices"`
-	}
-	if err := json.Unmarshal(body, &compatibleResponse); err != nil {
+	text, err := client.decodeProviderResponse(body)
+	if err != nil {
 		return Response{}, err
 	}
-	if len(compatibleResponse.Choices) == 0 {
-		return Response{}, errors.New("AI provider response has no choices")
-	}
-	return Response{Text: compatibleResponse.Choices[0].Message.Content}, nil
+	return Response{Text: text}, nil
 }
 
 func EncryptSecret(key []byte, secret string) (string, error) {
