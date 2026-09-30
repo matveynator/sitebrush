@@ -806,6 +806,17 @@ function restoreBackgroundPage() {
   pageBackgroundFrame.src = backgroundPageURL();
 }
 
+function editorFileReferences() {
+  return uploadedEditorFiles.map(function providerFileReference(uploadedFile) {
+    return {
+      name:uploadedFile.name,
+      original_name:uploadedFile.original_name || uploadedFile.name,
+      mime:uploadedFile.mime,
+      url:uploadedFile.url
+    };
+  });
+}
+
 async function executeTask() {
   const task = commandElement.value.trim();
   const provider = providerElement.value;
@@ -833,12 +844,10 @@ async function executeTask() {
   streamedProviderText = '';
   streamOutput.textContent = '';
   streamDetails.hidden = false;
-  streamDetails.open = true;
-  setStatus(currentDraft ? 'AI продолжает редактировать ваш черновик…' : 'AI редактирует текущую страницу…');
+  streamDetails.open = false;
+  setStatus(currentDraft ? 'AI продолжает редактировать ваш черновик…' : 'AI редактирует текущую страницу как HTML-разработчик…');
 
-  const files = uploadedEditorFiles.map(function providerFileReference(uploadedFile) {
-    return {name:uploadedFile.name, mime:uploadedFile.mime, url:uploadedFile.url};
-  });
+  const files = editorFileReferences();
 
   const socket = new WebSocket(editorWebSocketURL());
   activeEditorSocket = socket;
@@ -867,9 +876,37 @@ async function executeTask() {
       setStatus(payload.text || 'AI работает…');
       return;
     }
+    if (payload.type === 'reset_stream') {
+      streamedProviderText = '';
+      streamOutput.textContent = '';
+      if (backgroundBeforeRequest) {
+        pageBackgroundFrame.srcdoc = backgroundBeforeRequest;
+      } else {
+        restoreBackgroundPage();
+      }
+      return;
+    }
     if (payload.type === 'delta') {
       streamedProviderText += payload.text || '';
       scheduleStreamRender();
+      return;
+    }
+    if (payload.type === 'clarification') {
+      terminalEventReceived = true;
+      const clarificationQuestion = (payload.text || '').trim();
+      const clarificationPrefix = task + '\n\nУточнение AI: ' + clarificationQuestion + '\nОтвет: ';
+      commandElement.value = clarificationPrefix;
+      commandElement.focus();
+      commandElement.setSelectionRange(commandElement.value.length, commandElement.value.length);
+      streamDetails.open = false;
+      if (backgroundBeforeRequest) {
+        pageBackgroundFrame.srcdoc = backgroundBeforeRequest;
+      } else {
+        restoreBackgroundPage();
+      }
+      setStatus('AI просит уточнение перед изменением страницы: ' + clarificationQuestion);
+      refreshExecuteButtonState();
+      socket.close();
       return;
     }
     if (payload.type === 'draft') {
@@ -886,6 +923,7 @@ async function executeTask() {
         activeEditorSocket = null;
       }
       refreshExecuteButtonState();
+      streamDetails.open = streamedProviderText.trim() !== '';
       setStatus('Ошибка AI: ' + (payload.error || 'неизвестная ошибка'));
       if (backgroundBeforeRequest) {
         pageBackgroundFrame.srcdoc = backgroundBeforeRequest;
@@ -1060,7 +1098,11 @@ async function createExternalAILink() {
       method:'POST',
       credentials:'same-origin',
       headers:{'Content-Type':'application/json','X-SiteBrush-CSRF':accountCSRF},
-      body:JSON.stringify({page_path:'{{.Path}}', task:commandElement.value.trim()})
+      body:JSON.stringify({
+        page_path:'{{.Path}}',
+        task:commandElement.value.trim(),
+        files:editorFileReferences()
+      })
     });
     const payload = await parseResponse(response);
     externalAILink.value = payload.url || '';
