@@ -11876,7 +11876,7 @@ func (a *App) aiCapabilityRequest(w http.ResponseWriter, r *http.Request, domain
 	instructions := "No SiteBrush plugin is required. Read " + aiCapabilityOperationURL(r, token, "documentation") + " first. Then use POST " + aiCapabilityOperationURL(r, token, "exchange") + " to obtain a short-lived scoped session. For content operations use the same ai_token query parameter and send the session as Authorization: Bearer. Only site content is available; never request account, security, server, database, or shell access."
 	if strings.TrimSpace(capability.PagePath) != "" {
 		operations = []string{"manifest", "documentation", "exchange", "openapi", "read_page", "update_page", "list_files", "upload_file", "list_revisions", "rollback"}
-		instructions = "No SiteBrush plugin is required. This capability is restricted to the current page " + capability.PagePath + ". Exchange the capability for a short-lived session, then read/update that page, list or upload its files, inspect its revisions, or roll it back. Do not list, create, publish, or access any other page."
+		instructions = "No SiteBrush plugin is required. This link is a current-page editing job, not a request to discuss or summarize the page. The administrator task is in the task field. Exchange the capability for a short-lived session, read the current page " + capability.PagePath + ", then implement that task by updating the same page HTML. Preserve unrelated page content and behavior. Use attached /p/ file URLs from the task when requested. Ask the administrator one concise clarification question only when a genuinely necessary detail is missing. Do not list, create, publish, or access any other page."
 	}
 	manifest := aicapability.Manifest{
 		Name:             "SiteBrush AI editor",
@@ -11909,6 +11909,10 @@ func (a *App) writeAICapabilityDocumentation(w http.ResponseWriter, r *http.Requ
 	}
 	if capability.Task != "" {
 		fmt.Fprintf(w, "Task supplied by the administrator:\n\n> %s\n\n", strings.ReplaceAll(capability.Task, "\n", "\n> "))
+	}
+	if capability.PagePath != "" {
+		fmt.Fprint(w, "## Editing contract\n\n")
+		fmt.Fprint(w, "This capability is an editing job, not a general chat or page-analysis request. Read the current page, apply the administrator task directly to its HTML, and update that same page. Preserve unrelated content and behavior. If the task references attached files, use their exact /p/ URLs from the task context. Do not merely summarize the HTML or explain how it could be changed. If a genuinely necessary detail is missing, ask the administrator one concise clarification question before changing the page.\n\n")
 	}
 	fmt.Fprintf(w, "## Authentication\n\n")
 	fmt.Fprintf(w, "1. POST `%s` to exchange this capability for a short-lived editor session.\n", aiCapabilityOperationURL(r, token, "exchange"))
