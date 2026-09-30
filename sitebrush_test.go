@@ -19350,23 +19350,32 @@ func TestAIEditorPromptMakesTheUserRequestAnImplementationTask(t *testing.T) {
 		}
 	}
 	for _, required := range []string{
-		"=== USER EDITING TASK ===",
+		"=== FINAL USER EDITING TASK ===",
 		"Добавь приложенную фотографию",
 		"IMG_5869.JPG",
 		"/p/0db11377081a.jpg",
 		"=== CURRENT PAGE HTML ===",
 		"<main>catalog</main>",
+		"Do not ask the user to provide a task",
 	} {
 		if !strings.Contains(messages[1].Content, required) {
 			t.Fatalf("user prompt missing %q: %s", required, messages[1].Content)
 		}
 	}
+	htmlEndIndex := strings.Index(messages[1].Content, "=== END CURRENT PAGE HTML ===")
+	taskIndex := strings.Index(messages[1].Content, "=== FINAL USER EDITING TASK ===")
+	if htmlEndIndex < 0 || taskIndex <= htmlEndIndex {
+		t.Fatalf("editing task must follow page HTML so local-model context truncation keeps the task: %s", messages[1].Content)
+	}
 
 	retryMessages := aiEditorRepairMessages(messages)
 	if !strings.Contains(retryMessages[0].Content, "behaved like a chatbot") {
-		t.Fatalf("repair prompt=%q", retryMessages[0].Content)
+		t.Fatalf("repair system prompt=%q", retryMessages[0].Content)
 	}
-	if strings.Contains(messages[0].Content, "previous response was rejected") {
+	if !strings.Contains(retryMessages[1].Content, "Do not ask for the task again") {
+		t.Fatalf("repair user prompt=%q", retryMessages[1].Content)
+	}
+	if strings.Contains(messages[0].Content, "previous response was rejected") || strings.Contains(messages[1].Content, "Do not ask for the task again") {
 		t.Fatal("repair mutated the original message slice")
 	}
 }
@@ -19446,6 +19455,35 @@ func TestAIPageScopedManifestDescribesAnEditingJob(t *testing.T) {
 	} {
 		if !strings.Contains(response.Body.String(), required) {
 			t.Fatalf("manifest missing %q: %s", required, response.Body.String())
+		}
+	}
+}
+
+
+func TestAIEditorLargePageKeepsEditingTaskAtPromptTail(t *testing.T) {
+	largeHTML := "<html><body>" + strings.Repeat("<article>product</article>", 20000) + "</body></html>"
+	task := "Поставь фотографию /p/photo.jpg в карточку первого товара"
+	messages := aiEditorPageMessages(
+		aiEditorExecutionRequest{PagePath: "/", Task: task},
+		Page{Title: "Large catalog", HTML: largeHTML},
+		[]aiEditorFileReference{{Name: "photo.jpg", OriginalName: "IMG_5869.JPG", MIME: "image/jpeg", URL: "/p/photo.jpg"}},
+	)
+	if len(messages) != 2 {
+		t.Fatalf("messages=%+v", messages)
+	}
+	userPrompt := messages[1].Content
+	taskIndex := strings.LastIndex(userPrompt, task)
+	htmlEndIndex := strings.Index(userPrompt, "=== END CURRENT PAGE HTML ===")
+	if taskIndex <= htmlEndIndex {
+		t.Fatalf("task index=%d html end=%d", taskIndex, htmlEndIndex)
+	}
+	tail := userPrompt
+	if len(tail) > 4096 {
+		tail = tail[len(tail)-4096:]
+	}
+	for _, required := range []string{task, "SITEBRUSH_EDIT", "Do not ask the user to provide a task"} {
+		if !strings.Contains(tail, required) {
+			t.Fatalf("prompt tail lost %q", required)
 		}
 	}
 }
