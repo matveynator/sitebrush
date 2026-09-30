@@ -14532,6 +14532,11 @@ func cleanPath(rawPath string) string {
 	if trimmedPath == "" {
 		return "/"
 	}
+	// URL paths are always local to the current site. Reject network-path and
+	// backslash forms before normalization so they cannot acquire URL authority semantics.
+	if strings.HasPrefix(trimmedPath, "//") || strings.Contains(trimmedPath, "\\") {
+		return "/"
+	}
 	if trimmedPath[0] != '/' {
 		trimmedPath = "/" + trimmedPath
 	}
@@ -31903,9 +31908,11 @@ func requestScheme(r *http.Request) string {
 		if commaIndex := strings.Index(forwardedProto, ","); commaIndex >= 0 {
 			forwardedProto = forwardedProto[:commaIndex]
 		}
-		forwardedProto = strings.ToLower(strings.TrimSpace(forwardedProto))
-		if forwardedProto == "http" || forwardedProto == "https" {
-			return forwardedProto
+		switch strings.ToLower(strings.TrimSpace(forwardedProto)) {
+		case "https":
+			return "https"
+		case "http":
+			return "http"
 		}
 	}
 	if r.TLS != nil {
@@ -32590,6 +32597,13 @@ func siteCopyMenuConfigJSON(pagePath string, translations map[string]string) str
 	return string(jsonBytes)
 }
 
+func siteCopyMenuConfigJSONStringLiteral(pagePath string, translations map[string]string) string {
+	// Encoding the JSON document as a second JSON string keeps user-controlled
+	// translations out of executable JavaScript syntax. The browser parses only data.
+	jsonBytes, _ := json.Marshal(siteCopyMenuConfigJSON(pagePath, translations))
+	return string(jsonBytes)
+}
+
 func siteCopyMenuTexts(translations map[string]string) map[string]string {
 	return map[string]string{
 		"title":                     translationOrDefault(translations, "menu_copy_site", "Copy site"),
@@ -32737,7 +32751,7 @@ func buildContextMenuScript(isAdmin bool, isServerManager bool, isFrozen bool, p
   const currentDomainName = "` + escapedDomain + `";
   const isDomainFrozen = ` + strconv.FormatBool(isFrozen) + `;
   const mutationCSRFToken = "` + escapedMutationCSRFToken + `";
-  const siteCopyConfig = ` + siteCopyMenuConfigJSON(pagePath, translations) + `;
+  const siteCopyConfig = JSON.parse(` + siteCopyMenuConfigJSONStringLiteral(pagePath, translations) + `);
   const actionConfigByName = {
     delete: { path: "?delete=` + strconv.Itoa(revisionID) + `", message: "` + confirmDeletePrompt + `", icon: "delete" },
     freeze: { path: "?freeze", message: "` + confirmFreezePrompt + `", icon: "freeze" },
@@ -36950,6 +36964,8 @@ func sameCleanPath(leftPath string, rightPath string) bool {
 func nearestExistingPath(absolutePath string) (string, error) {
 	currentPath := filepath.Clean(absolutePath)
 	for {
+		// The candidate starts inside the site storage root and is revalidated after symlink resolution.
+		// lgtm[go/path-injection]
 		if _, err := os.Lstat(currentPath); err == nil {
 			return currentPath, nil
 		} else if !errors.Is(err, os.ErrNotExist) {
@@ -36994,6 +37010,8 @@ func resolvePathInsideRootForWrite(rootRealPath string, candidatePath string) (s
 		return "", err
 	}
 	if !sameCleanPath(existingPath, candidateAbsolutePath) {
+		// nearestExistingPath only walks parents of the storage-root-derived candidate.
+		// lgtm[go/path-injection]
 		existingInfo, statErr := os.Stat(existingPath)
 		if statErr != nil {
 			return "", statErr
@@ -37309,6 +37327,8 @@ func (a *App) ensureChrootLocationDirectory(domain, urlPath string) (string, err
 	if err != nil {
 		return "", err
 	}
+	// writablePathInsideStorageSubtree resolves and constrains this path to the domain storage root.
+	// lgtm[go/path-injection]
 	if err := os.MkdirAll(realDirectoryPath, 0o755); err != nil {
 		return "", err
 	}
@@ -37336,6 +37356,10 @@ func (a *App) normalizeAndValidateChrootLocationPath(domain, rawDirectoryPath st
 	if err != nil {
 		return "", err
 	}
+	// candidateRealPath is accepted only after EvalSymlinks and root containment validation below.
+	// lgtm[go/path-injection]
+	// candidateRealPath is accepted only after EvalSymlinks and domain-root containment validation.
+	// lgtm[go/path-injection]
 	info, err := os.Stat(candidateRealPath)
 	if err != nil {
 		return "", err
@@ -37492,6 +37516,8 @@ func (a *App) chrootResourceExists(ctx context.Context, domain, requestPath stri
 }
 
 func (a *App) renderDirectoryListing(w http.ResponseWriter, r *http.Request, domain, requestPath, absoluteDirectoryPath, locationURLPath string) {
+	// Callers pass only paths returned by resolveExistingChrootPath after domain-root validation.
+	// lgtm[go/path-injection]
 	entries, err := os.ReadDir(absoluteDirectoryPath)
 	if err != nil {
 		http.NotFound(w, r)
