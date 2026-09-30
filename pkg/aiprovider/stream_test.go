@@ -107,6 +107,7 @@ func TestStreamOllamaUsesNativeChatNDJSON(t *testing.T) {
 			`"model":"qwen-test"`,
 			`"stream":true`,
 			`"think":false`,
+			`"num_ctx":65536`,
 			`"content":"edit"`,
 		} {
 			if !strings.Contains(bodyText, required) {
