@@ -72,6 +72,20 @@ func (client *Client) Stream(ctx context.Context, request Request, output chan<-
 func (client *Client) streamingRequestPayload(request Request) (string, []byte, error) {
 	endpoint := client.baseURL + "/chat/completions"
 	switch client.configuration.Provider {
+	case ProviderOllama:
+		endpoint = strings.TrimSuffix(client.baseURL, "/v1") + "/api/chat"
+		payload, err := json.Marshal(struct {
+			Model    string    `json:"model"`
+			Messages []Message `json:"messages"`
+			Stream   bool      `json:"stream"`
+			Think    bool      `json:"think"`
+		}{
+			Model:    client.configuration.Model,
+			Messages: request.Messages,
+			Stream:   true,
+			Think:    false,
+		})
+		return endpoint, payload, err
 	case ProviderOpenAICompatible:
 		endpoint = client.baseURL + "/responses"
 		systemParts := make([]string, 0, 2)
