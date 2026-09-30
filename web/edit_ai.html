@@ -1211,6 +1211,7 @@ document.getElementById('copyExternalAILinkButton').addEventListener('click', fu
   });
 });
 document.getElementById('renewExternalAILinkButton').addEventListener('click', function onRenewExternalClick() {
+  invalidateExternalAILink();
   createExternalAILink().catch(function ignoreRenewError() {});
 });
 document.getElementById('openChatGPTButton').addEventListener('click', function onOpenChatGPTClick() {
