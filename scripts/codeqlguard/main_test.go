@@ -135,7 +135,12 @@ func TestSecurityWorkflowRequiresCleanCodeQLResult(t *testing.T) {
 	outputIndex := strings.Index(workflow, outputMarker)
 	noUploadIndex := strings.Index(workflow, noUploadMarker)
 	gateIndex := strings.Index(workflow, gateMarker)
-	uploadIndex := strings.Index(workflow, uploadMarker)
+	uploadIndex := -1
+	if gateIndex >= 0 {
+		if relativeUploadIndex := strings.Index(workflow[gateIndex:], uploadMarker); relativeUploadIndex >= 0 {
+			uploadIndex = gateIndex + relativeUploadIndex
+		}
+	}
 	if outputIndex < 0 {
 		t.Fatalf("security workflow must persist CodeQL SARIF with %q", outputMarker)
 	}
