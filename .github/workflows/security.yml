@@ -5,7 +5,6 @@ on:
   push:
     branches:
       - main
-      - fix/codeql-main-baseline
   schedule:
     - cron: "23 4 * * 1"
   workflow_dispatch:
@@ -162,12 +161,11 @@ jobs:
         with:
           category: /language:${{ matrix.language }}
           output: codeql-results
-      - name: Upload CodeQL SARIF for diagnosis
-        if: matrix.language == 'go'
-        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
-        with:
-          name: codeql-go-sarif
-          path: codeql-results
-          if-no-files-found: error
+          upload: never
       - name: Require clean CodeQL result
         run: go run ./scripts/codeqlguard
+      - name: Upload reviewed CodeQL result
+        uses: github/codeql-action/upload-sarif@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4
+        with:
+          sarif_file: codeql-results
+          category: /language:${{ matrix.language }}
