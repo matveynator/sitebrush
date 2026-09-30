@@ -313,7 +313,6 @@ let uploadingEditorFiles = false;
 let activeEditorSocket = null;
 let streamedProviderText = '';
 let streamRenderScheduled = false;
-let backgroundPreviewRenderScheduled = false;
 let editorMinimized = false;
 
 function setStatus(message) {
@@ -758,33 +757,6 @@ function editorWebSocketURL() {
   return socketURL.toString();
 }
 
-function streamingHTMLForBackground(text) {
-  const lowerText = text.toLowerCase();
-  const doctypeIndex = lowerText.indexOf('<!doctype');
-  const htmlIndex = lowerText.indexOf('<html');
-  let startIndex = -1;
-  if (doctypeIndex >= 0 && htmlIndex >= 0) {
-    startIndex = Math.min(doctypeIndex, htmlIndex);
-  } else {
-    startIndex = Math.max(doctypeIndex, htmlIndex);
-  }
-  return startIndex >= 0 ? text.slice(startIndex) : '';
-}
-
-function scheduleBackgroundPreviewRender() {
-  if (backgroundPreviewRenderScheduled) {
-    return;
-  }
-  backgroundPreviewRenderScheduled = true;
-  window.requestAnimationFrame(function renderBackgroundPreview() {
-    backgroundPreviewRenderScheduled = false;
-    const previewHTML = streamingHTMLForBackground(streamedProviderText);
-    if (previewHTML) {
-      pageBackgroundFrame.srcdoc = previewHTML;
-    }
-  });
-}
-
 function scheduleStreamRender() {
   if (streamRenderScheduled) {
     return;
@@ -796,7 +768,6 @@ function scheduleStreamRender() {
     streamOutput.textContent = visibleText;
     streamOutput.scrollTop = streamOutput.scrollHeight;
   });
-  scheduleBackgroundPreviewRender();
 }
 
 function setEditorMinimized(minimized) {
@@ -847,7 +818,6 @@ async function executeTask() {
     activeEditorSocket = null;
   }
 
-  const backgroundBeforeRequest = currentDraft ? currentDraft.html : '';
   executeButton.disabled = true;
   streamedProviderText = '';
   streamOutput.textContent = '';
@@ -887,11 +857,6 @@ async function executeTask() {
     if (payload.type === 'reset_stream') {
       streamedProviderText = '';
       streamOutput.textContent = '';
-      if (backgroundBeforeRequest) {
-        pageBackgroundFrame.srcdoc = backgroundBeforeRequest;
-      } else {
-        restoreBackgroundPage();
-      }
       return;
     }
     if (payload.type === 'delta') {
@@ -908,11 +873,6 @@ async function executeTask() {
       commandElement.focus();
       commandElement.setSelectionRange(commandElement.value.length, commandElement.value.length);
       streamDetails.open = false;
-      if (backgroundBeforeRequest) {
-        pageBackgroundFrame.srcdoc = backgroundBeforeRequest;
-      } else {
-        restoreBackgroundPage();
-      }
       setStatus('AI просит уточнение перед изменением страницы: ' + clarificationQuestion);
       refreshExecuteButtonState();
       socket.close();
@@ -934,11 +894,6 @@ async function executeTask() {
       refreshExecuteButtonState();
       streamDetails.open = streamedProviderText.trim() !== '';
       setStatus('Ошибка AI: ' + (payload.error || 'неизвестная ошибка'));
-      if (backgroundBeforeRequest) {
-        pageBackgroundFrame.srcdoc = backgroundBeforeRequest;
-      } else {
-        restoreBackgroundPage();
-      }
       socket.close();
     }
   };
@@ -1034,6 +989,18 @@ function scheduleVoiceSilenceStop() {
   }, 1400);
 }
 
+function voiceRequestsDraftSave(transcript) {
+  const normalizedTranscript = transcript.trim().toLocaleLowerCase(document.documentElement.lang || 'ru-RU').replace(/[.!?,;:]+$/g, '').trim();
+  return [
+    'сохранить',
+    'сохрани',
+    'сохранить страницу',
+    'сохрани страницу',
+    'save',
+    'save page'
+  ].includes(normalizedTranscript);
+}
+
 function toggleVoice() {
   if (speechRecognition) {
     requestVoiceStop(true);
@@ -1046,6 +1013,7 @@ function toggleVoice() {
   }
 
   const recognition = new Recognition();
+  let finalVoiceTranscript = '';
   speechRecognition = recognition;
   speechInitialText = commandElement.value.trim();
   recognition.continuous = false;
@@ -1070,9 +1038,14 @@ function toggleVoice() {
       }
     }
     transcript = transcript.trim();
-    commandElement.value = [speechInitialText, transcript].filter(Boolean).join(speechInitialText && transcript ? ' ' : '');
-    invalidateExternalAILink();
-    refreshExecuteButtonState();
+    if (hasFinalResult) {
+      finalVoiceTranscript = transcript;
+    }
+    if (!(currentDraft && voiceRequestsDraftSave(transcript))) {
+      commandElement.value = [speechInitialText, transcript].filter(Boolean).join(speechInitialText && transcript ? ' ' : '');
+      invalidateExternalAILink();
+      refreshExecuteButtonState();
+    }
     if (hasFinalResult) {
       requestVoiceStop(false);
     } else {
@@ -1092,6 +1065,11 @@ function toggleVoice() {
     clearVoiceTimers();
     speechRecognition = null;
     setRecording(false);
+    if (currentDraft && voiceRequestsDraftSave(finalVoiceTranscript)) {
+      setStatus('Сохраняю подтверждённый AI-черновик…');
+      saveDraft();
+      return;
+    }
     if (commandElement.value.trim()) {
       setStatus('Голосовое задание готово. Нажмите ↑, чтобы отправить его на редактирование страницы.');
     }
