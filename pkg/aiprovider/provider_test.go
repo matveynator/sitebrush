@@ -140,7 +140,7 @@ func TestProviderConfigurationAndDecryptionErrors(t *testing.T) {
 
 func TestOllamaUsesFixedLoopbackEndpointWithoutAPIKey(t *testing.T) {
 	client, err := NewClient(Config{Provider: ProviderOllama, Model: "qwen3"}, &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
-		if request.URL.String() != "http://127.0.0.1:11434/v1/chat/completions" {
+		if request.URL.String() != "http://127.0.0.1:11434/api/chat" {
 			return nil, errors.New("unexpected Ollama endpoint")
 		}
 		if request.Header.Get("Authorization") != "" {
@@ -544,5 +544,53 @@ func TestListModelsSupportsLocalOllamaWithoutAuthorization(t *testing.T) {
 	}
 	if len(models) != 2 || models[0] != "llama3.2:latest" || models[1] != "qwen3:8b" {
 		t.Fatalf("models=%v", models)
+	}
+}
+
+
+func TestOllamaCompleteUsesNativeChatAPIAndDisablesThinking(t *testing.T) {
+	httpClient := &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		if request.URL.String() != "http://127.0.0.1:11434/api/chat" {
+			t.Fatalf("endpoint=%q", request.URL.String())
+		}
+		if request.Header.Get("Authorization") != "" {
+			t.Fatal("native Ollama request unexpectedly carried authorization")
+		}
+		body, err := io.ReadAll(request.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		bodyText := string(body)
+		for _, required := range []string{
+			`"model":"qwen3:8b"`,
+			`"role":"system"`,
+			`"role":"user"`,
+			`"stream":false`,
+			`"think":false`,
+			`"num_ctx":65536`,
+		} {
+			if !strings.Contains(bodyText, required) {
+				t.Fatalf("Ollama payload missing %q: %s", required, bodyText)
+			}
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(`{"message":{"role":"assistant","content":"SITEBRUSH_EDIT\n<html><body>done</body></html>"},"done":true}`)),
+		}, nil
+	})}
+	client, err := NewClient(Config{Provider: ProviderOllama, Model: "qwen3:8b"}, httpClient)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := client.Complete(context.Background(), Request{Messages: []Message{
+		{Role: "system", Content: "edit, do not chat"},
+		{Role: "user", Content: "task at prompt tail"},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(result.Text, "SITEBRUSH_EDIT") {
+		t.Fatalf("result=%q", result.Text)
 	}
 }

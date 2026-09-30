@@ -30,6 +30,7 @@ const (
 	ProviderMistral          = "mistral"
 	ProviderOllama           = "ollama"
 	DefaultMaxResponseBytes  = 8 << 20
+	DefaultOllamaContextSize = 65536
 )
 
 var (
@@ -311,6 +312,25 @@ func (client *Client) Complete(ctx context.Context, request Request) (Response, 
 	var payload []byte
 	var err error
 	switch client.configuration.Provider {
+	case ProviderOllama:
+		endpoint = strings.TrimSuffix(client.baseURL, "/v1") + "/api/chat"
+		payload, err = json.Marshal(struct {
+			Model    string    `json:"model"`
+			Messages []Message `json:"messages"`
+			Stream   bool      `json:"stream"`
+			Think    bool      `json:"think"`
+			Options  struct {
+				NumCtx int `json:"num_ctx"`
+			} `json:"options"`
+		}{
+			Model:    client.configuration.Model,
+			Messages: request.Messages,
+			Stream:   false,
+			Think:    false,
+			Options: struct {
+				NumCtx int `json:"num_ctx"`
+			}{NumCtx: DefaultOllamaContextSize},
+		})
 	case ProviderOpenAICompatible:
 		endpoint = client.baseURL + "/responses"
 		systemParts := make([]string, 0, 2)
@@ -444,18 +464,11 @@ func (client *Client) Complete(ctx context.Context, request Request) (Response, 
 		}
 		return Response{Text: anthropicResponse.Content[0].Text}, nil
 	}
-	var compatibleResponse struct {
-		Choices []struct {
-			Message Message `json:"message"`
-		} `json:"choices"`
-	}
-	if err := json.Unmarshal(body, &compatibleResponse); err != nil {
+	text, err := client.decodeProviderResponse(body)
+	if err != nil {
 		return Response{}, err
 	}
-	if len(compatibleResponse.Choices) == 0 {
-		return Response{}, errors.New("AI provider response has no choices")
-	}
-	return Response{Text: compatibleResponse.Choices[0].Message.Content}, nil
+	return Response{Text: text}, nil
 }
 
 func EncryptSecret(key []byte, secret string) (string, error) {

@@ -48,6 +48,12 @@ func (client *Client) Stream(ctx context.Context, request Request, output chan<-
 		return Response{}, newHTTPError(response.StatusCode, errorBody)
 	}
 
+	if client.configuration.Provider == ProviderOllama {
+		// Ollama's native /api/chat stream is newline-delimited JSON rather than
+		// SSE. Keep it on the same channel-oriented parser used for provider deltas.
+		return client.readEventStream(ctx, response.Body, output, done)
+	}
+
 	if !strings.Contains(strings.ToLower(response.Header.Get("Content-Type")), "text/event-stream") {
 		body, readErr := io.ReadAll(io.LimitReader(response.Body, client.configuration.MaxResponseBytes+1))
 		if readErr != nil {
@@ -72,6 +78,26 @@ func (client *Client) Stream(ctx context.Context, request Request, output chan<-
 func (client *Client) streamingRequestPayload(request Request) (string, []byte, error) {
 	endpoint := client.baseURL + "/chat/completions"
 	switch client.configuration.Provider {
+	case ProviderOllama:
+		endpoint = strings.TrimSuffix(client.baseURL, "/v1") + "/api/chat"
+		payload, err := json.Marshal(struct {
+			Model    string    `json:"model"`
+			Messages []Message `json:"messages"`
+			Stream   bool      `json:"stream"`
+			Think    bool      `json:"think"`
+			Options  struct {
+				NumCtx int `json:"num_ctx"`
+			} `json:"options"`
+		}{
+			Model:    client.configuration.Model,
+			Messages: request.Messages,
+			Stream:   true,
+			Think:    false,
+			Options: struct {
+				NumCtx int `json:"num_ctx"`
+			}{NumCtx: DefaultOllamaContextSize},
+		})
+		return endpoint, payload, err
 	case ProviderOpenAICompatible:
 		endpoint = client.baseURL + "/responses"
 		systemParts := make([]string, 0, 2)
