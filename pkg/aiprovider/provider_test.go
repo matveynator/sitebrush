@@ -140,7 +140,7 @@ func TestProviderConfigurationAndDecryptionErrors(t *testing.T) {
 
 func TestOllamaUsesFixedLoopbackEndpointWithoutAPIKey(t *testing.T) {
 	client, err := NewClient(Config{Provider: ProviderOllama, Model: "qwen3"}, &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
-		if request.URL.String() != "http://127.0.0.1:11434/v1/chat/completions" {
+		if request.URL.String() != "http://127.0.0.1:11434/api/chat" {
 			return nil, errors.New("unexpected Ollama endpoint")
 		}
 		if request.Header.Get("Authorization") != "" {
