@@ -67,6 +67,9 @@ func DownloadHTMLPageContext(ctx context.Context, client *http.Client, pageURL *
 	if applyHeaders != nil {
 		applyHeaders(request)
 	}
+	// RequirePublicURL rejects unsafe URL forms and NewTransport re-resolves every dial to public IPs,
+	// preventing DNS rebinding between validation and connection.
+	// lgtm[go/request-forgery]
 	response, err := client.Do(request)
 	if err != nil {
 		return HTMLDownloadResult{}, err
