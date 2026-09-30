@@ -567,6 +567,7 @@ func TestOllamaCompleteUsesNativeChatAPIAndDisablesThinking(t *testing.T) {
 			`"role":"user"`,
 			`"stream":false`,
 			`"think":false`,
+			`"num_ctx":65536`,
 		} {
 			if !strings.Contains(bodyText, required) {
 				t.Fatalf("Ollama payload missing %q: %s", required, bodyText)
