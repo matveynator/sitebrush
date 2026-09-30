@@ -19355,6 +19355,9 @@ func TestAIEditorPromptMakesTheUserRequestAnImplementationTask(t *testing.T) {
 		">>>>>>> REPLACE",
 		"SITEBRUSH_CLARIFY",
 		"already stored SiteBrush assets",
+		"SiteBrush-Template-*",
+		"/p/<stored-name>",
+		"Do not invent a second SiteBrush API",
 	} {
 		if !strings.Contains(messages[0].Content, required) {
 			t.Fatalf("system prompt missing %q: %s", required, messages[0].Content)
@@ -19388,6 +19391,13 @@ func TestAIEditorPromptMakesTheUserRequestAnImplementationTask(t *testing.T) {
 	}
 	if strings.Contains(messages[0].Content, "previous response was rejected") || strings.Contains(messages[1].Content, "Do not ask for the task again") {
 		t.Fatal("repair mutated the original message slice")
+	}
+}
+
+func TestAIEditorRejectsTruncatedCompleteHTML(t *testing.T) {
+	_, err := parseAIEditorModelResult("SITEBRUSH_EDIT\n<!doctype html><html><head><title>Changed</title></head><body><main>partial")
+	if err == nil || !strings.Contains(err.Error(), "truncated HTML document") {
+		t.Fatalf("truncated HTML error=%v", err)
 	}
 }
 
@@ -19428,9 +19438,22 @@ func TestAIEditorTemplateTreatsClarificationAsEditingFlow(t *testing.T) {
 		"function invalidateExternalAILink()",
 		"invalidateExternalAILink();",
 		"requestedRevision !== externalLinkRevision",
+		"function voiceRequestsDraftSave(transcript)",
+		"currentDraft && voiceRequestsDraftSave(finalVoiceTranscript)",
+		"saveDraft();",
 	} {
 		if !strings.Contains(templateSource, required) {
 			t.Fatalf("AI editor task flow missing %q", required)
+		}
+	}
+	for _, forbidden := range []string{
+		"function streamingHTMLForBackground",
+		"function scheduleBackgroundPreviewRender",
+		"scheduleBackgroundPreviewRender();",
+		"backgroundBeforeRequest",
+	} {
+		if strings.Contains(templateSource, forbidden) {
+			t.Fatalf("AI streaming must not mutate the background before a complete draft; found %q", forbidden)
 		}
 	}
 }
