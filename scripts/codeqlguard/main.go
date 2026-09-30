@@ -90,9 +90,9 @@ func scanDirectory(directory string) (findingSummary, error) {
 	return summary, nil
 }
 
-// applyValidatedBaseline marks only exact CodeQL fingerprints that have a reviewed
+// applyValidatedBaseline removes only exact CodeQL results that have a reviewed
 // security boundary. A moved or newly introduced finding gets a different fingerprint
-// and therefore remains unsuppressed and fails CI.
+// or line and therefore remains in SARIF and fails CI.
 func applyValidatedBaseline(path string) error {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -114,22 +114,20 @@ func applyValidatedBaseline(path string) error {
 	for _, runValue := range runs {
 		run, _ := runValue.(map[string]any)
 		results, _ := run["results"].([]any)
+		filteredResults := make([]any, 0, len(results))
 		for _, resultValue := range results {
 			result, _ := resultValue.(map[string]any)
 			ruleID, _ := result["ruleId"].(string)
 			uri := primaryResultURI(result)
 			lineHash := primaryLineHash(result)
 			startLine := primaryStartLine(result)
-			justification, matched := baselineJustification(ruleID, uri, lineHash, startLine)
-			if !matched {
+			_, matched := baselineJustification(ruleID, uri, lineHash, startLine)
+			if matched {
 				continue
 			}
-			result["suppressions"] = []any{map[string]any{
-				"kind":          "external",
-				"status":        "accepted",
-				"justification": justification,
-			}}
+			filteredResults = append(filteredResults, resultValue)
 		}
+		run["results"] = filteredResults
 	}
 
 	encoded, err := json.Marshal(document)
