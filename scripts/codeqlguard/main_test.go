@@ -129,17 +129,27 @@ func TestSecurityWorkflowRequiresCleanCodeQLResult(t *testing.T) {
 	workflow := string(data)
 
 	outputMarker := "output: codeql-results"
+	noUploadMarker := "upload: never"
 	gateMarker := "run: go run ./scripts/codeqlguard"
+	uploadMarker := "uses: github/codeql-action/upload-sarif@"
 	outputIndex := strings.Index(workflow, outputMarker)
+	noUploadIndex := strings.Index(workflow, noUploadMarker)
 	gateIndex := strings.Index(workflow, gateMarker)
+	uploadIndex := strings.Index(workflow, uploadMarker)
 	if outputIndex < 0 {
 		t.Fatalf("security workflow must persist CodeQL SARIF with %q", outputMarker)
+	}
+	if noUploadIndex < 0 {
+		t.Fatalf("CodeQL analyze must not upload unreviewed SARIF; missing %q", noUploadMarker)
 	}
 	if gateIndex < 0 {
 		t.Fatalf("security workflow must enforce CodeQL results with %q", gateMarker)
 	}
-	if gateIndex < outputIndex {
-		t.Fatal("CodeQL gate must run after SARIF output is produced")
+	if uploadIndex < 0 {
+		t.Fatalf("security workflow must upload reviewed SARIF with %q", uploadMarker)
+	}
+	if gateIndex < outputIndex || uploadIndex < gateIndex {
+		t.Fatal("CodeQL workflow order must be analyze -> review gate -> reviewed SARIF upload")
 	}
 }
 
