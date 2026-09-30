@@ -311,6 +311,19 @@ func (client *Client) Complete(ctx context.Context, request Request) (Response, 
 	var payload []byte
 	var err error
 	switch client.configuration.Provider {
+	case ProviderOllama:
+		endpoint = strings.TrimSuffix(client.baseURL, "/v1") + "/api/chat"
+		payload, err = json.Marshal(struct {
+			Model    string    `json:"model"`
+			Messages []Message `json:"messages"`
+			Stream   bool      `json:"stream"`
+			Think    bool      `json:"think"`
+		}{
+			Model:    client.configuration.Model,
+			Messages: request.Messages,
+			Stream:   false,
+			Think:    false,
+		})
 	case ProviderOpenAICompatible:
 		endpoint = client.baseURL + "/responses"
 		systemParts := make([]string, 0, 2)
