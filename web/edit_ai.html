@@ -306,6 +306,7 @@ let speechSilenceTimer = 0;
 let speechHardStopTimer = 0;
 let speechInitialText = '';
 let externalLinkPromise = null;
+let externalLinkRevision = 0;
 let currentDraft = null;
 let uploadedEditorFiles = [];
 let uploadingEditorFiles = false;
@@ -321,6 +322,12 @@ function setStatus(message) {
 
 function setExternalStatus(message) {
   externalStatus.textContent = message || '';
+}
+
+function invalidateExternalAILink() {
+  externalLinkRevision += 1;
+  externalAILink.value = '';
+  externalLinkPromise = null;
 }
 
 async function parseResponse(response) {
@@ -701,6 +708,7 @@ async function uploadSelectedFiles() {
       const uploadedFile = await uploadEditorFile(selectedFile);
       if (!uploadedEditorFiles.some(function hasUploadedFile(existingFile) { return existingFile.url === uploadedFile.url; })) {
         uploadedEditorFiles.push(uploadedFile);
+        invalidateExternalAILink();
       }
       renderUploadedFiles();
     }
@@ -896,6 +904,7 @@ async function executeTask() {
       const clarificationQuestion = (payload.text || '').trim();
       const clarificationPrefix = task + '\n\nУточнение AI: ' + clarificationQuestion + '\nОтвет: ';
       commandElement.value = clarificationPrefix;
+      invalidateExternalAILink();
       commandElement.focus();
       commandElement.setSelectionRange(commandElement.value.length, commandElement.value.length);
       streamDetails.open = false;
@@ -1062,6 +1071,7 @@ function toggleVoice() {
     }
     transcript = transcript.trim();
     commandElement.value = [speechInitialText, transcript].filter(Boolean).join(speechInitialText && transcript ? ' ' : '');
+    invalidateExternalAILink();
     refreshExecuteButtonState();
     if (hasFinalResult) {
       requestVoiceStop(false);
@@ -1091,6 +1101,7 @@ function toggleVoice() {
 }
 
 async function createExternalAILink() {
+  const requestedRevision = externalLinkRevision;
   setExternalStatus('Создаю отзывную ссылку для текущей страницы…');
   externalAILink.value = '';
   try {
@@ -1105,6 +1116,9 @@ async function createExternalAILink() {
       })
     });
     const payload = await parseResponse(response);
+    if (requestedRevision !== externalLinkRevision) {
+      throw new Error('Задание или вложения изменились во время создания ссылки. Создайте ссылку ещё раз.');
+    }
     externalAILink.value = payload.url || '';
     setExternalStatus('Ссылка готова. Её можно отозвать из управления AI-сессиями.');
     return externalAILink.value;
@@ -1112,7 +1126,9 @@ async function createExternalAILink() {
     setExternalStatus(error.message);
     throw error;
   } finally {
-    externalLinkPromise = null;
+    if (requestedRevision === externalLinkRevision) {
+      externalLinkPromise = null;
+    }
   }
 }
 
@@ -1162,7 +1178,10 @@ fileInput.addEventListener('change', function onFileSelectionChange() {
 });
 recordButton.addEventListener('click', toggleVoice);
 executeButton.addEventListener('click', executeTask);
-commandElement.addEventListener('input', refreshExecuteButtonState);
+commandElement.addEventListener('input', function onCommandInput() {
+  invalidateExternalAILink();
+  refreshExecuteButtonState();
+});
 minimizeEditorButton.addEventListener('click', function onMinimizeEditorClick() {
   setEditorMinimized(!editorMinimized);
 });
