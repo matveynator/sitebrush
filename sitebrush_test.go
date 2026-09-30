@@ -19310,6 +19310,15 @@ func TestAIEditorTaskProtocolRejectsChatAndSupportsClarification(t *testing.T) {
 		t.Fatalf("edited result=%+v", edited)
 	}
 
+	patchResponse := "SITEBRUSH_PATCH\n<<<<<<< SEARCH\n<h1>Old</h1>\n=======\n<h1>New</h1>\n>>>>>>> REPLACE"
+	patched, err := parseAndMaterializeAIEditorModelResult(patchResponse, "<html><body><h1>Old</h1><p>Keep me</p></body></html>")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if patched.Action != aiEditorActionEdit || patched.HTML != "<html><body><h1>New</h1><p>Keep me</p></body></html>" {
+		t.Fatalf("patched result=%+v", patched)
+	}
+
 	clarification, err := parseAIEditorModelResult("SITEBRUSH_CLARIFY\nКакой из двух приложенных снимков поставить первым?")
 	if err != nil {
 		t.Fatal(err)
@@ -19341,7 +19350,9 @@ func TestAIEditorPromptMakesTheUserRequestAnImplementationTask(t *testing.T) {
 	for _, required := range []string{
 		"implementation engine",
 		"never as a topic to discuss",
-		"SITEBRUSH_EDIT",
+		"SITEBRUSH_PATCH",
+		"<<<<<<< SEARCH",
+		">>>>>>> REPLACE",
 		"SITEBRUSH_CLARIFY",
 		"already stored SiteBrush assets",
 	} {
@@ -19369,7 +19380,7 @@ func TestAIEditorPromptMakesTheUserRequestAnImplementationTask(t *testing.T) {
 	}
 
 	retryMessages := aiEditorRepairMessages(messages)
-	if !strings.Contains(retryMessages[0].Content, "behaved like a chatbot") {
+	if !strings.Contains(retryMessages[0].Content, "could not be applied") || !strings.Contains(retryMessages[0].Content, "SITEBRUSH_PATCH") {
 		t.Fatalf("repair system prompt=%q", retryMessages[0].Content)
 	}
 	if !strings.Contains(retryMessages[1].Content, "Do not ask for the task again") {
@@ -19481,9 +19492,58 @@ func TestAIEditorLargePageKeepsEditingTaskAtPromptTail(t *testing.T) {
 	if len(tail) > 4096 {
 		tail = tail[len(tail)-4096:]
 	}
-	for _, required := range []string{task, "SITEBRUSH_EDIT", "Do not ask the user to provide a task"} {
+	for _, required := range []string{task, "SITEBRUSH_PATCH", "Do not ask the user to provide a task"} {
 		if !strings.Contains(tail, required) {
 			t.Fatalf("prompt tail lost %q", required)
 		}
+	}
+}
+
+
+func TestAIEditorPatchProtocolAppliesMultipleCompactChanges(t *testing.T) {
+	currentHTML := "<html><head><title>Catalog</title></head><body><h1>Old title</h1><p class=\"price\">100</p><footer>Keep</footer></body></html>"
+	response := "SITEBRUSH_PATCH\n" +
+		"<<<<<<< SEARCH\n<h1>Old title</h1>\n=======\n<h1>New title</h1>\n>>>>>>> REPLACE\n" +
+		"<<<<<<< SEARCH\n<p class=\"price\">100</p>\n=======\n<p class=\"price\">90</p>\n>>>>>>> REPLACE"
+
+	result, err := parseAndMaterializeAIEditorModelResult(response, currentHTML)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(result.HTML, "<h1>New title</h1>") || !strings.Contains(result.HTML, ">90</p>") {
+		t.Fatalf("patches were not applied: %s", result.HTML)
+	}
+	if !strings.Contains(result.HTML, "<footer>Keep</footer>") {
+		t.Fatalf("unrelated HTML changed: %s", result.HTML)
+	}
+	if len(result.HTML) != len(currentHTML)+len("New title")-len("Old title") {
+		t.Fatalf("compact patch unexpectedly rewrote page shape: before=%d after=%d", len(currentHTML), len(result.HTML))
+	}
+}
+
+func TestAIEditorPatchProtocolRejectsAmbiguousOrMissingSearch(t *testing.T) {
+	ambiguous := "SITEBRUSH_PATCH\n<<<<<<< SEARCH\n<div>same</div>\n=======\n<div>changed</div>\n>>>>>>> REPLACE"
+	if _, err := parseAndMaterializeAIEditorModelResult(ambiguous, "<html><body><div>same</div><div>same</div></body></html>"); err == nil || !strings.Contains(err.Error(), "matched current HTML 2 times") {
+		t.Fatalf("ambiguous patch error=%v", err)
+	}
+
+	missing := "SITEBRUSH_PATCH\n<<<<<<< SEARCH\n<div>missing</div>\n=======\n<div>changed</div>\n>>>>>>> REPLACE"
+	if _, err := parseAndMaterializeAIEditorModelResult(missing, "<html><body><div>present</div></body></html>"); err == nil || !strings.Contains(err.Error(), "did not match current HTML") {
+		t.Fatalf("missing patch error=%v", err)
+	}
+}
+
+func TestAIEditorPatchProtocolSupportsInsertionAndDeletion(t *testing.T) {
+	currentHTML := "<html><body><main><p>One</p><p>Remove</p></main></body></html>"
+	response := "SITEBRUSH_PATCH\n" +
+		"<<<<<<< SEARCH\n<p>One</p>\n=======\n<p>One</p><img src=\"/p/photo.jpg\" alt=\"Photo\">\n>>>>>>> REPLACE\n" +
+		"<<<<<<< SEARCH\n<p>Remove</p>\n=======\n\n>>>>>>> REPLACE"
+
+	result, err := parseAndMaterializeAIEditorModelResult(response, currentHTML)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(result.HTML, "/p/photo.jpg") || strings.Contains(result.HTML, "<p>Remove</p>") {
+		t.Fatalf("insertion/deletion result=%s", result.HTML)
 	}
 }
