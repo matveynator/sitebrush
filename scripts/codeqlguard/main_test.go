@@ -91,6 +91,32 @@ func TestScanDirectoryFailsClosedForStructurallyInvalidSARIF(t *testing.T) {
 	}
 }
 
+
+
+func TestScanDirectoryAcceptsOnlyExactValidatedBaselineFingerprint(t *testing.T) {
+	directory := t.TempDir()
+	writeSARIF(t, directory, "baseline.sarif", `{"version":"2.1.0","runs":[{"results":[
+		{"ruleId":"go/request-forgery","locations":[{"physicalLocation":{"artifactLocation":{"uri":"pkg/crawler/download.go"}}}],"partialFingerprints":{"primaryLocationLineHash":"1b25405598db72a4:1"}},
+		{"ruleId":"go/request-forgery","locations":[{"physicalLocation":{"artifactLocation":{"uri":"pkg/crawler/download.go"}}}],"partialFingerprints":{"primaryLocationLineHash":"new-location:1"}}
+	]}]}`)
+
+	summary, err := scanDirectory(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary.Total != 1 || summary.ByRule["go/request-forgery"] != 1 {
+		t.Fatalf("unexpected findings: %#v", summary)
+	}
+
+	data, err := os.ReadFile(filepath.Join(directory, "baseline.sarif"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), `"status":"accepted"`) {
+		t.Fatal("validated baseline result must be written back as an accepted SARIF suppression")
+	}
+}
+
 // --- Workflow integration enforcement ---
 
 func TestSecurityWorkflowRequiresCleanCodeQLResult(t *testing.T) {
