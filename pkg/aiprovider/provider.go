@@ -30,6 +30,7 @@ const (
 	ProviderMistral          = "mistral"
 	ProviderOllama           = "ollama"
 	DefaultMaxResponseBytes  = 8 << 20
+	DefaultOllamaContextSize = 65536
 )
 
 var (
@@ -318,11 +319,17 @@ func (client *Client) Complete(ctx context.Context, request Request) (Response, 
 			Messages []Message `json:"messages"`
 			Stream   bool      `json:"stream"`
 			Think    bool      `json:"think"`
+			Options  struct {
+				NumCtx int `json:"num_ctx"`
+			} `json:"options"`
 		}{
 			Model:    client.configuration.Model,
 			Messages: request.Messages,
 			Stream:   false,
 			Think:    false,
+			Options: struct {
+				NumCtx int `json:"num_ctx"`
+			}{NumCtx: DefaultOllamaContextSize},
 		})
 	case ProviderOpenAICompatible:
 		endpoint = client.baseURL + "/responses"
