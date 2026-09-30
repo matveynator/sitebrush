@@ -162,5 +162,12 @@ jobs:
         with:
           category: /language:${{ matrix.language }}
           output: codeql-results
+      - name: Upload CodeQL SARIF for diagnosis
+        if: matrix.language == 'go'
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: codeql-go-sarif
+          path: codeql-results
+          if-no-files-found: error
       - name: Require clean CodeQL result
         run: go run ./scripts/codeqlguard
