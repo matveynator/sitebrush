@@ -19228,6 +19228,10 @@ func TestAIPageScopedCapabilityDocumentsFilesRevisionsAndRollbackWithoutPlugins(
 	body := response.Body.String()
 	for _, required := range []string{
 		"No SiteBrush plugin",
+		"## Editing contract",
+		"editing job, not a general chat",
+		"apply the administrator task directly to its HTML",
+		"one concise clarification question",
 		"/files?ai_token=",
 		"/revisions?ai_token=",
 		"/rollback?ai_token=",
@@ -19404,6 +19408,41 @@ func TestAIEditorTemplateTreatsClarificationAsEditingFlow(t *testing.T) {
 	} {
 		if !strings.Contains(templateSource, required) {
 			t.Fatalf("AI editor task flow missing %q", required)
+		}
+	}
+}
+
+
+func TestAIPageScopedManifestDescribesAnEditingJob(t *testing.T) {
+	application, _ := newTestApplication(t)
+	application.aiCapabilities = aicapability.NewManager()
+	t.Cleanup(application.aiCapabilities.Close)
+
+	token, _, err := application.aiCapabilities.IssueForTask(
+		"example.com",
+		"owner@example.com",
+		[]string{aicapability.ScopeRead, aicapability.ScopeWrite},
+		"/",
+		"Replace the hero image with /p/photo.jpg",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodGet, "https://example.com/?ai_token="+url.QueryEscape(token), nil)
+	response := httptest.NewRecorder()
+	application.aiCapabilityRequest(response, request, "example.com", token, "")
+	if response.Code != http.StatusOK {
+		t.Fatalf("manifest status=%d body=%q", response.Code, response.Body.String())
+	}
+	for _, required := range []string{
+		"current-page editing job",
+		"not a request to discuss or summarize",
+		"implement that task by updating the same page HTML",
+		"one concise clarification question",
+		"Replace the hero image with /p/photo.jpg",
+	} {
+		if !strings.Contains(response.Body.String(), required) {
+			t.Fatalf("manifest missing %q: %s", required, response.Body.String())
 		}
 	}
 }
