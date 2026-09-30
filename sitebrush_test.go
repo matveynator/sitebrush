@@ -11779,7 +11779,7 @@ func TestAIEditorStreamsDraftIntoBackgroundAndCanMinimize(t *testing.T) {
 		"revisionHistoryLink",
 		"?revisions",
 		"refreshExecuteButtonState",
-		"commandElement.addEventListener('input', refreshExecuteButtonState)",
+		"commandElement.addEventListener('input', function onCommandInput()",
 	} {
 		if !strings.Contains(templateSource, required) {
 			t.Fatalf("AI editor live preview/minimize flow missing %q", required)
@@ -19228,6 +19228,10 @@ func TestAIPageScopedCapabilityDocumentsFilesRevisionsAndRollbackWithoutPlugins(
 	body := response.Body.String()
 	for _, required := range []string{
 		"No SiteBrush plugin",
+		"## Editing contract",
+		"editing job, not a general chat",
+		"apply the administrator task directly to its HTML",
+		"one concise clarification question",
 		"/files?ai_token=",
 		"/revisions?ai_token=",
 		"/rollback?ai_token=",
@@ -19293,5 +19297,155 @@ func TestSafeAIProviderErrorMessageIncludes413Reason(t *testing.T) {
 	message := safeAIProviderErrorMessage(err)
 	if !strings.Contains(message, "слишком большой запрос") || !strings.Contains(message, "request body exceeds provider limit") {
 		t.Fatalf("message=%q", message)
+	}
+}
+
+
+func TestAIEditorTaskProtocolRejectsChatAndSupportsClarification(t *testing.T) {
+	edited, err := parseAIEditorModelResult("SITEBRUSH_EDIT\n<!doctype html><html><head><title>Changed</title></head><body><h1>Done</h1></body></html>")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if edited.Action != aiEditorActionEdit || edited.Title != "Changed" || !strings.Contains(edited.HTML, "<h1>Done</h1>") {
+		t.Fatalf("edited result=%+v", edited)
+	}
+
+	clarification, err := parseAIEditorModelResult("SITEBRUSH_CLARIFY\nКакой из двух приложенных снимков поставить первым?")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if clarification.Action != aiEditorActionClarify || !strings.Contains(clarification.Question, "какой") && !strings.Contains(strings.ToLower(clarification.Question), "какой") {
+		t.Fatalf("clarification=%+v", clarification)
+	}
+
+	if _, err := parseAIEditorModelResult("Based on the HTML, this looks like a product catalog with discounts."); err == nil {
+		t.Fatal("conversational page summary was accepted as an editor result")
+	}
+}
+
+func TestAIEditorPromptMakesTheUserRequestAnImplementationTask(t *testing.T) {
+	files := []aiEditorFileReference{{
+		Name:         "0db11377081a.jpg",
+		OriginalName: "IMG_5869.JPG",
+		MIME:         "image/jpeg",
+		URL:          "/p/0db11377081a.jpg",
+	}}
+	messages := aiEditorPageMessages(
+		aiEditorExecutionRequest{PagePath: "/", Task: "Добавь приложенную фотографию в первый товар"},
+		Page{Title: "Catalog", HTML: "<html><body><main>catalog</main></body></html>"},
+		files,
+	)
+	if len(messages) != 2 {
+		t.Fatalf("messages=%+v", messages)
+	}
+	for _, required := range []string{
+		"implementation engine",
+		"never as a topic to discuss",
+		"SITEBRUSH_EDIT",
+		"SITEBRUSH_CLARIFY",
+		"already stored SiteBrush assets",
+	} {
+		if !strings.Contains(messages[0].Content, required) {
+			t.Fatalf("system prompt missing %q: %s", required, messages[0].Content)
+		}
+	}
+	for _, required := range []string{
+		"=== USER EDITING TASK ===",
+		"Добавь приложенную фотографию",
+		"IMG_5869.JPG",
+		"/p/0db11377081a.jpg",
+		"=== CURRENT PAGE HTML ===",
+		"<main>catalog</main>",
+	} {
+		if !strings.Contains(messages[1].Content, required) {
+			t.Fatalf("user prompt missing %q: %s", required, messages[1].Content)
+		}
+	}
+
+	retryMessages := aiEditorRepairMessages(messages)
+	if !strings.Contains(retryMessages[0].Content, "behaved like a chatbot") {
+		t.Fatalf("repair prompt=%q", retryMessages[0].Content)
+	}
+	if strings.Contains(messages[0].Content, "previous response was rejected") {
+		t.Fatal("repair mutated the original message slice")
+	}
+}
+
+func TestAIEditorAttachmentContextKeepsOriginalNameAndPermanentURL(t *testing.T) {
+	decoded, _, err := decodeAIEditorFiles([]aiEditorUploadedFile{{
+		Name:         "stored.jpg",
+		OriginalName: "IMG_5869.JPG",
+		MIME:         "image/jpeg",
+		Content:      base64.StdEncoding.EncodeToString([]byte("image")),
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(decoded) != 1 || decoded[0].OriginalName != "IMG_5869.JPG" {
+		t.Fatalf("decoded=%+v", decoded)
+	}
+	references := aiEditorFileReferences(decoded)
+	contextText := aiEditorTaskWithAttachments("Используй приложенное фото", references)
+	if !strings.Contains(contextText, "IMG_5869.JPG") || !strings.Contains(contextText, "/p/stored.jpg") {
+		t.Fatalf("attachment context=%q", contextText)
+	}
+}
+
+func TestAIEditorTemplateTreatsClarificationAsEditingFlow(t *testing.T) {
+	templateBytes, err := embeddedWebFiles.ReadFile("web/edit_ai.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	templateSource := string(templateBytes)
+	for _, required := range []string{
+		"function editorFileReferences()",
+		"original_name:uploadedFile.original_name",
+		"payload.type === 'reset_stream'",
+		"payload.type === 'clarification'",
+		"AI просит уточнение перед изменением страницы",
+		"files:editorFileReferences()",
+		"streamDetails.open = false",
+		"function invalidateExternalAILink()",
+		"invalidateExternalAILink();",
+		"requestedRevision !== externalLinkRevision",
+	} {
+		if !strings.Contains(templateSource, required) {
+			t.Fatalf("AI editor task flow missing %q", required)
+		}
+	}
+}
+
+
+func TestAIPageScopedManifestDescribesAnEditingJob(t *testing.T) {
+	application, _ := newTestApplication(t)
+	application.aiCapabilities = aicapability.NewManager()
+	t.Cleanup(application.aiCapabilities.Close)
+
+	token, _, err := application.aiCapabilities.IssueForTask(
+		"example.com",
+		"owner@example.com",
+		[]string{aicapability.ScopeRead, aicapability.ScopeWrite},
+		"/",
+		"Replace the hero image with /p/photo.jpg",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodGet, "https://example.com/?ai_token="+url.QueryEscape(token), nil)
+	response := httptest.NewRecorder()
+	application.aiCapabilityRequest(response, request, "example.com", token, "")
+	if response.Code != http.StatusOK {
+		t.Fatalf("manifest status=%d body=%q", response.Code, response.Body.String())
+	}
+	for _, required := range []string{
+		"current-page editing job",
+		"not a request to discuss or summarize",
+		"implement that task by updating the same page HTML",
+		"one concise clarification question",
+		"Replace the hero image with /p/photo.jpg",
+	} {
+		if !strings.Contains(response.Body.String(), required) {
+			t.Fatalf("manifest missing %q: %s", required, response.Body.String())
+		}
 	}
 }
