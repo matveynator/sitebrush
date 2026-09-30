@@ -11428,14 +11428,16 @@ func aiEditorPageMessages(request aiEditorExecutionRequest, page Page, files []a
 		"Never return analysis, commentary, a page summary, Markdown fences, implementation advice, or conversational filler.",
 	}, "\n")
 
-	userPrompt := "=== USER EDITING TASK ===\n" + strings.TrimSpace(request.Task) +
-		"\n=== END USER EDITING TASK ===\n" +
-		"Page path: " + request.PagePath +
+	userTask := strings.TrimSpace(request.Task)
+	userPrompt := "Page path: " + request.PagePath +
 		"\nCurrent title: " + page.Title +
-		"\nAttached SiteBrush files:\n" + aiEditorAttachmentDescriptions(files) +
 		"\n=== CURRENT PAGE HTML ===\n" + page.HTML +
 		"\n=== END CURRENT PAGE HTML ===\n" +
-		"Apply the USER EDITING TASK to the CURRENT PAGE HTML now. The output must be an edited page or a necessary clarification question, never a discussion."
+		"=== ATTACHED SITEBRUSH FILES ===\n" + aiEditorAttachmentDescriptions(files) +
+		"\n=== END ATTACHED SITEBRUSH FILES ===\n" +
+		"=== FINAL USER EDITING TASK ===\n" + userTask +
+		"\n=== END FINAL USER EDITING TASK ===\n" +
+		"IMPORTANT: The FINAL USER EDITING TASK above is the instruction you must execute now. Do not ask the user to provide a task: it is already present immediately above this sentence. Edit the CURRENT PAGE HTML according to that task. If the task is clear, return SITEBRUSH_EDIT followed by the complete edited HTML. Only if a genuinely necessary detail is missing, return SITEBRUSH_CLARIFY followed by one concise question. Never discuss, summarize, or explain the page."
 
 	return []aiprovider.Message{
 		{Role: "system", Content: systemPrompt},
@@ -11448,7 +11450,15 @@ func aiEditorRepairMessages(messages []aiprovider.Message) []aiprovider.Message 
 	if len(repaired) == 0 {
 		return repaired
 	}
-	repaired[0].Content += "\nYour previous response was rejected because it behaved like a chatbot instead of a page editor. On this retry, use only SITEBRUSH_EDIT plus the complete edited HTML, or SITEBRUSH_CLARIFY plus one necessary question. Do not describe the page."
+
+	repairInstruction := "\nRETRY REQUIREMENT: Your previous response was rejected because it behaved like a chatbot instead of editing the page. The user's editing task is already present in this prompt. Do not ask for the task again. Return only SITEBRUSH_EDIT plus the complete edited HTML, or SITEBRUSH_CLARIFY plus one genuinely necessary question."
+	repaired[0].Content += repairInstruction
+	for messageIndex := len(repaired) - 1; messageIndex >= 0; messageIndex-- {
+		if strings.EqualFold(strings.TrimSpace(repaired[messageIndex].Role), "user") {
+			repaired[messageIndex].Content += repairInstruction
+			break
+		}
+	}
 	return repaired
 }
 
