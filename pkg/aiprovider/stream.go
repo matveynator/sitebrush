@@ -85,11 +85,17 @@ func (client *Client) streamingRequestPayload(request Request) (string, []byte, 
 			Messages []Message `json:"messages"`
 			Stream   bool      `json:"stream"`
 			Think    bool      `json:"think"`
+			Options  struct {
+				NumCtx int `json:"num_ctx"`
+			} `json:"options"`
 		}{
 			Model:    client.configuration.Model,
 			Messages: request.Messages,
 			Stream:   true,
 			Think:    false,
+			Options: struct {
+				NumCtx int `json:"num_ctx"`
+			}{NumCtx: DefaultOllamaContextSize},
 		})
 		return endpoint, payload, err
 	case ProviderOpenAICompatible:
