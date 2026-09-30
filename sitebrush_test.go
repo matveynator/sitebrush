@@ -11779,7 +11779,7 @@ func TestAIEditorStreamsDraftIntoBackgroundAndCanMinimize(t *testing.T) {
 		"revisionHistoryLink",
 		"?revisions",
 		"refreshExecuteButtonState",
-		"commandElement.addEventListener('input', refreshExecuteButtonState)",
+		"commandElement.addEventListener('input', function onCommandInput()",
 	} {
 		if !strings.Contains(templateSource, required) {
 			t.Fatalf("AI editor live preview/minimize flow missing %q", required)
@@ -19405,6 +19405,9 @@ func TestAIEditorTemplateTreatsClarificationAsEditingFlow(t *testing.T) {
 		"AI просит уточнение перед изменением страницы",
 		"files:editorFileReferences()",
 		"streamDetails.open = false",
+		"function invalidateExternalAILink()",
+		"invalidateExternalAILink();",
+		"requestedRevision !== externalLinkRevision",
 	} {
 		if !strings.Contains(templateSource, required) {
 			t.Fatalf("AI editor task flow missing %q", required)
